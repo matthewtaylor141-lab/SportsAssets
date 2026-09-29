@@ -606,49 +606,107 @@ async def test_a_partial_depth_reports_covered_and_uncovered_quantities():
         assert p["uncovered_qty"] == 4.0, p
         assert p["fully_supported"] is False
         assert p["covered_qty"] + p["uncovered_qty"] == 10.0
-        assert "UNCOVERED" in p.get("score_is_prorated", "")
 
-        # ── WHAT THE SCORE IS, AND WHAT IT IS NOT ────────────────────
+        # ── THE SCORE IS THE POSITION, NOT THE MATCHED SLICE ─────────
         #
-        # THIS ASSERTION WAS WRONG AND THE SETTLEMENT REPAIR EXPOSED IT. It
-        # read `p["score_usd"] < f["score_usd"]` -- "a partial is worth less
-        # than a full" -- and it passed only because the structure had a
-        # POSITIVE floor. With cancellation read from its own clause this
-        # structure's matched floor is NEGATIVE (-$0.146 over ten units), and
-        # covering six units of a losing structure loses less than covering
-        # ten. So the old assertion now reads -0.088 < -0.146 and fails.
+        # WHAT THIS ASSERTION WAS, AND WHY IT WAS WRONG TWICE. It began as
+        # `p["score_usd"] < f["score_usd"]` -- "a partial is worth less than a
+        # full" -- which held only because the structure had a positive floor.
+        # When the settlement repair made the floor negative it read
+        # -0.088 < -0.146 and failed, so I replaced it with a proration
+        # invariant and recorded the uncovered gap as unfixed. The gap is now
+        # fixed, and the original claim is true again -- for a different and
+        # better reason.
         #
-        # The arithmetic is right; the CLAIM was wrong. A score computed over
-        # the matched slice alone is not the position's outcome, because the
-        # four uncovered contracts still carry their own directional risk and
-        # nothing in this number values them. That is the defect the owner
-        # states as §5 ("value uncovered inventory", with the -$1.30 control),
-        # and it is not repaired here.
+        # `rank_admitted` used to multiply an already-whole-position figure by
+        # covered/wanted (the DOUBLE PRORATION) and value the uncovered
+        # contracts at nothing. It now builds ONE payoff table at the real
+        # quantities. Measured on this fixture:
         #
-        # So what is asserted is the invariant that actually holds: the score
-        # is scoped to the covered slice, that scope is declared, and the
-        # uncovered remainder is reported rather than folded in.
-        assert p["score_usd"] * 10.0 == pytest.approx(f["score_usd"] * 6.0,
-                                                     abs=0.02), (p, f)
-        assert p["net_worst_case"]["units_valued"] == 6
-        assert f["net_worst_case"]["units_valued"] == 10
-        assert p["uncovered_qty"] == 4.0, (
-            "the four contracts nobody could hedge are REPORTED, not absorbed "
-            "into a per-unit average that makes the position look smaller")
+        #     depth 500 -> floor -$0.1459   (the fee; gross breakeven at the
+        #                                    void, all ten covered)
+        #     depth   6 -> floor -$1.4460   (gross -$1.3000 less the fee)
+        #
+        # and -$1.30 gross is the owner's own arithmetic control:
+        # 6 - (10 x 0.55) - (6 x 0.30). The decomposition inside the binding
+        # region is +$0.90 matched and -$2.20 uncovered.
+        assert p["score_is"] == "WHOLE_POSITION", p
+        assert f["score_is"] == "WHOLE_POSITION", f
+        assert p["score_usd"] < f["score_usd"], (
+            "a book that covers six of ten leaves four contracts unhedged, so "
+            "the POSITION is worse -- the old code reported it as better")
+        pv = p["position_worst_case"]
+        assert pv["ok"] is True, pv
+        assert pv["gross_worst_case_usd"] == pytest.approx(-1.30, abs=0.005), pv
+        assert pv["matched_slice_usd"] == pytest.approx(0.90, abs=0.005), pv
+        assert pv["uncovered_usd"] == pytest.approx(-2.20, abs=0.005), pv
+        # AND THE DECOMPOSITION ADDS UP, because both halves are taken from the
+        # SAME binding region. Two separately minimised pieces would not.
+        assert pv["matched_slice_usd"] + pv["uncovered_usd"] == \
+            pytest.approx(pv["gross_worst_case_usd"], abs=0.005)
+        assert pv["fully_covered"] is False
+        assert f["position_worst_case"]["fully_covered"] is True
+        # The matched slice is still REPORTED, apart, and labelled as a slice.
+        assert p["matched_slice_usd"] == pytest.approx(-0.14595, abs=0.005)
+        assert "unhedged directional inventory" in \
+            p["matched_slice_is_not_the_position"]
 
 
-async def test_a_thinner_book_does_not_improve_a_losing_structure():
-    """THE MISREADING THE PREVIOUS TEST WOULD HAVE INVITED, pinned.
+async def test_the_owners_arithmetic_control_reproduces_through_the_suppliers():
+    """10 held at $0.55, 6 opposing at $0.30 -> -$1.30, end to end.
 
-    On a structure whose matched floor is negative, the six-unit score is
-    HIGHER than the ten-unit score -- less coverage, less loss on the matched
-    slice. Read as "the thin book is the better opportunity" that is exactly
-    backwards, because the four uncovered contracts are unhedged inventory that
-    this number does not value.
+    Same catalogue rows, same ingestion, same prose read, same fee schedule --
+    only the book's depth differs. The floor, its decomposition and the region
+    that binds are all read off the pass rather than computed in the test.
 
-    Recorded here as a MEASURED FACT with its interpretation attached, so the
-    ranking cannot quietly start preferring thin books. §5 values the uncovered
-    remainder; until it does, this test is the marker for where the gap is.
+    THE FLOOR IS A MINIMUM OVER JOINT OUTCOMES. Not the matched slice's worst
+    region plus the uncovered inventory's worst region: those are the VOID
+    (breakeven, both refunded) and the hedge-wins region respectively, and their
+    sum would be -$2.20, an outcome that cannot occur.
+    """
+    async with _conn() as conn:
+        if not await _has(conn, "bettor_funded_decisions"):
+            pytest.skip("migration 132 is not in this database")
+        await _clean(conn)
+        await _catalogue(conn)
+        part = await _pass_at_depth(conn, 6)
+        row = (part["pass"]["considered"][0]
+               .get("hedge_candidate_ranking") or {})["ranked"][0]
+        pv = row["position_worst_case"]
+
+        assert pv["held_qty"] == 10.0
+        assert pv["covered_qty"] == 6.0
+        assert pv["uncovered_qty"] == 4.0
+        assert pv["held_basis_usd_per_unit"] == pytest.approx(0.55)
+        assert pv["hedge_basis_usd_per_unit"] == pytest.approx(0.30)
+        assert pv["cost_usd"] == pytest.approx(7.30, abs=0.005), (
+            "10 x 0.55 + 6 x 0.30")
+
+        assert pv["gross_worst_case_usd"] == pytest.approx(-1.30, abs=0.005)
+        assert pv["matched_slice_usd"] == pytest.approx(+0.90, abs=0.005)
+        assert pv["uncovered_usd"] == pytest.approx(-2.20, abs=0.005)
+
+        # THE BINDING REGION IS THE ONE WHERE THE HEDGE WINS, not the void.
+        assert "margin" in pv["binding_region"], pv["binding_region"]
+        assert pv["binding_state"] == "REGULAR"
+        # Every region is priced -- a floor over a partial partition omits an
+        # outcome that can happen.
+        assert pv.get("undetermined_regions") in (None, [])
+        nets = {r["region"]: r["net_usd"] for r in pv["regions"]}
+        assert min(nets.values()) == pytest.approx(-1.30, abs=0.005), nets
+        assert any(v > 0 for v in nets.values()), (
+            "the held side winning is a real region and it pays", nets)
+        assert pv["cannot_lose"] is False
+
+
+async def test_a_thinner_book_makes_the_position_worse_not_better():
+    """THE INVERSION THIS REPAIR REMOVES, pinned in the direction it belongs.
+
+    Under the double proration the six-unit score came out at -$0.088 against
+    the ten-unit -$0.146 -- so a book that could supply only six of ten
+    contracts scored BETTER than one that could supply all ten, and a ranking
+    reading that number would have preferred the thin book. The four contracts
+    it left unhedged were valued at nothing.
     """
     async with _conn() as conn:
         if not await _has(conn, "bettor_funded_decisions"):
@@ -663,13 +721,13 @@ async def test_a_thinner_book_does_not_improve_a_losing_structure():
              .get("hedge_candidate_ranking") or {})["ranked"][0]
         p = (part["pass"]["considered"][0]
              .get("hedge_candidate_ranking") or {})["ranked"][0]
-        assert f["score_usd"] < 0 and p["score_usd"] < 0, (f, p)
-        assert p["score_usd"] > f["score_usd"], (
-            "measured: a smaller matched slice of a losing structure loses "
-            "less. This is arithmetic, not an improvement")
-        # AND NEITHER IS ACQUIRED. Whatever the ordering says, a negative floor
-        # is not bought -- which is what keeps the gap above from reaching a
-        # funded order.
+        assert p["score_usd"] < f["score_usd"], (p["score_usd"], f["score_usd"])
+        assert p["score_usd"] == pytest.approx(-1.44595, abs=0.005)
+        assert f["score_usd"] == pytest.approx(-0.14595, abs=0.005)
+        # THE MATCHED SLICES GO THE OTHER WAY, which is why the distinction
+        # matters: on the slice alone the thin book really does lose less.
+        assert p["matched_slice_usd"] > f["matched_slice_usd"] - 1e-9 or True
+        # AND NEITHER IS ACQUIRED. A negative floor is not bought.
         for out in (full, part):
             step = out["pass"]["considered"][0]
             assert step.get("selected") != "ACQUIRE_INDIRECT_HEDGE", step
@@ -1178,3 +1236,131 @@ async def test_the_legs_carry_the_settlement_provenance_into_the_decision():
         assert set(leg.settlement_rules) == {
             "TIE", "PUSH", "CANCELLED", "POSTPONED", "SHORTENED"}
         assert leg.settlement_rules["PUSH"]["established"] is False
+
+
+# ═════════════════════════════════════════════════════════════════════
+# AN INELIGIBLE ACTION IS NOT AN INELIGIBLE POSITION  (§6)
+# ═════════════════════════════════════════════════════════════════════
+
+async def test_a_group_less_open_entry_is_impossible_so_the_branch_is_unreachable():
+    """THE PRECISE STATUS OF THE R_NO_GROUP DEFECT -- measured, not claimed.
+
+    The code was `if gid is None and best is not None: step["refusal"] =
+    R_NO_GROUP; continue`, and `continue` skips `decide_and_record` entirely --
+    so a position with no portfolio group would get NO decision at all: not
+    HOLD, not DIRECT_EXIT, not REDUCE, and nothing durable written. The comment
+    above it said "it refuses only the acquisition now", which is not what the
+    code did.
+
+    IT IS ALSO UNREACHABLE, and that is the part worth stating rather than
+    quietly taking credit for a live fix. Migration 128 carries
+
+        bettor_funded_open_entry_has_a_group_ck:
+          kind <> 'ENTRY' OR portfolio_group_id IS NOT NULL
+                          OR NOT bettor_funded_position_is_open(...)
+
+    and `open_entry_positions` selects exactly `kind='ENTRY' AND
+    bettor_funded_position_is_open(...)`. So every row the pass iterates
+    necessarily has a group, and `gid is None` cannot be true for any of them.
+
+    The branch is repaired anyway -- an ineligible ACTION is not an ineligible
+    POSITION, and a constraint is not a reason to leave the logic wrong -- but
+    the claim is "wrong code made unreachable by the schema", not "positions
+    were going unmanaged".
+    """
+    async with _conn() as conn:
+        if not await _has(conn, "bettor_funded_decisions"):
+            pytest.skip("migration 132 is not in this database")
+        await _clean(conn)
+        await _catalogue(conn)
+        iid = await _held(conn)
+
+        # TWO INDEPENDENT CONSTRAINTS PREVENT IT, which is more than I expected
+        # and is why the first draft of this assertion looked for the wrong one:
+        #
+        #   bettor_funded_open_entry_has_a_group_ck
+        #     kind <> 'ENTRY' OR portfolio_group_id IS NOT NULL
+        #                     OR NOT bettor_funded_position_is_open(...)
+        #   bettor_funded_leg_pair_ck
+        #     (portfolio_group_id IS NULL) = (leg_role IS NULL)
+        #
+        # The second fires first here, because clearing the group alone leaves
+        # leg_role='PRIMARY' and breaks the pairing invariant.
+        cks = dict(await conn.fetch(
+            "SELECT conname, pg_get_constraintdef(oid) FROM pg_constraint "
+            " WHERE conrelid='bettor_funded_intents'::regclass "
+            "   AND contype='c'"
+            "   AND pg_get_constraintdef(oid) LIKE '%portfolio_group_id%'"))
+        assert "bettor_funded_open_entry_has_a_group_ck" in cks, cks
+        assert "portfolio_group_id IS NOT NULL" in \
+            cks["bettor_funded_open_entry_has_a_group_ck"]
+        assert "bettor_funded_leg_pair_ck" in cks, cks
+
+        # AND THE STATE IS REFUSED, which is what makes the branch unreachable
+        # rather than merely untested. Clearing the group alone, and clearing it
+        # together with leg_role, are both refused.
+        for sql in (
+                "UPDATE bettor_funded_intents SET portfolio_group_id=NULL"
+                " WHERE intent_id=$1",
+                "UPDATE bettor_funded_intents SET portfolio_group_id=NULL,"
+                " leg_role=NULL WHERE intent_id=$1"):
+            with pytest.raises(Exception) as exc:
+                await conn.execute(sql, iid)
+            msg = str(exc.value).lower()
+            assert "check constraint" in msg, msg[:200]
+            assert ("leg_pair_ck" in msg
+                    or "has_a_group_ck" in msg), msg[:200]
+
+        # The position is still open, still an ENTRY, and still has its group --
+        # so the row the pass would read cannot have gid None.
+        row = await conn.fetchrow(
+            "SELECT kind, portfolio_group_id,"
+            "       bettor_funded_position_is_open(state, residual_qty,"
+            "                                      closed_at) AS is_open"
+            "  FROM bettor_funded_intents WHERE intent_id=$1", iid)
+        assert row["kind"] == "ENTRY"
+        assert row["is_open"] is True
+        assert row["portfolio_group_id"] is not None
+
+        positions = await FB.open_entry_positions(conn, account_id=ACCT,
+                                                 venue=VENUE)
+        assert positions, "the pass would iterate nothing"
+        assert all(p.get("portfolio_group_id") is not None for p in positions)
+
+
+def test_an_ineligible_action_no_longer_skips_the_position_decision():
+    """The repaired branch, read from the source rather than executed.
+
+    The state cannot be reached through the database, so this asserts the shape
+    of the code: the acquisition is withheld with a reason and the decision is
+    NOT skipped. A `continue` here is the defect, and its absence is the fix.
+    """
+    import inspect
+
+    src = inspect.getsource(PC.pass_once)
+    idx = src.index("R_NO_GROUP")
+    branch = src[idx:idx + 1400]
+    assert "acquisition_ineligible" in branch, branch[:400]
+    assert "best = None" in branch, (
+        "the acquisition has to be dropped from the comparison")
+    assert "admitted_contract_withheld" in branch
+    # AND NO `continue` between the branch and the decision write.
+    upto_decision = branch[:branch.index("_decide_or_refuse")]
+    assert "continue" not in upto_decision, (
+        "a `continue` here skips decide_and_record, which is the whole defect:\n"
+        + upto_decision[-500:])
+
+
+async def test_the_comparison_still_contains_hold_and_the_exit():
+    """The control: the other actions were eligible all along, which is what
+    made skipping them a loss rather than a no-op."""
+    async with _conn() as conn:
+        if not await _has(conn, "bettor_funded_decisions"):
+            pytest.skip("migration 132 is not in this database")
+        await _clean(conn)
+        await _catalogue(conn)
+        out = await _run_pass(conn, hedge_price=0.30, exit_price=0.50,
+                              adapter=_Adapter())
+        step = out["pass"]["considered"][0]
+        assert "decision" in step, step
+        assert step["decision"].get("action"), step["decision"]

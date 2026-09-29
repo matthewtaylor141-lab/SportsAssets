@@ -1255,7 +1255,9 @@ R_CANDIDATE_VALUE_NOT_DETERMINED = (
 
 
 def rank_admitted(admitted, *, details=None, wanted_qty=None, fee_usd=None,
-                  fee_basis=None, shared_depth=None):
+                  fee_basis=None, shared_depth=None, held_leg=None,
+                  sport_permits_tie=None, fixture_can_void=True,
+                  fixture_can_postpone=True):
     """Order the admitted candidates by fee-adjusted net worst case.
 
     `admitted`  `discover`'s own admitted list, each entry carrying the
@@ -1312,8 +1314,23 @@ def rank_admitted(admitted, *, details=None, wanted_qty=None, fee_usd=None,
     if shared_qty is None and shared.get("ok") and "supportable_qty" in shared:
         shared_qty = shared.get("supportable_qty")
     out = {"ranked": [], "not_rankable": [], "best": None,
-           "scored_on": ("fee-adjusted net worst case per candidate, over the "
-                         "units the structure establishes"),
+           # WHAT THE SCORE MEASURES, STATED. It used to say "over the units the
+           # structure establishes", which describes the matched slice -- while
+           # the number was additionally pro-rated by covered/wanted, so the
+           # label was wrong about a figure that was itself wrong. Each row now
+           # carries `score_is`, because whether the whole position could be
+           # valued varies per candidate.
+           "scored_on": ("the fee-adjusted floor of the WHOLE POSITION where a "
+                         "held leg was supplied -- the matched contracts plus "
+                         "the inventory the hedge does not cover, over one "
+                         "joint partition of the fixture. Where it was not, the "
+                         "matched slice alone, and the row says so in "
+                         "`score_is`"),
+           "a_slice_is_not_a_position": (
+               "the matched slice's floor and the uncovered inventory's floor "
+               "can sit in DIFFERENT regions, so their sum can describe an "
+               "outcome that cannot happen. A position's floor is a minimum "
+               "over single joint outcomes and nothing else"),
            "an_unreadable_input_is_not_a_zero": (
                "a candidate whose depth or fee could not be read is reported "
                "not_rankable, never scored as worthless -- scoring it zero "
@@ -1424,17 +1441,64 @@ def rank_admitted(admitted, *, details=None, wanted_qty=None, fee_usd=None,
                      why=((val or {}).get("why")
                           or "the structure's floor was not determined")))
             continue
-        # THE FLOOR IS OVER WHAT CAN ACTUALLY BE ACQUIRED. A structure priced
-        # over ten contracts when six are available overstates the hedge by the
-        # four that would not fill, so the floor is pro-rated to the covered
-        # quantity and the fact is recorded rather than folded in silently.
-        row["score_usd"] = float(floor)
-        if want and supportable < float(want):
-            row["score_usd"] = float(floor) * (supportable / float(want))
-            row["score_is_prorated"] = (
-                "the structure's floor covers %s contracts and only %s can be "
-                "acquired, so the score is pro-rated and %s stay UNCOVERED"
-                % (want, supportable, row["uncovered_qty"]))
+        # ── THE SCORE IS THE WHOLE POSITION, NOT THE MATCHED SLICE ───
+        #
+        # THE DOUBLE PRORATION THIS REPLACES. `floor` comes from
+        # `net_worst_case`, which values the MATCHED slice at whole-position
+        # scale -- `classify` already set `units` to min(held, hedge) and built
+        # the table on one unit of each. This code then multiplied that figure
+        # by `supportable / want` AGAIN, so a slice worth $0.90 was reported as
+        # $0.54, and the contracts the hedge does not cover were valued at
+        # nothing at all.
+        #
+        # ON THE OWNER'S CONTROL -- 10 held at $0.55, 6 opposing at $0.30, a
+        # cancellation refunding basis -- the three figures are:
+        #
+        #     matched six pairs alone ....... +$0.90
+        #     four uncovered contracts ...... -$2.20
+        #     THE POSITION .................. -$1.30
+        #
+        # and the third is the only one that answers "what happens to this
+        # account". Note it is NOT the sum of two separately minimised pieces:
+        # the matched slice's worst region is the VOID (breakeven) while the
+        # uncovered inventory's worst region is the one where the held side
+        # loses, and their sum would describe an outcome that cannot occur.
+        # `position_worst_case` builds ONE table at the real quantities and
+        # takes the minimum over joint outcomes, which is the only thing a
+        # floor can be.
+        row["matched_slice_usd"] = float(floor)
+        row["matched_slice_is_not_the_position"] = (
+            "this is the floor of the %s matched contract(s). The %s the hedge "
+            "does not cover are unhedged directional inventory and contribute "
+            "separately" % (supportable, row["uncovered_qty"]))
+        pos_val = None
+        if held_leg is not None and leg is not None \
+                and sport_permits_tie is not None:
+            pos_val = IP.position_worst_case(
+                held_leg=held_leg, hedge_leg=leg, hedge_qty=supportable,
+                sport_permits_tie=bool(sport_permits_tie),
+                fee_usd=fee_usd, fee_basis=fee_basis,
+                fixture_can_void=fixture_can_void,
+                fixture_can_postpone=fixture_can_postpone)
+            row["position_worst_case"] = pos_val
+        if pos_val is not None and pos_val.get("ok"):
+            row["score_usd"] = float(pos_val["whole_position_usd"])
+            row["score_is"] = "WHOLE_POSITION"
+            row["uncovered_usd"] = pos_val["uncovered_usd"]
+            row["binding_region"] = pos_val["binding_region"]
+        else:
+            # THE POSITION COULD NOT BE VALUED, so the matched slice is what
+            # there is -- and the row says so instead of letting a slice figure
+            # pass as the position's. This is the path a caller that supplies no
+            # held leg takes, which is every legacy unit test of this function.
+            row["score_usd"] = float(floor)
+            row["score_is"] = "MATCHED_SLICE_ONLY"
+            row["score_scope_warning"] = (
+                "the whole position was not valued (%s), so this score covers "
+                "the matched contracts only and says nothing about the %s "
+                "uncovered"
+                % ((pos_val or {}).get("refusal")
+                   or "no held leg was supplied", row["uncovered_qty"]))
         out["ranked"].append(row)
     # HIGHEST FLOOR FIRST; ties broken by the contract id so the order is
     # deterministic rather than dependent on the catalogue's row order.
@@ -1442,8 +1506,31 @@ def rank_admitted(admitted, *, details=None, wanted_qty=None, fee_usd=None,
     if out["ranked"]:
         winner = out["ranked"][0]
         out["best"] = winner
-        by_id = {str(c.get("condition_id")): c for c in (admitted or ())}
-        out["best_admitted"] = by_id.get(winner["condition_id"])
+        # NOT `by_id` -- that name already holds the per-candidate DETAIL rows
+        # above, and rebinding it here made two different maps share one name in
+        # one function. Harmless only because the detail lookups are finished by
+        # this line, which is the kind of "harmless" that stops being so on the
+        # next edit.
+        admitted_by_id = {str(c.get("condition_id")): c
+                          for c in (admitted or ())}
+        out["best_admitted"] = admitted_by_id.get(winner["condition_id"])
+        # ── WHAT REACHES THE DECISION, AND WHAT DOES NOT ─────────────
+        #
+        # `pass_once` passes `best_admitted` -- ONE candidate -- to
+        # `decide_and_record`, and it is the one with the highest FLOOR. So a
+        # candidate with a lower floor and a higher expected value cannot be
+        # selected, whatever the approved objective says. That is a real
+        # limitation of the current comparison and it is recorded here rather
+        # than left for a reader to infer from the absence of a list.
+        out["carried_to_the_decision"] = winner["condition_id"]
+        out["not_carried_to_the_decision"] = [
+            r["condition_id"] for r in out["ranked"][1:]]
+        out["the_comparison_sees_one_hedge"] = (
+            "decide_and_record takes a single `admitted` candidate, chosen here "
+            "by the highest fee-adjusted floor. A candidate with a LOWER floor "
+            "and a HIGHER expected value is therefore unreachable, however the "
+            "approved objective is stated. %d ranked candidate(s) were not "
+            "carried" % len(out["ranked"][1:]))
         out["why"] = ("%d candidate(s) ranked on their own fee-adjusted floor, "
                       "%d not rankable; %s wins at %.4f"
                       % (len(out["ranked"]), len(out["not_rankable"]),
@@ -1576,10 +1663,24 @@ async def pass_once(conn, *, account_id: str, venue: str,
             wanted_qty=pos.get("residual_qty") or pos.get("filled_qty"),
             fee_usd=facts.get("fee_usd"),
             fee_basis=facts.get("fee_basis"),
-            shared_depth=facts.get("depth"))
+            shared_depth=facts.get("depth"),
+            # THE HELD LEG IS WHAT MAKES THE SCORE THE POSITION'S. Without it
+            # the ranking can only value the matched slice, and a slice figure
+            # read as the position's is how four uncovered contracts came to be
+            # worth nothing.
+            held_leg=facts.get("held_leg"),
+            # THE SAME PARTITION `discover` CLASSIFIED ON, coerced the same
+            # way. If the ranking valued a different outcome space than the
+            # classifier admitted on, the two would disagree about what the
+            # structure is -- and the number the decision uses would be the one
+            # nobody classified.
+            sport_permits_tie=bool(facts.get("sport_permits_tie")),
+            fixture_can_void=bool(facts.get("fixture_can_void", True)),
+            fixture_can_postpone=bool(
+                facts.get("fixture_can_postpone", True)))
         step["hedge_candidate_ranking"] = {
             k: ranking[k] for k in ("ranked", "not_rankable", "why",
-                                    "scored_on",
+                                    "scored_on", "identity",
                                     "an_unreadable_input_is_not_a_zero",
                                     "the_taxonomy_does_not_set_the_order")}
         best = ranking.get("best_admitted")
@@ -1600,13 +1701,30 @@ async def pass_once(conn, *, account_id: str, venue: str,
         step["admitted_contract"] = None if best is None else best["condition_id"]
         gid = pos.get("portfolio_group_id")
         if gid is None and best is not None:
-            # A GROUP IS NEEDED TO ACQUIRE A SECOND LEG, not to sell what is
-            # already held. This used to refuse before the decision, so a
-            # position with no group could not be exited through this pass --
-            # which after the ordering change means it could not be exited at
-            # all. It refuses only the acquisition now.
-            step["refusal"] = R_NO_GROUP
-            continue
+            # ── A GROUP IS NEEDED TO ACQUIRE, NOT TO DECIDE ──────────
+            #
+            # THE DEFECT, AND THE PREVIOUS COMMENT WAS WRONG ABOUT IT. It said
+            # "it refuses only the acquisition now" -- and then `continue`d,
+            # which skips `decide_and_record` altogether. So a position with no
+            # portfolio group got NO DECISION AT ALL: not HOLD, not
+            # DIRECT_EXIT, not REDUCE, and nothing written to the ledger. The
+            # one action that was genuinely unavailable took the other three
+            # down with it, and the position sat unmanaged with a refusal
+            # recorded on the step and nothing recorded anywhere durable.
+            #
+            # An ineligible ACTION is not an ineligible POSITION. The
+            # acquisition is dropped from the comparison, the reason travels
+            # with it, and the decision is made over the actions that remain --
+            # which is what the owner asked for: carry every ELIGIBLE candidate
+            # into the final comparison under the approved objective.
+            step["acquisition_ineligible"] = R_NO_GROUP
+            step["acquisition_ineligible_why"] = (
+                "the held position belongs to no portfolio group, and a second "
+                "leg has to be reserved against one. That makes ACQUIRE "
+                "unavailable; it does not make HOLD, DIRECT_EXIT or REDUCE "
+                "unavailable, and this used to skip the whole decision")
+            step["admitted_contract_withheld"] = best["condition_id"]
+            best = None
         # ── A DECISION WRITE THAT RAISES IS THIS POSITION'S PROBLEM ──
         #
         # `pass_once` says "never raises" and did not honour it here: an

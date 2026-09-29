@@ -265,6 +265,258 @@ def depth_supports(*, wanted_qty, depth_qty_at_price=None) -> dict:
                 "not be counted as separately executable in two places")}
 
 
+# ═════════════════════════════════════════════════════════════════════
+# FOUR QUANTITIES, AND THE UNCOVERED REMAINDER IS WORTH SOMETHING
+# ═════════════════════════════════════════════════════════════════════
+#
+# THE OWNER'S ARITHMETIC CONTROL, which this exists to reproduce:
+#
+#     10 held at $0.55, 6 opposing at $0.30. In the ordinary outcome
+#
+#         6 - (10 x 0.55) - (6 x 0.30) = -$1.30
+#
+#     while the matched six pairs alone show +$0.90 and the four uncovered
+#     contracts lose $2.20.
+#
+# `net_worst_case` values the MATCHED SLICE. `classify` sets `units` to
+# min(held, hedge) and builds the payout table on one unit of each, so the number
+# that comes back is +$0.90 -- correct for what it measures, and NOT the
+# position's result. The four uncovered contracts are unhedged directional
+# inventory that nothing in that figure values.
+#
+# `rank_admitted` then multiplied that +$0.90 by `supportable / wanted`, which is
+# the DOUBLE PRORATION: `classify` had already scaled to the matched units, so
+# scaling again by 6/10 reports $0.54 for a slice worth $0.90 -- and still says
+# nothing about the four.
+#
+# So the three are separated and all three are reported. `matched_slice` is what
+# the structure establishes; `uncovered` is the remainder at its own basis;
+# `whole_position` is their sum, and is the only one of the three that answers
+# "what happens to this account".
+#
+# FOUR QUANTITIES, NEVER ONE. Each has a different source and they diverge in the
+# ordinary case, which is why a single `qty` was wrong:
+#
+#     REQUESTED    what the position wants hedged -- its residual quantity
+#     SUPPORTABLE  what the book's DISPLAYED depth would cover
+#     PROPOSED     what the order actually asks for
+#     FILLED       what came back, knowable only after the fact
+#
+# Displayed depth is not a queue position, so SUPPORTABLE bounds PROPOSED and
+# PROPOSED bounds nothing at all.
+
+QTY_REQUESTED = "REQUESTED_BY_THE_POSITION"
+QTY_SUPPORTABLE = "SUPPORTABLE_BY_DISPLAYED_DEPTH"
+QTY_PROPOSED = "PROPOSED_ON_THE_ORDER"
+QTY_FILLED = "ACTUALLY_FILLED"
+
+R_UNCOVERED_BASIS_NOT_STATED = (
+    "THE_UNCOVERED_INVENTORYS_OWN_BASIS_IS_NOT_STATED")
+
+
+def quantities(*, requested, supportable=None, proposed=None, filled=None
+               ) -> dict:
+    """The four quantities, kept apart, with the relations that must hold.
+
+    Returns them named, plus `uncovered_qty` -- requested minus whichever later
+    quantity is known. `filled` decides it once it exists, because what is
+    covered is what actually filled, not what was proposed.
+    """
+    req = None if requested is None else float(requested)
+    sup = None if supportable is None else float(supportable)
+    pro = None if proposed is None else float(proposed)
+    fil = None if filled is None else float(filled)
+    # WHAT IS COVERED IS WHAT FILLED. Before a fill the best available estimate
+    # is the proposal, then the supportable quantity -- and WHICH ONE was used
+    # is recorded, because "6 will fill" and "6 did fill" are different
+    # statements and only one of them is a fact.
+    covered, basis_of_covered = None, None
+    for value, label in ((fil, QTY_FILLED), (pro, QTY_PROPOSED),
+                         (sup, QTY_SUPPORTABLE)):
+        if value is not None:
+            covered, basis_of_covered = value, label
+            break
+    out = {"version": VERSION,
+           "requested_qty": req, "supportable_qty": sup,
+           "proposed_qty": pro, "filled_qty": fil,
+           "covered_qty": covered,
+           "covered_qty_is": basis_of_covered,
+           "uncovered_qty": (None if (req is None or covered is None)
+                             else round(max(0.0, req - covered), 6)),
+           "why_four": ("requested, supportable, proposed and filled diverge in "
+                        "the ordinary case. Displayed depth is not a queue "
+                        "position, so supportable bounds proposed and proposed "
+                        "bounds nothing")}
+    problems = []
+    if req is not None and sup is not None and sup > req + 1e-9:
+        problems.append("supportable %s exceeds requested %s" % (sup, req))
+    if sup is not None and pro is not None and pro > sup + 1e-9:
+        problems.append("proposed %s exceeds the supportable %s" % (pro, sup))
+    if pro is not None and fil is not None and fil > pro + 1e-9:
+        problems.append("filled %s exceeds the proposed %s" % (fil, pro))
+    out["inconsistent"] = problems
+    return out
+
+
+R_POSITION_HAS_AN_UNDETERMINED_REGION = (
+    "SOME_OUTCOME_REGION_OF_THE_WHOLE_POSITION_HAS_NO_DETERMINED_PAYOUT")
+
+
+def position_worst_case(*, held_leg, hedge_leg, hedge_qty,
+                        sport_permits_tie, fee_usd=None, fee_basis=None,
+                        fixture_can_void=True, fixture_can_postpone=True
+                        ) -> dict:
+    """The WHOLE POSITION's floor, over ONE joint partition of the fixture.
+
+    `held_leg` carries the inventory at its real quantity; `hedge_qty` is how
+    many contracts of `hedge_leg` would actually be acquired -- the PROPOSED or
+    FILLED quantity, never the requested one.
+
+    WHY THIS IS NOT "THE MATCHED FLOOR PLUS THE UNCOVERED FLOOR", which is what
+    I wrote first and which is wrong. Those two minima occur in DIFFERENT
+    REGIONS. On the owner's control -- 10 held at $0.55, 6 opposing at $0.30,
+    cancellation refunding basis -- the matched slice's worst region is the VOID
+    (both legs refunded, exactly breakeven, $0.00) while the uncovered
+    inventory's worst region is the one where the held side loses (-$2.20).
+    Summing them gives -$2.20, an outcome that cannot occur: in the void the
+    uncovered contracts are refunded too.
+
+    Built as one table over the real quantities, the same control gives
+
+        margin < 0 (the hedge wins) ...  $6.00 - $7.30 = -$1.30   <- the floor
+        margin > 0 (the held wins) ....  $10.00 - $7.30 = +$2.70
+        cancelled (both refunded) .....  $7.30 - $7.30 =  $0.00
+
+    which is the owner's -$1.30, derived rather than asserted. A floor is the
+    minimum over single joint outcomes, and that is the only thing it can be.
+
+    NO SECOND PRORATION either: the table is built at the real quantities, so
+    there is nothing left to scale. `rank_admitted` used to multiply an
+    already-whole-position figure by covered/requested.
+    """
+    from . import bettor_indirect_structures as IS
+
+    out = {"version": VERSION, "ok": False, "refusal": None,
+           "scale": SCALE_WHOLE_POSITION,
+           "a_floor_is_a_minimum_over_joint_outcomes": (
+               "not the sum of two separately minimised pieces -- those minima "
+               "can sit in different regions and their sum can be an outcome "
+               "that cannot happen"),
+           "no_second_proration": (
+               "the table is built at the real quantities, so there is nothing "
+               "left to scale by covered/requested")}
+    hq = float(hedge_qty or 0.0)
+    held_q = float(getattr(held_leg, "quantity", 0) or 0.0)
+    out.update(held_qty=held_q, covered_qty=min(hq, held_q),
+               hedge_qty=hq,
+               uncovered_qty=round(max(0.0, held_q - hq), 6))
+    if held_leg is None or hedge_leg is None:
+        return dict(out, refusal=R_STRUCTURE_IS_UNESTABLISHABLE,
+                    why="both legs are needed to partition one outcome space")
+    gaps = list(held_leg.missing_facts()) + list(hedge_leg.missing_facts())
+    if gaps:
+        return dict(out, refusal=R_STRUCTURE_IS_UNESTABLISHABLE,
+                    missing_facts=gaps,
+                    why=("a leg missing a fact grading needs has no payout "
+                         "function: %s" % "; ".join(gaps[:3])))
+    if held_leg.cost_cents_per_unit is None or \
+            hedge_leg.cost_cents_per_unit is None:
+        return dict(out, refusal=R_COST_NOT_STATED,
+                    why="without both bases there is no result to report")
+    if fee_usd is None:
+        return dict(out, refusal=R_FEES_NOT_PRICED,
+                    why=("a fee-adjusted floor computed without a fee is not "
+                         "fee-adjusted"))
+
+    # THE REAL QUANTITIES, in one table. `_with_quantity` preserves the
+    # settlement reading, which is why it uses dataclasses.replace.
+    legs = (held_leg, IS._with_quantity(hedge_leg, int(hq)))
+    table = IS.payoff_table(legs, sport_permits_tie=sport_permits_tie,
+                            fixture_can_void=fixture_can_void,
+                            fixture_can_postpone=fixture_can_postpone)
+    cost_cents = (int(held_leg.cost_cents_per_unit) * int(held_q)
+                  + int(hedge_leg.cost_cents_per_unit) * int(hq))
+    cost_usd = round(cost_cents / 100.0, 6)
+    out.update(cost_usd=cost_usd,
+               held_basis_usd_per_unit=round(
+                   int(held_leg.cost_cents_per_unit) / 100.0, 6),
+               hedge_basis_usd_per_unit=round(
+                   int(hedge_leg.cost_cents_per_unit) / 100.0, 6))
+
+    rows, undetermined = [], []
+    for r in table:
+        # A POSTPONEMENT IS NOT A PAYOUT. The market stays open, so the cell
+        # has no money rather than an unknown amount, and it is reported apart
+        # instead of making every position undeterminable.
+        if r["state"] == IS.STATE_POSTPONED:
+            continue
+        if not r["determined"]:
+            undetermined.append(r["region"])
+            continue
+        gross = round(r["joint_cents"] / 100.0 - cost_usd, 6)
+        rows.append({"region": r["region"], "state": r["state"],
+                     "payout_usd": round(r["joint_cents"] / 100.0, 6),
+                     "net_usd": gross,
+                     "per_leg_cents": r["per_leg_cents"]})
+    out["regions"] = rows
+    out["unresolved_states"] = [r["region"] for r in table
+                               if r["state"] == IS.STATE_POSTPONED]
+    if undetermined:
+        return dict(out, refusal=R_POSITION_HAS_AN_UNDETERMINED_REGION,
+                    undetermined_regions=undetermined,
+                    why=("%d region(s) of the whole position have no "
+                         "determined payout, and a minimum taken over the rest "
+                         "omits an outcome that can actually happen: %s"
+                         % (len(undetermined), undetermined[:3])))
+    if not rows:
+        return dict(out, refusal=R_MIN_PAYOUT_NOT_DETERMINED,
+                    why="no region of the position has a determined payout")
+
+    binding = min(rows, key=lambda r: r["net_usd"])
+    gross_floor = binding["net_usd"]
+    net_floor = round(gross_floor - float(fee_usd), 6)
+    # ── THE DECOMPOSITION, INSIDE THE BINDING REGION ─────────────────
+    #
+    # Reported so the number can be read, not so the number can be built: both
+    # halves are taken from the SAME region as the floor, which is what makes
+    # them add up to it.
+    per_leg = binding["per_leg_cents"]
+    held_pays = round((per_leg[0] or 0) / 100.0, 6)
+    hedge_pays = round((per_leg[1] or 0) / 100.0, 6)
+    cov = min(hq, held_q)
+    unc = round(max(0.0, held_q - hq), 6)
+    held_basis = out["held_basis_usd_per_unit"]
+    hedge_basis = out["hedge_basis_usd_per_unit"]
+    matched_usd = round(cov * (held_pays - held_basis)
+                        + min(hq, held_q) * (hedge_pays - hedge_basis), 6)
+    extra_hedge = round(max(0.0, hq - held_q), 6)
+    uncovered_usd = round(unc * (held_pays - held_basis)
+                          + extra_hedge * (hedge_pays - hedge_basis), 6)
+    return dict(out, ok=True,
+                binding_region=binding["region"],
+                binding_state=binding["state"],
+                gross_worst_case_usd=gross_floor,
+                fees_usd=float(fee_usd), fee_basis=fee_basis,
+                worst_case_usd=net_floor,
+                whole_position_usd=net_floor,
+                matched_slice_usd=matched_usd,
+                uncovered_usd=uncovered_usd,
+                uncovered_is=("held inventory no hedge covers"
+                              if unc else
+                              ("hedge contracts beyond the inventory"
+                               if extra_hedge else "nothing")),
+                fully_covered=unc <= 1e-9 and extra_hedge <= 1e-9,
+                cannot_lose=net_floor > 0,
+                worst_case_is_conditional_on_resolution=True,
+                why=("the position's floor is $%+.4f in %r, gross $%+.4f less "
+                     "$%.4f of fees. Inside that region the %s matched "
+                     "contract(s) contribute $%+.4f and the %s uncovered "
+                     "contribute $%+.4f"
+                     % (net_floor, binding["region"], gross_floor,
+                        float(fee_usd), cov, matched_usd,
+                        unc or extra_hedge, uncovered_usd)))
+
+
 def downside_only_view(*, held: dict, hedge_candidate: dict | None = None,
                        exit_proceeds_usd=None, evidence: dict | None = None
                        ) -> dict:
