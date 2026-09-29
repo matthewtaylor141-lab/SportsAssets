@@ -269,8 +269,21 @@ async def claim_dispatch(conn, *, xavier_decision_id: str, plan_digest: str,
             d["portfolio_group_id"], d["account_id"], d["venue"],
             client_order_id, json.dumps(evidence or {}, default=str),
             float(at if at is not None else time.time()))
-    except asyncpg.exceptions.UniqueViolationError:
-        return dict(out, ok=True, refusal=R_PLAN_ALREADY_CLAIMED)
+    except asyncpg.exceptions.UniqueViolationError as exc:
+        # A CONCURRENT CLAIM WON THE RACE. Which unique index caught this one
+        # depends on timing (the idempotency key, the one-claim-per-decision
+        # index or the one-claim-per-plan index), so the refusal is named from
+        # who owns the winning claim, not from the index that fired.
+        owner = await conn.fetchval(
+            "SELECT xavier_decision_id FROM bettor_xavier_execution_events "
+            " WHERE event_kind='DISPATCH_CLAIMED' AND (xavier_decision_id=$1 "
+            "    OR plan_digest=$2) ORDER BY event_id LIMIT 1",
+            xavier_decision_id, plan_digest)
+        return dict(out, ok=True,
+                    refusal=(R_ALREADY_CLAIMED
+                             if owner in (None, xavier_decision_id)
+                             else R_PLAN_ALREADY_CLAIMED),
+                    constraint=getattr(exc, "constraint_name", None))
     except asyncpg.exceptions.RaiseError as exc:
         return dict(out, ok=False, refusal=R_NOT_THE_WINNING_PLAN,
                     detail=str(exc)[:300])
