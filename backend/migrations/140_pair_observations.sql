@@ -77,6 +77,23 @@ CREATE TABLE IF NOT EXISTS bettor_pair_observations (
         OR middle_occurred = (primary_won AND hedge_won))
 );
 
+-- ── A LABELLED ROW'S "WON" IS ITS SIDE AT ITS PRICE, NOTHING ELSE ──────
+-- The one label definition, shared with the funded LABEL_SQL: a side won
+-- only at the payout that pays it in full (LONG at 1, SHORT at 0). A push
+-- is a side that did not win. Enforced here, not only in Python.
+ALTER TABLE bettor_pair_observations
+    DROP CONSTRAINT IF EXISTS bettor_pair_obs_won_is_the_price_ck;
+ALTER TABLE bettor_pair_observations
+    ADD CONSTRAINT bettor_pair_obs_won_is_the_price_ck CHECK (
+        label_status <> 'LABELLED' OR (
+            primary_won = CASE WHEN primary_side = 'ORDER_INTENT_BUY_LONG'
+                               THEN primary_settlement_price = 1
+                               ELSE primary_settlement_price = 0 END
+            AND hedge_won = CASE WHEN hedge_side = 'ORDER_INTENT_BUY_LONG'
+                                 THEN hedge_settlement_price = 1
+                                 ELSE hedge_settlement_price = 0 END
+        ) IS TRUE);
+
 CREATE INDEX IF NOT EXISTS bettor_pair_obs_awaiting_idx
     ON bettor_pair_observations (last_read_at NULLS FIRST, observed_at)
     WHERE label_status = 'AWAITING_SETTLEMENT';
@@ -116,23 +133,57 @@ BEGIN
        OR NEW.overtime_included IS DISTINCT FROM OLD.overtime_included
        OR NEW.features::text IS DISTINCT FROM OLD.features::text
        OR NEW.feature_sha IS DISTINCT FROM OLD.feature_sha
+       OR NEW.feature_schema_sha IS DISTINCT FROM OLD.feature_schema_sha
+       OR NEW.taxonomy IS DISTINCT FROM OLD.taxonomy
+       OR NEW.source IS DISTINCT FROM OLD.source
        OR NEW.price_basis::text IS DISTINCT FROM OLD.price_basis::text THEN
         RAISE EXCEPTION 'observation % records what was seen at %; it is not '
                         'edited', OLD.observation_id, OLD.observed_at;
     END IF;
-    IF (NEW.label_status, NEW.middle_occurred, NEW.primary_settlement_price,
+    -- EVERY LABEL COLUMN IS VERSIONED, and the version moves ONLY with the
+    -- label: exactly +1 when any of them changes, and not at all otherwise.
+    IF (NEW.label_status, NEW.label_why, NEW.middle_occurred,
+        NEW.primary_won, NEW.hedge_won, NEW.primary_settlement_price,
         NEW.hedge_settlement_price, NEW.outcome_available_at)
        IS DISTINCT FROM
-       (OLD.label_status, OLD.middle_occurred, OLD.primary_settlement_price,
-        OLD.hedge_settlement_price, OLD.outcome_available_at)
-       AND NEW.label_version <> OLD.label_version + 1 THEN
-        RAISE EXCEPTION 'observation %: a label changes only as a new version '
-                        '(% -> % required)', OLD.observation_id,
-            OLD.label_version, OLD.label_version + 1;
+       (OLD.label_status, OLD.label_why, OLD.middle_occurred,
+        OLD.primary_won, OLD.hedge_won, OLD.primary_settlement_price,
+        OLD.hedge_settlement_price, OLD.outcome_available_at) THEN
+        IF NEW.label_version <> OLD.label_version + 1 THEN
+            RAISE EXCEPTION 'observation %: a label changes only as a new '
+                            'version (% -> % required)', OLD.observation_id,
+                OLD.label_version, OLD.label_version + 1;
+        END IF;
+    ELSIF NEW.label_version <> OLD.label_version THEN
+        RAISE EXCEPTION 'observation %: the label version moves only with '
+                        'the label', OLD.observation_id;
     END IF;
     RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
+
+-- ── EVERY LABEL VERSION HAS ITS HISTORY ROW, checked at commit ────────
+CREATE OR REPLACE FUNCTION bettor_pair_observation_version_has_history()
+RETURNS trigger AS $$
+BEGIN
+    IF NEW.label_version > 0 AND NOT EXISTS (
+        SELECT 1 FROM bettor_pair_observation_labels l
+         WHERE l.observation_id = NEW.observation_id
+           AND l.label_version = NEW.label_version) THEN
+        RAISE EXCEPTION 'observation %: label version % has no history row',
+            NEW.observation_id, NEW.label_version;
+    END IF;
+    RETURN NULL;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS bettor_pair_observation_version_has_history_trg
+    ON bettor_pair_observations;
+CREATE CONSTRAINT TRIGGER bettor_pair_observation_version_has_history_trg
+    AFTER UPDATE ON bettor_pair_observations
+    DEFERRABLE INITIALLY DEFERRED
+    FOR EACH ROW EXECUTE FUNCTION
+        bettor_pair_observation_version_has_history();
 
 DROP TRIGGER IF EXISTS bettor_pair_observation_is_fixed_trg
     ON bettor_pair_observations;

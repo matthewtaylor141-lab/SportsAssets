@@ -1137,9 +1137,8 @@ async def scheduled_learning_pass(conn, *, account_id: str,
                                          "named approver")}
     # ── 1 · JOIN ────────────────────────────────────────────────────
     try:
-        pending = [d for d in await FL.unjoined(
-            conn, limit=LEARNING_DECISIONS_PER_PASS)
-            if str(d.get("account_id")) == str(account_id)]
+        pending = await FL.unjoined(conn, limit=LEARNING_DECISIONS_PER_PASS,
+                                    account_id=account_id)
     except Exception as exc:                                   # noqa: BLE001
         out["join"] = {"ok": False, "refusal": "UNJOINED_DECISIONS_UNREADABLE",
                        "error": "%s: %s" % (type(exc).__name__,
@@ -1211,9 +1210,14 @@ async def scheduled_learning_pass(conn, *, account_id: str,
         # fixed limit meant a backlog of never-promoted candidates -- of any
         # key -- was re-scored every pass and a newer one was never reached.
         # A candidate past the limit is counted, not silently dropped.
+        # LEAST RECENTLY SCORED FIRST, never-scored before all: every
+        # candidate is re-scored in turn, so the one that first reaches enough
+        # prospective evidence is reached whatever was registered after it.
         cands = [r["model_id"] for r in await conn.fetch(
             "SELECT model_id FROM bettor_funded_models WHERE state=$1 "
-            "   AND model_key=$3 ORDER BY created_at DESC, model_id DESC "
+            "   AND model_key=$3 "
+            " ORDER BY (evaluation ->> 'evaluated_at')::float8 NULLS FIRST, "
+            "          created_at DESC, model_id DESC "
             " LIMIT $2", FMD.STATE_CANDIDATE, LEARNING_CANDIDATES_PER_PASS,
             FMD.KEY_MIDDLE)]
         out["candidates_not_scored_this_pass"] = max(0, int(

@@ -96,6 +96,17 @@ R_FIT_WINDOW_UNDERSTATED = "THE_DECLARED_FIT_WINDOW_ENDS_BEFORE_ROWS_IT_WAS_FIT_
 R_EVALUATION_NOT_EVENT_LEVEL = "THE_EVALUATION_DOES_NOT_COUNT_DISTINCT_FIXTURES"
 R_TRAINING_NOT_BOUND_TO_RECORDS = "THE_MODEL_WAS_NOT_FIT_ON_RECORDED_DECISIONS"
 R_TRAINING_RECORDS_DO_NOT_REPRODUCE = "THE_TRAINING_RECORDS_DO_NOT_REPRODUCE"
+#: THE RECORDS COULD NOT BE READ -- which is not the same as "they changed".
+#: `approved` refuses on either (it cannot vouch for what it cannot read), and
+#: `withdraw_invalidated` retires only on the second: a transient read failure
+#: must not permanently strip a model of an approval its records still support.
+R_TRAINING_RECORDS_UNREADABLE = "THE_TRAINING_RECORDS_COULD_NOT_BE_READ"
+#: THE PARAMETERS WERE NOT FIT ON THE NAMED RECORDS. A provenance that names
+#: real, reproducing records says nothing about the arithmetic unless the
+#: arithmetic is what those records produce: `fit()` on other rows, relabelled
+#: RECORDS, would otherwise pass (review of 599076c). The kernel is
+#: deterministic, so the records are refit and the predictions compared.
+R_PARAMS_NOT_FROM_THE_RECORDS = "THE_PARAMETERS_ARE_NOT_WHAT_THE_RECORDS_FIT"
 R_OUTCOME_AFTER_FIT_WINDOW = \
     "A_TRAINING_OUTCOME_BECAME_KNOWN_AFTER_THE_FIT_WINDOW"
 R_MODEL_ID_REUSED = "THAT_MODEL_ID_ALREADY_NAMES_A_DIFFERENT_FIT"
@@ -431,7 +442,10 @@ async def register(conn, *, model_id: str, model_version: str, fitted: dict,
     outcomes_through = None
     if prov.get("kind") == PROVENANCE_RECORDS:
         ver = await verify_provenance(
-            conn, {"training_provenance": prov, "model_key": model_key})
+            conn, {"training_provenance": prov, "model_key": model_key,
+                   "params": fitted.get("params"),
+                   "estimator": fitted.get("estimator")},
+            check_params=True)
         if not ver.get("ok"):
             return dict(out, ok=False, refusal=ver["refusal"],
                         why=ver.get("why"),
@@ -564,6 +578,13 @@ async def withdraw_invalidated(conn, *, model_key: str = KEY_MIDDLE) -> dict:
     out["approved_model"] = row["model_id"]
     if chk.get("ok"):
         return dict(out, ok=True, provenance_verified=True)
+    if chk.get("refusal") != R_TRAINING_RECORDS_DO_NOT_REPRODUCE:
+        # NOT ESTABLISHED IS NOT INVALIDATED. `approved` already refuses to
+        # price on it; retiring would turn a read failure into a verdict.
+        return dict(out, ok=True, withdrawn=False,
+                    not_withdrawn_because=chk.get("refusal"),
+                    verification={k: v for k, v in chk.items()
+                                  if k not in ("records", "lab")})
     reason = "%s: %s" % (RETIRED_EVIDENCE_INVALIDATED,
                          (chk.get("why") or chk.get("refusal") or "")[:200])
     status = await conn.execute(
@@ -636,6 +657,16 @@ LABEL_SQL = """
                bool_or(i.closed_reason = 'VOIDED_BY_THE_VENUE'
                        OR i.settlement ->> 'terminal_reading' = 'EXPLICIT_VOID')
                    AS any_leg_void,
+               -- A CONTESTED READING IS NO LABEL (migration 141). Once a
+               -- re-read of the leg's settlement has disagreed with what was
+               -- booked, the booked reading is not the venue's settled word,
+               -- so the group leaves the labelled set -- and a model whose
+               -- provenance names it stops reproducing, which is what
+               -- withdraws its approval.
+               bool_or(EXISTS (
+                   SELECT 1 FROM bettor_funded_settlement_rechecks rc
+                    WHERE rc.intent_id = i.intent_id
+                      AND rc.verdict = 'DISAGREES')) AS any_leg_contested,
                -- EACH LEG'S READING, which is the label's own version. It is
                -- bound into the training set's hash, so a corrected settlement
                -- after a fit makes the fit's records stop reproducing.
@@ -668,6 +699,8 @@ LABEL_SQL = """
        AND g.sides_known
        -- ── AND NO LEG WAS VOIDED ───────────────────────────────────
        AND NOT g.any_leg_void
+       -- ── OR HAS A SETTLEMENT THE VENUE HAS SINCE CONTRADICTED ────
+       AND NOT g.any_leg_contested
 """
 
 
@@ -889,7 +922,59 @@ async def fit_from_records(conn, *, through, model_key: str = KEY_MIDDLE,
     return dict(fitted, training_provenance=prov, n_events=lab["n_events"])
 
 
-async def verify_provenance(conn, model: dict) -> dict:
+def _hyper(estimator: str, params: dict) -> dict:
+    """The constructor arguments a stored model was fit with."""
+    if estimator == "RIDGE_LOGISTIC":
+        return {"l2": params.get("l2", 1.0)}
+    if estimator == "STUMPS":
+        return {"rounds": params.get("rounds_requested", 0),
+                "learning_rate": params.get("learning_rate", 0.1),
+                "min_leaf": params.get("min_leaf", 20),
+                "max_bins": params.get("max_bins", 32),
+                "l2": params.get("l2", 1.0)}
+    return {}
+
+
+def params_reproduce(model: dict, lab: dict) -> dict:
+    """REFIT THE NAMED RECORDS AND COMPARE: are these parameters what those
+    records produce? Deterministic kernel, same order, same weights -- so the
+    predictions on the training rows must agree to rounding."""
+    params = model.get("params") or {}
+    if isinstance(params, str):
+        params = json.loads(params)
+    est = str(model.get("estimator") or params.get("kind") or "")
+    if est == "BASE_RATE" or params.get("kind") == "BASE_RATE":
+        est = "BASE_RATE"
+    usable = [i for i in range(lab["n"])
+              if set(FEATURES) <= set((lab["rows"][i] or {}).keys())]
+    if not usable:
+        return {"ok": False, "refusal": R_PARAMS_NOT_FROM_THE_RECORDS,
+                "why": "no usable training row to refit"}
+    rows = [lab["rows"][i] for i in usable]
+    refit = fit(rows, [lab["labels"][i] for i in usable], estimator=est,
+                weights=event_weights([lab["fixtures"][i] for i in usable]),
+                **_hyper(est, params))
+    if not refit.get("ok", True) and refit.get("refusal"):
+        return {"ok": False, "refusal": R_PARAMS_NOT_FROM_THE_RECORDS,
+                "why": "the refit refused: %s" % refit.get("refusal")}
+    try:
+        stored, again = load(params), load(refit["params"])
+        worst = max(abs(float(stored.predict(r)) - float(again.predict(r)))
+                    for r in rows)
+    except Exception as exc:                                    # noqa: BLE001
+        return {"ok": False, "refusal": R_PARAMS_NOT_FROM_THE_RECORDS,
+                "why": "the comparison raised: %s" % type(exc).__name__}
+    if worst > 1e-9:
+        return {"ok": False, "refusal": R_PARAMS_NOT_FROM_THE_RECORDS,
+                "max_prediction_difference": worst,
+                "why": ("refitting the named records gives predictions that "
+                        "differ by up to %.3g, so these parameters were not "
+                        "fit on them" % worst)}
+    return {"ok": True, "max_prediction_difference": worst}
+
+
+async def verify_provenance(conn, model: dict, *,
+                            check_params: bool = False) -> dict:
     """RE-READ A RECORD-BOUND MODEL'S TRAINING SET AND RE-HASH IT.
 
     A corrected settlement, a changed vector or a missing decision after the
@@ -902,9 +987,17 @@ async def verify_provenance(conn, model: dict) -> dict:
     if prov.get("kind") != PROVENANCE_RECORDS:
         return {"ok": False, "refusal": R_TRAINING_NOT_BOUND_TO_RECORDS}
     ids = list(prov.get("decision_ids") or [])
-    lab = await labelled(conn, model_key=model.get("model_key") or KEY_MIDDLE,
-                         decision_ids=ids, source=source_of(model))
-    if not lab.get("ok") or lab["n"] != len(ids) or not ids:
+    try:
+        lab = await labelled(conn,
+                             model_key=model.get("model_key") or KEY_MIDDLE,
+                             decision_ids=ids, source=source_of(model))
+    except Exception as exc:                                    # noqa: BLE001
+        lab = {"ok": False, "error": type(exc).__name__}
+    if not lab.get("ok"):
+        return {"ok": False, "refusal": R_TRAINING_RECORDS_UNREADABLE,
+                "why": "the label read failed (%s)" % (
+                    lab.get("refusal") or lab.get("error"))}
+    if lab["n"] != len(ids) or not ids:
         return {"ok": False, "refusal": R_TRAINING_RECORDS_DO_NOT_REPRODUCE,
                 "why": "%d decision(s) named, %d still labelled"
                        % (len(ids), (lab or {}).get("n", 0))}
@@ -917,6 +1010,10 @@ async def verify_provenance(conn, model: dict) -> dict:
                 "why": ("the named decisions no longer carry the labels, "
                         "readings or vectors the fit was made from -- a "
                         "corrected settlement is one way that happens")}
+    if check_params:
+        pr = params_reproduce(model, lab)
+        if not pr.get("ok"):
+            return dict(pr, lab=lab, records=records)
     return {"ok": True, "records": records, "lab": lab}
 
 
@@ -959,7 +1056,8 @@ def _event_log_loss(obj, lab: dict) -> float:
 
 async def evidence_cohorts(conn, *, model_key: str, training_cutoff,
                            frozen_at, account_id: str | None = None,
-                           source: str = SOURCE_FUNDED) -> dict:
+                           source: str = SOURCE_FUNDED,
+                           holdout_sources=None) -> dict:
     """THE TWO KINDS OF EVIDENCE A MODEL CAN HAVE, KEPT APART.
 
       RETROSPECTIVE_OUT_OF_SAMPLE  decisions made after the training cutoff and
@@ -976,8 +1074,13 @@ async def evidence_cohorts(conn, *, model_key: str, training_cutoff,
                          account_id=account_id, source=source)
     if not lab.get("ok"):
         return {"ok": False, "refusal": lab.get("refusal")}
-    lab = _holdout(lab, await _fixtures_seen_through(conn, training_cutoff,
-                                                     source))
+    # HELD OUT FROM EVERY SOURCE A SCORED MODEL WAS FIT ON. The two sources
+    # share one fixture namespace, so a fixture an incumbent trained on in
+    # the OTHER source is in-sample for it here (review of 599076c).
+    seen: set = set()
+    for src in (holdout_sources or (source,)):
+        seen |= await _fixtures_seen_through(conn, training_cutoff, src)
+    lab = _holdout(lab, seen)
     fz = _epoch(frozen_at)
     retro = _subset(lab, [i for i in range(lab["n"])
                           if lab["decided_at"][i] <= fz])
@@ -1001,7 +1104,10 @@ def _cohort_report(obj, cohort: dict, *, baseline_rate, kind: str,
     rep = M.report(preds, cohort["labels"],
                    weights=event_weights(cohort["fixtures"]),
                    baseline_rate=baseline_rate, label=label)
-    rep["clustered_by_fixture"] = M.clustered_jackknife(
+    # THE CLUSTERED JACKKNIFE deletes one fixture at a time but scores the
+    # remaining ROWS unweighted, so it is the decision-weighted statistic's
+    # uncertainty, and named that -- not the event-balanced figure's.
+    rep["clustered_by_fixture_decision_weighted"] = M.clustered_jackknife(
         preds, cohort["labels"], cohort["fixtures"],
         M.skill_stat(baseline_rate))
     per_row = M.report(preds, cohort["labels"], baseline_rate=baseline_rate)
@@ -1065,6 +1171,7 @@ async def evaluate(conn, *, model_id: str, account_id: str | None = None,
                           coh[EVIDENCE_PROSPECTIVE]) for d in c["decided_at"]
               if d <= cut]
     doc = {"weighting": WEIGHTING_EVENT_BALANCED,
+           "evaluated_at": at,
            "record_source": source_of(mdl),
            "training_cutoff_epoch_s": cut,
            "frozen_at_epoch_s": mdl["created_at"].timestamp(),
@@ -1128,9 +1235,13 @@ async def compare_on_common_cohort(conn, *, candidate: dict,
     # THE CANDIDATE'S SOURCE decides the cohort, and BOTH models are scored on
     # it: the features are the same whichever source a model was fit on.
     out["record_source"] = source_of(candidate)
+    sources = tuple(sorted({source_of(candidate)} | (
+        {source_of(incumbent)} if incumbent is not None else set())))
+    out["held_out_from_sources"] = list(sources)
     coh = await evidence_cohorts(conn, model_key=candidate["model_key"],
                                  training_cutoff=cutoff, frozen_at=freeze,
-                                 source=source_of(candidate))
+                                 source=source_of(candidate),
+                                 holdout_sources=sources)
     if not coh.get("ok"):
         return dict(out, ok=False, refusal=coh.get("refusal"))
     lab = coh[EVIDENCE_PROSPECTIVE]
@@ -1232,7 +1343,7 @@ async def promote(conn, *, model_id: str, approved_by: str,
         return dict(out, ok=False, refusal=R_EVALUATION_NOT_PROSPECTIVE,
                     contamination=ev.get("contamination"))
     # ── THE TRAINING SET MUST STILL BE WHAT IT WAS FIT ON ───────────
-    ver = await verify_provenance(conn, cand)
+    ver = await verify_provenance(conn, cand, check_params=True)
     if not ver.get("ok"):
         return dict(out, ok=False, refusal=ver["refusal"],
                     why=ver.get("why"),
@@ -1324,10 +1435,11 @@ async def rollback(conn, *, to_model_id: str, reason: str) -> dict:
     # -- by a corrected settlement, say -- was restored and served by
     # `approved`. "Stood behind once" was a judgement about those records; it
     # does not survive them changing.
-    chk = await verify_provenance(conn, target)
+    chk = await verify_provenance(conn, target, check_params=True)
     if not chk.get("ok"):
         return dict(out, ok=False,
-                    refusal=R_TRAINING_RECORDS_DO_NOT_REPRODUCE,
+                    refusal=chk.get("refusal")
+                    or R_TRAINING_RECORDS_DO_NOT_REPRODUCE,
                     verification={k: v for k, v in chk.items()
                                   if k not in ("records", "lab")},
                     why=("%r was fit on records that no longer reproduce, so "
@@ -1515,6 +1627,13 @@ async def _generate_locked(conn, *, at: float, out: dict, model_key: str,
         estimator=estimator, windows=out["windows"], source=source)
     if not fitted.get("ok"):
         return dict(out, ok=False, refusal=fitted.get("refusal"))
+    # THE BAR ON WHAT THE FIT USED, not on the plan's count: rows whose vector
+    # lacks a model feature are excluded by the fit, and a plan of 40 fixtures
+    # can fit on fewer.
+    if int(fitted.get("n_events") or 0) < MIN_TRAIN_EVENTS:
+        return dict(out, ok=True, reason="TOO_FEW_TRAINING_EVENTS",
+                    required=MIN_TRAIN_EVENTS,
+                    fitted_events=fitted.get("n_events"))
     sha = fitted["training_provenance"]["records_sha"]
     tag = estimator.lower() if source == SOURCE_FUNDED \
         else "obs-" + estimator.lower()

@@ -81,6 +81,12 @@ R_ACCOUNT_UNKNOWN = "ACCOUNT_ID_NOT_IN_THE_CANONICAL_REGISTRY"
 R_ACCOUNT_NOT_ACTIVE = "ACCOUNT_IS_NOT_ACTIVE"
 R_ACCOUNT_PAUSED = "ACCOUNT_IS_PAUSED"
 R_ACCOUNTING_UNCERTAIN = "ACCOUNT_ACCOUNTING_IS_NOT_RESOLVED"
+#: A SETTLED LEG'S BOOKED READING IS CONTRADICTED BY THE VENUE NOW (141). The
+#: account's realised figures rest on a reading the venue no longer gives, so
+#: it takes no new exposure until that is resolved; exits are never gated.
+R_SETTLEMENT_CONTESTED = "A_BOOKED_SETTLEMENT_IS_CONTRADICTED_BY_THE_VENUE"
+R_SETTLEMENT_RECHECKS_UNREADABLE = \
+    "THE_SETTLEMENT_RECHECK_RECORD_COULD_NOT_BE_READ"
 R_VENUE_UNKNOWN = "VENUE_CLASS_NOT_ESTABLISHED"
 R_LIMITS_MISSING = "LIMIT_SET_INCOMPLETE"
 R_LIMITS_NOT_APPROVED = "LIMIT_SET_NOT_APPROVED_BY_THE_OWNER"
@@ -324,8 +330,43 @@ async def account_selection(conn, account_id: str) -> dict:
                     accounting_detail=acct.get("accounting_detail"),
                     why=("an account whose accounting is %s cannot fund "
                          "trading. UNKNOWN is not clean" % st))
+    # ── NO BOOKED SETTLEMENT THE VENUE NOW CONTRADICTS ──────────────
+    #
+    # The NEWEST ESTABLISHED re-read per leg decides: a venue that reverts to
+    # the booked reading clears it; a re-read that established nothing
+    # changes nothing. An unreadable record refuses -- unknown is not clean.
+    try:
+        contested = [dict(r) for r in await conn.fetch(CONTESTED_SQL, ident)]
+    except Exception as exc:                                   # noqa: BLE001
+        return dict(out, ok=False, refusal=R_SETTLEMENT_RECHECKS_UNREADABLE,
+                    unreadable=type(exc).__name__,
+                    why=("whether a booked settlement is contradicted could "
+                         "not be read, so it is not known to be clean"))
+    if contested:
+        return dict(out, ok=False, refusal=R_SETTLEMENT_CONTESTED,
+                    contested=[{k: (str(v) if v is not None else None)
+                                for k, v in c.items()} for c in contested],
+                    why=("%d settled leg(s) were booked on a reading the "
+                         "venue no longer gives. The booked figures are not "
+                         "rewritten by a re-read; until they are reconciled "
+                         "this account takes no new exposure. Exits are not "
+                         "gated on this" % len(contested)))
     return dict(out, ok=True, account_id=ident,
                 accounting_status=st)
+
+
+#: Legs of this account whose newest ESTABLISHED settlement re-read disagrees
+#: with what was booked (migration 141).
+CONTESTED_SQL = """
+    SELECT intent_id, booked_reading, booked_payout_price, venue_reading,
+           venue_payout_price, read_at
+      FROM (SELECT DISTINCT ON (r.intent_id) r.*
+              FROM bettor_funded_settlement_rechecks r
+              JOIN bettor_funded_intents i ON i.intent_id = r.intent_id
+             WHERE i.account_id = $1 AND r.verdict <> 'NOT_ESTABLISHED'
+             ORDER BY r.intent_id, r.read_at DESC, r.recheck_id DESC) newest
+     WHERE verdict = 'DISAGREES'
+"""
 
 
 # ── 2 · READINESS, DERIVED FROM EVIDENCE ────────────────────────────

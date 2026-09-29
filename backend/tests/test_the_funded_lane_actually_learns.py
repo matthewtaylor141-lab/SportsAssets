@@ -965,6 +965,113 @@ async def test_a_corrected_settlement_withdraws_an_approval_and_nothing_restores
         await conn.close()
 
 
+@pytest.mark.asyncio
+async def test_parameters_not_fit_on_the_named_records_are_refused():
+    """RECORD-BOUND MEANS THE ARITHMETIC TOO, not only the list of records.
+
+    Review of 599076c: `register` re-hashed the named records and never asked
+    whether the PARAMETERS were what those records fit. `fit()` on other rows
+    with a RECORDS provenance copied onto it registered as record-bound and
+    could be promoted. Now the records are refit (the kernel is
+    deterministic) and the predictions compared; the untouched fit is the
+    positive control."""
+    asyncpg = pytest.importorskip("asyncpg")
+    conn = await asyncpg.connect(DSN)
+    try:
+        await _clean(conn)
+        rows, labels = _synthetic(60)
+        t_fit = datetime.now(timezone.utc)
+        honest = await _fit_on_records(conn, rows=rows, labels=labels,
+                                       before=t_fit, base=5200,
+                                       account=ACCT_LOW)
+        # ── OTHER ROWS' ARITHMETIC, THE RECORDS' PROVENANCE ───────────
+        other_rows, other_labels = _synthetic(90)
+        other = FMD.fit(other_rows, [1.0 - y for y in other_labels],
+                        estimator="RIDGE_LOGISTIC")
+        assert other["ok"], other
+        forged = dict(honest, params=other["params"])
+        got = await FMD.register(conn, model_id="mdl:forged",
+                                 model_version="v-forged", fitted=forged,
+                                 fit_through=t_fit)
+        assert got["ok"] is False, got
+        assert got["refusal"] == FMD.R_PARAMS_NOT_FROM_THE_RECORDS, got
+        assert await conn.fetchval(
+            "SELECT count(*) FROM bettor_funded_models WHERE model_id=$1",
+            "mdl:forged") == 0
+        # ── ONE COEFFICIENT NUDGED IS ALSO NOT THE FIT ─────────────────
+        nudged_params = json.loads(json.dumps(honest["params"]))
+        nudged_params["coef"][0] = float(nudged_params["coef"][0]) + 1e-3
+        got = await FMD.register(conn, model_id="mdl:nudged",
+                                 model_version="v-nudged",
+                                 fitted=dict(honest, params=nudged_params),
+                                 fit_through=t_fit)
+        assert got["refusal"] == FMD.R_PARAMS_NOT_FROM_THE_RECORDS, got
+        # ── THE POSITIVE CONTROL ──────────────────────────────────────
+        ok = await FMD.register(conn, model_id="mdl:honest",
+                                model_version="v-honest", fitted=honest,
+                                fit_through=t_fit)
+        assert ok["ok"] is True, ok
+        pr = FMD.params_reproduce(
+            {"params": honest["params"], "estimator": "RIDGE_LOGISTIC"},
+            await FMD.labelled(conn, model_key=KEY, decision_ids=list(
+                honest["training_provenance"]["decision_ids"])))
+        assert pr["ok"] is True and pr["max_prediction_difference"] <= 1e-9
+    finally:
+        await _clean(conn)
+        await conn.close()
+
+
+@pytest.mark.asyncio
+async def test_a_record_read_failure_suspends_pricing_but_does_not_withdraw(
+        monkeypatch):
+    """NOT ESTABLISHED IS NOT INVALIDATED.
+
+    A read that fails cannot vouch for an approval, so `approved` refuses to
+    price on it -- but the scheduled pass must not turn a transient failure
+    into a permanent retirement only a person can undo. It retires only when
+    the records were READ and did not reproduce (the test above)."""
+    asyncpg = pytest.importorskip("asyncpg")
+    conn = await asyncpg.connect(DSN)
+    try:
+        await _clean(conn)
+        rows, _ = _synthetic(50)
+        t_fit = datetime.now(timezone.utc)
+        fitted = await _fit_on_records(
+            conn, rows=rows, labels=[0.0] * 45 + [1.0] * 5, before=t_fit,
+            base=5400, account=ACCT_LOW, estimator="BASE_RATE")
+        await FMD.register(conn, model_id="mdl:unread", model_version="v-u",
+                           fitted=fitted, fit_through=t_fit)
+        await conn.execute(
+            "UPDATE bettor_funded_models SET state='APPROVED', "
+            "  approved_at=now(), approved_by='owner@test', "
+            "  evaluation='{\"log_loss\": 0.5}'::jsonb WHERE model_id=$1",
+            "mdl:unread")
+        assert (await FMD.approved(conn, model_key=KEY))["ok"] is True
+
+        async def _unreadable(*a, **k):
+            raise ConnectionError("the ledger read failed")
+        real = FMD.labelled
+        monkeypatch.setattr(FMD, "labelled", _unreadable)
+        refused = await FMD.approved(conn, model_key=KEY)
+        assert refused["ok"] is False
+        assert refused["refusal"] == FMD.R_APPROVED_MODEL_EVIDENCE_INVALIDATED
+        assert refused["verification"]["refusal"] == \
+            FMD.R_TRAINING_RECORDS_UNREADABLE
+        w = await FMD.withdraw_invalidated(conn, model_key=KEY)
+        assert w["ok"] is True and w["withdrawn"] is False, w
+        assert w["not_withdrawn_because"] == FMD.R_TRAINING_RECORDS_UNREADABLE
+        assert await conn.fetchval(
+            "SELECT state FROM bettor_funded_models WHERE model_id=$1",
+            "mdl:unread") == "APPROVED"
+        # ── THE READ RECOVERS; SO DOES PRICING, WITH NO ONE RE-APPROVING ──
+        monkeypatch.setattr(FMD, "labelled", real)
+        back = await FMD.approved(conn, model_key=KEY)
+        assert back["ok"] is True and back["provenance_verified"] is True
+    finally:
+        await _clean(conn)
+        await conn.close()
+
+
 def test_the_module_says_what_a_good_score_cannot_say():
     d = FMD.describe()
     assert "would have made money" in d["what_a_good_score_does_not_say"]

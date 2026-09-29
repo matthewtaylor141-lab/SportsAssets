@@ -4477,7 +4477,11 @@ async def observation_quote(slug, side, *, now=None) -> dict:
     if ts not in (None, bs.NOT_IDENTIFIED):
         dt = _stream_parse_ts(ts)
         vt = None if dt is None else dt.timestamp()
-    currency = vc.evaluate(now=float(now if now is not None else read_at),
+    # THE VERDICT INSTANT IS NEVER BEFORE THE READ. A pass hands every read
+    # the instant it began; judging a book received minutes later at that
+    # instant understates its age (review of 599076c).
+    currency = vc.evaluate(now=max(float(now if now is not None else read_at),
+                                   read_at),
                            observation=book.get("http_observation"),
                            subscription=None, revalidation=None, venue_ts=vt,
                            our_receipt_at=read_at,
@@ -5021,6 +5025,19 @@ async def _funded_service(conn, *, now):
     except Exception as exc:                                   # noqa: BLE001
         got["investigations"] = {
             "ok": False, "refusal": "FUNDED_INVESTIGATION_RAISED",
+            "error": "%s: %s" % (type(exc).__name__, str(exc)[:200])}
+    # ── AND WHAT WAS ALREADY SETTLED, RE-READ (migration 141) ────────
+    #
+    # BEFORE the pair pass and the learning pass, so a correction found here
+    # is what both of them see this cycle: the contested group is no longer a
+    # label (the learning pass withdraws a model trained on it) and the
+    # account takes no new exposure. A read; it rewrites no accounting.
+    try:
+        got["settlement_rechecks"] = await _FM.recheck_settlements(
+            conn, account_id=account_id, venue=venue, now=now)
+    except Exception as exc:                                   # noqa: BLE001
+        got["settlement_rechecks"] = {
+            "ok": False, "refusal": "FUNDED_SETTLEMENT_RECHECK_RAISED",
             "error": "%s: %s" % (type(exc).__name__, str(exc)[:200])}
     try:
         from .. import bettor_funded_pair_cycle as _PC

@@ -7,7 +7,9 @@
 # the adapter, the book, reservations, recovery, management, exits, settlement,
 # the hedge decision and its admission record), the scheduled loop that drives
 # it (every file importing workers/ext_pinnacle_loop), the empty-book
-# lifecycle, the learning registry, and the gate tools themselves.
+# lifecycle, the learning registry, and the gate tools themselves -- and
+# (review of 599076c) the account-exposure, acquisition-boundary,
+# partial-loss and matched-slice proofs for modules the repair changed.
 #
 # WHAT IS NOT, AND WHY: test_e25_exit_confirm.py, test_e29_hand_exit.py, test_e5_frozen_exits.py, test_render_ops_exits_band.py, test_render_ops_exits_paired.py, test_render_ops_flow_books.py, test_render_ops_paired_ratio.py.
 # They pin the wording and ordering of manual-lane ops presets in the
@@ -17,6 +19,10 @@
 tests/test_a_candidate_identity_carries_its_side.py
 tests/test_a_filled_order_is_not_a_closed_position.py
 tests/test_a_lost_acknowledgement_is_investigated_and_resolved_by_an_audited_decision.py
+tests/test_a_partial_loss_actually_stops_new_exposure.py
+tests/test_a_settlement_the_venue_corrects_is_seen_and_withdraws_what_rested_on_it.py
+tests/test_account_exposure_is_not_lane_exposure.py
+tests/test_account_exposure_reaches_enforcement.py
 tests/test_account_onboarding_is_earned.py
 tests/test_acquisition_ladder_is_side_aware.py
 tests/test_admission_control.py
@@ -83,6 +89,7 @@ tests/test_refused_exit_is_held.py
 tests/test_reserved_capital_is_counted_exactly_once.py
 tests/test_rn1x_model_loop.py
 tests/test_run832_admission.py
+tests/test_selection_is_not_eligibility.py
 tests/test_settlement_attestation.py
 tests/test_settlement_census_decomposition.py
 tests/test_settlement_dating.py
@@ -97,6 +104,7 @@ tests/test_standby_does_not_erase_the_writer.py
 tests/test_stranded_exit_reaper.py
 tests/test_the_acceptance_harness_picks_a_usable_fixture.py
 tests/test_the_account_read_refuses_what_it_cannot_measure.py
+tests/test_the_acquisition_is_counted_once_at_the_boundary.py
 tests/test_the_admission_policy_is_off_and_bounded.py
 tests/test_the_audit_findings_are_closed.py
 tests/test_the_book_starts_empty_and_the_schedule_fills_it.py
@@ -127,6 +135,7 @@ tests/test_the_latency_levers_are_wired_and_measured.py
 tests/test_the_odds_quote_can_be_refreshed_before_it_goes_stale.py
 tests/test_the_pairing_model_bootstraps_from_non_funded_observations.py
 tests/test_the_pairing_panel_never_sums_the_books.py
+tests/test_the_position_is_not_the_matched_slice.py
 tests/test_the_position_manager_actually_decides.py
 tests/test_the_production_connection_is_correct.py
 tests/test_the_prospective_learning_path_promotes_or_rejects.py

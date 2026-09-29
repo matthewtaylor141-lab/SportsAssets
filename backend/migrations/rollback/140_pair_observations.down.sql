@@ -14,3 +14,4 @@ DROP TABLE IF EXISTS bettor_pair_observation_labels;
 DROP TABLE IF EXISTS bettor_pair_observations;
 DROP FUNCTION IF EXISTS bettor_pair_observation_label_is_append_only();
 DROP FUNCTION IF EXISTS bettor_pair_observation_is_fixed();
+DROP FUNCTION IF EXISTS bettor_pair_observation_version_has_history();

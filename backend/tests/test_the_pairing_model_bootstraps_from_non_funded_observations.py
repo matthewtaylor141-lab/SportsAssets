@@ -201,8 +201,10 @@ async def test_the_label_is_both_sides_won_read_from_both_settlements():
         got = await PO.label_pending(conn, now=NOW + 10, settlement_reader=
                                      _settlements({HW.HELD: 1.0}))
         assert got["awaiting"] >= 1 and got["labelled"] == 0
-        # BOTH SETTLED, BOTH OBSERVED SIDES WON
-        got = await PO.label_pending(conn, now=NOW + 20, settlement_reader=
+        # BOTH SETTLED, BOTH OBSERVED SIDES WON -- read when the pair is
+        # next due, and stamped with the instant it was read
+        t2 = NOW + 10 + PO.REREAD_AFTER_S + 10
+        got = await PO.label_pending(conn, now=t2, settlement_reader=
                                      _settlements({HW.HELD: 1.0,
                                                    HW.SIB: _pays(hs, True)}))
         assert got["labelled"] >= 1, got
@@ -211,10 +213,10 @@ async def test_the_label_is_both_sides_won_read_from_both_settlements():
             oid))
         assert r["label_status"] == PO.LABELLED and r["middle_occurred"] is True
         assert r["primary_won"] is True and r["hedge_won"] is True
-        assert r["outcome_available_at"].timestamp() == pytest.approx(NOW + 20)
+        assert t2 <= r["outcome_available_at"].timestamp() < t2 + 5
         assert r["label_version"] == 1
         # THE VENUE CORRECTS THE HEDGE'S SETTLEMENT: a new version, with history
-        got = await PO.label_pending(conn, now=NOW + 30, settlement_reader=
+        got = await PO.label_pending(conn, now=t2 + 10, settlement_reader=
                                      _settlements({HW.HELD: 1.0,
                                                    HW.SIB: _pays(hs, False)}))
         assert got["corrected"] >= 1, got
@@ -239,7 +241,11 @@ async def test_the_label_is_both_sides_won_read_from_both_settlements():
                 " hedge_won=true WHERE observation_id=$1", oid)
 
 
-async def test_a_push_or_void_is_not_a_label_and_a_short_side_wins_at_zero():
+async def test_a_push_is_not_both_won_as_funded_counts_it_and_a_void_is_no_label():
+    """ONE LABEL DEFINITION ACROSS SOURCES (review of 599076c). The funded
+    LABEL_SQL counts a pushed leg as a leg that did not win and keeps the
+    group; dropping pushes here made an observation model estimate
+    P(both win | no push), consumed as the unconditional p_middle."""
     async with _conn() as conn:
         await _clean(conn)
         await HW._catalogue(conn)
@@ -247,6 +253,27 @@ async def test_a_push_or_void_is_not_a_label_and_a_short_side_wins_at_zero():
         got = await PO.label_pending(conn, now=NOW + 20, settlement_reader=
                                      _settlements({HW.HELD: 1.0,
                                                    HW.SIB: 0.5}))
+        assert got["labelled"] >= 1, got
+        r = await conn.fetchrow(
+            "SELECT label_status, middle_occurred, hedge_won, label_why FROM "
+            " bettor_pair_observations WHERE observation_id=$1",
+            row["observation_id"])
+        assert r["label_status"] == PO.LABELLED
+        assert r["middle_occurred"] is False and r["hedge_won"] is False
+        assert r["label_why"] == PO.WHY_PUSH
+        lab = await PO.labelled(conn, ids=[row["observation_id"]])
+        assert lab["pushes"] == [True] and lab["labels"] == [0.0]
+    async with _conn() as conn:
+        await _clean(conn)
+        await HW._catalogue(conn)
+        row = await _one(conn)
+
+        def _void(slug):
+            if slug == HW.SIB:
+                return {"status": PO.VOID, "settlement_price": None}
+            return {"status": LR.RESOLVED, "settlement_price": 1.0}
+        got = await PO.label_pending(conn, now=NOW + 20,
+                                     settlement_reader=_void)
         assert got["not_a_label"] >= 1, got
         r = await conn.fetchrow(
             "SELECT label_status, middle_occurred, label_why FROM "
@@ -254,11 +281,59 @@ async def test_a_push_or_void_is_not_a_label_and_a_short_side_wins_at_zero():
             row["observation_id"])
         assert r["label_status"] == PO.NOT_A_LABEL
         assert r["middle_occurred"] is None
-        assert r["label_why"] == PO.WHY_PUSH_OR_VOID
+        assert r["label_why"] == PO.WHY_VOID
+    # RESOLVED WITH NO PRICE WAITS -- it is not recorded as a push
+    row = {"primary_side": LONG, "hedge_side": SHORT}
+    got = PO.label_from(row, {"status": LR.RESOLVED, "settlement_price": 1.0},
+                        {"status": LR.RESOLVED, "settlement_price": None,
+                         "outcome": "Panthers"})
+    assert got["status"] == PO.AWAITING, got
+    assert got["why"].startswith("RESOLVED_WITHOUT_A_SETTLEMENT_PRICE")
     # side-awareness, as a pure rule
     assert PO.won(LONG, 1.0) is True and PO.won(LONG, 0.0) is False
     assert PO.won(SHORT, 0.0) is True and PO.won(SHORT, 1.0) is False
-    assert PO.won(LONG, 0.5) is None and PO.won(SHORT, None) is None
+    assert PO.won(LONG, 0.5) is False and PO.won(SHORT, 0.5) is False
+    assert PO.won(SHORT, None) is None
+
+
+def test_the_production_label_reads_what_a_funded_leg_closes_on(monkeypatch):
+    """THE SAME BAR AS A FUNDED LABEL: the settlement probe
+    `reconcile_settlement` closes a funded position on. Its REPORTED reading
+    is the endpoint's price CORROBORATED against the venue's own long side
+    (a contradiction is UNREADABLE), and it tells a declared void apart --
+    which the bare endpoint cannot."""
+    from sportsassets import bettor_venue_settlement_probe as SP
+    calls = []
+    answers = {
+        "a-contradicted": {"terminal_reading": "UNREADABLE",
+                           "reader_verdict": {"status": LR.UNREADABLE,
+                                              "corroboration": "CONTRADICTED"}},
+        "a-settled": {"terminal_reading": "REPORTED_SETTLEMENT",
+                      "reader_verdict": {"status": LR.RESOLVED,
+                                         "corroboration": "CORROBORATED",
+                                         "settlement_price": 1.0}},
+        "a-void": {"terminal_reading": "EXPLICIT_VOID", "reader_verdict": {}},
+        "an-inference": {"terminal_reading": "CONVERGED_PRICE_INFERENCE",
+                         "reader_verdict": {"status": "RESOLVED_DERIVED"}},
+    }
+    monkeypatch.setattr(LR, "read_settlement", lambda c, s: calls.append(
+        ("bare", s)) or {"status": LR.RESOLVED, "settlement_price": 1.0})
+    monkeypatch.setattr(SP, "probe", lambda c, s: calls.append(
+        ("probe", s)) or answers[s])
+    got = {k: PO._real_production_settlement(k) for k in answers}
+    assert calls == [("probe", k) for k in answers], calls
+    assert got["a-settled"]["status"] == LR.RESOLVED
+    assert got["a-settled"]["settlement_price"] == 1.0
+    assert got["a-void"]["status"] == PO.VOID
+    ok = {"status": LR.RESOLVED, "settlement_price": 1.0}
+    row = {"primary_side": LONG, "hedge_side": LONG}
+    # a contradicted read, and our own inference, label nothing
+    assert PO.label_from(row, got["a-contradicted"], ok)["status"] == \
+        PO.AWAITING
+    assert PO.label_from(row, got["an-inference"], ok)["status"] == \
+        PO.AWAITING
+    assert PO.label_from(row, got["a-void"], ok)["status"] == PO.NOT_A_LABEL
+    assert PO.label_from(row, got["a-settled"], ok)["status"] == PO.LABELLED
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -453,3 +528,150 @@ async def test_the_labeller_rotates_so_nothing_is_starved():
                                    recheck=0, settlement_reader=reader)
         primaries = sorted({s for s in reads if "-p-" in s})
         assert len(primaries) == 9, primaries
+
+
+async def test_new_observations_cannot_starve_the_re_reads():
+    """UNDER INFLOW (review of 599076c). Every pass inserts new, never-read
+    pairs; with them always first, a pair read once was never read again and
+    so never labelled. Now pairs already read and due again keep at least
+    (1 - FRESH_SHARE) of the budget however many new pairs arrive."""
+    async with _conn() as conn:
+        await _clean(conn)
+        await _cohort(conn, n=4, first_at=NOW, prefix="obold")
+        reads: list = []
+
+        def reader(slug):
+            reads.append(slug)
+            return {"status": LR.PENDING, "settlement_price": None}
+        await PO.label_pending(conn, now=NOW + 100, limit=4, recheck=0,
+                               settlement_reader=reader)
+        assert len({s for s in reads if s.startswith("obold-p-")}) == 4
+        # TEN NEW PAIRS ARRIVE; the four old ones are due again
+        await _cohort(conn, n=10, first_at=NOW + 200, prefix="obnew")
+        reads.clear()
+        got = await PO.label_pending(
+            conn, now=NOW + 100 + PO.REREAD_AFTER_S + 1, limit=4, recheck=0,
+            settlement_reader=reader)
+        assert got["pairs_selected"] == {"never_read": 2, "read_before": 2}
+        assert len({s for s in reads if s.startswith("obold-p-")}) == 2
+        assert len({s for s in reads if s.startswith("obnew-p-")}) == 2
+    # the split, as a pure rule
+    assert PO.split_budget(10, 0, 4) == (4, 0)   # nothing else due
+    assert PO.split_budget(10, 10, 4) == (2, 2)
+    assert PO.split_budget(0, 10, 4) == (0, 4)
+    assert PO.split_budget(1, 10, 4) == (1, 3)
+
+
+async def test_every_label_column_is_versioned_and_won_is_the_side_at_its_price():
+    """140's trigger versions EVERY label column, keeps the version moving only
+    with the label, and demands a history row per version at commit; a CHECK
+    ties `won` to side and price."""
+    async with _conn() as conn:
+        await _clean(conn)
+        _, prices = await _cohort(conn, n=1, first_at=NOW, prefix="obtrg")
+        await _label(conn, prices, at=NOW + 50)
+        oid = await conn.fetchval(
+            "SELECT observation_id FROM bettor_pair_observations "
+            " WHERE fixture='obtrg-fx-0'")
+        for sql in (
+                # a label column changed without a version
+                "UPDATE bettor_pair_observations SET label_why='x' "
+                " WHERE observation_id=$1",
+                # the version moved without the label
+                "UPDATE bettor_pair_observations SET label_version="
+                " label_version-1 WHERE observation_id=$1",
+                # frozen fields
+                "UPDATE bettor_pair_observations SET source='OTHER' "
+                " WHERE observation_id=$1",
+                "UPDATE bettor_pair_observations SET taxonomy='OTHER' "
+                " WHERE observation_id=$1"):
+            with pytest.raises(asyncpg.exceptions.RaiseError):
+                await conn.execute(sql, oid)
+        # won that is not the side at its price
+        with pytest.raises(asyncpg.exceptions.CheckViolationError):
+            await conn.execute(
+                "UPDATE bettor_pair_observations SET primary_won=false, "
+                " middle_occurred=false, label_version=label_version+1 "
+                " WHERE observation_id=$1", oid)
+        # a new version with no history row fails at commit
+        with pytest.raises(asyncpg.exceptions.RaiseError):
+            async with conn.transaction():
+                await conn.execute(
+                    "UPDATE bettor_pair_observations SET label_why='y', "
+                    " label_version=label_version+1 WHERE observation_id=$1",
+                    oid)
+
+
+async def test_the_pass_is_bounded_in_time_and_rotates_its_candidates():
+    async with _conn() as conn:
+        await _clean(conn)
+        got = await PO.observation_pass(
+            conn, candidates=[("a-slug", LONG), ("b-slug", LONG)],
+            quoter=None, prose_reader=None, now=NOW, budget_s=0.0,
+            settlement_reader=lambda s: {"status": LR.PENDING})
+        assert got["ok"] is True
+        assert got["stopped_for_deadline"] is True
+        assert got["observed"] == [] and got["not_observed_this_pass"] == 2
+    seen = []
+
+    async def _fake_observe(conn, *, us_market_slug, side, **k):
+        seen.append(us_market_slug)
+        return {"ok": True, "us_market_slug": us_market_slug}
+    import sportsassets.bettor_pair_observations as mod
+    real = mod.observe_candidate
+    mod.observe_candidate = _fake_observe
+    try:
+        async with _conn() as conn:
+            for _ in range(3):
+                await PO.observation_pass(
+                    conn, candidates=[("a", LONG), ("b", LONG), ("c", LONG),
+                                      ("d", LONG)],
+                    quoter=None, prose_reader=None, now=NOW, per_pass=1,
+                    settlement_reader=lambda s: {"status": LR.PENDING})
+    finally:
+        mod.observe_candidate = real
+    assert len(set(seen)) == 3, seen
+
+
+async def test_a_mixed_source_comparison_holds_out_both_sources_fixtures():
+    """A fixture the FUNDED incumbent trained on is in-sample for it even
+    when it appears only later among observations; the common cohort drops it
+    (review of 599076c)."""
+    from tests import test_the_funded_lane_actually_learns as LRN
+    from datetime import datetime as _d, timezone as _z
+    async with _conn() as conn:
+        await _clean(conn)
+        await LRN._clean(conn)
+        try:
+            cut = _d.fromtimestamp(NOW, _z.utc)
+            # a funded decision on fixture F, before the cutoff
+            await LRN._resolved_decision(
+                conn, i=7700, decided_at=_d.fromtimestamp(NOW - 7200, _z.utc),
+                middle_occurred=True, features=LRN._synthetic(1)[0][0])
+            fx = "fx-learns-7700"
+            # an observation on the same fixture, after the cutoff
+            await PO.record(
+                conn, fixture=fx, admitted={"structure": _structure(2),
+                                            "taxonomy": "MIDDLE",
+                                            "condition_id": "h#" + LONG},
+                held_leg=_Leg("p#" + LONG), primary_slug="obmix-p",
+                primary_side=LONG, hedge_slug="obmix-h", hedge_side=LONG,
+                primary_cost_cents=55, hedge_cost_cents=31,
+                overtime_included=True, price_basis={"test": True},
+                at=NOW + 600)
+            await _label(conn, {"obmix-p": 1.0, "obmix-h": 1.0},
+                         at=NOW + 900)
+            only = await FMD.evidence_cohorts(
+                conn, model_key=FMD.KEY_MIDDLE, training_cutoff=cut,
+                frozen_at=cut, source=FMD.SOURCE_OBSERVATIONS)
+            both = await FMD.evidence_cohorts(
+                conn, model_key=FMD.KEY_MIDDLE, training_cutoff=cut,
+                frozen_at=cut, source=FMD.SOURCE_OBSERVATIONS,
+                holdout_sources=(FMD.SOURCE_FUNDED,
+                                 FMD.SOURCE_OBSERVATIONS))
+            pros = FMD.EVIDENCE_PROSPECTIVE
+            assert fx in only[pros]["fixtures"]
+            assert fx not in both[pros]["fixtures"]
+            assert fx in both["dropped_fixtures"]
+        finally:
+            await LRN._clean(conn)

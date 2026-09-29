@@ -663,12 +663,22 @@ def check_the_worst_case(decision: dict, *, observed=None,
     return res
 
 
-async def unjoined(conn, *, limit: int = 100) -> list[dict]:
+async def unjoined(conn, *, limit: int = 100,
+                   account_id: str | None = None) -> list[dict]:
     """DECISIONS WHOSE OUTCOME IS NOT YET KNOWN. What a scoring pass iterates,
-    and what a restart picks up."""
+    and what a restart picks up.
+
+    THE ACCOUNT IS FILTERED BEFORE THE LIMIT. Filtering the first `limit`
+    rows afterwards let another account's older backlog take the whole page,
+    so this account's decisions were never examined."""
+    if account_id is None:
+        return [_row(r) for r in await conn.fetch(
+            "SELECT * FROM bettor_funded_decisions WHERE NOT realised_known "
+            " ORDER BY decided_at LIMIT $1", int(limit))]
     return [_row(r) for r in await conn.fetch(
         "SELECT * FROM bettor_funded_decisions WHERE NOT realised_known "
-        " ORDER BY decided_at LIMIT $1", int(limit))]
+        "   AND account_id = $2 ORDER BY decided_at LIMIT $1", int(limit),
+        str(account_id))]
 
 
 async def score(conn, *, account_id: str | None = None,

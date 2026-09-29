@@ -365,4 +365,18 @@ def _no_observation_reads_from_tests(monkeypatch):
     monkeypatch.setattr(loop, "_real_observation_quote",
                         loop.observation_quote, raising=False)
     monkeypatch.setattr(loop, "observation_quote", _no_book)
+    monkeypatch.setattr(po, "_real_production_settlement",
+                        po._production_settlement, raising=False)
     monkeypatch.setattr(po, "_production_settlement", _no_settlement)
+    # THE FUNDED SETTLEMENT RE-READ (migration 141) runs inside every funded
+    # servicing pass; a test that drives it without its own probe records a
+    # re-read that established nothing, never a disagreement.
+    from sportsassets import bettor_funded_management as fm
+
+    def _no_recheck(client, slug):
+        return {"terminal_reading": "UNREADABLE",
+                "why": "NO_SETTLEMENT_RECHECK_READ_FROM_TESTS"}
+
+    monkeypatch.setattr(fm, "_real_settlement_probe", fm._settlement_probe,
+                        raising=False)
+    monkeypatch.setattr(fm, "_settlement_probe", _no_recheck)

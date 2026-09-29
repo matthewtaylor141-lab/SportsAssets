@@ -1577,6 +1577,142 @@ async def reconcile_settlement(conn, *, intent_id: str, client=None,
                 payout_price=payout_px, basis=basis)
 
 
+# ── 3b · RE-READING WHAT WAS ALREADY SETTLED (migration 141) ─────────
+#
+# A LEG IS CLOSED ON THE VENUE'S READING AT THAT INSTANT, and a venue can
+# correct a settlement afterwards. Nothing re-read a closed leg, so a
+# correction could never reach the booked record or the pairing model's
+# label built on it -- an approved model trained on a label the venue had
+# since reversed stayed approved. This re-reads recently settled legs through
+# the SAME probe and the SAME authoritative bar the close used, and records
+# every re-read. It is a read: it rewrites no accounting and closes nothing.
+
+#: How long after settling a leg is re-read, and how many per pass (least
+#: recently re-read first, so every leg in the window is reached in turn).
+RECHECK_WINDOW_S = 7 * 86400.0
+RECHECKS_PER_PASS = 10
+VERDICT_AGREES = "AGREES"
+VERDICT_DISAGREES = "DISAGREES"
+VERDICT_NOT_ESTABLISHED = "NOT_ESTABLISHED"
+R_RECHECKS_UNAVAILABLE = "THE_SETTLEMENT_RECHECK_RECORD_IS_UNAVAILABLE"
+_EPOCH_RE = r"^[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?$"
+
+
+def _settlement_probe(client, slug: str) -> dict:
+    """The production reader for a re-read: the probe the close used."""
+    from . import bettor_venue_settlement_probe as SP
+    return SP.probe(client, slug)
+
+
+def recheck_verdict(booked: dict, got: dict) -> dict:
+    """Does the venue's reading now match what was booked? Pure."""
+    b_reading = str((booked or {}).get("terminal_reading") or "") or None
+    b_px = (booked or {}).get("payout_price")
+    reading = str((got or {}).get("terminal_reading") or "")
+    base = {"booked_reading": b_reading, "booked_payout_price": b_px,
+            "venue_reading": reading or None, "venue_payout_price": None}
+    if reading not in AUTHORITATIVE_TERMINAL_READINGS:
+        return dict(base, verdict=VERDICT_NOT_ESTABLISHED,
+                    why=("the re-read is %r, which is not authoritative, so "
+                         "it says nothing about the booked reading"
+                         % (reading or None)))
+    if reading == "EXPLICIT_VOID":
+        agrees = b_reading == "EXPLICIT_VOID"
+        return dict(base, verdict=VERDICT_AGREES if agrees
+                    else VERDICT_DISAGREES,
+                    why=("the venue now declares a void; %s was booked"
+                         % b_reading))
+    try:
+        v_px = float(((got or {}).get("reader_verdict") or {})
+                     .get("settlement_price"))
+    except (TypeError, ValueError):
+        v_px = None
+    if v_px is None or v_px != v_px:
+        return dict(base, verdict=VERDICT_NOT_ESTABLISHED,
+                    why="the reading is REPORTED and states no price")
+    base["venue_payout_price"] = v_px
+    try:
+        b_num = float(b_px) if b_px is not None else None
+    except (TypeError, ValueError):
+        b_num = None
+    agrees = (b_reading == "REPORTED_SETTLEMENT" and b_num is not None
+              and abs(b_num - v_px) <= 1e-9)
+    return dict(base, verdict=VERDICT_AGREES if agrees else VERDICT_DISAGREES,
+                why=("the venue's settlement price is now %s; %s at %s was "
+                     "booked" % (v_px, b_reading, b_px)))
+
+
+async def recheck_settlements(conn, *, account_id: str, venue: str,
+                              now: float | None = None, probe=None,
+                              client=None, window_s: float = RECHECK_WINDOW_S,
+                              per_pass: int = RECHECKS_PER_PASS) -> dict:
+    """RE-READ RECENTLY SETTLED FUNDED LEGS AND RECORD WHAT THE VENUE SAYS.
+
+    A DISAGREEMENT is recorded and acted on elsewhere, by reading this record:
+    the leg's group stops being a pairing-model label
+    (`bettor_funded_model.LABEL_SQL`), so an approved model trained on it no
+    longer reproduces and stops pricing; and the account is refused new
+    exposure (`bettor_funded_activation.account_selection`) while the leg's
+    newest established re-read disagrees. Exits are never gated on it.
+    """
+    import json
+
+    at = float(now if now is not None else time.time())
+    out = {"version": VERSION, "at": at, "is_a_read": True,
+           "account_id": account_id, "rechecked": [], "disagreements": 0,
+           "rewrote_accounting": False}
+    if await conn.fetchval(
+            "SELECT to_regclass('bettor_funded_settlement_rechecks')") is None:
+        return dict(out, ok=False, refusal=R_RECHECKS_UNAVAILABLE,
+                    why="migration 141 is not applied here")
+    rows = await conn.fetch(
+        "SELECT i.intent_id, i.us_market_slug, i.settlement, "
+        "       (SELECT max(r.read_at) FROM bettor_funded_settlement_rechecks r"
+        "         WHERE r.intent_id = i.intent_id) AS last_read "
+        "  FROM bettor_funded_intents i "
+        " WHERE i.account_id=$1 AND i.venue=$2 AND i.kind='ENTRY' "
+        "   AND i.closed_at IS NOT NULL "
+        "   AND (i.settlement ->> 'terminal_reading') = ANY($3::text[]) "
+        "   AND (CASE WHEN (i.settlement ->> 'at') ~ $6 "
+        "             THEN (i.settlement ->> 'at')::float8 END) >= $4 "
+        " ORDER BY last_read NULLS FIRST, i.intent_id "
+        " LIMIT $5",
+        account_id, venue, list(AUTHORITATIVE_TERMINAL_READINGS),
+        at - float(window_s), int(per_pass), _EPOCH_RE)
+    fn = probe or _settlement_probe
+    for r in rows:
+        booked = r["settlement"]
+        if isinstance(booked, str):
+            booked = json.loads(booked)
+        try:
+            got = fn(client, str(r["us_market_slug"])) or {}
+        except Exception as exc:                               # noqa: BLE001
+            got = {"terminal_reading": None,
+                   "why": "%s: %s" % (type(exc).__name__, str(exc)[:200])}
+        v = recheck_verdict(booked or {}, got)
+        rv = got.get("reader_verdict") or {}
+        kept = {"terminal_reading": got.get("terminal_reading"),
+                "why": got.get("why"),
+                "reader_verdict": {k: rv.get(k) for k in (
+                    "status", "corroboration", "settlement_price",
+                    "settlement_price_raw", "settled_at", "error")}}
+        await conn.execute(
+            "INSERT INTO bettor_funded_settlement_rechecks (intent_id, "
+            " read_at, booked_reading, booked_payout_price, venue_reading, "
+            " venue_payout_price, verdict, why, probe) VALUES "
+            " ($1, to_timestamp($2), $3, $4, $5, $6, $7, $8, $9::jsonb)",
+            r["intent_id"], at, v["booked_reading"],
+            None if v["booked_payout_price"] is None
+            else float(v["booked_payout_price"]),
+            v["venue_reading"], v["venue_payout_price"], v["verdict"],
+            v["why"], _json(kept))
+        out["rechecked"].append({"intent_id": r["intent_id"],
+                                 "verdict": v["verdict"], "why": v["why"]})
+        if v["verdict"] == VERDICT_DISAGREES:
+            out["disagreements"] += 1
+    return dict(out, ok=True, refusal=None)
+
+
 def _json(obj) -> str:
     import json
     return json.dumps(obj, default=str)
