@@ -462,7 +462,32 @@ def test_the_whole_chain_completes_with_no_valuation_row_at_all():
     assert fix["events_considered"] == 1
     # link 4 · a probability, aged 8 s against the odds engine's 30 s
     p = next(x for x in ci["chain"] if x["link"] == "4_PROBABILITY")
-    assert p["age_s"] == pytest.approx(8.0, abs=0.01)
+    # ── THE TOLERANCE, AND WHY 0.01 WAS WRONG ────────────────────────
+    #
+    # `anchored_clock` advances with REAL elapsed time, deliberately: its own
+    # docstring says freezing everything at the caller's `now` "would make a
+    # delayed provider look instantaneous -- which is the defect this exists to
+    # expose". So `age_s` is the declared age PLUS however long the chain's four
+    # database round trips actually took.
+    #
+    # `abs=0.01` therefore asserted that those round trips complete inside TEN
+    # MILLISECONDS. That is a real fragility on its own terms, whatever else is
+    # true.
+    #
+    # WHAT IT DOES NOT EXPLAIN, AND I AM NOT GOING TO PRETEND IT DOES. This file
+    # failed once in six full-suite runs, on a commit that does not touch this
+    # path. The 10 ms budget is the mechanism I would EXPECT to produce that, but
+    # I could not reproduce it: three concurrent runs against separate databases
+    # passed with the OLD tolerance as well as the new one. So this change is a
+    # robustness fix justified by reading the clock's contract, NOT a diagnosed
+    # cause, and that failure is still unexplained.
+    #
+    # The claim under test is not "exactly 8 seconds"; it is which side of the
+    # 30 s bound the quote falls on. So the tolerance is widened to something a
+    # scheduler delay cannot cross, and the SIDE is asserted explicitly, which
+    # is the assertion that was always meant.
+    assert p["age_s"] == pytest.approx(8.0, abs=2.0)
+    assert p["age_s"] < 30.0, "the point of this case is that 8 s is FRESH"
     assert p["max_age_s"] == 30.0
     assert 0.55 < ci["probability_row"]["probability"] < 0.65
     assert ci["probability_row"]["payout_event"] == "Chicago Cubs"
@@ -493,7 +518,32 @@ def test_a_stale_quote_stops_at_link_four_with_its_age_and_bound():
     f = ci["first_failing_link"]
     assert f["link"] == "4_PROBABILITY", ci["chain"]
     assert f["refusal"] == "QUOTE_STALE"
-    assert f["age_s"] == pytest.approx(200.0, abs=0.01)
+    # ── THE TOLERANCE, AND WHY 0.01 WAS WRONG ────────────────────────
+    #
+    # `anchored_clock` advances with REAL elapsed time, deliberately: its own
+    # docstring says freezing everything at the caller's `now` "would make a
+    # delayed provider look instantaneous -- which is the defect this exists to
+    # expose". So `age_s` is the declared age PLUS however long the chain's four
+    # database round trips actually took.
+    #
+    # `abs=0.01` therefore asserted that those round trips complete inside TEN
+    # MILLISECONDS. That is a real fragility on its own terms, whatever else is
+    # true.
+    #
+    # WHAT IT DOES NOT EXPLAIN, AND I AM NOT GOING TO PRETEND IT DOES. This file
+    # failed once in six full-suite runs, on a commit that does not touch this
+    # path. The 10 ms budget is the mechanism I would EXPECT to produce that, but
+    # I could not reproduce it: three concurrent runs against separate databases
+    # passed with the OLD tolerance as well as the new one. So this change is a
+    # robustness fix justified by reading the clock's contract, NOT a diagnosed
+    # cause, and that failure is still unexplained.
+    #
+    # The claim under test is not "exactly 200 seconds"; it is which side of the
+    # 30 s bound the quote falls on. So the tolerance is widened to something a
+    # scheduler delay cannot cross, and the SIDE is asserted explicitly, which
+    # is the assertion that was always meant.
+    assert f["age_s"] == pytest.approx(200.0, abs=2.0)
+    assert f["age_s"] > 30.0, "the point of this case is that 200 s is STALE"
     assert f["max_age_s"] == 30.0
     assert ci["available"] is False
     assert ci.get("probability_row") is None
@@ -883,7 +933,11 @@ def test_a_slow_provider_response_is_refused_at_the_pull():
     if isinstance(ffl, str):
         import json
         ffl = json.loads(ffl)
-    assert ffl["age_s"] == pytest.approx(35.0, abs=0.01)
+    # Same anchored-clock reasoning as above, but 35 s sits only 5 s past the
+    # bound, so the tolerance stays well inside that margin rather than being
+    # widened uniformly.
+    assert ffl["age_s"] == pytest.approx(35.0, abs=1.0)
+    assert ffl["age_s"] > 30.0, "this case is a quote just PAST the bound"
     assert ffl["max_age_s"] == 30.0
 
 
@@ -1056,7 +1110,10 @@ def test_a_payload_in_hand_is_reused_instead_of_paced_out():
     assert calls == ["baseball_mlb"], "one request served all three callers"
     assert warm["calls_made"] == 0 and warm["payloads"]
     assert warm["reused"][0]["from"] == "PROCESS_CACHE"
-    assert warm["reused"][0]["cache_age_s"] == pytest.approx(20.0, abs=0.01)
+    # Same reasoning: the claim is that a 20 s cache entry is INSIDE the 30 s
+    # reuse ceiling, not that it is 20.000 s old.
+    assert warm["reused"][0]["cache_age_s"] == pytest.approx(20.0, abs=2.0)
+    assert warm["reused"][0]["cache_age_s"] < 30.0
     assert W.MANAGED_ODDS_CACHE_TTL_S == 30.0, (
         "the reuse ceiling is the odds rule, not the request interval")
     assert cold["calls_made"] == 0 and not cold["payloads"], (
