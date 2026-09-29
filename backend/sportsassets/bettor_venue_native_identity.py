@@ -109,11 +109,14 @@ R_READ_TRUNCATED = "VENUE_NATIVE_CANDIDATE_READ_TRUNCATED"
 #: for a women's price, Serie A's Botafogo for Serie B's -- could not be ruled
 #: out by competition.
 R_COMPETITION = "VENUE_NATIVE_COMPETITION_NOT_ESTABLISHED"
+#: The matcher itself raised on the rows it was given. Nothing maps, and the
+#: error is named on the event instead of ending the cycle it runs inside.
+R_MATCH_RAISED = "VENUE_NATIVE_MATCH_RAISED"
 
 REFUSALS = (R_NO_EVENT, R_AMBIGUOUS, R_ONE_TEAM_ONLY, R_ASSIGNMENT_AMBIGUOUS,
             R_NO_PRICED_CONTRACT, R_PRICED_CONTRACT_AMBIGUOUS,
             R_CONTRACT_SIDES, R_FAMILY, R_PROVIDER_EVENT, R_READ_FAILED,
-            R_READ_TRUNCATED, R_COMPETITION)
+            R_READ_TRUNCATED, R_COMPETITION, R_MATCH_RAISED)
 
 LONG = "ORDER_INTENT_BUY_LONG"
 SHORT = "ORDER_INTENT_BUY_SHORT"
@@ -759,10 +762,20 @@ async def resolve_venue_native(conn, *, home, away, commence_time, family,
                         "a second matching event may lie beyond it"
                         % MAX_CANDIDATE_ROWS))
         return out
-    match = match_event(home=home, away=away, commence_epoch=at,
-                        family=family, rows=rows, competition=competition,
-                        league_tokens=league_tokens)
-    got = identity_from_match(match, priced_outcome=priced)
+    try:
+        match = match_event(home=home, away=away, commence_epoch=at,
+                            family=family, rows=rows, competition=competition,
+                            league_tokens=league_tokens)
+        got = identity_from_match(match, priced_outcome=priced)
+    except Exception as exc:                                   # noqa: BLE001
+        # FAIL CLOSED AND SAY SO. `cycle()` never raises, and a defect here
+        # must not take down every other event's decision -- nor may it map
+        # anything. The refusal carries the exception's type.
+        out.update(refusal=R_MATCH_RAISED, match_error=type(exc).__name__,
+                   why=("the venue-native matcher raised %s on %d catalogue "
+                        "rows; nothing is mapped"
+                        % (type(exc).__name__, len(rows))))
+        return out
     got["venue_native"]["rows_read"] = len(rows)
     got["venue_native"]["reseen_within_s"] = RESEEN_WITHIN_S
     return got

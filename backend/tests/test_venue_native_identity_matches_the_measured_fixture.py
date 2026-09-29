@@ -845,6 +845,25 @@ async def test_resolve_venue_native_reads_the_catalogue_writers_rows():
 
 
 @pytest.mark.asyncio
+async def test_a_matcher_that_raises_maps_nothing_and_says_so(monkeypatch):
+    class _Rows:
+        async def fetch(self, *a, **k):
+            return [dict(r) for r in ROWS[:4]]
+
+    def boom(**k):
+        raise KeyError("defect")
+
+    monkeypatch.setattr(V, "match_event", boom)
+    got = await V.resolve_venue_native(
+        _Rows(), home=HOME, away=AWAY, commence_time="2026-10-01T00:00:00Z",
+        family="baseball", now=time.time())
+    assert got["ok"] is False
+    assert got["refusal"] == V.R_MATCH_RAISED
+    assert got["match_error"] == "KeyError"
+    assert got["us_market_slug"] is None
+
+
+@pytest.mark.asyncio
 async def test_a_failed_catalogue_read_refuses_by_name():
     class _Broken:
         async def fetch(self, *a, **k):
