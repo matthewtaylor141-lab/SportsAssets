@@ -86,6 +86,43 @@ from tests.test_mirror_shadow import CID, M, N, SLUG, _fill, _nosleep
 from tests.test_mirror_shadow import _Pool as _ShadowPool
 
 NOW = time.time()
+
+
+class _FixtureClock:
+    """`time`, with `.time()` running from the fixture world's NOW.
+
+    NOW above is stamped ONCE, at import. The world ticks at it, but two
+    production reads stamp and age themselves on the real clock:
+    `whale_exits.market_positions` (its per-market read's `ts`, compared with
+    the tick's now) and `mirror_shadow.snapshot_sizes` (its snapshot age). Past
+    300 s of real time after collection (`ms.SNAP_MAX_AGE_S`), a test driving
+    the real read therefore saw every read as stale, however quickly it ran --
+    which is how a slow file earlier in the ordered suite failed five tests
+    here (bisected 2026-09-29: the unstubbed shadow-ledger write in
+    test_e9_fast_path spent ~12 minutes in a DB retry walk). Every other
+    attribute is the real module's.
+    """
+
+    def __init__(self, real, start):
+        self._real, self._start = real, start
+
+    def time(self):
+        return NOW + (self._real.time() - self._start)
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+def anchor_reads_to_fixture_now(monkeypatch):
+    """Run the two real-clock read stamps from NOW, for a test that drives the
+    real per-market read. Elapsed time inside the test still elapses."""
+    from sportsassets.workers import whale_exits
+    clock = _FixtureClock(time, time.time())
+    monkeypatch.setattr(whale_exits, "time", clock)
+    monkeypatch.setattr(ms, "time", clock)
+    return clock
+
+
 INTENT = "ORDER_INTENT_BUY_LONG"
 BUY, SELL = rules.BUY, rules.SELL
 HIS_SLUG = "atp-nakashi-michels-2026-09-02"

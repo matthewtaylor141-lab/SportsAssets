@@ -64,6 +64,7 @@ from tests.test_e9_fast_path import _fast, _skips, _walk
 from tests.test_mirror_live_worker import (  # noqa: F401 -- the autouse rails
     BUY, CID, M, N, NOW, SELL, SHORT, SLUG, _NoClose, _Venue, _armed, _cancels, _census, _fill,
     _flip_world, _kinds, _mkt, _places, _pool, _run, _short_book, _shorts_on, _tick,
+    anchor_reads_to_fixture_now,
 )
 
 GTC_TIF = "TIME_IN_FORCE_GOOD_TILL_CANCEL"
@@ -77,8 +78,11 @@ BAND_WORDS = ("exit_take_in_band", "cover_in_band")
 def _band_default(_armed, monkeypatch):
     """The exit band at its CODE DEFAULT (0.01, inert) for every test
     here, pinned against the runner's environment; the tests of the
-    band itself set 0.02 by name (`_band_two`)."""
+    band itself set 0.02 by name (`_band_two`). And the real per-market
+    read's clock runs from the fixture's NOW, so these pins do not depend
+    on how long the suite took to reach them."""
     monkeypatch.setattr(rules, "MIRROR_EXIT_TAKE_BAND", 0.01)
+    anchor_reads_to_fixture_now(monkeypatch)
     yield
 
 

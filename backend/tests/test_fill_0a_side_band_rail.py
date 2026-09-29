@@ -31,7 +31,17 @@ from sportsassets.workers import mirror_live as ml
 from tests.test_e19_smaller_reading import _martinez
 from tests.test_mirror_live_worker import M, NOW, _armed  # noqa: F401 -- the fixture
 from tests.test_mirror_live_worker import _census, _places, _pool, _rails_2026_09_06, _tick, _Venue
+from tests.test_mirror_live_worker import anchor_reads_to_fixture_now
 from tests.test_mirror_shadow import _fill
+
+
+@pytest.fixture(autouse=True)
+def _reads_run_from_the_fixture_clock(_armed, monkeypatch):
+    """The real per-market read stamps itself on the real clock and the world
+    ticks at the NOW frozen at import; anchored here so these pins hold however
+    long the suite took to reach them (see `_FixtureClock`)."""
+    anchor_reads_to_fixture_now(monkeypatch)
+    yield
 
 DEFAULT = 0.15
 

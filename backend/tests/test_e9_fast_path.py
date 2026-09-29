@@ -159,6 +159,15 @@ def _ingest(monkeypatch, ev, insert=True):
     monkeypatch.setattr(pipeline, "get_pool", _get_pool)
     monkeypatch.setattr(pipeline, "publish", _noop)
     monkeypatch.setattr(pipeline, "_write_outbox", _noop)
+    # THE PROSPECTIVE SHADOW LEDGER'S WRITE (2026-09-19) sits between the
+    # insert and the wake, and falls back to the REAL `sportsassets.db.get_pool`
+    # through shadow_store. Unstubbed, each rn1 fill here ran that pool's retry
+    # walk (~105 s) against a database this test does not use: ~12 minutes of
+    # wall clock across the six ingest tests. That was the contamination behind
+    # five mirror failures later in the ordered suite -- their fixture clock is
+    # frozen at import while the 300 s snapshot rail reads the real one
+    # (bisected and reproduced 2026-09-29). Stubbed like the other writes.
+    monkeypatch.setattr(pipeline, "_shadow_observe", _noop)
     return _run(pipeline.ingest_trade_result(ev)), pool
 
 
