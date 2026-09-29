@@ -1,4 +1,4 @@
--- READ-ONLY. RELEASE READ-BACK FOR THE API DEPLOY OF bc4bc21.
+-- READ-ONLY. RELEASE READ-BACK FOR THE API DEPLOY OF aca3564 (bc4bc21 plus one test-only commit).
 --
 -- WHAT IT ESTABLISHES, FROM PRODUCTION'S OWN ROWS:
 --   1  which migrations the production runner has applied (131-141 ship with
