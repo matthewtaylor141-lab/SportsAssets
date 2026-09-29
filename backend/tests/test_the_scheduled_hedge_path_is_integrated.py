@@ -117,6 +117,25 @@ async def _catalogue(conn):
     if await conn.fetchval("SELECT to_regclass('us_premap') IS NULL"):
         pytest.skip("no us_premap in this database; this module does not own "
                     "the catalogue schema")
+    # ── AND IT DOES NOT DEPEND ON ANOTHER MODULE'S COLUMN SET EITHER ──
+    #
+    # THE SECOND HALF OF THE SAME MISTAKE, caught by the re-gate. Not owning
+    # the schema was necessary and not sufficient: the legacy `us_premap` that
+    # older test modules stand up carries no `team_abbr`, `team_name` or
+    # `game_start`, and this module names all three. Alone it passed, because
+    # it created the production table itself; in the full suite an earlier
+    # module won the race and every test here failed on a missing column.
+    #
+    # So the columns are added if absent, which is exactly what migrations 031
+    # and 055 and `premap._ensure_table` do, and for the same reason. They are
+    # nullable additions: they cannot disturb a module that does not select
+    # them, and `ON CONFLICT (identifier)` keeps working.
+    for col, typ in (("team_abbr", "text"), ("team_name", "text"),
+                     ("team_safe_name", "text"), ("team_league", "text"),
+                     ("game_start", "timestamptz"), ("sports_type", "text"),
+                     ("signed", "text"), ("intent", "text")):
+        await conn.execute("ALTER TABLE us_premap ADD COLUMN IF NOT EXISTS "
+                           "%s %s" % (col, typ))
     await conn.execute("DELETE FROM us_premap WHERE event_slug=$1", EVENT)
     rows = [
         # the held moneyline, BOTH sides -- one instrument, two rows
