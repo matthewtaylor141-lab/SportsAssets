@@ -451,11 +451,23 @@ def distribution(classes: dict, *, primary: dict | None,
     if voids:
         vr = dict(void or {})
         rate = _prob(vr.get("rate"))
-        if not vr or rate is None:
+        upper = _prob(vr.get("upper_95"))
+        try:
+            n_fx = int(vr.get("n_fixtures") or 0)
+        except (TypeError, ValueError):
+            n_fx = 0
+        # A MEASURED RATE STATES ITS RATE, ITS FIXTURE COUNT, ITS UPPER BOUND
+        # AND ITS SOURCE. A bare number is an assumption with a decimal point.
+        if (not vr or rate is None or upper is None or upper < rate
+                or n_fx < 1 or not vr.get("source")):
             return dict(out, refusal=R_VOID_RATE_NOT_MEASURED,
+                        supplied=({k: vr.get(k) for k in (
+                            "rate", "n_fixtures", "upper_95", "source")}
+                                  if vr else None),
                         why=("the table pays a cancelled fixture (%s) and no "
-                             "measured void rate was supplied; its mass is not "
-                             "assumed" % voids[0]["label"]))
+                             "measured void rate -- rate, fixtures counted, "
+                             "upper bound and source -- was supplied; its mass "
+                             "is not assumed" % voids[0]["label"]))
         v = rate
         void_basis = {"used": True, "rate": rate,
                       "n_fixtures": vr.get("n_fixtures"),

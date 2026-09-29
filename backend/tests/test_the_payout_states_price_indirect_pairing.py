@@ -422,10 +422,17 @@ def test_each_missing_input_is_refused_by_name_and_never_filled():
     got = PS.distribution(cls, primary={"p_win": .6},
                           conditional={"WIN": .3}, void=VOID_IN)
     assert got["refusal"] == PS.R_PRIMARY_PARTIAL_OUTCOME_NOT_PRICED
-    # the void class exists and no rate was measured
+    # the void class exists and no rate was measured -- and a bare number is
+    # not a measurement: fixtures counted, upper bound and source are required
     got = PS.distribution(cls, primary=PRIMARY, conditional={"WIN": .3},
                           void=None)
     assert got["refusal"] == PS.R_VOID_RATE_NOT_MEASURED
+    for bare in ({"rate": 0.01}, dict(VOID_IN, n_fixtures=0),
+                 dict(VOID_IN, source=None), dict(VOID_IN, upper_95=None),
+                 dict(VOID_IN, upper_95=0.001)):
+        got = PS.distribution(cls, primary=PRIMARY, conditional={"WIN": .3},
+                              void=bare)
+        assert got["refusal"] == PS.R_VOID_RATE_NOT_MEASURED, bare
     # the binary conditional is not estimated -- and names the outcome
     got = PS.distribution(cls, primary=PRIMARY, conditional={}, void=VOID_IN)
     assert got["refusal"] == PS.R_CONDITIONAL_NOT_ESTIMATED
