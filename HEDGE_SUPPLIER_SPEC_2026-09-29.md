@@ -101,3 +101,85 @@ supports an assumption of superiority:
 `P5_DOCUMENTED_TIMING` is the single unmet precondition and only the venue can
 supply it. Not to be manufactured from movement, receipt time or a fabricated
 subscription; four acceptance tests hold those closed.
+
+---
+
+# ADDENDUM, after reading the catalogue instead of describing it
+
+Runs 262–265 of the authorized read-only route. Everything above the line was
+written from the module interfaces; this was written from the venue's rows,
+and it corrects the section above in three places and adds one measurement
+that changes what this item can claim.
+
+## Three corrections to the plan above
+
+The table under "Supplier 1" marked `kind`, `line` and `backs` **available**
+from `us_premap`. All three were wrong.
+
+| plan said | the catalogue says |
+|---|---|
+| `kind` from `us_premap.kind` | `kind` is the literal `'side'` on all 60,540 rows |
+| `line` from `us_premap.line` | on a moneyline that column is the GAME START MINUTE — every value two digits in 00..59, and the baseball rows carrying `'00'` start at 9:00 AM UTC |
+| `backs` from `side_norm` | `side_norm` is the team's own NAME on a moneyline and `yes`/`no` on a spread; neither states which participant is listed first |
+
+Two successive versions of the derivation read one of those columns and were
+refuted. A third defect survived inspection and appeared only when the real
+row went through: `Leg.line` is defined against **team A's** margin whichever
+side the leg backs, so the B-side row's `+10.5` had to become `-10.5`. Left
+alone it inverts the payout function of every B-side spread, and a pair built
+from one reads as a middle that cannot lose while being a doubled position.
+
+## One fact measured rather than asserted
+
+**Every one of the venue's seventeen slug prefixes carries exactly 2.00 rows
+per `market_slug` and exactly 2 distinct intents** — `asta`, `tsc-`, `asc-`,
+`atc-`, `tec-`, `aec-` and eleven more, without exception across 60,540 rows.
+One instrument per market; the side is carried only by the order intent. So
+the opposite side of a held contract is netting on one instrument and can
+never be a second settling holding. That was previously an assertion about how
+the venue works; it is now a measurement.
+
+## The measurement that bounds this item
+
+The `Leg` vocabulary grades three variables — signed MARGIN, combined TOTAL,
+three-way WIN3 — over six named periods. 215 `sports_type` values exist and
+most name neither: `soccer_game_total_corners` (560 rows),
+`football_player_receiving_yards` (946), `tennis_match_total_games` (1,686),
+`table_tennis_match_total_sets` (1,796), `futures` (6,562). Mapping a corners
+total onto VAR_TOTAL would give two legs a shared `grading_key()` while one
+settles on corners and the other on points, and `discover` would report a
+guaranteed minimum payout that does not exist. So the allowlist is narrow by
+construction, and run 265 measured what that costs:
+
+| distinct admitted contracts on the fixture | events |
+|---|---|
+| 1 | **2,440** |
+| 4–9 | 79 |
+| 42–74 | 12 |
+
+**2,440 of the 2,531 fixtures carrying any admitted contract carry exactly
+one.** A hedge needs a second admitted contract on the same fixture that is
+not the held instrument, so on 96% of those fixtures an indirect hedge is
+structurally unavailable — not blocked by missing plumbing, and not fixable by
+finishing the suppliers.
+
+Two things follow, and both are reportable rather than arguable:
+
+- the remaining supplier work is worth doing and is now done for the facts the
+  catalogue can supply, but it does not make indirect hedging available at
+  scale on this venue's current board;
+- **`bettor_funded_intents` holds zero rows.** There is no held position in
+  production for `held_leg` to be built from, so the two `cycle()` proofs that
+  need a real held position and a real candidate cannot be produced from
+  production data today, by anyone, regardless of code.
+
+Both remain true after this batch. Neither is a reason to stop building the
+supplier; both are reasons not to describe the supplier as making hedging
+available.
+
+## Still not supplied, and unchanged
+
+`region_probabilities` needs an APPROVED model and the production registry is
+empty. Venue-implied prices must not be substituted for it. `P5_DOCUMENTED_
+TIMING` remains the single unmet book-currency precondition and only the venue
+can supply it.
