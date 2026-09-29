@@ -582,3 +582,28 @@ def test_the_void_rate_upper_bound_is_wilson():
     assert PO.wilson_upper_95(3, 98) == pytest.approx(0.0862, abs=5e-4)
     assert PO.wilson_upper_95(3, 98) > 3 / 98
     assert PO.MIN_VOID_RATE_FIXTURES == 40
+
+
+def test_the_primary_probability_meets_the_entry_lanes_source_gates():
+    """An acquisition priced on the primary probability commits new money on
+    an external valuation, so the entry lane's MODEL_TRUST_DRIFT and
+    OUT_OF_DISTRIBUTION rules apply to it -- by the entry lane's own
+    constants."""
+    from sportsassets import bettor_entry_execution as EX
+    none = FMD.primary_gates(primary_probability=0.6, primary_calibration=None)
+    assert none["MODEL_TRUST_DRIFT"]["clear"] is False
+    assert EX.R_NO_CALIBRATION in none["MODEL_TRUST_DRIFT"]["why"]
+    out_tol = FMD.primary_gates(
+        primary_probability=0.6,
+        primary_calibration={"measured": True, "within_tolerance": False})
+    assert out_tol["MODEL_TRUST_DRIFT"]["clear"] is False
+    ok = FMD.primary_gates(
+        primary_probability=0.6,
+        primary_calibration={"measured": True, "within_tolerance": True})
+    assert ok["MODEL_TRUST_DRIFT"]["clear"] is True
+    assert ok["OUT_OF_DISTRIBUTION"]["clear"] is True
+    for p in (EX.SUPPORT_MAX + 0.001, EX.SUPPORT_MIN - 0.001, None, True):
+        g = FMD.primary_gates(primary_probability=p,
+                              primary_calibration={"measured": True,
+                                                   "within_tolerance": True})
+        assert g["OUT_OF_DISTRIBUTION"]["clear"] is False, p

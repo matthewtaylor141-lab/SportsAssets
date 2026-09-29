@@ -617,6 +617,7 @@ X_C_STRUCTURAL = "HEDGE_PAYOUT_IS_DETERMINED_BY_THE_TABLE_GIVEN_THIS_OUTCOME"
 X_C_NOT_BINARY = "HEDGE_OUTCOME_IS_NOT_BINARY_GIVEN_THIS_OUTCOME"
 X_C_HEDGE_PUSHED = "HEDGE_PUSHED_WHERE_THE_TABLE_ADMITS_ONLY_WIN_OR_LOSE"
 X_C_FEATURES_UNREADABLE = "THE_FROZEN_FEATURE_VECTOR_IS_UNREADABLE"
+X_C_STRUCTURE_UNREADABLE = "THE_FROZEN_STRUCTURE_IS_UNREADABLE"
 
 
 def conditional_row(row: dict) -> dict:
@@ -646,7 +647,7 @@ def conditional_row(row: dict) -> dict:
         try:
             structure = json.loads(structure)
         except ValueError:
-            structure = None
+            return {"include": False, "exclusion": X_C_STRUCTURE_UNREADABLE}
     classes = PS.payout_classes(structure or {})
     if not classes.get("ok"):
         return {"include": False,
@@ -1447,8 +1448,9 @@ async def observation_pass(conn, *, candidates, quoter, prose_reader,
                            book_budget: int = BOOK_READS_PER_PASS,
                            evaluations: int = EVALUATIONS_PER_PASS) -> dict:
     """ONE CYCLE'S OBSERVATION WORK: observe a few candidates, label what has
-    settled, offer the registry a candidate fit on observations, and score
-    the observation-sourced candidates. Bounded in candidates, book reads,
+    settled, offer the registry a candidate fit on observations for EACH key
+    observations train (KEY_MIDDLE and KEY_HEDGE_GIVEN_PRIMARY), and score the
+    observation-sourced candidates of both. Bounded in candidates, book reads,
     pairs and wall-clock time; it never raises into the cycle.
 
     EVERY ATTEMPT IS ACCOUNTED FOR. Each attempted candidate comes back with

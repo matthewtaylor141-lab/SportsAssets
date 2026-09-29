@@ -1914,11 +1914,56 @@ PRIMARY_PROBABILITY_IS = (
     "position's own external probability, passed through unchanged so all four "
     "actions rest on one primary marginal")
 
+#: THE ENTRY LANE'S TWO GATES ON AN EXTERNAL PROBABILITY, APPLIED WHERE IT
+#: PRICES NEW CAPITAL HERE TOO. HOLD, DIRECT_EXIT and REDUCE only keep or shed
+#: what is held; an acquisition priced on the primary probability commits new
+#: money on it, which is exactly what `bettor_entry_execution`'s
+#: MODEL_TRUST_DRIFT forbids an unvalidated external valuation to do ("it
+#: would state that an unvalidated external valuation may size a position. It
+#: may not"). So the distribution refuses unless the source has a CURRENT,
+#: PASSING calibration measurement (the worker's `source_calibration` read,
+#: current evaluator, enough sample, not stale, within tolerance), and unless
+#: the probability lies inside the source's declared support.
+R_PRIMARY_SOURCE_NOT_CALIBRATED = (
+    "THE_PRIMARY_PROBABILITYS_SOURCE_HAS_NO_CURRENT_PASSING_CALIBRATION")
+R_PRIMARY_OUTSIDE_SUPPORT = (
+    "THE_PRIMARY_PROBABILITY_IS_OUTSIDE_ITS_SOURCES_DECLARED_SUPPORT")
+
+
+def primary_gates(*, primary_probability, primary_calibration) -> dict:
+    """MODEL_TRUST_DRIFT and OUT_OF_DISTRIBUTION for the primary probability,
+    by the entry lane's own rules and constants. Pure."""
+    from . import bettor_entry_execution as EX
+
+    cal = dict(primary_calibration or {})
+    trusted = cal.get("measured") is True and cal.get("within_tolerance") is True
+    try:
+        p = (None if primary_probability is None
+             or isinstance(primary_probability, bool)
+             else float(primary_probability))
+    except (TypeError, ValueError):
+        p = None
+    inside = p is not None and EX.SUPPORT_MIN <= p <= EX.SUPPORT_MAX
+    return {
+        "MODEL_TRUST_DRIFT": {
+            "clear": trusted,
+            "why": (cal.get("why") if trusted else
+                    "%s: %s" % (EX.R_NO_CALIBRATION if not cal.get("measured")
+                                else "CALIBRATION_OUTSIDE_TOLERANCE",
+                                cal.get("why") or cal.get("error")
+                                or "no calibration measurement was supplied")),
+            "source_version": cal.get("source_version")},
+        "OUT_OF_DISTRIBUTION": {
+            "clear": inside,
+            "support": [EX.SUPPORT_MIN, EX.SUPPORT_MAX],
+            "probability": p}}
+
 
 async def predict_distribution(conn, *, structure, primary_cost_cents,
                                hedge_cost_cents, overtime_included,
                                primary_probability, primary_source, at,
                                primary_partial_probability=None,
+                               primary_calibration=None,
                                position_value=None,
                                model_key: str = KEY_HEDGE_GIVEN_PRIMARY
                                ) -> dict:
@@ -1935,7 +1980,10 @@ async def predict_distribution(conn, *, structure, primary_cost_cents,
       3 the void rate measured from recorded outcomes as of `at`
         (`bettor_pair_observations.void_rate`), no look-ahead;
       4 `bettor_payout_states.distribution` with `primary_probability` -- the
-        probability HOLD is valued on -- as P(primary wins | not void).
+        probability HOLD is valued on -- as P(primary wins | not void) --
+        and only once that probability has cleared the entry lane's own
+        gates on an external source: a current passing calibration
+        (`primary_calibration`) and the source's declared support.
 
     Returns the class probabilities keyed by class label (plus every
     unresolved state at zero), the merged structure and, when a position value
@@ -1953,10 +2001,13 @@ async def predict_distribution(conn, *, structure, primary_cost_cents,
     from . import bettor_pair_observations as PO
     from . import bettor_payout_states as PS
 
+    gates = primary_gates(primary_probability=primary_probability,
+                          primary_calibration=primary_calibration)
     out: dict[str, Any] = {"version": VERSION, "model_key": model_key,
                            "path": "PAYOUT_STATE_DISTRIBUTION",
                            "primary_probability": primary_probability,
-                           "primary_source": primary_source}
+                           "primary_source": primary_source,
+                           "primary_gates": gates}
     got = await approved(conn, model_key=model_key)
     if not got.get("ok"):
         return dict(out, ok=False, refusal=got["refusal"],
@@ -1965,6 +2016,15 @@ async def predict_distribution(conn, *, structure, primary_cost_cents,
                                                 got["refusal"], model_key)))
     mdl = got["model"]
     out.update(model_id=mdl["model_id"], model_version=mdl["model_version"])
+    if not gates["MODEL_TRUST_DRIFT"]["clear"]:
+        return dict(out, ok=False, refusal=R_PRIMARY_SOURCE_NOT_CALIBRATED,
+                    why=gates["MODEL_TRUST_DRIFT"]["why"])
+    if not gates["OUT_OF_DISTRIBUTION"]["clear"]:
+        return dict(out, ok=False, refusal=R_PRIMARY_OUTSIDE_SUPPORT,
+                    why=("P(primary) %r is outside the source's declared "
+                         "support %s" % (
+                             primary_probability,
+                             gates["OUT_OF_DISTRIBUTION"]["support"])))
     classes = PS.payout_classes(structure)
     if not classes.get("ok"):
         return dict(out, ok=False, refusal=classes["refusal"],
@@ -2029,6 +2089,7 @@ async def predict_distribution(conn, *, structure, primary_cost_cents,
     basis = {"model_key": model_key, "model_id": mdl["model_id"],
              "model_version": mdl["model_version"],
              "primary": dist["basis"]["primary"],
+             "primary_gates": gates,
              "conditional": dist["basis"]["conditional"],
              "void": dist["basis"]["void"],
              "postponed": dist["basis"]["postponed"],

@@ -22,13 +22,20 @@ What is pinned:
   * the void rate counts FIXTURES, refuses below the bar, and reads each label
     as it stood at `through`;
   * `predict_distribution` refuses with the key named when nothing is
-    approved, and otherwise returns class probabilities with their basis;
+    approved; refuses, with a model approved, while the primary probability's
+    source has no current passing calibration or the probability is outside
+    the source's declared support (the entry lane's own gates on an external
+    valuation that would commit new money); and otherwise returns class
+    probabilities with their basis;
   * ACCEPTANCE: a scheduled pair pass through the PRODUCTION suppliers ranks
     ACQUIRE_INDIRECT_HEDGE, HOLD and DIRECT_EXIT in one decision (REDUCE is in
     it too, as not rankable: management deferred an executable plan for one
-    exit action), records the distribution basis on the ledger row, and --
-    with no approved conditional model -- reports the indirect candidate not
-    rankable on THAT key's R_NO_APPROVED_MODEL, not on the outside split.
+    exit action), records the distribution basis on the ledger row; with the
+    source's calibration row removed it reports the acquisition not rankable
+    on R_PRIMARY_SOURCE_NOT_CALIBRATED; and with no approved conditional model
+    it reports the indirect candidate not rankable on THAT key's
+    R_NO_APPROVED_MODEL, not on the outside split. The calibration row is
+    SYNTHETIC, for a TEST source version, and removed afterwards.
 """
 from __future__ import annotations
 
@@ -76,7 +83,32 @@ async def _conn():
         await c.close()
 
 
+#: The primary probability's source version in the acceptance pass: a TEST
+#: source, so the synthetic calibration row seeded for it cannot open the
+#: gate for any real source.
+CAL_SOURCE = "HEDGE_ACCEPTANCE_SYNTHETIC_SOURCE"
+
+
+async def _seed_calibration(conn):
+    """ONE PASSING CALIBRATION ROW for the test source, read by the worker's
+    own `source_calibration` -- SYNTHETIC, and labelled so in its provenance."""
+    from sportsassets import bettor_source_calibration as CAL
+    await conn.execute("DELETE FROM external_source_calibration "
+                       " WHERE source_version=$1", CAL_SOURCE)
+    await conn.execute(
+        "INSERT INTO external_source_calibration (source_version, measured_at,"
+        " window_start, window_end, sample_size, metric, score, tolerance, "
+        " within_tolerance, measured_by, provenance) VALUES ($1, now() - "
+        " interval '1 hour', now() - interval '90 days', now(), $2, 'BRIER', "
+        " 0.21, 0.24, TRUE, 'HEDGE_ACCEPTANCE_TEST', $3::jsonb)",
+        CAL_SOURCE, int(CAL.MIN_RESOLVED_EVENTS) + 1,
+        json.dumps({"evaluator": CAL.VERSION, "supplied_by": "TEST_FIXTURE",
+                    "synthetic": LABEL}))
+
+
 async def _drop_models(conn):
+    await conn.execute("DELETE FROM external_source_calibration "
+                       " WHERE source_version=$1", CAL_SOURCE)
     await conn.execute("DELETE FROM bettor_funded_models WHERE model_key=$1 "
                        "   OR model_id LIKE 'fmc:%:obs-%'", KEY)
     # THE RELEASED HEDGE RESERVATIONS the acceptance pass leaves (its
@@ -416,6 +448,11 @@ async def test_the_void_rate_counts_fixtures_point_in_time():
 # ═════════════════════════════════════════════════════════════════════
 
 PRIMARY_SOURCE = {"from": "CHOSEN_FOR_THIS_TEST", "is": LABEL}
+#: A PASSING CALIBRATION MEASUREMENT, in the shape the worker's
+#: `source_calibration` returns -- SYNTHETIC, stated for this test.
+PASSING_CALIBRATION = {"measured": True, "within_tolerance": True,
+                       "source_version": "SYNTHETIC_TEST_SOURCE",
+                       "why": "SYNTHETIC CALIBRATION FOR THIS TEST: " + LABEL}
 
 
 async def test_predict_distribution_names_the_key_it_lacks_then_prices_classes():
@@ -436,8 +473,25 @@ async def test_predict_distribution_names_the_key_it_lacks_then_prices_classes()
                                  approved_by="owner@test")
         assert prom["ok"] is True, prom
         at = time.time()
-        got = await FMD.predict_distribution(conn, at=at, **kw)
+        # THE ENTRY LANE'S GATES ON AN EXTERNAL PROBABILITY APPLY: no
+        # current passing calibration, or a probability outside the source's
+        # declared support, refuses -- the model's approval does not waive it
+        nocal = await FMD.predict_distribution(conn, at=at, **kw)
+        assert nocal["refusal"] == FMD.R_PRIMARY_SOURCE_NOT_CALIBRATED, nocal
+        failing = await FMD.predict_distribution(
+            conn, at=at, primary_calibration=dict(PASSING_CALIBRATION,
+                                                  within_tolerance=False),
+            **kw)
+        assert failing["refusal"] == FMD.R_PRIMARY_SOURCE_NOT_CALIBRATED
+        tail = await FMD.predict_distribution(
+            conn, at=at, primary_calibration=PASSING_CALIBRATION,
+            **dict(kw, primary_probability=0.99))
+        assert tail["refusal"] == FMD.R_PRIMARY_OUTSIDE_SUPPORT, tail
+        got = await FMD.predict_distribution(
+            conn, at=at, primary_calibration=PASSING_CALIBRATION, **kw)
         assert got["ok"] is True, got
+        assert got["distribution_basis"]["primary_gates"][
+            "MODEL_TRUST_DRIFT"]["clear"] is True
         probs = got["region_probabilities"]
         assert sum(probs.values()) == pytest.approx(1.0, abs=1e-9)
         assert probs["fixture postponed; market stays open"] == 0.0
@@ -470,8 +524,9 @@ async def test_predict_distribution_names_the_key_it_lacks_then_prices_classes()
                           dataclasses.replace(IS.PANTHERS_PLUS_4_5,
                                               cost_cents_per_unit=41),
                           sport_permits_tie=True).to_dict()
-        bad = await FMD.predict_distribution(conn, at=at,
-                                             **dict(kw, structure=tie))
+        bad = await FMD.predict_distribution(
+            conn, at=at, primary_calibration=PASSING_CALIBRATION,
+            **dict(kw, structure=tie))
         assert bad["refusal"] == PS.R_PRIMARY_PARTIAL_OUTCOME_NOT_PRICED
 
 
@@ -557,7 +612,8 @@ async def _pass(conn, iid, now, adapter):
         "ranking": ranking}}
     mr = {iid: {"ranking": ranking, "hold_probability": {
         "probability": P_HOLD, "source_row_id": "synthetic-valuation",
-        "source": {"provider": "SYNTHETIC_FOR_THIS_TEST"},
+        "source": {"provider": "SYNTHETIC_FOR_THIS_TEST",
+                   "version": CAL_SOURCE},
         "probability_event": "BOS_WINS", "payout_event_held": "BOS_WINS",
         "status": "IDENTIFIED"}}}
     pair_inputs = functools.partial(
@@ -608,6 +664,7 @@ async def test_acceptance_the_scheduled_pass_ranks_the_hedge_on_the_distribution
         prom = await FMD.promote(conn, model_id=gen["model_id"],
                                  approved_by="owner@test")
         assert prom["ok"] is True, prom
+        await _seed_calibration(conn)
         void = await PO.void_rate(conn, through=now)
         assert void["ok"] is True and void["n_void_fixtures"] == 2, void
 
@@ -674,10 +731,36 @@ async def test_acceptance_the_scheduled_pass_ranks_the_hedge_on_the_distribution
         assert adapter.sent == [], adapter.sent
         assert got["opened_anything"] is False
 
+        assert basis["primary"]["source"]["calibration"]["measured"] is True
+        assert basis["primary"]["source"]["calibration"]["source_version"] \
+            == CAL_SOURCE
+        assert basis["primary_gates"]["MODEL_TRUST_DRIFT"]["clear"] is True
+
+        # ── THE SAME CYCLE WITH NO CURRENT CALIBRATION ──────────────
+        await conn.execute("DELETE FROM external_source_calibration "
+                           " WHERE source_version=$1", CAL_SOURCE)
+        uncal = now + 1
+        adapter_u = HW._Adapter()
+        got_u = await _pass(conn, iid, uncal, adapter_u)
+        row_u = await _decision_row(conn,
+                                    "dec:%s:%d" % (iid[-24:], int(uncal)))
+        blocked_u = [c for c in row_u["unrankable"]
+                     if c["action"] == FD.ACTION_ACQUIRE_INDIRECT_HEDGE]
+        assert len(blocked_u) == 2, row_u["unrankable"]
+        for b in blocked_u:
+            assert b["prediction"]["refusal"] == \
+                FMD.R_PRIMARY_SOURCE_NOT_CALIBRATED, b["prediction"]
+        assert got_u["considered"][0]["decision"][
+            "region_probabilities_came_from"].startswith(
+            "DISTRIBUTION_COULD_NOT_PRICE_THIS_STRUCTURE:%s"
+            % FMD.R_PRIMARY_SOURCE_NOT_CALIBRATED)
+        assert adapter_u.sent == []
+
         # ── THE SAME CYCLE WITH NO APPROVED CONDITIONAL MODEL ───────
         await conn.execute("DELETE FROM bettor_funded_models "
                            " WHERE model_key=$1", KEY)
-        later = now + 1
+        await _seed_calibration(conn)
+        later = now + 2
         adapter2 = HW._Adapter()
         got2 = await _pass(conn, iid, later, adapter2)
         step2 = got2["considered"][0]

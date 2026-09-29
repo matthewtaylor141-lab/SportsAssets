@@ -4889,6 +4889,25 @@ async def funded_pair_inputs(conn, pos, *, at, deferred=None,
     # disagreement supplies nothing rather than choosing one.
     primary = _primary_probability_for(hold_ranking,
                                        (_mr or {}).get("hold_probability"))
+    # THE SOURCE'S CALIBRATION, by the entry lane's own reader. An acquisition
+    # priced on this probability commits new money on it, so the same
+    # MODEL_TRUST_DRIFT evidence the entry lane requires is read here and
+    # carried with it; `predict_distribution` refuses without a current
+    # passing measurement. Read, never assumed.
+    primary_calibration = None
+    if primary.get("ok"):
+        ver = (primary.get("source") or {}).get("version")
+        primary_calibration = (
+            await source_calibration(conn, ver) if ver else
+            {"measured": False, "error": "PRIMARY_SOURCE_VERSION_NOT_STATED",
+             "source_version": None,
+             "why": ("the HOLD probability's record names no source version, "
+                     "so no calibration can be matched to it")})
+        primary["source"]["calibration"] = {
+            k: (primary_calibration or {}).get(k) for k in (
+                "measured", "within_tolerance", "error", "source_version",
+                "measured_at", "sample_size", "metric", "score", "tolerance",
+                "why")}
     out["primary_probability_read"] = primary
     out["deferred_selection"] = ({k: sel.get(k) for k in
                                   ("selected", "selected_qty", "limit_price",
@@ -5070,7 +5089,8 @@ async def funded_pair_inputs(conn, pos, *, at, deferred=None,
                     _model_inputs_for(held=held,
                                       candidates=cands.get("legs") or []),
                     **({"primary_probability": primary["probability"],
-                        "primary_source": primary["source"]}
+                        "primary_source": primary["source"],
+                        "primary_calibration": primary_calibration}
                        if primary.get("ok") else {})),
                 limits=None,
                 fee_usd=fee_read.get("fee_usd"),

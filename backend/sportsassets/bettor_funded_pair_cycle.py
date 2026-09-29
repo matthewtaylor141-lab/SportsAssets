@@ -370,7 +370,10 @@ async def _price_indirect(conn, *, admitted, region_probabilities=None,
     # through by the supplier. `predict_distribution` prices the structure's
     # PAYOUT CLASSES from it, the table's own structure, the approved
     # KEY_HEDGE_GIVEN_PRIMARY model and a measured void rate -- and refuses,
-    # naming the key, when that model is not approved. There is NO fallback to
+    # naming the key, when that model is not approved, and refuses while the
+    # primary probability's source has no current passing calibration (the
+    # entry lane's MODEL_TRUST_DRIFT, applied because an acquisition commits
+    # new money on that probability). There is NO fallback to
     # the legacy path below from here: a lane that has a primary probability
     # prices through classes or not at all.
     prediction = None
@@ -384,6 +387,7 @@ async def _price_indirect(conn, *, admitted, region_probabilities=None,
             primary_source=mi.get("primary_source"),
             primary_partial_probability=mi.get(
                 "primary_partial_probability"),
+            primary_calibration=mi.get("primary_calibration"),
             position_value=position_value, at=now)
         heavy = ("merged_structure", "merged_position_value")
         out["prediction"] = {k: v for k, v in prediction.items()
