@@ -58,6 +58,8 @@ NOTHING HERE PLACES, SIZES OR FUNDS AN ORDER.
 
 from __future__ import annotations
 
+import math
+
 VERSION = "FUNDED_DECISION_V1"
 
 NOT_ESTABLISHED = "NOT_ESTABLISHED"
@@ -66,6 +68,9 @@ ACTION_ACQUIRE_INDIRECT_HEDGE = "ACQUIRE_INDIRECT_HEDGE"
 
 R_HOLD_NOT_PRICED = "HOLD_IS_NOT_PRICED_SO_NOTHING_IS_SELECTED"
 R_NO_REGION_PROBABILITIES = "NO_PROBABILITY_OVER_THE_FIXTURES_OUTCOME_REGIONS"
+R_INVALID_PROBABILITY = "INVALID_OUTCOME_PROBABILITY"
+R_PROBABILITY_PARTITION = "PROBABILITIES_DO_NOT_MATCH_THE_OUTCOME_PARTITION"
+R_REQUIRED_RISK_MEASUREMENT = "A_REQUIRED_RISK_MEASUREMENT_IS_UNAVAILABLE"
 R_PROBABILITIES_DO_NOT_SUM = "THE_REGION_PROBABILITIES_DO_NOT_SUM_TO_ONE"
 R_STRUCTURE_IS_UNESTABLISHABLE = "THE_STRUCTURE_ITSELF_IS_UNESTABLISHABLE"
 R_DEPTH_NOT_ESTABLISHED = "THE_BOOKS_DEPTH_AT_THAT_PRICE_IS_NOT_ESTABLISHED"
@@ -125,7 +130,25 @@ def _regions_expected_cents(table, probabilities) -> dict:
     if not rows:
         return dict(out, ok=False, refusal=R_NO_REGION_PROBABILITIES,
                     why="the payoff table is empty")
-    probs = {str(k): float(v) for k, v in dict(probabilities or {}).items()}
+    try:
+        raw_probs = dict(probabilities or {})
+        if any(not isinstance(k, str) for k in raw_probs):
+            return dict(out, ok=False, refusal=R_PROBABILITY_PARTITION)
+        probs = {k: float(v) for k, v in raw_probs.items()}
+    except (TypeError, ValueError, OverflowError):
+        return dict(out, ok=False, refusal=R_INVALID_PROBABILITY,
+                    why="every outcome probability must be a finite number")
+    invalid = [k for k, v in probs.items()
+               if isinstance(raw_probs[k], bool) or not math.isfinite(v)
+               or not 0 <= v <= 1]
+    if invalid:
+        return dict(out, ok=False, refusal=R_INVALID_PROBABILITY,
+                    invalid_regions=invalid,
+                    why="probabilities must be finite and between zero and one")
+    labels = [str(r.get("region", "")) for r in rows]
+    if len(set(labels)) != len(labels) or "" in labels or set(probs) - set(labels):
+        return dict(out, ok=False, refusal=R_PROBABILITY_PARTITION,
+                    why="probabilities must name exactly one value for each outcome region")
     if not probs:
         return dict(out, ok=False, refusal=R_NO_REGION_PROBABILITIES,
                     why=("an expectation needs a probability over the "
@@ -154,7 +177,14 @@ def _regions_expected_cents(table, probabilities) -> dict:
                          "their probabilities must sum to 1. %s does not, and "
                          "an expectation over a mis-normalised measure is not "
                          "an expectation" % total_p))
-    exp_cents = sum(probs[r["region"]] * float(r["joint_cents"]) for r in rows)
+    try:
+        payouts = [float(r["joint_cents"]) for r in rows]
+    except (TypeError, ValueError, KeyError, OverflowError):
+        return dict(out, ok=False, refusal=R_STRUCTURE_IS_UNESTABLISHABLE)
+    if any(not math.isfinite(v) or v < 0 for v in payouts):
+        return dict(out, ok=False, refusal=R_STRUCTURE_IS_UNESTABLISHABLE)
+    exp_cents = sum(probs[r["region"]] * payout
+                    for r, payout in zip(rows, payouts))
     return dict(out, ok=True, refusal=None,
                 expected_joint_cents=round(exp_cents, 6),
                 regions=len(rows), probabilities_sum_to=total_p)
@@ -163,7 +193,7 @@ def _regions_expected_cents(table, probabilities) -> dict:
 def indirect_candidate(*, structure, region_probabilities,
                        evidence_quality: str, fee_usd=None, depth=None,
                        incremental=None, capital_duration_h=None,
-                       worst_case=None) -> dict:
+                       worst_case=None, position_value=None) -> dict:
     """THE INDIRECT ACQUISITION, AS ONE CANDIDATE IN THE SAME UNIT.
 
     `value_usd` is EXPECTED net value over the position -- expected joint payout
@@ -200,7 +230,11 @@ def indirect_candidate(*, structure, region_probabilities,
                    undetermined_regions=list(d.get("undetermined_regions") or ()))
     if d.get("cost_cents") is None:
         return _no(R_FEES_NOT_PRICED, "the structure's cost is not stated")
-    if fee_usd is None:
+    try:
+        fee_valid = fee_usd is not None and not isinstance(fee_usd, bool) and math.isfinite(float(fee_usd))
+    except (TypeError, ValueError, OverflowError):
+        fee_valid = False
+    if not fee_valid:
         return _no(R_FEES_NOT_PRICED,
                    ("an alternative scored without its fee is a preference "
                     "manufactured by omission. At these margins the fee decides "
@@ -219,7 +253,21 @@ def indirect_candidate(*, structure, region_probabilities,
         return _no(R_FEES_NOT_PRICED,
                    "the new capital this would consume is not known")
 
-    exp = _regions_expected_cents(d.get("table") or (), region_probabilities)
+    table = d.get("table") or ()
+    if position_value is not None:
+        if not position_value.get("ok"):
+            return _no(R_STRUCTURE_IS_UNESTABLISHABLE,
+                       "the complete position, including uncovered inventory, was not valued")
+        table = [{"region": r["region"], "determined": True,
+                  "joint_cents": float(r["payout_usd"]) * 100}
+                 for r in position_value.get("regions", ())]
+        # An unresolved state has no terminal payout. It can be excluded from a
+        # terminal expectation only when the supplied measure explicitly gives
+        # it zero mass; missing probability is still refused below.
+        for region in position_value.get("unresolved_states", ()):
+            table.append({"region": region, "determined": (
+                (region_probabilities or {}).get(region) == 0), "joint_cents": 0})
+    exp = _regions_expected_cents(table, region_probabilities)
     if not exp.get("ok"):
         return _no(exp["refusal"], exp.get("why"),
                    **{k: v for k, v in exp.items()
@@ -247,9 +295,15 @@ def indirect_candidate(*, structure, region_probabilities,
     cost_usd = round(cost_usd_per_unit * units, 6)
     payout_per_unit = round(exp["expected_joint_cents"] / 100.0, 6)
     expected_payout = round(payout_per_unit * units, 6)
+    if position_value is not None:
+        cost_usd = float(position_value["cost_usd"])
+        expected_payout = round(exp["expected_joint_cents"] / 100.0, 6)
+        payout_per_unit = None
     fees = round(float(fee_usd), 6)
     expected_net = round(expected_payout - cost_usd - fees, 6)
-    wc = (worst_case or {}).get("worst_case_usd")
+    wc = ((position_value or {}).get("whole_position_usd")
+          if position_value is not None else
+          (worst_case or {}).get("worst_case_usd"))
     return dict(out, rankable=True, blocker=None,
                 scale=FIP.SCALE_WHOLE_POSITION,
                 units_valued=units,
@@ -259,6 +313,7 @@ def indirect_candidate(*, structure, region_probabilities,
                 expected_payout_usd_per_unit=payout_per_unit,
                 cost_usd_per_unit=cost_usd_per_unit,
                 cost_usd=cost_usd, fees_usd=fees,
+                position_includes_uncovered_inventory=position_value is not None,
                 scale_note=("comparable with `rank_with_hold`'s candidates, "
                             "which are scored over the whole position. The "
                             "classifier's cents are per unit and are multiplied "
@@ -278,10 +333,14 @@ def indirect_candidate(*, structure, region_probabilities,
 
 def _limit(limits: dict | None, key: str):
     v = dict(limits or {}).get(key)
-    return None if v is None else float(v)
+    if v is None:
+        return None
+    if isinstance(v, bool) or not math.isfinite(float(v)) or float(v) < 0:
+        raise ValueError("invalid risk limit: " + key)
+    return float(v)
 
 
-def decide(*, hold_ranking: dict, indirect=None, limits: dict | None = None,
+def decide(*, hold_ranking: dict, indirect=None, indirect_candidates=None, limits: dict | None = None,
            capital_duration_h=None) -> dict:
     """ONE COMPARISON. `hold_ranking` is a `rank_with_hold` result, UNCHANGED.
 
@@ -303,21 +362,32 @@ def decide(*, hold_ranking: dict, indirect=None, limits: dict | None = None,
     blocked = [dict(c) for c in (hr.get("not_rankable") or [])]
 
     # ── THE INHERITED GUARD ──────────────────────────────────────────
+    def finite(v):
+        try:
+            return not isinstance(v, bool) and v is not None and math.isfinite(float(v))
+        except (TypeError, ValueError, OverflowError):
+            return False
+
     hold_priced = any(c.get("action") == "HOLD"
-                      and c.get("value_usd") is not None for c in existing)
+                      and finite(c.get("value_usd")) for c in existing)
     out["hold_is_priced"] = hold_priced
 
+    alternatives = list(indirect_candidates or ())
     if indirect is not None:
-        if indirect.get("rankable"):
-            existing.append(dict(indirect, qty=indirect.get("units")))
+        alternatives.append(indirect)
+    for candidate in alternatives:
+        if candidate.get("rankable"):
+            existing.append(dict(candidate, qty=candidate.get("qty", candidate.get("units"))))
         else:
-            blocked.append({"action": indirect.get("action"),
-                            "blocker": indirect.get("blocker"),
-                            "value_usd": None, "why": indirect.get("why")})
+            blocked.append(dict(candidate, value_usd=None))
 
     # ── CONSTRAINTS, APPLIED BEFORE THE CHOICE ───────────────────────
-    downside_limit = _limit(limits, "max_downside_usd")
-    capital_limit = _limit(limits, "max_incremental_capital_usd")
+    try:
+        downside_limit = _limit(limits, "max_downside_usd")
+        capital_limit = _limit(limits, "max_incremental_capital_usd")
+    except (TypeError, ValueError, OverflowError):
+        return dict(out, selected=None, refusal="INVALID_RISK_LIMIT",
+                    selection_reason="a supplied risk limit is not a finite nonnegative amount")
     out["limits_applied"] = {
         "max_downside_usd": downside_limit,
         "max_incremental_capital_usd": capital_limit,
@@ -329,7 +399,22 @@ def decide(*, hold_ranking: dict, indirect=None, limits: dict | None = None,
     for c in existing:
         ds = c.get("downside_usd")
         ic = c.get("incremental_capital_usd")
-        if downside_limit is not None and ds is not None and ds < -abs(
+        if c.get("action") == ACTION_ACQUIRE_INDIRECT_HEDGE:
+            missing = []
+            for key, limit, value in (("downside_usd", downside_limit, ds),
+                                      ("incremental_capital_usd", capital_limit, ic)):
+                if limit is not None:
+                    try:
+                        valid = value is not None and math.isfinite(float(value))
+                    except (TypeError, ValueError, OverflowError):
+                        valid = False
+                    if not valid:
+                        missing.append(key)
+            if missing:
+                blocked.append(dict(c, blocker=R_REQUIRED_RISK_MEASUREMENT,
+                                    missing=missing, value_usd=None))
+                continue
+        if downside_limit is not None and ds is not None and float(ds) < -abs(
                 downside_limit):
             blocked.append(dict(c, blocker=R_DOWNSIDE_LIMIT_BREACHED,
                                 value_usd=None,
@@ -348,7 +433,16 @@ def decide(*, hold_ranking: dict, indirect=None, limits: dict | None = None,
             continue
         admitted.append(c)
 
-    scored = [c for c in admitted if c.get("value_usd") is not None]
+    scored = []
+    for c in admitted:
+        try:
+            finite_value = c.get("value_usd") is not None and math.isfinite(float(c["value_usd"]))
+        except (TypeError, ValueError, OverflowError):
+            finite_value = False
+        if finite_value:
+            scored.append(c)
+        elif c.get("value_usd") is not None:
+            blocked.append(dict(c, value_usd=None, blocker="NON_FINITE_ACTION_VALUE"))
     scored.sort(key=lambda c: (-float(c["value_usd"]),
                                float(c.get("incremental_capital_usd") or 0.0)))
     out["candidates"] = scored
@@ -392,7 +486,7 @@ def decide(*, hold_ranking: dict, indirect=None, limits: dict | None = None,
                                       "incremental_capital_usd",
                                       "capital_duration_h",
                                       "evidence_quality")}
-            for k, c in ((c["action"], c) for c in scored)},
+            for k, c in ((c.get("candidate_id") or c["action"], c) for c in scored)},
         what_this_is_not=(
             "an authorisation. A selected ACQUIRE_INDIRECT_HEDGE means the "
             "expected economics are best on these inputs and the constraints "

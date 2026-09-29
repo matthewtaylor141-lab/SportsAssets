@@ -895,12 +895,20 @@ async def test_recovery_resolves_an_ambiguity_only_from_recorded_evidence():
         assert (await RS.get(c, op2))["reservation"]["state"] == RS.AMBIGUOUS
 
         # (c) A SEARCH THAT COVERED TERMINAL ORDERS AND FOUND NOTHING DOES.
+        # Synthetic venue evidence covers this recorded send and declares the
+        # point through which the history is complete. A wall clock alone is
+        # not a visibility guarantee.
+        await c.execute("UPDATE bettor_funded_intents SET sent_at=to_timestamp($2) "
+                        "WHERE intent_id=$1", PFX + "id", 1790000000.0)
         good = await RS.record_venue_evidence(
             c, evidence_id=PFX + "evd-all", operation_id=op2, account_id=ACCT,
             venue="PMUS", us_market_slug=SLUG_A, intent_id=PFX + "id",
             kind=RS.EV_NO_SUCH_ORDER,
             search_endpoint="GET /v1/orders?status=all",
             search_scope={"account": ACCT, "market": SLUG_A,
+                          "operation_id": op2, "intent_id": PFX + "id",
+                          "status": "ALL", "pagination_complete": True,
+                          "complete_through_epoch_s": 1790000003.0,
                           "includes": ["open", "filled", "cancelled",
                                        "rejected"]},
             read_at=1790000003.0, covered_terminal_orders=True,

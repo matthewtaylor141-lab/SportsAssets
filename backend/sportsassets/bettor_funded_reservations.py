@@ -572,14 +572,26 @@ async def record_venue_evidence(conn, *, evidence_id: str, operation_id: str,
             have = dict(await conn.fetchrow(
                 "SELECT * FROM bettor_funded_operation_evidence "
                 " WHERE evidence_id = $1", str(evidence_id)) or {})
-            differs = [f for f, want in (
-                ("operation_id", str(operation_id)), ("kind", kind),
-                ("us_market_slug", str(us_market_slug)),
-                ("venue_order_id",
-                 None if venue_order_id is None else str(venue_order_id)),
-                ("covered_terminal_orders", bool(covered_terminal_orders)),
-                ("results_returned", int(results_returned)))
-                if f in have and have[f] != want]
+            expected = {
+                "operation_id": str(operation_id), "account_id": str(account_id),
+                "venue": str(venue), "us_market_slug": str(us_market_slug),
+                "intent_id": None if intent_id is None else str(intent_id),
+                "kind": kind, "venue_order_id": None if venue_order_id is None else str(venue_order_id),
+                "search_endpoint": str(search_endpoint),
+                "covered_terminal_orders": bool(covered_terminal_orders),
+                "results_returned": int(results_returned),
+                "window_from_epoch_s": window_from_epoch_s,
+                "window_to_epoch_s": window_to_epoch_s}
+            differs = [f for f, want in expected.items() if f not in have or have[f] != want]
+            for field, value in (("search_scope", search_scope or {}), ("raw", raw or {})):
+                stored = have.get(field)
+                if isinstance(stored, str):
+                    stored = _json.loads(stored)
+                if stored != _json.loads(_json.dumps(value, default=str)):
+                    differs.append(field)
+            stored_time = have.get("read_at")
+            if stored_time is None or abs(stored_time.timestamp() - float(read_at)) > 0.000001:
+                differs.append("read_at")
             if differs:
                 return dict(out, ok=False, refusal=R_EVIDENCE_NOT_BOUND,
                             conflicts=differs, stored=have,
@@ -607,6 +619,64 @@ async def record_venue_evidence(conn, *, evidence_id: str, operation_id: str,
     return dict(out, ok=True, written=True, already=False)
 
 
+def evidence_matches_operation(evidence, reservation):
+    """Validate the recorded read against the operation, not its label alone."""
+    import datetime
+    import json
+    import math
+
+    e, r = dict(evidence), dict(reservation)
+    bad = []
+    for field, expected in (("operation_id", r.get("operation_id")),
+                            ("account_id", e.get("group_account")),
+                            ("venue", e.get("group_venue")),
+                            ("us_market_slug", r.get("us_market_slug")),
+                            ("intent_id", r.get("intent_id"))):
+        if expected is None or str(e.get(field) or "") != str(expected):
+            bad.append(field)
+    if e.get("kind") == EV_NO_SUCH_ORDER:
+        def epoch(value):
+            if isinstance(value, datetime.datetime):
+                value = value.timestamp()
+            try:
+                n = float(value)
+                return n if math.isfinite(n) else None
+            except (TypeError, ValueError, OverflowError):
+                return None
+        scope = e.get("search_scope") or {}
+        if isinstance(scope, str):
+            try:
+                scope = json.loads(scope)
+            except (TypeError, ValueError):
+                scope = {}
+        if not isinstance(scope, dict):
+            scope = {}
+        # A complete search must explicitly correlate this request and include
+        # all states/pages. An empty OPEN page cannot satisfy these assertions.
+        required = {"operation_id": r.get("operation_id"),
+                    "intent_id": r.get("intent_id"),
+                    "status": "ALL", "pagination_complete": True}
+        for field, value in required.items():
+            if value is None or scope.get(field) != value:
+                bad.append("search_scope." + field)
+        endpoint = str(e.get("search_endpoint") or "").lower()
+        if not endpoint or "open" in endpoint or not e.get("covered_terminal_orders"):
+            bad.append("terminal_coverage")
+        if e.get("results_returned") != 0:
+            bad.append("results_returned")
+        sent = epoch(e.get("intent_sent_at"))
+        start = epoch(e.get("window_from_epoch_s"))
+        end = epoch(e.get("window_to_epoch_s"))
+        read = epoch(e.get("read_at"))
+        # Absence also needs a venue-established visibility watermark. Wall
+        # clock time alone says nothing about eventual consistency of a search.
+        visible = epoch(scope.get("complete_through_epoch_s"))
+        if None in (sent, start, end, read, visible) or not (
+                start <= sent <= end <= read and sent <= visible <= end):
+            bad.append("search_window_and_visibility")
+    return {"ok": not bad, "mismatched": bad}
+
+
 async def _usable_evidence(conn, *, operation_id, kind, reservation) -> dict:
     """The evidence for this operation that is actually BOUND to its facts.
 
@@ -623,11 +693,13 @@ async def _usable_evidence(conn, *, operation_id, kind, reservation) -> dict:
         return dict(out, ok=False, refusal=R_EVIDENCE_SCHEMA_UNAVAILABLE,
                     why=str(exc))
     rows = [dict(r) for r in await conn.fetch(
-        "SELECT e.*, g.account_id AS group_account FROM "
+        "SELECT e.*, g.account_id AS group_account, g.venue AS group_venue, "
+        " i.sent_at AS intent_sent_at FROM "
         "  bettor_funded_operation_evidence e "
         "  JOIN bettor_funded_leg_reservations r "
         "       ON r.operation_id = e.operation_id "
         "  JOIN bettor_funded_portfolio_groups g ON g.group_id = r.group_id "
+        "  LEFT JOIN bettor_funded_intents i ON i.intent_id = r.intent_id "
         " WHERE e.operation_id = $1 AND e.kind = $2 "
         " ORDER BY e.read_at DESC", str(operation_id), kind)]
     if not rows:
@@ -635,16 +707,10 @@ async def _usable_evidence(conn, *, operation_id, kind, reservation) -> dict:
                     why=("no %s evidence is recorded against this operation. A "
                          "caller's assertion is not a substitute" % kind))
     for r in rows:
-        if str(r["us_market_slug"]) != str(reservation["us_market_slug"]):
-            continue
-        if str(r["account_id"]) != str(r["group_account"]):
-            continue
-        if reservation.get("intent_id") and r.get("intent_id") \
-                and str(r["intent_id"]) != str(reservation["intent_id"]):
-            continue
-        if kind == EV_NO_SUCH_ORDER and not r["covered_terminal_orders"]:
-            continue
-        return dict(out, ok=True, refusal=None, evidence=r)
+        check = evidence_matches_operation(r, reservation)
+        if check["ok"]:
+            return dict(out, ok=True, refusal=None, evidence=r)
+    out["evidence_checks"] = [evidence_matches_operation(r, reservation) for r in rows]
     return dict(out, ok=False,
                 refusal=(R_EVIDENCE_SEARCH_COULD_NOT_HAVE_FOUND_IT
                          if kind == EV_NO_SUCH_ORDER else R_EVIDENCE_NOT_BOUND),
@@ -789,6 +855,7 @@ async def live(conn, *, group_id: str | None = None,
     does not yet know."""
     sql = ("SELECT r.* FROM bettor_funded_leg_reservations r "
            "  JOIN bettor_funded_portfolio_groups g ON g.group_id = r.group_id "
+        "  LEFT JOIN bettor_funded_intents i ON i.intent_id = r.intent_id "
            " WHERE r.state = ANY($1::text[])")
     args: list = [list(LIVE_STATES)]
     if group_id is not None:
@@ -875,6 +942,7 @@ async def reserved_collateral_usd(conn, *,
     sql = ("SELECT r.*, g.account_id, g.event_key "
            "  FROM bettor_funded_leg_reservations r "
            "  JOIN bettor_funded_portfolio_groups g ON g.group_id = r.group_id "
+        "  LEFT JOIN bettor_funded_intents i ON i.intent_id = r.intent_id "
            " WHERE r.state = ANY($1::text[])")
     args: list = [list(LIVE_STATES)]
     if account_id is not None:

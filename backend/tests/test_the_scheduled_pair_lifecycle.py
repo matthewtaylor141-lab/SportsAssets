@@ -909,8 +909,8 @@ async def test_the_complete_scheduled_pair_lifecycle(monkeypatch):
         naked = [r for r in view["risks"] if r["risk"] == PC.RISK_UNPAIRED]
         assert naked, view["risks"]
         assert naked[0]["group_id"] == GROUP
-        assert naked[0]["primary_filled_qty"] == pytest.approx(10.0)
-        assert naked[0]["hedge_filled_qty"] == pytest.approx(6.0)
+        assert naked[0]["primary_residual_qty"] == pytest.approx(10.0)
+        assert naked[0]["hedge_residual_qty"] == pytest.approx(6.0)
         assert naked[0]["unpaired_qty"] == pytest.approx(4.0)
         assert "MATCHED units" in naked[0]["what_it_means"]
         _stage("operator_view", risk_count=view["risk_count"],

@@ -207,7 +207,7 @@ def test_a_different_quantity_or_price_is_a_different_order():
     assert fewer.digest != base.digest
     assert dearer.digest != base.digest
     assert fewer.quantity == 3.0 and base.quantity == 6.0
-    assert dearer.limit_price == 0.44
+    assert dearer.limit_price == 0.56
 
 
 def test_the_quantity_is_the_proposed_one_not_the_requested_one():
@@ -220,7 +220,7 @@ def test_the_quantity_is_the_proposed_one_not_the_requested_one():
 
 def test_the_price_comes_from_the_candidate_and_says_which_part_of_it():
     quoted = plan(SHORT_ID)
-    assert quoted.limit_price == 0.30
+    assert quoted.limit_price == 0.70
     assert "own quoted price" in quoted.price_from
     # With no per-candidate quote -- a supplier that read a shared depth for the
     # position -- the price is the winning LEG's own basis, still the candidate's.
@@ -230,7 +230,7 @@ def test_the_price_comes_from_the_candidate_and_says_which_part_of_it():
         account_id="acct", venue="PMUS", group_id="grp-1",
         held_position={"us_market_slug": HELD_SLUG},
         inputs_expire_at=1_000_000.0)
-    assert unquoted.limit_price == 0.41
+    assert unquoted.limit_price == 0.59
     assert "winning leg's own cost_cents_per_unit" in unquoted.price_from
 
 
@@ -289,7 +289,7 @@ async def test_the_side_reaches_the_order_record():
     # and the binding records the side beside it.
     assert seen["us_market_slug"] == HEDGE_SLUG
     assert seen["quantity"] == 6.0
-    assert seen["limit_price"] == 0.30
+    assert seen["limit_price"] == 0.70
     assert got["order_binding"]["bound"] is True
     assert got["order_binding"]["side"] == HS.SIDE_SHORT
     assert got["order_binding"]["candidate_id"] == SHORT_ID
@@ -358,5 +358,5 @@ def test_the_production_supplier_still_hardcodes_the_old_hedge_plan_fields():
     assert 'facts["hedge_limit_price"]' not in call
     # IT READS THE PLAN AND CHECKS IT AGAINST THE RANKING.
     assert "plan=acq_plan" in call
-    assert "expect_candidate_id=best" in call
-    assert "expect_digest=acq_plan.digest" in call
+    assert "expect_candidate_id=cid" in call
+    assert 'expect_digest=selected["plan_digest"]' in call

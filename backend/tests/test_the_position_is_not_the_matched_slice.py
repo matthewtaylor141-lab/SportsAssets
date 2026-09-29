@@ -452,32 +452,13 @@ def test_the_ranking_reports_which_candidates_do_not_reach_the_decision():
         wanted_qty=10, fee_usd=0.0, fee_basis="zero",
         held_leg=HELD, sport_permits_tie=False)
     assert len(got["ranked"]) == 2, got
-    assert got["carried_to_the_decision"] == got["ranked"][0]["condition_id"]
-    assert got["not_carried_to_the_decision"] == [
-        got["ranked"][1]["condition_id"]]
-    assert "unreachable" in got["the_comparison_sees_one_hedge"]
-    assert "1 ranked candidate(s) were not carried" in \
-        got["the_comparison_sees_one_hedge"]
+    assert got["carried_to_the_decision"] == [r["condition_id"] for r in got["ranked"]]
+    assert got["not_carried_to_the_decision"] == []
+    assert got["the_comparison_sees_one_hedge"] is False
 
 
 def test_the_order_is_by_floor_which_is_not_the_order_by_expected_value():
-    """THE GAP, DEMONSTRATED ON TWO CANDIDATES THAT DISAGREE.
-
-    `cheap` at $0.30 has the higher floor. `dear` at $0.45 has the lower floor
-    and a strictly better payoff in the region where the held side WINS -- it
-    costs more and covers the same six contracts, so in the held-wins region it
-    is worse, and in the hedge-wins region it is worse too... which is why the
-    honest construction is the reverse: a hedge that costs MORE cannot have a
-    better floor here.
-
-    So what this test actually shows is narrower and still sufficient: the
-    ranking is a total order on the FLOOR, `carried_to_the_decision` is its
-    maximum, and the decision therefore never sees the second candidate at all.
-    Whether the second would have won under the approved objective cannot be
-    determined from this ranking -- which is the point. The comparison is not
-    complete, and nothing here claims the selected candidate is the best one
-    under the objective.
-    """
+    """The floor diagnostic retains its ordering without pruning EV alternatives."""
     cheap = leg("cheap#ORDER_INTENT_BUY_SHORT", "B", 30, 6)
     dear = leg("dear#ORDER_INTENT_BUY_SHORT", "B", 45, 6)
     got = PC.rank_admitted(
@@ -495,9 +476,8 @@ def test_the_order_is_by_floor_which_is_not_the_order_by_expected_value():
     assert got["ranked"][0]["condition_id"] == cheap.condition_id
     assert scores[0] == pytest.approx(-1.30, abs=1e-6)
     assert scores[1] == pytest.approx(-2.20, abs=1e-6)
-    # AND THE SECOND NEVER REACHES THE DECISION.
-    assert dear.condition_id in got["not_carried_to_the_decision"]
-    assert "the approved objective" in got["the_comparison_sees_one_hedge"]
+    assert dear.condition_id in got["carried_to_the_decision"]
+    assert got["floor_is_diagnostic_only"] is True
 
 
 def test_the_detail_map_and_the_admitted_map_no_longer_share_a_name():

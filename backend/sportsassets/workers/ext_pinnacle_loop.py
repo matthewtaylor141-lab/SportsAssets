@@ -4277,6 +4277,17 @@ async def _fee_for_candidates(legs, *, at, sport=None,
         # THE LARGEST CANDIDATE'S OWN PRICE AND SIZE. A single reading is used
         # for the comparison, so it must not flatter the cheapest candidate:
         # taking the most expensive one keeps the shared reading conservative.
+        candidate_fees = {}
+        for row in rows:
+            available = row.get("depth_qty")
+            qty_for_row = min(float(wanted_qty or 0), float(available or 0))
+            if qty_for_row <= 0 or not qty_for_row.is_integer():
+                continue
+            candidate_fees[row.get("candidate_id") or row["market_slug"]] = {
+                "fee_usd": float(sched.exact(theta, int(qty_for_row), float(row["price"]))),
+                "fee_basis": "DATED_SCHEDULE_AT_THIS_CANDIDATES_PRICE_AND_PROPOSED_QUANTITY",
+                "fee_quantity": qty_for_row}
+        out["candidate_fees"] = candidate_fees
         worst = max(rows, key=lambda r: float(r.get("price") or 0.0))
         # THE QUANTITY WE WOULD ACQUIRE, NOT THE WHOLE DISPLAYED DEPTH. Sizing
         # the fee on `depth_qty` priced 500 contracts when 10 were wanted and
@@ -4303,7 +4314,7 @@ R_NO_ADMISSIBLE_HEDGE_CANDIDATE = (
     "NO_SIBLING_CONTRACT_ON_THIS_FIXTURE_COULD_BE_BUILT_INTO_A_LEG")
 
 
-async def _candidate_quote(conn, slug, *, now=None) -> dict:
+async def _candidate_quote(conn, slug, side, *, now=None) -> dict:
     """ONE CANDIDATE CONTRACT'S OWN PRICE AND DEPTH.
 
     It goes through `venue_quote`, which is the same paced acquisition-ladder
@@ -4312,13 +4323,13 @@ async def _candidate_quote(conn, slug, *, now=None) -> dict:
     there and arrives here without a price, and `candidate_legs_for` then
     refuses the candidate rather than pricing it off the held contract's book.
 
-    THE INTENT IS LONG because acquiring a hedge is a purchase. The venue
-    carries one instrument per market and the side is the intent, so asking for
-    the wrong side would price the complement of the contract we mean.
+    LONG consumes the ask; SHORT consumes the bid at the complementary cost.
+    Depth is restricted to levels at the quoted cost, not the entire ladder.
     """
     try:
-        got = await venue_quote(conn, us_slug=slug,
-                                intent="ORDER_INTENT_BUY_LONG", now=now)
+        if side not in ("ORDER_INTENT_BUY_LONG", "ORDER_INTENT_BUY_SHORT"):
+            return {"ok": False, "refusal": "HEDGE_SIDE_NOT_IDENTIFIED"}
+        got = await venue_quote(conn, us_slug=slug, intent=side, now=now)
     except Exception as exc:                                    # noqa: BLE001
         return {"ok": False, "error": type(exc).__name__,
                 "why": ("the candidate's own ladder read failed; the candidate "
@@ -4326,7 +4337,22 @@ async def _candidate_quote(conn, slug, *, now=None) -> dict:
     got = dict(got or {})
     if not got.get("ok"):
         return got
-    return dict(got, price=got.get("cost_per_share"))
+    levels = (got.get("acquisition_ladder") or {}).get("levels") or []
+    if not levels:
+        return dict(got, ok=False, refusal="HEDGE_PRICE_LEVEL_NOT_IDENTIFIED")
+    price = levels[0].get("acquisition_price")
+    depth = sum(float(r["qty"]) for r in levels if r.get("acquisition_price") == price)
+    currency = got.get("book_currency") or {}
+    established = currency.get("book_state_established_at_epoch_s")
+    bound = currency.get("bound_s")
+    received = got.get("read_at")
+    if None in (established, bound, received):
+        return dict(got, ok=False, refusal="HEDGE_EVIDENCE_EXPIRY_NOT_ESTABLISHED")
+    expiry = min(float(established) + float(bound),
+                 float(received) + MAX_OUR_PROCESSING_DELAY_S)
+    return dict(got, price=price, cost_per_share=price,
+                api_price=levels[0].get("api_price"), depth_qty=depth,
+                inputs_expire_at=expiry)
 
 
 async def _registry_state(conn) -> dict:
@@ -4679,7 +4705,9 @@ async def funded_pair_inputs(conn, pos, *, at, deferred=None,
     return dict(out, ok=True,
                 held_leg=(held.get("leg") if held.get("ok") else None),
                 candidate_legs=[c["leg"] for c in (cands.get("legs") or [])],
-                candidate_leg_details=list(cands.get("legs") or []),
+                candidate_leg_details=[dict(c, **(fee_read.get("candidate_fees") or {}).get(
+                    c.get("candidate_id") or c["market_slug"], {"fee_usd": None}))
+                    for c in (cands.get("legs") or [])],
                 decision_id="dec:%s:%d" % (intent_id[-24:], int(at)),
                 operation_id="op:%s:%d" % (intent_id[-24:], int(at)),
                 # None BY DESIGN: `discover` asks `predict_for` per structure.

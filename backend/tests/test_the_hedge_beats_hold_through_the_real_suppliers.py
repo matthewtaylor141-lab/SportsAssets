@@ -198,12 +198,12 @@ def _prose_reader(text=None):
 
 
 def _quoter(prices):
-    async def quote(slug):
+    async def quote(slug, side):
         p = prices.get(slug)
         if p is None:
             return {"ok": False, "refusal": "NOT_IN_THE_CAPTURED_BOOK"}
         return {"ok": True, "cost_per_share": p[0], "depth_qty": p[1],
-                "available_qty": p[1]}
+                "available_qty": p[1], "inputs_expire_at": NOW + 30}
     return quote
 
 

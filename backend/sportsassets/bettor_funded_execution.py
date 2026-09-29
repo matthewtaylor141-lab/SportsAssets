@@ -145,11 +145,20 @@ def safe_cent(price: float, intent: str) -> float | None:
     Returns None when the rounded price leaves the tradeable open interval,
     because a bound we cannot represent is not a bound we may quietly widen.
     """
-    import math
+    from decimal import Decimal, InvalidOperation, ROUND_FLOOR, ROUND_CEILING
 
-    p = float(price)
-    cents = math.floor(p * 100.0) if intent == LONG else math.ceil(p * 100.0)
-    out = round(cents / 100.0, 2)
+    if intent not in (LONG, "ORDER_INTENT_BUY_SHORT"):
+        return None
+    try:
+        p = Decimal(str(price))
+        if not p.is_finite():
+            return None
+        # Binary multiplication moves exact cents (e.g. .56 * 100) across a
+        # rounding boundary. Decimal preserves an already representable limit.
+        out = float(p.quantize(Decimal("0.01"), rounding=(
+            ROUND_FLOOR if intent == LONG else ROUND_CEILING)))
+    except (InvalidOperation, ValueError, TypeError, OverflowError):
+        return None
     if not (0.0 < out < 1.0):
         return None
     # AND IT MUST SURVIVE THE ADAPTER'S OWN FORMATTING UNCHANGED, so the

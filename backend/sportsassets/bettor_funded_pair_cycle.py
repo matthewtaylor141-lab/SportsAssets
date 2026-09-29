@@ -330,37 +330,14 @@ def discover(*, held_leg, candidate_legs, sport_permits_tie,
 # 3 · THE DECISION, IN ONE COMPARISON
 # ═════════════════════════════════════════════════════════════════════
 
-async def decide_and_record(conn, *, decision_id: str, account_id: str,
-                            venue: str, fixture: str, group_id: str | None,
-                            hold_ranking: dict, admitted: dict | None,
-                            region_probabilities: dict | None = None,
-                            evidence_quality: str = FD.EVIDENCE_NOT_ESTABLISHED,
-                            limits: dict | None = None,
-                            fee_usd=None, depth=None, incremental=None,
-                            capital_duration_h=None,
-                            holding_policy: str = FL.POLICY_MAY_EXIT_EARLY,
-                            filled_qty=None,
-                            use_approved_model: bool = False,
-                            model_inputs: dict | None = None,
-                            now: float | None = None) -> dict:
-    """ONE COMPARISON, THEN WRITE IT DOWN BEFORE THE OUTCOME EXISTS.
-
-    `hold_ranking` is `bettor_mgmt_select.rank_with_hold`'s own output, UNCHANGED
-    -- so HOLD, DIRECT_EXIT and REDUCE are the ones the deployed selector
-    produced, priced by the deployed valuation, and the indirect acquisition
-    joins THAT list rather than replacing it. `decide` ranks the whole set on
-    expected net value and applies the downside and incremental-capital limits
-    BEFORE choosing, so a breaching candidate is never selected.
-
-    THE LEDGER ROW IS WRITTEN WITH THE SCOPE ITS BOUND IS CONDITIONAL ON: the
-    action, the filled quantity and the holding policy. A floor computed for
-    HOLD-to-settlement says nothing about a position sold on cycle three, and
-    filing that divergence as a modelling error would be filing the wrong
-    finding.
-    """
-    at = float(now if now is not None else time.time())
-    out: dict[str, Any] = {"version": VERSION, "at": at,
-                           "decision_id": decision_id, "group_id": group_id}
+async def _price_indirect(conn, *, admitted, region_probabilities=None,
+                          evidence_quality=FD.EVIDENCE_NOT_ESTABLISHED,
+                          fee_usd=None, depth=None, incremental=None,
+                          capital_duration_h=None, use_approved_model=False,
+                          model_inputs=None, position_value=None,
+                          candidate_id=None, plan_digest=None):
+    """Price one alternative; this helper never writes a decision or sends."""
+    out = {}
     # ── THE APPROVED MODEL, WHEN THIS LANE IS ASKED TO DECIDE FROM ONE ──
     #
     # `use_approved_model` is what makes the registry load-bearing instead of
@@ -432,10 +409,84 @@ async def decide_and_record(conn, *, decision_id: str, account_id: str,
             region_probabilities=region_probabilities,
             evidence_quality=evidence_quality, fee_usd=fee_usd, depth=depth,
             incremental=incremental, capital_duration_h=capital_duration_h,
-            worst_case=out["worst_case"])
-    out["indirect_candidate"] = cand
-    verdict = FD.decide(hold_ranking=hold_ranking, indirect=cand,
+            worst_case=out["worst_case"], position_value=position_value)
+    if cand is not None:
+        cand = dict(cand, candidate_id=candidate_id or admitted.get("condition_id"),
+                    plan_digest=plan_digest)
+        if prediction:
+            cand["prediction"] = prediction
+    return dict(out, candidate=cand, prediction=prediction)
+
+
+async def decide_and_record(conn, *, decision_id: str, account_id: str,
+                            venue: str, fixture: str, group_id: str | None,
+                            hold_ranking: dict, admitted: dict | None,
+                            region_probabilities: dict | None = None,
+                            evidence_quality: str = FD.EVIDENCE_NOT_ESTABLISHED,
+                            limits: dict | None = None,
+                            fee_usd=None, depth=None, incremental=None,
+                            capital_duration_h=None,
+                            holding_policy: str = FL.POLICY_MAY_EXIT_EARLY,
+                            filled_qty=None,
+                            use_approved_model: bool = False,
+                            model_inputs: dict | None = None,
+                            now: float | None = None,
+                            indirect_options: list | None = None) -> dict:
+    """ONE COMPARISON, THEN WRITE IT DOWN BEFORE THE OUTCOME EXISTS.
+
+    `hold_ranking` is `bettor_mgmt_select.rank_with_hold`'s own output, UNCHANGED
+    -- so HOLD, DIRECT_EXIT and REDUCE are the ones the deployed selector
+    produced, priced by the deployed valuation, and the indirect acquisition
+    joins THAT list rather than replacing it. `decide` ranks the whole set on
+    expected net value and applies the downside and incremental-capital limits
+    BEFORE choosing, so a breaching candidate is never selected.
+
+    THE LEDGER ROW IS WRITTEN WITH THE SCOPE ITS BOUND IS CONDITIONAL ON: the
+    action, the filled quantity and the holding policy. A floor computed for
+    HOLD-to-settlement says nothing about a position sold on cycle three, and
+    filing that divergence as a modelling error would be filing the wrong
+    finding.
+    """
+    at = float(now if now is not None else time.time())
+    out: dict[str, Any] = {"version": VERSION, "at": at,
+                           "decision_id": decision_id, "group_id": group_id}
+    options = indirect_options
+    if options is None:
+        options = [] if admitted is None else [{
+            "admitted": admitted, "region_probabilities": region_probabilities,
+            "evidence_quality": evidence_quality, "fee_usd": fee_usd,
+            "depth": depth, "incremental": incremental,
+            "capital_duration_h": capital_duration_h,
+            "use_approved_model": use_approved_model, "model_inputs": model_inputs}]
+    priced = []
+    for option in options:
+        try:
+            priced.append(await _price_indirect(conn, **option))
+        except Exception as exc:
+            # An unreadable hedge model removes that alternative, not the
+            # independently priced exit or the other positions' decisions.
+            priced.append({"candidate": {
+                "action": FD.ACTION_ACQUIRE_INDIRECT_HEDGE,
+                "candidate_id": option.get("candidate_id"), "rankable": False,
+                "value_usd": None, "blocker": "HEDGE_VALUATION_UNAVAILABLE",
+                "error_type": type(exc).__name__}})
+    candidates = [r["candidate"] for r in priced if r.get("candidate") is not None]
+    out["indirect_candidates"] = candidates
+    out["indirect_candidate"] = candidates[0] if len(candidates) == 1 else None
+    out["candidate_predictions"] = priced
+    verdict = FD.decide(hold_ranking=hold_ranking,
+                        indirect_candidates=candidates,
                         limits=limits, capital_duration_h=capital_duration_h)
+    winner = verdict.get("selected_candidate") or {}
+    prediction = winner.get("prediction")
+    selected_pricing = next((r for r in priced
+                            if (r.get("candidate") or {}).get("candidate_id") == winner.get("candidate_id")), {})
+    # Keep the established diagnostic fields for single-candidate callers.
+    diagnostic = selected_pricing or (priced[0] if len(priced) == 1 else {})
+    for key in ("prediction", "prediction_refusal", "prediction_why",
+                "region_probabilities_came_from", "worst_case"):
+        if key in diagnostic:
+            out[key] = diagnostic[key]
     out["decision"] = verdict
     # `selected` IS THE ACTION NAME; `selected_candidate` IS THE ROW. Reading
     # `selected` as a dict silently produced no action at all -- caught by the
@@ -545,6 +596,9 @@ async def acquire_second_leg(conn, *, operation_id: str, group_id: str,
                                 "candidate_id": plan.candidate_id,
                                 "side": plan.side,
                                 "venue_slug": plan.venue_slug}
+        if plan.check_not_expired(at)["expired"]:
+            return dict(out, ok=False, refusal="ACQUISITION_INPUTS_EXPIRED",
+                        submitted=False, nothing_was_sent=True)
         # THE DIGEST BINDS IT. The persisted decision records the digest of the
         # plan it was ranked with; a substituted plan changes the digest.
         if expect_digest is not None and plan.digest != expect_digest:
@@ -677,6 +731,24 @@ RISK_BOUND_NOT_HELD = "A_DECISIONS_CLAIMED_WORST_CASE_DID_NOT_HOLD"
 RISK_BOUND_INVALIDATED = "A_CLAIMED_BOUNDS_SCOPE_WAS_INVALIDATED_LATER"
 
 
+def residual_pair_risk(row):
+    """Report either unmatched side from the canonical remaining inventory."""
+    primary, hedge = float(row["primary_qty"]), float(row["hedge_qty"])
+    difference = round(primary - hedge, 6)
+    if difference == 0:
+        return None
+    role = "PRIMARY" if difference > 0 else "HEDGE"
+    return {
+        "risk": RISK_UNPAIRED, "group_id": row["group_id"],
+        "fixture": row["event_key"], "legs": int(row["legs"]),
+        "structure": row["structure"], "hedge_intent": row["hedge_intent"],
+        "primary_residual_qty": primary, "hedge_residual_qty": hedge,
+        "unpaired_role": role, "unpaired_qty": abs(difference),
+        "what_it_means": (
+            "%s remaining %s contract(s) have no matching remaining leg. "
+            "Closed or settled legs carry zero inventory." % (abs(difference), role))}
+
+
 async def operator_view(conn, *, account_id: str | None = None,
                         limit: int = 50) -> dict:
     """THE ACTUAL DECISION AND THE OUTSTANDING RISKS, for the command centre.
@@ -775,18 +847,15 @@ async def operator_view(conn, *, account_id: str | None = None,
         unpaired = await conn.fetch(
             "SELECT g.group_id, g.event_key, g.structure, g.hedge_intent, "
             "       count(DISTINCT i.intent_id) AS legs, "
-            "       coalesce(sum(q.filled) FILTER "
+            "       coalesce(sum(CASE WHEN i.closed_at IS NULL THEN "
+            "           greatest(coalesce(i.residual_qty, 0), 0) ELSE 0 END) FILTER "
             "         (WHERE i.leg_role = 'PRIMARY'), 0)::float8 AS primary_qty,"
-            "       coalesce(sum(q.filled) FILTER "
+            "       coalesce(sum(CASE WHEN i.closed_at IS NULL THEN "
+            "           greatest(coalesce(i.residual_qty, 0), 0) ELSE 0 END) FILTER "
             "         (WHERE i.leg_role = 'HEDGE'), 0)::float8 AS hedge_qty "
             "  FROM bettor_funded_portfolio_groups g "
             "  JOIN bettor_funded_intents i "
             "    ON i.portfolio_group_id = g.group_id AND i.kind = 'ENTRY' "
-            "  LEFT JOIN LATERAL ("
-            "    SELECT coalesce(sum(f.qty) FILTER "
-            "             (WHERE f.direction = 'ENTRY'), 0) AS filled "
-            "      FROM bettor_funded_fills f WHERE f.intent_id = i.intent_id"
-            "  ) q ON TRUE "
             " WHERE g.closed_at IS NULL "
             + ("  AND g.account_id = $1 " if account_id else "")
             + " GROUP BY g.group_id, g.event_key, g.structure, g.hedge_intent",
@@ -796,21 +865,9 @@ async def operator_view(conn, *, account_id: str | None = None,
         out["unpaired_read_error"] = "%s: %s" % (type(exc).__name__,
                                                  str(exc)[:200])
     for row in unpaired:
-        naked = round(float(row["primary_qty"]) - float(row["hedge_qty"]), 6)
-        if naked <= 0:
-            continue
-        out["risks"].append({
-            "risk": RISK_UNPAIRED, "group_id": row["group_id"],
-            "fixture": row["event_key"], "legs": int(row["legs"]),
-            "structure": row["structure"], "hedge_intent": row["hedge_intent"],
-            "primary_filled_qty": float(row["primary_qty"]),
-            "hedge_filled_qty": float(row["hedge_qty"]),
-            "unpaired_qty": naked,
-            "what_it_means": (
-                "%s of %s primary contract(s) carry no second leg. The claimed "
-                "floor was computed over the MATCHED units, so it does not "
-                "describe the naked part at all"
-                % (naked, row["primary_qty"]))})
+        risk = residual_pair_risk(row)
+        if risk is not None:
+            out["risks"].append(risk)
     # ── THE DECISIONS, AND WHETHER THEIR CLAIMED BOUND HELD ─────────
     try:
         rows = await conn.fetch(
@@ -1275,13 +1332,19 @@ def acquisition_plan_for(*, winner, ranked_row, account_id, venue, group_id,
         price_from = ("the winning leg's own cost_cents_per_unit, which is the "
                       "basis its structure was valued at")
     collateral = None
+    wire_price = None
     if qty is not None and price is not None:
-        collateral = FX.collateral_for(float(price), float(qty), FX.LONG)
+        from decimal import Decimal
+        wire_price = (float(Decimal("1") - Decimal(str(price)))
+                      if _side == "ORDER_INTENT_BUY_SHORT" else float(price))
+        wire_price = FX.safe_cent(wire_price, _side)
+        if wire_price is not None:
+            collateral = FX.collateral_for(wire_price, float(qty), _side)
     return AcquisitionPlan(
         quantity_from=qty_from, price_from=price_from,
         account_id=account_id, venue=venue, group_id=group_id,
         candidate_id=cid, action=ACTION_ACQUIRE, quantity=qty,
-        limit_price=price, collateral_usd=collateral,
+        limit_price=wire_price, collateral_usd=collateral,
         inputs_expire_at=inputs_expire_at,
         assessed_at=row.get("evidence_age_s"),
         source="bettor_funded_pair_cycle.rank_admitted (the selected candidate)")
@@ -1551,7 +1614,7 @@ def rank_admitted(admitted, *, details=None, wanted_qty=None, fee_usd=None,
     # ── DETAILS ARE KEYED BY THE SIDE-AWARE IDENTITY ─────────────────
     #
     # THE DEFECT THIS FIXES, MEASURED. This was keyed by `market_slug`, and one
-    # slug carries two sides with independent books. So both sides of one
+    # slug carries two sides consuming opposite ladders of one book. So both sides of one
     # instrument read the SAME price and the SAME depth, and two ranked rows
     # came out sharing one `condition_id` with different scores -- after which
     # `best_admitted`'s lookup by that id resolved to whichever entry was last
@@ -1620,7 +1683,7 @@ def rank_admitted(admitted, *, details=None, wanted_qty=None, fee_usd=None,
                              "cannot discriminate between candidates"
                              if shared_qty is not None else "none")),
            "identity": ("condition_id is slug#SIDE. The two sides of one venue "
-                        "instrument have independent books, so a reading keyed "
+                        "instrument have different acquisition prices, so a reading keyed "
                         "by slug alone cannot price either of them")}
     for cand in (admitted or ()):
         cand = dict(cand or {})
@@ -1631,7 +1694,7 @@ def rank_admitted(admitted, *, details=None, wanted_qty=None, fee_usd=None,
         # THE SIDE-AWARE LOOKUP FIRST, then the slug-only one -- and when the
         # slug-only one answers, say so on the row.
         det = dict(by_id.get(cid) or {})
-        price_is_side_aware = bool(det)
+        price_is_side_aware = bool(det) and det.get("price_is_this_sides_own") is not False
         if not det:
             det = dict(by_slug_only.get(venue_slug) or {})
             if det:
@@ -1646,6 +1709,12 @@ def rank_admitted(admitted, *, details=None, wanted_qty=None, fee_usd=None,
                "units": cand.get("units"),
                "price": det.get("price"), "depth_qty": det.get("depth_qty"),
                "evidence_age_s": det.get("evidence_age_s")}
+        candidate_fee = det.get("fee_usd", fee_usd)
+        candidate_fee_basis = det.get("fee_basis", fee_basis)
+        row["fee_usd"] = candidate_fee
+        row["fee_basis"] = candidate_fee_basis
+        row["inputs_expire_at"] = (det.get("inputs_expire_at")
+                                  or (det.get("quote") or {}).get("inputs_expire_at"))
         # ── DEPTH, WHICH IS DISPLAYED DEPTH AND NOT A QUEUE POSITION ──
         want = wanted_qty if wanted_qty is not None else cand.get("units")
         dep = IP.depth_supports(wanted_qty=want,
@@ -1686,14 +1755,14 @@ def rank_admitted(admitted, *, details=None, wanted_qty=None, fee_usd=None,
                           % (det.get("depth_qty"),))))
             continue
         # ── THE FEE, WHICH MUST BE PRICED AND NOT ASSUMED ────────────
-        if fee_usd is None:
+        if candidate_fee is None:
             out["not_rankable"].append(
                 dict(row, refusal=R_CANDIDATE_FEE_NOT_PRICED,
                      why=("no fee reading was supplied, and a fee-adjusted "
                           "value computed without a fee is not fee-adjusted")))
             continue
-        val = IP.net_worst_case(cand.get("structure"), fee_usd=fee_usd,
-                                fee_basis=fee_basis)
+        val = IP.net_worst_case(cand.get("structure"), fee_usd=candidate_fee,
+                                fee_basis=candidate_fee_basis)
         row["net_worst_case"] = val
         # THE KEY IS `worst_case_usd`. I read `net_worst_case_usd`, which the
         # function does not return, so every candidate was refused
@@ -1753,7 +1822,7 @@ def rank_admitted(admitted, *, details=None, wanted_qty=None, fee_usd=None,
             pos_val = IP.position_worst_case(
                 held_leg=held_leg, hedge_leg=leg, hedge_qty=supportable,
                 sport_permits_tie=bool(sport_permits_tie),
-                fee_usd=fee_usd, fee_basis=fee_basis,
+                fee_usd=candidate_fee, fee_basis=candidate_fee_basis,
                 fixture_can_void=fixture_can_void,
                 fixture_can_postpone=fixture_can_postpone)
             row["position_worst_case"] = pos_val
@@ -1790,23 +1859,10 @@ def rank_admitted(admitted, *, details=None, wanted_qty=None, fee_usd=None,
         admitted_by_id = {str(c.get("condition_id")): c
                           for c in (admitted or ())}
         out["best_admitted"] = admitted_by_id.get(winner["condition_id"])
-        # ── WHAT REACHES THE DECISION, AND WHAT DOES NOT ─────────────
-        #
-        # `pass_once` passes `best_admitted` -- ONE candidate -- to
-        # `decide_and_record`, and it is the one with the highest FLOOR. So a
-        # candidate with a lower floor and a higher expected value cannot be
-        # selected, whatever the approved objective says. That is a real
-        # limitation of the current comparison and it is recorded here rather
-        # than left for a reader to infer from the absence of a list.
-        out["carried_to_the_decision"] = winner["condition_id"]
-        out["not_carried_to_the_decision"] = [
-            r["condition_id"] for r in out["ranked"][1:]]
-        out["the_comparison_sees_one_hedge"] = (
-            "decide_and_record takes a single `admitted` candidate, chosen here "
-            "by the highest fee-adjusted floor. A candidate with a LOWER floor "
-            "and a HIGHER expected value is therefore unreachable, however the "
-            "approved objective is stated. %d ranked candidate(s) were not "
-            "carried" % len(out["ranked"][1:]))
+        out["carried_to_the_decision"] = [r["condition_id"] for r in out["ranked"]]
+        out["not_carried_to_the_decision"] = []
+        out["the_comparison_sees_one_hedge"] = False
+        out["floor_is_diagnostic_only"] = True
         out["why"] = ("%d candidate(s) ranked on their own fee-adjusted floor, "
                       "%d not rankable; %s wins at %.4f"
                       % (len(out["ranked"]), len(out["not_rankable"]),
@@ -1815,6 +1871,60 @@ def rank_admitted(admitted, *, details=None, wanted_qty=None, fee_usd=None,
         out["why"] = ("no admitted candidate could be ranked: %d had an input "
                       "nobody read" % len(out["not_rankable"]))
     return out
+
+
+def decision_options(*, admitted, ranking, facts, position, account_id, venue, now):
+    """Bind every eligible hedge to its own valuation and immutable order plan.
+
+    Floor ordering is diagnostic. It never removes an alternative from the EV
+    comparison. Missing whole-position valuation or expiry refuses acquisition
+    while leaving HOLD/EXIT/REDUCE available.
+    """
+    by_id = {c["condition_id"]: c for c in admitted}
+    options, plans, refused = [], {}, []
+    for row in ranking.get("ranked", ()):
+        cid = row["condition_id"]
+        candidate = by_id[cid]
+        if not row.get("price_is_this_sides_own"):
+            refused.append({"candidate_id": cid, "refusal": "SIDE_SPECIFIC_QUOTE_NOT_ESTABLISHED"})
+            continue
+        pos_value = row.get("position_worst_case")
+        if not pos_value or not pos_value.get("ok"):
+            refused.append({"candidate_id": cid, "refusal": "WHOLE_POSITION_VALUE_NOT_ESTABLISHED"})
+            continue
+        try:
+            plan = acquisition_plan_for(
+                winner=candidate, ranked_row=row, account_id=account_id,
+                venue=venue, group_id=position.get("portfolio_group_id"),
+                held_position=position, fee_usd=row.get("fee_usd"),
+                inputs_expire_at=row.get("inputs_expire_at") or facts.get("inputs_expire_at"))
+            if plan.check_not_expired(now)["expired"]:
+                refused.append({"candidate_id": cid, "refusal": "ACQUISITION_INPUTS_EXPIRED"})
+                continue
+        except PlanRefused as exc:
+            refused.append(dict(exc.as_dict(), candidate_id=cid))
+            continue
+        leg = candidate["leg"]
+        held = facts.get("held_leg")
+        mi = dict(facts.get("model_inputs") or {})
+        mi.update(primary_cost_cents=getattr(held, "cost_cents_per_unit", None),
+                  hedge_cost_cents=getattr(leg, "cost_cents_per_unit", None),
+                  overtime_included=getattr(held, "overtime", None) == IS.OT_INCLUDED)
+        mi.update((facts.get("model_inputs_by_candidate") or {}).get(cid, {}))
+        options.append({
+            "admitted": candidate, "candidate_id": cid, "plan_digest": plan.digest,
+            "region_probabilities": (facts.get("region_probabilities_by_candidate") or {}).get(
+                cid, facts.get("region_probabilities")),
+            "evidence_quality": facts.get("evidence_quality", FD.EVIDENCE_NOT_ESTABLISHED),
+            "fee_usd": row.get("fee_usd"), "position_value": pos_value,
+            "depth": FIP.depth_supports(wanted_qty=plan.quantity, depth_qty_at_price=row.get("depth_qty")),
+            "incremental": FIP.incremental_capital_usd(
+                hedge_qty=plan.quantity, hedge_price=plan.collateral_usd / plan.quantity,
+                hedge_fee_usd=row.get("fee_usd")),
+            "capital_duration_h": facts.get("capital_duration_h"),
+            "use_approved_model": bool(facts.get("use_approved_model")), "model_inputs": mi})
+        plans[cid] = plan
+    return options, plans, refused
 
 
 async def pass_once(conn, *, account_id: str, venue: str,
@@ -2006,6 +2116,14 @@ async def pass_once(conn, *, account_id: str, venue: str,
                 "unavailable, and this used to skip the whole decision")
             step["admitted_contract_withheld"] = best["condition_id"]
             best = None
+        options, acquisition_plans, option_refusals = decision_options(
+            admitted=admitted_all if gid is not None else [],
+            ranking=ranking if gid is not None else {}, facts=facts,
+            position=pos, account_id=account_id, venue=venue, now=at)
+        step["hedge_decision_inputs"] = {
+            "candidate_ids": [o["candidate_id"] for o in options],
+            "not_eligible": option_refusals,
+            "selection_policy": "EXPECTED_NET_VALUE_OVER_THE_WHOLE_POSITION"}
         # ── A DECISION WRITE THAT RAISES IS THIS POSITION'S PROBLEM ──
         #
         # `pass_once` says "never raises" and did not honour it here: an
@@ -2029,7 +2147,7 @@ async def pass_once(conn, *, account_id: str, venue: str,
                      if facts.get("held_leg") is not None
                      else (pos.get("event_key") or pos.get("us_market_slug"))),
             group_id=gid,
-            hold_ranking=facts["hold_ranking"], admitted=best,
+            hold_ranking=facts["hold_ranking"], admitted=None, indirect_options=options,
             region_probabilities=facts.get("region_probabilities"),
             evidence_quality=facts.get("evidence_quality",
                                        FD.EVIDENCE_NOT_ESTABLISHED),
@@ -2206,33 +2324,18 @@ async def pass_once(conn, *, account_id: str, venue: str,
         # A correctly ranked SHORT side and an order carrying only the slug can
         # produce a LONG fill. The plan is derived from the winner, its side is
         # part of its identity, and its digest is checked against the ranking.
-        acq_plan, plan_refusal = None, None
-        try:
-            acq_plan = acquisition_plan_for(
-                winner=best, ranked_row=(ranking.get("best") or {}),
-                account_id=account_id, venue=venue, group_id=gid,
-                held_position=pos, fee_usd=facts.get("fee_usd"),
-                inputs_expire_at=(facts.get("inputs_expire_at")
-                                  or (at + 300.0)))
-        except PlanRefused as exc:
-            plan_refusal = exc.as_dict()
-        if acq_plan is None:
-            step["refusal"] = (plan_refusal or {}).get("refusal",
-                                                       R_PLAN_INCOMPLETE)
-            step["acquisition_plan_refusal"] = plan_refusal
-            step["dispatched"] = None
-            step["why_nothing_was_sent"] = (
-                "the selected candidate could not be turned into a complete "
-                "order (%s), and an acquisition whose address or quantity comes "
-                "from anywhere but the ranked candidate is not the order that "
-                "was decided" % (plan_refusal or {}).get("why"))
+        selected = dec.get("selected") or {}
+        cid = selected.get("candidate_id")
+        acq_plan = acquisition_plans.get(cid)
+        if acq_plan is None or selected.get("plan_digest") != acq_plan.digest:
+            step.update(refusal=R_ACQ_PLAN_DIGEST, dispatched=None)
             continue
+        step["admitted_contract"] = cid
         step["acquisition_plan"] = acq_plan.as_dict()
         got = await acquire_second_leg(
             conn, operation_id=facts["operation_id"], group_id=gid,
-            plan=acq_plan,
-            expect_candidate_id=best["condition_id"],
-            expect_digest=acq_plan.digest,
+            plan=acq_plan, expect_candidate_id=cid,
+            expect_digest=selected["plan_digest"],
             decision_record=(facts.get("hedge_decision_record")
                              or dict(dec.get("ledger") or {},
                                      decision_id=facts["decision_id"])),

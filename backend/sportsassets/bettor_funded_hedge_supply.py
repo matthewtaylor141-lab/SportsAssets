@@ -1358,35 +1358,24 @@ async def held_leg_for(conn, *, position, prose_reader=None, now=None) -> dict:
 
 
 async def _quote_side(quoter, market_slug, side):
-    """This side's own book, and whether the quoter could tell the sides apart.
+    """Call once on the requested side; a transport TypeError is not a retry.
 
-    THE HONEST HANDLING OF A ONE-ARGUMENT QUOTER. A venue book belongs to an
-    OUTCOME TOKEN, not to a market: the long side and the short side of one
-    instrument have separate ladders, and their prices need not sum to a dollar
-    (that gap is the venue's spread). So a quoter that takes only a slug cannot
-    price a side.
-
-    Rather than silently pricing both sides off one ladder, this tries
-    `quoter(slug, side)` first and falls back to `quoter(slug)` -- and RETURNS
-    WHICH FORM ANSWERED, so a shared price is recorded as shared. That is the
-    same treatment `rank_admitted` already gives a shared depth reading: the
-    limitation bounds what the number means instead of disappearing into it.
+    Legacy slug-only readers remain identifiable for diagnostics, but cannot
+    establish a side-specific execution price.
     """
+    import inspect
+    side_aware = True
     try:
-        got = await quoter(market_slug, side)
-        return dict(got or {}), True
+        inspect.signature(quoter).bind(market_slug, side)
     except TypeError:
-        # Only a signature mismatch falls through. A TypeError raised INSIDE a
-        # two-argument quoter would land here too, which is why the retry's own
-        # failure is reported rather than swallowed.
+        side_aware = False
+    except (ValueError, AttributeError):
         pass
-    except Exception as exc:                                    # noqa: BLE001
-        return {"ok": False, "error": type(exc).__name__}, True
     try:
-        got = await quoter(market_slug)
-    except Exception as exc:                                    # noqa: BLE001
-        return {"ok": False, "error": type(exc).__name__}, False
-    return dict(got or {}), False
+        got = await quoter(market_slug, side) if side_aware else await quoter(market_slug)
+    except Exception as exc:
+        return {"ok": False, "error": type(exc).__name__}, side_aware
+    return dict(got or {}), side_aware
 
 
 async def candidate_legs_for(conn, *, held_row, quoter=None,
@@ -1462,8 +1451,8 @@ async def candidate_legs_for(conn, *, held_row, quoter=None,
         # PRICE AND DEPTH ARE THIS CONTRACT'S OWN, AND THIS SIDE'S OWN. A
         # candidate priced off another instrument's ladder is a fabricated
         # cost; a candidate priced off the OTHER SIDE of its own instrument is
-        # the same error inside one market -- the two sides have independent
-        # books and prices that need not sum to a dollar.
+        # the same error inside one market -- the two sides consume opposite
+        # sides of one book and have different acquisition costs.
         price, depth, quote = None, None, {}
         quote_is_side_aware = None
         if quoter is not None:
