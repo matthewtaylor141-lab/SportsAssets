@@ -354,6 +354,11 @@ def read_positions_sync(client, *, paced_read=None) -> dict:
     out: dict[str, Any] = {"version": VERSION, "ok": False,
                            "endpoint": "portfolio.positions", "pages": 0}
     held, slugs, seen = 0.0, [], set()
+    # PER-MARKET QUANTITIES, kept beside the totals. The exposure gate needs
+    # only the dollars; a reconciliation needs the SIGNED net per market to
+    # compare against the book (a short is negative on this venue), and a
+    # second walk to get it would be a second, different snapshot.
+    per_slug: dict[str, dict] = {}
     cursor = ""
     for _ in range(POSITIONS_PAGES_MAX):
         params = {"limit": POSITIONS_PAGE_LIMIT,
@@ -398,12 +403,14 @@ def read_positions_sync(client, *, paced_read=None) -> dict:
                                  "not a measurable number" % (net, key)))
             held += abs(cost)
             slugs.append(key)
+            per_slug[key] = {"net_position": net, "cost_usd": cost}
         end = page_end(resp, previous_cursor=cursor)
         if not end["ok"]:
             return dict(out, **{k: v for k, v in end.items() if k != "ok"})
         if end["done"]:
             return dict(out, ok=True, refusal=None, held_usd=round(held, 6),
-                        held_slugs=sorted(slugs))
+                        held_slugs=sorted(slugs), positions=per_slug,
+                        complete=True)
         cursor = end["cursor"]
     return dict(out, refusal=R_POSITIONS_WALK_INCOMPLETE,
                 why="the walk reached %d pages without an end"
@@ -423,7 +430,43 @@ _EARLIEST_ACTIVITY_S = 1577836800.0
 _TIME_KEYS = ("timestamp", "createTime", "createdAt", "created_at", "time")
 
 
-def strict_activity_ts(act: dict) -> float | None:
+def _strict_time_value(v) -> float | None:
+    """One stated time value, by the rules below; None when it is not one."""
+    from datetime import datetime, timezone
+
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, (int, float)):
+        f = float(v)
+        f = f / 1000.0 if f > 1e11 else f
+        return f if (math.isfinite(f) and f >= _EARLIEST_ACTIVITY_S) else None
+    if not isinstance(v, str):
+        return None
+    try:
+        d = datetime.fromisoformat(v.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    d = (d.replace(tzinfo=timezone.utc) if d.tzinfo is None
+         else d.astimezone(timezone.utc))
+    f = d.timestamp()
+    return f if f >= _EARLIEST_ACTIVITY_S else None
+
+
+def _strict_time_in(src, keys) -> tuple[bool, float | None]:
+    """(a time key was present, its value or None). The first present key
+    decides; a present key that does not parse is (True, None), never a
+    fall-through to the next field."""
+    if not isinstance(src, dict):
+        return False, None
+    for key in keys:
+        if key not in src or src[key] is None:
+            continue
+        return True, _strict_time_value(src[key])
+    return False, None
+
+
+def strict_activity_ts(act: dict, nested=("trade",),
+                       keys=_TIME_KEYS) -> float | None:
     """THE ROW'S TIME, READ STRICTLY, or None.
 
     `api.pmus_account._any_ts` is the display reader and forgiving: it reads
@@ -432,33 +475,15 @@ def strict_activity_ts(act: dict) -> float | None:
     be a plausible epoch (seconds or milliseconds); an ISO string's offset is
     honoured, and a naive one is read as UTC. The first key present decides
     -- a present key that does not parse refuses rather than falling through
-    to another field."""
-    from datetime import datetime, timezone
+    to another field.
 
-    for src in (act, act.get("trade")):
-        if not isinstance(src, dict):
-            continue
-        for key in _TIME_KEYS:
-            if key not in src or src[key] is None:
-                continue
-            v = src[key]
-            if isinstance(v, bool):
-                return None
-            if isinstance(v, (int, float)):
-                f = float(v)
-                f = f / 1000.0 if f > 1e11 else f
-                return f if (math.isfinite(f)
-                             and f >= _EARLIEST_ACTIVITY_S) else None
-            if not isinstance(v, str):
-                return None
-            try:
-                d = datetime.fromisoformat(v.strip().replace("Z", "+00:00"))
-            except ValueError:
-                return None
-            d = (d.replace(tzinfo=timezone.utc) if d.tzinfo is None
-                 else d.astimezone(timezone.utc))
-            f = d.timestamp()
-            return f if f >= _EARLIEST_ACTIVITY_S else None
+    `nested` names the body objects searched after the row itself (a trade
+    row's time may sit on `trade`); the defaults are the own-trades walk's
+    and are unchanged."""
+    for src in (act, *[act.get(k) for k in nested]):
+        found, ts = _strict_time_in(src, keys)
+        if found:
+            return ts
     return None
 
 
@@ -563,6 +588,235 @@ def read_own_trades_sync(client, us_market_slug: str, since_ts: float, *,
     return dict(out, refusal=R_ACTIVITY_WALK_INCOMPLETE,
                 why="%d pages did not reach the window's start"
                     % ACTIVITY_PAGES_MAX)
+
+
+# ── THE WHOLE ACCOUNT'S ACTIVITY, READ AS STRICTLY (D5a) ──────────────
+#
+# THE GAP THIS CLOSES. The only account-wide walk,
+# `api/reconcile_read.historical_activity`, asks for two types, never uses its
+# `since` to stop, reads a missing cursor as the end and is called by no
+# route; `venue_reconcile.venue_activities` cuts off silently at 80 pages. A
+# reconciliation of executions against the book needs the account's WHOLE
+# activity over a stated window, with the same rules the own-trades walk
+# above already enforces -- and a type this code has never seen must be
+# REPORTED, because an unknown row may be exactly the execution that makes
+# the book wrong.
+#
+# So no `types` filter is sent: the venue returns every type it has, and
+# each is kept. The known ones are the SDK's `ActivityType` literal
+# (`polymarket_us.types.portfolio`), each with the body key the SDK's
+# `Activity` shape carries it under.
+
+KNOWN_ACTIVITY_TYPES = {
+    "ACTIVITY_TYPE_TRADE": "trade",
+    "ACTIVITY_TYPE_POSITION_RESOLUTION": "positionResolution",
+    "ACTIVITY_TYPE_ACCOUNT_DEPOSIT": "accountBalanceChange",
+    "ACTIVITY_TYPE_ACCOUNT_ADVANCED_DEPOSIT": "accountBalanceChange",
+    "ACTIVITY_TYPE_ACCOUNT_WITHDRAWAL": "accountBalanceChange",
+    "ACTIVITY_TYPE_REFERRAL_BONUS": "accountBalanceChange",
+    "ACTIVITY_TYPE_TRANSFER": "accountBalanceChange",
+}
+#: Generous, because the point is to FINISH the window, and bounded, because
+#: an unbounded walk against a paging bug spends our own venue budget.
+ACCOUNT_ACTIVITY_PAGES_MAX = 200
+#: The SDK's PositionResolution states only `updateTime`, so the account walk
+#: reads it too -- LAST, so a row that states a creation time is placed by it.
+_WALK_TIME_KEYS = _TIME_KEYS + ("updateTime",)
+
+
+def _activity_time(act: dict, body_key: str | None) -> float | None:
+    """The row's time for the account walk, by the strict rules.
+
+    The row itself first, then its body. A balance change states its times
+    per transaction: every one must be readable, and the row is placed at
+    the latest. An UNKNOWN type has no known body, so every nested object is
+    searched in key order and the first stated time decides; none at all is
+    unreadable, never "undated and therefore skipped"."""
+    found, ts = _strict_time_in(act, _WALK_TIME_KEYS)
+    if found:
+        return ts
+    bodies = ([act.get(body_key)] if body_key else
+              [act[k] for k in sorted(act) if isinstance(act.get(k), dict)])
+    for body in bodies:
+        found, ts = _strict_time_in(body, _WALK_TIME_KEYS)
+        if found:
+            return ts
+        txs = body.get("transactions") if isinstance(body, dict) else None
+        if isinstance(txs, list) and txs:
+            times = []
+            for tx in txs:
+                f, t = _strict_time_in(tx, _WALK_TIME_KEYS)
+                if not f or t is None:
+                    return None
+                times.append(t)
+            return max(times)
+    return None
+
+
+def _trade_row(t: dict, ts: float) -> dict:
+    """What the book is compared against, from one trade body."""
+    from . import pmus
+    agg = t.get("isAggressor")
+    own = pmus.trade_own_order(t)
+    own_exec = ((t.get("aggressorExecution" if agg else "passiveExecution")
+                 or {}) if isinstance(agg, bool) else {})
+    return {"trade_id": (str(t["id"]) if t.get("id") is not None else None),
+            "own_order_id": (str(own["id"]) if own.get("id") else None),
+            "own_execution_id": (str(own_exec["id"])
+                                 if isinstance(own_exec, dict)
+                                 and own_exec.get("id") else None),
+            "is_aggressor": agg if isinstance(agg, bool) else None}
+
+
+def read_account_activity_sync(client, *, since_ts: float,
+                               max_pages: int = ACCOUNT_ACTIVITY_PAGES_MAX,
+                               paced_read=None) -> dict:
+    """EVERY ACTIVITY ON THE ACCOUNT SINCE AN INSTANT, or why the log does
+    not establish it.
+
+    The own-trades walk's rules, account-wide:
+
+      * every page must carry an `activities` LIST;
+      * every row must state a type -- a KNOWN type is parsed, an UNKNOWN one
+        is kept and counted under `unknown_types`, never dropped;
+      * every row must carry a readable time (`_activity_time`), and rows
+        must descend (newest first, as requested);
+      * a trade or a resolution must name its market;
+      * the walk is COMPLETE only when a row older than `since_ts` has been
+        read or a page says eof=true by `page_end`.
+
+    `complete` is True exactly when `ok` is. Running out of pages returns
+    `ok: False, complete: False` with the rows read so far, labelled as a
+    PREFIX of the window; a damaged page or row returns no rows at all.
+    """
+    if paced_read is None:
+        from .pmus import paced_read
+    out: dict[str, Any] = {"version": VERSION, "ok": False, "complete": False,
+                           "endpoint": "portfolio.activities (all types)",
+                           "since_epoch_s": since_ts, "pages": 0,
+                           "max_pages": int(max_pages)}
+    rows: list[dict] = []
+    by_type: dict[str, int] = {}
+    unknown: dict[str, int] = {}
+    cursor = ""
+    prev_ts = None
+
+    def _refuse(**kw):
+        return dict(out, by_type=dict(by_type), unknown_types=dict(unknown),
+                    **kw)
+
+    for _ in range(max(1, int(max_pages))):
+        params = {"limit": ACTIVITY_PAGE_LIMIT,
+                  "sortOrder": "SORT_ORDER_DESCENDING",
+                  **({"cursor": cursor} if cursor else {})}
+        try:
+            resp = paced_read(lambda p=params: client.portfolio.activities(p),
+                              endpoint="portfolio.activities")
+        except Exception as exc:                               # noqa: BLE001
+            return _refuse(refusal=(R_ACTIVITY_RATE_LIMITED
+                                    if _is_rate_limit(exc)
+                                    else R_ACTIVITY_READ_RAISED),
+                           error=type(exc).__name__)
+        out["pages"] += 1
+        if not isinstance(resp, dict) or not isinstance(
+                resp.get("activities"), list):
+            return _refuse(refusal=R_ACTIVITY_RESPONSE_INCOMPLETE,
+                           why="a page carries no `activities` list")
+        reached = False
+        for act in resp["activities"]:
+            if not isinstance(act, dict):
+                return _refuse(refusal=R_ACTIVITY_FIELD_MALFORMED,
+                               field="activity")
+            kind = act.get("type")
+            if not isinstance(kind, str) or not kind.strip():
+                # A ROW THAT STATES NO TYPE cannot be told from an execution.
+                return _refuse(refusal=R_ACTIVITY_FIELD_MALFORMED,
+                               field="type", value=kind)
+            body_key = KNOWN_ACTIVITY_TYPES.get(kind)
+            if kind in ("ACTIVITY_TYPE_TRADE",
+                        "ACTIVITY_TYPE_POSITION_RESOLUTION") \
+                    and not isinstance(act.get(body_key), dict):
+                # A DAMAGED BODY is named as damaged, before its time is
+                # looked for inside it.
+                return _refuse(refusal=R_ACTIVITY_FIELD_MALFORMED,
+                               field=body_key, type=kind)
+            ts = _activity_time(act, body_key)
+            if ts is None:
+                return _refuse(refusal=R_ACTIVITY_TIME_UNREADABLE, type=kind)
+            if prev_ts is not None and ts > prev_ts + 1e-6:
+                return _refuse(refusal=R_ACTIVITY_NOT_NEWEST_FIRST, type=kind)
+            prev_ts = ts
+            if ts < since_ts:
+                reached = True
+                continue
+            by_type[kind] = by_type.get(kind, 0) + 1
+            row: dict[str, Any] = {"type": kind, "ts": ts,
+                                   "known": body_key is not None}
+            if body_key is None:
+                # KEPT, AND NAMED BY ITS KEYS ONLY: an unknown shape may carry
+                # anything, and what it carries is not ours to interpret.
+                unknown[kind] = unknown.get(kind, 0) + 1
+                row["keys"] = sorted(act)
+                rows.append(row)
+                continue
+            body = act.get(body_key)
+            if kind in ("ACTIVITY_TYPE_TRADE",
+                        "ACTIVITY_TYPE_POSITION_RESOLUTION"):
+                if not isinstance(body, dict):
+                    return _refuse(refusal=R_ACTIVITY_FIELD_MALFORMED,
+                                   field=body_key, type=kind)
+                slug = str(body.get("marketSlug") or "").strip().lower()
+                if not slug:
+                    return _refuse(refusal=R_ACTIVITY_FIELD_MALFORMED,
+                                   field="marketSlug", type=kind)
+                row["us_market_slug"] = slug
+            if kind == "ACTIVITY_TYPE_TRADE":
+                qty, qprob = number(body.get("qty"))
+                if qprob is not None or qty is None or qty <= 0:
+                    # AN EXECUTION WITHOUT A QUANTITY cannot be reconciled
+                    # against a booked fill, so it cannot be counted as one.
+                    return _refuse(refusal=R_ACTIVITY_FIELD_MALFORMED,
+                                   field="qty", trade_id=body.get("id"))
+                price, pprob = number(body.get("price"))
+                if pprob in (MALFORMED, NON_FINITE):
+                    return _refuse(refusal=R_ACTIVITY_FIELD_MALFORMED,
+                                   field="price", trade_id=body.get("id"))
+                row.update(_trade_row(body, ts), qty=qty, price=price)
+            elif kind == "ACTIVITY_TYPE_POSITION_RESOLUTION":
+                row["trade_id"] = (str(body["tradeId"])
+                                   if body.get("tradeId") else None)
+                row["side"] = body.get("side")
+            else:
+                # A BALANCE CHANGE: its ids and states, never its amounts.
+                # Cash figures are not needed to reconcile executions and are
+                # not copied into a record that outlives the read.
+                txs = (body.get("transactions")
+                       if isinstance(body, dict) else None)
+                txs = txs if isinstance(txs, list) else []
+                row["transactions"] = [
+                    {"transaction_id": tx.get("transactionId"),
+                     "status": tx.get("status")}
+                    for tx in txs if isinstance(tx, dict)]
+            rows.append(row)
+        if reached:
+            return dict(out, ok=True, complete=True, refusal=None, rows=rows,
+                        by_type=by_type, unknown_types=unknown,
+                        complete_by="A_ROW_OLDER_THAN_THE_WINDOW_WAS_READ")
+        end = page_end(resp, previous_cursor=cursor)
+        if not end["ok"]:
+            return _refuse(**{k: v for k, v in end.items() if k != "ok"})
+        if end["done"]:
+            return dict(out, ok=True, complete=True, refusal=None, rows=rows,
+                        by_type=by_type, unknown_types=unknown,
+                        complete_by="THE_VENUE_STATED_EOF")
+        cursor = end["cursor"]
+    # TRUNCATED. What was read is a PREFIX of the window -- kept, and labelled,
+    # because an operator can use it; never returned as the window.
+    return dict(out, refusal=R_ACTIVITY_WALK_INCOMPLETE, rows=rows,
+                rows_are_a_prefix_of_the_window=True,
+                by_type=by_type, unknown_types=unknown,
+                why="%d pages did not reach the window's start"
+                    % int(max_pages))
 
 
 async def read_venue_account(*, client=None, paced_read=None) -> dict:
