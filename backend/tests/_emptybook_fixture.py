@@ -27,7 +27,9 @@ WHAT IS SUPPLIED THAT PRODUCTION DOES NOT HAVE -- named, not hidden:
      qualifying M1 mechanism would produce. It is the assumption the proof runs
      under, not something the proof establishes.
   2. CALIBRATION (external evidence). A measurement of the odds source against
-     resolved outcomes; production has none, and MODEL_TRUST_DRIFT blocks.
+     resolved outcomes; production has none, and MODEL_TRUST_DRIFT blocks. The
+     row carries the current evaluator (the gate counts nothing else) and
+     `supplied_by: TEST_FIXTURE`.
   3. ACTIVATION (owner input). An account row, owner-approved limits, an
      authorization and the account binding, for a DEMONSTRATION account. In
      production all three activation records are absent (research-sql run 271).
@@ -48,6 +50,40 @@ from sportsassets import bettor_funded_execution as FX
 from sportsassets import bettor_pinnacle_devig as devig
 from sportsassets.workers import ext_pinnacle_loop as loop
 from sportsassets.workers import premap as pm
+
+#: THE FOUR INPUTS THIS PROOF SUPPLIES THAT PRODUCTION DOES NOT HAVE, each with
+#: the production check that refuses without it. Machine-read by
+#: `test_every_supplied_assumption_is_named_and_production_refuses_without_it`,
+#: so an input cannot be supplied here without being declared, and a declared
+#: one cannot quietly stop being refused in production.
+SUPPLIED_ASSUMPTIONS = (
+    {"name": "BOOK_CURRENCY", "kind": "EXTERNAL_EVIDENCE",
+     "supplied_as": "a live-subscription reading through "
+                    "ext_pinnacle_loop.book_currency_evidence",
+     "production": "no establishing mechanism: the venue publishes no timing "
+                   "contract (bettor_stream_currency P5)",
+     "refused_by": "ext_pinnacle_loop.venue_quote -> "
+                   "VENUE_BOOK_CURRENCY_NOT_ESTABLISHED"},
+    {"name": "CALIBRATION", "kind": "EXTERNAL_EVIDENCE",
+     "supplied_as": "one external_source_calibration row, supplied_by "
+                    "TEST_FIXTURE",
+     "production": "no current-evaluator measurement exists",
+     "refused_by": "ext_pinnacle_loop.source_calibration -> measured False, "
+                   "so MODEL_TRUST_DRIFT is not evaluable and blocks"},
+    {"name": "ACTIVATION", "kind": "OWNER_INPUT",
+     "supplied_as": "a DEMONSTRATION account row, approved limits, an "
+                    "authorization and the account binding",
+     "production": "none of the activation records exists",
+     "refused_by": "ext_pinnacle_loop._funded_attempt / _funded_service "
+                   "return None without the binding; authorize() refuses "
+                   "without limits and authorization"},
+    {"name": "SUBMISSION_SWITCHES", "kind": "CODE_CONSTANTS",
+     "supplied_as": "the three switches turned on in-process by monkeypatch",
+     "production": "all three False in shipped code",
+     "refused_by": "bettor_funded_execution.FUNDED_SUBMISSION_ENABLED, "
+                   "bettor_entry_execution.REAL_ORDER_SUBMISSION_ENABLED, "
+                   "bettor_funded_management.FUNDED_EXIT_SUBMISSION_ENABLED"},
+)
 
 GAME = "2026-10-02"
 EVENT_SLUG = "mlb-sea-hou-%s" % GAME

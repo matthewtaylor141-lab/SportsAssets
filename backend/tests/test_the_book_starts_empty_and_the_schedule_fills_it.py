@@ -638,3 +638,62 @@ def test_an_event_nothing_was_attributed_to_is_unclassified_not_dropped():
     assert rec["reconciles"] is False
     assert rec["per_sport"]["s"] == {"provider_events": 2, "rows": 1,
                                      "reconciles": False}
+
+
+
+# ═════════════════════════════════════════════════════════════════════
+# THE PROOF'S ASSUMPTIONS, DECLARED AND CHECKED AGAINST PRODUCTION
+# ═════════════════════════════════════════════════════════════════════
+
+def test_every_supplied_assumption_is_named_and_production_refuses_without_it():
+    """THE PROOF RUNS UNDER FOUR SUPPLIED INPUTS, and each is one production
+    does not have. This pins the list AND that each is still refused in
+    production -- so the proof can never be read as evidence that the lane
+    trades today."""
+    import asyncio
+
+    from sportsassets import bettor_entry_execution as _EX
+    from sportsassets import bettor_funded_execution as _FX
+    from sportsassets import bettor_funded_management as _FM
+
+    names = [a["name"] for a in F.SUPPLIED_ASSUMPTIONS]
+    assert names == ["BOOK_CURRENCY", "CALIBRATION", "ACTIVATION",
+                     "SUBMISSION_SWITCHES"]
+    for a in F.SUPPLIED_ASSUMPTIONS:
+        assert a["supplied_as"] and a["production"] and a["refused_by"]
+    # 1 · BOOK CURRENCY: in this (cold) process nothing establishes it
+    ev = loop.book_currency_evidence("aec-anything")
+    assert ev.get("subscription") is None and ev.get("revalidation") is None
+    assert VC.evaluate(now=1.0)["verdict"] == VC.NOT_ESTABLISHED
+    # 2 · CALIBRATION: no row, or no current-evaluator row, is not measured
+
+    class _NoRow:
+        async def fetchrow(self, *a, **k):
+            return None
+
+    class _TestRow:
+        async def fetchrow(self, *a, **k):
+            return {"source_version": "s", "sample_size": 412,
+                    "metric": "BRIER", "score": 0.2, "tolerance": 0.24,
+                    "within_tolerance": True, "measured_by": "SOMEONE",
+                    "provenance": {"note": "hand-inserted"},
+                    "measured_at_epoch_s": __import__("time").time(),
+                    "measured_at": "x", "window_start": "x",
+                    "window_end": "x"}
+    assert asyncio.run(loop.source_calibration(_NoRow(), "s"))[
+        "measured"] is False
+    assert asyncio.run(loop.source_calibration(_TestRow(), "s"))[
+        "measured"] is False
+    # 3 · ACTIVATION: without the binding neither funded path runs
+
+    class _NoBinding:
+        async def fetchval(self, *a, **k):
+            return None
+
+        async def fetchrow(self, *a, **k):
+            return None
+    assert asyncio.run(loop._funded_service(_NoBinding(), now=1.0)) is None
+    # 4 · THE SWITCHES, as shipped
+    assert _FX.FUNDED_SUBMISSION_ENABLED is False
+    assert _EX.REAL_ORDER_SUBMISSION_ENABLED is False
+    assert _FM.FUNDED_EXIT_SUBMISSION_ENABLED is False
