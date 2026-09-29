@@ -181,19 +181,27 @@ async def test_a_read_board_is_used_in_its_own_order():
     class _Good:
         async def fetch(self, *a):
             return [{"token": "mls", "events": 7,
-                     "titles": ["Columbus Crew vs. Inter Miami CF"]},
+                     "titles": ["Columbus Crew vs. Inter Miami CF"],
+                     "title_days": [
+                         "Columbus Crew vs. Inter Miami CF\u00012026-09-26"]},
                     {"token": "unl", "events": 2,
-                     "titles": ["Belgium vs. France"]}]
+                     "titles": ["Belgium vs. France"],
+                     "title_days": ["Belgium vs. France\u00012026-10-01"]}]
 
     got = await loop.venue_soccer_competitions(_Good())
     assert got["read"] is True
     assert got["board"] == [("mls", 7), ("unl", 2)]
-    cands = loop.candidates_from_board(got["board"], got["titles"])
+    cands = loop.candidates_from_board(got["board"], got["titles"],
+                                       got["title_days"])
     assert [c["our_token"] for c in cands] == ["mls", "unl"]
     # THE VENUE'S FIXTURES TRAVEL WITH THE CANDIDATE, because the mapping is
     # confirmed against them and a candidate that arrives without them would be
     # admitted on key existence alone.
     assert cands[0]["venue_titles"] == ["Columbus Crew vs. Inter Miami CF"]
+    # AND THE FIXTURE DATES, so the date check runs on the scheduled path and
+    # not only in a test -- which was Codex's second point on identity.
+    assert cands[0]["venue_title_days"] == {
+        "Columbus Crew vs. Inter Miami CF": "2026-09-26"}
 
 
 # ── EXISTENCE IS NOT IDENTITY ─────────────────────────────────────────

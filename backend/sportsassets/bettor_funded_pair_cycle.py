@@ -805,6 +805,261 @@ R_ORDER_DOES_NOT_MATCH_THE_DECISION = (
     "THE_ORDER_DOES_NOT_MATCH_THE_CANDIDATE_THE_RANKING_SELECTED")
 
 
+#: ── THE EXECUTABLE PLAN, COMPLETE AND IMMUTABLE BEFORE RANKING ───────
+#:
+#: WHAT `bind_selection_to_candidate` COULD NOT DO, AND WHY IT IS REPLACED.
+#: Codex, on 05fa15f:
+#:
+#:   * it returned ok=True when the candidate lacked `limit_price`,
+#:     `proceeds_per_contract` or `inputs_expire_at` -- recording them "unbound"
+#:     and proceeding, so an order with no wire limit passed the binding;
+#:   * a malformed numeric became None through `_num` and then compared equal to
+#:     another None, so garbage passed too;
+#:   * it IGNORED the candidate's own `us_market_slug`, comparing the position's
+#:     against the selection's with a fallback to the position itself -- so a
+#:     candidate for market B passed against an order for market A;
+#:   * it never checked position or intent identity at all.
+#:
+#: Every one of those is the same root error: comparing two partial records
+#: FIELD BY FIELD and treating an absence as agreement. A comparison cannot
+#: establish completeness.
+#:
+#: SO THE PLAN IS BUILT COMPLETE, ONCE, BEFORE RANKING. `ExecutionPlan` is
+#: frozen: an action cannot be ranked unless a plan for it validated, and the
+#: plan the winner is bound to is the same object that was ranked -- not a
+#: lookup by position id reconciled afterwards. A missing or malformed required
+#: field refuses at CONSTRUCTION, which is before the candidate exists, which is
+#: before anything can be dispatched.
+PLAN_REQUIRED = ("account_id", "venue", "intent_id", "us_market_slug",
+                 "action", "quantity", "limit_price",
+                 "proceeds_per_contract", "inputs_expire_at")
+
+R_PLAN_INCOMPLETE = "THE_EXECUTION_PLAN_IS_MISSING_A_REQUIRED_FIELD"
+R_PLAN_MALFORMED = "AN_EXECUTION_PLAN_FIELD_IS_NOT_A_USABLE_VALUE"
+R_PLAN_EVIDENCE_EXPIRED = "THE_EXECUTION_PLAN_EVIDENCE_HAS_ALREADY_EXPIRED"
+R_PLAN_NOT_THE_RANKED_ONE = "THE_PLAN_IS_NOT_THE_ONE_THAT_WAS_RANKED"
+R_PLAN_IDENTITY = "THE_EXECUTION_PLAN_NAMES_A_DIFFERENT_POSITION_OR_INSTRUMENT"
+
+
+class PlanRefused(Exception):
+    """Raised by `plan_for` with a named refusal. Never escapes `pass_once`."""
+
+    def __init__(self, refusal, why, field=None, value=None):
+        super().__init__(why)
+        self.refusal = refusal
+        self.why = why
+        self.field = field
+        self.value = value
+
+    def as_dict(self) -> dict:
+        return {"ok": False, "refusal": self.refusal, "why": self.why,
+                "field": self.field, "value": self.value}
+
+
+def _positive(field, value):
+    """A number that is present, finite and greater than zero, or refuse.
+
+    `_num` returned None for a malformed value and None compared equal to
+    another None, so "0.4x" and a missing field agreed with each other. A
+    quantity, a price and a proceeds figure are each meaningless at zero or
+    below, and an order carrying one is not an order.
+    """
+    import math
+
+    if value is None:
+        raise PlanRefused(R_PLAN_INCOMPLETE,
+                          "%s is required and was not supplied" % field, field)
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        raise PlanRefused(R_PLAN_MALFORMED,
+                          "%s is %r, which is not a number" % (field, value),
+                          field, value)
+    if not math.isfinite(v) or v <= 0:
+        raise PlanRefused(R_PLAN_MALFORMED,
+                          "%s is %r; a quantity, price or proceeds figure must "
+                          "be finite and above zero" % (field, value),
+                          field, value)
+    return round(v, 6)
+
+
+def _text(field, value):
+    if value is None or not str(value).strip():
+        raise PlanRefused(R_PLAN_INCOMPLETE,
+                          "%s is required and was not supplied" % field, field)
+    return str(value).strip()
+
+
+class ExecutionPlan:
+    """ONE ACTION'S COMPLETE ORDER. Immutable once built.
+
+    It carries the whole identity of the thing to be done -- account, venue,
+    position/intent, instrument, action, quantity, wire limit, valuation basis
+    and evidence validity -- because a dispatcher that has to look any of them up
+    is a dispatcher that can look up the wrong one.
+
+    `digest` is what binds it to the decision: the persisted winner records the
+    digest of the plan it was ranked with, and the dispatcher sends the plan
+    whose digest matches. A substituted plan changes the digest and refuses.
+    """
+
+    __slots__ = ("account_id", "venue", "intent_id", "us_market_slug", "action",
+                 "quantity", "limit_price", "proceeds_per_contract",
+                 "inputs_expire_at", "assessed_at", "source", "_digest")
+
+    def __init__(self, **kw):
+        object.__setattr__ if False else None
+        self.account_id = _text("account_id", kw.get("account_id"))
+        self.venue = _text("venue", kw.get("venue"))
+        self.intent_id = _text("intent_id", kw.get("intent_id"))
+        self.us_market_slug = _text("us_market_slug", kw.get("us_market_slug"))
+        self.action = _text("action", kw.get("action"))
+        self.quantity = _positive("quantity", kw.get("quantity"))
+        self.limit_price = _positive("limit_price", kw.get("limit_price"))
+        self.proceeds_per_contract = _positive(
+            "proceeds_per_contract", kw.get("proceeds_per_contract"))
+        self.inputs_expire_at = _positive("inputs_expire_at",
+                                          kw.get("inputs_expire_at"))
+        self.assessed_at = kw.get("assessed_at")
+        self.source = str(kw.get("source") or "")
+        self._digest = self._compute_digest()
+
+    def __setattr__(self, name, value):
+        # IMMUTABLE AFTER CONSTRUCTION. A plan that can be edited between the
+        # ranking and the send is not a binding, and the digest would no longer
+        # describe what is about to be dispatched.
+        if getattr(self, "_digest", None) is not None:
+            raise AttributeError(
+                "an ExecutionPlan is immutable once built; %s cannot be set "
+                "after the plan was ranked" % name)
+        object.__setattr__(self, name, value)
+
+    def _compute_digest(self) -> str:
+        import hashlib
+
+        payload = "|".join(str(getattr(self, f)) for f in PLAN_REQUIRED)
+        return hashlib.sha256(payload.encode()).hexdigest()[:32]
+
+    @property
+    def digest(self) -> str:
+        return self._digest
+
+    def as_dict(self) -> dict:
+        out = {f: getattr(self, f) for f in PLAN_REQUIRED}
+        out["digest"] = self._digest
+        out["assessed_at"] = self.assessed_at
+        out["source"] = self.source
+        return out
+
+    def check_not_expired(self, now) -> dict:
+        """Has this plan's evidence already expired? An independent check.
+
+        COMPARING two expiry values only establishes that two records agree
+        about when the evidence dies -- which they can do while it is already
+        dead. The clock is asked separately.
+        """
+        at = float(now)
+        remaining = round(self.inputs_expire_at - at, 3)
+        return {"expired": remaining <= 0, "now": at,
+                "inputs_expire_at": self.inputs_expire_at,
+                "remaining_s": remaining,
+                "why": ("agreement about an expiry instant is not evidence that "
+                        "the instant has not passed; the clock is asked")}
+
+
+def plan_for(*, action, selection, account_id, venue, position, now=None):
+    """Build one action's plan, or raise `PlanRefused` naming the field.
+
+    `action` is the SELECTOR's spelling (DIRECT_EXIT / REDUCE), because that is
+    what the plan executes; the ledger's spelling is applied to the decision,
+    not to the order.
+    """
+    sel = dict(selection or {})
+    pos = dict(position or {})
+    # THE INSTRUMENT COMES FROM THE POSITION, which is the authority on what is
+    # held -- and the selection's own slug, where it carries one, must AGREE
+    # rather than override. A selection naming another market is a different
+    # order, not a correction.
+    pos_slug = _text("us_market_slug", pos.get("us_market_slug"))
+    sel_slug = sel.get("us_market_slug")
+    if sel_slug is not None and str(sel_slug).strip() != pos_slug:
+        raise PlanRefused(
+            R_PLAN_IDENTITY,
+            "the selection names instrument %r and the position holds %r"
+            % (str(sel_slug).strip(), pos_slug), "us_market_slug", sel_slug)
+    sel_intent = sel.get("intent_id")
+    pos_intent = _text("intent_id", pos.get("intent_id"))
+    if sel_intent is not None and str(sel_intent).strip() != pos_intent:
+        raise PlanRefused(
+            R_PLAN_IDENTITY,
+            "the selection names position %r and this position is %r"
+            % (str(sel_intent).strip(), pos_intent), "intent_id", sel_intent)
+    return ExecutionPlan(
+        account_id=account_id, venue=venue, intent_id=pos_intent,
+        us_market_slug=pos_slug, action=action,
+        quantity=sel.get("selected_qty"),
+        limit_price=sel.get("limit_price"),
+        proceeds_per_contract=sel.get("proceeds_per_contract"),
+        inputs_expire_at=sel.get("inputs_expire_at"),
+        assessed_at=sel.get("assessed_at"),
+        source="bettor_funded_management.select_exit (deferred)")
+
+
+def bind_plan_to_decision(*, plan, candidate, action, now,
+                          expected_digest=None) -> dict:
+    """Is THIS plan the one the ranking selected, and is it still valid?
+
+    Replaces the field-by-field comparison. The candidate carries the digest of
+    the plan it was built from, so binding is an identity check rather than a
+    reconciliation of two partial records -- and a substituted plan, however
+    well-formed, does not match.
+    """
+    out: dict = {"ok": False, "refusal": R_PLAN_NOT_THE_RANKED_ONE,
+                 "plan": None, "compared": {}}
+    if plan is None:
+        out["why"] = ("no executable plan exists for the selected action, so "
+                      "there is nothing to bind and nothing to send")
+        out["refusal"] = R_PLAN_INCOMPLETE
+        return out
+    out["plan"] = plan.as_dict()
+    cand = dict(candidate or {})
+    want = str(expected_digest or cand.get("plan_digest") or "")
+    out["compared"] = {"plan_digest": plan.digest, "candidate_digest": want,
+                       "candidate_action": cand.get("action"),
+                       "plan_action": plan.action}
+    if not want:
+        out["why"] = ("the selected candidate carries no plan digest, so it was "
+                      "not built from an executable plan and nothing can be "
+                      "bound to it")
+        return out
+    if want != plan.digest:
+        out["why"] = ("the selected candidate was ranked with plan %s and the "
+                      "plan about to be sent is %s: a different order"
+                      % (want[:12], plan.digest[:12]))
+        return out
+    # THE ACTION, TOO: the digest covers it, and a mismatch here means the
+    # decision's own action disagrees with the plan it carried, which is a
+    # defect in the caller rather than a substitution.
+    if str(cand.get("action") or "") != plan.action:
+        out["why"] = ("the candidate's action %r and its plan's action %r "
+                      "disagree" % (cand.get("action"), plan.action))
+        return out
+    expiry = plan.check_not_expired(now)
+    out["expiry"] = expiry
+    if expiry["expired"]:
+        out.update(refusal=R_PLAN_EVIDENCE_EXPIRED,
+                   why=("the plan's evidence expired %.3fs ago. Two records "
+                        "agreeing about an expiry instant does not establish "
+                        "that the instant has not passed"
+                        % -expiry["remaining_s"]))
+        return out
+    out.update(ok=True, refusal=None,
+               why=("the plan about to be sent is the one the ranking selected "
+                    "(digest %s) and its evidence is valid for another %.3fs"
+                    % (plan.digest[:12], expiry["remaining_s"])))
+    return out
+
+
 def _num(v):
     try:
         return None if v is None else round(float(v), 6)
@@ -1167,9 +1422,18 @@ async def pass_once(conn, *, account_id: str, venue: str,
             # limit, proceeds basis and evidence expiry are all compared against
             # the candidate the ranking actually selected, BEFORE the adapter is
             # reached, and a mismatch on any of them refuses.
-            bound = bind_selection_to_candidate(
-                selection=sel, candidate=dec.get("selected"),
-                action=action, position=pos)
+            # ── BIND THE WINNER TO THE PLAN IT WAS RANKED WITH ──────
+            #
+            # An IDENTITY check on the plan object, not a field-by-field
+            # reconciliation of two partial records. The supplier built one
+            # complete, immutable plan per rankable action and the candidate
+            # carries its digest, so a substituted plan -- however well-formed --
+            # does not match, and expiry is checked against the clock rather than
+            # by two records agreeing about an instant.
+            plans = dict((facts.get("executable_plans_by_action") or {}))
+            plan = plans.get(SELECTION_ACTION_FOR_LEDGER.get(action, action))
+            bound = bind_plan_to_decision(
+                plan=plan, candidate=dec.get("selected"), action=action, now=at)
             step["order_binding"] = bound
             if not bound["ok"]:
                 step["refusal"] = bound["refusal"]
@@ -1177,6 +1441,14 @@ async def pass_once(conn, *, account_id: str, venue: str,
                 step["dispatched"] = None
                 step["why_nothing_was_sent"] = bound["why"]
                 continue
+            # THE ORDER IS THE PLAN. Nothing downstream re-reads the selection.
+            sel = dict(sel, selected_qty=plan.quantity,
+                       limit_price=plan.limit_price,
+                       proceeds_per_contract=plan.proceeds_per_contract,
+                       inputs_expire_at=plan.inputs_expire_at,
+                       us_market_slug=plan.us_market_slug,
+                       intent_id=plan.intent_id,
+                       plan_digest=plan.digest)
             dispatcher = exit_dispatcher
             if dispatcher is None:
                 from . import bettor_funded_management as _FM

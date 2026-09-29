@@ -174,11 +174,32 @@ def test_the_surviving_continuity_requirement_is_about_OUR_socket():
 
 
 def test_the_binding_precondition_is_TIMING_and_it_names_its_exit():
+    """AND THE EXIT IT NAMES IS NO LONGER A MOVING-BOOK READ.
+
+    This asserted `"MOVING book" in p5["what_would_establish_it"]`, pinning a
+    second route I had offered: "a read of a demonstrably MOVING book that
+    separates last-change from now". That route is withdrawn, so this test is
+    updated to assert the withdrawal rather than deleted.
+
+    WHY IT WAS WRONG. A delayed feed of a moving book shows exactly the same
+    movement as a current one -- a sixty-second-late stream of a live market is
+    indistinguishable, by movement alone, from a current one. Movement separates
+    LIVE from FROZEN. It does not separate CURRENT from LATE, and P5 is about the
+    second. The only thing that establishes P5 is the venue documenting the
+    guarantee, which is not ours to produce.
+    """
     p5 = SC.PRECONDITION_STATUS[SC.P5_DOCUMENTED_TIMING]
     assert p5["available"] is False
     assert p5["this_is_the_binding_precondition"] is True
     assert "no as-of instant" in p5["why"]
-    assert "MOVING book" in p5["what_would_establish_it"]
+    # THE ONLY ESTABLISHING ROUTE IS THE VENUE'S OWN DOCUMENTATION.
+    assert "documenting" in p5["what_would_establish_it"]
+    assert "MOVING" not in p5["what_would_establish_it"]
+    # AND THE WITHDRAWAL IS RECORDED, with what a movement experiment could and
+    # could not distinguish, so the next reader does not re-derive the offer.
+    assert "not current from late" in p5["movement_does_not_establish_it"]
+    assert "unmeasured" in p5["what_a_movement_experiment_could_distinguish"]
+    assert "promoting on movement" in p5["so_it_is_evidence_not_a_promotion"]
 
 
 def test_the_transact_time_DISCRIMINATOR_IS_WITHDRAWN():

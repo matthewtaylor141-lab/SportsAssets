@@ -124,7 +124,7 @@ def test_manage_is_asked_to_defer_and_the_ranking_dispatches():
         "manage would select AND submit before the hedge is considered")
     assert "deferred_exits=deferred" in src, (
         "the ranking would have no priced exit to compare or to dispatch")
-    assert "pair_inputs=functools.partial(funded_pair_inputs" in src, (
+    assert "functools.partial(" in src and "funded_pair_inputs" in src, (
         "pair_inputs=None leaves the pass with nothing to rank")
     # AND THE ORDER IS DECLARED IN THE RESULT, not left to a reader to infer.
     assert '"dispatched_by": "bettor_funded_pair_cycle.pass_once"' in src
@@ -193,8 +193,14 @@ async def test_no_exit_plan_does_not_stop_the_hedge_being_considered():
                     "incremental_capital_usd": 0.0, "capital_duration_h": 20.0,
                     "evidence_quality": "EXTERNAL_LABELLED",
                     "execution_secured": True}]}}
-    got = await loop.funded_pair_inputs(None, pos, at=1790000000.0,
-                                        deferred={})
+    got = await loop.funded_pair_inputs(
+        None, pos, at=1790000000.0, deferred={},
+        account_id="acct", venue="PMUS",
+        # THE PRODUCTION RANKING, keyed by intent id, exactly as
+        # `manage`'s `management_rankings` supplies it. It is NOT
+        # `pos["management_ranking"]`, which nothing ever wrote.
+        management_rankings={"fpi-1": {"ranking": pos.pop(
+            "management_ranking")}})
     assert got["ok"] is True, got
     assert got["exit_plan_absent"] == loop.R_NO_DEFERRED_SELECTION
     assert got["deferred_selection"] is None
@@ -209,6 +215,10 @@ async def test_the_supplier_carries_the_exit_at_its_own_numbers():
     sel = {"intent_id": INTENT, "selected": "DIRECT_EXIT",
            "selected_qty": 10.0, "limit_price": 0.47,
            "proceeds_per_contract": 0.465, "expected_net_usd": -0.85,
+           # A PLAN REQUIRES AN EVIDENCE EXPIRY. Production's `select_exit`
+           # supplies it, `submit_exit` refuses to send without it, and a plan
+           # that omitted it is exactly the "unbound field" Codex reported.
+           "inputs_expire_at": 1790000900.0,
            "ranking": {"version": "MGMT_SELECT_SHAPE", "candidates": [
                {"action": "HOLD", "qty": 10, "value_usd": -2.10,
                 "expected_net_usd": -2.10, "downside_usd": -5.50,
@@ -216,8 +226,11 @@ async def test_the_supplier_carries_the_exit_at_its_own_numbers():
                 "evidence_quality": "EXTERNAL_LABELLED",
                 "execution_secured": True}]}}
     got = await loop.funded_pair_inputs(
-        None, {"intent_id": INTENT, "residual_qty": 10.0},
-        at=1790000000.0, deferred={INTENT: sel})
+        None, {"intent_id": INTENT, "residual_qty": 10.0,
+               "us_market_slug": SLUG},
+        at=1790000000.0, deferred={INTENT: sel},
+        account_id=ACCT, venue=VENUE,
+        management_rankings={INTENT: {"ranking": sel["ranking"]}})
     assert got["ok"] is True
     cands = {c["action"]: c for c in got["hold_ranking"]["candidates"]}
     assert set(cands) == {"HOLD", "DIRECT_EXIT"}
@@ -241,6 +254,10 @@ async def test_an_exit_at_a_loss_is_still_a_rankable_candidate():
     sel = {"intent_id": INTENT, "selected": "DIRECT_EXIT",
            "selected_qty": 10.0, "limit_price": 0.47,
            "proceeds_per_contract": 0.465, "expected_net_usd": -0.85,
+           # A PLAN REQUIRES AN EVIDENCE EXPIRY. Production's `select_exit`
+           # supplies it, `submit_exit` refuses to send without it, and a plan
+           # that omitted it is exactly the "unbound field" Codex reported.
+           "inputs_expire_at": 1790000900.0,
            "ranking": {"version": "MGMT_SELECT_SHAPE", "candidates": [
                {"action": "HOLD", "qty": 10, "value_usd": -2.10,
                 "expected_net_usd": -2.10, "downside_usd": -5.50,
@@ -248,8 +265,11 @@ async def test_an_exit_at_a_loss_is_still_a_rankable_candidate():
                 "evidence_quality": FD.EVIDENCE_EXTERNAL_LABELLED,
                 "execution_secured": True}]}}
     facts = await loop.funded_pair_inputs(
-        None, {"intent_id": INTENT, "residual_qty": 10.0},
-        at=1790000000.0, deferred={INTENT: sel})
+        None, {"intent_id": INTENT, "residual_qty": 10.0,
+               "us_market_slug": SLUG},
+        at=1790000000.0, deferred={INTENT: sel},
+        account_id=ACCT, venue=VENUE,
+        management_rankings={INTENT: {"ranking": sel["ranking"]}})
     got = FD.decide(hold_ranking=facts["hold_ranking"], indirect=None)
     # LOSING LESS IS THE DECISION. -0.85 beats -2.10.
     assert got["selected"] == "DIRECT_EXIT", got

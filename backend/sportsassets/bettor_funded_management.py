@@ -1583,6 +1583,9 @@ async def manage(conn, *, account_id: str, venue: str, adapter=None,
            "venue": venue, "opened_anything": False,
            "recovered": None, "settlement": [], "needs_a_decision": [],
            "selection": [], "decisions": [], "exits": [],
+           # EVERY POSITION'S RANKING, keyed by intent id. Consumed by the
+           # pairing supplier, which previously read a field nothing wrote.
+           "management_rankings": {},
            "funded_capability": None,
            "defer_dispatch": bool(defer_dispatch),
            "defer_dispatch_means": (DEFER_DISPATCH_MEANS if defer_dispatch
@@ -1648,6 +1651,27 @@ async def manage(conn, *, account_id: str, venue: str, adapter=None,
                                 subscription=subscription,
                                 revalidation=revalidation)
         out["selection"].append(pick)
+        # ── THE RANKING, FOR EVERY POSITION, WHATEVER WAS SELECTED ───
+        #
+        # THE DEFECT THIS CLOSES. The pairing supplier read
+        # `pos["management_ranking"]` -- a key NOTHING in production ever wrote.
+        # `bettor_funded_intents` has no such column, so it was always empty and
+        # only a test manufactured it. When the selector chose HOLD the supplier
+        # therefore had no priced HOLD to rank a hedge against, and the case that
+        # matters most for pairing was unreachable through an invented field.
+        #
+        # `select_exit` computes the ranking for every position it examines,
+        # including the ones it decides to hold. It is recorded here, keyed by
+        # intent id, and handed to the supplier by the scheduled caller -- so the
+        # supplier consumes a production value whatever the selector chose.
+        out.setdefault("management_rankings", {})[str(p["intent_id"])] = {
+            "ranking": pick.get("ranking") or {},
+            "selected": pick.get("selected"),
+            "selection_ok": bool(pick.get("ok")),
+            "refusal": pick.get("refusal"),
+            "us_market_slug": p.get("us_market_slug"),
+            "residual_qty": p.get("residual"),
+        }
         if not pick.get("ok"):
             # A NAMED MISSING INPUT, not "needs a decision". Each of these
             # points at one thing to build or one row to supply.

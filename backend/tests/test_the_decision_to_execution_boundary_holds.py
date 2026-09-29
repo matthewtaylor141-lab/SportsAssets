@@ -203,8 +203,25 @@ async def _run_pass(monkeypatch, *, decision, selection, conn=None,
     monkeypatch.setattr(FB, "open_entry_positions", _open)
 
     async def _inputs(conn_, pos, *, at):
+        # THE SUPPLIER'S PRODUCTION CONTRACT, including the executable plans.
+        # An action is rankable only if a complete plan for it validated, so a
+        # harness that omitted them would exercise a path production cannot
+        # reach -- and the positive control below would pass on a dispatch that
+        # was never bound to anything.
+        plans = {}
+        if selection:
+            try:
+                pl = PC.plan_for(action=str(selection.get("selected")),
+                                 selection=selection, account_id="acct",
+                                 venue="PMUS", position=pos)
+                plans[pl.action] = pl
+            except PC.PlanRefused:
+                plans = {}
         return {"ok": True, "held_leg": None, "candidate_legs": [],
                 "decision_id": "dec-1", "operation_id": "op-1",
+                "executable_plans_by_action": plans,
+                "executable_plans": {a: pl.as_dict()
+                                     for a, pl in plans.items()},
                 "hold_ranking": {"version": "T", "candidates": [],
                                  "not_rankable": []},
                 "region_probabilities": None, "limits": None, "fee_usd": None,
@@ -256,15 +273,21 @@ async def test_a_decision_write_that_raises_sends_nothing(monkeypatch):
 
 async def test_a_persisted_decision_does_dispatch(monkeypatch):
     """THE POSITIVE CONTROL. Without it the two tests above would pass on a
-    pass that dispatches nothing under any circumstances."""
+    pass that dispatches nothing under any circumstances.
+
+    The candidate carries its plan's DIGEST, exactly as the supplier builds it:
+    a candidate without one is not bindable and is refused, which is asserted
+    separately.
+    """
+    sel = _selection()
+    pl = PC.plan_for(action="DIRECT_EXIT", selection=sel, account_id="acct",
+                     venue="PMUS", position=_position())
     got, disp = await _run_pass(
         monkeypatch,
         decision={"ok": True, "action": "EXIT",
-                  "selected": {"action": "DIRECT_EXIT", "qty": 10.0,
-                               "limit_price": 0.47,
-                               "proceeds_per_contract": 0.47,
-                               "inputs_expire_at": 1790000900.0}},
-        selection=_selection())
+                  "selected": {"action": "DIRECT_EXIT",
+                               "plan_digest": pl.digest}},
+        selection=sel)
     step = got["considered"][0]
     assert step.get("refusal") is None, step
     assert step["dispatched"] == "EXIT"
@@ -273,129 +296,265 @@ async def test_a_persisted_decision_does_dispatch(monkeypatch):
 
 
 # ═════════════════════════════════════════════════════════════════════
-# 3 · THE ORDER MUST BE THE CANDIDATE THE RANKING SELECTED
+# 3 · THE ORDER MUST BE THE PLAN THE RANKING WAS GIVEN
 # ═════════════════════════════════════════════════════════════════════
+#
+# WHAT REPLACED THE FIELD-BY-FIELD BINDING, AND WHY IT HAD TO GO. Codex, on
+# 05fa15f, showed `bind_selection_to_candidate` returning ok=True when the
+# candidate lacked `limit_price`, `proceeds_per_contract` or `inputs_expire_at`
+# -- it recorded them "unbound" and proceeded. A malformed number became None
+# and compared equal to another None. The candidate's own `us_market_slug` was
+# never read, so a candidate for market B passed against an order for market A.
+# Position and intent identity were not checked at all.
+#
+# Every one of those is the same root error: comparing two partial records and
+# treating an absence as agreement. A comparison cannot establish completeness.
+#
+# So a complete, immutable `ExecutionPlan` is built per action BEFORE ranking,
+# an action with no valid plan is not rankable, the candidate carries its plan's
+# digest, and binding is an identity check on the object that was ranked.
 
-async def test_codex_reproduction_reduce_decided_exit_in_the_order(monkeypatch):
-    """THE EXACT CASE: ranking selects REDUCE for 2, the deferred selection
-    holds DIRECT_EXIT for 10. The ten-contract exit must not be sent, and the
-    pass must not report a dispatch."""
-    got, disp = await _run_pass(
-        monkeypatch,
-        decision={"ok": True, "action": "REDUCE",
-                  "selected": {"action": "REDUCE", "qty": 2.0,
-                               "limit_price": 0.47,
-                               "proceeds_per_contract": 0.47,
-                               "inputs_expire_at": 1790000900.0}},
-        selection=_selection(action="DIRECT_EXIT", qty=10.0))
-    step = got["considered"][0]
-    assert step["refusal"] == PC.R_ORDER_DOES_NOT_MATCH_THE_DECISION, step
-    assert step["dispatched"] is None
-    assert set(step["order_binding"]["mismatched"]) >= {"action", "quantity"}
-    # NOTHING WENT OUT, and no row claims a dispatch.
-    assert disp.calls == []
-    assert got.get("exits") in (None, [])
+NOW = 1790000000.0
 
 
-@pytest.mark.parametrize("field,candidate_patch,selection_patch", [
-    ("quantity", {"qty": 4.0}, {"selected_qty": 10.0}),
-    ("limit_price", {"limit_price": 0.60}, {"limit_price": 0.47}),
-    ("proceeds_per_contract", {"proceeds_per_contract": 0.60},
-     {"proceeds_per_contract": 0.47}),
-    ("inputs_expire_at", {"inputs_expire_at": 1790000001.0},
-     {"inputs_expire_at": 1790000900.0}),
+def _sel(action="DIRECT_EXIT", qty=10.0, price=0.47, **kw):
+    out = {"intent_id": "fpi-1", "selected": action, "selected_qty": qty,
+           "limit_price": price, "proceeds_per_contract": price - 0.005,
+           "expected_net_usd": -0.85, "inputs_expire_at": NOW + 300.0}
+    out.update(kw)
+    return out
+
+
+def _plan(action="DIRECT_EXIT", **kw):
+    return PC.plan_for(action=action, selection=_sel(action=action, **kw),
+                       account_id="acct", venue="PMUS", position=_position())
+
+
+# ── the plan refuses at CONSTRUCTION, before a candidate can exist ────
+
+@pytest.mark.parametrize("field,patch", [
+    ("limit_price", {"limit_price": None}),
+    ("proceeds_per_contract", {"proceeds_per_contract": None}),
+    ("inputs_expire_at", {"inputs_expire_at": None}),
+    ("quantity", {"selected_qty": None}),
 ])
-async def test_each_bound_field_refuses_on_its_own(monkeypatch, field,
-                                                   candidate_patch,
-                                                   selection_patch):
-    """One parametrisation per field, because a binding that only checked the
-    action would have passed the quantity swap -- and a ten-contract order on a
-    two-contract decision is the loss, not the label."""
-    cand = {"action": "DIRECT_EXIT", "qty": 10.0, "limit_price": 0.47,
-            "proceeds_per_contract": 0.47, "inputs_expire_at": 1790000900.0}
-    cand.update(candidate_patch)
-    sel = _selection()
-    sel.update(selection_patch)
-    got, disp = await _run_pass(
-        monkeypatch,
-        decision={"ok": True, "action": "EXIT", "selected": cand},
-        selection=sel)
-    step = got["considered"][0]
-    assert step["refusal"] == PC.R_ORDER_DOES_NOT_MATCH_THE_DECISION, step
-    assert field in step["order_binding"]["mismatched"], step["order_binding"]
-    assert disp.calls == []
+def test_a_missing_required_field_refuses_the_plan(field, patch):
+    """CODEX'S FIRST CASE. These three previously passed the binding as
+    "unbound" and an order with no wire limit was dispatchable."""
+    sel = _sel()
+    sel.update(patch)
+    with pytest.raises(PC.PlanRefused) as e:
+        PC.plan_for(action="DIRECT_EXIT", selection=sel, account_id="acct",
+                    venue="PMUS", position=_position())
+    assert e.value.refusal == PC.R_PLAN_INCOMPLETE
+    assert e.value.field == field
 
 
-async def test_the_two_vocabularies_are_reconciled_not_papered_over(monkeypatch):
-    """The ledger says EXIT and the selector says DIRECT_EXIT. Comparing raw
-    strings would refuse every legitimate exit; ignoring the action would let
-    the REDUCE/DIRECT_EXIT swap through. Both must hold."""
-    assert PC.LEDGER_ACTION_FOR_SELECTION["DIRECT_EXIT"] == "EXIT"
-    good = PC.bind_selection_to_candidate(
-        selection=_selection(), action="EXIT",
-        candidate={"action": "DIRECT_EXIT", "qty": 10.0, "limit_price": 0.47,
-                   "proceeds_per_contract": 0.47,
-                   "inputs_expire_at": 1790000900.0},
-        position=_position())
-    assert good["ok"] is True, good
-    bad = PC.bind_selection_to_candidate(
-        selection=_selection(), action="REDUCE",
-        candidate={"action": "REDUCE", "qty": 10.0, "limit_price": 0.47,
-                   "proceeds_per_contract": 0.47,
-                   "inputs_expire_at": 1790000900.0},
-        position=_position())
-    assert bad["ok"] is False and "action" in bad["mismatched"]
+@pytest.mark.parametrize("patch", [
+    {"limit_price": "0.4x"}, {"selected_qty": 0}, {"selected_qty": -3},
+    {"limit_price": float("inf")}, {"proceeds_per_contract": "none"},
+])
+def test_a_malformed_or_non_positive_field_refuses_the_plan(patch):
+    """`_num` turned garbage into None and None compared equal to None, so
+    "0.4x" and a missing field agreed with each other."""
+    sel = _sel()
+    sel.update(patch)
+    with pytest.raises(PC.PlanRefused) as e:
+        PC.plan_for(action="DIRECT_EXIT", selection=sel, account_id="acct",
+                    venue="PMUS", position=_position())
+    assert e.value.refusal == PC.R_PLAN_MALFORMED
 
 
-def test_an_absent_candidate_binds_to_nothing_and_refuses():
-    got = PC.bind_selection_to_candidate(
-        selection=_selection(), candidate=None, action="EXIT",
-        position=_position())
+def test_a_selection_naming_another_instrument_refuses():
+    """CODEX'S SECOND CASE: a candidate for market B against an order for
+    market A. The position is the authority on what is held; a selection naming
+    another market is a different order, not a correction."""
+    with pytest.raises(PC.PlanRefused) as e:
+        PC.plan_for(action="DIRECT_EXIT",
+                    selection=_sel(us_market_slug="market-B"),
+                    account_id="acct", venue="PMUS", position=_position())
+    assert e.value.refusal == PC.R_PLAN_IDENTITY
+    assert e.value.field == "us_market_slug"
+
+
+def test_a_selection_naming_another_position_refuses():
+    """Position/intent identity was not checked at all."""
+    with pytest.raises(PC.PlanRefused) as e:
+        PC.plan_for(action="DIRECT_EXIT", selection=_sel(intent_id="fpi-OTHER"),
+                    account_id="acct", venue="PMUS", position=_position())
+    assert e.value.refusal == PC.R_PLAN_IDENTITY
+    assert e.value.field == "intent_id"
+
+
+def test_the_plan_carries_the_whole_identity_and_cannot_be_edited():
+    pl = _plan()
+    for f in PC.PLAN_REQUIRED:
+        assert getattr(pl, f) not in (None, ""), f
+    assert pl.account_id == "acct" and pl.venue == "PMUS"
+    assert pl.intent_id == "fpi-1" and pl.us_market_slug == "aec-slug"
+    # IMMUTABLE: a plan editable between the ranking and the send is not a
+    # binding, and its digest would stop describing what is about to go out.
+    with pytest.raises(AttributeError):
+        pl.quantity = 99
+
+
+# ── and binding is an identity check, not a reconciliation ────────────
+
+def test_a_substituted_plan_does_not_bind():
+    """A DIFFERENT plan, perfectly well-formed, for the same position and
+    action at a different size. Field-by-field comparison would have had to
+    catch it field by field; a digest cannot be talked round."""
+    ranked = _plan()
+    substituted = _plan(qty=4.0)
+    cand = {"action": "DIRECT_EXIT", "plan_digest": ranked.digest}
+    got = PC.bind_plan_to_decision(plan=substituted, candidate=cand,
+                                   action="EXIT", now=NOW)
     assert got["ok"] is False
-    assert "bound to nothing" in got["why"]
+    assert got["refusal"] == PC.R_PLAN_NOT_THE_RANKED_ONE
+    assert ranked.digest != substituted.digest
 
 
-def test_the_binding_reports_which_fields_it_actually_covered():
-    """A field the candidate does not carry is recorded as UNBOUND rather than
-    silently treated as equal, so the report cannot overstate the check."""
-    got = PC.bind_selection_to_candidate(
-        selection=_selection(),
-        candidate={"action": "DIRECT_EXIT", "qty": 10.0},
-        action="EXIT", position=_position())
+def test_a_candidate_with_no_plan_digest_binds_to_nothing():
+    got = PC.bind_plan_to_decision(plan=_plan(),
+                                   candidate={"action": "DIRECT_EXIT"},
+                                   action="EXIT", now=NOW)
+    assert got["ok"] is False
+    assert "carries no plan digest" in got["why"]
+
+
+def test_no_plan_at_all_refuses_as_incomplete():
+    got = PC.bind_plan_to_decision(plan=None, candidate={"plan_digest": "x"},
+                                   action="EXIT", now=NOW)
+    assert got["ok"] is False
+    assert got["refusal"] == PC.R_PLAN_INCOMPLETE
+
+
+def test_expired_evidence_refuses_on_the_clock_not_on_agreement():
+    """Two records agreeing about an expiry instant does not establish that the
+    instant has not passed. The clock is asked separately."""
+    pl = _plan()
+    cand = {"action": "DIRECT_EXIT", "plan_digest": pl.digest}
+    ok = PC.bind_plan_to_decision(plan=pl, candidate=cand, action="EXIT",
+                                  now=NOW)
+    assert ok["ok"] is True, ok
+    # SAME plan, SAME digest, SAME agreement -- one second past expiry.
+    late = PC.bind_plan_to_decision(plan=pl, candidate=cand, action="EXIT",
+                                    now=pl.inputs_expire_at + 1.0)
+    assert late["ok"] is False
+    assert late["refusal"] == PC.R_PLAN_EVIDENCE_EXPIRED
+    assert late["expiry"]["expired"] is True
+
+
+def test_the_positive_control_binds():
+    pl = _plan()
+    got = PC.bind_plan_to_decision(
+        plan=pl, candidate={"action": "DIRECT_EXIT", "plan_digest": pl.digest},
+        action="EXIT", now=NOW)
+    assert got["ok"] is True and got["refusal"] is None
+    assert got["expiry"]["remaining_s"] > 0
+
+
+def test_reduce_and_exit_get_separate_plans_with_separate_digests():
+    """Codex: keep separate executable plans for EXIT and REDUCE when both are
+    candidates. Two actions, two plans, two digests -- and one cannot be bound
+    to the other's candidate."""
+    ex = _plan(action="DIRECT_EXIT", qty=10.0)
+    rd = _plan(action="REDUCE", qty=2.0)
+    assert ex.digest != rd.digest
+    crossed = PC.bind_plan_to_decision(
+        plan=ex, candidate={"action": "REDUCE", "plan_digest": rd.digest},
+        action="REDUCE", now=NOW)
+    assert crossed["ok"] is False
+    assert crossed["refusal"] == PC.R_PLAN_NOT_THE_RANKED_ONE
+    # EACH BINDS TO ITS OWN.
+    for pl, ledger in ((ex, "EXIT"), (rd, "REDUCE")):
+        own = PC.bind_plan_to_decision(
+            plan=pl, candidate={"action": pl.action, "plan_digest": pl.digest},
+            action=ledger, now=NOW)
+        assert own["ok"] is True, (pl.action, own)
+
+
+# ═════════════════════════════════════════════════════════════════════
+# 4 · TEAM IDENTITY BEYOND THE MANCHESTER COUNTEREXAMPLE
+# ═════════════════════════════════════════════════════════════════════
+#
+# Fixing the shared-city case with a one-to-one assignment left unrestricted
+# token CONTAINMENT in place, and Codex showed what containment still accepted:
+#
+#     Arsenal vs Chelsea  ->  Arsenal Women vs Chelsea Women
+#     Arsenal vs Chelsea  ->  Arsenal U21 vs Chelsea U21
+#
+# {arsenal} is contained in {arsenal, women}, so each side matched and the
+# assignment was one-to-one: a correct assignment between the WRONG teams. A
+# men's first team and a women's team are different competitions, and pricing
+# one against the other is the same class of error as the eBattles simulation.
+
+@pytest.mark.parametrize("venue_title", [
+    "Arsenal Women vs Chelsea Women",
+    "Arsenal Ladies vs Chelsea Ladies",
+    "Arsenal U21 vs Chelsea U21",
+    "Arsenal U23 vs Chelsea U23",
+    "Arsenal II vs Chelsea II",
+    "Arsenal Reserves vs Chelsea Reserves",
+    "Arsenal Academy vs Chelsea Academy",
+])
+def test_a_squad_qualifier_on_one_side_only_is_a_different_team(venue_title):
+    got = loop.confirm_mapping_by_fixtures(
+        provider_events=[{"home_team": "Arsenal", "away_team": "Chelsea"}],
+        venue_event_titles=[venue_title])
+    assert got["ok"] is False, (venue_title, got)
+    assert got["strong_matches"] == 0
+
+
+@pytest.mark.parametrize("provider,venue_title", [
+    ({"home_team": "Arsenal Women", "away_team": "Chelsea Women"},
+     "Arsenal Women vs Chelsea Women"),
+    ({"home_team": "Arsenal U21", "away_team": "Chelsea U21"},
+     "Arsenal U21 vs Chelsea U21"),
+    ({"home_team": "Arsenal FC", "away_team": "Chelsea FC"},
+     "Arsenal vs Chelsea"),
+])
+def test_matching_qualifiers_on_both_sides_still_confirm(provider, venue_title):
+    """THE POSITIVE CONTROL. The rule must not become "no women's football":
+    a women's fixture against the same women's fixture is the same fixture."""
+    got = loop.confirm_mapping_by_fixtures(
+        provider_events=[provider], venue_event_titles=[venue_title])
+    assert got["ok"] is True, (provider, venue_title, got)
+
+
+def test_a_qualifier_is_not_confused_with_an_affiliation_marker():
+    """`FC` is a rendering difference and is dropped; `Women` is a different
+    team and is not. Both are single trailing tokens, so the distinction has to
+    be in the lists rather than in the shape of the name."""
+    assert "fc" in loop.AFFILIATION_MARKERS
+    assert "women" in loop.SQUAD_QUALIFIERS
+    assert not (loop.AFFILIATION_MARKERS & loop.SQUAD_QUALIFIERS)
+
+
+def test_the_scheduled_board_carries_fixture_dates_to_the_confirmation():
+    """CODEX'S SECOND IDENTITY POINT. The scheduled caller never supplied
+    `venue_event_days`, so the date comparison was exercised only by tests --
+    a path production did not use. The board query now reads `game_start` per
+    title and the candidate carries it."""
+    assert "title_days" in loop.VENUE_SOCCER_BOARD_SQL
+    assert "game_start" in loop.VENUE_SOCCER_BOARD_SQL
+    cands = loop.candidates_from_board(
+        [("mls", 3)], {"mls": ["A vs B"]}, {"mls": {"A vs B": "2026-09-26"}})
+    assert cands[0]["venue_title_days"] == {"A vs B": "2026-09-26"}
+    # AND THE CYCLE PASSES THEM to the confirmation.
+    import inspect
+    src = inspect.getsource(loop.cycle)
+    assert "venue_event_days=_cand.get(\"venue_title_days\")" in src
+
+
+def test_missing_dating_cannot_establish_the_same_meeting():
+    """Codex: missing dating may support tentative discovery but cannot
+    establish that two records describe the same meeting. A confirmation
+    without dates says so on the result."""
+    got = loop.confirm_mapping_by_fixtures(
+        provider_events=[{"home_team": "Columbus Crew",
+                          "away_team": "Inter Miami"}],
+        venue_event_titles=["Columbus Crew vs. Inter Miami"])
     assert got["ok"] is True
-    assert got["compared"]["limit_price"]["bound"] is False
-    assert got["compared"]["quantity"]["bound"] is True
-
-
-def test_only_an_action_with_an_executable_plan_may_win_the_ranking():
-    """THE SECOND HALF OF THE SAME RULE, found by the binding.
-
-    `select_exit` values several actions; `manage` defers a priced, bounded
-    order for exactly one. A REDUCE candidate with no plan used to win the
-    ranking, persist as REDUCE, and then be refused at the venue boundary --
-    the right refusal in the wrong place, after the decision was written.
-    """
-    assert loop.R_NO_EXECUTABLE_PLAN
-    import asyncio
-
-    sel = _selection(action="DIRECT_EXIT", qty=9.0)
-    sel["ranking"] = {"version": "T", "candidates": [
-        {"action": "HOLD", "qty": 9, "value_usd": -2.0,
-         "expected_net_usd": -2.0, "downside_usd": -5.0,
-         "incremental_capital_usd": 0.0, "capital_duration_h": 20.0,
-         "evidence_quality": "EXTERNAL_LABELLED", "execution_secured": True},
-        {"action": "REDUCE", "qty": 9, "value_usd": 5.0,
-         "expected_net_usd": 5.0, "downside_usd": 5.0,
-         "incremental_capital_usd": 0.0, "capital_duration_h": 0.0,
-         "evidence_quality": "VENUE_IMPLIED", "execution_secured": False},
-    ], "not_rankable": []}
-    facts = asyncio.get_event_loop_policy().new_event_loop().run_until_complete(
-        loop.funded_pair_inputs(None, _position(), at=1790000000.0,
-                                deferred={"fpi-1": sel}))
-    actions = [c["action"] for c in facts["hold_ranking"]["candidates"]]
-    blocked = {c.get("action"): c.get("blocker")
-               for c in facts["hold_ranking"]["not_rankable"]}
-    # REDUCE outscores everything and has NO plan, so it cannot win.
-    assert "REDUCE" not in actions, actions
-    assert blocked.get("REDUCE") == loop.R_NO_EXECUTABLE_PLAN, blocked
-    assert "DIRECT_EXIT" in actions
+    assert got["dating_incomplete"] is True
+    assert "not excluded" in got["why"]

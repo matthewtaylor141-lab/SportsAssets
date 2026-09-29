@@ -297,15 +297,60 @@ def _sides_of(title):
     return None
 
 
+#: ── QUALIFIERS THAT MAKE IT A DIFFERENT TEAM ─────────────────────────
+#:
+#: THE SECOND ROUND OF THE SAME DEFECT. Fixing the Manchester case with a
+#: one-to-one assignment left unrestricted token CONTAINMENT in place, and Codex
+#: showed what containment still accepts:
+#:
+#:     Arsenal vs Chelsea  ->  Arsenal Women vs Chelsea Women
+#:     Arsenal vs Chelsea  ->  Arsenal U21 vs Chelsea U21
+#:
+#: {arsenal} is contained in {arsenal, women}, so each side "matched" and the
+#: assignment was one-to-one -- a correct assignment between the WRONG teams.
+#: A men's first team and a women's team are different competitions entirely,
+#: and a Pinnacle price for one against a venue contract on the other is the
+#: same class of error as the eBattles simulation.
+#:
+#: So containment is no longer unrestricted: a qualifier present on one side and
+#: absent on the other makes them different teams. Containment still covers the
+#: case it was for -- an affiliation marker dropped from one rendering -- because
+#: markers are removed before comparison and are not qualifiers.
+SQUAD_QUALIFIERS = frozenset((
+    # gender
+    "women", "womens", "ladies", "feminin", "feminine", "femenino", "femenina",
+    "frauen", "damen", "dames", "kvinner", "kobiet", "w",
+    # age group
+    "u16", "u17", "u18", "u19", "u20", "u21", "u22", "u23", "youth", "junior",
+    "juniors", "academy", "primavera", "jugend",
+    # reserve and secondary sides
+    "ii", "iii", "b", "reserves", "reserve", "amateur", "amateure",
+    "castilla", "atletic",
+))
+
+R_QUALIFIER_MISMATCH = "ONE_SIDE_CARRIES_A_SQUAD_QUALIFIER_THE_OTHER_DOES_NOT"
+
+
+def _qualifiers(tokens) -> frozenset:
+    return frozenset(t for t in tokens if t in SQUAD_QUALIFIERS)
+
+
 def _same_team(a_tokens, b_tokens) -> bool:
     """Are these two renderings the SAME team?
 
-    Equality after normalisation, or one token set contained in the other --
-    which covers "Inter Miami" against "Inter Miami CF". It does NOT cover
-    "Manchester United" against "Manchester City": neither contains the other,
-    because `united` and `city` both survive.
+    Two conditions, and the second is the repair:
+
+      1. equality after normalisation, or one token set contained in the other
+         -- which covers "Inter Miami" against "Inter Miami CF", and does NOT
+         cover "Manchester United" against "Manchester City" because `united`
+         and `city` both survive;
+      2. THE SAME SQUAD QUALIFIERS. "Arsenal" is contained in "Arsenal Women"
+         and they are not the same team, so a qualifier on one side and not the
+         other refuses however well the rest matches.
     """
     if not a_tokens or not b_tokens:
+        return False
+    if _qualifiers(a_tokens) != _qualifiers(b_tokens):
         return False
     return (a_tokens == b_tokens or a_tokens <= b_tokens
             or b_tokens <= a_tokens)
@@ -647,7 +692,16 @@ def _board_sql() -> str:
     return ("""
     SELECT split_part(market_slug, '-', 2)  AS token,
            count(DISTINCT event_slug)        AS events,
-           (array_agg(DISTINCT left(event_title, 80)))[1:12] AS titles
+           (array_agg(DISTINCT left(event_title, 80)))[1:12] AS titles,
+           -- THE FIXTURE DATES, PER TITLE. Codex: the scheduled caller never
+           -- supplied `venue_event_days`, so the date comparison in
+           -- `confirm_mapping_by_fixtures` was exercised only by tests. Two
+           -- teams meet more than once a season and names alone cannot separate
+           -- a fixture from its return leg, so the venue's own game_start
+           -- travels with each title.
+           (array_agg(DISTINCT left(event_title, 80) || '\u0001'
+                      || coalesce(to_char(game_start, 'YYYY-MM-DD'), '')))[1:12]
+             AS title_days
       FROM us_premap
      WHERE sports_type LIKE 'soccer%'
        """ + types + """
@@ -716,13 +770,23 @@ async def venue_soccer_competitions(conn, *, now: float | None = None) -> dict:
     # against fixtures without a second query for every sport in the cycle.
     out["titles"] = {str(r["token"]): [str(t) for t in (r["titles"] or [])]
                      for r in rows}
+    # {token: {title: 'YYYY-MM-DD'}}, from the venue's own game_start.
+    days: dict = {}
+    for r in rows:
+        per: dict = {}
+        for pair in (r["title_days"] or []):
+            title, _, day = str(pair).partition("\u0001")
+            if title and day:
+                per[title] = day
+        days[str(r["token"])] = per
+    out["title_days"] = days
     out["why"] = ("the venue's own league tokens for REAL soccer events "
                   "starting within the last 6 hours or later, simulated "
                   "competitions excluded by the venue's own words")
     return out
 
 
-def candidates_from_board(board, titles=None) -> list:
+def candidates_from_board(board, titles=None, title_days=None) -> list:
     """Venue board -> provider-key candidates, in the board's own order.
 
     `titles` is the venue's own fixture titles per token. They travel WITH the
@@ -733,6 +797,7 @@ def candidates_from_board(board, titles=None) -> list:
     """
     got = []
     by_token = dict(titles or {})
+    days_by_token = dict(title_days or {})
     for token, events in (board or ()):
         if token in VENUE_TOKENS_DELIBERATELY_EXCLUDED:
             continue
@@ -746,7 +811,8 @@ def candidates_from_board(board, titles=None) -> list:
             continue
         got.append({"key": key, "family": "soccer", "our_token": token,
                     "venue_events": int(events),
-                    "venue_titles": list(by_token.get(token) or ())})
+                    "venue_titles": list(by_token.get(token) or ()),
+                    "venue_title_days": dict(days_by_token.get(token) or {})})
     return got
 
 #: The board as measured, for the tests and for a caller with no connection.
@@ -915,6 +981,7 @@ def select_sports(catalogue, *, budget=MAX_METERED_SPORTS_PER_CYCLE,
              # It refused everything, which is the safe direction and still the
              # wrong reason.
              "venue_titles": list(cand.get("venue_titles") or ()),
+             "venue_title_days": dict(cand.get("venue_title_days") or {}),
              "provider_title": row.get("title")})
     # ORDER IS MEASURED COVERAGE, and the cap is applied after confirmation so
     # a candidate the provider does not list cannot consume a budget slot.
@@ -4144,7 +4211,9 @@ def _exit_candidate_from(sel: dict, *, residual) -> dict | None:
 FD_EVIDENCE_VENUE_IMPLIED = "VENUE_IMPLIED"
 
 
-async def funded_pair_inputs(conn, pos, *, at, deferred=None):
+async def funded_pair_inputs(conn, pos, *, at, deferred=None,
+                             account_id=None, venue=None,
+                             management_rankings=None):
     """The pairing facts for one held position, or a named missing input.
 
     Signature matches what `pass_once` calls: `(conn, pos, at=)`. `deferred` is
@@ -4176,19 +4245,33 @@ async def funded_pair_inputs(conn, pos, *, at, deferred=None):
     # there and is not weakened here.
     hold_ranking_source = {}
     if sel:
-        hold_ranking_source = dict(sel.get("ranking") or {})
+        # The deferred selection carries the same ranking `manage` recorded; the
+        # production record is preferred so both branches read one source.
+        _mr = dict(management_rankings or {}).get(intent_id) or {}
+        hold_ranking_source = dict(_mr.get("ranking")
+                                   or sel.get("ranking") or {})
+        out["management_ranking_source"] = (
+            "manage.management_rankings" if _mr.get("ranking")
+            else "the deferred selection's own ranking")
     else:
         # The selector's own ranking, taken from the position's recorded
         # management selection where one exists. Without it there is no priced
         # HOLD, and the decision module refuses on its own account.
-        hold_ranking_source = dict(pos.get("management_ranking") or {})
+        # THE PRODUCTION RANKING, from `manage`'s own per-position record --
+        # not `pos["management_ranking"]`, which nothing ever wrote and which
+        # only a test supplied.
+        _mr = dict(management_rankings or {}).get(intent_id) or {}
+        hold_ranking_source = dict(_mr.get("ranking") or {})
+        out["management_ranking_source"] = (
+            "bettor_funded_management.manage.management_rankings[%s]"
+            % intent_id if _mr else "NONE_RECORDED_FOR_THIS_POSITION")
         out["exit_plan_absent"] = R_NO_DEFERRED_SELECTION
         out["what_that_costs"] = (
             "no exit candidate and no exit order. HOLD and any hedge are still "
             "ranked, and a hedge that wins is still dispatched through the "
             "acquisition path")
     residual = pos.get("residual_qty") or pos.get("filled_qty")
-    exit_cand = _exit_candidate_from(sel, residual=residual) if sel else None
+    exit_cand = None
     hold_from_selector = hold_ranking_source
     candidates = []
     # THE SELECTOR'S OWN HOLD, unchanged. Where it did not price one, the
@@ -4231,9 +4314,38 @@ async def funded_pair_inputs(conn, pos, *, at, deferred=None):
     # exactly like a non-dispatchable one. When a plan exists for REDUCE as well
     # as EXIT, both are rankable and each is bound to its own plan; that is what
     # `plans_by_action` is for and why it is keyed rather than a single slot.
+    # ── A COMPLETE PLAN PER ACTION, BUILT BEFORE RANKING ─────────────
+    #
+    # THE ROOT ERROR THIS REPLACES. The old path ranked a candidate and then
+    # reconciled it against a selection fetched by position id, field by field,
+    # treating an absent field as agreement -- so a candidate with no wire limit,
+    # a malformed price, or another market's slug all passed the "binding".
+    #
+    # An action is now rankable ONLY IF a complete, immutable ExecutionPlan for
+    # it validated first: account, venue, position/intent, instrument, action,
+    # quantity, wire limit, valuation basis and evidence validity, each present
+    # and usable or the plan refuses at construction. The candidate carries that
+    # plan's DIGEST, so binding the winner is an identity check on the object
+    # that was ranked rather than a comparison of two partial records.
     plans_by_action = {}
-    if sel and sel.get("selected_qty") is not None:
-        plans_by_action[str(sel.get("selected") or "DIRECT_EXIT")] = sel
+    plan_refusals = []
+    if sel and sel.get("selected") is not None:
+        try:
+            _plan = _PCD.plan_for(
+                action=str(sel.get("selected")), selection=sel,
+                account_id=account_id, venue=venue, position=pos)
+            plans_by_action[_plan.action] = _plan
+        except _PCD.PlanRefused as exc:
+            plan_refusals.append(dict(exc.as_dict(),
+                                      action=str(sel.get("selected"))))
+    out["executable_plans"] = {a: pl.as_dict()
+                               for a, pl in plans_by_action.items()}
+    # THE PLAN OBJECTS THEMSELVES, for the binding. The dicts above are for the
+    # report; the binding needs the immutable object that was ranked, because a
+    # dict can be edited between the ranking and the send and an ExecutionPlan
+    # cannot.
+    out["executable_plans_by_action"] = dict(plans_by_action)
+    out["plan_refusals"] = plan_refusals
 
     dispatchable = set(_PCD.DISPATCHABLE) | {"HOLD"}
     not_rankable = list(hold_from_selector.get("not_rankable") or [])
@@ -4262,8 +4374,20 @@ async def funded_pair_inputs(conn, pos, *, at, deferred=None):
                                       sorted(dispatchable))))) 
             continue
         candidates.append(dict(cand))
-    if exit_cand is not None:
-        candidates.append(exit_cand)
+    # THE EXIT CANDIDATE IS BUILT FROM ITS PLAN, not from the raw selection, so
+    # a candidate cannot exist for an action whose plan did not validate.
+    for _action, _pl in plans_by_action.items():
+        _c = _exit_candidate_from(sel, residual=residual)
+        if _c is None:
+            continue
+        _c["action"] = _action
+        _c["qty"] = _pl.quantity
+        _c["limit_price"] = _pl.limit_price
+        _c["proceeds_per_contract"] = _pl.proceeds_per_contract
+        _c["inputs_expire_at"] = _pl.inputs_expire_at
+        _c["plan_digest"] = _pl.digest
+        exit_cand = _c
+        candidates.append(_c)
     hold_ranking = {
         "version": hold_from_selector.get("version") or "MGMT_SELECT",
         "candidates": candidates,
@@ -4390,8 +4514,11 @@ async def _funded_service(conn, *, now):
 
         got["pair_cycle"] = await _PC.pass_once(
             conn, account_id=account_id, venue=venue,
-            pair_inputs=functools.partial(funded_pair_inputs,
-                                          deferred=deferred),
+            pair_inputs=functools.partial(
+                funded_pair_inputs, deferred=deferred,
+                account_id=account_id, venue=venue,
+                # THE PRODUCTION RANKING FOR EVERY POSITION, from `manage`.
+                management_rankings=got.get("management_rankings") or {}),
             deferred_exits=deferred,
             now=now)
         # THE ORDERING, ASSERTED IN THE RESULT rather than left to a reader to
@@ -4671,7 +4798,10 @@ async def cycle(conn) -> dict:
         if _cand is not None:
             conf = confirm_mapping_by_fixtures(
                 provider_events=got.get("events") or [],
-                venue_event_titles=_cand.get("venue_titles") or [])
+                venue_event_titles=_cand.get("venue_titles") or [],
+                # THE VENUE'S OWN FIXTURE DATES, so the date check runs on the
+                # scheduled path rather than only in a test.
+                venue_event_days=_cand.get("venue_title_days") or {})
             step["mapping_confirmation"] = {
                 k: conf[k] for k in ("ok", "refusal", "matches", "examined",
                                      "min_required", "matched_fixtures", "why")}
