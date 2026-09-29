@@ -84,6 +84,15 @@ R_POSITION_FIELD_MISSING = "VENUE_POSITION_FIELD_MISSING"
 R_POSITION_FIELD_MALFORMED = "VENUE_POSITION_FIELD_MALFORMED"
 R_POSITION_FIELD_NON_FINITE = "VENUE_POSITION_FIELD_NON_FINITE"
 R_POSITION_COST_NOT_STATED = "VENUE_POSITION_COST_NOT_STATED"
+R_PAGE_END_MALFORMED = "VENUE_PAGE_TERMINATION_FIELD_MALFORMED"
+R_PAGE_END_INCONSISTENT = "VENUE_PAGE_TERMINATION_IS_INCONSISTENT"
+R_PAGE_END_NOT_STATED = "VENUE_PAGE_DOES_NOT_SAY_WHETHER_IT_IS_THE_LAST"
+R_ACTIVITY_READ_RAISED = "VENUE_ACTIVITY_READ_RAISED"
+R_ACTIVITY_RATE_LIMITED = "VENUE_ACTIVITY_RATE_LIMITED"
+R_ACTIVITY_RESPONSE_INCOMPLETE = "VENUE_ACTIVITY_RESPONSE_NOT_COMPLETE"
+R_ACTIVITY_FIELD_MALFORMED = "VENUE_ACTIVITY_FIELD_MALFORMED"
+R_ACTIVITY_TIME_UNREADABLE = "VENUE_ACTIVITY_TIME_UNREADABLE"
+R_ACTIVITY_WALK_INCOMPLETE = "VENUE_ACTIVITY_WALK_DID_NOT_REACH_THE_WINDOW"
 
 MISSING, MALFORMED, NON_FINITE = "MISSING", "MALFORMED", "NON_FINITE"
 
@@ -232,6 +241,52 @@ def working(order: dict) -> dict:
                 price=price, leaves=leaves, intent=intent)
 
 
+def page_end(resp: dict, *, previous_cursor: str = "") -> dict:
+    """WHERE A PAGED WALK STANDS AFTER ONE PAGE, from fields read BY TYPE.
+
+    `{"ok": True, "done": True}`, `{"ok": True, "done": False, "cursor": c}`,
+    or `{"ok": False, "refusal": ...}`. The rules, and why each exists:
+
+      * `eof`, when present, is a JSON boolean. The string "false" is truthy,
+        and reading it as a boolean ended walks the venue said were not over.
+      * `nextCursor`, when present, is a string.
+      * eof true  -> done, and a non-empty cursor beside it is a contradiction.
+      * eof false -> NOT done, and needs a non-empty cursor to continue; one
+        without is an explicit "not finished" with no way on, which is a
+        refusal, never a finished walk.
+      * eof absent -> a non-empty cursor continues; no cursor either means the
+        page never said it was the last, which is not a complete walk.
+      * a cursor equal to the previous one would re-read the same page for
+        ever; it is refused rather than counted toward the page cap.
+    """
+    has_eof = "eof" in resp
+    eof = resp.get("eof")
+    cur = resp.get("nextCursor")
+    if has_eof and not isinstance(eof, bool):
+        return {"ok": False, "refusal": R_PAGE_END_MALFORMED, "field": "eof",
+                "type": type(eof).__name__}
+    if cur is not None and not isinstance(cur, str):
+        return {"ok": False, "refusal": R_PAGE_END_MALFORMED,
+                "field": "nextCursor", "type": type(cur).__name__}
+    cur = (cur or "").strip()
+    if eof is True:
+        if cur:
+            return {"ok": False, "refusal": R_PAGE_END_INCONSISTENT,
+                    "why": "eof is true and a continuation cursor is given"}
+        return {"ok": True, "done": True}
+    if not cur:
+        return {"ok": False,
+                "refusal": (R_PAGE_END_INCONSISTENT if eof is False
+                            else R_PAGE_END_NOT_STATED),
+                "why": ("the page says the walk is not finished and gives no "
+                        "cursor to continue it" if eof is False else
+                        "the page states neither eof nor a cursor")}
+    if previous_cursor and cur == previous_cursor:
+        return {"ok": False, "refusal": R_PAGE_END_INCONSISTENT,
+                "why": "the continuation cursor did not advance"}
+    return {"ok": True, "done": False, "cursor": cur}
+
+
 def _is_rate_limit(exc: Exception) -> bool:
     try:
         from .workers.mirror_shadow import is_rate_limit
@@ -259,7 +314,14 @@ def read_open_orders_sync(client, *, paced_read=None) -> dict:
                     why=("the response carries no `orders` list, so it states "
                          "nothing about the account -- and nothing is not "
                          "an empty list"))
-    if resp.get("nextCursor") or resp.get("eof") is False:
+    if "eof" in resp and not isinstance(resp.get("eof"), bool):
+        return dict(out, refusal=R_PAGE_END_MALFORMED, field="eof",
+                    type=type(resp.get("eof")).__name__)
+    if resp.get("nextCursor") is not None \
+            and not isinstance(resp.get("nextCursor"), str):
+        return dict(out, refusal=R_PAGE_END_MALFORMED, field="nextCursor",
+                    type=type(resp.get("nextCursor")).__name__)
+    if (resp.get("nextCursor") or "").strip() or resp.get("eof") is False:
         return dict(out, refusal=R_ORDERS_RESPONSE_INCOMPLETE,
                     why=("the response indicates more pages, which this "
                          "endpoint's published contract does not declare and "
@@ -327,13 +389,108 @@ def read_positions_sync(client, *, paced_read=None) -> dict:
                                  "not a measurable number" % (net, key)))
             held += abs(cost)
             slugs.append(key)
-        cursor = resp.get("nextCursor") or ""
-        if resp.get("eof") or not cursor:
+        end = page_end(resp, previous_cursor=cursor)
+        if not end["ok"]:
+            return dict(out, **{k: v for k, v in end.items() if k != "ok"})
+        if end["done"]:
             return dict(out, ok=True, refusal=None, held_usd=round(held, 6),
                         held_slugs=sorted(slugs))
+        cursor = end["cursor"]
     return dict(out, refusal=R_POSITIONS_WALK_INCOMPLETE,
                 why="the walk reached %d pages without an end"
                     % POSITIONS_PAGES_MAX)
+
+
+#: Bound on the own-trades walk. A lost acknowledgement is investigated over
+#: the minutes-to-hours since its send; a market with more of the account's
+#: own trades than this in that window refuses rather than truncating.
+ACTIVITY_PAGES_MAX = 10
+ACTIVITY_PAGE_LIMIT = 100
+
+
+def read_own_trades_sync(client, us_market_slug: str, since_ts: float, *,
+                         paced_read=None) -> dict:
+    """THE ACCOUNT'S OWN EXECUTIONS ON ONE MARKET SINCE AN INSTANT, or why the
+    log does not establish them.
+
+    Stricter than `pmus.recent_trades`, which the protected worker shares and
+    which this module therefore does not change: that reader treats a page
+    with no `activities` list as empty and a missing cursor as the end. Here:
+
+      * every page must carry an `activities` LIST;
+      * every trade row must carry a readable time -- a row that cannot be
+        placed before or after the send cannot be excluded from it;
+      * the walk ends only when a row older than `since_ts` has been seen
+        (newest-first order) or a page says eof=true by the rules of
+        `page_end`; running out of pages is a refusal, not an answer.
+    """
+    if paced_read is None:
+        from .pmus import paced_read
+    from . import pmus
+    from .api.pmus_account import _any_ts
+    want = str(us_market_slug or "").strip().lower()
+    out: dict[str, Any] = {"version": VERSION, "ok": False,
+                           "endpoint": "portfolio.activities",
+                           "us_market_slug": want, "since_epoch_s": since_ts,
+                           "pages": 0}
+    rows: list[dict] = []
+    cursor = ""
+    for _ in range(ACTIVITY_PAGES_MAX):
+        params = {"limit": ACTIVITY_PAGE_LIMIT,
+                  "sortOrder": "SORT_ORDER_DESCENDING",
+                  "types": ["ACTIVITY_TYPE_TRADE"], "marketSlug": want,
+                  **({"cursor": cursor} if cursor else {})}
+        try:
+            resp = paced_read(lambda p=params: client.portfolio.activities(p),
+                              endpoint="portfolio.activities")
+        except Exception as exc:                               # noqa: BLE001
+            return dict(out, refusal=(R_ACTIVITY_RATE_LIMITED
+                                      if _is_rate_limit(exc)
+                                      else R_ACTIVITY_READ_RAISED),
+                        error=type(exc).__name__)
+        out["pages"] += 1
+        if not isinstance(resp, dict) or not isinstance(
+                resp.get("activities"), list):
+            return dict(out, refusal=R_ACTIVITY_RESPONSE_INCOMPLETE,
+                        why="a page carries no `activities` list")
+        reached = False
+        for act in resp["activities"]:
+            if not isinstance(act, dict):
+                return dict(out, refusal=R_ACTIVITY_FIELD_MALFORMED,
+                            field="activity")
+            if act.get("type") != "ACTIVITY_TYPE_TRADE":
+                continue
+            t = act.get("trade")
+            if not isinstance(t, dict):
+                return dict(out, refusal=R_ACTIVITY_FIELD_MALFORMED,
+                            field="trade")
+            ts = float(_any_ts(act) or 0.0)
+            if ts <= 0:
+                return dict(out, refusal=R_ACTIVITY_TIME_UNREADABLE,
+                            trade_id=t.get("id"))
+            if ts < since_ts:
+                reached = True
+                continue
+            if str(t.get("marketSlug") or "").strip().lower() != want:
+                continue
+            own = pmus.trade_own_order(t)
+            rows.append({"trade_id": t.get("id"), "ts": ts,
+                         "qty": t.get("qty"),
+                         "own_order_id": (str(own.get("id"))
+                                          if own.get("id") else None)})
+        if reached:
+            return dict(out, ok=True, refusal=None, rows=rows,
+                        complete_by="A_ROW_OLDER_THAN_THE_WINDOW_WAS_READ")
+        end = page_end(resp, previous_cursor=cursor)
+        if not end["ok"]:
+            return dict(out, **{k: v for k, v in end.items() if k != "ok"})
+        if end["done"]:
+            return dict(out, ok=True, refusal=None, rows=rows,
+                        complete_by="THE_VENUE_STATED_EOF")
+        cursor = end["cursor"]
+    return dict(out, refusal=R_ACTIVITY_WALK_INCOMPLETE,
+                why="%d pages did not reach the window's start"
+                    % ACTIVITY_PAGES_MAX)
 
 
 async def read_venue_account(*, client=None, paced_read=None) -> dict:

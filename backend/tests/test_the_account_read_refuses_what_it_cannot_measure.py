@@ -208,6 +208,136 @@ def test_a_position_walk_that_cannot_be_measured_is_refused(pages, refusal):
     assert "held_usd" not in got
 
 
+# ── THE TERMINATION FIELDS, READ BY TYPE (review of a8de639) ─────────
+#
+# Reproduced through this reader with a substituted transport: an explicit
+# `eof: false` with no cursor, and `eof: "false"` (a truthy string) beside a
+# cursor, both ended the walk successfully with held_usd=0.0 after one page.
+
+@pytest.mark.parametrize("pages,refusal", [
+    # "not finished", and no way to continue
+    ([{"positions": {}, "eof": False}], FACCT.R_PAGE_END_INCONSISTENT),
+    ([{"positions": {}, "eof": False, "nextCursor": ""}],
+     FACCT.R_PAGE_END_INCONSISTENT),
+    # a string is not a boolean, whichever way it reads
+    ([{"positions": {}, "eof": "false", "nextCursor": "c1"}],
+     FACCT.R_PAGE_END_MALFORMED),
+    ([{"positions": {}, "eof": "true"}], FACCT.R_PAGE_END_MALFORMED),
+    ([{"positions": {}, "eof": 0}], FACCT.R_PAGE_END_MALFORMED),
+    ([{"positions": {}, "eof": None}], FACCT.R_PAGE_END_MALFORMED),
+    ([{"positions": {}, "nextCursor": 7}], FACCT.R_PAGE_END_MALFORMED),
+    # finished AND continuing is a contradiction
+    ([{"positions": {}, "eof": True, "nextCursor": "c1"}],
+     FACCT.R_PAGE_END_INCONSISTENT),
+    # silent on both
+    ([{"positions": {}}], FACCT.R_PAGE_END_NOT_STATED),
+    # a cursor that does not advance
+    ([{"positions": {}, "nextCursor": "c1"},
+      {"positions": {}, "nextCursor": "c1"}], FACCT.R_PAGE_END_INCONSISTENT),
+])
+def test_a_page_end_that_is_not_a_typed_consistent_statement_refuses(pages,
+                                                                     refusal):
+    client = _Client({"orders": []}, pages)
+    got = _read(client)
+    assert got["ok"] is False, got
+    assert got["refusal"] == refusal, got
+    assert "held_usd" not in got
+
+
+def test_an_explicitly_complete_empty_account_is_a_measurement():
+    """THE POSITIVE CONTROL for the rules above: eof=true with no cursor and
+    no positions is a complete read of an empty account."""
+    got = _read(_Client({"orders": []}, [{"positions": {}, "eof": True}]))
+    assert got["ok"] is True, got
+    assert got["held_usd"] == 0.0 and got["pages"] == 1
+    got = _read(_Client({"orders": []}, [{"positions": {}, "eof": True,
+                                          "nextCursor": ""}]))
+    assert got["ok"] is True, got
+
+
+def test_an_open_orders_page_end_is_typed_too():
+    got = _read(_Client({"orders": [], "eof": "false"}))
+    assert got["refusal"] == FACCT.R_PAGE_END_MALFORMED, got
+    got = _read(_Client({"orders": [], "nextCursor": 3}))
+    assert got["refusal"] == FACCT.R_PAGE_END_MALFORMED, got
+    got = _read(_Client({"orders": [], "eof": True}))
+    assert got["ok"] is True, got
+
+
+# ── THE ACCOUNT'S OWN TRADES, READ AS STRICTLY ───────────────────────
+
+class _Acts:
+    def __init__(self, pages):
+        self.pages, self.calls = list(pages), []
+
+    def activities(self, params=None):
+        self.calls.append(dict(params or {}))
+        if not self.pages:
+            raise AssertionError("read past the last page")
+        page = self.pages.pop(0)
+        if isinstance(page, Exception):
+            raise page
+        return page
+
+
+class _ActClient:
+    def __init__(self, pages):
+        self.portfolio = _Acts(pages)
+
+
+def _trade(tid, ts_iso, slug="aec-mlb-a-b", own="ord-1"):
+    return {"type": "ACTIVITY_TYPE_TRADE",
+            "trade": {"id": tid, "marketSlug": slug, "createTime": ts_iso,
+                      "qty": "5", "isAggressor": True,
+                      "aggressorExecution": {"order": {"id": own}}}}
+
+
+SINCE = 1790000000.0      # 2026-09-21T14:13:20Z
+AFTER, BEFORE = "2026-09-21T16:00:00Z", "2026-09-21T14:00:00Z"
+
+
+def _trades(pages):
+    return FACCT.read_own_trades_sync(_ActClient(pages), "aec-mlb-a-b", SINCE,
+                                      paced_read=lambda f, **k: f())
+
+
+@pytest.mark.parametrize("pages,refusal", [
+    ([{}], FACCT.R_ACTIVITY_RESPONSE_INCOMPLETE),
+    ([{"activities": None, "eof": True}],
+     FACCT.R_ACTIVITY_RESPONSE_INCOMPLETE),
+    ([{"activities": [], "eof": False}], FACCT.R_PAGE_END_INCONSISTENT),
+    ([{"activities": [], "eof": "true"}], FACCT.R_PAGE_END_MALFORMED),
+    ([{"activities": []}], FACCT.R_PAGE_END_NOT_STATED),
+    ([{"activities": [{"type": "ACTIVITY_TYPE_TRADE",
+                       "trade": {"id": "t", "marketSlug": "aec-mlb-a-b"}}],
+       "eof": True}], FACCT.R_ACTIVITY_TIME_UNREADABLE),
+    ([{"activities": [{"type": "ACTIVITY_TYPE_TRADE", "trade": "x"}],
+       "eof": True}], FACCT.R_ACTIVITY_FIELD_MALFORMED),
+    ([RuntimeError("boom")], FACCT.R_ACTIVITY_READ_RAISED),
+    ([{"activities": [_trade("t%d" % i, AFTER)], "nextCursor": "c%d" % i}
+      for i in range(FACCT.ACTIVITY_PAGES_MAX + 1)],
+     FACCT.R_ACTIVITY_WALK_INCOMPLETE),
+])
+def test_an_own_trades_walk_that_does_not_establish_the_window_refuses(
+        pages, refusal):
+    got = _trades(pages)
+    assert got["ok"] is False, got
+    assert got["refusal"] == refusal, got
+    assert "rows" not in got
+
+
+def test_an_own_trades_walk_ends_on_eof_or_on_a_row_older_than_the_window():
+    got = _trades([{"activities": [], "eof": True}])
+    assert got["ok"] is True and got["rows"] == []
+    assert got["complete_by"] == "THE_VENUE_STATED_EOF"
+    got = _trades([{"activities": [_trade("t1", AFTER), _trade("t0", BEFORE)],
+                    "nextCursor": "c1"}])
+    assert got["ok"] is True, got
+    assert [r["trade_id"] for r in got["rows"]] == ["t1"]
+    assert got["rows"][0]["own_order_id"] == "ord-1"
+    assert got["complete_by"] == "A_ROW_OLDER_THAN_THE_WINDOW_WAS_READ"
+
+
 def test_a_walk_that_never_reaches_its_end_is_truncated_not_complete():
     pages = [{"positions": {}, "nextCursor": "c%d" % i}
              for i in range(FACCT.POSITIONS_PAGES_MAX + 1)]
