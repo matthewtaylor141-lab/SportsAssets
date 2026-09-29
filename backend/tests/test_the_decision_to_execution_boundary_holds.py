@@ -163,6 +163,24 @@ class _Dispatcher:
                 "limit_price": (selection or {}).get("limit_price")}
 
 
+def _substitute_xavier_persistence(monkeypatch):
+    from sportsassets import bettor_xavier as XV
+
+    async def _record(conn_, **kw):
+        return {"ok": True, "refusal": None,
+                "xavier_decision_id": "xav:harness"}
+
+    async def _claim(conn_, **kw):
+        return {"ok": True, "claimed": True, "refusal": None}
+
+    async def _events(conn_, **kw):
+        return {"ok": True, "written": False, "refusal": None}
+
+    monkeypatch.setattr(XV, "record_decision", _record)
+    monkeypatch.setattr(XV, "claim_dispatch", _claim)
+    monkeypatch.setattr(XV, "record_dispatch", _events)
+
+
 def _position(intent_id="fpi-1"):
     return {"intent_id": intent_id, "us_market_slug": "aec-slug",
             "portfolio_group_id": None, "residual_qty": 10.0,
@@ -201,6 +219,13 @@ async def _run_pass(monkeypatch, *, decision, selection, conn=None,
     monkeypatch.setattr(PC, "decide_and_record", _decide)
     monkeypatch.setattr(PC, "recover_reservations", _recover)
     monkeypatch.setattr(FB, "open_entry_positions", _open)
+    # XAVIER'S PRE-ACTION RECORD AND DISPATCH CLAIM are database writes too,
+    # and every dispatch now requires both. They are substituted for the same
+    # reason `decide_and_record` is: this harness has no database, and the
+    # question is what reaches the adapter. (Their refusals stopping the send
+    # are pinned in test_xavier_manages_every_position_through_the_scheduled_
+    # pass.py against a real database.)
+    _substitute_xavier_persistence(monkeypatch)
 
     async def _inputs(conn_, pos, *, at):
         # THE SUPPLIER'S PRODUCTION CONTRACT, including the executable plans.

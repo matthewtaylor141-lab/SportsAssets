@@ -268,6 +268,22 @@ async def test_scheduled_pass_compares_all_contracts_then_sends_only_the_persist
     monkeypatch.setattr(C.FB, "open_entry_positions", positions)
     monkeypatch.setattr(C.FL, "record_decision", record)
     monkeypatch.setattr(C, "acquire_second_leg", send)
+    # XAVIER'S PRE-ACTION RECORD AND DISPATCH CLAIM are database writes as
+    # well, and every dispatch now requires both; substituted like the ledger
+    # write above because this harness has no database.
+    from sportsassets import bettor_xavier as XV
+
+    async def xrecord(conn, **kwargs):
+        return {"ok": True, "refusal": None, "xavier_decision_id": "xav:t"}
+
+    async def xclaim(conn, **kwargs):
+        return {"ok": True, "claimed": True, "refusal": None}
+
+    async def xevents(conn, **kwargs):
+        return {"ok": True, "written": False, "refusal": None}
+    monkeypatch.setattr(XV, "record_decision", xrecord)
+    monkeypatch.setattr(XV, "claim_dispatch", xclaim)
+    monkeypatch.setattr(XV, "record_dispatch", xevents)
     got = await C.pass_once(None, account_id="account", venue="PMUS",
                             pair_inputs=supplier, now=100)
     step = got["considered"][0]

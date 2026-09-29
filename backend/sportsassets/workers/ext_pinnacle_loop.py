@@ -4212,6 +4212,17 @@ R_NO_HEDGE_CANDIDATE_READER = "NO_SECOND_LEG_CANDIDATE_READER_IS_WIRED"
 R_NO_REGION_PROBABILITY_SOURCE = "NO_REGION_PROBABILITY_SOURCE_IS_WIRED"
 R_ACTION_NOT_DISPATCHABLE_HERE = "THIS_LANE_HAS_NO_ORDER_FOR_THAT_ACTION"
 R_NO_EXECUTABLE_PLAN = "NO_EXECUTABLE_PLAN_WAS_DEFERRED_FOR_THAT_ACTION"
+#: TAKE_COMPLEMENT on a one-signed-net venue is a REDUCE through the other
+#: ladder, not a separate holding (`bettor_venue_position_model`).
+R_TAKE_COMPLEMENT_NETS = "ON_PMUS_BUYING_THE_OTHER_SIDE_NETS_THE_POSITION_SEE_REDUCE"
+#: The selector's own churn rule, applied to exits it did not choose.
+R_BELOW_MIN_IMPROVEMENT = "IMPROVES_ON_HOLD_BY_LESS_THAN_THE_DECLARED_MINIMUM"
+
+
+def _MIN_IMPROVEMENT_PER_CONTRACT() -> float:
+    """`bettor_mgmt_select`'s declared minimum, read from its source of truth."""
+    from .. import bettor_mgmt_select as _MS
+    return float(_MS.MIN_IMPROVEMENT_USD_PER_CONTRACT)
 
 #: The inputs a pairing decision needs, and which of them this lane can read
 #: today. Declared rather than discovered so the gap is a list, not a surprise.
@@ -4752,17 +4763,55 @@ async def funded_pair_inputs(conn, pos, *, at, deferred=None,
     # and usable or the plan refuses at construction. The candidate carries that
     # plan's DIGEST, so binding the winner is an identity check on the object
     # that was ranked rather than a comparison of two partial records.
+    # ── A COMPLETE PLAN FOR EVERY EXECUTABLE EXIT, NOT ONLY THE SELECTED ONE ──
+    #
+    # THE DEFECT THIS CLOSES (Xavier map, decision-flow Q2). A plan was built
+    # for the ONE action `manage` selected. So the final ranking held at most one
+    # exit: a DIRECT_EXIT the selector ranked below HOLD or REDUCE vanished with
+    # no blocker, and when the selector chose REDUCE its own digest-less REDUCE
+    # was appended BESIDE the plan-built one and won the stable sort -- binding
+    # then refused the winner and a REDUCE could never be dispatched.
+    #
+    # `select_exit` now prices every evidenced DIRECT_EXIT and REDUCE with the
+    # SAME function it prices its choice with (`executable_exit_terms`), so a
+    # plan is built for each. The selection `manage` deferred is still the
+    # source for its own action (same numbers, one record); the others come from
+    # the terms. A candidate whose terms refused, or whose plan refused, is NOT
+    # RANKABLE with that exact refusal -- never dropped, never ranked.
     plans_by_action = {}
     plan_refusals = []
+    exit_sources = {}
     if sel and sel.get("selected") is not None:
         try:
             _plan = _PCD.plan_for(
                 action=str(sel.get("selected")), selection=sel,
                 account_id=account_id, venue=venue, position=pos)
             plans_by_action[_plan.action] = _plan
+            exit_sources[_plan.action] = dict(sel)
         except _PCD.PlanRefused as exc:
             plan_refusals.append(dict(exc.as_dict(),
                                       action=str(sel.get("selected"))))
+    _terms_by_action = dict((_mr or {}).get("executable_exit_terms") or {})
+    for _act, _t in sorted(_terms_by_action.items()):
+        if _act in plans_by_action or _act not in ("DIRECT_EXIT", "REDUCE"):
+            continue
+        if not (_t or {}).get("ok"):
+            plan_refusals.append({"ok": False, "action": _act,
+                                  "refusal": (_t or {}).get("refusal"),
+                                  "why": "the selector could not bound this "
+                                         "action's order: %s"
+                                         % ((_t or {}).get("refusal"),)})
+            continue
+        _src = dict(_t, intent_id=intent_id, selected=_act,
+                    us_market_slug=pos.get("us_market_slug"))
+        try:
+            _plan = _PCD.plan_for(action=_act, selection=_src,
+                                  account_id=account_id, venue=venue,
+                                  position=pos)
+            plans_by_action[_plan.action] = _plan
+            exit_sources[_plan.action] = _src
+        except _PCD.PlanRefused as exc:
+            plan_refusals.append(dict(exc.as_dict(), action=_act))
     out["executable_plans"] = {a: pl.as_dict()
                                for a, pl in plans_by_action.items()}
     # THE PLAN OBJECTS THEMSELVES, for the binding. The dicts above are for the
@@ -4770,14 +4819,77 @@ async def funded_pair_inputs(conn, pos, *, at, deferred=None,
     # dict can be edited between the ranking and the send and an ExecutionPlan
     # cannot.
     out["executable_plans_by_action"] = dict(plans_by_action)
+    # AND BY DIGEST: a group decision can hold the same action for two legs,
+    # and the digest -- not the action name -- is what names one order.
+    out["executable_plans_by_digest"] = {pl.digest: pl for pl in
+                                         plans_by_action.values()}
     out["plan_refusals"] = plan_refusals
+    _refusal_by_action = {r.get("action"): r for r in plan_refusals}
+
+    # THE POSITION'S BASIS AND HOLD'S PER-CONTRACT VALUE, for the worst cases.
+    _basis = (_mr or {}).get("basis") or {}
+    _basis_per = _basis.get("basis_per_contract")
+    _hold_cand = next((c for c in (hold_from_selector.get("candidates") or [])
+                       if str(c.get("action")) == "HOLD"), None)
+    _hold_value = (None if _hold_cand is None else _hold_cand.get("value_usd"))
 
     dispatchable = set(_PCD.DISPATCHABLE) | {"HOLD"}
-    not_rankable = list(hold_from_selector.get("not_rankable") or [])
+    # ── MANAGEMENT'S OWN BLOCKERS REACH THE RANKING ─────────────────────
+    #
+    # THE DEFECT THIS CLOSES (Xavier map Q4). `select_exit` puts its
+    # `not_rankable` at the TOP level, outside the `ranking` projection, and this
+    # read only the projection -- so HOLD_TO_SETTLEMENT, POST_COMPLEMENT, MERGE,
+    # NO_BID and the rest never reached the persisted decision. Both sources are
+    # read now, without duplicates.
+    not_rankable = []
+    _seen_blocks = set()
+    for _b in (list(hold_from_selector.get("not_rankable") or [])
+               + list((_mr or {}).get("not_rankable") or [])):
+        _key = (str(_b.get("action")), str(_b.get("blocker")))
+        if _key in _seen_blocks:
+            continue
+        _seen_blocks.add(_key)
+        not_rankable.append(dict(_b))
+    # A SELECTOR THAT REFUSED BEFORE RANKING still names why for every action
+    # the position could have taken, so the record shows a blocker per action
+    # rather than an empty list.
+    if (_mr or {}).get("refusal") and not (
+            hold_from_selector.get("candidates") or []):
+        for _act in ("HOLD", "DIRECT_EXIT", "REDUCE"):
+            if (_act, str(_mr.get("refusal"))) in _seen_blocks:
+                continue
+            not_rankable.append({
+                "action": _act, "blocker": _mr.get("refusal"),
+                "value_usd": None,
+                "why": ("bettor_funded_management.select_exit refused before "
+                        "any action was ranked: %s" % _mr.get("refusal"))})
     for cand in (hold_from_selector.get("candidates") or []):
         action = str(cand.get("action"))
-        if action == "DIRECT_EXIT":
-            continue                     # replaced by the deferred selection
+        if action in ("DIRECT_EXIT", "REDUCE"):
+            if action in plans_by_action:
+                continue          # replaced by the plan-built candidate below
+            _r = _refusal_by_action.get(action) or {}
+            not_rankable.append(dict(
+                cand, value_usd=None,
+                blocker=_r.get("refusal") or R_NO_EXECUTABLE_PLAN,
+                why=("scored %s by the selector and no executable plan could "
+                     "be built for it (%s). Winning without a plan would "
+                     "persist a decision nothing can carry out"
+                     % (cand.get("value_usd"),
+                        _r.get("why") or "no terms were supplied"))))
+            continue
+        if action == "TAKE_COMPLEMENT" and not cand.get("creates_second_leg"):
+            # ON PMUS BUYING THE OTHER SIDE IS NETTING, which is a REDUCE of the
+            # held position through the other ladder -- not a separate holding
+            # and not a second order route (`bettor_venue_position_model`).
+            not_rankable.append(dict(
+                cand, value_usd=None, blocker=R_TAKE_COMPLEMENT_NETS,
+                why=("scored %s by the selector. On a one-signed-net venue "
+                     "buying the other side of the held instrument nets the "
+                     "position: its economics are DIRECT_EXIT/REDUCE's on the "
+                     "other ladder, and it is not a separate holding"
+                     % (cand.get("value_usd"),))))
+            continue
         if action != "HOLD" and action not in plans_by_action:
             not_rankable.append(dict(
                 cand, value_usd=None, blocker=R_NO_EXECUTABLE_PLAN,
@@ -4796,13 +4908,25 @@ async def funded_pair_inputs(conn, pos, *, at, deferred=None,
                      "it: %s. It is removed before the choice rather than "
                      "out-ranked after it, so it cannot block an action that "
                      "can be sent" % (cand.get("value_usd"),
-                                      sorted(dispatchable))))) 
+                                      sorted(dispatchable)))))
             continue
-        candidates.append(dict(cand))
+        _c = dict(cand)
+        if action == "HOLD" and _basis_per is not None and residual:
+            # HOLD'S TRUE WORST CASE: the position loses and the remaining
+            # basis is gone.
+            _c.setdefault("worst_case_net_usd",
+                          round(-float(_basis_per) * float(residual), 6))
+        _c.setdefault("intent_id", intent_id)
+        candidates.append(_c)
     # THE EXIT CANDIDATE IS BUILT FROM ITS PLAN, not from the raw selection, so
     # a candidate cannot exist for an action whose plan did not validate.
+    _sel_cands = {str(c.get("action")): c
+                  for c in (hold_from_selector.get("candidates") or [])}
     for _action, _pl in plans_by_action.items():
-        _c = _exit_candidate_from(sel, residual=residual)
+        _src = exit_sources.get(_action) or {}
+        _c = _exit_candidate_from(dict(_src, ranking=hold_from_selector)
+                                  if not _src.get("ranking") else _src,
+                                  residual=residual)
         if _c is None:
             continue
         _c["action"] = _action
@@ -4811,6 +4935,48 @@ async def funded_pair_inputs(conn, pos, *, at, deferred=None,
         _c["proceeds_per_contract"] = _pl.proceeds_per_contract
         _c["inputs_expire_at"] = _pl.inputs_expire_at
         _c["plan_digest"] = _pl.digest
+        _c["intent_id"] = intent_id
+        _c["from_deferred_selection"] = bool(sel) and \
+            str(sel.get("selected")) == _action
+        # THE SELECTOR'S OWN FIGURES FOR THIS ACTION, carried (never
+        # recomputed): proceeds net of fees, fees, what stays held.
+        _sc = _sel_cands.get(_action) or {}
+        for _k in ("slice_value_usd", "retained_value_usd", "fees_usd",
+                   "cash_now_usd", "remaining_exposure_qty", "locks_a_loss",
+                   "depth_limited"):
+            if _sc.get(_k) is not None:
+                _c[_k] = _sc[_k]
+        # ── THE TRUE WORST CASE, not the expectation ────────────────────
+        # A depth-limited exit keeps inventory, and that inventory can LOSE:
+        # worst = the realised slice + the retained contracts losing their
+        # basis. Where the selector's slice is not available the previous
+        # figure stands, which is never less conservative than this one.
+        _kept = _sc.get("remaining_exposure_qty")
+        if _sc.get("slice_value_usd") is not None and _kept is not None \
+                and _basis_per is not None:
+            _wc = round(float(_sc["slice_value_usd"])
+                        - float(_basis_per) * float(_kept), 6)
+            _c["worst_case_net_usd"] = _wc
+            _c["downside_usd"] = _wc
+        # ── THE CHURN GATE THE SELECTOR APPLIES, APPLIED HERE TOO ───────
+        #
+        # `rank_with_hold` refuses to act for less than
+        # MIN_IMPROVEMENT_USD_PER_CONTRACT over HOLD. Offering an exit the
+        # selector declined on that rule to a ranking WITHOUT it would loosen
+        # the selection policy; it is carried NOT RANKABLE with the rule named.
+        if _hold_value is not None and _c.get("value_usd") is not None \
+                and residual:
+            _gain = (float(_c["value_usd"]) - float(_hold_value)) \
+                / float(residual)
+            if _gain < _MIN_IMPROVEMENT_PER_CONTRACT():
+                not_rankable.append(dict(
+                    _c, value_usd=None, blocker=R_BELOW_MIN_IMPROVEMENT,
+                    improvement_over_hold_per_contract=round(_gain, 6),
+                    why=("improves on HOLD by %.6f per contract, below the "
+                         "declared %.4f minimum the selector applies before "
+                         "the book is churned" % (
+                             _gain, _MIN_IMPROVEMENT_PER_CONTRACT()))))
+                continue
         exit_cand = _c
         candidates.append(_c)
     hold_ranking = {
@@ -4932,6 +5098,19 @@ async def funded_pair_inputs(conn, pos, *, at, deferred=None,
     if tie_read.get("refusal"):
         hedge_unavailable.append(tie_read["refusal"])
     out["region_probability_read"] = regions
+    # ── THE EVIDENCE THE MANAGEMENT VALUATION RESTED ON, for Xavier's record:
+    # the basis, HOLD's probability and its source row, the book and
+    # probability expiry. Read from `manage`'s own per-position record.
+    out["management_evidence"] = {
+        k: (_mr or {}).get(k) for k in (
+            "selected", "selection_ok", "refusal", "basis", "ev_hold",
+            "probability_read", "decision_evidence", "inputs_expire_at",
+            "assessed_at", "residual_qty")}
+    # ── HOW LONG CAPITAL STAYS COMMITTED: the catalogue's scheduled start is
+    # the known lower bound; its end is not stated, so no duration is invented.
+    from .. import bettor_xavier as _XV
+    out["capital"] = _XV.capital_duration(
+        game_start=(held.get("row") or {}).get("game_start"), now=at)
     out["readiness"] = dict(PAIR_INPUT_READINESS, **{
         "held_leg": ("BUILT via bettor_funded_hedge_supply.held_leg_for"
                      if held.get("ok") else
@@ -5153,6 +5332,8 @@ async def _funded_service(conn, *, now):
             deferred_exits=deferred,
             venue_positions=_venue_positions_for_gate(account_read),
             venue_reader=_FI.reservation_reader(),
+            # XAVIER'S NEXT REVIEW is no later than the next scheduled cycle.
+            review_interval_s=CYCLE_S,
             now=now)
         # THE ORDERING, ASSERTED IN THE RESULT rather than left to a reader to
         # infer from two sibling keys. `manage` sent nothing; whatever was sent
@@ -7113,6 +7294,17 @@ def _servicing_digest(svc) -> dict | None:
             # outcome, how many still wait on an open position, and what each
             # candidate model measured. Promotion is never scheduled.
             "learning": _learning_digest(svc.get("learning")),
+            # ── XAVIER: WHAT WAS DECIDED AND WHETHER IT COULD BE SENT ──
+            #
+            # THE GAP THIS CLOSES (Xavier map Q4). The rows above are
+            # `manage`'s choice, which is a CANDIDATE, not the decision: the
+            # one ranking in the pair pass decides and dispatches. Its per-
+            # position brief -- responsibility state, the chosen action, the
+            # execution eligibility, the top blockers and the next review --
+            # is what an operator reads to know what Xavier did.
+            "xavier": [dict(b) for b in (
+                (svc.get("pair_cycle") or {}).get("xavier")
+                or [])][:SERVICING_DIGEST_LIMIT],
             "what_this_is": (
                 "the LAST scheduled servicing decision, not a history. One "
                 "row per held position, overwritten each cycle"),

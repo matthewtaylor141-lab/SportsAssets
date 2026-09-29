@@ -85,6 +85,7 @@ from . import bettor_funded_learning as FL
 from . import bettor_funded_model as FMD
 from . import bettor_funded_reservations as RSV
 from . import bettor_indirect_structures as IS
+from . import bettor_xavier as XV
 
 VERSION = "FUNDED_PAIR_CYCLE_V1"
 
@@ -431,7 +432,8 @@ async def decide_and_record(conn, *, decision_id: str, account_id: str,
                             use_approved_model: bool = False,
                             model_inputs: dict | None = None,
                             now: float | None = None,
-                            indirect_options: list | None = None) -> dict:
+                            indirect_options: list | None = None,
+                            filled_qty_scope: dict | None = None) -> dict:
     """ONE COMPARISON, THEN WRITE IT DOWN BEFORE THE OUTCOME EXISTS.
 
     `hold_ranking` is `bettor_mgmt_select.rank_with_hold`'s own output, UNCHANGED
@@ -589,6 +591,23 @@ async def decide_and_record(conn, *, decision_id: str, account_id: str,
         # beside the hedge's translation.
         action = LEDGER_ACTION_FOR_SELECTION[action]
     out["action"] = action
+    # ── THE FILLED QUANTITY THE BOUND IS CONDITIONAL ON, FROM THE LEDGER ──
+    #
+    # THE DEFECT THIS CLOSES (Xavier execution map Q2). The scheduled pass
+    # passed `pos.get("filled_qty")` -- a column the intents table does not
+    # have -- so `bound_filled_qty` was None on every scheduled decision and
+    # the learning pass's scope check was skipped. The scope is now read from
+    # the fills ledger by the caller: the matched units the position holds,
+    # and for an acquisition the units the winning plan would match -- the
+    # same rule `bettor_funded_learning.observed_scope` applies at outcome.
+    if filled_qty is None and filled_qty_scope:
+        _sc = dict(filled_qty_scope)
+        if action == ACTION_ACQUIRE and sel.get("qty") is not None \
+                and _sc.get("intent_filled") is not None:
+            filled_qty = min(float(_sc["intent_filled"]), float(sel["qty"]))
+        else:
+            filled_qty = _sc.get("matched_units")
+        out["bound_filled_qty_from"] = _sc.get("source")
     rec = await FL.record_decision(
         conn, decision_id=decision_id, account_id=account_id, venue=venue,
         fixture=fixture, action=action, decided_at=at, group_id=group_id,
@@ -2482,7 +2501,8 @@ async def pass_once(conn, *, account_id: str, venue: str,
                     venue_positions: dict | None = None,
                     deferred_exits=None,
                     exit_dispatcher=None,
-                    venue_reader=None, now: float | None = None) -> dict:
+                    venue_reader=None, now: float | None = None,
+                    review_interval_s: float | None = None) -> dict:
     """ONE SCHEDULED PAIR PASS. Never raises; reports what it did not do.
 
     `pair_inputs` is a callable the scheduled caller supplies, returning the
@@ -2511,7 +2531,8 @@ async def pass_once(conn, *, account_id: str, venue: str,
                            "account_id": account_id, "venue": venue,
                            "opened_anything": False,
                            "resubmitted_anything": False,
-                           "considered": [], "acquisitions": []}
+                           "considered": [], "acquisitions": [],
+                           "xavier": []}
     out["recovery"] = await recover_reservations(
         conn, account_id=account_id, venue_reader=venue_reader, now=at)
     if pair_inputs is None:
@@ -2527,18 +2548,68 @@ async def pass_once(conn, *, account_id: str, venue: str,
         return dict(out, ok=False, refusal=R_NO_SCHEMA,
                     error="%s: %s" % (type(exc).__name__, str(exc)[:200]))
     out["open_entry_positions"] = len(held)
+    # ── XAVIER'S RESPONSIBILITY, READ BEFORE ANY POSITION IS REVIEWED ────
+    #
+    # Every position whose entry received any fill (a partial one included),
+    # or whose entry answer was lost, until every obligation it created is
+    # cleared. A position with no open entry row but an obligation left --
+    # a settlement not booked, provisional economics, an unanswered DISAGREES
+    # re-read, an unresolved claim -- is still reviewed and recorded, with
+    # nothing selectable, so it cannot fall out of sight.
+    xs = XV.review_context(account_id=account_id, venue=venue, at=at,
+                           review_interval_s=review_interval_s,
+                           venue_positions=venue_positions)
+    await xs.load(conn)
+    out["xavier_responsibility"] = xs.summary()
+    held_ids = {str(p.get("intent_id")) for p in held}
+    for r in xs.positions():
+        if r["intent_id"] not in held_ids:
+            got = await xs.record_obligations_only(conn, r)
+            out["xavier"].append(got.get("brief") or got)
     if not held:
         return dict(out, ok=True, paired_anything=False,
                     refusal=R_NO_HELD_POSITION,
                     why="nothing is held, so there is nothing to pair")
+    groups = XV.two_leg_groups(held)
     for pos in held:
         step: dict[str, Any] = {"intent_id": pos.get("intent_id"),
                                 "group_id": pos.get("portfolio_group_id")}
         out["considered"].append(step)
+        gid = pos.get("portfolio_group_id")
+        grp = groups.get(gid) if gid else None
+        # ── ONE DECISION PER GROUP, TAKEN ON THE PRIMARY ROW ─────────
+        #
+        # A group holding both legs is decided ONCE: the primary's review
+        # values the whole group and its alternatives include exiting or
+        # reducing either leg. The hedge row therefore produces no decision
+        # and no dispatch of its own this cycle -- which is what stops two
+        # conflicting orders for one group -- and its record names the group
+        # decision it is governed by.
+        if grp is not None and str(pos.get("intent_id")) == str(
+                grp["HEDGE"].get("intent_id")):
+            step["refusal"] = XV.R_DECIDED_WITH_THE_GROUP
+            step["decided_with_group_primary"] = grp["PRIMARY"].get(
+                "intent_id")
+            step["dispatched"] = None
+            continue
         facts = await pair_inputs(conn, pos, at=at)
+        companion = None
+        if grp is not None:
+            hfacts = await pair_inputs(conn, grp["HEDGE"], at=at)
+            companion = {"pos": grp["HEDGE"], "facts": hfacts}
+            if facts and facts.get("ok"):
+                facts = XV.group_facts(facts, hfacts, primary=pos,
+                                       hedge=grp["HEDGE"])
+                step["group"] = facts.get("group")
         if not facts or not facts.get("ok"):
             step["refusal"] = (facts or {}).get("refusal", R_NO_SECOND_CONTRACT)
             step["missing"] = (facts or {}).get("missing")
+            got = await xs.record_without_decision(
+                conn, pos, facts=facts,
+                why=("the position's decision inputs were not supplied (%s)"
+                     % step["refusal"]), companion=companion)
+            step["xavier"] = got.get("brief") or got
+            out["xavier"].append(step["xavier"])
             continue
         # ── DISCOVERY IS SKIPPED WHEN THERE IS NOTHING TO DISCOVER ──
         #
@@ -2589,6 +2660,22 @@ async def pass_once(conn, *, account_id: str, venue: str,
         # inferred from the absence of a ranking, and `discover`'s full admitted
         # list travels with it so a reader can see what was not compared.
         admitted_all = list(found.get("admitted") or [])
+        # ── THE SEARCH ORDER: SETTLEMENT-COMPATIBLE MIDDLES FIRST ────
+        #
+        # A SEARCH ORDER, NOT A PURCHASE RULE. Structures with an overlapping
+        # winning region whose matched units cost under 100 cents are
+        # examined first, and each structure's claimed floor is screened
+        # against fees, executable depth, quantities and every settlement
+        # state (void, push, postponement). The screen is recorded; it
+        # neither admits nor prefers anything -- the decision below is still
+        # whole-position expected value against HOLD, EXIT and REDUCE, and a
+        # floor that fails any check is never reported as locking one.
+        _screen_pre = {str(a.get("condition_id")): XV.structure_screen(
+            a, held_qty=pos.get("residual_qty")) for a in admitted_all}
+        admitted_all.sort(key=lambda a: _screen_pre[str(
+            a.get("condition_id"))]["search_rank"])
+        step["search_order"] = [str(a.get("condition_id"))
+                                for a in admitted_all]
         # ── EVERY ELIGIBLE CANDIDATE IS SCORED, NOT THE FIRST ADMITTED ──
         #
         # This used to be `admitted_all[0]`. The supplier now prices EACH
@@ -2624,7 +2711,23 @@ async def pass_once(conn, *, account_id: str, venue: str,
                                     "scored_on", "identity",
                                     "an_unreadable_input_is_not_a_zero",
                                     "the_taxonomy_does_not_set_the_order")}
+        _rows_by_id = {str(r.get("condition_id")): r
+                       for r in (ranking.get("ranked") or [])
+                       + (ranking.get("not_rankable") or [])}
+        screens = {cid: XV.structure_screen(
+            next(a for a in admitted_all if str(a.get("condition_id")) == cid),
+            _rows_by_id.get(cid), held_qty=pos.get("residual_qty"))
+            for cid in _screen_pre}
+        step["structure_screens"] = screens
         best = ranking.get("best_admitted")
+        if grp is not None and best is not None:
+            # A GROUP ALREADY HOLDING ITS HEDGE LEG ACQUIRES NO SECOND ONE:
+            # migration 131 permits one open leg per role per group, so the
+            # acquisition would be refused at the database. It is named here,
+            # before a plan exists, rather than discovered there.
+            step["acquisition_ineligible"] = XV.R_GROUP_ALREADY_HOLDS_A_HEDGE_LEG
+            step["admitted_contract_withheld"] = best["condition_id"]
+            best = None
         if best is None and admitted_all and not ranking.get("ranked"):
             # NOTHING COULD BE SCORED. Not "no candidate exists" -- candidates
             # were admitted and each lacked an input nobody read. Naming that
@@ -2641,6 +2744,15 @@ async def pass_once(conn, *, account_id: str, venue: str,
                 "contracts": [c.get("condition_id") for c in admitted_all][:8]}
         step["admitted_contract"] = None if best is None else best["condition_id"]
         gid = pos.get("portfolio_group_id")
+        # THE FILLED QUANTITY, FROM THE FILLS LEDGER (never a column the
+        # intents table does not have).
+        scope = await XV.filled_scope(conn, intent_id=str(pos.get("intent_id")),
+                                      group_id=gid)
+        step["filled_scope"] = scope
+        # (The structure screens are NOT added to the decision options: each
+        # option is splatted into `_price_indirect(**option)`, where an
+        # unknown key raises TypeError and removes the hedge from the
+        # comparison. Xavier's record attaches each screen by candidate id.)
         if gid is None and best is not None:
             # ── A GROUP IS NEEDED TO ACQUIRE, NOT TO DECIDE ──────────
             #
@@ -2666,9 +2778,10 @@ async def pass_once(conn, *, account_id: str, venue: str,
                 "unavailable, and this used to skip the whole decision")
             step["admitted_contract_withheld"] = best["condition_id"]
             best = None
+        _may_acquire = gid is not None and grp is None
         options, acquisition_plans, option_refusals = decision_options(
-            admitted=admitted_all if gid is not None else [],
-            ranking=ranking if gid is not None else {}, facts=facts,
+            admitted=admitted_all if _may_acquire else [],
+            ranking=ranking if _may_acquire else {}, facts=facts,
             position=pos, account_id=account_id, venue=venue, now=at)
         step["hedge_decision_inputs"] = {
             "candidate_ids": [o["candidate_id"] for o in options],
@@ -2706,7 +2819,7 @@ async def pass_once(conn, *, account_id: str, venue: str,
             capital_duration_h=facts.get("capital_duration_h"),
             holding_policy=facts.get("holding_policy",
                                      FL.POLICY_MAY_EXIT_EARLY),
-            filled_qty=pos.get("filled_qty"),
+            filled_qty=None, filled_qty_scope=scope,
             # ── THE APPROVED MODEL, WHEN THE SUPPLIER ASKS FOR IT ────
             #
             # The supplier decides, not this function: a lane with no approved
@@ -2726,10 +2839,36 @@ async def pass_once(conn, *, account_id: str, venue: str,
                 "for an order to refer to. Contained to this position: the "
                 "recovery and every other position's decision still ran"
                 % type(exc).__name__)
+            got = await xs.record_without_decision(
+                conn, pos, facts=facts, companion=companion,
+                eligibility="%s:THE_DECISION_WRITE_RAISED" % XV.E_NOT_DISPATCHED,
+                why=step["why_nothing_was_sent"])
+            step["xavier"] = got.get("brief") or got
+            out["xavier"].append(step["xavier"])
             continue
         step["decision"] = {k: dec.get(k) for k in
                             ("ok", "action", "refusal", "policy", "selected",
                              "region_probabilities_came_from")}
+        # ── XAVIER'S RECORD, WRITTEN BEFORE ANYTHING IS DISPATCHED ───
+        #
+        # One record per position under responsibility: the chosen action and
+        # the digest of the plan it was ranked with, EVERY alternative with
+        # the same whole-position economics or its exact blocker, the hedge
+        # search's refusals, the evidence, the obligations, the execution
+        # eligibility (which gate would stop it, read now) and the next
+        # review. A record that does not persist STOPS the dispatch, exactly
+        # like a ledger row that does not persist; so does a dispatch claim
+        # that is refused.
+        xr = await xs.review(
+            conn, pos=pos, facts=facts, dec=dec, step=step, ranking=ranking,
+            admitted_all=admitted_all, acquisition_plans=acquisition_plans,
+            option_refusals=option_refusals, screens=screens,
+            companion=companion, deferred_exits=deferred_exits)
+        step["xavier"] = xr.get("brief") or {k: xr.get(k) for k in (
+            "ok", "refusal", "error")}
+        out["xavier"].append(step["xavier"])
+        for _cb in xr.get("companion_briefs") or []:
+            out["xavier"].append(_cb)
         # ── DISPATCH THE ONE SELECTED ACTION, WHICHEVER IT IS ───────
         #
         # `pass_once` used to dispatch only the acquisition and record anything
@@ -2771,6 +2910,17 @@ async def pass_once(conn, *, account_id: str, venue: str,
                 "would exist at the venue and nowhere in our own ledger"
                 % (dec.get("refusal") or dec.get("error") or "no reason given"))
             continue
+        if not xr.get("ok"):
+            # NO XAVIER RECORD, NO DISPATCH -- the same rule as the ledger's.
+            step["refusal"] = XV.R_XAVIER_RECORD_NOT_PERSISTED
+            step["what_was_selected_instead"] = action
+            step["decision_refusal"] = xr.get("refusal") or xr.get("error")
+            step["dispatched"] = None
+            step["why_nothing_was_sent"] = (
+                "Xavier's pre-action record did not persist (%s). An order "
+                "sent now would name a decision nobody can read back"
+                % (xr.get("refusal") or xr.get("error")))
+            continue
         if action in (ACTION_HOLD, None, ACTION_NOTHING_RANKABLE):
             step["dispatched"] = None
             step["refusal"] = R_DECISION_IS_NOT_ACQUIRE
@@ -2780,12 +2930,15 @@ async def pass_once(conn, *, account_id: str, venue: str,
                 "and no venue call is made, which is the action being taken")
             continue
         if action in LEDGER_EXIT_ACTIONS:
-            # THE EXIT `manage` SELECTED AND DID NOT SEND. It is dispatched
-            # exactly as selected -- nothing here recomputes a price, a
-            # quantity or a proceeds figure, because a dispatcher with its own
-            # opinion of the number is the binding defect in another place.
+            # THE EXIT THE RANKING SELECTED, dispatched exactly as its plan
+            # states -- nothing here recomputes a price, a quantity or a
+            # proceeds figure, because a dispatcher with its own opinion of
+            # the number is the binding defect in another place.
+            _win = dec.get("selected") or {}
+            _by_digest = dict(facts.get("executable_plans_by_digest") or {})
+            plan = _by_digest.get(str(_win.get("plan_digest") or ""))
             sel = dict(deferred_exits or {}).get(pos.get("intent_id"))
-            if not sel:
+            if not sel and plan is None:
                 step["refusal"] = R_NO_DEFERRED_EXIT_TO_DISPATCH
                 step["what_was_selected_instead"] = action
                 step["why_nothing_was_sent"] = (
@@ -2816,8 +2969,10 @@ async def pass_once(conn, *, account_id: str, venue: str,
             # carries its digest, so a substituted plan -- however well-formed --
             # does not match, and expiry is checked against the clock rather than
             # by two records agreeing about an instant.
-            plans = dict((facts.get("executable_plans_by_action") or {}))
-            plan = plans.get(SELECTION_ACTION_FOR_LEDGER.get(action, action))
+            if plan is None:
+                plans = dict((facts.get("executable_plans_by_action") or {}))
+                plan = plans.get(SELECTION_ACTION_FOR_LEDGER.get(action,
+                                                                 action))
             bound = bind_plan_to_decision(
                 plan=plan, candidate=dec.get("selected"), action=action, now=at)
             step["order_binding"] = bound
@@ -2827,20 +2982,56 @@ async def pass_once(conn, *, account_id: str, venue: str,
                 step["dispatched"] = None
                 step["why_nothing_was_sent"] = bound["why"]
                 continue
-            # THE ORDER IS THE PLAN. Nothing downstream re-reads the selection.
-            sel = dict(sel, selected_qty=plan.quantity,
+            # ── THE DISPATCH CLAIM, BEFORE ANYTHING IS SENT ──────────
+            #
+            # One DISPATCH_CLAIMED event per decision and per plan digest; the
+            # database refuses a second and refuses a plan that is not the
+            # decision's chosen one. A replay, a restart or a concurrent
+            # review is refused here and sends nothing.
+            claim = await XV.claim_dispatch(
+                conn, xavier_decision_id=xr["xavier_decision_id"],
+                plan_digest=plan.digest, decision_id=facts.get("decision_id"),
+                at=time.time(),
+                evidence={"action": action, "intent_id": plan.intent_id,
+                          "leg_role": _win.get("leg_role")})
+            step["dispatch_claim"] = claim
+            if not claim.get("claimed"):
+                step["refusal"] = XV.R_DISPATCH_NOT_CLAIMED
+                step["what_was_selected_instead"] = action
+                step["dispatched"] = None
+                step["why_nothing_was_sent"] = (
+                    "the dispatch claim was not taken (%s), so nothing is "
+                    "sent" % claim.get("refusal"))
+                continue
+            # THE ORDER IS THE PLAN. Nothing downstream re-reads the selection
+            # -- and it may not exist at all when the winner is an exit the
+            # selector did not choose, whose plan was built from its terms.
+            if not sel or str(sel.get("selected") or "") != plan.action \
+                    or str(sel.get("intent_id") or "") != plan.intent_id:
+                sel = {}
+            sel = dict(sel, selected=plan.action, selected_qty=plan.quantity,
                        limit_price=plan.limit_price,
                        proceeds_per_contract=plan.proceeds_per_contract,
                        inputs_expire_at=plan.inputs_expire_at,
                        us_market_slug=plan.us_market_slug,
                        intent_id=plan.intent_id,
-                       plan_digest=plan.digest)
+                       assessed_at=sel.get("assessed_at", plan.assessed_at),
+                       plan_digest=plan.digest,
+                       # WHICH DECISION THIS ORDER EXECUTES, onto the intent.
+                       decision_ref={
+                           "decision_id": facts.get("decision_id"),
+                           "plan_digest": plan.digest,
+                           "xavier_decision_id": xr["xavier_decision_id"],
+                           "action": action})
             dispatcher = exit_dispatcher
             if dispatcher is None:
                 from . import bettor_funded_management as _FM
                 dispatcher = _FM.dispatch_selection
             sent = await dispatcher(conn, selection=sel, adapter=adapter,
                                     venue=venue, now=at)
+            step["xavier_execution"] = await xs.record_execution(
+                conn, xavier_decision_id=xr["xavier_decision_id"],
+                result=XV.exit_result(sent))
             step["dispatched"] = action
             step["exit_dispatch"] = {
                 k: sent.get(k) for k in
@@ -2891,14 +3082,17 @@ async def pass_once(conn, *, account_id: str, venue: str,
         # could never be sent. The admission record is now built from the
         # selected plan and the evidence that qualified it, and any check that
         # fails is refused here by name, before a reservation exists.
-        adm = hedge_admission_record(
+        # THE ADMISSION RECORD XAVIER'S REVIEW BUILT from this very plan (the
+        # same pure function, the same inputs), so the record's eligibility
+        # and the dispatch rest on one admission, not two.
+        adm = xr.get("admission") or hedge_admission_record(
             plan=acq_plan, selected=selected,
             admitted=next((a for a in admitted_all
                            if str(a.get("condition_id")) == str(cid)), None),
             ranked_row=next((r for r in (ranking.get("ranked") or ())
                              if str(r.get("condition_id")) == str(cid)), None),
             position=pos, decision_id=facts["decision_id"], now=at,
-            supplied=facts.get("hedge_decision_record"))
+            supplied=XV.hedge_record_supplied(facts, admitted_all, cid))
         step["admission"] = {k: adm.get(k) for k in
                              ("ok", "refusal", "passed", "failed", "conflicts",
                               "drift", "why")}
@@ -2908,13 +3102,33 @@ async def pass_once(conn, *, account_id: str, venue: str,
                 adm, submitted=False, nothing_was_sent=True,
                 nothing_was_reserved=True, candidate_id=cid))
             continue
+        # ── THE DISPATCH CLAIM, BEFORE THE LEG IS RESERVED OR SENT ───
+        claim = await XV.claim_dispatch(
+            conn, xavier_decision_id=xr["xavier_decision_id"],
+            plan_digest=acq_plan.digest, decision_id=facts.get("decision_id"),
+            at=time.time(), evidence={"action": ACTION_ACQUIRE,
+                                      "candidate_id": cid})
+        step["dispatch_claim"] = claim
+        if not claim.get("claimed"):
+            step.update(refusal=XV.R_DISPATCH_NOT_CLAIMED, dispatched=None,
+                        why_nothing_was_sent=(
+                            "the dispatch claim was not taken (%s), so "
+                            "nothing is reserved or sent"
+                            % claim.get("refusal")))
+            continue
         got = await acquire_second_leg(
             conn, operation_id=facts["operation_id"], group_id=gid,
             plan=acq_plan, expect_candidate_id=cid,
             expect_digest=selected["plan_digest"],
-            decision_record=adm["record"],
+            # THE ORDER NAMES THE XAVIER REVIEW IT EXECUTES, besides the
+            # ledger decision and the plan digest the record already carries.
+            decision_record=dict(adm["record"],
+                                 xavier_decision_id=xr["xavier_decision_id"]),
             account_id=account_id, venue=venue, adapter=adapter,
             venue_positions=venue_positions, now=at)
+        step["xavier_execution"] = await xs.record_execution(
+            conn, xavier_decision_id=xr["xavier_decision_id"],
+            result=XV.acquisition_result(got))
         step["acquisition"] = {k: got.get(k) for k in
                                ("ok", "refusal", "submitted", "intent_id",
                                 "exposure", "order_binding")}
