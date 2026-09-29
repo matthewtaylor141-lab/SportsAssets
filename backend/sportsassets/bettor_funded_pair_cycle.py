@@ -73,6 +73,7 @@ uncalled. Turning it on is a code change with the owner's authority behind it.
 
 from __future__ import annotations
 
+import math
 import time
 from typing import Any
 
@@ -330,15 +331,134 @@ def discover(*, held_leg, candidate_legs, sport_permits_tie,
 # 3 · THE DECISION, IN ONE COMPARISON
 # ═════════════════════════════════════════════════════════════════════
 
+#: THE ACQUISITION AND HOLD MUST REST ON ONE PRIMARY PROBABILITY. A candidate
+#: priced through the payout-state distribution whose primary probability is
+#: not shown to be the one HOLD is valued on is refused by this name.
+R_PRIMARY_MARGINAL_DIFFERS_FROM_HOLD = (
+    "THE_ACQUISITION_IS_NOT_PRICED_ON_THE_PRIMARY_PROBABILITY_HOLD_IS_VALUED_ON")
+
+
+R_NO_HOLD_VALUE_TO_ANCHOR = "HOLD_STATES_NO_VALUE_TO_MEASURE_THE_ACQUISITION_AGAINST"
+
+
+def _hold_value(hold_ranking):
+    """HOLD's own `value_usd` from the selector's ranking, or None."""
+    for c in (dict(hold_ranking or {}).get("candidates") or ()):
+        if str((c or {}).get("action")) == "HOLD":
+            v = c.get("value_usd")
+            try:
+                f = None if v is None or isinstance(v, bool) else float(v)
+            except (TypeError, ValueError):
+                f = None
+            return f if f is not None and math.isfinite(f) else None
+    return None
+
+
+def _hold_probability(hold_ranking):
+    """The probability `rank_with_hold` valued HOLD on (its candidate's
+    `value_per_contract`), or None when the ranking does not state one."""
+    for c in (dict(hold_ranking or {}).get("candidates") or ()):
+        if str((c or {}).get("action")) == "HOLD":
+            v = c.get("value_per_contract")
+            try:
+                f = None if v is None or isinstance(v, bool) else float(v)
+            except (TypeError, ValueError):
+                f = None
+            return f if f is not None and 0.0 <= f <= 1.0 else None
+    return None
+
+
+def _hold_value_under(position_value, probabilities) -> float | None:
+    """HOLD'S EXPECTED NET VALUE UNDER THE SAME MEASURE AND TABLE THE
+    ACQUISITION WAS PRICED ON: the held leg alone, at its real quantity and
+    basis, over the position table's regions (void refunds included).
+    None when the table or a region probability is missing. Pure."""
+    pv = dict(position_value or {})
+    probs = dict(probabilities or {})
+    held_q = pv.get("held_qty")
+    basis = pv.get("held_basis_usd_per_unit")
+    if not pv.get("ok") or held_q is None or basis is None:
+        return None
+    total = 0.0
+    for r in pv.get("regions") or ():
+        p = probs.get(r.get("region"))
+        cents = (r.get("per_leg_cents") or [None])[0]
+        if p is None or cents is None:
+            return None
+        total += float(p) * float(cents) / 100.0 * float(held_q)
+    return round(total - float(basis) * float(held_q), 6)
+
+
 async def _price_indirect(conn, *, admitted, region_probabilities=None,
                           evidence_quality=FD.EVIDENCE_NOT_ESTABLISHED,
                           fee_usd=None, depth=None, incremental=None,
                           capital_duration_h=None, use_approved_model=False,
                           model_inputs=None, position_value=None,
-                          candidate_id=None, plan_digest=None):
+                          candidate_id=None, plan_digest=None, now=None):
     """Price one alternative; this helper never writes a decision or sends."""
     out = {}
+    mi = dict(model_inputs or {})
+    structure = None if admitted is None else admitted["structure"]
+    upper_probabilities = None
+    # ── THE PAYOUT-STATE DISTRIBUTION, WHENEVER A PRIMARY PROBABILITY IS
+    #    SUPPLIED ──────────────────────────────────────────────────────
+    #
+    # THE PATH THAT CLOSES THE OUTSIDE-SPLIT BLOCKER. `primary_probability` is
+    # the probability HOLD, DIRECT_EXIT and REDUCE are valued on, passed
+    # through by the supplier. `predict_distribution` prices the structure's
+    # PAYOUT CLASSES from it, the table's own structure, the approved
+    # KEY_HEDGE_GIVEN_PRIMARY model and a measured void rate -- and refuses,
+    # naming the key, when that model is not approved, and refuses while the
+    # primary probability's source has no current passing calibration (the
+    # entry lane's MODEL_TRUST_DRIFT, applied because an acquisition commits
+    # new money on that probability). There is NO fallback to
+    # the legacy path below from here: a lane that has a primary probability
+    # prices through classes or not at all.
+    prediction = None
+    if admitted is not None and mi.get("primary_probability") is not None:
+        prediction = await FMD.predict_distribution(
+            conn, structure=structure,
+            primary_cost_cents=mi.get("primary_cost_cents"),
+            hedge_cost_cents=mi.get("hedge_cost_cents"),
+            overtime_included=mi.get("overtime_included"),
+            primary_probability=mi.get("primary_probability"),
+            primary_source=mi.get("primary_source"),
+            primary_partial_probability=mi.get(
+                "primary_partial_probability"),
+            primary_calibration=mi.get("primary_calibration"),
+            position_value=position_value, at=now)
+        heavy = ("merged_structure", "merged_position_value")
+        out["prediction"] = {k: v for k, v in prediction.items()
+                             if k not in heavy}
+        if not prediction.get("ok"):
+            out["region_probabilities_came_from"] = (
+                "NOTHING_APPROVED_FOR:%s" % prediction.get("model_key")
+                if prediction.get("refusal") == FMD.R_NO_APPROVED_MODEL
+                else "DISTRIBUTION_COULD_NOT_PRICE_THIS_STRUCTURE:%s"
+                     % prediction.get("refusal"))
+            out["prediction_refusal"] = prediction.get("refusal")
+            out["prediction_why"] = prediction.get("why")
+            region_probabilities = None
+        else:
+            region_probabilities = prediction["region_probabilities"]
+            upper_probabilities = prediction.get(
+                "region_probabilities_at_void_upper_95")
+            # THE MERGED TABLES ARE WHAT THE CLASS PROBABILITIES PRICE. Same
+            # payouts, same floor, one row per payout class (see
+            # `bettor_payout_states.merged_position_value`).
+            structure = prediction["merged_structure"]
+            if position_value is not None:
+                position_value = prediction["merged_position_value"]
+            evidence_quality = FD.EVIDENCE_EXTERNAL_LABELLED
+            out["region_probabilities_came_from"] = (
+                "APPROVED_DISTRIBUTION:%s@%s" % (prediction["model_key"],
+                                                 prediction["model_version"]))
+            out["distribution_basis"] = prediction["distribution_basis"]
     # ── THE APPROVED MODEL, WHEN THIS LANE IS ASKED TO DECIDE FROM ONE ──
+    #
+    # THE LEGACY PATH: KEY_MIDDLE's single number plus an outside split that no
+    # admissible source supplies, so it refuses R_NO_OUTSIDE_SPLIT. Kept for a
+    # caller that supplies no primary probability.
     #
     # `use_approved_model` is what makes the registry load-bearing instead of
     # decorative: the probability comes from the ONE approved version, and the
@@ -350,9 +470,7 @@ async def _price_indirect(conn, *, admitted, region_probabilities=None,
     # absent, and `bettor_funded_decision` declines the indirect candidate by
     # name. A fallback to an unregistered number would mean the promotion gate
     # governed nothing.
-    prediction = None
-    if use_approved_model and admitted is not None:
-        mi = dict(model_inputs or {})
+    elif use_approved_model and admitted is not None:
         prediction = await FMD.predict_for(
             conn, structure=admitted["structure"],
             primary_cost_cents=mi.get("primary_cost_cents"),
@@ -405,17 +523,64 @@ async def _price_indirect(conn, *, admitted, region_probabilities=None,
             admitted["structure"], fee_usd=fee_usd,
             fee_basis=(None if fee_usd is None else "SUPPLIED_BY_THE_CALLER"))
         cand = FD.indirect_candidate(
-            structure=admitted["structure"],
+            structure=structure,
             region_probabilities=region_probabilities,
             evidence_quality=evidence_quality, fee_usd=fee_usd, depth=depth,
             incremental=incremental, capital_duration_h=capital_duration_h,
             worst_case=out["worst_case"], position_value=position_value)
+        if upper_probabilities is not None and cand.get("rankable"):
+            # THE SAME CANDIDATE WITH THE VOID MASS AT ITS UPPER 95% BOUND.
+            # Carried beside it -- never ranked in its place -- so the decision
+            # can report whether its choice survives the rate's uncertainty.
+            up = FD.indirect_candidate(
+                structure=structure, region_probabilities=upper_probabilities,
+                evidence_quality=evidence_quality, fee_usd=fee_usd,
+                depth=depth, incremental=incremental,
+                capital_duration_h=capital_duration_h,
+                worst_case=out["worst_case"], position_value=position_value)
+            out["value_at_void_upper_95"] = (up.get("value_usd")
+                                             if up.get("rankable") else None)
+            out["hold_value_at_void_upper_95"] = _hold_value_under(
+                position_value, upper_probabilities)
+        # HOLD UNDER THE SAME MEASURE. The acquisition's whole-position value
+        # is an expectation over the distribution (void mass included); HOLD
+        # from the selector is valued on P(primary wins) with no void term.
+        # The increment over HOLD is therefore computed HERE, under ONE
+        # measure and ONE table, so the difference between the two actions
+        # contains no term from the measure or the held leg's basis.
+        if out.get("distribution_basis") and cand.get("rankable"):
+            out["hold_value_same_measure"] = _hold_value_under(
+                position_value, region_probabilities)
     if cand is not None:
         cand = dict(cand, candidate_id=candidate_id or admitted.get("condition_id"),
                     plan_digest=plan_digest)
         if prediction:
-            cand["prediction"] = prediction
-    return dict(out, candidate=cand, prediction=prediction)
+            cand["prediction"] = out.get("prediction", prediction)
+        if out.get("distribution_basis"):
+            cand["distribution_basis"] = out["distribution_basis"]
+            cand["primary_probability"] = mi.get("primary_probability")
+            cand["primary_source"] = mi.get("primary_source")
+            cand["implied_primary_marginal"] = (
+                prediction.get("predicted") or {}).get(
+                    "implied_primary_marginal")
+            if "value_at_void_upper_95" in out:
+                cand["value_at_void_upper_95"] = out["value_at_void_upper_95"]
+            hs = out.get("hold_value_same_measure")
+            if hs is not None and cand.get("expected_net_usd") is not None:
+                cand["whole_position_expected_net_usd"] = cand[
+                    "expected_net_usd"]
+                cand["hold_value_same_measure_usd"] = hs
+                cand["increment_vs_hold_same_measure_usd"] = round(
+                    float(cand["expected_net_usd"]) - hs, 6)
+                hu = out.get("hold_value_at_void_upper_95")
+                if hu is not None and out.get("value_at_void_upper_95") \
+                        is not None:
+                    cand["increment_vs_hold_at_void_upper_95_usd"] = round(
+                        float(out["value_at_void_upper_95"]) - hu, 6)
+    # THE MERGED TABLES STAY HERE: they priced the candidate and the decision
+    # records the class probabilities and their basis, not the tables again.
+    return dict(out, candidate=cand,
+                prediction=out.get("prediction", prediction))
 
 
 async def decide_and_record(conn, *, decision_id: str, account_id: str,
@@ -460,8 +625,10 @@ async def decide_and_record(conn, *, decision_id: str, account_id: str,
             "use_approved_model": use_approved_model, "model_inputs": model_inputs}]
     priced = []
     for option in options:
+        opt = dict(option)
+        opt.setdefault("now", at)
         try:
-            priced.append(await _price_indirect(conn, **option))
+            priced.append(await _price_indirect(conn, **opt))
         except Exception as exc:
             # An unreadable hedge model removes that alternative, not the
             # independently priced exit or the other positions' decisions.
@@ -470,6 +637,88 @@ async def decide_and_record(conn, *, decision_id: str, account_id: str,
                 "candidate_id": option.get("candidate_id"), "rankable": False,
                 "value_usd": None, "blocker": "HEDGE_VALUATION_UNAVAILABLE",
                 "error_type": type(exc).__name__}})
+    # ── ONE PRIMARY MARGINAL UNDER ALL FOUR ACTIONS ──────────────────
+    #
+    # A candidate priced through the payout-state distribution rests on the
+    # primary probability its supplier passed. HOLD rests on the probability
+    # `rank_with_hold` valued it on (`value_per_contract`). If the two are not
+    # shown to be the SAME number, the difference between ACQUIRE and HOLD
+    # contains a spurious term -- the gap between two marginals -- and the
+    # ranking would be comparing two different fixtures. So the acquisition is
+    # refused by name unless HOLD states its probability and it agrees.
+    hold_p = _hold_probability(hold_ranking)
+    consistency = {}
+    for row in priced:
+        cand = row.get("candidate") or {}
+        if not cand.get("distribution_basis"):
+            continue
+        p = cand.get("primary_probability")
+        same = (hold_p is not None and p is not None
+                and abs(float(hold_p) - float(p)) <= 1e-12)
+        cons = {"hold_probability": hold_p,
+                "acquire_primary_probability": p,
+                "same_primary_probability": same,
+                "acquire_implied_primary_marginal": cand.get(
+                    "implied_primary_marginal"),
+                "implied_minus_hold": (
+                    None if hold_p is None
+                    or cand.get("implied_primary_marginal") is None
+                    else float(cand["implied_primary_marginal"])
+                    - float(hold_p)),
+                "why_they_may_differ": (
+                    "the implied marginal is (1 - void rate) x P(primary "
+                    "wins | not void); HOLD is valued on P(primary wins). "
+                    "With the same primary probability they differ by exactly "
+                    "the void mass the table admits")}
+        consistency[str(cand.get("candidate_id"))] = cons
+        row["candidate"] = dict(cand, primary_marginal_consistency=cons)
+        if cand.get("rankable") and not same:
+            row["candidate"].update(
+                rankable=False, value_usd=None,
+                blocker=R_PRIMARY_MARGINAL_DIFFERS_FROM_HOLD,
+                why=("HOLD %s and the acquisition was priced on %r; the two "
+                     "actions must rest on one primary probability"
+                     % ("states no probability" if hold_p is None
+                        else "is valued on %r" % hold_p, p)))
+    if consistency:
+        out["primary_marginal_consistency"] = consistency
+    # ── THE ACQUISITION IS RANKED AS HOLD + ITS SAME-MEASURE INCREMENT ─
+    #
+    # HOLD, DIRECT_EXIT and REDUCE are valued by the selector on P(primary
+    # wins) at the held leg's remaining basis. The acquisition's whole-position
+    # value is an expectation under the payout-state distribution, which also
+    # carries the void mass. Comparing the two raw would put the gap between
+    # the measures (and any gap between the held-leg bases) into the ranking.
+    # So the acquisition's ranking value is HOLD's own value plus the increment
+    # over HOLD computed under ONE measure and ONE table (`_price_indirect`);
+    # its whole-position expectation is kept beside it, unchanged.
+    hold_value = _hold_value(hold_ranking)
+    for row in priced:
+        cand = row.get("candidate") or {}
+        inc = cand.get("increment_vs_hold_same_measure_usd")
+        if not cand.get("rankable") or inc is None:
+            continue
+        if hold_value is None:
+            row["candidate"] = dict(
+                cand, rankable=False, value_usd=None,
+                blocker=R_NO_HOLD_VALUE_TO_ANCHOR,
+                why=("the acquisition's value is HOLD's value plus its "
+                     "same-measure increment, and HOLD states no value"))
+            continue
+        anchored = round(hold_value + float(inc), 6)
+        upd = {"value_usd": anchored, "expected_net_usd": anchored,
+               "hold_value_usd": hold_value,
+               "valued_as": ("HOLD's value (%.6f) + the increment over HOLD "
+                             "under the payout-state distribution (%+.6f); "
+                             "the whole-position expectation under that "
+                             "distribution is %s"
+                             % (hold_value, float(inc),
+                                cand.get("whole_position_expected_net_usd")))}
+        iu = cand.get("increment_vs_hold_at_void_upper_95_usd")
+        if "value_at_void_upper_95" in cand:
+            upd["value_at_void_upper_95"] = (
+                None if iu is None else round(hold_value + float(iu), 6))
+        row["candidate"] = dict(cand, **upd)
     candidates = [r["candidate"] for r in priced if r.get("candidate") is not None]
     out["indirect_candidates"] = candidates
     out["indirect_candidate"] = candidates[0] if len(candidates) == 1 else None
@@ -477,6 +726,41 @@ async def decide_and_record(conn, *, decision_id: str, account_id: str,
     verdict = FD.decide(hold_ranking=hold_ranking,
                         indirect_candidates=candidates,
                         limits=limits, capital_duration_h=capital_duration_h)
+    # ── DOES THE CHOICE SURVIVE THE VOID RATE'S UPPER BOUND? ─────────
+    #
+    # Only the distribution-priced acquisitions depend on the void rate; HOLD,
+    # DIRECT_EXIT and REDUCE do not. So the same ranking is re-run with each
+    # such candidate valued at the rate's upper 95% bound, and the decision
+    # records whether the selected action changes. Nothing is selected from
+    # the re-run: it is a sensitivity statement, not a second decision.
+    sens_rows = [c for c in candidates if "value_at_void_upper_95" in c]
+    if sens_rows:
+        alt = []
+        for c in candidates:
+            if "value_at_void_upper_95" not in c or not c.get("rankable"):
+                alt.append(c)
+                continue
+            v2 = c.get("value_at_void_upper_95")
+            alt.append(dict(c, value_usd=v2, expected_net_usd=v2)
+                       if v2 is not None else
+                       dict(c, rankable=False, value_usd=None,
+                            blocker="NOT_VALUED_AT_THE_VOID_UPPER_BOUND"))
+        v_up = FD.decide(hold_ranking=hold_ranking, indirect_candidates=alt,
+                         limits=limits, capital_duration_h=capital_duration_h)
+
+        def _pick(v):
+            sc = v.get("selected_candidate") or {}
+            return (v.get("selected"), sc.get("candidate_id"))
+        out["void_rate_sensitivity"] = {
+            "decision_sensitive_to_void_rate": _pick(verdict) != _pick(v_up),
+            "selected_at_the_point_rate": list(_pick(verdict)),
+            "selected_at_the_upper_95_rate": list(_pick(v_up)),
+            "acquisition_values": {
+                str(c.get("candidate_id")): {
+                    "at_the_point_rate": c.get("value_usd"),
+                    "at_the_upper_95_rate": c.get("value_at_void_upper_95")}
+                for c in sens_rows},
+            "is": "A SENSITIVITY STATEMENT; the decision is the point-rate one"}
     winner = verdict.get("selected_candidate") or {}
     prediction = winner.get("prediction")
     # ── THE PREDICTION THE DECISION WAS MADE FROM, EVEN WHEN IT LOST ─
@@ -510,6 +794,24 @@ async def decide_and_record(conn, *, decision_id: str, account_id: str,
                 "estimate the model gave for the strongest indirect candidate "
                 "it priced, which is what that action was compared against"
                 % (verdict.get("selected") or "none"))
+    # ── THE DISTRIBUTION'S BASIS GOES ON THE LEDGER ROW ──────────────
+    #
+    # When the recorded prediction came through the payout-state distribution,
+    # the row's `predicted` carries what makes it falsifiable: the conditional
+    # model's id and version and both answers, both feature shas, the class
+    # probabilities and their classes, the void-rate basis, the primary source,
+    # ACQUIRE's implied primary marginal against HOLD's, and whether the choice
+    # survives the void rate's upper bound. Existing columns are unchanged:
+    # `model_key`/`model_version`/`features`/`feature_sha` keep their meaning.
+    if (prediction or {}).get("path") == "PAYOUT_STATE_DISTRIBUTION" \
+            and (prediction or {}).get("ok"):
+        prediction = dict(prediction, predicted=dict(
+            prediction.get("predicted") or {},
+            recorded_for_candidate=recorded_for,
+            primary_marginal_consistency=consistency.get(str(recorded_for)),
+            void_rate_sensitivity=out.get("void_rate_sensitivity")))
+        out["distribution_basis_recorded"] = (
+            prediction["predicted"].get("distribution_basis"))
     selected_pricing = next((r for r in priced
                             if (r.get("candidate") or {}).get("candidate_id") == winner.get("candidate_id")), {})
     # Keep the established diagnostic fields for single-candidate callers.
@@ -1187,6 +1489,16 @@ async def scheduled_learning_pass(conn, *, account_id: str,
         out["withdraw"] = {"ok": False, "refusal": "WITHDRAWAL_RAISED",
                            "error": "%s: %s" % (type(exc).__name__,
                                                 str(exc)[:200])}
+    # AND THE CONDITIONAL THE PAYOUT-STATE DISTRIBUTION PRICES FROM: an
+    # approval whose records no longer reproduce is withdrawn for that key
+    # too. Retiring only removes pricing authority.
+    try:
+        out["withdraw_conditional"] = await FMD.withdraw_invalidated(
+            conn, model_key=FMD.KEY_HEDGE_GIVEN_PRIMARY)
+    except Exception as exc:                                   # noqa: BLE001
+        out["withdraw_conditional"] = {
+            "ok": False, "refusal": "WITHDRAWAL_RAISED",
+            "error": "%s: %s" % (type(exc).__name__, str(exc)[:200])}
     # ── 1b · GENERATE: one governed candidate from the ledger as it stands ──
     #
     # Declared rules in `bettor_funded_model.generate_candidate`: enough
@@ -2729,7 +3041,10 @@ async def pass_once(conn, *, account_id: str, venue: str,
             continue
         step["decision"] = {k: dec.get(k) for k in
                             ("ok", "action", "refusal", "policy", "selected",
-                             "region_probabilities_came_from")}
+                             "region_probabilities_came_from",
+                             "primary_marginal_consistency",
+                             "void_rate_sensitivity",
+                             "distribution_basis_recorded")}
         # ── DISPATCH THE ONE SELECTED ACTION, WHICHEVER IT IS ───────
         #
         # `pass_once` used to dispatch only the acquisition and record anything

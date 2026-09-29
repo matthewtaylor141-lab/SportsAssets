@@ -1005,26 +1005,28 @@ async def test_the_supplier_turns_the_registry_on_when_a_model_is_approved():
         assert mi["overtime_included"] is True      # read from the prose
 
 
-async def test_the_last_blocker_is_the_outside_split_and_it_is_not_invented():
-    """THE REMAINING BLOCKER FOR "A HEDGE BEATS HOLD", MEASURED AND NAMED.
+async def test_the_outside_split_is_no_longer_the_blocker_and_is_still_not_invented():
+    """THE BLOCKER THIS REPLACES, AND THE ONE THAT REPLACES IT, BOTH NAMED.
 
-    With a model promoted through the whole registry path, `predict_for` computes
-    p_middle = 0.1344 for this structure and then REFUSES:
+    This test used to be `test_the_last_blocker_is_the_outside_split_and_it_is_
+    not_invented`, and it said it should be REPLACED -- not deleted -- once the
+    mass outside the middle had a real source. It now has one, and it is not an
+    outside split: the pair cycle prices the structure's PAYOUT CLASSES
+    (`bettor_payout_states`) as
+        (1 - measured void rate) x P(primary outcome) x P(hedge | outcome)
+    where P(primary outcome) is the probability HOLD is valued on, P(hedge |
+    outcome) is 1 wherever the table admits one hedge payout, and elsewhere it
+    is the approved KEY_HEDGE_GIVEN_PRIMARY model -- `predict_distribution`.
 
-        NO_PROBABILITY_WAS_STATED_FOR_THE_REGIONS_OUTSIDE_THE_MIDDLE
-        "the model prices the middle only. How the remaining 0.8656 is
-         distributed over 6 other region(s) is a separate statement about the
-         fixture, and spreading it uniformly would make that statement silently"
+    So what is pinned now, on the same fixture and the same promoted KEY_MIDDLE
+    model:
 
-    So the blocker is not plumbing and not an empty registry: it is a SECOND
-    probability statement -- a distribution over the fixture's non-middle margin
-    regions -- that no source in this repository supplies. `outside_split` is the
-    parameter that would carry it.
-
-    This test exists so that blocker cannot be closed by inventing a uniform
-    split. If a future change makes the prediction succeed, it must be because
-    an outside split was SUPPLIED by a source, and this test should then be
-    replaced by one naming that source -- not deleted.
+      * the LEGACY path still refuses exactly as before -- p_middle is computed
+        and the outside split is refused, never spread uniformly;
+      * the path that replaces it is asked and refuses on ITS dependency, by
+        name: no approved KEY_HEDGE_GIVEN_PRIMARY model. That is the blocker
+        now -- evidence for a named approver, not a missing source;
+      * the module's own record of the inadmissible source names the new path.
     """
     async with _conn() as conn:
         for t in ("bettor_funded_decisions", "bettor_funded_models"):
@@ -1036,7 +1038,7 @@ async def test_the_last_blocker_is_the_outside_split_and_it_is_not_invented():
         await conn.execute(
             "DELETE FROM bettor_funded_intents WHERE account_id=$1", ACCT)
         await _catalogue(conn)
-        # THE MODEL REALLY IS APPROVED.
+        # THE KEY_MIDDLE MODEL REALLY IS APPROVED.
         appr = await FMD.approved(conn, model_key=FMD.KEY_MIDDLE)
         assert appr.get("ok") is True, appr
 
@@ -1056,18 +1058,35 @@ async def test_the_last_blocker_is_the_outside_split_and_it_is_not_invented():
                             sport_permits_tie=False, fixture_can_postpone=False)
         adm = (found.get("admitted") or [None])[0]
         assert adm is not None, found
+        # ── THE LEGACY PATH: UNCHANGED, AND STILL NOT INVENTING A SPLIT ──
         pred = await FMD.predict_for(
             conn, structure=adm["structure"], primary_cost_cents=55,
             hedge_cost_cents=30, overtime_included=True)
         assert pred["ok"] is False, pred
         assert pred["refusal"] == (
             "NO_PROBABILITY_WAS_STATED_FOR_THE_REGIONS_OUTSIDE_THE_MIDDLE"), pred
-        # THE MIDDLE ITSELF WAS PRICED -- so the model works and the gap is the
-        # second statement, not the first.
         assert 0.0 < pred["p_middle"] < 1.0, pred
         assert len(pred["outside_regions"]) >= 2, pred
-        # AND NO UNIFORM SPLIT WAS SUBSTITUTED.
         assert "uniformly" in pred["why"], pred
+        # ── THE PATH THAT REPLACES IT, AND ITS BLOCKER, BY NAME ──────
+        # The primary probability is CHOSEN here; in the scheduled pass it is
+        # the HOLD candidate's own `value_per_contract`.
+        dist = await FMD.predict_distribution(
+            conn, structure=adm["structure"], primary_cost_cents=55,
+            hedge_cost_cents=30, overtime_included=True,
+            primary_probability=0.60,
+            primary_source={"from": "CHOSEN_FOR_THIS_TEST"}, at=NOW)
+        assert dist["ok"] is False, dist
+        assert dist["refusal"] == FMD.R_NO_APPROVED_MODEL, dist
+        assert dist["refused_for_key"] == FMD.KEY_HEDGE_GIVEN_PRIMARY
+        assert "OUTSIDE" not in str(dist.get("refusal"))
+        # AND THE STRUCTURE ITSELF IS PRICEABLE BY CLASSES: the blocker is the
+        # model's evidence, not the table.
+        from sportsassets import bettor_payout_states as PS
+        cls = PS.payout_classes(adm["structure"])
+        assert cls["ok"] is True, cls
+        assert "predict_distribution" in \
+            FMD.OUTSIDE_SPLIT_HAS_NO_ADMISSIBLE_SOURCE
 
 
 async def test_an_unpriced_outside_region_is_not_reported_as_an_empty_registry():

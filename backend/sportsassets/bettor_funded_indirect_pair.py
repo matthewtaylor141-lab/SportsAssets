@@ -414,6 +414,10 @@ def position_worst_case(*, held_leg, hedge_leg, hedge_qty,
         return dict(out, refusal=R_STRUCTURE_IS_UNESTABLISHABLE,
                     why="both legs are needed to partition one outcome space")
     gaps = list(held_leg.missing_facts()) + list(hedge_leg.missing_facts())
+    # THE SAME REFUSAL `classify` MAKES: an integer total line's push is not
+    # isolated by the partition this table is built on, so the floor would be
+    # a minimum over cells that misgrade the push.
+    gaps += IS.integer_total_push_gaps((held_leg, hedge_leg))
     if gaps:
         return dict(out, refusal=R_STRUCTURE_IS_UNESTABLISHABLE,
                     missing_facts=gaps,

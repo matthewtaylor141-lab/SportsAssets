@@ -26,11 +26,22 @@ and a clustered jackknife. This module fits and scores THROUGH them. Writing a
 third arithmetic would be the duplication that produced a fabricated hedge once
 already in this codebase.
 
-NOT A NEW PROBABILITY OVER THE WHOLE FIXTURE. The model answers ONE question --
-`p(the structure's both-win region occurs)` -- and the mass outside that region has
-to come from somewhere the caller names. `region_probabilities` REFUSES without an
-outside split rather than spreading the remainder uniformly, because a uniform
-assumption nobody stated is an assertion about the fixture.
+NOT A NEW PROBABILITY OVER THE WHOLE FIXTURE. The KEY_MIDDLE model answers ONE
+question -- `p(the structure's both-win region occurs)` -- and the mass outside that
+region has to come from somewhere the caller names. `region_probabilities` REFUSES
+without an outside split rather than spreading the remainder uniformly, because a
+uniform assumption nobody stated is an assertion about the fixture.
+
+WHAT CLOSES THAT, AND IT IS STILL NOT A FIXTURE-WIDE MODEL. Every action's value
+depends on a region only through its (primary, hedge) payout pair, so the measure a
+decision needs is over PAYOUT CLASSES (`bettor_payout_states`), and it factors as
+P(primary outcome) x P(hedge class | primary outcome) with a measured void mass.
+P(primary outcome) is the external probability HOLD is already valued on;
+P(hedge class | outcome) is 1 wherever the table admits one hedge payout, and where
+it admits exactly two -- {0, 100} -- it is the one binary question the second key
+learns: KEY_HEDGE_GIVEN_PRIMARY, P(hedge wins | primary outcome), fitted, bound to
+its records, evaluated prospectively and promoted through exactly the registry path
+KEY_MIDDLE uses. `predict_distribution` is where the three meet.
 
 ──────────────────────────────────────────────────────────────────────
 THE TARGET, AND WHY THIS ONE.
@@ -62,9 +73,16 @@ from .learn import metrics as M
 
 VERSION = "FUNDED_MODEL_V1"
 
-#: ── THE ONE QUESTION THIS LANE LEARNS ───────────────────────────────
+#: ── THE QUESTIONS THIS LANE LEARNS ──────────────────────────────────
 KEY_MIDDLE = "funded_pair_middle_region"
 TARGET = "MIDDLE_REGION_OCCURRED"
+#: THE CONDITIONAL THE PAYOUT-STATE DISTRIBUTION NEEDS: did the hedge leg win,
+#: GIVEN the primary leg's outcome. Binary, observable from the venue's own
+#: settlement of each leg, and asked only where the payoff table admits exactly
+#: two hedge payouts {0, 100} for that primary outcome -- everywhere else the
+#: table itself answers it (`bettor_payout_states`).
+KEY_HEDGE_GIVEN_PRIMARY = "funded_pair_hedge_given_primary"
+TARGET_HEDGE_GIVEN_PRIMARY = "HEDGE_WON_GIVEN_PRIMARY_OUTCOME"
 
 #: The estimators this lane will register, by the kernel's own names. A name the
 #: kernel does not know is refused rather than defaulted.
@@ -120,6 +138,13 @@ R_PROVENANCE_SCHEMA = "THE_REGISTRY_CANNOT_STORE_TRAINING_PROVENANCE"
 R_APPROVED_MODEL_EVIDENCE_INVALIDATED = \
     "THE_APPROVED_MODELS_TRAINING_RECORDS_NO_LONGER_REPRODUCE"
 RETIRED_EVIDENCE_INVALIDATED = "TRAINING_EVIDENCE_INVALIDATED"
+#: A FUNDED DECISION ROW DOES NOT CARRY THE STRUCTURE'S PAYOFF TABLE (migration
+#: 132's columns and 135's model columns; the `ranked` jsonb carries candidate
+#: summaries, not the table). The conditional's label needs the table to know
+#: whether the hedge outcome was binary given the primary's, so funded records
+#: cannot be labelled for KEY_HEDGE_GIVEN_PRIMARY and are refused, not guessed.
+R_FUNDED_NO_PAYOFF_TABLE = "FUNDED_DECISIONS_DO_NOT_STORE_THE_PAYOFF_TABLE"
+R_NOT_A_RECORD_SOURCE = "THAT_IS_NOT_A_RECORD_SOURCE"
 
 #: ── WHERE A MODEL'S TRAINING SET CAME FROM ──────────────────────────
 #: RECORDS: decisions in the ledger, re-read and verified at registration.
@@ -240,6 +265,41 @@ def features_of(structure, *, primary_cost_cents, hedge_cost_cents,
     }
 
 
+#: THE CONDITIONAL'S OWN FEATURE LIST: the structure's vector plus the primary
+#: outcome it is conditioned on. Its own list, so its schema sha -- and every
+#: feature sha -- is distinct from KEY_MIDDLE's: a vector scored by one model is
+#: never mistaken for the other's.
+FEATURES_HEDGE_GIVEN_PRIMARY = FEATURES + ("primary_won",)
+
+_FEATURES_BY_KEY = {KEY_MIDDLE: FEATURES,
+                    KEY_HEDGE_GIVEN_PRIMARY: FEATURES_HEDGE_GIVEN_PRIMARY}
+_TARGET_BY_KEY = {KEY_MIDDLE: TARGET,
+                  KEY_HEDGE_GIVEN_PRIMARY: TARGET_HEDGE_GIVEN_PRIMARY}
+
+
+def features_for(model_key: str | None) -> tuple:
+    """The feature list a model of this key is fit and scored on."""
+    return _FEATURES_BY_KEY.get(model_key or KEY_MIDDLE, FEATURES)
+
+
+def target_for(model_key: str | None) -> str:
+    return _TARGET_BY_KEY.get(model_key or KEY_MIDDLE, TARGET)
+
+
+def conditional_features_of(structure, *, primary_cost_cents,
+                            hedge_cost_cents, overtime_included,
+                            primary_won) -> dict:
+    """KEY_HEDGE_GIVEN_PRIMARY's vector: `features_of` plus the conditioning
+    primary outcome, 1.0 for a primary WIN and 0.0 for a LOSS. The outcome is a
+    CONDITION of the question asked, not a peek at the answer: the model is
+    asked P(hedge wins | primary won) and P(hedge wins | primary lost)
+    separately, and both answers are recorded."""
+    return dict(features_of(structure, primary_cost_cents=primary_cost_cents,
+                            hedge_cost_cents=hedge_cost_cents,
+                            overtime_included=overtime_included),
+                primary_won=1.0 if primary_won else 0.0)
+
+
 def feature_sha(features: dict) -> str:
     """Identity of the exact vector scored.
 
@@ -266,7 +326,7 @@ def event_weights(fixtures) -> list:
 
 
 def fit(rows, labels, *, estimator: str = "RIDGE_LOGISTIC", decided_at=None,
-        weights=None, **kw) -> dict:
+        weights=None, features=None, **kw) -> dict:
     """FIT ONE CANDIDATE. `rows` are feature dicts; `labels` are 0/1.
 
     Returns the model's own `to_dict()` plus the training base rate, which the
@@ -282,13 +342,16 @@ def fit(rows, labels, *, estimator: str = "RIDGE_LOGISTIC", decided_at=None,
     ys = [float(y) for y in labels]
     if not ys:
         return dict(out, ok=False, refusal=R_TOO_FEW_LABELS, train_rows=0)
+    # THE KEY'S OWN LIST, defaulting to KEY_MIDDLE's so every existing caller
+    # fits exactly what it fit before.
+    feats = list(features or FEATURES)
     # `BaseRate` TAKES NO FEATURE LIST, and that is not an inconsistency to
     # paper over: it predicts the training mean for every input, so there is no
     # vector for it to have. Its `features` column is still the lane's full list
     # -- what the model MAY be scored on -- so the registry rows are comparable.
     mdl = (_ESTIMATOR_CLASS[estimator]()
            if estimator == "BASE_RATE"
-           else _ESTIMATOR_CLASS[estimator](list(FEATURES), **kw))
+           else _ESTIMATOR_CLASS[estimator](list(feats), **kw))
     if weights is not None:
         weights = [float(w) for w in weights]
         if len(weights) != len(ys) or any(w < 0 for w in weights) \
@@ -318,7 +381,7 @@ def fit(rows, labels, *, estimator: str = "RIDGE_LOGISTIC", decided_at=None,
                 training_provenance={"kind": PROVENANCE_DECLARED,
                                      "rows": len(ys)},
                 params=mdl.to_dict(), kernel=K.VERSION,
-                features=list(FEATURES), train_rows=len(ys),
+                features=list(feats), train_rows=len(ys),
                 train_base_rate=round(sum(y * wi for y, wi in zip(ys, w))
                                       / sum(w), 9),
                 train_weighting=(WEIGHTING_EVENT_BALANCED
@@ -722,6 +785,28 @@ async def labelled(conn, *, model_key: str = KEY_MIDDLE, after=None,
     made before T whose outcome was learned after T is not something a fit at
     T could have learned from.
     """
+    if model_key == KEY_HEDGE_GIVEN_PRIMARY:
+        # THE CONDITIONAL'S RECORDS: the same shape and windows, a different
+        # label (did the hedge win) on the rows whose table makes that a
+        # binary question given the primary's outcome. Only observations
+        # store the table it is decided on.
+        if source == SOURCE_OBSERVATIONS:
+            from . import bettor_pair_observations as PO
+            return dict(await PO.labelled_conditional(
+                conn, after=after, through=through,
+                outcomes_through=outcomes_through, ids=decision_ids),
+                model_key=model_key, source=source)
+        if source == SOURCE_FUNDED:
+            return {"version": VERSION, "ok": False, "source": source,
+                    "model_key": model_key,
+                    "refusal": R_FUNDED_NO_PAYOFF_TABLE,
+                    "why": ("a funded decision row does not carry the "
+                            "structure's payoff table, so whether the hedge "
+                            "outcome was binary given the primary's cannot be "
+                            "read from it; the conditional is learned from "
+                            "observations, which store the table")}
+        return {"version": VERSION, "ok": False, "source": source,
+                "refusal": R_NOT_A_RECORD_SOURCE}
     if source == SOURCE_OBSERVATIONS:
         # NON-FUNDED OBSERVATIONS: the same record shape, the same windows;
         # `account_id` does not apply -- nothing was held by any account.
@@ -732,7 +817,7 @@ async def labelled(conn, *, model_key: str = KEY_MIDDLE, after=None,
                     model_key=model_key, source=source)
     if source != SOURCE_FUNDED:
         return {"version": VERSION, "ok": False, "source": source,
-                "refusal": "THAT_IS_NOT_A_RECORD_SOURCE"}
+                "refusal": R_NOT_A_RECORD_SOURCE}
     out: dict[str, Any] = {"version": VERSION, "model_key": model_key,
                            "rows": [], "labels": [], "source": source}
     sql, args = LABEL_SQL, []
@@ -804,6 +889,13 @@ async def labelled(conn, *, model_key: str = KEY_MIDDLE, after=None,
 #: lacks one of these cannot be scored by the kernel and is not training data.
 FEATURE_SCHEMA_SHA = hashlib.sha256(
     json.dumps(sorted(FEATURES)).encode()).hexdigest()[:16]
+FEATURE_SCHEMA_SHA_HEDGE_GIVEN_PRIMARY = hashlib.sha256(
+    json.dumps(sorted(FEATURES_HEDGE_GIVEN_PRIMARY)).encode()).hexdigest()[:16]
+
+
+def feature_schema_sha_for(model_key: str | None) -> str:
+    return (FEATURE_SCHEMA_SHA_HEDGE_GIVEN_PRIMARY
+            if model_key == KEY_HEDGE_GIVEN_PRIMARY else FEATURE_SCHEMA_SHA)
 
 EVIDENCE_RETROSPECTIVE = "RETROSPECTIVE_OUT_OF_SAMPLE"
 EVIDENCE_PROSPECTIVE = "PROSPECTIVE"
@@ -884,8 +976,10 @@ async def fit_from_records(conn, *, through, model_key: str = KEY_MIDDLE,
     if not lab.get("ok"):
         return dict(out, ok=False, refusal=lab.get("refusal"),
                     error=lab.get("error"))
+    # THE KEY'S OWN FEATURE LIST, for the schema filter and for the fit.
+    feats = features_for(model_key)
     usable = [i for i in range(lab["n"])
-              if set(FEATURES) <= set((lab["rows"][i] or {}).keys())]
+              if set(feats) <= set((lab["rows"][i] or {}).keys())]
     excluded_schema = lab["n"] - len(usable)
     lab = _subset(lab, usable)
     if not lab["n"]:
@@ -893,7 +987,8 @@ async def fit_from_records(conn, *, through, model_key: str = KEY_MIDDLE,
                     excluded_for_feature_schema=excluded_schema)
     weights = event_weights(lab["fixtures"])
     fitted = fit(lab["rows"], lab["labels"], estimator=estimator,
-                 decided_at=lab["decided_at"], weights=weights, **kw)
+                 decided_at=lab["decided_at"], weights=weights,
+                 features=feats, **kw)
     if not fitted.get("ok"):
         return fitted
     records = _training_records(lab)
@@ -903,7 +998,11 @@ async def fit_from_records(conn, *, through, model_key: str = KEY_MIDDLE,
             "decision_ids": [r["decision_id"] for r in records],
             "fixtures": sorted({r["fixture"] for r in records}),
             "records_sha": _records_sha(records),
-            "feature_schema_sha": FEATURE_SCHEMA_SHA,
+            "feature_schema_sha": feature_schema_sha_for(model_key),
+            "model_key": model_key, "target": target_for(model_key),
+            # EVERY RECORD THE LABEL RULE LEFT OUT, counted by name (the
+            # conditional's labeller reports them; KEY_MIDDLE's has none).
+            "label_exclusions": lab.get("excluded"),
             "n_rows": lab["n"], "n_events": lab["n_events"],
             "weighting": WEIGHTING_EVENT_BALANCED,
             "excluded_for_feature_schema": excluded_schema,
@@ -945,15 +1044,19 @@ def params_reproduce(model: dict, lab: dict) -> dict:
     est = str(model.get("estimator") or params.get("kind") or "")
     if est == "BASE_RATE" or params.get("kind") == "BASE_RATE":
         est = "BASE_RATE"
+    # REFIT ON THE KEY'S OWN FEATURE LIST -- the list `fit_from_records` fit
+    # it on. Refitting a conditional model on KEY_MIDDLE's list would drop the
+    # conditioning feature and fail to reproduce a fit that was honest.
+    feats = features_for(model.get("model_key"))
     usable = [i for i in range(lab["n"])
-              if set(FEATURES) <= set((lab["rows"][i] or {}).keys())]
+              if set(feats) <= set((lab["rows"][i] or {}).keys())]
     if not usable:
         return {"ok": False, "refusal": R_PARAMS_NOT_FROM_THE_RECORDS,
                 "why": "no usable training row to refit"}
     rows = [lab["rows"][i] for i in usable]
     refit = fit(rows, [lab["labels"][i] for i in usable], estimator=est,
                 weights=event_weights([lab["fixtures"][i] for i in usable]),
-                **_hyper(est, params))
+                features=feats, **_hyper(est, params))
     if not refit.get("ok", True) and refit.get("refusal"):
         return {"ok": False, "refusal": R_PARAMS_NOT_FROM_THE_RECORDS,
                 "why": "the refit refused: %s" % refit.get("refusal")}
@@ -1682,17 +1785,24 @@ async def _generate_locked(conn, *, at: float, out: dict, model_key: str,
 #: pass silently: `probabilities` would be populated and no field would say the
 #: shape came from the prices the trade is against.
 #:
-#: WHAT WOULD CLOSE IT. The model predicting the FULL region distribution rather
-#: than `p_middle` alone: a multi-region target, labels per region from each
-#: leg's own settlement, and its own promotion under the same bar. That is a
-#: scoped piece of work, not a parameter to fill in.
+#: WHAT CLOSES IT -- AND IT IS LESS THAN WAS WRITTEN HERE. This said closing it
+#: meant predicting the FULL region distribution with per-region labels. No
+#: decision needs that: every action's value depends on a region only through
+#: its (primary, hedge) payout pair, so the measure a decision needs is the mass
+#: per PAYOUT CLASS, and per-leg outcomes -- which the observations already
+#: store -- label it. `predict_distribution` prices the classes from the
+#: primary probability HOLD is valued on, the table's own structure, the
+#: approved KEY_HEDGE_GIVEN_PRIMARY model and a measured void rate. The outside
+#: split itself is still unsourced, and `region_probabilities` still refuses it.
 OUTSIDE_SPLIT_HAS_NO_ADMISSIBLE_SOURCE = (
     "no source in this repository states how 1 - p_middle distributes over the "
     "non-middle regions. The venue's own spread ladder would give one, and is "
     "refused: the split enters the expected value directly, so a venue-implied "
     "shape would make the edge a function of the prices being traded against. "
-    "Closing it means predicting the full region distribution, with per-region "
-    "labels and its own promotion")
+    "A decision does not need the full region distribution either -- only the "
+    "mass per payout class, which predict_distribution prices from the primary "
+    "probability HOLD is valued on, the table's structure, the approved "
+    "hedge-given-primary model and a measured void rate, with no split")
 
 
 def region_probabilities(structure, *, p_middle: float,
@@ -1793,3 +1903,247 @@ async def predict_for(conn, *, structure, primary_cost_cents,
                            "model_version": mdl["model_version"]},
                 region_probabilities=regions["probabilities"],
                 probability_basis=regions["basis"])
+
+
+# ═════════════════════════════════════════════════════════════════════
+# 7 · THE PAYOUT-STATE DISTRIBUTION: WHAT PRICES THE INDIRECT CANDIDATE
+# ═════════════════════════════════════════════════════════════════════
+
+PRIMARY_PROBABILITY_IS = (
+    "THE PROBABILITY HOLD, DIRECT_EXIT AND REDUCE ARE VALUED ON -- the held "
+    "position's own external probability, passed through unchanged so all four "
+    "actions rest on one primary marginal")
+
+#: THE ENTRY LANE'S TWO GATES ON AN EXTERNAL PROBABILITY, APPLIED WHERE IT
+#: PRICES NEW CAPITAL HERE TOO. HOLD, DIRECT_EXIT and REDUCE only keep or shed
+#: what is held; an acquisition priced on the primary probability commits new
+#: money on it, which is exactly what `bettor_entry_execution`'s
+#: MODEL_TRUST_DRIFT forbids an unvalidated external valuation to do ("it
+#: would state that an unvalidated external valuation may size a position. It
+#: may not"). So the distribution refuses unless the source has a CURRENT,
+#: PASSING calibration measurement (the worker's `source_calibration` read,
+#: current evaluator, enough sample, not stale, within tolerance), and unless
+#: the probability lies inside the source's declared support.
+R_PRIMARY_SOURCE_NOT_CALIBRATED = (
+    "THE_PRIMARY_PROBABILITYS_SOURCE_HAS_NO_CURRENT_PASSING_CALIBRATION")
+R_PRIMARY_OUTSIDE_SUPPORT = (
+    "THE_PRIMARY_PROBABILITY_IS_OUTSIDE_ITS_SOURCES_DECLARED_SUPPORT")
+
+
+def primary_gates(*, primary_probability, primary_calibration) -> dict:
+    """MODEL_TRUST_DRIFT and OUT_OF_DISTRIBUTION for the primary probability,
+    by the entry lane's own rules and constants. Pure."""
+    from . import bettor_entry_execution as EX
+
+    cal = dict(primary_calibration or {})
+    trusted = cal.get("measured") is True and cal.get("within_tolerance") is True
+    try:
+        p = (None if primary_probability is None
+             or isinstance(primary_probability, bool)
+             else float(primary_probability))
+    except (TypeError, ValueError):
+        p = None
+    inside = p is not None and EX.SUPPORT_MIN <= p <= EX.SUPPORT_MAX
+    return {
+        "MODEL_TRUST_DRIFT": {
+            "clear": trusted,
+            "why": (cal.get("why") if trusted else
+                    "%s: %s" % (EX.R_NO_CALIBRATION if not cal.get("measured")
+                                else "CALIBRATION_OUTSIDE_TOLERANCE",
+                                cal.get("why") or cal.get("error")
+                                or "no calibration measurement was supplied")),
+            "source_version": cal.get("source_version")},
+        "OUT_OF_DISTRIBUTION": {
+            "clear": inside,
+            "support": [EX.SUPPORT_MIN, EX.SUPPORT_MAX],
+            "probability": p}}
+
+
+async def predict_distribution(conn, *, structure, primary_cost_cents,
+                               hedge_cost_cents, overtime_included,
+                               primary_probability, primary_source, at,
+                               primary_partial_probability=None,
+                               primary_calibration=None,
+                               position_value=None,
+                               model_key: str = KEY_HEDGE_GIVEN_PRIMARY
+                               ) -> dict:
+    """THE CLASS PROBABILITIES `decide` NEEDS, AND EVERYTHING THAT MAKES THEM
+    FALSIFIABLE.
+
+    Requires an APPROVED KEY_HEDGE_GIVEN_PRIMARY model -- with none it refuses
+    R_NO_APPROVED_MODEL and names that key, exactly as `predict_for` refuses for
+    KEY_MIDDLE; nothing falls back to an unregistered estimate. With one:
+
+      1 the structure's payout classes (`bettor_payout_states.payout_classes`);
+      2 the approved model's P(hedge wins | primary WIN) and | primary LOSE,
+        each from its own feature vector;
+      3 the void rate measured from recorded outcomes as of `at`
+        (`bettor_pair_observations.void_rate`), no look-ahead;
+      4 `bettor_payout_states.distribution` with `primary_probability` -- the
+        probability HOLD is valued on -- as P(primary wins | not void) --
+        and only once that probability has cleared the entry lane's own
+        gates on an external source: a current passing calibration
+        (`primary_calibration`) and the source's declared support.
+
+    Returns the class probabilities keyed by class label (plus every
+    unresolved state at zero), the merged structure and, when a position value
+    is supplied, the position value merged the same way -- the table those
+    probabilities price exactly. Plus the model id and version, both feature
+    vectors and their shas, the void-rate basis and the primary source, which
+    is what a decision must record to be scored later.
+
+    `features` / `feature_sha` are the STRUCTURE'S base vector (KEY_MIDDLE's
+    schema): the conditional's two vectors are that vector plus the primary
+    outcome, and both are recorded under `features_by_primary_outcome`. The
+    base vector keeps the decision row readable by every existing consumer of
+    the ledger's `features` column.
+    """
+    from . import bettor_pair_observations as PO
+    from . import bettor_payout_states as PS
+
+    gates = primary_gates(primary_probability=primary_probability,
+                          primary_calibration=primary_calibration)
+    out: dict[str, Any] = {"version": VERSION, "model_key": model_key,
+                           "path": "PAYOUT_STATE_DISTRIBUTION",
+                           "primary_probability": primary_probability,
+                           "primary_source": primary_source,
+                           "primary_gates": gates}
+    got = await approved(conn, model_key=model_key)
+    if not got.get("ok"):
+        return dict(out, ok=False, refusal=got["refusal"],
+                    refused_for_key=model_key,
+                    why=("%s (model key %s)" % (got.get("why") or
+                                                got["refusal"], model_key)))
+    mdl = got["model"]
+    out.update(model_id=mdl["model_id"], model_version=mdl["model_version"])
+    if not gates["MODEL_TRUST_DRIFT"]["clear"]:
+        return dict(out, ok=False, refusal=R_PRIMARY_SOURCE_NOT_CALIBRATED,
+                    why=gates["MODEL_TRUST_DRIFT"]["why"])
+    if not gates["OUT_OF_DISTRIBUTION"]["clear"]:
+        return dict(out, ok=False, refusal=R_PRIMARY_OUTSIDE_SUPPORT,
+                    why=("P(primary) %r is outside the source's declared "
+                         "support %s" % (
+                             primary_probability,
+                             gates["OUT_OF_DISTRIBUTION"]["support"])))
+    classes = PS.payout_classes(structure)
+    if not classes.get("ok"):
+        return dict(out, ok=False, refusal=classes["refusal"],
+                    why=classes.get("why"))
+    base = features_of(structure, primary_cost_cents=primary_cost_cents,
+                       hedge_cost_cents=hedge_cost_cents,
+                       overtime_included=overtime_included)
+    by_outcome = {
+        PS.WIN: conditional_features_of(
+            structure, primary_cost_cents=primary_cost_cents,
+            hedge_cost_cents=hedge_cost_cents,
+            overtime_included=overtime_included, primary_won=True),
+        PS.LOSE: conditional_features_of(
+            structure, primary_cost_cents=primary_cost_cents,
+            hedge_cost_cents=hedge_cost_cents,
+            overtime_included=overtime_included, primary_won=False)}
+    obj = load(mdl["params"])
+    q = {o: float(obj.predict(f)) for o, f in by_outcome.items()}
+    # ── ONE EVENT UNDER THE PROBABILITY, THE MODEL AND THE TABLE ─────
+    ev = PS.same_event(structure, primary_source=primary_source,
+                       overtime_included=overtime_included)
+    out["same_event"] = ev
+    if not ev.get("ok"):
+        return dict(out, ok=False, refusal=ev["refusal"], why=ev.get("why"),
+                    mismatched=ev.get("mismatched"))
+    # ── EVERY LEARNED CONDITIONAL STANDS ON ENOUGH EVIDENCE ──────────
+    prov = mdl.get("training_provenance")
+    if isinstance(prov, str):
+        try:
+            prov = json.loads(prov)
+        except ValueError:
+            prov = None
+    learned = PS.learned_outcomes(classes)
+    cohort = PS.cohort_evidence((prov or {}).get("records") or (),
+                                learned_outcomes=learned,
+                                predictions={o: q.get(o) for o in learned})
+    out["conditional_evidence"] = cohort
+    if not cohort.get("ok"):
+        return dict(out, ok=False, refusal=cohort["refusal"],
+                    why=cohort.get("why"),
+                    conditional_evidence=cohort)
+    void = await PO.void_rate(conn, through=at)
+    void_in = None
+    if void.get("ok"):
+        void_in = {"rate": void["rate"], "n_fixtures": void["n_fixtures"],
+                   "n_void_fixtures": void["n_void_fixtures"],
+                   "upper_95": void["upper_95"],
+                   "source": "bettor_pair_observations.void_rate",
+                   "basis": void.get("basis"), "through": void.get("through")}
+    primary = {"p_win": primary_probability,
+               "p_partial": primary_partial_probability,
+               "source": primary_source, "basis": PRIMARY_PROBABILITY_IS}
+    predicted = {"target": TARGET_HEDGE_GIVEN_PRIMARY,
+                 "p_hedge_wins_given_primary": dict(q),
+                 "estimator": mdl["estimator"], "kernel": mdl["kernel"],
+                 "model_version": mdl["model_version"],
+                 "model_id": mdl["model_id"],
+                 "feature_shas_by_primary_outcome": {
+                     o: feature_sha(f) for o, f in by_outcome.items()}}
+    dist = PS.distribution(classes, primary=primary, conditional=q,
+                           void=void_in)
+    if not dist.get("ok"):
+        return dict(out, ok=False, refusal=dist["refusal"],
+                    why=dist.get("why"), predicted=predicted,
+                    void_read={k: v for k, v in void.items()
+                               if k != "fixtures"},
+                    distribution=dist)
+    # THE SAME DISTRIBUTION WITH THE VOID MASS AT ITS UPPER 95% BOUND, so the
+    # ranking can say whether its choice survives the rate's uncertainty.
+    upper = None
+    if (dist["basis"]["void"] or {}).get("used") and \
+            void_in.get("upper_95") is not None:
+        up = PS.distribution(classes, primary=primary, conditional=q,
+                             void=dict(void_in, rate=void_in["upper_95"]))
+        if up.get("ok"):
+            upper = dict(up["probabilities"],
+                         **up["unresolved_probabilities"])
+    mpv = None
+    if position_value is not None:
+        mpv = PS.merged_position_value(position_value, classes)
+        if not mpv.get("ok"):
+            return dict(out, ok=False, refusal=mpv["refusal"],
+                        why=mpv.get("why"), predicted=predicted)
+    probs = dict(dist["probabilities"], **dist["unresolved_probabilities"])
+    basis = {"model_key": model_key, "model_id": mdl["model_id"],
+             "model_version": mdl["model_version"],
+             "primary": dist["basis"]["primary"],
+             "primary_gates": gates,
+             "conditional": dist["basis"]["conditional"],
+             "void": dist["basis"]["void"],
+             "postponed": dist["basis"]["postponed"],
+             "identified": dist["identified"],
+             "probability_kinds": dist.get("probability_kinds"),
+             "same_event": ev.get("agreements"),
+             "conditional_evidence": cohort.get("cohorts"),
+             "merge_rule": PS.MERGE_RULE}
+    predicted.update(class_probabilities=dict(dist["probabilities"]),
+                     classes=dist["classes"],
+                     implied_primary_marginal=dist["implied_primary_marginal"],
+                     primary_probability=primary_probability,
+                     primary_source=primary_source,
+                     distribution_basis=basis)
+    return dict(out, ok=True, refusal=None,
+                features=base, feature_sha=feature_sha(base),
+                features_by_primary_outcome=by_outcome,
+                predicted=predicted,
+                region_probabilities=probs,
+                region_probabilities_at_void_upper_95=upper,
+                merged_structure=PS.merged_structure(structure, classes),
+                merged_position_value=mpv,
+                distribution={k: dist[k] for k in (
+                    "probabilities", "classes", "basis", "identified",
+                    "indistinguishable", "implied_primary_marginal",
+                    "implied_primary_marginal_is", "sums_to")},
+                void_read={k: v for k, v in void.items() if k != "fixtures"},
+                distribution_basis=basis,
+                probability_basis=(
+                    "payout classes priced as (1 - void) x P(primary outcome) "
+                    "x P(hedge class | primary outcome): the primary from the "
+                    "probability HOLD is valued on, the conditional from the "
+                    "table's structure or the approved model %s, the void mass "
+                    "measured" % mdl["model_version"]))

@@ -700,7 +700,11 @@ async def select_exit(conn, position, *, client=None, now=None,
     out["ev_hold"] = {k: hv.get(k) for k in
                       ("status", "refusal", "why", "ev_hold_usd",
                        "probability", "age_bound_s", "event_state",
-                       "probability_event", "payout_event_held")}
+                       "probability_event", "payout_event_held",
+                       # WHICH ROW THE PROBABILITY CAME FROM, so a consumer
+                       # that must price on the SAME probability (the pair
+                       # cycle's payout-state distribution) can name it.
+                       "source_row_id", "source")}
     term = dict(hv.get("terminal_rule") or {})
     out["terminal_rule"] = {k: term.get(k) for k in
                             ("compatibility", "established", "asked", "unmet",
@@ -1871,6 +1875,7 @@ async def manage(conn, *, account_id: str, venue: str, adapter=None,
         # including the ones it decides to hold. It is recorded here, keyed by
         # intent id, and handed to the supplier by the scheduled caller -- so the
         # supplier consumes a production value whatever the selector chose.
+        _hv = pick.get("ev_hold") or {}
         out.setdefault("management_rankings", {})[str(p["intent_id"])] = {
             "ranking": pick.get("ranking") or {},
             "selected": pick.get("selected"),
@@ -1878,6 +1883,17 @@ async def manage(conn, *, account_id: str, venue: str, adapter=None,
             "refusal": pick.get("refusal"),
             "us_market_slug": p.get("us_market_slug"),
             "residual_qty": p.get("residual"),
+            # THE PROBABILITY HOLD, DIRECT_EXIT AND REDUCE WERE VALUED ON, with
+            # the row it came from. The pair cycle prices the indirect
+            # acquisition on this same number, so all four actions rest on one
+            # primary marginal.
+            "hold_probability": ({
+                "probability": _hv.get("probability"),
+                "source_row_id": _hv.get("source_row_id"),
+                "source": _hv.get("source"),
+                "probability_event": _hv.get("probability_event"),
+                "payout_event_held": _hv.get("payout_event_held"),
+                "status": _hv.get("status")} if _hv else None),
         }
         if not pick.get("ok"):
             # A NAMED MISSING INPUT, not "needs a decision". Each of these
