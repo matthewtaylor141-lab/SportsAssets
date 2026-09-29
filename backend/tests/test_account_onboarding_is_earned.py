@@ -489,3 +489,107 @@ def test_nothing_in_the_module_unpauses_without_reconciling():
         # the guard `if not rec.get("eligible")` must appear before it
         assert 'if not rec.get("eligible")' in src[:at], (
             "an unpause that is not behind the reconciliation verdict")
+
+
+# ── 5 · THE FUNDED LANE'S OWN POSITIONS ARE BOOKED POSITIONS ─────────
+#
+# Production-prerequisite investigation, 2026-09-29: "our book" was
+# rn1x_positions alone, so the funded lane's first fill came back from the
+# venue as UNBOOKED, the next reconciliation failed, the 24-hour authorization
+# could not be renewed, and entry ended within a day of the first fill.
+
+FUNDED_SLUG = "aec-onboard-funded-held"
+LOST_SLUG = "aec-onboard-send-unanswered"
+
+
+async def _funded(conn, *, intent_id, slug, account=ACCT, state="FILLED"):
+    from sportsassets import bettor_funded_book as FB
+    from sportsassets import bettor_funded_execution as FX
+    got = await FB.record_intent(
+        conn, intent_id=intent_id, account_id=account, venue=VENUE,
+        venue_class=FA.VENUE_FUNDED, us_market_slug=slug,
+        event_key="ev-" + slug, order_intent=FX.LONG, limit_price=0.5,
+        quantity=10, collateral_usd=5.0, effective_digest="d-onboard",
+        held_is_long=True)
+    assert got.get("ok"), got
+    if state == "FILLED":
+        await FB.record_acknowledgement(conn, intent_id,
+                                       venue_order_id="vo-" + intent_id,
+                                       status="open")
+        await FB.ingest_fills(conn, intent_id, [
+            {"qty": 10.0, "price": 0.5, "venue_fill_id": "vf-" + intent_id}])
+    else:
+        await FB.mark_send_attempted(conn, intent_id)
+        await FB.mark_unresolved(conn, intent_id, "the answer never came")
+
+
+async def _drop_funded(conn):
+    for acct in (ACCT, ACCT + "-other"):
+        await conn.execute(
+            "DELETE FROM bettor_funded_fills WHERE intent_id IN (SELECT "
+            " intent_id FROM bettor_funded_intents WHERE account_id=$1)", acct)
+        await conn.execute(
+            "DELETE FROM bettor_funded_economics WHERE intent_id IN (SELECT "
+            " intent_id FROM bettor_funded_intents WHERE account_id=$1)", acct)
+        await conn.execute(
+            "DELETE FROM bettor_funded_intents WHERE account_id=$1", acct)
+        await conn.execute(
+            "DELETE FROM bettor_funded_portfolio_groups WHERE account_id=$1",
+            acct)
+
+
+@pg
+@pytest.mark.asyncio
+async def test_a_funded_position_this_account_holds_is_booked_not_a_discrepancy():
+    asyncpg = pytest.importorskip("asyncpg")
+    conn = await asyncpg.connect(DSN)
+    try:
+        await _drop_funded(conn)
+        await _funded(conn, intent_id="fpi-onboard-held", slug=FUNDED_SLUG)
+        v = _clean_venue()
+        v._portfolio = _Portfolio({FUNDED_SLUG: {"netPosition": 10}})
+        v._trades = {FUNDED_SLUG: [{"id": 1}]}
+        rec = await ON.reconcile(conn, account_id=ACCT, venue=VENUE,
+                                 adapter=v)
+        assert FUNDED_SLUG in rec["our_open_markets"], rec
+        assert not [c for c in rec["checks"] if c.get(
+            "venue_holds_positions_this_book_does_not_know_about")], rec
+        assert rec["verdicts"]["positions"] == ON.RECONCILED, rec["checks"]
+        # ANOTHER ACCOUNT'S POSITION IS NOT THIS ACCOUNT'S BOOK
+        other = await ON.reconcile(conn, account_id=ACCT + "-nobody",
+                                   venue=VENUE, adapter=v)
+        found = [c for c in other["checks"] if c.get(
+            "venue_holds_positions_this_book_does_not_know_about")]
+        assert found and FUNDED_SLUG in found[0][
+            "venue_holds_positions_this_book_does_not_know_about"]
+    finally:
+        await _drop_funded(conn)
+        await conn.close()
+
+
+@pg
+@pytest.mark.asyncio
+async def test_a_venue_position_under_an_unanswered_send_blocks_and_names_it():
+    asyncpg = pytest.importorskip("asyncpg")
+    conn = await asyncpg.connect(DSN)
+    try:
+        await _drop_funded(conn)
+        await _funded(conn, intent_id="fpi-onboard-lost", slug=LOST_SLUG,
+                      state="UNRESOLVED")
+        v = _clean_venue()
+        v._portfolio = _Portfolio({LOST_SLUG: {"netPosition": 10}})
+        v._trades = {LOST_SLUG: [{"id": 1}]}
+        rec = await ON.reconcile(conn, account_id=ACCT, venue=VENUE,
+                                 adapter=v)
+        assert rec["eligible"] is False
+        assert rec["markets_with_unresolved_sends"] == [LOST_SLUG]
+        named = [c for c in rec["checks"] if c.get(
+            "venue_holds_positions_where_a_send_is_unresolved")]
+        assert named and named[0]["verdict"] == ON.DISCREPANCY
+        assert "funded-investigations" in named[0]["why"]
+        # not double-reported as "never booked"
+        assert not [c for c in rec["checks"] if c.get(
+            "venue_holds_positions_this_book_does_not_know_about")]
+    finally:
+        await _drop_funded(conn)
+        await conn.close()

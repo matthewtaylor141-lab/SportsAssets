@@ -308,9 +308,18 @@ async def reconcile(conn, *, account_id: str, venue: str, adapter=None,
     out["checks"].append(ex)
 
     # WHAT WE BELIEVE WE HOLD, so a venue position nobody booked is a finding
-    ours, ours_err = await _our_open_slugs(conn)
+    ours, ours_err = await _our_open_slugs(conn, account_id=account_id,
+                                           venue=venue)
     out["our_open_markets"] = (None if ours is None else sorted(ours))
     out["our_book_read_error"] = ours_err
+    # MARKETS WHERE A SEND OF OURS HAS NO ANSWER. Not "ours" -- whether the
+    # venue holds anything there is exactly what is unknown -- and not
+    # "unbooked" either: the book knows the request and an investigation is
+    # open on it. A venue position on such a market is named with the
+    # investigation to resolve, and it still blocks.
+    unresolved, unresolved_err = await _our_unresolved_slugs(
+        conn, account_id=account_id, venue=venue)
+    out["markets_with_unresolved_sends"] = sorted(unresolved or ())
     if ours is None:
         # OUR OWN BOOK IS UNREADABLE. Comparing the venue against an empty set
         # would report every venue position as unbooked, which is noise, not a
@@ -323,7 +332,23 @@ async def reconcile(conn, *, account_id: str, venue: str, adapter=None,
         ours = set()
         unbooked = []
     else:
-        unbooked = sorted(set(slugs) - ours)
+        unbooked = sorted(set(slugs) - ours - set(unresolved or ()))
+    if unresolved_err:
+        out["checks"].append({
+            "check": "positions", "verdict": UNREADABLE,
+            "error": unresolved_err,
+            "why": ("the funded book's unresolved sends could not be read, so "
+                    "a venue position cannot be told from an unanswered one")})
+    held_under_unresolved = sorted(set(slugs) & set(unresolved or ()))
+    if held_under_unresolved:
+        out["checks"].append({
+            "check": "positions", "verdict": DISCREPANCY,
+            "venue_holds_positions_where_a_send_is_unresolved":
+                held_under_unresolved,
+            "why": ("a send on each of these markets has no answer and the "
+                    "venue holds a position there. It may be that send's. "
+                    "Resolve the investigation (GET /api/admin/"
+                    "funded-investigations) before this account is clean")})
     if unbooked:
         out["checks"].append({
             "check": "positions", "verdict": DISCREPANCY,
@@ -372,7 +397,7 @@ async def reconcile(conn, *, account_id: str, venue: str, adapter=None,
                      % (len(blocking), len(CHECKS))))
 
 
-async def _our_open_slugs(conn):
+async def _our_open_slugs(conn, *, account_id=None, venue=None):
     """The markets THIS system believes it holds, across every lane.
 
     THE DEFECT THIS CLOSES, and the Postgres log is what found it. The query
@@ -395,6 +420,49 @@ async def _our_open_slugs(conn):
             "  FROM rn1x_positions "
             " WHERE venue_market_slug IS NOT NULL "
             "   AND coalesce(seed_qty, 0) <> 0")
+    except Exception as exc:                               # noqa: BLE001
+        return None, "%s: %s" % (type(exc).__name__, str(exc)[:200])
+    slugs = {str(r["slug"]) for r in rows if r["slug"]}
+    # ── AND THE FUNDED LANE'S OWN OPEN POSITIONS ────────────────────
+    #
+    # THE DEFECT (production-prerequisite investigation, 2026-09-29). "Our
+    # book" was rn1x_positions alone, so the first position the funded lane
+    # filled came back from the venue as UNBOOKED -- a blocking discrepancy --
+    # the next reconciliation failed, readiness check 2 could not be met,
+    # the 24-hour authorization could not be renewed, and entry capability
+    # ended within a day of the first fill. An open funded ENTRY on this
+    # account and venue is a position this system booked.
+    if account_id is not None:
+        try:
+            if await conn.fetchval(
+                    "SELECT to_regclass('bettor_funded_intents') IS NOT NULL"):
+                funded = await conn.fetch(
+                    "SELECT DISTINCT us_market_slug AS slug "
+                    "  FROM bettor_funded_intents "
+                    " WHERE account_id=$1 AND ($2::text IS NULL OR venue=$2) "
+                    "   AND kind='ENTRY' "
+                    "   AND bettor_funded_position_is_open(state, "
+                    "                                      residual_qty, "
+                    "                                      closed_at) "
+                    "   AND coalesce(residual_qty, 0) > 0",
+                    str(account_id), venue)
+                slugs |= {str(r["slug"]) for r in funded if r["slug"]}
+        except Exception as exc:                           # noqa: BLE001
+            return None, "%s: %s" % (type(exc).__name__, str(exc)[:200])
+    return slugs, None
+
+
+async def _our_unresolved_slugs(conn, *, account_id, venue):
+    """Markets where a funded send of this account has no answer yet."""
+    try:
+        if not await conn.fetchval(
+                "SELECT to_regclass('bettor_funded_intents') IS NOT NULL"):
+            return set(), None
+        rows = await conn.fetch(
+            "SELECT DISTINCT us_market_slug AS slug FROM bettor_funded_intents"
+            " WHERE account_id=$1 AND ($2::text IS NULL OR venue=$2) "
+            "   AND state IN ('UNRESOLVED', 'SEND_ATTEMPTED')",
+            str(account_id), venue)
     except Exception as exc:                               # noqa: BLE001
         return None, "%s: %s" % (type(exc).__name__, str(exc)[:200])
     return {str(r["slug"]) for r in rows if r["slug"]}, None

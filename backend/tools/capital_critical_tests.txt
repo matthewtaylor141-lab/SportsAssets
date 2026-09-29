@@ -17,6 +17,7 @@
 tests/test_a_candidate_identity_carries_its_side.py
 tests/test_a_filled_order_is_not_a_closed_position.py
 tests/test_a_lost_acknowledgement_is_investigated_and_resolved_by_an_audited_decision.py
+tests/test_account_onboarding_is_earned.py
 tests/test_acquisition_ladder_is_side_aware.py
 tests/test_admission_control.py
 tests/test_admission_fractional.py
