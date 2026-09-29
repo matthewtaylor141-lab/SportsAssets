@@ -356,15 +356,14 @@ def test_a_swappable_assignment_is_refused():
 
 
 def test_the_draw_contract_is_never_the_priced_outcome():
-    """Remove Wales's own contract: the event still matches on both teams (the
-    Norway rows name both participants), and the draw is NOT picked instead."""
+    """Remove the LONG row of Wales's own contract. The event still names
+    both participants (Wales through its SHORT row, Norway through its own
+    contract) and still matches -- and neither the draw's LONG row nor the
+    Wales SHORT row (which pays on NOT Wales) is picked in its place."""
     wal_ev = "unl-wal-nor-2026-10-01"
     rows = [r for r in ROWS if not (r["event_slug"] == wal_ev
-                                    and r["team_abbr"] == "wal")]
-    # keep the participant list at two by leaving one Wales row on the SHORT
-    # side only -- so a LONG home row does not exist
-    rows += [r for r in ROWS if r["event_slug"] == wal_ev
-             and r["team_abbr"] == "wal" and r["intent"] == SHORT]
+                                    and r["team_abbr"] == "wal"
+                                    and r["intent"] == LONG)]
     m = _match(WAL, rows=rows)
     assert m["ok"] is False
     assert m["refusal"] == V.R_NO_PRICED_CONTRACT
