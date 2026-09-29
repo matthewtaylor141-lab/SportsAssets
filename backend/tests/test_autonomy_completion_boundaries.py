@@ -222,8 +222,14 @@ async def test_scheduled_pass_compares_all_contracts_then_sends_only_the_persist
     money = replace(OPP, condition_id="money#ORDER_INTENT_BUY_SHORT")
     middle = replace(OPP, condition_id="middle#ORDER_INTENT_BUY_SHORT",
                      kind=S.KIND_SPREAD, line=Fraction(-9, 2), cost_cents_per_unit=45)
+    # `event_key` IS ON EVERY REAL FUNDED INTENT: `plan_from_decision` refuses an
+    # entry without one (R_NO_EVENT_KEY), because MAX_EVENT_EXPOSURE is enforced
+    # per event. This fixture omitted it, and the hedge admission record now
+    # refuses a hedge whose held position names no event -- asserted below in
+    # `test_a_hedge_on_a_position_with_no_event_is_not_dispatched`.
     position = {"intent_id": "held-intent", "portfolio_group_id": "group",
-                "us_market_slug": "held", "residual_qty": 10, "filled_qty": 10}
+                "us_market_slug": "held", "residual_qty": 10, "filled_qty": 10,
+                "event_key": "event-held"}
     measures = {}
     for leg in (money, middle):
         structure = S.classify(HELD, leg, sport_permits_tie=False)

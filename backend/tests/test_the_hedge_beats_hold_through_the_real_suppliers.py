@@ -624,13 +624,32 @@ async def test_a_partial_depth_reports_covered_and_uncovered_quantities():
         # contracts at nothing. It now builds ONE payoff table at the real
         # quantities. Measured on this fixture:
         #
-        #     depth 500 -> floor -$0.1459   (the fee; gross breakeven at the
-        #                                    void, all ten covered)
-        #     depth   6 -> floor -$1.4460   (gross -$1.3000 less the fee)
+        #     depth 500 -> floor -$0.14595  (the fee on TEN covered contracts;
+        #                                    gross breakeven at the void)
+        #     depth   6 -> floor -$1.38757  (gross -$1.30000 less the fee on
+        #                                    the SIX contracts ordered)
         #
         # and -$1.30 gross is the owner's own arithmetic control:
         # 6 - (10 x 0.55) - (6 x 0.30). The decomposition inside the binding
         # region is +$0.90 matched and -$2.20 uncovered.
+        #
+        # ── THE FEE IS CHARGED ON THE ORDER THAT IS SENT ─────────────
+        #
+        # THE SECOND DEFECT IN THIS ARITHMETIC, AND IT WAS MINE. These two
+        # figures were -$0.14595 and -$1.44595: the SAME fee on both, because
+        # one candidate's fee was shared across the whole comparison. At depth
+        # 6 the hedge order is for SIX contracts, so a ten-contract fee is
+        # money the venue never charges.
+        #
+        # The published schedule is the check, not the new number. The taker
+        # rate at the hedge's $0.30 is $0.014595 per contract:
+        #
+        #     10 x 0.014595 = 0.14595 -> bankers-rounds to the schedule's $0.15
+        #      6 x 0.014595 = 0.08757 -> bankers-rounds to the schedule's $0.09
+        #
+        # Both agree with `bettor_fee_schedule.LATEST.fill_fee` at that price,
+        # so the quantity is the only thing that changed and the direction is
+        # the one that matters: -1.30 - 0.08757 = -1.38757.
         assert p["score_is"] == "WHOLE_POSITION", p
         assert f["score_is"] == "WHOLE_POSITION", f
         assert p["score_usd"] < f["score_usd"], (
@@ -648,7 +667,9 @@ async def test_a_partial_depth_reports_covered_and_uncovered_quantities():
         assert pv["fully_covered"] is False
         assert f["position_worst_case"]["fully_covered"] is True
         # The matched slice is still REPORTED, apart, and labelled as a slice.
-        assert p["matched_slice_usd"] == pytest.approx(-0.14595, abs=0.005)
+        # The matched slice is the SIX covered contracts, so its fee is the
+        # six-contract fee -- see the fee note above.
+        assert p["matched_slice_usd"] == pytest.approx(-0.08757, abs=0.005)
         assert "unhedged directional inventory" in \
             p["matched_slice_is_not_the_position"]
 
@@ -723,7 +744,16 @@ async def test_a_thinner_book_makes_the_position_worse_not_better():
         p = (part["pass"]["considered"][0]
              .get("hedge_candidate_ranking") or {})["ranked"][0]
         assert p["score_usd"] < f["score_usd"], (p["score_usd"], f["score_usd"])
-        assert p["score_usd"] == pytest.approx(-1.44595, abs=0.005)
+        # -1.30 gross less the fee on the SIX contracts actually ordered.
+        # The ten-contract fee that used to stand here was one candidate's fee
+        # shared across the comparison; the note in
+        # `test_a_partial_depth_reports_covered_and_uncovered_quantities`
+        # reconciles both figures against the published schedule.
+        assert p["score_usd"] == pytest.approx(-1.38757, abs=0.005)
+        # THE FULL BOOK COVERS ALL TEN, so its fee IS the ten-contract fee and
+        # this figure does not move. That is the control on the change above:
+        # if the repair had simply scaled every fee down, this would have moved
+        # too.
         assert f["score_usd"] == pytest.approx(-0.14595, abs=0.005)
         # THE MATCHED SLICES GO THE OTHER WAY, which is why the distinction
         # matters: on the slice alone the thin book really does lose less.
@@ -1057,8 +1087,17 @@ async def test_an_unpriced_outside_region_is_not_reported_as_an_empty_registry()
         iid = await _held(conn)
         out = await _pass_at_depth(conn, 500, intent_id=iid)
         step = out["pass"]["considered"][0]
-        came = (step.get("decision") or {}).get(
-            "region_probabilities_came_from")
+        # ── THE PROVENANCE IS THE STEP'S, NOT THE VERDICT'S ──────────
+        #
+        # This read it off `step["decision"]`. `out["decision"]` is whatever
+        # `FD.decide` returned, and `decide` ranks actions -- it knows nothing
+        # about where a region probability came from. The ranking step is what
+        # asked the registry, so the label belongs on the step, and it is lifted
+        # there from the selected candidate's own pricing row. Reading the
+        # verdict found None and reported it as a missing label.
+        came = (step.get("region_probabilities_came_from")
+                or (step.get("decision") or {}).get(
+                    "region_probabilities_came_from"))
         assert came, step
         assert came != "NOTHING_APPROVED", (
             "a model IS approved; reporting an empty registry would be false")
@@ -1349,7 +1388,20 @@ def test_an_ineligible_action_no_longer_skips_the_position_decision():
         "the acquisition has to be dropped from the comparison")
     assert "admitted_contract_withheld" in branch
     # AND NO `continue` between the branch and the decision write.
-    upto_decision = branch[:branch.index("_decide_or_refuse")]
+    #
+    # THE WRITE IS NAMED, AND A RENAME MUST FAIL LOUDLY RATHER THAN PASS.
+    # This read `branch.index("_decide_or_refuse")`, and when that helper was
+    # renamed to `decide_and_record` the ValueError was reported as a hedge
+    # failure rather than as a stale test. Both spellings are accepted and the
+    # absence of BOTH is an explicit failure, so the next rename says so
+    # instead of making the invariant silently unmeasured.
+    write_call = next((n for n in ("decide_and_record", "_decide_or_refuse")
+                       if n in branch), None)
+    assert write_call is not None, (
+        "the decision write is no longer named by either known spelling, so "
+        "this test can no longer locate the region it is asserting about:\n"
+        + branch[:600])
+    upto_decision = branch[:branch.index(write_call)]
     assert "continue" not in upto_decision, (
         "a `continue` here skips decide_and_record, which is the whole defect:\n"
         + upto_decision[-500:])

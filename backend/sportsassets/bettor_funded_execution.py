@@ -349,10 +349,18 @@ async def check_rails(conn, plan: dict, effective: dict, *,
     # of $15. The reading below validates that the reservation names the same
     # instrument, quantity, price and collateral as the plan, and only then
     # leaves it out -- every OTHER reservation is still summed.
+    #
+    # AND THE SIDE GOES WITH THEM. This passed only `PLAN_FIELDS` -- slug,
+    # quantity, price, collateral -- so the order's side was stripped HERE,
+    # before any comparison could see it. At a wire price of 0.50 a LONG and a
+    # SHORT on one slug agree on all four, and the exclusion below then netted a
+    # plan for one side against a reservation for the other. `intent` is carried
+    # so `plan_matches` can hold a reservation that states a side to it.
     try:
         got = await RSV.reserved_collateral_usd(
             conn, account_id=account_id, excluding_operation_id=operation_id,
-            plan=({k: plan.get(k) for k in RSV.PLAN_FIELDS}
+            plan=(dict({k: plan.get(k) for k in RSV.PLAN_FIELDS},
+                       intent=plan.get("intent"))
                   if operation_id is not None else None))
         if got.get("ok"):
             held_res = dict(got, schema="PRESENT")

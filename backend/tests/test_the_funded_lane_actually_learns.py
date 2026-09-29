@@ -815,7 +815,14 @@ async def test_the_scheduled_pass_forwards_the_model_request_to_the_decision():
     src = inspect.getsource(PC.pass_once)
     assert "use_approved_model" in src
     assert 'facts.get("model_inputs")' in src
-    step_src = inspect.getsource(PC.decide_and_record)
+    # THE LABELS MOVED ONE CALL DOWN. `decide_and_record` now prices each
+    # candidate through `_price_indirect`, which is where the registry is asked
+    # and where the answer is labelled. Both functions are read, so this
+    # follows the behaviour rather than one function's text; the BEHAVIOUR is
+    # asserted by `test_an_unpriced_outside_region_is_not_reported_as_an_empty_
+    # registry`, which reads the label off a real pass.
+    step_src = (inspect.getsource(PC.decide_and_record)
+                + inspect.getsource(PC._price_indirect))
     assert "NOTHING_APPROVED" in step_src
     assert "APPROVED_MODEL:%s" in step_src
 

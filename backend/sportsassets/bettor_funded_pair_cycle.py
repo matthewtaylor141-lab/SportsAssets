@@ -479,6 +479,37 @@ async def decide_and_record(conn, *, decision_id: str, account_id: str,
                         limits=limits, capital_duration_h=capital_duration_h)
     winner = verdict.get("selected_candidate") or {}
     prediction = winner.get("prediction")
+    # ── THE PREDICTION THE DECISION WAS MADE FROM, EVEN WHEN IT LOST ─
+    #
+    # THE TRACEABILITY DEFECT THIS CLOSES. The prediction recorded on the
+    # decision row was read off the WINNER. HOLD, EXIT and REDUCE carry none, so
+    # whenever the model priced the hedge BELOW the alternative -- which is the
+    # model deciding the action -- the row recorded no model at all, and
+    # `bettor_funded_model.labelled` then excluded it from every evaluation. The
+    # model was scored only on the decisions where it said "acquire", which is a
+    # selection on its own output.
+    #
+    # A decision the model influenced by losing is still the model's decision.
+    # Where the winner has no prediction, the one recorded is the strongest
+    # indirect candidate the model actually priced, and the row says which
+    # candidate that was so the outcome join scores the right structure.
+    recorded_for = winner.get("candidate_id") if prediction else None
+    if not (prediction or {}).get("model_version"):
+        priced_ok = [
+            (r.get("candidate") or {}) for r in priced
+            if ((r.get("candidate") or {}).get("prediction") or {}).get("ok")]
+        priced_ok.sort(key=lambda c: (c.get("value_usd") is not None,
+                                      c.get("value_usd") or 0.0),
+                       reverse=True)
+        if priced_ok:
+            prediction = priced_ok[0]["prediction"]
+            recorded_for = priced_ok[0].get("candidate_id")
+            out["prediction_recorded_for"] = recorded_for
+            out["prediction_recorded_because"] = (
+                "the selected action (%s) carries no prediction; this is the "
+                "estimate the model gave for the strongest indirect candidate "
+                "it priced, which is what that action was compared against"
+                % (verdict.get("selected") or "none"))
     selected_pricing = next((r for r in priced
                             if (r.get("candidate") or {}).get("candidate_id") == winner.get("candidate_id")), {})
     # Keep the established diagnostic fields for single-candidate callers.
@@ -487,6 +518,52 @@ async def decide_and_record(conn, *, decision_id: str, account_id: str,
                 "region_probabilities_came_from", "worst_case"):
         if key in diagnostic:
             out[key] = diagnostic[key]
+    # ── WHY NOTHING COULD BE PRICED SURVIVES HAVING NOTHING SELECTED ─
+    #
+    # THE REPORTING DEFECT THIS CLOSES, AND IT WAS A REGRESSION. `diagnostic`
+    # is the SELECTED candidate's pricing row, falling back to the only row
+    # when there is exactly one. So with two or more candidates and NO
+    # selection -- which is precisely the case where no candidate could be
+    # priced -- `selected_pricing` is `{}`, the length test fails, and every
+    # field above is dropped. The step then reported no reason at all for
+    # having ranked nothing, which sends a reader looking for a cause that was
+    # measured and then discarded.
+    #
+    # An empty registry and an approved model that could not price THIS
+    # structure have different owners and different fixes, so the label is
+    # reported per candidate as well as once for the step. Where the candidates
+    # disagree, all of their labels are carried rather than one being chosen:
+    # picking a representative is how the harder of two problems gets hidden
+    # behind the easier one.
+    by_candidate = {}
+    for row in priced:
+        cid = (row.get("candidate") or {}).get("candidate_id") \
+            or row.get("candidate_id")
+        label = row.get("region_probabilities_came_from")
+        if cid and label:
+            by_candidate[str(cid)] = label
+    if by_candidate:
+        out["region_probabilities_came_from_by_candidate"] = by_candidate
+    if not out.get("region_probabilities_came_from") and by_candidate:
+        distinct = sorted(set(by_candidate.values()))
+        out["region_probabilities_came_from"] = (
+            distinct[0] if len(distinct) == 1 else "; ".join(distinct))
+        out["region_probabilities_came_from_is"] = (
+            "EVERY_CANDIDATE_AGREED" if len(distinct) == 1
+            else "CANDIDATES_DISAGREED_AND_ALL_ARE_REPORTED")
+        out["region_probabilities_came_from_why"] = (
+            "no candidate was selected, so there is no selected candidate's "
+            "row to read this from. The labels below are the ones the ranking "
+            "actually measured, and they are the reason nothing was rankable")
+    # The refusals likewise: a step that ranked nothing has to say what each
+    # candidate refused on, not merely that the list came out empty.
+    if not out.get("prediction_refusal"):
+        refusals = sorted({str(r.get("prediction_refusal")) for r in priced
+                           if r.get("prediction_refusal")})
+        if refusals:
+            out["prediction_refusals_over_the_candidates"] = refusals
+            out["prediction_refusal"] = (refusals[0] if len(refusals) == 1
+                                         else "; ".join(refusals))
     out["decision"] = verdict
     # `selected` IS THE ACTION NAME; `selected_candidate` IS THE ROW. Reading
     # `selected` as a dict silently produced no action at all -- caught by the
@@ -545,6 +622,266 @@ async def decide_and_record(conn, *, decision_id: str, account_id: str,
 # ═════════════════════════════════════════════════════════════════════
 # 4 · THE ACQUISITION: RESERVE, THEN SUBMIT THROUGH THE RAILS
 # ═════════════════════════════════════════════════════════════════════
+
+# ── THE HEDGE'S ADMISSION RECORD ─────────────────────────────────────
+#
+# THE CONNECTION THIS BUILDS, AND WHY IT WAS BROKEN IN BOTH DIRECTIONS.
+#
+# `submit_for_decision` reads an ADMITTED, SIZED decision record through
+# `bettor_funded_execution.plan_from_decision`: it requires `admissible`, a sized
+# `execution_plan.execution`, a venue slug, an event key and an order intent. The
+# entry lane hands it a `bettor_external_shadow.evaluate` record, which has all of
+# them. The hedge lane handed it one of two things, and neither was a hedge:
+#
+#   * IN PRODUCTION, `facts["hedge_decision_record"]` is None and the fallback is
+#     `dec["ledger"]` -- a decision-LEDGER write result, measured null on the
+#     scheduled pass -- so the record was `{"decision_id": ...}` alone.
+#     `plan_from_decision` must refuse that as not admissible, so a hedge that
+#     WON the ranking could never reach a venue.
+#
+#   * WHERE A RECORD WAS SUPPLIED, `acquire_second_leg` merged the plan into it
+#     with `setdefault` -- which writes only where the record is SILENT. A
+#     supplied record naming a price or a side therefore OVERRODE the plan that
+#     was ranked. Measured: the ranking selected `...#ORDER_INTENT_BUY_SHORT`
+#     with a wire limit of 0.59; the supplied record said LONG at 0.41; the
+#     reservation was taken at 0.59 from the plan and the execution plan was
+#     built at 0.41 from the record. The rails refused on the price mismatch.
+#     Nothing compared the SIDE.
+#
+# WHAT THIS DOES INSTEAD. The record is BUILT FROM THE PLAN. `admissible` is not
+# asserted because an expected-value comparison selected the action: it is the
+# conjunction of named checks on the evidence that qualified THIS plan, and each
+# check that fails is reported by name. A supplied record may add evidence (its
+# `payout_event`), but a supplied value for any ORDER-DEFINING field that
+# disagrees with the plan refuses outright -- two different orders are in play
+# and neither may stand in for the other.
+#
+# AND IT CHECKS ITS OWN WORK. The finished record is passed through the SAME
+# `plan_from_decision` the execution module will run, and the resulting
+# instrument, side, quantity, wire price and collateral must equal the plan's.
+# A record that would not reproduce the ranked plan is refused here, before any
+# reservation exists, rather than discovered at the rails.
+#
+# WHAT IT DOES NOT CHECK, AND WHY. Account eligibility, owner-approved limits,
+# the rails, exposure, authorization and the submission switch are
+# `submit_for_decision`'s, and they run after this unchanged. Pre-asserting any
+# of them here would be a second, weaker copy of the real gate.
+
+R_HEDGE_NOT_ADMISSIBLE = "THE_SELECTED_HEDGE_DID_NOT_QUALIFY_FOR_ADMISSION"
+R_HEDGE_RECORD_CONFLICTS_WITH_PLAN = (
+    "A_SUPPLIED_HEDGE_RECORD_DISAGREES_WITH_THE_SELECTED_PLAN")
+R_HEDGE_RECORD_DOES_NOT_REPRODUCE_PLAN = (
+    "THE_HEDGE_RECORD_WOULD_NOT_REPRODUCE_THE_SELECTED_PLAN")
+
+#: The record fields that DEFINE the order, and the plan attribute each must
+#: equal. A supplied record may be silent on any of these; it may not differ.
+HEDGE_ORDER_FIELDS = (("us_market_slug", "venue_slug"),
+                      ("order_intent", "side"),
+                      ("quantity", "quantity"),
+                      ("limit_price", "limit_price"),
+                      ("collateral_usd", "collateral_usd"))
+
+#: Every check `admissible` is the conjunction of, in the order they run.
+HEDGE_ADMISSION_CHECKS = (
+    "PLAN_IS_THE_SELECTED_ONE", "INPUTS_NOT_EXPIRED",
+    "SETTLEMENT_RELATIONSHIP_ESTABLISHED", "QUOTE_IS_THIS_SIDES_OWN",
+    "FEE_PRICED", "DEPTH_SUPPORTS_THE_QUANTITY", "VALUED_ON_THE_WHOLE_POSITION",
+    "EVENT_KEY_STATED", "DOES_NOT_NET_THE_HELD_INSTRUMENT")
+
+
+def _same(a, b) -> bool:
+    if isinstance(a, bool) or isinstance(b, bool):
+        return a is b
+    if isinstance(a, (int, float)) and isinstance(b, (int, float)):
+        return abs(float(a) - float(b)) < 1e-9
+    return a is not None and b is not None and str(a) == str(b)
+
+
+def _finite(v) -> bool:
+    import math
+
+    try:
+        return (v is not None and not isinstance(v, bool)
+                and math.isfinite(float(v)))
+    except (TypeError, ValueError, OverflowError):
+        return False
+
+
+def hedge_admission_record(*, plan, selected: dict, admitted: dict | None,
+                           ranked_row: dict | None, position: dict | None,
+                           decision_id: str, now: float,
+                           supplied: dict | None = None) -> dict:
+    """THE SUBMISSION RECORD FOR ONE SELECTED HEDGE, or the named reasons why not.
+
+    Pure. Returns `{"ok": True, "record": {...}}` where the record is admissible
+    and reproduces `plan` exactly, or `{"ok": False, "refusal": ...}` naming every
+    check that failed. See the block comment above for why each input is needed.
+    """
+    selected = dict(selected or {})
+    admitted = dict(admitted or {})
+    row = dict(ranked_row or {})
+    pos = dict(position or {})
+    sup = dict(supplied or {})
+    passed, failed = [], []
+
+    def _check(name, ok, why):
+        (passed if ok else failed).append(
+            name if ok else {"check": name, "why": why})
+
+    # 1 · THE PLAN IS THE ONE THE RANKING SELECTED, BY DIGEST AND BY IDENTITY.
+    _check("PLAN_IS_THE_SELECTED_ONE",
+           plan is not None
+           and selected.get("plan_digest") == getattr(plan, "digest", None)
+           and selected.get("candidate_id") == getattr(plan, "candidate_id",
+                                                       None),
+           "the selected candidate's plan digest %r and identity %r do not "
+           "name this plan (%r, %r)" % (
+               selected.get("plan_digest"), selected.get("candidate_id"),
+               getattr(plan, "digest", None),
+               getattr(plan, "candidate_id", None)))
+    if plan is None:
+        return {"ok": False, "refusal": R_HEDGE_NOT_ADMISSIBLE,
+                "failed": failed, "passed": passed,
+                "why": "no plan was supplied, so there is no order to admit"}
+    # 2 · ITS INPUTS ARE STILL ALIVE, asked of the clock and not of a record.
+    exp = plan.check_not_expired(now)
+    _check("INPUTS_NOT_EXPIRED", not exp["expired"],
+           "the plan's inputs expired %.3fs ago" % -exp["remaining_s"])
+    # 3 · THE PAYOUT RELATIONSHIP WAS ESTABLISHED by the classifier, over the
+    #     whole partition -- not merely admitted with facts missing.
+    st = admitted.get("structure") or {}
+    _check("SETTLEMENT_RELATIONSHIP_ESTABLISHED",
+           bool(st) and str(st.get("taxonomy") or admitted.get("taxonomy"))
+           not in ("", "None", IS.UNESTABLISHABLE)
+           and not st.get("missing_facts")
+           and not st.get("undetermined_regions"),
+           "the classifier did not establish this structure: taxonomy %r, "
+           "missing %r, undetermined %r" % (
+               st.get("taxonomy"), st.get("missing_facts"),
+               st.get("undetermined_regions")))
+    # 4 · THE PRICE WAS READ OFF THIS SIDE'S OWN LADDER.
+    _check("QUOTE_IS_THIS_SIDES_OWN", row.get("price_is_this_sides_own") is True,
+           "the price was not read from this side's own book, so it cannot "
+           "price an order on this side")
+    # 5 · THE FEE THE COMPARISON CHARGED IS A NUMBER.
+    fee = selected.get("fees_usd", row.get("fee_usd"))
+    _check("FEE_PRICED", _finite(fee), "the fee is %r" % (fee,))
+    # 6 · THE BOOK SUPPORTS THE QUANTITY THE PLAN WILL SEND.
+    depth = row.get("depth_qty")
+    _check("DEPTH_SUPPORTS_THE_QUANTITY",
+           _finite(depth) and float(depth) + 1e-9 >= float(plan.quantity),
+           "the book supports %r of the %r this plan would send"
+           % (depth, plan.quantity))
+    # 7 · IT WON ON THE WHOLE POSITION, WITH A NUMBER.
+    _check("VALUED_ON_THE_WHOLE_POSITION",
+           selected.get("rankable") is not False
+           and _finite(selected.get("value_usd"))
+           and selected.get("position_includes_uncovered_inventory")
+           is not False,
+           "the selected candidate carried value %r (rankable %r, whole "
+           "position %r)" % (selected.get("value_usd"),
+                             selected.get("rankable"),
+                             selected.get("position_includes_uncovered_inventory")))
+    # 8 · THE EVENT RAIL NEEDS A KEY, AND IT IS NEVER DERIVED FROM A SLUG.
+    event_key = pos.get("event_key") or sup.get("event_key")
+    _check("EVENT_KEY_STATED", bool(event_key),
+           "the held position names no event, so MAX_EVENT_EXPOSURE cannot be "
+           "enforced on this acquisition")
+    # 9 · A SECOND LEG ON THE HELD INSTRUMENT IS A NETTING TRADE, NOT A HEDGE.
+    held_slug = pos.get("us_market_slug")
+    _check("DOES_NOT_NET_THE_HELD_INSTRUMENT",
+           not held_slug or str(held_slug) != str(plan.venue_slug),
+           "the plan addresses %r, which is the held instrument" % held_slug)
+
+    # A SUPPLIED RECORD MAY ADD EVIDENCE; IT MAY NOT REDEFINE THE ORDER.
+    conflicts = []
+    for rec_field, plan_attr in HEDGE_ORDER_FIELDS:
+        if rec_field in sup and sup[rec_field] is not None:
+            if not _same(sup[rec_field], getattr(plan, plan_attr)):
+                conflicts.append({"field": rec_field,
+                                  "supplied": sup[rec_field],
+                                  "plan": getattr(plan, plan_attr)})
+    # The legacy shape carries its sizing one level down; it is an order field
+    # too, so it is held to the same rule.
+    legacy = ((sup.get("execution_plan") or {}).get("execution")) or {}
+    for rec_field, plan_attr in (("size", "quantity"),
+                                 ("limit_price", "limit_price")):
+        if legacy.get(rec_field) is not None and not _same(
+                legacy[rec_field], getattr(plan, plan_attr)):
+            conflicts.append({"field": "execution_plan.execution." + rec_field,
+                              "supplied": legacy[rec_field],
+                              "plan": getattr(plan, plan_attr)})
+    if conflicts:
+        return {"ok": False, "refusal": R_HEDGE_RECORD_CONFLICTS_WITH_PLAN,
+                "conflicts": conflicts, "passed": passed, "failed": failed,
+                "why": ("a supplied record disagrees with the selected plan on "
+                        "%s. Two different orders are in play and neither may "
+                        "stand in for the other; the plan was ranked and the "
+                        "record was not" % ", ".join(c["field"]
+                                                     for c in conflicts))}
+    if failed:
+        return {"ok": False, "refusal": R_HEDGE_NOT_ADMISSIBLE,
+                "failed": failed, "passed": passed,
+                "why": ("the selected hedge did not qualify on %s. Being "
+                        "selected by the comparison is not admission" %
+                        ", ".join(f["check"] for f in failed))}
+
+    prediction = selected.get("prediction") or {}
+    record = {
+        # ADMISSIBLE BECAUSE EVERY NAMED CHECK PASSED -- listed, so the claim
+        # can be read back and verified rather than trusted.
+        "admissible": True, "refusals": [],
+        "admitted_because": list(passed),
+        "admitted_by": "bettor_funded_pair_cycle.hedge_admission_record",
+        "us_market_slug": plan.venue_slug,
+        "event_key": str(event_key),
+        "order_intent": plan.side,
+        # CARRIED, NEVER DERIVED. A BUY_SHORT pays on the complement, and on a
+        # three-way book that is not the opposing team; exit valuation refuses a
+        # position without it, which is the honest outcome when nobody stated it.
+        "payout_event": sup.get("payout_event"),
+        # THE SIZING, IN THE SHAPE `plan_from_decision` READS. `limit_price` is
+        # the plan's WIRE price -- YES-denominated, so a SHORT at 0.41 of cost is
+        # 0.59 on the wire -- because `collateral_for` converts from the wire.
+        "execution_plan": {"execution": {
+            "size": plan.quantity, "vwap": plan.limit_price,
+            "limit_price": plan.limit_price,
+            "sized_from": "the selected AcquisitionPlan (%s)" % plan.digest}},
+        "collateral_usd": plan.collateral_usd,
+        "account_id": plan.account_id, "venue": plan.venue,
+        "group_id": plan.group_id,
+        "candidate_id": plan.candidate_id, "plan_digest": plan.digest,
+        "decision_id": decision_id,
+        "fee_usd": float(fee),
+        "inputs_expire_at": plan.inputs_expire_at,
+        "expected_net_usd": selected.get("value_usd"),
+        "downside_usd": selected.get("downside_usd"),
+        "evidence_quality": selected.get("evidence_quality"),
+        "model_key": prediction.get("model_key"),
+        "model_version": prediction.get("model_version"),
+    }
+    # ── THE RECORD MUST REPRODUCE THE PLAN THROUGH THE REAL READER ──
+    got = FX.plan_from_decision(record)
+    if not got.get("ok"):
+        return {"ok": False, "refusal": R_HEDGE_RECORD_DOES_NOT_REPRODUCE_PLAN,
+                "reader_refusal": got.get("refusal"),
+                "why": got.get("why"), "passed": passed}
+    drift = [{"field": f, "record": got.get(g), "plan": getattr(plan, p)}
+             for f, g, p in (("us_market_slug", "us_market_slug", "venue_slug"),
+                             ("side", "intent", "side"),
+                             ("quantity", "quantity", "quantity"),
+                             ("wire_price", "limit_price", "limit_price"),
+                             ("collateral_usd", "collateral_usd",
+                              "collateral_usd"))
+             if not _same(got.get(g), getattr(plan, p))]
+    if drift:
+        return {"ok": False, "refusal": R_HEDGE_RECORD_DOES_NOT_REPRODUCE_PLAN,
+                "drift": drift, "passed": passed,
+                "why": ("the execution module would build a different order "
+                        "from this record than the plan that was ranked: %s"
+                        % ", ".join(d["field"] for d in drift))}
+    return {"ok": True, "record": record, "reproduces": got, "passed": passed}
+
 
 async def acquire_second_leg(conn, *, operation_id: str, group_id: str,
                              decision_record: dict, account_id: str,
@@ -620,11 +957,44 @@ async def acquire_second_leg(conn, *, operation_id: str, group_id: str,
         # AND THE SIDE REACHES THE ORDER. `order_intent` on the decision record
         # is what the venue is told; without it the order names a market and not
         # an outcome token.
+        #
+        # THE PLAN IS AUTHORITATIVE, AND A DISAGREEING RECORD REFUSES. This used
+        # `setdefault`, which writes only where the record is silent -- so a
+        # record naming a price or a side OVERRODE the ranked plan, and the
+        # reservation (taken from the plan) and the order (built from the
+        # record) described two different acquisitions. Measured: a SHORT
+        # ranked at wire 0.59 against a record saying LONG at 0.41. A silent
+        # field is filled from the plan; a contradicting one is refused before
+        # anything is reserved. See `hedge_admission_record`.
         decision_record = dict(decision_record or {})
-        decision_record.setdefault("us_market_slug", plan.venue_slug)
-        decision_record.setdefault("order_intent", plan.side)
-        decision_record.setdefault("quantity", plan.quantity)
-        decision_record.setdefault("limit_price", plan.limit_price)
+        clash = []
+        for rec_field, plan_attr in HEDGE_ORDER_FIELDS:
+            v = decision_record.get(rec_field)
+            if v is None:
+                decision_record[rec_field] = getattr(plan, plan_attr)
+            elif not _same(v, getattr(plan, plan_attr)):
+                clash.append({"field": rec_field, "record": v,
+                              "plan": getattr(plan, plan_attr)})
+        legacy = ((decision_record.get("execution_plan") or {})
+                  .get("execution")) or {}
+        for rec_field, plan_attr in (("size", "quantity"),
+                                     ("limit_price", "limit_price")):
+            if legacy.get(rec_field) is not None and not _same(
+                    legacy[rec_field], getattr(plan, plan_attr)):
+                clash.append({"field": "execution_plan.execution." + rec_field,
+                              "record": legacy[rec_field],
+                              "plan": getattr(plan, plan_attr)})
+        if clash:
+            return dict(out, ok=False,
+                        refusal=R_HEDGE_RECORD_CONFLICTS_WITH_PLAN,
+                        conflicts=clash, submitted=False,
+                        nothing_was_sent=True, nothing_was_reserved=True,
+                        why=("the decision record and the selected plan "
+                             "describe different orders on %s. Nothing is "
+                             "reserved, because a reservation taken from one "
+                             "and an order built from the other is the "
+                             "failure this prevents"
+                             % ", ".join(c["field"] for c in clash)))
         decision_record.setdefault("candidate_id", plan.candidate_id)
         us_market_slug = plan.venue_slug
         quantity = plan.quantity
@@ -645,10 +1015,18 @@ async def acquire_second_leg(conn, *, operation_id: str, group_id: str,
                          "collateral=%r"
                          % (us_market_slug, quantity, limit_price,
                             collateral_usd)))
+    # THE SIDE GOES ON THE CLAIM (migration 136), so the database can refuse to
+    # commit this reservation to an intent on the other outcome token. From the
+    # plan when one is bound -- that is the side the ranking chose -- and
+    # otherwise from the record, which is the only statement an unbound caller
+    # has made about it.
     res = await RSV.hold(conn, operation_id=operation_id, group_id=group_id,
                          leg_role=leg_role, us_market_slug=us_market_slug,
                          quantity=quantity, limit_price=limit_price,
-                         collateral_usd=collateral_usd)
+                         collateral_usd=collateral_usd,
+                         order_intent=(plan.side if plan is not None else
+                                       (decision_record or {}).get(
+                                           "order_intent")))
     out["reservation"] = res
     if not res.get("ok"):
         return dict(out, ok=False, refusal=R_RESERVATION_REFUSED,
@@ -2332,13 +2710,37 @@ async def pass_once(conn, *, account_id: str, venue: str,
             continue
         step["admitted_contract"] = cid
         step["acquisition_plan"] = acq_plan.as_dict()
+        # ── THE SUBMISSION RECORD IS BUILT FROM THE PLAN THAT WON ────
+        #
+        # THE DEFECT THIS REPLACES. This passed `facts["hedge_decision_record"]`
+        # or, when absent -- always, in production -- `dec["ledger"]` with a
+        # decision id. A ledger write result is not an admitted, sized decision,
+        # so `plan_from_decision` refused it and a hedge that won the ranking
+        # could never be sent. The admission record is now built from the
+        # selected plan and the evidence that qualified it, and any check that
+        # fails is refused here by name, before a reservation exists.
+        adm = hedge_admission_record(
+            plan=acq_plan, selected=selected,
+            admitted=next((a for a in admitted_all
+                           if str(a.get("condition_id")) == str(cid)), None),
+            ranked_row=next((r for r in (ranking.get("ranked") or ())
+                             if str(r.get("condition_id")) == str(cid)), None),
+            position=pos, decision_id=facts["decision_id"], now=at,
+            supplied=facts.get("hedge_decision_record"))
+        step["admission"] = {k: adm.get(k) for k in
+                             ("ok", "refusal", "passed", "failed", "conflicts",
+                              "drift", "why")}
+        if not adm.get("ok"):
+            step.update(refusal=adm.get("refusal"), dispatched=None)
+            out["acquisitions"].append(dict(
+                adm, submitted=False, nothing_was_sent=True,
+                nothing_was_reserved=True, candidate_id=cid))
+            continue
         got = await acquire_second_leg(
             conn, operation_id=facts["operation_id"], group_id=gid,
             plan=acq_plan, expect_candidate_id=cid,
             expect_digest=selected["plan_digest"],
-            decision_record=(facts.get("hedge_decision_record")
-                             or dict(dec.get("ledger") or {},
-                                     decision_id=facts["decision_id"])),
+            decision_record=adm["record"],
             account_id=account_id, venue=venue, adapter=adapter,
             venue_positions=venue_positions, now=at)
         step["acquisition"] = {k: got.get(k) for k in

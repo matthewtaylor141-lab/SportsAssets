@@ -912,7 +912,13 @@ async def test_the_complete_scheduled_pair_lifecycle(monkeypatch):
         assert naked[0]["primary_residual_qty"] == pytest.approx(10.0)
         assert naked[0]["hedge_residual_qty"] == pytest.approx(6.0)
         assert naked[0]["unpaired_qty"] == pytest.approx(4.0)
-        assert "MATCHED units" in naked[0]["what_it_means"]
+        # THE MESSAGE NAMES THE QUANTITY AND THE NAKED LEG. This asserted the
+        # phrase "MATCHED units", which the residual repair replaced with a
+        # sentence reading remaining inventory rather than historical entry
+        # volume. The numbers above are the claim; the text has to agree with
+        # them, not reproduce one wording of them.
+        meaning = naked[0]["what_it_means"]
+        assert "4.0" in meaning and "PRIMARY" in meaning, meaning
         _stage("operator_view", risk_count=view["risk_count"],
                unpaired_qty=naked[0]["unpaired_qty"],
                risks=sorted({r["risk"] for r in view["risks"]}),
@@ -1270,6 +1276,18 @@ async def test_the_pair_pass_recovers_even_with_no_pairing_inputs():
 # order. These two go through `pass_once` with a supplier, so the ordering under
 # test is the module's.
 
+def _processing_delay_bound() -> float:
+    """The DEPLOYED bound, read from the worker rather than restated here.
+
+    A literal copied into this file would drift from the constant the scheduled
+    caller actually applies, and the test would then assert an expiry production
+    does not use.
+    """
+    from sportsassets.workers import ext_pinnacle_loop as _W
+
+    return float(_W.MAX_OUR_PROCESSING_DELAY_S)
+
+
 def _pair_facts(hold_ranking=None):
     """Everything `pass_once`'s supplier contract requires, for one position.
 
@@ -1279,9 +1297,31 @@ def _pair_facts(hold_ranking=None):
     the test plays the supplier, and this function is the whole contract in one
     place.
     """
+    # ── THE MEASURE IS STATED OVER THE PARTITION THIS SUPPLIER DECLARES ──
+    #
+    # THE INCONSISTENCY THIS CLOSES, AND IT WAS THE FIXTURE'S OWN. The supplier
+    # below declares `fixture_can_void: False`, and `pass_once` hands that to
+    # BOTH `discover` and the whole-position valuation, so the pass values the
+    # position over NINE regions. This call omitted the flag, took the default
+    # `True`, and the probabilities built from it named TEN -- including
+    # "fixture cancelled or abandoned", a region the supplier had just said
+    # cannot occur.
+    #
+    # `bettor_funded_decision` now requires exactly one probability per region
+    # of the table it values, and refused this with
+    # PROBABILITIES_DO_NOT_MATCH_THE_OUTCOME_PARTITION. That refusal was right:
+    # a measure over a different outcome space is not a measure of this one.
+    # The hedge then carried no value into the comparison, and the ranking test
+    # read EXIT as the winner of a contest the hedge could not enter.
+    #
+    # Measured, not assumed: under MATCHING flags the classifier's table and the
+    # position's table are identical region for region (10 = 10 with void, 9 = 9
+    # without), so production -- which passes one reading to both -- is
+    # consistent. Only this fixture disagreed with itself.
     admitted = PC.discover(held_leg=_held_leg(),
                            candidate_legs=_decoys() + [_hedge_leg()],
                            sport_permits_tie=False,
+                           fixture_can_void=False,
                            fixture_can_postpone=False)["admitted"][0]
 
     async def _supply(conn, pos, *, at):
@@ -1298,6 +1338,38 @@ def _pair_facts(hold_ranking=None):
                 admitted["structure"]["table"]),
             "evidence_quality": FD.EVIDENCE_EXTERNAL_LABELLED,
             "fee_usd": HEDGE_FEE,
+            # ── THE QUOTE IS KEYED BY THE SIDE IT WAS TAKEN FROM ─────
+            #
+            # WHY THIS IS NOW REQUIRED, AND WHY ITS ABSENCE WAS A REAL GAP IN
+            # THIS FIXTURE RATHER THAN A NEW STRICTNESS TO ROUTE AROUND. One
+            # venue instrument carries TWO outcome tokens with different
+            # acquisition prices, so a reading keyed by `market_slug` alone
+            # cannot price either side. `rank_admitted` records such a reading
+            # as SLUG-ONLY and `decision_options` then refuses the candidate
+            # with SIDE_SPECIFIC_QUOTE_NOT_ESTABLISHED.
+            #
+            # This supplier gave only the flat `fee_usd` and `depth` below, so
+            # the hedge was dropped from the comparison BEFORE any number was
+            # compared -- `hedge_decision_inputs.candidate_ids` measured empty.
+            # The ranking test below then read a winner chosen from a set the
+            # hedge had never joined. A candidate excluded for want of a quote
+            # and a candidate beaten on its value are different facts, and
+            # asserting either against this fixture required supplying this.
+            #
+            # `candidate_id` is `slug#SIDE` and matches `_hedge_leg()`, so the
+            # price here IS this side's own.
+            # `inputs_expire_at` is the second thing the plan requires, and for
+            # the same reason: a priced, sized order plan that outlives its
+            # inputs would send a stale limit. Production takes
+            # `min(book_state_established_at + bound, read_at + MAX_OUR_
+            # PROCESSING_DELAY_S)` in `_candidate_quote`. This test reads no
+            # venue, so it supplies the SECOND term of that same expression off
+            # the supplier's own clock -- a bound this fixture can honestly
+            # state, rather than a currency guarantee it has not established.
+            "candidate_leg_details": [
+                {"candidate_id": _hedge_leg().condition_id,
+                 "price": HEDGE_PX, "depth_qty": 25, "fee_usd": HEDGE_FEE,
+                 "inputs_expire_at": float(at) + _processing_delay_bound()}],
             "depth": FIP.depth_supports(wanted_qty=HEDGE_QTY,
                                         depth_qty_at_price=25),
             "incremental": FIP.incremental_capital_usd(
@@ -1312,7 +1384,18 @@ def _pair_facts(hold_ranking=None):
             "hedge_limit_price": HEDGE_PX,
             "hedge_collateral_usd": FX.collateral_for(HEDGE_PX, HEDGE_QTY,
                                                       FX.LONG),
-            "hedge_decision_record": _hedge_decision_record(),
+            # ── NONE, AS IN PRODUCTION ───────────────────────────────
+            #
+            # This supplied `_hedge_decision_record()` -- a LONG at 0.41 -- while
+            # the ranking selected the SHORT side at a wire price of 0.59. The
+            # old `setdefault` merge let that record override the ranked plan,
+            # so this test was exercising a path production never takes (the
+            # scheduled supplier sets it to None) and an order production must
+            # never send. The admission record is now BUILT FROM THE PLAN, so the
+            # scheduled caller needs no separate order and must not supply a
+            # contradicting one. `test_a_supplied_record_that_disagrees_with_the_
+            # plan_is_refused` pins what happens when one is supplied anyway.
+            "hedge_decision_record": None,
         }
 
     return _supply

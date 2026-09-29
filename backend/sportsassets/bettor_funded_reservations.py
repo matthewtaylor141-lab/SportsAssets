@@ -123,7 +123,11 @@ R_IDENTITY_REUSED_WITH_DIFFERENT_TERMS = \
 #: not a retry. `intent_id` is included: from COMMITTED onward the identity names a
 #: specific order.
 IDENTITY_FIXES = ("group_id", "leg_role", "us_market_slug", "quantity",
-                  "limit_price", "collateral_usd", "intent_id")
+                  "limit_price", "collateral_usd", "intent_id", "order_intent")
+
+#: The venue's two intents; a reservation may name one or neither (migration 136).
+SIDES = ("ORDER_INTENT_BUY_LONG", "ORDER_INTENT_BUY_SHORT")
+R_SIDE_NOT_A_VENUE_INTENT = "THE_RESERVATION_SIDE_IS_NOT_A_VENUE_INTENT"
 
 #: Why a reservation resolved. Stored in `resolution`, so a later reader can tell
 #: an evidenced release from a guess.
@@ -246,7 +250,7 @@ async def get(conn, operation_id: str) -> dict:
 
 async def hold(conn, *, operation_id: str, group_id: str, leg_role: str,
                us_market_slug: str, quantity: float, limit_price: float,
-               collateral_usd: float) -> dict:
+               collateral_usd: float, order_intent: str | None = None) -> dict:
     """TAKE THE LEG, BEFORE ANY INTENT EXISTS.
 
     IDEMPOTENT ON AN IDENTICAL OPERATION. A replay of the SAME request reaches
@@ -271,6 +275,18 @@ async def hold(conn, *, operation_id: str, group_id: str, leg_role: str,
     if leg_role not in ("PRIMARY", "HEDGE"):
         return dict(out, ok=False, refusal=R_ROLE_NOT_STATED,
                     why="leg role %r is not PRIMARY or HEDGE" % (leg_role,))
+    # ── THE SIDE, WHEN THE CALLER KNOWS IT ──────────────────────────
+    #
+    # Migration 136. The instrument alone does not say which outcome token is
+    # being claimed, and at a wire price of 0.50 a LONG and a SHORT on one slug
+    # agree on every other field here. A side that is stated is stored, is part
+    # of the fixed identity, and is compared by the database against the intent
+    # this reservation is later committed to. One that is not stated is not
+    # invented. Validated with the role, before the database is touched.
+    if order_intent is not None and order_intent not in SIDES:
+        return dict(out, ok=False, refusal=R_SIDE_NOT_A_VENUE_INTENT,
+                    why=("%r is not one of the venue's two intents %r"
+                         % (order_intent, SIDES)))
     try:
         if not await _has_schema(conn):
             return dict(out, ok=False, refusal=R_SCHEMA_UNAVAILABLE)
@@ -280,7 +296,8 @@ async def hold(conn, *, operation_id: str, group_id: str, leg_role: str,
     asserted = {"group_id": str(group_id), "leg_role": str(leg_role),
                 "us_market_slug": str(us_market_slug),
                 "quantity": float(quantity), "limit_price": float(limit_price),
-                "collateral_usd": float(collateral_usd)}
+                "collateral_usd": float(collateral_usd),
+                "order_intent": order_intent}
     existing = await _fetch(conn, operation_id)
     if existing is not None:
         clashes = _conflicts(existing, asserted)
@@ -297,11 +314,12 @@ async def hold(conn, *, operation_id: str, group_id: str, leg_role: str,
             await conn.execute(
                 "INSERT INTO bettor_funded_leg_reservations "
                 "(reservation_id, group_id, leg_role, us_market_slug, quantity,"
-                " collateral_usd, limit_price, state, operation_id) "
-                "VALUES ($1,$2,$3,$4,$5,$6,$7,'HELD',$8)",
+                " collateral_usd, limit_price, state, operation_id,"
+                " order_intent) "
+                "VALUES ($1,$2,$3,$4,$5,$6,$7,'HELD',$8,$9)",
                 rid, str(group_id), str(leg_role), str(us_market_slug),
                 float(quantity), float(collateral_usd), float(limit_price),
-                str(operation_id))
+                str(operation_id), order_intent)
     except Exception as exc:                                # noqa: BLE001
         # THE SAVEPOINT HAS ROLLED BACK BY HERE, so the queries below are safe.
         # The same ordering the entry path needed, for the same reason: catching
@@ -899,8 +917,23 @@ def plan_matches(reservation: dict, plan: dict) -> dict:
             same = a is not None and b is not None and str(a) == str(b)
         if not same:
             clashes.append({"field": f, "reservation": a, "plan": b})
-    return {"ok": not clashes, "conflicts": clashes,
-            "compared": list(PLAN_FIELDS)}
+    # ── AND THE SIDE, WHICH THE FOUR FIELDS ABOVE CANNOT SEPARATE ────
+    #
+    # At a wire price of 0.50 a LONG and a SHORT on one slug agree on slug,
+    # quantity, price and collateral, so the comparison above passed a plan for
+    # one side against a reservation for the other and the rails counted them as
+    # one acquisition. The execution plan names its side `intent`; the
+    # reservation (migration 136) names it `order_intent`. A reservation that
+    # stated a side must be met by a plan on that side -- including a plan that
+    # states none, because an unstated side is not agreement.
+    compared = list(PLAN_FIELDS)
+    if res.get("order_intent") is not None:
+        compared.append("order_intent")
+        if str(res.get("order_intent")) != str(want.get("intent")):
+            clashes.append({"field": "order_intent",
+                            "reservation": res.get("order_intent"),
+                            "plan": want.get("intent")})
+    return {"ok": not clashes, "conflicts": clashes, "compared": compared}
 
 
 async def reserved_collateral_usd(conn, *,
