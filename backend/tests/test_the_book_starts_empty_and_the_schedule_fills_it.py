@@ -390,24 +390,48 @@ def test_a_row_without_a_condition_to_payout_comparison_derives_nothing():
 
 @pytest.mark.asyncio
 async def test_the_account_read_offers_no_partial_total(monkeypatch):
-    from sportsassets.workers import mirror_shadow as MS
+    """THROUGH THE LOOP'S OWN DELEGATE, with only the venue client replaced.
 
-    async def failed_walk(pmus, basis_out=None):
-        return None, 3, False
+    A walk that never reaches its end, and a held position whose cost the
+    venue did not state, each refuse the whole read: no partial total reaches
+    the gate. (The exhaustive cases are in
+    test_the_account_read_refuses_what_it_cannot_measure.py.)
+    """
+    from sportsassets import pmus
+    from sportsassets import bettor_funded_account as FACCT
 
-    monkeypatch.setattr(MS, "account_positions_walk", failed_walk)
+    class _P:
+        def __init__(self, pages):
+            self.pages = list(pages)
+
+        def positions(self, params=None):
+            return self.pages.pop(0)
+
+    class _O:
+        def list(self, params=None):
+            return {"orders": []}
+
+    class _C:
+        def __init__(self, pages):
+            self.portfolio, self.orders = _P(pages), _O()
+
+    endless = [{"positions": {}, "nextCursor": "c%d" % i}
+               for i in range(FACCT.POSITIONS_PAGES_MAX + 1)]
+    monkeypatch.setattr(pmus, "_get_client", lambda: _C(endless))
+    monkeypatch.setattr(pmus, "paced_read",
+                        lambda call, *, endpoint, max_dispatches=None: call())
     got = await loop.venue_account_exposure()
     assert got["ok"] is False
     assert got["refusal"] == "VENUE_POSITIONS_WALK_INCOMPLETE"
     assert loop._venue_positions_for_gate(got) is None
 
-    async def no_cost(pmus, basis_out=None):
-        return {"some-slug": 5.0}, 1, False
-
-    monkeypatch.setattr(MS, "account_positions_walk", no_cost)
+    no_cost = [{"positions": {"some-slug": {"netPosition": "5"}},
+                "eof": True}]
+    monkeypatch.setattr(pmus, "_get_client", lambda: _C(no_cost))
     got = await loop.venue_account_exposure()
     assert got["ok"] is False
     assert got["refusal"] == "VENUE_POSITION_COST_NOT_STATED"
+    assert loop._venue_positions_for_gate(got) is None
 
 
 def test_an_instant_orders_the_same_before_and_after_the_database():

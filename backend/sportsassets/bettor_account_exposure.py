@@ -291,14 +291,44 @@ async def account_exposure(conn, *, account_id=None,
                           "This is not a claim that the manual sleeve is "
                           "empty"),
     }
+    # ── THE VENUE'S FIGURES, EACH ONE STATED OR THE PATH IS UNREADABLE ──
+    #
+    # This used to read `float(venue_positions.get("held_usd") or 0.0)`, so a
+    # caller's dict that omitted a figure -- or carried None, NaN or a string
+    # -- produced a total with that path counted as ZERO. Missing exposure is
+    # not zero exposure: every one of the three must be a finite,
+    # non-negative number, and anything else makes the path READ_FAILED and
+    # the total UNREADABLE, by name.
+    def _venue_figures(vp):
+        import math as _m
+        got, bad = {}, []
+        for key, name in (("held_usd", HELD), ("working_usd", WORKING),
+                          ("unresolved_usd", UNRESOLVED)):
+            v = vp.get(key)
+            try:
+                f = None if isinstance(v, bool) or v is None else float(v)
+            except (TypeError, ValueError):
+                f = None
+            if f is None or not _m.isfinite(f) or f < 0:
+                bad.append(key)
+            else:
+                got[name] = f
+        return got, bad
+
     if isinstance(venue_positions, dict):
-        per_path["VENUE_HELD_POSITIONS"] = {
-            "read": READ_OK,
-            HELD: float(venue_positions.get("held_usd") or 0.0),
-            WORKING: float(venue_positions.get("working_usd") or 0.0),
-            UNRESOLVED: float(venue_positions.get("unresolved_usd") or 0.0),
-            "read_at_epoch_s": venue_positions.get("read_at_epoch_s"),
-        }
+        figs, bad = _venue_figures(venue_positions)
+        if bad:
+            per_path["VENUE_HELD_POSITIONS"] = {
+                "read": READ_FAILED,
+                "error": "VENUE_READ_INCOMPLETE",
+                "missing_or_unreadable": bad,
+                "why": ("the venue read was supplied without a measurable %s, "
+                        "and an unstated figure is not zero" % ", ".join(bad)),
+            }
+        else:
+            per_path["VENUE_HELD_POSITIONS"] = dict(
+                figs, read=READ_OK,
+                read_at_epoch_s=venue_positions.get("read_at_epoch_s"))
     else:
         per_path["VENUE_HELD_POSITIONS"] = {
             "read": READ_FAILED,
