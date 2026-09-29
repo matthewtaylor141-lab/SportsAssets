@@ -103,6 +103,24 @@ def test_in_sample_numbers_are_labelled_in_sample():
 
 async def _seed(conn, *, n_markets=260, complete_every=3):
     """Insert cohort fills: an entry per market, some with a complement."""
+    # ── THE WHALE THIS MODULE'S TRADES REFERENCE, SEEDED BY IT ───────
+    #
+    # A PRE-EXISTING LATENT BUG, diagnosed by a gate on a FRESH database. This
+    # module uses WHALE = 424242 and never inserted it; the row is created by
+    # `test_rn1x_persistence_pg.py`, and "m" sorts before "p". So on a fresh
+    # database every test here failed on trades_whale_id_fkey, and on a REUSED
+    # one they passed because the earlier run had left the row behind.
+    #
+    # That made this file's result a function of residual database state rather
+    # than of the code, which is how it showed up as a "new" failure on a SHA
+    # that had not touched it: the baseline gate's database was reused and this
+    # gate's was fresh. Seeding it here makes the outcome deterministic and
+    # costs nothing -- ON CONFLICT DO NOTHING leaves the other module's row
+    # alone.
+    await conn.execute(
+        "INSERT INTO whales (id, address, username) VALUES ($1, $2, $3) "
+        "ON CONFLICT (id) DO NOTHING",
+        WHALE, "0xrn1xmodelloop", "rn1x-model-loop")
     await conn.execute("DELETE FROM trades WHERE whale_id = $1", WHALE)
     tid = 900_000
     for c in range(n_markets):
