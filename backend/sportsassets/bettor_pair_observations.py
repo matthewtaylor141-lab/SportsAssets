@@ -203,6 +203,7 @@ async def observe_candidate(conn, *, us_market_slug: str, side: str,
         quoter=quoter, prose_reader=prose_reader, now=at)
     row = held.get("row") or {}
     leg = held["leg"]
+    out["fixture"] = getattr(leg, "fixture_id", None)
     tie = (tie_reader or vset.tie_is_reachable)(
         sport_family=str(row.get("sports_type") or "").split("_")[0].lower()
         or None, overtime=getattr(leg, "overtime", None))
@@ -212,14 +213,30 @@ async def observe_candidate(conn, *, us_market_slug: str, side: str,
                         sport_permits_tie=tie.get("permits_tie"))
     out["examined"] = cands.get("examined")
     out["discovery_refusal"] = found.get("refusal")
+    out["admitted"] = len(found.get("admitted") or [])
+    # WHY EACH SIBLING DID NOT BECOME A SECOND LEG, counted by name: the
+    # supplier's refusals (unpriced, unbuildable) and discovery's rejections.
+    why: dict = {}
+    for r in cands.get("refused") or []:
+        k = str(r.get("refusal") or "UNNAMED")
+        why[k] = why.get(k, 0) + 1
+    for r in found.get("rejected") or []:
+        k = str((r or {}).get("refusal") or (r or {}).get("reason")
+                or "UNNAMED")
+        why[k] = why.get(k, 0) + 1
+    out["second_legs_refused"] = why
     if not found.get("admitted"):
         return dict(out, ok=True, refusal=R_NOTHING_ADMITTED)
     quotes = {c["candidate_id"]: c for c in cands.get("legs") or []}
+    out["skipped_unpriced_second_leg"] = 0
     for adm in found["admitted"]:
         detail = quotes.get(adm["condition_id"]) or {}
         h_slug, h_side = HSUP.split_identity(adm["condition_id"])
         hleg = adm.get("leg")
         if h_side is None or getattr(hleg, "cost_cents_per_unit", None) is None:
+            # COUNTED, NOT SILENT: an admitted structure whose second leg
+            # names no side or carries no cost cannot be frozen as features.
+            out["skipped_unpriced_second_leg"] += 1
             continue
         got = await record(
             conn, fixture=leg.fixture_id, admitted=adm, held_leg=leg,
@@ -581,7 +598,377 @@ async def labelled(conn, *, after=None, through=None, outcomes_through=None,
 
 
 # ═════════════════════════════════════════════════════════════════════
-# 4 · THE SCHEDULED PASS
+# 4 · CANDIDATES FROM THE VENUE'S OWN CATALOGUE, NOT FROM ENTRY ADMISSION
+# ═════════════════════════════════════════════════════════════════════
+#
+# THE DEPENDENCY THIS REMOVES. The observer used to be offered only the
+# contracts the entry cycle had mapped: an event needed a Pinnacle h2h quote,
+# a global-catalogue match and a resolved venue identity before a single
+# pairing structure on it could be seen. On the production cycle of
+# 2026-09-29 every one of 49 events was refused before identity (no venue
+# contract 22, no Pinnacle price 21, ...), so the observer was offered nothing
+# and recorded nothing -- the learning path starved on the ENTRY lane's
+# coverage, which has nothing to do with whether two venue contracts on one
+# fixture can be observed and later labelled from the venue's settlements.
+#
+# The venue's catalogue (`us_premap`, written by the premap sweep from the
+# venue's own event listing) names every open contract. A candidate is taken
+# from it by the SAME predicates the supplier applies after a paid book read
+# -- realism, fixture identity, a graded variable, orientation -- applied
+# FIRST, so a contract that could never become a leg costs no venue read.
+# Every exclusion is counted by name.
+
+SOURCE_ENTRY = "ENTRY_IDENTITY"
+SOURCE_CATALOGUE = "VENUE_CATALOGUE"
+
+#: The premap sweep window is now-12h .. now+96h; a fixture is offered only
+#: when it has not started (with a margin: a book read at the whistle prices a
+#: live market) and lies inside the full sweep's forward window.
+CATALOGUE_START_MARGIN_S = 600
+CATALOGUE_HORIZON_S = 96 * 3600
+#: A row the sweep has not re-seen recently may be a closed market: the sweep
+#: writes only open markets and never deletes a closed one before its 26-hour
+#: prune, so recency is the only open-proxy the catalogue offers. Two full
+#: sweeps (1800 s each) plus slack.
+CATALOGUE_RESEEN_S = 3900
+#: And the sweep itself must be running: a catalogue nobody refreshes is
+#: refused by name rather than read as the venue's current listing.
+CATALOGUE_SWEEP_FRESH_S = 3900
+#: A fixture observed this recently is not offered again: repeated
+#: observations of one fixture are ONE example to the event-balanced model,
+#: so a fresh fixture is worth more than another look at a seen one.
+OBSERVE_FIXTURE_AGAIN_AFTER_S = 6 * 3600
+#: A fixture attempted and refused is not re-attempted before this, so a
+#: fixture that can never admit a pair does not consume every pass.
+ATTEMPT_RETRY_S = 3 * 3600
+#: Rows read per catalogue pass (both sides of each contract are rows).
+CATALOGUE_ROW_LIMIT = 6000
+#: Families whose overtime rule is captured from venue prose
+#: (`bettor_venue_settlement.OVERTIME_PROSE`). Any other family's leg is
+#: refused by `build_leg` (R_OVERTIME_NOT_CAPTURED) after a paid read, so it
+#: is excluded -- by name and count -- before one.
+CATALOGUE_FAMILIES = ("baseball", "soccer")
+
+R_CATALOGUE_NOT_IN_DB = "THE_VENUE_CATALOGUE_TABLE_IS_NOT_IN_THIS_DATABASE"
+R_CATALOGUE_SWEEP_STALE = "THE_VENUE_CATALOGUE_SWEEP_HAS_NOT_RUN_RECENTLY"
+R_CATALOGUE_READ_FAILED = "THE_VENUE_CATALOGUE_COULD_NOT_BE_READ"
+
+X_FAMILY_NOT_CAPTURED = "FAMILY_OVERTIME_RULE_NOT_CAPTURED"
+X_NOT_A_GRADED_VARIABLE = "NOT_A_GRADED_VARIABLE"
+X_NOT_REAL = "NOT_ESTABLISHED_AS_A_REAL_FIXTURE"
+X_FIXTURE_IDENTITY = "FIXTURE_IDENTITY_NOT_ESTABLISHED"
+X_ORIENTATION = "ORIENTATION_NOT_ESTABLISHED"
+X_SIDE = "SIDE_NOT_LONG_OR_SHORT"
+X_FEWER_THAN_TWO = "FEWER_THAN_TWO_GRADED_CONTRACTS_ON_THE_FIXTURE"
+X_OBSERVED_RECENTLY = "FIXTURE_OBSERVED_RECENTLY"
+X_ATTEMPTED_RECENTLY = "FIXTURE_ATTEMPTED_RECENTLY_AND_REFUSED"
+
+_CATALOGUE_SQL = (
+    "SELECT market_slug, intent, event_slug, event_title, question, "
+    "       sports_type, team_abbr, side_norm, signed, line, game_start, "
+    "       updated_at, extract(epoch FROM game_start) AS start_epoch "
+    "  FROM us_premap "
+    " WHERE game_start > to_timestamp($1) AND game_start <= to_timestamp($2) "
+    "   AND updated_at > to_timestamp($3) AND event_slug IS NOT NULL "
+    "   AND market_slug IS NOT NULL "
+    " ORDER BY game_start, event_slug, market_slug, intent LIMIT $4")
+
+#: fixture -> (attempted_at, refusal), process-local. Lost on restart, which
+#: costs one re-attempt per fixture, never a wrong observation.
+_ATTEMPTED: dict = {}
+
+
+def note_attempt(fixture, *, at: float, refusal) -> None:
+    """Remember a REFUSED fixture so it is not re-attempted every pass. An
+    attempt that recorded an observation is remembered by the table itself."""
+    if fixture and refusal:
+        _ATTEMPTED[str(fixture)] = (float(at), str(refusal))
+        if len(_ATTEMPTED) > 4096:
+            for k in sorted(_ATTEMPTED, key=lambda k: _ATTEMPTED[k][0])[:2048]:
+                _ATTEMPTED.pop(k, None)
+
+
+def _sweep_age_s(value, now: float):
+    """Seconds since a premap sweep summary's `at` (ISO or epoch), or None
+    if it cannot be read."""
+    import datetime as _d
+
+    v = value
+    if isinstance(v, str):
+        try:
+            v = json.loads(v)
+        except ValueError:
+            return None
+    at = v.get("at") if isinstance(v, dict) else None
+    if at is None:
+        return None
+    try:
+        t = float(at)
+    except (TypeError, ValueError):
+        try:
+            dt = _d.datetime.fromisoformat(str(at).replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=_d.timezone.utc)
+        t = dt.timestamp()
+    return round(float(now) - t, 1)
+
+
+def screen_row(row: dict) -> str | None:
+    """THE SUPPLIER'S OWN PREDICATES, before any venue read. None when the row
+    could become a leg; otherwise the exclusion's name."""
+    from . import bettor_funded_hedge_supply as HSUP
+    from . import bettor_indirect_structures as IS
+    from . import bettor_venue_realism as vreal
+
+    if row.get("intent") not in (LONG, SHORT):
+        return X_SIDE
+    fam = str(row.get("sports_type") or "").split("_")[0].lower()
+    if fam not in CATALOGUE_FAMILIES:
+        return X_FAMILY_NOT_CAPTURED
+    if (vreal.classify(row) or {}).get("verdict") != vreal.REAL:
+        return X_NOT_REAL
+    kind = HSUP.derive_kind(row)
+    if kind.get("refusal"):
+        return X_NOT_A_GRADED_VARIABLE
+    fx = HSUP.fixture_participants(row.get("event_slug"))
+    if fx.get("refusal"):
+        return X_FIXTURE_IDENTITY
+    if kind.get("kind") != IS.KIND_TOTAL and \
+            HSUP.orientation_of(row, participants=fx).get("refusal"):
+        return X_ORIENTATION
+    return None
+
+
+def _preference(row: dict) -> tuple:
+    """Which contract of a fixture is offered as its first leg: a full-game
+    winner's LONG side first, then spreads, then the rest. Discovery examines
+    every sibling either way; this only fixes the order deterministically."""
+    from . import bettor_funded_hedge_supply as HSUP
+    from . import bettor_indirect_structures as IS
+
+    k = HSUP.derive_kind(row)
+    rank = {IS.KIND_MONEYLINE: 0, IS.KIND_THREE_WAY: 1, IS.KIND_SPREAD: 2,
+            IS.KIND_TOTAL: 3}.get(k.get("kind"), 9)
+    return (0 if k.get("period") == IS.PERIOD_FULL else 1, rank,
+            0 if row.get("intent") == LONG else 1,
+            str(row.get("market_slug") or ""))
+
+
+async def catalogue_candidates(conn, *, now: float | None = None,
+                               limit: int = 24) -> dict:
+    """UP TO `limit` FIRST-LEG CANDIDATES, one per fixture, from the venue's
+    own catalogue. DB reads only; never raises; every exclusion is counted."""
+    at = float(now if now is not None else time.time())
+    out: dict[str, Any] = {"version": VERSION, "source": SOURCE_CATALOGUE,
+                           "at": at, "candidates": [], "excluded_rows": {},
+                           "excluded_fixtures": {}, "rows_read": 0,
+                           "fixtures_seen": 0, "venue_reads": 0}
+    try:
+        present = await conn.fetchval("SELECT to_regclass('us_premap')")
+    except Exception as exc:                                    # noqa: BLE001
+        return dict(out, ok=False, refusal=R_CATALOGUE_READ_FAILED,
+                    error=type(exc).__name__)
+    if present is None:
+        return dict(out, ok=False, refusal=R_CATALOGUE_NOT_IN_DB)
+    try:
+        sweeps = {r["key"]: r["value"] for r in await conn.fetch(
+            "SELECT key, value FROM ingestion_state "
+            " WHERE key IN ('premap_last', 'premap_last_fast')")}
+    except Exception:                                           # noqa: BLE001
+        sweeps = {}
+    ages = {k: _sweep_age_s(v, at) for k, v in sweeps.items()}
+    out["sweep_age_s"] = ages
+    known = [a for a in ages.values() if a is not None]
+    if not known or min(known) > CATALOGUE_SWEEP_FRESH_S:
+        return dict(out, ok=False, refusal=R_CATALOGUE_SWEEP_STALE,
+                    why=("the premap sweep that refreshes the catalogue last "
+                         "ran %s s ago (limit %d s); an unrefreshed catalogue "
+                         "is not the venue's current listing"
+                         % (min(known) if known else "never",
+                            CATALOGUE_SWEEP_FRESH_S)))
+    try:
+        rows = [dict(r) for r in await conn.fetch(
+            _CATALOGUE_SQL, at + CATALOGUE_START_MARGIN_S,
+            at + CATALOGUE_HORIZON_S, at - CATALOGUE_RESEEN_S,
+            int(CATALOGUE_ROW_LIMIT))]
+        seen_fx = ({str(r["fixture"]): float(r["last"]) for r in await
+                    conn.fetch(
+                        "SELECT fixture, extract(epoch FROM max(observed_at)) "
+                        "       AS last FROM bettor_pair_observations "
+                        " WHERE observed_at > to_timestamp($1) "
+                        " GROUP BY fixture",
+                        at - OBSERVE_FIXTURE_AGAIN_AFTER_S)}
+                   if await has_schema(conn) else {})
+    except Exception as exc:                                    # noqa: BLE001
+        return dict(out, ok=False, refusal=R_CATALOGUE_READ_FAILED,
+                    error=type(exc).__name__)
+    out["rows_read"] = len(rows)
+    out["row_limit"] = CATALOGUE_ROW_LIMIT
+    out["truncated_at_row_limit"] = len(rows) >= CATALOGUE_ROW_LIMIT
+    by_fx: dict[str, list] = {}
+    order: list = []
+    for r in rows:
+        why = screen_row(r)
+        if why is not None:
+            out["excluded_rows"][why] = out["excluded_rows"].get(why, 0) + 1
+            continue
+        fx = str(r["event_slug"]).strip().lower()
+        if fx not in by_fx:
+            by_fx[fx] = []
+            order.append(fx)
+        by_fx[fx].append(r)
+    out["fixtures_seen"] = len(order)
+
+    def _xf(name):
+        out["excluded_fixtures"][name] = out["excluded_fixtures"].get(
+            name, 0) + 1
+
+    fresh, again = [], []
+    for fx in order:
+        legs = by_fx[fx]
+        if len({r["market_slug"] for r in legs}) < 2:
+            _xf(X_FEWER_THAN_TWO)
+            continue
+        if fx in seen_fx:
+            _xf(X_OBSERVED_RECENTLY)
+            continue
+        tried = _ATTEMPTED.get(fx)
+        if tried is not None and at - tried[0] < ATTEMPT_RETRY_S:
+            _xf(X_ATTEMPTED_RECENTLY)
+            continue
+        best = min(legs, key=_preference)
+        cand = {"us_market_slug": best["market_slug"], "side": best["intent"],
+                "fixture": fx, "sports_type": best["sports_type"],
+                "starts_in_s": round(float(best["start_epoch"]) - at, 0),
+                "graded_contracts": len({r["market_slug"] for r in legs}),
+                "source": SOURCE_CATALOGUE}
+        (again if tried is not None else fresh).append(cand)
+    # NEVER-ATTEMPTED FIXTURES FIRST, soonest first (their labels arrive
+    # soonest); fixtures whose refusal has aged out after them.
+    out["candidates"] = (fresh + again)[:int(limit)]
+    out["eligible_fixtures"] = len(fresh) + len(again)
+    out["not_offered_for_limit"] = max(0, len(fresh) + len(again)
+                                       - int(limit))
+    return dict(out, ok=True, refusal=None)
+
+
+# ═════════════════════════════════════════════════════════════════════
+# 5 · THE VENUE READS A PASS MAKES, COUNTED AND BOUNDED
+# ═════════════════════════════════════════════════════════════════════
+
+#: Logical book reads one pass may make (each up to
+#: `venue_sdk.BOOK_READ_MAX_DISPATCHES` requests). A read past it is refused
+#: by name, without a request, so a fixture with many siblings cannot spend
+#: the lane's share of the venue budget.
+BOOK_READS_PER_PASS = 48
+#: Seconds of the pass reserved for labelling: observations stop starting
+#: reads this long before the deadline, so labels are always read.
+LABEL_RESERVE_S = 20.0
+
+R_READ_BUDGET = "THE_PASS_BOOK_READ_BUDGET_IS_SPENT"
+R_PASS_DEADLINE = "THE_PASS_DEADLINE_FOR_OBSERVATIONS_HAS_PASSED"
+
+
+def metered(fn, *args):
+    """Call a blocking venue reader under its own request-gate read id, in
+    THIS thread, and return (result, dispatches). Dispatches are None when
+    the gate cannot say."""
+    from . import venue_request_gate as grt
+
+    rid = grt.begin_read(slug=str(args[0]) if args else None)
+    grt.bind_read(rid)
+    try:
+        got = fn(*args)
+    finally:
+        grt.bind_read(None)
+        st = grt.end_read(rid)
+    return got, (st or {}).get("dispatched")
+
+
+class PassUsage:
+    """Every venue read one observation pass made, by kind, with the
+    requests they dispatched where the gate counted them."""
+
+    def __init__(self, *, book_budget: int, t0: float, obs_deadline_s: float):
+        self.book_budget = int(book_budget)
+        self.t0 = t0
+        self.obs_deadline_s = float(obs_deadline_s)
+        self.c = {"book_reads": 0, "book_dispatches": 0,
+                  "book_dispatches_unknown": 0, "book_refused_for_budget": 0,
+                  "book_refused_for_deadline": 0, "book_cache_hits": 0,
+                  "rules_reads": 0, "rules_cache_hits": 0,
+                  "rules_dispatches": 0, "rules_dispatches_unknown": 0,
+                  "settlement_reads": 0, "settlement_dispatches": 0,
+                  "settlement_dispatches_unknown": 0}
+
+    def _add(self, key: str, n) -> None:
+        if n is None:
+            self.c[key + "_unknown"] += 1
+        else:
+            self.c[key] += int(n)
+
+    def quoter(self, inner):
+        async def q(slug, side):
+            if time.monotonic() - self.t0 > self.obs_deadline_s:
+                self.c["book_refused_for_deadline"] += 1
+                return {"ok": False, "refusal": R_PASS_DEADLINE}
+            if self.c["book_reads"] >= self.book_budget:
+                self.c["book_refused_for_budget"] += 1
+                return {"ok": False, "refusal": R_READ_BUDGET}
+            got = dict(await inner(slug, side) or {})
+            if got.get("book_from_pass_cache"):
+                self.c["book_cache_hits"] += 1
+            else:
+                self.c["book_reads"] += 1
+                self._add("book_dispatches", got.get("dispatches"))
+            return got
+        return q
+
+    def prose_reader(self, inner):
+        async def p(slug):
+            got = dict(await inner(slug) or {})
+            if got.get("from_cache"):
+                self.c["rules_cache_hits"] += 1
+            else:
+                self.c["rules_reads"] += 1
+                self._add("rules_dispatches", got.get("dispatches"))
+            return got
+        return p
+
+    def settlement_reader(self, inner):
+        def s(slug):
+            got, n = metered(inner, slug)
+            self.c["settlement_reads"] += 1
+            self._add("settlement_dispatches", n)
+            return got
+        return s
+
+    def report(self) -> dict:
+        from . import venue_sdk
+
+        per_book = int(getattr(venue_sdk, "BOOK_READ_MAX_DISPATCHES", 2))
+        c = dict(self.c)
+        c["requests_counted"] = (c["book_dispatches"] + c["rules_dispatches"]
+                                 + c["settlement_dispatches"])
+        c["reads_whose_requests_were_not_counted"] = (
+            c["book_dispatches_unknown"] + c["rules_dispatches_unknown"]
+            + c["settlement_dispatches_unknown"])
+        c["bound"] = {
+            "book_reads_per_pass": self.book_budget,
+            "book_requests_per_read_at_most": per_book,
+            "settlement_pairs_per_pass": LABEL_READS_PER_PASS
+            + RECHECKS_PER_PASS,
+            "rules_reads": "at most one per contract per hour (cached)",
+            "passes": "at most one per scheduled cycle"}
+        c["scope"] = ("THIS PASS ONLY, counted at the request gate per "
+                      "logical read; not process totals")
+        return c
+
+
+# ═════════════════════════════════════════════════════════════════════
+# 6 · THE SCHEDULED PASS
 # ═════════════════════════════════════════════════════════════════════
 
 #: How many passes have run in this process: which candidates a pass
@@ -591,16 +978,170 @@ _PASSES = [0]
 #: The wall-clock budget one pass may spend inside the cycle. Reads already
 #: started finish; nothing new starts after it.
 PASS_BUDGET_S = 60.0
+#: Observation-sourced CANDIDATE models scored per pass. Scoring reads only
+#: the database; it records the evaluation and approves nothing.
+EVALUATIONS_PER_PASS = 2
+
+
+def _candidate_list(candidates, catalogue) -> list:
+    """Entry-derived and catalogue candidates, interleaved, each tagged with
+    where it came from."""
+    ent = []
+    for c in candidates or ():
+        if isinstance(c, dict):
+            extra = dict(c)
+            slug, side = extra.get("us_market_slug"), extra.get("side")
+        else:
+            extra = {}
+            slug, side = c[0], c[1]
+        ent.append(dict(extra, us_market_slug=slug, side=side,
+                        source=extra.get("source") or SOURCE_ENTRY))
+    cat = [dict(c, source=c.get("source") or SOURCE_CATALOGUE)
+           for c in catalogue or ()]
+    merged = []
+    for i in range(max(len(ent), len(cat))):
+        if i < len(ent):
+            merged.append(ent[i])
+        if i < len(cat):
+            merged.append(cat[i])
+    return merged
+
+
+async def _evaluate_observation_candidates(conn, *, now: float,
+                                           limit: int) -> dict:
+    """SCORE OBSERVATION-SOURCED CANDIDATES WITHOUT A FUNDED ACCOUNT.
+
+    `scheduled_learning_pass` evaluates candidates only inside funded
+    servicing, which needs a bound account; with none bound, a candidate fit
+    on observations was generated and never scored, so its evaluation stayed
+    empty and `promote` could only refuse it as unevaluated. This scores the
+    least recently scored observation-sourced candidates through the SAME
+    `evaluate` (prospective and retrospective cohorts, event-balanced,
+    contamination check) and records the result. It promotes nothing: the
+    scores are evidence for a named approver, never an approval."""
+    from . import bettor_funded_model as FMD
+
+    out: dict[str, Any] = {"scored": [], "promoted_anything": False}
+    try:
+        if not await FMD.has_schema(conn):
+            return dict(out, ok=False, refusal=FMD.R_SCHEMA_UNAVAILABLE)
+        rows = await conn.fetch(
+            "SELECT model_id FROM bettor_funded_models "
+            " WHERE state=$1 AND model_key=$2 "
+            "   AND training_provenance->>'source' = $3 "
+            " ORDER BY (evaluation->>'evaluated_at')::float8 NULLS FIRST, "
+            "          created_at DESC LIMIT $4",
+            FMD.STATE_CANDIDATE, FMD.KEY_MIDDLE, FMD.SOURCE_OBSERVATIONS,
+            int(limit))
+        out["candidates_waiting"] = int(await conn.fetchval(
+            "SELECT count(*) FROM bettor_funded_models WHERE state=$1 "
+            "   AND model_key=$2 AND training_provenance->>'source' = $3",
+            FMD.STATE_CANDIDATE, FMD.KEY_MIDDLE, FMD.SOURCE_OBSERVATIONS)
+            or 0)
+    except Exception as exc:                                    # noqa: BLE001
+        return dict(out, ok=False, refusal="OBSERVATION_CANDIDATES_UNREADABLE",
+                    error=type(exc).__name__)
+    for r in rows:
+        try:
+            ev = await FMD.evaluate(conn, model_id=r["model_id"],
+                                    account_id=None, now=now)
+        except Exception as exc:                                # noqa: BLE001
+            ev = {"ok": False, "refusal": "EVALUATION_RAISED",
+                  "error": type(exc).__name__}
+        doc = ev.get("evaluation") or {}
+        pros = doc.get(FMD.EVIDENCE_PROSPECTIVE) or {}
+        retro = doc.get(FMD.EVIDENCE_RETROSPECTIVE) or {}
+        base = ((pros.get("report") or {}).get("baseline") or {})
+        out["scored"].append({
+            "model_id": r["model_id"], "ok": ev.get("ok"),
+            "refusal": ev.get("refusal"),
+            "prospective_events": pros.get("n_events"),
+            "prospective_log_loss": pros.get("log_loss"),
+            "prospective_baseline_log_loss": base.get("log_loss"),
+            "retrospective_out_of_sample_events": retro.get("n_events"),
+            "retrospective_out_of_sample_log_loss": retro.get("log_loss"),
+            "contamination": (doc.get("contamination") or {}).get("verdict"),
+            "required_events": FMD.MIN_EVALUATION_EVENTS})
+    try:
+        out["withdraw"] = await FMD.withdraw_invalidated(conn)
+    except Exception as exc:                                    # noqa: BLE001
+        out["withdraw"] = {"ok": False, "refusal": "WITHDRAWAL_RAISED",
+                           "error": type(exc).__name__}
+    return dict(out, ok=True, refusal=None)
+
+
+def attempt_outcome(got: dict) -> str:
+    """One name for what happened to an attempted candidate."""
+    written = [r for r in got.get("recorded") or [] if r.get("written")]
+    if written:
+        return "RECORDED"
+    if got.get("error"):
+        return "ERROR"
+    if got.get("refusal") == R_NOTHING_ADMITTED:
+        return "NOTHING_ADMITTED"
+    if got.get("refusal"):
+        return "REFUSED"
+    if got.get("recorded"):
+        return "ALREADY_RECORDED_THIS_BUCKET"
+    return "ADMITTED_BUT_NOTHING_RECORDABLE"
+
+
+async def _has_attempt_ledger(conn) -> bool:
+    try:
+        return await conn.fetchval(
+            "SELECT to_regclass('bettor_pair_observation_attempts')"
+        ) is not None
+    except Exception:                                           # noqa: BLE001
+        return False
+
+
+async def _ledger_attempt(conn, *, pass_id: str, cand: dict, got: dict,
+                          started: float, finished: float,
+                          reads: dict) -> bool:
+    """One row per attempted candidate, whatever happened. False if the
+    write failed; the pass continues either way."""
+    try:
+        detail = {k: got.get(k) for k in (
+            "quote_refusal", "held_refusal", "discovery_refusal", "examined",
+            "admitted", "skipped_unpriced_second_leg", "error")}
+        detail["recorded"] = [r.get("observation_id")
+                              for r in got.get("recorded") or []]
+        written = sum(1 for r in got.get("recorded") or [] if r.get("written"))
+        await conn.execute(
+            "INSERT INTO bettor_pair_observation_attempts (pass_id, "
+            " attempted_at, finished_at, candidate_source, us_market_slug, "
+            " side, fixture, outcome, refusal, observations_written, detail, "
+            " venue_reads) VALUES ($1, to_timestamp($2), to_timestamp($3), "
+            " $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12::jsonb)",
+            pass_id, float(started), float(finished),
+            str(cand.get("source") or SOURCE_ENTRY),
+            str(cand.get("us_market_slug")), str(cand.get("side")),
+            cand.get("fixture") or got.get("fixture"), attempt_outcome(got),
+            got.get("refusal") or got.get("error"), int(written),
+            json.dumps(detail, default=str), json.dumps(reads, default=str))
+        return True
+    except Exception:                                           # noqa: BLE001
+        return False
 
 
 async def observation_pass(conn, *, candidates, quoter, prose_reader,
                            settlement_reader=None, now: float | None = None,
                            per_pass: int = CANDIDATES_PER_PASS,
-                           budget_s: float = PASS_BUDGET_S) -> dict:
+                           budget_s: float = PASS_BUDGET_S,
+                           catalogue=None,
+                           book_budget: int = BOOK_READS_PER_PASS,
+                           evaluations: int = EVALUATIONS_PER_PASS) -> dict:
     """ONE CYCLE'S OBSERVATION WORK: observe a few candidates, label what has
-    settled, and offer the registry a candidate fit on observations. Bounded
-    in candidates, pairs and wall-clock time, and it never raises into the
-    cycle."""
+    settled, offer the registry a candidate fit on observations, and score
+    the observation-sourced candidates. Bounded in candidates, book reads,
+    pairs and wall-clock time; it never raises into the cycle.
+
+    EVERY ATTEMPT IS ACCOUNTED FOR. Each attempted candidate comes back with
+    its outcome and the exact refusal at every depth (the first leg's quote,
+    its build, each sibling's, discovery's), and -- when migration 142 is
+    present -- is appended to `bettor_pair_observation_attempts`. Each
+    candidate offered and not attempted is counted by the reason. Every venue
+    read the pass made is counted by kind, with the requests the gate saw."""
     from . import bettor_funded_model as FMD
 
     t0 = time.monotonic()
@@ -609,44 +1150,110 @@ async def observation_pass(conn, *, candidates, quoter, prose_reader,
     def _now() -> float:
         return at + (time.monotonic() - t0)
 
-    out: dict[str, Any] = {"version": VERSION, "at": at, "observed": [],
-                           "sent_anything": False, "promoted_anything": False,
-                           "budget_s": budget_s, "stopped_for_deadline": False}
+    obs_deadline = max(0.0, float(budget_s) - min(LABEL_RESERVE_S,
+                                                  float(budget_s) / 3.0))
+    usage = PassUsage(book_budget=book_budget, t0=t0,
+                      obs_deadline_s=obs_deadline)
+    pass_id = "opass:" + hashlib.sha256(
+        ("%r|%d" % (at, _PASSES[0])).encode()).hexdigest()[:16]
+    out: dict[str, Any] = {"version": VERSION, "at": at, "pass_id": pass_id,
+                           "observed": [], "sent_anything": False,
+                           "promoted_anything": False, "budget_s": budget_s,
+                           "observation_deadline_s": obs_deadline,
+                           "stopped_for_deadline": False}
     if not await has_schema(conn):
         return dict(out, ok=False, refusal=R_SCHEMA)
     seen = set()
     todo = []
-    for slug, side in candidates or ():
-        if not slug or side not in (LONG, SHORT) or (slug, side) in seen:
+    for c in _candidate_list(candidates, catalogue):
+        key = (c.get("us_market_slug"), c.get("side"))
+        if not key[0] or key[1] not in (LONG, SHORT) or key in seen:
             continue
-        seen.add((slug, side))
-        todo.append((slug, side))
+        seen.add(key)
+        todo.append(c)
     out["candidates_offered"] = len(todo)
+    out["candidates_offered_by_source"] = {}
+    for c in todo:
+        s = c["source"]
+        out["candidates_offered_by_source"][s] = \
+            out["candidates_offered_by_source"].get(s, 0) + 1
     if todo:
-        k = _PASSES[0] % len(todo)
+        k = (_PASSES[0] * max(1, int(per_pass))) % len(todo)
         todo = todo[k:] + todo[:k]
     _PASSES[0] += 1
+    ledger = await _has_attempt_ledger(conn)
+    out["attempt_ledger"] = {"present": ledger, "written": 0, "failed": 0}
+    q_metered = usage.quoter(quoter) if quoter is not None else None
+    p_metered = (usage.prose_reader(prose_reader)
+                 if prose_reader is not None else None)
+    outcomes: dict = {}
+    refusals: dict = {}
     done = 0
-    for slug, side in todo[:int(per_pass)]:
-        if time.monotonic() - t0 > budget_s:
+    for cand in todo[:int(per_pass)]:
+        if time.monotonic() - t0 > obs_deadline:
             out["stopped_for_deadline"] = True
             break
+        slug, side = cand["us_market_slug"], cand["side"]
+        before = dict(usage.c)
+        started = _now()
         try:
             got = await observe_candidate(conn, us_market_slug=slug, side=side,
-                                          quoter=quoter,
-                                          prose_reader=prose_reader,
-                                          now=_now())
+                                          quoter=q_metered,
+                                          prose_reader=p_metered,
+                                          now=started)
         except Exception as exc:                            # noqa: BLE001
             got = {"ok": False, "us_market_slug": slug, "side": side,
                    "error": "%s: %s" % (type(exc).__name__, str(exc)[:160])}
+        finished = _now()
         done += 1
-        out["observed"].append({k: got.get(k) for k in
-                                ("us_market_slug", "side", "ok", "refusal",
-                                 "recorded", "examined", "error")})
+        reads = {k: usage.c[k] - before[k] for k in usage.c
+                 if usage.c[k] != before[k]}
+        budget_limited = bool(reads.get("book_refused_for_budget")
+                              or reads.get("book_refused_for_deadline"))
+        outcome = attempt_outcome(got)
+        refusal = got.get("refusal") or got.get("error")
+        deeper = (got.get("quote_refusal") or got.get("held_refusal")
+                  or got.get("discovery_refusal"))
+        name = "%s%s" % (refusal, (" <- %s" % deeper) if deeper else "") \
+            if refusal else None
+        outcomes[outcome] = outcomes.get(outcome, 0) + 1
+        if name:
+            refusals[name] = refusals.get(name, 0) + 1
+        entry = {k: got.get(k) for k in
+                 ("us_market_slug", "side", "ok", "refusal", "quote_refusal",
+                  "held_refusal", "discovery_refusal", "examined",
+                  "admitted", "second_legs_refused",
+                  "skipped_unpriced_second_leg", "recorded", "error")}
+        entry.update(source=cand["source"],
+                     fixture=cand.get("fixture") or got.get("fixture"),
+                     outcome=outcome, budget_limited=budget_limited,
+                     elapsed_s=round(finished - started, 3), reads=reads)
+        out["observed"].append(entry)
+        if outcome not in ("RECORDED", "ALREADY_RECORDED_THIS_BUCKET") \
+                and not budget_limited:
+            note_attempt(entry["fixture"], at=finished, refusal=name
+                         or outcome)
+        if ledger:
+            ok = await _ledger_attempt(conn, pass_id=pass_id, cand=cand,
+                                       got=dict(got, fixture=entry["fixture"]),
+                                       started=started, finished=finished,
+                                       reads=reads)
+            out["attempt_ledger"]["written" if ok else "failed"] += 1
+    out["attempted"] = done
+    out["outcomes"] = outcomes
+    out["refusals"] = refusals
+    out["observations_written"] = sum(
+        1 for e in out["observed"] for r in e.get("recorded") or []
+        if r.get("written"))
     out["not_observed_this_pass"] = max(0, len(todo) - done)
+    cap = min(len(todo), max(0, int(per_pass)))
+    out["not_attempted"] = {"LIMIT_PER_PASS": len(todo) - cap,
+                            "PASS_DEADLINE": cap - done}
+    reader = settlement_reader or _production_settlement
     try:
         out["labels"] = await label_pending(
-            conn, settlement_reader=settlement_reader, now=_now(),
+            conn, settlement_reader=usage.settlement_reader(reader),
+            now=_now(),
             deadline_s=max(0.0, budget_s - (time.monotonic() - t0)))
     except Exception as exc:                                # noqa: BLE001
         out["labels"] = {"ok": False, "error": type(exc).__name__}
@@ -656,5 +1263,11 @@ async def observation_pass(conn, *, candidates, quoter, prose_reader,
         out["generate"] = await FMD.generate_candidate(conn, now=_now(),
                                                        source=SOURCE)
     except Exception as exc:                                # noqa: BLE001
-        out["generate"] = {"ok": False, "error": type(exc).__name__}
+        out["generate"] = {"ok": False, "refusal": "GENERATION_RAISED",
+                           "error": type(exc).__name__}
+    # AND SCORED, WITHOUT A FUNDED ACCOUNT. Evidence, not approval.
+    out["evaluate"] = await _evaluate_observation_candidates(
+        conn, now=_now(), limit=int(evaluations))
+    out["venue_usage"] = usage.report()
+    out["elapsed_s"] = round(time.monotonic() - t0, 3)
     return dict(out, ok=True)

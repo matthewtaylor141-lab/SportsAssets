@@ -39,6 +39,7 @@ second-half trigger are not consulted, imported or read.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import logging
 import os
 import re
@@ -4328,8 +4329,18 @@ async def _venue_prose(slug):
     A thin async wrapper over the reader that has been on the entry path since
     the rules-text work, so the funded lane reads the SAME text the entry lane
     does rather than a second, divergent copy of the same call.
+
+    It carries the requests the read DISPATCHED, counted at the request gate
+    under the read's own id (0 for a cached answer), so a caller that bounds
+    its venue usage can report what it spent rather than estimate it.
     """
-    return dict(await asyncio.to_thread(_read_venue_rules_blocking, slug) or {})
+    from .. import bettor_pair_observations as _PO
+
+    got, sent = await asyncio.to_thread(_PO.metered,
+                                        _read_venue_rules_blocking, slug)
+    got = dict(got or {})
+    got["dispatches"] = 0 if got.get("from_cache") else sent
+    return got
 
 
 def _clean_family(sports_type):
@@ -4456,20 +4467,37 @@ async def observation_quote(slug, side, *, now=None) -> dict:
     from .. import bettor_book_snapshot as bs
 
     if side not in ("ORDER_INTENT_BUY_LONG", "ORDER_INTENT_BUY_SHORT"):
-        return {"ok": False, "refusal": "OBSERVED_SIDE_NOT_IDENTIFIED"}
-    try:
-        book = await asyncio.wait_for(
-            asyncio.to_thread(_read_book_blocking, str(slug)),
-            timeout=VENUE_TIMEOUT_S)
-    except Exception as exc:                                    # noqa: BLE001
-        return {"ok": False, "refusal": R_VENUE_READ_FAILED,
-                "error": type(exc).__name__}
-    if book.get("error"):
-        return {"ok": False, "refusal": R_VENUE_READ_ERROR}
-    read_at = time.time()
+        return {"ok": False, "refusal": "OBSERVED_SIDE_NOT_IDENTIFIED",
+                "dispatches": 0}
+    # ONE BOOK PER CONTRACT PER PASS. Both sides of an instrument are read
+    # off ONE book -- LONG consumes the offers, SHORT the bids -- so within an
+    # observation pass the second side reuses the payload the first side's
+    # read returned, with that read's own receipt instant and HTTP metadata:
+    # the currency verdict below is evaluated at the time it is used, so the
+    # reused book is judged older, never fresher.
+    cache = _OBS_BOOK_CACHE.get()
+    hit = cache.get(str(slug)) if cache is not None else None
+    if hit is not None:
+        book, read_at, sent, reused = hit["book"], hit["read_at"], 0, True
+    else:
+        try:
+            book = await asyncio.wait_for(
+                asyncio.to_thread(_read_book_blocking, str(slug)),
+                timeout=VENUE_TIMEOUT_S)
+        except Exception as exc:                                # noqa: BLE001
+            return {"ok": False, "refusal": R_VENUE_READ_FAILED,
+                    "error": type(exc).__name__, "dispatches": None}
+        sent, reused = book.get("attempts"), False
+        if book.get("error"):
+            return {"ok": False, "refusal": R_VENUE_READ_ERROR,
+                    "dispatches": sent}
+        read_at = time.time()
+        if cache is not None:
+            cache[str(slug)] = {"book": book, "read_at": read_at}
     lad = bs.acquisition_ladder(book.get("marketData"), intent=side)
     if not lad.get("ok") or not (lad.get("levels") or []):
-        return {"ok": False, "refusal": lad.get("refusal") or R_NO_DEPTH}
+        return {"ok": False, "refusal": lad.get("refusal") or R_NO_DEPTH,
+                "dispatches": sent, "book_from_pass_cache": reused}
     snap = bs.snapshot(book.get("marketData"), symbol=str(slug),
                        captured_at=read_at)
     vt = None
@@ -4479,9 +4507,10 @@ async def observation_quote(slug, side, *, now=None) -> dict:
         vt = None if dt is None else dt.timestamp()
     # THE VERDICT INSTANT IS NEVER BEFORE THE READ. A pass hands every read
     # the instant it began; judging a book received minutes later at that
-    # instant understates its age (review of 599076c).
+    # instant understates its age (review of 599076c). A book reused within
+    # the pass is judged at the instant it is used.
     currency = vc.evaluate(now=max(float(now if now is not None else read_at),
-                                   read_at),
+                                   read_at, time.time() if reused else read_at),
                            observation=book.get("http_observation"),
                            subscription=None, revalidation=None, venue_ts=vt,
                            our_receipt_at=read_at,
@@ -4493,28 +4522,79 @@ async def observation_quote(slug, side, *, now=None) -> dict:
                              if r.get("acquisition_price") == price),
             "read_at": read_at, "book_currency": currency,
             "usable_for_orders": currency.get("verdict") == vc.ESTABLISHED,
+            "dispatches": sent, "book_from_pass_cache": reused,
             "what_this_is": "A DISPLAYED PRICE FOR AN OBSERVATION, NOT AN "
                             "ORDER PRICE"}
+
+
+#: The observer's per-pass book cache. Set by `_pair_observation_pass` for the
+#: duration of one pass and read only by `observation_quote`; unset (None)
+#: everywhere else, so no other caller ever sees a reused book.
+_OBS_BOOK_CACHE: contextvars.ContextVar = contextvars.ContextVar(
+    "ext_pinnacle_observation_book_cache", default=None)
+#: When the observer last ran in this process, and the least interval between
+#: passes: a BLOCKED cycle repeats every IDLE_POLL_S, and the observer's venue
+#: reads must not repeat with it.
+_LAST_OBSERVATION_PASS = [0.0]
+OBSERVATION_MIN_INTERVAL_S = 840.0
+R_OBSERVER_STOPPED_WITH_THE_LANE = (
+    "THE_LANE_IS_STOPPED_SO_THE_OBSERVER_MAKES_NO_VENUE_READS")
+R_OBSERVATION_NOT_DUE = "THE_LAST_OBSERVATION_PASS_WAS_TOO_RECENT"
 
 
 async def _pair_observation_pass(conn, observable, *, now) -> dict:
     """THE NON-FUNDED PAIR OBSERVER, once per LIVE cycle, never fatal.
 
     See `bettor_pair_observations`: it records the pairing structures on a few
-    of this cycle's mapped contracts, labels older observations from the
-    venue's own settlements, and offers the registry a CANDIDATE fit on them.
-    It holds, reserves and sends nothing, and promotes nothing.
+    contracts -- this cycle's mapped identities AND fixtures taken straight
+    from the venue's own catalogue, so the observer does not starve when the
+    entry lane admits nothing -- labels older observations from the venue's
+    own settlements, offers the registry a CANDIDATE fit on them, and scores
+    the observation-sourced candidates. It holds, reserves and sends nothing,
+    and promotes nothing.
     """
+    _LAST_OBSERVATION_PASS[0] = float(now)
     try:
         from .. import bettor_pair_observations as _PO
 
-        return await _PO.observation_pass(
-            conn, candidates=observable,
-            quoter=lambda slug, side: observation_quote(slug, side, now=now),
-            prose_reader=_venue_prose, now=now)
+        catalogue = await _PO.catalogue_candidates(conn, now=now)
+        token = _OBS_BOOK_CACHE.set({})
+        try:
+            got = await _PO.observation_pass(
+                conn, candidates=observable,
+                catalogue=catalogue.get("candidates") or [],
+                quoter=lambda slug, side: observation_quote(slug, side,
+                                                            now=now),
+                prose_reader=_venue_prose, now=now)
+        finally:
+            _OBS_BOOK_CACHE.reset(token)
+        return dict(got, catalogue={k: v for k, v in catalogue.items()
+                                    if k != "candidates"})
     except Exception as exc:                                    # noqa: BLE001
         return {"ok": False, "refusal": "PAIR_OBSERVATION_PASS_RAISED",
                 "error": "%s: %s" % (type(exc).__name__, str(exc)[:200])}
+
+
+async def _observation_when_entry_is_blocked(conn, *, now: float,
+                                             blocked_by: str) -> dict:
+    """THE OBSERVER, WHEN THE ENTRY LANE CANNOT RUN.
+
+    A missing odds credential or an unmigrated shadow table stops the ENTRY
+    lane, and neither has anything to do with observing two venue contracts
+    and reading their settlements. So the observer runs here too -- from the
+    catalogue alone -- at most once per OBSERVATION_MIN_INTERVAL_S, because
+    a blocked cycle repeats every IDLE_POLL_S. It does NOT run when the lane
+    is STOPPED: that switch stops the lane's venue reads, observations
+    included."""
+    last = _LAST_OBSERVATION_PASS[0]
+    if last and float(now) - last < OBSERVATION_MIN_INTERVAL_S:
+        return {"ran": False, "why": R_OBSERVATION_NOT_DUE,
+                "lane_state": "BLOCKED:%s" % blocked_by,
+                "last_pass_age_s": round(float(now) - last, 1),
+                "next_due_in_s": round(OBSERVATION_MIN_INTERVAL_S
+                                       - (float(now) - last), 1)}
+    got = await _pair_observation_pass(conn, [], now=now)
+    return dict(got, ran=True, lane_state="BLOCKED:%s" % blocked_by)
 
 
 async def _registry_state(conn) -> dict:
@@ -5285,6 +5365,11 @@ async def cycle(conn) -> dict:
         return await _beat({
             "ran": False, "state": "STOPPED", "why": why,
             "funded_servicing": funded_service,
+            # THE OBSERVER STOPS WITH THE LANE, and says so: the stop switch
+            # stops this lane's venue reads, and observations are venue reads.
+            "pair_observation": {"ran": False,
+                                 "why": R_OBSERVER_STOPPED_WITH_THE_LANE,
+                                 "lane_state": "STOPPED"},
             "servicing_ran_anyway": ("a stopped entry loop is a reason to "
                                      "add nothing, not a reason to stop "
                                      "managing an open position")})
@@ -5292,6 +5377,8 @@ async def cycle(conn) -> dict:
         return await _beat({
             "ran": False, "state": "BLOCKED", "why": R_NO_TABLE,
             "funded_servicing": funded_service,
+            "pair_observation": await _observation_when_entry_is_blocked(
+                conn, now=time.time(), blocked_by=R_NO_TABLE),
             "servicing_ran_anyway": True})
 
     cred = ext.credential_present()
@@ -5300,6 +5387,10 @@ async def cycle(conn) -> dict:
             "ran": False, "state": "BLOCKED",
             "why": cred["refusal"], "credential": cred,
             "funded_servicing": funded_service,
+            # NOT AN ODDS-PROVIDER READ: the observer prices nothing from
+            # the provider, so a missing provider credential does not stop it.
+            "pair_observation": await _observation_when_entry_is_blocked(
+                conn, now=time.time(), blocked_by=str(cred["refusal"])),
             "servicing_ran_anyway": ("the odds provider prices NEW "
                                      "candidates. An open funded position "
                                      "is managed from the VENUE's book "
@@ -6765,23 +6856,171 @@ def _learning_digest(lp) -> dict | None:
     j = lp.get("join") or {}
     e = lp.get("evaluate") or {}
     g = lp.get("generate") or {}
+    w = lp.get("withdraw") or {}
     return {"ok": lp.get("ok"), "refusal": lp.get("refusal"),
             "generate": {k: g.get(k) for k in (
                 "ok", "refusal", "generated", "reason", "model_id",
-                "n_events", "training_events_available")},
+                "n_events", "training_events_available", "error")},
+            "join": {k: j.get(k) for k in ("ok", "refusal", "examined",
+                                           "without_a_group", "error")},
             "joined": len(j.get("joined") or []),
             "waiting_for_the_position": len(
                 j.get("waiting_for_the_position") or []),
             "join_refused": len(j.get("refused") or []),
+            "evaluate": {k: e.get(k) for k in ("ok", "refusal", "error")},
+            "candidates_not_scored_this_pass": lp.get(
+                "candidates_not_scored_this_pass"),
             "candidates_scored": [
                 {k: c.get(k) for k in (
                     "model_id", "ok", "refusal", "prospective_events",
                     "prospective_log_loss",
                     "retrospective_out_of_sample_events",
-                    "retrospective_out_of_sample_log_loss", "weighting")}
+                    "retrospective_out_of_sample_log_loss", "weighting",
+                    "awaiting", "error")}
                 for c in (e.get("scored") or [])[:SERVICING_DIGEST_LIMIT]],
+            "withdraw": _withdraw_digest(w),
             "promoted_anything": lp.get("promoted_anything"),
             "promotion": lp.get("promotion")}
+
+
+def _withdraw_digest(w) -> dict | None:
+    """`withdraw_invalidated`'s answer: whether an approved model lost its
+    pricing authority this pass, and why -- or why it did not."""
+    if not isinstance(w, dict) or not w:
+        return None
+    return {k: w.get(k) for k in ("ok", "refusal", "approved_model",
+                                  "withdrawn", "reason",
+                                  "not_withdrawn_because",
+                                  "provenance_verified", "error")}
+
+
+def _settlement_digest(reads) -> dict | None:
+    """The per-position settlement reads `manage` made, counted by result."""
+    if reads is None:
+        return None
+    if not isinstance(reads, list):
+        return {"unreadable_shape": type(reads).__name__}
+    by: dict = {}
+    for r in reads:
+        r = r if isinstance(r, dict) else {}
+        k = ("CLOSED" if r.get("closed") else
+             str(r.get("refusal") or r.get("status") or r.get("why")
+                 or "OPEN"))[:120]
+        by[k] = by.get(k, 0) + 1
+    return {"positions_read": len(reads), "by_result": by}
+
+
+def _recheck_digest(rc) -> dict | None:
+    """The re-reads of recently settled funded legs (migration 141)."""
+    if not isinstance(rc, dict):
+        return None
+    out = {k: rc.get(k) for k in ("ok", "refusal", "error",
+                                  "disagreements")}
+    by: dict = {}
+    for r in rc.get("rechecked") or []:
+        v = str((r or {}).get("verdict") or "UNNAMED")
+        by[v] = by.get(v, 0) + 1
+    out["rechecked"] = len(rc.get("rechecked") or [])
+    out["by_verdict"] = by
+    return out
+
+
+#: The heartbeat row's ceiling. Nothing in the database bounds
+#: `ingestion_state.value`; past this the per-row samples are emptied (and
+#: the row says so) while every count and named refusal is kept.
+HEARTBEAT_MAX_BYTES = 262144
+
+
+def _observation_digest(po) -> dict | None:
+    """THE NON-FUNDED OBSERVER'S LAST PASS, for the heartbeat.
+
+    Every count and every named refusal; a bounded sample of the attempts
+    (the full list of each attempt is in `bettor_pair_observation_attempts`
+    when migration 142 is present); what the labeller, generation and
+    evaluation did; and the venue reads the pass spent. Never raises."""
+    if po is None:
+        return None
+    try:
+        if not isinstance(po, dict):
+            return {"digest_failed": "not a dict: %s" % type(po).__name__}
+        lab = po.get("labels") or {}
+        gen = po.get("generate") or {}
+        ev = po.get("evaluate") or {}
+        cat = po.get("catalogue") or {}
+        attempts = []
+        for a in (po.get("observed") or [])[:SERVICING_DIGEST_LIMIT]:
+            a = a if isinstance(a, dict) else {}
+            attempts.append(dict(
+                {k: a.get(k) for k in (
+                    "us_market_slug", "side", "source", "fixture", "outcome",
+                    "refusal", "quote_refusal", "held_refusal",
+                    "discovery_refusal", "examined", "admitted",
+                    "second_legs_refused", "skipped_unpriced_second_leg",
+                    "budget_limited", "elapsed_s", "reads", "error")},
+                written=sum(1 for r in a.get("recorded") or []
+                            if (r or {}).get("written"))))
+        return {
+            "ran": po.get("ran", "ok" in po),
+            "why": po.get("why"),
+            "ok": po.get("ok"), "refusal": po.get("refusal"),
+            "error": po.get("error"),
+            "pass_id": po.get("pass_id"), "at": po.get("at"),
+            "elapsed_s": po.get("elapsed_s"), "budget_s": po.get("budget_s"),
+            "stopped_for_deadline": po.get("stopped_for_deadline"),
+            "lane_state": po.get("lane_state"),
+            "candidates": {
+                "offered": po.get("candidates_offered"),
+                "by_source": po.get("candidates_offered_by_source"),
+                "attempted": po.get("attempted"),
+                "not_attempted": po.get("not_attempted")},
+            "outcomes": po.get("outcomes"),
+            "refusals": po.get("refusals"),
+            "observations_written": po.get("observations_written"),
+            "attempts": attempts,
+            "attempts_truncated_at": (
+                SERVICING_DIGEST_LIMIT
+                if len(po.get("observed") or []) > SERVICING_DIGEST_LIMIT
+                else None),
+            "attempt_ledger": po.get("attempt_ledger"),
+            "catalogue": ({k: cat.get(k) for k in (
+                "ok", "refusal", "why", "error", "sweep_age_s", "rows_read",
+                "truncated_at_row_limit", "fixtures_seen",
+                "eligible_fixtures", "excluded_rows", "excluded_fixtures",
+                "not_offered_for_limit")} if cat else None),
+            "labels": {k: lab.get(k) for k in (
+                "ok", "refusal", "error", "labelled", "not_a_label",
+                "awaiting", "corrected", "unreadable", "row_errors",
+                "pairs_read", "pairs_selected", "stopped_for_deadline")},
+            "generate": {k: gen.get(k) for k in (
+                "ok", "refusal", "error", "reason", "generated", "model_id",
+                "n_events", "training_events_available", "why")},
+            "evaluate": {
+                "ok": ev.get("ok"), "refusal": ev.get("refusal"),
+                "error": ev.get("error"),
+                "candidates_waiting": ev.get("candidates_waiting"),
+                "scored": list((ev.get("scored") or [])
+                               [:SERVICING_DIGEST_LIMIT]),
+                "withdraw": _withdraw_digest(ev.get("withdraw")),
+                "promoted_anything": ev.get("promoted_anything")},
+            "venue_usage": po.get("venue_usage"),
+            "sent_anything": po.get("sent_anything"),
+            "promoted_anything": po.get("promoted_anything"),
+        }
+    except Exception as exc:                                   # noqa: BLE001
+        return {"digest_failed": "%s: %s" % (type(exc).__name__,
+                                             str(exc)[:160])}
+
+
+def _outcome_join_digest(oj) -> dict | None:
+    """`join_outcomes`: valuations joined to venue settlements this cycle,
+    by result. It feeds the source-calibration cohort."""
+    if not isinstance(oj, dict):
+        return None
+    return {k: oj.get(k) for k in (
+        "ran", "error", "why", "examined", "resolved", "void", "pending",
+        "unreadable", "unmatched", "errors", "named_winner", "inferred",
+        "side_unknown", "unparseable", "neither_side_paid", "limit",
+        "by_status", "by_class")}
 
 
 def _servicing_digest(svc) -> dict | None:
@@ -6864,8 +7103,12 @@ def _servicing_digest(svc) -> dict | None:
                 "reconciled": len(rec.get("reconciled") or []),
                 "unresolved": len(rec.get("unresolved") or []),
             } if rec else None,
-            "settlement": (svc.get("settlement") or {}).get("ok")
-            if isinstance(svc.get("settlement"), dict) else None,
+            # `manage` returns ONE SETTLEMENT READ PER HELD POSITION, a list.
+            # This used to read `.get("ok")` off it only when it was a dict,
+            # so it was None on every cycle whatever the reads said.
+            "settlement": _settlement_digest(svc.get("settlement")),
+            "settlement_rechecks": _recheck_digest(
+                svc.get("settlement_rechecks")),
             # THE LEARNING LOOP'S LAST PASS: how many decisions got their
             # outcome, how many still wait on an open position, and what each
             # candidate model measured. Promotion is never scheduled.
@@ -7024,10 +7267,7 @@ async def _heartbeat(conn, out: dict, *, key: str = None) -> None:
     import json
 
     try:
-        await conn.execute(
-            "INSERT INTO ingestion_state (key, value) VALUES ($1, $2::jsonb) "
-            "ON CONFLICT (key) DO UPDATE SET value = $2::jsonb",
-            key or HEARTBEAT_KEY, json.dumps({
+        payload = {
                 "at": time.time(),
                 "writer": _code_identity(),
                 # ── WHICH VENUE CLIENT THIS PROCESS IS ACTUALLY RUNNING ──
@@ -7109,7 +7349,46 @@ async def _heartbeat(conn, out: dict, *, key: str = None) -> None:
                 # whether it was sent, and the named blocker otherwise.
                 "funded_servicing": _servicing_digest(
                     out.get("funded_servicing")),
-            }, default=str))
+                # WHY A CYCLE STOPPED OR WAS BLOCKED. The early returns
+                # carry it and the heartbeat used to drop it, so a STOPPED
+                # row read `refusals: {}` and did not say why.
+                "why": out.get("why"),
+                # ── THE LEARNING PATH, PERSISTED ─────────────────────────
+                #
+                # THE GAP THIS CLOSES. The non-funded observer, its labeller,
+                # candidate generation and evaluation ran every LIVE cycle
+                # and their result was returned to a caller that dropped it,
+                # so "zero observations" could not be told from "never ran"
+                # or "ran and every attempt was refused for a stated reason".
+                # Projected like servicing: counts, every named refusal, a
+                # bounded sample of attempts, and the venue reads it spent.
+                "pair_observation": _observation_digest(
+                    out.get("pair_observation")),
+                # And the entry lane's outcome join (valuations -> venue
+                # settlements), which feeds the calibration cohort.
+                "outcome_join": _outcome_join_digest(out.get("outcome_join")),
+        }
+        blob = json.dumps(payload, default=str)
+        if len(blob) > HEARTBEAT_MAX_BYTES:
+            # BOUNDED, AND SAYS SO. The per-row samples go first; every
+            # count and named refusal stays.
+            trimmed = []
+            for k in ("mapped_candidate_ledger", "venue_errors"):
+                if payload.get(k):
+                    payload[k] = []
+                    trimmed.append(k)
+            po = payload.get("pair_observation")
+            if isinstance(po, dict) and po.get("attempts"):
+                po["attempts"] = []
+                trimmed.append("pair_observation.attempts")
+            payload["heartbeat_trimmed"] = {"over_bytes": len(blob),
+                                            "limit_bytes": HEARTBEAT_MAX_BYTES,
+                                            "emptied": trimmed}
+            blob = json.dumps(payload, default=str)
+        await conn.execute(
+            "INSERT INTO ingestion_state (key, value) VALUES ($1, $2::jsonb) "
+            "ON CONFLICT (key) DO UPDATE SET value = $2::jsonb",
+            key or HEARTBEAT_KEY, blob)
     except Exception:                                          # noqa: BLE001
         # A heartbeat that cannot be written must not take the cycle down.
         log.warning("ext_pinnacle: heartbeat failed", exc_info=True)
