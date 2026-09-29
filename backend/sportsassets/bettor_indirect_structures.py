@@ -80,8 +80,10 @@ reading only the second would be reading the wrong number.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field, asdict, replace
 from fractions import Fraction
+
+from . import bettor_settlement_clauses as SETTLE
 
 # ── the outcome variable a leg is graded against ─────────────────────
 #
@@ -178,9 +180,33 @@ class Leg:
     # Settlement rule text captured from the venue for THIS condition.
     # Absent text is a refusal for any exceptional state it would have
     # governed -- we do not supply the venue's rules from memory.
+    #
+    # ONE FIELD PER OUTCOME, AND EACH HOLDS ONLY THE CLAUSE THAT
+    # ESTABLISHES IT. The reported defect was that `build_leg` put the
+    # WHOLE captured prose in both of these, so "A tie resolves 50-50"
+    # -- a sentence about a played, drawn fixture -- established a
+    # 50-cent payout for a fixture that never happened. The fields are
+    # now per-outcome by contract, and `_established_payout` below
+    # ENFORCES it rather than trusting the caller: a string in
+    # `void_rule` that does not name a cancellation trigger establishes
+    # nothing, whoever put it there.
     tie_rule: str | None = None
     void_rule: str | None = None
     settlement_text_captured: bool = False
+    #: The structured five-outcome reading from `bettor_settlement_clauses`,
+    #: keyed by outcome, each entry carrying its own source clause, payout
+    #: class and refusal. Present when the leg was built from captured prose;
+    #: `None` on the hand-written fixtures below, which state their clauses
+    #: directly in the two fields above. `compare=False` keeps `Leg`
+    #: hashable and keeps two legs differing only in provenance equal.
+    settlement_rules: dict | None = field(default=None, compare=False)
+    #: The whole-document provenance (raw text, source, retrieval time,
+    #: content hash, interpretation version) for the reading above.
+    settlement_provenance: dict | None = field(default=None, compare=False)
+
+    def rule_for(self, outcome: str) -> dict | None:
+        """The structured reading for one outcome, or None if unread."""
+        return (self.settlement_rules or {}).get(outcome)
 
     def missing_facts(self) -> list[str]:
         """Facts this leg needs before its payout function can be built."""
@@ -218,12 +244,18 @@ class Leg:
                             "land exactly on it; the venue's push rule was "
                             "not captured, so that region has no known "
                             "payout" % (self.line, self.condition_id))
-            elif self.line.denominator == 1:
-                # Capturing prose is not a parsed payout instruction.
-                # Leg has no explicit push-payout representation yet.
-                gaps.append("integer line %s on %s can push; its push "
-                            "payout is not represented by this classifier"
-                            % (self.line, self.condition_id))
+            elif _established_payout(self, SETTLE.PUSH) is None:
+                # CAPTURING PROSE IS NOT A PARSED PAYOUT INSTRUCTION. This
+                # used to say the classifier could not represent a push at
+                # all; it now can, so the gap is the narrower and truer one:
+                # THIS leg's text does not establish a push payout, and the
+                # clause reader says why.
+                rec = self.rule_for(SETTLE.PUSH) or {}
+                gaps.append("integer line %s on %s can push -- the outcome can "
+                            "land exactly on the line -- and no captured clause "
+                            "establishes that push's payout (%s)"
+                            % (self.line, self.condition_id,
+                               rec.get("refusal") or SETTLE.R_NOT_STATED))
         if self.quantity < 0:
             gaps.append("quantity is negative on %s" % self.condition_id)
         return gaps
@@ -294,6 +326,110 @@ def _margin_regions(breaks: list[int]) -> list[Region]:
     return out
 
 
+#: Which `Leg` string field is contractually about which outcome. A string
+#: found in one of these is evidence about THAT outcome and no other, and
+#: `_established_payout` checks the text actually names the outcome before
+#: reading a payout out of it.
+_LEGACY_FIELD_FOR = {
+    SETTLE.TIE: "tie_rule",
+    SETTLE.CANCELLED: "void_rule",
+}
+
+
+def _established_payout(leg: Leg, outcome: str) -> int | None:
+    """Per-unit cents this leg pays in `outcome`, or None if not established.
+
+    THE RULE THIS ENFORCES. A payout is established for an outcome only by
+    text that NAMES THAT OUTCOME and states a payout for it. Nothing else
+    counts -- not a payout stated for a different outcome, not the presence
+    of a string in a field, not a default.
+
+    Two sources are read, in order:
+
+      1. `leg.settlement_rules` -- the structured per-outcome reading, which
+         already carries one clause per outcome and refuses on silence,
+         conflict and ambiguity.
+      2. the legacy per-outcome string field, VERIFIED against the same
+         trigger vocabulary. This is the half that closes the reported
+         defect at the point of USE: the whole-prose blob that `build_leg`
+         used to put in `void_rule` does not name a cancellation trigger, so
+         it now establishes nothing even if some caller still supplies it.
+
+    A REFUND IS NOT FIFTY CENTS. Where the clause says the basis is
+    refunded, the payout is this contract's own cost -- 30c on one bought at
+    30c -- and is undetermined when the cost is not stated. Returning 50
+    would invent a gain on the cheap side and a loss on the dear one, and
+    would contradict `reconcile_settlement`, which books a void as the
+    remaining basis.
+    """
+    rec = leg.rule_for(outcome)
+    if rec and rec.get("established"):
+        cls = rec.get("payout_class")
+        if cls == SETTLE.PAY_REFUND_BASIS:
+            return leg.cost_cents_per_unit        # None if unstated
+        if cls == SETTLE.PAY_STAYS_OPEN:
+            return None          # not a payout at all; the market stays open
+        return SETTLE.PAYOUT_CENTS.get(cls)       # None for unpriced classes
+    if rec is not None:
+        # READ AND REFUSED. The structured reading is authoritative for this
+        # outcome once it exists; falling back to the string field here would
+        # let the blob answer a question the clause reader just declined.
+        return None
+
+    field_name = _LEGACY_FIELD_FOR.get(outcome)
+    if field_name is None:
+        return None
+    text = getattr(leg, field_name, None)
+    if not leg.settlement_text_captured or not text:
+        return None
+    # THE GUARD. Does this text actually speak about this outcome?
+    if not SETTLE._mentions(text, outcome):
+        return None
+    read = SETTLE.read_outcome(text, outcome)
+    if not read["established"]:
+        return None
+    cls = read["payout_class"]
+    if cls == SETTLE.PAY_REFUND_BASIS:
+        return leg.cost_cents_per_unit
+    if cls == SETTLE.PAY_STAYS_OPEN:
+        return None
+    return SETTLE.PAYOUT_CENTS.get(cls)
+
+
+def void_suppression_hides(legs, *, fixture_can_void: bool) -> tuple[str, ...]:
+    """Legs whose cancellation payout is unknown and would be hidden.
+
+    DECLARING CANCELLATION IMPOSSIBLE IS NOT READING THE CANCELLATION RULE.
+    `payoff_table(fixture_can_void=False)` removes the VOID cell entirely, so
+    a leg whose cancellation payout is UNDETERMINED stops contributing `None`
+    to the joint column and the minimum becomes determinate. The floor then
+    looks proved when what actually happened is that the unknown was deleted.
+
+    A caller may legitimately know a fixture cannot be cancelled. What it may
+    not do is use that claim to stand in for a settlement rule it never read.
+    So the two are separated: suppression is allowed, and suppression that
+    hides an unread cancellation rule is named here and refused by `classify`.
+
+    Returns one string per affected leg; empty when nothing is hidden --
+    including when `fixture_can_void` is True, since then nothing is removed.
+    """
+    if fixture_can_void:
+        return ()
+    out = []
+    for leg in legs:
+        if _established_payout(leg, SETTLE.CANCELLED) is None:
+            rec = leg.rule_for(SETTLE.CANCELLED) or {}
+            out.append(
+                "cancellation was declared impossible for this fixture, and %s "
+                "has no established cancellation payout (%s), so suppressing "
+                "the VOID region removes an UNDETERMINED cell rather than an "
+                "inapplicable one -- the resulting floor would be an artefact "
+                "of the suppression"
+                % (leg.condition_id,
+                   rec.get("refusal") or SETTLE.R_NOT_STATED))
+    return tuple(out)
+
+
 def _leg_payout_cents(leg: Leg, region: Region) -> int | None:
     """What one unit of `leg` pays in this region. None = not determined.
 
@@ -301,28 +437,21 @@ def _leg_payout_cents(leg: Leg, region: Region) -> int | None:
     """
     # ── exceptional states first: they override the variable ─────────
     if region.state == STATE_POSTPONED:
-        return None                       # no payout; market stays open
-    if region.state == STATE_VOID:
-        if not leg.settlement_text_captured or leg.void_rule is None:
-            return None
-        if "50-50" in leg.void_rule or "50/50" in leg.void_rule:
-            return CENTS // 2
-        # "Refund" alone does not specify fifty cents per contract.
-        # Do not invent a payout from a word in uncodified rule prose.
+        # A postponement is not a payout: the market stays open until the
+        # fixture is played or abandoned. Prose saying so is recorded (it is
+        # how POSTPONED becomes established rather than unknown) but there is
+        # still no money to book in this cell.
         return None
+    if region.state == STATE_VOID:
+        return _established_payout(leg, SETTLE.CANCELLED)
+    if region.state == STATE_PUSH:
+        return _established_payout(leg, SETTLE.PUSH)
     if region.state == STATE_TIE:
-        # A regulation tie in a two-outcome US moneyline. Polymarket's
-        # captured rule resolves 50-50; a SPREAD at a .5 line has no
-        # tie region at all (margin 0 is simply a loss for the
+        # A regulation tie in a two-outcome US moneyline. A SPREAD at a .5
+        # line has no tie region at all (margin 0 is simply a loss for the
         # favourite), so a tie only reaches a moneyline leg.
         if leg.kind == KIND_MONEYLINE:
-            if not leg.settlement_text_captured or leg.tie_rule is None:
-                return None
-            if "50-50" in leg.tie_rule or "50/50" in leg.tie_rule:
-                return CENTS // 2
-            if "underdog" in leg.tie_rule.lower():
-                return None              # needs which side is the dog
-            return None
+            return _established_payout(leg, SETTLE.TIE)
         # fall through: spreads and totals grade a tie by the variable
 
     # ── regular grading by the variable ──────────────────────────────
@@ -341,7 +470,10 @@ def _leg_payout_cents(leg: Leg, region: Region) -> int | None:
         if probe is None:
             return None
         if Fraction(probe) == leg.line:
-            return None                   # no explicit push payout supplied
+            # The total landed exactly on the line: this cell IS the push,
+            # whatever `region.state` says, because the state is a property
+            # of the fixture and the push is a property of THIS leg's line.
+            return _established_payout(leg, SETTLE.PUSH)
         over = Fraction(probe) > leg.line
         if leg.over_under == "OVER":
             return CENTS if over else 0
@@ -360,7 +492,10 @@ def _leg_payout_cents(leg: Leg, region: Region) -> int | None:
     # A-side leg wins iff margin + line > 0, and the B-side leg is the
     # complement of that same test on the same condition.
     if m + leg.line == 0:
-        return None                       # a push is not a B-side win
+        # A PUSH IS NOT A B-SIDE WIN. Both sides of an integer spread land
+        # here together, and the cell pays what the venue's push clause says
+        # -- which is `None` until a clause naming a push states one.
+        return _established_payout(leg, SETTLE.PUSH)
     a_side_wins = (m + leg.line) > 0
     return CENTS if (a_side_wins == (leg.backs == "A")) else 0
 
@@ -424,6 +559,12 @@ def payoff_table(legs: tuple[Leg, ...],
     if fixture_can_void:
         regions.append(Region("fixture cancelled or abandoned",
                               state=STATE_VOID))
+    # `fixture_can_void=False` DELETES the cell, and deleting a cell whose
+    # payout was undetermined turns an unknown floor into a determinate one.
+    # That bypass is reported by `void_suppression_hides` and refused in
+    # `classify`; it is not silently corrected here, because whether this
+    # fixture can be cancelled is a fact about the fixture that this function
+    # has no way to establish.
     if fixture_can_postpone:
         regions.append(Region("fixture postponed; market stays open",
                               state=STATE_POSTPONED))
@@ -507,6 +648,12 @@ def classify(leg_a: Leg, leg_b: Leg, *,
                     "line on the two legs is not the same threshold, so "
                     "the structure is not established"
                     % (leg_a.overtime, leg_b.overtime))
+    # AN UNREAD CANCELLATION RULE CANNOT BE REPAIRED BY DECLARING
+    # CANCELLATION IMPOSSIBLE. Both are facts about settlement, only one of
+    # them was read, and the table would otherwise report a floor that exists
+    # because the unknown cell was deleted.
+    gaps.extend(void_suppression_hides((leg_a, leg_b),
+                                       fixture_can_void=fixture_can_void))
     if gaps:
         return Structure(taxonomy=UNESTABLISHABLE,
                          legs=(leg_a.condition_id, leg_b.condition_id),
@@ -611,12 +758,12 @@ def classify(leg_a: Leg, leg_b: Leg, *,
 
 
 def _with_quantity(leg: Leg, q: int) -> Leg:
-    return Leg(condition_id=leg.condition_id, fixture_id=leg.fixture_id,
-               kind=leg.kind, period=leg.period, overtime=leg.overtime,
-               backs=leg.backs, line=leg.line, over_under=leg.over_under,
-               quantity=q, cost_cents_per_unit=leg.cost_cents_per_unit,
-               tie_rule=leg.tie_rule, void_rule=leg.void_rule,
-               settlement_text_captured=leg.settlement_text_captured)
+    # `replace` RATHER THAN A FIELD LIST. The hand-written constructor call
+    # this replaces enumerated ten fields, so every field added to `Leg`
+    # afterwards was silently dropped on requantification -- which for the
+    # settlement reading would have turned an established rule back into
+    # "nothing established" in the middle of a sizing loop, with no error.
+    return replace(leg, quantity=q)
 
 
 # ═════════════════════════════════════════════════════════════════════

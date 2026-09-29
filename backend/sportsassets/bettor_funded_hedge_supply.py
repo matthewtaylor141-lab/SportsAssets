@@ -77,6 +77,7 @@ import re
 from fractions import Fraction
 
 from . import bettor_indirect_structures as IS
+from . import bettor_settlement_clauses as SETTLE
 from . import bettor_venue_settlement as VS
 
 VERSION = "FUNDED_HEDGE_SUPPLY_V1"
@@ -136,11 +137,27 @@ LEG_FIELD_SOURCES = {
     "quantity": ("the funded intent's residual quantity", R_QUANTITY_NOT_POSITIVE),
     "cost_cents_per_unit": ("the funded intent's per-unit basis",
                             R_BASIS_NOT_STATED),
-    "tie_rule": ("the same captured venue prose. Absent prose leaves the "
-                 "TIE region's payout UNDETERMINED, which propagates as "
-                 "UNESTABLISHABLE -- it is never filled in from memory",
+    # ONE CLAUSE, NOT THE DOCUMENT. These two used to name "the same captured
+    # venue prose" -- the whole blob in both fields -- which is how a sentence
+    # about a drawn fixture established the payout for a fixture that never
+    # happened.
+    "tie_rule": ("the ONE clause of the captured prose that names a tie and "
+                 "states its payout, per bettor_settlement_clauses. No such "
+                 "clause leaves the TIE region's payout UNDETERMINED, which "
+                 "propagates as UNESTABLISHABLE -- it is never filled in from "
+                 "memory, and never from a clause about another outcome",
                  None),
-    "void_rule": ("the same captured venue prose, same treatment", None),
+    "void_rule": ("the ONE clause that names a cancellation and states its "
+                  "payout. Same treatment, and separately determined: a tie "
+                  "clause establishes nothing here", None),
+    "settlement_rules": ("all five exceptional outcomes read separately by "
+                         "bettor_settlement_clauses.interpret, each with its "
+                         "source clause, payout class and refusal", None),
+    "settlement_provenance": ("the captured text, its source, retrieval age, "
+                              "sha256 content hash and interpretation version, "
+                              "so a decision made on this reading stays "
+                              "auditable if the venue's text later changes",
+                              None),
 }
 
 
@@ -716,7 +733,8 @@ def line_against_a(*, signed_line, backs) -> dict:
 #: upstream and silently arrive unsourced.
 PROVENANCE_KEYS = ("condition_id", "fixture_id", "kind", "period", "overtime",
                    "backs", "line", "over_under", "quantity",
-                   "cost_cents_per_unit", "tie_rule", "void_rule")
+                   "cost_cents_per_unit", "tie_rule", "void_rule",
+                   "settlement_rules", "settlement_provenance")
 
 
 class LegRefused(Exception):
@@ -874,29 +892,64 @@ def build_leg(*, row, quantity, cost_per_unit, prose=None, sport_family=None,
         prov["cost_cents_per_unit"] = ("the funded intent's per-unit basis, or "
                                       "the candidate's own quoted price")
 
-        # ── THE SETTLEMENT PROSE ITSELF, CARRIED NOT INTERPRETED ─────
+        # ── THE SETTLEMENT PROSE, READ ONE OUTCOME AT A TIME ─────────
         #
-        # `_leg_payout_cents` searches these strings for '50-50' and
-        # 'underdog' and returns None when it finds neither -- so an absent
-        # rule leaves the TIE and VOID regions UNDETERMINED, which propagates
-        # as UNESTABLISHABLE. That is why absence here is NOT a build refusal
-        # the way OT_UNKNOWN is: it degrades the classification honestly
-        # instead of fabricating a payout. It is also why the text is passed
-        # through verbatim rather than summarised.
+        # THE DEFECT THIS REPLACES, in the owner's words: "build_leg() passes
+        # the entire captured prose into both tie_rule and void_rule.
+        # _leg_payout_cents() interprets '50-50' in void_rule as a 50-cent
+        # cancellation payout." Reproduced before this change: the text
+        #
+        #     "...includes any extra innings played. A tie resolves 50-50."
+        #
+        # established a 50-cent payout for a fixture that NEVER HAPPENED. The
+        # prose says nothing whatever about cancellation. One blob in two
+        # fields meant one sentence answered every question asked of it.
+        #
+        # So the prose is now READ PER OUTCOME, and each field receives only
+        # the clause that establishes ITS outcome -- or None. Absence still is
+        # not a build refusal the way OT_UNKNOWN is: it leaves that region
+        # UNDETERMINED, which propagates as UNESTABLISHABLE rather than
+        # fabricating a payout. What has changed is that "the venue said
+        # nothing about this" is now distinguishable from "the venue said
+        # this", per outcome, with the sentence attached.
         captured = bool(str(prose or "").strip())
-        prov["tie_rule"] = prov["void_rule"] = (
-            ("the venue's captured prose, verbatim" if captured else
-             "NOT CAPTURED -- the TIE and VOID regions stay undetermined, and "
-             "we do not supply the venue's rules from memory"))
+        read = SETTLE.interpret(prose, source=prose_source,
+                                retrieved_at=(None if evidence_age_s is None
+                                              else "age_s=%s" % evidence_age_s))
+        tie_rec = read["rules"][SETTLE.TIE]
+        void_rec = read["rules"][SETTLE.CANCELLED]
+
+        def _clause_prov(outcome, rec):
+            if rec["established"]:
+                return ("the ONE clause of the venue's captured prose that "
+                        "names %s and states its payout: %r"
+                        % (outcome, rec["clause"]))
+            return ("NOT ESTABLISHED (%s) -- the %s region stays undetermined. "
+                    "A payout stated for a different outcome is not evidence "
+                    "here, which is the defect this replaces"
+                    % (rec["refusal"], outcome))
+
+        prov["tie_rule"] = _clause_prov(SETTLE.TIE, tie_rec)
+        prov["void_rule"] = _clause_prov(SETTLE.CANCELLED, void_rec)
+        prov["settlement_rules"] = (
+            "bettor_settlement_clauses.interpret: five outcomes read "
+            "separately, each carrying its source clause. Established here: "
+            "%s" % (read["established"] or "none"))
+        prov["settlement_provenance"] = (
+            "raw text, source, retrieval age, sha256 %s, interpretation %s"
+            % (read["provenance"]["content_sha256"][:16], SETTLE.VERSION))
 
         leg = IS.Leg(
             condition_id=slug, fixture_id=fx["event_slug"], kind=kd["kind"],
             period=kd["period"], overtime=overtime, backs=backs, line=line,
             over_under=kd["over_under"], quantity=qty,
             cost_cents_per_unit=cents,
-            tie_rule=(str(prose) if captured else None),
-            void_rule=(str(prose) if captured else None),
-            settlement_text_captured=captured)
+            # ONLY the establishing clause, never the document.
+            tie_rule=tie_rec["clause"] if tie_rec["established"] else None,
+            void_rule=void_rec["clause"] if void_rec["established"] else None,
+            settlement_text_captured=captured,
+            settlement_rules=read["rules"],
+            settlement_provenance=read["provenance"])
     except LegRefused as exc:
         return dict(exc.as_dict(), built_from=prov)
 

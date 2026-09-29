@@ -61,8 +61,30 @@ NOW = 1790500000.0
 
 #: Prose stating the terminal case with a DECLARED baseball pattern, so the
 #: overtime rule is READ and both legs land on the same grading key.
+#:
+#: WHAT THIS TEXT DOES AND DOES NOT STATE, which turned out to matter. It
+#: states the overtime treatment and a tie. It says NOTHING about cancellation.
+#: While `build_leg` put the whole blob in both `tie_rule` and `void_rule`,
+#: `_leg_payout_cents` found "50-50" in the void field and paid 50 cents for a
+#: fixture that never happened -- so every structure below had a determined
+#: VOID cell that the venue had not actually specified. With each outcome read
+#: from its own clause that cell is undetermined, and the floors measured under
+#: this text are withdrawn. See `PROSE_WITH_CANCELLATION` and the two
+#: recomputation tests at the end of this file.
 PROSE = ("Resolves on the final score and includes any extra innings played. "
          "A tie resolves 50-50.")
+
+#: The same text plus a cancellation clause, so the VOID cell is established
+#: and the ranking has a determinate floor to report.
+#:
+#: SYNTHETIC EXTERNAL EVIDENCE, EXPLICITLY. This sentence is written for this
+#: test. It is not captured Polymarket text and nothing here claims the venue
+#: publishes it. What the tests below establish is that the pipeline computes
+#: the right floor FROM a stated cancellation rule -- not what Polymarket's
+#: cancellation rule is. Reading the venue's real text is the production path's
+#: job and is the remaining evidence dependency for any funded claim.
+CANCELLATION_CLAUSE = ("If the game is cancelled all stakes are refunded.")
+PROSE_WITH_CANCELLATION = PROSE + " " + CANCELLATION_CLAUSE
 
 
 @contextlib.asynccontextmanager
@@ -162,7 +184,11 @@ async def _catalogue(conn):
             st)
 
 
-def _prose_reader(text=PROSE):
+def _prose_reader(text=None):
+    # DEFAULTS TO THE TEXT THAT STATES A CANCELLATION RULE. The bare
+    # `PROSE` leaves the VOID cell undetermined for every leg, which is a
+    # correct refusal and a useless default for a test about ranking.
+    text = PROSE_WITH_CANCELLATION if text is None else text
     async def read(slug):
         return {"ok": True, "rules_text": text, "rules_field": "description",
                 "source": "pmus:/markets?slug=<slug>:rules_text",
@@ -335,12 +361,20 @@ async def _promote_a_model(conn):
 
 
 async def _run_pass(conn, *, hedge_price, exit_price, adapter,
-                    intent_id=None):
+                    intent_id=None, prose=None):
     """ONE SCHEDULED PASS with the REAL supplier bound, as production binds it.
 
     `hedge_price` moves the candidate's cost; `exit_price` moves the deferred
     exit's value. Nothing else differs between the two scenarios below, which
     is what makes the comparison a comparison.
+
+    `prose` is a PARAMETER rather than the module constant because the
+    settlement repair made the text load-bearing: `PROSE` states no
+    cancellation rule, so with each outcome read from its own clause the VOID
+    cell is undetermined and no structure is establishable. The default is
+    `PROSE_WITH_CANCELLATION` -- the ranking tests are about RANKING, and
+    running them on prose that refuses before reaching the ranking would test
+    nothing. The two tests at the end of the file pin both readings.
     """
     import functools
 
@@ -373,7 +407,7 @@ async def _run_pass(conn, *, hedge_price, exit_price, adapter,
         LOOP.funded_pair_inputs, deferred=deferred, account_id=ACCT,
         venue=VENUE,
         management_rankings={iid: {"ranking": deferred[iid]["ranking"]}},
-        prose_reader=_prose_reader(),
+        prose_reader=_prose_reader(prose or PROSE_WITH_CANCELLATION),
         quoter=_quoter({} if hedge_price is None
                        else {SIB: (hedge_price, 500)}))
     got = await PC.pass_once(
@@ -475,10 +509,19 @@ async def test_a_moneyline_plus_an_opposing_spread_is_not_assumed_to_be_a_middle
     """MEASURED, ON THE COMBINATION IT WOULD BE EASIEST TO ASSUME ABOUT.
 
     Codex: do not assume every moneyline/opposing-spread combination is superior
-    or cannot lose. On this fixture the classifier returns INDEPENDENT_OVERLAP
-    for one of the two pairings -- both-win AND both-lose are reachable -- and
-    its fee-adjusted floor is NEGATIVE. So the pair can lose, and the ranking
-    puts it last rather than preferring it for looking like a hedge.
+    or cannot lose. On this fixture, under the venue reading where a cancelled
+    market refunds the purchase basis, the classifier returns
+    INDEPENDENT_OVERLAP for BOTH pairings -- both-win and both-lose are
+    reachable -- and every fee-adjusted floor is NEGATIVE. So nothing is
+    preferred for looking like a hedge, and nothing is selected.
+
+    THIS ASSERTION CHANGED WITH THE SETTLEMENT REPAIR, and the change is the
+    point. It used to assert the overlap was not the WINNER, which held because
+    a second pairing scored +$1.35. That +$1.35 existed because the tie clause
+    was establishing a 50-cent cancellation payout; with cancellation read from
+    its own clause as a basis refund, both pairings are overlaps and the best
+    score is -$0.146. `test_the_reported_floor_depends_on_the_cancellation_rule`
+    below measures all three readings side by side.
     """
     async with _conn() as conn:
         if not await _has(conn, "bettor_funded_decisions"):
@@ -493,11 +536,41 @@ async def test_a_moneyline_plus_an_opposing_spread_is_not_assumed_to_be_a_middle
                    if row.get("taxonomy_from_valuation") == "INDEPENDENT_OVERLAP"]
         assert overlap and overlap[0]["score_usd"] < 0, overlap
         assert overlap[0]["both_win_and_both_lose_reachable"] is True
-        # AND IT IS NOT THE WINNER.
-        assert r["ranked"][0].get("taxonomy_from_valuation") != \
-            "INDEPENDENT_OVERLAP"
+        # NOT ONE CANDIDATE HAS A POSITIVE FLOOR, so none is acquired. "It can
+        # lose both legs" is established by the table, not by the label.
+        assert all(row["score_usd"] < 0 for row in r["ranked"]), r["ranked"]
         # THE ORDER DOES NOT COME FROM THE TAXONOMY.
         assert "taxonomy" in r["the_taxonomy_does_not_set_the_order"]
+
+
+async def test_an_overlap_loses_to_a_better_structure_when_one_exists():
+    """The original form of the assertion above, on prose that produces two
+    different taxonomies: the overlap is ranked LAST, by its number.
+
+    The 50-50 cancellation clause is SYNTHETIC EXTERNAL EVIDENCE, stated here to
+    produce a positive structure so the ordering can be exercised at all. It is
+    not a claim about Polymarket's published rule.
+    """
+    async with _conn() as conn:
+        if not await _has(conn, "bettor_funded_decisions"):
+            pytest.skip("migration 132 is not in this database")
+        await _clean(conn)
+        await _catalogue(conn)
+        out = await _run_pass(
+            conn, hedge_price=0.30, exit_price=0.50, adapter=_Adapter(),
+            prose=(PROSE + " If the game is cancelled the market resolves "
+                           "50-50."))
+        r = (out["pass"]["considered"][0].get("hedge_candidate_ranking") or {})
+        assert len(r["ranked"]) >= 2, r["ranked"]
+        tax = [row.get("taxonomy_from_valuation") for row in r["ranked"]]
+        assert "INDEPENDENT_OVERLAP" in tax, tax
+        # Two DIFFERENT taxonomies, and the overlap is not first.
+        assert len(set(tax)) >= 2, tax
+        assert r["ranked"][0].get("taxonomy_from_valuation") != \
+            "INDEPENDENT_OVERLAP", r["ranked"]
+        # The order is by score, descending, and the overlap's score is worse.
+        scores = [row["score_usd"] for row in r["ranked"]]
+        assert scores == sorted(scores, reverse=True), scores
 
 
 async def test_a_partial_depth_reports_covered_and_uncovered_quantities():
@@ -531,9 +604,73 @@ async def test_a_partial_depth_reports_covered_and_uncovered_quantities():
         assert p["uncovered_qty"] == 4.0, p
         assert p["fully_supported"] is False
         assert p["covered_qty"] + p["uncovered_qty"] == 10.0
-        # AND IT IS WORTH LESS, pro-rated rather than counted as if full.
-        assert p["score_usd"] < f["score_usd"], (p, f)
         assert "UNCOVERED" in p.get("score_is_prorated", "")
+
+        # ── WHAT THE SCORE IS, AND WHAT IT IS NOT ────────────────────
+        #
+        # THIS ASSERTION WAS WRONG AND THE SETTLEMENT REPAIR EXPOSED IT. It
+        # read `p["score_usd"] < f["score_usd"]` -- "a partial is worth less
+        # than a full" -- and it passed only because the structure had a
+        # POSITIVE floor. With cancellation read from its own clause this
+        # structure's matched floor is NEGATIVE (-$0.146 over ten units), and
+        # covering six units of a losing structure loses less than covering
+        # ten. So the old assertion now reads -0.088 < -0.146 and fails.
+        #
+        # The arithmetic is right; the CLAIM was wrong. A score computed over
+        # the matched slice alone is not the position's outcome, because the
+        # four uncovered contracts still carry their own directional risk and
+        # nothing in this number values them. That is the defect the owner
+        # states as §5 ("value uncovered inventory", with the -$1.30 control),
+        # and it is not repaired here.
+        #
+        # So what is asserted is the invariant that actually holds: the score
+        # is scoped to the covered slice, that scope is declared, and the
+        # uncovered remainder is reported rather than folded in.
+        assert p["score_usd"] * 10.0 == pytest.approx(f["score_usd"] * 6.0,
+                                                     abs=0.02), (p, f)
+        assert p["net_worst_case"]["units_valued"] == 6
+        assert f["net_worst_case"]["units_valued"] == 10
+        assert p["uncovered_qty"] == 4.0, (
+            "the four contracts nobody could hedge are REPORTED, not absorbed "
+            "into a per-unit average that makes the position look smaller")
+
+
+async def test_a_thinner_book_does_not_improve_a_losing_structure():
+    """THE MISREADING THE PREVIOUS TEST WOULD HAVE INVITED, pinned.
+
+    On a structure whose matched floor is negative, the six-unit score is
+    HIGHER than the ten-unit score -- less coverage, less loss on the matched
+    slice. Read as "the thin book is the better opportunity" that is exactly
+    backwards, because the four uncovered contracts are unhedged inventory that
+    this number does not value.
+
+    Recorded here as a MEASURED FACT with its interpretation attached, so the
+    ranking cannot quietly start preferring thin books. §5 values the uncovered
+    remainder; until it does, this test is the marker for where the gap is.
+    """
+    async with _conn() as conn:
+        if not await _has(conn, "bettor_funded_decisions"):
+            pytest.skip("migration 132 is not in this database")
+        await _clean(conn)
+        await _catalogue(conn)
+        full = await _pass_at_depth(conn, 500)
+        await _clean(conn)
+        await _catalogue(conn)
+        part = await _pass_at_depth(conn, 6)
+        f = (full["pass"]["considered"][0]
+             .get("hedge_candidate_ranking") or {})["ranked"][0]
+        p = (part["pass"]["considered"][0]
+             .get("hedge_candidate_ranking") or {})["ranked"][0]
+        assert f["score_usd"] < 0 and p["score_usd"] < 0, (f, p)
+        assert p["score_usd"] > f["score_usd"], (
+            "measured: a smaller matched slice of a losing structure loses "
+            "less. This is arithmetic, not an improvement")
+        # AND NEITHER IS ACQUIRED. Whatever the ordering says, a negative floor
+        # is not bought -- which is what keeps the gap above from reaching a
+        # funded order.
+        for out in (full, part):
+            step = out["pass"]["considered"][0]
+            assert step.get("selected") != "ACQUIRE_INDIRECT_HEDGE", step
 
 
 async def test_a_book_supporting_nothing_is_not_rankable_and_not_a_zero():
@@ -906,3 +1043,132 @@ def test_a_venue_implied_outside_split_is_refused_by_documentation_and_by_code()
         p_middle=0.25, outside_split={"b": 0.6, "c": 0.4})
     assert ok["ok"] is True, ok
     assert abs(sum(ok["probabilities"].values()) - 1.0) < 1e-9, ok
+
+
+# ═════════════════════════════════════════════════════════════════════
+# THE RECOMPUTED FLOOR · §3, "recompute the reported +$1.35 and other
+# floors after repairing their settlement assumptions"
+# ═════════════════════════════════════════════════════════════════════
+
+async def test_the_reported_floor_is_withdrawn_on_the_prose_it_was_measured_on():
+    """+$1.35 WAS AN ARTEFACT OF THE SETTLEMENT DEFECT. Measured here.
+
+    The +$1.35 was reported under `PROSE`, which states the overtime treatment
+    and a tie and says NOTHING about cancellation. While the whole blob sat in
+    `void_rule`, `_leg_payout_cents` found "50-50" there and paid 50 cents for a
+    fixture that never happened -- so the VOID cell was determined by a sentence
+    about a fixture that WAS played.
+
+    With cancellation read from its own clause, that cell is undetermined, the
+    classifier returns UNESTABLISHABLE, and NO candidate is ranked at all. The
+    number is not smaller; there is no number.
+    """
+    async with _conn() as conn:
+        if not await _has(conn, "bettor_funded_decisions"):
+            pytest.skip("migration 132 is not in this database")
+        await _clean(conn)
+        await _catalogue(conn)
+        out = await _run_pass(conn, hedge_price=0.30, exit_price=0.50,
+                              adapter=_Adapter(), prose=PROSE)
+        step = out["pass"]["considered"][0]
+        disc = step.get("discovery") or {}
+        # Both pairings were EXAMINED -- the supplier ran and built real legs.
+        assert disc.get("examined") == 2, disc
+        assert disc.get("ok") is False, disc
+        rejected = disc.get("rejected") or []
+        assert rejected, disc
+        for row in rejected:
+            assert row["refusal"] == "THE_STRUCTURE_ITSELF_IS_UNESTABLISHABLE"
+            assert row["undetermined_regions"] == [
+                "fixture cancelled or abandoned"], row
+            # THE REASON IS THE UNREAD RULE, not a missing fact on the leg.
+            assert row["missing_facts"] == [], row
+        r = step.get("hedge_candidate_ranking") or {}
+        assert (r.get("ranked") or []) == [], r
+        assert step.get("selected") != "ACQUIRE_INDIRECT_HEDGE", step
+
+
+async def test_the_reported_floor_depends_on_the_cancellation_rule():
+    """THE THREE READINGS, SIDE BY SIDE, WITH ONLY THE PROSE CHANGED.
+
+    Nothing else differs: same catalogue rows, same held position, same hedge
+    price 0.30, same exit price 0.50, same depth, same fee schedule.
+
+        tie clause only .................. no candidate establishable
+        cancelled -> basis refunded ...... best score  -$0.146
+        cancelled -> resolves 50-50 ...... best score  +$1.354
+
+    SO THE SIGN OF THE ONLY POSITIVE HEDGE NUMBER EVER REPORTED FOR THIS LANE
+    IS DECIDED BY A VENUE RULE THAT WAS NEVER READ. That is the finding, and it
+    is why no funded claim rests on the +$1.35.
+
+    WHICH READING IS RIGHT IS NOT DECIDED HERE. The basis-refund reading is the
+    one this repository already books elsewhere -- `reconcile_settlement` credits
+    a void as the remaining basis -- so it is the default for the ranking tests.
+    Establishing Polymarket's actual published cancellation rule requires reading
+    the venue's own text and is an open evidence dependency, not a code change.
+    """
+    async with _conn() as conn:
+        if not await _has(conn, "bettor_funded_decisions"):
+            pytest.skip("migration 132 is not in this database")
+
+        async def best(prose):
+            await _clean(conn)
+            await _catalogue(conn)
+            out = await _run_pass(conn, hedge_price=0.30, exit_price=0.50,
+                                  adapter=_Adapter(), prose=prose)
+            r = (out["pass"]["considered"][0]
+                 .get("hedge_candidate_ranking") or {})
+            rows = r.get("ranked") or []
+            return (rows[0] if rows else None)
+
+        tie_only = await best(PROSE)
+        refund = await best(PROSE_WITH_CANCELLATION)
+        half = await best(PROSE + " If the game is cancelled the market "
+                                  "resolves 50-50.")
+
+        assert tie_only is None, tie_only
+        assert refund is not None and half is not None
+
+        assert refund["score_usd"] == pytest.approx(-0.14595, abs=0.005), refund
+        assert half["score_usd"] == pytest.approx(1.35405, abs=0.005), half
+
+        # THE +$1.35 IS RECOVERABLE ONLY UNDER THE 50-50 READING, and the two
+        # readings disagree by more than the whole reported edge.
+        assert half["score_usd"] - refund["score_usd"] > 1.0
+        assert refund["score_usd"] < 0 < half["score_usd"], (
+            "one unread sentence decides whether this structure makes or loses "
+            "money")
+
+        # AND THE TAXONOMY CHANGES TOO, so this is not a scaling difference.
+        assert refund["taxonomy_from_valuation"] == "INDEPENDENT_OVERLAP"
+        assert half["taxonomy_from_valuation"] != "INDEPENDENT_OVERLAP"
+
+
+async def test_the_legs_carry_the_settlement_provenance_into_the_decision():
+    """A decision made on a reading must stay auditable when the venue's text
+    changes. The hash is what proves the text is the same text."""
+    async with _conn() as conn:
+        if not await _has(conn, "us_premap"):
+            pytest.skip("no catalogue table in this database")
+        await _clean(conn)
+        await _catalogue(conn)
+        iid = await _held(conn)
+        got = await HS.held_leg_for(
+            conn, position={"intent_id": iid, "us_market_slug": HELD,
+                            "residual_qty": 10, "avg_price": 0.55},
+            prose_reader=_prose_reader(PROSE_WITH_CANCELLATION), now=NOW)
+        assert got["ok"] is True, got
+        leg = got["leg"]
+        prov = leg.settlement_provenance
+        assert prov["raw_text"] == PROSE_WITH_CANCELLATION
+        assert len(prov["content_sha256"]) == 64
+        assert prov["interpretation_version"] == "SETTLEMENT_CLAUSES_V1"
+        # ONE CLAUSE PER FIELD, not the document.
+        assert leg.tie_rule == "A tie resolves 50-50."
+        assert leg.void_rule == CANCELLATION_CLAUSE
+        assert "extra innings" not in (leg.void_rule or "")
+        # And the five outcomes are each present with their own verdict.
+        assert set(leg.settlement_rules) == {
+            "TIE", "PUSH", "CANCELLED", "POSTPONED", "SHORTENED"}
+        assert leg.settlement_rules["PUSH"]["established"] is False
