@@ -866,3 +866,43 @@ async def test_an_unpriced_outside_region_is_not_reported_as_an_empty_registry()
         # go looking for it. (`prediction_refusal` is also set on the decision
         # payload; the label is what a step summary shows.)
         assert "OUTSIDE_THE_MIDDLE" in came, came
+
+
+def test_a_venue_implied_outside_split_is_refused_by_documentation_and_by_code():
+    """THE SHORTCUT THIS FORECLOSES.
+
+    The venue lists spreads at many lines on one fixture, so differencing their
+    implied probabilities yields a distribution over exactly the margin bands
+    `outside_split` needs. It is real data we already read, and it is the
+    obvious thing to reach for.
+
+    It is inadmissible. The split decides whether a unit pays $0, $1 or $2, so
+    it enters the expected value of a capital decision directly -- a
+    venue-implied shape would make the lane's edge a function of the prices it
+    is trading against. And it would pass SILENTLY: `probabilities` would be
+    populated with no field saying where the shape came from.
+
+    So the module records the rejected source and what would actually close the
+    gap, and this test holds that record in place.
+    """
+    assert "spread ladder" in FMD.OUTSIDE_SPLIT_HAS_NO_ADMISSIBLE_SOURCE
+    assert "refused" in FMD.OUTSIDE_SPLIT_HAS_NO_ADMISSIBLE_SOURCE
+    assert "full region distribution" in \
+        FMD.OUTSIDE_SPLIT_HAS_NO_ADMISSIBLE_SOURCE
+    # AND THE CODE REFUSES, not merely the comment: an empty split is a refusal
+    # and a uniform one is never substituted.
+    got = FMD.region_probabilities(
+        {"table": [{"region": "a"}, {"region": "b"}, {"region": "c"}],
+         "both_win_regions": ("a",)},
+        p_middle=0.25, outside_split=None)
+    assert got["ok"] is False
+    assert got["refusal"] == FMD.R_NO_OUTSIDE_SPLIT
+    assert "uniformly" in got["why"]
+    # A STATED SPLIT IS ACCEPTED, so the refusal is about absence and not a
+    # blanket refusal that would make the parameter unusable.
+    ok = FMD.region_probabilities(
+        {"table": [{"region": "a"}, {"region": "b"}, {"region": "c"}],
+         "both_win_regions": ("a",)},
+        p_middle=0.25, outside_split={"b": 0.6, "c": 0.4})
+    assert ok["ok"] is True, ok
+    assert abs(sum(ok["probabilities"].values()) - 1.0) < 1e-9, ok

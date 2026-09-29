@@ -684,6 +684,43 @@ async def rollback(conn, *, to_model_id: str, reason: str) -> dict:
 # 6 · FROM A PREDICTION TO THE DECISION'S OWN INPUT
 # ═════════════════════════════════════════════════════════════════════
 
+#: THE OUTSIDE SPLIT HAS NO ADMISSIBLE SOURCE TODAY, AND ONE OBVIOUS
+#: INADMISSIBLE ONE. Recorded here because the shortcut is easy to reach for and
+#: would be almost invisible once taken.
+#:
+#: WHAT IS MISSING. `region_probabilities` needs a share of `1 - p_middle` for
+#: every non-middle region. On a margin structure those regions are bands --
+#: (-inf,-2), -2, -1, 0, 1, and the void -- so what is needed is a distribution
+#: over the fixture's margin, not another single number.
+#:
+#: THE SOURCE THAT EXISTS AND MUST NOT BE USED. The venue lists spreads at many
+#: lines on the same fixture (run 263 saw asc- slugs at 1.5, 2.5 ... 21.5), so
+#: differencing the implied probabilities across consecutive lines yields exactly
+#: a distribution over those bands. It is real, measured, per-contract data we
+#: already read.
+#:
+#: It is still not admissible HERE. The outside split is not a presentational
+#: detail: which non-middle region occurs decides whether a unit pays $0, $1 or
+#: $2, so the split enters the expected value of a capital decision directly.
+#: Feeding venue prices into it would make the lane's edge a function of the
+#: venue's own quotes -- the substitution the standing instruction forbids, and
+#: the one that makes a measured edge circular. A venue-implied split would also
+#: pass silently: `probabilities` would be populated and no field would say the
+#: shape came from the prices the trade is against.
+#:
+#: WHAT WOULD CLOSE IT. The model predicting the FULL region distribution rather
+#: than `p_middle` alone: a multi-region target, labels per region from each
+#: leg's own settlement, and its own promotion under the same bar. That is a
+#: scoped piece of work, not a parameter to fill in.
+OUTSIDE_SPLIT_HAS_NO_ADMISSIBLE_SOURCE = (
+    "no source in this repository states how 1 - p_middle distributes over the "
+    "non-middle regions. The venue's own spread ladder would give one, and is "
+    "refused: the split enters the expected value directly, so a venue-implied "
+    "shape would make the edge a function of the prices being traded against. "
+    "Closing it means predicting the full region distribution, with per-region "
+    "labels and its own promotion")
+
+
 def region_probabilities(structure, *, p_middle: float,
                          outside_split: dict | None) -> dict:
     """TURN ONE PREDICTION INTO THE MEASURE `decide` NEEDS.
