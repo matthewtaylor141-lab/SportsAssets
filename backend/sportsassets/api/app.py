@@ -3816,6 +3816,16 @@ async def admin_funded_account_eligibility(
 # One contiguous block of NEW routes. None of them unpauses an account,
 # changes an accounting status, or submits anything to a venue.
 
+def _resolution_auth(route: str) -> dict:
+    """How a two-factor caller authenticated: WHICH factors were verified
+    (the dependencies ran before this), and the identity the resolution key
+    authenticates -- from configuration, never from the request body."""
+    return {"admin_token_verified": True, "resolution_key_verified": True,
+            "operator": (getattr(settings(), "funded_resolution_operator", "")
+                         or "").strip(),
+            "route": route}
+
+
 @app.post("/api/admin/funded-account-discrepancy-report",
           dependencies=[Depends(require_admin)])
 async def admin_funded_account_discrepancy_report(response: Response,
@@ -3872,6 +3882,64 @@ async def admin_funded_account_discrepancy_reports(
     async with pool.acquire() as conn:
         return await ON.report_history(conn, account_id=account_id,
                                        limit=int(limit))
+
+
+@app.post("/api/admin/funded-settlement-corrections/{intent_id}",
+          dependencies=[Depends(require_admin),
+                        Depends(require_resolution_key)])
+async def admin_book_funded_settlement_correction(intent_id: str,
+                                                  response: Response,
+                                                  body: dict | None = None
+                                                  ) -> dict:
+    """BOOK THE CORRECTION OF ONE SETTLED LEG THE VENUE HAS RE-SETTLED.
+
+    body: {recheck_id (the newest established DISAGREES re-read of the leg),
+           seen_recheck_sha (that re-read's sha, from GET
+           /api/admin/funded-settlement-corrections), confirm: <intent_id>,
+           statement (at least 20 characters: what was checked)}
+
+    The operator is the identity FUNDED_RESOLUTION_OPERATOR names -- the one
+    the resolution key authenticates -- never a name in the body. Books one
+    SETTLEMENT_CORRECTION delta, never a second SETTLEMENT; audited whether
+    accepted or refused. Nothing is submitted to any venue.
+    """
+    from .. import bettor_funded_corrections as FC
+    from ..db import get_pool
+
+    response.headers["Cache-Control"] = "no-store"
+    b = dict(body or {})
+    auth = _resolution_auth(
+        "POST /api/admin/funded-settlement-corrections/{intent_id}")
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        out = await FC.book_settlement_correction(
+            conn, intent_id=intent_id, recheck_id=b.get("recheck_id"),
+            operator=auth["operator"], statement=b.get("statement"),
+            seen_recheck_sha=b.get("seen_recheck_sha"),
+            confirm=b.get("confirm"), auth=auth)
+    if not out.get("ok"):
+        response.status_code = 409
+    return out
+
+
+@app.get("/api/admin/funded-settlement-corrections",
+         dependencies=[Depends(require_admin)])
+async def admin_funded_settlement_corrections(
+        response: Response, intent_id: str | None = None) -> dict:
+    """EVERY BOOKED CORRECTION, EVERY ATTEMPT, and every contested leg still
+    awaiting one -- with the re-read sha a correction must cite. A read."""
+    from .. import bettor_funded_corrections as FC
+    from ..db import get_pool
+
+    response.headers["Cache-Control"] = "no-store"
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        out = await FC.listing(conn, intent_id=intent_id)
+    out["resolution_key_configured"] = bool(
+        (getattr(settings(), "funded_resolution_key", "") or "").strip()
+        and (getattr(settings(), "funded_resolution_operator", "")
+             or "").strip())
+    return out
 
 
 @app.get("/api/admin/funded-account-registry",

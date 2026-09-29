@@ -663,10 +663,33 @@ LABEL_SQL = """
                -- so the group leaves the labelled set -- and a model whose
                -- provenance names it stops reproducing, which is what
                -- withdraws its approval.
+               --
+               -- UNLESS A BOOKED CORRECTION ANSWERS IT (migration 145). A
+               -- correction answers the newest established re-read, and
+               -- every disagreement at or before that re-read was with the
+               -- reading the correction replaced; the corrected reading is
+               -- now what `settlement` carries, so the label below is read
+               -- from the CORRECTED price, and `settlement.at` is the instant
+               -- the correction was booked -- a fit taken before then could
+               -- not have learned it. A disagreement AFTER the answered
+               -- re-read is a new one and contests again. A correction that
+               -- turns a priced leg into a void (or a void into a price)
+               -- leaves the group out either way: `any_leg_void`, or a
+               -- closure reason that no longer says the venue settled it.
                bool_or(EXISTS (
                    SELECT 1 FROM bettor_funded_settlement_rechecks rc
                     WHERE rc.intent_id = i.intent_id
-                      AND rc.verdict = 'DISAGREES')) AS any_leg_contested,
+                      AND rc.verdict = 'DISAGREES'
+                      AND NOT EXISTS (
+                          SELECT 1
+                            FROM bettor_funded_settlement_corrections c
+                            JOIN bettor_funded_settlement_rechecks ra
+                              ON ra.recheck_id = c.recheck_id
+                             AND ra.intent_id = c.intent_id
+                           WHERE c.intent_id = rc.intent_id
+                             AND (ra.read_at, ra.recheck_id)
+                                 >= (rc.read_at, rc.recheck_id))))
+                   AS any_leg_contested,
                -- EACH LEG'S READING, which is the label's own version. It is
                -- bound into the training set's hash, so a corrected settlement
                -- after a fit makes the fit's records stop reproducing.
