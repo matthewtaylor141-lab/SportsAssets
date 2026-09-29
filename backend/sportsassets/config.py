@@ -151,6 +151,20 @@ class Settings(BaseSettings):
     # refuses by name rather than falling back to a default -- a default
     # operator password would be worse than none.
     operator_password: str = ""
+    # FUNDED RESOLUTION KEY (2026-09-29). The second factor for the one route
+    # that can close a lost acknowledgement and release its exposure
+    # (POST /api/admin/funded-investigations/{intent_id}/resolve). The admin
+    # token alone is not enough there: it is also held by the verification
+    # workflows, so it proves possession of a service credential, not an
+    # operator's decision. This key is meant to be held by the owner only and
+    # never placed in a workflow. EMPTY MEANS THE ROUTE REFUSES 503 by name.
+    # It is deliberately NOT in CREDENTIAL_CONSEQUENCES: an unset key disables
+    # one owner-only action, and must not report the service as misconfigured.
+    funded_resolution_key: str = ""
+    # THE IDENTITY THAT KEY AUTHENTICATES. The route writes this -- not a name
+    # typed into the request -- into the audit row, and refuses an attestation
+    # signed by anyone else. Empty refuses 503, like an empty key.
+    funded_resolution_operator: str = ""
     # Committed capital (owner directive 2026-08-22): dollars the owner
     # has committed to restore to the Polymarket account (an owner draw
     # outstanding). Displayed ONLY as part of the clearly-labeled

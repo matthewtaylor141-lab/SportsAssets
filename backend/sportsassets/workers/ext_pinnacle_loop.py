@@ -4883,6 +4883,23 @@ async def _funded_service(conn, *, now):
     # bounded order to send and the pass refuses by name -- which is the correct
     # failure, but the whole point is that they ARE supplied, so the ranking's
     # choice is the one that acts.
+    # ── EVERY LOST ACKNOWLEDGEMENT, INVESTIGATED ─────────────────────
+    #
+    # `manage` has just run recovery, which leaves a send with no answer
+    # UNRESOLVED and never adopts a term-matched order. This opens (or
+    # refreshes) one durable investigation per such intent with what the venue
+    # shows on its market. It reads, records and changes no intent; only the
+    # audited operator route closes one. Its reader is also handed to the pair
+    # pass, whose recovery step reaches the same investigation from the
+    # reservation side.
+    from .. import bettor_funded_investigation as _FI
+    try:
+        got["investigations"] = await _FI.investigate_all(
+            conn, account_id=account_id, venue=venue, now=now)
+    except Exception as exc:                                   # noqa: BLE001
+        got["investigations"] = {
+            "ok": False, "refusal": "FUNDED_INVESTIGATION_RAISED",
+            "error": "%s: %s" % (type(exc).__name__, str(exc)[:200])}
     try:
         from .. import bettor_funded_pair_cycle as _PC
 
@@ -4916,6 +4933,7 @@ async def _funded_service(conn, *, now):
                 quoter=functools.partial(_candidate_quote, conn, now=now)),
             deferred_exits=deferred,
             venue_positions=_venue_positions_for_gate(account_read),
+            venue_reader=_FI.reservation_reader(),
             now=now)
         # THE ORDERING, ASSERTED IN THE RESULT rather than left to a reader to
         # infer from two sibling keys. `manage` sent nothing; whatever was sent

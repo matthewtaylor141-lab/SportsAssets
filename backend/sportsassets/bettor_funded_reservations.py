@@ -499,7 +499,17 @@ async def mark_send_attempted(conn, *, operation_id: str) -> dict:
 EV_NAMED = "VENUE_NAMED_THE_ORDER"
 EV_NO_SUCH_ORDER = "VENUE_HAS_NO_SUCH_ORDER"
 EV_ESTABLISHED_NOTHING = "READ_ESTABLISHED_NOTHING"
-EVIDENCE_KINDS = (EV_NAMED, EV_NO_SUCH_ORDER, EV_ESTABLISHED_NOTHING)
+#: A HUMAN'S STATEMENT, NOT THE VENUE'S (migration 139). An operator, through
+#: the authenticated and audited resolution route, attests that no exposure-
+#: bearing order exists for this operation -- after that route has itself read
+#: the venue's resting orders and the account's own executions on the market
+#: and found neither. It is its own kind so that it can never satisfy a check
+#: written for `VENUE_HAS_NO_SUCH_ORDER`: `resolve_from_the_venue` does not
+#: read it, and only `release_on_attestation` does.
+EV_ATTESTED_NO_EXPOSURE = "OPERATOR_ATTESTED_NO_EXPOSURE"
+EVIDENCE_KINDS = (EV_NAMED, EV_NO_SUCH_ORDER, EV_ESTABLISHED_NOTHING,
+                  EV_ATTESTED_NO_EXPOSURE)
+WHY_OPERATOR_ATTESTED_NO_EXPOSURE = "AN_OPERATOR_ATTESTED_NO_EXPOSURE_EXISTS"
 
 R_NO_EVIDENCE = "NO_DURABLE_EVIDENCE_IS_BOUND_TO_THIS_OPERATION"
 R_EVIDENCE_NOT_BOUND = "THE_EVIDENCE_IS_NOT_BOUND_TO_THIS_OPERATIONS_FACTS"
@@ -849,6 +859,36 @@ async def resolve_from_the_venue(conn, *, operation_id: str,
                            ("search_endpoint", "covered_terminal_orders",
                             "results_returned", "window_from_epoch_s",
                             "window_to_epoch_s")}
+    return got
+
+
+async def release_on_attestation(conn, *, operation_id: str) -> dict:
+    """RELEASE AN AMBIGUOUS RESERVATION ON A RECORDED, AUDITED ATTESTATION.
+
+    Not a venue answer and not presented as one. It requires an
+    `OPERATOR_ATTESTED_NO_EXPOSURE` row bound to this operation's account,
+    instrument and intent -- which the database accepts only with an attester
+    and an audit id -- and moves AMBIGUOUS -> RELEASED with a resolution that
+    names the attestation. SEND_ATTEMPTED is refused, as everywhere: it must
+    first be marked AMBIGUOUS, which says the answer was lost.
+    """
+    out: dict[str, Any] = {"version": VERSION,
+                           "operation_id": str(operation_id), "to": RELEASED}
+    res = await _fetch(conn, operation_id)
+    if res is None:
+        return dict(out, ok=False, refusal=R_NO_SUCH_OPERATION)
+    ev = await _usable_evidence(conn, operation_id=operation_id,
+                                kind=EV_ATTESTED_NO_EXPOSURE, reservation=res)
+    if not ev.get("ok"):
+        return dict(out, ok=False, refusal=ev["refusal"], why=ev.get("why"),
+                    exposure="PRESERVED", evidence_check=ev)
+    got = await _transition(
+        conn, operation_id, to=RELEASED, expect=(AMBIGUOUS,),
+        note="%s:%s" % (WHY_OPERATOR_ATTESTED_NO_EXPOSURE,
+                        ev["evidence"]["evidence_id"]))
+    if got.get("ok"):
+        got["evidence_id"] = ev["evidence"]["evidence_id"]
+        got["released_on"] = "AN_AUDITED_OPERATOR_ATTESTATION"
     return got
 
 

@@ -3411,6 +3411,92 @@ def _desk_page_headers() -> dict:
             "X-Content-Type-Options": "nosniff"}
 
 
+def require_resolution_key(x_resolution_key: str = Header(default="")) -> None:
+    """THE SECOND FACTOR FOR RESOLVING A LOST ACKNOWLEDGEMENT.
+
+    Checked after `require_admin`. The admin token is also held by the
+    verification workflows, so on its own it proves possession of a service
+    credential. This key is the owner's and is never put in a workflow; an
+    unset key refuses 503 by name rather than falling back to the token.
+    """
+    import hmac
+
+    expected = (getattr(settings(), "funded_resolution_key", "") or "").strip()
+    operator = (getattr(settings(), "funded_resolution_operator", "")
+                or "").strip()
+    if not expected or not operator:
+        raise HTTPException(status_code=503, detail={
+            "reason": "FUNDED_RESOLUTION_KEY_NOT_CONFIGURED",
+            "what": ("the service needs FUNDED_RESOLUTION_KEY and the identity "
+                     "it authenticates, FUNDED_RESOLUTION_OPERATOR, before any "
+                     "lost acknowledgement can be resolved. Until then every "
+                     "one stays UNRESOLVED with its exposure counted")})
+    supplied = (x_resolution_key or "").strip()
+    if not hmac.compare_digest(supplied, expected):
+        raise HTTPException(status_code=401, detail={
+            "reason": "RESOLUTION_KEY_REQUIRED"})
+
+
+@app.get("/api/admin/funded-investigations",
+         dependencies=[Depends(require_admin)])
+async def admin_funded_investigations(response: Response,
+                                      state: str | None = None) -> dict:
+    """EVERY LOST ACKNOWLEDGEMENT, what the venue last showed about it, and
+    every resolution attempt made on it. A read."""
+    from .. import bettor_funded_investigation as FI
+    from ..db import get_pool
+
+    response.headers["Cache-Control"] = "no-store"
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        out = await FI.listing(conn, state=state)
+    out["resolution_key_configured"] = bool(
+        (getattr(settings(), "funded_resolution_key", "") or "").strip()
+        and (getattr(settings(), "funded_resolution_operator", "")
+             or "").strip())
+    return out
+
+
+@app.post("/api/admin/funded-investigations/{intent_id}/resolve",
+          dependencies=[Depends(require_admin),
+                        Depends(require_resolution_key)])
+async def admin_resolve_funded_investigation(intent_id: str,
+                                             response: Response,
+                                             body: dict | None = None) -> dict:
+    """CLOSE ONE LOST ACKNOWLEDGEMENT ON AN OPERATOR'S DECISION, re-read at
+    the venue and audited whether accepted or refused.
+
+    body: {request: NAME_THE_ORDER | NO_EXPOSURE_EXISTS, confirm: <intent_id>,
+           attested_by (must be FUNDED_RESOLUTION_OPERATOR), statement,
+           seen_read_sha (the investigation read the decision was made on,
+           from GET /api/admin/funded-investigations),
+           venue_order_id (NAME_THE_ORDER only)}
+
+    See `bettor_funded_investigation` for what each request re-reads and
+    refuses. Nothing is submitted, cancelled or resent on any path.
+    """
+    from .. import bettor_funded_investigation as FI
+    from ..db import get_pool
+
+    response.headers["Cache-Control"] = "no-store"
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        out = await FI.resolve_audited(
+            conn, intent_id=intent_id, body=dict(body or {}),
+            auth={"admin_token_verified": True,
+                  "resolution_key_verified": True,
+                  # WHO THE KEY AUTHENTICATES, from configuration -- never
+                  # from the request body.
+                  "operator": (getattr(settings(),
+                                       "funded_resolution_operator", "")
+                               or "").strip(),
+                  "route": ("POST /api/admin/funded-investigations/"
+                            "{intent_id}/resolve")})
+    if not out.get("ok"):
+        response.status_code = 409
+    return out
+
+
 @app.post("/api/admin/funded-limits/approve",
           dependencies=[Depends(require_admin)])
 async def admin_approve_funded_limits(response: Response,
