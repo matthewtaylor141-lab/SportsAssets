@@ -47,6 +47,7 @@ from sportsassets import bettor_funded_management as FM
 from sportsassets import bettor_funded_model as FMD
 from sportsassets import bettor_funded_pair_cycle as PC
 from sportsassets import bettor_indirect_structures as IS
+from sportsassets import bettor_settlement_clauses as SC
 from sportsassets.workers import ext_pinnacle_loop as LOOP
 
 DSN = os.environ.get("RN1X_TEST_DSN", "")
@@ -1227,7 +1228,10 @@ async def test_the_legs_carry_the_settlement_provenance_into_the_decision():
         prov = leg.settlement_provenance
         assert prov["raw_text"] == PROSE_WITH_CANCELLATION
         assert len(prov["content_sha256"]) == 64
-        assert prov["interpretation_version"] == "SETTLEMENT_CLAUSES_V1"
+        # THE CONSTANT, not the literal: the version moves whenever the
+        # grammar changes, and pinning the string makes every such change
+        # look like a regression in a test about provenance.
+        assert prov["interpretation_version"] == SC.VERSION
         # ONE CLAUSE PER FIELD, not the document.
         assert leg.tie_rule == "A tie resolves 50-50."
         assert leg.void_rule == CANCELLATION_CLAUSE

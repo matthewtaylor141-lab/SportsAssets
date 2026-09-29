@@ -260,7 +260,7 @@ def test_one_clause_stating_two_payouts_is_ambiguous_not_a_choice():
 
 
 def test_a_clause_naming_an_outcome_with_no_payout_is_acknowledged_not_priced():
-    prose = "A cancelled game will be handled under our general rules."
+    prose = "If the game is cancelled the fixture will be reviewed."
     rec = SC.interpret(prose)["rules"][SC.CANCELLED]
     assert rec["established"] is False
     assert rec["refusal"] == SC.R_TRIGGER_WITHOUT_PAYOUT
@@ -269,6 +269,22 @@ def test_a_clause_naming_an_outcome_with_no_payout_is_acknowledged_not_priced():
     # not state its money. That is a different report from silence, and both
     # are refusals.
     assert rec["refusal"] != SC.R_NOT_STATED
+
+
+def test_a_cross_reference_is_a_discretion_not_a_missing_payout():
+    """MY EARLIER PROSE FOR THE TEST ABOVE, which v2 reads more precisely.
+
+    "A cancelled game will be handled under our general rules" was asserted as
+    A_CLAUSE_NAMES_THIS_OUTCOME_AND_STATES_NO_PAYOUT. That refusal sends a
+    reader looking for the payout elsewhere in the document; "handled under" is
+    a CROSS-REFERENCE, and saying so says there is no payout here to find. The
+    two are both refusals and they are not the same report.
+    """
+    rec = SC.interpret("A cancelled game will be handled under our general "
+                       "rules.")["rules"][SC.CANCELLED]
+    assert rec["established"] is False
+    assert rec["refusal"] == SC.R_DISCRETIONARY
+    assert rec["hedges"], rec
 
 
 def test_absent_prose_refuses_distinctly_from_prose_that_omits_the_outcome():

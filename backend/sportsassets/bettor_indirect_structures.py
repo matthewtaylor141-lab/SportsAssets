@@ -337,43 +337,42 @@ _LEGACY_FIELD_FOR = {
 
 
 def _established_payout(leg: Leg, outcome: str) -> int | None:
-    """Per-unit cents this leg pays in `outcome`, or None if not established.
+    """Per-unit cents THIS SIDE of this leg pays in `outcome`, or None.
 
-    THE RULE THIS ENFORCES. A payout is established for an outcome only by
-    text that NAMES THAT OUTCOME and states a payout for it. Nothing else
-    counts -- not a payout stated for a different outcome, not the presence
-    of a string in a field, not a default.
+    THE RULE THIS ENFORCES. A payout is established for an outcome only by text
+    that NAMES THAT OUTCOME and, by a construction the clause reader recognises,
+    states a resolution for it. Nothing else counts -- not a resolution stated
+    for a different outcome, not the presence of a string in a field, not a
+    default.
 
-    Two sources are read, in order:
+    AND A RESOLUTION IS NOT A PAYOUT. The prose says what the MARKET does; what
+    a held contract RECEIVES also needs the account's own order intent, because
+    a market resolving NO pays $1.00 to the NO holder and $0.00 to the YES
+    holder. v1 read "this market resolves NO" as a class it had named
+    RESOLVES_NO_FOR_THE_HELD_SIDE and returned 0 cents for BOTH sides.
 
-      1. `leg.settlement_rules` -- the structured per-outcome reading, which
-         already carries one clause per outcome and refuses on silence,
-         conflict and ambiguity.
-      2. the legacy per-outcome string field, VERIFIED against the same
-         trigger vocabulary. This is the half that closes the reported
-         defect at the point of USE: the whole-prose blob that `build_leg`
-         used to put in `void_rule` does not name a cancellation trigger, so
-         it now establishes nothing even if some caller still supplies it.
+    THE SIDE COMES FROM THE IDENTITY, NEVER FROM `backs`. `condition_id` is
+    `slug#SIDE`, so the order intent travels with the leg. Which participant a
+    leg backs is a different fact: a leg backing team B can hold either outcome
+    token of a market about team B, and inferring polarity from orientation is
+    the conflation this function must not make. A leg whose identity carries no
+    side cannot be paid a YES/NO resolution, and refuses.
 
-    A REFUND IS NOT FIFTY CENTS. Where the clause says the basis is
-    refunded, the payout is this contract's own cost -- 30c on one bought at
-    30c -- and is undetermined when the cost is not stated. Returning 50
-    would invent a gain on the cheap side and a loss on the dear one, and
-    would contradict `reconcile_settlement`, which books a void as the
-    remaining basis.
+    A REFUND IS NOT FIFTY CENTS. Where the clause says the basis is refunded the
+    payout is this contract's own cost -- 30c on one bought at 30c -- and is
+    undetermined when the cost is not stated. Returning 50 would invent a gain
+    on the cheap side and a loss on the dear one, and would contradict
+    `reconcile_settlement`, which books a void as the remaining basis.
     """
+    side = held_side_of_leg(leg)
     rec = leg.rule_for(outcome)
     if rec and rec.get("established"):
-        cls = rec.get("payout_class")
-        if cls == SETTLE.PAY_REFUND_BASIS:
-            return leg.cost_cents_per_unit        # None if unstated
-        if cls == SETTLE.PAY_STAYS_OPEN:
-            return None          # not a payout at all; the market stays open
-        return SETTLE.PAYOUT_CENTS.get(cls)       # None for unpriced classes
+        return _cents_for(rec.get("resolution") or rec.get("payout_class"),
+                          side, leg)
     if rec is not None:
         # READ AND REFUSED. The structured reading is authoritative for this
         # outcome once it exists; falling back to the string field here would
-        # let the blob answer a question the clause reader just declined.
+        # let a blob answer a question the clause reader just declined.
         return None
 
     field_name = _LEGACY_FIELD_FOR.get(outcome)
@@ -382,18 +381,36 @@ def _established_payout(leg: Leg, outcome: str) -> int | None:
     text = getattr(leg, field_name, None)
     if not leg.settlement_text_captured or not text:
         return None
-    # THE GUARD. Does this text actually speak about this outcome?
+    # THE GUARD. Does this text actually speak about this outcome at all?
     if not SETTLE._mentions(text, outcome):
         return None
     read = SETTLE.read_outcome(text, outcome)
     if not read["established"]:
         return None
-    cls = read["payout_class"]
-    if cls == SETTLE.PAY_REFUND_BASIS:
-        return leg.cost_cents_per_unit
-    if cls == SETTLE.PAY_STAYS_OPEN:
+    return _cents_for(read.get("resolution") or read.get("payout_class"),
+                      side, leg)
+
+
+def held_side_of_leg(leg: Leg) -> str | None:
+    """The account's order intent for this leg, from its side-aware identity.
+
+    Deliberately NOT `leg.backs`. Orientation says which participant the leg's
+    outcome is about; the side says which outcome token is held. A market on
+    team B resolving NO pays the holder of B's NO token, and orientation cannot
+    tell you whether that is this leg.
+    """
+    cid = str(getattr(leg, "condition_id", "") or "")
+    if "#" not in cid:
         return None
-    return SETTLE.PAYOUT_CENTS.get(cls)
+    side = cid.rsplit("#", 1)[1].strip().upper()
+    return side if side in SETTLE.SIDES else None
+
+
+def _cents_for(resolution, side, leg: Leg) -> int | None:
+    """One resolution plus one side plus one basis, in cents, or None."""
+    got = SETTLE.side_payout_cents(
+        resolution, side, basis_cents=leg.cost_cents_per_unit)
+    return got.get("cents")
 
 
 def void_suppression_hides(legs, *, fixture_can_void: bool) -> tuple[str, ...]:
