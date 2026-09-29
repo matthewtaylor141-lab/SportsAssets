@@ -663,6 +663,11 @@ X_FEWER_THAN_TWO = "FEWER_THAN_TWO_GRADED_CONTRACTS_ON_THE_FIXTURE"
 X_OBSERVED_RECENTLY = "FIXTURE_OBSERVED_RECENTLY"
 X_ATTEMPTED_RECENTLY = "FIXTURE_ATTEMPTED_RECENTLY_AND_REFUSED"
 
+#: ONLY ROWS THAT CAN BECOME A LEG ARE FETCHED -- a captured family and a
+#: graded suffix -- because the window holds ~70,000 rows across every sport
+#: and a row limit applied before that filter would be spent on table tennis.
+#: Every other row is still COUNTED, by `_CATALOGUE_TALLY_SQL`, so what the
+#: fetch leaves out is reported rather than silent.
 _CATALOGUE_SQL = (
     "SELECT market_slug, intent, event_slug, event_title, question, "
     "       sports_type, team_abbr, side_norm, signed, line, game_start, "
@@ -671,7 +676,29 @@ _CATALOGUE_SQL = (
     " WHERE game_start > to_timestamp($1) AND game_start <= to_timestamp($2) "
     "   AND updated_at > to_timestamp($3) AND event_slug IS NOT NULL "
     "   AND market_slug IS NOT NULL "
+    "   AND split_part(coalesce(sports_type, ''), '_', 1) = ANY($5::text[]) "
+    "   AND sports_type ~ $6 "
     " ORDER BY game_start, event_slug, market_slug, intent LIMIT $4")
+_CATALOGUE_TALLY_SQL = (
+    "SELECT split_part(coalesce(sports_type, ''), '_', 1) = ANY($4::text[]) "
+    "         AS family_captured, "
+    "       coalesce(sports_type ~ $5, false) AS graded, count(*) AS rows "
+    "  FROM us_premap "
+    " WHERE game_start > to_timestamp($1) AND game_start <= to_timestamp($2) "
+    "   AND updated_at > to_timestamp($3) AND event_slug IS NOT NULL "
+    "   AND market_slug IS NOT NULL "
+    " GROUP BY 1, 2")
+
+
+def graded_suffix_pattern() -> str:
+    """A regular expression matching exactly the sports_types whose suffix
+    `bettor_funded_hedge_supply.GRADED_SUFFIXES` names -- the supplier's own
+    list, not a second copy of it."""
+    import re as _re
+
+    from . import bettor_funded_hedge_supply as HSUP
+
+    return "(%s)$" % "|".join(_re.escape(s) for s, _ in HSUP.GRADED_SUFFIXES)
 
 #: fixture -> (attempted_at, refusal), process-local. Lost on restart, which
 #: costs one re-attempt per fixture, never a wrong observation.
@@ -788,11 +815,26 @@ async def catalogue_candidates(conn, *, now: float | None = None,
                          "is not the venue's current listing"
                          % (min(known) if known else "never",
                             CATALOGUE_SWEEP_FRESH_S)))
+    pattern = graded_suffix_pattern()
+    window = (at + CATALOGUE_START_MARGIN_S, at + CATALOGUE_HORIZON_S,
+              at - CATALOGUE_RESEEN_S)
     try:
         rows = [dict(r) for r in await conn.fetch(
-            _CATALOGUE_SQL, at + CATALOGUE_START_MARGIN_S,
-            at + CATALOGUE_HORIZON_S, at - CATALOGUE_RESEEN_S,
-            int(CATALOGUE_ROW_LIMIT))]
+            _CATALOGUE_SQL, *window, int(CATALOGUE_ROW_LIMIT),
+            list(CATALOGUE_FAMILIES), pattern)]
+        # WHAT THE FETCH LEFT OUT, COUNTED: other families and ungraded
+        # types in the same window, so the exclusion is a number, not a
+        # silence.
+        for t in await conn.fetch(_CATALOGUE_TALLY_SQL, *window,
+                                  list(CATALOGUE_FAMILIES), pattern):
+            if not t["family_captured"]:
+                k = X_FAMILY_NOT_CAPTURED
+            elif not t["graded"]:
+                k = X_NOT_A_GRADED_VARIABLE
+            else:
+                continue
+            out["excluded_rows"][k] = (out["excluded_rows"].get(k, 0)
+                                       + int(t["rows"]))
         seen_fx = ({str(r["fixture"]): float(r["last"]) for r in await
                     conn.fetch(
                         "SELECT fixture, extract(epoch FROM max(observed_at)) "
