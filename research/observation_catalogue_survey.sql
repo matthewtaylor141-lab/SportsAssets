@@ -14,9 +14,9 @@
 SELECT key, value->>'mode' AS mode, value->>'events' AS events,
        value->>'rows' AS rows, value->>'truncated' AS truncated,
        value->>'err' AS err, value->>'pages_walked' AS pages,
-       to_timestamp((value->>'at')::float8) AS at,
-       round((extract(epoch FROM now()) - (value->>'at')::float8)::numeric, 0)
-                                                           AS age_s
+       (value->>'at')::timestamptz AS at,
+       round(extract(epoch FROM now() - (value->>'at')::timestamptz)::numeric,
+             0)                                            AS age_s
   FROM ingestion_state
  WHERE key IN ('premap_last', 'premap_last_fast')
  ORDER BY key;
