@@ -636,7 +636,10 @@
     ['live', 'Live operation'],
     ['tests', 'Test &amp; release'],
     ['economics', 'Economics'],
-    ['capabilities', 'Capabilities']
+    ['capabilities', 'Capabilities'],
+    /* XAVIER reads its own route (/api/command/xavier) through xavier.js,
+     * loaded by center.html before this file. */
+    ['xavier', 'Xavier']
   ];
 
   function render() {
@@ -682,6 +685,10 @@
       : state.view === 'tests' ? viewTests(v.test_evidence || {})
       : state.view === 'economics' ? viewEconomics(v.economics || {})
       : state.view === 'capabilities' ? viewCapabilities(v.capabilities)
+      : state.view === 'xavier' ? (root.BTXavier
+          ? root.BTXavier.panel(render)
+          : '<section class="cc-panel"><p>xavier.js is not loaded.</p>'
+            + '</section>')
       : viewManagement(v.management || {});
     el.innerHTML = header() + '<main class="cc-body">' + body + '</main>'
       + footer();
