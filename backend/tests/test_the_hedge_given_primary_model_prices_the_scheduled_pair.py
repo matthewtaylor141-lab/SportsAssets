@@ -447,7 +447,14 @@ async def test_the_void_rate_counts_fixtures_point_in_time():
 # 3 · predict_distribution
 # ═════════════════════════════════════════════════════════════════════
 
-PRIMARY_SOURCE = {"from": "CHOSEN_FOR_THIS_TEST", "is": LABEL}
+#: THE HOLD VALUATION'S SOURCE, as `_primary_probability_for` passes it: the
+#: probability is stated for the outcome the held leg pays on, and the HOLD
+#: valuation record it came from was checked (owner requirement: one event
+#: under every component). SYNTHETIC.
+PRIMARY_SOURCE = {"from": "CHOSEN_FOR_THIS_TEST", "is": LABEL,
+                  "probability_event": "CHICAGO_BEARS",
+                  "payout_event_held": "CHICAGO_BEARS",
+                  "record_checked": True, "valuation_row_id": 1}
 #: A PASSING CALIBRATION MEASUREMENT, in the shape the worker's
 #: `source_calibration` returns -- SYNTHETIC, stated for this test.
 PASSING_CALIBRATION = {"measured": True, "within_tolerance": True,
@@ -703,6 +710,16 @@ async def test_acceptance_the_scheduled_pass_ranks_the_hedge_on_the_distribution
             assert cons["acquire_primary_probability"] == P_HOLD
             assert cons["acquire_implied_primary_marginal"] == pytest.approx(
                 (1 - void["rate"]) * P_HOLD)
+        # ── HOLD AND ACQUIRE ARE COMPARED UNDER ONE MEASURE ─────────
+        # the acquisition ranks at HOLD's value plus its increment over HOLD
+        # computed under the distribution; its whole-position expectation
+        # is kept beside it
+        for h in hedges:
+            assert h["hold_value_usd"] == pytest.approx(hold["value_usd"])
+            assert h["value_usd"] == pytest.approx(
+                hold["value_usd"] + h["increment_vs_hold_same_measure_usd"])
+            assert h["whole_position_expected_net_usd"] is not None
+            assert h["valued_as"].startswith("HOLD's value")
         # ── THE DISTRIBUTION BASIS IS ON THE LEDGER ROW ─────────────
         assert row["model_key"] == KEY
         assert row["model_version"] == prom["model"]["model_version"]
@@ -726,6 +743,18 @@ async def test_acceptance_the_scheduled_pass_ranks_the_hedge_on_the_distribution
             pred["void_rate_sensitivity"]
         assert sum(pred["class_probabilities"].values()) == \
             pytest.approx(1.0, abs=1e-9)
+        # ONE EVENT UNDER EVERY COMPONENT, the evidence behind the learned
+        # conditional, and what each probability is conditional on
+        assert set(basis["same_event"]) == {"fixture", "side", "period",
+                                            "overtime", "settlement"}
+        assert all(v["agrees"] for v in basis["same_event"].values())
+        for c in basis["conditional_evidence"].values():
+            assert c["fixtures"] >= PS.MIN_CONDITIONAL_COHORT_FIXTURES
+            assert c["wilson_95"][0] <= c["wilson_95"][1]
+        assert basis["probability_kinds"]["probabilities"] == \
+            PS.UNCONDITIONAL
+        assert basis["probability_kinds"]["basis.primary.p_win"] == \
+            PS.CONDITIONAL_ON_NORMAL_SETTLEMENT
         # ── NOTHING WAS SENT ────────────────────────────────────────
         assert FX.FUNDED_SUBMISSION_ENABLED is False
         assert adapter.sent == [], adapter.sent

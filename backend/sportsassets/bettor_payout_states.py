@@ -111,6 +111,202 @@ R_POSITION_TABLE_DOES_NOT_MATCH = (
 
 _SUM_TOL = 1e-9
 
+#: ── WHAT EACH PROBABILITY IS CONDITIONAL ON (owner requirement 2) ───
+#: A devigged bookmaker probability is a probability GIVEN the fixture is
+#: played and settled normally. The class probabilities apply the measured
+#: void rate to it -- (1 - v) x conditional, plus v on the void class -- and are
+#: therefore UNCONDITIONAL. Every probability in the output is labelled with
+#: one of these, so neither is ever read as the other.
+CONDITIONAL_ON_NORMAL_SETTLEMENT = "CONDITIONAL_ON_NORMAL_SETTLEMENT"
+CONDITIONAL_ON_NORMAL_SETTLEMENT_AND_PRIMARY_OUTCOME = (
+    "CONDITIONAL_ON_NORMAL_SETTLEMENT_AND_THE_PRIMARY_OUTCOME")
+UNCONDITIONAL = "UNCONDITIONAL"
+PROBABILITY_KINDS = {
+    "probabilities": UNCONDITIONAL,
+    "basis.primary.p_win": CONDITIONAL_ON_NORMAL_SETTLEMENT,
+    "basis.primary.p_lose": CONDITIONAL_ON_NORMAL_SETTLEMENT,
+    "basis.primary.p_partial": CONDITIONAL_ON_NORMAL_SETTLEMENT,
+    "basis.conditional.*.p_hedge_wins":
+        CONDITIONAL_ON_NORMAL_SETTLEMENT_AND_PRIMARY_OUTCOME,
+    "basis.void.rate": UNCONDITIONAL,
+    "implied_primary_marginal": UNCONDITIONAL,
+}
+
+#: ── ONE EVENT UNDER EVERY COMPONENT (owner requirement 2) ───────────
+R_COMPONENTS_DESCRIBE_DIFFERENT_EVENTS = (
+    "THE_PRIMARY_PROBABILITY_THE_MODEL_AND_THE_PAYOFF_TABLE_DO_NOT_DESCRIBE_"
+    "ONE_EVENT")
+
+#: ── SPARSE CONDITIONAL COHORTS (owner requirement 2) ────────────────
+#: A learned P(hedge wins | primary outcome) is admissible only when the
+#: conditioning cohort -- the model's own training fixtures with that primary
+#: outcome -- is at least this many independent fixtures AND has shown BOTH
+#: hedge outcomes. Half the registry's MIN_TRAIN_EVENTS (40): the two
+#: cohorts partition the training set, so a balanced 40 gives 20 each. Chosen,
+#: not derived; stated so it can be argued with.
+MIN_CONDITIONAL_COHORT_FIXTURES = 20
+R_CONDITIONAL_EVIDENCE_INSUFFICIENT = "THE_CONDITIONAL_EVIDENCE_IS_INSUFFICIENT"
+R_LEARNED_CERTAINTY_IS_NOT_STRUCTURAL = (
+    "A_LEARNED_CONDITIONAL_OF_ZERO_OR_ONE_IS_NOT_A_STRUCTURAL_FACT")
+_CERTAINTY_EPS = 1e-9
+
+
+def _wilson(k: float, n: float, z: float = 1.959963984540054) -> list | None:
+    if n <= 0:
+        return None
+    ph = k / n
+    den = 1.0 + z * z / n
+    centre = (ph + z * z / (2 * n)) / den
+    half = z * math.sqrt(ph * (1 - ph) / n + z * z / (4 * n * n)) / den
+    return [max(0.0, centre - half), min(1.0, centre + half)]
+
+
+def cohort_evidence(records, *, learned_outcomes, predictions=None,
+                    min_fixtures: int = MIN_CONDITIONAL_COHORT_FIXTURES
+                    ) -> dict:
+    """THE EVIDENCE BEHIND EACH LEARNED CONDITIONAL, OR A NAMED REFUSAL. Pure.
+
+    `records` are the approved model's own training records (its provenance):
+    each names its fixture, its label (did the hedge win) and each leg's
+    settlement reading, the primary first. Per primary outcome the model is
+    asked to predict for (`learned_outcomes`): the cohort's fixture count, its
+    EVENT-WEIGHTED hedge-win rate (one weight per fixture -- repeated
+    observations of one fixture are not independent examples), a Wilson 95%
+    interval on that rate over the fixture count, and the model's prediction
+    beside it. Refuses when a cohort has fewer than `min_fixtures` fixtures or
+    has never shown one of the two hedge outcomes -- an outcome not observed is
+    not thereby impossible -- and when the model predicts an exact 0 or 1 for
+    an outcome the table says is uncertain."""
+    preds = dict(predictions or {})
+    by_fixture: dict = {}
+    for r in records or ():
+        legs = r.get("leg_outcomes") or ()
+        won = (legs[0] or {}).get("won") if legs else None
+        if won is None:
+            continue
+        o = WIN if bool(won) else LOSE
+        by_fixture.setdefault(o, {}).setdefault(str(r.get("fixture")),
+                                                []).append(
+            float(r.get("label") or 0.0))
+    cohorts: dict = {}
+    refusals: list = []
+    for o in learned_outcomes:
+        fx = by_fixture.get(o, {})
+        n = len(fx)
+        wins = sum(sum(v) / len(v) for v in fx.values()) if n else 0.0
+        fixtures_with_win = sum(1 for v in fx.values() if max(v) >= 0.5)
+        fixtures_with_loss = sum(1 for v in fx.values() if min(v) < 0.5)
+        rate = (wins / n) if n else None
+        q = preds.get(o)
+        c = {"primary_outcome": o, "fixtures": n,
+             "records": sum(len(v) for v in fx.values()),
+             "event_weighted_hedge_win_rate": rate,
+             "wilson_95": _wilson(wins, n),
+             "fixtures_with_a_hedge_win": fixtures_with_win,
+             "fixtures_with_a_hedge_loss": fixtures_with_loss,
+             "model_prediction": q, "min_fixtures": min_fixtures,
+             "weighting": "ONE_WEIGHT_PER_FIXTURE"}
+        why = None
+        if n < min_fixtures:
+            why = ("the %s cohort has %d fixture(s); %d are required before a "
+                   "learned P(hedge wins | %s) is used" % (o, n, min_fixtures,
+                                                           o))
+        elif fixtures_with_win == 0 or fixtures_with_loss == 0:
+            why = ("the %s cohort has never shown a hedge %s; an unobserved "
+                   "outcome is not an impossible one" % (
+                       o, "win" if fixtures_with_win == 0 else "loss"))
+        if why:
+            c["insufficient"] = why
+            refusals.append({"refusal": R_CONDITIONAL_EVIDENCE_INSUFFICIENT,
+                             "outcome": o, "why": why})
+        elif q is not None and (q <= _CERTAINTY_EPS
+                                or q >= 1.0 - _CERTAINTY_EPS):
+            c["insufficient"] = "LEARNED_CERTAINTY"
+            refusals.append({"refusal": R_LEARNED_CERTAINTY_IS_NOT_STRUCTURAL,
+                             "outcome": o,
+                             "why": ("the model predicts %r for an outcome the "
+                                     "payoff table leaves uncertain; only the "
+                                     "table can make a conditional certain"
+                                     % q)})
+        cohorts[o] = c
+    if refusals:
+        return {"ok": False, "refusal": refusals[0]["refusal"],
+                "refusals": refusals, "cohorts": cohorts,
+                "why": refusals[0]["why"]}
+    return {"ok": True, "refusal": None, "cohorts": cohorts}
+
+
+def learned_outcomes(classes: dict) -> list:
+    """The primary outcomes whose hedge payout is LEARNED for this table (two
+    played classes with hedge payouts {0, 100}); the rest are structural."""
+    played = [c for c in (classes or {}).get("classes") or () if not c["void"]]
+    out = []
+    for o in PRIMARY_OUTCOMES:
+        g = [c for c in played if c["primary"]["outcome"] == o]
+        if len(g) == 2 and sorted(c["hedge"]["cents"] for c in g) == [
+                0, IS.CENTS]:
+            out.append(o)
+    return out
+
+
+def same_event(structure, *, primary_source: dict | None,
+               overtime_included) -> dict:
+    """DO THE PRIMARY PROBABILITY, THE CONDITIONAL MODEL AND THE PAYOFF TABLE
+    DESCRIBE ONE EVENT? Pure. Checked field by field and recorded; a mismatch,
+    or a field that cannot be checked, refuses by name.
+
+      fixture     both legs of the table are on one fixture
+      side        the probability is stated for the outcome the held leg pays
+                  on (probability_event == payout_event_held)
+      period      both legs grade the same period
+      overtime    both legs share one overtime treatment, and it is the one
+                  the model's features were computed with
+      settlement  the held leg's settlement compatibility was established by
+                  the HOLD valuation that supplied the probability (its
+                  record was checked), and the hedge leg's by `discover`
+    """
+    st = _as_dict(structure)
+    grading = list(st.get("leg_grading") or ())
+    src = dict(primary_source or {})
+    agree: dict = {}
+    bad: list = []
+
+    def _put(field, ok, detail):
+        agree[field] = dict(detail, agrees=ok)
+        if not ok:
+            bad.append(field)
+
+    if len(grading) != 2:
+        return {"ok": False, "refusal": R_COMPONENTS_DESCRIBE_DIFFERENT_EVENTS,
+                "agreements": {}, "mismatched": ["legs"],
+                "why": "the structure does not record both legs' grading"}
+    fx = [g.get("fixture_id") for g in grading]
+    _put("fixture", bool(fx[0]) and fx[0] == fx[1], {"legs": fx})
+    pe, he = src.get("probability_event"), src.get("payout_event_held")
+    _put("side", bool(pe) and bool(he) and str(pe) == str(he),
+         {"probability_event": pe, "payout_event_held": he})
+    per = [g.get("period") for g in grading]
+    _put("period", bool(per[0]) and per[0] == per[1], {"legs": per})
+    ot = [g.get("overtime") for g in grading]
+    # the supplier's `overtime_included` is `leg.overtime == OT_INCLUDED`
+    legs_ot_included = None if not ot[0] else (ot[0] == IS.OT_INCLUDED)
+    _put("overtime", bool(ot[0]) and ot[0] != IS.OT_UNKNOWN
+         and ot[0] == ot[1] and overtime_included is not None
+         and bool(overtime_included) == bool(legs_ot_included),
+         {"legs": ot, "model_features_overtime_included": overtime_included})
+    _put("settlement", bool(src.get("record_checked")),
+         {"held": ("ESTABLISHED_BY_THE_HOLD_VALUATION_RECORD"
+                   if src.get("record_checked")
+                   else "THE_HOLD_VALUATION_RECORD_WAS_NOT_CHECKED"),
+          "hedge": "SETTLEMENT_COMPATIBLE_BY_DISCOVER",
+          "valuation_row_id": src.get("valuation_row_id")})
+    if bad:
+        return {"ok": False, "refusal": R_COMPONENTS_DESCRIBE_DIFFERENT_EVENTS,
+                "agreements": agree, "mismatched": bad,
+                "why": ("the components disagree or cannot be shown to agree "
+                        "on: %s" % ", ".join(bad))}
+    return {"ok": True, "refusal": None, "agreements": agree}
+
 
 def _as_dict(structure) -> dict:
     if structure is None:
@@ -544,6 +740,31 @@ def distribution(classes: dict, *, primary: dict | None,
     probs = {k: min(1.0, max(0.0, p)) for k, p in probs.items()}
     implied = sum(probs[c["label"]] for c in played
                   if c["primary"]["outcome"] == WIN)
+    # ── ALL FOUR JOINT OUTCOMES, STATED (owner requirement 1) ────────
+    # (primary WIN/LOSE) x (hedge WIN/LOSE), each with its unconditional
+    # probability and how its conditional was identified. A cell no played
+    # row of the table produces is STRUCTURALLY impossible and says which
+    # rows imply that; it is never an unobserved cell set to zero.
+    joint = []
+    for po in (WIN, LOSE):
+        g = by_outcome[po]
+        for ho in (WIN, LOSE):
+            m = [c for c in g if c["hedge"]["outcome"] == ho]
+            cell = {"primary": po, "hedge": ho,
+                    "probability": sum(probs[c["label"]] for c in m),
+                    "probability_kind": UNCONDITIONAL,
+                    "conditional": (cond_basis.get(po) or {}).get("kind"),
+                    "classes": [c["label"] for c in m],
+                    "table_rows": [r for c in m for r in c["merged_regions"]]}
+            if not m:
+                cell["structurally_impossible"] = True
+                cell["implied_by_rows"] = [r for c in g
+                                           for r in c["merged_regions"]]
+                cell["why"] = (
+                    "no played row of the table pays the primary %s with the "
+                    "hedge %s; given the primary %s the table admits only %s"
+                    % (po, ho, po, [c["label"] for c in g] or "no row"))
+            joint.append(cell)
     unresolved = {u["region"]: 0.0 for u in classes.get("unresolved") or ()}
     return dict(
         out, ok=True, refusal=None,
@@ -563,6 +784,13 @@ def distribution(classes: dict, *, primary: dict | None,
             "postponed": POSTPONED_BASIS},
         identified=identified,
         indistinguishable={c["label"]: list(c["merged_regions"]) for c in cls},
+        probability_kinds=dict(PROBABILITY_KINDS),
+        joint_outcomes=joint,
+        other_outcomes={
+            "partial": {c["label"]: probs[c["label"]] for c in played
+                        if c["primary"]["outcome"] == PARTIAL},
+            "void": {c["label"]: probs[c["label"]] for c in voids},
+            "postponed": dict(unresolved)},
         implied_primary_marginal=implied,
         implied_primary_marginal_is=(
             "(1 - void rate) x P(primary wins | not void): the unconditional "

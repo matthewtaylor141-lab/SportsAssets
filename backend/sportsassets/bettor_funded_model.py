@@ -2043,6 +2043,29 @@ async def predict_distribution(conn, *, structure, primary_cost_cents,
             overtime_included=overtime_included, primary_won=False)}
     obj = load(mdl["params"])
     q = {o: float(obj.predict(f)) for o, f in by_outcome.items()}
+    # ── ONE EVENT UNDER THE PROBABILITY, THE MODEL AND THE TABLE ─────
+    ev = PS.same_event(structure, primary_source=primary_source,
+                       overtime_included=overtime_included)
+    out["same_event"] = ev
+    if not ev.get("ok"):
+        return dict(out, ok=False, refusal=ev["refusal"], why=ev.get("why"),
+                    mismatched=ev.get("mismatched"))
+    # ── EVERY LEARNED CONDITIONAL STANDS ON ENOUGH EVIDENCE ──────────
+    prov = mdl.get("training_provenance")
+    if isinstance(prov, str):
+        try:
+            prov = json.loads(prov)
+        except ValueError:
+            prov = None
+    learned = PS.learned_outcomes(classes)
+    cohort = PS.cohort_evidence((prov or {}).get("records") or (),
+                                learned_outcomes=learned,
+                                predictions={o: q.get(o) for o in learned})
+    out["conditional_evidence"] = cohort
+    if not cohort.get("ok"):
+        return dict(out, ok=False, refusal=cohort["refusal"],
+                    why=cohort.get("why"),
+                    conditional_evidence=cohort)
     void = await PO.void_rate(conn, through=at)
     void_in = None
     if void.get("ok"):
@@ -2094,6 +2117,9 @@ async def predict_distribution(conn, *, structure, primary_cost_cents,
              "void": dist["basis"]["void"],
              "postponed": dist["basis"]["postponed"],
              "identified": dist["identified"],
+             "probability_kinds": dist.get("probability_kinds"),
+             "same_event": ev.get("agreements"),
+             "conditional_evidence": cohort.get("cohorts"),
              "merge_rule": PS.MERGE_RULE}
     predicted.update(class_probabilities=dict(dist["probabilities"]),
                      classes=dist["classes"],

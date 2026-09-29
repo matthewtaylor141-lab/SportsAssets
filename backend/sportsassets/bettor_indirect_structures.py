@@ -581,6 +581,7 @@ def leg_grading(legs) -> tuple[dict, ...]:
     for leg in legs:
         line = getattr(leg, "line", None)
         out.append({"condition_id": getattr(leg, "condition_id", None),
+                    "fixture_id": getattr(leg, "fixture_id", None),
                     "kind": getattr(leg, "kind", None),
                     "variable": getattr(leg, "variable", None),
                     "period": getattr(leg, "period", None),

@@ -73,6 +73,7 @@ uncalled. Turning it on is a code change with the owner's authority behind it.
 
 from __future__ import annotations
 
+import math
 import time
 from typing import Any
 
@@ -337,6 +338,22 @@ R_PRIMARY_MARGINAL_DIFFERS_FROM_HOLD = (
     "THE_ACQUISITION_IS_NOT_PRICED_ON_THE_PRIMARY_PROBABILITY_HOLD_IS_VALUED_ON")
 
 
+R_NO_HOLD_VALUE_TO_ANCHOR = "HOLD_STATES_NO_VALUE_TO_MEASURE_THE_ACQUISITION_AGAINST"
+
+
+def _hold_value(hold_ranking):
+    """HOLD's own `value_usd` from the selector's ranking, or None."""
+    for c in (dict(hold_ranking or {}).get("candidates") or ()):
+        if str((c or {}).get("action")) == "HOLD":
+            v = c.get("value_usd")
+            try:
+                f = None if v is None or isinstance(v, bool) else float(v)
+            except (TypeError, ValueError):
+                f = None
+            return f if f is not None and math.isfinite(f) else None
+    return None
+
+
 def _hold_probability(hold_ranking):
     """The probability `rank_with_hold` valued HOLD on (its candidate's
     `value_per_contract`), or None when the ranking does not state one."""
@@ -349,6 +366,27 @@ def _hold_probability(hold_ranking):
                 f = None
             return f if f is not None and 0.0 <= f <= 1.0 else None
     return None
+
+
+def _hold_value_under(position_value, probabilities) -> float | None:
+    """HOLD'S EXPECTED NET VALUE UNDER THE SAME MEASURE AND TABLE THE
+    ACQUISITION WAS PRICED ON: the held leg alone, at its real quantity and
+    basis, over the position table's regions (void refunds included).
+    None when the table or a region probability is missing. Pure."""
+    pv = dict(position_value or {})
+    probs = dict(probabilities or {})
+    held_q = pv.get("held_qty")
+    basis = pv.get("held_basis_usd_per_unit")
+    if not pv.get("ok") or held_q is None or basis is None:
+        return None
+    total = 0.0
+    for r in pv.get("regions") or ():
+        p = probs.get(r.get("region"))
+        cents = (r.get("per_leg_cents") or [None])[0]
+        if p is None or cents is None:
+            return None
+        total += float(p) * float(cents) / 100.0 * float(held_q)
+    return round(total - float(basis) * float(held_q), 6)
 
 
 async def _price_indirect(conn, *, admitted, region_probabilities=None,
@@ -502,6 +540,17 @@ async def _price_indirect(conn, *, admitted, region_probabilities=None,
                 worst_case=out["worst_case"], position_value=position_value)
             out["value_at_void_upper_95"] = (up.get("value_usd")
                                              if up.get("rankable") else None)
+            out["hold_value_at_void_upper_95"] = _hold_value_under(
+                position_value, upper_probabilities)
+        # HOLD UNDER THE SAME MEASURE. The acquisition's whole-position value
+        # is an expectation over the distribution (void mass included); HOLD
+        # from the selector is valued on P(primary wins) with no void term.
+        # The increment over HOLD is therefore computed HERE, under ONE
+        # measure and ONE table, so the difference between the two actions
+        # contains no term from the measure or the held leg's basis.
+        if out.get("distribution_basis") and cand.get("rankable"):
+            out["hold_value_same_measure"] = _hold_value_under(
+                position_value, region_probabilities)
     if cand is not None:
         cand = dict(cand, candidate_id=candidate_id or admitted.get("condition_id"),
                     plan_digest=plan_digest)
@@ -516,6 +565,18 @@ async def _price_indirect(conn, *, admitted, region_probabilities=None,
                     "implied_primary_marginal")
             if "value_at_void_upper_95" in out:
                 cand["value_at_void_upper_95"] = out["value_at_void_upper_95"]
+            hs = out.get("hold_value_same_measure")
+            if hs is not None and cand.get("expected_net_usd") is not None:
+                cand["whole_position_expected_net_usd"] = cand[
+                    "expected_net_usd"]
+                cand["hold_value_same_measure_usd"] = hs
+                cand["increment_vs_hold_same_measure_usd"] = round(
+                    float(cand["expected_net_usd"]) - hs, 6)
+                hu = out.get("hold_value_at_void_upper_95")
+                if hu is not None and out.get("value_at_void_upper_95") \
+                        is not None:
+                    cand["increment_vs_hold_at_void_upper_95_usd"] = round(
+                        float(out["value_at_void_upper_95"]) - hu, 6)
     # THE MERGED TABLES STAY HERE: they priced the candidate and the decision
     # records the class probabilities and their basis, not the tables again.
     return dict(out, candidate=cand,
@@ -621,6 +682,43 @@ async def decide_and_record(conn, *, decision_id: str, account_id: str,
                         else "is valued on %r" % hold_p, p)))
     if consistency:
         out["primary_marginal_consistency"] = consistency
+    # ── THE ACQUISITION IS RANKED AS HOLD + ITS SAME-MEASURE INCREMENT ─
+    #
+    # HOLD, DIRECT_EXIT and REDUCE are valued by the selector on P(primary
+    # wins) at the held leg's remaining basis. The acquisition's whole-position
+    # value is an expectation under the payout-state distribution, which also
+    # carries the void mass. Comparing the two raw would put the gap between
+    # the measures (and any gap between the held-leg bases) into the ranking.
+    # So the acquisition's ranking value is HOLD's own value plus the increment
+    # over HOLD computed under ONE measure and ONE table (`_price_indirect`);
+    # its whole-position expectation is kept beside it, unchanged.
+    hold_value = _hold_value(hold_ranking)
+    for row in priced:
+        cand = row.get("candidate") or {}
+        inc = cand.get("increment_vs_hold_same_measure_usd")
+        if not cand.get("rankable") or inc is None:
+            continue
+        if hold_value is None:
+            row["candidate"] = dict(
+                cand, rankable=False, value_usd=None,
+                blocker=R_NO_HOLD_VALUE_TO_ANCHOR,
+                why=("the acquisition's value is HOLD's value plus its "
+                     "same-measure increment, and HOLD states no value"))
+            continue
+        anchored = round(hold_value + float(inc), 6)
+        upd = {"value_usd": anchored, "expected_net_usd": anchored,
+               "hold_value_usd": hold_value,
+               "valued_as": ("HOLD's value (%.6f) + the increment over HOLD "
+                             "under the payout-state distribution (%+.6f); "
+                             "the whole-position expectation under that "
+                             "distribution is %s"
+                             % (hold_value, float(inc),
+                                cand.get("whole_position_expected_net_usd")))}
+        iu = cand.get("increment_vs_hold_at_void_upper_95_usd")
+        if "value_at_void_upper_95" in cand:
+            upd["value_at_void_upper_95"] = (
+                None if iu is None else round(hold_value + float(iu), 6))
+        row["candidate"] = dict(cand, **upd)
     candidates = [r["candidate"] for r in priced if r.get("candidate") is not None]
     out["indirect_candidates"] = candidates
     out["indirect_candidate"] = candidates[0] if len(candidates) == 1 else None
