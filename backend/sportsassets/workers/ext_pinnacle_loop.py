@@ -4221,6 +4221,60 @@ async def _venue_prose(slug):
     return dict(await asyncio.to_thread(_read_venue_rules_blocking, slug) or {})
 
 
+def _clean_family(sports_type):
+    """The sport family from a venue sports_type, for the fee coefficient."""
+    return str(sports_type or "").split("_")[0].strip().lower() or None
+
+
+async def _fee_for_candidates(legs, *, at, sport=None,
+                              wanted_qty=None) -> dict:
+    """ONE TAKER FEE READING for an acquisition of this size, or None.
+
+    Priced on the schedule in force at the CYCLE'S date and with the SPORT'S
+    own coefficient, because the fee module says in its own source that doing
+    otherwise is a defect. It never raises: a fee that cannot be priced is a
+    None the ranking refuses on, not an exception on the decision path.
+    """
+    import datetime as _dt
+
+    out = {"fee_usd": None, "fee_basis": None, "sport": sport,
+           "why": None}
+    rows = [dict(c) for c in (legs or []) if (c or {}).get("price") is not None]
+    if not rows:
+        out["why"] = ("no priced candidate to price a fee for")
+        return out
+    try:
+        from .. import bettor_fee_schedule as FS
+        from .. import calibration_fees as CF
+
+        when = _dt.datetime.fromtimestamp(float(at), _dt.timezone.utc)
+        sched = FS.for_date(when.date().isoformat())
+        theta = CF.taker_coefficient(sport, at=when.isoformat())
+        # THE LARGEST CANDIDATE'S OWN PRICE AND SIZE. A single reading is used
+        # for the comparison, so it must not flatter the cheapest candidate:
+        # taking the most expensive one keeps the shared reading conservative.
+        worst = max(rows, key=lambda r: float(r.get("price") or 0.0))
+        # THE QUANTITY WE WOULD ACQUIRE, NOT THE WHOLE DISPLAYED DEPTH. Sizing
+        # the fee on `depth_qty` priced 500 contracts when 10 were wanted and
+        # produced a $7.30 fee on a $3 hedge -- which would have made every
+        # candidate look unaffordable. Displayed depth is what is AVAILABLE; the
+        # fee is charged on what is bought.
+        qty = int(float(wanted_qty or 0) or 1)
+        fee = sched.exact(theta, qty, float(worst["price"]))
+        out.update(fee_usd=float(fee),
+                   fee_basis=("%s taker fee at theta %s for %d contracts at "
+                              "%s, schedule in force on %s"
+                              % (sched.describe().get("name", "PMUS"), theta,
+                                 qty, worst["price"],
+                                 when.date().isoformat())),
+                   theta=str(theta), schedule_date=when.date().isoformat(),
+                   priced_on=worst.get("market_slug"))
+    except Exception as exc:                                    # noqa: BLE001
+        out["why"] = ("the fee could not be priced (%s), so no candidate is "
+                      "scored on an assumed fee" % type(exc).__name__)
+    return out
+
+
 R_NO_ADMISSIBLE_HEDGE_CANDIDATE = (
     "NO_SIBLING_CONTRACT_ON_THIS_FIXTURE_COULD_BE_BUILT_INTO_A_LEG")
 
@@ -4527,6 +4581,28 @@ async def funded_pair_inputs(conn, pos, *, at, deferred=None,
         hedge_unavailable.append(cands["refusal"])
     if held.get("ok") and not cands.get("legs"):
         hedge_unavailable.append(R_NO_ADMISSIBLE_HEDGE_CANDIDATE)
+    # ── THE FEE, PRICED PER CANDIDATE AT ITS OWN DATE AND SPORT ──────
+    #
+    # `fee_usd` was None, which made every candidate `not_rankable` for want of
+    # a fee reading. Two traps the fee module names in its own source and both
+    # are avoided here:
+    #
+    #   * `LATEST_CALLERS_ARE_A_DEFECT` -- "a fee is a fact about WHEN it was
+    #     charged. Callers that use LATEST price every fill on today's
+    #     schedule." So the schedule is taken with `for_date` at the cycle's own
+    #     date.
+    #   * `PER_SPORT_THETA_IS_NOT_HERE` -- the exchange-wide coefficient
+    #     understates Table Tennis from 2026-10-01 by 31%. So the coefficient
+    #     comes from `calibration_fees.taker_coefficient(sport, at)`.
+    #
+    # A fee that cannot be priced stays None and the candidates report
+    # THE_FEE_SCHEDULE_WOULD_NOT_PRICE_THIS_CANDIDATE rather than being scored
+    # on an assumed one.
+    fee_read = await _fee_for_candidates(
+        cands.get("legs") or [], at=at, wanted_qty=residual,
+        sport=_clean_family((held.get("row") or {}).get("sports_type")))
+    out["fee_read"] = fee_read
+
     # ── THE PROBABILITY SUPPLIER IS NOT RE-IMPLEMENTED HERE ──────────
     #
     # `discover` already calls `bettor_funded_model.predict_for` itself, per
@@ -4575,7 +4651,9 @@ async def funded_pair_inputs(conn, pos, *, at, deferred=None,
                 # None BY DESIGN: `discover` asks `predict_for` per structure.
                 region_probabilities=None,
                 evidence_quality=FD.EVIDENCE_NOT_ESTABLISHED,
-                limits=None, fee_usd=None,
+                limits=None,
+                fee_usd=fee_read.get("fee_usd"),
+                fee_basis=fee_read.get("fee_basis"),
                 depth=({c["market_slug"]: c.get("depth_qty")
                         for c in (cands.get("legs") or [])} or None),
                 incremental=None, capital_duration_h=None,

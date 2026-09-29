@@ -87,6 +87,17 @@ async def _clean(conn):
     for t in ("bettor_funded_decisions",):
         if await _has(conn, t):
             await conn.execute("DELETE FROM %s WHERE account_id=$1" % t, ACCT)
+    # ── THE MODEL THIS MODULE PROMOTES MUST NOT OUTLIVE IT ───────────
+    #
+    # `_promote_a_model` leaves an APPROVED row in the registry, and the
+    # database permits ONE approved version per key. Left behind, the learning
+    # module's "a candidate with no skill is rejected" test then found an
+    # approved model where it asserts there is none -- a false pass waiting to
+    # happen in the other direction too, since a stale approved model would
+    # answer `predict_for` for any later test.
+    if await _has(conn, "bettor_funded_models"):
+        await conn.execute("DELETE FROM bettor_funded_models "
+                           "WHERE model_id LIKE 'hedgewins-%'")
     await conn.execute(
         "DELETE FROM bettor_funded_fills WHERE intent_id IN ("
         " SELECT intent_id FROM bettor_funded_intents WHERE account_id=$1)",
@@ -387,45 +398,146 @@ async def test_the_scheduled_pass_reaches_discovery_with_built_legs():
         assert disc.get("distinct_settlement_compatible_contracts", 0) >= 1, disc
 
 
-async def test_the_candidates_are_admitted_but_still_not_RANKED_and_it_says_so():
-    """THE REMAINING GAP, NAMED BY THE CODE ITSELF RATHER THAN BY ME.
+def _depth(prices, d):
+    return _quoter({k: (v[0], d) for k, v in prices.items()})
 
-    `discover` admits the eligible contracts and then takes THE FIRST of them,
-    and its own payload says why:
 
-        hedge_candidates_not_ranked = {
-            'admitted': 2, 'taken': 'the first',
-            'why': 'ranking them needs a region probability, a fee and a depth
-                    reading per contract, none of which is wired on this lane.
-                    Scoring on inputs nobody read would be worse than one
-                    deterministic choice'}
+async def _pass_at_depth(conn, depth, *, hedge_price=0.30, exit_price=0.50):
+    """One pass with every candidate's displayed depth set to `depth`."""
+    import sportsassets  # noqa: F401  (keeps the import graph honest)
+    global _quoter
+    real = _quoter
+    try:
+        _quoter = lambda pr, _d=depth: real(                      # noqa: E731
+            {k: (v[0], _d) for k, v in pr.items()})
+        return await _run_pass(conn, hedge_price=hedge_price,
+                               exit_price=exit_price, adapter=_Adapter())
+    finally:
+        _quoter = real
 
-    So "evaluate every eligible hedge candidate rather than the first admitted"
-    is NOT closed by this batch. The suppliers now deliver the candidates; the
-    per-contract fee and depth readings that would let them be scored against
-    each other are still missing, and the lane reports that instead of implying
-    a ranking happened.
 
-    This test exists so the gap cannot be quietly closed by a later change that
-    starts picking the first candidate WITHOUT saying so.
+async def test_every_admitted_candidate_is_scored_on_its_own_numbers():
+    """CODEX'S ITEM: rank eligible candidates rather than selecting the first
+    admitted. It used to take `admitted_all[0]` and record
+    `hedge_candidates_not_ranked` with the reason that a region probability, a
+    fee and a depth reading per contract were not wired. They are now: the
+    supplier prices EACH candidate on its OWN ladder and returns that
+    contract's own displayed depth, and the fee is priced at the cycle's date
+    with the sport's own coefficient.
+
+    AND THE RANKING MATTERS, which is the part worth measuring. On this fixture
+    the two admitted candidates score +$1.35 and -$8.65 net of fees. Taking
+    "the first" was a coin flip between them.
     """
     async with _conn() as conn:
         if not await _has(conn, "bettor_funded_decisions"):
             pytest.skip("migration 132 is not in this database")
         await _clean(conn)
         await _catalogue(conn)
-        out = await _run_pass(conn, hedge_price=0.30, exit_price=0.50,
-                              adapter=_Adapter())
+        out = await _pass_at_depth(conn, 500)
         step = out["pass"]["considered"][0]
-        nr = step.get("hedge_candidates_not_ranked")
-        assert nr, (
-            "either the candidates are ranked -- in which case this test should "
-            "be replaced by one asserting the ranking -- or the lane must say "
-            "they are not: %r" % (step,))
-        assert nr.get("admitted", 0) >= 2, nr
-        assert nr.get("taken") == "the first", nr
-        for word in ("region probability", "fee", "depth"):
-            assert word in nr.get("why", ""), nr
+        r = step.get("hedge_candidate_ranking") or {}
+        assert len(r.get("ranked") or []) >= 2, r
+        assert r.get("not_rankable") == [], r
+        scores = [row["score_usd"] for row in r["ranked"]]
+        # DESCENDING, and genuinely spread -- a ranking over indistinguishable
+        # candidates would prove nothing.
+        assert scores == sorted(scores, reverse=True), scores
+        assert max(scores) - min(scores) > 1.0, (
+            "the candidates must actually differ, or the ranking is decorative: "
+            "%r" % (scores,))
+        # THE WINNER IS THE TOP SCORE, and it is what the step admitted.
+        assert step.get("admitted_contract") == r["ranked"][0]["condition_id"]
+        # AND THE OLD "not ranked" ADMISSION IS GONE.
+        assert "hedge_candidates_not_ranked" not in step, step
+
+
+async def test_a_moneyline_plus_an_opposing_spread_is_not_assumed_to_be_a_middle():
+    """MEASURED, ON THE COMBINATION IT WOULD BE EASIEST TO ASSUME ABOUT.
+
+    Codex: do not assume every moneyline/opposing-spread combination is superior
+    or cannot lose. On this fixture the classifier returns INDEPENDENT_OVERLAP
+    for one of the two pairings -- both-win AND both-lose are reachable -- and
+    its fee-adjusted floor is NEGATIVE. So the pair can lose, and the ranking
+    puts it last rather than preferring it for looking like a hedge.
+    """
+    async with _conn() as conn:
+        if not await _has(conn, "bettor_funded_decisions"):
+            pytest.skip("migration 132 is not in this database")
+        await _clean(conn)
+        await _catalogue(conn)
+        out = await _pass_at_depth(conn, 500)
+        r = (out["pass"]["considered"][0].get("hedge_candidate_ranking") or {})
+        tax = {row.get("taxonomy_from_valuation") for row in r["ranked"]}
+        assert "INDEPENDENT_OVERLAP" in tax, r["ranked"]
+        overlap = [row for row in r["ranked"]
+                   if row.get("taxonomy_from_valuation") == "INDEPENDENT_OVERLAP"]
+        assert overlap and overlap[0]["score_usd"] < 0, overlap
+        assert overlap[0]["both_win_and_both_lose_reachable"] is True
+        # AND IT IS NOT THE WINNER.
+        assert r["ranked"][0].get("taxonomy_from_valuation") != \
+            "INDEPENDENT_OVERLAP"
+        # THE ORDER DOES NOT COME FROM THE TAXONOMY.
+        assert "taxonomy" in r["the_taxonomy_does_not_set_the_order"]
+
+
+async def test_a_partial_depth_reports_covered_and_uncovered_quantities():
+    """CODEX'S THIRD PROOF, at the point the quantity is decided.
+
+    A book supporting 6 of 10 contracts is not "no hedge": it is a hedge over
+    6 leaving 4 UNCOVERED, and the two quantities travel separately because the
+    way this structure fails is a half-filled second leg whose accounting
+    believes the pair is complete -- `depth_supports` says exactly that.
+
+    The score is PRO-RATED to what can be acquired, so a structure priced over
+    ten contracts does not flatter a book that can only supply six.
+    """
+    async with _conn() as conn:
+        if not await _has(conn, "bettor_funded_decisions"):
+            pytest.skip("migration 132 is not in this database")
+        await _clean(conn)
+        await _catalogue(conn)
+        full = await _pass_at_depth(conn, 500)
+        await _clean(conn)
+        await _catalogue(conn)
+        part = await _pass_at_depth(conn, 6)
+        rf = (full["pass"]["considered"][0].get("hedge_candidate_ranking") or {})
+        rp = (part["pass"]["considered"][0].get("hedge_candidate_ranking") or {})
+        assert rf["ranked"] and rp["ranked"]
+        f, p = rf["ranked"][0], rp["ranked"][0]
+        assert f["covered_qty"] == 10.0 and f["uncovered_qty"] == 0.0
+        assert f["fully_supported"] is True
+        # THE PARTIAL CARRIES BOTH QUANTITIES, SEPARATELY.
+        assert p["covered_qty"] == 6.0, p
+        assert p["uncovered_qty"] == 4.0, p
+        assert p["fully_supported"] is False
+        assert p["covered_qty"] + p["uncovered_qty"] == 10.0
+        # AND IT IS WORTH LESS, pro-rated rather than counted as if full.
+        assert p["score_usd"] < f["score_usd"], (p, f)
+        assert "UNCOVERED" in p.get("score_is_prorated", "")
+
+
+async def test_a_book_supporting_nothing_is_not_rankable_and_not_a_zero():
+    """An unreadable or empty book is not "a candidate worth nothing" -- it is a
+    candidate nobody could size, and scoring it zero would let a measured loser
+    beat it."""
+    async with _conn() as conn:
+        if not await _has(conn, "bettor_funded_decisions"):
+            pytest.skip("migration 132 is not in this database")
+        await _clean(conn)
+        await _catalogue(conn)
+        out = await _pass_at_depth(conn, 0)
+        step = out["pass"]["considered"][0]
+        r = step.get("hedge_candidate_ranking") or {}
+        assert r.get("ranked") == [], r
+        assert r.get("not_rankable"), r
+        assert all(row["refusal"] for row in r["not_rankable"])
+        assert step.get("admitted_contract") is None
+        # AND THE DISTINCTION IS STATED, not left to be inferred.
+        assert "not a zero" in r["an_unreadable_input_is_not_a_zero"] or \
+            "never scored as worthless" in r["an_unreadable_input_is_not_a_zero"]
+        nr = step.get("hedge_candidates_not_ranked") or {}
+        assert nr.get("taken") == "none", nr
 
 
 async def test_nothing_is_sent_when_the_decision_is_not_an_acquisition():

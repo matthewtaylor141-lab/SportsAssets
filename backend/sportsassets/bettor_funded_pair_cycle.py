@@ -1158,6 +1158,224 @@ async def _decide_or_refuse(fn, conn, **kw):
     return await fn(conn, **kw)
 
 
+# ═════════════════════════════════════════════════════════════════════
+# RANKING THE ADMITTED CANDIDATES, ON EACH ONE'S OWN NUMBERS
+# ═════════════════════════════════════════════════════════════════════
+#
+# WHAT THIS REPLACES, AND WHY IT COULD NOT BE DONE BEFORE. `discover` admitted
+# every settlement-compatible contract and then took `admitted_all[0]` -- the
+# first -- recording `hedge_candidates_not_ranked` with the honest reason:
+#
+#     "ranking them needs a region probability, a fee and a depth reading per
+#      contract, none of which is wired on this lane"
+#
+# That was true while `candidate_legs` was empty and the lane had no per-contract
+# reads at all. It is no longer true: `bettor_funded_hedge_supply.
+# candidate_legs_for` prices EACH candidate on its OWN ladder and returns that
+# contract's own price and displayed depth, and the fee schedule prices each
+# acquisition. So the inputs exist and the first-admitted shortcut is now a
+# defect rather than a limitation.
+#
+# ── WHAT IS RANKED ON, AND WHAT IS REFUSED RATHER THAN SCORED ────────
+#
+# Each candidate is scored on its FEE-ADJUSTED NET WORST CASE over the units the
+# structure actually establishes, using `bettor_funded_indirect_pair.
+# net_worst_case` -- the same function the decision module uses, not a second
+# arithmetic. A candidate is NOT scored, and is reported `not_rankable`, when:
+#
+#   * its own price was never established (it never reached here: the supplier
+#     refuses an unpriced candidate rather than pricing it off another book),
+#   * its displayed depth will not support the quantity wanted, or
+#   * the fee schedule will not price it.
+#
+# AN UNREADABLE INPUT IS NOT A ZERO. A candidate missing depth is not "a
+# candidate worth nothing"; it is a candidate nobody measured, and scoring it as
+# zero would let a measured loser beat it. Both lists travel on the step.
+#
+# ── WHAT THIS IS NOT ────────────────────────────────────────────────
+#
+# It is not a claim that the winner is profitable, and it does not choose
+# between the hedge and HOLD or the exit -- `bettor_funded_decision.decide`
+# still owns that comparison and still requires a region probability for the
+# indirect action. This only stops the lane from picking arbitrarily among
+# several hedges. A middle is not preferred here for being a middle: the
+# taxonomy is carried for the record and the ORDER comes from the numbers.
+
+R_CANDIDATE_DEPTH_NOT_ESTABLISHED = (
+    "THIS_CANDIDATES_DISPLAYED_DEPTH_WAS_NOT_ESTABLISHED")
+R_CANDIDATE_DEPTH_TOO_THIN = (
+    "THIS_CANDIDATES_DISPLAYED_DEPTH_WILL_NOT_SUPPORT_THE_QUANTITY")
+R_CANDIDATE_FEE_NOT_PRICED = "THE_FEE_SCHEDULE_WOULD_NOT_PRICE_THIS_CANDIDATE"
+R_CANDIDATE_VALUE_NOT_DETERMINED = (
+    "THE_CANDIDATES_NET_WORST_CASE_WAS_NOT_DETERMINED")
+
+
+def rank_admitted(admitted, *, details=None, wanted_qty=None, fee_usd=None,
+                  fee_basis=None, shared_depth=None):
+    """Order the admitted candidates by fee-adjusted net worst case.
+
+    `admitted`  `discover`'s own admitted list, each entry carrying the
+                classified `structure` and the `leg` it was built from.
+    `details`   the supplier's per-candidate readings keyed by market slug --
+                its own price and its own displayed depth.
+    `wanted_qty` how many contracts the acquisition would want.
+
+    Returns {"ranked": [...], "not_rankable": [...], "best": entry|None, ...}.
+    Pure and never raises: a ranking that throws on the decision path would take
+    down the exit beside it.
+    """
+    from . import bettor_funded_indirect_pair as IP
+
+    by_slug = {}
+    for d in (details or ()):
+        if isinstance(d, dict) and d.get("market_slug"):
+            by_slug[str(d["market_slug"])] = d
+    # ── A SUPPLIER MAY READ DEPTH ONCE FOR THE POSITION ──────────────
+    #
+    # THE REGRESSION THIS FIXES, AND THE GATE FOUND IT. `pair_inputs`'
+    # contract has always allowed a single `depth` reading -- a
+    # `depth_supports(...)` result for the position -- rather than one per
+    # candidate. Reading only `candidate_leg_details` made every candidate
+    # DEPTH_NOT_ESTABLISHED for such a supplier, nothing was rankable, and the
+    # acquisition could no longer win a ranking it used to win. One existing
+    # test caught exactly that.
+    #
+    # So a shared reading is accepted and USED, and the fact that it is shared
+    # is recorded: it cannot discriminate between candidates, so it bounds what
+    # the ranking means rather than being quietly treated as per-contract.
+    shared = dict(shared_depth or {}) if isinstance(shared_depth, dict) else {}
+    shared_qty = shared.get("available_qty")
+    if shared_qty is None and shared.get("ok") and "supportable_qty" in shared:
+        shared_qty = shared.get("supportable_qty")
+    out = {"ranked": [], "not_rankable": [], "best": None,
+           "scored_on": ("fee-adjusted net worst case per candidate, over the "
+                         "units the structure establishes"),
+           "an_unreadable_input_is_not_a_zero": (
+               "a candidate whose depth or fee could not be read is reported "
+               "not_rankable, never scored as worthless -- scoring it zero "
+               "would let a measured loser beat something nobody measured"),
+           "the_taxonomy_does_not_set_the_order": (
+               "a middle is not preferred for being a middle; the order comes "
+               "from the numbers and the taxonomy is carried for the record"),
+           "depth_source": ("per candidate, from each contract's own ladder"
+                            if by_slug else
+                            ("one shared reading for the position, which "
+                             "cannot discriminate between candidates"
+                             if shared_qty is not None else "none"))}
+    for cand in (admitted or ()):
+        cand = dict(cand or {})
+        leg = cand.get("leg")
+        slug = str(cand.get("condition_id")
+                   or getattr(leg, "condition_id", "") or "")
+        det = dict(by_slug.get(slug) or {})
+        if det.get("depth_qty") is None and shared_qty is not None:
+            det["depth_qty"] = shared_qty
+            det["depth_is_shared_not_per_contract"] = True
+        row = {"condition_id": slug, "taxonomy": cand.get("taxonomy"),
+               "units": cand.get("units"),
+               "price": det.get("price"), "depth_qty": det.get("depth_qty"),
+               "evidence_age_s": det.get("evidence_age_s")}
+        # ── DEPTH, WHICH IS DISPLAYED DEPTH AND NOT A QUEUE POSITION ──
+        want = wanted_qty if wanted_qty is not None else cand.get("units")
+        dep = IP.depth_supports(wanted_qty=want,
+                                depth_qty_at_price=det.get("depth_qty"))
+        row["depth"] = dep
+        if det.get("depth_qty") is None:
+            out["not_rankable"].append(
+                dict(row, refusal=R_CANDIDATE_DEPTH_NOT_ESTABLISHED,
+                     why=("this contract's displayed depth was not read, so "
+                          "whether the quantity could be acquired at all is "
+                          "unknown")))
+            continue
+        # ── A PARTIAL DEPTH IS RANKED AT WHAT IT COVERS, NOT REFUSED ──
+        #
+        # MY OWN BUG FIRST: this read `dep.get("supported")`, which
+        # `depth_supports` does not return -- the field is `fully_supported` --
+        # so every candidate was refused THIS_CANDIDATES_DISPLAYED_DEPTH_WILL_
+        # NOT_SUPPORT_THE_QUANTITY however deep the book was. A missing key read
+        # as False, which is the same class of error as treating an absence as
+        # agreement.
+        #
+        # AND THE PARTIAL CASE IS A REAL ANSWER. A book that supports 6 of 10
+        # contracts is not "no hedge": it is a hedge over 6, leaving 4 UNCOVERED,
+        # and the two quantities have to travel separately because the way this
+        # structure fails is a half-filled second leg whose accounting believes
+        # the pair is complete. `depth_supports` says so in its own words. So the
+        # candidate is ranked at its SUPPORTABLE quantity with the shortfall
+        # carried, and only a book supporting nothing is not rankable.
+        supportable = float(dep.get("supportable_qty") or 0.0)
+        row["covered_qty"] = supportable
+        row["uncovered_qty"] = float(dep.get("shortfall_qty") or 0.0)
+        row["fully_supported"] = bool(dep.get("fully_supported"))
+        if supportable <= 0:
+            out["not_rankable"].append(
+                dict(row, refusal=R_CANDIDATE_DEPTH_TOO_THIN,
+                     why=("the displayed depth %r supports no contracts at all, "
+                          "so there is no hedge to rank"
+                          % (det.get("depth_qty"),))))
+            continue
+        # ── THE FEE, WHICH MUST BE PRICED AND NOT ASSUMED ────────────
+        if fee_usd is None:
+            out["not_rankable"].append(
+                dict(row, refusal=R_CANDIDATE_FEE_NOT_PRICED,
+                     why=("no fee reading was supplied, and a fee-adjusted "
+                          "value computed without a fee is not fee-adjusted")))
+            continue
+        val = IP.net_worst_case(cand.get("structure"), fee_usd=fee_usd,
+                                fee_basis=fee_basis)
+        row["net_worst_case"] = val
+        # THE KEY IS `worst_case_usd`. I read `net_worst_case_usd`, which the
+        # function does not return, so every candidate was refused
+        # THE_CANDIDATES_NET_WORST_CASE_WAS_NOT_DETERMINED while the floor was
+        # sitting in the payload at -15.7975. Same shape of error as the depth
+        # key above: a missing key read as an absent value.
+        floor = (val or {}).get("worst_case_usd")
+        row["taxonomy_from_valuation"] = (val or {}).get("taxonomy")
+        # AND THE TAXONOMY IS RECORDED, NOT REWARDED. On the fixture this was
+        # built against -- a moneyline plus an opposing spread, the very
+        # combination it would be easiest to assume cannot lose -- the
+        # classifier returns INDEPENDENT_OVERLAP and a floor of -$15.80 net of
+        # $7.30 in fees. Both-win AND both-lose are reachable. That is the
+        # measured answer to "is a moneyline/opposing-spread pair a middle",
+        # and it is no.
+        row["both_win_and_both_lose_reachable"] = (
+            (val or {}).get("taxonomy") == "INDEPENDENT_OVERLAP")
+        if floor is None:
+            out["not_rankable"].append(
+                dict(row, refusal=R_CANDIDATE_VALUE_NOT_DETERMINED,
+                     why=((val or {}).get("why")
+                          or "the structure's floor was not determined")))
+            continue
+        # THE FLOOR IS OVER WHAT CAN ACTUALLY BE ACQUIRED. A structure priced
+        # over ten contracts when six are available overstates the hedge by the
+        # four that would not fill, so the floor is pro-rated to the covered
+        # quantity and the fact is recorded rather than folded in silently.
+        row["score_usd"] = float(floor)
+        if want and supportable < float(want):
+            row["score_usd"] = float(floor) * (supportable / float(want))
+            row["score_is_prorated"] = (
+                "the structure's floor covers %s contracts and only %s can be "
+                "acquired, so the score is pro-rated and %s stay UNCOVERED"
+                % (want, supportable, row["uncovered_qty"]))
+        out["ranked"].append(row)
+    # HIGHEST FLOOR FIRST; ties broken by the contract id so the order is
+    # deterministic rather than dependent on the catalogue's row order.
+    out["ranked"].sort(key=lambda r: (-r["score_usd"], r["condition_id"]))
+    if out["ranked"]:
+        winner = out["ranked"][0]
+        out["best"] = winner
+        by_id = {str(c.get("condition_id")): c for c in (admitted or ())}
+        out["best_admitted"] = by_id.get(winner["condition_id"])
+        out["why"] = ("%d candidate(s) ranked on their own fee-adjusted floor, "
+                      "%d not rankable; %s wins at %.4f"
+                      % (len(out["ranked"]), len(out["not_rankable"]),
+                         winner["condition_id"][:40], winner["score_usd"]))
+    else:
+        out["why"] = ("no admitted candidate could be ranked: %d had an input "
+                      "nobody read" % len(out["not_rankable"]))
+    return out
+
+
 async def pass_once(conn, *, account_id: str, venue: str,
                     pair_inputs=None, adapter=None,
                     venue_positions: dict | None = None,
@@ -1268,15 +1486,38 @@ async def pass_once(conn, *, account_id: str, venue: str,
         # inferred from the absence of a ranking, and `discover`'s full admitted
         # list travels with it so a reader can see what was not compared.
         admitted_all = list(found.get("admitted") or [])
-        best = (admitted_all or [None])[0]
-        if len(admitted_all) > 1:
+        # ── EVERY ELIGIBLE CANDIDATE IS SCORED, NOT THE FIRST ADMITTED ──
+        #
+        # This used to be `admitted_all[0]`. The supplier now prices EACH
+        # candidate on its OWN ladder and returns that contract's own depth, so
+        # the inputs the old comment said were missing exist, and taking the
+        # first became a defect rather than a stated limitation.
+        ranking = rank_admitted(
+            admitted_all,
+            details=facts.get("candidate_leg_details"),
+            wanted_qty=pos.get("residual_qty") or pos.get("filled_qty"),
+            fee_usd=facts.get("fee_usd"),
+            fee_basis=facts.get("fee_basis"),
+            shared_depth=facts.get("depth"))
+        step["hedge_candidate_ranking"] = {
+            k: ranking[k] for k in ("ranked", "not_rankable", "why",
+                                    "scored_on",
+                                    "an_unreadable_input_is_not_a_zero",
+                                    "the_taxonomy_does_not_set_the_order")}
+        best = ranking.get("best_admitted")
+        if best is None and admitted_all and not ranking.get("ranked"):
+            # NOTHING COULD BE SCORED. Not "no candidate exists" -- candidates
+            # were admitted and each lacked an input nobody read. Naming that
+            # separately is the difference between a thin board and an
+            # unfinished reader.
             step["hedge_candidates_not_ranked"] = {
                 "admitted": len(admitted_all),
-                "taken": "the first",
-                "why": ("ranking them needs a region probability, a fee and a "
-                        "depth reading per contract, none of which is wired on "
-                        "this lane. Scoring on inputs nobody read would be "
-                        "worse than one deterministic choice"),
+                "taken": "none",
+                "why": ("every admitted candidate was missing a reading it "
+                        "would have to be scored on -- see "
+                        "hedge_candidate_ranking.not_rankable. Scoring on "
+                        "inputs nobody read would be worse than sending "
+                        "nothing"),
                 "contracts": [c.get("condition_id") for c in admitted_all][:8]}
         step["admitted_contract"] = None if best is None else best["condition_id"]
         gid = pos.get("portfolio_group_id")
