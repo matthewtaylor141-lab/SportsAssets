@@ -11,8 +11,8 @@
 -- the kind needs one, and what do an event's sibling contracts look like
 -- side by side? Read-only; no keyword this workflow refuses.
 
-\pset pager off
-\timing off
+-- Only \echo is permitted by the workflow guard; \pset and \timing are
+-- refused, which is how run 261 failed before a single statement ran.
 
 \echo == 0 DISTINCT kind, WITH LINE AND SIDE COVERAGE ==
 SELECT kind,
@@ -56,10 +56,15 @@ WITH widest AS (
    GROUP BY event_slug
    ORDER BY n DESC
    LIMIT 3)
+-- `event_slug` and `team_abbr` are selected because ORIENTATION depends on
+-- them: `backs` must name the fixture's FIRST listed participant, and the
+-- only ordering authority in the row is the order the two team codes appear
+-- in the event slug. If a slug does not carry two codes, the leg refuses.
 SELECT w.n AS siblings_on_event,
-       left(p.event_title, 46)  AS event_title,
-       p.kind, p.side_norm, p.line,
-       left(p.market_slug, 54)  AS market_slug,
+       left(p.event_slug, 40)   AS event_slug,
+       p.team_abbr,
+       p.kind, p.side_norm, p.line, p.signed,
+       left(p.market_slug, 50)  AS market_slug,
        p.sports_type
   FROM widest w
   JOIN us_premap p USING (event_slug)
