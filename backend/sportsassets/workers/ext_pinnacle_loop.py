@@ -1300,6 +1300,25 @@ VENUE_NATIVE_MAY_REPLACE = (vmap.R_NO_CONTRACT, vmap.R_AMBIGUOUS, vmap.R_LINE)
 VENUE_NATIVE_MAY_REPLACE_IDENTITY = (R_NO_PREMAP,)
 
 
+#: THE VENUE LEAGUE EACH PROVIDER COMPETITION IS LISTED UNDER, so the
+#: venue-native search stays inside the competition the cycle confirmed. The
+#: soccer keys come from VENUE_TOKEN_TO_PROVIDER_KEY (each entry supported by
+#: the venue's own fixtures); `mlb` is the league token of every MLB contract
+#: this lane has ever valued (`aec-mlb-...`) and of the 7 MLB events in the
+#: 2026-09-29 capture -- whose 16 NPB and KBO events, on the SAME winner type,
+#: carry `npb` and `kbo`. A key with no entry maps nothing
+#: (VENUE_NATIVE_COMPETITION_NOT_ESTABLISHED).
+VENUE_LEAGUE_TOKENS_CONFIRMED = {"baseball_mlb": ("mlb",)}
+
+
+def venue_league_tokens(sport_key) -> tuple:
+    """The venue league token(s) for a provider key; () when none is named."""
+    got = set(VENUE_LEAGUE_TOKENS_CONFIRMED.get(str(sport_key), ()))
+    got |= {t for t, k in VENUE_TOKEN_TO_PROVIDER_KEY.items()
+            if k == str(sport_key)}
+    return tuple(sorted(got))
+
+
 def venue_native_may_replace(codes) -> bool:
     """True only when EVERY global mapping refusal is one the venue's own
     catalogue can answer. Pure."""
@@ -6023,7 +6042,8 @@ async def cycle(conn) -> dict:
                         conn, home=quote["home"], away=quote["away"],
                         commence_time=quote.get("commence_time"),
                         family=family, now=time.time(),
-                        competition=sport_key)
+                        competition=sport_key,
+                        league_tokens=venue_league_tokens(sport_key))
                 if vn is not None and vn.get("ok"):
                     replaced = list(mapped["refusals"])
                     mapped = venue_native_mapping(vn, replaced=replaced,
@@ -6063,7 +6083,8 @@ async def cycle(conn) -> dict:
                         conn, home=quote["home"], away=quote["away"],
                         commence_time=quote.get("commence_time"),
                         family=family, now=time.time(),
-                        competition=sport_key)
+                        competition=sport_key,
+                        league_tokens=venue_league_tokens(sport_key))
                     if vn.get("ok"):
                         vn["global_identity_replaced"] = {
                             k: ident.get(k) for k in (

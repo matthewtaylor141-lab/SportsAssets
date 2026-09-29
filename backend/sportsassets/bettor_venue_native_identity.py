@@ -104,11 +104,16 @@ R_READ_FAILED = "VENUE_NATIVE_CATALOGUE_READ_FAILED"
 #: The bounded read came back full, so a second candidate may be beyond the
 #: bound. An ambiguity that cannot be ruled out is not ruled out.
 R_READ_TRUNCATED = "VENUE_NATIVE_CANDIDATE_READ_TRUNCATED"
+#: The caller could not name the venue league this provider competition is
+#: listed under, so a candidate in some OTHER competition -- the men's fixture
+#: for a women's price, Serie A's Botafogo for Serie B's -- could not be ruled
+#: out by competition.
+R_COMPETITION = "VENUE_NATIVE_COMPETITION_NOT_ESTABLISHED"
 
 REFUSALS = (R_NO_EVENT, R_AMBIGUOUS, R_ONE_TEAM_ONLY, R_ASSIGNMENT_AMBIGUOUS,
             R_NO_PRICED_CONTRACT, R_PRICED_CONTRACT_AMBIGUOUS,
             R_CONTRACT_SIDES, R_FAMILY, R_PROVIDER_EVENT, R_READ_FAILED,
-            R_READ_TRUNCATED)
+            R_READ_TRUNCATED, R_COMPETITION)
 
 LONG = "ORDER_INTENT_BUY_LONG"
 SHORT = "ORDER_INTENT_BUY_SHORT"
@@ -153,6 +158,11 @@ START_TOLERANCE_S = 90 * 60.0
 #: re-seen in three sweep periods has missed at least two consecutive sweeps:
 #: either the venue stopped listing it or the writer is not running, and in
 #: neither case is it evidence of a current contract.
+#:
+#: IT IS ALSO THE CLOSED-MARKET FILTER. `us_premap` has no `closed` column;
+#: the sweep asks the venue for active, unclosed events and drops closed
+#: markets before writing, so a contract that closes simply stops being
+#: re-seen and leaves this window.
 RESEEN_WITHIN_S = 3 * 1800.0
 
 #: Bound on the candidate read. A full result refuses (R_READ_TRUNCATED).
@@ -350,10 +360,21 @@ def _row(r) -> dict:
     return dict(r) if not isinstance(r, dict) else r
 
 
-def _events_in_window(rows, *, family, commence_epoch):
+def league_token(event_slug) -> str:
+    """The venue's league token: the first segment of its event slug
+    (`uwcl-asr-fcb-2026-09-30` -> `uwcl`). The same position the lane's
+    board reads (`split_part(market_slug, '-', 2)` on `atc-uwcl-...`)."""
+    return str(event_slug or "").split("-", 1)[0].strip().lower()
+
+
+def _events_in_window(rows, *, family, commence_epoch, league_tokens=None):
     """Group the family's winner rows by venue event, keeping only events
-    whose start is inside the tolerance. Reports what it set aside."""
+    whose start is inside the tolerance and, where the caller named them,
+    whose league is the provider competition's own. Reports what it set
+    aside."""
     types = FAMILY_WINNER_TYPES.get(family) or ()
+    leagues = (None if league_tokens is None
+               else {str(t).strip().lower() for t in league_tokens})
     by_event: dict = {}
     for r in rows or ():
         r = _row(r)
@@ -364,7 +385,8 @@ def _events_in_window(rows, *, family, commence_epoch):
             continue
         by_event.setdefault(ev, []).append(r)
     inside, set_aside = [], {"not_two_participants": [],
-                             "start_not_one_instant": []}
+                             "start_not_one_instant": [],
+                             "other_competition": []}
     for ev, rs in sorted(by_event.items()):
         starts = {_epoch(r.get("game_start")) for r in rs}
         if len(starts) != 1 or None in starts:
@@ -373,6 +395,11 @@ def _events_in_window(rows, *, family, commence_epoch):
         start = next(iter(starts))
         offset = start - float(commence_epoch)
         if abs(offset) > START_TOLERANCE_S:
+            continue
+        # INSIDE THE WINDOW, BUT ANOTHER COMPETITION: reported, never a
+        # candidate.
+        if leagues is not None and league_token(ev) not in leagues:
+            set_aside["other_competition"].append(ev)
             continue
         names = sorted({str(r.get("team_name")) for r in rs
                         if str(r.get("team_name") or "").strip()})
@@ -390,7 +417,7 @@ def _refuse(out: dict, code: str, why: str) -> dict:
 
 
 def match_event(*, home, away, commence_epoch, family, rows,
-                competition=None) -> dict:
+                competition=None, league_tokens=None) -> dict:
     """THE ONE venue event for this provider fixture and the contract that
     pays on HOME, or a named refusal saying what failed. Pure; never raises.
 
@@ -399,6 +426,14 @@ def match_event(*, home, away, commence_epoch, family, rows,
     team_name, side_norm and game_start. `competition` is the provider's
     sport key; it is read for one thing only, the women's-competition
     exemption on gender qualifiers.
+
+    `league_tokens` RESTRICTS THE SEARCH TO THE PROVIDER COMPETITION'S OWN
+    VENUE LEAGUE(S) -- the league the cycle confirmed this provider key
+    against. Given, a venue event in any other league is not a candidate, so a
+    women's price cannot land on a men's fixture of the same two clubs, nor a
+    Serie B price on a Serie A "Botafogo". Given EMPTY, the competition is not
+    established and nothing maps. None (a direct caller that has no mapping)
+    applies no league restriction; the scheduled path always supplies it.
     """
     out: dict = {"version": VERSION, "ok": False, "refusal": None,
                  "why": None, "family": family, "home": home, "away": away,
@@ -422,9 +457,17 @@ def match_event(*, home, away, commence_epoch, family, rows,
             "folding (%r vs %r)" % (home, away)))
     womens = str(competition or "") in WOMENS_PROVIDER_COMPETITIONS
     out["womens_competition"] = womens
+    out["league_tokens"] = (None if league_tokens is None
+                            else sorted(str(t) for t in league_tokens))
+    if league_tokens is not None and not list(league_tokens):
+        return _refuse(out, R_COMPETITION, (
+            "no venue league is named for the provider competition %r, so a "
+            "fixture of the same two teams in another competition cannot be "
+            "ruled out" % (competition,)))
 
     events, set_aside = _events_in_window(rows, family=family,
-                                          commence_epoch=commence)
+                                          commence_epoch=commence,
+                                          league_tokens=league_tokens)
     out["events_in_window"] = len(events)
     out["set_aside"] = {k: v[:6] for k, v in set_aside.items() if v}
     full = []
@@ -616,7 +659,7 @@ def identity_from_match(match: dict, *, priced_outcome) -> dict:
         "version", "event_slug", "participants", "assignment", "orientation",
         "offset_s", "tolerance_s", "candidates", "candidate_events",
         "partial_matches", "events_in_window", "womens_competition",
-        "competition", "set_aside", "why")}
+        "competition", "league_tokens", "set_aside", "why")}
     out["venue_native"]["name_evidence"] = match.get("name_evidence")
     if not match.get("ok"):
         out["refusal"] = match.get("refusal") or R_NO_EVENT
@@ -675,7 +718,8 @@ def identity_from_match(match: dict, *, priced_outcome) -> dict:
 
 
 async def resolve_venue_native(conn, *, home, away, commence_time, family,
-                               now, competition=None) -> dict:
+                               now, competition=None,
+                               league_tokens=None) -> dict:
     """Provider fixture -> the venue's own contract for HOME, or a refusal.
 
     One bounded read of `us_premap`, then `match_event`. Returns EXACTLY the
@@ -716,7 +760,8 @@ async def resolve_venue_native(conn, *, home, away, commence_time, family,
                         % MAX_CANDIDATE_ROWS))
         return out
     match = match_event(home=home, away=away, commence_epoch=at,
-                        family=family, rows=rows, competition=competition)
+                        family=family, rows=rows, competition=competition,
+                        league_tokens=league_tokens)
     got = identity_from_match(match, priced_outcome=priced)
     got["venue_native"]["rows_read"] = len(rows)
     got["venue_native"]["reseen_within_s"] = RESEEN_WITHIN_S

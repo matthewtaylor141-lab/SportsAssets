@@ -175,6 +175,35 @@ def test_every_mapped_contract_is_the_home_teams_own_row():
         assert m["period_evidence"]["period"] == vmap.FULL_MATCH
 
 
+def test_the_scheduled_paths_league_restriction_changes_no_pinned_outcome():
+    """The cycle passes the provider competition's own venue league(s). On the
+    capture that restriction changes nothing -- every pinned mapping is in its
+    competition's own league -- and it is what keeps a women's price off a
+    men's fixture and a Serie B price off Serie A."""
+    for e in EVENTS:
+        tokens = loop.venue_league_tokens(e["sport_key"])
+        assert tokens, e["sport_key"]
+        m = _match(e, league_tokens=tokens)
+        want = EXPECTED[e["provider_event_id"]][1]
+        got = (("MAPS", m["us_market_slug"],
+                "SHORT" if m["intent"] == SHORT else "LONG")
+               if m["ok"] else ("REFUSED", m["refusal"]))
+        assert got == want, e
+    assert loop.venue_league_tokens("baseball_mlb") == ("mlb",)
+    assert loop.venue_league_tokens("soccer_uefa_champs_league_women") == \
+        ("uwcl",)
+    assert loop.venue_league_tokens("soccer_epl") == ()
+
+
+def test_a_fixture_in_another_venue_league_is_not_a_candidate():
+    # the capture's own MLB event, searched as though it were NPB
+    m = _match(HOU, league_tokens=("npb",))
+    assert m["refusal"] == V.R_NO_EVENT
+    assert "mlb-cws-hou-2026-09-29" in m["set_aside"]["other_competition"]
+    # and a competition nobody named maps nothing
+    assert _match(HOU, league_tokens=())["refusal"] == V.R_COMPETITION
+
+
 def test_it_agrees_with_the_venue_slug_production_resolved_globally():
     """Where production DID cross through `premap.resolve` (HOU-CWS reached the
     book read, ATL-PHI too), the venue-native matcher names the same contract."""
@@ -957,6 +986,121 @@ async def test_no_pinnacle_is_never_repaired_by_the_venue_catalogue(monkeypatch)
         assert out["latency"]["on_arrival_every_priced_event"]["events"] == 0
     finally:
         await clean(conn, g)
+        await conn.close()
+
+
+async def _insert_fixture_rows(conn, event_slugs):
+    """The capture's own venue rows for these events, written verbatim (the
+    identifier is the market slug, as the writer keys a per-side row)."""
+    n = 0
+    for r in ROWS:
+        if r["event_slug"] not in event_slugs:
+            continue
+        await conn.execute(
+            "INSERT INTO us_premap (identifier, event_slug, event_title, "
+            " market_slug, question, kind, line, side_norm, event_keys, "
+            " intent, signed, team_abbr, team_name, game_start, sports_type, "
+            " updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,"
+            " $14::timestamptz,$15, now()) "
+            "ON CONFLICT (identifier, side_norm) DO UPDATE SET updated_at=now()",
+            r["market_slug"], r["event_slug"], r["event_title"],
+            r["market_slug"], r["question"], r["kind"], r["line"],
+            r["side_norm"], [], r["intent"], r["signed"], r["team_abbr"],
+            r["team_name"], _dt.datetime.fromisoformat(r["game_start"]),
+            r["sports_type"])
+        n += 1
+    return n
+
+
+@pg
+@pytest.mark.asyncio
+async def test_none_of_the_captures_21_no_pinnacle_events_is_repaired(
+        monkeypatch):
+    """ALL 21 NO_PINNACLE_ON_EVENT EVENTS OF THE CAPTURE, THROUGH THE REAL
+    CYCLE, WITH THE VENUE ROWS THAT WOULD MAP 15 OF THEM PRESENT. The provider
+    response carries no Pinnacle h2h for any of them -- exactly production --
+    so every one refuses NO_PINNACLE_ON_EVENT and nothing else, and the venue
+    catalogue is never asked. (The competition confirmation runs for real, on
+    the venue's own titles and dates for these fixtures.)"""
+    conn = await _connect()
+    nopin = [e for e in EVENTS if e["first_refusal"] == "NO_PINNACLE_ON_EVENT"]
+    assert len(nopin) == 21
+    mappable = {_match(e)["event_slug"] for e in nopin if _match(e)["ok"]}
+    assert len(mappable) == 15
+    keys = sorted({e["sport_key"] for e in nopin})
+    token = {"soccer_uefa_nations_league": "unl",
+             "soccer_brazil_serie_b": "brb"}
+    calls = []
+    real = V.resolve_venue_native
+
+    async def spy(*a, **k):
+        calls.append(k)
+        return await real(*a, **k)
+
+    titles, days = {}, {}
+    for r in ROWS:
+        if r["event_slug"] in mappable:
+            t = token[next(e["sport_key"] for e in nopin
+                           if _match(e).get("event_slug") == r["event_slug"])]
+            titles.setdefault(t, set()).add(r["event_title"])
+            days.setdefault(t, {})[r["event_title"]] = r["game_start"][:10]
+
+    async def board(conn, *, now=None):
+        return {"read": True, "source": "us_premap", "evidence": "LIVE_READ",
+                "evidence_age_s": 0.0,
+                "board": [(t, len(v)) for t, v in sorted(titles.items())],
+                "titles": {t: sorted(v) for t, v in titles.items()},
+                "title_days": days}
+
+    def provider(key):
+        def events(now):
+            stamp = _iso(now - 2)
+            return [{"id": PREFIX + "nopin-" + e["provider_event_id"],
+                     "home_team": e["home"], "away_team": e["away"],
+                     "commence_time": e["commence_time"],
+                     # another book prices it; PINNACLE DOES NOT
+                     "bookmakers": [{"key": "smarkets", "last_update": stamp,
+                                     "markets": [{"key": "h2h", "outcomes": [
+                                         {"name": e["home"], "price": 2.0},
+                                         {"name": e["away"], "price": 3.6},
+                                         {"name": "Draw", "price": 3.3}]}]}]}
+                    for e in nopin if e["sport_key"] == key]
+        return events
+
+    try:
+        await clean(conn)
+        await conn.execute(
+            "DELETE FROM us_premap WHERE event_slug = ANY($1::text[])",
+            sorted(mappable))
+        assert await _insert_fixture_rows(conn, mappable) > 0
+        await conn.execute(
+            "INSERT INTO ingestion_state (key, value) VALUES ($1,'true') "
+            "ON CONFLICT (key) DO UPDATE SET value='true'", loop.CONTROL_KEY)
+        substitute(monkeypatch, slugs=[],
+                   catalogue=["baseball_mlb"] + keys,
+                   odds_by_sport=dict({k: provider(k) for k in keys},
+                                      baseball_mlb=[]))
+        monkeypatch.setattr(loop, "venue_soccer_competitions", board)
+        monkeypatch.setattr(V, "resolve_venue_native", spy)
+        out = await loop.cycle(conn)
+        rows = [r for r in out["event_ledger"]
+                if str(r["provider_event_id"]).startswith(PREFIX + "nopin-")]
+        assert len(rows) == 21
+        for r in rows:
+            assert r["codes"] == ["NO_PINNACLE_ON_EVENT"], r
+            assert r["mapped_by"] is None and r["us_market_slug"] is None
+        assert calls == []
+        assert out["refusals"]["NO_PINNACLE_ON_EVENT"] == 21
+        for k in keys:
+            fn = out["funnel_by_provider_sport"][k]
+            assert fn["mapping_confirmation"]["ok"] is True, fn
+            assert fn["mapped_by_venue_native"] == 0
+            assert fn["with_pinnacle_h2h"] == 0
+    finally:
+        await conn.execute(
+            "DELETE FROM us_premap WHERE event_slug = ANY($1::text[])",
+            sorted(mappable))
+        await clean(conn)
         await conn.close()
 
 
