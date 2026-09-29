@@ -334,7 +334,27 @@ LABEL_SQL = """
                -- it is read from each leg's own settlement payout rather than
                -- from a score this lane never sees.
                bool_and(coalesce((i.settlement::jsonb ->> 'payout_usd')
-                                 ::numeric, 0) > 0) AS middle_occurred
+                                 ::numeric, 0) > 0) AS middle_occurred,
+               -- ── A VOID IS NOT A MIDDLE, AND IT IS NOT A LOSS ────
+               --
+               -- MEASURED, NOT REASONED ABOUT. A fixture the venue VOIDED
+               -- closes both legs `VOIDED_BY_THE_VENUE` and refunds each
+               -- leg's remaining basis -- which `reconcile_settlement`
+               -- writes as `payout_usd`, a POSITIVE number. So
+               -- `bool_and(payout_usd > 0)` was true for every void, and a
+               -- cancelled fixture was labelled "the middle occurred".
+               --
+               -- Observed on a two-leg group at $0.45 a contract: both legs
+               -- closed VOIDED_BY_THE_VENUE with payout_usd 4.5 each, and
+               -- `labelled` returned n=1, labels=[1.0].
+               --
+               -- The direction is the expensive one: voids enter training as
+               -- POSITIVES, so the model over-predicts p(both legs pay) and
+               -- the error buys hedges. A refunded basis is not a won
+               -- payout, and the fixture never happened -- so a void is no
+               -- observation at all, exactly like an unresolved fixture, and
+               -- it is EXCLUDED rather than counted either way.
+               bool_or(i.closed_reason = 'VOIDED_BY_THE_VENUE') AS any_leg_void
           FROM bettor_funded_intents i
          WHERE i.portfolio_group_id = d.group_id AND i.kind = 'ENTRY'
       ) g ON TRUE
@@ -357,6 +377,12 @@ LABEL_SQL = """
        -- that had not finished for the other leg. `bool_and` requires all of
        -- them.
        AND g.settled
+       -- ── AND NO LEG WAS VOIDED ───────────────────────────────────
+       --
+       -- See `any_leg_void` above. A void is excluded here rather than
+       -- relabelled, because there is no correct label for it: the outcome
+       -- space the structure was priced over never resolved.
+       AND NOT g.any_leg_void
 """
 
 
