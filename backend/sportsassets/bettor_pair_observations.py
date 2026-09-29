@@ -196,11 +196,15 @@ async def observe_candidate(conn, *, us_market_slug: str, side: str,
     if not held.get("ok"):
         return dict(out, ok=False, refusal=R_NO_LEG,
                     held_refusal=held.get("refusal"))
+    # SIBLINGS ARE SCREENED BY THE SAME PREDICATES AS CATALOGUE CANDIDATES
+    # before their book is read: a prop, a simulated fixture or an
+    # unorientable row can never become a second leg, so it costs no read.
     cands = await HSUP.candidate_legs_for(
         conn, held_row=dict(held.get("row") or {},
                             market_slug=held.get("us_market_slug"),
                             residual_qty=1),
-        quoter=quoter, prose_reader=prose_reader, now=at)
+        quoter=quoter, prose_reader=prose_reader, now=at,
+        prefilter=screen_row)
     row = held.get("row") or {}
     leg = held["leg"]
     out["fixture"] = getattr(leg, "fixture_id", None)
@@ -807,6 +811,17 @@ async def catalogue_candidates(conn, *, now: float | None = None,
         sweeps = {}
     ages = {k: _sweep_age_s(v, at) for k, v in sweeps.items()}
     out["sweep_age_s"] = ages
+    # A TRUNCATED SWEEP stopped at its page budget, so events past it were
+    # never listed. The rows that ARE listed are still the venue's own, so
+    # this is reported -- a coverage limit -- not a reason to refuse them.
+    out["sweep_truncated"] = {}
+    for k, v in sweeps.items():
+        try:
+            vv = json.loads(v) if isinstance(v, str) else (v or {})
+        except ValueError:
+            vv = {}
+        out["sweep_truncated"][k] = (vv.get("truncated")
+                                     if isinstance(vv, dict) else None)
     known = [a for a in ages.values() if a is not None]
     if not known or min(known) > CATALOGUE_SWEEP_FRESH_S:
         return dict(out, ok=False, refusal=R_CATALOGUE_SWEEP_STALE,

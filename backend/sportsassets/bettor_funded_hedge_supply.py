@@ -1379,7 +1379,8 @@ async def _quote_side(quoter, market_slug, side):
 
 
 async def candidate_legs_for(conn, *, held_row, quoter=None,
-                             prose_reader=None, limit=None, now=None) -> dict:
+                             prose_reader=None, limit=None, now=None,
+                             prefilter=None) -> dict:
     """EVERY ELIGIBLE COMPLEMENTARY CONTRACT ON THE SAME FIXTURE, built.
 
     Returns {"legs": [...], "refused": [...], "examined": n, ...}. EVERY
@@ -1453,6 +1454,22 @@ async def candidate_legs_for(conn, *, held_row, quoter=None,
         # cost; a candidate priced off the OTHER SIDE of its own instrument is
         # the same error inside one market -- the two sides consume opposite
         # sides of one book and have different acquisition costs.
+        # SCREENED BEFORE IT COSTS A READ, when the caller supplies the
+        # screen. `prefilter(row)` returns None or the name of the fact the
+        # row lacks; it applies the predicates `build_leg` would apply after
+        # the read (graded variable, fixture identity, orientation) plus
+        # realism, so it can only refuse earlier, never admit more.
+        if prefilter is not None:
+            screened = prefilter(row)
+            if screened:
+                out["refused"].append(
+                    {"candidate_id": cid, "market_slug": slug, "side": side,
+                     "sports_type": row.get("sports_type"),
+                     "refusal": str(screened),
+                     "why": ("refused by the caller's screen before any venue "
+                             "read: the row cannot become a leg (%s)"
+                             % screened)})
+                continue
         price, depth, quote = None, None, {}
         quote_is_side_aware = None
         if quoter is not None:

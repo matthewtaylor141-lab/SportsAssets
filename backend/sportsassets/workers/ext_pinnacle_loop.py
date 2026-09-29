@@ -7367,6 +7367,10 @@ async def _heartbeat(conn, out: dict, *, key: str = None) -> None:
                 # And the entry lane's outcome join (valuations -> venue
                 # settlements), which feeds the calibration cohort.
                 "outcome_join": _outcome_join_digest(out.get("outcome_join")),
+                # THE STARTUP ROW'S OWN SUBJECT. The cooldown-resume row is
+                # written at startup with what was resumed from storage, and
+                # this field was dropped -- so the row said only its state.
+                "cooldown_resume": out.get("cooldown_resume"),
         }
         blob = json.dumps(payload, default=str)
         if len(blob) > HEARTBEAT_MAX_BYTES:

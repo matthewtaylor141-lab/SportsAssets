@@ -4141,7 +4141,11 @@ async def bettor_desk(response: Response, hours: int = Query(24, ge=1, le=168),
     # the projection is the error that produced "the read never returned".
     controls["venue_sdk"] = (cycle or {}).get("venue_sdk")
     controls["venue_rate_controls"] = (cycle or {}).get("venue_rate_controls")
-    controls["pacer_lanes"] = (cycle or {}).get("pacer_lanes")
+    # The writer nests the lanes under `venue_rate_controls` (it never
+    # emitted a top-level `pacer_lanes`), so reading the top level returned
+    # null on every build.
+    controls["pacer_lanes"] = (((cycle or {}).get("venue_rate_controls")
+                                or {}).get("pacer_lanes"))
     controls["venue_sdk_absent_means"] = (
         "the SERVING BUILD does not persist it, not that the dependency is "
         "unpinned or that rate control is off")

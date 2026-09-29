@@ -583,3 +583,61 @@ async def test_an_oversized_heartbeat_is_trimmed_and_says_so():
     assert hb["mapped_candidate_ledger"] == []
     assert hb["refusals"] == {"A": 1}
     assert len(c.args[1]) <= L.HEARTBEAT_MAX_BYTES
+
+
+# ═════════════════════════════════════════════════════════════════════
+# 6 · SIBLINGS ARE SCREENED BEFORE THEY COST A READ; TRUNCATION IS SAID
+# ═════════════════════════════════════════════════════════════════════
+
+async def test_a_sibling_that_cannot_be_a_leg_is_refused_before_its_book_is_read():
+    calls = []
+    inner = HW._quoter(PRICES)
+
+    async def counting(slug, side):
+        calls.append(slug)
+        return await inner(slug, side)
+    prop = "astatc-mlb-bos-nyy-2026-10-05-hits"
+    async with _conn() as conn:
+        await _clean(conn)
+        await _seed_the_catalogue(conn)
+        # a player prop on the SAME fixture: never a graded variable
+        await _row(conn, event=HW.EVENT, slug=prop, st="baseball_player_hits",
+                   abbr="bos", intent=LONG)
+        got = await PO.observe_candidate(
+            conn, us_market_slug=HW.HELD, side=LONG, quoter=counting,
+            prose_reader=HW._prose_reader(), now=time.time())
+        assert got["ok"] is True, got
+        assert prop not in calls, calls
+        assert got["second_legs_refused"].get(PO.X_NOT_A_GRADED_VARIABLE), got
+        # the admissible sibling was still read and observed
+        assert HW.SIB in calls and got["recorded"], got
+
+
+async def test_a_truncated_sweep_is_reported_not_hidden():
+    async with _conn() as conn:
+        await _clean(conn)
+        await _seed_the_catalogue(conn)
+        at = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
+        await conn.execute(
+            "INSERT INTO ingestion_state (key, value) VALUES ('premap_last', "
+            " $1::jsonb) ON CONFLICT (key) DO UPDATE SET value=$1::jsonb",
+            json.dumps({"mode": "full", "at": at, "truncated": True}))
+        got = await PO.catalogue_candidates(conn, now=time.time())
+        assert got["ok"] is True
+        assert got["sweep_truncated"]["premap_last"] is True
+
+
+async def test_the_cooldown_resume_row_keeps_what_was_resumed():
+    from sportsassets.workers import ext_pinnacle_loop as L
+
+    class _C:
+        args = None
+
+        async def execute(self, sql, *args):
+            _C.args = args
+    await L._heartbeat(_C(), {"state": "COOLDOWN_RESUME_AT_STARTUP",
+                              "cooldown_resume": {"resumed": False,
+                                                  "why": "NOTHING_STORED"}},
+                       key=L.COOLDOWN_RESUME_KEY)
+    hb = json.loads(_C.args[1])
+    assert hb["cooldown_resume"] == {"resumed": False, "why": "NOTHING_STORED"}
