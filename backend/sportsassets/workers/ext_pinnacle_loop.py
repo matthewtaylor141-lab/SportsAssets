@@ -4211,16 +4211,95 @@ def _exit_candidate_from(sel: dict, *, residual) -> dict | None:
 FD_EVIDENCE_VENUE_IMPLIED = "VENUE_IMPLIED"
 
 
+async def _venue_prose(slug):
+    """The venue's own settlement prose for one contract, paced and cached.
+
+    A thin async wrapper over the reader that has been on the entry path since
+    the rules-text work, so the funded lane reads the SAME text the entry lane
+    does rather than a second, divergent copy of the same call.
+    """
+    return dict(await asyncio.to_thread(_read_venue_rules_blocking, slug) or {})
+
+
+R_NO_ADMISSIBLE_HEDGE_CANDIDATE = (
+    "NO_SIBLING_CONTRACT_ON_THIS_FIXTURE_COULD_BE_BUILT_INTO_A_LEG")
+
+
+async def _candidate_quote(conn, slug, *, now=None) -> dict:
+    """ONE CANDIDATE CONTRACT'S OWN PRICE AND DEPTH.
+
+    It goes through `venue_quote`, which is the same paced acquisition-ladder
+    read the entry lane prices with, so a hedge candidate is costed exactly the
+    way an entry is. A candidate whose currency is not established REFUSES
+    there and arrives here without a price, and `candidate_legs_for` then
+    refuses the candidate rather than pricing it off the held contract's book.
+
+    THE INTENT IS LONG because acquiring a hedge is a purchase. The venue
+    carries one instrument per market and the side is the intent, so asking for
+    the wrong side would price the complement of the contract we mean.
+    """
+    try:
+        got = await venue_quote(conn, us_slug=slug,
+                                intent="ORDER_INTENT_BUY_LONG", now=now)
+    except Exception as exc:                                    # noqa: BLE001
+        return {"ok": False, "error": type(exc).__name__,
+                "why": ("the candidate's own ladder read failed; the candidate "
+                        "is refused rather than priced from another book")}
+    got = dict(got or {})
+    if not got.get("ok"):
+        return got
+    return dict(got, price=got.get("cost_per_share"))
+
+
+async def _registry_state(conn) -> dict:
+    """IS A MODEL APPROVED FOR THE PAIRING KEY. A read, not a substitute.
+
+    Recorded on the payload so a cycle that produced no hedge says WHICH
+    dependency was absent. An empty registry is a missing evidence dependency
+    to work through, and naming it on every cycle is how it stays visible
+    instead of becoming the permanent shape of the lane.
+    """
+    from .. import bettor_funded_model as FMD
+
+    out = {"model_key": FMD.KEY_MIDDLE, "approved": False, "refusal": None,
+           "promotion_bar": {"min_rows": FMD.MIN_EVALUATION_ROWS,
+                             "min_margin_vs_incumbent": FMD.MIN_SKILL_MARGIN},
+           "asked_by": ("discover, per structure, via "
+                        "bettor_funded_model.predict_for -- not here")}
+    try:
+        got = await FMD.approved(conn, model_key=FMD.KEY_MIDDLE)
+    except Exception as exc:                                    # noqa: BLE001
+        out["refusal"] = "REGISTRY_READ_RAISED_" + type(exc).__name__
+        return out
+    if got.get("ok"):
+        mdl = dict(got.get("model") or {})
+        out.update(approved=True,
+                   model_version=mdl.get("model_version"),
+                   model_id=mdl.get("model_id"))
+        return out
+    out["refusal"] = got.get("refusal") or FMD.R_NO_APPROVED_MODEL
+    out["why"] = got.get("why")
+    return out
+
+
 async def funded_pair_inputs(conn, pos, *, at, deferred=None,
                              account_id=None, venue=None,
-                             management_rankings=None):
+                             management_rankings=None,
+                             prose_reader=None, quoter=None):
     """The pairing facts for one held position, or a named missing input.
 
     Signature matches what `pass_once` calls: `(conn, pos, at=)`. `deferred` is
     bound by `_funded_service` with `functools.partial`, so the supplier is a
     plain callable to the pass and carries no hidden state.
+
+    `prose_reader` and `quoter` default to the PRODUCTION venue reads and are
+    overridable so a test can substitute the TRANSPORT while the supplier, the
+    builder and every reader under test still run. That is the only thing they
+    are for: a test that passed a finished `Leg` or a finished ranking would be
+    testing nothing.
     """
     from .. import bettor_funded_decision as FD
+    from .. import bettor_funded_hedge_supply as HSUP
 
     out: dict = {"ok": False, "readiness": dict(PAIR_INPUT_READINESS)}
     intent_id = str(pos.get("intent_id") or "")
@@ -4398,30 +4477,125 @@ async def funded_pair_inputs(conn, pos, *, at, deferred=None,
                                   ("selected", "selected_qty", "limit_price",
                                    "proceeds_per_contract",
                                    "expected_net_usd")} if sel else None)
-    # ── THE TWO READINGS THIS LANE CANNOT YET SUPPLY ──────────────────
+    # ══════════════════════════════════════════════════════════════════
+    # THE HEDGE SUPPLIERS, RUN. Previously this returned held_leg=None and
+    # candidate_legs=[] with the reads named as NOT WIRED -- so `discover` was
+    # skipped on every cycle and no hedge could ever be a candidate.
     #
-    # Named individually, because "pairing inputs missing" sent a reader to look
-    # at all eight. The pass still RANKS what it has -- the hedge is simply not
-    # among the candidates -- so a HOLD or an exit can still be selected and
-    # dispatched, which is more than the previous configuration could do.
+    # THREE THINGS ARE PRESERVED WHATEVER THESE READS DO.
+    #
+    #   1. EVERY failure is a named refusal on the payload, never an exception:
+    #      a catalogue outage or an unread settlement rule must not take out
+    #      the cycle.
+    #   2. The exit and the HOLD are ALREADY in `candidates` above and are not
+    #      touched here. An independently executable exit survives a total
+    #      failure of the hedge path, which is the property Codex asked for and
+    #      the one a "return early on missing hedge input" shape destroys.
+    #   3. `region_probabilities` stays None while no model is APPROVED. A
+    #      venue-implied price is not a qualified probability and is not
+    #      substituted for one.
+    # ══════════════════════════════════════════════════════════════════
+    _prose = prose_reader if prose_reader is not None else _venue_prose
+    held = {"ok": False, "refusal": None}
+    cands = {"legs": [], "refused": [], "examined": 0}
+    hedge_unavailable = []
+    try:
+        held = await HSUP.held_leg_for(conn, position=pos, prose_reader=_prose,
+                                      now=at)
+    except Exception as exc:                                    # noqa: BLE001
+        held = {"ok": False, "refusal": "HELD_LEG_SUPPLIER_RAISED_"
+                + type(exc).__name__,
+                "why": ("the held-leg supplier raised. The exit and HOLD "
+                        "candidates are unaffected and still rankable")}
+    if held.get("ok"):
+        try:
+            cands = await HSUP.candidate_legs_for(
+                conn, held_row=dict(held.get("row") or {},
+                                    market_slug=held.get("us_market_slug"),
+                                    event_slug=(held.get("row") or {}).get(
+                                        "event_slug"),
+                                    residual_qty=residual),
+                quoter=quoter, prose_reader=_prose, now=at)
+        except Exception as exc:                                # noqa: BLE001
+            cands = {"legs": [], "refused": [], "examined": 0,
+                     "refusal": "CANDIDATE_SUPPLIER_RAISED_"
+                     + type(exc).__name__}
+    else:
+        hedge_unavailable.append(held.get("refusal")
+                                 or R_NO_HEDGE_CANDIDATE_READER)
+    if cands.get("refusal"):
+        hedge_unavailable.append(cands["refusal"])
+    if held.get("ok") and not cands.get("legs"):
+        hedge_unavailable.append(R_NO_ADMISSIBLE_HEDGE_CANDIDATE)
+    # ── THE PROBABILITY SUPPLIER IS NOT RE-IMPLEMENTED HERE ──────────
+    #
+    # `discover` already calls `bettor_funded_model.predict_for` itself, per
+    # STRUCTURE, once the two legs have been classified -- which is the only
+    # place it can be called, because the feature vector is a function of the
+    # structure and the structure does not exist until the legs are paired.
+    # Computing a probability here would either duplicate that or invent one
+    # before the thing it is about exists.
+    #
+    # So what this reads is the REGISTRY STATE, as evidence on the payload: is
+    # a model approved for this key at all. `region_probabilities` stays None
+    # and `discover` asks the model itself.
+    regions = await _registry_state(conn)
+    if not regions.get("approved"):
+        hedge_unavailable.append(regions.get("refusal")
+                                 or R_NO_REGION_PROBABILITY_SOURCE)
+
+    out["held_leg_read"] = {k: held.get(k) for k in
+                            ("ok", "refusal", "field", "why", "built_from",
+                             "grading_key", "prose_read", "missing_facts")}
+    out["candidate_legs_read"] = {
+        "examined": cands.get("examined"), "built": len(cands.get("legs") or []),
+        "refused": cands.get("refused"), "why": cands.get("why"),
+        "netting_exclusion": cands.get("netting_exclusion"),
+        "every_candidate_was_attempted": cands.get(
+            "every_candidate_was_attempted")}
+    out["region_probability_read"] = regions
+    out["readiness"] = dict(PAIR_INPUT_READINESS, **{
+        "held_leg": ("BUILT via bettor_funded_hedge_supply.held_leg_for"
+                     if held.get("ok") else
+                     "REFUSED -- %s" % held.get("refusal")),
+        "candidate_legs": ("BUILT %d of %d siblings"
+                           % (len(cands.get("legs") or []),
+                              cands.get("examined") or 0)),
+        "region_probabilities": (
+            "ASKED PER STRUCTURE by discover via "
+            "bettor_funded_model.predict_for; registry %s"
+            % ("has an approved model" if regions.get("approved")
+               else "is empty (%s)" % regions.get("refusal")))})
     return dict(out, ok=True,
-                held_leg=None, candidate_legs=[],
+                held_leg=(held.get("leg") if held.get("ok") else None),
+                candidate_legs=[c["leg"] for c in (cands.get("legs") or [])],
+                candidate_leg_details=list(cands.get("legs") or []),
                 decision_id="dec:%s:%d" % (intent_id[-24:], int(at)),
                 operation_id="op:%s:%d" % (intent_id[-24:], int(at)),
+                # None BY DESIGN: `discover` asks `predict_for` per structure.
                 region_probabilities=None,
                 evidence_quality=FD.EVIDENCE_NOT_ESTABLISHED,
-                limits=None, fee_usd=None, depth=None, incremental=None,
-                capital_duration_h=None,
+                limits=None, fee_usd=None,
+                depth=({c["market_slug"]: c.get("depth_qty")
+                        for c in (cands.get("legs") or [])} or None),
+                incremental=None, capital_duration_h=None,
                 hedge_us_market_slug=None, hedge_quantity=None,
                 hedge_limit_price=None, hedge_collateral_usd=None,
                 hedge_decision_record=None,
-                unavailable=[R_NO_HEDGE_CANDIDATE_READER,
-                             R_NO_REGION_PROBABILITY_SOURCE],
-                why=("the exit and the hold are read and ranked. The indirect "
-                     "hedge is not a candidate on this lane yet: the venue "
-                     "complementary-contract read and the region probability "
-                     "source are not wired, and inventing either would "
-                     "manufacture the input of a capital decision"))
+                unavailable=sorted(set(hedge_unavailable)),
+                why=("the exit and the hold are read and ranked, and the "
+                     "hedge suppliers ran: held leg %s, %d of %d sibling "
+                     "contracts built into candidate legs, region "
+                     "probabilities %s. Anything unavailable is named on "
+                     "`unavailable` and leaves the exit independently "
+                     "executable"
+                     % ("built" if held.get("ok")
+                        else "refused (%s)" % held.get("refusal"),
+                        len(cands.get("legs") or []),
+                        cands.get("examined") or 0,
+                        "available from an approved model"
+                        if regions.get("approved")
+                        else "unavailable (%s)" % regions.get("refusal"))))
 
 
 async def _funded_service(conn, *, now):
@@ -4518,7 +4692,13 @@ async def _funded_service(conn, *, now):
                 funded_pair_inputs, deferred=deferred,
                 account_id=account_id, venue=venue,
                 # THE PRODUCTION RANKING FOR EVERY POSITION, from `manage`.
-                management_rankings=got.get("management_rankings") or {}),
+                management_rankings=got.get("management_rankings") or {},
+                # THE PRODUCTION VENUE READS, bound here so the SCHEDULED
+                # caller is what supplies them. `_venue_prose` is the same
+                # paced, hour-cached reader the entry lane uses;
+                # `_candidate_quote` prices each candidate on ITS OWN ladder.
+                prose_reader=_venue_prose,
+                quoter=functools.partial(_candidate_quote, conn, now=now)),
             deferred_exits=deferred,
             now=now)
         # THE ORDERING, ASSERTED IN THE RESULT rather than left to a reader to

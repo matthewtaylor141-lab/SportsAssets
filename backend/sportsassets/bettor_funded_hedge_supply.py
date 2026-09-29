@@ -101,6 +101,7 @@ R_LEG_FACTS_MISSING = "THE_LEG_IS_MISSING_A_FACT_GRADING_NEEDS"
 R_SAME_CONTRACT = "THE_CANDIDATE_IS_THE_HELD_CONTRACT_ITSELF"
 R_NETTED_SAME_INSTRUMENT = (
     "THE_CANDIDATE_IS_THE_OPPOSING_SIDE_OF_THE_HELD_INSTRUMENT")
+R_CANDIDATE_NOT_PRICED = "THIS_CANDIDATES_OWN_PRICE_WAS_NOT_ESTABLISHED"
 
 #: THE PROVENANCE TABLE. A reviewer should be able to ask "where did this
 #: field come from" and get an answer without reading the code, and a field
@@ -692,6 +693,436 @@ def line_against_a(*, signed_line, backs) -> dict:
     out["why"] = ("orientation is %r, so it is not established whether this "
                   "handicap is A's or the negation of A's. The two differ by "
                   "the whole payout function of the leg" % (backs,))
+    return out
+
+
+# ═════════════════════════════════════════════════════════════════════
+# 5 · THE BUILDER: A Leg, OR A REFUSAL NAMING THE FACT THAT WAS MISSING
+# ═════════════════════════════════════════════════════════════════════
+#
+# Everything above is a reader for ONE fact. This is where they combine into
+# the object `discover` consumes, and it is the part that was missing when the
+# previous batch reported this item done: parsing helpers existed, no `Leg` was
+# ever constructed, and `funded_pair_inputs` still returned `held_leg=None`.
+#
+# PROVENANCE TRAVELS WITH THE LEG. `built_from` records, per field, which
+# source supplied it -- catalogue row, settlement prose, the funded intent, the
+# venue ladder -- so a decision that reaches a ledger can be audited back to
+# the reads that produced it without re-running anything. A field with no
+# source is not defaulted; the build refuses and names it.
+
+#: Every fact a built leg carries a source for. Checked by a test against
+#: `Leg`'s own dataclass fields so a new required field cannot be added
+#: upstream and silently arrive unsourced.
+PROVENANCE_KEYS = ("condition_id", "fixture_id", "kind", "period", "overtime",
+                   "backs", "line", "over_under", "quantity",
+                   "cost_cents_per_unit", "tie_rule", "void_rule")
+
+
+class LegRefused(Exception):
+    """A leg that could not be built. Carries the refusal and the field."""
+
+    def __init__(self, refusal, why, field=None, detail=None):
+        super().__init__(why)
+        self.refusal = refusal
+        self.why = why
+        self.field = field
+        self.detail = detail
+
+    def as_dict(self) -> dict:
+        return {"ok": False, "refusal": self.refusal, "why": self.why,
+                "field": self.field, "detail": self.detail}
+
+
+def _cents_per_unit(value, field):
+    """An integer cent basis, or refuse. `Leg` costs are exact in cents."""
+    if value is None:
+        raise LegRefused(R_BASIS_NOT_STATED,
+                         "%s is not stated, so the leg has no cost basis and "
+                         "no structure built on it has a cost" % field, field)
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        raise LegRefused(R_BASIS_NOT_STATED,
+                         "%s is %r, which is not a number" % (field, value),
+                         field, value)
+    if v != v or v in (float("inf"), float("-inf")) or v <= 0:
+        raise LegRefused(R_BASIS_NOT_STATED,
+                         "%s is %r; a per-unit basis must be finite and above "
+                         "zero" % (field, value), field, value)
+    # A venue price is quoted in dollars per contract on a $1 payout, so cents
+    # are the price times one hundred. Rounded to the cent because that is the
+    # unit `Leg` states and `_leg_payout_cents` compares against.
+    return int(round(v * 100)) if v <= 1.5 else int(round(v))
+
+
+def build_leg(*, row, quantity, cost_per_unit, prose=None, sport_family=None,
+              prose_source=None, evidence_age_s=None) -> dict:
+    """ONE `bettor_indirect_structures.Leg` from real reads, or a refusal.
+
+    `row`            a `us_premap` row as a mapping
+    `quantity`       contracts held or to be acquired, a positive integer
+    `cost_per_unit`  the per-contract price or basis, in dollars
+    `prose`          the venue's own captured settlement text for THIS
+                     contract, from `bettor_live_read.read_rules_text`
+    `sport_family`   the family the overtime patterns are declared for
+
+    Returns {"ok": True, "leg": Leg, "built_from": {...}, ...} or
+    {"ok": False, "refusal": ..., "field": ..., "why": ...}. Never raises: a
+    refusal on the decision path must be a value, not an exception.
+
+    IT DOES NOT JUDGE THE LEG'S VALUE. It answers only "are all the facts
+    grading needs stated", and `Leg.missing_facts()` is consulted as the final
+    word rather than re-implemented here -- if that class gains a requirement,
+    this builder starts refusing rather than starting to lie.
+    """
+    prov: dict = {}
+    try:
+        r = dict(row or {})
+        slug = _clean(r.get("market_slug"))
+        if not slug:
+            raise LegRefused(R_NO_CATALOGUE_ROW,
+                             "the row names no market_slug, so the contract has "
+                             "no venue-native identity", "condition_id")
+        prov["condition_id"] = ("us_premap.market_slug (the VENUE-native id, "
+                               "never markets.slug)")
+
+        fx = fixture_participants(r.get("event_slug"))
+        if fx["refusal"]:
+            raise LegRefused(fx["refusal"], fx["why"], "fixture_id", fx)
+        prov["fixture_id"] = "us_premap.event_slug %r" % (fx["event_slug"],)
+
+        kd = derive_kind(r)
+        if kd["refusal"]:
+            raise LegRefused(kd["refusal"], kd["why"], "kind", kd)
+        prov["kind"] = "us_premap.sports_type via %s" % (kd["matched_suffix"],)
+        prov["period"] = prov["kind"]
+
+        # ── ORIENTATION, WHICH A TOTAL DOES NOT HAVE ─────────────────
+        backs = None
+        if kd["kind"] != IS.KIND_TOTAL:
+            ori = orientation_of(r, participants=fx)
+            if ori["refusal"]:
+                raise LegRefused(ori["refusal"], ori["why"], "backs", ori)
+            backs = ori["backs"]
+            prov["backs"] = ("us_premap.team_abbr %r against the ordered "
+                            "participants %r" % (ori["team_abbr"],
+                                                ori["participants"]))
+        else:
+            prov["backs"] = ("not applicable: a total has no orientation, it "
+                            "has a direction")
+
+        # ── THE LINE, AGAINST TEAM A'S MARGIN ────────────────────────
+        line = None
+        if kd["kind"] == IS.KIND_SPREAD:
+            la = line_against_a(signed_line=kd["signed_line"], backs=backs)
+            if la["refusal"]:
+                raise LegRefused(la["refusal"], la["why"], "line", la)
+            line = la["line"]
+            prov["line"] = ("us_premap.signed %s, expressed against team A's "
+                           "margin (%s)" % (kd["signed_line"], line))
+        elif kd["kind"] == IS.KIND_TOTAL:
+            line = kd["line"]
+            prov["line"] = "us_premap.line %s" % (line,)
+        else:
+            prov["line"] = ("not read: on a moneyline row that column is the "
+                           "game start minute")
+        prov["over_under"] = (("us_premap.side_norm %r" % kd["over_under"])
+                              if kd["over_under"] else "not applicable")
+
+        # ── THE OVERTIME RULE: THE TYPE FIRST, THEN THE PROSE ────────
+        #
+        # A type that states its own rule (`_team_regulation_winner`) is
+        # stronger than a prose match, because it is the venue naming the rule
+        # in the instrument's own identifier. Otherwise the prose is read.
+        fam = _clean(sport_family) or _clean(
+            str(r.get("sports_type") or "").split("_")[0])
+        if kd.get("overtime_from_type"):
+            overtime = kd["overtime_from_type"]
+            prov["overtime"] = ("us_premap.sports_type states it in the "
+                               "instrument's own name")
+            ot_read = {"overtime": overtime, "established": True,
+                       "source": "SPORTS_TYPE"}
+        else:
+            ot_read = overtime_from_venue_prose(sport_family=fam, prose=prose)
+            overtime = ot_read["overtime"]
+            prov["overtime"] = ("the venue's own published settlement prose "
+                               "for this contract via %s"
+                               % (prose_source or "read_rules_text",))
+        if overtime == IS.OT_UNKNOWN:
+            raise LegRefused(
+                R_OVERTIME_NOT_CAPTURED,
+                ("the overtime treatment is not established (%s), and it is "
+                 "part of the grading key: two legs that may or may not count "
+                 "overtime are not graded against one variable. %s"
+                 % (ot_read.get("refusal"), ot_read.get("why") or "")),
+                "overtime", ot_read)
+
+        # ── QUANTITY AND BASIS, FROM THE INTENT, NOT THE CATALOGUE ───
+        try:
+            qty = int(quantity)
+        except (TypeError, ValueError):
+            raise LegRefused(R_QUANTITY_NOT_POSITIVE,
+                             "quantity is %r, which is not a whole number of "
+                             "contracts" % (quantity,), "quantity")
+        if qty <= 0:
+            raise LegRefused(R_QUANTITY_NOT_POSITIVE,
+                             "quantity is %r; a leg of no contracts has no "
+                             "payout to classify" % (qty,), "quantity")
+        prov["quantity"] = "the funded intent's residual quantity"
+        cents = _cents_per_unit(cost_per_unit, "cost_per_unit")
+        prov["cost_cents_per_unit"] = ("the funded intent's per-unit basis, or "
+                                      "the candidate's own quoted price")
+
+        # ── THE SETTLEMENT PROSE ITSELF, CARRIED NOT INTERPRETED ─────
+        #
+        # `_leg_payout_cents` searches these strings for '50-50' and
+        # 'underdog' and returns None when it finds neither -- so an absent
+        # rule leaves the TIE and VOID regions UNDETERMINED, which propagates
+        # as UNESTABLISHABLE. That is why absence here is NOT a build refusal
+        # the way OT_UNKNOWN is: it degrades the classification honestly
+        # instead of fabricating a payout. It is also why the text is passed
+        # through verbatim rather than summarised.
+        captured = bool(str(prose or "").strip())
+        prov["tie_rule"] = prov["void_rule"] = (
+            ("the venue's captured prose, verbatim" if captured else
+             "NOT CAPTURED -- the TIE and VOID regions stay undetermined, and "
+             "we do not supply the venue's rules from memory"))
+
+        leg = IS.Leg(
+            condition_id=slug, fixture_id=fx["event_slug"], kind=kd["kind"],
+            period=kd["period"], overtime=overtime, backs=backs, line=line,
+            over_under=kd["over_under"], quantity=qty,
+            cost_cents_per_unit=cents,
+            tie_rule=(str(prose) if captured else None),
+            void_rule=(str(prose) if captured else None),
+            settlement_text_captured=captured)
+    except LegRefused as exc:
+        return dict(exc.as_dict(), built_from=prov)
+
+    # ── THE CLASS ITSELF IS THE FINAL WORD ───────────────────────────
+    gaps = leg.missing_facts()
+    if gaps:
+        return {"ok": False, "refusal": R_LEG_FACTS_MISSING,
+                "why": ("the leg is built and still missing a fact grading "
+                        "needs: %s" % "; ".join(gaps)),
+                "field": None, "missing_facts": gaps, "built_from": prov,
+                "checked_by": "bettor_indirect_structures.Leg.missing_facts"}
+    return {"ok": True, "refusal": None, "leg": leg, "built_from": prov,
+            "grading_key": leg.grading_key(),
+            "settlement_text_captured": captured,
+            "evidence_age_s": evidence_age_s,
+            "why": ("every fact this leg's kind needs is stated and sourced, "
+                    "and Leg.missing_facts agrees")}
+
+
+# ═════════════════════════════════════════════════════════════════════
+# 6 · THE PRODUCTION IMPORTERS
+# ═════════════════════════════════════════════════════════════════════
+
+#: One catalogue row by its venue-native slug.
+ROW_SQL = """
+    SELECT market_slug, event_slug, event_title, question, sports_type,
+           side_norm, team_abbr, team_name, line, signed, intent, kind,
+           game_start, updated_at
+      FROM us_premap
+     WHERE market_slug = $1
+     LIMIT 1
+"""
+
+#: THE SIBLING CONTRACTS ON THE SAME FIXTURE, which is the candidate set.
+#:
+#: `market_slug <> $2` is the NETTING EXCLUSION and it is not a tidy-up: run
+#: 264 measured exactly 2.00 rows per market_slug and exactly 2 distinct
+#: intents on every one of the venue's seventeen slug prefixes, so the held
+#: contract's other side IS the held instrument. Admitting it would present a
+#: netting trade as an independent liquidity opportunity.
+#:
+#: DISTINCT ON keeps one row per (slug, team) so each side of each sibling
+#: market is offered once. Bounded because a single fixture carries up to 74
+#: distinct admitted slugs and each candidate costs a paced venue read.
+SIBLINGS_SQL = """
+    SELECT DISTINCT ON (market_slug, coalesce(team_abbr, side_norm))
+           market_slug, event_slug, event_title, question, sports_type,
+           side_norm, team_abbr, team_name, line, signed, intent, kind,
+           game_start, updated_at
+      FROM us_premap
+     WHERE event_slug = $1
+       AND market_slug <> $2
+     ORDER BY market_slug, coalesce(team_abbr, side_norm), updated_at DESC
+     LIMIT $3
+"""
+
+MAX_CANDIDATE_ROWS = 40
+
+R_NO_EVENT_FOR_HELD = "THE_HELD_CONTRACTS_ROW_NAMES_NO_EVENT_TO_FIND_SIBLINGS_ON"
+R_CATALOGUE_READ_FAILED = "THE_CATALOGUE_READ_ITSELF_FAILED"
+
+
+async def read_row(conn, market_slug):
+    """One catalogue row, or None. Never raises."""
+    try:
+        got = await conn.fetchrow(ROW_SQL, str(market_slug or ""))
+    except Exception as exc:                                    # noqa: BLE001
+        return {"error": type(exc).__name__}
+    return dict(got) if got is not None else None
+
+
+async def held_leg_for(conn, *, position, prose_reader=None, now=None) -> dict:
+    """THE HELD POSITION'S LEG, from the real catalogue and the real prose.
+
+    `prose_reader` is an awaitable taking the slug and returning the result of
+    `bettor_live_read.read_rules_text` -- injected so the venue transport can
+    be substituted in a test WITHOUT substituting this function, the builder,
+    or the readers it calls. That distinction is the whole point: the thing
+    under test is the supplier, and only the network is stood in for.
+    """
+    pos = dict(position or {})
+    slug = _clean(pos.get("us_market_slug"))
+    out = {"ok": False, "leg": None, "refusal": None, "us_market_slug": slug,
+           "source": "us_premap + venue settlement prose"}
+    if not slug:
+        out.update(refusal=R_NO_CATALOGUE_ROW,
+                   why="the position names no venue market slug")
+        return out
+    row = await read_row(conn, slug)
+    if isinstance(row, dict) and row.get("error"):
+        out.update(refusal=R_CATALOGUE_READ_FAILED,
+                   why=("the catalogue read failed (%s). Unread is not empty: "
+                        "no leg is built and no hedge is discovered, and the "
+                        "exit path is untouched" % row["error"]))
+        return out
+    if row is None:
+        out.update(refusal=R_NO_CATALOGUE_ROW,
+                   why=("the venue catalogue has no row for %r, so the held "
+                        "contract's kind, period and orientation are all "
+                        "unestablished" % slug))
+        return out
+    out["row"] = {k: row.get(k) for k in ("sports_type", "event_slug",
+                                          "team_abbr", "side_norm", "signed")}
+    prose, psource, age = None, None, None
+    if prose_reader is not None:
+        try:
+            pr = await prose_reader(slug)
+        except Exception as exc:                                # noqa: BLE001
+            pr = {"ok": False, "error": type(exc).__name__}
+        pr = dict(pr or {})
+        prose = pr.get("rules_text")
+        psource = pr.get("source") or pr.get("error")
+        out["prose_read"] = {"ok": bool(pr.get("ok")),
+                             "field": pr.get("rules_field"),
+                             "chars": len(str(prose or "")),
+                             "error": pr.get("error"),
+                             "from_cache": pr.get("from_cache")}
+        if pr.get("read_at") is not None and now is not None:
+            age = round(float(now) - float(pr["read_at"]), 3)
+    built = build_leg(
+        row=row, quantity=(pos.get("residual_qty") or pos.get("filled_qty")),
+        cost_per_unit=(pos.get("avg_price") or pos.get("limit_price")),
+        prose=prose, prose_source=psource, evidence_age_s=age,
+        sport_family=_clean(str(row.get("sports_type") or "").split("_")[0]))
+    out.update(built)
+    out["ok"] = bool(built.get("ok"))
+    return out
+
+
+async def candidate_legs_for(conn, *, held_row, quoter=None,
+                             prose_reader=None, limit=None, now=None) -> dict:
+    """EVERY ELIGIBLE COMPLEMENTARY CONTRACT ON THE SAME FIXTURE, built.
+
+    Returns {"legs": [...], "refused": [...], "examined": n, ...}. EVERY
+    sibling is attempted and every failure is reported with the fact it
+    lacked, because "the first admitted contract" is what Codex asked this not
+    to be: a ranking over one candidate is not a ranking.
+
+    `quoter` is an awaitable taking the slug and returning that contract's own
+    price and depth; `prose_reader` its settlement text. Both are injected so
+    the venue transport can be substituted without substituting the supplier.
+    A candidate with no price is REFUSED rather than priced from the held
+    contract's book -- two instruments do not share a ladder.
+    """
+    hr = dict(held_row or {})
+    event = _clean(hr.get("event_slug"))
+    held_slug = _clean(hr.get("market_slug"))
+    out = {"legs": [], "refused": [], "examined": 0, "event_slug": event,
+           "held_excluded": held_slug, "refusal": None,
+           "every_candidate_was_attempted": True,
+           "netting_exclusion": (
+               "the held market_slug is excluded because the venue carries ONE "
+               "instrument per market -- run 264 measured exactly 2.00 rows "
+               "and 2 intents per slug on all seventeen prefixes -- so its "
+               "other side is the held instrument, not a second holding")}
+    if not event:
+        out.update(refusal=R_NO_EVENT_FOR_HELD,
+                   why="the held contract's row names no event")
+        return out
+    try:
+        rows = await conn.fetch(SIBLINGS_SQL, event, held_slug,
+                                int(limit or MAX_CANDIDATE_ROWS))
+    except Exception as exc:                                    # noqa: BLE001
+        out.update(refusal=R_CATALOGUE_READ_FAILED,
+                   why=("the sibling read failed (%s); no candidate is "
+                        "discovered and the exit path is untouched"
+                        % type(exc).__name__))
+        return out
+    out["examined"] = len(rows)
+    for raw in rows:
+        row = dict(raw)
+        slug = _clean(row.get("market_slug"))
+        # PRICE AND DEPTH ARE THIS CONTRACT'S OWN. A candidate priced off
+        # another instrument's ladder is a fabricated cost.
+        price, depth, quote = None, None, {}
+        if quoter is not None:
+            try:
+                quote = dict(await quoter(slug) or {})
+            except Exception as exc:                            # noqa: BLE001
+                quote = {"ok": False, "error": type(exc).__name__}
+            price = quote.get("cost_per_share") or quote.get("price")
+            depth = quote.get("depth_qty")
+        if price is None:
+            out["refused"].append(
+                {"market_slug": slug, "sports_type": row.get("sports_type"),
+                 "refusal": R_CANDIDATE_NOT_PRICED,
+                 "why": ("this contract's own price was not established (%s). "
+                         "Pricing it off the held contract's ladder would "
+                         "invent the cost of the hedge"
+                         % (quote.get("refusal") or quote.get("error")
+                            or "no quoter supplied"))})
+            continue
+        prose, psource, age = None, None, None
+        if prose_reader is not None:
+            try:
+                pr = dict(await prose_reader(slug) or {})
+            except Exception as exc:                            # noqa: BLE001
+                pr = {"ok": False, "error": type(exc).__name__}
+            prose = pr.get("rules_text")
+            psource = pr.get("source") or pr.get("error")
+            if pr.get("read_at") is not None and now is not None:
+                age = round(float(now) - float(pr["read_at"]), 3)
+        built = build_leg(
+            row=row, quantity=(quote.get("available_qty")
+                               or depth or hr.get("residual_qty") or 1),
+            cost_per_unit=price, prose=prose, prose_source=psource,
+            evidence_age_s=age,
+            sport_family=_clean(str(row.get("sports_type")
+                                    or "").split("_")[0]))
+        if not built.get("ok"):
+            out["refused"].append(
+                {"market_slug": slug, "sports_type": row.get("sports_type"),
+                 "refusal": built.get("refusal"), "field": built.get("field"),
+                 "why": built.get("why")})
+            continue
+        out["legs"].append(
+            {"leg": built["leg"], "market_slug": slug,
+             "sports_type": row.get("sports_type"),
+             "built_from": built["built_from"],
+             "grading_key": built["grading_key"],
+             "price": price, "depth_qty": depth,
+             "evidence_age_s": age, "quote": quote,
+             "settlement_text_captured": built["settlement_text_captured"]})
+    out["why"] = ("%d of %d sibling contracts on this fixture were built into "
+                  "legs; %d refused, each naming the fact it lacked"
+                  % (len(out["legs"]), out["examined"], len(out["refused"])))
     return out
 
 
