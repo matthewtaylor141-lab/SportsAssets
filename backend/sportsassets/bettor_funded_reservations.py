@@ -507,9 +507,17 @@ EV_ESTABLISHED_NOTHING = "READ_ESTABLISHED_NOTHING"
 #: written for `VENUE_HAS_NO_SUCH_ORDER`: `resolve_from_the_venue` does not
 #: read it, and only `release_on_attestation` does.
 EV_ATTESTED_NO_EXPOSURE = "OPERATOR_ATTESTED_NO_EXPOSURE"
+#: AN OPERATOR NAMED THE ORDER (migration 139). The venue RETURNED the order --
+#: its terms and creation time were checked by the resolution route -- but that
+#: the order is THIS request's is the operator's statement from the venue's own
+#: account records, not the venue's. So it is its own kind, read only by
+#: `consume_on_operator_naming`, and the reservation's resolution says who
+#: named it.
+EV_OPERATOR_NAMED = "OPERATOR_NAMED_THE_ORDER"
 EVIDENCE_KINDS = (EV_NAMED, EV_NO_SUCH_ORDER, EV_ESTABLISHED_NOTHING,
-                  EV_ATTESTED_NO_EXPOSURE)
+                  EV_ATTESTED_NO_EXPOSURE, EV_OPERATOR_NAMED)
 WHY_OPERATOR_ATTESTED_NO_EXPOSURE = "AN_OPERATOR_ATTESTED_NO_EXPOSURE_EXISTS"
+WHY_OPERATOR_NAMED_THE_ORDER = "AN_OPERATOR_NAMED_THE_ORDER"
 
 R_NO_EVIDENCE = "NO_DURABLE_EVIDENCE_IS_BOUND_TO_THIS_OPERATION"
 R_EVIDENCE_NOT_BOUND = "THE_EVIDENCE_IS_NOT_BOUND_TO_THIS_OPERATIONS_FACTS"
@@ -563,7 +571,7 @@ async def record_venue_evidence(conn, *, evidence_id: str, operation_id: str,
     except SchemaUnavailable as exc:
         return dict(out, ok=False, refusal=R_EVIDENCE_SCHEMA_UNAVAILABLE,
                     why=str(exc))
-    if kind == EV_NAMED and not venue_order_id:
+    if kind in (EV_NAMED, EV_OPERATOR_NAMED) and not venue_order_id:
         return dict(out, ok=False, refusal=R_ORDER_ID_REQUIRED,
                     why=("a record that the venue named an order must carry the "
                          "id it named. Without one it names nothing"))
@@ -859,6 +867,43 @@ async def resolve_from_the_venue(conn, *, operation_id: str,
                            ("search_endpoint", "covered_terminal_orders",
                             "results_returned", "window_from_epoch_s",
                             "window_to_epoch_s")}
+    return got
+
+
+async def consume_on_operator_naming(conn, *, operation_id: str,
+                                    venue_order_id: str) -> dict:
+    """CONSUME AN AMBIGUOUS RESERVATION ON AN AUDITED OPERATOR NAMING.
+
+    Requires an `OPERATOR_NAMED_THE_ORDER` row bound to this operation's
+    account, instrument and intent, naming this very order -- the database
+    accepts one only with the order id, the attester and the audit id -- and
+    moves AMBIGUOUS -> CONSUMED with a resolution that says an operator named
+    it. `resolve_from_the_venue` never reads this kind.
+    """
+    out: dict[str, Any] = {"version": VERSION,
+                           "operation_id": str(operation_id), "to": CONSUMED}
+    if not venue_order_id:
+        return dict(out, ok=False, refusal=R_ORDER_ID_REQUIRED)
+    res = await _fetch(conn, operation_id)
+    if res is None:
+        return dict(out, ok=False, refusal=R_NO_SUCH_OPERATION)
+    ev = await _usable_evidence(conn, operation_id=operation_id,
+                                kind=EV_OPERATOR_NAMED, reservation=res)
+    if not ev.get("ok"):
+        return dict(out, ok=False, refusal=ev["refusal"], why=ev.get("why"),
+                    exposure="PRESERVED", evidence_check=ev)
+    if str(ev["evidence"]["venue_order_id"]) != str(venue_order_id):
+        return dict(out, ok=False, refusal=R_EVIDENCE_NOT_BOUND,
+                    why=("the recorded naming is of order %r, not %r"
+                         % (ev["evidence"]["venue_order_id"], venue_order_id)))
+    got = await _transition(
+        conn, operation_id, to=CONSUMED, expect=(AMBIGUOUS,),
+        note="%s:%s:%s" % (WHY_OPERATOR_NAMED_THE_ORDER, venue_order_id,
+                           ev["evidence"]["evidence_id"]))
+    if got.get("ok"):
+        got["evidence_id"] = ev["evidence"]["evidence_id"]
+        got["venue_order_id"] = str(venue_order_id)
+        got["consumed_on"] = "AN_AUDITED_OPERATOR_NAMING"
     return got
 
 

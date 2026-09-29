@@ -316,6 +316,10 @@ def test_the_route_refuses_without_both_factors(client):
     r = c.post(ROUTE, json=body, headers={
         "X-Resolution-Key": cfg.funded_resolution_key})
     assert r.status_code == 401
+    # a non-ASCII guess is a wrong key, not a server error
+    r = c.post(ROUTE, json=body, headers=dict(admin, **{
+        "X-Resolution-Key": "cl\u00e9".encode("utf-8")}))
+    assert r.status_code == 401
 
 
 def test_the_route_passes_the_configured_identity_not_the_typed_one():
@@ -454,16 +458,32 @@ async def test_a_named_order_is_booked_consumed_and_audited_once(monkeypatch):
         assert fills == 1
         res = await RSV.get(conn, PL.OP_HEDGE)
         assert res["reservation"]["state"] == RSV.CONSUMED
+        # AN OPERATOR'S NAMING, NEVER RECORDED AS THE VENUE'S STATEMENT
+        assert await conn.fetchval(
+            "SELECT count(*) FROM bettor_funded_operation_evidence "
+            " WHERE operation_id=$1 AND kind=$2", PL.OP_HEDGE,
+            RSV.EV_NAMED) == 0
         named = dict(await conn.fetchrow(
             "SELECT * FROM bettor_funded_operation_evidence "
-            " WHERE operation_id=$1 AND kind=$2", PL.OP_HEDGE, RSV.EV_NAMED))
+            " WHERE operation_id=$1 AND kind=$2", PL.OP_HEDGE,
+            RSV.EV_OPERATOR_NAMED))
         scope = named["search_scope"]
         scope = json.loads(scope) if isinstance(scope, str) else scope
         assert scope["named_by"] == "OPERATOR"
         assert named["venue_order_id"] == "venue-ours"
+        assert res["reservation"]["resolution"].startswith(
+            RSV.WHY_OPERATOR_NAMED_THE_ORDER), res["reservation"]["resolution"]
         [acc] = [a for a in await _audits(conn, intent["intent_id"])
                  if a["outcome"] == "ACCEPTED"]
         assert str(acc["audit_id"]) == str(scope["audit_id"])
+        # THE AUDIT ROW RECORDS WHAT THE EFFECTS WERE, not a placeholder
+        eff = acc["effect"]
+        eff = json.loads(eff) if isinstance(eff, str) else eff
+        assert eff["intent_state"] == "PARTIALLY_FILLED", eff
+        assert eff["reservation"]["state"] == RSV.CONSUMED
+        reads = acc["venue_reads"]
+        reads = json.loads(reads) if isinstance(reads, str) else reads
+        assert reads["order"]["order_id"] == "venue-ours"
 
         # THE SAME DECISION RETRIED: idempotent, audited, nothing re-booked
         again = await FI.resolve_audited(conn, intent_id=intent["intent_id"],
@@ -481,6 +501,21 @@ async def test_a_named_order_is_booked_consumed_and_audited_once(monkeypatch):
         outcomes = [a["outcome"] for a in await _audits(conn,
                                                         intent["intent_id"])]
         assert outcomes == ["ACCEPTED", "ALREADY_RESOLVED", "REFUSED"]
+        # A LOST-ACK RECOVERY THAT LOOKED BEFORE THE NAMING does not turn the
+        # named, acknowledged intent back into an unanswered one.
+        late_reader = await FB.mark_unresolved(
+            conn, intent["intent_id"], "a reader that looked before",
+            only_if_unacknowledged=True)
+        assert late_reader["marked"] is False, late_reader
+        # ...and its ADOPTION write, guarded the same way, does not overwrite
+        # the operator's named order with a term-matched one
+        late_adopt = await FB.record_acknowledgement(
+            conn, intent["intent_id"], venue_order_id="venue-someone-else",
+            status="open", only_if_unacknowledged_in=FB.ADOPTABLE_FROM)
+        assert late_adopt["written"] is False, late_adopt
+        assert await conn.fetchval(
+            "SELECT venue_order_id FROM bettor_funded_intents "
+            " WHERE intent_id=$1", intent["intent_id"]) == "venue-ours"
         assert venue.creates == 0 and client.orders.creates == 1
     finally:
         await PL._clean(conn)
@@ -518,10 +553,19 @@ async def test_absence_is_refused_while_anything_could_still_be_ours(
         venue.resting = [_raw_order("manual-at-another-price", price=0.55,
                                     created=sent - 7200)]
         assert await _try(late) == FI.R_RESTING_ON_MARKET
+        # 2b · a working order that names NO market cannot be excluded
+        venue.resting = [_raw_order("naming-nothing", slug=None,
+                                    created=sent - 60)]
+        assert await _try(late) == FI.R_RESTING_UNPLACED
         venue.resting = []
         # 3 · the account executed on the market after the send
         venue.trades = [_own_trade("t-after", sent + 5)]
         assert await _try(late) == FI.R_EXECUTED_SINCE_SEND
+        # 3b · a trade that names no market is not "nothing traded here"
+        bad = _own_trade("t-nomkt", sent + 5)
+        bad["trade"].pop("marketSlug")
+        venue.trades = [bad]
+        assert await _try(late) == FI.R_EXECUTIONS_UNREADABLE
         venue.trades = []
         # 4 · the reads do not establish anything
         venue.resting_raises = True
@@ -534,6 +578,39 @@ async def test_absence_is_refused_while_anything_could_still_be_ours(
         venue.activity_page = {"activities": [], "eof": "true"}
         assert await _try(late) == FI.R_EXECUTIONS_UNREADABLE
         assert venue.creates == 0
+    finally:
+        await PL._clean(conn)
+        await conn.close()
+
+
+@pg
+async def test_executions_of_an_order_another_intent_owns_do_not_block_absence(
+        monkeypatch):
+    """REVIEW OF 599076c: a later order of ANOTHER intent trading on the same
+    market made absence unattestable for good. Its executions are booked
+    there and say nothing about this request; an unowned order's still do."""
+    asyncpg = pytest.importorskip("asyncpg")
+    conn = await asyncpg.connect(DSN)
+    try:
+        intent, _ = await _lost_ack(conn, monkeypatch)
+        venue = _install(monkeypatch, _Venue())
+        sent = _sent(intent)
+        late = sent + FI.SETTLE_S + 60
+        await _investigate(conn, now=late - 30)
+        inv = await _inv(conn, intent["intent_id"])
+        await conn.execute(
+            "UPDATE bettor_funded_intents SET venue_order_id='vo-primary' "
+            " WHERE intent_id=$1", PL.PRIMARY_INTENT)
+        venue.trades = [_own_trade("t-primary", sent + 5, own="vo-primary")]
+        got = await FI.resolve_audited(
+            conn, intent_id=intent["intent_id"], auth=AUTH, now=late,
+            body=_body(intent, inv, FI.REQ_NO_EXPOSURE_EXISTS))
+        assert got["ok"] is True, got
+        [acc] = [a for a in await _audits(conn, intent["intent_id"])
+                 if a["outcome"] == "ACCEPTED"]
+        reads = acc["venue_reads"]
+        reads = json.loads(reads) if isinstance(reads, str) else reads
+        assert reads["executions_explained_by_other_intents"] == ["vo-primary"]
     finally:
         await PL._clean(conn)
         await conn.close()
@@ -607,6 +684,13 @@ async def test_an_attested_absence_releases_the_leg_and_is_never_a_venue_stateme
                 " ('ev:bare', $1, $2, $3, $4, $5, 'none', false, now())",
                 PL.OP_HEDGE, PL.ACCT, PL.VENUE, PL.SLUG_HEDGE,
                 RSV.EV_ATTESTED_NO_EXPOSURE)
+        # A RECOVERY PASS THAT READ THE ROW BEFORE THE OPERATOR DID cannot
+        # reopen it: the UPDATE itself refuses an ended row.
+        late_reader = await FB.mark_unresolved(
+            conn, intent["intent_id"], "a reader that looked before the "
+            "resolution", only_if_unacknowledged=True)
+        assert late_reader["marked"] is False, late_reader
+        assert late_reader["state"] == "ABANDONED"
         assert venue.creates == 0 and client.orders.creates == 1
     finally:
         await conn.execute("DELETE FROM bettor_funded_operation_evidence "
@@ -640,6 +724,10 @@ async def test_an_effect_that_fails_half_way_leaves_nothing_and_is_audited(
         [a] = await _audits(conn, intent["intent_id"])
         assert a["outcome"] == "REFUSED"
         assert a["refusal"] == FI.R_RESERVATION_NOT_MOVED
+        reads = a["venue_reads"]
+        reads = json.loads(reads) if isinstance(reads, str) else reads
+        assert reads.get("picture"), ("a rolled-back attempt is audited WITH "
+                                      "what it read")
         assert await conn.fetchval(
             "SELECT count(*) FROM bettor_funded_operation_evidence "
             " WHERE operation_id=$1 AND kind=$2", PL.OP_HEDGE,

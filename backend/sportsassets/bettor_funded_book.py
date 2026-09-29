@@ -998,11 +998,23 @@ async def abandon_proven_not_sent(conn, intent_id: str, reason: str) -> dict:
             "asserted": "nothing left this process", "group_release": rel}
 
 
+#: The states recovery may ADOPT a venue order onto: a send with no answer.
+ADOPTABLE_FROM = ("INTENT_RECORDED", "SEND_ATTEMPTED", "UNRESOLVED")
+
+
 async def record_acknowledgement(conn, intent_id: str, *,
                                  venue_order_id, status: str,
-                                 raw: dict | None = None) -> dict:
+                                 raw: dict | None = None,
+                                 only_if_unacknowledged_in=None) -> dict:
     """THE VENUE NAMED AN ORDER. Store its id; that is the handle every later
-    poll, cancel and recovery needs."""
+    poll, cancel and recovery needs.
+
+    `only_if_unacknowledged_in` guards a write made by a reader that looked
+    earlier -- recovery's adoption: the row must still carry no venue order id
+    and still be in one of those states, or nothing is written and
+    `written: False` says what the row is now (review of 599076c: an operator
+    resolution committed between recovery's read and its write was otherwise
+    overwritten)."""
     vid = str(venue_order_id or "").strip() or None
     state = "ACKNOWLEDGED"
     if str(status or "").lower() in ("rejected", "post_only_rejected",
@@ -1011,31 +1023,81 @@ async def record_acknowledgement(conn, intent_id: str, *,
                                      "side_unverifiable"):
         # THE VENUE REFUSED IT, and a refusal is not exposure.
         state = "REJECTED"
-    await conn.execute(
+    guard = only_if_unacknowledged_in is not None
+    status_ = await conn.execute(
         "UPDATE bettor_funded_intents SET state=$3, venue_order_id=$2, "
         "  raw=$4::jsonb, updated_at=now(), "
         "  resolved_at=CASE WHEN $3='REJECTED' THEN now() ELSE resolved_at END"
-        " WHERE intent_id=$1", intent_id, vid, state,
-        json.dumps(raw or {}, default=str))
-    out = {"intent_id": intent_id, "state": state, "venue_order_id": vid}
+        " WHERE intent_id=$1 AND (NOT $5 OR (venue_order_id IS NULL "
+        "   AND state = ANY($6::text[])))", intent_id, vid, state,
+        json.dumps(raw or {}, default=str), guard,
+        list(only_if_unacknowledged_in or ()))
+    if guard and str(status_).endswith(" 0"):
+        now_row = await conn.fetchrow(
+            "SELECT state, venue_order_id FROM bettor_funded_intents "
+            " WHERE intent_id=$1", intent_id)
+        return {"intent_id": intent_id, "written": False,
+                "state": (now_row or {}).get("state"),
+                "venue_order_id": (now_row or {}).get("venue_order_id"),
+                "why": "the row moved on after it was read; not adopted"}
+    out = {"intent_id": intent_id, "state": state, "venue_order_id": vid,
+           "written": True}
     if state == "REJECTED":
         # A REFUSAL IS NOT EXPOSURE, so it must not keep holding the slot.
         out["group_release"] = await release_group_if_earned(conn, intent_id)
     return out
 
 
-async def mark_unresolved(conn, intent_id: str, reason: str) -> dict:
+#: The states an intent can be marked UNRESOLVED FROM. A row that has ended --
+#: REJECTED, CANCELLED, ABANDONED -- or FILLED is not reopened by a later
+#: reader that looked at it before it ended.
+UNRESOLVABLE_FROM = ("INTENT_RECORDED", "SEND_ATTEMPTED", "ACKNOWLEDGED",
+                     "PARTIALLY_FILLED", "UNRESOLVED")
+
+
+async def mark_unresolved(conn, intent_id: str, reason: str, *,
+                          only_if_unacknowledged: bool = False,
+                          also_from_filled: bool = False) -> dict:
     """WE DO NOT KNOW WHAT HAPPENED, and the exposure stands until we do.
 
     Deliberately NOT a terminal state: it keeps the intent live, so the
     one-live guard keeps refusing new exposure and the headroom check keeps
     counting it.
+
+    GUARDED BY STATE IN THE UPDATE ITSELF (review of 599076c). Recovery reads
+    the live intents, then asks the venue, then writes; an operator's audited
+    resolution can commit in between. An unguarded UPDATE put an intent the
+    operator had just ABANDONED straight back to UNRESOLVED. Now a row that has
+    ended is left alone, and `only_if_unacknowledged` -- the lost-
+    acknowledgement branch -- also leaves a row that has since been given a
+    venue order id. The result says what the row actually is.
+
+    `also_from_filled` is for a caller holding NEW evidence about a filled
+    order -- fill ingestion that has just read executions the venue did not
+    name -- not for a reader that looked before the row filled.
     """
-    await conn.execute(
+    states = list(UNRESOLVABLE_FROM) + (["FILLED"] if also_from_filled
+                                        else [])
+    status = await conn.execute(
         "UPDATE bettor_funded_intents SET state='UNRESOLVED', "
-        "  unresolved_reason=$2, updated_at=now() WHERE intent_id=$1",
-        intent_id, str(reason)[:500])
-    return {"intent_id": intent_id, "state": "UNRESOLVED",
+        "  unresolved_reason=$2, updated_at=now() WHERE intent_id=$1 "
+        "   AND state = ANY($3::text[]) "
+        "   AND (NOT $4 OR venue_order_id IS NULL)",
+        intent_id, str(reason)[:500], states,
+        bool(only_if_unacknowledged))
+    if str(status).endswith(" 0"):
+        now_row = await conn.fetchrow(
+            "SELECT state, venue_order_id FROM bettor_funded_intents "
+            " WHERE intent_id=$1", intent_id)
+        return {"intent_id": intent_id,
+                "state": (now_row or {}).get("state"),
+                "marked": False, "reason": reason,
+                "why": ("the row had already moved on (state %r, venue order "
+                        "%r) and is not reopened by a reader that looked "
+                        "before it did" % ((now_row or {}).get("state"),
+                                           (now_row or {}).get(
+                                               "venue_order_id")))}
+    return {"intent_id": intent_id, "state": "UNRESOLVED", "marked": True,
             "exposure": "PRESERVED", "reason": reason}
 
 
@@ -2039,7 +2101,7 @@ async def _ingest_locked(conn, *, intent_id, fills, direction, now, row,
         await mark_unresolved(
             conn, intent_id,
             "%d execution(s) the venue did not name; quantity unreconciled"
-            % len(unresolved))
+            % len(unresolved), also_from_filled=True)
     elif filled >= float(row["quantity"]) - 1e-9:
         await conn.execute(
             "UPDATE bettor_funded_intents SET state='FILLED', "
@@ -2598,7 +2660,8 @@ async def recover(conn, adapter, *, account_id: str, venue: str,
             # WE COULD NOT LOOK. That is not "no order exists".
             got = await mark_unresolved(
                 conn, iid, "the venue's open-order list could not be read, "
-                           "so whether this order exists is unknown")
+                           "so whether this order exists is unknown",
+                only_if_unacknowledged=vid is None)
             out["unresolved"].append(dict(rec, **got))
             continue
         if vid is None:
@@ -2614,7 +2677,8 @@ async def recover(conn, adapter, *, account_id: str, venue: str,
                 got = await mark_unresolved(
                     conn, iid,
                     "sent with no acknowledgement and %s; the exposure stands "
-                    "until the venue establishes it" % corr["refusal"])
+                    "until the venue establishes it" % corr["refusal"],
+                    only_if_unacknowledged=True)
                 if corr.get("term_match_only"):
                     # A TERM MATCH IS A LEAD, NOT A CLAIM. It is recorded so an
                     # operator knows which order to look at -- and recorded as
@@ -2641,12 +2705,20 @@ async def recover(conn, adapter, *, account_id: str, venue: str,
                 out["unresolved"].append(dict(rec, **got, **extra))
                 continue
             aid = corr["venue_order_id"]
-            await record_acknowledgement(
+            adopted = await record_acknowledgement(
                 conn, iid, venue_order_id=aid, status="open",
                 raw={"adopted_by_recovery": True,
                      "correlation": {k: v for k, v in corr.items()
                                      if k != "adopt"},
-                     "venue_order": corr["adopt"]})
+                     "venue_order": corr["adopt"]},
+                only_if_unacknowledged_in=ADOPTABLE_FROM)
+            if not adopted.get("written"):
+                # SOMETHING ELSE DECIDED THIS ROW while recovery was reading
+                # -- an audited resolution, a late acknowledgement. It is not
+                # overwritten; the next pass sees what it is now.
+                out["unresolved"].append(dict(
+                    rec, case="MOVED_ON_DURING_RECOVERY", adoption=adopted))
+                continue
             claimed.add(str(aid))
             vid = aid
             rec["venue_order_id"] = aid

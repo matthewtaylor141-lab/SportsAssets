@@ -112,6 +112,7 @@ R_SENT_AT_UNKNOWN = "THE_REQUESTS_SEND_TIME_IS_NOT_RECORDED"
 R_TOO_SOON = "THE_REQUEST_IS_TOO_RECENT_FOR_ABSENCE_TO_MEAN_ANYTHING"
 R_RESTING_UNREADABLE = "THE_RESTING_ORDERS_COULD_NOT_BE_READ_COMPLETELY"
 R_RESTING_ON_MARKET = "AN_ORDER_IS_RESTING_ON_THIS_MARKET"
+R_RESTING_UNPLACED = "A_RESTING_ORDER_NAMES_NO_MARKET"
 R_EXECUTIONS_UNREADABLE = "THE_ACCOUNTS_EXECUTIONS_COULD_NOT_BE_READ_COMPLETELY"
 R_EXECUTED_SINCE_SEND = "THE_ACCOUNT_EXECUTED_ON_THIS_MARKET_SINCE_THE_SEND"
 R_RESERVATION_NOT_MOVED = "THE_RESERVATION_COULD_NOT_BE_MOVED"
@@ -267,11 +268,18 @@ async def read_market(reads, intent: dict) -> dict:
     out: dict[str, Any] = {"us_market_slug": slug, "sent_at_epoch_s": sent}
     rest = await _call(reads.resting_orders)
     if rest.get("ok"):
-        here = [o for o in rest.get("orders") or []
+        orders = rest.get("orders") or []
+        here = [o for o in orders
                 if str(o.get("us_market_slug") or "").lower() == slug.lower()]
+        # AN ORDER THAT NAMES NO MARKET cannot be placed off this one, so it
+        # is reported apart and blocks an absence attestation like one on it.
+        unplaced = [o for o in orders
+                    if not str(o.get("us_market_slug") or "").strip()]
         out["resting"] = {"ok": True, "complete": True,
                           "orders_on_this_market": sorted(
-                              str(o.get("order_id")) for o in here)}
+                              str(o.get("order_id")) for o in here),
+                          "orders_naming_no_market": sorted(
+                              str(o.get("order_id")) for o in unplaced)}
     else:
         out["resting"] = {"ok": False, "complete": False,
                           "refusal": rest.get("refusal")}
@@ -287,7 +295,9 @@ async def read_market(reads, intent: dict) -> dict:
                 "since_epoch_s": sent - CLOCK_TOLERANCE_S,
                 "order_ids": sorted({str(r.get("own_order_id"))
                                      for r in rows
-                                     if r.get("own_order_id")})}
+                                     if r.get("own_order_id")}),
+                "rows_naming_no_own_order": sum(
+                    1 for r in rows if not r.get("own_order_id"))}
         else:
             out["own_executions"] = {"ok": False, "complete": False,
                                      "refusal": ex.get("refusal")}
@@ -462,20 +472,32 @@ def reservation_reader(reads=None):
 # 4 · THE OPERATOR'S RESOLUTION
 # ═════════════════════════════════════════════════════════════════════
 
+async def _next_audit_id(conn) -> int:
+    """Reserve an audit id BEFORE the effects, so every effect can name the
+    audit row and the row itself -- written last, in the same transaction --
+    records what the effects actually were rather than a placeholder."""
+    return int(await conn.fetchval(
+        "SELECT nextval(pg_get_serial_sequence("
+        "'bettor_funded_resolution_audit', 'audit_id'))"))
+
+
 async def _audit(conn, *, intent_id, investigation_id, requested, outcome,
-                 refusal, attested_by, statement, auth, reads, effect) -> int:
+                 refusal, attested_by, statement, auth, reads, effect,
+                 audit_id: int | None = None) -> int:
+    if audit_id is None:
+        audit_id = await _next_audit_id(conn)
     return int(await conn.fetchval(
         "INSERT INTO bettor_funded_resolution_audit "
-        "(intent_id, investigation_id, requested, outcome, refusal, "
+        "(audit_id, intent_id, investigation_id, requested, outcome, refusal, "
         " attested_by, statement, authenticated_by, venue_reads, effect) "
-        "VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb,$10::jsonb) "
+        "VALUES ($11,$1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb,$10::jsonb) "
         "RETURNING audit_id",
         str(intent_id), investigation_id,
         requested if requested in REQUESTS else REQ_UNRECOGNISED,
         outcome, refusal, attested_by, statement,
         json.dumps({k: auth.get(k) for k in AUTH_FIELDS}, default=str),
         json.dumps(reads or {}, default=str),
-        json.dumps(effect or {}, default=str)))
+        json.dumps(effect or {}, default=str), int(audit_id)))
 
 
 def _terms_disagree(intent: dict, order: dict) -> list:
@@ -561,14 +583,33 @@ async def _no_exposure(conn, reads, intent: dict, *, at: float,
                 "why": ("an order is working on this market. Name it if it "
                         "is ours; if it is a manual order, it must be "
                         "cancelled or filled before absence can be attested")}
+    if rest.get("orders_naming_no_market"):
+        return {"ok": False, "refusal": R_RESTING_UNPLACED,
+                "orders": rest["orders_naming_no_market"],
+                "why": ("a working order names no market, so it cannot be "
+                        "shown not to be on this one")}
     if not ex.get("ok"):
         return {"ok": False, "refusal": R_EXECUTIONS_UNREADABLE,
                 "read_refusal": ex.get("refusal")}
-    if int(ex.get("count") or 0) > 0:
+    # EXECUTIONS OF AN ORDER ANOTHER INTENT ALREADY OWNS are that intent's,
+    # booked there; they say nothing about this request. Anything else --
+    # an order no intent holds, or a row naming no order -- may be this one.
+    claimed = {str(r["venue_order_id"]) for r in await conn.fetch(
+        "SELECT venue_order_id FROM bettor_funded_intents "
+        " WHERE venue_order_id IS NOT NULL AND intent_id <> $1",
+        intent["intent_id"])}
+    unexplained = [o for o in ex.get("order_ids") or [] if o not in claimed]
+    if unexplained or int(ex.get("rows_naming_no_own_order") or 0) > 0:
         return {"ok": False, "refusal": R_EXECUTED_SINCE_SEND,
-                "execution_order_ids": ex.get("order_ids"),
+                "execution_order_ids": unexplained,
+                "rows_naming_no_own_order": ex.get("rows_naming_no_own_order"),
+                "explained_by_other_intents": sorted(
+                    set(ex.get("order_ids") or []) & claimed),
                 "why": ("the account traded on this market after the request "
-                        "left. That may be this request; name the order")}
+                        "left, on an order no other intent holds. That may be "
+                        "this request; name the order")}
+    record["executions_explained_by_other_intents"] = sorted(
+        set(ex.get("order_ids") or []) & claimed)
     return {"ok": True, "picture": picture}
 
 
@@ -593,7 +634,8 @@ def _validate(body: dict, intent_id: str, auth: dict) -> str | None:
 
 
 async def resolve(conn, *, intent_id: str, body: dict, auth: dict,
-                  reads=None, now: float | None = None) -> dict:
+                  reads=None, now: float | None = None,
+                  _trace: dict | None = None) -> dict:
     """RESOLVE ONE LOST ACKNOWLEDGEMENT, or refuse by name. Always audited.
 
     `auth` is the route's statement of how the caller authenticated
@@ -615,6 +657,8 @@ async def resolve(conn, *, intent_id: str, body: dict, auth: dict,
         # The route refuses before calling; this is the second statement of it.
         return dict(out, ok=False, refusal="BOTH_FACTORS_ARE_REQUIRED")
     record: dict[str, Any] = {}
+    if _trace is not None:
+        _trace["record"] = record       # what was read, for a rolled-back audit
     refusal = _validate(body, intent_id, auth)
     investigation_id = investigation_id_for(intent_id)
     async with conn.transaction():
@@ -697,12 +741,9 @@ async def resolve(conn, *, intent_id: str, body: dict, auth: dict,
             return dict(out, ok=False, refusal=refusal, audit_id=aid,
                         exposure="PRESERVED",
                         detail=record.get("check") or {})
-        # ── ACCEPTED: the audit row first, so every effect can name it ──
-        aid = await _audit(
-            conn, intent_id=intent_id, investigation_id=investigation_id,
-            requested=request, outcome="ACCEPTED", refusal=None,
-            attested_by=attested_by, statement=statement, auth=auth,
-            reads=record, effect={"pending": True})
+        # ── ACCEPTED: the audit id first, so every effect can name it; the
+        # audit ROW last, in this transaction, with the effects it caused ──
+        aid = await _next_audit_id(conn)
         if request == REQ_NAME_THE_ORDER:
             effect = await _apply_named(conn, intent, chk["order"], res=res,
                                         audit_id=aid, attested_by=attested_by,
@@ -714,9 +755,14 @@ async def resolve(conn, *, intent_id: str, body: dict, auth: dict,
                 attested_by=attested_by, statement=statement, at=at)
             state = RESOLVED_NO_EXPOSURE
         if not effect.get("ok"):
-            # Nothing partial survives: raising rolls back the audit row and
-            # every effect, and the refusal is audited outside it below.
+            # Nothing partial survives: raising rolls back every effect, and
+            # the refusal -- with what was read -- is audited outside it.
             raise _Rollback(effect)
+        await _audit(
+            conn, intent_id=intent_id, investigation_id=investigation_id,
+            requested=request, outcome="ACCEPTED", refusal=None,
+            attested_by=attested_by, statement=statement, auth=auth,
+            reads=record, effect=effect, audit_id=aid)
         await conn.execute(
             "UPDATE bettor_funded_investigations SET state=$2, "
             " resolved_at=to_timestamp($3), resolution=$4::jsonb "
@@ -741,9 +787,10 @@ class _Rollback(Exception):
 async def resolve_audited(conn, *, intent_id: str, body: dict, auth: dict,
                           reads=None, now: float | None = None) -> dict:
     """`resolve`, with an effect that failed half-way rolled back AND audited."""
+    trace: dict = {}
     try:
         return await resolve(conn, intent_id=intent_id, body=body, auth=auth,
-                             reads=reads, now=now)
+                             reads=reads, now=now, _trace=trace)
     except Exception as exc:                                # noqa: BLE001
         # EVERY PATH IS AUDITED, including one that raised. The transaction
         # rolled back, so nothing was applied; the audit row says so.
@@ -763,7 +810,8 @@ async def resolve_audited(conn, *, intent_id: str, body: dict, auth: dict,
             refusal=rb.effect.get("refusal") or R_RESERVATION_NOT_MOVED,
             attested_by=str(body.get("attested_by") or "")[:200] or None,
             statement=str(body.get("statement") or "")[:2000] or None,
-            auth=auth, reads={}, effect={"rolled_back": rb.effect})
+            auth=auth, reads=trace.get("record") or {},
+            effect={"rolled_back": rb.effect})
         return {"version": VERSION, "intent_id": str(intent_id), "ok": False,
                 "refusal": rb.effect.get("refusal") or R_RESERVATION_NOT_MOVED,
                 "audit_id": aid, "exposure": "PRESERVED",
@@ -777,6 +825,7 @@ async def _apply_named(conn, intent: dict, order: dict, *, res, audit_id: int,
     ack = await FB.record_acknowledgement(
         conn, iid, venue_order_id=vid, status=order.get("state") or "open",
         raw={"named_by_operator": True, "audit_id": audit_id,
+             "is_a_venue_acknowledgement": False,
              "attested_by": attested_by,
              "venue_order": {k: order.get(k) for k in
                              ("order_id", "us_market_slug", "intent", "price",
@@ -815,11 +864,14 @@ async def _apply_named(conn, intent: dict, order: dict, *, res, audit_id: int,
         if res["state"] == RSV.SEND_ATTEMPTED:
             await RSV.mark_ambiguous(conn, operation_id=op,
                                      why="resolved by an operator")
+        # THE OPERATOR'S NAMING, under its own kind: the venue returned the
+        # order and its terms were checked, but "it is this request's" is the
+        # operator's statement, never recorded as the venue's.
         ev = await RSV.record_venue_evidence(
             conn, evidence_id="inv-named:%s:%s" % (op, audit_id),
             operation_id=op, account_id=intent["account_id"],
             venue=intent["venue"], us_market_slug=intent["us_market_slug"],
-            kind=RSV.EV_NAMED, search_endpoint="orders.retrieve",
+            kind=RSV.EV_OPERATOR_NAMED, search_endpoint="orders.retrieve",
             read_at=at, covered_terminal_orders=True, intent_id=iid,
             venue_order_id=vid,
             search_scope={"named_by": "OPERATOR", "audit_id": audit_id,
@@ -827,12 +879,12 @@ async def _apply_named(conn, intent: dict, order: dict, *, res, audit_id: int,
                           "created_within_s": [-CLOCK_TOLERANCE_S,
                                                NAMED_CREATED_WITHIN_S]},
             results_returned=1,
-            raw={"attested_by": attested_by, "audit_id": audit_id})
+            raw={"attested_by": attested_by, "audit_id": str(audit_id)})
         if not ev.get("ok"):
             return {"ok": False, "refusal": R_RESERVATION_NOT_MOVED,
                     "evidence": ev}
-        moved = await RSV.resolve_from_the_venue(conn, operation_id=op,
-                                                 venue_order_id=vid)
+        moved = await RSV.consume_on_operator_naming(conn, operation_id=op,
+                                                     venue_order_id=vid)
         if not moved.get("ok"):
             return {"ok": False, "refusal": R_RESERVATION_NOT_MOVED,
                     "reservation": moved}

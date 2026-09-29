@@ -5,9 +5,19 @@ DO $$
 BEGIN
     IF to_regclass('bettor_funded_operation_evidence') IS NOT NULL
        AND EXISTS (SELECT 1 FROM bettor_funded_operation_evidence
-                    WHERE kind = 'OPERATOR_ATTESTED_NO_EXPOSURE') THEN
-        RAISE EXCEPTION 'operator attestations are recorded; 139 is not rolled '
+                    WHERE kind IN ('OPERATOR_ATTESTED_NO_EXPOSURE',
+                                   'OPERATOR_NAMED_THE_ORDER')) THEN
+        RAISE EXCEPTION 'operator resolutions are recorded; 139 is not rolled '
                         'back over them';
+    END IF;
+    -- THE AUDIT AND THE INVESTIGATIONS ARE RECORDS, not scaffolding: a
+    -- rollback that dropped them would erase every resolution attempt.
+    IF (to_regclass('bettor_funded_resolution_audit') IS NOT NULL
+        AND EXISTS (SELECT 1 FROM bettor_funded_resolution_audit))
+       OR (to_regclass('bettor_funded_investigations') IS NOT NULL
+           AND EXISTS (SELECT 1 FROM bettor_funded_investigations)) THEN
+        RAISE EXCEPTION 'investigations or resolution attempts are recorded; '
+                        '139 is not rolled back over them';
     END IF;
     IF to_regclass('bettor_funded_operation_evidence') IS NOT NULL THEN
         ALTER TABLE bettor_funded_operation_evidence

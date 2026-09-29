@@ -1299,7 +1299,10 @@ async def test_the_command_centre_shows_the_funded_book_and_what_is_unresolved()
         await _seed(conn)
         expected, _ = FB.fee_for(10, 0.62, at=time.time())
         await _entry(conn, intent_id="fpi-cc", commission=expected + 0.5)
-        await FB.mark_unresolved(conn, "fpi-cc", "the venue went quiet")
+        # A FILLED order made unresolved by new evidence -- the way fill
+        # ingestion does it when the venue reports executions it did not name.
+        await FB.mark_unresolved(conn, "fpi-cc", "the venue went quiet",
+                                 also_from_filled=True)
 
         got = await FB.command_center(conn)
         assert got["section"] == "Funded book"

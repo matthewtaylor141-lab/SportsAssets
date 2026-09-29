@@ -167,17 +167,24 @@ BEGIN
             ADD CONSTRAINT bettor_funded_evidence_kind_ck CHECK (
                 kind IN ('VENUE_NAMED_THE_ORDER', 'VENUE_HAS_NO_SUCH_ORDER',
                          'READ_ESTABLISHED_NOTHING',
-                         'OPERATOR_ATTESTED_NO_EXPOSURE'));
+                         'OPERATOR_ATTESTED_NO_EXPOSURE',
+                         'OPERATOR_NAMED_THE_ORDER'));
         -- AN ATTESTATION NAMES WHO MADE IT, AND ITS READS FOUND NOTHING.
-        IF NOT EXISTS (SELECT 1 FROM pg_constraint
-                        WHERE conname = 'bettor_funded_evidence_attested_ck') THEN
-            ALTER TABLE bettor_funded_operation_evidence
-                ADD CONSTRAINT bettor_funded_evidence_attested_ck CHECK (
-                    kind <> 'OPERATOR_ATTESTED_NO_EXPOSURE'
-                    OR (results_returned = 0
-                        AND coalesce(raw ->> 'attested_by', '') <> ''
-                        AND coalesce(raw ->> 'audit_id', '') <> ''));
-        END IF;
+        -- AN OPERATOR'S NAMING carries the order it names, who named it and
+        -- the audit row that records the decision. Neither is a venue kind.
+        ALTER TABLE bettor_funded_operation_evidence
+            DROP CONSTRAINT IF EXISTS bettor_funded_evidence_attested_ck;
+        ALTER TABLE bettor_funded_operation_evidence
+            ADD CONSTRAINT bettor_funded_evidence_attested_ck CHECK (
+                (kind <> 'OPERATOR_ATTESTED_NO_EXPOSURE'
+                 OR (results_returned = 0
+                     AND coalesce(raw ->> 'attested_by', '') <> ''
+                     AND coalesce(raw ->> 'audit_id', '') <> ''))
+                AND
+                (kind <> 'OPERATOR_NAMED_THE_ORDER'
+                 OR (venue_order_id IS NOT NULL
+                     AND coalesce(raw ->> 'attested_by', '') <> ''
+                     AND coalesce(raw ->> 'audit_id', '') <> '')));
     END IF;
 END $$;
 

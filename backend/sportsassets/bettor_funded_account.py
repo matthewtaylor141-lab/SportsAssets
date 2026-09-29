@@ -54,9 +54,15 @@ BUY_INTENTS = ("ORDER_INTENT_BUY_LONG", "ORDER_INTENT_BUY_SHORT")
 SELL_INTENTS = ("ORDER_INTENT_SELL_LONG", "ORDER_INTENT_SELL_SHORT")
 
 #: Venue order states that are still working the book (raw, prefixed form).
+#: PENDING_CANCEL is WORKING: the cancel is requested, not confirmed, and the
+#: order still commits its collateral until it is (SDK `OrderState`).
 WORKING_STATES = ("ORDER_STATE_NEW", "ORDER_STATE_PENDING_NEW",
                   "ORDER_STATE_PARTIALLY_FILLED", "ORDER_STATE_PENDING_REPLACE",
-                  "ORDER_STATE_PENDING_RISK", "ORDER_STATE_OPEN")
+                  "ORDER_STATE_PENDING_RISK", "ORDER_STATE_OPEN",
+                  "ORDER_STATE_PENDING_CANCEL")
+#: REPLACED is decided by what it states is left: finished only with nothing
+#: left to fill, and otherwise measured as a working order.
+REPLACED_STATE = "ORDER_STATE_REPLACED"
 #: States that are finished. One in an open-orders response commits nothing
 #: ONLY if it also states nothing left to fill.
 FINISHED_STATES = ("ORDER_STATE_FILLED", "ORDER_STATE_CANCELED",
@@ -93,6 +99,7 @@ R_ACTIVITY_RESPONSE_INCOMPLETE = "VENUE_ACTIVITY_RESPONSE_NOT_COMPLETE"
 R_ACTIVITY_FIELD_MALFORMED = "VENUE_ACTIVITY_FIELD_MALFORMED"
 R_ACTIVITY_TIME_UNREADABLE = "VENUE_ACTIVITY_TIME_UNREADABLE"
 R_ACTIVITY_WALK_INCOMPLETE = "VENUE_ACTIVITY_WALK_DID_NOT_REACH_THE_WINDOW"
+R_ACTIVITY_NOT_NEWEST_FIRST = "VENUE_ACTIVITY_IS_NOT_IN_THE_ORDER_REQUESTED"
 
 MISSING, MALFORMED, NON_FINITE = "MISSING", "MALFORMED", "NON_FINITE"
 
@@ -202,11 +209,13 @@ def working(order: dict) -> dict:
     if not state:
         return dict(base, ok=False, refusal=R_ORDER_FIELD_MISSING,
                     field="state")
-    if state not in WORKING_STATES + FINISHED_STATES:
+    if state not in WORKING_STATES + FINISHED_STATES + (REPLACED_STATE,):
         return dict(base, ok=False, refusal=R_ORDER_FIELD_MALFORMED,
                     field="state", value=state)
     leaves = order.get("leaves")
-    if state in FINISHED_STATES:
+    replaced_done = (state == REPLACED_STATE
+                     and "leavesQuantity" not in probs and leaves == 0)
+    if state in FINISHED_STATES or replaced_done:
         if "leavesQuantity" in probs:
             return dict(base, ok=False, refusal=R_ORDER_FIELD_MISSING,
                         field="leavesQuantity",
@@ -408,6 +417,51 @@ ACTIVITY_PAGES_MAX = 10
 ACTIVITY_PAGE_LIMIT = 100
 
 
+#: The earliest instant a venue activity can carry (2020-01-01Z): a smaller
+#: number is a unit error or a placeholder, not a time.
+_EARLIEST_ACTIVITY_S = 1577836800.0
+_TIME_KEYS = ("timestamp", "createTime", "createdAt", "created_at", "time")
+
+
+def strict_activity_ts(act: dict) -> float | None:
+    """THE ROW'S TIME, READ STRICTLY, or None.
+
+    `api.pmus_account._any_ts` is the display reader and forgiving: it reads
+    a bool as a number and drops a stated UTC offset. This walk's
+    completeness rests on the time, so: a bool is not a time; a number must
+    be a plausible epoch (seconds or milliseconds); an ISO string's offset is
+    honoured, and a naive one is read as UTC. The first key present decides
+    -- a present key that does not parse refuses rather than falling through
+    to another field."""
+    from datetime import datetime, timezone
+
+    for src in (act, act.get("trade")):
+        if not isinstance(src, dict):
+            continue
+        for key in _TIME_KEYS:
+            if key not in src or src[key] is None:
+                continue
+            v = src[key]
+            if isinstance(v, bool):
+                return None
+            if isinstance(v, (int, float)):
+                f = float(v)
+                f = f / 1000.0 if f > 1e11 else f
+                return f if (math.isfinite(f)
+                             and f >= _EARLIEST_ACTIVITY_S) else None
+            if not isinstance(v, str):
+                return None
+            try:
+                d = datetime.fromisoformat(v.strip().replace("Z", "+00:00"))
+            except ValueError:
+                return None
+            d = (d.replace(tzinfo=timezone.utc) if d.tzinfo is None
+                 else d.astimezone(timezone.utc))
+            f = d.timestamp()
+            return f if f >= _EARLIEST_ACTIVITY_S else None
+    return None
+
+
 def read_own_trades_sync(client, us_market_slug: str, since_ts: float, *,
                          paced_read=None) -> dict:
     """THE ACCOUNT'S OWN EXECUTIONS ON ONE MARKET SINCE AN INSTANT, or why the
@@ -427,7 +481,6 @@ def read_own_trades_sync(client, us_market_slug: str, since_ts: float, *,
     if paced_read is None:
         from .pmus import paced_read
     from . import pmus
-    from .api.pmus_account import _any_ts
     want = str(us_market_slug or "").strip().lower()
     out: dict[str, Any] = {"version": VERSION, "ok": False,
                            "endpoint": "portfolio.activities",
@@ -435,6 +488,7 @@ def read_own_trades_sync(client, us_market_slug: str, since_ts: float, *,
                            "pages": 0}
     rows: list[dict] = []
     cursor = ""
+    prev_ts = None
     for _ in range(ACTIVITY_PAGES_MAX):
         params = {"limit": ACTIVITY_PAGE_LIMIT,
                   "sortOrder": "SORT_ORDER_DESCENDING",
@@ -458,20 +512,38 @@ def read_own_trades_sync(client, us_market_slug: str, since_ts: float, *,
             if not isinstance(act, dict):
                 return dict(out, refusal=R_ACTIVITY_FIELD_MALFORMED,
                             field="activity")
+            # THE QUERY ASKED FOR TRADES ONLY. A row that is not stated to
+            # be one -- no type, another type -- means the filter was not
+            # honoured or the row is damaged; either way it cannot be
+            # excluded from "nothing traded here", so it refuses.
             if act.get("type") != "ACTIVITY_TYPE_TRADE":
-                continue
+                return dict(out, refusal=R_ACTIVITY_FIELD_MALFORMED,
+                            field="type", value=act.get("type"))
             t = act.get("trade")
             if not isinstance(t, dict):
                 return dict(out, refusal=R_ACTIVITY_FIELD_MALFORMED,
                             field="trade")
-            ts = float(_any_ts(act) or 0.0)
-            if ts <= 0:
+            ts = strict_activity_ts(act)
+            if ts is None:
                 return dict(out, refusal=R_ACTIVITY_TIME_UNREADABLE,
                             trade_id=t.get("id"))
+            # THE WALK'S COMPLETENESS RESTS ON NEWEST-FIRST ORDER: "a row
+            # older than the window was read" means nothing older is left
+            # only if the rows really descend. Checked, not assumed.
+            if prev_ts is not None and ts > prev_ts + 1e-6:
+                return dict(out, refusal=R_ACTIVITY_NOT_NEWEST_FIRST,
+                            trade_id=t.get("id"))
+            prev_ts = ts
             if ts < since_ts:
                 reached = True
                 continue
-            if str(t.get("marketSlug") or "").strip().lower() != want:
+            got_slug = str(t.get("marketSlug") or "").strip().lower()
+            if not got_slug:
+                # A TRADE THAT NAMES NO MARKET cannot be placed off this one,
+                # so it cannot be excluded from "nothing traded here".
+                return dict(out, refusal=R_ACTIVITY_FIELD_MALFORMED,
+                            field="marketSlug", trade_id=t.get("id"))
+            if got_slug != want:
                 continue
             own = pmus.trade_own_order(t)
             rows.append({"trade_id": t.get("id"), "ts": ts,
@@ -513,17 +585,24 @@ async def read_venue_account(*, client=None, paced_read=None) -> dict:
             client = _get_client()
         except Exception as exc:                               # noqa: BLE001
             return dict(out, refusal=R_NO_CLIENT, error=type(exc).__name__)
+    # ORDERS FIRST, THEN POSITIONS. The two reads are not one snapshot. In
+    # the other order a BUY working while the (paced, multi-page) positions
+    # walk runs, and filled before `orders.list`, is in neither read -- the
+    # total is short by its cost. In this order such a fill is counted in
+    # both, which overstates exposure: the error that refuses, not the one
+    # that clears a rail on headroom already used.
+    ords = await asyncio.to_thread(read_open_orders_sync, client,
+                                   paced_read=paced_read)
+    if not ords.get("ok"):
+        return dict(out, **{k: v for k, v in ords.items()
+                            if k not in ("ok", "version")})
     pos = await asyncio.to_thread(read_positions_sync, client,
                                   paced_read=paced_read)
     out["pages"] = pos.get("pages")
     if not pos.get("ok"):
         return dict(out, **{k: v for k, v in pos.items()
                             if k not in ("ok", "version")})
-    ords = await asyncio.to_thread(read_open_orders_sync, client,
-                                   paced_read=paced_read)
-    if not ords.get("ok"):
-        return dict(out, **{k: v for k, v in ords.items()
-                            if k not in ("ok", "version")})
+    out["read_order"] = ["orders.list", "portfolio.positions"]
     return dict(out, ok=True, refusal=None,
                 held_usd=pos["held_usd"], working_usd=ords["working_usd"],
                 unresolved_usd=0.0, held_slugs=pos["held_slugs"],

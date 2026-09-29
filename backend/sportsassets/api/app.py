@@ -3432,7 +3432,10 @@ def require_resolution_key(x_resolution_key: str = Header(default="")) -> None:
                      "lost acknowledgement can be resolved. Until then every "
                      "one stays UNRESOLVED with its exposure counted")})
     supplied = (x_resolution_key or "").strip()
-    if not hmac.compare_digest(supplied, expected):
+    # BYTES, not str: compare_digest raises TypeError on a non-ASCII str,
+    # which would surface as a 500 rather than the 401 a wrong key is.
+    if not hmac.compare_digest(supplied.encode("utf-8", "surrogateescape"),
+                               expected.encode("utf-8", "surrogateescape")):
         raise HTTPException(status_code=401, detail={
             "reason": "RESOLUTION_KEY_REQUIRED"})
 

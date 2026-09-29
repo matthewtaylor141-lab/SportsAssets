@@ -314,9 +314,33 @@ def _trades(pages):
     ([{"activities": [{"type": "ACTIVITY_TYPE_TRADE", "trade": "x"}],
        "eof": True}], FACCT.R_ACTIVITY_FIELD_MALFORMED),
     ([RuntimeError("boom")], FACCT.R_ACTIVITY_READ_RAISED),
+    # NEWEST FIRST, checked rather than assumed
+    ([{"activities": [_trade("t0", BEFORE), _trade("t1", AFTER)],
+       "eof": True}], FACCT.R_ACTIVITY_NOT_NEWEST_FIRST),
+    # a trade naming no market cannot be excluded from this one
+    ([{"activities": [{"type": "ACTIVITY_TYPE_TRADE",
+                       "trade": {"id": "t", "createTime": AFTER}}],
+       "eof": True}], FACCT.R_ACTIVITY_FIELD_MALFORMED),
     ([{"activities": [_trade("t%d" % i, AFTER)], "nextCursor": "c%d" % i}
       for i in range(FACCT.ACTIVITY_PAGES_MAX + 1)],
      FACCT.R_ACTIVITY_WALK_INCOMPLETE),
+    # A ROW NOT STATED TO BE A TRADE on a trades-only query is not skipped:
+    # it could be our own execution (review of 68bc75b)
+    ([{"activities": [dict(_trade("t", AFTER), type=None)], "eof": True}],
+     FACCT.R_ACTIVITY_FIELD_MALFORMED),
+    ([{"activities": [{k: v for k, v in _trade("t", AFTER).items()
+                       if k != "type"}], "eof": True}],
+     FACCT.R_ACTIVITY_FIELD_MALFORMED),
+    ([{"activities": [dict(_trade("t", AFTER),
+                           type="ACTIVITY_TYPE_POSITION_RESOLUTION")],
+       "eof": True}], FACCT.R_ACTIVITY_FIELD_MALFORMED),
+    # A TIME THAT IS NOT A TIME: a bool, a tiny number, garbage
+    ([{"activities": [dict(_trade("t", AFTER), timestamp=True)],
+       "nextCursor": "c1"}], FACCT.R_ACTIVITY_TIME_UNREADABLE),
+    ([{"activities": [dict(_trade("t", AFTER), time=12)],
+       "nextCursor": "c1"}], FACCT.R_ACTIVITY_TIME_UNREADABLE),
+    ([{"activities": [_trade("t", "yesterday")], "eof": True}],
+     FACCT.R_ACTIVITY_TIME_UNREADABLE),
 ])
 def test_an_own_trades_walk_that_does_not_establish_the_window_refuses(
         pages, refusal):
@@ -336,6 +360,62 @@ def test_an_own_trades_walk_ends_on_eof_or_on_a_row_older_than_the_window():
     assert [r["trade_id"] for r in got["rows"]] == ["t1"]
     assert got["rows"][0]["own_order_id"] == "ord-1"
     assert got["complete_by"] == "A_ROW_OLDER_THAN_THE_WINDOW_WAS_READ"
+
+
+def test_a_stated_offset_is_honoured_not_discarded():
+    """11:00-04:00 is 15:00Z -- inside a window that starts 14:13Z. Read as
+    11:00Z it would end the walk as 'older than the window' and drop it."""
+    got = _trades([{"activities": [_trade("t1", "2026-09-21T11:00:00-04:00"),
+                                   _trade("t0", BEFORE)],
+                    "nextCursor": "c1"}])
+    assert got["ok"] is True, got
+    assert [r["trade_id"] for r in got["rows"]] == ["t1"]
+    assert got["rows"][0]["ts"] == pytest.approx(1790002800.0)
+    # a naive time is UTC; a millisecond epoch is read as one
+    assert FACCT.strict_activity_ts(
+        {"trade": {"createTime": "2026-09-21T15:00:00"}}) == \
+        pytest.approx(1790002800.0)
+    assert FACCT.strict_activity_ts({"time": 1790002800000}) == \
+        pytest.approx(1790002800.0)
+
+
+def test_orders_are_read_before_positions():
+    """A fill between the two reads is then counted twice (refuses sooner),
+    never in neither (clears a rail on headroom already used)."""
+    seen = []
+
+    class _O(_Orders):
+        def list(self, params=None):
+            seen.append("orders")
+            return super().list(params)
+
+    class _P(_Portfolio):
+        def positions(self, params=None):
+            seen.append("positions")
+            return super().positions(params)
+
+    c = _Client({"orders": []})
+    c.orders = _O({"orders": []})
+    c.portfolio = _P([{"positions": {}, "eof": True}])
+    got = _read(c)
+    assert got["ok"] is True, got
+    assert seen == ["orders", "positions"]
+    assert got["read_order"] == ["orders.list", "portfolio.positions"]
+
+
+def test_a_pending_cancel_still_commits_and_a_replaced_order_is_judged_by_what_is_left():
+    got = _read(_Client({"orders": [
+        _order(state="ORDER_STATE_PENDING_CANCEL")]}))
+    assert got["ok"] is True, got
+    assert got["working_usd"] > 0, "the cancel is not confirmed; it commits"
+    got = _read(_Client({"orders": [
+        _order(state="ORDER_STATE_REPLACED", leavesQuantity=0)]}))
+    assert got["ok"] is True and got["working_usd"] == 0.0
+    got = _read(_Client({"orders": [_order(state="ORDER_STATE_REPLACED")]}))
+    assert got["ok"] is True and got["working_usd"] > 0
+    got = _read(_Client({"orders": [
+        _order(state="ORDER_STATE_REPLACED", leavesQuantity=None)]}))
+    assert got["refusal"] == FACCT.R_ORDER_FIELD_MISSING
 
 
 def test_a_walk_that_never_reaches_its_end_is_truncated_not_complete():
