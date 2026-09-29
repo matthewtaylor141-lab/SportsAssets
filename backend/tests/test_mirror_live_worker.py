@@ -123,6 +123,29 @@ def anchor_reads_to_fixture_now(monkeypatch):
     return clock
 
 
+@pytest.fixture(autouse=True)
+def _reads_run_from_the_fixture_now(monkeypatch):
+    """EVERY TEST IN THIS FILE ticks the fixture world at NOW, so every one
+    runs its real-clock reads from NOW too.
+
+    The defect 862a25c repaired in two dependent files, here in the file
+    itself: how many of these tests passed depended on how long the ordered
+    suite took to reach them. Measured 2026-09-29 on the unchanged file: run
+    alone, 8 fail; with a 420 s gap between collection and execution, 144
+    fail -- exactly the 517cacf gate's count here. The bc4bc21 gate reached
+    the file sooner, failed 61, and failed one test 517cacf passed, with no
+    change in the code under test. Anchored, the outcome is the file-alone
+    outcome however late the file runs.
+
+    ONE CLOCK FOR THIS FILE'S WORLD. Some tests here take their tick's `now`
+    from `time.time()` rather than NOW; anchoring only the two read modules
+    would put that `now` on a different clock from the reads, so this
+    module's `time` runs from the same anchored clock."""
+    import sys
+    clock = anchor_reads_to_fixture_now(monkeypatch)
+    monkeypatch.setattr(sys.modules[__name__], "time", clock)
+
+
 INTENT = "ORDER_INTENT_BUY_LONG"
 BUY, SELL = rules.BUY, rules.SELL
 HIS_SLUG = "atp-nakashi-michels-2026-09-02"
