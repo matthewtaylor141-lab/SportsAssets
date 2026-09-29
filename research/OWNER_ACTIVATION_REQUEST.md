@@ -27,6 +27,18 @@
 **Why this is needed:**
 - **The venue cannot identify the account.** Its balances response carries no account identifier (`account_identity` returns `no_identity`), so the system cannot prove which account a key signs for. Your statement becomes the identity evidence, recorded as **your attestation**.
 - **Your statement is not enough to trade.** The account becomes eligible only after all four venue reconciliations pass against that key: balances, positions, open orders and executions. A failed reconciliation writes nothing.
+- **How your statement is recorded.** After §4 is in place, you register the account yourself with one authenticated call. It needs the admin token and your resolution key, and the operator is taken from the server's settings.
+
+  ```
+  POST https://sportsassets-api.onrender.com/api/admin/funded-account-onboard
+  headers: X-Admin-Token: <from the Render dashboard>   X-Resolution-Key: <yours>
+  body: {"account_id": "<your label>", "venue": "PMUS", "confirm": "<your label>",
+         "statement": "<your label> is my Polymarket US (PMUS) account and the deployed key belongs to it"}
+  ```
+
+  - The call registers the account paused and unverified, records your statement, and runs the four reconciliations.
+  - It answers with the verdict of each check.
+  - It never sends an order, and it refuses the shadow desk book.
 - **Why a screenshot of the key page.** The venue documents a single key type whose Orders group can place, modify and cancel. It does not say whether narrower keys exist. Your screenshot settles that. Until then, the key is treated as **able to trade**, and protected accordingly.
 
 ## 2 · Limit values — five numbers in USD, each yours to choose

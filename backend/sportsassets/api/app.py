@@ -3837,6 +3837,41 @@ async def admin_funded_account_registry(response: Response) -> dict:
     return dict(FA.summarise_registry(rows), ok=True)
 
 
+@app.post("/api/admin/funded-account-onboard",
+          dependencies=[Depends(require_admin),
+                        Depends(require_resolution_key)])
+async def admin_funded_account_onboard(response: Response,
+                                       body: dict | None = None) -> dict:
+    """ONBOARD A REAL VENUE ACCOUNT: register it PAUSED and UNVERIFIED, record
+    the owner's statement of which account the deployed key signs for, then run
+    the four venue reconciliations. It becomes eligible only if all four pass.
+
+    Two factors: the admin token AND the owner's resolution key. The operator
+    is the server's configured identity, never a field of the request. No
+    order is sent; nothing unpauses on a failed reconciliation; the shadow
+    desk book is refused by name.
+    """
+    from .. import bettor_account_onboarding as ON
+    from ..db import get_pool
+
+    response.headers["Cache-Control"] = "no-store"
+    b = dict(body or {})
+    operator = (getattr(settings(), "funded_resolution_operator", "")
+                or "").strip()
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        got = await ON.onboard_attested(
+            conn, account_id=str(b.get("account_id") or ""),
+            venue=str(b.get("venue") or ""),
+            statement=str(b.get("statement") or ""),
+            confirm=str(b.get("confirm") or ""), operator=operator)
+    if not got.get("ok") and got.get("refusal") in (
+            ON.R_SHADOW_DESK, ON.R_CONFIRM, ON.R_VENUE, ON.R_ATTESTATION):
+        raise HTTPException(status_code=422, detail=got)
+    got["funded_submission"] = "DISABLED"
+    return got
+
+
 @app.post("/api/admin/test-venue-lifecycle",
           dependencies=[Depends(require_admin)])
 async def admin_test_venue_lifecycle(response: Response,

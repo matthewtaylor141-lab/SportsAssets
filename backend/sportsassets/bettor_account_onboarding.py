@@ -732,6 +732,97 @@ async def resolve_existing(conn, *, account_id: str, venue: str, by: str,
     return got
 
 
+#: ── ONBOARDING A REAL VENUE ACCOUNT ON THE OWNER'S ATTESTATION ──────
+#:
+#: THE GAP. `register` and `mark_eligible` existed and NOTHING could reach them
+#: in production: no route called either, so the only row in the registry
+#: stayed the shadow desk book, which is not a venue account and cannot be one.
+#:
+#: WHY AN ATTESTATION, AND WHAT IT DOES NOT DO. The venue's balances payload
+#: carries no account identifier (`reconcile_read.account_identity` returns
+#: `no_identity`), so which account the deployed key signs for cannot be read
+#: from the venue. The OWNER states it -- recorded as the owner's attestation,
+#: never as the venue's statement -- and the account is then made eligible ONLY
+#: by the same four reconciliations as any other (`mark_eligible`). The
+#: attestation establishes identity; it establishes nothing about accounting.
+#: A failed reconciliation writes nothing and the row stays paused.
+ATTESTATION_KEY_PREFIX = "bettor_funded_account_identity_attestation:"
+#: The shadow desk book. Unpausing it restarts the shadow desk loop, and a
+#: venue reconciliation says nothing about its overwritten rows, so it is never
+#: onboarded as a venue account.
+SHADOW_DESK_ACCOUNT = "acct_fc2d773a2afa4851"
+R_SHADOW_DESK = "THE_SHADOW_DESK_BOOK_IS_NOT_A_VENUE_ACCOUNT"
+R_ATTESTATION = "THE_OWNERS_STATEMENT_MUST_NAME_THE_ACCOUNT_AND_THE_VENUE"
+R_CONFIRM = "CONFIRM_MUST_REPEAT_THE_ACCOUNT_ID"
+R_VENUE = "THE_VENUE_IS_NOT_A_KNOWN_VENUE_CLASS"
+
+
+async def onboard_attested(conn, *, account_id: str, venue: str,
+                           statement: str, confirm: str, operator: str,
+                           adapter=None, now: float | None = None) -> dict:
+    """REGISTER (paused, unverified), RECORD THE OWNER'S IDENTITY STATEMENT,
+    THEN RUN THE FOUR RECONCILIATIONS. Eligible only if they all pass.
+
+    `operator` is the server's configured identity, never the request's."""
+    at = float(now if now is not None else time.time())
+    ident = str(account_id or "").strip()
+    ven = str(venue or "").strip()
+    text = str(statement or "").strip()
+    out = {"version": VERSION, "at": at, "account_id": ident, "venue": ven,
+           "operator": operator, "wrote_eligibility": False}
+    if ident == SHADOW_DESK_ACCOUNT:
+        return dict(out, ok=False, refusal=R_SHADOW_DESK,
+                    why=("it is the shadow desk book, paused since the "
+                         "2026-09-23 identifier collision; unpausing it "
+                         "restarts the shadow desk and a venue reconciliation "
+                         "does not address its overwritten rows"))
+    if not ident or str(confirm or "").strip() != ident:
+        return dict(out, ok=False, refusal=R_CONFIRM)
+    if FA.venue_class(ven) is None:
+        return dict(out, ok=False, refusal=R_VENUE,
+                    known=sorted(FA.VENUE_CLASS))
+    low = text.lower()
+    if (len(text) < 20 or ident.lower() not in low
+            or ven.lower() not in low):
+        return dict(out, ok=False, refusal=R_ATTESTATION,
+                    why=("the statement must say, in the owner's words, which "
+                         "account this is and on which venue -- at least 20 "
+                         "characters naming both"))
+    reg = await register(conn, account_id=ident, venue=ven,
+                         desk_id="funded-%s" % ven.lower(),
+                         note="onboarded on the owner's attestation",
+                         by=operator, now=at)
+    out["registered"] = reg.get("account")
+    attestation = {
+        "account_id": ident, "venue": ven, "venue_class": FA.venue_class(ven),
+        "statement": text, "attested_by": operator, "at": at,
+        "identity_evidence": "OWNER_ATTESTATION",
+        "why_an_attestation": ("the venue's balances payload carries no "
+                               "account identifier, so the account a key "
+                               "signs for cannot be read from the venue"),
+        "establishes_accounting": False}
+    await _put_state(conn, ATTESTATION_KEY_PREFIX + ident, attestation)
+    out["attestation"] = attestation
+    got = await mark_eligible(conn, account_id=ident, venue=ven, by=operator,
+                              adapter=adapter, now=at)
+    out["reconciliation"] = got.get("reconciliation")
+    out["wrote_eligibility"] = bool(got.get("wrote"))
+    if not got.get("ok"):
+        return dict(out, ok=False, refusal=got.get("refusal"),
+                    blocking=got.get("blocking"),
+                    still_paused=True,
+                    why=("registered and attested; the venue reconciliation "
+                         "did not pass, so the account stays PENDING, "
+                         "UNVERIFIED and paused. Run this again once the "
+                         "named checks can pass"))
+    return dict(out, ok=True, refusal=None, marked=got.get("marked"))
+
+
+async def attestation_for(conn, account_id: str):
+    return await _get_state(conn, ATTESTATION_KEY_PREFIX
+                            + str(account_id or "").strip())
+
+
 def describe() -> dict:
     return {
         "version": VERSION,
@@ -755,5 +846,11 @@ def describe() -> dict:
                            "unreadable or truncated page set")},
         "remaining_adapter_gap": None,
         "refusals": [R_NO_ADAPTER, R_NOT_RECONCILED, R_NO_ACCOUNT_ROW,
-                     R_STILL_PAUSED],
+                     R_STILL_PAUSED, R_SHADOW_DESK, R_ATTESTATION, R_CONFIRM,
+                     R_VENUE],
+        "onboarding_route": ("POST /api/admin/funded-account-onboard -- admin "
+                             "token AND the owner's resolution key; operator "
+                             "from settings; registers paused, records the "
+                             "owner's identity attestation, then runs the "
+                             "four reconciliations"),
     }
