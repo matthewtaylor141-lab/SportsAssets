@@ -1214,6 +1214,87 @@ SIBLING_COUNT_SQL = """
 #: truncated discovery reads as "these are the candidates" when it is not.
 MAX_CANDIDATE_ROWS = 40
 
+#: How many catalogue rows are READ to order the search. A database read, not a
+#: venue read: only MAX_CANDIDATE_ROWS of them are ever quoted.
+SEARCH_ORDER_ROWS_READ = 400
+
+SEARCH_ORDER_RULE = (
+    "rank 0: the other participant's POSITIVE handicap (or the opposite side "
+    "of a total) in the SAME period as the held leg, whose line leaves an "
+    "overlapping winning region -- the shape of a middle; rank 1: any other "
+    "graded contract in the same period; rank 2: another period, which the "
+    "grading key never admits as protection for this one; rank 3: a row no "
+    "leg can be built from. Ties keep the catalogue's slug order. It orders "
+    "what is QUOTED within the unchanged budget and decides nothing")
+
+#: A payout event derived from a built leg names the leg's grading facts.
+PAYOUT_EVENT_BASIS = "BUILT_LEG_GRADING_FACTS"
+
+
+def payout_event_of_leg(leg) -> str | None:
+    """WHAT A BUILT LEG PAYS ON, stated from its own grading facts.
+
+    Not a bookmaker's outcome name -- no external source prices most hedge
+    contracts -- but the exact event the venue grades this side against:
+    fixture, period, variable, which participant it backs and at what line,
+    the direction of a total and the overtime treatment. Carried onto the
+    hedge intent so the servicing pass can value the leg; a probability row
+    whose payout event does not match it is still refused by `ev_hold`, which
+    is the honest outcome when nothing prices this exact event."""
+    if leg is None or getattr(leg, "condition_id", None) is None:
+        return None
+    parts = []
+    for name in ("condition_id", "fixture_id", "period", "kind", "backs",
+                 "line", "over_under", "overtime"):
+        v = getattr(leg, name, None)
+        if v is not None:
+            parts.append("%s=%s" % (name, v))
+    return "PAYS_ON(%s)" % ";".join(parts)
+
+
+def search_priority(row, held_row) -> dict:
+    """The search rank of one catalogue row against the held leg's row. Pure.
+
+    Read from the catalogue alone (no quote, no prose), so it can order what
+    is quoted. It never admits anything: `discover` and the whole-position
+    valuation decide on the built legs."""
+    cand = derive_kind(row)
+    held = derive_kind(held_row)
+    if cand.get("refusal"):
+        return {"rank": 3, "why": cand.get("refusal")}
+    if held.get("refusal") or held.get("period") != cand.get("period"):
+        return {"rank": 2,
+                "why": ("a different graded period (%s against the held %s): "
+                        "never admitted as protection for this position"
+                        % (cand.get("period"), held.get("period")))}
+    h_team = _clean((held_row or {}).get("team_abbr"))
+    c_team = _clean((row or {}).get("team_abbr"))
+    if cand.get("kind") == IS.KIND_SPREAD and c_team and h_team \
+            and c_team != h_team \
+            and held.get("kind") in (IS.KIND_MONEYLINE, IS.KIND_SPREAD):
+        c_line = cand.get("signed_line")
+        h_line = (held.get("signed_line") if held.get("kind")
+                  == IS.KIND_SPREAD else 0)
+        if c_line is not None and h_line is not None \
+                and (c_line + h_line) > 0:
+            return {"rank": 0,
+                    "why": ("the other participant at %+g against a held "
+                            "%s%s: both can win when the held side wins by "
+                            "less than the handicap"
+                            % (float(c_line), held.get("kind"),
+                               "" if not h_line
+                               else " %+g" % float(h_line)))}
+    if cand.get("kind") == IS.KIND_TOTAL and held.get("kind") == IS.KIND_TOTAL:
+        h_ou, c_ou = held.get("over_under"), cand.get("over_under")
+        h_l, c_l = held.get("line"), cand.get("line")
+        if None not in (h_l, c_l) and h_ou != c_ou and (
+                (h_ou == "OVER" and c_l > h_l)
+                or (h_ou == "UNDER" and c_l < h_l)):
+            return {"rank": 0,
+                    "why": ("the opposite side of the total with a line that "
+                            "leaves a band where both win")}
+    return {"rank": 1, "why": "a graded contract in the held leg's period"}
+
 R_NO_EVENT_FOR_HELD = "THE_HELD_CONTRACTS_ROW_NAMES_NO_EVENT_TO_FIND_SIBLINGS_ON"
 R_CATALOGUE_READ_FAILED = "THE_CATALOGUE_READ_ITSELF_FAILED"
 
@@ -1330,7 +1411,8 @@ async def held_leg_for(conn, *, position, prose_reader=None, now=None) -> dict:
                         "unestablished" % slug))
         return out
     out["row"] = {k: row.get(k) for k in ("sports_type", "event_slug",
-                                          "team_abbr", "side_norm", "signed")}
+                                          "team_abbr", "side_norm", "signed",
+                                          "line", "game_start")}
     prose, psource, age = None, None, None
     if prose_reader is not None:
         try:
@@ -1347,13 +1429,70 @@ async def held_leg_for(conn, *, position, prose_reader=None, now=None) -> dict:
                              "from_cache": pr.get("from_cache")}
         if pr.get("read_at") is not None and now is not None:
             age = round(float(now) - float(pr["read_at"]), 3)
+    basis = await held_basis_per_unit(conn, pos)
+    out["basis"] = basis
     built = build_leg(
         row=row, quantity=(pos.get("residual_qty") or pos.get("filled_qty")),
-        cost_per_unit=(pos.get("avg_price") or pos.get("limit_price")),
+        cost_per_unit=basis.get("cost_per_unit"),
         prose=prose, prose_source=psource, evidence_age_s=age,
         sport_family=_clean(str(row.get("sports_type") or "").split("_")[0]))
     out.update(built)
+    if built.get("ok"):
+        out.setdefault("built_from", {})["cost_cents_per_unit"] = (
+            basis.get("source"))
     out["ok"] = bool(built.get("ok"))
+    return out
+
+
+#: Where the held leg's per-unit cost came from.
+BASIS_FROM_FILLS = "FB.remaining_basis: entry-fill cash / entry-fill quantity"
+BASIS_FROM_LIMIT_NO_FILL = ("the entry order's limit, converted to the held "
+                            "side's cost: no entry fill carries a cost yet")
+
+
+async def held_basis_per_unit(conn, position) -> dict:
+    """THE HELD LEG'S PER-CONTRACT COST, ON THE SAME BASIS HOLD USES.
+
+    THE DEFECT THIS CLOSES (Xavier map Q3). The held leg was costed at
+    `avg_price or limit_price`. The intents table has no `avg_price`, so it was
+    the entry order's WIRE limit: on an entry that filled better than its
+    limit the hedge was valued against a cost the position never paid, and on
+    a SHORT the YES-denominated wire (0.40) stood in for the short's actual
+    cost (0.60) -- `_cents_per_unit` converts nothing. HOLD, EXIT and REDUCE
+    are all scored on `FB.remaining_basis`, so the same leg was valued on two
+    different costs depending on which action was being compared.
+
+    The fills ledger's cash is already in COST space on both sides
+    (`live_executor.fill_cash`: price x qty on a long, (1 - price) x qty on a
+    short), so the per-contract basis needs no further conversion. Only a
+    position with NO entry fill falls back to its limit -- converted to the
+    side held -- and says so; such a position holds nothing yet.
+    """
+    pos = dict(position or {})
+    out = {"cost_per_unit": None, "source": None, "basis_per_contract": None}
+    iid = pos.get("intent_id")
+    if conn is not None and iid:
+        try:
+            from . import bettor_funded_book as _FB
+
+            rb = await _FB.remaining_basis(conn, str(iid))
+        except Exception as exc:                                # noqa: BLE001
+            rb = {"error": type(exc).__name__}
+        out["remaining_basis"] = rb
+        per = (rb or {}).get("basis_per_contract")
+        if per is not None:
+            out.update(cost_per_unit=float(per), basis_per_contract=float(per),
+                       source=BASIS_FROM_FILLS)
+            return out
+    lim = pos.get("limit_price")
+    if lim is None:
+        return out
+    wire = float(lim)
+    held = _side_token(pos.get("order_intent"))
+    out.update(cost_per_unit=(round(1.0 - wire, 6) if held == SIDE_SHORT
+                              else wire),
+               source=BASIS_FROM_LIMIT_NO_FILL, wire_limit=wire,
+               held_side=held)
     return out
 
 
@@ -1409,15 +1548,43 @@ async def candidate_legs_for(conn, *, held_row, quoter=None,
         out.update(refusal=R_NO_EVENT_FOR_HELD,
                    why="the held contract's row names no event")
         return out
+    cap = int(limit or MAX_CANDIDATE_ROWS)
     try:
-        rows = await conn.fetch(SIBLINGS_SQL, event, held_slug,
-                                int(limit or MAX_CANDIDATE_ROWS))
+        # THE CATALOGUE ROWS ARE CHEAP; THE QUOTES ARE NOT. Enough rows are
+        # read to ORDER the search, and only `cap` of them are then quoted --
+        # so the paced venue-read budget is exactly what it was.
+        fetched = await conn.fetch(SIBLINGS_SQL, event, held_slug,
+                                   max(cap, SEARCH_ORDER_ROWS_READ))
     except Exception as exc:                                    # noqa: BLE001
         out.update(refusal=R_CATALOGUE_READ_FAILED,
                    why=("the sibling read failed (%s); no candidate is "
                         "discovered and the exit path is untouched"
                         % type(exc).__name__))
         return out
+    # ── THE SEARCH ORDER: LIKELY OVERLAPPING STRUCTURES ARE QUOTED FIRST ──
+    #
+    # A SEARCH ORDER, NOT A PURCHASE RULE. Within the same read budget, the
+    # opponent's positive handicap in the SAME game and period (the shape of a
+    # middle against a held moneyline or spread) and the opposite side of a
+    # total are examined before the rest, so the budget is spent where an
+    # overlapping winning region is possible. Nothing is admitted, preferred
+    # or bought for being here: admission is `discover`'s, and the decision is
+    # still whole-position expected value against HOLD, EXIT and REDUCE. A
+    # row from another period sorts last because it can never be protection
+    # for this one -- the grading key refuses it.
+    keyed = []
+    for i, raw in enumerate(fetched):
+        pr = search_priority(dict(raw), hr)
+        keyed.append((pr["rank"], i, pr, raw))
+    keyed.sort(key=lambda k: (k[0], k[1]))
+    rows = [k[3] for k in keyed][:cap]
+    priorities = {str(k[1]): k[2] for k in keyed}
+    out["search_order"] = {
+        "rule": SEARCH_ORDER_RULE,
+        "catalogue_rows_read": len(fetched), "quoted_at_most": cap,
+        "by_rank": {r: sum(1 for k in keyed if k[0] == r)
+                    for r in sorted({k[0] for k in keyed})},
+        "is_a_purchase_rule": False}
     out["examined"] = len(rows)
     # ── TRUNCATION IS REPORTED, NEVER SILENT ─────────────────────────
     #
@@ -1426,7 +1593,6 @@ async def candidate_legs_for(conn, *, held_row, quoter=None,
     # A discovery that stopped at the limit is not "the candidate set"; it is a
     # prefix of it, and saying so is the difference between "nothing better
     # exists" and "we did not look".
-    cap = int(limit or MAX_CANDIDATE_ROWS)
     try:
         tot = await conn.fetchrow(SIBLING_COUNT_SQL, event, held_slug)
     except Exception:                                           # noqa: BLE001
@@ -1436,16 +1602,19 @@ async def candidate_legs_for(conn, *, held_row, quoter=None,
     out["fixture_candidate_slugs"] = (None if tot is None
                                       else int(tot["slugs"]))
     out["limit"] = cap
-    out["truncated_at_limit"] = bool(len(rows) >= cap
-                                     and (have_pairs or 0) > len(rows))
+    out["truncated_at_limit"] = bool(
+        len(rows) >= cap and max(have_pairs or 0, len(fetched)) > len(rows))
     if out["truncated_at_limit"]:
         out["truncation_note"] = (
             "this fixture has %s (slug, side) candidate pairs and the read "
-            "stopped at %d. The candidates below are a PREFIX ordered by slug, "
-            "not the fixture's best ones -- nothing here supports 'no better "
-            "candidate exists'" % (have_pairs, cap))
+            "stopped at %d. The candidates below are a PREFIX -- in the "
+            "search order above, then by slug -- not the fixture's best ones: "
+            "nothing here supports 'no better candidate exists'"
+            % (have_pairs if have_pairs is not None else len(fetched), cap))
+    index_of = {id(k[3]): k[1] for k in keyed}
     for raw in rows:
         row = dict(raw)
+        priority = priorities.get(str(index_of.get(id(raw))), {})
         slug = _clean(row.get("market_slug"))
         side = side_of(row)
         cid = candidate_identity(slug, side) if side else slug
@@ -1523,6 +1692,12 @@ async def candidate_legs_for(conn, *, held_row, quoter=None,
              "price": price, "depth_qty": depth,
              "price_is_this_sides_own": quote_is_side_aware,
              "evidence_age_s": age, "quote": quote,
+             # WHAT THIS CONTRACT PAYS ON, from the leg's own grading facts,
+             # so a hedge acquired from it is a position the next servicing
+             # pass can value (it refused R_NO_PAYOUT_EVENT forever before).
+             "payout_event": payout_event_of_leg(built["leg"]),
+             "payout_event_basis": PAYOUT_EVENT_BASIS,
+             "search_priority": priority,
              "settlement_text_captured": built["settlement_text_captured"]})
     # ── THE ONE CHECK THAT NEEDS BOTH ROWS OF AN INSTRUMENT ──────────
     #

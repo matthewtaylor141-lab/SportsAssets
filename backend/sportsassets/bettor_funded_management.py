@@ -803,6 +803,29 @@ async def select_exit(conn, position, *, client=None, now=None,
     out["ranking"]["selected_is_depth_limited"] = (
         None if _chosen is None else bool(_chosen.get("depth_limited")))
     out["not_rankable"] = ranked.get("not_rankable")
+    # ── EVERY EVIDENCED EXIT ACTION GETS ITS OWN EXECUTABLE TERMS ────
+    #
+    # THE GAP THIS CLOSES (Xavier map, decision-flow Q2). Only the SELECTED
+    # action got a wire limit and a proceeds bound, so the final ranking could
+    # build an ExecutionPlan for that one action alone: a DIRECT_EXIT that lost
+    # to HOLD here (or to REDUCE) was dropped silently before the one ranking
+    # that also holds the hedge ever saw it. The terms below are the SAME
+    # arithmetic the selected branch applies -- `_exit_terms` is that branch's
+    # rule, factored out -- computed for every DIRECT_EXIT and REDUCE
+    # candidate. An action whose terms cannot be established carries its
+    # refusal instead, so the supplier can name it rather than drop it.
+    out["executable_exit_terms"] = {}
+    for _cand in (ranked.get("candidates") or []):
+        _act = _cand.get("action")
+        if _act not in EXECUTABLE_ACTIONS or not _cand.get("qty"):
+            continue
+        _t = _exit_terms(_act, float(_cand["qty"]), lad, ranked, opened_with)
+        _t.update(assessed_at=decision_at,
+                  inputs_expire_at=float(deadline["expires_at"]),
+                  inputs_expiry_governed_by=deadline.get("governed_by"),
+                  value_usd=_cand.get("value_usd"),
+                  selection_eligible=_cand.get("selection_eligible"))
+        out["executable_exit_terms"][_act] = _t
     sel = ranked.get("selected")
     qty = ranked.get("selected_qty")
     if sel in ("DIRECT_EXIT", "REDUCE") and qty and float(qty) > 0:
@@ -965,9 +988,66 @@ async def select_exit(conn, position, *, client=None, now=None,
                       "the reason above says which rule"))
 
 
+def _exit_terms(action, qty, lad, ranked, opened_with) -> dict:
+    """THE WIRE LIMIT AND PROCEEDS BOUND ONE EXIT ACTION WOULD BE SENT AT.
+
+    The same rules `select_exit` applies to the SELECTED action -- the best
+    level for a DIRECT_EXIT, the MARGINAL level for a multi-level REDUCE,
+    rounding in the direction that cannot receive less, and that rounding
+    checked rather than trusted -- so a plan built for an action that was not
+    selected here is bounded exactly as it would have been had it been. Pure.
+    """
+    out = {"ok": False, "action": action, "selected_qty": float(qty),
+           "price_space": "VENUE_WIRE_CONTRACT_PRICE"}
+    proceeds_per = float(lad["best_exit_price"])
+    wire = float(lad["best_api_price"])
+    marg = ranked.get("marginal_sale") or {}
+    if action == "REDUCE" and marg.get("needs_a_marginal_wire_price"):
+        mw = marg.get("marginal_api_price")
+        if mw is None:
+            return dict(out, refusal=R_REDUCE_MARGINAL_WIRE_NOT_SUPPLIED,
+                        levels_spanned=marg.get("levels_spanned"),
+                        vwap=marg.get("vwap"))
+        wire = float(mw)
+        proceeds_per = float(marg["marginal_proceeds_per_contract"])
+        out.update(reduce_spans_levels=marg.get("levels_spanned"),
+                   reduce_bounded_at="THE_MARGINAL_LEVEL",
+                   reduce_expected_vwap=float(marg["vwap"]))
+    rounded = safe_exit_cent(wire, opened_with)
+    if rounded is None:
+        return dict(out, refusal=R_EXIT_WIRE_UNREPRESENTABLE, wire_asked=wire,
+                    proceeds_per_contract=proceeds_per)
+    got_per = exit_proceeds(1, rounded, opened_with)
+    if got_per < proceeds_per - 1e-9:
+        return dict(out, refusal=R_EXIT_WIRE_UNREPRESENTABLE, wire_asked=wire,
+                    wire_rounded=rounded, proceeds_per_contract=proceeds_per,
+                    proceeds_after_rounding=got_per)
+    return dict(out, ok=True, refusal=None, limit_price=rounded,
+                proceeds_per_contract=proceeds_per,
+                proceeds_after_rounding=got_per,
+                rounding=("CEIL" if opened_with != SHORT else "FLOOR"))
+
+
+#: The decision-reference keys an exit intent may carry beyond the servicing
+#: flags: which persisted decision it executes, the digest of the plan that
+#: decision bound, and the Xavier review that recorded it.
+EXIT_DECISION_REF_KEYS = ("decision_id", "plan_digest", "xavier_decision_id",
+                          "action")
+
+
+def _exit_decision_ref(decision_ref: dict | None) -> str:
+    import json as _j
+    ref = {"servicing": True, "reduces_exposure": True}
+    for k in EXIT_DECISION_REF_KEYS:
+        if (decision_ref or {}).get(k) is not None:
+            ref[k] = str(decision_ref[k])
+    return _j.dumps(ref)
+
+
 async def _reserve_exit(conn, *, parent: str, row, venue: str,
                         opened_with: str, wire: float,
-                        contracts: int) -> dict:
+                        contracts: int, decision_ref: dict | None = None
+                        ) -> dict:
     """TAKE THE INVENTORY BEFORE SENDING ANYTHING, under a row lock.
 
     THE DEFECT THIS CLOSES, and it is the one the one-open-position index
@@ -1032,7 +1112,12 @@ async def _reserve_exit(conn, *, parent: str, row, venue: str,
             wire, contracts,
             # AN EXIT COMMITS NO COLLATERAL. It releases it.
             0.0, str(row["effective_digest"] or ""),
-            '{"servicing": true, "reduces_exposure": true}',
+            # ── THE ORDER NAMES THE DECISION IT EXECUTES ────────────
+            # The link used to be a naming convention (`op:` vs `dec:`). The
+            # persisted decision id, the bound plan's digest and the Xavier
+            # review are written onto the order itself when the caller has
+            # them; the servicing flags stay exactly as they were.
+            _exit_decision_ref(decision_ref),
             FB.PROVENANCE, parent,
             row["payout_event"] if "payout_event" in row.keys() else None,
             row["held_is_long"] if "held_is_long" in row.keys() else None,
@@ -1051,7 +1136,8 @@ async def submit_exit(conn, *, intent_id: str, limit_price=None,
                       quantity=None, adapter=None, venue: str | None = None,
                       expect_proceeds_per_contract=None, assessed_at=None,
                       inputs_expire_at=None,
-                      now: float | None = None) -> dict:
+                      now: float | None = None,
+                      decision_ref: dict | None = None) -> dict:
     """SELL BACK SOME OR ALL OF A HELD FUNDED POSITION.
 
     `limit_price` IS THE VENUE'S WIRE PRICE -- the contract price the order
@@ -1300,7 +1386,7 @@ async def submit_exit(conn, *, intent_id: str, limit_price=None,
     # ── THE EXIT INTENT IS RESERVED AND COMMITTED, ATOMICALLY ───────
     res = await _reserve_exit(conn, parent=intent_id, row=row, venue=ven,
                              opened_with=opened_with, wire=wire,
-                             contracts=contracts)
+                             contracts=contracts, decision_ref=decision_ref)
     out["reservation"] = res
     if not res.get("ok"):
         return dict(out, ok=False, refusal=res["refusal"],
@@ -1878,6 +1964,28 @@ async def manage(conn, *, account_id: str, venue: str, adapter=None,
             "refusal": pick.get("refusal"),
             "us_market_slug": p.get("us_market_slug"),
             "residual_qty": p.get("residual"),
+            # ── WHAT THE RANKING COULD NOT RANK, AND WHAT IT COULD SEND ──
+            # `select_exit` puts its `not_rankable` at the TOP level, outside
+            # the `ranking` projection, so HOLD_TO_SETTLEMENT, POST_COMPLEMENT,
+            # MERGE, NO_BID and the rest never reached the decision record
+            # (Xavier map Q4). And only the selected action had terms a plan
+            # could be built from. Both travel now.
+            "not_rankable": list(pick.get("not_rankable") or []),
+            "executable_exit_terms": dict(
+                pick.get("executable_exit_terms") or {}),
+            # THE EVIDENCE THE VALUATION RESTED ON, for the decision record.
+            "basis": {k: (pick.get("basis") or {}).get(k) for k in (
+                "basis_per_contract", "remaining_basis_usd", "residual_qty",
+                "entry_qty")},
+            "ev_hold": {k: (pick.get("ev_hold") or {}).get(k) for k in (
+                "status", "refusal", "probability", "probability_event",
+                "payout_event_held", "age_bound_s")},
+            "probability_read": pick.get("probability_read"),
+            "decision_evidence": {k: (pick.get("decision_evidence")
+                                      or {}).get(k) for k in (
+                "valuation_row_id", "valuation_observed_at", "event_state")},
+            "inputs_expire_at": pick.get("inputs_expire_at"),
+            "assessed_at": pick.get("assessed_at"),
         }
         if not pick.get("ok"):
             # A NAMED MISSING INPUT, not "needs a decision". Each of these
@@ -2075,11 +2183,19 @@ async def dispatch_selection(conn, *, selection, adapter=None, venue: str,
             assessed_at=sel.get("assessed_at"),
             inputs_expire_at=sel.get("inputs_expire_at"),
             adapter=mod, venue=venue,
-            now=float(now if now is not None else time.time()))
+            now=float(now if now is not None else time.time()),
+            # WHICH DECISION THIS ORDER EXECUTES, written onto the exit
+            # intent. Carried, never computed here.
+            decision_ref=sel.get("decision_ref"))
     except Exception as exc:                                   # noqa: BLE001
-        return {"ok": False, "submitted": False,
+        # THE SEND'S OUTCOME IS NOT KNOWN FROM HERE. `submit_exit` handles
+        # its own send exceptions; one reaching this point may have been
+        # raised after the request left, so it is reported as an unknown
+        # outcome (exposure preserved) rather than as a refusal.
+        return {"ok": False, "submitted": None, "outcome_unknown": True,
                 "refusal": "EXIT_DISPATCH_RAISED",
                 "error": "%s: %s" % (type(exc).__name__, str(exc)[:200])}
+    ack = ex.get("acknowledgement") or {}
     return {"ok": True, "submitted": bool(ex.get("submitted")),
             "refusal": ex.get("refusal"),
             "exit_intent_id": ex.get("exit_intent_id"),
@@ -2088,6 +2204,13 @@ async def dispatch_selection(conn, *, selection, adapter=None, venue: str,
             "dispatched": sel["selected"],
             "quantity": sel["selected_qty"],
             "limit_price": sel["limit_price"],
+            # WHAT THE VENUE SAID, for the execution record: its order id,
+            # the state our book recorded from its answer, and the filled
+            # quantity the fills ledger now holds for this exit.
+            "venue_order_id": ack.get("venue_order_id"),
+            "acknowledged_state": ack.get("state"),
+            "filled_qty": (ex.get("fills") or {}).get(
+                "filled_qty_from_the_ledger"),
             "why": ex.get("why")}
 
 

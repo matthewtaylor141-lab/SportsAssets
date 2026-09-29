@@ -85,6 +85,11 @@ EVIDENCE_EXTERNAL_LABELLED = "EXTERNAL_LABELLED_PROBABILITY"
 EVIDENCE_VENUE_IMPLIED = "VENUE_IMPLIED_FROM_ITS_OWN_PRICES"
 EVIDENCE_NOT_ESTABLISHED = NOT_ESTABLISHED
 
+#: Applied only between candidates of EQUAL expected net value.
+TIE_BREAK = ("at equal expected net value: the higher worst-case net "
+             "(`worst_case_net_usd`, else `downside_usd`; unknown sorts last), "
+             "then the smaller incremental capital")
+
 
 def describe() -> dict:
     return {
@@ -443,8 +448,25 @@ def decide(*, hold_ranking: dict, indirect=None, indirect_candidates=None, limit
             scored.append(c)
         elif c.get("value_usd") is not None:
             blocked.append(dict(c, value_usd=None, blocker="NON_FINITE_ACTION_VALUE"))
-    scored.sort(key=lambda c: (-float(c["value_usd"]),
+    # ── THE TIE-BREAK, DOCUMENTED: WORST CASE, THEN NEW CAPITAL ──────
+    #
+    # The ranking is EXPECTED VALUE and stays so. Only among candidates of
+    # EQUAL expected value does the worst case decide: the one whose worst
+    # outcome loses less goes first (a known worst case beats an unknown one),
+    # and then the one committing less new capital. Before this, equal-EV
+    # candidates fell back on list order, which is how a digest-less copy of
+    # an action came to win over the executable one.
+    def _worst(c):
+        w = c.get("worst_case_net_usd", c.get("downside_usd"))
+        try:
+            return float(w) if w is not None and math.isfinite(float(w)) \
+                else float("-inf")
+        except (TypeError, ValueError, OverflowError):
+            return float("-inf")
+
+    scored.sort(key=lambda c: (-float(c["value_usd"]), -_worst(c),
                                float(c.get("incremental_capital_usd") or 0.0)))
+    out["tie_break"] = TIE_BREAK
     out["candidates"] = scored
     out["not_rankable"] = blocked
     out["unscored_admitted"] = [c for c in admitted
