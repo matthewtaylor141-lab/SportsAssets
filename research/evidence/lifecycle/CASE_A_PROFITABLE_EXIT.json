@@ -186,6 +186,14 @@
     "state_was": "PARTIALLY_FILLED",
     "venue_order_id": "vo-xa-1",
     "direction": "EXIT",
+    "terminal": {
+     "intent_id": "fpi-<GENERATED-PER-RUN>",
+     "venue_state": "filled",
+     "applied": false,
+     "to": "FILLED",
+     "state": null,
+     "why": "the intent was already terminal; nothing moved"
+    },
     "case": "READ_FROM_THE_VENUE",
     "venue_state": "filled",
     "state_now": "FILLED",

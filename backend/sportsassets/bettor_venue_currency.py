@@ -548,6 +548,28 @@ def evaluate(*, now, observation=None, subscription=None, revalidation=None,
         "verdict": NOT_ESTABLISHED,
         "mechanism": NO_MECHANISM,
         "bound_s": float(bound_s),
+        # ── THE EVIDENCE THIS VERDICT WAS COMPUTED FROM, CARRIED FORWARD ──
+        #
+        # THE BROKEN LINK THIS CLOSES. The entry lane evaluates currency twice:
+        # once at the READ, in `venue_quote`, and again at the DECISION instant
+        # in `_entry_freshness`, which re-ages the same evidence so a book whose
+        # currency was established at the read cannot inherit that
+        # establishment through the further reads that follow it. The second
+        # evaluation reads `subscription_input` and `revalidation_input` off
+        # this dict -- and nothing wrote them. So the decision-time evaluation
+        # always ran with NO mechanism, and STALE_DATA refused every entry at
+        # the risk stage even when the read had ESTABLISHED currency.
+        #
+        # It stayed invisible because production supplies no mechanism at all,
+        # so every candidate is refused at the read first; only an end-to-end
+        # run with a qualifying mechanism reaches the second evaluation.
+        #
+        # THE INPUTS ARE CARRIED AS GIVEN, and re-ageing them can only make the
+        # verdict stricter: silence and state age both grow with `now`.
+        "subscription_input": (dict(subscription)
+                               if isinstance(subscription, dict) else None),
+        "revalidation_input": (dict(revalidation)
+                               if isinstance(revalidation, dict) else None),
         "book_state_established_at_epoch_s": None,
         "book_state_age_s": None,
         "contract": contract,

@@ -1039,6 +1039,67 @@ async def mark_unresolved(conn, intent_id: str, reason: str) -> dict:
             "exposure": "PRESERVED", "reason": reason}
 
 
+#: The venue's own order states (as `pmus._norm_order` spells them) that mean
+#: the order can execute nothing more, and the book state each one closes to.
+VENUE_TERMINAL_STATES = {"filled": "FILLED", "canceled": "CANCELLED",
+                         "cancelled": "CANCELLED", "expired": "CANCELLED",
+                         "rejected": "REJECTED"}
+
+
+async def record_venue_terminal(conn, intent_id: str, *, venue_state: str,
+                                venue_filled: float, leaves: float,
+                                ledger_filled: float) -> dict:
+    """THE VENUE SAYS THE ORDER IS OVER, SO THE BOOK STOPS COUNTING IT AS LIVE.
+
+    THE DEFECT THIS CLOSES. `recover` read each outstanding order's own record
+    from the venue and ingested its executions -- and never applied the
+    record's TERMINAL STATE. `ingest_fills` advances state only on fills, so an
+    order the venue confirmed CANCELED with nothing filled (a fill-or-kill the
+    book could not fill) stayed ACKNOWLEDGED forever, and one the venue
+    cancelled after a partial fill stayed PARTIALLY_FILLED forever. Both are
+    `bettor_funded_order_is_outstanding`, so each held the one-live-intent slot
+    and counted as live exposure permanently: one killed order stopped the lane
+    entering again. Measured end to end, not inferred.
+
+    ONLY ON THE VENUE'S OWN RECORD, AND ONLY WHEN IT BALANCES. The transition
+    needs all three of: a terminal state on the venue's record of THIS order;
+    nothing left working (`leaves` 0); and the ledger holding exactly the
+    quantity the venue says filled. A record that fails any of them is not
+    evidence of an ending, and the intent is left exactly as it was -- the
+    caller's unresolved path handles a quantity the ledger cannot place.
+
+    INVENTORY IS NOT TOUCHED. `residual_qty` is what filled, and a cancelled
+    order that filled six still holds six. Only the ORDER stops being live.
+    Guarded in the UPDATE itself, so a replay or a race cannot move a
+    terminal intent again.
+    """
+    to = VENUE_TERMINAL_STATES.get(str(venue_state or "").lower())
+    out = {"intent_id": intent_id, "venue_state": venue_state,
+           "applied": False, "to": to}
+    if to is None:
+        return dict(out, why="the venue's state %r is not terminal"
+                    % (venue_state,))
+    if float(leaves or 0.0) > 1e-9:
+        return dict(out, why=("the venue reports %s still working, so the "
+                              "order is not over" % leaves))
+    if abs(float(venue_filled or 0.0) - float(ledger_filled or 0.0)) > 1e-9:
+        return dict(out, why=("the venue says %s filled and the ledger holds "
+                              "%s; an ending that does not balance is not "
+                              "applied" % (venue_filled, ledger_filled)))
+    if to == "FILLED" and float(ledger_filled or 0.0) <= 1e-9:
+        return dict(out, why="a FILLED state with nothing filled is not "
+                              "coherent, so nothing is applied")
+    got = await conn.fetchval(
+        "UPDATE bettor_funded_intents SET state=$2, resolved_at=now(), "
+        "  updated_at=now(), unresolved_reason=NULL "
+        " WHERE intent_id=$1 AND bettor_funded_order_is_outstanding(state) "
+        "RETURNING state", intent_id, to)
+    return dict(out, applied=got is not None, state=got or None,
+                why=("closed on the venue's own record of the order"
+                     if got is not None else
+                     "the intent was already terminal; nothing moved"))
+
+
 # ── 2 · FILLS, KEYED BY THE VENUE'S OWN IDENTITY ────────────────────
 
 #: DISCREPANCY KINDS. Each is a thing that cannot be true at once.
@@ -1224,13 +1285,30 @@ def venue_execution_order(row) -> tuple:
     vat = row.get("venue_executed_at")
     fid = str(row.get("fill_id") or "")
     if seq is not None:
-        return (ORDER_BY_VENUE_SEQUENCE, (0, float(seq), 0.0, fid))
+        return (ORDER_BY_VENUE_SEQUENCE, (0, float(seq), 0, fid))
     if vat is not None:
         ts = vat.timestamp() if hasattr(vat, "timestamp") else float(vat)
-        return (ORDER_BY_VENUE_TIME, (1, 0.0, ts, fid))
+        return (ORDER_BY_VENUE_TIME, (1, 0.0, _whole_us(ts), fid))
     at = row.get("at")
     ts = at.timestamp() if hasattr(at, "timestamp") else float(at or 0.0)
-    return (ORDER_BY_ARRIVAL, (2, 0.0, ts, fid))
+    return (ORDER_BY_ARRIVAL, (2, 0.0, _whole_us(ts), fid))
+
+
+def _whole_us(ts: float) -> int:
+    """An instant in WHOLE MICROSECONDS, the resolution Postgres stores.
+
+    THE NONDETERMINISM THIS CLOSES, measured on the scheduled lifecycle: one
+    exit filled in two executions came out at $0.38 of fees on some runs and
+    $0.39 on others, from identical inputs. A fill already written is read back
+    at Postgres's microsecond resolution; the fill being placed carried the raw
+    float instant it was about to be written with. For the SAME instant the two
+    differed in the sub-microsecond digits, so whether the earlier fill sorted
+    before or after the new one depended on how Postgres rounded them -- and a
+    new fill that sorted first was priced as the order's first leg and escaped
+    the venue's cumulative cap. Both sides are now compared at the resolution
+    the database can actually hold.
+    """
+    return int(round(float(ts) * 1_000_000))
 
 
 async def prior_taker_legs(conn, intent_id: str, direction: str) -> list:
@@ -1781,7 +1859,10 @@ async def ingest_fills(conn, intent_id: str, fills, *,
     Every ingested fill also writes its ECONOMIC EVENTS -- the cash and the fee
     -- so realised P&L and drawdown are sums over rows rather than constants.
     """
-    now = float(at if at is not None else time.time())
+    # QUANTIZED ONCE, to the resolution it will be stored at, so the instant
+    # written and the instant this batch is ordered by are the same number.
+    # See `_whole_us`.
+    now = round(float(at if at is not None else time.time()), 6)
     row = await conn.fetchrow(
         "SELECT intent_id, venue_order_id, order_intent, quantity, kind, "
         "       parent_intent_id "
@@ -2622,6 +2703,19 @@ async def recover(conn, adapter, *, account_id: str, venue: str,
                 out["unresolved"].append(dict(
                     rec, case="FILLED_SHARES_WITH_NO_EXECUTIONS", **got))
                 continue
+        # ── AND THE ORDER'S OWN ENDING, WHEN THE VENUE STATES ONE ─────
+        # See `record_venue_terminal`: without this an order the venue
+        # confirmed over stayed live in the book forever.
+        rec["terminal"] = await record_venue_terminal(
+            conn, iid, venue_state=st.get("state") or st.get("status"),
+            venue_filled=(float(st.get("filled_shares") or 0.0)
+                          if st.get("filled_shares") is not None
+                          else float(ing.get("filled_qty_from_the_ledger")
+                                     or 0.0)),
+            leaves=float(st.get("leaves") or 0.0),
+            ledger_filled=float(ing.get("filled_qty_from_the_ledger") or 0.0))
+        if rec["terminal"].get("applied"):
+            after = rec["terminal"]["state"]
         out["reconciled"].append(dict(
             rec, case=rec.pop("case_pre", "READ_FROM_THE_VENUE"),
             venue_state=st.get("state") or st.get("status"),

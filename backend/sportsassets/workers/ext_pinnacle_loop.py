@@ -3979,6 +3979,98 @@ def _entry_plan(*, ladder, fee_fn, observation_age_s, action, condition_id,
 
 # ── one cycle ───────────────────────────────────────────────────────
 
+async def venue_account_exposure() -> dict:
+    """WHAT THE ACCOUNT HOLDS AND HAS WORKING AT THE VENUE, OR WHY NOT.
+
+    THE MISSING CONNECTION THIS SUPPLIES. `submit_for_decision` measures the
+    ACCOUNT-WIDE exposure and hands it to the execution gate, and that total
+    needs the venue's own answer -- `bettor_account_exposure` says so and holds
+    no credential. Neither scheduled caller supplied it: `_funded_attempt`
+    passed nothing and `_funded_service` handed `pass_once` nothing, so the
+    total was UNREADABLE and the gate refused EVERY entry and EVERY hedge with
+    ACCOUNT_WIDE_EXPOSURE_COULD_NOT_BE_MEASURED -- whatever the account held.
+
+    THE READS ARE THE ONES PRODUCTION ALREADY TRUSTS. Positions come from
+    `mirror_shadow.account_positions_walk`, which pages the account with its
+    own pacing and returns None for a failed or truncated walk ("a partial
+    reading of the account is not a reading of the account"); resting orders
+    from `pmus.open_orders`. Held exposure is the venue's own all-in COST per
+    held slug (`pmus.position_basis`), because that is what the position has
+    committed; working exposure is each resting BUY's collateral at its limit,
+    side-aware. A SELL commits nothing new.
+
+    NEVER A PARTIAL NUMBER. Any failure -- no client, a failed or truncated
+    walk, a held slug whose cost the venue did not state, an unreadable order
+    -- returns `{"ok": False}` with the reason, and the caller passes None, so
+    the gate refuses exactly as it did before. `unresolved_usd` is 0 here
+    because unresolved sends are OUR state and are already counted from our own
+    tables under THIS_LANE; the venue cannot report an order it never received.
+    """
+    from .. import bettor_funded_execution as _FX
+    from .. import pmus as _pmus
+    from . import mirror_shadow as _ms
+
+    at = time.time()
+    out = {"ok": False, "read_at_epoch_s": at,
+           "source": ("mirror_shadow.account_positions_walk + "
+                      "pmus.open_orders")}
+    try:
+        basis: dict = {}
+        positions, pages, rate_limited = await _ms.account_positions_walk(
+            _pmus, basis_out=basis)
+    except Exception as exc:                                   # noqa: BLE001
+        return dict(out, refusal="VENUE_POSITIONS_READ_RAISED",
+                    error=type(exc).__name__)
+    out["pages"] = pages
+    if positions is None:
+        return dict(out, refusal=("VENUE_POSITIONS_RATE_LIMITED"
+                                  if rate_limited else
+                                  "VENUE_POSITIONS_WALK_INCOMPLETE"),
+                    why="a failed or truncated walk is not a reading of the "
+                        "account, so no total is offered")
+    held = 0.0
+    for slug, net in positions.items():
+        if not net:
+            continue
+        cost = (basis.get(slug) or {}).get("cost")
+        try:
+            held += abs(float(cost))
+        except (TypeError, ValueError):
+            return dict(out, refusal="VENUE_POSITION_COST_NOT_STATED",
+                        slug=slug,
+                        why=("the account holds %s of %s and the venue stated "
+                             "no cost for it, so its commitment is unknown"
+                             % (net, slug)))
+    try:
+        orders = await asyncio.to_thread(_pmus.open_orders)
+    except Exception as exc:                                   # noqa: BLE001
+        return dict(out, refusal="VENUE_OPEN_ORDERS_READ_RAISED",
+                    error=type(exc).__name__)
+    working = 0.0
+    for o in orders or ():
+        if o.get("side") != "BUY":
+            continue
+        try:
+            working += _FX.collateral_for(float(o.get("price")),
+                                          float(o.get("leaves") or 0.0),
+                                          o.get("intent"))
+        except (TypeError, ValueError):
+            return dict(out, refusal="VENUE_OPEN_ORDER_UNREADABLE",
+                        order_id=o.get("order_id"))
+    return dict(out, ok=True, held_usd=round(held, 6),
+                working_usd=round(working, 6), unresolved_usd=0.0,
+                held_slugs=sorted(s for s, n in positions.items() if n),
+                open_orders=len(orders or ()))
+
+
+def _venue_positions_for_gate(read: dict) -> dict | None:
+    """The shape `bettor_account_exposure.account_exposure` reads, or None."""
+    if not (read or {}).get("ok"):
+        return None
+    return {k: read[k] for k in ("held_usd", "working_usd", "unresolved_usd",
+                                 "read_at_epoch_s")}
+
+
 async def _funded_attempt(conn, rec, *, now):
     """OFFER ONE ADMITTED DECISION TO THE FUNDED CONNECTOR.
 
@@ -4004,9 +4096,22 @@ async def _funded_attempt(conn, rec, *, now):
     if not account_id or not venue:
         # NOT CONFIGURED. Not a refusal -- there is nothing to refuse yet.
         return None
+    # THE ACCOUNT, READ AT THE VENUE, so the execution gate can measure it. A
+    # failed read passes None and the gate refuses by name, as before.
+    read = await venue_account_exposure()
     try:
-        return await _FX.submit_for_decision(
-            conn, rec, account_id=account_id, venue=venue, now=now)
+        # THE SCHEDULED ENTRY IS FITTED TO THE APPROVED RAILS. The count on
+        # `rec` is the shadow cohort's; the connector reduces it to the largest
+        # count every approved rail clears at the same limit, records that on
+        # the intent, and refuses when not one contract fits.
+        got = await _FX.submit_for_decision(
+            conn, rec, account_id=account_id, venue=venue, now=now,
+            venue_positions=_venue_positions_for_gate(read),
+            size_to_approved_rails=True)
+        return dict(got, venue_account_read={
+            k: read.get(k) for k in ("ok", "refusal", "held_usd",
+                                     "working_usd", "pages", "open_orders",
+                                     "read_at_epoch_s", "why")})
     except Exception as exc:                                   # noqa: BLE001
         # A CONNECTOR THAT RAISES MUST NOT TAKE THE CYCLE DOWN, and it must
         # not be reported as a clean refusal either.
@@ -4856,6 +4961,15 @@ async def _funded_service(conn, *, now):
         got["deferred_exit_count"] = len(deferred)
         import functools
 
+        # THE ACCOUNT, READ AT THE VENUE, for the same gate the entry path
+        # consults. Only a dispatched acquisition reaches it; HOLD and the
+        # recovery step never do, so a failed read withholds orders and
+        # nothing else.
+        account_read = await venue_account_exposure()
+        got["venue_account_read"] = {
+            k: account_read.get(k) for k in (
+                "ok", "refusal", "held_usd", "working_usd", "pages",
+                "open_orders", "read_at_epoch_s", "why")}
         got["pair_cycle"] = await _PC.pass_once(
             conn, account_id=account_id, venue=venue,
             pair_inputs=functools.partial(
@@ -4870,6 +4984,7 @@ async def _funded_service(conn, *, now):
                 prose_reader=_venue_prose,
                 quoter=functools.partial(_candidate_quote, conn, now=now)),
             deferred_exits=deferred,
+            venue_positions=_venue_positions_for_gate(account_read),
             now=now)
         # THE ORDERING, ASSERTED IN THE RESULT rather than left to a reader to
         # infer from two sibling keys. `manage` sent nothing; whatever was sent

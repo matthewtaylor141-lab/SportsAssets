@@ -541,3 +541,91 @@ async def test_each_owner_side_precondition_refuses_and_sends_nothing(
     finally:
         await _clean(conn)
         await conn.close()
+
+
+@pg
+@pytest.mark.asyncio
+async def test_the_scheduled_entry_is_fitted_to_the_approved_rails_and_says_so(
+        monkeypatch):
+    """THE FIT IS AN EXPLICIT REQUEST, IT IS THE GATE, AND IT IS RECORDED.
+
+    The scheduled entry's count is the shadow cohort's. Asked to, the connector
+    reduces it to the largest count every approved rail clears at the SAME
+    limit, sends exactly that, and writes what it was sized down from onto the
+    intent. Not asked to, the same order refuses and sends nothing. When not one
+    contract clears, the refusal stands either way.
+    """
+    asyncpg = pytest.importorskip("asyncpg")
+    conn = await asyncpg.connect(DSN)
+    try:
+        pmus, sent = _substitute_transport(monkeypatch)
+        monkeypatch.setattr(FX, "FUNDED_SUBMISSION_ENABLED", True)
+        monkeypatch.setattr(EX, "REAL_ORDER_SUBMISSION_ENABLED", True)
+        await _clean(conn)
+        await _seed(conn)
+        # $25 per market; 60 x 0.63 is $37.80
+        big = _decision(execution_plan={"execution": {
+            "size": 60, "vwap": 0.62, "limit_price": 0.63}})
+
+        # NOT ASKED: refused, nothing sent, no row
+        r = await FX.submit_for_decision(conn, big, account_id=ACCT,
+                                         venue=VENUE,
+                                         venue_positions=EMPTY_VENUE)
+        assert r["refusal"] == FX.R_OVER_RAIL, r
+        assert "sized_to_fit" not in r
+        assert sent == []
+        assert await conn.fetchval(
+            "SELECT count(*) FROM bettor_funded_intents") == 0
+
+        # ASKED: 39 x 0.63 = $24.57 clears; 40 x 0.63 = $25.20 does not
+        r = await FX.submit_for_decision(conn, big, account_id=ACCT,
+                                         venue=VENUE,
+                                         venue_positions=EMPTY_VENUE,
+                                         size_to_approved_rails=True)
+        assert r.get("refusal") is None, r
+        fit = r["sized_to_fit"]
+        assert fit["ok"] is True and fit["from_quantity"] == 60
+        assert fit["to_quantity"] == 39, fit
+        assert {o["rail"] for o in fit["binding"]} >= {"MAX_MARKET_EXPOSURE"}
+        assert not r["rails"]["over"] and not r["rails"]["unmeasured"]
+        creates = [b for k, b in sent if k == "create"]
+        assert len(creates) == 1
+        assert int(creates[0]["quantity"]) == 39
+        assert float(creates[0]["price"]["value"]) == pytest.approx(0.63)
+        row = await conn.fetchrow(
+            "SELECT quantity, limit_price, collateral_usd, decision_ref "
+            "  FROM bettor_funded_intents")
+        assert int(row["quantity"]) == 39
+        assert float(row["limit_price"]) == pytest.approx(0.63)
+        assert float(row["collateral_usd"]) == pytest.approx(24.57)
+        import json as _json
+        ref = row["decision_ref"]
+        ref = _json.loads(ref) if isinstance(ref, str) else ref
+        assert ref["sized_to_approved_rails"]["from_quantity"] == 60
+        assert ref["sized_to_approved_rails"]["to_quantity"] == 39
+
+        # NOT ONE CONTRACT CLEARS: a pending intent on the same market already
+        # commits $24.90 of the $25 market rail, and one more contract at 0.63
+        # would make $25.53. The fit offers nothing and the refusal stands.
+        await _clean(conn)
+        await _seed(conn)
+        sent.clear()
+        await FB.record_intent(
+            conn, intent_id="fpi-market-full", account_id=ACCT, venue=VENUE,
+            venue_class=FA.VENUE_FUNDED, us_market_slug=big["us_market_slug"],
+            event_key=big["event_key"], order_intent=FX.LONG,
+            limit_price=0.60, quantity=41, collateral_usd=24.90,
+            effective_digest="d")
+        r = await FX.submit_for_decision(conn, big, account_id=ACCT,
+                                         venue=VENUE,
+                                         venue_positions=EMPTY_VENUE,
+                                         size_to_approved_rails=True)
+        assert r["refusal"] == FX.R_OVER_RAIL, r
+        assert r["sized_to_fit"]["ok"] is False, r["sized_to_fit"]
+        assert r["sized_to_fit"]["to_quantity"] is None
+        assert sent == []
+        assert await conn.fetchval(
+            "SELECT count(*) FROM bettor_funded_intents") == 1
+    finally:
+        await _clean(conn)
+        await conn.close()

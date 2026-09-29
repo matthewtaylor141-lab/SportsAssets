@@ -340,6 +340,47 @@ def event_state_of(raw) -> str:
     return _EVENT_STATE_TOKENS.get(tok, "UNKNOWN")
 
 
+def _attestation_from_comparison(cmp_, *, book_rule=None) -> dict | None:
+    """THE ENTRY'S CONDITION-TO-PAYOUT VERDICT, in the shape `ev_hold` reads.
+
+    None when the row carries no such comparison -- the caller then falls back
+    to an attestation dict if one exists, and otherwise to nothing, which reads
+    UNKNOWN and restricts the funded action. Pure.
+
+      COMPATIBLE    every applicable condition was stated on both sides and paid
+                    the same -> established, nothing unmet.
+      INCOMPATIBLE  the named mismatched conditions travel as conflicts, so
+                    `_terminal_rule` reads INCOMPATIBLE and applies its own
+                    transform-or-disqualify rule to them.
+      UNKNOWN       the unstated conditions travel as unmet. Silence is not
+                    agreement, and an UNKNOWN terminal rule restricts a funded
+                    action exactly as it did before.
+    """
+    c = dict(cmp_ or {})
+    if c.get("compared_on") != "CONDITION_TO_PAYOUT":
+        return None
+    verdict = str(c.get("compatibility") or "").upper()
+    if verdict not in ("COMPATIBLE", "INCOMPATIBLE", "UNKNOWN"):
+        return None
+    applicable = list(c.get("applicable_conditions") or [])
+    unstated = list(c.get("unstated_conditions") or [])
+    mismatched = list(c.get("mismatched_conditions") or [])
+    base = {"book_rule": book_rule, "attested": applicable,
+            "venue_rules_text_read": c.get("venue_rules_read"),
+            "venue_rules_field": c.get("venue_rules_source"),
+            "derived_from": "settlement_comparison",
+            "comparison_verdict": verdict}
+    if verdict == "COMPATIBLE" and not unstated and not mismatched:
+        return dict(base, overall_established=True, unmet=[])
+    if verdict == "INCOMPATIBLE" or mismatched:
+        return dict(base, overall_established=False,
+                    unmet=["CONFLICT:%s" % m for m in mismatched]
+                    or ["CONFLICT:UNNAMED"],
+                    mismatched_conditions=mismatched)
+    return dict(base, overall_established=False,
+                unmet=unstated or ["SETTLEMENT_COMPARISON_UNKNOWN"])
+
+
 async def _decision_evidence(conn, probability_row) -> dict:
     """THE FIXTURE AND SETTLEMENT EVIDENCE BESIDE THE PROBABILITY BEING USED.
 
@@ -400,7 +441,37 @@ async def _decision_evidence(conn, probability_row) -> dict:
             cmp_ = None
     raw_state = (cmp_ or {}).get("fixture_event_state")
     obs = (probability_row or {}).get("observed_at")
+    # ── THE VERDICT THAT ADMITTED THE ENTRY, NOT A SUPERSEDED FIELD ──
+    #
+    # THE DEFECT THIS CLOSES, found by running the scheduled lifecycle end to
+    # end. The entry lane admits on `settlement_comparison` -- the
+    # condition-to-payout comparison, COMPATIBLE / INCOMPATIBLE / UNKNOWN. The
+    # `settlement_rule` column on the same row holds the bookmaker rule's NAME,
+    # e.g. "FULL_GAME_INCLUDING_EXTRA_INNINGS". This read `json.loads` of that
+    # name, which raises, so `rule` became None, the terminal rule read
+    # UNKNOWN, and every funded exit, reduce and hedge on a position the entry
+    # had admitted as COMPATIBLE was refused
+    # THE_SETTLEMENT_RULE_IS_NOT_ESTABLISHED_FOR_A_FUNDED_ACTION. One decision
+    # row carried two settlement verdicts and management read the one that was
+    # never a verdict.
+    #
+    # The funded lifecycle tests did not see it because they seed
+    # `settlement_rule` as an attestation dict -- a shape the real entry lane
+    # does not write.
+    derived = _attestation_from_comparison(cmp_, book_rule=row[
+        "settlement_rule"] if isinstance(row["settlement_rule"], str) else None)
+    settlement_source = None
+    if derived is not None:
+        rule = derived
+        settlement_source = (
+            "settlement_comparison -- the condition-to-payout verdict the "
+            "entry was admitted on")
+    elif isinstance(rule, dict):
+        settlement_source = "settlement_rule (an attestation dict)"
+    else:
+        rule = None
     return dict(out, read=True, settlement_rule=rule,
+                settlement_source=settlement_source,
                 settlement_supplied=bool(rule),
                 event_state_raw=raw_state,
                 event_state=event_state_of(raw_state),

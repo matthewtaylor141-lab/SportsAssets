@@ -581,6 +581,82 @@ async def check_rails(conn, plan: dict, effective: dict, *,
             "every_effective_rail_was_checked": not unmeasured}
 
 
+def _resized(plan: dict, qty: int) -> dict:
+    """The same order at a smaller count: same contract, side and LIMIT."""
+    return dict(plan, quantity=int(qty),
+                collateral_usd=collateral_for(plan["limit_price"], int(qty),
+                                              plan["intent"]),
+                sized_down_from=int(plan.get("sized_down_from")
+                                    or plan["quantity"]))
+
+
+async def fit_to_rails(conn, plan: dict, effective: dict, *, account_id: str,
+                       venue: str) -> dict:
+    """THE LARGEST WHOLE NUMBER OF CONTRACTS EVERY EFFECTIVE RAIL CLEARS.
+
+    Searches the count with `check_rails` itself, so the fit and the gate are
+    one computation and cannot disagree about a rail. Each rail's measurement is
+    existing exposure plus this order's collateral, and collateral grows with
+    the count at a fixed limit price, so "clears" is monotone in the count and a
+    bisection finds the boundary. The result is re-checked rather than assumed.
+
+    Returns `{"ok": False}` -- with the rails that bind at ONE contract -- when
+    not even a single contract fits; the caller's refusal then stands. A rail
+    that cannot be measured is never fitted around: the caller has already
+    refused on that before this is reached.
+    """
+    import math
+
+    want = int(plan["quantity"])
+    out = {"from_quantity": want, "to_quantity": None, "checks": 0,
+           "binding": None}
+
+    async def _check(q):
+        out["checks"] += 1
+        return await check_rails(conn, _resized(plan, q), effective,
+                                 account_id=account_id, venue=venue)
+
+    def _clear(r):
+        return not r.get("over") and not r.get("unmeasured") \
+            and r.get("ok", True)
+
+    if want <= 1:
+        return dict(out, ok=False, why="the order is already one contract")
+    one = await _check(1)
+    if not _clear(one):
+        return dict(out, ok=False, binding=one.get("over"),
+                    why=("not even one contract clears the approved rails: %s"
+                         % "; ".join("%s $%.2f against $%.2f"
+                                     % (o["rail"], o["measured"], o["limit"])
+                                     for o in (one.get("over") or []))))
+    lo, hi = 1, want          # lo clears; `want` is known not to
+    while hi - lo > 1:
+        mid = (lo + hi) // 2
+        if _clear(await _check(mid)):
+            lo = mid
+        else:
+            hi = mid
+    final = await _check(lo)
+    if not _clear(final):
+        # The monotonicity the bisection relies on did not hold. Refuse rather
+        # than send a count the gate has not affirmatively cleared.
+        return dict(out, ok=False,
+                    why=("the fitted count %d did not clear on re-check; the "
+                         "rails are not monotone in the count here, so no "
+                         "fitted size is offered" % lo))
+    above = await _check(lo + 1) if lo + 1 < want else None
+    return dict(out, ok=True, to_quantity=lo, plan=_resized(plan, lo),
+                rails=final,
+                binding=(above or {}).get("over"),
+                why=("sized down from %d to %d contracts, the largest count "
+                     "every approved rail clears at the same limit price"
+                     % (want, lo)),
+                capped_by_approved_limits=True,
+                fraction_of_the_decision=round(lo / float(want), 6)
+                if want else None,
+                )
+
+
 class _BindFailed(Exception):
     """Carries a refusal OUT of the atomic block so the block rolls back.
 
@@ -687,7 +763,8 @@ async def submit_for_decision(conn, rec: dict, *, account_id: str,
                               operation_id: str | None = None,
                               portfolio_group_id: str | None = None,
                               leg_role: str | None = None,
-                              now: float | None = None) -> dict:
+                              now: float | None = None,
+                              size_to_approved_rails: bool = False) -> dict:
     """THE WHOLE PATH, refusing at the first thing that is not established.
 
     ORDER OF OPERATIONS, and it matters: every check that can refuse runs
@@ -769,6 +846,47 @@ async def submit_for_decision(conn, rec: dict, *, account_id: str,
                     unmeasured=rails["unmeasured"],
                     why=("a predeclared rail without a measurement is not a "
                          "cleared rail"))
+    # ── AN ENTRY IS FITTED TO THE APPROVED RAILS, NEVER THE OTHER WAY ──
+    #
+    # THE GAP THIS CLOSES. The quantity came from the SHADOW lane's sizing
+    # policy -- a $1,000 cohort -- and this connector took it verbatim. The
+    # approved limits exist to tighten the frozen rails "to a pilot size", so
+    # at any pilot-scale approval every admitted entry exceeded the per-order
+    # rail and was refused. Measured end to end: an admitted MLB entry sized at
+    # 900 contracts against a $60 per-order limit was refused
+    # THE_ORDER_EXCEEDS_AN_EFFECTIVE_RAIL, and would have been on every cycle,
+    # for a reason that had nothing to do with its economics.
+    #
+    # WHAT CHANGES AND WHAT DOES NOT. The decision is unchanged: the same
+    # contract, the same side, the same LIMIT price. Only the count is reduced,
+    # to the largest integer the REAL `check_rails` clears -- so the fit cannot
+    # disagree with the gate, because it is the gate. A smaller order at the
+    # same limit fills no worse, and its collateral is measured at the limit,
+    # so nothing here loosens a rail. Below one contract nothing fits and the
+    # refusal stands.
+    #
+    # NOT FOR AN ACQUISITION WITH A RESERVATION. That quantity is fixed on the
+    # reservation row, and a resized plan would no longer be the acquisition it
+    # claims -- `plan_matches` refuses exactly that.
+    #
+    # AND ONLY WHEN THE CALLER ASKS. A direct call is a request to send THIS
+    # plan, and an order over a rail refuses and sends nothing -- the owner-side
+    # precondition tests pin exactly that. The scheduled entry path asks
+    # (`size_to_approved_rails=True`) because its count is the shadow cohort's,
+    # not a funded one; the fit is then written onto the intent's decision
+    # reference, so the row that was sent says what it was sized down from.
+    if rails["over"] and operation_id is None and size_to_approved_rails:
+        fitted = await fit_to_rails(
+            conn, plan, eff["effective"], account_id=sel["account_id"],
+            venue=venue)
+        out["sized_to_fit"] = {k: fitted.get(k) for k in
+                               ("ok", "from_quantity", "to_quantity",
+                                "binding", "checks", "why")}
+        if fitted.get("ok"):
+            plan = fitted["plan"]
+            rails = fitted["rails"]
+            out["plan"] = plan
+            out["rails"] = rails
     if rails["over"]:
         return dict(out, ok=False, refusal=R_OVER_RAIL, over=rails["over"],
                     why="; ".join(
@@ -879,6 +997,11 @@ async def submit_for_decision(conn, rec: dict, *, account_id: str,
                           "sized_from": plan["sized_from"],
                           "payout_event": plan.get("payout_event"),
                           "reservation_operation_id": operation_id,
+                          "sized_to_approved_rails": (
+                              {k: out["sized_to_fit"].get(k) for k in
+                               ("from_quantity", "to_quantity", "why")}
+                              if (out.get("sized_to_fit") or {}).get("ok")
+                              else None),
                           "authorization_at": auth.get("authorization",
                                                        {}).get("at")})
 
