@@ -87,7 +87,8 @@ SELECT CASE WHEN to_regclass('bettor_pair_observations') IS NOT NULL THEN
                    ' first=' || min(observed_at)::text ||
                    ' last=' || max(observed_at)::text as line
               from bettor_pair_observations group by label_status, taxonomy) q
-  $q$, false, true, '')))[1]::text AS observations,
+  $q$, false, true, '')))[1]::text END AS observations,
+  CASE WHEN to_regclass('bettor_pair_observation_labels') IS NOT NULL THEN
   (xpath('/row/c/text()', query_to_xml($q$
     select count(*) || ' label versions; newest ' ||
            coalesce(max(recorded_at)::text, 'none') as c
@@ -155,3 +156,73 @@ SELECT account_id, desk_id, status, paused,
        accounting_status, last_verified_at
   FROM bettor_desk_accounts
  ORDER BY account_id;
+
+\echo '== X1 · Xavier: decisions per state, action and eligibility (7 days) =='
+SELECT CASE WHEN to_regclass('bettor_xavier_decisions') IS NOT NULL THEN
+  (xpath('/row/c/text()', query_to_xml($q$
+    select coalesce(string_agg(line, E'\n' order by line), 'none') as c
+      from (select responsibility_state || ' ' || coalesce(chosen_action, '-')
+                   || ' ' || split_part(execution_eligibility, ':', 1) ||
+                   ' n=' || count(*) || ' positions=' ||
+                   count(distinct intent_id) || ' newest=' ||
+                   max(decided_at)::text as line
+              from bettor_xavier_decisions
+             where decided_at > now() - interval '7 days'
+             group by responsibility_state, chosen_action,
+                      split_part(execution_eligibility, ':', 1)) q
+  $q$, false, true, '')))[1]::text END AS xavier_decisions;
+
+\echo '== X2 · Xavier: the newest decision per position (identity, choice, blockers) =='
+SELECT CASE WHEN to_regclass('bettor_xavier_decisions') IS NOT NULL THEN
+  (xpath('/row/c/text()', query_to_xml($q$
+    select coalesce(string_agg(line, E'\n' order by at desc), 'none') as c
+      from (select distinct on (intent_id) decided_at as at,
+                   decided_at::text || ' ' || intent_id || ' ' ||
+                   coalesce(us_market_slug, '-') || ' ' ||
+                   responsibility_state || ' chose=' ||
+                   coalesce(chosen_action, '-') || ' ' ||
+                   execution_eligibility || ' alternatives=' ||
+                   jsonb_array_length(alternatives)::text || ' blocked=' ||
+                   (select count(*) from jsonb_array_elements(alternatives) a
+                     where a ? 'blocker' and a->>'blocker' is not null)::text
+                   || ' next=' || coalesce(next_review_at::text, '-') as line
+              from bettor_xavier_decisions
+             order by intent_id, decided_at desc) q
+  $q$, false, true, '')))[1]::text END AS xavier_positions;
+
+\echo '== X3 · Xavier: execution events by kind (7 days); unresolved claims =='
+SELECT CASE WHEN to_regclass('bettor_xavier_execution_events') IS NOT NULL THEN
+  (xpath('/row/c/text()', query_to_xml($q$
+    select coalesce(string_agg(line, E'\n' order by line), 'none') as c
+      from (select event_kind || ' ' || source || ' n=' || count(*) ||
+                   ' decisions=' || count(distinct xavier_decision_id) as line
+              from bettor_xavier_execution_events
+             where recorded_at > now() - interval '7 days'
+             group by event_kind, source) q
+  $q$, false, true, '')))[1]::text END AS xavier_events,
+  CASE WHEN to_regclass('bettor_xavier_execution_events') IS NOT NULL THEN
+  (xpath('/row/c/text()', query_to_xml($q$
+    select count(*) as c from bettor_xavier_execution_events e
+     where e.event_kind = 'DISPATCH_CLAIMED'
+       and not exists (select 1 from bettor_xavier_execution_events f
+                        where f.xavier_decision_id = e.xavier_decision_id
+                          and f.event_kind in ('NOT_SENT', 'REFUSED',
+                              'TERMINAL', 'CANCELLED', 'RECOVERED'))
+  $q$, false, true, '')))[1]::text END AS claims_without_a_terminal_fact;
+
+\echo '== X4 · Xavier: daily reviews and the heartbeat digest =='
+SELECT CASE WHEN to_regclass('bettor_xavier_reviews') IS NOT NULL THEN
+  (xpath('/row/c/text()', query_to_xml($q$
+    select coalesce(string_agg(line, E'\n' order by line desc), 'none') as c
+      from (select review_date::text || ' reviewed=' ||
+                   decisions_reviewed::text || ' with_outcomes=' ||
+                   decisions_with_outcomes::text || ' invalidated=' ||
+                   jsonb_array_length(coalesce(invalidated, '[]'::jsonb))::text
+                   || ' ' || left(coalesce(summary, ''), 160) as line
+              from bettor_xavier_reviews
+             order by review_date desc limit 7) q
+  $q$, false, true, '')))[1]::text END AS xavier_reviews,
+  (SELECT value->'xavier_review' FROM ingestion_state
+    WHERE key = 'ext_pinnacle_last_cycle')          AS xavier_review_digest,
+  (SELECT value->'funded_servicing' FROM ingestion_state
+    WHERE key = 'ext_pinnacle_last_cycle')          AS funded_servicing_digest;
