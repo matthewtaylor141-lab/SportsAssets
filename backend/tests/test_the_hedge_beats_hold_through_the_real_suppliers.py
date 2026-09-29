@@ -323,7 +323,8 @@ async def _promote_a_model(conn):
     return prom
 
 
-async def _run_pass(conn, *, hedge_price, exit_price, adapter):
+async def _run_pass(conn, *, hedge_price, exit_price, adapter,
+                    intent_id=None):
     """ONE SCHEDULED PASS with the REAL supplier bound, as production binds it.
 
     `hedge_price` moves the candidate's cost; `exit_price` moves the deferred
@@ -332,7 +333,11 @@ async def _run_pass(conn, *, hedge_price, exit_price, adapter):
     """
     import functools
 
-    iid = await _held(conn)
+    # A RESTART RE-RUNS THE PASS, NOT THE POSITION. Passing an existing intent
+    # id is what makes the restart case a restart: re-recording the intent is
+    # refused ANOTHER_FUNDED_INTENT_IS_ALREADY_LIVE, which is the funded book
+    # doing its job, not the behaviour under test.
+    iid = intent_id or await _held(conn)
     deferred = {iid: {
         "intent_id": iid, "selected": PC.ACTION_DIRECT_EXIT,
         "selected_qty": 10.0, "limit_price": exit_price,
@@ -402,7 +407,8 @@ def _depth(prices, d):
     return _quoter({k: (v[0], d) for k, v in prices.items()})
 
 
-async def _pass_at_depth(conn, depth, *, hedge_price=0.30, exit_price=0.50):
+async def _pass_at_depth(conn, depth, *, hedge_price=0.30, exit_price=0.50,
+                         intent_id=None, adapter=None):
     """One pass with every candidate's displayed depth set to `depth`."""
     import sportsassets  # noqa: F401  (keeps the import graph honest)
     global _quoter
@@ -411,7 +417,9 @@ async def _pass_at_depth(conn, depth, *, hedge_price=0.30, exit_price=0.50):
         _quoter = lambda pr, _d=depth: real(                      # noqa: E731
             {k: (v[0], _d) for k, v in pr.items()})
         return await _run_pass(conn, hedge_price=hedge_price,
-                               exit_price=exit_price, adapter=_Adapter())
+                               exit_price=exit_price,
+                               adapter=adapter or _Adapter(),
+                               intent_id=intent_id)
     finally:
         _quoter = real
 
@@ -586,3 +594,118 @@ async def test_missing_hedge_evidence_leaves_the_pass_running_and_names_it():
         assert (disc.get("examined") or 0) == 0 or not disc.get("ok"), disc
         assert adapter.sent == []
         assert step.get("refusal") or step.get("why_nothing_was_sent"), step
+
+
+# ═════════════════════════════════════════════════════════════════════
+# 3 · RESTART AND DUPLICATE DELIVERY, WITH THE SUPPLIERS LIVE
+# ═════════════════════════════════════════════════════════════════════
+
+async def _counts(conn):
+    """Everything a duplicate could duplicate, counted from the book itself."""
+    out = {}
+    out["intents"] = await conn.fetchval(
+        "SELECT count(*) FROM bettor_funded_intents WHERE account_id=$1", ACCT)
+    out["fills"] = await conn.fetchval(
+        "SELECT count(*) FROM bettor_funded_fills WHERE intent_id IN ("
+        " SELECT intent_id FROM bettor_funded_intents WHERE account_id=$1)",
+        ACCT)
+    # `residual_qty`, not `filled_qty`: the intents table carries what is
+    # STILL HELD, and the filled total lives in the fills. Both are counted,
+    # because a duplicate could inflate either one.
+    out["residual_qty"] = float(await conn.fetchval(
+        "SELECT coalesce(sum(residual_qty),0) FROM bettor_funded_intents"
+        " WHERE account_id=$1", ACCT) or 0)
+    out["fill_qty_total"] = float(await conn.fetchval(
+        "SELECT coalesce(sum(qty),0) FROM bettor_funded_fills WHERE intent_id"
+        " IN (SELECT intent_id FROM bettor_funded_intents WHERE account_id=$1)",
+        ACCT) or 0)
+    out["collateral"] = float(await conn.fetchval(
+        "SELECT coalesce(sum(collateral_usd),0) FROM bettor_funded_intents"
+        " WHERE account_id=$1", ACCT) or 0)
+    if await _has(conn, "bettor_funded_decisions"):
+        out["decisions"] = await conn.fetchval(
+            "SELECT count(*) FROM bettor_funded_decisions WHERE account_id=$1",
+            ACCT)
+    if await _has(conn, "bettor_funded_economics"):
+        out["fees"] = float(await conn.fetchval(
+            "SELECT coalesce(sum(amount_usd),0) FROM bettor_funded_economics"
+            " WHERE kind LIKE '%FEE%' AND intent_id IN ("
+            " SELECT intent_id FROM bettor_funded_intents WHERE account_id=$1)",
+            ACCT) or 0)
+    return out
+
+
+async def test_a_restart_of_the_pass_duplicates_no_order_inventory_or_fee():
+    """RESTART. The same scheduled pass runs twice over the same position with
+    the suppliers live, as it would after a worker restart.
+
+    Nothing about the second pass may create a second order, a second holding,
+    a second decision for the same decision id, or a second fee. The counts are
+    taken from the BOOK rather than from the pass's own report, because a pass
+    that believed it had done nothing while the book gained a row is exactly the
+    failure this guards.
+    """
+    async with _conn() as conn:
+        if not await _has(conn, "bettor_funded_decisions"):
+            pytest.skip("migration 132 is not in this database")
+        await _clean(conn)
+        await _catalogue(conn)
+        adapter = _Adapter()
+        iid = await _held(conn)
+        first = await _pass_at_depth(conn, 500, intent_id=iid,
+                                     adapter=adapter)
+        after_first = await _counts(conn)
+        # THE SAME PASS AGAIN OVER THE SAME POSITION, no cleanup between and a
+        # FRESH adapter as a restarted worker would have: this is the restart.
+        second = await _pass_at_depth(conn, 500, intent_id=iid,
+                                      adapter=adapter)
+        after_second = await _counts(conn)
+        assert first["pass"]["ok"] is True and second["pass"]["ok"] is True
+        for key in ("intents", "fills", "residual_qty", "fill_qty_total",
+                    "collateral", "decisions", "fees"):
+            if key in after_first:
+                assert after_second[key] == after_first[key], (
+                    "the second pass changed %s from %r to %r -- a restart "
+                    "duplicated something"
+                    % (key, after_first[key], after_second[key]))
+        # AND NO ORDER LEFT EITHER PASS.
+        assert adapter.sent == []
+
+
+async def test_the_same_fill_delivered_twice_is_recorded_once():
+    """DUPLICATE DELIVERY, through the real ingestion path.
+
+    `ingest_fills` is given the SAME `venue_fill_id` twice. The venue redelivers;
+    the book must not. Inventory, collateral and the fill count all stay put,
+    and the second call reports what it ignored rather than silently succeeding.
+    """
+    async with _conn() as conn:
+        await _clean(conn)
+        await _catalogue(conn)
+        iid = await _held(conn)                 # one fill, vf-held
+        before = await _counts(conn)
+        again = await FB.ingest_fills(conn, iid, [
+            {"qty": 10.0, "price": 0.55, "venue_fill_id": "vf-held"}])
+        after = await _counts(conn)
+        assert after["fills"] == before["fills"], (before, after, again)
+        assert after["residual_qty"] == before["residual_qty"]
+        assert after["fill_qty_total"] == before["fill_qty_total"]
+        assert after["collateral"] == before["collateral"]
+        if "fees" in before:
+            assert after["fees"] == before["fees"], (
+                "a redelivered fill charged a second fee")
+
+
+async def test_a_second_distinct_fill_is_recorded_and_is_not_a_duplicate():
+    """THE CONTROL. Deduplication that rejected everything would pass the test
+    above and be useless, so a genuinely NEW fill id must still be recorded."""
+    async with _conn() as conn:
+        await _clean(conn)
+        await _catalogue(conn)
+        iid = await _held(conn, qty=10)
+        before = await _counts(conn)
+        got = await FB.ingest_fills(conn, iid, [
+            {"qty": 2.0, "price": 0.55, "venue_fill_id": "vf-held-SECOND"}])
+        after = await _counts(conn)
+        assert after["fills"] == before["fills"] + 1, (before, after, got)
+        assert after["fill_qty_total"] > before["fill_qty_total"]
