@@ -33,9 +33,12 @@ eligibility, not an authorization, not an evidence requirement. Two tests at the
 bottom assert that, because it is the property that makes the rest safe.
 """
 
-import os
+import asyncio
 import contextlib
 import datetime as _dt
+import json
+import os
+import time
 
 import asyncpg
 import pytest
@@ -99,7 +102,8 @@ async def _clean(conn):
             "DELETE FROM bettor_funded_decisions WHERE account_id=$1", ACCT)
     if await _has(conn, "bettor_funded_models"):
         await conn.execute("DELETE FROM bettor_funded_models "
-                           "WHERE model_id LIKE 'learnpath-%'")
+                           "WHERE model_id LIKE 'learnpath-%' "
+                           "   OR model_id LIKE 'fmc:%'")
     await conn.execute(
         "DELETE FROM bettor_funded_fills WHERE intent_id IN ("
         " SELECT intent_id FROM bettor_funded_intents WHERE account_id=$1)",
@@ -256,15 +260,20 @@ async def _group(conn, *, gid, primary_pays, hedge_pays, decided_at,
         return {"ok": False, "refusal": rec.get("refusal"), "stage": "decision"}
 
     # THEN THE VENUE SETTLES, through the real consumer.
+    settled_at = decided_at.timestamp() + 3600.0
     for iid, pays in legs:
         await FM.reconcile_settlement(
             conn, intent_id=iid, client=object(),
             probe=_probe_for(None if unresolved else pays),
-            now=(decided_at.timestamp() + 3600.0))
+            now=settled_at)
+    # THE OUTCOME BECAME KNOWN AT `settled_at`: the consumer writes the instant
+    # it read the venue (`now`) into `settlement.at`, and that -- not the row's
+    # `closed_at` -- is what the label query reads as availability.
     return {"ok": True, "decision_id": did, "group_id": group_id}
 
 
-async def _cohort(conn, *, n=N_GROUPS, skill=True, prefix="lp", base=100):
+async def _cohort(conn, *, n=N_GROUPS, skill=True, prefix="lp", base=100,
+                  step=1):
     """A COHORT OF RESOLVED TWO-LEG GROUPS.
 
     `skill=True` makes the label CORRELATED with the recorded feature, so a fit
@@ -284,7 +293,7 @@ async def _cohort(conn, *, n=N_GROUPS, skill=True, prefix="lp", base=100):
             # BOTH legs pay only in the both-win case; otherwise the hedge
             # leg's payout is zero and `bool_and(payout > 0)` is false.
             hedge_pays=(1.0 if both else 0.0),
-            decided_at=_at(base + i), p_middle=p)
+            decided_at=_at(base + i * step), p_middle=p)
         if not got.get("ok"):
             return {"ok": False, "at": i, **got}
         made.append(got)
@@ -356,36 +365,48 @@ async def test_the_prospective_filter_excludes_anything_the_fit_could_see():
 # ═════════════════════════════════════════════════════════════════════
 
 #: WHERE THE TRAINING COHORT SITS: a day before the fit window closes, so every
-#: training decision is inside it and every evaluation decision is after it.
+#: training decision -- and its outcome, an hour later -- is inside it.
 TRAIN_BASE_S = -86400
 
 
-async def _run_pipeline(conn, *, model_id, skill):
-    """FIT ON ONE COHORT, SCORE ON ANOTHER.
+def _after_freeze_s():
+    """An offset from FIT_THROUGH that lands an hour after NOW.
 
-    THIS USED TO FIT ON THE EVALUATION ROWS. It read `labelled(after=
-    FIT_THROUGH)` -- the rows decided after the window -- fitted on them,
-    declared `fit_through=FIT_THROUGH`, and then evaluated on the same rows,
-    which the leak check scored PROSPECTIVE because it compares evaluation rows
-    with the DECLARED window. `register` now checks that window against the
-    fit's own rows and refuses that registration, so the training cohort here
-    is a separate set of fixtures decided inside the window.
+    PROSPECTIVE evidence is predictions on decisions made after the model was
+    frozen, and a model registered in this test is frozen at the wall clock.
+    So the evaluation cohort is decided after it: in a test, that is the
+    future. Decisions between FIT_THROUGH and now are RETROSPECTIVE
+    out-of-sample evidence, and the pipeline keeps the two apart.
+    """
+    return int(time.time() - FIT_THROUGH.timestamp()) + 3600
+
+
+async def _run_pipeline(conn, *, model_id, skill, n_eval=N_GROUPS):
+    """FIT ON ONE COHORT, FREEZE, THEN SCORE ON DECISIONS MADE AFTERWARDS.
+
+    THIS USED TO FIT ON THE EVALUATION ROWS, and before that to call rows
+    decided after the fit cutoff "prospective" even though the model was chosen
+    after they happened. Now: a training cohort decided and resolved inside the
+    window, a fit from those RECORDS, a registration (the freeze), and only
+    then an evaluation cohort decided after it.
     """
     train = await _cohort(conn, skill=skill, prefix="lt", base=TRAIN_BASE_S)
     assert train.get("ok"), train
-    coh = await _cohort(conn, skill=skill)
-    assert coh.get("ok"), coh
-    tr = await FMD.labelled(conn, through=FIT_THROUGH, account_id=ACCT)
-    assert tr["ok"] and tr["n"] >= FMD.MIN_EVALUATION_ROWS, tr
-    lab = await FMD.labelled(conn, after=FIT_THROUGH, account_id=ACCT)
-    assert lab["ok"] and lab["n"] >= FMD.MIN_EVALUATION_ROWS, lab
-    assert not set(tr["fixtures"]) & set(lab["fixtures"])
-    fitted = FMD.fit(tr["rows"], tr["labels"], decided_at=tr["decided_at"])
+    tr = await FMD.labelled(conn, through=FIT_THROUGH,
+                            outcomes_through=FIT_THROUGH, account_id=ACCT)
+    assert tr["ok"] and tr["n_events"] >= FMD.MIN_TRAIN_EVENTS, tr
+    fitted = await FMD.fit_from_records(conn, through=FIT_THROUGH,
+                                        account_id=ACCT)
     assert fitted.get("ok"), fitted
+    assert fitted["training_provenance"]["n_events"] == tr["n_events"]
     reg = await FMD.register(conn, model_id=model_id,
                              model_version="v-" + model_id, fitted=fitted,
                              fit_through=FIT_THROUGH)
     assert reg.get("ok"), reg
+    coh = await _cohort(conn, skill=skill, n=n_eval, base=_after_freeze_s())
+    assert coh.get("ok"), coh
+    lab = await FMD.labelled(conn, after=FIT_THROUGH, account_id=ACCT)
+    assert not set(tr["fixtures"]) & set(lab["fixtures"])
     ev = await FMD.evaluate(conn, model_id=model_id, account_id=ACCT)
     prom = await FMD.promote(conn, model_id=model_id,
                              approved_by="integration-test")
@@ -405,13 +426,15 @@ async def test_a_candidate_with_skill_is_promoted_and_then_predicts():
         got = await _run_pipeline(conn, model_id="learnpath-skill", skill=True)
         ev, prom = got["evaluation"], got["promotion"]
         assert ev.get("ok"), ev
-        assert ev["n"] >= FMD.MIN_EVALUATION_ROWS, ev
-        # `prospective` lives inside the recorded `evaluation` report, which is
-        # the same jsonb `promote` re-reads off the model row.
-        pros = (ev.get("evaluation") or {}).get("prospective") or {}
-        assert pros.get("verdict") == "PROSPECTIVE", ev
-        assert pros["rows_the_fit_could_have_seen"] == 0, pros
+        assert ev["n_events"] >= FMD.MIN_EVALUATION_EVENTS, ev
+        doc = ev["evaluation"]
+        assert doc[FMD.EVIDENCE_PROSPECTIVE]["evidence_kind"] == "PROSPECTIVE"
+        assert doc["contamination"]["rows_the_fit_could_have_seen"] == 0
         assert prom.get("ok"), prom
+        cmp_ = prom["comparison"]
+        assert cmp_["evidence_kind"] == "PROSPECTIVE"
+        assert cmp_["weighting"] == FMD.WEIGHTING_EVENT_BALANCED
+        assert cmp_["n_events"] == N_GROUPS
         # AND THE REGISTRY NOW ANSWERS.
         appr = await FMD.approved(conn, model_key=FMD.KEY_MIDDLE)
         assert appr.get("ok"), appr
@@ -446,25 +469,13 @@ async def test_too_few_labels_refuses_even_with_a_good_fit():
             if not await _has(conn, t):
                 pytest.skip("%s is not in this database" % t)
         await _clean(conn)
-        train = await _cohort(conn, n=6, skill=True, prefix="lt",
-                              base=TRAIN_BASE_S)
-        assert train.get("ok"), train
-        coh = await _cohort(conn, n=6, skill=True)
-        assert coh.get("ok"), coh
-        lab = await FMD.labelled(conn, after=FIT_THROUGH, account_id=ACCT)
-        assert 0 < lab["n"] < FMD.MIN_EVALUATION_ROWS
-        tr = await FMD.labelled(conn, through=FIT_THROUGH, account_id=ACCT)
-        fitted = FMD.fit(tr["rows"], tr["labels"], decided_at=tr["decided_at"])
-        await FMD.register(conn, model_id="learnpath-thin",
-                           model_version="v-thin", fitted=fitted,
-                           fit_through=FIT_THROUGH)
-        await FMD.evaluate(conn, model_id="learnpath-thin", account_id=ACCT)
-        prom = await FMD.promote(conn, model_id="learnpath-thin",
-                                 approved_by="integration-test")
+        got = await _run_pipeline(conn, model_id="learnpath-thin", skill=True,
+                                  n_eval=6)
+        assert 0 < got["labels"]["n_events"] < FMD.MIN_EVALUATION_EVENTS
+        assert got["evaluation"]["refusal"] == FMD.R_TOO_FEW_LABELS
+        prom = got["promotion"]
         assert prom.get("ok") is False
-        assert prom.get("refusal") in (FMD.R_TOO_FEW_LABELS,
-                                       FMD.R_NOT_EVALUATED,
-                                       FMD.R_EVALUATION_NOT_PROSPECTIVE)
+        assert prom.get("refusal") == FMD.R_TOO_FEW_LABELS, prom
 
 
 async def test_an_approval_with_no_approver_is_refused():
@@ -663,11 +674,16 @@ async def test_a_fixture_the_fit_could_see_is_held_out_whole():
         assert reg["ok"], reg
         ev = await FMD.evaluate(conn, model_id="learnpath-holdout",
                                 account_id=ACCT)
-        assert ev["fixtures_held_out_because_the_fit_could_see_them"] == \
+        doc = ev["evaluation"]
+        assert doc["fixtures_held_out_because_the_fit_could_see_them"] == \
             ["lt000"], ev
-        # 4 evaluation fixtures, 7 rows: the three repeats are rows, not events
-        assert ev["n_events"] == 4, ev
-        assert ev["n"] == 7, ev
+        # 4 evaluation fixtures, 7 rows: the three repeats are rows, not events.
+        # All were decided after the cutoff and before the freeze, so they are
+        # RETROSPECTIVE out-of-sample, not prospective.
+        retro = doc[FMD.EVIDENCE_RETROSPECTIVE]
+        assert retro["n_events"] == 4 and retro["n"] == 7, retro
+        assert retro["evidence_kind"] == "RETROSPECTIVE_OUT_OF_SAMPLE"
+        assert doc[FMD.EVIDENCE_PROSPECTIVE]["n_events"] == 0
         assert ev["refusal"] == FMD.R_TOO_FEW_LABELS
 
 
@@ -690,15 +706,15 @@ async def test_the_schedule_joins_outcomes_and_scores_candidates_but_never_promo
         train = await _cohort(conn, skill=True, prefix="lt",
                               base=TRAIN_BASE_S)
         assert train.get("ok"), train
-        coh = await _cohort(conn, skill=True)
-        assert coh.get("ok"), coh
-        tr = await FMD.labelled(conn, through=FIT_THROUGH, account_id=ACCT)
         reg = await FMD.register(
             conn, model_id="learnpath-scheduled", model_version="v-sched",
-            fitted=FMD.fit(tr["rows"], tr["labels"],
-                           decided_at=tr["decided_at"]),
+            fitted=await FMD.fit_from_records(conn, through=FIT_THROUGH,
+                                              account_id=ACCT),
             fit_through=FIT_THROUGH)
         assert reg["ok"], reg
+        # THE EVALUATION COHORT IS DECIDED AFTER THE FREEZE
+        coh = await _cohort(conn, skill=True, base=_after_freeze_s())
+        assert coh.get("ok"), coh
         before = await conn.fetchval(
             "SELECT count(*) FROM bettor_funded_decisions "
             " WHERE account_id=$1 AND NOT realised_known", ACCT)
@@ -707,6 +723,11 @@ async def test_the_schedule_joins_outcomes_and_scores_candidates_but_never_promo
         got = await PC.scheduled_learning_pass(conn, account_id=ACCT)
         assert got["ok"], got
         assert got["promoted_anything"] is False
+        # THE GENERATOR FIT NOTHING: the evaluation cohort resolves after now,
+        # so the resolved set is still the 46 the owner's fit already covers.
+        gen = got["generate"]
+        assert gen["ok"] and gen["generated"] is False, gen
+        assert gen["reason"] == "NOT_ENOUGH_NEW_EVENTS", gen
         join = got["join"]
         assert len(join["joined"]) == 2 * N_GROUPS, join
         assert join["refused"] == [] and join["waiting_for_the_position"] == []
@@ -721,7 +742,9 @@ async def test_the_schedule_joins_outcomes_and_scores_candidates_but_never_promo
         scored = {c["model_id"]: c for c in got["evaluate"]["scored"]}
         mine = scored["learnpath-scheduled"]
         assert mine["ok"] is True, mine
-        assert mine["prospective"] == "PROSPECTIVE"
+        assert mine["prospective_events"] == N_GROUPS
+        assert mine["retrospective_out_of_sample_events"] == 0
+        assert mine["weighting"] == FMD.WEIGHTING_EVENT_BALANCED
         assert mine["awaiting"]
         # STILL A CANDIDATE: the schedule scored it and approved nothing
         assert (await FMD.approved(conn, model_key=FMD.KEY_MIDDLE))[
@@ -730,9 +753,417 @@ async def test_the_schedule_joins_outcomes_and_scores_candidates_but_never_promo
         prom = await FMD.promote(conn, model_id="learnpath-scheduled",
                                  approved_by="owner@test")
         assert prom["ok"], prom
-        # AND A SECOND PASS JOINS NOTHING TWICE AND PROMOTES NOTHING
+        # AND A SECOND PASS JOINS NOTHING TWICE, FITS NOTHING NEW AND
+        # PROMOTES NOTHING
         again = await PC.scheduled_learning_pass(conn, account_id=ACCT)
         assert again["join"]["joined"] == []
         assert again["promoted_anything"] is False
+        assert again["generate"]["generated"] is False
+        assert again["generate"]["reason"] == "NOT_ENOUGH_NEW_EVENTS"
+        assert await conn.fetchval(
+            "SELECT count(*) FROM bettor_funded_models "
+            " WHERE model_id LIKE 'fmc:%'") == 0
         appr = await FMD.approved(conn, model_key=FMD.KEY_MIDDLE)
         assert appr["model"]["model_id"] == "learnpath-scheduled"
+
+
+# ═════════════════════════════════════════════════════════════════════
+# 6 · WINDOWS DECLARED BEFORE FITTING, AND GENERATION THAT IS IDEMPOTENT
+# ═════════════════════════════════════════════════════════════════════
+
+async def _fmc_count(conn):
+    return await conn.fetchval("SELECT count(*) FROM bettor_funded_models "
+                               " WHERE model_id LIKE 'fmc:%'")
+
+
+async def test_when_training_takes_every_fixture_the_plan_says_no_cohort_remains():
+    """TOO FEW RESOLVED FIXTURES TO HOLD ANY OUT. The plan is made before the
+    fit and says so; the only evidence the model can ever have is prospective.
+    And two passes racing on the same ledger register ONE candidate."""
+    from sportsassets import bettor_funded_pair_cycle as PC  # noqa: F401
+
+    async with _conn() as conn, _conn() as other:
+        for t in ("bettor_funded_decisions", "bettor_funded_models"):
+            if not await _has(conn, t):
+                pytest.skip("%s is not in this database" % t)
+        await _clean(conn)
+        coh = await _cohort(conn, n=50, prefix="lg", base=TRAIN_BASE_S)
+        assert coh.get("ok"), coh
+        now = time.time()
+        # CONCURRENT PASSES on two connections, the same ledger, the same clock
+        a, b = await asyncio.gather(
+            FMD.generate_candidate(conn, now=now, account_id=ACCT),
+            FMD.generate_candidate(other, now=now, account_id=ACCT))
+        assert a["ok"] and b["ok"], (a, b)
+        # ONE REGISTRATION; THE OTHER PASS WAITED FOR IT AND NAMES IT
+        first, second = (a, b) if a["generated"] else (b, a)
+        assert first["generated"] is True, (a, b)
+        assert second["generated"] is False, (a, b)
+        assert second["reason"] == "NOT_ENOUGH_NEW_EVENTS", second
+        assert second["last_fit"]["model_id"] == first["model_id"]
+        assert await _fmc_count(conn) == 1
+        a = first
+        win = a["windows"]
+        assert win["declared_before_fitting"] is True
+        assert win["retrospective_holdout"]["fixtures_planned"] == 0
+        assert win["retrospective_holdout"]["why"] == FMD.NO_INDEPENDENT_COHORT
+        assert win["training_cutoff_epoch_s"] == pytest.approx(now)
+        row = await conn.fetchrow("SELECT * FROM bettor_funded_models "
+                                  " WHERE model_id=$1", a["model_id"])
+        assert row["state"] == "CANDIDATE"
+        prov = json.loads(row["training_provenance"]) \
+            if isinstance(row["training_provenance"], str) \
+            else row["training_provenance"]
+        assert prov["windows"]["retrospective_holdout"]["fixtures_planned"] == 0
+        assert prov["n_events"] == 50
+        # EVALUATED NOW, IT HAS NO INDEPENDENT EVIDENCE, AND SAYS WHY
+        ev = await FMD.evaluate(conn, model_id=a["model_id"], account_id=ACCT)
+        retro = ev["evaluation"][FMD.EVIDENCE_RETROSPECTIVE]
+        assert retro["n_events"] == 0
+        assert retro["why"] == FMD.NO_INDEPENDENT_COHORT
+        assert ev["evaluation"][FMD.EVIDENCE_PROSPECTIVE]["n_events"] == 0
+        # A RESTARTED PASS ON THE SAME LEDGER FITS NOTHING
+        again = await FMD.generate_candidate(conn, now=time.time(),
+                                             account_id=ACCT)
+        assert again["reason"] == "NOT_ENOUGH_NEW_EVENTS", again
+        assert await _fmc_count(conn) == 1
+        assert (await FMD.approved(conn))["ok"] is False
+
+
+async def test_with_enough_fixtures_the_latest_are_a_retrospective_holdout():
+    """ENOUGH TO HOLD OUT. The latest MIN_EVALUATION_EVENTS fixtures become a
+    RETROSPECTIVE out-of-sample cohort, the training cutoff for decisions AND
+    labels is set before them, and the model can be scored on them at once --
+    as retrospective evidence, which is not what promotion reads."""
+    async with _conn() as conn:
+        for t in ("bettor_funded_decisions", "bettor_funded_models"):
+            if not await _has(conn, t):
+                pytest.skip("%s is not in this database" % t)
+        await _clean(conn)
+        # two hours apart, each settled an hour after its decision, so every
+        # outcome is known before the next fixture is decided
+        coh = await _cohort(conn, n=90, prefix="lh", base=-86400 * 12,
+                            step=7200)
+        assert coh.get("ok"), coh
+        gen = await FMD.generate_candidate(conn, now=time.time(),
+                                           account_id=ACCT)
+        assert gen["ok"] and gen["generated"], gen
+        win = gen["windows"]
+        assert win["retrospective_holdout"]["fixtures_planned"] == \
+            FMD.MIN_EVALUATION_EVENTS
+        assert win["training_fixtures_planned"] == 90 - FMD.MIN_EVALUATION_EVENTS
+        assert gen["n_events"] == 90 - FMD.MIN_EVALUATION_EVENTS
+        ev = await FMD.evaluate(conn, model_id=gen["model_id"], account_id=ACCT)
+        doc = ev["evaluation"]
+        retro = doc[FMD.EVIDENCE_RETROSPECTIVE]
+        assert retro["n_events"] == FMD.MIN_EVALUATION_EVENTS, retro
+        assert retro["evidence_kind"] == "RETROSPECTIVE_OUT_OF_SAMPLE"
+        assert retro["report"] is not None
+        assert doc[FMD.EVIDENCE_PROSPECTIVE]["n_events"] == 0
+        assert ev["ok"] is False and ev["refusal"] == FMD.R_TOO_FEW_LABELS
+        prom = await FMD.promote(conn, model_id=gen["model_id"],
+                                 approved_by="owner@test")
+        assert prom["ok"] is False
+        assert prom["refusal"] == FMD.R_TOO_FEW_LABELS
+        assert prom["comparison"]["evidence_kind"] == "PROSPECTIVE"
+        # TEN MORE RESOLVED FIXTURES: a new training set, a new id
+        more = await _cohort(conn, n=10, prefix="li", base=-86400 * 2,
+                             step=3 * 3600)
+        assert more.get("ok"), more
+        nxt = await FMD.generate_candidate(conn, now=time.time(),
+                                           account_id=ACCT)
+        assert nxt["generated"] is True, nxt
+        assert nxt["model_id"] != gen["model_id"]
+        assert await _fmc_count(conn) == 2
+
+
+# ═════════════════════════════════════════════════════════════════════
+# 7 · REPEATED DECISIONS ON ONE FIXTURE MANUFACTURE NOTHING
+# ═════════════════════════════════════════════════════════════════════
+
+async def _repeat_decision(conn, *, decision_id, times, first_at):
+    """`times` more decisions on the fixture of `decision_id`, identical
+    vector, same group -- what a held position produces cycle after cycle."""
+    d = await conn.fetchrow("SELECT * FROM bettor_funded_decisions "
+                            " WHERE decision_id=$1", decision_id)
+    feats = d["features"]
+    feats = json.loads(feats) if isinstance(feats, str) else feats
+    for k in range(times):
+        rec = await FL.record_decision(
+            conn, decision_id="%s-rep%04d" % (decision_id, k),
+            account_id=ACCT, venue=VENUE, fixture=d["fixture"], action="HOLD",
+            decided_at=first_at + k * 0.001, group_id=d["group_id"],
+            worst_case_usd=-1.0, model_key=FMD.KEY_MIDDLE,
+            model_version="baseline-0", features=feats,
+            feature_sha=FMD.feature_sha(feats), predicted={"p_middle": 0.5})
+        assert rec.get("ok"), rec
+
+
+async def test_repeating_one_fixture_cannot_manufacture_promotion_evidence():
+    """REPRODUCED BY INDEPENDENT REVIEW: the same forty fixtures scored 3.30946
+    one decision each and 0.16026 with the one successful fixture repeated
+    1,000 times, and the second was promoted. Here: a model that is wrong on 39
+    of 40 prospective fixtures is refused; repeating the one it gets right
+    1,000 times moves the decision-weighted figure and nothing that promotion
+    reads."""
+    async with _conn() as conn:
+        for t in ("bettor_funded_decisions", "bettor_funded_models"):
+            if not await _has(conn, t):
+                pytest.skip("%s is not in this database" % t)
+        await _clean(conn)
+        train = await _cohort(conn, skill=True, prefix="lt", base=TRAIN_BASE_S)
+        assert train.get("ok"), train
+        reg = await FMD.register(
+            conn, model_id="learnpath-rep", model_version="v-rep",
+            fitted=await FMD.fit_from_records(conn, through=FIT_THROUGH,
+                                              account_id=ACCT),
+            fit_through=FIT_THROUGH)
+        assert reg["ok"], reg
+        base = _after_freeze_s()
+        right = None
+        for i in range(40):
+            p = 0.1 + 0.8 * (i % 9) / 8.0
+            truth = _width_for(p) >= 3
+            # WRONG ON EVERY FIXTURE BUT THE FIRST: the label is inverted
+            label = truth if i == 0 else (not truth)
+            got = await _group(conn, gid="lq%03d" % i, primary_pays=1.0,
+                               hedge_pays=(1.0 if label else 0.0),
+                               decided_at=_at(base + i), p_middle=p)
+            assert got.get("ok"), got
+            if i == 0:
+                right = got["decision_id"]
+        ev1 = await FMD.evaluate(conn, model_id="learnpath-rep",
+                                 account_id=ACCT)
+        p1 = await FMD.promote(conn, model_id="learnpath-rep",
+                               approved_by="owner@test")
+        assert p1["ok"] is False and p1["refusal"] == FMD.R_NO_SKILL, p1
+        # THE ONE CORRECT FIXTURE, DECIDED 1,000 MORE TIMES
+        await _repeat_decision(conn, decision_id=right, times=1000,
+                               first_at=_at(base + 100).timestamp())
+        ev2 = await FMD.evaluate(conn, model_id="learnpath-rep",
+                                 account_id=ACCT)
+        p2 = await FMD.promote(conn, model_id="learnpath-rep",
+                               approved_by="owner@test")
+        pr1 = ev1["evaluation"][FMD.EVIDENCE_PROSPECTIVE]
+        pr2 = ev2["evaluation"][FMD.EVIDENCE_PROSPECTIVE]
+        assert pr1["n_events"] == pr2["n_events"] == 40
+        assert pr2["n"] == pr1["n"] + 1000
+        # THE DECISION-WEIGHTED FIGURE IS WHAT REPETITION WOULD HAVE BOUGHT...
+        dw1 = pr1["report"]["decision_weighted_for_reference_only"]["log_loss"]
+        dw2 = pr2["report"]["decision_weighted_for_reference_only"]["log_loss"]
+        assert dw2 < dw1 / 4, (dw1, dw2)
+        # ...AND THE EVENT-BALANCED ONE, THE ONLY ONE PROMOTION READS, DID NOT
+        assert pr2["log_loss"] == pytest.approx(pr1["log_loss"], abs=1e-9)
+        assert p2["ok"] is False and p2["refusal"] == FMD.R_NO_SKILL, p2
+        assert p2["comparison"]["candidate"] == pytest.approx(
+            p1["comparison"]["candidate"], abs=1e-9)
+        assert p2["comparison"]["against"] == pytest.approx(
+            p1["comparison"]["against"], abs=1e-9)
+        assert (await FMD.approved(conn))["ok"] is False
+
+
+async def test_training_is_event_balanced_too():
+    """A FIXTURE DECIDED ON MANY CYCLES COUNTS ONCE IN THE FIT. The same
+    forty fixtures, with one of them repeated 999 times inside the training
+    window, produce the same model."""
+    async with _conn() as conn:
+        for t in ("bettor_funded_decisions", "bettor_funded_models"):
+            if not await _has(conn, t):
+                pytest.skip("%s is not in this database" % t)
+        await _clean(conn)
+        train = await _cohort(conn, n=40, skill=True, prefix="lt",
+                              base=TRAIN_BASE_S - 86400)
+        assert train.get("ok"), train
+        a = await FMD.fit_from_records(conn, through=FIT_THROUGH,
+                                       account_id=ACCT)
+        await _repeat_decision(conn, decision_id=train["groups"][0]
+                               ["decision_id"], times=999,
+                               first_at=_at(TRAIN_BASE_S).timestamp())
+        b = await FMD.fit_from_records(conn, through=FIT_THROUGH,
+                                       account_id=ACCT)
+        assert a["ok"] and b["ok"]
+        assert a["n_events"] == b["n_events"] == 40
+        assert b["training_provenance"]["n_rows"] == \
+            a["training_provenance"]["n_rows"] + 999
+        assert b["train_base_rate"] == pytest.approx(a["train_base_rate"],
+                                                     abs=1e-9)
+        ma, mb = FMD.load(a["params"]), FMD.load(b["params"])
+        for r in train["groups"]:
+            d = await conn.fetchval("SELECT features FROM bettor_funded_decisions"
+                                    " WHERE decision_id=$1", r["decision_id"])
+            d = json.loads(d) if isinstance(d, str) else d
+            assert mb.predict(d) == pytest.approx(ma.predict(d), abs=1e-6)
+
+
+async def test_identical_models_on_one_cohort_are_never_promoted_over_each_other():
+    """THE STORED EVALUATIONS ARE NOT WHAT IS COMPARED. The incumbent's stored
+    score is made to look terrible; a challenger with the SAME fit is re-scored
+    beside it on the same prospective fixtures, improves by exactly zero, and
+    is refused."""
+    async with _conn() as conn:
+        for t in ("bettor_funded_decisions", "bettor_funded_models"):
+            if not await _has(conn, t):
+                pytest.skip("%s is not in this database" % t)
+        await _clean(conn)
+        got = await _run_pipeline(conn, model_id="learnpath-inc", skill=True)
+        assert got["promotion"]["ok"], got["promotion"]
+        await conn.execute(
+            "UPDATE bettor_funded_models SET evaluation = jsonb_set("
+            " evaluation, '{PROSPECTIVE,log_loss}', '9.9'::jsonb) "
+            " WHERE model_id='learnpath-inc'")
+        reg = await FMD.register(
+            conn, model_id="learnpath-same", model_version="v-same",
+            fitted=await FMD.fit_from_records(conn, through=FIT_THROUGH,
+                                              account_id=ACCT),
+            fit_through=FIT_THROUGH)
+        assert reg["ok"], reg
+        # decided after BOTH freezes
+        more = await _cohort(conn, skill=True, prefix="lr",
+                             base=_after_freeze_s() + 7200)
+        assert more.get("ok"), more
+        await FMD.evaluate(conn, model_id="learnpath-same", account_id=ACCT)
+        prom = await FMD.promote(conn, model_id="learnpath-same",
+                                 approved_by="owner@test")
+        assert prom["ok"] is False, prom
+        assert prom["refusal"] == FMD.R_NO_SKILL
+        cmp_ = prom["comparison"]
+        assert cmp_["against_what"] == "THE_INCUMBENT"
+        assert cmp_["improvement"] == pytest.approx(0.0, abs=1e-9)
+        assert cmp_["candidate"] == pytest.approx(cmp_["against"], abs=1e-9)
+        assert cmp_["n_events"] >= FMD.MIN_EVALUATION_EVENTS
+
+
+# ═════════════════════════════════════════════════════════════════════
+# 8 · PROVENANCE: BOUND TO RECORDS, AND BROKEN BY A CORRECTION
+# ═════════════════════════════════════════════════════════════════════
+
+async def test_the_label_is_each_legs_own_side_from_the_settlement_price():
+    """A PUSH IS NOT A WIN; A PARTIAL EXIT DOES NOT CHANGE THE FIXTURE; A LEG
+    WE EXITED BEFORE SETTLEMENT IS NOT A LABEL; A SHORT WINS AT PRICE ZERO."""
+    async with _conn() as conn:
+        if not await _has(conn, "bettor_funded_decisions"):
+            pytest.skip("migration 132 is not in this database")
+        await _clean(conn)
+        push = await _group(conn, gid="lp-push", primary_pays=1.0,
+                            hedge_pays=0.5, decided_at=_at(20))
+        part = await _group(conn, gid="lp-part", primary_pays=1.0,
+                            hedge_pays=1.0, decided_at=_at(30))
+        exited = await _group(conn, gid="lp-exit", primary_pays=1.0,
+                              hedge_pays=1.0, decided_at=_at(40))
+        short = await _group(conn, gid="lp-short", primary_pays=1.0,
+                             hedge_pays=0.0, decided_at=_at(50))
+        for g in (push, part, exited, short):
+            assert g.get("ok"), g
+        # a partial exit leaves little held: the cash is small, the price is 1
+        await conn.execute(
+            "UPDATE bettor_funded_intents SET settlement = settlement || "
+            " '{\"payout_usd\": 0.0}'::jsonb "
+            " WHERE portfolio_group_id=$1 AND leg_role='HEDGE'",
+            part["group_id"])
+        # a leg that left the book through our own exit, not the venue's price
+        await conn.execute(
+            "UPDATE bettor_funded_intents SET closed_reason='EXITED_IN_THE_MARKET'"
+            " WHERE portfolio_group_id=$1 AND leg_role='HEDGE'",
+            exited["group_id"])
+        # the hedge leg as a SHORT: it won because the long side settled at 0
+        await conn.execute(
+            "UPDATE bettor_funded_intents SET order_intent="
+            " 'ORDER_INTENT_BUY_SHORT' "
+            " WHERE portfolio_group_id=$1 AND leg_role='HEDGE'",
+            short["group_id"])
+        lab = await FMD.labelled(conn, account_id=ACCT)
+        by = dict(zip(lab["decision_ids"], zip(lab["labels"], lab["pushes"])))
+        assert by[push["decision_id"]] == (0.0, True), by
+        assert by[part["decision_id"]] == (1.0, False), by
+        assert exited["decision_id"] not in by
+        assert by[short["decision_id"]] == (1.0, False), by
+
+
+async def test_a_corrected_settlement_after_the_fit_invalidates_the_model():
+    """THE LABEL'S OWN VERSION IS BOUND. A training leg's settlement corrected
+    after registration makes the training records stop reproducing, and the
+    model is not promoted on a set that no longer exists as it was fit."""
+    async with _conn() as conn:
+        for t in ("bettor_funded_decisions", "bettor_funded_models"):
+            if not await _has(conn, t):
+                pytest.skip("%s is not in this database" % t)
+        await _clean(conn)
+        train = await _cohort(conn, skill=True, prefix="lt", base=TRAIN_BASE_S)
+        assert train.get("ok"), train
+        fitted = await FMD.fit_from_records(conn, through=FIT_THROUGH,
+                                            account_id=ACCT)
+        prov = fitted["training_provenance"]
+        rec0 = prov["records"][0]
+        # THE PROVENANCE NAMES WHAT A LABEL DEPENDS ON
+        assert set(rec0) >= {"decision_id", "fixture", "feature_sha",
+                             "feature_schema", "label", "leg_outcomes",
+                             "outcome_available_at", "decided_at"}
+        assert all(leg["read_at"] is not None and leg["payout_price"]
+                   is not None for leg in rec0["leg_outcomes"])
+        assert prov["feature_schema_sha"] == FMD.FEATURE_SCHEMA_SHA
+        reg = await FMD.register(conn, model_id="learnpath-corr",
+                                 model_version="v-corr", fitted=fitted,
+                                 fit_through=FIT_THROUGH)
+        assert reg["ok"], reg
+        coh = await _cohort(conn, skill=True, base=_after_freeze_s())
+        assert coh.get("ok"), coh
+        assert (await FMD.evaluate(conn, model_id="learnpath-corr",
+                                   account_id=ACCT))["ok"]
+        # THE VENUE CORRECTS ONE TRAINING LEG'S SETTLEMENT
+        leg = rec0["leg_outcomes"][0]
+        await conn.execute(
+            "UPDATE bettor_funded_intents SET settlement = settlement || "
+            " jsonb_build_object('payout_price', "
+            "   CASE WHEN (settlement->>'payout_price')::numeric = 1 "
+            "        THEN 0.0 ELSE 1.0 END, 'at', $2::float8) "
+            " WHERE intent_id=$1", leg["intent_id"], time.time())
+        prom = await FMD.promote(conn, model_id="learnpath-corr",
+                                 approved_by="owner@test")
+        assert prom["ok"] is False, prom
+        assert prom["refusal"] == FMD.R_TRAINING_RECORDS_DO_NOT_REPRODUCE
+        assert rec0["decision_id"] in prom["changed_records"]
+
+
+async def test_a_label_learned_after_the_cutoff_is_not_training_data():
+    """DECIDED BEFORE THE CUTOFF IS NOT ENOUGH: the outcome must have been
+    known by it too."""
+    async with _conn() as conn:
+        if not await _has(conn, "bettor_funded_decisions"):
+            pytest.skip("migration 132 is not in this database")
+        await _clean(conn)
+        early = await _group(conn, gid="lt-early", primary_pays=1.0,
+                             hedge_pays=1.0, decided_at=_at(-7200))
+        late = await _group(conn, gid="lt-late", primary_pays=1.0,
+                            hedge_pays=0.0, decided_at=_at(-60))
+        assert early.get("ok") and late.get("ok")
+        # lt-late was decided 60 s before the cutoff and settled an hour later
+        fitted = await FMD.fit_from_records(conn, through=FIT_THROUGH,
+                                            account_id=ACCT)
+        ids = fitted["training_provenance"]["decision_ids"]
+        assert early["decision_id"] in ids
+        assert late["decision_id"] not in ids
+
+
+async def test_an_approved_model_is_record_bound_in_the_database_too():
+    """MIGRATION 138'S CHECK: a DECLARED fit cannot be written APPROVED, by
+    `promote` or by hand."""
+    async with _conn() as conn:
+        for t in ("bettor_funded_decisions", "bettor_funded_models"):
+            if not await _has(conn, t):
+                pytest.skip("%s is not in this database" % t)
+        await _clean(conn)
+        rows = [dict.fromkeys(FMD.FEATURES, 1.0) for _ in range(10)]
+        fitted = FMD.fit(rows, [0.0, 1.0] * 5,
+                         decided_at=[FIT_THROUGH.timestamp() - 10] * 10)
+        reg = await FMD.register(conn, model_id="learnpath-declared",
+                                 model_version="v-decl", fitted=fitted,
+                                 fit_through=FIT_THROUGH)
+        assert reg["ok"] and reg["provenance"] == "DECLARED", reg
+        prom = await FMD.promote(conn, model_id="learnpath-declared",
+                                 approved_by="owner@test")
+        assert prom["refusal"] == FMD.R_TRAINING_NOT_BOUND_TO_RECORDS
+        with pytest.raises(asyncpg.exceptions.CheckViolationError):
+            await conn.execute(
+                "UPDATE bettor_funded_models SET state='APPROVED', "
+                " approved_at=now(), approved_by='hand', evaluation='{}' "
+                " WHERE model_id='learnpath-declared'")

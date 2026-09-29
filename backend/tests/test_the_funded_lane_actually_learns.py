@@ -120,7 +120,46 @@ def _trained_before(rows):
     return [start + 60.0 * i for i in range(len(rows))]
 
 
+ACCT_LOW = ACCT + "-low"
+ACCT_HIGH = ACCT + "-high"
+
+
+async def _record_training(conn, *, rows, labels, before, base, account=None):
+    """RESOLVED DECISIONS THAT PRECEDE THE FIT WINDOW, in the ledger.
+
+    A model is approvable only if it was fit on recorded decisions (migration
+    138), so the training rows these tests used to hand to `fit` are written
+    as real resolved groups instead: decided before `before`, and settled
+    before it too, so the snapshot could have been taken at `before`. Their
+    fixtures are distinct from every evaluation fixture.
+    """
+    n = len(rows)
+    for k in range(n):
+        decided = before - timedelta(hours=2 * (n - k) + 2)
+        await _resolved_decision(
+            conn, i=base + k, decided_at=decided,
+            middle_occurred=bool(labels[k]), features=rows[k],
+            settled_at=decided + timedelta(hours=1), account=account)
+
+
+async def _fit_on_records(conn, *, rows, labels, before, base, account=None,
+                          estimator="RIDGE_LOGISTIC"):
+    await _record_training(conn, rows=rows, labels=labels, before=before,
+                           base=base, account=account)
+    got = await FMD.fit_from_records(conn, through=before,
+                                     account_id=account or ACCT,
+                                     model_key=KEY, estimator=estimator)
+    assert got.get("ok"), got
+    return got
+
+
 async def _clean(conn):
+    for acct in (ACCT_LOW, ACCT_HIGH):
+        await _clean_account(conn, acct)
+    await _clean_account(conn, ACCT)
+
+
+async def _clean_account(conn, ACCT):
     await conn.execute(
         "DELETE FROM bettor_funded_decision_outcomes WHERE decision_id IN "
         "(SELECT decision_id FROM bettor_funded_decisions WHERE account_id=$1)",
@@ -147,7 +186,8 @@ async def _clean(conn):
 
 
 async def _resolved_decision(conn, *, i, decided_at, middle_occurred,
-                             features, model_version="v0-recorder"):
+                             features, model_version="v0-recorder",
+                             settled_at=None, account=None):
     """ONE RESOLVED GROUP AND THE DECISION THAT WAS TAKEN ON IT.
 
     THE GROUP IS CLOSED AND BOTH LEGS CARRY A SETTLEMENT PAYOUT, because that is
@@ -155,6 +195,11 @@ async def _resolved_decision(conn, *, i, decided_at, middle_occurred,
     `settlement.payout_usd`, not a score and not a model. `middle_occurred` is
     encoded by paying BOTH legs or only one.
     """
+    account = account or ACCT
+    # THE OUTCOME BECAME KNOWN AN HOUR AFTER THE DECISION unless stated. It is
+    # written onto the legs because migration 138 makes outcome availability
+    # part of what a registration verifies.
+    settled_at = settled_at or (decided_at + timedelta(hours=1))
     gid = "grp:learns-%d" % i
     # OPEN FIRST. 131's trigger refuses a leg joining a CLOSED group -- "it
     # cannot take leg ..." -- and it is right to: attaching exposure to a closed
@@ -164,7 +209,7 @@ async def _resolved_decision(conn, *, i, decided_at, middle_occurred,
         "INSERT INTO bettor_funded_portfolio_groups "
         "(group_id, account_id, venue, event_key, structure, hedge_intent) "
         "VALUES ($1,$2,$3,$4,'INDIRECT_MIDDLE','ACQUIRED')",
-        gid, ACCT, VENUE, "ev-learns-%d" % i)
+        gid, account, VENUE, "ev-learns-%d" % i)
     for role, paid in (("PRIMARY", True),
                        ("HEDGE", bool(middle_occurred))):
         iid = "fpi-learns-%d-%s" % (i, role[:1].lower())
@@ -175,16 +220,22 @@ async def _resolved_decision(conn, *, i, decided_at, middle_occurred,
             " effective_digest, state, kind, residual_qty, closed_at, "
             " closed_reason, settlement, portfolio_group_id, leg_role) VALUES "
             "($1,$2,$3,'FUNDED',$4,$5,'ORDER_INTENT_BUY_LONG',0.5,10,5.0,'d',"
-            " 'FILLED','ENTRY',0,now(),'SETTLED_BY_THE_VENUE',$6::jsonb,$7,$8)",
-            iid, ACCT, VENUE, "slug-learns-%d-%s" % (i, role), "ev-learns-%d" % i,
+            " 'FILLED','ENTRY',0,$9,'SETTLED_BY_THE_VENUE',$6::jsonb,$7,$8)",
+            iid, account, VENUE, "slug-learns-%d-%s" % (i, role),
+            "ev-learns-%d" % i,
+            # THE VENUE'S READING, in the shape `reconcile_settlement` writes:
+            # the long-side settlement price (a LONG leg won at 1) and the
+            # instant it was read, which is when the label became known.
             json.dumps({"payout_usd": (10.0 if paid else 0.0),
-                        "terminal_reading": "CHOSEN_FOR_THIS_PROOF"}),
-            gid, role)
+                        "payout_price": (1.0 if paid else 0.0),
+                        "terminal_reading": "REPORTED_SETTLEMENT",
+                        "at": settled_at.timestamp()}),
+            gid, role, settled_at)
     await conn.execute(
         "UPDATE bettor_funded_portfolio_groups SET closed_at=now(), "
         "  closure='BOTH_LEGS_SETTLED' WHERE group_id=$1", gid)
     got = await FL.record_decision(
-        conn, decision_id="dec:learns-%d" % i, account_id=ACCT, venue=VENUE,
+        conn, decision_id="dec:learns-%d" % i, account_id=account, venue=VENUE,
         fixture="fx-learns-%d" % i, action="ACQUIRE_HEDGE",
         decided_at=decided_at.timestamp(), group_id=gid,
         worst_case_usd=-0.60, model_key=KEY, model_version=model_version,
@@ -339,9 +390,14 @@ async def test_a_promotion_is_refused_without_enough_prospective_labels():
         fit_through = datetime.now(timezone.utc) - timedelta(days=30)
         rows, labels = _synthetic()
         await FMD.register(conn, model_id="mdl:learns-thin",
-                           model_version="v1", fitted=FMD.fit(rows, labels, decided_at=_trained_before(rows)),
+                           model_version="v1",
+                           fitted=await _fit_on_records(
+                               conn, rows=rows, labels=labels,
+                               before=fit_through, base=3000),
                            fit_through=fit_through)
-        # TOO FEW RESOLVED DECISIONS AFTER THE FIT WINDOW.
+        # FIVE HELD-OUT DECISIONS AFTER THE FIT WINDOW -- but BEFORE the model
+        # was frozen (registered just now), so they are RETROSPECTIVE
+        # out-of-sample evidence, and none is prospective.
         for i in range(5):
             await _resolved_decision(
                 conn, i=i, decided_at=fit_through + timedelta(days=1 + i),
@@ -349,13 +405,18 @@ async def test_a_promotion_is_refused_without_enough_prospective_labels():
         ev = await FMD.evaluate(conn, model_id="mdl:learns-thin")
         assert ev["ok"] is False
         assert ev["refusal"] == FMD.R_TOO_FEW_LABELS
-        # THE BAR IS FIXTURES: five decisions on five fixtures here
-        assert ev["n"] == 5 and ev["n_events"] == 5
+        assert ev["retrospective_n_events"] == 5
+        assert ev["n_events"] == 0          # prospective
         assert ev["required_events"] == FMD.MIN_EVALUATION_EVENTS
+        doc = ev["evaluation"]
+        assert doc[FMD.EVIDENCE_RETROSPECTIVE]["evidence_kind"] == \
+            "RETROSPECTIVE_OUT_OF_SAMPLE"
+        assert doc[FMD.EVIDENCE_PROSPECTIVE]["n_events"] == 0
         promoted = await FMD.promote(conn, model_id="mdl:learns-thin",
                                     approved_by="owner")
         assert promoted["ok"] is False
-        assert promoted["refusal"] == FMD.R_NOT_EVALUATED
+        assert promoted["refusal"] == FMD.R_TOO_FEW_LABELS
+        assert promoted["comparison"]["evidence_kind"] == "PROSPECTIVE"
     finally:
         await _clean(conn)
         await conn.close()
@@ -430,45 +491,50 @@ async def test_the_evaluation_is_prospective_and_the_promotion_is_atomic():
         fit_through = datetime.now(timezone.utc) - timedelta(days=30)
         rows, labels = _synthetic()
 
-        # THREE MODELS. A base rate, which knows only the mean; a ridge, which
-        # has the window width; and stumps, which fit the same feature harder.
-        # Measured on this synthetic set: base 0.673, ridge 0.605, stumps 0.588
-        # in log loss -- so the base rate has ZERO skill over its own baseline
-        # and stumps beats the ridge by 0.017, above the declared 0.01 bar.
-        await FMD.register(conn, model_id="mdl:learns-base",
-                           model_version="v1-baserate",
-                           fitted=FMD.fit(rows, labels, decided_at=_trained_before(rows), estimator="BASE_RATE"),
-                           fit_through=fit_through)
-        await FMD.register(conn, model_id="mdl:learns-ridge",
-                           model_version="v2-ridge",
-                           fitted=FMD.fit(rows, labels, decided_at=_trained_before(rows),
-                                          estimator="RIDGE_LOGISTIC"),
-                           fit_through=fit_through)
-        await FMD.register(conn, model_id="mdl:learns-stumps",
-                           model_version="v3-stumps",
-                           fitted=FMD.fit(rows, labels, decided_at=_trained_before(rows), estimator="STUMPS"),
-                           fit_through=fit_through)
+        # THREE MODELS, ALL FIT ON THE SAME RECORDED TRAINING SET. A base rate,
+        # which knows only the mean; a ridge, which has the window width; and
+        # stumps, which fit the same feature harder.
+        await _record_training(conn, rows=rows, labels=labels,
+                               before=fit_through, base=4000)
+        for mid, ver, est in (("mdl:learns-base", "v1-baserate", "BASE_RATE"),
+                              ("mdl:learns-ridge", "v2-ridge",
+                               "RIDGE_LOGISTIC"),
+                              ("mdl:learns-stumps", "v3-stumps", "STUMPS")):
+            reg = await FMD.register(
+                conn, model_id=mid, model_version=ver,
+                fitted=await FMD.fit_from_records(
+                    conn, through=fit_through, account_id=ACCT,
+                    model_key=KEY, estimator=est),
+                fit_through=fit_through)
+            assert reg["ok"], reg
 
-        # ── RESOLVED DECISIONS, ALL AFTER THE FIT WINDOW ────────────
+        # ── RESOLVED DECISIONS MADE AFTER ALL THREE WERE FROZEN ─────
+        #
+        # PROSPECTIVE evidence is predictions on decisions made after the model
+        # could no longer change, so these are decided after registration --
+        # which, in a test run now, means later than the wall clock.
+        frozen = datetime.now(timezone.utc)
         for i in range(60):
             feats = rows[i]
             await _resolved_decision(
-                conn, i=i, decided_at=fit_through + timedelta(hours=1 + i),
+                conn, i=i, decided_at=frozen + timedelta(hours=1 + i),
                 middle_occurred=bool(labels[i]), features=feats)
 
         ev_base = await FMD.evaluate(conn, model_id="mdl:learns-base")
         assert ev_base["ok"] is True, ev_base
-        assert ev_base["evaluation"]["prospective"]["verdict"] == "PROSPECTIVE"
-        assert ev_base["evaluation"]["prospective"][
-            "rows_the_fit_could_have_seen"] == 0
-        assert ev_base["n"] >= FMD.MIN_EVALUATION_ROWS
+        doc = ev_base["evaluation"]
+        assert doc["contamination"]["verdict"] == "CLEAN"
+        assert doc["contamination"]["rows_the_fit_could_have_seen"] == 0
+        assert doc[FMD.EVIDENCE_PROSPECTIVE]["n_events"] == 60
+        assert doc["weighting"] == FMD.WEIGHTING_EVENT_BALANCED
 
         ev_ridge = await FMD.evaluate(conn, model_id="mdl:learns-ridge")
         ev_stumps = await FMD.evaluate(conn, model_id="mdl:learns-stumps")
         assert ev_ridge["ok"] is True and ev_stumps["ok"] is True
-        assert ev_stumps["evaluation"]["log_loss"] < \
-            ev_ridge["evaluation"]["log_loss"] < \
-            ev_base["evaluation"]["log_loss"], (
+
+        def _ll(ev):
+            return ev["evaluation"][FMD.EVIDENCE_PROSPECTIVE]["log_loss"]
+        assert _ll(ev_stumps) < _ll(ev_ridge) < _ll(ev_base), (
             "the ordering these promotions assert has to be the measured one, "
             "or the promotion tests below assert nothing")
 
@@ -567,21 +633,24 @@ async def test_a_contaminated_evaluation_is_named_and_blocks_promotion():
             await _resolved_decision(
                 conn, i=i, decided_at=decided_from + timedelta(hours=i),
                 middle_occurred=bool(labels[i]), features=rows[i])
-        # FIT WINDOW AFTER EVERY DECISION: nothing is prospective.
+        # FIT WINDOW AFTER EVERY DECISION: the fit is trained ON these sixty,
+        # so none of them is held out and nothing is prospective.
+        cutoff = datetime.now(timezone.utc) + timedelta(days=1)
         await FMD.register(
             conn, model_id="mdl:learns-leak", model_version="v1-leak",
-            fitted=FMD.fit(rows, labels, decided_at=_trained_before(rows)),
-            fit_through=datetime.now(timezone.utc) + timedelta(days=1))
+            fitted=await FMD.fit_from_records(conn, through=cutoff,
+                                              account_id=ACCT, model_key=KEY),
+            fit_through=cutoff)
         ev = await FMD.evaluate(conn, model_id="mdl:learns-leak")
         assert ev["ok"] is False
         assert ev["refusal"] == FMD.R_TOO_FEW_LABELS
-        assert ev["n"] == 0, (
+        assert ev["n_events"] == 0 and ev["retrospective_n_events"] == 0, (
             "every decision predates this model's fit window, so none of them "
             "can measure it")
         got = await FMD.promote(conn, model_id="mdl:learns-leak",
                                 approved_by="owner@test")
         assert got["ok"] is False
-        assert got["refusal"] == FMD.R_NOT_EVALUATED
+        assert got["refusal"] == FMD.R_TOO_FEW_LABELS
     finally:
         await _clean(conn)
         await conn.close()
@@ -667,11 +736,16 @@ async def test_an_approved_model_changes_a_later_decision():
         # own test above, and re-running it would make this test about promotion
         # rather than about the decision changing.
         rows, _ = _synthetic(50)
-        low = FMD.fit(rows, [0.0] * 45 + [1.0] * 5, estimator="BASE_RATE",
-                      decided_at=_trained_before(rows))
+        # FIT ON RECORDED DECISIONS: an approved model must be record-bound
+        # (migration 138). Each model's training set lives under its own
+        # account so the two base rates are what the proof needs.
+        t_fit = datetime.now(timezone.utc)
+        low = await _fit_on_records(
+            conn, rows=rows, labels=[0.0] * 45 + [1.0] * 5, before=t_fit,
+            base=5000, account=ACCT_LOW, estimator="BASE_RATE")
         await FMD.register(conn, model_id="mdl:demo-low",
                            model_version="v1-pessimistic", fitted=low,
-                           fit_through=datetime.now(timezone.utc))
+                           fit_through=t_fit)
         await conn.execute(
             "UPDATE bettor_funded_models SET state='APPROVED', "
             "  approved_at=now(), approved_by='owner@test', "
@@ -687,11 +761,12 @@ async def test_an_approved_model_changes_a_later_decision():
         assert first["action"] == "HOLD", first["decision"]["selection_reason"]
 
         # ── 2 · THE OPTIMISTIC MODEL, APPROVED IN ITS PLACE ─────────
-        high = FMD.fit(rows, [1.0] * 40 + [0.0] * 10, estimator="BASE_RATE",
-                       decided_at=_trained_before(rows))
+        high = await _fit_on_records(
+            conn, rows=rows, labels=[1.0] * 40 + [0.0] * 10, before=t_fit,
+            base=6000, account=ACCT_HIGH, estimator="BASE_RATE")
         await FMD.register(conn, model_id="mdl:demo-high",
                            model_version="v2-optimistic", fitted=high,
-                           fit_through=datetime.now(timezone.utc))
+                           fit_through=t_fit)
         async with conn.transaction():
             await conn.execute(
                 "UPDATE bettor_funded_models SET state='RETIRED', "
@@ -796,9 +871,13 @@ async def test_the_operator_can_see_which_model_is_deciding():
         assert "declined" in view["deciding_model"]["consequence"]
 
         rows, labels = _synthetic(50)
+        t_fit = datetime.now(timezone.utc)
         await FMD.register(conn, model_id="mdl:view", model_version="v9-view",
-                           fitted=FMD.fit(rows, labels, decided_at=_trained_before(rows), estimator="BASE_RATE"),
-                           fit_through=datetime.now(timezone.utc))
+                           fitted=await _fit_on_records(
+                               conn, rows=rows, labels=labels, before=t_fit,
+                               base=7000, account=ACCT_LOW,
+                               estimator="BASE_RATE"),
+                           fit_through=t_fit)
         # A CANDIDATE IS STILL NOT THE DECIDING MODEL.
         mid = await PC.operator_view(conn, account_id=ACCT)
         assert mid["deciding_model"]["refusal"] == FMD.R_NO_APPROVED_MODEL

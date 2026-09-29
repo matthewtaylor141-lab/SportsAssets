@@ -63,6 +63,7 @@ tests/test_heartbeat_does_not_queue_for_a_second_connection.py
 tests/test_in_flight_entry_is_pending.py
 tests/test_indirect_pair_priority.py
 tests/test_indirect_structures.py
+tests/test_learn_kernel.py
 tests/test_legacy_position_identity_repair.py
 tests/test_m1_is_verified_not_asserted.py
 tests/test_mirror_exit.py

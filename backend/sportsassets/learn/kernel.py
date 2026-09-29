@@ -173,14 +173,29 @@ class Ridge:
             out.append(v)
         return out
 
-    def _standardise(self, X) -> None:
+    def _standardise(self, X, w=None) -> None:
+        """Centre and scale by the WEIGHTED training moments.
+
+        The weights are the same ones the likelihood uses. Unweighted,
+        every row weighs 1.0 and this is the plain mean and deviation,
+        bit for bit (multiplying by 1.0 is exact). Weighted, a fixture
+        decided on a thousand cycles moves the centre and the scale no
+        more than a fixture decided once -- otherwise repetition would
+        re-scale every feature, and through the ridge penalty on the
+        scaled coefficients it would change the fit that event weights
+        were supposed to leave alone.
+        """
         n, d = len(X), len(self.features)
+        w = [1.0] * n if w is None else w
+        tw = sum(w)
+        if tw <= 0.0:
+            raise ValueError("weights sum to zero; nothing to fit")
         self.center = [0.0] * d
         self.scale = [1.0] * d
         for j in range(d):
             col = [X[i][j] for i in range(n)]
-            m = sum(col) / n
-            var = sum((c - m) ** 2 for c in col) / n
+            m = sum(w[i] * col[i] for i in range(n)) / tw
+            var = sum(w[i] * (col[i] - m) ** 2 for i in range(n)) / tw
             self.center[j] = m
             # A constant feature keeps scale 1.0 rather than exploding.
             self.scale[j] = math.sqrt(var) if var > 1e-18 else 1.0
@@ -205,7 +220,7 @@ class Ridge:
             raise ValueError("weights must be non-negative")
 
         Xr = self._raw(rows)
-        self._standardise(Xr)
+        self._standardise(Xr, w)
         X = [self._apply(v) for v in Xr]
         n, d = len(X), len(self.features)
         self.n_rows = n
@@ -566,12 +581,18 @@ class Stumps:
                 for t in cand[j]:
                     gl = hl = nl = 0.0
                     gr = hr = nr = 0.0
+                    # A leaf's size is its WEIGHT: unweighted that is
+                    # the row count, event-weighted it is the number of
+                    # fixtures, so repeating one fixture cannot satisfy
+                    # `min_leaf` on its own.
                     for i in range(n):
                         if cols[j][i] <= t:
-                            gl += grad[i]; hl += hess[i]; nl += 1
+                            gl += grad[i]; hl += hess[i]; nl += w[i]
                         else:
-                            gr += grad[i]; hr += hess[i]; nr += 1
-                    if nl < self.min_leaf or nr < self.min_leaf:
+                            gr += grad[i]; hr += hess[i]; nr += w[i]
+                    # 1e-9: three decisions weighing 1/3 are one fixture.
+                    if (nl < self.min_leaf - 1e-9
+                            or nr < self.min_leaf - 1e-9):
                         continue
                     gain = (gl * gl / (hl + self.l2)
                             + gr * gr / (hr + self.l2))

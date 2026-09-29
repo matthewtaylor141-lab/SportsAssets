@@ -528,3 +528,76 @@ class TestClusteredJackknife:
         g = ["big"] * 100 + ["g%d" % i for i in range(8)]
         r = M.clustered_jackknife(p, y, g, M.auc_stat, min_groups=5)
         assert r["largest_cluster_share"] > 0.9
+
+
+# ── EVENT WEIGHTS REACH EVERY PART OF THE FIT ─────────────────────────
+
+class TestRepetitionUnderEventWeightsChangesNothing:
+    """A fixture decided on k cycles contributes k rows weighing 1/k each.
+    The fit must equal the fit on one row per fixture: the likelihood, the
+    STANDARDISATION the penalty is applied on, and a stump's leaf size all
+    read the weight, not the row count."""
+
+    @staticmethod
+    def _events():
+        rows, ys = [], []
+        for i in range(60):
+            x = (i % 13) / 13.0
+            rows.append({"a": x, "b": ((i * 7) % 11) / 11.0})
+            ys.append(1.0 if (x + 0.3 * ((i * 5) % 3)) > 0.6 else 0.0)
+        return rows, ys
+
+    @classmethod
+    def _repeated(cls, k):
+        rows, ys = cls._events()
+        r2, y2, w2 = [], [], []
+        for i, (r, y) in enumerate(zip(rows, ys)):
+            n = k if i == 0 else 1          # one fixture decided k times
+            r2 += [dict(r)] * n
+            y2 += [y] * n
+            w2 += [1.0 / n] * n
+        return rows, ys, r2, y2, w2
+
+    def test_ridge(self):
+        rows, ys, r2, y2, w2 = self._repeated(999)
+        a = K.Ridge(["a", "b"]).fit(rows, ys)
+        b = K.Ridge(["a", "b"]).fit(r2, y2, weights=w2)
+        for j in range(2):
+            assert b.center[j] == pytest.approx(a.center[j], abs=1e-9)
+            assert b.scale[j] == pytest.approx(a.scale[j], abs=1e-9)
+            assert b.coef[j] == pytest.approx(a.coef[j], abs=1e-7)
+        assert b.intercept == pytest.approx(a.intercept, abs=1e-7)
+        for r in rows:
+            assert b.predict(r) == pytest.approx(a.predict(r), abs=1e-9)
+
+    def test_ridge_unweighted_is_the_plain_moments(self):
+        rows, ys = self._events()
+        m = K.Ridge(["a"]).fit(rows, ys)
+        col = [r["a"] for r in rows]
+        mean = sum(col) / len(col)
+        assert m.center[0] == mean
+        assert m.scale[0] == math.sqrt(sum((c - mean) ** 2 for c in col)
+                                       / len(col))
+
+    def test_repetition_without_weights_does_move_the_ridge(self):
+        """The control: the test above is not passing because repetition is
+        harmless anyway. Unweighted, the repeated fixture moves the fit."""
+        rows, ys, r2, y2, _ = self._repeated(999)
+        a = K.Ridge(["a", "b"]).fit(rows, ys)
+        b = K.Ridge(["a", "b"]).fit(r2, y2)
+        assert abs(b.predict(rows[5]) - a.predict(rows[5])) > 1e-3
+
+    def test_a_stump_leaf_is_measured_in_fixtures(self):
+        """min_leaf=20 fixtures. One fixture repeated 999 times on one side
+        of every threshold cannot make that side big enough."""
+        rows = [{"a": float(i)} for i in range(25)]
+        ys = [1.0 if i < 12 else 0.0 for i in range(25)]
+        r2 = [dict(rows[0])] * 999 + rows[1:]
+        y2 = [ys[0]] * 999 + ys[1:]
+        w2 = [1.0 / 999] * 999 + [1.0] * 24
+        plain = K.Stumps(["a"], rounds=3, min_leaf=20).fit(rows, ys)
+        weighted = K.Stumps(["a"], rounds=3, min_leaf=20).fit(r2, y2,
+                                                            weights=w2)
+        counted = K.Stumps(["a"], rounds=3, min_leaf=20).fit(r2, y2)
+        assert plain.trees == [] and weighted.trees == []
+        assert counted.trees != []          # the row count WOULD have split

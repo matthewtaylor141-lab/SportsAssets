@@ -1113,6 +1113,8 @@ async def scheduled_learning_pass(conn, *, account_id: str,
 
     WHAT RUNS, every cycle, whether or not entry is paused:
 
+      0 (see 1b) GENERATE. `generate_candidate` fits and registers at most one
+        CANDIDATE from the ledger as it stands, under its declared rules.
       1 JOIN. Every decision without a realised outcome is grouped by its
         portfolio group and `reconcile_and_learn` attaches the group's result as
         a VERSIONED outcome, with the group's P&L written once. A group still
@@ -1174,6 +1176,19 @@ async def scheduled_learning_pass(conn, *, account_id: str,
                        "joined": joined, "waiting_for_the_position": waiting,
                        "refused": refused,
                        "without_a_group": ungrouped}
+    # ── 1b · GENERATE: one governed candidate from the ledger as it stands ──
+    #
+    # Declared rules in `bettor_funded_model.generate_candidate`: enough
+    # resolved fixtures, enough NEW ones since the last record-bound fit, a
+    # model id derived from the training set so a restarted or concurrent pass
+    # reaches the same id. It registers a CANDIDATE and nothing more.
+    try:
+        out["generate"] = await FMD.generate_candidate(
+            conn, now=at, account_id=account_id)
+    except Exception as exc:                                   # noqa: BLE001
+        out["generate"] = {"ok": False, "refusal": "GENERATION_RAISED",
+                           "error": "%s: %s" % (type(exc).__name__,
+                                                str(exc)[:200])}
     # ── 2 · EVALUATE ────────────────────────────────────────────────
     try:
         if not await FMD.has_schema(conn):
@@ -1200,14 +1215,21 @@ async def scheduled_learning_pass(conn, *, account_id: str,
                            "error": "%s: %s" % (type(exc).__name__,
                                                 str(exc)[:160])})
             continue
-        rep = ev.get("evaluation") or {}
+        doc = ev.get("evaluation") or {}
+        pros = doc.get(FMD.EVIDENCE_PROSPECTIVE) or {}
+        retro = doc.get(FMD.EVIDENCE_RETROSPECTIVE) or {}
         scored.append({
             "model_id": mid, "ok": ev.get("ok"), "refusal": ev.get("refusal"),
-            "n": ev.get("n"),
-            FMD.PROMOTION_METRIC: rep.get(FMD.PROMOTION_METRIC),
-            "prospective": (rep.get("prospective") or {}).get("verdict"),
-            "awaiting": ("an owner's approval through promote()"
-                         if ev.get("ok") else None)})
+            # TWO KINDS OF EVIDENCE, NEVER POOLED
+            "prospective_events": pros.get("n_events"),
+            "prospective_log_loss": pros.get("log_loss"),
+            "retrospective_out_of_sample_events": retro.get("n_events"),
+            "retrospective_out_of_sample_log_loss": retro.get("log_loss"),
+            "retrospective_note": retro.get("why"),
+            "weighting": doc.get("weighting"),
+            "awaiting": ("an owner's approval through promote(), which "
+                         "re-scores against the incumbent on shared "
+                         "prospective fixtures" if ev.get("ok") else None)})
     out["evaluate"] = {"ok": True, "candidates": len(cands),
                        "scored": scored}
     return dict(out, ok=True)

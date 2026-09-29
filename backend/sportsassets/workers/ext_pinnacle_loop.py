@@ -6597,14 +6597,21 @@ def _learning_digest(lp) -> dict | None:
         return None
     j = lp.get("join") or {}
     e = lp.get("evaluate") or {}
+    g = lp.get("generate") or {}
     return {"ok": lp.get("ok"), "refusal": lp.get("refusal"),
+            "generate": {k: g.get(k) for k in (
+                "ok", "refusal", "generated", "reason", "model_id",
+                "n_events", "training_events_available")},
             "joined": len(j.get("joined") or []),
             "waiting_for_the_position": len(
                 j.get("waiting_for_the_position") or []),
             "join_refused": len(j.get("refused") or []),
             "candidates_scored": [
-                {k: c.get(k) for k in ("model_id", "ok", "refusal", "n",
-                                       "log_loss", "prospective")}
+                {k: c.get(k) for k in (
+                    "model_id", "ok", "refusal", "prospective_events",
+                    "prospective_log_loss",
+                    "retrospective_out_of_sample_events",
+                    "retrospective_out_of_sample_log_loss", "weighting")}
                 for c in (e.get("scored") or [])[:SERVICING_DIGEST_LIMIT]],
             "promoted_anything": lp.get("promoted_anything"),
             "promotion": lp.get("promotion")}
