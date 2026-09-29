@@ -38,10 +38,20 @@ made after it froze, and promoted only by a named approver through `promote`.
 It sends nothing to any venue: every read is a book, catalogue, prose or
 settlement read.
 
-WHAT REMAINS SEPARATE. `region_probabilities` still needs how `1 - p_middle`
-splits over the non-middle regions (`OUTSIDE_SPLIT_HAS_NO_ADMISSIBLE_SOURCE`).
-These labels are "both won / not"; they do not identify which non-middle
-region occurred, so they do not supply the split.
+WHAT THE RECORD KEEPS, AND WHAT THE BINARY TARGET THROWS AWAY. An earlier
+version of this paragraph said these labels are only "both won / not". That was
+false about the record: `label_from` and the table keep `primary_won`,
+`hedge_won` and BOTH settlement prices, so which leg won, which pushed and at
+what price are all stored. It is KEY_MIDDLE's binary training target,
+`middle_occurred`, that discards the distinction. What no record states is
+which margin or total band occurred -- and no decision needs it: every action's
+value depends on a region only through its per-leg payout pair
+(`bettor_payout_states`). So the per-leg outcomes kept here, read against the
+observation's stored payoff table, label the second model the lane learns --
+KEY_HEDGE_GIVEN_PRIMARY, P(hedge wins | primary outcome), via
+`labelled_conditional` -- and the settled fixtures give the void rate
+(`void_rate`). `region_probabilities`' outside split is still not supplied by
+anything, and is no longer needed on the path that prices through classes.
 
 AND A STATED LIMIT. The observed population is every discovered pair; the
 funded population is the pairs the lane admits. A model skilled on the first
@@ -597,6 +607,245 @@ async def labelled(conn, *, after=None, through=None, outcomes_through=None,
                              "counts it; a void is not a label"))
 
 
+#: ── THE CONDITIONAL'S LABEL RULE: every record it leaves out, by name ──
+X_C_PRIMARY_OUTCOME_NOT_RECORDED = "PRIMARY_OUTCOME_NOT_RECORDED"
+X_C_PRIMARY_PARTIAL = "PRIMARY_LEG_PUSHED_OR_SETTLED_BETWEEN_ZERO_AND_ONE"
+X_C_HEDGE_OUTCOME_NOT_RECORDED = "HEDGE_OUTCOME_NOT_RECORDED"
+X_C_CLASSES_REFUSED = "PAYOUT_CLASSES_REFUSED"
+X_C_OUTCOME_NOT_IN_TABLE = "PRIMARY_OUTCOME_IS_NOT_ADMITTED_BY_THE_TABLE"
+X_C_STRUCTURAL = "HEDGE_PAYOUT_IS_DETERMINED_BY_THE_TABLE_GIVEN_THIS_OUTCOME"
+X_C_NOT_BINARY = "HEDGE_OUTCOME_IS_NOT_BINARY_GIVEN_THIS_OUTCOME"
+X_C_HEDGE_PUSHED = "HEDGE_PUSHED_WHERE_THE_TABLE_ADMITS_ONLY_WIN_OR_LOSE"
+X_C_FEATURES_UNREADABLE = "THE_FROZEN_FEATURE_VECTOR_IS_UNREADABLE"
+
+
+def conditional_row(row: dict) -> dict:
+    """ONE LABELLED OBSERVATION, READ FOR P(hedge wins | primary outcome).
+
+    Pure. Returns {"include": True, "primary_outcome", "label", "features"} or
+    {"include": False, "exclusion": name}. The primary outcome is WIN when the
+    primary side won at its settlement price and LOSE when it lost outright; a
+    push or any price between 0 and 1 on the primary is excluded, never read
+    as a loss. The row is a training example only where the observation's OWN
+    stored payoff table admits exactly two hedge payouts {0, 100} given that
+    outcome -- the binary case the distribution needs learned. Elsewhere the
+    table answers the question structurally, or the question is not binary.
+    """
+    from . import bettor_payout_states as PS
+
+    pw, hw = row.get("primary_won"), row.get("hedge_won")
+    if pw is None:
+        return {"include": False, "exclusion": X_C_PRIMARY_OUTCOME_NOT_RECORDED}
+    if is_push(row.get("primary_settlement_price")):
+        return {"include": False, "exclusion": X_C_PRIMARY_PARTIAL}
+    if hw is None:
+        return {"include": False, "exclusion": X_C_HEDGE_OUTCOME_NOT_RECORDED}
+    outcome = PS.WIN if pw else PS.LOSE
+    structure = row.get("structure")
+    if isinstance(structure, str):
+        try:
+            structure = json.loads(structure)
+        except ValueError:
+            structure = None
+    classes = PS.payout_classes(structure or {})
+    if not classes.get("ok"):
+        return {"include": False,
+                "exclusion": "%s:%s" % (X_C_CLASSES_REFUSED,
+                                        classes.get("refusal"))}
+    group = [c for c in classes["classes"]
+             if not c["void"] and c["primary"]["outcome"] == outcome]
+    if not group:
+        return {"include": False, "exclusion": X_C_OUTCOME_NOT_IN_TABLE,
+                "primary_outcome": outcome}
+    if len(group) == 1:
+        return {"include": False, "exclusion": X_C_STRUCTURAL,
+                "primary_outcome": outcome}
+    if sorted(c["hedge"]["cents"] for c in group) != [0, 100]:
+        return {"include": False, "exclusion": X_C_NOT_BINARY,
+                "primary_outcome": outcome}
+    if is_push(row.get("hedge_settlement_price")):
+        # THE TABLE SAID ONLY WIN OR LOSE WAS POSSIBLE AND THE VENUE PAID
+        # SOMETHING BETWEEN. That is a disagreement between the partition and
+        # the settlement, and it is counted -- not labelled as either.
+        return {"include": False, "exclusion": X_C_HEDGE_PUSHED,
+                "primary_outcome": outcome}
+    feats = row.get("features")
+    if isinstance(feats, str):
+        try:
+            feats = json.loads(feats)
+        except ValueError:
+            feats = None
+    if not isinstance(feats, dict):
+        return {"include": False, "exclusion": X_C_FEATURES_UNREADABLE}
+    return {"include": True, "primary_outcome": outcome,
+            "label": 1.0 if hw else 0.0,
+            "features": dict(feats, primary_won=1.0 if pw else 0.0)}
+
+
+async def labelled_conditional(conn, *, after=None, through=None,
+                               outcomes_through=None, ids=None) -> dict:
+    """`labelled`'s record shape, for KEY_HEDGE_GIVEN_PRIMARY.
+
+    THE SAME WINDOWS AND THE SAME ROWS `labelled` reads (LABELLED observations
+    only -- a void is still no label), so the training cutoffs, the outcome-
+    availability instants, the label versions and the event-level holdouts are
+    exactly KEY_MIDDLE's. What differs is the target -- did the HEDGE win --
+    and which rows carry it (`conditional_row`). Every row left out is counted
+    under `excluded` by name.
+
+    The feature vector is the observation's frozen one plus `primary_won`, so
+    its sha is distinct from the KEY_MIDDLE vector's.
+    """
+    from . import bettor_funded_model as FMD
+
+    lab = await labelled(conn, after=after, through=through,
+                         outcomes_through=outcomes_through, ids=ids)
+    keys = ("decision_ids", "groups", "fixtures", "decided_at",
+            "feature_shas", "outcome_available_at", "leg_outcomes", "pushes",
+            "outcome_versions")
+    out: dict[str, Any] = {"version": VERSION, "source": SOURCE,
+                           "target": FMD.TARGET_HEDGE_GIVEN_PRIMARY,
+                           "rows": [], "labels": [], "excluded": {},
+                           "by_primary_outcome": {}}
+    for k in keys:
+        out[k] = []
+    if not lab.get("ok"):
+        return dict(out, ok=False, refusal=lab.get("refusal"), n=0,
+                    n_events=0)
+    by_id: dict = {}
+    if lab["decision_ids"]:
+        for r in await conn.fetch(
+                "SELECT observation_id, structure, features, primary_won, "
+                "       hedge_won, primary_settlement_price, "
+                "       hedge_settlement_price "
+                "  FROM bettor_pair_observations "
+                " WHERE observation_id = ANY($1::text[])",
+                [str(x) for x in lab["decision_ids"]]):
+            by_id[r["observation_id"]] = dict(r)
+    for i, oid in enumerate(lab["decision_ids"]):
+        got = conditional_row(by_id.get(oid) or {})
+        if not got["include"]:
+            name = got["exclusion"]
+            out["excluded"][name] = out["excluded"].get(name, 0) + 1
+            continue
+        o = got["primary_outcome"]
+        out["by_primary_outcome"][o] = out["by_primary_outcome"].get(o, 0) + 1
+        out["rows"].append(got["features"])
+        out["labels"].append(got["label"])
+        out["feature_shas"].append(FMD.feature_sha(got["features"]))
+        for k in keys:
+            if k != "feature_shas":
+                out[k].append(lab[k][i])
+    out["n_events"] = len({str(f) for f in out["fixtures"]})
+    return dict(out, ok=True, refusal=None, n=len(out["labels"]),
+                n_excluded=sum(out["excluded"].values()),
+                label_basis=(
+                    "THE HEDGE SIDE WON, from its venue settlement price (LONG "
+                    "at 1, SHORT at 0), GIVEN the primary side won or lost "
+                    "outright -- only where the observation's own payoff table "
+                    "admits exactly two hedge payouts {0, 100} for that primary "
+                    "outcome. A primary push, a hedge push the table does not "
+                    "admit, and a void are not labels; each exclusion is "
+                    "counted by name"))
+
+
+# ═════════════════════════════════════════════════════════════════════
+# 3b · THE VOID RATE, FROM RECORDED OUTCOMES, EVENT-LEVEL
+# ═════════════════════════════════════════════════════════════════════
+
+#: Settled FIXTURES a void rate is stated on. Below this the rate is refused:
+#: a rate from a handful of fixtures is an anecdote with a decimal point.
+MIN_VOID_RATE_FIXTURES = 40
+#: The two-sided 95% normal quantile the Wilson upper bound is taken at.
+_Z95 = 1.959963984540054
+R_VOID_RATE_TOO_FEW_FIXTURES = "TOO_FEW_SETTLED_FIXTURES_TO_STATE_A_VOID_RATE"
+R_VOID_RATE_UNREADABLE = "THE_SETTLED_OUTCOMES_COULD_NOT_BE_READ"
+
+
+def wilson_upper_95(k: int, n: int) -> float | None:
+    """The Wilson score interval's upper 95% bound for k of n. Pure."""
+    if n <= 0:
+        return None
+    import math as _m
+    p = k / float(n)
+    z2 = _Z95 * _Z95
+    centre = p + z2 / (2.0 * n)
+    half = _Z95 * _m.sqrt(p * (1.0 - p) / n + z2 / (4.0 * n * n))
+    return min(1.0, (centre + half) / (1.0 + z2 / n))
+
+
+#: POINT IN TIME, FROM THE LABEL HISTORY. Each observation's label as it stood
+#: at `through` is its latest history version recorded by then -- so a void
+#: declared, or corrected, after `through` is not seen at `through`.
+_VOID_RATE_SQL = """
+    WITH pit AS (
+      SELECT DISTINCT ON (l.observation_id)
+             l.observation_id, l.label_status, l.label_why, l.recorded_at
+        FROM bettor_pair_observation_labels l
+       WHERE ($1::timestamptz IS NULL OR l.recorded_at <= $1::timestamptz)
+       ORDER BY l.observation_id, l.label_version DESC)
+    SELECT o.fixture,
+           bool_or(pit.label_status = $2 AND pit.label_why = $4) AS any_void,
+           count(*) AS observations
+      FROM pit JOIN bettor_pair_observations o USING (observation_id)
+     WHERE pit.label_status = $3
+        OR (pit.label_status = $2 AND pit.label_why = $4)
+     GROUP BY o.fixture
+"""
+
+
+async def void_rate(conn, *, through=None) -> dict:
+    """THE SHARE OF SETTLED FIXTURES THE VENUE DECLARED VOID. Never raises.
+
+    EVENT-LEVEL. A fixture counts once however many observations it has: it
+    is settled when any of its observations was LABELLED or declared void
+    (NOT_A_LABEL with WHY_VOID) by `through`, and void when any of them was
+    declared void -- a single voided contract is a void the fixture's payoff
+    table has to price. Repeated observations of one fixture are one example.
+
+    NO LOOK-AHEAD. Each observation's label is read as it stood at `through`
+    (the latest label version recorded by then), so a void declared or
+    corrected later is not counted earlier. Below MIN_VOID_RATE_FIXTURES the
+    rate is refused. The point rate prices the distribution; the Wilson upper
+    95% bound is carried so a ranking can say whether its choice changes at
+    the rate's upper bound.
+    """
+    import datetime as _d
+
+    thr = through
+    if isinstance(thr, (int, float)):
+        thr = _dt(thr)
+    out: dict[str, Any] = {"version": VERSION, "source": SOURCE,
+                           "through": (None if thr is None else
+                                       thr.timestamp() if isinstance(
+                                           thr, _d.datetime) else str(thr)),
+                           "min_fixtures": MIN_VOID_RATE_FIXTURES}
+    try:
+        if not await has_schema(conn):
+            return dict(out, ok=False, refusal=R_SCHEMA)
+        rows = await conn.fetch(_VOID_RATE_SQL, thr, NOT_A_LABEL, LABELLED,
+                                WHY_VOID)
+    except Exception as exc:                                    # noqa: BLE001
+        return dict(out, ok=False, refusal=R_VOID_RATE_UNREADABLE,
+                    error=type(exc).__name__)
+    n = len(rows)
+    k = sum(1 for r in rows if r["any_void"])
+    out.update(n_fixtures=n, n_void_fixtures=k,
+               basis=("FIXTURES whose observations settled by `through` -- "
+                      "LABELLED, or NOT_A_LABEL because the venue declared a "
+                      "void -- each counted once; void when any of its "
+                      "observations was declared void. Read point-in-time "
+                      "from the label history"))
+    if n < MIN_VOID_RATE_FIXTURES:
+        return dict(out, ok=False, refusal=R_VOID_RATE_TOO_FEW_FIXTURES,
+                    rate=None, upper_95=None,
+                    why=("%d settled fixture(s); a void rate is stated on at "
+                         "least %d" % (n, MIN_VOID_RATE_FIXTURES)))
+    return dict(out, ok=True, refusal=None, rate=k / float(n),
+                upper_95=wilson_upper_95(k, n),
+                upper_95_is="WILSON_SCORE_UPPER_BOUND_AT_95_PERCENT")
+
+
 # ═════════════════════════════════════════════════════════════════════
 # 4 · CANDIDATES FROM THE VENUE'S OWN CATALOGUE, NOT FROM ENTRY ADMISSION
 # ═════════════════════════════════════════════════════════════════════
@@ -1020,9 +1269,15 @@ _PASSES = [0]
 #: The wall-clock budget one pass may spend inside the cycle. Reads already
 #: started finish; nothing new starts after it.
 PASS_BUDGET_S = 60.0
-#: Observation-sourced CANDIDATE models scored per pass. Scoring reads only
-#: the database; it records the evaluation and approves nothing.
+#: Observation-sourced CANDIDATE models scored per pass, across every key
+#: below. Scoring reads only the database; it records the evaluation and
+#: approves nothing.
 EVALUATIONS_PER_PASS = 2
+#: The registry keys observations train: P(both win) and P(hedge wins |
+#: primary outcome). Named here rather than imported at module load so this
+#: module keeps its lazy import of the registry.
+OBSERVATION_MODEL_KEYS = ("funded_pair_middle_region",
+                          "funded_pair_hedge_given_primary")
 
 
 def _candidate_list(candidates, catalogue) -> list:
@@ -1063,23 +1318,32 @@ async def _evaluate_observation_candidates(conn, *, now: float,
     scores are evidence for a named approver, never an approval."""
     from . import bettor_funded_model as FMD
 
-    out: dict[str, Any] = {"scored": [], "promoted_anything": False}
+    out: dict[str, Any] = {"scored": [], "promoted_anything": False,
+                           "model_keys": list(OBSERVATION_MODEL_KEYS)}
     try:
         if not await FMD.has_schema(conn):
             return dict(out, ok=False, refusal=FMD.R_SCHEMA_UNAVAILABLE)
+        # BOTH KEYS IN ONE QUEUE, LEAST RECENTLY SCORED FIRST (never-scored
+        # before all), under one bound: a backlog of one key's candidates
+        # cannot starve the other's, because a scored candidate moves to the
+        # back whichever key it has.
         rows = await conn.fetch(
-            "SELECT model_id FROM bettor_funded_models "
-            " WHERE state=$1 AND model_key=$2 "
+            "SELECT model_id, model_key FROM bettor_funded_models "
+            " WHERE state=$1 AND model_key = ANY($2::text[]) "
             "   AND training_provenance->>'source' = $3 "
             " ORDER BY (evaluation->>'evaluated_at')::float8 NULLS FIRST, "
-            "          created_at DESC LIMIT $4",
-            FMD.STATE_CANDIDATE, FMD.KEY_MIDDLE, FMD.SOURCE_OBSERVATIONS,
-            int(limit))
-        out["candidates_waiting"] = int(await conn.fetchval(
-            "SELECT count(*) FROM bettor_funded_models WHERE state=$1 "
-            "   AND model_key=$2 AND training_provenance->>'source' = $3",
-            FMD.STATE_CANDIDATE, FMD.KEY_MIDDLE, FMD.SOURCE_OBSERVATIONS)
-            or 0)
+            "          created_at DESC, model_id LIMIT $4",
+            FMD.STATE_CANDIDATE, list(OBSERVATION_MODEL_KEYS),
+            FMD.SOURCE_OBSERVATIONS, int(limit))
+        waiting = {r["model_key"]: int(r["n"]) for r in await conn.fetch(
+            "SELECT model_key, count(*) AS n FROM bettor_funded_models "
+            " WHERE state=$1 AND model_key = ANY($2::text[]) "
+            "   AND training_provenance->>'source' = $3 GROUP BY model_key",
+            FMD.STATE_CANDIDATE, list(OBSERVATION_MODEL_KEYS),
+            FMD.SOURCE_OBSERVATIONS)}
+        out["candidates_waiting_by_key"] = {
+            k: waiting.get(k, 0) for k in OBSERVATION_MODEL_KEYS}
+        out["candidates_waiting"] = sum(waiting.values())
     except Exception as exc:                                    # noqa: BLE001
         return dict(out, ok=False, refusal="OBSERVATION_CANDIDATES_UNREADABLE",
                     error=type(exc).__name__)
@@ -1095,7 +1359,8 @@ async def _evaluate_observation_candidates(conn, *, now: float,
         retro = doc.get(FMD.EVIDENCE_RETROSPECTIVE) or {}
         base = ((pros.get("report") or {}).get("baseline") or {})
         out["scored"].append({
-            "model_id": r["model_id"], "ok": ev.get("ok"),
+            "model_id": r["model_id"], "model_key": r["model_key"],
+            "ok": ev.get("ok"),
             "refusal": ev.get("refusal"),
             "prospective_events": pros.get("n_events"),
             "prospective_log_loss": pros.get("log_loss"),
@@ -1104,11 +1369,19 @@ async def _evaluate_observation_candidates(conn, *, now: float,
             "retrospective_out_of_sample_log_loss": retro.get("log_loss"),
             "contamination": (doc.get("contamination") or {}).get("verdict"),
             "required_events": FMD.MIN_EVALUATION_EVENTS})
-    try:
-        out["withdraw"] = await FMD.withdraw_invalidated(conn)
-    except Exception as exc:                                    # noqa: BLE001
-        out["withdraw"] = {"ok": False, "refusal": "WITHDRAWAL_RAISED",
-                           "error": type(exc).__name__}
+    # WITHDRAWAL FOR EVERY KEY THE OBSERVATIONS TRAIN. Retiring only removes
+    # pricing authority; a correction to a training observation must reach
+    # whichever key's approved model rested on it.
+    out["withdraw_by_key"] = {}
+    for key in OBSERVATION_MODEL_KEYS:
+        try:
+            w = await FMD.withdraw_invalidated(conn, model_key=key)
+        except Exception as exc:                                # noqa: BLE001
+            w = {"ok": False, "refusal": "WITHDRAWAL_RAISED",
+                 "error": type(exc).__name__}
+        out["withdraw_by_key"][key] = w
+    # KEY_MIDDLE's, under its established name, for existing readers.
+    out["withdraw"] = out["withdraw_by_key"][FMD.KEY_MIDDLE]
     return dict(out, ok=True, refusal=None)
 
 
@@ -1307,6 +1580,18 @@ async def observation_pass(conn, *, candidates, quoter, prose_reader,
     except Exception as exc:                                # noqa: BLE001
         out["generate"] = {"ok": False, "refusal": "GENERATION_RAISED",
                            "error": type(exc).__name__}
+    # AND THE CONDITIONAL THE PAYOUT-STATE DISTRIBUTION NEEDS, through the
+    # same governed generator: same windows, same event bar, same refit rule,
+    # a CANDIDATE and nothing more.
+    try:
+        out["generate_conditional"] = await FMD.generate_candidate(
+            conn, now=_now(), source=SOURCE,
+            model_key=FMD.KEY_HEDGE_GIVEN_PRIMARY)
+    except Exception as exc:                                # noqa: BLE001
+        out["generate_conditional"] = {
+            "ok": False, "refusal": "GENERATION_RAISED",
+            "model_key": FMD.KEY_HEDGE_GIVEN_PRIMARY,
+            "error": type(exc).__name__}
     # AND SCORED, WITHOUT A FUNDED ACCOUNT. Evidence, not approval.
     out["evaluate"] = await _evaluate_observation_candidates(
         conn, now=_now(), limit=int(evaluations))

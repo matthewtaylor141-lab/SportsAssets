@@ -4299,6 +4299,60 @@ def _exit_candidate_from(sel: dict, *, residual) -> dict | None:
 FD_EVIDENCE_VENUE_IMPLIED = "VENUE_IMPLIED"
 
 
+R_NO_HOLD_PROBABILITY = "HOLD_STATES_NO_PROBABILITY_TO_PRICE_THE_ACQUISITION_ON"
+R_HOLD_PROBABILITY_RECORD_DISAGREES = (
+    "HOLDS_PROBABILITY_DISAGREES_WITH_THE_RECORD_MANAGEMENT_KEPT")
+
+
+def _primary_probability_for(hold_ranking, record) -> dict:
+    """THE PROBABILITY THE HOLD CANDIDATE IS VALUED ON, with its source, or a
+    named refusal. Pure.
+
+    Read from the HOLD candidate's `value_per_contract` -- the number
+    `rank_with_hold` valued HOLD on -- and, where `manage` kept the
+    `ev_hold` record it came from, checked against that record's probability.
+    A HOLD with no stated probability, or one whose record disagrees, supplies
+    nothing: the acquisition is then not priced at all rather than priced on a
+    different marginal from HOLD's.
+    """
+    hold = next((c for c in (hold_ranking or {}).get("candidates") or ()
+                 if str((c or {}).get("action")) == "HOLD"), None)
+    p = None if hold is None else hold.get("value_per_contract")
+    try:
+        p = None if p is None or isinstance(p, bool) else float(p)
+    except (TypeError, ValueError):
+        p = None
+    if p is None or not (0.0 <= p <= 1.0):
+        return {"ok": False, "refusal": R_NO_HOLD_PROBABILITY,
+                "why": ("no priced HOLD candidate states the probability it "
+                        "was valued on (value_per_contract)")}
+    rec = dict(record or {})
+    rp = rec.get("probability")
+    try:
+        rp_f = None if rp is None or isinstance(rp, bool) else float(rp)
+    except (TypeError, ValueError):
+        rp_f = float("nan")
+    if rp is not None and not (rp_f is not None and abs(rp_f - p) <= 1e-12):
+        return {"ok": False, "refusal": R_HOLD_PROBABILITY_RECORD_DISAGREES,
+                "hold_candidate_probability": p, "record_probability": rp,
+                "why": ("the HOLD candidate is valued on %r and the ev_hold "
+                        "record management kept says %r" % (p, rp))}
+    src = dict(rec.get("source") or {})
+    return {"ok": True, "refusal": None, "probability": p,
+            "source": {
+                "from": "hold_ranking.HOLD.value_per_contract",
+                "is": ("the probability HOLD, DIRECT_EXIT and REDUCE are "
+                       "valued on"),
+                "record_checked": rp is not None,
+                "valuation_row_id": rec.get("source_row_id"),
+                "provider": src.get("provider"),
+                "book": src.get("book"),
+                "devig_method": src.get("devig_method"),
+                "version": src.get("version"),
+                "probability_event": rec.get("probability_event"),
+                "payout_event_held": rec.get("payout_event_held")}}
+
+
 def _model_inputs_for(*, held, candidates) -> dict:
     """The feature inputs `predict_for` needs, from the built legs.
 
@@ -4597,8 +4651,8 @@ async def _observation_when_entry_is_blocked(conn, *, now: float,
     return dict(got, ran=True, lane_state="BLOCKED:%s" % blocked_by)
 
 
-async def _registry_state(conn) -> dict:
-    """IS A MODEL APPROVED FOR THE PAIRING KEY. A read, not a substitute.
+async def _registry_state(conn, model_key=None) -> dict:
+    """IS A MODEL APPROVED FOR A PAIRING KEY. A read, not a substitute.
 
     Recorded on the payload so a cycle that produced no hedge says WHICH
     dependency was absent. An empty registry is a missing evidence dependency
@@ -4607,13 +4661,16 @@ async def _registry_state(conn) -> dict:
     """
     from .. import bettor_funded_model as FMD
 
-    out = {"model_key": FMD.KEY_MIDDLE, "approved": False, "refusal": None,
+    key = model_key or FMD.KEY_MIDDLE
+    out = {"model_key": key, "approved": False, "refusal": None,
            "promotion_bar": {"min_rows": FMD.MIN_EVALUATION_ROWS,
                              "min_margin_vs_incumbent": FMD.MIN_SKILL_MARGIN},
-           "asked_by": ("discover, per structure, via "
-                        "bettor_funded_model.predict_for -- not here")}
+           "asked_by": ("the pair cycle, per structure, via "
+                        "bettor_funded_model.predict_distribution (a primary "
+                        "probability supplied) or predict_for (legacy) -- not "
+                        "here")}
     try:
-        got = await FMD.approved(conn, model_key=FMD.KEY_MIDDLE)
+        got = await FMD.approved(conn, model_key=key)
     except Exception as exc:                                    # noqa: BLE001
         out["refusal"] = "REGISTRY_READ_RAISED_" + type(exc).__name__
         return out
@@ -4646,6 +4703,7 @@ async def funded_pair_inputs(conn, pos, *, at, deferred=None,
     """
     from .. import bettor_funded_decision as FD
     from .. import bettor_funded_hedge_supply as HSUP
+    from .. import bettor_funded_model as FMD
 
     out: dict = {"ok": False, "readiness": dict(PAIR_INPUT_READINESS)}
     intent_id = str(pos.get("intent_id") or "")
@@ -4819,6 +4877,19 @@ async def funded_pair_inputs(conn, pos, *, at, deferred=None,
         "not_rankable": not_rankable,
     }
     out["hold_ranking"] = hold_ranking
+    # ── THE PRIMARY PROBABILITY HOLD IS VALUED ON, FOR THE ACQUISITION ──
+    #
+    # `rank_with_hold` values HOLD at `value_per_contract` = the held
+    # position's external probability, and DIRECT_EXIT and REDUCE keep the
+    # unsold part on the same number. The indirect acquisition is priced on
+    # THAT probability too (the payout-state distribution's P(primary wins)),
+    # so all four actions rest on one primary marginal. It is read from the
+    # HOLD candidate that actually enters the ranking -- not re-derived -- and
+    # cross-checked against the probability record `manage` kept beside it; a
+    # disagreement supplies nothing rather than choosing one.
+    primary = _primary_probability_for(hold_ranking,
+                                       (_mr or {}).get("hold_probability"))
+    out["primary_probability_read"] = primary
     out["deferred_selection"] = ({k: sel.get(k) for k in
                                   ("selected", "selected_qty", "limit_price",
                                    "proceeds_per_contract",
@@ -4908,7 +4979,15 @@ async def funded_pair_inputs(conn, pos, *, at, deferred=None,
     # a model approved for this key at all. `region_probabilities` stays None
     # and `discover` asks the model itself.
     regions = await _registry_state(conn)
-    if not regions.get("approved"):
+    if primary.get("ok"):
+        # THE DISTRIBUTION PATH PRICES THE HEDGE, so ITS model is the
+        # dependency to name; KEY_MIDDLE's state is still recorded.
+        cond = await _registry_state(conn, model_key=FMD.KEY_HEDGE_GIVEN_PRIMARY)
+        out["conditional_registry_read"] = cond
+        if not cond.get("approved"):
+            hedge_unavailable.append(cond.get("refusal")
+                                     or R_NO_REGION_PROBABILITY_SOURCE)
+    elif not regions.get("approved"):
         hedge_unavailable.append(regions.get("refusal")
                                  or R_NO_REGION_PROBABILITY_SOURCE)
 
@@ -4983,8 +5062,16 @@ async def funded_pair_inputs(conn, pos, *, at, deferred=None,
                 sport_permits_tie=tie_read.get("permits_tie"),
                 sport_permits_tie_read=tie_read,
                 use_approved_model=bool(regions.get("approved")),
-                model_inputs=_model_inputs_for(
-                    held=held, candidates=cands.get("legs") or []),
+                # THE PRIMARY PROBABILITY TRAVELS WITH THE MODEL INPUTS: with
+                # it the pair cycle prices through the payout-state
+                # distribution (`predict_distribution`); without it only the
+                # legacy KEY_MIDDLE path remains, and that refuses.
+                model_inputs=dict(
+                    _model_inputs_for(held=held,
+                                      candidates=cands.get("legs") or []),
+                    **({"primary_probability": primary["probability"],
+                        "primary_source": primary["source"]}
+                       if primary.get("ok") else {})),
                 limits=None,
                 fee_usd=fee_read.get("fee_usd"),
                 fee_basis=fee_read.get("fee_basis"),
@@ -6945,6 +7032,7 @@ def _observation_digest(po) -> dict | None:
             return {"digest_failed": "not a dict: %s" % type(po).__name__}
         lab = po.get("labels") or {}
         gen = po.get("generate") or {}
+        genc = po.get("generate_conditional") or {}
         ev = po.get("evaluate") or {}
         cat = po.get("catalogue") or {}
         attempts = []
@@ -6994,13 +7082,23 @@ def _observation_digest(po) -> dict | None:
             "generate": {k: gen.get(k) for k in (
                 "ok", "refusal", "error", "reason", "generated", "model_id",
                 "n_events", "training_events_available", "why")},
+            # THE SECOND KEY OBSERVATIONS TRAIN: P(hedge wins | primary
+            # outcome), which the payout-state distribution prices from.
+            "generate_conditional": {k: genc.get(k) for k in (
+                "ok", "refusal", "error", "model_key", "reason", "generated",
+                "model_id", "n_events", "training_events_available", "why")},
             "evaluate": {
                 "ok": ev.get("ok"), "refusal": ev.get("refusal"),
                 "error": ev.get("error"),
                 "candidates_waiting": ev.get("candidates_waiting"),
+                "candidates_waiting_by_key": ev.get(
+                    "candidates_waiting_by_key"),
                 "scored": list((ev.get("scored") or [])
                                [:SERVICING_DIGEST_LIMIT]),
                 "withdraw": _withdraw_digest(ev.get("withdraw")),
+                "withdraw_by_key": {
+                    k: _withdraw_digest(w) for k, w in
+                    (ev.get("withdraw_by_key") or {}).items()},
                 "promoted_anything": ev.get("promoted_anything")},
             "venue_usage": po.get("venue_usage"),
             "sent_anything": po.get("sent_anything"),
