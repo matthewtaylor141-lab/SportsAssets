@@ -534,6 +534,63 @@ def _break_points(legs: tuple[Leg, ...]) -> list[int]:
     return sorted(pts)
 
 
+#: AN INTEGER TOTAL LINE IS A PUSH THE PARTITION DOES NOT ISOLATE.
+#:
+#: THE DEFECT, MEASURED (map of aca3564, §1). The total partition below breaks
+#: only at floor(line), and `_leg_payout_cents` recognises a push only when a
+#: cell's lower bound IS the line. A half-integer line is exactly right under
+#: that rule. An integer line is not: OVER 20 + UNDER 23 with an established
+#: refund-push clause gives "total in [0, 20]" = [0, 100] and "total in
+#: [21, 23]" = [100, 100] -- totals 20 and 23 should push and are graded as a
+#: loss and a win instead. Integer SPREADS are isolated correctly (every
+#: +/-floor(line) is a margin break point, so the push has its own cell).
+#:
+#: So a total leg with an integer line is REFUSED by name wherever a table is
+#: built from it, rather than priced on a partition that folds its push into a
+#: neighbouring cell. Repairing the partition is a separate, tested change.
+R_INTEGER_TOTAL_PUSH_NOT_ISOLATED = (
+    "AN_INTEGER_TOTAL_LINE_CAN_PUSH_AND_THE_PARTITION_DOES_NOT_ISOLATE_IT")
+
+
+def integer_total_push_gaps(legs) -> list[str]:
+    """One named gap per total leg whose line is an integer. Pure."""
+    out = []
+    for leg in legs:
+        line = getattr(leg, "line", None)
+        if (getattr(leg, "kind", None) == KIND_TOTAL and line is not None
+                and Fraction(line).denominator == 1):
+            out.append(
+                "%s: total %s has the integer line %s, so the total can land "
+                "exactly on it, and the total partition breaks only at "
+                "floor(line) -- the push would be folded into a neighbouring "
+                "cell and priced as a win or a loss"
+                % (R_INTEGER_TOTAL_PUSH_NOT_ISOLATED, leg.condition_id, line))
+    return out
+
+
+def leg_grading(legs) -> tuple[dict, ...]:
+    """THE GRADING FACTS OF EACH LEG, recorded on the structure.
+
+    The table's region labels do not carry the lines -- "total in [0, 20]" is
+    the same label for an OVER 20.5 and an OVER 20 -- so a consumer that must
+    refuse the integer-total defect above cannot tell the two apart from the
+    table alone. This is what it reads instead. Index order is the leg order
+    the table's `per_leg_cents` uses.
+    """
+    out = []
+    for leg in legs:
+        line = getattr(leg, "line", None)
+        out.append({"condition_id": getattr(leg, "condition_id", None),
+                    "kind": getattr(leg, "kind", None),
+                    "variable": getattr(leg, "variable", None),
+                    "period": getattr(leg, "period", None),
+                    "overtime": getattr(leg, "overtime", None),
+                    "backs": getattr(leg, "backs", None),
+                    "over_under": getattr(leg, "over_under", None),
+                    "line": None if line is None else str(Fraction(line))})
+    return tuple(out)
+
+
 def payoff_table(legs: tuple[Leg, ...],
                  *, sport_permits_tie: bool,
                  fixture_can_void: bool = True,
@@ -623,6 +680,8 @@ class Structure:
     guaranteed_gross_result_cents: int | None = None
     missing_facts: tuple[str, ...] = ()
     table: tuple[dict, ...] = ()
+    #: Each leg's grading facts, in `per_leg_cents` order (see `leg_grading`).
+    leg_grading: tuple[dict, ...] = ()
     label_is: str = LABEL_IS
     label_is_not: str = LABEL_IS_NOT
     why: str = ""
@@ -671,9 +730,15 @@ def classify(leg_a: Leg, leg_b: Leg, *,
     # because the unknown cell was deleted.
     gaps.extend(void_suppression_hides((leg_a, leg_b),
                                        fixture_can_void=fixture_can_void))
+    # AN INTEGER TOTAL LINE'S PUSH IS NOT ISOLATED by the total partition (see
+    # R_INTEGER_TOTAL_PUSH_NOT_ISOLATED), so its table would grade the push as
+    # a win or a loss. Refused here, before any floor is computed from it.
+    gaps.extend(integer_total_push_gaps((leg_a, leg_b)))
+    grading = leg_grading((leg_a, leg_b))
     if gaps:
         return Structure(taxonomy=UNESTABLISHABLE,
                          legs=(leg_a.condition_id, leg_b.condition_id),
+                         leg_grading=grading,
                          missing_facts=tuple(gaps),
                          why=("classification refused: %d fact(s) needed to "
                               "build a payout function are not established"
@@ -699,7 +764,7 @@ def classify(leg_a: Leg, leg_b: Leg, *,
     if not determined:
         return Structure(taxonomy=UNESTABLISHABLE,
                          legs=(leg_a.condition_id, leg_b.condition_id),
-                         table=tuple(table),
+                         table=tuple(table), leg_grading=grading,
                          undetermined_regions=undet,
                          unresolved_states=unresolved,
                          missing_facts=("no region has a determined joint "
@@ -770,6 +835,7 @@ def classify(leg_a: Leg, leg_b: Leg, *,
         locks_gross_surplus=locks,
         guaranteed_gross_result_cents=guaranteed,
         table=tuple(table),
+        leg_grading=grading,
         why=why,
     )
 
