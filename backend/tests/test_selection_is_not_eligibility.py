@@ -146,9 +146,15 @@ def test_eligibility_is_earned_and_each_failure_is_NAMED(
     from sportsassets import bettor_account_onboarding as ON
     from sportsassets.api import app as A
 
+    # THE SHAPE `reconciliation_evidence` REALLY RETURNS: `present`, `usable`
+    # and `passes` -- it has never returned `ok`. This stub used to answer
+    # `ok`, which pinned the route's bug (it tested that key, so `eligible`
+    # was always False against the real function).
     async def _recon(conn, *, account_id=None, **kw):
-        return ({"ok": True, "refusal": None, "age_s": 12.0} if recon_ok
-                else {"ok": False, "refusal": ON.R_NO_EVIDENCE})
+        return ({"present": True, "usable": True, "passes": True,
+                 "refusal": None, "age_s": 12.0} if recon_ok
+                else {"present": False, "usable": False,
+                      "refusal": ON.R_NO_EVIDENCE})
 
     async def _expo(conn, *, account_id=None, venue_positions=None, now=None):
         return {"total": None, "refusal": "TOTAL_UNREADABLE"}

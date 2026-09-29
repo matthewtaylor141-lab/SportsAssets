@@ -3767,9 +3767,17 @@ async def admin_funded_account_eligibility(
                         "why": type(exc).__name__}
 
     writers = CP.account_writers()
+    # THE FIELD `reconciliation_evidence` ACTUALLY RETURNS. This tested the
+    # evidence's `ok` key for True, a key that function never sets, so
+    # `eligible` was False for every account however clean -- a report that
+    # can only say no reports nothing. Evidence passes when it is usable
+    # (present, this account's, fresh and complete) AND passing; both are
+    # required. This route still only REPORTS: it unpauses nothing.
+    evidence_passes = (evidence.get("usable") is True
+                       and evidence.get("passes") is True)
     eligible = bool(row and str(row.get("status", "")).upper() == "ACTIVE"
                     and not row.get("paused")
-                    and evidence.get("ok") is True)
+                    and evidence_passes)
     return {
         "account_id": acct,
         "selected_for_assessment": acct is not None,
@@ -3792,7 +3800,7 @@ async def admin_funded_account_eligibility(
                 "the account is PAUSED" if row is not None
                 and row.get("paused") else None,
                 ("reconciliation: %s" % evidence.get("refusal"))
-                if evidence.get("ok") is not True else None,
+                if not evidence_passes else None,
             ) if r]),
         "and_a_one_position_rule_does_not_isolate_this_account": (
             "a limit of one concurrent position in THIS lane bounds what this "
@@ -3801,6 +3809,69 @@ async def admin_funded_account_eligibility(
         "this_route_is_read_only": {"method": "GET", "writes": 0,
                                     "venue_calls": 0},
     }
+
+
+# ── D5a: THE DISCREPANCY REPORT AND SETTLEMENT CORRECTIONS ────────────
+#
+# One contiguous block of NEW routes. None of them unpauses an account,
+# changes an accounting status, or submits anything to a venue.
+
+@app.post("/api/admin/funded-account-discrepancy-report",
+          dependencies=[Depends(require_admin)])
+async def admin_funded_account_discrepancy_report(response: Response,
+                                                  account_id: str = "",
+                                                  venue: str = "",
+                                                  by: str = "operator"
+                                                  ) -> dict:
+    """THE VENUE AND THE BOOK COMPARED IN BOTH DIRECTIONS, AND KEPT.
+
+    Runs the strict venue reads (balances, open orders, positions, the
+    account-wide activity walk), compares them with this system's book in
+    BOTH directions, keeps the report in the append-only history and writes
+    the latest-evidence key. The report -- balances included -- is returned
+    to the authenticated caller and is not logged.
+
+    IT DECIDES NOTHING: `would_be_eligible` is information, `pause_kept` is
+    always true, and nothing here unpauses an account, changes its accounting
+    status or places, modifies or cancels anything at the venue.
+    """
+    from .. import bettor_account_onboarding as ON
+    from .. import bettor_funded_activation as FA
+    from ..db import get_pool
+
+    response.headers["Cache-Control"] = "no-store"
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        if not account_id or not venue:
+            bound = FA._obj(await FA._state(conn, FA.ACCOUNT_KEY)) or {}
+            account_id = account_id or str(bound.get("account_id") or "")
+            venue = venue or str(bound.get("venue") or "")
+        if not account_id or not venue:
+            response.status_code = 409
+            return {"ok": False, "refusal": ON.R_NO_ACCOUNT_NAMED,
+                    "why": ("name the account and venue, or bind one first. "
+                            "A report on an unnamed account is not a check")}
+        rep = await ON.record_discrepancy_report(
+            conn, account_id=account_id, venue=venue, by=str(by or ""))
+    if not rep.get("ok"):
+        response.status_code = 409
+    return rep
+
+
+@app.get("/api/admin/funded-account-discrepancy-reports",
+         dependencies=[Depends(require_admin)])
+async def admin_funded_account_discrepancy_reports(
+        response: Response, account_id: str | None = None,
+        limit: int = 50) -> dict:
+    """THE REPORT HISTORY: ids, times and verdict fields -- not the bodies."""
+    from .. import bettor_account_onboarding as ON
+    from ..db import get_pool
+
+    response.headers["Cache-Control"] = "no-store"
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        return await ON.report_history(conn, account_id=account_id,
+                                       limit=int(limit))
 
 
 @app.get("/api/admin/funded-account-registry",
