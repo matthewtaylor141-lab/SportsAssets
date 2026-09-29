@@ -1095,6 +1095,124 @@ async def reconcile_and_learn(conn, *, group_id: str,
     return dict(out, ok=not out["not_joined"])
 
 
+#: How many unjoined decisions and candidate models one scheduled pass reads.
+#: Bounded so a backlog is worked down over cycles rather than in one.
+LEARNING_DECISIONS_PER_PASS = 100
+LEARNING_CANDIDATES_PER_PASS = 5
+
+
+async def scheduled_learning_pass(conn, *, account_id: str,
+                                  now: float | None = None) -> dict:
+    """THE LEARNING LOOP, RUN BY THE SCHEDULE: JOIN, THEN EVALUATE. NEVER PROMOTE.
+
+    THE GAP THIS CLOSES. `reconcile_and_learn`, `bettor_funded_model.evaluate`,
+    `promote` and `rollback` were complete and tested, and NOTHING outside the
+    tests called any of them. A finished position's result never reached its
+    decisions, so no label existed, so no candidate could be scored, so the
+    registry could not change however many positions closed.
+
+    WHAT RUNS, every cycle, whether or not entry is paused:
+
+      1 JOIN. Every decision without a realised outcome is grouped by its
+        portfolio group and `reconcile_and_learn` attaches the group's result as
+        a VERSIONED outcome, with the group's P&L written once. A group still
+        open is refused by `join_realised` and reported as waiting, not failed.
+      2 EVALUATE. Every CANDIDATE model is scored by `evaluate`, which reads the
+        prospective window from the registry itself and clusters by group, so a
+        caller cannot widen it. Too few labels is reported as such.
+
+    WHAT DOES NOT RUN, deliberately: `promote`. Promotion changes which model
+    prices capital decisions, and it requires a named approver; a schedule is
+    not one. This pass reports whether each candidate's evaluation exists and
+    what it measured, and stops there. Nothing here touches authorization,
+    limits or evidence requirements.
+    """
+    at = float(now if now is not None else time.time())
+    out: dict[str, Any] = {"version": VERSION, "at": at,
+                           "account_id": account_id,
+                           "promoted_anything": False,
+                           "promotion": ("NOT_SCHEDULED: promotion requires a "
+                                         "named approver")}
+    # ── 1 · JOIN ────────────────────────────────────────────────────
+    try:
+        pending = [d for d in await FL.unjoined(
+            conn, limit=LEARNING_DECISIONS_PER_PASS)
+            if str(d.get("account_id")) == str(account_id)]
+    except Exception as exc:                                   # noqa: BLE001
+        out["join"] = {"ok": False, "refusal": "UNJOINED_DECISIONS_UNREADABLE",
+                       "error": "%s: %s" % (type(exc).__name__,
+                                            str(exc)[:200])}
+        pending = None
+    if pending is not None:
+        by_group: dict = {}
+        ungrouped = []
+        for d in pending:
+            gid = d.get("group_id")
+            if gid:
+                by_group.setdefault(str(gid), []).append(d["decision_id"])
+            else:
+                ungrouped.append(d["decision_id"])
+        joined, waiting, refused = [], [], []
+        for gid, dids in by_group.items():
+            try:
+                got = await reconcile_and_learn(conn, group_id=gid,
+                                                decision_ids=dids)
+            except Exception as exc:                           # noqa: BLE001
+                refused.append({"group_id": gid,
+                                "refusal": "JOIN_RAISED",
+                                "error": "%s: %s" % (type(exc).__name__,
+                                                     str(exc)[:160])})
+                continue
+            joined += [j["decision_id"] for j in got.get("joined") or []]
+            for nj in got.get("not_joined") or []:
+                row = {"group_id": gid, "decision_id": nj.get("decision_id"),
+                       "refusal": nj.get("refusal")}
+                (waiting if nj.get("refusal") in (
+                    FL.R_POSITION_IS_STILL_OPEN, FL.R_NO_ECONOMICS_YET)
+                 else refused).append(row)
+        out["join"] = {"ok": True, "examined": len(pending),
+                       "joined": joined, "waiting_for_the_position": waiting,
+                       "refused": refused,
+                       "without_a_group": ungrouped}
+    # ── 2 · EVALUATE ────────────────────────────────────────────────
+    try:
+        if not await FMD.has_schema(conn):
+            out["evaluate"] = {"ok": False,
+                               "refusal": FMD.R_SCHEMA_UNAVAILABLE}
+            return dict(out, ok=False)
+        cands = [r["model_id"] for r in await conn.fetch(
+            "SELECT model_id FROM bettor_funded_models WHERE state=$1 "
+            " ORDER BY created_at LIMIT $2", FMD.STATE_CANDIDATE,
+            LEARNING_CANDIDATES_PER_PASS)]
+    except Exception as exc:                                   # noqa: BLE001
+        out["evaluate"] = {"ok": False, "refusal": "CANDIDATES_UNREADABLE",
+                           "error": "%s: %s" % (type(exc).__name__,
+                                                str(exc)[:200])}
+        return dict(out, ok=False)
+    scored = []
+    for mid in cands:
+        try:
+            ev = await FMD.evaluate(conn, model_id=mid, account_id=account_id,
+                                    now=at)
+        except Exception as exc:                               # noqa: BLE001
+            scored.append({"model_id": mid, "ok": False,
+                           "refusal": "EVALUATION_RAISED",
+                           "error": "%s: %s" % (type(exc).__name__,
+                                                str(exc)[:160])})
+            continue
+        rep = ev.get("evaluation") or {}
+        scored.append({
+            "model_id": mid, "ok": ev.get("ok"), "refusal": ev.get("refusal"),
+            "n": ev.get("n"),
+            FMD.PROMOTION_METRIC: rep.get(FMD.PROMOTION_METRIC),
+            "prospective": (rep.get("prospective") or {}).get("verdict"),
+            "awaiting": ("an owner's approval through promote()"
+                         if ev.get("ok") else None)})
+    out["evaluate"] = {"ok": True, "candidates": len(cands),
+                       "scored": scored}
+    return dict(out, ok=True)
+
+
 # ═════════════════════════════════════════════════════════════════════
 # 6 · WHAT AN OPERATOR HAS TO SEE
 # ═════════════════════════════════════════════════════════════════════

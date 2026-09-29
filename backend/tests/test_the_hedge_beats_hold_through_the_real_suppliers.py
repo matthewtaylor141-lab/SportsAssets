@@ -343,22 +343,14 @@ async def _promote_a_model(conn):
     # job: a fee event may not outlive the position it was charged on.
     await _clean(conn)
     await lp._clean(conn)
-    coh = await lp._cohort(conn, skill=True)
-    if not coh.get("ok"):
-        pytest.skip("the learning cohort could not be built here: %r" % (coh,))
-    lab = await FMD.labelled(conn, after=lp.FIT_THROUGH,
-                             account_id=lp.ACCT)
-    if not lab.get("ok") or lab["n"] < FMD.MIN_EVALUATION_ROWS:
-        pytest.skip("too few labels to promote a model here: %r" % (lab,))
-    fitted = FMD.fit(lab["rows"], lab["labels"])
-    await FMD.register(conn, model_id="hedgewins-model",
-                       model_version="v-hedgewins", fitted=fitted,
-                       fit_through=lp.FIT_THROUGH)
-    await FMD.evaluate(conn, model_id="hedgewins-model", account_id=lp.ACCT)
-    prom = await FMD.promote(conn, model_id="hedgewins-model",
-                             approved_by="integration-test")
-    if not prom.get("ok"):
-        pytest.skip("the model did not clear its own bar here: %r" % (prom,))
+    # THE SAME SPLIT PIPELINE the learning file uses: fit on fixtures decided
+    # inside the window, score on later ones. This used to fit on the rows it
+    # then scored, and SKIPPED when the model did not clear its bar -- a proof
+    # this file depends on, quietly not run. A failure here now fails.
+    got = await lp._run_pipeline(conn, model_id="hedgewins-model", skill=True)
+    prom = got["promotion"]
+    assert prom.get("ok"), ("the approved model this proof needs was not "
+                            "promoted: %r" % (prom,))
     await lp._clean(conn)
     return prom
 

@@ -91,13 +91,23 @@ R_NOTHING_TO_ROLL_BACK_TO = "NO_EARLIER_APPROVED_VERSION_TO_ROLL_BACK_TO"
 R_NO_OUTSIDE_SPLIT = "NO_PROBABILITY_WAS_STATED_FOR_THE_REGIONS_OUTSIDE_THE_MIDDLE"
 R_SPLIT_DOES_NOT_SUM = "THE_OUTSIDE_SPLIT_DOES_NOT_SUM_TO_ONE"
 R_NO_LABEL = "THE_FIXTURES_RESOLUTION_IS_NOT_RECORDED"
+R_TRAINING_WINDOW_NOT_STATED = "THE_FIT_DOES_NOT_STATE_WHEN_ITS_ROWS_WERE_DECIDED"
+R_FIT_WINDOW_UNDERSTATED = "THE_DECLARED_FIT_WINDOW_ENDS_BEFORE_ROWS_IT_WAS_FIT_ON"
+R_EVALUATION_NOT_EVENT_LEVEL = "THE_EVALUATION_DOES_NOT_COUNT_DISTINCT_FIXTURES"
 
 #: ── THE PROMOTION BAR, DECLARED HERE AND NOT PER CALL ───────────────
 #:
 #: A threshold chosen at promotion time is a threshold chosen to be cleared. These
 #: are the lane's, they are readable before any candidate exists, and `promote`
 #: takes no argument that can loosen them.
+#:
+#: THE 40 IS FIXTURES, NOT DECISIONS. The funded lane records a decision for a
+#: held position on every cycle, so forty decisions can be two fixtures seen
+#: twenty times -- and repeated observations of one fixture are not independent
+#: examples: they share one outcome. `evaluate` counts distinct fixtures
+#: (`n_events`) and both it and `promote` apply the bar to that count.
 MIN_EVALUATION_ROWS = 40
+MIN_EVALUATION_EVENTS = MIN_EVALUATION_ROWS
 MIN_SKILL_MARGIN = 0.01          # in log loss, against the incumbent
 PROMOTION_METRIC = "log_loss"
 
@@ -180,7 +190,8 @@ def feature_sha(features: dict) -> str:
 # 2 · FITTING, THROUGH THE EXISTING KERNEL
 # ═════════════════════════════════════════════════════════════════════
 
-def fit(rows, labels, *, estimator: str = "RIDGE_LOGISTIC", **kw) -> dict:
+def fit(rows, labels, *, estimator: str = "RIDGE_LOGISTIC", decided_at=None,
+        **kw) -> dict:
     """FIT ONE CANDIDATE. `rows` are feature dicts; `labels` are 0/1.
 
     Returns the model's own `to_dict()` plus the training base rate, which the
@@ -204,7 +215,23 @@ def fit(rows, labels, *, estimator: str = "RIDGE_LOGISTIC", **kw) -> dict:
            if estimator == "BASE_RATE"
            else _ESTIMATOR_CLASS[estimator](list(FEATURES), **kw))
     mdl.fit(list(rows), ys)
+    # ── WHEN THE ROWS IT WAS FIT ON WERE DECIDED ─────────────────────
+    #
+    # `register` needs this to check the caller's `fit_through`. Without it the
+    # declared window was taken on trust, and a model fit on the very decisions
+    # it was then scored on was reported PROSPECTIVE: the leak check compares
+    # the evaluation rows with `fit_through`, and a `fit_through` declared
+    # before the training rows makes that comparison vacuous.
+    trained_through = None
+    if decided_at is not None:
+        ts = [float(t) for t in decided_at]
+        if len(ts) != len(ys):
+            return dict(out, ok=False, refusal=R_TRAINING_WINDOW_NOT_STATED,
+                        why=("%d decision instants for %d labels"
+                             % (len(ts), len(ys))))
+        trained_through = max(ts)
     return dict(out, ok=True, refusal=None,
+                trained_through_epoch_s=trained_through,
                 params=mdl.to_dict(), kernel=K.VERSION,
                 features=list(FEATURES), train_rows=len(ys),
                 train_base_rate=round(sum(ys) / len(ys), 9),
@@ -263,6 +290,29 @@ async def register(conn, *, model_id: str, model_version: str, fitted: dict,
     if not fitted.get("ok"):
         return dict(out, ok=False, refusal=fitted.get("refusal"),
                     why="the fit itself did not succeed")
+    # ── THE DECLARED WINDOW IS CHECKED AGAINST THE ROWS, NOT BELIEVED ──
+    trained = fitted.get("trained_through_epoch_s")
+    if trained is None:
+        return dict(out, ok=False, refusal=R_TRAINING_WINDOW_NOT_STATED,
+                    why=("the fit does not say when the rows it learned from "
+                         "were decided, so `fit_through` cannot be checked and "
+                         "every prospective claim made against it would be "
+                         "the caller's word. Pass `decided_at` to `fit`"))
+    try:
+        declared = (fit_through.timestamp() if hasattr(fit_through,
+                                                       "timestamp")
+                    else float(fit_through))
+    except (TypeError, ValueError):
+        declared = None
+    if declared is None or declared < float(trained):
+        return dict(out, ok=False, refusal=R_FIT_WINDOW_UNDERSTATED,
+                    declared_fit_through_epoch_s=declared,
+                    trained_through_epoch_s=float(trained),
+                    why=("the fit learned from a decision made at %r and "
+                         "declares it could see nothing after %r. Every "
+                         "evaluation row between the two would be scored as "
+                         "prospective while the fit had seen it"
+                         % (trained, declared)))
     await conn.execute(
         "INSERT INTO bettor_funded_models "
         "(model_id, model_key, model_version, state, kernel, estimator, "
@@ -308,7 +358,7 @@ async def approved(conn, *, model_key: str = KEY_MIDDLE) -> dict:
 # ═════════════════════════════════════════════════════════════════════
 
 LABEL_SQL = """
-    SELECT d.decision_id, d.group_id, d.features, d.feature_sha,
+    SELECT d.decision_id, d.group_id, d.fixture, d.features, d.feature_sha,
            d.model_version, d.predicted,
            extract(epoch FROM d.decided_at) AS decided_epoch,
            d.decided_at,
@@ -387,7 +437,7 @@ LABEL_SQL = """
 
 
 async def labelled(conn, *, model_key: str = KEY_MIDDLE, after=None,
-                   account_id: str | None = None) -> dict:
+                   account_id: str | None = None, through=None) -> dict:
     """EVERY DECISION WHOSE FIXTURE HAS RESOLVED, with its prospective vector.
 
     THE LABEL COMES FROM THE VENUE'S SETTLEMENT, per leg. `middle_occurred` is
@@ -405,6 +455,11 @@ async def labelled(conn, *, model_key: str = KEY_MIDDLE, after=None,
     if after is not None:
         args.append(after)
         sql += " AND d.decided_at > $%d" % len(args)
+    if through is not None:
+        # THE TRAINING SIDE OF A SPLIT: rows decided no later than `through`,
+        # which is then the `fit_through` a registration declares.
+        args.append(through)
+        sql += " AND d.decided_at <= $%d" % len(args)
     if account_id is not None:
         args.append(str(account_id))
         sql += " AND d.account_id = $%d" % len(args)
@@ -424,6 +479,7 @@ async def labelled(conn, *, model_key: str = KEY_MIDDLE, after=None,
         out["labels"].append(1.0 if r["middle_occurred"] else 0.0)
         out.setdefault("decision_ids", []).append(r["decision_id"])
         out.setdefault("groups", []).append(r["group_id"])
+        out.setdefault("fixtures", []).append(r["fixture"])
         out.setdefault("decided_at", []).append(float(r["decided_epoch"]))
     return dict(out, ok=True, refusal=None, n=len(out["labels"]),
                 label_basis=("BOTH LEGS PAID, from each leg's own venue "
@@ -468,13 +524,39 @@ async def evaluate(conn, *, model_id: str, account_id: str | None = None,
     if not lab.get("ok"):
         return dict(out, ok=False, refusal=lab["refusal"],
                     error=lab.get("error"))
+    # ── A FIXTURE THE FIT COULD HAVE SEEN IS HELD OUT WHOLE ──────────
+    #
+    # The label belongs to the FIXTURE, not the decision. A fixture with any
+    # decision inside the fit window may have contributed its outcome to the
+    # fit, so a later decision on it is not a fresh example of anything -- it
+    # re-asks a question whose answer the model was trained on. Every such
+    # fixture's rows are dropped here, and how many is reported.
+    seen = {str(r["fixture"]) for r in await conn.fetch(
+        "SELECT DISTINCT fixture FROM bettor_funded_decisions "
+        " WHERE decided_at <= $1", mdl["fit_through"])}
+    keep = [i for i, fx in enumerate(lab.get("fixtures") or [])
+            if str(fx) not in seen]
+    dropped_fixtures = sorted({str(lab["fixtures"][i])
+                               for i in range(len(lab.get("fixtures") or []))
+                               if str(lab["fixtures"][i]) in seen})
+    for k in ("rows", "labels", "decision_ids", "groups", "fixtures",
+              "decided_at"):
+        if lab.get(k) is not None:
+            lab[k] = [lab[k][i] for i in keep]
+    lab["n"] = len(keep)
+    n_events = len({str(f) for f in lab.get("fixtures") or []})
     out["n"] = lab["n"]
-    if lab["n"] < MIN_EVALUATION_ROWS:
+    out["n_events"] = n_events
+    out["fixtures_held_out_because_the_fit_could_see_them"] = dropped_fixtures
+    if n_events < MIN_EVALUATION_EVENTS:
         return dict(out, ok=False, refusal=R_TOO_FEW_LABELS,
-                    n=lab["n"], required=MIN_EVALUATION_ROWS,
-                    why=("%d labelled decision(s) after this model's fit "
-                         "window. A promotion on fewer is a promotion on noise"
-                         % lab["n"]))
+                    n=lab["n"], n_events=n_events,
+                    required_events=MIN_EVALUATION_EVENTS,
+                    why=("%d distinct fixture(s) -- %d labelled decision(s) -- "
+                         "after this model's fit window. Repeated decisions on "
+                         "one fixture share its outcome and are not separate "
+                         "examples, and a promotion on fewer fixtures is a "
+                         "promotion on noise" % (n_events, lab["n"])))
     obj = load(mdl["params"])
     preds = [float(obj.predict(r)) for r in lab["rows"]]
     rep = M.report(preds, lab["labels"],
@@ -495,8 +577,15 @@ async def evaluate(conn, *, model_id: str, account_id: str | None = None,
                              "its memory, and that is how a model with no skill "
                              "gets promoted"),
     }
+    rep["n_events"] = n_events
+    rep["fixtures_held_out_because_the_fit_could_see_them"] = \
+        dropped_fixtures
     rep["clustered_by_group"] = M.clustered_jackknife(
         preds, lab["labels"], lab.get("groups", []),
+        M.skill_stat(mdl.get("train_base_rate")))
+    # AND BY FIXTURE, which is the unit the label belongs to.
+    rep["clustered_by_fixture"] = M.clustered_jackknife(
+        preds, lab["labels"], lab.get("fixtures", []),
         M.skill_stat(mdl.get("train_base_rate")))
     await conn.execute(
         "UPDATE bettor_funded_models SET evaluation=$2::jsonb "
@@ -554,9 +643,15 @@ async def promote(conn, *, model_id: str, approved_by: str,
     if pros.get("verdict") != "PROSPECTIVE":
         return dict(out, ok=False, refusal=R_EVALUATION_NOT_PROSPECTIVE,
                     prospective=pros)
-    if int(ev.get("n") or 0) < MIN_EVALUATION_ROWS:
+    if ev.get("n_events") is None:
+        return dict(out, ok=False, refusal=R_EVALUATION_NOT_EVENT_LEVEL,
+                    why=("this evaluation predates fixture-level counting, so "
+                         "how many independent outcomes it saw is unknown. "
+                         "Re-run `evaluate`"))
+    if int(ev.get("n_events") or 0) < MIN_EVALUATION_EVENTS:
         return dict(out, ok=False, refusal=R_TOO_FEW_LABELS,
-                    n=ev.get("n"), required=MIN_EVALUATION_ROWS)
+                    n=ev.get("n"), n_events=ev.get("n_events"),
+                    required_events=MIN_EVALUATION_EVENTS)
     # ── THE BAR ──────────────────────────────────────────────────────
     inc = _row(await conn.fetchrow(
         "SELECT * FROM bettor_funded_models "

@@ -109,6 +109,17 @@ def _synthetic(n=200):
 # SEEDING THE LEDGER WITH RESOLVED DECISIONS TO EVALUATE AGAINST
 # ════════════════════════════════════════════════════════════════════
 
+def _trained_before(rows):
+    """WHEN THE SYNTHETIC TRAINING ROWS WERE DECIDED: sixty days back, inside
+    every fit window these tests declare. `register` now checks the declared
+    window against the fit's own rows, so the rows have to say when they were
+    decided -- and these are not the evaluation decisions, which are separate
+    fixtures recorded after the window."""
+    from datetime import datetime as _d, timedelta as _t, timezone as _z
+    start = (_d.now(_z.utc) - _t(days=60)).timestamp()
+    return [start + 60.0 * i for i in range(len(rows))]
+
+
 async def _clean(conn):
     await conn.execute(
         "DELETE FROM bettor_funded_decision_outcomes WHERE decision_id IN "
@@ -225,7 +236,7 @@ def test_the_fit_uses_the_shipped_kernel_and_carries_its_training_base_rate():
     known is flattered on exactly the split where drift shows up.
     """
     rows, labels = _synthetic()
-    got = FMD.fit(rows, labels, estimator="RIDGE_LOGISTIC")
+    got = FMD.fit(rows, labels, decided_at=_trained_before(rows), estimator="RIDGE_LOGISTIC")
     assert got["ok"] is True, got
     assert got["kernel"].startswith("BETTOR_LEARN_KERNEL")
     assert got["params"]["kind"] == "RIDGE_LOGISTIC"
@@ -243,7 +254,7 @@ def test_the_fit_uses_the_shipped_kernel_and_carries_its_training_base_rate():
 
 def test_an_unknown_estimator_is_refused_not_defaulted():
     rows, labels = _synthetic(40)
-    got = FMD.fit(rows, labels, estimator="XGBOOST")
+    got = FMD.fit(rows, labels, decided_at=_trained_before(rows), estimator="XGBOOST")
     assert got["ok"] is False
     assert got["refusal"] == FMD.R_ESTIMATOR_UNKNOWN
     assert "RIDGE_LOGISTIC" in got["recognised"]
@@ -301,7 +312,7 @@ async def test_a_candidate_has_no_authority_over_a_decision():
     try:
         await _clean(conn)
         rows, labels = _synthetic()
-        fitted = FMD.fit(rows, labels)
+        fitted = FMD.fit(rows, labels, decided_at=_trained_before(rows))
         reg = await FMD.register(
             conn, model_id="mdl:learns-cand", model_version="v1",
             fitted=fitted,
@@ -328,7 +339,7 @@ async def test_a_promotion_is_refused_without_enough_prospective_labels():
         fit_through = datetime.now(timezone.utc) - timedelta(days=30)
         rows, labels = _synthetic()
         await FMD.register(conn, model_id="mdl:learns-thin",
-                           model_version="v1", fitted=FMD.fit(rows, labels),
+                           model_version="v1", fitted=FMD.fit(rows, labels, decided_at=_trained_before(rows)),
                            fit_through=fit_through)
         # TOO FEW RESOLVED DECISIONS AFTER THE FIT WINDOW.
         for i in range(5):
@@ -338,7 +349,9 @@ async def test_a_promotion_is_refused_without_enough_prospective_labels():
         ev = await FMD.evaluate(conn, model_id="mdl:learns-thin")
         assert ev["ok"] is False
         assert ev["refusal"] == FMD.R_TOO_FEW_LABELS
-        assert ev["n"] == 5 and ev["required"] == FMD.MIN_EVALUATION_ROWS
+        # THE BAR IS FIXTURES: five decisions on five fixtures here
+        assert ev["n"] == 5 and ev["n_events"] == 5
+        assert ev["required_events"] == FMD.MIN_EVALUATION_EVENTS
         promoted = await FMD.promote(conn, model_id="mdl:learns-thin",
                                     approved_by="owner")
         assert promoted["ok"] is False
@@ -375,7 +388,7 @@ async def test_a_fitted_models_arithmetic_cannot_be_edited():
         await _clean(conn)
         rows, labels = _synthetic()
         await FMD.register(conn, model_id="mdl:learns-fixed",
-                           model_version="v1", fitted=FMD.fit(rows, labels),
+                           model_version="v1", fitted=FMD.fit(rows, labels, decided_at=_trained_before(rows)),
                            fit_through=datetime.now(timezone.utc))
         with pytest.raises(Exception) as e1:
             await conn.execute(
@@ -424,16 +437,16 @@ async def test_the_evaluation_is_prospective_and_the_promotion_is_atomic():
         # and stumps beats the ridge by 0.017, above the declared 0.01 bar.
         await FMD.register(conn, model_id="mdl:learns-base",
                            model_version="v1-baserate",
-                           fitted=FMD.fit(rows, labels, estimator="BASE_RATE"),
+                           fitted=FMD.fit(rows, labels, decided_at=_trained_before(rows), estimator="BASE_RATE"),
                            fit_through=fit_through)
         await FMD.register(conn, model_id="mdl:learns-ridge",
                            model_version="v2-ridge",
-                           fitted=FMD.fit(rows, labels,
+                           fitted=FMD.fit(rows, labels, decided_at=_trained_before(rows),
                                           estimator="RIDGE_LOGISTIC"),
                            fit_through=fit_through)
         await FMD.register(conn, model_id="mdl:learns-stumps",
                            model_version="v3-stumps",
-                           fitted=FMD.fit(rows, labels, estimator="STUMPS"),
+                           fitted=FMD.fit(rows, labels, decided_at=_trained_before(rows), estimator="STUMPS"),
                            fit_through=fit_through)
 
         # ── RESOLVED DECISIONS, ALL AFTER THE FIT WINDOW ────────────
@@ -557,7 +570,7 @@ async def test_a_contaminated_evaluation_is_named_and_blocks_promotion():
         # FIT WINDOW AFTER EVERY DECISION: nothing is prospective.
         await FMD.register(
             conn, model_id="mdl:learns-leak", model_version="v1-leak",
-            fitted=FMD.fit(rows, labels),
+            fitted=FMD.fit(rows, labels, decided_at=_trained_before(rows)),
             fit_through=datetime.now(timezone.utc) + timedelta(days=1))
         ev = await FMD.evaluate(conn, model_id="mdl:learns-leak")
         assert ev["ok"] is False
@@ -654,7 +667,8 @@ async def test_an_approved_model_changes_a_later_decision():
         # own test above, and re-running it would make this test about promotion
         # rather than about the decision changing.
         rows, _ = _synthetic(50)
-        low = FMD.fit(rows, [0.0] * 45 + [1.0] * 5, estimator="BASE_RATE")
+        low = FMD.fit(rows, [0.0] * 45 + [1.0] * 5, estimator="BASE_RATE",
+                      decided_at=_trained_before(rows))
         await FMD.register(conn, model_id="mdl:demo-low",
                            model_version="v1-pessimistic", fitted=low,
                            fit_through=datetime.now(timezone.utc))
@@ -673,7 +687,8 @@ async def test_an_approved_model_changes_a_later_decision():
         assert first["action"] == "HOLD", first["decision"]["selection_reason"]
 
         # ── 2 · THE OPTIMISTIC MODEL, APPROVED IN ITS PLACE ─────────
-        high = FMD.fit(rows, [1.0] * 40 + [0.0] * 10, estimator="BASE_RATE")
+        high = FMD.fit(rows, [1.0] * 40 + [0.0] * 10, estimator="BASE_RATE",
+                       decided_at=_trained_before(rows))
         await FMD.register(conn, model_id="mdl:demo-high",
                            model_version="v2-optimistic", fitted=high,
                            fit_through=datetime.now(timezone.utc))
@@ -782,7 +797,7 @@ async def test_the_operator_can_see_which_model_is_deciding():
 
         rows, labels = _synthetic(50)
         await FMD.register(conn, model_id="mdl:view", model_version="v9-view",
-                           fitted=FMD.fit(rows, labels, estimator="BASE_RATE"),
+                           fitted=FMD.fit(rows, labels, decided_at=_trained_before(rows), estimator="BASE_RATE"),
                            fit_through=datetime.now(timezone.utc))
         # A CANDIDATE IS STILL NOT THE DECIDING MODEL.
         mid = await PC.operator_view(conn, account_id=ACCT)

@@ -4934,6 +4934,19 @@ async def _funded_service(conn, *, now):
         got["pair_cycle"] = {
             "ok": False, "refusal": "FUNDED_PAIR_CYCLE_RAISED",
             "error": "%s: %s" % (type(exc).__name__, str(exc)[:200])}
+    # ── AND THE LEARNING LOOP: JOIN FINISHED POSITIONS, SCORE CANDIDATES ──
+    #
+    # After the pass, so a position the pass just closed is joined this cycle.
+    # It promotes nothing: promotion needs a named approver.
+    try:
+        from .. import bettor_funded_pair_cycle as _PC
+
+        got["learning"] = await _PC.scheduled_learning_pass(
+            conn, account_id=account_id, now=now)
+    except Exception as exc:                                   # noqa: BLE001
+        got["learning"] = {
+            "ok": False, "refusal": "FUNDED_LEARNING_PASS_RAISED",
+            "error": "%s: %s" % (type(exc).__name__, str(exc)[:200])}
     return got
 
 
@@ -6578,6 +6591,25 @@ def _code_identity() -> dict:
 SERVICING_DIGEST_LIMIT = 8
 
 
+def _learning_digest(lp) -> dict | None:
+    """The scheduled learning pass, bounded for the heartbeat."""
+    if not isinstance(lp, dict):
+        return None
+    j = lp.get("join") or {}
+    e = lp.get("evaluate") or {}
+    return {"ok": lp.get("ok"), "refusal": lp.get("refusal"),
+            "joined": len(j.get("joined") or []),
+            "waiting_for_the_position": len(
+                j.get("waiting_for_the_position") or []),
+            "join_refused": len(j.get("refused") or []),
+            "candidates_scored": [
+                {k: c.get(k) for k in ("model_id", "ok", "refusal", "n",
+                                       "log_loss", "prospective")}
+                for c in (e.get("scored") or [])[:SERVICING_DIGEST_LIMIT]],
+            "promoted_anything": lp.get("promoted_anything"),
+            "promotion": lp.get("promotion")}
+
+
 def _servicing_digest(svc) -> dict | None:
     """ONE ROW PER POSITION: the decision, and why it could not proceed.
 
@@ -6660,6 +6692,10 @@ def _servicing_digest(svc) -> dict | None:
             } if rec else None,
             "settlement": (svc.get("settlement") or {}).get("ok")
             if isinstance(svc.get("settlement"), dict) else None,
+            # THE LEARNING LOOP'S LAST PASS: how many decisions got their
+            # outcome, how many still wait on an open position, and what each
+            # candidate model measured. Promotion is never scheduled.
+            "learning": _learning_digest(svc.get("learning")),
             "what_this_is": (
                 "the LAST scheduled servicing decision, not a history. One "
                 "row per held position, overwritten each cycle"),

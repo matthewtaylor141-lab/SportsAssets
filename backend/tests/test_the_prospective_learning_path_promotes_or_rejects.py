@@ -113,6 +113,18 @@ async def _clean(conn):
                     " WHERE account_id=$1)" % t, ACCT)
     await conn.execute("DELETE FROM bettor_funded_intents WHERE account_id=$1",
                        ACCT)
+    # AND THE GROUPS THOSE INTENTS OPENED, with their one-row results. Left
+    # behind, they accumulated across runs (hundreds on a reused database).
+    if await _has(conn, "bettor_funded_group_results"):
+        await conn.execute(
+            "DELETE FROM bettor_funded_group_results WHERE group_id IN ("
+            " SELECT group_id FROM bettor_funded_portfolio_groups"
+            " WHERE account_id=$1)", ACCT)
+    if await _has(conn, "bettor_funded_portfolio_groups"):
+        with contextlib.suppress(Exception):
+            await conn.execute(
+                "DELETE FROM bettor_funded_portfolio_groups WHERE account_id=$1",
+                ACCT)
 
 
 @pytest.fixture(autouse=True)
@@ -252,7 +264,7 @@ async def _group(conn, *, gid, primary_pays, hedge_pays, decided_at,
     return {"ok": True, "decision_id": did, "group_id": group_id}
 
 
-async def _cohort(conn, *, n=N_GROUPS, skill=True):
+async def _cohort(conn, *, n=N_GROUPS, skill=True, prefix="lp", base=100):
     """A COHORT OF RESOLVED TWO-LEG GROUPS.
 
     `skill=True` makes the label CORRELATED with the recorded feature, so a fit
@@ -267,12 +279,12 @@ async def _cohort(conn, *, n=N_GROUPS, skill=True):
         p = 0.1 + 0.8 * (i % 9) / 8.0
         both = (_width_for(p) >= 3) if skill else (i % 2 == 0)
         got = await _group(
-            conn, gid="lp%03d" % i,
+            conn, gid="%s%03d" % (prefix, i),
             primary_pays=1.0,
             # BOTH legs pay only in the both-win case; otherwise the hedge
             # leg's payout is zero and `bool_and(payout > 0)` is false.
             hedge_pays=(1.0 if both else 0.0),
-            decided_at=_at(100 + i), p_middle=p)
+            decided_at=_at(base + i), p_middle=p)
         if not got.get("ok"):
             return {"ok": False, "at": i, **got}
         made.append(got)
@@ -343,12 +355,32 @@ async def test_the_prospective_filter_excludes_anything_the_fit_could_see():
 # 2 · PROMOTION AND REJECTION, THROUGH THE SAME PIPELINE
 # ═════════════════════════════════════════════════════════════════════
 
+#: WHERE THE TRAINING COHORT SITS: a day before the fit window closes, so every
+#: training decision is inside it and every evaluation decision is after it.
+TRAIN_BASE_S = -86400
+
+
 async def _run_pipeline(conn, *, model_id, skill):
+    """FIT ON ONE COHORT, SCORE ON ANOTHER.
+
+    THIS USED TO FIT ON THE EVALUATION ROWS. It read `labelled(after=
+    FIT_THROUGH)` -- the rows decided after the window -- fitted on them,
+    declared `fit_through=FIT_THROUGH`, and then evaluated on the same rows,
+    which the leak check scored PROSPECTIVE because it compares evaluation rows
+    with the DECLARED window. `register` now checks that window against the
+    fit's own rows and refuses that registration, so the training cohort here
+    is a separate set of fixtures decided inside the window.
+    """
+    train = await _cohort(conn, skill=skill, prefix="lt", base=TRAIN_BASE_S)
+    assert train.get("ok"), train
     coh = await _cohort(conn, skill=skill)
     assert coh.get("ok"), coh
+    tr = await FMD.labelled(conn, through=FIT_THROUGH, account_id=ACCT)
+    assert tr["ok"] and tr["n"] >= FMD.MIN_EVALUATION_ROWS, tr
     lab = await FMD.labelled(conn, after=FIT_THROUGH, account_id=ACCT)
     assert lab["ok"] and lab["n"] >= FMD.MIN_EVALUATION_ROWS, lab
-    fitted = FMD.fit(lab["rows"], lab["labels"])
+    assert not set(tr["fixtures"]) & set(lab["fixtures"])
+    fitted = FMD.fit(tr["rows"], tr["labels"], decided_at=tr["decided_at"])
     assert fitted.get("ok"), fitted
     reg = await FMD.register(conn, model_id=model_id,
                              model_version="v-" + model_id, fitted=fitted,
@@ -414,11 +446,15 @@ async def test_too_few_labels_refuses_even_with_a_good_fit():
             if not await _has(conn, t):
                 pytest.skip("%s is not in this database" % t)
         await _clean(conn)
+        train = await _cohort(conn, n=6, skill=True, prefix="lt",
+                              base=TRAIN_BASE_S)
+        assert train.get("ok"), train
         coh = await _cohort(conn, n=6, skill=True)
         assert coh.get("ok"), coh
         lab = await FMD.labelled(conn, after=FIT_THROUGH, account_id=ACCT)
         assert 0 < lab["n"] < FMD.MIN_EVALUATION_ROWS
-        fitted = FMD.fit(lab["rows"], lab["labels"])
+        tr = await FMD.labelled(conn, through=FIT_THROUGH, account_id=ACCT)
+        fitted = FMD.fit(tr["rows"], tr["labels"], decided_at=tr["decided_at"])
         await FMD.register(conn, model_id="learnpath-thin",
                            model_version="v-thin", fitted=fitted,
                            fit_through=FIT_THROUGH)
@@ -534,3 +570,169 @@ async def test_one_voided_leg_disqualifies_the_whole_group():
         assert got.get("ok"), got
         lab = await FMD.labelled(conn, after=FIT_THROUGH, account_id=ACCT)
         assert lab["n"] == 0, lab
+
+
+# ═════════════════════════════════════════════════════════════════════
+# 5 · THE WINDOW IS CHECKED, THE HOLDOUT IS BY FIXTURE, AND THE SCHEDULE
+#     JOINS AND SCORES WITHOUT PROMOTING
+# ═════════════════════════════════════════════════════════════════════
+
+async def test_a_fit_on_the_rows_it_is_scored_on_cannot_be_registered():
+    """THE DEFECT THIS FILE USED TO DEMONSTRATE AS A SUCCESS.
+
+    Fit on the decisions after the window, declare the window closed before
+    them: the leak check compared evaluation rows with the declared window and
+    called it PROSPECTIVE. `register` now reads when the fit's own rows were
+    decided and refuses."""
+    async with _conn() as conn:
+        for t in ("bettor_funded_decisions", "bettor_funded_models"):
+            if not await _has(conn, t):
+                pytest.skip("%s is not in this database" % t)
+        await _clean(conn)
+        coh = await _cohort(conn, n=6, skill=True)
+        assert coh.get("ok"), coh
+        lab = await FMD.labelled(conn, after=FIT_THROUGH, account_id=ACCT)
+        fitted = FMD.fit(lab["rows"], lab["labels"],
+                         decided_at=lab["decided_at"])
+        reg = await FMD.register(conn, model_id="learnpath-insample",
+                                 model_version="v", fitted=fitted,
+                                 fit_through=FIT_THROUGH)
+        assert reg["ok"] is False
+        assert reg["refusal"] == FMD.R_FIT_WINDOW_UNDERSTATED, reg
+        # AND A FIT THAT DOES NOT SAY WHEN ITS ROWS WERE DECIDED IS NOT TAKEN
+        # ON TRUST EITHER
+        reg = await FMD.register(conn, model_id="learnpath-unstated",
+                                 model_version="v",
+                                 fitted=FMD.fit(lab["rows"], lab["labels"]),
+                                 fit_through=FIT_THROUGH)
+        assert reg["ok"] is False
+        assert reg["refusal"] == FMD.R_TRAINING_WINDOW_NOT_STATED, reg
+        assert await conn.fetchval(
+            "SELECT count(*) FROM bettor_funded_models "
+            " WHERE model_id LIKE 'learnpath-%'") == 0
+
+
+async def test_a_fixture_the_fit_could_see_is_held_out_whole():
+    """THE LABEL BELONGS TO THE FIXTURE. A fixture decided once inside the
+    window and again after it shares one outcome across both decisions, so its
+    later decision is not held-out evidence and is dropped -- and the bar is
+    counted in fixtures, so repeated decisions cannot fill it."""
+    async with _conn() as conn:
+        for t in ("bettor_funded_decisions", "bettor_funded_models"):
+            if not await _has(conn, t):
+                pytest.skip("%s is not in this database" % t)
+        await _clean(conn)
+        train = await _cohort(conn, n=6, skill=True, prefix="lt",
+                              base=TRAIN_BASE_S)
+        assert train.get("ok"), train
+        coh = await _cohort(conn, n=4, skill=True)
+        assert coh.get("ok"), coh
+        # A SECOND, LATER DECISION ON A TRAINING FIXTURE
+        first = train["groups"][0]
+        feats = FMD.features_of(
+            {"both_win_regions": (0,), "cost_cents": 90,
+             "min_payout_cents": 100, "max_payout_cents": 200},
+            primary_cost_cents=45, hedge_cost_cents=45,
+            overtime_included=True)
+        rec = await FL.record_decision(
+            conn, decision_id="dec-lt000-again", account_id=ACCT,
+            venue=VENUE, fixture="lt000", action="HOLD",
+            decided_at=_at(500).timestamp(), group_id=first["group_id"],
+            worst_case_usd=-1.0, model_key=FMD.KEY_MIDDLE,
+            model_version="baseline-0", features=feats,
+            feature_sha=FMD.feature_sha(feats), predicted={"p_middle": 0.3})
+        assert rec.get("ok"), rec
+        # AND THREE MORE DECISIONS ON ONE EVALUATION FIXTURE: four rows, one
+        # outcome
+        again = coh["groups"][0]
+        for k in range(3):
+            rec = await FL.record_decision(
+                conn, decision_id="dec-lp000-%d" % k, account_id=ACCT,
+                venue=VENUE, fixture="lp000", action="HOLD",
+                decided_at=_at(600 + k).timestamp(),
+                group_id=again["group_id"], worst_case_usd=-1.0,
+                model_key=FMD.KEY_MIDDLE, model_version="baseline-0",
+                features=feats, feature_sha=FMD.feature_sha(feats),
+                predicted={"p_middle": 0.3})
+            assert rec.get("ok"), rec
+        tr = await FMD.labelled(conn, through=FIT_THROUGH, account_id=ACCT)
+        fitted = FMD.fit(tr["rows"], tr["labels"], decided_at=tr["decided_at"])
+        reg = await FMD.register(conn, model_id="learnpath-holdout",
+                                 model_version="v", fitted=fitted,
+                                 fit_through=FIT_THROUGH)
+        assert reg["ok"], reg
+        ev = await FMD.evaluate(conn, model_id="learnpath-holdout",
+                                account_id=ACCT)
+        assert ev["fixtures_held_out_because_the_fit_could_see_them"] == \
+            ["lt000"], ev
+        # 4 evaluation fixtures, 7 rows: the three repeats are rows, not events
+        assert ev["n_events"] == 4, ev
+        assert ev["n"] == 7, ev
+        assert ev["refusal"] == FMD.R_TOO_FEW_LABELS
+
+
+async def test_the_schedule_joins_outcomes_and_scores_candidates_but_never_promotes():
+    """THE LEARNING LOOP ON THE SCHEDULED PATH.
+
+    `scheduled_learning_pass` is what the funded service now runs every cycle.
+    It attaches each finished group's result to its decisions as a versioned
+    outcome, scores every candidate prospectively and by fixture, and leaves
+    promotion to a named approver. The same candidate is then promoted by the
+    owner's call, and a second pass does not undo or repeat anything."""
+    from sportsassets import bettor_funded_pair_cycle as PC
+
+    async with _conn() as conn:
+        for t in ("bettor_funded_decisions", "bettor_funded_models",
+                  "bettor_funded_decision_outcomes"):
+            if not await _has(conn, t):
+                pytest.skip("%s is not in this database" % t)
+        await _clean(conn)
+        train = await _cohort(conn, skill=True, prefix="lt",
+                              base=TRAIN_BASE_S)
+        assert train.get("ok"), train
+        coh = await _cohort(conn, skill=True)
+        assert coh.get("ok"), coh
+        tr = await FMD.labelled(conn, through=FIT_THROUGH, account_id=ACCT)
+        reg = await FMD.register(
+            conn, model_id="learnpath-scheduled", model_version="v-sched",
+            fitted=FMD.fit(tr["rows"], tr["labels"],
+                           decided_at=tr["decided_at"]),
+            fit_through=FIT_THROUGH)
+        assert reg["ok"], reg
+        before = await conn.fetchval(
+            "SELECT count(*) FROM bettor_funded_decisions "
+            " WHERE account_id=$1 AND NOT realised_known", ACCT)
+        assert before == 2 * N_GROUPS
+
+        got = await PC.scheduled_learning_pass(conn, account_id=ACCT)
+        assert got["ok"], got
+        assert got["promoted_anything"] is False
+        join = got["join"]
+        assert len(join["joined"]) == 2 * N_GROUPS, join
+        assert join["refused"] == [] and join["waiting_for_the_position"] == []
+        assert await conn.fetchval(
+            "SELECT count(*) FROM bettor_funded_decisions "
+            " WHERE account_id=$1 AND NOT realised_known", ACCT) == 0
+        # ONE GROUP RESULT PER GROUP, however many decisions it had
+        assert await conn.fetchval(
+            "SELECT count(*) FROM bettor_funded_group_results r "
+            "  JOIN bettor_funded_portfolio_groups g USING (group_id) "
+            " WHERE g.account_id=$1", ACCT) == 2 * N_GROUPS
+        scored = {c["model_id"]: c for c in got["evaluate"]["scored"]}
+        mine = scored["learnpath-scheduled"]
+        assert mine["ok"] is True, mine
+        assert mine["prospective"] == "PROSPECTIVE"
+        assert mine["awaiting"]
+        # STILL A CANDIDATE: the schedule scored it and approved nothing
+        assert (await FMD.approved(conn, model_key=FMD.KEY_MIDDLE))[
+            "refusal"] == FMD.R_NO_APPROVED_MODEL
+        # THE OWNER'S CALL DOES
+        prom = await FMD.promote(conn, model_id="learnpath-scheduled",
+                                 approved_by="owner@test")
+        assert prom["ok"], prom
+        # AND A SECOND PASS JOINS NOTHING TWICE AND PROMOTES NOTHING
+        again = await PC.scheduled_learning_pass(conn, account_id=ACCT)
+        assert again["join"]["joined"] == []
+        assert again["promoted_anything"] is False
+        appr = await FMD.approved(conn, model_key=FMD.KEY_MIDDLE)
+        assert appr["model"]["model_id"] == "learnpath-scheduled"
