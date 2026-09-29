@@ -323,7 +323,12 @@ def test_the_refusal_is_not_relieved_by_passing_a_subscription_argument():
     assert got["m1"]["status"] == SC.M1_NOT_AVAILABLE
     assert set(got["m1"]["missing_from_the_feed"]) == {
         SC.P5_DOCUMENTED_TIMING}
-    assert "properties of the FEED" in got["why_none"]
+    # THE REASON IS THE CURRENCY MODULE'S OWN. This used to pin "properties
+    # of the FEED", from a hand-written account the loop no longer carries;
+    # P5 is a property of the PUBLISHED PROTOCOL, and the text says so.
+    assert "P5_DOCUMENTED_TIMING" in got["why_none"]
+    assert "published protocol" in got["why_none"]
+    assert "TIMING refusal" in got["why_none"]
 
 
 # ── §4 · DISCONNECT INVALIDATION ────────────────────────────────────
@@ -400,9 +405,15 @@ def test_the_reader_says_which_guarantee_is_missing_not_merely_none():
     assert got["refusal"] == SC.M1_NOT_AVAILABLE
     assert got["missing_from_the_feed"] == list(SC.MISSING_PRECONDITIONS)
     ev = L.book_currency_evidence("aec-x")
-    assert "sequence" in ev["what_would_change_it"]
-    assert "ETag" in ev["what_would_change_it"]
-    assert "BY MEASUREMENT rather than by decision" in ev["what_would_change_it"]
+    # WHAT WOULD CHANGE IT, AS IT STANDS. A sequence number was withdrawn as a
+    # precondition (this feed carries whole books, not deltas, so there is no
+    # stream for one to order), and so was the old closing phrase; pinning
+    # either would pin a claim the currency module no longer makes.
+    what = ev["what_would_change_it"]
+    assert "TIMING contract" in what and "P5" in what
+    assert "ETag" in what
+    assert "CONNECTION CONTINUITY is OURS to fix" in what
+    assert "sequence" not in what
 
 
 def test_the_scheduled_read_still_refuses_and_names_the_mechanism():

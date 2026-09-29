@@ -1,0 +1,156 @@
+# CAPITAL-CRITICAL TESTS FOR THE FUNDED LANE -- every test these files collect
+# must RUN and PASS. `gate_verdict.py --critical` reads this list; a file here
+# that collects nothing, or any test in it that is skipped, deselected or
+# failed, makes the gate reject the run whatever the matched baseline says.
+#
+# WHAT IS IN IT: the funded execution path (activation, rails, the connector,
+# the adapter, the book, reservations, recovery, management, exits, settlement,
+# the hedge decision and its admission record), the scheduled loop that drives
+# it (every file importing workers/ext_pinnacle_loop), the empty-book
+# lifecycle, the learning registry, and the gate tools themselves.
+#
+# WHAT IS NOT, AND WHY: test_e25_exit_confirm.py, test_e29_hand_exit.py, test_e5_frozen_exits.py, test_render_ops_exits_band.py, test_render_ops_exits_paired.py, test_render_ops_flow_books.py, test_render_ops_paired_ratio.py.
+# They pin the wording and ordering of manual-lane ops presets in the
+# render-ops workflow, fail identically at 517cacf, and do not touch the funded
+# lane. They still run in every gate and are still compared against the
+# matched baseline; they are simply not allowed to veto it.
+tests/test_a_candidate_identity_carries_its_side.py
+tests/test_a_filled_order_is_not_a_closed_position.py
+tests/test_acquisition_ladder_is_side_aware.py
+tests/test_admission_control.py
+tests/test_admission_fractional.py
+tests/test_admission_policies.py
+tests/test_an_autonomous_entry_is_not_counted_twice.py
+tests/test_an_indirect_pair_is_valued_on_the_outcomes.py
+tests/test_autonomy_completion_boundaries.py
+tests/test_bettor_decision_engine.py
+tests/test_bettor_entry_gate.py
+tests/test_bettor_entry_kind.py
+tests/test_bettor_exit_dataset.py
+tests/test_bettor_exit_engine.py
+tests/test_bettor_exit_ml.py
+tests/test_bettor_hedge_tax.py
+tests/test_bettor_mgmt_lifecycle.py
+tests/test_bettor_pair_engine.py
+tests/test_bettor_shadow_execution.py
+tests/test_cut_whale_exit.py
+tests/test_desk_mirror_sides.py
+tests/test_desk_recovery.py
+tests/test_e12_catchup_side.py
+tests/test_e14b_exit_take_rests.py
+tests/test_e21_fast_add_replan.py
+tests/test_entry_execution_sizing_and_risk.py
+tests/test_execution_gate.py
+tests/test_execution_gate_fail_open.py
+tests/test_execution_gate_integration.py
+tests/test_exit_census.py
+tests/test_exit_classifier.py
+tests/test_exit_dead_band_and_confirm.py
+tests/test_exit_exception_is_pending.py
+tests/test_exit_fraction_is_a_stock.py
+tests/test_exit_outranks_the_entry_roster.py
+tests/test_exit_rounds_to_zero.py
+tests/test_exit_target_survives_the_rewrite.py
+tests/test_exit_token_repair.py
+tests/test_ext_pinnacle_loop.py
+tests/test_ext_shadow_cannot_fund.py
+tests/test_fill_0a_side_band_rail.py
+tests/test_fill_x1_exit_band.py
+tests/test_followup_budget_reservation.py
+tests/test_funded_activation_is_a_real_path.py
+tests/test_fuzzy_side_fidelity.py
+tests/test_heartbeat_does_not_queue_for_a_second_connection.py
+tests/test_in_flight_entry_is_pending.py
+tests/test_indirect_pair_priority.py
+tests/test_indirect_structures.py
+tests/test_legacy_position_identity_repair.py
+tests/test_m1_is_verified_not_asserted.py
+tests/test_mirror_exit.py
+tests/test_mirror_exit_quantity.py
+tests/test_one_ranking_precedes_the_action_in_production.py
+tests/test_one_shared_freshness_rule_and_the_audit_findings.py
+tests/test_pair_completion.py
+tests/test_partial_exit_pnl_is_separable.py
+tests/test_payout_event_is_priced_once.py
+tests/test_payout_identity_is_not_read_off_the_intent.py
+tests/test_position_lifecycle_and_reentry.py
+tests/test_r1_pair_key.py
+tests/test_refused_exit_is_held.py
+tests/test_reserved_capital_is_counted_exactly_once.py
+tests/test_rn1x_model_loop.py
+tests/test_run832_admission.py
+tests/test_settlement_attestation.py
+tests/test_settlement_census_decomposition.py
+tests/test_settlement_dating.py
+tests/test_settlement_outcomes_are_read_one_at_a_time.py
+tests/test_settlement_relates_a_trigger_to_a_payout.py
+tests/test_settlement_terms_govern_selection.py
+tests/test_side_band.py
+tests/test_side_intent.py
+tests/test_single_writer_ownership.py
+tests/test_soccer_settlement_terms_are_captured.py
+tests/test_standby_does_not_erase_the_writer.py
+tests/test_stranded_exit_reaper.py
+tests/test_the_acceptance_harness_picks_a_usable_fixture.py
+tests/test_the_admission_policy_is_off_and_bounded.py
+tests/test_the_audit_findings_are_closed.py
+tests/test_the_book_starts_empty_and_the_schedule_fills_it.py
+tests/test_the_capacity_probe_cannot_touch_a_strategy_book.py
+tests/test_the_command_centre_shows_the_decision.py
+tests/test_the_cycle_confirms_a_competition_before_spending.py
+tests/test_the_cycle_readback_cannot_be_suppressed.py
+tests/test_the_decision_is_expected_value_not_minimax.py
+tests/test_the_decision_to_execution_boundary_holds.py
+tests/test_the_entry_lane_acquires_its_own_scope.py
+tests/test_the_entry_lane_reaches_inventory.py
+tests/test_the_entry_lane_reaches_the_exit_path.py
+tests/test_the_entry_position_settles_from_the_venue.py
+tests/test_the_executor_runs_an_authorized_lifecycle.py
+tests/test_the_funded_book_is_durable.py
+tests/test_the_funded_lane_actually_learns.py
+tests/test_the_funded_lane_learns_from_its_own_results.py
+tests/test_the_funded_lifecycle_demonstration.py
+tests/test_the_funded_lifecycle_is_complete.py
+tests/test_the_funded_path_is_the_real_adapter.py
+tests/test_the_gate_tools_refuse_invalid_evidence.py
+tests/test_the_group_lifecycle_is_atomic_and_earned.py
+tests/test_the_hedge_beats_hold_through_the_real_suppliers.py
+tests/test_the_hedge_leg_is_built_from_read_facts.py
+tests/test_the_held_position_gets_its_own_inputs.py
+tests/test_the_lane_reports_its_own_funnel.py
+tests/test_the_latency_levers_are_wired_and_measured.py
+tests/test_the_odds_quote_can_be_refreshed_before_it_goes_stale.py
+tests/test_the_pairing_panel_never_sums_the_books.py
+tests/test_the_position_manager_actually_decides.py
+tests/test_the_production_connection_is_correct.py
+tests/test_the_prospective_learning_path_promotes_or_rejects.py
+tests/test_the_refusal_census_attributes_the_stage.py
+tests/test_the_research_lane_runs_the_lifecycle_uncalibrated.py
+tests/test_the_research_shadow_waives_one_gate.py
+tests/test_the_reservation_reaches_submission.py
+tests/test_the_scheduled_hedge_path_is_integrated.py
+tests/test_the_scheduled_pair_lifecycle.py
+tests/test_the_scheduled_read_is_rate_controlled_end_to_end.py
+tests/test_the_selected_side_is_the_side_that_is_ordered.py
+tests/test_the_settlement_gap_was_misread_from_a_fixture.py
+tests/test_the_source_calibration_is_measured.py
+tests/test_the_source_cannot_price_a_price_settled_branch.py
+tests/test_the_venue_clock_is_parsed.py
+tests/test_the_venue_contract_is_the_real_fixture.py
+tests/test_the_venue_market_type_is_read_not_parsed.py
+tests/test_the_venue_period_is_established.py
+tests/test_the_venue_prose_states_a_price_settlement.py
+tests/test_the_venue_response_contract_is_observed.py
+tests/test_the_venue_settlement_field_is_read.py
+tests/test_the_venue_settlement_probe.py
+tests/test_the_winning_plan_is_the_order_that_is_sent.py
+tests/test_two_detectors_one_exit.py
+tests/test_venue_native_identity.py
+tests/test_venue_probe_reaches_the_venue.py
+tests/test_venue_settle.py
+tests/test_whale_exit_fail_closed.py
+tests/test_whale_exits.py
+tests/test_whale_exits_held_only.py
+tests/test_whale_exits_held_predicate.py
+tests/test_whale_exits_market_positions.py
+tests/test_when_the_book_evidence_goes_away_while_we_hold.py

@@ -300,6 +300,43 @@ def test_an_uncollected_critical_test_is_invalid(tmp_path):
     assert "not COLLECTED" in out
 
 
+def test_a_critical_test_failing_in_both_runs_is_not_accepted(tmp_path):
+    """A capital-critical proof that is red on every commit is not excused by
+    the matched baseline: the critical list must PASS, not merely run."""
+    head = _report(nodes={"tests/a.py::t": "failed",
+                          "tests/crit.py::proof": "failed"})
+    base = _report(nodes={"tests/a.py::t": "failed",
+                          "tests/crit.py::proof": "failed"})
+    rc, out = _run(tmp_path, base, head, critical=["tests/crit.py::proof"])
+    assert rc == RC_NEW_FAILURES, out
+    assert "critical acceptance test(s) FAILED" in out
+    assert "tests/crit.py::proof" in out
+    # AND WITHOUT THE CRITICAL LIST the same pair is a matched baseline
+    rc, out = _run(tmp_path, base, head)
+    assert rc == RC_ACCEPTED, out
+
+
+def test_a_critical_file_means_every_test_it_collects(tmp_path):
+    """A file-level entry covers each of its tests, and a listed file that
+    collected nothing did not run."""
+    base = _report(nodes={"tests/crit.py::a": "passed",
+                          "tests/crit.py::b": "passed"}, exitstatus=0)
+    head = _report(nodes={"tests/crit.py::a": "passed",
+                          "tests/crit.py::b": "skipped"}, exitstatus=0)
+    rc, out = _run(tmp_path, base, head, critical=["tests/crit.py"])
+    assert rc == RC_INVALID, out
+    assert "tests/crit.py::b was SKIPPED" in out
+    head = _report(nodes={"tests/crit.py::a": "passed",
+                          "tests/crit.py::b": "failed"})
+    rc, out = _run(tmp_path, base, head, critical=["tests/crit.py"])
+    assert rc == RC_NEW_FAILURES, out
+    rc, out = _run(tmp_path, base, base, critical=["tests/gone.py"])
+    assert rc == RC_INVALID, out
+    assert "tests/gone.py collected no test at all" in out
+    rc, out = _run(tmp_path, base, base, critical=["tests/crit.py"])
+    assert rc == RC_ACCEPTED, out
+
+
 def test_a_present_and_passing_critical_test_is_accepted(tmp_path):
     """The control: the critical check must not refuse everything."""
     head = _report(nodes={"tests/a.py::t": "failed",

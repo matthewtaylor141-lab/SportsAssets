@@ -185,6 +185,20 @@ def main(argv):
     hnodes = head.get("nodes") or {}
     hdesel = set(head.get("deselected") or ())
     hcoll = set(head.get("collected") or ())
+    # A FILE-LEVEL ENTRY (no `::`) names every test that file collects, so the
+    # list can be declared and committed before the run it judges instead of
+    # being generated from it. A listed file that collected NOTHING is itself
+    # a critical proof that did not run.
+    expanded = []
+    for c in critical:
+        if "::" in c:
+            expanded.append(c)
+            continue
+        mine = sorted(n for n in (hcoll | hdesel) if n.split("::", 1)[0] == c)
+        if not mine:
+            crit_bad.append("%s collected no test at all" % c)
+        expanded.extend(mine)
+    critical = expanded
     for c in critical:
         if c in hdesel:
             crit_bad.append("%s was DESELECTED" % c)
@@ -194,6 +208,15 @@ def main(argv):
             crit_bad.append("%s was SKIPPED" % c)
         elif c not in hnodes:
             crit_bad.append("%s produced no phase record" % c)
+    # ── AND A CRITICAL PROOF THAT FAILED IS NOT ACCEPTED EITHER ──────
+    #
+    # THE GAP THIS CLOSES. The check above established only that a critical
+    # test RAN. One that failed in both runs was then "pre-existing" and the
+    # verdict was ACCEPTED -- so a capital-critical proof could be red on every
+    # commit and never stop a release. The critical list is the set that must
+    # PASS, not merely execute; the matched baseline excuses everything else.
+    crit_failed = sorted(c for c in critical
+                         if hnodes.get(c, {}).get("outcome") in FAILING)
 
     print("NEW FAILURES (in HEAD, not in the baseline): %d" % len(new))
     for n in new:
@@ -219,6 +242,13 @@ def main(argv):
         for c in crit_bad:
             print("  ! %s" % c)
         return 2
+    if crit_failed:
+        print("VERDICT: NEW_FAILURES -- %d critical acceptance test(s) FAILED. "
+              "A critical proof must pass; the matched baseline does not "
+              "excuse it." % len(crit_failed))
+        for c in crit_failed:
+            print("  ! %s" % c)
+        return 1
     if new:
         print("VERDICT: NEW_FAILURES -- %d identity(ies) the baseline did not "
               "have. Each must be explained or fixed." % len(new))
