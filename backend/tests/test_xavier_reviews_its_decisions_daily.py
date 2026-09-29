@@ -519,6 +519,9 @@ async def test_alternatives_are_labelled_estimates_and_never_results(db):
     acq = mine[(xc, "ACQUIRE_HEDGE")]
     assert acq["estimate_usd"] is None
     assert acq["no_estimate_because"] == XR.NE_HEDGE_OUTCOME_UNKNOWN
+    # WHY it is unknown travels with the row: nothing recorded, not a failure
+    assert "no settlement of this contract is recorded" in acq[
+        "settlement_lookup"]
     # THE CHOSEN ACTION IS NEVER ITS OWN ALTERNATIVE
     assert (xa, "HOLD") not in mine and (xc, "DIRECT_EXIT") not in mine
     # every estimated row is labelled; no row claims a result

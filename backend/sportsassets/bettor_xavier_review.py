@@ -1385,6 +1385,7 @@ async def _review(conn, *, now: float, day, account_id, venue) -> dict:
         # ── THE HELD LEG'S OUTCOME, for HOLD's estimate and the check ──
         held = {"qty": None, "basis_per_contract": None,
                 "payout_per_contract": None, "payout_source": None}
+        held_lookup = None
         if me is not None:
             b = facts["basis_at_decision"].get(me["intent_id"]) or {}
             held.update(qty=b.get("held_qty_at_decision"),
@@ -1407,6 +1408,13 @@ async def _review(conn, *, now: float, day, account_id, venue) -> dict:
                             payout_source=ls.get("source"))
                 if p_used is not None and ls.get("won") is not None:
                     pairs.append((fixture, p_used, ls["won"]))
+            else:
+                # WHY IT IS UNKNOWN travels with every estimate it blocks: a
+                # failed read is not the same finding as "never settled".
+                held_lookup = {"booked": ls.get("why"),
+                               "market": (slug_cache.get(
+                                   me.get("us_market_slug")) or {}).get(
+                                       "why")}
         # ── EVERY NOT-TAKEN ALTERNATIVE, LABELLED ──────────────────────
         alts = _obj(d.get("alternatives")) or []
         chosen_at = chosen_index(d, alts)
@@ -1414,6 +1422,7 @@ async def _review(conn, *, now: float, day, account_id, venue) -> dict:
             if not isinstance(a, dict) or i == chosen_at:
                 continue
             hedge = None
+            ms = None
             slug = _first_str(a, HEDGE_SLUG_KEYS)
             if a.get("action") in ACQUIRE_ACTIONS and slug:
                 ms = await market_settlement(conn, slug, slug_cache)
@@ -1423,6 +1432,10 @@ async def _review(conn, *, now: float, day, account_id, venue) -> dict:
                     hedge = {"payout_per_contract": side_payout(
                         ms["long_price"], side), "source": ms["source"]}
             est = hypothetical_estimate(a, held=held, hedge=hedge)
+            if est.get("no_estimate_because") == NE_HELD_OUTCOME_UNKNOWN:
+                est["settlement_lookup"] = held_lookup
+            elif est.get("no_estimate_because") == NE_HEDGE_OUTCOME_UNKNOWN:
+                est["settlement_lookup"] = (ms or {}).get("why")
             alt_rows.append(dict(
                 est, xavier_decision_id=d["xavier_decision_id"],
                 intent_id=d["intent_id"], group_id=group_of[d["intent_id"]],
