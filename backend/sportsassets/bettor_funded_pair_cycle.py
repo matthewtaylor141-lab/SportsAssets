@@ -1176,6 +1176,18 @@ async def scheduled_learning_pass(conn, *, account_id: str,
                        "joined": joined, "waiting_for_the_position": waiting,
                        "refused": refused,
                        "without_a_group": ungrouped}
+    # ── 1a · WITHDRAW AN APPROVAL WHOSE RECORDS NO LONGER REPRODUCE ──
+    #
+    # After the join, because a join is when a corrected settlement lands.
+    # `approved` already refuses such a model on every read; this makes the
+    # withdrawal durable and names why. Retiring only removes pricing
+    # authority -- restoring any needs a person and records that reproduce.
+    try:
+        out["withdraw"] = await FMD.withdraw_invalidated(conn)
+    except Exception as exc:                                   # noqa: BLE001
+        out["withdraw"] = {"ok": False, "refusal": "WITHDRAWAL_RAISED",
+                           "error": "%s: %s" % (type(exc).__name__,
+                                                str(exc)[:200])}
     # ── 1b · GENERATE: one governed candidate from the ledger as it stands ──
     #
     # Declared rules in `bettor_funded_model.generate_candidate`: enough
@@ -1195,10 +1207,20 @@ async def scheduled_learning_pass(conn, *, account_id: str,
             out["evaluate"] = {"ok": False,
                                "refusal": FMD.R_SCHEMA_UNAVAILABLE}
             return dict(out, ok=False)
+        # THE PAIRING KEY'S CANDIDATES, NEWEST FIRST. Oldest-first under a
+        # fixed limit meant a backlog of never-promoted candidates -- of any
+        # key -- was re-scored every pass and a newer one was never reached.
+        # A candidate past the limit is counted, not silently dropped.
         cands = [r["model_id"] for r in await conn.fetch(
             "SELECT model_id FROM bettor_funded_models WHERE state=$1 "
-            " ORDER BY created_at LIMIT $2", FMD.STATE_CANDIDATE,
-            LEARNING_CANDIDATES_PER_PASS)]
+            "   AND model_key=$3 ORDER BY created_at DESC, model_id DESC "
+            " LIMIT $2", FMD.STATE_CANDIDATE, LEARNING_CANDIDATES_PER_PASS,
+            FMD.KEY_MIDDLE)]
+        out["candidates_not_scored_this_pass"] = max(0, int(
+            await conn.fetchval(
+                "SELECT count(*) FROM bettor_funded_models WHERE state=$1 "
+                "   AND model_key=$2", FMD.STATE_CANDIDATE, FMD.KEY_MIDDLE)
+            or 0) - len(cands))
     except Exception as exc:                                   # noqa: BLE001
         out["evaluate"] = {"ok": False, "refusal": "CANDIDATES_UNREADABLE",
                            "error": "%s: %s" % (type(exc).__name__,
@@ -1314,6 +1336,12 @@ async def operator_view(conn, *, account_id: str | None = None,
     # rather than omitted.
     try:
         appr = await FMD.approved(conn)
+        if appr.get("refusal") == FMD.R_APPROVED_MODEL_EVIDENCE_INVALIDATED:
+            out["risks"].append({
+                "kind": "APPROVED_MODEL_EVIDENCE_INVALIDATED",
+                "model_id": appr.get("model_id"),
+                "consequence": ("indirect acquisitions refuse; servicing of "
+                                "held positions continues")})
         out["deciding_model"] = (
             {"model_key": appr["model"]["model_key"],
              "model_version": appr["model"]["model_version"],

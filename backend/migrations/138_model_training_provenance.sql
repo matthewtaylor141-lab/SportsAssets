@@ -38,19 +38,52 @@ ALTER TABLE IF EXISTS bettor_funded_models
     ADD COLUMN IF NOT EXISTS trained_through timestamptz,
     ADD COLUMN IF NOT EXISTS outcomes_available_through timestamptz;
 
+-- THE APPROVAL PREDICATE MUST BE AFFIRMATIVELY TRUE. A CHECK accepts NULL, and
+-- `training_provenance ->> 'kind' = 'RECORDS'` is NULL -- not false -- when the
+-- provenance is SQL NULL or `{}`. Written as a bare disjunction, an APPROVED row
+-- with no provenance at all passed (review of a8de639, evaluated in PostgreSQL).
+-- So the whole predicate is wrapped in `IS TRUE`, and every sub-test that could
+-- raise on a malformed document (an array length of a non-array, a cast of a
+-- non-number) is guarded by its type first, so malformed is FALSE, not an error
+-- and not NULL.
+--
+-- COMPLETE RECORDS PROVENANCE, as the database can see it:
+--   kind = RECORDS; a non-empty `decision_ids` array; a 64-hex `records_sha`;
+--   `weighting` = EVENT_BALANCED; a numeric `n_events` >= 1; and both
+--   instants present and inside `fit_through`.
+-- Whether those records REPRODUCE from the ledger is `verify_provenance`'s job;
+-- the database guarantees an approved model at least names them.
+ALTER TABLE IF EXISTS bettor_funded_models
+    DROP CONSTRAINT IF EXISTS bettor_funded_model_approved_is_record_bound_ck;
 DO $$
 BEGIN
-    IF to_regclass('bettor_funded_models') IS NOT NULL AND NOT EXISTS (
-        SELECT 1 FROM pg_constraint
-         WHERE conname = 'bettor_funded_model_approved_is_record_bound_ck') THEN
+    IF to_regclass('bettor_funded_models') IS NOT NULL THEN
         ALTER TABLE bettor_funded_models
             ADD CONSTRAINT bettor_funded_model_approved_is_record_bound_ck
-            CHECK (state <> 'APPROVED'
-                   OR (training_provenance ->> 'kind' = 'RECORDS'
-                       AND trained_through IS NOT NULL
-                       AND outcomes_available_through IS NOT NULL
-                       AND trained_through <= fit_through
-                       AND outcomes_available_through <= fit_through))
+            CHECK ((
+                state <> 'APPROVED'
+                OR (training_provenance IS NOT NULL
+                    AND jsonb_typeof(training_provenance) = 'object'
+                    AND training_provenance ->> 'kind' = 'RECORDS'
+                    AND CASE WHEN jsonb_typeof(
+                                  training_provenance -> 'decision_ids')
+                                  = 'array'
+                             THEN jsonb_array_length(
+                                  training_provenance -> 'decision_ids') > 0
+                             ELSE false END
+                    AND coalesce(training_provenance ->> 'records_sha', '')
+                        ~ '^[0-9a-f]{64}$'
+                    AND training_provenance ->> 'weighting' = 'EVENT_BALANCED'
+                    AND CASE WHEN jsonb_typeof(
+                                  training_provenance -> 'n_events') = 'number'
+                             THEN (training_provenance ->> 'n_events')::numeric
+                                  >= 1
+                             ELSE false END
+                    AND trained_through IS NOT NULL
+                    AND outcomes_available_through IS NOT NULL
+                    AND trained_through <= fit_through
+                    AND outcomes_available_through <= fit_through)
+            ) IS TRUE)
             NOT VALID;
     END IF;
 END $$;

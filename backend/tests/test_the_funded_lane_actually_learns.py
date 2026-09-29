@@ -840,6 +840,131 @@ async def test_an_approved_model_changes_a_later_decision():
         await conn.close()
 
 
+@pg
+@pytest.mark.asyncio
+async def test_a_corrected_settlement_withdraws_an_approval_and_nothing_restores_it():
+    """AN APPROVAL IS ONLY AS GOOD AS THE RECORDS IT WAS MADE ON.
+
+    Reproduced in review of a8de639 with the production functions:
+    `verify_provenance` said the training records no longer reproduced,
+    `rollback` restored the model anyway, and `approved` served it. Here a
+    training fixture's settlement is corrected after approval, and:
+
+      * `approved` refuses by name at once, so `predict_for` has no estimate;
+      * the decision still ranks HOLD / exit / reduce -- servicing continues --
+        and only the indirect acquisition is not rankable;
+      * the scheduled learning pass retires the model, naming why;
+      * `rollback` to it is refused, before and after retirement.
+    """
+    asyncpg = pytest.importorskip("asyncpg")
+    conn = await asyncpg.connect(DSN)
+    try:
+        await _clean(conn)
+        st = _structure()
+        admitted = {"condition_id": "0xhedge", "taxonomy": st.taxonomy,
+                    "units": st.units, "structure": st.to_dict()}
+        hold_ranking = {
+            "version": "MGMT_SELECT_SHAPE", "not_rankable": [],
+            "candidates": [
+                {"action": "HOLD", "qty": 10, "value_usd": 1.80,
+                 "expected_net_usd": 1.80, "downside_usd": -6.20,
+                 "incremental_capital_usd": 0.0, "capital_duration_h": 26.0,
+                 "evidence_quality": FD.EVIDENCE_EXTERNAL_LABELLED,
+                 "execution_secured": True},
+                {"action": "DIRECT_EXIT", "qty": 10, "value_usd": 0.40,
+                 "expected_net_usd": 0.40, "downside_usd": 0.40,
+                 "incremental_capital_usd": 0.0, "capital_duration_h": 0.0,
+                 "evidence_quality": FD.EVIDENCE_VENUE_IMPLIED,
+                 "execution_secured": False}]}
+        common = dict(
+            account_id=ACCT, venue=VENUE, fixture=IS.BEARS_PANTHERS_FIXTURE,
+            group_id=None, hold_ranking=hold_ranking, admitted=admitted,
+            fee_usd=0.30,
+            depth=FIP.depth_supports(wanted_qty=10, depth_qty_at_price=25),
+            incremental=FIP.incremental_capital_usd(
+                hedge_qty=10, hedge_price=0.41, hedge_fee_usd=0.30),
+            capital_duration_h=26.0, use_approved_model=True,
+            model_inputs={"primary_cost_cents": 62, "hedge_cost_cents": 41,
+                          "overtime_included": True,
+                          "outside_split": _outside_split(st)})
+        rows, _ = _synthetic(50)
+        t_fit = datetime.now(timezone.utc)
+        fitted = await _fit_on_records(
+            conn, rows=rows, labels=[0.0] * 45 + [1.0] * 5, before=t_fit,
+            base=5000, account=ACCT_LOW, estimator="BASE_RATE")
+        await FMD.register(conn, model_id="mdl:inval", model_version="v-inval",
+                           fitted=fitted, fit_through=t_fit)
+        await conn.execute(
+            "UPDATE bettor_funded_models SET state='APPROVED', "
+            "  approved_at=now(), approved_by='owner@test', "
+            "  evaluation='{\"log_loss\": 0.5}'::jsonb WHERE model_id=$1",
+            "mdl:inval")
+        # ── BEFORE: the approval is served, and prices a decision ─────
+        ok = await FMD.approved(conn, model_key=KEY)
+        assert ok["ok"] is True and ok["provenance_verified"] is True, ok
+        before = await PC.decide_and_record(
+            conn, decision_id="dec:learns-inval-0", **common)
+        assert before["prediction"]["ok"] is True, before["prediction"]
+
+        # ── THE CORRECTION: a training fixture's HEDGE leg, first settled as
+        # a loss, is re-read by the venue as a win. The label changes.
+        corrected = await conn.execute(
+            "UPDATE bettor_funded_intents SET settlement = jsonb_set("
+            "  jsonb_set(settlement, '{payout_price}', '1.0'), "
+            "  '{payout_usd}', '10.0') WHERE intent_id=$1",
+            "fpi-learns-5000-h")
+        assert corrected.endswith(" 1")
+
+        # ── AT ONCE: no estimate, by name, and servicing still ranks ──
+        gone = await FMD.approved(conn, model_key=KEY)
+        assert gone["ok"] is False
+        assert gone["refusal"] == FMD.R_APPROVED_MODEL_EVIDENCE_INVALIDATED
+        assert gone["model_id"] == "mdl:inval"
+        assert gone["verification"]["refusal"] == \
+            FMD.R_TRAINING_RECORDS_DO_NOT_REPRODUCE
+        shown = await FMD.approved(conn, model_key=KEY, verify=False)
+        assert shown["ok"] is True, "display may still name the row"
+        after = await PC.decide_and_record(
+            conn, decision_id="dec:learns-inval-1", **common)
+        assert after["prediction"]["refusal"] == \
+            FMD.R_APPROVED_MODEL_EVIDENCE_INVALIDATED
+        blocked = {b["action"]: b for b in after["decision"]["not_rankable"]}
+        assert blocked[FD.ACTION_ACQUIRE_INDIRECT_HEDGE]["blocker"] == \
+            FD.R_NO_REGION_PROBABILITIES
+        assert after["action"] == "HOLD", (
+            "servicing continues: HOLD and the exit are still ranked")
+
+        # ── ROLLBACK CANNOT RESTORE IT ────────────────────────────────
+        await conn.execute(
+            "UPDATE bettor_funded_models SET state='RETIRED', "
+            " retired_at=now(), retired_reason='test: pulled by hand' "
+            " WHERE model_id=$1", "mdl:inval")
+        back = await FMD.rollback(conn, to_model_id="mdl:inval",
+                                  reason="trying to restore it")
+        assert back["ok"] is False, back
+        assert back["refusal"] == FMD.R_TRAINING_RECORDS_DO_NOT_REPRODUCE
+        assert (await FMD.approved(conn, model_key=KEY,
+                                   verify=False))["ok"] is False
+
+        # ── AND THE SCHEDULE WITHDRAWS AN APPROVAL IT FINDS INVALID ──
+        await conn.execute(
+            "UPDATE bettor_funded_models SET state='APPROVED', "
+            " retired_at=NULL, retired_reason=NULL WHERE model_id=$1",
+            "mdl:inval")
+        lp = await PC.scheduled_learning_pass(conn, account_id=ACCT)
+        assert lp["withdraw"]["withdrawn"] is True, lp["withdraw"]
+        row = await conn.fetchrow(
+            "SELECT state, retired_reason FROM bettor_funded_models "
+            " WHERE model_id=$1", "mdl:inval")
+        assert row["state"] == "RETIRED"
+        assert row["retired_reason"].startswith(
+            FMD.RETIRED_EVIDENCE_INVALIDATED)
+        assert lp["promoted_anything"] is False
+    finally:
+        await _clean(conn)
+        await conn.close()
+
+
 def test_the_module_says_what_a_good_score_cannot_say():
     d = FMD.describe()
     assert "would have made money" in d["what_a_good_score_does_not_say"]

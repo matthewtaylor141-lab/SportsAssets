@@ -1167,3 +1167,142 @@ async def test_an_approved_model_is_record_bound_in_the_database_too():
                 "UPDATE bettor_funded_models SET state='APPROVED', "
                 " approved_at=now(), approved_by='hand', evaluation='{}' "
                 " WHERE model_id='learnpath-declared'")
+
+
+# ── THE DATABASE PREDICATE MUST BE AFFIRMATIVELY TRUE (review of a8de639) ──
+#
+# A CHECK accepts NULL. With otherwise valid timestamps, SQL NULL provenance and
+# `{}` both made the old approval predicate NULL, so an APPROVED model with no
+# provenance at all was admitted by the database. These write the rows by hand,
+# because the claim is about the database, not about `promote`.
+
+_GOOD_SHA = "a" * 64
+_RECORD_BOUND_CK = "bettor_funded_model_approved_is_record_bound_ck"
+
+
+def _prov(**over):
+    p = {"kind": "RECORDS", "decision_ids": ["d-1", "d-2"],
+         "records_sha": _GOOD_SHA, "weighting": "EVENT_BALANCED",
+         "n_events": 2}
+    for k, v in over.items():
+        if v is _DROP:
+            p.pop(k, None)
+        else:
+            p[k] = v
+    return p
+
+
+_DROP = object()
+
+
+async def _insert_model(conn, model_id, *, state, prov, trained=-3600,
+                        learned=-1800):
+    """One row, straight into the table. `prov` is a dict, the string
+    'SQLNULL', or a raw JSON text."""
+    if prov == "SQLNULL":
+        doc = None
+    elif isinstance(prov, str):
+        doc = prov
+    else:
+        doc = json.dumps(prov)
+    await conn.execute(
+        "INSERT INTO bettor_funded_models (model_id, model_key, model_version,"
+        " state, kernel, estimator, features, params, fit_through, train_rows,"
+        " approved_at, approved_by, evaluation, training_provenance,"
+        " trained_through, outcomes_available_through) VALUES ($1,$1,$1,$2,"
+        " 'K','E', ARRAY['f'], '{}'::jsonb, $3, 2, CASE WHEN $2='APPROVED' "
+        " THEN now() END, CASE WHEN $2='APPROVED' THEN 'hand' END, CASE WHEN "
+        " $2='APPROVED' THEN '{}'::jsonb END, $4::jsonb, $5, $6)",
+        model_id, state, FIT_THROUGH, doc,
+        None if trained is None else FIT_THROUGH + _dt.timedelta(
+            seconds=trained),
+        None if learned is None else FIT_THROUGH + _dt.timedelta(
+            seconds=learned))
+
+
+_REFUSED_APPROVALS = [
+    ("sql-null", "SQLNULL", {}),
+    ("empty-object", {}, {}),
+    ("json-null", "null", {}),
+    ("an-array", "[]", {}),
+    ("no-kind", _prov(kind=_DROP), {}),
+    ("declared", _prov(kind="DECLARED"), {}),
+    ("no-decision-ids", _prov(decision_ids=_DROP), {}),
+    ("empty-decision-ids", _prov(decision_ids=[]), {}),
+    ("ids-not-a-list", _prov(decision_ids="d-1"), {}),
+    ("no-records-sha", _prov(records_sha=_DROP), {}),
+    ("short-records-sha", _prov(records_sha="abc"), {}),
+    ("per-row-weighting", _prov(weighting="PER_ROW"), {}),
+    ("no-n-events", _prov(n_events=_DROP), {}),
+    ("n-events-a-string", _prov(n_events="40"), {}),
+    ("zero-events", _prov(n_events=0), {}),
+    ("no-trained-through", _prov(), {"trained": None}),
+    ("no-outcome-instant", _prov(), {"learned": None}),
+    ("trained-after-window", _prov(), {"trained": 60}),
+    ("learned-after-window", _prov(), {"learned": 60}),
+]
+
+
+@pytest.mark.parametrize("name,prov,inst", _REFUSED_APPROVALS,
+                         ids=[r[0] for r in _REFUSED_APPROVALS])
+async def test_the_database_refuses_an_approved_model_without_record_bound_provenance(
+        name, prov, inst):
+    async with _conn() as conn:
+        if not await _has(conn, "bettor_funded_models"):
+            pytest.skip("bettor_funded_models is not in this database")
+        mid = "dbchk-%s-%d" % (name, time.time_ns())
+        try:
+            await _refused_both_ways(conn, mid, prov, inst)
+        finally:
+            await conn.execute("DELETE FROM bettor_funded_models "
+                               " WHERE model_key LIKE 'dbchk-%'")
+
+
+async def _refused_both_ways(conn, mid, prov, inst):
+    # AN INSERT STRAIGHT INTO APPROVED -- refused by THIS constraint, not
+    # by the older one that wants an approver and an evaluation (both
+    # supplied, so it cannot be what refuses)
+    with pytest.raises(asyncpg.exceptions.CheckViolationError) as ins:
+        await _insert_model(conn, mid + "-ins", state="APPROVED",
+                            prov=prov, **inst)
+    assert ins.value.constraint_name == _RECORD_BOUND_CK
+    # AND A CANDIDATE -- which the CHECK does not constrain -- MOVED TO IT
+    await _insert_model(conn, mid, state="CANDIDATE", prov=prov, **inst)
+    with pytest.raises(asyncpg.exceptions.CheckViolationError) as upd:
+        await conn.execute(
+            "UPDATE bettor_funded_models SET state='APPROVED', "
+            " approved_at=now(), approved_by='hand', evaluation='{}' "
+            " WHERE model_id=$1", mid)
+    assert upd.value.constraint_name == _RECORD_BOUND_CK
+    assert await conn.fetchval(
+        "SELECT state FROM bettor_funded_models WHERE model_id=$1",
+        mid) == "CANDIDATE"
+
+
+async def test_the_database_admits_a_complete_record_bound_approval():
+    """THE POSITIVE CONTROL: the same predicate admits a complete RECORDS
+    provenance, by insert and by transition."""
+    async with _conn() as conn:
+        if not await _has(conn, "bettor_funded_models"):
+            pytest.skip("bettor_funded_models is not in this database")
+        mid = "dbchk-good-%d" % time.time_ns()
+        try:
+            await _admitted_both_ways(conn, mid)
+        finally:
+            await conn.execute("DELETE FROM bettor_funded_models "
+                               " WHERE model_key LIKE 'dbchk-%'")
+
+
+async def _admitted_both_ways(conn, mid):
+    await _insert_model(conn, mid + "-ins", state="APPROVED",
+                        prov=_prov())
+    await _insert_model(conn, mid, state="CANDIDATE", prov=_prov())
+    await conn.execute(
+        "UPDATE bettor_funded_models SET state='APPROVED', "
+        " approved_at=now(), approved_by='hand', evaluation='{}' "
+        " WHERE model_id=$1", mid)
+    assert await conn.fetchval(
+        "SELECT count(*) FROM bettor_funded_models WHERE model_id = "
+        " ANY($1::text[]) AND state='APPROVED'",
+        [mid, mid + "-ins"]) == 2
+

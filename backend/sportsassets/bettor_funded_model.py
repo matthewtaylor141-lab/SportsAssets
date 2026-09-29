@@ -101,6 +101,14 @@ R_OUTCOME_AFTER_FIT_WINDOW = \
 R_MODEL_ID_REUSED = "THAT_MODEL_ID_ALREADY_NAMES_A_DIFFERENT_FIT"
 R_INCUMBENT_CANNOT_BE_SCORED = "THE_INCUMBENT_CANNOT_BE_SCORED_ON_THE_COHORT"
 R_PROVENANCE_SCHEMA = "THE_REGISTRY_CANNOT_STORE_TRAINING_PROVENANCE"
+#: THE APPROVED MODEL'S OWN TRAINING SET NO LONGER REPRODUCES -- a settlement
+#: was corrected, a decision's vector changed, or a named decision is gone. The
+#: approval was a judgement about a model fit on THOSE records; with them gone
+#: it vouches for nothing, so the model stops pricing acquisitions at once and
+#: the next learning pass withdraws it (`withdraw_invalidated`).
+R_APPROVED_MODEL_EVIDENCE_INVALIDATED = \
+    "THE_APPROVED_MODELS_TRAINING_RECORDS_NO_LONGER_REPRODUCE"
+RETIRED_EVIDENCE_INVALIDATED = "TRAINING_EVIDENCE_INVALIDATED"
 
 #: ── WHERE A MODEL'S TRAINING SET CAME FROM ──────────────────────────
 #: RECORDS: decisions in the ledger, re-read and verified at registration.
@@ -478,13 +486,22 @@ async def register(conn, *, model_id: str, model_version: str, fitted: dict,
                            "decision path reads only the APPROVED row"))
 
 
-async def approved(conn, *, model_key: str = KEY_MIDDLE) -> dict:
+async def approved(conn, *, model_key: str = KEY_MIDDLE,
+                   verify: bool = True) -> dict:
     """THE MODEL THE DECISION PATH MUST USE, or a refusal naming its absence.
 
     NO APPROVED MODEL IS A REAL ANSWER AND IT IS NOT A FALLBACK. The caller then
     has no model-derived probability, and `bettor_funded_decision` already refuses
     an indirect candidate with no region probabilities -- so the lane declines the
     acquisition rather than deciding from an unregistered estimate.
+
+    AND AN APPROVAL IS ONLY AS GOOD AS ITS RECORDS. With `verify` (the default,
+    and what every pricing caller gets) the approved model's training set is
+    re-read and re-hashed; if it no longer reproduces, this refuses with
+    R_APPROVED_MODEL_EVIDENCE_INVALIDATED. That refusal reaches `decide` as "no
+    region probabilities", which makes the indirect acquisition not rankable and
+    leaves HOLD, exit and reduce ranked -- so servicing continues and only the
+    model-dependent acquisition stops. `verify=False` is for display only.
     """
     out: dict[str, Any] = {"version": VERSION, "model_key": model_key}
     if not await has_schema(conn):
@@ -497,7 +514,55 @@ async def approved(conn, *, model_key: str = KEY_MIDDLE) -> dict:
                     why=("no model is approved for this key, so this lane has no "
                          "estimate it is permitted to decide from. That is a "
                          "refusal, not a reason to use an unregistered one"))
+    if verify:
+        chk = await verify_provenance(conn, row)
+        if not chk.get("ok"):
+            return dict(out, ok=False,
+                        refusal=R_APPROVED_MODEL_EVIDENCE_INVALIDATED,
+                        model_id=row["model_id"],
+                        model_version=row["model_version"],
+                        verification={k: v for k, v in chk.items()
+                                      if k not in ("records", "lab")},
+                        why=("model %s is approved, and the records it was fit "
+                             "on no longer reproduce (%s). It prices nothing "
+                             "until a person approves a model whose records do"
+                             % (row["model_id"], chk.get("refusal"))))
+        out["provenance_verified"] = True
     return dict(out, ok=True, refusal=None, model=row)
+
+
+async def withdraw_invalidated(conn, *, model_key: str = KEY_MIDDLE) -> dict:
+    """RETIRE AN APPROVED MODEL WHOSE TRAINING RECORDS NO LONGER REPRODUCE.
+
+    The durable half of the rule `approved` enforces on every read. Retiring
+    only ever REMOVES pricing authority, so a schedule may do it; restoring
+    one -- by `promote` or `rollback` -- needs a named person and records
+    that reproduce. The reason names what failed, so the registry says why
+    the lane lost its model.
+    """
+    out: dict[str, Any] = {"version": VERSION, "model_key": model_key,
+                           "withdrawn": False}
+    if not await has_schema(conn):
+        return dict(out, ok=False, refusal=R_SCHEMA_UNAVAILABLE)
+    row = _row(await conn.fetchrow(
+        "SELECT * FROM bettor_funded_models "
+        " WHERE model_key=$1 AND state=$2", model_key, STATE_APPROVED))
+    if row is None:
+        return dict(out, ok=True, approved_model=None)
+    chk = await verify_provenance(conn, row)
+    out["approved_model"] = row["model_id"]
+    if chk.get("ok"):
+        return dict(out, ok=True, provenance_verified=True)
+    reason = "%s: %s" % (RETIRED_EVIDENCE_INVALIDATED,
+                         (chk.get("why") or chk.get("refusal") or "")[:200])
+    status = await conn.execute(
+        "UPDATE bettor_funded_models SET state=$2, retired_at=now(), "
+        "  retired_reason=$3 WHERE model_id=$1 AND state=$4",
+        row["model_id"], STATE_RETIRED, reason, STATE_APPROVED)
+    return dict(out, ok=True, withdrawn=str(status).endswith(" 1"),
+                reason=reason,
+                verification={k: v for k, v in chk.items()
+                              if k not in ("records", "lab")})
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -1201,6 +1266,22 @@ async def rollback(conn, *, to_model_id: str, reason: str) -> dict:
         return dict(out, ok=False, refusal=R_TRAINING_NOT_BOUND_TO_RECORDS,
                     why=("%r was not fit on recorded decisions, so it cannot "
                          "be the approved model" % to_model_id))
+    # ── AND ITS RECORDS MUST STILL REPRODUCE ─────────────────────────
+    #
+    # THE DEFECT (review of a8de639). Rollback checked only that the provenance
+    # SAID "RECORDS", so a model whose training set had since been invalidated
+    # -- by a corrected settlement, say -- was restored and served by
+    # `approved`. "Stood behind once" was a judgement about those records; it
+    # does not survive them changing.
+    chk = await verify_provenance(conn, target)
+    if not chk.get("ok"):
+        return dict(out, ok=False,
+                    refusal=R_TRAINING_RECORDS_DO_NOT_REPRODUCE,
+                    verification={k: v for k, v in chk.items()
+                                  if k not in ("records", "lab")},
+                    why=("%r was fit on records that no longer reproduce, so "
+                         "the approval it once had vouches for nothing"
+                         % to_model_id))
     current = _row(await conn.fetchrow(
         "SELECT * FROM bettor_funded_models "
         " WHERE model_key=$1 AND state=$2", target["model_key"], STATE_APPROVED))

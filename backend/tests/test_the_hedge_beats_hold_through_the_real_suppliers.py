@@ -121,6 +121,12 @@ async def _clean(conn):
     if await _has(conn, "bettor_funded_models"):
         await conn.execute("DELETE FROM bettor_funded_models "
                            "WHERE model_id LIKE 'hedgewins-%'")
+        # AND THE LEDGER IT WAS TRAINED ON, which lives under the learning
+        # module's account (see `_promote_a_model`).
+        import importlib
+        await importlib.import_module(
+            "tests.test_the_prospective_learning_path_promotes_or_rejects"
+        )._clean(conn)
     await conn.execute(
         "DELETE FROM bettor_funded_fills WHERE intent_id IN ("
         " SELECT intent_id FROM bettor_funded_intents WHERE account_id=$1)",
@@ -351,7 +357,11 @@ async def _promote_a_model(conn):
     prom = got["promotion"]
     assert prom.get("ok"), ("the approved model this proof needs was not "
                             "promoted: %r" % (prom,))
-    await lp._clean(conn)
+    # THE TRAINING RECORDS STAY FOR AS LONG AS THE MODEL IS APPROVED. This
+    # used to clean the learning module's ledger here, leaving an approved
+    # model whose records no longer existed -- the state `approved` now
+    # refuses (R_APPROVED_MODEL_EVIDENCE_INVALIDATED). This module's `_clean`
+    # removes both, together, on teardown.
     return prom
 
 
