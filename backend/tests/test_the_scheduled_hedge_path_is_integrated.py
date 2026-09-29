@@ -95,13 +95,28 @@ async def _catalogue(conn):
     the start minute on the moneyline, `signed` only on the spread, `side_norm`
     the team name on the moneyline and yes/no on the spread.
     """
-    from sportsassets.workers import premap as PM
-
-    class _P:
-        def __init__(self, c): self.c = c
-        async def execute(self, q, *a): return await self.c.execute(q, *a)
-
-    await PM._ensure_table(_P(conn))
+    # THIS MODULE DOES NOT DEFINE THE CATALOGUE SCHEMA, and the reason is a
+    # latent inconsistency in the suite that my gate run surfaced.
+    #
+    # `premap._ensure_table` -- the PRODUCTION DDL -- puts the unique index on
+    # (identifier, side_norm), because the aec- family's two sides share an
+    # identifier. Several older test modules instead create `us_premap` for
+    # themselves with `identifier` as a bare PRIMARY KEY and then insert with
+    # `ON CONFLICT (identifier)`.
+    #
+    # Both shapes work for whoever creates the table first, and the loser gets
+    # "no unique or exclusion constraint matching the ON CONFLICT
+    # specification". When I called the production DDL here, this module ran
+    # first in my gate and broke eleven tests in a file I had not touched --
+    # not a code regression, a schema-ownership collision I introduced.
+    #
+    # So: use whatever `us_premap` exists, skip when none does, and insert
+    # without a conflict target. The divergence between the suite's legacy
+    # shape and production's is real and worth fixing, but it is a separate
+    # change and not one to make silently from inside a new test.
+    if await conn.fetchval("SELECT to_regclass('us_premap') IS NULL"):
+        pytest.skip("no us_premap in this database; this module does not own "
+                    "the catalogue schema")
     await conn.execute("DELETE FROM us_premap WHERE event_slug=$1", EVENT)
     rows = [
         # the held moneyline, BOTH sides -- one instrument, two rows
@@ -126,28 +141,70 @@ async def _catalogue(conn):
          "yes", "nhf", None, None, "ORDER_INTENT_BUY_LONG"),
     ]
     for ident, slug, st, side, abbr, line, signed, intent in rows:
+        # A PLAIN INSERT, AFTER THE DELETE ABOVE. No ON CONFLICT clause:
+        # `us_premap`'s unique key differs between what `premap._ensure_table`
+        # builds in production -- (identifier, side_norm), because the aec-
+        # sides share an identifier -- and what several older test modules
+        # create for themselves, keyed on identifier alone. A conflict target
+        # naming either one makes this module depend on which of them happened
+        # to create the table first, and that dependency is exactly how my gate
+        # database preparation produced eleven failures in a file I had not
+        # touched. The delete makes the clause unnecessary.
         await conn.execute(
             "INSERT INTO us_premap (identifier, event_slug, event_title,"
             " market_slug, question, kind, line, side_norm, intent, signed,"
             " team_abbr, team_name, sports_type, game_start)"
             " VALUES ($1,$2,$3,$4,$5,'side',$6,$7,$8,$9,$10,$11,$12,"
-            "         now() + interval '2 hours')"
-            " ON CONFLICT (identifier, side_norm) DO UPDATE SET market_slug=$4,"
-            " sports_type=$12, side_norm=$7, signed=$9, line=$6,"
-            " team_abbr=$10",
+            "         now() + interval '2 hours')",
             ident, EVENT, "Chiba Lotte Marines vs. Nippon Ham Fighters",
             slug, "Who will win?", line, side, intent, signed, abbr,
             (abbr or ""), st)
 
 
+#: EVERY ROW THIS MODULE CREATES, SO IT CAN REMOVE EXACTLY THOSE.
+#:
+#: THE DEFECT THIS FIXES, AND IT WAS MINE. The first version of `_clean` ran
+#: `DELETE FROM bettor_funded_intents` with no WHERE, at the START of each test
+#: and never at the end. Two consequences, and the gate found both:
+#:
+#:   * it left this module's own intents live when the file finished. The funded
+#:     book enforces ONE live intent at a time, so every later test in the
+#:     session that recorded an intent was refused with
+#:     ANOTHER_FUNDED_INTENT_IS_ALREADY_LIVE -- 41 new failing node ids across
+#:     six files, none of which had anything to do with hedging;
+#:   * an unscoped DELETE would also have wiped another module's setup had the
+#:     order been different, which is the same bug pointing the other way.
+#:
+#: So the deletes are SCOPED to this module's own account and event, and they
+#: run on teardown as well as setup. A test that cleans only before itself is
+#: not isolated; it has just moved its mess onto whoever runs next.
 async def _clean(conn):
+    await conn.execute(
+        "DELETE FROM bettor_funded_fills WHERE intent_id IN ("
+        " SELECT intent_id FROM bettor_funded_intents WHERE account_id=$1)",
+        ACCT)
     for t in ("bettor_funded_leg_reservations", "bettor_funded_decisions",
-              "bettor_funded_economics", "bettor_funded_fills",
-              "bettor_funded_intents"):
+              "bettor_funded_economics"):
         try:
-            await conn.execute("DELETE FROM %s" % t)
+            await conn.execute(
+                "DELETE FROM %s WHERE intent_id IN ("
+                " SELECT intent_id FROM bettor_funded_intents"
+                " WHERE account_id=$1)" % t, ACCT)
         except Exception:                                       # noqa: BLE001
             pass
+    await conn.execute("DELETE FROM bettor_funded_intents WHERE account_id=$1",
+                       ACCT)
+    await conn.execute("DELETE FROM us_premap WHERE event_slug=$1", EVENT)
+
+
+@pytest.fixture(autouse=True)
+async def _leave_nothing_behind():
+    """CLEAN AFTER, NOT ONLY BEFORE. This is the fixture whose absence cost 41
+    new failing node ids on the gate for 3ac9b20."""
+    yield
+    if DSN:
+        async with _conn() as c:
+            await _clean(c)
 
 
 async def _held_position(conn, *, qty=10, price=0.62, intent_id="fpi-integ"):

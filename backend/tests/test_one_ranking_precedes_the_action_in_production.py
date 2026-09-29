@@ -239,9 +239,26 @@ async def test_the_supplier_carries_the_exit_at_its_own_numbers():
     assert ex["proceeds_per_contract"] == 0.465
     assert ex["expected_net_usd"] == -0.85
     assert ex["from_deferred_selection"] is True
-    # AND THE TWO UNWIRED READINGS ARE NAMED, one each.
-    assert loop.R_NO_HEDGE_CANDIDATE_READER in got["unavailable"]
-    assert loop.R_NO_REGION_PROBABILITY_SOURCE in got["unavailable"]
+    # ── WHAT THIS ASSERTION USED TO SAY, AND WHY IT CHANGED ──────────
+    #
+    # It asserted R_NO_HEDGE_CANDIDATE_READER -- "no second-leg candidate
+    # reader is wired". That was true and is now FALSE: `held_leg_for` and
+    # `candidate_legs_for` run on every pass. The refusal is therefore no
+    # longer a statement about missing code; it names the read that actually
+    # failed, which here is the catalogue, because this test deliberately
+    # passes conn=None and there is no catalogue to read.
+    #
+    # Keeping the old assertion would have meant keeping a test that passes
+    # only while the supplier does not exist.
+    assert loop.R_NO_HEDGE_CANDIDATE_READER not in got["unavailable"], (
+        "a candidate reader IS wired now, so a refusal saying otherwise would "
+        "be false: %r" % (got["unavailable"],))
+    assert got["unavailable"], "an absent hedge must still be named"
+    # AND THE EXIT IS UNTOUCHED BY THE HEDGE PATH FAILING, which is the
+    # property this file exists to protect.
+    assert "DIRECT_EXIT" in cands
+    assert got["held_leg"] is None
+    assert got["held_leg_read"]["refusal"], got["held_leg_read"]
 
 
 async def test_an_exit_at_a_loss_is_still_a_rankable_candidate():
