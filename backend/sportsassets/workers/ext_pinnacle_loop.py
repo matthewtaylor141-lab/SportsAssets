@@ -3982,93 +3982,24 @@ def _entry_plan(*, ladder, fee_fn, observation_age_s, action, condition_id,
 async def venue_account_exposure() -> dict:
     """WHAT THE ACCOUNT HOLDS AND HAS WORKING AT THE VENUE, OR WHY NOT.
 
-    THE MISSING CONNECTION THIS SUPPLIES. `submit_for_decision` measures the
-    ACCOUNT-WIDE exposure and hands it to the execution gate, and that total
-    needs the venue's own answer -- `bettor_account_exposure` says so and holds
-    no credential. Neither scheduled caller supplied it: `_funded_attempt`
-    passed nothing and `_funded_service` handed `pass_once` nothing, so the
-    total was UNREADABLE and the gate refused EVERY entry and EVERY hedge with
-    ACCOUNT_WIDE_EXPOSURE_COULD_NOT_BE_MEASURED -- whatever the account held.
-
-    THE READS ARE THE ONES PRODUCTION ALREADY TRUSTS. Positions come from
-    `mirror_shadow.account_positions_walk`, which pages the account with its
-    own pacing and returns None for a failed or truncated walk ("a partial
-    reading of the account is not a reading of the account"); resting orders
-    from `pmus.open_orders`. Held exposure is the venue's own all-in COST per
-    held slug (`pmus.position_basis`), because that is what the position has
-    committed; working exposure is each resting BUY's collateral at its limit,
-    side-aware. A SELL commits nothing new.
-
-    NEVER A PARTIAL NUMBER. Any failure -- no client, a failed or truncated
-    walk, a held slug whose cost the venue did not state, an unreadable order
-    -- returns `{"ok": False}` with the reason, and the caller passes None, so
-    the gate refuses exactly as it did before. `unresolved_usd` is 0 here
-    because unresolved sends are OUR state and are already counted from our own
-    tables under THIS_LANE; the venue cannot report an order it never received.
+    Delegates to `bettor_funded_execution.read_venue_account`. The read lives
+    there, beside the connector whose gate needs it, because THIS module is
+    held to `book_read` and `_get_client` off `pmus`
+    (`test_the_lane_takes_only_the_two_permitted_names_off_pmus`) so that the
+    shadow lane cannot acquire a venue capability by accident. An account read
+    is read-only, but the rule is about which module holds venue access, and
+    the funded modules already do.
     """
     from .. import bettor_funded_execution as _FX
-    from .. import pmus as _pmus
-    from . import mirror_shadow as _ms
 
-    at = time.time()
-    out = {"ok": False, "read_at_epoch_s": at,
-           "source": ("mirror_shadow.account_positions_walk + "
-                      "pmus.open_orders")}
-    try:
-        basis: dict = {}
-        positions, pages, rate_limited = await _ms.account_positions_walk(
-            _pmus, basis_out=basis)
-    except Exception as exc:                                   # noqa: BLE001
-        return dict(out, refusal="VENUE_POSITIONS_READ_RAISED",
-                    error=type(exc).__name__)
-    out["pages"] = pages
-    if positions is None:
-        return dict(out, refusal=("VENUE_POSITIONS_RATE_LIMITED"
-                                  if rate_limited else
-                                  "VENUE_POSITIONS_WALK_INCOMPLETE"),
-                    why="a failed or truncated walk is not a reading of the "
-                        "account, so no total is offered")
-    held = 0.0
-    for slug, net in positions.items():
-        if not net:
-            continue
-        cost = (basis.get(slug) or {}).get("cost")
-        try:
-            held += abs(float(cost))
-        except (TypeError, ValueError):
-            return dict(out, refusal="VENUE_POSITION_COST_NOT_STATED",
-                        slug=slug,
-                        why=("the account holds %s of %s and the venue stated "
-                             "no cost for it, so its commitment is unknown"
-                             % (net, slug)))
-    try:
-        orders = await asyncio.to_thread(_pmus.open_orders)
-    except Exception as exc:                                   # noqa: BLE001
-        return dict(out, refusal="VENUE_OPEN_ORDERS_READ_RAISED",
-                    error=type(exc).__name__)
-    working = 0.0
-    for o in orders or ():
-        if o.get("side") != "BUY":
-            continue
-        try:
-            working += _FX.collateral_for(float(o.get("price")),
-                                          float(o.get("leaves") or 0.0),
-                                          o.get("intent"))
-        except (TypeError, ValueError):
-            return dict(out, refusal="VENUE_OPEN_ORDER_UNREADABLE",
-                        order_id=o.get("order_id"))
-    return dict(out, ok=True, held_usd=round(held, 6),
-                working_usd=round(working, 6), unresolved_usd=0.0,
-                held_slugs=sorted(s for s, n in positions.items() if n),
-                open_orders=len(orders or ()))
+    return await _FX.read_venue_account()
 
 
 def _venue_positions_for_gate(read: dict) -> dict | None:
     """The shape `bettor_account_exposure.account_exposure` reads, or None."""
-    if not (read or {}).get("ok"):
-        return None
-    return {k: read[k] for k in ("held_usd", "working_usd", "unresolved_usd",
-                                 "read_at_epoch_s")}
+    from .. import bettor_funded_execution as _FX
+
+    return _FX.venue_positions_for_gate(read)
 
 
 async def _funded_attempt(conn, rec, *, now):
@@ -5006,6 +4937,141 @@ async def _funded_service(conn, *, now):
     return got
 
 
+class _EventTally(dict):
+    """THE CYCLE'S REFUSAL TALLY, which also says WHICH EVENT each count
+    belongs to.
+
+    Every per-event outcome in `cycle` is already written as
+    `tally[code] = tally.get(code, 0) + 1`. Recording the increment where it
+    happens attributes each code to the open event in the order it fired, so
+    no refusal site has to be edited -- and a site added later is attributed
+    by construction rather than by remembering to.
+    """
+
+    def __init__(self, *a, **k):
+        super().__init__(*a, **k)
+        self.log = None
+
+    def __setitem__(self, key, value):
+        if self.log is not None and value > self.get(key, 0):
+            self.log.append(key)
+        super().__setitem__(key, value)
+
+
+#: Codes that record what happened AFTER admission rather than why an event was
+#: refused. An ADMITTED event keeps them in its code list; none of them is a
+#: first refusal.
+EVENT_NOT_A_REFUSAL = ("ADMITTED", "ENTRY_INVENTORY_WRITTEN",
+                       "EXPOSURE_RESERVED", "DUPLICATE_OBSERVATION_SKIPPED")
+
+#: Every outcome a provider event can have in one cycle. UNCLASSIFIED means the
+#: cycle moved past an event without attributing anything to it: a defect in
+#: this accounting, reported rather than hidden.
+EVENT_OUTCOMES = ("ADMITTED", "REFUSED", "ALREADY_RECORDED", "DEFERRED",
+                  "UNCLASSIFIED")
+
+
+def _event_outcome(codes, *, deferred=False) -> dict:
+    """What happened to one provider event, from the codes attributed to it in
+    the order they fired."""
+    if deferred:
+        return {"outcome": "DEFERRED", "first_refusal": None,
+                "codes": [], "why": WHY_DEFERRED}
+    seen: list = []
+    for c in codes:
+        if c not in seen:
+            seen.append(c)
+    refusals = [c for c in seen if c not in EVENT_NOT_A_REFUSAL
+                and not str(c).startswith("FUNDED:")]
+    if "ADMITTED" in seen:
+        outcome = "ADMITTED"
+    elif refusals:
+        outcome = "REFUSED"
+    elif "DUPLICATE_OBSERVATION_SKIPPED" in seen:
+        outcome = "ALREADY_RECORDED"
+    else:
+        outcome = "UNCLASSIFIED"
+    return {"outcome": outcome,
+            "first_refusal": refusals[0] if refusals else None,
+            "codes": seen}
+
+
+def _reconcile_event_ledger(rows, funnel) -> dict:
+    """DO THE ROWS ADD UP TO THE FUNNEL? Per provider sport, the events the
+    fetch returned must equal the rows written for that sport, and no row may
+    be UNCLASSIFIED. Either failing is reported by name."""
+    by_outcome: dict = {}
+    per_sport: dict = {}
+    for r in rows:
+        by_outcome[r["outcome"]] = by_outcome.get(r["outcome"], 0) + 1
+        per_sport[r["sport_key"]] = per_sport.get(r["sport_key"], 0) + 1
+    sports: dict = {}
+    for sk, step in (funnel or {}).items():
+        want = int((step or {}).get("provider_events") or 0)
+        got = per_sport.get(sk, 0)
+        sports[sk] = {"provider_events": want, "rows": got,
+                      "reconciles": want == got}
+    for sk, got in per_sport.items():
+        sports.setdefault(sk, {"provider_events": 0, "rows": got,
+                               "reconciles": False})
+    unclassified = by_outcome.get("UNCLASSIFIED", 0)
+    return {"rows": len(rows), "by_outcome": by_outcome,
+            "per_sport": sports, "unclassified": unclassified,
+            "reconciles": (unclassified == 0
+                           and all(v["reconciles"] for v in sports.values()))}
+
+
+async def _persist_candidate_outcomes(conn, *, cycle_at: float, rows) -> dict:
+    """ONE ROW PER PROVIDER EVENT PER CYCLE, appended, never updated.
+
+    Never raises: an unwritable ledger is reported on the cycle and the cycle
+    goes on, because refusing to trade is not made safer by also refusing to
+    record why. An absent table is named separately from a failed write, since
+    one is a migration not yet applied and the other is a fault.
+    """
+    import json
+    import uuid
+
+    cycle_id = uuid.uuid4().hex
+    if not rows:
+        return {"ok": True, "cycle_id": cycle_id, "rows": 0}
+    try:
+        exists = await conn.fetchval(
+            "SELECT to_regclass('ext_candidate_outcomes') IS NOT NULL")
+    except Exception as exc:                                   # noqa: BLE001
+        return {"ok": False, "cycle_id": cycle_id, "rows": 0,
+                "refusal": "CANDIDATE_OUTCOMES_READ_FAILED",
+                "error": type(exc).__name__}
+    if not exists:
+        return {"ok": False, "cycle_id": cycle_id, "rows": 0,
+                "refusal": "CANDIDATE_OUTCOMES_TABLE_ABSENT",
+                "why": "migration 137 is not applied here"}
+    _ident = _code_identity() or {}
+    writer = _ident.get("build") or _ident.get("source_sha256_12")
+    try:
+        await conn.executemany(
+            "INSERT INTO ext_candidate_outcomes (cycle_id, cycle_at, writer, "
+            " sport_key, family, queue_position, provider_event_id, home, "
+            " away, commence_time, global_slug, us_market_slug, stage, "
+            " outcome, first_refusal, codes) "
+            "VALUES ($1, to_timestamp($2), $3, $4, $5, $6, $7, $8, $9, $10, "
+            " $11, $12, $13, $14, $15, $16::jsonb)",
+            [(cycle_id, float(cycle_at), writer, r["sport_key"],
+              r.get("family"), int(r["queue_position"]),
+              r.get("provider_event_id"), r.get("home"), r.get("away"),
+              None if r.get("commence_time") is None
+              else str(r.get("commence_time")),
+              r.get("global_slug"), r.get("us_market_slug"), r.get("stage"),
+              r["outcome"], r.get("first_refusal"),
+              json.dumps(list(r.get("codes") or [])))
+             for r in rows])
+    except Exception as exc:                                   # noqa: BLE001
+        return {"ok": False, "cycle_id": cycle_id, "rows": 0,
+                "refusal": "CANDIDATE_OUTCOMES_WRITE_FAILED",
+                "error": "%s: %s" % (type(exc).__name__, str(exc)[:160])}
+    return {"ok": True, "cycle_id": cycle_id, "rows": len(rows)}
+
+
 async def cycle(conn) -> dict:
     """Never raises. Returns what it did and, mostly, why it did not."""
     started = time.time()
@@ -5095,7 +5161,40 @@ async def cycle(conn) -> dict:
     # candidate query returned an empty set. A mapping refusal and an empty
     # candidate list are different facts, and only one of them is about
     # the mapping.
-    tally: dict = {}
+    tally = _EventTally()
+    # ── EVERY PROVIDER EVENT, WITH ITS IDENTITY AND WHAT HAPPENED TO IT ──
+    #
+    # The tally counts codes and `mapped_candidate_ledger` names only the
+    # candidates that REACHED the mapping. An event refused before that --
+    # no Pinnacle price, no venue contract -- was a count and nothing else, and
+    # the heartbeat holding even that is overwritten every cycle. So "33 events,
+    # 33 refusals" could be reconciled once, by whoever read it in time, and
+    # never again. One row per provider event now carries its identity and every
+    # code the cycle attributed to it, IN ORDER, and is written durably below.
+    event_ledger: list = []
+    _open_ev: dict = {"row": None}
+
+    def _close_event() -> None:
+        row = _open_ev["row"]
+        tally.log = None
+        _open_ev["row"] = None
+        if row is None:
+            return
+        row.update(_event_outcome(row.pop("_codes")))
+        event_ledger.append(row)
+
+    def _open_event(sport_key, family, position, ev) -> None:
+        _close_event()
+        ev = ev if isinstance(ev, dict) else {}
+        row = {"sport_key": sport_key, "family": family,
+               "queue_position": int(position),
+               "provider_event_id": ev.get("id"),
+               "home": ev.get("home_team"), "away": ev.get("away_team"),
+               "commence_time": ev.get("commence_time"),
+               "global_slug": None, "us_market_slug": None, "stage": None,
+               "_codes": []}
+        _open_ev["row"] = row
+        tally.log = row["_codes"]
     # THE VENUE'S OWN ERROR TEXT, bounded. A counter says how often the
     # venue refused; only the message says whether that is an entitlement,
     # a closed market or a rate limit -- and those need different actions
@@ -5118,6 +5217,10 @@ async def cycle(conn) -> dict:
     ledger: list = []
 
     def _ledger(entry: dict) -> None:
+        if _open_ev["row"] is not None:
+            for _k in ("global_slug", "us_market_slug", "stage"):
+                if entry.get(_k) is not None:
+                    _open_ev["row"][_k] = entry.get(_k)
         if len(ledger) < MAX_PER_CYCLE + 8:
             ledger.append(entry)
     # ── WHICH COMPETITIONS THIS CYCLE MAY SPEND ON ───────────────────
@@ -5220,6 +5323,7 @@ async def cycle(conn) -> dict:
     research = await rsh.authorised(conn)
 
     for sport_key, family in sports_for_cycle:
+        _close_event()
         if evaluated >= MAX_PER_CYCLE:
             break
         step = funnel.setdefault(sport_key, {
@@ -5379,6 +5483,19 @@ async def cycle(conn) -> dict:
                         "queue_position": _k,
                         "why": WHY_DEFERRED})
                 deferred_total += max(0, len(events) - _i)
+                _close_event()
+                for _k in range(_i, len(events)):
+                    _e = events[_k] if isinstance(events[_k], dict) else {}
+                    event_ledger.append({
+                        "sport_key": sport_key, "family": family,
+                        "queue_position": _k,
+                        "provider_event_id": _e.get("id"),
+                        "home": _e.get("home_team"),
+                        "away": _e.get("away_team"),
+                        "commence_time": _e.get("commence_time"),
+                        "global_slug": None, "us_market_slug": None,
+                        "stage": None,
+                        **_event_outcome([], deferred=True)})
                 break
             # ── REFRESH THE QUOTE BEFORE IT GOES STALE ON OUR CLOCK ────
             #
@@ -5414,6 +5531,7 @@ async def cycle(conn) -> dict:
                     # a provider hiccup into missing coverage.
                     odds_refetch_failures += 1
             event = events[_i]
+            _open_event(sport_key, family, _i, event)
             served_by_this_fetch += 1
             quote = pinnacle_h2h(event, received_at=received_at)
             if quote is None:
@@ -6132,6 +6250,11 @@ async def cycle(conn) -> dict:
                              None if rec.get("edge") is None
                              else float(rec["edge"]) > 0.0)})
 
+    _close_event()
+    candidate_outcomes = _reconcile_event_ledger(event_ledger, funnel)
+    candidate_outcomes["persisted"] = await _persist_candidate_outcomes(
+        conn, cycle_at=started, rows=event_ledger)
+
     # THE OUTCOME JOIN RUNS EVERY CYCLE, bounded. Collection has to
     # progress on its own: a calibration that waits for someone to
     # remember to run a backfill is a calibration that never happens.
@@ -6244,6 +6367,10 @@ async def cycle(conn) -> dict:
            "funnel_by_provider_sport": funnel,
            # EVERY MAPPED CANDIDATE, RECONCILED TO ITS FIRST REFUSAL.
            "mapped_candidate_ledger": ledger,
+           # EVERY PROVIDER EVENT, mapped or not, with its identity and its
+           # outcome -- and whether the rows add up to the funnel.
+           "candidate_outcomes": candidate_outcomes,
+           "event_ledger": event_ledger,
            # THE CYCLE'S OWN LABEL, and the distinction it protects.
            # "zero positive edge" is a claim ABOUT THE MARKET. It can only
            # be made when candidates actually reached the economics. When
@@ -6742,6 +6869,10 @@ async def _heartbeat(conn, out: dict, *, key: str = None) -> None:
                 # per-candidate census with it).
                 "mapped_candidate_ledger":
                     out.get("mapped_candidate_ledger") or [],
+                # THE PER-EVENT RECONCILIATION, summarised. The rows
+                # themselves are in `ext_candidate_outcomes`, one per event
+                # per cycle, so this heartbeat stays bounded.
+                "candidate_outcomes": out.get("candidate_outcomes"),
                 "cycle_label": out.get("cycle_label"),
                 "cycle_label_note": out.get("cycle_label_note"),
                 # THE LATENCY MEASUREMENT, PERSISTED. See

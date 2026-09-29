@@ -581,6 +581,105 @@ async def check_rails(conn, plan: dict, effective: dict, *,
             "every_effective_rail_was_checked": not unmeasured}
 
 
+# ── THE ACCOUNT, READ AT THE VENUE ─────────────────────────────────
+
+async def read_venue_account() -> dict:
+    """WHAT THE ACCOUNT HOLDS AND HAS WORKING AT THE VENUE, OR WHY NOT.
+
+    THE MISSING CONNECTION THIS SUPPLIES. `submit_for_decision` measures the
+    ACCOUNT-WIDE exposure and hands it to the execution gate, and that total
+    needs the venue's own answer -- `bettor_account_exposure` says so and holds
+    no credential. Neither scheduled caller supplied it: `_funded_attempt`
+    passed nothing and `_funded_service` handed `pass_once` nothing, so the
+    total was UNREADABLE and the gate refused EVERY entry and EVERY hedge with
+    ACCOUNT_WIDE_EXPOSURE_COULD_NOT_BE_MEASURED -- whatever the account held.
+
+    THE READS ARE THE ONES PRODUCTION ALREADY TRUSTS. Positions come from
+    `mirror_shadow.account_positions_walk`, which pages the account with its
+    own pacing and returns None for a failed or truncated walk ("a partial
+    reading of the account is not a reading of the account"); resting orders
+    from `pmus.open_orders`. Held exposure is the venue's own all-in COST per
+    held slug (`pmus.position_basis`), because that is what the position has
+    committed; working exposure is each resting BUY's collateral at its limit,
+    side-aware. A SELL commits nothing new.
+
+    NEVER A PARTIAL NUMBER. Any failure -- no client, a failed or truncated
+    walk, a held slug whose cost the venue did not state, an unreadable order
+    -- returns `{"ok": False}` with the reason, and the caller passes None, so
+    the gate refuses exactly as it did before. `unresolved_usd` is 0 here
+    because unresolved sends are OUR state and are already counted from our own
+    tables under THIS_LANE; the venue cannot report an order it never received.
+    """
+    import asyncio
+
+    from . import pmus as _pmus
+    from .workers import mirror_shadow as _ms
+
+    at = time.time()
+    out = {"ok": False, "read_at_epoch_s": at,
+           "source": ("mirror_shadow.account_positions_walk + "
+                      "pmus.open_orders")}
+    try:
+        basis: dict = {}
+        positions, pages, rate_limited = await _ms.account_positions_walk(
+            _pmus, basis_out=basis)
+    except Exception as exc:                                   # noqa: BLE001
+        return dict(out, refusal="VENUE_POSITIONS_READ_RAISED",
+                    error=type(exc).__name__)
+    out["pages"] = pages
+    if positions is None:
+        return dict(out, refusal=("VENUE_POSITIONS_RATE_LIMITED"
+                                  if rate_limited else
+                                  "VENUE_POSITIONS_WALK_INCOMPLETE"),
+                    why="a failed or truncated walk is not a reading of the "
+                        "account, so no total is offered")
+    held = 0.0
+    for slug, net in positions.items():
+        if not net:
+            continue
+        cost = (basis.get(slug) or {}).get("cost")
+        try:
+            held += abs(float(cost))
+        except (TypeError, ValueError):
+            return dict(out, refusal="VENUE_POSITION_COST_NOT_STATED",
+                        slug=slug,
+                        why=("the account holds %s of %s and the venue stated "
+                             "no cost for it, so its commitment is unknown"
+                             % (net, slug)))
+    try:
+        orders = await asyncio.to_thread(_pmus.open_orders)
+    except Exception as exc:                                   # noqa: BLE001
+        return dict(out, refusal="VENUE_OPEN_ORDERS_READ_RAISED",
+                    error=type(exc).__name__)
+    working = 0.0
+    for o in orders or ():
+        if o.get("side") != "BUY":
+            continue
+        try:
+            working += collateral_for(float(o.get("price")),
+                                          float(o.get("leaves") or 0.0),
+                                          o.get("intent"))
+        except (TypeError, ValueError):
+            return dict(out, refusal="VENUE_OPEN_ORDER_UNREADABLE",
+                        order_id=o.get("order_id"))
+    return dict(out, ok=True, held_usd=round(held, 6),
+                working_usd=round(working, 6), unresolved_usd=0.0,
+                held_slugs=sorted(s for s, n in positions.items() if n),
+                open_orders=len(orders or ()))
+
+
+def venue_positions_for_gate(read: dict) -> dict | None:
+    """The shape `bettor_account_exposure.account_exposure` reads, or None.
+
+    Only an `ok` read becomes a figure; anything else becomes None, and the
+    gate then refuses ACCOUNT_WIDE_EXPOSURE_COULD_NOT_BE_MEASURED by name.
+    """
+    if not (read or {}).get("ok"):
+        return None
+    return {k: read[k] for k in ("held_usd", "working_usd", "unresolved_usd",
+                                 "read_at_epoch_s")}
+
+
 def _resized(plan: dict, qty: int) -> dict:
     """The same order at a smaller count: same contract, side and LIMIT."""
     return dict(plan, quantity=int(qty),

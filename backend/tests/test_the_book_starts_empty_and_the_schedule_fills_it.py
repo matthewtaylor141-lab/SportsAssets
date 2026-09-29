@@ -496,3 +496,121 @@ async def test_a_venue_confirmed_ending_closes_the_order_and_keeps_inventory():
                            "intent_id='fpi-emptybook-terminal'")
         await F.clean(conn)
         await conn.close()
+
+
+@pg
+@pytest.mark.asyncio
+async def test_every_provider_event_is_recorded_with_its_identity_and_outcome(
+        monkeypatch):
+    """EVERY EVENT THE SCHEDULE SAW HAS A DURABLE ROW, AND THE ROWS ADD UP.
+
+    Three events in one fetch: the fixture the venue lists (admitted), one
+    with no Pinnacle price, and one between teams the venue does not carry.
+    The two refusals used to be counts in a heartbeat the next cycle
+    overwrote. Each now has its own row with who played, what it mapped to
+    where it got that far, and the refusal that stopped it, and the rows
+    reconcile to the funnel's own event count.
+    """
+    asyncpg = pytest.importorskip("asyncpg")
+    conn = await asyncpg.connect(DSN)
+    venue = F.Venue()
+
+    def odds(now):
+        admitted = F.odds_event(now)
+        no_pinnacle = dict(F.odds_event(now), id="odds-emptybook-no-pinnacle")
+        no_pinnacle["bookmakers"] = [b for b in no_pinnacle["bookmakers"]
+                                     if b["key"] != "pinnacle"]
+        unlisted = dict(F.odds_event(now), id="odds-emptybook-unlisted",
+                        home_team="Boston Red Sox",
+                        away_team="New York Yankees")
+        for b in unlisted["bookmakers"]:
+            for m in b["markets"]:
+                m["outcomes"] = [{"name": "Boston Red Sox", "price": 1.9},
+                                 {"name": "New York Yankees", "price": 1.9}]
+        return [admitted, no_pinnacle, unlisted]
+
+    try:
+        await F.clean(conn)
+        await F.seed(conn)
+        F.substitute(monkeypatch, venue, odds=odds)
+        out = await loop.cycle(conn)
+        co = out["candidate_outcomes"]
+        assert co["reconciles"] is True, co
+        assert co["unclassified"] == 0
+        assert co["per_sport"]["baseball_mlb"] == {
+            "provider_events": 3, "rows": 3, "reconciles": True}, co
+        assert co["persisted"]["ok"] is True, co["persisted"]
+        assert co["persisted"]["rows"] == 3
+
+        rows = {r["provider_event_id"]: r for r in await conn.fetch(
+            "SELECT * FROM ext_candidate_outcomes WHERE cycle_id=$1",
+            co["persisted"]["cycle_id"])}
+        assert set(rows) == {F.ODDS_EVENT, "odds-emptybook-no-pinnacle",
+                             "odds-emptybook-unlisted"}
+
+        a = rows[F.ODDS_EVENT]
+        assert a["outcome"] == "ADMITTED", dict(a)
+        assert a["first_refusal"] is None
+        assert a["us_market_slug"] == F.US_SLUG
+        assert a["home"] == F.HOME and a["away"] == F.AWAY
+        assert a["commence_time"] == "%sT23:10:00Z" % F.GAME
+
+        n = rows["odds-emptybook-no-pinnacle"]
+        assert n["outcome"] == "REFUSED"
+        assert n["first_refusal"] == "NO_PINNACLE_ON_EVENT"
+        assert n["global_slug"] is None and n["us_market_slug"] is None
+
+        u = rows["odds-emptybook-unlisted"]
+        assert u["outcome"] == "REFUSED", dict(u)
+        assert u["first_refusal"], dict(u)
+        assert u["home"] == "Boston Red Sox"
+        assert u["us_market_slug"] is None
+
+        # the codes are the cycle's own tally, attributed: every refusal the
+        # tally counted for these events appears on exactly one row
+        import json as _json
+        attributed: dict = {}
+        for r in rows.values():
+            for c in _json.loads(r["codes"]) if isinstance(r["codes"], str) \
+                    else r["codes"]:
+                attributed[c] = attributed.get(c, 0) + 1
+        for code in ("NO_PINNACLE_ON_EVENT", u["first_refusal"]):
+            assert attributed.get(code) == out["refusals"].get(code), \
+                (code, attributed, out["refusals"])
+
+        # AND THE HEARTBEAT CARRIES THE SUMMARY, so the operator view can
+        # say whether this cycle's rows reconciled without reading them all
+        hb = await conn.fetchval(
+            "SELECT value FROM ingestion_state WHERE key=$1",
+            loop.HEARTBEAT_KEY)
+        hb = _json.loads(hb) if isinstance(hb, str) else hb
+        assert hb["candidate_outcomes"]["reconciles"] is True
+        assert hb["candidate_outcomes"]["persisted"]["cycle_id"] == \
+            co["persisted"]["cycle_id"]
+    finally:
+        await F.clean(conn)
+        await conn.close()
+
+
+def test_an_event_nothing_was_attributed_to_is_unclassified_not_dropped():
+    """The accounting's own failure is a named outcome, and it fails the
+    reconciliation rather than disappearing into it."""
+    assert loop._event_outcome([])["outcome"] == "UNCLASSIFIED"
+    assert loop._event_outcome(["DUPLICATE_OBSERVATION_SKIPPED"])[
+        "outcome"] == "ALREADY_RECORDED"
+    got = loop._event_outcome(["ADMITTED", "ENTRY_INVENTORY_WRITTEN",
+                               "FUNDED:THE_ORDER_EXCEEDS_AN_EFFECTIVE_RAIL"])
+    assert got["outcome"] == "ADMITTED" and got["first_refusal"] is None
+    got = loop._event_outcome(["VENUE_MAPPING_AMBIGUOUS",
+                               "VENUE_MAPPING_AMBIGUOUS", "X"])
+    assert got == {"outcome": "REFUSED",
+                   "first_refusal": "VENUE_MAPPING_AMBIGUOUS",
+                   "codes": ["VENUE_MAPPING_AMBIGUOUS", "X"]}
+    rows = [dict(sport_key="s", outcome="REFUSED"),
+            dict(sport_key="s", outcome="UNCLASSIFIED")]
+    rec = loop._reconcile_event_ledger(rows, {"s": {"provider_events": 2}})
+    assert rec["reconciles"] is False and rec["unclassified"] == 1
+    rec = loop._reconcile_event_ledger(rows[:1], {"s": {"provider_events": 2}})
+    assert rec["reconciles"] is False
+    assert rec["per_sport"]["s"] == {"provider_events": 2, "rows": 1,
+                                     "reconciles": False}

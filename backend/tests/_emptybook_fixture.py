@@ -377,7 +377,8 @@ def substitute(monkeypatch, venue: Venue, *, schedule_state="Pre-Game",
 
     async def fake_odds(sport_key, *, api_key, timeout=20.0):
         now = time.time()
-        events = ([odds(now) if odds else odds_event(now)]
+        got = odds(now) if odds else odds_event(now)
+        events = ((got if isinstance(got, list) else [got])
                   if sport_key == "baseball_mlb" else [])
         return {"ok": True, "events": events, "received_at": now,
                 "credits_used": "1", "credits_remaining": "9"}
@@ -485,6 +486,11 @@ async def seed(conn):
 
 async def clean(conn):
     """Everything this fixture created, and nothing else. Run in `finally`."""
+    if await conn.fetchval(
+            "SELECT to_regclass('ext_candidate_outcomes') IS NOT NULL"):
+        await conn.execute(
+            "DELETE FROM ext_candidate_outcomes "
+            " WHERE provider_event_id LIKE 'odds-emptybook%'")
     for sql, args in (
             ("DELETE FROM bettor_funded_leg_reservations WHERE group_id IN "
              "(SELECT group_id FROM bettor_funded_portfolio_groups "

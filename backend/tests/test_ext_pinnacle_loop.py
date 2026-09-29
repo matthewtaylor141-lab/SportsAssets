@@ -381,7 +381,12 @@ async def test_one_cycle_writes_a_complete_refusal_record(monkeypatch):
                 "sports_type, intent) "
                 "VALUES ($1,$2,$3,'side',$4,$5,$6,$7,"
                 "'ORDER_INTENT_BUY_LONG') "
-                "ON CONFLICT (identifier) DO NOTHING",
+                # NO CONFLICT TARGET. Production's `us_premap` (premap._ensure_table)
+                # is unique on (identifier, side_norm) and has no key on identifier
+                # alone; this module's own DDL has the reverse. Naming either target
+                # fails whenever the other module created the table first, so the
+                # seed names none and is correct under both.
+                "ON CONFLICT DO NOTHING",
                 "aec-soccer-mci-mun-2026-09-24-%s" % _side,
                 "soccer-mci-mun-2026-09-24",
                 "aec-soccer-mci-mun-2026-09-24-%s" % _side,
