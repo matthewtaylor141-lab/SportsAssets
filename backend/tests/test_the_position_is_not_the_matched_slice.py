@@ -510,3 +510,98 @@ def test_the_detail_map_and_the_admitted_map_no_longer_share_a_name():
     assert "admitted_by_id = {" in src
     assert src.count("by_id = {") == 1, (
         "two different maps must not share one name in one function")
+
+
+# ═════════════════════════════════════════════════════════════════════
+# AN UNKNOWN PARTITION IS NOT A PARTITION WITHOUT THE TIE  (§4)
+# ═════════════════════════════════════════════════════════════════════
+#
+# `payoff_table(sport_permits_tie=False)` REMOVES the margin-0 cell. `pass_once`
+# and the ranking both passed `bool(facts.get("sport_permits_tie"))`, and the
+# production supplier never set that field at all -- so every structure was
+# classified over a partition with the level cell deleted. On a fixture that CAN
+# end level that omits the outcome which happens.
+#
+# The owner's words: "Do not silently turn missing sport_permits_tie into False:
+# an unknown outcome partition must not become a partition with the tie removed."
+
+from sportsassets import bettor_venue_settlement as VS
+
+
+def test_the_tie_question_is_answered_per_sport_and_per_graded_interval():
+    """It is not a property of the sport alone.
+
+    Baseball including extra innings cannot end level; baseball graded on
+    regulation can. Soccer over ninety minutes routinely does; through extra
+    time and penalties it does not.
+    """
+    assert VS.tie_is_reachable(sport_family="baseball",
+                               overtime=IS.OT_INCLUDED)["permits_tie"] is False
+    assert VS.tie_is_reachable(sport_family="baseball",
+                               overtime=IS.OT_EXCLUDED)["permits_tie"] is True
+    assert VS.tie_is_reachable(sport_family="soccer",
+                               overtime=IS.OT_EXCLUDED)["permits_tie"] is True
+    assert VS.tie_is_reachable(sport_family="soccer",
+                               overtime=IS.OT_INCLUDED)["permits_tie"] is False
+
+
+@pytest.mark.parametrize("fam,ot", [
+    ("cricket", IS.OT_INCLUDED),          # no entry for the family
+    ("baseball", IS.OT_UNKNOWN),          # the overtime read refused
+    ("", IS.OT_INCLUDED),                 # no family
+    ("baseball", None),                   # no overtime
+])
+def test_an_undeclared_pair_refuses_rather_than_answering_false(fam, ot):
+    got = VS.tie_is_reachable(sport_family=fam, overtime=ot)
+    assert got["permits_tie"] is None, got
+    assert got["refusal"] == VS.TIE_UNKNOWN
+    assert "coerced to False" in got["why_not_a_default"]
+
+
+def test_discover_refuses_an_unknown_partition_before_classifying_anything():
+    held = leg("held#ORDER_INTENT_BUY_LONG", "A", 55, 10)
+    cand = leg("opp#ORDER_INTENT_BUY_SHORT", "B", 30, 6)
+    got = PC.discover(held_leg=held, candidate_legs=[cand],
+                      sport_permits_tie=None)
+    assert got["ok"] is False
+    assert got["refusal"] == PC.R_TIE_PARTITION_UNKNOWN
+    assert got["admitted"] == []
+    # NOTHING WAS CLASSIFIED -- not even rejected with a reason, because there
+    # was no outcome space to classify over.
+    assert got["examined"] == 0
+    assert got["rejected"] == []
+    assert "missing an outcome it has" in got["why"]
+
+
+@pytest.mark.parametrize("permits", [True, False])
+def test_a_stated_partition_is_classified_either_way(permits):
+    """The control: the refusal is about ABSENCE, not about the tie."""
+    held = leg("held#ORDER_INTENT_BUY_LONG", "A", 55, 10)
+    cand = leg("opp#ORDER_INTENT_BUY_SHORT", "B", 30, 6)
+    got = PC.discover(held_leg=held, candidate_legs=[cand],
+                      sport_permits_tie=permits)
+    assert got["refusal"] != PC.R_TIE_PARTITION_UNKNOWN
+    assert got["examined"] == 1
+
+
+def test_removing_the_level_cell_changes_the_floor_which_is_why_it_matters():
+    """The reason this is a correctness issue and not a bookkeeping one.
+
+    With the level cell present the position's floor is computed over it too.
+    Deleting it can only make the reported floor look better or equal, never
+    worse -- which is the direction that matters for a capital decision.
+    """
+    held = leg("held#ORDER_INTENT_BUY_LONG", "A", 55, 10)
+    cand = leg("opp#ORDER_INTENT_BUY_SHORT", "B", 30, 6)
+    with_tie = IP.position_worst_case(
+        held_leg=held, hedge_leg=cand, hedge_qty=6,
+        sport_permits_tie=True, fee_usd=0.0, fee_basis="zero")
+    without = IP.position_worst_case(
+        held_leg=held, hedge_leg=cand, hedge_qty=6,
+        sport_permits_tie=False, fee_usd=0.0, fee_basis="zero")
+    assert with_tie["ok"] and without["ok"]
+    assert with_tie["whole_position_usd"] <= without["whole_position_usd"] + 1e-9
+    # And the two partitions are genuinely different.
+    assert len(with_tie["regions"]) != len(without["regions"]) or \
+        {r["state"] for r in with_tie["regions"]} != \
+        {r["state"] for r in without["regions"]}

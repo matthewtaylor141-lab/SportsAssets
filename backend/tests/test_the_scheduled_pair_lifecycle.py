@@ -89,6 +89,7 @@ from sportsassets import bettor_funded_learning as FL
 from sportsassets import bettor_funded_management as FM
 from sportsassets import bettor_funded_pair_cycle as PC
 from sportsassets import bettor_funded_reservations as RSV
+from sportsassets import bettor_funded_hedge_supply as HS
 from sportsassets import bettor_indirect_structures as IS
 
 DSN = __import__("os").environ.get("RN1X_TEST_DSN", "")
@@ -320,13 +321,25 @@ async def _primary(conn, *, intent_id=PRIMARY_INTENT):
 # THE INPUTS, BUILT FROM THE DEPLOYED MODULES' OWN SHAPES
 # ════════════════════════════════════════════════════════════════════
 
+#: SIDE-AWARE IDENTITIES, because a real candidate has one and an order needs
+#: it. `condition_id` is `slug#SIDE`: the slug is what the venue is addressed
+#: with and the side is which of its two outcome tokens is being bought. Without
+#: the side, `acquisition_plan_for` refuses -- correctly -- because an order
+#: naming only the slug does not say what it would buy, and a ranking that picks
+#: the SHORT side could produce a LONG fill.
+HELD_ID = "%s#%s" % (SLUG_PRIMARY, HS.SIDE_LONG)
+HEDGE_ID = "%s#%s" % (SLUG_HEDGE, HS.SIDE_SHORT)
+
+
 def _held_leg():
-    return dataclasses.replace(IS.BEARS_MONEYLINE, quantity=PRIMARY_QTY,
+    return dataclasses.replace(IS.BEARS_MONEYLINE, condition_id=HELD_ID,
+                               quantity=PRIMARY_QTY,
                                cost_cents_per_unit=int(PRIMARY_PX * 100))
 
 
 def _hedge_leg():
-    return dataclasses.replace(IS.PANTHERS_PLUS_4_5, quantity=HEDGE_QTY,
+    return dataclasses.replace(IS.PANTHERS_PLUS_4_5, condition_id=HEDGE_ID,
+                               quantity=HEDGE_QTY,
                                cost_cents_per_unit=int(HEDGE_PX * 100))
 
 

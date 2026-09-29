@@ -210,7 +210,11 @@ async def recover_reservations(conn, *, account_id: str,
 # 2 · DISCOVERY: TWO DISTINCT SETTLEMENT-COMPATIBLE CONTRACTS
 # ═════════════════════════════════════════════════════════════════════
 
-def discover(*, held_leg, candidate_legs, sport_permits_tie: bool,
+R_TIE_PARTITION_UNKNOWN = (
+    "WHETHER_THE_GRADED_INTERVAL_CAN_END_LEVEL_IS_NOT_ESTABLISHED")
+
+
+def discover(*, held_leg, candidate_legs, sport_permits_tie,
              fixture_can_void: bool = True,
              fixture_can_postpone: bool = True) -> dict:
     """CLASSIFY EVERY CANDIDATE AGAINST THE HELD LEG, AND SAY WHY EACH FAILED.
@@ -235,6 +239,22 @@ def discover(*, held_leg, candidate_legs, sport_permits_tie: bool,
                            "held": held_leg.condition_id,
                            "fixture": held_leg.fixture_id,
                            "examined": 0, "admitted": [], "rejected": []}
+    # ── AN UNKNOWN PARTITION IS NOT A PARTITION WITHOUT THE TIE ──────
+    #
+    # `payoff_table(sport_permits_tie=False)` REMOVES the margin-0 cell. Callers
+    # were passing `bool(facts.get("sport_permits_tie"))`, so an absent reading
+    # became False and a fixture that CAN end level was graded over a partition
+    # missing the outcome that happens. `None` now refuses here, before any
+    # structure is classified.
+    if sport_permits_tie is None:
+        return dict(out, ok=False, refusal=R_TIE_PARTITION_UNKNOWN,
+                    why=("whether this fixture's graded interval can end level "
+                         "is not established, so the outcome partition is "
+                         "unknown. Removing the level cell would grade the "
+                         "position over a space missing an outcome it has -- "
+                         "see bettor_venue_settlement.tie_is_reachable"),
+                    distinct_settlement_compatible_contracts=1,
+                    counting="nothing was classified")
     want = held_leg.grading_key()
     for leg in candidate_legs:
         out["examined"] += 1
@@ -476,10 +496,15 @@ async def decide_and_record(conn, *, decision_id: str, account_id: str,
 # ═════════════════════════════════════════════════════════════════════
 
 async def acquire_second_leg(conn, *, operation_id: str, group_id: str,
-                             us_market_slug: str, quantity: float,
-                             limit_price: float, collateral_usd: float,
                              decision_record: dict, account_id: str,
-                             venue: str, adapter=None,
+                             venue: str, plan=None,
+                             expect_candidate_id: str | None = None,
+                             expect_digest: str | None = None,
+                             us_market_slug: str | None = None,
+                             quantity: float | None = None,
+                             limit_price: float | None = None,
+                             collateral_usd: float | None = None,
+                             adapter=None,
                              venue_positions: dict | None = None,
                              leg_role: str = "HEDGE",
                              now: float | None = None) -> dict:
@@ -507,6 +532,65 @@ async def acquire_second_leg(conn, *, operation_id: str, group_id: str,
     out: dict[str, Any] = {"version": VERSION, "at": at,
                            "operation_id": operation_id, "group_id": group_id,
                            "resubmitted_anything": False}
+    # ── THE PLAN IS THE ORDER, AND IT MUST BE THE RANKED ONE ─────────
+    #
+    # `us_market_slug`, `quantity`, `limit_price` and `collateral_usd` remain
+    # accepted for callers that predate the plan, and a call supplying them
+    # WITHOUT a plan is recorded as unbound -- because that is exactly the shape
+    # that let an order's address come from a record other than the candidate
+    # that was ranked.
+    if plan is not None:
+        out["plan"] = plan.as_dict()
+        out["order_binding"] = {"bound": True, "digest": plan.digest,
+                                "candidate_id": plan.candidate_id,
+                                "side": plan.side,
+                                "venue_slug": plan.venue_slug}
+        # THE DIGEST BINDS IT. The persisted decision records the digest of the
+        # plan it was ranked with; a substituted plan changes the digest.
+        if expect_digest is not None and plan.digest != expect_digest:
+            return dict(out, ok=False, refusal=R_ACQ_PLAN_DIGEST,
+                        submitted=False, nothing_was_sent=True,
+                        why=("the decision was ranked with plan digest %r and "
+                             "this plan is %r. A substituted plan is a "
+                             "different order"
+                             % (expect_digest, plan.digest)))
+        if expect_candidate_id is not None and \
+                plan.candidate_id != expect_candidate_id:
+            return dict(out, ok=False,
+                        refusal=R_ACQ_PLAN_NOT_THE_SELECTED_CANDIDATE,
+                        submitted=False, nothing_was_sent=True,
+                        why=("the ranking selected %r and this plan would buy "
+                             "%r. A correctly ranked side is not enough if the "
+                             "order addresses another one"
+                             % (expect_candidate_id, plan.candidate_id)))
+        # AND THE SIDE REACHES THE ORDER. `order_intent` on the decision record
+        # is what the venue is told; without it the order names a market and not
+        # an outcome token.
+        decision_record = dict(decision_record or {})
+        decision_record.setdefault("us_market_slug", plan.venue_slug)
+        decision_record.setdefault("order_intent", plan.side)
+        decision_record.setdefault("quantity", plan.quantity)
+        decision_record.setdefault("limit_price", plan.limit_price)
+        decision_record.setdefault("candidate_id", plan.candidate_id)
+        us_market_slug = plan.venue_slug
+        quantity = plan.quantity
+        limit_price = plan.limit_price
+        collateral_usd = plan.collateral_usd
+    else:
+        out["order_binding"] = {
+            "bound": False,
+            "why": ("no AcquisitionPlan was supplied, so this order's address "
+                    "and quantity come from the caller rather than from the "
+                    "candidate that was ranked")}
+    if not us_market_slug or quantity is None or limit_price is None \
+            or collateral_usd is None:
+        return dict(out, ok=False, refusal=R_PLAN_INCOMPLETE, submitted=False,
+                    nothing_was_sent=True,
+                    why=("an acquisition needs an instrument, a quantity, a "
+                         "limit and its collateral. slug=%r qty=%r limit=%r "
+                         "collateral=%r"
+                         % (us_market_slug, quantity, limit_price,
+                            collateral_usd)))
     res = await RSV.hold(conn, operation_id=operation_id, group_id=group_id,
                          leg_role=leg_role, us_market_slug=us_market_slug,
                          quantity=quantity, limit_price=limit_price,
@@ -1009,6 +1093,198 @@ class ExecutionPlan:
                 "remaining_s": remaining,
                 "why": ("agreement about an expiry instant is not evidence that "
                         "the instant has not passed; the clock is asked")}
+
+
+# ═════════════════════════════════════════════════════════════════════
+# THE ACQUISITION'S PLAN, BOUND AS RIGOROUSLY AS AN EXIT'S
+# ═════════════════════════════════════════════════════════════════════
+#
+# THE DEFECT THIS EXISTS TO END. `pass_once` dispatched the acquisition with
+#
+#     us_market_slug=facts["hedge_us_market_slug"]
+#     quantity=facts["hedge_quantity"]
+#     limit_price=facts["hedge_limit_price"]
+#
+# -- a SEPARATE record from the candidate that was ranked and selected. The
+# owner's words: "A correctly ranked side is not sufficient if dispatch takes
+# its address or quantity from a separate record." And the production supplier
+# hardcodes all five of those fields to None, so the path could not dispatch at
+# all, which is why no test caught the missing binding.
+#
+# THERE WAS ALSO NO SIDE ANYWHERE IN IT. One venue slug carries two outcome
+# tokens; an order that names only the slug does not say which one it is buying.
+# A ranking that correctly picks the SHORT side and an order that carries only
+# the slug can produce a LONG fill, and nothing in the record would disagree.
+#
+# So the plan is built FROM the selected candidate, carries the side explicitly,
+# and its digest binds it: the persisted decision records the digest, and
+# `acquire_second_leg` refuses a plan whose digest does not match.
+
+ACQ_PLAN_REQUIRED = ("account_id", "venue", "group_id", "candidate_id",
+                     "venue_slug", "side", "action", "quantity", "limit_price",
+                     "collateral_usd", "inputs_expire_at")
+
+R_ACQ_PLAN_NOT_THE_SELECTED_CANDIDATE = (
+    "THE_ACQUISITION_PLAN_NAMES_A_DIFFERENT_CANDIDATE_THAN_THE_RANKING_SELECTED")
+R_ACQ_PLAN_SIDE_MISSING = (
+    "THE_ACQUISITION_PLAN_DOES_NOT_STATE_WHICH_SIDE_OF_THE_INSTRUMENT_TO_BUY")
+R_ACQ_PLAN_DIGEST = "THE_ACQUISITION_PLAN_IS_NOT_THE_ONE_THAT_WAS_RANKED"
+R_ACQ_PLAN_NETS_THE_HELD_INSTRUMENT = (
+    "THE_ACQUISITION_PLAN_ADDRESSES_THE_HELD_INSTRUMENT_WHICH_WOULD_NET_IT")
+
+
+class AcquisitionPlan:
+    """ONE HEDGE ACQUISITION'S COMPLETE ORDER. Immutable once built.
+
+    `candidate_id` is the side-aware identity (`slug#SIDE`) the ranking chose.
+    `venue_slug` and `side` are DERIVED from it rather than supplied separately,
+    so a plan cannot name one candidate and address another.
+    """
+
+    __slots__ = ("account_id", "venue", "group_id", "candidate_id",
+                 "venue_slug", "side", "action", "quantity", "limit_price",
+                 "collateral_usd", "inputs_expire_at", "assessed_at", "source",
+                 "quantity_from", "price_from", "_digest")
+
+    def __init__(self, **kw):
+        self.account_id = _text("account_id", kw.get("account_id"))
+        self.venue = _text("venue", kw.get("venue"))
+        self.group_id = _text("group_id", kw.get("group_id"))
+        cid = _text("candidate_id", kw.get("candidate_id"))
+        slug, side = HS.split_identity(cid)
+        if side is None:
+            raise PlanRefused(
+                R_ACQ_PLAN_SIDE_MISSING,
+                "candidate_id %r carries no side. One venue slug has two "
+                "outcome tokens with opposite payouts, so an order naming only "
+                "the slug does not say what it is buying" % cid,
+                "candidate_id", cid)
+        self.candidate_id = cid
+        # DERIVED, NOT SUPPLIED. A caller cannot hand in a slug that disagrees
+        # with the identity it claims to be executing.
+        self.venue_slug = slug
+        self.side = side
+        self.action = _text("action", kw.get("action"))
+        self.quantity = _positive("quantity", kw.get("quantity"))
+        self.limit_price = _positive("limit_price", kw.get("limit_price"))
+        self.collateral_usd = _positive("collateral_usd",
+                                        kw.get("collateral_usd"))
+        self.inputs_expire_at = _positive("inputs_expire_at",
+                                          kw.get("inputs_expire_at"))
+        self.assessed_at = kw.get("assessed_at")
+        self.source = str(kw.get("source") or "")
+        # WHERE THE TWO NUMBERS CAME FROM, on the record. Outside the digest on
+        # purpose: they describe the provenance of the plan, not the order, and
+        # a plan whose price came from the leg rather than a quote is the same
+        # order.
+        self.quantity_from = str(kw.get("quantity_from") or "")
+        self.price_from = str(kw.get("price_from") or "")
+        self._digest = self._compute_digest()
+
+    def __setattr__(self, name, value):
+        if getattr(self, "_digest", None) is not None:
+            raise AttributeError(
+                "an AcquisitionPlan is immutable once built; %s cannot be set "
+                "after the plan was ranked" % name)
+        object.__setattr__(self, name, value)
+
+    def _compute_digest(self) -> str:
+        import hashlib
+
+        payload = "|".join(str(getattr(self, f)) for f in ACQ_PLAN_REQUIRED)
+        return hashlib.sha256(payload.encode()).hexdigest()[:32]
+
+    @property
+    def digest(self) -> str:
+        return self._digest
+
+    def as_dict(self) -> dict:
+        out = {f: getattr(self, f) for f in ACQ_PLAN_REQUIRED}
+        out["digest"] = self._digest
+        out["assessed_at"] = self.assessed_at
+        out["source"] = self.source
+        out["quantity_from"] = self.quantity_from
+        out["price_from"] = self.price_from
+        return out
+
+    def check_not_expired(self, now) -> dict:
+        at = float(now)
+        remaining = round(self.inputs_expire_at - at, 3)
+        return {"expired": remaining <= 0, "now": at,
+                "inputs_expire_at": self.inputs_expire_at,
+                "remaining_s": remaining}
+
+
+def acquisition_plan_for(*, winner, ranked_row, account_id, venue, group_id,
+                         held_position, fee_usd=None, inputs_expire_at=None):
+    """The plan for the candidate the ranking actually selected.
+
+    `winner` is `rank_admitted`'s `best_admitted` -- the admitted entry, which
+    carries the `leg` -- and `ranked_row` is its scored row, which carries the
+    price and the quantity the book supports. Both come from the ranking; none
+    of it is looked up again anywhere else.
+
+    THE QUANTITY IS THE PROPOSED ONE. `covered_qty` is what the displayed depth
+    supports, and it is the quantity the order asks for. `requested_qty` would
+    ask for contracts the book has not shown.
+    """
+    w = dict(winner or {})
+    row = dict(ranked_row or {})
+    pos = dict(held_position or {})
+    cid = _text("candidate_id", w.get("condition_id")
+                or getattr(w.get("leg"), "condition_id", None))
+    # THE RANKED ROW AND THE ADMITTED ENTRY MUST BE THE SAME CANDIDATE.
+    row_cid = row.get("condition_id")
+    if row_cid is not None and str(row_cid) != cid:
+        raise PlanRefused(
+            R_ACQ_PLAN_NOT_THE_SELECTED_CANDIDATE,
+            "the scored row is %r and the selected candidate is %r"
+            % (row_cid, cid), "candidate_id", row_cid)
+    slug, _side = HS.split_identity(cid)
+    # AND IT MUST NOT BE THE HELD INSTRUMENT. Buying the other side of what you
+    # hold NETS the position; it is not a hedge, and an order that does it is
+    # not the order the ranking meant.
+    held_slug = HS.venue_slug_of(pos.get("us_market_slug") or "")
+    if held_slug and slug == held_slug:
+        raise PlanRefused(
+            R_ACQ_PLAN_NETS_THE_HELD_INSTRUMENT,
+            "the plan addresses %r, which is the held instrument. Acquiring "
+            "either side of it nets the position" % slug, "venue_slug", slug)
+    # ── THE QUANTITY AND THE PRICE COME FROM THE CANDIDATE ───────────
+    #
+    # BOTH FROM THE WINNER, and where each came from is recorded. The rule the
+    # owner states is that dispatch must not take its address or quantity from a
+    # separate record; the price is the same kind of fact, so it is sourced the
+    # same way.
+    #
+    # The quantity is the PROPOSED one -- what the displayed depth supports --
+    # not the requested one, which would ask for contracts the book has not
+    # shown. The price is the candidate's own quoted price where the supplier
+    # read one per contract, and otherwise the winning LEG's own
+    # `cost_cents_per_unit`, which is the basis the structure was actually
+    # valued at. A supplier that reads a shared depth for the position has no
+    # per-candidate price, and the leg still does.
+    leg = w.get("leg")
+    qty, qty_from = row.get("covered_qty"), "the depth the book supports"
+    if qty is None:
+        qty, qty_from = w.get("units"), "the units the structure establishes"
+    price, price_from = row.get("price"), "the candidate's own quoted price"
+    if price is None and leg is not None \
+            and getattr(leg, "cost_cents_per_unit", None) is not None:
+        price = round(int(leg.cost_cents_per_unit) / 100.0, 6)
+        price_from = ("the winning leg's own cost_cents_per_unit, which is the "
+                      "basis its structure was valued at")
+    collateral = None
+    if qty is not None and price is not None:
+        collateral = FX.collateral_for(float(price), float(qty), FX.LONG)
+    return AcquisitionPlan(
+        quantity_from=qty_from, price_from=price_from,
+        account_id=account_id, venue=venue, group_id=group_id,
+        candidate_id=cid, action=ACTION_ACQUIRE, quantity=qty,
+        limit_price=price, collateral_usd=collateral,
+        inputs_expire_at=inputs_expire_at,
+        assessed_at=row.get("evidence_age_s"),
+        source="bettor_funded_pair_cycle.rank_admitted (the selected candidate)")
 
 
 def plan_for(*, action, selection, account_id, venue, position, now=None):
@@ -1630,7 +1906,9 @@ async def pass_once(conn, *, account_id: str, venue: str,
             found = discover(
                 held_leg=facts["held_leg"],
                 candidate_legs=facts["candidate_legs"],
-                sport_permits_tie=bool(facts.get("sport_permits_tie")),
+                # NOT `bool(...)`. An absent reading is None and `discover`
+                # refuses it; coercing here would put the partition back.
+                sport_permits_tie=facts.get("sport_permits_tie"),
                 fixture_can_void=bool(facts.get("fixture_can_void", True)),
                 fixture_can_postpone=bool(
                     facts.get("fixture_can_postpone", True)))
@@ -1674,7 +1952,10 @@ async def pass_once(conn, *, account_id: str, venue: str,
             # classifier admitted on, the two would disagree about what the
             # structure is -- and the number the decision uses would be the one
             # nobody classified.
-            sport_permits_tie=bool(facts.get("sport_permits_tie")),
+            # THE SAME READING `discover` CLASSIFIED ON, uncoerced. `None`
+            # leaves the position unvalued, which is the honest answer, rather
+            # than valuing it over a partition nobody established.
+            sport_permits_tie=facts.get("sport_permits_tie"),
             fixture_can_void=bool(facts.get("fixture_can_void", True)),
             fixture_can_postpone=bool(
                 facts.get("fixture_can_postpone", True)))
@@ -1914,18 +2195,52 @@ async def pass_once(conn, *, account_id: str, venue: str,
             step["what_was_selected_instead"] = action
             continue
         step["dispatched"] = ACTION_ACQUIRE
+        # ── THE ORDER IS BUILT FROM THE CANDIDATE THAT WON ───────────
+        #
+        # THE DEFECT THIS REPLACES. This read `facts["hedge_us_market_slug"]`,
+        # `facts["hedge_quantity"]` and `facts["hedge_limit_price"]` -- a
+        # SEPARATE record from the candidate the ranking selected -- and carried
+        # no side at all. The production supplier hardcodes all five of those to
+        # None, so the path could not dispatch, which is why nothing caught it.
+        #
+        # A correctly ranked SHORT side and an order carrying only the slug can
+        # produce a LONG fill. The plan is derived from the winner, its side is
+        # part of its identity, and its digest is checked against the ranking.
+        acq_plan, plan_refusal = None, None
+        try:
+            acq_plan = acquisition_plan_for(
+                winner=best, ranked_row=(ranking.get("best") or {}),
+                account_id=account_id, venue=venue, group_id=gid,
+                held_position=pos, fee_usd=facts.get("fee_usd"),
+                inputs_expire_at=(facts.get("inputs_expire_at")
+                                  or (at + 300.0)))
+        except PlanRefused as exc:
+            plan_refusal = exc.as_dict()
+        if acq_plan is None:
+            step["refusal"] = (plan_refusal or {}).get("refusal",
+                                                       R_PLAN_INCOMPLETE)
+            step["acquisition_plan_refusal"] = plan_refusal
+            step["dispatched"] = None
+            step["why_nothing_was_sent"] = (
+                "the selected candidate could not be turned into a complete "
+                "order (%s), and an acquisition whose address or quantity comes "
+                "from anywhere but the ranked candidate is not the order that "
+                "was decided" % (plan_refusal or {}).get("why"))
+            continue
+        step["acquisition_plan"] = acq_plan.as_dict()
         got = await acquire_second_leg(
             conn, operation_id=facts["operation_id"], group_id=gid,
-            us_market_slug=facts["hedge_us_market_slug"],
-            quantity=facts["hedge_quantity"],
-            limit_price=facts["hedge_limit_price"],
-            collateral_usd=facts["hedge_collateral_usd"],
-            decision_record=facts["hedge_decision_record"],
+            plan=acq_plan,
+            expect_candidate_id=best["condition_id"],
+            expect_digest=acq_plan.digest,
+            decision_record=(facts.get("hedge_decision_record")
+                             or dict(dec.get("ledger") or {},
+                                     decision_id=facts["decision_id"])),
             account_id=account_id, venue=venue, adapter=adapter,
             venue_positions=venue_positions, now=at)
         step["acquisition"] = {k: got.get(k) for k in
                                ("ok", "refusal", "submitted", "intent_id",
-                                "exposure")}
+                                "exposure", "order_binding")}
         out["acquisitions"].append(got)
         out["opened_anything"] = bool(out["opened_anything"]
                                       or got.get("submitted"))

@@ -102,6 +102,84 @@ OVERTIME_PROSE = {
     },
 }
 
+# ═════════════════════════════════════════════════════════════════════
+# CAN THE GRADED INTERVAL END LEVEL? DECLARED, NEVER INFERRED
+# ═════════════════════════════════════════════════════════════════════
+#
+# WHY THIS EXISTS. `payoff_table(sport_permits_tie=False)` REMOVES the margin-0
+# cell and replaces it with nothing -- so a fixture that CAN end level is graded
+# over a partition missing the outcome that actually happens. Callers were
+# passing `bool(facts.get("sport_permits_tie"))`, which turns an UNKNOWN into a
+# False: the owner's words, "an unknown outcome partition must not become a
+# partition with the tie removed."
+#
+# It is a fact about the SPORT and the GRADED INTERVAL together, not the sport
+# alone. Baseball including extra innings cannot end level; baseball graded on
+# nine innings only can. Soccer over ninety minutes very often does; soccer
+# including extra time and penalties does not. So the key is
+# (family, overtime treatment) and anything not declared here REFUSES.
+#
+# Every entry below is a rule of the game, not a claim about a venue's terms --
+# which is why it may live in code at all, and why the venue's own prose still
+# decides the overtime treatment that selects the row.
+
+TIE_UNKNOWN = "WHETHER_THIS_GRADED_INTERVAL_CAN_END_LEVEL_IS_NOT_DECLARED"
+
+#: (family, overtime) -> can the graded interval end level?
+TIE_REACHABLE = {
+    # Extra innings are played until someone leads, so an included-overtime
+    # baseball result cannot be level. Graded on regulation only, it can.
+    ("baseball", "OT_INCLUDED"): False,
+    ("baseball", "OT_EXCLUDED"): True,
+    # Ninety minutes routinely ends level. Through extra time and penalties a
+    # winner is produced.
+    ("soccer", "OT_EXCLUDED"): True,
+    ("soccer", "OT_INCLUDED"): False,
+    # Gridiron overtime can expire level; regulation certainly can.
+    ("football", "OT_INCLUDED"): True,
+    ("football", "OT_EXCLUDED"): True,
+    # Basketball overtime periods repeat until a winner emerges.
+    ("basketball", "OT_INCLUDED"): False,
+    ("basketball", "OT_EXCLUDED"): True,
+    # Hockey: a regulation draw is common; through overtime and a shootout a
+    # winner is produced.
+    ("hockey", "OT_EXCLUDED"): True,
+    ("hockey", "OT_INCLUDED"): False,
+    # A tennis match is played to a winner either way.
+    ("tennis", "OT_INCLUDED"): False,
+    ("tennis", "OT_EXCLUDED"): False,
+    ("tennis", "OT_NOT_APPLICABLE"): False,
+}
+
+
+def tie_is_reachable(*, sport_family, overtime) -> dict:
+    """Can the graded interval end level? Or a refusal naming what is undeclared.
+
+    Returns {"permits_tie": True|False|None, "refusal": str|None, ...}. `None`
+    with a refusal is the answer for anything not in `TIE_REACHABLE`, and a
+    caller must NOT turn it into False: removing the level cell from the outcome
+    partition of a fixture that can end level is how a floor comes to omit the
+    outcome that happens.
+    """
+    fam = str(sport_family or "").strip().lower()
+    ot = str(overtime or "").strip().upper()
+    out = {"sport_family": fam or None, "overtime": ot or None,
+           "permits_tie": None, "refusal": None,
+           "source": "bettor_venue_settlement.TIE_REACHABLE (rules of the game)",
+           "why_not_a_default": (
+               "payoff_table(sport_permits_tie=False) REMOVES the level cell. "
+               "An undeclared answer coerced to False grades a fixture that can "
+               "end level over a partition missing that outcome")}
+    if (fam, ot) in TIE_REACHABLE:
+        out["permits_tie"] = TIE_REACHABLE[(fam, ot)]
+        out["why"] = ("declared for (%s, %s)" % (fam, ot))
+        return out
+    out["refusal"] = TIE_UNKNOWN
+    out["why"] = ("no entry for (%r, %r). The declared pairs are %s"
+                  % (fam, ot, sorted(TIE_REACHABLE)))
+    return out
+
+
 #: THE BOOKMAKER'S ABANDONMENT RULE, PER FAMILY -- DELIBERATELY EMPTY.
 #:
 #: A value here is a claim about a third party's published terms. It may be

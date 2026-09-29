@@ -4653,6 +4653,16 @@ async def funded_pair_inputs(conn, pos, *, at, deferred=None,
         "netting_exclusion": cands.get("netting_exclusion"),
         "every_candidate_was_attempted": cands.get(
             "every_candidate_was_attempted")}
+    # THE TIE PARTITION, from the held leg's own family and overtime treatment.
+    # Both come from reads already done: the family from `sports_type` and the
+    # overtime treatment from the venue's captured prose.
+    _held_leg_obj = held.get("leg")
+    tie_read = vset.tie_is_reachable(
+        sport_family=_clean_family((held.get("row") or {}).get("sports_type")),
+        overtime=(getattr(_held_leg_obj, "overtime", None)
+                  if _held_leg_obj is not None else None))
+    if tie_read.get("refusal"):
+        hedge_unavailable.append(tie_read["refusal"])
     out["region_probability_read"] = regions
     out["readiness"] = dict(PAIR_INPUT_READINESS, **{
         "held_leg": ("BUILT via bettor_funded_hedge_supply.held_leg_for"
@@ -4688,6 +4698,20 @@ async def funded_pair_inputs(conn, pos, *, at, deferred=None,
                 # behaves exactly as before, and with a model approved the
                 # probability comes from that one version, whose id, feature
                 # vector and sha go onto the decision row.
+                # ── CAN THE GRADED INTERVAL END LEVEL ────────────────
+                #
+                # NEVER SUPPLIED AT ALL BEFORE, so `pass_once` coerced the
+                # absence to False with `bool(facts.get(...))` and every
+                # structure was classified over a partition with the level cell
+                # REMOVED. On a fixture that can end level that omits the
+                # outcome which happens.
+                #
+                # Read from the declared table of game rules, keyed by the sport
+                # family and the overtime treatment the venue's own prose
+                # established -- so an undeclared pair arrives as None and
+                # `discover` refuses rather than removing a cell.
+                sport_permits_tie=tie_read.get("permits_tie"),
+                sport_permits_tie_read=tie_read,
                 use_approved_model=bool(regions.get("approved")),
                 model_inputs=_model_inputs_for(
                     held=held, candidates=cands.get("legs") or []),
