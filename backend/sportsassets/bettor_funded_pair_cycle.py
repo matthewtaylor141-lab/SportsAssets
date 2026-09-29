@@ -341,7 +341,28 @@ async def decide_and_record(conn, *, decision_id: str, account_id: str,
             outside_split=mi.get("outside_split"))
         out["prediction"] = prediction
         if not prediction.get("ok"):
-            out["region_probabilities_came_from"] = "NOTHING_APPROVED"
+            # ── THE LABEL MUST NAME WHICH FAILURE THIS WAS ───────────
+            #
+            # This said "NOTHING_APPROVED" for every unsuccessful prediction,
+            # which is false whenever a model IS approved and could not price
+            # this structure. Measured: with a model promoted through the full
+            # registry path, `predict_for` returned p_middle = 0.1344 and then
+            # refused NO_PROBABILITY_WAS_STATED_FOR_THE_REGIONS_OUTSIDE_THE_
+            # MIDDLE -- and the step reported NOTHING_APPROVED, sending a reader
+            # to look at an empty registry that was not empty.
+            #
+            # The two have different owners. An empty registry is closed by
+            # promoting a model; an unpriced outside region is closed by a
+            # SECOND statement about the fixture that no source supplies, and
+            # `predict_for` refuses to invent it by spreading the remainder
+            # uniformly. Conflating them hides the harder of the two.
+            out["region_probabilities_came_from"] = (
+                "NOTHING_APPROVED"
+                if prediction.get("refusal") == FMD.R_NO_APPROVED_MODEL
+                else "APPROVED_MODEL_COULD_NOT_PRICE_THIS_STRUCTURE:%s"
+                     % prediction.get("refusal"))
+            out["prediction_refusal"] = prediction.get("refusal")
+            out["prediction_why"] = prediction.get("why")
             region_probabilities = None
         else:
             region_probabilities = prediction["region_probabilities"]

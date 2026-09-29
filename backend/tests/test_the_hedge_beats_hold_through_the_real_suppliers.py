@@ -302,6 +302,17 @@ async def _promote_a_model(conn):
     import importlib
     lp = importlib.import_module(
         "tests.test_the_prospective_learning_path_promotes_or_rejects")
+    # BOTH ACCOUNTS, because the funded book permits ONE live intent at a time
+    # GLOBALLY, not one per account. Cleaning only the learning account left
+    # this module's own held position live, the cohort's first leg was refused
+    # ANOTHER_FUNDED_INTENT_IS_ALREADY_LIVE, and the test SKIPPED -- which is a
+    # proof quietly not run, no better than a missing one.
+    # `_clean` already removes the children in the order the foreign keys
+    # require -- economics and reservations before the intents they reference.
+    # Hand-rolling the deletes here hit
+    # bettor_funded_economics_intent_id_fkey, which is the constraint doing its
+    # job: a fee event may not outlive the position it was charged on.
+    await _clean(conn)
     await lp._clean(conn)
     coh = await lp._cohort(conn, skill=True)
     if not coh.get("ok"):
@@ -709,3 +720,149 @@ async def test_a_second_distinct_fill_is_recorded_and_is_not_a_duplicate():
         after = await _counts(conn)
         assert after["fills"] == before["fills"] + 1, (before, after, got)
         assert after["fill_qty_total"] > before["fill_qty_total"]
+
+
+# ═════════════════════════════════════════════════════════════════════
+# 4 · THE APPROVED MODEL IS NOW LOAD-BEARING, AND THE LAST BLOCKER IS NAMED
+# ═════════════════════════════════════════════════════════════════════
+
+async def test_the_supplier_turns_the_registry_on_when_a_model_is_approved():
+    """THE WIRE THAT WAS MISSING, and without it a promoted model changed
+    nothing on the scheduled path.
+
+    `decide_and_record` calls `predict_for` only when `use_approved_model` is
+    true. `funded_pair_inputs` never set it, so the indirect candidate was
+    declined for want of a probability EVEN WITH A MODEL APPROVED -- the
+    registry was decorative here. It is now set from the registry's own state,
+    and the model inputs are the two legs' own costs rather than one shared
+    number.
+    """
+    async with _conn() as conn:
+        for t in ("bettor_funded_decisions", "bettor_funded_models"):
+            if not await _has(conn, t):
+                pytest.skip("%s is not in this database" % t)
+        await _clean(conn)
+        await _catalogue(conn)
+        # WITH NOTHING APPROVED the switch stays off and the lane is unchanged.
+        iid = await _held(conn)
+        off = await LOOP.funded_pair_inputs(
+            conn, {"intent_id": iid, "us_market_slug": HELD,
+                   "residual_qty": 10, "avg_price": 0.55, "filled_qty": 10},
+            at=NOW, account_id=ACCT, venue=VENUE,
+            prose_reader=_prose_reader(),
+            quoter=_quoter({SIB: (0.30, 500)}))
+        assert off["use_approved_model"] is False, off["region_probability_read"]
+
+        # WITH A MODEL APPROVED it turns on, and carries the legs' own costs.
+        await _promote_a_model(conn)
+        await conn.execute(
+            "DELETE FROM bettor_funded_intents WHERE account_id=$1", ACCT)
+        await _catalogue(conn)
+        iid = await _held(conn)
+        on = await LOOP.funded_pair_inputs(
+            conn, {"intent_id": iid, "us_market_slug": HELD,
+                   "residual_qty": 10, "avg_price": 0.55, "filled_qty": 10},
+            at=NOW, account_id=ACCT, venue=VENUE,
+            prose_reader=_prose_reader(),
+            quoter=_quoter({SIB: (0.30, 500)}))
+        assert on["use_approved_model"] is True, on["region_probability_read"]
+        mi = on["model_inputs"]
+        # THE TWO COSTS ARE EACH LEG'S OWN, not one shared figure.
+        assert mi["primary_cost_cents"] == 55       # the held basis
+        assert mi["hedge_cost_cents"] == 30         # the candidate's own quote
+        assert mi["overtime_included"] is True      # read from the prose
+
+
+async def test_the_last_blocker_is_the_outside_split_and_it_is_not_invented():
+    """THE REMAINING BLOCKER FOR "A HEDGE BEATS HOLD", MEASURED AND NAMED.
+
+    With a model promoted through the whole registry path, `predict_for` computes
+    p_middle = 0.1344 for this structure and then REFUSES:
+
+        NO_PROBABILITY_WAS_STATED_FOR_THE_REGIONS_OUTSIDE_THE_MIDDLE
+        "the model prices the middle only. How the remaining 0.8656 is
+         distributed over 6 other region(s) is a separate statement about the
+         fixture, and spreading it uniformly would make that statement silently"
+
+    So the blocker is not plumbing and not an empty registry: it is a SECOND
+    probability statement -- a distribution over the fixture's non-middle margin
+    regions -- that no source in this repository supplies. `outside_split` is the
+    parameter that would carry it.
+
+    This test exists so that blocker cannot be closed by inventing a uniform
+    split. If a future change makes the prediction succeed, it must be because
+    an outside split was SUPPLIED by a source, and this test should then be
+    replaced by one naming that source -- not deleted.
+    """
+    async with _conn() as conn:
+        for t in ("bettor_funded_decisions", "bettor_funded_models"):
+            if not await _has(conn, t):
+                pytest.skip("%s is not in this database" % t)
+        await _clean(conn)
+        await _catalogue(conn)
+        await _promote_a_model(conn)
+        await conn.execute(
+            "DELETE FROM bettor_funded_intents WHERE account_id=$1", ACCT)
+        await _catalogue(conn)
+        # THE MODEL REALLY IS APPROVED.
+        appr = await FMD.approved(conn, model_key=FMD.KEY_MIDDLE)
+        assert appr.get("ok") is True, appr
+
+        iid = await _held(conn)
+        held = await HS.held_leg_for(
+            conn, position={"intent_id": iid, "us_market_slug": HELD,
+                            "residual_qty": 10, "avg_price": 0.55},
+            prose_reader=_prose_reader(), now=NOW)
+        cands = await HS.candidate_legs_for(
+            conn, held_row={"market_slug": HELD, "event_slug": EVENT,
+                            "residual_qty": 10},
+            quoter=_quoter({SIB: (0.30, 500)}),
+            prose_reader=_prose_reader(), now=NOW)
+        found = PC.discover(held_leg=held["leg"],
+                            candidate_legs=[c["leg"] for c in cands["legs"]],
+                            sport_permits_tie=False, fixture_can_postpone=False)
+        adm = (found.get("admitted") or [None])[0]
+        assert adm is not None, found
+        pred = await FMD.predict_for(
+            conn, structure=adm["structure"], primary_cost_cents=55,
+            hedge_cost_cents=30, overtime_included=True)
+        assert pred["ok"] is False, pred
+        assert pred["refusal"] == (
+            "NO_PROBABILITY_WAS_STATED_FOR_THE_REGIONS_OUTSIDE_THE_MIDDLE"), pred
+        # THE MIDDLE ITSELF WAS PRICED -- so the model works and the gap is the
+        # second statement, not the first.
+        assert 0.0 < pred["p_middle"] < 1.0, pred
+        assert len(pred["outside_regions"]) >= 2, pred
+        # AND NO UNIFORM SPLIT WAS SUBSTITUTED.
+        assert "uniformly" in pred["why"], pred
+
+
+async def test_an_unpriced_outside_region_is_not_reported_as_an_empty_registry():
+    """THE REPORTING DEFECT THIS FIXES. `region_probabilities_came_from` said
+    NOTHING_APPROVED for every unsuccessful prediction, which is false when a
+    model IS approved and simply could not price the structure -- it sent a
+    reader to look at an empty registry that was not empty, and hid the harder
+    of the two problems behind the easier one."""
+    async with _conn() as conn:
+        for t in ("bettor_funded_decisions", "bettor_funded_models"):
+            if not await _has(conn, t):
+                pytest.skip("%s is not in this database" % t)
+        await _clean(conn)
+        await _catalogue(conn)
+        await _promote_a_model(conn)
+        await conn.execute(
+            "DELETE FROM bettor_funded_intents WHERE account_id=$1", ACCT)
+        await _catalogue(conn)
+        iid = await _held(conn)
+        out = await _pass_at_depth(conn, 500, intent_id=iid)
+        step = out["pass"]["considered"][0]
+        came = (step.get("decision") or {}).get(
+            "region_probabilities_came_from")
+        assert came, step
+        assert came != "NOTHING_APPROVED", (
+            "a model IS approved; reporting an empty registry would be false")
+        assert came.startswith("APPROVED_MODEL_COULD_NOT_PRICE_THIS_STRUCTURE")
+        # AND THE LABEL CARRIES THE REFUSAL ITSELF, so a reader does not have to
+        # go looking for it. (`prediction_refusal` is also set on the decision
+        # payload; the label is what a step summary shows.)
+        assert "OUTSIDE_THE_MIDDLE" in came, came

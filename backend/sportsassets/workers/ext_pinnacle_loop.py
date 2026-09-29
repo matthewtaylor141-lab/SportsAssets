@@ -4211,6 +4211,30 @@ def _exit_candidate_from(sel: dict, *, residual) -> dict | None:
 FD_EVIDENCE_VENUE_IMPLIED = "VENUE_IMPLIED"
 
 
+def _model_inputs_for(*, held, candidates) -> dict:
+    """The feature inputs `predict_for` needs, from the built legs.
+
+    `features_of` is a function of the STRUCTURE plus each side's cost and the
+    overtime treatment, so the two costs come from the legs themselves -- the
+    held leg's recorded basis and the candidate's own quoted price -- rather
+    than from one shared number. `overtime_included` is the treatment the legs
+    AGREE on, which they must, since a differing one would have kept them out
+    of the same grading key and out of the same structure.
+    """
+    from .. import bettor_indirect_structures as _IS
+
+    hl = (held or {}).get("leg")
+    if hl is None or not candidates:
+        return {}
+    best = candidates[0]
+    cl = best.get("leg")
+    return {"primary_cost_cents": getattr(hl, "cost_cents_per_unit", None),
+            "hedge_cost_cents": getattr(cl, "cost_cents_per_unit", None),
+            "overtime_included": (
+                getattr(hl, "overtime", None) == _IS.OT_INCLUDED),
+            "from_the_built_legs": True}
+
+
 async def _venue_prose(slug):
     """The venue's own settlement prose for one contract, paced and cached.
 
@@ -4651,6 +4675,22 @@ async def funded_pair_inputs(conn, pos, *, at, deferred=None,
                 # None BY DESIGN: `discover` asks `predict_for` per structure.
                 region_probabilities=None,
                 evidence_quality=FD.EVIDENCE_NOT_ESTABLISHED,
+                # ── THE SWITCH THAT MAKES THE REGISTRY LOAD-BEARING ──
+                #
+                # `decide_and_record` calls `predict_for` only when
+                # `use_approved_model` is true, and this supplier never set it --
+                # so a promoted model changed nothing on the scheduled path and
+                # the indirect candidate was declined for want of a probability
+                # even with a model approved. The registry was decorative here.
+                #
+                # It is set from the REGISTRY'S OWN STATE, not from a
+                # preference: with nothing approved it stays false and the lane
+                # behaves exactly as before, and with a model approved the
+                # probability comes from that one version, whose id, feature
+                # vector and sha go onto the decision row.
+                use_approved_model=bool(regions.get("approved")),
+                model_inputs=_model_inputs_for(
+                    held=held, candidates=cands.get("legs") or []),
                 limits=None,
                 fee_usd=fee_read.get("fee_usd"),
                 fee_basis=fee_read.get("fee_basis"),
