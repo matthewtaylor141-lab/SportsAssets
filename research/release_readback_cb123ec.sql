@@ -115,3 +115,18 @@ SELECT k AS key,
   FROM unnest(ARRAY['bettor_funded_account_binding',
                     'bettor_funded_limits_approved',
                     'bettor_funded_authorization']) AS k;
+
+\echo '== 6 · the odds source calibration the entry path requires (latest row per version) =='
+SELECT CASE WHEN to_regclass('external_source_calibration') IS NOT NULL THEN
+  (xpath('/row/c/text()', query_to_xml($q$
+    select coalesce(string_agg(line, E'\n' order by line), 'none') as c
+      from (select distinct on (source_version)
+                   source_version || ' n=' || coalesce(sample_size::text, '?') ||
+                   ' ' || coalesce(metric, '?') || '=' || coalesce(score::text, '?') ||
+                   ' tol=' || coalesce(tolerance::text, '?') ||
+                   ' within=' || coalesce(within_tolerance::text, '?') ||
+                   ' by=' || coalesce(measured_by, '?') ||
+                   ' at=' || coalesce(measured_at::text, '?') as line
+              from external_source_calibration
+             order by source_version, measured_at desc) q
+  $q$, false, true, '')))[1]::text END AS calibration;
