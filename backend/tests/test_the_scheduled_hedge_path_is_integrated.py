@@ -253,14 +253,23 @@ async def test_the_held_leg_is_built_from_the_catalogue_and_the_prose():
       await _clean(dbconn)
       await _catalogue(dbconn)
       iid = await _held_position(dbconn)
-      pos = {"intent_id": iid, "us_market_slug": HELD, "residual_qty": 10,
+      pos = {"intent_id": iid, "us_market_slug": HELD,
+                            "order_intent": FX.LONG, "residual_qty": 10,
              "avg_price": 0.62}
       got = await HS.held_leg_for(dbconn, position=pos,
                                  prose_reader=_prose_reader(), now=NOW)
       assert got["ok"], got
       leg = got["leg"]
       assert isinstance(leg, IS.Leg)
-      assert leg.condition_id == HELD and leg.fixture_id == EVENT
+      # THE IDENTITY IS SIDE-AWARE; THE VENUE ADDRESS IS NOT. One slug
+      # carries two sides with opposite payout functions, so the slug is
+      # not an identity for a leg -- and the bare slug is still what an
+      # order addresses, recoverable from the identity.
+      assert leg.condition_id == HS.candidate_identity(HELD, FX.LONG)
+      assert HS.venue_slug_of(leg.condition_id) == HELD
+      assert HS.split_identity(leg.condition_id) == (HELD, FX.LONG)
+      assert got["side"] == FX.LONG and got["candidate_id"] == leg.condition_id
+      assert leg.fixture_id == EVENT
       assert leg.kind == IS.KIND_MONEYLINE and leg.period == IS.PERIOD_FULL
       assert leg.overtime == IS.OT_INCLUDED       # READ from the prose
       assert leg.backs == "A"                     # clm is listed first
@@ -327,6 +336,7 @@ async def test_unread_settlement_prose_refuses_the_leg_rather_than_defaulting():
       iid = await _held_position(dbconn, intent_id="fpi-noprose")
       got = await HS.held_leg_for(
           dbconn, position={"intent_id": iid, "us_market_slug": HELD,
+                            "order_intent": FX.LONG,
                             "residual_qty": 10, "avg_price": 0.62},
           prose_reader=_prose_reader(fail_for=(HELD,)), now=NOW)
       assert got["ok"] is False
@@ -344,7 +354,8 @@ async def test_funded_pair_inputs_now_returns_real_legs_not_none():
       await _clean(dbconn)
       await _catalogue(dbconn)
       iid = await _held_position(dbconn, intent_id="fpi-wired")
-      pos = {"intent_id": iid, "us_market_slug": HELD, "residual_qty": 10,
+      pos = {"intent_id": iid, "us_market_slug": HELD,
+                            "order_intent": FX.LONG, "residual_qty": 10,
              "avg_price": 0.62, "filled_qty": 10}
       got = await LOOP.funded_pair_inputs(
           dbconn, pos, at=NOW, account_id=ACCT, venue=VENUE,
@@ -369,7 +380,12 @@ async def test_a_catalogue_outage_names_a_refusal_and_keeps_the_exit():
       await _clean(dbconn)
       await _catalogue(dbconn)
       iid = await _held_position(dbconn, intent_id="fpi-outage")
+      # A REAL POSITION ALWAYS STATES ITS SIDE. `open_entry_positions` is
+      # `SELECT *` over `bettor_funded_intents`, so `order_intent` is always
+      # present in production; a hand-built dict without it refuses on the
+      # side BEFORE the catalogue read, masking the outage under test.
       pos = {"intent_id": iid, "us_market_slug": "aec-not-in-the-catalogue",
+             "order_intent": FX.LONG,
              "residual_qty": 10, "avg_price": 0.62, "filled_qty": 10}
       got = await LOOP.funded_pair_inputs(
           dbconn, pos, at=NOW, account_id=ACCT, venue=VENUE,
@@ -395,6 +411,7 @@ async def test_the_supplier_never_raises_out_of_the_cycle():
 
       got = await LOOP.funded_pair_inputs(
           dbconn, {"intent_id": iid, "us_market_slug": HELD,
+                            "order_intent": FX.LONG,
                    "residual_qty": 10, "avg_price": 0.62, "filled_qty": 10},
           at=NOW, account_id=ACCT, venue=VENUE,
           prose_reader=boom, quoter=_quoter({}))

@@ -260,6 +260,7 @@ async def test_the_two_built_legs_share_a_grading_key_and_differ_by_instrument()
         iid = await _held(conn)
         held = await HS.held_leg_for(
             conn, position={"intent_id": iid, "us_market_slug": HELD,
+                            "order_intent": FX.LONG,
                             "residual_qty": 10, "avg_price": 0.55},
             prose_reader=_prose_reader(), now=NOW)
         assert held["ok"], held
@@ -294,6 +295,7 @@ async def test_a_structure_is_classified_from_the_built_legs():
         iid = await _held(conn)
         held = await HS.held_leg_for(
             conn, position={"intent_id": iid, "us_market_slug": HELD,
+                            "order_intent": FX.LONG,
                             "residual_qty": 10, "avg_price": 0.55},
             prose_reader=_prose_reader(), now=NOW)
         cands = await HS.candidate_legs_for(
@@ -884,6 +886,7 @@ async def test_the_supplier_turns_the_registry_on_when_a_model_is_approved():
         iid = await _held(conn)
         off = await LOOP.funded_pair_inputs(
             conn, {"intent_id": iid, "us_market_slug": HELD,
+                            "order_intent": FX.LONG,
                    "residual_qty": 10, "avg_price": 0.55, "filled_qty": 10},
             at=NOW, account_id=ACCT, venue=VENUE,
             prose_reader=_prose_reader(),
@@ -898,6 +901,7 @@ async def test_the_supplier_turns_the_registry_on_when_a_model_is_approved():
         iid = await _held(conn)
         on = await LOOP.funded_pair_inputs(
             conn, {"intent_id": iid, "us_market_slug": HELD,
+                            "order_intent": FX.LONG,
                    "residual_qty": 10, "avg_price": 0.55, "filled_qty": 10},
             at=NOW, account_id=ACCT, venue=VENUE,
             prose_reader=_prose_reader(),
@@ -948,6 +952,7 @@ async def test_the_last_blocker_is_the_outside_split_and_it_is_not_invented():
         iid = await _held(conn)
         held = await HS.held_leg_for(
             conn, position={"intent_id": iid, "us_market_slug": HELD,
+                            "order_intent": FX.LONG,
                             "residual_qty": 10, "avg_price": 0.55},
             prose_reader=_prose_reader(), now=NOW)
         cands = await HS.candidate_legs_for(
@@ -1156,6 +1161,7 @@ async def test_the_legs_carry_the_settlement_provenance_into_the_decision():
         iid = await _held(conn)
         got = await HS.held_leg_for(
             conn, position={"intent_id": iid, "us_market_slug": HELD,
+                            "order_intent": FX.LONG,
                             "residual_qty": 10, "avg_price": 0.55},
             prose_reader=_prose_reader(PROSE_WITH_CANCELLATION), now=NOW)
         assert got["ok"] is True, got

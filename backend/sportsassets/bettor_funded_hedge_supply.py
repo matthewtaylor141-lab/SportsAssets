@@ -103,6 +103,122 @@ R_SAME_CONTRACT = "THE_CANDIDATE_IS_THE_HELD_CONTRACT_ITSELF"
 R_NETTED_SAME_INSTRUMENT = (
     "THE_CANDIDATE_IS_THE_OPPOSING_SIDE_OF_THE_HELD_INSTRUMENT")
 R_CANDIDATE_NOT_PRICED = "THIS_CANDIDATES_OWN_PRICE_WAS_NOT_ESTABLISHED"
+R_HELD_SIDE_NOT_STATED = "WHICH_SIDE_OF_THE_INSTRUMENT_IS_HELD_IS_NOT_STATED"
+R_HELD_SIDE_NOT_IN_CATALOGUE = (
+    "THE_CATALOGUE_HAS_NO_ROW_FOR_THE_SIDE_THE_POSITION_STATES")
+R_SIDE_NOT_STATED_ON_ROW = "THE_CATALOGUE_ROW_STATES_NO_SIDE"
+R_BOTH_SIDES_CLAIM_ONE_ORIENTATION = (
+    "TWO_SIDES_OF_ONE_INSTRUMENT_CLAIM_THE_SAME_ORIENTATION")
+
+
+# ═════════════════════════════════════════════════════════════════════
+# 0 · THE IDENTITY MODEL: A VENUE INSTRUMENT IS NOT A CANDIDATE
+# ═════════════════════════════════════════════════════════════════════
+#
+# WHAT RUN 268 MEASURED, on the production catalogue, 52,950 rows:
+#
+#   rows per market_slug ................................. exactly 2.000
+#   `identifier` distinct values per slug ................. 1  (identifier IS
+#                                                            the slug, so it is
+#                                                            NOT the side key)
+#   slugs where `side_norm` differs between the rows ...... 26,475 of 26,475
+#   slugs where `intent` differs between the rows ......... 26,475 of 26,475
+#   slugs where `line` or `sports_type` differ ............ 0
+#   the whole `intent` vocabulary ......................... ORDER_INTENT_BUY_LONG
+#                                                           ORDER_INTENT_BUY_SHORT
+#                                                           (26,475 slugs each)
+#
+# So ONE VENUE INSTRUMENT CARRIES TWO SIDES, and `(market_slug, intent)` names
+# one of them. The two sides share the line and the type and differ in which
+# outcome token you hold -- for a spread, `signed` is -1.5 on one row and +1.5
+# on the other, which is the SAME contract read from opposite ends and the
+# whole payout function of the leg.
+#
+# TWO CONSEQUENCES, AND THEY PULL IN OPPOSITE DIRECTIONS, which is why this
+# section exists instead of a rename:
+#
+#   1. THE HELD LEG MUST BE BOUND TO THE SIDE ACTUALLY HELD. `ROW_SQL` was
+#      `WHERE market_slug = $1 LIMIT 1` with no ORDER BY, so orientation came
+#      from whichever of the two rows Postgres returned. Half the time that is
+#      the wrong end of the contract and the leg's payout is inverted, with no
+#      error anywhere.
+#
+#   2. A CANDIDATE'S IDENTITY MUST CARRY ITS SIDE. Keying by slug alone
+#      collapsed the two sides onto one id -- measured: 16,545 candidates
+#      across 1,558 future fixtures, which is EVERY future fixture and exactly
+#      half the candidate set. Two ranked rows shared one condition_id with
+#      different scores, and `best_admitted` resolved that id to whichever
+#      entry happened to be last.
+#
+# AND THE THING NOT TO DO, in the owner's words: "Do not pretend opposite sides
+# are separate venue instruments to avoid fixing the identity model." So the
+# netting exclusion stays on `market_slug`: the held instrument's other side is
+# the held instrument, it nets, and it is never a liquidity opportunity. A
+# side-aware CANDIDATE identity and a slug-level NETTING identity are different
+# questions and both are answered, separately.
+
+#: The two sides of every PMUS instrument, as the catalogue states them. Not an
+#: invented vocabulary: `us_premap.intent` takes exactly these two values and
+#: nothing else, one row of each per slug.
+SIDE_LONG = "ORDER_INTENT_BUY_LONG"
+SIDE_SHORT = "ORDER_INTENT_BUY_SHORT"
+SIDES = (SIDE_LONG, SIDE_SHORT)
+
+#: The separator in a candidate identity. `#` cannot occur in a venue slug --
+#: every slug is lowercase alphanumerics and hyphens -- so `split_identity` is
+#: unambiguous and an identity can never be mistaken for a slug by a consumer
+#: that does not know about sides.
+IDENTITY_SEP = "#"
+
+
+def side_of(row) -> str | None:
+    """Which side of its instrument this catalogue row is, or None.
+
+    `intent` is the key because run 268 measured it varying on all 26,475
+    slugs with exactly two values. `side_norm` also varies on all of them, but
+    its values are the participant's name on a moneyline, yes/no on a spread
+    and over/under on a total -- three vocabularies -- so it identifies the
+    side without NAMING it in a way two market families share.
+    """
+    intent = _side_token((dict(row) if not isinstance(row, dict) else row)
+                         .get("intent"))
+    return intent if intent in SIDES else None
+
+
+def candidate_identity(market_slug, side) -> str:
+    """The side-aware identity: `slug#SIDE`.
+
+    THIS IS THE KEY EVERYTHING DOWNSTREAM USES -- quoting, valuation, ranking,
+    persistence and the selected-candidate lookup. `venue_slug_of` recovers the
+    slug for the parts that address the venue, which is the only place the slug
+    alone is the right identifier.
+    """
+    return "%s%s%s" % (_clean(market_slug), IDENTITY_SEP,
+                       _side_token(side))
+
+
+def split_identity(identity) -> tuple[str, str | None]:
+    """(venue slug, side) from an identity. A bare slug yields (slug, None).
+
+    Accepting a bare slug is deliberate: a persisted decision written before
+    this change carries one, and reading it back as "slug, side unknown" is
+    correct -- that is a fact about the record, not a default to dispatch on.
+    """
+    # THE TWO HALVES NORMALISE DIFFERENTLY, which is why this does not just
+    # `_clean` the whole string: slugs are lowercase and the side tokens are
+    # uppercase. Lowercasing the lot turns every side into an unrecognised one.
+    text = str(identity or "").strip()
+    if IDENTITY_SEP not in text:
+        return _clean(text), None
+    slug, _, side = text.partition(IDENTITY_SEP)
+    side = _side_token(side)
+    return _clean(slug), (side if side in SIDES else None)
+
+
+def venue_slug_of(identity) -> str:
+    """What to send to the venue. The slug, never the identity."""
+    return split_identity(identity)[0]
+
 
 #: THE PROVENANCE TABLE. A reviewer should be able to ask "where did this
 #: field come from" and get an answer without reading the code, and a field
@@ -386,6 +502,19 @@ SIDE_CLASS_TOTAL = ("over", "under")
 
 def _clean(value) -> str:
     return str(value or "").strip().lower()
+
+
+def _side_token(value) -> str:
+    """A side, normalised WITHOUT lowercasing.
+
+    `_clean` lowercases, which is right for slugs and wrong for these: the
+    catalogue's own values are ORDER_INTENT_BUY_LONG and
+    ORDER_INTENT_BUY_SHORT, uppercase, and `_clean` turned every one of them
+    into something not in SIDES -- so every held leg refused. Caught by the
+    integration suite immediately; it is here as its own function so the two
+    normalisations cannot be confused again.
+    """
+    return str(value or "").strip().upper()
 
 
 def parse_line(text) -> dict:
@@ -802,8 +931,30 @@ def build_leg(*, row, quantity, cost_per_unit, prose=None, sport_family=None,
             raise LegRefused(R_NO_CATALOGUE_ROW,
                              "the row names no market_slug, so the contract has "
                              "no venue-native identity", "condition_id")
-        prov["condition_id"] = ("us_premap.market_slug (the VENUE-native id, "
-                               "never markets.slug)")
+        # ── THE IDENTITY IS SIDE-AWARE, THE VENUE ADDRESS IS NOT ─────
+        #
+        # One venue instrument carries two sides with opposite payout
+        # functions, so the SLUG is not an identity for a leg. `condition_id`
+        # becomes `slug#SIDE`; `venue_slug` is carried beside it for the parts
+        # that address the venue, which is the only place the bare slug is the
+        # right identifier.
+        side = side_of(r)
+        if side is None:
+            raise LegRefused(
+                R_SIDE_NOT_STATED_ON_ROW,
+                "the row states intent=%r, not one of %s. Run 268 measured "
+                "every one of the catalogue's 26,475 slugs carrying exactly "
+                "these two, one row each, so a row without one is not a side "
+                "of anything" % (_side_token(r.get("intent")), SIDES),
+                "condition_id")
+        identity = candidate_identity(slug, side)
+        prov["condition_id"] = (
+            "us_premap.market_slug + us_premap.intent as %r -- the VENUE-native "
+            "slug is the netting identity and is NOT the leg's identity, "
+            "because the same slug carries a second side with the opposite "
+            "payout function" % identity)
+        prov["side"] = ("us_premap.intent, one of the exactly two values run "
+                        "268 measured across all 26,475 slugs")
 
         fx = fixture_participants(r.get("event_slug"))
         if fx["refusal"]:
@@ -940,7 +1091,7 @@ def build_leg(*, row, quantity, cost_per_unit, prose=None, sport_family=None,
             % (read["provenance"]["content_sha256"][:16], SETTLE.VERSION))
 
         leg = IS.Leg(
-            condition_id=slug, fixture_id=fx["event_slug"], kind=kd["kind"],
+            condition_id=identity, fixture_id=fx["event_slug"], kind=kd["kind"],
             period=kd["period"], overtime=overtime, backs=backs, line=line,
             over_under=kd["over_under"], quantity=qty,
             cost_cents_per_unit=cents,
@@ -963,6 +1114,12 @@ def build_leg(*, row, quantity, cost_per_unit, prose=None, sport_family=None,
                 "checked_by": "bettor_indirect_structures.Leg.missing_facts"}
     return {"ok": True, "refusal": None, "leg": leg, "built_from": prov,
             "grading_key": leg.grading_key(),
+            # THE THREE IDENTIFIERS, KEPT APART ON PURPOSE. `candidate_id` keys
+            # quoting, valuation, ranking and persistence; `venue_slug` is what
+            # an order addresses; `side` is which outcome token of it.
+            "candidate_id": identity,
+            "venue_slug": slug,
+            "side": side,
             "settlement_text_captured": captured,
             "evidence_age_s": evidence_age_s,
             "why": ("every fact this leg's kind needs is stated and sourced, "
@@ -973,14 +1130,36 @@ def build_leg(*, row, quantity, cost_per_unit, prose=None, sport_family=None,
 # 6 · THE PRODUCTION IMPORTERS
 # ═════════════════════════════════════════════════════════════════════
 
-#: One catalogue row by its venue-native slug.
+#: ONE CATALOGUE ROW, BY SLUG **AND SIDE**.
+#:
+#: THE DEFECT THIS REPLACES. This was `WHERE market_slug = $1 LIMIT 1` with no
+#: ORDER BY. Run 268 measured exactly 2.000 rows per market_slug, so the row
+#: that came back -- and with it the leg's orientation, and with that its whole
+#: payout function -- was whichever one Postgres happened to return first. On a
+#: spread the two rows carry `signed` -1.5 and +1.5: binding to the wrong one
+#: inverts the payout, silently.
+#:
+#: Run 269 established `(market_slug, intent)` is EXACTLY unique over all
+#: 52,950 rows -- 52,950 distinct pairs, zero duplicates -- so this is a key
+#: and not a heuristic. `LIMIT 1` stays as a belt-and-braces guard, not as the
+#: thing making the answer single.
 ROW_SQL = """
     SELECT market_slug, event_slug, event_title, question, sports_type,
            side_norm, team_abbr, team_name, line, signed, intent, kind,
            game_start, updated_at
       FROM us_premap
      WHERE market_slug = $1
+       AND intent = $2
      LIMIT 1
+"""
+
+#: Both sides of one slug, for reporting what the catalogue actually offers
+#: when the side asked for is not there.
+ROW_SIDES_SQL = """
+    SELECT intent, side_norm, team_abbr
+      FROM us_premap
+     WHERE market_slug = $1
+     ORDER BY intent
 """
 
 #: THE SIBLING CONTRACTS ON THE SAME FIXTURE, which is the candidate set.
@@ -991,34 +1170,109 @@ ROW_SQL = """
 #: contract's other side IS the held instrument. Admitting it would present a
 #: netting trade as an independent liquidity opportunity.
 #:
-#: DISTINCT ON keeps one row per (slug, team) so each side of each sibling
-#: market is offered once. Bounded because a single fixture carries up to 74
-#: distinct admitted slugs and each candidate costs a paced venue read.
+#: DISTINCT ON (market_slug, intent) keeps BOTH SIDES of every sibling market.
+#:
+#: THE SECOND DEFECT, MEASURED. This key was
+#: `coalesce(team_abbr, side_norm)`, and run 269 measured what that drops:
+#:
+#:   future slugs ...................................... 16,540
+#:   slugs where the OLD key collapsed the two sides ...  5,930  (35.9%)
+#:   slugs where `intent` keeps both ................... 16,540  (all)
+#:
+#: The collapsing case is `team_abbr` present and EQUAL on both rows -- e.g.
+#: `aachc-nhl-fewestpts-2027-04-10-ana`, whose yes row and no row are both
+#: `ana`. The old key saw one value and returned one row, so on more than a
+#: third of tradable instruments the second side was never offered at all --
+#: upstream of, and separate from, the identity collapse downstream.
 SIBLINGS_SQL = """
-    SELECT DISTINCT ON (market_slug, coalesce(team_abbr, side_norm))
+    SELECT DISTINCT ON (market_slug, intent)
            market_slug, event_slug, event_title, question, sports_type,
            side_norm, team_abbr, team_name, line, signed, intent, kind,
            game_start, updated_at
       FROM us_premap
      WHERE event_slug = $1
        AND market_slug <> $2
-     ORDER BY market_slug, coalesce(team_abbr, side_norm), updated_at DESC
+     ORDER BY market_slug, intent, updated_at DESC
      LIMIT $3
 """
 
+#: How many (slug, side) pairs the fixture actually has, so truncation at
+#: MAX_CANDIDATE_ROWS is REPORTED rather than looking like the whole set.
+SIBLING_COUNT_SQL = """
+    SELECT count(DISTINCT (market_slug, intent)) AS pairs,
+           count(DISTINCT market_slug)           AS slugs
+      FROM us_premap
+     WHERE event_slug = $1
+       AND market_slug <> $2
+"""
+
+#: Bounded because each candidate costs a paced venue read. NOTE THE UNITS: the
+#: limit counts (slug, side) PAIRS, and now that both sides are returned it
+#: covers half as many instruments as it used to. That is a real reduction in
+#: breadth per pass and it is why `candidate_legs_for` reports
+#: `truncated_at_limit` with the number of pairs the fixture has -- a silently
+#: truncated discovery reads as "these are the candidates" when it is not.
 MAX_CANDIDATE_ROWS = 40
 
 R_NO_EVENT_FOR_HELD = "THE_HELD_CONTRACTS_ROW_NAMES_NO_EVENT_TO_FIND_SIBLINGS_ON"
 R_CATALOGUE_READ_FAILED = "THE_CATALOGUE_READ_ITSELF_FAILED"
 
 
-async def read_row(conn, market_slug):
-    """One catalogue row, or None. Never raises."""
+async def read_row(conn, market_slug, side):
+    """The catalogue row for ONE SIDE of one instrument, or None.
+
+    `side` is required and is not defaulted. A caller that does not know which
+    side it holds must refuse, because picking one is picking a payout function
+    at random -- which is exactly what `LIMIT 1` was doing.
+    """
+    if side not in SIDES:
+        return {"error": "SIDE_NOT_ONE_OF_%s" % (SIDES,)}
     try:
-        got = await conn.fetchrow(ROW_SQL, str(market_slug or ""))
+        got = await conn.fetchrow(ROW_SQL, str(market_slug or ""), str(side))
     except Exception as exc:                                    # noqa: BLE001
         return {"error": type(exc).__name__}
     return dict(got) if got is not None else None
+
+
+async def read_sides(conn, market_slug):
+    """Which sides the catalogue actually has for this slug. For reporting."""
+    try:
+        rows = await conn.fetch(ROW_SIDES_SQL, str(market_slug or ""))
+    except Exception:                                           # noqa: BLE001
+        return []
+    return [dict(r) for r in rows]
+
+
+def held_side_of(position) -> dict:
+    """Which side of its instrument this funded position holds.
+
+    `bettor_funded_intents.order_intent` is the field, and run 268 measured its
+    vocabulary to be the SAME two values `us_premap.intent` takes, so the join
+    is direct rather than a mapping to be invented.
+
+    ABSENT IS A REFUSAL. Production currently holds ZERO funded intents (run
+    268, statements 4 and 5, both empty), so there is no live position to read
+    this off and no measurement can tell me what a real one will carry. Guessing
+    would put a coin flip between the venue and the payout function.
+    """
+    pos = dict(position or {})
+    stated = _side_token(pos.get("order_intent"))
+    out = {"side": None, "refusal": None, "stated": stated,
+           "source": "bettor_funded_intents.order_intent",
+           "vocabulary": SIDES}
+    if stated in SIDES:
+        out["side"] = stated
+        out["why"] = ("the position states %s, which is one of the two values "
+                      "us_premap.intent takes" % stated)
+        return out
+    out["refusal"] = R_HELD_SIDE_NOT_STATED
+    out["why"] = (
+        "the position states order_intent=%r, which is not one of %s. The "
+        "instrument has exactly two sides and they have opposite payout "
+        "functions -- on a spread the same row pair carries signed -1.5 and "
+        "+1.5 -- so a leg built without knowing the side is a payout function "
+        "chosen at random. This used to be `LIMIT 1`" % (stated, SIDES))
+    return out
 
 
 async def held_leg_for(conn, *, position, prose_reader=None, now=None) -> dict:
@@ -1038,7 +1292,31 @@ async def held_leg_for(conn, *, position, prose_reader=None, now=None) -> dict:
         out.update(refusal=R_NO_CATALOGUE_ROW,
                    why="the position names no venue market slug")
         return out
-    row = await read_row(conn, slug)
+    # ── WHICH SIDE, BEFORE ANY ROW IS READ ───────────────────────────
+    side_read = held_side_of(pos)
+    out["held_side"] = side_read
+    if side_read["refusal"]:
+        out.update(refusal=side_read["refusal"], why=side_read["why"])
+        return out
+    side = side_read["side"]
+    out["side"] = side
+    out["candidate_id"] = candidate_identity(slug, side)
+    row = await read_row(conn, slug, side)
+    if row is None:
+        # THE SIDE ASKED FOR IS NOT IN THE CATALOGUE. Distinguish that from
+        # "no row for this slug at all": the first is a data gap on one side
+        # and the second is an unknown instrument, and they are fixed
+        # differently.
+        available = await read_sides(conn, slug)
+        if available:
+            out.update(
+                refusal=R_HELD_SIDE_NOT_IN_CATALOGUE,
+                sides_available=[r.get("intent") for r in available],
+                why=("the catalogue has %d row(s) for %r but none with "
+                     "intent=%s. The position states a side the catalogue does "
+                     "not carry, and the other side is a different contract"
+                     % (len(available), slug, side)))
+            return out
     if isinstance(row, dict) and row.get("error"):
         out.update(refusal=R_CATALOGUE_READ_FAILED,
                    why=("the catalogue read failed (%s). Unread is not empty: "
@@ -1077,6 +1355,38 @@ async def held_leg_for(conn, *, position, prose_reader=None, now=None) -> dict:
     out.update(built)
     out["ok"] = bool(built.get("ok"))
     return out
+
+
+async def _quote_side(quoter, market_slug, side):
+    """This side's own book, and whether the quoter could tell the sides apart.
+
+    THE HONEST HANDLING OF A ONE-ARGUMENT QUOTER. A venue book belongs to an
+    OUTCOME TOKEN, not to a market: the long side and the short side of one
+    instrument have separate ladders, and their prices need not sum to a dollar
+    (that gap is the venue's spread). So a quoter that takes only a slug cannot
+    price a side.
+
+    Rather than silently pricing both sides off one ladder, this tries
+    `quoter(slug, side)` first and falls back to `quoter(slug)` -- and RETURNS
+    WHICH FORM ANSWERED, so a shared price is recorded as shared. That is the
+    same treatment `rank_admitted` already gives a shared depth reading: the
+    limitation bounds what the number means instead of disappearing into it.
+    """
+    try:
+        got = await quoter(market_slug, side)
+        return dict(got or {}), True
+    except TypeError:
+        # Only a signature mismatch falls through. A TypeError raised INSIDE a
+        # two-argument quoter would land here too, which is why the retry's own
+        # failure is reported rather than swallowed.
+        pass
+    except Exception as exc:                                    # noqa: BLE001
+        return {"ok": False, "error": type(exc).__name__}, True
+    try:
+        got = await quoter(market_slug)
+    except Exception as exc:                                    # noqa: BLE001
+        return {"ok": False, "error": type(exc).__name__}, False
+    return dict(got or {}), False
 
 
 async def candidate_legs_for(conn, *, held_row, quoter=None,
@@ -1119,22 +1429,51 @@ async def candidate_legs_for(conn, *, held_row, quoter=None,
                         % type(exc).__name__))
         return out
     out["examined"] = len(rows)
+    # ── TRUNCATION IS REPORTED, NEVER SILENT ─────────────────────────
+    #
+    # The limit counts (slug, side) PAIRS, and the DISTINCT ON key now returns
+    # both sides, so the same limit covers half as many instruments as before.
+    # A discovery that stopped at the limit is not "the candidate set"; it is a
+    # prefix of it, and saying so is the difference between "nothing better
+    # exists" and "we did not look".
+    cap = int(limit or MAX_CANDIDATE_ROWS)
+    try:
+        tot = await conn.fetchrow(SIBLING_COUNT_SQL, event, held_slug)
+    except Exception:                                           # noqa: BLE001
+        tot = None
+    have_pairs = None if tot is None else int(tot["pairs"])
+    out["fixture_candidate_pairs"] = have_pairs
+    out["fixture_candidate_slugs"] = (None if tot is None
+                                      else int(tot["slugs"]))
+    out["limit"] = cap
+    out["truncated_at_limit"] = bool(len(rows) >= cap
+                                     and (have_pairs or 0) > len(rows))
+    if out["truncated_at_limit"]:
+        out["truncation_note"] = (
+            "this fixture has %s (slug, side) candidate pairs and the read "
+            "stopped at %d. The candidates below are a PREFIX ordered by slug, "
+            "not the fixture's best ones -- nothing here supports 'no better "
+            "candidate exists'" % (have_pairs, cap))
     for raw in rows:
         row = dict(raw)
         slug = _clean(row.get("market_slug"))
-        # PRICE AND DEPTH ARE THIS CONTRACT'S OWN. A candidate priced off
-        # another instrument's ladder is a fabricated cost.
+        side = side_of(row)
+        cid = candidate_identity(slug, side) if side else slug
+        # PRICE AND DEPTH ARE THIS CONTRACT'S OWN, AND THIS SIDE'S OWN. A
+        # candidate priced off another instrument's ladder is a fabricated
+        # cost; a candidate priced off the OTHER SIDE of its own instrument is
+        # the same error inside one market -- the two sides have independent
+        # books and prices that need not sum to a dollar.
         price, depth, quote = None, None, {}
+        quote_is_side_aware = None
         if quoter is not None:
-            try:
-                quote = dict(await quoter(slug) or {})
-            except Exception as exc:                            # noqa: BLE001
-                quote = {"ok": False, "error": type(exc).__name__}
+            quote, quote_is_side_aware = await _quote_side(quoter, slug, side)
             price = quote.get("cost_per_share") or quote.get("price")
             depth = quote.get("depth_qty")
         if price is None:
             out["refused"].append(
-                {"market_slug": slug, "sports_type": row.get("sports_type"),
+                {"candidate_id": cid, "market_slug": slug, "side": side,
+                 "sports_type": row.get("sports_type"),
                  "refusal": R_CANDIDATE_NOT_PRICED,
                  "why": ("this contract's own price was not established (%s). "
                          "Pricing it off the held contract's ladder would "
@@ -1161,18 +1500,82 @@ async def candidate_legs_for(conn, *, held_row, quoter=None,
                                     or "").split("_")[0]))
         if not built.get("ok"):
             out["refused"].append(
-                {"market_slug": slug, "sports_type": row.get("sports_type"),
+                {"candidate_id": cid, "market_slug": slug, "side": side,
+                 "sports_type": row.get("sports_type"),
                  "refusal": built.get("refusal"), "field": built.get("field"),
                  "why": built.get("why")})
             continue
         out["legs"].append(
-            {"leg": built["leg"], "market_slug": slug,
+            {"leg": built["leg"],
+             # THE IDENTITY, AND THE VENUE ADDRESS, SEPARATELY.
+             "candidate_id": built["candidate_id"],
+             "market_slug": built["venue_slug"],
+             "side": built["side"],
              "sports_type": row.get("sports_type"),
              "built_from": built["built_from"],
              "grading_key": built["grading_key"],
              "price": price, "depth_qty": depth,
+             "price_is_this_sides_own": quote_is_side_aware,
              "evidence_age_s": age, "quote": quote,
              "settlement_text_captured": built["settlement_text_captured"]})
+    # ── THE ONE CHECK THAT NEEDS BOTH ROWS OF AN INSTRUMENT ──────────
+    #
+    # WHERE THIS CAME FROM. `orientation_of` reads `team_abbr` alone. Run 269
+    # measured 5,930 future slugs whose two rows carry the SAME team_abbr, and
+    # on such a pair both sides would come back with the SAME `backs` -- two
+    # legs claiming to back one participant while holding opposite outcome
+    # tokens, one of them with its payout function inverted. Exercised against a
+    # fixture of that shape, that is exactly what happened.
+    #
+    # Run 270 then measured whether it reaches a market we grade. On the graded
+    # prefixes (aec-/asc-/tsc-), of 5,974 future slugs:
+    #
+    #     team_abbr absent on both ....  2,159  (orientation refuses, correctly)
+    #     team_abbr differs ...........  3,347  (orientation established)
+    #     team_abbr EQUAL .............    468  -- and every one is a TEAM TOTAL
+    #     side_norm differs ...........  5,974  (all of them)
+    #
+    # A total has no orientation: `Leg` carries `over_under` and `build_leg`
+    # does not call `orientation_of` for KIND_TOTAL. So on every leg that
+    # actually uses orientation, `team_abbr` either distinguishes the sides or
+    # is absent and refuses -- the collapse does not reach a payout function
+    # TODAY.
+    #
+    # It is guarded anyway, because "today" is a fact about the catalogue and
+    # not about this code: a provider that starts emitting equal team codes on a
+    # spread would otherwise invert a payout silently. This is the only place
+    # both rows of one instrument are in scope, so it is the only place the
+    # contradiction is visible.
+    by_instrument: dict[str, list[dict]] = {}
+    for entry in out["legs"]:
+        by_instrument.setdefault(entry["market_slug"], []).append(entry)
+    contradictions = []
+    for slug_, entries in by_instrument.items():
+        oriented = [e for e in entries
+                    if getattr(e["leg"], "backs", None) is not None]
+        if len(oriented) < 2:
+            continue
+        if len({e["leg"].backs for e in oriented}) == 1:
+            contradictions.append(slug_)
+    if contradictions:
+        kept = []
+        for entry in out["legs"]:
+            if entry["market_slug"] not in contradictions:
+                kept.append(entry)
+                continue
+            out["refused"].append({
+                "candidate_id": entry["candidate_id"],
+                "market_slug": entry["market_slug"], "side": entry["side"],
+                "sports_type": entry.get("sports_type"),
+                "refusal": R_BOTH_SIDES_CLAIM_ONE_ORIENTATION,
+                "why": ("both sides of %r built a leg backing %r. The two sides "
+                        "of one instrument hold opposite outcome tokens, so one "
+                        "of these payout functions is inverted and the row does "
+                        "not say which. Orientation comes from team_abbr, and "
+                        "this instrument states the same code on both rows"
+                        % (entry["market_slug"], entry["leg"].backs))})
+        out["legs"] = kept
+        out["orientation_contradictions"] = sorted(contradictions)
     out["why"] = ("%d of %d sibling contracts on this fixture were built into "
                   "legs; %d refused, each naming the fact it lacked"
                   % (len(out["legs"]), out["examined"], len(out["refused"])))

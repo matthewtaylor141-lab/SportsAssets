@@ -79,6 +79,7 @@ from typing import Any
 from . import bettor_funded_book as FB
 from . import bettor_funded_decision as FD
 from . import bettor_funded_execution as FX
+from . import bettor_funded_hedge_supply as HS
 from . import bettor_funded_indirect_pair as FIP
 from . import bettor_funded_learning as FL
 from . import bettor_funded_model as FMD
@@ -238,12 +239,34 @@ def discover(*, held_leg, candidate_legs, sport_permits_tie: bool,
     for leg in candidate_legs:
         out["examined"] += 1
         row: dict[str, Any] = {"condition_id": leg.condition_id}
-        if leg.condition_id == held_leg.condition_id:
+        # ── NETTING IS A QUESTION ABOUT THE INSTRUMENT, NOT THE SIDE ─
+        #
+        # `condition_id` is now `slug#SIDE`, so comparing identities alone
+        # would let the OPPOSING SIDE of the held instrument through as a
+        # distinct candidate -- precisely the error the owner named: "Direct
+        # complements on the same netted PMUS instrument must not be presented
+        # as an independent liquidity opportunity." The venue carries ONE book
+        # per market (run 264: exactly 2.00 rows and 2 intents per slug across
+        # all seventeen prefixes), so buying the other side of what you hold
+        # nets the position rather than adding a second settling holding.
+        #
+        # So the identity is side-aware and this comparison deliberately is
+        # NOT. `venue_slug_of` strips the side, and the two questions stay
+        # separate instead of one key being bent to answer both.
+        held_instrument = HS.venue_slug_of(held_leg.condition_id)
+        if HS.venue_slug_of(leg.condition_id) == held_instrument:
+            same_side = leg.condition_id == held_leg.condition_id
             out["rejected"].append(dict(
                 row, refusal=R_NOT_DISTINCT,
-                why=("this is the contract already held. On a venue with one "
-                     "instrument per market the opposite side of the same book "
-                     "is netting, not a second settling holding")))
+                venue_instrument=held_instrument,
+                is_the_same_side=same_side,
+                why=("this is the contract already held"
+                     if same_side else
+                     ("this is the OPPOSING SIDE of the held instrument %r. It "
+                      "has a different identity and it is the same book: "
+                      "acquiring it nets the position rather than hedging it, "
+                      "so it is not an independent liquidity opportunity"
+                      % held_instrument))))
             continue
         if leg.grading_key() != want:
             out["rejected"].append(dict(
@@ -1247,10 +1270,30 @@ def rank_admitted(admitted, *, details=None, wanted_qty=None, fee_usd=None,
     """
     from . import bettor_funded_indirect_pair as IP
 
-    by_slug = {}
+    # ── DETAILS ARE KEYED BY THE SIDE-AWARE IDENTITY ─────────────────
+    #
+    # THE DEFECT THIS FIXES, MEASURED. This was keyed by `market_slug`, and one
+    # slug carries two sides with independent books. So both sides of one
+    # instrument read the SAME price and the SAME depth, and two ranked rows
+    # came out sharing one `condition_id` with different scores -- after which
+    # `best_admitted`'s lookup by that id resolved to whichever entry was last
+    # in the dict. Run 268 measured the size of the collapse: 16,545 candidates
+    # across 1,558 future fixtures, which is every future fixture and exactly
+    # half the candidate set.
+    #
+    # A detail row that carries only a slug is still accepted -- a supplier
+    # that predates the identity model, and a persisted decision read back --
+    # but it is recorded as SLUG-ONLY so a price that cannot distinguish the
+    # sides is not read as this side's own.
+    by_id, by_slug_only = {}, {}
     for d in (details or ()):
-        if isinstance(d, dict) and d.get("market_slug"):
-            by_slug[str(d["market_slug"])] = d
+        if not isinstance(d, dict):
+            continue
+        cid = d.get("candidate_id")
+        if cid:
+            by_id[str(cid)] = d
+        elif d.get("market_slug"):
+            by_slug_only[str(d["market_slug"])] = d
     # ── A SUPPLIER MAY READ DEPTH ONCE FOR THE POSITION ──────────────
     #
     # THE REGRESSION THIS FIXES, AND THE GATE FOUND IT. `pair_inputs`'
@@ -1279,20 +1322,34 @@ def rank_admitted(admitted, *, details=None, wanted_qty=None, fee_usd=None,
                "a middle is not preferred for being a middle; the order comes "
                "from the numbers and the taxonomy is carried for the record"),
            "depth_source": ("per candidate, from each contract's own ladder"
-                            if by_slug else
+                            if (by_id or by_slug_only) else
                             ("one shared reading for the position, which "
                              "cannot discriminate between candidates"
-                             if shared_qty is not None else "none"))}
+                             if shared_qty is not None else "none")),
+           "identity": ("condition_id is slug#SIDE. The two sides of one venue "
+                        "instrument have independent books, so a reading keyed "
+                        "by slug alone cannot price either of them")}
     for cand in (admitted or ()):
         cand = dict(cand or {})
         leg = cand.get("leg")
-        slug = str(cand.get("condition_id")
-                   or getattr(leg, "condition_id", "") or "")
-        det = dict(by_slug.get(slug) or {})
+        cid = str(cand.get("condition_id")
+                  or getattr(leg, "condition_id", "") or "")
+        venue_slug, side = HS.split_identity(cid)
+        # THE SIDE-AWARE LOOKUP FIRST, then the slug-only one -- and when the
+        # slug-only one answers, say so on the row.
+        det = dict(by_id.get(cid) or {})
+        price_is_side_aware = bool(det)
+        if not det:
+            det = dict(by_slug_only.get(venue_slug) or {})
+            if det:
+                det["price_is_shared_across_both_sides"] = True
         if det.get("depth_qty") is None and shared_qty is not None:
             det["depth_qty"] = shared_qty
             det["depth_is_shared_not_per_contract"] = True
-        row = {"condition_id": slug, "taxonomy": cand.get("taxonomy"),
+        row = {"condition_id": cid,
+               "venue_slug": venue_slug, "side": side,
+               "price_is_this_sides_own": price_is_side_aware,
+               "taxonomy": cand.get("taxonomy"),
                "units": cand.get("units"),
                "price": det.get("price"), "depth_qty": det.get("depth_qty"),
                "evidence_age_s": det.get("evidence_age_s")}
