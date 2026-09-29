@@ -60,6 +60,7 @@ from ..bettor_market_stream import _parse_ts as _stream_parse_ts
 from .. import bettor_pinnacle_devig as devig
 from .. import bettor_venue_currency as vc
 from .. import bettor_venue_mapping as vmap
+from .. import bettor_venue_native_identity as vnat
 from .. import bettor_venue_realism as vreal
 from .. import bettor_venue_settlement as vset
 
@@ -562,55 +563,6 @@ def confirm_mapping_by_fixtures(*, provider_events, venue_event_titles,
                     "against `Manchester United vs Liverpool` shares only "
                     "'manchester' and is a different fixture"
                     % (out["examined"], len(venue))))
-    return out
-    events = list(provider_events or ())
-    out["examined"] = len(events)
-    if not events:
-        out["why"] = ("the provider returned no events for this key. That is "
-                      "consistent with a competition between rounds AND with a "
-                      "key that is not this competition; it confirms neither")
-        return out
-    for ev in events:
-        home = _participants((ev or {}).get("home_team") or "")
-        away = _participants((ev or {}).get("away_team") or "")
-        got = home | away
-        if not got:
-            continue
-        for vset, title in venue_sets:
-            if not (got & vset):
-                continue
-            # STRONG means BOTH sides of the provider's fixture are recognized
-            # in the same venue title. One shared word is the weak case and is
-            # counted, but it cannot carry a mapping on its own.
-            strong = bool(home & vset) and bool(away & vset)
-            out["matches"] += 1
-            if strong:
-                out["strong_matches"] += 1
-            if len(out["matched_fixtures"]) < 4:
-                out["matched_fixtures"].append(
-                    {"provider": "%s vs %s" % (
-                        (ev or {}).get("home_team"),
-                        (ev or {}).get("away_team")),
-                     "venue": title, "strong": strong,
-                     "shared": sorted(got & vset)[:4]})
-            break
-    out["min_required"] = MIN_STRONG_FIXTURE_MATCHES
-    if out["strong_matches"] >= MIN_STRONG_FIXTURE_MATCHES:
-        out.update(ok=True, refusal=None,
-                   why=("%d of the provider's %d fixtures match a venue "
-                        "fixture on BOTH sides (%d match on at least one "
-                        "side), so the two are the same competition"
-                        % (out["strong_matches"], out["examined"],
-                           out["matches"])))
-        return out
-    out.update(refusal=R_MAPPING_FIXTURES_DO_NOT_MATCH,
-               why=("none of the provider's %d fixtures matches any of the "
-                    "venue's %d on both sides (%d matched on one side, which "
-                    "'United' and 'City' do across every English division). "
-                    "The key may exist and be active and still be a different "
-                    "competition -- `soccer_england_league2` against the "
-                    "venue's National League is exactly that case"
-                    % (out["examined"], len(venue_sets), out["matches"])))
     return out
 
 #: `intf` (international friendlies, 15 events) is deliberately ABSENT. The
@@ -1208,6 +1160,36 @@ WHY_SKIPPED_ON_ARRIVAL = (
     "delay to every candidate after this one. The LIMIT IS UNCHANGED -- "
     "this is the same PINNACLE_MAX_AGE_S the decision gate applies, "
     "checked earlier, not a tighter bound")
+
+
+def arrival_split(provider_epoch, received_at, arrival) -> dict:
+    """HOW OLD THE PRICE WAS WHEN WE REACHED IT, split by whose time it was.
+
+    `provider_lag_s`   received_at - the provider's own last_update: THEIRS
+    `our_processing_s` arrival - received_at: OURS (every earlier event's
+                       paced reads in this fetch, plus this event's work)
+    `quote_age_s`      arrival - last_update: the sum the 30 s rule governs
+
+    Pure. A missing clock leaves its figures None, never 0 -- an unmeasured
+    lag reported as zero would be the best-looking number in the table.
+    """
+    out = {"provider_lag_s": None, "our_processing_s": None,
+           "quote_age_s": None}
+    try:
+        pe = None if provider_epoch is None else float(provider_epoch)
+        rx = None if received_at is None else float(received_at)
+        ar = None if arrival is None else float(arrival)
+    except (TypeError, ValueError):
+        return out
+    if pe is not None and rx is not None:
+        out["provider_lag_s"] = round(rx - pe, 3)
+    if rx is not None and ar is not None:
+        out["our_processing_s"] = round(ar - rx, 3)
+    if pe is not None and ar is not None:
+        out["quote_age_s"] = round(ar - pe, 3)
+    return out
+
+
 #: WHAT `marketData.transactTime` MEANS -- AND THIS IS NOT YET ESTABLISHED.
 #:
 #: The gate below computes `decision_instant - transactTime` and refuses
@@ -1297,6 +1279,59 @@ R_INTENT_NOT_LONG = "VENUE_CONTRACT_IS_NOT_LONG_ON_THE_PRICED_OUTCOME"
 R_NO_SLUG = "VENUE_MARKET_ROW_HAS_NO_SLUG"
 R_VENUE_READ_FAILED = "VENUE_BOOK_READ_FAILED"
 R_VENUE_READ_ERROR = "VENUE_BOOK_READ_RETURNED_ERROR"
+
+#: ── WHEN THE VENUE'S OWN CATALOGUE MAY STAND IN FOR THE GLOBAL ONE ───
+#:
+#: EXACTLY THE REFUSALS THAT MEAN "THE GLOBAL CATALOGUE COULD NOT NAME ONE
+#: MONEYLINE ROW". No row (NO_VENUE_CONTRACT_FOR_EVENT), two rows because the
+#: global match ignores dates (VENUE_MAPPING_AMBIGUOUS, the MLB series case),
+#: or only line markets (VENUE_CONTRACT_IS_A_LINE_MARKET_NOT_A_MONEYLINE). Each
+#: is a statement about the GLOBAL catalogue, and `bettor_venue_native_identity`
+#: asks the venue's own. Every code must be one of these: a CLOSED or SEGMENT
+#: code beside them says the fixture was found and was unusable, which the
+#: venue-native path has no business overriding. And identity, only when the
+#: US catalogue crossing found NOTHING (NO_VENUE_NATIVE_CONTRACT_IN_PREMAP) --
+#: never a realism, intent or period refusal, which are findings about a
+#: contract that was found.
+#:
+#: NO_PINNACLE_ON_EVENT IS NOT HERE AND CANNOT BE: it is refused before the
+#: mapping is attempted. No catalogue can repair a missing provider price.
+VENUE_NATIVE_MAY_REPLACE = (vmap.R_NO_CONTRACT, vmap.R_AMBIGUOUS, vmap.R_LINE)
+VENUE_NATIVE_MAY_REPLACE_IDENTITY = (R_NO_PREMAP,)
+
+
+def venue_native_may_replace(codes) -> bool:
+    """True only when EVERY global mapping refusal is one the venue's own
+    catalogue can answer. Pure."""
+    codes = [str(c) for c in (codes or ())]
+    return bool(codes) and all(c in VENUE_NATIVE_MAY_REPLACE for c in codes)
+
+
+def venue_native_mapping(vn, *, replaced, global_mapped=None) -> dict:
+    """The `mapped` record a venue-native identity travels under.
+
+    NO GLOBAL ID IS CARRIED, even where the global match found a row: that row
+    was matched on names alone -- for Wales v Norway it was the global DRAW
+    market -- and a venue-native contract borrowing its condition would key
+    the market rail, the fixture scope and the payout binding to a different
+    instrument. The global evidence is kept, labelled as what was replaced.
+    """
+    g = dict(global_mapped or {})
+    row = dict(g.get("market_row") or {})
+    return {"version": vnat.VERSION, "mapped": True,
+            "mapped_by": vnat.MAPPED_BY_VENUE_NATIVE,
+            "condition_id": None, "global_slug": None, "market_row": None,
+            "match": vnat.MATCHED_BY, "refusals": [],
+            "matched_title": (vn.get("venue_native") or {}).get("event_slug"),
+            "global_refusal_replaced": ",".join(str(c) for c in replaced),
+            "global_refusals_replaced": list(replaced),
+            "global_mapping_replaced": ({
+                "condition_id": g.get("condition_id"),
+                "slug": row.get("slug"), "title": row.get("title")}
+                if g.get("mapped") else {
+                "refusals": list(g.get("refusals") or []),
+                "candidates": g.get("candidates")}),
+            "venue_native": vn.get("venue_native")}
 
 #: A venue quote older than this is not contemporaneous with a 30 s odds
 #: quote. Same order of magnitude as the feed's own freshness rule,
@@ -3214,6 +3249,9 @@ def _fetch_schedule_blocking(date_str):
                 "error": "%s: %s" % (type(exc).__name__, exc)}
 
 
+R_FIXTURE_KEY_ABSENT = "FIXTURE_METADATA_HAS_NO_CONDITION_KEY"
+
+
 async def acquire_fixture_scope(conn, *, condition_id, home, away,
                                 commence_iso, now, cache, fetcher=None):
     """The scope evidence for ONE candidate's fixture, acquired if needed.
@@ -3243,7 +3281,23 @@ async def acquire_fixture_scope(conn, *, condition_id, home, away,
     a state. It never selects a fixture without both team names and a date.
     It never widens the scope guard. Every failure is a named refusal on
     the returned row, and the caller's gate reads that refusal.
+
+    ── NO KEY, NO READ AND NO WRITE ────────────────────────────────
+    The row is keyed by the GLOBAL condition id. A candidate whose identity
+    came from the venue's own catalogue has none, and `str(None)` is the
+    string "None": the old path would have read -- and on a match WRITTEN --
+    a row under that shared key, so a second venue-native candidate would
+    have been handed the first one's game state. Refused by name instead;
+    the scope stays unestablished and the settlement comparison says so.
     """
+    if not str(condition_id or "").strip():
+        acq = {"attempted": False, "refusal": R_FIXTURE_KEY_ABSENT,
+               "why": ("no global condition id to key the fixture row by "
+                       "(a venue-native identity), so nothing is read or "
+                       "written and the scope stays unestablished")}
+        return {"read": False, "error": None,
+                "refusal": R_FIXTURE_KEY_ABSENT, "why": acq["why"],
+                "acquisition": acq}
     row = await fstore.read(conn, condition_id)
     need = fstore.needs_acquisition(row, now=now)
     acq = {"attempted": False, "decided": need}
@@ -3382,7 +3436,18 @@ async def bind_payout_outcome(conn, *, condition_id, payout_event, intent):
     are expected to agree, and a disagreement is reported rather than
     resolved in favour of either. An unbindable outcome refuses the entry
     -- there is no default.
+
+    A VENUE-NATIVE IDENTITY HAS NO GLOBAL CONDITION TO BIND AGAINST, and
+    querying `str(None)` would ask the catalogue about the literal "None".
+    It refuses by the same name, saying why, before any read.
     """
+    if not str(condition_id or "").strip():
+        return {"ok": False, "refusal": R_OUTCOME_NOT_BOUND, "tokens": [],
+                "basis": "NO_GLOBAL_CONDITION_TO_BIND_AGAINST",
+                "why": ("this contract's identity came from the venue's own "
+                        "catalogue and the global catalogue holds no "
+                        "condition for it, so the payout outcome cannot be "
+                        "bound to a global token index. It is NOT assumed")}
     try:
         rows = await conn.fetch(TOKENS_SQL, str(condition_id))
     except Exception as exc:                                   # noqa: BLE001
@@ -3828,7 +3893,7 @@ def _settlement_compatibility(srule) -> dict:
 def _entry_plan(*, ladder, fee_fn, observation_age_s, action, condition_id,
                 event_key, open_book, settlement, freshness, calibration,
                 now, research_authorised=False, provider_event_id=None,
-                event_exposure_measurable=None):
+                event_exposure_measurable=None, venue_market_slug=None):
     """A callable `bettor_external_shadow.evaluate` invokes once.
 
     It receives the fair value that function computed -- so there is
@@ -3845,9 +3910,12 @@ def _entry_plan(*, ladder, fee_fn, observation_age_s, action, condition_id,
         # STANDARD-dollar rail by exactly the edge. Sizing now asks the
         # rails what is left FIRST and spends at most that. No limit
         # moves; the standard trade remains the ceiling.
+        # THE VENUE CONTRACT TOO, so the market rail counts an open row on
+        # the same venue contract whichever catalogue its identity came from
+        # (a venue-native candidate carries no global condition id).
         head = entryx.headroom_from_rows(
             open_book, condition_id=condition_id, event_key=event_key,
-            now=now)
+            now=now, venue_market_slug=venue_market_slug)
         # ── THE EVENT RAIL MUST BE MEASURABLE, NOT MERELY SMALL (A9) ──
         #
         # Until the open-book query carried an event identity, this rail summed
@@ -3904,7 +3972,8 @@ def _entry_plan(*, ladder, fee_fn, observation_age_s, action, condition_id,
         exposure = entryx.exposure_from_rows(
             open_book, condition_id=condition_id, event_key=event_key,
             proposed_cost_usd=cost, proposed_qty=est["size"], now=now,
-            proposed_cost_basis="SIZE_TIMES_WORST_CASE_COST_PER_CONTRACT")
+            proposed_cost_basis="SIZE_TIMES_WORST_CASE_COST_PER_CONTRACT",
+            venue_market_slug=venue_market_slug)
         gates = entryx.state_from_evidence(
             freshness=freshness,
             settlement=_settlement_compatibility(settlement),
@@ -5271,6 +5340,12 @@ def _reconcile_event_ledger(rows, funnel) -> dict:
                            and all(v["reconciles"] for v in sports.values()))}
 
 
+#: The columns migration 143 adds, written when all of them are present.
+CANDIDATE_OUTCOME_143_COLUMNS = ("provider_lag_s", "our_processing_s",
+                                 "quote_age_s", "mapped_by",
+                                 "global_refusal_replaced")
+
+
 async def _persist_candidate_outcomes(conn, *, cycle_at: float, rows) -> dict:
     """ONE ROW PER PROVIDER EVENT PER CYCLE, appended, never updated.
 
@@ -5298,28 +5373,70 @@ async def _persist_candidate_outcomes(conn, *, cycle_at: float, rows) -> dict:
                 "why": "migration 137 is not applied here"}
     _ident = _code_identity() or {}
     writer = _ident.get("build") or _ident.get("source_sha256_12")
+    # MIGRATION 143'S COLUMNS, WHERE THE DATABASE HAS THEM. The workers can
+    # boot before the API has migrated, so an absent column set falls back to
+    # the 137 row -- and SAYS SO on the result -- rather than losing every
+    # row to a failed INSERT.
     try:
-        await conn.executemany(
-            "INSERT INTO ext_candidate_outcomes (cycle_id, cycle_at, writer, "
-            " sport_key, family, queue_position, provider_event_id, home, "
-            " away, commence_time, global_slug, us_market_slug, stage, "
-            " outcome, first_refusal, codes) "
-            "VALUES ($1, to_timestamp($2), $3, $4, $5, $6, $7, $8, $9, $10, "
-            " $11, $12, $13, $14, $15, $16::jsonb)",
-            [(cycle_id, float(cycle_at), writer, r["sport_key"],
-              r.get("family"), int(r["queue_position"]),
-              r.get("provider_event_id"), r.get("home"), r.get("away"),
-              None if r.get("commence_time") is None
-              else str(r.get("commence_time")),
-              r.get("global_slug"), r.get("us_market_slug"), r.get("stage"),
-              r["outcome"], r.get("first_refusal"),
-              json.dumps(list(r.get("codes") or [])))
-             for r in rows])
+        have = int(await conn.fetchval(
+            "SELECT count(*) FROM information_schema.columns "
+            " WHERE table_name = 'ext_candidate_outcomes' "
+            "   AND column_name = ANY($1::text[])",
+            list(CANDIDATE_OUTCOME_143_COLUMNS)) or 0)
+    except Exception as exc:                                   # noqa: BLE001
+        return {"ok": False, "cycle_id": cycle_id, "rows": 0,
+                "refusal": "CANDIDATE_OUTCOMES_READ_FAILED",
+                "error": type(exc).__name__}
+    with_143 = have == len(CANDIDATE_OUTCOME_143_COLUMNS)
+
+    def _num(v):
+        return None if v is None else float(v)
+
+    base = [(cycle_id, float(cycle_at), writer, r["sport_key"],
+             r.get("family"), int(r["queue_position"]),
+             r.get("provider_event_id"), r.get("home"), r.get("away"),
+             None if r.get("commence_time") is None
+             else str(r.get("commence_time")),
+             r.get("global_slug"), r.get("us_market_slug"), r.get("stage"),
+             r["outcome"], r.get("first_refusal"),
+             json.dumps(list(r.get("codes") or [])))
+            for r in rows]
+    try:
+        if with_143:
+            await conn.executemany(
+                "INSERT INTO ext_candidate_outcomes (cycle_id, cycle_at, "
+                " writer, sport_key, family, queue_position, "
+                " provider_event_id, home, away, commence_time, global_slug, "
+                " us_market_slug, stage, outcome, first_refusal, codes, "
+                " provider_lag_s, our_processing_s, quote_age_s, mapped_by, "
+                " global_refusal_replaced) "
+                "VALUES ($1, to_timestamp($2), $3, $4, $5, $6, $7, $8, $9, "
+                " $10, $11, $12, $13, $14, $15, $16::jsonb, $17, $18, $19, "
+                " $20, $21)",
+                [b + (_num(r.get("provider_lag_s")),
+                      _num(r.get("our_processing_s")),
+                      _num(r.get("quote_age_s")),
+                      r.get("mapped_by"), r.get("global_refusal_replaced"))
+                 for b, r in zip(base, rows)])
+        else:
+            await conn.executemany(
+                "INSERT INTO ext_candidate_outcomes (cycle_id, cycle_at, "
+                " writer, sport_key, family, queue_position, "
+                " provider_event_id, home, away, commence_time, global_slug, "
+                " us_market_slug, stage, outcome, first_refusal, codes) "
+                "VALUES ($1, to_timestamp($2), $3, $4, $5, $6, $7, $8, $9, "
+                " $10, $11, $12, $13, $14, $15, $16::jsonb)", base)
     except Exception as exc:                                   # noqa: BLE001
         return {"ok": False, "cycle_id": cycle_id, "rows": 0,
                 "refusal": "CANDIDATE_OUTCOMES_WRITE_FAILED",
                 "error": "%s: %s" % (type(exc).__name__, str(exc)[:160])}
-    return {"ok": True, "cycle_id": cycle_id, "rows": len(rows)}
+    out = {"ok": True, "cycle_id": cycle_id, "rows": len(rows),
+           "columns_143": with_143}
+    if not with_143:
+        out["why_no_arrival_columns"] = (
+            "migration 143 is not applied here, so the lag split and the "
+            "mapping path were not written; the rows are otherwise complete")
+    return out
 
 
 async def cycle(conn) -> dict:
@@ -5453,9 +5570,19 @@ async def cycle(conn) -> dict:
                "home": ev.get("home_team"), "away": ev.get("away_team"),
                "commence_time": ev.get("commence_time"),
                "global_slug": None, "us_market_slug": None, "stage": None,
+               # migration 143: the price's age on arrival, split, and which
+               # catalogue mapped the contract. None until measured.
+               "provider_lag_s": None, "our_processing_s": None,
+               "quote_age_s": None, "mapped_by": None,
+               "global_refusal_replaced": None,
                "_codes": []}
         _open_ev["row"] = row
         tally.log = row["_codes"]
+
+    def _event_fields(fields: dict) -> None:
+        """Facts about the OPEN event that are not refusal codes."""
+        if _open_ev["row"] is not None:
+            _open_ev["row"].update(fields)
     # THE VENUE'S OWN ERROR TEXT, bounded. A counter says how often the
     # venue refused; only the message says whether that is an entitlement,
     # a closed market or a rate limit -- and those need different actions
@@ -5498,9 +5625,16 @@ async def cycle(conn) -> dict:
     # would be wrong within a fortnight, so it is read.
     _cat = await fetch_sport_catalogue(api_key=api_key)
     _board = await venue_soccer_competitions(conn)
+    # THE FIXTURE DATES TRAVEL WITH THE TITLES (map4 section 9 D1). The board
+    # read has carried `title_days` since the return-leg defect was fixed, and
+    # this call dropped it, so every candidate reached
+    # `confirm_mapping_by_fixtures` with `venue_title_days == {}` and the date
+    # comparison never ran on the scheduled path -- only in a test that called
+    # the helper directly.
     sports_selection = select_sports(
         _cat, candidates=candidates_from_board(_board["board"],
-                                               _board.get("titles")))
+                                               _board.get("titles"),
+                                               _board.get("title_days")))
     sports_selection["venue_board"] = _board
     sports_for_cycle = tuple(sports_selection["sports"])
     labels = sorted({lbl for _, fam in sports_for_cycle
@@ -5556,8 +5690,12 @@ async def cycle(conn) -> dict:
     lat = {"provider_lag_samples": [], "our_delay_samples": [],
            "age_samples": [], "valid_evaluations": 0, "stale_refusals": 0,
            "self_inflicted_stale": 0, "provider_stale_on_arrival": 0,
-           "skipped_stale_on_arrival": 0, "deduplicated_requests": 0,
-           "venue_requests": 0}
+           "stale_on_arrival_due_to_our_processing": 0,
+           "skipped_stale_on_arrival": 0, "arrival_skip_samples": 0,
+           "deduplicated_requests": 0, "venue_requests": 0,
+           # every event WITH A PINNACLE PRICE, measured when it came up --
+           # mapped or not, evaluated or not
+           "arrival_lag_every_priced": [], "arrival_ours_every_priced": []}
 
     # THE OPEN BOOK, READ ONCE PER CYCLE. The risk rails are measured
     # against it plus the position being proposed, so it has to be read
@@ -5595,11 +5733,31 @@ async def cycle(conn) -> dict:
                 universe.get(lbl, 0)
                 for lbl in VENUE_SPORT_LABELS.get(family, ())),
             "provider_events": 0, "with_pinnacle_h2h": 0,
-            "mapped_to_a_venue_contract": 0, "evaluated": 0, "written": 0,
+            "mapped_to_a_venue_contract": 0,
+            # WHICH CATALOGUE MAPPED IT: `mapped_to_a_venue_contract` counts
+            # both paths, this counts the venue-native one, and
+            # `venue_native_replaced` names the global refusal each replaced.
+            "mapped_by_venue_native": 0, "venue_native_replaced": {},
+            # THE STAGE AFTER MAPPING, counted (map4 section 9 D4): an
+            # identity refusal used to reach the cycle tally and not this
+            # sport's own refusals, so `mapped 3 -> evaluated 0` did not say
+            # how many stopped at identity.
+            "identity_resolved": 0,
+            "evaluated": 0, "written": 0,
             "refusals": {}})
 
         def _step_refuse(code, _s=step):
             _s["refusals"][code] = _s["refusals"].get(code, 0) + 1
+
+        def _venue_native_took_it(replaced, _s=step):
+            """A venue-native identity replaced the global refusal(s)."""
+            _s["mapped_by_venue_native"] += 1
+            for c in replaced:
+                _s["venue_native_replaced"][c] = \
+                    _s["venue_native_replaced"].get(c, 0) + 1
+            _event_fields({"mapped_by": vnat.MAPPED_BY_VENUE_NATIVE,
+                           "global_refusal_replaced":
+                               ",".join(str(c) for c in replaced)})
 
         got = await fetch_odds(sport_key, api_key=api_key)
         credits["used"] = got.get("credits_used") or credits["used"]
@@ -5624,6 +5782,11 @@ async def cycle(conn) -> dict:
         # resolution attempt, no venue read, no candidate, and the competition
         # is refused BY NAME rather than appearing as twenty unmappable events.
         # The credit is reported as spent either way.
+        # THE PAID FETCH'S EVENTS ARE COUNTED BEFORE ANYTHING CAN REFUSE THEM
+        # (map4 section 9 D3). This was set after the confirmation below, so a
+        # competition refused there showed `provider_events 0` and no event
+        # rows at all, although the metered call had returned events.
+        step["provider_events"] = len(got.get("events") or [])
         _cand = next((c for c in sports_selection.get("confirmed_by_provider")
                       or [] if c.get("key") == sport_key), None)
         if _cand is not None:
@@ -5638,11 +5801,28 @@ async def cycle(conn) -> dict:
                                      "min_required", "matched_fixtures", "why")}
             _cand["fixture_confirmation"] = step["mapping_confirmation"]
             if not conf["ok"]:
+                # COUNTED ONCE, AS A COMPETITION (the tally and this sport's
+                # refusals are unchanged), AND RECORDED ONCE PER EVENT: every
+                # event the fetch returned gets its row, refused with the
+                # confirmation's reason, so the rows still add up to
+                # `provider_events` and an event is never silently absent.
                 tally[conf["refusal"]] = tally.get(conf["refusal"], 0) + 1
                 _step_refuse(conf["refusal"])
+                _close_event()
+                for _k, _e in enumerate(got.get("events") or []):
+                    _e = _e if isinstance(_e, dict) else {}
+                    event_ledger.append({
+                        "sport_key": sport_key, "family": family,
+                        "queue_position": _k,
+                        "provider_event_id": _e.get("id"),
+                        "home": _e.get("home_team"),
+                        "away": _e.get("away_team"),
+                        "commence_time": _e.get("commence_time"),
+                        "global_slug": None, "us_market_slug": None,
+                        "stage": "3_IDENTITY",
+                        **_event_outcome([conf["refusal"]])})
                 continue
         received_at = got["received_at"]
-        step["provider_events"] = len(got["events"] or [])
 
         # HOW MANY EVENTS THIS FETCH HAS ALREADY SERVED. Counted per sport,
         # because `received_at` is stamped per fetch and the accumulated
@@ -5802,39 +5982,121 @@ async def cycle(conn) -> dict:
                 _step_refuse("NO_PINNACLE_ON_EVENT")
                 continue
             step["with_pinnacle_h2h"] += 1
+            # ── HOW OLD THE PRICE WAS WHEN WE REACHED IT, FOR EVERY EVENT ──
+            #
+            # THE GAP THIS CLOSES. The lag split was taken only for events that
+            # reached a decision (and, at lever A, for those skipped there), so
+            # an event refused at mapping or identity left no measurement: the
+            # cycle could not say whether its unmapped events were also stale
+            # ones, or whose time made them so. Every event with a Pinnacle
+            # price is measured here, on the row; lever A re-measures at its
+            # own instant for the events that get that far.
+            _pe = _quote_epoch(quote)
+            _first = arrival_split(_pe, received_at, time.time())
+            _event_fields(_first)
+            if _first["provider_lag_s"] is not None:
+                lat["arrival_lag_every_priced"].append(_first["provider_lag_s"])
+            if _first["our_processing_s"] is not None:
+                lat["arrival_ours_every_priced"].append(
+                    _first["our_processing_s"])
 
             # ── the venue contract, exactly or not at all ───────────
             mapped = vmap.map_event(home=quote["home"], away=quote["away"],
                                     markets=markets)
+            ident = None
             if not mapped["mapped"]:
-                for code in mapped["refusals"]:
-                    tally[code] = tally.get(code, 0) + 1
-                    _step_refuse(code)
-                continue
+                # ── THE VENUE'S OWN CATALOGUE, WHEN THE GLOBAL ONE HAS NO ROW ──
+                #
+                # `map_event` searches the GLOBAL catalogue. On 2026-09-29 at
+                # least eleven of twenty NO_VENUE_CONTRACT events were listed
+                # by the US venue itself on the same date, and the two MLB
+                # series games collided because the global match ignores
+                # dates. `bettor_venue_native_identity` asks the venue's own
+                # catalogue -- start time within its tolerance, both teams to
+                # distinct participants, exactly one event -- and on a match
+                # the candidate continues down THIS admission path with that
+                # identity. On a refusal the global refusal stays first and
+                # the venue-native refusal is counted beside it.
+                vn = None
+                if venue_native_may_replace(mapped["refusals"]):
+                    vn = await vnat.resolve_venue_native(
+                        conn, home=quote["home"], away=quote["away"],
+                        commence_time=quote.get("commence_time"),
+                        family=family, now=time.time(),
+                        competition=sport_key)
+                if vn is not None and vn.get("ok"):
+                    replaced = list(mapped["refusals"])
+                    mapped = venue_native_mapping(vn, replaced=replaced,
+                                                  global_mapped=mapped)
+                    ident = vn
+                    _venue_native_took_it(replaced)
+                else:
+                    for code in mapped["refusals"]:
+                        tally[code] = tally.get(code, 0) + 1
+                        _step_refuse(code)
+                    if vn is not None:
+                        code = vn.get("refusal") or vnat.R_NO_EVENT
+                        tally[code] = tally.get(code, 0) + 1
+                        _step_refuse(code)
+                    continue
+            else:
+                _event_fields({"mapped_by": vnat.MAPPED_BY_GLOBAL})
             step["mapped_to_a_venue_contract"] += 1
 
             # ── the venue's OWN contract, before any venue read ─────
             # Refusing here costs nothing: a fixture the venue's catalogue
             # does not carry cannot answer a book read, and asking anyway
             # spends a read the protected collector shares.
-            ident = await resolve_venue_identity(
-                conn, market_row=mapped["market_row"],
-                priced_outcome=quote["home"])
+            _vn_refusal = None
+            if ident is None:
+                ident = await resolve_venue_identity(
+                    conn, market_row=mapped["market_row"],
+                    priced_outcome=quote["home"])
+                if (not ident["ok"]
+                        and ident.get("refusal")
+                        in VENUE_NATIVE_MAY_REPLACE_IDENTITY):
+                    # THE GLOBAL ROW WAS FOUND AND THE US CROSSING FOUND
+                    # NOTHING. Only that refusal is offered to the venue's own
+                    # catalogue; a realism, intent or period refusal is a
+                    # finding about a contract that WAS found, and stands.
+                    vn = await vnat.resolve_venue_native(
+                        conn, home=quote["home"], away=quote["away"],
+                        commence_time=quote.get("commence_time"),
+                        family=family, now=time.time(),
+                        competition=sport_key)
+                    if vn.get("ok"):
+                        vn["global_identity_replaced"] = {
+                            k: ident.get(k) for k in (
+                                "refusal", "why", "global_slug",
+                                "condition_id", "resolver")}
+                        mapped = venue_native_mapping(
+                            vn, replaced=[R_NO_PREMAP], global_mapped=mapped)
+                        ident = vn
+                        _venue_native_took_it([R_NO_PREMAP])
+                    else:
+                        _vn_refusal = vn.get("refusal") or vnat.R_NO_EVENT
             if ident["ok"]:
                 # A CONTRACT WITH A RESOLVED VENUE IDENTITY is something the
                 # non-funded pair observer can start from, whatever this
                 # candidate's own fate below.
                 observable.append((ident.get("us_market_slug"),
                                    ident.get("intent")))
+                step["identity_resolved"] += 1
             if not ident["ok"]:
                 code = ident["refusal"] or R_NO_PREMAP
                 tally[code] = tally.get(code, 0) + 1
+                _step_refuse(code)
+                if _vn_refusal:
+                    # BOTH COUNTED, the crossing's refusal first.
+                    tally[_vn_refusal] = tally.get(_vn_refusal, 0) + 1
+                    _step_refuse(_vn_refusal)
                 _ledger({"global_slug": mapped.get("global_slug")
                          or (mapped.get("market_row") or {}).get("slug"),
                          "us_market_slug": ident.get("us_market_slug"),
                          "priced_outcome": quote.get("home"),
                          "stage": ext.STAGE_OF.get(code, "3_IDENTITY"),
                          "first_refusal": code,
+                         "venue_native_refusal": _vn_refusal,
                          "period_evidence": ident.get("period_evidence")})
                 key = (ident.get("global_slug"), code, ident.get("intent"))
                 if (key not in seen_venue_errors
@@ -5881,11 +6143,29 @@ async def cycle(conn) -> dict:
             # combined case is `skipped_stale_on_arrival`.
             _pe = _quote_epoch(quote)
             _arr = time.time()
+            _event_fields(arrival_split(_pe, received_at, _arr))
             if _pe is not None and (_arr - _pe) > PINNACLE_MAX_AGE_S:
                 lat["skipped_stale_on_arrival"] += 1
                 if (received_at is not None
                         and (float(received_at) - _pe) > PINNACLE_MAX_AGE_S):
                     lat["provider_stale_on_arrival"] += 1
+                elif received_at is not None:
+                    # OURS, BY NAME. The provider handed this price over
+                    # INSIDE the limit and our own accumulated processing
+                    # took it past. It used to be derivable only as
+                    # skipped - provider_stale, which also swept in the
+                    # events whose receipt stamp was missing.
+                    lat["stale_on_arrival_due_to_our_processing"] += 1
+                # THE SKIPPED EVENT'S CLOCKS JOIN THE CYCLE'S FIGURES. The
+                # medians sampled evaluated candidates only, so the events
+                # most likely to be stale were the ones left out of the
+                # measurement of staleness.
+                if received_at is not None:
+                    lat["provider_lag_samples"].append(
+                        float(received_at) - _pe)
+                    lat["our_delay_samples"].append(_arr - float(received_at))
+                lat["age_samples"].append(_arr - _pe)
+                lat["arrival_skip_samples"] += 1
                 code = R_QUOTE_STALE_ON_ARRIVAL
                 tally[code] = tally.get(code, 0) + 1
                 _step_refuse(code)
@@ -6167,8 +6447,11 @@ async def cycle(conn) -> dict:
                 # the other, which is why the basis can say BOTH.
                 "condition_id": mapped["condition_id"],
                 "us_market_slug": ident["us_market_slug"],
+                # A VENUE-NATIVE IDENTITY HAS NO GLOBAL ID and says so
+                # (VENUE_NATIVE_US_SLUG); it never borrows the global row's.
                 "contract_identity_basis":
-                    "BOTH_PRESENT_AND_INDEPENDENTLY_SOURCED",
+                    ident.get("contract_identity_basis")
+                    or "BOTH_PRESENT_AND_INDEPENDENTLY_SOURCED",
                 "identity_resolver": ident["resolver"],
                 "buy_intent": ident["intent"],
                 "selection": quote["home"],
@@ -6264,6 +6547,7 @@ async def cycle(conn) -> dict:
                     # provider's `event_id` against it would never match, so the
                     # event rail would still read zero on a repaired query.
                     event_key=ident.get("venue_event_key"),
+                    venue_market_slug=ident.get("us_market_slug"),
                     provider_event_id=quote["event_id"],
                     open_book=open_book,
                     event_exposure_measurable=_ev_measurable,
@@ -6484,6 +6768,8 @@ async def cycle(conn) -> dict:
                         if open_book is not None:
                             open_book.append({
                                 "condition_id": mapped["condition_id"],
+                                "venue_market_slug":
+                                    ident.get("us_market_slug"),
                                 "event_key": quote["event_id"],
                                 "cost_usd": acct.get("cost_basis_usd"),
                                 "qty": acct.get("filled_qty"),
@@ -6565,7 +6851,26 @@ async def cycle(conn) -> dict:
                "stale_refusals": lat["stale_refusals"],
                "self_inflicted_stale": lat["self_inflicted_stale"],
                "provider_stale_on_arrival": lat["provider_stale_on_arrival"],
+               # THE OTHER HALF OF THE SKIPS, BY NAME: the provider was inside
+               # the limit and our own processing took the price past it.
+               "stale_on_arrival_due_to_our_processing":
+                   lat["stale_on_arrival_due_to_our_processing"],
                "skipped_stale_on_arrival": lat["skipped_stale_on_arrival"],
+               # `samples` now includes the events lever A skipped (their
+               # clocks at the skip instant); this many of them.
+               "samples_from_arrival_skips": lat["arrival_skip_samples"],
+               # AND FOR EVERY EVENT THAT HAD A PINNACLE PRICE, measured when
+               # the cycle reached it -- including the events refused at
+               # mapping or identity, which the figures above never saw.
+               "on_arrival_every_priced_event": {
+                   "events": len(lat["arrival_lag_every_priced"]),
+                   "provider_lag_s": _median(lat["arrival_lag_every_priced"]),
+                   "provider_lag_max_s": _maxof(
+                       lat["arrival_lag_every_priced"]),
+                   "our_processing_s": _median(
+                       lat["arrival_ours_every_priced"]),
+                   "our_processing_max_s": _maxof(
+                       lat["arrival_ours_every_priced"])},
                "deduplicated_requests": lat["deduplicated_requests"],
                "venue_requests": lat["venue_requests"],
                # WHAT WAS NOT EXAMINED, so throughput cannot be confused
@@ -7180,7 +7485,13 @@ def _freshness_digest(out: dict) -> dict | None:
             "stale_refusals": lat.get("stale_refusals"),
             "self_inflicted_stale": lat.get("self_inflicted_stale"),
             "provider_stale_on_arrival": lat.get("provider_stale_on_arrival"),
+            "stale_on_arrival_due_to_our_processing": lat.get(
+                "stale_on_arrival_due_to_our_processing"),
             "skipped_stale_on_arrival": lat.get("skipped_stale_on_arrival"),
+            "samples_from_arrival_skips": lat.get(
+                "samples_from_arrival_skips"),
+            "on_arrival_every_priced_event": lat.get(
+                "on_arrival_every_priced_event"),
             "deduplicated_requests": lat.get("deduplicated_requests"),
             "venue_requests": lat.get("venue_requests"),
             # DEFERRALS REACH THE OPERATOR SURFACE TOO. A count and a
