@@ -30,6 +30,20 @@ tests/test_acquisition_ladder_is_side_aware.py
 tests/test_admission_control.py
 tests/test_admission_fractional.py
 tests/test_admission_policies.py
+# (1002) agent concurrency: discovery, management, chat and learning keep one execution authority (proof 23)
+tests/test_agent_concurrency_keeps_one_execution_authority.py
+# (1002) agent registry: identities, permissions, heartbeats, tasks, policy versions, read API
+tests/test_agent_core_registry.py
+# (1002) entry-side shutdown (Derek gate binding) preserves exits and recovery (proof 12)
+tests/test_agent_entry_shutdown_preserves_exits_and_recovery.py
+# (1002) the Derek->Xavier handoff transfers only confirmed filled quantity (proof 3)
+tests/test_agent_handoff_transfers_only_confirmed_fills.py
+# (1002) failing agent hooks leave management, recovery and settlement running (proof 21)
+tests/test_agent_hook_failures_leave_deterministic_work_running.py
+# (1002) lost acknowledgements and restarts create no duplicate orders (proof 11)
+tests/test_agent_lost_acks_and_restarts_create_no_duplicate_orders.py
+# (1002) failed records, duplicate claims, stale plans, changed inventory stop the send (proof 10)
+tests/test_agent_sends_stop_on_failed_records_and_stale_plans.py
 tests/test_an_action_is_valued_only_on_depth_its_limit_can_reach.py
 tests/test_an_autonomous_entry_is_not_counted_twice.py
 tests/test_an_indirect_pair_is_valued_on_the_outcomes.py
