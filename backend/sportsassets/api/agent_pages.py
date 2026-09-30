@@ -68,7 +68,19 @@ ENDPOINTS = {
     "characters": "/api/command/agents/static/cc_characters.js",
     "avatar": "/api/command/agents/static/cc_avatar.js",
     "labels": "/api/command/agents/labels",
+    # the paper session (served by the paper-session change; 404 here until
+    # it is merged, and the pages say so): see agent_cc_page.PAPER_CONTRACT
+    "paper_account": "/api/command/paper/account",
+    "paper_stream": "/api/command/paper/stream",
+    "paper_ledger": "/api/command/paper/ledger",
 }
+for _agent, _secs in (("derek", ("opportunities", "orders", "fills", "handoffs")),
+                      ("xavier", ("inventory", "standing-orders", "recommendations",
+                                  "outcome-pnl")),
+                      ("audrey", ("portfolio", "daily-report", "audits",
+                                  "improvements"))):
+    for _s in _secs:
+        ENDPOINTS["paper_%s_%s" % (_agent, _s)] = "/api/command/paper/%s/%s" % (_agent, _s)
 
 REQUIRED_SECTIONS = {
     "derek": ("status", "versions", "coverage", "subscription",
@@ -1791,9 +1803,11 @@ _CC_SHELL = r"""<!doctype html>
 <nav class="cc-sub" aria-label="More"><a href="/api/command/agents/page">All agents</a><a href="/api/command/agents/demo/page">Product demo</a></nav>
 <div class="meta"><span class="ro">READ-ONLY</span><span id="readat">reading&#8230;</span><button id="trace-btn" type="button">Trace</button><button id="refresh" type="button">Refresh</button></div></header>
 <main id="cc-main" tabindex="-1">
+<div class="cc-paper-banner" id="paper-banner" data-state="READING" role="status" aria-live="polite">Reading the paper session&#8230;</div>
 <div class="cc-banner" role="alert" id="cc-banner">%%BANNER%%</div>
 <div class="cc-hero">%%STAGE%%%%BRIEF%%</div>
 %%PANELS%%
+%%PAPER%%
 <section class="card wide" id="trace" hidden aria-label="Trace linked records" style="margin-top:16px"><header><span class="idx">&#8594;</span><div class="ttl"><h3>Trace linked records</h3><code class="key">entry decision &#8594; handoff &#8594; Xavier decisions &#8594; audit &#8594; directive &#8594; task &#8594; candidate</code></div><button id="trace-close" type="button">Close</button></header>
 <p class="note">Follows the ids the records carry (entry_intent_id, portfolio_group_id, xavier_decision_id, directive_id, task_id, candidate_id, and evidence references) across the four same-origin reads. Every step says what linked it.</p><div id="trace-body"></div></section>
 <h2 class="cc-h2" id="full-record">Full workspace record</h2>
@@ -1811,9 +1825,12 @@ def _cc_page_html(kind: str) -> str:
               "var E = AG.ENDPOINTS,",
               "var E = Object.assign({}, AG.ENDPOINTS, %s)," % _cc_endpoints_js(),
               1)
+          + CCP.PAPER_CORE_JS + CCP.PAPER_BOOT_JS.replace(
+              "%%PAPER_EP%%", _json_ep(("paper_account", "paper_stream", "paper_ledger")))
           + BOOT_JS)
     chat = CCP.chat_panel_html(CHAT_PANEL_HTML) if kind == "audrey" else ""
-    return (_CC_SHELL.replace("%%CSS%%", BASE_CSS + CCP.CC_CSS)
+    return (_CC_SHELL.replace("%%CSS%%", BASE_CSS + CCP.CC_CSS + CCP.PAPER_CSS)
+            .replace("%%PAPER%%", CCP.paper_html(kind))
             .replace("%%JS%%", js)
             .replace("%%FRAMED%%", CCP.FRAMED_JS)
             .replace("%%LOADER%%", CCP.LOADER_JS.replace(
@@ -1830,6 +1847,11 @@ def _cc_page_html(kind: str) -> str:
             .replace("%%ROLE%%", CCP.CC_META[kind]["role"].replace("&", "&amp;"))
             .replace("%%DESC%%", _DESCS[kind])
             .replace("%%KIND%%", kind))
+
+
+def _json_ep(keys) -> str:
+    import json as _json
+    return _json.dumps({k: ENDPOINTS[k] for k in keys}).replace('"', "'")
 
 
 def _cc_endpoints_js() -> str:
@@ -1866,7 +1888,7 @@ def render_js(kind: str) -> str:
     from . import agent_cc_page as CCP
     return CORE_JS + COMMON_JS + TRACE_JS + {"index": INDEX_JS, "derek": DEREK_JS,
                                   "xavier": XAVIER_JS, "audrey": AUDREY_JS}[kind] + (
-        CCP.CC_CORE_JS if kind in ("derek", "xavier", "audrey") else "")
+        CCP.CC_CORE_JS + CCP.PAPER_CORE_JS if kind in ("derek", "xavier", "audrey") else "")
 
 
 LOCKED_PAGE_HTML = r"""<!doctype html>

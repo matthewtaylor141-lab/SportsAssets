@@ -1139,3 +1139,255 @@ FRAMED_JS = r"""
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', retarget); else retarget();
 })();
 """
+
+# ════════════════════════════════════════════════════════════════════
+# THE PAPER SESSION (live market data, SIMULATED execution)
+#
+# The routes are served by the paper-session change on another branch; this
+# is the contract these pages render against. Until a route exists here it
+# answers 404 and the section says UNAVAILABLE by name. No figure is ever
+# drawn that the server did not send: not the starting bankroll, not a
+# balance, not an intermediate value between two committed events.
+# ════════════════════════════════════════════════════════════════════
+PAPER_BASE = "/api/command/paper"
+PAPER_ACCOUNT_FIELDS = (
+    ("cash_usd", "Cash"), ("reserved_cash_usd", "Reserved cash"),
+    ("available_cash_usd", "Available cash"),
+    ("open_position_value_usd", "Open-position value"),
+    ("total_equity_usd", "Total equity"),
+    ("realized_pnl_usd", "Realized P&L"), ("unrealized_pnl_usd", "Unrealized P&L"))
+LEDGER_TYPES = ("INITIAL_FUNDING", "ORDER_SUBMITTED", "FILL", "CANCEL", "SALE",
+                "SETTLEMENT", "CORRECTION")
+PAPER_CONTRACT = {
+    "GET /api/command/paper/account": {
+        "session": {"active": "bool", "reason": "str|null (why not running)",
+                    "starting_bankroll_usd": "number (shown only as sent)",
+                    "started_at": "ISO time", "heartbeat_at": "ISO time"},
+        "account": {k: "number (USD)" for k, _ in PAPER_ACCOUNT_FIELDS},
+        "marks": {"status": "CURRENT|STALE|UNAVAILABLE", "as_of": "ISO time",
+                  "stale_positions": "int", "unavailable_positions": "int",
+                  "why": "str|null"},
+        "updated_at": "ISO time of the last committed change",
+        "last_event_id": "the stream id the snapshot is current to",
+        "rules": ("total_equity_usd = cash_usd + open_position_value_usd; "
+                  "reserved_cash_usd is part of cash_usd; the page checks and "
+                  "shows whether the sent figures reconcile, never recomputes")},
+    "GET /api/command/paper/stream": {
+        "transport": "text/event-stream, same origin, COMMAND cookie",
+        "events": {"account": "the account snapshot above",
+                   "ledger": "one ledger entry (below)"},
+        "id": "monotonic event id; recovery by the Last-Event-ID header, or "
+              "?last_event_id=<id> on a manual reconnect"},
+    "GET /api/command/paper/ledger?limit=": {
+        "entries": [{"entry_id": "str", "at": "ISO time",
+                     "type": "|".join(LEDGER_TYPES),
+                     "instrument": {"market_slug": "str|null",
+                                    "intent": "ORDER_INTENT_BUY_LONG|..._SHORT|null"},
+                     "amount_usd": "signed number",
+                     "balance_after_usd": "number (cash after this entry)"}]},
+    "GET /api/command/paper/derek/{opportunities,orders,fills,handoffs}": {
+        "status": "OK|EMPTY|UNAVAILABLE", "why": "str|null", "rows": "[...]"},
+    "GET /api/command/paper/xavier/{inventory,standing-orders,recommendations,outcome-pnl}": {
+        "status": "OK|EMPTY|UNAVAILABLE", "why": "str|null", "rows": "[...]",
+        "rule": "outcome-pnl payoff floors are never realized P&L"},
+    "GET /api/command/paper/audrey/{portfolio,daily-report,audits,improvements}": {
+        "status": "OK|EMPTY|UNAVAILABLE", "why": "str|null", "rows": "[...]"},
+}
+PAPER_SECTIONS = {
+    "derek": (("opportunities", "Paper opportunities"), ("orders", "Paper orders"),
+              ("fills", "Paper fills"), ("handoffs", "Paper handoffs to Xavier")),
+    "xavier": (("inventory", "Managed paper inventory"),
+               ("standing-orders", "Standing paper orders"),
+               ("recommendations", "Live recommendations (paper)"),
+               ("outcome-pnl", "Outcome-dependent P&L (paper)")),
+    "audrey": (("portfolio", "Reconciled paper portfolio"),
+               ("daily-report", "Paper daily report"),
+               ("audits", "Paper audits"), ("improvements", "Paper improvements")),
+}
+PAPER_UNAVAILABLE = "paper account routes not in this build"
+PAPER_SECTION_UNAVAILABLE = "paper session routes not in this build"
+
+#: VOICE (design only, not built in this release): each agent's future voice
+#: is a profile handed to a TTS or recorded-audio pipeline, which drives the
+#: mouth through the existing 'cc:speech' hook (amplitude or visemes). Voices
+#: must be original or properly licensed adult voices, non-explicit.
+VOICE_PROFILES = {
+    "derek": {"character": "bright, analytical, a little nerdy", "pace": "quick"},
+    "xavier": {"character": "deep and composed", "pace": "measured"},
+    "audrey": {"character": "warm and glamorous", "pace": "unhurried"},
+}
+
+PAPER_CSS = r"""
+.cc-paper-banner{margin:0 0 14px;padding:10px 14px;border-radius:12px;font:700 12.5px/1.4 var(--mono);letter-spacing:.08em;border:1px dashed var(--line-2);color:var(--ink-2);background:var(--panel)}
+.cc-paper-banner[data-state=ACTIVE]{border:1px solid #58a6ff;color:#cfe3ff;background:linear-gradient(90deg,rgba(88,166,255,.16),rgba(88,166,255,.04))}
+.cc-paper-banner[data-state=OFF]{border-color:var(--warn);color:var(--warn)}
+.cc-paper-banner[data-state=UNAVAILABLE]{border-color:var(--bad);color:var(--bad)}
+.cc-p.paper{border-style:dashed;border-color:#3a5a86;background:repeating-linear-gradient(135deg,rgba(88,166,255,.035) 0 12px,transparent 12px 24px),var(--panel)}
+.sim{display:inline-block;font:700 9.5px/1 var(--mono);letter-spacing:.1em;color:#9fc6ff;border:1px solid #3a6aa8;border-radius:4px;padding:3px 5px;margin-left:6px;vertical-align:middle}
+.pfig{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:1px;background:var(--line);border:1px solid var(--line);border-radius:12px;overflow:hidden}
+.pfig>div{background:var(--panel);padding:10px 12px;min-width:0}.pfig .v{font:600 18px/1.25 var(--display);margin-top:4px;overflow-wrap:anywhere}
+.pfig .v.flash{animation:pflash 1.2s ease-out 1}
+@keyframes pflash{0%{background:rgba(88,166,255,.35)}100%{background:transparent}}
+.pconn{font:650 11px/1 var(--mono);letter-spacing:.08em;padding:4px 7px;border-radius:6px;border:1px solid currentColor}
+.pconn[data-conn=LIVE]{color:var(--ok)}.pconn[data-conn=RECONNECTING]{color:var(--warn)}.pconn[data-conn=DISCONNECTED],.pconn[data-conn=UNAVAILABLE]{color:var(--bad)}
+.pmarks{font:12px/1.4 var(--mono);color:var(--ink-2);margin:8px 0}.pmarks b.STALE,.pmarks b.UNAVAILABLE{color:var(--warn)}
+tr.pnew td{animation:pflash 1.2s ease-out 1}
+@media (max-width:1000px){.pfig{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (prefers-reduced-motion:reduce){.pfig .v.flash,tr.pnew td{animation:none}}
+"""
+
+
+def paper_html(kind: str) -> str:
+    """The shared paper account panel and this agent's paper sections."""
+    acct = ('<section class="cc-p paper" id="p-paper-account" data-status="READING" '
+            'aria-labelledby="p-paper-account-h"><header><h2 id="p-paper-account-h">'
+            'Paper account <span class="sim">LIVE MARKET DATA · SIMULATED EXECUTION'
+            '</span></h2><span class="pill st-MISSING" data-pill>READING</span>'
+            '<span class="pconn" id="paper-conn" data-conn="UNAVAILABLE">NOT CONNECTED'
+            '</span><span class="src">GET /api/command/paper/account &#183; '
+            'stream /api/command/paper/stream &#183; simulated figures, never summed '
+            'with the funded book</span></header><div data-body><p class="boot">'
+            'Reading&#8230;</p></div></section>')
+    secs = "".join(
+        '<section class="cc-p paper half" id="p-paper-%s" data-status="READING" '
+        'data-paper-route="%s/%s/%s" aria-labelledby="p-paper-%s-h"><header><h2 '
+        'id="p-paper-%s-h">%s <span class="sim">SIMULATED</span></h2><span '
+        'class="pill st-MISSING" data-pill>READING</span><span class="src">GET '
+        '%s/%s/%s</span></header><div data-body><p class="boot">Reading&#8230;</p>'
+        '</div></section>' % (key, PAPER_BASE, kind, key, key, key, _html.escape(t),
+                              PAPER_BASE, kind, key)
+        for key, t in PAPER_SECTIONS[kind])
+    return ('<h2 class="cc-h2" id="paper">Paper session <span class="sim">'
+            'SIMULATED</span></h2><div class="cc-panels" id="cc-paper" '
+            'data-cc-paper>%s%s</div>' % (acct, secs))
+
+PAPER_CORE_JS = r"""
+(function (AG, CC) {
+  'use strict';
+  var esc = AG.esc, isObj = AG.isObj;
+  var FIELDS = [['cash_usd', 'Cash'], ['reserved_cash_usd', 'Reserved cash'], ['available_cash_usd', 'Available cash'],
+    ['open_position_value_usd', 'Open-position value'], ['total_equity_usd', 'Total equity'],
+    ['realized_pnl_usd', 'Realized P&L'], ['unrealized_pnl_usd', 'Unrealized P&L']];
+  var UNAV = 'paper account routes not in this build', SECT_UNAV = 'paper session routes not in this build';
+  var SIM = '<span class="sim">SIMULATED</span>';
+  function num(v) { return typeof v === 'number' && isFinite(v); }
+  function nyTime(v) {
+    var e = AG.toEpoch(v); if (e === null) return null;
+    try { return new Intl.DateTimeFormat('en-US', {timeZone: 'America/New_York', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false}).format(new Date(e * 1000)) + ' ET'; }
+    catch (_) { return new Date(e * 1000).toISOString(); }
+  }
+  // THE BANNER: the starting bankroll only as the server sent it; never while off
+  function banner(o) {
+    if (!o || o.kind === 'NOT_DEPLOYED') return {state: 'UNAVAILABLE', text: 'PAPER SESSION NOT RUNNING — ' + UNAV};
+    if (o.kind !== 'OK') return {state: 'UNAVAILABLE', text: 'PAPER SESSION NOT RUNNING — the paper account read failed (' + (o.why || o.kind) + ')'};
+    var s = isObj(o.json) && isObj(o.json.session) ? o.json.session : null;
+    if (!s || s.active !== true) return {state: 'OFF', text: 'PAPER SESSION NOT RUNNING — ' + ((s && s.reason) || 'the server reports no active session and gave no reason')};
+    var bank = num(s.starting_bankroll_usd) ? ' · ' + CC.usd(s.starting_bankroll_usd).replace(/\.00$/, '') + ' STARTING BANKROLL' : ' · STARTING BANKROLL NOT SENT';
+    return {state: 'ACTIVE', text: 'LIVE MARKET DATA · SIMULATED EXECUTION' + bank};
+  }
+  // THE ACCOUNT: the seven figures exactly as sent; the page only checks them
+  function account(j, prev) {
+    if (!isObj(j)) return {status: 'UNAVAILABLE', html: CC.unavLine('no response'), changed: []};
+    var a = isObj(j.account) ? j.account : {}, p = isObj(prev) ? prev : {}, changed = [];
+    var figs = FIELDS.map(function (f) {
+      var v = a[f[0]], was = p[f[0]];
+      var ch = num(v) && num(was) && v !== was; if (ch) changed.push(f[0]);
+      var shown = num(v) ? (/pnl/.test(f[0]) ? CC.usdS(v) : CC.usd(v)) : CC.nr('not sent by the server');
+      return '<div data-fig="' + f[0] + '"><div class="lbl">' + esc(f[1]) + SIM + '</div><div class="v' + (ch ? ' flash' : '') + '">' + shown + '</div></div>';
+    }).join('');
+    var m = isObj(j.marks) ? j.marks : null;
+    var marks = m ? '<p class="pmarks">Marks: <b class="' + esc(m.status) + '">' + esc(m.status || 'NOT REPORTED') + '</b>' + (m.as_of ? ' as of ' + AG.ts(m.as_of) : '') + (num(m.stale_positions) && m.stale_positions ? ' · ' + m.stale_positions + ' stale position mark(s)' : '') + (num(m.unavailable_positions) && m.unavailable_positions ? ' · ' + m.unavailable_positions + ' position(s) with no mark' : '') + (m.why ? ' — ' + esc(m.why) : '') + '</p>'
+                 : '<p class="pmarks"><b class="UNAVAILABLE">MARK STATUS NOT REPORTED</b> — open-position value cannot be read as current</p>';
+    var rec = '';
+    if (num(a.total_equity_usd) && num(a.cash_usd) && num(a.open_position_value_usd)) {
+      var ok = Math.abs(a.cash_usd + a.open_position_value_usd - a.total_equity_usd) <= 0.01;
+      rec = '<p class="note">' + (ok ? 'Reconciles: cash + open-position value = total equity (reserved cash is part of cash).' : '<b class="neg">DOES NOT RECONCILE</b>: cash + open-position value ≠ total equity as sent. Shown as sent; nothing recomputed.') + '</p>';
+    }
+    var upd = '<p class="note">Last updated ' + (j.updated_at ? AG.ts(j.updated_at) + ' (' + esc(nyTime(j.updated_at)) + ')' : CC.nr('the server sent no update time')) + (isObj(j.session) && j.session.heartbeat_at ? ' · session heartbeat ' + AG.ts(j.session.heartbeat_at) : '') + '. LIVE MARKET DATA · SIMULATED EXECUTION — never summed with the funded book.</p>';
+    return {status: 'OK', html: '<div class="pfig">' + figs + '</div>' + marks + rec + upd, changed: changed, values: a};
+  }
+  function ledgerRow(e, fresh) {
+    e = isObj(e) ? e : {};
+    var ins = isObj(e.instrument) ? e.instrument : {};
+    var item = ins.market_slug ? 'slug:' + ins.market_slug + '|' + (ins.intent || '') : null;
+    return '<tr' + (fresh ? ' class="pnew"' : '') + ' data-entry="' + esc(e.entry_id || '') + '"><td>' + (nyTime(e.at) ? esc(nyTime(e.at)) : CC.nr('no time')) + '</td><td class="mono">' + esc(e.type || '?') + (e.type === 'ORDER_SUBMITTED' ? ' <span class="mute">reserve</span>' : e.type === 'CANCEL' ? ' <span class="mute">release</span>' : '') + '</td>'
+      + '<td>' + (item ? CC.labelSlot(item, [['market slug', ins.market_slug], ['order intent', ins.intent], ['entry id', e.entry_id]]) : '<span class="mute">—</span>') + '</td>'
+      + '<td class="num">' + (num(e.amount_usd) ? CC.usdS(e.amount_usd) : CC.nr('not sent')) + SIM + '</td><td class="num">' + (num(e.balance_after_usd) ? CC.usd(e.balance_after_usd) : CC.nr('not sent')) + '</td></tr>';
+  }
+  function ledger(entries) {
+    var rows = Array.isArray(entries) ? entries : [];
+    return '<p class="lbl" style="margin:12px 0 6px">Ledger (America/New_York) ' + SIM + '</p><div class="tbl"><table><thead><tr><th>time</th><th>type</th><th>instrument</th><th class="num">amount</th><th class="num">balance after</th></tr></thead><tbody id="paper-ledger">'
+      + (rows.length ? rows.map(function (e) { return ledgerRow(e, false); }).join('') : '<tr><td colspan="5" class="mute">No ledger entry has been sent.</td></tr>') + '</tbody></table></div>';
+  }
+  function section(key, o) {
+    if (!o || o.kind === 'NOT_DEPLOYED') return {status: 'UNAVAILABLE', html: '<div class="plain"><p class="big">UNAVAILABLE · ' + SECT_UNAV + '</p><p class="mute">No simulated figure is shown because none can be read here.</p></div>'};
+    if (o.kind !== 'OK') return {status: 'UNAVAILABLE', html: AG.gate(o, '')};
+    var j = o.json || {};
+    if (j.status === 'UNAVAILABLE') return {status: 'UNAVAILABLE', html: CC.unavLine(j.why)};
+    var rows = Array.isArray(j.rows) ? j.rows : [];
+    if (!rows.length) return {status: 'EMPTY', html: CC.emptyLine(j.why)};
+    var note = key === 'outcome-pnl' ? '<p class="note"><b>Payoff floors are outcome-dependent, never realized P&amp;L.</b> Realized P&amp;L is only in the paper account above.</p>' : '';
+    return {status: 'OK', html: note + '<p class="note">' + SIM + ' figures from the paper session.</p>' + AG.table(rows, null, {rd: AG.toEpoch(j.read_at)})};
+  }
+  CC.paper = {FIELDS: FIELDS, UNAV: UNAV, SECT_UNAV: SECT_UNAV, banner: banner, account: account, ledger: ledger, ledgerRow: ledgerRow, section: section, nyTime: nyTime};
+})(AG, CC);
+"""
+
+PAPER_BOOT_JS = r"""
+(function (AG, CC) {
+  'use strict';
+  var E = Object.assign({}, AG.ENDPOINTS, %%PAPER_EP%%), F = fetch.bind(window);
+  var $ = function (id) { return document.getElementById(id); };
+  var st = {vals: null, es: null, lastId: null, retry: 0, timer: null};
+  function setPanel(id, status, html) {
+    var p = $(id); if (!p) return;
+    p.setAttribute('data-status', status);
+    var pl = p.querySelector('[data-pill]'); if (pl) pl.outerHTML = CC.pill(status);
+    var b = p.querySelector('[data-body]'); if (b) { b.innerHTML = html; if (CC.labelize) CC.labelize(b); }
+  }
+  function setBanner(o) { var b = CC.paper.banner(o), el = $('paper-banner'); if (el) { el.setAttribute('data-state', b.state); el.textContent = b.text; } }
+  function conn(state) { var el = $('paper-conn'); if (!el) return; el.setAttribute('data-conn', state); el.textContent = state + ' · ' + new Date().toISOString().slice(11, 19) + 'Z'; }
+  function renderAccount(j, entries) {
+    var r = CC.paper.account(j, st.vals); st.vals = r.values || st.vals;
+    var keep = $('paper-ledger') ? $('paper-ledger').innerHTML : null;
+    setPanel('p-paper-account', r.status, r.html + CC.paper.ledger(entries || []));
+    if (keep !== null && !entries && $('paper-ledger')) $('paper-ledger').innerHTML = keep;
+  }
+  function stream() {
+    if (!window.EventSource) { conn('DISCONNECTED'); return; }
+    var url = E.paper_stream + (st.lastId ? '?last_event_id=' + encodeURIComponent(st.lastId) : '');
+    var es = st.es = new EventSource(url);
+    es.onopen = function () { st.retry = 0; conn('LIVE'); };
+    es.addEventListener('account', function (ev) { st.lastId = ev.lastEventId || st.lastId; try { var j = JSON.parse(ev.data); setBanner({kind: 'OK', json: j}); renderAccount(j, null); } catch (_) {} });
+    es.addEventListener('ledger', function (ev) {
+      st.lastId = ev.lastEventId || st.lastId;
+      try { var e = JSON.parse(ev.data), tb = $('paper-ledger'); if (tb) { if (tb.querySelector('td[colspan]')) tb.innerHTML = ''; tb.insertAdjacentHTML('afterbegin', CC.paper.ledgerRow(e, true)); if (CC.labelize) CC.labelize(tb); } } catch (_) {}
+    });
+    es.onerror = function () {
+      if (es.readyState === 2) {                // closed: reconnect ourselves, resuming from the last id
+        conn('DISCONNECTED'); es.close();
+        clearTimeout(st.timer); st.timer = setTimeout(function () { conn('RECONNECTING'); stream(); }, Math.min(30000, 1000 * Math.pow(2, st.retry++)));
+      } else conn('RECONNECTING');               // the browser retries with Last-Event-ID
+    };
+  }
+  async function load() {
+    var o = await AG.load(E.paper_account, F);
+    setBanner(o);
+    if (o.kind !== 'OK') {
+      conn(o.kind === 'NOT_DEPLOYED' ? 'UNAVAILABLE' : 'DISCONNECTED');
+      setPanel('p-paper-account', 'UNAVAILABLE', o.kind === 'NOT_DEPLOYED' ? '<div class="plain"><p class="big">UNAVAILABLE · ' + CC.paper.UNAV + '</p><p class="mute">No paper figure is shown: none was sent. This is not a zero balance.</p></div>' : AG.gate(o, E.paper_account));
+    } else {
+      st.lastId = o.json.last_event_id || null;
+      var l = await AG.load(E.paper_ledger + '?limit=50', F);
+      renderAccount(o.json, l.kind === 'OK' ? (l.json.entries || []) : []);
+      if (!st.es) stream();
+    }
+    [].forEach.call(document.querySelectorAll('[data-paper-route]'), async function (p) {
+      var r = await AG.load(p.getAttribute('data-paper-route'), F);
+      var s = CC.paper.section(p.id.replace('p-paper-', ''), r); setPanel(p.id, s.status, s.html);
+    });
+  }
+  load();
+  setInterval(function () { if (!document.hidden && !st.es) load(); }, 60000);
+})(AG, CC);
+"""

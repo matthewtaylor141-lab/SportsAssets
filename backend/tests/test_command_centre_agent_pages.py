@@ -1199,3 +1199,103 @@ def test_the_candidate_is_labelled_and_credited_on_the_derek_page(monkeypatch):
     for k in ("xavier", "audrey"):
         h = c.get(P.PAGE_PATHS[k], headers={"X-Admin-Token": _Cfg.admin_token}).text
         assert "Rocketbox" not in h and CCP.PLACEHOLDER_TAG in h
+
+
+# ═════════════════════════════════════════════════════════════════════
+# THE PAPER SESSION: LIVE MARKET DATA, SIMULATED EXECUTION
+# ═════════════════════════════════════════════════════════════════════
+
+ACCT = {"session": {"active": True, "reason": None, "starting_bankroll_usd": 500000,
+                    "started_at": "2026-09-30T13:30:00Z", "heartbeat_at": "2026-09-30T21:00:00Z"},
+        "account": {"cash_usd": 498000.0, "reserved_cash_usd": 1000.0, "available_cash_usd": 497000.0,
+                    "open_position_value_usd": 2100.0, "total_equity_usd": 500100.0,
+                    "realized_pnl_usd": 0.0, "unrealized_pnl_usd": 100.0},
+        "marks": {"status": "STALE", "as_of": "2026-09-30T20:59:00Z", "stale_positions": 1,
+                  "unavailable_positions": 0, "why": "one book older than 30 s"},
+        "updated_at": "2026-09-30T21:00:01Z", "last_event_id": "42"}
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_every_page_carries_the_same_paper_account_and_its_own_sections(monkeypatch, kind):
+    c, _ = _client(monkeypatch)
+    html = c.get(P.PAGE_PATHS[kind], headers={"X-Admin-Token": _Cfg.admin_token}).text
+    assert 'id="paper-banner" data-state="READING"' in html and 'id="p-paper-account"' in html
+    assert "LIVE MARKET DATA · SIMULATED EXECUTION" in html
+    for key, _t in CCP.PAPER_SECTIONS[kind]:
+        assert 'data-paper-route="/api/command/paper/%s/%s"' % (kind, key) in html
+    # no figure the server did not send: not even the starting bankroll
+    assert "500,000" not in html and "500000" not in html
+    assert "new EventSource(url)" in html and "?last_event_id=" in html
+    for s in ("LIVE", "RECONNECTING", "DISCONNECTED"):
+        assert "conn('%s')" % s in html
+
+
+def test_the_paper_banner_is_shown_only_for_an_active_session():
+    got = _node("derek", """
+      var acct = %s;
+      var off = JSON.parse(JSON.stringify(acct)); off.session = {active: false, reason: 'market closed'};
+      var nob = JSON.parse(JSON.stringify(acct)); delete nob.session.starting_bankroll_usd;
+      return [CC.paper.banner({kind: 'OK', json: acct}), CC.paper.banner({kind: 'OK', json: off}),
+              CC.paper.banner({kind: 'NOT_DEPLOYED'}), CC.paper.banner({kind: 'UNAVAILABLE', why: 'HTTP 503'}),
+              CC.paper.banner({kind: 'OK', json: nob}), CC.paper.banner({kind: 'OK', json: {}})];
+    """ % json.dumps(ACCT))
+    assert got[0] == {"state": "ACTIVE", "text": "LIVE MARKET DATA · SIMULATED EXECUTION · $500,000 STARTING BANKROLL"}
+    assert got[1] == {"state": "OFF", "text": "PAPER SESSION NOT RUNNING — market closed"}
+    assert got[2]["text"] == "PAPER SESSION NOT RUNNING — paper account routes not in this build"
+    assert got[3]["state"] == "UNAVAILABLE" and "HTTP 503" in got[3]["text"]
+    assert "STARTING BANKROLL NOT SENT" in got[4]["text"] and "$" not in got[4]["text"]
+    assert got[5]["state"] == "OFF" and "LIVE MARKET DATA" not in got[5]["text"]
+
+
+def test_the_account_shows_the_seven_figures_as_sent_and_flags_what_is_stale():
+    got = _node("audrey", """
+      var a = %s;
+      var first = CC.paper.account(a, null);
+      var same = CC.paper.account(a, first.values);
+      var b = JSON.parse(JSON.stringify(a)); b.account.cash_usd = 497500; b.account.total_equity_usd = 499600; b.account.open_position_value_usd = 2100;
+      var moved = CC.paper.account(b, first.values);
+      var broken = JSON.parse(JSON.stringify(a)); broken.account.total_equity_usd = 1; delete broken.account.unrealized_pnl_usd; delete broken.marks;
+      return {first: first.html, same: same.changed, moved: moved.changed, movedHtml: moved.html, broken: CC.paper.account(broken, null).html};
+    """ % json.dumps(ACCT))
+    for label in ("Cash", "Reserved cash", "Available cash", "Open-position value", "Total equity",
+                  "Realized P&amp;L", "Unrealized P&amp;L"):
+        assert label + '<span class="sim">SIMULATED</span>' in got["first"], label
+    for fig in ("$498,000.00", "$1,000.00", "$497,000.00", "$2,100.00", "$500,100.00", "+$100.00"):
+        assert fig in got["first"], fig
+    assert "Reconciles: cash + open-position value = total equity" in got["first"]
+    assert '<b class="STALE">STALE</b>' in got["first"] and "1 stale position mark(s)" in got["first"]
+    assert "Last updated" in got["first"] and " ET)" in got["first"]
+    assert got["same"] == []                                        # nothing changed, nothing animates
+    assert got["moved"] == ["cash_usd", "total_equity_usd"]         # only committed changes animate
+    assert got["movedHtml"].count('class="v flash"') == 2
+    assert "DOES NOT RECONCILE" in got["broken"] and "not sent by the server" in got["broken"]
+    assert "MARK STATUS NOT REPORTED" in got["broken"]
+
+
+def test_the_ledger_reads_in_new_york_time_with_type_amount_and_balance():
+    got = _node("derek", """
+      return CC.paper.ledger([
+        {entry_id: 'L2', at: '2026-09-30T20:15:00Z', type: 'ORDER_SUBMITTED', instrument: {market_slug: 'aec-mlb-nyy-bos-2026-10-02', intent: 'ORDER_INTENT_BUY_LONG'}, amount_usd: -1000, balance_after_usd: 499000},
+        {entry_id: 'L1', at: '2026-09-30T13:30:00Z', type: 'INITIAL_FUNDING', instrument: null, amount_usd: 500000, balance_after_usd: 500000}]);
+    """)
+    assert "Sep 30, 16:15:00 ET" in got and "Sep 30, 09:30:00 ET" in got      # EDT = UTC-4
+    assert "ORDER_SUBMITTED <span class=\"mute\">reserve</span>" in got
+    assert "−$1,000.00" in got and "$499,000.00" in got and "+$500,000.00" in got
+    assert 'data-label-item="slug:aec-mlb-nyy-bos-2026-10-02|ORDER_INTENT_BUY_LONG"' in got
+    empty = _node("derek", "return CC.paper.ledger([]);")
+    assert "No ledger entry has been sent." in empty
+
+
+def test_a_missing_paper_route_is_unavailable_by_name_and_floors_are_never_realized():
+    got = _node("xavier", """
+      return [CC.paper.section('inventory', {kind: 'NOT_DEPLOYED'}),
+              CC.paper.section('outcome-pnl', {kind: 'OK', json: {status: 'OK', rows: [{group: 'G1', floor_usd: 200}]}}),
+              CC.paper.section('inventory', {kind: 'OK', json: {status: 'EMPTY', why: 'no paper position yet', rows: []}})];
+    """)
+    assert got[0]["status"] == "UNAVAILABLE" and "paper session routes not in this build" in got[0]["html"]
+    assert got[1]["status"] == "OK" and "never realized P&amp;L" in got[1]["html"]
+    assert got[2]["status"] == "EMPTY" and "no paper position yet" in got[2]["html"]
+    # and the contract they are built against is written down
+    assert set(CCP.PAPER_CONTRACT) >= {"GET /api/command/paper/account", "GET /api/command/paper/stream",
+                                       "GET /api/command/paper/ledger?limit="}
+    assert set(CCP.VOICE_PROFILES) == set(KINDS)        # voice is designed, not built
