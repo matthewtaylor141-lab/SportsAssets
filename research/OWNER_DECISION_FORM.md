@@ -52,7 +52,7 @@ Your example of 62 contracts at 40¢ hedged at 80¢: 31 contracts are covered an
 ## C · Authorization duration: bounded renewal (implemented)
 
 There are two records:
-- **Your owner authorization:** you sign it, with a finite lifetime you choose (§F.3).
+- **Your owner authorization:** you sign it, with a finite lifetime you choose (§G.3).
 - **The system authorization:** expires after 24 hours, and never later than your owner authorization.
 
 **Renewal.** The system authorization renews itself only when **all** of these hold:
