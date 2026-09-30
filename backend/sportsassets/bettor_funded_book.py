@@ -1987,11 +1987,34 @@ async def ingest_fills(conn, intent_id: str, fills, *,
         await conn.execute(
             "SELECT 1 FROM bettor_funded_intents WHERE intent_id=$1 "
             " FOR UPDATE", econ_intent)
-        return await _ingest_locked(
+        got = await _ingest_locked(
             conn, intent_id=intent_id, fills=fills, direction=direction,
             now=now, row=row, econ_intent=econ_intent,
             buy_intent=buy_intent, written=written, already=already,
             unresolved=unresolved)
+    # ── AGENT HANDOFF (core, migration 152): AFTER THE FILLS COMMITTED ──
+    # Confirmed ENTRY quantity becomes Xavier's. Contained: a handoff
+    # failure is logged and never fails or rolls back this ingestion (the
+    # servicing pass's `reconcile_unowned` repairs whatever it missed).
+    if direction == "ENTRY" and (written or already):
+        await _agent_handoff_after_ingest(conn, intent_id, now)
+    return got
+
+
+async def _agent_handoff_after_ingest(conn, intent_id: str, now: float) -> None:
+    """`agents.handoff.on_fills`, in its own savepoint when nested, so an
+    error there cannot abort a caller's transaction. Never raises."""
+    try:
+        from .agents import handoff as _AH
+
+        async with conn.transaction():
+            await _AH.on_fills(conn, intent_id=intent_id, now=now)
+    except Exception as exc:                                    # noqa: BLE001
+        import logging
+        logging.getLogger(__name__).warning(
+            "funded book: agent handoff for %s failed after the fills "
+            "committed (%s); reconcile_unowned repairs it", intent_id,
+            type(exc).__name__)
 
 
 async def _ingest_locked(conn, *, intent_id, fills, direction, now, row,
