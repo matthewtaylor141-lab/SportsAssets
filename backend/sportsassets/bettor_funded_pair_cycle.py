@@ -3294,12 +3294,19 @@ async def pass_once(conn, *, account_id: str, venue: str,
     out["standing_orders"] = []
     # A STANDING ORDER WHOSE PRIMARY IS NO LONGER HELD is still maintained
     # (cancelled, its terminal state confirmed, its capacity released).
-    out["standing_order_sweep"] = await _SPO.sweep_orphaned(
-        conn, account_id=account_id, venue=venue,
-        held_primary_ids={str(p.get("intent_id")) for p in held
-                          if str(p.get("leg_role") or "PRIMARY")
-                          == "PRIMARY"},
-        at=at, source=trigger_source, adapter=adapter, policy=_spo_policy)
+    try:
+        out["standing_order_sweep"] = await _SPO.sweep_orphaned(
+            conn, account_id=account_id, venue=venue,
+            held_primary_ids={str(p.get("intent_id")) for p in held
+                              if str(p.get("leg_role") or "PRIMARY")
+                              == "PRIMARY"},
+            at=at, source=trigger_source, adapter=adapter,
+            policy=_spo_policy)
+    except Exception as exc:                                   # noqa: BLE001
+        # CONTAINED: the pass never raises. Nothing new is placed by a sweep.
+        out["standing_order_sweep"] = {
+            "ok": False, "error": "%s: %s" % (type(exc).__name__,
+                                              str(exc)[:200])}
     out["open_entry_positions"] = len(held)
     # ── XAVIER'S RESPONSIBILITY, READ BEFORE ANY POSITION IS REVIEWED ────
     #
@@ -3428,10 +3435,21 @@ async def pass_once(conn, *, account_id: str, venue: str,
         # venue reads it rests on already ran in `manage`.
         _standing_live = False
         if gid and str(pos.get("leg_role") or "PRIMARY") == "PRIMARY":
-            _mt = await _SPO.maintain(
-                conn, account_id=account_id, venue=venue, group_id=str(gid),
-                primary_intent_id=str(pos.get("intent_id")), at=at,
-                source=trigger_source, adapter=adapter, policy=_spo_policy)
+            try:
+                _mt = await _SPO.maintain(
+                    conn, account_id=account_id, venue=venue,
+                    group_id=str(gid),
+                    primary_intent_id=str(pos.get("intent_id")), at=at,
+                    source=trigger_source, adapter=adapter,
+                    policy=_spo_policy)
+            except Exception as exc:                           # noqa: BLE001
+                # CONTAINED, and in the safe direction: an unreadable
+                # standing state withholds any acquisition beside it (the
+                # standing step's own exit gate re-reads it).
+                _mt = {"ok": False, "refusal": "STANDING_ORDER_MAINTENANCE_"
+                       "RAISED", "error": "%s: %s" % (
+                           type(exc).__name__, str(exc)[:200]),
+                       "state": {"live_or_potentially_live_orders": 1}}
             _mst = _mt.get("state") or {}
             _standing_live = bool(_mst.get(
                 "live_or_potentially_live_orders"))
