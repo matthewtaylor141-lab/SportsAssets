@@ -13,11 +13,13 @@
 # leftover from the old context and will fail the build rather than
 # silently ship the wrong tree.
 
-FROM python:3.12-slim
+# THE INTERPRETER THE GATE RAN ON, BY DIGEST. `python:3.12-slim` floats: a
+# build on 2026-09-30 got 3.12.14 while the gate ran 3.12.3.
+FROM python:3.12.3-slim@sha256:afc139a0a640942491ec481ad8dda10f2c5b753f5c969393b12480155fe15a63
 
 WORKDIR /app
 
-COPY backend/pyproject.toml ./
+COPY backend/pyproject.toml backend/requirements.lock ./
 COPY backend/sportsassets ./sportsassets
 COPY backend/migrations ./migrations
 COPY backend/start.sh ./
@@ -89,6 +91,13 @@ COPY research/beta48/bettor_incentive_opportunity.py \
 # whose layout a Dockerfile chose.
 ENV BETTOR_RESEARCH_ROOT=/app/research/beta48/shadow
 
-RUN pip install --no-cache-dir . && chmod +x start.sh
+# THE LOCK, THEN THE PACKAGE WITHOUT RESOLUTION. requirements.lock is the
+# exact runtime closure the release gate ran against; `--no-deps` means the
+# build resolves nothing of its own, so a fresh hosting build installs those
+# versions or fails. `pip check` fails the build on an inconsistent set.
+RUN pip install --no-cache-dir -r requirements.lock \
+ && pip install --no-cache-dir --no-deps . \
+ && pip check \
+ && chmod +x start.sh
 
 CMD ["sh", "start.sh"]

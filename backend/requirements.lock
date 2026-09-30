@@ -1,0 +1,100 @@
+# THE RUNTIME DEPENDENCY MANIFEST. Every package the service imports at run
+# time, transitively, at the exact version the release gate ran against.
+#
+# Generated 2026-09-30 from the gate environment (/tmp/claude-0/gatevenv312,
+# Python 3.12.3) as the dependency closure of pyproject's
+# [project].dependencies -- dev tools (pytest-asyncio, pytest-timeout, ruff,
+# pglast) are not in it; pytest, iniconfig, pluggy and pygments are, because
+# a runtime dependency requires pytest.
+#
+# The image installs THIS FILE, then the package with --no-deps, so a fresh
+# hosting build resolves nothing: it installs exactly these versions or fails.
+# A floor in pyproject (anthropic>=1.9.0,<2) let an image built the same
+# evening resolve anthropic 1.10.0 while the gate ran 1.9.0; that is the
+# drift this file closes. `sportsassets.runtime_manifest` compares the
+# installed distributions against this file at boot and logs the result.
+aiohappyeyeballs==2.7.1
+aiohttp==3.14.3
+aiosignal==1.4.0
+annotated-doc==0.0.5
+annotated-types==0.8.0
+anthropic==1.9.0
+anyio==4.15.1
+asyncpg==0.31.0
+attrs==26.1.0
+bitarray==3.11.0
+certifi==2026.7.22
+cffi==2.1.1
+charset-normalizer==3.5.2
+ckzg==2.1.8
+click==8.5.0
+cryptography==50.0.2
+cytoolz==1.1.0
+docstring-parser==0.18.0
+eth-abi==6.0.0
+eth-account==0.14.0
+eth-hash==0.8.0
+eth-keyfile==0.10.0
+eth-keys==0.8.0
+eth-rlp==3.0.0
+eth-typing==6.0.0
+eth-utils==6.0.0
+fastapi==0.142.2
+frozenlist==1.8.0
+h11==0.16.0
+h2==4.4.1
+hexbytes==2.0.0
+hpack==4.2.0
+http-ece==1.2.1
+httpcore==1.0.9
+httpcore2==2.13.1
+httptools==0.8.0
+httpx==0.28.1
+httpx2==2.13.1
+hyperframe==6.1.0
+idna==3.20
+iniconfig==2.3.0
+jiter==0.17.0
+multidict==6.9.1
+opentelemetry-api==1.45.0
+packaging==26.3
+parsimonious==0.10.0
+pillow==12.3.0
+pluggy==1.6.0
+poly-eip712-structs==0.0.1
+polymarket-us==1.0.2
+propcache==0.5.4
+py-builder-signing-sdk==0.0.2
+py-clob-client==0.34.6
+py-ecc==8.0.0
+py-order-utils==0.3.2
+py-vapid==1.9.4
+pycparser==3.0
+pycryptodome==3.23.0
+pydantic==2.13.5
+pydantic-core==2.46.5
+pydantic-settings==2.15.0
+pygments==2.21.0
+pyjwt==2.15.1
+pynacl==1.6.2
+pytest==9.1.1
+python-dotenv==1.2.3
+pywebpush==2.5.0
+pyyaml==6.0.3
+redis==8.1.0
+regex==2026.9.29
+reportlab==5.0.1
+requests==2.34.2
+rlp==5.0.0
+sniffio==1.3.1
+starlette==1.7.0
+toolz==1.1.0
+truststore==0.10.4
+typing-extensions==4.16.0
+typing-inspection==0.4.4
+urllib3==2.8.0
+uvicorn==0.54.0
+uvloop==0.22.1
+watchfiles==1.3.0
+websockets==17.1
+yarl==1.25.1

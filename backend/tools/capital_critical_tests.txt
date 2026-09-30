@@ -285,6 +285,7 @@ tests/test_a_directive_becomes_an_evaluated_artifact.py
 # the provider SDK is a declared production dependency; the real adapter is
 # imported and constructed at startup without a request
 tests/test_provider_adapter_is_a_declared_startup_checked_dependency.py
+tests/test_the_runtime_manifest_is_the_gated_one.py
 # Derek -> Xavier -> Audrey as ONE trace through the real cycle (REHEARSAL venue):
 # Derek's gate ENTERs and the intent names his decision; a partial fill hands
 # over only confirmed quantity, the rest updates the same owner row; Xavier
