@@ -101,8 +101,8 @@ async def read_books(conn, ctx: dict, slugs: list, *, basis: str) -> dict:
 
 async def step_simulate(conn, ctx: dict) -> dict:
     from .. import bettor_paper_simulator as SIM
-    got = await SIM.run(conn, account_id=ctx["account_id"], now=time.time()
-                        if ctx.get("live_clock") else ctx["now"],
+    got = await SIM.run(conn, account_id=ctx["account_id"],
+                        now=ctx["clock"](),
                         fee_fn=ctx.get("fee_fn"), deadline=ctx["deadline"])
     ctx["first_fills"].extend(got.get("first_fills") or [])
     ctx["fills"] += got.get("fills") or 0
@@ -150,12 +150,13 @@ async def paper_pass(conn, *, now: float | None = None,
                      steps: list | None = None, config: dict | None = None,
                      force: bool = False, fee_fn=None,
                      trigger: str = "SCHEDULED_SERVICING",
-                     cycle: dict | None = None) -> dict:
+                     cycle: dict | None = None, sleep=None) -> dict:
     """ONE BOUNDED PAPER PASS. Never raises (CancelledError excepted).
 
     `force` skips the enablement check (tests only; the scheduled hook never
     passes it). `steps` replaces the default steps (a list of callables or
     (name, callable) pairs taking (conn, ctx))."""
+    live_clock = now is None
     at = float(now if now is not None else time.time())
     t0 = time.monotonic()
     out: dict[str, Any] = {"version": VERSION, "at": at, "trigger": trigger,
@@ -187,7 +188,8 @@ async def paper_pass(conn, *, now: float | None = None,
             return await _run(conn, out, at=at, t0=t0,
                               account_id=account_id, market_data=market_data,
                               steps=steps, config=config, fee_fn=fee_fn,
-                              cycle=cycle)
+                              cycle=cycle, live_clock=live_clock,
+                              sleep=sleep)
         finally:
             try:
                 await conn.execute("SELECT pg_advisory_unlock($1)",
@@ -197,7 +199,7 @@ async def paper_pass(conn, *, now: float | None = None,
 
 
 async def _run(conn, out, *, at, t0, account_id, market_data, steps, config,
-               fee_fn, cycle) -> dict:
+               fee_fn, cycle, live_clock=False, sleep=None) -> dict:
     try:
         sess = await S.ensure_session(conn, now=at, config=config,
                                       account_id=account_id)
@@ -218,7 +220,10 @@ async def _run(conn, out, *, at, t0, account_id, market_data, steps, config,
         "account_id": account_id, "config": cfg, "market_data": md,
         "now": at, "deadline": t0 + budget, "fee_fn": fee_fn,
         "books_read": 0, "first_fills": [], "fills": 0, "cycle": cycle or {},
-        "results": out}
+        "results": out, "sleep": sleep,
+        # THE DECISION CLOCK: the real clock in production (a decision made
+        # 15 s into a pass is stamped 15 s later); the pass instant in tests.
+        "clock": (time.time if live_clock else (lambda: at))}
     out.update(ran=True, session_id=sess["session_id"],
                resumed=sess.get("resumed"))
     for item in (steps if steps is not None else default_steps()):

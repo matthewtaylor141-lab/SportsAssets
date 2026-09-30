@@ -343,3 +343,17 @@ tests/test_paper_stream_and_account_routes.py
 # 500,000 funding), resumes, is gated by the env flag AND the control row, and
 # is scheduled from the API's existing loop in the background
 tests/test_paper_session_starts_once_and_is_scheduled_in_the_api.py
+# the paper vertical slice through the real paper pass: Derek's V2 decision
+# (EXPERIMENTAL_RESEARCH_MODEL, named refusal without one) persisted before
+# the order, the delayed simulated fill, the first-fill handoff, Xavier's
+# review and one standing protective order, touch vs strict cross,
+# settlement exactly once, Audrey's reconciling report, restart recovery
+tests/test_paper_vertical_slice_derek_to_audrey.py
+# PAPER_SIM_V1: depth walk within the limit, side semantics, delay, FOK/IOC,
+# no double consumption, resting orders never fill on a touch or a missing
+# update, cancel-pending, SIMULATOR labels
+tests/test_paper_simulator_semantics.py
+# first-partial-fill handoff, the one-live-standing-order invariant on the
+# paper book, Audrey's acquisition / breadth definitions and reconciliation,
+# the improvement hook (tasks, never promotion)
+tests/test_paper_handoff_standing_and_audit_rules.py

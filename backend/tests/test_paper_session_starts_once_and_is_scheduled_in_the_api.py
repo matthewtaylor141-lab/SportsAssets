@@ -130,11 +130,20 @@ async def test_the_hook_schedules_a_background_pass_that_writes_a_db_heartbeat(m
 
 
 @pg
-async def test_the_account_payload_carries_the_session_brief():
+async def test_the_account_payload_carries_the_session_brief(monkeypatch):
+    """After migration 171 applies and before PAPER_SESSION=on: the account
+    shows $500,000 funded once, session.active false with the flag's reason,
+    and no pass runs."""
     from sportsassets.api import command_paper as CP
     conn = await H.connect()
     try:
+        monkeypatch.delenv(S.ENV_FLAG, raising=False)
         body = await CP.account_payload(conn)
+        assert body["session"]["active"] is False
+        assert body["session"]["reason"] == \
+            "PAPER_SESSION_ENVIRONMENT_FLAG_IS_NOT_ON"
+        assert RT.paper_pass_hook(trigger="SERVICING_TASK")["scheduled"] \
+            is False
         s = body["session"]
         assert set(s) >= {"active", "reason", "session_id", "started_at",
                           "starting_cash_usd", "last_heartbeat_at",
