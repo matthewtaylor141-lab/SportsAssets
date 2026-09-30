@@ -177,6 +177,14 @@ def _wire(monkeypatch, headers):
 
     monkeypatch.setattr(pmus, "_get_client", lambda: client)
     monkeypatch.setattr(pmus, "book_read", fake_book_read)
+    # THE LISTING ROW'S TICK (SYNTHETIC 0.01): an orderable ladder is
+    # restricted to the executable grid, which refuses an unread tick. This
+    # file's subject is the book read's response contract, not the listing.
+    monkeypatch.setattr(loop, "_read_venue_rules_blocking",
+                        lambda _slug, **_k: {
+                            "tick_size": "0.01",
+                            "tick_field": "orderPriceMinTickSize",
+                            "read_at": time.time(), "from_cache": False})
     monkeypatch.setattr(loop, "pace_is_disabled", True, raising=False)
     from sportsassets import venue_pace
     monkeypatch.setattr(venue_pace, "pace", lambda *a, **k: None)

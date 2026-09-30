@@ -684,8 +684,12 @@ class _Markets:
 
     def list(self, params=None):
         want = list((params or {}).get("slug") or [])
+        # orderPriceMinTickSize: the market's own tick, on every listing row
+        # as the venue publishes it (SYNTHETIC 0.01). Every funded ladder is
+        # restricted to the executable grid, which refuses an unread tick.
         return {"markets": [{"slug": s, "description": VENUE_PROSE,
-                             "sportsMarketType": SPORTS_TYPE}
+                             "sportsMarketType": SPORTS_TYPE,
+                             "orderPriceMinTickSize": "0.01"}
                             for s in want if s in self.slugs]}
 
     def book(self, slug):

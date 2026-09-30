@@ -117,7 +117,10 @@ def _steps(out):
 async def test_the_schedule_enters_manages_exits_and_reconciles_from_empty(
         monkeypatch):
     conn = await _connect()
-    venue = F.Venue(split=[50, 35])
+    # THE WHOLE ORDER IN TWO EXECUTIONS. The order is bounded at the worst
+    # level its size was counted on (0.66), so the $60 rails fit 90 contracts
+    # at that limit -- 50 then 40.
+    venue = F.Venue(split=[50, 40])
     try:
         await F.clean(conn)
         await F.seed(conn)

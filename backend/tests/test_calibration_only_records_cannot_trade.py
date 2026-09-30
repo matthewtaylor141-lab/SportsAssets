@@ -476,6 +476,13 @@ class _Conn:
 
 def _quote(monkeypatch, *, now, subscription):
     monkeypatch.setattr(loop, "_read_book_blocking", lambda _slug: _book())
+    # THE LISTING ROW'S TICK (SYNTHETIC 0.01), the other venue read an
+    # orderable ladder needs: the executable grid refuses an unread tick.
+    monkeypatch.setattr(loop, "_read_venue_rules_blocking",
+                        lambda _slug, **_k: {
+                            "tick_size": "0.01",
+                            "tick_field": "orderPriceMinTickSize",
+                            "read_at": time.time(), "from_cache": False})
     return asyncio.run(loop.venue_quote(
         _Conn(), us_slug="aec-mlb-d4-d8-2026-10-02",
         intent="ORDER_INTENT_BUY_LONG", now=now, subscription=subscription))

@@ -155,6 +155,13 @@ class _Markets:
             {"identifier": slug + "-a", "description": "A"},
             {"identifier": slug + "-b", "description": "B"}]}}
 
+    def list(self, params=None):
+        # THE LISTING ROW'S TICK, as the venue publishes it on every market
+        # (SYNTHETIC 0.01). The exit ladder is restricted to the executable
+        # grid, which refuses a market whose tick was not read.
+        return {"markets": [{"slug": s, "orderPriceMinTickSize": "0.01"}
+                            for s in (params or {}).get("slug") or []]}
+
     def book(self, slug):
         if self._raise:
             raise RuntimeError("the venue's book feed is unreachable")

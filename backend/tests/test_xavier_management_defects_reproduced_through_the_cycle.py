@@ -108,6 +108,11 @@ class _Orders:
         return {}
 
 
+#: THE MARKET'S OWN orderPriceMinTickSize, as the venue publishes it on every
+#: listing row (SYNTHETIC). A test may set another tick before its cycle.
+TICK = {"value": "0.01"}
+
+
 class _Markets:
     def __init__(self, bids):
         self._bids = bids
@@ -116,6 +121,11 @@ class _Markets:
         return {"market": {"marketSides": [
             {"identifier": slug + "-a", "description": "A"},
             {"identifier": slug + "-b", "description": "B"}]}}
+
+    def list(self, params=None):
+        return {"markets": [{"slug": s,
+                             "orderPriceMinTickSize": TICK["value"]}
+                            for s in (params or {}).get("slug") or []]}
 
     def book(self, slug):
         return {"marketData": {"bids": list(self._bids), "offers": [],
