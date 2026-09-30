@@ -406,6 +406,9 @@ READERS = {
     "bettor_funded_management.py": ("BY_ID_FROM_A_FILTERED_READER", 2),
     # read-only reporting / prose / probes
     "bettor_capacity_fingerprint.py": ("COUNT_ONLY", 2),
+    # counts rows by record_purpose for the management overview; selects
+    # no candidate and no probability
+    "api/command_overview.py": ("COUNT_BY_PURPOSE_REPORTING", 1),
     "api/app.py": ("GET_ONLY_SETTLEMENT_PROBE_PICK_AND_PROSE", 6),
     "bettor_demonstration.py": ("PROSE_ONLY", 1),
     "bettor_pilot_prerequisites.py": ("PROSE_ONLY", 1),
