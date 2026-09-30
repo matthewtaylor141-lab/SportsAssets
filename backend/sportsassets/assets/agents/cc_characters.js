@@ -704,7 +704,7 @@ export function mount(stage, opts) {
     for (const lg of rig.legs) { lg.thigh.rotation.z = -w * 0.028; lg.knee.rotation.x = (lg.s * w > 0 ? 0.0 : 0.06 * Math.abs(w)); lg.thigh.rotation.x = -(lg.s * w > 0 ? 0 : 0.03 * Math.abs(w)); }
     // breathing
     const bh = (off ? 0.14 : m === 'waiting' ? P.breathHz * 0.85 : P.breathHz);
-    const br = instant ? 0 : Math.sin(T * TAU * bh);
+    const br = (instant || off) ? 0 : Math.sin(T * TAU * bh);
     rig.torso.scale.set(1 + br * 0.006, 1 + br * 0.004, 1 + br * 0.012);
     rig.chest.position.y = 0.24 + br * 0.0025;
     // look target
@@ -778,8 +778,12 @@ export function mount(stage, opts) {
     }
     if (!off && !instant) { env.ticker.offset.x = (T * 0.012) % 1; for (let i = 0; i < env.textures.length; i++) env.textures[i].offset.x = Math.sin(T * 0.05 + i) * 0.004; }
     // camera: a slow, small drift
-    camera.position.set(camBase.x + (instant ? 0 : Math.sin(T * 0.07) * 0.035), camBase.y + (instant ? 0 : Math.sin(T * 0.05) * 0.012), camBase.z);
+    const still_ = instant || off;
+    camera.position.set(camBase.x + (still_ ? 0 : Math.sin(T * 0.07) * 0.035), camBase.y + (still_ ? 0 : Math.sin(T * 0.05) * 0.012), camBase.z);
     camera.lookAt(lookAt);
+    // AN OFFLINE AGENT IS NOT ANIMATED: once the offline pose and the dimmed
+    // lights have settled, the loop stops until the mode changes.
+    S.offSettled = off && Math.abs(S.light - lt) < 0.01 && Math.abs(S.lean - leanT) < 0.002 && Math.abs(S.head.pitch - S.look.pitch * 0.75) < 0.004;
   }
 
   function resize() {
@@ -807,15 +811,16 @@ export function mount(stage, opts) {
   }
   function schedule() {
     if (reduced || dead || raf || S.paused || document.hidden || !S.visible) return;
+    if (S.mode === 'unavailable' && S.offSettled) { stage.setAttribute('data-cc-frames', 'offline-still'); return; }
     raf = requestAnimationFrame(frame);
   }
   function still() { update(1 / 60, true); renderer.render(scene, camera); stage.setAttribute('data-cc-frames', 'static'); }
 
   function setMode(m) {
     if (!m || m === S.mode) return;
-    S.mode = m; S.gesture = null; S.lookHold = 0; S.nextGesture = S.t + rand(1.5, 3);
+    S.mode = m; S.gesture = null; S.lookHold = 0; S.nextGesture = S.t + rand(1.5, 3); S.offSettled = false;
     stage.setAttribute('data-cc-pose', m);
-    if (reduced || S.paused) still();
+    if (reduced || S.paused) still(); else { S.lastT = 0; schedule(); }
   }
   const onMode = (e) => setMode(e.detail && e.detail.mode);
   const onPause = (e) => { S.paused = !!(e.detail && e.detail.paused); if (S.paused) { if (raf) cancelAnimationFrame(raf); raf = 0; } else { S.lastT = 0; schedule(); } };

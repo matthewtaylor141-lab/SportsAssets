@@ -189,6 +189,16 @@ body[data-cc-mode=unavailable] .cc-banner{display:block}
 .dtree{list-style:none;margin:0;padding:0}.dtree>li{border:1px solid var(--line);border-radius:12px;padding:10px 12px;margin-bottom:10px;background:var(--panel-2)}
 .dtree ol{list-style:none;margin:6px 0 0;padding:0 0 0 16px;border-left:1px solid var(--line-2)}.dtree ol li{padding:4px 0 4px 10px;font-size:12.5px}
 .prov-tag{font:650 10px/1 var(--mono);letter-spacing:.08em;color:var(--warn);border:1px dashed var(--warn);border-radius:5px;padding:3px 5px}
+.plabel{display:flex;gap:10px;align-items:flex-start;min-width:0}
+.tbadge{flex:none;width:34px;height:34px;border-radius:50%;display:grid;place-items:center;font:700 11px/1 var(--mono);color:#fff;background:hsl(var(--h,220) 38% 30%);box-shadow:inset 0 0 0 2px hsl(var(--h,220) 45% 55% / .7)}
+.tbadge.none{background:var(--panel-2);color:var(--ink-3);box-shadow:inset 0 0 0 1px var(--line-2)}
+.plabel .p1{font:650 14.5px/1.25 var(--display);color:var(--ink);overflow-wrap:anywhere}.plabel .p2{font:12px/1.35 var(--sans);color:var(--ink-2)}.plabel .p3{font:12px/1.35 var(--mono);color:var(--ink-3)}
+.mdw{display:inline-block;margin:3px 4px 0 0;font:650 10px/1.3 var(--mono);color:var(--warn);border:1px dashed var(--warn);border-radius:5px;padding:2px 5px}
+.sideno{font:700 10px/1 var(--mono);color:#1a0c0c;background:var(--bad);border-radius:4px;padding:3px 5px;margin-left:6px}
+details.tech{margin-top:6px}details.tech summary{cursor:pointer;font:11px/1.2 var(--mono);color:var(--ink-3)}
+details.tech dl{display:grid;grid-template-columns:auto 1fr auto;gap:3px 8px;font:11.5px/1.4 var(--mono);margin:6px 0 0}
+details.tech dd{margin:0;overflow-wrap:anywhere;color:var(--ink-2)}details.tech button{font-size:10.5px;padding:3px 6px}
+abbr.mlabel{text-decoration:none;border-bottom:1px dotted var(--acc);cursor:help}
 @media (max-width:1000px){.cc-hero{grid-template-columns:1fr}.cc-p.half{grid-column:span 12}.fg{grid-template-columns:repeat(2,minmax(0,1fr))}.fg .wide{grid-column:span 2}.rec{grid-template-columns:1fr}.pgrid{grid-template-columns:repeat(2,minmax(0,1fr))}.pl{grid-template-columns:repeat(2,minmax(0,1fr))}.drow>summary{grid-template-columns:minmax(0,1fr) repeat(2,minmax(0,1fr))}}
 @media (max-width:760px){.cc-stage{min-height:360px}.cc-ov h1{font-size:32px}.cc-sub{display:none}.fg{grid-template-columns:1fr}.fg .wide{grid-column:span 1}}
 @media (prefers-reduced-motion:reduce){.cc-stage canvas{transition:none}.tick.changed{animation:none}}
@@ -531,6 +541,27 @@ var CC = (function (AG) {
   function unavLine(why) { return '<p class="unav">UNAVAILABLE: ' + esc(why || 'the read failed') + '</p>'; }
   function gateLine(o, url) { return AG.gate(o, url); }
 
+  // ── management-friendly labels (from the shared server resolver) ──
+  function techDetails(pairs) {
+    var ps = pairs.filter(function (p) { return p[1] !== null && p[1] !== undefined && p[1] !== ''; });
+    if (!ps.length) return '';
+    return '<details class="tech"><summary>Technical details</summary><dl>' + ps.map(function (p) {
+      return '<dt>' + esc(p[0]) + '</dt><dd>' + esc(p[1]) + '</dd><dd><button type="button" data-copy="' + esc(p[1]) + '" aria-label="Copy ' + esc(p[0]) + '">Copy</button></dd>';
+    }).join('') + '</dl></details>';
+  }
+  function labelBlock(lbl, tech) {
+    var ok = isObj(lbl) && !lbl.pending && lbl.primary;
+    var b = ok && isObj(lbl.badge) ? '<span class="tbadge" style="--h:' + (+lbl.badge.hue || 0) + '" title="' + esc(lbl.badge.note || '') + '" aria-hidden="true">' + esc(lbl.badge.initials) + '</span>' : '<span class="tbadge none" aria-hidden="true">?</span>';
+    var no = ok && lbl.side && lbl.side.is_no ? '<span class="sideno" title="the position holds the NO side">NO SIDE</span>' : '';
+    var warn = ok ? (lbl.warnings || []).map(function (w) { return '<span class="mdw">' + esc(w) + '</span>'; }).join('') : (isObj(lbl) && lbl.pending === 'slot' ? '' : '<span class="mdw">LABEL_NOT_RESOLVED: the label service answered nothing for this record</span>');
+    return '<div class="plabel">' + b + '<div style="min-width:0"><div class="p1" data-primary-label>' + (ok ? esc(lbl.primary) : (isObj(lbl) && lbl.pending === 'slot' ? 'Resolving label…' : 'Label not resolved')) + no + '</div>'
+      + (ok && lbl.secondary ? '<div class="p2">' + esc(lbl.secondary) + '</div>' : '')
+      + (ok && lbl.size ? '<div class="p3">' + esc(lbl.size) + '</div>' : '') + warn + techDetails(tech || []) + '</div></div>';
+  }
+  function labelSlot(item, tech) {
+    return '<div class="plabel-slot" data-label-item="' + esc(item) + '" data-tech="' + esc(JSON.stringify(tech || [])) + '">' + labelBlock({pending: 'slot'}, tech) + '</div>';
+  }
+
   // ── DEREK: one row, eight groups ─────────────────────────────────
   function dl(pairs) { return '<dl>' + pairs.map(function (p) { return '<dt>' + esc(p[0]) + '</dt><dd>' + p[1] + '</dd>'; }).join('') + '</dl>'; }
   function derekRow(r, rd) {
@@ -543,7 +574,10 @@ var CC = (function (AG) {
     var verdict = W.verdict ? '<span class="vb vb-' + esc(W.verdict) + '">' + esc(W.verdict) + '</span>' : '<span class="vb vb-ORDER">ORDER ONLY</span>';
     var ost = X.order_state ? '<span class="os os-' + esc(X.order_state) + '">' + esc(X.order_state.replace(/_/g, ' ')) + '</span>' : '<span class="mute">no order</span>';
     var t = rec.decided_at || rec.created_at;
-    var sum = '<summary><div><div class="mk">' + esc(I.market || I.event || rec.decision_id || rec.intent_id || 'record') + '</div><div class="sub">' + esc(I.side || '') + ' · ' + (t ? AG.ts(t, rd) : 'time not recorded') + '</div></div>'
+    var tech = [['market slug', I.market], ['event key', I.event], ['decision id', rec.decision_id], ['order (intent) id', rec.intent_id], ['venue order id', X.venue_order_id], ['order intent', I.side]];
+    var lb = r.label;
+    var lbOk = isObj(lb) && !lb.pending && lb.primary;
+    var sum = '<summary><div><div class="mk" data-primary-label>' + (lbOk ? esc(lb.primary) + (lb.side && lb.side.is_no ? '<span class="sideno">NO SIDE</span>' : '') : 'Label not resolved') + '</div><div class="sub">' + (lbOk && lb.secondary ? esc(lb.secondary) + ' · ' : '') + (t ? AG.ts(t, rd) : 'time not recorded') + '</div></div>'
       + '<div class="q"><small>verdict</small>' + verdict + '</div><div class="q"><small>order</small>' + ost + '</div>'
       + '<div class="q"><small>price × qty</small>' + (price(P.price) || '—') + ' × ' + (qty(P.quantity) || '—') + '</div>'
       + '<div class="q"><small>gross edge</small>' + (pp(E.gross_edge_pp) || '—') + '</div>'
@@ -557,7 +591,7 @@ var CC = (function (AG) {
     var blkHtml = Array.isArray(blk) ? (blk.length ? blk.map(function (b) { return '<div>' + esc(b.blocks) + ': <b>' + esc(b.refusal || b.state || b.check || '') + '</b>' + (b.detail ? ' — ' + esc(b.detail) : '') + (b.dependency ? ' ' + AG.dep(b.dependency) : '') + '</div>'; }).join('') : '<span class="mute">' + esc(W.blocking_note || 'none recorded') + '</span>') : nr((n.explanation || {}).blocking_condition);
     var checks = Array.isArray(W.checks) && W.checks.length ? '<ul class="chk">' + W.checks.map(function (c) { return '<li><span class="' + esc(c.status) + '">' + esc(c.status) + '</span><span><span class="mono">' + esc(c.check) + '</span>' + (c.detail ? ' — ' + esc(c.detail) : '') + '</span></li>'; }).join('') + '</ul>' : '<span class="mute">no checks on this record</span>';
     var settle = E.settlement_states ? '<div class="wide"><h4>Settlement-state valuation (voids, refunds)</h4>' + esc(E.settlement_states.status) + ' — ' + esc(E.settlement_states.detail || '') + (E.settlement_states.evidence ? '<details class="raw"><summary>rules as recorded</summary><pre>' + esc(JSON.stringify(E.settlement_states.evidence, null, 2)) + '</pre></details>' : '') + '</div>' : '';
-    var body = '<div class="fg">'
+    var body = '<div class="fg"><div class="wide">' + labelBlock(lb, tech) + '</div>'
       + '<div><h4>Instrument</h4>' + dl([['event', field(I, n.instrument, 'event')], ['market', field(I, n.instrument, 'market')], ['side', field(I, n.instrument, 'side')], ['settlement period', spTxt || nr((n.instrument || {}).settlement_period)]]) + '</div>'
       + '<div><h4>Purchase</h4>' + dl([['price', field(P, n.purchase, 'price', price)], ['quantity', field(P, n.purchase, 'quantity', function (v) { return qty(v) + ' contracts'; })], ['dollars committed', P.dollars_committed === null && isNum(P.cost_at_decision_usd) ? nr((n.purchase || {}).dollars_committed) + '<span class="nrw">cost at decision ' + usd(P.cost_at_decision_usd) + '</span>' : field(P, n.purchase, 'dollars_committed', usd)], ['dollars filled', field(P, n.purchase, 'dollars_filled', usd) + (P.dollars_filled_basis ? '<span class="nrw">' + esc(P.dollars_filled_basis) + '</span>' : '')]]) + '</div>'
       + '<div><h4>Internal estimate</h4>' + dl([['probability', field(M, n.internal, 'probability', prob)], ['model', field(M, n.internal, 'model_version')], ['at', field(M, n.internal, 'at', when, rd)]]) + '</div>'
@@ -612,7 +646,7 @@ var CC = (function (AG) {
       var rejected = alts.filter(function (a) { return a !== chosen; }).map(function (a) {
         return '<li><b>' + esc(a.action) + '</b>' + (a.candidate_id ? ' <span class="mono">' + esc(a.candidate_id) + '</span>' : '') + ' — ' + esc(a.blocker || (a.rankable === false ? 'not rankable' : 'ranked lower')) + (isNum(a.increment_vs_hold_usd) ? ' · vs HOLD ' + usdS(a.increment_vs_hold_usd) : '') + '</li>';
       });
-      html += '<div class="rec" data-rec="' + esc(d.xavier_decision_id) + '"><div><div class="lbl">Group ' + esc(d.portfolio_group_id || d.intent_id || '') + '</div>'
+      html += '<div class="rec" data-rec="' + esc(d.xavier_decision_id) + '"><div>' + labelSlot('intent:' + (d.intent_id || ''), [['group id', d.portfolio_group_id], ['intent id', d.intent_id], ['decision id', d.xavier_decision_id]])
         + '<div class="act">' + esc(d.chosen_action || 'NO ACTION RECORDED') + '<small>' + (chosen && isNum(chosen.qty_executable_at_limit) ? qty(chosen.qty_executable_at_limit) + ' executable at limit · ' : '') + (chosen && chosen.candidate_id ? esc(chosen.candidate_id) : 'quantity and price as recorded on the decision') + '</small></div>'
         + '<div style="margin-top:8px">' + tick + '</div>'
         + '<div class="perm">' + (permitted ? '<b>EXECUTION PERMITTED</b> by the submission switch as the serving code has it.' : '<b>EXECUTION NOT PERMITTED</b>: funded submission is disabled (' + esc(JSON.stringify(sw)) + '). This is a recommendation on record, not an order.') + '</div></div>'
@@ -638,7 +672,7 @@ var CC = (function (AG) {
       var h = hand.filter(function (x) { return legs.some(function (l) { return l.intent_id === x.entry_intent_id; }); })[0];
       var rv = cur.filter(function (x) { return x.portfolio_group_id === g.group || legs.some(function (l) { return l.intent_id === x.intent_id; }); })[0];
       var hold = rv ? altsFor(ws, rv.xavier_decision_id).filter(function (a) { return a.action === 'HOLD'; })[0] : null;
-      return '<div class="poscard" data-group="' + esc(g.group) + '"><h3>' + esc(prim.us_market_slug || g.group) + '</h3><div class="sub mono" style="font-size:11px;color:var(--ink-3)">group ' + esc(g.group) + '</div>'
+      return '<div class="poscard" data-group="' + esc(g.group) + '"><h3 class="sr-only">Position group</h3>' + labelSlot('intent:' + (prim.intent_id || ''), [['group id', g.group], ['market slug', prim.us_market_slug], ['primary intent id', prim.intent_id]])
         + '<div class="pgrid">'
         + '<div><div class="lbl">Derek’s entry</div><div class="v">' + (h ? qty(h.confirmed_qty) + ' of ' + qty(h.ordered_qty) + ' confirmed' : nr('no handoff row for this group')) + '</div>' + (h ? '<span class="nrw">first fill ' + (when(h.first_fill_at, rd) || '?') + '</span>' : '') + '</div>'
         + '<div><div class="lbl">Primary / hedge</div><div class="v">' + qty(g.primary_qty) + ' / ' + qty(g.hedge_qty) + '</div></div>'
@@ -662,7 +696,7 @@ var CC = (function (AG) {
       return '<p class="lbl" style="margin:8px 0 6px">Review ' + esc(d.xavier_decision_id) + '</p><div class="tbl"><table><thead><tr><th>rung</th><th>status</th><th class="num">target price</th><th class="num">executable price</th><th class="num">combined cost</th><th class="num">depth</th><th class="num">coverage</th><th class="num">EV</th><th class="num">settlement floor</th><th class="num">overlap p</th></tr></thead><tbody>'
         + rows.map(function (r) {
           var ea = r.exposure_after || {};
-          return '<tr><td class="mono">' + esc(r.backs || '') + ' ' + esc(r.line === null || r.line === undefined ? '' : r.line) + '</td><td><span class="mon">MONITORED ALTERNATIVE</span></td>'
+          return '<tr><td>' + labelSlot('slug:' + (r.candidate_id || ''), [['candidate id', r.candidate_id], ['line', r.line], ['backs', r.backs]]) + '</td><td><span class="mon">MONITORED ALTERNATIVE</span></td>'
             + '<td class="num">' + show(price(pick(r, ['target_price', 'limit_price'])), 'not recorded on this rung') + '</td>'
             + '<td class="num">' + show(price(pick(r, ['executable_price', 'price', 'ask'])), 'not recorded on this rung') + '</td>'
             + '<td class="num">' + show(usd(r.capital_required_usd), 'not recorded') + '</td>'
@@ -678,7 +712,7 @@ var CC = (function (AG) {
   function standing(j, rd) {
     if (!isObj(j)) return {status: 'UNAVAILABLE', html: unavLine('no response')};
     var mon = Array.isArray(j.monitored_alternatives) ? j.monitored_alternatives : [];
-    var monHtml = '<p class="lbl" style="margin:12px 0 6px">Monitored alternatives (never venue orders)</p>' + (mon.length ? mon.map(function (m) { return '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:6px"><span class="mon">' + esc(m.label) + '</span><span class="mono">' + esc(m.candidate_id || '') + '</span>' + (isNum(m.expected_net_usd) ? ' EV ' + usdS(m.expected_net_usd) : '') + (m.href ? ' <a class="ev" href="' + esc(AG.safeHref(m.href) || '') + '">decision</a>' : '') + '</div>'; }).join('') : '<span class="mute">none on the latest reviews</span>');
+    var monHtml = '<p class="lbl" style="margin:12px 0 6px">Monitored alternatives (never venue orders)</p>' + (mon.length ? mon.map(function (m) { return '<div style="margin-bottom:8px"><span class="mon">' + esc(m.label) + '</span>' + labelSlot('slug:' + (m.candidate_id || ''), [['candidate id', m.candidate_id], ['decision id', m.xavier_decision_id], ['group id', m.portfolio_group_id]]) + (isNum(m.expected_net_usd) ? ' EV ' + usdS(m.expected_net_usd) : '') + (m.href ? ' <a class="ev" href="' + esc(AG.safeHref(m.href) || '') + '">decision</a>' : '') + '</div>'; }).join('') : '<span class="mute">none on the latest reviews</span>');
     var rule = '<p class="note">' + esc(j.rule || '') + '</p>';
     if (j.status === 'UNAVAILABLE') return {status: 'UNAVAILABLE', html: '<div class="plain" data-standing="UNAVAILABLE"><p class="big">UNAVAILABLE · ' + esc(j.why) + '</p><p>' + esc(j.detail || '') + '</p><p class="mute">No protective order is shown because none can be read here; this is not "no orders".</p></div>' + rule + monHtml};
     if (j.status === 'EMPTY') return {status: 'EMPTY', html: emptyLine(j.why) + rule + monHtml};
@@ -686,7 +720,7 @@ var CC = (function (AG) {
       var cap = g.capacity_consumed || {};
       return '<div class="poscard"><h3>Group ' + esc(g.group_id) + (g.invariant_holds ? '' : ' <span class="warnchip">MORE THAN ONE LIVE ORDER</span>') + '</h3>'
         + (g.pinned ? '<p class="note">Instrument pinned by the first hedge fill: <span class="mono">' + esc(g.pinned.candidate_id) + '</span> (' + esc(g.pinned.first_fill_id || '') + ')</p>' : '<p class="note">No hedge fill has pinned an instrument yet.</p>')
-        + (g.plans || []).map(function (p) { return '<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:6px"><span class="sto">' + esc(p.label) + '</span><span class="mono">' + esc(p.venue_slug) + '</span> ' + qty(p.quantity) + ' @ ' + (price(p.wire_limit_price) || '?') + ' · order ' + esc(p.order_state || 'not sent') + ' · lifecycle ' + esc(p.lifecycle_state || 'not recorded') + ' <a class="ev" href="' + esc(AG.safeHref(p.href) || '') + '">record</a></div>'; }).join('')
+        + (g.plans || []).map(function (p) { return '<div style="margin-bottom:8px"><span class="sto">' + esc(p.label) + '</span>' + labelBlock(p.label_resolved, [['market slug', p.venue_slug], ['plan id', p.plan_id], ['hedge intent id', p.hedge_intent_id], ['venue order id', p.venue_order_id], ['candidate id', p.candidate_id]]) + ' ' + qty(p.quantity) + ' @ ' + (price(p.wire_limit_price) || '?') + ' · order ' + esc(p.order_state || 'not sent') + ' · lifecycle ' + esc(p.lifecycle_state || 'not recorded') + ' <a class="ev" href="' + esc(AG.safeHref(p.href) || '') + '">record</a></div>'; }).join('')
         + '<p class="note">Capacity consumed until reconciled: ' + qty(cap.reserved_qty) + ' contracts · ' + (usd(cap.reserved_collateral_usd) || '?') + '. ' + esc(cap.why || '') + '</p></div>';
     }).join('');
     return {status: 'OK', html: html + rule + monHtml};
@@ -777,6 +811,7 @@ var CC = (function (AG) {
   }
 
   return {MODES: MODES, STALE_MIN_S: STALE_MIN_S, nr: nr, prob: prob, pp: pp, pct: pct, usd: usd, usdS: usdS, qty: qty, price: price,
+    labelBlock: labelBlock, labelSlot: labelSlot, techDetails: techDetails,
     modeOf: modeOf, staleAfter: staleAfter, pill: pill, emptyLine: emptyLine, unavLine: unavLine, gateLine: gateLine,
     derekRow: derekRow, derekList: derekList, secData: secData, recommendation: recommendation, positionCards: positionCards,
     ladder: ladder, standing: standing, payoff: payoff, pnlPanel: pnlPanel, auditPanel: auditPanel, directiveTree: directiveTree};
@@ -798,6 +833,7 @@ CC_BOOT_JS = r"""
     p.setAttribute('data-status', status);
     var pl = p.querySelector('[data-pill]'); if (pl) pl.outerHTML = CC.pill(status);
     var b = p.querySelector('[data-body]'); if (b) b.innerHTML = html;
+    if (b && CC.labelize) CC.labelize(b).then(function () { if ((id === 'p-audit' || id === 'p-history') && CC.relabelText) CC.relabelText(b); });
   }
   function failPanel(id, o, url) { setPanel(id, o.kind === 'LOCKED' ? 'LOCKED' : o.kind === 'NOT_DEPLOYED' ? 'NOT DEPLOYED' : 'UNAVAILABLE', AG.gate(o, url)); }
   function kpis(list) {
@@ -945,9 +981,55 @@ CC_BOOT_JS = r"""
       {label: 'Latest audit report', value: rp.status === 'OK' && rp.data && rp.data[0] ? esc(rp.data[0].report_id || rp.data[0].report_date || 'report') : rp.status, sub: rp.status === 'OK' ? '' : esc(rp.why || ''), href: E.audrey},
       {label: 'Improvement tasks', value: ts.status === 'OK' ? String(ts.data.length) : ts.status, sub: ts.status === 'OK' ? 'filed by Audrey' : esc(ts.why || ''), href: E.audrey}]);
   }
+  // ── labels: one shared server resolver for every page ────────────
+  var labelCache = {};
+  async function labelize(root) {
+    root = root || document;
+    var slots = [].slice.call(root.querySelectorAll('[data-label-item]:not([data-label-done])'));
+    var want = slots.map(function (e) { return e.getAttribute('data-label-item'); }).filter(function (i, k, a) { return i && !/:$/.test(i) && a.indexOf(i) === k && !(i in labelCache); });
+    for (var i = 0; i < want.length; i += 50) {
+      var o = await AG.load(E.labels + '?' + want.slice(i, i + 50).map(function (x) { return 'item=' + encodeURIComponent(x); }).join('&'), F);
+      if (o.kind === 'OK') Object.keys(o.json.labels || {}).forEach(function (k) { labelCache[k] = o.json.labels[k]; });
+      want.slice(i, i + 50).forEach(function (k) { if (!(k in labelCache)) labelCache[k] = null; });
+    }
+    slots.forEach(function (e) {
+      var tech = []; try { tech = JSON.parse(e.getAttribute('data-tech') || '[]'); } catch (_) {}
+      e.innerHTML = CC.labelBlock(labelCache[e.getAttribute('data-label-item')], tech);
+      e.setAttribute('data-label-done', '1');
+    });
+  }
+  var SLUG_RX = /\b[a-z]{2,8}-[a-z0-9]+(?:-[a-z0-9]+)*-\d{4}-\d{2}-\d{2}(?:-[a-z0-9]+)*\b/g;
+  async function relabelText(root) {
+    if (!root) return;
+    var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {acceptNode: function (n) {
+      var p = n.parentNode; if (!p || p.closest('details.tech, details.raw, code, pre, abbr.mlabel, textarea, input')) return NodeFilter.FILTER_REJECT;
+      SLUG_RX.lastIndex = 0; return SLUG_RX.test(n.nodeValue) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT; }});
+    var nodes = [], n; while ((n = walker.nextNode())) nodes.push(n);
+    if (!nodes.length) return;
+    var slugs = {}; nodes.forEach(function (t) { (t.nodeValue.match(SLUG_RX) || []).forEach(function (x) { slugs['slug:' + x + '|'] = 1; }); });
+    var want = Object.keys(slugs).filter(function (k) { return !(k in labelCache); });
+    if (want.length) {
+      var o = await AG.load(E.labels + '?' + want.slice(0, 60).map(function (x) { return 'item=' + encodeURIComponent(x); }).join('&'), F);
+      if (o.kind === 'OK') Object.keys(o.json.labels || {}).forEach(function (k) { labelCache[k] = o.json.labels[k]; });
+    }
+    nodes.forEach(function (t) {
+      var html = esc(t.nodeValue).replace(SLUG_RX, function (x) {
+        var l = labelCache['slug:' + x + '|'];
+        return l && l.primary ? '<abbr class="mlabel" title="' + esc('market slug: ' + x + (l.warnings && l.warnings.length ? ' · ' + l.warnings[0] : '')) + '" data-slug="' + esc(x) + '">' + esc(l.primary) + '</abbr>' : x;
+      });
+      var span = document.createElement('span'); span.innerHTML = html; t.parentNode.replaceChild(span, t);
+    });
+  }
+  CC.labelize = labelize; CC.relabelText = relabelText;
+  document.addEventListener('click', function (ev) {
+    var b = ev.target.closest ? ev.target.closest('button[data-copy]') : null; if (!b) return;
+    var v = b.getAttribute('data-copy');
+    try { navigator.clipboard.writeText(v).then(function () { b.textContent = 'Copied'; setTimeout(function () { b.textContent = 'Copy'; }, 1200); }); } catch (_) {}
+  });
   // ── hooks called by the workspace boot ───────────────────────────
   CC.onWorkspace = function (k, json) {
     st.ws = json;
+    setTimeout(function () { if (CC.relabelText) CC.relabelText(document.getElementById('app')); }, 0);
     try {
       if (kind === 'derek') derekPanels(json);
       else if (kind === 'xavier') xavierPanels(json);
@@ -960,6 +1042,7 @@ CC_BOOT_JS = r"""
   };
   CC.chatPending = function () { st.chat = 'reviewing'; clearTimeout(st.chatTimer); applyMode(effective()); };
   CC.chatReply = function (textLen) {
+    if (CC.relabelText) CC.relabelText(document.getElementById('chat-log'));
     st.chat = 'speaking'; applyMode(effective());
     clearTimeout(st.chatTimer);
     st.chatTimer = setTimeout(function () { st.chat = null; applyMode(effective()); }, Math.min(12000, 1500 + 35 * (textLen || 0)));

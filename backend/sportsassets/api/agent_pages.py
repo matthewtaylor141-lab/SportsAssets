@@ -36,7 +36,7 @@ is generated from `demo_html(standalone=True)`; a test compares the two.
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse
 
 router = APIRouter()
@@ -66,6 +66,7 @@ ENDPOINTS = {
     "xavier_payoff": "/api/command/agents/xavier/payoff-demonstration",
     "audrey_performance": "/api/command/agents/audrey/performance",
     "characters": "/api/command/agents/static/cc_characters.js",
+    "labels": "/api/command/agents/labels",
 }
 
 REQUIRED_SECTIONS = {
@@ -1830,7 +1831,7 @@ def _cc_endpoints_js() -> str:
     import json as _json
     return _json.dumps({k: ENDPOINTS[k] for k in (
         "derek_orders", "xavier_standing", "xavier_payoff",
-        "audrey_performance")}).replace('"', "'")
+        "audrey_performance", "labels")}).replace('"', "'")
 
 
 def page_html(kind: str) -> str:
@@ -1926,24 +1927,35 @@ def _serve(request: Request, html_fn, headers_fn=None) -> HTMLResponse:
 # (r185, MIT, the minified ES module build and the core it imports) is pinned
 # by file and cached long; the character module is ours and cached briefly so
 # a release reaches browsers within minutes. None of these files carries data
-# or a credential, so they are served without the COMMAND session (a module
-# script is fetched before any of the page's own reads).
+# or a credential; they are still served only to the COMMAND session (a
+# same-origin module import sends the session cookie, which is scoped to
+# /api/command), so nothing under /api/command answers an anonymous caller,
+# and they are cached privately.
 STATIC_DIR = __import__("pathlib").Path(__file__).resolve().parents[1] \
     / "assets" / "agents"
 STATIC_FILES = {
     "three.module.min.js": ("text/javascript; charset=utf-8",
-                            "public, max-age=604800, immutable"),
+                            "private, max-age=604800, immutable"),
     "three.core.min.js": ("text/javascript; charset=utf-8",
-                          "public, max-age=604800, immutable"),
+                          "private, max-age=604800, immutable"),
     "cc_characters.js": ("text/javascript; charset=utf-8",
-                         "public, max-age=300"),
+                         "private, max-age=300"),
     "THREE_LICENSE.txt": ("text/plain; charset=utf-8",
-                          "public, max-age=86400"),
+                          "private, max-age=86400"),
 }
 THREE_VERSION = "0.185.1"
 
 
-@router.get("/api/command/agents/static/{name}", include_in_schema=False)
+async def require_command(request: Request) -> str:
+    """The COMMAND read check (api.app.require_command), as a dependency."""
+    from . import app as A
+    return A.require_command(bt_command=request.cookies.get("bt_command", ""),
+                             x_desk_token=request.headers.get("x-desk-token", ""),
+                             x_admin_token=request.headers.get("x-admin-token", ""))
+
+
+@router.get("/api/command/agents/static/{name}", include_in_schema=False,
+            dependencies=[Depends(require_command)])
 async def agents_static(name: str):
     from fastapi.responses import Response as _R
     got = STATIC_FILES.get(name)

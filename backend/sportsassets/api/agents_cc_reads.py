@@ -228,7 +228,8 @@ def _combination_rule(decision: dict) -> str | None:
 
 def normalise_row(*, decision: dict | None, intent: dict | None,
                   fills: dict | None = None,
-                  alternatives: list | None = None) -> dict:
+                  alternatives: list | None = None,
+                  label: dict | None = None) -> dict:
     """ONE DEREK ROW FROM ITS RECORDS. Pure (the tests drive it directly).
 
     `decision` is a derek_entry_decisions row as JSON, `intent` a
@@ -526,7 +527,39 @@ def normalise_row(*, decision: dict | None, intent: dict | None,
         "instrument": ins, "purchase": pur, "internal": it, "pinnacle": pn,
         "combined": cb, "economics": ec, "execution": ex, "explanation": xp,
         "not_recorded": {g: v for g, v in nr.items() if v},
-        "evidence": evidence}
+        "evidence": evidence, "label": label or label_inputs_of(
+            instrument=ins, purchase=pur, execution=ex)}
+
+
+def label_inputs_of(*, instrument: dict, purchase: dict,
+                    execution: dict) -> dict:
+    """What the shared label resolver needs from one row (the resolved label
+    replaces this when the catalogue is read)."""
+    fq = execution.get("filled_qty") if isinstance(execution, dict) else None
+    filled = isinstance(fq, (int, float)) and fq > 0
+    side = instrument.get("side")
+    return {"pending": True, "market_slug": instrument.get("market"),
+            "intent": side if str(side or "").startswith("ORDER_INTENT_")
+            else None,
+            "contracts": fq if filled else purchase.get("quantity"),
+            "avg_price": (execution.get("average_price") if filled
+                          else purchase.get("price")),
+            "invested": (purchase.get("dollars_filled") if filled else
+                         purchase.get("dollars_committed")
+                         if purchase.get("dollars_committed") is not None
+                         else purchase.get("cost_at_decision_usd"))}
+
+
+async def label_rows(conn, rows: list) -> None:
+    """Replace each row's label inputs with the shared resolver's label."""
+    from .. import market_labels as ML
+    todo = [r for r in rows if isinstance(r.get("label"), dict)
+            and r["label"].get("pending")]
+    if not todo:
+        return
+    got = await ML.resolve_many(conn, [r["label"] for r in todo])
+    for r, lbl in zip(todo, got):
+        r["label"] = lbl
 
 
 _DEC_COLS = "to_jsonb(d) - 'features'"
@@ -703,6 +736,10 @@ async def derek_orders(conn, *, view: str = "orders", q: str = "",
             decision=dec, intent=it, fills=fl,
             alternatives=(alts.get((dec or {}).get("decision_id"), [])
                           if dec else None)))
+    try:
+        await label_rows(conn, out["rows"])
+    except Exception as exc:                                    # noqa: BLE001
+        out["label_error"] = type(exc).__name__
     out["total"] = total
     out["pages"] = (total + page_size - 1) // page_size if total else 0
     out["evidence"] = [e for row in out["rows"] for e in row["evidence"]]
@@ -874,6 +911,19 @@ async def xavier_standing(conn) -> dict:
                     "the order terminal (or it was never sent): a "
                     "cancel-pending or ambiguous order keeps consuming it")}
         g["invariant_holds"] = g["live_order_count"] <= 1
+    try:
+        from .. import market_labels as ML
+        lbls = await ML.resolve_many(conn, [{
+            "market_slug": p.get("venue_slug"), "intent": p.get("order_intent"),
+            "contracts": p.get("quantity"), "avg_price": p.get("wire_limit_price"),
+            "invested": (float(p["quantity"]) * float(p["wire_limit_price"])
+                         if p.get("quantity") is not None
+                         and p.get("wire_limit_price") is not None else None)}
+            for p in plans])
+        for p, lbl in zip(plans, lbls):
+            p["label_resolved"] = lbl
+    except Exception as exc:                                    # noqa: BLE001
+        out["label_error"] = type(exc).__name__
     out["groups"] = list(groups.values())
     if not out["groups"]:
         out.update(status=EMPTY, why=("no standing protective order has "
@@ -1126,3 +1176,48 @@ async def audrey_performance_route(response: Response) -> dict:
     pool = await _pool()
     async with pool.acquire() as conn:
         return await audrey_performance(conn)
+
+
+# ═════════════════════════════════════════════════════════════════════
+# THE SHARED LABELS, FOR ANY MARKET OR ORDER A PAGE SHOWS
+# ═════════════════════════════════════════════════════════════════════
+
+LABELS = "/api/command/agents/labels"
+MAX_LABEL_ITEMS = 60
+
+
+async def labels_for(conn, items: list[str]) -> dict:
+    """`intent:<intent_id>` or `slug:<market_slug>|<order intent>` -> the
+    shared resolver's label, keyed by the item as asked."""
+    from .. import market_labels as ML
+    items = [str(i)[:300] for i in items if i][:MAX_LABEL_ITEMS]
+    by_intent = await ML.items_for_intents(
+        conn, [i[7:] for i in items if i.startswith("intent:")])
+    asks, keys = [], []
+    for it in items:
+        if it.startswith("intent:"):
+            got = by_intent.get(it[7:])
+            if got is None:
+                continue
+            asks.append(got)
+        elif it.startswith("slug:"):
+            slug, _, intent = it[5:].partition("|")
+            asks.append({"market_slug": slug, "intent": intent or None})
+        else:
+            continue
+        keys.append(it)
+    got = await ML.resolve_many(conn, asks)
+    out = {k: v for k, v in zip(keys, got)}
+    missing = [i for i in items if i not in out]
+    return {"read_only": True, "read_at": time.time(), "version": ML.VERSION,
+            "labels": out, "unresolved_items": missing,
+            "logos": ML.LOGO_NOTE}
+
+
+@router.get(LABELS, dependencies=[Depends(require_read)])
+async def labels_route(response: Response,
+                       item: list[str] = Query(default=[])) -> dict:
+    response.headers["Cache-Control"] = "no-store"
+    pool = await _pool()
+    async with pool.acquire() as conn:
+        return await labels_for(conn, item)
