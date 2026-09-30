@@ -60,6 +60,10 @@ tests/test_bettor_pair_engine.py
 tests/test_bettor_shadow_execution.py
 tests/test_calibration_only_records_cannot_trade.py
 tests/test_cut_whale_exit.py
+# (1002) Derek: the Polymarket US coverage census sums and hides nothing; the workspace is truthful when empty
+tests/test_derek_coverage_census_and_workspace.py
+# (1002) Derek: owner proofs 1-2, 5 pp gross edge on conservative agreement, net of fee_for, through cycle()
+tests/test_derek_enters_on_conservative_agreement.py
 tests/test_desk_mirror_sides.py
 tests/test_desk_recovery.py
 tests/test_e12_catchup_side.py
