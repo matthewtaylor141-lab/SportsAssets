@@ -566,6 +566,31 @@ async def _price_indirect(conn, *, admitted, region_probabilities=None,
                     "implied_primary_marginal")
             if "value_at_void_upper_95" in out:
                 cand["value_at_void_upper_95"] = out["value_at_void_upper_95"]
+            # WHAT THE COMMON VALUATION NEEDS to value this acquisition on the
+            # same measure as HOLD / EXIT / REDUCE: both legs' payouts per
+            # region, the tables at the point and upper void rates, and the
+            # hedge's real quantity, cost and fees.
+            _pv = dict(position_value or {})
+            _vr = dict((prediction or {}).get("void_read") or {})
+            if _pv.get("ok") and region_probabilities is not None:
+                cand["cv_acquisition"] = {
+                    "regions": [{"region": r.get("region"),
+                                 "state": r.get("state"),
+                                 "per_leg_cents": r.get("per_leg_cents")}
+                                for r in (_pv.get("regions") or ())],
+                    "p_point": dict(region_probabilities),
+                    "p_upper": (None if upper_probabilities is None
+                                else dict(upper_probabilities)),
+                    "void_rate": _vr.get("rate") if _vr.get("ok") else None,
+                    "void_upper_95": (_vr.get("upper_95") if _vr.get("ok")
+                                      else None),
+                    "hedge_qty": _pv.get("hedge_qty"),
+                    "hedge_cost_usd": (
+                        None if _pv.get("hedge_qty") is None
+                        or _pv.get("hedge_basis_usd_per_unit") is None
+                        else float(_pv["hedge_qty"])
+                        * float(_pv["hedge_basis_usd_per_unit"])),
+                    "fees_usd": _pv.get("fees_usd")}
             hs = out.get("hold_value_same_measure")
             if hs is not None and cand.get("expected_net_usd") is not None:
                 cand["whole_position_expected_net_usd"] = cand[
@@ -584,6 +609,173 @@ async def _price_indirect(conn, *, admitted, region_probabilities=None,
                 prediction=out.get("prediction", prediction))
 
 
+
+# ── THE COMMON VALUATION: EVERY ACTION ON ONE MEASURE, FOR DISPATCH ──
+#
+# `FD.decide` ranks HOLD / EXIT / REDUCE from the selector (valued on P(win)
+# with no void term) beside the acquisition (valued on the payout-state
+# distribution), anchored on HOLD. `bettor_common_valuation` values all of
+# them on ONE distribution over the held contract's own payouts -- WIN, LOSE
+# and VOID -- with the void rate's uncertainty (and, where it is not
+# established, the held contract's void payout) treated as a range. A funded
+# dispatch goes out only when that valuation permits it AND selects the same
+# fixed action (kind, candidate, quantity) `FD.decide` selected under the
+# limits. Otherwise the step refuses by name and nothing is sent.
+R_CV_UNAVAILABLE = "THE_COMMON_VALUATION_COULD_NOT_VALUE_THIS_POSITION"
+R_CV_DISAGREES = "THE_COMMON_VALUATION_SELECTS_A_DIFFERENT_ACTION"
+_CV_ACTION = {"HOLD": "HOLD", "HOLD_TO_SETTLEMENT": "HOLD",
+              "DIRECT_EXIT": "DIRECT_EXIT", "REDUCE": "REDUCE",
+              FD.ACTION_ACQUIRE_INDIRECT_HEDGE: "ACQUIRE_INDIRECT_HEDGE"}
+
+
+def _mixture_table_at_zero(p_pt, v_pt, p_up, v_up):
+    """The table at v = 0 on the line through the point and upper tables
+    (the distribution is (1 - v) N + v V by construction; CV checks it)."""
+    if p_pt is None or p_up is None or v_pt is None or v_up is None \
+            or abs(float(v_up) - float(v_pt)) <= 1e-12:
+        return None
+    keys = set(p_pt) | set(p_up)
+    sl = {k: (float(p_up.get(k, 0.0)) - float(p_pt.get(k, 0.0)))
+          / (float(v_up) - float(v_pt)) for k in keys}
+    return {k: float(p_pt.get(k, 0.0)) - float(v_pt) * sl[k] for k in keys}
+
+
+def common_valuation_for(hold_ranking, candidates, *, held_leg=None,
+                         sport_permits_tie=None, fixture_can_void=True,
+                         void_read=None, p_partial=None) -> dict:
+    """Build the one-measure valuation from what the pass already holds.
+    Pure; never raises."""
+    from . import bettor_common_valuation as CV
+    try:
+        hr = dict(hold_ranking or {})
+        hold = next((c for c in (hr.get("candidates") or ())
+                     if str(c.get("action")) == "HOLD"), None)
+        if hold is None:
+            return {"ok": False, "refusal": R_CV_UNAVAILABLE,
+                    "why": "the ranking has no HOLD row to take the held "
+                           "quantity, basis and probability from"}
+        p = hold.get("value_per_contract")
+        q = hold.get("qty")
+        basis_usd = None
+        if hold.get("basis_per_contract_valued") is not None and q is not None:
+            basis_usd = float(q) * float(hold["basis_per_contract_valued"])
+        elif isinstance(hold.get("basis"), (int, float)) \
+                and not isinstance(hold.get("basis"), bool):
+            basis_usd = float(hold["basis"])
+        elif isinstance(hold.get("basis"), dict):
+            _b = hold["basis"]
+            if _b.get("remaining_basis_usd") is not None:
+                basis_usd = float(_b["remaining_basis_usd"])
+            elif _b.get("basis_per_contract") is not None and q is not None:
+                basis_usd = float(q) * float(_b["basis_per_contract"])
+        if basis_usd is None and None not in (p, q, hold.get("value_usd")):
+            # the selector's own HOLD is p x q - basis
+            basis_usd = float(p) * float(q) - float(hold["value_usd"])
+        bpc = None if basis_usd is None or not q else basis_usd / float(q)
+        if p is None or q is None or bpc is None:
+            return {"ok": False, "refusal": R_CV_UNAVAILABLE,
+                    "why": ("HOLD states no probability, quantity or basis "
+                            "(it carries %s)" % sorted(hold))}
+        cands = [{"action": "HOLD", "candidate_id": "HOLD"}]
+        for c in hr.get("candidates") or ():
+            a = str(c.get("action"))
+            if a in ("DIRECT_EXIT", "REDUCE") and c.get("value_usd") \
+                    is not None and c.get("cash_now_usd") is not None:
+                cands.append({"action": a, "candidate_id": a,
+                              "qty": c.get("qty"),
+                              "net_proceeds_usd": c.get("cash_now_usd")})
+        vr = dict(void_read or {})
+        v_pt = vr.get("rate") if vr.get("ok") else None
+        v_up = vr.get("upper_95") if vr.get("ok") else None
+        for c in candidates or ():
+            ci = c.get("cv_acquisition")
+            if not ci or not c.get("rankable"):
+                continue
+            by = {}
+            if ci.get("void_rate") is not None:
+                by[float(ci["void_rate"])] = ci.get("p_point")
+                v_pt, v_up = ci.get("void_rate"), ci.get("void_upper_95")
+            if ci.get("p_upper") is not None and v_up is not None:
+                by[float(v_up)] = ci["p_upper"]
+            z = _mixture_table_at_zero(ci.get("p_point"), ci.get("void_rate"),
+                                       ci.get("p_upper"), v_up)
+            if z is not None:
+                by[0.0] = z
+            cands.append({"action": "ACQUIRE_INDIRECT_HEDGE",
+                          "candidate_id": c.get("candidate_id"),
+                          "regions": ci.get("regions"),
+                          "region_probabilities": ci.get("p_point"),
+                          "distribution_void_rate": ci.get("void_rate"),
+                          "region_probabilities_by_void": by,
+                          "hedge_qty": ci.get("hedge_qty"),
+                          "hedge_cost_usd": ci.get("hedge_cost_usd"),
+                          "fees_usd": ci.get("fees_usd")})
+        can_void = bool(fixture_can_void)
+        held_cents, rng, held_src = None, None, None
+        if held_leg is not None and sport_permits_tie is not None:
+            hc = CV.held_outcome_cents(held_leg,
+                                       sport_permits_tie=bool(sport_permits_tie),
+                                       fixture_can_void=can_void)
+            if hc.get("ok"):
+                held_cents = hc["held_cents"]
+                held_src = "THE_HELD_CONTRACTS_OWN_SETTLEMENT_RULES"
+        if held_cents is None:
+            # A BINARY CONTRACT whose void payout is not established: valued
+            # over [0, 100] cents, never assumed.
+            held_cents = {"WIN": 100, "LOSE": 0}
+            if can_void:
+                held_cents["VOID"] = None
+                rng = (0.0, 100.0)
+            held_src = "BINARY_PAYOUTS_VOID_PAYOUT_NOT_ESTABLISHED"
+        got = CV.value_actions(
+            held_cents=held_cents, p_win=p, p_partial=p_partial,
+            void_rate=v_pt,
+            void_lower=(0.0 if v_pt is not None else None),
+            void_upper=(v_up if v_pt is not None else None),
+            qty=q, basis_usd=float(q) * float(bpc), candidates=cands,
+            void_cents_range=rng)
+        return dict(got, held_payouts_from=held_src,
+                    void_rate_read={k: vr.get(k) for k in (
+                        "ok", "rate", "upper_95", "n_fixtures", "refusal")})
+    except Exception as exc:                                    # noqa: BLE001
+        return {"ok": False, "refusal": R_CV_UNAVAILABLE,
+                "error": "%s: %s" % (type(exc).__name__, str(exc)[:200])}
+
+
+def common_valuation_gate(verdict, cv) -> dict:
+    """May the action `FD.decide` selected be dispatched with real money?"""
+    sel = dict((verdict or {}).get("selected_candidate") or {})
+    action = (verdict or {}).get("selected")
+    kind = _CV_ACTION.get(str(action))
+    if kind == "HOLD" or action is None:
+        return {"permitted": True, "refusal": None,
+                "why": "nothing is dispatched for a hold"}
+    if not (cv or {}).get("ok"):
+        return {"permitted": False, "refusal": R_CV_UNAVAILABLE,
+                "cv_refusal": (cv or {}).get("refusal")}
+    if not cv.get("funded_dispatch_permitted"):
+        return {"permitted": False,
+                "refusal": cv.get("funded_dispatch_refusal")
+                or R_CV_UNAVAILABLE,
+                "selection_basis": cv.get("selection_basis")}
+    w = (cv.get("winner") or {}).get("fixed_action") or []
+    want_id = (sel.get("candidate_id") if kind == "ACQUIRE_INDIRECT_HEDGE"
+               else kind)
+    same = bool(w) and w[0] == kind and w[1] == want_id
+    if same and kind in ("DIRECT_EXIT", "REDUCE"):
+        try:
+            same = abs(float(w[2]) - float(sel.get("qty"))) <= 1e-9
+        except (TypeError, ValueError):
+            same = False
+    if not same:
+        return {"permitted": False, "refusal": R_CV_DISAGREES,
+                "fd_selected": [action, sel.get("candidate_id"),
+                                sel.get("qty")],
+                "cv_winner": w}
+    return {"permitted": True, "refusal": None,
+            "selection_basis": cv.get("selection_basis")}
+
+
 async def decide_and_record(conn, *, decision_id: str, account_id: str,
                             venue: str, fixture: str, group_id: str | None,
                             hold_ranking: dict, admitted: dict | None,
@@ -598,7 +790,9 @@ async def decide_and_record(conn, *, decision_id: str, account_id: str,
                             model_inputs: dict | None = None,
                             now: float | None = None,
                             indirect_options: list | None = None,
-                            filled_qty_scope: dict | None = None) -> dict:
+                            filled_qty_scope: dict | None = None,
+                            held_leg=None, sport_permits_tie=None,
+                            fixture_can_void: bool = True) -> dict:
     """ONE COMPARISON, THEN WRITE IT DOWN BEFORE THE OUTCOME EXISTS.
 
     `hold_ranking` is `bettor_mgmt_select.rank_with_hold`'s own output, UNCHANGED
@@ -763,6 +957,33 @@ async def decide_and_record(conn, *, decision_id: str, account_id: str,
                     "at_the_upper_95_rate": c.get("value_at_void_upper_95")}
                 for c in sens_rows},
             "is": "A SENSITIVITY STATEMENT; the decision is the point-rate one"}
+    # ── THE ONE-MEASURE VALUATION, AND WHETHER REAL MONEY MAY FOLLOW ─
+    try:
+        from . import bettor_pair_observations as _PO
+        _void = await _PO.void_rate(conn)
+    except Exception as exc:                                    # noqa: BLE001
+        _void = {"ok": False, "refusal": "VOID_RATE_UNREADABLE",
+                 "error": type(exc).__name__}
+    _cv = common_valuation_for(hold_ranking, candidates, held_leg=held_leg,
+                               sport_permits_tie=sport_permits_tie,
+                               fixture_can_void=fixture_can_void,
+                               void_read=_void,
+                               p_partial=(model_inputs or {}).get(
+                                   "primary_partial_probability"))
+    _gate = common_valuation_gate(verdict, _cv)
+    out["common_valuation"] = {
+        k: _cv.get(k) for k in (
+            "ok", "refusal", "selection_basis", "funded_dispatch_permitted",
+            "funded_dispatch_refusal", "winner", "winner_at_range_low",
+            "winner_at_range_high", "void_range", "void_rate_status",
+            "void_payout_status", "void_cents_range", "held_payouts_from",
+            "void_rate_read", "uncertainty_model", "error", "why")}
+    out["common_valuation"]["valued"] = [
+        {k: r.get(k) for k in ("fixed_action", "rankable", "value_usd",
+                               "value_at_range_low", "value_at_range_high",
+                               "worst_value_over_range", "refusal")}
+        for r in (_cv.get("valued") or [])]
+    out["funded_dispatch_gate"] = _gate
     winner = verdict.get("selected_candidate") or {}
     prediction = winner.get("prediction")
     # ── THE PREDICTION THE DECISION WAS MADE FROM, EVEN WHEN IT LOST ─
@@ -3257,7 +3478,10 @@ async def pass_once(conn, *, account_id: str, venue: str,
             # supplier computed itself. Both are visible in the step's own
             # `region_probabilities_came_from`.
             use_approved_model=bool(facts.get("use_approved_model")),
-            model_inputs=facts.get("model_inputs"), now=at)
+            model_inputs=facts.get("model_inputs"), now=at,
+            held_leg=facts.get("held_leg"),
+            sport_permits_tie=facts.get("sport_permits_tie"),
+            fixture_can_void=bool(facts.get("fixture_can_void", True)))
         except Exception as exc:                               # noqa: BLE001
             step["refusal"] = R_DECISION_NOT_PERSISTED
             step["decision_refusal"] = "%s: %s" % (type(exc).__name__,
@@ -3370,6 +3594,23 @@ async def pass_once(conn, *, account_id: str, venue: str,
             step["what_was_selected_instead"] = action
             step["dispatched"] = None
             step["why_nothing_was_sent"] = (_gate or {}).get("why")
+            continue
+        # ── THE ONE-MEASURE GATE: REAL MONEY ONLY ON A ROBUST, AGREEING CHOICE
+        _cvg = dict(dec.get("funded_dispatch_gate") or {})
+        step["common_valuation"] = dec.get("common_valuation")
+        step["funded_dispatch_gate"] = _cvg
+        if not _cvg.get("permitted"):
+            step["refusal"] = _cvg.get("refusal") or R_CV_UNAVAILABLE
+            step["what_was_selected_instead"] = action
+            step["dispatched"] = None
+            step["why_nothing_was_sent"] = (
+                "the action is not dispatched with real money: valued on one "
+                "measure over the void rate's (and, where unestablished, the "
+                "void payout's) range, it is %s"
+                % ("not the same fixed action the limits-constrained ranking "
+                   "chose" if step["refusal"] == R_CV_DISAGREES
+                   else "not robust, or could not be valued (%s)"
+                   % step["refusal"]))
             continue
         if action in LEDGER_EXIT_ACTIONS:
             # THE EXIT THE RANKING SELECTED, dispatched exactly as its plan

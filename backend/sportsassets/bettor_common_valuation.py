@@ -319,9 +319,83 @@ def _rank(rows):
     return sorted(ok, key=lambda r: -r["value_usd"])
 
 
+R_ACQ_HELD_VOID_PAYOUT_UNKNOWN = (
+    "AN_ACQUISITION_NEEDS_THE_HELD_CONTRACTS_OWN_VOID_PAYOUT")
+
+
 def value_actions(*, held_cents: dict, p_win, p_partial=None,
                   void_rate=None, void_lower=None, void_upper=None,
-                  qty, basis_usd, candidates) -> dict:
+                  qty, basis_usd, candidates,
+                  void_cents_range=None) -> dict:
+    """`_value_actions_known`, and ALSO robust to an UNESTABLISHED void payout.
+
+    When the held contract's own void payout is not established
+    (`held_cents["VOID"]` is None) and `void_cents_range` = (a, b) is given,
+    every action is valued with the void paying a and paying b. Values are
+    affine in the payout and in the rate separately (bilinear jointly), so the
+    worst case over the rectangle is at a corner: the selection is ROBUST only
+    if the same fixed action is the strict robust winner at both payouts.
+    Acquisitions are refused: their tables price the held leg's own void
+    payout, which is exactly what is not established. Pure; never raises."""
+    hc = dict(held_cents or {})
+    if not ("VOID" in hc and hc["VOID"] is None and void_cents_range):
+        return _value_actions_known(
+            held_cents=held_cents, p_win=p_win, p_partial=p_partial,
+            void_rate=void_rate, void_lower=void_lower, void_upper=void_upper,
+            qty=qty, basis_usd=basis_usd, candidates=candidates)
+    try:
+        a, b = (float(x) for x in void_cents_range)
+    except (TypeError, ValueError):
+        return {"version": VERSION, "ok": False, "refusal": R_VOID_UNPRICED}
+    cands = []
+    for c in candidates or ():
+        if str(c.get("action") or "") in ("ACQUIRE_INDIRECT_HEDGE",
+                                          "ACQUIRE_HEDGE"):
+            cands.append(dict(c, _refuse=R_ACQ_HELD_VOID_PAYOUT_UNKNOWN))
+        else:
+            cands.append(c)
+    runs = [_value_actions_known(
+        held_cents=dict(hc, VOID=x), p_win=p_win, p_partial=p_partial,
+        void_rate=void_rate, void_lower=void_lower, void_upper=void_upper,
+        qty=qty, basis_usd=basis_usd, candidates=cands) for x in (a, b)]
+    if not all(r.get("ok") for r in runs):
+        return next(r for r in runs if not r.get("ok"))
+    lo_run, hi_run = runs
+    same = ((lo_run.get("winner") or {}).get("fixed_action")
+            == (hi_run.get("winner") or {}).get("fixed_action"))
+    permitted = bool(same and lo_run["funded_dispatch_permitted"]
+                     and hi_run["funded_dispatch_permitted"])
+    by_hi = {tuple(r["fixed_action"]): r for r in hi_run["valued"]}
+    valued = []
+    for r in lo_run["valued"]:
+        o = by_hi.get(tuple(r["fixed_action"]), {})
+        worst = [x for x in (r.get("worst_value_over_range"),
+                             o.get("worst_value_over_range")) if x is not None]
+        valued.append(dict(
+            r, value_at_void_payout_low=r.get("value_usd"),
+            value_at_void_payout_high=o.get("value_usd"),
+            worst_value_over_range=(min(worst) if len(worst) == 2 else None)))
+    return dict(lo_run, valued=valued,
+                void_payout_status="UNESTABLISHED_VALUED_OVER_A_RANGE",
+                void_cents_range=[a, b],
+                selection_basis=(lo_run["selection_basis"] if permitted
+                                 else BASIS_RESEARCH),
+                funded_dispatch_permitted=permitted,
+                funded_dispatch_refusal=(None if permitted else (
+                    lo_run.get("funded_dispatch_refusal")
+                    or hi_run.get("funded_dispatch_refusal")
+                    or R_SELECTION_DEPENDS_ON_VOID)),
+                winner_at_void_payout_high=hi_run.get("winner"),
+                uncertainty_model=(
+                    "the void rate over %s and the held contract's void "
+                    "payout over [%s, %s] cents; values are bilinear in the "
+                    "two, so the corners bound them; candidates are fixed"
+                    % (lo_run.get("void_range"), a, b)))
+
+
+def _value_actions_known(*, held_cents: dict, p_win, p_partial=None,
+                         void_rate=None, void_lower=None, void_upper=None,
+                         qty, basis_usd, candidates) -> dict:
     """Every candidate valued on the one measure, and whether the selection
     may be dispatched with real money.
 
@@ -379,7 +453,9 @@ def value_actions(*, held_cents: dict, p_win, p_partial=None,
             a = str(c.get("action") or "")
             is_acq = a in ("ACQUIRE_INDIRECT_HEDGE", "ACQUIRE_HEDGE")
             dv = _f(c.get("distribution_void_rate")) if is_acq else None
-            if is_acq and can_void and point is None:
+            if c.get("_refuse"):
+                got = {"refusal": c["_refuse"]}
+            elif is_acq and can_void and point is None:
                 got = {"refusal": R_ACQ_NEEDS_MEASURED_VOID}
             elif (is_acq and can_void and dv is not None
                   and abs(dv - point) > 1e-12):

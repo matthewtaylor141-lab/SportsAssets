@@ -11,6 +11,13 @@ account paused:
   * a profitable full exit is SENT (the adapter receives it);
   * a new entry is refused and nothing is created for it.
 Market data is SYNTHETIC.
+
+THE HELD CONTRACT'S SETTLEMENT TERMS are supplied as the production held-leg
+supplier reads them from the venue (void resolves 50-50). Every funded action
+must be robust on the common valuation (unknown void rate over [0, 1]); with
+the void payout established this exit is, and it is sent. The companion test
+below pins that with the void payout NOT established it is a research
+valuation and is not sent.
 """
 from __future__ import annotations
 
@@ -22,13 +29,32 @@ import pytest
 from sportsassets import bettor_entry_execution as EX
 from sportsassets import bettor_funded_activation as FA
 from sportsassets import bettor_funded_execution as FX
+from sportsassets import bettor_funded_hedge_supply as HSUP
 from sportsassets import bettor_funded_management as FM
+from sportsassets import bettor_indirect_structures as IS
 from tests.test_the_funded_lifecycle_is_complete import (  # noqa: E402
     ACCT, EVENT, PAYS_ON, SLUG, VENUE, _clean, _entry, _level, _live,
     _probability, _seed, _stopped, _transport)
 
 DSN = os.environ.get("RN1X_TEST_DSN", "")
 pg = pytest.mark.skipif(not DSN, reason="needs RN1X_TEST_DSN")
+
+
+def _venue_terms(monkeypatch):
+    """The held leg as the supplier reads it from the venue's prose: a
+    moneyline including extra innings (so it cannot end level) whose void
+    resolves 50-50 (SYNTHETIC terms)."""
+    import dataclasses
+
+    leg = dataclasses.replace(IS.BEARS_MONEYLINE, quantity=10,
+                              cost_cents_per_unit=60,
+                              overtime=IS.OT_INCLUDED)
+
+    async def _held(conn, *, position, prose_reader=None, now=None):
+        return {"ok": True, "leg": leg, "us_market_slug": SLUG,
+                "row": {"sports_type": "baseball", "event_slug": EVENT},
+                "built_from": "SYNTHETIC_VENUE_TERMS"}
+    monkeypatch.setattr(HSUP, "held_leg_for", _held)
 
 
 @pg
@@ -54,6 +80,7 @@ async def test_exits_are_sent_and_acquisitions_refused_in_the_incident_state(
         assert FX.FUNDED_SUBMISSION_ENABLED is False
         assert EX.REAL_ORDER_SUBMISSION_ENABLED is False
         pmus, sent, _ = _transport(monkeypatch, bids=[_level(0.75, 400)])
+        _venue_terms(monkeypatch)
         monkeypatch.delenv("EDGE_ODDS_API_KEY", raising=False)
         monkeypatch.setattr(L, "_running", lambda c: _stopped())
         monkeypatch.setattr(
