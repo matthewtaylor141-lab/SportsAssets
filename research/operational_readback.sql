@@ -226,3 +226,45 @@ SELECT CASE WHEN to_regclass('bettor_xavier_reviews') IS NOT NULL THEN
     WHERE key = 'ext_pinnacle_last_cycle')          AS xavier_review_digest,
   (SELECT value->'funded_servicing' FROM ingestion_state
     WHERE key = 'ext_pinnacle_last_cycle')          AS funded_servicing_digest;
+
+\echo '== R1 · renewal, calibration-only records and the calibration measurement (heartbeat) =='
+SELECT to_timestamp((value->>'at')::float8)                          AS written_at,
+       value->'writer'->>'build'                                      AS writer_build,
+       value->'funded_servicing'->'authorization_renewal'             AS renewal,
+       value->'source_calibration_measurement'                        AS calibration_measurement,
+       value->>'valuations_recorded_inadmissible_for_calibration'     AS calibration_only_recorded,
+       value->'calibration_only'                                      AS calibration_only
+  FROM ingestion_state
+ WHERE key = 'ext_pinnacle_last_cycle';
+
+\echo '== R2 · valuations by record purpose (7 days) and the renewal log =='
+SELECT CASE WHEN EXISTS (SELECT 1 FROM information_schema.columns
+                          WHERE table_name = 'external_valuations'
+                            AND column_name = 'record_purpose') THEN
+  (xpath('/row/c/text()', query_to_xml($q$
+    select coalesce(string_agg(line, E'\n' order by line), 'none') as c
+      from (select record_purpose || ' ' || coalesce(decision, '?') ||
+                   ' admissible=' || admissible::text || ' n=' || count(*)::text
+                   as line
+              from external_valuations
+             where decided_at > now() - interval '7 days'
+             group by record_purpose, decision, admissible) q
+  $q$, false, true, '')))[1]::text END AS valuations_by_purpose,
+  (SELECT jsonb_array_length(value) FROM ingestion_state
+    WHERE key = 'bettor_funded_authorization_renewals')   AS renewal_log_entries;
+
+\echo '== R3 · reconciliation reports and owner-authorization audit (identity fields only) =='
+SELECT CASE WHEN to_regclass('bettor_account_reconciliation_reports') IS NOT NULL THEN
+  (xpath('/row/c/text()', query_to_xml($q$
+    select coalesce(string_agg(line, E'\n' order by line desc), 'none') as c
+      from (select recorded_at::text || ' ' || account_id || ' by=' ||
+                   recorded_by || ' authoritative=' || authoritative::text ||
+                   ' would_be_eligible=' || would_be_eligible::text ||
+                   ' blocking=' || blocking_count::text as line
+              from bettor_account_reconciliation_reports
+             order by recorded_at desc limit 10) q
+  $q$, false, true, '')))[1]::text END AS reconciliation_reports,
+  CASE WHEN to_regclass('bettor_funded_owner_authorization_audit') IS NOT NULL THEN
+  (xpath('/row/c/text()', query_to_xml($q$
+    select count(*)::text as c from bettor_funded_owner_authorization_audit
+  $q$, false, true, '')))[1]::text END AS owner_authorization_audit_rows;
