@@ -1001,6 +1001,12 @@ async def test_events_revalue_under_the_capital_preservation_policy(
         assert got["ok"], got
         (plan,) = await SH.plans(conn)
         await XH.probability(conn, p=0.80)
+        # TEST ISOLATION: the previous test's last market-event pass on this
+        # slug is stamped time.time() + 2 in the process-wide per-slug gap
+        # map, so whether THIS event runs its pass depended on how fast the
+        # two tests happened to run (MARKET_EVENT_MIN_GAP_S). The gap rule is
+        # unchanged; only the other test's stamp is cleared.
+        L._VENUE_EVENTS["last_market_pass"].pop(plan["venue_slug"], None)
         got = await L.on_market_message(conn, _book_msg(
             plan["venue_slug"], bid=0.31, ask=0.90))
         val = _event_step(got)["standing_order"]["valuation"]
