@@ -1,0 +1,93 @@
+== METADATA (baseline | candidate)
+  commit                 b51378de92dd03239d66ac0fe1b5f6b5e4449059 | dff544c735906227cc93b51a6b14d33f081ae818   <-- differs
+  database               gate_b51_now | gate_c2_run2   <-- differs
+  funded_tables          17 | 17
+  migration_max          150_refused_hedge_claims_resolve_on_evidence.sql | 151_pair_observation_admission.sql   <-- differs
+  pip_freeze_sha256_16   a5fd9ef9e4c78dd2 | a5fd9ef9e4c78dd2
+  public_tables          136 | 136
+  pytest                 pytest 9.1.1 | pytest 9.1.1
+  pytest_exitstatus      1 | 1
+  python                 3.11.15 | 3.11.15
+  report_present         True | True
+  exitstatus             1 | 1
+  collected_count        15642 | 15711
+  executed_count         15642 | 15711
+  counts                 {'failed': 181, 'passed': 15410, 'skipped': 48, 'xfailed': 3} | {'failed': 153, 'passed': 15507, 'skipped': 48, 'xfailed': 3}
+
+== COLLECTION
+  only in candidate: 73   only in baseline: 4
+  candidate-only files: ['tests/test_a_pair_is_observed_without_being_admitted.py', 'tests/test_bettor_live_loop.py', 'tests/test_l2_review_pins.py', 'tests/test_management_runs_on_its_own_cadence.py', 'tests/test_rehearsal_xavier_full_scheduled_path.py', 'tests/test_the_management_overview_names_every_empty_section.py', 'tests/test_the_market_data_subscription_is_finished.py']
+  baseline-only (MISSING in candidate): ['tests/test_bettor_live_loop.py::TestTheProbeBudgetSurvivesRestarts::test_it_fails_closed_on_every_bad_budget[{"probe_id": "11111111-2222-3333-4444-555555555555", "started_at": "2026-09-30T14:46:04.369060+00:00", "deadline_at": "2026-09-30T15:16:04.369060+00:00", "max_distinct": 40, "max_bbo_attempts": 160, "max_listing_attempts": 18, "distinct_reserved": 40, "bbo_attempts_reserved": 0, "listing_attempts_reserved": 0, "slugs": []}-BUDGET_EXHAUSTED]', 'tests/test_bettor_live_loop.py::TestTheProbeBudgetSurvivesRestarts::test_it_fails_closed_on_every_bad_budget[{"probe_id": "11111111-2222-3333-4444-555555555555", "started_at": "2026-09-30T14:46:04.369084+00:00", "deadline_at": "2026-09-30T14:46:03.369084+00:00", "max_distinct": 40, "max_bbo_attempts": 160, "max_listing_attempts": 18, "distinct_reserved": 0, "bbo_attempts_reserved": 0, "listing_attempts_reserved": 0, "slugs": []}-DEADLINE_PASSED]', 'tests/test_l2_review_pins.py::test_review_the_preset_reads_a_naive_or_future_at_as_the_worker_does[{"at": "2026-09-30T14:16:47"}-a naive at: the worker reads it as malformed, the full window]', 'tests/test_l2_review_pins.py::test_review_the_preset_reads_a_naive_or_future_at_as_the_worker_does[{"at": "2026-09-30T15:46:47Z"}-a future at: the worker reads it as malformed, the full window]']
+
+== COLLECTION / SETUP ERRORS
+  baseline collect_errors: []
+  candidate collect_errors: []
+  baseline setup-phase failures: 0 []
+  candidate setup-phase failures: 0 []
+
+== SKIPS
+  baseline 48, candidate 48, candidate-only []
+
+== FAILURES  baseline 181, candidate 153, both 153
+  candidate-only failures (0):
+  baseline-only failures (28):
+    tests/test_e7_cand_memo.py::test_e7_a_no_mark_candidate_is_memoised_and_not_re_read_inside_the_ttl
+        E   AssertionError: the memo is not touched by a read that found a mark; it simply expired
+    tests/test_e7_review_pins.py::test_review_q4_a_market_he_entered_at_first_sight_and_the_venue_lists_20_minutes_later_opens_at_the_next_base_read
+        E   AssertionError: read at the base TTL: the book opens
+    tests/test_e7_review_pins.py::test_review_q4_a_market_he_entered_inside_the_hour_keeps_the_base_ttl
+        E   AssertionError: his fill 100 s before the first read: read again at the base TTL
+    tests/test_e7_review_pins.py::test_review_q5_a_hand_written_key_skips_a_live_market_at_most_its_rail_and_a_longer_one_not_at_all
+        E   AssertionError: the rail ran: read, and quoted, a book
+    tests/test_e9_fold2_review_pins.py::test_fold2_q2_the_release_window_a_full_tick_arriving_as_a_fast_ticks_wait_ends_queues_behind_it
+        E   assert (0 == 1)
+    tests/test_e9_fold2_review_pins.py::test_fold2_q6_the_window_is_counted_forward_only_a_full_ticks_spend_never_seeds_the_fast_ticks_after_it
+        E   AssertionError: the seeded ops plus the tick's own placement
+    tests/test_e9_review_pins.py::test_review_fold_a_full_tick_waits_on_a_fast_ticks_hold_and_still_returns_overlap_on_a_full_ticks
+        E   AssertionError: the fast tick's read and E31's re-read at the send, then the full tick's own
+    tests/test_e9_review_pins.py::test_review_fold_a_wake_during_the_full_ticks_step_o_waits_and_reads_the_market_order_open_once
+        E   AssertionError: assert ('ok' != 'overlap' and 0 == 1)
+    tests/test_e9_review_pins.py::test_review_fold_the_fast_tick_that_waited_finds_its_markets_drained_by_the_full_tick_and_places_nothing
+        E   AssertionError: assert (['0xcond'] == ['0xcond']
+    tests/test_e9_review_pins.py::test_review_q10_nothing_new_is_persisted_and_a_deploy_leaves_the_market_to_the_full_tick
+        E   assert ([] == []
+    tests/test_e9_review_pins.py::test_review_q1_a_full_tick_started_beside_a_fast_ticks_take_sizes_the_book_again
+        E   assert (0 == 1)
+    tests/test_e9_review_pins.py::test_review_q1_the_full_tick_reads_the_fast_ticks_rest_standing_and_never_reaches_a_second_insert
+        E   assert (0 == 1)
+    tests/test_e9_review_pins.py::test_review_q1_two_wakes_two_seconds_apart_the_second_fast_tick_sees_the_firsts_rest
+        E   assert (0 == 1)
+    tests/test_e9_review_pins.py::test_review_q2_a_siblings_open_order_in_the_rows_makes_the_room_unreadable_and_a_booked_fill_reads_fresh
+        E   assert ({} == {}
+    tests/test_e9_review_pins.py::test_review_q3_the_day_stop_the_post_only_latch_and_a_venue_ledger_disagreement_read_the_same
+        E   IndexError: list index out of range
+    tests/test_e9_review_pins.py::test_review_q7_a_burst_spends_at_most_the_rail_plus_one_markets_overshoot_and_hot_books_are_still_read
+        E   assert (2 == 5)
+    tests/test_e9_review_pins.py::test_review_q7_the_full_ticks_e2_guard_and_ops_budget_start_from_the_fast_ticks_spend
+        E   AssertionError: assert (0 == 1)
+    tests/test_e9_review_pins.py::test_review_q7_the_guarded_calls_of_one_fast_tick_seed_the_next
+        E   assert 0 == 1
+    tests/test_e9_review_pins.py::test_review_q8_a_take_that_filled_is_named_by_its_plan_never_answered_by_an_order_id
+        E   AssertionError: assert (0 == 0 and 0 == 300)
+    tests/test_fill_c16_turn_wakes.py::test_c16_book_353s_shape_side_band_at_the_wake_then_his_next_fills_wake_is_admitted_as_today
+        E   AssertionError: assert (1 == 2)
+    tests/test_fill_c16_turn_wakes.py::test_c16_book_741s_shape_the_flip_close_on_a_full_tick_wakes_the_market_and_the_next_fast_tick_opens_the_other_side
+        E   AssertionError: assert (1 == 2)
+    tests/test_fill_c16_turn_wakes.py::test_c16_every_name_is_emitted_here
+        E   AssertionError: assert (1 == 2)
+    tests/test_fill_c16_turn_wakes.py::test_c16_the_same_close_on_a_fast_tick_puts_the_market_back_for_the_next_fast_tick
+        E   AssertionError: assert (1 == 2)
+    tests/test_fill_c16_turn_wakes.py::test_c16_the_wake_releases_the_no_mark_memo_as_his_fills_wake_does_only_the_bare_terminal_memo_stands
+        E   AssertionError: read at the wake, admitted as today
+    tests/test_fill_c7_clock.py::test_c7_the_real_clock_path_with_no_wait_stamps_the_wall_clock_at_the_lock_never_the_fast_ticks_end
+        E   AssertionError: 1790779476.296292
+    tests/test_fill_t1_turn.py::test_t1_book_467s_shape_a_short_flipped_long_closes_under_a_turn_and_the_long_side_opens
+        E   AssertionError: assert (1 == 2)
+    tests/test_fill_t1_turn.py::test_t1_the_long_to_short_turn_and_the_e15_flip_witness_pin_re_run
+        E   AssertionError: assert (1 == 2)
+    tests/test_fill_t2_record.py::test_t2_book_611s_shape_forty_fills_on_one_tick_write_forty_rows_the_list_keeps_twenty_and_the_hwm_advances
+        E   AssertionError: assert (0 == 1)
+  shared failures with identical first error line: 143 of 153
+
+== CRITICAL TESTS
+  declared critical entries: 186; candidate entries not all-passed: 0

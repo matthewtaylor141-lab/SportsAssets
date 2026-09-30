@@ -1,0 +1,15 @@
+{
+ "commit": "7a3ba7b3781c6ed9d82c8c3e2c79aec3a57356b3",
+ "console_bytes": 191111,
+ "console_path": "/tmp/claude-0/gate_c1_out/head_console.txt",
+ "database": "gate_c1_head",
+ "funded_tables": "17",
+ "migration_max": "151_pair_observation_admission.sql",
+ "pip_freeze_sha256_16": "a5fd9ef9e4c78dd2",
+ "public_tables": "136",
+ "pytest": "pytest 9.1.1",
+ "pytest_exitstatus": 1,
+ "python": "3.11.15",
+ "report_path": "/tmp/claude-0/gate_c1_out/head_report.json",
+ "report_present": true
+}

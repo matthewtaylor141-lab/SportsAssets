@@ -1,0 +1,13 @@
+        assert keys[-1] == "cand_terminal_skipped" and keys[-8:-4] == ("fast_tick", "fast_tick_placed", "fast_tick_skipped", "fast_tick_failed")
+        assert keys[-1] == "cand_terminal_skipped" and keys[-8:-4] == ("fast_tick", "fast_tick_placed", "fast_tick_skipped", "fast_tick_failed")
+FAILED tests/test_e9_review_pins.py::test_review_q8_the_help_line_regenerated_from_the_case_block
+FAILED tests/test_fill_c11_cand_terminal_db.py::test_c11_the_census_place_the_emit_site_the_source_shape_and_no_knob
+FAILED tests/test_fill_c14_tick_ring.py::test_c14_the_tick_ring_label_sits_after_mirror_tick_in_the_case_order_the_help_arm_and_the_hourly
+FAILED tests/test_fill_c16_turn_wakes.py::test_c16_the_census_place_the_emit_site_no_rail_no_decision_word_no_migration
+FAILED tests/test_fill_c7_clock.py::test_c7_no_rail_no_name_no_field_no_word_no_migration
+FAILED tests/test_fill_c9_record_cols.py::test_c9_061_exists_sorts_last_after_060_and_is_four_nullable_add_column_if_not_exists_with_no_default
+FAILED tests/test_fill_c9_record_cols.py::test_c9_the_presets_read_the_columns_guarded_and_the_hourly_is_still_nine
+FAILED tests/test_fill_t2_record.py::test_t2_060_exists_sorts_last_and_is_one_create_table_if_not_exists_with_the_unique_and_one_index
+FAILED tests/test_l2_review_pins.py::test_review_the_error_line_names_every_case_label
+FAILED tests/test_l2_sleeve_window.py::test_l2_the_preset_reads_both_windows_and_sits_in_the_error_line
+10 failed, 336 passed, 2 xfailed in 75.31s (0:01:15)

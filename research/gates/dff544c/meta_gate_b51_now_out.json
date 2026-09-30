@@ -1,0 +1,15 @@
+{
+ "commit": "b51378de92dd03239d66ac0fe1b5f6b5e4449059",
+ "console_bytes": 146626,
+ "console_path": "/tmp/claude-0/gate_b51_now_out/head_console.txt",
+ "database": "gate_b51_now",
+ "funded_tables": "17",
+ "migration_max": "150_refused_hedge_claims_resolve_on_evidence.sql",
+ "pip_freeze_sha256_16": "a5fd9ef9e4c78dd2",
+ "public_tables": "136",
+ "pytest": "pytest 9.1.1",
+ "pytest_exitstatus": 1,
+ "python": "3.11.15",
+ "report_path": "/tmp/claude-0/gate_b51_now_out/head_report.json",
+ "report_present": true
+}

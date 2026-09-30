@@ -1,0 +1,46 @@
+BASELINE  exitstatus=1  collected=15642 executed=15642 deselected=0
+  counts: {"failed": 181, "passed": 15410, "skipped": 48, "xfailed": 3}
+  commit-ish argv: ['tests/', '-q', '-p', 'no:randomly', '--tb=short', '-rf', '-p', 'gate_report', '--timeout=600']
+  database: gate_b51_now   python 3.11.15   pytest 9.1.1
+HEAD  exitstatus=1  collected=15711 executed=15711 deselected=0
+  counts: {"failed": 153, "passed": 15507, "skipped": 48, "xfailed": 3}
+  commit-ish argv: ['tests/', '-q', '-p', 'no:randomly', '--tb=short', '-rf', '-p', 'gate_report', '--timeout=600']
+  database: gate_c2_run2   python 3.11.15   pytest 9.1.1
+
+NEW FAILURES (in HEAD, not in the baseline): 0
+
+NO LONGER FAILING (in the baseline, not in HEAD): 28
+  - tests/test_e7_cand_memo.py::test_e7_a_no_mark_candidate_is_memoised_and_not_re_read_inside_the_ttl
+  - tests/test_e7_review_pins.py::test_review_q4_a_market_he_entered_at_first_sight_and_the_venue_lists_20_minutes_later_opens_at_the_next_base_read
+  - tests/test_e7_review_pins.py::test_review_q4_a_market_he_entered_inside_the_hour_keeps_the_base_ttl
+  - tests/test_e7_review_pins.py::test_review_q5_a_hand_written_key_skips_a_live_market_at_most_its_rail_and_a_longer_one_not_at_all
+  - tests/test_e9_fold2_review_pins.py::test_fold2_q2_the_release_window_a_full_tick_arriving_as_a_fast_ticks_wait_ends_queues_behind_it
+  - tests/test_e9_fold2_review_pins.py::test_fold2_q6_the_window_is_counted_forward_only_a_full_ticks_spend_never_seeds_the_fast_ticks_after_it
+  - tests/test_e9_review_pins.py::test_review_fold_a_full_tick_waits_on_a_fast_ticks_hold_and_still_returns_overlap_on_a_full_ticks
+  - tests/test_e9_review_pins.py::test_review_fold_a_wake_during_the_full_ticks_step_o_waits_and_reads_the_market_order_open_once
+  - tests/test_e9_review_pins.py::test_review_fold_the_fast_tick_that_waited_finds_its_markets_drained_by_the_full_tick_and_places_nothing
+  - tests/test_e9_review_pins.py::test_review_q10_nothing_new_is_persisted_and_a_deploy_leaves_the_market_to_the_full_tick
+  - tests/test_e9_review_pins.py::test_review_q1_a_full_tick_started_beside_a_fast_ticks_take_sizes_the_book_again
+  - tests/test_e9_review_pins.py::test_review_q1_the_full_tick_reads_the_fast_ticks_rest_standing_and_never_reaches_a_second_insert
+  - tests/test_e9_review_pins.py::test_review_q1_two_wakes_two_seconds_apart_the_second_fast_tick_sees_the_firsts_rest
+  - tests/test_e9_review_pins.py::test_review_q2_a_siblings_open_order_in_the_rows_makes_the_room_unreadable_and_a_booked_fill_reads_fresh
+  - tests/test_e9_review_pins.py::test_review_q3_the_day_stop_the_post_only_latch_and_a_venue_ledger_disagreement_read_the_same
+  - tests/test_e9_review_pins.py::test_review_q7_a_burst_spends_at_most_the_rail_plus_one_markets_overshoot_and_hot_books_are_still_read
+  - tests/test_e9_review_pins.py::test_review_q7_the_full_ticks_e2_guard_and_ops_budget_start_from_the_fast_ticks_spend
+  - tests/test_e9_review_pins.py::test_review_q7_the_guarded_calls_of_one_fast_tick_seed_the_next
+  - tests/test_e9_review_pins.py::test_review_q8_a_take_that_filled_is_named_by_its_plan_never_answered_by_an_order_id
+  - tests/test_fill_c16_turn_wakes.py::test_c16_book_353s_shape_side_band_at_the_wake_then_his_next_fills_wake_is_admitted_as_today
+  - tests/test_fill_c16_turn_wakes.py::test_c16_book_741s_shape_the_flip_close_on_a_full_tick_wakes_the_market_and_the_next_fast_tick_opens_the_other_side
+  - tests/test_fill_c16_turn_wakes.py::test_c16_every_name_is_emitted_here
+  - tests/test_fill_c16_turn_wakes.py::test_c16_the_same_close_on_a_fast_tick_puts_the_market_back_for_the_next_fast_tick
+  - tests/test_fill_c16_turn_wakes.py::test_c16_the_wake_releases_the_no_mark_memo_as_his_fills_wake_does_only_the_bare_terminal_memo_stands
+  - tests/test_fill_c7_clock.py::test_c7_the_real_clock_path_with_no_wait_stamps_the_wall_clock_at_the_lock_never_the_fast_ticks_end
+  - tests/test_fill_t1_turn.py::test_t1_book_467s_shape_a_short_flipped_long_closes_under_a_turn_and_the_long_side_opens
+  - tests/test_fill_t1_turn.py::test_t1_the_long_to_short_turn_and_the_e15_flip_witness_pin_re_run
+  - tests/test_fill_t2_record.py::test_t2_book_611s_shape_forty_fills_on_one_tick_write_forty_rows_the_list_keeps_twenty_and_the_hwm_advances
+
+COMMON (pre-existing, unchanged): 153
+SKIPPED in HEAD: 48   XPASSED in HEAD: 0
+
+VERDICT: ACCEPTED -- both runs completed, both manifests reconcile, and every failure in HEAD is one the matched baseline already had.
+         This is NOT 'all tests green': 181 baseline failures remain.
