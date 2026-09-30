@@ -230,6 +230,69 @@ FAILED = "FAILED"
 OUT_OF_SCOPE = "NO_ROWS_IN_SCOPE"
 
 
+def _split_of(total: int) -> tuple:
+    """(fit, evaluation) fixture counts for `total` resolved fixtures, by the
+    SAME arithmetic `evaluate` uses -- float BASELINE_FRACTION, int()."""
+    k = int(int(total) * BASELINE_FRACTION)
+    return k, int(total) - k
+
+
+def _smallest_total(pred) -> int:
+    """The smallest resolved-fixture total for which `pred(fit, ev)` holds.
+
+    Searched, not solved: the split rounds with the evaluator's own float
+    arithmetic, and a closed form would be a second implementation of it.
+    Bounded far above any requirement this module declares.
+    """
+    for n in range(0, 20 * (MIN_RESOLVED_EVENTS + BASELINE_MIN_EVENTS) + 1):
+        if pred(*_split_of(n)):
+            return n
+    raise ValueError("no total satisfies the declared minimums")   # unreachable
+
+
+#: THE EXACT COHORT THRESHOLDS, computed from the evaluator's own split.
+#:   NEEDED_FOR_BASELINE  the fewest resolved fixtures whose earliest third
+#:                        holds BASELINE_MIN_EVENTS (150 with float 1/3).
+#:   NEEDED_FOR_VERDICT   the fewest at which PASSED or FAILED is possible:
+#:                        baseline fitted AND MIN_RESOLVED_EVENTS scored
+#:                        (449: 149 fit + 300 scored).
+#: `evaluate` also reports `total_resolved_fixtures_required` as
+#: ceil(300 / (2/3)) = 450, one more than necessary; that figure errs on the
+#: conservative side and is left as it is. The shortfall below is exact.
+NEEDED_FOR_BASELINE = _smallest_total(
+    lambda fit, ev: fit >= BASELINE_MIN_EVENTS)
+NEEDED_FOR_VERDICT = _smallest_total(
+    lambda fit, ev: fit >= BASELINE_MIN_EVENTS and ev >= MIN_RESOLVED_EVENTS)
+
+
+def cohort_shortfall(resolved_fixtures) -> dict:
+    """HOW FAR THE COHORT IS FROM A VERDICT, EXACTLY. Pure.
+
+    `resolved_fixtures` is `evaluate`'s own count: independent fixtures, one
+    per event_key, RESOLVED with a verified venue basis and a recorded
+    probability. The answer is a number of FIXTURES still needed, never of
+    rows -- twenty-four quotes of one game are one fixture.
+    """
+    try:
+        n = max(0, int(resolved_fixtures or 0))
+    except (TypeError, ValueError):
+        n = 0
+    fit, ev = _split_of(n)
+    return {"resolved_fixtures": n,
+            "needed_for_baseline": NEEDED_FOR_BASELINE,
+            "needed_for_verdict": NEEDED_FOR_VERDICT,
+            "shortfall": max(0, NEEDED_FOR_VERDICT - n),
+            "shortfall_for_baseline": max(0, NEEDED_FOR_BASELINE - n),
+            "fit_fixtures": fit, "evaluation_fixtures": ev,
+            "evaluator_stated_total_required": int(
+                math.ceil(MIN_RESOLVED_EVENTS / (1.0 - BASELINE_FRACTION))),
+            "unit": "INDEPENDENT_RESOLVED_FIXTURES",
+            "basis": ("the evaluator's own chronological split: the earliest "
+                      "int(total/3) fixtures fit the baseline (need %d) and "
+                      "the rest are scored (need %d)"
+                      % (BASELINE_MIN_EVENTS, MIN_RESOLVED_EVENTS))}
+
+
 def _sha(obj) -> str:
     return hashlib.sha256(
         json.dumps(obj, sort_keys=True, separators=(",", ":"),
@@ -437,6 +500,7 @@ def evaluate(rows, *, measured_at=None) -> dict:
     }
     if not scoped:
         out.update(status=OUT_OF_SCOPE, within_tolerance=False,
+                   resolved_fixtures=0, cohort_shortfall=cohort_shortfall(0),
                    why=("no recorded valuation is inside the declared "
                         "scope, so there is nothing to measure"))
         return out
@@ -477,6 +541,9 @@ def evaluate(rows, *, measured_at=None) -> dict:
     usable.sort()
     total = len(usable)
     out["resolved_fixtures"] = total
+    # THE EXACT SHORTFALL, from the same split. Reported on every result so
+    # the heartbeat and the admin route state one number.
+    out["cohort_shortfall"] = cohort_shortfall(total)
     k = int(total * BASELINE_FRACTION)
     fit = usable[:k]
     ev = usable[k:]
@@ -702,6 +769,10 @@ def describe() -> dict:
 
 # ── THE READ AND THE RUN ─────────────────────────────────────────────
 
+#: EVERY RECORD PURPOSE, deliberately (migration 144). A CALIBRATION_ONLY row
+#: is a valuation recorded while the venue read refused for book currency;
+#: its probability, fixture and venue contract are exactly what this measures,
+#: and it exists so this cohort can grow. Scope and class stay in `evaluate`.
 ROWS_SQL = """
     SELECT id, version, devig_method, sport_family, market, event_key,
            payout_event, probability, outcome_known, outcome,

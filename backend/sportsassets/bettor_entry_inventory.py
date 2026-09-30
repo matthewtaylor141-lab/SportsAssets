@@ -62,6 +62,7 @@ from datetime import datetime, timezone
 
 from . import bettor_entry_execution as entryx
 from . import bettor_research_shadow as _rsh
+from . import bettor_valuation_purpose as _vp
 from . import shadow
 
 #: The lane's own policy name in the shared ledger, so its rows are
@@ -212,8 +213,18 @@ def plan_entry(rec, *, now, outcome_index, fee_fn) -> dict:
 
     Pure: it touches no database. `rec` is a
     `bettor_external_shadow.evaluate` record.
+
+    A CALIBRATION-ONLY RECORD IS REFUSED FIRST, BY NAME, before `admissible`
+    is even read: it exists to score the odds source and may never become
+    inventory, whatever its flag says (see `bettor_valuation_purpose`).
     """
     out = {"ok": False, "refusals": []}
+    refused = _vp.refuse_unless_entry(rec)
+    if refused is not None:
+        out["refusals"].append(refused["refusal"])
+        out["record_purpose"] = refused["record_purpose"]
+        out["why"] = refused["why"]
+        return out
     if not rec.get("admissible"):
         out["refusals"].append(R_NOT_ADMISSIBLE)
         out["why"] = ("a refused decision creates no inventory: %s"
@@ -310,6 +321,9 @@ def plan_entry(rec, *, now, outcome_index, fee_fn) -> dict:
 
     out.update({
         "ok": True,
+        # CARRIED so `persist_entry` can refuse a plan whose record was not an
+        # entry decision, even one assembled by hand.
+        "record_purpose": _vp.purpose_of(rec),
         "position": {
             "position_id": pid,
             "experiment_id": rec["experiment_id"],
@@ -644,7 +658,18 @@ async def persist_entry(conn, plan) -> dict:
 
     A position with no order, or an order with no fill, would be a
     half-entry that every subsequent reconciliation would have to explain.
+
+    A plan naming any purpose but ENTRY_DECISION is refused before any read
+    or write; `plan_entry` never builds one, so this closes the hand-built
+    case. Migration 144 refuses a position whose `source_valuation_id` is a
+    calibration-only row as well.
     """
+    refused = _vp.refuse_unless_entry(purpose=(
+        plan or {}).get("record_purpose") or _vp.ENTRY_DECISION)
+    if refused is not None:
+        return {"written": False, "refusals": [refused["refusal"]],
+                "record_purpose": refused["record_purpose"],
+                "why": refused["why"]}
     if not plan.get("ok"):
         return {"written": False, "refusals": list(plan.get("refusals")
                                                    or []),
@@ -740,7 +765,7 @@ def describe() -> dict:
         "writesInto": ["rn1x_positions", "rn1x_decisions", "rn1x_orders",
                        "rn1x_fills"],
         "refusals": [R_NOT_ADMISSIBLE, R_NO_FILL, R_ALREADY_HELD,
-                     R_EXISTING_LOOKUP_FAILED],
+                     R_EXISTING_LOOKUP_FAILED, _vp.R_CALIBRATION_ONLY],
         "onePositionWhy": ONE_POSITION_WHY,
         "submitsNothing": True,
     }

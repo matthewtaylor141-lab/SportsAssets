@@ -418,6 +418,9 @@ async def _decision_evidence(conn, probability_row) -> dict:
         return dict(out, why=("the probability row carries no id, so the "
                               "decision evidence beside it cannot be found"))
     try:
+        # BY ID, AND ONLY THE ID `latest_probability` SELECTED -- which reads
+        # ENTRY_DECISION rows only (migration 144), so a calibration-only row
+        # never reaches this decision's evidence.
         row = await conn.fetchrow(
             "SELECT settlement_rule, settlement_comparison "
             "  FROM external_valuations WHERE id=$1", rid)

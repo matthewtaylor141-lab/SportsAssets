@@ -37,8 +37,17 @@ from __future__ import annotations
 
 from . import bettor_entry_gate as gate
 from . import bettor_pinnacle_devig as devig
+from . import bettor_valuation_purpose as vp
 
 EXPERIMENT_ID = "EXT_PINNACLE_DEVIG_V1_SHADOW"
+
+#: WHAT A RECORD IS FOR. See `bettor_valuation_purpose`: an ENTRY_DECISION is
+#: the lane's ordinary record; a CALIBRATION_ONLY record is written when the
+#: venue read refused for book currency, so the odds source can still be
+#: scored, and it can never become an entry.
+PURPOSE_ENTRY_DECISION = vp.ENTRY_DECISION
+PURPOSE_CALIBRATION_ONLY = vp.CALIBRATION_ONLY
+R_CALIBRATION_ONLY = vp.R_CALIBRATION_ONLY
 LABEL = ("EXTERNAL BOOKMAKER VALUATION, EXPERIMENTAL SHADOW. Not a trained "
          "proprietary model, not an internally qualified settlement model, "
          "and not shown to be profitable")
@@ -100,11 +109,22 @@ def evaluate(*, contract, quote, market_state, execution_estimate, size,
              outcome_books=None, armed=False,
              min_net_edge_per_contract=MIN_NET_EDGE_PER_CONTRACT,
              extra_refusals=None, payout_is_complement=False,
-             execution_plan=None) -> dict:
+             execution_plan=None, record_purpose=vp.ENTRY_DECISION,
+             calibration_only_evidence=None) -> dict:
     """One contract, end to end, through the REAL gate.
 
     Returns a record that is persisted whether or not it clears, because
     the refusals are the deliverable when nothing clears.
+
+    ── `record_purpose` ─────────────────────────────────────────────
+    ENTRY_DECISION (the default) leaves every step below exactly as it was.
+    CALIBRATION_ONLY runs the SAME valuation and the SAME gate -- so the
+    record carries every refusal it would meet -- and is then SEALED by
+    `_seal_calibration_only`: never admissible, no executable price, no
+    size, no plan, the venue price it was compared at moved into
+    `calibration_only_evidence` and flagged unusable for orders, and
+    R_CALIBRATION_ONLY added to its refusals. Nothing a caller passes can
+    unseal it.
 
     ── `execution_plan`, AND WHY THE ORDER MATTERS ──────────────────
     The execution estimate, the size and the price all depend on the
@@ -201,7 +221,7 @@ def evaluate(*, contract, quote, market_state, execution_estimate, size,
         rec["refusals"].insert(0, R_CONTROL_OFF)
         rec["decision"] = "NO_TRADE"
         rec["why"] = "the experiment's control row is not true"
-        return rec
+        return _with_purpose(rec, record_purpose, calibration_only_evidence)
 
     # PER-OUTCOME depth, not per-event. The anchor alone is a rounding
     # error; the feed module's own audit is cited in MIN_OUTCOME_BOOKS.
@@ -339,6 +359,92 @@ def evaluate(*, contract, quote, market_state, execution_estimate, size,
                    % (_p_pay, rec["payout_event"], float(ask), fee_per))
                   if rec["admissible"] else
                   ("; ".join(rec["refusals"]) or "no reason recorded"))
+    return _with_purpose(rec, record_purpose, calibration_only_evidence)
+
+
+def _with_purpose(rec: dict, purpose, evidence) -> dict:
+    """Stamp the record's purpose and, for anything but an entry decision,
+    seal it. An ENTRY_DECISION record is returned with the purpose added and
+    nothing else touched."""
+    p = str(purpose if purpose is not None else vp.ENTRY_DECISION)
+    rec["record_purpose"] = p
+    if p == vp.ENTRY_DECISION and evidence is None:
+        return rec
+    if p not in vp.PURPOSES:
+        # AN UNRECOGNISED PURPOSE IS REFUSED, NOT DEFAULTED. `persist` refuses
+        # to write it at all; this makes the in-memory record say so too.
+        if vp.R_UNKNOWN_PURPOSE not in rec["refusals"]:
+            rec["refusals"].append(vp.R_UNKNOWN_PURPOSE)
+        rec.update(admissible=False, decision="NO_TRADE", proposed_size=None,
+                   why="; ".join(rec["refusals"]))
+        return rec
+    # An ENTRY_DECISION handed calibration evidence is a contradiction; the
+    # evidence wins, because it is only ever attached by the calibration path
+    # and reading it as an entry is the direction that could trade.
+    rec["record_purpose"] = vp.CALIBRATION_ONLY
+    return _seal_calibration_only(rec, evidence)
+
+
+def _seal_calibration_only(rec: dict, evidence) -> dict:
+    """THE CALIBRATION-ONLY RECORD, MADE STRUCTURALLY UNABLE TO TRADE.
+
+    The valuation and the gate ran exactly as for an entry, so the record
+    carries every refusal a real candidate would meet. What changes is what
+    the record may CLAIM:
+
+      * the venue price it was compared at was DISPLAYED on a book whose
+        currency was not established. It is moved out of `executable_price`
+        -- a column readers take as the same-venue ask -- into the evidence,
+        with the cost and edge computed at it, and labelled unusable for
+        orders. The row's economics columns are NULL;
+      * no size, no execution estimate, no risk verdict, no exposure: a plan
+        handed in by mistake is discarded, and the evidence says so;
+      * never admissible, whatever the gate said, and R_CALIBRATION_ONLY is
+        one of its refusals so every census can count it.
+
+    Migration 144 enforces the same on the row, so a later edit to this
+    function cannot write a calibration-only row that could trade.
+    """
+    ev = dict(evidence or {})
+    displayed = dict(ev.get("displayed_quote") or {})
+    displayed["usable_for_orders"] = False
+    displayed.setdefault("what_this_is", vp.DISPLAYED_NOT_AN_ORDER_PRICE)
+    ev["displayed_quote"] = displayed
+    ev["compared_at_the_displayed_price"] = {
+        "price": rec.get("executable_price"),
+        "price_basis": rec.get("executable_price_basis"),
+        "cost_per_contract": rec.get("cost_per_contract"),
+        "cost_per_contract_basis": rec.get("cost_per_contract_basis"),
+        "edge_per_contract": rec.get("estimated_edge_per_contract"),
+        "usable_for_orders": False,
+        "what_this_is": (
+            "the edge the gate computed against the DISPLAYED price, kept so "
+            "a real candidate is traced through the economics too. It is not "
+            "an executable edge and no reader may size against it")}
+    ev["gate_refusals"] = list((rec.get("gate") or {}).get("refusals") or [])
+    if rec.pop("execution_plan", None) is not None:
+        ev["execution_plan_discarded"] = (
+            "a plan was handed to a calibration-only record and discarded: "
+            "such a record carries no size, estimate or risk verdict")
+    for k in ("submitted_limit", "worst_case_cost_per_contract",
+              "plan_refusals"):
+        rec.pop(k, None)
+    ev["record_purpose"] = vp.CALIBRATION_ONLY
+    ev["usable_for_orders"] = False
+    ev["why"] = vp.WHY_CALIBRATION_ONLY_CANNOT_TRADE
+    if isinstance(rec.get("gate"), dict):
+        rec["gate"] = dict(rec["gate"],
+                           priced_against=("A_DISPLAYED_PRICE_NOT_USABLE_"
+                                           "FOR_ORDERS"))
+    rec.update(executable_price=None, executable_price_basis=None,
+               cost_per_contract=None, cost_per_contract_basis=None,
+               estimated_edge_per_contract=None, proposed_size=None,
+               admissible=False, decision="NO_TRADE",
+               record_purpose=vp.CALIBRATION_ONLY,
+               calibration_only_evidence=ev)
+    if vp.R_CALIBRATION_ONLY not in rec["refusals"]:
+        rec["refusals"].append(vp.R_CALIBRATION_ONLY)
+    rec["why"] = "; ".join(rec["refusals"])
     return rec
 
 
@@ -381,7 +487,11 @@ INSERT = """
          -- what size the policy chose, which rail passed or what the
          -- settlement comparison found.
          execution_estimate, risk_verdict, exposure_observed,
-         settlement_comparison)
+         settlement_comparison,
+         -- WHAT THE ROW IS FOR (migration 144): ENTRY_DECISION with no
+         -- evidence -- exactly the column default -- or CALIBRATION_ONLY with
+         -- the refused read and the displayed price it was compared at.
+         record_purpose, calibration_only_evidence)
     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,
             $18::jsonb,$19,$20,$21,
             CASE WHEN $22::double precision IS NULL THEN NULL
@@ -390,7 +500,8 @@ INSERT = """
                  ELSE to_timestamp($23) END,
             $24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,
             $37,$38,$39,$40,$41,$42,$43,$44,
-            $45::jsonb,$46::jsonb,$47::jsonb,$48::jsonb)
+            $45::jsonb,$46::jsonb,$47::jsonb,$48::jsonb,
+            $49,$50::jsonb)
     -- BARE `DO NOTHING`, deliberately. Migration 105's uniqueness is an
     -- EXPRESSION index (coalesce over the nullable key columns), and
     -- `ON CONFLICT ON CONSTRAINT` cannot name an index, while inferring
@@ -405,6 +516,14 @@ INSERT = """
     ON CONFLICT DO NOTHING
     RETURNING id
 """
+
+#: ONE STATEMENT FOR BOTH PURPOSES, with every value explicit. An
+#: ENTRY_DECISION row goes down with `record_purpose = 'ENTRY_DECISION'` and
+#: no evidence -- exactly what the column default would have written, so the
+#: row an entry decision produces is the row it always produced. On a database
+#: where migration 144 has not run, the write fails on the missing column and
+#: is counted by name: a calibration-only record can never land in a table
+#: that cannot say what it is for, where it would read as an entry decision.
 
 JOIN_OUTCOME = """
     UPDATE external_valuations
@@ -434,9 +553,28 @@ async def persist(conn, rec: dict) -> int | None:
     Returns the row id. A refused record is stored with its full refusal
     list because that list is what management inspects to see WHY the
     engine did not buy.
+
+    The record's PURPOSE goes on the row: an entry decision with no
+    evidence, or a calibration-only record with its evidence. A
+    calibration-only record that is admissible, or that lost its evidence,
+    is refused here before the database refuses it too. An unrecognised
+    purpose is never written.
     """
     import json
 
+    purpose = vp.purpose_of(rec)
+    if purpose not in vp.PURPOSES:
+        raise ValueError("%s: %r" % (vp.R_UNKNOWN_PURPOSE, purpose))
+    evidence_json = None
+    if purpose == vp.CALIBRATION_ONLY:
+        ev = rec.get("calibration_only_evidence")
+        if rec.get("admissible") or not isinstance(ev, dict) \
+                or ev.get("usable_for_orders") is not False:
+            raise ValueError(
+                "%s: a calibration-only record must be inadmissible and carry "
+                "its evidence, flagged unusable for orders"
+                % vp.R_CALIBRATION_ONLY)
+        evidence_json = json.dumps(ev, default=str)
     c = rec.get("contract") or {}
     v = rec.get("valuation") or {}
     return await conn.fetchval(
@@ -512,9 +650,17 @@ async def persist(conn, rec: dict) -> int | None:
         _plan_json(rec, "risk"),
         _plan_json(rec, "exposure"),
         (None if rec.get("settlement_comparison") is None
-         else json.dumps(rec["settlement_comparison"], default=str)))
+         else json.dumps(rec["settlement_comparison"], default=str)),
+        # ── WHAT THE ROW IS FOR (migration 144) ───────────────────────
+        purpose, evidence_json)
 
 
+#: THE CENSUS READS BELOW ARE REPORTING, over EVERY record purpose (migration
+#: 144): they count what the lane recorded and act on nothing. A
+#: calibration-only row carries its venue-read refusal first and
+#: CALIBRATION_ONLY_RECORD_IS_NOT_AN_ENTRY_CANDIDATE among its refusals, so it
+#: is attributed to 2_FRESHNESS and never reads as admissible; SUMMARY counts
+#: it apart. Readers that SELECT candidates filter record_purpose instead.
 REFUSAL_CENSUS = """
     SELECT unnest(refusals) AS refusal, count(*) AS n
       FROM external_valuations
@@ -538,7 +684,13 @@ SUMMARY = """
                AS with_global_condition_id,
            count(*) FILTER (WHERE us_market_slug IS NOT NULL
                               AND condition_id IS NOT NULL)
-               AS with_both
+               AS with_both,
+           -- WHAT EACH ROW IS FOR (migration 144). A calibration-only row is
+           -- a valuation recorded while the venue read refused; counting it
+           -- among "evaluated" without saying so would overstate the entry
+           -- lane's reach.
+           count(*) FILTER (WHERE record_purpose = 'CALIBRATION_ONLY')
+               AS calibration_only
       FROM external_valuations
      WHERE experiment_id = $1
 """
@@ -559,6 +711,8 @@ SUMMARY_IN_WINDOW = """
            count(*) FILTER (WHERE admissible) AS admissible,
            count(*) FILTER (WHERE NOT admissible) AS refused,
            count(*) FILTER (WHERE probability IS NOT NULL) AS priced,
+           count(*) FILTER (WHERE record_purpose = 'CALIBRATION_ONLY')
+               AS calibration_only,
            min(decided_at) AS first_at, max(decided_at) AS last_at
       FROM external_valuations
      WHERE experiment_id = $1
@@ -609,7 +763,14 @@ STAGES = (
         "VENUE_BOOK_STALE",
         "ONE_CLOCK_IS_NOT_MEASURED",
         # Lever A: already past the 30 s rule before any venue read.
-        "QUOTE_STALE_ON_ARRIVAL")),
+        "QUOTE_STALE_ON_ARRIVAL",
+        # THE VENUE READ'S OWN FRESHNESS REFUSALS. They used to stop the lane
+        # before any row existed, so no row carried them; a calibration-only
+        # record now does, and without these the census would attribute it
+        # to whichever LATER stage also refused it.
+        "VENUE_BOOK_CURRENCY_NOT_ESTABLISHED",
+        "VENUE_BOOK_CURRENCY_CONTRADICTED_BY_CONTRACT",
+        "OUR_OWN_PROCESSING_DELAY_EXCEEDED_BEFORE_THE_DECISION")),
     ("3_IDENTITY", (
         # THE GLOBAL CATALOGUE COULD NOT NAME ONE MONEYLINE ROW (map4 D9).
         "VENUE_MAPPING_AMBIGUOUS",
@@ -743,8 +904,16 @@ EVALUABILITY_OF = {
     # fixture, and this lane prices whole fixtures.
     "VENUE_MARKET_SCOPE_IS_A_SEGMENT": DECIDED,
     "PAYOUT_OUTCOME_DISAGREES_WITH_THE_VENUE_INTENT": DECIDED,
+    # THE RESPONSE'S OWN HEADERS PUT IT PAST THE BOUND, and our own delay was
+    # MEASURED past its bound: both are judgements on evidence that was read.
+    "VENUE_BOOK_CURRENCY_CONTRADICTED_BY_CONTRACT": DECIDED,
+    "OUR_OWN_PROCESSING_DELAY_EXCEEDED_BEFORE_THE_DECISION": DECIDED,
 
     # ── COULD NOT EVALUATE: an input we need was not established ──────
+    # A CALIBRATION-ONLY RECORD WAS NEVER EVALUATED AS AN ENTRY: its venue
+    # price was displayed, not executable, so there was no size, estimate or
+    # risk verdict to judge. The venue refusal beside it says why.
+    "CALIBRATION_ONLY_RECORD_IS_NOT_AN_ENTRY_CANDIDATE": COULD_NOT_EVALUATE,
     "INDEPENDENT_FAIR_VALUE_NOT_ESTABLISHED": COULD_NOT_EVALUATE,
     "NO_QUALIFIED_MODEL": COULD_NOT_EVALUATE,
     "THIN_OUTCOME_COVERAGE": COULD_NOT_EVALUATE,
@@ -825,6 +994,10 @@ EVALUABILITY_OF = {
     "NO_VENUE_CONTRACT_FOR_EVENT": EXTERNAL_DEPENDENCY,
     "NO_VENUE_NATIVE_CONTRACT_IN_PREMAP": EXTERNAL_DEPENDENCY,
     "NO_PREMAP_CONTRACT_FOR_THIS_FIXTURE": EXTERNAL_DEPENDENCY,
+    # THE VENUE DOES NOT DOCUMENT ITS MARKET-DATA TIMING (bettor_stream_currency
+    # P5), so no mechanism can establish that a book is current. Missing
+    # evidence that only the venue can supply.
+    "VENUE_BOOK_CURRENCY_NOT_ESTABLISHED": EXTERNAL_DEPENDENCY,
 }
 
 

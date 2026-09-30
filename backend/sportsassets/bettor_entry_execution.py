@@ -1721,11 +1721,25 @@ def qty_cap_from_headroom(headroom: dict, *,
 # NOT_EVALUABLE and it BLOCKS inventory creation.
 #
 # THAT IS NOT CIRCULAR AND IT IS NOT A DEAD END. What the gate blocks is
-# creating a POSITION. It does not block the lane's actual shadow work,
-# which is recording the valuation, the price, the costs and the verdict
-# on every supported market every cycle -- and those records, paired with
-# settled outcomes, are exactly the calibration evidence the gate is
-# waiting for. The lane accumulates its own key.
+# creating a POSITION. It does not block recording the valuation -- the
+# probability, the fixture and the venue contract -- for every candidate the
+# lane evaluates, and those records, joined to the venue's settlements, are
+# exactly the calibration evidence the gate is waiting for. The lane
+# accumulates its own key.
+#
+# CORRECTED 2026-09-29, BECAUSE FOR TWO DAYS IT WAS NOT TRUE. The claim above
+# once read "recording the valuation, the price, the costs and the verdict on
+# every supported market every cycle". From d66e89e (2026-09-27) the venue read
+# refused every book on VENUE_BOOK_CURRENCY_NOT_ESTABLISHED, the valuation was
+# written only after an ok read, and so NOTHING was recorded and the cohort
+# stopped growing -- not this gate, but the venue-currency gate, blocked the
+# evidence. `ext_pinnacle_loop` now records the valuation after a currency
+# refusal too, sealed CALIBRATION_ONLY (`bettor_valuation_purpose`): it carries
+# the probability and every refusal it met, but NO executable price, size,
+# execution estimate or risk verdict, it is never admissible, and every
+# inventory, funded and reservation path refuses it by name. So on a book
+# whose currency is not established the lane records the VALUATION, not a
+# price or a verdict it could act on -- and that is all calibration needs.
 #
 # IT IS ALSO NOT SOMETHING TO ARGUE AROUND. A `permitted: True` written
 # here because the lane is "only shadow" would be the same placeholder

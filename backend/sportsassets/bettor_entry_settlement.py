@@ -550,11 +550,17 @@ ALL_TOKENS_SQL = """
 
 #: Candidate venue identities recorded for this condition, WITH the payout
 #: event each one describes -- which is what makes checking them possible.
+#:
+#: ENTRY DECISIONS ONLY (migration 144). A position can only ever have been
+#: opened from an ENTRY_DECISION row, so a CALIBRATION_ONLY row can never be
+#: the identity a position holds -- and admitting it as a candidate could only
+#: add an identity no position was opened under.
 CANDIDATE_IDENTITY_SQL = """
     SELECT DISTINCT us_market_slug, buy_intent, ladder_side, payout_event,
            venue, max(id) AS valuation_id
       FROM external_valuations
      WHERE condition_id = $1 AND us_market_slug IS NOT NULL
+       AND record_purpose = 'ENTRY_DECISION'
      GROUP BY us_market_slug, buy_intent, ladder_side, payout_event, venue
 """
 

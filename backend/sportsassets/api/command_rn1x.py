@@ -1391,7 +1391,10 @@ EXTERNAL_TRACE = """
            mapping_match, probability, executable_price, cost_per_contract,
            estimated_edge_per_contract, decision, admissible, refusals,
            why, proposed_size, decided_at, outcome_known, outcome,
-           outcome_at, realised_net_usd, order_submitted
+           outcome_at, realised_net_usd, order_submitted,
+           -- WHAT THE ROW IS FOR (migration 144), and for a calibration-only
+           -- row the refused read and the DISPLAYED price it was compared at.
+           record_purpose, calibration_only_evidence
       FROM external_valuations WHERE id = $1
 """
 
@@ -1419,8 +1422,23 @@ ENTRY_EVIDENCE = """
            devig_method, book, event_key
       FROM external_valuations
      WHERE experiment_id = $1
+       -- ENTRY DECISIONS ONLY (migration 144). This read is "the entry
+       -- lane's own decisions"; a CALIBRATION_ONLY row is a valuation kept
+       -- for scoring the odds source on a refused venue read, and is
+       -- counted separately by CALIBRATION_ONLY_COUNT, never shown as a
+       -- candidate.
+       AND record_purpose = 'ENTRY_DECISION'
        AND decided_at >= now() - ($2 || ' hours')::interval
      ORDER BY decided_at DESC LIMIT $3
+"""
+
+#: THE CALIBRATION-ONLY ROWS IN THE SAME WINDOW, as a count: how many
+#: valuations were recorded for calibration while the venue read refused.
+CALIBRATION_ONLY_COUNT = """
+    SELECT count(*) FROM external_valuations
+     WHERE experiment_id = $1
+       AND record_purpose = 'CALIBRATION_ONLY'
+       AND decided_at >= now() - ($2 || ' hours')::interval
 """
 
 #: THE POLICY IS NOT THE EXPERIMENT, and scoping on the policy alone let
@@ -1490,25 +1508,33 @@ async def entry_evidence(conn, *, hours: int = 24, limit: int = 20) -> dict:
     held = await conn.fetch(ENTRY_INVENTORY, inv.POLICY, ext.EXPERIMENT_ID,
                             max(1, min(200, int(limit))))
     try:
-        cal = await conn.fetchrow(
-            "SELECT source_version, sample_size, metric, score, tolerance, "
-            "within_tolerance, measured_by, measured_at "
-            "FROM external_source_calibration WHERE source_version = $1 "
-            "ORDER BY measured_at DESC LIMIT 1", devig.VERSION)
-        # `measured` IS SET EXPLICITLY, not inferred from the row's
-        # presence by whoever reads this. A row that came back without it
-        # printed `measured: null`, which reads like a third state that
-        # does not exist.
-        calibration = (dict(cal, measured=True) if cal is not None
-                       else {"measured": False,
-                             "source_version": devig.VERSION,
-                             "why": ("no calibration has been measured for "
-                                     "this source, so MODEL_TRUST_DRIFT is "
-                                     "NOT_EVALUABLE and blocks every "
-                                     "entry")})
+        calibration_only_rows = int(await conn.fetchval(
+            CALIBRATION_ONLY_COUNT, ext.EXPERIMENT_ID,
+            str(max(1, min(720, int(hours))))) or 0)
+    except Exception as exc:                                   # noqa: BLE001
+        calibration_only_rows = {"read_failed": type(exc).__name__}
+    # ── "MEASURED" MEANS WHAT THE GATE MEANS BY IT ───────────────────
+    #
+    # THE DISAGREEMENT THIS CLOSES (map5 §2). This read took the newest row
+    # and printed `measured: true` whatever it was -- an older evaluator's
+    # row, a row below the evaluator's minimum sample, a row weeks past its
+    # age limit -- while the MODEL_TRUST_DRIFT gate, reading the same table
+    # through `source_calibration`, called it not measured. The display now
+    # asks the SAME function the gate asks, so the two cannot disagree: the
+    # current evaluator, >= its minimum sample, <= CALIBRATION_MAX_AGE_S. A
+    # rejected newest row is shown beside the reason it does not count.
+    from ..workers import ext_pinnacle_loop as _EXT
+
+    try:
+        calibration = dict(await _EXT.source_calibration(conn,
+                                                         devig.VERSION))
+        calibration["verdict_source"] = (
+            "ext_pinnacle_loop.source_calibration -- the same evaluator, "
+            "sample-size and age checks the MODEL_TRUST_DRIFT gate applies")
     except Exception as exc:                                   # noqa: BLE001
         # A FAILED READ IS NOT AN ABSENT MEASUREMENT, and the two must not
-        # print the same.
+        # print the same. (`source_calibration` itself never raises; this is
+        # the defect path.)
         calibration = {"measured": False, "read_failed": type(exc).__name__}
 
     # JSONB COMES BACK AS A STRING, AND THE API MUST NOT PASS THAT ON.
@@ -1548,6 +1574,9 @@ async def entry_evidence(conn, *, hours: int = 24, limit: int = 20) -> dict:
         "experiment_id": ext.EXPERIMENT_ID,
         "policy": inv.POLICY,
         "candidates": cands,
+        # NOT CANDIDATES: valuations recorded for calibration only while the
+        # venue read refused, in the same window. Never admissible.
+        "calibration_only_valuations_in_window": calibration_only_rows,
         "inventory": [dict(r) for r in held],
         "source_calibration": calibration,
         "risk_declaration": entryx.declaration(),
@@ -1699,6 +1728,11 @@ async def input_chain(pool, position_id: str) -> dict:
         "SELECT count(*) AS rows, "
         "count(*) FILTER (WHERE probability IS NOT NULL) AS priced, "
         "count(*) FILTER (WHERE eligibility = 'ELIGIBLE') AS eligible, "
+        # A DIAGNOSTIC COUNT, read-only. Calibration-only rows (migration
+        # 144) are counted apart so `eligible` is not read as "usable by a
+        # decision" -- no decision reads them.
+        "count(*) FILTER (WHERE record_purpose = 'CALIBRATION_ONLY') "
+        "  AS calibration_only, "
         "max(observed_at) AS newest_observed, max(id) AS last_id, "
         "extract(epoch FROM now() - max(observed_at))::float8 AS newest_age_s "
         "FROM external_valuations WHERE condition_id = $1",

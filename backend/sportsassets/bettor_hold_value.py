@@ -285,6 +285,10 @@ LATEST_PROBABILITY_SQL = """
       FROM external_valuations
      WHERE us_market_slug = $1
        AND eligibility = 'ELIGIBLE'
+       -- ENTRY DECISIONS ONLY (migration 144). A CALIBRATION_ONLY row was
+       -- valued while the venue read was refused; it exists to score the
+       -- odds source and must never price a HOLD or an exit.
+       AND record_purpose = 'ENTRY_DECISION'
      ORDER BY observed_at DESC NULLS LAST, id DESC
      LIMIT 1
 """

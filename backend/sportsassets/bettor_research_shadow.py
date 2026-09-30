@@ -74,6 +74,8 @@ that cannot answer has not authorised anything.
 
 from __future__ import annotations
 
+from . import bettor_valuation_purpose as _vp
+
 VERSION = "UNFUNDED_RESEARCH_SHADOW_V1"
 
 #: The control row. Absence is NOT permission.
@@ -156,13 +158,20 @@ async def authorised(conn) -> dict:
                      "explicitly unmeasured" % CONTROL_KEY))
 
 
-def waive(state, *, authorised_flag, calibration=None) -> dict:
+def waive(state, *, authorised_flag, calibration=None,
+          record_purpose=None) -> dict:
     """The gate map the risk engine should see, and the record of why.
 
     `state` is `state_from_evidence(...)["state"]` -- UNMODIFIED. This
     returns a COPY with the waived gate marked clear for the engine's
     purposes, plus the untouched original, so a reader can always see what
     the gate actually said.
+
+    `record_purpose` is the valuation's purpose. A CALIBRATION_ONLY record is
+    refused first, by name, and nothing is waived for it: it was valued on a
+    book whose currency was not established, so STALE_DATA is unknown for it
+    (never waivable) and the waiver has nothing it may do. None is the
+    entry lane's own caller, whose records are entry decisions.
 
     Returns {"state": <for the engine>, "gate_state_as_read": <original>,
              "waived": [...], "refusals": [...], ...}.
@@ -177,6 +186,15 @@ def waive(state, *, authorised_flag, calibration=None) -> dict:
         "what_this_is_not": WHAT_THE_WAIVER_IS_NOT,
         "never_waivable": sorted(NEVER_WAIVABLE),
     }
+
+    not_entry = _vp.refuse_unless_entry(
+        purpose=(_vp.ENTRY_DECISION if record_purpose is None
+                 else record_purpose))
+    if not_entry is not None:
+        out["refusals"].append(not_entry["refusal"])
+        out["state"] = dict(original)
+        out["why"] = not_entry["why"]
+        return out
 
     # A CONTRADICTORY LIST REFUSES RATHER THAN BEING RESOLVED. If somebody
     # adds a gate to both sets, the safe reading is not "the permissive one
@@ -267,5 +285,5 @@ def describe() -> dict:
         "absence_is_not_permission": (
             "an absent or unreadable control row leaves the mode OFF"),
         "refusals": (R_NOT_AUTHORISED, R_CONTROL_UNREADABLE,
-                     R_CONTRADICTORY, R_CALIBRATED),
+                     R_CONTRADICTORY, R_CALIBRATED, _vp.R_CALIBRATION_ONLY),
     }

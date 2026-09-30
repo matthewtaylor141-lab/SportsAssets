@@ -41,6 +41,7 @@ tests/test_bettor_hedge_tax.py
 tests/test_bettor_mgmt_lifecycle.py
 tests/test_bettor_pair_engine.py
 tests/test_bettor_shadow_execution.py
+tests/test_calibration_only_records_cannot_trade.py
 tests/test_cut_whale_exit.py
 tests/test_desk_mirror_sides.py
 tests/test_desk_recovery.py
@@ -108,6 +109,7 @@ tests/test_the_acquisition_is_counted_once_at_the_boundary.py
 tests/test_the_admission_policy_is_off_and_bounded.py
 tests/test_the_audit_findings_are_closed.py
 tests/test_the_book_starts_empty_and_the_schedule_fills_it.py
+tests/test_the_calibration_measurement_is_scheduled.py
 tests/test_the_capacity_probe_cannot_touch_a_strategy_book.py
 tests/test_the_command_centre_shows_the_decision.py
 tests/test_the_cycle_confirms_a_competition_before_spending.py
