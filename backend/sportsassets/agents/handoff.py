@@ -259,6 +259,7 @@ async def handoffs(conn, *, limit: int = 50, entry_intent_id=None) -> list:
         "SELECT h.*, i.state AS intent_state, "
         "       i.residual_qty::float8 AS residual_qty, i.closed_at, "
         "       i.closed_reason, i.account_id, i.venue, i.us_market_slug, "
+        "       (i.decision_ref->>'derek_decision_id') AS derek_decision_id, "
         "       bettor_funded_position_is_open(i.state, i.residual_qty, "
         "                                      i.closed_at) AS position_open "
         "  FROM agent_position_handoffs h "
@@ -288,9 +289,17 @@ async def handoffs(conn, *, limit: int = 50, entry_intent_id=None) -> list:
                 v = float(v)
             d[k] = v
         d["fills"] = fills.get(d["entry_intent_id"], [])
+        # THE DEREK DECISION THE ENTRY EXECUTED, by the id the intent carries
+        # (absent on an intent written before the id was carried).
+        derek = ([{"kind": "derek_entry_decisions",
+                   "id": d["derek_decision_id"],
+                   "href": "/api/command/agents/derek/decisions/%s"
+                   % d["derek_decision_id"]}]
+                 if d.get("derek_decision_id") else [])
         d["evidence"] = (
-            [{"kind": "bettor_funded_intents", "id": d["entry_intent_id"],
-              "href": "/api/command/xavier/%s" % d["entry_intent_id"]}]
+            derek
+            + [{"kind": "bettor_funded_intents", "id": d["entry_intent_id"],
+                "href": "/api/command/xavier/%s" % d["entry_intent_id"]}]
             + [{"kind": "bettor_funded_fills", "id": f["fill_id"],
                 "href": "/api/command/agents/handoffs?entry_intent_id=%s"
                 % d["entry_intent_id"]} for f in d["fills"]])
