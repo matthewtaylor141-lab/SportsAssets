@@ -12,6 +12,9 @@ PRODUCTION default separately, with the env cleared. Lifting it here
 cannot hide a regression in the halt itself.
 """
 
+import sys
+import time
+
 import pytest
 
 
@@ -380,3 +383,59 @@ def _no_observation_reads_from_tests(monkeypatch):
     monkeypatch.setattr(fm, "_real_settlement_probe", fm._settlement_probe,
                         raising=False)
     monkeypatch.setattr(fm, "_settlement_probe", _no_recheck)
+
+
+#: Harness users that compare against a REAL database clock (Postgres now()),
+#: which cannot be re-anchored; re-anchoring Python's clock there would split
+#: the two clocks instead of joining them. Named, not inferred.
+_DB_CLOCK_MODULES = frozenset({
+    "tests.test_l2_review_pins",
+    "tests.test_mirror_loss_sum_real_pg",
+})
+
+
+@pytest.fixture(autouse=True)
+def _mirror_harness_clock_is_its_own_now(request, monkeypatch):
+    """THE MIRROR HARNESS'S CLOCK IS NOW, NOT THE SUITE'S ELAPSED TIME.
+
+    `tests/test_mirror_live_worker.py` fixes `NOW = time.time()` at IMPORT --
+    at collection, for a full-suite run -- and drives `ml.tick_once(...,
+    now_ts=NOW)`, while the worker stamps a snapshot's read with the real
+    clock (`t.snap_read_at[whale] = time.time()`). Once the suite has run
+    longer than the snapshot freshness window before a harness test executes,
+    that snapshot reads `snapshot_stale` / `snap_market_stale` against NOW
+    and nothing is placed: the e4dc132 and edd2a2f gates reached
+    test_e21_fast_add_replan about 9-10 minutes after collection and failed
+    it, the dff544c baseline reached it at about 8 minutes and passed, and
+    every run that reached it sooner passed. Advancing the real clock by 300 s
+    after collection reproduces the failure in isolation.
+
+    The worker is right; the harness's two clocks drifted apart. For every
+    test that uses the harness, the real clock is re-anchored to the harness's
+    NOW for the duration of the test, so it reads as it did when the tests
+    were written: the same relationship, independent of suite length.
+    """
+    harness = sys.modules.get("tests.test_mirror_live_worker")
+    if harness is None:
+        yield
+        return
+    mod = request.module
+    uses = mod is harness or any(v is harness for v in vars(mod).values()) \
+        or any(getattr(v, "__module__", None) == harness.__name__
+               for v in vars(mod).values() if callable(v))
+    if not uses or getattr(mod, "__name__", "") in _DB_CLOCK_MODULES:
+        yield
+        return
+    real = time.time
+    start = real()
+    monkeypatch.setattr(time, "time", lambda: harness.NOW + (real() - start))
+    # The worker's own module-level stamps from an earlier test were taken on
+    # the real clock; on the re-anchored clock they would sit in the future
+    # and throttle this test's ticks. Start each test from the loop's
+    # initial values, as a fresh process would (a test that needs one sets it).
+    ml = sys.modules.get("sportsassets.workers.mirror_live")
+    if ml is not None:
+        for name in ("_backoff_until", "_last_tick_at", "_fast_last_at"):
+            if hasattr(ml, name):
+                monkeypatch.setattr(ml, name, 0.0)
+    yield
