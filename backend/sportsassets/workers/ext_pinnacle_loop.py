@@ -6495,6 +6495,15 @@ async def _agents_after_service(conn, out: dict, *, slow: bool) -> dict:
     except Exception as exc:                                   # noqa: BLE001
         got["xavier"] = {"error": "%s: %s" % (type(exc).__name__,
                                               str(exc)[:200])}
+    # PAPER TRADING (migration 171+): one background pass per servicing
+    # pass, on its own pool connection, gated by PAPER_SESSION=on AND the
+    # paper control row; it returns at once and never raises here.
+    try:
+        got["paper"] = _agents_runtime().paper_pass_hook(
+            trigger="SERVICING_TASK")
+    except Exception as exc:                                   # noqa: BLE001
+        got["paper"] = {"error": "%s: %s" % (type(exc).__name__,
+                                             str(exc)[:200])}
     if slow:
         try:
             got["audrey"] = await _agents_runtime().slow_half(

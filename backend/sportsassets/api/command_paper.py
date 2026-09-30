@@ -1,0 +1,291 @@
+"""PAPER TRADING READ MODELS: /api/command/paper/* (read-only, COMMAND auth).
+
+Every figure is LIVE MARKET DATA / SIMULATED EXECUTION on the fictional
+$500,000 paper account. Paper totals are NEVER mixed with funded totals: no
+route here reads a funded table.
+
+EVERY SECTION IS INDEPENDENTLY
+    {"status": "OK" | "EMPTY" | "UNAVAILABLE", "why": <reason or null>,
+     "data": ...}
+EMPTY carries the named reason; UNAVAILABLE names the failed read. Every
+response carries `labels`, `data_label` and `last_updated_at`.
+
+ROUTES (shapes documented in docs/PAPER_TRADING_READ_MODELS.md):
+  GET /api/command/paper/account     derived balances + latest N entries
+  GET /api/command/paper/stream      Server-Sent Events of COMMITTED ledger
+                                     entries (Last-Event-ID replay)
+  GET /api/command/paper/session     id, start, frozen config, simulator
+                                     version, health, heartbeats, mutation
+                                     attempts
+  GET /api/command/paper/derek       opportunities (decisions), paper orders,
+                                     fills, handoffs
+  GET /api/command/paper/xavier      positions, standing orders,
+                                     recommendations
+  GET /api/command/paper/audrey      daily report and audit entries
+"""
+from __future__ import annotations
+
+import asyncio
+import json
+import time
+
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
+from fastapi.responses import StreamingResponse
+
+from .agents_core import require_read
+
+router = APIRouter()
+
+STREAM_POLL_S = 1.0
+STREAM_HEARTBEAT_S = 15.0
+STREAM_BATCH = 200
+
+
+def _labels() -> dict:
+    from .. import bettor_paper_ledger as L
+    return {"data_label": L.DATA_LABEL, "labels": dict(L.LABELS)}
+
+
+async def _pool():
+    from ..db import get_pool
+    try:
+        return await get_pool()
+    except Exception as exc:                                    # noqa: BLE001
+        raise HTTPException(status_code=503, detail={
+            "reason": "NO_DATABASE_POOL", "detail": type(exc).__name__})
+
+
+async def section(coro, *, empty_why: str, is_empty=None) -> dict:
+    try:
+        data = await coro
+    except Exception as exc:                                    # noqa: BLE001
+        return {"status": "UNAVAILABLE",
+                "why": "%s: %s" % (type(exc).__name__, str(exc)[:160]),
+                "data": None}
+    empty = (is_empty(data) if is_empty is not None else not data)
+    if empty:
+        return {"status": "EMPTY", "why": empty_why, "data": data}
+    return {"status": "OK", "why": None, "data": data}
+
+
+async def _schema(conn) -> bool:
+    try:
+        return bool(await conn.fetchval(
+            "SELECT to_regclass('paper_ledger') IS NOT NULL"))
+    except Exception:                                           # noqa: BLE001
+        return False
+
+
+def _unavailable_schema() -> dict:
+    return {"status": "UNAVAILABLE", "why": "MIGRATION_171_IS_NOT_APPLIED",
+            "data": None}
+
+
+# ═════════════════════════════════════════════════════════════════════
+# ACCOUNT
+# ═════════════════════════════════════════════════════════════════════
+
+async def account_payload(conn, *, entries: int = 50,
+                          now: float | None = None) -> dict:
+    from .. import bettor_paper_ledger as L
+    at = float(now if now is not None else time.time())
+    out = dict(_labels(), as_of=at, account_id=L.ACCOUNT_ID)
+    if not await _schema(conn):
+        out.update(account=_unavailable_schema(),
+                   ledger=_unavailable_schema(), last_updated_at=None)
+        return out
+    bal = await section(L.balances(conn, L.ACCOUNT_ID, now=at),
+                        empty_why="THE_PAPER_ACCOUNT_DOES_NOT_EXIST",
+                        is_empty=lambda d: not (d or {}).get("ok"))
+    led = await section(L.latest_entries(conn, L.ACCOUNT_ID, limit=entries),
+                        empty_why="NO_LEDGER_ENTRIES")
+    out["account"] = bal
+    out["ledger"] = led
+    out["session"] = await session_brief(conn, bal.get("data") or {})
+    out["last_updated_at"] = ((bal.get("data") or {}).get("last_updated_at")
+                              if bal["status"] == "OK" else None)
+    # Drawdown, from the session's equity snapshots when they exist.
+    try:
+        from .. import bettor_paper_readmodel as RM
+        out["drawdown"] = await section(
+            RM.drawdown(conn, L.ACCOUNT_ID),
+            empty_why="NO_EQUITY_SNAPSHOTS_YET_THE_SESSION_HAS_NOT_RUN",
+            is_empty=lambda d: not (d or {}).get("snapshots"))
+    except ImportError:
+        out["drawdown"] = {"status": "UNAVAILABLE",
+                           "why": "READ_MODEL_NOT_INSTALLED", "data": None}
+    return out
+
+
+async def session_brief(conn, bal: dict) -> dict:
+    """THE BANNER'S ONE READ: {active, reason, session_id, started_at,
+    starting_cash_usd, last_heartbeat_at, real_money_submission}."""
+    from .. import bettor_paper_ledger as L
+    from .. import bettor_paper_session as S
+    out = {"active": False, "reason": None, "session_id": None,
+           "started_at": None,
+           "starting_cash_usd": bal.get("starting_cash_usd",
+                                        float(L.STARTING_CASH_USD)),
+           "last_heartbeat_at": None, "real_money_submission": "DISABLED"}
+    try:
+        en = await S.enablement(conn)
+        sess = await S.active_session(conn, L.ACCOUNT_ID)
+        if sess is not None:
+            h = await S.health(conn, sess["session_id"]) or {}
+            out.update(session_id=sess["session_id"],
+                       started_at=sess["started_at"],
+                       last_heartbeat_at=h.get("heartbeat_at"))
+        out["active"] = bool(sess is not None and en.get("enabled"))
+        out["reason"] = (None if out["active"] else
+                         en.get("refusal") or "NO_ACTIVE_PAPER_SESSION_YET")
+    except Exception as exc:                                    # noqa: BLE001
+        out["reason"] = "SESSION_UNREADABLE: %s" % type(exc).__name__
+    return out
+
+
+@router.get("/api/command/paper/account",
+            dependencies=[Depends(require_read)])
+async def paper_account(entries: int = Query(50, ge=1, le=500)) -> dict:
+    pool = await _pool()
+    async with pool.acquire() as conn:
+        return await account_payload(conn, entries=entries)
+
+
+# ═════════════════════════════════════════════════════════════════════
+# THE LIVE STREAM: COMMITTED LEDGER ENTRIES ONLY
+# ═════════════════════════════════════════════════════════════════════
+
+def sse(event: str, data: dict, *, event_id=None) -> str:
+    head = "" if event_id is None else "id: %s\n" % event_id
+    return "%sevent: %s\ndata: %s\n\n" % (head, event, json.dumps(
+        data, default=str, separators=(",", ":")))
+
+
+async def stream_events(acquire, *, last_event_id: int | None,
+                        poll_s: float = STREAM_POLL_S,
+                        heartbeat_s: float = STREAM_HEARTBEAT_S,
+                        max_polls: int | None = None,
+                        is_disconnected=None, sleep=None,
+                        account_id: str | None = None):
+    """THE STREAM, as an async generator of SSE frames.
+
+    `acquire()` is an async context manager yielding a connection (the
+    pool's `acquire`). Publishes ONLY committed ledger entries: it polls the
+    ledger by sequence, and the ledger's trigger numbers each entry after the
+    account row lock, so sequence order is commit order and no committed
+    entry is skipped. With `last_event_id` it REPLAYS every entry after it
+    (reconnect recovery); without one it opens with a full snapshot."""
+    from .. import bettor_paper_ledger as L
+    acct = account_id or L.ACCOUNT_ID
+    sleep = sleep or asyncio.sleep
+    cursor = last_event_id
+    polls = 0
+    last_beat = time.monotonic()
+    if cursor is None:
+        async with acquire() as conn:
+            if not await _schema(conn):
+                yield sse("unavailable", dict(
+                    _labels(), why="MIGRATION_171_IS_NOT_APPLIED"))
+                return
+            bal = await L.balances(conn, acct)
+            latest = await L.latest_entries(conn, acct, limit=20)
+        cursor = int(bal.get("last_sequence") or 0)
+        yield sse("snapshot", dict(_labels(), sequence=cursor, balances=bal,
+                                   latest_entries=latest,
+                                   last_updated_at=bal.get(
+                                       "last_updated_at")),
+                  event_id=cursor)
+    while max_polls is None or polls < max_polls:
+        polls += 1
+        if is_disconnected is not None and await is_disconnected():
+            return
+        async with acquire() as conn:
+            rows = await L.ledger_after(conn, acct, after_seq=int(cursor),
+                                        limit=STREAM_BATCH)
+            bal = await L.balances(conn, acct) if rows else None
+        for i, e in enumerate(rows):
+            cursor = e["sequence"]
+            frame = dict(_labels(), sequence=e["sequence"], entry=e,
+                         running_balances={
+                             "cash_usd": e["cash_after_usd"],
+                             "reserved_usd": e["reserved_after_usd"],
+                             "available_usd": e["available_after_usd"]},
+                         committed_at=e["committed_at"],
+                         last_updated_at=e["committed_at"])
+            if i == len(rows) - 1:
+                frame["balances"] = bal
+            yield sse("ledger", frame, event_id=e["sequence"])
+        if time.monotonic() - last_beat >= heartbeat_s:
+            last_beat = time.monotonic()
+            yield sse("heartbeat", dict(_labels(), sequence=cursor,
+                                        at=time.time()))
+        if max_polls is None or polls < max_polls:
+            await sleep(poll_s)
+
+
+@router.get("/api/command/paper/stream",
+            dependencies=[Depends(require_read)])
+async def paper_stream(request: Request,
+                       last_event_id: str | None = Header(
+                           default=None, alias="Last-Event-ID"),
+                       last: int | None = Query(None, ge=0)):
+    pool = await _pool()
+    cur = last
+    if cur is None and last_event_id:
+        try:
+            cur = int(str(last_event_id).strip())
+        except ValueError:
+            cur = None
+    gen = stream_events(pool.acquire, last_event_id=cur,
+                        is_disconnected=request.is_disconnected)
+    return StreamingResponse(gen, media_type="text/event-stream",
+                             headers={"cache-control": "no-store",
+                                      "x-accel-buffering": "no"})
+
+
+# ═════════════════════════════════════════════════════════════════════
+# SESSION, DEREK, XAVIER, AUDREY
+# ═════════════════════════════════════════════════════════════════════
+
+async def _readmodel(name: str, conn, **kw) -> dict:
+    from .. import bettor_paper_readmodel as RM
+    return await getattr(RM, name)(conn, **kw)
+
+
+@router.get("/api/command/paper/session",
+            dependencies=[Depends(require_read)])
+async def paper_session() -> dict:
+    pool = await _pool()
+    async with pool.acquire() as conn:
+        if not await _schema(conn):
+            return dict(_labels(), session=_unavailable_schema())
+        return await _readmodel("session_payload", conn)
+
+
+@router.get("/api/command/paper/derek", dependencies=[Depends(require_read)])
+async def paper_derek(limit: int = Query(100, ge=1, le=1000)) -> dict:
+    pool = await _pool()
+    async with pool.acquire() as conn:
+        if not await _schema(conn):
+            return dict(_labels(), derek=_unavailable_schema())
+        return await _readmodel("derek_payload", conn, limit=limit)
+
+
+@router.get("/api/command/paper/xavier",
+            dependencies=[Depends(require_read)])
+async def paper_xavier(limit: int = Query(100, ge=1, le=1000)) -> dict:
+    pool = await _pool()
+    async with pool.acquire() as conn:
+        if not await _schema(conn):
+            return dict(_labels(), xavier=_unavailable_schema())
+        return await _readmodel("xavier_payload", conn, limit=limit)
+
+
+@router.get("/api/command/paper/audrey",
+            dependencies=[Depends(require_read)])
+async def paper_audrey(limit: int = Query(50, ge=1, le=500)) -> dict:
+    pool = await _pool()
+    async with pool.acquire() as conn:
+        if not await _schema(conn):
+            return dict(_labels(), audrey=_unavailable_schema())
+        return await _readmodel("audrey_payload", conn, limit=limit)

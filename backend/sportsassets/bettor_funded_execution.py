@@ -998,6 +998,17 @@ async def submit_for_decision(conn, rec: dict, *, account_id: str,
     # Before the schema check, the account, the limits, the rails and any
     # reservation: such a record may never claim collateral or exposure, so
     # nothing is consulted on its behalf. `plan_from_decision` refuses it too.
+    # ── A PAPER RECORD OR ID, REFUSED BEFORE ANYTHING ELSE ──────────
+    # Paper orders, fills, positions and authorizations are simulated and
+    # live in separate paper tables; none is ever an input here.
+    from . import bettor_paper_guard as _PG
+    paper = _PG.refuse_paper_record(
+        rec, account_id=account_id, operation_id=operation_id,
+        portfolio_group_id=portfolio_group_id)
+    if paper is not None:
+        return dict(out, ok=False, refusal=paper["refusal"],
+                    paper_fields=paper["paper_fields"], why=paper["why"],
+                    nothing_was_written=True, exposure="NONE")
     refused = VP.refuse_unless_entry(rec)
     if refused is not None:
         return dict(out, ok=False, refusal=refused["refusal"],

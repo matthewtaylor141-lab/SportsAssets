@@ -209,12 +209,16 @@ async def derek_cycle_finished(conn, *, cycle: dict,
     hook = await call_hook(conn, R.DEREK, "derek", "after_cycle",
                            kwargs={"cycle": cycle}, now=at)
     state, activity, waiting = derek_end_state(cycle, hook)
+    # PAPER: this cycle's valuations are freshest now; the paper pass runs
+    # in the background on its own connection and never delays the cycle.
+    paper = paper_pass_hook(trigger="COLLECTION_CYCLE")
     if hook.get("ok") or hook.get("state_recorded") is None:
         await R.heartbeat(conn, R.DEREK, state=state, activity=activity,
                           waiting_on=waiting, now=at,
                           run={"finished_at": at,
                                "elapsed_s": cycle.get("elapsed_s")})
-    return {"state": state, "activity": activity, "hook": _digest(hook)}
+    return {"state": state, "activity": activity, "hook": _digest(hook),
+            "paper": paper}
 
 
 async def gate_for_funded_entry(conn, rec: dict, *,
@@ -387,6 +391,25 @@ async def xavier_pass_finished(conn, *, res: dict,
 # ═════════════════════════════════════════════════════════════════════
 # AUDREY AND IMPROVEMENT: THE SLOW HALF, OUTSIDE THE EXECUTION LOCK
 # ═════════════════════════════════════════════════════════════════════
+
+# ═════════════════════════════════════════════════════════════════════
+# PAPER TRADING: A BACKGROUND PASS, NEVER A WAIT
+# ═════════════════════════════════════════════════════════════════════
+
+def paper_pass_hook(*, trigger: str, get_pool=None) -> dict:
+    """SCHEDULE ONE PAPER PASS (`agents.paper_runtime.schedule`) on its own
+    pool connection and return at once. The pass itself checks the
+    PAPER_SESSION environment flag AND the database control row, writes a
+    heartbeat on every attempt, is bounded, and never raises into the
+    caller's loop. A missing paper module is reported, not raised."""
+    try:
+        from . import paper_runtime as _PR
+        if get_pool is None:
+            from ..db import get_pool
+        return _PR.schedule(get_pool, trigger=trigger)
+    except Exception as exc:                                    # noqa: BLE001
+        return {"scheduled": False, "error": _err(exc)}
+
 
 async def slow_half(conn, *, now: float | None = None) -> dict:
     """`audrey_audit.run_due` and `improvement.run_due`, guarded and bounded,

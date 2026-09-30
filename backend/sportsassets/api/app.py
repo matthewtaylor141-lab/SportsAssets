@@ -497,6 +497,13 @@ try:
     app.include_router(_agents_chat_router)
 except ImportError:
     log.warning("agents: api.agents_chat not loaded", exc_info=True)
+# ── PAPER TRADING READ MODELS (migration 171+): /api/command/paper/* ────
+# Read-only, COMMAND auth, fictional $500,000 account, simulated execution.
+try:
+    from .command_paper import router as _command_paper_router
+    app.include_router(_command_paper_router)
+except ImportError:
+    log.warning("paper: api.command_paper not loaded", exc_info=True)
 
 # Which frontends actually talk to this API? The deployed site's hostname
 # is recorded nowhere (Netlify names are set in its UI), which has made
