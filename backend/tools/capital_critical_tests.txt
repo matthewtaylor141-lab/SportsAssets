@@ -47,6 +47,15 @@ tests/test_agent_sends_stop_on_failed_records_and_stale_plans.py
 tests/test_an_action_is_valued_only_on_depth_its_limit_can_reach.py
 tests/test_an_autonomous_entry_is_not_counted_twice.py
 tests/test_an_indirect_pair_is_valued_on_the_outcomes.py
+# (1002) Audrey's daily audit: local-day boundary, idempotent versions,
+# watermark, NO_CHANGE, four evidence categories never merged, fixtures
+tests/test_audrey_audits_derek_and_xavier_daily.py
+# (1002) Audrey keeps a limited search's limitation; a later-discovered
+# contract is NOT_CONSIDERED_AT_DECISION_TIME, never a missed opportunity
+tests/test_audrey_keeps_the_search_limitation.py
+# (1002) a settlement correction versions the audit and retires the model
+# resting on it through the existing invalidation path
+tests/test_audrey_versions_a_corrected_settlement.py
 tests/test_autonomy_completion_boundaries.py
 tests/test_bettor_decision_engine.py
 tests/test_bettor_entry_gate.py
@@ -90,6 +99,11 @@ tests/test_followup_budget_reservation.py
 tests/test_funded_activation_is_a_real_path.py
 tests/test_fuzzy_side_fidelity.py
 tests/test_heartbeat_does_not_queue_for_a_second_connection.py
+# (1002) improvement: harm rejects, no approval without a pass, no self-
+# approval, protected keys, holdout budget, pre-authorized canary rollback
+tests/test_improvement_is_evaluated_released_and_rolled_back.py
+# (1002) the improvement sandbox produces a real committed candidate
+tests/test_improvement_sandbox_produces_a_real_candidate.py
 tests/test_in_flight_entry_is_pending.py
 tests/test_indirect_pair_priority.py
 tests/test_indirect_structures.py
