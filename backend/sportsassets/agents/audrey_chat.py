@@ -1710,10 +1710,14 @@ def _wrap(label: str, payload, *, env=None) -> str:
                                 ' truncated="true"' if truncated else "", s))
 
 
-def _history_messages(history: list) -> list:
+def _history_messages(history: list, roles: dict | None = None) -> list:
+    """Earlier turns as Messages API turns. `roles` maps the stored role to
+    user / assistant (default: this chat's MANAGEMENT / AUDREY); the persona
+    chat (`persona_chat`) passes its USER / ASSISTANT."""
+    roles = roles or {"MANAGEMENT": "user", "AUDREY": "assistant"}
     msgs: list = []
     for h in history:
-        role = {"MANAGEMENT": "user", "AUDREY": "assistant"}.get(h["role"])
+        role = roles.get(h["role"])
         if role is None or not h.get("body"):
             continue
         if msgs and msgs[-1]["role"] == role:
@@ -1738,11 +1742,17 @@ def _block_dict(b) -> dict:
     return b.model_dump(exclude_unset=True)
 
 
-def build_request(*, cfg: dict, msgs: list, tools: list) -> dict:
-    """The keyword arguments of `client.beta.messages.create`."""
-    req: dict[str, Any] = {"model": cfg["model"], "max_tokens": 4096,
-                           "system": SYSTEM_PROMPT, "tools": tools,
+def build_request(*, cfg: dict, msgs: list, tools: list,
+                  system: str | None = None, max_tokens: int = 4096) -> dict:
+    """The keyword arguments of `client.beta.messages.create` (or
+    `.stream`). `system` defaults to Audrey's fixed prompt; the persona chat
+    passes the agent's persona inside its fixed rules. No tools -> the
+    `tools` key is omitted (the persona chat gives the model none)."""
+    req: dict[str, Any] = {"model": cfg["model"], "max_tokens": max_tokens,
+                           "system": system or SYSTEM_PROMPT,
                            "messages": msgs}
+    if tools:
+        req["tools"] = tools
     if cfg["model"] in EFFORT_MODELS:
         req["output_config"] = {"effort": "low"}
     if cfg["model"] in FALLBACK_MODELS:

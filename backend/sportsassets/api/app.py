@@ -504,6 +504,15 @@ try:
     app.include_router(_command_paper_router)
 except ImportError:
     log.warning("paper: api.command_paper not loaded", exc_info=True)
+# AFTER agents_chat: its literal /api/command/agents/audrey/chat keeps
+# Audrey's management-chat contract; the persona chat answers
+# /api/command/agents/{derek,xavier}/chat and /{agent}/persona/chat for all
+# three, and the server-side speech route.
+try:
+    from .agents_persona import router as _agents_persona_router
+    app.include_router(_agents_persona_router)
+except ImportError:
+    log.warning("agents: api.agents_persona not loaded", exc_info=True)
 
 # Which frontends actually talk to this API? The deployed site's hostname
 # is recorded nowhere (Netlify names are set in its UI), which has made

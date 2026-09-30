@@ -1,0 +1,652 @@
+"""THE FACTS THE THREE AGENTS TALK FROM -- read from the database, numbered.
+
+READ-ONLY. `gather` returns ONE fact list for a question; Derek, Xavier and
+Audrey are all given the SAME list, so their answers cite the same record ids
+and the same numbers and differ only in perspective. Each fact is
+
+    {"fact_id": "F3", "source": <table>, "record_id": <primary key>,
+     "field": <column / json path>, "value": <as recorded>, "text": <label>}
+
+WHERE FACTS COME FROM, in order
+  1. the DEMONSTRATION position -- only when the caller asks for it
+     (context {"demonstration": true} or position_id "DEMONSTRATION"). Every
+     fact is labelled DEMONSTRATION and none is a record in any table.
+  2. the PAPER LEDGER, when its tables exist in this database (any table
+     named like `paper_*` / `*_paper_*`); otherwise the answer says "paper
+     ledger not in this build".
+  3. the funded book's positions (`bettor_funded_intents`, `_fills`,
+     `_economics`) and the desk accounts' cash (`bettor_desk_account_state`).
+  4. the agents' own records: Derek's entry decisions with the stored V2
+     policy decision (`derek_entry_decisions.evidence.policy_decision`),
+     Xavier's decisions (`bettor_xavier_decisions`) and standing protective
+     orders with their per-state payoff table
+     (`bettor_standing_order_plans.floor.regions`), Audrey's audit reports
+     (`audrey_audit_reports`) and the agents' status (`agent_status`).
+
+A question naming a team ("the Yankees position") is matched on the team's
+nickname and venue abbreviation; when nothing matches, `found` is False and
+`checked` lists every source that was read -- the answer then says so and
+never substitutes another position. Nothing is computed that a record did not
+store, except the arithmetic the demonstration states explicitly.
+"""
+
+from __future__ import annotations
+
+import datetime as _dt
+import decimal
+import json
+import re
+from typing import Any
+
+DEMO_LABEL = "DEMONSTRATION"
+DEMO_POSITION_ID = "DEMONSTRATION-NYY-ML"
+PAPER_NOT_IN_BUILD = "paper ledger not in this build"
+
+#: nickname -> venue abbreviations (the search terms besides the nickname)
+TEAM_CODES = {
+    "yankees": ("nyy",), "red sox": ("bos",), "mets": ("nym",),
+    "dodgers": ("lad",), "padres": ("sd",), "astros": ("hou",),
+    "mariners": ("sea",), "braves": ("atl",), "cubs": ("chc",),
+    "white sox": ("cws", "chw"), "blue jays": ("tor",), "orioles": ("bal",),
+    "rays": ("tb",), "phillies": ("phi",), "giants": ("sf",),
+    "cardinals": ("stl",), "brewers": ("mil",), "twins": ("min",),
+    "guardians": ("cle",), "tigers": ("det",), "royals": ("kc",),
+    "angels": ("laa",), "rangers": ("tex",), "rockies": ("col",),
+    "pirates": ("pit",), "reds": ("cin",), "marlins": ("mia",),
+    "nationals": ("wsh",), "athletics": ("oak", "ath"),
+    "diamondbacks": ("ari",),
+}
+
+_LIVE_STATES = ("INTENT_RECORDED", "SEND_ATTEMPTED", "ACKNOWLEDGED",
+                "PARTIALLY_FILLED", "FILLED", "UNRESOLVED")
+
+
+def _jsonable(v):
+    if isinstance(v, dict):
+        return {str(k): _jsonable(x) for k, x in v.items()}
+    if isinstance(v, (list, tuple)):
+        return [_jsonable(x) for x in v]
+    if isinstance(v, decimal.Decimal):
+        return float(v)
+    if isinstance(v, (_dt.datetime, _dt.date)):
+        return v.isoformat()
+    return v
+
+
+def _obj(v, default=None):
+    if v is None:
+        return default
+    if isinstance(v, (dict, list)):
+        return v
+    try:
+        return json.loads(v)
+    except (TypeError, ValueError):
+        return default
+
+
+async def _regclass(conn, name: str) -> bool:
+    try:
+        return bool(await conn.fetchval("SELECT to_regclass($1) IS NOT NULL",
+                                        name))
+    except Exception:                                           # noqa: BLE001
+        return False
+
+
+def subject_of(question: str) -> dict | None:
+    """The team a question names, with its search terms, or None."""
+    q = " %s " % re.sub(r"[^a-z0-9 ]", " ", str(question or "").lower())
+    for nick in sorted(TEAM_CODES, key=len, reverse=True):
+        if " %s " % nick in q:
+            return {"label": nick.title(), "nickname": nick,
+                    "terms": [nick] + list(TEAM_CODES[nick])}
+    return None
+
+
+def _likes(terms: list) -> list:
+    out = []
+    for t in terms:
+        t = str(t).replace("\\", "\\\\").replace("%", "\\%").replace("_",
+                                                                     "\\_")
+        # a short code matches as a slug token, not inside another word
+        out.append("%" + t + "%" if len(t) > 3 else "%-" + t + "-%")
+    return out
+
+
+class Facts:
+    def __init__(self):
+        self.items: list[dict] = []
+        self.checked: list[dict] = []
+        self.missing: list[str] = []
+
+    def add(self, source, record_id, field, value, text) -> str:
+        fid = "F%d" % (len(self.items) + 1)
+        self.items.append({"fact_id": fid, "source": source,
+                           "record_id": str(record_id), "field": field,
+                           "value": _jsonable(value), "text": text})
+        return fid
+
+    def check(self, source, status, matches=0, why=None):
+        self.checked.append({"source": source, "status": status,
+                             "matches": int(matches), "why": why})
+
+    def miss(self, text):
+        if text not in self.missing:
+            self.missing.append(text)
+
+
+# ═════════════════════════════════════════════════════════════════════
+# THE DEMONSTRATION POSITION (clearly labelled; never a record)
+# ═════════════════════════════════════════════════════════════════════
+
+DEMO = {
+    "entry_id": "DEMONSTRATION:derek_entry_decisions:demo-nyy-ml-entry",
+    "hedge_id": "DEMONSTRATION:bettor_xavier_decisions:demo-nyy-ml-hedge",
+    "plan_id": "DEMONSTRATION:bettor_standing_order_plans:demo-bos-p25-plan",
+    "stake_usd": 1000.0, "price": 0.50, "qty": 2000,
+    "p_internal": 0.60, "p_pinnacle": 0.58, "p_blended": 0.59,
+    "edge_pp": 9.0, "threshold_pp": 5.0, "ev_before_fees_usd": 180.0,
+    "hedge_usd": 800.0, "hedge_price": 0.40, "hedge_qty": 2000,
+    "total_cost_usd": 1800.0,
+    "floors": [("Yankees win by 3 or more", 200.0),
+               ("Yankees win by 1 or 2", 2200.0),
+               ("Red Sox win", 200.0)],
+    "unhedged_loss_usd": -1000.0, "unhedged_win_usd": 1000.0,
+}
+
+
+def demonstration_facts() -> Facts:
+    f = Facts()
+    e, h, p = DEMO["entry_id"], DEMO["hedge_id"], DEMO["plan_id"]
+    f.add(DEMO_LABEL, e, "label", DEMO_LABEL,
+          "DEMONSTRATION position -- not a production or paper record")
+    f.add(DEMO_LABEL, e, "instrument", "Yankees moneyline (YES = Yankees "
+          "win)", "instrument: Yankees moneyline")
+    f.add(DEMO_LABEL, e, "stake_usd", DEMO["stake_usd"], "stake $1,000")
+    f.add(DEMO_LABEL, e, "executable_price", DEMO["price"],
+          "entry price $0.50 per contract")
+    f.add(DEMO_LABEL, e, "qty", DEMO["qty"], "2,000 contracts")
+    f.add(DEMO_LABEL, e, "p_internal", DEMO["p_internal"],
+          "internal probability 0.60")
+    f.add(DEMO_LABEL, e, "p_pinnacle", DEMO["p_pinnacle"],
+          "Pinnacle probability 0.58")
+    f.add(DEMO_LABEL, e, "p_blended", DEMO["p_blended"],
+          "blended probability 0.59 = (0.60 + 0.58) / 2")
+    f.add(DEMO_LABEL, e, "gross_edge_pp", DEMO["edge_pp"],
+          "edge 9 pp = 0.59 - 0.50")
+    f.add(DEMO_LABEL, e, "threshold_gross_edge_pp", DEMO["threshold_pp"],
+          "policy minimum edge 5 pp (DEREK_ENTRY_POLICY_V2)")
+    f.add(DEMO_LABEL, e, "expected_gross_profit_usd",
+          DEMO["ev_before_fees_usd"],
+          "expected profit $180 before fees = 2,000 x 0.09")
+    f.add(DEMO_LABEL, h, "hedge", "Red Sox +2.5",
+          "hedge instrument: Red Sox +2.5")
+    f.add(DEMO_LABEL, h, "hedge_cost_usd", DEMO["hedge_usd"],
+          "hedge cost $800")
+    f.add(DEMO_LABEL, h, "hedge_price", DEMO["hedge_price"],
+          "hedge price $0.40 per contract")
+    f.add(DEMO_LABEL, h, "hedge_qty", DEMO["hedge_qty"],
+          "2,000 hedge contracts")
+    f.add(DEMO_LABEL, p, "total_cost_usd", DEMO["total_cost_usd"],
+          "total cost $1,800 = $1,000 + $800")
+    for state, net in DEMO["floors"]:
+        f.add(DEMO_LABEL, p, "floor:" + state, net,
+              "%s: $%s before fees" % (state, format(int(net), ",")))
+    f.add(DEMO_LABEL, h, "unhedged_worst_case_usd",
+          DEMO["unhedged_loss_usd"],
+          "unhedged, a Red Sox win loses the $1,000 stake")
+    f.add(DEMO_LABEL, h, "unhedged_best_case_usd", DEMO["unhedged_win_usd"],
+          "unhedged, a Yankees win pays $1,000 net before fees")
+    f.miss("fees on either leg (every figure is before fees)")
+    f.miss("a settlement (no result exists, so nothing is realised)")
+    f.miss("the probability of the Yankees winning by exactly 1 or 2 runs, "
+           "so the hedged pair's expected value cannot be graded")
+    f.check(DEMO_LABEL, "DEMONSTRATION", len(f.items))
+    return f
+
+
+# ═════════════════════════════════════════════════════════════════════
+# THE DATABASE
+# ═════════════════════════════════════════════════════════════════════
+
+async def paper_tables(conn) -> list:
+    try:
+        rows = await conn.fetch(
+            "SELECT table_name FROM information_schema.tables WHERE "
+            " table_schema = current_schema() AND table_type = 'BASE TABLE' "
+            " AND (table_name LIKE 'paper\\_%' OR table_name LIKE "
+            " '%\\_paper\\_%' OR table_name LIKE '%\\_paper') "
+            " ORDER BY table_name")
+        return [r["table_name"] for r in rows]
+    except Exception:                                           # noqa: BLE001
+        return []
+
+
+def _scalar_fields(row: dict, limit: int = 12) -> list:
+    out = []
+    for k, v in row.items():
+        if isinstance(v, (int, float, str, bool)) and v not in ("", None) \
+                and len(str(v)) <= 120:
+            out.append((k, v))
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _row_key(row: dict) -> str:
+    for k in ("position_id", "trade_id", "entry_id", "id", "intent_id",
+              "order_id", "account_id"):
+        if row.get(k) not in (None, ""):
+            return str(row[k])
+    return str(next(iter(row.values()), "?"))
+
+
+async def _paper(conn, f: Facts, *, likes, context_ids, limit=5) -> bool:
+    tables = await paper_tables(conn)
+    if not tables:
+        f.check("paper_ledger", "NOT_IN_THIS_BUILD", 0, PAPER_NOT_IN_BUILD)
+        f.miss(PAPER_NOT_IN_BUILD)
+        return False
+    found = False
+    for t in tables:
+        try:
+            if likes or context_ids:
+                rows = await conn.fetch(
+                    'SELECT to_jsonb(x) AS j FROM "%s" x WHERE '
+                    " to_jsonb(x)::text ILIKE ANY($1::text[]) OR "
+                    " to_jsonb(x)::text LIKE ANY($2::text[]) LIMIT $3"
+                    % t.replace('"', ''), likes or [],
+                    ["%" + i + "%" for i in context_ids], int(limit))
+            else:
+                rows = await conn.fetch(
+                    'SELECT to_jsonb(x) AS j FROM "%s" x LIMIT $1'
+                    % t.replace('"', ''), int(limit))
+        except Exception as exc:                                # noqa: BLE001
+            f.check(t, "READ_FAILED", 0, type(exc).__name__)
+            continue
+        f.check(t, "MATCHED" if rows else "NO_MATCH", len(rows))
+        for r in rows:
+            row = _obj(r["j"], {}) or {}
+            rid = _row_key(row)
+            for k, v in _scalar_fields(row):
+                f.add(t, rid, k, v, "paper %s %s = %s" % (t, k, v))
+            found = True
+    return found
+
+
+def _money(v) -> str:
+    try:
+        x = float(v)
+    except (TypeError, ValueError):
+        return "unknown"
+    s = "$" + format(abs(x), ",.2f")
+    if s.endswith(".00"):
+        s = s[:-3]
+    return ("-" if x < 0 else "") + s
+
+
+async def _positions(conn, f: Facts, *, likes, context_ids,
+                     limit=5) -> list:
+    """The funded book's positions matching the subject (or, with no
+    subject, the live ones). Returns the intent ids."""
+    if not await _regclass(conn, "bettor_funded_intents"):
+        f.check("bettor_funded_intents", "TABLE_ABSENT")
+        return []
+    where = ["state = ANY($1::text[])"]
+    args: list[Any] = [list(_LIVE_STATES)]
+    if likes or context_ids:
+        args += [likes or [], context_ids or []]
+        where.append("(us_market_slug ILIKE ANY($2::text[]) OR event_key "
+                     "ILIKE ANY($2::text[]) OR intent_id = ANY($3::text[]) "
+                     "OR decision_ref->>'derek_decision_id' = "
+                     "ANY($3::text[]))")
+    args.append(int(limit))
+    rows = await conn.fetch(
+        "SELECT intent_id, account_id, us_market_slug, event_key, "
+        " order_intent, limit_price, quantity, collateral_usd, state, "
+        " created_at FROM bettor_funded_intents WHERE %s ORDER BY created_at "
+        " DESC LIMIT $%d" % (" AND ".join(where), len(args)), *args)
+    f.check("bettor_funded_intents", "MATCHED" if rows else "NO_MATCH",
+            len(rows))
+    ids = []
+    for r in rows:
+        d = _jsonable(dict(r))
+        iid = d["intent_id"]
+        ids.append(iid)
+        f.add("bettor_funded_intents", iid, "position",
+              "%s %s" % (d["us_market_slug"], d["order_intent"]),
+              "funded position %s on %s (%s), state %s" % (
+                  iid, d["us_market_slug"],
+                  "long" if d["order_intent"].endswith("LONG") else "short",
+                  d["state"]))
+        f.add("bettor_funded_intents", iid, "quantity", d["quantity"],
+              "ordered %s contracts at limit %s" % (d["quantity"],
+                                                    d["limit_price"]))
+        f.add("bettor_funded_intents", iid, "collateral_usd",
+              d["collateral_usd"], "collateral committed %s"
+              % _money(d["collateral_usd"]))
+    if ids and await _regclass(conn, "bettor_funded_fills"):
+        for r in await conn.fetch(
+                "SELECT intent_id, sum(qty)::float8 AS qty, "
+                " sum(cash_usd)::float8 AS cash, sum(fee_usd)::float8 AS fee "
+                " FROM bettor_funded_fills WHERE intent_id = ANY($1::text[]) "
+                " GROUP BY intent_id", ids):
+            f.add("bettor_funded_fills", r["intent_id"], "filled_qty",
+                  r["qty"], "filled %s contracts for %s plus %s fees" % (
+                      format(r["qty"], ",g"), _money(r["cash"]),
+                      _money(r["fee"])))
+    if ids and await _regclass(conn, "bettor_funded_economics"):
+        for r in await conn.fetch(
+                "SELECT intent_id, sum(amount_usd)::float8 AS net, "
+                " bool_or(provisional) AS provisional FROM "
+                " bettor_funded_economics WHERE intent_id = ANY($1::text[]) "
+                " GROUP BY intent_id", ids):
+            f.add("bettor_funded_economics", r["intent_id"], "net_usd",
+                  r["net"], "booked net %s%s" % (
+                      _money(r["net"]),
+                      " (provisional)" if r["provisional"] else ""))
+    return ids
+
+
+async def _cash(conn, f: Facts, limit=10) -> None:
+    if not await _regclass(conn, "bettor_desk_account_state"):
+        f.check("bettor_desk_account_state", "TABLE_ABSENT")
+        return
+    rows = await conn.fetch(
+        "SELECT account_id, cash_usd, starting_cash_usd, realized_pnl_usd, "
+        " fees_usd, updated_at FROM bettor_desk_account_state "
+        " ORDER BY account_id LIMIT $1", int(limit))
+    f.check("bettor_desk_account_state", "MATCHED" if rows else "NO_MATCH",
+            len(rows))
+    for r in rows:
+        d = _jsonable(dict(r))
+        f.add("bettor_desk_account_state", d["account_id"], "cash_usd",
+              d["cash_usd"], "desk account %s cash %s (started %s, realised "
+              "P&L %s, fees %s, as of %s)" % (
+                  d["account_id"], _money(d["cash_usd"]),
+                  _money(d["starting_cash_usd"]),
+                  _money(d["realized_pnl_usd"]), _money(d["fees_usd"]),
+                  d["updated_at"]))
+
+
+PD_FIELDS = (("verdict", None), ("policy_version", None),
+             ("p_internal", "internal probability"),
+             ("p_pinnacle", "Pinnacle probability"),
+             ("p_blended", "blended probability"),
+             ("gross_edge_pp", "edge (pp)"),
+             ("threshold_gross_edge_pp", "policy minimum edge (pp)"),
+             ("executable_price", "executable price"),
+             ("qty", "contracts"),
+             ("acquisition_cost_usd", "acquisition cost"),
+             ("expected_gross_profit_usd", "expected profit before fees"),
+             ("fees_usd", "fees"),
+             ("net_expected_profit_usd", "expected profit after fees"))
+
+
+async def _derek(conn, f: Facts, *, likes, context_ids, limit=2) -> list:
+    if not await _regclass(conn, "derek_entry_decisions"):
+        f.check("derek_entry_decisions", "TABLE_ABSENT")
+        return []
+    if likes or context_ids:
+        rows = await conn.fetch(
+            "SELECT decision_id, valuation_id, fixture, us_market_slug, side, "
+            " decided_at, policy_version, verdict, refusal, pinnacle_p, "
+            " model_p, gross_edge_pp, executable_price, qty, "
+            " expected_gross_profit_usd, fees_usd, expected_net_profit_usd, "
+            " evidence->'policy_decision' AS pd FROM derek_entry_decisions "
+            " WHERE decision_id = ANY($2::text[]) OR fixture ILIKE "
+            " ANY($1::text[]) OR us_market_slug ILIKE ANY($1::text[]) OR "
+            " (evidence->'policy_decision'->'instrument')::text ILIKE "
+            " ANY($1::text[]) ORDER BY (verdict = 'ENTER') DESC, decided_at "
+            " DESC LIMIT $3", likes or [], context_ids or [], int(limit))
+    else:
+        rows = await conn.fetch(
+            "SELECT decision_id, valuation_id, fixture, us_market_slug, side, "
+            " decided_at, policy_version, verdict, refusal, pinnacle_p, "
+            " model_p, gross_edge_pp, executable_price, qty, "
+            " expected_gross_profit_usd, fees_usd, expected_net_profit_usd, "
+            " evidence->'policy_decision' AS pd FROM derek_entry_decisions "
+            " ORDER BY decided_at DESC LIMIT $1", int(limit))
+    f.check("derek_entry_decisions", "MATCHED" if rows else "NO_MATCH",
+            len(rows))
+    ids = []
+    for r in rows:
+        d = _jsonable(dict(r))
+        did = d["decision_id"]
+        ids.append(did)
+        pd = _obj(d.get("pd"), {}) or {}
+        f.add("derek_entry_decisions", did, "decision",
+              "%s %s" % (d.get("verdict"), d.get("fixture")),
+              "Derek's entry decision %s on %s (%s) at %s: %s%s" % (
+                  did, d.get("fixture") or d.get("us_market_slug"),
+                  d.get("side"), d.get("decided_at"), d.get("verdict"),
+                  (" -- refused: %s" % d["refusal"]) if d.get("refusal")
+                  else ""))
+        for k, label in PD_FIELDS:
+            if label is None:
+                continue
+            v = pd.get(k)
+            if v is None:
+                v = {"p_pinnacle": d.get("pinnacle_p"),
+                     "p_internal": d.get("model_p"),
+                     "executable_price": d.get("executable_price"),
+                     "qty": d.get("qty"),
+                     "expected_gross_profit_usd":
+                         d.get("expected_gross_profit_usd"),
+                     "fees_usd": d.get("fees_usd"),
+                     "net_expected_profit_usd":
+                         d.get("expected_net_profit_usd")}.get(k)
+            if v is None:
+                continue
+            txt = ("%s %s" % (label, _money(v)) if k.endswith("_usd")
+                   else "%s %s" % (label, v))
+            f.add("derek_entry_decisions", did, k, v, txt)
+        if pd.get("inputs_are"):
+            f.add("derek_entry_decisions", did, "inputs_are",
+                  pd["inputs_are"], "what the inputs are: %s"
+                  % str(pd["inputs_are"])[:200])
+    return ids
+
+
+async def _xavier(conn, f: Facts, *, likes, intents, context_ids,
+                  limit=2) -> list:
+    if not await _regclass(conn, "bettor_xavier_decisions"):
+        f.check("bettor_xavier_decisions", "TABLE_ABSENT")
+        return []
+    if likes or intents or context_ids:
+        rows = await conn.fetch(
+            "SELECT xavier_decision_id, intent_id, account_id, "
+            " us_market_slug, decided_at, chosen_action, "
+            " execution_eligibility, alternatives, reasoning, "
+            " expected_economics, residual_exposure FROM "
+            " bettor_xavier_decisions WHERE intent_id = ANY($2::text[]) OR "
+            " xavier_decision_id = ANY($3::text[]) OR us_market_slug ILIKE "
+            " ANY($1::text[]) ORDER BY decided_at DESC LIMIT $4",
+            likes or [], intents or [], context_ids or [], int(limit))
+    else:
+        rows = await conn.fetch(
+            "SELECT xavier_decision_id, intent_id, account_id, "
+            " us_market_slug, decided_at, chosen_action, "
+            " execution_eligibility, alternatives, reasoning, "
+            " expected_economics, residual_exposure FROM "
+            " bettor_xavier_decisions ORDER BY decided_at DESC LIMIT $1",
+            int(limit))
+    f.check("bettor_xavier_decisions", "MATCHED" if rows else "NO_MATCH",
+            len(rows))
+    ids = []
+    for r in rows:
+        d = _jsonable(dict(r))
+        xid = d["xavier_decision_id"]
+        ids.append(xid)
+        f.add("bettor_xavier_decisions", xid, "chosen_action",
+              d.get("chosen_action"),
+              "Xavier's decision %s on position %s (%s) at %s: chose %s; "
+              "eligibility %s" % (xid, d.get("intent_id"),
+                                  d.get("us_market_slug"), d.get("decided_at"),
+                                  d.get("chosen_action") or "nothing",
+                                  d.get("execution_eligibility")))
+        why = (_obj(d.get("reasoning"), {}) or {}).get("why")
+        if why:
+            f.add("bettor_xavier_decisions", xid, "reasoning.why", why,
+                  "his recorded reasoning: %s" % str(why)[:240])
+        econ = _obj(d.get("expected_economics"), {}) or {}
+        if econ.get("expected_net_usd") is not None:
+            f.add("bettor_xavier_decisions", xid,
+                  "expected_economics.expected_net_usd",
+                  econ["expected_net_usd"], "expected net of the chosen "
+                  "action %s" % _money(econ["expected_net_usd"]))
+        res = _obj(d.get("residual_exposure"), {}) or {}
+        if res.get("unpaired_qty") is not None:
+            f.add("bettor_xavier_decisions", xid,
+                  "residual_exposure.unpaired_qty", res["unpaired_qty"],
+                  "unpaired contracts %s" % res["unpaired_qty"])
+        for a in (_obj(d.get("alternatives"), []) or [])[:6]:
+            if not isinstance(a, dict):
+                continue
+            act = a.get("action")
+            if a.get("blocker"):
+                f.add("bettor_xavier_decisions", xid, "alternative:%s" % act,
+                      a["blocker"], "alternative %s blocked: %s"
+                      % (act, a["blocker"]))
+            elif a.get("value_usd") is not None:
+                f.add("bettor_xavier_decisions", xid, "alternative:%s" % act,
+                      a["value_usd"], "alternative %s valued %s"
+                      % (act, _money(a["value_usd"])))
+    return ids
+
+
+async def _standing(conn, f: Facts, *, intents, xids, limit=2) -> None:
+    if not (intents or xids):
+        return
+    if not await _regclass(conn, "bettor_standing_order_plans"):
+        f.check("bettor_standing_order_plans", "TABLE_ABSENT")
+        return
+    rows = await conn.fetch(
+        "SELECT plan_id, venue_slug, quantity, cost_price, floor_class, "
+        " floor, created_at FROM bettor_standing_order_plans WHERE "
+        " primary_intent_id = ANY($1::text[]) OR xavier_decision_id = "
+        " ANY($2::text[]) ORDER BY created_at DESC LIMIT $3",
+        intents or [], xids or [], int(limit))
+    f.check("bettor_standing_order_plans", "MATCHED" if rows else "NO_MATCH",
+            len(rows))
+    for r in rows:
+        d = _jsonable(dict(r))
+        pid = d["plan_id"]
+        f.add("bettor_standing_order_plans", pid, "plan",
+              "%s x %s @ %s" % (d["venue_slug"], d["quantity"],
+                                d["cost_price"]),
+              "standing protective order %s: %s contracts of %s at %s; "
+              "floor class %s" % (pid, d["quantity"], d["venue_slug"],
+                                  d["cost_price"], d["floor_class"]))
+        fl = _obj(d.get("floor"), {}) or {}
+        for reg in (fl.get("regions") or [])[:6]:
+            if reg.get("net_usd") is not None:
+                f.add("bettor_standing_order_plans", pid,
+                      "floor.regions:%s" % reg.get("region"),
+                      reg["net_usd"], "payoff if %s: %s" % (
+                          reg.get("region"), _money(reg["net_usd"])))
+
+
+async def _audits(conn, f: Facts, *, ids, limit=1) -> None:
+    if not await _regclass(conn, "audrey_audit_reports"):
+        f.check("audrey_audit_reports", "TABLE_ABSENT")
+        return
+    if ids:
+        rows = await conn.fetch(
+            "SELECT report_id, version, audit_day, summary FROM "
+            " audrey_audit_reports WHERE report::text LIKE ANY($1::text[]) "
+            " ORDER BY audit_day DESC, version DESC LIMIT $2",
+            ["%" + i + "%" for i in ids], int(limit))
+    else:
+        rows = await conn.fetch(
+            "SELECT report_id, version, audit_day, summary FROM "
+            " audrey_audit_reports ORDER BY audit_day DESC, version DESC "
+            " LIMIT $1", int(limit))
+    f.check("audrey_audit_reports", "MATCHED" if rows else "NO_MATCH",
+            len(rows))
+    for r in rows:
+        f.add("audrey_audit_reports", "%s/v%s" % (r["report_id"],
+                                                  r["version"]),
+              "summary", r["summary"], "Audrey's audit %s (v%s): %s" % (
+                  r["audit_day"], r["version"], str(r["summary"])[:300]))
+
+
+async def _status(conn, f: Facts) -> None:
+    if not await _regclass(conn, "agent_status"):
+        f.check("agent_status", "TABLE_ABSENT")
+        return
+    rows = await conn.fetch(
+        "SELECT agent_id, state, activity, last_heartbeat_at FROM "
+        " agent_status ORDER BY agent_id")
+    f.check("agent_status", "MATCHED" if rows else "NO_MATCH", len(rows))
+    for r in rows:
+        d = _jsonable(dict(r))
+        f.add("agent_status", d["agent_id"], "state", d.get("state"),
+              "%s is %s%s (last heartbeat %s)" % (
+                  d["agent_id"], d.get("state"),
+                  (" -- %s" % d["activity"]) if d.get("activity") else "",
+                  d.get("last_heartbeat_at") or "never"))
+
+
+def _context_ids(context: dict | None) -> list:
+    c = context or {}
+    out = []
+    for k in ("position_id", "decision_id", "intent_id",
+              "xavier_decision_id"):
+        v = c.get(k)
+        if isinstance(v, str) and v.strip() and len(v) <= 200:
+            out.append(v.strip())
+    return out
+
+
+def wants_demonstration(context: dict | None) -> bool:
+    c = context or {}
+    return c.get("demonstration") is True or str(
+        c.get("position_id") or "").upper().startswith(DEMO_LABEL)
+
+
+async def gather(conn, *, question: str, context: dict | None = None,
+                 now: float | None = None) -> dict:
+    """The one fact list for this question (see the module docstring)."""
+    subj = subject_of(question)
+    if wants_demonstration(context):
+        f = demonstration_facts()
+        return {"subject": {"label": "Yankees", "terms": ["yankees", "nyy"]},
+                "demonstration": True, "found": True, "scope": "POSITION",
+                "facts": f.items, "checked": f.checked, "missing": f.missing,
+                "paper": {"present": False, "why": "not read for the "
+                          "DEMONSTRATION position"}}
+    f = Facts()
+    ctx_ids = _context_ids(context)
+    likes = _likes(subj["terms"]) if subj else []
+    scoped = bool(subj or ctx_ids)
+    paper = await _paper(conn, f, likes=likes, context_ids=ctx_ids)
+    intents = await _positions(conn, f, likes=likes, context_ids=ctx_ids)
+    dids = await _derek(conn, f, likes=likes, context_ids=ctx_ids)
+    xids = await _xavier(conn, f, likes=likes, intents=intents,
+                         context_ids=ctx_ids)
+    await _standing(conn, f, intents=intents, xids=xids)
+    if scoped:
+        found = bool(f.items)
+        if found:
+            await _audits(conn, f, ids=dids + xids + intents)
+    else:
+        await _cash(conn, f)
+        await _audits(conn, f, ids=[])
+        await _status(conn, f)
+        found = bool(f.items)
+        if not any(x["source"] == "bettor_desk_account_state"
+                   for x in f.items):
+            f.miss("desk account cash (no bettor_desk_account_state row)")
+        if not intents:
+            f.miss("open funded positions (none recorded)")
+    if scoped and found and not any(x["source"] == "bettor_funded_economics"
+                                    for x in f.items):
+        f.miss("a booked result (no settlement is recorded for this "
+               "position, so nothing is realised)")
+    tables = await paper_tables(conn)
+    return {"subject": subj, "demonstration": False, "found": found,
+            "scope": "POSITION" if scoped else "BOOK", "facts": f.items,
+            "checked": f.checked, "missing": f.missing,
+            "paper": {"present": bool(tables), "tables": tables,
+                      "why": None if tables else PAPER_NOT_IN_BUILD,
+                      "matched": paper}}

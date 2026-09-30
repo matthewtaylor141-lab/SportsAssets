@@ -1,0 +1,1232 @@
+{
+  "generated_at": "2026-09-30T22:28:33.972104+00:00",
+  "mode": "RECORDS_ONLY",
+  "agents": {
+    "derek": {
+      "turns": [
+        {
+          "question": "Walk me through the Yankees position.",
+          "status": "ANSWERED",
+          "http_status": 200,
+          "reason": null,
+          "conversation_id": "pc-derek-a7ecd68b8d9b42de",
+          "message_id": "pc-derek-a7ecd68b8d9b42de:1",
+          "transcript": "Here's what the record says. I don't have a Yankees position to walk through \u2014 no production or paper Yankees record exists in what I checked. Checked: paper_ledger (not in this build), bettor_funded_intents (no match), derek_entry_decisions (no match), bettor_xavier_decisions (no match). The DEMONSTRATION position is available if you want a worked example \u2014 ask with the demonstration context.",
+          "spoken_text": "Here's what the record says. I don't have a Yankees position to walk through \u2014 no production or paper Yankees record exists in what I checked. Checked: paper ledger not in this build, bettor funded intents no match, derek entry decisions no match, bettor xavier decisions no match. The demonstration position is available if you want a worked example \u2014 ask with the demonstration context.",
+          "cited_facts": [],
+          "citations": [],
+          "missing_evidence": [
+            "paper ledger not in this build"
+          ],
+          "found": false,
+          "demonstration": false,
+          "provider": {
+            "mode": "RECORDS_ONLY",
+            "model": null,
+            "failure": null,
+            "reason": "NO_ANTHROPIC_API_KEY",
+            "disclosure": "Records-only mode \u2014 answered directly from the cited records; no language model was used"
+          },
+          "persona": {
+            "version": 1,
+            "display_name": "Derek",
+            "role_title": "the enthusiastic quant"
+          },
+          "kind": "REAL_RECORDS",
+          "audio": {
+            "status": "SKIPPED_RECORDS_ONLY",
+            "bytes": 0
+          }
+        },
+        {
+          "question": "Walk me through our current cash and positions.",
+          "status": "ANSWERED",
+          "http_status": 200,
+          "reason": null,
+          "conversation_id": "pc-derek-6e45b3843f1d43d0",
+          "message_id": "pc-derek-6e45b3843f1d43d0:1",
+          "transcript": "Short version up front. Where the agents are: AUDREY is IDLE -- NOT_YET_RUN (last heartbeat never) [F1]; DEREK is IDLE -- NOT_YET_RUN (last heartbeat never) [F2]; XAVIER is IDLE -- NOT_YET_RUN (last heartbeat never) [F3]. What I don't have: paper ledger not in this build; desk account cash (no bettor_desk_account_state row); open funded positions (none recorded). Each figure is as of the record time shown; nothing here is a forecast.",
+          "spoken_text": "Short version up front. Where the agents are: audrey is IDLE -- NOT YET RUN last heartbeat never; derek is IDLE -- NOT YET RUN last heartbeat never; xavier is IDLE -- NOT YET RUN last heartbeat never. What I don't have: paper ledger not in this build; desk account cash no bettor desk account state row; open funded positions none recorded. Each figure is as of the record time shown; nothing here is a forecast.",
+          "cited_facts": [
+            {
+              "fact_id": "F1",
+              "source": "agent_status",
+              "record_id": "AUDREY",
+              "field": "state",
+              "value": "IDLE",
+              "text": "AUDREY is IDLE -- NOT_YET_RUN (last heartbeat never)"
+            },
+            {
+              "fact_id": "F2",
+              "source": "agent_status",
+              "record_id": "DEREK",
+              "field": "state",
+              "value": "IDLE",
+              "text": "DEREK is IDLE -- NOT_YET_RUN (last heartbeat never)"
+            },
+            {
+              "fact_id": "F3",
+              "source": "agent_status",
+              "record_id": "XAVIER",
+              "field": "state",
+              "value": "IDLE",
+              "text": "XAVIER is IDLE -- NOT_YET_RUN (last heartbeat never)"
+            }
+          ],
+          "citations": [
+            {
+              "kind": "agent_status",
+              "id": "AUDREY"
+            },
+            {
+              "kind": "agent_status",
+              "id": "DEREK"
+            },
+            {
+              "kind": "agent_status",
+              "id": "XAVIER"
+            }
+          ],
+          "missing_evidence": [
+            "paper ledger not in this build",
+            "desk account cash (no bettor_desk_account_state row)",
+            "open funded positions (none recorded)"
+          ],
+          "found": true,
+          "demonstration": false,
+          "provider": {
+            "mode": "RECORDS_ONLY",
+            "model": null,
+            "failure": null,
+            "reason": "NO_ANTHROPIC_API_KEY",
+            "disclosure": "Records-only mode \u2014 answered directly from the cited records; no language model was used"
+          },
+          "persona": {
+            "version": 1,
+            "display_name": "Derek",
+            "role_title": "the enthusiastic quant"
+          },
+          "kind": "CASH_AND_POSITIONS",
+          "audio": {
+            "status": "SKIPPED_RECORDS_ONLY",
+            "bytes": 0
+          }
+        },
+        {
+          "question": "Walk me through the Yankees position.",
+          "status": "ANSWERED",
+          "http_status": 200,
+          "reason": null,
+          "conversation_id": "pc-derek-f59772cc1bb34df1",
+          "message_id": "pc-derek-f59772cc1bb34df1:1",
+          "transcript": "Let me walk it from the top. This is the DEMONSTRATION position, not a real trade [F1]. The Yankees moneyline was trading at $0.50 while our blended probability said 0.59 \u2014 that's 9 pp of edge [F4] [F8] [F9]. Probability: internal probability 0.60, Pinnacle 0.58, blended 0.59 [F6] [F7] [F8]; the internal model learns from market prices, so the blend isn't fully independent confirmation. Price: $0.50 a contract [F4]. Expected value: about $180 before fees across 2,000 contracts [F11] [F5] \u2014 comfortably above the 5 pp minimum [F10]. Sizing: $1,000 on the Yankees moneyline at $0.50, which is 2,000 contracts [F3] [F4] [F5]. After entry, Xavier added Red Sox +2.5 for $800 at $0.40, another 2,000 contracts [F12] [F13] [F14] [F15], which turns the outcomes into $200 if the Yankees win by 3 or more, $2,200 if they win by 1 or 2, and $200 if the Red Sox win \u2014 all before fees [F17] [F18] [F19] \u2014 his side of the story. What I don't have: the fees, so the net number is unknown.",
+          "spoken_text": "Let me walk it from the top. This is the demonstration position, not a real trade. The Yankees moneyline was trading at fifty cents while our blended probability said fifty-nine percent \u2014 that's nine percentage points of edge. Probability: internal probability sixty percent, Pinnacle fifty-eight percent, blended fifty-nine percent; the internal model learns from market prices, so the blend isn't fully independent confirmation. Price: fifty cents a contract. Expected value: about one hundred eighty dollars before fees across two thousand contracts \u2014 comfortably above the five percentage points minimum. Sizing: one thousand dollars on the Yankees moneyline at fifty cents, which is two thousand contracts. After entry, Xavier added Red Sox plus two point five for eight hundred dollars at forty cents, another two thousand contracts, which turns the outcomes into two hundred dollars if the Yankees win by three or more, two thousand two hundred dollars if they win by one or two, and two hundred dollars if the Red Sox win \u2014 all before fees \u2014 his side of the story. What I don't have: the fees, so the net number is unknown.",
+          "cited_facts": [
+            {
+              "fact_id": "F1",
+              "source": "DEMONSTRATION",
+              "record_id": "DEMONSTRATION:derek_entry_decisions:demo-nyy-ml-entry",
+              "field": "label",
+              "value": "DEMONSTRATION",
+              "text": "DEMONSTRATION position -- not a production or paper record"
+            },
+            {
+              "fact_id": "F3",
+              "source": "DEMONSTRATION",
+              "record_id": "DEMONSTRATION:derek_entry_decisions:demo-nyy-ml-entry",
+              "field": "stake_usd",
+              "value": 1000.0,
+              "text": "stake $1,000"
+            },
+            {
+              "fact_id": "F4",
+              "source": "DEMONSTRATION",
+              "record_id": "DEMONSTRATION:derek_entry_decisions:demo-nyy-ml-entry",
+              "field": "executable_price",
+              "value": 0.5,
+              "text": "entry price $0.50 per contract"
+            },
+            {
+              "fact_id": "F5",
+              "source": "DEMONSTRATION",
+              "record_id": "DEMONSTRATION:derek_entry_decisions:demo-nyy-ml-entry",
+              "field": "qty",
+              "value": 2000,
+              "text": "2,000 contracts"
+            },
+            {
+              "fact_id": "F6",
+              "source": "DEMONSTRATION",
+              "record_id": "DEMONSTRATION:derek_entry_decisions:demo-nyy-ml-entry",
+              "field": "p_internal",
+              "value": 0.6,
+              "text": "internal probability 0.60"
+            },
+            {
+              "fact_id": "F7",
+              "source": "DEMONSTRATION",
+              "record_id": "DEMONSTRATION:derek_entry_decisions:demo-nyy-ml-entry",
+              "field": "p_pinnacle",
+              "value": 0.58,
+              "text": "Pinnacle probability 0.58"
+            },
+            {
+              "fact_id": "F8",
+              "source": "DEMONSTRATION",
+              "record_id": "DEMONSTRATION:derek_entry_decisions:demo-nyy-ml-entry",
+              "field": "p_blended",
+              "value": 0.59,
+              "text": "blended probability 0.59 = (0.60 + 0.58) / 2"
+            },
+            {
+              "fact_id": "F9",
+              "source": "DEMONSTRATION",
+              "record_id": "DEMONSTRATION:derek_entry_decisions:demo-nyy-ml-entry",
+              "field": "gross_edge_pp",
+              "value": 9.0,
+              "text": "edge 9 pp = 0.59 - 0.50"
+            },
+            {
+              "fact_id": "F10",
+              "source": "DEMONSTRATION",
+              "record_id": "DEMONSTRATION:derek_entry_decisions:demo-nyy-ml-entry",
+              "field": "threshold_gross_edge_pp",
+              "value": 5.0,
+              "text": "policy minimum edge 5 pp (DEREK_ENTRY_POLICY_V2)"
+            },
+            {
+              "fact_id": "F11",
+              "source": "DEMONSTRATION",
+              "record_id": "DEMONSTRATION:derek_entry_decisions:demo-nyy-ml-entry",
+              "field": "expected_gross_profit_usd",
+              "value": 180.0,
+              "text": "expected profit $180 before fees = 2,000 x 0.09"
+            },
+            {
+              "fact_id": "F12",
+              "source": "DEMONSTRATION",
+              "record_id": "DEMONSTRATION:bettor_xavier_decisions:demo-nyy-ml-hedge",
+              "field": "hedge",
+              "value": "Red Sox +2.5",
+              "text": "hedge instrument: Red Sox +2.5"
+            },
+            {
+              "fact_id": "F13",
+              "source": "DEMONSTRATION",
+              "record_id": "DEMONSTRATION:bettor_xavier_decisions:demo-nyy-ml-hedge",
+              "field": "hedge_cost_usd",
+              "value": 800.0,
+              "text": "hedge cost $800"
+            },
+            {
+              "fact_id": "F14",
+              "source": "DEMONSTRATION",
+              "record_id": "DEMONSTRATION:bettor_xavier_decisions:demo-nyy-ml-hedge",
+              "field": "hedge_price",
+              "value": 0.4,
+              "text": "hedge price $0.40 per contract"
+            },
+            {
+              "fact_id": "F15",
+              "source": "DEMONSTRATION",
+              "record_id": "DEMONSTRATION:bettor_xavier_decisions:demo-nyy-ml-hedge",
+              "field": "hedge_qty",
+              "value": 2000,
+              "text": "2,000 hedge contracts"
+            },
+            {
+              "fact_id": "F17",
+              "source": "DEMONSTRATION",
+              "record_id": "DEMONSTRATION:bettor_standing_order_plans:demo-bos-p25-plan",
+              "field": "floor:Yankees win by 3 or more",
+              "value": 200.0,
+              "text": "Yankees win by 3 or more: $200 before fees"
+            },
+            {
+              "fact_id": "F18",
+              "source": "DEMONSTRATION",
+              "record_id": "DEMONSTRATION:bettor_standing_order_plans:demo-bos-p25-plan",
+              "field": "floor:Yankees win by 1 or 2",
+              "value": 2200.0,
+              "text": "Yankees win by 1 or 2: $2,200 before fees"
+            },
+            {
+              "fact_id": "F19",
+              "source": "DEMONSTRATION",
+              "record_id": "DEMONSTRATION:bettor_standing_order_plans:demo-bos-p25-plan",
+              "field": "floor:Red Sox win",
+              "value": 200.0,
+              "text": "Red Sox win: $200 before fees"
+            }
+          ],
+          "citations": [
+            {
+              "kind": "DEMONSTRATION",
+              "id": "DEMONSTRATION:derek_entry_decisions:demo-nyy-ml-entry"
+            },
+            {
+              "kind": "DEMONSTRATION",
+              "id": "DEMONSTRATION:bettor_xavier_decisions:demo-nyy-ml-hedge"
+            },
+            {
+              "kind": "DEMONSTRATION",
+              "id": "DEMONSTRATION:bettor_standing_order_plans:demo-bos-p25-plan"
+            }
+          ],
+          "missing_evidence": [
+            "fees on either leg (every figure is before fees)",
+            "a settlement (no result exists, so nothing is realised)",
+            "the probability of the Yankees winning by exactly 1 or 2 runs, so the hedged pair's expected value cannot be graded"
+          ],
+          "found": true,
+          "demonstration": true,
+          "provider": {
+            "mode": "RECORDS_ONLY",
+            "model": null,
+            "failure": null,
+            "reason": "NO_ANTHROPIC_API_KEY",
+            "disclosure": "Records-only mode \u2014 answered directly from the cited records; no language model was used"
+          },
+          "persona": {
+            "version": 1,
+            "display_name": "Derek",
+            "role_title": "the enthusiastic quant"
+          },
+          "kind": "DEMONSTRATION_VOICE_SAMPLE",
+          "audio": {
+            "status": "SKIPPED_RECORDS_ONLY",
+            "bytes": 0
+          }
+        },
+        {
+          "question": "Show me the math on the edge.",
+          "status": "ANSWERED",
+          "http_status": 200,
+          "reason": null,
+          "conversation_id": "pc-derek-f59772cc1bb34df1",
+          "message_id": "pc-derek-f59772cc1bb34df1:3",
+          "transcript": "Okay, the finding first. This is the DEMONSTRATION position, not a real trade [F1]. Here's the entry math, step by step. Blended probability = (0.60 + 0.58) / 2 = 0.59 [F6] [F7] [F8]. Edge = 0.59 \u2212 0.50 = 9 pp [F9]. Contracts = $1,000 / $0.50 = 2,000 [F3] [F4] [F5]. Expected profit before fees = 2,000 \u00d7 0.09 = $180 [F11]. It clears the 5 pp policy minimum [F10]. Fees aren't in this record, so the net figure is unknown.",
+          "spoken_text": "Okay, the finding first. This is the demonstration position, not a real trade. Here's the entry math, step by step. Blended probability equals sixty percent plus fifty-eight percent divided by two equals fifty-nine percent. Edge equals zero point five nine minus zero point five equals nine percentage points. Contracts equals one thousand dollars / fifty cents equals two thousand. Expected profit before fees equals two thousand times zero point zero nine equals one hundred eighty dollars. It clears the five percentage points policy minimum. Fees aren't in this record, so the net figure is unknown.",
+          "cited_facts": [
+            {
+              "fact_id": "F1",
+              "source": "DEMONSTRATION",
+              "record_id": "DEMONSTRATION:derek_entry_decisions:demo-nyy-ml-entry",
+              "field": "label",
+              "value": "DEMONSTRATION",
+              "text": "DEMONSTRATION position -- not a production or paper record"
+            },
+            {
+              "fact_id": "F3",
+              "source": "DEMONSTRATION",
+              "record_id": "DEMONSTRATION:derek_entry_decisions:demo-nyy-ml-entry",
+              "field": "stake_usd",
+              "value": 1000.0,
+              "text": "stake $1,000"
+            },
+            {
+              "fact_id": "F4",
+              "source": "DEMONSTRATION",
+              "record_id": "DEMONSTRATION:derek_entry_decisions:demo-nyy-ml-entry",
+              "field": "executable_price",
+              "value": 0.5,
+              "text": "entry price $0.50 per contract"
+            },
+            {
+              "fact_id": "F5",
+              "source": "DEMONSTRATION",
+              "record_id": "DEMONSTRATION:derek_entry_decisions:demo-nyy-ml-entry",
+              "field": "qty",
+              "value": 2000,
+              "text": "2,000 contracts"
+            },
+            {
+              "fact_id": "F6",
+              "source": "DEMONSTRATION",
+              "record_id": "DEMONSTRATION:derek_entry_decisions:demo-nyy-ml-entry",
+              "field": "p_internal",
+              "value": 0.6,
+              "text": "internal probability 0.60"
+            },
+            {
+              "fact_id": "F7",
+              "source": "DEMONSTRATION",
+              "record_id": "DEMONSTRATION:derek_entry_decisions:demo-nyy-ml-entry",
+              "field": "p_pinnacle",
+              "value": 0.58,
+              "text": "Pinnacle probability 0.58"
+            },
+            {
+              "fact_id": "F8",
+              "source": "DEMONSTRATION",
+              "record_id": "DEMONSTRATION:derek_entry_decisions:demo-nyy-ml-entry",
+              "field": "p_blended",
+              "value": 0.59,
+              "text": "blended probability 0.59 = (0.60 + 0.58) / 2"
+            },
+            {
+              "fact_id": "F9",
+              "source": "DEMONSTRATION",
+              "record_id": "DEMONSTRATION:derek_entry_decisions:demo-nyy-ml-entry",
+              "field": "gross_edge_pp",
+              "value": 9.0,
+              "text": "edge 9 pp = 0.59 - 0.50"
+            },
+            {
+              "fact_id": "F10",
+              "source": "DEMONSTRATION",
+              "record_id": "DEMONSTRATION:derek_entry_decisions:demo-nyy-ml-entry",
+              "field": "threshold_gross_edge_pp",
+              "value": 5.0,
+              "text": "policy minimum edge 5 pp (DEREK_ENTRY_POLICY_V2)"
+            },
+            {
+              "fact_id": "F11",
+              "source": "DEMONSTRATION",
+              "record_id": "DEMONSTRATION:derek_entry_decisions:demo-nyy-ml-entry",
+              "field": "expected_gross_profit_usd",
+              "value": 180.0,
+              "text": "expected profit $180 before fees = 2,000 x 0.09"
+            }
+          ],
+          "citations": [
+            {
+              "kind": "DEMONSTRATION",
+              "id": "DEMONSTRATION:derek_entry_decisions:demo-nyy-ml-entry"
+            }
+          ],
+          "missing_evidence": [
+            "fees on either leg (every figure is before fees)",
+            "a settlement (no result exists, so nothing is realised)",
+            "the probability of the Yankees winning by exactly 1 or 2 runs, so the hedged pair's expected value cannot be graded"
+          ],
+          "found": true,
+          "demonstration": true,
+          "provider": {
+            "mode": "RECORDS_ONLY",
+            "model": null,
+            "failure": null,
+            "reason": "NO_ANTHROPIC_API_KEY",
+            "disclosure": "Records-only mode \u2014 answered directly from the cited records; no language model was used"
+          },
+          "persona": {
+            "version": 1,
+            "display_name": "Derek",
+            "role_title": "the enthusiastic quant"
+          },
+          "kind": "DEMONSTRATION_FOLLOW_UP",
+          "audio": {
+            "status": "SKIPPED_RECORDS_ONLY",
+            "bytes": 0
+          }
+        }
+      ]
+    },
+    "xavier": {
+      "turns": [
+        {
+          "question": "Walk me through the Yankees position.",
+          "status": "ANSWERED",
+          "http_status": 200,
+          "reason": null,
+          "conversation_id": "pc-xavier-3a2a1b502ffc4a42",
+          "message_id": "pc-xavier-3a2a1b502ffc4a42:1",
+          "transcript": "Plainly, then. There is no Yankees position on the book: no production or paper Yankees record exists, so there is nothing to manage or protect. Checked: paper_ledger (not in this build), bettor_funded_intents (no match), derek_entry_decisions (no match), bettor_xavier_decisions (no match). The DEMONSTRATION position is available if you want a worked example \u2014 ask with the demonstration context.",
+          "spoken_text": "Plainly, then. There is no Yankees position on the book: no production or paper Yankees record exists, so there is nothing to manage or protect. Checked: paper ledger not in this build, bettor funded intents no match, derek entry decisions no match, bettor xavier decisions no match. The demonstration position is available if you want a worked example \u2014 ask with the demonstration context.",
+          "cited_facts": [],
+          "citations": [],
+          "missing_evidence": [
+            "paper ledger not in this build"
+          ],
+          "found": false,
+          "demonstration": false,
+          "provider": {
+            "mode": "RECORDS_ONLY",
+            "model": null,
+            "failure": null,
+            "reason": "NO_ANTHROPIC_API_KEY",
+            "disclosure": "Records-only mode \u2014 answered directly from the cited records; no language model was used"
+          },
+          "persona": {
+            "version": 1,
+            "display_name": "Xavier",
+            "role_title": "the composed investment manager"
+          },
+          "kind": "REAL_RECORDS",
+          "audio": {
+            "status": "SKIPPED_RECORDS_ONLY",
+            "bytes": 0
+          }
+        },
+        {
+          "question": "Walk me through our current cash and positions.",
+          "status": "ANSWERED",
+          "http_status": 200,
+          "reason": null,
+          "conversation_id": "pc-xavier-c290983ed3284f70",
+          "message_id": "pc-xavier-c290983ed3284f70:1",
+          "transcript": "Here's where the book stands. Exposure first \u2014 status: AUDREY is IDLE -- NOT_YET_RUN (last heartbeat never) [F1]; DEREK is IDLE -- NOT_YET_RUN (last heartbeat never) [F2]; XAVIER is IDLE -- NOT_YET_RUN (last heartbeat never) [F3]. Not in the record: paper ledger not in this build; desk account cash (no bettor_desk_account_state row); open funded positions (none recorded). Each figure is as of the record time shown; nothing here is a forecast.",
+          "spoken_text": "Here's where the book stands. Exposure first \u2014 status: audrey is IDLE -- NOT YET RUN last heartbeat never; derek is IDLE -- NOT YET RUN last heartbeat never; xavier is IDLE -- NOT YET RUN last heartbeat never. Not in the record: paper ledger not in this build; desk account cash no bettor desk account state row; open funded positions none recorded. Each figure is as of the record time shown; nothing here is a forecast.",
+          "cited_facts": [
+            {
+              "fact_id": "F1",
+              "source": "agent_status",
+              "record_id": "AUDREY",
+              "field": "state",
+              "value": "IDLE",
+              "text": "AUDREY is IDLE -- NOT_YET_RUN (last heartbeat never)"
+            },
+            {
+              "fact_id": "F2",
+              "source": "agent_status",
+              "record_id": "DEREK",
+              "field": "state",
+              "value": "IDLE",
+              "text": "DEREK is IDLE -- NOT_YET_RUN (last heartbeat never)"
+            },
+            {
+              "fact_id": "F3",
+              "source": "agent_status",
+              "record_id": "XAVIER",
+              "field": "state",
+              "value": "IDLE",
+              "text": "XAVIER is IDLE -- NOT_YET_RUN (last heartbeat never)"
+            }
+          ],
+          "citations": [
+            {
+              "kind": "agent_status",
+              "id": "AUDREY"
+            },
+            {
+              "kind": "agent_status",
+              "id": "DEREK"
+            },
+            {
+              "kind": "agent_status",
+              "id": "XAVIER"
+            }
+          ],
+          "missing_evidence": [
+            "paper ledger not in this build",
+            "desk account cash (no bettor_desk_account_state row)",
+            "open funded positions (none recorded)"
+          ],
+          "found": true,
+          "demonstration": false,
+          "provider": {
+            "mode": "RECORDS_ONLY",
+            "model": null,
+            "failure": null,
+            "reason": "NO_ANTHROPIC_API_KEY",
+            "disclosure": "Records-only mode \u2014 answered directly from the cited records; no language model was used"
+          },
+          "persona": {
+            "version": 1,
+            "display_name": "Xavier",
+            "role_title": "the composed investment manager"
+          },
+          "kind": "CASH_AND_POSITIONS",
+          "audio": {
+            "status": "SKIPPED_RECORDS_ONLY",
+            "bytes": 0
+          }
+        },
+        {
+          "question": "Walk me through the Yankees position.",
+          "status": "ANSWERED",
+          "http_status": 200,
+          "reason": null,
+          "conversation_id": "pc-xavier-29cb4452d9ca482f",
+          "message_id": "pc-xavier-29cb4452d9ca482f:1",
+          "transcript": "Here's where the book stands. This is the DEMONSTRATION position, not a real trade [F1]. Exposure first: 2,000 Yankees contracts that cost $1,000 [F5] [F3]. Unhedged, a Red Sox win loses the whole $1,000 [F20]. Protection: Red Sox +2.5 for $800 at $0.40, another 2,000 contracts [F12] [F13] [F14] [F15]. With both legs on, every outcome pays at least $200: $200 if the Yankees win by 3 or more, $2,200 if they win by 1 or 2, and $200 if the Red Sox win \u2014 all before fees [F17] [F18] [F19]. The trade-off: we spent $800 and gave up the unhedged $1,000 upside on a Yankees win [F21] to take the $1,000 downside off the table. The original thesis was Derek's: internal probability 0.60, Pinnacle 0.58, blended 0.59 [F6] [F7] [F8] against a $0.50 price, 9 pp of edge and about $180 expected before fees [F9] [F11]. What changed is that protection became available at $0.40 [F14], so the pair costs $1,800 against a minimum payout that covers it [F16]. What makes sense now: hold both legs to settlement; there is no later decision in the record. Not in the record: fees on either leg, so every floor is before fees.",
+          "spoken_text": "Here's where the book stands. This is the demonstration position, not a real trade. Exposure first: two thousand Yankees contracts that cost one thousand dollars. Unhedged, a Red Sox win loses the whole one thousand dollars. Protection: Red Sox plus two point five for eight hundred dollars at forty cents, another two thousand contracts. With both legs on, every outcome pays at least two hundred dollars: two hundred dollars if the Yankees win by three or more, two thousand two hundred dollars if they win by one or two, and two hundred dollars if the Red Sox win \u2014 all before fees. The trade-off: we spent eight hundred dollars and gave up the unhedged one thousand dollars upside on a Yankees win to take the one thousand dollars downside off the table. The original thesis was Derek's: internal probability sixty percent, Pinnacle fifty-eight percent, blended fifty-nine percent against a fifty cents price, nine percentage points of edge and about one hundred eighty dollars expected before fees. What changed is that protection became available at forty cents, so the pair costs one thousand eight hundred dollars against a minimum payout that covers it. What makes sense now: hold both legs to settlement; there is no later decision in the record. Not in the record: fees on either leg, so every floor is before fees.",
+          "cited_facts": [
+            {
+              "fact_id": "F1",
+              "source": "DEMONSTRATION",
+              "record_id": "DEMONSTRATION:derek_entry_decisions:demo-nyy-ml-entry",
+              "field": "label",
+              "value": "DEMONSTRATION",
+              "text": "DEMONSTRATION position -- not a production or paper record"
+            },
+            {
+              "fact_id": "F3",
+              "source": "DEMONSTRATION",
+              "record_id": "DEMONSTRATION:derek_entry_decisions:demo-nyy-ml-entry",
+              "field": "stake_usd",
+              "value": 1000.0,
+              "text": "stake $1,000"
+            },
+            {
+              "fact_id": "F5",
+              "source": "DEMONSTRATION",
+              "record_id": "DEMONSTRATION:derek_entry_decisions:demo-nyy-ml-entry",
+              "field": "qty",
+              "value": 2000,
+              "text": "2,000 contracts"
+            },
+            {
+              "fact_id": "F6",
+              "source": "DEMONSTRATION",
+              "record_id": "DEMONSTRATION:derek_entry_decisions:demo-nyy-ml-entry",
+              "field": "p_internal",
+              "value": 0.6,
+              "text": "internal probability 0.60"
+            },
+            {
+              "fact_id": "F7",
+              "source": "DEMONSTRATION",
+              "record_id": "DEMONSTRATION:derek_entry_decisions:demo-nyy-ml-entry",
+              "field": "p_pinnacle",
+              "value": 0.58,
+              "text": "Pinnacle probability 0.58"
+            },
+            {
+              "fact_id": "F8",
+              "source": "DEMONSTRATION",
+              "record_id": "DEMONSTRATION:derek_entry_decisions:demo-nyy-ml-entry",
+              "field": "p_blended",
+              "value": 0.59,
+              "text": "blended probability 0.59 = (0.60 + 0.58) / 2"
+            },
+            {
+              "fact_id": "F9",
+              "source": "DEMONSTRATION",
+              "record_id": "DEMONSTRATION:derek_entry_decisions:demo-nyy-ml-entry",
+              "field": "gross_edge_pp",
+              "value": 9.0,
+              "text": "edge 9 pp = 0.59 - 0.50"
+            },
+            {
+              "fact_id": "F11",
+              "source": "DEMONSTRATION",
+              "record_id": "DEMONSTRATION:derek_entry_decisions:demo-nyy-ml-entry",
+              "field": "expected_gross_profit_usd",
+              "value": 180.0,
+              "text": "expected profit $180 before fees = 2,000 x 0.09"
+            },
+            {
+              "fact_id": "F12",
+              "source": "DEMONSTRATION",
+              "record_id": "DEMONSTRATION:bettor_xavier_decisions:demo-nyy-ml-hedge",
+              "field": "hedge",
+              "value": "Red Sox +2.5",
+              "text": "hedge instrument: Red Sox +2.5"
+            },
+            {
+              "fact_id": "F13",
+              "source": "DEMONSTRATION",
+              "record_id": "DEMONSTRATION:bettor_xavier_decisions:demo-nyy-ml-hedge",
+              "field": "hedge_cost_usd",
+              "value": 800.0,
+              "text": "hedge cost $800"
+            },
+            {
+              "fact_id": "F14",
+              "source": "DEMONSTRATION",
+              "record_id": "DEMONSTRATION:bettor_xavier_decisions:demo-nyy-ml-hedge",
+              "field": "hedge_price",
+              "value": 0.4,
+              "text": "hedge price $0.40 per contract"
+            },
+            {
+              "fact_id": "F15",
+              "source": "DEMONSTRATION",
+              "record_id": "DEMONSTRATION:bettor_xavier_decisions:demo-nyy-ml-hedge",
+              "field": "hedge_qty",
+              "value": 2000,
+              "text": "2,000 hedge contracts"
+            },
+            {
+              "fact_id": "F16",
+              "source": "DEMONSTRATION",
+              "record_id": "DEMONSTRATION:bettor_standing_order_plans:demo-bos-p25-plan",
+              "field": "total_cost_usd",
+              "value": 1800.0,
+              "text": "total cost $1,800 = $1,000 + $800"
+            },
+            {
+              "fact_id": "F17",
+              "source": "DEMONSTRATION",
+              "record_id": "DEMONSTRATION:bettor_standing_order_plans:demo-bos-p25-plan",
+              "field": "floor:Yankees win by 3 or more",
+              "value": 200.0,
+              "text": "Yankees win by 3 or more: $200 before fees"
+            },
+            {
+              "fact_id": "F18",
+              "source": "DEMONSTRATION",
+              "record_id": "DEMONSTRATION:bettor_standing_order_plans:demo-bos-p25-plan",
+              "field": "floor:Yankees win by 1 or 2",
+              "value": 2200.0,
+              "text": "Yankees win by 1 or 2: $2,200 before fees"
+            },
+            {
+              "fact_id": "F19",
+              "source": "DEMONSTRATION",
+              "record_id": "DEMONSTRATION:bettor_standing_order_plans:demo-bos-p25-plan",
+              "field": "floor:Red Sox win",
+              "value": 200.0,
+              "text": "Red Sox win: $200 before fees"
+            },
+            {
+              "fact_id": "F20",
+              "source": "DEMONSTRATION",
+              "record_id": "DEMONSTRATION:bettor_xavier_decisions:demo-nyy-ml-hedge",
+              "field": "unhedged_worst_case_usd",
+              "value": -1000.0,
+              "text": "unhedged, a Red Sox win loses the $1,000 stake"
+            },
+            {
+              "fact_id": "F21",
+              "source": "DEMONSTRATION",
+              "record_id": "DEMONSTRATION:bettor_xavier_decisions:demo-nyy-ml-hedge",
+              "field": "unhedged_best_case_usd",
+              "value": 1000.0,
+              "text": "unhedged, a Yankees win pays $1,000 net before fees"
+            }
+          ],
+          "citations": [
+            {
+              "kind": "DEMONSTRATION",
+              "id": "DEMONSTRATION:derek_entry_decisions:demo-nyy-ml-entry"
+            },
+            {
+              "kind": "DEMONSTRATION",
+              "id": "DEMONSTRATION:bettor_xavier_decisions:demo-nyy-ml-hedge"
+            },
+            {
+              "kind": "DEMONSTRATION",
+              "id": "DEMONSTRATION:bettor_standing_order_plans:demo-bos-p25-plan"
+            }
+          ],
+          "missing_evidence": [
+            "fees on either leg (every figure is before fees)",
+            "a settlement (no result exists, so nothing is realised)",
+            "the probability of the Yankees winning by exactly 1 or 2 runs, so the hedged pair's expected value cannot be graded"
+          ],
+          "found": true,
+          "demonstration": true,
+          "provider": {
+            "mode": "RECORDS_ONLY",
+            "model": null,
+            "failure": null,
+            "reason": "NO_ANTHROPIC_API_KEY",
+            "disclosure": "Records-only mode \u2014 answered directly from the cited records; no language model was used"
+          },
+          "persona": {
+            "version": 1,
+            "display_name": "Xavier",
+            "role_title": "the composed investment manager"
+          },
+          "kind": "DEMONSTRATION_VOICE_SAMPLE",
+          "audio": {
+            "status": "SKIPPED_RECORDS_ONLY",
+            "bytes": 0
+          }
+        },
+        {
+          "question": "What happens if the Red Sox win?",
+          "status": "ANSWERED",
+          "http_status": 200,
+          "reason": null,
+          "conversation_id": "pc-xavier-29cb4452d9ca482f",
+          "message_id": "pc-xavier-29cb4452d9ca482f:3",
+          "transcript": "DEMONSTRATION position [F1]: if the Red Sox win, the +2.5 leg pays and we net $200 before fees [F19] \u2014 unhedged, that same result would have cost the full $1,000 [F20].",
+          "spoken_text": "demonstration position: if the Red Sox win, the plus two point five leg pays and we net two hundred dollars before fees \u2014 unhedged, that same result would have cost the full one thousand dollars.",
+          "cited_facts": [
+            {
+              "fact_id": "F1",
+              "source": "DEMONSTRATION",
+              "record_id": "DEMONSTRATION:derek_entry_decisions:demo-nyy-ml-entry",
+              "field": "label",
+              "value": "DEMONSTRATION",
+              "text": "DEMONSTRATION position -- not a production or paper record"
+            },
+            {
+              "fact_id": "F19",
+              "source": "DEMONSTRATION",
+              "record_id": "DEMONSTRATION:bettor_standing_order_plans:demo-bos-p25-plan",
+              "field": "floor:Red Sox win",
+              "value": 200.0,
+              "text": "Red Sox win: $200 before fees"
+            },
+            {
+              "fact_id": "F20",
+              "source": "DEMONSTRATION",
+              "record_id": "DEMONSTRATION:bettor_xavier_decisions:demo-nyy-ml-hedge",
+              "field": "unhedged_worst_case_usd",
+              "value": -1000.0,
+              "text": "unhedged, a Red Sox win loses the $1,000 stake"
+            }
+          ],
+          "citations": [
+            {
+              "kind": "DEMONSTRATION",
+              "id": "DEMONSTRATION:derek_entry_decisions:demo-nyy-ml-entry"
+            },
+            {
+              "kind": "DEMONSTRATION",
+              "id": "DEMONSTRATION:bettor_standing_order_plans:demo-bos-p25-plan"
+            },
+            {
+              "kind": "DEMONSTRATION",
+              "id": "DEMONSTRATION:bettor_xavier_decisions:demo-nyy-ml-hedge"
+            }
+          ],
+          "missing_evidence": [
+            "fees on either leg (every figure is before fees)",
+            "a settlement (no result exists, so nothing is realised)",
+            "the probability of the Yankees winning by exactly 1 or 2 runs, so the hedged pair's expected value cannot be graded"
+          ],
+          "found": true,
+          "demonstration": true,
+          "provider": {
+            "mode": "RECORDS_ONLY",
+            "model": null,
+            "failure": null,
+            "reason": "NO_ANTHROPIC_API_KEY",
+            "disclosure": "Records-only mode \u2014 answered directly from the cited records; no language model was used"
+          },
+          "persona": {
+            "version": 1,
+            "display_name": "Xavier",
+            "role_title": "the composed investment manager"
+          },
+          "kind": "DEMONSTRATION_FOLLOW_UP",
+          "audio": {
+            "status": "SKIPPED_RECORDS_ONLY",
+            "bytes": 0
+          }
+        }
+      ]
+    },
+    "audrey": {
+      "turns": [
+        {
+          "question": "Walk me through the Yankees position.",
+          "status": "ANSWERED",
+          "http_status": 200,
+          "reason": null,
+          "conversation_id": "pc-audrey-6b67e35609ef47df",
+          "message_id": "pc-audrey-6b67e35609ef47df:1",
+          "transcript": "Let's be honest about this one. Nothing to audit on Yankees: no production or paper Yankees position exists in the records, and I won't grade one that doesn't. Checked: paper_ledger (not in this build), bettor_funded_intents (no match), derek_entry_decisions (no match), bettor_xavier_decisions (no match). The DEMONSTRATION position is available if you want a worked example \u2014 ask with the demonstration context.",
+          "spoken_text": "Let's be honest about this one. Nothing to audit on Yankees: no production or paper Yankees position exists in the records, and I won't grade one that doesn't. Checked: paper ledger not in this build, bettor funded intents no match, derek entry decisions no match, bettor xavier decisions no match. The demonstration position is available if you want a worked example \u2014 ask with the demonstration context.",
+          "cited_facts": [],
+          "citations": [],
+          "missing_evidence": [
+            "paper ledger not in this build"
+          ],
+          "found": false,
+          "demonstration": false,
+          "provider": {
+            "mode": "RECORDS_ONLY",
+            "model": null,
+            "failure": null,
+            "reason": "NO_ANTHROPIC_API_KEY",
+            "disclosure": "Records-only mode \u2014 answered directly from the cited records; no language model was used"
+          },
+          "persona": {
+            "version": 1,
+            "display_name": "Audrey",
+            "role_title": "the charismatic auditor"
+          },
+          "kind": "REAL_RECORDS",
+          "audio": {
+            "status": "SKIPPED_RECORDS_ONLY",
+            "bytes": 0
+          }
+        },
+        {
+          "question": "Walk me through our current cash and positions.",
+          "status": "ANSWERED",
+          "http_status": 200,
+          "reason": null,
+          "conversation_id": "pc-audrey-f94953aae3814ff5",
+          "message_id": "pc-audrey-f94953aae3814ff5:1",
+          "transcript": "Status: AUDREY is IDLE -- NOT_YET_RUN (last heartbeat never) [F1]; DEREK is IDLE -- NOT_YET_RUN (last heartbeat never) [F2]; XAVIER is IDLE -- NOT_YET_RUN (last heartbeat never) [F3]. Missing evidence: paper ledger not in this build; desk account cash (no bettor_desk_account_state row); open funded positions (none recorded). Each figure is as of the record time shown; nothing here is a forecast.",
+          "spoken_text": "Status: audrey is IDLE -- NOT YET RUN last heartbeat never; derek is IDLE -- NOT YET RUN last heartbeat never; xavier is IDLE -- NOT YET RUN last heartbeat never. Missing evidence: paper ledger not in this build; desk account cash no bettor desk account state row; open funded positions none recorded. Each figure is as of the record time shown; nothing here is a forecast.",
+          "cited_facts": [
+            {
+              "fact_id": "F1",
+              "source": "agent_status",
+              "record_id": "AUDREY",
+              "field": "state",
+              "value": "IDLE",
+              "text": "AUDREY is IDLE -- NOT_YET_RUN (last heartbeat never)"
+            },
+            {
+              "fact_id": "F2",
+              "source": "agent_status",
+              "record_id": "DEREK",
+              "field": "state",
+              "value": "IDLE",
+              "text": "DEREK is IDLE -- NOT_YET_RUN (last heartbeat never)"
+            },
+            {
+              "fact_id": "F3",
+              "source": "agent_status",
+              "record_id": "XAVIER",
+              "field": "state",
+              "value": "IDLE",
+              "text": "XAVIER is IDLE -- NOT_YET_RUN (last heartbeat never)"
+            }
+          ],
+          "citations": [
+            {
+              "kind": "agent_status",
+              "id": "AUDREY"
+            },
+            {
+              "kind": "agent_status",
+              "id": "DEREK"
+            },
+            {
+              "kind": "agent_status",
+              "id": "XAVIER"
+            }
+          ],
+          "missing_evidence": [
+            "paper ledger not in this build",
+            "desk account cash (no bettor_desk_account_state row)",
+            "open funded positions (none recorded)"
+          ],
+          "found": true,
+          "demonstration": false,
+          "provider": {
+            "mode": "RECORDS_ONLY",
+            "model": null,
+            "failure": null,
+            "reason": "NO_ANTHROPIC_API_KEY",
+            "disclosure": "Records-only mode \u2014 answered directly from the cited records; no language model was used"
+          },
+          "persona": {
+            "version": 1,
+            "display_name": "Audrey",
+            "role_title": "the charismatic auditor"
+          },
+          "kind": "CASH_AND_POSITIONS",
+          "audio": {
+            "status": "SKIPPED_RECORDS_ONLY",
+            "bytes": 0
+          }
+        },
+        {
+          "question": "Walk me through the Yankees position.",
+          "status": "ANSWERED",
+          "http_status": 200,
+          "reason": null,
+          "conversation_id": "pc-audrey-5d8509d7556b44a5",
+          "message_id": "pc-audrey-5d8509d7556b44a5:1",
+          "transcript": "Let's be honest about this one. This is the DEMONSTRATION position, not a real trade [F1]. Result first: there isn't one \u2014 no settlement is recorded, so nothing is realised yet. Decision quality, which is what I can grade: Derek's entry cleared the bar \u2014 internal probability 0.60, Pinnacle 0.58, blended 0.59 [F6] [F7] [F8] against a $0.50 price is 9 pp, over the 5 pp minimum [F4] [F9] [F10], for about $180 expected before fees on $1,000, 2,000 contracts [F11] [F3] [F5]. Xavier's hedge, Red Sox +2.5 for $800 at $0.40, another 2,000 contracts [F12] [F13] [F14] [F15], locked in $200 if the Yankees win by 3 or more, $2,200 if they win by 1 or 2, and $200 if the Red Sox win \u2014 all before fees [F17] [F18] [F19]. Where I'd push them: Derek, the internal model learns from market prices, so that blend is less independent than it looks. Xavier, the hedge record doesn't carry the probability of the 1-or-2 middle, so I can't tell whether $800 was a good price for that protection. What should improve: record fees on both legs, record the middle's probability on the hedge decision, and grade it again after settlement.",
+          "spoken_text": "Let's be honest about this one. This is the demonstration position, not a real trade. Result first: there isn't one \u2014 no settlement is recorded, so nothing is realised yet. Decision quality, which is what I can grade: Derek's entry cleared the bar \u2014 internal probability sixty percent, Pinnacle fifty-eight percent, blended fifty-nine percent against a fifty cents price is nine percentage points, over the five percentage points minimum, for about one hundred eighty dollars expected before fees on one thousand dollars, two thousand contracts. Xavier's hedge, Red Sox plus two point five for eight hundred dollars at forty cents, another two thousand contracts, locked in two hundred dollars if the Yankees win by three or more, two thousand two hundred dollars if they win by one or two, and two hundred dollars if the Red Sox win \u2014 all before fees. Where I'd push them: Derek, the internal model learns from market prices, so that blend is less independent than it looks. Xavier, the hedge record doesn't carry the probability of the one-or-two middle, so I can't tell whether eight hundred dollars was a good price for that protection. What should improve: record fees on both legs, record the middle's probability on the hedge decision, and grade it again after settlement.",
+          "cited_facts": [
+            {
+              "fact_id": "F1",
+              "source": "DEMONSTRATION",
+              "record_id": "DEMONSTRATION:derek_entry_decisions:demo-nyy-ml-entry",
+              "field": "label",
+              "value": "DEMONSTRATION",
+              "text": "DEMONSTRATION position -- not a production or paper record"
+            },
+            {
+              "fact_id": "F3",
+              "source": "DEMONSTRATION",
+              "record_id": "DEMONSTRATION:derek_entry_decisions:demo-nyy-ml-entry",
+              "field": "stake_usd",
+              "value": 1000.0,
+              "text": "stake $1,000"
+            },
+            {
+              "fact_id": "F4",
+              "source": "DEMONSTRATION",
+              "record_id": "DEMONSTRATION:derek_entry_decisions:demo-nyy-ml-entry",
+              "field": "executable_price",
+              "value": 0.5,
+              "text": "entry price $0.50 per contract"
+            },
+            {
+              "fact_id": "F5",
+              "source": "DEMONSTRATION",
+              "record_id": "DEMONSTRATION:derek_entry_decisions:demo-nyy-ml-entry",
+              "field": "qty",
+              "value": 2000,
+              "text": "2,000 contracts"
+            },
+            {
+              "fact_id": "F6",
+              "source": "DEMONSTRATION",
+              "record_id": "DEMONSTRATION:derek_entry_decisions:demo-nyy-ml-entry",
+              "field": "p_internal",
+              "value": 0.6,
+              "text": "internal probability 0.60"
+            },
+            {
+              "fact_id": "F7",
+              "source": "DEMONSTRATION",
+              "record_id": "DEMONSTRATION:derek_entry_decisions:demo-nyy-ml-entry",
+              "field": "p_pinnacle",
+              "value": 0.58,
+              "text": "Pinnacle probability 0.58"
+            },
+            {
+              "fact_id": "F8",
+              "source": "DEMONSTRATION",
+              "record_id": "DEMONSTRATION:derek_entry_decisions:demo-nyy-ml-entry",
+              "field": "p_blended",
+              "value": 0.59,
+              "text": "blended probability 0.59 = (0.60 + 0.58) / 2"
+            },
+            {
+              "fact_id": "F9",
+              "source": "DEMONSTRATION",
+              "record_id": "DEMONSTRATION:derek_entry_decisions:demo-nyy-ml-entry",
+              "field": "gross_edge_pp",
+              "value": 9.0,
+              "text": "edge 9 pp = 0.59 - 0.50"
+            },
+            {
+              "fact_id": "F10",
+              "source": "DEMONSTRATION",
+              "record_id": "DEMONSTRATION:derek_entry_decisions:demo-nyy-ml-entry",
+              "field": "threshold_gross_edge_pp",
+              "value": 5.0,
+              "text": "policy minimum edge 5 pp (DEREK_ENTRY_POLICY_V2)"
+            },
+            {
+              "fact_id": "F11",
+              "source": "DEMONSTRATION",
+              "record_id": "DEMONSTRATION:derek_entry_decisions:demo-nyy-ml-entry",
+              "field": "expected_gross_profit_usd",
+              "value": 180.0,
+              "text": "expected profit $180 before fees = 2,000 x 0.09"
+            },
+            {
+              "fact_id": "F12",
+              "source": "DEMONSTRATION",
+              "record_id": "DEMONSTRATION:bettor_xavier_decisions:demo-nyy-ml-hedge",
+              "field": "hedge",
+              "value": "Red Sox +2.5",
+              "text": "hedge instrument: Red Sox +2.5"
+            },
+            {
+              "fact_id": "F13",
+              "source": "DEMONSTRATION",
+              "record_id": "DEMONSTRATION:bettor_xavier_decisions:demo-nyy-ml-hedge",
+              "field": "hedge_cost_usd",
+              "value": 800.0,
+              "text": "hedge cost $800"
+            },
+            {
+              "fact_id": "F14",
+              "source": "DEMONSTRATION",
+              "record_id": "DEMONSTRATION:bettor_xavier_decisions:demo-nyy-ml-hedge",
+              "field": "hedge_price",
+              "value": 0.4,
+              "text": "hedge price $0.40 per contract"
+            },
+            {
+              "fact_id": "F15",
+              "source": "DEMONSTRATION",
+              "record_id": "DEMONSTRATION:bettor_xavier_decisions:demo-nyy-ml-hedge",
+              "field": "hedge_qty",
+              "value": 2000,
+              "text": "2,000 hedge contracts"
+            },
+            {
+              "fact_id": "F17",
+              "source": "DEMONSTRATION",
+              "record_id": "DEMONSTRATION:bettor_standing_order_plans:demo-bos-p25-plan",
+              "field": "floor:Yankees win by 3 or more",
+              "value": 200.0,
+              "text": "Yankees win by 3 or more: $200 before fees"
+            },
+            {
+              "fact_id": "F18",
+              "source": "DEMONSTRATION",
+              "record_id": "DEMONSTRATION:bettor_standing_order_plans:demo-bos-p25-plan",
+              "field": "floor:Yankees win by 1 or 2",
+              "value": 2200.0,
+              "text": "Yankees win by 1 or 2: $2,200 before fees"
+            },
+            {
+              "fact_id": "F19",
+              "source": "DEMONSTRATION",
+              "record_id": "DEMONSTRATION:bettor_standing_order_plans:demo-bos-p25-plan",
+              "field": "floor:Red Sox win",
+              "value": 200.0,
+              "text": "Red Sox win: $200 before fees"
+            }
+          ],
+          "citations": [
+            {
+              "kind": "DEMONSTRATION",
+              "id": "DEMONSTRATION:derek_entry_decisions:demo-nyy-ml-entry"
+            },
+            {
+              "kind": "DEMONSTRATION",
+              "id": "DEMONSTRATION:bettor_xavier_decisions:demo-nyy-ml-hedge"
+            },
+            {
+              "kind": "DEMONSTRATION",
+              "id": "DEMONSTRATION:bettor_standing_order_plans:demo-bos-p25-plan"
+            }
+          ],
+          "missing_evidence": [
+            "fees on either leg (every figure is before fees)",
+            "a settlement (no result exists, so nothing is realised)",
+            "the probability of the Yankees winning by exactly 1 or 2 runs, so the hedged pair's expected value cannot be graded"
+          ],
+          "found": true,
+          "demonstration": true,
+          "provider": {
+            "mode": "RECORDS_ONLY",
+            "model": null,
+            "failure": null,
+            "reason": "NO_ANTHROPIC_API_KEY",
+            "disclosure": "Records-only mode \u2014 answered directly from the cited records; no language model was used"
+          },
+          "persona": {
+            "version": 1,
+            "display_name": "Audrey",
+            "role_title": "the charismatic auditor"
+          },
+          "kind": "DEMONSTRATION_VOICE_SAMPLE",
+          "audio": {
+            "status": "SKIPPED_RECORDS_ONLY",
+            "bytes": 0
+          }
+        },
+        {
+          "question": "Was the hedge worth it?",
+          "status": "ANSWERED",
+          "http_status": 200,
+          "reason": null,
+          "conversation_id": "pc-audrey-5d8509d7556b44a5",
+          "message_id": "pc-audrey-5d8509d7556b44a5:3",
+          "transcript": "This is the DEMONSTRATION position, not a real trade [F1]. Was the hedge worth it? I can't grade that yet, and I won't pretend to. It turned a position that could lose $1,000 [F20] into $200 if the Yankees win by 3 or more, $2,200 if they win by 1 or 2, and $200 if the Red Sox win \u2014 all before fees [F17] [F18] [F19]. But the record doesn't carry the probability of the 1-or-2 run middle, so I can't say whether $800 [F13] bought that floor at a fair price. Xavier, that number belongs on the hedge decision. Until it's there, I'm grading the process, not the price.",
+          "spoken_text": "This is the demonstration position, not a real trade. Was the hedge worth it? I can't grade that yet, and I won't pretend to. It turned a position that could lose one thousand dollars into two hundred dollars if the Yankees win by three or more, two thousand two hundred dollars if they win by one or two, and two hundred dollars if the Red Sox win \u2014 all before fees. But the record doesn't carry the probability of the one-or-two run middle, so I can't say whether eight hundred dollars bought that floor at a fair price. Xavier, that number belongs on the hedge decision. Until it's there, I'm grading the process, not the price.",
+          "cited_facts": [
+            {
+              "fact_id": "F1",
+              "source": "DEMONSTRATION",
+              "record_id": "DEMONSTRATION:derek_entry_decisions:demo-nyy-ml-entry",
+              "field": "label",
+              "value": "DEMONSTRATION",
+              "text": "DEMONSTRATION position -- not a production or paper record"
+            },
+            {
+              "fact_id": "F13",
+              "source": "DEMONSTRATION",
+              "record_id": "DEMONSTRATION:bettor_xavier_decisions:demo-nyy-ml-hedge",
+              "field": "hedge_cost_usd",
+              "value": 800.0,
+              "text": "hedge cost $800"
+            },
+            {
+              "fact_id": "F17",
+              "source": "DEMONSTRATION",
+              "record_id": "DEMONSTRATION:bettor_standing_order_plans:demo-bos-p25-plan",
+              "field": "floor:Yankees win by 3 or more",
+              "value": 200.0,
+              "text": "Yankees win by 3 or more: $200 before fees"
+            },
+            {
+              "fact_id": "F18",
+              "source": "DEMONSTRATION",
+              "record_id": "DEMONSTRATION:bettor_standing_order_plans:demo-bos-p25-plan",
+              "field": "floor:Yankees win by 1 or 2",
+              "value": 2200.0,
+              "text": "Yankees win by 1 or 2: $2,200 before fees"
+            },
+            {
+              "fact_id": "F19",
+              "source": "DEMONSTRATION",
+              "record_id": "DEMONSTRATION:bettor_standing_order_plans:demo-bos-p25-plan",
+              "field": "floor:Red Sox win",
+              "value": 200.0,
+              "text": "Red Sox win: $200 before fees"
+            },
+            {
+              "fact_id": "F20",
+              "source": "DEMONSTRATION",
+              "record_id": "DEMONSTRATION:bettor_xavier_decisions:demo-nyy-ml-hedge",
+              "field": "unhedged_worst_case_usd",
+              "value": -1000.0,
+              "text": "unhedged, a Red Sox win loses the $1,000 stake"
+            }
+          ],
+          "citations": [
+            {
+              "kind": "DEMONSTRATION",
+              "id": "DEMONSTRATION:derek_entry_decisions:demo-nyy-ml-entry"
+            },
+            {
+              "kind": "DEMONSTRATION",
+              "id": "DEMONSTRATION:bettor_xavier_decisions:demo-nyy-ml-hedge"
+            },
+            {
+              "kind": "DEMONSTRATION",
+              "id": "DEMONSTRATION:bettor_standing_order_plans:demo-bos-p25-plan"
+            }
+          ],
+          "missing_evidence": [
+            "fees on either leg (every figure is before fees)",
+            "a settlement (no result exists, so nothing is realised)",
+            "the probability of the Yankees winning by exactly 1 or 2 runs, so the hedged pair's expected value cannot be graded"
+          ],
+          "found": true,
+          "demonstration": true,
+          "provider": {
+            "mode": "RECORDS_ONLY",
+            "model": null,
+            "failure": null,
+            "reason": "NO_ANTHROPIC_API_KEY",
+            "disclosure": "Records-only mode \u2014 answered directly from the cited records; no language model was used"
+          },
+          "persona": {
+            "version": 1,
+            "display_name": "Audrey",
+            "role_title": "the charismatic auditor"
+          },
+          "kind": "DEMONSTRATION_FOLLOW_UP",
+          "audio": {
+            "status": "SKIPPED_RECORDS_ONLY",
+            "bytes": 0
+          }
+        }
+      ]
+    }
+  },
+  "verification": {
+    "same_record_ids": true,
+    "record_ids": [
+      [
+        "DEMONSTRATION",
+        "DEMONSTRATION:bettor_standing_order_plans:demo-bos-p25-plan"
+      ],
+      [
+        "DEMONSTRATION",
+        "DEMONSTRATION:bettor_xavier_decisions:demo-nyy-ml-hedge"
+      ],
+      [
+        "DEMONSTRATION",
+        "DEMONSTRATION:derek_entry_decisions:demo-nyy-ml-entry"
+      ]
+    ],
+    "core_numbers_missing": {
+      "derek": [],
+      "xavier": [],
+      "audrey": []
+    },
+    "all_core_numbers_present": true,
+    "perspective_words_missing": {
+      "derek": [],
+      "xavier": [],
+      "audrey": []
+    },
+    "perspectives_differ": true,
+    "labelled_demonstration": true
+  }
+}
