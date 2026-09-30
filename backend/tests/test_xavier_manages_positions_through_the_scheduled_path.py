@@ -264,13 +264,20 @@ def substitute(monkeypatch, venue: Venue, *, settlements=None):
 
     monkeypatch.setattr(pmus, "_get_client", lambda: venue.client)
     monkeypatch.setattr(pmus._gate, "authorize", lambda *a, **k: {"ok": True})
-    table = dict(settlements or {})
+    # BY REFERENCE: a test changes what the venue reports between cycles.
+    table = settlements if settlements is not None else {}
 
     def probe(client, slug):
         return dict(table.get(slug) or {
             "terminal_reading": SP.R_PENDING,
             "why": "SYNTHETIC: the market has not settled"})
     monkeypatch.setattr(SP, "probe", probe)
+    # THE PRODUCTION RE-READ PATH. The suite's conftest replaces the funded
+    # settlement re-read with a no-read for every test; here the production
+    # reader is put back, so the re-read reaches the (substituted) probe.
+    real = getattr(FM, "_real_settlement_probe", None)
+    if real is not None:
+        monkeypatch.setattr(FM, "_settlement_probe", real)
 
     real_bce = L.book_currency_evidence
 
@@ -1049,5 +1056,290 @@ async def test_e_a_lost_answer_and_a_restart_send_nothing_twice(monkeypatch):
             "SELECT count(*) FROM bettor_funded_intents WHERE account_id=$1"
             " AND leg_role='HEDGE'", ACCT) == 1
     finally:
+        await clean(conn)
+        await conn.close()
+
+
+# ════════════════════════════════════════════════════════════════════
+# (f) A SETTLEMENT CORRECTION UPDATES ACCOUNTING AND INVALIDATES LEARNING
+# ════════════════════════════════════════════════════════════════════
+
+#: THE FUNDED-LANE MODEL'S OTHER TRAINING AND EVALUATION GROUPS live under a
+#: separate SYNTHETIC account, so the scheduled pass of the bound account
+#: never touches them (their fixtures are synthetic; each is settled through
+#: the production `reconcile_settlement` with only the probe substituted).
+LEARN_ACCT = "acct-funded-DEMONSTRATION-xavier-xc-learn"
+MIDDLE_MODEL = "xc-middle-model"
+CORRECTION_OPERATOR = OPERATOR
+CORRECTION_STATEMENT = ("SYNTHETIC: read the venue's corrected settlement of "
+                        "the run line -- its long side now settles at 1.0")
+
+
+def _settled(px):
+    """The settlement probe's answer for a market the venue settled at the
+    long-side price `px` (SYNTHETIC)."""
+    return {"terminal_reading": SP.R_REPORTED,
+            "authoritative_payout_present": True,
+            "reader_verdict": {"status": "RESOLVED",
+                               "corroboration": "CORROBORATED",
+                               "settlement_price": float(px),
+                               "settlement_price_raw": str(px)},
+            "why": "SYNTHETIC venue settlement"}
+
+
+async def _learning_group(conn, *, gid, primary_pays, hedge_pays,
+                          decided_at, p):
+    """ONE RESOLVED TWO-LEG GROUP under LEARN_ACCT, through the book's own
+    writers, `FL.record_decision` (the vector before any outcome) and the
+    production settlement close (probe substituted) -- the pattern of
+    test_the_prospective_learning_path_promotes_or_rejects._group."""
+    from sportsassets import bettor_funded_learning as FL
+    from sportsassets import bettor_funded_model as FMD
+
+    group_id, legs = None, []
+    for role, pays in (("PRIMARY", primary_pays), ("HEDGE", hedge_pays)):
+        iid = "%s-%s" % (gid, role.lower())
+        got = await FB.record_intent(
+            conn, intent_id=iid, account_id=LEARN_ACCT, venue=VENUE,
+            venue_class=FA.VENUE_FUNDED,
+            us_market_slug="aec-%s-%s" % (gid, role), event_key=gid,
+            order_intent=FX.LONG, limit_price=0.45, quantity=10,
+            collateral_usd=FX.collateral_for(0.45, 10, FX.LONG),
+            effective_digest="d-" + iid, held_is_long=True,
+            portfolio_group_id=group_id, leg_role=role,
+            group_structure="INDIRECT_MIDDLE")
+        assert got.get("ok"), got
+        await FB.record_acknowledgement(conn, iid, venue_order_id="vo-" + iid,
+                                        status="open")
+        await FB.ingest_fills(conn, iid, [{"qty": 10.0, "price": 0.45,
+                                           "venue_fill_id": "vf-" + iid}])
+        if group_id is None:
+            group_id = await conn.fetchval(
+                "SELECT portfolio_group_id FROM bettor_funded_intents "
+                " WHERE intent_id=$1", iid)
+        legs.append((iid, pays))
+    width = int(round(4.0 * float(p)))
+    feats = FMD.features_of(
+        {"both_win_regions": tuple(range(width)), "cost_cents": 90,
+         "min_payout_cents": 100 * (1 if width else 0),
+         "max_payout_cents": 200},
+        primary_cost_cents=45, hedge_cost_cents=45, overtime_included=True)
+    rec = await FL.record_decision(
+        conn, decision_id="dec-" + gid, account_id=LEARN_ACCT, venue=VENUE,
+        fixture=gid, action="ACQUIRE_HEDGE", decided_at=decided_at,
+        group_id=group_id, worst_case_usd=-1.0, model_key=FMD.KEY_MIDDLE,
+        model_version="baseline-0", features=feats,
+        feature_sha=FMD.feature_sha(feats), predicted={"p_middle": float(p)})
+    assert rec.get("ok"), rec
+    for iid, pays in legs:
+        await FM.reconcile_settlement(
+            conn, intent_id=iid, client=object(),
+            probe=lambda c, s, _p=pays: _settled(_p), now=decided_at + 3600.0)
+
+
+async def _learning_cohort(conn, *, prefix, first_at, step, n=46):
+    """SYNTHETIC GROUPS FROM A STATED RULE: the middle occurs when its window
+    is at least 3 regions wide (so a fit can learn it)."""
+    for i in range(n):
+        p = 0.1 + 0.8 * (i % 9) / 8.0
+        both = int(round(4.0 * p)) >= 3
+        await _learning_group(conn, gid="%s%03d" % (prefix, i),
+                              primary_pays=1.0,
+                              hedge_pays=(1.0 if both else 0.0),
+                              decided_at=first_at + i * step, p=p)
+
+
+async def _clean_learning(conn):
+    from sportsassets import bettor_funded_model as FMD
+    from sportsassets import bettor_xavier_review as XR
+    for sql in (
+            "DELETE FROM bettor_funded_decision_outcomes WHERE decision_id IN"
+            " (SELECT decision_id FROM bettor_funded_decisions "
+            "  WHERE account_id=$1)",
+            "DELETE FROM bettor_funded_decisions WHERE account_id=$1",
+            "DELETE FROM bettor_funded_group_results WHERE group_id IN "
+            " (SELECT group_id FROM bettor_funded_portfolio_groups "
+            "  WHERE account_id=$1)",
+            "DELETE FROM bettor_funded_economics WHERE intent_id IN "
+            " (SELECT intent_id FROM bettor_funded_intents WHERE account_id=$1)",
+            "DELETE FROM bettor_funded_fills WHERE intent_id IN "
+            " (SELECT intent_id FROM bettor_funded_intents WHERE account_id=$1)",
+            "DELETE FROM bettor_funded_intents WHERE account_id=$1",
+            "DELETE FROM bettor_funded_portfolio_groups WHERE account_id=$1"):
+        await conn.execute(sql, LEARN_ACCT)
+    await conn.execute("DELETE FROM bettor_funded_models WHERE model_key=$1",
+                       FMD.KEY_MIDDLE)
+    async with conn.transaction():
+        await conn.execute("SET LOCAL session_replication_role = replica")
+        await conn.execute(
+            "DELETE FROM bettor_xavier_reviews WHERE review_date = "
+            " (now() AT TIME ZONE 'utc')::date")
+    await conn.execute("DELETE FROM ingestion_state WHERE key=$1",
+                       XR.STATE_KEY)
+
+
+@pg
+@pytest.mark.asyncio
+async def test_f_a_settlement_correction_corrects_accounting_and_invalidates_learning(
+        monkeypatch):
+    """A group Xavier managed settles; a funded-lane model trained on its
+    label is APPROVED (promote, a named approver, prospective evidence). The
+    venue then CORRECTS the run line's settlement:
+
+      cycle 3 -- the scheduled re-read DISAGREES; the account is contested;
+                 the model no longer reproduces and the scheduled pass
+                 withdraws it; Xavier's daily review marks the decision
+                 INVALIDATED;
+      then    -- the audited correction writer books ONE
+                 SETTLEMENT_CORRECTION delta;
+      cycle 4 -- the contest lifts, the group's label is read from the
+                 CORRECTED price, and the withdrawn model -- trained on the
+                 old label -- still does not reproduce and cannot be
+                 restored."""
+    from sportsassets import bettor_funded_corrections as FC
+    from sportsassets import bettor_funded_model as FMD
+    from sportsassets import bettor_xavier_review as XR
+    import datetime as _dt
+
+    conn = await _connect()
+    try:
+        await _clean_learning(conn)
+        await start(conn, p=0.55)
+        venue = Venue(books=books(held_bids=PROFIT_LADDER, hedge_bid=0.55),
+                      holdings={HELD: (10.0, 5.0)})
+        table: dict = {}
+        substitute(monkeypatch, venue, settlements=table)
+        # ── CYCLE 1: THE HEDGE IS ACQUIRED (demonstration (a)) ───────
+        one = await run_cycle(conn)
+        assert step_of(one)["decision"]["action"] == PC.ACTION_ACQUIRE
+        rec1 = (await xavier_records(conn))[0]
+        d1 = rec1["decision_id"]
+        hedge = await conn.fetchval(
+            "SELECT intent_id FROM bettor_funded_intents WHERE account_id=$1"
+            " AND leg_role='HEDGE'", ACCT)
+        # ── CYCLE 2: THE VENUE SETTLES BOTH LEGS (Red Sox by exactly 1) ─
+        table[HELD] = _settled(1.0)      # the Red Sox won
+        table[SIB] = _settled(0.0)       # BOS -1.5 lost: NYY +1.5 paid
+        await run_cycle(conn)
+        legs = {r["intent_id"]: dict(r) for r in await conn.fetch(
+            "SELECT intent_id, closed_reason, settlement::text AS s "
+            "  FROM bettor_funded_intents WHERE account_id=$1 AND "
+            "  kind='ENTRY'", ACCT)}
+        assert {v["closed_reason"] for v in legs.values()} == {
+            "SETTLED_BY_THE_VENUE"}, legs
+        assert json.loads(legs[hedge]["s"])["payout_price"] == 0.0
+        lab0 = await FMD.labelled(conn, decision_ids=[d1])
+        assert lab0["n"] == 1 and lab0["labels"] == [1.0]   # a middle
+        # ── A FUNDED-LANE MODEL TRAINED ON THAT LABEL, APPROVED ──────
+        now = time.time()
+        await _learning_cohort(conn, prefix="xclt", first_at=now - 20 * 86400,
+                               step=600.0)
+        fit_through = _dt.datetime.fromtimestamp(time.time() + 1,
+                                                 _dt.timezone.utc)
+        fitted = await FMD.fit_from_records(conn, through=fit_through)
+        assert fitted.get("ok"), fitted
+        assert d1 in fitted["training_provenance"]["decision_ids"]
+        reg = await FMD.register(conn, model_id=MIDDLE_MODEL,
+                                 model_version="v-xc", fitted=fitted,
+                                 fit_through=fit_through)
+        assert reg.get("ok"), reg
+        await _learning_cohort(conn, prefix="xcle",
+                               first_at=time.time() + 3600.0, step=60.0)
+        ev = await FMD.evaluate(conn, model_id=MIDDLE_MODEL)
+        assert ev.get("ok"), ev
+        prom = await FMD.promote(conn, model_id=MIDDLE_MODEL,
+                                 approved_by="owner@test (SYNTHETIC)")
+        assert prom.get("ok"), prom
+        assert (await FMD.approved(conn))["ok"] is True
+        assert (await FA.account_selection(conn, ACCT))["ok"] is True
+
+        # ── CYCLE 3: THE VENUE CORRECTS THE RUN LINE ─────────────────
+        async with conn.transaction():
+            await conn.execute("SET LOCAL session_replication_role = replica")
+            await conn.execute(
+                "DELETE FROM bettor_xavier_reviews WHERE review_date = "
+                " (now() AT TIME ZONE 'utc')::date")
+        await conn.execute("DELETE FROM ingestion_state WHERE key=$1",
+                           XR.STATE_KEY)
+        table[SIB] = _settled(1.0)       # BOS -1.5 won: NYY +1.5 lost
+        three = await run_cycle(conn)
+        rc = [dict(r) for r in await conn.fetch(
+            "SELECT * FROM bettor_funded_settlement_rechecks WHERE "
+            " intent_id=$1 ORDER BY read_at, recheck_id", hedge)]
+        assert rc[-1]["verdict"] == "DISAGREES", rc
+        assert float(rc[-1]["booked_payout_price"]) == 0.0
+        assert float(rc[-1]["venue_payout_price"]) == 1.0
+        sel = await FA.account_selection(conn, ACCT)
+        assert sel["refusal"] == FA.R_SETTLEMENT_CONTESTED
+        # THE SCHEDULED PASS WITHDREW THE MODEL
+        w = three["funded_servicing"]["learning"]["withdraw"]
+        assert w["withdrawn"] is True, w
+        m = await conn.fetchrow(
+            "SELECT state, retired_reason FROM bettor_funded_models "
+            " WHERE model_id=$1", MIDDLE_MODEL)
+        assert m["state"] == FMD.STATE_RETIRED
+        assert m["retired_reason"].startswith(
+            FMD.RETIRED_EVIDENCE_INVALIDATED), m
+        # XAVIER'S DAILY REVIEW MARKED THE DECISION INVALIDATED
+        rev = await XR.latest_review(conn)
+        assert rev is not None
+        inv = {i["xavier_decision_id"]: i for i in rev["invalidated"]}
+        assert rec1["xavier_decision_id"] in inv, rev["invalidated"]
+        assert inv[rec1["xavier_decision_id"]]["reason"] == \
+            XR.INV_VENUE_DISAGREES
+
+        # ── THE AUDITED CORRECTION ───────────────────────────────────
+        view = await FC.listing(conn, intent_id=hedge)
+        aw = view["awaiting_correction"]
+        assert len(aw) == 1, view
+        booked = await FC.book_settlement_correction(
+            conn, intent_id=hedge, recheck_id=aw[0]["recheck_id"],
+            operator=CORRECTION_OPERATOR, statement=CORRECTION_STATEMENT,
+            seen_recheck_sha=aw[0]["recheck_sha"], confirm=hedge,
+            auth=dict(AUTH))
+        assert booked["ok"] is True and booked["already"] is False, booked
+        # 10 SHORT contracts: booked paid 10.00 at a long price of 0; at the
+        # corrected long price of 1 they pay nothing -- a -10.00 delta
+        assert booked["effect"]["delta_usd"] == pytest.approx(-10.0)
+        econ = [dict(r) for r in await conn.fetch(
+            "SELECT kind, amount_usd::float8 AS amt FROM "
+            " bettor_funded_economics WHERE intent_id=$1 AND kind IN "
+            " ('SETTLEMENT', 'SETTLEMENT_CORRECTION') ORDER BY kind", hedge)]
+        assert [e["kind"] for e in econ] == ["SETTLEMENT",
+                                             "SETTLEMENT_CORRECTION"]
+        assert econ[1]["amt"] == pytest.approx(-10.0)
+        corr = await conn.fetchrow(
+            "SELECT * FROM bettor_funded_settlement_corrections WHERE "
+            " intent_id=$1", hedge)
+        assert corr["operator"] == CORRECTION_OPERATOR
+        assert float(corr["from_price"]) == 0.0
+        assert float(corr["to_price"]) == 1.0
+        assert await conn.fetchval(
+            "SELECT outcome FROM bettor_funded_correction_audit WHERE "
+            " audit_id=$1", booked["audit_id"]) == "ACCEPTED"
+
+        # ── CYCLE 4: THE CONTEST LIFTS; THE LABEL IS CORRECTED ───────
+        await run_cycle(conn)
+        assert (await FA.account_selection(conn, ACCT))["ok"] is True
+        lab = await FMD.labelled(conn, decision_ids=[d1])
+        assert lab["n"] == 1 and lab["labels"] == [0.0]      # no middle
+        hl = [g for g in lab["leg_outcomes"][0]
+              if g["leg_role"] == "HEDGE"][0]
+        assert float(hl["payout_price"]) == 1.0
+        # THE MODEL TRAINED ON THE OLD LABEL DOES NOT REPRODUCE, STAYS
+        # WITHDRAWN, AND CANNOT BE RESTORED
+        row = FMD._row(await conn.fetchrow(
+            "SELECT * FROM bettor_funded_models WHERE model_id=$1",
+            MIDDLE_MODEL))
+        ver = await FMD.verify_provenance(conn, row)
+        assert ver["refusal"] == FMD.R_TRAINING_RECORDS_DO_NOT_REPRODUCE
+        assert d1 in ver.get("changed_records", []), ver
+        assert row["state"] == FMD.STATE_RETIRED
+        assert (await FMD.approved(conn))["ok"] is False
+        back = await FMD.rollback(conn, to_model_id=MIDDLE_MODEL,
+                                  reason="try to restore it (SYNTHETIC)")
+        assert back["ok"] is False, back
+    finally:
+        await _clean_learning(conn)
         await clean(conn)
         await conn.close()
