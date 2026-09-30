@@ -1,99 +1,128 @@
-# Owner decision form — funded pilot (for review; nothing here is chosen or activated)
+# Owner decision form — funded pilot (for review; nothing chosen, nothing activated)
 
-**Dated:** 2026-09-30.
+**Dated:** 2026-09-30, revision 2.
 
-**What this form does and does not do:**
-- It records your decisions. It does not activate submission.
-- The three submission switches stay `False` in code until a separate yes/no on a named activation build (§F).
-- Nothing has been chosen on your behalf: not the account, not any amount, not the hedge policy, not the export policy.
+**What this form is:** it records your decisions. It does not activate submission.
 
-## A · What each limit field actually enforces (from the code)
+**What stays true until you decide otherwise:**
+- The three submission switches stay `False` in code until a separate yes/no on a named activation build (§E).
+- Nothing has been chosen on your behalf: not the account, not the amounts, not the authorization duration, not a hedge exception, not activation.
 
-**Scope:** every limit is measured on the funded lane's open book at the moment a new order is decided. Only **entries and hedge acquisitions** are checked against them. Exits and reductions are not, because they reduce exposure.
+**Where the numbers come from:** every figure below comes from the code, and is pinned by tests on the critical list.
 
-| Field you set | Accurate name also accepted | Enforced rail | What it bounds | Cap |
-|---|---|---|---|---|
-| `capital_usd` | — | MAX_CAPITAL_DEPLOYED | Cost basis of every open position, the proposed one included | 3,000 |
-| `per_order_usd` | `per_market_usd` | MAX_MARKET_EXPOSURE | Cost basis on **one market** (venue contract), the proposed one included. Not a per-order cap | 1,000 |
-| `event_exposure_usd` | — | MAX_EVENT_EXPOSURE | Cost basis on **one event** (venue event slug). A primary and its same-game hedge count together | 1,000 |
-| `max_exposure_usd` | — | MAX_CORRELATED_EXPOSURE | **The same number as `capital_usd`**: every open position is counted in full, as if perfectly correlated. The lower of the two is the binding bound | 1,000 |
-| `daily_loss_stop_usd` | `cumulative_loss_stop_usd` | MAX_DRAWDOWN | **Cumulative, with no daily reset.** It adds three things: realised losses (gains do not offset them), mark-to-market losses on open positions that have a bid, and the **full cost** of open positions with no bid, the proposed one included. When reached, new entries and hedges are refused. Only an operator's new book clears realised losses | 1,000 |
+## A · What each limit field enforces
 
-Two further rails exist that you cannot tighten. Neither can bind at the proposed scale:
-- **MAX_RESIDUAL_INVENTORY: 2,000 contracts.** At $250 and prices of at least $0.40, the lane holds at most about 625 contracts.
-- **MAX_CAPITAL_HOURS: 72,000 USD-hours.** $250 held for 72 hours is 18,000 USD-hours.
+**Scope:** limits are checked only for **entries and hedge acquisitions**, on the funded open book at the moment an order is decided. Exits and reductions are exempt.
 
-**Code:** from this release, the two accurate names are accepted and give the same limit digest, and each field's meaning is stored with the recorded limits (commit 5f8767b).
+| Field (accurate name) | Rail | What it bounds | Cap |
+|---|---|---|---|
+| `capital_usd` | MAX_CAPITAL_DEPLOYED | Cost of every open position, the proposed one included | 3,000 |
+| `per_order_usd` (`per_market_usd`) | MAX_MARKET_EXPOSURE | Cost on **one market**. Not per order | 1,000 |
+| `event_exposure_usd` | MAX_EVENT_EXPOSURE | Cost on **one event**. A primary and its same-game hedge count together | 1,000 |
+| `max_exposure_usd` | MAX_CORRELATED_EXPOSURE | **The same number as capital**; the lower of the two binds | 1,000 |
+| `daily_loss_stop_usd` (`cumulative_loss_stop_usd`) | MAX_DRAWDOWN | **No daily reset.** Realised losses (gains don't offset them), plus mark-to-market losses on open positions with a bid, plus the full cost of open positions with no bid, the proposed one included. It refuses only **above** its value | 1,000 |
 
-## B · Proposed pilot limits — for your review, separately justified
+**Capacity rules that dollar limits do not change:**
+- **One open portfolio group in the whole database.** Migration 131's `bettor_funded_one_open_group` is a unique index on `(true)` where `closed_at IS NULL`. A group holds at most one PRIMARY and one HEDGE leg. So at most **one market plus its hedge** can be held at a time, for every account. The pilot trades positions one after another, not ten at once. Proven in `test_the_database_admits_one_open_group_at_a_time`.
+- **No price floor is enforced.** The only bound is the probability support [0.02, 0.98], and a buy needs its price below the probability, so prices down to 1¢ are admissible. At 1¢, the 2,000-contract inventory rail binds: a $25 primary would be 2,500 contracts and is capped at 2,000, which is $20.
+- **Capital-hours (72,000 USD-hours, not owner-adjustable).** Until this correction, the funded book integrated **every fill ever made, up to "now"**. Closed positions consumed this rail forever, and a multi-day pilot would have been refused on a flat book. It now integrates each fill over its holding period only. One group holds about $50, so this rail could bind only on positions held for about 60 days. Proven in `test_a_closed_position_stops_consuming_capital_hours`.
 
-**Purpose:** a pilot's only job is to demonstrate, with real money at the smallest useful size, what the software has shown only on simulated transport:
-- venue acknowledgement;
-- fills, partial fills included;
-- Xavier's management;
-- settlement;
-- reconciliation.
-
-It establishes nothing about profitability.
+## B · Proposed pilot limits — for your review, revised
 
 | Field | Proposed | Justification |
 |---|---|---|
-| `per_market_usd` | **25** | At prices of $0.40–$0.65, $25 buys about 38–62 contracts. That is enough to exercise partial fills, depth-limited exits and REDUCE, so fees are measured at a realistic per-contract scale, while any single market risks $25. |
-| `event_exposure_usd` | **50** | This room is for a primary ($25) plus a same-game protective hedge of up to $25. If it equalled `per_market_usd`, the event rail would refuse every protective hedge. That matters under hedge policy (i). |
-| `capital_usd` | **250** | Enough for 10 concurrent markets at $25, or 5 hedged pairs. Concurrency, restart recovery and group management then occur for real. |
-| `max_exposure_usd` | **250** | This measures the same number as capital. A lower value would silently become the real capital cap, so it is set equal and one number governs. |
-| `cumulative_loss_stop_usd` | **75** | 30% of capital. Open positions with no bid count at full cost. The rail refuses only above its value, so with $25 markets and no bids, at most three such positions can be open (25 + 25 + 25 = 75 is allowed; a fourth is refused). Realised losses never reset: after $75 of cumulative realised plus worst-case loss, the pilot stops taking new exposure until you decide to start a new book. Exits and settlement continue. |
+| `per_market_usd` | **25** | The primary is at most $25: 62 contracts at 40¢, 47 at 52.2¢, 38 at 65¢, 1,250 at 2¢. Enough contracts for partial fills, reductions and real per-contract fees; at most $25 at risk per market. |
+| `event_exposure_usd` | **50** | Leaves $25 of room for a same-game hedge beside the primary. |
+| `capital_usd` | **50** | One group holds at most a $25 primary and a $25 hedge. The previous $250 was unreachable under the one-group rule and implied capacity that does not exist. |
+| `max_exposure_usd` | **50** | The same measured number as capital, so it is set equal and hides no tighter bound. |
+| `cumulative_loss_stop_usd` | **100** | A realised-loss budget. A new unhedged $25 primary is allowed while realised losses are at most **$75**. A hedged pair (up to $50 open) is allowed while realised losses are at most **$50**. Money at risk never exceeds realised losses plus the open worst case, which is at most $100. Exits and settlement continue after the stop. |
 
-**Your choice:** accept these five numbers, or write your own. Each must be above 0 and at or below its cap, and `per_market_usd` cannot exceed `capital_usd`.
+**Hedge coverage under these limits.** The hedge is sized to at most the unpaired primary quantity. A $25 hedge cap means full coverage only when the hedge is no dearer than the primary. Otherwise coverage is about primary price ÷ hedge price, and the **unpaired remainder stays held, and valued as held**:
 
-## C · When an authorization expires while positions are held
+| Primary price → contracts | hedge 40¢ | hedge 60¢ | hedge 80¢ | hedge 98.5¢ |
+|---|---|---|---|---|
+| 30¢ → 83 | 62 (75%) | 41 (49%) | 31 (37%) | 25 (30%) |
+| 40¢ → 62 | 62 (100%) | 41 (66%) | **31 (50%)** | 25 (40%) |
+| 52.2¢ → 47 | 47 (100%) | 41 (87%) | 31 (66%) | 25 (53%) |
+| 65¢ → 38 | 38 (100%) | 38 (100%) | 31 (82%) | 25 (66%) |
+| 90¢ → 27 | 27 (100%) | 27 (100%) | 27 (100%) | 25 (93%) |
+
+Your example of 62 contracts at 40¢ hedged at 80¢: 31 contracts are covered and **31 stay unpaired**. Full coverage would need an event cap of at least $75 and a per-market cap of at least $50, and the per-market cap also raises the primary's size. The table is computed with the rail code in `test_the_proposed_pilot_limits_permit_what_the_form_says.py`.
+
+## C · Authorization duration: bounded renewal (implemented)
 
 There are two records:
-- **Your owner authorization:** you sign it, with a finite lifetime that you choose in §E.
-- **The system authorization:** issued from a valid owner authorization when activation is run. It expires after **24 hours** and is renewed only by running activation again while your record is still valid. Nothing renews it automatically.
+- **Your owner authorization:** you sign it, with a finite lifetime you choose (§F.3).
+- **The system authorization:** expires after 24 hours, and never later than your owner authorization.
 
-**What happens when either expires, is revoked, or is invalidated** (a change of account or limits invalidates it):
+**Renewal.** The system authorization renews itself only when **all** of these hold:
+- it is live, unrevoked, and within its last 2 hours;
+- your owner authorization is unrevoked, uninvalidated, dated and unexpired;
+- your owner authorization covers exactly the same account, venue and limit digest;
+- a full re-run of `authorize` passes, rechecking account eligibility and reconciliation, calibration, limits, readiness, and your authorization.
 
-| Activity | Effect |
-|---|---|
-| New entries | **Refused** |
-| Protective hedges | **Refused** (they add exposure). Xavier's record names the authorization as the gate that stopped them |
-| Exits and reductions | **Continue.** They depend only on the exit switch and servicing checks, not on the authorization. This is proven by `test_an_exit_survives_every_entry_side_lapse`, run for expired, revoked, paused-account and submission-disabled cases |
-| Settlement, lost-acknowledgement recovery, reconciliation, learning, Xavier records | **Continue** |
+Renewal never creates the first authorization, and never extends past your expiry. Any failed check leaves the record to expire. Every attempt is logged. Proven by `test_the_system_authorization_renews_only_under_the_owners` (12 cases).
 
-**Net effect:** after a lapse, held positions are still managed to exit or settlement, but they cannot be newly hedged.
+**One gap remains:** calling renewal from the scheduled cycle is done during the merge now in progress. Until the frozen build shows that call, treat the pilot as a **one-day trading pilot**. The final yes/no (§E) is asked only on a build that demonstrates renewal.
 
-## D · How the actual activation build is verified
+**When authorization lapses, is revoked, or is invalidated:** entries and protective hedges are refused. Exits, reductions, settlement, recovery, reconciliation, learning and Xavier's records continue, provided the exit switch is on (§D).
 
-1. **One small commit.** The activation build S1 is the accepted, released build S0 plus one commit. That commit changes only the three switch constants and the tests that pin them `False`, each named in the commit. The diff S0..S1 is reviewed for exactly that and nothing else.
-2. **Full gate.** The full gate runs on S1 through the production migration path, compared against S0's accepted report. It passes only with zero new failures, every critical test passing, and changed outcomes limited to the named pinned tests.
-3. **Readiness.** Readiness is read at that moment and must show no unmet check: P5, calibration, a reconciled account, your owner authorization, and no open investigation.
-4. **Your yes.** You answer yes or no, naming S1.
-5. **Deploy S1 only.** Only S1 is deployed, through `render-ops` → `deploy-api-commit` with S1's 40-hex SHA and `confirm=DO`.
-6. **Readback from the live process**, not from git:
-   - `GET /api/admin/pilot-prerequisites` → `running_build.serving_commit` equals S1, and all three `running_build.switches` are `true`;
-   - the heartbeat's writer build equals S1.
-7. **Rollback.** Deploy S0 by the same route; the readback then shows all three switches `false`.
+## D · Incident procedure: stop acquisitions, keep protective management
 
-## E · Render configuration — read live on 2026-09-30 at 00:09Z
+**Which disabled switch the existing test covers.** `test_an_exit_survives_every_entry_side_lapse` runs with an expired or revoked authorization, a paused account, and the shipped state where both **entry** switches (`FUNDED_SUBMISSION_ENABLED`, `REAL_ORDER_SUBMISSION_ENABLED`) are off. It shows an exit then reaches its **own** switch, `FUNDED_EXIT_SUBMISSION_ENABLED`, and depends on nothing else. It does not send an exit, because that switch is also off in shipped code.
 
-Read through the read-only `render-ops` actions: `api-branch-get` (run 36648916538) and `rootdir-get` (run 36648918818).
-- `sportsassets-api`: branch `claude/session-njaewf`, **autoDeploy = no**, Dockerfile `./backend/Dockerfile`, build context `.`.
-- `sportsassets-workers`: branch `claude/session-njaewf`, **autoDeploy = yes**. A push to that branch redeploys the workers. Nothing is pushed there without the established release route.
+**New test.** `test_exits_are_sent_and_acquisitions_refused_in_the_incident_state` drives `cycle()` with only the venue transport substituted, in this state: exit switch **on**, both entry switches off, authorization revoked, account paused. The protective exit **is sent**, and a new entry is refused.
 
-**What this means for provisioning:**
-- A push does not redeploy the API.
-- An environment save in the dashboard may still offer to redeploy it. Choose **"Save only"**.
-- The restart is then done with the reviewed SHA through `deploy-api-commit`.
+**Procedure** (none of the first three steps redeploys anything):
+1. Revoke your owner authorization. This also revokes the system authorization issued on it.
+2. Pause the account.
+3. Stop the entry loop with the `ext_pinnacle_shadow` control.
+4. Verify:
+   - the readback shows the exit switch `true` and the authorization revoked;
+   - Xavier's records show acquisitions blocked with the gate named;
+   - exits and reductions are still dispatchable;
+   - reconciliation and recovery run each cycle.
+5. **Build rollback while inventory is held** goes to the prepared **exit-only build S0x**, not to S0. S0x is S0 with only the exit switch on; it is gated and readback-verified like S1. Rolling back to S0, with all three switches off, disables exits. That happens only if the exit path itself is faulty, and it is then recorded as the loss of autonomous protective management.
 
-## F · Your decisions (mark one in each)
+## E · How the activation build is verified
+
+1. **Two candidate builds, gated before any funding:**
+   - **S1:** S0 plus a commit changing only the three switch constants and the tests that pin them `False`.
+   - **S0x:** S0 with only the exit switch on.
+
+   Each diff is reviewed for exactly that and nothing else.
+2. **Full gate on each**, through the production migration path, against S0's accepted report: zero new failures, all critical tests passing, and changed outcomes limited to the named pinned tests.
+3. **Readiness shows nothing unmet:** P5, calibration, a reconciled account, your authorization, no open investigation, and renewal present in the cycle.
+4. **Your yes/no**, naming S1.
+5. **Deploy S1 only**, through `render-ops` → `deploy-api-commit` (40-hex SHA, `confirm=DO`).
+6. **Readback from the live process:** `GET /api/admin/pilot-prerequisites` shows `running_build.serving_commit` = S1 and all three switches `true`, and the heartbeat's writer build equals S1.
+7. **Rollback while holding:** deploy S0x, then read back the exit switch `true` and both entry switches `false`.
+
+**Render, read live 2026-09-30 00:09Z:**
+- `sportsassets-api`: autoDeploy **no**, branch `claude/session-njaewf`.
+- `sportsassets-workers`: autoDeploy **yes**.
+- When provisioning, use "Save only". The restart is done through `deploy-api-commit`.
+
+## F · Valuation under an unknown void rate
+
+An unknown void probability is **not treated as zero**:
+- **No measured rate:** every action is valued at both ends of [0, 1]. A selection may be dispatched with real money only if the **same action wins at both ends**; values are linear in the rate, so it then wins everywhere between.
+- **Otherwise:** the ranking is labelled a **conditional research valuation**, and funded dispatch is refused by name.
+- **Acquisitions:** never admitted on an unmeasured rate.
+- **Measured rate:** the winner must hold across the rate's stated uncertainty range.
+
+Proven in `test_every_action_is_valued_on_one_measure.py` (12 cases).
+
+**Consequence.** Until the void rate is measured (at least 40 settled fixtures from the non-funded observer), funded management acts only where its choice is robust to any void rate, and never acquires a hedge on a fixture that can void.
+
+## G · Your decisions (one in each)
 
 1. **Account:** ☐ A: the account the deployed key belongs to (send a label and a redacted key-page screenshot) ☐ B: another account (send a label; provision its key yourself)
-2. **Limits:** ☐ accept §B as proposed ☐ my values: capital ___ / per-market ___ / event ___ / max-exposure ___ / cumulative loss stop ___
-3. **Owner-authorization lifetime:** ☐ 7 days (proposed: shorter than the 14-day calibration freshness bound, and long enough to avoid daily re-signing) ☐ other: ___ days
-4. **Hedges when a limit is reached:** ☐ (i) the limits apply to hedges (current) ☐ (ii) allow hedges that lower worst-case loss (a code change, gated separately)
+2. **Limits:** ☐ accept §B (25 / 50 / 50 / 50 / 100) ☐ my values: per-market __ / event __ / capital __ / max-exposure __ / cumulative loss stop __
+3. **Owner-authorization lifetime:** ☐ ___ days. It is uninterrupted only on a build that demonstrates renewal (§C); otherwise it is a one-day pilot.
+4. **Hedges when a limit is reached:** ☐ (i) limits apply to hedges (current) ☐ (ii) allow hedges that lower worst-case loss (a separate, gated code change)
 5. **Public trade export:** ☐ (a) keep public ☐ (b) put behind the admin token before funding
-6. **Provisioning:** ☐ `FUNDED_RESOLUTION_KEY` and `FUNDED_RESOLUTION_OPERATOR` entered with "Save only" → reply "resolution credentials in place"
-7. **The P5 message:** ☐ sent to the venue (text in the owner request §5)
+6. **Provisioning:** ☐ `FUNDED_RESOLUTION_KEY` and `FUNDED_RESOLUTION_OPERATOR` entered with "Save only", then reply "resolution credentials in place"
+7. **P5:** ☐ message sent to the venue
 
-**Not on this form:** the final yes/no on S1. It is asked only when §D steps 1–3 hold.
+**Not on this form:** the final yes/no on S1.

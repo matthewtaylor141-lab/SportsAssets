@@ -1,7 +1,7 @@
 """WHAT THE PROPOSED PILOT LIMITS ACTUALLY PERMIT -- computed with the rail code.
 
-The proposed values are per-market 25, event 50, capital 250, max-exposure
-250, cumulative loss stop 75. They are FOR THE OWNER'S REVIEW; nothing here
+The proposed values are per-market 25, event 50, capital 50, max-exposure
+50, cumulative loss stop 100. They are FOR THE OWNER'S REVIEW; nothing here
 approves them. Every number the decision form states is derived here from
 `bettor_entry_execution.exposure_from_rows` and the effective limits, with the
 database's capacity rule (ONE open portfolio group at a time, at most one
@@ -16,9 +16,9 @@ import pytest
 from sportsassets import bettor_entry_execution as EX
 from sportsassets import bettor_funded_activation as FA
 
-PROPOSED = {"capital_usd": 250, "per_market_usd": 25,
-            "event_exposure_usd": 50, "max_exposure_usd": 250,
-            "cumulative_loss_stop_usd": 75}
+PROPOSED = {"capital_usd": 50, "per_market_usd": 25,
+            "event_exposure_usd": 50, "max_exposure_usd": 50,
+            "cumulative_loss_stop_usd": 100}
 EFF = EX.effective_limits(FA.normalise_limit_keys(dict(PROPOSED)))["effective"]
 RAILS = ("MAX_MARKET_EXPOSURE", "MAX_EVENT_EXPOSURE", "MAX_CAPITAL_DEPLOYED",
          "MAX_CORRELATED_EXPOSURE", "MAX_RESIDUAL_INVENTORY", "MAX_DRAWDOWN")
@@ -92,23 +92,27 @@ def test_the_inventory_rail_binds_below_about_one_and_a_quarter_cents():
     assert float(EFF["MAX_RESIDUAL_INVENTORY"]) == 2000.0
 
 
-def test_the_loss_stop_admits_three_unmarked_25_dollar_positions_not_four():
-    rows = [{"condition_id": "m%d" % i, "event_key": "e%d" % i,
-             "cost_usd": 25.0, "qty": 50, "opened_at": 0.0} for i in (1, 2)]
-    assert _passes(rows, cid="m3", ev="e3", cost=25.0, qty=50) is True
-    rows.append({"condition_id": "m3", "event_key": "e3", "cost_usd": 25.0,
-                 "qty": 50, "opened_at": 0.0})
-    assert _passes(rows, cid="m4", ev="e4", cost=25.0, qty=50) is False
+def test_the_loss_stop_is_a_75_dollar_realised_loss_budget_for_a_new_entry():
+    """Realised losses never reset. A new unmarked $25 primary is admitted
+    while realised losses are at most $75 (75 + 25 = 100) and refused
+    beyond; a hedged pair (up to $50 open) needs realised losses of at most
+    $50."""
+    def book(realised):
+        return [{"condition_id": "old", "event_key": "old", "cost_usd": 25.0,
+                 "qty": 50, "opened_at": 0.0, "realized_net_usd": -realised}]
+    assert _passes(book(75), cid="m9", ev="e9", cost=25.0, qty=50) is True
+    assert _passes(book(76), cid="m9", ev="e9", cost=25.0, qty=50) is False
 
 
-def test_capital_and_max_exposure_would_bind_only_above_one_group():
-    """With one open group (a $25 primary and at most a $25 hedge) the book
-    never holds more than about $50, so the $250 capital and max-exposure
-    values cannot bind while the one-group rule stands."""
+def test_one_group_holds_at_most_about_50_dollars_and_the_caps_say_so():
+    """With one open group (a $25 primary and at most a $25 hedge) capital and
+    max-exposure are set to what can actually be held, not to a figure the
+    one-group rule makes unreachable."""
     q1 = max_primary_qty(0.40)
     h = max_hedge_qty(0.40, q1, 0.40)
     assert q1 * 0.40 + h * 0.40 <= 50.0
-    assert float(EFF["MAX_CAPITAL_DEPLOYED"]) == 250.0
+    assert float(EFF["MAX_CAPITAL_DEPLOYED"]) == 50.0
+    assert float(EFF["MAX_CORRELATED_EXPOSURE"]) == 50.0
 
 
 # ── THE DATABASE'S CAPACITY RULE ─────────────────────────────────────
