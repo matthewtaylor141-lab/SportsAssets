@@ -600,6 +600,26 @@ def cash_for(qty: float, price: float, intent: str) -> float:
     return float(fill_cash(float(qty), float(price), intent))
 
 
+def settlement_cash(qty: float, long_price: float, intent: str) -> float:
+    """THE CASH A SETTLED RESIDUAL IS PAID, side-aware, at any long-side
+    price in [0, 1].
+
+    `cash_for` is a FILL's cost and returns 0 for a non-positive price
+    (`fill_cash`'s guard), whatever the side. A settlement at a long-side
+    price of exactly 0 is the one place that guard is wrong: a SHORT is then
+    paid in full. The side-aware rate (`live_executor.cost_per_share`) is used
+    there, so a winning short is never booked at $0."""
+    px = float(long_price)
+    q = float(qty)
+    if not (0.0 <= px <= 1.0) or q <= 0:
+        raise ValueError("a settlement price is in [0, 1] and a residual "
+                         "is positive; got %r on %r" % (px, q))
+    if px > 0:
+        return cash_for(q, px, intent)
+    from .live_executor import cost_per_share
+    return round(q * cost_per_share(0.0, intent), 2)
+
+
 def fee_for(qty: float, price: float, *, at=None) -> tuple[float, str]:
     """The fee from the DEPLOYED schedule, with its basis and version named.
 

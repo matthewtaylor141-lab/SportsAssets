@@ -1557,13 +1557,22 @@ async def reconcile_settlement(conn, *, intent_id: str, client=None,
                         why=("the reading is REPORTED and the reader states "
                              "no settlement price, so the payout is not "
                              "established"))
+        if not (0.0 <= payout_px <= 1.0):
+            return dict(out, ok=False,
+                        refusal=R_SETTLEMENT_NOT_AUTHORITATIVE,
+                        why=("the reader's settlement price %r is outside "
+                             "[0, 1], so the payout is not established"
+                             % payout_px))
         # THE PAYOUT IS IN THE POSITION'S OWN SPACE, through the same
         # side-aware function the entry cash used: a long is paid the long
         # price, a short is paid one minus it.
-        amount = FB.cash_for(residual, payout_px, opened_with)
+        # `settlement_cash`, not `cash_for`: at a long-side price of 0 a
+        # fill's cost is 0 whatever the side, but a winning SHORT is paid in
+        # full.
+        amount = FB.settlement_cash(residual, payout_px, opened_with)
         basis = ("the venue's settlement endpoint reported a long-side price "
                  "of %s, corroborated against its own long side; the payout "
-                 "is live_executor.fill_cash(%s, %s, %s)"
+                 "is bettor_funded_book.settlement_cash(%s, %s, %s)"
                  % (payout_px, residual, payout_px, opened_with))
         reason = "SETTLED_BY_THE_VENUE"
     await FB.record_economic_event(

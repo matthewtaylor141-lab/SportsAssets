@@ -168,14 +168,7 @@ def settlement_payout(qty: float, long_price: float, order_intent: str) -> float
     then paid in full, not nothing. The side-aware rate the close relies on
     (`live_executor.cost_per_share`) is used there instead, so a correction
     TO zero on a short books the payout it is actually owed."""
-    px = float(long_price)
-    if not (0.0 <= px <= 1.0) or float(qty) <= 0:
-        raise ValueError("a settlement price is in [0, 1] and a residual "
-                         "is positive; got %r on %r" % (px, qty))
-    if px > 0:
-        return float(FB.cash_for(float(qty), px, order_intent))
-    from .live_executor import cost_per_share
-    return round(float(qty) * cost_per_share(0.0, order_intent), 2)
+    return FB.settlement_cash(qty, long_price, order_intent)
 
 
 async def has_schema(conn) -> bool:
