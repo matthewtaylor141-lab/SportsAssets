@@ -8206,7 +8206,9 @@ def _observation_digest(po) -> dict | None:
                     "second_legs_refused", "skipped_unpriced_second_leg",
                     "budget_limited", "elapsed_s", "reads", "error",
                     "conclusion", "sibling_categories", "siblings_total",
-                    "siblings_truncated_at_limit")},
+                    "siblings_truncated_at_limit", "siblings_eligible",
+                    "siblings_examined", "siblings_deferred",
+                    "siblings_exhausted", "observable_without_admission")},
                 written=sum(1 for r in a.get("recorded") or []
                             if (r or {}).get("written"))))
         return {
@@ -8228,6 +8230,10 @@ def _observation_digest(po) -> dict | None:
             "conclusions": po.get("conclusions"),
             "attempt_memory": po.get("attempt_memory"),
             "observations_written": po.get("observations_written"),
+            # OF WHICH RECORDED WITHOUT ADMISSION (cancellation unresolved):
+            # evidence, never an approval.
+            "observations_written_not_admitted": po.get(
+                "observations_written_not_admitted"),
             "attempts": attempts,
             "attempts_truncated_at": (
                 SERVICING_DIGEST_LIMIT

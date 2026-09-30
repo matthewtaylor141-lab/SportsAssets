@@ -63,6 +63,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import re
 import time
 from typing import Any
 
@@ -239,6 +240,8 @@ def _sibling_categories() -> dict:
          X_ORIENTATION: C_METADATA,
          X_FIXTURE_IDENTITY: C_METADATA,
          X_NOT_A_GRADED_VARIABLE: C_FILTERED,
+         X_OTHER_PERIOD: C_INCOMPATIBLE,
+         X_DRAW_CONTRACT: C_INTERPRETATION,
          X_NOT_REAL: C_FILTERED,
          X_SIDE: C_FILTERED,
          X_FAMILY_NOT_CAPTURED: C_FILTERED}
@@ -286,6 +289,7 @@ N_UNNAMED = "BLOCKED_BY_AN_UNCLASSIFIED_REFUSAL"
 N_ADMITTED = "ADMITTED"
 N_FIRST_LEG_UNPRICED = "FIRST_LEG_HAS_NO_DISPLAYED_PRICE"
 N_FIRST_LEG_NOT_BUILT = "FIRST_LEG_NOT_BUILT"
+N_OBSERVED_NOT_ADMITTED = "OBSERVED_NOT_ADMITTED_CANCELLATION_UNRESOLVED"
 
 
 def attempt_conclusion(siblings, *, fixture_pairs=None,
@@ -378,9 +382,187 @@ def count_by(items, key) -> dict:
 
 
 
+# ── OBSERVING A PAIR IS NOT APPROVING ITS ACQUISITION ─────────────────
+#
+# Funded discovery admits a structure only when EVERY outcome region has a
+# determined joint payout. On 2026-09-30 production examined 120 siblings on
+# 18 fixtures whose fixture, period, variable and overtime all matched the
+# held leg and refused each one because ONE region -- "fixture cancelled or
+# abandoned" -- had no determined payout. That refusal is right for money. It
+# is not a reason to record nothing: the pair is correctly identified, its
+# prices are real, and the venue's later settlement will say what happened.
+#
+# So such a pair is recorded WITHOUT admission: admission_status
+# OBSERVED_NOT_ADMITTED_CANCELLATION_UNRESOLVED, the unresolved region named,
+# each leg's cancellation clause as read, the ordinary-play payoff table, and
+# NO floor. Funded discovery still refuses it (nothing here calls into the
+# funded path), and model training reads admitted rows only.
+
+ADMITTED = "ADMITTED_BY_DISCOVERY"
+NOT_ADMITTED = "OBSERVED_NOT_ADMITTED_CANCELLATION_UNRESOLVED"
+#: Structures of this kind recorded per attempt, at most; the rest counted.
+UNADMITTED_PER_ATTEMPT = 8
+#: How much of the venue's own cancellation wording is kept per leg.
+CANCELLATION_EXCERPT_CHARS = 600
+
+WHY_NONBINARY_UNRESOLVED = (
+    "a settlement strictly between 0 and 1 on a pair whose cancellation "
+    "treatment is unresolved: it may be a cancellation settled at the last "
+    "fair market price rather than a push, so it is kept as evidence and is "
+    "not a label")
+
+
+def leg_cancellation(leg) -> dict:
+    """ONE leg's cancellation rule as read from the venue's own prose: the
+    clause, the treatment it names, and the venue's sentences that mention a
+    cancellation at all (verbatim, bounded) with the document's hash."""
+    from . import bettor_settlement_clauses as SETTLE
+
+    rule = (getattr(leg, "settlement_rules", None) or {}).get(SETTLE.CANCELLED)
+    t = SETTLE.cancellation_treatment(rule)
+    prov = getattr(leg, "settlement_provenance", None) or {}
+    raw = str(prov.get("raw_text") or "")
+    said = [x.strip() for x in SETTLE.sentences(raw)
+            if SETTLE._mentions(x, SETTLE.CANCELLED)]
+    t["venue_sentences_naming_cancellation"] = (
+        " | ".join(said)[:CANCELLATION_EXCERPT_CHARS] if said else None)
+    t["prose_sha256"] = prov.get("content_sha256")
+    t["prose_chars"] = prov.get("chars")
+    t["prose_source"] = prov.get("source")
+    t["condition_id"] = getattr(leg, "condition_id", None)
+    return t
+
+
+def ordinary_play_view(structure: dict) -> dict:
+    """The payoff table WITHOUT the cancelled cell, labelled as conditional.
+
+    NOT A FLOOR. It says what the pair pays IF the fixture is played to a
+    result; the cancelled cell is reported as unresolved beside it."""
+    from . import bettor_indirect_structures as IS
+
+    table = list((structure or {}).get("table") or ())
+    det = [r for r in table if r.get("determined")]
+    if not det:
+        return {"determined_regions": 0}
+    lo = min(r["joint_cents"] for r in det)
+    hi = max(r["joint_cents"] for r in det)
+    both = [r["region"] for r in det if r["joint_cents"] >= 2 * IS.CENTS]
+    none_ = [r["region"] for r in det if r["joint_cents"] == 0]
+    if lo == hi == IS.CENTS:
+        tax = IS.DIRECT_COMPLEMENT
+    elif lo >= IS.CENTS and hi > IS.CENTS:
+        tax = IS.MIDDLE
+    elif lo == 0 and hi <= IS.CENTS:
+        tax = IS.GAP
+    else:
+        tax = IS.INDEPENDENT_OVERLAP
+    return {"basis": "CONDITIONAL_ON_THE_FIXTURE_BEING_PLAYED_TO_A_RESULT",
+            "is_a_floor": False,
+            "determined_regions": len(det),
+            "taxonomy_if_played": tax,
+            "joint_cents_range_if_played": [lo, hi],
+            "both_win_regions_if_played": both,
+            "both_lose_regions_if_played": none_}
+
+
+def unresolved_only_cancellation(structure: dict) -> bool:
+    """True when every region without a determined payout is the cancelled
+    fixture, and nothing else is missing."""
+    from . import bettor_indirect_structures as IS
+
+    d = structure or {}
+    if d.get("missing_facts") or not d.get("undetermined_regions"):
+        return False
+    undet = [r for r in (d.get("table") or ()) if not r.get("determined")
+             and r.get("state") != IS.STATE_POSTPONED]
+    return bool(undet) and all(r.get("state") == IS.STATE_VOID
+                               for r in undet)
+
+
+async def record_unadmitted(conn, *, fixture: str, structure: dict, held_leg,
+                            hedge_leg, primary_slug: str, primary_side: str,
+                            hedge_slug: str, hedge_side: str,
+                            cancellation: dict, price_basis: dict,
+                            at: float) -> dict:
+    """ONE OBSERVATION RECORDED WITHOUT ADMISSION. Idempotent in its bucket."""
+    from . import bettor_funded_model as FMD
+    from . import bettor_indirect_structures as IS
+
+    view = ordinary_play_view(structure)
+    # NO FLOOR TRAVELS WITH IT. The classifier's min/max over the DETERMINED
+    # regions would read as a guaranteed floor; they are withheld here and the
+    # range appears only inside `ordinary_play`, labelled conditional.
+    frozen = dict(structure, ordinary_play=view,
+                  cancelled_cell="UNRESOLVED",
+                  admission_status=NOT_ADMITTED,
+                  authorizes_nothing=True,
+                  min_payout_cents=None, max_payout_cents=None,
+                  floor_withheld=("the cancelled-fixture cell has no "
+                                  "determined payout, so no minimum over the "
+                                  "outcome space exists"))
+    pc, hc = held_leg.cost_cents_per_unit, hedge_leg.cost_cents_per_unit
+    feats = FMD.features_of(frozen, primary_cost_cents=pc,
+                            hedge_cost_cents=hc,
+                            overtime_included=(getattr(held_leg, "overtime",
+                                                       None) == IS.OT_INCLUDED))
+    oid = observation_id_for(
+        fixture=fixture, primary_identity=held_leg.condition_id,
+        hedge_identity=hedge_leg.condition_id, at=at)
+    unresolved = list(structure.get("undetermined_regions") or ())
+    status = await conn.execute(
+        "INSERT INTO bettor_pair_observations (observation_id, observed_at, "
+        " fixture, primary_slug, primary_side, hedge_slug, hedge_side, "
+        " taxonomy, structure, primary_cost_cents, hedge_cost_cents, "
+        " overtime_included, features, feature_sha, feature_schema_sha, "
+        " price_basis, source, admission_status, unresolved, "
+        " cancellation_terms) VALUES ($1, to_timestamp($2), $3, $4, $5, $6, "
+        " $7, $8, $9::jsonb, $10, $11, $12, $13::jsonb, $14, $15, $16::jsonb, "
+        " $17, $18, $19::jsonb, $20::jsonb) "
+        " ON CONFLICT (observation_id) DO NOTHING",
+        oid, float(at), str(fixture), primary_slug, primary_side, hedge_slug,
+        hedge_side, structure.get("taxonomy"),
+        json.dumps(frozen, default=str), float(pc), float(hc),
+        getattr(held_leg, "overtime", None) == IS.OT_INCLUDED,
+        json.dumps(feats), FMD.feature_sha(feats), FMD.FEATURE_SCHEMA_SHA,
+        json.dumps(price_basis or {}, default=str), OBSERVATION_SOURCE_TAG,
+        NOT_ADMITTED, json.dumps(unresolved),
+        json.dumps(cancellation, default=str))
+    return {"observation_id": oid, "written": str(status).endswith(" 1"),
+            "taxonomy": structure.get("taxonomy"),
+            "admission_status": NOT_ADMITTED, "unresolved": unresolved,
+            "taxonomy_if_played": view.get("taxonomy_if_played"),
+            "pair_cancellation": (cancellation or {}).get("pair", {}).get(
+                "verdict")}
+
+
+def FD_UNESTABLISHABLE() -> str:
+    from . import bettor_funded_decision as FD
+    return FD.R_STRUCTURE_IS_UNESTABLISHABLE
+
+
+def sibling_eligibility(held_row: dict):
+    """The pre-read screen for one held leg's siblings: the supplier's own
+    predicates plus a different period from the held leg (search rank 2).
+    Returns a callable row -> None | reason."""
+    from . import bettor_funded_hedge_supply as HSUP
+
+    def _eligible(row):
+        why = screen_row(row)
+        if why:
+            return why
+        pr = HSUP.search_priority(row, held_row)
+        if pr.get("rank") == 2:
+            return X_OTHER_PERIOD
+        if pr.get("rank") == 3:
+            return X_NOT_A_GRADED_VARIABLE
+        return None
+    return _eligible
+
+
 async def observe_candidate(conn, *, us_market_slug: str, side: str,
                             quoter, prose_reader, tie_reader=None,
-                            now: float | None = None) -> dict:
+                            now: float | None = None,
+                            exhausted_ids=None) -> dict:
     """DISCOVER AND RECORD EVERY PAIRING STRUCTURE ON ONE CANDIDATE'S FIXTURE.
 
     The candidate is built as a hypothetical first leg at its own displayed
@@ -418,12 +600,17 @@ async def observe_candidate(conn, *, us_market_slug: str, side: str,
     # SIBLINGS ARE SCREENED BY THE SAME PREDICATES AS CATALOGUE CANDIDATES
     # before their book is read: a prop, a simulated fixture or an
     # unorientable row can never become a second leg, so it costs no read.
+    held_row = dict(held.get("row") or {},
+                    market_slug=held.get("us_market_slug"), residual_qty=1)
+    # THE READ BUDGET GOES TO SIBLINGS THAT CAN PAIR, and not twice to the
+    # same one: another period, an ungraded type or a one-participant
+    # instrument is excluded before any read and before the cap, and siblings
+    # already examined conclusively (from the ledger) are skipped.
     cands = await HSUP.candidate_legs_for(
-        conn, held_row=dict(held.get("row") or {},
-                            market_slug=held.get("us_market_slug"),
-                            residual_qty=1),
-        quoter=quoter, prose_reader=prose_reader, now=at,
-        prefilter=screen_row)
+        conn, held_row=held_row, quoter=quoter, prose_reader=prose_reader,
+        now=at, prefilter=screen_row,
+        eligible=sibling_eligibility(held_row),
+        skip_ids=set(exhausted_ids or ()), exclude_one_participant=True)
     row = held.get("row") or {}
     leg = held["leg"]
     out["fixture"] = getattr(leg, "fixture_id", None)
@@ -465,10 +652,76 @@ async def observe_candidate(conn, *, us_market_slug: str, side: str,
     out["conclusion"] = attempt_conclusion(
         trace, fixture_pairs=cands.get("fixture_candidate_pairs"),
         truncated=bool(cands.get("truncated_at_limit")))
+    elig = cands.get("eligibility") or {}
+    out["siblings_eligible"] = elig.get("eligible_total")
+    out["siblings_examined"] = elig.get("examined")
+    out["siblings_deferred"] = elig.get("deferred")
+    out["siblings_exhausted"] = elig.get("exhausted_skipped")
+    out["excluded_before_reads"] = elig.get("excluded_before_reads")
+    # EACH LEG'S CANCELLATION RULE, AS READ: the held leg's in full, each
+    # sibling that reached discovery's compactly, with its undetermined
+    # regions -- so the ledger shows the venue's words, not our summary.
+    held_cx = leg_cancellation(leg)
+    out["held"]["cancellation"] = held_cx
+    legs_by_id = {c["candidate_id"]: c for c in cands.get("legs") or []}
+    rej_by_id = {(r or {}).get("condition_id"): r
+                 for r in found.get("rejected") or []}
+    unadmitted = []
+    for e in trace:
+        if e.get("stage") != "DISCOVERY":
+            continue
+        cid = HSUP.candidate_identity(e.get("market_slug"), e.get("side"))
+        c = legs_by_id.get(cid)
+        if c is None:
+            continue
+        cx = leg_cancellation(c["leg"])
+        e["cancellation"] = {k: cx.get(k) for k in (
+            "interpretation", "resolution", "refusal")}
+        e["cancellation_clause"] = (cx.get("clause") or "")[:200] or None
+        rj = rej_by_id.get(cid) or {}
+        if rj.get("undetermined_regions"):
+            e["undetermined_regions"] = list(rj["undetermined_regions"])
+        if rj.get("refusal") == FD_UNESTABLISHABLE() and not rj.get(
+                "missing_facts"):
+            st = IS.classify(leg, c["leg"],
+                             sport_permits_tie=tie.get("permits_tie"))
+            d = st.to_dict()
+            if unresolved_only_cancellation(d):
+                e["observable_without_admission"] = True
+                unadmitted.append((c, d, cx))
     out["siblings"] = trace[:SIBLINGS_RECORDED_PER_ATTEMPT]
     out["siblings_recorded"] = len(out["siblings"])
     out["siblings_total"] = len(trace)
+    out["observable_without_admission"] = len(unadmitted)
+    out["observed_not_admitted"] = []
+    from . import bettor_settlement_clauses as SETTLE
+    for c, d, cx in unadmitted[:UNADMITTED_PER_ATTEMPT]:
+        h_slug, h_side = HSUP.split_identity(c["candidate_id"])
+        hleg = c["leg"]
+        if h_side is None or getattr(hleg, "cost_cents_per_unit",
+                                     None) is None:
+            continue
+        pair = SETTLE.pair_cancellation(
+            held_cx, cx, held_cost_cents=leg.cost_cents_per_unit,
+            other_cost_cents=hleg.cost_cents_per_unit)
+        got = await record_unadmitted(
+            conn, fixture=leg.fixture_id, structure=d, held_leg=leg,
+            hedge_leg=hleg, primary_slug=us_market_slug, primary_side=side,
+            hedge_slug=h_slug, hedge_side=h_side,
+            cancellation={"held": held_cx, "hedge": cx, "pair": pair},
+            price_basis={"primary": _basis_of(q),
+                         "hedge": _basis_of(c.get("quote") or {})},
+            at=at + (time.monotonic() - t0))
+        out["observed_not_admitted"].append(got)
+        out["recorded"].append(got)
+    out["unadmitted_not_recorded_for_limit"] = max(
+        0, len(unadmitted) - UNADMITTED_PER_ATTEMPT)
+    if any(r.get("written") for r in out["observed_not_admitted"]) \
+            and not found.get("admitted"):
+        out["conclusion"] = N_OBSERVED_NOT_ADMITTED
     if not found.get("admitted"):
+        if out["observed_not_admitted"]:
+            return dict(out, ok=True, refusal=None)
         return dict(out, ok=True, refusal=R_NOTHING_ADMITTED)
     quotes = {c["candidate_id"]: c for c in cands.get("legs") or []}
     out["skipped_unpriced_second_leg"] = 0
@@ -571,8 +824,14 @@ def label_from(row: dict, pr: dict, hr: dict) -> dict:
                        "hedge %s)" % (pr.get("settlement_price"),
                                       hr.get("settlement_price"))}
     pp, hp = pr.get("settlement_price"), hr.get("settlement_price")
-    pw, hw = won(row["primary_side"], pp), won(row["hedge_side"], hp)
     push = is_push(pp) or is_push(hp)
+    if push and row.get("admission_status") == NOT_ADMITTED:
+        # NOT A PUSH BY ASSUMPTION. On a pair whose cancellation treatment is
+        # unresolved, a price between 0 and 1 may be a last-fair-price
+        # cancellation. Kept, with the prices, and not labelled.
+        return {"status": NOT_A_LABEL, "why": WHY_NONBINARY_UNRESOLVED,
+                "primary_price": pp, "hedge_price": hp}
+    pw, hw = won(row["primary_side"], pp), won(row["hedge_side"], hp)
     return {"status": LABELLED, "primary_won": pw, "hedge_won": hw,
             "middle": bool(pw and hw), "push": push,
             "why": WHY_PUSH if push else None,
@@ -793,9 +1052,13 @@ async def labelled(conn, *, after=None, through=None, outcomes_through=None,
         out[k] = []
     if not await has_schema(conn):
         return dict(out, ok=False, refusal=R_SCHEMA, n=0, n_events=0)
+    # ADMITTED ROWS ONLY. An observation recorded without admission trains
+    # nothing until its own validation says it may; it is still labelled and
+    # still counts toward the fixture void rate.
     sql = ("SELECT *, extract(epoch FROM observed_at) AS obs_epoch, "
            " extract(epoch FROM outcome_available_at) AS avail_epoch "
-           " FROM bettor_pair_observations WHERE label_status=$1")
+           " FROM bettor_pair_observations WHERE label_status=$1 "
+           " AND admission_status = '%s'" % ADMITTED)
     args: list = [LABELLED]
     if after is not None:
         args.append(after)
@@ -1145,6 +1408,17 @@ X_SIDE = "SIDE_NOT_LONG_OR_SHORT"
 X_FEWER_THAN_TWO = "FEWER_THAN_TWO_GRADED_CONTRACTS_ON_THE_FIXTURE"
 X_OBSERVED_RECENTLY = "FIXTURE_OBSERVED_RECENTLY"
 X_ATTEMPTED_RECENTLY = "FIXTURE_ATTEMPTED_RECENTLY_AND_REFUSED"
+#: A sibling graded over a different period from the held leg: its grading key
+#: can never match, so it is excluded before any read (search rank 2).
+X_OTHER_PERIOD = "GRADED_OVER_A_DIFFERENT_PERIOD_FROM_THE_HELD_LEG"
+#: A per-outcome DRAW contract ("Will the match end in a draw?"): its rows name
+#: no team because the contract backs none. The row is complete; the leg model
+#: cannot represent a draw yes/no, so this is an unsupported interpretation,
+#: not missing metadata (it was counted as the latter until 2026-10-01).
+X_DRAW_CONTRACT = "PER_OUTCOME_DRAW_CONTRACT_IS_NOT_REPRESENTED"
+#: A first leg whose two catalogue rows name one participant (a per-outcome
+#: yes/no contract): `held_leg_for` refuses it, so it costs no read either.
+X_FIRST_LEG_ONE_PARTICIPANT = "FIRST_LEG_IS_A_ONE_PARTICIPANT_INSTRUMENT"
 
 #: ONLY ROWS THAT CAN BECOME A LEG ARE FETCHED -- a captured family and a
 #: graded suffix -- because the window holds ~70,000 rows across every sport
@@ -1199,11 +1473,71 @@ _RECENT_ATTEMPTS_SQL = (
     "       outcome, "
     "       (coalesce((venue_reads->>'book_refused_for_budget')::int, 0) > 0 "
     "        OR coalesce((venue_reads->>'book_refused_for_deadline')::int, 0) "
-    "           > 0) AS budget_limited "
+    "           > 0 "
+    "        OR coalesce((detail->>'siblings_deferred')::int, 0) > 0) "
+    "       AS budget_limited "
     "  FROM bettor_pair_observation_attempts "
     " WHERE attempted_at > to_timestamp($1)")
 
 _NOT_A_REFUSAL = ("RECORDED", "ALREADY_RECORDED_THIS_BUCKET")
+
+
+#: Sibling stages whose refusal is a fact about the contract that does not
+#: change within the retry interval: examined, it need not be read again.
+_CONCLUSIVE_STAGES = ("BUILD", "DISCOVERY", "ADMITTED")
+
+_EXHAUSTED_SQL = (
+    "SELECT e->>'market_slug' AS slug, e->>'side' AS side "
+    "  FROM bettor_pair_observation_attempts a, "
+    "       jsonb_array_elements(CASE WHEN jsonb_typeof(a.detail->'siblings')"
+    "                                  = 'array' THEN a.detail->'siblings' "
+    "                                 ELSE '[]'::jsonb END) e "
+    " WHERE lower(coalesce(a.fixture, '')) = lower($1) "
+    "   AND a.attempted_at > to_timestamp($2) "
+    "   AND e->>'stage' = ANY($3::text[])")
+
+
+async def exhausted_siblings(conn, *, fixture, now: float) -> set:
+    """Sibling identities on this fixture examined CONCLUSIVELY within the
+    retry interval -- built and refused, or classified by discovery -- so the
+    next attempt spends its reads on the rest. A sibling whose read was
+    refused for budget, or whose book showed no price, is not exhausted."""
+    from . import bettor_funded_hedge_supply as HSUP
+
+    if not fixture or not await _has_attempt_ledger(conn):
+        return set()
+    try:
+        rows = await conn.fetch(_EXHAUSTED_SQL, str(fixture),
+                                float(now) - ATTEMPT_RETRY_S,
+                                list(_CONCLUSIVE_STAGES))
+    except Exception:                                           # noqa: BLE001
+        return set()
+    return {HSUP.candidate_identity(r["slug"], r["side"])
+            for r in rows if r["slug"] and r["side"]}
+
+
+async def first_leg_screen(conn, slug: str, side: str) -> str | None:
+    """Before any venue read: is this first leg a one-participant instrument
+    (both catalogue rows name one team, not a total), which `held_leg_for`
+    refuses? DB only; None when it may be built."""
+    from . import bettor_funded_hedge_supply as HSUP
+    from . import bettor_indirect_structures as IS
+
+    try:
+        rows = await HSUP.read_sides(conn, slug)
+    except Exception:                                           # noqa: BLE001
+        return None
+    abbrs = [HSUP._clean(r.get("team_abbr")) for r in rows or []]
+    if len(abbrs) < 2 or len(set(abbrs)) != 1 or not abbrs[0]:
+        return None
+    try:
+        row = await HSUP.read_row(conn, slug, side)
+    except Exception:                                           # noqa: BLE001
+        row = None
+    if isinstance(row, dict) and HSUP.derive_kind(row).get("kind") \
+            == IS.KIND_TOTAL:
+        return None
+    return X_FIRST_LEG_ONE_PARTICIPANT
 
 
 async def recent_attempts(conn, *, now: float) -> dict:
@@ -1309,6 +1643,11 @@ def screen_row(row: dict) -> str | None:
         return X_FIXTURE_IDENTITY
     if kind.get("kind") != IS.KIND_TOTAL and \
             HSUP.orientation_of(row, participants=fx).get("refusal"):
+        if not HSUP._clean(row.get("team_abbr")) and (
+                str(row.get("market_slug") or "").lower().endswith("-draw")
+                or re.search(r"\b(draw|tie|tied)\b",
+                             str(row.get("question") or "").lower())):
+            return X_DRAW_CONTRACT
         return X_ORIENTATION
     return None
 
@@ -1829,7 +2168,12 @@ async def _ledger_attempt(conn, *, pass_id: str, cand: dict, got: dict,
             "conclusion", "held", "second_legs_refused",
             "sibling_categories", "sibling_stages", "fixture_candidate_pairs",
             "siblings_truncated_at_limit", "siblings_total",
-            "siblings_recorded", "siblings")}
+            "siblings_recorded", "siblings",
+            # THE READ BUDGET, AND WHAT WAS RECORDED WITHOUT ADMISSION
+            "siblings_eligible", "siblings_examined", "siblings_deferred",
+            "siblings_exhausted", "excluded_before_reads",
+            "observable_without_admission", "observed_not_admitted",
+            "unadmitted_not_recorded_for_limit")}
         detail["budget_limited"] = bool(
             (reads or {}).get("book_refused_for_budget")
             or (reads or {}).get("book_refused_for_deadline"))
@@ -1900,6 +2244,7 @@ async def observation_pass(conn, *, candidates, quoter, prose_reader,
     # for want of budget) is not attempted again after a restart either.
     memory = await recent_attempts(conn, now=at)
     skipped_recent = 0
+    skipped_shape = 0
     for c in _candidate_list(candidates, catalogue):
         key = (c.get("us_market_slug"), c.get("side"))
         if not key[0] or key[1] not in (LONG, SHORT) or key in seen:
@@ -1910,6 +2255,13 @@ async def observation_pass(conn, *, candidates, quoter, prose_reader,
                 fx and fx in memory["refused_fixtures"]):
             skipped_recent += 1
             continue
+        # A FIRST LEG THE SUPPLIER CANNOT BUILD COSTS NO READ: a per-outcome
+        # yes/no contract whose two rows name one team (13 production entry
+        # candidates on 2026-09-30 were read and refused for exactly this).
+        shape = await first_leg_screen(conn, key[0], key[1])
+        if shape:
+            skipped_shape += 1
+            continue
         todo.append(c)
     out["attempt_memory"] = {"source": memory.get("source"),
                              "skipped_refused_recently": skipped_recent}
@@ -1919,9 +2271,21 @@ async def observation_pass(conn, *, candidates, quoter, prose_reader,
         s = c["source"]
         out["candidates_offered_by_source"][s] = \
             out["candidates_offered_by_source"].get(s, 0) + 1
-    if todo:
-        k = (_PASSES[0] * max(1, int(per_pass))) % len(todo)
-        todo = todo[k:] + todo[:k]
+    # THE ORDER IS THE PRIORITY, AND IT IS PERSISTENT: catalogue fixtures the
+    # census shows structurally pairable first, then entry-lane identities,
+    # then the rest -- each in the order offered (soonest first; never
+    # attempted before least recently attempted). The ledger, not a process
+    # counter, keeps the rotation across restarts, so the old per-pass offset
+    # (which let unpairable fixtures take the pass ahead of pairable ones) is
+    # gone.
+    def _rank(c):
+        if c.get("structural_verdict") == S_PAIRABLE:
+            return 0
+        if c.get("source") == SOURCE_ENTRY:
+            return 1
+        return 2
+    todo = [c for _, c in sorted(enumerate(todo),
+                                 key=lambda ic: (_rank(ic[1]), ic[0]))]
     _PASSES[0] += 1
     ledger = await _has_attempt_ledger(conn)
     out["attempt_ledger"] = {"present": ledger, "written": 0, "failed": 0}
@@ -1940,10 +2304,13 @@ async def observation_pass(conn, *, candidates, quoter, prose_reader,
         before = dict(usage.c)
         started = _now()
         try:
+            exhausted = await exhausted_siblings(
+                conn, fixture=cand.get("fixture"), now=started)
             got = await observe_candidate(conn, us_market_slug=slug, side=side,
                                           quoter=q_metered,
                                           prose_reader=p_metered,
-                                          now=started)
+                                          now=started,
+                                          exhausted_ids=exhausted)
         except Exception as exc:                            # noqa: BLE001
             got = {"ok": False, "us_market_slug": slug, "side": side,
                    "error": "%s: %s" % (type(exc).__name__, str(exc)[:160])}
@@ -1973,7 +2340,11 @@ async def observation_pass(conn, *, candidates, quoter, prose_reader,
                   "skipped_unpriced_second_leg", "recorded", "error",
                   "conclusion", "held", "sibling_categories",
                   "sibling_stages", "fixture_candidate_pairs",
-                  "siblings_truncated_at_limit", "siblings_total")}
+                  "siblings_truncated_at_limit", "siblings_total",
+                  "siblings_eligible", "siblings_examined",
+                  "siblings_deferred", "siblings_exhausted",
+                  "excluded_before_reads", "observable_without_admission",
+                  "observed_not_admitted")}
         entry.update(source=cand["source"],
                      fixture=cand.get("fixture") or got.get("fixture"),
                      outcome=outcome, budget_limited=budget_limited,
@@ -2002,7 +2373,11 @@ async def observation_pass(conn, *, candidates, quoter, prose_reader,
     cap = min(len(todo), max(0, int(per_pass)))
     out["not_attempted"] = {"LIMIT_PER_PASS": len(todo) - cap,
                             "PASS_DEADLINE": cap - done,
-                            X_ATTEMPTED_RECENTLY: skipped_recent}
+                            X_ATTEMPTED_RECENTLY: skipped_recent,
+                            X_FIRST_LEG_ONE_PARTICIPANT: skipped_shape}
+    out["observations_written_not_admitted"] = sum(
+        1 for e in out["observed"]
+        for r in e.get("observed_not_admitted") or [] if r.get("written"))
     reader = settlement_reader or _production_settlement
     try:
         out["labels"] = await label_pending(

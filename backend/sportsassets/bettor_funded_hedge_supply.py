@@ -1546,7 +1546,8 @@ async def _quote_side(quoter, market_slug, side):
 
 async def candidate_legs_for(conn, *, held_row, quoter=None,
                              prose_reader=None, limit=None, now=None,
-                             prefilter=None) -> dict:
+                             prefilter=None, eligible=None, skip_ids=None,
+                             exclude_one_participant=False) -> dict:
     """EVERY ELIGIBLE COMPLEMENTARY CONTRACT ON THE SAME FIXTURE, built.
 
     Returns {"legs": [...], "refused": [...], "examined": n, ...}. EVERY
@@ -1604,7 +1605,71 @@ async def candidate_legs_for(conn, *, held_row, quoter=None,
         pr = search_priority(dict(raw), hr)
         keyed.append((pr["rank"], i, pr, raw))
     keyed.sort(key=lambda k: (k[0], k[1]))
-    rows = [k[3] for k in keyed][:cap]
+    # ── ELIGIBILITY BEFORE THE CAP, WHEN THE CALLER ASKS FOR IT ──────
+    #
+    # The cap counts rows that COST a read. Without `eligible` a row that can
+    # never pair -- another period, an ungraded type -- still takes one of the
+    # `cap` places even though the screen refuses it without a read, so a
+    # 156-pair fixture was examined 40 rows deep and its supported siblings
+    # past them were never reached. With `eligible(row)` (None or the reason
+    # the row cannot pair), a one-participant instrument check and `skip_ids`
+    # (siblings already examined conclusively), the cap is spent on eligible,
+    # unexamined siblings only. Excluded rows are still listed as refused, by
+    # name, at no read. The funded path passes none of these and is unchanged.
+    out["eligibility"] = None
+    pre_refused = []
+    if eligible is not None or skip_ids or exclude_one_participant:
+        one_participant = set()
+        if exclude_one_participant:
+            abbrs: dict = {}
+            kinds: dict = {}
+            for k in keyed:
+                r_ = dict(k[3])
+                sl = _clean(r_.get("market_slug"))
+                abbrs.setdefault(sl, []).append(_clean(r_.get("team_abbr")))
+                kinds[sl] = derive_kind(r_).get("kind")
+            one_participant = {
+                sl for sl, ab in abbrs.items()
+                if len(ab) >= 2 and len(set(ab)) == 1 and ab[0]
+                and kinds.get(sl) != IS.KIND_TOTAL}
+        skip = set(skip_ids or ())
+        excluded: dict = {}
+        kept, n_skipped = [], 0
+        for k in keyed:
+            r_ = dict(k[3])
+            sl = _clean(r_.get("market_slug"))
+            sd = side_of(r_)
+            cid_ = candidate_identity(sl, sd) if sd else sl
+            why_ = None
+            if sl in one_participant:
+                why_ = R_BOTH_SIDES_CLAIM_ONE_ORIENTATION
+            elif eligible is not None:
+                why_ = eligible(r_)
+            if why_:
+                excluded[str(why_)] = excluded.get(str(why_), 0) + 1
+                pre_refused.append(
+                    {"candidate_id": cid_, "market_slug": sl, "side": sd,
+                     "sports_type": r_.get("sports_type"),
+                     "search_rank": k[2].get("rank"), "stage": "SCREEN",
+                     "refusal": str(why_),
+                     "why": ("excluded before any venue read and before the "
+                             "cap: %s" % why_)})
+                continue
+            if cid_ in skip:
+                n_skipped += 1
+                continue
+            kept.append(k)
+        rows = [k[3] for k in kept][:cap]
+        out["eligibility"] = {
+            "rows_fetched": len(keyed),
+            "excluded_before_reads": excluded,
+            "eligible_total": len(kept) + n_skipped,
+            "exhausted_skipped": n_skipped,
+            "examined": len(rows),
+            "deferred": max(0, len(kept) - len(rows)),
+            "cap": cap}
+    else:
+        rows = [k[3] for k in keyed][:cap]
     priorities = {str(k[1]): k[2] for k in keyed}
     out["search_order"] = {
         "rule": SEARCH_ORDER_RULE,
@@ -1631,6 +1696,11 @@ async def candidate_legs_for(conn, *, held_row, quoter=None,
     out["limit"] = cap
     out["truncated_at_limit"] = bool(
         len(rows) >= cap and max(have_pairs or 0, len(fetched)) > len(rows))
+    if out["eligibility"] is not None:
+        # WITH ELIGIBILITY, "TRUNCATED" MEANS ELIGIBLE SIBLINGS WERE LEFT
+        # UNEXAMINED -- not that ineligible rows existed past the cap.
+        out["truncated_at_limit"] = out["eligibility"]["deferred"] > 0
+        out["refused"].extend(pre_refused)
     if out["truncated_at_limit"]:
         out["truncation_note"] = (
             "this fixture has %s (slug, side) candidate pairs and the read "

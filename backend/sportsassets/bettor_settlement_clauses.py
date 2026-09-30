@@ -119,9 +119,13 @@ RES_REFUND = "THE_MARKET_REFUNDS_THE_PURCHASE_BASIS"
 RES_STAYS_OPEN = "THE_MARKET_STAYS_OPEN_UNTIL_THE_FIXTURE_COMPLETES"
 RES_ON_PARTIAL = "THE_MARKET_IS_GRADED_ON_THE_RESULT_AT_THE_TIME"
 RES_CENTS = "THE_MARKET_RESOLVES_AT_A_STATED_PER_CONTRACT_AMOUNT"
+#: SETTLED AT THE LAST FAIR MARKET PRICE: a VARIABLE amount, known only once
+#: the venue names it. It is neither a refund of the basis nor fifty cents, and
+#: nothing here converts it into either (2026-10-01).
+RES_LAST_FAIR_PRICE = "THE_MARKET_SETTLES_AT_THE_LAST_FAIR_MARKET_PRICE"
 
 RESOLUTIONS = (RES_YES, RES_NO, RES_HALF, RES_REFUND, RES_STAYS_OPEN,
-               RES_ON_PARTIAL, RES_CENTS)
+               RES_ON_PARTIAL, RES_CENTS, RES_LAST_FAIR_PRICE)
 
 #: V1 NAMES, KEPT AS ALIASES. `PAY_NO`/`PAY_YES` were named for the held side
 #: and read from prose about the market; the new names say which they are. The
@@ -176,6 +180,13 @@ PAYOUT_PATTERNS = (
     (RES_STAYS_OPEN, (r"\bremains?\s+open\b", r"\bstays?\s+open\b",
                       r"\buntil\s+(?:it\s+is\s+)?(?:replayed|completed|"
                       r"resumed|played)\b")),
+    # BEFORE the partial-result patterns: "the last fair market price at the
+    # time of cancellation" names WHEN the price is taken, not a partial grade.
+    (RES_LAST_FAIR_PRICE, (r"\blast\s+(?:fair\s+)?(?:market\s+)?"
+                           r"(?:traded\s+)?(?:price|value)\b",
+                           r"\bfair\s+market\s+(?:price|value)\b",
+                           r"\bfair\s+(?:price|value)\b",
+                           r"\blast\s+trad(?:ed|ing)\s+price\b")),
     (RES_ON_PARTIAL, (r"\bat\s+the\s+time\s+(?:of|the)\b",
                       r"\blast\s+completed\b",
                       r"\bresult\s+(?:at|when)\s+(?:the\s+)?"
@@ -257,6 +268,7 @@ R_MIXED_TRIGGERS = "ONE_CLAUSE_NAMES_TWO_DIFFERENT_OUTCOMES"
 R_UNSUPPORTED_CONSTRUCTION = (
     "NO_SUPPORTED_CONSTRUCTION_RELATES_THIS_TRIGGER_TO_THIS_PAYOUT")
 R_SIDE_NOT_STATED = "WHICH_SIDE_OF_THE_INSTRUMENT_IS_HELD_IS_NOT_STATED"
+R_VARIABLE_PAYOUT = "THE_PAYOUT_IS_THE_LAST_FAIR_MARKET_PRICE_NOT_KNOWN_IN_ADVANCE"
 R_BASIS_NOT_STATED = "THE_CONTRACTS_OWN_PURCHASE_BASIS_IS_NOT_STATED"
 R_RESOLUTION_HAS_NO_PER_CONTRACT_VALUE = (
     "THIS_RESOLUTION_DOES_NOT_FIX_A_PER_CONTRACT_AMOUNT")
@@ -360,6 +372,11 @@ def _payouts_in(clause):
                     res = RES_CENTS
             found.append((res, (m.start(), m.end()), cents))
             break
+    # A LAST-FAIR-PRICE SETTLEMENT'S "at the time of" names when that price
+    # is taken; it is not a second resolution that would make the clause
+    # ambiguous.
+    if any(f[0] == RES_LAST_FAIR_PRICE for f in found):
+        found = [f for f in found if f[0] != RES_ON_PARTIAL]
     # De-duplicate on the resolution, keeping the earliest span.
     seen, out = set(), []
     for res, span, cents in sorted(found, key=lambda t: t[1][0]):
@@ -655,6 +672,14 @@ def side_payout_cents(resolution, side, *, basis_cents=None) -> dict:
                          % ("YES" if resolution == RES_YES else "NO", side,
                             "YES" if holds_yes else "NO",
                             100 if wins else 0)))
+    if resolution == RES_LAST_FAIR_PRICE:
+        # VARIABLE, NOT UNKNOWN WORDING. The rule is read; its amount is the
+        # market's own last fair price, which no one knows in advance. It is
+        # never a refund and never fifty cents.
+        return dict(out, refusal=R_VARIABLE_PAYOUT, variable=True,
+                    why=("the market settles at its last fair market price, "
+                         "an amount known only when the venue states it; no "
+                         "fixed per-contract value exists in advance"))
     if resolution == RES_ON_PARTIAL:
         return dict(out, refusal=R_RESOLUTION_HAS_NO_PER_CONTRACT_VALUE,
                     why=("grading on the partial result needs that result, "
@@ -742,3 +767,93 @@ def describe() -> dict:
                               "for BOTH sides"),
         },
     }
+
+
+# ═════════════════════════════════════════════════════════════════════
+# CANCELLATION TREATMENT, NAMED FOR THE PEOPLE WHO READ THE LEDGER
+# ═════════════════════════════════════════════════════════════════════
+#
+# The four treatments the owner distinguishes, plus a stated resolution that is
+# none of them. Each keeps its source clause. A variable last-fair-price
+# settlement is NEVER mapped onto a refund or onto fifty cents, and matching
+# wording on two legs does not by itself show the pair cannot lose in the
+# cancelled cell -- `pair_cancellation` works that out from the treatments and
+# the prices, and says when it cannot.
+
+T_REFUND_OF_BASIS = "REFUND_OF_ACQUISITION_BASIS"
+T_FIXED_50C = "FIXED_50_CENT_SETTLEMENT"
+T_LAST_FAIR_PRICE = "SETTLEMENT_AT_THE_LAST_FAIR_MARKET_PRICE"
+T_OTHER_STATED = "ANOTHER_STATED_RESOLUTION"
+T_UNSTATED_OR_AMBIGUOUS = "UNSTATED_OR_AMBIGUOUS"
+
+_TREATMENT_OF = {RES_REFUND: T_REFUND_OF_BASIS, RES_HALF: T_FIXED_50C,
+                 RES_LAST_FAIR_PRICE: T_LAST_FAIR_PRICE}
+
+
+def cancellation_treatment(rule: dict | None) -> dict:
+    """ONE leg's cancellation rule, as read, named as one of the treatments.
+
+    `rule` is `read_outcome(prose, CANCELLED)` (a Leg's
+    `settlement_rules[CANCELLED]`). Never raises."""
+    r = dict(rule or {})
+    out = {"outcome": CANCELLED, "clause": r.get("clause"),
+           "resolution": r.get("resolution"),
+           "established": bool(r.get("established")),
+           "refusal": r.get("refusal"), "construction": r.get("construction"),
+           "states": r.get("states"), "why": r.get("why")}
+    if not r:
+        return dict(out, interpretation=T_UNSTATED_OR_AMBIGUOUS,
+                    refusal=R_NO_PROSE, why="no cancellation rule was read")
+    if not r.get("established"):
+        return dict(out, interpretation=T_UNSTATED_OR_AMBIGUOUS)
+    res = r.get("resolution")
+    if res == RES_CENTS and r.get("stated_cents") == 50:
+        res = RES_HALF
+    return dict(out, interpretation=_TREATMENT_OF.get(res, T_OTHER_STATED),
+                stated_cents=r.get("stated_cents"))
+
+
+P_BASIS_RETURNED = "BOTH_LEGS_RETURN_THEIR_BASIS_FEES_NOT_ESTABLISHED"
+P_FIXED = "FIXED_PAYOUT_COMPARED_WITH_COST"
+P_VARIABLE = "A_LEG_SETTLES_AT_A_VARIABLE_PRICE_NO_FLOOR"
+P_UNDETERMINED = "A_LEGS_CANCELLATION_PAYOUT_IS_NOT_ESTABLISHED"
+
+
+def pair_cancellation(held: dict, other: dict, *, held_cost_cents,
+                      other_cost_cents) -> dict:
+    """WHAT ONE UNIT OF EACH LEG RECEIVES IF THE FIXTURE IS CANCELLED, AGAINST
+    WHAT THE PAIR COST. Never a guaranteed floor unless both amounts are fixed
+    and known; fees are never assumed refunded."""
+    ts = (held.get("interpretation"), other.get("interpretation"))
+    costs = (held_cost_cents, other_cost_cents)
+    out = {"treatments": list(ts), "costs_cents": list(costs),
+           "pair_cost_cents": (None if None in costs
+                               else float(costs[0]) + float(costs[1]))}
+    if T_UNSTATED_OR_AMBIGUOUS in ts or T_OTHER_STATED in ts:
+        return dict(out, verdict=P_UNDETERMINED, receives_cents=None,
+                    can_both_lose=None,
+                    why=("at least one leg's cancellation payout is not one "
+                         "of the recognised fixed treatments"))
+    if T_LAST_FAIR_PRICE in ts:
+        return dict(out, verdict=P_VARIABLE, receives_cents=None,
+                    can_both_lose=True,
+                    why=("a last-fair-price settlement can be anywhere from 0 "
+                         "to 100 cents, so the pair can receive less than it "
+                         "paid; no floor exists in the cancelled cell"))
+    if None in costs:
+        return dict(out, verdict=P_UNDETERMINED, receives_cents=None,
+                    can_both_lose=None, why="a leg's cost is not stated")
+    got = sum(float(c) if t == T_REFUND_OF_BASIS else 50.0
+              for t, c in zip(ts, costs))
+    if ts == (T_REFUND_OF_BASIS, T_REFUND_OF_BASIS):
+        return dict(out, verdict=P_BASIS_RETURNED, receives_cents=got,
+                    can_both_lose=None,
+                    why=("both legs return their purchase basis; whether fees "
+                         "are refunded is not stated, so a small loss is not "
+                         "ruled out"))
+    return dict(out, verdict=P_FIXED, receives_cents=got,
+                net_before_fees_cents=round(got - out["pair_cost_cents"], 4),
+                can_both_lose=bool(got < out["pair_cost_cents"]),
+                why=("fixed cancellation payouts of %.0f cents against a pair "
+                     "cost of %.2f cents, before fees"
+                     % (got, out["pair_cost_cents"])))
