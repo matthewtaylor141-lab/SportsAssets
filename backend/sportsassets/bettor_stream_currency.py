@@ -791,19 +791,62 @@ def evidence_for(slug, *, now=None) -> dict:
     THIS IS THE FUNCTION `book_currency_evidence` CALLS. It returns None today,
     and it returns None because of `MISSING_PRECONDITIONS`, not because nothing
     is wired -- a distinction that matters when somebody asks what to build next.
+
+    It also requires the decision process's own subscription
+    (`bettor_market_subscription`) to hold this market as CURRENT, and it
+    carries that readiness and its named M1 reason on every answer.
     """
     state = subscription_state(slug, now=now)
+    # ── THE SUBSCRIPTION'S OWN READINESS FOR THIS MARKET ─────────────
+    #
+    # `bettor_market_subscription` is the decision process's subscription:
+    # it holds an explicit per-market state (NOT_SUBSCRIBED ... CURRENT ...
+    # REFUSED_BY_VENUE) with a named reason. It is CARRIED on every answer,
+    # so a refusal says which part of M1 was missing -- a venue refusal or an
+    # entitlement denial is named here rather than folded into "no mechanism".
+    #
+    # AND IT GATES: this market must be CURRENT there IN ADDITION to every
+    # precondition below. The two are fed by the same frames, so requiring
+    # both can only refuse more -- and requiring it ALWAYS, not only when a
+    # subscription happens to be installed, means M1 has exactly one source:
+    # the decision process's own supervised subscription. A stream some other
+    # caller runs in the same process feeds this module's epoch bookkeeping
+    # but can never, on its own, supply the mechanism. With nothing installed
+    # the readiness is NOT_SUBSCRIBED and the answer is today's refusal.
+    readiness = None
+    try:
+        from . import bettor_market_subscription as _msub
+        readiness = _msub.readiness(slug, now=now)
+        sub_refusal = _msub.m1_refusal_name(readiness)
+    except Exception as exc:  # noqa: BLE001 -- unknown is NOT current
+        readiness = {"state": "UNKNOWN", "why": type(exc).__name__}
+        sub_refusal = "M1_SUBSCRIPTION_READINESS_UNREADABLE"
+    if sub_refusal is None and MISSING_PRECONDITIONS:
+        sub_refusal = "M1_FEED_TIMING_NOT_DOCUMENTED_P5"
     if not state.get("usable_as_a_currency_mechanism"):
         return {"subscription": None, "state": state,
                 "refusal": M1_NOT_AVAILABLE if MISSING_PRECONDITIONS else
                            "M1_PRECONDITIONS_NOT_MET_FOR_THIS_MARKET",
                 "missing_from_the_feed": list(MISSING_PRECONDITIONS),
+                "readiness": readiness,
+                "subscription_refusal": sub_refusal,
                 "why": state.get("why")}
+    if (readiness or {}).get("state") != "CURRENT":
+        return {"subscription": None, "state": state,
+                "refusal": "M1_SUBSCRIPTION_NOT_CURRENT",
+                "missing_from_the_feed": list(MISSING_PRECONDITIONS),
+                "readiness": readiness,
+                "subscription_refusal": sub_refusal,
+                "why": ("every precondition holds in this module, but the "
+                        "decision process's subscription does not hold this "
+                        "market as CURRENT: %s (%s)"
+                        % ((readiness or {}).get("state"),
+                           (readiness or {}).get("reason")))}
     return {"subscription": {"alive_at": state["alive_at"],
                              "last_update_at": state["last_update_at"],
                              "slug": state["slug"],
                              "established_by": PRECONDITIONS},
-            "state": state}
+            "state": state, "readiness": readiness}
 
 
 def describe() -> dict:
