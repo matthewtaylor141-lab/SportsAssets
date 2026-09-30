@@ -120,6 +120,34 @@ async def train_model(conn, monkeypatch, *, model_id: str) -> None:
         await DRT._restore_backfill(conn, prior)
 
 
+async def purge_everything(conn) -> None:
+    """Everything the paper live proofs put into tables OTHER proofs read.
+
+    `train_model` seeds through the Derek research harness, which inserts a
+    fresh CONTROLLED_INTEGRATION_TEST source-calibration row, fixture rows
+    and synthetic valuations; `valuation` inserts synthetic valuations. Left
+    in a shared test database they made the calibration schedule see a
+    recent row (and skip its critical cases) and the held-position census
+    count a candidate that is not one. Remove them -- and only them."""
+    from tests import test_derek_research_observations_break_the_deadlock \
+        as DRT
+    try:
+        await DRT._purge(conn)
+    except Exception:                                           # noqa: BLE001
+        pass
+    await DRT.DT._cleanup(conn)
+    async with conn.transaction():
+        # paper_decisions keep their valuation id; the paper tables are the
+        # proofs' own records, so the valuation rows go without the FK check
+        await conn.execute("SET LOCAL session_replication_role = replica")
+        await conn.execute(
+            "DELETE FROM external_valuations WHERE us_market_slug LIKE $1",
+            SYN + "%")
+        await conn.execute(
+            "DELETE FROM external_source_calibration WHERE measured_by = $1",
+            "CONTROLLED_INTEGRATION_TEST")
+
+
 async def drop_today_run(conn, at: float) -> None:
     """The daily research run the no-model proof triggered, removed so a
     shared test database's other proofs see today's run as not yet made."""

@@ -92,6 +92,7 @@ async def test_without_a_research_model_every_decision_refuses_by_name(monkeypat
         assert again["steps"]["derek"]["decisions_recorded"] == 0
     finally:
         await PL.drop_today_run(conn, now)
+        await PL.purge_everything(conn)
         await conn.close()
 
 
@@ -231,6 +232,7 @@ async def test_the_vertical_slice_decides_fills_hands_off_protects_settles_and_r
         assert h["mutation_attempts"] == 0 and h["passes"] >= 4
     finally:
         await PL.purge_research_models(conn)
+        await PL.purge_everything(conn)
         await conn.close()
 
 
@@ -310,4 +312,5 @@ async def test_a_strict_cross_after_the_queue_fills_the_protection_and_a_restart
         assert b["realized_pnl_usd"] == pytest.approx(60.0)
     finally:
         await PL.purge_research_models(conn)
+        await PL.purge_everything(conn)
         await conn.close()
