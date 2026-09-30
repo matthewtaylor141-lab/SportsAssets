@@ -2120,6 +2120,9 @@ R_NO_OPEN_ENTRY_ROW = (
     "NO_OPEN_POSITION_TO_ACT_ON_THE_OBLIGATIONS_ARE_ORDERS_OR_SETTLEMENT")
 R_XAVIER_REVIEW_RAISED = "XAVIERS_REVIEW_RAISED_SO_NO_RECORD_AND_NOTHING_IS_SENT"
 G_NO_PLAN = "THE_WINNER_CARRIES_NO_EXECUTABLE_PLAN"
+#: The common (one-measure) valuation refused the funded dispatch; the
+#: record's eligibility is "BLOCKED:COMMON_VALUATION:<its refusal>".
+G_COMMON_VALUATION = "COMMON_VALUATION"
 #: The side an exit is sent on, by the side the position was opened with --
 #: `pmus._exit_intent`'s rule (a test pins that the two agree).
 EXIT_SIDE_OF = {"ORDER_INTENT_BUY_LONG": "ORDER_INTENT_SELL_LONG",
@@ -2639,6 +2642,25 @@ class ReviewContext:
             # THE GROUP'S QUANTITY IS MOVING OR UNKNOWN: the winner is
             # recorded with its plan, and the gate is what the record names.
             elig = dict(gate, underlying=elig)
+        elif chosen and chosen != "HOLD":
+            # ── THE ONE-MEASURE GATE, NAMED ON THE RECORD (integration, XC) ──
+            #
+            # The common valuation (880377f) refuses a funded dispatch that is
+            # not the same robust fixed action on one measure, and `pass_once`
+            # checks it right after the group gate and before any binding or
+            # claim. It was wired AFTER this record, so a refused dispatch was
+            # persisted as DISPATCHED while nothing was sent. The record now
+            # names that gate exactly -- it is read from the decision, never
+            # recomputed -- and keeps what the later gates said beneath it.
+            _cvg = dict((dec or {}).get("funded_dispatch_gate") or {})
+            if _cvg and not _cvg.get("permitted"):
+                elig = {"eligibility": _blocked("%s:%s" % (
+                            G_COMMON_VALUATION, _cvg.get("refusal"))),
+                        "gate": G_COMMON_VALUATION,
+                        "why": ("the one-measure valuation over the void "
+                                "rate's range does not permit this dispatch "
+                                "(%s)" % _cvg.get("refusal")),
+                        "underlying": elig}
         win = next((a for a in alts if a.get("rankable") and (
             (digest and a.get("plan_digest") == digest)
             or (not digest and a.get("action") == (selected.get("action")
