@@ -1,34 +1,73 @@
-"""DEREK_ENTRY_POLICY_V1 -- THE OWNER'S ENTRY INSTRUCTION, WITH ITS UNITS.
+"""DEREK'S ENTRY POLICY -- THE OWNER'S ENTRY INSTRUCTION, WITH ITS UNITS.
+
+    ACTIVE: DEREK_ENTRY_POLICY_V2 (combination BLENDED_AVERAGE_MIN_GROSS_EDGE).
+    RETAINED FOR REPLAY AND COMPARISON: DEREK_ENTRY_POLICY_V1 (combination
+    CONSERVATIVE_AGREEMENT). Both run through the one pure function
+    `decide_entry`; every decision records which one judged it.
 
     "5%+ EV" is read, by default, as a FIVE-PERCENTAGE-POINT GROSS PROBABILITY
     EDGE on a $0/$1 contract:
 
-        qualified_probability - executable_acquisition_price >= min_gross_edge_pp
+        policy_probability - executable_acquisition_price >= min_gross_edge_pp
 
     with `min_gross_edge_pp = 0.05` in PROBABILITY POINTS (0.05 = 5 pp). It is
     NOT a 5% return on capital: a 5 pp edge bought at $0.50 is a 10% gross return
     on the $0.50, and the same 5 pp bought at $0.90 is 5.6%. Both are displayed,
     separately, and only the probability-point edge is the threshold.
 
-── THE COMBINATION POLICY: CONSERVATIVE AGREEMENT ─────────────────────────
+── V2 (ACTIVE): THE BLENDED AVERAGE ────────────────────────────────────────
 
-    The de-vigged Pinnacle probability (PINNACLE_DEVIG_V1, the entry lane's own
-    valuation) AND the approved internal model's probability
-    (bettor_funded_model.KEY_ENTRY_PAYOUT, state APPROVED, provenance verified)
-    must EACH clear the threshold at the same executable price. Nothing is
-    averaged. When no approved internal model exists the candidate is refused
-    NO_APPROVED_INTERNAL_MODEL -- there is no fallback to Pinnacle alone and no
-    pretend model. The headline economics are computed on the LOWER of the two
-    probabilities, because that is the one the policy guarantees.
+    The owner's instruction, verbatim in arithmetic:
+
+        blended_probability = (internal_probability + pinnacle_fair_probability) / 2
+        gross_edge          = blended_probability - executable acquisition price
+                              (per $1 contract, depth-weighted over the size)
+        ENTER only if gross_edge >= 0.05 AND expected net profit after fees and
+        execution costs > 0.
+
+    BOTH INPUTS MUST BE PRESENT AND QUALIFIED: the approved internal model
+    (bettor_funded_model.KEY_ENTRY_PAYOUT, state APPROVED, provenance verified,
+    approved before the decision, able to score it) and the de-vigged Pinnacle
+    probability (PINNACLE_DEVIG_V1) that passes the lane's own freshness rule.
+    Either missing or unqualified refuses BY NAME (NO_APPROVED_INTERNAL_MODEL,
+    INTERNAL_MODEL_CANNOT_SCORE_THIS_CANDIDATE, NO_QUALIFIED_PINNACLE_PROBABILITY,
+    PROBABILITY_EVIDENCE_STALE, PROBABILITY_EVIDENCE_FRESHNESS_UNKNOWN): nothing
+    is averaged with a missing value and there is no Pinnacle-only fallback.
+
+    WHAT THE AVERAGE IS NOT. The internal model is a calibration fitted to
+    market prices (its inputs are the venue price and the payout side), not an
+    independent sports forecast. The blended probability is therefore an
+    average of two market-derived estimates; it is not independent
+    confirmation of an edge, and it is displayed as such.
+
+── V1 (RETAINED): CONSERVATIVE AGREEMENT ──────────────────────────────────
+
+    The de-vigged Pinnacle probability AND the approved internal model's
+    probability must EACH clear the threshold at the same executable price.
+    Nothing is averaged; the headline economics are the LOWER of the two.
+    Replayed on recorded inputs by `derek_policy_replay`; never binding.
 
 ── NET OF FEES ─────────────────────────────────────────────────────────────
 
     Expected net profit = sum over the depth walk of qty_i * (p - price_i)
     minus the deployed fee schedule charged per fill,
     `bettor_funded_book.fee_for(qty_i, price_i)` -- the function the funded book
-    books fees with -- and it must be POSITIVE. A further net threshold is a
-    separately named parameter, `min_net_ev_usd` (dollars, default 0), never
-    folded into the gross edge.
+    books fees with -- and it must be POSITIVE. `p` is the policy's own
+    probability (V2: the blended average). The acquisition cost is the
+    executable price PLUS the fee; the valuation row's `cost_per_contract` is
+    that FEE, not the cost. Expected return on capital = net / (acquisition
+    cost + fees). A further net threshold is a separately named parameter,
+    `min_net_ev_usd` (dollars, default 0), never folded into the gross edge.
+
+── ONE FUNCTION FOR EXECUTION AND FOR DISPLAY ──────────────────────────────
+
+    `decide_entry(policy, internal=, pinnacle=, econ=)` is the combination
+    rule. `evaluate` takes the combination check and C_NET_EV from it, the
+    decision record stores its whole output (evidence.policy_decision: policy
+    name and version, internal p with its model version and time, Pinnacle p
+    with its time, blended p, gross edge, fees, net expected profit, expected
+    return on capital, each condition's pass/fail) and copies the headline
+    columns from it, and Derek's workspace reads that stored output.
 
 ── THE FLOAT BOUNDARY, DELIBERATELY ────────────────────────────────────────
 
@@ -93,8 +132,16 @@ from typing import Any
 
 AGENT_ID = "DEREK"
 POLICY_KEY = "DEREK_ENTRY_POLICY"
-POLICY_VERSION = "DEREK_ENTRY_POLICY_V1"
-COMBINATION_POLICY = "CONSERVATIVE_AGREEMENT"
+#: ── THE POLICY VERSIONS. V1 is retained for replay and comparison only. ──
+POLICY_V1 = "DEREK_ENTRY_POLICY_V1"
+POLICY_V2 = "DEREK_ENTRY_POLICY_V2"
+COMBINATION_V1 = "CONSERVATIVE_AGREEMENT"
+COMBINATION_V2 = "BLENDED_AVERAGE_MIN_GROSS_EDGE"
+POLICY_RULES = {POLICY_V1: COMBINATION_V1, POLICY_V2: COMBINATION_V2}
+#: THE ACTIVE POLICY: the one the funded gate and the scheduled pass bind.
+ACTIVE_POLICY = POLICY_V2
+POLICY_VERSION = ACTIVE_POLICY
+COMBINATION_POLICY = POLICY_RULES[ACTIVE_POLICY]
 
 #: THE ENTRY THRESHOLD'S VERSIONED DEFAULT, as a PROBABILITY DIFFERENCE on
 #: a $0/$1 contract: 0.05 means 5 percentage points (qualified probability
@@ -154,7 +201,9 @@ C_CAPACITY = "available_capital_and_inventory_capacity"
 C_LIMITS = "limits_reservations_and_authorization"
 C_SUBMISSION = "enabled_submission_state"
 C_MODEL = "approved_internal_model"
-C_AGREEMENT = "conservative_agreement_min_gross_edge"
+C_AGREEMENT = "conservative_agreement_min_gross_edge"      # V1 only
+C_BLENDED = "blended_average_min_gross_edge"              # V2
+COMBINATION_CHECK = {POLICY_V1: C_AGREEMENT, POLICY_V2: C_BLENDED}
 C_NET_EV = "positive_net_ev_after_fees"
 C_LANE = "entry_lane_admission"
 PRE_PURCHASE_CHECKS = (C_IDENTITY, C_REAL, C_SETTLEMENT, C_PROBABILITY,
@@ -177,7 +226,7 @@ R_CAPACITY = "NO_CAPACITY_UNDER_THE_LANE_RAILS"
 R_NO_MODEL = "NO_APPROVED_INTERNAL_MODEL"
 R_MODEL_CANNOT_SCORE = "INTERNAL_MODEL_CANNOT_SCORE_THIS_CANDIDATE"
 R_BELOW = "BELOW_MIN_GROSS_EDGE"
-R_DISAGREE = "ESTIMATES_DISAGREE_MODEL_BELOW_MIN_GROSS_EDGE"
+R_DISAGREE = "ESTIMATES_DISAGREE_MODEL_BELOW_MIN_GROSS_EDGE"   # V1 only
 R_NET = "NET_EV_NOT_POSITIVE_AFTER_FEES"
 R_BELOW_NET = "BELOW_MIN_NET_EV"
 R_LANE = "ENTRY_LANE_REFUSED"
@@ -552,13 +601,25 @@ def walk(levels, qty) -> list:
     return out
 
 
+def blend(p_internal, p_pinnacle) -> float | None:
+    """V2's blended probability: (internal + Pinnacle) / 2, as the DECIMAL
+    mean of the two recorded numbers. None when either is missing -- nothing
+    is ever averaged with a missing value."""
+    a, b = _dec(p_internal), _dec(p_pinnacle)
+    if a is None or b is None:
+        return None
+    return float((a + b) / 2)
+
+
 def economics(*, p_pinnacle, p_model, fills, fee_fn=None, at=None,
-              params=None) -> dict:
+              params=None, policy: str = ACTIVE_POLICY) -> dict:
     """The owner's arithmetic, in explicit units. Pure.
 
     `fills` is [(price_usd_per_contract, qty_contracts)] -- the depth walk the
     order would consume. Fees are charged per fill by `fee_fn` (default
     `bettor_funded_book.fee_for`, the function the funded book books with).
+    The HEADLINE is the probability `policy` binds: V2 the blended average
+    (None when either input is missing), V1 the lower of the two.
     """
     prm = dict(DEFAULT_PARAMS, **(params or {}))
     out: dict[str, Any] = {"params": prm, "units": dict(PARAM_UNITS)}
@@ -591,34 +652,515 @@ def economics(*, p_pinnacle, p_model, fills, fee_fn=None, at=None,
     out["fees_usd"] = round(fees, 9) if fees_ok else None
     out["fee_basis"] = fee_basis
     out["fees_ok"] = fees_ok
+    #: THE DEPTH WALK ITSELF, so a replay re-prices exactly this quantity.
+    out["fills"] = [[float(px), float(q)] for px, q in fills]
 
     def _one(p):
-        if p is None:
-            return None
-        e = gross_edge(p, vwap)
-        gross = sum(q * (float(p) - px) for px, q in fills)
-        net = (gross - fees) if fees_ok else None
-        return {"p": float(p), "gross_edge_pp": e,
-                "gross_edge_percentage_points": (None if e is None
-                                                 else round(e * 100.0, 9)),
-                "clears_min_gross_edge": clears(e, prm["min_gross_edge_pp"]),
-                "expected_gross_profit_usd": round(gross, 9),
-                "expected_gross_return_on_cost": (round(gross / cost, 9)
-                                                  if cost > 0 else None),
-                "expected_net_profit_usd": (None if net is None
-                                            else round(net, 9)),
-                "expected_net_roi": (None if net is None or cost + fees <= 0
-                                     else round(net / (cost + fees), 9))}
+        return edge_figures(p, fills=fills, fees=(fees if fees_ok else None),
+                            threshold=prm["min_gross_edge_pp"])
     out["pinnacle"] = _one(p_pinnacle)
     out["model"] = _one(p_model)
-    ps = [x for x in (p_pinnacle, p_model) if x is not None]
-    # THE HEADLINE IS THE LOWER ESTIMATE: the one the policy guarantees.
-    out["headline"] = _one(min(ps)) if ps else None
-    out["headline_is"] = ("THE_LOWER_OF_THE_TWO_QUALIFIED_PROBABILITIES "
-                          "(conservative agreement)")
+    p_blend = blend(p_model, p_pinnacle)
+    out["blended"] = _one(p_blend)
+    out["policy"] = policy
+    if policy == POLICY_V1:
+        ps = [x for x in (p_pinnacle, p_model) if x is not None]
+        # V1: THE HEADLINE IS THE LOWER ESTIMATE, the one V1 guarantees.
+        out["headline"] = _one(min(ps)) if ps else None
+        out["headline_is"] = ("V1: THE_LOWER_OF_THE_TWO_QUALIFIED_PROBABILITIES "
+                              "(%s)" % COMBINATION_V1)
+    else:
+        # V2: THE HEADLINE IS THE BLENDED AVERAGE, and only when both exist.
+        out["headline"] = out["blended"]
+        out["headline_is"] = ("V2: THE_BLENDED_AVERAGE (internal + Pinnacle) "
+                              "/ 2 of the figures supplied; absent when "
+                              "either is absent (%s). The BINDING figures, "
+                              "with each input's qualification, are "
+                              "decide_entry's (evidence.policy_decision)"
+                              % COMBINATION_V2)
     out["roi_denominator"] = ("acquisition cost + fees: the cash the entry "
                               "deploys")
     return dict(out, ok=True, refusal=None)
+
+
+def edge_figures(p, *, fills, fees, threshold) -> dict | None:
+    """One probability's figures over one depth walk. Pure. `fees` is the
+    fee total in dollars, or None when the schedule could not price it."""
+    if p is None or not fills:
+        return None
+    qty = sum(q for _, q in fills)
+    cost = sum(px * q for px, q in fills)
+    vwap = cost / qty
+    e = gross_edge(p, vwap)
+    gross = sum(q * (float(p) - px) for px, q in fills)
+    net = (gross - fees) if fees is not None else None
+    return {"p": float(p), "gross_edge_pp": e,
+            "gross_edge_percentage_points": (None if e is None
+                                             else round(e * 100.0, 9)),
+            "clears_min_gross_edge": clears(e, threshold),
+            "expected_gross_profit_usd": round(gross, 9),
+            "expected_gross_return_on_cost": (round(gross / cost, 9)
+                                              if cost > 0 else None),
+            "expected_net_profit_usd": (None if net is None
+                                        else round(net, 9)),
+            "expected_net_roi": (None if net is None or cost + fees <= 0
+                                 else round(net / (cost + fees), 9))}
+
+
+# ═════════════════════════════════════════════════════════════════════════
+# THE COMBINATION RULE: ONE PURE FUNCTION FOR EXECUTION AND FOR DISPLAY
+# ═════════════════════════════════════════════════════════════════════════
+
+NOT_EVALUATED = "NOT_EVALUATED"
+#: V2's conditions, in order.
+COND_INPUTS = "internal_and_pinnacle_present_and_qualified"
+COND_QTY = "priced_quantity_and_depth_walk"
+COND_BLENDED_EDGE = "blended_gross_edge_at_least_min_gross_edge_pp"
+#: V1's conditions, in order (replay only).
+COND_PIN_EDGE = "pinnacle_gross_edge_at_least_min_gross_edge_pp"
+COND_MODEL_PRESENT = "approved_internal_model_present"
+COND_MODEL_EDGE = "internal_gross_edge_at_least_min_gross_edge_pp"
+#: Both policies' net conditions (a separate check, C_NET_EV).
+COND_NET_POSITIVE = "expected_net_profit_after_fees_positive"
+COND_NET_MIN = "expected_net_profit_at_least_min_net_ev_usd"
+NET_CONDITIONS = (COND_NET_POSITIVE, COND_NET_MIN)
+
+_DEPENDENCY_OF = {
+    R_NO_QTY: DEP_EVIDENCE, R_NO_PINNACLE: DEP_EVIDENCE, R_STALE: DEP_EVIDENCE,
+    R_FRESHNESS_UNKNOWN: DEP_EVIDENCE, R_FEES: DEP_EVIDENCE,
+    R_NO_MODEL: DEP_ENGINEERING, R_MODEL_CANNOT_SCORE: DEP_ENGINEERING,
+    R_BELOW: DEP_NONE_MARKET, R_DISAGREE: DEP_NONE_MARKET,
+    R_NET: DEP_NONE_MARKET, R_BELOW_NET: DEP_NONE_MARKET}
+
+
+def policy_use_is(policy: str = ACTIVE_POLICY) -> str:
+    """WHAT THE POLICY'S COMBINATION OF THE TWO ESTIMATES IS, stated wherever
+    the policy is shown. Neither version is independent confirmation."""
+    from .. import bettor_funded_model as FM
+    if policy == POLICY_V1:
+        return FM.ENTRY_POLICY_V1_AGREEMENT_IS
+    return FM.ENTRY_POLICY_AGREEMENT_IS
+
+
+def _cond(name, status, *, refusal=None, detail=None, **ev) -> dict:
+    return dict({"condition": name, "status": status,
+                 "passed": (None if status == NOT_EVALUATED
+                            else status == PASS),
+                 "refusal": None if status in (PASS, NOT_EVALUATED)
+                 else refusal,
+                 "dependency": (None if status in (PASS, NOT_EVALUATED)
+                                else _DEPENDENCY_OF.get(refusal,
+                                                        DEP_EVIDENCE)),
+                 "detail": detail}, **ev)
+
+
+#: THE STABLE FIELD NAMES OF THE STORED POLICY DECISION. A UI displays these
+#: verbatim from the record; renaming one is a breaking change.
+RECORD_FIELDS = (
+    "policy_name", "policy_version", "p_internal", "internal_model_version",
+    "internal_at", "p_pinnacle", "pinnacle_at", "p_blended", "gross_edge_pp",
+    "fees_usd", "net_expected_profit_usd", "expected_return_pct",
+    "conditions", "rationale")
+
+#: ── THE SETTLEMENT STATES OF ONE BOUGHT CONTRACT (V2's net EV) ──────────
+#: The payout-state distribution's own convention (bettor_payout_states /
+#: xavier_ladder.measure_of): P(WIN) = (1-v) p, P(LOSE) = (1-v)(1-p),
+#: P(VOID) = v, with p conditional on the fixture being played (both the
+#: de-vigged Pinnacle price and the internal model's labels exclude voids)
+#: and v the measured void rate (bettor_pair_observations.void_rate). A
+#: contract the venue voids returns its purchase price (the settlement terms
+#: are attested COMPATIBLE with the book's "void, stakes returned" rule before
+#: any entry), so the VOID state adds no gross profit; the fees are NOT
+#: assumed refunded.
+VOID_MEASURED = "MEASURED"
+VOID_UNMEASURED = "THE_VOID_RATE_IS_NOT_MEASURED_PROBABILITIES_ARE_CONDITIONAL"
+VOID_PAYOUT_UNESTABLISHED = "THE_VOID_PAYOUT_IS_NOT_ESTABLISHED"
+
+
+def settlement_states(void: dict | None, *,
+                      void_refunds_price: bool | None) -> dict:
+    """The void measure a V2 valuation applies. Pure."""
+    vr = dict(void or {})
+    v = _f(vr.get("rate")) if vr.get("ok") else None
+    vu = _f(vr.get("upper_95")) if vr.get("ok") else None
+    if v is not None and not (0.0 <= v < 1.0):
+        v = vu = None
+    status = (VOID_PAYOUT_UNESTABLISHED if void_refunds_price is False
+              else VOID_MEASURED if v is not None else VOID_UNMEASURED)
+    return {"void_rate": v if status == VOID_MEASURED else None,
+            "void_upper_95": vu if status == VOID_MEASURED else None,
+            "void_n_fixtures": vr.get("n_fixtures"),
+            "void_source": vr.get("source"),
+            "void_refusal": vr.get("refusal"),
+            "void_status": status,
+            "void_payout": ("REFUND_OF_THE_PURCHASE_PRICE (settlement "
+                            "attested COMPATIBLE); fees not assumed refunded"
+                            if void_refunds_price else
+                            "NOT_ESTABLISHED" if void_refunds_price is False
+                            else "REFUND_OF_THE_PURCHASE_PRICE (assumed with "
+                                 "the attested settlement terms)"),
+            "convention": ("P(WIN)=(1-v)p, P(LOSE)=(1-v)(1-p), P(VOID)=v; "
+                           "expected gross = (1-v) x sum q (p - price); "
+                           "net = gross - fees"),
+            "applied": status == VOID_MEASURED,
+            "basis": ("the measured void rate is applied" if
+                      status == VOID_MEASURED else
+                      "no measured void rate: the figures are CONDITIONAL on "
+                      "the fixture being played, and say so")}
+
+
+def _pct(v):
+    return None if v is None else round(float(v) * 100.0, 9)
+
+
+def rationale(pd: dict, *, verdict: str | None = None,
+              refusal: str | None = None) -> str:
+    """ONE CONCISE SENTENCE BUILT ONLY FROM THE STORED FIELDS of a policy
+    decision (and, when known, Derek's overall verdict). Pure."""
+    def n(v, f="%.4f"):
+        return "n/a" if v is None else f % v
+    pol = pd.get("policy_name")
+    head = ("%s under %s (%s)" % (verdict, pol, pd.get("policy_version"))
+            if verdict else "%s (%s)" % (pol, pd.get("policy_version")))
+    if refusal:
+        head += " -- refused %s" % refusal
+    if pol == POLICY_V2:
+        probs = ("p_blended %s = (p_internal %s [%s] + p_pinnacle %s) / 2"
+                 % (n(pd.get("p_blended")), n(pd.get("p_internal")),
+                    pd.get("internal_model_version") or "no approved model",
+                    n(pd.get("p_pinnacle"))))
+    else:
+        probs = ("p_internal %s [%s], p_pinnacle %s, each must clear; "
+                 "headline the lower %s" % (
+                     n(pd.get("p_internal")),
+                     pd.get("internal_model_version") or "no approved model",
+                     n(pd.get("p_pinnacle")),
+                     n(pd.get("policy_probability"))))
+    econ = ("at price %s: gross_edge_pp %s vs %s pp; fees_usd %s; "
+            "net_expected_profit_usd %s; expected_return_pct %s"
+            % (n(pd.get("executable_price")), n(pd.get("gross_edge_pp"),
+                                                "%.2f"),
+               n(pd.get("threshold_gross_edge_pp"), "%.2f"),
+               n(pd.get("fees_usd"), "%.2f"),
+               n(pd.get("net_expected_profit_usd"), "%.2f"),
+               n(pd.get("expected_return_pct"), "%.2f")))
+    conds = ", ".join("%s=%s" % (c["condition"], c["status"])
+                      for c in pd.get("conditions") or [])
+    return "%s: %s; %s. Conditions: %s." % (head, probs, econ, conds)
+
+
+def decide_entry(policy: str, *, internal: dict, pinnacle: dict, econ: dict,
+                 params: dict | None = None, void: dict | None = None,
+                 void_refunds_price: bool | None = None,
+                 policy_version: str | None = None) -> dict:
+    """THE COMBINATION RULE OF `policy` ON ONE PRICED CANDIDATE. Pure.
+
+    THE ONE FUNCTION: `evaluate` (and so the funded gate and the scheduled
+    pass) takes its combination and net-EV verdicts from this output, the
+    decision record persists it whole (evidence.policy_decision, and the
+    headline columns are copied from it), and Derek's workspace displays the
+    stored copy -- nothing downstream recomputes it. The stable field names
+    are RECORD_FIELDS.
+
+      internal  {p, qualified, refusal, why, model_id, model_version, at}
+                -- qualified means the registry's approved model scored it
+      pinnacle  {p, qualified, qualification, refusal, why, at}
+                -- qualified means the lane's freshness rule passed
+      econ      `economics(...)` over the depth walk (fills, fees)
+      void      `bettor_pair_observations.void_rate(...)` (V2's settlement
+                states); absent or unmeasured -> conditional, and labelled
+
+    V2: p_blended = (p_internal + p_pinnacle) / 2, only when BOTH are present
+    and qualified; enter iff p_blended - executable price >= min_gross_edge_pp
+    AND expected net profit after fees (settlement states applied) > 0 and
+    >= min_net_ev_usd. V1: each estimate must clear the threshold; net on the
+    lower of the two (V1 never applied settlement states).
+    """
+    if policy not in POLICY_RULES:
+        raise ValueError("unknown Derek entry policy %r" % (policy,))
+    prm = dict(DEFAULT_PARAMS, **(params or {}))
+    thr = float(prm["min_gross_edge_pp"])
+    internal, pinnacle, econ = (dict(internal or {}), dict(pinnacle or {}),
+                                dict(econ or {}))
+    ok = bool(econ.get("ok"))
+    fills = ([(float(px), float(q)) for px, q in (econ.get("fills") or [])]
+             if ok else [])
+    priced = ok and bool(fills)
+    fees = econ.get("fees_usd") if (ok and econ.get("fees_ok")) else None
+    states = (settlement_states(void, void_refunds_price=void_refunds_price)
+              if policy == POLICY_V2 else
+              {"applied": False, "void_status": "NOT_PART_OF_V1"})
+    scale = (1.0 - states["void_rate"]) if states.get("applied") else 1.0
+
+    def fig(p):
+        return edge_figures(p, fills=fills, fees=fees, threshold=thr) \
+            if priced else None
+
+    p_int = _f(internal.get("p")) if internal.get("qualified") else None
+    p_pin = _f(pinnacle.get("p"))
+    conds: list = []
+    blended = None
+    if policy == POLICY_V2:
+        pin_ok = p_pin is not None and pinnacle.get("qualified") is True
+        if p_pin is None:
+            conds.append(_cond(COND_INPUTS, FAIL, refusal=R_NO_PINNACLE,
+                               detail="no de-vigged Pinnacle probability; "
+                                      "nothing is averaged with a missing "
+                                      "value"))
+        elif not pin_ok:
+            ref = pinnacle.get("refusal") or R_NO_PINNACLE
+            conds.append(_cond(
+                COND_INPUTS, UNKNOWN if ref == R_FRESHNESS_UNKNOWN else FAIL,
+                refusal=ref,
+                detail="the Pinnacle probability %.6f is not qualified (%s); "
+                       "it is not averaged" % (p_pin, pinnacle.get("why")
+                                               or ref)))
+        elif p_int is None:
+            ref = internal.get("refusal") or R_NO_MODEL
+            conds.append(_cond(
+                COND_INPUTS, FAIL, refusal=ref,
+                detail="no qualified internal probability (%s): %s; there "
+                       "is no Pinnacle-only fallback and no substitute "
+                       "estimate" % (ref, internal.get("why") or "the "
+                                     "registry has no approved model that "
+                                     "scored this candidate")))
+        else:
+            blended = blend(p_int, p_pin)
+            conds.append(_cond(COND_INPUTS, PASS,
+                               detail="internal %.6f (%s) and Pinnacle %.6f "
+                                      "(%s) both qualified" % (
+                                          p_int, internal.get("model_version"),
+                                          p_pin, pinnacle.get("qualification")
+                                          or "FRESH")))
+        conds.append(_cond(COND_QTY, PASS if priced else UNKNOWN,
+                           refusal=R_NO_QTY,
+                           detail=("%s contracts walked at $%.6f "
+                                   "depth-weighted" % (econ.get("qty"),
+                                                       econ.get(
+                                                           "executable_price"))
+                                   if priced else
+                                   "no priced quantity to walk")))
+        head = fig(blended)
+        if head is None:
+            conds.append(_cond(COND_BLENDED_EDGE, NOT_EVALUATED,
+                               detail="no blended probability over a priced "
+                                      "quantity"))
+        else:
+            conds.append(_cond(
+                COND_BLENDED_EDGE,
+                PASS if head["clears_min_gross_edge"] else FAIL,
+                refusal=R_BELOW,
+                detail="blended %.6f - price %.6f = %.4f pp %s %.4f pp" % (
+                    blended, econ.get("executable_price"),
+                    head["gross_edge_percentage_points"],
+                    ">=" if head["clears_min_gross_edge"] else "<",
+                    thr * 100.0),
+                value=head["gross_edge_percentage_points"],
+                threshold=thr * 100.0, units="percentage points"))
+        headline_is = ("V2: THE_BLENDED_AVERAGE (internal + Pinnacle) / 2 of "
+                       "two QUALIFIED estimates")
+    else:
+        pe, me = fig(p_pin), fig(p_int)
+        if pe is None:
+            conds.append(_cond(COND_PIN_EDGE, UNKNOWN, refusal=R_NO_QTY,
+                               detail="no edge could be computed (no priced "
+                                      "quantity or no Pinnacle probability)"))
+        else:
+            conds.append(_cond(COND_PIN_EDGE,
+                               PASS if pe["clears_min_gross_edge"] else FAIL,
+                               refusal=R_BELOW,
+                               detail="Pinnacle edge %.4f pp vs %.4f pp" % (
+                                   pe["gross_edge_percentage_points"],
+                                   thr * 100.0),
+                               value=pe["gross_edge_percentage_points"],
+                               threshold=thr * 100.0,
+                               units="percentage points"))
+        conds.append(_cond(COND_MODEL_PRESENT,
+                           PASS if p_int is not None else UNKNOWN,
+                           refusal=R_NO_MODEL,
+                           detail=("%s scored it" % internal.get(
+                               "model_version") if p_int is not None else
+                               "no approved model estimate to agree with "
+                               "Pinnacle")))
+        if me is None:
+            conds.append(_cond(COND_MODEL_EDGE, NOT_EVALUATED,
+                               detail="no model edge over a priced quantity"))
+        else:
+            conds.append(_cond(COND_MODEL_EDGE,
+                               PASS if me["clears_min_gross_edge"] else FAIL,
+                               refusal=R_DISAGREE,
+                               detail="model edge %.4f pp vs %.4f pp" % (
+                                   me["gross_edge_percentage_points"],
+                                   thr * 100.0),
+                               value=me["gross_edge_percentage_points"],
+                               threshold=thr * 100.0,
+                               units="percentage points"))
+        ps = [x for x in (p_pin, p_int) if x is not None]
+        head = fig(min(ps)) if ps else None
+        headline_is = "V1: THE_LOWER_OF_THE_TWO_PROBABILITIES"
+    # ── THE HEADLINE ECONOMICS, settlement states applied (V2) ───────
+    cost = econ.get("acquisition_cost_usd") if priced else None
+    gross = (None if head is None
+             else round(head["expected_gross_profit_usd"] * scale, 9))
+    net = (None if gross is None or fees is None
+           else round(gross - fees, 9))
+    total = None if cost is None or fees is None else round(cost + fees, 9)
+    roc = (None if net is None or not total or total <= 0
+           else round(net / total, 9))
+    net_upper = None
+    if head is not None and fees is not None and \
+            states.get("void_upper_95") is not None:
+        net_upper = round(head["expected_gross_profit_usd"]
+                          * (1.0 - states["void_upper_95"]) - fees, 9)
+    # ── NET EV AFTER FEES (both policies), on the policy's headline ──
+    if head is None and policy == POLICY_V2:
+        first = next((c for c in conds if c["status"] not in
+                      (PASS, NOT_EVALUATED)), None)
+        why = (first or {}).get("refusal") or R_NO_QTY
+        conds.append(_cond(COND_NET_POSITIVE, UNKNOWN, refusal=why,
+                           detail="net EV not computable: no blended "
+                                  "probability over a priced quantity"))
+        conds.append(_cond(COND_NET_MIN, NOT_EVALUATED))
+    elif net is None:
+        conds.append(_cond(COND_NET_POSITIVE, UNKNOWN,
+                           refusal=(R_FEES if ok else R_NO_QTY),
+                           detail="net EV not computable"))
+        conds.append(_cond(COND_NET_MIN, NOT_EVALUATED))
+    else:
+        conds.append(_cond(COND_NET_POSITIVE, PASS if net > 0 else FAIL,
+                           refusal=R_NET,
+                           detail="expected net $%.6f after $%.4f fees%s%s"
+                                  % (net, fees,
+                                     "" if not states.get("applied") else
+                                     " (void rate %.4f applied)"
+                                     % states["void_rate"],
+                                     "" if net > 0 else " is not positive"),
+                           value=net, threshold=0.0, units="USD"))
+        mn = float(prm["min_net_ev_usd"])
+        conds.append(_cond(COND_NET_MIN, PASS if net >= mn else FAIL,
+                           refusal=R_BELOW_NET,
+                           detail="expected net $%.6f %s min_net_ev_usd $%.4f"
+                                  % (net, ">=" if net >= mn else "<", mn),
+                           value=net, threshold=mn, units="USD"))
+    failing = [c for c in conds if c["status"] not in (PASS, NOT_EVALUATED)]
+    qty = econ.get("qty") if priced else None
+    per = (lambda v: None if v is None or not qty else round(v / qty, 9))
+    e_frac = (head or {}).get("gross_edge_pp")
+    pd = {
+        # ── THE STABLE FIELDS (RECORD_FIELDS) ────────────────────────
+        "policy_name": policy,
+        "policy_version": policy_version or policy,
+        "p_internal": _f(internal.get("p")),
+        "internal_model_version": internal.get("model_version"),
+        "internal_at": internal.get("at"),
+        "p_pinnacle": p_pin,
+        "pinnacle_at": pinnacle.get("at"),
+        "p_blended": blended,
+        #: PERCENTAGE POINTS (9.0 == 9 pp). NB the table column and the
+        #: parameter of the same name hold the FRACTION (0.09); this record
+        #: states its unit in `units` and carries the fraction beside it.
+        "gross_edge_pp": _pct(e_frac),
+        "fees_usd": fees,
+        "net_expected_profit_usd": net,
+        "expected_return_pct": _pct(roc),
+        "conditions": conds,
+        "rationale": None,
+        # ── SUPPORTING FIELDS ─────────────────────────────────────────
+        "function": "agents.derek_policy.decide_entry",
+        "policy_key": POLICY_KEY,
+        "combination_policy": POLICY_RULES[policy],
+        "inputs_are": policy_use_is(policy),
+        "internal_qualified": bool(internal.get("qualified")),
+        "internal_refusal": internal.get("refusal"),
+        "internal_model_id": internal.get("model_id"),
+        "internal_gross_edge_pp": _pct((fig(p_int) or {}).get(
+            "gross_edge_pp")),
+        "pinnacle_qualified": pinnacle.get("qualified") is True,
+        "pinnacle_qualification": pinnacle.get("qualification"),
+        "pinnacle_refusal": pinnacle.get("refusal"),
+        "pinnacle_gross_edge_pp": _pct((fig(p_pin) or {}).get(
+            "gross_edge_pp")),
+        "policy_probability": (head or {}).get("p"),
+        "policy_probability_is": headline_is,
+        "executable_price": econ.get("executable_price") if priced else None,
+        "executable_price_basis": econ.get("executable_price_basis"),
+        "qty": qty,
+        "acquisition_cost_usd": cost,
+        "gross_edge_fraction": e_frac,
+        "threshold_gross_edge_pp": thr * 100.0,
+        "threshold_gross_edge_fraction": thr,
+        "edge_tolerance_fraction": EDGE_TOLERANCE_PP,
+        "expected_gross_profit_usd": gross,
+        "expected_gross_profit_per_contract_usd": per(gross),
+        "expected_gross_return_pct": (None if gross is None or not cost
+                                      else _pct(gross / cost)),
+        "fee_per_contract_usd": per(fees),
+        "total_cost_usd": total,
+        "net_expected_profit_per_contract_usd": per(net),
+        "net_expected_profit_at_void_upper_95_usd": net_upper,
+        "expected_return_on_capital": roc,
+        "return_on_capital_denominator": ("acquisition cost (price x qty) + "
+                                          "fees: the cash the entry deploys"),
+        "min_net_ev_usd": float(prm["min_net_ev_usd"]),
+        "settlement_states": states,
+        "units": {"p_*": "probability of the payout event (0..1)",
+                  "gross_edge_pp": "PERCENTAGE POINTS (9.0 == 9 pp)",
+                  "gross_edge_fraction": "fraction (0.09 == 9 pp)",
+                  "*_usd": "US dollars for qty contracts unless per_contract",
+                  "expected_return_pct": ("percent: net / (acquisition cost"
+                                          " + fees) x 100"),
+                  "expected_gross_return_pct": ("percent: gross / acquisition"
+                                                " cost x 100, before fees"),
+                  "internal_at / pinnacle_at": "epoch seconds (UTC)"},
+        "admitted": not failing,
+        "refusal": failing[0]["refusal"] if failing else None,
+        "refusals": [c["refusal"] for c in failing],
+    }
+    pd["rationale"] = rationale(pd)
+    return pd
+
+
+def combination_check(pd: dict) -> dict:
+    """The policy's combination check, built from `decide_entry`'s output."""
+    policy = pd["policy_name"]
+    name = COMBINATION_CHECK[policy]
+    mine = [c for c in pd["conditions"]
+            if c["condition"] not in NET_CONDITIONS]
+    bad = next((c for c in mine if c["status"] not in (PASS, NOT_EVALUATED)),
+               None)
+    ev = {"combination": pd["combination_policy"], "policy": policy,
+          "min_gross_edge_pp": pd["threshold_gross_edge_fraction"],
+          "tolerance_pp": EDGE_TOLERANCE_PP,
+          "p_internal": pd["p_internal"], "p_pinnacle": pd["p_pinnacle"],
+          "p_blended": pd["p_blended"],
+          "gross_edge_fraction": pd["gross_edge_fraction"],
+          "pinnacle_gross_edge_pp": pd["pinnacle_gross_edge_pp"],
+          "model_gross_edge_pp": pd["internal_gross_edge_pp"],
+          "conditions": mine}
+    if bad is None:
+        return _check(name, PASS, "; ".join(
+            c["detail"] for c in mine if c.get("detail")),
+            source="agents.derek_policy.decide_entry", evidence=ev)
+    return _check(name, bad["status"], bad["detail"], refusal=bad["refusal"],
+                  dependency=bad["dependency"],
+                  source="agents.derek_policy.decide_entry", evidence=ev)
+
+
+def net_ev_check(pd: dict) -> dict:
+    """C_NET_EV, built from `decide_entry`'s output."""
+    mine = [c for c in pd["conditions"] if c["condition"] in NET_CONDITIONS]
+    bad = next((c for c in mine if c["status"] not in (PASS, NOT_EVALUATED)),
+               None)
+    ev = {"expected_net_profit_usd": pd["net_expected_profit_usd"],
+          "min_net_ev_usd": pd["min_net_ev_usd"], "fees_usd": pd["fees_usd"],
+          "settlement_states": pd["settlement_states"],
+          "policy": pd["policy_name"], "conditions": mine}
+    if bad is None:
+        return _check(C_NET_EV, PASS, mine[0]["detail"],
+                      source="agents.derek_policy.decide_entry", evidence=ev)
+    return _check(C_NET_EV, bad["status"], bad["detail"],
+                  refusal=bad["refusal"], dependency=bad["dependency"],
+                  source="agents.derek_policy.decide_entry", evidence=ev)
 
 
 # ═════════════════════════════════════════════════════════════════════════
@@ -651,8 +1193,9 @@ def model_estimate(approved: dict | None, cand: dict, *,
         return dict(out, ok=False, refusal=R_NO_MODEL,
             registry_refusal=ap.get("refusal"),
             why=("the registry has no APPROVED, provenance-verified model for "
-                 "%s (%s). Conservative agreement needs one; Pinnacle alone "
-                 "is never enough" % (FM.KEY_ENTRY_PAYOUT, ap.get("refusal"))))
+                 "%s (%s). The entry policy needs both a qualified internal "
+                 "and a qualified Pinnacle probability; Pinnacle alone is "
+                 "never enough" % (FM.KEY_ENTRY_PAYOUT, ap.get("refusal"))))
     m = dict(ap.get("model") or {})
     approved_at = _epoch(m.get("approved_at"))
     if at is not None and approved_at is not None and approved_at > at:
@@ -684,7 +1227,6 @@ def model_estimate(approved: dict | None, cand: dict, *,
     mc = dict(comp.get("market_comparison") or {})
     return dict(out, **base, ok=True, refusal=None, p=p,
                 description=FM.ENTRY_PAYOUT_DESCRIPTION,
-                agreement_is=FM.ENTRY_POLICY_AGREEMENT_IS,
                 promotion_vs_raw_price=(mc.get("model_vs_raw_venue_price")
                                         or {}).get("log_loss_improvement"),
                 uncertainty={
@@ -834,14 +1376,21 @@ def _realism(cand: dict, catalogue_row: dict | None) -> dict:
 
 def evaluate(cand: dict, *, model: dict, params: dict | None = None,
              authority: list | None = None, catalogue_row: dict | None = None,
-             fee_fn=None, policy_version: str = POLICY_VERSION) -> dict:
+             fee_fn=None, policy_version: str | None = None,
+             policy: str = ACTIVE_POLICY, void: dict | None = None) -> dict:
     """DEREK'S VERDICT ON ONE CANDIDATE. Pure and deterministic given its
     inputs; every figure is from decision-time data on the candidate, the
-    registry read in `model`, and the authority reads in `authority`."""
+    registry read in `model`, and the authority reads in `authority`.
+
+    `policy` is the combination rule (ACTIVE_POLICY unless a replay asks for
+    V1); `policy_version` the label the decision is recorded under (the
+    policy's own name unless the registry supplied the parameters)."""
     from .. import bettor_funded_execution as FX
     from ..bettor_funded_model import (
-        ENTRY_PAYOUT_DESCRIPTION as FM_DESCRIPTION,
-        ENTRY_POLICY_AGREEMENT_IS as FM_AGREEMENT_IS)
+        ENTRY_PAYOUT_DESCRIPTION as FM_DESCRIPTION)
+    if policy not in POLICY_RULES:
+        raise ValueError("unknown Derek entry policy %r" % (policy,))
+    policy_version = policy_version or policy
     prm = dict(DEFAULT_PARAMS, **(params or {}))
     checks: list = []
     lane = list(cand.get("refusals") or [])
@@ -1024,7 +1573,7 @@ def evaluate(cand: dict, *, model: dict, params: dict | None = None,
     econ = economics(p_pinnacle=pin.get("p"),
                      p_model=(model.get("p") if model.get("ok") else None),
                      fills=fills, fee_fn=fee_fn,
-                     at=cand.get("decided_at"), params=prm)
+                     at=cand.get("decided_at"), params=prm, policy=policy)
     if econ.get("ok") and econ.get("fees_ok"):
         checks.append(_check(C_FEES, PASS,
                              "$%.4f over %s fill(s), bettor_funded_book."
@@ -1102,69 +1651,31 @@ def evaluate(cand: dict, *, model: dict, params: dict | None = None,
                              evidence={"registry_refusal":
                                        model.get("registry_refusal")}))
 
-    # 11 · CONSERVATIVE AGREEMENT
-    pe = (econ.get("pinnacle") or {}) if econ.get("ok") else {}
-    me = (econ.get("model") or {}) if econ.get("ok") else {}
-    agv = {"min_gross_edge_pp": prm["min_gross_edge_pp"],
-           "tolerance_pp": EDGE_TOLERANCE_PP,
-           "pinnacle_gross_edge_pp": pe.get("gross_edge_pp"),
-           "model_gross_edge_pp": me.get("gross_edge_pp"),
-           "combination": COMBINATION_POLICY}
-    if not econ.get("ok") or not pe:
-        checks.append(_check(C_AGREEMENT, UNKNOWN,
-                             "no edge could be computed (no priced quantity "
-                             "or no Pinnacle probability)", refusal=R_NO_QTY,
-                             dependency=DEP_EVIDENCE, evidence=agv))
-    elif not pe.get("clears_min_gross_edge"):
-        checks.append(_check(C_AGREEMENT, FAIL,
-                             "Pinnacle edge %.6f pp-fraction is below %.4f"
-                             % (pe["gross_edge_pp"], prm["min_gross_edge_pp"]),
-                             refusal=R_BELOW, dependency=DEP_NONE_MARKET,
-                             evidence=agv))
-    elif not me:
-        checks.append(_check(C_AGREEMENT, UNKNOWN,
-                             "Pinnacle clears; no approved model estimate to "
-                             "agree with it", refusal=R_NO_MODEL,
-                             dependency=DEP_ENGINEERING, evidence=agv))
-    elif not me.get("clears_min_gross_edge"):
-        checks.append(_check(C_AGREEMENT, FAIL,
-                             "Pinnacle clears (%.6f) and the model does not "
-                             "(%.6f)" % (pe["gross_edge_pp"],
-                                         me["gross_edge_pp"]),
-                             refusal=R_DISAGREE, dependency=DEP_NONE_MARKET,
-                             evidence=agv))
-    else:
-        checks.append(_check(C_AGREEMENT, PASS,
-                             "both clear: Pinnacle %.6f, model %.6f >= %.4f"
-                             % (pe["gross_edge_pp"], me["gross_edge_pp"],
-                                prm["min_gross_edge_pp"]), evidence=agv))
-
-    # 12 · NET EV AFTER FEES
-    head = (econ.get("headline") or {}) if econ.get("ok") else {}
-    net = head.get("expected_net_profit_usd")
-    nev = {"expected_net_profit_usd": net,
-           "min_net_ev_usd": prm["min_net_ev_usd"],
-           "fees_usd": econ.get("fees_usd")}
-    if net is None:
-        checks.append(_check(C_NET_EV, UNKNOWN, "net EV not computable",
-                             refusal=(R_FEES if econ.get("ok") else R_NO_QTY),
-                             dependency=DEP_EVIDENCE, evidence=nev))
-    elif net <= 0:
-        checks.append(_check(C_NET_EV, FAIL,
-                             "expected net $%.6f after $%.4f fees is not "
-                             "positive" % (net, econ["fees_usd"]),
-                             refusal=R_NET, dependency=DEP_NONE_MARKET,
-                             evidence=nev))
-    elif net < float(prm["min_net_ev_usd"]):
-        checks.append(_check(C_NET_EV, FAIL,
-                             "expected net $%.6f is below min_net_ev_usd "
-                             "$%.4f" % (net, prm["min_net_ev_usd"]),
-                             refusal=R_BELOW_NET, dependency=DEP_NONE_MARKET,
-                             evidence=nev))
-    else:
-        checks.append(_check(C_NET_EV, PASS,
-                             "expected net $%.6f after $%.4f fees"
-                             % (net, econ["fees_usd"]), evidence=nev))
+    # 11 + 12 · THE COMBINATION RULE AND NET EV AFTER FEES -- one pure
+    # function (`decide_entry`), whose whole output is recorded and shown.
+    prob = next(c for c in checks if c["check"] == C_PROBABILITY)
+    pd = decide_entry(
+        policy,
+        internal={"p": model.get("p") if model.get("ok") else None,
+                  "qualified": bool(model.get("ok")),
+                  "refusal": (None if model.get("ok")
+                              else model.get("refusal") or R_NO_MODEL),
+                  "why": model.get("why"),
+                  "model_id": model.get("model_id"),
+                  "model_version": model.get("model_version"),
+                  "at": cand.get("decided_at")},
+        pinnacle={"p": pin.get("p"),
+                  "qualified": prob["status"] == PASS,
+                  "qualification": fr.get("pinnacle_qualification"),
+                  "refusal": prob["refusal"],
+                  "why": prob["detail"],
+                  "at": pin.get("observed_at")},
+        econ=econ, params=prm, void=void,
+        void_refunds_price=(None if st.get("compatibility") is None
+                            else st.get("compatibility") == "COMPATIBLE"),
+        policy_version=policy_version)
+    checks.append(combination_check(pd))
+    checks.append(net_ev_check(pd))
 
     # 13 · THE LANE'S OWN ADMISSION (its remaining gates)
     other = [c for c in lane if not any(c in v for v in by_check.values())]
@@ -1183,13 +1694,17 @@ def evaluate(cand: dict, *, model: dict, params: dict | None = None,
     # ── THE VERDICT: first failing POLICY check, in the order above ───
     order = (C_PURPOSE, C_IDENTITY, C_REAL, C_SETTLEMENT, C_PROBABILITY,
              C_DEPTH, C_TICK, C_FEES, C_CAPACITY, C_MODEL, C_AGREEMENT,
-             C_NET_EV, C_LANE)
+             C_BLENDED, C_NET_EV, C_LANE)
     by_name = {c["check"]: c for c in checks}
     failing = [by_name[n] for n in order
                if n in by_name and by_name[n]["status"] != PASS
                and by_name[n]["blocks"] == BLOCKS_POLICY]
     verdict = ENTER if not failing else REFUSE
     refusal = None if not failing else failing[0]["refusal"]
+    # THE RECORD'S RATIONALE: built only from the stored fields, with the
+    # overall verdict (a non-combination check may refuse a V2 admission).
+    pd["verdict"], pd["decision_refusal"] = verdict, refusal
+    pd["rationale"] = rationale(pd, verdict=verdict, refusal=refusal)
     exec_blockers = [
         {"check": c["check"], "status": c["status"], "refusal": c["refusal"],
          "dependency": c["dependency"]}
@@ -1199,7 +1714,9 @@ def evaluate(cand: dict, *, model: dict, params: dict | None = None,
     return {
         "policy_version": policy_version,
         "policy_key": POLICY_KEY,
-        "combination_policy": COMBINATION_POLICY,
+        "policy_name": policy,
+        "combination_policy": POLICY_RULES[policy],
+        "policy_decision": pd,
         "params": prm, "param_units": dict(PARAM_UNITS),
         "verdict": verdict, "refusal": refusal,
         "all_refusals": [c["refusal"] for c in failing],
@@ -1238,8 +1755,14 @@ def evaluate(cand: dict, *, model: dict, params: dict | None = None,
                     "carries the venue arm of the same freshness rule"),
                 "uncertainty": model.get("uncertainty"),
                 "is": FM_DESCRIPTION,
-                "agreement_is": FM_AGREEMENT_IS,
-                "refusal": model.get("refusal")}},
+                # WHAT THE POLICY'S USE OF THIS ESTIMATE IS (V2: one half of
+                # an average with Pinnacle; not independent confirmation).
+                "policy_use_is": pd["inputs_are"],
+                "refusal": model.get("refusal")},
+            "blended": {"p": pd["p_blended"],
+                        "is": ("(internal + Pinnacle) / 2 of two qualified "
+                               "estimates" if policy == POLICY_V2 else
+                               "NOT_USED_BY_%s" % policy)}},
         "economics": econ,
         "features": model.get("features"),
         "feature_sha": model.get("feature_sha"),
@@ -1289,8 +1812,16 @@ INSERT_SQL = """
 
 def row_values(decision_id: str, cand: dict, dec: dict, *, latency: dict,
                decided_by: str, evidence: dict) -> tuple:
+    """THE HEADLINE COLUMNS ARE COPIED FROM `decide_entry`'s OUTPUT (the
+    policy's own probability: V2 the blended average, V1 the lower), so the
+    columns, evidence.policy_decision and the verdict are one computation."""
     econ = dec.get("economics") or {}
-    head = (econ.get("headline") or {}) if econ.get("ok") else {}
+    pd = dec.get("policy_decision") or {}
+    # (the column gross_edge_pp holds the FRACTION, as it always has)
+    head = {"gross_edge_pp": pd.get("gross_edge_fraction"),
+            "expected_gross_profit_usd": pd.get("expected_gross_profit_usd"),
+            "expected_net_profit_usd": pd.get("net_expected_profit_usd"),
+            "expected_net_roi": pd.get("expected_return_on_capital")}
     est = dec["estimates"]
     return (
         decision_id, cand.get("valuation_id"), cand.get("fixture"),
@@ -1324,7 +1855,12 @@ async def record(conn, decision_id: str, cand: dict, dec: dict, *,
         "estimates": dec["estimates"],
         "economics": dec.get("economics"),
         "params": dec["params"], "param_units": dec["param_units"],
+        "policy_key": dec.get("policy_key"),
+        "policy_name": dec.get("policy_name"),
         "combination_policy": dec["combination_policy"],
+        # THE ONE COMPUTATION (decide_entry), stored whole: what the
+        # workspace displays is this, never a recomputation.
+        "policy_decision": dec.get("policy_decision"),
         "all_refusals": dec["all_refusals"],
         "execution_authority_blockers": dec["execution_authority_blockers"],
         "sendable_now": dec["sendable_now"],
@@ -1388,13 +1924,33 @@ async def policy_params(conn) -> dict:
         # The registry labels a fallback with version 'CODE_DEFAULT'; the
         # policy that runs is still this module's declared version, and the
         # source field says the parameters came from code, not an approval.
-        version = (POLICY_VERSION if source == "CODE_DEFAULT"
-                   else (got.get("version") or POLICY_VERSION))
-        return {"params": params, "version": version, "source": source}
+        # A registry-held parameter version is recorded UNDER the active
+        # combination rule's name, so a V1-era parameter label can never be
+        # mistaken for (or collide with) the rule that now judges.
+        version = (ACTIVE_POLICY if source == "CODE_DEFAULT"
+                   else "%s+%s" % (ACTIVE_POLICY,
+                                   got.get("version") or "REGISTRY"))
+        return {"params": params, "version": version, "source": source,
+                "policy": ACTIVE_POLICY,
+                "params_version": got.get("version")}
     except Exception as exc:                                   # noqa: BLE001
-        return {"params": dict(DEFAULT_PARAMS), "version": POLICY_VERSION,
-                "source": "CODE_DEFAULT",
+        return {"params": dict(DEFAULT_PARAMS), "version": ACTIVE_POLICY,
+                "source": "CODE_DEFAULT", "policy": ACTIVE_POLICY,
                 "registry": type(exc).__name__}
+
+
+async def void_measure(conn, *, through: float | None) -> dict:
+    """THE MEASURED VOID RATE V2's settlement states apply, read point in
+    time (`through`, never after the decision) through the one reader that
+    states it, `bettor_pair_observations.void_rate`. Never raises: a failed
+    or refused read leaves the valuation conditional, and says so."""
+    try:
+        from .. import bettor_pair_observations as PO
+        got = await PO.void_rate(conn, through=through)
+        return dict(got or {})
+    except Exception as exc:                                   # noqa: BLE001
+        return {"ok": False, "refusal": "VOID_RATE_READ_FAILED",
+                "error": type(exc).__name__}
 
 
 async def catalogue_row(conn, slug) -> dict | None:
@@ -1444,8 +2000,9 @@ async def gate_for_funded_entry(conn, rec: dict, *, now: float,
         model = model_estimate(ap, cand, at=float(now))
         auth = await authority_checks(conn, now=float(now))
         cat = await catalogue_row(conn, cand.get("us_market_slug"))
+        void = await void_measure(conn, through=float(now))
         dec = evaluate(cand, model=model, params=prm, authority=auth,
-                       catalogue_row=cat, policy_version=version)
+                       catalogue_row=cat, policy_version=version, void=void)
         did = decision_id_for(valuation_id=cand.get("valuation_id"),
                               rec_digest=_rec_digest(rec, now=float(now)),
                               policy_version=version)
@@ -1498,8 +2055,7 @@ async def _link(conn, did, cand, *, verdict, refusal, decided_at, dec) -> dict:
         return {"linked": False, "why": "registry unavailable: %s"
                 % type(exc).__name__}
     try:
-        econ = dec.get("economics") or {}
-        head = (econ.get("headline") or {}) if econ.get("ok") else {}
+        pd = dec.get("policy_decision") or {}
         refs = [{"kind": e["kind"], "id": e["id"], "href": e["href"]}
                 for e in evidence_links(did, cand)]
         return await REG.link_decision(
@@ -1507,9 +2063,12 @@ async def _link(conn, did, cand, *, verdict, refusal, decided_at, dec) -> dict:
             subject=str(cand.get("us_market_slug") or cand.get("fixture")),
             decided_at=decided_at, verdict=verdict,
             summary={"refusal": refusal,
-                     "gross_edge_pp": head.get("gross_edge_pp"),
+                     "gross_edge_pp": pd.get("gross_edge_fraction"),
+                     "p_blended": pd.get("p_blended"),
                      "expected_net_profit_usd":
-                         head.get("expected_net_profit_usd"),
+                         pd.get("net_expected_profit_usd"),
+                     "rationale": pd.get("rationale"),
+                     "policy_name": dec.get("policy_name"),
                      "policy_version": dec.get("policy_version")},
             evidence_refs=refs, decision_ref=did)
     except Exception as exc:                                   # noqa: BLE001
@@ -1606,9 +2165,36 @@ async def labelled_entries(conn, *, after=None, through=None,
                              "or unjoined outcome is not a label"))
 
 
+def policy_of_record(row: dict) -> str | None:
+    """WHICH COMBINATION RULE JUDGED A STORED DECISION. A record written
+    before V2 carries no policy_name; its combination (CONSERVATIVE_AGREEMENT)
+    or its version label says V1."""
+    ev = row.get("evidence")
+    ev = _j(ev) if not isinstance(ev, dict) else ev
+    ev = ev or {}
+    pd = ev.get("policy_decision") or {}
+    name = pd.get("policy_name") or ev.get("policy_name")
+    if name in POLICY_RULES:
+        return name
+    comb = ev.get("combination_policy")
+    for pol, rule in POLICY_RULES.items():
+        if comb == rule:
+            return pol
+    ver = str(row.get("policy_version") or "")
+    for pol in (POLICY_V2, POLICY_V1):
+        if ver.startswith(pol):
+            return pol
+    return None
+
+
 def describe() -> dict:
     return {"agent": AGENT_ID, "policy_key": POLICY_KEY,
             "policy_version": POLICY_VERSION,
+            "active_policy": ACTIVE_POLICY,
+            "retained_policies": sorted(p for p in POLICY_RULES
+                                        if p != ACTIVE_POLICY),
+            "policy_rules": dict(POLICY_RULES),
+            "policy_use_is": policy_use_is(ACTIVE_POLICY),
             "combination_policy": COMBINATION_POLICY,
             "default_params": dict(DEFAULT_PARAMS),
             "param_units": dict(PARAM_UNITS),

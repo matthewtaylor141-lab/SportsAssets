@@ -149,6 +149,9 @@ async def purge(c):
                         " WHERE group_id LIKE $1", PFX + "%")
         await c.execute("DELETE FROM bettor_pair_observation_attempts "
                         " WHERE pass_id LIKE $1", PFX + "%")
+        if await c.fetchval("SELECT to_regclass('derek_entry_decisions')"):
+            await c.execute("DELETE FROM derek_entry_decisions "
+                            " WHERE decision_id LIKE $1", PFX + "derek-%")
         await c.execute("DELETE FROM external_valuations "
                         " WHERE experiment_id LIKE $1", PFX + "%")
         await c.execute("DELETE FROM ext_candidate_outcomes "
@@ -267,9 +270,15 @@ _EV_ID = [0]
 async def valuation(c, *, fixture, decided, decision="NO_TRADE",
                     refusals=("NO_ACTION_HAS_POSITIVE_NET_EDGE",), p=0.5,
                     price=None, cost=None, edge=None, outcome=None,
-                    outcome_at=None, submitted=False, size=None):
+                    outcome_at=None, submitted=False, size=None,
+                    internal_p=None):
     """ONE SYNTHETIC ENTRY_DECISION VALUATION. Inserted BEFORE its outcome
-    (the table refuses otherwise); the outcome is joined by UPDATE."""
+    (the table refuses otherwise); the outcome is joined by UPDATE.
+
+    `internal_p`: the internal probability Derek recorded for it (a
+    synthetic REFUSE decision row carrying model_p), which Derek's active
+    policy (V2) averages with the valuation's Pinnacle probability `p`. None
+    records no Derek decision, so the row has no internal probability."""
     _EV_ID[0] += 1
     admissible = decision == "BUY"
     rid = await c.fetchval(
@@ -286,6 +295,16 @@ async def valuation(c, *, fixture, decided, decision="NO_TRADE",
         PFX + "exp", "%sv-%d" % (PFX, _EV_ID[0]), fixture, ts(decided - 2),
         p, price, cost, edge, decision, admissible,
         list(refusals if not admissible else []), size, ts(decided))
+    if internal_p is not None:
+        await c.execute(
+            "INSERT INTO derek_entry_decisions (decision_id, valuation_id, "
+            " fixture, us_market_slug, side, decided_at, policy_version, "
+            " pinnacle_p, model_p, model_version, checks, verdict, refusal, "
+            " decided_by) VALUES ($1,$2,$3,$4,'ORDER_INTENT_BUY_LONG',$5,"
+            " 'DEREK_ENTRY_POLICY_V2',$6,$7,'synthetic-model','[]'::jsonb,"
+            " 'REFUSE','SYNTHETIC_TEST_RECORD','AFTER_CYCLE')",
+            "%sderek-%d" % (PFX, rid), rid, fixture,
+            "%sv-%d" % (PFX, _EV_ID[0]), ts(decided), p, float(internal_p))
     if outcome is not None:
         await c.execute(
             "UPDATE external_valuations SET outcome_known=true, outcome=$2, "

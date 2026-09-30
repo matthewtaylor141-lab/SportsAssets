@@ -222,9 +222,10 @@ CHANGE_CLASSES: dict[str, ChangeClass] = {c.name: c for c in (
                       "MIN_NET_EDGE_PER_CONTRACT")),
     ChangeClass(
         name="DEREK_ENTRY_POLICY_THRESHOLD", kind=K_POLICY, agent=DEREK,
-        description=("Derek's binding entry policy threshold: the minimum "
-                     "GROSS probability edge in probability points "
-                     "(qualified probability - executable price), "
+        description=("Derek's binding entry policy threshold "
+                     "(DEREK_ENTRY_POLICY_V2): the minimum GROSS probability "
+                     "edge in probability points (blended probability = "
+                     "(internal + Pinnacle) / 2, minus the executable price), "
                      "agents.derek_policy MIN_GROSS_EDGE_PROBABILITY (DEFAULT_PARAMS); "
                      "units: " + THRESHOLD_UNITS),
         policy_key="DEREK_ENTRY_POLICY",
@@ -917,9 +918,12 @@ def derek_selectable(row: dict, threshold: float, *,
     recorded. Every other refusal still refuses.
 
     BASIS_NET: the shadow evaluator's net edge per contract, strictly above.
-    BASIS_GROSS: Derek's policy measure -- decision-time probability minus
-    executable price, at or above the threshold (the owner's 5 pp rule,
-    0.05 as a probability difference)."""
+    BASIS_GROSS: Derek's ACTIVE policy measure (derek_policy.ACTIVE_POLICY,
+    DEREK_ENTRY_POLICY_V2) -- the blended probability, (the internal
+    probability Derek recorded + the recorded Pinnacle probability) / 2,
+    minus the executable price, at or above the threshold (the owner's 5 pp
+    rule, 0.05 as a probability difference). A row with no recorded
+    internal probability is not eligible: none is ever substituted."""
     return derek_eligibility(row, basis=basis) is None and \
         _meets(row, threshold, basis)
 
@@ -935,14 +939,26 @@ def derek_eligibility(row: dict, *, basis: str = BASIS_NET) -> str | None:
         return "NO_FEE"
     if basis == BASIS_GROSS and _num(row.get("probability")) is None:
         return "NO_PROBABILITY"
+    if basis == BASIS_GROSS and \
+            _num(row.get("internal_probability")) is None:
+        return "NO_INTERNAL_PROBABILITY"
     if basis == BASIS_NET and _num(row.get("edge")) is None:
         return "NO_NET_EDGE"
     return None
 
 
+def derek_policy_probability(row: dict) -> float | None:
+    """THE ACTIVE POLICY'S PROBABILITY for a recorded row, through
+    `derek_policy.blend` (V2: the mean of the recorded internal and Pinnacle
+    probabilities; None when either is missing)."""
+    from . import derek_policy as DP                          # noqa: PLC0415
+    return DP.blend(row.get("internal_probability"), row.get("probability"))
+
+
 def _meets(row: dict, threshold: float, basis: str) -> bool:
     if basis == BASIS_GROSS:
-        return (_num(row["probability"]) - _num(row["price"])) >= \
+        p = derek_policy_probability(row)
+        return p is not None and (p - _num(row["price"])) >= \
             float(threshold) - GROSS_EDGE_TOLERANCE
     return _num(row["edge"]) > float(threshold)
 
@@ -998,8 +1014,13 @@ def replay_derek_threshold(rows: list, *, threshold: float,
     net = sum(t["pnl"] for t in trades)
     cap = sum(t["capital"] for t in trades)
     losers = [t for t in trades if t["pnl"] < 0]
+    from . import derek_policy as DP                          # noqa: PLC0415
     return dict(
         m, threshold=float(threshold), basis=basis, units=THRESHOLD_UNITS,
+        policy=(DP.ACTIVE_POLICY if basis == BASIS_GROSS else None),
+        probability_basis=(
+            "%s: (recorded internal + recorded Pinnacle) / 2" % DP.ACTIVE_POLICY
+            if basis == BASIS_GROSS else None),
         replay_version=DEREK_REPLAY_VERSION, rows_considered=len(rows),
         eligible_opportunities=len(eligible),
         eligible_fixtures=len(per_fx), not_eligible=missing,
@@ -1756,28 +1777,38 @@ async def evaluate_pass_limit_task(conn, task: dict, *, now: float) -> dict:
 
 async def derek_rows(conn, *, start: float, end: float) -> list:
     """Recorded ENTRY_DECISION valuations with their decision-time edge
-    and cost and the outcome and the instant it became known."""
+    and cost and the outcome and the instant it became known -- and the
+    INTERNAL probability Derek recorded for the valuation (the approved
+    model's, at the decision; NULL when no approved model scored it), which
+    the active policy (V2) averages with the Pinnacle probability."""
     if not await _regclass(conn, "external_valuations"):
         return []
+    internal = ("(SELECT d.model_p FROM derek_entry_decisions d "
+                "  WHERE d.valuation_id = v.id AND d.model_p IS NOT NULL "
+                "  ORDER BY d.decided_at, d.decision_id LIMIT 1)"
+                if await _regclass(conn, "derek_entry_decisions")
+                else "NULL::float8")
     return [{"id": r["id"], "fixture": r["fixture"],
              "decided_at": float(r["decided_at"]),
              "outcome_at": _num(r["outcome_at"]),
              "outcome": r["outcome"], "edge": _num(r["edge"]),
              "cost": _num(r["cost"]), "refusals": list(r["refusals"] or []),
              "probability": _num(r["probability"]),
+             "internal_probability": _num(r["internal_probability"]),
              "price": _num(r["executable_price"]),
              "decision": r["decision"]}
             for r in await conn.fetch(
-        "SELECT id, coalesce(event_key, us_market_slug, condition_id) "
-        "         AS fixture, extract(epoch FROM decided_at)::float8 "
-        "         AS decided_at, extract(epoch FROM outcome_at)::float8 "
-        "         AS outcome_at, outcome, "
-        "       estimated_edge_per_contract AS edge, "
-        "       cost_per_contract AS cost, refusals, decision, "
-        "       probability, executable_price "
-        "  FROM external_valuations WHERE record_purpose='ENTRY_DECISION' "
-        "   AND decided_at > $1 AND decided_at <= $2 "
-        " ORDER BY decided_at, id", _ts(start), _ts(end))]
+        "SELECT v.id, coalesce(v.event_key, v.us_market_slug, "
+        "         v.condition_id) AS fixture, "
+        "       extract(epoch FROM v.decided_at)::float8 AS decided_at, "
+        "       extract(epoch FROM v.outcome_at)::float8 AS outcome_at, "
+        "       v.outcome, v.estimated_edge_per_contract AS edge, "
+        "       v.cost_per_contract AS cost, v.refusals, v.decision, "
+        "       v.probability, v.executable_price, "
+        "       %s AS internal_probability "
+        "  FROM external_valuations v WHERE v.record_purpose='ENTRY_DECISION' "
+        "   AND v.decided_at > $1 AND v.decided_at <= $2 "
+        " ORDER BY v.decided_at, v.id" % internal, _ts(start), _ts(end))]
 
 
 DEREK_HOLDOUT_SALT = "derek-entry-holdout-v1"

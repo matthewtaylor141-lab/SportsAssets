@@ -83,8 +83,16 @@ tests/test_collection_pass_limit_reads_the_released_policy.py
 tests/test_cut_whale_exit.py
 # (1002) Derek: the Polymarket US coverage census sums and hides nothing; the workspace is truthful when empty
 tests/test_derek_coverage_census_and_workspace.py
-# (1002) Derek: owner proofs 1-2, 5 pp gross edge on conservative agreement, net of fee_for, through cycle()
+# (1002) Derek: owner proofs 1-2 through cycle(), now under the ACTIVE policy
+# DEREK_ENTRY_POLICY_V2 (blended average >= 5 pp gross edge, net of fee_for,
+# V2 fields persisted and shown from the record), with V1 (conservative
+# agreement) retained as replay assertions; the file keeps its name
 tests/test_derek_enters_on_conservative_agreement.py
+# (V2) DEREK_ENTRY_POLICY_V2 as pure arithmetic: the owner's worked examples,
+# disagreement both ways, fees, the exact 5 pp boundary, missing/unqualified
+# inputs refused by name, settlement states, one function for execution and
+# display, and the RETROSPECTIVE V1-vs-V2 replay tool on synthetic records
+tests/test_derek_policy_v2_blended_average.py
 # (170) Derek's non-funded research observations break the model-qualification
 # deadlock: collected by the scheduled cycle with nothing authorized, labelled
 # by the production join, fit/evaluated/eligibility-decided (must beat the raw

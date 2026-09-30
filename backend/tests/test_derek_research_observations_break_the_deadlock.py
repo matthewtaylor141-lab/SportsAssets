@@ -1019,13 +1019,19 @@ async def test_a_model_that_beats_the_price_qualifies_and_derek_uses_it(
         est = gate["decision"]["estimates"]["model"]
         assert est["model_id"] == mid
         assert est["is"] == FM.ENTRY_PAYOUT_DESCRIPTION
-        assert est["agreement_is"].startswith("POLICY_AGREEMENT_CHECK")
+        # WHAT THE ACTIVE POLICY'S (V2) USE OF IT IS: one half of an
+        # average with Pinnacle, stated as not independent confirmation.
+        assert est["policy_use_is"] == FM.ENTRY_POLICY_AGREEMENT_IS
+        assert est["policy_use_is"].startswith(
+            "POLICY_AVERAGE_OF_TWO_MARKET_DERIVED_ESTIMATES_NOT_INDEPENDENT")
         assert est["p"] == pytest.approx(FM.load(ap["model"]["params"])
                                          .predict({"acquisition_price": 0.5,
                                                    "payout_is_complement":
                                                    0.0}))
-        # THE POLICY IS UNCHANGED: both estimates clear 5 pp at $0.50.
+        # THE ACTIVE POLICY (V2) ADMITS IT: the blended average of the two
+        # estimates clears 5 pp at $0.50, net of fees.
         assert gate["verdict"] == DP.ENTER, gate.get("refusal")
+        assert gate["decision"]["policy_name"] == DP.POLICY_V2
         assert gate["decision"]["params"]["min_gross_edge_pp"] == 0.05
         # the cycle's ENTRY_DECISION valuation was observed too, with the
         # approved model's prediction frozen on it

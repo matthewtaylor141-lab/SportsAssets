@@ -1,17 +1,27 @@
 """DEREK'S ENTRY POLICY, PROVEN THROUGH THE SCHEDULED CYCLE (owner proofs 1, 2).
 
-PROOF 1. A Yankees moneyline at $0.50 whose de-vigged Pinnacle probability is
-0.60 AND whose APPROVED internal model clears the threshold reaches a Derek
-ENTER decision -- through `derek_policy.gate_for_funded_entry` on the record
-`_funded_attempt` receives from the real `ext_pinnacle_loop.cycle()`, and
-through `derek.after_cycle` alone -- with the gross edge in probability points,
-the fees from `bettor_funded_book.fee_for`, the net EV and the return on
-deployed capital all exact.
+THE ACTIVE POLICY IS DEREK_ENTRY_POLICY_V2 (BLENDED_AVERAGE_MIN_GROSS_EDGE):
+blended = (internal + Pinnacle) / 2, enter iff blended - executable price >=
+5 pp AND expected net profit after fees > 0, both inputs present and
+qualified. The file keeps its historical name; every proof below tests the
+ACTIVE policy, and the V1 (conservative agreement) behaviour it used to pin
+is kept as explicit V1-REPLAY assertions (`policy=DP.POLICY_V1`).
 
-PROOF 2. Exactly 5 pp enters; 4.99 pp refuses BELOW_MIN_GROSS_EDGE; an edge
-the fees erase refuses NET_EV_NOT_POSITIVE_AFTER_FEES; Pinnacle clearing while
-the model does not refuses ESTIMATES_DISAGREE...; no approved model refuses
-NO_APPROVED_INTERNAL_MODEL; a stale quote (the lane's own freshness rule, a
+PROOF 1. A Yankees moneyline at $0.50 whose de-vigged Pinnacle probability is
+0.60 AND whose APPROVED internal model is qualified reaches a Derek ENTER
+decision -- through `derek_policy.gate_for_funded_entry` on the record
+`_funded_attempt` receives from the real `ext_pinnacle_loop.cycle()`, and
+through `derek.after_cycle` alone -- with the blended probability, the gross
+edge in probability points, the fees from `bettor_funded_book.fee_for`, the
+net EV and the return on deployed capital all exact, persisted on the record
+(evidence.policy_decision) and shown by the workspace from that record.
+
+PROOF 2. Exactly 5 pp of BLENDED edge enters; 4.99 pp refuses
+BELOW_MIN_GROSS_EDGE; an edge the fees erase refuses
+NET_EV_NOT_POSITIVE_AFTER_FEES; a disagreement V1 refused (Pinnacle clears,
+the model does not) V2 admits on the average; no approved model refuses
+NO_APPROVED_INTERNAL_MODEL (never averaged with a missing value, no
+Pinnacle-only fallback); a stale quote (the lane's own freshness rule, a
 controlled clock) refuses PROBABILITY_EVIDENCE_STALE; unsupported settlement
 refuses SETTLEMENT_NOT_SUPPORTED.
 
@@ -421,11 +431,61 @@ def _perturbed(rec, **fields):
 # THE OWNER'S WORKED EXAMPLE (pure arithmetic, fee_for exact)
 # ═════════════════════════════════════════════════════════════════════════
 
+def _void_scale(pd: dict) -> float:
+    """1 - v when the record applied a measured void rate, else 1."""
+    st = pd.get("settlement_states") or {}
+    return (1.0 - st["void_rate"]) if st.get("applied") else 1.0
+
+
+def _assert_v2_record(row, *, p_pin, p_int, price, qty, fee):
+    """THE PERSISTED V2 DECISION: columns and evidence.policy_decision carry
+    the same numbers, computed by the one function."""
+    ev = json.loads(row["evidence"]) if isinstance(row["evidence"], str) \
+        else row["evidence"]
+    pd = ev["policy_decision"]
+    assert pd["function"] == "agents.derek_policy.decide_entry"
+    for k in DP.RECORD_FIELDS:
+        assert k in pd, k
+    blended = DP.blend(p_int, p_pin)
+    edge = DP.gross_edge(blended, price)
+    scale = _void_scale(pd)
+    gross = (blended - price) * qty * scale
+    net = gross - fee
+    assert pd["policy_name"] == DP.POLICY_V2 == ev["policy_name"]
+    assert pd["policy_version"] == row["policy_version"]
+    assert pd["combination_policy"] == DP.COMBINATION_V2
+    assert pd["p_pinnacle"] == pytest.approx(p_pin, abs=1e-12)
+    assert pd["p_internal"] == pytest.approx(p_int, abs=1e-12)
+    assert pd["internal_model_version"] == row["model_version"]
+    assert pd["internal_at"] is not None and pd["pinnacle_at"] is not None
+    assert pd["p_blended"] == pytest.approx(blended, abs=1e-12)
+    assert pd["gross_edge_pp"] == pytest.approx(edge * 100.0, abs=1e-9)
+    assert pd["gross_edge_fraction"] == pytest.approx(edge, abs=1e-12)
+    assert pd["fees_usd"] == pytest.approx(fee)
+    assert pd["net_expected_profit_usd"] == pytest.approx(net)
+    assert pd["expected_return_pct"] == pytest.approx(
+        100.0 * net / (price * qty + fee))
+    assert [c["status"] for c in pd["conditions"]] == [DP.PASS] * 5
+    assert pd["rationale"].startswith("ENTER under %s" % DP.POLICY_V2)
+    # THE COLUMNS ARE COPIES OF THE SAME COMPUTATION
+    assert row["pinnacle_p"] == pytest.approx(p_pin, abs=1e-12)
+    assert row["model_p"] == pytest.approx(p_int, abs=1e-12)
+    assert row["gross_edge_pp"] == pytest.approx(edge, abs=1e-12)
+    assert row["fees_usd"] == pytest.approx(fee)
+    assert row["expected_gross_profit_usd"] == pytest.approx(gross)
+    assert row["expected_net_profit_usd"] == pytest.approx(net)
+    assert row["expected_net_roi"] == pytest.approx(
+        net / (price * qty + fee))
+    return pd
+
+
 def test_the_owners_worked_example_in_explicit_units():
     at = 1790000000.0
     for qty in (1.0, 100.0):
         e = DP.economics(p_pinnacle=0.60, p_model=0.60, fills=[(0.50, qty)],
                          at=at)
+        # V2's headline is the blended average: (0.60 + 0.60) / 2 = 0.60
+        assert e["headline"]["p"] == pytest.approx(0.60)
         h = e["headline"]
         fee, _basis = FB.fee_for(qty, 0.50, at=at)
         assert h["gross_edge_pp"] == pytest.approx(0.10, abs=1e-12)
@@ -489,30 +549,38 @@ async def test_proof1_the_yankees_at_50c_on_qualified_60pct_reach_enter(
         row = await _decision_for(conn, rec["valuation_row_id"])
         assert row is not None and row["verdict"] == DP.ENTER
         assert row["decided_by"] == DP.DECIDED_BY_GATE
-        assert row["policy_version"] == DP.POLICY_VERSION
+        assert row["policy_version"] == DP.POLICY_VERSION == DP.POLICY_V2
         assert row["pinnacle_p"] == pytest.approx(0.60, abs=1e-12)
         assert row["pinnacle_qualification"] == "FRESH"
         mp = row["model_p"]
-        m = DP.model_estimate(ap, DP.candidate_from_rec(
-            rec, now=captured[0]["now"]), at=captured[0]["now"])
+        cand = DP.candidate_from_rec(rec, now=captured[0]["now"])
+        m = DP.model_estimate(ap, cand, at=captured[0]["now"])
         assert mp == pytest.approx(m["p"]) and mp >= 0.60, mp
         assert row["model_version"] == "derek-entry-test-v1"
         assert row["executable_price"] == pytest.approx(0.50)
         qty = float(row["qty"])
         assert qty >= 1 and qty == int(qty)
         fee, _ = FB.fee_for(qty, 0.50, at=captured[0]["now"])
-        assert row["gross_edge_pp"] == pytest.approx(0.10, abs=1e-12)
-        assert row["expected_gross_profit_usd"] == pytest.approx(0.10 * qty)
-        assert row["fees_usd"] == pytest.approx(fee)
-        assert row["expected_net_profit_usd"] == pytest.approx(
-            0.10 * qty - fee)
-        assert row["expected_net_roi"] == pytest.approx(
-            (0.10 * qty - fee) / (0.50 * qty + fee))
+        # V2: THE BLENDED AVERAGE, PERSISTED WITH EVERY INPUT AND CONDITION
+        pd = _assert_v2_record(row, p_pin=0.60, p_int=mp, price=0.50,
+                               qty=qty, fee=fee)
         ev = json.loads(row["evidence"])
-        assert ev["economics"]["headline"]["expected_gross_return_on_cost"] \
-            == pytest.approx(0.20)
         assert ev["estimates"]["model"]["qualification"] == "FRESH"
-        assert ev["combination_policy"] == DP.COMBINATION_POLICY
+        assert ev["combination_policy"] == DP.COMBINATION_POLICY == \
+            DP.COMBINATION_V2
+        assert ev["estimates"]["blended"]["p"] == pd["p_blended"]
+        # V1 REPLAY OF THE SAME CANDIDATE (retained, never binding): both
+        # estimates clear, and V1's headline is the LOWER one, 0.60 -- the
+        # exact figures this proof pinned before V2.
+        v1 = DP.evaluate(cand, model=m, authority=[], policy=DP.POLICY_V1,
+                         params=gate["decision"]["params"])
+        assert v1["verdict"] == DP.ENTER and v1["policy_name"] == DP.POLICY_V1
+        h1 = v1["economics"]["headline"]
+        assert h1["gross_edge_pp"] == pytest.approx(0.10, abs=1e-12)
+        assert h1["expected_gross_return_on_cost"] == pytest.approx(0.20)
+        assert v1["policy_decision"]["p_blended"] is None
+        assert DP.C_AGREEMENT in {c["check"] for c in v1["checks"]}
+        assert DP.C_BLENDED not in {c["check"] for c in v1["checks"]}
         # EVERY PRE-PURCHASE CHECK IS RECORDED, BY NAME, WITH A STATUS.
         cks = _checks(row)
         for name in DP.PRE_PURCHASE_CHECKS:
@@ -547,6 +615,11 @@ async def test_proof1_the_yankees_at_50c_on_qualified_60pct_reach_enter(
         mine = [d for d in dec["data"] if d["decision_id"] ==
                 row["decision_id"]]
         assert mine and mine[0]["verdict"] == DP.ENTER
+        # THE SAME NUMBERS AS THE RECORD, READ FROM IT
+        shown = mine[0]["policy"]
+        assert shown["policy_label"] == "V2" and shown["active"] is True
+        for k in DP.RECORD_FIELDS:
+            assert shown["decision"][k] == pd[k], k
         assert any(e["href"].endswith(row["decision_id"])
                    for e in dec["evidence"])
         assert ws["sections"]["plans_fills"]["status"] == "EMPTY"
@@ -586,11 +659,40 @@ async def test_proof1_after_cycle_alone_reaches_the_same_enter(monkeypatch):
         assert row["verdict"] == DP.ENTER, (row["refusal"],
                                             json.loads(row["evidence"])
                                             ["all_refusals"])
-        assert row["gross_edge_pp"] == pytest.approx(0.10, abs=1e-12)
         qty = float(row["qty"])
         fee, _ = FB.fee_for(qty, 0.50)
-        assert row["expected_net_profit_usd"] == pytest.approx(
-            0.10 * qty - fee)
+        # THE SCHEDULED PASS PERSISTED THE V2 FIELDS ...
+        pd = _assert_v2_record(row, p_pin=0.60, p_int=row["model_p"],
+                               price=0.50, qty=qty, fee=fee)
+        # ... AND DEREK'S WORKSPACE JSON SHOWS THE SAME NUMBERS AS THE RECORD
+        from sportsassets.api import agents_derek as A
+        ws = await A.workspace(conn)
+        assert ws["sections"]["versions"]["data"]["policy"][
+            "active_policy"] == DP.POLICY_V2
+        assert ws["sections"]["versions"]["data"]["policy"][
+            "combination_policy"] == DP.COMBINATION_V2
+        assert "not independent confirmation" in ws["sections"]["versions"][
+            "data"]["policy"]["inputs_are"]
+        assert "conservative agreement" not in json.dumps(
+            ws["sections"]["versions"]).lower()
+        dec = await A.decisions(conn, limit=500)
+        shown = [d for d in dec["data"]
+                 if d["decision_id"] == row["decision_id"]][0]
+        assert shown["policy"]["policy_name"] == DP.POLICY_V2
+        assert shown["p_blended"] == pd["p_blended"]
+        assert shown["rationale"] == pd["rationale"]
+        assert shown["gross_edge_percentage_points"] == pd["gross_edge_pp"]
+        for k in DP.RECORD_FIELDS:
+            assert shown["policy"]["decision"][k] == pd[k], k
+        for k in ("pinnacle_p", "model_p", "gross_edge_pp", "fees_usd",
+                  "expected_net_profit_usd", "expected_net_roi"):
+            assert shown[k] == pytest.approx(row[k]), k
+        q = await A.opportunity_queue(conn)
+        qrow = [r for r in (q["data"] or [])
+                if r["decision_id"] == row["decision_id"]]
+        if qrow:        # within the queue's 30-minute window
+            assert qrow[0]["p_blended"] == pytest.approx(pd["p_blended"])
+            assert qrow[0]["rationale"] == pd["rationale"]
     finally:
         await _cleanup(conn)
         await conn.close()
@@ -613,49 +715,68 @@ async def test_proof2_the_threshold_the_fees_and_the_agreement(monkeypatch):
         await loop.cycle(conn)
         rec, now = captured[0]["rec"], captured[0]["now"]
 
-        # EXACTLY 5 pp ENTERS.
+        # THE APPROVED MODEL'S ESTIMATE AT $0.50 (it reads only the price
+        # and the side, so every perturbation below shares it). V2 averages
+        # it with the Pinnacle probability, so each boundary is set on the
+        # PINNACLE input: p_pin = 2 x (price + edge) - p_model.
+        cand = DP.candidate_from_rec(rec, now=now)
+        real = DP.model_estimate(ap, cand, at=now)
+        mp = real["p"]
+
+        def pin_for(edge):
+            return 2.0 * (0.50 + edge) - mp
+
+        # EXACTLY 5 pp OF BLENDED EDGE ENTERS.
         got = await DP.gate_for_funded_entry(
-            conn, _perturbed(rec, probability=0.55), now=now)
+            conn, _perturbed(rec, probability=pin_for(0.05)), now=now)
         assert got["verdict"] == DP.ENTER, got.get("refusal")
-        hd = got["decision"]["economics"]["headline"]
-        assert hd["gross_edge_pp"] == 0.05
+        pd = got["decision"]["policy_decision"]
+        assert pd["gross_edge_pp"] == pytest.approx(5.0, abs=1e-7)
+        assert DP.clears(pd["gross_edge_fraction"], 0.05)
+        assert pd["p_blended"] == pytest.approx(0.55, abs=1e-12)
 
         # 4.99 pp REFUSES, BY NAME.
         got = await DP.gate_for_funded_entry(
-            conn, _perturbed(rec, probability=0.5499), now=now)
+            conn, _perturbed(rec, probability=pin_for(0.0499)), now=now)
         assert (got["verdict"], got["refusal"]) == (DP.REFUSE, DP.R_BELOW)
 
         # AN EDGE THE FEES ERASE: 1 pp gross clears a 1 pp threshold (a
         # separately versioned override; the code default is untouched), and
         # fee_for at $0.50 is ~1.7 cents a contract.
         got = await DP.gate_for_funded_entry(
-            conn, _perturbed(rec, probability=0.51), now=now,
+            conn, _perturbed(rec, probability=pin_for(0.01)), now=now,
             params={"min_gross_edge_pp": 0.01})
         assert (got["verdict"], got["refusal"]) == (DP.REFUSE, DP.R_NET)
-        assert got["decision"]["economics"]["headline"][
+        assert got["decision"]["policy_decision"][
             "expected_gross_profit_usd"] > 0
         assert DP.DEFAULT_PARAMS["min_gross_edge_pp"] == 0.05
 
         # THE SEPARATELY NAMED NET THRESHOLD.
         got = await DP.gate_for_funded_entry(
-            conn, _perturbed(rec, probability=0.55), now=now,
+            conn, _perturbed(rec, probability=pin_for(0.05)), now=now,
             params={"min_net_ev_usd": 1e9})
         assert (got["verdict"], got["refusal"]) == (DP.REFUSE, DP.R_BELOW_NET)
 
         # DISAGREEMENT: Pinnacle clears and the model does not. The policy
         # function is pure in its model input, so the model's answer is
         # stated here (the registry read path is proof 1's).
-        cand = DP.candidate_from_rec(rec, now=now)
-        real = DP.model_estimate(ap, cand, at=now)
         low = dict(real, p=0.52)
-        dec = DP.evaluate(cand, model=low, authority=[])
+        # V1 REPLAY: refused, ESTIMATES_DISAGREE...; never averaged.
+        dec = DP.evaluate(cand, model=low, authority=[], policy=DP.POLICY_V1)
         assert (dec["verdict"], dec["refusal"]) == (DP.REFUSE, DP.R_DISAGREE)
         assert dec["economics"]["pinnacle"]["clears_min_gross_edge"] is True
         assert dec["economics"]["model"]["clears_min_gross_edge"] is False
-        # NEVER AVERAGED: (0.60 + 0.52) / 2 = 0.56 would have cleared.
-        assert DP.clears(DP.gross_edge((0.60 + 0.52) / 2, 0.50), 0.05)
-        # And the same candidate with the real approved model enters.
+        # V2 (ACTIVE): (0.60 + 0.52) / 2 = 0.56 clears 5 pp by 1 pp, net of
+        # fees -- the average admits what V1's agreement refused.
+        dec = DP.evaluate(cand, model=low, authority=[])
+        assert dec["verdict"] == DP.ENTER, dec["all_refusals"]
+        assert dec["policy_decision"]["p_blended"] == pytest.approx(0.56)
+        assert dec["policy_decision"]["gross_edge_pp"] == pytest.approx(6.0)
+        # And the same candidate with the real approved model enters under
+        # both.
         dec = DP.evaluate(cand, model=real, authority=[])
+        assert dec["verdict"] == DP.ENTER, dec["all_refusals"]
+        dec = DP.evaluate(cand, model=real, authority=[], policy=DP.POLICY_V1)
         assert dec["verdict"] == DP.ENTER, dec["all_refusals"]
     finally:
         await _cleanup(conn)
@@ -679,15 +800,30 @@ async def test_proof2_no_approved_model_and_a_stale_quote_refuse(monkeypatch):
         assert out["refusals"].get("ADMITTED") == 1, out["refusals"]
         gate, rec, now = (captured[0]["gate"], captured[0]["rec"],
                           captured[0]["now"])
-        # NO APPROVED MODEL: refused by name; Pinnacle alone is never enough.
+        # NO APPROVED MODEL: refused by name; Pinnacle alone is never enough
+        # and nothing is averaged with a missing value.
         assert (gate["verdict"], gate["refusal"]) == (DP.REFUSE,
                                                       DP.R_NO_MODEL)
         pin = gate["decision"]["economics"]["pinnacle"]
         assert pin["clears_min_gross_edge"] is True
         assert gate["decision"]["estimates"]["model"]["p"] is None
+        pd = gate["decision"]["policy_decision"]
+        assert pd["p_blended"] is None and pd["p_internal"] is None
+        assert pd["conditions"][0]["condition"] == DP.COND_INPUTS
+        assert pd["conditions"][0]["refusal"] == DP.R_NO_MODEL
+        assert pd["gross_edge_pp"] is None
+        assert pd["net_expected_profit_usd"] is None
+        # V1 REPLAY refuses the same candidate by the same name.
+        v1 = DP.evaluate(DP.candidate_from_rec(rec, now=now),
+                         model=gate["decision"]["estimates"]["model"] | {
+                             "ok": False, "refusal": DP.R_NO_MODEL},
+                         authority=[], policy=DP.POLICY_V1)
+        assert v1["refusal"] == DP.R_NO_MODEL
         row = await _decision_for(conn, rec["valuation_row_id"])
         assert row["verdict"] == DP.REFUSE and row["refusal"] == DP.R_NO_MODEL
         assert row["model_p"] is None
+        # nothing averaged, so no headline edge is recorded
+        assert row["gross_edge_pp"] is None
         assert _checks(row)[DP.C_MODEL]["dependency"] == DP.DEP_ENGINEERING
 
         # STALE, BY THE LANE'S OWN RULE ON A CONTROLLED CLOCK: six seconds

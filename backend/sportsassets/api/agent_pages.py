@@ -964,15 +964,18 @@ DEREK_JS = r"""
     {group: 'Internal (model)', label: 'Probability', keys: ['internal_probability', 'internal_prob', 'p_internal', 'model_probability', 'model_prob'], u: 'prob', num: 1},
     {group: 'Internal (model)', label: 'Computed', keys: ['internal_at', 'model_at', 'internal_ts', 'internal_computed_at'], u: 'ts'},
     {group: 'Internal (model)', label: 'Qualification', keys: ['qualification', 'internal_qualification', 'probability_qualification', 'qualified']},
+    {group: 'Policy (stored record)', label: 'Blended', keys: ['p_blended'], u: 'prob', num: 1, title: 'V2: (internal + Pinnacle) / 2, read from the stored decision; an average of two market-derived estimates, not independent confirmation'},
+    {group: 'Policy (stored record)', label: 'Policy', keys: ['policy_name']},
+    {group: 'Policy (stored record)', label: 'Rationale', keys: ['rationale']},
     {group: 'Economics · four separate quantities', label: 'Price', keys: ['price', 'ask', 'entry_price', 'price_usd'], u: 'price', num: 1},
-    {group: 'Economics · four separate quantities', label: 'Gross edge', keys: ['gross_edge_pp', 'edge_pp', 'gross_edge'], u: 'pp', num: 1, title: 'qualified probability minus price, in percentage points'},
+    {group: 'Economics · four separate quantities', label: 'Gross edge', keys: ['gross_edge_pp', 'edge_pp', 'gross_edge'], u: 'pp', num: 1, title: 'the policy probability (V2: the blended average) minus price, in percentage points'},
     {group: 'Economics · four separate quantities', label: 'Net EV / contract', keys: ['net_ev_usd', 'net_ev_per_contract_usd', 'net_ev', 'ev_net_usd'], u: 'usd', num: 1, title: 'expected value per contract after fees'},
     {group: 'Economics · four separate quantities', label: 'ROI', keys: ['roi', 'net_roi', 'roi_pct', 'net_roi_pct'], u: 'roi', num: 1, title: 'net EV divided by capital at risk'},
     {group: 'Sizing', label: 'Contracts', keys: ['size_qty', 'sizing_qty', 'sized_qty', 'contracts', 'qty', 'sizing'], u: 'qty', num: 1, title: 'size permitted by the risk policy; not a function of edge alone'},
     {label: 'Blockers', render: R.blockers},
     {label: 'Evidence', keys: ['evidence']}
   ];
-  var ECON = '<div class="econ"><div><b>Gross edge · pp</b>qualified probability − price</div><div><b>Net EV · $/contract</b>after fees, per contract</div><div><b>ROI · %</b>net EV ÷ capital at risk</div><div><b>Sizing · contracts</b>set by the risk policy</div></div>';
+  var ECON = '<div class="econ"><div><b>Gross edge · pp</b>blended probability − price (V2)</div><div><b>Net EV · $/contract</b>after fees, per contract</div><div><b>ROI · %</b>net EV ÷ capital at risk</div><div><b>Sizing · contracts</b>set by the risk policy</div></div>';
   function blockerSummary(rows, d) {
     var all = [];
     rows.forEach(function (r) { var b = isObj(r) ? pick(r, ['blockers', 'blocked_by']) : null; if (Array.isArray(b)) all = all.concat(b); else if (isObj(r) && isObj(r.blocker)) all.push(r.blocker); });
@@ -1042,7 +1045,7 @@ DEREK_JS = r"""
     {key: 'coverage', title: 'Catalogue coverage & exclusions', render: coverage, wide: true, note: 'Every census category, including markets Derek does not support.'},
     {key: 'subscription', title: 'Data & subscription health', render: subscription},
     {key: 'collection', title: 'Collection'},
-    {key: 'opportunity_queue', title: 'Active evaluations & opportunity queue', render: queue, wide: true, note: 'Pinnacle and internal probabilities are shown separately with their own timestamps and qualification. Gross edge, net EV, ROI and sizing are separate quantities.'},
+    {key: 'opportunity_queue', title: 'Active evaluations & opportunity queue', render: queue, wide: true, note: 'Pinnacle and internal probabilities are shown separately with their own timestamps and qualification, beside the blended average the active policy (V2) enters on. The internal model is trained on market prices, so the average is not independent confirmation. Every figure is read from the stored decision record. Gross edge, net EV, ROI and sizing are separate quantities.'},
     {key: 'decisions', title: 'Entry decisions', render: decisions, wide: true},
     {key: 'plans_fills', title: 'Plans, acknowledgements & fills', render: plans, wide: true},
     {key: 'handoffs', title: 'Handoffs to Xavier', render: handoffs, wide: true},
@@ -2230,7 +2233,7 @@ DEMO_JS = r"""
        + R(0.7, '<div class="lbl">Net ROI</div><div class="big">' + C(ENTRY.netROI * 100, 1, '', '%', 0.7, 0.78) + '</div><div class="sub">on $' + (ENTRY.price + ENTRY.feePer).toFixed(4) + ' deployed</div>', 'card') + '</div>';
      return h + R(0.8, '<div class="callout"><b>Sizing is separate:</b> ' + ENTRY.ordered + ' contracts, $' + (ENTRY.ordered * ENTRY.price).toFixed(2) + ' plus an estimated ' + m(ENTRY.planFee) + ' fee, set by the risk policy’s per-fixture limit. A bigger edge does not by itself buy a bigger size, and no agent can edit that limit.</div>');
    },
-   inspect: '<h3>The arithmetic</h3><p>Gross edge = qualified probability − price = 0.60 − 0.50 = <b>10 pp</b>. Gross value per contract = $0.10, a <b>20%</b> gross return on the $0.50 price. The published taker fee is 0.0695 × contracts × p × (1−p) = $0.0174 per contract here, so net EV = <b>$0.0826</b> per contract, <b>16.0%</b> on the $0.5174 deployed. Orders round fees up to the cent: 100 contracts = $1.74.</p><h3>Why two probabilities</h3><p>Pinnacle (reference) and the internal model are shown separately with their own timestamps and qualification. Either one failing qualification blocks the entry by name; they are never averaged into one untraceable number.</p><h3>Illustrative</h3><p>Every price and probability in rehearsal is illustrative.</p>'},
+   inspect: '<h3>The arithmetic</h3><p>Blended probability = (internal 0.60 + Pinnacle 0.60) / 2 = 0.60. Gross edge = blended probability − price = 0.60 − 0.50 = <b>10 pp</b>. Gross value per contract = $0.10, a <b>20%</b> gross return on the $0.50 price. The published taker fee is 0.0695 × contracts × p × (1−p) = $0.0174 per contract here, so net EV = <b>$0.0826</b> per contract, <b>16.0%</b> on the $0.5174 deployed. Orders round fees up to the cent: 100 contracts = $1.74.</p><h3>Why two probabilities</h3><p>Pinnacle (reference) and the internal model are shown separately with their own timestamps and qualification. The active policy (DEREK_ENTRY_POLICY_V2) enters on their average, (internal + Pinnacle) / 2, and records all three. Either one missing or failing qualification blocks the entry by name; nothing is averaged with a missing value. The internal model is trained on market prices, so the average combines two market-derived estimates and is not independent confirmation.</p><h3>Illustrative</h3><p>Every price and probability in rehearsal is illustrative.</p>'},
 
   {a: 'DEREK', t: 'Identity, evidence, risk and execution checks', dur: 10, music: 1, cam: [-5, 2, 30],
    st: {DEREK: 'EVALUATING', XAVIER: 'IDLE', AUDREY: 'IDLE'},

@@ -206,12 +206,23 @@ PRICE_BASIS_EXECUTABLE = "EXECUTABLE_BOOK_CURRENCY_ESTABLISHED"
 ENTRY_PAYOUT_DESCRIPTION = (
     "a separately fitted market-price calibration model (features: price, "
     "payout side); not an independent sports forecast")
-#: What Derek's entry policy's use of it is.
+#: What Derek's ACTIVE entry policy's use of it is (DEREK_ENTRY_POLICY_V2,
+#: agents.derek_policy). The name is kept so every reader follows the policy.
 ENTRY_POLICY_AGREEMENT_IS = (
+    "POLICY_AVERAGE_OF_TWO_MARKET_DERIVED_ESTIMATES_NOT_INDEPENDENT_"
+    "CONFIRMATION: Derek's entry policy (DEREK_ENTRY_POLICY_V2) averages the "
+    "de-vigged Pinnacle probability with this model's probability and "
+    "requires the average to clear the executable price by 5 pp, with "
+    "positive expected profit after fees. This model is trained on market "
+    "prices -- a calibration of the venue price, not an independent sports "
+    "forecast -- so the average combines two market-derived estimates; it "
+    "is not independent confirmation of an edge")
+#: What the RETIRED V1 policy's use of it was (replay and history only).
+ENTRY_POLICY_V1_AGREEMENT_IS = (
     "POLICY_AGREEMENT_CHECK_NOT_EVIDENCE_OF_INDEPENDENT_INFORMATION: the "
-    "entry policy requires Pinnacle and this model each to clear 5 pp; the "
-    "model is a calibration of the venue price, so the two agreeing is a "
-    "policy condition, not independent confirmation")
+    "entry policy (DEREK_ENTRY_POLICY_V1) requires Pinnacle and this model "
+    "each to clear 5 pp; the model is a calibration of the venue price, so "
+    "the two agreeing is a policy condition, not independent confirmation")
 #: THE ADDITIONAL BAR FOR THIS KEY, declared here and not per call: on the
 #: same prospective fixtures the model must beat (a) the RAW VENUE PRICE used
 #: as a probability -- otherwise it adds nothing beyond the price it was given

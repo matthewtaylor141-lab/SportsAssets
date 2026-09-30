@@ -76,14 +76,16 @@ def _names(holdout: bool, n: int, prefix: str) -> list:
 async def _seed(c, *, tb, n=40):
     """Per fixture: a 5.5 pp entry that LOST and a 12 pp entry that WON,
     each priced 0.50 with a 0.01 FEE (cost_per_contract is the fee).
-    Today's 5 pp threshold takes both; 6 pp takes only the winner."""
+    Today's 5 pp threshold takes both; 6 pp takes only the winner. Each
+    carries a recorded internal probability equal to its Pinnacle one, so
+    the active policy's (V2) blended probability is the same p."""
     for i, f in enumerate(_names(False, n, "t") + _names(True, n, "h")):
         dec = (tb + DAY + i * 60) if i >= n else (tb - 5 * DAY + i * 60)
-        await AH.valuation(c, fixture=f, decided=dec, p=0.555, price=0.5,
-                           cost=0.01, edge=0.0, outcome=0,
+        await AH.valuation(c, fixture=f, decided=dec, p=0.555,
+                           internal_p=0.555, price=0.5, cost=0.01, edge=0.0, outcome=0,
                            outcome_at=dec + 3600)
-        await AH.valuation(c, fixture=f, decided=dec + 1, p=0.62, price=0.5,
-                           cost=0.01, edge=0.1, outcome=1,
+        await AH.valuation(c, fixture=f, decided=dec + 1, p=0.62,
+                           internal_p=0.62, price=0.5, cost=0.01, edge=0.1, outcome=1,
                            outcome_at=dec + 3600)
 
 

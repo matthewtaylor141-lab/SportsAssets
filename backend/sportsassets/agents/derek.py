@@ -18,8 +18,10 @@ hook the core stream calls after every scheduled cycle. It:
      ENTRY_DECISION written in the cycle window that has no Derek decision yet
      (the funded gate may already have recorded the admitted ones; the same
      deterministic id makes that a no-op) -- each judged AS OF ITS OWN
-     DECISION INSTANT from the row's recorded evidence, under
-     DEREK_ENTRY_POLICY_V1 (`derek_policy`);
+     DECISION INSTANT from the row's recorded evidence, under the ACTIVE
+     policy `derek_policy.ACTIVE_POLICY` (DEREK_ENTRY_POLICY_V2, the blended
+     average of the internal and Pinnacle probabilities; every record stores
+     `decide_entry`'s output whole, see `derek_policy`);
   2. records the coverage census of the Polymarket US catalogue (`coverage`);
   3. records latency: source-to-decision from the provider's own stamp, and
      decision-to-send / send-to-ack from funded intents when one exists --
@@ -167,6 +169,9 @@ async def after_cycle(conn, *, cycle: dict, now: float) -> dict:
     out["params_source"] = pol.get("source")
     ap = await DP.approved_entry_model(conn) if rows else None
     auth = await DP.authority_checks(conn, now=at) if rows else []
+    # V2's settlement states: the void rate as it stood at the window's
+    # start, so no row is valued on a void declared after its decision.
+    void = await DP.void_measure(conn, through=since) if rows else None
     for row in rows:
         try:
             cand = DP.candidate_from_row(row)
@@ -175,7 +180,7 @@ async def after_cycle(conn, *, cycle: dict, now: float) -> dict:
             cat = await DP.catalogue_row(conn, cand.get("us_market_slug"))
             dec = DP.evaluate(cand, model=model, params=pol["params"],
                               authority=auth, catalogue_row=cat,
-                              policy_version=pol["version"])
+                              policy_version=pol["version"], void=void)
             did = DP.decision_id_for(valuation_id=cand["valuation_id"],
                                      policy_version=pol["version"])
             lat = DP.latency_for(cand, decided_at=decided)

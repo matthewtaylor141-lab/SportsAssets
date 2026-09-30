@@ -75,6 +75,51 @@ def _decision_href(did) -> str:
     return "%s/decisions/%s" % (BASE, did)
 
 
+#: THE STORED FIELDS OF `derek_policy.decide_entry`'s OUTPUT a decision row
+#: shows. They are READ from the record (evidence.policy_decision), never
+#: recomputed here: execution and this explanation are one computation.
+POLICY_DECISION_FIELDS = (
+    # the stable fields (derek_policy.RECORD_FIELDS), shown verbatim
+    "policy_name", "policy_version", "p_internal", "internal_model_version",
+    "internal_at", "p_pinnacle", "pinnacle_at", "p_blended", "gross_edge_pp",
+    "fees_usd", "net_expected_profit_usd", "expected_return_pct",
+    "conditions", "rationale",
+    # supporting fields of the same stored output
+    "policy_key", "combination_policy", "inputs_are", "internal_qualified",
+    "internal_refusal", "pinnacle_qualified", "pinnacle_qualification",
+    "pinnacle_refusal", "internal_gross_edge_pp", "pinnacle_gross_edge_pp",
+    "policy_probability", "policy_probability_is", "executable_price", "qty",
+    "acquisition_cost_usd", "gross_edge_fraction", "threshold_gross_edge_pp",
+    "expected_gross_profit_usd", "expected_gross_profit_per_contract_usd",
+    "expected_gross_return_pct", "fee_per_contract_usd", "total_cost_usd",
+    "net_expected_profit_per_contract_usd",
+    "net_expected_profit_at_void_upper_95_usd", "settlement_states",
+    "min_net_ev_usd", "admitted", "refusal", "verdict", "decision_refusal",
+    "units")
+
+
+def _policy_view(d: dict) -> dict:
+    """WHICH POLICY JUDGED THIS RECORD, and what it stored. A record written
+    before V2 has no stored policy decision: it is labelled V1 and shown with
+    its V1 columns (the LOWER of the two estimates), never re-judged."""
+    from ..agents import derek_policy as DP
+    ev = d.get("evidence") if isinstance(d.get("evidence"), dict) else {}
+    pol = DP.policy_of_record(d)
+    pd = (ev or {}).get("policy_decision")
+    view = {"policy_name": pol,
+            "policy_label": ("V2" if pol == DP.POLICY_V2 else
+                             "V1" if pol == DP.POLICY_V1 else "UNKNOWN"),
+            "combination_policy": DP.POLICY_RULES.get(pol),
+            "active": pol == DP.ACTIVE_POLICY,
+            "source": ("evidence.policy_decision (decide_entry's stored "
+                       "output)" if isinstance(pd, dict) else
+                       "V1 record columns (written before V2; no stored "
+                       "policy decision)")}
+    if isinstance(pd, dict):
+        view["decision"] = {k: pd.get(k) for k in POLICY_DECISION_FIELDS}
+    return view
+
+
 def _decision_row(r) -> dict:
     d = dict(r)
     for k in ("checks", "latency", "evidence", "features"):
@@ -83,11 +128,18 @@ def _decision_row(r) -> dict:
         d[k] = _iso(d.get(k))
     if d.get("qty") is not None:
         d["qty"] = float(d["qty"])
+    d["policy"] = _policy_view(d)
+    pdv = d["policy"].get("decision") or {}
+    d["p_blended"] = pdv.get("p_blended")
+    d["rationale"] = pdv.get("rationale")
     d["gross_edge_percentage_points"] = (
+        pdv.get("gross_edge_pp") if pdv else
         None if d.get("gross_edge_pp") is None
         else round(float(d["gross_edge_pp"]) * 100.0, 6))
     d["units"] = {"gross_edge_pp": "probability points as a fraction "
-                                   "(0.05 = 5 pp) on a $0/$1 contract",
+                                   "(0.05 = 5 pp) on a $0/$1 contract, on "
+                                   "the policy's own probability (V2: the "
+                                   "blended average; V1: the lower estimate)",
                   "expected_*_usd": "dollars for qty contracts",
                   "expected_net_roi": "net / (acquisition cost + fees)"}
     d["evidence_links"] = ((d.get("evidence") or {}).get("links")
@@ -129,6 +181,18 @@ async def status(conn) -> dict:
     return _sec(OK, data)
 
 
+POLICY_RULE_TEXT = (
+    "DEREK_ENTRY_POLICY_V2: blended probability = (internal probability + "
+    "Pinnacle de-vigged probability) / 2; gross edge = blended probability - "
+    "executable acquisition price (per $1 contract, depth-weighted for the "
+    "size); enter only if gross edge >= min_gross_edge_pp (0.05 = 5 "
+    "percentage points) AND expected net profit after fees > 0. Both inputs "
+    "must be present and qualified; either missing refuses by name. The "
+    "internal model is trained on market prices, so the blended figure is "
+    "an average of two market-derived estimates, not independent "
+    "confirmation.")
+
+
 async def versions(conn) -> dict:
     from ..agents import coverage as COV
     from ..agents import derek_policy as DP
@@ -160,10 +224,18 @@ async def versions(conn) -> dict:
         code = {"why": type(exc).__name__}
     return _sec(OK, {"policy": {"key": DP.POLICY_KEY,
                                 "version": pol.get("version"),
+                                "active_policy": DP.ACTIVE_POLICY,
                                 "source": pol.get("source"),
                                 "params": pol.get("params"),
                                 "param_units": DP.PARAM_UNITS,
                                 "combination_policy": DP.COMBINATION_POLICY,
+                                "rule": POLICY_RULE_TEXT,
+                                # WHAT THE AVERAGE IS, stated where the
+                                # policy is shown: not independent
+                                # confirmation.
+                                "inputs_are": DP.policy_use_is(),
+                                "retained_for_replay": {
+                                    DP.POLICY_V1: DP.COMBINATION_V1},
                                 "edge_tolerance_pp": DP.EDGE_TOLERANCE_PP},
                      "internal_model": dict(model, model_key=FM.KEY_ENTRY_PAYOUT),
                      "probability_source": "PINNACLE_DEVIG_V1",
@@ -241,7 +313,7 @@ async def decisions(conn, *, limit: int = 50) -> dict:
         d["checks"] = [{k: c.get(k) for k in ("check", "status", "blocks",
                                                "refusal", "dependency")}
                        for c in (d.get("checks") or [])]
-        d.pop("evidence", None)
+        d.pop("evidence", None)       # the stored policy decision is in d["policy"]
     if not rows:
         return _sec(EMPTY, [], why=(
             "no entry decision has been recorded: no candidate has been "
@@ -254,10 +326,20 @@ async def decisions(conn, *, limit: int = 50) -> dict:
 async def opportunity_queue(conn) -> dict:
     if not await _regclass(conn, "derek_entry_decisions"):
         return _sec(UNAVAILABLE, why="migration 153 is not applied here")
+    # p_blended, rationale and policy_name are READ from the stored policy
+    # decision
+    # (NULL for a V1 record, which never blended).
     rows = [dict(r) for r in await conn.fetch(
         "SELECT decision_id, us_market_slug, side, verdict, refusal, "
         "       gross_edge_pp, expected_net_profit_usd, expected_net_roi, "
-        "       pinnacle_p, model_p, executable_price, decided_at "
+        "       pinnacle_p, model_p, "
+        "       (evidence->'policy_decision'->>'p_blended')::float8 "
+        "           AS p_blended, "
+        "       evidence->'policy_decision'->>'rationale' AS rationale, "
+        "       coalesce(evidence->'policy_decision'->>'policy_name', "
+        "                evidence->>'policy_name', policy_version) "
+        "           AS policy_name, "
+        "       executable_price, decided_at "
         "  FROM derek_entry_decisions "
         " WHERE decided_at > now() - interval '30 minutes' "
         "   AND (verdict = 'ENTER' OR gross_edge_pp IS NOT NULL) "
@@ -384,13 +466,20 @@ async def latency(conn) -> dict:
 async def performance(conn) -> dict:
     if not await _regclass(conn, "derek_entry_decisions"):
         return _sec(UNAVAILABLE, why="migration 153 is not applied here")
+    # THE HEADLINE PROBABILITY IS THE ONE EACH RECORD'S OWN POLICY STORED
+    # (evidence.policy_decision.policy_probability: V2 the blended average);
+    # a record written before V2 has none and its V1 headline was the lower
+    # of the two estimates.
     rows = [dict(r) for r in await conn.fetch(
         "SELECT d.verdict, count(*) AS decisions, "
         "       count(DISTINCT d.fixture) AS fixtures, "
         "       count(*) FILTER (WHERE v.outcome_known) AS resolved, "
         "       count(DISTINCT d.fixture) FILTER (WHERE v.outcome_known) "
         "           AS resolved_fixtures, "
-        "       avg(LEAST(d.pinnacle_p, coalesce(d.model_p, d.pinnacle_p))) "
+        "       avg(coalesce((d.evidence->'policy_decision'"
+        "                     ->>'policy_probability')::float8, "
+        "                    LEAST(d.pinnacle_p, "
+        "                          coalesce(d.model_p, d.pinnacle_p)))) "
         "           FILTER (WHERE v.outcome_known) AS mean_headline_p, "
         "       avg(v.outcome::float8) FILTER (WHERE v.outcome_known) "
         "           AS realised_frequency "
@@ -508,8 +597,9 @@ async def workspace(conn) -> dict:
         "agent": {"agent_id": DP.AGENT_ID, "display_name": "Derek",
                   "mandate": ("discovery and initial entry on Polymarket US: "
                               "full-game moneylines in the entry lane's "
-                              "configured sports, under %s"
-                              % DP.POLICY_VERSION),
+                              "configured sports, under %s (%s)"
+                              % (DP.ACTIVE_POLICY, DP.COMBINATION_POLICY)),
+                  "policy_inputs_are": DP.policy_use_is(),
                   "sends_orders": False},
         "read_at": time.time(), "read_only": True, "sections": {}}
     for name, fn in SECTIONS:
@@ -582,7 +672,8 @@ async def derek_decision(decision_id: str, response: Response) -> dict:
                     for k, x in dict(lr).items()}
         except Exception:                                      # noqa: BLE001
             link = None
-        return {"decision": d, "valuation": valuation,
+        return {"decision": d, "policy": d.get("policy"),
+                "valuation": valuation,
                 "authoritative_record": ("external_valuations row %s"
                                          % d.get("valuation_id")),
                 "registry_link": link,

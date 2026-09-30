@@ -639,19 +639,24 @@ async def _seed_gross(c, *, tb, n_train=40, n_hold=40):
     edge (p 0.555) that LOST, and a 12 pp edge (p 0.62) that WON; each at
     0.50 plus a 0.01 FEE; only the edge refused any. Today's 5 pp policy
     takes the 5.5 pp losers and the winners; 7 pp keeps only the winners;
-    3 pp adds the 4 pp losers."""
+    3 pp adds the 4 pp losers.
+
+    Derek's ACTIVE policy (V2) measures the edge on the BLENDED probability,
+    (internal + Pinnacle) / 2; each valuation carries a recorded internal
+    probability equal to its Pinnacle one, so the blended figure is the same
+    p and the story above is unchanged."""
     fx = _names(False, n_train, "gt") + _names(True, n_hold, "gh")
     for i, f in enumerate(fx):
         hold = i >= n_train
         dec = (tb + DAY + i * 60) if hold else (tb - 5 * DAY + i * 60)
-        await H.valuation(c, fixture=f, decided=dec, p=0.54, price=0.5,
-                          cost=0.01, edge=0.0, outcome=0,
+        await H.valuation(c, fixture=f, decided=dec, p=0.54,
+                          internal_p=0.54, price=0.5, cost=0.01, edge=0.0, outcome=0,
                           outcome_at=dec + 3600)
-        await H.valuation(c, fixture=f, decided=dec + 1, p=0.555, price=0.5,
-                          cost=0.01, edge=0.0, outcome=0,
+        await H.valuation(c, fixture=f, decided=dec + 1, p=0.555,
+                          internal_p=0.555, price=0.5, cost=0.01, edge=0.0, outcome=0,
                           outcome_at=dec + 3600)
-        await H.valuation(c, fixture=f, decided=dec + 2, p=0.62, price=0.5,
-                          cost=0.01, edge=0.1, outcome=1,
+        await H.valuation(c, fixture=f, decided=dec + 2, p=0.62,
+                          internal_p=0.62, price=0.5, cost=0.01, edge=0.1, outcome=1,
                           outcome_at=dec + 3600)
     return fx
 
@@ -664,10 +669,25 @@ def test_the_derek_policy_class_targets_the_binding_policy_key():
     assert "min_gross_edge_pp" in DP.DEFAULT_PARAMS
     assert cls.pre_authorized is False
     # the boundary is the owner's: exactly 5 pp qualifies, 4.99 pp does not
-    row = {"probability": 0.55, "price": 0.50, "cost": 0.50, "refusals": []}
+    # -- on the ACTIVE policy's (V2) blended probability
+    assert "DEREK_ENTRY_POLICY_V2" in cls.description
+    row = {"probability": 0.55, "internal_probability": 0.55, "price": 0.50,
+           "cost": 0.50, "refusals": []}
     assert IMP.derek_selectable(row, 0.05, basis=IMP.BASIS_GROSS)
-    assert not IMP.derek_selectable(dict(row, probability=0.5499), 0.05,
-                                    basis=IMP.BASIS_GROSS)
+    assert not IMP.derek_selectable(
+        dict(row, probability=0.5499, internal_probability=0.5499), 0.05,
+        basis=IMP.BASIS_GROSS)
+    # V2: (0.62 + 0.53) / 2 = 0.575 -> 7.5 pp qualifies, though Pinnacle
+    # alone (3 pp) would not
+    assert IMP.derek_selectable(dict(row, probability=0.53,
+                                     internal_probability=0.62), 0.05,
+                                basis=IMP.BASIS_GROSS)
+    # no recorded internal probability: not eligible, none substituted
+    assert IMP.derek_eligibility(dict(row, internal_probability=None),
+                                 basis=IMP.BASIS_GROSS) == \
+        "NO_INTERNAL_PROBABILITY"
+    assert not IMP.derek_selectable(dict(row, internal_probability=None),
+                                    0.0, basis=IMP.BASIS_GROSS)
     # a row refused for any other reason is never selected by a threshold
     assert not IMP.derek_selectable(dict(row, refusals=["STALE"]), 0.0,
                                     basis=IMP.BASIS_GROSS)

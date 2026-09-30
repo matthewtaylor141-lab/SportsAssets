@@ -431,6 +431,12 @@ READERS = {
     "agents/derek_policy.py": ("FILTERS_ENTRY_DECISION", 5),
     "agents/coverage.py": ("REPORTING_CENSUS_CALIBRATION_ONLY_BLOCKED", 3),
     "api/agents_derek.py": ("BY_ID_FROM_A_FILTERED_READER", 4),
+    # (V2) the RETROSPECTIVE replay of Derek's recorded decisions under V1
+    # and V2: joins each decision's valuation by id for its outcome, with
+    # record_purpose = 'ENTRY_DECISION' in the join; reports only, selects
+    # no candidate and writes nothing
+    "agents/derek_policy_replay.py": (
+        "RETROSPECTIVE_REPLAY_BY_ID_FILTERS_ENTRY_DECISION", 1),
     # (170) Derek's NON-FUNDED RESEARCH observer and labeller: reads BOTH
     # purposes deliberately -- a calibration-only row's settlement is exactly
     # what the internal model's research needs -- and writes only
