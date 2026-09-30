@@ -365,6 +365,9 @@ async def set_limits(conn, *, by: str, proposed: dict) -> dict:
     at all. What this stores is the OWNER'S INTENT, for the activation
     checklist to compare against the enforced values.
     """
+    # THE ACCURATE NAMES ARE ACCEPTED (per_market_usd,
+    # cumulative_loss_stop_usd); the record keeps the canonical keys.
+    proposed = _FA_LIMITS.normalise_limit_keys(proposed)
     missing = [k for k in REQUIRED_LIMITS
                if proposed.get(k) in (None, "")]
     if missing:
@@ -404,6 +407,8 @@ async def set_limits(conn, *, by: str, proposed: dict) -> dict:
                                               "limit")},
                 "why": "nothing was stored"}
     record = {"proposed": clean, "by": by, "at": time.time(),
+              "meanings": {k: _FA_LIMITS.LIMIT_MEANINGS.get(k)
+                           for k in clean},
               # APPROVAL IS THE OWNER'S ACT, through the admin route. An
               # operator records the intent; approving it is what makes it
               # an enforced tightening.

@@ -176,7 +176,34 @@ LIMIT_LABELS = {
 
 #: The accurate synonym, accepted so a future approval can be written correctly
 #: without breaking the ones already recorded.
-LIMIT_SYNONYMS = {"cumulative_loss_stop_usd": "daily_loss_stop_usd"}
+#: ACCURATE NAMES FOR THE TWO MISLABELLED FIELDS, accepted on input. The
+#: recorded canonical names are kept (approvals and digests already use them),
+#: but an owner never has to type a name that says something false:
+#:   per_order_usd        bounds cost basis on ONE MARKET, not one order
+#:   daily_loss_stop_usd  is a CUMULATIVE worst-case loss ceiling, no reset
+LIMIT_SYNONYMS = {"cumulative_loss_stop_usd": "daily_loss_stop_usd",
+                  "per_market_usd": "per_order_usd"}
+#: What each field actually enforces, for every surface that shows one.
+LIMIT_MEANINGS = {
+    "capital_usd": ("MAX_CAPITAL_DEPLOYED: cost basis of every open position "
+                    "in the lane, including the proposed one"),
+    "per_order_usd": ("MAX_MARKET_EXPOSURE: cost basis of open positions on "
+                      "one market (condition id / venue contract), including "
+                      "the proposed one. Accurate name: per_market_usd"),
+    "event_exposure_usd": ("MAX_EVENT_EXPOSURE: cost basis of open positions "
+                           "sharing one venue event, including the proposed "
+                           "one"),
+    "max_exposure_usd": ("MAX_CORRELATED_EXPOSURE: the SAME total as "
+                         "capital_usd (every open position counted in full, "
+                         "as if perfectly correlated); the lower of the two "
+                         "is the binding bound"),
+    "daily_loss_stop_usd": ("MAX_DRAWDOWN: cumulative worst-case loss -- "
+                            "realised losses (gains do not offset), plus "
+                            "mark-to-market losses on marked open positions, "
+                            "plus the full cost of unmarked ones including the "
+                            "proposed one. No daily reset. Accurate name: "
+                            "cumulative_loss_stop_usd"),
+}
 
 
 def normalise_limit_keys(proposed) -> dict:

@@ -3747,6 +3747,18 @@ async def admin_funded_activation_readiness(response: Response,
             "bound_account": rec}
 
 
+def running_switches() -> dict:
+    """The three submission constants as THIS process loaded them."""
+    from .. import bettor_entry_execution as _EX
+    from .. import bettor_funded_execution as _FX
+    from .. import bettor_funded_management as _FM
+    return {"FUNDED_SUBMISSION_ENABLED": bool(_FX.FUNDED_SUBMISSION_ENABLED),
+            "REAL_ORDER_SUBMISSION_ENABLED":
+                bool(_EX.REAL_ORDER_SUBMISSION_ENABLED),
+            "FUNDED_EXIT_SUBMISSION_ENABLED":
+                bool(_FM.FUNDED_EXIT_SUBMISSION_ENABLED)}
+
+
 @app.get("/api/admin/pilot-prerequisites",
          dependencies=[Depends(require_admin)])
 async def admin_pilot_prerequisites(response: Response,
@@ -3785,7 +3797,14 @@ async def admin_pilot_prerequisites(response: Response,
             "funded_execution": FX.describe(),
             "onboarding": ON.describe(),
             "what_remains_disabled": FX.disablements(),
-            "funded_submission": "DISABLED"}
+            # THE RUNNING PROCESS'S OWN SWITCHES AND BUILD. An activation build
+            # is verified here, from the serving process, not from git: the
+            # commit it serves and the three code constants it loaded.
+            "running_build": {
+                "serving_commit": os.getenv("RENDER_GIT_COMMIT") or None,
+                "switches": running_switches()},
+            "funded_submission": ("ENABLED" if all(
+                running_switches().values()) else "DISABLED")}
 
 
 @app.get("/api/admin/funded-account-eligibility",
