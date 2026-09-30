@@ -32,14 +32,18 @@ dependencies = [
     "PyJWT>=2.7",
     "requests>=2.31",
     # Audrey's management chat (sportsassets/agents/audrey_chat.py) calls the
-    # Claude API through the OFFICIAL SDK. 1.9.0 is the release the adapter
-    # was built and tested against (verified on the package index
-    # 2026-09-30); 1.x moved the SDK's HTTP layer to httpx2 (the SDK's own
-    # dependency, the maintained fork of httpx by its original author,
-    # published by Pydantic), which arrives transitively. The SDK is used only
-    # when ANTHROPIC_API_KEY is provisioned; without it the chat answers from
-    # records and says so.
-    "anthropic>=1.9.0,<2",
+    # Claude API through the OFFICIAL SDK. 1.x moved the SDK's HTTP layer to
+    # httpx2 (the SDK's own dependency, the maintained fork of httpx by its
+    # original author, published by Pydantic), which arrives transitively. The
+    # SDK is used only when ANTHROPIC_API_KEY is provisioned; without it the
+    # chat answers from records and says so.
+    #
+    # PINNED EXACTLY, for the reason polymarket-us is. The floor `>=1.9.0,<2`
+    # let the gate environment (built earlier on 2026-09-30) run 1.9.0 while
+    # an image built the same evening resolved 1.10.0: what was tested and
+    # what would ship differed. The image and the gate environment both
+    # install from this line, so they now resolve the same release.
+    "anthropic==1.10.0",
 ]
 
 [project.optional-dependencies]

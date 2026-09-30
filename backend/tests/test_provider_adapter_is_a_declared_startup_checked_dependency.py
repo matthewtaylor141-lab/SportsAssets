@@ -25,7 +25,18 @@ BACKEND = pathlib.Path(__file__).resolve().parents[1]
 def test_the_sdk_is_a_production_dependency():
     doc = tomllib.loads((BACKEND / "pyproject.toml").read_text())
     deps = doc["project"]["dependencies"]
-    assert any(d.replace(" ", "").startswith("anthropic>=1.9.0") for d in deps)
+    pins = [d.replace(" ", "") for d in deps if d.startswith("anthropic")]
+    assert pins == ["anthropic==1.10.0"], pins
+
+
+def test_the_installed_sdk_is_the_pinned_release():
+    """The environment running the tests holds exactly the pinned release, so
+    a gate run on a drifted environment fails here rather than passing."""
+    import importlib.metadata as md
+    doc = tomllib.loads((BACKEND / "pyproject.toml").read_text())
+    pin = next(d for d in doc["project"]["dependencies"]
+               if d.startswith("anthropic"))
+    assert md.version("anthropic") == pin.split("==")[1].strip()
 
 
 def test_the_startup_check_imports_and_builds_the_real_adapter(monkeypatch):
