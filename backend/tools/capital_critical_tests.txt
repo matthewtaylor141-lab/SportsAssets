@@ -37,6 +37,8 @@ tests/test_an_indirect_pair_is_valued_on_the_outcomes.py
 tests/test_audrey_chat_answers_from_records_and_directs_work.py
 # (1002) proof 18: the chat cannot grant itself risk, trading or deployment authority
 tests/test_audrey_chat_cannot_grant_itself_authority.py
+# (1002) the chat's Anthropic SDK adapter: request rules, outcomes, bounds, deadline, idempotency
+tests/test_audrey_chat_sdk_adapter_is_bounded_and_idempotent.py
 # (1002) proof 21 (chat): a provider failure is disclosed and answered from records; no secret is stored
 tests/test_audrey_chat_survives_provider_failure.py
 tests/test_autonomy_completion_boundaries.py

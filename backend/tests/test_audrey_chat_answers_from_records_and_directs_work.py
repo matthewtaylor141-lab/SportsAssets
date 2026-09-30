@@ -17,7 +17,8 @@ links, and the status follows the tasks' outcomes.
 
 Both composition modes are proven: deterministic (no provider key -- today's
 production fact -- with the disclosure) and LLM (a mocked Claude Messages API
-behind the injected transport; the network is never reached).
+behind httpx2.MockTransport, parsed by the real Anthropic SDK; the network
+is never reached).
 
 An ambiguous directive becomes DRAFT_NEEDS_CLARIFICATION with the exact
 question stored, and a follow-up completes it.
@@ -63,7 +64,7 @@ def world():
 
 
 def _chat(client, headers, message, conversation_id=None, cookies=None):
-    body = {"message": message}
+    body = {"message": message, "request_id": F.rid("p17")}
     if conversation_id:
         body["conversation_id"] = conversation_id
     if cookies:
@@ -251,15 +252,19 @@ def test_a_directive_is_created_assigned_and_reported_the_next_day(
     assert spec["directive_id"] == did
     assert spec["standing_rules"]["capital_limits"] == "NO_INCREASE"
 
-    # replaying the same message id creates nothing new
+    # replaying the same request id creates nothing new
+    assert got["request_id"] and got["replayed"] is False
+    assert did == D.directive_id_for(requester_role="operator",
+                                     instruction=text, now=F.T0,
+                                     request_id=got["request_id"])
+
     async def _replay():
         c = await F.connect()
         try:
             return await D.create(
                 c, instruction=text, requester_role="operator",
                 requester_label="operator session", now=F.T0,
-                conversation_id=cid,
-                message_id=got["management_message_id"])
+                conversation_id=cid, request_id=got["request_id"])
         finally:
             await c.close()
     again = F.run(_replay())
@@ -342,7 +347,8 @@ def test_assign_and_cancel_through_chat_and_the_structured_routes(
     clock = F.Clock(F.T0)
     client = F.build_client(monkeypatch, clock)
     r = client.post("/api/command/agents/audrey/directives", headers=F.ADMIN,
-                    json={"objective": "Have Xavier reduce unpaired exposure "
+                    json={"request_id": F.rid("form"),
+                          "objective": "Have Xavier reduce unpaired exposure "
                                        "below $200",
                           "accounts": [F.ACCT_A],
                           "review_at": "2031-03-20T00:00:00Z"})
@@ -400,7 +406,7 @@ def test_llm_mode_uses_only_typed_tools_and_cites_what_it_read(world,
     fake = F.FakeModel([
         F.tool_use("why_hold", {"account_id": F.ACCT_A}),
         F.final_text(_answer)])
-    monkeypatch.setattr(AC, "httpx_transport", fake)
+    F.use_fake(monkeypatch, fake)
     clock = F.Clock(F.T0)
     client = F.build_client(monkeypatch, clock)
     desk = F.desk_headers()
@@ -446,7 +452,7 @@ def test_llm_mode_uses_only_typed_tools_and_cites_what_it_read(world,
     # a DIRECTIVE in LLM mode is still executed deterministically (the model
     # is not involved), and from the operator's credential only
     fake2 = F.FakeModel([])
-    monkeypatch.setattr(AC, "httpx_transport", fake2)
+    F.use_fake(monkeypatch, fake2)
     got = _chat(client, F.ADMIN, "Prioritize reducing drawdown without "
                 "increasing capital limits.", cid)
     assert got["status"] == AC.S_DIRECTIVE
@@ -464,7 +470,7 @@ def test_llm_mode_uses_only_typed_tools_and_cites_what_it_read(world,
                 "%s are open." % (dids[0], ", ".join(sorted(set(tids)))))
 
     fake3 = F.FakeModel([F.final_text(_dir_answer)])
-    monkeypatch.setattr(AC, "httpx_transport", fake3)
+    F.use_fake(monkeypatch, fake3)
     clock.t = F.T0 + F.DAY
     got = _chat(client, desk, "What happened to the directive I gave "
                 "yesterday?", cid)
@@ -570,14 +576,16 @@ def test_the_structured_form_draft_is_completed_by_confirm(world,
     F.no_network(monkeypatch)
     client = F.build_client(monkeypatch, F.Clock(F.T0))
     r = client.post("/api/command/agents/audrey/directives", headers=F.ADMIN,
-                    json={"objective": "Reduce losses on that account"})
+                    json={"objective": "Reduce losses on that account",
+                          "request_id": F.rid("form")})
     assert r.status_code == 200
     d = r.json()["directive"]
     assert d["status"] == D.DRAFT
     assert d["clarifying_question"] == D.Q_ACCOUNT
     r = client.post("/api/command/agents/audrey/directives/%s/confirm"
                     % d["directive_id"], headers=F.ADMIN,
-                    json={"accounts": [F.ACCT_B]})
+                    json={"accounts": [F.ACCT_B],
+                          "request_id": F.rid("confirm")})
     assert r.status_code == 200, r.text
     d2 = r.json()["directive"]
     assert d2["status"] == D.ACTIVE
@@ -587,7 +595,8 @@ def test_the_structured_form_draft_is_completed_by_confirm(world,
     # confirming an active, tasked directive again is refused by name and
     # changes nothing
     r = client.post("/api/command/agents/audrey/directives/%s/confirm"
-                    % d["directive_id"], headers=F.ADMIN, json={})
+                    % d["directive_id"], headers=F.ADMIN,
+                    json={"request_id": F.rid("confirm")})
     assert r.status_code == 409
     assert r.json()["detail"]["refusal"] == D.R_NOT_OPEN
     r = client.get("/api/command/agents/audrey/directives/%s"

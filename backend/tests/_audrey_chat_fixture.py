@@ -152,6 +152,10 @@ async def purge(c) -> None:
                 " >= '2031-01-01')")
             await c.execute("DELETE FROM audrey_conversations WHERE "
                             " created_at >= '2031-01-01'")
+            if await c.fetchval(
+                    "SELECT to_regclass('audrey_requests') IS NOT NULL"):
+                await c.execute("DELETE FROM audrey_requests WHERE "
+                                " created_at >= '2031-01-01'")
         if await c.fetchval("SELECT to_regclass('agent_status') IS NOT NULL"):
             await c.execute("DELETE FROM agent_status WHERE activity LIKE "
                             " 'chatt:%'")
@@ -294,6 +298,29 @@ class Clock:
         return self.t
 
 
+#: connections the route's test pool has out right now; the fake model
+#: records it on every provider call (none may be held across one)
+POOL_IN_USE = {"n": 0, "max": 0}
+
+
+class CountingPool:
+    """The route's pool: a fresh asyncpg connection per acquire, counted."""
+
+    class _Acq:
+        async def __aenter__(self):
+            self.c = await connect()
+            POOL_IN_USE["n"] += 1
+            POOL_IN_USE["max"] = max(POOL_IN_USE["max"], POOL_IN_USE["n"])
+            return self.c
+
+        async def __aexit__(self, *a):
+            POOL_IN_USE["n"] -= 1
+            await self.c.close()
+
+    def acquire(self):
+        return self._Acq()
+
+
 def build_client(monkeypatch, clock: Clock):
     starlette = pytest.importorskip("starlette.testclient")
     from fastapi import FastAPI
@@ -302,21 +329,10 @@ def build_client(monkeypatch, clock: Clock):
     from sportsassets.api import app as A
 
     monkeypatch.setattr(A, "settings", lambda: Cfg(), raising=False)
-
-    class _Acq:
-        async def __aenter__(self):
-            self.c = await connect()
-            return self.c
-
-        async def __aexit__(self, *a):
-            await self.c.close()
-
-    class _Pool:
-        def acquire(self):
-            return _Acq()
+    monkeypatch.setenv("AUDREY_PROVIDER_MAX_RETRIES", "0")
 
     async def _get():
-        return _Pool()
+        return CountingPool()
 
     monkeypatch.setattr(AGC, "get_pool", _get)
     monkeypatch.setattr(AGC, "_clock", clock)
@@ -340,67 +356,117 @@ def operator_cookie() -> dict:
     return {"bt_control": tok}
 
 
+_RID = [0]
+
+
+def rid(tag: str = "t") -> str:
+    """A stable, unique idempotency key for one request in a test run."""
+    _RID[0] += 1
+    return "req-chatt-%s-%04d" % (tag, _RID[0])
+
+
 def no_network(monkeypatch):
-    """Deterministic mode: no key, and a transport that fails if called."""
+    """Deterministic mode: no key, and an HTTP client that fails if built."""
     from sportsassets.agents import audrey_chat as AC
 
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.delenv("AUDREY_PROVIDER", raising=False)
 
-    async def _never(*a, **kw):
+    def _never():
         raise AssertionError("the provider must not be called")
 
-    monkeypatch.setattr(AC, "httpx_transport", _never)
+    monkeypatch.setattr(AC, "http_client_factory", _never)
+
+
+def message(content, stop_reason, *, model="claude-opus-5-5",
+            stop_details=None) -> dict:
+    """A Messages API response body, as the API returns it."""
+    m = {"id": "msg_fake", "type": "message", "role": "assistant",
+         "model": model, "content": content, "stop_reason": stop_reason,
+         "stop_sequence": None,
+         "usage": {"input_tokens": 10, "output_tokens": 5}}
+    if stop_details is not None:
+        m["stop_details"] = stop_details
+    return m
 
 
 class FakeModel:
-    """A scripted Claude Messages API. `script` is a list of callables
-    (request body) -> (status, json) or exceptions to raise."""
+    """A scripted Claude Messages API behind `httpx2.MockTransport`: the REAL
+    Anthropic SDK builds each request and parses each response. `script` is a
+    list of steps: callables (request body) -> (status, json[, headers]) --
+    sync or async -- or exceptions to raise from the transport."""
 
     def __init__(self, script):
         self.script = list(script)
         self.requests = []
 
-    async def __call__(self, url, *, headers, json_body, timeout_s):
-        assert url == "https://api.anthropic.com/v1/messages"
-        self.requests.append({"url": url, "headers": dict(headers),
-                              "body": json.loads(json.dumps(json_body))})
+    async def handler(self, request):
+        import httpx2
+
+        body = json.loads(request.content.decode() or "{}")
+        self.requests.append({"url": str(request.url),
+                              "path": request.url.path,
+                              "headers": {k.lower(): v for k, v in
+                                          request.headers.items()},
+                              "body": body,
+                              "pool_in_use": POOL_IN_USE["n"]})
         if not self.script:
             raise AssertionError("the fake model was called more often than "
                                  "scripted")
         step = self.script.pop(0)
         if isinstance(step, BaseException):
             raise step
-        return step(json_body)
+        got = step(body)
+        if asyncio.iscoroutine(got):
+            got = await got
+        status, payload = got[0], got[1]
+        headers = got[2] if len(got) > 2 else {}
+        return httpx2.Response(status, json=payload, headers=headers)
+
+    def client(self):
+        import httpx2
+
+        return httpx2.AsyncClient(transport=httpx2.MockTransport(self.handler))
+
+
+def use_fake(monkeypatch, fake: FakeModel) -> FakeModel:
+    from sportsassets.agents import audrey_chat as AC
+
+    monkeypatch.setattr(AC, "http_client_factory", fake.client)
+    return fake
 
 
 def tool_use(name: str, args: dict, tid: str = "toolu_1"):
     def _step(body):
-        return 200, {"id": "msg_fake", "type": "message", "role": "assistant",
-                     "stop_reason": "tool_use", "content": [
-                         {"type": "text", "text": "Checking the records."},
-                         {"type": "tool_use", "id": tid, "name": name,
-                          "input": args}]}
+        return 200, message([
+            {"type": "text", "text": "Checking the records."},
+            {"type": "tool_use", "id": tid, "name": name, "input": args}],
+            "tool_use")
     return _step
 
 
 def tool_uses(calls: list):
     def _step(body):
-        return 200, {"id": "msg_fake", "type": "message", "role": "assistant",
-                     "stop_reason": "tool_use", "content": [
-                         {"type": "tool_use", "id": "toolu_%d" % i,
-                          "name": n, "input": a}
-                         for i, (n, a) in enumerate(calls)]}
+        return 200, message([
+            {"type": "tool_use", "id": "toolu_%d" % i, "name": n, "input": a}
+            for i, (n, a) in enumerate(calls)], "tool_use")
     return _step
 
 
-def final_text(fn):
+def final_text(fn, *, model="claude-opus-5-5"):
     """End the turn with text computed from the request body (so the fake
     can cite the ids it was shown, as a model would)."""
     def _step(body):
-        return 200, {"id": "msg_fake", "type": "message", "role": "assistant",
-                     "stop_reason": "end_turn",
-                     "content": [{"type": "text", "text": fn(body)}]}
+        return 200, message([{"type": "text", "text": fn(body)}],
+                            "end_turn", model=model)
+    return _step
+
+
+def api_error(status: int, etype: str, msg: str = "", headers=None):
+    def _step(body):
+        return status, {"type": "error",
+                        "error": {"type": etype, "message": msg}}, \
+            dict(headers or {})
     return _step
 
 

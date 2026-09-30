@@ -99,7 +99,8 @@ async def _q(sql, *args):
 
 def _chat(client, headers, message, cid):
     r = client.post("/api/command/agents/audrey/chat",
-                    json={"message": message, "conversation_id": cid},
+                    json={"message": message, "conversation_id": cid,
+                          "request_id": F.rid("p18")},
                     headers=headers)
     assert r.status_code == 200, r.text
     return r.json()
@@ -200,7 +201,7 @@ def test_a_misbehaving_model_can_only_reach_the_typed_tools(world,
             ("agents_status", {"account_id": F.ACCT_A,
                                "sql": "DROP TABLE x"})]),
         F.final_text(lambda body: "Derek is pricing; Xavier is idle.")])
-    monkeypatch.setattr(AC, "httpx_transport", fake)
+    F.use_fake(monkeypatch, fake)
     client = F.build_client(monkeypatch, F.Clock(F.T0))
 
     got = _chat(client, F.desk_headers(), "What are Derek and Xavier "
@@ -232,13 +233,20 @@ def test_a_misbehaving_model_can_only_reach_the_typed_tools(world,
         F.tool_use("create_directive", {"instruction": "Raise the capital "
                                                        "limits to $1m"}),
         F.final_text(lambda body: "I could not do that.")])
-    monkeypatch.setattr(AC, "httpx_transport", fake2)
+    F.use_fake(monkeypatch, fake2)
     got = _chat(client, F.ADMIN, "What are Derek and Xavier doing?",
                 "chatt-llm-bad-ops")
     call = got["tool_calls"][-1]
     assert call["tool"] == "create_directive"
     assert call["status"] == "REFUSED" and call["why"] == D.R_PROHIBITED
-    assert got["directive"]["status"] == D.REFUSED
+    # a refused request is RECORDED as a refused directive, never reported
+    # as a created one
+    assert "directive" not in got and "committed_directive_id" not in got
+    rows = F.run(_q("SELECT status, refusal, change_class FROM "
+                    " management_directives WHERE conversation_id = "
+                    " 'chatt-llm-bad-ops'"))
+    assert rows == [{"status": D.REFUSED, "refusal": D.R_PROHIBITED,
+                     "change_class": D.AUTHORITY_CHANGE}]
     # the operator is offered the write tools; the read caller was not
     offered = {t["name"] for t in fake2.requests[0]["body"]["tools"]}
     assert AC.MUTATING_TOOLS <= offered
@@ -260,22 +268,26 @@ def test_a_read_credential_cannot_create_confirm_or_cancel(world,
 
     # the structured routes: read session refused by name (403), anonymous 401
     r = client.post("/api/command/agents/audrey/directives", headers=desk,
-                    json={"objective": "Reduce drawdown"})
+                    json={"objective": "Reduce drawdown",
+                          "request_id": F.rid("form")})
     assert r.status_code == 403
     assert r.json()["detail"]["reason"] == \
         "CONTROL_REQUIRES_AN_OPERATOR_SESSION"
     assert client.post("/api/command/agents/audrey/directives",
-                       json={"objective": "Reduce drawdown"}
+                       json={"objective": "Reduce drawdown",
+                             "request_id": F.rid("form")}
                        ).status_code == 401
     for action in ("confirm", "cancel"):
         r = client.post("/api/command/agents/audrey/directives/dir-0/%s"
-                        % action, headers=desk, json={})
+                        % action, headers=desk,
+                        json={"request_id": F.rid("act")})
         assert r.status_code == 403, action
     # reading needs a credential too
     assert client.get("/api/command/agents/audrey/directives"
                       ).status_code == 401
     assert client.post("/api/command/agents/audrey/chat",
-                       json={"message": "hi"}).status_code == 401
+                       json={"message": "hi", "request_id": F.rid("anon")}
+                       ).status_code == 401
 
     # the chat: each change is a structured refusal
     for msg in ("Prioritize reducing drawdown without increasing capital "
