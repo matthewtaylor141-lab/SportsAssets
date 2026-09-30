@@ -440,6 +440,9 @@ async def model_qualification(conn) -> dict:
         "description": FM.ENTRY_PAYOUT_DESCRIPTION,
         "entry_policy_use": FM.ENTRY_POLICY_AGREEMENT_IS,
         "minimums": FM.qualification_minimums(FM.KEY_ENTRY_PAYOUT),
+        # THE SAME CONSTANTS, PER MODEL KEY, in fixtures
+        "minimums_by_model_key": {k: FM.qualification_minimums(k) for k in (
+            FM.KEY_MIDDLE, FM.KEY_HEDGE_GIVEN_PRIMARY, FM.KEY_ENTRY_PAYOUT)},
         "cohorts": [FM.COHORT_DISPLAYED, FM.COHORT_EXECUTABLE]}
     if not await _regclass(conn, "derek_research_observations"):
         return _sec(UNAVAILABLE, data, why="migration 170 is not applied here")
