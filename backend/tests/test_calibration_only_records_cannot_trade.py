@@ -444,6 +444,23 @@ READERS = {
     # whose price is CHECKed unusable for orders. It selects no candidate and
     # no execution module reads what it writes
     # (tests/test_derek_research_observations_break_the_deadlock.py).
+    # (171/172) THE PAPER SESSION, SIMULATED EXECUTION ONLY. Paper Derek reads
+    # BOTH purposes deliberately: while the venue does not establish book
+    # currency (P5) every lane row is CALIBRATION_ONLY, and each paper
+    # decision records that as the open QUOTE_TIMING_UNCERTAINTY_P5 gap. It
+    # never uses the row's displayed price (it prices off its own book read)
+    # and writes only paper_* tables; paper Xavier reads the newest
+    # valuation's probability for a held paper position and the venue's
+    # joined settlement for paper settlement. No funded module reads a paper
+    # table and the funded executor refuses any paper record or id first
+    # (tests/test_paper_records_cannot_reach_the_funded_path.py).
+    "agents/paper_derek.py": (
+        "PAPER_ONLY_READS_BOTH_PURPOSES_WRITES_PAPER_TABLES_ONLY", 3),
+    "agents/paper_xavier.py": (
+        "PAPER_ONLY_PROBABILITY_AND_SETTLEMENT_READS_FOR_PAPER_POSITIONS", 6),
+    # the in-cycle paper hook: reads the ONE row the collection cycle has just
+    # persisted, by the id the cycle passes, and hands it to paper Derek
+    "agents/paper_runtime.py": ("PAPER_ONLY_BY_ID_FROM_THE_CYCLE_HOOK", 1),
     "agents/derek_research.py": (
         "RESEARCH_ONLY_READS_BOTH_PURPOSES_NEVER_SELECTS_A_CANDIDATE", 4),
 }

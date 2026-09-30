@@ -87,3 +87,15 @@ def test_number_words():
     assert money_words("2200.50") == ("two thousand two hundred dollars and "
                                       "fifty cents")
     assert money_words("200", negative=True) == "minus two hundred dollars"
+
+
+def test_an_identifier_sized_number_is_read_digit_by_digit_and_never_crashes():
+    """A fact list can carry a ledger sequence, an epoch in milliseconds or a
+    venue id. Past the trillions it is an identifier, not a quantity: read it
+    as written rather than index past the words table (which raised
+    IndexError and failed the whole answer)."""
+    assert integer_words(1_727_740_800_000_123) == (
+        "one seven two seven seven four zero eight zero zero zero zero zero "
+        "one two three")
+    assert integer_words(999_999_999_999_999) .startswith("nine hundred")
+    assert "one seven two seven" in normalise("sequence 1727740800000123")

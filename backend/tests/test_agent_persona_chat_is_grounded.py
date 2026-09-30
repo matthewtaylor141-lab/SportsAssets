@@ -82,8 +82,17 @@ def test_no_yankees_position_is_said_truthfully(db, monkeypatch):
         assert g["status"] == "ANSWERED" and g["found"] is False
         assert g["facts"] == [] and g["citations"] == []
         assert "no production or paper yankees" in g["answer"].lower()
-        assert "paper ledger not in this build" in g["missing_evidence"] \
-            or any(c["status"] == "NOT_IN_THIS_BUILD" for c in g["checked"])
+        # WHICHEVER BUILD THIS IS, the paper ledger was looked at and said
+        # nothing: either its tables are absent and that is named, or (with
+        # migrations 171/172 applied) every paper table was read and matched
+        # no Yankees row -- never silently skipped, never a read failure.
+        paper = [c for c in g["checked"] if c["source"].startswith("paper")]
+        assert paper, g["checked"]
+        if any(c["status"] == "NOT_IN_THIS_BUILD" for c in paper):
+            assert "paper ledger not in this build" in g["missing_evidence"]
+        else:
+            assert all(c["status"] == "NO_MATCH" and c["matches"] == 0
+                       for c in paper), paper
         # no figure is stated at all
         assert not re.search(r"\$\d", g["answer"])
         seen.append(g["answer"])

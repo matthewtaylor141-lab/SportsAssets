@@ -62,6 +62,12 @@ def integer_words(n: int) -> str:
         return "minus " + integer_words(-n)
     if n == 0:
         return "zero"
+    # BEYOND THE LARGEST SCALE THE NUMBER IS AN IDENTIFIER, NOT A QUANTITY
+    # (a ledger sequence, an epoch in ms, a venue id). Read it digit by
+    # digit, exactly as written -- n // 10**12 >= 1000 would otherwise index
+    # past `_ONES` and crash the answer that contains it.
+    if n >= 10 ** 15:
+        return " ".join(_DIGIT[int(c)] for c in str(n))
     parts = []
     for size, name in _SCALES:
         if n >= size:
