@@ -144,3 +144,47 @@ def test_a_budget_limited_search_says_so_and_never_concludes_absence():
     got = XL.search_completeness(facts={"candidate_legs_read": {}},
                                  step=step, alts=alts)
     assert got["budget_statement"].startswith("NOT_REPORTED_BY_THE_SUPPLIER")
+
+
+def _facts(**clr):
+    base = {"examined": 4, "built": 4, "refused": [],
+            "truncated_at_limit": False, "limit": 40,
+            "fixture_candidate_pairs": 4,
+            "search_order": {"catalogue_rows_read": 4}}
+    base.update(clr)
+    return {"held_leg_read": {"ok": True}, "candidate_legs_read": base}
+
+
+def test_the_search_account_names_how_the_search_ended():
+    got = XL.search_account(_facts())
+    assert got["complete"] is True and got["stop_reason"] == XL.STOP_COMPLETE
+    assert got["comparison_scope"] == "COMPLETE: every sibling examined (4 of 4)"
+    # a quote refused for the pass deadline was NOT examined
+    got = XL.search_account(_facts(refused=[
+        {"stage": "QUOTE", "refusal": "THIS_CANDIDATES_OWN_PRICE_WAS_NOT_"
+         "ESTABLISHED", "quote_refusal": "DECISION_DEADLINE_PASSED_BEFORE_"
+         "DISPATCH"},
+        {"stage": "BUILD", "refusal": "THE_LEG_IS_MISSING_A_FACT"}]))
+    assert got["stop_reason"] == XL.STOP_DEADLINE and got["complete"] is False
+    assert got["examined"] == 3 and got["unexamined"] == 1
+    assert got["excluded"] == {"BUILD:THE_LEG_IS_MISSING_A_FACT": 1}
+    assert got["comparison_scope"] == \
+        "BEST_AMONG_EXAMINED (3 of 4; 1 unexamined: DEADLINE)"
+    # the catalogue read's own limit
+    got = XL.search_account(_facts(fixture_candidate_pairs=450,
+                                   examined=40, limit=40,
+                                   search_order={"catalogue_rows_read": 400}))
+    assert got["stop_reason"] == XL.STOP_LIMIT
+    got = XL.search_account(_facts(fixture_candidate_pairs=450,
+                                   examined=40, limit=40,
+                                   truncated_at_limit=True))
+    assert got["stop_reason"] == XL.STOP_BUDGET
+    assert got["unexamined"] == 410
+    # no held leg: the search never ran, and nothing is concluded
+    got = XL.search_account({"held_leg_read": {"ok": False,
+                                               "refusal": "NO_ROW"},
+                             "candidate_legs_read": {}})
+    assert got["stop_reason"] == XL.STOP_NOT_RUN and got["complete"] is False
+    got = XL.search_account({"candidate_legs_read": {"examined": 2}})
+    assert got["stop_reason"] == XL.STOP_NOT_REPORTED
+    assert got["complete"] is None
