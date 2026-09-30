@@ -5755,7 +5755,24 @@ async def funded_pair_inputs(conn, pos, *, at, deferred=None,
         "refused": cands.get("refused"), "why": cands.get("why"),
         "netting_exclusion": cands.get("netting_exclusion"),
         "every_candidate_was_attempted": cands.get(
-            "every_candidate_was_attempted")}
+            "every_candidate_was_attempted"),
+        # ── HOW THE SEARCH ENDED, CARRIED TO THE DECISION (XAVIER) ───────
+        # The supplier reports its read budget (the per-pass quote cap), the
+        # catalogue's own count of sibling pairs, whether it stopped at the
+        # cap, and its eligibility block when one was applied. These were
+        # dropped here, so the decision could not say "best among the
+        # examined, N of M" and a limited search read as a complete one.
+        # Carried verbatim; nothing is recomputed and no read is added.
+        "truncated_at_limit": cands.get("truncated_at_limit"),
+        "limit": cands.get("limit"),
+        "fixture_candidate_pairs": cands.get("fixture_candidate_pairs"),
+        "fixture_candidate_slugs": cands.get("fixture_candidate_slugs"),
+        "truncation_note": cands.get("truncation_note"),
+        "eligibility": cands.get("eligibility"),
+        "search_order": {k: (cands.get("search_order") or {}).get(k)
+                         for k in ("catalogue_rows_read", "quoted_at_most",
+                                   "by_rank", "rule")},
+        "refusal": cands.get("refusal")}
     # THE TIE PARTITION, from the held leg's own family and overtime treatment.
     # Both come from reads already done: the family from `sports_type` and the
     # overtime treatment from the venue's captured prose.

@@ -771,14 +771,29 @@ def common_valuation_for(hold_ranking, candidates, *, held_leg=None,
                 "error": "%s: %s" % (type(exc).__name__, str(exc)[:200])}
 
 
-def common_valuation_gate(verdict, cv) -> dict:
-    """May the action `FD.decide` selected be dispatched with real money?"""
+def common_valuation_gate(verdict, cv, policy=None) -> dict:
+    """May the action the policy's decision function selected be dispatched
+    with real money?
+
+    Under the approved EXPECTED_NET_VALUE policy (the default, `policy`
+    None) this is unchanged: the common valuation's own robust winner must be
+    the selected fixed action. Under CAPITAL_PRESERVATION_V1 the SAME
+    valuation's values at both ends of the void range are used, with the
+    preservation rule applied at each end (`xavier_policy.
+    capital_preservation_is_robust`): the rule must pick the selected fixed
+    action at both ends. A hold dispatches nothing either way."""
     sel = dict((verdict or {}).get("selected_candidate") or {})
     action = (verdict or {}).get("selected")
     kind = _CV_ACTION.get(str(action))
     if kind == "HOLD" or action is None:
         return {"permitted": True, "refusal": None,
                 "why": "nothing is dispatched for a hold"}
+    _rule = (((verdict or {}).get("decision_policy") or {}).get(
+        "selection_rule")
+        or ((policy or {}).get("params") or {}).get("selection_rule"))
+    if _rule == "CAPITAL_PRESERVATION_V1":
+        from .agents import xavier_policy as _XP
+        return _XP.capital_preservation_is_robust(verdict, cv, policy)
     if not (cv or {}).get("ok"):
         return {"permitted": False, "refusal": R_CV_UNAVAILABLE,
                 "cv_refusal": (cv or {}).get("refusal")}
@@ -826,8 +841,21 @@ async def decide_and_record(conn, *, decision_id: str, account_id: str,
                             indirect_options: list | None = None,
                             filled_qty_scope: dict | None = None,
                             held_leg=None, sport_permits_tie=None,
-                            fixture_can_void: bool = True) -> dict:
+                            fixture_can_void: bool = True,
+                            policy: dict | None = None,
+                            shadow_policy: dict | None = None,
+                            search_account: dict | None = None) -> dict:
     """ONE COMPARISON, THEN WRITE IT DOWN BEFORE THE OUTCOME EXISTS.
+
+    `policy` is Xavier's ACTIVE management policy (`agents.xavier_policy.
+    load`; None = the code default, the approved EXPECTED_NET_VALUE policy).
+    It names the ONE decision function that runs (`xavier_policy.run`):
+    EXPECTED_NET_VALUE -> `FD.decide` unchanged; CAPITAL_PRESERVATION_V1 ->
+    `xavier_policy.decide`. `shadow_policy` is the other one, run on the SAME
+    frozen inputs and recorded as `shadow_comparison` -- displayed, never
+    dispatched. `search_account` (`xavier_ladder.search_account`) is how the
+    hedge search ended; a policy that requires a complete comparison
+    withholds every acquisition from an incomplete one BEFORE the choice.
 
     `hold_ranking` is `bettor_mgmt_select.rank_with_hold`'s own output, UNCHANGED
     -- so HOLD, DIRECT_EXIT and REDUCE are the ones the deployed selector
@@ -950,12 +978,35 @@ async def decide_and_record(conn, *, decision_id: str, account_id: str,
                 None if iu is None else round(hold_value + float(iu), 6))
         row["candidate"] = dict(cand, **upd)
     candidates = [r["candidate"] for r in priced if r.get("candidate") is not None]
+    # ── XAVIER'S POLICY: WHICH DECISION FUNCTION RUNS (one selector) ───
+    from .agents import xavier_policy as _XP
+    _pol = policy if policy is not None else _XP.code_default()
+    # A POLICY REQUIRING A COMPLETE COMPARISON withholds every acquisition
+    # from an incomplete hedge search BEFORE the choice, so HOLD / EXIT /
+    # REDUCE are still chosen between and a protective exit is never
+    # suppressed by the search being cut short.
+    _sgate = _XP.gate_incomplete_search(candidates, _pol, search_account)
+    if _sgate["applied"]:
+        _ungated = _XP.run(_pol, hold_ranking=hold_ranking,
+                           indirect_candidates=candidates, limits=limits,
+                           capital_duration_h=capital_duration_h)
+        _sgate["would_have_selected"] = [
+            _ungated.get("selected"),
+            (_ungated.get("selected_candidate") or {}).get("candidate_id")]
+    candidates = _sgate.pop("candidates")
+    out["search_policy_gate"] = _sgate
+    out["search_account"] = search_account
     out["indirect_candidates"] = candidates
     out["indirect_candidate"] = candidates[0] if len(candidates) == 1 else None
     out["candidate_predictions"] = priced
-    verdict = FD.decide(hold_ranking=hold_ranking,
-                        indirect_candidates=candidates,
-                        limits=limits, capital_duration_h=capital_duration_h)
+    _frozen = dict(hold_ranking=hold_ranking, indirect_candidates=candidates,
+                   limits=limits, capital_duration_h=capital_duration_h)
+    verdict = _XP.run(_pol, **_frozen)
+    out["decision_policy"] = verdict.get("decision_policy")
+    # THE OTHER POLICY, ON THE SAME FROZEN INPUTS: displayed, never
+    # dispatched (nothing below reads it to bind, claim or send).
+    out["shadow_comparison"] = _XP.shadow_comparison(
+        verdict, shadow_policy, **_frozen)
     # ── DOES THE CHOICE SURVIVE THE VOID RATE'S UPPER BOUND? ─────────
     #
     # Only the distribution-priced acquisitions depend on the void rate; HOLD,
@@ -975,8 +1026,9 @@ async def decide_and_record(conn, *, decision_id: str, account_id: str,
                        if v2 is not None else
                        dict(c, rankable=False, value_usd=None,
                             blocker="NOT_VALUED_AT_THE_VOID_UPPER_BOUND"))
-        v_up = FD.decide(hold_ranking=hold_ranking, indirect_candidates=alt,
-                         limits=limits, capital_duration_h=capital_duration_h)
+        v_up = _XP.run(_pol, hold_ranking=hold_ranking,
+                       indirect_candidates=alt, limits=limits,
+                       capital_duration_h=capital_duration_h)
 
         def _pick(v):
             sc = v.get("selected_candidate") or {}
@@ -1004,7 +1056,7 @@ async def decide_and_record(conn, *, decision_id: str, account_id: str,
                                void_read=_void,
                                p_partial=(model_inputs or {}).get(
                                    "primary_partial_probability"))
-    _gate = common_valuation_gate(verdict, _cv)
+    _gate = common_valuation_gate(verdict, _cv, policy=_pol)
     out["common_valuation"] = {
         k: _cv.get(k) for k in (
             "ok", "refusal", "selection_basis", "funded_dispatch_permitted",
@@ -3241,6 +3293,21 @@ async def pass_once(conn, *, account_id: str, venue: str,
                     refusal=R_NO_HELD_POSITION,
                     why="nothing is held, so there is nothing to pair")
     groups = XV.two_leg_groups(held)
+    # ── XAVIER'S ACTIVE MANAGEMENT POLICY, read once for the pass ────────
+    # (agent_policy_versions via agents.xavier_policy; the code default --
+    # the approved EXPECTED_NET_VALUE policy -- when none is ACTIVE). It
+    # names the decision function every review below runs; the other policy
+    # is its shadow, recorded and never dispatched. Never raises.
+    try:
+        from .agents import xavier_policy as _XP
+        _policy = await _XP.load(conn)
+        _shadow_policy = await _XP.load_shadow(conn, _policy)
+    except Exception as exc:                                   # noqa: BLE001
+        _policy, _shadow_policy = None, None
+        out["xavier_policy_read_error"] = type(exc).__name__
+    out["xavier_policy"] = (None if _policy is None else {
+        k: _policy.get(k) for k in ("policy_key", "version", "source",
+                                    "why", "params")})
     _group_lock = None
     for pos in held:
         # THE PREVIOUS GROUP'S LOCK is released before the next position is
@@ -3457,6 +3524,17 @@ async def pass_once(conn, *, account_id: str, venue: str,
             _rows_by_id.get(cid), held_qty=pos.get("residual_qty"))
             for cid in _screen_pre}
         step["structure_screens"] = screens
+        # ── HOW THE HEDGE SEARCH ENDED, for the decision and the record ──
+        # (the supplier's own budget report, carried on the pair inputs):
+        # "best among examined (N of M; K unexamined: reason)" whenever the
+        # search did not examine every sibling.
+        try:
+            from .agents import xavier_ladder as _XL
+            _search = _XL.search_account(facts)
+        except Exception as exc:                               # noqa: BLE001
+            _search = {"complete": None, "stop_reason": "UNREADABLE",
+                       "error": type(exc).__name__}
+        step["search_completeness"] = _search
         best = ranking.get("best_admitted")
         if grp is not None and best is not None:
             # A GROUP ALREADY HOLDING ITS HEDGE LEG ACQUIRES NO SECOND ONE:
@@ -3576,7 +3654,9 @@ async def pass_once(conn, *, account_id: str, venue: str,
             model_inputs=facts.get("model_inputs"), now=at,
             held_leg=facts.get("held_leg"),
             sport_permits_tie=facts.get("sport_permits_tie"),
-            fixture_can_void=bool(facts.get("fixture_can_void", True)))
+            fixture_can_void=bool(facts.get("fixture_can_void", True)),
+            policy=_policy, shadow_policy=_shadow_policy,
+            search_account=_search)
         except Exception as exc:                               # noqa: BLE001
             step["refusal"] = R_DECISION_NOT_PERSISTED
             step["decision_refusal"] = "%s: %s" % (type(exc).__name__,
@@ -3599,7 +3679,9 @@ async def pass_once(conn, *, account_id: str, venue: str,
                              "region_probabilities_came_from",
                              "primary_marginal_consistency",
                              "void_rate_sensitivity",
-                             "distribution_basis_recorded")}
+                             "distribution_basis_recorded",
+                             "decision_policy", "shadow_comparison",
+                             "search_policy_gate")}
         # ── XAVIER'S RECORD, WRITTEN BEFORE ANYTHING IS DISPATCHED ───
         #
         # One record per position under responsibility: the chosen action and

@@ -254,3 +254,21 @@ tests/test_rehearsal_xavier_full_scheduled_path.py
 # (0930) held-position management and fill recovery on their own cadence,
 # under one execution authority, never behind the collection cycle
 tests/test_management_runs_on_its_own_cadence.py
+# (1002) Xavier's spread ladder through cycle(): every +1.5..+4.5 alternative
+# reaches the comparison; wider-but-dearer loses; the $1.10 pair; fees; 10/6
+tests/test_xavier_ladder_compares_every_spread.py
+# (1002) Xavier's payout tables: unestablished void never assumed, the
+# combined-state minimum, a budget-limited search says so
+tests/test_xavier_ladder_tables_are_whole_position.py
+# (1002) HOLD, EXIT, REDUCE and an indirect pair each selected through the
+# real decision path, never by injecting the winner
+tests/test_xavier_selects_each_action_through_the_real_path.py
+# (1002) XAVIER_MANAGEMENT_POLICY_V1: default parity with decide(), the
+# disabled capital-preservation leg, no risk limits as parameters, storage
+tests/test_xavier_policy_default_is_the_approved_policy.py
+# (1002) Xavier's workspace reads truthfully (EMPTY named), its decision
+# route, and after_review's links into agent_decisions
+tests/test_xavier_workspace_reads_truthfully.py
+# (1002) search completeness through _funded_service (budget spent, persisted,
+# served; EXIT/REDUCE kept) and the policy selecting the real decision function
+tests/test_xavier_search_completeness_and_policy_through_the_cycle.py
