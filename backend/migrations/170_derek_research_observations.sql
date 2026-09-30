@@ -52,7 +52,7 @@
 --     model registry reads it to fit, evaluate and re-verify a model's
 --     training records -- which is a probability, never an order.
 --
--- ADDITIVE. Two new tables; nothing existing is altered. No foreign key to the
+-- ADDITIVE. Three new tables; nothing existing is altered. No foreign key to the
 -- valuation, deliberately: an observation is a frozen record and must not
 -- block (or be cascaded by) a later clean-up of the valuation table; the
 -- labeller joins by id and an unjoinable observation is simply not a label.
@@ -117,6 +117,14 @@ CREATE TABLE IF NOT EXISTS derek_research_observations (
     -- recorded, nothing re-queried or inferred; recorded_at is the backfill
     -- instant; no model prediction is frozen retroactively).
     collection_mode         text        NOT NULL,
+    -- WHAT KIND OF EVIDENCE IT IS. PROSPECTIVE_LIVE: recorded by the live
+    -- cycle at the decision, features frozen then (and the approved model's
+    -- prediction, when one existed). RETROSPECTIVE_STORED: reconstructed later
+    -- from the stored row; it may form a labelled RETROSPECTIVE cohort and
+    -- can NEVER count as a prospective prediction of any model. Prospective
+    -- evaluation and approval count only PROSPECTIVE_LIVE rows recorded after
+    -- the evaluated model's registration (bettor_funded_model.evidence_cohorts).
+    evidence_class          text        NOT NULL,
     recorded_at             timestamptz NOT NULL DEFAULT now(),
 
     CONSTRAINT derek_research_observations_one_per_valuation
@@ -138,6 +146,18 @@ CREATE TABLE IF NOT EXISTS derek_research_observations (
                 'AGE_BOUND_NOT_RECORDED_ON_THE_VALUATION'))),
     CONSTRAINT derek_research_observations_collection_mode_ck CHECK (
         collection_mode IN ('LIVE_CYCLE', 'BACKFILL_FROM_STORED_VALUATION')),
+    --: THE EVIDENCE CLASS FOLLOWS HOW THE ROW WAS COLLECTED, AND NOTHING ELSE.
+    CONSTRAINT derek_research_observations_evidence_class_ck CHECK (
+        (collection_mode = 'LIVE_CYCLE'
+         AND evidence_class = 'PROSPECTIVE_LIVE')
+        OR (collection_mode = 'BACKFILL_FROM_STORED_VALUATION'
+            AND evidence_class = 'RETROSPECTIVE_STORED')),
+    --: A RETROSPECTIVE ROW EXISTS ONLY WHERE THE STORED ROW HELD THE ORIGINAL
+    --: TIMESTAMPS: our receipt of the price and the Pinnacle reading's stamp.
+    CONSTRAINT derek_research_observations_stored_timestamps_ck CHECK (
+        evidence_class <> 'RETROSPECTIVE_STORED'
+        OR (price_received_at IS NOT NULL
+            AND pinnacle_observed_at IS NOT NULL)),
     --: A BACKFILL NEVER CARRIES A PREDICTION IT DID NOT MAKE AT THE DECISION.
     CONSTRAINT derek_research_observations_backfill_no_model_ck CHECK (
         collection_mode = 'LIVE_CYCLE' OR model_p IS NULL),
@@ -185,6 +205,8 @@ CREATE TABLE IF NOT EXISTS derek_research_model_runs (
     fitted       jsonb,
     evaluations  jsonb,
     detail       jsonb,
+    -- EVERY MODEL THE RUN ATTEMPTED (derek_research_model_attempts.attempt_id)
+    attempted_model_ids text[] NOT NULL DEFAULT '{}',
     promoted     boolean     NOT NULL DEFAULT FALSE,
     recorded_at  timestamptz NOT NULL DEFAULT now(),
     CONSTRAINT derek_research_model_runs_one_per_day UNIQUE (run_day),
@@ -193,6 +215,40 @@ CREATE TABLE IF NOT EXISTS derek_research_model_runs (
         'EVALUATED_WITHOUT_REFIT', 'FIT_REFUSED', 'LABELS_UNREADABLE')),
     CONSTRAINT derek_research_model_runs_never_promotes_ck CHECK (
         promoted = FALSE)
+);
+
+-- ── EVERY ATTEMPTED FIT, INCLUDING THE ONES THAT FAILED ─────────────────
+-- One row per attempt at fitting the entry model on research observations,
+-- whatever came of it: its declared (frozen) evaluation cohort, written
+-- BEFORE the fit; the training rows and fixtures it saw; the hash of the set
+-- it attempted and, when fitted, the registered records' hash; and the
+-- outcome. A registered attempt's id is the bettor_funded_models.model_id.
+CREATE TABLE IF NOT EXISTS derek_research_model_attempts (
+    attempt_id          text PRIMARY KEY,
+    run_id              text,
+    model_key           text        NOT NULL,
+    source              text        NOT NULL,
+    cohort              text        NOT NULL,
+    attempted_at        timestamptz NOT NULL,
+    fit_through         timestamptz NOT NULL,
+    evaluation_cohort   jsonb       NOT NULL,
+    outcome             text        NOT NULL,
+    train_rows          int         NOT NULL,
+    train_fixtures      int         NOT NULL,
+    attempted_set_sha   text        NOT NULL,
+    records_sha         text,
+    refusal             text,
+    detail              jsonb,
+    recorded_at         timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT derek_research_model_attempts_outcome_ck CHECK (outcome IN (
+        'REGISTERED', 'REGISTERED_DEGENERATE', 'FIT_REFUSED',
+        'REGISTRATION_REFUSED', 'RAISED')),
+    CONSTRAINT derek_research_model_attempts_registered_ck CHECK (
+        (outcome IN ('REGISTERED', 'REGISTERED_DEGENERATE'))
+        = (records_sha IS NOT NULL)),
+    CONSTRAINT derek_research_model_attempts_refusal_ck CHECK (
+        outcome IN ('REGISTERED', 'REGISTERED_DEGENERATE')
+        OR refusal IS NOT NULL)
 );
 
 CREATE OR REPLACE FUNCTION derek_research_record_is_append_only()
@@ -207,6 +263,12 @@ DROP TRIGGER IF EXISTS derek_research_model_runs_append_only_trg
     ON derek_research_model_runs;
 CREATE TRIGGER derek_research_model_runs_append_only_trg
     BEFORE UPDATE OR DELETE ON derek_research_model_runs
+    FOR EACH ROW EXECUTE FUNCTION derek_research_record_is_append_only();
+
+DROP TRIGGER IF EXISTS derek_research_model_attempts_append_only_trg
+    ON derek_research_model_attempts;
+CREATE TRIGGER derek_research_model_attempts_append_only_trg
+    BEFORE UPDATE OR DELETE ON derek_research_model_attempts
     FOR EACH ROW EXECUTE FUNCTION derek_research_record_is_append_only();
 
 DROP TRIGGER IF EXISTS derek_research_observations_append_only_trg

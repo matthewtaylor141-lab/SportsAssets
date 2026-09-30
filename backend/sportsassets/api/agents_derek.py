@@ -452,6 +452,18 @@ async def model_qualification(conn) -> dict:
                                 if await _regclass(
                                     conn, "derek_research_model_runs")
                                 else None)
+    data["recent_attempts"] = ([{
+        "attempt_id": r["attempt_id"], "run_id": r["run_id"],
+        "cohort": r["cohort"], "outcome": r["outcome"],
+        "refusal": r["refusal"], "train_rows": r["train_rows"],
+        "train_fixtures": r["train_fixtures"],
+        "attempted_set_sha": r["attempted_set_sha"],
+        "records_sha": r["records_sha"],
+        "attempted_at": _iso(r["attempted_at"])}
+        for r in await conn.fetch(
+            "SELECT * FROM derek_research_model_attempts "
+            " ORDER BY attempted_at DESC LIMIT 10")]
+        if await _regclass(conn, "derek_research_model_attempts") else None)
     models = []
     if await _regclass(conn, "bettor_funded_models"):
         for r in await conn.fetch(

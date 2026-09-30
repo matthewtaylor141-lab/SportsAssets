@@ -95,6 +95,14 @@ S_NO_PRICE = "NO_PRICE_ON_THE_VALUATION"
 S_PRICE_OUT_OF_RANGE = "PRICE_NOT_STRICTLY_BETWEEN_0_AND_1"
 S_NO_PINNACLE = "NO_PINNACLE_PROBABILITY_ON_THE_VALUATION"
 S_NO_FIXTURE = "NO_FIXTURE_IDENTITY_ON_THE_VALUATION"
+#: A BACKFILL is retrospective evidence only where the stored row holds the
+#: original timestamps; otherwise it is excluded, and counted.
+S_BACKFILL_NO_PRICE_RECEIPT = \
+    "BACKFILL_EXCLUDED_STORED_ROW_HOLDS_NO_PRICE_RECEIPT_TIME"
+S_BACKFILL_NO_PINNACLE_STAMP = \
+    "BACKFILL_EXCLUDED_STORED_ROW_HOLDS_NO_PINNACLE_OBSERVED_AT"
+S_BACKFILL_NO_DECISION_TIME = \
+    "BACKFILL_EXCLUDED_STORED_ROW_HOLDS_NO_DECISION_TIME"
 
 #: ── HOW AN OBSERVATION WAS COLLECTED (CHECKed by migration 170) ──────────
 MODE_LIVE = "LIVE_CYCLE"
@@ -300,6 +308,14 @@ def observation_from_row(row: dict, *, approved: dict | None = None,
     if pin is None:
         return None, S_NO_PINNACLE
     decided = _epoch(r.get("decided_at"))
+    if mode != MODE_LIVE:
+        # RETROSPECTIVE ONLY WHERE THE ORIGINAL TIMESTAMPS WERE STORED.
+        if decided is None:
+            return None, S_BACKFILL_NO_DECISION_TIME
+        if pt["received_at"] is None:
+            return None, S_BACKFILL_NO_PRICE_RECEIPT
+        if _epoch(r.get("observed_at")) is None:
+            return None, S_BACKFILL_NO_PINNACLE_STAMP
     feats = {"acquisition_price": round(float(price), 9),
              "payout_is_complement": (1.0 if r.get("payout_is_complement")
                                       else 0.0)}
@@ -338,6 +354,8 @@ def observation_from_row(row: dict, *, approved: dict | None = None,
         "model_id": mdl["model_id"], "model_version": mdl["model_version"],
         "model_p": mdl["model_p"], "model_absent_reason": mdl["absent"],
         "collection_mode": mode,
+        "evidence_class": (FM.EVIDENCE_CLASS_LIVE if mode == MODE_LIVE
+                           else FM.EVIDENCE_CLASS_STORED),
     }, None
 
 
@@ -389,7 +407,8 @@ INSERT_SQL = """
          pinnacle_p, pinnacle_observed_at, pinnacle_received_at,
          pinnacle_overround, devig_method, pinnacle_source_version,
          features, feature_sha, model_id, model_version, model_p,
-         model_absent_reason, observer_version, collection_mode)
+         model_absent_reason, observer_version, collection_mode,
+         evidence_class)
     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,to_timestamp($13),
             $14,$15,$16,
             CASE WHEN $17::float8 IS NULL THEN NULL ELSE to_timestamp($17) END,
@@ -397,7 +416,7 @@ INSERT_SQL = """
             $19,$20,$21,$22::jsonb,$23,
             CASE WHEN $24::float8 IS NULL THEN NULL ELSE to_timestamp($24) END,
             CASE WHEN $25::float8 IS NULL THEN NULL ELSE to_timestamp($25) END,
-            $26,$27,$28,$29::jsonb,$30,$31,$32,$33,$34,$35,$36)
+            $26,$27,$28,$29::jsonb,$30,$31,$32,$33,$34,$35,$36,$37)
     ON CONFLICT DO NOTHING
     RETURNING observation_id
 """
@@ -420,7 +439,8 @@ def _insert_args(o: dict) -> tuple:
             o["devig_method"], o["pinnacle_source_version"],
             json.dumps(o["features"]), o["feature_sha"], o["model_id"],
             o["model_version"], o["model_p"], o["model_absent_reason"],
-            OBSERVER_VERSION, o.get("collection_mode") or MODE_LIVE)
+            OBSERVER_VERSION, o.get("collection_mode") or MODE_LIVE,
+            o.get("evidence_class") or _FM().EVIDENCE_CLASS_LIVE)
 
 
 async def _regclass(conn, name) -> bool:
@@ -588,6 +608,8 @@ async def observe_cycle(conn, *, now: float, elapsed_s: float = 0.0) -> dict:
 LABEL_SQL = """
     SELECT o.observation_id, o.fixture, o.features, o.feature_sha,
            o.price, o.price_basis, o.cohort, o.pinnacle_p, o.record_purpose,
+           o.evidence_class,
+           extract(epoch FROM o.recorded_at) AS recorded_epoch,
            extract(epoch FROM o.decided_at) AS decided_epoch,
            v.id AS valuation_id, v.outcome, v.outcome_basis,
            extract(epoch FROM v.outcome_at) AS outcome_epoch
@@ -617,7 +639,7 @@ async def labelled_observations(conn, *, after=None, through=None,
     keys = ("decision_ids", "groups", "fixtures", "decided_at",
             "feature_shas", "outcome_available_at", "leg_outcomes",
             "pushes", "outcome_versions", "pinnacle_p", "price_basis",
-            "cohorts")
+            "cohorts", "evidence_classes", "recorded_at")
     for k in keys:
         out[k] = []
     sql, args = LABEL_SQL, [ext.EXPERIMENT_ID, list(LABEL_BASES)]
@@ -661,6 +683,8 @@ async def labelled_observations(conn, *, after=None, through=None,
         out["pinnacle_p"].append(_f(r["pinnacle_p"]))
         out["price_basis"].append(r["price_basis"])
         out["cohorts"].append(r["cohort"])
+        out["evidence_classes"].append(r["evidence_class"])
+        out["recorded_at"].append(float(r["recorded_epoch"]))
     out["n_events"] = len({str(f) for f in out["fixtures"]})
     return dict(out, ok=True, refusal=None, n=len(out["labels"]),
                 target=FM.TARGET_ENTRY_PAYOUT,
@@ -810,18 +834,154 @@ def _eval_summary(ev: dict) -> dict:
             "promoted": False}
 
 
+ATTEMPT_REGISTERED = "REGISTERED"
+ATTEMPT_DEGENERATE = "REGISTERED_DEGENERATE"
+ATTEMPT_FIT_REFUSED = "FIT_REFUSED"
+ATTEMPT_REG_REFUSED = "REGISTRATION_REFUSED"
+ATTEMPT_RAISED = "RAISED"
+
+
+def evaluation_cohort_for(cohort: str, *, declared_at: float) -> dict:
+    """THE EVALUATION COHORT, DECLARED BEFORE A FIT AND FROZEN WITH IT.
+    Stored in the model's training provenance, which migration 138's trigger
+    makes immutable; a refit is a NEW model with its own declaration."""
+    FM = _FM()
+    return {"declared_before_fitting": True,
+            "declared_at_epoch_s": float(declared_at),
+            "model_key": FM.KEY_ENTRY_PAYOUT,
+            "source": FM.SOURCE_RESEARCH_OBSERVATIONS,
+            "cohorts": [str(cohort)],
+            "evidence_class": FM.EVIDENCE_CLASS_LIVE,
+            "prospective_window_start": (
+                "THIS MODEL'S REGISTRATION INSTANT "
+                "(bettor_funded_models.created_at, immutable)"),
+            "rule": ("PROSPECTIVE_LIVE observations of these cohorts, decided, "
+                     "recorded and resolved after registration, on fixtures "
+                     "the fit could not see; RETROSPECTIVE_STORED rows never "
+                     "count"),
+            "never_changes": ("a refit is a new model with its own frozen "
+                              "cohort; it never re-scores or replaces this "
+                              "one")}
+
+
+def _degenerate(fitted: dict, lab_rows, labels) -> str | None:
+    """Why a fitted model says nothing, or None."""
+    FM = _FM()
+    if len({float(y) for y in labels}) < 2:
+        return "SINGLE_CLASS_TRAINING_LABELS"
+    try:
+        m = FM.load(fitted["params"])
+        preds = [float(m.predict(r)) for r in lab_rows]
+    except Exception as exc:                                   # noqa: BLE001
+        return "PREDICTIONS_RAISED:%s" % type(exc).__name__
+    if preds and max(preds) - min(preds) < 1e-6:
+        return "CONSTANT_PREDICTIONS_ON_THE_TRAINING_ROWS"
+    return None
+
+
+async def attempt_fit(conn, *, model_id: str, cohort: str, through,
+                      run_id: str | None = None, now: float | None = None,
+                      estimator: str | None = None) -> dict:
+    """ONE ATTEMPT TO FIT THE ENTRY MODEL ON ONE COHORT, ALWAYS RECORDED.
+
+    Declares the evaluation cohort BEFORE fitting (stored, frozen, in the
+    provenance), fits through `bettor_funded_model.fit_from_records`,
+    registers a CANDIDATE, and writes one `derek_research_model_attempts`
+    row whatever happened -- refused, degenerate, raised or registered --
+    with the training rows and fixtures, the attempted set's hash and, when
+    registered, the records' hash. Never promotes. Never raises."""
+    import datetime as _dt
+    import hashlib
+    FM = _FM()
+    at = float(now if now is not None else time.time())
+    th = _epoch(through)
+    through_dt = _dt.datetime.fromtimestamp(th, _dt.timezone.utc)
+    ecoh = evaluation_cohort_for(cohort, declared_at=at)
+    out: dict[str, Any] = {"attempt_id": str(model_id), "cohort": cohort,
+                           "run_id": run_id, "evaluation_cohort": ecoh,
+                           "promoted": False}
+    rows_n = fx_n = 0
+    set_sha = hashlib.sha256(b"[]").hexdigest()
+    outcome, refusal, records_sha, detail = ATTEMPT_RAISED, None, None, {}
+    try:
+        lab = await labelled_observations(conn, through=th,
+                                          outcomes_through=th,
+                                          cohorts=[cohort])
+        if lab.get("ok"):
+            rows_n, fx_n = int(lab["n"]), int(lab["n_events"])
+            set_sha = hashlib.sha256(json.dumps(sorted(
+                str(d) for d in lab["decision_ids"])).encode()).hexdigest()
+        fit = await FM.fit_from_records(
+            conn, through=through_dt, model_key=FM.KEY_ENTRY_PAYOUT,
+            source=FM.SOURCE_RESEARCH_OBSERVATIONS, cohorts=[cohort],
+            estimator=estimator or FM.SCHEDULED_ESTIMATOR,
+            windows={"declared_before_fitting": True,
+                     "evaluation_cohort": ecoh})
+        out["fit"] = {k: fit.get(k) for k in ("ok", "refusal", "n_events",
+                                               "train_rows")}
+        if not fit.get("ok"):
+            outcome, refusal = ATTEMPT_FIT_REFUSED, str(fit.get("refusal"))
+        else:
+            rows_n = int(fit.get("train_rows") or rows_n)
+            fx_n = int(fit.get("n_events") or fx_n)
+            reg = await FM.register(
+                conn, model_id=str(model_id), model_version=str(model_id),
+                fitted=fit, fit_through=through_dt,
+                model_key=FM.KEY_ENTRY_PAYOUT)
+            out["registration"] = {k: reg.get(k) for k in (
+                "ok", "refusal", "why", "inserted")}
+            if not reg.get("ok"):
+                outcome = ATTEMPT_REG_REFUSED
+                refusal = str(reg.get("refusal"))
+            else:
+                records_sha = fit["training_provenance"]["records_sha"]
+                created = _epoch((reg.get("model") or {}).get("created_at"))
+                detail["prospective_window_start_epoch_s"] = created
+                why = _degenerate(fit, lab.get("rows") or [],
+                                  lab.get("labels") or [])
+                outcome = ATTEMPT_DEGENERATE if why else ATTEMPT_REGISTERED
+                if why:
+                    detail["degenerate_because"] = why
+    except Exception as exc:                                   # noqa: BLE001
+        outcome, refusal = ATTEMPT_RAISED, "%s: %s" % (
+            type(exc).__name__, str(exc)[:200])
+    out.update(outcome=outcome, refusal=refusal, train_rows=rows_n,
+               train_fixtures=fx_n, attempted_set_sha=set_sha,
+               records_sha=records_sha, detail=detail)
+    try:
+        out["recorded"] = await conn.fetchval(
+            "INSERT INTO derek_research_model_attempts (attempt_id, run_id, "
+            " model_key, source, cohort, attempted_at, fit_through, "
+            " evaluation_cohort, outcome, train_rows, train_fixtures, "
+            " attempted_set_sha, records_sha, refusal, detail) "
+            "VALUES ($1,$2,$3,$4,$5,to_timestamp($6),to_timestamp($7),"
+            " $8::jsonb,$9,$10,$11,$12,$13,$14,$15::jsonb) "
+            "ON CONFLICT DO NOTHING RETURNING attempt_id",
+            str(model_id), run_id, FM.KEY_ENTRY_PAYOUT,
+            FM.SOURCE_RESEARCH_OBSERVATIONS, str(cohort), at, th,
+            json.dumps(ecoh), outcome, rows_n, fx_n, set_sha, records_sha,
+            refusal, json.dumps(detail, default=str)) is not None
+    except Exception as exc:                                   # noqa: BLE001
+        out["recorded"] = False
+        out["record_error"] = type(exc).__name__
+    return out
+
+
 async def daily_model_run(conn, *, now: float) -> dict:
     """ONCE PER UTC DAY. When a cohort's labelled research fixtures reach
-    MIN_TRAIN_EVENTS: fit (that cohort only -- never pooled), register a
-    CANDIDATE, and evaluate the cohort's scheduled candidates against the raw
-    venue price, Pinnacle and the base rate. Otherwise record
-    INSUFFICIENT_LABELLED_FIXTURES with the exact counts. A refit happens only
-    when the cohort has grown by CANDIDATE_REFIT_MIN_NEW_EVENTS fixtures since
-    the last scheduled fit. NEVER promotes. Never raises."""
-    import datetime as _dt
+    MIN_TRAIN_EVENTS: ATTEMPT a fit on that cohort only (never pooled) --
+    every attempt recorded, its evaluation cohort declared and frozen before
+    fitting -- and evaluate the cohort's scheduled candidates, each on its
+    OWN frozen cohort, against the raw venue price, Pinnacle and the base
+    rate. Otherwise record INSUFFICIENT_LABELLED_FIXTURES with the exact
+    counts. A refit happens only when the cohort has grown by
+    CANDIDATE_REFIT_MIN_NEW_EVENTS fixtures since the last scheduled
+    attempt, and is a NEW model. NEVER promotes. Never raises (the caller
+    guards)."""
     FM = _FM()
     at = float(now)
     day = _day_of(at)
+    run_id = "derek-research-run:%s" % day
     out: dict[str, Any] = {"run_day": str(day), "ran": False,
                            "promoted": False, "promotion": NEVER_PROMOTES}
     if not (await _regclass(conn, "derek_research_model_runs")
@@ -836,6 +996,7 @@ async def daily_model_run(conn, *, now: float) -> dict:
     lab = await labelled_observations(conn, through=at, outcomes_through=at)
     fitted: dict = {}
     evaluations: dict = {}
+    attempted: list = []
     if not lab.get("ok"):
         outcome, counts = RUN_LABELS_UNREADABLE, {"error": lab.get("error")}
     else:
@@ -843,40 +1004,36 @@ async def daily_model_run(conn, *, now: float) -> dict:
         ready = [c for c, b in counts["by_cohort"].items()
                  if b["have_labelled_fixtures"] >= FM.MIN_TRAIN_EVENTS]
         outcome = RUN_INSUFFICIENT
-        through = _dt.datetime.fromtimestamp(at, _dt.timezone.utc)
         for c in ready:
             prefix = "%s:%s:" % (AUTO_MODEL_PREFIX, c)
-            prev = await conn.fetch(
-                "SELECT model_id, state, training_provenance "
-                "  FROM bettor_funded_models WHERE model_key = $1 "
-                "   AND model_id LIKE $2 ORDER BY created_at DESC",
-                FM.KEY_ENTRY_PAYOUT, prefix + "%")
+            prev = await conn.fetchrow(
+                "SELECT attempt_id, train_fixtures "
+                "  FROM derek_research_model_attempts "
+                " WHERE attempt_id LIKE $1 ORDER BY attempted_at DESC "
+                " LIMIT 1", prefix + "%")
             have = counts["by_cohort"][c]["have_labelled_fixtures"]
-            last_n = (None if not prev else int(
-                (_j(prev[0]["training_provenance"]) or {}).get("n_events")
-                or 0))
+            last_n = None if prev is None else int(prev["train_fixtures"])
             grew = None if last_n is None else have - last_n
             if last_n is None or grew >= FM.CANDIDATE_REFIT_MIN_NEW_EVENTS:
-                mid = prefix + str(day)
-                fit = await FM.fit_from_records(
-                    conn, through=through, model_key=FM.KEY_ENTRY_PAYOUT,
-                    source=FM.SOURCE_RESEARCH_OBSERVATIONS, cohorts=[c])
-                reg = (await FM.register(
-                    conn, model_id=mid, model_version=mid, fitted=fit,
-                    fit_through=through, model_key=FM.KEY_ENTRY_PAYOUT)
-                    if fit.get("ok") else {"ok": False,
-                                           "refusal": fit.get("refusal")})
-                fitted[c] = {"refit": True, "model_id": mid,
-                             "ok": bool(reg.get("ok")),
-                             "refusal": reg.get("refusal"),
-                             "training_fixtures": fit.get("n_events"),
+                att = await attempt_fit(conn, model_id=prefix + str(day),
+                                        cohort=c, through=at, run_id=run_id,
+                                        now=at)
+                attempted.append(att["attempt_id"])
+                fitted[c] = {"refit": True,
+                             "model_id": att["attempt_id"],
+                             "outcome": att["outcome"],
+                             "ok": att["outcome"] in (ATTEMPT_REGISTERED,
+                                                      ATTEMPT_DEGENERATE),
+                             "refusal": att["refusal"],
+                             "training_rows": att["train_rows"],
+                             "training_fixtures": att["train_fixtures"],
+                             "records_sha": att["records_sha"],
                              "fit_through_epoch_s": at}
             else:
                 fitted[c] = {"refit": False, "why": (
-                    "%d new labelled fixture(s) since the last scheduled fit "
-                    "(%d); a refit needs %d" % (grew, last_n,
-                                                FM.CANDIDATE_REFIT_MIN_NEW_EVENTS
-                                                ))}
+                    "%d new labelled fixture(s) since the last scheduled "
+                    "attempt (%d); a refit needs %d"
+                    % (grew, last_n, FM.CANDIDATE_REFIT_MIN_NEW_EVENTS))}
             cands = [r["model_id"] for r in await conn.fetch(
                 "SELECT model_id FROM bettor_funded_models "
                 " WHERE model_key = $1 AND model_id LIKE $2 AND state = $3 "
@@ -884,18 +1041,19 @@ async def daily_model_run(conn, *, now: float) -> dict:
                 FM.KEY_ENTRY_PAYOUT, prefix + "%", FM.STATE_CANDIDATE,
                 EVALUATE_LATEST)]
             for mid in cands:
+                # ITS OWN FROZEN COHORT (read from its provenance by the
+                # registry); never another model's.
                 evaluations[mid] = _eval_summary(
                     await FM.evaluate(conn, model_id=mid, now=at))
         if ready:
             outcome = (RUN_FITTED if any(f.get("refit") and f.get("ok")
                                          for f in fitted.values())
                        else RUN_EVALUATED if evaluations else RUN_FIT_REFUSED)
-    run_id = "derek-research-run:%s" % day
     wrote = await conn.fetchval(
         "INSERT INTO derek_research_model_runs (run_id, run_day, ran_at, "
-        " outcome, counts, fitted, evaluations, detail) "
+        " outcome, counts, fitted, evaluations, detail, attempted_model_ids) "
         "VALUES ($1, $2, to_timestamp($3), $4, $5::jsonb, $6::jsonb, "
-        "        $7::jsonb, $8::jsonb) "
+        "        $7::jsonb, $8::jsonb, $9::text[]) "
         "ON CONFLICT DO NOTHING RETURNING run_id",
         run_id, day, at, outcome, json.dumps(counts, default=str),
         json.dumps(fitted, default=str), json.dumps(evaluations, default=str),
@@ -903,9 +1061,10 @@ async def daily_model_run(conn, *, now: float) -> dict:
                     "minimums": FM.qualification_minimums(
                         FM.KEY_ENTRY_PAYOUT),
                     "model_description": FM.ENTRY_PAYOUT_DESCRIPTION},
-                   default=str))
+                   default=str), attempted)
     return dict(out, ran=wrote is not None, run_id=run_id, outcome=outcome,
-                counts=counts, fitted=fitted, evaluations=evaluations)
+                counts=counts, fitted=fitted, evaluations=evaluations,
+                attempted_model_ids=attempted)
 
 
 async def latest_model_run(conn) -> dict | None:
@@ -913,7 +1072,8 @@ async def latest_model_run(conn) -> dict | None:
     read."""
     r = await conn.fetchrow(
         "SELECT run_id, run_day, ran_at, outcome, counts, fitted, "
-        "       evaluations, promoted FROM derek_research_model_runs "
+        "       evaluations, promoted, attempted_model_ids "
+        "  FROM derek_research_model_runs "
         " ORDER BY run_day DESC LIMIT 1")
     if r is None:
         return None
@@ -921,6 +1081,7 @@ async def latest_model_run(conn) -> dict | None:
             "ran_at": _epoch(r["ran_at"]), "outcome": r["outcome"],
             "counts": _j(r["counts"]), "fitted": _j(r["fitted"]),
             "evaluations": _j(r["evaluations"]),
+            "attempted_model_ids": list(r["attempted_model_ids"] or []),
             "promoted": bool(r["promoted"]), "promotion": NEVER_PROMOTES}
 
 

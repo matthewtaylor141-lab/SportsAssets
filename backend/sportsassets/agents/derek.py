@@ -259,7 +259,8 @@ async def model_run_step(conn, *, now: float) -> dict:
                 % type(exc).__name__, "error": str(exc)[:200]}
     return {k: got.get(k) for k in (
         "run_day", "ran", "already_ran", "run_id", "outcome", "counts",
-        "fitted", "refusal", "promoted", "promotion")}
+        "fitted", "attempted_model_ids", "refusal", "promoted",
+        "promotion")}
 
 
 async def collection(conn, *, now: float) -> dict:

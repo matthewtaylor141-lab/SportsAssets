@@ -192,6 +192,14 @@ ENTRY_PAYOUT_SOURCES = (SOURCE_ENTRY_DECISIONS, SOURCE_RESEARCH_OBSERVATIONS)
 #: was trained on and is evaluated on those, the other reported apart.
 COHORT_DISPLAYED = "DISPLAYED_PRICE_AGE_UNKNOWN"
 COHORT_EXECUTABLE = "EXECUTABLE_PRICE_CURRENT"
+#: ── WHAT KIND OF EVIDENCE A RESEARCH ROW IS (migration 170, CHECKed) ────
+#: PROSPECTIVE_LIVE rows were recorded by the live cycle at the decision. A
+#: model's PROSPECTIVE cohort counts only these, and only those RECORDED after
+#: its registration. RETROSPECTIVE_STORED rows were reconstructed later from
+#: stored valuations: labelled retrospective evidence, reported as such,
+#: never prospective, never toward MIN_EVALUATION_EVENTS or a promotion.
+EVIDENCE_CLASS_LIVE = "PROSPECTIVE_LIVE"
+EVIDENCE_CLASS_STORED = "RETROSPECTIVE_STORED"
 PRICE_BASIS_DISPLAYED = "DISPLAYED_BOOK_CURRENCY_UNESTABLISHED"
 PRICE_BASIS_EXECUTABLE = "EXECUTABLE_BOOK_CURRENCY_ESTABLISHED"
 #: What the model is, stated on its record and wherever it is shown.
@@ -1069,7 +1077,9 @@ def _subset(lab: dict, keep: list) -> dict:
               "decided_at", "feature_shas", "outcome_available_at",
               "leg_outcomes", "pushes", "outcome_versions",
               # KEY_ENTRY_PAYOUT's per-row market context (never hashed)
-              "pinnacle_p", "price_basis", "cohorts"):
+              "pinnacle_p", "price_basis", "cohorts",
+              # research rows: what kind of evidence, recorded when
+              "evidence_classes", "recorded_at"):
         if lab.get(k) is not None:
             out[k] = [lab[k][i] for i in keep]
     out["n"] = len(keep)
@@ -1188,6 +1198,19 @@ def _mix(lab: dict) -> dict:
             for c, b in sorted(out.items())}
 
 
+def _class_mix(lab: dict) -> dict | None:
+    cls = lab.get("evidence_classes")
+    if cls is None:
+        return None
+    out: dict = {}
+    for c, fx in zip(cls, lab.get("fixtures") or []):
+        b = out.setdefault(str(c), {"rows": 0, "fixtures": set()})
+        b["rows"] += 1
+        b["fixtures"].add(str(fx))
+    return {c: {"rows": b["rows"], "fixtures": len(b["fixtures"])}
+            for c, b in sorted(out.items())}
+
+
 def input_distribution_shift(trained_cohorts, *, prospective_mix=None
                              ) -> dict:
     """THE TRAINING-VS-LIVE INPUT DIFFERENCE, named. Derek scores the model
@@ -1241,6 +1264,7 @@ def training_population(lab: dict, *, source: str, cohorts_requested=None,
                               else sorted(str(c) for c in cohorts_requested)),
         "rows_excluded_for_cohort": int(excluded_for_cohort),
         "cohort_mix": mix,
+        "evidence_class_mix": _class_mix(lab),
         "price_basis_mix": {b: {"rows": e["rows"],
                                 "fixtures": len(e["fixtures"])}
                             for b, e in sorted(basis_mix.items())},
@@ -1411,7 +1435,13 @@ def declared_cohorts(model: dict):
     prov = (model or {}).get("training_provenance") or {}
     if isinstance(prov, str):
         prov = json.loads(prov)
-    got = (prov.get("training_population") or {}).get("training_cohorts")
+    # THE EVALUATION COHORT DECLARED BEFORE FITTING, when there is one --
+    # frozen with the provenance (migration 138's trigger) -- else the
+    # cohorts the model was trained on.
+    frozen = ((prov.get("windows") or {}).get("evaluation_cohort") or {})
+    got = frozen.get("cohorts")
+    if got is None:
+        got = (prov.get("training_population") or {}).get("training_cohorts")
     return None if got is None else [str(c) for c in got]
 
 
@@ -1689,13 +1719,35 @@ async def evidence_cohorts(conn, *, model_key: str, training_cutoff,
         seen |= await _fixtures_seen_through(conn, training_cutoff, src)
     lab = _holdout(lab, seen)
     fz = _epoch(frozen_at)
+    # RESEARCH ROWS CARRY THEIR EVIDENCE CLASS. Only a PROSPECTIVE_LIVE row
+    # RECORDED after the freeze is a prospective prediction; a row decided
+    # after the freeze but reconstructed from storage (RETROSPECTIVE_STORED),
+    # or recorded before the freeze, is retrospective evidence at best.
+    cls, rec = lab.get("evidence_classes"), lab.get("recorded_at")
+
+    def _live_after(i):
+        if cls is None:
+            return True
+        return (cls[i] == EVIDENCE_CLASS_LIVE and rec is not None
+                and rec[i] is not None and float(rec[i]) > fz)
+    late = [i for i in range(lab["n"]) if lab["decided_at"][i] > fz]
+    pros_i = [i for i in late
+              if (lab["outcome_available_at"][i] or 0) > fz and _live_after(i)]
+    demoted = [i for i in late if not _live_after(i)]
     retro = _subset(lab, [i for i in range(lab["n"])
-                          if lab["decided_at"][i] <= fz])
-    pros = _subset(lab, [i for i in range(lab["n"])
-                         if lab["decided_at"][i] > fz
-                         and (lab["outcome_available_at"][i] or 0) > fz])
-    return {"ok": True, "dropped_fixtures": lab["dropped_fixtures"],
-            EVIDENCE_RETROSPECTIVE: retro, EVIDENCE_PROSPECTIVE: pros}
+                          if lab["decided_at"][i] <= fz] + demoted)
+    pros = _subset(lab, pros_i)
+    out = {"ok": True, "dropped_fixtures": lab["dropped_fixtures"],
+           EVIDENCE_RETROSPECTIVE: retro, EVIDENCE_PROSPECTIVE: pros}
+    if cls is not None:
+        out["not_prospective"] = {
+            "rows_decided_after_the_freeze_but_not_live_after_it":
+                len(demoted),
+            "of_which_retrospective_stored": sum(
+                1 for i in demoted if cls[i] == EVIDENCE_CLASS_STORED),
+            "rule": ("prospective = PROSPECTIVE_LIVE, decided AND recorded "
+                     "AND resolved after the model's registration")}
+    return out
 
 
 def _cohort_report(obj, cohort: dict, *, baseline_rate, kind: str,
@@ -1836,7 +1888,21 @@ async def evaluate(conn, *, model_id: str, account_id: str | None = None,
         elig = entry_payout_eligibility(mc, leaked=bool(leaked), model=mdl,
                                         prospective_mix=pros_mix,
                                         separate=separate, coverage=cov)
+        retro_mc = entry_payout_comparison(
+            obj, coh[EVIDENCE_RETROSPECTIVE], baseline_rate=rate)
+        retro_mc["evidence_kind"] = EVIDENCE_RETROSPECTIVE
+        retro_mc["role"] = (
+            "RETROSPECTIVE_NOT_PROSPECTIVE: rows decided before this model "
+            "was frozen, or reconstructed from storage (RETROSPECTIVE_STORED) "
+            "at any time. Reported; never counted toward "
+            "MIN_EVALUATION_EVENTS, eligibility or promotion")
+        retro_mc["evidence_class_mix"] = _class_mix(
+            coh[EVIDENCE_RETROSPECTIVE])
         doc.update(market_comparison=mc,
+                   retrospective_market_comparison=retro_mc,
+                   not_prospective=coh.get("not_prospective"),
+                   prospective_evidence_class_mix=_class_mix(
+                       coh[EVIDENCE_PROSPECTIVE]),
                    market_comparison_by_training_cohort=by_cohort,
                    approval_eligibility=elig,
                    evaluated_on_cohorts=decl,

@@ -35,10 +35,16 @@ SYNTHETIC AND LABELLED AS SUCH:
      step: bounded, walked backwards, marked BACKFILL_FROM_STORED_VALUATION,
      every value the stored row's own, no model prediction invented, and
      idempotent.
+     Backfilled rows are RETROSPECTIVE_STORED evidence: a model fitted after
+     the backfill can never count them toward MIN_EVALUATION_EVENTS or a
+     promotion; only PROSPECTIVE_LIVE rows recorded after its registration
+     count.
   7. Derek's DAILY MODEL RUN through `after_cycle`, both branches: too few
      labelled fixtures -> INSUFFICIENT_LABELLED_FIXTURES with the exact
      counts, once per day; enough -> fit, register and evaluate a CANDIDATE,
-     never promoted. The workspace shows the latest run.
+     never promoted. Every attempted fit is recorded (refused ones too), its
+     evaluation cohort declared before fitting and frozen with it; the run
+     lists the ids it attempted. The workspace shows the latest run.
 
 SYNTHETIC EVIDENCE. Every price, probability, book and settlement below is a
 test fixture. The approval is a test's (APPROVER says so). Nothing here is a
@@ -126,6 +132,9 @@ async def _purge(conn):
             "DELETE FROM derek_entry_decisions WHERE us_market_slug LIKE $1",
             SYN + "%")
         await conn.execute(
+            "DELETE FROM derek_research_model_attempts "
+            " WHERE attempt_id LIKE 'derek-research-%'")
+        await conn.execute(
             "DELETE FROM derek_research_model_runs "
             " WHERE run_day = ANY($1::date[])", [DR._day_of(t)
                                                 for t in RUN_DAYS])
@@ -210,10 +219,20 @@ async def _calibration_row(conn, *, cid, price, p_pin, decided_at,
     return vid
 
 
-async def _entry_row(conn, *, cid, price, p_pin, decided_at) -> int:
+async def _entry_row(conn, *, cid, price, p_pin, decided_at,
+                     received_at=None) -> int:
     """A SYNTHETIC entry-decision valuation (an executable price on an
-    established book), in the shape the Derek harness writes."""
-    return await conn.fetchval(
+    established book), in the shape the Derek harness writes; with
+    `received_at`, its risk verdict carries the venue clock the lane
+    records."""
+    risk = None if received_at is None else json.dumps({
+        "freshness_evidence": {
+            "venue_age_s": 1.0, "venue_limit_s": 10.0,
+            "venue_age_basis": "SYNTHETIC_M1_SUBSCRIPTION",
+            "venue_clock": {"our_response_received_at": received_at,
+                            "parsed_epoch_s": None,
+                            "basis": "VENUE_CLOCK_NOT_PROVIDED"}}})
+    vid = await conn.fetchval(
         "INSERT INTO external_valuations (experiment_id, version, "
         " source_class, provider, book, devig_method, venue, condition_id, "
         " us_market_slug, contract_selection, sport_family, market, period, "
@@ -229,6 +248,10 @@ async def _entry_row(conn, *, cid, price, p_pin, decided_at) -> int:
         " 'HOME',$6,'ASK','ENTRY_DECISION',to_timestamp($3),'e-' || $2) "
         "RETURNING id", ext.EXPERIMENT_ID, cid, float(decided_at),
         float(p_pin), float(price), LONG)
+    if risk is not None:
+        await conn.execute("UPDATE external_valuations SET risk_verdict = "
+                           "$2::jsonb WHERE id = $1", vid, risk)
+    return vid
 
 
 def _outcomes(rule, per=PER_PRICE):
@@ -301,17 +324,13 @@ async def _train_register(conn, monkeypatch, *, tag, rule, model_id):
     assert lab["ok"] and lab["n"] == len(made), lab.get("refusal")
     assert set(lab["price_basis"]) == {FM.PRICE_BASIS_DISPLAYED}
     assert set(lab["cohorts"]) == {FM.COHORT_DISPLAYED}
-    cutoff = _dt.datetime.fromtimestamp(time.time() + 1.0,
-                                        tz=_dt.timezone.utc)
-    fitted = await FM.fit_from_records(
-        conn, through=cutoff, model_key=FM.KEY_ENTRY_PAYOUT,
-        source=FM.SOURCE_RESEARCH_OBSERVATIONS, cohorts=[FM.COHORT_DISPLAYED])
-    assert fitted.get("ok"), fitted
-    reg = await FM.register(conn, model_id=model_id, model_version=model_id,
-                            fitted=fitted, fit_through=cutoff,
-                            model_key=FM.KEY_ENTRY_PAYOUT)
-    assert reg.get("ok"), reg
-    return made, fitted, reg
+    # THE ONE FIT PATH, RECORDED AS AN ATTEMPT (a person's here: no run id)
+    att = await DR.attempt_fit(conn, model_id=model_id,
+                               cohort=FM.COHORT_DISPLAYED,
+                               through=time.time() + 1.0)
+    assert att["outcome"] == DR.ATTEMPT_REGISTERED, att
+    assert att["recorded"] is True
+    return made, att
 
 
 async def _prospective(conn, *, tag, rule, n_exec=0):
@@ -484,6 +503,7 @@ def test_a_calibration_valuation_becomes_a_frozen_displayed_price_observation():
     assert obs["model_p"] is None
     assert obs["model_absent_reason"].startswith(DR.A_NO_APPROVED_MODEL)
     assert obs["collection_mode"] == DR.MODE_LIVE
+    assert obs["evidence_class"] == FM.EVIDENCE_CLASS_LIVE
     # nothing on it claims execution
     for k in ("qty", "quantity", "size", "verdict", "plan", "limit_price",
               "admissible", "depth", "fill", "edge"):
@@ -606,6 +626,8 @@ async def test_the_research_table_has_no_order_columns_and_refuses_claims():
         names = [c.strip() for c in cols_sql.replace("\n", " ").split(",")]
         for field, value, ck in (
                 ("collection_mode", "SOMETHING", "collection_mode_ck"),
+                ("evidence_class", FM.EVIDENCE_CLASS_STORED,
+                 "evidence_class_ck"),
                 ("price_basis", FM.PRICE_BASIS_EXECUTABLE, "basis_follows"),
                 ("cohort", FM.COHORT_EXECUTABLE, "basis_follows"),
                 ("price_timing_uncertainty", DR.TIMING_BOUNDED,
@@ -620,10 +642,22 @@ async def test_the_research_table_has_no_order_columns_and_refuses_claims():
         # A BACKFILLED ROW CANNOT CARRY A MODEL PREDICTION
         args = list(base)
         args[0], args[1] = "derek-research:ddl:bf", -424245
-        for f, v in (("collection_mode", DR.MODE_BACKFILL), ("model_p", 0.6),
+        for f, v in (("collection_mode", DR.MODE_BACKFILL),
+                     ("evidence_class", FM.EVIDENCE_CLASS_STORED),
+                     ("model_p", 0.6),
                      ("model_id", "m"), ("model_absent_reason", None)):
             args[names.index(f)] = v
         with pytest.raises(asyncpg.PostgresError, match="backfill_no_model"):
+            await conn.fetchval(DR.INSERT_SQL, *args)
+        # A RETROSPECTIVE ROW WITHOUT THE ORIGINAL TIMESTAMPS IS REFUSED
+        args = list(base)
+        args[0], args[1] = "derek-research:ddl:bft", -424246
+        for f, v in (("collection_mode", DR.MODE_BACKFILL),
+                     ("evidence_class", FM.EVIDENCE_CLASS_STORED),
+                     ("price_received_at", None)):
+            args[names.index(f)] = v
+        with pytest.raises(asyncpg.PostgresError,
+                           match="stored_timestamps"):
             await conn.fetchval(DR.INSERT_SQL, *args)
         # NO ROW MAY CLAIM ORDER USE OR KNOWN EXECUTION QUALITY, whatever
         # writes it: a minimal raw row, with one claim added at a time.
@@ -633,7 +667,8 @@ async def test_the_research_table_has_no_order_columns_and_refuses_claims():
                " price_basis, price_source, price_source_ts_basis, "
                " price_timing_uncertainty, price_timing_basis, "
                " price_source_identity, pinnacle_p, features, feature_sha, "
-               " model_absent_reason, observer_version, collection_mode%s)"
+               " model_absent_reason, observer_version, collection_mode, "
+               " evidence_class%s)"
                " VALUES "
                "($1, -424244, 'X', 'CALIBRATION_ONLY', "
                " 'DISPLAYED_PRICE_AGE_UNKNOWN', 'condition:%sraw', false, "
@@ -641,7 +676,7 @@ async def test_the_research_table_has_no_order_columns_and_refuses_claims():
                " 'b', 'AGE_BOUND_UNKNOWN', 'b', '{}'::jsonb, 0.5, "
                " '{\"acquisition_price\": 0.5, "
                "\"payout_is_complement\": 0}'::jsonb, 's', 'none', 'v', "
-               " 'LIVE_CYCLE'%s)")
+               " 'LIVE_CYCLE', 'PROSPECTIVE_LIVE'%s)")
         for col, val, ck in (
                 ("price_usable_for_orders", "TRUE", "never_for_orders"),
                 ("execution_quality", "'FILLED'", "execution_unknown")):
@@ -858,7 +893,7 @@ async def test_a_model_that_beats_the_price_qualifies_and_derek_uses_it(
         prior = await _pause_backfill(conn)
         await _purge(conn)
         mid = "derek-research-model-informative"
-        train, fitted, reg = await _train_register(
+        train, att = await _train_register(
             conn, monkeypatch, tag="inf", rule=RULE_INFORMATIVE, model_id=mid)
 
         # ── THE MODEL RECORD DECLARES ITS TRAINING POPULATION ─────────
@@ -885,6 +920,28 @@ async def test_a_model_that_beats_the_price_qualifies_and_derek_uses_it(
             "NOT_ESTABLISHED")
         assert pop["minimums"]["min_train_events"] == 40
         assert prov["n_events"] == 3 * PER_PRICE >= FM.MIN_TRAIN_EVENTS
+        assert pop["evidence_class_mix"] == {FM.EVIDENCE_CLASS_LIVE: {
+            "rows": 3 * PER_PRICE, "fixtures": 3 * PER_PRICE}}
+        # THE EVALUATION COHORT, DECLARED BEFORE FITTING AND FROZEN
+        ec = prov["windows"]["evaluation_cohort"]
+        assert ec["declared_before_fitting"] is True
+        assert ec["cohorts"] == [FM.COHORT_DISPLAYED]
+        assert ec["evidence_class"] == FM.EVIDENCE_CLASS_LIVE
+        assert ec["source"] == FM.SOURCE_RESEARCH_OBSERVATIONS
+        assert ec["prospective_window_start"].startswith(
+            "THIS MODEL'S REGISTRATION INSTANT")
+        import asyncpg
+        with pytest.raises(asyncpg.PostgresError, match="not edited"):
+            await conn.execute(
+                "UPDATE bettor_funded_models SET training_provenance = "
+                "training_provenance || '{\"windows\": {}}'::jsonb "
+                " WHERE model_id=$1", mid)
+        a = await conn.fetchrow("SELECT * FROM derek_research_model_attempts"
+                                " WHERE attempt_id=$1", mid)
+        assert a["outcome"] == DR.ATTEMPT_REGISTERED
+        assert a["train_rows"] == a["train_fixtures"] == 3 * PER_PRICE
+        assert a["records_sha"] == prov["records_sha"]
+        assert json.loads(a["evaluation_cohort"]) == ec
 
         # ── NO PROSPECTIVE EVIDENCE YET: NOT ELIGIBLE, NOT PROMOTABLE ─
         ev0 = await FM.evaluate(conn, model_id=mid)
@@ -923,6 +980,9 @@ async def test_a_model_that_beats_the_price_qualifies_and_derek_uses_it(
         assert el["minimums"]["min_prospective_evaluation_events"] == 40
         assert el["trained_on_cohorts"] == [FM.COHORT_DISPLAYED]
         assert el["input_distribution_shift"]["status"] == "UNRESOLVED"
+        assert doc["prospective_evidence_class_mix"] == {
+            FM.EVIDENCE_CLASS_LIVE: {"rows": 3 * PER_PRICE,
+                                     "fixtures": 3 * PER_PRICE}}
         pmix = el["input_distribution_shift"]["prospective_by_cohort"]
         assert pmix[FM.COHORT_DISPLAYED]["fixtures"] == 3 * PER_PRICE
         assert pmix[FM.COHORT_EXECUTABLE]["fixtures"] == 10
@@ -1103,12 +1163,34 @@ def test_a_backfilled_observation_invents_no_prediction():
                                     mode=DR.MODE_BACKFILL)
     assert live["model_p"] is not None
     assert bf["collection_mode"] == DR.MODE_BACKFILL
+    assert bf["evidence_class"] == FM.EVIDENCE_CLASS_STORED
     assert bf["model_p"] is None and bf["model_id"] is None
     assert bf["model_absent_reason"] == DR.A_BACKFILL
     # everything else is the same stored-row reading
     for k in set(live) - {"model_p", "model_id", "model_version",
-                          "model_absent_reason", "collection_mode"}:
+                          "model_absent_reason", "collection_mode",
+                          "evidence_class"}:
         assert bf[k] == live[k], k
+    # RETROSPECTIVE ONLY WHERE THE STORED ROW HOLDS THE ORIGINAL TIMESTAMPS
+    ev = json.loads(_cal_dict()["calibration_only_evidence"])
+    ev["displayed_quote"].pop("read_at")
+    row = _cal_dict(calibration_only_evidence=json.dumps(ev))
+    assert DR.observation_from_row(row, mode=DR.MODE_BACKFILL)[1] == \
+        DR.S_BACKFILL_NO_PRICE_RECEIPT
+    assert DR.observation_from_row(row)[1] is None      # live keeps it
+    assert DR.observation_from_row(_cal_dict(observed_at=None),
+                                   mode=DR.MODE_BACKFILL)[1] == \
+        DR.S_BACKFILL_NO_PINNACLE_STAMP
+
+
+def test_a_degenerate_fit_is_named():
+    rows = [{"acquisition_price": p, "payout_is_complement": 0.0}
+            for p in (0.3, 0.5, 0.7)]
+    fitted = FM.fit(rows, [1, 1, 1], features=list(FM.FEATURES_ENTRY_PAYOUT))
+    assert DR._degenerate(fitted, rows, [1, 1, 1]) == \
+        "SINGLE_CLASS_TRAINING_LABELS"
+    fitted = FM.fit(rows, [0, 1, 1], features=list(FM.FEATURES_ENTRY_PAYOUT))
+    assert DR._degenerate(fitted, rows, [0, 1, 1]) is None
 
 
 # ═════════════════════════════════════════════════════════════════════════
@@ -1136,11 +1218,16 @@ async def test_the_backfill_carries_only_stored_values_and_runs_once(
             decided_at=old + 1, venue_ts=False)
         mine["entry"] = await _entry_row(conn, cid=SYN + "bf-entry",
                                          price=0.50, p_pin=0.62,
-                                         decided_at=old + 2)
+                                         decided_at=old + 2,
+                                         received_at=old + 1.5)
+        # STORED WITHOUT OUR RECEIPT TIME: excluded, counted by reason
+        noreceipt = await _entry_row(conn, cid=SYN + "bf-noreceipt",
+                                     price=0.50, p_pin=0.62,
+                                     decided_at=old + 2.5)
         nopin = await _calibration_row(
             conn, cid=SYN + "bf-nopin", price=0.40, p_pin=0.5,
             decided_at=old + 3, book="smarkets")
-        top = max(list(mine.values()) + [nopin])
+        top = max(list(mine.values()) + [nopin, noreceipt])
         # THE BACKFILL MAY NOT RE-QUERY ANYTHING: every transport raises.
         def _no(*a, **k):
             raise AssertionError("the backfill re-queried a source")
@@ -1161,10 +1248,12 @@ async def test_the_backfill_carries_only_stored_values_and_runs_once(
         assert bf["recorded"] >= 3 and bf["candidates"] <= \
             DR.BACKFILL_PER_CYCLE
         assert bf["not_observed"].get(DR.S_NO_PINNACLE, 0) >= 1
+        assert bf["not_observed"].get(DR.S_BACKFILL_NO_PRICE_RECEIPT, 0) >= 1
         assert bf["cursor_below_id"] < top + 1
-        assert await conn.fetchval(
-            "SELECT count(*) FROM derek_research_observations "
-            " WHERE valuation_id=$1", nopin) == 0
+        for excluded in (nopin, noreceipt):
+            assert await conn.fetchval(
+                "SELECT count(*) FROM derek_research_observations "
+                " WHERE valuation_id=$1", excluded) == 0
 
         for tag, vid in mine.items():
             v = dict(await conn.fetchrow(
@@ -1182,6 +1271,7 @@ async def test_the_backfill_carries_only_stored_values_and_runs_once(
                 " FROM derek_research_observations WHERE valuation_id=$1",
                 vid))
             assert o["collection_mode"] == DR.MODE_BACKFILL, tag
+            assert o["evidence_class"] == FM.EVIDENCE_CLASS_STORED
             assert o["valuation_id"] == vid
             # RECORDED NOW; DECIDED WHEN THE VALUATION SAYS
             assert float(o["rec"]) >= before - 5.0
@@ -1214,11 +1304,14 @@ async def test_the_backfill_carries_only_stored_values_and_runs_once(
                 assert o["cohort"] == FM.COHORT_DISPLAYED
             else:
                 assert o["price"] == pytest.approx(v["executable_price"])
-                # the stored entry row recorded no venue clock: NULL + why
-                assert o["prc"] is None and o["pts"] is None
-                assert o["price_source_ts_basis"].startswith("NOT_CARRIED")
-                assert o["price_timing_uncertainty"] == \
-                    DR.TIMING_NOT_RECORDED
+                clock = json.loads(v["risk_verdict"])["freshness_evidence"][
+                    "venue_clock"]
+                assert float(o["prc"]) == pytest.approx(
+                    clock["our_response_received_at"], abs=1e-3)
+                # the venue supplied no stamp: NULL, with the clock's reason
+                assert o["pts"] is None
+                assert "VENUE_CLOCK_NOT_PROVIDED" in o["price_source_ts_basis"]
+                assert o["price_timing_uncertainty"] == DR.TIMING_BOUNDED
                 assert o["cohort"] == FM.COHORT_EXECUTABLE
 
         # ── TWICE INSERTS NOTHING ────────────────────────────────────
@@ -1326,6 +1419,38 @@ async def test_the_daily_model_run_fits_and_evaluates_but_never_promotes(
         assert disp["shortfall"] == 0
         f = run["fitted"][FM.COHORT_DISPLAYED]
         assert f["refit"] is True and f["ok"] is True, f
+        # EVERY ATTEMPT IS LISTED ON THE RUN AND RECORDED
+        assert run["attempted_model_ids"] == [f["model_id"]]
+        assert list(await conn.fetchval(
+            "SELECT attempted_model_ids FROM derek_research_model_runs "
+            " WHERE run_day=$1", DR._day_of(day2))) == [f["model_id"]]
+        a = await conn.fetchrow("SELECT * FROM derek_research_model_attempts"
+                                " WHERE attempt_id=$1", f["model_id"])
+        assert a["outcome"] == DR.ATTEMPT_REGISTERED
+        assert a["run_id"] == run["run_id"]
+        assert a["train_fixtures"] == 12 + 3 * PER_PRICE
+        assert a["records_sha"] and a["attempted_set_sha"]
+        assert json.loads(a["evaluation_cohort"])["cohorts"] == [
+            FM.COHORT_DISPLAYED]
+        # the INSUFFICIENT run attempted nothing
+        assert list(await conn.fetchval(
+            "SELECT attempted_model_ids FROM derek_research_model_runs "
+            " WHERE run_day=$1", DR._day_of(day1))) == []
+        # A FAILED ATTEMPT IS RECORDED TOO: the executable cohort has no
+        # labelled fixture, so the fit is refused -- and written down.
+        bad = await DR.attempt_fit(conn, model_id="derek-research-attempt-"
+                                   "refused", cohort=FM.COHORT_EXECUTABLE,
+                                   through=day2, now=day2)
+        assert bad["outcome"] == DR.ATTEMPT_FIT_REFUSED
+        assert bad["recorded"] is True
+        b = await conn.fetchrow("SELECT * FROM derek_research_model_attempts"
+                                " WHERE attempt_id=$1", bad["attempt_id"])
+        assert b["outcome"] == DR.ATTEMPT_FIT_REFUSED and b["refusal"]
+        assert b["train_rows"] == 0 and b["train_fixtures"] == 0
+        assert b["records_sha"] is None
+        assert await conn.fetchval(
+            "SELECT count(*) FROM bettor_funded_models WHERE model_id=$1",
+            bad["attempt_id"]) == 0
         assert f["model_id"] == "%s:%s:%s" % (
             DR.AUTO_MODEL_PREFIX, FM.COHORT_DISPLAYED, DR._day_of(day2))
         assert f["training_fixtures"] == 12 + 3 * PER_PRICE
@@ -1370,6 +1495,82 @@ async def test_the_daily_model_run_fits_and_evaluates_but_never_promotes(
         assert lr_["counts"]["by_cohort"][FM.COHORT_DISPLAYED][
             "have_labelled_fixtures"] == 12 + 3 * PER_PRICE
         assert lr_["promoted"] is False
+        assert lr_["attempted_model_ids"] == [f["model_id"]]
+        assert any(x["attempt_id"] == bad["attempt_id"]
+                   for x in mq["data"]["recent_attempts"])
+    finally:
+        if prior is not _UNSET:
+            await _restore_backfill(conn, prior)
+        await _purge(conn)
+        await conn.close()
+
+
+# ═════════════════════════════════════════════════════════════════════════
+# 11 · A BACKFILL IS NEVER PROSPECTIVE EVIDENCE
+# ═════════════════════════════════════════════════════════════════════════
+
+@pg
+async def test_backfilled_rows_never_count_as_prospective_evidence(
+        monkeypatch):
+    """A model is fitted and registered; THEN fixtures decided after its
+    registration arrive only through the backfill (RETROSPECTIVE_STORED) --
+    the pattern the live collector would have produced, labelled and
+    informative. They are reported as retrospective and count toward
+    neither MIN_EVALUATION_EVENTS nor a promotion."""
+    conn = await _connect()
+    prior = _UNSET
+    try:
+        await _ensure_schema(conn)
+        prior = await _pause_backfill(conn)
+        await _purge(conn)
+        mid = "derek-research-model-after-backfill"
+        await _train_register(conn, monkeypatch, tag="retro",
+                              rule=RULE_INFORMATIVE, model_id=mid)
+        created = float((await conn.fetchval(
+            "SELECT extract(epoch FROM created_at) FROM bettor_funded_models"
+            " WHERE model_id=$1", mid)))
+        # decided AFTER registration, never seen by the live collector
+        t = time.time() + 120.0
+        made = []
+        for n, (price, won) in enumerate(_outcomes(RULE_INFORMATIVE)):
+            cid = "%sretro-late-%03d" % (SYN, n)
+            vid = await _calibration_row(conn, cid=cid, price=price,
+                                         p_pin=min(0.97, price + 0.15),
+                                         decided_at=t + n)
+            made.append((vid, cid, won, t + n))
+        top = max(v for v, *_ in made)
+        await DR._save_state(conn, {"cursor_below_id": top + 1})
+        bf = await DR.backfill(conn, older_than=t + len(made) + 1.0,
+                               now=time.time(), limit=len(made))
+        assert bf["recorded"] == len(made), bf
+        await _label_prospectively(conn, made)
+        classes = {r["evidence_class"] for r in await conn.fetch(
+            "SELECT evidence_class FROM derek_research_observations "
+            " WHERE valuation_id = ANY($1::bigint[])",
+            [v for v, *_ in made])}
+        assert classes == {FM.EVIDENCE_CLASS_STORED}
+        assert all(d > created for *_x, d in made)   # decided after freeze
+
+        ev = await FM.evaluate(conn, model_id=mid)
+        assert ev["ok"] is False and ev["refusal"] == FM.R_TOO_FEW_LABELS
+        doc = ev["evaluation"]
+        assert doc["n_events"] == 0                       # prospective
+        assert doc["PROSPECTIVE"]["n_events"] == 0
+        np_ = doc["not_prospective"]
+        assert np_["of_which_retrospective_stored"] >= len(made)
+        rm = doc["retrospective_market_comparison"]
+        assert rm["role"].startswith("RETROSPECTIVE_NOT_PROSPECTIVE")
+        assert rm["n_events"] >= len(made)
+        assert rm["evidence_class_mix"][FM.EVIDENCE_CLASS_STORED][
+            "fixtures"] >= len(made)
+        assert doc["approval_eligibility"]["eligible"] is False
+        assert doc["approval_eligibility"]["prospective_fixtures_counted"] \
+            == 0
+        prom = await FM.promote(conn, model_id=mid, approved_by=APPROVER)
+        assert prom["ok"] is False
+        assert prom["refusal"] == FM.R_TOO_FEW_LABELS, prom
+        assert (await FM.approved(conn, model_key=FM.KEY_ENTRY_PAYOUT))[
+            "refusal"] == FM.R_NO_APPROVED_MODEL
     finally:
         if prior is not _UNSET:
             await _restore_backfill(conn, prior)
