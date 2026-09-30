@@ -120,6 +120,7 @@ body[data-cc-mode=unavailable] .cc-banner{display:block}
 .cc-st{position:absolute;left:0;right:0;bottom:0;padding:14px 18px;display:flex;flex-wrap:wrap;gap:8px 14px;align-items:center;background:linear-gradient(0deg,rgba(4,6,9,.9),rgba(4,6,9,0));font:12px/1.35 var(--mono);color:var(--ink-2)}
 .cc-st .anim{color:var(--ink)}.cc-st .anim b{color:var(--acc-2)}
 .cc-ctl{position:absolute;right:14px;top:14px;display:flex;gap:6px}
+.cc-real-model .cc-placeholder{display:none}
 .cc-placeholder{position:absolute;right:14px;top:52px;z-index:2;font:700 10.5px/1.3 var(--mono);letter-spacing:.08em;color:#1a1204;background:var(--warn);padding:5px 8px;border-radius:6px;pointer-events:none}
 .cc-ctl button{background:rgba(6,8,12,.7);border-color:var(--line-2);font-size:11.5px;padding:6px 9px}
 .cc-brief{display:flex;flex-direction:column;gap:12px}
@@ -418,11 +419,13 @@ def nav_html(current: str, page_paths: dict) -> str:
     return "".join(out)
 
 
-def stage_html(kind: str, endpoint: str) -> str:
+def stage_html(kind: str, endpoint: str, asset: dict | None = None) -> str:
+    import json as _json
     m = CC_META[kind]
+    asset = asset or {"model": None, "why": "no character config"}
     return (
         '<section class="cc-stage" id="cc-stage" data-cc-stage '
-        'data-agent="%(k)s" aria-labelledby="cc-name" '
+        'data-agent="%(k)s" data-cc-asset="%(asset)s" aria-labelledby="cc-name" '
         'aria-describedby="cc-alt">'
         '<canvas id="cc-canvas" role="img" aria-label="Placeholder character, '
         'final model pending: animated 3D stand-in for %(n)s, an AI agent. Pose '
@@ -451,7 +454,8 @@ def stage_html(kind: str, endpoint: str) -> str:
         'available as JSON at <a href="%(ep)s">%(ep)s</a>.</p></noscript>'
         '</section>' % {"k": kind, "n": m["name"], "r": _html.escape(m["role"]),
                         "p": _html.escape(m["persona"]), "ep": endpoint,
-                        "svg": _PORTRAITS[kind], "ph": PLACEHOLDER_TAG})
+                        "svg": _PORTRAITS[kind], "ph": PLACEHOLDER_TAG,
+                        "asset": _html.escape(_json.dumps(asset), quote=True)})
 
 
 def brief_html(kind: str) -> str:
@@ -496,9 +500,17 @@ LOADER_JS = r"""
     if (!gl) return keep2d('WebGL unavailable');
   } catch (e) { return keep2d('WebGL unavailable'); }
   stage.setAttribute('data-cc-3d', 'loading');
-  import('%%CHARACTERS%%').then(function (m) {
-    return m.mount(stage, {agent: stage.getAttribute('data-agent'), reducedMotion: reduced});
-  }).catch(function (e) { keep2d('3D character failed to load (' + ((e && e.name) || 'Error') + ')'); });
+  var asset = {}; try { asset = JSON.parse(stage.getAttribute('data-cc-asset') || '{}'); } catch (e) { asset = {}; }
+  function placeholder() {
+    return import('%%CHARACTERS%%').then(function (m) {
+      return m.mount(stage, {agent: stage.getAttribute('data-agent'), reducedMotion: reduced});
+    });
+  }
+  // a licensed model when the manifest provides one; the tagged placeholder otherwise
+  (asset.model ? import('%%AVATAR%%').then(function (m) { return m.mountAvatar(stage, asset, {reducedMotion: reduced}); })
+      .catch(function (e) { stage.setAttribute('data-cc-model-error', (e && e.message) || 'Error'); return placeholder(); })
+    : placeholder()
+  ).catch(function (e) { keep2d('3D character failed to load (' + ((e && e.name) || 'Error') + ')'); });
 })();
 """
 
@@ -868,7 +880,8 @@ CC_BOOT_JS = r"""
   function applyMode(m) {
     document.body.setAttribute('data-cc-mode', m.mode);
     var a = $('cc-anim'); if (a) a.innerHTML = 'Animation: <b>' + esc(m.mode) + '</b>' + (m.why ? ' — ' + esc(m.why) : m.activity ? ' — ' + esc(m.activity) : '');
-    var c = $('cc-canvas'); if (c) c.setAttribute('aria-label', 'Placeholder character, final model pending: animated 3D stand-in for ' + document.getElementById('cc-name').textContent + ', an AI agent, shown ' + m.mode + (m.why ? ' (' + m.why + ')' : '') + '.');
+    var real = $('cc-stage') && $('cc-stage').classList.contains('cc-real-model');
+    var c = $('cc-canvas'); if (c) c.setAttribute('aria-label', (real ? 'Animated 3D character of ' : 'Placeholder character, final model pending: animated 3D stand-in for ') + document.getElementById('cc-name').textContent + ', an AI agent, shown ' + m.mode + (m.why ? ' (' + m.why + ')' : '') + '.');
     try { window.dispatchEvent(new CustomEvent('cc:mode', {detail: {mode: m.mode, recorded: m.recorded, why: m.why}})); } catch (_) {}
   }
   function effective() {

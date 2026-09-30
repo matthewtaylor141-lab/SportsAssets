@@ -957,3 +957,179 @@ def test_every_character_canvas_is_labelled_a_placeholder(monkeypatch, kind):
     assert 'aria-label="Placeholder character, final model pending' in html
     assert CCP.PLACEHOLDER_TAG + ". " in html                     # the text alternative
     assert "Placeholder character, final model pending: animated 3D stand-in for" in html   # kept on mode change
+
+
+# ═════════════════════════════════════════════════════════════════════
+# THE LICENSED-CHARACTER PIPELINE (glTF 2.0 binary)
+# ═════════════════════════════════════════════════════════════════════
+
+GLTF_TEST = Path(__file__).resolve().parent / "assets" / "gltf"
+
+
+def _node_mjs(body, timeout=60):
+    if not NODE:
+        pytest.fail("node is required: the pipeline's own module is executed")
+    src = ("const A = %s;\nconst THREE = await import(A + 'three.module.min.js');\n"
+           "const av = await import(A + 'cc_avatar.js');\nconst {GLTFLoader} = await import(A + 'GLTFLoader.js');\n"
+           "import fs from 'fs';\nconst out = await (async () => {\n%s\n})();\n"
+           "process.stdout.write(JSON.stringify(out));\n") % (json.dumps(str(STATIC) + "/"), body)
+    src = "import fs from 'fs';\n" + src.replace("import fs from 'fs';\n", "")
+    with tempfile.NamedTemporaryFile("w", suffix=".mjs", delete=False) as f:
+        f.write(src)
+        path = f.name
+    try:
+        out = subprocess.run([NODE, path], capture_output=True, text=True, timeout=timeout)
+    finally:
+        os.unlink(path)
+    assert out.returncode == 0, out.stderr
+    return json.loads(out.stdout)
+
+
+def test_bones_resolve_from_mixamo_vrm_and_explicit_overrides():
+    got = _node_mjs("""
+      function rig(names) { const root = new THREE.Group(); let p = root; for (const n of names) { const b = new THREE.Bone(); b.name = n; p.add(b); p = b; } return root; }
+      const mix = av.resolveBones(rig(['mixamorigHips', 'mixamorigSpine', 'mixamorigSpine1', 'mixamorigSpine2', 'mixamorigNeck', 'mixamorigHead', 'mixamorigLeftEye']));
+      const vrm = av.resolveBones(rig(['J_Bip_C_Hips', 'J_Bip_C_Spine', 'J_Bip_C_Chest', 'J_Bip_C_UpperChest', 'J_Bip_C_Neck', 'J_Bip_C_Head']));
+      const hum = av.resolveBones(rig(['Hips', 'Spine', 'Chest', 'Neck', 'Head']));
+      const odd = av.resolveBones(rig(['torso_joint_1', 'torso_joint_2', 'torso_joint_3', 'neck_joint_1', 'neck_joint_2']));
+      const fixed = av.resolveBones(rig(['torso_joint_1', 'torso_joint_2', 'torso_joint_3', 'neck_joint_1', 'neck_joint_2']),
+        {hips: 'torso_joint_1', spine: 'torso_joint_2', chest: 'torso_joint_3', neck: 'neck_joint_1', head: 'neck_joint_2'});
+      return {mix: [mix.missing, mix.source], vrm: [vrm.missing, vrm.source], hum: hum.missing, odd: odd.missing, fixed: fixed.missing, arkit: av.ARKIT_52.length};
+    """)
+    assert got["mix"][0] == [] and got["mix"][1]["chest"] == "mixamorigSpine2" and got["mix"][1]["leftEye"] == "mixamorigLeftEye"
+    assert got["vrm"][0] == [] and got["vrm"][1]["chest"] == "J_Bip_C_UpperChest"
+    assert got["hum"] == [] and got["fixed"] == []
+    assert got["odd"] == ["hips", "spine", "chest", "neck", "head"]
+    assert got["arkit"] == 52
+
+
+def test_arkit_blendshapes_resolve_by_name_namespace_and_override():
+    got = _node_mjs("""
+      const m = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1));
+      m.morphTargetDictionary = {'blendShape1.eyeBlinkLeft': 0, 'EyeBlinkRight': 1, 'jawOpen': 2, 'mouthSmileLeft': 3};
+      m.morphTargetInfluences = [0, 0, 0, 0];
+      const g = new THREE.Group(); g.add(m);
+      const a = av.resolveBlendshapes(g);
+      const buf = fs.readFileSync(%s); const ab = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
+      const cube = await new GLTFLoader().parseAsync(ab, '');
+      const b = av.resolveBlendshapes(cube.scene, {eyeBlinkLeft: '0', jawOpen: '1'});
+      return {a: a.names.sort(), amissing: a.missing.length, b: b.names.sort()};
+    """ % json.dumps(str(GLTF_TEST / "AnimatedMorphCube.glb")))
+    assert got["a"] == ["eyeBlinkLeft", "eyeBlinkRight", "jawOpen", "mouthSmileLeft"]
+    assert got["amissing"] == 48
+    assert got["b"] == ["eyeBlinkLeft", "jawOpen"]
+
+
+def test_the_controller_blinks_breathes_turns_speaks_and_stills_offline():
+    got = _node_mjs("""
+      const names = ['hips', 'spine', 'chest', 'neck', 'head'];
+      const bones = {}; for (const n of names) { const b = new THREE.Bone(); b.name = n; bones[n] = b; }
+      const mesh = {morphTargetInfluences: [0, 0, 0, 0]};
+      const shapes = {eyeBlinkLeft: [{mesh, index: 0}], eyeBlinkRight: [{mesh, index: 1}], jawOpen: [{mesh, index: 2}]};
+      const c = new av.AvatarController(bones, shapes, {mode: 'monitoring', seed: 3});
+      const dt = 1 / 60; let blinkFrames = 0, runs = [], run = 0, maxChest = 0, jawBefore = 0, jawDuring = 0, jawAfter = 0;
+      for (let i = 0; i < 60 * 120; i++) {
+        c.update(dt);
+        if (mesh.morphTargetInfluences[0] > 0) { run++; blinkFrames++; } else if (run) { runs.push(run); run = 0; }
+        maxChest = Math.max(maxChest, Math.abs(bones.chest.rotation.x));
+        jawBefore = Math.max(jawBefore, mesh.morphTargetInfluences[2]);
+      }
+      c.setSpeaking(true); for (let i = 0; i < 180; i++) { c.update(dt); jawDuring = Math.max(jawDuring, mesh.morphTargetInfluences[2]); }
+      c.setSpeaking(false); c.update(dt); jawAfter = mesh.morphTargetInfluences[2];
+      const hipsPos = bones.hips.position.toArray();
+      c.setMode('unavailable'); let n = 0; while (c.update(dt) && n < 60 * 60) n++;
+      const frozen = JSON.stringify(names.map((k) => bones[k].rotation.toArray()));
+      const again = c.update(dt);
+      return {blinks: c.stats.blinks, runs, maxYawDeg: c.stats.maxHeadYaw * 180 / Math.PI, maxBreath: c.stats.maxBreath,
+              maxChest, saccades: c.stats.saccades, postures: c.stats.postureShifts, jawBefore, jawDuring, jawAfter,
+              hipsPos, settledIn: n * dt, again, unchanged: frozen === JSON.stringify(names.map((k) => bones[k].rotation.toArray())),
+              offBlink: mesh.morphTargetInfluences[0]};
+    """)
+    assert 20 <= got["blinks"] <= 60, got["blinks"]                      # every 2-6 s over 120 s
+    durations = [r / 60.0 for r in got["runs"]]
+    assert durations and all(0.1 <= d <= 0.2 for d in durations), durations    # about 150 ms
+    assert got["maxYawDeg"] <= 12.0 + 1e-9
+    assert 0.004 <= got["maxBreath"] <= 0.006                             # milliradians, not bobbing
+    assert got["maxChest"] < 0.02 and got["hipsPos"] == [0, 0, 0]
+    assert got["saccades"] > 20 and got["postures"] >= 5
+    assert got["jawBefore"] == 0 and got["jawDuring"] > 0.2 and got["jawAfter"] == 0
+    assert got["settledIn"] < 30 and got["again"] is False and got["unchanged"] is True
+    assert got["offBlink"] == 0.45                                         # eyes lowered, still
+
+
+def test_the_pipeline_loads_a_licensed_test_asset_and_drives_its_skeleton():
+    got = _node_mjs("""
+      const buf = fs.readFileSync(%s); const ab = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
+      const g = await new GLTFLoader().parseAsync(ab, '');
+      const r = av.resolveBones(g.scene, {hips: 'torso_joint_1', spine: 'torso_joint_2', chest: 'torso_joint_3', neck: 'neck_joint_1', head: 'neck_joint_2'});
+      const rest = r.bones.head.rotation.toArray();
+      const c = new av.AvatarController(r.bones, {}, {mode: 'monitoring', seed: 5});
+      let maxDev = 0; for (let i = 0; i < 600; i++) { c.update(1 / 60); maxDev = Math.max(maxDev, Math.abs(r.bones.head.rotation.y - rest[1])); }
+      return {missing: r.missing, skinned: g.scene.getObjectByName('Proxy').isSkinnedMesh, maxDevDeg: maxDev * 180 / Math.PI};
+    """ % json.dumps(str(GLTF_TEST / "RiggedFigure.glb")))
+    assert got["missing"] == [] and got["skinned"] is True
+    assert 0 < got["maxDevDeg"] <= 12.0
+
+
+def test_test_assets_are_licensed_recorded_and_never_shipped():
+    for name, spdx, who in (("RiggedFigure", "CC-BY-4.0", "Cesium"), ("AnimatedMorphCube", "CC0-1.0", "Microsoft")):
+        assert (GLTF_TEST / (name + ".glb")).is_file()
+        lic = (GLTF_TEST / (name + ".LICENSE.md")).read_text()
+        assert 'SPDX license identifier: "%s"' % spdx in lic
+        assert who in (GLTF_TEST / (name + ".README.md")).read_text()
+    shipped = [p for p in STATIC.rglob("*") if p.suffix in (".glb", ".gltf")]
+    assert shipped == [], shipped
+
+
+def test_the_manifest_admits_only_complete_licensed_non_test_models(monkeypatch, tmp_path):
+    for k in KINDS:
+        a = P.character_asset(k)
+        assert a["model"] is None and a["why"]                    # nothing licensed in this build
+        assert a["framing"] in ("face", "chest", "waist") and a["lighting"].startswith("cinematic_")
+    shutil.copy(GLTF_TEST / "RiggedFigure.glb", tmp_path / "derek.glb")
+    (tmp_path / "derek.LICENSE.txt").write_text("licence text")
+    entry = {"model": "derek.glb", "license_file": "derek.LICENSE.txt", "license_spdx": "LicenseRef-Test",
+             "licensed_from": "test", "test_asset": False, "framing": "chest", "lighting": "cinematic_warm",
+             "bones": {"head": "neck_joint_2"}}
+    def manifest(e):
+        (tmp_path / "manifest.json").write_text(json.dumps({"characters": {"derek": e}}))
+    monkeypatch.setattr(P, "MODELS_DIR", tmp_path)
+    manifest(entry)
+    got = P.character_asset("derek")
+    assert got["model"] == "/api/command/agents/static/models/derek.glb"
+    assert got["license"]["file"].endswith("derek.LICENSE.txt") and got["bones"] == {"head": "neck_joint_2"}
+    manifest(dict(entry, test_asset=True))
+    assert P.character_asset("derek")["model"] is None
+    manifest({k: v for k, v in entry.items() if k != "test_asset"})
+    assert P.character_asset("derek")["model"] is None
+    manifest(dict(entry, license_file="absent.txt"))
+    assert "licence file" in P.character_asset("derek")["why"]
+    manifest(dict(entry, model="../derek.glb"))
+    assert P.character_asset("derek")["model"] is None
+    # the route serves the complete entry's files, and nothing else
+    manifest(entry)
+    c, _ = _client(monkeypatch)
+    url = "/api/command/agents/static/models/derek.glb"
+    assert c.get(url).status_code == 401
+    r = c.get(url, headers={"X-Admin-Token": _Cfg.admin_token})
+    assert r.status_code == 200 and r.headers["content-type"] == "model/gltf-binary"
+    assert r.content[:4] == b"glTF"
+    assert c.get("/api/command/agents/static/models/manifest.json",
+                 headers={"X-Admin-Token": _Cfg.admin_token}).status_code == 404
+    html = c.get(P.PAGE_PATHS["derek"], headers={"X-Admin-Token": _Cfg.admin_token}).text
+    assert "/api/command/agents/static/models/derek.glb" in html        # handed to the loader
+
+
+def test_the_loader_prefers_a_licensed_model_and_falls_back_to_the_placeholder():
+    html = P.page_html("audrey")
+    _c, module = _scripts(html)
+    loader = module[0]
+    assert "asset.model ? import('%s')" % P.ENDPOINTS["avatar"] in loader
+    assert "m.mountAvatar(stage, asset" in loader and "return placeholder();" in loader
+    assert 'data-cc-asset="{&quot;framing&quot;: &quot;waist&quot;' in html
+    assert ".cc-real-model .cc-placeholder{display:none}" in html
+    src = (STATIC / "cc_avatar.js").read_text()
+    for need in ("Math.min(window.devicePixelRatio || 1, 1.5)", "document.hidden", "ema > 20",
+                 "ACESFilmicToneMapping", "studioEnvironment", "setMeshoptDecoder", "window.__ccFps"):
+        assert need in src, need
+    assert "fetch(" not in src and "/api/" not in src

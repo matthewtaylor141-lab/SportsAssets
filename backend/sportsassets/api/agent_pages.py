@@ -66,6 +66,7 @@ ENDPOINTS = {
     "xavier_payoff": "/api/command/agents/xavier/payoff-demonstration",
     "audrey_performance": "/api/command/agents/audrey/performance",
     "characters": "/api/command/agents/static/cc_characters.js",
+    "avatar": "/api/command/agents/static/cc_avatar.js",
     "labels": "/api/command/agents/labels",
 }
 
@@ -1816,10 +1817,11 @@ def _cc_page_html(kind: str) -> str:
             .replace("%%JS%%", js)
             .replace("%%FRAMED%%", CCP.FRAMED_JS)
             .replace("%%LOADER%%", CCP.LOADER_JS.replace(
-                "%%CHARACTERS%%", ENDPOINTS["characters"]))
+                "%%CHARACTERS%%", ENDPOINTS["characters"]).replace(
+                "%%AVATAR%%", ENDPOINTS["avatar"]))
             .replace("%%NAV%%", CCP.nav_html(kind, PAGE_PATHS))
             .replace("%%BANNER%%", CCP.UNAVAILABLE_BANNER)
-            .replace("%%STAGE%%", CCP.stage_html(kind, ENDPOINTS[kind]))
+            .replace("%%STAGE%%", CCP.stage_html(kind, ENDPOINTS[kind], character_asset(kind)))
             .replace("%%BRIEF%%", CCP.brief_html(kind))
             .replace("%%PANELS%%", CCP.panels_html(kind, chat))
             .replace("%%ENDPOINT%%", ENDPOINTS[kind])
@@ -1947,7 +1949,63 @@ STATIC_FILES = {
                          "private, max-age=300"),
     "THREE_LICENSE.txt": ("text/plain; charset=utf-8",
                           "private, max-age=86400"),
+    # the licensed-character pipeline: glTF loader (three.js addons, MIT),
+    # the Meshopt decoder (MIT) and the controller
+    "cc_avatar.js": ("text/javascript; charset=utf-8", "private, max-age=300"),
+    "GLTFLoader.js": ("text/javascript; charset=utf-8",
+                      "private, max-age=604800, immutable"),
+    "BufferGeometryUtils.js": ("text/javascript; charset=utf-8",
+                               "private, max-age=604800, immutable"),
+    "SkeletonUtils.js": ("text/javascript; charset=utf-8",
+                         "private, max-age=604800, immutable"),
+    "meshopt_decoder.module.js": ("text/javascript; charset=utf-8",
+                                  "private, max-age=604800, immutable"),
 }
+
+# ── LICENSED CHARACTER MODELS ───────────────────────────────────────
+MODELS_DIR = STATIC_DIR / "models"
+MODELS_URL = "/api/command/agents/static/models/"
+
+
+def _manifest() -> dict:
+    import json as _json
+    try:
+        return _json.loads((MODELS_DIR / "manifest.json").read_text())
+    except (OSError, ValueError):
+        return {"characters": {}}
+
+
+def _safe_file(name) -> bool:
+    import re as _re
+    return isinstance(name, str) and bool(_re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,120}", name))
+
+
+def character_asset(kind: str) -> dict:
+    """The character config the page hands its loader: a licensed model when
+    the manifest entry is complete and both files exist, else model None with
+    the reason (and the procedural placeholder is shown, tagged)."""
+    e = dict((_manifest().get("characters") or {}).get(kind) or {})
+    base = {k: e.get(k) for k in ("framing", "lighting", "yaw", "scale",
+                                  "bones", "blendshapes") if e.get(k) is not None}
+    why = None
+    if not e.get("model"):
+        why = e.get("why_absent") or "no model in the manifest"
+    elif e.get("test_asset") is not False:
+        why = "refused: a test asset (or an entry not marked test_asset=false) is never a character"
+    elif not (_safe_file(e.get("model")) and e["model"].endswith(".glb")):
+        why = "refused: model must be a .glb file name in the models directory"
+    elif not (MODELS_DIR / e["model"]).is_file():
+        why = "refused: the model file is not in this build"
+    elif not (_safe_file(e.get("license_file")) and (MODELS_DIR / e["license_file"]).is_file()
+              and (MODELS_DIR / e["license_file"]).stat().st_size > 0):
+        why = "refused: the licence file shipped with the model is missing"
+    elif not (e.get("license_spdx") and e.get("licensed_from")):
+        why = "refused: license_spdx and licensed_from are required"
+    if why:
+        return dict(base, model=None, why=why)
+    return dict(base, model=MODELS_URL + e["model"],
+                license={"spdx": e["license_spdx"], "from": e["licensed_from"],
+                         "file": MODELS_URL + e["license_file"]})
 THREE_VERSION = "0.185.1"
 
 
@@ -1957,6 +2015,24 @@ async def require_command(request: Request) -> str:
     return A.require_command(bt_command=request.cookies.get("bt_command", ""),
                              x_desk_token=request.headers.get("x-desk-token", ""),
                              x_admin_token=request.headers.get("x-admin-token", ""))
+
+
+@router.get("/api/command/agents/static/models/{name}", include_in_schema=False,
+            dependencies=[Depends(require_command)])
+async def agents_model(name: str):
+    """Only the model and licence files of a COMPLETE manifest entry."""
+    from fastapi.responses import Response as _R
+    allowed = {}
+    for kind in (_manifest().get("characters") or {}):
+        a = character_asset(kind)
+        if a.get("model"):
+            allowed[a["model"].rsplit("/", 1)[1]] = "model/gltf-binary"
+            allowed[a["license"]["file"].rsplit("/", 1)[1]] = "text/plain; charset=utf-8"
+    if name not in allowed:
+        raise HTTPException(status_code=404, detail="not a licensed model file in this build")
+    return _R(content=(MODELS_DIR / name).read_bytes(), media_type=allowed[name].split(";")[0],
+              headers={"Content-Type": allowed[name], "Cache-Control": "private, max-age=3600",
+                       "X-Content-Type-Options": "nosniff"})
 
 
 @router.get("/api/command/agents/static/{name}", include_in_schema=False,
