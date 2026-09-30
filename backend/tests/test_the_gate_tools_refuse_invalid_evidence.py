@@ -533,3 +533,65 @@ def test_the_reporter_records_a_collection_error_with_no_double_colon(tmp_path):
         "a collection error names a module, not a test -- which is exactly why "
         "an identity comparison requiring `::` cannot see it")
     assert doc["exitstatus"] == 2
+
+
+def test_failures_are_streamed_to_disk_before_a_killed_session_can_lose_them(
+        tmp_path):
+    """The completed report is written only in sessionfinish, so a run that is
+    killed part-way has no report at all. The failure stream must already hold
+    every failure that happened before the kill, with its traceback -- and no
+    `session_finish` line, so it cannot be read as a finished run."""
+    (tmp_path / "test_gen_killed.py").write_text(
+        "import os\n"
+        "def test_first_fails():\n"
+        "    assert 1 + 1 == 3, 'the named reason'\n"
+        "def test_second_kills_the_session():\n"
+        "    os._exit(7)\n"
+        "def test_third_never_runs():\n"
+        "    assert False\n")
+    rep = tmp_path / "r.json"
+    r = subprocess.run(
+        [sys.executable, "-m", "pytest", str(tmp_path), "-q", "-p", "no:randomly",
+         "-p", "tools.gate_report", "--tb=short", "-p", "no:cacheprovider"],
+        capture_output=True, text=True, cwd=str(TOOLS.parent),
+        env={"PATH": "/usr/bin:/bin:/usr/local/bin",
+             "GATE_REPORT_PATH": str(rep),
+             "PYTHONPATH": str(TOOLS.parent),
+             "HOME": str(tmp_path)})
+    assert r.returncode == 7, r.stdout + r.stderr
+    assert not rep.exists(), "a killed session must leave no completed report"
+    stream = tmp_path / "r.json.failures.jsonl"
+    assert stream.exists(), r.stdout + r.stderr
+    lines = [json.loads(x) for x in stream.read_text().splitlines()]
+    events = [x["event"] for x in lines]
+    assert events[0] == "session_start"
+    assert "session_finish" not in events
+    failed = [x for x in lines if x["event"] == "failed"]
+    assert [f["nodeid"].rsplit("::", 1)[-1] for f in failed] == [
+        "test_first_fails"], failed
+    assert failed[0]["when"] == "call"
+    assert "the named reason" in failed[0]["longrepr"]
+
+
+def test_a_completed_run_closes_its_failure_stream(tmp_path):
+    (tmp_path / "test_gen_done.py").write_text(
+        "def test_ok():\n"
+        "    pass\n"
+        "def test_bad():\n"
+        "    raise RuntimeError('boom')\n")
+    rep = tmp_path / "r.json"
+    subprocess.run(
+        [sys.executable, "-m", "pytest", str(tmp_path), "-q", "-p", "no:randomly",
+         "-p", "tools.gate_report", "--tb=no", "-p", "no:cacheprovider"],
+        capture_output=True, text=True, cwd=str(TOOLS.parent),
+        env={"PATH": "/usr/bin:/bin:/usr/local/bin",
+             "GATE_REPORT_PATH": str(rep),
+             "PYTHONPATH": str(TOOLS.parent),
+             "HOME": str(tmp_path)})
+    lines = [json.loads(x) for x in
+             (tmp_path / "r.json.failures.jsonl").read_text().splitlines()]
+    assert lines[-1] == dict(lines[-1], event="session_finish", exitstatus=1)
+    failed = [x for x in lines if x["event"] == "failed"]
+    assert len(failed) == 1 and "boom" in failed[0]["longrepr"]
+    doc = json.loads(rep.read_text())
+    assert doc["counts"] == {"passed": 1, "failed": 1}

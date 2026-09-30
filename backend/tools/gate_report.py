@@ -42,6 +42,15 @@ WHAT IS RECORDED, AND WHICH HOOK OWNS IT
                  has no completion record and cannot be read as a finished one
 
 Loaded with `-p` so it never affects an ordinary developer run.
+
+FAILURES ARE ALSO STREAMED AS THEY HAPPEN. The report above is written once, in
+sessionfinish, so a run that is killed, hangs past its wall clock or loses its
+machine leaves no record of which tests had already failed or why. Each failing
+phase (and each collection error) is therefore appended to
+`<GATE_REPORT_PATH>.failures.jsonl` the moment pytest reports it -- node id,
+phase, traceback -- flushed and fsynced, one JSON object per line. That file is
+evidence for people; the verdict still reads only the completed report, and a
+stream without a `session_finish` line is by construction an incomplete run.
 """
 
 from __future__ import annotations
@@ -67,6 +76,22 @@ class GateReport:
         self.exitstatus = None
         self.complete = False
         self.interrupted = None
+        self.stream_path = path + ".failures.jsonl"
+        self._stream({"event": "session_start", "argv": sys.argv[1:],
+                      "python": sys.version.split()[0]}, mode="w")
+
+    # ── the failure stream ───────────────────────────────────────────
+    def _stream(self, doc, *, mode="a"):
+        """Append one line and force it to disk. Never raises: losing the
+        side stream must not change the run it describes."""
+        try:
+            with open(self.stream_path, mode, encoding="utf-8") as fh:
+                fh.write(json.dumps(dict(doc, at=time.time()), default=str,
+                                    sort_keys=True) + "\n")
+                fh.flush()
+                os.fsync(fh.fileno())
+        except Exception:                                       # noqa: BLE001
+            pass
 
     # ── collection ───────────────────────────────────────────────────
     def pytest_collection_modifyitems(self, items):
@@ -85,6 +110,8 @@ class GateReport:
                 # comparator that requires `::` in an identity silently drops
                 # these -- which is defect B.
                 "kind": "COLLECT_ERROR"})
+            self._stream({"event": "collect_error", "nodeid": report.nodeid,
+                          "longrepr": str(report.longrepr)[:20000]})
 
     # ── execution ────────────────────────────────────────────────────
     def pytest_runtest_logreport(self, report):
@@ -98,15 +125,22 @@ class GateReport:
         n["phases"][report.when] = outcome
         if report.longrepr is not None and n["longrepr"] is None:
             n["longrepr"] = str(report.longrepr)[:4000]
+        if outcome == "failed":
+            self._stream({"event": "failed", "nodeid": report.nodeid,
+                          "when": report.when,
+                          "duration_s": getattr(report, "duration", None),
+                          "longrepr": str(report.longrepr)[:20000]})
 
     # ── session ──────────────────────────────────────────────────────
     def pytest_keyboard_interrupt(self, excinfo):
         self.interrupted = "KEYBOARD_INTERRUPT"
+        self._stream({"event": "interrupted", "kind": self.interrupted})
 
     def pytest_sessionfinish(self, session, exitstatus):
         self.exitstatus = int(exitstatus)
         self.complete = True
         self._write()
+        self._stream({"event": "session_finish", "exitstatus": self.exitstatus})
 
     def _derive(self):
         """One outcome per node, from its phases, with the phase that decided it.
