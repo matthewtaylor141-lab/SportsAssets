@@ -3577,6 +3577,113 @@ async def admin_resolve_funded_investigation(intent_id: str,
     return out
 
 
+# ── THE OWNER'S AUTHORIZATION: SIGNED BY THE OWNER, TWO FACTORS, AUDITED ──
+#
+# The last funded refusal reads `bettor_funded_owner_authorization`, and these
+# are the only routes that write it. Both writes need the admin token AND the
+# owner-held resolution key; the name recorded is whoever that key
+# authenticates (FUNDED_RESOLUTION_OPERATOR), never a name in the body. The read
+# needs the admin token only and shows the owner exactly which account, venue
+# and effective-limit digest they would bind to BEFORE they sign.
+
+def _owner_auth_factors(route: str) -> dict:
+    """WHICH factors were verified -- the dependencies ran before this -- and
+    who the key authenticates, from configuration. Never the factors."""
+    return {"admin_token_verified": True, "resolution_key_verified": True,
+            "operator": (getattr(settings(), "funded_resolution_operator", "")
+                         or "").strip(),
+            "route": route}
+
+
+@app.get("/api/admin/funded-owner-authorization",
+         dependencies=[Depends(require_admin)])
+async def admin_funded_owner_authorization(response: Response) -> dict:
+    """WHAT THE OWNER WOULD SIGN, WHAT IS SIGNED, AND EVERY ATTEMPT. A read.
+
+    `to_sign` is the account and venue bound now and the approved effective
+    digest, computed exactly as `authorize()` computes it. `record` is the
+    current owner authorization's non-secret fields and `valid_against_
+    current_scope` whether it still describes the binding and limits in force.
+    `owner_key_configured` says whether the second factor is set -- never its
+    value, length or fingerprint.
+    """
+    from .. import bettor_owner_authorization as OA
+    from ..db import get_pool
+
+    response.headers["Cache-Control"] = "no-store"
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        out = await OA.status(conn)
+    out["owner_key_configured"] = bool(
+        (getattr(settings(), "funded_resolution_key", "") or "").strip()
+        and (getattr(settings(), "funded_resolution_operator", "")
+             or "").strip())
+    return out
+
+
+@app.post("/api/admin/funded-owner-authorization",
+          dependencies=[Depends(require_admin),
+                        Depends(require_resolution_key)])
+async def admin_record_funded_owner_authorization(
+        response: Response, body: dict | None = None) -> dict:
+    """THE OWNER SIGNS THE FUNDED SCOPE. Audited whether accepted or refused.
+
+    body: {account_id, venue, effective_digest (from the GET's to_sign),
+           statement (>= 20 chars, naming the account and the venue),
+           confirm (repeats account_id), lifetime_days (optional, <= 30)}
+
+    It enables nothing: real submission stays off in code, and this record is
+    one input to `authorize()`, which still runs every other gate.
+    """
+    from .. import bettor_owner_authorization as OA
+    from ..db import get_pool
+
+    response.headers["Cache-Control"] = "no-store"
+    b = dict(body or {})
+    auth = _owner_auth_factors("POST /api/admin/funded-owner-authorization")
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        out = await OA.record_owner_authorization(
+            conn, account_id=b.get("account_id"), venue=b.get("venue"),
+            effective_digest=b.get("effective_digest"),
+            statement=b.get("statement"), confirm=b.get("confirm"),
+            lifetime_days=b.get("lifetime_days"),
+            # WHO SIGNS is the identity the key authenticates, from
+            # configuration -- never a name typed into the request.
+            operator=auth["operator"], auth=auth)
+    if not out.get("ok"):
+        response.status_code = 409
+    return out
+
+
+@app.post("/api/admin/funded-owner-authorization/revoke",
+          dependencies=[Depends(require_admin),
+                        Depends(require_resolution_key)])
+async def admin_revoke_funded_owner_authorization(
+        response: Response, body: dict | None = None) -> dict:
+    """THE OWNER WITHDRAWS THE AUTHORIZATION, and the system authorization
+    issued on it is revoked with it, so the execution gate refuses at once.
+
+    body: {authorization_id, confirm (repeats authorization_id), reason}
+    """
+    from .. import bettor_owner_authorization as OA
+    from ..db import get_pool
+
+    response.headers["Cache-Control"] = "no-store"
+    b = dict(body or {})
+    auth = _owner_auth_factors(
+        "POST /api/admin/funded-owner-authorization/revoke")
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        out = await OA.revoke_owner_authorization(
+            conn, authorization_id=b.get("authorization_id"),
+            confirm=b.get("confirm"), reason=b.get("reason"),
+            operator=auth["operator"], auth=auth)
+    if not out.get("ok"):
+        response.status_code = 409
+    return out
+
+
 @app.post("/api/admin/funded-limits/approve",
           dependencies=[Depends(require_admin)])
 async def admin_approve_funded_limits(response: Response,
@@ -3594,6 +3701,7 @@ async def admin_approve_funded_limits(response: Response,
     """
     from .. import bettor_entry_execution as EX
     from .. import bettor_funded_activation as FA
+    from .. import bettor_owner_authorization as OA
     from ..db import get_pool
 
     response.headers["Cache-Control"] = "no-store"
@@ -3614,21 +3722,39 @@ async def admin_approve_funded_limits(response: Response,
             "what": ("confirm must equal the recorded per_order_usd, so an "
                      "approval names the set it approves"),
             "recorded_per_order_usd": proposed.get("per_order_usd")})
-    eff = EX.effective_limits(proposed)
+    # THE DIGEST IS COMPUTED EXACTLY AS `authorize()` COMPUTES IT (with the
+    # accurate-synonym normalisation), because this is the digest the owner
+    # is shown and then signs.
+    eff = EX.effective_limits(FA.normalise_limit_keys(proposed))
     rec.update(approved=True, approved_by=str(b.get("by") or "OWNER")[:120],
                approved_at=time.time(), enforced=True,
                effective_when_approved=eff["effective"],
                effective_digest=eff["effective_digest"],
                tightened=eff["tightened"],
                ignored_because_looser=eff["ignored_because_looser"])
-    await pool.execute(
-        "INSERT INTO ingestion_state (key, value) VALUES ($1, $2::jsonb) "
-        "ON CONFLICT (key) DO UPDATE SET value = $2::jsonb",
-        FA.LIMITS_KEY, json.dumps(rec))
+    # AN APPROVAL WITH A DIFFERENT EFFECTIVE DIGEST VOIDS THE OWNER'S
+    # AUTHORIZATION on the old one (and the system authorization issued on
+    # it), in the same transaction as the approval; the same digest re-approved
+    # leaves it standing.
+    async with pool.acquire() as conn:
+        async def _write():
+            await conn.execute(
+                "INSERT INTO ingestion_state (key, value) VALUES "
+                "($1, $2::jsonb) ON CONFLICT (key) DO UPDATE SET "
+                "value = $2::jsonb", FA.LIMITS_KEY, json.dumps(rec))
+        moved = await OA.apply_scope_change(
+            conn, reason=OA.SCOPE_LIMITS_APPROVED, write=_write,
+            by=rec["approved_by"])
+    if not moved.get("ok"):
+        raise HTTPException(status_code=409, detail={
+            "reason": moved.get("refusal"),
+            "what": "nothing was approved; the attempt is audited",
+            "audit_id": moved.get("audit_id")})
     back = await pool.fetchval(
         "SELECT value FROM ingestion_state WHERE key = $1", FA.LIMITS_KEY)
     read = json.loads(back) if isinstance(back, str) else back
     return {"ok": bool((read or {}).get("approved")),
+            "owner_authorization": moved.get("owner_authorization"),
             "requested": {"approve": proposed},
             "applied": {"approved": bool((read or {}).get("approved")),
                         "effective": eff["effective"],

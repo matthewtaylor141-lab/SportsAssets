@@ -159,7 +159,12 @@ class Settings(BaseSettings):
     # operator's decision. This key is meant to be held by the owner only and
     # never placed in a workflow. EMPTY MEANS THE ROUTE REFUSES 503 by name.
     # It is deliberately NOT in CREDENTIAL_CONSEQUENCES: an unset key disables
-    # one owner-only action, and must not report the service as misconfigured.
+    # owner-only actions, and must not report the service as misconfigured.
+    # It IS in OWNER_CREDENTIAL_CONSEQUENCES below, which the posture reports
+    # separately, so what refuses without it is still visible. Since D5b it is
+    # also the second factor for SIGNING the funded owner authorization
+    # (POST /api/admin/funded-owner-authorization and its /revoke).
+    # Provisioning: research/RESOLUTION_CREDENTIAL_PROVISIONING.md.
     funded_resolution_key: str = ""
     # THE IDENTITY THAT KEY AUTHENTICATES. The route writes this -- not a name
     # typed into the request -- into the audit row, and refuses an attestation
@@ -316,6 +321,32 @@ CREDENTIAL_CONSEQUENCES = {
 }
 
 
+#: THE OWNER-HELD CREDENTIALS -> what refuses when they are absent (D5b).
+#:
+#: KEPT APART FROM CREDENTIAL_CONSEQUENCES ON PURPOSE. That map drives
+#: `all_configured`, which /healthz publishes and the verification workflow
+#: expects to read `true`: every name in it guards a route the service needs to
+#: operate. These two guard OWNER-ONLY acts -- signing or revoking the funded
+#: owner authorization, and resolving a lost acknowledgement -- and are unset
+#: until the owner provisions them, which is the correct state for a service
+#: with capital off, not a misconfiguration. Folding them into the first map
+#: would turn every healthz readback red until then. They are reported beside
+#: it, by name and consequence, with no value.
+OWNER_CREDENTIAL_CONSEQUENCES = {
+    "funded_resolution_key": (
+        "FUNDED_RESOLUTION_KEY: POST /api/admin/funded-owner-authorization, "
+        "POST /api/admin/funded-owner-authorization/revoke and POST "
+        "/api/admin/funded-investigations/{intent_id}/resolve all refuse 503 "
+        "FUNDED_RESOLUTION_KEY_NOT_CONFIGURED, so the owner cannot sign or "
+        "revoke the funded authorization and no lost acknowledgement can be "
+        "resolved"),
+    "funded_resolution_operator": (
+        "FUNDED_RESOLUTION_OPERATOR: the same three routes refuse 503, because "
+        "a key with no identity bound to it authenticates nobody; it is the "
+        "name written into every owner-authorization and resolution audit row"),
+}
+
+
 def credential_posture() -> dict:
     """Which authentication credentials are configured, and what refuses if not.
 
@@ -331,10 +362,23 @@ def credential_posture() -> dict:
             "if_absent": consequence,
         }
     missing = sorted(k for k, v in out.items() if not v["configured"])
+    owner = {}
+    for name, consequence in OWNER_CREDENTIAL_CONSEQUENCES.items():
+        configured = bool((getattr(s, name, "") or "").strip())
+        owner[name] = {
+            "configured": configured,
+            "state": "CONFIGURED" if configured else "NOT_CONFIGURED",
+            "if_absent": consequence,
+        }
     return {
         "credentials": out,
         "not_configured": missing,
         "all_configured": not missing,
+        # REPORTED, NOT COUNTED: owner-only credentials do not make the
+        # service misconfigured when unset (see OWNER_CREDENTIAL_CONSEQUENCES).
+        "owner_credentials": owner,
+        "owner_not_configured": sorted(
+            k for k, v in owner.items() if not v["configured"]),
         "there_is_no_default_for_any_of_these": (
             "admin_token and desk_password previously defaulted to values "
             "published in this repository. Both now default to empty, and every "

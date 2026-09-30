@@ -5707,11 +5707,16 @@ async def _funded_service(conn, *, now):
     # digest, only if a full re-run of `authorize` passes, and never past the
     # owner's expiry. Anything else leaves the record to expire, named. It
     # sends nothing and grants nothing the owner has not.
+    # The recheck needs a venue reconciliation no older than its bound; when a
+    # renewal is due, one is read and recorded first (reads only).
+    renewal_reconciliation = await _FA.reconcile_before_renewal(
+        conn, account_id=account_id, venue=venue, now=now)
     try:
         renewal = await _FA.renew_system_authorization(conn, now=now)
     except Exception as exc:                                   # noqa: BLE001
         renewal = {"renewed": False, "reason": "RENEWAL_RAISED",
                    "error": "%s: %s" % (type(exc).__name__, str(exc)[:200])}
+    renewal["reconciliation"] = renewal_reconciliation
     ev = book_currency_evidence()
     # ── ONE MANAGEMENT DECISION, AND `manage` NO LONGER ACTS ALONE ───
     #
@@ -8315,7 +8320,8 @@ def _servicing_digest(svc) -> dict | None:
             "authorization_renewal": ({
                 k: ren.get(k) for k in (
                     "renewed", "reason", "refusal", "expires_at",
-                    "previous_expires_at", "owner_expires_at", "error")}
+                    "previous_expires_at", "owner_expires_at", "error",
+                    "reconciliation")}
                 if ren else None),
             "positions_serviced": len(svc.get("selection") or []),
             "decisions": rows,

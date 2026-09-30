@@ -51,12 +51,23 @@ async def _ready(conn, *, owner_expires_in):
                        "WHERE experiment_id = $1", ext.EXPERIMENT_ID)
     await _seed_evidence(conn, waived=False)
     eff = EX.effective_limits(_LIMITS)
-    owner = {"account_id": CLEAN, "venue": "PMUS",
-             "effective_digest": eff["effective_digest"], "by": "owner",
-             "at": time.time(), "expires_at": time.time() + owner_expires_in,
-             "revoked": False, "invalidated": False,
-             "statement": "a test fixture, not a real authorisation"}
-    await _put(conn, FA.OWNER_AUTH_KEY, owner)
+    # SIGNED THROUGH THE AUTHENTICATED WRITER (D5b): a hand-written owner row
+    # is refused as unauthenticated. Synthetic factors; not a real signature.
+    from sportsassets import bettor_owner_authorization as OA
+
+    await _put(conn, FA.ACCOUNT_KEY, {"account_id": CLEAN, "venue": "PMUS",
+                                      "bound": True})
+    signed = await OA.record_owner_authorization(
+        conn, account_id=CLEAN, venue="PMUS",
+        effective_digest=eff["effective_digest"],
+        statement=("SYNTHETIC TEST: %s at PMUS, a test fixture, not a real "
+                   "authorisation" % CLEAN),
+        confirm=CLEAN, operator="test-owner",
+        auth={"admin_token_verified": True, "resolution_key_verified": True,
+              "operator": "test-owner", "route": "test"},
+        lifetime_days=owner_expires_in / 86400.0)
+    assert signed["ok"] is True, signed
+    owner = await _get(conn, FA.OWNER_AUTH_KEY)
     first = await FA.authorize(conn, account_id=CLEAN, venue="PMUS",
                                by="test")
     assert first["ok"] is True, first.get("refusal")
