@@ -151,3 +151,28 @@ SELECT CASE WHEN fx.graded_contracts < 2 THEN 'ONE_GRADED_CONTRACT'
 SELECT count(*) AS observations, count(DISTINCT fixture) AS fixtures,
        min(observed_at) AS first, max(observed_at) AS last
   FROM bettor_pair_observations;
+
+\echo '== K4 · the evaluator rule: first GRADEABLE row per fixture (probability AND buy_intent) =='
+WITH s AS (
+  SELECT * FROM external_valuations
+   WHERE experiment_id = 'EXT_PINNACLE_DEVIG_V1_SHADOW'
+     AND decided_at >= now() - interval '90 days'
+     AND version = 'PINNACLE_DEVIG_V1' AND devig_method = 'power'
+     AND sport_family IN ('baseball', 'soccer') AND market = 'h2h'
+     AND coalesce(event_key, '') <> ''),
+g AS (SELECT event_key, bool_or(probability IS NOT NULL AND coalesce(buy_intent, '') <> '')
+             AS has_gradeable FROM s GROUP BY 1),
+pick AS (
+  SELECT DISTINCT ON (s.event_key) s.*
+    FROM s JOIN g USING (event_key)
+   WHERE NOT g.has_gradeable
+      OR (s.probability IS NOT NULL AND coalesce(s.buy_intent, '') <> '')
+   ORDER BY s.event_key, s.observed_at, s.id)
+SELECT count(*) AS fixtures_in_scope,
+       count(*) FILTER (WHERE outcome_known AND outcome IN (0, 1)
+                          AND outcome_basis IN ('VENUE_SETTLEMENT_PRICE', 'VENUE_REPORTED_OUTCOME')
+                          AND probability IS NOT NULL) AS resolved_fixtures,
+       count(*) FILTER (WHERE outcome_known AND probability IS NULL) AS known_but_never_priced,
+       count(*) FILTER (WHERE NOT outcome_known) AS unresolved,
+       count(DISTINCT event_key) FILTER (WHERE outcome_known) AS known_outcome_fixtures_picked
+  FROM pick;
