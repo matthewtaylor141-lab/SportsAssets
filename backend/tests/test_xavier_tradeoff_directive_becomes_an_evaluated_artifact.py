@@ -3,7 +3,7 @@
 The chain, through the production paths (mirroring what
 test_a_directive_becomes_an_evaluated_artifact proves for Derek):
 
-  1. RECORDED DECISIONS FROM THE REAL SCHEDULED PATH. Two review passes of
+  1. RECORDED DECISIONS FROM THE REAL SCHEDULED PATH. One review pass per fixture of
      `ext_pinnacle_loop._funded_service` (manage -> the production pair-input
      builder -> `pass_once` -> `decide_and_record` -> Xavier's record) over a
      DEMONSTRATION account, with ONLY the venue transport substituted (the
@@ -513,21 +513,23 @@ def test_a_loss_directive_becomes_an_evaluated_committed_xavier_candidate(
             await _purge_xim(conn, events)
             await H.authorize(conn)
             await ACM.approve(conn)
-            # ── BATCH 1: the TRAINING fixtures, decided then settled ──
-            for ev in train:
+            # THE BOOK HOLDS ONE OPEN ENTRY POSITION AT A TIME
+            # (bettor_funded_one_open_position), so every fixture is its own
+            # scheduled review pass: held, reviewed, then settled.
+            async def _one(ev, o):
                 await _catalogue(conn, H, ev)
                 await _position(conn, H, ev)
-            await _serve(conn, H, monkeypatch, train, table)
-            await _settle(conn, H, train, PATTERN, table)
+                await _serve(conn, H, monkeypatch, [ev], table)
+                await _settle(conn, H, [ev], [o], table)
+            # ── THE TRAINING fixtures, decided and settled first ──────
+            for ev, o in zip(train, PATTERN):
+                await _one(ev, o)
             await asyncio.sleep(1.1)
             stamps["boundary"] = time.time()
             await asyncio.sleep(1.1)
-            # ── BATCH 2: the HOLDOUT fixtures, decided after the boundary ─
-            for ev in hold:
-                await _catalogue(conn, H, ev)
-                await _position(conn, H, ev)
-            await _serve(conn, H, monkeypatch, hold, table)
-            await _settle(conn, H, hold, PATTERN, table)
+            # ── THE HOLDOUT fixtures, decided after the boundary ──────
+            for ev, o in zip(hold, PATTERN):
+                await _one(ev, o)
             recs = [dict(r) for r in await conn.fetch(
                 "SELECT xavier_decision_id, chosen_action, account_id, "
                 "       reasoning->'decision_inputs' AS di, "
