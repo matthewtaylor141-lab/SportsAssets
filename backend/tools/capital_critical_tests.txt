@@ -33,6 +33,12 @@ tests/test_admission_policies.py
 tests/test_an_action_is_valued_only_on_depth_its_limit_can_reach.py
 tests/test_an_autonomous_entry_is_not_counted_twice.py
 tests/test_an_indirect_pair_is_valued_on_the_outcomes.py
+# (1002) proof 17: Audrey's chat answers from cited records and turns an instruction into a tasked directive
+tests/test_audrey_chat_answers_from_records_and_directs_work.py
+# (1002) proof 18: the chat cannot grant itself risk, trading or deployment authority
+tests/test_audrey_chat_cannot_grant_itself_authority.py
+# (1002) proof 21 (chat): a provider failure is disclosed and answered from records; no secret is stored
+tests/test_audrey_chat_survives_provider_failure.py
 tests/test_autonomy_completion_boundaries.py
 tests/test_bettor_decision_engine.py
 tests/test_bettor_entry_gate.py
