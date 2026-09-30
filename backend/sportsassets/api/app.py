@@ -434,6 +434,41 @@ app.add_middleware(
 # page-load time on mobile. ~10x smaller on the wire with gzip.
 app.add_middleware(GZipMiddleware, minimum_size=1024)
 
+# ── THE THREE AGENTS' ROUTERS (migration 152+) ──────────────────────────
+# Each stream's router in its own block: a module that is absent or fails to
+# import is logged and skipped, and every other route is unaffected. All
+# are under /api/command/agents and use the command read / control checks.
+try:
+    from .agents_core import router as _agents_core_router
+    app.include_router(_agents_core_router)
+except ImportError:
+    log.warning("agents: api.agents_core not loaded", exc_info=True)
+try:
+    from .agents_derek import router as _agents_derek_router
+    app.include_router(_agents_derek_router)
+except ImportError:
+    log.warning("agents: api.agents_derek not loaded", exc_info=True)
+try:
+    from .agents_xavier import router as _agents_xavier_router
+    app.include_router(_agents_xavier_router)
+except ImportError:
+    log.warning("agents: api.agents_xavier not loaded", exc_info=True)
+try:
+    from .agents_audrey import router as _agents_audrey_router
+    app.include_router(_agents_audrey_router)
+except ImportError:
+    log.warning("agents: api.agents_audrey not loaded", exc_info=True)
+try:
+    from .agents_chat import router as _agents_chat_router
+    app.include_router(_agents_chat_router)
+except ImportError:
+    log.warning("agents: api.agents_chat not loaded", exc_info=True)
+try:
+    from .agent_pages import router as _agent_pages_router
+    app.include_router(_agent_pages_router)
+except ImportError:
+    log.warning("agents: api.agent_pages not loaded", exc_info=True)
+
 # Which frontends actually talk to this API? The deployed site's hostname
 # is recorded nowhere (Netlify names are set in its UI), which has made
 # "is the new build live?" unanswerable by probes twice now. Real browser
