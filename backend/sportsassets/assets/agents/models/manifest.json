@@ -1,0 +1,60 @@
+{
+  "version": "CC_CHARACTER_ASSETS_V1",
+  "_format": {
+    "what": "One entry per agent. model null = the procedural placeholder is shown, tagged PLACEHOLDER CHARACTER. A licensed model is used only when every required field is present and both files exist in this directory.",
+    "required": {
+      "model": "file name of a glTF 2.0 binary (.glb) in this directory: one skinned humanoid (Mixamo or VRM/humanoid bone names, or map them in 'bones'), ARKit 52 face blendshapes (or map them in 'blendshapes'); Meshopt compression allowed; textures PNG/JPEG/WebP inside the .glb (KTX2 is not supported in this build)",
+      "license_file": "file name, in this directory, of the licence text shipped with the model",
+      "license_spdx": "the licence identifier (SPDX, or LicenseRef-<vendor> for a commercial licence)",
+      "licensed_from": "who granted the licence (vendor, artist, or contract reference)",
+      "test_asset": "must be false: a test asset is never shown as a character"
+    },
+    "optional": {
+      "framing": "face | chest | waist (default chest)",
+      "lighting": "cinematic_warm | cinematic_cool | cinematic_violet",
+      "yaw": "radians to turn the model to face the camera",
+      "scale": "uniform scale",
+      "bones": "role -> exact bone name, for rigs outside the built-in Mixamo/VRM table",
+      "blendshapes": "ARKit name -> exact morph target name, for faces outside the ARKit naming",
+      "candidate_label": "shown on the stage while the model is under evaluation (the placeholder tag is replaced by it, never hidden)",
+      "credit": "the attribution line shown in the page footer",
+      "hide_materials": "material names to hide (e.g. alpha-card hair whose opacity map the vendor did not supply)",
+      "arms_down": "false to keep the model's bind pose (default: a T/A pose is turned arms-down)"
+    }
+  },
+  "characters": {
+    "derek": {
+      "model": "derek_candidate.glb",
+      "license_file": "ROCKETBOX_LICENSE.md",
+      "license_spdx": "MIT",
+      "licensed_from": "Microsoft Rocketbox (github.com/microsoft/Microsoft-Rocketbox), Assets/Avatars/Adults/Male_Adult_01, Copyright (c) 2020 Microsoft",
+      "test_asset": false,
+      "candidate_label": "CANDIDATE MODEL (Rocketbox, MIT) — under evaluation",
+      "credit": "Character model: Microsoft Rocketbox Male_Adult_01 (MIT, © 2020 Microsoft)",
+      "framing": "chest",
+      "lighting": "cinematic_warm",
+      "source": {
+        "fbx": "Assets/Avatars/Adults/Male_Adult_01/Export/Male_Adult_01_facial.fbx",
+        "converted_by": "FBX2glTF 0.9.7 + gltf-transform (tools/rocketbox_to_glb.mjs); textures downscaled to 2K/1K JPEG, specular mapped to roughness; morph order verified against the FBX"
+      },
+      "hide_materials": [
+        "m002_opacity"
+      ],
+      "known_gaps": [
+        "the hair-card opacity map for Male_Adult_01 is not in the Rocketbox repository (404), so the alpha-card hair (material m002_opacity) is hidden and the painted scalp shows"
+      ]
+    },
+    "xavier": {
+      "model": null,
+      "framing": "waist",
+      "lighting": "cinematic_cool",
+      "why_absent": "no licensed model has been supplied yet"
+    },
+    "audrey": {
+      "model": null,
+      "framing": "waist",
+      "lighting": "cinematic_violet",
+      "why_absent": "no licensed model has been supplied yet"
+    }
+  }
+}

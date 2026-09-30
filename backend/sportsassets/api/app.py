@@ -473,6 +473,13 @@ try:
 except ImportError:
     log.warning("agents: api.agent_pages not loaded", exc_info=True)
 try:
+    # the Command Centre pages' extra reads (Derek order history, Xavier
+    # standing orders and payoff demonstration, Audrey company P&L)
+    from .agents_cc_reads import router as _agents_cc_reads_router
+    app.include_router(_agents_cc_reads_router)
+except ImportError:
+    log.warning("agents: api.agents_cc_reads not loaded", exc_info=True)
+try:
     from .agents_core import router as _agents_core_router
     app.include_router(_agents_core_router)
 except ImportError:

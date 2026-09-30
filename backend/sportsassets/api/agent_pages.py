@@ -36,7 +36,7 @@ is generated from `demo_html(standalone=True)`; a test compares the two.
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse
 
 router = APIRouter()
@@ -59,7 +59,26 @@ ENDPOINTS = {
     "audrey": "/api/command/agents/audrey",
     "chat": "/api/command/agents/audrey/chat",
     "directives": "/api/command/agents/audrey/directives",
+    # the Command Centre pages' extra read-only routes (agents_cc_reads) and
+    # the character module (served by `agents_static` below)
+    "derek_orders": "/api/command/agents/derek/orders",
+    "xavier_standing": "/api/command/agents/xavier/standing-orders",
+    "xavier_payoff": "/api/command/agents/xavier/payoff-demonstration",
+    "audrey_performance": "/api/command/agents/audrey/performance",
+    "characters": "/api/command/agents/static/cc_characters.js",
+    "avatar": "/api/command/agents/static/cc_avatar.js",
+    "labels": "/api/command/agents/labels",
+    # the paper session, as api/command_paper.py serves it (404 in a build
+    # without it, and the pages say so): see agent_cc_page.PAPER_CONTRACT
+    "paper_account": "/api/command/paper/account",
+    "paper_stream": "/api/command/paper/stream",
+    "paper_session": "/api/command/paper/session",
+    "paper_derek": "/api/command/paper/derek",
+    "paper_xavier": "/api/command/paper/xavier",
+    "paper_audrey": "/api/command/paper/audrey",
 }
+PAPER_EP_KEYS = ("paper_account", "paper_stream", "paper_session",
+                 "paper_derek", "paper_xavier", "paper_audrey")
 
 REQUIRED_SECTIONS = {
     "derek": ("status", "versions", "coverage", "subscription",
@@ -1685,8 +1704,9 @@ BOOT_JS = r"""
     if (busy) return; busy = true;
     var open = [].map.call(document.querySelectorAll('details[open]'), function (d) { var c = d.closest('[id]'); return c && c.id; });
     var o = await AG.load(url, fetch.bind(window));
-    if (o.kind !== 'OK') { app.innerHTML = AG.gate(o, url); readat.textContent = o.kind === 'LOCKED' ? 'locked' : o.kind.toLowerCase().replace('_', ' '); busy = false; return; }
+    if (o.kind !== 'OK') { app.innerHTML = AG.gate(o, url); readat.textContent = o.kind === 'LOCKED' ? 'locked' : o.kind.toLowerCase().replace('_', ' '); busy = false; if (typeof CC !== 'undefined' && CC.onWorkspaceFail) CC.onWorkspaceFail(o); return; }
     app.innerHTML = kind === 'index' ? AG.index(o.json) : AG.workspace(kind, o.json);
+    if (typeof CC !== 'undefined' && CC.onWorkspace) CC.onWorkspace(kind, o.json);
     open.forEach(function (id) { var el = id && document.getElementById(id); if (el) { var d = el.querySelector('details'); if (d) d.open = true; } });
     readat.textContent = AG.readLine(o.json);
     busy = false;
@@ -1711,11 +1731,13 @@ BOOT_JS = r"""
       ev.preventDefault();
       var q = input.value.trim(); if (!q) return;
       log.insertAdjacentHTML('beforeend', '<div class="msg q"><div class="who">MANAGEMENT</div><p>' + AG.esc(q) + '</p></div>');
-      input.value = ''; form.querySelector('button').disabled = true;
+      input.value = ''; form.querySelector('button[type=submit]').disabled = true;
+      if (typeof CC !== 'undefined' && CC.chatPending) CC.chatPending();
       var r = await AG.chat.ask(fetch.bind(window), q, cid);
       if (r.conversationId) cid = r.conversationId;
       log.insertAdjacentHTML('beforeend', r.html); log.scrollTop = log.scrollHeight;
-      form.querySelector('button').disabled = false;
+      if (typeof CC !== 'undefined') { if (r.kind === 'OK' && CC.chatReply) CC.chatReply(String(r.html || '').replace(/<[^>]*>/g, '').length); else if (CC.chatDone) CC.chatDone(); }
+      form.querySelector('button[type=submit]').disabled = false;
     });
   }
   // ── trace view ──────────────────────────────────────────────────
@@ -1795,10 +1817,88 @@ _DESCS = {
 }
 
 
+_CC_SHELL = r"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="robots" content="noindex,nofollow">
+<meta name="color-scheme" content="dark">
+<meta name="description" content="%%DESC%%">
+<title>%%TITLE%% · %%ROLE%% | BETTOR Command</title>
+<style>%%CSS%%</style></head>
+<body class="ag cc ag-%%KIND%%" data-kind="%%KIND%%" data-cc-mode="unavailable">
+<script>%%FRAMED%%</script>
+<a class="skip" href="#cc-main">Skip to the records</a>
+<header class="top cc-top"><a class="brand" href="/api/command/agents/page"><span class="mark"></span>BETTOR <b>COMMAND</b></a>
+<nav class="cc-nav" aria-label="Agents">%%NAV%%</nav>
+<nav class="cc-sub" aria-label="More"><a href="/api/command/agents/page">All agents</a><a href="/api/command/agents/demo/page">Product demo</a></nav>
+<div class="meta"><span class="ro">READ-ONLY</span><span id="readat">reading&#8230;</span><button id="trace-btn" type="button">Trace</button><button id="refresh" type="button">Refresh</button></div></header>
+<main id="cc-main" tabindex="-1">
+<div class="cc-paper-banner" id="paper-banner" data-state="READING" role="status" aria-live="polite">Reading the paper session&#8230;</div>
+<div class="cc-banner" role="alert" id="cc-banner">%%BANNER%%</div>
+<div class="cc-hero">%%STAGE%%%%BRIEF%%</div>
+%%PANELS%%
+%%PAPER%%
+<section class="card wide" id="trace" hidden aria-label="Trace linked records" style="margin-top:16px"><header><span class="idx">&#8594;</span><div class="ttl"><h3>Trace linked records</h3><code class="key">entry decision &#8594; handoff &#8594; Xavier decisions &#8594; audit &#8594; directive &#8594; task &#8594; candidate</code></div><button id="trace-close" type="button">Close</button></header>
+<p class="note">Follows the ids the records carry (entry_intent_id, portfolio_group_id, xavier_decision_id, directive_id, task_id, candidate_id, and evidence references) across the four same-origin reads. Every step says what linked it.</p><div id="trace-body"></div></section>
+<h2 class="cc-h2" id="full-record">Full workspace record</h2>
+<div id="app"><p class="boot">Reading %%ENDPOINT%% &#8230;</p></div></main>
+<p class="foot">Presentation of recorded state. This page sends no order and holds no credential; it reads %%ENDPOINT%% with the COMMAND session. The character is an original stylised illustration of an AI agent; its pose follows the agent_status record and never stands in for data. UNKNOWN is not zero; EMPTY is not success.%%CREDIT%%</p>
+<script>%%JS%%</script>
+<script type="module">%%LOADER%%</script></body></html>"""
+
+
+def _cc_page_html(kind: str) -> str:
+    from . import agent_cc_page as CCP
+    js = (CORE_JS + COMMON_JS + TRACE_JS
+          + {"derek": DEREK_JS, "xavier": XAVIER_JS, "audrey": AUDREY_JS}[kind]
+          + CCP.CC_CORE_JS + CCP.CC_BOOT_JS.replace(
+              "var E = AG.ENDPOINTS,",
+              "var E = Object.assign({}, AG.ENDPOINTS, %s)," % _cc_endpoints_js(),
+              1)
+          + CCP.PAPER_CORE_JS + CCP.PAPER_BOOT_JS.replace(
+              "%%PAPER_EP%%", _json_ep(PAPER_EP_KEYS))
+          + BOOT_JS)
+    chat = CCP.chat_panel_html(CHAT_PANEL_HTML) if kind == "audrey" else ""
+    return (_CC_SHELL.replace("%%CSS%%", BASE_CSS + CCP.CC_CSS + CCP.PAPER_CSS)
+            .replace("%%PAPER%%", CCP.paper_html(kind))
+            .replace("%%JS%%", js)
+            .replace("%%FRAMED%%", CCP.FRAMED_JS)
+            .replace("%%LOADER%%", CCP.LOADER_JS.replace(
+                "%%CHARACTERS%%", ENDPOINTS["characters"]).replace(
+                "%%AVATAR%%", ENDPOINTS["avatar"]))
+            .replace("%%NAV%%", CCP.nav_html(kind, PAGE_PATHS))
+            .replace("%%BANNER%%", CCP.UNAVAILABLE_BANNER)
+            .replace("%%STAGE%%", CCP.stage_html(kind, ENDPOINTS[kind], character_asset(kind)))
+            .replace("%%BRIEF%%", CCP.brief_html(kind))
+            .replace("%%PANELS%%", CCP.panels_html(kind, chat))
+            .replace("%%CREDIT%%", CCP.credit_html(character_asset(kind)))
+            .replace("%%ENDPOINT%%", ENDPOINTS[kind])
+            .replace("%%TITLE%%", _PAGE_TITLES[kind])
+            .replace("%%ROLE%%", CCP.CC_META[kind]["role"].replace("&", "&amp;"))
+            .replace("%%DESC%%", _DESCS[kind])
+            .replace("%%KIND%%", kind))
+
+
+def _json_ep(keys) -> str:
+    import json as _json
+    return _json.dumps({k: ENDPOINTS[k] for k in keys}).replace('"', "'")
+
+
+def _cc_endpoints_js() -> str:
+    import json as _json
+    return _json.dumps({k: ENDPOINTS[k] for k in (
+        "derek_orders", "xavier_standing", "xavier_payoff",
+        "audrey_performance", "labels")}).replace('"', "'")
+
+
 def page_html(kind: str) -> str:
-    """One self-contained workspace page (no external asset)."""
+    """One workspace page. Derek, Xavier and Audrey are the Command Centre
+    pages (data module inline, character module loaded separately); the
+    index keeps the plain workspace shell."""
     if kind not in _PAGE_TITLES:
         raise KeyError(kind)
+    if kind in ("derek", "xavier", "audrey"):
+        return _cc_page_html(kind)
     js = CORE_JS + COMMON_JS + TRACE_JS
     js += {"index": INDEX_JS, "derek": DEREK_JS, "xavier": XAVIER_JS,
            "audrey": AUDREY_JS}[kind]
@@ -1815,8 +1915,10 @@ def page_html(kind: str) -> str:
 
 def render_js(kind: str) -> str:
     """The pure render code a page carries, without its DOM boot (for tests)."""
+    from . import agent_cc_page as CCP
     return CORE_JS + COMMON_JS + TRACE_JS + {"index": INDEX_JS, "derek": DEREK_JS,
-                                  "xavier": XAVIER_JS, "audrey": AUDREY_JS}[kind]
+                                  "xavier": XAVIER_JS, "audrey": AUDREY_JS}[kind] + (
+        CCP.CC_CORE_JS + CCP.PAPER_CORE_JS if kind in ("derek", "xavier", "audrey") else "")
 
 
 LOCKED_PAGE_HTML = r"""<!doctype html>
@@ -1853,11 +1955,161 @@ def _authorised(request: Request) -> bool:
     return True
 
 
-def _serve(request: Request, html_fn) -> HTMLResponse:
+#: The Command Centre pages load ONE same-origin module (the character, over
+#: the vendored three.js build) -- so their script-src adds 'self'. Nothing
+#: else changes: no external origin, connect-src 'self', no form posts.
+CC_PAGE_CSP = ("default-src 'none'; style-src 'unsafe-inline'; "
+               # 'wasm-unsafe-eval' lets the vendored Meshopt decoder compile
+               # its WebAssembly; it does NOT allow eval() of JavaScript
+               "script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; "
+               # blob: is the glTF loader decoding a model's EMBEDDED
+               # textures (object URLs of this document); nothing remote
+               "connect-src 'self' blob:; "
+               "img-src 'self' data: blob:; base-uri 'none'; form-action 'none'; "
+               # the management shell at /derek, /xavier and /audrey frames
+               # these pages from the same origin; nothing else may frame them
+               "frame-ancestors 'self'")
+
+
+def _cc_headers() -> dict:
+    h = dict(_headers())
+    h["Content-Security-Policy"] = CC_PAGE_CSP
+    return h
+
+
+def _serve(request: Request, html_fn, headers_fn=None) -> HTMLResponse:
     if not _authorised(request):
         return HTMLResponse(content=locked_html(), status_code=401,
                             headers=_headers())
-    return HTMLResponse(content=html_fn(), status_code=200, headers=_headers())
+    return HTMLResponse(content=html_fn(), status_code=200,
+                        headers=(headers_fn or _headers)())
+
+
+# ── THE CHARACTER MODULE AND ITS VENDORED three.js, READ-ONLY ───────
+#
+# An allowlist, not a directory listing: only these files are served, from
+# sportsassets/assets/agents, with their exact content type. three.js
+# (r185, MIT, the minified ES module build and the core it imports) is pinned
+# by file and cached long; the character module is ours and cached briefly so
+# a release reaches browsers within minutes. None of these files carries data
+# or a credential; they are still served only to the COMMAND session (a
+# same-origin module import sends the session cookie, which is scoped to
+# /api/command), so nothing under /api/command answers an anonymous caller,
+# and they are cached privately.
+STATIC_DIR = __import__("pathlib").Path(__file__).resolve().parents[1] \
+    / "assets" / "agents"
+STATIC_FILES = {
+    "three.module.min.js": ("text/javascript; charset=utf-8",
+                            "private, max-age=604800, immutable"),
+    "three.core.min.js": ("text/javascript; charset=utf-8",
+                          "private, max-age=604800, immutable"),
+    "cc_characters.js": ("text/javascript; charset=utf-8",
+                         "private, max-age=300"),
+    "THREE_LICENSE.txt": ("text/plain; charset=utf-8",
+                          "private, max-age=86400"),
+    # the licensed-character pipeline: glTF loader (three.js addons, MIT),
+    # the Meshopt decoder (MIT) and the controller
+    "cc_avatar.js": ("text/javascript; charset=utf-8", "private, max-age=300"),
+    "GLTFLoader.js": ("text/javascript; charset=utf-8",
+                      "private, max-age=604800, immutable"),
+    "BufferGeometryUtils.js": ("text/javascript; charset=utf-8",
+                               "private, max-age=604800, immutable"),
+    "SkeletonUtils.js": ("text/javascript; charset=utf-8",
+                         "private, max-age=604800, immutable"),
+    "meshopt_decoder.module.js": ("text/javascript; charset=utf-8",
+                                  "private, max-age=604800, immutable"),
+}
+
+# ── LICENSED CHARACTER MODELS ───────────────────────────────────────
+MODELS_DIR = STATIC_DIR / "models"
+MODELS_URL = "/api/command/agents/static/models/"
+
+
+def _manifest() -> dict:
+    import json as _json
+    try:
+        return _json.loads((MODELS_DIR / "manifest.json").read_text())
+    except (OSError, ValueError):
+        return {"characters": {}}
+
+
+def _safe_file(name) -> bool:
+    import re as _re
+    return isinstance(name, str) and bool(_re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,120}", name))
+
+
+def character_asset(kind: str) -> dict:
+    """The character config the page hands its loader: a licensed model when
+    the manifest entry is complete and both files exist, else model None with
+    the reason (and the procedural placeholder is shown, tagged)."""
+    e = dict((_manifest().get("characters") or {}).get(kind) or {})
+    base = {k: e.get(k) for k in ("framing", "lighting", "yaw", "scale",
+                                  "bones", "blendshapes", "candidate_label",
+                                  "credit", "hide_materials", "arms_down")
+            if e.get(k) is not None}
+    why = None
+    if not e.get("model"):
+        why = e.get("why_absent") or "no model in the manifest"
+    elif e.get("test_asset") is not False:
+        why = "refused: a test asset (or an entry not marked test_asset=false) is never a character"
+    elif not (_safe_file(e.get("model")) and e["model"].endswith(".glb")):
+        why = "refused: model must be a .glb file name in the models directory"
+    elif not (MODELS_DIR / e["model"]).is_file():
+        why = "refused: the model file is not in this build"
+    elif not (_safe_file(e.get("license_file")) and (MODELS_DIR / e["license_file"]).is_file()
+              and (MODELS_DIR / e["license_file"]).stat().st_size > 0):
+        why = "refused: the licence file shipped with the model is missing"
+    elif not (e.get("license_spdx") and e.get("licensed_from")):
+        why = "refused: license_spdx and licensed_from are required"
+    if why:
+        return dict(base, model=None, why=why)
+    return dict(base, model=MODELS_URL + e["model"],
+                license={"spdx": e["license_spdx"], "from": e["licensed_from"],
+                         "file": MODELS_URL + e["license_file"]})
+THREE_VERSION = "0.185.1"
+
+
+async def require_command(request: Request) -> str:
+    """The COMMAND read check (api.app.require_command), as a dependency."""
+    from . import app as A
+    return A.require_command(bt_command=request.cookies.get("bt_command", ""),
+                             x_desk_token=request.headers.get("x-desk-token", ""),
+                             x_admin_token=request.headers.get("x-admin-token", ""))
+
+
+@router.get("/api/command/agents/static/models/{name}", include_in_schema=False,
+            dependencies=[Depends(require_command)])
+async def agents_model(name: str):
+    """Only the model and licence files of a COMPLETE manifest entry."""
+    from fastapi.responses import Response as _R
+    allowed = {}
+    for kind in (_manifest().get("characters") or {}):
+        a = character_asset(kind)
+        if a.get("model"):
+            allowed[a["model"].rsplit("/", 1)[1]] = "model/gltf-binary"
+            allowed[a["license"]["file"].rsplit("/", 1)[1]] = "text/plain; charset=utf-8"
+    if name not in allowed:
+        raise HTTPException(status_code=404, detail="not a licensed model file in this build")
+    return _R(content=(MODELS_DIR / name).read_bytes(), media_type=allowed[name].split(";")[0],
+              headers={"Content-Type": allowed[name], "Cache-Control": "private, max-age=3600",
+                       "X-Content-Type-Options": "nosniff"})
+
+
+@router.get("/api/command/agents/static/{name}", include_in_schema=False,
+            dependencies=[Depends(require_command)])
+async def agents_static(name: str):
+    from fastapi.responses import Response as _R
+    got = STATIC_FILES.get(name)
+    if got is None:
+        raise HTTPException(status_code=404, detail="not a served file")
+    try:
+        body = (STATIC_DIR / name).read_bytes()
+    except OSError:
+        raise HTTPException(status_code=404, detail="file absent in this build")
+    return _R(content=body, media_type=got[0].split(";")[0],
+              headers={"Content-Type": got[0], "Cache-Control": got[1],
+                       "X-Content-Type-Options": "nosniff",
+                       "Cross-Origin-Resource-Policy": "same-origin"})
 
 
 @router.get("/api/command/agents/page", include_in_schema=False)
@@ -1867,17 +2119,17 @@ async def agents_index_page(request: Request):
 
 @router.get("/api/command/agents/derek/page", include_in_schema=False)
 async def agents_derek_page(request: Request):
-    return _serve(request, lambda: page_html("derek"))
+    return _serve(request, lambda: page_html("derek"), _cc_headers)
 
 
 @router.get("/api/command/agents/xavier/page", include_in_schema=False)
 async def agents_xavier_page(request: Request):
-    return _serve(request, lambda: page_html("xavier"))
+    return _serve(request, lambda: page_html("xavier"), _cc_headers)
 
 
 @router.get("/api/command/agents/audrey/page", include_in_schema=False)
 async def agents_audrey_page(request: Request):
-    return _serve(request, lambda: page_html("audrey"))
+    return _serve(request, lambda: page_html("audrey"), _cc_headers)
 
 
 @router.get("/api/command/agents/demo/page", include_in_schema=False)

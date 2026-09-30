@@ -379,3 +379,12 @@ tests/test_agent_speech_speaks_only_stored_messages.py
 # (180) the pronunciation normaliser (money, cents, %, pp, labelled
 # probabilities, negatives, decimals)
 tests/test_speech_pronunciation_normaliser.py
+# the Command Centre pages for Derek, Xavier and Audrey: COMMAND-only access,
+# persistent navigation, the data module separate from the 3D character (data
+# drawn with the canvas absent), the vendored three.js static route, reduced
+# motion, the character's mode from agent_status (stale = UNAVAILABLE), Derek's
+# server-side searched and paginated history in eight field groups with the
+# combined estimate read from the record, the owner's worked example, standing
+# orders UNAVAILABLE when not in this build, the DEMONSTRATION payoff through
+# xavier_ladder.group_table (full and partial hedge), Audrey's FALLBACK MODE
+tests/test_command_centre_agent_pages.py
