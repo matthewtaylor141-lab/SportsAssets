@@ -8205,6 +8205,7 @@ async def cycle(conn) -> dict:
                             .get("acquisition_price"))})
                 _vq_entry["calibration_only_record"] = "RECORDED"
                 _vq_entry["calibration_only_valuation_id"] = cal_id
+                await _paper_valuation(conn, cal_id)
                 continue
             try:
                 row_id = await ext.persist(conn, rec)
@@ -8222,6 +8223,7 @@ async def cycle(conn) -> dict:
                 tally["PERSIST:" + type(exc).__name__] = \
                     tally.get("PERSIST:" + type(exc).__name__, 0) + 1
                 continue
+            await _paper_valuation(conn, row_id)
             key = "ADMITTED" if rec.get("admissible") else None
             if key:
                 tally[key] = tally.get(key, 0) + 1
@@ -8570,6 +8572,24 @@ async def cycle(conn) -> dict:
     out["agents"] = await _derek_after_cycle(conn, out)
     await _heartbeat(conn, out)
     return out
+
+
+async def _paper_valuation(conn, valuation_id) -> None:
+    """PAPER TRADING: Derek's paper decision on this valuation at the instant
+    it was written (`agents.runtime.paper_valuation_hook`). Returns at once
+    when PAPER_SESSION is unset; bounded; never raises into the cycle; sends
+    nothing to the venue (the paper path reads market data only)."""
+    if str(os.environ.get("PAPER_SESSION", "")).strip().lower() not in (
+            "on", "1", "true", "yes"):
+        return
+    try:
+        await _agents_runtime().paper_valuation_hook(
+            conn, valuation_id=valuation_id)
+    except asyncio.CancelledError:
+        raise
+    except Exception:                                          # noqa: BLE001
+        log.warning("ext_pinnacle: paper valuation hook failed",
+                    exc_info=True)
 
 
 async def _derek_heartbeat_start(conn, *, now: float) -> None:

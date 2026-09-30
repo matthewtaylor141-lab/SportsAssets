@@ -60,6 +60,14 @@ R_NO_BOOK = "THE_OBSERVED_BOOK_WAS_UNREADABLE_OR_EMPTY"
 R_NOT_PMUS = "NOT_A_SUPPORTED_POLYMARKET_US_CONTRACT"
 R_ORDER_REFUSED = "PAPER_RISK_REFUSED_THE_ORDER"
 
+#: WHERE A DECISION WAS FORMED. In the cycle, at the instant the valuation
+#: was written (the lane's own inputs and instant): the primary path. By the
+#: paper pass, later: the backstop for a valuation the in-cycle hook missed,
+#: whose Pinnacle reading is re-aged at that later instant -- a STALE refusal
+#: there is labelled with this basis and its lag.
+DECIDED_VIA_CYCLE = "IN_CYCLE_AT_THE_VALUATION_INSTANT"
+DECIDED_VIA_PASS = "PAPER_PASS_BACKSTOP"
+
 GAP_MODEL = "MODEL_APPROVAL"
 GAP_CALIBRATION = "SOURCE_CALIBRATION"
 GAP_P5 = "QUOTE_TIMING_UNCERTAINTY_P5"
@@ -287,11 +295,25 @@ def _alternatives(md: dict | None, *, side: str, p_blended) -> dict:
 # THE STEP
 # ═════════════════════════════════════════════════════════════════════
 
+#: The per-valuation hook reuses one context for this long (the model read
+#: verifies provenance, which re-reads its training records).
+CONTEXT_TTL_S = 300.0
+_CONTEXT_CACHE: dict = {}
+
+
 async def _context(conn, ctx: dict) -> dict:
-    """Once per pass: the research model, its daily attempt, the void
-    measure and the source calibration."""
+    """Once per pass (or per CONTEXT_TTL_S for the per-valuation hook): the
+    research model, its daily attempt, the void measure and the source
+    calibration."""
     if "derek" in ctx:
         return ctx["derek"]
+    key = ctx.get("context_cache_key")
+    if key is not None:
+        hit = _CONTEXT_CACHE.get(key)
+        if hit is not None and float(ctx["now"]) - hit["at"] < \
+                CONTEXT_TTL_S and float(ctx["now"]) >= hit["at"]:
+            ctx["derek"] = hit["derek"]
+            return ctx["derek"]
     at = ctx["now"]
     model = await research_model(conn, at=at)
     attempt = None
@@ -301,6 +323,9 @@ async def _context(conn, ctx: dict) -> dict:
     void = await DP.void_measure(conn, through=at)
     ctx["derek"] = {"model": model, "model_attempt": attempt, "void": void,
                     "calibration": {}}
+    if key is not None:
+        _CONTEXT_CACHE.clear()
+        _CONTEXT_CACHE[key] = {"at": float(at), "derek": ctx["derek"]}
     return ctx["derek"]
 
 
@@ -341,6 +366,14 @@ async def decide_one(conn, ctx: dict, row: dict) -> dict:
     if cand["settlement"].get("compatibility") == "INCOMPATIBLE":
         refusals.append(DP.R_SETTLEMENT)
     pin = _pinnacle(cand, at=at, max_age=float(ent["pinnacle_max_age_s"]))
+    # WHERE AND WHEN THIS DECISION WAS FORMED (audits the freshness rule):
+    # at the valuation instant inside the cycle, or later by the pass.
+    pin["decided_via"] = ctx.get("decided_via") or DECIDED_VIA_PASS
+    pin["decided_at"] = at
+    pin["valuation_decided_at"] = cand.get("decided_at")
+    pin["decision_lag_after_valuation_s"] = (
+        None if cand.get("decided_at") is None
+        else round(at - float(cand["decided_at"]), 3))
     if pin.get("refusal"):
         refusals.append(pin["refusal"])
     if not model.get("ok"):
@@ -443,7 +476,7 @@ async def decide_one(conn, ctx: dict, row: dict) -> dict:
     rec = {"decision_id": did, "verdict": verdict,
            "refusal": refusals[0] if refusals else None,
            "refusals": refusals}
-    await conn.execute(
+    inserted = await conn.fetchval(
         "INSERT INTO paper_decisions (decision_id, session_id, account_id, "
         " decided_at, valuation_id, us_market_slug, holding_side, intent, "
         " fixture, label, verdict, refusal, refusals, p_internal, "
@@ -453,7 +486,7 @@ async def decide_one(conn, ctx: dict, row: dict) -> dict:
         " simulator_version) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,"
         " $11,$12,$13,$14,$15::jsonb,$16,$17::jsonb,$18,$19,$20::jsonb,$21,"
         " $22,$23::jsonb,$24::jsonb,$25,$26::jsonb,$27::jsonb,$28::jsonb,$29)"
-        " ON CONFLICT DO NOTHING",
+        " ON CONFLICT DO NOTHING RETURNING decision_id",
         did, ctx["session_id"], ctx["account_id"], L._ts(at),
         cand["valuation_id"], cand.get("us_market_slug"), side,
         cand.get("side"), cand.get("fixture"),
@@ -471,6 +504,11 @@ async def decide_one(conn, ctx: dict, row: dict) -> dict:
                                  p_blended=p_blend), default=str),
         None if optimistic is None else json.dumps(optimistic, default=str),
         cfg["simulator_version"])
+    if inserted is None:
+        # ANOTHER WRITER (the in-cycle hook or a racing pass) RECORDED THIS
+        # VALUATION'S DECISION FIRST. Its record stands; nothing is sent on
+        # this computation.
+        return dict(rec, duplicate=True)
     if verdict != DP.ENTER:
         return rec
     # ── ONLY NOW, THE PAPER ORDER ─────────────────────────────────────
@@ -559,6 +597,9 @@ async def step(conn, ctx: dict) -> dict:
         if rec.get("deferred"):
             out["deferred"] += 1
             continue
+        if rec.get("duplicate"):
+            out["already_recorded"] = out.get("already_recorded", 0) + 1
+            continue
         out["decisions_recorded"] += 1
         out["verdicts"][rec["verdict"]] = out["verdicts"].get(
             rec["verdict"], 0) + 1
@@ -576,7 +617,20 @@ async def step_after_delay(conn, ctx: dict) -> dict:
     entries become eligible, observe their books again, and simulate. An
     entry whose eligible book is not observed this pass stays pending for
     the next one, or expires with no fill."""
-    pend = ctx.get("pending_entries") or []
+    pend = list(ctx.get("pending_entries") or [])
+    known = {p["order_id"] for p in pend}
+    # ...and every open marketable order still waiting for a book observed
+    # at or after its eligible instant (e.g. one the in-cycle hook submitted).
+    for r in await conn.fetch(
+            "SELECT o.order_id, o.eligible_at FROM paper_orders o "
+            " WHERE o.account_id=$1 AND o.order_type='MARKETABLE' "
+            "   AND o.state='PENDING_SIMULATION' AND NOT EXISTS (SELECT 1 "
+            "   FROM paper_book_observations b WHERE b.us_market_slug = "
+            "   o.us_market_slug AND b.observed_at >= o.eligible_at)",
+            ctx["account_id"]):
+        if r["order_id"] not in known:
+            pend.append({"order_id": r["order_id"],
+                         "eligible_at": L._epoch(r["eligible_at"])})
     if not pend:
         return {"pending": 0}
     clock = ctx.get("clock") or (lambda: float(ctx["now"]))

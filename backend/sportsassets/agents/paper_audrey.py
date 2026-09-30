@@ -219,6 +219,32 @@ async def build_report(conn, *, session: dict, account_id: str, day,
         "       sum((optimistic->>'filled_qty')::float8) AS opt_qty "
         "  FROM paper_decisions WHERE account_id=$1 AND verdict='ENTER' "
         "   AND decided_at >= $2 AND decided_at < $3", account_id, t0, t1)
+    # AGAINST THE ALTERNATIVES CAPTURED AT DECISION TIME (knowable then)
+    alt_rows = await conn.fetch(
+        "SELECT verdict, alternatives, "
+        "       (policy_decision->>'gross_edge_pp')::float8 AS edge_pp "
+        "  FROM paper_decisions WHERE account_id=$1 AND decided_at >= $2 "
+        "   AND decided_at < $3 AND alternatives IS NOT NULL LIMIT 2000",
+        account_id, t0, t1)
+    better_opp, compared = 0, 0
+    for r in alt_rows:
+        opp = (L._j(r["alternatives"]) or {}).get(
+            "OPPOSITE_SIDE_SAME_MARKET") or {}
+        oe = opp.get("gross_edge_pp")
+        if oe is None or r["edge_pp"] is None:
+            continue
+        compared += 1
+        if float(oe) * 100.0 > float(r["edge_pp"]) + 1e-9:
+            better_opp += 1
+    vs_alternatives = {
+        "compared": compared,
+        "opposite_side_edge_exceeded_the_evaluated_side": better_opp,
+        "no_trade_chosen": sum(1 for r in alt_rows
+                               if r["verdict"] == "REFUSE"),
+        "basis": ("alternatives captured AT the decision (NO_TRADE and the "
+                  "opposite side of the same market on the same measure); a "
+                  "question of decision quality, answerable without "
+                  "outcomes")}
     settled = await conn.fetch(
         "SELECT s.group_id, s.outcome, s.payout_usd, s.version "
         "  FROM paper_settlements s WHERE s.account_id=$1 "
@@ -336,6 +362,7 @@ async def build_report(conn, *, session: dict, account_id: str, day,
             "mean_gross_edge_pp": quality["edge"],
             "basis": "what was known at each decision; not scored on "
                      "outcomes"},
+        "decisions_vs_alternatives_at_decision_time": vs_alternatives,
         "hindsight": dict(hindsight, basis=(
             "authoritative settlements booked this day, with corrections; "
             "never used to re-score a decision")),

@@ -357,3 +357,8 @@ tests/test_paper_simulator_semantics.py
 # paper book, Audrey's acquisition / breadth definitions and reconciliation,
 # the improvement hook (tasks, never promotion)
 tests/test_paper_handoff_standing_and_audit_rules.py
+# Derek's paper decision is formed at the valuation instant inside the real
+# cycle (the 30 s Pinnacle rule unchanged, the age recorded on every
+# decision); the pass is only a labelled backstop; the hook is inert when
+# PAPER_SESSION is unset
+tests/test_paper_decides_at_the_valuation_instant.py
