@@ -74,18 +74,31 @@ async def step_books(conn, ctx: dict) -> dict:
         "SELECT DISTINCT us_market_slug FROM paper_orders "
         " WHERE account_id=$1 AND state = ANY($2::text[])", acct,
         list(L.OPEN_STATES))]
-    for p in await L.positions(conn, acct):
-        if p["us_market_slug"] not in slugs:
-            slugs.append(p["us_market_slug"])
-    return await read_books(conn, ctx, slugs, basis="OPEN_ORDER_OR_POSITION")
+    # Positions next, the stalest observation first, so marks rotate.
+    held = [p["us_market_slug"] for p in await L.positions(conn, acct)
+            if p["us_market_slug"] not in slugs]
+    if held:
+        ages = {r["us_market_slug"]: L._epoch(r["at"]) for r in
+                await conn.fetch(
+                    "SELECT us_market_slug, max(observed_at) AS at FROM "
+                    " paper_book_observations WHERE us_market_slug = "
+                    " ANY($1::text[]) GROUP BY 1", held)}
+        held.sort(key=lambda s: ages.get(s) or 0.0)
+    slugs.extend(dict.fromkeys(held))
+    # AT MOST HALF THE PASS'S READS: the other half is Derek's.
+    cap = int(ctx["config"]["cadence"]["max_book_reads_per_pass"])
+    return await read_books(conn, ctx, slugs, basis="OPEN_ORDER_OR_POSITION",
+                            limit=max(1, cap // 2))
 
 
-async def read_books(conn, ctx: dict, slugs: list, *, basis: str) -> dict:
+async def read_books(conn, ctx: dict, slugs: list, *, basis: str,
+                     limit: int | None = None) -> dict:
     from .. import bettor_paper_simulator as SIM
     cap = int(ctx["config"]["cadence"]["max_book_reads_per_pass"])
     out = {"read": 0, "errors": 0, "skipped_budget": 0, "obs": {}}
     for slug in slugs:
-        if ctx["books_read"] >= cap or not _budget_left(ctx):
+        if ctx["books_read"] >= cap or not _budget_left(ctx) or (
+                limit is not None and out["read"] >= limit):
             out["skipped_budget"] += 1
             continue
         got = await ctx["market_data"].read_book(slug)
@@ -363,3 +376,100 @@ def schedule(get_pool, *, trigger: str, **kw) -> dict:
     _TASK["scheduled"] += 1
     return {"scheduled": True, "trigger": trigger,
             "scheduled_total": _TASK["scheduled"]}
+
+
+# ═════════════════════════════════════════════════════════════════════
+# THE PER-VALUATION HOOK: DEREK DECIDES AT THE VALUATION INSTANT
+# ═════════════════════════════════════════════════════════════════════
+#
+# Called by the collection cycle right after each entry-experiment valuation
+# is persisted (`workers/ext_pinnacle_loop._paper_valuation`), on the cycle's
+# own connection: Derek's paper decision is formed from the same inputs at
+# the same instant the lane formed its own, so the 30 s Pinnacle rule is
+# applied where it belongs rather than after the cycle's whole duration.
+# The decision (with the Pinnacle age at that instant) is persisted first;
+# an ENTER submits its paper order at once with the 2 s delay, and a
+# background pass is scheduled to observe the book after that delay and
+# simulate the fill. The paper pass keeps deciding any valuation this hook
+# missed, labelled PAPER_PASS_BACKSTOP.
+#
+# CHEAP WHEN OFF: with PAPER_SESSION unset it returns before any I/O.
+# BOUNDED: one valuation, at most one book read, VALUATION_HOOK_TIMEOUT_S.
+
+VALUATION_HOOK_TIMEOUT_S = 8.0
+DEFAULT_ACCOUNT_ID = L.ACCOUNT_ID
+_CLIENT: dict = {"client": None}
+
+
+def _client() -> G.PaperMarketDataClient:
+    if _CLIENT["client"] is None:
+        _CLIENT["client"] = G.PaperMarketDataClient()
+    return _CLIENT["client"]
+
+
+async def decide_valuation(conn, *, valuation_id, now: float | None = None,
+                           market_data=None, account_id: str | None = None,
+                           fee_fn=None, schedule_fill=None) -> dict:
+    """ONE PAPER DECISION FOR ONE JUST-WRITTEN VALUATION. Never raises."""
+    if not S.env_on():
+        return {"decided": False, "why": S.R_ENV_OFF}
+    acct = account_id or DEFAULT_ACCOUNT_ID
+    live_clock = now is None
+    at = float(now if now is not None else time.time())
+    try:
+        en = await S.enablement(conn)
+        if not en.get("enabled"):
+            return {"decided": False, "why": en.get("refusal")}
+        sess = await S.ensure_session(conn, now=at, account_id=acct)
+        if not sess.get("ok"):
+            return {"decided": False, "why": sess.get("refusal")}
+        row = await conn.fetchrow(
+            "SELECT * FROM external_valuations WHERE id = $1",
+            int(valuation_id))
+        from .. import bettor_external_shadow as ext
+        if row is None or row["experiment_id"] != ext.EXPERIMENT_ID:
+            return {"decided": False, "why": "NOT_AN_ENTRY_EXPERIMENT_ROW"}
+        md = market_data if market_data is not None else _client()
+        before = int(getattr(md, "mutation_attempts", 0) or 0)
+        cfg = sess["config"]
+        ctx: dict[str, Any] = {
+            "session": sess, "session_id": sess["session_id"],
+            "account_id": acct, "config": cfg, "market_data": md,
+            "now": at, "deadline": time.monotonic()
+            + VALUATION_HOOK_TIMEOUT_S, "fee_fn": fee_fn, "books_read": 0,
+            "first_fills": [], "fills": 0, "results": {},
+            "clock": (time.time if live_clock else (lambda: at)),
+            "decided_via": "IN_CYCLE_AT_THE_VALUATION_INSTANT",
+            "context_cache_key": sess["session_id"]}
+        from . import paper_derek as PD
+        rec = await asyncio.wait_for(PD.decide_one(conn, ctx, dict(row)),
+                                     VALUATION_HOOK_TIMEOUT_S)
+        delta = int(getattr(md, "mutation_attempts", 0) or 0) - before
+        if delta:
+            import json as _json
+            await conn.execute(
+                "UPDATE paper_session_health SET mutation_attempts = "
+                " mutation_attempts + $2, last_mutation_attempt = $3::jsonb "
+                " WHERE session_id = $1", sess["session_id"], delta,
+                _json.dumps(getattr(md, "last_mutation_attempt", None),
+                            default=str))
+        if rec.get("order_id"):
+            sched = schedule_fill
+            if sched is None:
+                from . import runtime as _RT
+                sched = (lambda: _RT.paper_pass_hook(
+                    trigger="VALUATION_DECISION_FILL"))
+            try:
+                rec["fill_pass"] = sched()
+            except Exception as exc:                           # noqa: BLE001
+                rec["fill_pass"] = {"scheduled": False,
+                                    "error": type(exc).__name__}
+        return dict({k: rec.get(k) for k in (
+            "decision_id", "verdict", "refusal", "order_id", "duplicate",
+            "deferred", "fill_pass")}, decided=not rec.get("deferred"),
+            mutation_attempts=delta)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:                                   # noqa: BLE001
+        return {"decided": False, "error": "%s: %s" % (type(exc).__name__,
+                                                       str(exc)[:200])}

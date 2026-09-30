@@ -411,6 +411,21 @@ def paper_pass_hook(*, trigger: str, get_pool=None) -> dict:
         return {"scheduled": False, "error": _err(exc)}
 
 
+async def paper_valuation_hook(conn, *, valuation_id,
+                               now: float | None = None) -> dict:
+    """DEREK'S PAPER DECISION AT THE VALUATION INSTANT
+    (`agents.paper_runtime.decide_valuation`), on the cycle's connection,
+    bounded, returning at once when PAPER_SESSION is unset. Never raises."""
+    try:
+        from . import paper_runtime as _PR
+        return await _PR.decide_valuation(conn, valuation_id=valuation_id,
+                                          now=now)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:                                    # noqa: BLE001
+        return {"decided": False, "error": _err(exc)}
+
+
 async def slow_half(conn, *, now: float | None = None) -> dict:
     """`audrey_audit.run_due` and `improvement.run_due`, guarded and bounded,
     with Audrey's heartbeat. Runs AFTER the servicing pass released the

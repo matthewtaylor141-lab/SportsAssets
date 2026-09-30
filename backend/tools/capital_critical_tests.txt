@@ -392,3 +392,8 @@ tests/test_command_centre_agent_pages.py
 # from bettor_paper_ledger / command_paper / bettor_paper_readmodel over a fake
 # connection), so a contract drift between server and page fails the gate
 tests/test_command_centre_paper_contract.py
+# Derek's paper decision is formed at the valuation instant inside the real
+# cycle (the 30 s Pinnacle rule unchanged, the age recorded on every
+# decision); the pass is only a labelled backstop; the hook is inert when
+# PAPER_SESSION is unset
+tests/test_paper_decides_at_the_valuation_instant.py
