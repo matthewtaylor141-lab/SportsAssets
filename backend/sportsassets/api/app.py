@@ -438,6 +438,13 @@ app.add_middleware(GZipMiddleware, minimum_size=1024)
 # Each stream's router in its own block: a module that is absent or fails to
 # import is logged and skipped, and every other route is unaffected. All
 # are under /api/command/agents and use the command read / control checks.
+# THE PAGES FIRST: an agent router's /api/command/agents/<agent>/{id} route
+# would otherwise capture /api/command/agents/<agent>/page.
+try:
+    from .agent_pages import router as _agent_pages_router
+    app.include_router(_agent_pages_router)
+except ImportError:
+    log.warning("agents: api.agent_pages not loaded", exc_info=True)
 try:
     from .agents_core import router as _agents_core_router
     app.include_router(_agents_core_router)
@@ -463,11 +470,6 @@ try:
     app.include_router(_agents_chat_router)
 except ImportError:
     log.warning("agents: api.agents_chat not loaded", exc_info=True)
-try:
-    from .agent_pages import router as _agent_pages_router
-    app.include_router(_agent_pages_router)
-except ImportError:
-    log.warning("agents: api.agent_pages not loaded", exc_info=True)
 
 # Which frontends actually talk to this API? The deployed site's hostname
 # is recorded nowhere (Netlify names are set in its UI), which has made

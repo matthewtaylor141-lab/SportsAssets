@@ -1,0 +1,899 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="robots" content="noindex,nofollow">
+<meta name="description" content="The three-agent operating system in fourteen chapters: Derek, Xavier, Audrey. Rehearsal-only copy.">
+<title>Three Agents | BETTOR</title>
+<style>
+:root{--sans:ui-sans-serif,system-ui,-apple-system,"SF Pro Text","Segoe UI Variable Text","Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+--display:ui-sans-serif,system-ui,-apple-system,"SF Pro Display","Segoe UI Variable Display","Segoe UI",Roboto,sans-serif;
+--mono:ui-monospace,"SF Mono",SFMono-Regular,"JetBrains Mono","Cascadia Mono",Menlo,Consolas,monospace;
+--bg:#eeece6;--bg2:#e4e1d9;--glass:rgba(255,255,255,.72);--glass2:rgba(255,255,255,.5);--ink:#12141a;--ink2:#444a56;--ink3:#737a87;--line:rgba(20,24,32,.12);--line2:rgba(20,24,32,.2);
+--ok:#1b7550;--warn:#9a6200;--bad:#b0312a;--info:#2d56c6;--neutral:#6b7280;
+--derek:#b1600a;--xavier:#0a7a8b;--audrey:#6a45c8;--mgmt:#2f55d4;--acc:var(--derek);--shadow:0 30px 80px -40px rgba(20,24,40,.45),0 1px 0 rgba(255,255,255,.8) inset;color-scheme:light dark}
+@media (prefers-color-scheme:dark){:root{--bg:#05070b;--bg2:#0a0d13;--glass:rgba(17,21,29,.74);--glass2:rgba(24,29,39,.6);--ink:#edf0f5;--ink2:#aab2bf;--ink3:#6f7888;--line:rgba(255,255,255,.08);--line2:rgba(255,255,255,.15);
+--ok:#45c089;--warn:#e6ab43;--bad:#ff766b;--info:#7d9dff;--neutral:#8b93a1;--derek:#f2a541;--xavier:#3fd0e0;--audrey:#a98cff;--mgmt:#86a2ff;--shadow:0 40px 90px -40px rgba(0,0,0,.9),0 1px 0 rgba(255,255,255,.04) inset}}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;overflow:hidden}
+body{background:radial-gradient(1200px 700px at 50% -10%,color-mix(in oklab,var(--acc) 14%,transparent),transparent 70%),var(--bg);color:var(--ink);font:14px/1.45 var(--sans);font-variant-numeric:tabular-nums;transition:background 1.2s}
+body.a-DEREK{--acc:var(--derek)}body.a-XAVIER{--acc:var(--xavier)}body.a-AUDREY{--acc:var(--audrey)}body.a-MANAGEMENT{--acc:var(--mgmt)}
+#stage{position:fixed;inset:0;display:flex;flex-direction:column}
+#bg{position:absolute;inset:0;width:100%;height:100%;z-index:0}
+.banner{position:relative;z-index:5;display:flex;justify-content:center;align-items:center;gap:10px;padding:6px 12px;font:700 11px/1.2 var(--mono);letter-spacing:.14em;text-align:center;
+color:#1a1200;background:repeating-linear-gradient(135deg,#f2c14e 0 14px,#e8b43a 14px 28px)}
+.banner.prod{color:#fff;background:linear-gradient(90deg,#0c5f46,#12795a)}
+.hud{position:relative;z-index:5;display:flex;align-items:center;gap:14px;padding:10px 20px}
+.brand{font:650 12px/1 var(--mono);letter-spacing:.16em;color:var(--ink);text-decoration:none;display:flex;align-items:center;gap:8px;white-space:nowrap}
+.brand i{width:16px;height:16px;border-radius:5px;background:conic-gradient(from 200deg,var(--derek),var(--xavier),var(--audrey),var(--derek));box-shadow:0 0 16px color-mix(in oklab,var(--acc) 60%,transparent)}
+.ctitle{flex:1;min-width:0;display:flex;align-items:baseline;gap:12px}
+.ctitle .n{font:650 12px/1 var(--mono);color:var(--acc);letter-spacing:.1em;white-space:nowrap}
+.ctitle h1{margin:0;font:680 clamp(15px,2.1vw,22px)/1.2 var(--display);letter-spacing:-.015em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.hbtn{font:650 11.5px/1 var(--mono);letter-spacing:.06em;color:var(--ink);background:var(--glass);border:1px solid var(--line2);border-radius:9px;padding:8px 11px;cursor:pointer;white-space:nowrap;-webkit-backdrop-filter:blur(10px);backdrop-filter:blur(10px)}
+.hbtn:hover{border-color:var(--acc)}.hbtn[aria-pressed=true]{background:var(--acc);border-color:var(--acc);color:#fff}
+.seg{display:inline-flex;border:1px solid var(--line2);border-radius:9px;overflow:hidden;background:var(--glass)}
+.seg button{font:650 11px/1 var(--mono);letter-spacing:.06em;padding:8px 10px;border:0;background:transparent;color:var(--ink2);cursor:pointer}
+.seg button[aria-pressed=true]{background:var(--ink);color:var(--bg)}
+#world{position:relative;z-index:2;flex:1;min-height:0;perspective:1600px;perspective-origin:50% 30%;display:flex;flex-direction:column;padding:0 16px}
+#cam,#par{position:relative;flex:1;min-height:0;display:flex;flex-direction:column;transform-style:preserve-3d}
+#cam{transition:transform 1.9s cubic-bezier(.2,.75,.12,1)}
+#par{transition:transform .5s ease-out}
+#triad{position:relative;display:flex;justify-content:center;align-items:center;gap:clamp(18px,7vw,110px);padding:22px 0 14px;transform:translateZ(36px);transform-style:preserve-3d}
+#beams{position:absolute;inset:0;width:100%;height:100%;overflow:visible;pointer-events:none}
+#beams path{fill:none;stroke:var(--line2);stroke-width:1.4}
+#beams path.live{stroke:var(--acc);stroke-width:2;stroke-dasharray:6 8;animation:flow 0.9s linear infinite;filter:drop-shadow(0 0 6px var(--acc))}
+@keyframes flow{to{stroke-dashoffset:-28}}
+.node{position:relative;display:flex;flex-direction:column;align-items:center;gap:6px;min-width:84px;transition:transform .9s cubic-bezier(.2,.75,.12,1),opacity .6s}
+.node .core{position:relative;width:54px;height:54px;border-radius:50%;display:grid;place-items:center;font:750 19px/1 var(--mono);color:#fff;background:radial-gradient(circle at 35% 30%,color-mix(in oklab,var(--c) 60%,#fff),var(--c) 55%,color-mix(in oklab,var(--c) 50%,#000));box-shadow:0 0 0 1px color-mix(in oklab,var(--c) 50%,transparent),0 14px 30px -12px var(--c)}
+.node .core::before,.node .core::after{content:"";position:absolute;inset:-8px;border-radius:50%;border:1px solid color-mix(in oklab,var(--c) 45%,transparent);border-top-color:transparent;animation:spin 7s linear infinite}
+.node .core::after{inset:-15px;border-style:dashed;animation-duration:13s;animation-direction:reverse;opacity:.6}
+@keyframes spin{to{transform:rotate(360deg)}}
+.node[data-a=DEREK]{--c:var(--derek)}.node[data-a=XAVIER]{--c:var(--xavier)}.node[data-a=AUDREY]{--c:var(--audrey)}.node[data-a=MANAGEMENT]{--c:var(--mgmt)}
+.node[data-a=MANAGEMENT] .core{width:40px;height:40px;font-size:14px}
+.node .nm{font:650 12px/1 var(--mono);letter-spacing:.12em}
+.node .st{font:650 9.5px/1 var(--mono);letter-spacing:.08em;padding:4px 7px;border-radius:99px;border:1px solid currentColor;white-space:nowrap;color:var(--neutral);background:var(--glass)}
+.node.active{transform:translateZ(40px) scale(1.12)}
+.node.active .core{box-shadow:0 0 0 2px var(--c),0 0 40px 4px color-mix(in oklab,var(--c) 55%,transparent)}
+.node.dim{opacity:.55}
+.st.s-EVALUATING{color:var(--acc)}.st.s-WAITING_FOR_EVIDENCE,.st.s-WAITING_FOR_PROVIDER,.st.s-RECOVERING{color:var(--warn)}.st.s-BLOCKED{color:#d9621c}.st.s-DECISION_RECORDED{color:var(--info)}.st.s-FAILED{color:var(--bad)}
+.st.s-EVALUATING::before,.st.s-RECOVERING::before{content:"\25cf ";animation:blink 1.2s infinite}
+@keyframes blink{50%{opacity:.25}}
+#token{position:absolute;left:0;top:0;z-index:4;pointer-events:none;font:700 11px/1 var(--mono);letter-spacing:.04em;padding:7px 10px;border-radius:99px;color:#fff;background:var(--acc);box-shadow:0 0 0 4px color-mix(in oklab,var(--acc) 25%,transparent),0 10px 30px -6px var(--acc);opacity:0;transform:translate(-50%,-50%);white-space:nowrap}
+#panelwrap{flex:1;min-height:0;display:flex;justify-content:center;transform-style:preserve-3d;padding-bottom:10px}
+#panel{position:relative;width:min(1120px,100%);height:100%;overflow:auto;background:var(--glass);border:1px solid var(--line2);border-radius:20px;box-shadow:var(--shadow);
+-webkit-backdrop-filter:blur(18px) saturate(1.3);backdrop-filter:blur(18px) saturate(1.3);padding:22px 26px 0;transform:rotateX(2deg);transform-origin:50% 0;transition:transform .55s cubic-bezier(.2,.75,.12,1),opacity .35s;scrollbar-width:thin}
+#panel.swap{opacity:0;transform:rotateY(-10deg) rotateX(6deg) translateZ(-120px) translateX(40px)}
+#panel::before{content:"";position:absolute;inset:0 0 auto;height:2px;border-radius:20px 20px 0 0;background:linear-gradient(90deg,transparent,var(--acc),transparent)}
+.kicker{font:650 11px/1.2 var(--mono);letter-spacing:.14em;color:var(--acc);text-transform:uppercase;margin:0 0 6px}
+.lead{font:600 clamp(17px,2.2vw,24px)/1.3 var(--display);letter-spacing:-.015em;margin:0 0 18px;max-width:62ch}
+.lbl{font:650 10px/1.2 var(--mono);letter-spacing:.12em;text-transform:uppercase;color:var(--ink3)}
+.g2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.g3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.g4{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+.card{background:var(--glass2);border:1px solid var(--line);border-radius:14px;padding:13px 15px;min-width:0}
+.card h4{margin:0 0 8px;font:650 13px/1.3 var(--display)}
+.big{font:700 clamp(20px,2.6vw,30px)/1.1 var(--display);letter-spacing:-.02em;margin:6px 0 2px}
+.sub{color:var(--ink3);font-size:12px}
+.mono{font-family:var(--mono);font-size:12px}
+.pos{color:var(--ok)}.neg{color:var(--bad)}
+.rv{opacity:0;transform:translateY(10px);transition:opacity .5s,transform .6s cubic-bezier(.2,.75,.12,1)}
+.rv.on{opacity:1;transform:none}
+.rv.hl.on{animation:hl 1.6s ease-out 1}
+@keyframes hl{0%{box-shadow:0 0 0 0 var(--acc)}40%{box-shadow:0 0 0 6px color-mix(in oklab,var(--acc) 30%,transparent)}100%{box-shadow:0 0 0 0 transparent}}
+.bars{display:grid;grid-template-columns:minmax(110px,max-content) 1fr 56px;gap:7px 12px;align-items:center;font-size:12.5px}
+.track{height:9px;border-radius:5px;background:var(--line);overflow:hidden}
+.gw{display:block;height:100%;width:0;background:linear-gradient(90deg,color-mix(in oklab,var(--acc) 50%,transparent),var(--acc));border-radius:5px}
+.gw.x{background:repeating-linear-gradient(135deg,var(--ink3) 0 3px,transparent 3px 6px)}
+.tag{font:650 9px/1 var(--mono);letter-spacing:.08em;padding:3px 5px;border-radius:4px;border:1px dashed var(--ink3);color:var(--ink3);margin-left:6px;white-space:nowrap}
+.q{display:flex;justify-content:space-between;gap:10px;padding:8px 10px;border-radius:9px;border:1px solid var(--line);margin-bottom:6px;font-size:12.5px;background:var(--glass2)}
+.q.hl{border-color:var(--acc);background:color-mix(in oklab,var(--acc) 12%,var(--glass2))}
+.chain{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:10px;margin:14px 0}
+.chain .card{position:relative}.chain .big{font-size:clamp(17px,1.9vw,24px);white-space:nowrap}
+.chain .card+.card::before{content:"\2192";position:absolute;left:-10px;top:50%;transform:translate(-50%,-50%);color:var(--ink3)}
+.scale{position:relative;height:56px;margin:8px 4px 4px}
+.scale .ax{position:absolute;left:0;right:0;top:26px;height:2px;background:var(--line2)}
+.scale .edge{position:absolute;top:18px;height:18px;background:repeating-linear-gradient(135deg,color-mix(in oklab,var(--acc) 45%,transparent) 0 4px,transparent 4px 8px);border:1px solid var(--acc);border-radius:4px}
+.scale .mk{position:absolute;top:0;transform:translateX(-50%);font:650 10.5px/1.2 var(--mono);text-align:center;white-space:nowrap}
+.scale .mk::after{content:"";display:block;width:2px;height:22px;margin:3px auto 0;background:currentColor}
+.chk{list-style:none;margin:0;padding:0}
+.chk li{display:flex;gap:8px;align-items:flex-start;padding:5px 0;font-size:12.5px;border-bottom:1px dashed var(--line)}
+.chk li::before{content:"\2713";flex:none;width:17px;height:17px;border-radius:50%;display:grid;place-items:center;font-size:10px;color:#fff;background:var(--ok);transform:scale(0);transition:transform .35s cubic-bezier(.3,1.6,.5,1)}
+.chk li.on::before{transform:scale(1)}
+.rec{font:12px/1.6 var(--mono);background:var(--glass2);border:1px solid var(--line);border-radius:12px;padding:12px 14px;white-space:pre-wrap;overflow-wrap:anywhere;margin:0}
+.rec b{color:var(--acc);font-weight:650}
+table{border-collapse:collapse;width:100%;font-size:12px}
+th,td{padding:6px 8px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+th{font:650 9.5px/1.25 var(--mono);letter-spacing:.08em;text-transform:uppercase;color:var(--ink3);white-space:nowrap}
+td.n,th.n{text-align:right;white-space:nowrap}
+tr.sel td{background:color-mix(in oklab,var(--acc) 14%,transparent)}
+tr.sel td:first-child{box-shadow:inset 3px 0 0 var(--acc)}
+tr.ref td{color:var(--ink3)}
+.tw{overflow-x:auto;border:1px solid var(--line);border-radius:12px;background:var(--glass2)}
+.pill{display:inline-block;font:650 9.5px/1 var(--mono);letter-spacing:.08em;padding:4px 6px;border-radius:5px;border:1px solid currentColor;white-space:nowrap}
+.p-ok{color:var(--ok)}.p-bad{color:var(--bad)}.p-warn{color:var(--warn)}.p-info{color:var(--info)}.p-n{color:var(--neutral);border-style:dashed}
+.fb{display:flex;height:22px;border-radius:7px;overflow:hidden;border:1px solid var(--line2);margin:10px 0}
+.fb .f{background:var(--acc);width:0;display:flex;align-items:center;justify-content:center;color:#fff;font:700 11px/1 var(--mono)}
+.fb .o{flex:1;background:repeating-linear-gradient(135deg,color-mix(in oklab,var(--ink3) 50%,transparent) 0 4px,transparent 4px 8px);display:flex;align-items:center;justify-content:center;font:700 11px/1 var(--mono);color:var(--ink2)}
+.tl{list-style:none;margin:0;padding:0 0 0 16px;border-left:2px solid var(--line2)}
+.tl li{position:relative;padding:4px 0 10px 10px;font-size:12.5px}
+.tl li::before{content:"";position:absolute;left:-23px;top:8px;width:10px;height:10px;border-radius:50%;background:var(--bg);border:2px solid var(--acc)}
+.margin{display:grid;grid-template-columns:40fr 18fr 12fr 9fr 6.6fr 14.4fr;gap:2px;margin:8px 0 4px;font:650 10px/1.2 var(--mono)}
+.margin>div{padding:6px 4px;text-align:center;background:var(--line);border-radius:4px;color:var(--ink2);overflow:hidden;white-space:nowrap}
+.mrow{display:grid;grid-template-columns:52px 1fr;gap:8px;align-items:center;margin:3px 0}
+.mrow .cells{display:grid;grid-template-columns:40fr 18fr 12fr 9fr 6.6fr 14.4fr;gap:2px}
+.mrow .cells i{height:12px;border-radius:3px;background:var(--line);transform-origin:left;transform:scaleX(0);transition:transform .6s cubic-bezier(.2,.75,.12,1)}
+.mrow.on .cells i{transform:scaleX(1)}
+.mrow .cells i.h{background:color-mix(in oklab,var(--acc) 55%,transparent)}
+.mrow .cells i.b{background:var(--ok)}
+.callout{border-left:3px solid var(--acc);padding:9px 12px;border-radius:0 10px 10px 0;background:color-mix(in oklab,var(--acc) 9%,var(--glass2));font-size:12.5px}
+.score{display:flex;align-items:center;justify-content:center;gap:28px;padding:14px;border-radius:14px;background:var(--ink);color:var(--bg);font:750 clamp(26px,4vw,44px)/1 var(--display);letter-spacing:-.02em}
+.score small{display:block;font:650 10px/1 var(--mono);letter-spacing:.14em;opacity:.7;margin-bottom:6px}
+.cat{border-radius:12px;padding:12px;min-width:0;background:var(--glass2)}
+.cat h5{margin:0 0 4px;font:650 10.5px/1.25 var(--mono);letter-spacing:.08em;text-transform:uppercase}
+.cat p{margin:4px 0 0;font-size:12px;color:var(--ink2)}
+.c-ACTUAL{border:2px solid var(--ok)}.c-ACTUAL h5{color:var(--ok)}
+.c-OBSERVED{border:2px solid var(--info);background:radial-gradient(color-mix(in oklab,var(--info) 22%,transparent) 1px,transparent 1.5px) 0 0/9px 9px,var(--glass2)}.c-OBSERVED h5{color:var(--info)}
+.c-MODELLED{border:2px dashed var(--warn);background:repeating-linear-gradient(135deg,color-mix(in oklab,var(--warn) 10%,transparent) 0 6px,transparent 6px 12px),var(--glass2)}.c-MODELLED h5{color:var(--warn)}
+.c-UNRESOLVED{border:2px dotted var(--neutral)}.c-UNRESOLVED h5{color:var(--neutral)}
+.chat{display:flex;flex-direction:column;gap:9px}
+.bubble{max-width:82%;padding:10px 12px;border-radius:13px;border:1px solid var(--line);background:var(--glass2);font-size:13px}
+.bubble.me{align-self:flex-end;background:color-mix(in oklab,var(--mgmt) 16%,var(--glass2))}
+.bubble .who{font:650 9.5px/1 var(--mono);letter-spacing:.1em;color:var(--ink3);margin-bottom:5px}
+.scripted{font:700 10px/1.2 var(--mono);letter-spacing:.1em;color:var(--warn);border:1px dashed var(--warn);border-radius:6px;padding:5px 8px;display:inline-block;margin-bottom:10px}
+.diff{font:12px/1.55 var(--mono);border-radius:10px;border:1px solid var(--line);overflow:hidden}
+.diff div{padding:1px 10px;white-space:pre}
+.diff .m{background:color-mix(in oklab,var(--bad) 14%,transparent)}.diff .p{background:color-mix(in oklab,var(--ok) 14%,transparent)}.diff .c{color:var(--ink3)}
+.pipe{display:flex;gap:0;overflow-x:auto;margin:10px 0}
+.pipe>div{flex:1 0 108px;padding:9px 10px;border:1px solid var(--line);background:var(--glass2);font-size:11.5px;position:relative}
+.pipe>div:first-child{border-radius:10px 0 0 10px}.pipe>div:last-child{border-radius:0 10px 10px 0}.pipe>div+div{border-left:0}
+.pipe>div.on{box-shadow:inset 0 -3px 0 var(--acc);background:color-mix(in oklab,var(--acc) 10%,var(--glass2))}
+.pipe b{display:block;font:650 10px/1.2 var(--mono);letter-spacing:.06em}
+.roles{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.roles .card{text-align:center}.roles .ne{font:700 18px/1 var(--mono);color:var(--acc)}
+.framelab{position:sticky;bottom:0;margin:18px -26px 0;padding:8px 26px;display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;font:700 10px/1.3 var(--mono);letter-spacing:.1em;color:var(--warn);
+background:color-mix(in oklab,var(--bg) 94%,transparent);-webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px);border-top:1px dashed color-mix(in oklab,var(--warn) 50%,transparent)}
+.framelab.prod{color:var(--ok);border-top-color:color-mix(in oklab,var(--ok) 50%,transparent)}
+.transport{position:relative;z-index:5;display:flex;align-items:center;gap:10px;padding:10px 20px 14px}
+.tbtn{width:38px;height:38px;border-radius:50%;border:1px solid var(--line2);background:var(--glass);color:var(--ink);cursor:pointer;display:grid;place-items:center;font:700 14px/1 var(--mono);flex:none}
+.tbtn.play{width:46px;height:46px;background:var(--acc);border-color:var(--acc);color:#fff;font-size:16px;box-shadow:0 10px 30px -10px var(--acc)}
+.scrub{position:relative;flex:1;height:38px;min-width:0}
+.scrub .segs{position:absolute;left:0;right:0;top:15px;height:8px;display:flex;gap:3px}
+.scrub .segs button{flex:1;min-width:0;height:8px;padding:0;border:0;border-radius:3px;background:var(--line2);cursor:pointer;position:relative;overflow:hidden}
+.scrub .segs button i{position:absolute;inset:0;width:0;background:var(--acc)}
+.scrub .segs button.done i{width:100%}
+.scrub input{position:absolute;inset:0;width:100%;opacity:0;cursor:pointer;margin:0}
+.time{font:600 11px/1 var(--mono);color:var(--ink3);white-space:nowrap;min-width:92px;text-align:right}
+.drawer{position:fixed;top:0;bottom:0;right:0;z-index:30;width:min(440px,100%);background:var(--glass);border-left:1px solid var(--line2);-webkit-backdrop-filter:blur(22px);backdrop-filter:blur(22px);
+transform:translateX(102%);transition:transform .45s cubic-bezier(.2,.75,.12,1);padding:20px 22px 30px;overflow:auto;box-shadow:var(--shadow)}
+.drawer.left{right:auto;left:0;border-left:0;border-right:1px solid var(--line2);transform:translateX(-102%)}
+.drawer.open{transform:none}
+.drawer h2{margin:0 0 4px;font:680 20px/1.2 var(--display)}
+.drawer h3{margin:18px 0 6px;font:650 11px/1.2 var(--mono);letter-spacing:.12em;text-transform:uppercase;color:var(--acc)}
+.drawer p,.drawer li{font-size:13px;color:var(--ink2)}
+.drawer code{font:12px var(--mono)}
+.drawer .x{position:absolute;right:14px;top:14px}
+.chlist{list-style:none;margin:12px 0 0;padding:0}
+.chlist button{display:flex;gap:10px;width:100%;text-align:left;padding:9px 10px;border-radius:9px;border:1px solid transparent;background:transparent;color:var(--ink);cursor:pointer;font:13px/1.3 var(--sans)}
+.chlist button:hover{border-color:var(--line2)}.chlist button.cur{border-color:var(--acc);background:color-mix(in oklab,var(--acc) 10%,transparent)}
+.chlist .n{font:650 11px/1.3 var(--mono);color:var(--ink3);width:22px;flex:none}
+#intro{position:fixed;inset:0;z-index:40;display:grid;place-items:center;background:radial-gradient(900px 600px at 50% 40%,color-mix(in oklab,var(--acc) 18%,transparent),transparent 70%),color-mix(in oklab,var(--bg) 82%,transparent);-webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px);transition:opacity .8s}
+#intro.gone{opacity:0;pointer-events:none}
+#intro .box{text-align:center;padding:24px;max-width:760px}
+#intro .trio{display:flex;justify-content:center;gap:14px;margin-bottom:22px}
+#intro .trio span{width:14px;height:14px;border-radius:50%}
+#intro h2{font:750 clamp(30px,6vw,64px)/1.02 var(--display);letter-spacing:-.035em;margin:0 0 14px}
+#intro h2 em{font-style:normal;background:linear-gradient(90deg,var(--derek),var(--xavier),var(--audrey));-webkit-background-clip:text;background-clip:text;color:transparent}
+#intro p{color:var(--ink2);font-size:15px;margin:0 auto 22px;max-width:58ch}
+#intro .go{font:700 14px/1 var(--sans);padding:14px 22px;border-radius:12px;border:0;background:var(--ink);color:var(--bg);cursor:pointer;box-shadow:0 20px 40px -20px var(--ink)}
+#intro .hint{margin-top:14px;font:600 11px/1.5 var(--mono);color:var(--ink3);letter-spacing:.04em}
+.kbd{font:600 10.5px/1 var(--mono);padding:2px 5px;border:1px solid var(--line2);border-radius:4px}
+.prodcard{border:1px solid var(--line);border-radius:14px;padding:12px 14px;margin-bottom:12px;background:var(--glass2)}
+.prodcard .h{display:flex;justify-content:space-between;gap:10px;align-items:baseline;flex-wrap:wrap;margin-bottom:6px}
+.prodcard table.kv td:first-child{color:var(--ink3);width:36%;font:11.5px var(--mono)}
+.prodcard .pill.st-OK{color:var(--ok)}.prodcard .pill.st-EMPTY{color:var(--neutral);border-style:dashed}.prodcard .pill.st-UNAVAILABLE{color:var(--bad)}.prodcard .pill.st-MISSING{color:var(--warn);border-style:dashed}
+.prodcard .ev{font:11px var(--mono);padding:3px 6px;border:1px solid var(--line2);border-radius:5px;margin-right:4px;color:var(--acc);text-decoration:none}
+.prodcard .unk{font:650 10px var(--mono);color:var(--warn)}
+.prodcard .why{color:var(--ink2);font-size:12.5px;margin:2px 0 8px}
+.prodcard .plain{padding:12px;border:1px dashed var(--line2);border-radius:10px}
+.prodcard .plain .big{font-size:17px}
+.gatebox{padding:16px;border-radius:12px;border:1px dashed var(--line2);background:var(--glass2)}
+@media (max-width:900px){.g4,.chain{grid-template-columns:repeat(2,minmax(0,1fr))}.chain .card+.card::before{display:none}.g3{grid-template-columns:1fr}}
+@media (max-width:640px){.hud{padding:8px 12px;gap:8px;flex-wrap:wrap}.ctitle{order:3;flex-basis:100%}.ctitle h1{white-space:normal}.hbtn{padding:7px 8px}
+#world{padding:0 10px}#panel{padding:16px 16px 0;border-radius:16px}.framelab{margin:14px -16px 0;padding:8px 16px}
+.g2,.g4,.roles{grid-template-columns:1fr}#triad{gap:12px;padding-bottom:8px}.node{min-width:0}.node .core{width:40px;height:40px;font-size:15px}.node .nm{font-size:10px}.node .st{font-size:8px;padding:3px 5px}
+.transport{padding:8px 12px 12px;gap:7px}.time{display:none}.bars{grid-template-columns:minmax(80px,40%) 1fr 44px}.banner{font-size:9.5px;letter-spacing:.08em}}
+@media (prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition-duration:.01s!important}#cam,#par{transform:none!important}}
+</style></head>
+<body class="a-DEREK">
+
+<div id="stage">
+<canvas id="bg" aria-hidden="true"></canvas>
+<div class="banner" id="banner" role="status">REHEARSAL · ILLUSTRATIVE PRICES AND FILLS · NO LIVE ORDERS</div>
+<header class="hud">
+<a class="brand" href="#"><i></i>BETTOR</a>
+<div class="ctitle"><span class="n" id="cnum">01 / 14</span><h1 id="ctitle">Derek finds the Yankees opportunity</h1></div>
+
+<button class="hbtn" id="chapters" type="button" aria-controls="chdrawer">Chapters</button>
+<button class="hbtn" id="inspectBtn" type="button" aria-controls="inspect" aria-pressed="false">Inspect <span class="kbd">I</span></button>
+<button class="hbtn" id="soundBtn" type="button" aria-pressed="false" title="Original score generated live with the Web Audio API">&#9834; Sound off</button>
+</header>
+<div id="world"><div id="cam"><div id="par">
+<div id="triad">
+<svg id="beams" aria-hidden="true"></svg>
+<div class="node" data-a="DEREK"><div class="core">D</div><div class="nm">DEREK</div><div class="st">IDLE</div></div>
+<div class="node" data-a="XAVIER"><div class="core">X</div><div class="nm">XAVIER</div><div class="st">IDLE</div></div>
+<div class="node" data-a="AUDREY"><div class="core">A</div><div class="nm">AUDREY</div><div class="st">IDLE</div></div>
+<div class="node" data-a="MANAGEMENT"><div class="core">M</div><div class="nm">MANAGEMENT</div><div class="st">HUMAN</div></div>
+<div id="token"></div>
+</div>
+<div id="panelwrap"><article id="panel" aria-live="polite"></article></div>
+</div></div></div>
+<footer class="transport">
+<button class="tbtn" id="prev" type="button" aria-label="Previous chapter">&#9664;&#9664;</button>
+<button class="tbtn play" id="play" type="button" aria-label="Play">&#9654;</button>
+<button class="tbtn" id="next" type="button" aria-label="Next chapter">&#9654;&#9654;</button>
+<div class="scrub"><div class="segs" id="segs"></div><input type="range" id="scrub" min="0" max="1000" value="0" aria-label="Scrub the walkthrough"></div>
+<span class="time" id="time">0:00 / 0:00</span>
+</footer>
+</div>
+<aside class="drawer" id="inspect" aria-label="Inspect this step"><button class="hbtn x" type="button" data-close="inspect">Close</button><div id="inspectBody"></div></aside>
+<aside class="drawer left" id="chdrawer" aria-label="Chapters"><button class="hbtn x" type="button" data-close="chdrawer">Close</button><h2>Chapters</h2><p class="sub">Keys: <span class="kbd">Space</span> play/pause &middot; <span class="kbd">&larr;</span><span class="kbd">&rarr;</span> chapter &middot; <span class="kbd">,</span><span class="kbd">.</span> seek &middot; <span class="kbd">1</span>&ndash;<span class="kbd">0</span> jump &middot; <span class="kbd">I</span> inspect &middot; <span class="kbd">M</span> sound</p><ul class="chlist" id="chlist"></ul></aside>
+<div id="intro"><div class="box">
+<div class="trio"><span style="background:var(--derek)"></span><span style="background:var(--xavier)"></span><span style="background:var(--audrey)"></span></div>
+<h2>Three agents.<br><em>One execution authority.</em></h2>
+<p>Derek finds and enters. Xavier manages what was actually filled. Audrey audits both, takes direction from management and turns it into tested, separately approved change. Fourteen chapters, one position, every number explained.</p>
+<button class="go" id="begin" type="button">Play the walkthrough</button>
+<div class="hint">Rehearsal-only copy: scripted, illustrative data; no network access.<br>Sound is off. Press <span class="kbd">M</span> for the original score.</div>
+</div></div>
+
+<script>
+(function () {
+  'use strict';
+  var SERVED = false;
+  var LABEL = 'REHEARSAL · ILLUSTRATIVE PRICES AND FILLS · NO LIVE ORDERS';
+  var mq = window.matchMedia ? window.matchMedia('(prefers-reduced-motion: reduce)') : {matches: false};
+  var REDUCE = mq.matches;
+  function $(id) { return document.getElementById(id); }
+  function esc(v) { return String(v === null || v === undefined ? '' : v).replace(/[&<>"']/g, function (c) { return {'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]; }); }
+  function clamp(x, a, b) { return Math.max(a, Math.min(b, x)); }
+  function ease(x) { return 1 - Math.pow(1 - x, 3); }
+
+  // ── the illustrative economics, computed, never typed ──────────────
+  // Published Polymarket US taker schedule: fee = 0.0695 x contracts x p x (1-p),
+  // rounded up to the cent per order (illustrative rounding).
+  var THETA = 0.0695;
+  function fee(q, p) { return Math.ceil(THETA * q * p * (1 - p) * 100 - 1e-9) / 100; }
+  function m(v, signed) {
+    var a = Math.abs(v), s = a.toFixed(2);
+    if (a !== 0 && a < 1 && Math.abs(a - +s) > 1e-9) s = a.toFixed(4).replace(/0+$/, '');
+    if (v < 0) return '<span class="neg">−$' + s + '</span>';
+    return (signed && v > 0 ? '<span class="pos">+$' : '$') + s + (signed && v > 0 ? '</span>' : '');
+  }
+  var ENTRY = {price: 0.50, p: 0.60, ordered: 100, filled: 30};
+  ENTRY.edgePP = (ENTRY.p - ENTRY.price) * 100;
+  ENTRY.gross = ENTRY.p - ENTRY.price;
+  ENTRY.grossRet = ENTRY.gross / ENTRY.price;
+  ENTRY.feePer = THETA * ENTRY.price * (1 - ENTRY.price);
+  ENTRY.netEV = ENTRY.gross - ENTRY.feePer;
+  ENTRY.netROI = ENTRY.netEV / (ENTRY.price + ENTRY.feePer);
+  ENTRY.planFee = fee(ENTRY.ordered, ENTRY.price);
+  ENTRY.fillFee = fee(ENTRY.filled, ENTRY.price);
+  var Q = ENTRY.filled, BASIS = +(Q * ENTRY.price + ENTRY.fillFee).toFixed(2);
+  var STATES = ['RS', 'Y1', 'Y2', 'Y3', 'Y4', 'Y5'];
+  var SLAB = {RS: 'Red Sox win', Y1: 'NYY by 1', Y2: 'NYY by 2', Y3: 'NYY by 3', Y4: 'NYY by 4', Y5: 'NYY by 5+'};
+  var PS = {RS: 0.40, Y1: 0.18, Y2: 0.12, Y3: 0.09, Y4: 0.066, Y5: 0.144};
+  var MARG = {RS: 0, Y1: 1, Y2: 2, Y3: 3, Y4: 4, Y5: 5};
+  var BID = 0.55, FLOOR = -6.00, CAND_FLOOR = -4.50;
+  function alt(name, kind, cap, fees, pay, extra) {
+    var net = {}; STATES.forEach(function (s) { net[s] = +pay(s).toFixed(2); });
+    var E = STATES.reduce(function (a, s) { return a + PS[s] * net[s]; }, 0);
+    var worst = Math.min.apply(null, STATES.map(function (s) { return net[s]; }));
+    var pp = STATES.filter(function (s) { return net[s] > 0; }).reduce(function (a, s) { return a + PS[s]; }, 0);
+    return Object.assign({name: name, kind: kind, E: +E.toFixed(2), worst: worst, pp: pp, cap: cap, fees: fees, net: net, pboth: null, q: null, unp: Q, dur: '2 h 40 min'}, extra || {});
+  }
+  var ALTS = [];
+  ALTS.push(alt('HOLD', 'HOLD', 0, 0, function (s) { return (s === 'RS' ? 0 : Q) - BASIS; }));
+  var exitFee = fee(Q, BID);
+  ALTS.push(alt('EXIT 30 @ $0.55', 'EXIT', 0, exitFee, function () { return Q * BID - exitFee - BASIS; }, {unp: 0, q: 30, dur: 'released now'}));
+  var redFee = fee(15, BID);
+  ALTS.push(alt('REDUCE 15 @ $0.55', 'REDUCE', 0, redFee, function (s) { return 15 * BID - redFee + (s === 'RS' ? 0 : 15) - BASIS; }, {unp: 15, q: 15}));
+  var RUNGS = [{k: 1.5, price: 0.60, depth: 25}, {k: 2.5, price: 0.72, depth: 20}, {k: 3.5, price: 0.82, depth: 30}, {k: 4.5, price: 0.89, depth: 30}];
+  RUNGS.forEach(function (r) {
+    var q = Math.min(r.depth, Q), f = fee(q, r.price), c = +(q * r.price + f).toFixed(2);
+    var cov = function (s) { return s === 'RS' || MARG[s] <= r.k; };
+    r.pcover = STATES.filter(cov).reduce(function (a, s) { return a + PS[s]; }, 0);
+    r.pair = ENTRY.price + r.price; r.single = 1 - r.pair; r.dbl = 2 - r.pair;
+    r.pboth = STATES.filter(function (s) { return s !== 'RS' && cov(s); }).reduce(function (a, s) { return a + PS[s]; }, 0);
+    r.alt = alt('Red Sox +' + r.k + ' × ' + q, 'HEDGE', c, f, function (s) { return (s === 'RS' ? 0 : Q) + (cov(s) ? q : 0) - BASIS - c; }, {q: q, unp: Q - q, pboth: r.pboth, cov: cov, rung: r});
+    ALTS.push(r.alt);
+  });
+  var HOLD = ALTS[0];
+  ALTS.forEach(function (a) { a.inc = +(a.E - HOLD.E).toFixed(2); a.eligible = a.kind === 'HOLD' ? a.worst >= FLOOR : a.worst >= FLOOR; a.candEligible = a.worst >= CAND_FLOOR; });
+  var CHOSEN = ALTS.filter(function (a) { return a.eligible; }).sort(function (a, b) { return b.E - a.E; })[0];
+  var CAND_CHOSEN = ALTS.filter(function (a) { return a.candEligible; }).sort(function (a, b) { return b.E - a.E; })[0];
+  var FINAL = 'Y4';
+
+  // ── reveal helpers (deterministic in local progress, so scrubbing works) ─
+  function R(t, inner, cls, tag) { tag = tag || 'div'; return '<' + tag + ' class="rv ' + (cls || '') + '" data-t="' + t + '">' + inner + '</' + tag + '>'; }
+  function C(to, dec, pre, suf, t0, t1) { return '<span class="cu" data-to="' + to + '" data-dec="' + dec + '" data-pre="' + esc(pre || '') + '" data-suf="' + esc(suf || '') + '" data-t0="' + t0 + '" data-t1="' + t1 + '">' + esc(pre || '') + (0).toFixed(dec) + esc(suf || '') + '</span>'; }
+  function W(pct, t0, t1, cls) { return '<i class="gw ' + (cls || '') + '" data-w="' + pct + '" data-t0="' + t0 + '" data-t1="' + t1 + '"></i>'; }
+  function pill(t, c) { return '<span class="pill ' + c + '">' + esc(t) + '</span>'; }
+  function lead(k, l) { return '<p class="kicker">' + k + '</p><p class="lead">' + l + '</p>'; }
+
+  function altTable(opts) {
+    opts = opts || {};
+    var h = '<div class="tw"><table><thead><tr><th>Alternative</th><th class="n">Expected net P&amp;L</th><th class="n">vs HOLD</th><th class="n">Worst case</th><th class="n">P(net profit)</th><th class="n">P(both win)</th><th class="n">Capital required</th><th>Capital duration</th><th class="n">Executable</th><th class="n">Unpaired</th><th class="n">Fees</th><th>Eligibility</th></tr></thead><tbody>';
+    ALTS.forEach(function (a, i) {
+      var sel = opts.select && a === CHOSEN;
+      h += '<tr class="rv' + (sel ? ' sel' : '') + '" data-t="' + (opts.t0 + i * 0.035).toFixed(3) + '"><td>' + esc(a.name) + (sel ? ' ' + pill('SELECTED', 'p-info') : '') + '</td><td class="n">' + m(a.E, true) + '</td><td class="n">' + (a.kind === 'HOLD' ? '—' : m(a.inc, true)) + '</td><td class="n">' + m(a.worst, true) + '</td><td class="n">' + a.pp.toFixed(3) + '</td><td class="n">' + (a.pboth === null ? '<span class="sub">n/a</span>' : a.pboth.toFixed(3)) + '</td><td class="n">' + m(a.cap) + '</td><td>' + a.dur + '</td><td class="n">' + (a.q === null ? '—' : a.q) + '</td><td class="n">' + a.unp + '</td><td class="n">' + m(a.fees) + '</td><td>' + (a.eligible ? pill('ELIGIBLE', 'p-ok') : pill('REFUSED · worst < −$6.00', 'p-bad')) + '</td></tr>';
+    });
+    return h + '</tbody></table></div>';
+  }
+
+  // ── the fourteen chapters ──────────────────────────────────────────
+  var CH = [
+  {a: 'DEREK', t: 'Derek finds the Yankees opportunity', dur: 10, music: 0, cam: [-7, 3, 30],
+   st: {DEREK: 'EVALUATING', XAVIER: 'IDLE', AUDREY: 'IDLE'},
+   scene: function () {
+     var cats = [['MLB moneyline', 214, 0], ['MLB run line (hedge side)', 188, 0], ['NFL spread', 96, 0], ['Player props', 1204, 1], ['Futures', 77, 1], ['In-play', 0, 2]];
+     var h = lead('01 · Discovery', 'Derek walks the whole catalogue, counts what it cannot trade as carefully as what it can, and queues what it can evaluate.');
+     h += '<div class="g2"><div class="card"><div class="lbl">Catalogue census · every category</div><div class="bars" style="margin-top:10px">';
+     cats.forEach(function (c, i) {
+       var t = 0.06 + i * 0.05;
+       h += R(t, esc(c[0]) + (c[2] === 1 ? '<span class="tag">UNSUPPORTED</span>' : c[2] === 2 ? '<span class="tag">EXCLUDED · LATENCY</span>' : ''), '', 'div') + '<div class="track">' + W(c[1] / 1204 * 100, t, t + 0.25, c[2] ? 'x' : '') + '</div><div class="mono" style="text-align:right">' + C(c[1], 0, '', '', t, t + 0.25) + '</div>';
+     });
+     h += '</div><p class="sub" style="margin-top:10px">Unsupported markets are counted and named, not silently dropped.</p></div>';
+     h += '<div class="card"><div class="lbl">Opportunity queue</div><div style="margin-top:10px">';
+     [['LAD @ SD · Dodgers to win', 'no qualified internal probability', 0.3], ['HOU @ SEA · Astros to win', 'Pinnacle quote 94 s old', 0.36], ['NYY @ BOS · Yankees to win · YES ask $0.50', 'EVALUATING', 0.5], ['ATL @ NYM · Braves to win', 'edge below threshold', 0.42]].forEach(function (r) {
+       var hl = r[1] === 'EVALUATING';
+       h += R(r[2], '<span>' + esc(r[0]) + '</span><span class="mono" style="color:' + (hl ? 'var(--acc)' : 'var(--ink3)') + '">' + esc(r[1]) + '</span>', 'q' + (hl ? ' hl' : ''));
+     });
+     return h + R(0.62, '<div class="callout" style="margin-top:10px"><b>Currently contemplating</b> is the persisted evaluation state on <span class="mono">agent_status</span>: “evaluating NYY @ BOS moneyline”. It is a record, not an invented thought.</div>') + '</div></div></div>';
+   },
+   inspect: '<h3>What the real system does</h3><p>Each collection cycle Derek reads the venue catalogue and writes a census by category, including unsupported and excluded markets, so coverage gaps are visible rather than inferred. Candidates enter the opportunity queue with their current blocker and its dependency class (ENGINEERING_CONFIGURATION, EVIDENCE, ENGINEERING, ELAPSED_TIME, OWNER_DECISION).</p><h3>Where it is recorded</h3><p><code>agent_status</code> (state, activity), Derek’s coverage census, <code>external_valuations</code> for each evaluation.</p><h3>What this does not mean</h3><p>Being in the queue is not a decision, and no order exists at this point.</p>'},
+
+  {a: 'DEREK', t: 'Probability edge and net economics', dur: 12, music: 1, cam: [-6, 2, 30],
+   st: {DEREK: 'EVALUATING', XAVIER: 'IDLE', AUDREY: 'IDLE'},
+   scene: function () {
+     var h = lead('02 · Economics', 'Two qualified probabilities, one price. Gross edge, gross return, net EV and sizing are four different numbers.');
+     h += '<div class="g2">' + R(0.04, '<div class="lbl">Pinnacle · reference</div><div class="big">' + C(0.6, 3, '', '', 0.06, 0.2) + '</div><div class="sub">de-vigged · observed 23:02:11Z · age 4 s · <b>QUALIFIED</b></div>', 'card')
+       + R(0.1, '<div class="lbl">Internal · model</div><div class="big">' + C(0.6, 3, '', '', 0.12, 0.26) + '</div><div class="sub">calibrated cohort · computed 23:02:12Z · <b>QUALIFIED</b></div>', 'card') + '</div>';
+     h += R(0.22, '<div class="scale"><div class="ax"></div><div class="edge" style="left:50%;width:10%"></div><div class="mk" style="left:50%;color:var(--ink2)">price $0.50</div><div class="mk" style="left:60%;color:var(--acc)">p 0.600</div><div class="mk" style="left:0;color:var(--ink3)">0</div><div class="mk" style="left:100%;color:var(--ink3)">1</div></div>');
+     h += '<div class="chain">'
+       + R(0.3, '<div class="lbl">Gross edge</div><div class="big">' + C(ENTRY.edgePP, 2, '+', ' pp', 0.3, 0.4) + '</div><div class="sub">0.600 − 0.500</div>', 'card')
+       + R(0.38, '<div class="lbl">Gross / contract</div><div class="big">' + C(ENTRY.gross, 2, '$', '', 0.38, 0.46) + '</div><div class="sub">pays $1.00 w.p. 0.60</div>', 'card')
+       + R(0.46, '<div class="lbl">Gross return</div><div class="big">' + C(ENTRY.grossRet * 100, 1, '', '%', 0.46, 0.54) + '</div><div class="sub">$0.10 on $0.50</div>', 'card')
+       + R(0.54, '<div class="lbl">Taker fee</div><div class="big">' + C(ENTRY.feePer, 4, '$', '', 0.54, 0.62) + '</div><div class="sub">0.0695 · p · (1−p)</div>', 'card')
+       + R(0.62, '<div class="lbl">Net EV / contract</div><div class="big">' + C(ENTRY.netEV, 4, '$', '', 0.62, 0.7) + '</div><div class="sub">after fees</div>', 'card hl')
+       + R(0.7, '<div class="lbl">Net ROI</div><div class="big">' + C(ENTRY.netROI * 100, 1, '', '%', 0.7, 0.78) + '</div><div class="sub">on $' + (ENTRY.price + ENTRY.feePer).toFixed(4) + ' deployed</div>', 'card') + '</div>';
+     return h + R(0.8, '<div class="callout"><b>Sizing is separate:</b> ' + ENTRY.ordered + ' contracts, $' + (ENTRY.ordered * ENTRY.price).toFixed(2) + ' plus an estimated ' + m(ENTRY.planFee) + ' fee, set by the risk policy’s per-fixture limit. A bigger edge does not by itself buy a bigger size, and no agent can edit that limit.</div>');
+   },
+   inspect: '<h3>The arithmetic</h3><p>Gross edge = qualified probability − price = 0.60 − 0.50 = <b>10 pp</b>. Gross value per contract = $0.10, a <b>20%</b> gross return on the $0.50 price. The published taker fee is 0.0695 × contracts × p × (1−p) = $0.0174 per contract here, so net EV = <b>$0.0826</b> per contract, <b>16.0%</b> on the $0.5174 deployed. Orders round fees up to the cent: 100 contracts = $1.74.</p><h3>Why two probabilities</h3><p>Pinnacle (reference) and the internal model are shown separately with their own timestamps and qualification. Either one failing qualification blocks the entry by name; they are never averaged into one untraceable number.</p><h3>Illustrative</h3><p>Every price and probability in rehearsal is illustrative.</p>'},
+
+  {a: 'DEREK', t: 'Identity, evidence, risk and execution checks', dur: 10, music: 1, cam: [-5, 2, 30],
+   st: {DEREK: 'EVALUATING', XAVIER: 'IDLE', AUDREY: 'IDLE'},
+   scene: function () {
+     var cols = [['Identity', ['Venue market mapped to Pinnacle event and side (YES = Yankees win)', 'Fixture start 23:05 ET; not in play', 'Market rules: regulation plus extras, no tie outcome']],
+       ['Evidence', ['Pinnacle quote age 4 s ≤ 30 s limit', 'Internal probability QUALIFIED (calibrated cohort)', 'Book snapshot 2 s old; ask $0.50 visible']],
+       ['Risk', ['Fixture exposure $0.00 + $51.74 ≤ per-fixture limit', 'Daily loss budget intact', 'Limits read-only to every agent']],
+       ['Execution', ['Venue open; account reconciled', 'One execution path: bettor_funded_execution', 'No automatic retry of an ambiguous submission']]];
+     var h = lead('03 · Checks', 'Nothing is entered on edge alone. Four families of checks must all pass, and each failure would carry its own name.');
+     h += '<div class="g4">';
+     cols.forEach(function (c, i) {
+       h += R(0.05 + i * 0.05, '<h4>' + c[0] + '</h4><ul class="chk">' + c[1].map(function (x, j) { return '<li class="rv" data-t="' + (0.18 + i * 0.12 + j * 0.035).toFixed(3) + '">' + esc(x) + '</li>'; }).join('') + '</ul>', 'card');
+     });
+     return h + '</div>' + R(0.78, '<div class="callout" style="margin-top:14px"><b>All four families pass.</b> Had one failed, the candidate would stay in the queue with that blocker and its dependency class; the production build today holds funded submission switched off, which is itself an OWNER_DECISION blocker.</div>');
+   },
+   inspect: '<h3>What the real system does</h3><p>Checks run in the deterministic entry lane, not in a model. Identity binds venue market, event and side; evidence checks quote ages and qualification; risk reads the limits (which no agent may change); execution confirms venue and account state and that the one execution authority is available.</p><h3>Production today</h3><p>FUNDED_SUBMISSION_ENABLED, REAL_ORDER_SUBMISSION_ENABLED and FUNDED_EXIT_SUBMISSION_ENABLED are False in this build. The rehearsal shows what happens after the owner enables them; it does not enable anything.</p>'},
+
+  {a: 'DEREK', t: 'Decision and plan persisted', dur: 9, music: 2, cam: [-5, 3, 30],
+   st: {DEREK: 'DECISION_RECORDED', XAVIER: 'IDLE', AUDREY: 'IDLE'},
+   scene: function () {
+     var h = lead('04 · Decision', 'The decision and its plan are written before anything is sent, with links to the evidence they rest on.');
+     h += '<div class="g2">' + R(0.08, '<pre class="rec"><b>agent_decisions</b>\ndecision_ref   DRK-1002-0412\nagent_id       DEREK\nkind           ENTRY\nsubject        NYY @ BOS · Yankees to win · YES\nverdict        <b>ENTER</b>\nsummary        edge +10.00 pp · net EV $0.0826/ct · size 100\nevidence_refs  external_valuations#88412\n               bettor_funded_intents#FI-7Q2\ndecided_at     23:02:13.904Z</pre>')
+       + R(0.24, '<pre class="rec"><b>bettor_funded_intents</b> (the plan)\nintent_id      FI-7Q2\nside           BUY YES\nqty            100\nlimit          $0.50\nexpiry         60 s\nplan_digest    9f3c…51a0\nstate          PLANNED\n\n<b>execution authority</b>\nbettor_funded_execution (deterministic)\nno model in the order path</pre>') + '</div>';
+     return h + R(0.6, '<div class="callout" style="margin-top:14px">The decision index links to the authoritative records; it never copies the economics. Derek’s recorded state is now <b>DECISION_RECORDED</b>.</div>');
+   },
+   inspect: '<h3>Where it is recorded</h3><p><code>agent_decisions</code> is an index: its <code>evidence_refs</code> point at <code>external_valuations</code> (the evaluation) and <code>bettor_funded_intents</code> (the plan). The one authoritative accounting system is <code>bettor_funded_intents / fills / economics</code>; agents read it and link to it.</p><h3>Why before sending</h3><p>A plan persisted before submission makes every later state (acknowledged, partially filled, expired) attributable to one intent.</p>'},
+
+  {a: 'DEREK', t: 'Acknowledgement, partial fill and full fill are different', dur: 11, music: 2, cam: [-4, 3, 20],
+   st: {DEREK: 'WAITING_FOR_EVIDENCE', XAVIER: 'IDLE', AUDREY: 'IDLE'},
+   scene: function () {
+     var h = lead('05 · Fills', 'An acknowledgement is not a fill, and a partial fill is not the plan. Only what actually filled becomes a position.');
+     h += '<div class="g2"><div class="card"><div class="lbl">Order lifecycle · FI-7Q2</div><ul class="tl" style="margin-top:10px">'
+       + R(0.08, '<b>23:02:14.210</b> submitted · BUY YES 100 @ ≤ $0.50', '', 'li')
+       + R(0.2, '<b>23:02:14.388</b> ' + pill('ACKNOWLEDGED', 'p-info') + ' venue accepted the order · <b>0 filled</b>', '', 'li')
+       + R(0.34, '<b>23:02:14.402</b> ' + pill('PARTIAL FILL', 'p-warn') + ' 30 @ $0.50 · fee ' + m(ENTRY.fillFee), '', 'li')
+       + R(0.5, '<b>23:03:14.210</b> ' + pill('EXPIRED', 'p-n') + ' remaining 70 unfilled; nothing retried', '', 'li')
+       + R(0.6, '<span class="sub">A full fill would read 100 / 100. It did not happen, and the page never implies it.</span>', '', 'li') + '</ul></div>';
+     h += '<div class="card"><div class="lbl">Quantities</div><div class="g3" style="margin-top:8px"><div><div class="sub">Ordered</div><div class="big">' + C(100, 0, '', '', 0.06, 0.16) + '</div></div><div><div class="sub">Filled</div><div class="big" style="color:var(--acc)">' + C(30, 0, '', '', 0.34, 0.44) + '</div></div><div><div class="sub">Outstanding</div><div class="big">' + C(70, 0, '', '', 0.34, 0.44) + '</div></div></div>'
+       + '<div class="fb"><div class="f cuw" data-w="30" data-t0="0.34" data-t1="0.46">30 FILLED</div><div class="o">70 OUTSTANDING</div></div>'
+       + R(0.66, '<div class="callout"><b>30 transferred to Xavier.</b> 70 outstanding stays with Derek’s plan until it fills or ends, and is never managed as a position.</div>') + '</div></div>';
+     return h;
+   },
+   inspect: '<h3>The three states</h3><p><b>Acknowledged</b>: the venue accepted the order; quantity filled may be zero. <b>Partial</b>: some quantity filled (30 of 100). <b>Full</b>: the ordered quantity filled. Fills are recorded one by one in <code>bettor_funded_fills</code>.</p><h3>No retry</h3><p>An ambiguous submission is never retried automatically; it goes to recovery and reconciliation.</p><h3>Handoff</h3><p><code>agent_position_handoffs</code> records ordered, confirmed and outstanding quantity; <code>agent_handoff_fills</code> is keyed by fill id so a replayed fill cannot be counted twice.</p>'},
+
+  {a: 'XAVIER', t: 'Xavier receives the confirmed position', dur: 9, music: 2, cam: [0, 3, 0], flow: ['DEREK', 'XAVIER', '30 filled · basis $' + BASIS.toFixed(2)],
+   st: {DEREK: 'IDLE', XAVIER: 'EVALUATING', AUDREY: 'IDLE'},
+   scene: function () {
+     var h = lead('06 · Handoff', 'Ownership moves with confirmed fills, not with intentions. Xavier now owns 30 contracts and nothing else.');
+     h += '<div class="g2">' + R(0.1, '<pre class="rec"><b>agent_position_handoffs</b>\nentry_intent_id    FI-7Q2\nportfolio_group_id PG-7Q2\nfrom_agent         DEREK\nowner_agent        <b>XAVIER</b>\nordered_qty        100\nconfirmed_qty      <b>30</b>\noutstanding_qty    70 → 0 (expired)\nfirst_fill_id      F-3318 · 23:02:14.402Z\nhandoff_at         23:02:14.9Z</pre>')
+       + R(0.3, '<div class="card"><div class="lbl">Position group PG-7Q2</div><div class="g2" style="margin-top:8px"><div><div class="sub">Primary</div><div class="big">30</div><div class="sub">Yankees YES</div></div><div><div class="sub">Basis</div><div class="big">' + m(BASIS) + '</div><div class="sub">30 × $0.50 + ' + m(ENTRY.fillFee) + ' fee</div></div><div><div class="sub">Hedge</div><div class="big">0</div></div><div><div class="sub">Next review</div><div class="big">now</div><div class="sub">servicing cadence</div></div></div></div>') + '</div>';
+     return h + R(0.6, '<div class="callout" style="margin-top:14px">Xavier’s servicing runs on its own cadence, independent of Derek’s collection cycle. With nothing owned, a servicing pass records that it had nothing to service; it is never shown as management.</div>');
+   },
+   inspect: '<h3>What the real system does</h3><p>A post-ingest hook on the book records each confirmed fill against the entry intent. The first fill creates the handoff; later fills add to <code>confirmed_qty</code>. Xavier’s servicing task picks the group up on its next pass.</p><h3>What this does not mean</h3><p>Receiving a position does not mean it is profitable or that any management action will be taken.</p>'},
+
+  {a: 'XAVIER', t: 'Xavier compares the ladder with HOLD, EXIT and REDUCE', dur: 16, music: 3, cam: [2, 4, 0],
+   st: {DEREK: 'IDLE', XAVIER: 'EVALUATING', AUDREY: 'IDLE'},
+   scene: function () {
+     var h = lead('07 · Alternatives', 'Every alternative is priced on the same states and fees. Wider is not automatically better.');
+     h += '<div class="g2"><div class="card"><div class="lbl">Where each Red Sox line also pays · final margin</div><div class="margin">' + STATES.map(function (s) { return '<div title="' + (PS[s] * 100).toFixed(1) + '%">' + SLAB[s].replace('NYY ', '') + '</div>'; }).join('') + '</div>';
+     RUNGS.forEach(function (r, i) {
+       h += '<div class="mrow rv" data-t="' + (0.08 + i * 0.06).toFixed(2) + '"><span class="mono">+' + r.k + '</span><div class="cells">' + STATES.map(function (s) { var c = r.alt.cov(s); return '<i class="' + (c ? (s === 'RS' ? 'h' : 'b') : '') + '"></i>'; }).join('') + '</div></div>';
+     });
+     h += '<div class="sub" style="margin-top:6px"><span style="color:var(--ok)">■</span> both legs win &nbsp; <span style="color:var(--acc)">■</span> hedge alone wins &nbsp; □ Yankees alone win</div></div>';
+     var r1 = RUNGS[0], r4 = RUNGS[3];
+     h += '<div>' + R(0.32, '<div class="callout"><b>The $1.10 case.</b> Yankees $0.50 + Red Sox +1.5 $0.60 = <b>$1.10</b> per pair. One winner pays $1.00: ' + m(r1.single, true) + ' per pair. Both win (Yankees by exactly 1) pays $2.00: ' + m(r1.dbl, true) + ' per pair.</div>')
+       + R(0.4, '<div class="callout" style="margin-top:8px"><b>+4.5 overlaps Yankees wins by 1–4 runs</b> (P(both) ' + r4.pboth.toFixed(3) + ') but costs $' + r4.price.toFixed(2) + ': a single winner loses ' + m(-r4.single) + ' per pair, and its worst case on 30 is ' + m(r4.alt.worst, true) + '. More overlap, not a better choice.</div>')
+       + R(0.48, '<div class="callout" style="margin-top:8px"><b>Depth is real.</b> +1.5 has 25 executable at $0.60 and +2.5 has 20: the rest would stay unpaired.</div>') + '</div></div>';
+     return h + '<div style="margin-top:14px">' + altTable({t0: 0.55, select: false}) + '</div>';
+   },
+   inspect: '<h3>How every row is computed</h3><p>Six settlement states with qualified probabilities (Red Sox win 0.40; Yankees by 1: 0.18, 2: 0.12, 3: 0.09, 4: 0.066, 5+: 0.144). For each alternative the net P&L in every state includes the entry basis ($15.53), the hedge or exit price and the fee rounded up per order. Expected net = Σ P(state) × net; worst case = the minimum; P(net profit) = total probability of states with net > 0.</p><h3>Policy</h3><p>Rehearsal policy: maximise expected net P&L subject to worst case ≥ −$6.00 on the group. HOLD (−$15.53), REDUCE (−$7.54) and +2.5 to +4.5 are refused by name.</p><h3>Real records</h3><p><code>bettor_xavier_decisions</code> keeps one pre-action record per review with every alternative, its eligibility and the reason for any refusal.</p>'},
+
+  {a: 'XAVIER', t: 'The chosen action and its residual exposure', dur: 13, music: 3, cam: [2, 3, 0],
+   st: {DEREK: 'IDLE', XAVIER: 'DECISION_RECORDED', AUDREY: 'IDLE'},
+   scene: function () {
+     var c = CHOSEN, states = [['RS', 'Red Sox win'], ['Y1', 'NYY by 1'], ['Y2', 'NYY by 2+']];
+     var ex = ALTS[1];
+     var h = lead('08 · Selection', 'Xavier selects ' + esc(c.name) + ': the best expected value that keeps the worst case inside the bound, with 5 contracts left unpaired and said so.');
+     h += '<div class="g2">' + R(0.06, '<div class="lbl">Selected</div><div class="big" style="color:var(--acc)">' + esc(c.name) + '</div><div class="g3" style="margin-top:8px"><div><div class="sub">Expected net</div><b>' + m(c.E, true) + '</b></div><div><div class="sub">vs HOLD</div><b>' + m(c.inc, true) + '</b></div><div><div class="sub">Worst case</div><b>' + m(c.worst, true) + '</b></div><div><div class="sub">Capital added</div><b>' + m(c.cap) + '</b></div><div><div class="sub">P(net profit)</div><b>' + c.pp.toFixed(3) + '</b></div><div><div class="sub">Fees</div><b>' + m(c.fees) + '</b></div></div>', 'card')
+       + R(0.16, '<div class="lbl">Why this one</div><p style="margin:6px 0">Worst case must be ≥ −$6.00. Eligible: EXIT (' + m(ex.E, true) + ') and ' + esc(c.name) + ' (' + m(c.E, true) + '). The hedge keeps ' + m(c.E - ex.E, true) + ' more expected value; it gives up ' + m(-c.inc) + ' against HOLD to cut the worst case from ' + m(HOLD.worst, true) + ' to ' + m(c.worst, true) + '.</p>', 'card') + '</div>';
+     h += '<div class="g2" style="margin-top:14px"><div class="tw">' + R(0.3, '<table><thead><tr><th>State</th><th class="n">P</th><th class="n">HOLD</th><th class="n">' + esc(c.name) + '</th><th class="n">EXIT</th></tr></thead><tbody>' + states.map(function (s) {
+       return '<tr><td>' + s[1] + '</td><td class="n">' + (s[0] === 'Y2' ? (1 - PS.RS - PS.Y1) : PS[s[0]]).toFixed(3) + '</td><td class="n">' + m(HOLD.net[s[0]], true) + '</td><td class="n">' + m(c.net[s[0]], true) + '</td><td class="n">' + m(ex.net[s[0]], true) + '</td></tr>';
+     }).join('') + '</tbody></table>') + '</div>';
+     h += R(0.46, '<div class="lbl">Residual exposure</div><p style="margin:6px 0">30 Yankees held, 25 paired with Red Sox +1.5. <b>5 unpaired</b>: if the Red Sox win those 5 lose their $2.50 of stake with nothing against them. That is inside the −$5.95 worst case, recorded on the group as <span class="mono">unpaired_residual_qty = 5</span>, and reviewed again on the next pass.</p>', 'card') + '</div>';
+     return h + R(0.7, '<div class="callout" style="margin-top:14px">The hedge order goes through the same single execution path. In rehearsal the 25 fill at $0.60; the fill, not the decision, updates the book.</div>');
+   },
+   inspect: '<h3>The per-state table</h3><p>Hedge cost = 25 × $0.60 + fee $0.42 = $15.42. Red Sox win: 25 − 15.53 − 15.42 = −$5.95. Yankees by 1 (both win): 55 − 30.95 = +$24.05. Yankees by 2+: 30 − 30.95 = −$0.95.</p><h3>Unpaired remainder</h3><p>Executable quantity at the selected price was 25 of 30. The remainder is kept visible as residual exposure; the decision never pretends the pair is complete.</p><h3>What this does not mean</h3><p>A selected action is a recorded decision. It is not a promise of profit.</p>'},
+
+  {a: 'XAVIER', t: 'Settlement updates the actual accounting', dur: 10, music: 3, cam: [3, 2, -10],
+   st: {DEREK: 'IDLE', XAVIER: 'WAITING_FOR_EVIDENCE', AUDREY: 'IDLE'},
+   scene: function () {
+     var c = CHOSEN;
+     var h = lead('09 · Settlement', 'The game settles. The book records what was actually paid, and only that.');
+     h += R(0.06, '<div class="score"><div><small>NYY</small>' + C(6, 0, '', '', 0.08, 0.22) + '</div><div style="opacity:.5">–</div><div><small>BOS</small>' + C(2, 0, '', '', 0.08, 0.22) + '</div><div style="font-size:14px;letter-spacing:.14em">FINAL</div></div>');
+     h += '<div class="g2" style="margin-top:14px">' + R(0.28, '<pre class="rec"><b>bettor_funded_economics</b> · PG-7Q2\nYankees YES × 30 settles $1.00   +$30.00\nRed Sox +1.5 × 25 settles $0.00   +$0.00\nentry cost + fee                  −$15.53\nhedge cost + fee                  −$15.42\n<b>realised net                       −$0.95</b></pre>')
+       + R(0.46, '<div class="lbl">Not realised</div><p style="margin:6px 0">HOLD would have paid ' + m(HOLD.net[FINAL], true) + ' on this outcome. That figure is hypothetical: no such order history exists, and it is never added to the book.</p><div class="callout">Yankees won by 4, outside the +1.5 overlap. The hedge cost money on this game, exactly as its per-state table said it could.</div>', 'card') + '</div>';
+     return h;
+   },
+   inspect: '<h3>One book</h3><p>Settlement is ingested into <code>bettor_funded_economics</code>, the one authoritative accounting system. Xavier and Audrey read it; neither keeps a second ledger.</p><h3>Hypothetical is not realised</h3><p>What an alternative would have paid is computed for audit, labelled hypothetical, and kept out of realised P&L.</p>'},
+
+  {a: 'AUDREY', t: 'Audrey compares the decision with its captured alternatives', dur: 13, music: 3, cam: [7, 3, -30], flow: ['XAVIER', 'AUDREY', 'decision + 7 alternatives'],
+   st: {DEREK: 'IDLE', XAVIER: 'IDLE', AUDREY: 'EVALUATING'},
+   scene: function () {
+     var h = lead('10 · Audit', 'Audrey separates what happened from what might have. Four kinds of evidence, never blended.');
+     var obs = ALTS.filter(function (a) { return a.kind === 'HOLD' || a.kind === 'EXIT' || a.kind === 'REDUCE'; });
+     h += '<div class="g4">'
+       + R(0.1, '<h5>Actual · executed & booked</h5><div class="big">' + m(-0.95, true) + '</div><p>' + esc(CHOSEN.name) + ' on 30 Yankees, from the book.</p>', 'cat c-ACTUAL')
+       + R(0.22, '<h5>Observed alternative</h5><p>' + obs.map(function (a) { return esc(a.name) + ': ' + m(a.net[FINAL], true); }).join('<br>') + '</p><p>Quotes captured at decision time. Never placed: outcomes hypothetical.</p>', 'cat c-OBSERVED')
+       + R(0.34, '<h5>Modelled estimate</h5><p>' + RUNGS.slice(1).map(function (r) { return '+' + r.k + ': ' + m(r.alt.net[FINAL], true); }).join('<br>') + '</p><p>Depth beyond the top level not captured; fills modelled.</p>', 'cat c-MODELLED')
+       + R(0.46, '<h5>Unresolved</h5><p>70 unfilled entry contracts: no fill, no outcome attributed.</p><p>One fixture: not a sample of the policy.</p>', 'cat c-UNRESOLVED') + '</div>';
+     return h + R(0.62, '<div class="g2" style="margin-top:14px"><pre class="rec"><b>finding</b> · XAVIER · LOW\nThe selection followed the active policy.\nExpected cost of the worst-case bound: ' + CHOSEN.inc.toFixed(2) + ' vs HOLD.\n+4.5 would have paid ' + RUNGS[3].alt.net[FINAL].toFixed(2) + ' here (modelled);\nit was refused on worst case, correctly.\nHindsight on one game is not evidence.</pre><pre class="rec"><b>finding</b> · DEREK · INFO\nEntry filled 30 of 100 at the limit.\nFill rate belongs in sizing evidence;\nrepeated decisions on one fixture\nare not independent examples.</pre></div>');
+   },
+   inspect: '<h3>The four categories</h3><p><b>Actual</b>: realised in the book. <b>Observed alternative</b>: priced from captured executable quotes at decision time, never placed. <b>Modelled estimate</b>: fill or price modelled rather than captured. <b>Unresolved</b>: outcome or evidence not established. Only the first is P&L.</p><h3>Independence</h3><p>Audrey counts cohorts by fixture: several reviews of one position are one example, not several.</p><h3>What this does not mean</h3><p>Auditing a decision does not prove the policy profitable or unprofitable.</p>'},
+
+  {a: 'AUDREY', t: 'Management gives Audrey a directive', dur: 11, music: 4, cam: [9, 3, -40], flow: ['MANAGEMENT', 'AUDREY', 'directive'],
+   st: {DEREK: 'IDLE', XAVIER: 'IDLE', AUDREY: 'DECISION_RECORDED'},
+   scene: function () {
+     var h = lead('11 · Direction', 'Management states an objective in plain words. Audrey turns it into a bounded, confirmable directive.');
+     h += '<div class="g2"><div><span class="scripted">SCRIPTED EXCHANGE · NOT THE AUDREY SERVICE</span><div class="chat">'
+       + R(0.08, '<div class="who">MANAGEMENT</div>Prioritize reducing drawdown without increasing capital limits.', 'bubble me')
+       + R(0.24, '<div class="who">AUDREY · SCRIPTED</div>Understood. I’ll record this as a directive: reduce Xavier’s drawdown; capital and risk limits unchanged (no agent can edit them). It becomes active when you confirm it with the operator credential.', 'bubble')
+       + R(0.4, '<div class="who">MANAGEMENT</div>Confirmed.', 'bubble me') + '</div></div>';
+     h += R(0.5, '<pre class="rec"><b>directive</b> D-0417\ntext        Prioritize reducing drawdown without\n            increasing capital limits.\nconstraints capital limits: UNCHANGED\n            risk limits: not agent-editable\nstate       PROPOSED → <b>CONFIRMED</b>\nconfirmed   operator credential · 23:41:07Z</pre>') + '</div>';
+     return h + R(0.7, '<div class="callout" style="margin-top:14px">The live chat is on Audrey’s workspace. Every real answer states its provider mode and disclosure (for example “answered from records; AI provider not configured”) and cites the records it used.</div>');
+   },
+   inspect: '<h3>Scripted here, real elsewhere</h3><p>This exchange is scripted for the rehearsal. The functioning service is <code>POST /api/command/agents/audrey/chat</code>, on the Audrey workspace; this page never calls it in rehearsal.</p><h3>Directives</h3><p>A directive is proposed, then confirmed or cancelled with the OPERATOR credential. Directives cannot change risk limits, credentials, account authority or approval controls.</p>'},
+
+  {a: 'AUDREY', t: 'Audrey creates a development task', dur: 10, music: 4, cam: [4, 3, -10], flow: ['AUDREY', 'XAVIER', 'task T-0418'],
+   st: {DEREK: 'IDLE', XAVIER: 'EVALUATING', AUDREY: 'DECISION_RECORDED'},
+   scene: function () {
+     var h = lead('12 · Task', 'The directive becomes a task with a testable objective, assigned to the agent whose policy it concerns.');
+     h += '<div class="g2">' + R(0.08, '<pre class="rec"><b>agent_tasks</b>\ntask_id      T-0418\nassignee     <b>XAVIER</b>\ncreated_by   AUDREY\ndirective_id D-0417\nkind         POLICY_CANDIDATE\ntitle        Reduce management drawdown\nspec         objective: max drawdown ↓\n             hold: capital limits unchanged\n             evaluate: replay on recorded\n             reviews, grouped by fixture\nstatus       OPEN → IN_PROGRESS</pre>')
+       + '<div class="card"><div class="lbl">agent_task_events · append-only</div><ul class="tl" style="margin-top:10px">'
+       + R(0.24, '<b>CREATED</b> by AUDREY from D-0417', '', 'li') + R(0.36, '<b>ASSIGNED</b> to XAVIER', '', 'li') + R(0.48, '<b>STARTED</b> · status IN_PROGRESS', '', 'li')
+       + R(0.6, '<span class="sub">Events cannot be updated or deleted; the trigger refuses it.</span>', '', 'li') + '</ul></div></div>';
+     return h;
+   },
+   inspect: '<h3>What the real system does</h3><p><code>agent_tasks</code> holds the task and its status; <code>agent_task_events</code> is append-only (a trigger refuses UPDATE and DELETE), so the history of every change is permanent.</p>'},
+
+  {a: 'XAVIER', t: 'A candidate change: branch, tests and replay', dur: 12, music: 4, cam: [1, 4, 0], flow: ['XAVIER', 'AUDREY', 'candidate + replay'],
+   st: {DEREK: 'IDLE', XAVIER: 'EVALUATING', AUDREY: 'IDLE'},
+   scene: function () {
+     var h = lead('13 · Candidate', 'Xavier proposes one parameter change on a branch, with tests and a replay on recorded reviews. Nothing live changes.');
+     h += '<div class="g2"><div>' + R(0.06, '<div class="lbl" style="margin-bottom:6px">branch candidate/xavier-drawdown-guard</div><div class="diff"><div class="c">@@ xavier_policy · management @@</div><div class="m">-  worst_case_floor_usd: -6.00</div><div class="p">+  worst_case_floor_usd: -4.50</div><div class="c">   risk_limits: (untouched)</div><div class="c">   capital_limits: (untouched)</div></div>')
+       + R(0.24, '<div class="card" style="margin-top:12px"><div class="lbl">Tests</div><div class="big pos">214 passed · 0 failed</div><div class="sub">including: risk limits are not agent-editable</div></div>') + '</div>';
+     h += R(0.36, '<div class="tw"><table><thead><tr><th>Replay · 412 reviews · 57 fixtures</th><th class="n">Active</th><th class="n">Candidate</th></tr></thead><tbody>'
+       + '<tr><td>Max drawdown</td><td class="n">' + m(-182.4, true) + '</td><td class="n">' + m(-131.1, true) + '</td></tr>'
+       + '<tr><td>Expected net P&amp;L</td><td class="n">' + m(114.2, true) + '</td><td class="n">' + m(103.0, true) + '</td></tr>'
+       + '<tr><td>P(net profit) per group</td><td class="n">0.41</td><td class="n">0.47</td></tr>'
+       + '<tr><td>Capital limit</td><td class="n">unchanged</td><td class="n">unchanged</td></tr>'
+       + '<tr><td>This position would select</td><td class="n">' + esc(CHOSEN.name) + '</td><td class="n">' + esc(CAND_CHOSEN.name) + '</td></tr>'
+       + '<tr class="ref"><td>Independent examples</td><td class="n" colspan="2">57 fixtures (not 412)</td></tr></tbody></table></div>') + '</div>';
+     return h + R(0.66, '<div class="callout" style="margin-top:14px">A replay re-decides recorded reviews under the candidate policy. It sends no order, and a better replay is not proven profitability.</div>');
+   },
+   inspect: '<h3>What the real system does</h3><p>Improvement tasks that can run in-process (policy and model replay) are advanced by <code>improvement.run_due</code>. A candidate policy version is written as CANDIDATE in <code>agent_policy_versions</code>; it cannot become ACTIVE without evaluation and a separate approval.</p><h3>Replay figures</h3><p>Rehearsal replay figures are illustrative. Real ones come from recorded reviews and are grouped by fixture.</p>'},
+
+  {a: 'AUDREY', t: 'Evaluation, authorised release, canary and rollback', dur: 15, music: 5, cam: [6, 3, -20], flow: ['AUDREY', 'MANAGEMENT', 'approval request'],
+   st: {DEREK: 'IDLE', XAVIER: 'IDLE', AUDREY: 'DECISION_RECORDED'},
+   scene: function () {
+     var gates = [['Max drawdown reduced ≥ 15%', '−28.1%', true], ['Expected net loss ≤ 12%', '−9.8%', true], ['Capital and risk limits unchanged', 'diff touches neither', true], ['Independent fixtures ≥ 50', '57', true], ['Tests pass', '214 / 214', true]];
+     var h = lead('14 · Release', 'The proposer cannot evaluate its own change, and neither agent can approve it. A person releases it to a canary with rollback armed.');
+     h += '<div class="roles">' + R(0.04, '<div class="lbl">Proposer</div><div class="big">XAVIER</div>', 'card') + R(0.1, '<div class="lbl">Evaluator</div><div class="big">AUDREY</div><div class="sub">evaluation harness</div>', 'card') + R(0.16, '<div class="lbl">Approver</div><div class="big">OPERATOR</div><div class="sub">a person, operator credential</div>', 'card') + '</div>';
+     h += '<div class="g2" style="margin-top:14px"><div class="tw"><table><thead><tr><th>Gate</th><th class="n">Result</th><th></th></tr></thead><tbody>' + gates.map(function (g, i) { return '<tr class="rv" data-t="' + (0.22 + i * 0.05).toFixed(2) + '"><td>' + g[0] + '</td><td class="n mono">' + g[1] + '</td><td>' + pill('PASS', 'p-ok') + '</td></tr>'; }).join('') + '</tbody></table></div>';
+     h += R(0.5, '<div class="lbl">If any gate had failed</div><p style="margin:6px 0">The task ends <b>REJECTED</b> with the failing gate named, the candidate stays CANDIDATE → REJECTED, and the active policy is untouched.</p>', 'card') + '</div>';
+     var stages = [['CANDIDATE_READY', 0.56], ['EVALUATING', 0.6], ['APPROVAL_READY', 0.64], ['APPROVED', 0.7], ['CANARY 10% · 14 d', 0.76], ['ROLLBACK ARMED', 0.82]];
+     h += '<div class="pipe">' + stages.map(function (s) { return '<div class="rv" data-t="' + s[1] + '" data-on="1"><b>' + s[0] + '</b></div>'; }).join('') + '</div>';
+     return h + R(0.88, '<div class="callout">Canary: the candidate manages 10% of new position groups for 14 days; rollback is automatic if realised drawdown exceeds the replay’s p90 or any reconciliation breaks. None of this sends an order by itself, and none of it proves profitability.</div>');
+   },
+   inspect: '<h3>Separation</h3><p>Proposer ≠ evaluator ≠ approver. The evaluator runs the gates on replay and tests; approval needs the OPERATOR credential, which no agent holds. Risk limits, credentials, account authority and approval controls are not editable by any agent.</p><h3>Canary and rollback</h3><p>Release to a canary slice with a named rollback trigger; <code>agent_tasks</code> moves APPROVED → RELEASED or ROLLED_BACK, each with an event.</p><h3>What this does not mean</h3><p>An approved candidate is a policy change, not evidence of profit. Profit is only ever the book’s realised P&L.</p>'}
+  ];
+
+  var starts = [], total = 0;
+  CH.forEach(function (c) { starts.push(total); total += c.dur; });
+
+  // ── state ─────────────────────────────────────────────────────────
+  var S = {t: 0, playing: false, idx: -1, mode: 'rehearsal', sound: false, prod: null, prodLoading: false};
+  var AGENTS = ['DEREK', 'XAVIER', 'AUDREY', 'MANAGEMENT'];
+  var nodes = {};
+  [].forEach.call(document.querySelectorAll('.node'), function (n) { nodes[n.getAttribute('data-a')] = n; });
+  var panel = $('panel'), token = $('token'), triad = $('triad');
+
+  function fmtTime(s) { s = Math.max(0, Math.round(s)); return Math.floor(s / 60) + ':' + ('0' + s % 60).slice(-2); }
+  function locate(t) { for (var i = 0; i < CH.length; i++) if (t < starts[i] + CH[i].dur) return {i: i, p: (t - starts[i]) / CH[i].dur}; return {i: CH.length - 1, p: 1}; }
+
+  function frameLabel(i) {
+    if (S.mode === 'production') {
+      var rd = S.prod && S.prod.readLine ? S.prod.readLine : 'records not yet read';
+      return '<div class="framelab prod"><span>PRODUCTION · RECORDED STATE · READ-ONLY · ' + esc(rd) + '</span><span>frame ' + (i + 1) + ' / 14</span></div>';
+    }
+    return '<div class="framelab"><span>' + LABEL + '</span><span>frame ' + (i + 1) + ' / 14</span></div>';
+  }
+  function sceneHtml(i) {
+    if (S.mode === 'production' && window.DemoProd) return window.DemoProd.frame(i, S.prod, CH[i]) + frameLabel(i);
+    return CH[i].scene() + frameLabel(i);
+  }
+  var swapTimer = null;
+  function enter(i) {
+    var c = CH[i], prev = S.idx; S.idx = i;
+    document.body.className = 'a-' + c.a + (S.mode === 'production' ? ' m-prod' : '');
+    $('cnum').textContent = (i < 9 ? '0' : '') + (i + 1) + ' / 14';
+    $('ctitle').textContent = c.t;
+    var st = S.mode === 'production' && window.DemoProd ? window.DemoProd.states(S.prod) : c.st;
+    AGENTS.forEach(function (a) {
+      var n = nodes[a]; if (!n) return;
+      var active = a === c.a || (c.flow && (c.flow[0] === a || c.flow[1] === a));
+      n.classList.toggle('active', a === c.a); n.classList.toggle('dim', !active);
+      if (a !== 'MANAGEMENT') { var s = st[a] || 'NO STATUS RECORDED'; var el = n.querySelector('.st'); el.textContent = s.replace(/_/g, ' '); el.className = 'st s-' + s; }
+    });
+    if (!REDUCE) $('cam').style.transform = 'rotateY(' + c.cam[0] + 'deg) rotateX(' + c.cam[1] + 'deg) translate3d(' + (-c.cam[2]) + 'px,0,0)';
+    drawBeams();
+    var html = sceneHtml(i);
+    if (swapTimer) clearTimeout(swapTimer);
+    if (prev === -1 || REDUCE) { panel.innerHTML = html; panel.scrollTop = 0; update(locate(S.t).p); }
+    else {
+      panel.classList.add('swap');
+      swapTimer = setTimeout(function () { panel.innerHTML = html; panel.scrollTop = 0; update(locate(S.t).p); panel.classList.remove('swap'); }, 260);
+    }
+    $('inspectBody').innerHTML = '<p class="kicker" style="color:var(--acc)">Inspect · ' + (i + 1) + ' / 14</p><h2>' + esc(c.t) + '</h2>' + c.inspect
+      + '<h3>Mode</h3><p>' + (S.mode === 'production' ? 'PRODUCTION: this frame shows the records the service holds now, read from same-origin endpoints. Empty records are shown as empty.' : esc(LABEL) + '. Every price, fill and timestamp in this frame is illustrative.') + '</p>';
+    [].forEach.call(document.querySelectorAll('#chlist button'), function (b, j) { b.classList.toggle('cur', j === i); });
+    BG.setScene(c.a, c.cam[0], c.music);
+    Music.setLevel(c.music);
+  }
+  function update(p) {
+    [].forEach.call(panel.querySelectorAll('[data-t]'), function (el) { el.classList.toggle('on', p >= +el.getAttribute('data-t')); });
+    [].forEach.call(panel.querySelectorAll('.cu'), function (el) {
+      var k = ease(clamp((p - +el.dataset.t0) / Math.max(0.001, +el.dataset.t1 - +el.dataset.t0), 0, 1));
+      el.textContent = el.dataset.pre + (+el.dataset.to * k).toFixed(+el.dataset.dec) + el.dataset.suf;
+    });
+    [].forEach.call(panel.querySelectorAll('.gw,.cuw'), function (el) {
+      var k = ease(clamp((p - +el.dataset.t0) / Math.max(0.001, +el.dataset.t1 - +el.dataset.t0), 0, 1));
+      el.style.width = (+el.dataset.w * k).toFixed(2) + '%';
+    });
+    if (S.playing) follow();
+    var c = CH[S.idx];
+    if (c && c.flow && S.mode !== 'production') {
+      var a = center(c.flow[0]), b = center(c.flow[1]), k = clamp((p - 0.06) / 0.34, 0, 1), e = ease(k);
+      token.textContent = c.flow[2];
+      token.style.left = (a.x + (b.x - a.x) * e) + 'px';
+      token.style.top = (a.y + (b.y - a.y) * e - Math.sin(e * Math.PI) * 26) + 'px';
+      token.style.opacity = (k > 0 && p < 0.55) ? 1 : 0;
+    } else token.style.opacity = 0;
+  }
+  function follow() {
+    var on = panel.querySelectorAll('.rv.on'); if (!on.length) return;
+    var el = on[on.length - 1], pr = panel.getBoundingClientRect(), er = el.getBoundingClientRect();
+    var over = er.bottom - (pr.bottom - 60);
+    if (over > 4) panel.scrollTop += Math.min(over, 14);
+  }
+  function center(a) {
+    var n = nodes[a].querySelector('.core'), r = n.getBoundingClientRect(), t = triad.getBoundingClientRect();
+    return {x: r.left - t.left + r.width / 2, y: r.top - t.top + r.height / 2};
+  }
+  function drawBeams() {
+    var c = CH[S.idx] || {}, pairs = [['DEREK', 'XAVIER'], ['XAVIER', 'AUDREY'], ['AUDREY', 'MANAGEMENT'], ['DEREK', 'AUDREY']];
+    var live = c.flow ? [c.flow[0], c.flow[1]].sort().join() : '';
+    var h = '';
+    pairs.forEach(function (pp) {
+      var a = center(pp[0]), b = center(pp[1]);
+      var arc = pp[0] === 'DEREK' && pp[1] === 'AUDREY';
+      var d = arc ? 'M' + a.x + ' ' + (a.y - 30) + ' Q' + ((a.x + b.x) / 2) + ' ' + (a.y - 52) + ' ' + b.x + ' ' + (b.y - 30) : 'M' + (a.x + 36) + ' ' + a.y + ' L' + (b.x - 36) + ' ' + b.y;
+      h += '<path d="' + d + '"' + (pp.slice().sort().join() === live ? ' class="live"' : '') + '/>';
+    });
+    $('beams').innerHTML = h;
+  }
+
+  // ── transport ─────────────────────────────────────────────────────
+  var last = null;
+  function tick(now) {
+    if (last === null) last = now;
+    var dt = Math.min(0.1, (now - last) / 1000); last = now;
+    if (S.playing) { S.t += dt; if (S.t >= total) { S.t = total - 0.001; setPlaying(false); } }
+    apply();
+    requestAnimationFrame(tick);
+  }
+  function apply() {
+    var L = locate(S.t);
+    if (L.i !== S.idx) enter(L.i);
+    if (!panel.classList.contains('swap')) update(L.p);
+    $('scrub').value = Math.round(S.t / total * 1000);
+    $('time').textContent = fmtTime(S.t) + ' / ' + fmtTime(total);
+    [].forEach.call(document.querySelectorAll('#segs button'), function (b, j) {
+      b.classList.toggle('done', j < L.i);
+      b.querySelector('i').style.width = j === L.i ? (L.p * 100).toFixed(1) + '%' : '';
+    });
+  }
+  function setPlaying(v) {
+    S.playing = v;
+    $('play').innerHTML = v ? '&#10074;&#10074;' : '&#9654;';
+    $('play').setAttribute('aria-label', v ? 'Pause' : 'Play');
+    if (S.sound) { if (v) Music.resume(); else Music.pause(); }
+  }
+  function seek(t) { S.t = clamp(t, 0, total - 0.001); apply(); }
+  function go(i) { seek(starts[clamp(i, 0, CH.length - 1)] + 0.001); }
+  $('play').addEventListener('click', function () { if (S.t >= total - 0.01) seek(0); setPlaying(!S.playing); });
+  $('prev').addEventListener('click', function () { var L = locate(S.t); go(L.p > 0.15 ? L.i : L.i - 1); });
+  $('next').addEventListener('click', function () { go(locate(S.t).i + 1); });
+  var wasPlaying = false;
+  $('scrub').addEventListener('pointerdown', function () { wasPlaying = S.playing; setPlaying(false); });
+  $('scrub').addEventListener('input', function (e) { seek(+e.target.value / 1000 * total); });
+  $('scrub').addEventListener('change', function () { if (wasPlaying) setPlaying(true); });
+  $('segs').innerHTML = CH.map(function (c, i) { return '<button type="button" title="' + (i + 1) + '. ' + esc(c.t) + '" data-go="' + i + '"><i></i></button>'; }).join('');
+  $('chlist').innerHTML = CH.map(function (c, i) { return '<li><button type="button" data-go="' + i + '"><span class="n">' + (i + 1) + '</span><span>' + esc(c.t) + '</span></button></li>'; }).join('');
+  document.addEventListener('click', function (e) {
+    var g = e.target.closest && e.target.closest('[data-go]');
+    if (g) { go(+g.getAttribute('data-go')); if (g.closest('#chdrawer')) toggleDrawer('chdrawer', false); }
+    var cl = e.target.closest && e.target.closest('[data-close]');
+    if (cl) toggleDrawer(cl.getAttribute('data-close'), false);
+  });
+  function toggleDrawer(id, v) {
+    var d = $(id); var open = v === undefined ? !d.classList.contains('open') : v;
+    d.classList.toggle('open', open);
+    if (id === 'inspect') $('inspectBtn').setAttribute('aria-pressed', open ? 'true' : 'false');
+  }
+  $('inspectBtn').addEventListener('click', function () { toggleDrawer('inspect'); });
+  $('chapters').addEventListener('click', function () { toggleDrawer('chdrawer'); });
+  function setSound(v) {
+    S.sound = v;
+    $('soundBtn').setAttribute('aria-pressed', v ? 'true' : 'false');
+    $('soundBtn').innerHTML = v ? '&#9834; Sound on' : '&#9834; Sound off';
+    if (v) { if (!Music.enable()) { S.sound = false; $('soundBtn').textContent = 'Sound unavailable'; return; } Music.setLevel(CH[Math.max(0, S.idx)].music); if (!S.playing) Music.pause(); }
+    else Music.disable();
+  }
+  $('soundBtn').addEventListener('click', function () { setSound(!S.sound); });
+  $('begin').addEventListener('click', function () { $('intro').classList.add('gone'); seek(0); setPlaying(true); });
+  document.addEventListener('keydown', function (e) {
+    if (e.target && /INPUT|TEXTAREA|SELECT/.test(e.target.tagName) && e.target.id !== 'scrub') return;
+    var k = e.key;
+    if (k === ' ' || k === 'k' || k === 'K') { e.preventDefault(); $('intro').classList.add('gone'); if (S.t >= total - 0.01) seek(0); setPlaying(!S.playing); }
+    else if (k === 'ArrowRight') { e.preventDefault(); go(locate(S.t).i + 1); }
+    else if (k === 'ArrowLeft') { e.preventDefault(); var L = locate(S.t); go(L.p > 0.15 ? L.i : L.i - 1); }
+    else if (k === '.') seek(S.t + 2); else if (k === ',') seek(S.t - 2);
+    else if (k === 'Home') go(0); else if (k === 'End') go(CH.length - 1);
+    else if (k === 'i' || k === 'I') toggleDrawer('inspect');
+    else if (k === 'm' || k === 'M') setSound(!S.sound);
+    else if (k === 'c' || k === 'C') toggleDrawer('chdrawer');
+    else if ((k === 'p' || k === 'P') && SERVED && window.DemoProd) setMode(S.mode === 'production' ? 'rehearsal' : 'production');
+    else if (k === 'Escape') { toggleDrawer('inspect', false); toggleDrawer('chdrawer', false); }
+    else if (/^[0-9]$/.test(k)) go(k === '0' ? 9 : +k - 1);
+  });
+  window.addEventListener('pointermove', function (e) {
+    if (REDUCE) return;
+    var px = e.clientX / window.innerWidth - 0.5, py = e.clientY / window.innerHeight - 0.5;
+    $('par').style.transform = 'rotateY(' + (px * 4).toFixed(2) + 'deg) rotateX(' + (-py * 3).toFixed(2) + 'deg)';
+    BG.setPointer(px, py);
+  });
+  window.addEventListener('resize', function () { BG.resize(); drawBeams(); });
+
+  // ── modes ─────────────────────────────────────────────────────────
+  function setMode(mode) {
+    if (!(SERVED && window.DemoProd)) mode = 'rehearsal';
+    S.mode = mode;
+    var b = $('banner');
+    b.className = 'banner' + (mode === 'production' ? ' prod' : '');
+    b.textContent = mode === 'production' ? 'PRODUCTION · RECORDED STATE FROM THIS SERVICE · READ-ONLY · THIS PAGE SENDS NO ORDER' : LABEL;
+    [].forEach.call(document.querySelectorAll('[data-mode]'), function (x) { x.setAttribute('aria-pressed', x.getAttribute('data-mode') === mode ? 'true' : 'false'); });
+    if (mode === 'production' && !S.prod && !S.prodLoading) {
+      S.prodLoading = true;
+      window.DemoProd.load().then(function (d) { S.prod = d; S.prodLoading = false; var i = S.idx; S.idx = -1; if (i >= 0) { S.idx = -1; enter(i); } });
+    }
+    var i = S.idx; if (i >= 0) { S.idx = -1; enter(i); }
+  }
+  [].forEach.call(document.querySelectorAll('[data-mode]'), function (x) { x.addEventListener('click', function () { setMode(x.getAttribute('data-mode')); }); });
+
+  // ── depth field: 2D canvas, perspective projection ────────────────
+  var BG = (function () {
+    var cv = $('bg'), g = cv.getContext('2d'), W = 0, H = 0, parts = [], off = 0;
+    var COL = {DEREK: [242, 165, 65], XAVIER: [63, 208, 224], AUDREY: [169, 140, 255], MANAGEMENT: [134, 162, 255]};
+    var col = COL.DEREK.slice(), tcol = col.slice(), camX = 0, tcamX = 0, energy = 0.2, tenergy = 0.2, px = 0, py = 0, flash = 0, lastT = null;
+    var dark = window.matchMedia && matchMedia('(prefers-color-scheme: dark)').matches;
+    function resize() {
+      var dpr = Math.min(2, window.devicePixelRatio || 1);
+      W = cv.clientWidth; H = cv.clientHeight; cv.width = W * dpr; cv.height = H * dpr; g.setTransform(dpr, 0, 0, dpr, 0, 0);
+      var n = W < 700 ? 90 : 190; parts = [];
+      for (var i = 0; i < n; i++) parts.push({x: Math.random() * 3.2 - 1.6, y: Math.random() * 2 - 1, z: Math.random() * 0.95 + 0.05, s: Math.random() * 1.1 + 0.5});
+      if (REDUCE) draw(0);
+    }
+    function rgba(a) { return 'rgba(' + col[0] + ',' + col[1] + ',' + col[2] + ',' + a.toFixed(3) + ')'; }
+    function draw(dt) {
+      for (var j = 0; j < 3; j++) col[j] += (tcol[j] - col[j]) * Math.min(1, dt * 1.6);
+      camX += (tcamX - camX) * Math.min(1, dt * 1.2); energy += (tenergy - energy) * Math.min(1, dt); flash *= Math.pow(0.2, dt);
+      g.clearRect(0, 0, W, H);
+      var vx = W / 2 - camX * W * 0.012 + px * 24, y0 = H * 0.6 + py * 10;
+      var glow = g.createRadialGradient(vx, H * 0.34, 0, vx, H * 0.34, Math.max(W, H) * 0.6);
+      glow.addColorStop(0, rgba((dark ? 0.16 : 0.12) + flash * 0.22)); glow.addColorStop(1, rgba(0));
+      g.fillStyle = glow; g.fillRect(0, 0, W, H);
+      g.lineWidth = 1;
+      for (var k = -16; k <= 16; k++) { g.strokeStyle = rgba(dark ? 0.07 : 0.1); g.beginPath(); g.moveTo(vx + k * 8, y0); g.lineTo(vx + k * W / 8, H); g.stroke(); }
+      off = (off + dt * (0.12 + energy * 0.5)) % 1;
+      for (var r = 0; r < 20; r++) {
+        var z = (r + off) / 20, y = y0 + (H - y0) * Math.pow(z, 2.3);
+        g.strokeStyle = rgba((dark ? 0.1 : 0.12) * z); g.beginPath(); g.moveTo(0, y); g.lineTo(W, y); g.stroke();
+      }
+      var sp = dt * 0.06 * (0.3 + energy * 1.4);
+      for (var i = 0; i < parts.length; i++) {
+        var p = parts[i];
+        p.z -= sp; if (p.z < 0.04) { p.z = 1; p.x = Math.random() * 3.2 - 1.6; p.y = Math.random() * 2 - 1; }
+        var f = 1 / (p.z * 1.25 + 0.14);
+        var sx = W / 2 + (p.x - camX * 0.02) * W * 0.24 * f + px * 40 * (1 - p.z), sy = H * 0.42 + p.y * H * 0.24 * f + py * 26 * (1 - p.z);
+        if (sx < -10 || sx > W + 10 || sy < -10 || sy > H + 10) continue;
+        g.fillStyle = rgba((1 - p.z) * (dark ? 0.75 : 0.55));
+        g.beginPath(); g.arc(sx, sy, Math.max(0.4, p.s * f * 0.45), 0, 6.283); g.fill();
+      }
+      // streaks along the floor: data moving toward the viewer
+      for (var s = 0; s < 7; s++) {
+        var ph = ((performance.now() / 1000) * (0.18 + energy * 0.25) + s * 0.37) % 1, kk = (s * 5 % 13) - 6;
+        var ax = vx + kk * 8, bx = vx + kk * W / 8, t1 = Math.pow(ph, 2), t2 = Math.pow(Math.min(1, ph + 0.08), 2);
+        g.strokeStyle = rgba(0.45 * (1 - ph)); g.lineWidth = 2; g.beginPath();
+        g.moveTo(ax + (bx - ax) * t1, y0 + (H - y0) * t1); g.lineTo(ax + (bx - ax) * t2, y0 + (H - y0) * t2); g.stroke(); g.lineWidth = 1;
+      }
+    }
+    function loop(now) { if (lastT === null) lastT = now; var dt = Math.min(0.1, (now - lastT) / 1000); lastT = now; draw(dt); requestAnimationFrame(loop); }
+    return {
+      start: function () { resize(); if (!REDUCE) requestAnimationFrame(loop); },
+      resize: resize,
+      setScene: function (a, cx, lvl) { tcol = (COL[a] || COL.DEREK).slice(); tcamX = cx; tenergy = 0.15 + lvl * 0.17; flash = 1; if (REDUCE) { col = tcol.slice(); camX = cx; draw(0); } },
+      setPointer: function (x, y) { px = x; py = y; }
+    };
+  })();
+
+  // ── the score: original, generated live with the Web Audio API ─────
+  // D major, 96 BPM. Chapter levels: 0 sparse pad, 1 pad + bell, 2 pulse +
+  // sub, 3 bass + half-time kick + hats, 4 four-on-the-floor + arp + clap,
+  // 5 riser into a resolving Dmaj9 and a long tail.
+  var Music = (function () {
+    var ctx = null, master, verbIn, delay, bus = {}, level = 0, timer = null, next = 0, step = 0, resolveBar = -1, resolved = false, noise = null, pauseTimer = null;
+    var BPM = 96, SIX = 60 / BPM / 4;
+    var PROG = [[50, 57, 61, 64, 66], [47, 54, 57, 61, 62], [43, 50, 54, 57, 59], [45, 52, 57, 62, 64]];
+    var MIX = {0: {pad: .2}, 1: {pad: .22, bell: .1}, 2: {pad: .2, bell: .09, pulse: .11, sub: .2},
+      3: {pad: .19, bell: .08, pulse: .12, sub: .18, bass: .15, kick: .34, hat: .05},
+      4: {pad: .19, bell: .09, pulse: .11, sub: .18, bass: .17, kick: .4, hat: .06, clap: .09, arp: .06},
+      5: {pad: .26, bell: .14, sub: .2, kick: .3}};
+    function hz(n) { return 440 * Math.pow(2, (n - 69) / 12); }
+    function init() {
+      var AC = window.AudioContext || window.webkitAudioContext; if (!AC) return false;
+      ctx = new AC();
+      master = ctx.createGain(); master.gain.value = 0;
+      var comp = ctx.createDynamicsCompressor(); comp.threshold.value = -18; comp.ratio.value = 3; comp.attack.value = 0.01; comp.release.value = 0.25;
+      master.connect(comp); comp.connect(ctx.destination);
+      var verb = ctx.createConvolver(), len = Math.floor(ctx.sampleRate * 3.2), ir = ctx.createBuffer(2, len, ctx.sampleRate);
+      for (var c = 0; c < 2; c++) { var d = ir.getChannelData(c); for (var i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, 2.7); }
+      verb.buffer = ir; var vg = ctx.createGain(); vg.gain.value = 0.5; verb.connect(vg); vg.connect(master);
+      verbIn = ctx.createGain(); verbIn.connect(verb);
+      delay = ctx.createDelay(1.5); delay.delayTime.value = SIX * 3;
+      var fb = ctx.createGain(); fb.gain.value = 0.32; var dl = ctx.createBiquadFilter(); dl.type = 'lowpass'; dl.frequency.value = 2400;
+      delay.connect(dl); dl.connect(fb); fb.connect(delay); dl.connect(master); dl.connect(verbIn);
+      ['pad', 'bell', 'pulse', 'sub', 'bass', 'kick', 'hat', 'clap', 'arp'].forEach(function (k) { var gn = ctx.createGain(); gn.gain.value = 0; gn.connect(master); bus[k] = gn; });
+      bus.pad.connect(verbIn); bus.bell.connect(verbIn); bus.bell.connect(delay); bus.pulse.connect(delay); bus.arp.connect(delay); bus.arp.connect(verbIn); bus.clap.connect(verbIn);
+      noise = ctx.createBuffer(1, ctx.sampleRate, ctx.sampleRate); var nd = noise.getChannelData(0); for (var j = 0; j < nd.length; j++) nd[j] = Math.random() * 2 - 1;
+      return true;
+    }
+    function mix(l, when) { var mm = MIX[l]; Object.keys(bus).forEach(function (k) { bus[k].gain.setTargetAtTime(mm[k] || 0, when || ctx.currentTime, 0.8); }); }
+    function env(gn, t, a, peak, hold, rel) { gn.gain.setValueAtTime(0.0001, t); gn.gain.exponentialRampToValueAtTime(peak, t + a); gn.gain.setValueAtTime(peak, t + a + hold); gn.gain.exponentialRampToValueAtTime(0.0001, t + a + hold + rel); }
+    function osc(type, f, t, stop, dest, det) { var o = ctx.createOscillator(); o.type = type; o.frequency.value = f; if (det) o.detune.value = det; o.connect(dest); o.start(t); o.stop(stop); return o; }
+    function pad(notes, t, len, bright) {
+      var f = ctx.createBiquadFilter(); f.type = 'lowpass'; f.Q.value = 0.6; f.frequency.setValueAtTime(bright * 0.55, t); f.frequency.linearRampToValueAtTime(bright, t + len * 0.6);
+      var gn = ctx.createGain(); f.connect(gn); gn.connect(bus.pad); env(gn, t, 1.2, 0.16, Math.max(0.1, len - 1.2), 2.2);
+      notes.forEach(function (n) { osc('sawtooth', hz(n), t, t + len + 2.6, f, -7); osc('sawtooth', hz(n), t, t + len + 2.6, f, 7); });
+    }
+    function pluck(n, t, v, b, type) {
+      var f = ctx.createBiquadFilter(); f.type = 'lowpass'; f.frequency.setValueAtTime(4200, t); f.frequency.exponentialRampToValueAtTime(650, t + 0.25);
+      var gn = ctx.createGain(); f.connect(gn); gn.connect(bus[b]); env(gn, t, 0.004, v, 0.02, 0.36); osc(type || 'triangle', hz(n), t, t + 0.5, f);
+    }
+    function bell(n, t, v) { var gn = ctx.createGain(); gn.connect(bus.bell); env(gn, t, 0.005, v, 0.05, 2.6); osc('sine', hz(n), t, t + 3, gn); var g2 = ctx.createGain(); g2.gain.value = 0.25; g2.connect(gn); osc('sine', hz(n) * 2.76, t, t + 1.2, g2); }
+    function sub(n, t, len) { var gn = ctx.createGain(); gn.connect(bus.sub); env(gn, t, 0.06, 0.5, Math.max(0.05, len - 0.4), 0.4); osc('sine', hz(n - 12), t, t + len + 0.6, gn); }
+    function bass(n, t, v) { var f = ctx.createBiquadFilter(); f.type = 'lowpass'; f.frequency.value = 420; var gn = ctx.createGain(); f.connect(gn); gn.connect(bus.bass); env(gn, t, 0.005, v, 0.08, 0.2); osc('sawtooth', hz(n - 12), t, t + 0.4, f); }
+    function kick(t, v) { var o = ctx.createOscillator(), gn = ctx.createGain(); o.frequency.setValueAtTime(140, t); o.frequency.exponentialRampToValueAtTime(42, t + 0.28); o.connect(gn); gn.connect(bus.kick); env(gn, t, 0.002, v, 0.02, 0.32); o.start(t); o.stop(t + 0.4); }
+    function nz(t, v, b, type, fq, dur) { var s = ctx.createBufferSource(); s.buffer = noise; var f = ctx.createBiquadFilter(); f.type = type; f.frequency.value = fq; var gn = ctx.createGain(); s.connect(f); f.connect(gn); gn.connect(bus[b]); env(gn, t, 0.001, v, 0.005, dur); s.start(t); s.stop(t + dur + 0.05); }
+    function riser(t, len) { var s = ctx.createBufferSource(); s.buffer = noise; s.loop = true; var f = ctx.createBiquadFilter(); f.type = 'bandpass'; f.Q.value = 2; f.frequency.setValueAtTime(300, t); f.frequency.exponentialRampToValueAtTime(6000, t + len); var gn = ctx.createGain(); gn.gain.setValueAtTime(0.0001, t); gn.gain.exponentialRampToValueAtTime(0.12, t + len); gn.gain.exponentialRampToValueAtTime(0.0001, t + len + 0.08); s.connect(f); f.connect(gn); gn.connect(verbIn); gn.connect(master); s.start(t); s.stop(t + len + 0.1); }
+    function resolve(t) {
+      mix(5, t);
+      pad(PROG[0].concat([74]), t, 7, 2800); kick(t, 1); sub(PROG[0][0], t, 4);
+      [78, 76, 74, 69].forEach(function (n, i) { bell(n, t + i * SIX * 4, 0.5); });
+      resolved = true;
+    }
+    function play(st, t) {
+      var bar = Math.floor(st / 16), s = st % 16, ch = PROG[bar % 4];
+      if (resolved) { if (s === 0 && bar > resolveBar && bar <= resolveBar + 6 && (bar - resolveBar) % 2 === 0) pad(PROG[0], t, SIX * 32, 900); return; }
+      if (level === 5 && bar === resolveBar && s === 0) { resolve(t); return; }
+      if (level === 5 && bar === resolveBar - 1 && s === 0) riser(t, SIX * 16);
+      var L = level === 5 ? 4 : level;
+      if (s === 0) { if (L > 0 || bar % 2 === 0) pad(ch, t, SIX * 16 * (L === 0 ? 2 : 1) + 0.2, 700 + L * 450); if (L >= 1) bell(ch[ch.length - 1] + 12, t, 0.45); if (L >= 2) sub(ch[0], t, SIX * 16); }
+      if (L >= 3 && s === 8) bell(ch[2] + 12, t, 0.3);
+      if (L >= 2 && s % 2 === 0) pluck(ch[(s / 2) % ch.length] + 12, t, s % 8 === 0 ? 0.5 : 0.3, 'pulse');
+      if (L >= 3 && (s === 0 || s === 6 || s === 12 || (L >= 4 && s === 10))) bass(s === 10 ? ch[0] + 7 : ch[0], t, 0.6);
+      if ((L === 3 && (s === 0 || s === 8)) || (L >= 4 && s % 4 === 0)) kick(t, 0.9);
+      if (L >= 3 && s % 4 === 2) nz(t, 0.5, 'hat', 'highpass', 7200, 0.05);
+      if (L >= 4 && s % 2 === 1) nz(t, 0.16, 'hat', 'highpass', 8000, 0.03);
+      if (L >= 4 && (s === 4 || s === 12)) { nz(t, 0.6, 'clap', 'bandpass', 1500, 0.12); nz(t + 0.012, 0.4, 'clap', 'bandpass', 1500, 0.16); }
+      if (L >= 4) { var arp = ch.concat(ch.map(function (x) { return x + 12; })); pluck(arp[s % arp.length], t, 0.22, 'arp', 'square'); }
+    }
+    function schedule() { while (next < ctx.currentTime + 0.14) { play(step, next); next += SIX; step++; } }
+    return {
+      enable: function () {
+        if (!ctx && !init()) return false;
+        if (pauseTimer) { clearTimeout(pauseTimer); pauseTimer = null; }
+        ctx.resume();
+        master.gain.cancelScheduledValues(ctx.currentTime); master.gain.setTargetAtTime(0.8, ctx.currentTime, 0.4);
+        if (!timer) { next = ctx.currentTime + 0.1; timer = setInterval(schedule, 25); }
+        mix(level === 5 && !resolved ? 4 : level);
+        return true;
+      },
+      disable: function () {
+        if (!ctx) return;
+        master.gain.setTargetAtTime(0, ctx.currentTime, 0.15);
+        if (pauseTimer) clearTimeout(pauseTimer);
+        pauseTimer = setTimeout(function () { if (timer) { clearInterval(timer); timer = null; } ctx.suspend(); pauseTimer = null; }, 700);
+      },
+      pause: function () { this.disable(); },
+      resume: function () { this.enable(); },
+      setLevel: function (l) {
+        if (l === level && !(l === 5 && resolveBar < 0)) return;
+        if (l < 5) { resolved = false; resolveBar = -1; }
+        level = l;
+        if (!ctx) return;
+        if (l === 5) { var bar = Math.floor(step / 16); resolveBar = bar + ((step % 16) > 10 ? 2 : 1); resolved = false; mix(4); }
+        else mix(l);
+      }
+    };
+  })();
+
+  // ── boot ──────────────────────────────────────────────────────────
+  BG.start();
+  var qmode = /[?&]mode=production\b/.test(location.search) ? 'production' : 'rehearsal';
+  setMode(qmode);
+  enter(0);
+  requestAnimationFrame(tick);
+  if (mq.addEventListener) mq.addEventListener('change', function (e) { REDUCE = e.matches; });
+})();
+</script></body></html>
