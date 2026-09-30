@@ -305,7 +305,19 @@ async def claim_dispatch(conn, *, xavier_decision_id: str, plan_digest: str,
             client_order_id, json.dumps(evidence or {}, default=str),
             float(at if at is not None else time.time()))
     except asyncpg.exceptions.UniqueViolationError:
-        return dict(out, ok=True, refusal=R_PLAN_ALREADY_CLAIMED)
+        # WHICH CLAIM EXISTS, not which index happened to be checked first:
+        # racing claims of the SAME decision can trip the per-plan index
+        # before the per-decision one, and that is a replay of this decision,
+        # not another decision holding the plan.
+        try:
+            mine = await conn.fetchval(
+                "SELECT 1 FROM bettor_xavier_execution_events WHERE "
+                " xavier_decision_id=$1 AND event_kind='DISPATCH_CLAIMED'",
+                xavier_decision_id)
+        except Exception:                                       # noqa: BLE001
+            mine = None
+        return dict(out, ok=True, refusal=(R_ALREADY_CLAIMED if mine
+                                           else R_PLAN_ALREADY_CLAIMED))
     except asyncpg.exceptions.RaiseError as exc:
         return dict(out, ok=False, refusal=R_NOT_THE_WINNING_PLAN,
                     detail=str(exc)[:300])
