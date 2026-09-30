@@ -275,3 +275,10 @@ tests/test_xavier_search_completeness_and_policy_through_the_cycle.py
 # the three workspaces and the index drawn from the real endpoint JSON by the
 # page's own render code; each page path answered by agent_pages first
 tests/test_agent_workspaces_show_runtime_records.py
+# Derek -> Xavier -> Audrey as ONE trace through the real cycle (REHEARSAL venue):
+# Derek's gate ENTERs and the intent names his decision; a partial fill hands
+# over only confirmed quantity, the rest updates the same owner row; Xavier
+# HOLDs then EXITs through the venue; a restart with replayed fill reports
+# duplicates nothing; Audrey's report and every workspace endpoint return the
+# same ids and ledger amounts; status rows written by the runtime
+tests/test_three_agents_form_one_linked_trace.py
