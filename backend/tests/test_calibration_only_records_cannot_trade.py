@@ -446,6 +446,22 @@ READERS = {
     # (tests/test_derek_research_observations_break_the_deadlock.py).
     "agents/derek_research.py": (
         "RESEARCH_ONLY_READS_BOTH_PURPOSES_NEVER_SELECTS_A_CANDIDATE", 4),
+    # (171/172) PAPER TRADING on the fictional $500,000 account. Derek's paper
+    # decisions read BOTH purposes deliberately: in production every
+    # valuation is CALIBRATION_ONLY (P5), and the owner's paper authorization
+    # is to evaluate live markets anyway with that gap recorded on every
+    # decision (QUOTE_TIMING_UNCERTAINTY_P5). What they select can only become
+    # a SIMULATED paper order in paper_* tables: the funded executor refuses
+    # any paper id or record first and no funded table is written
+    # (tests/test_paper_records_cannot_reach_the_funded_path.py). The paper
+    # runtime reads one row by the id the cycle just wrote; paper Xavier reads
+    # the latest Pinnacle reading for a held paper contract and the venue's
+    # joined settlement evidence to settle paper positions.
+    "agents/paper_derek.py": (
+        "PAPER_ONLY_READS_BOTH_PURPOSES_SIMULATED_ORDERS_NEVER_FUNDED", 3),
+    "agents/paper_runtime.py": ("PAPER_ONLY_BY_ID_OF_THE_ROW_JUST_WRITTEN", 1),
+    "agents/paper_xavier.py": (
+        "PAPER_ONLY_MEASURE_AND_SETTLEMENT_EVIDENCE_READS", 6),
 }
 
 

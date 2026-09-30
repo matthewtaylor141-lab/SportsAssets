@@ -103,6 +103,14 @@ async def purge_research_models(conn) -> None:
                        FM.KEY_ENTRY_PAYOUT)
 
 
+async def cleanup_seed(conn) -> None:
+    """Undo what `train_model`'s Derek-harness seed wrote (its catalogue,
+    fixture rows and the CONTROLLED_INTEGRATION_TEST source-calibration
+    measurement), so later proofs in a shared database start clean."""
+    from tests import test_derek_enters_on_conservative_agreement as DT
+    await DT._cleanup(conn)
+
+
 async def train_model(conn, monkeypatch, *, model_id: str) -> None:
     """The real research-model fit and registration (a CANDIDATE), through
     the existing proof's helpers."""
