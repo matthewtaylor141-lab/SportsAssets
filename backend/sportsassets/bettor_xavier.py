@@ -2793,11 +2793,18 @@ class ReviewContext:
         reasoning["shadow_comparison"] = (dec or {}).get("shadow_comparison")
         reasoning["search_policy_gate"] = (dec or {}).get(
             "search_policy_gate")
-        _sc = dict(_xl.get("search_completeness") or {})
+        # THE SUPPLIER'S SEARCH ACCOUNT, AS THE GATE USED IT: decision
+        # evidence persisted apart from the ladder view above, so a fault in
+        # presentation cannot change or erase it. Absent -> UNKNOWN.
+        from . import bettor_hedge_search as _HS
+        _sa = dict((step or {}).get("search_completeness") or {}) or \
+            _HS.unknown("NOT_SUPPLIED_TO_THE_REVIEW")
+        reasoning["search_account"] = _sa
         reasoning["selection_scope"] = (
             "%s selected; HOLD / EXIT / REDUCE compared as priced; indirect "
             "pairs: %s" % (chosen or action or "NOTHING",
-                           _sc.get("comparison_scope") or "NOT_ESTABLISHED"))
+                           _sa.get("comparison_scope")
+                           or "COMPLETENESS_UNKNOWN"))
         scope = dict(step.get("filled_scope") or {})
         exposure = {"held_qty": qty, "filled_qty": scope.get("intent_filled"),
                     "matched_units": scope.get("matched_units"),

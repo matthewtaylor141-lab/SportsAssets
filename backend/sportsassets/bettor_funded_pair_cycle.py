@@ -853,7 +853,7 @@ async def decide_and_record(conn, *, decision_id: str, account_id: str,
     EXPECTED_NET_VALUE -> `FD.decide` unchanged; CAPITAL_PRESERVATION_V1 ->
     `xavier_policy.decide`. `shadow_policy` is the other one, run on the SAME
     frozen inputs and recorded as `shadow_comparison` -- displayed, never
-    dispatched. `search_account` (`xavier_ladder.search_account`) is how the
+    dispatched. `search_account` (`bettor_hedge_search.search_account`) is how the
     hedge search ended; a policy that requires a complete comparison
     withholds every acquisition from an incomplete one BEFORE the choice.
 
@@ -3528,12 +3528,11 @@ async def pass_once(conn, *, account_id: str, venue: str,
         # (the supplier's own budget report, carried on the pair inputs):
         # "best among examined (N of M; K unexamined: reason)" whenever the
         # search did not examine every sibling.
-        try:
-            from .agents import xavier_ladder as _XL
-            _search = _XL.search_account(facts)
-        except Exception as exc:                               # noqa: BLE001
-            _search = {"complete": None, "stop_reason": "UNREADABLE",
-                       "error": type(exc).__name__}
+        # The account is the SUPPLIER's evidence (bettor_hedge_search), not
+        # the ladder view's; if it cannot be computed it is UNKNOWN, which a
+        # policy requiring a complete comparison never treats as complete.
+        from . import bettor_hedge_search as _HS
+        _search = _HS.account_or_unknown(facts)
         step["search_completeness"] = _search
         best = ranking.get("best_admitted")
         if grp is not None and best is not None:

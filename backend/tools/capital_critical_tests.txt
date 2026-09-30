@@ -275,3 +275,7 @@ tests/test_xavier_search_completeness_and_policy_through_the_cycle.py
 # the three workspaces and the index drawn from the real endpoint JSON by the
 # page's own render code; each page path answered by agent_pages first
 tests/test_agent_workspaces_show_runtime_records.py
+# the hedge search's completeness is the supplier's evidence (bettor_hedge_search),
+# persisted apart from the ladder view; a broken ladder keeps it, an
+# uncomputable account is UNKNOWN and a complete-comparison policy buys nothing
+tests/test_hedge_search_evidence_survives_a_presentation_failure.py

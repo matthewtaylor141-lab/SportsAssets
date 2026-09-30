@@ -339,15 +339,23 @@ def search_completeness(decision: dict) -> dict:
     reasoning = _obj(decision.get("reasoning")) or {}
     ladder = reasoning.get("xavier_ladder") if isinstance(
         reasoning, dict) else None
-    sc = (ladder or {}).get("search_completeness") if isinstance(
+    view = (ladder or {}).get("search_completeness") if isinstance(
         ladder, dict) else None
+    # THE SUPPLIER'S ACCOUNT the decision was gated on is the evidence; the
+    # ladder view only adds display fields and never overrides it.
+    acct = reasoning.get("search_account") if isinstance(
+        reasoning, dict) else None
+    sc = None
+    if isinstance(view, dict) or isinstance(acct, dict):
+        sc = dict(view or {})
+        sc.update({k: v for k, v in (acct or {}).items()})
     if not isinstance(sc, dict):
         return {"status": SC_NOT_RECORDED, "supports": SUPPORTS_UNKNOWN,
                 "limited": True,
                 "why": ("the decision does not record how complete its "
                         "search was; it is never assumed complete")}
-    ended, _ = _first(sc, ("ended", "search_ended", "end_reason",
-                           "ended_because", "reason"))
+    ended, _ = _first(sc, ("stop_reason", "ended", "search_ended",
+                           "end_reason", "ended_because", "reason"))
     ended = str(ended).upper() if ended is not None else None
     excl = sc.get("excluded") if sc.get("excluded") is not None else \
         sc.get("contracts_excluded")
@@ -363,7 +371,7 @@ def search_completeness(decision: dict) -> dict:
         "left_unexamined": _count_of(_first(sc, (
             "left_unexamined", "unexamined", "contracts_left_unexamined"))[
                 0])}
-    if ended == SC_COMPLETE:
+    if ended == SC_COMPLETE and sc.get("complete") is not False:
         return dict(out, status=SC_COMPLETE, limited=False,
                     supports=SUPPORTS_BEST_AVAILABLE)
     return dict(out, status="INCOMPLETE:%s" % (ended or "END_NOT_STATED"),

@@ -298,8 +298,11 @@ async def workspace(conn, *, now: float | None = None) -> dict:
         return _f
 
     def _search(d):
-        sc = dict(((d.get("reasoning") or {}).get("xavier_ladder") or {})
+        rs = d.get("reasoning") or {}
+        sc = dict((rs.get("xavier_ladder") or {})
                   .get("search_completeness") or {})
+        # the supplier's account (decision evidence) wins over the view
+        sc.update(dict(rs.get("search_account") or {}))
         if not sc:
             return None
         return {k: sc.get(k) for k in (
