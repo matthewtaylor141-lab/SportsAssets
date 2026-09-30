@@ -536,6 +536,20 @@ def estimate(*, ladder, fair_value, fee_fn, observation_age_s=None,
         "worst_case_cost_per_contract": round(limit, 6),
         "worst_case_cost_is": (
             "THE_SUBMITTED_LIMIT_NOTHING_FILLS_ABOVE_IT"),
+        # ── THE LIMIT AN ORDER FOR EXACTLY THIS WALK CARRIES ─────────
+        #
+        # The WORST level the walk counted, in cost space. The funded
+        # connector sends THIS (converted to the wire for the side), not
+        # the break-even: an order bounded at the worst counted level
+        # reaches every level the size was counted on and nothing the walk
+        # did not count, and -- the ladder being restricted to the
+        # executable grid before the walk -- it is a price the adapter can
+        # send unchanged. `worst_case_cost_per_contract` stays the
+        # break-even: the reservation is measured on the wider bound.
+        "executable_limit_price": (
+            (walk.get("levels_taken") or [{}])[-1].get("price")),
+        "executable_limit_is": (
+            "THE_WORST_COUNTED_LEVEL_IN_COST_SPACE"),
         "economics_use": "acquisition_cost_per_contract",
         "reservation_uses": "worst_case_cost_per_contract",
         "best_acquisition_price": best,

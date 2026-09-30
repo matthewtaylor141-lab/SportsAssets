@@ -2711,6 +2711,9 @@ class ReviewContext:
                 "region_probabilities_came_from"),
             "capital": f.get("capital"),
             "hedge_supply_unavailable": f.get("unavailable"),
+            # WHAT THE EXECUTABLE GRID EXCLUDED before any alternative was
+            # valued: the exit ladder's and every quoted hedge candidate's.
+            "executable_grid": f.get("executable_grid"),
             "responsibility_read_ok": bool(self.resp.get("ok")),
             "chosen_plan": chosen_plan}
         dec_id = f.get("decision_id") if (dec or {}).get("ok") else None

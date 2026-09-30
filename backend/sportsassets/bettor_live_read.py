@@ -642,6 +642,13 @@ def read_rules_text(client, market_slug: str) -> dict:
         return out
     m = markets[0]
     out["keys_seen"] = sorted(k for k in m if isinstance(k, str))
+    # THE MARKET'S OWN TICK, from the SAME listing row and recorded whatever
+    # happens to the prose below: which prices an order for this market can
+    # carry is a fact about the market, not about its rules text, and
+    # `bettor_book_snapshot.executable_grid` refuses by name without it.
+    tf, tv = _first(m, TICK_SIZE_FIELDS)
+    out["tick_size"] = str(tv) if tv is not None else None
+    out["tick_field"] = tf
     out["market_type"] = (str(m.get("marketType"))
                           if m.get("marketType") is not None else None)
     out["sports_market_type"] = (
@@ -655,6 +662,36 @@ def read_rules_text(client, market_slug: str) -> dict:
         out["error"] = R_RULES_NOT_PUBLISHED
         return out
     out.update(ok=True, rules_field=field, rules_text=str(value).strip())
+    return out
+
+
+def read_market_tick(client, market_slug: str) -> dict:
+    """THE MARKET'S OWN `orderPriceMinTickSize`, read off its listing row.
+
+    The uncached form, for a caller that holds a client and no cache (the
+    scheduled loop hands `bettor_funded_management` its hourly-cached reader
+    instead, so this costs no extra request there). Never raises: an unread
+    tick is `tick_size: None` with the error named, and the grid then refuses.
+    """
+    from . import pmus
+
+    out = {"reader": READER_VERSION, "slug": market_slug, "tick_size": None,
+           "tick_field": None, "error": None,
+           "source": "pmus:/markets?slug=<slug>:orderPriceMinTickSize"}
+    try:
+        resp = _markets(client, pmus).list({"slug": [market_slug]})
+        markets = list((resp or {}).get("markets") or [])
+    except Exception as exc:  # noqa: BLE001
+        out["error"] = type(exc).__name__
+        return out
+    if not markets:
+        out["error"] = R_RULES_NOT_LISTED
+        return out
+    tf, tv = _first(markets[0], TICK_SIZE_FIELDS)
+    out["tick_size"] = str(tv) if tv is not None else None
+    out["tick_field"] = tf
+    if tv is None:
+        out["error"] = "TICK_SIZE_NOT_ON_THE_LISTING_ROW"
     return out
 
 
