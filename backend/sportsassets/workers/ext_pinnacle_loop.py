@@ -5520,6 +5520,19 @@ async def _funded_service(conn, *, now):
     venue = str(bound.get("venue") or "").strip()
     if not account_id or not venue:
         return None
+    # ── BOUNDED RENEWAL OF THE 24-HOUR SYSTEM AUTHORIZATION ──────────
+    #
+    # FIRST, so a later step that raises cannot skip it. It renews only in the
+    # record's last RENEW_WINDOW_S, only under an unrevoked, uninvalidated,
+    # unexpired owner authorization for the same account, venue and limit
+    # digest, only if a full re-run of `authorize` passes, and never past the
+    # owner's expiry. Anything else leaves the record to expire, named. It
+    # sends nothing and grants nothing the owner has not.
+    try:
+        renewal = await _FA.renew_system_authorization(conn, now=now)
+    except Exception as exc:                                   # noqa: BLE001
+        renewal = {"renewed": False, "reason": "RENEWAL_RAISED",
+                   "error": "%s: %s" % (type(exc).__name__, str(exc)[:200])}
     ev = book_currency_evidence()
     # ── ONE MANAGEMENT DECISION, AND `manage` NO LONGER ACTS ALONE ───
     #
@@ -5548,7 +5561,9 @@ async def _funded_service(conn, *, now):
     except Exception as exc:                                   # noqa: BLE001
         # SERVICING THAT RAISED IS NOT SERVICING THAT FOUND NOTHING.
         return {"ok": False, "refusal": "FUNDED_SERVICING_RAISED",
-                "error": "%s: %s" % (type(exc).__name__, str(exc)[:200])}
+                "error": "%s: %s" % (type(exc).__name__, str(exc)[:200]),
+                "authorization_renewal": renewal}
+    got["authorization_renewal"] = renewal
     # ── AND THE PAIR PASS, WHOSE FIRST STEP IS RESERVATION RECOVERY ──
     #
     # WHY IT RUNS ON EVERY CYCLE THAT REACHES HERE, held position or not: its
@@ -8110,9 +8125,17 @@ def _servicing_digest(svc) -> dict | None:
                   "position_after": x.get("position_after")}
                  for x in (svc.get("exits") or [])[:SERVICING_DIGEST_LIMIT]]
         rec = svc.get("recovered") or {}
+        ren = svc.get("authorization_renewal") or {}
         return {
             "ok": svc.get("ok"),
             "refusal": svc.get("refusal"),
+            # THE RENEWAL ATTEMPT, every cycle: renewed or the named reason,
+            # and the expiry it leaves in force.
+            "authorization_renewal": ({
+                k: ren.get(k) for k in (
+                    "renewed", "reason", "refusal", "expires_at",
+                    "previous_expires_at", "owner_expires_at", "error")}
+                if ren else None),
             "positions_serviced": len(svc.get("selection") or []),
             "decisions": rows,
             "decisions_truncated_at": (
