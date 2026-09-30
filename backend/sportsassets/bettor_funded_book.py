@@ -616,8 +616,12 @@ def settlement_cash(qty: float, long_price: float, intent: str) -> float:
                          "is positive; got %r on %r" % (px, q))
     if px > 0:
         return cash_for(q, px, intent)
-    from .live_executor import cost_per_share
-    return round(q * cost_per_share(0.0, intent), 2)
+    # AT ZERO, THROUGH THE SAME FUNCTION, WITHOUT A NEW COUPLING. The side-aware
+    # rate is px on a long and 1 - px on a short, so the payout at 0 is
+    # q - (the same contract's cash at 1): q on a short, 0 on a long. This keeps
+    # the funded book's reach into `live_executor` to `fill_cash` alone (see
+    # test_which_failures_can_reach_money).
+    return round(q - cash_for(q, 1.0, intent), 2)
 
 
 def fee_for(qty: float, price: float, *, at=None) -> tuple[float, str]:
