@@ -119,6 +119,105 @@ FRAMES_DEFAULT = 0
 FRAMES_MAX = 200
 
 
+#: ── THE BOUNDED RECONNECT POLICY ─────────────────────────────────────
+#:
+#: WHY A BOUND AT ALL. The historic loop retries forever: a key the venue has
+#: stopped honouring, an entitlement it never granted, or a venue outage all
+#: produce a connection attempt every 30 s for the life of the process. That
+#: is a retry storm against a regulated venue with nothing learning from it,
+#: and it hides the one fact an operator needs -- that the venue said no.
+#:
+#: WHAT IS BOUNDED, AND HOW.
+#:   max_consecutive_failures   connection attempts that DELIVERED NOTHING, in
+#:                              a row. A handshake that succeeds and is then
+#:                              closed without one frame counts as a failure --
+#:                              otherwise a venue that accepts and immediately
+#:                              drops would reset the count forever. Exhausting
+#:                              it ends the loop with `gave_up` set.
+#:   base_s / cap_s             exponential backoff between attempts, doubling
+#:                              from base to cap. Reset to base only by a
+#:                              connection that delivered a frame.
+#:   stop_on_venue_refusal      an HTTP 401/403 at the handshake is the venue
+#:                              refusing THIS KEY. Retrying it cannot succeed
+#:                              and is exactly the storm above, so the loop
+#:                              stops at once with `venue_refusal` set.
+#:   silence_reconnect_s        an open socket with no market-data frame and no
+#:                              heartbeat for this long is treated as dead and
+#:                              reconnected. The SDK's `websockets` connection
+#:                              already pings (its default keepalive), so this
+#:                              is the backstop for the one case pings cannot
+#:                              see: the SDK's message loop ending on a
+#:                              non-close exception, which emits 'error' and
+#:                              never 'close', leaving `open_flag` true on a
+#:                              socket nobody reads.
+RECONNECT_POLICY_DEFAULTS = {
+    "max_consecutive_failures": 8,
+    "base_s": 1.0,
+    "cap_s": 60.0,
+    "stop_on_venue_refusal": True,
+    "silence_reconnect_s": 90.0,
+}
+#: The handshake statuses that are the venue refusing the key, not a fault.
+VENUE_REFUSAL_STATUSES = (401, 403)
+
+# Connection-lost reasons the policy loop names (the historic loop names none).
+LOST_SOCKET_NOT_CONNECTED = "SOCKET_NOT_CONNECTED"
+LOST_MESSAGE_LOOP_ENDED = "SDK_MESSAGE_LOOP_ENDED"
+LOST_SILENCE_WATCHDOG = "SILENCE_WATCHDOG"
+LOST_CLOSED_BY_PEER = "CLOSED_BY_PEER"
+LOST_EXCEPTION = "EXCEPTION"
+LOST_STOP_REQUESTED = "STOP_REQUESTED"
+
+
+def _normalise_policy(policy):
+    """None stays None (the historic loop). Anything else is completed from
+    the defaults and CLAMPED, so a policy cannot be made unbounded by
+    passing zero or a negative -- the one mistake a bound must survive."""
+    if policy is None:
+        return None
+    p = dict(RECONNECT_POLICY_DEFAULTS)
+    for k in p:
+        if isinstance(policy, dict) and k in policy and policy[k] is not None:
+            p[k] = policy[k]
+    try:
+        p["max_consecutive_failures"] = max(1, int(p["max_consecutive_failures"]))
+    except (TypeError, ValueError):
+        p["max_consecutive_failures"] = RECONNECT_POLICY_DEFAULTS[
+            "max_consecutive_failures"]
+    for k in ("base_s", "cap_s"):
+        try:
+            p[k] = max(0.0, float(p[k]))
+        except (TypeError, ValueError):
+            p[k] = RECONNECT_POLICY_DEFAULTS[k]
+    p["cap_s"] = max(p["cap_s"], p["base_s"])
+    try:
+        s = p["silence_reconnect_s"]
+        p["silence_reconnect_s"] = None if s in (None, False) else max(
+            1.0, float(s))
+    except (TypeError, ValueError):
+        p["silence_reconnect_s"] = RECONNECT_POLICY_DEFAULTS[
+            "silence_reconnect_s"]
+    p["stop_on_venue_refusal"] = bool(p["stop_on_venue_refusal"])
+    return p
+
+
+def _handshake_status(exc):
+    """The HTTP status a refused websocket handshake carried, or None.
+
+    `websockets` >= 13 raises `InvalidStatus` with `.response.status_code`;
+    the legacy `InvalidStatusCode` carried `.status_code`. Read by attribute so
+    neither class has to be importable, and never from the message text.
+    """
+    resp = getattr(exc, "response", None)
+    code = getattr(resp, "status_code", None)
+    if code is None:
+        code = getattr(exc, "status_code", None)
+    try:
+        return int(code) if code is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
 def _tell_currency(event: str, *, slug: str = None) -> None:
     """Feed `bettor_stream_currency` from the PRODUCTION stream.
 
@@ -172,10 +271,51 @@ class MarketStream:
     evidence_class = "PROSPECTIVE_SHADOW"
 
     def __init__(self, key_id: str, secret_key: str, *,
-                 on_book=None, on_trade=None, autostart: bool = False) -> None:
+                 on_book=None, on_trade=None, autostart: bool = False,
+                 ws_factory=None, reconnect_policy=None,
+                 with_trades: bool = True) -> None:
         self._key_id = key_id
         self._secret_key = secret_key
         self._lock = threading.Lock()
+        # ── THREE ADDITIVE SEAMS, ALL DEFAULTING TO WHAT RAN BEFORE ──────
+        #
+        # `ws_factory` is the TRANSPORT. None means the SDK's
+        # `MarketsWebSocket`, imported inside `_main` exactly as before; a
+        # test passes a fake that speaks the same five calls (`on`,
+        # `connect`, `subscribe_market_data`, `subscribe_trades`, `close`),
+        # which is the only way to exercise the lifecycle in a container
+        # that cannot reach the venue.
+        #
+        # `reconnect_policy` is the BOUND. None keeps the historic loop
+        # byte for byte (1 s doubling to 30 s, forever, a handshake refusal
+        # retried like any other failure) so the callers that existed
+        # before -- the protected live loop and the incentive observer --
+        # see no change. A policy makes the loop FINITE: see
+        # `_normalise_policy` for what it bounds and why.
+        #
+        # `with_trades` exists because the decision process's subscription
+        # needs the BOOK and nothing else. A trade subscription it does not
+        # read would double the subscribe messages, and an error on the
+        # trade request would be attributed to the book slugs through the
+        # shared `_req_slugs` map -- a refusal of something we never needed
+        # read as a refusal of the book.
+        self._ws_factory = ws_factory
+        self._policy = _normalise_policy(reconnect_policy)
+        self._with_trades = bool(with_trades)
+        # The sleeps, as attributes so a deterministic test can replace the
+        # BACKOFF sleep with a recorder and shrink the idle poll. Production
+        # never touches either.
+        self._sleep = asyncio.sleep
+        self._idle_s = 0.25
+        self._clock = time.time
+        self._lifecycle_cb = None
+        # WHAT THE BOUND HAS SPENT, reported rather than inferred.
+        self.consecutive_failures = 0
+        self.backoff_log: list = []
+        self.gave_up: dict | None = None
+        self.venue_refusal: dict | None = None
+        self.connect_failures: list = []
+        self._connected_at_epoch_s: float | None = None
         # slug -> book record. Every record carries BOTH clocks and the
         # epoch it arrived in.
         self._books: dict[str, dict] = {}
@@ -800,11 +940,65 @@ class MarketStream:
         with self._lock:
             self.errors.append({"at": _now_iso(), "error": str(err),
                                 "request_id": rid})
-            for slug in self._req_slugs.get(rid, []):
+            slugs = list(self._req_slugs.get(rid, []))
+            for slug in slugs:
                 sub = self._subs.get(slug)
                 if sub is not None and sub["state"] != CONFIRMED:
                     sub["state"] = FAILED
                     sub["error"] = str(err)
+        # THE REFUSAL, TO WHOEVER TRACKS READINESS. Carried with the slugs the
+        # requestId named, so a venue refusal lands on the markets it refused
+        # instead of in a log line. The text is the venue's own error string,
+        # truncated; nothing of ours (no key, no header) is in it.
+        self._emit_lifecycle("error", request_id=rid, slugs=slugs,
+                             error=str(err)[:200])
+
+    def set_lifecycle_listener(self, cb) -> None:
+        """Additive. `cb(event, info)` on connected / disconnected /
+        subscribe_sent / error / connect_failed / gave_up / venue_refused.
+
+        Called from the socket thread, outside `self._lock`, and never allowed
+        to raise into the socket loop. A caller that does not install one sees
+        no change."""
+        with self._lock:
+            self._lifecycle_cb = cb
+
+    def _emit_lifecycle(self, event: str, **info) -> None:
+        cb = self._lifecycle_cb
+        if cb is None:
+            return
+        try:
+            cb(event, dict(info))
+        except Exception as exc:  # noqa: BLE001 -- never stop the feed
+            log.debug("lifecycle listener failed on %s: %s", event, exc)
+
+    def _connection_lost_why(self, ws):
+        """POLICY LOOP ONLY. Why an apparently open connection is not, or None.
+
+        Three checks, cheapest first. None of them is a freshness claim: each
+        is a reason to STOP trusting the connection, and reconnecting can only
+        make every book on it ineligible (new epoch), never eligible.
+        """
+        conn = getattr(ws, "is_connected", None)
+        if conn is False:
+            return LOST_SOCKET_NOT_CONNECTED
+        task = getattr(ws, "_message_task", None)
+        done = getattr(task, "done", None)
+        if callable(done):
+            try:
+                if done():
+                    return LOST_MESSAGE_LOOP_ENDED
+            except Exception:  # noqa: BLE001 -- unknown is not "ended"
+                pass
+        sil = (self._policy or {}).get("silence_reconnect_s")
+        if sil:
+            with self._lock:
+                marks = [t for t in (self.last_frame_at, self.last_heartbeat_at,
+                                     self._connected_at_epoch_s)
+                         if t is not None]
+            if marks and self._clock() - max(marks) > float(sil):
+                return LOST_SILENCE_WATCHDOG
+        return None
 
     def _run(self) -> None:
         try:
@@ -826,12 +1020,24 @@ class MarketStream:
                     self.thread_exited_at_iso = _now_iso()
 
     async def _main(self) -> None:
-        from polymarket_us.websocket.markets import MarketsWebSocket
+        # THE TRANSPORT. The SDK's class unless a caller supplied another --
+        # imported here, as before, so importing this module never needs the
+        # SDK.
+        factory = self._ws_factory
+        if factory is None:
+            from polymarket_us.websocket.markets import MarketsWebSocket
+            factory = MarketsWebSocket
+        pol = self._policy
 
-        backoff, seq = 1.0, 0
+        backoff, seq = (pol["base_s"] if pol else 1.0), 0
         while not self._stop:
             open_flag = {"v": False}
             ws = None
+            # WHAT THIS ATTEMPT CAME TO, for the policy loop's accounting.
+            reached_open = False
+            frames_at_open = None
+            lost_why = None
+            refused_status = None
             # RESERVED BEFORE THE ATTEMPT, NOT AFTER IT. This covers the
             # initial connection, a retry after a failure and a
             # reconnect after a drop -- they are one event to the venue
@@ -841,11 +1047,17 @@ class MarketStream:
                 break
             with self._lock:
                 self.socket_connect_attempts += 1
+                attempt_no = self.socket_connect_attempts
             try:
-                ws = MarketsWebSocket(key_id=self._key_id,
-                                      secret_key=self._secret_key)
+                # THE EXISTING CREDENTIAL PATH, unchanged: the key id and
+                # secret this object was constructed with go to the SDK's own
+                # constructor, which signs the handshake. Neither is logged,
+                # stored elsewhere, or placed in any event emitted below.
+                ws = factory(key_id=self._key_id,
+                             secret_key=self._secret_key)
                 ws.on("market_data", self._on_market_data)
-                ws.on("trade", self._on_trade)
+                if self._with_trades:
+                    ws.on("trade", self._on_trade)
                 ws.on("error", self._on_error)
                 # GUARDED, BECAUSE THE EVENT NAME IS NOT VERIFIED. The
                 # union declares Heartbeat; whether this SDK surfaces
@@ -861,12 +1073,14 @@ class MarketStream:
                 ws.on("close", lambda *a: open_flag.update(v=False))
                 await ws.connect()
                 open_flag["v"] = True
+                reached_open = True
                 with self._lock:
                     # NEW EPOCH. Everything cached before this instant is
                     # now ineligible, whatever its age.
                     self.epoch += 1
                     self.connected = True
                     self.connected_since = _now_iso()
+                    self._connected_at_epoch_s = time.time()
                     if self.first_connected_at is None:
                         self.first_connected_at = self.connected_since
                     # Every known slug goes back to REQUESTED: a
@@ -874,6 +1088,8 @@ class MarketStream:
                     for s in self._subs.values():
                         s["state"] = REQUESTED
                     self._pending = list(self._subs)
+                    frames_at_open = self.updates + self.heartbeats
+                    epoch_now = self.epoch
                 # AND TELL THE CURRENCY MODULE, which kept its own epoch and was
                 # never fed by production.
                 #
@@ -887,17 +1103,30 @@ class MarketStream:
                 # Outside the lock on purpose -- it takes its own -- and never
                 # allowed to break the socket loop.
                 _tell_currency("connection_opened")
-                backoff = 1.0
+                self._emit_lifecycle("connected", epoch=epoch_now,
+                                     attempt=attempt_no)
+                if pol is None:
+                    # THE HISTORIC RESET, kept exactly: any successful
+                    # handshake resets the backoff. The policy loop resets it
+                    # only on a connection that DELIVERED something (below).
+                    backoff = 1.0
                 while open_flag["v"] and not self._stop:
+                    if pol is not None:
+                        lost_why = self._connection_lost_why(ws)
+                        if lost_why:
+                            break
                     with self._lock:
                         batch = self._pending[:SUB_BATCH]
                         self._pending = self._pending[SUB_BATCH:]
                     if not batch:
-                        await asyncio.sleep(0.25)
+                        await asyncio.sleep(self._idle_s)
                         continue
                     seq += 1
-                    for kind, rid in (("book", "bk-%d" % seq),
-                                      ("trade", "tr-%d" % seq)):
+                    kinds = (("book", "bk-%d" % seq),
+                             ("trade", "tr-%d" % seq))
+                    if not self._with_trades:
+                        kinds = kinds[:1]
+                    for kind, rid in kinds:
                         # ONE UNIT PER MESSAGE. A batch is TWO messages
                         # -- market data and trades -- so a batch costs
                         # two, and counting batches would undercount by
@@ -909,17 +1138,42 @@ class MarketStream:
                             self.subscribe_messages_sent += 1
                             if kind == "book":
                                 for s in batch:
-                                    self._subs[s]["request_id"] = rid
+                                    if s in self._subs:
+                                        self._subs[s]["request_id"] = rid
                         if kind == "book":
                             await ws.subscribe_market_data(rid, batch)
                         else:
                             await ws.subscribe_trades(rid, batch)
+                        # SENT, on THIS connection. Readiness needs the
+                        # distinction between "asked on this socket" and
+                        # "queued", because only the first can be answered.
+                        self._emit_lifecycle("subscribe_sent", epoch=epoch_now,
+                                             kind=kind, request_id=rid,
+                                             slugs=list(batch))
                     if self._stop:
                         break
+                if lost_why is None:
+                    lost_why = (LOST_STOP_REQUESTED if self._stop
+                                else LOST_CLOSED_BY_PEER)
             except Exception as exc:  # noqa: BLE001 -- reconnect
                 log.warning("bettor market stream disconnected: %s", exc)
                 with self._lock:
                     self.errors.append({"at": _now_iso(), "error": str(exc)})
+                lost_why = LOST_EXCEPTION
+                if not reached_open:
+                    # A HANDSHAKE THAT FAILED. Its status, when it carried
+                    # one, is read by attribute -- 401/403 is the venue
+                    # refusing this key, which no retry can change.
+                    refused_status = _handshake_status(exc)
+                    fail = {"at": _now_iso(), "attempt": attempt_no,
+                            "exception": type(exc).__name__,
+                            "status": refused_status,
+                            "venue_refusal": refused_status
+                            in VENUE_REFUSAL_STATUSES}
+                    with self._lock:
+                        self.connect_failures.append(fail)
+                        del self.connect_failures[:-20]
+                    self._emit_lifecycle("connect_failed", **fail)
             finally:
                 if ws is not None:
                     # THE ONE EVENT THAT MEANS THE CONNECTION IS SHUT,
@@ -941,7 +1195,12 @@ class MarketStream:
             with self._lock:
                 self.connected = False
                 self.connected_since = None
+                self._connected_at_epoch_s = None
                 self.reconnects += 1
+                delivered = bool(reached_open and frames_at_open is not None
+                                 and self.updates + self.heartbeats
+                                 > frames_at_open)
+                epoch_closed = self.epoch
             # EVERY CACHED BOOK IS DISCARDED, NOT AGED. A book held across a
             # drop has an unknown number of unseen replacements in front of it,
             # and on a full-replacement feed the recovery is exactly: discard,
@@ -949,10 +1208,62 @@ class MarketStream:
             # implementable without any venue guarantee, and it is implemented
             # -- the resubscribe is the `s["state"] = REQUESTED` loop above.
             _tell_currency("connection_closed")
+            if reached_open:
+                self._emit_lifecycle("disconnected", epoch=epoch_closed,
+                                     why=lost_why, delivered=delivered)
             if self._stop:
                 break
-            await asyncio.sleep(backoff)
-            backoff = min(backoff * 2, 30.0)
+            if pol is not None:
+                # ── THE BOUND ────────────────────────────────────────
+                if (refused_status in VENUE_REFUSAL_STATUSES
+                        and pol["stop_on_venue_refusal"]):
+                    with self._lock:
+                        self.venue_refusal = {
+                            "at": _now_iso(), "status": refused_status,
+                            "attempt": attempt_no,
+                            "why": ("the venue refused the websocket "
+                                    "handshake with HTTP %s: it is refusing "
+                                    "THIS KEY for this endpoint. No retry can "
+                                    "change that, so none is made"
+                                    % refused_status)}
+                        self._stop = True
+                    log.warning("bettor market stream: handshake refused "
+                                "by the venue (HTTP %s); stopping, not "
+                                "retrying", refused_status)
+                    self._emit_lifecycle("venue_refused",
+                                         status=refused_status,
+                                         attempt=attempt_no)
+                    break
+                if delivered:
+                    self.consecutive_failures = 0
+                    backoff = pol["base_s"]
+                else:
+                    self.consecutive_failures += 1
+                if self.consecutive_failures >= pol["max_consecutive_failures"]:
+                    with self._lock:
+                        self.gave_up = {
+                            "at": _now_iso(),
+                            "consecutive_failures": self.consecutive_failures,
+                            "attempts": self.socket_connect_attempts,
+                            "last_lost_why": lost_why,
+                            "why": ("%d consecutive connection attempts "
+                                    "delivered nothing; the bound is %d. The "
+                                    "loop ends rather than retrying forever"
+                                    % (self.consecutive_failures,
+                                       pol["max_consecutive_failures"]))}
+                        self._stop = True
+                    log.warning("bettor market stream: %d consecutive "
+                                "attempts delivered nothing; giving up",
+                                self.consecutive_failures)
+                    self._emit_lifecycle("gave_up",
+                                         consecutive_failures=(
+                                             self.consecutive_failures))
+                    break
+            with self._lock:
+                self.backoff_log.append(backoff)
+                del self.backoff_log[:-50]
+            await self._sleep(backoff)
+            backoff = min(backoff * 2, pol["cap_s"] if pol else 30.0)
 
 
 def _amount(a):

@@ -462,6 +462,23 @@ def test_the_mechanism_works_once_the_feed_supplies_the_two_guarantees(
     SC.heartbeat(now=now - 1.0)
     SC.message_received("aec-x", now=now - 4.0, payload_slug="aec-x")
 
+    # AND THE DECISION PROCESS'S OWN SUBSCRIPTION MUST HOLD THE MARKET AS
+    # CURRENT (bettor_market_subscription). M1 has exactly one source: without
+    # it the answer is None even with every feed guarantee present.
+    assert SC.evidence_for("aec-x", now=now)["subscription"] is None
+    from sportsassets import bettor_market_subscription as MSUB
+    clk = {"t": now - 30.0}
+    sub = MSUB.MarketSubscription("k", "s", clock=lambda: clk["t"])
+    monkeypatch.setattr(MSUB, "_ACTIVE", sub)    # restored after the test
+    sub._set_state(MSUB.S_CONNECTING, "test")
+    sub.want(["aec-x"])
+    sub._on_lifecycle("connected", {"epoch": 1})
+    sub._on_lifecycle("subscribe_sent", {"kind": "book", "slugs": ["aec-x"]})
+    clk["t"] = now - 4.0
+    sub._on_book("aec-x", {"source_ts": None})
+    clk["t"] = now - 1.0
+    sub._on_heartbeat()
+
     got = SC.evidence_for("aec-x", now=now)
     assert got["subscription"] is not None, got
     assert got["subscription"]["last_update_at"] == pytest.approx(now - 4.0)

@@ -2859,7 +2859,15 @@ async def venue_quote(conn, *, us_slug, intent, now=None, size=None,
                 "book_currency": currency, "venue_clock": clock,
                 **refused_read}
     if currency["verdict"] != vc.ESTABLISHED:
+        # THE SAME REFUSAL, BY THE SAME NAME -- plus WHICH PART OF M1 WAS
+        # MISSING for this market: the subscription's readiness and its named
+        # reason (M1_SUBSCRIPTION_REFUSED_BY_VENUE, M1_SNAPSHOT_PENDING, ...,
+        # M1_FEED_TIMING_NOT_DOCUMENTED_P5). Diagnostic only; nothing reads it
+        # to admit, and it never raises.
+        from .. import bettor_market_subscription as _msub
         return {"ok": False, "refusal": R_BOOK_CURRENCY_NOT_ESTABLISHED,
+                "m1_subscription": _msub.m1_refusal_detail(
+                    slug, now=verdict_at),
                 "age_s": None,
                 "limit_s": MAX_VENUE_QUOTE_AGE_S,
                 "age_basis": vc.NO_MECHANISM,
@@ -4574,7 +4582,14 @@ def book_currency_evidence(slug=None) -> dict:
     returning real instants from here rather than changing any gate.
     """
     from .. import bettor_stream_currency as _sc
+    from .. import bettor_market_subscription as _msub
 
+    # THE DECISION PROCESS ASKS FOR THIS MARKET. Every market whose currency is
+    # asked about here is one the subscription must hold, so asking IS the
+    # subscribe request. A no-op (never raises) when no subscription runs in
+    # this process -- and the answer below is then today's refusal.
+    if slug:
+        _msub.want([slug])
     m1 = _sc.evidence_for(slug)
     return {
         "subscription": m1.get("subscription"),
@@ -4583,7 +4598,11 @@ def book_currency_evidence(slug=None) -> dict:
                "missing_from_the_feed": list(_sc.MISSING_PRECONDITIONS),
                "refusal": m1.get("refusal"),
                "why": m1.get("why"),
-               "state": m1.get("state")},
+               "state": m1.get("state"),
+               # THE SUBSCRIPTION'S PER-MARKET READINESS, and the name of the
+               # part of M1 that was missing (a venue refusal lands here).
+               "readiness": m1.get("readiness"),
+               "subscription_refusal": m1.get("subscription_refusal")},
         # ── WHY, FROM THE MODULE THAT OWNS THE QUESTION ────────────────
         #
         # THE DEFECT THIS REPLACES (2026-09-28). This key used to carry a
@@ -9027,6 +9046,16 @@ def _selection_digest(out: dict) -> dict:
     }
 
 
+def _market_subscription_digest() -> dict:
+    """`bettor_market_subscription.heartbeat_digest`, guarded twice: the import
+    too, so a heartbeat can never be lost to it."""
+    try:
+        from .. import bettor_market_subscription as _msub
+        return _msub.heartbeat_digest()
+    except Exception as exc:                                   # noqa: BLE001
+        return {"digest_failed": type(exc).__name__}
+
+
 async def _heartbeat(conn, out: dict, *, key: str = None) -> None:
     """PERSIST THE CYCLE SUMMARY, because most refusals never reach a row.
 
@@ -9082,6 +9111,11 @@ async def _heartbeat(conn, out: dict, *, key: str = None) -> None:
                 # are separate quantities (a prohibition and a slower rate)
                 # and were previously reported as one.
                 "venue_rate_controls": _rate_control_digest(),
+                # THE MARKET-DATA SUBSCRIPTION: its own state, readiness per
+                # market counted by state and by named reason, the reconnect
+                # bound it has spent, any venue refusal, and which M1 reasons
+                # decisions were refused under. Bounded; never raises.
+                "market_subscription": _market_subscription_digest(),
                 "state": out.get("state"),
                 "evaluated": out.get("evaluated"),
                 "written": out.get("written"),
@@ -9302,6 +9336,15 @@ async def run(get_pool) -> None:
                              key=COOLDOWN_RESUME_KEY)
         except Exception:                                      # noqa: BLE001
             log.warning("ext_pinnacle: cooldown resume failed", exc_info=True)
+        # ── THE MARKET-DATA SUBSCRIPTION, IN THE PROCESS THAT DECIDES ────
+        #
+        # After the writer lock, so a standby never opens a socket. Armed only
+        # by BETTOR_MARKET_SUBSCRIPTION=on and a configured venue key; in every
+        # other case it records why and does nothing, and every decision
+        # refuses exactly as before. `start_default` never raises.
+        from .. import bettor_market_subscription as _msub
+        log.info("ext_pinnacle: market-data subscription %s",
+                 _msub.start_default().get("state"))
         # ── MANAGEMENT AND RECOVERY, ON THEIR OWN CADENCE ────────────────
         #
         # AFTER THE LOCK, so only the writer services (a standby never
@@ -9339,6 +9382,10 @@ async def run(get_pool) -> None:
                     log.warning("ext_pinnacle: cycle failed", exc_info=True)
                 await asyncio.sleep(delay)
         finally:
+            # CLEAN SHUTDOWN of the subscription's socket. Never raises, and
+            # does not block the event loop: the socket thread sees the stop
+            # and closes on its own next pass.
+            _msub.shutdown_default(wait_s=0.0)
             servicing.cancel()
             try:
                 await servicing
