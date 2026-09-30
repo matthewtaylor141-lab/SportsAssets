@@ -6094,9 +6094,11 @@ async def _funded_service(conn, *, now, review_interval_s: float = CYCLE_S,
             # SERVICING_INTERVAL_S under the servicing task, CYCLE_S when the
             # collection cycle services in its place.
             review_interval_s=review_interval_s,
-            # WHAT STARTED THIS PASS: the servicing cadence, or a venue
-            # order / market event routed into the same group authority.
-            trigger_source=trigger_source,
+            # WHAT STARTED THIS PASS: named only for a venue order / market
+            # event routed into the same group authority (the scheduled
+            # call is unchanged).
+            **({} if trigger_source == "SCHEDULED_SERVICING"
+               else {"trigger_source": trigger_source}),
             now=now)
         # THE ORDERING, ASSERTED IN THE RESULT rather than left to a reader to
         # infer from two sibling keys. `manage` sent nothing; whatever was sent
@@ -6305,9 +6307,13 @@ async def _service_once(conn, *, now: float, source: str,
             if service is not None:
                 svc = await service()
             else:
+                # The scheduled call is exactly the call it always was; only
+                # a venue-event pass names its trigger.
                 svc = await _funded_service(
                     conn, now=now, review_interval_s=review_interval_s,
-                    run_learning=slow, trigger_source=trigger_source)
+                    run_learning=slow,
+                    **({} if trigger_source == "SCHEDULED_SERVICING"
+                       else {"trigger_source": trigger_source}))
         except asyncio.CancelledError:
             raise
         except Exception as exc:                               # noqa: BLE001
