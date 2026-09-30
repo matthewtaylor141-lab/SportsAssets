@@ -136,3 +136,46 @@ def test_the_gate_refuses_when_the_two_rankings_disagree():
     assert PC.common_valuation_gate(verdict, cv3)["permitted"] is True
     # a hold needs no permit
     assert PC.common_valuation_gate({"selected": "HOLD"}, {})["permitted"]
+
+
+def test_a_depth_limited_exit_and_the_same_reduce_are_one_order():
+    """THE INTEGRATION DEFECT (XC). When the only levels above HOLD are the
+    ones a full exit would take, the selector prices a depth-limited
+    DIRECT_EXIT and a REDUCE of the SAME quantity, limit and proceeds -- one
+    order under two names. Valued as two fixed actions they tied exactly at
+    every void rate and the strict-winner rule refused every such exit.
+    They are valued once; the other spelling is accepted at the same
+    quantity; a REDUCE that differs is still its own action. SYNTHETIC."""
+    from tests import held_contract_terms as HCT
+
+    def ranking(reduce_qty, reduce_cash):
+        return {"candidates": [
+            {"action": "HOLD", "qty": 15.0, "value_per_contract": 0.30,
+             "value_usd": -4.5, "basis_per_contract_valued": 0.60},
+            {"action": "DIRECT_EXIT", "qty": 9.0, "value_usd": -3.51,
+             "cash_now_usd": 3.69, "limit_price": 0.41},
+            {"action": "REDUCE", "qty": reduce_qty, "value_usd": -3.51,
+             "cash_now_usd": reduce_cash, "limit_price": 0.41}]}
+    void = {"ok": True, "rate": 2 / 60, "upper_95": 0.114}
+    kw = dict(held_leg=HCT.held_leg(cost_cents=60, qty=15),
+              sport_permits_tie=HCT.SPORT_PERMITS_TIE, void_read=void)
+    cv = PC.common_valuation_for(ranking(9.0, 3.69), [], **kw)
+    assert cv["same_order_exits"] == {"DIRECT_EXIT": ["REDUCE"]}
+    assert cv["funded_dispatch_permitted"] is True, cv
+    assert cv["winner"]["fixed_action"][:3] == ["DIRECT_EXIT", "DIRECT_EXIT",
+                                                9.0]
+    for name in ("DIRECT_EXIT", "REDUCE"):
+        g = PC.common_valuation_gate(
+            {"selected": name,
+             "selected_candidate": {"action": name, "qty": 9.0}}, cv)
+        assert g["permitted"] is True, (name, g)
+    # the same name at another quantity is still a different fixed action
+    g = PC.common_valuation_gate(
+        {"selected": "REDUCE",
+         "selected_candidate": {"action": "REDUCE", "qty": 8.0}}, cv)
+    assert g["refusal"] == PC.R_CV_DISAGREES
+    # a REDUCE that is a different order stays its own candidate
+    cv2 = PC.common_valuation_for(ranking(8.0, 3.28), [], **kw)
+    assert cv2["same_order_exits"] == {}
+    assert len([r for r in cv2["valued"]
+                if r["fixed_action"][0] == "REDUCE"]) == 1

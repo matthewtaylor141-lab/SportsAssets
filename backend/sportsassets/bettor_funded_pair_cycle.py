@@ -677,10 +677,38 @@ def common_valuation_for(hold_ranking, candidates, *, held_leg=None,
                     "why": ("HOLD states no probability, quantity or basis "
                             "(it carries %s)" % sorted(hold))}
         cands = [{"action": "HOLD", "candidate_id": "HOLD"}]
+        # ── ONE ORDER IS ONE FIXED ACTION ────────────────────────────
+        #
+        # THE DEFECT THIS CLOSES (integration, XC). A depth-limited
+        # DIRECT_EXIT and a REDUCE that sells the same quantity at the same
+        # limit for the same net proceeds are the SAME ORDER: the selector
+        # prices both whenever the only levels above HOLD are the ones a full
+        # exit would take. Valued as two fixed actions they tie exactly at
+        # every void rate, the strict-winner rule reads the tie as "the choice
+        # changes within the range", and every such exit -- a loss-containing
+        # partial exit included -- was refused funded dispatch. It is valued
+        # ONCE (under the first name) and the other name is recorded as the
+        # same order, so the gate can accept either spelling. A REDUCE that
+        # differs in quantity, limit or proceeds is still its own action.
+        same_order: dict = {}
+        seen_orders: dict = {}
         for c in hr.get("candidates") or ():
             a = str(c.get("action"))
             if a in ("DIRECT_EXIT", "REDUCE") and c.get("value_usd") \
                     is not None and c.get("cash_now_usd") is not None:
+                try:
+                    okey = (round(float(c.get("qty")), 9),
+                            round(float(c.get("cash_now_usd")), 9),
+                            None if c.get("limit_price") is None
+                            else round(float(c.get("limit_price")), 9))
+                except (TypeError, ValueError):
+                    okey = None
+                first = seen_orders.get(okey) if okey is not None else None
+                if first is not None and first != a:
+                    same_order.setdefault(first, []).append(a)
+                    continue
+                if okey is not None:
+                    seen_orders[okey] = a
                 cands.append({"action": a, "candidate_id": a,
                               "qty": c.get("qty"),
                               "net_proceeds_usd": c.get("cash_now_usd")})
@@ -735,6 +763,7 @@ def common_valuation_for(hold_ranking, candidates, *, held_leg=None,
             qty=q, basis_usd=float(q) * float(bpc), candidates=cands,
             void_cents_range=rng)
         return dict(got, held_payouts_from=held_src,
+                    same_order_exits=same_order,
                     void_rate_read={k: vr.get(k) for k in (
                         "ok", "rate", "upper_95", "n_fixtures", "refusal")})
     except Exception as exc:                                    # noqa: BLE001
@@ -762,6 +791,11 @@ def common_valuation_gate(verdict, cv) -> dict:
     want_id = (sel.get("candidate_id") if kind == "ACQUIRE_INDIRECT_HEDGE"
                else kind)
     same = bool(w) and w[0] == kind and w[1] == want_id
+    if not same and bool(w) and kind in ("DIRECT_EXIT", "REDUCE") \
+            and kind in (cv.get("same_order_exits") or {}).get(w[0], ()):
+        # THE SAME ORDER UNDER THE OTHER EXIT NAME (see
+        # `common_valuation_for`): accepted only at the same quantity, below.
+        same = True
     if same and kind in ("DIRECT_EXIT", "REDUCE"):
         try:
             same = abs(float(w[2]) - float(sel.get("qty"))) <= 1e-9
@@ -977,7 +1011,8 @@ async def decide_and_record(conn, *, decision_id: str, account_id: str,
             "funded_dispatch_refusal", "winner", "winner_at_range_low",
             "winner_at_range_high", "void_range", "void_rate_status",
             "void_payout_status", "void_cents_range", "held_payouts_from",
-            "void_rate_read", "uncertainty_model", "error", "why")}
+            "void_rate_read", "same_order_exits", "uncertainty_model",
+            "error", "why")}
     out["common_valuation"]["valued"] = [
         {k: r.get(k) for k in ("fixed_action", "rankable", "value_usd",
                                "value_at_range_low", "value_at_range_high",
