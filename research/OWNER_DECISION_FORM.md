@@ -1,6 +1,6 @@
 # Owner decision form — funded pilot (for review; nothing chosen, nothing activated)
 
-**Dated:** 2026-09-30, revision 3.
+**Dated:** 2026-09-30, revision 4 (integration corrections to §C, §D, §F only).
 
 **What this form is:** it records your decisions. It does not activate submission.
 
@@ -63,7 +63,9 @@ There are two records:
 
 Renewal never creates the first authorization, and never extends past your expiry. Any failed check leaves the record to expire. Every attempt is logged. Proven by `test_the_system_authorization_renews_only_under_the_owners` (12 cases).
 
-**The scheduled call is wired** (commit c5ba055): the funded service calls renewal first on every cycle, and the heartbeat reports the outcome — renewed, or the named reason. Proven through `cycle()` in `test_the_scheduled_cycle_renews_the_authorization` (renews under a live owner authorization; lets it expire when the owner revoked). This is not yet in a released build. Until the frozen, gated build is serving and its heartbeat shows renewal, treat the pilot as a **one-day trading pilot**. The final yes/no (§E) is asked only on a build that demonstrates renewal.
+**The scheduled call is wired.** On every cycle the funded service first records a venue reconciliation when a renewal is due (reads only, at most every 15 minutes inside the window — readiness needs one under 2 hours old, and before this only operator routes wrote it), then attempts renewal; the heartbeat reports the outcome. Proven through `cycle()` in `test_the_scheduled_cycle_renews_the_authorization`, including hourly cycles on a controlled clock for 80 hours under a 3-day owner record: live at every hour before your expiry, renewed only inside the window, never past your expiry, lapsed after it.
+
+**What renewal also needs, found in integration:** the recheck reads the previous cycle's record, so that cycle must have read a venue book on an established timing basis (which requires P5). A cycle that read no book (entry loop stopped, nothing eligible) leaves renewal refused by name and the authorization lapses at its expiry — acquisitions stop, exits do not depend on it. Pinned by `test_renewal_fails_closed_when_the_last_cycle_read_no_book`. Until the frozen build is serving and its heartbeat shows a renewal, treat the pilot as a **one-day trading pilot**.
 
 **When authorization lapses, is revoked, or is invalidated:** entries and protective hedges are refused. Exits, reductions, settlement, recovery, reconciliation, learning and Xavier's records continue, provided the exit switch is on (§D).
 
@@ -72,6 +74,8 @@ Renewal never creates the first authorization, and never extends past your expir
 **Which disabled switch the existing test covers.** `test_an_exit_survives_every_entry_side_lapse` runs with an expired or revoked authorization, a paused account, and the shipped state where both **entry** switches (`FUNDED_SUBMISSION_ENABLED`, `REAL_ORDER_SUBMISSION_ENABLED`) are off. It shows an exit then reaches its **own** switch, `FUNDED_EXIT_SUBMISSION_ENABLED`, and depends on nothing else. It does not send an exit, because that switch is also off in shipped code.
 
 **New test.** `test_exits_are_sent_and_acquisitions_refused_in_the_incident_state` drives `cycle()` with only the venue transport substituted, in this state: exit switch **on**, both entry switches off, authorization revoked, account paused. The protective exit **is sent**, and a new entry is refused.
+
+**A protective exit is sent only when it is robust (§F).** Every funded order, exits included, must win on the one-measure valuation across the void rate's range. With the rate unmeasured, that needs the held contract's own void payout from its venue terms (the production held-leg read supplies it): with it, the test's exit is robust and sent; without it, the void payout is valued over 0–100¢, the exit is a research valuation and is **not** sent (`test_an_unestablished_void_payout_is_a_range_not_a_zero`).
 
 **Procedure** (none of the first three steps redeploys anything):
 1. Revoke your owner authorization. This also revokes the system authorization issued on it.
@@ -113,7 +117,7 @@ An unknown void probability is **not treated as zero**:
 
 Proven in `test_every_action_is_valued_on_one_measure.py` (12 cases).
 
-**Consequence.** Until the void rate is measured (at least 40 settled fixtures from the non-funded observer), funded management acts only where its choice is robust to any void rate, and never acquires a hedge on a fixture that can void.
+**Consequence.** Until the void rate is measured (at least 40 settled fixtures from the non-funded observer), funded management acts only where its choice is robust to any void rate (and, where the contract's void payout is not established, to any void payout), and never acquires a hedge on a fixture that can void. This gate is enforced at dispatch: `test_the_common_valuation_gates_funded_dispatch`.
 
 ## G · Your decisions (one in each)
 
