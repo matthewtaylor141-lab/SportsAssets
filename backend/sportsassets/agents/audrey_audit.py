@@ -1604,6 +1604,13 @@ async def build_report(conn, *, day: _dt.date, tz_name: str, tz,
     collection = await _unavailable(collection_section, conn, start=start,
                                     end=end)
     versions = await _unavailable(versions_section, conn, end=end)
+    # XAVIER'S STANDING PROTECTIVE ORDERS (migration 157), audited from the
+    # book and the lifecycle records: the invariant, at most one live hedge
+    # order per group, capacity released only on a confirmed terminal state,
+    # the selected instrument, covered / uncovered, resting orders apart
+    # from filled protection, the floor class and the capability flag.
+    standing = await _unavailable(standing_orders_section, conn,
+                                  start=start, end=end)
     evidence = evidence_categories(derek, xavier, book)
     xavier.pop("_categories", None)
     xavier.pop("_positions", None)
@@ -1617,6 +1624,7 @@ async def build_report(conn, *, day: _dt.date, tz_name: str, tz,
                    "hours": round((end - start) / 3600.0, 3)},
         "boundary_settles_nothing": True,
         "derek": derek, "xavier": xavier, "positions": positions,
+        "standing_orders": standing,
         "book": book, "collection": collection, "versions": versions,
         "evidence": evidence,
         "outcomes": {"states": (positions.get("states")
@@ -1630,6 +1638,13 @@ async def build_report(conn, *, day: _dt.date, tz_name: str, tz,
                                                       conn)
     report["run"] = {"model_withdrawals": withdrawals}
     return report
+
+
+async def standing_orders_section(conn, *, start: float, end: float) -> dict:
+    """The standing protective orders active in the window, read by
+    `agents.xavier_standing_view.audit` (read-only)."""
+    from . import xavier_standing_view as XSV                  # noqa: PLC0415
+    return await XSV.audit(conn, start=start, end=end)
 
 
 async def _withdraw_invalidated(conn) -> list:

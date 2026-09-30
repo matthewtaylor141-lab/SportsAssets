@@ -1060,6 +1060,34 @@ XAVIER_JS = r"""
   var WHY = ['explanation', 'reasoning', 'why', 'rationale'];
   function tile(label, v) { return '<div><div class="lbl">' + esc(label) + '</div><div class="v">' + v + '</div></div>'; }
   function f(r, keys, u, rd) { var k = AG.pickKey(r, keys); return k === null ? AG.unk('not in this record') : AG.fmt(k, r[k], rd, u); }
+  function standing(sp, rd) {
+    // STANDING PROTECTION: filled protection and resting orders are shown
+    // APART -- a resting order is an obligation that may still fill, not
+    // protection. The venue capability flag and the strict fallback's
+    // latency / queue trade-off are stated, not implied.
+    if (!isObj(sp)) return '';
+    if (sp.available === false) return '<div class="note">Standing protection: ' + esc(sp.why || 'unavailable') + '</div>';
+    var fp = isObj(sp.filled_protection) ? sp.filled_protection : {};
+    var sel = isObj(sp.selected_instrument) ? sp.selected_instrument : null;
+    var inv = isObj(sp.invariant) ? sp.invariant : {};
+    var h = '<div class="standing" data-standing="1"><div class="lbl">Standing protection &middot; mode <b>' + esc(sp.mode) + '</b> &middot; exchange-linked exclusivity <b>' + esc(sp.exchange_linked_exclusivity) + '</b></div>'
+      + '<div class="tiles">' + tile('Selected instrument', sel ? esc(sel.candidate_id) + ' <span class="note">(' + esc(sel.selected_by) + ')</span>' : AG.unk('none selected: no hedge fill yet'))
+      + tile('Confirmed primary', AG.fmt('confirmed_primary_qty', sp.confirmed_primary_qty, rd, 'qty'))
+      + tile('Covered (filled protection)', AG.fmt('covered_qty', fp.covered_qty, rd, 'qty'))
+      + tile('Uncovered', AG.fmt('uncovered_qty', fp.uncovered_qty, rd, 'qty'))
+      + tile('Fill-capable (resting / potentially live)', AG.fmt('fill_capable_qty', sp.fill_capable_qty, rd, 'qty'))
+      + tile('Lifecycle state', esc(sp.lifecycle_state))
+      + tile('Floor class', sp.floor_class ? esc(sp.floor_class) : AG.unk('no plan'))
+      + tile('Invariant', inv.holds === true ? 'holds: ' + esc(inv.hedge_held_plus_fill_capable) + ' &le; ' + esc(inv.confirmed_primary) : '<b>BREACHED</b> ' + esc(JSON.stringify(inv))) + '</div>';
+    var rest = Array.isArray(sp.resting_orders) ? sp.resting_orders : [];
+    h += '<div class="lbl">Resting orders &middot; obligations, not protection</div>' + (rest.length ? AG.table(rest, [
+      {label: 'Instrument', keys: ['candidate_id']}, {label: 'Limit', keys: ['limit_price'], u: 'price', num: 1},
+      {label: 'Quantity', keys: ['quantity'], u: 'qty', num: 1}, {label: 'Filled', keys: ['filled_qty'], u: 'qty', num: 1},
+      {label: 'Fill-capable', keys: ['fill_capable_qty'], u: 'qty', num: 1}, {label: 'State', keys: ['lifecycle_state']},
+      {label: 'Venue order', keys: ['venue_order_id']}, {label: 'Good till', keys: ['good_till']}], {rd: rd}) : '<p class="emptyline">No resting or potentially-live hedge order.</p>');
+    h += '<p class="note">' + esc(sp.latency_disclosure || '') + '</p></div>';
+    return h;
+  }
   function positions(sec, ctx) {
     var rows = AG.rowsOf(sec.data, ['positions', 'groups', 'rows']);
     if (!rows.length) return AG.genericBody(sec, ctx.rd);
@@ -1076,6 +1104,7 @@ XAVIER_JS = r"""
         + '<div class="action"><div><div class="lbl">Selected action</div><div class="a">' + (act !== undefined ? esc(act) : AG.unk('no action recorded')) + '</div></div>'
         + '<div><div class="lbl">Explanation</div><div>' + (why !== undefined ? (isObj(why) ? AG.kv(why, rd) : esc(why)) : AG.unk('no explanation recorded')) + '</div>'
         + '<div class="wr">' + R.searchChip(p) + ' <span class="note" style="margin:0">policy ' + R.policyText(R.policyOf(p)) + '</span></div></div></div>'
+        + standing(p.standing_protection, rd)
         + '<details class="raw" style="margin-top:8px"><summary>search completeness, policy and shadow comparison</summary>' + R.searchPanel(p, rd) + R.policyShadow(p, act, rd) + '</details>'
         + '<div style="margin-top:8px">' + AG.evidence(p.evidence) + '</div></div>';
     }).join('');

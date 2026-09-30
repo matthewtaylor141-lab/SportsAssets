@@ -5917,7 +5917,8 @@ async def funded_pair_inputs(conn, pos, *, at, deferred=None,
 
 
 async def _funded_service(conn, *, now, review_interval_s: float = CYCLE_S,
-                          run_learning: bool = True):
+                          run_learning: bool = True,
+                          trigger_source: str = "SCHEDULED_SERVICING"):
     """SERVICE WHAT THE FUNDED LANE HOLDS, once per servicing pass.
 
     `review_interval_s` is when Xavier's next review of each position is
@@ -6093,6 +6094,9 @@ async def _funded_service(conn, *, now, review_interval_s: float = CYCLE_S,
             # SERVICING_INTERVAL_S under the servicing task, CYCLE_S when the
             # collection cycle services in its place.
             review_interval_s=review_interval_s,
+            # WHAT STARTED THIS PASS: the servicing cadence, or a venue
+            # order / market event routed into the same group authority.
+            trigger_source=trigger_source,
             now=now)
         # THE ORDERING, ASSERTED IN THE RESULT rather than left to a reader to
         # infer from two sibling keys. `manage` sent nothing; whatever was sent
@@ -6258,7 +6262,8 @@ _SERVICING: dict = _servicing_state()
 
 async def _service_once(conn, *, now: float, source: str,
                         review_interval_s: float = SERVICING_INTERVAL_S,
-                        slow: bool | None = None, service=None) -> dict:
+                        slow: bool | None = None, service=None,
+                        trigger_source: str = "SCHEDULED_SERVICING") -> dict:
     """ONE SERVICING PASS UNDER THE EXECUTION LOCK. Never raises.
 
     `slow` runs the slow half (learning, Xavier's daily review): None means
@@ -6280,6 +6285,10 @@ async def _service_once(conn, *, now: float, source: str,
                 "error": "%s: %s" % (type(exc).__name__, str(exc)[:200])}
     if lock.locked():
         st["skipped_busy"] += 1
+        if trigger_source != "SCHEDULED_SERVICING":
+            # A VENUE EVENT ARRIVED WHILE A PASS WAS ACTING: it is not
+            # dropped -- the running pass is re-run once when it finishes.
+            _VENUE_EVENTS["pending"] += 1
         return {"ran": False, "source": source, "at": float(now),
                 "refusal": R_EXECUTION_AUTHORITY_BUSY,
                 "funded_service": {"ok": False,
@@ -6298,7 +6307,7 @@ async def _service_once(conn, *, now: float, source: str,
             else:
                 svc = await _funded_service(
                     conn, now=now, review_interval_s=review_interval_s,
-                    run_learning=slow)
+                    run_learning=slow, trigger_source=trigger_source)
         except asyncio.CancelledError:
             raise
         except Exception as exc:                               # noqa: BLE001
@@ -6339,7 +6348,118 @@ async def _service_once(conn, *, now: float, source: str,
     # Audrey / improvement -- all guarded and bounded, none holding the lock,
     # none able to undo or delay what this pass already did.
     out["agents"] = await _agents_after_service(conn, out, slow=slow)
+    # ── A VENUE EVENT THAT ARRIVED DURING THIS PASS ─────────────────────
+    # It found the execution lock held and was recorded as pending; the same
+    # group authority runs once more now, so the event is acted on without
+    # waiting for the next servicing interval. Bounded: one re-run, and a
+    # re-run does not chain another.
+    if _VENUE_EVENTS["pending"] and not _VENUE_EVENTS["rerunning"]:
+        _VENUE_EVENTS["pending"] = 0
+        _VENUE_EVENTS["rerunning"] = True
+        try:
+            out["coalesced_venue_event_pass"] = await _service_once(
+                conn, now=time.time(), source=SOURCE_VENUE_EVENT,
+                review_interval_s=review_interval_s, slow=False,
+                trigger_source=VENUE_EVENT_COALESCED)
+        finally:
+            _VENUE_EVENTS["rerunning"] = False
     return out
+
+
+# ═════════════════════════════════════════════════════════════════════
+# VENUE EVENTS: A TRIGGER INTO THE SAME GROUP AUTHORITY, NOT A SECOND ONE
+# ═════════════════════════════════════════════════════════════════════
+#
+# An authenticated order update or snapshot (the private websocket's
+# `order_update` / `order_snapshot`) and a market update (book, trade,
+# market state) on a watched slug are TRIGGERS. Each is recorded (append-
+# only, `bettor_standing_order_events`); an order update carrying an
+# execution is ingested into the ONE book through the one reader and the
+# idempotent writer; and then the SAME servicing pass runs -- `_service_once`
+# under the execution lock, `manage`'s reconciliation reads, the pair pass
+# under each group's lock -- so the standing order is re-evaluated against
+# HOLD on the event rather than on the next interval. The 60-second
+# servicing task remains the reconciliation backstop: a lost event costs
+# latency, never correctness.
+#
+# TOUCHING THE PRICE IS NOT A FILL. A market update never writes a fill;
+# only the venue's own executions on our order do.
+#
+# NOT WIRED TO A LIVE CONNECTION IN THIS DEPLOYMENT: the private websocket
+# needs the venue credential this deployment does not hold (the same one
+# `pmus._get_client` needs). `attach_private_feed` registers these handlers
+# on an SDK `PrivateWebSocket` when one is connected.
+SOURCE_VENUE_EVENT = "VENUE_EVENT"
+VENUE_EVENT_COALESCED = "VENUE_ORDER_EVENT"
+#: A market update re-runs the pass at most this often per slug.
+MARKET_EVENT_MIN_GAP_S = 1.0
+_VENUE_EVENTS: dict = {"pending": 0, "rerunning": False,
+                       "last_market_pass": {}}
+
+
+async def on_private_order_message(conn, message: dict, *,
+                                   now: float | None = None,
+                                   run_pass: bool = True) -> dict:
+    """ONE AUTHENTICATED ORDER UPDATE / SNAPSHOT. Records it, ingests any
+    execution it carries (idempotently, into the one book), then runs the
+    group authority's pass. Never raises."""
+    from .. import bettor_xavier_standing_orders as _SPO
+    at = float(now if now is not None else time.time())
+    try:
+        got = await _SPO.ingest_private_order_message(conn, message, now=at)
+    except Exception as exc:                                   # noqa: BLE001
+        return {"ok": False, "error": "%s: %s" % (type(exc).__name__,
+                                                  str(exc)[:200])}
+    if run_pass and got.get("relevant"):
+        got["pass"] = await _service_once(
+            conn, now=at, source=SOURCE_VENUE_EVENT, slow=False,
+            trigger_source="VENUE_ORDER_EVENT")
+    return dict(got, ok=True)
+
+
+async def on_market_message(conn, message: dict, *, now: float | None = None,
+                            run_pass: bool = True) -> dict:
+    """ONE MARKET UPDATE. Never a fill. On a watched slug it is recorded and
+    re-runs the group authority's pass (at most every
+    MARKET_EVENT_MIN_GAP_S per slug). Never raises."""
+    from .. import bettor_xavier_standing_orders as _SPO
+    at = float(now if now is not None else time.time())
+    try:
+        got = await _SPO.note_market_message(conn, message, now=at)
+    except Exception as exc:                                   # noqa: BLE001
+        return {"ok": False, "error": "%s: %s" % (type(exc).__name__,
+                                                  str(exc)[:200])}
+    slug = ((message or {}).get("marketData") or (message or {}).get(
+        "marketDataLite") or (message or {}).get("trade") or {}).get(
+        "marketSlug")
+    last = _VENUE_EVENTS["last_market_pass"].get(slug)
+    if run_pass and got.get("relevant") and (
+            last is None or at - last >= MARKET_EVENT_MIN_GAP_S):
+        _VENUE_EVENTS["last_market_pass"][slug] = at
+        got["pass"] = await _service_once(
+            conn, now=at, source=SOURCE_VENUE_EVENT, slow=False,
+            trigger_source="VENUE_MARKET_EVENT")
+    return dict(got, ok=True)
+
+
+def attach_private_feed(ws, *, get_conn) -> dict:
+    """REGISTER THE HANDLERS ON AN SDK `PrivateWebSocket` (its `order_update`
+    / `order_snapshot` events). `get_conn` is an async context manager
+    factory for a database connection. Each message is handled on its own
+    task; the handler itself serialises on the execution lock."""
+    import asyncio as _aio
+
+    def _cb(message):
+        async def _run():
+            async with get_conn() as conn:
+                await on_private_order_message(conn, message)
+        try:
+            _aio.get_running_loop().create_task(_run())
+        except RuntimeError:
+            pass
+    ws.on("order_update", _cb)
+    ws.on("order_snapshot", _cb)
+    return {"attached": ["order_update", "order_snapshot"]}
 
 
 async def _agents_after_service(conn, out: dict, *, slow: bool) -> dict:
