@@ -76,12 +76,20 @@ def _no_store(response: Response) -> None:
     response.headers["Cache-Control"] = "no-store"
 
 
+_RID = Field(min_length=8, max_length=128, pattern=r"^[A-Za-z0-9][\w:.\-]+$",
+             description="client-supplied idempotency key; a retry or a "
+                         "reconnect with the same key returns the original "
+                         "result instead of acting again")
+
+
 class ChatBody(BaseModel):
+    request_id: str = _RID
     conversation_id: str | None = Field(default=None, max_length=100)
     message: str = Field(min_length=1, max_length=AC.MAX_MESSAGE_CHARS)
 
 
 class DirectiveBody(BaseModel):
+    request_id: str = _RID
     objective: str = Field(min_length=1, max_length=4000)
     accounts: list[str] | None = None
     agents: list[Literal["DEREK", "XAVIER"]] | None = None
@@ -94,19 +102,28 @@ class DirectiveBody(BaseModel):
 
 
 class ConfirmBody(BaseModel):
+    request_id: str = _RID
     answer: str | None = Field(default=None, max_length=2000)
     review_at: str | None = None
     accounts: list[str] | None = None
 
 
 class CancelBody(BaseModel):
+    request_id: str | None = Field(default=None, min_length=8,
+                                   max_length=128)
     reason: str = Field(default="cancelled by management", max_length=500)
 
 
-def _refusal_status(got: dict) -> None:
+def _refusal_status(got: dict, response: Response | None = None) -> None:
     r = got.get("refusal")
     if got.get("ok"):
         return
+    if r == D.R_REQUEST_IN_FLIGHT:
+        if response is not None:
+            response.status_code = 202
+        return
+    if r in (D.R_IDEMPOTENCY_MISMATCH, D.R_BAD_REQUEST_ID):
+        raise HTTPException(status_code=409, detail=got)
     if r == D.R_NOT_FOUND:
         raise HTTPException(status_code=404, detail=got)
     if r == D.R_NO_SCHEMA:
@@ -120,13 +137,17 @@ async def audrey_chat(body: ChatBody, response: Response,
                       role: str = Depends(resolve_role)) -> dict:
     _no_store(response)
     pool = await _pool()
-    async with pool.acquire() as conn:
-        got = await AC.handle_message(
-            conn, role=role, label=AC.ROLE_LABELS.get(role),
-            message=body.message, conversation_id=body.conversation_id,
-            now=_clock())
+    # the POOL, not a held connection: the service acquires a connection per
+    # read / write and holds none across the provider call
+    got = await AC.handle_message(
+        pool, role=role, label=AC.ROLE_LABELS.get(role),
+        message=body.message, conversation_id=body.conversation_id,
+        now=_clock(), request_id=body.request_id)
     if got.get("status") == AC.S_ERROR:
-        raise HTTPException(status_code=422, detail=got)
+        code = 409 if got.get("error") == D.R_IDEMPOTENCY_MISMATCH else 422
+        raise HTTPException(status_code=code, detail=got)
+    if got.get("status") == AC.S_PENDING:
+        response.status_code = 202
     return got
 
 
@@ -134,7 +155,8 @@ async def audrey_chat(body: ChatBody, response: Response,
             dependencies=[Depends(require_read)])
 async def audrey_chat_describe(response: Response) -> dict:
     _no_store(response)
-    return {"chat": AC.describe(), "directives": D.describe(),
+    return {"chat": AC.describe(), "provider": AC.provider_status(),
+            "directives": D.describe(),
             "tools": AC.tool_catalog(), "read_only": True}
 
 
@@ -231,44 +253,74 @@ async def audrey_directive(directive_id: str, response: Response) -> dict:
 
 
 @router.post("/api/command/agents/audrey/directives")
-async def audrey_directive_create(body: DirectiveBody,
+async def audrey_directive_create(body: DirectiveBody, response: Response,
                                   role: str = Depends(require_write)) -> dict:
     fields = body.model_dump(exclude_none=True)
+    request_id = fields.pop("request_id")
     objective = fields.pop("objective")
     pool = await _pool()
-    async with pool.acquire() as conn:
-        got = await D.create(conn, instruction=objective,
-                             requester_role=role,
-                             requester_label=AC.ROLE_LABELS.get(role),
-                             now=_clock(), fields=fields or None)
-    _refusal_status(got)
+    now = _clock()
+
+    async def _run():
+        async with pool.acquire() as conn:
+            return await D.create(conn, instruction=objective,
+                                  requester_role=role,
+                                  requester_label=AC.ROLE_LABELS.get(role),
+                                  now=now, fields=fields or None,
+                                  request_id=request_id)
+    got = await D.idempotent_call(
+        pool, request_id=request_id, kind="directive_create",
+        requester_role=role, payload={"objective": objective,
+                                      "fields": fields}, now=now, run=_run)
+    _refusal_status(got, response)
     return got
 
 
 @router.post("/api/command/agents/audrey/directives/{directive_id}/confirm")
 async def audrey_directive_confirm(directive_id: str, body: ConfirmBody,
+                                   response: Response,
                                    role: str = Depends(require_write)) -> dict:
     fields = {k: v for k, v in (("review_at", body.review_at),
                                 ("accounts", body.accounts)) if v}
     pool = await _pool()
-    async with pool.acquire() as conn:
-        got = await D.confirm(conn, directive_id=directive_id,
-                              requester_role=role,
-                              requester_label=AC.ROLE_LABELS.get(role),
-                              now=_clock(), answer=body.answer,
-                              fields=fields or None)
-    _refusal_status(got)
+    now = _clock()
+
+    async def _run():
+        async with pool.acquire() as conn:
+            return await D.confirm(conn, directive_id=directive_id,
+                                   requester_role=role,
+                                   requester_label=AC.ROLE_LABELS.get(role),
+                                   now=now, answer=body.answer,
+                                   fields=fields or None)
+    got = await D.idempotent_call(
+        pool, request_id=body.request_id, kind="directive_confirm",
+        requester_role=role, payload={"directive_id": directive_id,
+                                      "answer": body.answer,
+                                      "fields": fields}, now=now, run=_run)
+    _refusal_status(got, response)
     return got
 
 
 @router.post("/api/command/agents/audrey/directives/{directive_id}/cancel")
 async def audrey_directive_cancel(directive_id: str, body: CancelBody,
+                                  response: Response,
                                   role: str = Depends(require_write)) -> dict:
     pool = await _pool()
-    async with pool.acquire() as conn:
-        got = await D.cancel(conn, directive_id=directive_id,
-                             reason=body.reason, requester_role=role,
-                             requester_label=AC.ROLE_LABELS.get(role),
-                             now=_clock())
-    _refusal_status(got)
+    now = _clock()
+
+    async def _run():
+        async with pool.acquire() as conn:
+            return await D.cancel(conn, directive_id=directive_id,
+                                  reason=body.reason, requester_role=role,
+                                  requester_label=AC.ROLE_LABELS.get(role),
+                                  now=now)
+    if body.request_id:
+        got = await D.idempotent_call(
+            pool, request_id=body.request_id, kind="directive_cancel",
+            requester_role=role, payload={"directive_id": directive_id,
+                                          "reason": body.reason}, now=now,
+            run=_run)
+    else:
+        got = await _run()
+    _refusal_status(got, response)
     return got

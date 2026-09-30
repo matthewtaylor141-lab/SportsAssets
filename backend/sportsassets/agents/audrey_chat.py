@@ -19,7 +19,9 @@ HOW AN ANSWER IS PRODUCED
      CONTROL credential; a read caller gets a structured
      REQUIRES_OPERATOR_CREDENTIAL response.
   4. Composition. With an AI provider configured (ANTHROPIC_API_KEY), the
-     Claude Messages API is called over httpx with ONLY: a fixed system prompt,
+     Claude Messages API is called through the official Anthropic Python SDK
+     (`anthropic.AsyncAnthropic`, beta messages with the server-side refusal
+     fallback) with ONLY: a fixed system prompt,
      the typed tool definitions this caller may use, and the retrieved records
      wrapped as untrusted DATA. The model may call the typed tools and nothing
      else -- there is no shell, no SQL, no file or network tool. Without a key,
@@ -55,8 +57,6 @@ log = logging.getLogger(__name__)
 
 VERSION = "audrey-chat-v1"
 
-API_URL = "https://api.anthropic.com/v1/messages"
-ANTHROPIC_VERSION = "2023-06-01"
 DEFAULT_MODEL = "claude-opus-5-5"
 DEFAULT_TIMEOUT_S = 20.0
 MAX_TOOL_ROUNDS = 4
@@ -258,6 +258,11 @@ class Ctx:
     now: float
     conversation_id: str | None = None
     message_id: str | None = None
+    request_id: str | None = None
+    #: set only while the deterministic directive path runs: the chat
+    #: request's idempotency key, from which the directive id derives
+    directive_request_id: str | None = None
+    deadline_at: float | None = None
 
     @property
     def can_control(self) -> bool:
@@ -986,7 +991,8 @@ async def t_create_directive(conn, args, ctx):
     return _dres(await D.create(
         conn, instruction=args["instruction"], requester_role=ctx.role,
         requester_label=ctx.label, now=ctx.now,
-        conversation_id=ctx.conversation_id, message_id=ctx.message_id))
+        conversation_id=ctx.conversation_id, message_id=ctx.message_id,
+        request_id=ctx.directive_request_id))
 
 
 @_tool("confirm_directive",
@@ -1046,10 +1052,13 @@ _RX_ACCT = re.compile(r"\b(acct[-_:][\w\-:.]*\w)", re.I)
 _RX_FIXTURE = re.compile(
     r"(?:\b(?:fixture|market|slug|game|event)\s+)([\w\-:.]{3,})"
     r"|[\"'“‘]([^\"'”’]{3,80})[\"'”’]", re.I)
+# wh-words and "tell me / show me / explain" ask whatever the punctuation;
+# an auxiliary ("have", "do", "is" ...) asks only with a question mark --
+# "Have Xavier reduce unpaired exposure" is an instruction
 _RX_QUESTION_START = re.compile(
-    r"^\s*(what|why|how|which|who|when|where|did|does|do|is|are|was|were|"
-    r"has|have|can\s+you\s+(?:tell|show|explain)|tell\s+me|show\s+me|"
-    r"explain|list|give\s+me\s+(?:the|a)\s+(?:status|summary))\b", re.I)
+    r"^\s*(what|why|how|which|who|when|where|can\s+you\s+(?:tell|show|"
+    r"explain)|tell\s+me|show\s+me|explain|list|give\s+me\s+(?:the|a)\s+"
+    r"(?:status|summary))\b", re.I)
 _RX_DIRECTIVE_VERB = re.compile(
     r"^\s*(?:please\s+|audrey\s*[,:]\s*|directive\s*:\s*)*"
     r"(prioriti[sz]e|focus|reduce|cut|lower|minimi[sz]e|maximi[sz]e|"
@@ -1443,16 +1452,51 @@ def compose_deterministic(calls: list, *, disclosure: str,
 
 
 # ═════════════════════════════════════════════════════════════════════
-# 5 · THE PROVIDER (Claude Messages API over httpx; injectable transport)
+# 5 · THE PROVIDER (the official Anthropic Python SDK; injectable client)
 # ═════════════════════════════════════════════════════════════════════
-
-Transport = Callable[..., Awaitable[tuple]]
+#
+# REQUEST RULES for the default model (claude-opus-5-5), kept deliberately:
+#   * effort is set EXPLICITLY inside output_config (this model's default is
+#     `medium`); `thinking` is never sent -- `disabled` and `budget_tokens`
+#     are rejected with a 400 -- so adaptive thinking runs by default;
+#   * tool_choice is never forced (`any` / `tool` are a 400): `auto` only;
+#   * the server-side refusal fallback is requested with
+#     betas=["server-side-fallback-2026-07-01"] and fallbacks="default";
+#   * each tool round appends the model's FULL assistant content (thinking
+#     blocks included) unchanged, and returns every tool_result of that turn
+#     in ONE user message, failures as is_error=true. Earlier turns are never
+#     edited;
+#   * stop_reason is checked before content is read: refusal (with
+#     stop_details.category when present), max_tokens, tool_use, pause_turn,
+#     end_turn.
 
 
 class ProviderFailure(Exception):
     def __init__(self, reason: str):
         super().__init__(reason)
         self.reason = reason
+
+
+#: the last provider outcome in this process -- for `provider_status()`.
+#: Holds reasons and times only, never the credential or any content.
+_PROVIDER_STATE: dict[str, Any] = {"last_failure": None,
+                                   "last_failure_at": None,
+                                   "last_success_at": None,
+                                   "first_live_success_at": None,
+                                   "last_model": None, "attempts": 0,
+                                   "failures": 0}
+
+STATUS_PENDING_LIVE = ("implemented/tested; live provider verification "
+                       "pending")
+STATUS_LIVE_VERIFIED = "implemented/tested; live provider call succeeded"
+
+
+def sdk_version() -> str | None:
+    try:
+        import anthropic
+        return str(anthropic.__version__)
+    except Exception:                                           # noqa: BLE001
+        return None
 
 
 def provider_config(env=None) -> dict:
@@ -1466,20 +1510,64 @@ def provider_config(env=None) -> dict:
     except (TypeError, ValueError):
         timeout = DEFAULT_TIMEOUT_S
     timeout = max(2.0, min(60.0, timeout))
+    try:
+        retries = int(env.get("AUDREY_PROVIDER_MAX_RETRIES") or 0)
+    except (TypeError, ValueError):
+        retries = 0
+    retries = max(0, min(1, retries))
     disabled = (env.get("AUDREY_PROVIDER") or "").strip().lower() in (
         "off", "0", "false", "disabled", "none")
-    configured = bool(key) and not disabled
+    sdk = sdk_version()
+    configured = bool(key) and not disabled and sdk is not None
     reason = None
     if not key:
         reason = "NO_ANTHROPIC_API_KEY"
     elif disabled:
         reason = "DISABLED_BY_AUDREY_PROVIDER"
+    elif sdk is None:
+        reason = "ANTHROPIC_SDK_NOT_INSTALLED"
     return {"configured": configured, "provider": "anthropic",
-            "model": model, "timeout_s": timeout,
-            "total_budget_s": min(90.0, timeout * 3),
+            "key_present": bool(key), "sdk_version": sdk,
+            "model": model, "timeout_s": timeout, "max_retries": retries,
+            "total_budget_s": min(90.0, timeout * 3 * (retries + 1)),
             "reason": reason,
             "mode": MODE_LLM if configured else MODE_DETERMINISTIC,
             "disclosure": None if configured else DISCLOSE_NOT_CONFIGURED}
+
+
+def provider_status(env=None) -> dict:
+    """Startup / health read: configured or not (the key's PRESENCE, never
+    its value), the model, and the last failure reason and time."""
+    cfg = provider_config(env)
+    st = dict(_PROVIDER_STATE)
+    return {"status_text": (STATUS_LIVE_VERIFIED
+                            if st["first_live_success_at"]
+                            else STATUS_PENDING_LIVE),
+            "first_success_at": st["first_live_success_at"],
+            "configured": cfg["configured"], "key_present": cfg["key_present"],
+            "sdk_version": cfg["sdk_version"], "model": cfg["model"],
+            "mode": cfg["mode"], "reason": cfg["reason"],
+            "timeout_s": cfg["timeout_s"], "max_retries": cfg["max_retries"],
+            "last_failure": st["last_failure"],
+            "last_failure_at": st["last_failure_at"],
+            "last_success_at": st["last_success_at"],
+            "attempts": st["attempts"], "failures": st["failures"]}
+
+
+def _record_provider(*, ok: bool, reason: str | None, model: str,
+                     now: float, live: bool) -> None:
+    """`live` is True only when the SDK used its own HTTP client -- a call
+    through an injected (test) client never counts as live verification."""
+    _PROVIDER_STATE["attempts"] += 1
+    _PROVIDER_STATE["last_model"] = model
+    if ok:
+        _PROVIDER_STATE["last_success_at"] = _utc(now).isoformat()
+        if live and not _PROVIDER_STATE["first_live_success_at"]:
+            _PROVIDER_STATE["first_live_success_at"] = _utc(now).isoformat()
+    else:
+        _PROVIDER_STATE["failures"] += 1
+        _PROVIDER_STATE["last_failure"] = reason
+        _PROVIDER_STATE["last_failure_at"] = _utc(now).isoformat()
 
 
 def _api_key(env=None) -> str:
@@ -1487,28 +1575,49 @@ def _api_key(env=None) -> str:
     return (env.get("ANTHROPIC_API_KEY") or "").strip()
 
 
-async def httpx_transport(url: str, *, headers: dict, json_body: dict,
-                          timeout_s: float) -> tuple:
-    import httpx
+def http_client_factory():
+    """The HTTP client handed to the SDK. None in production (the SDK builds
+    its own); tests substitute an `httpx2.AsyncClient` over a MockTransport so
+    the real SDK request / response handling runs without a network."""
+    return None
 
-    async with httpx.AsyncClient(timeout=httpx.Timeout(
-            timeout_s, connect=min(5.0, timeout_s))) as client:
-        resp = await client.post(url, headers=headers, json=json_body)
-    try:
-        data = resp.json()
-    except ValueError:
-        data = None
-    return resp.status_code, data
+
+def make_client(cfg: dict, key: str, http_client=None):
+    import anthropic
+
+    kw: dict[str, Any] = {"api_key": key, "max_retries": cfg["max_retries"],
+                          "timeout": cfg["timeout_s"]}
+    if http_client is not None:
+        kw["http_client"] = http_client
+    return anthropic.AsyncAnthropic(**kw)
 
 
 def failure_reason(exc: BaseException) -> str:
+    """SDK exceptions, most specific first. Never the exception text."""
     if isinstance(exc, ProviderFailure):
         return exc.reason
-    name = type(exc).__name__
-    if isinstance(exc, (asyncio.TimeoutError, TimeoutError)) or \
-            "timeout" in name.lower():
+    try:
+        import anthropic
+    except Exception:                                           # noqa: BLE001
+        anthropic = None
+    if anthropic is not None:
+        if isinstance(exc, (anthropic.AuthenticationError,
+                            anthropic.PermissionDeniedError)):
+            return "PROVIDER_CREDENTIAL_REJECTED"
+        if isinstance(exc, anthropic.RateLimitError):
+            return "PROVIDER_RATE_LIMITED"
+        if isinstance(exc, anthropic.APIStatusError):
+            code = int(getattr(exc, "status_code", 0) or 0)
+            return "PROVIDER_OVERLOADED" if code == 529 else "HTTP_%d" % code
+        if isinstance(exc, anthropic.APITimeoutError):
+            return "TIMEOUT"
+        if isinstance(exc, anthropic.APIConnectionError):
+            return "CONNECTION_FAILED"
+        if isinstance(exc, anthropic.AnthropicError):
+            return "PROVIDER_ERROR:%s" % type(exc).__name__
+    if isinstance(exc, (asyncio.TimeoutError, TimeoutError)):
         return "TIMEOUT"
-    return "TRANSPORT_ERROR:%s" % name
+    return "PROVIDER_ERROR:%s" % type(exc).__name__
 
 
 def _wrap(label: str, payload, *, env=None) -> str:
@@ -1542,13 +1651,38 @@ def _history_messages(history: list) -> list:
     return msgs
 
 
-async def llm_answer(conn, *, cfg: dict, key: str, transport: Transport,
-                     question: str, prefetched: list, history: list,
-                     ctx: Ctx, executed: list, env=None) -> tuple:
-    """(answer_text, rounds). The model sees the fixed system prompt, the
-    tools this caller may use, the conversation's earlier turns and the
+def _block_dict(b) -> dict:
+    """A response content block as the API sent it (unset fields omitted),
+    for appending back unchanged."""
+    if isinstance(b, dict):
+        return b
+    to_dict = getattr(b, "to_dict", None)
+    if callable(to_dict):
+        return to_dict()
+    return b.model_dump(exclude_unset=True)
+
+
+def build_request(*, cfg: dict, msgs: list, tools: list) -> dict:
+    """The keyword arguments of `client.beta.messages.create`."""
+    req: dict[str, Any] = {"model": cfg["model"], "max_tokens": 4096,
+                           "system": SYSTEM_PROMPT, "tools": tools,
+                           "messages": msgs}
+    if cfg["model"] in EFFORT_MODELS:
+        req["output_config"] = {"effort": "low"}
+    if cfg["model"] in FALLBACK_MODELS:
+        req["betas"] = [FALLBACK_BETA]
+        req["fallbacks"] = "default"
+    return req
+
+
+async def llm_answer(db, *, cfg: dict, client, question: str,
+                     prefetched: list, history: list, ctx: Ctx,
+                     executed: list, env=None, meta: dict | None = None
+                     ) -> tuple:
+    """(answer_text, rounds, notes). The model sees the fixed system prompt,
+    the tools this caller may use, the conversation's earlier turns and the
     retrieved records as data. Every tool call goes through `run_tool`.
-    Raises ProviderFailure / transport errors; the caller falls back."""
+    Raises ProviderFailure / SDK errors; the caller falls back."""
     tools = [t.definition() for t in TOOLS.values()
              if t.permission == READ or ctx.can_control]
     msgs = _history_messages(history)
@@ -1556,45 +1690,47 @@ async def llm_answer(conn, *, cfg: dict, key: str, transport: Transport,
     msgs.append({"role": "user", "content": [
         {"type": "text", "text": question},
         {"type": "text", "text": _wrap("prefetched_records", pre, env=env)}]})
-    headers = {"x-api-key": key, "anthropic-version": ANTHROPIC_VERSION,
-               "content-type": "application/json"}
-    body: dict[str, Any] = {"model": cfg["model"], "max_tokens": 4096,
-                            "system": SYSTEM_PROMPT, "tools": tools,
-                            "messages": msgs}
-    if cfg["model"] in EFFORT_MODELS:
-        body["output_config"] = {"effort": "low"}
-    if cfg["model"] in FALLBACK_MODELS:
-        body["fallbacks"] = "default"
-        headers["anthropic-beta"] = FALLBACK_BETA
+    notes: dict[str, Any] = {}
+    last_pause = False
     for rnd in range(MAX_TOOL_ROUNDS):
-        status, data = await asyncio.wait_for(
-            transport(API_URL, headers=headers, json_body=body,
-                      timeout_s=cfg["timeout_s"]),
-            timeout=cfg["timeout_s"] + 2.0)
-        if status != 200:
-            etype = ""
-            if isinstance(data, dict) and isinstance(data.get("error"), dict):
-                etype = re.sub(r"[^a-z_]", "", str(
-                    data["error"].get("type") or ""))[:40]
-            raise ProviderFailure("HTTP_%s%s" % (int(status),
-                                                 (":" + etype) if etype
-                                                 else ""))
-        if not isinstance(data, dict) or not isinstance(data.get("content"),
-                                                        list):
-            raise ProviderFailure("MALFORMED_RESPONSE")
-        stop, content = data.get("stop_reason"), data["content"]
+        req = build_request(cfg=cfg, msgs=msgs, tools=tools)
+        resp = await asyncio.wait_for(client.beta.messages.create(**req),
+                                      timeout=cfg["timeout_s"] + 2.0)
+        stop = getattr(resp, "stop_reason", None)
+        content = getattr(resp, "content", None)
+        answered = getattr(resp, "model", None)
+        if meta is not None and isinstance(answered, str):
+            meta["answered_model"] = answered
+            if answered != cfg["model"]:
+                meta["fallback_used"] = True
         if stop == "refusal":
-            raise ProviderFailure("PROVIDER_REFUSAL")
-        if stop == "tool_use":
-            body["messages"].append({"role": "assistant", "content": content})
+            cat = None
+            sd = getattr(resp, "stop_details", None)
+            if sd is not None:
+                cat = sd.get("category") if isinstance(sd, dict) else \
+                    getattr(sd, "category", None)
+            raise ProviderFailure("PROVIDER_REFUSAL" + (
+                ":" + re.sub(r"[^a-z_]", "", str(cat))[:40] if cat else ""))
+        if not isinstance(content, list):
+            raise ProviderFailure("MALFORMED_RESPONSE")
+        blocks = [_block_dict(b) for b in content]
+        if stop in ("tool_use", "pause_turn"):
+            # append-only: the assistant turn goes back exactly as received
+            msgs.append({"role": "assistant", "content": blocks})
+            if stop == "pause_turn":
+                last_pause = True
+                continue
+            last_pause = False
             results = []
-            for b in content:
-                if not isinstance(b, dict) or b.get("type") != "tool_use":
+            for b in blocks:
+                if b.get("type") != "tool_use":
                     continue
                 name = str(b.get("name") or "")
                 args = b.get("input") if isinstance(b.get("input"),
                                                     dict) else {}
-                res = await run_tool(conn, name, args, ctx)
+                # a connection only for this tool's reads / writes
+                async with D.use(db) as conn:
+                    res = await run_tool(conn, name, args, ctx)
                 executed.append((name, _redact_obj(args, env=env), res))
                 results.append({
                     "type": "tool_result", "tool_use_id": b.get("id"),
@@ -1603,15 +1739,23 @@ async def llm_answer(conn, *, cfg: dict, key: str, transport: Transport,
                                                   "UNAVAILABLE")})
             if not results:
                 raise ProviderFailure("TOOL_USE_WITHOUT_A_TOOL_CALL")
-            body["messages"].append({"role": "user", "content": results})
+            # every tool_result of this turn in ONE user message
+            msgs.append({"role": "user", "content": results})
             continue
-        text = "".join(str(b.get("text") or "") for b in content
-                       if isinstance(b, dict) and b.get("type") == "text")
-        text = text.strip()
+        if stop not in ("end_turn", "max_tokens", "stop_sequence"):
+            raise ProviderFailure("UNEXPECTED_STOP_REASON:%s"
+                                  % re.sub(r"[^a-z_]", "", str(stop))[:40])
+        text = "".join(str(b.get("text") or "") for b in blocks
+                       if b.get("type") == "text").strip()
+        if stop == "max_tokens":
+            # an answer cut off at the output limit is INCOMPLETE, not an
+            # answer: the records answer instead
+            raise ProviderFailure("MAX_TOKENS")
         if not text:
             raise ProviderFailure("EMPTY_ANSWER")
-        return text, rnd + 1
-    raise ProviderFailure("TOOL_ROUNDS_EXCEEDED")
+        return text, rnd + 1, notes
+    raise ProviderFailure("PAUSE_TURN_LIMIT" if last_pause
+                          else "TOOL_ROUNDS_EXCEEDED")
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -1646,7 +1790,9 @@ async def _ensure_conversation(conn, cid, *, role, label, now) -> None:
 
 async def _append(conn, cid, *, role: str, body: str, now: float,
                   requester_role: str, intent: str | None = None,
-                  citations=None, provider=None, tool_calls=None) -> str:
+                  citations=None, provider=None, tool_calls=None,
+                  outcome: str | None = None,
+                  request_id: str | None = None) -> str:
     async with conn.transaction():
         await conn.execute("SELECT pg_advisory_xact_lock(hashtext($1))",
                            "audrey_chat:" + cid)
@@ -1657,11 +1803,12 @@ async def _append(conn, cid, *, role: str, body: str, now: float,
         await conn.execute(
             "INSERT INTO audrey_messages (message_id, conversation_id, seq, "
             " at, role, requester_role, body, intent, citations, provider, "
-            " tool_calls) VALUES ($1,$2,$3,to_timestamp($4),$5,$6,$7,$8,"
-            " $9::jsonb,$10::jsonb,$11::jsonb)",
+            " tool_calls, outcome, request_id) VALUES ($1,$2,$3,"
+            " to_timestamp($4),$5,$6,$7,$8,$9::jsonb,$10::jsonb,$11::jsonb,"
+            " $12,$13)",
             mid, cid, int(seq), float(now), role, requester_role, body,
             intent, _j(citations or []), _j(provider or {}),
-            _j(tool_calls or []))
+            _j(tool_calls or []), outcome, request_id)
         await conn.execute(
             "UPDATE audrey_conversations SET updated_at = GREATEST("
             " updated_at, to_timestamp($2)) WHERE conversation_id=$1", cid,
@@ -1678,7 +1825,8 @@ async def conversation(conn, cid: str) -> dict | None:
         return None
     msgs = await conn.fetch(
         "SELECT message_id, seq, at, role, requester_role, body, intent, "
-        " citations, provider, tool_calls FROM audrey_messages WHERE "
+        " outcome, request_id, citations, provider, tool_calls FROM "
+        " audrey_messages WHERE "
         " conversation_id=$1 ORDER BY seq", cid)
     return {"conversation": _jsonable(dict(c)),
             "messages": [_jsonable(dict(m)) for m in msgs]}
@@ -1707,6 +1855,83 @@ async def _history(conn, cid: str, *, before_seq: int | None,
 # ═════════════════════════════════════════════════════════════════════
 # 7 · THE SERVICE
 # ═════════════════════════════════════════════════════════════════════
+#
+# BOUNDS
+#   AUDREY_PROVIDER_TIMEOUT_S   bounds ONE HTTP attempt inside the SDK
+#                               (SDK `timeout=`; default 20s, 2..60s).
+#   AUDREY_PROVIDER_MAX_RETRIES the SDK's retries of a retryable failure --
+#                               429, 529/5xx, connection errors -- (default
+#                               0, at most 1); then the deterministic answer.
+#   AUDREY_CHAT_DEADLINE_S      bounds the WHOLE chat operation: every SDK
+#                               attempt and retry, every tool round and every
+#                               database read / write (default 45s, 1..120s),
+#                               enforced with asyncio.timeout. On expiry the
+#                               turn is recorded as DEADLINE_EXCEEDED and that
+#                               truthful state is returned. The model is given
+#                               only what is left of the deadline minus a
+#                               reserve, so the deterministic answer still fits.
+# CONNECTIONS: a connection is acquired for each read or write and released
+# at once (`directives.use`); none is held -- and no transaction is open --
+# across a provider call. No execution lock is taken. This runs on the API
+# request path only; nothing in the scheduler or servicing path imports it.
+
+DEFAULT_DEADLINE_S = 45.0
+DEADLINE_RESERVE_S = 5.0
+
+# outcomes recorded on each Audrey turn (audrey_messages.outcome)
+O_SUCCESS = "SUCCESS"
+O_DETERMINISTIC = "DETERMINISTIC"
+O_REFUSAL = "PROVIDER_REFUSAL"
+O_INCOMPLETE = "INCOMPLETE_OUTPUT"
+O_MALFORMED_ARGS = "MALFORMED_TOOL_ARGUMENTS"
+O_TEXT_WITHOUT_TOOL = "TEXT_WITHOUT_TOOL_CALL"
+O_UNAVAILABLE = "PROVIDER_UNAVAILABLE"
+O_REFUSED = "REFUSED"
+O_REQUIRES_OPERATOR = "REQUIRES_OPERATOR"
+O_DIRECTIVE = "DIRECTIVE_RECORDED"
+O_DEADLINE = "DEADLINE_EXCEEDED"
+S_DEADLINE = "DEADLINE_EXCEEDED"
+S_PENDING = "PENDING"
+
+DISCLOSE_DISCARDED = ("AI answer discarded: it claimed an action no tool "
+                      "performed — answered directly from records")
+
+_CLAIM = re.compile(
+    r"\b(?:i\s+(?:have\s+|'ve\s+)?(?:created|recorded|set\s+up|registered|"
+    r"filed|opened|assigned|cancel+ed|confirmed|activated|issued)\b|"
+    r"(?:directive|task)s?\b[^.\n]{0,80}\b(?:has|have|is|was|were)\s+(?:now\s+)?"
+    r"(?:been\s+)?(?:created|recorded|assigned|cancel+ed|confirmed|activated|"
+    r"issued)\b|(?:created|recorded|issued)\s+(?:a|the|your)\s+(?:new\s+)?"
+    r"(?:directive|task))", re.I)
+
+
+def deadline_s(env=None) -> float:
+    env = os.environ if env is None else env
+    try:
+        v = float(env.get("AUDREY_CHAT_DEADLINE_S") or DEFAULT_DEADLINE_S)
+    except (TypeError, ValueError):
+        v = DEFAULT_DEADLINE_S
+    return max(1.0, min(120.0, v))
+
+
+def _outcome_of_failure(reason: str) -> str:
+    if reason.startswith("PROVIDER_REFUSAL"):
+        return O_REFUSAL
+    if reason in ("MAX_TOKENS", "PAUSE_TURN_LIMIT", "TOOL_ROUNDS_EXCEEDED"):
+        return O_INCOMPLETE
+    return O_UNAVAILABLE
+
+
+def _committed(res: dict) -> str | None:
+    """The directive id a mutating tool call COMMITTED -- only from the
+    persistence layer's read-back, never inferred."""
+    data = res.get("data") or {}
+    d = data.get("directive") if isinstance(data, dict) else None
+    if res.get("status") == "OK" and isinstance(d, dict) \
+            and d.get("directive_id"):
+        return str(d["directive_id"])
+    return None
+
 
 def _call_record(name, args, res) -> dict:
     return {"tool": name, "permission": (TOOLS[name].permission
@@ -1715,69 +1940,157 @@ def _call_record(name, args, res) -> dict:
             "citations": res.get("citations") or []}
 
 
-async def handle_message(conn, *, role: str, message: str,
+async def handle_message(db, *, role: str, message: str,
                          label: str | None = None,
                          conversation_id: str | None = None,
-                         now: float, env=None,
-                         transport: Transport | None = None) -> dict:
-    """One management message in, one cited answer out. `role` is the role
-    the ROUTE authenticated. Never raises for a provider failure or a
-    refusal; an invalid request returns status ERROR."""
+                         now: float, env=None, http_client=None,
+                         request_id: str | None = None) -> dict:
+    """One management message in, one cited answer out.
+
+    `db` is a pool (a connection is acquired per read / write) or a single
+    connection. `role` is the role the ROUTE authenticated. With a
+    `request_id` the call is idempotent: a replay returns the stored result
+    and acts again on nothing. Never raises for a provider failure, a refusal
+    or the deadline; an invalid request returns status ERROR."""
     if role not in D.CONTROL_ROLES | D.READ_ROLES:
         return {"status": S_ERROR, "error": "UNKNOWN_ROLE"}
-    label = label or ROLE_LABELS.get(role)
     raw = str(message or "")
     if not raw.strip():
         return {"status": S_ERROR, "error": "EMPTY_MESSAGE"}
     if len(raw) > MAX_MESSAGE_CHARS:
         return {"status": S_ERROR, "error": "MESSAGE_TOO_LONG",
                 "max_chars": MAX_MESSAGE_CHARS}
-    text = redact(" ".join(raw.split()), env=env)
     if conversation_id is not None and not _CID.match(str(conversation_id)):
         return {"status": S_ERROR, "error": "INVALID_CONVERSATION_ID"}
+    text = redact(" ".join(raw.split()), env=env)
+    if request_id is None:
+        return await _deadlined(db, role=role, label=label, text=text,
+                                conversation_id=conversation_id, now=now,
+                                env=env, http_client=http_client,
+                                request_id=None)
+    if not D.valid_request_id(request_id):
+        return {"status": S_ERROR, "error": D.R_BAD_REQUEST_ID}
+
+    async def _run():
+        return await _deadlined(db, role=role, label=label, text=text,
+                                conversation_id=conversation_id, now=now,
+                                env=env, http_client=http_client,
+                                request_id=request_id)
+    got = await D.idempotent_call(
+        db, request_id=request_id, kind="chat", requester_role=role,
+        payload={"conversation_id": conversation_id, "message": text},
+        now=now, run=_run)
+    if got.get("refusal") == D.R_IDEMPOTENCY_MISMATCH:
+        return dict(got, status=S_ERROR, error=D.R_IDEMPOTENCY_MISMATCH)
+    if got.get("refusal") == D.R_REQUEST_IN_FLIGHT:
+        return dict(got, status=S_PENDING)
+    return got
+
+
+async def _deadlined(db, *, role, label, text, conversation_id, now, env,
+                     http_client, request_id) -> dict:
+    label = label or ROLE_LABELS.get(role)
     cid = conversation_id or conversation_id_for(role=role, now=now,
                                                  message=text)
-    persisted = await has_schema(conn)
-    mgmt_mid = None
-    if persisted:
-        await _ensure_conversation(conn, cid, role=role, label=label, now=now)
-        mgmt_mid = await _append(conn, cid, role="MANAGEMENT", body=text,
-                                 now=now, requester_role=role)
     ctx = Ctx(role=role, label=label, now=now, conversation_id=cid,
-              message_id=mgmt_mid)
+              request_id=request_id)
     out: dict[str, Any] = {"conversation_id": cid,
-                           "management_message_id": mgmt_mid,
-                           "persisted": persisted, "role": role,
-                           "can_control": ctx.can_control}
+                           "management_message_id": None, "persisted": False,
+                           "role": role, "can_control": ctx.can_control}
+    limit = deadline_s(env)
+    loop = asyncio.get_running_loop()
+    ctx.deadline_at = loop.time() + limit
+    try:
+        async with asyncio.timeout(limit):
+            return await _handle(db, ctx, text, out, env=env,
+                                 http_client=http_client)
+    except TimeoutError:
+        log.warning("audrey chat: deadline of %.0fs exceeded", limit)
+        return await _deadline_exceeded(db, ctx, text, out, limit)
+
+
+async def _deadline_exceeded(db, ctx, text, out, limit) -> dict:
+    """Record the truthful state: the question was received, the answer was
+    not produced within the deadline. Anything a directive write committed
+    before the cut stays committed and is found by its request id."""
+    provider = {"mode": MODE_DETERMINISTIC, "answer_mode": MODE_DETERMINISTIC,
+                "failure": O_DEADLINE, "reason": O_DEADLINE,
+                "deadline_s": limit, "outcome": O_DEADLINE}
+    answer = ("[Deadline exceeded — no answer was produced within %.0fs. "
+              "Nothing further was done; ask again, or read the directives "
+              "list for any directive this request recorded.]" % limit)
+    try:
+        async with D.use(db) as conn:
+            if await has_schema(conn):
+                await _ensure_conversation(conn, ctx.conversation_id,
+                                           role=ctx.role, label=ctx.label,
+                                           now=ctx.now)
+                if not out.get("management_message_id"):
+                    out["management_message_id"] = await _append(
+                        conn, ctx.conversation_id, role="MANAGEMENT",
+                        body=text, now=ctx.now, requester_role=ctx.role,
+                        request_id=ctx.request_id)
+                out["message_id"] = await _append(
+                    conn, ctx.conversation_id, role="AUDREY", body=answer,
+                    now=ctx.now, requester_role=ctx.role, intent=O_DEADLINE,
+                    provider=provider, outcome=O_DEADLINE,
+                    request_id=ctx.request_id)
+                out["persisted"] = True
+    except Exception as exc:                                    # noqa: BLE001
+        log.warning("deadline state not recorded: %s", type(exc).__name__)
+    out.update({"status": S_DEADLINE, "outcome": O_DEADLINE,
+                "answer": answer, "citations": [], "provider": provider,
+                "tool_calls": []})
+    return out
+
+
+async def _tool(db, name, args, ctx) -> dict:
+    async with D.use(db) as conn:
+        return await run_tool(conn, name, args, ctx)
+
+
+async def _handle(db, ctx: Ctx, text: str, out: dict, *, env,
+                  http_client) -> dict:
+    async with D.use(db) as conn:
+        persisted = await has_schema(conn)
+        if persisted:
+            await _ensure_conversation(conn, ctx.conversation_id,
+                                       role=ctx.role, label=ctx.label,
+                                       now=ctx.now)
+            ctx.message_id = await _append(
+                conn, ctx.conversation_id, role="MANAGEMENT", body=text,
+                now=ctx.now, requester_role=ctx.role,
+                request_id=ctx.request_id)
+        pending = None
+        try:
+            pending = await D.open_draft_in(conn, ctx.conversation_id)
+        except Exception:                                       # noqa: BLE001
+            pending = None
+    out.update({"management_message_id": ctx.message_id,
+                "persisted": persisted})
 
     # 1 · the authority screen (before anything else, in every mode)
     screen = D.screen_authority(text)
     if screen["refused"]:
-        return await _refuse_authority(conn, ctx, text, screen, out,
-                                       persisted)
+        return await _refuse_authority(db, ctx, text, screen, out, persisted)
 
     # 2 · deterministic routing
-    pending = None
-    try:
-        pending = await D.open_draft_in(conn, cid)
-    except Exception:                                           # noqa: BLE001
-        pending = None
     plan = route(text, pending_draft=pending)
     out["intent"] = plan["intent"]
-
     if plan["mutation"]:
-        return await _mutation(conn, ctx, plan, out, persisted, pending)
-
+        return await _mutation(db, ctx, plan, out, persisted, pending)
     calls = []
     for name, args in plan["calls"]:
-        calls.append((name, args, await run_tool(conn, name, args, ctx)))
+        calls.append((name, args, await _tool(db, name, args, ctx)))
 
     # 3 · composition
     cfg = provider_config(env)
-    provider: dict[str, Any] = {"mode": MODE_DETERMINISTIC,
-                                "provider": cfg["provider"],
-                                "model": None, "configured": cfg["configured"],
-                                "failure": None, "reason": cfg["reason"]}
+    provider: dict[str, Any] = {
+        "mode": MODE_DETERMINISTIC, "answer_mode": MODE_DETERMINISTIC,
+        "provider": cfg["provider"], "configured": cfg["configured"],
+        "model": None, "requested_model": None, "answered_model": None,
+        "fallback_enabled": False, "provider_fallback_used": False,
+        "failure": None, "reason": cfg["reason"], "outcome": O_DETERMINISTIC}
     executed: list = []
     answer = None
     preface = None
@@ -1789,27 +2102,9 @@ async def handle_message(conn, *, role: str, message: str,
                    "decisions helped or hurt; what today's audit found; what "
                    "change is proposed; or what happened to a directive.")
     if cfg["configured"]:
-        try:
-            history = await _history(conn, cid, before_seq=None) \
-                if persisted else []
-            text_ans, rounds = await asyncio.wait_for(
-                llm_answer(conn, cfg=cfg, key=_api_key(env),
-                           transport=transport or httpx_transport,
-                           question=text, prefetched=calls, history=history,
-                           ctx=ctx, executed=executed, env=env),
-                timeout=cfg["total_budget_s"])
-            answer = redact(text_ans, env=env)
-            provider.update({"mode": MODE_LLM, "model": cfg["model"],
-                             "rounds": rounds, "reason": None,
-                             "disclosure": "Answered by %s from the cited "
-                                           "records" % cfg["model"]})
-        except Exception as exc:                                # noqa: BLE001
-            reason = failure_reason(exc)
-            log.warning("audrey chat: provider failed (%s); answering from "
-                        "records", reason)
-            provider.update({"failure": reason, "model": cfg["model"],
-                             "reason": "PROVIDER_FAILED",
-                             "disclosure": DISCLOSE_UNAVAILABLE})
+        answer = await _llm(db, ctx, text, cfg, calls, executed, provider,
+                            persisted=persisted, env=env,
+                            http_client=http_client)
     else:
         provider["disclosure"] = DISCLOSE_NOT_CONFIGURED
     all_calls = calls + executed
@@ -1823,57 +2118,143 @@ async def handle_message(conn, *, role: str, message: str,
         answer = answer + "\n\n" + _sources_line(cites)
     directive = None
     for n, _a, r_ in executed:
-        if n in MUTATING_TOOLS and (r_.get("data") or {}).get("directive"):
+        if n in MUTATING_TOOLS and _committed(r_):
             directive = r_["data"]["directive"]
-    return await _finish(conn, ctx, out, persisted, status=S_ANSWERED,
+    return await _finish(db, ctx, out, persisted, status=S_ANSWERED,
                          intent=plan["intent"], answer=answer,
                          citations=cites, provider=provider,
-                         calls=all_calls, directive=directive)
+                         calls=all_calls, directive=directive,
+                         outcome=provider["outcome"])
 
 
-async def _finish(conn, ctx: Ctx, out: dict, persisted: bool, *, status,
-                  intent, answer, citations, provider, calls,
+async def _llm(db, ctx, text, cfg, calls, executed, provider, *, persisted,
+               env, http_client) -> str | None:
+    """The model's answer, or None with the failure recorded on `provider`.
+    Holds no connection across the network call."""
+    provider.update({"requested_model": cfg["model"],
+                     "model": cfg["model"],
+                     "fallback_enabled": cfg["model"] in FALLBACK_MODELS})
+    history = []
+    if persisted:
+        async with D.use(db) as conn:
+            history = await _history(conn, ctx.conversation_id,
+                                     before_seq=None)
+    loop = asyncio.get_running_loop()
+    budget = min(cfg["total_budget_s"],
+                 ctx.deadline_at - loop.time() - DEADLINE_RESERVE_S) \
+        if ctx.deadline_at else cfg["total_budget_s"]
+    injected = http_client if http_client is not None else \
+        http_client_factory()
+    live = injected is None
+    meta: dict[str, Any] = {}
+    try:
+        if budget <= 0:
+            raise ProviderFailure("NO_TIME_LEFT_BEFORE_THE_DEADLINE")
+        client = make_client(cfg, _api_key(env), injected)
+        try:
+            text_ans, rounds, notes = await asyncio.wait_for(
+                llm_answer(db, cfg=cfg, client=client, question=text,
+                           prefetched=calls, history=history, ctx=ctx,
+                           executed=executed, env=env, meta=meta),
+                timeout=budget)
+        finally:
+            try:
+                await client.close()
+            except Exception:                                   # noqa: BLE001
+                pass
+    except Exception as exc:                                    # noqa: BLE001
+        reason = failure_reason(exc)
+        log.warning("audrey chat: provider failed (%s); answering from "
+                    "records", reason)
+        _record_provider(ok=False, reason=reason, model=cfg["model"],
+                         now=ctx.now, live=live)
+        provider.update({"failure": reason, "reason": "PROVIDER_FAILED",
+                         "answered_model": meta.get("answered_model"),
+                         "provider_fallback_used": bool(
+                             meta.get("fallback_used")),
+                         "outcome": _outcome_of_failure(reason),
+                         "disclosure": DISCLOSE_UNAVAILABLE})
+        if reason.startswith("PROVIDER_REFUSAL:"):
+            provider["refusal_category"] = reason.split(":", 1)[1]
+        return None
+    _record_provider(ok=True, reason=None, model=cfg["model"], now=ctx.now,
+                     live=live)
+    provider.update({
+        "mode": MODE_LLM, "answer_mode": MODE_LLM, "rounds": rounds,
+        "reason": None, "answered_model": meta.get("answered_model"),
+        "provider_fallback_used": bool(meta.get("fallback_used")),
+        "outcome": O_SUCCESS,
+        "disclosure": "Answered by %s from the cited records" % (
+            meta.get("answered_model") or cfg["model"])})
+    if notes.get("truncated"):
+        provider["truncated"] = True
+    if any(str(r_.get("why") or "").startswith("INVALID_ARGUMENTS")
+           for _n, _a, r_ in executed):
+        provider["outcome"] = O_MALFORMED_ARGS
+    # A reply that CLAIMS an action no tool committed is never reported as
+    # that action: it is discarded and the records answer instead.
+    committed = [_committed(r_) for n, _a, r_ in executed
+                 if n in MUTATING_TOOLS]
+    if _CLAIM.search(text_ans or "") and not any(committed):
+        provider.update({"mode": MODE_DETERMINISTIC,
+                         "answer_mode": MODE_DETERMINISTIC,
+                         "failure": O_TEXT_WITHOUT_TOOL,
+                         "outcome": O_TEXT_WITHOUT_TOOL,
+                         "disclosure": DISCLOSE_DISCARDED})
+        return None
+    return redact(text_ans, env=env)
+
+
+async def _finish(db, ctx: Ctx, out: dict, persisted: bool, *, status,
+                  intent, answer, citations, provider, calls, outcome,
                   directive=None, extra=None) -> dict:
     records = [_call_record(n, a, r_) for n, a, r_ in calls]
+    provider = dict(provider, outcome=outcome)
     mid = None
     if persisted:
-        for rec in records:
-            await _append(conn, ctx.conversation_id, role="TOOL",
-                          body="%s -> %s%s" % (rec["tool"], rec["status"],
-                                               (" (%s)" % rec["why"])
-                                               if rec.get("why") else ""),
-                          now=ctx.now, requester_role=ctx.role,
-                          intent=intent, citations=rec["citations"],
-                          tool_calls=[rec])
-        mid = await _append(conn, ctx.conversation_id, role="AUDREY",
-                            body=answer, now=ctx.now, requester_role=ctx.role,
-                            intent=intent, citations=citations,
-                            provider=provider, tool_calls=records)
+        async with D.use(db) as conn:
+            for rec in records:
+                await _append(conn, ctx.conversation_id, role="TOOL",
+                              body="%s -> %s%s" % (
+                                  rec["tool"], rec["status"],
+                                  (" (%s)" % rec["why"])
+                                  if rec.get("why") else ""),
+                              now=ctx.now, requester_role=ctx.role,
+                              intent=intent, citations=rec["citations"],
+                              tool_calls=[rec], request_id=ctx.request_id)
+            mid = await _append(conn, ctx.conversation_id, role="AUDREY",
+                                body=answer, now=ctx.now,
+                                requester_role=ctx.role, intent=intent,
+                                citations=citations, provider=provider,
+                                tool_calls=records, outcome=outcome,
+                                request_id=ctx.request_id)
     out.update({"status": status, "intent": intent, "message_id": mid,
-                "answer": answer, "citations": citations,
+                "outcome": outcome, "answer": answer, "citations": citations,
                 "provider": provider, "tool_calls": records})
-    if directive is not None:
+    if directive is not None and directive.get("directive_id"):
         out["directive"] = directive
+        out["committed_directive_id"] = directive["directive_id"]
     if extra:
         out.update(extra)
     return out
 
 
-async def _refuse_authority(conn, ctx: Ctx, text: str, screen: dict,
+async def _refuse_authority(db, ctx: Ctx, text: str, screen: dict,
                             out: dict, persisted: bool) -> dict:
     log.warning("audrey chat: %s refused (%s) for role %s", D.R_PROHIBITED,
                 ",".join(screen["categories"]), ctx.role)
     directive = None
     request = None
-    calls = []
     if ctx.can_control and set(screen["categories"]) - {"RUN_SHELL"}:
         # a legitimate owner request: recorded for the owner's process
         try:
-            got = await D.create(conn, instruction=text,
-                                 requester_role=ctx.role,
-                                 requester_label=ctx.label, now=ctx.now,
-                                 conversation_id=ctx.conversation_id,
-                                 message_id=ctx.message_id)
+            async with D.use(db) as conn:
+                got = await D.create(conn, instruction=text,
+                                     requester_role=ctx.role,
+                                     requester_label=ctx.label, now=ctx.now,
+                                     conversation_id=ctx.conversation_id,
+                                     message_id=ctx.message_id,
+                                     request_id=ctx.request_id)
             directive = got.get("directive")
             request = got.get("approval_request")
         except Exception as exc:                                # noqa: BLE001
@@ -1902,21 +2283,23 @@ async def _refuse_authority(conn, ctx: Ctx, text: str, screen: dict,
          "process: %s." % "; ".join("%s -> %s" % kv
                                      for kv in request["routes"].items())),
         _sources_line(cites)])
-    provider = {"mode": MODE_DETERMINISTIC, "model": None, "failure": None,
+    provider = {"mode": MODE_DETERMINISTIC, "answer_mode": MODE_DETERMINISTIC,
+                "model": None, "failure": None,
                 "reason": "REFUSALS_ARE_NEVER_DELEGATED_TO_A_MODEL",
                 "disclosure": DISCLOSE_REFUSAL}
     return await _finish(
-        conn, ctx, out, persisted, status=S_REFUSED,
+        db, ctx, out, persisted, status=S_REFUSED,
         intent="REFUSED_" + D.R_PROHIBITED, answer=answer, citations=cites,
-        provider=provider, calls=calls, directive=directive,
+        provider=provider, calls=[], directive=directive, outcome=O_REFUSED,
         extra={"refusal": D.R_PROHIBITED,
                "categories": screen["categories"],
                "approval_request": request, "executed": False})
 
 
-async def _mutation(conn, ctx: Ctx, plan: dict, out: dict, persisted: bool,
+async def _mutation(db, ctx: Ctx, plan: dict, out: dict, persisted: bool,
                     pending: dict | None) -> dict:
-    provider = {"mode": MODE_DETERMINISTIC, "model": None, "failure": None,
+    provider = {"mode": MODE_DETERMINISTIC, "answer_mode": MODE_DETERMINISTIC,
+                "model": None, "failure": None,
                 "reason": "DIRECTIVE_WRITES_ARE_DETERMINISTIC",
                 "disclosure": DISCLOSE_DIRECTIVE}
     if not ctx.can_control:
@@ -1934,35 +2317,45 @@ async def _mutation(conn, ctx: Ctx, plan: dict, out: dict, persisted: bool,
             "session holds a read credential. Nothing was recorded as a "
             "directive. Questions still work." % plan["intent"],
             _sources_line([])])
-        return await _finish(conn, ctx, out, persisted,
+        return await _finish(db, ctx, out, persisted,
                              status=S_REQUIRES_OPERATOR, intent=plan["intent"],
                              answer=answer, citations=[], provider=provider,
-                             calls=[], extra={"requires": requires})
+                             calls=[], outcome=O_REQUIRES_OPERATOR,
+                             extra={"requires": requires})
     calls = []
-    for name, args in plan["calls"]:
-        if name in ("cancel_directive", "confirm_directive", "assign_task") \
-                and not args.get("directive_id"):
-            latest = pending or (await D.list_directives(conn, limit=1)
-                                 or [None])[0]
-            if name == "cancel_directive":
-                opens = [d for d in await D.list_directives(conn, limit=20)
-                         if d["status"] in D.OPEN_STATUSES
-                         and d.get("conversation_id") == ctx.conversation_id]
-                latest = opens[0] if opens else None
-            if latest is None:
-                calls.append((name, args, _res(
-                    "REFUSED", why="NO_DIRECTIVE_ID_GIVEN_AND_NONE_OPEN_IN_"
-                    "THIS_CONVERSATION")))
-                continue
-            args = dict(args, directive_id=latest["directive_id"])
-        calls.append((name, args, await run_tool(conn, name, args, ctx)))
+    # the chat request's idempotency key names the directive it creates
+    ctx.directive_request_id = ctx.request_id
+    try:
+        for name, args in plan["calls"]:
+            if name in ("cancel_directive", "confirm_directive",
+                        "assign_task") and not args.get("directive_id"):
+                async with D.use(db) as conn:
+                    latest = pending or (await D.list_directives(
+                        conn, limit=1) or [None])[0]
+                    if name == "cancel_directive":
+                        opens = [d for d in await D.list_directives(
+                            conn, limit=20)
+                            if d["status"] in D.OPEN_STATUSES
+                            and d.get("conversation_id")
+                            == ctx.conversation_id]
+                        latest = opens[0] if opens else None
+                if latest is None:
+                    calls.append((name, args, _res(
+                        "REFUSED", why="NO_DIRECTIVE_ID_GIVEN_AND_NONE_OPEN_"
+                        "IN_THIS_CONVERSATION")))
+                    continue
+                args = dict(args, directive_id=latest["directive_id"])
+            calls.append((name, args, await _tool(db, name, args, ctx)))
+    finally:
+        ctx.directive_request_id = None
     cites = _dedupe([c for _n, _a, r_ in calls
                      for c in r_.get("citations") or []])
     directive = None
     for _n, _a, r_ in calls:
-        if (r_.get("data") or {}).get("directive"):
+        if _committed(r_):
             directive = r_["data"]["directive"]
-    ok = all(r_.get("status") == "OK" for _n, _a, r_ in calls)
+    ok = bool(calls) and all(r_.get("status") == "OK"
+                             for _n, _a, r_ in calls) and directive is not None
     preface = None
     if directive and directive.get("status") == D.DRAFT:
         preface = ("Recorded as a DRAFT directive; it needs one answer "
@@ -1974,14 +2367,16 @@ async def _mutation(conn, ctx: Ctx, plan: dict, out: dict, persisted: bool,
                    "no increase in risk or limits.")
     answer = compose_deterministic(calls, disclosure=DISCLOSE_DIRECTIVE,
                                    preface=preface)
-    return await _finish(conn, ctx, out, persisted,
+    return await _finish(db, ctx, out, persisted,
                          status=S_DIRECTIVE if ok else S_REFUSED,
                          intent=plan["intent"], answer=answer,
                          citations=cites, provider=provider, calls=calls,
                          directive=directive,
+                         outcome=O_DIRECTIVE if ok else O_REFUSED,
                          extra=None if ok else {"refusal": next(
                              (r_.get("why") for _n, _a, r_ in calls
-                              if r_.get("status") != "OK"), None)})
+                              if r_.get("status") != "OK"),
+                             "NO_DIRECTIVE_WAS_COMMITTED")})
 
 
 async def workspace_sections(conn, *, now: float, limit: int = 20) -> dict:
@@ -2039,7 +2434,7 @@ async def workspace_sections(conn, *, now: float, limit: int = 20) -> dict:
         out["conversations"] = {"status": "UNAVAILABLE",
                                 "why": type(exc).__name__, "data": [],
                                 "evidence": []}
-    cfg = provider_config()
+    cfg = provider_status()
     out["provider"] = {"status": "OK", "why": cfg["reason"],
                        "data": dict(cfg, tools=[
                            {"name": t.name, "permission": t.permission}
@@ -2052,7 +2447,7 @@ def describe() -> dict:
     return {"version": VERSION, "tools": [
         {"name": t.name, "permission": t.permission}
         for t in TOOLS.values()],
-        "provider": provider_config(), "submits_orders": False,
+        "provider": provider_status(), "submits_orders": False,
         "grants_authority": False,
         "capabilities_the_model_does_not_have": [
             "shell", "arbitrary SQL", "files", "network", "configuration",
