@@ -504,3 +504,28 @@ async def test_a_fill_between_the_decision_and_the_send_stops_the_stale_plan(
     finally:
         await XM.spl_clean(conn)
         await conn.close()
+
+
+@pg
+@pytest.mark.asyncio
+async def test_a_lock_left_by_a_pass_that_raised_is_released_and_no_other_lock_is():
+    """A pass that raised before releasing leaves its session holding the
+    group's lock (twice, if it was re-entered). The next pass on that session
+    releases every Xavier group lock it holds -- and only those: an advisory
+    lock another module took on the same session is untouched."""
+    conn, other = await XM._connect(), await XM._connect()
+    try:
+        for _ in range(2):
+            assert (await XV.try_group_lock(conn, "grp:stale"))["ok"]
+        await conn.fetchval("SELECT pg_advisory_lock(424242)")
+        assert (await XV.try_group_lock(other, "grp:stale"))["ok"] is False
+        assert await XV.release_session_group_locks(conn) == 2
+        got = await XV.try_group_lock(other, "grp:stale")
+        assert got["ok"] is True, got
+        await XV.release_group_lock(other, got)
+        assert await other.fetchval(
+            "SELECT pg_try_advisory_lock(424242)") is False
+    finally:
+        await conn.fetchval("SELECT pg_advisory_unlock_all()")
+        await conn.close()
+        await other.close()
