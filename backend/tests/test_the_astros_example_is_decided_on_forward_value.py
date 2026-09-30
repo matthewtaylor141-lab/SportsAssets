@@ -171,9 +171,9 @@ def _discover(cand):
     return got["admitted"]
 
 
-def _rank(admitted, *, depth, expire_at):
-    detail = {"candidate_id": admitted[0]["condition_id"], "price": HEDGE_PX,
-              "fee_usd": fee(min(QTY, depth or QTY), HEDGE_PX)}
+def _rank(admitted, *, depth, expire_at, price=HEDGE_PX):
+    detail = {"candidate_id": admitted[0]["condition_id"], "price": price,
+              "fee_usd": fee(min(QTY, depth or QTY), price)}
     if depth is not None:
         detail["depth_qty"] = depth
     if expire_at is not None:
@@ -205,27 +205,37 @@ def test_the_plus_1_5_is_visible_but_not_rankable_without_depth_or_evidence():
     assert [x["refusal"] for x in r["not_rankable"]] == [
         PC.R_CANDIDATE_DEPTH_TOO_THIN]
     # EVIDENCE THAT HAS EXPIRED: ranked on its number, but no order option
-    r = _rank(adm, depth=500, expire_at=999.0)
+    # (at a representable cost, so the expiry is what refuses it)
+    r = _rank(adm, depth=500, expire_at=999.0, price=0.98)
     assert r["ranked"], r
     opts, plans, refused = _options(adm, r, now=1000.0)
     assert opts == [] and plans == {}
     assert [x["refusal"] for x in refused] == ["ACQUISITION_INPUTS_EXPIRED"]
     # EVIDENCE NEVER ESTABLISHED (no expiry at all): refused by the plan
-    r = _rank(adm, depth=500, expire_at=None)
+    r = _rank(adm, depth=500, expire_at=None, price=0.98)
     opts, plans, refused = _options(adm, r, now=1000.0)
     assert opts == [] and refused and refused[0]["refusal"], refused
-    # WITH SUFFICIENT DEPTH AND LIVE EVIDENCE IT IS AN EXECUTABLE OPTION
+    # WITH SUFFICIENT DEPTH AND LIVE EVIDENCE, A 0.985 COST IS STILL NOT AN
+    # ORDER THE ADAPTER CAN SEND: its YES price 0.015 is not a whole cent, and
+    # rounding it to 0.02 would send a sell that does not trade the 0.015 bid
+    # the depth was counted on. Refused by name -- never rounded.
     r = _rank(adm, depth=500, expire_at=1030.0)
+    opts, plans, refused = _options(adm, r, now=1000.0)
+    assert opts == [] and plans == {}
+    assert [x["refusal"] for x in refused] == [
+        PC.R_ACQ_PLAN_LIMIT_WOULD_BE_ROUNDED]
+    assert FX.safe_cent(1 - HEDGE_PX, "ORDER_INTENT_BUY_SHORT") == 0.02 \
+        != 1 - HEDGE_PX
+    # AT A REPRESENTABLE COST, WITH DEPTH AND LIVE EVIDENCE, IT IS AN
+    # EXECUTABLE OPTION -- sent at exactly the valued YES price, unrounded
+    r = _rank(adm, depth=500, expire_at=1030.0, price=0.98)
     opts, plans, refused = _options(adm, r, now=1000.0)
     assert refused == [] and len(opts) == 1, refused
     plan = plans[opts[0]["candidate_id"]]
     assert plan.quantity == QTY
     assert plan.side == "ORDER_INTENT_BUY_SHORT"
-    # YES-DENOMINATED AND ROUNDED THE PROTECTIVE WAY: the venue takes cents,
-    # so the 0.015 YES price of a 0.985 NO cost goes UP to 0.02 -- the order
-    # can never pay more than 0.98, i.e. never more than it was ranked at
-    assert plan.limit_price == pytest.approx(
-        FX.safe_cent(1 - HEDGE_PX, "ORDER_INTENT_BUY_SHORT")) == 0.02
+    assert plan.limit_price == 0.02 == FX.safe_cent(
+        0.02, "ORDER_INTENT_BUY_SHORT")
 
 
 def test_whole_position_economics_carry_hedge_capital_fees_and_the_uncovered():
@@ -252,13 +262,20 @@ def test_whole_position_economics_carry_hedge_capital_fees_and_the_uncovered():
     assert lose and all(x["net_usd"] == pytest.approx(100.0 - cost)
                         for x in lose)
     # THE ADDED CAPITAL: the hedge's own collateral at its order's price,
-    # and its fee
-    opts, plans, _ = _options(adm, r)
+    # and its fee. At 0.985 there is no order to carry it (the plan is
+    # refused, see above); at a representable 0.98 the plan's collateral is
+    # at exactly the valued price and the fee is on the counted 100.
+    opts, plans, refused = _options(adm, r)
+    assert opts == [] and [x["refusal"] for x in refused] == [
+        PC.R_ACQ_PLAN_LIMIT_WOULD_BE_ROUNDED]
+    r98 = _rank(adm, depth=100, expire_at=1030.0, price=0.98)
+    opts, plans, _ = _options(adm, r98)
     plan = plans[opts[0]["candidate_id"]]
     assert plan.quantity == 100
     assert plan.collateral_usd == pytest.approx(
         FX.collateral_for(plan.limit_price, 100, "ORDER_INTENT_BUY_SHORT"))
-    assert opts[0]["fee_usd"] == pytest.approx(fee(100, HEDGE_PX))
+    assert plan.collateral_usd == pytest.approx(100 * 0.98)
+    assert opts[0]["fee_usd"] == pytest.approx(fee(100, 0.98))
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -469,14 +486,19 @@ async def test_the_scheduled_cycle_holds_the_astros_despite_the_loss(
     """Through `ext_pinnacle_loop.cycle` (the scheduled harness of
     test_xavier_management_defects_reproduced_through_the_cycle, venue
     transport and the held-leg read substituted): 383 at 0.522, forward
-    probability 0.10, the $10.004 exit on the book. Xavier's persisted
-    decision is HOLD; the exit is on the record, blocked by name as worth
-    less than holding (its improvement over HOLD stated); HOLD's value is
-    forward value less the BOOKED basis, $199.93; nothing is sent."""
+    probability 0.10, the 0.028 bid on the book of a 0.001-tick market.
+    Xavier's persisted decision is HOLD; HOLD's value is forward value less
+    the BOOKED basis, $199.93; nothing is sent. The exit is on the record,
+    blocked by name -- and the name is that no sell the adapter can carry
+    (whole cents) reaches a 0.028 bid: the "$10 exit" the pure cases price is
+    not an order this lane can send, so its depth is excluded before any
+    exit is valued rather than ranked as though it could fill."""
     asyncpg = pytest.importorskip("asyncpg")
     from tests import test_xavier_management_defects_reproduced_through_the_cycle as XD
+    from sportsassets import bettor_book_snapshot as BS
     from sportsassets import bettor_xavier as XV
 
+    monkeypatch.setitem(XD.TICK, "value", "0.001")   # like the example's 0.522
     conn = await asyncpg.connect(DSN)
     try:
         await XD._clean(conn)
@@ -498,19 +520,19 @@ async def test_the_scheduled_cycle_holds_the_astros_despite_the_loss(
         assert hold["expected_net_usd"] == pytest.approx(
             QTY * 0.10 - 199.93, abs=1e-4)
         ex = alts["DIRECT_EXIT"]
-        # THE $10 EXIT IS ON THE RECORD -- a full 383 at 0.028, locking a
-        # loss -- and it does not win: it is worth 28.30 less than HOLD
-        # (-0.0739 a contract), which the selector's churn rule names
-        assert ex["qty"] == QTY
-        assert ex["proceeds_per_contract"] == pytest.approx(EXIT_BID)
-        assert ex["locks_a_loss"] is True
-        from sportsassets.workers import ext_pinnacle_loop as L
-        assert ex["blocker"] == L.R_BELOW_MIN_IMPROVEMENT
+        # THE EXIT IS ON THE RECORD, NOT RANKABLE, WITH THE GRID'S NAME: the
+        # 0.028 x 383 depth is excluded, listed with its price and quantity
+        assert ex["rankable"] is False
+        assert ex["blocker"] == BS.R_NO_REPRESENTABLE_DEPTH
+        grid = rec["evidence"]["executable_grid"]["exit_ladder"]
+        assert grid["executable_grid"]["tick"] == "0.001"
+        assert [(x["api_price"], x["qty"]) for x in
+                grid["levels_excluded_unrepresentable"]] == [
+            (EXIT_BID, float(QTY))]
         led = await XD._ledger(conn)
         blocked = next(u for u in led["unrankable"]
                        if u.get("action") == "DIRECT_EXIT")
-        assert blocked["improvement_over_hold_per_contract"] == \
-            pytest.approx((10.004 - QTY * 0.10) / QTY, abs=1e-5)
+        assert blocked["blocker"] == BS.R_NO_REPRESENTABLE_DEPTH
         assert "history_is_not_a_reason" in rec["reasoning"]
         assert led["action"] == "HOLD"
         assert XD._creates(sent) == []

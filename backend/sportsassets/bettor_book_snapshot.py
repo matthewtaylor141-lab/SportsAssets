@@ -832,6 +832,230 @@ def exit_ladder(market_data, *, held_intent, limit=None) -> dict:
     return out
 
 
+# ── THE EXECUTABLE GRID: DEPTH AN ORDER WE CAN SEND IS ABLE TO REACH ──
+#
+# THE DEFECT THIS CLOSES (XC, reproduced). A hedge displayed at a COST of
+# 0.985 -- a SHORT against a bid of 0.015, on a market whose own
+# `orderPriceMinTickSize` is 0.005 -- was valued, sized and ranked on the
+# 0.015 bid's depth. The order actually built for it went out with a wire
+# limit of 0.02, because `pmus._amount` formats every price "%.2f" and
+# `safe_cent` rounds a short's wire UP so it can never pay more than 0.98.
+# That rounding is correct about COST and silent about REACH: a SELL at 0.02
+# does not trade against a bid at 0.015. The whole displayed depth the action
+# won on was unreachable by the order sent. The long side is the mirror: an
+# offer at 0.985 is floored to a 0.98 buy limit, which cannot lift it.
+#
+# THE RULE. Under our policy an order can carry only a price that is a
+# multiple of the venue's OWN tick for that market AND of the adapter's whole
+# cent. So the executable grid is their least common multiple, and a level
+# whose wire price is not on it is EXCLUDED -- before valuation, sizing,
+# ranking and plan building, counted and reported by name. No level is ever
+# rounded onto the grid: rounding a 0.985 cost to 0.98 would value depth at a
+# price nobody is offering, and rounding it to 0.99 would accept a worse price
+# to recover depth the displayed book never offered at that price either.
+#
+# THE WIRE PRICE IS `api_price` ON EVERY LADDER THIS MODULE BUILDS. A long
+# acquisition's wire is the offer; a short acquisition's wire is the bid (the
+# CONTRACT price, cost 1 - bid); a long exit sells into the bids at the bid; a
+# short exit buys the offers at the offer. One field, one check, both sides.
+#
+# AN UNREAD TICK IS NOT A CENT TICK. If the market's tick size was not read,
+# representability is not established and the ladder is refused by name --
+# never assumed to be 0.01.
+
+GRID_VERSION = "BETTOR_EXECUTABLE_GRID_V1"
+
+#: The only prices the venue adapter can carry: `pmus._amount` formats every
+#: order price "%.2f". Named here, never imported: `pmus` is shared with a
+#: protected worker and this module must stay free of the order path.
+ADAPTER_PRICE_INCREMENT = Decimal("0.01")
+ADAPTER_PRICE_FORMAT = "%.2f"
+
+R_TICK_NOT_ESTABLISHED = (
+    "THE_MARKETS_TICK_SIZE_WAS_NOT_READ_SO_REPRESENTABILITY_IS_NOT_ESTABLISHED")
+R_TICK_UNUSABLE = "THE_MARKETS_PUBLISHED_TICK_SIZE_IS_NOT_A_USABLE_INCREMENT"
+R_NO_REPRESENTABLE_DEPTH = (
+    "NO_DISPLAYED_DEPTH_IS_REPRESENTABLE_BY_AN_ORDER_WE_CAN_SEND")
+R_LIMIT_WOULD_BE_ROUNDED = "ROUNDING_WOULD_CHANGE_THE_VALUED_LIMIT"
+R_LIMIT_OFF_THE_EXECUTABLE_GRID = "THE_LIMIT_IS_NOT_ON_THE_EXECUTABLE_GRID"
+R_COUNTED_LEVEL_UNREACHABLE = (
+    "A_COUNTED_LEVEL_IS_NOT_REACHABLE_BY_THE_LIMIT_SENT")
+
+#: Every refusal this section can name, for callers that must recognise one.
+GRID_REFUSALS = (R_TICK_NOT_ESTABLISHED, R_TICK_UNUSABLE,
+                 R_NO_REPRESENTABLE_DEPTH, R_LIMIT_WOULD_BE_ROUNDED,
+                 R_LIMIT_OFF_THE_EXECUTABLE_GRID, R_COUNTED_LEVEL_UNREACHABLE)
+
+EXECUTABLE_GRID_RULE = (
+    "a level counts only if its wire price is an exact multiple of BOTH the "
+    "market's own orderPriceMinTickSize and the adapter's whole cent (%.2f "
+    "formatting). Anything else is excluded before valuation and sizing, "
+    "reported by name, and never rounded onto the grid")
+
+
+def _lcm_decimal(a: Decimal, b: Decimal) -> Decimal:
+    """The least common multiple of two positive decimal increments."""
+    import math
+
+    places = max(-a.as_tuple().exponent, -b.as_tuple().exponent, 0)
+    scale = Decimal(10) ** places
+    ia, ib = int(a * scale), int(b * scale)
+    return Decimal(ia * ib // math.gcd(ia, ib)) / scale
+
+
+def executable_grid(tick, *, source=None, read_at=None, field=None) -> dict:
+    """The price grid an order for this market can be sent on, or a refusal.
+
+    `tick` is the market's own `orderPriceMinTickSize` as the venue published
+    it. The grid step is lcm(tick, 0.01): 0.01 on the observed 0.01, 0.005
+    and 0.001 markets, and coarser only on a market whose tick is.
+    """
+    out = {"version": GRID_VERSION, "rule": EXECUTABLE_GRID_RULE,
+           "tick": None, "tick_source": source, "tick_field": field,
+           "tick_read_at": read_at,
+           "adapter_increment": str(ADAPTER_PRICE_INCREMENT),
+           "adapter_format": ADAPTER_PRICE_FORMAT, "step": None}
+    if tick is None or tick == "" or tick == NOT_IDENTIFIED:
+        return dict(out, ok=False, refusal=R_TICK_NOT_ESTABLISHED,
+                    why=("the market's orderPriceMinTickSize was not read, so "
+                         "which prices an order can carry is not established. "
+                         "It is not assumed to be a cent"))
+    t = _d(tick)
+    if t is None or not t.is_finite() or t <= 0 or t >= 1:
+        return dict(out, ok=False, refusal=R_TICK_UNUSABLE, tick=str(tick),
+                    why=("the published tick %r is not an increment strictly "
+                         "between 0 and 1" % (tick,)))
+    t = t.normalize()
+    step = _lcm_decimal(t, ADAPTER_PRICE_INCREMENT).normalize()
+    return dict(out, ok=True, refusal=None, tick=str(t), step=str(step))
+
+
+def on_executable_grid(price, grid: dict) -> bool:
+    """True when `price` is exactly an order price we can send. Exact: a
+    decimal comparison, never a float tolerance."""
+    if not (grid or {}).get("ok"):
+        return False
+    p = _d(price)
+    step = _d(grid.get("step"))
+    if p is None or step is None or not p.is_finite() or not (0 < p < 1):
+        return False
+    if p % step != 0:
+        return False
+    # AND IT SURVIVES THE ADAPTER'S OWN FORMATTING UNCHANGED.
+    return Decimal(ADAPTER_PRICE_FORMAT % float(p)) == p
+
+
+def restrict_to_executable(ladder: dict, grid: dict) -> dict:
+    """The ladder with ONLY the levels an order we can send is able to reach.
+
+    Works on an acquisition ladder and on an exit ladder alike (both carry the
+    wire price per level as `api_price`). Every summary field -- best price,
+    size at best, displayed depth -- is recomputed from the kept levels, so
+    nothing downstream can value, size or rank on an excluded one. The
+    excluded levels travel on the result as `levels_excluded_unrepresentable`
+    with their prices and quantities.
+    """
+    lad = dict(ladder or {})
+    g = dict(grid or {})
+    lad["executable_grid"] = g
+    lad["executable_grid_applied"] = True
+    if not lad.get("ok"):
+        # A LADDER THAT WAS ALREADY REFUSED keeps its own refusal: an empty
+        # book is a different fact from an unrepresentable one.
+        lad.setdefault("levels_excluded_unrepresentable", [])
+        return lad
+    levels = list(lad.get("levels") or [])
+    is_exit = "exit_price" in (levels[0] if levels else {})
+    lad["levels_before_grid"] = len(levels)
+    lad["displayed_depth_before_grid"] = round(
+        sum(float(r["qty"]) for r in levels), 6)
+    if not g.get("ok"):
+        return dict(lad, ok=False, levels=[],
+                    refusal=g.get("refusal") or R_TICK_NOT_ESTABLISHED,
+                    levels_excluded_unrepresentable=[
+                        dict(r, why=g.get("refusal")) for r in levels],
+                    excluded_unrepresentable_qty=lad[
+                        "displayed_depth_before_grid"],
+                    why=g.get("why"))
+    kept, dropped = [], []
+    for r in levels:
+        if on_executable_grid(r.get("api_price"), g):
+            kept.append(r)
+        else:
+            dropped.append(dict(r, why=(
+                "wire price %s is not a multiple of the executable step %s "
+                "(tick %s, adapter %s)" % (r.get("api_price"), g["step"],
+                                           g["tick"],
+                                           g["adapter_increment"]))))
+    lad["levels"] = kept
+    lad["levels_excluded_unrepresentable"] = dropped
+    lad["excluded_unrepresentable_qty"] = round(
+        sum(float(r["qty"]) for r in dropped), 6)
+    if not kept:
+        for k in ("best_acquisition_price", "best_api_price",
+                  "best_exit_price", "best_complement_price", "size_at_best"):
+            lad.pop(k, None)
+        return dict(lad, ok=False, displayed_depth=0.0,
+                    refusal=R_NO_REPRESENTABLE_DEPTH,
+                    why=("every displayed level on the side this order would "
+                         "consume is off the executable grid (step %s), so "
+                         "no order we can send reaches any of it. It is not "
+                         "rounded onto the grid" % g["step"]))
+    lad["displayed_depth"] = round(sum(float(r["qty"]) for r in kept), 6)
+    lad["best_api_price"] = kept[0]["api_price"]
+    if is_exit:
+        lad["best_exit_price"] = kept[0]["exit_price"]
+        lad["best_complement_price"] = kept[0]["complement_price"]
+        lad["size_at_best"] = kept[0]["qty"]
+    else:
+        lad["best_acquisition_price"] = kept[0]["acquisition_price"]
+    return lad
+
+
+def limit_reaches(*, wire, levels, side_consumed, grid=None) -> dict:
+    """IS EVERY COUNTED LEVEL REACHABLE BY THE LIMIT WE WOULD SEND?
+
+    Checked in wire space, which is the one space both sides share: an order
+    consuming the OFFERS (a buy of the long contract) trades a level whose
+    price is at or below its limit; an order consuming the BIDS (a short
+    acquisition, or a long exit) trades a level at or above it. In cost space
+    that is `level cost <= limit cost`; in proceeds space `level proceeds >=
+    limit proceeds`. The limit itself must be on the grid and survive the
+    adapter's formatting unchanged.
+    """
+    w = _d(wire)
+    out = {"wire": None if w is None else str(w),
+           "side_consumed": side_consumed, "levels_checked": 0}
+    if w is None:
+        return dict(out, ok=False, refusal=R_LIMIT_OFF_THE_EXECUTABLE_GRID,
+                    why="no limit price was supplied")
+    if Decimal(ADAPTER_PRICE_FORMAT % float(w)) != w:
+        return dict(out, ok=False, refusal=R_LIMIT_WOULD_BE_ROUNDED,
+                    why=("the adapter would send %s for a limit of %s"
+                         % (ADAPTER_PRICE_FORMAT % float(w), w)))
+    if grid is not None and not on_executable_grid(w, grid):
+        return dict(out, ok=False, refusal=R_LIMIT_OFF_THE_EXECUTABLE_GRID,
+                    why=("%s is not on the executable step %s"
+                         % (w, (grid or {}).get("step"))))
+    bad = []
+    for lv in levels or ():
+        px = _d((lv or {}).get("api_price"))
+        if px is None:
+            bad.append({"level": lv, "why": "the level carries no wire price"})
+            continue
+        ok = (px <= w) if side_consumed == SIDE_ASK else (px >= w)
+        if not ok:
+            bad.append({"api_price": str(px), "qty": (lv or {}).get("qty")})
+    out["levels_checked"] = len(list(levels or ()))
+    if bad:
+        return dict(out, ok=False, refusal=R_COUNTED_LEVEL_UNREACHABLE,
+                    unreachable=bad,
+                    why=("a %s limit at %s does not trade %d counted level(s)"
+                         % ("buy" if side_consumed == SIDE_ASK else "sell",
+                            w, len(bad))))
+    return dict(out, ok=True, refusal=None)
+
+
 def as_sale_ladder(exit_lad: dict) -> dict:
     """An exit ladder shaped for `marginal_sale_size`.
 

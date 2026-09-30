@@ -534,7 +534,7 @@
     "intent_id": "dem-loss",
     "residual_qty": 6.0,
     "us_market_slug": "aec-nba-bos-lal-2026-09-27",
-    "settlement": "{\"at\": 0, \"why\": \"no reported settlement, no exact price convergence and no declared void. `closed`, `resolved` and `settledAt` are NOT treated as payout evidence\", \"closed_anything\": false, \"terminal_reading\": \"UNREADABLE\"}",
+    "settlement": "{\"at\": 0, \"why\": \"the venue lists the market and reports no outcome\", \"closed_anything\": false, \"terminal_reading\": \"PENDING\"}",
     "partial_exit_result": {
      "sold_qty": 9.0,
      "exit_proceeds_usd": 3.69,

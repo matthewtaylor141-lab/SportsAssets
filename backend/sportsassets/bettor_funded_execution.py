@@ -113,6 +113,11 @@ R_LOST_ACKNOWLEDGEMENT = "THE_REQUEST_LEFT_AND_THE_ANSWER_WAS_LOST"
 R_VENUE_GATE_DENIED = "THE_VENUE_BOUNDARY_GATE_DENIED_IT_BEFORE_SENDING"
 R_PRICE_UNREPRESENTABLE = "THE_LIMIT_PRICE_CANNOT_BE_SENT_WITHOUT_LOOSENING_THE_BOUND"
 R_INPUTS_EXPIRED_AT_SEND = "THE_PLANS_INPUTS_EXPIRED_ON_THE_REAL_CLOCK_BEFORE_THE_SEND"
+#: The worst counted level's wire price would be changed by the adapter's
+#: rounding, so the order sent would not be the order the size was counted on.
+R_LIMIT_WOULD_BE_ROUNDED = "THE_COUNTED_LIMIT_WOULD_BE_ROUNDED_BEFORE_SENDING"
+#: A level the size was counted on is not traded by the limit that would go.
+R_COUNTED_DEPTH_UNREACHABLE = "THE_LIMIT_DOES_NOT_REACH_THE_DEPTH_IT_WAS_SIZED_ON"
 
 #: The one intent this lane sends. The adapter refuses an unnamed side on any
 #: market whose two sides share an identifier -- every `aec-` match -- so the
@@ -277,7 +282,57 @@ def plan_from_decision(rec: dict | None) -> dict:
         return dict(out, refusal=R_NO_SIZED_PLAN, execution=est,
                     why=("%s contracts rounds down to nothing at this "
                          "venue's integer quantity" % qty))
-    wire = safe_cent(float(limit), intent)
+    # ── A WALK THAT COUNTED LEVELS IS SENT AT ITS WORST COUNTED LEVEL ──
+    #
+    # When the decision carries the levels its size was counted on, the order
+    # carries EXACTLY the worst one's wire price: nothing rounds it, it
+    # reaches every counted level, and it reaches nothing the walk did not
+    # count. Its ladder was restricted to the executable grid before the walk,
+    # so that price is one the adapter sends unchanged; if it were not,
+    # `safe_cent` -- kept, as an assertion -- would move it, and the plan is
+    # refused by name rather than sent at a limit nobody valued.
+    taken = est.get("levels_taken") or []
+    exe = est.get("executable_limit_price")
+    counted = None
+    if exe is not None and taken:
+        from decimal import Decimal, InvalidOperation
+
+        from . import bettor_book_snapshot as _BS
+
+        def _wire(cost):
+            c = Decimal(str(cost))
+            return (Decimal("1") - c) if intent == "ORDER_INTENT_BUY_SHORT" \
+                else c
+        try:
+            exact = _wire(exe)
+            levels = [{"api_price": str(_wire(lv["price"])),
+                       "qty": lv.get("qty")} for lv in taken]
+        except (InvalidOperation, KeyError, TypeError, ValueError):
+            return dict(out, refusal=R_PRICE_UNREPRESENTABLE, asked=exe,
+                        intent=intent,
+                        why="the counted levels carry no readable price")
+        sent = safe_cent(float(exact), intent)
+        if sent is None or Decimal(str(sent)) != exact:
+            return dict(out, refusal=R_LIMIT_WOULD_BE_ROUNDED, asked=str(exact),
+                        rounded_to=sent, intent=intent,
+                        why=("the worst counted level's wire price %s cannot be "
+                             "sent unchanged (the adapter would carry %s), so "
+                             "the order would not be the one the size was "
+                             "counted on" % (exact, sent)))
+        reach = _BS.limit_reaches(
+            wire=float(exact), levels=levels,
+            side_consumed=(_BS.SIDE_BID if intent == "ORDER_INTENT_BUY_SHORT"
+                           else _BS.SIDE_ASK))
+        if not reach.get("ok"):
+            return dict(out, refusal=R_COUNTED_DEPTH_UNREACHABLE,
+                        reach=reach, intent=intent,
+                        why=("%s: %s" % (reach.get("refusal"),
+                                         reach.get("why"))))
+        wire = float(exact)
+        counted = {"levels": levels, "limit_is": "THE_WORST_COUNTED_LEVEL",
+                   "reach": reach}
+    else:
+        wire = safe_cent(float(limit), intent)
     if wire is None:
         return dict(out, refusal=R_PRICE_UNREPRESENTABLE,
                     asked=float(limit), intent=intent,
@@ -309,11 +364,18 @@ def plan_from_decision(rec: dict | None) -> dict:
             "collateral_space": ("(1 - price) x qty" if intent ==
                                  "ORDER_INTENT_BUY_SHORT" else "price x qty"),
             "sized_from": {"size": qty, "vwap": vwap,
-                           "limit_price": est.get("limit_price")},
-            "rounded": {"asked": float(limit), "sent": wire,
-                        "direction": ("FLOOR" if intent == LONG else "CEIL"),
-                        "why": ("the direction that cannot commit more than "
-                                "the plan was sized for")},
+                           "limit_price": est.get("limit_price"),
+                           "executable_limit_price": exe},
+            "counted_levels": counted,
+            "rounded": ({"asked": float(limit), "sent": wire,
+                         "direction": ("FLOOR" if intent == LONG else "CEIL"),
+                         "why": ("the direction that cannot commit more than "
+                                 "the plan was sized for")}
+                        if counted is None else
+                        {"asked": wire, "sent": wire, "direction": "NONE",
+                         "why": ("the worst counted level's own wire price, "
+                                 "already on the executable grid: nothing "
+                                 "was rounded")}),
             "rounded_down_because": ("the venue's quantity is an integer "
                                      "count of contracts")}
 

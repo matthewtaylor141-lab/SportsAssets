@@ -1673,6 +1673,27 @@ async def candidate_legs_for(conn, *, held_row, quoter=None,
             quote, quote_is_side_aware = await _quote_side(quoter, slug, side)
             price = quote.get("cost_per_share") or quote.get("price")
             depth = quote.get("depth_qty")
+        from . import bettor_book_snapshot as _bs
+        if price is None and quote.get("refusal") in _bs.GRID_REFUSALS:
+            # ── NO DEPTH AN ORDER WE CAN SEND IS ABLE TO REACH ───────────
+            #
+            # Refused by the GRID'S OWN NAME, with the levels it excluded, so
+            # the hedge search's record says "unrepresentable" -- not the
+            # generic "not priced", which would read as a missing quote.
+            out["refused"].append(
+                {"candidate_id": cid, "market_slug": slug, "side": side,
+                 "sports_type": row.get("sports_type"),
+                 "refusal": quote["refusal"],
+                 "executable_grid": quote.get("executable_grid"),
+                 "levels_excluded_unrepresentable": quote.get(
+                     "levels_excluded_unrepresentable"),
+                 "excluded_unrepresentable_qty": quote.get(
+                     "excluded_unrepresentable_qty"),
+                 "why": ("%s. The displayed depth is not reachable by any "
+                         "order we can send, so it is excluded before "
+                         "valuation and sizing and the candidate is not "
+                         "rankable" % (quote.get("why") or quote["refusal"]))})
+            continue
         if price is None:
             out["refused"].append(
                 {"candidate_id": cid, "market_slug": slug, "side": side,
@@ -1689,6 +1710,22 @@ async def candidate_legs_for(conn, *, held_row, quoter=None,
                          "invent the cost of the hedge"
                          % (quote.get("refusal") or quote.get("error")
                             or "no quoter supplied"))})
+            continue
+        if quote.get("executable_grid") is not None and not \
+                _bs.on_executable_grid(quote.get("api_price"),
+                                       quote.get("executable_grid")):
+            # A FUNDED QUOTE (one that carries its grid) whose price is off the
+            # grid would be rounded to a whole cent in `build_leg` -- 0.985
+            # becomes 98 cents -- and valued at a price nobody offered.
+            out["refused"].append(
+                {"candidate_id": cid, "market_slug": slug, "side": side,
+                 "sports_type": row.get("sports_type"),
+                 "refusal": _bs.R_LIMIT_OFF_THE_EXECUTABLE_GRID,
+                 "why": ("the quoted wire price %r is not on the executable "
+                         "grid %r; its cost would be rounded into the leg"
+                         % (quote.get("api_price"),
+                            (quote.get("executable_grid") or {}).get(
+                                "step")))})
             continue
         prose, psource, age = None, None, None
         if prose_reader is not None:

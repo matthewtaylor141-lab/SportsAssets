@@ -169,15 +169,21 @@ async def test_all_hedges_reach_one_persisted_ev_comparison(monkeypatch):
     ("ORDER_INTENT_BUY_LONG", .31, .31),
     ("ORDER_INTENT_BUY_SHORT", .29, .71)])
 async def test_production_quote_uses_correct_side_fields_and_single_price_depth(monkeypatch, side, price, wire):
+    from sportsassets import bettor_book_snapshot as BS
     from sportsassets.workers import ext_pinnacle_loop as loop
     calls = []
     async def read(conn, **kwargs):
         calls.append(kwargs)
         return {"ok": True, "read_at": 100,
             "book_currency": {"book_state_established_at_epoch_s": 98, "bound_s": 10},
-            "acquisition_ladder": {"levels": [
-                {"acquisition_price": price, "api_price": wire, "qty": 4},
-                {"acquisition_price": price + .1, "qty": 500}]}}
+            "acquisition_ladder": {
+                # venue_quote's ladder is restricted to the executable grid
+                # (a SYNTHETIC 0.01 tick), and says so.
+                "executable_grid_applied": True,
+                "executable_grid": BS.executable_grid("0.01"),
+                "levels": [
+                    {"acquisition_price": price, "api_price": wire, "qty": 4},
+                    {"acquisition_price": price + .1, "qty": 500}]}}
     monkeypatch.setattr(loop, "venue_quote", read)
     got = await loop._candidate_quote(None, "hedge", side, now=100)
     assert calls[0]["intent"] == side

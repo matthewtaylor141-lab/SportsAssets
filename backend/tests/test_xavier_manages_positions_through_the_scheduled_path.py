@@ -123,14 +123,26 @@ class Venue:
         self.creates = 0
         self.fill_cap = None
         self.raise_on_create = None
+        # THE MARKET'S OWN orderPriceMinTickSize, published on every listing
+        # row as the real venue does (SYNTHETIC values; a slug mapped to None
+        # publishes no tick). 0.01 unless a test states otherwise.
+        self.ticks: dict = {}
         v = self
 
         class _Markets:
             def list(self, params=None):
                 slugs = list((params or {}).get("slug") or [])
                 v.sent.append(("markets.list", slugs))
-                return {"markets": [{"slug": s, "description": PROSE}
-                                    for s in slugs if s in v.books]}
+                rows = []
+                for s in slugs:
+                    if s not in v.books:
+                        continue
+                    row = {"slug": s, "description": PROSE}
+                    tick = v.ticks.get(s, "0.01")
+                    if tick is not None:
+                        row["orderPriceMinTickSize"] = tick
+                    rows.append(row)
+                return {"markets": rows}
 
             def book(self, slug):
                 v.sent.append(("markets.book", slug))

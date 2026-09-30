@@ -1584,6 +1584,39 @@ def _read_venue_rules_blocking(slug: str, *, now=None) -> dict:
     return got
 
 
+def market_grid_blocking(slug: str, *, now=None) -> dict:
+    """THE PRICES AN ORDER FOR THIS MARKET CAN CARRY, or a named refusal.
+
+    The market's own `orderPriceMinTickSize` comes off the SAME listing row
+    the rules prose is read from, through the SAME hourly cache -- so it costs
+    no request the cycle was not already making for this contract -- and
+    `bettor_book_snapshot.executable_grid` combines it with the adapter's
+    whole cent. A listing that could not be read, or that names no tick, is
+    NOT a cent tick: the grid refuses and every ladder on this market with it.
+    """
+    from .. import bettor_book_snapshot as bs
+
+    got = dict(_read_venue_rules_blocking(slug, now=now) or {})
+    grid = bs.executable_grid(
+        got.get("tick_size"), field=got.get("tick_field"),
+        read_at=got.get("read_at"),
+        source=("pmus:/markets?slug=%s (the rules listing, cached %ss)"
+                % (slug, int(RULES_CACHE_TTL_S))))
+    grid["tick_from_cache"] = bool(got.get("from_cache"))
+    if not grid.get("ok") and got.get("error"):
+        grid["listing_error"] = got.get("error")
+    return grid
+
+
+def funded_tick_reader(client, slug):
+    """The tick reader `bettor_funded_management.select_exit` is handed by
+    the scheduled servicing pass: the cached listing above, not a second
+    uncached read per position. `client` is accepted for the reader's shape
+    and not used -- the cache resolves the transport the same way."""
+    del client
+    return market_grid_blocking(slug)
+
+
 async def fetch_sport_catalogue(*, api_key: str, timeout=20.0) -> dict:
     """WHICH SPORTS THE PROVIDER OFFERS AT ALL. Costs no credits.
 
@@ -2863,6 +2896,26 @@ async def venue_quote(conn, *, us_slug, intent, now=None, size=None,
                         "readable: %s" % (lad.get("book_was")
                                           or lad.get("parse_status"))),
                 "acquisition": lad, "slug": slug}
+    # ── ONLY DEPTH AN ORDER WE CAN SEND IS ABLE TO REACH ─────────────
+    #
+    # BEFORE anything values, sizes or ranks this ladder: a level whose wire
+    # price is off the market's executable grid (its own tick AND the
+    # adapter's whole cent) is excluded here, by name, with its quantity --
+    # the entry's budget walk, the hedge candidate's price and depth and the
+    # plan built from either all read the ladder returned below. An unread
+    # tick refuses the whole ladder; it is never assumed to be a cent.
+    grid = await asyncio.to_thread(market_grid_blocking, slug)
+    lad = bs.restrict_to_executable(lad, grid)
+    if not lad.get("ok"):
+        return {"ok": False, "refusal": lad.get("refusal"),
+                "why": lad.get("why"),
+                "executable_grid": grid,
+                "levels_excluded_unrepresentable": lad.get(
+                    "levels_excluded_unrepresentable"),
+                "excluded_unrepresentable_qty": lad.get(
+                    "excluded_unrepresentable_qty"),
+                "acquisition": lad, "slug": slug, "intent": intent,
+                "book_currency": currency, "read_at": read_at}
     sized = (bs.fill_across_levels(lad, float(size))
              if size else None)
 
@@ -2887,6 +2940,13 @@ async def venue_quote(conn, *, us_slug, intent, now=None, size=None,
             # returning only `depth` forced the loop to treat the book as
             # one price with a number beside it.
             "acquisition_ladder": lad,
+            # WHAT WAS LEFT OUT, AND WHY: the executable grid this ladder was
+            # restricted to and every displayed level it excluded, priced.
+            "executable_grid": lad.get("executable_grid"),
+            "levels_excluded_unrepresentable": lad.get(
+                "levels_excluded_unrepresentable"),
+            "excluded_unrepresentable_qty": lad.get(
+                "excluded_unrepresentable_qty"),
             "age_s": age, "age_basis": age_basis,
             # THE CURRENCY VERDICT, CARRIED. `_entry_freshness` re-ages it at
             # the decision instant rather than re-deriving it, so one module
@@ -4859,8 +4919,12 @@ async def _candidate_quote(conn, slug, side, *, now=None) -> dict:
     refuses the candidate rather than pricing it off the held contract's book.
 
     LONG consumes the ask; SHORT consumes the bid at the complementary cost.
-    Depth is restricted to levels at the quoted cost, not the entire ladder.
+    Depth is restricted to levels at the quoted cost, not the entire ladder --
+    and the ladder itself to the levels an order we can send is able to reach
+    (`bettor_book_snapshot.restrict_to_executable`, applied in `venue_quote`).
     """
+    from .. import bettor_book_snapshot as bs
+
     try:
         if side not in ("ORDER_INTENT_BUY_LONG", "ORDER_INTENT_BUY_SHORT"):
             return {"ok": False, "refusal": "HEDGE_SIDE_NOT_IDENTIFIED"}
@@ -4881,9 +4945,23 @@ async def _candidate_quote(conn, slug, side, *, now=None) -> dict:
     got = dict(got or {})
     if not got.get("ok"):
         return got
-    levels = (got.get("acquisition_ladder") or {}).get("levels") or []
+    lad = got.get("acquisition_ladder") or {}
+    levels = lad.get("levels") or []
     if not levels:
         return dict(got, ok=False, refusal="HEDGE_PRICE_LEVEL_NOT_IDENTIFIED")
+    # THE LADDER IS ALREADY RESTRICTED TO THE EXECUTABLE GRID (`venue_quote`).
+    # Asserted, not trusted: a quote whose ladder did not pass through the
+    # grid, or whose best level is off it, is refused by name rather than
+    # priced -- this price becomes the leg's cost and the plan's wire limit.
+    grid = lad.get("executable_grid") or got.get("executable_grid")
+    if not lad.get("executable_grid_applied") or not (grid or {}).get("ok") \
+            or not bs.on_executable_grid(levels[0].get("api_price"), grid):
+        return dict(got, ok=False,
+                    refusal=bs.R_LIMIT_OFF_THE_EXECUTABLE_GRID,
+                    why=("the candidate's best level %r is not established "
+                         "on the executable grid %r"
+                         % (levels[0].get("api_price"),
+                            (grid or {}).get("step"))))
     price = levels[0].get("acquisition_price")
     depth = sum(float(r["qty"]) for r in levels if r.get("acquisition_price") == price)
     currency = got.get("book_currency") or {}
@@ -4896,6 +4974,13 @@ async def _candidate_quote(conn, slug, side, *, now=None) -> dict:
                  float(received) + MAX_OUR_PROCESSING_DELAY_S)
     return dict(got, price=price, cost_per_share=price,
                 api_price=levels[0].get("api_price"), depth_qty=depth,
+                # THE LEVELS THIS PRICE AND DEPTH COUNT, so the plan built on
+                # them can prove its limit reaches every one.
+                counted_levels=[{"api_price": r.get("api_price"),
+                                 "acquisition_price": r.get(
+                                     "acquisition_price"),
+                                 "qty": r.get("qty")} for r in levels
+                                if r.get("acquisition_price") == price],
                 inputs_expire_at=expiry)
 
 
@@ -5585,6 +5670,38 @@ async def funded_pair_inputs(conn, pos, *, at, deferred=None,
             "selected", "selection_ok", "refusal", "basis", "ev_hold",
             "probability_read", "decision_evidence", "inputs_expire_at",
             "assessed_at", "residual_qty")}
+    # ── WHAT THE EXECUTABLE GRID EXCLUDED BEFORE ANYTHING WAS VALUED ─────
+    #
+    # For the held position's exit ladder and for every hedge candidate the
+    # search quoted: the grid (tick, step), the levels counted and the levels
+    # excluded as unrepresentable, with prices and quantities -- so the
+    # decision record can show that no action was valued, sized or ranked on
+    # depth its order could not reach.
+    from .. import bettor_book_snapshot as _bsg
+
+    def _grid_view(src):
+        src = dict(src or {})
+        return {"executable_grid": src.get("executable_grid"),
+                "levels_excluded_unrepresentable": src.get(
+                    "levels_excluded_unrepresentable"),
+                "excluded_unrepresentable_qty": src.get(
+                    "excluded_unrepresentable_qty"),
+                "counted_levels": src.get("counted_levels"),
+                "refusal": src.get("refusal")}
+    _hedge_grid = {}
+    for c in cands.get("legs") or []:
+        _hedge_grid[str(c.get("candidate_id"))] = dict(
+            _grid_view(c.get("quote")), price=c.get("price"),
+            depth_qty=c.get("depth_qty"), rankable_input=True)
+    for r in cands.get("refused") or []:
+        if r.get("executable_grid") is not None \
+                or r.get("levels_excluded_unrepresentable") is not None:
+            _hedge_grid[str(r.get("candidate_id"))] = dict(
+                _grid_view(r), rankable_input=False)
+    out["executable_grid"] = {
+        "exit_ladder": _grid_view((_mr or {}).get("exit_ladder")),
+        "hedge_candidates": _hedge_grid,
+        "rule": _bsg.EXECUTABLE_GRID_RULE}
     # ── HOW LONG CAPITAL STAYS COMMITTED: the catalogue's scheduled start is
     # the known lower bound; its end is not stated, so no duration is invented.
     from .. import bettor_xavier as _XV
@@ -5750,6 +5867,7 @@ async def _funded_service(conn, *, now):
                                subscription=ev.get("subscription"),
                                revalidation=ev.get("revalidation"),
                                defer_dispatch=True,
+                               tick_reader=funded_tick_reader,
                                now=now)
     except Exception as exc:                                   # noqa: BLE001
         # SERVICING THAT RAISED IS NOT SERVICING THAT FOUND NOTHING.

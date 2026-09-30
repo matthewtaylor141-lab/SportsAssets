@@ -195,8 +195,12 @@ class _Markets:
     def list(self, params=None):
         slugs = list((params or {}).get("slug") or [])
         self.v.sent.append(("markets.list", slugs))
+        # orderPriceMinTickSize: the market's own tick, on every listing row
+        # as the venue publishes it (SYNTHETIC 0.01). Every funded ladder is
+        # restricted to the executable grid, which refuses an unread tick.
         return {"markets": [{"slug": s, "description": VENUE_PROSE,
-                             "sportsMarketType": SPORTS_TYPE}
+                             "sportsMarketType": SPORTS_TYPE,
+                             "orderPriceMinTickSize": "0.01"}
                             for s in slugs if s == US_SLUG]}
 
     def book(self, slug):

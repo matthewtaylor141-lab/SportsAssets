@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import time
 
+from . import bettor_book_snapshot as BS
 from . import bettor_entry_execution as EX
 from . import bettor_funded_activation as FA
 from . import bettor_funded_book as FB
@@ -133,6 +134,12 @@ R_SETTLEMENT_NOT_ESTABLISHED = \
     "THE_SETTLEMENT_RULE_IS_NOT_ESTABLISHED_FOR_A_FUNDED_ACTION"
 R_EXIT_WIRE_UNREPRESENTABLE = \
     "THE_SELECTED_LEVEL_CANNOT_BE_SENT_WITHOUT_ACCEPTING_LESS"
+#: Rounding would move the exit's limit off the counted level's own wire.
+R_EXIT_LIMIT_WOULD_BE_ROUNDED = \
+    "THE_EXIT_LIMIT_WOULD_BE_ROUNDED_AWAY_FROM_THE_COUNTED_LEVEL"
+#: The exit's limit does not trade every level its quantity was counted on.
+R_EXIT_LIMIT_DOES_NOT_REACH_THE_COUNTED_DEPTH = \
+    "THE_EXIT_LIMIT_DOES_NOT_REACH_THE_DEPTH_IT_WAS_SIZED_ON"
 R_ASSESSMENT_EXPIRED = "THE_ASSESSMENT_THIS_EXIT_RESTS_ON_HAS_EXPIRED"
 
 R_NO_INPUT_DEADLINE = "NO_INPUT_EXPIRY_WAS_CARRIED_TO_THIS_SUBMISSION"
@@ -485,9 +492,26 @@ async def _decision_evidence(conn, probability_row) -> dict:
                      "rule attested for THAT observation"))
 
 
+def default_tick_reader(client, slug) -> dict:
+    """The market's executable grid, read off its listing row through the
+    client this pass already resolved. Uncached: the scheduled loop supplies
+    its hourly-cached reader instead (`ext_pinnacle_loop.funded_tick_reader`).
+    Returns `bettor_book_snapshot.executable_grid`'s answer."""
+    from . import bettor_live_read as _lr
+
+    got = _lr.read_market_tick(client, slug)
+    grid = BS.executable_grid(got.get("tick_size"),
+                              field=got.get("tick_field"),
+                              source=got.get("source"))
+    if not grid.get("ok") and got.get("error"):
+        grid["listing_error"] = got.get("error")
+    return grid
+
+
 async def select_exit(conn, position, *, client=None, now=None,
                       fee_fn=None, book_reader=None,
-                      subscription=None, revalidation=None) -> dict:
+                      subscription=None, revalidation=None,
+                      tick_reader=None) -> dict:
     """WHAT TO DO WITH A FUNDED HOLDING, AND HOW MUCH OF IT.
 
     THE DEFECT THIS CLOSES. `manage()` reconciled, asked about settlement, and
@@ -616,11 +640,31 @@ async def select_exit(conn, position, *, client=None, now=None,
     #    publishes no executable level has nothing to sell into whatever any
     #    probability says -- so it is refused before a database read.
     lad = BS.exit_ladder(got["marketData"], held_intent=opened_with)
+    if lad.get("ok"):
+        # ── ONLY LEVELS AN EXIT WE CAN SEND IS ABLE TO REACH ─────────────
+        #
+        # BEFORE the ranking reads a single number off this ladder. A bid of
+        # 0.625 on a 0.005-tick market cannot be hit by any sell the adapter
+        # can carry (%.2f), so its depth is excluded here, by name -- it is
+        # not rounded onto a cent and it is never sized, valued or ranked.
+        # An unread tick refuses the whole ladder: not assumed to be a cent.
+        try:
+            grid = (tick_reader or default_tick_reader)(use, slug)
+        except Exception as exc:                           # noqa: BLE001
+            grid = BS.executable_grid(None, source="tick_reader raised %s"
+                                      % type(exc).__name__)
+        lad = BS.restrict_to_executable(lad, grid)
+        exit_unrepresentable = not lad.get("ok")
+    else:
+        exit_unrepresentable = False
     out["exit_ladder"] = {k: lad.get(k) for k in
                           ("ok", "refusal", "best_exit_price",
                            "best_api_price", "size_at_best",
-                           "displayed_depth", "levels_read", "parse_status")}
-    if not lad.get("ok"):
+                           "displayed_depth", "levels_read", "parse_status",
+                           "executable_grid", "levels_excluded_unrepresentable",
+                           "excluded_unrepresentable_qty",
+                           "displayed_depth_before_grid")}
+    if not lad.get("ok") and not exit_unrepresentable:
         return dict(out, ok=False, refusal=R_NO_EXIT_SIDE,
                     ladder_refusal=lad.get("refusal"), why=lad.get("why"))
 
@@ -768,6 +812,10 @@ async def select_exit(conn, position, *, client=None, now=None,
 
     # ── THE RANKING, AND ITS OWN GATES ─────────────────────────────
     sale = BS.as_sale_ladder(lad)
+    if exit_unrepresentable:
+        # NOTHING ON THE EXIT SIDE IS REACHABLE: every exit is priced on
+        # nothing, and HOLD -- which needs no fill -- is still decided.
+        sale = {"levels": [], "refusal": lad.get("refusal")}
     ranked = MS.rank_with_hold(
         residual, basis_per, ev_hold=hv,
         bid=lad.get("best_exit_price"), bid_size=lad.get("size_at_best"),
@@ -782,6 +830,30 @@ async def select_exit(conn, position, *, client=None, now=None,
         # action becoming selectable before its execution semantics are
         # supported -- see EXECUTABLE_ACTIONS.
         executable_actions=EXECUTABLE_ACTIONS)
+    if exit_unrepresentable:
+        # THE BLOCKER IS THE GRID'S, BY NAME -- not the generic "no bid",
+        # which would say the venue showed nothing when it showed depth no
+        # order we can send is able to reach.
+        ranked = dict(ranked)
+        blocked, seen = [], set()
+        for b in ranked.get("not_rankable") or []:
+            if b.get("action") in EXECUTABLE_ACTIONS:
+                b = dict(b, blocker=lad.get("refusal"),
+                         displayed_blocker=b.get("blocker"),
+                         levels_excluded_unrepresentable=lad.get(
+                             "levels_excluded_unrepresentable"),
+                         why=lad.get("why"))
+                seen.add(b["action"])
+            blocked.append(b)
+        for act in EXECUTABLE_ACTIONS:
+            if act not in seen:
+                blocked.append({"action": act, "blocker": lad.get("refusal"),
+                                "value_usd": None, "why": lad.get("why"),
+                                "levels_excluded_unrepresentable": lad.get(
+                                    "levels_excluded_unrepresentable")})
+        ranked["not_rankable"] = blocked
+        ranked["candidates"] = [c for c in ranked.get("candidates") or []
+                                if c.get("action") not in EXECUTABLE_ACTIONS]
     out["ranking"] = {k: ranked.get(k) for k in
                       ("selected", "selected_qty", "selection_reason",
                        "operating_state", "governing_rule", "runner_up",
@@ -924,6 +996,13 @@ async def select_exit(conn, position, *, client=None, now=None,
                              "decimals on this side without accepting less "
                              "than the level the action was chosen on"
                              % wire))
+        # ── THE LIMIT SENT IS THE COUNTED LEVEL'S OWN WIRE, EXACTLY ─────
+        _held = _limit_is_the_counted_wire(
+            wire, rounded, _counted_exit_levels(sel, lad, ranked), lad)
+        if _held is not None:
+            return dict(out, ok=False, selected=sel, selected_qty=float(qty),
+                        wire_asked=wire, wire_rounded=rounded,
+                        proceeds_per_contract=proceeds_per, **_held)
         # AND THE ROUNDING IS CHECKED, not trusted. `safe_exit_cent` ceils a
         # long wire and floors a short one, which is the direction that cannot
         # reduce proceeds -- so this assertion should never fire, and it is
@@ -995,6 +1074,49 @@ async def select_exit(conn, position, *, client=None, now=None,
                       "the reason above says which rule"))
 
 
+def _counted_exit_levels(action, lad, ranked) -> list:
+    """The levels an exit action's quantity was counted on: every level a
+    REDUCE's marginal walk took, or the best level a DIRECT_EXIT sells into."""
+    marg = (ranked or {}).get("marginal_sale") or {}
+    if action == "REDUCE" and marg.get("taken"):
+        return [{"api_price": t.get("api_price"), "qty": t.get("qty")}
+                for t in marg["taken"]]
+    best = ((lad or {}).get("levels") or [{}])[0]
+    return [{"api_price": best.get("api_price", (lad or {}).get(
+        "best_api_price")), "qty": best.get("qty")}]
+
+
+def _limit_is_the_counted_wire(wire, rounded, levels, lad) -> dict | None:
+    """None when the limit about to be sent IS the counted level's own wire
+    and reaches every counted level; otherwise the named refusal.
+
+    `safe_exit_cent`'s direction (it cannot accept less) is kept, as an
+    assertion of this invariant rather than the mechanism: on a ladder
+    restricted to the executable grid it never moves a price, and if it would,
+    the exit is refused instead of sent at a limit nobody valued.
+    """
+    from decimal import Decimal
+
+    try:
+        moved = Decimal(str(rounded)) != Decimal(str(wire))
+    except Exception:                                          # noqa: BLE001
+        moved = True
+    if moved:
+        return {"refusal": R_EXIT_LIMIT_WOULD_BE_ROUNDED,
+                "why": ("the counted level's wire price %s would be sent as "
+                        "%s. Either the level is off the executable grid or "
+                        "the rounding moved it; the order would not be the "
+                        "one the action was valued on" % (wire, rounded))}
+    reach = BS.limit_reaches(wire=rounded, levels=levels,
+                             side_consumed=(lad or {}).get("side_consumed"),
+                             grid=(lad or {}).get("executable_grid"))
+    if not reach.get("ok"):
+        return {"refusal": R_EXIT_LIMIT_DOES_NOT_REACH_THE_COUNTED_DEPTH,
+                "reach": reach,
+                "why": "%s: %s" % (reach.get("refusal"), reach.get("why"))}
+    return None
+
+
 def _exit_terms(action, qty, lad, ranked, opened_with) -> dict:
     """THE WIRE LIMIT AND PROCEEDS BOUND ONE EXIT ACTION WOULD BE SENT AT.
 
@@ -1024,6 +1146,11 @@ def _exit_terms(action, qty, lad, ranked, opened_with) -> dict:
     if rounded is None:
         return dict(out, refusal=R_EXIT_WIRE_UNREPRESENTABLE, wire_asked=wire,
                     proceeds_per_contract=proceeds_per)
+    held = _limit_is_the_counted_wire(
+        wire, rounded, _counted_exit_levels(action, lad, ranked), lad)
+    if held is not None:
+        return dict(out, wire_asked=wire, wire_rounded=rounded,
+                    proceeds_per_contract=proceeds_per, **held)
     got_per = exit_proceeds(1, rounded, opened_with)
     if got_per < proceeds_per - 1e-9:
         return dict(out, refusal=R_EXIT_WIRE_UNREPRESENTABLE, wire_asked=wire,
@@ -1858,6 +1985,7 @@ async def manage(conn, *, account_id: str, venue: str, adapter=None,
                  client=None, probe=None, fee_fn=None, book_reader=None,
                  subscription=None, revalidation=None,
                  defer_dispatch: bool = False,
+                 tick_reader=None,
                  now: float | None = None) -> dict:
     """ONE MANAGEMENT CYCLE over every open funded position.
 
@@ -1958,7 +2086,8 @@ async def manage(conn, *, account_id: str, venue: str, adapter=None,
         pick = await select_exit(conn, p, client=client, now=at,
                                 fee_fn=fee_fn, book_reader=book_reader,
                                 subscription=subscription,
-                                revalidation=revalidation)
+                                revalidation=revalidation,
+                                tick_reader=tick_reader)
         out["selection"].append(pick)
         # ── THE RANKING, FOR EVERY POSITION, WHATEVER WAS SELECTED ───
         #
@@ -2001,6 +2130,9 @@ async def manage(conn, *, account_id: str, venue: str, adapter=None,
             "not_rankable": list(pick.get("not_rankable") or []),
             "executable_exit_terms": dict(
                 pick.get("executable_exit_terms") or {}),
+            # THE EXIT LADDER AS VALUED: its executable grid and every level
+            # the grid excluded before the exits were sized, by price.
+            "exit_ladder": pick.get("exit_ladder"),
             # THE EVIDENCE THE VALUATION RESTED ON, for the decision record.
             "basis": {k: (pick.get("basis") or {}).get(k) for k in (
                 "basis_per_contract", "remaining_basis_usd", "residual_qty",

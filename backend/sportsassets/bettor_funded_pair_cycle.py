@@ -2328,6 +2328,13 @@ R_ACQ_PLAN_SIDE_MISSING = (
 R_ACQ_PLAN_DIGEST = "THE_ACQUISITION_PLAN_IS_NOT_THE_ONE_THAT_WAS_RANKED"
 R_ACQ_PLAN_NETS_THE_HELD_INSTRUMENT = (
     "THE_ACQUISITION_PLAN_ADDRESSES_THE_HELD_INSTRUMENT_WHICH_WOULD_NET_IT")
+#: The valued wire price is not one the adapter can send unchanged: rounding
+#: it would send a different limit from the one the hedge was valued on.
+R_ACQ_PLAN_LIMIT_WOULD_BE_ROUNDED = (
+    "THE_ACQUISITION_LIMIT_WOULD_BE_ROUNDED_AWAY_FROM_THE_VALUED_PRICE")
+#: The plan's limit does not trade every level the counted depth came from.
+R_ACQ_PLAN_LIMIT_DOES_NOT_REACH_THE_COUNTED_DEPTH = (
+    "THE_ACQUISITION_LIMIT_DOES_NOT_REACH_THE_DEPTH_IT_WAS_SIZED_ON")
 
 
 class AcquisitionPlan:
@@ -2473,13 +2480,54 @@ def acquisition_plan_for(*, winner, ranked_row, account_id, venue, group_id,
                       "basis its structure was valued at")
     collateral = None
     wire_price = None
-    if qty is not None and price is not None:
+    if qty is not None and price is not None and _side in (
+            "ORDER_INTENT_BUY_LONG", "ORDER_INTENT_BUY_SHORT"):
+        # (A candidate naming no side is refused by `AcquisitionPlan` itself,
+        # by that name, before any price is considered.)
         from decimal import Decimal
-        wire_price = (float(Decimal("1") - Decimal(str(price)))
-                      if _side == "ORDER_INTENT_BUY_SHORT" else float(price))
-        wire_price = FX.safe_cent(wire_price, _side)
-        if wire_price is not None:
-            collateral = FX.collateral_for(wire_price, float(qty), _side)
+        from . import bettor_book_snapshot as _BS
+        exact = (Decimal("1") - Decimal(str(price))
+                 if _side == "ORDER_INTENT_BUY_SHORT" else Decimal(str(price)))
+        wire_price = float(exact)
+        # ── THE LIMIT IS THE VALUED PRICE, EXACTLY, OR NOTHING IS SENT ──
+        #
+        # THE DEFECT THIS CLOSES (XC's 0.985). This ran the valued wire
+        # through `safe_cent` and used whatever came back. On a 0.985 SHORT
+        # cost the wire 0.015 became 0.02 -- a sell that does not trade the
+        # 0.015 bid the depth was counted on -- and on a 0.985 LONG offer the
+        # buy limit became 0.98, which cannot lift it. The ranking won on
+        # liquidity its own order could not reach. `safe_cent`'s direction
+        # stays correct and is kept, as an ASSERTION: if it would move the
+        # limit at all, the plan is refused by name rather than sent.
+        sent = FX.safe_cent(wire_price, _side)
+        if sent is None or Decimal(str(sent)) != exact:
+            raise PlanRefused(
+                R_ACQ_PLAN_LIMIT_WOULD_BE_ROUNDED,
+                "the valued cost %s is a wire price of %s on %s, and the "
+                "adapter can send only %s -- a different limit from the one "
+                "the candidate was valued and sized on, which may not reach "
+                "the depth it counted" % (price, exact, _side, sent),
+                "limit_price", str(exact))
+        # ── AND IT REACHES EVERY LEVEL THE DEPTH WAS COUNTED FROM ───────
+        side_consumed = (_BS.SIDE_BID if _side == "ORDER_INTENT_BUY_SHORT"
+                         else _BS.SIDE_ASK)
+        if row.get("api_price") is not None \
+                and Decimal(str(row["api_price"])) != exact:
+            raise PlanRefused(
+                R_ACQ_PLAN_LIMIT_DOES_NOT_REACH_THE_COUNTED_DEPTH,
+                "the counted level's wire price is %s and the plan's limit is "
+                "%s" % (row["api_price"], exact), "limit_price", str(exact))
+        if row.get("counted_levels") is not None \
+                or row.get("executable_grid") is not None:
+            reach = _BS.limit_reaches(
+                wire=wire_price, levels=row.get("counted_levels") or [],
+                side_consumed=side_consumed, grid=row.get("executable_grid"))
+            if not reach.get("ok"):
+                raise PlanRefused(
+                    R_ACQ_PLAN_LIMIT_DOES_NOT_REACH_THE_COUNTED_DEPTH,
+                    "%s: %s" % (reach.get("refusal"), reach.get("why")),
+                    "limit_price", str(exact))
+        collateral = FX.collateral_for(wire_price, float(qty), _side)
     return AcquisitionPlan(
         quantity_from=qty_from, price_from=price_from,
         account_id=account_id, venue=venue, group_id=group_id,
@@ -2849,6 +2897,18 @@ def rank_admitted(admitted, *, details=None, wanted_qty=None, fee_usd=None,
                "units": cand.get("units"),
                "price": det.get("price"), "depth_qty": det.get("depth_qty"),
                "evidence_age_s": det.get("evidence_age_s")}
+        # ── THE GRID AND THE LEVELS THE PRICE COUNTS, CARRIED ────────────
+        #
+        # So the plan built from this row can prove its wire limit reaches
+        # every level the depth came from, and the record can name what the
+        # executable grid excluded before this candidate was valued.
+        _q = dict(det.get("quote") or {})
+        for _k in ("api_price", "counted_levels", "executable_grid",
+                   "levels_excluded_unrepresentable",
+                   "excluded_unrepresentable_qty", "side_consumed"):
+            _v = det.get(_k, _q.get(_k))
+            if _v is not None:
+                row[_k] = _v
         candidate_fee = det.get("fee_usd", fee_usd)
         candidate_fee_basis = det.get("fee_basis", fee_basis)
         row["fee_usd"] = candidate_fee
