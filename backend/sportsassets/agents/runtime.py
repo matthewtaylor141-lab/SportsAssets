@@ -426,11 +426,23 @@ async def slow_half(conn, *, now: float | None = None) -> dict:
         error = "; ".join(h.get("error") or "" for h in raised + missing)
     else:
         res = audit.get("result") or {}
+        # `audrey_audit.run_due` reports what it did as `audited` /
+        # `reaudited` (one entry per day, `written` when a report version
+        # was written), not `ran` / `recorded`: read that shape too, or an
+        # audit that wrote a report is recorded as AUDIT_NOT_DUE.
+        audited = [a for a in (res.get("audited") or [])
+                   if isinstance(a, dict)]
+        written = ([a.get("report_id") for a in audited if a.get("written")]
+                   + [a.get("report_id") for a in (res.get("reaudited") or [])
+                      if isinstance(a, dict)])
         state = res.get("state") if res.get("state") in R.STATES else (
             R.S_DECISION_RECORDED if res.get("recorded") or res.get(
-                "ran") else R.S_IDLE)
+                "ran") or written else R.S_IDLE)
         activity = res.get("activity") or (
+            ("AUDIT_REPORT_WRITTEN:%s" % ",".join(str(w) for w in written))
+            if written else
             "AUDIT_RAN" if state == R.S_DECISION_RECORDED
+            else "AUDIT_RAN_SAME_EVIDENCE_NO_NEW_VERSION" if audited
             else "AUDIT_NOT_DUE")
     await R.heartbeat(conn, R.AUDREY, state=state, activity=activity,
                       now=at, error=error, dependencies=deps,
