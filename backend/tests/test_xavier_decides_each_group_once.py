@@ -59,6 +59,11 @@ async def _start(conn):
     await XM.spl_clean(conn)
     await SPL._seed(conn)
     await SPL._primary(conn)
+    # THE INPUTS A FUNDED ACQUISITION NEEDS SINCE 880377f: an approved
+    # conditional model and a measured void rate (SYNTHETIC observations;
+    # tests/approved_conditional_model). `XM.spl_clean` purges them.
+    from tests import approved_conditional_model as ACM
+    await ACM.approve(conn)
 
 
 def _step(got, intent_id):
@@ -67,11 +72,18 @@ def _step(got, intent_id):
 
 
 def _acquire_supplier(*, depth=25, decision_id=None, operation_id=None,
-                      gate_event=None, release_event=None, calls=None):
-    """The lifecycle's supplier with the hedge winning (EXIT 2.40 standalone
-    is beaten), optionally depth-limited, optionally blocking inside the
-    review until another review has run."""
-    base = SPL._pair_facts(SPL._exit_is_the_standalone_winner())
+                      gate_event=None, release_event=None, calls=None,
+                      exit_px=0.66):
+    """The lifecycle's supplier with the hedge winning (the best standalone
+    exit is beaten), optionally depth-limited, optionally blocking inside the
+    review until another review has run.
+
+    DISTRIBUTION-PRICED since 880377f (SPL `_distribution_pair_facts`): a
+    funded acquisition is dispatched only when priced from an approved
+    conditional model on a measured void rate and robust over that range.
+    `_start` approves the model."""
+    base = SPL._distribution_pair_facts(
+        SPL._robust_hold_ranking(exit_px=exit_px))
 
     async def _supply(conn, pos, *, at):
         if calls is not None:
@@ -210,7 +222,10 @@ async def test_a_partial_hedge_is_valued_with_its_unmatched_remainder_and_no_sec
                                 executions=[SPL._fill(
                                     6, 0.59, vid="vf-h6",
                                     state="ORDER_STATE_FILLED")])
-        sup = _acquire_supplier(depth=6)
+        # A 6-CONTRACT HEDGE's increment is smaller than a full one's, so the
+        # standalone exit here bids 0.58 (a loss on the 0.62 basis) and the
+        # partial hedge still wins at both ends of the void range (SYNTHETIC).
+        sup = _acquire_supplier(depth=6, exit_px=0.58)
         # ── REVIEW 1: THE BOOK COVERS 6 OF THE 10 HELD ───────────────
         got = await PC.pass_once(conn, account_id=SPL.ACCT, venue=SPL.VENUE,
                                  pair_inputs=sup,
@@ -420,6 +435,9 @@ async def test_a_fill_between_the_decision_and_the_send_stops_the_stale_plan(
             # THE PRIMARY IS HELD (10) AND THE HEDGE ORDER IS WORKING: 6 OF
             # 10 FILLED, through the pass's own acquisition.
             await SPL._primary(conn)
+            # the acquisition's production inputs since 880377f (SYNTHETIC)
+            from tests import approved_conditional_model as ACM
+            await ACM.approve(conn)
             client.orders._exec = [SPL._fill(
                 6, 0.59, vid="vf-h6", state="ORDER_STATE_PARTIALLY_FILLED")]
             got = await PC.pass_once(conn, account_id=SPL.ACCT,

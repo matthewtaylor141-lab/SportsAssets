@@ -1420,6 +1420,105 @@ def _exit_is_the_standalone_winner():
     return hr
 
 
+# ── THE SAME CONTRACT, PRICED AS PRODUCTION NOW REQUIRES FOR REAL MONEY ──
+#
+# WHY THESE EXIST (880377f). A funded order goes out only when the common
+# (one-measure) valuation permits it and selects the same fixed action: HOLD,
+# the exits and the acquisition valued on ONE distribution over the held
+# contract's own payouts, over the void rate's measured range. That needs
+# (a) HOLD's probability, quantity and basis, (b) each exit's net proceeds,
+# (c) the held leg's settlement terms and (d) an acquisition priced through
+# the payout-state distribution from an APPROVED conditional model on a
+# MEASURED void rate. `_pair_facts` above supplies a hand-written region
+# measure and a HOLD with no probability, so a hedge it ranks first is
+# correctly refused funded dispatch. These supply the production inputs;
+# `tests/approved_conditional_model.approve` must have run first. SYNTHETIC.
+P_PRIMARY = 0.55
+
+
+def _robust_hold_ranking(*, exit_px=0.66, reduce_qty=5):
+    """HOLD, DIRECT_EXIT and REDUCE priced on ONE probability (0.55) and the
+    position's real basis (0.62), in `rank_with_hold`'s shape: HOLD -0.70,
+    DIRECT_EXIT at 0.66 +0.40 (profitable -- the best standalone action),
+    REDUCE 5 -0.15. The exit beats HOLD at both ends of any void range (a
+    void pays 50c, below the 66c bid)."""
+    q, b = float(PRIMARY_QTY), PRIMARY_PX
+    hold = round(q * P_PRIMARY - q * b, 6)
+    ex_cash = round(q * exit_px, 6)
+    rd_cash = round(reduce_qty * exit_px, 6)
+    return {"version": "MGMT_SELECT_SHAPE", "not_rankable": [],
+            "candidates": [
+                {"action": "HOLD", "qty": q, "value_usd": hold,
+                 "expected_net_usd": hold, "value_per_contract": P_PRIMARY,
+                 "basis_per_contract_valued": b, "downside_usd": -q * b,
+                 "incremental_capital_usd": 0.0, "capital_duration_h": 26.0,
+                 "evidence_quality": FD.EVIDENCE_EXTERNAL_LABELLED,
+                 "execution_secured": True},
+                {"action": "DIRECT_EXIT", "qty": q,
+                 "value_usd": round(ex_cash - q * b, 6),
+                 "expected_net_usd": round(ex_cash - q * b, 6),
+                 "downside_usd": round(ex_cash - q * b, 6),
+                 "cash_now_usd": ex_cash, "limit_price": exit_px,
+                 "incremental_capital_usd": 0.0, "capital_duration_h": 0.0,
+                 "evidence_quality": FD.EVIDENCE_VENUE_IMPLIED,
+                 "execution_secured": False},
+                {"action": "REDUCE", "qty": float(reduce_qty),
+                 "value_usd": round(rd_cash + (q - reduce_qty) * P_PRIMARY
+                                    - q * b, 6),
+                 "expected_net_usd": round(rd_cash + (q - reduce_qty)
+                                           * P_PRIMARY - q * b, 6),
+                 "downside_usd": round(rd_cash - q * b, 6),
+                 "cash_now_usd": rd_cash, "limit_price": exit_px,
+                 "incremental_capital_usd": 0.0, "capital_duration_h": 26.0,
+                 "evidence_quality": FD.EVIDENCE_EXTERNAL_LABELLED,
+                 "execution_secured": False}]}
+
+
+def _distribution_pair_facts(hold_ranking=None, *, calibration=None,
+                             hedge_px=HEDGE_PX, depth_qty=25,
+                             hedge_fee=HEDGE_FEE):
+    """`_pair_facts`, with the inputs the production supplier passes for a
+    distribution-priced acquisition: the held leg's terms, a fixture that CAN
+    void (so the measured void rate is used), HOLD's primary probability with
+    its source and that source's calibration (read by the worker's own
+    reader; read on the pass's own connection when not given), and the two
+    legs' costs as the features' inputs."""
+    from tests import approved_conditional_model as ACM
+
+    hedge = dataclasses.replace(_hedge_leg(),
+                                cost_cents_per_unit=int(round(hedge_px * 100)))
+    base = _pair_facts(hold_ranking or _robust_hold_ranking())
+
+    async def _supply(conn, pos, *, at):
+        facts = await base(conn, pos, at=at)
+        cal = (calibration if calibration is not None
+               else await ACM.calibration(conn))
+        facts.update({
+            "candidate_legs": _decoys() + [hedge],
+            "fixture_can_void": True,
+            "region_probabilities": None,
+            "fee_usd": hedge_fee,
+            "candidate_leg_details": [
+                {"candidate_id": hedge.condition_id, "price": hedge_px,
+                 "depth_qty": depth_qty, "fee_usd": hedge_fee,
+                 "inputs_expire_at": float(at) + _processing_delay_bound()}],
+            "depth": FIP.depth_supports(wanted_qty=HEDGE_QTY,
+                                        depth_qty_at_price=depth_qty),
+            "incremental": FIP.incremental_capital_usd(
+                hedge_qty=HEDGE_QTY, hedge_price=hedge_px,
+                hedge_fee_usd=hedge_fee),
+            "model_inputs": {
+                "primary_cost_cents": int(PRIMARY_PX * 100),
+                "hedge_cost_cents": int(round(hedge_px * 100)),
+                "overtime_included": True,
+                "primary_probability": P_PRIMARY,
+                "primary_source": ACM.primary_source(payout_event=PAYS_ON),
+                "primary_calibration": cal},
+        })
+        return facts
+    return _supply
+
+
 async def test_the_pass_ranks_everything_together_before_it_dispatches(
         monkeypatch):
     """THE ORDERING, FROM THE PRODUCTION CALLER.
@@ -1430,16 +1529,25 @@ async def test_the_pass_ranks_everything_together_before_it_dispatches(
     ranked set having been beaten on its number rather than withheld.
     """
     asyncpg = pytest.importorskip("asyncpg")
+    from tests import approved_conditional_model as ACM
     conn = await asyncpg.connect(DSN)
     try:
         await _clean(conn)
         await _seed(conn)
         await _primary(conn)
         _, sent, _client = _transport(monkeypatch, order_id="venue-hedge")
+        # THE PRODUCTION INPUTS FOR A FUNDED ACQUISITION (880377f): an
+        # approved conditional model and a measured void rate (SYNTHETIC
+        # observations), HOLD on one probability and the real basis, the
+        # exit profitable and the best standalone action -- see
+        # `_robust_hold_ranking`.
+        await ACM.approve(conn)
 
         got = await PC.pass_once(
             conn, account_id=ACCT, venue=VENUE,
-            pair_inputs=_pair_facts(_exit_is_the_standalone_winner()),
+            pair_inputs=_distribution_pair_facts(
+                _robust_hold_ranking(),
+                calibration=await ACM.calibration(conn)),
             venue_positions=EMPTY_VENUE)
         assert got["ok"] is True, got
         step = got["considered"][0]
@@ -1467,7 +1575,12 @@ async def test_the_pass_ranks_everything_together_before_it_dispatches(
         # and then get "fixed" by relaxing it.
         creates = [c for c in sent if c[0] == "create"]
         assert len(creates) == 1, sent
+        # AND REAL MONEY FOLLOWED A ROBUST, AGREEING ONE-MEASURE CHOICE
+        assert step["funded_dispatch_gate"]["permitted"] is True, step
+        assert step["common_valuation"]["selection_basis"] == \
+            "ROBUST_ACROSS_THE_VOID_RATE_RANGE"
     finally:
+        await ACM.purge(conn)
         await _clean(conn)
         await conn.close()
 

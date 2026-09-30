@@ -58,14 +58,36 @@ async def _connect():
     return await asyncpg.connect(DSN)
 
 
-def _supplier(**overrides):
+@pytest.fixture(autouse=True)
+async def _no_approved_model_left_behind():
+    """The distribution-priced tests approve a SYNTHETIC conditional model and
+    record SYNTHETIC observations; none of it outlives the test."""
+    yield
+    if DSN:
+        from tests import approved_conditional_model as ACM
+        conn = await _connect()
+        try:
+            await ACM.purge(conn)
+        finally:
+            await conn.close()
+
+
+def _supplier(*, distribution=False, **overrides):
     """THE PAIR LIFECYCLE'S OWN SUPPLIER, with named fields replaced.
 
     Built on `L._pair_facts` so every test here runs the same fixture the
     lifecycle proof runs, and the ONLY difference between a passing and a
     refusing case is the field the test names.
+
+    `distribution=True`: the lifecycle's DISTRIBUTION-PRICED facts
+    (`L._distribution_pair_facts`), which a test whose premise is an
+    acquisition that REACHES dispatch needs since 880377f -- a funded
+    acquisition goes out only when priced from an approved conditional model
+    on a measured void rate and robust over it (`_run(approve=True)`).
     """
-    base = L._pair_facts(L._exit_is_the_standalone_winner())
+    base = (L._distribution_pair_facts(L._robust_hold_ranking())
+            if distribution else
+            L._pair_facts(L._exit_is_the_standalone_winner()))
 
     async def _supply(conn, pos, *, at):
         facts = await base(conn, pos, at=at)
@@ -76,10 +98,16 @@ def _supplier(**overrides):
     return _supply
 
 
-async def _run(conn, monkeypatch, supplier):
+async def _run(conn, monkeypatch, supplier, *, approve=False):
     await L._clean(conn)
     await L._seed(conn)
     await L._primary(conn)
+    if approve:
+        # SYNTHETIC: tests/approved_conditional_model (`promote` with a named
+        # approver on prospective observations; they also measure the void
+        # rate).
+        from tests import approved_conditional_model as ACM
+        await ACM.approve(conn)
     _, sent, _client = L._transport(monkeypatch, order_id="venue-hedge")
     got = await PC.pass_once(conn, account_id=L.ACCT, venue=L.VENUE,
                              pair_inputs=supplier,
@@ -107,7 +135,7 @@ async def test_the_persisted_winner_is_the_order_the_venue_receives(monkeypatch)
     conn = await _connect()
     try:
         got, step, sent = await _run(conn, monkeypatch, _supplier(
-            hedge_decision_record=None))
+            distribution=True, hedge_decision_record=None), approve=True)
         assert step["decision"]["action"] == PC.ACTION_ACQUIRE, step
         plan = step["acquisition_plan"]
         # EVERY ADMISSION CHECK PASSED, BY NAME -- being selected is not enough.
@@ -166,7 +194,7 @@ async def test_a_short_costing_41_cents_is_sent_at_59_with_41_cents_collateral(
     conn = await _connect()
     try:
         got, step, sent = await _run(conn, monkeypatch, _supplier(
-            hedge_decision_record=None))
+            distribution=True, hedge_decision_record=None), approve=True)
         plan = step["acquisition_plan"]
         assert plan["side"] == SHORT
         assert plan["limit_price"] == pytest.approx(0.59)
@@ -205,7 +233,7 @@ async def test_a_supplied_record_on_the_other_side_is_refused(monkeypatch):
         rec = dict(L._hedge_decision_record(), order_intent=LONG)
         rec.pop("execution_plan", None)
         got, step, sent = await _run(conn, monkeypatch, _supplier(
-            hedge_decision_record=rec))
+            distribution=True, hedge_decision_record=rec), approve=True)
         assert step["decision"]["action"] == PC.ACTION_ACQUIRE
         assert step["refusal"] == PC.R_HEDGE_RECORD_CONFLICTS_WITH_PLAN, step
         fields = [c["field"] for c in step["admission"]["conflicts"]]
@@ -226,7 +254,8 @@ async def test_a_supplied_record_at_another_price_is_refused(monkeypatch):
     conn = await _connect()
     try:
         got, step, sent = await _run(conn, monkeypatch, _supplier(
-            hedge_decision_record=L._hedge_decision_record()))
+            distribution=True,
+            hedge_decision_record=L._hedge_decision_record()), approve=True)
         assert step["refusal"] == PC.R_HEDGE_RECORD_CONFLICTS_WITH_PLAN, step
         fields = {c["field"] for c in step["admission"]["conflicts"]}
         # LONG, and 0.41 where the plan says 0.59 -- both named.

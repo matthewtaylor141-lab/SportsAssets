@@ -77,6 +77,19 @@ SUPPLIED_ASSUMPTIONS = (
      "refused_by": "ext_pinnacle_loop._funded_attempt / _funded_service "
                    "return None without the binding; authorize() refuses "
                    "without limits and authorization"},
+    {"name": "VOID_RATE", "kind": "EXTERNAL_EVIDENCE",
+     "supplied_as": "60 SYNTHETIC settled fixtures (2 declared void) recorded "
+                    "and labelled by bettor_pair_observations' own recorder "
+                    "and labeller (tests/measured_void_rate)",
+     "production": "no pair observations are recorded, so no void rate is "
+                   "measured and the common valuation values every funded "
+                   "action over a void rate of [0, 1]",
+     "refused_by": "bettor_pair_observations.void_rate -> "
+                   "R_VOID_RATE_TOO_FEW_FIXTURES; with the venue prose's void "
+                   "clause not established the exit is then not robust and "
+                   "bettor_funded_pair_cycle refuses its dispatch with "
+                   "THE_SELECTED_ACTION_CHANGES_WITHIN_THE_VOID_RATES_"
+                   "UNCERTAINTY"},
     {"name": "SUBMISSION_SWITCHES", "kind": "CODE_CONSTANTS",
      "supplied_as": "the three switches turned on in-process by monkeypatch",
      "production": "all three False in shipped code",

@@ -305,10 +305,22 @@ async def test_scheduled_pass_compares_all_contracts_then_sends_only_the_persist
     assert len(hedges) == 2, step
     assert step["decision"]["selected"]["candidate_id"] == middle.condition_id
     if persisted:
-        assert events == ["persist", "send"]
-        assert orders[0]["plan"].candidate_id == middle.condition_id
-        assert orders[0]["plan"].limit_price == .55
-        assert orders[0]["expect_digest"] == step["decision"]["selected"]["plan_digest"]
+        # THE PERSISTED WINNER, AND NOW THE ONE-MEASURE GATE (880377f). This
+        # harness prices both hedges on a legacy region measure (no payout-
+        # state distribution, so no `cv_acquisition`) beside a HOLD that
+        # states no probability or basis, so the common valuation cannot value
+        # the position and real money does not follow the ranking: the send
+        # is refused BY NAME after the persist. Premise changed deliberately
+        # -- it cannot be made robust without substituting a valuation, which
+        # a funded path must never accept. The positive "persist then send
+        # exactly the winning plan" path is pinned against a real database
+        # with the distribution-priced hedge in
+        # test_xavier_manages_every_position_through_the_scheduled_pass.py
+        # (test_the_hedge_sent_is_the_persisted_xavier_plan_field_for_field).
+        assert events == ["persist"] and not orders
+        assert step["refusal"] == C.R_CV_UNAVAILABLE, step
+        assert step["funded_dispatch_gate"]["permitted"] is False
+        assert step["what_was_selected_instead"] == C.ACTION_ACQUIRE
     else:
         assert events == ["persist"] and not orders
 
