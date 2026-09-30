@@ -4511,27 +4511,46 @@ async def _funded_attempt(conn, rec, *, now):
     if not account_id or not venue:
         # NOT CONFIGURED. Not a refusal -- there is nothing to refuse yet.
         return None
-    # THE ACCOUNT, READ AT THE VENUE, so the execution gate can measure it. A
-    # failed read passes None and the gate refuses by name, as before.
-    read = await venue_account_exposure()
+    # ── THE ONE EXECUTION AUTHORITY ─────────────────────────────────
+    #
+    # This is a submit path, so it takes the same lock a servicing pass holds
+    # (see `_execution_lock`), BEFORE the account read, so the exposure the
+    # gate measures cannot move under a concurrent servicing pass's dispatch.
+    # A bounded wait, then a named refusal: a decision that aged past the
+    # freshness bound while it waited must not be sent.
+    lock = _execution_lock()
     try:
-        # THE SCHEDULED ENTRY IS FITTED TO THE APPROVED RAILS. The count on
-        # `rec` is the shadow cohort's; the connector reduces it to the largest
-        # count every approved rail clears at the same limit, records that on
-        # the intent, and refuses when not one contract fits.
-        got = await _FX.submit_for_decision(
-            conn, rec, account_id=account_id, venue=venue, now=now,
-            venue_positions=_venue_positions_for_gate(read),
-            size_to_approved_rails=True)
-        return dict(got, venue_account_read={
-            k: read.get(k) for k in ("ok", "refusal", "held_usd",
-                                     "working_usd", "pages", "open_orders",
-                                     "read_at_epoch_s", "why")})
-    except Exception as exc:                                   # noqa: BLE001
-        # A CONNECTOR THAT RAISES MUST NOT TAKE THE CYCLE DOWN, and it must
-        # not be reported as a clean refusal either.
-        return {"ok": False, "refusal": "FUNDED_CONNECTOR_RAISED",
-                "error": "%s: %s" % (type(exc).__name__, str(exc)[:200])}
+        await asyncio.wait_for(lock.acquire(), ENTRY_WAITS_FOR_EXECUTION_S)
+    except (asyncio.TimeoutError, TimeoutError):
+        return {"ok": False, "refusal": R_EXECUTION_AUTHORITY_BUSY,
+                "waited_s": ENTRY_WAITS_FOR_EXECUTION_S}
+    try:
+        # THE ACCOUNT, READ AT THE VENUE, so the execution gate can measure
+        # it. A failed read passes None and the gate refuses by name, as
+        # before.
+        read = await venue_account_exposure()
+        try:
+            # THE SCHEDULED ENTRY IS FITTED TO THE APPROVED RAILS. The count
+            # on `rec` is the shadow cohort's; the connector reduces it to the
+            # largest count every approved rail clears at the same limit,
+            # records that on the intent, and refuses when not one contract
+            # fits.
+            got = await _FX.submit_for_decision(
+                conn, rec, account_id=account_id, venue=venue, now=now,
+                venue_positions=_venue_positions_for_gate(read),
+                size_to_approved_rails=True)
+            return dict(got, venue_account_read={
+                k: read.get(k) for k in ("ok", "refusal", "held_usd",
+                                         "working_usd", "pages",
+                                         "open_orders", "read_at_epoch_s",
+                                         "why")})
+        except Exception as exc:                               # noqa: BLE001
+            # A CONNECTOR THAT RAISES MUST NOT TAKE THE CYCLE DOWN, and it
+            # must not be reported as a clean refusal either.
+            return {"ok": False, "refusal": "FUNDED_CONNECTOR_RAISED",
+                    "error": "%s: %s" % (type(exc).__name__, str(exc)[:200])}
+    finally:
+        lock.release()
 
 
 def book_currency_evidence(slug=None) -> dict:
@@ -5794,8 +5813,17 @@ async def funded_pair_inputs(conn, pos, *, at, deferred=None,
                         else "unavailable (%s)" % regions.get("refusal"))))
 
 
-async def _funded_service(conn, *, now):
-    """SERVICE WHAT THE FUNDED LANE HOLDS, once per cycle.
+async def _funded_service(conn, *, now, review_interval_s: float = CYCLE_S,
+                          run_learning: bool = True):
+    """SERVICE WHAT THE FUNDED LANE HOLDS, once per servicing pass.
+
+    `review_interval_s` is when Xavier's next review of each position is
+    due, stated on its record: CYCLE_S when the collection cycle is the
+    caller (its fallback, see `_service_once`), SERVICING_INTERVAL_S when
+    the servicing task is. `run_learning=False` skips ONLY the learning pass
+    at the end -- it is the slow half, and it runs on its own cadence (see
+    `LEARNING_INTERVAL_S`); nothing that can submit, cancel or recover is
+    ever skipped by it.
 
     Returns None when the funded lane is not configured, like
     `_funded_attempt`. Otherwise it returns one servicing pass:
@@ -5958,8 +5986,10 @@ async def _funded_service(conn, *, now):
             deferred_exits=deferred,
             venue_positions=_venue_positions_for_gate(account_read),
             venue_reader=_FI.reservation_reader(),
-            # XAVIER'S NEXT REVIEW is no later than the next scheduled cycle.
-            review_interval_s=CYCLE_S,
+            # XAVIER'S NEXT REVIEW is no later than the next servicing pass:
+            # SERVICING_INTERVAL_S under the servicing task, CYCLE_S when the
+            # collection cycle services in its place.
+            review_interval_s=review_interval_s,
             now=now)
         # THE ORDERING, ASSERTED IN THE RESULT rather than left to a reader to
         # infer from two sibling keys. `manage` sent nothing; whatever was sent
@@ -5982,6 +6012,8 @@ async def _funded_service(conn, *, now):
     #
     # After the pass, so a position the pass just closed is joined this cycle.
     # It promotes nothing: promotion needs a named approver.
+    if not run_learning:
+        return got
     try:
         from .. import bettor_funded_pair_cycle as _PC
 
@@ -5992,6 +6024,344 @@ async def _funded_service(conn, *, now):
             "ok": False, "refusal": "FUNDED_LEARNING_PASS_RAISED",
             "error": "%s: %s" % (type(exc).__name__, str(exc)[:200])}
     return got
+
+
+# ═════════════════════════════════════════════════════════════════════
+# ONE EXECUTION AUTHORITY, ON ITS OWN CADENCE
+# ═════════════════════════════════════════════════════════════════════
+#
+# THE DEPENDENCY THIS REMOVES. `_funded_service` -- the reconciliation,
+# `manage`'s fill recovery, the lost-acknowledgement investigations, the
+# settlement re-reads, the pair pass whose first steps are reservation and
+# claim recovery, and Xavier's review of every held position -- ran ONCE PER
+# CYCLE, at the top of `cycle()`. First WITHIN its cycle, but the NEXT pass
+# waited behind everything else that cycle did (the entry lane's odds fetches
+# and paced venue reads, the candidate-outcome rows, the outcome join, the
+# calibration measurement, the pair observation pass) and then behind `run`'s
+# CYCLE_S sleep, which starts only when the cycle has ended. A held position
+# was therefore reviewed, and a lost acknowledgement recovered, once every
+# CYCLE_S + elapsed_s -- the ~17-18 minutes between production heartbeats,
+# and longer whenever collection ran long. Xavier's own record promised the
+# next review at `at + CYCLE_S`, which the schedule never met.
+#
+# WHAT REPLACES IT. `_servicing_loop` is its own task in the same process,
+# started by `run` only once the writer lock is held (a standby services
+# nothing), on its own pool connection, one pass every SERVICING_INTERVAL_S
+# from the start of the previous one. It awaits nothing the collection cycle
+# does. While it is alive the cycle does not service; it reports the task's
+# latest pass. `cycle()` called on its own -- no task in this process --
+# services exactly as it always did, under the same lock.
+#
+# ONE EXECUTION AUTHORITY, IN THREE LAYERS:
+#   1 PROCESS. Only the process holding LOCK_KEY starts the task.
+#   2 IN PROCESS. `_execution_lock()` is the ONE serialization point for every
+#     path in this module that can submit or cancel an order: a servicing pass
+#     (`manage` and the pair pass it feeds) and the funded entry attempt. A
+#     servicing pass that finds it held does NOT queue behind it -- it sends
+#     nothing and reports R_EXECUTION_AUTHORITY_BUSY -- so two passes never
+#     overlap and the task's pass and the cycle's servicing cannot both
+#     dispatch. The funded entry attempt waits at most
+#     ENTRY_WAITS_FOR_EXECUTION_S for it and then refuses by name, rather than
+#     sending a decision that aged while it waited.
+#   3 PER GROUP, ACROSS CONNECTIONS AND PROCESSES. Xavier's group advisory lock
+#     and dispatch claims (`bettor_xavier.try_group_lock`, `record_execution`)
+#     are unchanged and still govern every dispatch.
+#
+# WHAT IS NOT BOUNDED BY A TIMEOUT, deliberately: a pass in progress is never
+# cancelled. Cancelling one between an intent's commit and the venue's answer
+# would manufacture exactly the ambiguous submission recovery exists for, and
+# no ambiguous submission is ever retried. Every venue call carries its own
+# timeout, and every pass's duration is on the servicing heartbeat, so an
+# overrun is visible rather than assumed away.
+#
+# THE BOUND. A pass starts no later than
+#     max(SERVICING_INTERVAL_S, previous pass's duration + SERVICING_MIN_GAP_S)
+# after the previous pass started, whatever the collection cycle is doing.
+# The only thing the two tasks share is the process-wide venue pacer
+# (`venue_pace`, FIFO, one request per MIN_GAP_S), so each servicing venue read
+# queues behind at most the collection reads already queued -- seconds, not a
+# cycle. The collection cycle's own cadence is unchanged.
+
+#: How often held positions are reviewed and fills / reservations recovered,
+#: start to start. The same interval a STOPPED lane has always serviced at
+#: (IDLE_POLL_S, every poll), so servicing at this rate is venue load
+#: production has already carried.
+SERVICING_INTERVAL_S = 60.0
+
+#: The least pause after a pass that overran its interval, so an overrunning
+#: pass cannot turn the task into a tight loop against the venue.
+SERVICING_MIN_GAP_S = 5.0
+
+#: THE SLOW HALF KEEPS THE COLLECTION CADENCE. The learning pass (it fits and
+#: scores candidate models) and Xavier's daily review hold no order path and
+#: are not what a held position waits for; running a model fit sixty times an
+#: hour would be a change of learning policy, not of management latency. They
+#: run inside a servicing pass, under the same lock and after the pair pass as
+#: before, at most once per this interval.
+LEARNING_INTERVAL_S = CYCLE_S
+
+#: How long a servicing pass waits for a pool connection before the pass is
+#: reported as not run -- never an indefinite wait.
+SERVICING_ACQUIRE_TIMEOUT_S = 30.0
+
+#: How long the funded ENTRY attempt waits for the execution lock: the age an
+#: entry's price may reach at all (PINNACLE_MAX_AGE_S). Longer and the decision
+#: it would carry is one the freshness rule would already refuse.
+ENTRY_WAITS_FOR_EXECUTION_S = PINNACLE_MAX_AGE_S
+
+#: The servicing task's own heartbeat key, beside the cycle's.
+SERVICING_KEY = "ext_pinnacle_last_servicing"
+
+SOURCE_SERVICING_TASK = "SERVICING_TASK"
+SOURCE_COLLECTION_CYCLE = "COLLECTION_CYCLE"
+R_EXECUTION_AUTHORITY_BUSY = (
+    "THE_EXECUTION_LOCK_IS_HELD_BY_ANOTHER_SERVICING_PASS_OR_FUNDED_ACTION"
+    "_SO_THIS_ONE_SENDS_NOTHING")
+R_SERVICING_PASS_RAISED = "SERVICING_PASS_RAISED"
+R_NO_SERVICING_PASS_YET = "THE_SERVICING_TASK_HAS_NOT_COMPLETED_A_PASS_YET"
+
+#: How many recent pass starts are kept to report the measured interval.
+SERVICING_STARTS_KEPT = 16
+
+#: The lock is built lazily PER EVENT LOOP (see `db._connect_lock`): an
+#: asyncio.Lock binds to the first loop that contends on it.
+_EXEC_LOCK: dict = {"lock": None, "loop": None}
+
+
+def _execution_lock() -> asyncio.Lock:
+    """THE ONE IN-PROCESS SERIALIZATION POINT for submit/cancel paths."""
+    loop = asyncio.get_running_loop()
+    if _EXEC_LOCK["lock"] is None or _EXEC_LOCK["loop"] is not loop:
+        _EXEC_LOCK["lock"] = asyncio.Lock()
+        _EXEC_LOCK["loop"] = loop
+    return _EXEC_LOCK["lock"]
+
+
+def _servicing_state() -> dict:
+    return {"task_active": False, "task_started_at": None,
+            "passes": 0, "skipped_busy": 0, "errors": 0, "last_error": None,
+            "last": None, "last_started_at": None, "last_finished_at": None,
+            "last_elapsed_s": None, "max_elapsed_s": None,
+            "last_source": None, "starts": [],
+            "slow_half_at": 0.0, "last_learning": None,
+            "last_xavier_review": None}
+
+
+#: What this process's servicing did, for the heartbeats. Process memory only:
+#: the durable facts are the funded book, Xavier's decision rows and the
+#: SERVICING_KEY heartbeat.
+_SERVICING: dict = _servicing_state()
+
+
+async def _service_once(conn, *, now: float, source: str,
+                        review_interval_s: float = SERVICING_INTERVAL_S,
+                        slow: bool | None = None, service=None) -> dict:
+    """ONE SERVICING PASS UNDER THE EXECUTION LOCK. Never raises.
+
+    `slow` runs the slow half (learning, Xavier's daily review): None means
+    "when LEARNING_INTERVAL_S has passed since it last ran". `service` is the
+    servicing call itself, when the caller binds its own (the collection
+    cycle's fallback does, with `_funded_service`'s defaults); by default it
+    is `_funded_service` at `review_interval_s`.
+
+    A HELD LOCK IS NOT WAITED ON. Another pass, or a funded entry attempt, is
+    acting; this one sends nothing and says so, and the next pass decides on
+    what is then held.
+    """
+    st = _SERVICING
+    try:
+        lock = _execution_lock()
+    except Exception as exc:                                   # noqa: BLE001
+        return {"ran": False, "source": source, "at": float(now),
+                "refusal": R_SERVICING_PASS_RAISED,
+                "error": "%s: %s" % (type(exc).__name__, str(exc)[:200])}
+    if lock.locked():
+        st["skipped_busy"] += 1
+        return {"ran": False, "source": source, "at": float(now),
+                "refusal": R_EXECUTION_AUTHORITY_BUSY,
+                "funded_service": {"ok": False,
+                                   "refusal": R_EXECUTION_AUTHORITY_BUSY},
+                "xavier_review": st["last_xavier_review"]}
+    async with lock:
+        t0 = time.monotonic()
+        if slow is None:
+            slow = (float(now) - float(st["slow_half_at"] or 0.0)
+                    >= LEARNING_INTERVAL_S)
+        slow = bool(slow)
+        st["starts"] = (st["starts"] + [float(now)])[-SERVICING_STARTS_KEPT:]
+        try:
+            if service is not None:
+                svc = await service()
+            else:
+                svc = await _funded_service(
+                    conn, now=now, review_interval_s=review_interval_s,
+                    run_learning=slow)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:                               # noqa: BLE001
+            svc = {"ok": False, "refusal": "FUNDED_SERVICING_RAISED",
+                   "error": "%s: %s" % (type(exc).__name__, str(exc)[:200])}
+        if slow:
+            if isinstance(svc, dict) and "learning" in svc:
+                st["last_learning"] = svc.get("learning")
+            # XAVIER'S DAILY REVIEW, after the learning pass, as before.
+            try:
+                xr = await _xavier_daily_review(conn, now=time.time())
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:                           # noqa: BLE001
+                xr = {"ok": False, "ran": False,
+                      "refusal": R_SERVICING_PASS_RAISED,
+                      "error": "%s: %s" % (type(exc).__name__,
+                                           str(exc)[:200])}
+            st["last_xavier_review"] = xr
+            st["slow_half_at"] = float(now)
+        else:
+            # THE LAST LEARNING PASS, CARRIED -- it has its own `at`, so the
+            # digest shows how old it is rather than an empty learning row.
+            if isinstance(svc, dict) and st["last_learning"] is not None:
+                svc["learning"] = st["last_learning"]
+            xr = st["last_xavier_review"]
+        elapsed = round(time.monotonic() - t0, 3)
+        out = {"ran": True, "source": source, "at": float(now),
+               "elapsed_s": elapsed, "slow_half_ran": slow,
+               "review_interval_s": float(review_interval_s),
+               "funded_service": svc, "xavier_review": xr}
+        st.update(passes=st["passes"] + 1, last=out,
+                  last_started_at=float(now), last_finished_at=time.time(),
+                  last_elapsed_s=elapsed, last_source=source,
+                  max_elapsed_s=max(elapsed, st["max_elapsed_s"] or 0.0))
+        return out
+
+
+def _serviced_by_the_task() -> tuple:
+    """(funded_service, xavier_review) of the servicing task's latest pass,
+    for the collection cycle's heartbeat. The cycle services nothing itself
+    while the task is alive."""
+    last = _SERVICING.get("last")
+    if not isinstance(last, dict):
+        return ({"ok": None, "refusal": R_NO_SERVICING_PASS_YET},
+                _SERVICING.get("last_xavier_review"))
+    return last.get("funded_service"), last.get("xavier_review")
+
+
+def _servicing_cadence_digest(now: float | None = None) -> dict:
+    """WHO SERVICES, HOW OFTEN, MEASURED IN THIS PROCESS. Never raises."""
+    try:
+        st = _SERVICING
+        now = time.time() if now is None else float(now)
+        starts = list(st.get("starts") or [])
+        gaps = [round(b - a, 3) for a, b in zip(starts, starts[1:])]
+        last = st.get("last_started_at")
+        return {
+            "servicer": (SOURCE_SERVICING_TASK if st.get("task_active")
+                         else SOURCE_COLLECTION_CYCLE),
+            "task_active": bool(st.get("task_active")),
+            "task_started_at": st.get("task_started_at"),
+            "interval_s": SERVICING_INTERVAL_S,
+            "min_gap_s": SERVICING_MIN_GAP_S,
+            "learning_interval_s": LEARNING_INTERVAL_S,
+            "passes": st.get("passes"),
+            "skipped_busy": st.get("skipped_busy"),
+            "errors": st.get("errors"), "last_error": st.get("last_error"),
+            "last_pass_at": last,
+            "last_pass_age_s": (None if last is None
+                                else round(now - float(last), 3)),
+            "last_pass_source": st.get("last_source"),
+            "last_pass_elapsed_s": st.get("last_elapsed_s"),
+            "max_pass_elapsed_s": st.get("max_elapsed_s"),
+            "slow_half_at": st.get("slow_half_at") or None,
+            "recent_start_gaps_s": {
+                "n": len(gaps),
+                "min": min(gaps) if gaps else None,
+                "max": max(gaps) if gaps else None,
+                "last": gaps[-1] if gaps else None},
+            "bound": ("with the task alive, a servicing pass starts no later "
+                      "than max(interval_s, previous pass duration + "
+                      "min_gap_s) after the previous one started, whatever "
+                      "the collection cycle is doing"),
+        }
+    except Exception as exc:                                   # noqa: BLE001
+        return {"digest_failed": "%s: %s" % (type(exc).__name__,
+                                             str(exc)[:160])}
+
+
+async def _servicing_heartbeat(conn, res: dict) -> None:
+    """THE SERVICING TASK'S OWN ROW (SERVICING_KEY). Never raises.
+
+    A pass that did not run (the lock was held) keeps the last completed
+    pass's digests, so a skip never erases what was last decided."""
+    import json
+
+    try:
+        res = res if isinstance(res, dict) else {}
+        shown = res if res.get("ran") else (_SERVICING.get("last") or {})
+        payload = {
+            "at": time.time(),
+            "writer": _code_identity(),
+            "state": "SERVICED" if res.get("ran") else "NOT_RUN",
+            "refusal": res.get("refusal"),
+            "source": res.get("source"),
+            "pass_at": shown.get("at"),
+            "elapsed_s": shown.get("elapsed_s"),
+            "slow_half_ran": shown.get("slow_half_ran"),
+            "review_interval_s": shown.get("review_interval_s"),
+            "servicing_cadence": _servicing_cadence_digest(),
+            "funded_servicing": _servicing_digest(shown.get("funded_service")),
+            "xavier_review": _xavier_review_digest(shown.get("xavier_review")),
+        }
+        blob = json.dumps(payload, default=str)
+        if len(blob) > HEARTBEAT_MAX_BYTES:
+            payload["funded_servicing"] = {"trimmed_over_bytes": len(blob)}
+            blob = json.dumps(payload, default=str)
+        await conn.execute(
+            "INSERT INTO ingestion_state (key, value) VALUES ($1, $2::jsonb) "
+            "ON CONFLICT (key) DO UPDATE SET value = $2::jsonb",
+            SERVICING_KEY, blob)
+    except Exception:                                          # noqa: BLE001
+        log.warning("ext_pinnacle: servicing heartbeat failed", exc_info=True)
+
+
+async def _servicing_loop(pool, *, interval_s: float = SERVICING_INTERVAL_S,
+                          sleep=None, clock=None,
+                          max_passes: int | None = None) -> None:
+    """THE SERVICING TASK: management and recovery on their own cadence.
+
+    Started by `run` after the writer lock is held; cancelled with it. Each
+    pass takes a pool connection (bounded wait), services under the execution
+    lock and writes SERVICING_KEY. NOTHING RAISES OUT OF A PASS: a failed pass
+    is counted, logged and followed by the next one on schedule. `sleep`,
+    `clock` and `max_passes` exist so a test can drive it on controlled time.
+    """
+    sleep = sleep or asyncio.sleep
+    clock = clock or time.monotonic
+    st = _SERVICING
+    st["task_active"] = True
+    st["task_started_at"] = time.time()
+    n = 0
+    try:
+        while max_passes is None or n < max_passes:
+            n += 1
+            t0 = clock()
+            try:
+                async with pool.acquire(
+                        timeout=SERVICING_ACQUIRE_TIMEOUT_S) as sconn:
+                    res = await _service_once(
+                        sconn, now=time.time(), source=SOURCE_SERVICING_TASK,
+                        review_interval_s=interval_s)
+                    await _servicing_heartbeat(sconn, res)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:                           # noqa: BLE001
+                st["errors"] += 1
+                st["last_error"] = "%s: %s" % (type(exc).__name__,
+                                               str(exc)[:200])
+                log.warning("ext_pinnacle: servicing pass failed",
+                            exc_info=True)
+            elapsed = clock() - t0
+            await sleep(max(SERVICING_MIN_GAP_S, float(interval_s) - elapsed))
+    finally:
+        st["task_active"] = False
 
 
 class _EventTally(dict):
@@ -6198,11 +6568,30 @@ async def cycle(conn) -> dict:
     #
     # It runs here, unconditionally, and its own result says what it did. It
     # submits nothing that the servicing switch does not permit.
-    funded_service = await _funded_service(conn, now=time.time())
-    # XAVIER'S DAILY REVIEW, after the learning pass inside servicing and
-    # above every entry gate, so a stopped lane is still reviewed. Once per
-    # UTC day; never fatal. Every heartbeat below carries its digest.
-    xavier_review = await _xavier_daily_review(conn, now=time.time())
+    #
+    # UNLESS THE SERVICING TASK IS ALIVE, which is the production schedule
+    # (see "ONE EXECUTION AUTHORITY, ON ITS OWN CADENCE" above `_EventTally`):
+    # then held positions are reviewed and fills recovered every
+    # SERVICING_INTERVAL_S by that task, never behind this cycle's collection
+    # work, and this cycle reports its latest pass instead of running a second
+    # one. Without the task (a cycle called on its own) it services here,
+    # exactly as before, under the same execution lock.
+    async def _service_here():
+        return await _funded_service(conn, now=time.time())
+    if _SERVICING["task_active"]:
+        funded_service, xavier_review = _serviced_by_the_task()
+    else:
+        # XAVIER'S DAILY REVIEW runs inside, after the learning pass inside
+        # servicing and above every entry gate, so a stopped lane is still
+        # reviewed. Once per UTC day; never fatal. Every heartbeat below
+        # carries its digest.
+        _svc = await _service_once(conn, now=time.time(),
+                                   source=SOURCE_COLLECTION_CYCLE,
+                                   review_interval_s=CYCLE_S, slow=True,
+                                   service=_service_here)
+        funded_service = _svc.get("funded_service")
+        xavier_review = _svc.get("xavier_review")
+    _t_serviced = time.time()
 
     # ── A CYCLE THAT ENTERS NOTHING STILL SERVICED, SO IT STILL BEATS ──
     #
@@ -6217,6 +6606,8 @@ async def cycle(conn) -> dict:
     # decided and then returns the same dict.
     async def _beat(payload: dict) -> dict:
         payload.setdefault("xavier_review", xavier_review)
+        payload.setdefault("step_timing_s", {
+            "servicing_in_cycle": round(_t_serviced - started, 3)})
         await _heartbeat(conn, payload)
         return payload
 
@@ -7696,24 +8087,40 @@ async def cycle(conn) -> dict:
                              else float(rec["edge"]) > 0.0)})
 
     _close_event()
+    _t_entry = time.time()
     candidate_outcomes = _reconcile_event_ledger(event_ledger, funnel)
     candidate_outcomes["persisted"] = await _persist_candidate_outcomes(
         conn, cycle_at=started, rows=event_ledger)
+    _t_persisted = time.time()
 
     # THE OUTCOME JOIN RUNS EVERY CYCLE, bounded. Collection has to
     # progress on its own: a calibration that waits for someone to
     # remember to run a backfill is a calibration that never happens.
     joined = await join_outcomes(conn)
+    _t_joined = time.time()
     # THE CALIBRATION MEASUREMENT, SCHEDULED, right after the join that
     # feeds it. At most once per CALIBRATION_MEASURE_EVERY_S; see
     # `_scheduled_calibration_measurement`. It writes only a completed
     # verdict and changes nothing the entry gate requires.
     calibration_measurement = await _scheduled_calibration_measurement(
         conn, now=time.time())
+    _t_calibrated = time.time()
     pair_observation = await _pair_observation_pass(conn, observable,
                                                     now=time.time())
+    _t_observed = time.time()
+    # WHERE THE CYCLE'S TIME WENT, per step, so the cadence can be read from
+    # the heartbeat rather than inferred from `elapsed_s` alone. `servicing`
+    # is ~0 while the servicing task is alive: the cycle then services nothing.
+    step_timing_s = {
+        "servicing_in_cycle": round(_t_serviced - started, 3),
+        "entry_lane": round(_t_entry - _t_serviced, 3),
+        "candidate_outcomes": round(_t_persisted - _t_entry, 3),
+        "outcome_join": round(_t_joined - _t_persisted, 3),
+        "calibration_measurement": round(_t_calibrated - _t_joined, 3),
+        "pair_observation": round(_t_observed - _t_calibrated, 3)}
 
     out = {"ran": True, "state": "LIVE",
+           "step_timing_s": step_timing_s,
            "pair_observation": pair_observation,
            "experiment_id": ext.EXPERIMENT_ID,
            "outcome_join": joined,
@@ -8740,6 +9147,12 @@ async def _heartbeat(conn, out: dict, *, key: str = None) -> None:
                 # outcomes, invalidated, next due -- or why it did not run.
                 "xavier_review": _xavier_review_digest(
                     out.get("xavier_review")),
+                # WHO SERVICES AND HOW OFTEN, measured: the servicing task
+                # (its own cadence) or this cycle (its fallback). The
+                # servicing task also writes SERVICING_KEY on every pass.
+                "servicing_cadence": _servicing_cadence_digest(),
+                # WHERE THIS CYCLE'S TIME WENT, per step.
+                "step_timing_s": out.get("step_timing_s"),
                 # WHY A CYCLE STOPPED OR WAS BLOCKED. The early returns
                 # carry it and the heartbeat used to drop it, so a STOPPED
                 # row read `refusals: {}` and did not say why.
@@ -8889,30 +9302,46 @@ async def run(get_pool) -> None:
                              key=COOLDOWN_RESUME_KEY)
         except Exception:                                      # noqa: BLE001
             log.warning("ext_pinnacle: cooldown resume failed", exc_info=True)
-        while True:
-            delay = IDLE_POLL_S
-            try:
-                # ── THE OTHER HALF OF DURABILITY ─────────────────────
-                # A 429 is observed on a synchronous market-data path with
-                # no connection, so it QUEUES its cooldown. This is where
-                # the connection exists. Drained BEFORE the cycle, so an
-                # observation from the previous cycle is durable before
-                # this one sends anything.
+        # ── MANAGEMENT AND RECOVERY, ON THEIR OWN CADENCE ────────────────
+        #
+        # AFTER THE LOCK, so only the writer services (a standby never
+        # reaches here), and AFTER the cooldown resume, so its first venue
+        # read already obeys a stored prohibition. It lives exactly as long
+        # as this loop. See "ONE EXECUTION AUTHORITY, ON ITS OWN CADENCE".
+        servicing = asyncio.get_running_loop().create_task(
+            _servicing_loop(pool, interval_s=SERVICING_INTERVAL_S))
+        try:
+            while True:
+                delay = IDLE_POLL_S
                 try:
-                    from .. import venue_cooldown_store as _vcs2
-                    if _vcs2.pending() is not None:
-                        drained = await _vcs2.drain_pending(conn)
-                        log.warning("ext_pinnacle: venue cooldown persisted "
-                                    "%s", drained)
+                    # ── THE OTHER HALF OF DURABILITY ─────────────────────
+                    # A 429 is observed on a synchronous market-data path
+                    # with no connection, so it QUEUES its cooldown. This is
+                    # where the connection exists. Drained BEFORE the cycle,
+                    # so an observation from the previous cycle is durable
+                    # before this one sends anything.
+                    try:
+                        from .. import venue_cooldown_store as _vcs2
+                        if _vcs2.pending() is not None:
+                            drained = await _vcs2.drain_pending(conn)
+                            log.warning("ext_pinnacle: venue cooldown "
+                                        "persisted %s", drained)
+                    except Exception:                          # noqa: BLE001
+                        log.warning("ext_pinnacle: cooldown drain failed",
+                                    exc_info=True)
+                    out = await cycle(conn)
+                    log.info("ext_pinnacle: %s", out)
+                    if out.get("ran"):
+                        delay = CYCLE_S
+                except asyncio.CancelledError:
+                    raise
                 except Exception:                              # noqa: BLE001
-                    log.warning("ext_pinnacle: cooldown drain failed",
-                                exc_info=True)
-                out = await cycle(conn)
-                log.info("ext_pinnacle: %s", out)
-                if out.get("ran"):
-                    delay = CYCLE_S
-            except asyncio.CancelledError:
-                raise
-            except Exception:                                  # noqa: BLE001
-                log.warning("ext_pinnacle: cycle failed", exc_info=True)
-            await asyncio.sleep(delay)
+                    log.warning("ext_pinnacle: cycle failed", exc_info=True)
+                await asyncio.sleep(delay)
+        finally:
+            servicing.cancel()
+            try:
+                await servicing
+            except (asyncio.CancelledError, Exception):        # noqa: BLE001
+                pass
+            _SERVICING["task_active"] = False
