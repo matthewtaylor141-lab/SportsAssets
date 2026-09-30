@@ -945,3 +945,15 @@ def test_the_framed_switch_retargets_links_under_a_dom(monkeypatch):
     assert framed["link"]["href"] == "/xavier" and framed["link"]["target"] == "_top"
     assert plain["classes"] == [] and plain["link"]["href"] == "/api/command/agents/xavier/page"
     assert "target" not in plain["link"]
+
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_every_character_canvas_is_labelled_a_placeholder(monkeypatch, kind):
+    c, _ = _client(monkeypatch)
+    html = c.get(P.PAGE_PATHS[kind], headers={"X-Admin-Token": _Cfg.admin_token}).text
+    assert CCP.PLACEHOLDER_TAG == "PLACEHOLDER CHARACTER — final model pending"
+    assert '<span class="cc-placeholder" id="cc-placeholder" data-placeholder>%s</span>' % CCP.PLACEHOLDER_TAG in html
+    assert 'aria-label="Placeholder character, final model pending' in html
+    assert CCP.PLACEHOLDER_TAG + ". " in html                     # the text alternative
+    assert "Placeholder character, final model pending: animated 3D stand-in for" in html   # kept on mode change

@@ -60,6 +60,10 @@ NAV_ORDER = ("derek", "xavier", "audrey")
 STATIC_BASE = "/api/command/agents/static/"
 CHARACTERS_JS = STATIC_BASE + "cc_characters.js"
 
+#: The procedural characters are placeholders until licensed models are
+#: loaded through the asset pipeline (cc_characters.js, CHARACTER_ASSETS).
+PLACEHOLDER_TAG = "PLACEHOLDER CHARACTER — final model pending"
+
 UNAVAILABLE_BANNER = ("UNAVAILABLE: the agent's status could not be read or "
                       "its heartbeat is stale. The character is shown in its "
                       "offline pose; nothing here is animated as if the agent "
@@ -116,6 +120,7 @@ body[data-cc-mode=unavailable] .cc-banner{display:block}
 .cc-st{position:absolute;left:0;right:0;bottom:0;padding:14px 18px;display:flex;flex-wrap:wrap;gap:8px 14px;align-items:center;background:linear-gradient(0deg,rgba(4,6,9,.9),rgba(4,6,9,0));font:12px/1.35 var(--mono);color:var(--ink-2)}
 .cc-st .anim{color:var(--ink)}.cc-st .anim b{color:var(--acc-2)}
 .cc-ctl{position:absolute;right:14px;top:14px;display:flex;gap:6px}
+.cc-placeholder{position:absolute;right:14px;top:52px;z-index:2;font:700 10.5px/1.3 var(--mono);letter-spacing:.08em;color:#1a1204;background:var(--warn);padding:5px 8px;border-radius:6px;pointer-events:none}
 .cc-ctl button{background:rgba(6,8,12,.7);border-color:var(--line-2);font-size:11.5px;padding:6px 9px}
 .cc-brief{display:flex;flex-direction:column;gap:12px}
 .cc-brief .blurb{color:var(--ink-2);margin:0}
@@ -419,8 +424,11 @@ def stage_html(kind: str, endpoint: str) -> str:
         '<section class="cc-stage" id="cc-stage" data-cc-stage '
         'data-agent="%(k)s" aria-labelledby="cc-name" '
         'aria-describedby="cc-alt">'
-        '<canvas id="cc-canvas" role="img" aria-label="Animated 3D portrait '
-        'of %(n)s, an AI agent. Pose reflects the recorded status."></canvas>'
+        '<canvas id="cc-canvas" role="img" aria-label="Placeholder character, '
+        'final model pending: animated 3D stand-in for %(n)s, an AI agent. Pose '
+        'reflects the recorded status."></canvas>'
+        '<span class="cc-placeholder" id="cc-placeholder" data-placeholder>'
+        '%(ph)s</span>'
         '<div class="cc-fallback" id="cc-fallback">%(svg)s'
         '<span class="fbnote" id="cc-fbnote">2D PORTRAIT &#183; 3D character '
         'not loaded</span></div>'
@@ -432,8 +440,9 @@ def stage_html(kind: str, endpoint: str) -> str:
         '<span class="sb sb-NONE"><i></i>READING STATUS</span></span>'
         '<span class="anim" id="cc-anim">Animation: <b>waiting for the '
         'status read</b></span><span id="cc-hb"></span></div>'
-        '<p class="sr-only" id="cc-alt">%(n)s is an AI agent (%(r)s), drawn '
-        'as an original stylised character: %(p)s. The pose follows the '
+        '<p class="sr-only" id="cc-alt">%(ph)s. %(n)s is an AI agent (%(r)s), '
+        'shown by an original procedural stand-in (%(p)s) until the licensed '
+        'model is installed. The pose follows the '
         'agent_status record: monitoring, reviewing, waiting, speaking or '
         'unavailable.</p>'
         '<noscript><p class="note" style="position:absolute;left:18px;'
@@ -442,7 +451,7 @@ def stage_html(kind: str, endpoint: str) -> str:
         'available as JSON at <a href="%(ep)s">%(ep)s</a>.</p></noscript>'
         '</section>' % {"k": kind, "n": m["name"], "r": _html.escape(m["role"]),
                         "p": _html.escape(m["persona"]), "ep": endpoint,
-                        "svg": _PORTRAITS[kind]})
+                        "svg": _PORTRAITS[kind], "ph": PLACEHOLDER_TAG})
 
 
 def brief_html(kind: str) -> str:
@@ -859,7 +868,7 @@ CC_BOOT_JS = r"""
   function applyMode(m) {
     document.body.setAttribute('data-cc-mode', m.mode);
     var a = $('cc-anim'); if (a) a.innerHTML = 'Animation: <b>' + esc(m.mode) + '</b>' + (m.why ? ' — ' + esc(m.why) : m.activity ? ' — ' + esc(m.activity) : '');
-    var c = $('cc-canvas'); if (c) c.setAttribute('aria-label', 'Animated 3D portrait of ' + document.getElementById('cc-name').textContent + ', an AI agent, shown ' + m.mode + (m.why ? ' (' + m.why + ')' : '') + '.');
+    var c = $('cc-canvas'); if (c) c.setAttribute('aria-label', 'Placeholder character, final model pending: animated 3D stand-in for ' + document.getElementById('cc-name').textContent + ', an AI agent, shown ' + m.mode + (m.why ? ' (' + m.why + ')' : '') + '.');
     try { window.dispatchEvent(new CustomEvent('cc:mode', {detail: {mode: m.mode, recorded: m.recorded, why: m.why}})); } catch (_) {}
   }
   function effective() {
