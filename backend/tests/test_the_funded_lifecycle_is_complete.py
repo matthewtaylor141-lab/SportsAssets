@@ -1118,6 +1118,11 @@ async def test_the_scheduled_path_selects_executes_recovers_and_reports(
                                 "lastShares": 10,
                                 "commissionNotionalTotalCollected": {
                                     "value": "0.1100"}}]}})
+        # THE HELD CONTRACT'S VENUE TERMS (SYNTHETIC; tests/held_contract_terms):
+        # since 880377f the exit is sent only when the one-measure valuation
+        # selects it robustly, which needs the contract's own void payout.
+        from tests import held_contract_terms as HCT
+        HCT.substitute_held_leg_read(monkeypatch, slug=SLUG, event=EVENT)
         monkeypatch.delenv("EDGE_ODDS_API_KEY", raising=False)
         monkeypatch.setattr(L, "_running", lambda c: _stopped())
         # THE SCHEDULER'S FRESHNESS SEAM, SUPPLIED FOR THIS TEST.

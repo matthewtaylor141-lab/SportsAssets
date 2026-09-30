@@ -76,6 +76,8 @@ async def purge_xavier(conn, account_id):
 
 
 async def spl_clean(conn):
+    from tests import approved_conditional_model as ACM
+    await ACM.purge(conn)
     await purge_xavier(conn, SPL.ACCT)
     await conn.execute(
         "DELETE FROM bettor_funded_operation_evidence WHERE operation_id IN "
@@ -83,6 +85,23 @@ async def spl_clean(conn):
         " group_id IN (SELECT group_id FROM bettor_funded_portfolio_groups "
         " WHERE account_id=$1))", SPL.ACCT)
     await SPL._clean(conn)
+
+
+async def hedge_supplier(conn, hold_ranking=None, **kw):
+    """THE SUPPLIER FOR A TEST WHOSE PREMISE IS A DISPATCHED ACQUISITION.
+
+    Since the common valuation gates funded dispatch (880377f), a hedge is
+    sent only when it was priced through the payout-state distribution from
+    an APPROVED conditional model on a MEASURED void rate, and wins robustly
+    over that rate's range. This approves one on SYNTHETIC observations
+    (tests/approved_conditional_model, `promote` with a named approver) and
+    returns SPL's distribution-priced facts: the exit is still the best
+    standalone action, and the acquisition beats it. `spl_clean` purges it."""
+    from tests import approved_conditional_model as ACM
+    await ACM.approve(conn)
+    return SPL._distribution_pair_facts(
+        hold_ranking or SPL._robust_hold_ranking(),
+        calibration=await ACM.calibration(conn), **kw)
 
 
 async def records(conn, intent_id):
@@ -133,7 +152,7 @@ def exit_plan(pos, *, at, qty, px=0.70, action="DIRECT_EXIT"):
                    "intent_id": pos["intent_id"]})
 
 
-def exit_supplier(*, exit_value=5.0, hold_value=0.10, hedge_hold=0.0,
+def exit_supplier(*, exit_value=None, hold_value=0.10, hedge_hold=0.0,
                   qty=None, px=0.70, plan_for_candidate=None):
     """A SUPPLIER WHOSE WINNER IS AN EXIT WITH A COMPLETE PLAN.
 
@@ -141,9 +160,36 @@ def exit_supplier(*, exit_value=5.0, hold_value=0.10, hedge_hold=0.0,
     supplier fills it for a position with no hedge reader: HOLD and a
     DIRECT_EXIT carrying the digest of the plan it was ranked with. A hedge
     leg's row is supplied HOLD only. `plan_for_candidate(plan, pos, at)` lets
-    a test file a DIFFERENT plan under the winner's digest (a substitution)."""
+    a test file a DIFFERENT plan under the winner's digest (a substitution).
+
+    THE ONE-MEASURE INPUTS (880377f). Since the common valuation gates funded
+    dispatch, the supplier carries what the production one carries: the held
+    leg's settlement terms (tests/held_contract_terms, SYNTHETIC), HOLD's
+    probability and the position's real basis (`FB.remaining_basis`, the
+    fills ledger), and the exit's net proceeds. HOLD keeps its stated value
+    (`hold_value`), its probability is the one that value implies, and the
+    exit's value is its proceeds plus any retained contracts at that same
+    probability, less the basis -- one measure, so the valuation that gates
+    the send and the ranking agree. With the default prices the exit (0.70)
+    beats HOLD (0.63) at every void rate: a void pays 0.50."""
+    from tests import held_contract_terms as HCT
+
     async def _supply(conn, pos, *, at):
-        base = {"ok": True, "held_leg": None, "candidate_legs": [],
+        residual = float(pos.get("residual_qty") or 0)
+        rb = await FB.remaining_basis(conn, str(pos["intent_id"]))
+        bpc = rb.get("basis_per_contract")
+        # A leg with nothing filled (a hedge whose answer was lost) states no
+        # basis; it is supplied HOLD only below and carries no measure.
+        measured = bpc is not None and residual > 0
+        bpc = float(bpc) if measured else None
+        p_hold = ((float(hold_value) + residual * bpc) / residual
+                  if measured else None)
+        base = {"ok": True,
+                "held_leg": (HCT.held_leg(cost_cents=round(bpc * 100),
+                                          qty=int(residual))
+                             if measured else None),
+                "sport_permits_tie": HCT.SPORT_PERMITS_TIE,
+                "candidate_legs": [],
                 "decision_id": "dec:xs:%s:%.3f" % (pos["intent_id"], at),
                 "operation_id": "op:xs:%s:%.3f" % (pos["intent_id"], at),
                 "region_probabilities": None,
@@ -152,9 +198,12 @@ def exit_supplier(*, exit_value=5.0, hold_value=0.10, hedge_hold=0.0,
                 "limits": None, "fee_usd": None, "depth": None,
                 "incremental": None, "capital_duration_h": None,
                 "hedge_decision_record": None}
-        residual = float(pos.get("residual_qty") or 0)
         hold = {"action": "HOLD", "qty": residual, "value_usd": hold_value,
-                "expected_net_usd": hold_value, "downside_usd": -6.20,
+                "expected_net_usd": hold_value,
+                "value_per_contract": p_hold,
+                "basis_per_contract_valued": bpc,
+                "downside_usd": (-round(residual * bpc, 6) if measured
+                                 else -6.20),
                 "incremental_capital_usd": 0.0, "capital_duration_h": 26.0,
                 "evidence_quality": FD.EVIDENCE_EXTERNAL_LABELLED,
                 "execution_secured": True}
@@ -162,12 +211,20 @@ def exit_supplier(*, exit_value=5.0, hold_value=0.10, hedge_hold=0.0,
             return dict(base, hold_ranking={
                 "version": "T", "not_rankable": [],
                 "candidates": [dict(hold, value_usd=hedge_hold,
-                                    expected_net_usd=hedge_hold)]})
+                                    expected_net_usd=hedge_hold,
+                                    value_per_contract=(
+                                        (float(hedge_hold) + residual * bpc)
+                                        / residual if measured else None))]})
         plan = exit_plan(pos, at=at, qty=qty or residual, px=px)
+        cash = round(float(plan.quantity) * float(plan.proceeds_per_contract),
+                     6)
+        value = (round(cash + (residual - float(plan.quantity)) * p_hold
+                       - residual * bpc, 6)
+                 if exit_value is None else exit_value)
         cand = {"action": "DIRECT_EXIT", "qty": plan.quantity,
-                "value_usd": exit_value, "expected_net_usd": exit_value,
-                "downside_usd": exit_value, "incremental_capital_usd": 0.0,
-                "capital_duration_h": 0.0,
+                "value_usd": value, "expected_net_usd": value,
+                "downside_usd": value, "incremental_capital_usd": 0.0,
+                "capital_duration_h": 0.0, "cash_now_usd": cash,
                 "evidence_quality": FD.EVIDENCE_VENUE_IMPLIED,
                 "execution_secured": False, "plan_digest": plan.digest,
                 "limit_price": plan.limit_price,
@@ -449,7 +506,7 @@ async def test_the_hedge_sent_is_the_persisted_xavier_plan_field_for_field(
         _, sent, _c = SPL._transport(monkeypatch, order_id="venue-hedge")
         got = await PC.pass_once(
             conn, account_id=SPL.ACCT, venue=SPL.VENUE,
-            pair_inputs=SPL._pair_facts(SPL._exit_is_the_standalone_winner()),
+            pair_inputs=await hedge_supplier(conn),
             venue_positions=SPL.EMPTY_VENUE)
         step = _step(got, SPL.PRIMARY_INTENT)
         assert step["decision"]["action"] == PC.ACTION_ACQUIRE, step
@@ -574,7 +631,7 @@ async def test_a_replayed_review_is_refused_by_its_claim_and_sends_nothing(
 
         monkeypatch.setattr(XV, "claim_dispatch", _claim_then_die)
         t0 = time.time()
-        supplier = SPL._pair_facts(SPL._exit_is_the_standalone_winner())
+        supplier = await hedge_supplier(conn)
         with pytest.raises(RuntimeError, match="died after the claim"):
             await PC.pass_once(conn, account_id=SPL.ACCT, venue=SPL.VENUE,
                                pair_inputs=supplier,
@@ -824,7 +881,7 @@ async def test_the_hedge_is_refused_on_the_real_clock_immediately_before_it_is_s
         delay = SPL._processing_delay_bound()
         got = await PC.pass_once(
             conn, account_id=SPL.ACCT, venue=SPL.VENUE,
-            pair_inputs=SPL._pair_facts(SPL._exit_is_the_standalone_winner()),
+            pair_inputs=await hedge_supplier(conn),
             venue_positions=SPL.EMPTY_VENUE, now=time.time() - delay - 5.0)
         step = _step(got, SPL.PRIMARY_INTENT)
         assert step["decision"]["action"] == PC.ACTION_ACQUIRE, step
@@ -876,7 +933,7 @@ async def test_a_hedge_refused_in_the_answer_releases_its_claim_and_an_unknown_d
                                         executions=_refused_in_the_answer())
         got = await PC.pass_once(
             conn, account_id=SPL.ACCT, venue=SPL.VENUE,
-            pair_inputs=SPL._pair_facts(SPL._exit_is_the_standalone_winner()),
+            pair_inputs=await hedge_supplier(conn),
             venue_positions=SPL.EMPTY_VENUE)
         assert len(creates(sent)) == 1
         res = (await RSV.get(conn, SPL.OP_HEDGE))["reservation"]

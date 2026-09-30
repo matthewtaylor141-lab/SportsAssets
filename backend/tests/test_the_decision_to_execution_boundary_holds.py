@@ -323,11 +323,34 @@ async def test_a_persisted_decision_does_dispatch(monkeypatch):
     sel = _selection()
     pl = PC.plan_for(action="DIRECT_EXIT", selection=sel, account_id="acct",
                      venue="PMUS", position=_position())
+    # THE ONE-MEASURE GATE `decide_and_record` NOW RETURNS (880377f), which
+    # this harness substitutes -- so the substituted decision carries the
+    # verdict the REAL `common_valuation_for` / `common_valuation_gate`
+    # compute on stated inputs (SYNTHETIC): HOLD at p = 0.30 on a 0.60 basis,
+    # the full exit's 4.70 of proceeds at 0.47, the held contract's own
+    # terms (void pays 50c) and a measured void rate whose upper bound is
+    # 0.11. HOLD is worth at most 0.89 x 0.30 + 0.11 x 0.50 = 0.32 a
+    # contract, so the exit wins at both ends and may be dispatched.
+    from tests import held_contract_terms as HCT
+    hold_ranking = {"candidates": [
+        {"action": "HOLD", "qty": 10.0, "value_per_contract": 0.30,
+         "value_usd": -3.0, "basis_per_contract_valued": 0.60},
+        {"action": "DIRECT_EXIT", "qty": 10.0, "value_usd": -1.30,
+         "cash_now_usd": 4.70, "limit_price": 0.47}]}
+    cv = PC.common_valuation_for(
+        hold_ranking, [], held_leg=HCT.held_leg(),
+        sport_permits_tie=HCT.SPORT_PERMITS_TIE,
+        void_read={"ok": True, "rate": 0.03, "upper_95": 0.11})
+    gate = PC.common_valuation_gate(
+        {"selected": "DIRECT_EXIT",
+         "selected_candidate": {"action": "DIRECT_EXIT", "qty": 10.0}}, cv)
+    assert gate["permitted"] is True, (gate, cv)
     got, disp = await _run_pass(
         monkeypatch,
         decision={"ok": True, "action": "EXIT",
                   "selected": {"action": "DIRECT_EXIT",
-                               "plan_digest": pl.digest}},
+                               "plan_digest": pl.digest},
+                  "funded_dispatch_gate": gate},
         selection=sel)
     step = got["considered"][0]
     assert step.get("refusal") is None, step

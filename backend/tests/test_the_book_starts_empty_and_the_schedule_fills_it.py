@@ -22,9 +22,11 @@ WHAT IS SUBSTITUTED, AND WHAT IS SUPPLIED -- see `_emptybook_fixture`. In short:
 the odds provider, the league schedule and the venue, at their transport
 boundaries; and, NAMED AS ASSUMPTIONS THIS PROOF RUNS UNDER, a book-currency
 mechanism the venue does not document today (P5/P6), a calibration measurement
-production does not have, and owner activation records production does not
-have. Nothing here is evidence that production can do this today; research-sql
-run 271 read production and found all three absent.
+production does not have, owner activation records production does not have,
+and (since the common valuation gates funded dispatch) a measured void rate
+production does not have. Nothing here is evidence that production can do
+this today; research-sql run 271 read production and found the first three
+absent, and production records no pair observations.
 
 DEFECTS THIS RUN FOUND AND THAT ARE FIXED ALONGSIDE IT -- each would have kept
 the lane from ever trading, and none was visible to a test that stubbed the
@@ -183,6 +185,15 @@ async def test_the_schedule_enters_manages_exits_and_reconciles_from_empty(
 
         # ── THE MARKET MOVES ABOVE FAIR VALUE ─────────────────────────
         venue.bids = [(0.93, 400), (0.91, 300)]
+        # THE SUPPLIED VOID RATE (F.SUPPLIED_ASSUMPTIONS "VOID_RATE"). The
+        # venue prose's void clause is read and NOT established (it names two
+        # outcomes in one clause), so the one-measure valuation values the
+        # void payout over [0, 100] cents; over an unmeasured rate [0, 1] the
+        # exit would not be robust (a certain void paying 100c beats 0.93).
+        # Over the measured rate's range it is, and it is sent.
+        from tests import measured_void_rate as MVR
+        await MVR.purge(conn, prefix="emptybook-void")
+        await MVR.seed(conn, prefix="emptybook-void")
         c3 = await loop.cycle(conn)
         steps = _steps(c3)
         assert steps[0]["decision"]["action"] == "EXIT", steps[0]["decision"]
@@ -228,6 +239,8 @@ async def test_the_schedule_enters_manages_exits_and_reconciles_from_empty(
                                     - _order_fee(qty, fill_px)
                                     - _order_fee(qty, 0.93))
     finally:
+        from tests import measured_void_rate as MVR
+        await MVR.purge(conn, prefix="emptybook-void")
         await F.clean(conn)
         await conn.close()
 
@@ -646,7 +659,7 @@ def test_an_event_nothing_was_attributed_to_is_unclassified_not_dropped():
 # ═════════════════════════════════════════════════════════════════════
 
 def test_every_supplied_assumption_is_named_and_production_refuses_without_it():
-    """THE PROOF RUNS UNDER FOUR SUPPLIED INPUTS, and each is one production
+    """THE PROOF RUNS UNDER FIVE SUPPLIED INPUTS, and each is one production
     does not have. This pins the list AND that each is still refused in
     production -- so the proof can never be read as evidence that the lane
     trades today."""
@@ -658,7 +671,7 @@ def test_every_supplied_assumption_is_named_and_production_refuses_without_it():
 
     names = [a["name"] for a in F.SUPPLIED_ASSUMPTIONS]
     assert names == ["BOOK_CURRENCY", "CALIBRATION", "ACTIVATION",
-                     "SUBMISSION_SWITCHES"]
+                     "VOID_RATE", "SUBMISSION_SWITCHES"]
     for a in F.SUPPLIED_ASSUMPTIONS:
         assert a["supplied_as"] and a["production"] and a["refused_by"]
     # 1 · BOOK CURRENCY: in this (cold) process nothing establishes it
@@ -693,6 +706,18 @@ def test_every_supplied_assumption_is_named_and_production_refuses_without_it():
         async def fetchrow(self, *a, **k):
             return None
     assert asyncio.run(loop._funded_service(_NoBinding(), now=1.0)) is None
+    # 3b · VOID RATE: with no settled observations none is measured
+    from sportsassets import bettor_pair_observations as _PO
+
+    class _NoObservations:
+        async def fetchval(self, *a, **k):
+            return 2                      # both tables exist
+
+        async def fetch(self, *a, **k):
+            return []                     # and nothing has settled
+    vr = asyncio.run(_PO.void_rate(_NoObservations()))
+    assert vr["ok"] is False
+    assert vr["refusal"] == _PO.R_VOID_RATE_TOO_FEW_FIXTURES
     # 4 · THE SWITCHES, as shipped
     assert _FX.FUNDED_SUBMISSION_ENABLED is False
     assert _EX.REAL_ORDER_SUBMISSION_ENABLED is False

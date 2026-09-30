@@ -286,10 +286,22 @@ async def _prose(slug):
                            "hours the market resolves 50-50.")}
 
 
+def _venue_terms(monkeypatch):
+    """THE HELD CONTRACT'S SETTLEMENT TERMS (SYNTHETIC), read by the
+    production held-leg supplier: the Houston moneyline including extra
+    innings, void resolving 50-50 -- the terms `_prose` states. Required since
+    the common valuation gates funded dispatch (880377f); see
+    `tests/held_contract_terms.py`. Only the venue-prose read is substituted."""
+    from tests import held_contract_terms as HCT
+    HCT.substitute_held_leg_read(monkeypatch, slug=SLUG,
+                                 event="mlb-hou-sea-2026-09-29")
+
+
 async def _run_cycle(conn, monkeypatch, *, bids):
     from sportsassets.workers import ext_pinnacle_loop as L
     monkeypatch.setattr(FM, "FUNDED_EXIT_SUBMISSION_ENABLED", True)
     monkeypatch.setattr(EX, "REAL_ORDER_SUBMISSION_ENABLED", True)
+    _venue_terms(monkeypatch)
     sent = _transport(monkeypatch, bids=bids)
     monkeypatch.delenv("EDGE_ODDS_API_KEY", raising=False)
     monkeypatch.setattr(L, "_running", lambda c: _stopped())
@@ -461,15 +473,22 @@ async def test_an_acquired_hedge_leg_is_manageable(monkeypatch):
     asyncpg = pytest.importorskip("asyncpg")
     from sportsassets import bettor_funded_pair_cycle as PC
     from tests import test_the_scheduled_pair_lifecycle as SPL
+    from tests import approved_conditional_model as ACM
     conn = await asyncpg.connect(DSN)
     try:
         await SPL._clean(conn)
         await SPL._seed(conn)
         await SPL._primary(conn)
         _, sent, _ = SPL._transport(monkeypatch, order_id="venue-hedge")
+        # A FUNDED ACQUISITION NEEDS THE DISTRIBUTION-PRICED HEDGE AND A
+        # MEASURED VOID RATE since 880377f (SYNTHETIC; see SPL
+        # `_distribution_pair_facts`). The defect under test is unchanged.
+        await ACM.approve(conn)
         got = await PC.pass_once(
             conn, account_id=SPL.ACCT, venue=SPL.VENUE,
-            pair_inputs=SPL._pair_facts(SPL._exit_is_the_standalone_winner()),
+            pair_inputs=SPL._distribution_pair_facts(
+                SPL._robust_hold_ranking(),
+                calibration=await ACM.calibration(conn)),
             venue_positions=SPL.EMPTY_VENUE)
         assert got["ok"] is True and len(got["acquisitions"]) == 1, got
         hedge = await conn.fetchrow(
@@ -486,6 +505,7 @@ async def test_an_acquired_hedge_leg_is_manageable(monkeypatch):
                     if s.get("intent_id") == hedge["intent_id"]]
         assert FM.R_NO_PAYOUT_EVENT not in refusals, refusals
     finally:
+        await ACM.purge(conn)
         await SPL._clean(conn)
         await conn.close()
 

@@ -282,6 +282,12 @@ def _seams(monkeypatch, L):
         L, "book_currency_evidence",
         lambda slug=None: {"subscription": _live(), "revalidation": None})
     monkeypatch.setattr(FM, "FUNDED_EXIT_SUBMISSION_ENABLED", True)
+    # THE HELD CONTRACT'S VENUE TERMS (SYNTHETIC; tests/held_contract_terms).
+    # Since 880377f an exit is sent only when the one-measure valuation
+    # selects it robustly over the void rate's range, which needs the
+    # contract's own void payout. Only the venue-prose read is substituted.
+    from tests import held_contract_terms as HCT
+    HCT.substitute_held_leg_read(monkeypatch, slug=SLUG, event=EVENT)
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -574,6 +580,15 @@ async def test_case_b_a_loss_is_contained_and_inventory_remains(monkeypatch):
         await _seed_for(conn, ACCT)
         await _entry_for(conn, ACCT, intent_id="dem-loss", qty=15, price=0.60)
         await _probability(conn, p=0.30)
+        # A MEASURED VOID RATE (SYNTHETIC observations through the production
+        # recorder; tests/measured_void_rate). The void resolves 50-50, so over
+        # an UNMEASURED rate [0, 1] holding could be worth 0.50 > 0.41 and the
+        # loss-taking exit would not be robust. At the measured rate's upper
+        # bound holding is worth ~0.32, and the exit is robust.
+        from tests import measured_void_rate as MVR
+        await MVR.purge(conn, prefix="dem-loss-void")
+        void = await MVR.seed(conn, prefix="dem-loss-void")
+        assert void["upper_95"] < 0.2, void
         _seams(monkeypatch, L)
 
         _pm, sent, _c = _transport(
@@ -773,6 +788,8 @@ async def test_case_b_a_loss_is_contained_and_inventory_remains(monkeypatch):
         await conn.execute("DELETE FROM bettor_funded_intents")
         await conn.execute(
             "DELETE FROM bettor_desk_accounts WHERE account_id=$1", ACCT)
+        from tests import measured_void_rate as MVR
+        await MVR.purge(conn, prefix="dem-loss-void")
         await conn.close()
 
 

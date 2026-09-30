@@ -186,6 +186,41 @@ async def test_production_quote_uses_correct_side_fields_and_single_price_depth(
     assert got["inputs_expire_at"] == min(108, 100 + loop.MAX_OUR_PROCESSING_DELAY_S)
 
 
+@pytest.mark.asyncio
+async def test_the_hedge_quote_goes_through_the_one_freshness_seam(monkeypatch):
+    """INTEGRATION (XC): `book_currency_evidence` is the one seam through
+    which a freshness mechanism reaches either lane, and the entry lane passes
+    it per contract. The funded hedge quote called `venue_quote` with NO
+    mechanism, so a hedge book could never be admitted. It now passes the
+    seam's own reading for that contract -- which today is none, so the
+    production refusal is unchanged."""
+    from sportsassets.workers import ext_pinnacle_loop as loop
+    calls, asked = [], []
+
+    async def read(conn, **kwargs):
+        calls.append(kwargs)
+        return {"ok": False, "refusal": loop.R_BOOK_CURRENCY_NOT_ESTABLISHED}
+    monkeypatch.setattr(loop, "venue_quote", read)
+    sub = {"alive_at": 99.5, "last_update_at": 99.0}
+
+    def seam(slug=None):
+        asked.append(slug)
+        return {"subscription": sub, "revalidation": None}
+    monkeypatch.setattr(loop, "book_currency_evidence", seam)
+    await loop._candidate_quote(None, "hedge-slug",
+                                "ORDER_INTENT_BUY_SHORT", now=100)
+    assert asked == ["hedge-slug"]
+    assert calls[0]["subscription"] == sub
+    assert calls[0]["revalidation"] is None
+    # AND THE UNPATCHED SEAM SUPPLIES NOTHING TODAY
+    monkeypatch.undo()
+    monkeypatch.setattr(loop, "venue_quote", read)
+    calls.clear()
+    await loop._candidate_quote(None, "hedge-slug",
+                                "ORDER_INTENT_BUY_SHORT", now=100)
+    assert calls[0]["subscription"] is None
+
+
 @pytest.mark.parametrize("side,cost,wire", [
     ("ORDER_INTENT_BUY_LONG", .3, .3),
     ("ORDER_INTENT_BUY_SHORT", .3, .7),
@@ -305,10 +340,22 @@ async def test_scheduled_pass_compares_all_contracts_then_sends_only_the_persist
     assert len(hedges) == 2, step
     assert step["decision"]["selected"]["candidate_id"] == middle.condition_id
     if persisted:
-        assert events == ["persist", "send"]
-        assert orders[0]["plan"].candidate_id == middle.condition_id
-        assert orders[0]["plan"].limit_price == .55
-        assert orders[0]["expect_digest"] == step["decision"]["selected"]["plan_digest"]
+        # THE PERSISTED WINNER, AND NOW THE ONE-MEASURE GATE (880377f). This
+        # harness prices both hedges on a legacy region measure (no payout-
+        # state distribution, so no `cv_acquisition`) beside a HOLD that
+        # states no probability or basis, so the common valuation cannot value
+        # the position and real money does not follow the ranking: the send
+        # is refused BY NAME after the persist. Premise changed deliberately
+        # -- it cannot be made robust without substituting a valuation, which
+        # a funded path must never accept. The positive "persist then send
+        # exactly the winning plan" path is pinned against a real database
+        # with the distribution-priced hedge in
+        # test_xavier_manages_every_position_through_the_scheduled_pass.py
+        # (test_the_hedge_sent_is_the_persisted_xavier_plan_field_for_field).
+        assert events == ["persist"] and not orders
+        assert step["refusal"] == C.R_CV_UNAVAILABLE, step
+        assert step["funded_dispatch_gate"]["permitted"] is False
+        assert step["what_was_selected_instead"] == C.ACTION_ACQUIRE
     else:
         assert events == ["persist"] and not orders
 
