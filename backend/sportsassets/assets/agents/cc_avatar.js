@@ -326,7 +326,7 @@ export async function mountAvatar(stage, cfg, opts = {}) {
   const span = (FRAMING[cfg.framing] || FRAMING.chest) * unit;
   // the head bone sits at the top of the neck: a face shot centres ~9 cm
   // above it, chest and waist shots lower
-  const lift = {face: 0.09, chest: -0.12, waist: -0.3}[cfg.framing] ?? -0.12;
+  const lift = {face: 0.09, chest: -0.05, waist: -0.26}[cfg.framing] ?? -0.05;
   const target = headPos.clone().add(new THREE.Vector3(0, lift * unit, 0));
   const camera = new THREE.PerspectiveCamera(24, 1, 0.01, 100);
   const dist = span / (2 * Math.tan(THREE.MathUtils.degToRad(12)));
