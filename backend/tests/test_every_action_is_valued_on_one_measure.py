@@ -75,16 +75,24 @@ def test_a_nonzero_void_rate_and_unequal_payouts_change_the_ranking():
     assert refund["HOLD"] > refund["DIRECT_EXIT"]
     # WITH ITS UNCERTAINTY [0, 0.10] the HOLD/EXIT choice is not robust:
     # it is a research valuation and may not be dispatched with real money
-    got = CV.value_actions(held_cents=FIFTY, p_win=P, void_rate=0.10, qty=Q,
+    got = CV.value_actions(held_cents=FIFTY, p_win=P, void_rate=0.10,
+                           void_lower=0.0, void_upper=0.10, qty=Q,
                            basis_usd=BASIS, candidates=_cands()[:2])
     assert got["selection_basis"] == CV.BASIS_RESEARCH
     assert got["funded_dispatch_permitted"] is False
     assert got["funded_dispatch_refusal"] == CV.R_SELECTION_DEPENDS_ON_VOID
     # with the refund payout the same range leaves HOLD on top throughout
     got_r = CV.value_actions(held_cents=REFUND, p_win=P, void_rate=0.10,
+                             void_lower=0.0, void_upper=0.10,
                              qty=Q, basis_usd=BASIS, candidates=_cands()[:2])
     assert got_r["selection_basis"] == CV.BASIS_ROBUST
     assert got_r["funded_dispatch_permitted"] is True
+    # A MEASURED RATE WITH NO STATED UPPER BOUND covers [0, 1], not [0, point]:
+    # at v = 1 the refund pays 0.62 and the exit (0.685) wins, so not robust.
+    got_n = CV.value_actions(held_cents=REFUND, p_win=P, void_rate=0.10,
+                             qty=Q, basis_usd=BASIS, candidates=_cands()[:2])
+    assert got_n["void_range"] == [0.0, 1.0]
+    assert got_n["funded_dispatch_permitted"] is False
 
 
 def test_an_unknown_void_rate_is_not_zero():
@@ -311,3 +319,107 @@ def test_an_acquisition_must_win_at_both_ends_of_the_measured_range():
     assert a2["value_at_range_low"] is None
     if got2["winner"]["action"] == "ACQUIRE_INDIRECT_HEDGE":
         assert got2["funded_dispatch_permitted"] is False
+
+
+# ════════════════════════════════════════════════════════════════════
+# THE ENDPOINT-ROBUSTNESS CLAIM: FIXED ACTIONS, THE EXACT MODEL IT COVERS
+# ════════════════════════════════════════════════════════════════════
+
+def test_two_reductions_of_different_size_are_different_actions():
+    """REDUCE 2 wins at v = 0 and REDUCE 9 at v = 1. Without ids they used to
+    share one key, so 'the same action won at both ends' was claimed for two
+    different orders. The fixed action now includes its quantity."""
+    cands = [{"action": "HOLD"},
+             {"action": "REDUCE", "qty": 2, "net_proceeds_usd": 1.46},
+             {"action": "REDUCE", "qty": 9, "net_proceeds_usd": 6.20}]
+    got = CV.value_actions(held_cents=FIFTY, p_win=P, void_rate=None, qty=Q,
+                           basis_usd=BASIS, candidates=cands)
+    lo, hi = got["winner_at_range_low"], got["winner_at_range_high"]
+    assert lo[0] == hi[0] == "REDUCE"
+    assert lo[2] != hi[2]                     # different quantities
+    assert got["funded_dispatch_permitted"] is False
+    assert got["selection_basis"] == CV.BASIS_RESEARCH
+
+
+def test_a_candidate_unrankable_at_one_end_voids_the_robustness_claim():
+    """An acquisition priced at the point and the upper end but not at 0 cannot
+    be compared there, so no winner can be called robust over [0, hi]."""
+    held, hedge, hc = _plain_pair()
+    acq, _, _ = _acquire(held, hedge, v=0.05, q_win=0.9, also=(0.20,))
+    cands = [{"action": "HOLD"},
+             {"action": "DIRECT_EXIT", "qty": Q, "net_proceeds_usd": 9.0},
+             acq]
+    got = CV.value_actions(held_cents=hc, p_win=P, void_rate=0.05,
+                           void_lower=0.0, void_upper=0.20, qty=Q,
+                           basis_usd=BASIS, candidates=cands)
+    assert got["funded_dispatch_permitted"] is False
+    assert got["funded_dispatch_refusal"] == CV.R_RANKABLE_SET_CHANGES
+
+
+def test_tables_that_are_not_a_normal_plus_void_mixture_are_refused():
+    """The affine claim holds for an acquisition only if its tables ARE
+    (1 - v) N + v V. A table at the upper end that moves regular mass between
+    regular regions is not, and the acquisition is refused by name."""
+    held, hedge, hc = _plain_pair()
+    acq, _, _ = _acquire(held, hedge, v=0.05, q_win=0.9, also=(0.0, 0.20))
+    bad = dict(acq["region_probabilities_by_void"][0.20])
+    ks = [k for k in bad if not k.startswith("VOID")]
+    bad[ks[0]] += 0.05
+    bad[ks[1]] -= 0.05
+    by = dict(acq["region_probabilities_by_void"])
+    by[0.20] = bad
+    acq["region_probabilities_by_void"] = by
+    got = CV.value_actions(held_cents=hc, p_win=P, void_rate=0.05,
+                           void_lower=0.0, void_upper=0.20, qty=Q,
+                           basis_usd=BASIS, candidates=[{"action": "HOLD"},
+                                                        acq])
+    a = [r for r in got["valued"] if r["action"] != "HOLD"][0]
+    assert a["refusal"] == CV.R_ACQ_NOT_THE_VOID_MIXTURE
+    assert a["rankable"] is False
+
+
+@pytest.mark.parametrize("seed", range(40))
+def test_a_robust_verdict_holds_at_every_rate_in_its_range(seed):
+    """THE CLAIM ITSELF, checked by brute force: whenever the verdict is
+    ROBUST, re-valuing the SAME fixed candidates at 101 rates across the
+    stated range (each as a degenerate measured range) never changes the
+    winner. Candidates include an acquisition built as a genuine mixture."""
+    import random
+    rnd = random.Random(seed)
+    held, hedge, hc = _plain_pair()
+    measured = seed % 2 == 0
+    v_pt = round(rnd.uniform(0.01, 0.15), 4) if measured else None
+    hi_m = round(min(1.0, (v_pt or 0) + rnd.uniform(0.02, 0.3)), 4)
+    grid_ends = (0.0, hi_m) if measured else (0.0, 1.0)
+    pts = [grid_ends[0] + (grid_ends[1] - grid_ends[0]) * i / 100.0
+           for i in range(101)]
+    cands = [{"action": "HOLD"},
+             {"action": "DIRECT_EXIT", "qty": Q,
+              "net_proceeds_usd": round(rnd.uniform(3.0, 9.0), 2)},
+             {"action": "REDUCE", "qty": rnd.randint(1, 9),
+              "net_proceeds_usd": round(rnd.uniform(0.5, 6.0), 2)}]
+    acq = None
+    if measured:
+        acq, _, _ = _acquire(held, hedge, v=v_pt,
+                             q_win=round(rnd.uniform(0.2, 0.95), 3),
+                             also=tuple([0.0, hi_m] + pts))
+        cands.append(acq)
+    got = CV.value_actions(held_cents=hc, p_win=P, void_rate=v_pt,
+                           void_lower=0.0 if measured else None,
+                           void_upper=hi_m if measured else None,
+                           qty=Q, basis_usd=BASIS, candidates=cands)
+    assert got["ok"] is True
+    if got["selection_basis"] != CV.BASIS_ROBUST:
+        return
+    want = got["winner"]["fixed_action"]
+    for v in pts:
+        cs = cands
+        if acq is not None:
+            a2 = dict(acq, distribution_void_rate=v,
+                      region_probabilities=acq[
+                          "region_probabilities_by_void"][v])
+            cs = cands[:-1] + [a2]
+        one = CV.value_actions(held_cents=hc, p_win=P, void_rate=v,
+                               void_lower=v, void_upper=v, qty=Q,
+                               basis_usd=BASIS, candidates=cs)
+        assert one["winner"]["fixed_action"] == want, (v, one["winner"])

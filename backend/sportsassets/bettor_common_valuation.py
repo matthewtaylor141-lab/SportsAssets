@@ -26,11 +26,20 @@ measure (same probability, same void rate, same payouts): the check is made
 here, not assumed, so "HOLD plus the hedge's increment" is an identity rather
 than an anchoring convention.
 
-Values are linear in `v`; each action carries its value at the rate used and
-its slope, and the verdict reports the void rate at which the winner would
-change. With no measured rate, every action is valued at v = 0 -- one
-distribution for all of them, labelled -- and that break-even rate is what the
-decision says about its dependence on the unmeasured quantity.
+THE UNCERTAINTY MODEL, EXACTLY. Only the void rate `v` is treated as
+uncertain; `p_win` and the conditional table are point inputs. Every value is
+an affine function of `v`: HOLD / EXIT / REDUCE through E[held payout], and an
+acquisition because its table is REQUIRED to be the mixture
+(1 - v) x N + v x V, with N on the regular regions and V on the VOID regions
+(checked from the tables it supplies, refused otherwise). The candidates are
+FIXED -- the same action, id and quantities at every rate -- so if one
+candidate is the strict winner at both ends of the range it is the winner at
+every rate between (differences of affine functions keep their sign). The
+range is:
+  * no measured rate: [0, 1];
+  * a measured rate: [void_lower, void_upper] as supplied (the caller passes
+    [0, the Wilson upper 95% bound]); a missing upper bound is 1, never the
+    point estimate.
 
 Pure; never raises.
 """
@@ -178,6 +187,10 @@ R_SELECTION_DEPENDS_ON_VOID = (
     "THE_SELECTED_ACTION_CHANGES_WITHIN_THE_VOID_RATES_UNCERTAINTY")
 R_ACQ_BOUND_NOT_PRICED = (
     "THE_ACQUISITION_IS_NOT_PRICED_AT_THE_ENDS_OF_THE_VOID_RATE_RANGE")
+R_ACQ_NOT_THE_VOID_MIXTURE = (
+    "THE_ACQUISITIONS_TABLES_ARE_NOT_ONE_NORMAL_PLUS_VOID_MIXTURE")
+R_RANKABLE_SET_CHANGES = (
+    "A_CANDIDATE_IS_RANKABLE_AT_ONE_END_OF_THE_RANGE_AND_NOT_THE_OTHER")
 BASIS_EXACT = "EXACT_THE_FIXTURE_CANNOT_VOID"
 BASIS_ROBUST = "ROBUST_ACROSS_THE_VOID_RATE_RANGE"
 BASIS_RESEARCH = "CONDITIONAL_RESEARCH_VALUATION_NOT_FOR_FUNDED_DISPATCH"
@@ -254,6 +267,53 @@ def _probs_for(c, v, *, point):
     return None
 
 
+def _mixture_check(c, *, lo, hi, point, can_void):
+    """None when the acquisition's tables are the mixture (1-v)N + vV over
+    [lo, hi] (N on regular regions, V on VOID regions, both distributions,
+    and the point table on that line); else a refusal dict."""
+    if not can_void or hi - lo <= 1e-12:
+        return None
+    p_lo = _probs_for(c, lo, point=point)
+    p_hi = _probs_for(c, hi, point=point)
+    if p_lo is None or p_hi is None:
+        return None            # refused at the ends as R_ACQ_BOUND_NOT_PRICED
+    state = {r.get("region"): str(r.get("state") or "")
+             for r in (c.get("regions") or ())}
+    keys = set(p_lo) | set(p_hi)
+    try:
+        slope = {k: (float(p_hi.get(k, 0.0)) - float(p_lo.get(k, 0.0)))
+                 / (hi - lo) for k in keys}
+        n = {k: float(p_lo.get(k, 0.0)) - lo * slope[k] for k in keys}
+    except (TypeError, ValueError):
+        return {"refusal": R_ACQ_NOT_THE_VOID_MIXTURE, "why": "unreadable"}
+    vv = {k: n[k] + slope[k] for k in keys}
+    tol = 1e-9
+    bad = []
+    if any(x < -tol for x in n.values()) or any(x < -tol for x in vv.values()):
+        bad.append("a component is negative")
+    if abs(sum(n.values()) - 1.0) > 1e-6 or abs(sum(vv.values()) - 1.0) > 1e-6:
+        bad.append("a component does not sum to one")
+    if any(vv[k] > tol and state.get(k) != "VOID" for k in keys):
+        bad.append("the void component puts mass on a regular region")
+    if any(n[k] > tol and state.get(k) == "VOID" for k in keys):
+        bad.append("the normal component puts mass on a VOID region")
+    if point is not None and lo - 1e-12 <= point <= hi + 1e-12:
+        p_pt = _probs_for(c, point, point=point)
+        if p_pt is not None and any(
+                abs(float(p_pt.get(k, 0.0)) - (n[k] + point * slope[k]))
+                > 1e-9 for k in keys):
+            bad.append("the point table is not on the line through the ends")
+    if bad:
+        return {"refusal": R_ACQ_NOT_THE_VOID_MIXTURE, "why": bad}
+    return None
+
+
+def _cand_key(c):
+    """A FIXED action: its kind, id and quantities, the same at every rate."""
+    return (str(c.get("action") or ""), c.get("candidate_id"),
+            _f(c.get("qty")), _f(c.get("hedge_qty")))
+
+
 def _rank(rows):
     ok = [r for r in rows if r.get("value_usd") is not None]
     return sorted(ok, key=lambda r: -r["value_usd"])
@@ -301,8 +361,10 @@ def value_actions(*, held_cents: dict, p_win, p_partial=None,
         if not 0.0 <= point <= 1.0:
             return dict(out, refusal=R_PROBABILITY, void_rate=void_rate)
         lo = max(0.0, _f(void_lower) if _f(void_lower) is not None else 0.0)
+        # A MISSING UPPER BOUND IS 1, never the point estimate: the range must
+        # cover every rate the evidence has not excluded.
         hi = min(1.0, _f(void_upper) if _f(void_upper) is not None
-                 else point)
+                 else 1.0)
         lo, hi = min(lo, point), max(hi, point)
         point_v = point
         status = VOID_RATE_MEASURED
@@ -324,22 +386,41 @@ def value_actions(*, held_cents: dict, p_win, p_partial=None,
                 got = {"refusal": R_MEASURES_DO_NOT_RECONCILE,
                        "distribution_void_rate": dv,
                        "measure_void_rate": point}
+            elif is_acq and mixture_refusal.get(id(c)) is not None:
+                got = dict(mixture_refusal[id(c)])
             else:
                 got = _value_one(c, q=q, basis=basis, e_held=e,
                                  marginal=marg, v=v,
                                  probs_at_v=(_probs_for(c, v, point=point)
                                              if is_acq else None), m=m)
             rows.append(dict(got, action=a,
-                             candidate_id=c.get("candidate_id")))
+                             candidate_id=c.get("candidate_id"),
+                             _key=_cand_key(c)))
         return rows
+
+    mixture_refusal = {
+        id(c): _mixture_check(c, lo=lo, hi=hi, point=point,
+                              can_void=can_void)
+        for c in (candidates or ())
+        if str(c.get("action") or "") in ("ACQUIRE_INDIRECT_HEDGE",
+                                          "ACQUIRE_HEDGE")}
 
     rows_lo, rows_hi = at(lo), at(hi)
     rows_pt = at(point_v) if point_v is not None else None
-    key = lambda r: (r["action"], r.get("candidate_id"))       # noqa: E731
+    key = lambda r: r["_key"]                                  # noqa: E731
     win_lo = (_rank(rows_lo) or [None])[0]
     win_hi = (_rank(rows_hi) or [None])[0]
     win_pt = None if rows_pt is None else (_rank(rows_pt) or [None])[0]
-    robust = (win_lo is not None and win_hi is not None
+    def rankable(rows):
+        return {key(r) for r in rows if r.get("value_usd") is not None}
+    same_set = (rankable(rows_lo) == rankable(rows_hi)
+                and (rows_pt is None or rankable(rows_pt) == rankable(rows_lo)))
+    # A STRICT WINNER at each end: a tie at an end is not a robust choice.
+    def strict(rows):
+        rk = _rank(rows)
+        return len(rk) < 2 or rk[0]["value_usd"] > rk[1]["value_usd"] + 1e-12
+    robust = (win_lo is not None and win_hi is not None and same_set
+              and strict(rows_lo) and strict(rows_hi)
               and key(win_lo) == key(win_hi)
               and (win_pt is None or key(win_pt) == key(win_lo)))
     if not can_void:
@@ -356,7 +437,9 @@ def value_actions(*, held_cents: dict, p_win, p_partial=None,
         k = key(r)
         v_lo = lo_by.get(k, {}).get("value_usd")
         v_hi = hi_by.get(k, {}).get("value_usd")
-        row = dict(r, rankable=r.get("value_usd") is not None,
+        row = dict({x: y for x, y in r.items() if x != "_key"},
+                   fixed_action=list(k),
+                   rankable=r.get("value_usd") is not None,
                    value_at_range_low=v_lo, value_at_range_high=v_hi,
                    worst_value_over_range=(None if v_lo is None or v_hi is None
                                            else min(v_lo, v_hi)))
@@ -366,7 +449,8 @@ def value_actions(*, held_cents: dict, p_win, p_partial=None,
         winner is not None
     refusal = None
     if not permitted and winner is not None:
-        refusal = R_SELECTION_DEPENDS_ON_VOID
+        refusal = (R_RANKABLE_SET_CHANGES if can_void and not same_set
+                   else R_SELECTION_DEPENDS_ON_VOID)
     return dict(out, ok=True, refusal=None, measure=m0,
                 void_rate_status=status, void_rate=point_v,
                 void_range=[lo, hi], valued=valued,
@@ -376,9 +460,14 @@ def value_actions(*, held_cents: dict, p_win, p_partial=None,
                 winner=None if winner is None else
                 {"action": winner["action"],
                  "candidate_id": winner.get("candidate_id"),
+                 "fixed_action": list(key(winner)),
                  "value_usd": winner["value_usd"]},
-                winner_at_range_low=None if win_lo is None else key(win_lo),
-                winner_at_range_high=None if win_hi is None else key(win_hi),
+                winner_at_range_low=None if win_lo is None else list(key(win_lo)),
+                winner_at_range_high=(None if win_hi is None
+                                      else list(key(win_hi))),
+                uncertainty_model=(
+                    "only the void rate is uncertain; values are affine in "
+                    "it; candidates are fixed; range %s" % [lo, hi]),
                 an_unknown_void_rate_is_not_zero=(
                     "with no measured rate every action is valued at both "
                     "ends of [0, 1]; a selection that differs between them is "
