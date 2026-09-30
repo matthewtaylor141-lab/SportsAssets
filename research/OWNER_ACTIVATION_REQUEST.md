@@ -141,19 +141,30 @@ When §1–§6 are answered **and** every evidence gate below holds, I will ask 
 
 The question is whether to set the three submission switches to `True` in that gated release. Until you answer yes, no funded order can be sent.
 
-## What is *not* an owner input (listed so it is not confused with one)
+## What is *not* an owner input — reconciliation, implementation and measurement I must finish
 
-**Evidence gates:**
-- **P5:** the venue's answer (§5).
-- **Calibration:** 53 of 450 fixtures, with collection stopped since 2026-09-27. The gate is measured automatically once eligible data exists.
-- **Reconciliation:** the chosen account must pass all four venue reconciliations.
-- **Open investigations:** no unresolved lost acknowledgement, and no settlement the venue contradicts.
+**External evidence (neither owner authorization nor engineering can clear these):**
+- **P5, book-timing contract.** Cleared only by the venue's documented answer: an accepted answer to question 1 (what `transactTime` denotes) and to question 2 or 3 (every change is delivered, or a stated delay bound), as tabled in the P5 request. It must then also be matched by live stream evidence in the process that decides (P2–P4).
+- **Calibration of the Pinnacle source** (`bettor_source_calibration`, unchanged since it was written):
+  - The acceptance needs 300 SCORED independent fixtures.
+  - The chronologically earliest third of resolved fixtures is used only to fit the baseline and is never scored, so 450 resolved fixtures are needed in total (150 fit + 300 scored).
+  - Production has 53 resolved, about 36 of them scored.
+  - All four conditions must hold together: at least 300 scored fixtures; Brier at or below the ceiling; beating the held-out baseline on paired squared error with a 95% interval excluding zero; mean calibration error ≤ 0.05.
+  - The row must also come from the current evaluator and be at most 14 days old.
+- **Pairing model (indirect hedges only).** Approval needs:
+  - at least 40 labelled training fixtures;
+  - then at least 40 prospective fixtures observed after the model was frozen;
+  - a better event-balanced log loss than the baseline, by 0.01 or more;
+  - promotion by a named approver.
 
-**For indirect hedges only:** an approved pairing model built on prospective, event-balanced observations. There are zero production observations today.
+  The 20-fixture cohort check is only an extra refusal on top; it does not make a model valid. The void rate needs at least 40 settled fixtures. There are zero production observations today; the observer collects them without trading.
 
-**Engineering in progress:**
-- Xavier's integration through the scheduled path, with the six demonstrations;
-- the corrected execution history (migration 148);
-- the account-onboarding route;
-- the gated API-only release;
+**Reconciliation:** the account you choose must pass the four venue reconciliations. There must be no unresolved lost acknowledgement, and no settlement the venue contradicts.
+
+**Implementation, then release:**
+- merge the remaining workstreams;
+- wire the common valuation (one measure for HOLD, EXIT, REDUCE and ACQUIRE) into the ranking;
+- the scheduled-path demonstrations;
+- the frozen gate;
+- the API-only release with submissions disabled;
 - the production readback.
