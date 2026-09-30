@@ -95,6 +95,7 @@ PROTECTED_PATHS = (
     r"(^|/)sportsassets/provider_key_proxy\.py$",
     r"(^|/)sportsassets/api/app\.py$",
     r"(^|/)sportsassets/agents/improvement\.py$",
+    r"(^|/)sportsassets/agents/xavier_replay\.py$",
     r"(^|/)tools/improvement_sandbox\.py$",
     r"(^|/)tools/gate_[^/]*$",
     r"(^|/)tools/run_gate\.sh$",
@@ -350,6 +351,26 @@ async def _db_replay(dsn: str, cls, params: dict, spec: dict,
                         "min_gross_edge_pp") or 0.05), basis=IMP.BASIS_GROSS),
                 "excluded": sp["excluded"],
                 "source": "DSN:external_valuations"}
+        if cls.name == "XAVIER_CAPITAL_PRESERVATION_TRADEOFF":
+            # THE EVALUATION'S OWN WINDOWS, SPLIT AND SCOPE: Xavier's recorded
+            # decisions re-run on their frozen inputs, valued on settlement
+            pname = next(iter(cls.bounds))
+            tbd = dict(spec.get("training_boundary_detail") or {})
+            ebd = dict(spec.get("evaluation_boundary_detail") or {})
+            tbd.setdefault("start", start)
+            tbd.setdefault("end", tb)
+            ebd.setdefault("end", eb)
+            sp = await IMP._xavier_split(conn, tbd, ebd)
+            cur = float(current.get(pname) or 0.0)
+            hv = IMP._XR.replay(sp["holdout"], sacrifice=float(params[pname]))
+            hb = IMP._XR.replay(sp["holdout"], sacrifice=cur)
+            return {"new": dict(IMP._XR.public(hv), **IMP._XR.paired(hv, hb)),
+                    "baseline": IMP._XR.public(hb),
+                    "excluded": sp["excluded"],
+                    "evidence_scope": sp.get("scope"),
+                    "source": ("DSN:bettor_xavier_decisions (frozen decision "
+                               "inputs, payout tables) + persisted "
+                               "settlements")}
     finally:
         await conn.close()
     return {}

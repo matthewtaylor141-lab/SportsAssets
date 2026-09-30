@@ -89,6 +89,15 @@ DECISION_FUNCTION = {
 #: for the shadow comparison (a stated example, displayed only).
 CODE_CANDIDATE_SACRIFICE_USD = 0.50
 
+#: THE VERSIONED DEFAULT OF THE CAPITAL-PRESERVATION TRADEOFF, in USD of
+#: whole-position expected value Xavier may give up for a strictly better
+#: worst case (`max_ev_sacrifice_for_downside_usd`). 0.0 == DISABLED: the
+#: approved EXPECTED_NET_VALUE policy. The improvement class
+#: XAVIER_CAPITAL_PRESERVATION_TRADEOFF edits exactly this line (bounds
+#: 0.0 to 1.0 USD); the selection rule follows it (> 0 runs
+#: CAPITAL_PRESERVATION_V1), so a one-line change is a whole, valid policy.
+MAX_EV_SACRIFICE_FOR_DOWNSIDE_USD = 0.0  # versioned default (XAVIER_CAPITAL_PRESERVATION_TRADEOFF)
+
 R_RULE_NEEDS_SACRIFICE = (
     "CAPITAL_PRESERVATION_V1_NEEDS_A_POSITIVE_EV_SACRIFICE_AND_"
     "EXPECTED_NET_VALUE_TAKES_NONE")
@@ -129,7 +138,12 @@ OBJECTIVE_ORDER = (
 #: approved policy.
 PARAMETERS: dict[str, dict] = {
     "selection_rule": {
-        "default": SEL_EXPECTED_NET_VALUE,
+        # FOLLOWS THE VERSIONED SACRIFICE: 0 is the approved EXPECTED_NET_VALUE
+        # rule; a positive default is CAPITAL_PRESERVATION_V1 (`validate`
+        # refuses any other pairing).
+        "default": (SEL_CAPITAL_PRESERVATION
+                    if float(MAX_EV_SACRIFICE_FOR_DOWNSIDE_USD) > 0
+                    else SEL_EXPECTED_NET_VALUE),
         "doc": ("which decision function runs. EXPECTED_NET_VALUE is "
                 "decide()'s approved rule, run unchanged; "
                 "CAPITAL_PRESERVATION_V1 runs decide() and then the "
@@ -144,7 +158,8 @@ PARAMETERS: dict[str, dict] = {
                 "BEFORE the choice, so HOLD / EXIT / REDUCE stay selectable "
                 "and a protective exit is never suppressed")},
     "max_ev_sacrifice_for_downside_usd": {
-        "default": 0.0, "group": "capital_preservation",
+        "default": float(MAX_EV_SACRIFICE_FOR_DOWNSIDE_USD),
+        "group": "capital_preservation",
         "doc": ("DISABLED at 0. When > 0, an admitted alternative whose worst "
                 "case is strictly better than the expected-value winner's, and "
                 "whose expected value is at most this many dollars lower, is "
@@ -484,8 +499,12 @@ async def load_shadow(conn, active: dict) -> dict:
     Never raises."""
     rule = identity(active)["selection_rule"]
     if rule == SEL_CAPITAL_PRESERVATION:
-        return dict(code_default(),
-                    why="the approved EXPECTED_NET_VALUE policy, as shadow")
+        # EXPLICITLY the EXPECTED_NET_VALUE rule (not "the code default",
+        # which follows the versioned sacrifice and may itself be CP)
+        return dict(code_default(), params=dict(
+            default_params(), selection_rule=SEL_EXPECTED_NET_VALUE,
+            max_ev_sacrifice_for_downside_usd=0.0),
+            why="the approved EXPECTED_NET_VALUE policy, as shadow")
     try:
         if await conn.fetchval(
                 "SELECT to_regclass('agent_policy_versions')") is not None:
@@ -798,3 +817,141 @@ def record(verdict: dict, policy: dict | None) -> dict:
 def describe() -> dict:
     return {"policy": code_default(), "forbidden_keys": list(FORBIDDEN_KEYS),
             "selection_rules_implemented": list(SELECTION_RULES)}
+
+
+# ═════════════════════════════════════════════════════════════════════
+# THE DECISION FUNCTION'S FROZEN INPUTS, PERSISTED FOR REPLAY
+# ═════════════════════════════════════════════════════════════════════
+#
+# WHAT WAS MISSING. A persisted Xavier decision carried every alternative's
+# economics, but not the exact inputs `run` was called with (the HOLD
+# ranking, the indirect candidates after the search gate, the limits, the
+# capital duration) nor the common valuation the dispatch gate read. So no
+# evaluator could re-run the real selector on what it actually saw. These are
+# now persisted on the record (`reasoning.decision_inputs`); records written
+# before carry none and are excluded BY NAME from any replay, never
+# reconstructed.
+
+DECISION_INPUTS_VERSION = "XAVIER_DECISION_INPUTS_V1"
+#: What the projection keeps: every SCALAR field of every candidate (the
+#: decision function and the preservation leg read only scalars: action,
+#: value_usd, downside / worst case, incremental capital, qty, ids, blockers)
+#: -- nested structures, tables and predictions stay on the ledger row.
+FROZEN_PROJECTION = ("EVERY_SCALAR_FIELD_OF_EVERY_CANDIDATE; LIMITS; "
+                     "CAPITAL_DURATION; THE COMMON VALUATION'S GATE FIELDS")
+
+
+def _scalar(v):
+    if v is None or isinstance(v, (bool, int, str)):
+        return v
+    if isinstance(v, float):
+        return v if math.isfinite(v) else str(v)
+    f = _finite(v)
+    return f if f is not None else str(v)
+
+
+def _project(c) -> dict:
+    return {str(k): _scalar(v) for k, v in dict(c or {}).items()
+            if v is None or isinstance(v, (bool, int, float, str))
+            or _finite(v) is not None}
+
+
+def _gate_view(cv: dict | None) -> dict | None:
+    if cv is None:
+        return None
+    cv = dict(cv)
+    out = {k: cv.get(k) for k in ("ok", "refusal", "selection_basis",
+                                  "funded_dispatch_permitted",
+                                  "funded_dispatch_refusal", "winner",
+                                  "same_order_exits")}
+    out["valued"] = [{k: r.get(k) for k in (
+        "fixed_action", "rankable", "value_usd", "value_at_range_low",
+        "value_at_range_high")} for r in (cv.get("valued") or [])]
+    return json.loads(json.dumps(out, default=str))
+
+
+def _canon(v):
+    """Numbers as the database returns them: a float rounded to 9 places
+    (and -0.0 as 0.0), so a jsonb round trip never moves the digest."""
+    if isinstance(v, bool) or v is None or isinstance(v, str):
+        return v
+    if isinstance(v, (int, float)):
+        f = float(v)
+        return round(f, 9) + 0.0 if math.isfinite(f) else str(v)
+    if isinstance(v, dict):
+        return {str(k): _canon(x) for k, x in v.items()}
+    if isinstance(v, (list, tuple)):
+        return [_canon(x) for x in v]
+    return str(v)
+
+
+def frozen_digest(frozen: dict) -> str:
+    import hashlib
+    return hashlib.sha256(json.dumps(_canon(frozen), sort_keys=True)
+                          .encode()).hexdigest()
+
+
+def freeze_inputs(frozen: dict, *, verdict: dict | None = None,
+                  common_valuation: dict | None = None) -> dict:
+    """THE EXACT KEYWORD SET `run` WAS CALLED WITH, JSON-safe, with its
+    digest, the selection it produced and the common valuation the dispatch
+    gate read. Pure."""
+    f = dict(frozen or {})
+    hr = dict(f.get("hold_ranking") or {})
+    body = {
+        "hold_ranking": {"version": _scalar(hr.get("version")),
+                         "candidates": [_project(c) for c in
+                                        hr.get("candidates") or []],
+                         "not_rankable": [_project(c) for c in
+                                          hr.get("not_rankable") or []]},
+        "indirect_candidates": [_project(c) for c in
+                                f.get("indirect_candidates") or []],
+        "limits": (None if f.get("limits") is None
+                   else _project(f.get("limits"))),
+        "capital_duration_h": _scalar(f.get("capital_duration_h"))}
+    sel = (verdict or {}).get("selected_candidate")
+    return {"version": DECISION_INPUTS_VERSION, "frozen": body,
+            "digest": frozen_digest(body), "projection": FROZEN_PROJECTION,
+            "selected": _key(sel) if sel else None,
+            "selected_action": (verdict or {}).get("selected"),
+            "common_valuation": _gate_view(common_valuation)}
+
+
+def thaw_inputs(record: dict | None) -> dict:
+    """The keyword set back from a persisted record, after checking its
+    digest. Returns {"ok", "refusal", "frozen"}. Pure."""
+    rec = dict(record or {})
+    if rec.get("version") != DECISION_INPUTS_VERSION or not isinstance(
+            rec.get("frozen"), dict):
+        return {"ok": False, "refusal": "NO_FROZEN_DECISION_INPUTS_PERSISTED"}
+    if frozen_digest(rec["frozen"]) != rec.get("digest"):
+        return {"ok": False, "refusal": "FROZEN_INPUTS_DIGEST_MISMATCH"}
+    return {"ok": True, "refusal": None,
+            "frozen": copy.deepcopy(rec["frozen"])}
+
+
+def policy_with_sacrifice(params: dict | None, sacrifice: float, *,
+                          version: str | None = None) -> dict:
+    """THE POLICY A REPLAY RUNS: the recorded (or active) parameters with
+    only `max_ev_sacrifice_for_downside_usd` set, and the selection rule that
+    value implies. Validated; never stored, never activated. Pure."""
+    s = float(sacrifice)
+    p = dict(default_params(), **dict(params or {}))
+    p.update(max_ev_sacrifice_for_downside_usd=s,
+             selection_rule=(SEL_CAPITAL_PRESERVATION if s > 0
+                             else SEL_EXPECTED_NET_VALUE))
+    v = validate(p)
+    if not v.get("ok"):
+        raise ValueError("replay policy did not validate: %s" % v)
+    return dict(code_default(), params=v["params"],
+                version=version or "REPLAY:sacrifice=%.6f" % s,
+                source="IMPROVEMENT_REPLAY_NEVER_DISPATCHED",
+                why="a replay variant: evaluated on recorded inputs only")
+
+
+def policy_params_for_sacrifice(sacrifice: float,
+                                base: dict | None = None) -> dict:
+    """The WHOLE parameter set a version with this sacrifice carries (what
+    an approved candidate is written as, so it validates when a person
+    activates it). Pure."""
+    return dict(policy_with_sacrifice(base, sacrifice)["params"])

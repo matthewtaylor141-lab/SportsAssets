@@ -42,6 +42,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
+from . import xavier_replay as _XR
+
 VERSION = "AUDREY_IMPROVEMENT_V1"
 TASK_KIND = "IMPROVEMENT"
 
@@ -243,6 +245,38 @@ CHANGE_CLASSES: dict[str, ChangeClass] = {c.name: c for c in (
                   "(DEREK, DEREK_ENTRY_POLICY)"),
         code_default=("backend/sportsassets/agents/derek_policy.py",
                       "MIN_GROSS_EDGE_PROBABILITY")),
+    ChangeClass(
+        name="XAVIER_CAPITAL_PRESERVATION_TRADEOFF", kind=K_POLICY,
+        agent=XAVIER,
+        description=("how much whole-position EXPECTED VALUE Xavier may give "
+                     "up for a strictly better WORST CASE, choosing only "
+                     "among the alternatives decide() already admitted under "
+                     "the approved limits (agents.xavier_policy "
+                     "MAX_EV_SACRIFICE_FOR_DOWNSIDE_USD, the "
+                     "CAPITAL_PRESERVATION_V1 leg; 0 == the approved "
+                     "EXPECTED_NET_VALUE policy). It changes which admitted "
+                     "action the real selector picks; it touches no limit, "
+                     "credential, authority, switch, binding or settlement "
+                     "check; units: " + _XR.UNITS),
+        policy_key="XAVIER_MANAGEMENT_POLICY",
+        bounds={"max_ev_sacrifice_for_downside_usd": (0.0, 1.0, False)},
+        pre_authorized=False, evaluator="xavier_capital_preservation_replay",
+        # SUCCESS IS A BETTER SETTLED NET RESULT PER ELIGIBLE FIXTURE (paired
+        # against the current parameter on the same recorded decisions)
+        # WITHOUT A DEEPER DRAWDOWN. HARM: a worse worst decision, or a worse
+        # ex-ante worst case on average -- the class exists to protect the
+        # downside. A variant that changes no action gains 0 and fails; no
+        # eligible decision is INSUFFICIENT_EVIDENCE, never a success.
+        success_metrics={"delta_net_per_eligible_fixture": {">": 0.0},
+                         "delta_max_drawdown": {"<=": 0.0},
+                         "min_fixtures": 10},
+        harm_metrics={"delta_worst_decision_net_usd": {">=": 0.0},
+                      "delta_mean_ex_ante_worst_case_usd": {">=": 0.0}},
+        acceptance={"holdout_verdict": V_PASS},
+        rollback=("reactivate the prior agent_policy_versions row for "
+                  "(XAVIER, XAVIER_MANAGEMENT_POLICY)"),
+        code_default=("backend/sportsassets/agents/xavier_policy.py",
+                      "MAX_EV_SACRIFICE_FOR_DOWNSIDE_USD")),
     ChangeClass(
         name="XAVIER_POLICY_PARAMETER", kind=K_POLICY, agent=XAVIER,
         description="a bounded Xavier policy parameter; no replay registered",
@@ -1101,6 +1135,13 @@ def code_default_params(cls: ChangeClass) -> dict:
                     float(DP.DEFAULT_PARAMS["min_gross_edge_pp"])}
         except Exception:                                       # noqa: BLE001
             return {"min_gross_edge_pp": 0.05}
+    if cls.name == "XAVIER_CAPITAL_PRESERVATION_TRADEOFF":
+        try:
+            from . import xavier_policy as XP                    # noqa: PLC0415
+            return {"max_ev_sacrifice_for_downside_usd":
+                    float(XP.MAX_EV_SACRIFICE_FOR_DOWNSIDE_USD)}
+        except Exception:                                       # noqa: BLE001
+            return {"max_ev_sacrifice_for_downside_usd": 0.0}
     if cls.name == "REPORT_THRESHOLD":
         return {"min_fixtures_for_statistic": 30,
                 "collection_alert_passes": 3,
@@ -1341,7 +1382,28 @@ async def check_canaries(conn, *, now: float) -> dict:
 # 6 · APPROVAL (the API's write route)
 # ═════════════════════════════════════════════════════════════════════
 
-REPLAY_EVALUATORS = ("derek_threshold_replay", "derek_gross_edge_replay")
+XAVIER_EVALUATOR = "xavier_capital_preservation_replay"
+#: the Xavier tradeoff replay's own version, bound into every evaluation
+XAVIER_REPLAY_VERSION = _XR.VERSION
+REPLAY_EVALUATORS = ("derek_threshold_replay", "derek_gross_edge_replay",
+                     XAVIER_EVALUATOR)
+
+
+async def _xavier_split(conn, tbd: dict, ebd: dict) -> dict:
+    """The Xavier replay's rows over the evaluation's own windows, split as
+    the evaluation split them (fixture-level holdout, outcome cutoffs), in
+    the evidence scope it resolved."""
+    got = await _XR.read_rows(
+        conn, start=float(tbd["start"]), end=float(ebd["end"]),
+        scope=ebd.get("evidence_scope") or _XR.SCOPE_AUTO)
+    sp = split_rows(got["rows"], training_boundary=float(tbd["end"]),
+                    evaluation_boundary=float(ebd["end"]),
+                    salt=ebd.get("holdout_salt") or _XR.HOLDOUT_SALT,
+                    percent=int(ebd.get("holdout_percent")
+                                or _XR.HOLDOUT_PERCENT))
+    return dict(sp, scope=got["scope"],
+                outside_scope=got.get("outside_scope"),
+                records_read=got.get("records_read"))
 
 
 async def verify_approval_basis(conn, c: dict) -> dict:
@@ -1375,18 +1437,26 @@ async def verify_approval_basis(conn, c: dict) -> dict:
     if rep.get("diff_sha256") and hashlib.sha256(
             str(c["diff"]).encode()).hexdigest() != rep["diff_sha256"]:
         changed.append("DIFF")
-    if b.get("evaluator_version") != DEREK_REPLAY_VERSION:
+    xav = cls.evaluator == XAVIER_EVALUATOR
+    if b.get("evaluator_version") != (XAVIER_REPLAY_VERSION if xav
+                                      else DEREK_REPLAY_VERSION):
         changed.append("EVALUATOR_VERSION")
     tbd, ebd = b.get("training_boundary") or {}, b.get(
         "evaluation_boundary") or {}
-    rows = await derek_rows(conn, start=float(tbd["start"]),
-                            end=float(ebd["end"]))
-    sp = split_rows(rows, training_boundary=float(tbd["end"]),
-                    evaluation_boundary=float(ebd["end"]),
-                    salt=ebd.get("holdout_salt") or DEREK_HOLDOUT_SALT,
-                    percent=int(ebd.get("holdout_percent")
-                                or DEREK_HOLDOUT_PERCENT))
-    now_digest = rows_digest(sp["training"] + sp["holdout"])
+    if xav:
+        # THE SAME RECORDED DECISIONS AND SETTLEMENTS, RE-READ NOW: a changed
+        # settlement, correction, record or exclusion changes the digest
+        sp = await _xavier_split(conn, tbd, ebd)
+        now_digest = _XR.rows_digest(sp["training"] + sp["holdout"])
+    else:
+        rows = await derek_rows(conn, start=float(tbd["start"]),
+                                end=float(ebd["end"]))
+        sp = split_rows(rows, training_boundary=float(tbd["end"]),
+                        evaluation_boundary=float(ebd["end"]),
+                        salt=ebd.get("holdout_salt") or DEREK_HOLDOUT_SALT,
+                        percent=int(ebd.get("holdout_percent")
+                                    or DEREK_HOLDOUT_PERCENT))
+        now_digest = rows_digest(sp["training"] + sp["holdout"])
     if now_digest != (b.get("input_records") or {}).get("digest"):
         changed.append("INPUT_RECORDS")
     if changed:
@@ -1413,6 +1483,21 @@ def economic_promotion_gate(c: dict) -> dict:
     return {"permitted": False, "refusal": R_ECON_PENDING,
             "economic_qualification": q or "NOT_ASSESSED",
             "evidence": (ev.get("qualification") or {}).get("evidence")}
+
+
+async def policy_version_params(conn, cls: ChangeClass, params: dict) -> dict:
+    """What a policy CANDIDATE row carries. For Xavier's tradeoff the WHOLE
+    parameter set -- the active policy's, with the evaluated sacrifice and
+    the rule it implies -- so the row validates when a person activates it
+    (a lone sacrifice under the EXPECTED_NET_VALUE rule would not). Every
+    other class: its own parameters."""
+    if cls.name != "XAVIER_CAPITAL_PRESERVATION_TRADEOFF":
+        return dict(params or {})
+    from . import xavier_policy as XP                            # noqa: PLC0415
+    active = await XP.load(conn)
+    return XP.policy_params_for_sacrifice(
+        float((params or {})["max_ev_sacrifice_for_downside_usd"]),
+        base=active.get("params"))
 
 
 async def approve(conn, candidate_id: str, *, approver: str,
@@ -1475,7 +1560,9 @@ async def approve(conn, candidate_id: str, *, approver: str,
                 " approved_at, created_at) VALUES ($1,$2,$3,$4::jsonb,"
                 " 'CANDIDATE',$5,$6,$7,$7) ON CONFLICT DO NOTHING",
                 cls.agent, cls.policy_key, wrote_policy,
-                _j(c.get("params") or {}), c["proposed_by"], who, _ts(now))
+                _j(await policy_version_params(conn, cls,
+                                               c.get("params") or {})),
+                c["proposed_by"], who, _ts(now))
     await task_event(conn, c["task_id"], kind="APPROVED", actor=who,
                      detail={"candidate_id": candidate_id,
                              "credential_role": credential_role,
@@ -1907,6 +1994,279 @@ async def evaluate_derek_threshold_task(
             "selection": selection, "binding": binding}
 
 
+async def _xavier_current(conn, cls: ChangeClass) -> dict:
+    """The parameter Xavier runs under now: the ACTIVE validated version
+    (`xavier_policy.load`, the scheduled path's own reader), else the code
+    default -- labelled either way."""
+    from . import xavier_policy as XP                            # noqa: PLC0415
+    pname = next(iter(cls.bounds))
+    pol = await XP.load(conn)
+    v = _num((pol.get("params") or {}).get(pname))
+    return {"value": float(v if v is not None
+                           else code_default_params(cls).get(pname) or 0.0),
+            "source": pol.get("source"), "version": pol.get("version"),
+            "params": dict(pol.get("params") or {})}
+
+
+XAVIER_STEPS = (0.25, 0.50, 1.00)
+
+
+async def evaluate_xavier_tradeoff_task(conn, task: dict, *,
+                                        now: float) -> dict:
+    """XAVIER_CAPITAL_PRESERVATION_TRADEOFF BY REPLAY OVER HIS RECORDED
+    DECISIONS (`agents.xavier_replay`).
+
+    Each recorded decision's frozen inputs are re-run through Xavier's real
+    decision function under the current sacrifice and each variant; the
+    chosen action is valued on the position's known settlement through its
+    persisted payout table. Fixture-level holdout (fixed salt), cut by
+    outcome availability. EVERY variant is tried on TRAINING only and
+    recorded; the one selected (the largest paired gain among those whose
+    training judgement passes the class's rule) is replayed ONCE on the
+    holdout against the current parameter and judged. Not pre-authorized: a
+    PASS stops at APPROVAL_READY."""
+    cls = CHANGE_CLASSES["XAVIER_CAPITAL_PRESERVATION_TRADEOFF"]
+    pname = next(iter(cls.bounds))
+    spec = task.get("spec") or {}
+    tid = task["task_id"]
+    start, tb, eb = _boundaries(spec, now, holdout_days=float(
+        spec.get("holdout_days") or 14))
+    current = await _xavier_current(conn, cls)
+    cur = float(current["value"])
+    lo, hi, _ = cls.bounds[pname]
+    variants = sorted({round(float(v), 6) for v in (
+        spec.get("variants") or [cur + d for d in XAVIER_STEPS]
+        + [cur - d for d in XAVIER_STEPS])
+        if lo <= float(v) <= hi and abs(float(v) - cur) > 1e-12})
+    if spec.get("direction") == MORE_PROTECTION:
+        # a loss / drawdown directive only ever buys MORE protection
+        variants = [v for v in variants if v > cur]
+    if not variants:
+        await task_event(conn, tid, kind="NO_VARIANT", actor=AUDREY,
+                         detail={"current": cur, "bounds": [lo, hi]},
+                         status="CLOSED_NO_CHANGE", now=now)
+        return {"task_id": tid, "verdict": "NO_VARIANT_WITHIN_BOUNDS"}
+    got = await _XR.read_rows(conn, start=start, end=eb, scope=spec.get(
+        "evidence_scope") or _XR.SCOPE_AUTO)
+    scope = got["scope"]
+    sp = split_rows(got["rows"], training_boundary=tb, evaluation_boundary=eb,
+                    salt=_XR.HOLDOUT_SALT, percent=_XR.HOLDOUT_PERCENT)
+    min_fx = int(cls.success_metrics.get("min_fixtures") or 1)
+    base_train = _XR.replay(sp["training"], sacrifice=cur)
+    await task_event(conn, tid, kind="EVALUATING", actor=EVALUATOR_REPLAY,
+                     detail={"variants": variants, "current": cur,
+                             "units": _XR.UNITS, "evidence_scope": scope,
+                             "records_read": got.get("records_read"),
+                             "excluded": sp["excluded"]},
+                     status="EVALUATING", now=now)
+    tbd = {"start": start, "end": tb, "outcomes_known_by": tb}
+    ebd = {"start": tb, "end": eb, "outcomes_known_by": eb,
+           "holdout_salt": _XR.HOLDOUT_SALT,
+           "holdout_percent": _XR.HOLDOUT_PERCENT,
+           "evidence_scope": scope}
+    scored = []
+    for v in variants:
+        prop = await propose(
+            conn, task_id=tid, change_class=cls.name, proposed_by=cls.agent,
+            hypothesis=spec.get("hypothesis") or (
+                "Xavier gives up too little (or too much) expected value for "
+                "a better worst case, judged on settled outcomes"),
+            evidence=spec.get("evidence") or {},
+            affected_behavior=cls.description, params={pname: v},
+            training_boundary=tbd, evaluation_boundary=ebd, now=now)
+        if not prop.get("ok"):
+            scored.append({"sacrifice": v, "refused": prop})
+            continue
+        m = _XR.replay(sp["training"], sacrifice=v)
+        tr = dict(_XR.public(m), **_XR.paired(m, base_train),
+                  baseline=_XR.public(base_train), min_fixtures=min_fx)
+        j = judge(tr, success=cls.success_metrics, harm=cls.harm_metrics,
+                  min_key="min_fixtures", n_key="fixtures")
+        scored.append({"candidate_id": prop["candidate_id"], "sacrifice": v,
+                       "training": tr, "judgement": j})
+    # SELECTION USES TRAINING EVIDENCE ONLY: among the variants whose
+    # training judgement PASSES the class's rule, the largest paired gain per
+    # eligible fixture (ties to the variant nearest the current value). The
+    # holdout is replayed once, afterwards, for that variant alone.
+    ok = [s for s in scored if "candidate_id" in s
+          and s["judgement"]["verdict"] == V_PASS]
+    best = max(ok, key=lambda s: (
+        s["training"]["delta_net_per_eligible_fixture"],
+        -abs(s["sacrifice"] - cur)), default=None)
+    selection = {
+        "segment": "TRAINING",
+        "rule": ("among variants whose TRAINING judgement passes the class's "
+                 "rule (at least %d eligible fixtures, a better paired net "
+                 "result, no deeper drawdown, no harm), the largest mean "
+                 "paired change in settled net per eligible fixture against "
+                 "the current %s (%.4f); ties go to the variant nearest the "
+                 "current value" % (min_fx, pname, cur)),
+        "holdout_used_for_selection": False,
+        "current": cur, "units": _XR.UNITS, "parameter": pname,
+        "attempted": [{"sacrifice": s["sacrifice"],
+                       "candidate_id": s.get("candidate_id"),
+                       "refused": (s.get("refused") or {}).get("refusal"),
+                       "verdict": (s.get("judgement") or {}).get("verdict"),
+                       "training": ({k: s["training"].get(k) for k in (
+                           "fixtures", "eligible_decisions", "net_total",
+                           "delta_net_per_eligible_fixture",
+                           "delta_max_drawdown", "actions_changed",
+                           "objective_outcome")}
+                           if "training" in s else None)}
+                      for s in scored],
+        "selected": None if best is None else {
+            "sacrifice": best["sacrifice"],
+            "candidate_id": best["candidate_id"]}}
+    for s in scored:
+        if "candidate_id" not in s:
+            continue
+        is_sel = best is not None and s["candidate_id"] == best[
+            "candidate_id"]
+        await record_trial(
+            conn, candidate_id=s["candidate_id"], task_id=tid,
+            segment="TRAINING", variant={pname: s["sacrifice"]},
+            metrics=dict(s["training"], judgement=s["judgement"],
+                         excluded=sp["excluded"],
+                         training_fixtures=len(sp["training_fixtures"])),
+            verdict=V_SELECTED if is_sel else V_NOT_SELECTED,
+            evidence_category=KNOWN_SETTLEMENT, training_boundary=start,
+            evaluation_boundary=tb, now=now)
+        if not is_sel:
+            jv = s["judgement"]["verdict"]
+            await record_evaluation(
+                conn, candidate_id=s["candidate_id"],
+                evaluated_by=EVALUATOR_REPLAY, state="REJECTED", now=now,
+                evaluation={"verdict": (jv if jv != V_PASS
+                                        else V_NOT_SELECTED),
+                            "segment": "TRAINING", "selection": selection,
+                            "judgement": s["judgement"],
+                            "metrics": s["training"],
+                            "evidence_scope": scope})
+    if best is None:
+        insufficient = all((s.get("judgement") or {}).get("verdict")
+                           == V_INSUFFICIENT for s in scored
+                           if "candidate_id" in s)
+        verdict = V_INSUFFICIENT if insufficient else \
+            "NO_VARIANT_PASSED_TRAINING"
+        await task_event(conn, tid, kind="REJECTED", actor=EVALUATOR_REPLAY,
+                         detail={"why": ("too few eligible training "
+                                         "fixtures" if insufficient else
+                                         "no variant passed the class's "
+                                         "rule on training"),
+                                 "verdict": verdict, "min_fixtures": min_fx,
+                                 "selection": selection,
+                                 "evidence_scope": scope,
+                                 "training_fixtures":
+                                     len(sp["training_fixtures"])},
+                         status="REJECTED", now=now)
+        return {"task_id": tid, "verdict": verdict, "selection": selection,
+                "evidence_scope": scope,
+                "split": {"excluded": sp["excluded"]},
+                "baseline_training": _XR.public(base_train)}
+    hid = "xavier_tradeoff:%s:%dpct" % (_XR.HOLDOUT_SALT,
+                                        _XR.HOLDOUT_PERCENT)
+    await ensure_holdout(conn, holdout_id=hid, description=(
+        "fixture-level holdout of Xavier's recorded decisions"),
+        rule={"kind": "FIXTURE_HASH", "salt": _XR.HOLDOUT_SALT,
+              "percent": _XR.HOLDOUT_PERCENT})
+    hv = _XR.replay(sp["holdout"], sacrifice=best["sacrifice"])
+    hb = _XR.replay(sp["holdout"], sacrifice=cur)
+    hm = dict(_XR.public(hv), **_XR.paired(hv, hb))
+    hm["baseline"] = _XR.public(hb)
+    hm["min_fixtures"] = min_fx
+    hm["excluded"] = sp["excluded"]
+    hm["training_fixture_count"] = len(sp["training_fixtures"])
+    hm["holdout_fixture_count"] = len(sp["holdout_fixtures"])
+    hm["fixtures_in_both"] = len(set(sp["training_fixtures"])
+                                 & set(sp["holdout_fixtures"]))
+    hm["evidence_scope"] = scope
+    j = judge(hm, success=cls.success_metrics, harm=cls.harm_metrics,
+              min_key="min_fixtures", n_key="fixtures")
+    used = sp["training"] + sp["holdout"]
+    rehearsal = scope == _XR.SCOPE_REHEARSAL
+    binding = {
+        "evaluator_version": XAVIER_REPLAY_VERSION,
+        "change_class": cls.name, "params": {pname: best["sacrifice"]},
+        "current": {pname: cur, "source": current.get("source"),
+                    "version": current.get("version")},
+        "units": _XR.UNITS,
+        "decision_function": ("agents.xavier_policy.run -> "
+                              "bettor_funded_decision.decide (+ the "
+                              "CAPITAL_PRESERVATION_V1 leg when > 0), on "
+                              "each record's persisted frozen inputs"),
+        "dispatch_gate": "bettor_funded_pair_cycle.common_valuation_gate",
+        "training_boundary": tbd, "evaluation_boundary": ebd,
+        "holdout_id": hid,
+        "input_records": {
+            "table": ("bettor_xavier_decisions (reasoning.decision_inputs, "
+                      "alternatives' payout tables) + settlements "
+                      "(bettor_funded_intents ENTRY venue settlements with "
+                      "booked corrections; bettor_pair_observations labels)"),
+            "digest": _XR.rows_digest(used),
+            "training_rows": len(sp["training"]),
+            "holdout_rows": len(sp["holdout"]),
+            "records_read": got.get("records_read"),
+            "outside_evidence_scope": got.get("outside_scope"),
+            "evidence_scope": scope, "outcomes_as_of": eb}}
+    qualification = {
+        "evidence": QUAL_RETROSPECTIVE,
+        "execution": _XR.EXECUTION_ASSUMPTION, "fills": "UNPROVEN",
+        "evidence_scope": scope, "rehearsal": rehearsal,
+        "rehearsal_label": _XR.REHEARSAL_LABEL if rehearsal else None,
+        "establishes": ("that, re-running Xavier's decision function on the "
+                        "recorded inputs, the selected sacrifice would have "
+                        "chosen actions with a better settled net result on "
+                        "the holdout without a deeper drawdown, at the "
+                        "alternatives' frozen prices and fees"
+                        + (" -- IN A REHEARSAL (demonstration books)"
+                           if rehearsal else "")),
+        "does_not_establish": ("that the alternatives not executed would "
+                               "have filled, realised performance, later "
+                               "management of the position, or any "
+                               "prospective result"),
+        "economic_qualification": ECON_PENDING}
+    tr = await record_trial(
+        conn, candidate_id=best["candidate_id"], task_id=tid,
+        segment="HOLDOUT", holdout_id=hid,
+        variant={pname: best["sacrifice"]},
+        metrics=dict(hm, judgement=j), verdict=j["verdict"],
+        evidence_category=KNOWN_SETTLEMENT, training_boundary=tb,
+        evaluation_boundary=eb, now=now)
+    if not tr.get("ok"):
+        await task_event(conn, tid, kind="HOLDOUT_REFUSED",
+                         actor=EVALUATOR_REPLAY, detail=tr, status="WAITING",
+                         now=now)
+        return {"task_id": tid, "verdict": tr.get("refusal"), "trial": tr}
+    passed = j["verdict"] == V_PASS
+    await record_evaluation(
+        conn, candidate_id=best["candidate_id"],
+        evaluated_by=EVALUATOR_REPLAY, now=now,
+        state="APPROVAL_READY" if passed else "REJECTED",
+        evaluation={"verdict": j["verdict"], "segment": "HOLDOUT",
+                    "holdout_id": hid, "judgement": j, "metrics": hm,
+                    "selection": selection, "binding": binding,
+                    "qualification": qualification,
+                    "approval_ready_means": (
+                        "ARTIFACT_READY_FOR_REVIEW once a committed artifact "
+                        "is attached; NOT economic qualification for live "
+                        "promotion"),
+                    "evidence_category": KNOWN_SETTLEMENT,
+                    "evidence_scope": scope,
+                    "could_have_filled": "UNPROVEN"})
+    await task_event(
+        conn, tid, kind="APPROVAL_READY" if passed else "REJECTED",
+        actor=EVALUATOR_REPLAY, detail={"candidate_id": best["candidate_id"],
+                                        "judgement": j,
+                                        "evidence_scope": scope,
+                                        "objective_outcome":
+                                            hm["objective_outcome"]},
+        status="APPROVAL_READY" if passed else "REJECTED", now=now)
+    return {"task_id": tid, "verdict": j["verdict"],
+            "candidate_id": best["candidate_id"], "holdout": hm,
+            "selection": selection, "binding": binding,
+            "evidence_scope": scope}
+
+
 async def advance_code_task(conn, task: dict, *, now: float) -> dict:
     """A CODE (or unreplayable) TASK CANNOT RUN IN THE SERVING PROCESS.
     Without a sandbox artifact it WAITS on NEEDS_SANDBOX; with one it is
@@ -2005,11 +2365,24 @@ async def _waiting_too_recently(conn, task: dict, now: float) -> bool:
 
 DIRECTIVE_TASK_KIND = "DIRECTIVE_IMPROVEMENT"
 #: what each agent's directive work is, when a replay for it is registered
-DIRECTIVE_WORK = {DEREK: "DEREK_ENTRY_POLICY_THRESHOLD"}
+DIRECTIVE_WORK = {DEREK: "DEREK_ENTRY_POLICY_THRESHOLD",
+                  XAVIER: "XAVIER_CAPITAL_PRESERVATION_TRADEOFF"}
 #: objectives under which a threshold may only TIGHTEN (fewer, better
 #: entries); never loosened in the name of reducing losses or drawdown
 TIGHTEN_ONLY = ("DRAWDOWN_REDUCTION", "LOSS_REDUCTION")
+#: THE OBJECTIVE KINDS AN AGENT'S CLASS CAN ADDRESS, and the one direction
+#: its parameter may move under each (an agent absent here: any kind, its
+#: own rule above). Xavier's tradeoff addresses losses and drawdown ONLY by
+#: MORE downside protection -- a larger sacrifice of expected value for a
+#: better worst case -- never less. Any other objective (profit targets,
+#: pairing, exits, execution quality...) is not something this class can
+#: move: the task WAITS and names why.
+MORE_PROTECTION = "MORE_DOWNSIDE_PROTECTION"
+DIRECTIVE_OBJECTIVES = {XAVIER: {"DRAWDOWN_REDUCTION": MORE_PROTECTION,
+                                 "LOSS_REDUCTION": MORE_PROTECTION}}
 R_NO_DIRECTIVE_EVALUATOR = "NO_REGISTERED_EVALUATOR_FOR_THIS_AGENTS_DIRECTIVE_WORK"
+R_OBJECTIVE_NOT_ADDRESSED = (
+    "NO_REGISTERED_EVALUATOR_ADDRESSES_THIS_OBJECTIVE_FOR_THIS_AGENT")
 R_PRIORITY_ONLY = "PRIORITY_ONLY_DIRECTIVE_PRODUCES_NO_CANDIDATE"
 #: directive-task status that mirrors each improvement-task outcome
 _MIRROR = {"APPROVAL_READY": "APPROVAL_READY", "APPROVED": "APPROVED",
@@ -2053,40 +2426,74 @@ async def take_up_directive_tasks(conn, *, now: float) -> dict:
                              status="WAITING", now=now)
             out["waiting"].append(tid)
             continue
+        kind = str(spec.get("objective_kind") or "")
+        addressed = DIRECTIVE_OBJECTIVES.get(agent)
+        if addressed is not None and kind not in addressed:
+            await task_event(conn, tid, kind="WAITING_FOR_AN_EVALUATOR",
+                             actor=agent or AUDREY,
+                             detail={"why": R_OBJECTIVE_NOT_ADDRESSED,
+                                     "agent": agent, "objective_kind": kind,
+                                     "change_class": cls_name,
+                                     "addresses": sorted(addressed)},
+                             status="WAITING", now=now)
+            out["waiting"].append(tid)
+            continue
         cls = CHANGE_CLASSES[cls_name]
         pname = next(iter(cls.bounds))
-        current = await current_policy(conn, cls)
-        cur = current["params"].get(pname)
-        cur = float(cur if cur is not None
-                    else code_default_params(cls).get(pname))
+        if cls.evaluator == XAVIER_EVALUATOR:
+            current = await _xavier_current(conn, cls)
+            cur = float(current["value"])
+        else:
+            current = await current_policy(conn, cls)
+            cur = current["params"].get(pname)
+            cur = float(cur if cur is not None
+                        else code_default_params(cls).get(pname))
         lo, hi, _ = cls.bounds[pname]
-        kind = str(spec.get("objective_kind") or "")
         variants = None
-        if kind in TIGHTEN_ONLY:
+        if cls.evaluator == XAVIER_EVALUATOR:
+            # MORE DOWNSIDE PROTECTION ONLY: a larger sacrifice, in bounds
+            variants = [round(cur + d, 6) for d in XAVIER_STEPS
+                        if lo <= cur + d <= hi + 1e-12]
+        elif kind in TIGHTEN_ONLY:
             variants = [round(cur + d, 6) for d in (0.01, 0.02)
                         if lo <= cur + d <= hi]
         wid = directive_work_task_id(tid)
+        if cls.evaluator == XAVIER_EVALUATOR:
+            hyp = ("Management directive %s (%s): giving up at most a "
+                   "larger %s (USD of expected value per decision) than the "
+                   "current %.4f for a strictly better worst case, among the "
+                   "actions the approved limits already admit, settles "
+                   "better with no deeper drawdown"
+                   % (spec.get("directive_id"), kind, pname, cur))
+            tests = ["tests/test_xavier_tradeoff_directive_becomes_an_"
+                     "evaluated_artifact.py::test_the_versioned_default_is_"
+                     "a_whole_valid_policy_the_selector_reads"]
+        else:
+            hyp = ("Management directive %s (%s): a %s %s than the current "
+                   "%.4f selects fewer losing entries without giving up "
+                   "settled profit" % (spec.get("directive_id"),
+                                       kind or "UNCLASSIFIED", pname,
+                                       "higher" if variants else "different",
+                                       cur))
+            tests = ["tests/test_improvement_is_evaluated_released_"
+                     "and_rolled_back.py::test_the_derek_policy_class_"
+                     "targets_the_binding_policy_key"]
         wspec = {"change_class": cls_name, "variants": variants,
                  "directive_id": spec.get("directive_id"),
                  "directive_task_id": tid,
                  "objective": spec.get("objective"),
                  "objective_kind": kind or None,
-                 "hypothesis": (
-                     "Management directive %s (%s): a %s %s than the current "
-                     "%.4f selects fewer losing entries without giving up "
-                     "settled profit" % (spec.get("directive_id"),
-                                         kind or "UNCLASSIFIED", pname,
-                                         "higher" if variants else "different",
-                                         cur)),
+                 "direction": (addressed or {}).get(kind),
+                 "hypothesis": hyp,
                  "evidence": {"directive_id": spec.get("directive_id"),
                               "directive_task_id": tid,
                               "current": {pname: cur,
                                           "source": current.get("source")}},
                  "standing_rules": spec.get("standing_rules"),
-                 "tests": ["tests/test_improvement_is_evaluated_released_"
-                           "and_rolled_back.py::test_the_derek_policy_class_"
-                           "targets_the_binding_policy_key"],
+                 "tests": tests,
                  "test_cwd": "backend"}
+        if cls.evaluator == XAVIER_EVALUATOR:
+            wspec["evidence_scope"] = _XR.SCOPE_AUTO
         made = await create_task(
             conn, assignee=agent, created_by=agent, kind=TASK_KIND,
             title="%s for directive %s" % (cls_name, spec.get("directive_id")),
@@ -2218,6 +2625,9 @@ async def run_due(conn, *, now: float) -> dict:
                                        "derek_gross_edge_replay"):
                     got = await evaluate_derek_threshold_task(
                         conn, t, now=now, class_name=cls.name)
+                elif cls.evaluator == XAVIER_EVALUATOR:
+                    got = await evaluate_xavier_tradeoff_task(conn, t,
+                                                              now=now)
                 else:
                     got = await advance_code_task(conn, t, now=now)
                 out["advanced"].append(got)

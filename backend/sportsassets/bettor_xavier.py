@@ -2837,6 +2837,22 @@ class ReviewContext:
         reasoning["shadow_comparison"] = (dec or {}).get("shadow_comparison")
         reasoning["search_policy_gate"] = (dec or {}).get(
             "search_policy_gate")
+        # THE SELECTOR'S FROZEN INPUTS (`xavier_policy.freeze_inputs`), with
+        # the contract each acquisition would buy and the held contract, so a
+        # replay can re-run the decision function and value each alternative
+        # on the contracts' own settlements. Replay evidence only.
+        _di = (dec or {}).get("decision_inputs")
+        if isinstance(_di, dict):
+            reasoning["decision_inputs"] = dict(
+                _di,
+                held_contract={"slug": pos.get("us_market_slug"),
+                               "side": pos.get("order_intent"),
+                               "intent_id": pos.get("intent_id")},
+                acquisition_contracts={
+                    str(_cid): {"slug": getattr(_pl, "venue_slug", None),
+                                "side": getattr(_pl, "side", None),
+                                "plan_digest": getattr(_pl, "digest", None)}
+                    for _cid, _pl in (acquisition_plans or {}).items()})
         # THE SUPPLIER'S SEARCH ACCOUNT, AS THE GATE USED IT: decision
         # evidence persisted apart from the ladder view above, so a fault in
         # presentation cannot change or erase it. Absent -> UNKNOWN.
