@@ -237,7 +237,9 @@ function skinTune(root) {
     if (!o.isMesh) return;
     for (const m of Array.isArray(o.material) ? o.material : [o.material]) {
       if (!m || !/skin|body|face|head/i.test(m.name || '')) continue;
-      if ('roughness' in m) m.roughness = clamp(m.roughness, 0.45, 0.6);
+      // a roughness map carries the skin's own variation; only an untextured
+      // material is clamped into the skin range
+      if ('roughness' in m && !m.roughnessMap) m.roughness = clamp(m.roughness, 0.45, 0.6);
       if ('clearcoat' in m) m.clearcoat = 0;
       if ('sheen' in m) m.sheen = 0;
       if ('metalness' in m) m.metalness = 0;
