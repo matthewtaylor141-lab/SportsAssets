@@ -365,8 +365,15 @@ def test_the_agent_routes_require_the_command_credential():
 async def test_the_index_and_readers_are_truthful_about_empty_and_present(
         monkeypatch):
     from fastapi import Response
+    from sportsassets import config, db
     from sportsassets.api import agents_core as AC
 
+    # THE READERS USE THE SERVICE'S OWN POOL, so point it at the test
+    # database explicitly. The gate sets only RN1X_TEST_DSN; this test used
+    # to pass only where DATABASE_URL happened to be exported as well.
+    monkeypatch.setenv("DATABASE_URL", DSN)
+    config.settings.cache_clear()
+    await db.close_pool()
     conn = await _connect()
     try:
         await H.clean_agents(conn)
@@ -408,5 +415,6 @@ async def test_the_index_and_readers_are_truthful_about_empty_and_present(
     finally:
         await H.clean_agents(conn)
         await conn.close()
-        from sportsassets import db
         await db.close_pool()
+        monkeypatch.delenv("DATABASE_URL", raising=False)
+        config.settings.cache_clear()

@@ -331,7 +331,13 @@ async def _cohort(conn, *, tag: str, start: float, resolve_at: float) -> list:
             n += 1
     got = await D.after_cycle(conn, cycle={"elapsed_s": 0.0},
                               now=start + n + 1)
-    assert got["decisions_recorded"] == n, got
+    # EVERY ONE OF THIS COHORT'S FIXTURES DECIDED EXACTLY ONCE. The pass also
+    # decides any other undecided ENTRY_DECISION row a shared database holds
+    # (a full-suite run leaves some), so its total is not this cohort's count.
+    own = await conn.fetchval(
+        "SELECT count(*) FROM derek_entry_decisions "
+        " WHERE valuation_id = ANY($1::bigint[])", [v for v, _ in ids])
+    assert own == n and got["decisions_recorded"] >= n, (own, got)
     for vid, won in ids:
         await conn.execute(
             "UPDATE external_valuations SET outcome_known = TRUE, outcome = $2,"
