@@ -1135,11 +1135,28 @@ def alternatives_of(verdict: dict, *, ctx: dict,
                     hedge_search: dict | None = None) -> list:
     """EVERY CONSIDERED ACTION: the ranked ones with the standard economics,
     the unrankable ones with their exact blocker, and the hedge search's
-    refusals summarised by name. Never only the winner. Pure."""
+    refusals summarised by name. Never only the winner. Pure.
+
+    With `ctx["ladder_inputs"]` (the review supplies it) each alternative
+    also carries Xavier's ladder fields -- payout table over every
+    settlement state, worst case over established states, P(net profit),
+    P(both legs win), sensitivity, executable quantity, exposure after,
+    settlement compatibility, evidence age -- computed from the SAME
+    candidate row (`agents.xavier_ladder`). They are reported, never
+    ranked on: the choice is still decide()'s."""
+    ladder = (ctx or {}).get("ladder_inputs")
+    _XL = None
+    if ladder is not None:
+        try:
+            from .agents import xavier_ladder as _XL
+        except Exception:                                       # noqa: BLE001
+            _XL = None
     alts = []
     for c in (verdict or {}).get("candidates") or []:
         row = {k: c.get(k) for k in _CARRIED if c.get(k) is not None}
         row.update(economics(c, ctx=ctx), rankable=True)
+        if _XL is not None:
+            row.update(_XL.enrich_one(dict(c, **row), ladder))
         alts.append(row)
     for b in (verdict or {}).get("not_rankable") or []:
         row = {k: b.get(k) for k in _CARRIED if b.get(k) is not None}
@@ -1150,7 +1167,19 @@ def alternatives_of(verdict: dict, *, ctx: dict,
                    value_usd=None)
         row.update({k: None for k in ECONOMIC_FIELDS})
         row["field_reasons"] = {"*": "NOT_RANKABLE:%s" % row["blocker"]}
+        if _XL is not None:
+            row.update(_XL.enrich_one(dict(b, **row), ladder))
         alts.append(row)
+    if _XL is not None:
+        try:
+            alts.extend(_XL.extra_rows(alts, ladder))
+        except Exception as exc:                                # noqa: BLE001
+            alts.append({"action": "XAVIER_LADDER", "rankable": False,
+                         "blocker": "XAVIER_LADDER_ROWS_FAILED:%s"
+                         % type(exc).__name__})
+    elif ladder is not None:
+        alts.append({"action": "XAVIER_LADDER", "rankable": False,
+                     "blocker": "XAVIER_LADDER_MODULE_UNAVAILABLE"})
     if hedge_search and hedge_search.get("total"):
         alts.append({"action": "ACQUIRE_HEDGE", "rankable": False,
                      "blocker": "HEDGE_SEARCH_REFUSALS",
@@ -2566,6 +2595,43 @@ class ReviewContext:
                "limits_by_candidate": limits_by,
                "unpaired_qty": unp_q, "unpaired_var_usd": unp_v,
                "group": bool(group), "group_detail": group}
+        # ── XAVIER'S LADDER INPUTS (agents.xavier_ladder): read-only facts
+        # this review already holds, so every alternative states its payout
+        # table, probabilities and exposure on ONE measure. Nothing here
+        # changes the ranking or what is dispatched.
+        policy = None
+        try:
+            from .agents import xavier_policy as _XP
+            policy = await _XP.load(conn)
+        except Exception:                                       # noqa: BLE001
+            _XP = None
+        _cvr = dict((dec or {}).get("common_valuation") or {})
+        _de = dict(mev.get("decision_evidence") or {})
+        try:
+            from .agents import xavier_ladder as _XLm
+            _adm_view = _XLm.admitted_view(admitted_all)
+        except Exception:                                       # noqa: BLE001
+            _XLm, _adm_view = None, {}
+        ctx["ladder_inputs"] = {
+            "at": self.at, "held_leg": f.get("held_leg"),
+            "hedge_held_leg": ((companion or {}).get("facts") or {}).get(
+                "held_leg"),
+            "sport_permits_tie": f.get("sport_permits_tie"),
+            "fixture_can_void": bool(f.get("fixture_can_void", True)),
+            "p_win": None if hold_c is None else hold_c.get(
+                "value_per_contract"),
+            "void_read": _cvr.get("void_rate_read"),
+            "qty": qty, "basis_per_contract": basis.get("basis_per_contract"),
+            "group": group, "rows": rows, "admitted": _adm_view,
+            "capital": f.get("capital"),
+            "evidence": {"probability_observed_at": _de.get(
+                             "valuation_observed_at"),
+                         "inputs_expire_at": mev.get("inputs_expire_at"),
+                         "assessed_at": mev.get("assessed_at")},
+            "policy": policy,
+            "hedge_unavailable": f.get("unavailable"),
+            "acquisition_ineligible": (step or {}).get(
+                "acquisition_ineligible")}
         search = hedge_search_refusals(facts=f, step=step,
                                        option_refusals=option_refusals)
         alts = alternatives_of(verdict, ctx=ctx, hedge_search=search)
@@ -2685,6 +2751,21 @@ class ReviewContext:
                 if elig.get(k) is not None},
             "history_is_not_a_reason": HISTORY_IS_NOT_A_REASON,
             "group_decision": group}
+        # ── THE LADDER, THE SEARCH'S COMPLETENESS AND THE POLICY, NAMED ──
+        _xl: dict[str, Any] = {}
+        try:
+            if _XLm is not None:
+                _xl = {"version": _XLm.VERSION,
+                       "measure": _XLm.measure_of(ctx["ladder_inputs"]),
+                       "ladder": _XLm.ladder_view(alts),
+                       "search_completeness": _XLm.search_completeness(
+                           facts=f, step=step, alts=alts,
+                           option_refusals=option_refusals)}
+            if _XP is not None:
+                _xl["policy"] = _XP.record(verdict, policy)
+        except Exception as exc:                                # noqa: BLE001
+            _xl["error"] = "%s: %s" % (type(exc).__name__, str(exc)[:160])
+        reasoning["xavier_ladder"] = _xl
         scope = dict(step.get("filled_scope") or {})
         exposure = {"held_qty": qty, "filled_qty": scope.get("intent_filled"),
                     "matched_units": scope.get("matched_units"),
