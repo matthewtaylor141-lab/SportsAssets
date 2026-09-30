@@ -957,8 +957,25 @@ async def test_a_structurally_pairable_fixture_is_offered_before_one_that_cannot
             order = [c["fixture"] for c in got["candidates"]]
             assert ev in order and HW.EVENT in order, got
             assert order.index(HW.EVENT) < order.index(ev), order
+            mine = [c for c in got["candidates"] if c["fixture"] == ev]
+            assert mine[0]["structural_verdict"] == PO.S_NO_USABLE_SHAPE
             census = got["structural_census"]
             assert census[PO.S_PAIRABLE]["fixtures"] >= 1
             assert census[PO.S_NO_USABLE_SHAPE]["by_family"].get("soccer") == 1
         finally:
             await conn.execute("DELETE FROM us_premap WHERE event_slug=$1", ev)
+
+
+def test_the_first_leg_offered_is_one_that_can_pair():
+    """intf-sey-sri: per-outcome winners and two spreads. The winner cannot
+    pair (its rows name one team); the spreads share FULL_GAME / MARGIN."""
+    rows = (_cat("atc-f-sey", "soccer_team_full_time_winner", ("sey", "sey"))
+            + _cat("asc-f-sey-neg-1pt5", "soccer_team_full_game_spread",
+                   ("sey", "sri"), ("-1.5", "+1.5"))
+            + _cat("asc-f-sri-neg-1pt5", "soccer_team_full_game_spread",
+                   ("sri", "sey"), ("-1.5", "+1.5")))
+    got = PO.structural_verdict(rows)
+    assert got["verdict"] == PO.S_PAIRABLE
+    assert "atc-f-sey" not in got["pairable_slugs"]
+    assert set(got["pairable_slugs"]) == {"asc-f-sey-neg-1pt5",
+                                          "asc-f-sri-neg-1pt5"}

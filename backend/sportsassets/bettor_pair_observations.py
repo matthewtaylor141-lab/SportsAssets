@@ -1360,6 +1360,7 @@ def structural_verdict(rows) -> dict:
     for slug, key in usable.items():
         groups.setdefault(key, []).append(slug)
     shared = {"%s/%s" % k: len(v) for k, v in groups.items() if len(v) >= 2}
+    pairable = sorted(s_ for v in groups.values() if len(v) >= 2 for s_ in v)
     if len(usable) < 2:
         verdict = S_NO_USABLE_SHAPE
     elif not shared:
@@ -1369,7 +1370,7 @@ def structural_verdict(rows) -> dict:
     return {"verdict": verdict, "contracts": len(by_slug),
             "usable_contracts": len(usable),
             "unsupported_shape_contracts": len(unsupported),
-            "shared_keys": shared}
+            "shared_keys": shared, "pairable_slugs": pairable}
 
 
 async def catalogue_candidates(conn, *, now: float | None = None,
@@ -1479,9 +1480,11 @@ async def catalogue_candidates(conn, *, now: float | None = None,
     # THE CENSUS, EVERY FIXTURE IN THE WINDOW, before any is offered.
     census: dict = {}
     verdict_of: dict = {}
+    pairable_of: dict = {}
     for fx in order:
         v = structural_verdict(by_fx[fx])
         verdict_of[fx] = v["verdict"]
+        pairable_of[fx] = set(v.get("pairable_slugs") or ())
         fam = str(by_fx[fx][0].get("sports_type") or "").split("_")[0]
         c = census.setdefault(v["verdict"], {"fixtures": 0, "contracts": 0,
                                              "by_family": {}})
@@ -1501,7 +1504,12 @@ async def catalogue_candidates(conn, *, now: float | None = None,
             _xf(X_ATTEMPTED_RECENTLY)
             continue
         tried = memory["last_attempted"].get(fx)
-        best = min(legs, key=_preference)
+        # THE FIRST LEG IS ONE THAT CAN PAIR. Offering a per-outcome winner
+        # whose only siblings are spreads (intf-sey-sri, intf-lit-and) spent
+        # the attempt on a leg that could never be matched.
+        pool = [r for r in legs if r["market_slug"] in pairable_of.get(fx,
+                                                                       ())]
+        best = min(pool or legs, key=_preference)
         cand = {"us_market_slug": best["market_slug"], "side": best["intent"],
                 "fixture": fx, "sports_type": best["sports_type"],
                 "structural_verdict": verdict_of.get(fx),
