@@ -1151,12 +1151,23 @@ def alternatives_of(verdict: dict, *, ctx: dict,
             from .agents import xavier_ladder as _XL
         except Exception:                                       # noqa: BLE001
             _XL = None
+    enrich_failed: list = []
+
+    def _enrich(row, src):
+        # DISPLAY-ONLY: a fault in the ladder module blanks these fields and
+        # is named on the row; it never stops the review that decides.
+        try:
+            row.update(_XL.enrich_one(dict(src, **row), ladder))
+        except Exception as exc:                                # noqa: BLE001
+            row["ladder_error"] = type(exc).__name__
+            enrich_failed.append(type(exc).__name__)
+
     alts = []
     for c in (verdict or {}).get("candidates") or []:
         row = {k: c.get(k) for k in _CARRIED if c.get(k) is not None}
         row.update(economics(c, ctx=ctx), rankable=True)
         if _XL is not None:
-            row.update(_XL.enrich_one(dict(c, **row), ladder))
+            _enrich(row, c)
         alts.append(row)
     for b in (verdict or {}).get("not_rankable") or []:
         row = {k: b.get(k) for k in _CARRIED if b.get(k) is not None}
@@ -1168,7 +1179,7 @@ def alternatives_of(verdict: dict, *, ctx: dict,
         row.update({k: None for k in ECONOMIC_FIELDS})
         row["field_reasons"] = {"*": "NOT_RANKABLE:%s" % row["blocker"]}
         if _XL is not None:
-            row.update(_XL.enrich_one(dict(b, **row), ladder))
+            _enrich(row, b)
         alts.append(row)
     if _XL is not None:
         try:
@@ -1177,6 +1188,11 @@ def alternatives_of(verdict: dict, *, ctx: dict,
             alts.append({"action": "XAVIER_LADDER", "rankable": False,
                          "blocker": "XAVIER_LADDER_ROWS_FAILED:%s"
                          % type(exc).__name__})
+        if enrich_failed:
+            alts.append({"action": "XAVIER_LADDER", "rankable": False,
+                         "blocker": "XAVIER_LADDER_ENRICHMENT_FAILED:%s"
+                         % enrich_failed[0],
+                         "rows_without_ladder_fields": len(enrich_failed)})
     elif ladder is not None:
         alts.append({"action": "XAVIER_LADDER", "rankable": False,
                      "blocker": "XAVIER_LADDER_MODULE_UNAVAILABLE"})

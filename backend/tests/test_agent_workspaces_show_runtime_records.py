@@ -67,13 +67,41 @@ def _require():
         pytest.fail("node is required: the page's own render code is executed")
     from sportsassets.api import agent_pages as P
     from sportsassets.api import app as A
-    paths = {getattr(r, "path", None) for r in A.app.routes}
+    paths = set(_route_paths(A.app.routes))
     needed = [P.ENDPOINTS[k] for k in ("index", "derek", "xavier", "audrey")] + list(P.PAGE_PATHS.values())
     absent = [p for p in needed if p not in paths]
     if absent:
         pytest.fail("api/app.py does not include these routes: %s (include each agent "
                     "router and agent_pages.router)" % absent)
+    # THE PAGE, NOT AN AGENT ROUTER'S /{id}, ANSWERS EACH PAGE PATH: the first
+    # route the application itself matches is agent_pages' router.
+    captured = {p: _first_match(A.app, p) for p in P.PAGE_PATHS.values()}
+    wrong = {p: m for p, m in captured.items() if m is not P.router}
+    if wrong:
+        pytest.fail("these page paths are answered by another router first: %s" % wrong)
     return P, A
+
+
+def _route_paths(routes, prefix=""):
+    """Every path the application serves. FastAPI >= 0.140 keeps an included
+    router as one wrapper route (`original_router` + `include_context`), so
+    its paths are read from the router it wraps."""
+    for r in routes:
+        inner = getattr(r, "original_router", None)
+        if inner is not None:
+            ctx = getattr(r, "include_context", None)
+            yield from _route_paths(inner.routes, prefix + (getattr(ctx, "prefix", "") or ""))
+        elif getattr(r, "path", None) is not None:
+            yield prefix + r.path
+
+
+def _first_match(app, path):
+    from starlette.routing import Match
+    scope = {"type": "http", "path": path, "method": "GET", "root_path": ""}
+    for r in app.routes:
+        if r.matches(scope)[0] == Match.FULL:
+            return getattr(r, "original_router", r)
+    return None
 
 
 def _node(P, kind, body):
@@ -142,6 +170,15 @@ async def test_each_workspace_draws_the_real_endpoint_json(monkeypatch, kind):
 
 async def test_the_index_and_the_trace_draw_the_real_records(monkeypatch):
     P, A = _require()
+    # The service registers the three identities when its writer starts; an
+    # earlier test may have emptied the tables, so register them as it would.
+    import asyncpg
+    from sportsassets.agents import registry as R
+    conn = await asyncpg.connect(DSN)
+    try:
+        await R.ensure_identities(conn)
+    finally:
+        await conn.close()
     c = await _client(monkeypatch, A)
     try:
         outs = {}
@@ -159,7 +196,9 @@ async def test_the_index_and_the_trace_draw_the_real_records(monkeypatch):
     ids = {str(a.get("agent_id", "")).upper() for a in ix["agents"]}
     assert {"DEREK", "XAVIER", "AUDREY"} <= ids, ids
     for a in ix["agents"]:
-        assert a.get("state") in P.AGENT_STATES, a
+        # a named state, or none with the reason (never a borrowed success)
+        assert a.get("state") in P.AGENT_STATES or (
+            a.get("state") is None and a.get("why")), a
     html = _node(P, "index", "return AG.index(%s);" % json.dumps(ix))
     for a in ("DEREK", "XAVIER", "AUDREY"):
         assert 'data-agent="%s"' % a in html
