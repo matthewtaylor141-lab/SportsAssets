@@ -3162,6 +3162,36 @@ async def command_xavier_page():
                         headers=_desk_page_headers())
 
 
+# ── THE MANAGEMENT OVERVIEW (2026-10-01) ────────────────────────────
+#
+# Serving build and mode, observation counts, calibration progress, Xavier
+# decisions, execution status, the venue account and the funded-launch
+# verdict sorted by who can clear each blocker -- one read, each section with
+# its own OK / EMPTY / UNAVAILABLE and the named reason. Read-only, behind the
+# same COMMAND cookie as every read here.
+@app.get("/api/command/overview", dependencies=[Depends(require_command)])
+async def command_overview(response: Response) -> dict:
+    from . import command_overview as CO
+
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        pool = await get_pool()
+    except Exception as exc:                                    # noqa: BLE001
+        raise HTTPException(status_code=503, detail={
+            "reason": "NO_DATABASE_POOL", "detail": type(exc).__name__})
+    async with pool.acquire() as conn:
+        return await CO.overview(conn)
+
+
+@app.get("/api/command/overview/page", include_in_schema=False,
+         dependencies=[Depends(require_command)])
+async def command_overview_page():
+    from .overview_page import OVERVIEW_PAGE_HTML
+
+    return HTMLResponse(content=OVERVIEW_PAGE_HTML, status_code=200,
+                        headers=_desk_page_headers())
+
+
 @app.get("/api/command/xavier/{intent_id}",
          dependencies=[Depends(require_command)])
 async def command_xavier_position(intent_id: str, response: Response) -> dict:
