@@ -55,6 +55,8 @@ R_SCHEMA = "THE_XAVIER_DECISION_TABLE_IS_NOT_IN_THIS_DATABASE"
 R_STATE = "THAT_IS_NOT_A_XAVIER_RESPONSIBILITY_STATE"
 R_PLAN_REQUIRED = "A_CHOSEN_ORDER_ACTION_MUST_NAME_ITS_RANKED_PLAN"
 R_WRITE_FAILED = "XAVIER_DECISION_WRITE_FAILED"
+R_RECORD_ID_HELD_BY_ANOTHER_REVIEW = (
+    "ANOTHER_REVIEW_ALREADY_HOLDS_THIS_RECORD_ID_WITH_A_DIFFERENT_CHOICE")
 
 
 async def has_schema(conn) -> bool:
@@ -70,9 +72,16 @@ def _dt(epoch: float):
     return _d.datetime.fromtimestamp(float(epoch), _d.timezone.utc)
 
 
-def decision_id_for(*, intent_id: str, decided_at: float) -> str:
-    """Deterministic: a re-run of the same review reaches the same row."""
+def decision_id_for(*, intent_id: str, decided_at: float,
+                    salt: str | None = None) -> str:
+    """Deterministic: a re-run of the same review reaches the same row.
+
+    `salt` separates a record that is NOT a decision (a review refused the
+    group's lock) from the decision another session is taking at the same
+    instant, so the refusal can never occupy the row the decision needs."""
     blob = "%s|%.3f" % (intent_id, float(decided_at))
+    if salt:
+        blob += "|" + str(salt)
     return "xav:" + hashlib.sha256(blob.encode()).hexdigest()[:24]
 
 
@@ -88,8 +97,14 @@ async def record_decision(conn, *, account_id: str, venue: str,
                           decision_id: str | None = None,
                           portfolio_group_id: str | None = None,
                           us_market_slug: str | None = None,
-                          next_review_at: float | None = None) -> dict:
+                          next_review_at: float | None = None,
+                          salt: str | None = None) -> dict:
     """PERSIST ONE REVIEW, BEFORE DISPATCH. Idempotent on (intent, instant).
+
+    A replay of the same review finds its row (`already=True`). A DIFFERENT
+    review that lands on the same id -- same position, same instant, another
+    choice -- is refused (`R_RECORD_ID_HELD_BY_ANOTHER_REVIEW`): the row that
+    exists is not this review's record, so nothing may be dispatched on it.
 
     Never raises on the decision path: a refusal is returned by name."""
     out: dict[str, Any] = {"version": VERSION}
@@ -101,7 +116,8 @@ async def record_decision(conn, *, account_id: str, venue: str,
                     chosen_action=chosen_action)
     if not await has_schema(conn):
         return dict(out, ok=False, refusal=R_SCHEMA)
-    xid = decision_id_for(intent_id=intent_id, decided_at=decided_at)
+    xid = decision_id_for(intent_id=intent_id, decided_at=decided_at,
+                          salt=salt)
     try:
         status = await conn.execute(
             "INSERT INTO bettor_xavier_decisions (xavier_decision_id, "
@@ -127,8 +143,25 @@ async def record_decision(conn, *, account_id: str, venue: str,
     except Exception as exc:                                    # noqa: BLE001
         return dict(out, ok=False, refusal=R_WRITE_FAILED,
                     error=type(exc).__name__)
+    already = not str(status).endswith(" 1")
+    if already:
+        try:
+            prior = await conn.fetchrow(
+                "SELECT chosen_action, chosen_plan_digest, decision_id "
+                "  FROM bettor_xavier_decisions WHERE xavier_decision_id=$1",
+                xid)
+        except Exception as exc:                                # noqa: BLE001
+            return dict(out, ok=False, refusal=R_WRITE_FAILED,
+                        error=type(exc).__name__)
+        if prior is None or (prior["chosen_action"], prior[
+                "chosen_plan_digest"], prior["decision_id"]) != (
+                chosen_action, chosen_plan_digest, decision_id):
+            return dict(out, ok=False,
+                        refusal=R_RECORD_ID_HELD_BY_ANOTHER_REVIEW,
+                        xavier_decision_id=xid,
+                        stored=None if prior is None else dict(prior))
     return dict(out, ok=True, refusal=None, xavier_decision_id=xid,
-                already=not str(status).endswith(" 1"))
+                already=already)
 
 
 # ── EXECUTION HISTORY (migration 148 `bettor_xavier_execution_events`) ──
@@ -682,7 +715,8 @@ RESPONSIBILITY_SQL = """
                           AND f.direction = 'ENTRY'), 0)::float8 AS filled
         FROM bettor_funded_intents i
        WHERE i.kind = 'ENTRY' AND i.account_id = $1
-         AND upper(i.venue) = upper($2))
+         AND upper(i.venue) = upper($2)
+         AND ($4::text[] IS NULL OR i.intent_id = ANY($4::text[])))
     SELECT e.*,
       (SELECT count(*) FROM bettor_funded_intents c
         WHERE c.parent_intent_id = e.intent_id AND c.kind = 'EXIT'
@@ -768,10 +802,13 @@ def state_of(obligations: list) -> str:
 
 
 async def responsibilities(conn, *, account_id: str, venue: str,
-                           now: float | None = None) -> dict:
+                           now: float | None = None,
+                           intent_ids: list | None = None) -> dict:
     """EVERY POSITION XAVIER IS RESPONSIBLE FOR, with its state and its open
     obligations by name. A position leaves only when ALL are cleared; the
-    reconciled ones are counted, not listed. Never raises."""
+    reconciled ones are counted, not listed. `intent_ids` narrows the read to
+    those positions (the fresh re-read a review takes under its group's
+    lock). Never raises."""
     at = float(now if now is not None else time.time())
     out: dict[str, Any] = {"version": VERSION, "at": at,
                            "account_id": account_id, "venue": venue,
@@ -779,7 +816,8 @@ async def responsibilities(conn, *, account_id: str, venue: str,
     try:
         rows = [dict(r) for r in await conn.fetch(
             RESPONSIBILITY_SQL, str(account_id), str(venue),
-            list(_OUTSTANDING))]
+            list(_OUTSTANDING),
+            None if intent_ids is None else [str(i) for i in intent_ids])]
     except Exception as exc:                                    # noqa: BLE001
         return dict(out, ok=False, refusal=R_RESPONSIBILITY_UNREADABLE,
                     error="%s: %s" % (type(exc).__name__, str(exc)[:200]))
@@ -1511,9 +1549,46 @@ def _joint_floor(p_leg, p_qty, h_leg, h_qty, *, tie, void, postpone):
     return (float(got["whole_position_usd"]) if got.get("ok") else None)
 
 
+def leg_identity(pos: dict, facts: dict | None) -> dict:
+    """WHAT ONE LEG PAYS ON AND HOW IT SETTLES, as its own rows state it.
+    Pure. `payout_event` is the intent's column; the settlement identity is
+    the one it was admitted on (a hedge's `decision_ref.settlement_identity`,
+    written at acquisition) and the rule its valuation read."""
+    p = dict(pos or {})
+    ref = p.get("decision_ref")
+    if isinstance(ref, str):
+        try:
+            ref = json.loads(ref)
+        except ValueError:
+            ref = {}
+    ev = dict((facts or {}).get("management_evidence") or {})
+    de = dict(ev.get("decision_evidence") or {})
+    out = {"intent_id": p.get("intent_id"),
+           "leg_role": str(p.get("leg_role") or "PRIMARY"),
+           "us_market_slug": p.get("us_market_slug"),
+           "order_intent": p.get("order_intent"),
+           "payout_event": p.get("payout_event"),
+           "settlement_identity": (ref or {}).get("settlement_identity"),
+           "valuation_settlement_rule": de.get("settlement_rule"),
+           "valuation_settlement_source": de.get("settlement_source"),
+           "valuation_row_id": de.get("valuation_row_id")}
+    gaps = []
+    if not out["payout_event"]:
+        gaps.append("PAYOUT_EVENT")
+    if not (out["settlement_identity"] or out["valuation_settlement_rule"]):
+        gaps.append("SETTLEMENT_RULES")
+    out["gaps"] = gaps
+    return out
+
+
 def group_facts(pfacts: dict, hfacts: dict | None, *, primary: dict,
-                hedge: dict) -> dict:
-    """THE PRIMARY'S FACTS, TURNED INTO THE GROUP'S ONE DECISION. Pure."""
+                hedge: dict, orders_in_flight: list | None = None) -> dict:
+    """THE PRIMARY'S FACTS, TURNED INTO THE GROUP'S ONE DECISION. Pure.
+
+    The group is valued whole: both legs' remaining quantities, the unmatched
+    remainder, and every order of the group still in flight or unresolved
+    (listed with its size, its exposure counted, and -- through the gate --
+    no new order sent until it resolves)."""
     pf = dict(pfacts or {})
     hf = dict(hfacts or {}) if (hfacts or {}).get("ok") else {}
     p_hr = dict(pf.get("hold_ranking") or {})
@@ -1620,6 +1695,17 @@ def group_facts(pfacts: dict, hfacts: dict | None, *, primary: dict,
             "PRIMARY": _marginal_of(pf), "HEDGE": _marginal_of(hf)},
         "worst_case_is": ("the floor of one joint table over the real "
                           "quantities, never a sum of separate minima"),
+        # THE ORDERS THE GROUP HAS IN FLIGHT OR UNRESOLVED, with sizes: an
+        # exit still working lowers what a leg will hold, a hedge claim not
+        # answered may have raised it. Their exposure is counted and the
+        # group's gate sends nothing new until they resolve.
+        "orders_in_flight": list(orders_in_flight or []),
+        "orders_in_flight_qty": round(sum(float(o.get("qty") or 0)
+                                          for o in orders_in_flight or []),
+                                      6),
+        # BOTH LEGS' PAYOUT AND SETTLEMENT IDENTITY, from their own rows.
+        "legs_identity": {"PRIMARY": leg_identity(primary, pf),
+                          "HEDGE": leg_identity(hedge, hf)},
     }
     plans = dict(pf.get("executable_plans_by_digest") or {})
     plans.update(hf.get("executable_plans_by_digest") or {})
@@ -1643,6 +1729,361 @@ def _marginal_of(facts: dict) -> dict:
 
 
 # ═════════════════════════════════════════════════════════════════════
+# ONE REVIEW OF A GROUP AT A TIME, ON THE QUANTITIES IT WAS DECIDED ON
+# ═════════════════════════════════════════════════════════════════════
+#
+# THE GAP THIS CLOSES. The claim stops the SAME decision being sent twice, and
+# the leg reservation stops the same LEG being bought twice. Neither stops two
+# reviews of one group -- two passes, two connections -- from each deciding on
+# their own snapshot and committing DIFFERENT actions (one sells the primary
+# while the other buys the hedge). So decide -> record -> claim -> dispatch
+# for a group runs under one advisory lock keyed on the group, and a review
+# that cannot take it sends nothing and says so.
+#
+# WHY A SESSION LOCK AND NOT `pg_advisory_xact_lock`. The dispatch commits its
+# intent BEFORE the request leaves (the durability rule every send path is
+# built on); wrapping it in one outer transaction would turn those commits
+# into savepoints that a crash rolls back after the order has left. So the
+# lock is held by the session across the review's own transactions, released
+# explicitly, and a crashed session releases it by ending. `try` rather than
+# wait: a review never blocks the scheduled cycle behind another's venue call.
+#
+# AND THE QUANTITIES ARE CHECKED AGAIN BEFORE THE SEND. A fill of an order
+# still working on either leg can land between the decision and the send and
+# change the residual or the matched units. The plan was valued on the old
+# numbers, so it is not sent; the claim is spent (NOT_SENT names why) and the
+# next review decides again on what is now held.
+
+#: The advisory-lock namespace (first key of the two-key form), 'XAV1'.
+LOCK_NAMESPACE = 0x58415631
+R_GROUP_REVIEW_IN_PROGRESS = (
+    "ANOTHER_REVIEW_OF_THIS_GROUP_HOLDS_ITS_LOCK_SO_THIS_ONE_SENDS_NOTHING")
+R_GROUP_LOCK_UNAVAILABLE = (
+    "THE_GROUP_LOCK_COULD_NOT_BE_TAKEN_SO_NOTHING_IS_SENT")
+R_POSITION_CHANGED = "THE_POSITION_CHANGED_AFTER_THE_DECISION_REVALIDATE"
+R_POSITION_CLOSED_BEFORE_REVIEW = (
+    "THE_POSITION_CLOSED_BETWEEN_THE_PASS_SNAPSHOT_AND_ITS_REVIEW")
+G_GROUP_ORDER_IN_FLIGHT = "GROUP_ORDER_IN_FLIGHT_OR_UNRESOLVED"
+R_GROUP_ORDER_IN_FLIGHT = (
+    "THE_GROUP_HAS_AN_ORDER_IN_FLIGHT_OR_UNRESOLVED_SO_NOTHING_NEW_IS_SENT")
+#: The obligations that mean the group's quantity is moving or unknown. An
+#: entry order still working (a partial entry) is NOT one of them: it is
+#: re-checked before the send instead, so a partially filled position can
+#: still be managed.
+GROUP_GATING_OBLIGATIONS = (OB_ENTRY_UNRESOLVED, OB_EXIT_UNRESOLVED,
+                            OB_CLAIM_UNRESOLVED, OB_DISPATCH_UNRESOLVED,
+                            OB_CLAIM_LIVE, OB_EXIT_OUTSTANDING)
+LOCK_SALT = "GROUP_LOCK_HELD_BY_ANOTHER_REVIEW"
+
+
+def group_key(pos: dict) -> str:
+    """The group a position is reviewed under: its portfolio group, else
+    itself. Pure."""
+    p = dict(pos or {})
+    gid = p.get("portfolio_group_id")
+    return str(gid) if gid else "intent:%s" % p.get("intent_id")
+
+
+async def try_group_lock(conn, key: str) -> dict:
+    """Take the group's review lock for this session, or say it is held."""
+    try:
+        got = await conn.fetchval(
+            "SELECT pg_try_advisory_lock($1::int4, hashtext($2))",
+            LOCK_NAMESPACE, str(key))
+    except Exception as exc:                                    # noqa: BLE001
+        return {"ok": False, "key": key, "refusal": R_GROUP_LOCK_UNAVAILABLE,
+                "error": type(exc).__name__}
+    if not got:
+        return {"ok": False, "key": key, "refusal": R_GROUP_REVIEW_IN_PROGRESS}
+    return {"ok": True, "key": key, "refusal": None}
+
+
+async def release_group_lock(conn, lock: dict | None) -> None:
+    if not (lock or {}).get("ok"):
+        return
+    try:
+        await conn.fetchval(
+            "SELECT pg_advisory_unlock($1::int4, hashtext($2))",
+            LOCK_NAMESPACE, str(lock["key"]))
+    except Exception:                                           # noqa: BLE001
+        pass
+
+
+async def release_session_group_locks(conn) -> int:
+    """Release every Xavier group lock THIS session still holds -- left by a
+    pass that raised before it released. Only this namespace; never a lock
+    another module took. Returns how many were released."""
+    released = 0
+    try:
+        for _ in range(64):
+            n = await conn.fetchval(
+                "SELECT count(*) FILTER (WHERE pg_advisory_unlock($1::int4, "
+                "  (objid::bigint - CASE WHEN objid::bigint > 2147483647 "
+                "   THEN 4294967296 ELSE 0 END)::int4)) FROM pg_locks "
+                " WHERE locktype='advisory' AND pid=pg_backend_pid() "
+                "   AND classid=$1::int4::oid AND objsubid=2 AND granted",
+                LOCK_NAMESPACE)
+            if not n:
+                break
+            released += int(n)
+    except Exception:                                           # noqa: BLE001
+        pass
+    return released
+
+
+GROUP_QUANTITIES_SQL = """
+    SELECT i.intent_id, coalesce(i.leg_role, 'PRIMARY') AS role, i.state,
+           i.quantity::float8 AS quantity,
+           coalesce(i.residual_qty, 0)::float8 AS residual,
+           coalesce((SELECT sum(f.qty) FROM bettor_funded_fills f
+                      WHERE f.intent_id = i.intent_id
+                        AND f.direction = 'ENTRY'), 0)::float8 AS filled
+      FROM bettor_funded_intents i
+     WHERE i.kind = 'ENTRY'
+       AND (i.intent_id = ANY($1::text[])
+            OR ($2::text IS NOT NULL AND i.portfolio_group_id = $2))
+     ORDER BY i.intent_id
+"""
+
+
+async def group_quantities(conn, *, intent_ids: list,
+                           group_id: str | None = None) -> dict:
+    """WHAT THE GROUP HOLDS AND HAS IN FLIGHT, NOW, from our own rows: each
+    entry leg's residual, filled and still-working quantity, every exit of
+    those legs not yet finished, and every live leg claim. Never raises."""
+    out: dict[str, Any] = {"ok": False, "legs": {}, "orders_in_flight": []}
+    try:
+        legs = await conn.fetch(GROUP_QUANTITIES_SQL,
+                                [str(i) for i in intent_ids if i],
+                                None if not group_id else str(group_id))
+        ids = []
+        for r in legs:
+            working = (max(0.0, float(r["quantity"]) - float(r["filled"]))
+                       if r["state"] in _OUTSTANDING else 0.0)
+            out["legs"][r["intent_id"]] = {
+                "role": r["role"], "residual": round(float(r["residual"]), 6),
+                "filled": round(float(r["filled"]), 6),
+                "working": round(working, 6), "state": r["state"]}
+            ids.append(r["intent_id"])
+        for r in await conn.fetch(
+                "SELECT intent_id, parent_intent_id, state, "
+                "       quantity::float8 AS q FROM bettor_funded_intents "
+                " WHERE kind='EXIT' AND parent_intent_id = ANY($1::text[]) "
+                "   AND state = ANY($2::text[]) ORDER BY intent_id",
+                ids, list(_OUTSTANDING) + ["UNRESOLVED"]):
+            out["orders_in_flight"].append(
+                {"kind": "EXIT", "id": r["intent_id"],
+                 "leg": r["parent_intent_id"], "state": r["state"],
+                 "qty": round(float(r["q"]), 6)})
+        if group_id:
+            for r in await conn.fetch(
+                    "SELECT operation_id, leg_role, state, "
+                    "       quantity::float8 AS q "
+                    "  FROM bettor_funded_leg_reservations "
+                    " WHERE group_id=$1 AND state IN ('HELD','COMMITTED',"
+                    "       'SEND_ATTEMPTED','AMBIGUOUS') "
+                    " ORDER BY operation_id", str(group_id)):
+                out["orders_in_flight"].append(
+                    {"kind": "LEG_CLAIM", "id": r["operation_id"],
+                     "leg": r["leg_role"], "state": r["state"],
+                     "qty": round(float(r["q"]), 6)})
+        out["ok"] = True
+    except Exception as exc:                                    # noqa: BLE001
+        out["error"] = "%s: %s" % (type(exc).__name__, str(exc)[:160])
+    return out
+
+
+def valued_on(*, positions: list, scope: dict | None,
+              orders_in_flight: list) -> dict:
+    """THE QUANTITIES A DECISION WAS VALUED ON, as the pass used them: each
+    reviewed leg's residual, the filled quantity the bound is conditional on
+    (`bound_filled_qty`'s source) and the orders then in flight. Pure."""
+    sc = dict(scope or {})
+    legs = {}
+    for p in positions or []:
+        if not p:
+            continue
+        legs[str(p.get("intent_id"))] = {
+            "role": str(p.get("leg_role") or "PRIMARY"),
+            "residual": round(float(p.get("residual_qty") or 0), 6)}
+    return {"legs": legs, "intent_filled": sc.get("intent_filled"),
+            "filled_by_role": dict(sc.get("filled_by_role") or {}),
+            "matched_units": sc.get("matched_units"),
+            "orders_in_flight": sorted(
+                (o.get("kind"), o.get("id"), o.get("state"), o.get("qty"))
+                for o in (orders_in_flight or []))}
+
+
+def revalidate(decided: dict, now_q: dict, *, now_scope: dict | None) -> dict:
+    """HAS ANYTHING THE DECISION WAS VALUED ON CHANGED? Pure.
+
+    Compared exactly (to 1e-9): each reviewed leg's residual, the filled
+    quantity by intent and by role, the matched units, and the set of orders
+    in flight with their states and sizes. Any difference -- or a re-read that
+    failed -- refuses the send."""
+    d = dict(decided or {})
+    changed = []
+    if not (now_q or {}).get("ok"):
+        return {"ok": False, "refusal": R_POSITION_CHANGED,
+                "changed": [{"what": "RE_READ_FAILED",
+                             "error": (now_q or {}).get("error")}]}
+    legs_now = now_q.get("legs") or {}
+
+    def _diff(what, was, now):
+        if was is None and now is None:
+            return
+        if was is None or now is None or abs(float(was) - float(now)) > 1e-9:
+            changed.append({"what": what, "decided_on": was, "now": now})
+
+    for iid, leg in (d.get("legs") or {}).items():
+        _diff("residual:%s" % iid, leg.get("residual"),
+              (legs_now.get(iid) or {}).get("residual"))
+    sc = dict(now_scope or {})
+    _diff("intent_filled", d.get("intent_filled"), sc.get("intent_filled"))
+    _diff("matched_units", d.get("matched_units"), sc.get("matched_units"))
+    roles = set(d.get("filled_by_role") or {}) | set(
+        sc.get("filled_by_role") or {})
+    for role in sorted(roles):
+        _diff("filled_by_role:%s" % role,
+              (d.get("filled_by_role") or {}).get(role, 0.0),
+              (sc.get("filled_by_role") or {}).get(role, 0.0))
+    fl_now = sorted((o.get("kind"), o.get("id"), o.get("state"), o.get("qty"))
+                    for o in (now_q.get("orders_in_flight") or []))
+    fl_was = [tuple(x) for x in (d.get("orders_in_flight") or [])]
+    if fl_now != fl_was:
+        changed.append({"what": "orders_in_flight", "decided_on": fl_was,
+                        "now": fl_now})
+    if changed:
+        return {"ok": False, "refusal": R_POSITION_CHANGED,
+                "changed": changed,
+                "why": ("the group changed after the decision was valued: "
+                        "the plan is not sent and the next review decides "
+                        "again on what is now held")}
+    return {"ok": True, "refusal": None, "changed": []}
+
+
+def group_gate(responsibilities_of_legs: list) -> dict | None:
+    """THE GROUP'S QUANTITY IS MOVING OR UNKNOWN: an exit still working, a
+    lost answer on any leg, a leg claim held or unresolved, or a dispatch
+    claim with no outcome. The review is still recorded in full; nothing new
+    is sent for the group until recovery or the venue resolves it. Pure."""
+    hits = []
+    for r in responsibilities_of_legs or []:
+        for o in (r or {}).get("obligations") or []:
+            if o.get("obligation") in GROUP_GATING_OBLIGATIONS:
+                hits.append({"intent_id": (r or {}).get("intent_id"),
+                             "obligation": o.get("obligation")})
+    if not hits:
+        return None
+    names = sorted({h["obligation"] for h in hits})
+    return {"eligibility": "%s:%s:%s" % (E_BLOCKED, G_GROUP_ORDER_IN_FLIGHT,
+                                         ",".join(names)),
+            "gate": G_GROUP_ORDER_IN_FLIGHT,
+            "refusal": R_GROUP_ORDER_IN_FLIGHT,
+            "obligations": hits,
+            "why": ("an order of this group is still working or its outcome "
+                    "is unknown, so the quantity a new order would act on is "
+                    "not established; the exposure stays counted")}
+
+
+# ── RECOVERY OF DISPATCH CLAIMS, ON THE BOOK'S OWN EVIDENCE ──────────────
+#
+# A claim with nothing after it (the process died between the claim and the
+# send, or the outcome write failed) and an UNKNOWN outcome both count as an
+# unresolved send, and the group is gated on them. They are answered only by
+# evidence, and only while no review of the group is in flight (its lock is
+# free):
+#   * NO intent names the decision -> nothing was sent: every send path
+#     commits its intent, carrying `decision_ref.xavier_decision_id`, BEFORE
+#     the request leaves. NOT_SENT is appended.
+#   * the intent it created reached a state the book established (FILLED,
+#     CANCELLED, REJECTED, ABANDONED, or working with a venue order id) ->
+#     RECOVERED with that state and the fills ledger's quantity.
+#   * anything else (the intent is itself UNRESOLVED) stays UNRESOLVED and the
+#     exposure stays counted; only the audited investigation resolves it.
+RECOVERY_NO_INTENT = "NO_ORDER_INTENT_NAMES_THIS_DECISION_SO_NOTHING_WAS_SENT"
+_BOOK_TERMINAL = ("FILLED", "CANCELLED", "REJECTED", "ABANDONED")
+
+
+async def recover_claims(conn, *, account_id: str, venue: str,
+                         at: float | None = None) -> dict:
+    """Answer unresolved dispatch claims from the book's own rows. Never
+    raises; appends only (NOT_SENT / RECOVERED, source RECOVERY_READ)."""
+    when = float(at if at is not None else time.time())
+    out: dict[str, Any] = {"examined": 0, "recovered": [],
+                           "left_unresolved": [], "skipped_in_flight": []}
+    try:
+        rows = await unresolved_claims(conn, account_id=account_id,
+                                       venue=venue)
+    except Exception as exc:                                    # noqa: BLE001
+        return dict(out, ok=False, error=type(exc).__name__)
+    for s in rows:
+        xid = s["xavier_decision_id"]
+        out["examined"] += 1
+        try:
+            d = await _decision(conn, xid)
+            if d is None:
+                continue
+            lock = await try_group_lock(conn, group_key(
+                {"portfolio_group_id": d["portfolio_group_id"],
+                 "intent_id": d["intent_id"]}))
+            if not lock.get("ok"):
+                out["skipped_in_flight"].append(xid)
+                continue
+            try:
+                got = await _recover_one(conn, xid, s, when)
+            finally:
+                await release_group_lock(conn, lock)
+            (out["recovered"] if got.get("appended") or got.get("already")
+             else out["left_unresolved"]).append(dict(got,
+                                                      xavier_decision_id=xid))
+        except Exception as exc:                                # noqa: BLE001
+            out["left_unresolved"].append({"xavier_decision_id": xid,
+                                           "error": type(exc).__name__})
+    return dict(out, ok=True)
+
+
+async def _recover_one(conn, xid: str, state: dict, when: float) -> dict:
+    intents = await conn.fetch(
+        "SELECT intent_id, kind, state, venue_order_id FROM "
+        " bettor_funded_intents WHERE decision_ref->>'xavier_decision_id'=$1 "
+        " ORDER BY created_at", xid)
+    if not intents:
+        if state.get("status") != X_CLAIMED_OUTCOME_UNRECORDED:
+            # An UNKNOWN outcome with no intent naming it: two records
+            # disagree about whether a send happened. Not a resolution.
+            return {"resolution": None,
+                    "why": "UNKNOWN_OUTCOME_RECORDED_AND_NO_INTENT_NAMES_IT"}
+        got = await record_execution_event(
+            conn, xavier_decision_id=xid, kind=K_NOT_SENT,
+            source="RECOVERY_READ", occurred_at=when,
+            evidence={"resolution": RECOVERY_NO_INTENT,
+                      "rule": ("every send commits its intent, naming the "
+                               "decision, before the request leaves")})
+        return dict(got, resolution=RECOVERY_NO_INTENT)
+    it = intents[0]
+    st = str(it["state"] or "")
+    vo = it["venue_order_id"]
+    if st in _BOOK_TERMINAL or (st in ("ACKNOWLEDGED", "PARTIALLY_FILLED")
+                                and vo):
+        filled = await conn.fetchval(
+            "SELECT coalesce(sum(qty), 0)::float8 FROM bettor_funded_fills "
+            " WHERE intent_id=$1", it["intent_id"])
+        got = await record_execution_event(
+            conn, xavier_decision_id=xid, kind=K_RECOVERED,
+            source="RECOVERY_READ", occurred_at=when, venue_order_id=vo,
+            order_intent_id=it["intent_id"],
+            cumulative_filled_qty=float(filled or 0) if vo else None,
+            terminal_status=st if st in _BOOK_TERMINAL else None,
+            evidence={"resolution": "THE_BOOK_ESTABLISHED_THE_ORDERS_STATE",
+                      "intent_state": st})
+        return dict(got, resolution="BOOK_STATE:%s" % st)
+    return {"resolution": None, "intent_state": st,
+            "why": ("the order this decision created is itself unresolved; "
+                    "its exposure stays counted until it is investigated")}
+
+
+# ═════════════════════════════════════════════════════════════════════
 # ONE REVIEW PER POSITION, THROUGH THE SCHEDULED PASS
 # ═════════════════════════════════════════════════════════════════════
 #
@@ -1661,6 +2102,10 @@ R_NO_OPEN_ENTRY_ROW = (
     "NO_OPEN_POSITION_TO_ACT_ON_THE_OBLIGATIONS_ARE_ORDERS_OR_SETTLEMENT")
 R_XAVIER_REVIEW_RAISED = "XAVIERS_REVIEW_RAISED_SO_NO_RECORD_AND_NOTHING_IS_SENT"
 G_NO_PLAN = "THE_WINNER_CARRIES_NO_EXECUTABLE_PLAN"
+#: The side an exit is sent on, by the side the position was opened with --
+#: `pmus._exit_intent`'s rule (a test pins that the two agree).
+EXIT_SIDE_OF = {"ORDER_INTENT_BUY_LONG": "ORDER_INTENT_SELL_LONG",
+                "ORDER_INTENT_BUY_SHORT": "ORDER_INTENT_SELL_SHORT"}
 E_DECIDED_BY_GROUP = "%s:DECIDED_BY_THE_GROUP_REVIEW" % E_NOT_DISPATCHED
 HISTORY_IS_NOT_A_REASON = (
     "a loss already taken enters only through the remaining basis every "
@@ -1697,7 +2142,51 @@ def hedge_record_supplied(facts: dict, admitted_all, candidate_id) -> dict:
         basis = HS.PAYOUT_EVENT_BASIS
     if pe:
         sup.update(payout_event=pe, payout_event_basis=basis)
+    # AND HOW IT SETTLES: the settlement rules the leg was built and admitted
+    # on, carried onto the hedge intent so both legs of the group state their
+    # payout AND settlement identity from their own rows. Evidence only: it is
+    # not an order field, so the admission check is unchanged by it.
+    if not sup.get("settlement_identity"):
+        leg = next((a.get("leg") for a in (admitted_all or [])
+                    if str(a.get("condition_id")) == str(candidate_id)), None)
+        si = settlement_identity_of_leg(leg)
+        if si:
+            sup["settlement_identity"] = dict(si, payout_event=pe,
+                                              payout_event_basis=basis)
     return sup or None
+
+
+def settlement_identity_of_leg(leg) -> dict | None:
+    """THE SETTLEMENT RULES A BUILT LEG CARRIES, compactly and JSON-safe.
+    Each exceptional outcome's reading (established or not, its clause and
+    resolution), the grading facts, and the prose's hash -- never the prose.
+    Pure."""
+    if leg is None or getattr(leg, "condition_id", None) is None:
+        return None
+    rules = {}
+    for outcome, r in dict(getattr(leg, "settlement_rules", None)
+                           or {}).items():
+        r = dict(r or {})
+        rules[str(outcome)] = {k: r.get(k) for k in (
+            "established", "resolution", "clause", "refusal")
+            if r.get(k) is not None}
+    prov = dict(getattr(leg, "settlement_provenance", None) or {})
+    # JSON-SAFE BY CONSTRUCTION: the intent writer serialises decision_ref
+    # without a fallback, so anything not plain JSON is stringified here.
+    return json.loads(json.dumps({"condition_id": leg.condition_id,
+            "fixture_id": getattr(leg, "fixture_id", None),
+            "period": getattr(leg, "period", None),
+            "kind": getattr(leg, "kind", None),
+            "overtime": getattr(leg, "overtime", None),
+            "tie_rule": getattr(leg, "tie_rule", None),
+            "void_rule": getattr(leg, "void_rule", None),
+            "rules": rules,
+            "rules_established": sorted(o for o, r in rules.items()
+                                        if r.get("established")),
+            "prose_sha256": prov.get("content_sha256"),
+            "prose_source": prov.get("source"),
+            "interpretation_version": prov.get("interpretation_version")},
+        default=str))
 
 
 _TERMINAL_STATES = ("FILLED", "CANCELLED", "REJECTED")
@@ -1808,17 +2297,65 @@ class ReviewContext:
                            order_outstanding=state in (ORDER_OUTSTANDING,
                                                        ORDER_UNRESOLVED))
 
+    async def refresh(self, conn, intent_ids: list) -> dict:
+        """RE-READ these positions' responsibility NOW (under the group's
+        lock), so the record and the gate state what is true at the decision,
+        not at the start of the pass. A failed re-read keeps the pass-start
+        reading and says so."""
+        ids = [str(i) for i in intent_ids if i]
+        got = await responsibilities(conn, account_id=self.account_id,
+                                     venue=self.venue, now=self.at,
+                                     intent_ids=ids)
+        if not got.get("ok"):
+            return {"ok": False, "refusal": got.get("refusal"),
+                    "kept": "THE_PASS_START_READING"}
+        fresh = {p["intent_id"]: p for p in got.get("positions") or []}
+        for iid in ids:
+            if iid in fresh:
+                self.by_intent[iid] = fresh[iid]
+            else:
+                self.by_intent.pop(iid, None)
+        return {"ok": True, "refreshed": sorted(fresh)}
+
+    def responsibility_of(self, intent_id) -> dict | None:
+        return self.by_intent.get(str(intent_id))
+
+    async def record_lock_refused(self, conn, pos, *, lock) -> dict:
+        """A review that could not take its group's lock: recorded, nothing
+        decided, nothing sent. Salted, so it never occupies the id the review
+        holding the lock records its decision under."""
+        r = self._responsibility_for(pos)
+        if r is None:
+            return {"ok": True, "skipped": R_NOT_UNDER_RESPONSIBILITY,
+                    "brief": {"intent_id": pos.get("intent_id"),
+                              "recorded": False,
+                              "why": R_NOT_UNDER_RESPONSIBILITY}}
+        refusal = (lock or {}).get("refusal") or R_GROUP_REVIEW_IN_PROGRESS
+        return await self._write(
+            conn, intent_id=str(pos.get("intent_id")),
+            group_id=pos.get("portfolio_group_id"),
+            slug=pos.get("us_market_slug"), r=r,
+            eligibility="%s:%s" % (E_NOT_DISPATCHED, refusal),
+            alternatives=[{"action": "ANY", "rankable": False,
+                           "blocker": refusal}],
+            reasoning={"why": ("another review of this group holds its lock "
+                               "and is deciding now; this review decides and "
+                               "sends nothing, and the next one re-reads the "
+                               "group"), "group_key": (lock or {}).get("key")},
+            exposure={"held_qty": _f(pos.get("residual_qty"))},
+            salt=LOCK_SALT)
+
     async def _write(self, conn, *, intent_id, group_id, slug, r,
                      eligibility, alternatives, reasoning, economics_=None,
                      exposure=None, evidence=None, chosen=None, digest=None,
-                     decision_id=None) -> dict:
+                     decision_id=None, salt=None) -> dict:
         try:
             return await self._write_or_raise(
                 conn, intent_id=intent_id, group_id=group_id, slug=slug, r=r,
                 eligibility=eligibility, alternatives=alternatives,
                 reasoning=reasoning, economics_=economics_,
                 exposure=exposure, evidence=evidence, chosen=chosen,
-                digest=digest, decision_id=decision_id)
+                digest=digest, decision_id=decision_id, salt=salt)
         except Exception as exc:                                # noqa: BLE001
             return {"ok": False, "refusal": R_WRITE_FAILED,
                     "error": type(exc).__name__,
@@ -1829,7 +2366,7 @@ class ReviewContext:
                               eligibility, alternatives, reasoning,
                               economics_=None, exposure=None, evidence=None,
                               chosen=None, digest=None,
-                              decision_id=None) -> dict:
+                              decision_id=None, salt=None) -> dict:
         nr = self._next(r["state"])
         rec = await record_decision(
             conn, account_id=self.account_id, venue=self.venue,
@@ -1843,7 +2380,8 @@ class ReviewContext:
             obligations=r.get("obligations") or [],
             chosen_action=chosen, chosen_plan_digest=digest,
             decision_id=decision_id, portfolio_group_id=group_id,
-            us_market_slug=slug, next_review_at=nr["next_review_at"])
+            us_market_slug=slug, next_review_at=nr["next_review_at"],
+            salt=salt)
         rec["brief"] = brief({
             "intent_id": intent_id, "portfolio_group_id": group_id,
             "xavier_decision_id": rec.get("xavier_decision_id"),
@@ -1896,7 +2434,7 @@ class ReviewContext:
             slug=pos.get("us_market_slug"), r=r,
             eligibility=eligibility or E_NOTHING_SELECTABLE,
             alternatives=alts, reasoning={"why": why},
-            exposure={"held_qty": pos.get("residual_qty")},
+            exposure={"held_qty": _f(pos.get("residual_qty"))},
             evidence={"supplier_refusal": f.get("refusal"),
                       "supplier_unavailable": f.get("unavailable")},
             decision_id=f.get("decision_id") if f.get("ok") else None)
@@ -1943,10 +2481,16 @@ class ReviewContext:
     async def _review(self, conn, *, pos, facts, dec, step, ranking=None,
                       admitted_all=(), acquisition_plans=None,
                       option_refusals=None, screens=None, companion=None,
-                      deferred_exits=None) -> dict:
+                      deferred_exits=None, gate=None, valued=None) -> dict:
         """ONE POSITION'S RECORD, BEFORE DISPATCH. Returns the record's id,
         the execution eligibility and -- for an acquisition -- the admission
-        record the dispatch then uses, so both rest on one admission."""
+        record the dispatch then uses, so both rest on one admission.
+
+        `gate` is the group's in-flight gate (`group_gate`): when set, the
+        review is recorded in full and its eligibility names the gate, and
+        the caller sends nothing. `valued` is `valued_on(...)`: the
+        quantities the decision was valued on, persisted so the pre-send
+        revalidation compares against what the record states."""
         from . import bettor_funded_pair_cycle as PC
 
         r = self._responsibility_for(pos)
@@ -1961,6 +2505,19 @@ class ReviewContext:
         selected = dict((dec or {}).get("selected") or {})
         mev = dict(f.get("management_evidence") or {})
         basis = dict(mev.get("basis") or {})
+        if basis.get("basis_per_contract") is None:
+            # THE SAME READING `manage` VALUES ON, taken here when the supplier
+            # did not carry it: the fills ledger's remaining basis. Not a
+            # substitute number -- the one source every valuation names.
+            try:
+                from . import bettor_funded_book as FB
+                rb = await FB.remaining_basis(conn, str(pos.get("intent_id")))
+                basis = {k: _f(rb.get(k)) for k in (
+                    "basis_per_contract", "remaining_basis_usd",
+                    "residual_qty", "entry_qty")}
+                basis["read_here"] = "bettor_funded_book.remaining_basis"
+            except Exception:                                   # noqa: BLE001
+                pass
         group = f.get("group")
         qty = _f(pos.get("residual_qty"))
         hold_c = next((c for c in verdict.get("candidates") or []
@@ -1996,6 +2553,7 @@ class ReviewContext:
             if scr is not None:
                 a["search_screen"] = scr
         chosen, digest, adm, elig = None, None, None, {}
+        chosen_plan = None
         if not (dec or {}).get("ok"):
             elig = {"eligibility": "%s:THE_DECISION_DID_NOT_PERSIST"
                     % E_NOT_DISPATCHED}
@@ -2007,10 +2565,23 @@ class ReviewContext:
         elif action in PC.LEDGER_EXIT_ACTIONS:
             plan = dict(f.get("executable_plans_by_digest") or {}).get(
                 str(selected.get("plan_digest") or ""))
+            if plan is not None and plan.digest != selected.get("plan_digest"):
+                # A PLAN FILED UNDER THE WINNER'S DIGEST THAT IS NOT THAT PLAN
+                # is not the ranked order; the record never names it.
+                plan = None
             if plan is None:
                 elig = {"eligibility": _blocked(G_NO_PLAN), "gate": G_NO_PLAN}
             else:
                 chosen, digest = action, plan.digest
+                # THE ORDER ITSELF, PERSISTED: instrument, action, quantity,
+                # wire limit, proceeds bound, evidence expiry and the side
+                # the adapter derives for closing this position.
+                chosen_plan = dict(plan.as_dict(), kind="EXIT",
+                                   position_order_intent=pos.get(
+                                       "order_intent"),
+                                   order_intent=EXIT_SIDE_OF.get(
+                                       str(pos.get("order_intent") or "")),
+                                   order_intent_rule="pmus._exit_intent")
                 elig = await exit_eligibility(conn, plan=plan,
                                               account_id=self.account_id,
                                               venue=self.venue)
@@ -2021,6 +2592,9 @@ class ReviewContext:
                 elig = {"eligibility": _blocked(G_NO_PLAN), "gate": G_NO_PLAN}
             else:
                 chosen, digest = action, acq.digest
+                chosen_plan = dict(acq.as_dict(), kind="ACQUISITION",
+                                   us_market_slug=acq.venue_slug,
+                                   order_intent=acq.side)
                 adm = PC.hedge_admission_record(
                     plan=acq, selected=selected,
                     admitted=next((a for a in admitted_all
@@ -2043,6 +2617,10 @@ class ReviewContext:
         else:
             elig = {"eligibility": "%s:UNRECOGNISED_ACTION_%s"
                     % (E_NOT_DISPATCHED, action)}
+        if gate and chosen and chosen != "HOLD":
+            # THE GROUP'S QUANTITY IS MOVING OR UNKNOWN: the winner is
+            # recorded with its plan, and the gate is what the record names.
+            elig = dict(gate, underlying=elig)
         win = next((a for a in alts if a.get("rankable") and (
             (digest and a.get("plan_digest") == digest)
             or (not digest and a.get("action") == (selected.get("action")
@@ -2062,7 +2640,8 @@ class ReviewContext:
             "capital_released_usd": econ.get("capital_released_usd"),
             "eligibility": {k: elig.get(k) for k in (
                 "eligibility", "gate", "gates_checked", "switches_off",
-                "not_evaluated_here", "failed", "conflicts", "why")
+                "not_evaluated_here", "failed", "conflicts", "why",
+                "obligations", "underlying")
                 if elig.get(k) is not None},
             "history_is_not_a_reason": HISTORY_IS_NOT_A_REASON,
             "group_decision": group}
@@ -2072,7 +2651,10 @@ class ReviewContext:
                     "remaining_basis_usd": basis.get("remaining_basis_usd"),
                     "basis_per_contract": basis.get("basis_per_contract"),
                     "unpaired_qty": unp_q,
-                    "unpaired_value_at_risk_usd": unp_v, "group": group}
+                    "unpaired_value_at_risk_usd": unp_v, "group": group,
+                    # THE QUANTITIES THIS DECISION WAS VALUED ON, compared
+                    # again immediately before any send.
+                    "valued_on": valued}
         pred = dict((dec or {}).get("prediction") or {})
         evidence = {
             "probability": mev.get("ev_hold"),
@@ -2089,7 +2671,8 @@ class ReviewContext:
                 "region_probabilities_came_from"),
             "capital": f.get("capital"),
             "hedge_supply_unavailable": f.get("unavailable"),
-            "responsibility_read_ok": bool(self.resp.get("ok"))}
+            "responsibility_read_ok": bool(self.resp.get("ok")),
+            "chosen_plan": chosen_plan}
         dec_id = f.get("decision_id") if (dec or {}).get("ok") else None
         rec = await self._write(
             conn, intent_id=str(pos.get("intent_id")),
@@ -2103,6 +2686,8 @@ class ReviewContext:
                "error": rec.get("error"),
                "xavier_decision_id": rec.get("xavier_decision_id"),
                "eligibility": elig, "admission": adm,
+               "gate_blocked": bool(gate and chosen and chosen != "HOLD"),
+               "chosen_plan": chosen_plan,
                "brief": rec.get("brief"), "companion_briefs": []}
         if companion is not None and group:
             out["companion_briefs"].append(await self._companion(
@@ -2136,7 +2721,8 @@ class ReviewContext:
                                "row; this leg is dispatched only if that "
                                "decision's winner acts on it, and only "
                                "through that decision's claim")},
-            exposure={"held_qty": hpos.get("residual_qty"), "group": group},
+            exposure={"held_qty": _f(hpos.get("residual_qty")),
+                      "group": group},
             evidence={"marginal": _marginal_of(hf),
                       "facts_refusal": hf.get("refusal")},
             decision_id=decision_id)

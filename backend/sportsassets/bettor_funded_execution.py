@@ -1130,6 +1130,9 @@ async def submit_for_decision(conn, rec: dict, *, account_id: str,
                           "xavier_decision_id": (rec or {}).get(
                               "xavier_decision_id"),
                           "candidate_id": (rec or {}).get("candidate_id"),
+                          # WHAT THE LEG SETTLES ON, beside what it pays on.
+                          "settlement_identity": (rec or {}).get(
+                              "settlement_identity"),
                           "sized_to_approved_rails": (
                               {k: out["sized_to_fit"].get(k) for k in
                                ("from_quantity", "to_quantity", "why")}

@@ -1983,7 +1983,10 @@ async def manage(conn, *, account_id: str, venue: str, adapter=None,
             "probability_read": pick.get("probability_read"),
             "decision_evidence": {k: (pick.get("decision_evidence")
                                       or {}).get(k) for k in (
-                "valuation_row_id", "valuation_observed_at", "event_state")},
+                "valuation_row_id", "valuation_observed_at", "event_state",
+                # THE SETTLEMENT RULE THE VALUATION READ, so the position's
+                # settlement identity is on the record beside its payout.
+                "settlement_rule", "settlement_source")},
             "inputs_expire_at": pick.get("inputs_expire_at"),
             "assessed_at": pick.get("assessed_at"),
         }

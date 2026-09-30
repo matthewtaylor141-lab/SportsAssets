@@ -859,6 +859,9 @@ def hedge_admission_record(*, plan, selected: dict, admitted: dict | None,
         # three-way book that is not the opposing team; exit valuation refuses a
         # position without it, which is the honest outcome when nobody stated it.
         "payout_event": sup.get("payout_event"),
+        # AND HOW IT SETTLES, carried the same way (evidence, not an order
+        # field): the rules the leg was built and admitted on.
+        "settlement_identity": sup.get("settlement_identity"),
         # THE SIZING, IN THE SHAPE `plan_from_decision` READS. `limit_price` is
         # the plan's WIRE price -- YES-denominated, so a SHORT at 0.41 of cost is
         # 0.59 on the wire -- because `collateral_for` converts from the wire.
@@ -2496,6 +2499,35 @@ def decision_options(*, admitted, ranking, facts, position, account_id, venue, n
     return options, plans, refused
 
 
+async def _changed_since_decided(conn, *, xs, xr, step, valued, leg_ids, gid,
+                                 pos) -> bool:
+    """HAS THE GROUP CHANGED SINCE THE DECISION WAS VALUED? Re-read under the
+    group's lock, after the claim and immediately before the send.
+
+    A partial fill of an order still working on either leg can land between
+    the decision and the send and change a residual, the filled scope or the
+    matched units; an order can appear or resolve. On ANY difference the plan
+    is not sent: the claim is spent with a NOT_SENT event naming
+    `THE_POSITION_CHANGED_AFTER_THE_DECISION_REVALIDATE`, so this decision can
+    never be sent later, and the next review decides again on what is held.
+    Returns True when the send must not happen."""
+    now_q = await XV.group_quantities(conn, intent_ids=leg_ids, group_id=gid)
+    now_scope = await XV.filled_scope(conn, intent_id=str(pos.get("intent_id")),
+                                      group_id=gid)
+    rv = XV.revalidate(valued, now_q, now_scope=now_scope)
+    step["revalidation"] = rv
+    if rv.get("ok"):
+        return False
+    step["refusal"] = XV.R_POSITION_CHANGED
+    step["dispatched"] = None
+    step["why_nothing_was_sent"] = rv.get("why") or rv.get("refusal")
+    step["xavier_execution"] = await xs.record_execution(
+        conn, xavier_decision_id=xr["xavier_decision_id"],
+        result={"sent": False, "refusal": XV.R_POSITION_CHANGED,
+                "changed": rv.get("changed")})
+    return True
+
+
 async def pass_once(conn, *, account_id: str, venue: str,
                     pair_inputs=None, adapter=None,
                     venue_positions: dict | None = None,
@@ -2533,8 +2565,18 @@ async def pass_once(conn, *, account_id: str, venue: str,
                            "resubmitted_anything": False,
                            "considered": [], "acquisitions": [],
                            "xavier": []}
+    # A GROUP LOCK THIS SESSION STILL HOLDS was left by a pass that raised
+    # before releasing it; nothing of that pass is in flight any more.
+    out["xavier_stale_group_locks_released"] = (
+        await XV.release_session_group_locks(conn))
     out["recovery"] = await recover_reservations(
         conn, account_id=account_id, venue_reader=venue_reader, now=at)
+    # AND XAVIER'S OWN UNANSWERED DISPATCH CLAIMS, answered only from the
+    # book's evidence (no intent names the decision -> nothing was sent; the
+    # intent reached an established state -> that state). The rest stay
+    # unresolved, gate their group and keep their exposure counted.
+    out["xavier_claim_recovery"] = await XV.recover_claims(
+        conn, account_id=account_id, venue=venue, at=at)
     if pair_inputs is None:
         return dict(out, ok=True, paired_anything=False,
                     refusal=R_NO_HELD_POSITION,
@@ -2571,7 +2613,13 @@ async def pass_once(conn, *, account_id: str, venue: str,
                     refusal=R_NO_HELD_POSITION,
                     why="nothing is held, so there is nothing to pair")
     groups = XV.two_leg_groups(held)
+    _group_lock = None
     for pos in held:
+        # THE PREVIOUS GROUP'S LOCK is released before the next position is
+        # looked at (every `continue` below lands here); the last one after
+        # the loop.
+        await XV.release_group_lock(conn, _group_lock)
+        _group_lock = None
         step: dict[str, Any] = {"intent_id": pos.get("intent_id"),
                                 "group_id": pos.get("portfolio_group_id")}
         out["considered"].append(step)
@@ -2592,14 +2640,76 @@ async def pass_once(conn, *, account_id: str, venue: str,
                 "intent_id")
             step["dispatched"] = None
             continue
+        # ── ONE REVIEW OF THE GROUP AT A TIME ────────────────────────
+        #
+        # decide -> record -> claim -> dispatch for this group runs under its
+        # advisory lock. A second review of the same group (another pass, on
+        # another connection) cannot take it and sends nothing: two reviews
+        # can then never commit conflicting actions for one group, and the
+        # leg reservations still stop one leg being claimed twice.
+        _group_lock = await XV.try_group_lock(conn, XV.group_key(pos))
+        step["group_lock"] = {k: _group_lock.get(k)
+                              for k in ("ok", "key", "refusal")}
+        if not _group_lock.get("ok"):
+            step["refusal"] = _group_lock.get("refusal")
+            step["dispatched"] = None
+            for _p in ([pos] + ([grp["HEDGE"]] if grp is not None else [])):
+                got = await xs.record_lock_refused(conn, _p, lock=_group_lock)
+                out["xavier"].append(got.get("brief") or got)
+            _group_lock = None
+            continue
+        # ── AND WHAT THE GROUP HOLDS NOW, NOT AT THE START OF THE PASS ──
+        #
+        # Another review may have acted on this group between the pass's
+        # snapshot and this lock. The positions, their responsibility and the
+        # group's orders in flight are re-read under the lock, and the
+        # decision is valued on these.
+        try:
+            _open_now = {str(p.get("intent_id")): p
+                         for p in await FB.open_entry_positions(
+                             conn, account_id=account_id, venue=venue)}
+        except Exception:                                      # noqa: BLE001
+            _open_now = None
+        if _open_now is not None:
+            if str(pos.get("intent_id")) not in _open_now:
+                step["refusal"] = XV.R_POSITION_CLOSED_BEFORE_REVIEW
+                step["dispatched"] = None
+                await xs.refresh(conn, [pos.get("intent_id")])
+                _r = xs.responsibility_of(pos.get("intent_id"))
+                if _r is not None:
+                    got = await xs.record_obligations_only(conn, _r)
+                    out["xavier"].append(got.get("brief") or got)
+                continue
+            pos = _open_now[str(pos.get("intent_id"))]
+            grp = (XV.two_leg_groups(list(_open_now.values())).get(gid)
+                   if gid else None)
+            if grp is not None and str(pos.get("intent_id")) == str(
+                    grp["HEDGE"].get("intent_id")):
+                # Its primary appeared after the snapshot: it is decided with
+                # that primary, never alone beside it.
+                step["refusal"] = XV.R_DECIDED_WITH_THE_GROUP
+                step["decided_with_group_primary"] = grp["PRIMARY"].get(
+                    "intent_id")
+                step["dispatched"] = None
+                continue
+        _leg_ids = [pos.get("intent_id")] + (
+            [grp["HEDGE"].get("intent_id")] if grp is not None else [])
+        step["responsibility_refresh"] = await xs.refresh(conn, _leg_ids)
+        _in_flight = await XV.group_quantities(conn, intent_ids=_leg_ids,
+                                               group_id=gid)
+        step["orders_in_flight"] = _in_flight.get("orders_in_flight")
+        _gate = XV.group_gate([xs.responsibility_of(i) for i in _leg_ids])
+        if _gate is not None:
+            step["group_gate"] = _gate
         facts = await pair_inputs(conn, pos, at=at)
         companion = None
         if grp is not None:
             hfacts = await pair_inputs(conn, grp["HEDGE"], at=at)
             companion = {"pos": grp["HEDGE"], "facts": hfacts}
             if facts and facts.get("ok"):
-                facts = XV.group_facts(facts, hfacts, primary=pos,
-                                       hedge=grp["HEDGE"])
+                facts = XV.group_facts(
+                    facts, hfacts, primary=pos, hedge=grp["HEDGE"],
+                    orders_in_flight=_in_flight.get("orders_in_flight"))
                 step["group"] = facts.get("group")
         if not facts or not facts.get("ok"):
             step["refusal"] = (facts or {}).get("refusal", R_NO_SECOND_CONTRACT)
@@ -2749,6 +2859,13 @@ async def pass_once(conn, *, account_id: str, venue: str,
         scope = await XV.filled_scope(conn, intent_id=str(pos.get("intent_id")),
                                       group_id=gid)
         step["filled_scope"] = scope
+        # THE QUANTITIES THIS DECISION IS VALUED ON: the residuals the pass
+        # uses, the filled scope the bound is conditional on, and the orders
+        # in flight read under the lock. Persisted on Xavier's record and
+        # compared again immediately before any send.
+        _valued = XV.valued_on(
+            positions=[pos] + ([grp["HEDGE"]] if grp is not None else []),
+            scope=scope, orders_in_flight=_in_flight.get("orders_in_flight"))
         # (The structure screens are NOT added to the decision options: each
         # option is splatted into `_price_indirect(**option)`, where an
         # unknown key raises TypeError and removes the hedge from the
@@ -2863,7 +2980,8 @@ async def pass_once(conn, *, account_id: str, venue: str,
             conn, pos=pos, facts=facts, dec=dec, step=step, ranking=ranking,
             admitted_all=admitted_all, acquisition_plans=acquisition_plans,
             option_refusals=option_refusals, screens=screens,
-            companion=companion, deferred_exits=deferred_exits)
+            companion=companion, deferred_exits=deferred_exits,
+            gate=_gate, valued=_valued)
         step["xavier"] = xr.get("brief") or {k: xr.get(k) for k in (
             "ok", "refusal", "error")}
         out["xavier"].append(step["xavier"])
@@ -2928,6 +3046,15 @@ async def pass_once(conn, *, account_id: str, venue: str,
             step["why_nothing_was_sent"] = (
                 "holding is the absence of an order. The decision is recorded "
                 "and no venue call is made, which is the action being taken")
+            continue
+        if xr.get("gate_blocked"):
+            # THE GROUP HAS AN ORDER IN FLIGHT OR UNRESOLVED: the winner is on
+            # the record with its plan, and nothing new is sent for the group
+            # until that order resolves.
+            step["refusal"] = XV.R_GROUP_ORDER_IN_FLIGHT
+            step["what_was_selected_instead"] = action
+            step["dispatched"] = None
+            step["why_nothing_was_sent"] = (_gate or {}).get("why")
             continue
         if action in LEDGER_EXIT_ACTIONS:
             # THE EXIT THE RANKING SELECTED, dispatched exactly as its plan
@@ -3002,6 +3129,11 @@ async def pass_once(conn, *, account_id: str, venue: str,
                 step["why_nothing_was_sent"] = (
                     "the dispatch claim was not taken (%s), so nothing is "
                     "sent" % claim.get("refusal"))
+                continue
+            # ── THE QUANTITIES, AGAIN, IMMEDIATELY BEFORE THE SEND ───
+            if await _changed_since_decided(conn, xs=xs, xr=xr, step=step,
+                                            valued=_valued, leg_ids=_leg_ids,
+                                            gid=gid, pos=pos):
                 continue
             # THE ORDER IS THE PLAN. Nothing downstream re-reads the selection
             # -- and it may not exist at all when the winner is an exit the
@@ -3116,6 +3248,11 @@ async def pass_once(conn, *, account_id: str, venue: str,
                             "nothing is reserved or sent"
                             % claim.get("refusal")))
             continue
+        # ── THE QUANTITIES, AGAIN, BEFORE THE LEG IS RESERVED OR SENT ──
+        if await _changed_since_decided(conn, xs=xs, xr=xr, step=step,
+                                        valued=_valued, leg_ids=_leg_ids,
+                                        gid=gid, pos=pos):
+            continue
         got = await acquire_second_leg(
             conn, operation_id=facts["operation_id"], group_id=gid,
             plan=acq_plan, expect_candidate_id=cid,
@@ -3135,6 +3272,7 @@ async def pass_once(conn, *, account_id: str, venue: str,
         out["acquisitions"].append(got)
         out["opened_anything"] = bool(out["opened_anything"]
                                       or got.get("submitted"))
+    await XV.release_group_lock(conn, _group_lock)
     return dict(out, ok=True,
                 paired_anything=bool(out["acquisitions"]),
                 what_remains_disabled=FX.disablements(),

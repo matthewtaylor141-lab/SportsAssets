@@ -284,6 +284,18 @@ async def test_scheduled_pass_compares_all_contracts_then_sends_only_the_persist
     monkeypatch.setattr(XV, "record_decision", xrecord)
     monkeypatch.setattr(XV, "claim_dispatch", xclaim)
     monkeypatch.setattr(XV, "record_dispatch", xevents)
+
+    # THE GROUP LOCK AND THE QUANTITY RE-READS, likewise: taken, and finding
+    # this harness's position unchanged under the lock and before the send.
+    async def xlock(conn, key):
+        return {"ok": True, "key": key, "refusal": None}
+
+    async def xquantities(conn, *, intent_ids, group_id=None):
+        return {"ok": True, "orders_in_flight": [],
+                "legs": {position["intent_id"]: {
+                    "residual": float(position["residual_qty"])}}}
+    monkeypatch.setattr(XV, "try_group_lock", xlock)
+    monkeypatch.setattr(XV, "group_quantities", xquantities)
     got = await C.pass_once(None, account_id="account", venue="PMUS",
                             pair_inputs=supplier, now=100)
     step = got["considered"][0]

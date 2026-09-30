@@ -180,6 +180,22 @@ def _substitute_xavier_persistence(monkeypatch):
     monkeypatch.setattr(XV, "claim_dispatch", _claim)
     monkeypatch.setattr(XV, "record_dispatch", _events)
 
+    # THE GROUP'S REVIEW LOCK AND ITS QUANTITY RE-READS are database reads,
+    # substituted for the same reason: the lock is taken, and both re-reads
+    # (under the lock, and immediately before the send) find the harness's
+    # own position row unchanged.
+    async def _lock(conn_, key):
+        return {"ok": True, "key": key, "refusal": None}
+
+    async def _quantities(conn_, *, intent_ids, group_id=None):
+        pos = _position()
+        return {"ok": True, "orders_in_flight": [],
+                "legs": {pos["intent_id"]: {
+                    "residual": float(pos["residual_qty"])}}}
+
+    monkeypatch.setattr(XV, "try_group_lock", _lock)
+    monkeypatch.setattr(XV, "group_quantities", _quantities)
+
 
 def _position(intent_id="fpi-1"):
     return {"intent_id": intent_id, "us_market_slug": "aec-slug",
