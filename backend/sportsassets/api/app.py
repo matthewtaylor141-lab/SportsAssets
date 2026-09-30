@@ -3863,9 +3863,17 @@ async def admin_funded_account_eligibility(
                         "why": type(exc).__name__}
 
     writers = CP.account_writers()
+    # THE FIELD `reconciliation_evidence` ACTUALLY RETURNS. This tested the
+    # evidence's `ok` key for True, a key that function never sets, so
+    # `eligible` was False for every account however clean -- a report that
+    # can only say no reports nothing. Evidence passes when it is usable
+    # (present, this account's, fresh and complete) AND passing; both are
+    # required. This route still only REPORTS: it unpauses nothing.
+    evidence_passes = (evidence.get("usable") is True
+                       and evidence.get("passes") is True)
     eligible = bool(row and str(row.get("status", "")).upper() == "ACTIVE"
                     and not row.get("paused")
-                    and evidence.get("ok") is True)
+                    and evidence_passes)
     return {
         "account_id": acct,
         "selected_for_assessment": acct is not None,
@@ -3888,7 +3896,7 @@ async def admin_funded_account_eligibility(
                 "the account is PAUSED" if row is not None
                 and row.get("paused") else None,
                 ("reconciliation: %s" % evidence.get("refusal"))
-                if evidence.get("ok") is not True else None,
+                if not evidence_passes else None,
             ) if r]),
         "and_a_one_position_rule_does_not_isolate_this_account": (
             "a limit of one concurrent position in THIS lane bounds what this "
@@ -3897,6 +3905,137 @@ async def admin_funded_account_eligibility(
         "this_route_is_read_only": {"method": "GET", "writes": 0,
                                     "venue_calls": 0},
     }
+
+
+# ── D5a: THE DISCREPANCY REPORT AND SETTLEMENT CORRECTIONS ────────────
+#
+# One contiguous block of NEW routes. None of them unpauses an account,
+# changes an accounting status, or submits anything to a venue.
+
+def _resolution_auth(route: str) -> dict:
+    """How a two-factor caller authenticated: WHICH factors were verified
+    (the dependencies ran before this), and the identity the resolution key
+    authenticates -- from configuration, never from the request body."""
+    return {"admin_token_verified": True, "resolution_key_verified": True,
+            "operator": (getattr(settings(), "funded_resolution_operator", "")
+                         or "").strip(),
+            "route": route}
+
+
+@app.post("/api/admin/funded-account-discrepancy-report",
+          dependencies=[Depends(require_admin)])
+async def admin_funded_account_discrepancy_report(response: Response,
+                                                  account_id: str = "",
+                                                  venue: str = "",
+                                                  by: str = "operator"
+                                                  ) -> dict:
+    """THE VENUE AND THE BOOK COMPARED IN BOTH DIRECTIONS, AND KEPT.
+
+    Runs the strict venue reads (balances, open orders, positions, the
+    account-wide activity walk), compares them with this system's book in
+    BOTH directions, keeps the report in the append-only history and writes
+    the latest-evidence key. The report -- balances included -- is returned
+    to the authenticated caller and is not logged.
+
+    IT DECIDES NOTHING: `would_be_eligible` is information, `pause_kept` is
+    always true, and nothing here unpauses an account, changes its accounting
+    status or places, modifies or cancels anything at the venue.
+    """
+    from .. import bettor_account_onboarding as ON
+    from .. import bettor_funded_activation as FA
+    from ..db import get_pool
+
+    response.headers["Cache-Control"] = "no-store"
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        if not account_id or not venue:
+            bound = FA._obj(await FA._state(conn, FA.ACCOUNT_KEY)) or {}
+            account_id = account_id or str(bound.get("account_id") or "")
+            venue = venue or str(bound.get("venue") or "")
+        if not account_id or not venue:
+            response.status_code = 409
+            return {"ok": False, "refusal": ON.R_NO_ACCOUNT_NAMED,
+                    "why": ("name the account and venue, or bind one first. "
+                            "A report on an unnamed account is not a check")}
+        rep = await ON.record_discrepancy_report(
+            conn, account_id=account_id, venue=venue, by=str(by or ""))
+    if not rep.get("ok"):
+        response.status_code = 409
+    return rep
+
+
+@app.get("/api/admin/funded-account-discrepancy-reports",
+         dependencies=[Depends(require_admin)])
+async def admin_funded_account_discrepancy_reports(
+        response: Response, account_id: str | None = None,
+        limit: int = 50) -> dict:
+    """THE REPORT HISTORY: ids, times and verdict fields -- not the bodies."""
+    from .. import bettor_account_onboarding as ON
+    from ..db import get_pool
+
+    response.headers["Cache-Control"] = "no-store"
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        return await ON.report_history(conn, account_id=account_id,
+                                       limit=int(limit))
+
+
+@app.post("/api/admin/funded-settlement-corrections/{intent_id}",
+          dependencies=[Depends(require_admin),
+                        Depends(require_resolution_key)])
+async def admin_book_funded_settlement_correction(intent_id: str,
+                                                  response: Response,
+                                                  body: dict | None = None
+                                                  ) -> dict:
+    """BOOK THE CORRECTION OF ONE SETTLED LEG THE VENUE HAS RE-SETTLED.
+
+    body: {recheck_id (the newest established DISAGREES re-read of the leg),
+           seen_recheck_sha (that re-read's sha, from GET
+           /api/admin/funded-settlement-corrections), confirm: <intent_id>,
+           statement (at least 20 characters: what was checked)}
+
+    The operator is the identity FUNDED_RESOLUTION_OPERATOR names -- the one
+    the resolution key authenticates -- never a name in the body. Books one
+    SETTLEMENT_CORRECTION delta, never a second SETTLEMENT; audited whether
+    accepted or refused. Nothing is submitted to any venue.
+    """
+    from .. import bettor_funded_corrections as FC
+    from ..db import get_pool
+
+    response.headers["Cache-Control"] = "no-store"
+    b = dict(body or {})
+    auth = _resolution_auth(
+        "POST /api/admin/funded-settlement-corrections/{intent_id}")
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        out = await FC.book_settlement_correction(
+            conn, intent_id=intent_id, recheck_id=b.get("recheck_id"),
+            operator=auth["operator"], statement=b.get("statement"),
+            seen_recheck_sha=b.get("seen_recheck_sha"),
+            confirm=b.get("confirm"), auth=auth)
+    if not out.get("ok"):
+        response.status_code = 409
+    return out
+
+
+@app.get("/api/admin/funded-settlement-corrections",
+         dependencies=[Depends(require_admin)])
+async def admin_funded_settlement_corrections(
+        response: Response, intent_id: str | None = None) -> dict:
+    """EVERY BOOKED CORRECTION, EVERY ATTEMPT, and every contested leg still
+    awaiting one -- with the re-read sha a correction must cite. A read."""
+    from .. import bettor_funded_corrections as FC
+    from ..db import get_pool
+
+    response.headers["Cache-Control"] = "no-store"
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        out = await FC.listing(conn, intent_id=intent_id)
+    out["resolution_key_configured"] = bool(
+        (getattr(settings(), "funded_resolution_key", "") or "").strip()
+        and (getattr(settings(), "funded_resolution_operator", "")
+             or "").strip())
+    return out
 
 
 @app.get("/api/admin/funded-account-registry",

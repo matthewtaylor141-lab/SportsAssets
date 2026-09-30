@@ -376,15 +376,27 @@ async def account_selection(conn, account_id: str) -> dict:
                                 for k, v in c.items()} for c in contested],
                     why=("%d settled leg(s) were booked on a reading the "
                          "venue no longer gives. The booked figures are not "
-                         "rewritten by a re-read; until they are reconciled "
-                         "this account takes no new exposure. Exits are not "
-                         "gated on this" % len(contested)))
+                         "rewritten by a re-read; until a correction is "
+                         "booked by an authenticated, audited decision (POST "
+                         "/api/admin/funded-settlement-corrections/"
+                         "{intent_id}) or the venue reverts, this account "
+                         "takes no new exposure. Exits are not gated on this"
+                         % len(contested)))
     return dict(out, ok=True, account_id=ident,
                 accounting_status=st)
 
 
 #: Legs of this account whose newest ESTABLISHED settlement re-read disagrees
-#: with what was booked (migration 141).
+#: with what was booked (migration 141) and that no booked correction answers
+#: (migration 145).
+#:
+#: A CORRECTION ANSWERS EXACTLY THE RE-READ IT NAMES, and it may only name the
+#: newest established one (`bettor_funded_corrections`). Booking it makes the
+#: corrected reading the booked one, so the next re-read is compared against
+#: the correction: a LATER established re-read that disagrees with it is a new,
+#: unanswered disagreement and contests the account again. The corrections
+#: table is read unconditionally -- a database without it cannot say whether a
+#: disagreement was answered, and `account_selection` refuses on that error.
 CONTESTED_SQL = """
     SELECT intent_id, booked_reading, booked_payout_price, venue_reading,
            venue_payout_price, read_at
@@ -394,6 +406,10 @@ CONTESTED_SQL = """
              WHERE i.account_id = $1 AND r.verdict <> 'NOT_ESTABLISHED'
              ORDER BY r.intent_id, r.read_at DESC, r.recheck_id DESC) newest
      WHERE verdict = 'DISAGREES'
+       AND NOT EXISTS (
+           SELECT 1 FROM bettor_funded_settlement_corrections c
+            WHERE c.recheck_id = newest.recheck_id
+              AND c.intent_id = newest.intent_id)
 """
 
 
