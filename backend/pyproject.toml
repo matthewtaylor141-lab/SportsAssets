@@ -31,10 +31,21 @@ dependencies = [
     # its backend) and speaks REST through requests
     "PyJWT>=2.7",
     "requests>=2.31",
+    # Audrey's management chat (sportsassets/agents/audrey_chat.py) calls the
+    # Claude API through the OFFICIAL SDK. 1.9.0 is the release the adapter
+    # was built and tested against (verified on the package index
+    # 2026-09-30); 1.x moved the SDK's HTTP layer to httpx2 (the SDK's own
+    # dependency, the maintained fork of httpx by its original author,
+    # published by Pydantic), which arrives transitively. The SDK is used only
+    # when ANTHROPIC_API_KEY is provisioned; without it the chat answers from
+    # records and says so.
+    "anthropic>=1.9.0,<2",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "ruff>=0.5", "pglast>=6"]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "ruff>=0.5", "pglast>=6",
+       # the Audrey chat tests drive the real SDK over httpx2.MockTransport
+       "httpx2>=2.0"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
