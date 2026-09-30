@@ -810,7 +810,9 @@ export function mount(stage, opts) {
     S.brow = instant ? browT : damp(S.brow, browT + emph, 0.2, dt);
     for (const b of rig.brows) { b.g.position.y = b.y0 + S.brow; b.g.rotation.z = (m === 'reviewing' ? 0.12 : 0.0) * b.s * -1; }
     // mouth: speaking only while a reply renders
-    const jawT = (m === 'speaking' && !instant) ? (0.5 + 0.5 * Math.sin(T * 17.0) * Math.sin(T * 5.3)) * 0.085 * (0.6 + 0.4 * Math.max(0, Math.sin(T * 1.3))) : 0.0;
+    // RENDERED TEXT IS NOT SPEECH: the mouth moves only with real audio
+    // (the 'cc:speech' amplitude hook); a chat reply alone keeps it closed
+    const jawT = (S.speech && !off && !instant) ? clamp(S.speech, 0, 1) * 0.085 : 0.0;
     S.jaw = instant ? jawT : damp(S.jaw, jawT, 0.04, dt);
     rig.jaw.rotation.x = S.jaw;
     // hair sway (restrained)
@@ -891,6 +893,8 @@ export function mount(stage, opts) {
     if (reduced || S.paused) still(); else { S.lastT = 0; schedule(); }
   }
   const onMode = (e) => setMode(e.detail && e.detail.mode);
+  const onSpeech = (e) => { S.speech = e.detail && typeof e.detail.amplitude === 'number' ? e.detail.amplitude : 0; if (S.speech) schedule(); };
+  window.addEventListener('cc:speech', onSpeech);
   const onPause = (e) => { S.paused = !!(e.detail && e.detail.paused); if (S.paused) { if (raf) cancelAnimationFrame(raf); raf = 0; } else { S.lastT = 0; schedule(); } };
   const onVis = () => { S.lastT = 0; schedule(); };
   window.addEventListener('cc:mode', onMode);

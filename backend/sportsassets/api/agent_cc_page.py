@@ -120,7 +120,7 @@ body[data-cc-mode=unavailable] .cc-banner{display:block}
 .cc-st{position:absolute;left:0;right:0;bottom:0;padding:14px 18px;display:flex;flex-wrap:wrap;gap:8px 14px;align-items:center;background:linear-gradient(0deg,rgba(4,6,9,.9),rgba(4,6,9,0));font:12px/1.35 var(--mono);color:var(--ink-2)}
 .cc-st .anim{color:var(--ink)}.cc-st .anim b{color:var(--acc-2)}
 .cc-ctl{position:absolute;right:14px;top:14px;display:flex;gap:6px}
-.cc-real-model .cc-placeholder{display:none}
+.cc-real-model .cc-placeholder{display:none}.cc-real-model.cc-candidate .cc-placeholder{display:block}
 .cc-placeholder{position:absolute;right:14px;top:52px;z-index:2;font:700 10.5px/1.3 var(--mono);letter-spacing:.08em;color:#1a1204;background:var(--warn);padding:5px 8px;border-radius:6px;pointer-events:none}
 .cc-ctl button{background:rgba(6,8,12,.7);border-color:var(--line-2);font-size:11.5px;padding:6px 9px}
 .cc-brief{display:flex;flex-direction:column;gap:12px}
@@ -404,6 +404,17 @@ def chat_panel_html(base_chat_panel: str) -> str:
     return base_chat_panel.replace(
         '<div class="chatlog" id="chat-log"',
         _provider_banner() + sugg + '<div class="chatlog" id="chat-log"', 1)
+
+
+def credit_html(asset: dict) -> str:
+    """The model's attribution in the page footer (licensed models only)."""
+    if not asset.get("model") or not asset.get("credit"):
+        return ""
+    lic = asset.get("license") or {}
+    return (' <span class="cc-credit" data-credit>%s. Licence: %s, shipped with the '
+            'model as %s.</span>' % (_html.escape(asset["credit"]),
+                                    _html.escape(str(lic.get("spdx"))),
+                                    _html.escape(str(lic.get("file", "")).rsplit("/", 1)[-1])))
 
 
 def nav_html(current: str, page_paths: dict) -> str:

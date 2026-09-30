@@ -32,21 +32,21 @@ export const VERSION = 'CC_AVATAR_PIPELINE_V1';
 export const HEAD_TURN_LIMIT_RAD = 12 * Math.PI / 180;
 export const BLINK_MIN_S = 2, BLINK_MAX_S = 6, BLINK_S = 0.15;
 
-// ── skeleton roles: Mixamo, VRM / humanoid and common exporter names ──
+// ── skeleton roles: Mixamo, VRM / humanoid, 3ds Max Biped (Rocketbox) ──
 export const BONE_ROLES = {
-  hips: ['mixamorigHips', 'Hips', 'hips', 'J_Bip_C_Hips', 'pelvis', 'Pelvis'],
-  spine: ['mixamorigSpine', 'Spine', 'spine', 'J_Bip_C_Spine', 'spine_01'],
-  chest: ['mixamorigSpine2', 'mixamorigSpine1', 'UpperChest', 'Chest', 'upperChest', 'chest', 'J_Bip_C_UpperChest', 'J_Bip_C_Chest', 'spine_03', 'spine_02', 'Spine2', 'Spine1'],
-  neck: ['mixamorigNeck', 'Neck', 'neck', 'J_Bip_C_Neck', 'neck_01'],
-  head: ['mixamorigHead', 'Head', 'head', 'J_Bip_C_Head'],
-  leftEye: ['mixamorigLeftEye', 'LeftEye', 'leftEye', 'J_Adj_L_FaceEye', 'eye_L', 'Eye_L'],
-  rightEye: ['mixamorigRightEye', 'RightEye', 'rightEye', 'J_Adj_R_FaceEye', 'eye_R', 'Eye_R'],
-  leftShoulder: ['mixamorigLeftShoulder', 'LeftShoulder', 'leftShoulder', 'J_Bip_L_Shoulder', 'clavicle_l'],
-  rightShoulder: ['mixamorigRightShoulder', 'RightShoulder', 'rightShoulder', 'J_Bip_R_Shoulder', 'clavicle_r'],
-  leftUpperArm: ['mixamorigLeftArm', 'LeftUpperArm', 'LeftArm', 'leftUpperArm', 'J_Bip_L_UpperArm', 'upperarm_l'],
-  rightUpperArm: ['mixamorigRightArm', 'RightUpperArm', 'RightArm', 'rightUpperArm', 'J_Bip_R_UpperArm', 'upperarm_r'],
-  leftLowerArm: ['mixamorigLeftForeArm', 'LeftLowerArm', 'LeftForeArm', 'leftLowerArm', 'J_Bip_L_LowerArm', 'lowerarm_l'],
-  rightLowerArm: ['mixamorigRightForeArm', 'RightLowerArm', 'RightForeArm', 'rightLowerArm', 'J_Bip_R_LowerArm', 'lowerarm_r'],
+  hips: ['Bip01 Pelvis', 'mixamorigHips', 'Hips', 'hips', 'J_Bip_C_Hips', 'pelvis', 'Pelvis'],
+  spine: ['Bip01 Spine', 'mixamorigSpine', 'Spine', 'spine', 'J_Bip_C_Spine', 'spine_01'],
+  chest: ['Bip01 Spine2', 'Bip01 Spine1', 'mixamorigSpine2', 'mixamorigSpine1', 'UpperChest', 'Chest', 'upperChest', 'chest', 'J_Bip_C_UpperChest', 'J_Bip_C_Chest', 'spine_03', 'spine_02', 'Spine2', 'Spine1'],
+  neck: ['Bip01 Neck', 'mixamorigNeck', 'Neck', 'neck', 'J_Bip_C_Neck', 'neck_01'],
+  head: ['Bip01 Head', 'mixamorigHead', 'Head', 'head', 'J_Bip_C_Head'],
+  leftEye: ['Bip01 LEye', 'mixamorigLeftEye', 'LeftEye', 'leftEye', 'J_Adj_L_FaceEye', 'eye_L', 'Eye_L'],
+  rightEye: ['Bip01 REye', 'mixamorigRightEye', 'RightEye', 'rightEye', 'J_Adj_R_FaceEye', 'eye_R', 'Eye_R'],
+  leftShoulder: ['Bip01 L Clavicle', 'mixamorigLeftShoulder', 'LeftShoulder', 'leftShoulder', 'J_Bip_L_Shoulder', 'clavicle_l'],
+  rightShoulder: ['Bip01 R Clavicle', 'mixamorigRightShoulder', 'RightShoulder', 'rightShoulder', 'J_Bip_R_Shoulder', 'clavicle_r'],
+  leftUpperArm: ['Bip01 L UpperArm', 'mixamorigLeftArm', 'LeftUpperArm', 'LeftArm', 'leftUpperArm', 'J_Bip_L_UpperArm', 'upperarm_l'],
+  rightUpperArm: ['Bip01 R UpperArm', 'mixamorigRightArm', 'RightUpperArm', 'RightArm', 'rightUpperArm', 'J_Bip_R_UpperArm', 'upperarm_r'],
+  leftLowerArm: ['Bip01 L Forearm', 'mixamorigLeftForeArm', 'LeftLowerArm', 'LeftForeArm', 'leftLowerArm', 'J_Bip_L_LowerArm', 'lowerarm_l'],
+  rightLowerArm: ['Bip01 R Forearm', 'mixamorigRightForeArm', 'RightLowerArm', 'RightForeArm', 'rightLowerArm', 'J_Bip_R_LowerArm', 'lowerarm_r'],
 };
 export const REQUIRED_ROLES = ['hips', 'spine', 'chest', 'neck', 'head'];
 
@@ -64,7 +64,26 @@ export const ARKIT_52 = [
   'mouthSmileRight', 'mouthStretchLeft', 'mouthStretchRight', 'mouthUpperUpLeft', 'mouthUpperUpRight',
   'noseSneerLeft', 'noseSneerRight', 'tongueOut'];
 
+// the Oculus/Meta 15-viseme set (Rocketbox "AA_VI_10_aa", VRM "aa", ...)
+export const VISEMES = ['sil', 'PP', 'FF', 'TH', 'DD', 'kk', 'CH', 'SS', 'nn', 'RR', 'aa', 'E', 'I', 'O', 'U'];
+
+/** Viseme morph targets by viseme id. */
+export function resolveVisemes(root) {
+  const found = {};
+  root.traverse((o) => {
+    const dict = o.morphTargetDictionary;
+    if (!dict || !o.morphTargetInfluences) return;
+    for (const k of Object.keys(dict)) {
+      const m = /(?:^|[._])(?:VI_\d\d_|viseme_?)(sil|pp|ff|th|dd|kk|ch|ss|nn|rr|aa|e|i|o|u)$/i.exec(k.split('.').pop());
+      if (m) { const id = VISEMES.find((v) => v.toLowerCase() === m[1].toLowerCase()); (found[id] = found[id] || []).push({mesh: o, index: dict[k]}); }
+    }
+  });
+  return found;
+}
+
 const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+// a vendor's ordering code before the ARKit name ("AK_09_EyeBlinkLeft") is not part of the name
+const bare = (s) => norm(String(s || '').split('.').pop()).replace(/^[a-z]{2}\d{2}/, '');
 
 /** Bones by role. `overrides` maps role -> exact bone name. */
 export function resolveBones(root, overrides = {}) {
@@ -88,7 +107,7 @@ export function resolveBlendshapes(root, overrides = {}) {
     for (const a of ARKIT_52) {
       const want = overrides[a] !== undefined ? [String(overrides[a])] : [a];
       for (const w of want) {
-        const k = keys.find((x) => x === w || norm(x) === norm(w) || norm(x.split('.').pop()) === norm(w));
+        const k = keys.find((x) => x === w || norm(x) === norm(w) || norm(x.split('.').pop()) === norm(w) || (overrides[a] === undefined && bare(x) === norm(w)));
         if (k !== undefined) (found[a] = found[a] || []).push({mesh: o, index: dict[k]});
       }
     }
@@ -118,7 +137,13 @@ export class AvatarController {
     this.posture = 0; this.postureTarget = 0; this.nextPosture = 4 + 4 * this.rand();
     this.still = false;
     this.stats = {blinks: 0, saccades: 0, maxHeadYaw: 0, maxBreath: 0, speechFrames: 0, postureShifts: 0};
+    this.visemes = opts.visemes || {};
+    this.speech = null;             // {amplitude 0..1} or {viseme, weight}, from audio only
   }
+  /** SPEECH COMES FROM AUDIO, NEVER FROM RENDERED TEXT. The page's audio
+   *  hook (attachAudio, or a 'cc:speech' event carrying amplitude or a
+   *  viseme) sets this each frame; with none, the mouth stays closed. */
+  setSpeech(s) { this.speech = s && (typeof s.amplitude === 'number' || s.viseme) ? s : null; if (this.speech) this.still = false; }
   _blinkGap() { return BLINK_MIN_S + (BLINK_MAX_S - BLINK_MIN_S) * this.rand(); }
   setMode(m) { if (m && m !== this.mode) { this.mode = m; this.still = false; this.lookAt = 0; } }
   setSpeaking(on) { this.speaking = !!on; this.still = false; }
@@ -168,14 +193,16 @@ export class AvatarController {
     this._rot('spine', breath * 0.5, 0, this.posture * 0.5);
     this._rot('chest', breath, 0, -this.posture * 0.3);
     this._rot('hips', 0, 0, this.posture * 0.4);
-    // speech blendshapes while a chat reply renders (Audrey)
-    const talk = !off && (this.speaking || this.mode === 'speaking');
-    const j = talk ? (0.5 + 0.5 * Math.sin(T * 15.7) * Math.sin(T * 4.9)) * 0.55 : 0;
+    // speech: the mouth follows REAL audio (amplitude or visemes) only
+    const sp = off ? null : this.speech;
+    const amp = sp && typeof sp.amplitude === 'number' ? clamp(sp.amplitude, 0, 1) : 0;
+    for (const id of Object.keys(this.visemes)) for (const v of this.visemes[id]) v.mesh.morphTargetInfluences[v.index] = sp && sp.viseme === id ? clamp(sp.weight ?? 1, 0, 1) : 0;
+    const talk = !!sp;
     if (talk) this.stats.speechFrames++;
-    this._shape('jawOpen', j); this._shape('mouthFunnel', talk ? 0.2 * Math.max(0, Math.sin(T * 3.1)) : 0);
+    this._shape('jawOpen', amp * 0.6); this._shape('mouthFunnel', 0);
     this._shape('mouthClose', talk ? 0 : 0.05);
     this._shape('mouthSmileLeft', off ? 0 : 0.12); this._shape('mouthSmileRight', off ? 0 : 0.12);
-    this._shape('browInnerUp', this.mode === 'reviewing' ? 0.25 : talk ? 0.15 * Math.max(0, Math.sin(T * 1.7)) : 0);
+    this._shape('browInnerUp', this.mode === 'reviewing' ? 0.25 : (this.mode === 'speaking' || this.speaking) ? 0.12 : 0);
     // an offline agent settles, then stays still
     if (off && Math.abs(this.head.yaw) < 1e-3 && Math.abs(this.head.pitch - this.look.pitch * 0.6) < 1e-3 && Math.abs(this.posture) < 1e-3) this.still = true;
     return !this.still;
@@ -255,7 +282,8 @@ export async function mountAvatar(stage, cfg, opts = {}) {
   root.updateMatrixWorld(true);
   const {bones, source, missing} = resolveBones(root, cfg.bones || {});
   const bs = resolveBlendshapes(root, cfg.blendshapes || {});
-  const ctl = new AvatarController(bones, bs.shapes, {mode: document.body.getAttribute('data-cc-mode') || 'unavailable', seed: 11});
+  const vis = resolveVisemes(root);
+  const ctl = new AvatarController(bones, bs.shapes, {mode: document.body.getAttribute('data-cc-mode') || 'unavailable', seed: 11, visemes: vis});
   // framing from the head bone (or the model bounds)
   const box = new THREE.Box3().setFromObject(root);
   const size = box.getSize(new THREE.Vector3());
@@ -286,14 +314,37 @@ export async function mountAvatar(stage, cfg, opts = {}) {
   const go = () => { if (!raf && !reduced && !paused && !document.hidden) { last = 0; raf = requestAnimationFrame(tick); } };
   window.addEventListener('cc:mode', (e) => { ctl.setMode(e.detail && e.detail.mode); if (reduced) { ctl.update(1 / 60); renderer.render(scene, camera); } else go(); });
   window.addEventListener('cc:speak', (e) => { ctl.setSpeaking(e.detail && e.detail.on); go(); });
+  // THE AUDIO HOOK: {amplitude} or {viseme, weight} per frame from a TTS or
+  // audio pipeline; attachAudio() derives amplitude from a media element
+  window.addEventListener('cc:speech', (e) => { ctl.setSpeech(e.detail); go(); });
   window.addEventListener('cc:pause', (e) => { paused = !!(e.detail && e.detail.paused); if (!paused) go(); });
   document.addEventListener('visibilitychange', go);
   if (window.ResizeObserver) new ResizeObserver(() => { resize(); if (reduced) renderer.render(scene, camera); }).observe(stage);
   ctl.update(1 / 60); renderer.render(scene, camera);
   stage.classList.add('cc-3d-on', 'cc-real-model');
+  const tag = stage.querySelector('[data-placeholder]');
+  if (cfg.candidate_label && tag) { tag.textContent = cfg.candidate_label; stage.classList.add('cc-candidate'); }
   stage.setAttribute('data-cc-3d', reduced ? 'static' : 'on');
   stage.setAttribute('data-cc-model', cfg.model);
-  window.__ccAvatar = {controller: ctl, bones: source, missing, blendshapes: bs.names, blendshapesMissing: bs.missing.length, camera, root};
+  window.__ccAvatar = {controller: ctl, bones: source, missing, blendshapes: bs.names, blendshapesMissing: bs.missing.length,
+    visemes: Object.keys(vis), camera, root, renderer, scene, render: () => renderer.render(scene, camera)};
   go();
   return window.__ccAvatar;
+}
+
+/** Drive the mouth from a playing audio element (WebAudio RMS amplitude). */
+export function attachAudio(mediaElement) {
+  const AC = window.AudioContext || window.webkitAudioContext;
+  const ctx = new AC(), src = ctx.createMediaElementSource(mediaElement), an = ctx.createAnalyser();
+  an.fftSize = 1024; src.connect(an); an.connect(ctx.destination);
+  const buf = new Float32Array(an.fftSize); let on = true;
+  const step = () => {
+    if (!on) return;
+    an.getFloatTimeDomainData(buf); let s = 0; for (const v of buf) s += v * v;
+    const amp = Math.min(1, Math.sqrt(s / buf.length) * 6);
+    window.dispatchEvent(new CustomEvent('cc:speech', {detail: mediaElement.paused ? null : {amplitude: amp}}));
+    requestAnimationFrame(step);
+  };
+  step();
+  return () => { on = false; window.dispatchEvent(new CustomEvent('cc:speech', {detail: null})); ctx.close(); };
 }

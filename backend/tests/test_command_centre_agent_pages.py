@@ -1034,15 +1034,16 @@ def test_the_controller_blinks_breathes_turns_speaks_and_stills_offline():
         maxChest = Math.max(maxChest, Math.abs(bones.chest.rotation.x));
         jawBefore = Math.max(jawBefore, mesh.morphTargetInfluences[2]);
       }
-      c.setSpeaking(true); for (let i = 0; i < 180; i++) { c.update(dt); jawDuring = Math.max(jawDuring, mesh.morphTargetInfluences[2]); }
-      c.setSpeaking(false); c.update(dt); jawAfter = mesh.morphTargetInfluences[2];
+      c.setSpeaking(true); let jawTextOnly = 0; for (let i = 0; i < 120; i++) { c.update(dt); jawTextOnly = Math.max(jawTextOnly, mesh.morphTargetInfluences[2]); }
+      for (let i = 0; i < 180; i++) { c.setSpeech({amplitude: 0.5 + 0.5 * Math.sin(i / 5)}); c.update(dt); jawDuring = Math.max(jawDuring, mesh.morphTargetInfluences[2]); }
+      c.setSpeech(null); c.setSpeaking(false); c.update(dt); jawAfter = mesh.morphTargetInfluences[2];
       const hipsPos = bones.hips.position.toArray();
       c.setMode('unavailable'); let n = 0; while (c.update(dt) && n < 60 * 60) n++;
       const frozen = JSON.stringify(names.map((k) => bones[k].rotation.toArray()));
       const again = c.update(dt);
       return {blinks: c.stats.blinks, runs, maxYawDeg: c.stats.maxHeadYaw * 180 / Math.PI, maxBreath: c.stats.maxBreath,
               maxChest, saccades: c.stats.saccades, postures: c.stats.postureShifts, jawBefore, jawDuring, jawAfter,
-              hipsPos, settledIn: n * dt, again, unchanged: frozen === JSON.stringify(names.map((k) => bones[k].rotation.toArray())),
+              hipsPos, jawTextOnly, settledIn: n * dt, again, unchanged: frozen === JSON.stringify(names.map((k) => bones[k].rotation.toArray())),
               offBlink: mesh.morphTargetInfluences[0]};
     """)
     assert 20 <= got["blinks"] <= 60, got["blinks"]                      # every 2-6 s over 120 s
@@ -1052,7 +1053,9 @@ def test_the_controller_blinks_breathes_turns_speaks_and_stills_offline():
     assert 0.004 <= got["maxBreath"] <= 0.006                             # milliradians, not bobbing
     assert got["maxChest"] < 0.02 and got["hipsPos"] == [0, 0, 0]
     assert got["saccades"] > 20 and got["postures"] >= 5
-    assert got["jawBefore"] == 0 and got["jawDuring"] > 0.2 and got["jawAfter"] == 0
+    assert got["jawBefore"] == 0 and got["jawAfter"] == 0
+    assert got["jawTextOnly"] == 0                  # a rendered reply alone is not speech
+    assert got["jawDuring"] > 0.2                   # real audio amplitude moves the jaw
     assert got["settledIn"] < 30 and got["again"] is False and got["unchanged"] is True
     assert got["offBlink"] == 0.45                                         # eyes lowered, still
 
@@ -1077,15 +1080,25 @@ def test_test_assets_are_licensed_recorded_and_never_shipped():
         lic = (GLTF_TEST / (name + ".LICENSE.md")).read_text()
         assert 'SPDX license identifier: "%s"' % spdx in lic
         assert who in (GLTF_TEST / (name + ".README.md")).read_text()
-    shipped = [p for p in STATIC.rglob("*") if p.suffix in (".glb", ".gltf")]
-    assert shipped == [], shipped
+    # what IS shipped is a licensed manifest entry, never a test asset
+    shipped = sorted(p.name for p in STATIC.rglob("*") if p.suffix in (".glb", ".gltf"))
+    listed = json.loads((STATIC / "models" / "manifest.json").read_text())["characters"]
+    admitted = sorted(e["model"] for e in listed.values() if e.get("model") and e.get("test_asset") is False)
+    assert shipped == admitted, (shipped, admitted)
+    test_bytes = {(GLTF_TEST / f).read_bytes() for f in ("RiggedFigure.glb", "AnimatedMorphCube.glb")}
+    assert not any((STATIC / "models" / n).read_bytes() in test_bytes for n in shipped)
 
 
 def test_the_manifest_admits_only_complete_licensed_non_test_models(monkeypatch, tmp_path):
     for k in KINDS:
         a = P.character_asset(k)
-        assert a["model"] is None and a["why"]                    # nothing licensed in this build
         assert a["framing"] in ("face", "chest", "waist") and a["lighting"].startswith("cinematic_")
+        if k == "derek":                                          # the Rocketbox candidate
+            assert a["model"] == "/api/command/agents/static/models/derek_candidate.glb"
+            assert a["license"]["spdx"] == "MIT" and "Rocketbox" in a["license"]["from"]
+            assert a["candidate_label"] == "CANDIDATE MODEL (Rocketbox, MIT) — under evaluation"
+        else:
+            assert a["model"] is None and a["why"]                # still the tagged placeholder
     shutil.copy(GLTF_TEST / "RiggedFigure.glb", tmp_path / "derek.glb")
     (tmp_path / "derek.LICENSE.txt").write_text("licence text")
     entry = {"model": "derek.glb", "license_file": "derek.LICENSE.txt", "license_spdx": "LicenseRef-Test",
@@ -1133,3 +1146,50 @@ def test_the_loader_prefers_a_licensed_model_and_falls_back_to_the_placeholder()
                  "ACESFilmicToneMapping", "studioEnvironment", "setMeshoptDecoder", "window.__ccFps"):
         assert need in src, need
     assert "fetch(" not in src and "/api/" not in src
+
+
+
+def test_the_rocketbox_derek_candidate_carries_what_the_pipeline_needs():
+    """The converted model's own names, and the pipeline resolving them."""
+    import struct
+    glb = (STATIC / "models" / "derek_candidate.glb").read_bytes()
+    assert glb[:4] == b"glTF" and len(glb) < 8_000_000
+    n = struct.unpack("<I", glb[12:16])[0]
+    j = json.loads(glb[20:20 + n])
+    targets = j["meshes"][0]["extras"]["targetNames"]
+    joints = [j["nodes"][i]["name"] for i in j["skins"][0]["joints"]]
+    assert len(targets) == 175 and len(joints) == 80
+    assert "EXT_meshopt_compression" in j["extensionsUsed"]
+    assert {m["name"] for m in j["materials"]} == {"m002_body", "m002_head", "m002_opacity"}
+    assert all(m["pbrMetallicRoughness"].get("metallicRoughnessTexture") and m.get("normalTexture") for m in j["materials"])
+    lic = (STATIC / "models" / "ROCKETBOX_LICENSE.md").read_text()
+    assert lic.startswith("MIT License") and "Copyright (c) 2020 Microsoft" in lic
+    got = _node_mjs("""
+      const targets = %s, joints = %s;
+      const root = new THREE.Group(); for (const n of joints) { const b = new THREE.Bone(); b.name = n.replace(/ /g, '_'); root.add(b); }
+      const m = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1)); m.morphTargetDictionary = {}; targets.forEach((t, i) => { m.morphTargetDictionary[t] = i; });
+      m.morphTargetInfluences = targets.map(() => 0); root.add(m);
+      const b = av.resolveBones(root), s = av.resolveBlendshapes(root), v = av.resolveVisemes(root);
+      return {missing: b.missing, source: b.source, arkit: s.names.length, arkitMissing: s.missing, blink: s.shapes.eyeBlinkLeft.map((x) => targets[x.index]), visemes: Object.keys(v).sort()};
+    """ % (json.dumps(targets), json.dumps(joints)))
+    assert got["missing"] == []
+    assert got["source"]["head"] == "Bip01_Head" and got["source"]["chest"] == "Bip01_Spine2"
+    assert got["source"]["leftEye"] == "Bip01_LEye"
+    assert got["arkit"] == 52 and got["arkitMissing"] == []
+    assert got["blink"] == ["AK_09_EyeBlinkLeft"]
+    assert got["visemes"] == sorted(["sil", "PP", "FF", "TH", "DD", "kk", "CH", "SS", "nn", "RR", "aa", "E", "I", "O", "U"])
+
+
+def test_the_candidate_is_labelled_and_credited_on_the_derek_page(monkeypatch):
+    c, _ = _client(monkeypatch)
+    html = c.get(P.PAGE_PATHS["derek"], headers={"X-Admin-Token": _Cfg.admin_token}).text
+    assert "derek_candidate.glb" in html and "CANDIDATE MODEL (Rocketbox, MIT)" in html
+    assert "Character model: Microsoft Rocketbox Male_Adult_01 (MIT, © 2020 Microsoft)" in html
+    assert ".cc-real-model.cc-candidate .cc-placeholder{display:block}" in html
+    r = c.get("/api/command/agents/static/models/derek_candidate.glb", headers={"X-Admin-Token": _Cfg.admin_token})
+    assert r.status_code == 200 and r.headers["content-type"] == "model/gltf-binary"
+    lic = c.get("/api/command/agents/static/models/ROCKETBOX_LICENSE.md", headers={"X-Admin-Token": _Cfg.admin_token})
+    assert lic.status_code == 200 and "Copyright (c) 2020 Microsoft" in lic.text
+    for k in ("xavier", "audrey"):
+        h = c.get(P.PAGE_PATHS[k], headers={"X-Admin-Token": _Cfg.admin_token}).text
+        assert "Rocketbox" not in h and CCP.PLACEHOLDER_TAG in h

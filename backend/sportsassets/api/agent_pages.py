@@ -1798,7 +1798,7 @@ _CC_SHELL = r"""<!doctype html>
 <p class="note">Follows the ids the records carry (entry_intent_id, portfolio_group_id, xavier_decision_id, directive_id, task_id, candidate_id, and evidence references) across the four same-origin reads. Every step says what linked it.</p><div id="trace-body"></div></section>
 <h2 class="cc-h2" id="full-record">Full workspace record</h2>
 <div id="app"><p class="boot">Reading %%ENDPOINT%% &#8230;</p></div></main>
-<p class="foot">Presentation of recorded state. This page sends no order and holds no credential; it reads %%ENDPOINT%% with the COMMAND session. The character is an original stylised illustration of an AI agent; its pose follows the agent_status record and never stands in for data. UNKNOWN is not zero; EMPTY is not success.</p>
+<p class="foot">Presentation of recorded state. This page sends no order and holds no credential; it reads %%ENDPOINT%% with the COMMAND session. The character is an original stylised illustration of an AI agent; its pose follows the agent_status record and never stands in for data. UNKNOWN is not zero; EMPTY is not success.%%CREDIT%%</p>
 <script>%%JS%%</script>
 <script type="module">%%LOADER%%</script></body></html>"""
 
@@ -1824,6 +1824,7 @@ def _cc_page_html(kind: str) -> str:
             .replace("%%STAGE%%", CCP.stage_html(kind, ENDPOINTS[kind], character_asset(kind)))
             .replace("%%BRIEF%%", CCP.brief_html(kind))
             .replace("%%PANELS%%", CCP.panels_html(kind, chat))
+            .replace("%%CREDIT%%", CCP.credit_html(character_asset(kind)))
             .replace("%%ENDPOINT%%", ENDPOINTS[kind])
             .replace("%%TITLE%%", _PAGE_TITLES[kind])
             .replace("%%ROLE%%", CCP.CC_META[kind]["role"].replace("&", "&amp;"))
@@ -1986,7 +1987,8 @@ def character_asset(kind: str) -> dict:
     the reason (and the procedural placeholder is shown, tagged)."""
     e = dict((_manifest().get("characters") or {}).get(kind) or {})
     base = {k: e.get(k) for k in ("framing", "lighting", "yaw", "scale",
-                                  "bones", "blendshapes") if e.get(k) is not None}
+                                  "bones", "blendshapes", "candidate_label",
+                                  "credit") if e.get(k) is not None}
     why = None
     if not e.get("model"):
         why = e.get("why_absent") or "no model in the manifest"
