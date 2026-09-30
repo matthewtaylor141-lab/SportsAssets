@@ -860,3 +860,49 @@ async def test_a_budget_limited_fixture_queues_behind_never_attempted_ones():
         assert HW.EVENT in order, after
         assert order.index(other) < order.index(HW.EVENT), order
         assert after["excluded_fixtures"].get(PO.X_ATTEMPTED_RECENTLY, 0) == 0
+
+
+# ═════════════════════════════════════════════════════════════════════
+# 6 · A PER-OUTCOME YES/NO CONTRACT IS NOT A MONEYLINE ON ITS NO SIDE
+# ═════════════════════════════════════════════════════════════════════
+
+async def test_a_held_side_sharing_its_orientation_with_the_other_side_is_refused():
+    """THE PRODUCTION ROW SHAPE (research run 287): atc-...-eri states
+    team_abbr=eri on its YES and its NO row. The NO side ("Eritrea does not
+    win") was built as a moneyline backing Eritrea -- the YES side's payout.
+    The held path now refuses it, as the sibling path always did."""
+    from sportsassets import bettor_funded_hedge_supply as HS
+
+    ev = "afcq-eri-rsa-2026-10-05"
+    slug = "atc-afcq-eri-rsa-2026-10-05-eri"
+    async with _conn() as conn:
+        await _clean(conn)
+        await _seed_the_catalogue(conn)
+        await conn.execute("DELETE FROM us_premap WHERE event_slug=$1", ev)
+        for intent, sn in ((LONG, "yes"), (SHORT, "no")):
+            await _row(conn, event=ev, slug=slug,
+                       st="soccer_team_full_time_winner", abbr="eri",
+                       intent=intent, side=sn, title="Eritrea vs. South Africa")
+        try:
+            for intent in (SHORT, LONG):
+                got = await HS.held_leg_for(
+                    conn, position={"intent_id": "t", "us_market_slug": slug,
+                                    "order_intent": intent,
+                                    "limit_price": 0.4, "filled_qty": 1,
+                                    "residual_qty": 1},
+                    prose_reader=HW._prose_reader(
+                        "Resolves on the result after 90 minutes plus "
+                        "stoppage time. " + HW.CANCELLATION_CLAUSE),
+                    now=time.time())
+                assert got["ok"] is False, (intent, got)
+                assert got["refusal"] == HS.R_BOTH_SIDES_CLAIM_ONE_ORIENTATION
+                assert got["leg"] is None
+            # the two-row moneyline with distinct codes still builds
+            ok = await HS.held_leg_for(
+                conn, position={"intent_id": "t", "us_market_slug": HW.HELD,
+                                "order_intent": LONG, "limit_price": 0.55,
+                                "filled_qty": 1, "residual_qty": 1},
+                prose_reader=HW._prose_reader(), now=time.time())
+            assert ok["ok"] is True, ok
+        finally:
+            await conn.execute("DELETE FROM us_premap WHERE event_slug=$1", ev)

@@ -1437,6 +1437,33 @@ async def held_leg_for(conn, *, position, prose_reader=None, now=None) -> dict:
         prose=prose, prose_source=psource, evidence_age_s=age,
         sport_family=_clean(str(row.get("sports_type") or "").split("_")[0]))
     out.update(built)
+    # ── THE HELD SIDE MAY NOT SHARE ITS ORIENTATION WITH THE OTHER SIDE ──
+    #
+    # FOUND 2026-09-30 by replaying production catalogue rows. A per-outcome
+    # yes/no contract ("Will Eritrea win?", atc-...-eri) states team_abbr=eri
+    # on BOTH its rows, so the NO side ("Eritrea does not win") was built as a
+    # moneyline backing Eritrea -- the YES side's payout function. The
+    # sibling path already refuses this shape (R_BOTH_SIDES_CLAIM_ONE_
+    # ORIENTATION, below in `candidate_legs_for`); the held path did not, so
+    # a held NO position would have been valued inverted. Refused here the
+    # same way: which side pays is not established by these rows.
+    leg_ = built.get("leg") if built.get("ok") else None
+    if leg_ is not None and getattr(leg_, "backs", None) is not None:
+        for other in await read_sides(conn, slug):
+            if other.get("intent") == side:
+                continue
+            ori = orientation_of(other, participants=fixture_participants(
+                other.get("event_slug") or row.get("event_slug")))
+            if not ori.get("refusal") and ori.get("backs") == leg_.backs:
+                out.update(
+                    ok=False, leg=None,
+                    refusal=R_BOTH_SIDES_CLAIM_ONE_ORIENTATION,
+                    why=("both sides of %r back %r in the catalogue (%s on "
+                         "each row). The two sides hold opposite outcome "
+                         "tokens, so a leg built from this row would carry "
+                         "the other side's payout function" % (
+                             slug, leg_.backs, other.get("team_abbr"))))
+                return out
     if built.get("ok"):
         out.setdefault("built_from", {})["cost_cents_per_unit"] = (
             basis.get("source"))
