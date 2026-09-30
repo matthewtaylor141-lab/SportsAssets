@@ -256,9 +256,9 @@ def _smallest_total(pred) -> int:
 #:   NEEDED_FOR_VERDICT   the fewest at which PASSED or FAILED is possible:
 #:                        baseline fitted AND MIN_RESOLVED_EVENTS scored
 #:                        (449: 149 fit + 300 scored).
-#: `evaluate` also reports `total_resolved_fixtures_required` as
-#: ceil(300 / (2/3)) = 450, one more than necessary; that figure errs on the
-#: conservative side and is left as it is. The shortfall below is exact.
+#: `evaluate` reports `total_resolved_fixtures_required` as this same number.
+#: (It used to state ceil(300 / (2/3)) = 450 beside a shortfall computed from
+#: 449, which is how "450 - 21 = 429" came to be read off one report.)
 NEEDED_FOR_BASELINE = _smallest_total(
     lambda fit, ev: fit >= BASELINE_MIN_EVENTS)
 NEEDED_FOR_VERDICT = _smallest_total(
@@ -284,8 +284,7 @@ def cohort_shortfall(resolved_fixtures) -> dict:
             "shortfall": max(0, NEEDED_FOR_VERDICT - n),
             "shortfall_for_baseline": max(0, NEEDED_FOR_BASELINE - n),
             "fit_fixtures": fit, "evaluation_fixtures": ev,
-            "evaluator_stated_total_required": int(
-                math.ceil(MIN_RESOLVED_EVENTS / (1.0 - BASELINE_FRACTION))),
+            "evaluator_stated_total_required": NEEDED_FOR_VERDICT,
             "unit": "INDEPENDENT_RESOLVED_FIXTURES",
             "basis": ("the evaluator's own chronological split: the earliest "
                       "int(total/3) fixtures fit the baseline (need %d) and "
@@ -351,11 +350,37 @@ def unique_fixtures(rows) -> dict:
     is deterministic and does not depend on row order. Which of a
     fixture's two payout statements survives is therefore decided by the
     clock, never by which one scored better.
+
+    THE FIRST PROBABILITY, NOT THE FIRST ROW (2026-09-30). A row the lane
+    wrote before it had a probability -- refused QUOTE_STALE, so the odds
+    source's price was too old to use -- states no probability at all. Taking
+    it as the fixture's observation made the fixture UNRESOLVED however its
+    later, first-priced row settled: 22 of 53 settled production fixtures were
+    lost that way. The rule this implements was always "the first probability
+    recorded per fixture"; a row without one is not a candidate for it. A
+    fixture with no priced row keeps its earliest row, which is then counted
+    as unresolved exactly as before. Still point in time: the choice depends
+    only on whether a probability existed when the row was written, never on
+    the outcome.
+
+    AND ONE THAT CAN BE GRADED. The lane's first run (rows 1-9, 2026-09-24)
+    wrote valuations without the venue side (`buy_intent` NULL), so the
+    outcome join cannot say which side the probability pays on and leaves
+    them unjoined forever (VENUE_SIDE_IDENTITY_NOT_ESTABLISHED). Every later
+    row of those nine fixtures carries the side and joined. A row with no
+    side identity is therefore not a candidate either, by the same rule and
+    for the same reason: it is a fact fixed when the row was written. Rows
+    that do not carry the `buy_intent` key at all (pure callers) are taken
+    as stating their side.
     """
+    usable_fixtures = {str(r.get("event_key") or "") for r in rows
+                       if _gradeable(r)}
     best: dict = {}
     for r in rows:
         key = str(r.get("event_key") or "")
         if not key:
+            continue
+        if key in usable_fixtures and not _gradeable(r):
             continue
         cur = best.get(key)
         mine = (float(r.get("observed_at_epoch") or 0.0),
@@ -363,6 +388,13 @@ def unique_fixtures(rows) -> dict:
         if cur is None or mine < cur[0]:
             best[key] = (mine, r)
     return {k: v[1] for k, v in best.items()}
+
+
+def _gradeable(r) -> bool:
+    """A probability, and a venue side the outcome join can grade it on."""
+    if r.get("probability") is None:
+        return False
+    return (not ("buy_intent" in r)) or bool(r.get("buy_intent"))
 
 
 def _brier(pairs) -> float:
@@ -553,8 +585,11 @@ def evaluate(rows, *, measured_at=None) -> dict:
         "evaluation_fixtures": len(ev),
         "order": "CHRONOLOGICAL_BY_OBSERVED_AT_THEN_ROW_ID",
         "fit_fixtures_are_scored": False,
-        "total_resolved_fixtures_required": int(
-            math.ceil(MIN_RESOLVED_EVENTS / (1.0 - BASELINE_FRACTION))),
+        # ONE FIGURE: the exact total the evaluator's own split needs
+        # (149 fit + 300 scored). It was ceil(300 / (2/3)) = 450 here while
+        # the shortfall used 449, and a reader subtracting 21 from 450 got a
+        # shortfall of 429 that the evaluator never computed.
+        "total_resolved_fixtures_required": NEEDED_FOR_VERDICT,
     }
     pairs = [(p, o) for _, _, p, o in ev]
 
@@ -776,7 +811,7 @@ def describe() -> dict:
 ROWS_SQL = """
     SELECT id, version, devig_method, sport_family, market, event_key,
            payout_event, probability, outcome_known, outcome,
-           outcome_basis,
+           outcome_basis, buy_intent,
            extract(epoch FROM observed_at)::float8 AS observed_at_epoch,
            extract(epoch FROM decided_at)::float8  AS decided_at_epoch
       FROM external_valuations

@@ -641,3 +641,341 @@ async def test_the_cooldown_resume_row_keeps_what_was_resumed():
                        key=L.COOLDOWN_RESUME_KEY)
     hb = json.loads(_C.args[1])
     assert hb["cooldown_resume"] == {"resumed": False, "why": "NOTHING_STORED"}
+
+
+# ═════════════════════════════════════════════════════════════════════
+# 4 · WHY NO SECOND CONTRACT: EACH SIBLING BY CONTRACT, AND A CONCLUSION
+#     THAT SEPARATES ABSENCE FROM A BLOCK
+# ═════════════════════════════════════════════════════════════════════
+
+def _sib(cat, rank=1, **kw):
+    return dict({"category": cat, "search_rank": rank}, **kw)
+
+
+def test_absence_is_concluded_only_when_nothing_that_could_match_was_unread():
+    C = PO
+    assert C.attempt_conclusion([], fixture_pairs=0) == C.N_ABSENT
+    # only props on the fixture: no second GRADED contract exists
+    assert C.attempt_conclusion([_sib(C.C_FILTERED, rank=3)] * 5,
+                                fixture_pairs=5) == C.N_GRADED_ABSENT
+    # every graded sibling examined and graded on another variable
+    assert C.attempt_conclusion([_sib(C.C_INCOMPATIBLE)] * 3,
+                                fixture_pairs=3) == C.N_INCOMPATIBLE
+    # ONE sibling the pass could not afford to read: not a determination
+    assert C.attempt_conclusion(
+        [_sib(C.C_INCOMPATIBLE), _sib(C.C_READ_BUDGET)],
+        fixture_pairs=2) == C.N_BUDGET
+    assert C.attempt_conclusion(
+        [_sib(C.C_INCOMPATIBLE), _sib(C.C_METADATA)],
+        fixture_pairs=2) == C.N_METADATA
+    assert C.attempt_conclusion(
+        [_sib(C.C_INCOMPATIBLE), _sib(C.C_INTERPRETATION)],
+        fixture_pairs=2) == C.N_INTERPRETATION
+    assert C.attempt_conclusion(
+        [_sib(C.C_INCOMPATIBLE), _sib(C.C_UNPRICED)],
+        fixture_pairs=2) == C.N_UNPRICED
+    # a refusal nobody classified never reads as absence
+    assert C.attempt_conclusion([_sib(C.C_UNNAMED)],
+                                fixture_pairs=1) == C.N_UNNAMED
+    # siblings past the limit were never examined
+    assert C.attempt_conclusion([_sib(C.C_INCOMPATIBLE)], fixture_pairs=90,
+                                truncated=True) == C.N_LIMIT
+    # a sibling in ANOTHER period can never be protection, so its missing
+    # prose does not turn a determination into a block
+    assert C.attempt_conclusion(
+        [_sib(C.C_INCOMPATIBLE), _sib(C.C_METADATA, rank=2)],
+        fixture_pairs=2) == C.N_INCOMPATIBLE
+    assert C.attempt_conclusion([_sib(C.C_ADMITTED)]) == C.N_ADMITTED
+
+
+def test_every_supplier_and_discovery_refusal_has_a_category():
+    from sportsassets import bettor_funded_hedge_supply as HS
+    from sportsassets import bettor_funded_pair_cycle as PC
+
+    # an unpriced sibling is split by WHY its quote failed
+    assert PO.sibling_category(HS.R_CANDIDATE_NOT_PRICED,
+                               quote_refusal=PO.R_READ_BUDGET) \
+        == PO.C_READ_BUDGET
+    assert PO.sibling_category(HS.R_CANDIDATE_NOT_PRICED,
+                               quote_refusal=PO.R_PASS_DEADLINE) \
+        == PO.C_READ_BUDGET
+    assert PO.sibling_category(HS.R_CANDIDATE_NOT_PRICED,
+                               quote_refusal="NOT_IN_THE_CAPTURED_BOOK") \
+        == PO.C_UNPRICED
+    for name in (PC.R_NOT_DISTINCT, PC.R_NOT_SETTLEMENT_COMPATIBLE,
+                 HS.R_OT_NO_PROSE, HS.R_OT_PROSE_SILENT,
+                 HS.R_OT_PROSE_STATES_BOTH, HS.R_OVERTIME_NOT_CAPTURED,
+                 HS.R_ORIENTATION_NOT_ESTABLISHED, HS.R_KIND_NOT_DERIVABLE,
+                 PO.X_NOT_A_GRADED_VARIABLE, PO.X_ORIENTATION):
+        assert PO.sibling_category(name) != PO.C_UNNAMED, name
+    assert PO.sibling_category("A_NAME_NO_ONE_DECLARED") == PO.C_UNNAMED
+    assert PO.key_differs_on(["f", "FULL", "MARGIN", "INCL"],
+                             ["f", "FULL", "MARGIN", "EXCL"]) == ["overtime"]
+
+
+async def _ledger_detail(conn, pass_id):
+    row = dict(await conn.fetchrow(
+        "SELECT * FROM bettor_pair_observation_attempts WHERE pass_id=$1",
+        pass_id))
+    d = row["detail"]
+    return row, (d if isinstance(d, dict) else json.loads(d))
+
+
+async def test_the_ledger_names_each_sibling_its_stage_and_category():
+    """THE SIX REFUSED ATTEMPTS COULD NOT BE TRACED because only counts were
+    kept. Each sibling is now recorded by contract, with the stage that
+    stopped it, the refusal and the category; the attempt with a conclusion.
+    Here the spread sibling has no displayed price, and a prop on the same
+    fixture is screened out before any read."""
+    prop = "astatc-mlb-bos-nyy-2026-10-05-hits"
+    async with _conn() as conn:
+        await _clean(conn)
+        await _seed_the_catalogue(conn)
+        await _row(conn, event=HW.EVENT, slug=prop, st="baseball_player_hits",
+                   abbr="bos", intent=LONG)
+        got = await PO.observation_pass(
+            conn, candidates=[], catalogue=[{"us_market_slug": HW.HELD,
+                                             "side": LONG,
+                                             "fixture": HW.EVENT}],
+            quoter=HW._quoter({HW.HELD: (0.55, 500)}),
+            prose_reader=HW._prose_reader(), settlement_reader=_reader,
+            now=time.time())
+        a = got["observed"][0]
+        assert a["outcome"] == "NOTHING_ADMITTED", a
+        assert a["conclusion"] == PO.N_UNPRICED, a
+        assert got["conclusions"] == {PO.N_UNPRICED: 1}
+        row, d = await _ledger_detail(conn, got["pass_id"])
+        assert d["conclusion"] == PO.N_UNPRICED
+        assert d["budget_limited"] is False
+        assert d["held"]["us_market_slug"] == HW.HELD
+        assert len(d["held"]["grading_key"]) == 4
+        by = {(s["market_slug"], s["side"]): s for s in d["siblings"]}
+        spread = [s for k, s in by.items() if k[0] == HW.SIB]
+        assert spread and all(s["stage"] == "QUOTE" for s in spread), by
+        assert all(s["category"] == PO.C_UNPRICED for s in spread)
+        assert all(s["quote_refusal"] == "NOT_IN_THE_CAPTURED_BOOK"
+                   for s in spread)
+        props = [s for k, s in by.items() if k[0] == prop]
+        assert props and props[0]["stage"] == "SCREEN"
+        assert props[0]["category"] == PO.C_FILTERED
+        assert d["siblings_total"] == len(d["siblings"])
+        assert sum(d["sibling_categories"].values()) == d["siblings_total"]
+
+
+async def test_a_budget_limited_attempt_concludes_nothing_about_the_fixture():
+    async with _conn() as conn:
+        await _clean(conn)
+        await _seed_the_catalogue(conn)
+        got = await PO.observation_pass(
+            conn, candidates=[(HW.HELD, LONG)], quoter=HW._quoter(PRICES),
+            prose_reader=HW._prose_reader(), settlement_reader=_reader,
+            now=time.time(), book_budget=1)
+        a = got["observed"][0]
+        assert a["conclusion"] == PO.N_BUDGET, a
+        _, d = await _ledger_detail(conn, got["pass_id"])
+        assert d["budget_limited"] is True
+        assert any(s["category"] == PO.C_READ_BUDGET for s in d["siblings"])
+
+
+async def test_an_admitted_sibling_is_recorded_as_admitted():
+    async with _conn() as conn:
+        await _clean(conn)
+        await _seed_the_catalogue(conn)
+        got = await PO.observe_candidate(
+            conn, us_market_slug=HW.HELD, side=LONG,
+            quoter=HW._quoter(PRICES), prose_reader=HW._prose_reader(),
+            now=time.time())
+        assert got["conclusion"] == PO.N_ADMITTED, got
+        adm = [s for s in got["siblings"] if s["stage"] == "ADMITTED"]
+        assert adm and adm[0]["market_slug"] == HW.SIB
+
+
+# ═════════════════════════════════════════════════════════════════════
+# 5 · ROTATION SURVIVES A RESTART: THE LEDGER IS THE MEMORY
+# ═════════════════════════════════════════════════════════════════════
+
+def _restart():
+    """What a new process has: no in-memory attempts, pass counter at 0."""
+    PO._ATTEMPTED.clear()
+    PO._PASSES[0] = 0
+
+
+async def test_a_restart_does_not_reselect_the_fixtures_just_refused():
+    async with _conn() as conn:
+        await _clean(conn)
+        await _seed_the_catalogue(conn)
+        await _sweep_ran(conn)
+        first = await PO.observation_pass(
+            conn, candidates=[], catalogue=[{"us_market_slug": HW.HELD,
+                                             "side": LONG,
+                                             "fixture": HW.EVENT}],
+            quoter=HW._quoter({}), prose_reader=HW._prose_reader(),
+            settlement_reader=_reader, now=time.time())
+        assert first["observed"][0]["outcome"] == "REFUSED"
+        _restart()
+        cat = await PO.catalogue_candidates(conn, now=time.time())
+        assert cat["attempt_memory"]["source"] == "ATTEMPT_LEDGER"
+        assert HW.EVENT not in {c["fixture"] for c in cat["candidates"]}
+        assert cat["excluded_fixtures"].get(PO.X_ATTEMPTED_RECENTLY) == 1
+        # and the same identity offered by the entry lane is not re-attempted
+        again = await PO.observation_pass(
+            conn, candidates=[(HW.HELD, LONG)], quoter=HW._quoter({}),
+            prose_reader=HW._prose_reader(), settlement_reader=_reader,
+            now=time.time())
+        assert again["attempted"] == 0
+        assert again["not_attempted"][PO.X_ATTEMPTED_RECENTLY] == 1
+        # after the retry interval it is eligible again
+        later = time.time() + PO.ATTEMPT_RETRY_S + 60
+        _restart()
+        cat2 = await PO.catalogue_candidates(conn, now=later)
+        assert cat2["excluded_fixtures"].get(PO.X_ATTEMPTED_RECENTLY, 0) == 0
+
+
+async def test_a_budget_limited_fixture_queues_behind_never_attempted_ones():
+    other = "mlb-det-cle-2026-10-05"
+    async with _conn() as conn:
+        await _clean(conn)
+        await _seed_the_catalogue(conn)
+        await _sweep_ran(conn)
+        # a second admissible-shaped fixture: a moneyline and a spread
+        await _row(conn, event=other, slug="aec-mlb-det-cle-2026-10-05",
+                   st="baseball_team_full_game_winner", abbr="det",
+                   intent=LONG, title="Detroit Tigers vs. Cleveland Guardians")
+        await _row(conn, event=other,
+                   slug="asc-mlb-det-cle-2026-10-05-neg-1pt5",
+                   st="baseball_team_full_game_spread", abbr="cle",
+                   intent=LONG, signed="-1.5",
+                   title="Detroit Tigers vs. Cleveland Guardians")
+        before = await PO.catalogue_candidates(conn, now=time.time())
+        fx = [c["fixture"] for c in before["candidates"]]
+        assert HW.EVENT in fx and other in fx, before
+        # HW's fixture is attempted but budget-limited: not a refusal
+        await PO.observation_pass(
+            conn, candidates=[(HW.HELD, LONG)], quoter=HW._quoter(PRICES),
+            prose_reader=HW._prose_reader(), settlement_reader=_reader,
+            now=time.time(), book_budget=1)
+        _restart()
+        after = await PO.catalogue_candidates(conn, now=time.time())
+        order = [c["fixture"] for c in after["candidates"]]
+        assert HW.EVENT in order, after
+        assert order.index(other) < order.index(HW.EVENT), order
+        assert after["excluded_fixtures"].get(PO.X_ATTEMPTED_RECENTLY, 0) == 0
+
+
+# ═════════════════════════════════════════════════════════════════════
+# 6 · A PER-OUTCOME YES/NO CONTRACT IS NOT A MONEYLINE ON ITS NO SIDE
+# ═════════════════════════════════════════════════════════════════════
+
+async def test_a_held_side_sharing_its_orientation_with_the_other_side_is_refused():
+    """THE PRODUCTION ROW SHAPE (research run 287): atc-...-eri states
+    team_abbr=eri on its YES and its NO row. The NO side ("Eritrea does not
+    win") was built as a moneyline backing Eritrea -- the YES side's payout.
+    The held path now refuses it, as the sibling path always did."""
+    from sportsassets import bettor_funded_hedge_supply as HS
+
+    ev = "afcq-eri-rsa-2026-10-05"
+    slug = "atc-afcq-eri-rsa-2026-10-05-eri"
+    async with _conn() as conn:
+        await _clean(conn)
+        await _seed_the_catalogue(conn)
+        await conn.execute("DELETE FROM us_premap WHERE event_slug=$1", ev)
+        for intent, sn in ((LONG, "yes"), (SHORT, "no")):
+            await _row(conn, event=ev, slug=slug,
+                       st="soccer_team_full_time_winner", abbr="eri",
+                       intent=intent, side=sn, title="Eritrea vs. South Africa")
+        try:
+            for intent in (SHORT, LONG):
+                got = await HS.held_leg_for(
+                    conn, position={"intent_id": "t", "us_market_slug": slug,
+                                    "order_intent": intent,
+                                    "limit_price": 0.4, "filled_qty": 1,
+                                    "residual_qty": 1},
+                    prose_reader=HW._prose_reader(
+                        "Resolves on the result after 90 minutes plus "
+                        "stoppage time. " + HW.CANCELLATION_CLAUSE),
+                    now=time.time())
+                assert got["ok"] is False, (intent, got)
+                assert got["refusal"] == HS.R_BOTH_SIDES_CLAIM_ONE_ORIENTATION
+                assert got["leg"] is None
+            # the two-row moneyline with distinct codes still builds
+            ok = await HS.held_leg_for(
+                conn, position={"intent_id": "t", "us_market_slug": HW.HELD,
+                                "order_intent": LONG, "limit_price": 0.55,
+                                "filled_qty": 1, "residual_qty": 1},
+                prose_reader=HW._prose_reader(), now=time.time())
+            assert ok["ok"] is True, ok
+        finally:
+            await conn.execute("DELETE FROM us_premap WHERE event_slug=$1", ev)
+
+
+# ═════════════════════════════════════════════════════════════════════
+# 7 · THE STRUCTURAL CENSUS: WHAT THE CATALOGUE ALONE ESTABLISHES
+# ═════════════════════════════════════════════════════════════════════
+
+def _cat(slug, st, abbrs, signed=(None, None), ev="x-a-b-2026-10-05"):
+    return [{"market_slug": slug, "sports_type": st, "team_abbr": a,
+             "intent": i, "signed": sg, "side_norm": "yes",
+             "event_slug": ev}
+            for a, i, sg in zip(abbrs, (LONG, SHORT), signed)]
+
+
+def test_the_census_reads_the_production_row_shapes():
+    # soccer: three per-outcome yes/no contracts, each naming ONE team on
+    # both rows (the draw row has no code and never passes the screen)
+    soccer = (_cat("atc-e-eri", "soccer_team_full_time_winner", ("eri", "eri"))
+              + _cat("atc-e-rsa", "soccer_team_full_time_winner", ("rsa", "rsa")))
+    got = PO.structural_verdict(soccer)
+    assert got["verdict"] == PO.S_NO_USABLE_SHAPE, got
+    assert got["unsupported_shape_contracts"] == 2
+    # MLB: the two-row winner and a spread share FULL_GAME / MARGIN
+    mlb = (_cat("aec-m", "baseball_team_full_game_winner", ("bos", "nyy"))
+           + _cat("asc-m-neg-1pt5", "baseball_team_full_game_spread",
+                  ("bos", "nyy"), ("-1.5", "+1.5")))
+    got = PO.structural_verdict(mlb)
+    assert got["verdict"] == PO.S_PAIRABLE, got
+    assert got["shared_keys"] == {"FULL_GAME/MARGIN": 2}
+    # one contract
+    assert PO.structural_verdict(mlb[:2])["verdict"] == PO.S_ONE_CONTRACT
+
+
+async def test_a_structurally_pairable_fixture_is_offered_before_one_that_cannot_pair():
+    ev = "afcq-eri-rsa-2026-10-05"
+    async with _conn() as conn:
+        await _clean(conn)
+        await _seed_the_catalogue(conn)
+        await _sweep_ran(conn)
+        await conn.execute("DELETE FROM us_premap WHERE event_slug=$1", ev)
+        try:
+            # a soccer fixture starting SOONER than the HW fixture
+            for suf in ("eri", "rsa"):
+                for intent, sn in ((LONG, "yes"), (SHORT, "no")):
+                    await _row(conn, event=ev, slug="atc-%s-%s" % (ev, suf),
+                               st="soccer_team_full_time_winner", abbr=suf,
+                               intent=intent, side=sn, starts="20 minutes",
+                               title="Eritrea vs. South Africa")
+            got = await PO.catalogue_candidates(conn, now=time.time())
+            order = [c["fixture"] for c in got["candidates"]]
+            assert ev in order and HW.EVENT in order, got
+            assert order.index(HW.EVENT) < order.index(ev), order
+            mine = [c for c in got["candidates"] if c["fixture"] == ev]
+            assert mine[0]["structural_verdict"] == PO.S_NO_USABLE_SHAPE
+            census = got["structural_census"]
+            assert census[PO.S_PAIRABLE]["fixtures"] >= 1
+            assert census[PO.S_NO_USABLE_SHAPE]["by_family"].get("soccer") == 1
+        finally:
+            await conn.execute("DELETE FROM us_premap WHERE event_slug=$1", ev)
+
+
+def test_the_first_leg_offered_is_one_that_can_pair():
+    """intf-sey-sri: per-outcome winners and two spreads. The winner cannot
+    pair (its rows name one team); the spreads share FULL_GAME / MARGIN."""
+    rows = (_cat("atc-f-sey", "soccer_team_full_time_winner", ("sey", "sey"))
+            + _cat("asc-f-sey-neg-1pt5", "soccer_team_full_game_spread",
+                   ("sey", "sri"), ("-1.5", "+1.5"))
+            + _cat("asc-f-sri-neg-1pt5", "soccer_team_full_game_spread",
+                   ("sri", "sey"), ("-1.5", "+1.5")))
+    got = PO.structural_verdict(rows)
+    assert got["verdict"] == PO.S_PAIRABLE
+    assert "atc-f-sey" not in got["pairable_slugs"]
+    assert set(got["pairable_slugs"]) == {"asc-f-sey-neg-1pt5",
+                                          "asc-f-sri-neg-1pt5"}

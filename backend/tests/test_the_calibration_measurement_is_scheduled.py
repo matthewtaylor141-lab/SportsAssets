@@ -42,8 +42,10 @@ pg = pytest.mark.skipif(not DSN, reason="needs a migrated database")
 def test_the_thresholds_come_from_the_evaluators_own_split():
     assert CAL.NEEDED_FOR_BASELINE == 150
     assert CAL.NEEDED_FOR_VERDICT == 449
-    # the evaluator's reported figure is one more, and is labelled as its own
-    assert CAL.cohort_shortfall(0)["evaluator_stated_total_required"] == 450
+    # ONE FIGURE. The evaluator used to state ceil(300 / (2/3)) = 450 beside
+    # a shortfall computed from 449; both now report the exact 449.
+    assert CAL.cohort_shortfall(0)["evaluator_stated_total_required"] == 449
+    assert CAL.cohort_shortfall(21)["shortfall"] == 428
 
 
 @pytest.mark.parametrize("n,shortfall,base_short", [

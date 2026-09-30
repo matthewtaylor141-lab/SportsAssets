@@ -195,3 +195,6 @@ tests/test_a_venue_account_is_onboarded_on_attestation_and_reconciliation.py
 tests/test_xavier_manages_every_position_through_the_scheduled_pass.py
 tests/test_xavier_manages_positions_through_the_scheduled_path.py
 tests/test_xavier_reviews_its_decisions_daily.py
+# (0930) the pair collector's per-contract account, conclusions and
+# ledger-backed rotation across a restart
+tests/test_the_observer_is_fed_by_the_catalogue_and_accounts_for_every_attempt.py

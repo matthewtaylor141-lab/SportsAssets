@@ -131,6 +131,52 @@ def test_the_probability_scored_is_the_first_one_recorded():
     assert list(picked.values())[0]["probability"] == 0.55
 
 
+def test_a_first_row_the_source_could_not_price_does_not_hide_the_first_price():
+    """FIRST PROBABILITY, NOT THE FIRST ROW. The earliest record of a fixture
+    was often a refusal (QUOTE_STALE) carrying no probability. Keeping it
+    classified a settled fixture as RESOLVED_BUT_NO_PROBABILITY although the
+    source did state a price later, before the event. Production held 22 such
+    fixtures. The earliest PRICED row is still point-in-time: later prices
+    never displace it."""
+    stale = dict(_row(1, event="e", at=100.0, p=0.5), probability=None)
+    first_price = _row(2, event="e", at=200.0, p=0.62)
+    later_price = _row(3, event="e", at=300.0, p=0.99)
+    picked = CAL.unique_fixtures([later_price, stale, first_price])
+    assert list(picked.values())[0]["id"] == 2
+    got = CAL.evaluate([stale, first_price, later_price], measured_at=0.0)
+    assert got["unique_fixtures"] == 1
+    assert got["resolved_fixtures"] == 1
+    assert got["outcome_counts"].get("RESOLVED_BUT_NO_PROBABILITY", 0) == 0
+
+
+def test_a_first_row_without_a_venue_side_does_not_hide_the_graded_one():
+    """THE NINE FIXTURES OF THE LANE'S FIRST RUN. Their earliest rows were
+    priced but carried no buy_intent, so the join could never grade them;
+    the next row, with the side, joined. The first GRADEABLE row is kept."""
+    sideless = dict(_row(1, event="e", at=100.0, p=0.58, known=False,
+                         outcome=None, basis=None), buy_intent=None)
+    graded = dict(_row(2, event="e", at=200.0, p=0.61),
+                  buy_intent="ORDER_INTENT_BUY_SHORT")
+    picked = CAL.unique_fixtures([graded, sideless])
+    assert list(picked.values())[0]["id"] == 2
+    got = CAL.evaluate([sideless, graded], measured_at=0.0)
+    assert got["resolved_fixtures"] == 1
+    # with nothing gradeable, the earliest row still stands (and is unresolved)
+    only = CAL.unique_fixtures([sideless])
+    assert list(only.values())[0]["id"] == 1
+
+
+def test_a_fixture_never_priced_keeps_its_earliest_row():
+    """With no priced row at all the earliest row survives, so the fixture
+    is still counted -- as resolved without a probability, never scored."""
+    a = dict(_row(1, event="e", at=100.0), probability=None)
+    b = dict(_row(2, event="e", at=200.0), probability=None)
+    picked = CAL.unique_fixtures([b, a])
+    assert list(picked.values())[0]["id"] == 1
+    got = CAL.evaluate([a, b], measured_at=0.0)
+    assert got["resolved_fixtures"] == 0
+
+
 def test_both_sides_of_one_fixture_are_one_independent_observation():
     """THE REVIEW'S SECOND COUNTEREXAMPLE. 150 fixtures represented by both
     complementary payouts were counted as 300 "unique events". The two
