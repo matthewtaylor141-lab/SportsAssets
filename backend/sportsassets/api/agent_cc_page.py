@@ -1143,66 +1143,103 @@ FRAMED_JS = r"""
 # ════════════════════════════════════════════════════════════════════
 # THE PAPER SESSION (live market data, SIMULATED execution)
 #
-# The routes are served by the paper-session change on another branch; this
-# is the contract these pages render against. Until a route exists here it
+# The routes are served by the paper-session change (api/command_paper.py,
+# bettor_paper_ledger.py, bettor_paper_readmodel.py). THE SERVER IS
+# AUTHORITATIVE: this client reads its shapes exactly as they are written
+# there and changes nothing about them. Until a route exists in a build it
 # answers 404 and the section says UNAVAILABLE by name. No figure is ever
 # drawn that the server did not send: not the starting bankroll, not a
-# balance, not an intermediate value between two committed events.
+# balance, not an intermediate value between two committed entries; a null
+# figure (a missing mark) stays NOT STATED with the server's own basis.
 # ════════════════════════════════════════════════════════════════════
 PAPER_BASE = "/api/command/paper"
+#: bettor_paper_ledger.balances(): the seven headline figures, by its keys.
 PAPER_ACCOUNT_FIELDS = (
-    ("cash_usd", "Cash"), ("reserved_cash_usd", "Reserved cash"),
-    ("available_cash_usd", "Available cash"),
+    ("cash_usd", "Cash"), ("reserved_usd", "Reserved cash"),
+    ("available_usd", "Available cash"),
     ("open_position_value_usd", "Open-position value"),
     ("total_equity_usd", "Total equity"),
     ("realized_pnl_usd", "Realized P&L"), ("unrealized_pnl_usd", "Unrealized P&L"))
-LEDGER_TYPES = ("INITIAL_FUNDING", "ORDER_SUBMITTED", "FILL", "CANCEL", "SALE",
-                "SETTLEMENT", "CORRECTION")
-PAPER_CONTRACT = {
-    "GET /api/command/paper/account": {
-        "session": {"active": "bool", "reason": "str|null (why not running)",
-                    "starting_bankroll_usd": "number (shown only as sent)",
-                    "started_at": "ISO time", "heartbeat_at": "ISO time"},
-        "account": {k: "number (USD)" for k, _ in PAPER_ACCOUNT_FIELDS},
-        "marks": {"status": "CURRENT|STALE|UNAVAILABLE", "as_of": "ISO time",
-                  "stale_positions": "int", "unavailable_positions": "int",
-                  "why": "str|null"},
-        "updated_at": "ISO time of the last committed change",
-        "last_event_id": "the stream id the snapshot is current to",
-        "rules": ("total_equity_usd = cash_usd + open_position_value_usd; "
-                  "reserved_cash_usd is part of cash_usd; the page checks and "
-                  "shows whether the sent figures reconcile, never recomputes")},
-    "GET /api/command/paper/stream": {
-        "transport": "text/event-stream, same origin, COMMAND cookie",
-        "events": {"account": "the account snapshot above",
-                   "ledger": "one ledger entry (below)"},
-        "id": "monotonic event id; recovery by the Last-Event-ID header, or "
-              "?last_event_id=<id> on a manual reconnect"},
-    "GET /api/command/paper/ledger?limit=": {
-        "entries": [{"entry_id": "str", "at": "ISO time",
-                     "type": "|".join(LEDGER_TYPES),
-                     "instrument": {"market_slug": "str|null",
-                                    "intent": "ORDER_INTENT_BUY_LONG|..._SHORT|null"},
-                     "amount_usd": "signed number",
-                     "balance_after_usd": "number (cash after this entry)"}]},
-    "GET /api/command/paper/derek/{opportunities,orders,fills,handoffs}": {
-        "status": "OK|EMPTY|UNAVAILABLE", "why": "str|null", "rows": "[...]"},
-    "GET /api/command/paper/xavier/{inventory,standing-orders,recommendations,outcome-pnl}": {
-        "status": "OK|EMPTY|UNAVAILABLE", "why": "str|null", "rows": "[...]",
-        "rule": "outcome-pnl payoff floors are never realized P&L"},
-    "GET /api/command/paper/audrey/{portfolio,daily-report,audits,improvements}": {
-        "status": "OK|EMPTY|UNAVAILABLE", "why": "str|null", "rows": "[...]"},
+#: Every other balances() key the page reads. The server leaves the three
+#: marked figures null while any open position has no mark, and sends the
+#: marked-only figures beside them.
+PAPER_BALANCE_KEYS = (
+    "ok", "refusal", "last_sequence", "last_updated_at", "starting_cash_usd",
+    "open_position_value_marked_only_usd", "equity_excluding_unmarked_usd",
+    "unrealized_pnl_marked_only_usd", "marks_complete", "unmarked_positions",
+    "stale_marks", "equity_basis", "mark_method", "mark_stale_after_s",
+    "ledger_entries", "ledger_consistent", "reserved_is", "fees_paid_usd",
+    "real_money_submission", "open_positions")
+#: bettor_paper_ledger.entry_view(): what one ledger row reads.
+PAPER_ENTRY_KEYS = (
+    "sequence", "kind", "idempotency_key", "cash_delta_usd",
+    "reserved_delta_usd", "cash_after_usd", "reserved_after_usd",
+    "available_after_usd", "order_id", "fill_id", "group_id", "position_key",
+    "settlement_key", "corrects_seq", "event_source", "simulator_version",
+    "detail", "committed_at")
+#: bettor_paper_ledger.KINDS
+LEDGER_KINDS = ("INITIAL_FUNDING", "ORDER_SUBMITTED", "FILL",
+                "RESERVATION_RELEASED", "SALE", "SETTLEMENT", "CORRECTION")
+#: api.command_paper.session_brief(): the banner's one read.
+PAPER_SESSION_BRIEF_KEYS = ("active", "reason", "session_id", "started_at",
+                            "starting_cash_usd", "last_heartbeat_at",
+                            "real_money_submission")
+#: api.command_paper.stream_events(): the named events and what each carries.
+PAPER_STREAM_EVENTS = {
+    "snapshot": ("sequence", "balances", "latest_entries", "last_updated_at"),
+    "ledger": ("sequence", "entry", "running_balances", "committed_at",
+               "last_updated_at"),       # + "balances" on a batch's last entry
+    "heartbeat": ("sequence", "at"),
+    "unavailable": ("why",),
 }
+#: The per-agent routes: one GET each, every section {status, why, data}.
 PAPER_SECTIONS = {
-    "derek": (("opportunities", "Paper opportunities"), ("orders", "Paper orders"),
-              ("fills", "Paper fills"), ("handoffs", "Paper handoffs to Xavier")),
-    "xavier": (("inventory", "Managed paper inventory"),
-               ("standing-orders", "Standing paper orders"),
-               ("recommendations", "Live recommendations (paper)"),
-               ("outcome-pnl", "Outcome-dependent P&L (paper)")),
-    "audrey": (("portfolio", "Reconciled paper portfolio"),
-               ("daily-report", "Paper daily report"),
-               ("audits", "Paper audits"), ("improvements", "Paper improvements")),
+    "derek": (("opportunities", "Paper opportunities (Derek's decisions)"),
+              ("refusal_summary_24h", "Decisions by reason, last 24 h"),
+              ("orders", "Paper entry orders"),
+              ("fills", "Simulated entry fills"),
+              ("handoffs", "Paper handoffs to Xavier")),
+    "xavier": (("positions", "Open paper positions"),
+               ("standing_orders", "Standing and management paper orders"),
+               ("recommendations", "Xavier's latest paper review per group")),
+    "audrey": (("daily_reports", "Paper daily reports"),
+               ("audit_entries", "Paper audit findings")),
+}
+PAPER_SESSION_SECTIONS = ("session", "health", "enablement")
+PAPER_CONTRACT = {
+    "source": ("api/command_paper.py; bettor_paper_ledger.py (balances, "
+               "entry_view, order_view); bettor_paper_readmodel.py. The server "
+               "is authoritative; this page only reads."),
+    "section": {"status": "OK|EMPTY|UNAVAILABLE", "why": "the named reason, "
+                "or null when OK", "data": "the section's records"},
+    "GET /api/command/paper/account?entries=": {
+        "top": ("data_label", "labels", "as_of", "account_id", "account",
+                "ledger", "session", "last_updated_at", "drawdown"),
+        "account": "section; data = balances(): " + ", ".join(
+            [k for k, _ in PAPER_ACCOUNT_FIELDS] + list(PAPER_BALANCE_KEYS)),
+        "ledger": "section; data = [entry_view], newest first",
+        "session": "session_brief: " + ", ".join(PAPER_SESSION_BRIEF_KEYS),
+        "drawdown": ("section; data = snapshots, skipped_incomplete_marks, "
+                     "peak_equity_usd, current_equity_usd, "
+                     "current_drawdown_usd, max_drawdown_usd, "
+                     "max_drawdown_pct, basis"),
+        "schema absent": ("account and ledger UNAVAILABLE "
+                          "MIGRATION_171_IS_NOT_APPLIED; no session and no "
+                          "drawdown")},
+    "GET /api/command/paper/stream": {
+        "events": PAPER_STREAM_EVENTS,
+        "id": ("the ledger sequence on snapshot and ledger frames; none on "
+               "heartbeat or unavailable"),
+        "resume": ("the browser's Last-Event-ID header, or ?last=<sequence> "
+                   "on a manual reconnect (the query wins over the header, "
+                   "so the page drops replayed sequences it already holds)")},
+    "GET /api/command/paper/session": PAPER_SESSION_SECTIONS,
+    "GET /api/command/paper/derek": tuple(k for k, _ in PAPER_SECTIONS["derek"]),
+    "GET /api/command/paper/xavier": tuple(k for k, _ in PAPER_SECTIONS["xavier"]),
+    "GET /api/command/paper/audrey": tuple(k for k, _ in PAPER_SECTIONS["audrey"]),
+    "schema absent (per-agent and session routes)": (
+        "{data_label, labels, <derek|xavier|audrey|session>: UNAVAILABLE "
+        "MIGRATION_171_IS_NOT_APPLIED}"),
 }
 PAPER_UNAVAILABLE = "paper account routes not in this build"
 PAPER_SECTION_UNAVAILABLE = "paper session routes not in this build"
@@ -1226,110 +1263,318 @@ PAPER_CSS = r"""
 .sim{display:inline-block;font:700 9.5px/1 var(--mono);letter-spacing:.1em;color:#9fc6ff;border:1px solid #3a6aa8;border-radius:4px;padding:3px 5px;margin-left:6px;vertical-align:middle}
 .pfig{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:1px;background:var(--line);border:1px solid var(--line);border-radius:12px;overflow:hidden}
 .pfig>div{background:var(--panel);padding:10px 12px;min-width:0}.pfig .v{font:600 18px/1.25 var(--display);margin-top:4px;overflow-wrap:anywhere}
+.pfig .v .ns{color:var(--warn);font:700 13px/1.3 var(--mono);letter-spacing:.06em}
+.pfig .v .sub{display:block;font:11px/1.35 var(--mono);color:var(--ink-2);margin-top:4px}
 .pfig .v.flash{animation:pflash 1.2s ease-out 1}
 @keyframes pflash{0%{background:rgba(88,166,255,.35)}100%{background:transparent}}
 .pconn{font:650 11px/1 var(--mono);letter-spacing:.08em;padding:4px 7px;border-radius:6px;border:1px solid currentColor}
 .pconn[data-conn=LIVE]{color:var(--ok)}.pconn[data-conn=RECONNECTING]{color:var(--warn)}.pconn[data-conn=DISCONNECTED],.pconn[data-conn=UNAVAILABLE]{color:var(--bad)}
-.pmarks{font:12px/1.4 var(--mono);color:var(--ink-2);margin:8px 0}.pmarks b.STALE,.pmarks b.UNAVAILABLE{color:var(--warn)}
+.pmarks{font:12px/1.4 var(--mono);color:var(--ink-2);margin:8px 0}.pmarks b.OK{color:var(--ok)}.pmarks b.STALE,.pmarks b.UNAVAILABLE{color:var(--warn)}
+td .ns{color:var(--warn);font:700 11px/1.3 var(--mono)}
+.pdl{margin:0 0 8px;display:grid;grid-template-columns:auto 1fr;gap:3px 12px;font:12.5px/1.4 var(--mono)}.pdl dt{color:var(--ink-2)}
 tr.pnew td{animation:pflash 1.2s ease-out 1}
 @media (max-width:1000px){.pfig{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media (prefers-reduced-motion:reduce){.pfig .v.flash,tr.pnew td{animation:none}}
 """
 
 
+def _paper_panel(pid: str, route: str, agent: str, key: str, title: str) -> str:
+    return ('<section class="cc-p paper half" id="p-paper-%s" data-status="READING" '
+            'data-paper-route="%s" data-paper-agent="%s" data-paper-key="%s" '
+            'aria-labelledby="p-paper-%s-h"><header><h2 id="p-paper-%s-h">%s '
+            '<span class="sim">SIMULATED</span></h2><span class="pill st-MISSING" '
+            'data-pill>READING</span><span class="src">GET %s &#183; %s</span></header>'
+            '<div data-body><p class="boot">Reading&#8230;</p></div></section>'
+            % (pid, route, agent, key, pid, pid, _html.escape(title), route, key))
+
+
 def paper_html(kind: str) -> str:
-    """The shared paper account panel and this agent's paper sections."""
+    """The shared paper account and session panels, and this agent's
+    sections of its one paper route."""
     acct = ('<section class="cc-p paper" id="p-paper-account" data-status="READING" '
             'aria-labelledby="p-paper-account-h"><header><h2 id="p-paper-account-h">'
             'Paper account <span class="sim">LIVE MARKET DATA · SIMULATED EXECUTION'
             '</span></h2><span class="pill st-MISSING" data-pill>READING</span>'
             '<span class="pconn" id="paper-conn" data-conn="UNAVAILABLE">NOT CONNECTED'
-            '</span><span class="src">GET /api/command/paper/account &#183; '
-            'stream /api/command/paper/stream &#183; simulated figures, never summed '
-            'with the funded book</span></header><div data-body><p class="boot">'
-            'Reading&#8230;</p></div></section>')
-    secs = "".join(
-        '<section class="cc-p paper half" id="p-paper-%s" data-status="READING" '
-        'data-paper-route="%s/%s/%s" aria-labelledby="p-paper-%s-h"><header><h2 '
-        'id="p-paper-%s-h">%s <span class="sim">SIMULATED</span></h2><span '
-        'class="pill st-MISSING" data-pill>READING</span><span class="src">GET '
-        '%s/%s/%s</span></header><div data-body><p class="boot">Reading&#8230;</p>'
-        '</div></section>' % (key, PAPER_BASE, kind, key, key, key, _html.escape(t),
-                              PAPER_BASE, kind, key)
-        for key, t in PAPER_SECTIONS[kind])
+            '</span><span class="src">GET %s/account &#183; stream %s/stream &#183; '
+            'simulated figures, never summed with the funded book</span></header>'
+            '<div data-body><p class="boot">Reading&#8230;</p></div></section>'
+            % (PAPER_BASE, PAPER_BASE))
+    sess = _paper_panel("session", PAPER_BASE + "/session", "session", "session",
+                        "Paper session and health")
+    route = "%s/%s" % (PAPER_BASE, kind)
+    secs = "".join(_paper_panel(key, route, kind, key, t)
+                   for key, t in PAPER_SECTIONS[kind])
     return ('<h2 class="cc-h2" id="paper">Paper session <span class="sim">'
             'SIMULATED</span></h2><div class="cc-panels" id="cc-paper" '
-            'data-cc-paper>%s%s</div>' % (acct, secs))
+            'data-cc-paper>%s%s%s</div>' % (acct, sess, secs))
+
 
 PAPER_CORE_JS = r"""
 (function (AG, CC) {
   'use strict';
   var esc = AG.esc, isObj = AG.isObj;
-  var FIELDS = [['cash_usd', 'Cash'], ['reserved_cash_usd', 'Reserved cash'], ['available_cash_usd', 'Available cash'],
+  // bettor_paper_ledger.balances(): the seven figures, by the server's own keys
+  var FIELDS = [['cash_usd', 'Cash'], ['reserved_usd', 'Reserved cash'], ['available_usd', 'Available cash'],
     ['open_position_value_usd', 'Open-position value'], ['total_equity_usd', 'Total equity'],
     ['realized_pnl_usd', 'Realized P&L'], ['unrealized_pnl_usd', 'Unrealized P&L']];
+  // what a stream 'ledger' frame's running_balances carries (from the entry's own after-balances)
+  var RUNNING = ['cash_usd', 'reserved_usd', 'available_usd'];
+  // null while any open position has no mark; the server sends the marked-only figure beside it
+  var MARKED_ONLY = {open_position_value_usd: 'open_position_value_marked_only_usd', total_equity_usd: 'equity_excluding_unmarked_usd', unrealized_pnl_usd: 'unrealized_pnl_marked_only_usd'};
+  var INTENT = {LONG: 'ORDER_INTENT_BUY_LONG', SHORT: 'ORDER_INTENT_BUY_SHORT'};
+  var HINT = {INITIAL_FUNDING: 'funding', ORDER_SUBMITTED: 'reserve', FILL: 'purchase', RESERVATION_RELEASED: 'release',
+    SALE: 'sale proceeds', SETTLEMENT: 'payout', CORRECTION: 'settlement correction'};
+  var KEEP = 50;
   var UNAV = 'paper account routes not in this build', SECT_UNAV = 'paper session routes not in this build';
   var SIM = '<span class="sim">SIMULATED</span>';
+  var FLOORS = '<p class="note"><b>Payoff floors are outcome-dependent, never realized P&amp;L.</b> Realized P&amp;L is only in the paper account.</p>';
   function num(v) { return typeof v === 'number' && isFinite(v); }
+  function sec(s) { return isObj(s) && (s.status === 'OK' || s.status === 'EMPTY' || s.status === 'UNAVAILABLE') ? s : null; }
+  function money(k, v) { return /pnl/.test(k) ? CC.usdS(v) : CC.usd(v); }
+  function iso(v) { var e = AG.toEpoch(v); return e === null ? null : new Date(e * 1000).toISOString().slice(11, 19) + 'Z'; }
   function nyTime(v) {
     var e = AG.toEpoch(v); if (e === null) return null;
     try { return new Intl.DateTimeFormat('en-US', {timeZone: 'America/New_York', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false}).format(new Date(e * 1000)) + ' ET'; }
     catch (_) { return new Date(e * 1000).toISOString(); }
   }
-  // THE BANNER: the starting bankroll only as the server sent it; never while off
-  function banner(o) {
+  function sectUnav() { return '<div class="plain"><p class="big">UNAVAILABLE · ' + SECT_UNAV + '</p><p class="mute">No simulated figure is shown because none can be read here.</p></div>'; }
+
+  // THE BANNER: session_brief from GET /account. The bankroll only as sent, and
+  // only while the session is active; the session route's reason is the fallback.
+  function fallback(so) {
+    if (!so || so.kind !== 'OK' || !isObj(so.json)) return null;
+    var s = sec(so.json.session); return s && s.status !== 'OK' ? s.why : null;
+  }
+  function banner(o, so) {
     if (!o || o.kind === 'NOT_DEPLOYED') return {state: 'UNAVAILABLE', text: 'PAPER SESSION NOT RUNNING — ' + UNAV};
     if (o.kind !== 'OK') return {state: 'UNAVAILABLE', text: 'PAPER SESSION NOT RUNNING — the paper account read failed (' + (o.why || o.kind) + ')'};
-    var s = isObj(o.json) && isObj(o.json.session) ? o.json.session : null;
-    if (!s || s.active !== true) return {state: 'OFF', text: 'PAPER SESSION NOT RUNNING — ' + ((s && s.reason) || 'the server reports no active session and gave no reason')};
-    var bank = num(s.starting_bankroll_usd) ? ' · ' + CC.usd(s.starting_bankroll_usd).replace(/\.00$/, '') + ' STARTING BANKROLL' : ' · STARTING BANKROLL NOT SENT';
+    var j = isObj(o.json) ? o.json : {}, s = isObj(j.session) ? j.session : null, a = sec(j.account);
+    if (!s) return {state: a && a.status === 'UNAVAILABLE' ? 'UNAVAILABLE' : 'OFF', text: 'PAPER SESSION NOT RUNNING — ' + ((a && a.why) || fallback(so) || 'the server sent no session')};
+    if (s.active !== true) return {state: 'OFF', text: 'PAPER SESSION NOT RUNNING — ' + (s.reason || fallback(so) || 'the server reports no active session and gave no reason')};
+    var bank = num(s.starting_cash_usd) ? ' · ' + CC.usd(s.starting_cash_usd).replace(/\.00$/, '') + ' STARTING BANKROLL' : ' · STARTING BANKROLL NOT SENT';
     return {state: 'ACTIVE', text: 'LIVE MARKET DATA · SIMULATED EXECUTION' + bank};
   }
-  // THE ACCOUNT: the seven figures exactly as sent; the page only checks them
+
+  // THE ACCOUNT: balances() exactly as sent. `j` is GET /account's payload, or
+  // view(state) while streaming; `j.running` is a stream frame's after-entry
+  // cash figures, used only when newer than the full recomputation.
   function account(j, prev) {
     if (!isObj(j)) return {status: 'UNAVAILABLE', html: CC.unavLine('no response'), changed: []};
-    var a = isObj(j.account) ? j.account : {}, p = isObj(prev) ? prev : {}, changed = [];
+    var s = sec(j.account);
+    if (!s) return {status: 'UNAVAILABLE', html: CC.unavLine("the response carried no 'account' section"), changed: []};
+    var a = s.data;
+    if (s.status !== 'OK' || !isObj(a) || a.ok !== true) {
+      var st = s.status === 'OK' ? 'UNAVAILABLE' : s.status;
+      var why = s.why || (isObj(a) && a.refusal) || 'the server named no reason';
+      return {status: st, html: '<div class="plain"><p class="big">' + esc(st) + ' · ' + esc(why) + '</p><p class="mute">No paper figure is shown: none was sent. This is not a zero balance.</p></div>', changed: []};
+    }
+    var run = isObj(j.running) && num(j.running.sequence) && !(num(a.last_sequence) && j.running.sequence <= a.last_sequence) ? j.running : null;
+    var p = isObj(prev) ? prev : {}, vals = {}, changed = [];
     var figs = FIELDS.map(function (f) {
-      var v = a[f[0]], was = p[f[0]];
-      var ch = num(v) && num(was) && v !== was; if (ch) changed.push(f[0]);
-      var shown = num(v) ? (/pnl/.test(f[0]) ? CC.usdS(v) : CC.usd(v)) : CC.nr('not sent by the server');
-      return '<div data-fig="' + f[0] + '"><div class="lbl">' + esc(f[1]) + SIM + '</div><div class="v' + (ch ? ' flash' : '') + '">' + shown + '</div></div>';
+      var k = f[0], v = run && RUNNING.indexOf(k) >= 0 ? run[k] : a[k], was = p[k];
+      vals[k] = v;
+      var ch = num(v) && num(was) && v !== was; if (ch) changed.push(k);
+      var shown;
+      if (num(v)) shown = money(k, v);
+      else if (v === null && MARKED_ONLY[k]) shown = '<span class="ns">NOT STATED</span><span class="sub">' + esc(a.equity_basis || 'the server stated no basis') + '</span>'
+        + (num(a[MARKED_ONLY[k]]) ? '<span class="sub">marked-only ' + money(k, a[MARKED_ONLY[k]]) + ', excluding unmarked positions</span>' : '');
+      else shown = CC.nr('not sent by the server');
+      return '<div data-fig="' + k + '"><div class="lbl">' + esc(f[1]) + SIM + '</div><div class="v' + (ch ? ' flash' : '') + '">' + shown + '</div></div>';
     }).join('');
-    var m = isObj(j.marks) ? j.marks : null;
-    var marks = m ? '<p class="pmarks">Marks: <b class="' + esc(m.status) + '">' + esc(m.status || 'NOT REPORTED') + '</b>' + (m.as_of ? ' as of ' + AG.ts(m.as_of) : '') + (num(m.stale_positions) && m.stale_positions ? ' · ' + m.stale_positions + ' stale position mark(s)' : '') + (num(m.unavailable_positions) && m.unavailable_positions ? ' · ' + m.unavailable_positions + ' position(s) with no mark' : '') + (m.why ? ' — ' + esc(m.why) : '') + '</p>'
-                 : '<p class="pmarks"><b class="UNAVAILABLE">MARK STATUS NOT REPORTED</b> — open-position value cannot be read as current</p>';
+    var um = Array.isArray(a.unmarked_positions) ? a.unmarked_positions : [], sm = Array.isArray(a.stale_marks) ? a.stale_marks : [];
+    var mm = String(a.mark_method || '').split(':')[0], marks;
+    if (a.marks_complete === true) marks = sm.length ? '<b class="STALE">STALE</b> — ' + sm.length + ' position mark(s) older than ' + (num(a.mark_stale_after_s) ? a.mark_stale_after_s + ' s' : 'the stale limit') + ', shown and flagged' : '<b class="OK">COMPLETE</b>';
+    else if (a.marks_complete === false) marks = '<b class="UNAVAILABLE">INCOMPLETE</b> — ' + um.length + ' open position(s) with no available mark: total equity, open-position value and unrealized P&amp;L are not stated' + (sm.length ? ' · ' + sm.length + ' stale mark(s)' : '');
+    else marks = '<b class="UNAVAILABLE">MARK STATUS NOT REPORTED</b> — open-position value cannot be read as current';
+    marks = '<p class="pmarks">Marks: ' + marks + (mm ? ' · <span title="' + esc(a.mark_method) + '">' + esc(mm) + '</span>' : '') + '</p>';
+    var lc = a.ledger_consistent === false ? '<p class="note"><b class="neg">LEDGER INCONSISTENT</b>: the server reports that the last running balance disagrees with the sum of the ledger entries.</p>' : '';
     var rec = '';
-    if (num(a.total_equity_usd) && num(a.cash_usd) && num(a.open_position_value_usd)) {
+    if (!run && num(a.total_equity_usd) && num(a.cash_usd) && num(a.open_position_value_usd)) {
       var ok = Math.abs(a.cash_usd + a.open_position_value_usd - a.total_equity_usd) <= 0.01;
       rec = '<p class="note">' + (ok ? 'Reconciles: cash + open-position value = total equity (reserved cash is part of cash).' : '<b class="neg">DOES NOT RECONCILE</b>: cash + open-position value ≠ total equity as sent. Shown as sent; nothing recomputed.') + '</p>';
     }
-    var upd = '<p class="note">Last updated ' + (j.updated_at ? AG.ts(j.updated_at) + ' (' + esc(nyTime(j.updated_at)) + ')' : CC.nr('the server sent no update time')) + (isObj(j.session) && j.session.heartbeat_at ? ' · session heartbeat ' + AG.ts(j.session.heartbeat_at) : '') + '. LIVE MARKET DATA · SIMULATED EXECUTION — never summed with the funded book.</p>';
-    return {status: 'OK', html: '<div class="pfig">' + figs + '</div>' + marks + rec + upd, changed: changed, values: a};
+    var part = run ? '<p class="note">Cash, reserved and available are current to ledger entry #' + esc(run.sequence) + '; open-position value, equity and P&amp;L are from the server\'s recomputation at entry #' + esc(a.last_sequence) + '.</p>' : '';
+    var t = j.last_updated_at !== undefined && j.last_updated_at !== null ? j.last_updated_at : a.last_updated_at;
+    var ss = isObj(j.session) ? j.session : null;
+    var upd = '<p class="note">Last committed change ' + (AG.toEpoch(t) !== null ? AG.ts(t) + ' (' + esc(nyTime(t)) + ')' : CC.nr('the server sent no update time'))
+      + (num(a.last_sequence) ? ' · ledger entry #' + a.last_sequence : '')
+      + (num(a.ledger_entries) ? ' · ' + a.ledger_entries + ' entries' + (a.ledger_consistent === true ? ', running balance agrees with the ledger sum' : '') : '')
+      + (num(a.fees_paid_usd) ? ' · fees paid ' + CC.usd(a.fees_paid_usd) : '')
+      + (ss && ss.last_heartbeat_at ? ' · session heartbeat ' + AG.ts(ss.last_heartbeat_at) : '')
+      + '. ' + (a.reserved_is ? 'Reserved is ' + esc(a.reserved_is) + '. ' : '') + 'LIVE MARKET DATA · SIMULATED EXECUTION · fictional USD, never summed with the funded book'
+      + (a.real_money_submission ? ' · real-money submission ' + esc(a.real_money_submission) : '') + '.</p>';
+    return {status: 'OK', html: '<div class="pfig">' + figs + '</div>' + marks + lc + rec + part + upd, changed: changed, values: vals};
+  }
+  function drawdown(s) {
+    if (s === null || s === undefined) return '<p class="pmarks">Drawdown ' + SIM + ': not sent by the server.</p>';
+    s = sec(s); if (!s) return '<p class="pmarks">Drawdown: the section is not recognised.</p>';
+    if (s.status !== 'OK' || !isObj(s.data)) return '<p class="pmarks">Drawdown ' + SIM + ': <b class="' + (s.status === 'EMPTY' ? 'STALE' : 'UNAVAILABLE') + '">' + esc(s.status) + '</b> — ' + esc(s.why || 'no reason given') + '</p>';
+    var d = s.data;
+    function u(v) { return num(v) ? CC.usd(v) : 'not stated'; }
+    return '<p class="pmarks" title="' + esc(d.basis || '') + '">Drawdown ' + SIM + ': current ' + u(d.current_drawdown_usd) + ' · max ' + u(d.max_drawdown_usd) + (num(d.max_drawdown_pct) ? ' (' + d.max_drawdown_pct.toFixed(2) + '%)' : '')
+      + ' · peak equity ' + u(d.peak_equity_usd) + ' · ' + (num(d.snapshots) ? d.snapshots : '?') + ' equity snapshot(s)' + (num(d.skipped_incomplete_marks) && d.skipped_incomplete_marks ? ', ' + d.skipped_incomplete_marks + ' skipped for incomplete marks' : '') + '</p>';
+  }
+
+  // THE LEDGER: entry_view rows, newest first, in New York time
+  function posParts(pk) {                       // paperpos:<account>:<group>:<slug>:<side>
+    if (typeof pk !== 'string' || pk.indexOf('paperpos:') !== 0) return null;
+    var p = pk.split(':'); if (p.length < 5) return null;
+    var side = p[p.length - 1];
+    return INTENT[side] ? {slug: p[p.length - 2], side: side} : null;
   }
   function ledgerRow(e, fresh) {
     e = isObj(e) ? e : {};
-    var ins = isObj(e.instrument) ? e.instrument : {};
-    var item = ins.market_slug ? 'slug:' + ins.market_slug + '|' + (ins.intent || '') : null;
-    return '<tr' + (fresh ? ' class="pnew"' : '') + ' data-entry="' + esc(e.entry_id || '') + '"><td>' + (nyTime(e.at) ? esc(nyTime(e.at)) : CC.nr('no time')) + '</td><td class="mono">' + esc(e.type || '?') + (e.type === 'ORDER_SUBMITTED' ? ' <span class="mute">reserve</span>' : e.type === 'CANCEL' ? ' <span class="mute">release</span>' : '') + '</td>'
-      + '<td>' + (item ? CC.labelSlot(item, [['market slug', ins.market_slug], ['order intent', ins.intent], ['entry id', e.entry_id]]) : '<span class="mute">—</span>') + '</td>'
-      + '<td class="num">' + (num(e.amount_usd) ? CC.usdS(e.amount_usd) : CC.nr('not sent')) + SIM + '</td><td class="num">' + (num(e.balance_after_usd) ? CC.usd(e.balance_after_usd) : CC.nr('not sent')) + '</td></tr>';
+    var pp = posParts(e.position_key), d = isObj(e.detail) ? e.detail : {};
+    var tech = [['ledger sequence', e.sequence], ['order id', e.order_id], ['fill id', e.fill_id], ['group id', e.group_id], ['position key', e.position_key],
+      ['settlement key', e.settlement_key], ['corrects entry', e.corrects_seq], ['event source', e.event_source], ['simulator version', e.simulator_version], ['idempotency key', e.idempotency_key]];
+    var ins = pp ? CC.labelSlot('slug:' + pp.slug + '|' + INTENT[pp.side], [['market slug', pp.slug], ['holding side', pp.side]].concat(tech))
+                 : '<span class="mute">' + (e.group_id ? 'group ' + esc(e.group_id) : '—') + '</span>' + CC.techDetails(tech);
+    var why = d.role || d.reason || d.outcome || '';
+    function m(v, signed) { return num(v) ? (signed ? CC.usdS(v) : CC.usd(v)) : CC.nr('not sent'); }
+    return '<tr' + (fresh ? ' class="pnew"' : '') + ' data-seq="' + esc(e.sequence) + '"><td>' + (nyTime(e.committed_at) ? esc(nyTime(e.committed_at)) : CC.nr('no commit time')) + '</td><td class="num mono">#' + esc(e.sequence) + '</td>'
+      + '<td class="mono">' + esc(e.kind || '?') + (HINT[e.kind] ? ' <span class="mute">' + HINT[e.kind] + '</span>' : '') + (why ? '<br><span class="mute">' + esc(why) + '</span>' : '') + '</td><td>' + ins + '</td>'
+      + '<td class="num">' + m(e.cash_delta_usd, true) + '</td><td class="num">' + m(e.reserved_delta_usd, true) + '</td><td class="num">' + m(e.cash_after_usd) + SIM + '</td><td class="num">' + m(e.available_after_usd) + '</td></tr>';
   }
-  function ledger(entries) {
-    var rows = Array.isArray(entries) ? entries : [];
-    return '<p class="lbl" style="margin:12px 0 6px">Ledger (America/New_York) ' + SIM + '</p><div class="tbl"><table><thead><tr><th>time</th><th>type</th><th>instrument</th><th class="num">amount</th><th class="num">balance after</th></tr></thead><tbody id="paper-ledger">'
-      + (rows.length ? rows.map(function (e) { return ledgerRow(e, false); }).join('') : '<tr><td colspan="5" class="mute">No ledger entry has been sent.</td></tr>') + '</tbody></table></div>';
+  function ledger(list, fresh, why) {
+    var rows = (Array.isArray(list) ? list : []).filter(function (e) { return isObj(e) && num(e.sequence); })
+      .sort(function (x, y) { return y.sequence - x.sequence; }).slice(0, KEEP);
+    fresh = isObj(fresh) ? fresh : {};
+    return '<p class="lbl" style="margin:12px 0 6px">Ledger, newest first (America/New_York) ' + SIM + '</p><div class="tbl"><table><thead><tr><th>committed</th><th class="num">#</th><th>kind</th><th>instrument</th><th class="num">cash Δ</th><th class="num">reserved Δ</th><th class="num">cash after</th><th class="num">available after</th></tr></thead><tbody id="paper-ledger">'
+      + (rows.length ? rows.map(function (e) { return ledgerRow(e, !!fresh[e.sequence]); }).join('') : '<tr><td colspan="8" class="mute">' + esc(why || 'No ledger entry has been sent.') + '</td></tr>') + '</tbody></table></div>';
   }
-  function section(key, o) {
-    if (!o || o.kind === 'NOT_DEPLOYED') return {status: 'UNAVAILABLE', html: '<div class="plain"><p class="big">UNAVAILABLE · ' + SECT_UNAV + '</p><p class="mute">No simulated figure is shown because none can be read here.</p></div>'};
-    if (o.kind !== 'OK') return {status: 'UNAVAILABLE', html: AG.gate(o, '')};
-    var j = o.json || {};
-    if (j.status === 'UNAVAILABLE') return {status: 'UNAVAILABLE', html: CC.unavLine(j.why)};
-    var rows = Array.isArray(j.rows) ? j.rows : [];
-    if (!rows.length) return {status: 'EMPTY', html: CC.emptyLine(j.why)};
-    var note = key === 'outcome-pnl' ? '<p class="note"><b>Payoff floors are outcome-dependent, never realized P&amp;L.</b> Realized P&amp;L is only in the paper account above.</p>' : '';
-    return {status: 'OK', html: note + '<p class="note">' + SIM + ' figures from the paper session.</p>' + AG.table(rows, null, {rd: AG.toEpoch(j.read_at)})};
+
+  // THE CLIENT STATE: GET /account plus the stream's frames. Figures only move
+  // forward in ledger sequence; a replayed sequence is merged, never re-applied.
+  function newState() { return {bal: null, acctSec: null, run: null, seq: null, entries: {}, fresh: {}, ledgerSec: null, last: null, session: null, drawdown: null, beat: null, streamWhy: null}; }
+  function merge(st, list, fresh) {
+    (Array.isArray(list) ? list : []).forEach(function (e) {
+      if (!isObj(e) || !num(e.sequence)) return;
+      if (fresh && !(e.sequence in st.entries)) st.fresh[e.sequence] = 1;
+      st.entries[e.sequence] = e;
+    });
+    Object.keys(st.entries).map(Number).sort(function (x, y) { return y - x; }).slice(KEEP).forEach(function (k) { delete st.entries[k]; delete st.fresh[k]; });
   }
-  CC.paper = {FIELDS: FIELDS, UNAV: UNAV, SECT_UNAV: SECT_UNAV, banner: banner, account: account, ledger: ledger, ledgerRow: ledgerRow, section: section, nyTime: nyTime};
+  function bump(st, s) { if (num(s)) st.seq = st.seq === null ? s : Math.max(st.seq, s); }
+  function takeBal(st, b) {
+    if (!isObj(b) || b.ok !== true) return false;
+    if (st.bal && num(st.bal.last_sequence) && num(b.last_sequence) && b.last_sequence < st.bal.last_sequence) return false;
+    st.bal = b; bump(st, b.last_sequence); return true;
+  }
+  function fromAccount(st, j) {
+    j = isObj(j) ? j : {};
+    st.fresh = {};
+    st.session = isObj(j.session) ? j.session : null;
+    st.drawdown = j.drawdown === undefined ? null : j.drawdown;
+    var s = sec(j.account); st.acctSec = s;
+    if (s && s.status === 'OK' && isObj(s.data) && s.data.ok === true) takeBal(st, s.data); else { st.bal = null; st.run = null; }
+    var l = sec(j.ledger); st.ledgerSec = l;
+    if (l && l.status === 'OK') merge(st, l.data, false); else st.entries = {};
+    if (j.last_updated_at !== undefined && j.last_updated_at !== null && (st.last === null || AG.toEpoch(j.last_updated_at) >= AG.toEpoch(st.last))) st.last = j.last_updated_at;
+  }
+  function onEvent(st, name, d) {
+    d = isObj(d) ? d : {};
+    st.fresh = {};
+    if (name === 'snapshot') {
+      if (isObj(d.balances) && d.balances.ok !== true) { st.bal = null; st.run = null; st.acctSec = {status: 'EMPTY', why: d.balances.refusal || 'the stream snapshot carried no balances', data: d.balances}; }
+      else if (takeBal(st, d.balances)) st.acctSec = {status: 'OK', why: null, data: st.bal};
+      merge(st, d.latest_entries, false); bump(st, d.sequence);
+      if (d.last_updated_at !== undefined && d.last_updated_at !== null) st.last = d.last_updated_at;
+      return 'figures';
+    }
+    if (name === 'ledger') {
+      merge(st, [d.entry], true);
+      var newer = num(d.sequence) && (st.seq === null || d.sequence > st.seq), rb = isObj(d.running_balances) ? d.running_balances : {};
+      if (newer) { st.run = {sequence: d.sequence, cash_usd: rb.cash_usd, reserved_usd: rb.reserved_usd, available_usd: rb.available_usd}; bump(st, d.sequence); st.last = d.last_updated_at || d.committed_at || st.last; }
+      if (isObj(d.balances) && takeBal(st, d.balances)) st.acctSec = {status: 'OK', why: null, data: st.bal};
+      return newer ? 'figures' : 'replay';
+    }
+    if (name === 'heartbeat') { st.beat = num(d.at) ? d.at : null; return 'heartbeat'; }
+    if (name === 'unavailable') { st.streamWhy = d.why || 'the stream named no reason'; return 'unavailable'; }
+    return 'ignored';
+  }
+  function view(st) {
+    return {account: st.bal ? {status: 'OK', why: null, data: st.bal} : (st.acctSec || {status: 'UNAVAILABLE', why: 'no account figures have been read yet', data: null}),
+            running: st.run, last_updated_at: st.last, session: st.session, drawdown: st.drawdown};
+  }
+  function entries(st) { return Object.keys(st.entries).map(function (k) { return st.entries[k]; }); }
+
+  // THE PER-AGENT ROUTES: one GET each, every section {status, why, data}
+  function c(label, keys, extra) { var o = {label: label, keys: keys}; if (extra) Object.keys(extra).forEach(function (k) { o[k] = extra[k]; }); return o; }
+  function inst(r) {
+    var it = r.intent || INTENT[r.holding_side];
+    var tech = [['market slug', r.us_market_slug], ['order intent', it], ['fixture', r.fixture], ['group id', r.group_id], ['order id', r.order_id], ['fill id', r.fill_id], ['decision id', r.decision_id], ['position key', r.position_key]];
+    return r.us_market_slug ? CC.labelSlot('slug:' + r.us_market_slug + '|' + (it || ''), tech) : '<span class="mute">no market slug in this record</span>' + CC.techDetails(tech);
+  }
+  function markCell(r) {
+    var m = isObj(r.mark) ? r.mark : null; if (!m) return CC.nr('no mark sent');
+    return (num(m.price) ? CC.price(m.price) : '<span class="ns">NO MARK</span>') + ' <span class="mute">' + esc(m.status || '') + (m.stale ? ' · STALE' : '') + (num(m.age_s) ? ' · ' + Math.round(m.age_s) + ' s old' : '') + (m.why ? ' · ' + esc(m.why) : '') + '</span>';
+  }
+  function orNot(k, what) { return function (r) { return num(r[k]) ? money(k, r[k]) : r[k] === null ? '<span class="ns">' + what + '</span>' : CC.nr('not in this record'); }; }
+  var I = {label: 'instrument', render: inst};
+  var ORDERS = [c('created', ['created_at']), I, c('role', ['role']), c('direction', ['direction']), c('state', ['state']), c('qty', ['qty'], {num: true}), c('filled', ['filled_qty'], {num: true}),
+    c('remaining', ['remaining_qty'], {num: true}), c('limit', ['limit_price'], {num: true}), c('reserved left', ['reserved_remaining_usd'], {num: true, u: 'usd0'}), c('expires', ['expires_at'])];
+  var COLS = {
+    opportunities: [c('decided', ['decided_at']), I, c('verdict', ['verdict']), c('refusal', ['refusal']), c('p internal', ['p_internal'], {num: true}), c('p Pinnacle', ['p_pinnacle'], {num: true}),
+      c('p blended', ['p_blended'], {num: true}), c('proposed qty', ['proposed_qty'], {num: true}), c('limit', ['limit_price'], {num: true}), c('policy', ['policy_version'])],
+    refusal_summary_24h: [c('verdict', ['verdict']), c('reason', ['reason']), c('decisions', ['n'], {num: true})],
+    orders: ORDERS,
+    fills: [c('filled', ['filled_at']), I, c('direction', ['direction']), c('qty', ['qty'], {num: true}), c('price', ['price'], {num: true}), c('gross', ['gross_usd'], {num: true, u: 'usd0'}),
+      c('fee', ['fee_usd'], {num: true, u: 'usd0'}), c('basis', ['basis'])],
+    handoffs: [c('handed off', ['created_at']), c('group', ['group_id']), c('owner', ['owner']), c('confirmed qty', ['confirmed_qty'], {num: true}), c('outstanding qty', ['outstanding_qty'], {num: true}),
+      c('first fill', ['first_fill_at']), c('decision', ['decision_id'])],
+    positions: [I, c('side', ['holding_side']), c('open qty', ['open_qty'], {num: true}), c('avg cost incl. fees', ['avg_cost_per_contract_incl_fees'], {num: true, u: 'price'}),
+      c('cost basis', ['cost_basis_usd'], {num: true, u: 'usd0'}), {label: 'mark', render: markCell}, {label: 'marked value', num: true, render: orNot('marked_value_usd', 'NO MARK')},
+      {label: 'unrealized', num: true, render: orNot('unrealized_pnl_usd', 'NOT STATED')}, c('realized', ['realized_pnl_usd'], {num: true, u: 'usd'}), c('first fill', ['first_fill_at'])],
+    standing_orders: ORDERS,
+    recommendations: [c('reviewed', ['reviewed_at']), c('group', ['group_id']), c('trigger', ['trigger']), c('recommendation', ['recommendation']), c('refusal', ['refusal']), c('action', ['action'])],
+    daily_reports: [c('day', ['report_day']), c('version', ['version'], {num: true}), c('final', ['final']), c('reconciles', ['reconciles']), c('generated', ['generated_at']), c('time zone', ['reporting_tz']), c('digest', ['digest'])],
+    audit_entries: [c('found', ['found_at']), c('severity', ['severity']), c('kind', ['kind']), c('subject', ['subject']), c('detail', ['detail']), c('improvement task', ['improvement_task_id'])]
+  };
+  var NOTES = {positions: FLOORS, recommendations: FLOORS,
+    opportunities: '<p class="note">One decision per evaluated market once the session runs: ENTER, or a named refusal.</p>'};
+  function section(agent, key, o, url) {
+    if (!o || o.kind === 'NOT_DEPLOYED') return {status: 'UNAVAILABLE', html: sectUnav()};
+    if (o.kind !== 'OK') return {status: 'UNAVAILABLE', html: AG.gate(o, url || '')};
+    var j = isObj(o.json) ? o.json : {};
+    var s = sec(j[key]) || sec(j[agent]);          // the schema-absent shape names one section for the whole route
+    if (!s) return {status: 'UNAVAILABLE', html: CC.unavLine("the route returned no '" + key + "' section")};
+    if (s.status === 'UNAVAILABLE') return {status: 'UNAVAILABLE', html: CC.unavLine(s.why)};
+    if (s.status === 'EMPTY') return {status: 'EMPTY', html: CC.emptyLine(s.why)};
+    var rows = Array.isArray(s.data) ? s.data : (isObj(s.data) ? [s.data] : []);
+    if (!rows.length) return {status: 'EMPTY', html: CC.emptyLine(s.why || 'the section is OK but carried no records')};
+    return {status: 'OK', html: (NOTES[key] || '') + '<p class="note">' + SIM + ' records from the paper session' + (AG.toEpoch(j.last_updated_at) !== null ? ' · last ledger change ' + AG.ts(j.last_updated_at) : '') + '.</p>'
+      + AG.table(rows, COLS[key] || null, {rd: AG.toEpoch(j.as_of)})};
+  }
+  function sessionPanel(o, url) {
+    if (!o || o.kind === 'NOT_DEPLOYED') return {status: 'UNAVAILABLE', html: sectUnav()};
+    if (o.kind !== 'OK') return {status: 'UNAVAILABLE', html: AG.gate(o, url || '')};
+    var j = isObj(o.json) ? o.json : {}, s = sec(j.session), h = sec(j.health), en = sec(j.enablement), out = '';
+    if (!s) return {status: 'UNAVAILABLE', html: CC.unavLine("the route returned no 'session' section")};
+    if (s.status === 'OK' && isObj(s.data)) {
+      var d = s.data;
+      out += '<dl class="pdl">' + [['session', esc(d.session_id || '?')], ['started', d.started_at ? AG.ts(d.started_at) + ' (' + esc(nyTime(d.started_at)) + ')' : CC.nr('no start time')],
+        ['status', esc(d.status || '?')], ['simulator', esc(d.simulator_version || '?')], ['frozen config', esc(String(d.config_sha || '?').slice(0, 12))],
+        ['reporting time zone', esc(d.reporting_tz || '?')]].map(function (p) { return '<dt>' + p[0] + '</dt><dd>' + p[1] + '</dd>'; }).join('') + '</dl>'
+        + (d.frozen ? '<p class="note">' + esc(d.frozen) + '</p>' : '');
+    } else out += s.status === 'EMPTY' ? CC.emptyLine(s.why) : CC.unavLine(s.why);
+    if (h) {
+      if (h.status === 'OK' && isObj(h.data)) {
+        var hd = h.data, exp = num(hd.mutation_attempts_expected) ? hd.mutation_attempts_expected : 0, n = hd.mutation_attempts;
+        var mut = num(n) ? (n > exp ? '<b class="neg">' + n + ' (expected ' + exp + ')</b>' : n + ' (expected ' + exp + ')') : 'not reported';
+        out += '<p class="note">Health: last heartbeat ' + (hd.heartbeat_at ? AG.ts(hd.heartbeat_at) : 'none yet') + ' · ' + (num(hd.passes) ? hd.passes : '?') + ' pass(es) · ' + (num(hd.errors) ? hd.errors : '?') + ' error(s) · venue mutation attempts from the paper path: ' + mut + (hd.last_error ? ' · last error: ' + esc(hd.last_error) : '') + '</p>';
+      } else out += '<p class="note">Health: ' + esc(h.status) + ' — ' + esc(h.why || 'no reason given') + '</p>';
+    }
+    if (en && isObj(en.data)) {
+      var e = en.data;
+      out += '<p class="note">Enablement: ' + (e.enabled === true ? '<b>ENABLED</b>' : '<b class="neg">NOT ENABLED</b>' + (e.refusal ? ' — ' + esc(e.refusal) : ''))
+        + ' · environment flag ' + esc(e.env_flag || '?') + ' ' + (e.env_on === true ? 'on' : e.env_on === false ? 'off' : 'not reported') + ' · control row ' + (e.control_on === true ? 'on' : e.control_on === false ? 'off' : 'absent') + '</p>';
+    }
+    return {status: s.status, html: out};
+  }
+  CC.paper = {FIELDS: FIELDS, RUNNING: RUNNING, UNAV: UNAV, SECT_UNAV: SECT_UNAV, COLS: COLS, KEEP: KEEP, banner: banner, account: account, drawdown: drawdown,
+    ledger: ledger, ledgerRow: ledgerRow, posParts: posParts, section: section, sessionPanel: sessionPanel, nyTime: nyTime, iso: iso,
+    newState: newState, fromAccount: fromAccount, onEvent: onEvent, view: view, entries: entries};
 })(AG, CC);
 """
 
@@ -1338,56 +1583,74 @@ PAPER_BOOT_JS = r"""
   'use strict';
   var E = Object.assign({}, AG.ENDPOINTS, %%PAPER_EP%%), F = fetch.bind(window);
   var $ = function (id) { return document.getElementById(id); };
-  var st = {vals: null, es: null, lastId: null, retry: 0, timer: null};
+  var P = CC.paper, S = P.newState(), prev = null, es = null, opened = false, retry = 0, timer = null, acctO = null, sessO = null;
   function setPanel(id, status, html) {
     var p = $(id); if (!p) return;
     p.setAttribute('data-status', status);
     var pl = p.querySelector('[data-pill]'); if (pl) pl.outerHTML = CC.pill(status);
     var b = p.querySelector('[data-body]'); if (b) { b.innerHTML = html; if (CC.labelize) CC.labelize(b); }
   }
-  function setBanner(o) { var b = CC.paper.banner(o), el = $('paper-banner'); if (el) { el.setAttribute('data-state', b.state); el.textContent = b.text; } }
-  function conn(state) { var el = $('paper-conn'); if (!el) return; el.setAttribute('data-conn', state); el.textContent = state + ' · ' + new Date().toISOString().slice(11, 19) + 'Z'; }
-  function renderAccount(j, entries) {
-    var r = CC.paper.account(j, st.vals); st.vals = r.values || st.vals;
-    var keep = $('paper-ledger') ? $('paper-ledger').innerHTML : null;
-    setPanel('p-paper-account', r.status, r.html + CC.paper.ledger(entries || []));
-    if (keep !== null && !entries && $('paper-ledger')) $('paper-ledger').innerHTML = keep;
+  function setBanner() { var b = P.banner(acctO, sessO), el = $('paper-banner'); if (el) { el.setAttribute('data-state', b.state); el.textContent = b.text; } }
+  function conn(state, note) { var el = $('paper-conn'); if (!el) return; el.setAttribute('data-conn', state); el.textContent = state + ' · ' + (note || new Date().toISOString().slice(11, 19) + 'Z'); }
+  function paint() {
+    var r = P.account(P.view(S), prev); if (r.values) prev = r.values;
+    var l = S.ledgerSec;
+    setPanel('p-paper-account', r.status, r.html + P.drawdown(S.drawdown) + P.ledger(P.entries(S), S.fresh, l && l.status !== 'OK' ? l.status + ' · ' + (l.why || 'no reason given') : null));
   }
-  function stream() {
-    if (!window.EventSource) { conn('DISCONNECTED'); return; }
-    var url = E.paper_stream + (st.lastId ? '?last_event_id=' + encodeURIComponent(st.lastId) : '');
-    var es = st.es = new EventSource(url);
-    es.onopen = function () { st.retry = 0; conn('LIVE'); };
-    es.addEventListener('account', function (ev) { st.lastId = ev.lastEventId || st.lastId; try { var j = JSON.parse(ev.data); setBanner({kind: 'OK', json: j}); renderAccount(j, null); } catch (_) {} });
-    es.addEventListener('ledger', function (ev) {
-      st.lastId = ev.lastEventId || st.lastId;
-      try { var e = JSON.parse(ev.data), tb = $('paper-ledger'); if (tb) { if (tb.querySelector('td[colspan]')) tb.innerHTML = ''; tb.insertAdjacentHTML('afterbegin', CC.paper.ledgerRow(e, true)); if (CC.labelize) CC.labelize(tb); } } catch (_) {}
-    });
-    es.onerror = function () {
-      if (es.readyState === 2) {                // closed: reconnect ourselves, resuming from the last id
-        conn('DISCONNECTED'); es.close();
-        clearTimeout(st.timer); st.timer = setTimeout(function () { conn('RECONNECTING'); stream(); }, Math.min(30000, 1000 * Math.pow(2, st.retry++)));
-      } else conn('RECONNECTING');               // the browser retries with Last-Event-ID
+  function frame(src, name) {
+    return function (ev) {
+      if (src !== es) return;
+      var d; try { d = JSON.parse(ev.data); } catch (_) { return; }
+      var what = P.onEvent(S, name, d);
+      if (what === 'heartbeat') conn('LIVE', 'server heartbeat ' + (P.iso(S.beat) || 'without a time'));
+      else if (what === 'unavailable') { src.close(); es = null; conn('UNAVAILABLE', S.streamWhy); }
+      else if (what === 'figures' || what === 'replay') paint();
     };
   }
+  // The first connection takes the server's snapshot and lets the browser resume
+  // by Last-Event-ID; after the browser gives up, a manual reconnect resumes
+  // from the last sequence this page holds with ?last=<sequence>.
+  function stream() {
+    if (!window.EventSource) { conn('DISCONNECTED', 'this browser has no EventSource'); return; }
+    var url = E.paper_stream + (opened && S.seq !== null ? '?last=' + encodeURIComponent(S.seq) : '');
+    var src = es = new EventSource(url); opened = true;
+    src.onopen = function () { if (src === es) { retry = 0; conn('LIVE'); } };
+    ['snapshot', 'ledger', 'heartbeat', 'unavailable'].forEach(function (n) { src.addEventListener(n, frame(src, n)); });
+    src.onerror = function () {
+      if (src !== es) return;
+      if (src.readyState === 2) {
+        conn('DISCONNECTED'); src.close(); es = null;
+        clearTimeout(timer); timer = setTimeout(function () { conn('RECONNECTING'); stream(); }, Math.min(30000, 1000 * Math.pow(2, retry++)));
+      } else conn('RECONNECTING');
+    };
+  }
+  async function sections() {
+    var routes = {};
+    [].forEach.call(document.querySelectorAll('[data-paper-route]'), function (p) { var u = p.getAttribute('data-paper-route'); (routes[u] = routes[u] || []).push(p); });
+    await Promise.all(Object.keys(routes).map(async function (u) {
+      var r = await AG.load(u, F);
+      if (u === E.paper_session) { sessO = r; setBanner(); }
+      routes[u].forEach(function (p) {
+        var k = p.getAttribute('data-paper-key');
+        var s = k === 'session' ? P.sessionPanel(r, u) : P.section(p.getAttribute('data-paper-agent'), k, r, u);
+        setPanel(p.id, s.status, s.html);
+      });
+    }));
+  }
   async function load() {
-    var o = await AG.load(E.paper_account, F);
-    setBanner(o);
-    if (o.kind !== 'OK') {
-      conn(o.kind === 'NOT_DEPLOYED' ? 'UNAVAILABLE' : 'DISCONNECTED');
-      setPanel('p-paper-account', 'UNAVAILABLE', o.kind === 'NOT_DEPLOYED' ? '<div class="plain"><p class="big">UNAVAILABLE · ' + CC.paper.UNAV + '</p><p class="mute">No paper figure is shown: none was sent. This is not a zero balance.</p></div>' : AG.gate(o, E.paper_account));
+    acctO = await AG.load(E.paper_account + '?entries=' + P.KEEP, F);
+    setBanner();
+    if (acctO.kind !== 'OK') {
+      if (!es) conn(acctO.kind === 'NOT_DEPLOYED' ? 'UNAVAILABLE' : 'DISCONNECTED', acctO.kind === 'NOT_DEPLOYED' ? P.UNAV : (acctO.why || acctO.kind));
+      setPanel('p-paper-account', 'UNAVAILABLE', acctO.kind === 'NOT_DEPLOYED' ? '<div class="plain"><p class="big">UNAVAILABLE · ' + P.UNAV + '</p><p class="mute">No paper figure is shown: none was sent. This is not a zero balance.</p></div>' : AG.gate(acctO, E.paper_account));
     } else {
-      st.lastId = o.json.last_event_id || null;
-      var l = await AG.load(E.paper_ledger + '?limit=50', F);
-      renderAccount(o.json, l.kind === 'OK' ? (l.json.entries || []) : []);
-      if (!st.es) stream();
+      P.fromAccount(S, acctO.json); paint();
+      var a = acctO.json.account;
+      if (!es) { if (a && a.status !== 'UNAVAILABLE') stream(); else conn('UNAVAILABLE', (a && a.why) || 'the account read named no reason'); }
     }
-    [].forEach.call(document.querySelectorAll('[data-paper-route]'), async function (p) {
-      var r = await AG.load(p.getAttribute('data-paper-route'), F);
-      var s = CC.paper.section(p.id.replace('p-paper-', ''), r); setPanel(p.id, s.status, s.html);
-    });
+    await sections();
   }
   load();
-  setInterval(function () { if (!document.hidden && !st.es) load(); }, 60000);
+  setInterval(function () { if (!document.hidden) load(); }, 60000);
 })(AG, CC);
 """

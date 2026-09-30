@@ -25,6 +25,12 @@ database:
     whole-position code, fully and partially hedged, labelled DEMONSTRATION;
   * Audrey's chat shows FALLBACK MODE (conversational mode pending) with no
     provider key, and never a simulated exchange.
+  * the paper session: one account panel, a session panel and each agent's
+    sections of its one /api/command/paper/<agent> route, read in the
+    server's own shapes (balances(), entry_view(), the stream's snapshot /
+    ledger / heartbeat / unavailable frames); a null figure stays NOT STATED
+    with the server's basis, figures move only forward in ledger sequence, a
+    replay is dropped, and nothing the server did not send is drawn.
 
 node and RN1X_TEST_DSN are REQUIRED where used: their absence fails loudly
 rather than skipping (a skipped proof is how an unrendered record ships).
@@ -1203,99 +1209,436 @@ def test_the_candidate_is_labelled_and_credited_on_the_derek_page(monkeypatch):
 
 # ═════════════════════════════════════════════════════════════════════
 # THE PAPER SESSION: LIVE MARKET DATA, SIMULATED EXECUTION
+#
+# The server is authoritative. These fixtures are in the shapes that
+# api/command_paper.py, bettor_paper_ledger.py (balances, entry_view,
+# order_view) and bettor_paper_readmodel.py write, read from that code;
+# test_command_centre_paper_contract.py rebuilds them from the real modules
+# whenever those are importable (the paper-session change), and fails on drift.
 # ═════════════════════════════════════════════════════════════════════
+import copy  # noqa: E402
 
-ACCT = {"session": {"active": True, "reason": None, "starting_bankroll_usd": 500000,
-                    "started_at": "2026-09-30T13:30:00Z", "heartbeat_at": "2026-09-30T21:00:00Z"},
-        "account": {"cash_usd": 498000.0, "reserved_cash_usd": 1000.0, "available_cash_usd": 497000.0,
-                    "open_position_value_usd": 2100.0, "total_equity_usd": 500100.0,
-                    "realized_pnl_usd": 0.0, "unrealized_pnl_usd": 100.0},
-        "marks": {"status": "STALE", "as_of": "2026-09-30T20:59:00Z", "stale_positions": 1,
-                  "unavailable_positions": 0, "why": "one book older than 30 s"},
-        "updated_at": "2026-09-30T21:00:01Z", "last_event_id": "42"}
+T0 = 1_790_798_400.0                      # 2026-09-30T20:00:00Z = 16:00:00 EDT
+DATA_LABEL = "LIVE MARKET DATA / SIMULATED EXECUTION"
+LABELS = {"market_data": "LIVE_MARKET_DATA", "execution": "SIMULATED_EXECUTION",
+          "money": "FICTIONAL_USD_NOT_REAL_MONEY", "real_money_submission": "DISABLED"}
+ACCOUNT_ID = "paper_acct_main"
+PSLUG = "aec-mlb-nyy-bos-2026-10-02"
+GROUP = "paper_grp_1"
+PKEY = "paperpos:%s:%s:%s:LONG" % (ACCOUNT_ID, GROUP, PSLUG)
+ORDER_ID = "paperord:0123456789abcdef01234567"
+FILL_ID = "paperfill:0123456789abcdef01234567"
+MARK_METHOD = ("TOP_OF_BOOK_EXIT_PRICE: what closing one contract would receive at the best "
+               "displayed level of the side a close consumes (bettor_book_snapshot.exit_ladder), "
+               "from the paper path's latest observed book; no depth adjustment")
+UNAV_SCHEMA = {"status": "UNAVAILABLE", "why": "MIGRATION_171_IS_NOT_APPLIED", "data": None}
+
+
+def _entry(seq, kind, cash_d, res_d, cash_a, res_a, at, **kw):
+    """bettor_paper_ledger.entry_view()"""
+    e = {"sequence": seq, "kind": kind, "idempotency_key": "%s:%s" % (kind, kw.get("order_id") or seq),
+         "account_id": ACCOUNT_ID, "session_id": "paper_session_20260930T133000Z",
+         "cash_delta_usd": cash_d, "reserved_delta_usd": res_d, "cash_after_usd": cash_a,
+         "reserved_after_usd": res_a, "available_after_usd": round(cash_a - res_a, 6),
+         "order_id": None, "fill_id": None, "group_id": None, "position_key": None,
+         "settlement_key": None, "corrects_seq": None, "event_source": "PAPER_LEDGER",
+         "simulator_version": None, "data_label": "LIVE_MARKET_DATA / SIMULATED_EXECUTION",
+         "detail": {}, "committed_at": at}
+    e.update(kw)
+    return e
+
+
+E1 = _entry(1, "INITIAL_FUNDING", 500000.0, 0.0, 500000.0, 0.0, T0 - 23400.0,
+            detail={"why": "owner-authorized fictional bankroll, funded once"})
+E2 = _entry(2, "ORDER_SUBMITTED", 0.0, 500.5, 500000.0, 500.5, T0 + 2, order_id=ORDER_ID,
+            group_id=GROUP, simulator_version="PAPER_SIM_V1",
+            detail={"role": "ENTRY", "qty": 1000.0, "limit_price": 0.5,
+                    "reservation_is": "limit x qty + max fees; not a purchase"})
+E3 = _entry(3, "FILL", -400.2, -400.2, 499599.8, 100.3, T0 + 3, order_id=ORDER_ID, fill_id=FILL_ID,
+            group_id=GROUP, position_key=PKEY, event_source="SIMULATOR", simulator_version="PAPER_SIM_V1",
+            detail={"role": "ENTRY", "qty": 800.0, "price": 0.5, "fee_usd": 0.2,
+                    "basis": "DEPTH_WALK_WITHIN_LIMIT", "reservation_released_usd": 400.2})
+E4 = _entry(4, "RESERVATION_RELEASED", 0.0, -100.3, 499599.8, 0.0, T0 + 4, order_id=ORDER_ID,
+            group_id=GROUP, simulator_version="PAPER_SIM_V1",
+            detail={"reason": "IOC_REMAINDER", "state": "CANCELED", "unfilled_qty": 200.0})
+ENTRIES = [E4, E3, E2, E1]                # latest_entries(): newest first
+
+POSITION = {                              # balances()["open_positions"][0], no mark
+    "position_key": PKEY, "group_id": GROUP, "us_market_slug": PSLUG, "holding_side": "LONG",
+    "fixture": "NYY @ BOS", "label": {}, "bought_qty": 800.0, "sold_qty": 0.0, "settled_qty": 0.0,
+    "open_qty": 800.0, "avg_cost_per_contract_incl_fees": 0.50025, "acquisition_cost_usd": 400.2,
+    "buy_fees_usd": 0.2, "sale_proceeds_net_usd": 0.0, "sale_fees_usd": 0.0, "settlement": None,
+    "cost_basis_usd": 400.2, "realized_pnl_usd": 0.0, "first_fill_at": T0 + 3, "last_fill_at": T0 + 3,
+    "mark": {"status": "UNAVAILABLE", "price": None, "why": "NO_OBSERVED_BOOK_FOR_THIS_MARKET"},
+    "marked_value_usd": None, "unrealized_pnl_usd": None}
+
+BAL_UNMARKED = {                          # bettor_paper_ledger.balances(), a mark missing
+    "ok": True, "version": "PAPER_LEDGER_V1", "account_id": ACCOUNT_ID, "data_label": DATA_LABEL,
+    "labels": LABELS, "currency": "SIMULATED_USD", "as_of": T0 + 60, "last_updated_at": T0 + 4,
+    "last_sequence": 4, "starting_cash_usd": 500000.0, "cash_usd": 499599.8, "reserved_usd": 0.0,
+    "reserved_is": "part of cash, not extra", "available_usd": 499599.8,
+    "open_positions": [POSITION], "open_position_value_usd": None,
+    "open_position_value_marked_only_usd": 0.0, "marks_complete": False,
+    "unmarked_positions": [PKEY], "unmarked_cost_basis_usd": 400.2, "stale_marks": [],
+    "total_equity_usd": None, "equity_excluding_unmarked_usd": 499599.8,
+    "equity_basis": ("INCOMPLETE: 1 open position(s) have no available mark; total equity is not "
+                     "stated and the marked-only figure excludes them"),
+    "realized_pnl_usd": 0.0, "unrealized_pnl_usd": None, "unrealized_pnl_marked_only_usd": 0.0,
+    "fees_paid_usd": 0.2, "mark_method": MARK_METHOD, "mark_stale_after_s": 300.0,
+    "ledger_entries": 4, "ledger_consistent": True, "real_money_submission": "DISABLED"}
+
+MARK_STALE = {"status": "STALE", "price": 0.52, "source": "paper_book_observations:7",
+              "observed_at": T0 - 400, "age_s": 460.0, "stale": True, "method": MARK_METHOD}
+BAL_MARKED = copy.deepcopy(BAL_UNMARKED)  # every position marked, one mark stale
+BAL_MARKED["open_positions"][0].update(mark=MARK_STALE, marked_value_usd=416.0, unrealized_pnl_usd=15.8)
+BAL_MARKED.update(open_position_value_usd=416.0, open_position_value_marked_only_usd=416.0,
+                  marks_complete=True, unmarked_positions=[], unmarked_cost_basis_usd=0.0,
+                  stale_marks=[PKEY], total_equity_usd=500015.8, equity_excluding_unmarked_usd=500015.8,
+                  equity_basis="cash + marked open-position value", unrealized_pnl_usd=15.8,
+                  unrealized_pnl_marked_only_usd=15.8)
+
+BAL_AT_2 = copy.deepcopy(BAL_UNMARKED)    # after entry 2: no position yet
+BAL_AT_2.update(last_updated_at=T0 + 2, last_sequence=2, cash_usd=500000.0, reserved_usd=500.5,
+                available_usd=499499.5, open_positions=[], open_position_value_usd=0.0,
+                marks_complete=True, unmarked_positions=[], unmarked_cost_basis_usd=0.0,
+                total_equity_usd=500000.0, equity_excluding_unmarked_usd=500000.0,
+                equity_basis="cash + marked open-position value", unrealized_pnl_usd=0.0,
+                fees_paid_usd=0.0, ledger_entries=2)
+
+SESSION = {"active": True, "reason": None, "session_id": "paper_session_20260930T133000Z",
+           "started_at": T0 - 23400.0, "starting_cash_usd": 500000.0, "last_heartbeat_at": T0 + 55,
+           "real_money_submission": "DISABLED"}
+DRAWDOWN = {"snapshots": 12, "skipped_incomplete_marks": 2, "peak_equity_usd": 500120.0,
+            "current_equity_usd": 500015.8, "current_drawdown_usd": 104.2, "max_drawdown_usd": 180.0,
+            "max_drawdown_pct": 0.035992,
+            "basis": ("peak-to-trough over paper_equity_snapshots (one per paper pass), marks as in "
+                      "bettor_paper_ledger.MARK_METHOD")}
+
+
+def _ok(data):
+    return {"status": "OK", "why": None, "data": data}
+
+
+def _account(bal=BAL_MARKED, entries=ENTRIES, session=SESSION):
+    """GET /api/command/paper/account (account_payload)"""
+    return {"data_label": DATA_LABEL, "labels": LABELS, "as_of": T0 + 60, "account_id": ACCOUNT_ID,
+            "account": _ok(bal), "ledger": _ok(entries), "session": session,
+            "last_updated_at": bal["last_updated_at"], "drawdown": _ok(DRAWDOWN)}
+
+
+ACCOUNT_NO_SCHEMA = {"data_label": DATA_LABEL, "labels": LABELS, "as_of": T0, "account_id": ACCOUNT_ID,
+                     "account": UNAV_SCHEMA, "ledger": UNAV_SCHEMA, "last_updated_at": None}
+
+
+def _frames():
+    """stream_events(): a snapshot at entry 2, then entries 3 and 4 (the batch's last carries balances)"""
+    snap = {"data_label": DATA_LABEL, "labels": LABELS, "sequence": 2, "balances": BAL_AT_2,
+            "latest_entries": [E2, E1], "last_updated_at": T0 + 2}
+    led = []
+    for e, last in ((E3, False), (E4, True)):
+        f = {"data_label": DATA_LABEL, "labels": LABELS, "sequence": e["sequence"], "entry": e,
+             "running_balances": {"cash_usd": e["cash_after_usd"], "reserved_usd": e["reserved_after_usd"],
+                                  "available_usd": e["available_after_usd"]},
+             "committed_at": e["committed_at"], "last_updated_at": e["committed_at"]}
+        if last:
+            f["balances"] = BAL_UNMARKED
+        led.append(f)
+    beat = {"data_label": DATA_LABEL, "labels": LABELS, "sequence": 4, "at": T0 + 20}
+    unav = {"data_label": DATA_LABEL, "labels": LABELS, "why": "MIGRATION_171_IS_NOT_APPLIED"}
+    return {"snapshot": snap, "ledger": led, "heartbeat": beat, "unavailable": unav}
+
+
+def _base():
+    return {"data_label": DATA_LABEL, "labels": LABELS, "as_of": T0 + 60,
+            "paper_only": "paper totals; never mixed with funded totals"}
+
+
+DECISION = {"decision_id": "paperdec:1", "session_id": "paper_session_20260930T133000Z",
+            "decided_at": T0 + 1, "valuation_id": 91, "us_market_slug": PSLUG, "holding_side": "LONG",
+            "intent": "ORDER_INTENT_BUY_LONG", "fixture": "NYY @ BOS", "label": {}, "verdict": "ENTER",
+            "refusal": None, "refusals": [], "p_internal": 0.561, "internal_model": "M1",
+            "p_pinnacle": 0.548, "pinnacle": {}, "p_blended": 0.556, "book_obs_id": 7, "book": {},
+            "proposed_qty": 1000.0, "limit_price": 0.5, "economics": {}, "qualification_gaps": [],
+            "policy_version": "P1", "alternatives": [], "optimistic": False,
+            "simulator_version": "PAPER_SIM_V1"}
+DEREK_PAYLOAD = dict(_base(), opportunities=_ok([DECISION]),
+                     refusal_summary_24h=_ok([{"verdict": "ENTER", "reason": "ENTER", "n": 1}]),
+                     orders={"status": "EMPTY", "why": "NO_PAPER_ENTRY_ORDER: no decision said ENTER, "
+                             "or none has been simulated yet", "data": []},
+                     fills={"status": "EMPTY", "why": "NO_SIMULATED_ENTRY_FILL", "data": []},
+                     handoffs={"status": "EMPTY", "why": "NO_HANDOFF: Xavier takes a group from its first "
+                               "simulated fill", "data": []},
+                     last_updated_at=T0 + 4)
+XAVIER_PAYLOAD = dict(_base(), positions=_ok(BAL_UNMARKED["open_positions"]),
+                      standing_orders={"status": "EMPTY", "why": "NO_PAPER_MANAGEMENT_ORDER", "data": []},
+                      recommendations={"status": "EMPTY", "why": "NO_XAVIER_PAPER_REVIEW_YET", "data": []},
+                      last_updated_at=T0 + 4)
+AUDREY_PAYLOAD = dict(_base(), daily_reports={"status": "EMPTY", "why": "NO_PAPER_DAILY_REPORT_YET", "data": []},
+                      audit_entries={"status": "EMPTY", "why": "NO_PAPER_AUDIT_FINDING", "data": []},
+                      last_updated_at=T0 + 4)
+ENABLED = {"env_flag": "PAPER_SESSION", "env_on": True, "control_on": True, "control_why": "owner",
+           "control_updated_by": "owner", "enabled": True, "refusal": None}
+HEALTH = {"heartbeat_at": T0 + 55, "passes": 41, "errors": 0, "mutation_attempts": 0,
+          "mutation_attempts_expected": 0, "last_mutation_attempt": None, "last_pass": {},
+          "last_error": None, "recent_heartbeats": []}
+SESSION_ROW = {"session_id": "paper_session_20260930T133000Z", "account_id": ACCOUNT_ID,
+               "started_at": T0 - 23400.0, "config": {"reporting_tz": "America/New_York"},
+               "config_sha": "a" * 64, "simulator_version": "PAPER_SIM_V1",
+               "reporting_tz": "America/New_York", "status": "ACTIVE",
+               "frozen": "config, simulator version, start and account are frozen by migration 171's trigger"}
+SESSION_PAYLOAD = dict(_base(), enablement=_ok(ENABLED), session=_ok(SESSION_ROW), health=_ok(HEALTH),
+                       mutation_attempts=0, heartbeats=[], last_updated_at=T0 + 55)
+SESSION_PAYLOAD_OFF = dict(_base(), enablement=_ok(dict(ENABLED, env_on=False, enabled=False,
+                                                       refusal="PAPER_SESSION_ENVIRONMENT_FLAG_IS_NOT_ON")),
+                           session={"status": "EMPTY", "why": "NO_ACTIVE_PAPER_SESSION: "
+                                    "PAPER_SESSION_ENVIRONMENT_FLAG_IS_NOT_ON", "data": None},
+                           health={"status": "EMPTY", "why": "NO_ACTIVE_PAPER_SESSION", "data": None},
+                           last_updated_at=T0 + 4)
+
+
+def _j(v):
+    return json.dumps(v)
 
 
 @pytest.mark.parametrize("kind", KINDS)
-def test_every_page_carries_the_same_paper_account_and_its_own_sections(monkeypatch, kind):
+def test_every_page_carries_the_same_paper_account_and_its_own_route_sections(monkeypatch, kind):
     c, _ = _client(monkeypatch)
     html = c.get(P.PAGE_PATHS[kind], headers={"X-Admin-Token": _Cfg.admin_token}).text
     assert 'id="paper-banner" data-state="READING"' in html and 'id="p-paper-account"' in html
     assert "LIVE MARKET DATA · SIMULATED EXECUTION" in html
+    # one GET per agent route; each panel is one of its sections
     for key, _t in CCP.PAPER_SECTIONS[kind]:
-        assert 'data-paper-route="/api/command/paper/%s/%s"' % (kind, key) in html
+        assert ('data-paper-route="/api/command/paper/%s" data-paper-agent="%s" data-paper-key="%s"'
+                % (kind, kind, key)) in html
+    assert 'data-paper-route="/api/command/paper/session" data-paper-agent="session" data-paper-key="session"' in html
+    for other in KINDS:
+        if other != kind:
+            assert 'data-paper-route="/api/command/paper/%s"' % other not in html
+    assert "/api/command/paper/%s/" % kind not in html
+    assert "/api/command/paper/ledger" not in html and '"paper_ledger"' not in html
     # no figure the server did not send: not even the starting bankroll
     assert "500,000" not in html and "500000" not in html
-    assert "new EventSource(url)" in html and "?last_event_id=" in html
-    for s in ("LIVE", "RECONNECTING", "DISCONNECTED"):
-        assert "conn('%s')" % s in html
+    # the stream: the server's four named events, Last-Event-ID, then ?last=<sequence>
+    assert "new EventSource(url)" in html and "'?last='" in html and "last_event_id" not in html
+    assert "['snapshot', 'ledger', 'heartbeat', 'unavailable'].forEach" in html
+    assert "'?entries=' + P.KEEP" in html
+    for s in ("LIVE", "RECONNECTING", "DISCONNECTED", "UNAVAILABLE"):
+        assert "conn('%s'" % s in html
 
 
-def test_the_paper_banner_is_shown_only_for_an_active_session():
+def test_the_paper_banner_reads_the_session_brief_and_shows_the_bankroll_only_as_sent():
     got = _node("derek", """
-      var acct = %s;
-      var off = JSON.parse(JSON.stringify(acct)); off.session = {active: false, reason: 'market closed'};
-      var nob = JSON.parse(JSON.stringify(acct)); delete nob.session.starting_bankroll_usd;
-      return [CC.paper.banner({kind: 'OK', json: acct}), CC.paper.banner({kind: 'OK', json: off}),
+      var A = %s, NS = %s, OFF = %s;
+      var off = JSON.parse(JSON.stringify(A)); off.session.active = false; off.session.reason = 'PAPER_SESSION_ENVIRONMENT_FLAG_IS_NOT_ON';
+      var mute = JSON.parse(JSON.stringify(A)); mute.session.active = false; mute.session.reason = null;
+      var nob = JSON.parse(JSON.stringify(A)); delete nob.session.starting_cash_usd;
+      return [CC.paper.banner({kind: 'OK', json: A}), CC.paper.banner({kind: 'OK', json: off}),
               CC.paper.banner({kind: 'NOT_DEPLOYED'}), CC.paper.banner({kind: 'UNAVAILABLE', why: 'HTTP 503'}),
+              CC.paper.banner({kind: 'OK', json: NS}), CC.paper.banner({kind: 'OK', json: mute}, {kind: 'OK', json: OFF}),
               CC.paper.banner({kind: 'OK', json: nob}), CC.paper.banner({kind: 'OK', json: {}})];
-    """ % json.dumps(ACCT))
+    """ % (_j(_account()), _j(ACCOUNT_NO_SCHEMA), _j(SESSION_PAYLOAD_OFF)))
     assert got[0] == {"state": "ACTIVE", "text": "LIVE MARKET DATA · SIMULATED EXECUTION · $500,000 STARTING BANKROLL"}
-    assert got[1] == {"state": "OFF", "text": "PAPER SESSION NOT RUNNING — market closed"}
+    assert got[1] == {"state": "OFF", "text": "PAPER SESSION NOT RUNNING — PAPER_SESSION_ENVIRONMENT_FLAG_IS_NOT_ON"}
     assert got[2]["text"] == "PAPER SESSION NOT RUNNING — paper account routes not in this build"
     assert got[3]["state"] == "UNAVAILABLE" and "HTTP 503" in got[3]["text"]
-    assert "STARTING BANKROLL NOT SENT" in got[4]["text"] and "$" not in got[4]["text"]
-    assert got[5]["state"] == "OFF" and "LIVE MARKET DATA" not in got[5]["text"]
+    # the schema-absent payload has no session: its account section names why
+    assert got[4] == {"state": "UNAVAILABLE", "text": "PAPER SESSION NOT RUNNING — MIGRATION_171_IS_NOT_APPLIED"}
+    # no reason in the brief: the session route's own reason
+    assert got[5] == {"state": "OFF", "text": "PAPER SESSION NOT RUNNING — NO_ACTIVE_PAPER_SESSION: "
+                                              "PAPER_SESSION_ENVIRONMENT_FLAG_IS_NOT_ON"}
+    assert "STARTING BANKROLL NOT SENT" in got[6]["text"] and "$" not in got[6]["text"]
+    assert got[7]["state"] == "OFF" and "LIVE MARKET DATA" not in got[7]["text"]
+    for g in got[1:]:
+        assert "500,000" not in g["text"]
 
 
-def test_the_account_shows_the_seven_figures_as_sent_and_flags_what_is_stale():
+def test_the_account_shows_the_seven_figures_by_the_servers_keys_and_flags_a_stale_mark():
     got = _node("audrey", """
       var a = %s;
       var first = CC.paper.account(a, null);
       var same = CC.paper.account(a, first.values);
-      var b = JSON.parse(JSON.stringify(a)); b.account.cash_usd = 497500; b.account.total_equity_usd = 499600; b.account.open_position_value_usd = 2100;
+      var b = JSON.parse(JSON.stringify(a)); b.account.data.cash_usd = 499500; b.account.data.available_usd = 499500; b.account.data.total_equity_usd = 499916;
       var moved = CC.paper.account(b, first.values);
-      var broken = JSON.parse(JSON.stringify(a)); broken.account.total_equity_usd = 1; delete broken.account.unrealized_pnl_usd; delete broken.marks;
+      var broken = JSON.parse(JSON.stringify(a)); broken.account.data.total_equity_usd = 1; delete broken.account.data.realized_pnl_usd; delete broken.account.data.marks_complete; broken.account.data.ledger_consistent = false;
       return {first: first.html, same: same.changed, moved: moved.changed, movedHtml: moved.html, broken: CC.paper.account(broken, null).html};
-    """ % json.dumps(ACCT))
+    """ % _j(_account()))
     for label in ("Cash", "Reserved cash", "Available cash", "Open-position value", "Total equity",
                   "Realized P&amp;L", "Unrealized P&amp;L"):
         assert label + '<span class="sim">SIMULATED</span>' in got["first"], label
-    for fig in ("$498,000.00", "$1,000.00", "$497,000.00", "$2,100.00", "$500,100.00", "+$100.00"):
+    for key, _l in CCP.PAPER_ACCOUNT_FIELDS:
+        assert 'data-fig="%s"' % key in got["first"], key
+    for fig in ("$499,599.80", "$0.00", "$416.00", "$500,015.80", "+$15.80"):
         assert fig in got["first"], fig
     assert "Reconciles: cash + open-position value = total equity" in got["first"]
-    assert '<b class="STALE">STALE</b>' in got["first"] and "1 stale position mark(s)" in got["first"]
-    assert "Last updated" in got["first"] and " ET)" in got["first"]
-    assert got["same"] == []                                        # nothing changed, nothing animates
-    assert got["moved"] == ["cash_usd", "total_equity_usd"]         # only committed changes animate
-    assert got["movedHtml"].count('class="v flash"') == 2
+    assert '<b class="STALE">STALE</b> — 1 position mark(s) older than 300 s, shown and flagged' in got["first"]
+    assert 'title="%s">TOP_OF_BOOK_EXIT_PRICE</span>' % MARK_METHOD.replace("'", "&#39;") in got["first"]
+    assert "Last committed change" in got["first"] and "(Sep 30, 16:00:04 ET)" in got["first"]
+    assert "ledger entry #4 · 4 entries, running balance agrees with the ledger sum" in got["first"]
+    assert "fees paid $0.20" in got["first"] and "session heartbeat" in got["first"]
+    assert "Reserved is part of cash, not extra." in got["first"]
+    assert "real-money submission DISABLED" in got["first"]
+    assert "500,000" not in got["first"]                                    # the bankroll is the banner's, when active
+    assert got["same"] == []                                                # nothing changed, nothing animates
+    assert got["moved"] == ["cash_usd", "available_usd", "total_equity_usd"]   # only committed changes animate
+    assert got["movedHtml"].count('class="v flash"') == 3
     assert "DOES NOT RECONCILE" in got["broken"] and "not sent by the server" in got["broken"]
-    assert "MARK STATUS NOT REPORTED" in got["broken"]
+    assert "MARK STATUS NOT REPORTED" in got["broken"] and "LEDGER INCONSISTENT" in got["broken"]
 
 
-def test_the_ledger_reads_in_new_york_time_with_type_amount_and_balance():
+def test_a_missing_mark_leaves_equity_not_stated_with_the_servers_basis():
+    got = _node("xavier", "return CC.paper.account(%s, null);" % _j(_account(BAL_UNMARKED)))
+    h = got["html"]
+    assert got["status"] == "OK" and h.count('<span class="ns">NOT STATED</span>') == 3
+    assert h.count(BAL_UNMARKED["equity_basis"]) == 3
+    assert "marked-only $499,599.80, excluding unmarked positions" in h        # equity_excluding_unmarked_usd
+    assert "marked-only $0.00, excluding unmarked positions" in h              # open_position_value_marked_only_usd
+    assert '<b class="UNAVAILABLE">INCOMPLETE</b> — 1 open position(s) with no available mark' in h
+    assert "Reconciles" not in h and "DOES NOT RECONCILE" not in h             # nothing to check, nothing recomputed
+    assert got["values"]["total_equity_usd"] is None
+
+
+def test_an_empty_or_unavailable_account_shows_no_figure_and_names_the_reason():
+    empty = {"status": "EMPTY", "why": "THE_PAPER_ACCOUNT_DOES_NOT_EXIST",
+             "data": {"ok": False, "refusal": "THE_PAPER_ACCOUNT_DOES_NOT_EXIST", "data_label": DATA_LABEL,
+                      "labels": LABELS}}
     got = _node("derek", """
-      return CC.paper.ledger([
-        {entry_id: 'L2', at: '2026-09-30T20:15:00Z', type: 'ORDER_SUBMITTED', instrument: {market_slug: 'aec-mlb-nyy-bos-2026-10-02', intent: 'ORDER_INTENT_BUY_LONG'}, amount_usd: -1000, balance_after_usd: 499000},
-        {entry_id: 'L1', at: '2026-09-30T13:30:00Z', type: 'INITIAL_FUNDING', instrument: null, amount_usd: 500000, balance_after_usd: 500000}]);
-    """)
-    assert "Sep 30, 16:15:00 ET" in got and "Sep 30, 09:30:00 ET" in got      # EDT = UTC-4
-    assert "ORDER_SUBMITTED <span class=\"mute\">reserve</span>" in got
-    assert "−$1,000.00" in got and "$499,000.00" in got and "+$500,000.00" in got
-    assert 'data-label-item="slug:aec-mlb-nyy-bos-2026-10-02|ORDER_INTENT_BUY_LONG"' in got
-    empty = _node("derek", "return CC.paper.ledger([]);")
-    assert "No ledger entry has been sent." in empty
+      var e = %s, n = %s;
+      return [CC.paper.account(e, null), CC.paper.account(n, null), CC.paper.account({data_label: 'x'}, null)];
+    """ % (_j(dict(_account(), account=empty)), _j(ACCOUNT_NO_SCHEMA)))
+    assert got[0]["status"] == "EMPTY" and "EMPTY · THE_PAPER_ACCOUNT_DOES_NOT_EXIST" in got[0]["html"]
+    assert got[1]["status"] == "UNAVAILABLE" and "UNAVAILABLE · MIGRATION_171_IS_NOT_APPLIED" in got[1]["html"]
+    assert "the response carried no &#39;account&#39; section" in got[2]["html"]
+    for g in got:
+        assert "$" not in g["html"]
+    assert all("This is not a zero balance" in g["html"] for g in got[:2])
 
 
-def test_a_missing_paper_route_is_unavailable_by_name_and_floors_are_never_realized():
+def test_the_ledger_reads_entry_view_newest_first_in_new_york_time():
+    got = _node("derek", "return CC.paper.ledger(%s);" % _j([E1, E3, E4, E2]))
+    assert "Sep 30, 16:00:04 ET" in got and "Sep 30, 09:30:00 ET" in got      # EDT = UTC-4
+    assert got.index('data-seq="4"') < got.index('data-seq="3"') < got.index('data-seq="2"') < got.index('data-seq="1"')
+    assert 'ORDER_SUBMITTED <span class="mute">reserve</span><br><span class="mute">ENTRY</span>' in got
+    assert 'RESERVATION_RELEASED <span class="mute">release</span><br><span class="mute">IOC_REMAINDER</span>' in got
+    assert 'FILL <span class="mute">purchase</span>' in got and 'INITIAL_FUNDING <span class="mute">funding</span>' in got
+    assert "−$400.20" in got and "+$500.50" in got and "−$100.30" in got     # cash and reserved deltas as sent
+    assert "$499,599.80" in got and "+$500,000.00" in got and "$499,499.50" in got   # after-balances as sent
+    # the fill's position key names the instrument for the shared label resolver
+    assert 'data-label-item="slug:%s|ORDER_INTENT_BUY_LONG"' % PSLUG in got
+    assert got.count("data-label-item=") == 1
+    assert 'data-copy="%s"' % ORDER_ID in got                             # ids stay under Technical details
+    assert "class=\"pnew\"" not in got
+    empty = _node("derek", "return [CC.paper.ledger([]), CC.paper.ledger([], null, 'EMPTY · NO_LEDGER_ENTRIES')];")
+    assert "No ledger entry has been sent." in empty[0] and "EMPTY · NO_LEDGER_ENTRIES" in empty[1]
+
+
+def test_the_stream_moves_figures_only_on_newer_committed_entries_and_drops_replays():
+    got = _node("audrey", """
+      var F = %s, P = CC.paper, st = P.newState(), out = {};
+      var acct = %s;
+      P.fromAccount(st, acct);
+      var r0 = P.account(P.view(st), null); out.seq0 = st.seq;
+      out.w3 = P.onEvent(st, 'ledger', F.ledger[0]);
+      var r3 = P.account(P.view(st), r0.values); out.changed3 = r3.changed; out.html3 = r3.html; out.fresh3 = Object.keys(st.fresh);
+      out.ledger3 = P.ledger(P.entries(st), st.fresh);
+      out.w4 = P.onEvent(st, 'ledger', F.ledger[1]);
+      var r4 = P.account(P.view(st), r3.values); out.changed4 = r4.changed; out.html4 = r4.html; out.seq4 = st.seq;
+      out.wr = P.onEvent(st, 'ledger', F.ledger[0]);                       // a replay after a reconnect
+      var rr = P.account(P.view(st), r4.values); out.changedR = rr.changed; out.freshR = Object.keys(st.fresh);
+      out.n = P.entries(st).length; out.seqR = st.seq;
+      out.wb = P.onEvent(st, 'heartbeat', F.heartbeat); out.beat = st.beat;
+      out.wu = P.onEvent(st, 'unavailable', F.unavailable); out.why = st.streamWhy;
+      var s2 = P.newState(); out.ws = P.onEvent(s2, 'snapshot', F.snapshot);
+      out.snap = P.account(P.view(s2), null).html; out.snapSeq = s2.seq; out.snapN = P.entries(s2).length;
+      var s3 = P.newState(); P.onEvent(s3, 'snapshot', {sequence: 0, balances: {ok: false, refusal: 'THE_PAPER_ACCOUNT_DOES_NOT_EXIST'}, latest_entries: []});
+      out.none = P.account(P.view(s3), null);
+      var s4 = P.newState(); P.fromAccount(s4, acct); P.onEvent(s4, 'ledger', F.ledger[1]);
+      P.fromAccount(s4, acct);                                            // an older poll never moves figures back
+      out.back = P.view(s4).account.data.last_sequence;
+      return out;
+    """ % (_j(_frames()), _j(_account(BAL_AT_2, [E2, E1]))))
+    assert got["seq0"] == 2
+    assert got["w3"] == "figures" and got["changed3"] == ["cash_usd", "reserved_usd"]   # available stayed 499,499.50
+    assert "$499,599.80" in got["html3"] and "$100.30" in got["html3"]
+    assert "current to ledger entry #3" in got["html3"] and "recomputation at entry #2" in got["html3"]
+    assert "Reconciles" not in got["html3"]                   # a partial set is never checked as a whole
+    assert got["fresh3"] == ["3"] and got["ledger3"].count('class="pnew"') == 1
+    assert got["w4"] == "figures" and got["seq4"] == 4
+    assert "current to ledger entry" not in got["html4"]      # the batch's last entry carried full balances
+    assert got["html4"].count("NOT STATED") == 3 and "$499,599.80" in got["html4"]
+    assert got["wr"] == "replay" and got["changedR"] == [] and got["freshR"] == [] and got["n"] == 4 and got["seqR"] == 4
+    assert got["wb"] == "heartbeat" and got["beat"] == T0 + 20
+    assert got["wu"] == "unavailable" and got["why"] == "MIGRATION_171_IS_NOT_APPLIED"
+    assert got["ws"] == "figures" and got["snapSeq"] == 2 and got["snapN"] == 2 and "$499,499.50" in got["snap"]
+    assert got["none"]["status"] == "EMPTY" and "THE_PAPER_ACCOUNT_DOES_NOT_EXIST" in got["none"]["html"]
+    assert "$" not in got["none"]["html"]
+    assert got["back"] == 4
+
+
+def test_each_agent_route_renders_its_sections_and_a_missing_route_is_unavailable_by_name():
     got = _node("xavier", """
-      return [CC.paper.section('inventory', {kind: 'NOT_DEPLOYED'}),
-              CC.paper.section('outcome-pnl', {kind: 'OK', json: {status: 'OK', rows: [{group: 'G1', floor_usd: 200}]}}),
-              CC.paper.section('inventory', {kind: 'OK', json: {status: 'EMPTY', why: 'no paper position yet', rows: []}})];
-    """)
-    assert got[0]["status"] == "UNAVAILABLE" and "paper session routes not in this build" in got[0]["html"]
-    assert got[1]["status"] == "OK" and "never realized P&amp;L" in got[1]["html"]
-    assert got[2]["status"] == "EMPTY" and "no paper position yet" in got[2]["html"]
-    # and the contract they are built against is written down
-    assert set(CCP.PAPER_CONTRACT) >= {"GET /api/command/paper/account", "GET /api/command/paper/stream",
-                                       "GET /api/command/paper/ledger?limit="}
+      var D = %s, X = %s, A = %s, S = CC.paper.section, ok = function (j) { return {kind: 'OK', json: j}; };
+      var noSchema = {data_label: 'x', labels: {}, xavier: %s};
+      return {opp: S('derek', 'opportunities', ok(D)), sum: S('derek', 'refusal_summary_24h', ok(D)), ord: S('derek', 'orders', ok(D)),
+              pos: S('xavier', 'positions', ok(X)), rec: S('xavier', 'recommendations', ok(X)), rep: S('audrey', 'daily_reports', ok(A)),
+              gone: S('xavier', 'positions', {kind: 'NOT_DEPLOYED'}), locked: S('xavier', 'positions', {kind: 'LOCKED'}, '/api/command/paper/xavier'),
+              absent: S('xavier', 'standing_orders', ok(noSchema)), missing: S('xavier', 'nothing_here', ok(X)),
+              cols: Object.keys(CC.paper.COLS)};
+    """ % (_j(DEREK_PAYLOAD), _j(XAVIER_PAYLOAD), _j(AUDREY_PAYLOAD), _j(UNAV_SCHEMA)))
+    assert got["opp"]["status"] == "OK" and 'data-label-item="slug:%s|ORDER_INTENT_BUY_LONG"' % PSLUG in got["opp"]["html"]
+    assert "0.561" in got["opp"]["html"] and "ENTER" in got["opp"]["html"] and '<span class="sim">SIMULATED</span>' in got["opp"]["html"]
+    assert got["sum"]["status"] == "OK"
+    assert got["ord"]["status"] == "EMPTY" and "NO_PAPER_ENTRY_ORDER" in got["ord"]["html"]
+    p = got["pos"]
+    assert p["status"] == "OK" and "never realized P&amp;L" in p["html"]
+    assert '<span class="ns">NO MARK</span>' in p["html"] and "NO_OBSERVED_BOOK_FOR_THIS_MARKET" in p["html"]
+    assert '<span class="ns">NOT STATED</span>' in p["html"] and "$400.20" in p["html"]
+    assert PSLUG not in re.sub(r'<details class="tech">.*?</details>|data-label-item="[^"]*"|data-tech="[^"]*"', "",
+                               p["html"], flags=re.S)
+    assert got["rec"]["status"] == "EMPTY" and "NO_XAVIER_PAPER_REVIEW_YET" in got["rec"]["html"]
+    assert got["rep"]["status"] == "EMPTY" and "NO_PAPER_DAILY_REPORT_YET" in got["rep"]["html"]
+    assert got["gone"]["status"] == "UNAVAILABLE" and "paper session routes not in this build" in got["gone"]["html"]
+    assert got["locked"]["status"] == "UNAVAILABLE" and "/api/command/paper/xavier" in got["locked"]["html"]
+    assert got["absent"]["status"] == "UNAVAILABLE" and "MIGRATION_171_IS_NOT_APPLIED" in got["absent"]["html"]
+    assert "the route returned no &#39;nothing_here&#39; section" in got["missing"]["html"]
+    assert set(got["cols"]) == {k for v in CCP.PAPER_SECTIONS.values() for k, _t in v}
+
+
+def test_the_session_panel_reads_session_health_and_enablement():
+    bad = copy.deepcopy(SESSION_PAYLOAD)
+    bad["health"]["data"]["mutation_attempts"] = 2
+    got = _node("audrey", """
+      var S = CC.paper.sessionPanel, ok = function (j) { return {kind: 'OK', json: j}; };
+      return [S(ok(%s)), S(ok(%s)), S(ok(%s)), S(ok({data_label: 'x', session: %s})), S({kind: 'NOT_DEPLOYED'})];
+    """ % (_j(SESSION_PAYLOAD), _j(bad), _j(SESSION_PAYLOAD_OFF), _j(UNAV_SCHEMA)))
+    on = got[0]["html"]
+    assert got[0]["status"] == "OK" and "paper_session_20260930T133000Z" in on and "PAPER_SIM_V1" in on
+    assert "(Sep 30, 09:30:00 ET)" in on and "venue mutation attempts from the paper path: 0 (expected 0)" in on
+    assert "41 pass(es)" in on and "<b>ENABLED</b>" in on and "environment flag PAPER_SESSION on" in on
+    assert '<b class="neg">2 (expected 0)</b>' in got[1]["html"]
+    assert got[2]["status"] == "EMPTY" and "NO_ACTIVE_PAPER_SESSION: PAPER_SESSION_ENVIRONMENT_FLAG_IS_NOT_ON" in got[2]["html"]
+    assert "NOT ENABLED</b> — PAPER_SESSION_ENVIRONMENT_FLAG_IS_NOT_ON" in got[2]["html"]
+    assert got[3]["status"] == "UNAVAILABLE" and "MIGRATION_171_IS_NOT_APPLIED" in got[3]["html"]
+    assert got[4]["status"] == "UNAVAILABLE" and "paper session routes not in this build" in got[4]["html"]
+
+
+def test_the_written_contract_is_the_servers_routes_and_keys():
+    js = _node("derek", "return {f: CC.paper.FIELDS, r: CC.paper.RUNNING};")
+    assert [tuple(x) for x in js["f"]] == list(CCP.PAPER_ACCOUNT_FIELDS)
+    assert js["r"] == ["cash_usd", "reserved_usd", "available_usd"]
+    k = CCP.PAPER_CONTRACT
+    assert k["GET /api/command/paper/derek"] == ("opportunities", "refusal_summary_24h", "orders", "fills", "handoffs")
+    assert k["GET /api/command/paper/xavier"] == ("positions", "standing_orders", "recommendations")
+    assert k["GET /api/command/paper/audrey"] == ("daily_reports", "audit_entries")
+    assert k["GET /api/command/paper/session"] == ("session", "health", "enablement")
+    assert set(k["GET /api/command/paper/stream"]["events"]) == {"snapshot", "ledger", "heartbeat", "unavailable"}
+    for a in KINDS + ("session",):
+        assert P.ENDPOINTS["paper_" + a] == "/api/command/paper/" + a
+    assert not any(v.startswith("/api/command/paper/") and v.count("/") > 4 for v in P.ENDPOINTS.values())
+    # the fixtures above carry every key the page reads
+    fr = _frames()
+    assert set(CCP.PAPER_BALANCE_KEYS) - {"refusal"} <= set(BAL_UNMARKED)
+    assert set(CCP.PAPER_ENTRY_KEYS) <= set(E3) and set(CCP.PAPER_SESSION_BRIEF_KEYS) <= set(SESSION)
+    for ev, keys in CCP.PAPER_STREAM_EVENTS.items():
+        f = fr[ev][-1] if ev == "ledger" else fr[ev]
+        assert set(keys) <= set(f), ev
     assert set(CCP.VOICE_PROFILES) == set(KINDS)        # voice is designed, not built

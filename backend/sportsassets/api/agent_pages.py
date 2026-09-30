@@ -68,19 +68,17 @@ ENDPOINTS = {
     "characters": "/api/command/agents/static/cc_characters.js",
     "avatar": "/api/command/agents/static/cc_avatar.js",
     "labels": "/api/command/agents/labels",
-    # the paper session (served by the paper-session change; 404 here until
-    # it is merged, and the pages say so): see agent_cc_page.PAPER_CONTRACT
+    # the paper session, as api/command_paper.py serves it (404 in a build
+    # without it, and the pages say so): see agent_cc_page.PAPER_CONTRACT
     "paper_account": "/api/command/paper/account",
     "paper_stream": "/api/command/paper/stream",
-    "paper_ledger": "/api/command/paper/ledger",
+    "paper_session": "/api/command/paper/session",
+    "paper_derek": "/api/command/paper/derek",
+    "paper_xavier": "/api/command/paper/xavier",
+    "paper_audrey": "/api/command/paper/audrey",
 }
-for _agent, _secs in (("derek", ("opportunities", "orders", "fills", "handoffs")),
-                      ("xavier", ("inventory", "standing-orders", "recommendations",
-                                  "outcome-pnl")),
-                      ("audrey", ("portfolio", "daily-report", "audits",
-                                  "improvements"))):
-    for _s in _secs:
-        ENDPOINTS["paper_%s_%s" % (_agent, _s)] = "/api/command/paper/%s/%s" % (_agent, _s)
+PAPER_EP_KEYS = ("paper_account", "paper_stream", "paper_session",
+                 "paper_derek", "paper_xavier", "paper_audrey")
 
 REQUIRED_SECTIONS = {
     "derek": ("status", "versions", "coverage", "subscription",
@@ -1826,7 +1824,7 @@ def _cc_page_html(kind: str) -> str:
               "var E = Object.assign({}, AG.ENDPOINTS, %s)," % _cc_endpoints_js(),
               1)
           + CCP.PAPER_CORE_JS + CCP.PAPER_BOOT_JS.replace(
-              "%%PAPER_EP%%", _json_ep(("paper_account", "paper_stream", "paper_ledger")))
+              "%%PAPER_EP%%", _json_ep(PAPER_EP_KEYS))
           + BOOT_JS)
     chat = CCP.chat_panel_html(CHAT_PANEL_HTML) if kind == "audrey" else ""
     return (_CC_SHELL.replace("%%CSS%%", BASE_CSS + CCP.CC_CSS + CCP.PAPER_CSS)
