@@ -253,6 +253,8 @@ async def _clean(conn):
                        ACCT)
     for k in (FA.AUTHORIZATION_KEY, FA.LIMITS_KEY, FA.ACCOUNT_KEY):
         await conn.execute("DELETE FROM ingestion_state WHERE key=$1", k)
+    from tests._xavier_record_cleanup import purge_xavier_records
+    await purge_xavier_records(conn, ACCT)
 
 
 async def _entry(conn, *, intent_id="fpi-a", qty=10, price=0.62,

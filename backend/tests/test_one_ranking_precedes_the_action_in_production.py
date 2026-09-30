@@ -493,6 +493,8 @@ async def test_a_held_position_is_serviced_with_manage_still_sending_nothing(
         await conn.execute(
             "DELETE FROM ingestion_state WHERE key = ANY($1::text[])",
             [FA.ACCOUNT_KEY, loop.CONTROL_KEY, loop.HEARTBEAT_KEY])
+        from tests._xavier_record_cleanup import purge_xavier_records
+        await purge_xavier_records(conn, ACCT)
         await conn.close()
 
 

@@ -142,6 +142,8 @@ async def _clean(conn):
                        ACCT)
     if await _has(conn, "us_premap"):
         await conn.execute("DELETE FROM us_premap WHERE event_slug=$1", EVENT)
+    from tests._xavier_record_cleanup import purge_xavier_records
+    await purge_xavier_records(conn, ACCT)
 
 
 @pytest.fixture(autouse=True)
