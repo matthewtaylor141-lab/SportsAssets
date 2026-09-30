@@ -59,6 +59,13 @@ ENDPOINTS = {
     "audrey": "/api/command/agents/audrey",
     "chat": "/api/command/agents/audrey/chat",
     "directives": "/api/command/agents/audrey/directives",
+    # the Command Centre pages' extra read-only routes (agents_cc_reads) and
+    # the character module (served by `agents_static` below)
+    "derek_orders": "/api/command/agents/derek/orders",
+    "xavier_standing": "/api/command/agents/xavier/standing-orders",
+    "xavier_payoff": "/api/command/agents/xavier/payoff-demonstration",
+    "audrey_performance": "/api/command/agents/audrey/performance",
+    "characters": "/api/command/agents/static/cc_characters.js",
 }
 
 REQUIRED_SECTIONS = {
@@ -1653,8 +1660,9 @@ BOOT_JS = r"""
     if (busy) return; busy = true;
     var open = [].map.call(document.querySelectorAll('details[open]'), function (d) { var c = d.closest('[id]'); return c && c.id; });
     var o = await AG.load(url, fetch.bind(window));
-    if (o.kind !== 'OK') { app.innerHTML = AG.gate(o, url); readat.textContent = o.kind === 'LOCKED' ? 'locked' : o.kind.toLowerCase().replace('_', ' '); busy = false; return; }
+    if (o.kind !== 'OK') { app.innerHTML = AG.gate(o, url); readat.textContent = o.kind === 'LOCKED' ? 'locked' : o.kind.toLowerCase().replace('_', ' '); busy = false; if (typeof CC !== 'undefined' && CC.onWorkspaceFail) CC.onWorkspaceFail(o); return; }
     app.innerHTML = kind === 'index' ? AG.index(o.json) : AG.workspace(kind, o.json);
+    if (typeof CC !== 'undefined' && CC.onWorkspace) CC.onWorkspace(kind, o.json);
     open.forEach(function (id) { var el = id && document.getElementById(id); if (el) { var d = el.querySelector('details'); if (d) d.open = true; } });
     readat.textContent = AG.readLine(o.json);
     busy = false;
@@ -1679,11 +1687,13 @@ BOOT_JS = r"""
       ev.preventDefault();
       var q = input.value.trim(); if (!q) return;
       log.insertAdjacentHTML('beforeend', '<div class="msg q"><div class="who">MANAGEMENT</div><p>' + AG.esc(q) + '</p></div>');
-      input.value = ''; form.querySelector('button').disabled = true;
+      input.value = ''; form.querySelector('button[type=submit]').disabled = true;
+      if (typeof CC !== 'undefined' && CC.chatPending) CC.chatPending();
       var r = await AG.chat.ask(fetch.bind(window), q, cid);
       if (r.conversationId) cid = r.conversationId;
       log.insertAdjacentHTML('beforeend', r.html); log.scrollTop = log.scrollHeight;
-      form.querySelector('button').disabled = false;
+      if (typeof CC !== 'undefined') { if (r.kind === 'OK' && CC.chatReply) CC.chatReply(String(r.html || '').replace(/<[^>]*>/g, '').length); else if (CC.chatDone) CC.chatDone(); }
+      form.querySelector('button[type=submit]').disabled = false;
     });
   }
   // ── trace view ──────────────────────────────────────────────────
@@ -1763,10 +1773,74 @@ _DESCS = {
 }
 
 
+_CC_SHELL = r"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="robots" content="noindex,nofollow">
+<meta name="color-scheme" content="dark">
+<meta name="description" content="%%DESC%%">
+<title>%%TITLE%% · %%ROLE%% | BETTOR Command</title>
+<style>%%CSS%%</style></head>
+<body class="ag cc ag-%%KIND%%" data-kind="%%KIND%%" data-cc-mode="unavailable">
+<a class="skip" href="#cc-main">Skip to the records</a>
+<header class="top cc-top"><a class="brand" href="/api/command/agents/page"><span class="mark"></span>BETTOR <b>COMMAND</b></a>
+<nav class="cc-nav" aria-label="Agents">%%NAV%%</nav>
+<nav class="cc-sub" aria-label="More"><a href="/api/command/agents/page">All agents</a><a href="/api/command/agents/demo/page">Product demo</a></nav>
+<div class="meta"><span class="ro">READ-ONLY</span><span id="readat">reading&#8230;</span><button id="trace-btn" type="button">Trace</button><button id="refresh" type="button">Refresh</button></div></header>
+<main id="cc-main" tabindex="-1">
+<div class="cc-banner" role="alert" id="cc-banner">%%BANNER%%</div>
+<div class="cc-hero">%%STAGE%%%%BRIEF%%</div>
+%%PANELS%%
+<section class="card wide" id="trace" hidden aria-label="Trace linked records" style="margin-top:16px"><header><span class="idx">&#8594;</span><div class="ttl"><h3>Trace linked records</h3><code class="key">entry decision &#8594; handoff &#8594; Xavier decisions &#8594; audit &#8594; directive &#8594; task &#8594; candidate</code></div><button id="trace-close" type="button">Close</button></header>
+<p class="note">Follows the ids the records carry (entry_intent_id, portfolio_group_id, xavier_decision_id, directive_id, task_id, candidate_id, and evidence references) across the four same-origin reads. Every step says what linked it.</p><div id="trace-body"></div></section>
+<h2 class="cc-h2" id="full-record">Full workspace record</h2>
+<div id="app"><p class="boot">Reading %%ENDPOINT%% &#8230;</p></div></main>
+<p class="foot">Presentation of recorded state. This page sends no order and holds no credential; it reads %%ENDPOINT%% with the COMMAND session. The character is an original stylised illustration of an AI agent; its pose follows the agent_status record and never stands in for data. UNKNOWN is not zero; EMPTY is not success.</p>
+<script>%%JS%%</script>
+<script type="module">%%LOADER%%</script></body></html>"""
+
+
+def _cc_page_html(kind: str) -> str:
+    from . import agent_cc_page as CCP
+    js = (CORE_JS + COMMON_JS + TRACE_JS
+          + {"derek": DEREK_JS, "xavier": XAVIER_JS, "audrey": AUDREY_JS}[kind]
+          + CCP.CC_CORE_JS + CCP.CC_BOOT_JS.replace(
+              "var E = AG.ENDPOINTS,",
+              "var E = Object.assign({}, AG.ENDPOINTS, %s)," % _cc_endpoints_js(),
+              1)
+          + BOOT_JS)
+    chat = CCP.chat_panel_html(CHAT_PANEL_HTML) if kind == "audrey" else ""
+    return (_CC_SHELL.replace("%%CSS%%", BASE_CSS + CCP.CC_CSS)
+            .replace("%%JS%%", js)
+            .replace("%%LOADER%%", CCP.LOADER_JS.replace(
+                "%%CHARACTERS%%", ENDPOINTS["characters"]))
+            .replace("%%NAV%%", CCP.nav_html(kind, PAGE_PATHS))
+            .replace("%%BANNER%%", CCP.UNAVAILABLE_BANNER)
+            .replace("%%STAGE%%", CCP.stage_html(kind, ENDPOINTS[kind]))
+            .replace("%%BRIEF%%", CCP.brief_html(kind))
+            .replace("%%PANELS%%", CCP.panels_html(kind, chat))
+            .replace("%%ENDPOINT%%", ENDPOINTS[kind])
+            .replace("%%TITLE%%", _PAGE_TITLES[kind])
+            .replace("%%ROLE%%", CCP.CC_META[kind]["role"].replace("&", "&amp;"))
+            .replace("%%DESC%%", _DESCS[kind])
+            .replace("%%KIND%%", kind))
+
+
+def _cc_endpoints_js() -> str:
+    import json as _json
+    return _json.dumps({k: ENDPOINTS[k] for k in (
+        "derek_orders", "xavier_standing", "xavier_payoff",
+        "audrey_performance")}).replace('"', "'")
+
+
 def page_html(kind: str) -> str:
-    """One self-contained workspace page (no external asset)."""
+    """One workspace page. Derek, Xavier and Audrey are the Command Centre
+    pages (data module inline, character module loaded separately); the
+    index keeps the plain workspace shell."""
     if kind not in _PAGE_TITLES:
         raise KeyError(kind)
+    if kind in ("derek", "xavier", "audrey"):
+        return _cc_page_html(kind)
     js = CORE_JS + COMMON_JS + TRACE_JS
     js += {"index": INDEX_JS, "derek": DEREK_JS, "xavier": XAVIER_JS,
            "audrey": AUDREY_JS}[kind]
@@ -1783,8 +1857,10 @@ def page_html(kind: str) -> str:
 
 def render_js(kind: str) -> str:
     """The pure render code a page carries, without its DOM boot (for tests)."""
+    from . import agent_cc_page as CCP
     return CORE_JS + COMMON_JS + TRACE_JS + {"index": INDEX_JS, "derek": DEREK_JS,
-                                  "xavier": XAVIER_JS, "audrey": AUDREY_JS}[kind]
+                                  "xavier": XAVIER_JS, "audrey": AUDREY_JS}[kind] + (
+        CCP.CC_CORE_JS if kind in ("derek", "xavier", "audrey") else "")
 
 
 LOCKED_PAGE_HTML = r"""<!doctype html>
@@ -1821,11 +1897,66 @@ def _authorised(request: Request) -> bool:
     return True
 
 
-def _serve(request: Request, html_fn) -> HTMLResponse:
+#: The Command Centre pages load ONE same-origin module (the character, over
+#: the vendored three.js build) -- so their script-src adds 'self'. Nothing
+#: else changes: no external origin, connect-src 'self', no form posts.
+CC_PAGE_CSP = ("default-src 'none'; style-src 'unsafe-inline'; "
+               "script-src 'self' 'unsafe-inline'; connect-src 'self'; "
+               "img-src 'self' data:; base-uri 'none'; form-action 'none'")
+
+
+def _cc_headers() -> dict:
+    h = dict(_headers())
+    h["Content-Security-Policy"] = CC_PAGE_CSP
+    return h
+
+
+def _serve(request: Request, html_fn, headers_fn=None) -> HTMLResponse:
     if not _authorised(request):
         return HTMLResponse(content=locked_html(), status_code=401,
                             headers=_headers())
-    return HTMLResponse(content=html_fn(), status_code=200, headers=_headers())
+    return HTMLResponse(content=html_fn(), status_code=200,
+                        headers=(headers_fn or _headers)())
+
+
+# ── THE CHARACTER MODULE AND ITS VENDORED three.js, READ-ONLY ───────
+#
+# An allowlist, not a directory listing: only these files are served, from
+# sportsassets/assets/agents, with their exact content type. three.js
+# (r185, MIT, the minified ES module build and the core it imports) is pinned
+# by file and cached long; the character module is ours and cached briefly so
+# a release reaches browsers within minutes. None of these files carries data
+# or a credential, so they are served without the COMMAND session (a module
+# script is fetched before any of the page's own reads).
+STATIC_DIR = __import__("pathlib").Path(__file__).resolve().parents[1] \
+    / "assets" / "agents"
+STATIC_FILES = {
+    "three.module.min.js": ("text/javascript; charset=utf-8",
+                            "public, max-age=604800, immutable"),
+    "three.core.min.js": ("text/javascript; charset=utf-8",
+                          "public, max-age=604800, immutable"),
+    "cc_characters.js": ("text/javascript; charset=utf-8",
+                         "public, max-age=300"),
+    "THREE_LICENSE.txt": ("text/plain; charset=utf-8",
+                          "public, max-age=86400"),
+}
+THREE_VERSION = "0.185.1"
+
+
+@router.get("/api/command/agents/static/{name}", include_in_schema=False)
+async def agents_static(name: str):
+    from fastapi.responses import Response as _R
+    got = STATIC_FILES.get(name)
+    if got is None:
+        raise HTTPException(status_code=404, detail="not a served file")
+    try:
+        body = (STATIC_DIR / name).read_bytes()
+    except OSError:
+        raise HTTPException(status_code=404, detail="file absent in this build")
+    return _R(content=body, media_type=got[0].split(";")[0],
+              headers={"Content-Type": got[0], "Cache-Control": got[1],
+                       "X-Content-Type-Options": "nosniff",
+                       "Cross-Origin-Resource-Policy": "same-origin"})
 
 
 @router.get("/api/command/agents/page", include_in_schema=False)
@@ -1835,17 +1966,17 @@ async def agents_index_page(request: Request):
 
 @router.get("/api/command/agents/derek/page", include_in_schema=False)
 async def agents_derek_page(request: Request):
-    return _serve(request, lambda: page_html("derek"))
+    return _serve(request, lambda: page_html("derek"), _cc_headers)
 
 
 @router.get("/api/command/agents/xavier/page", include_in_schema=False)
 async def agents_xavier_page(request: Request):
-    return _serve(request, lambda: page_html("xavier"))
+    return _serve(request, lambda: page_html("xavier"), _cc_headers)
 
 
 @router.get("/api/command/agents/audrey/page", include_in_schema=False)
 async def agents_audrey_page(request: Request):
-    return _serve(request, lambda: page_html("audrey"))
+    return _serve(request, lambda: page_html("audrey"), _cc_headers)
 
 
 @router.get("/api/command/agents/demo/page", include_in_schema=False)
