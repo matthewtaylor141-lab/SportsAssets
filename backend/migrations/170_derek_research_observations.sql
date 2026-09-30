@@ -52,7 +52,7 @@
 --     model registry reads it to fit, evaluate and re-verify a model's
 --     training records -- which is a probability, never an order.
 --
--- ADDITIVE. One new table; nothing existing is altered. No foreign key to the
+-- ADDITIVE. Two new tables; nothing existing is altered. No foreign key to the
 -- valuation, deliberately: an observation is a frozen record and must not
 -- block (or be cascaded by) a later clean-up of the valuation table; the
 -- labeller joins by id and an unjoinable observation is simply not a label.
@@ -111,6 +111,12 @@ CREATE TABLE IF NOT EXISTS derek_research_observations (
     model_p                 double precision,
     model_absent_reason     text,
     observer_version        text        NOT NULL,
+    -- HOW IT WAS COLLECTED: by the scheduled cycle that wrote the valuation
+    -- (LIVE_CYCLE), or later, from the stored valuation row alone
+    -- (BACKFILL_FROM_STORED_VALUATION: every value is what that row
+    -- recorded, nothing re-queried or inferred; recorded_at is the backfill
+    -- instant; no model prediction is frozen retroactively).
+    collection_mode         text        NOT NULL,
     recorded_at             timestamptz NOT NULL DEFAULT now(),
 
     CONSTRAINT derek_research_observations_one_per_valuation
@@ -130,6 +136,11 @@ CREATE TABLE IF NOT EXISTS derek_research_observations (
             AND price_timing_uncertainty IN (
                 'AGE_BOUNDED_BY_ESTABLISHED_BOOK_CURRENCY',
                 'AGE_BOUND_NOT_RECORDED_ON_THE_VALUATION'))),
+    CONSTRAINT derek_research_observations_collection_mode_ck CHECK (
+        collection_mode IN ('LIVE_CYCLE', 'BACKFILL_FROM_STORED_VALUATION')),
+    --: A BACKFILL NEVER CARRIES A PREDICTION IT DID NOT MAKE AT THE DECISION.
+    CONSTRAINT derek_research_observations_backfill_no_model_ck CHECK (
+        collection_mode = 'LIVE_CYCLE' OR model_p IS NULL),
     CONSTRAINT derek_research_observations_identity_ck CHECK (
         jsonb_typeof(price_source_identity) = 'object'),
     --: NOTHING ON THE ROW CAN AUTHORIZE OR SIZE AN ORDER.
@@ -159,19 +170,50 @@ CREATE INDEX IF NOT EXISTS derek_research_observations_fixture_idx
 CREATE INDEX IF NOT EXISTS derek_research_observations_cohort_idx
     ON derek_research_observations (cohort, decided_at);
 
-CREATE OR REPLACE FUNCTION derek_research_observation_is_append_only()
+-- ── DEREK'S DAILY MODEL RUN: fit and evaluate, NEVER promote ────────────
+-- One row per UTC day. When the labelled research fixtures of a cohort reach
+-- MIN_TRAIN_EVENTS the run fits, registers and evaluates a CANDIDATE for that
+-- cohort (bettor_funded_models, never approved here); otherwise it records
+-- INSUFFICIENT_LABELLED_FIXTURES with the exact counts. `promoted` is CHECKed
+-- false: promotion is a named person's act through bettor_funded_model.promote.
+CREATE TABLE IF NOT EXISTS derek_research_model_runs (
+    run_id       text PRIMARY KEY,
+    run_day      date        NOT NULL,
+    ran_at       timestamptz NOT NULL,
+    outcome      text        NOT NULL,
+    counts       jsonb       NOT NULL,
+    fitted       jsonb,
+    evaluations  jsonb,
+    detail       jsonb,
+    promoted     boolean     NOT NULL DEFAULT FALSE,
+    recorded_at  timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT derek_research_model_runs_one_per_day UNIQUE (run_day),
+    CONSTRAINT derek_research_model_runs_outcome_ck CHECK (outcome IN (
+        'INSUFFICIENT_LABELLED_FIXTURES', 'FITTED_AND_EVALUATED',
+        'EVALUATED_WITHOUT_REFIT', 'FIT_REFUSED', 'LABELS_UNREADABLE')),
+    CONSTRAINT derek_research_model_runs_never_promotes_ck CHECK (
+        promoted = FALSE)
+);
+
+CREATE OR REPLACE FUNCTION derek_research_record_is_append_only()
 RETURNS trigger AS $$
 BEGIN
-    RAISE EXCEPTION 'derek_research_observations is append-only: an '
-                    'observation is what was known at its decision instant';
+    RAISE EXCEPTION '% is append-only: a research record is what was known '
+                    'when it was written', TG_TABLE_NAME;
 END;
 $$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS derek_research_model_runs_append_only_trg
+    ON derek_research_model_runs;
+CREATE TRIGGER derek_research_model_runs_append_only_trg
+    BEFORE UPDATE OR DELETE ON derek_research_model_runs
+    FOR EACH ROW EXECUTE FUNCTION derek_research_record_is_append_only();
 
 DROP TRIGGER IF EXISTS derek_research_observations_append_only_trg
     ON derek_research_observations;
 CREATE TRIGGER derek_research_observations_append_only_trg
     BEFORE UPDATE OR DELETE ON derek_research_observations
-    FOR EACH ROW EXECUTE FUNCTION derek_research_observation_is_append_only();
+    FOR EACH ROW EXECUTE FUNCTION derek_research_record_is_append_only();
 
 COMMENT ON TABLE derek_research_observations IS
     'Non-funded research observations for Derek''s internal entry model: '

@@ -7,7 +7,11 @@ hook the core stream calls after every scheduled cycle. It:
      experiment in the cycle window, CALIBRATION_ONLY and ENTRY_DECISION
      alike (`derek_research`, migration 170) -- the internal entry model's
      training and evaluation records, collected whatever the venue's book
-     currency, with no dependence on a model, an account or admission;
+     currency, with no dependence on a model, an account or admission --
+     then one bounded step of the one-time BACKFILL of older stored
+     valuations, and once per UTC day the MODEL RUN: fit and evaluate the
+     entry model on labelled research fixtures, or record the shortfall.
+     It never promotes;
 
   1. records ONE Derek entry decision per candidate the entry lane evaluated
      this cycle -- every `external_valuations` row with record_purpose
@@ -139,6 +143,8 @@ async def after_cycle(conn, *, cycle: dict, now: float) -> dict:
     # either purpose, bounded and idempotent; see `derek_research`.
     out["research_observations"] = await research_step(
         conn, now=at, elapsed_s=float(cyc.get("elapsed_s") or 0.0))
+    # ── 0b · THE DAILY MODEL RUN: fit + evaluate, NEVER promote ──────
+    out["model_run"] = await model_run_step(conn, now=at)
     if not await _regclass(conn, "derek_entry_decisions"):
         out.update(ok=False, refusal="DEREK_TABLES_ABSENT",
                    why="migration 153 is not applied here")
@@ -238,7 +244,22 @@ async def research_step(conn, *, now: float, elapsed_s: float = 0.0) -> dict:
     return {k: got.get(k) for k in (
         "ok", "refusal", "why", "candidates", "recorded", "already_recorded",
         "not_observed", "by_cohort", "model_frozen", "errors",
-        "bound_reached", "limit", "window")}
+        "bound_reached", "limit", "window", "backfill")}
+
+
+async def model_run_step(conn, *, now: float) -> dict:
+    """`derek_research.daily_model_run`, guarded: once per UTC day it fits
+    and evaluates the internal entry model on research observations, or
+    records why not. It never promotes and never blocks the cycle."""
+    try:
+        from . import derek_research as DR
+        got = await DR.daily_model_run(conn, now=now)
+    except Exception as exc:                                   # noqa: BLE001
+        return {"ran": False, "refusal": "MODEL_RUN_RAISED:%s"
+                % type(exc).__name__, "error": str(exc)[:200]}
+    return {k: got.get(k) for k in (
+        "run_day", "ran", "already_ran", "run_id", "outcome", "counts",
+        "fitted", "refusal", "promoted", "promotion")}
 
 
 async def collection(conn, *, now: float) -> dict:

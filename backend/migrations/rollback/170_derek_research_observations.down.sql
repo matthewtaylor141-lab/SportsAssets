@@ -9,6 +9,13 @@ BEGIN
                             'records; 170 is not rolled back over them';
         END IF;
     END IF;
+    IF to_regclass('derek_research_model_runs') IS NOT NULL THEN
+        IF EXISTS (SELECT 1 FROM derek_research_model_runs) THEN
+            RAISE EXCEPTION 'derek_research_model_runs holds run records; '
+                            '170 is not rolled back over them';
+        END IF;
+    END IF;
     DROP TABLE IF EXISTS derek_research_observations;
-    DROP FUNCTION IF EXISTS derek_research_observation_is_append_only();
+    DROP TABLE IF EXISTS derek_research_model_runs;
+    DROP FUNCTION IF EXISTS derek_research_record_is_append_only();
 END $$;

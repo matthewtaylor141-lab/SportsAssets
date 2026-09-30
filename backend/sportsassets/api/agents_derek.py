@@ -448,6 +448,10 @@ async def model_qualification(conn) -> dict:
         return _sec(UNAVAILABLE, data, why="migration 170 is not applied here")
     from ..agents import derek_research as DR
     data["research_observations"] = await DR.summary(conn)
+    data["latest_model_run"] = (await DR.latest_model_run(conn)
+                                if await _regclass(
+                                    conn, "derek_research_model_runs")
+                                else None)
     models = []
     if await _regclass(conn, "bettor_funded_models"):
         for r in await conn.fetch(

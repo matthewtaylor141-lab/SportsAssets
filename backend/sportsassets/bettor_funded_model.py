@@ -1492,34 +1492,32 @@ def entry_payout_comparison(obj, lab: dict, *, baseline_rate) -> dict:
              P_PINNACLE: pins,
              P_BASE: [float(baseline_rate)] * lab["n"]}
     names = (P_MODEL, P_PRICE, P_PINNACLE, P_BASE)
-    # The jackknife deletes whole fixtures; each row carries all four
-    # predictions and its FIXED event-balanced weight, so every deletion
-    # scores the same rows for every predictor under the same weights.
-    packed = [tuple(preds[k][i] for k in names) + (w[i],)
-              for i in range(lab["n"])]
+    # THE CLUSTERED JACKKNIFE, per fixture. Every statistic here is an
+    # event-balanced MEAN of a per-row loss (or of a difference of two), so
+    # deleting one fixture's rows leaves (S - S_g) / (W - W_g): the same
+    # delete-one-cluster estimator `metrics.clustered_jackknife` computes,
+    # with its variance formula and 8-cluster floor, in O(fixtures) rather
+    # than O(fixtures x rows) -- which is what keeps the daily run cheap.
+    def _ll1(p, y):
+        return M.log_loss([p], [y])
+
+    def _br1(p, y):
+        return (float(p) - float(y)) ** 2
+
+    losses = {("ll", k): [_ll1(preds[k][i], ys[i]) for i in range(lab["n"])]
+              for k in names}
+    losses.update({("br", k): [_br1(preds[k][i], ys[i])
+                               for i in range(lab["n"])] for k in names})
 
     def _metric(fn, k):
-        j = names.index(k)
-
-        def s(p, y):
-            return fn([t[j] for t in p], y, [t[-1] for t in p]) if p else None
-        return s
+        return losses[("ll" if fn is M.log_loss else "br", k)]
 
     def _diff(fn, a, b):
-        ja, jb = names.index(a), names.index(b)
+        la, lb = _metric(fn, a), _metric(fn, b)
+        return [x - z for x, z in zip(la, lb)]
 
-        def s(p, y):
-            if not p:
-                return None
-            ww = [t[-1] for t in p]
-            return fn([t[ja] for t in p], y, ww) - fn([t[jb] for t in p],
-                                                      y, ww)
-        return s
-
-    def _jk(stat):
-        r = M.clustered_jackknife(packed, ys, fx, stat)
-        return {k: r.get(k) for k in ("statistic", "status", "se_clustered",
-                                      "ci95", "n_groups", "why")}
+    def _jk(per_row):
+        return cluster_jackknife_of_mean(per_row, w, fx)
 
     scored = {}
     for k in names:
@@ -1564,6 +1562,42 @@ def entry_payout_comparison(obj, lab: dict, *, baseline_rate) -> dict:
         out["model_vs_training_base_rate"][
             "beats_by_margin_and_beyond_uncertainty"]
     return dict(out, ok=True)
+
+
+def cluster_jackknife_of_mean(values, weights, groups, *,
+                              min_groups: int = 8) -> dict:
+    """Delete-one-CLUSTER jackknife of a weighted mean, in closed form.
+
+    Identical in definition to `metrics.clustered_jackknife` applied to the
+    statistic sum(w*v)/sum(w) with FIXED per-row weights (tested against it):
+    the full-sample value, the delete-one-cluster values, se =
+    sqrt((G-1)/G * sum((v_g - mean)^2)), and full +/- 1.96 se."""
+    num: dict = {}
+    den: dict = {}
+    for v, w, g in zip(values, weights, groups):
+        num[str(g)] = num.get(str(g), 0.0) + float(w) * float(v)
+        den[str(g)] = den.get(str(g), 0.0) + float(w)
+    keys = sorted(num)
+    S, W = sum(num.values()), sum(den.values())
+    full = S / W if W > 0 else None
+    out = {"statistic": full, "n_groups": len(keys), "n_rows": len(values),
+           "method": "DELETE_ONE_CLUSTER_JACKKNIFE_CLOSED_FORM_FOR_A_MEAN",
+           "clusters_are": "fixtures"}
+    if len(keys) < min_groups:
+        return dict(out, status="INSUFFICIENT_CLUSTERS",
+                    why=("%d clusters is below the %d-cluster floor"
+                         % (len(keys), min_groups)))
+    if full is None:
+        return dict(out, status="STATISTIC_UNDEFINED_ON_FULL_SAMPLE")
+    vals = [(S - num[k]) / (W - den[k]) for k in keys if W - den[k] > 0]
+    if len(vals) < min_groups:
+        return dict(out, status="TOO_MANY_UNDEFINED_DELETIONS")
+    mean = sum(vals) / len(vals)
+    var = (len(vals) - 1.0) / len(vals) * sum((v - mean) ** 2 for v in vals)
+    se = var ** 0.5 if var > 0 else 0.0
+    return dict(out, status="OK", se_clustered=se,
+                ci95=[full - 1.96 * se, full + 1.96 * se],
+                n_deletions_used=len(vals))
 
 
 def entry_payout_eligibility(comparison: dict, *, leaked: bool,

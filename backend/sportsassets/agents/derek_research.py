@@ -96,7 +96,18 @@ S_PRICE_OUT_OF_RANGE = "PRICE_NOT_STRICTLY_BETWEEN_0_AND_1"
 S_NO_PINNACLE = "NO_PINNACLE_PROBABILITY_ON_THE_VALUATION"
 S_NO_FIXTURE = "NO_FIXTURE_IDENTITY_ON_THE_VALUATION"
 
+#: ── HOW AN OBSERVATION WAS COLLECTED (CHECKed by migration 170) ──────────
+MODE_LIVE = "LIVE_CYCLE"
+MODE_BACKFILL = "BACKFILL_FROM_STORED_VALUATION"
+#: THE ONE-TIME BACKFILL: older valuations of either purpose, walked
+#: BACKWARDS by id from the live window's lower edge, at most this many per
+#: cycle, until none remain. Its cursor lives in ingestion_state.
+BACKFILL_PER_CYCLE = 2000
+BACKFILL_STATE_KEY = "derek_research_backfill"
+
 A_NO_APPROVED_MODEL = "NO_APPROVED_MODEL_AT_THE_DECISION_INSTANT"
+A_BACKFILL = ("BACKFILLED_FROM_THE_STORED_VALUATION: no prediction was frozen "
+              "at the decision instant and none is inferred afterwards")
 A_APPROVED_AFTER = "MODEL_APPROVED_AFTER_THE_DECISION_INSTANT"
 A_REGISTRY_UNREADABLE = "MODEL_REGISTRY_UNREADABLE"
 A_CANNOT_SCORE = "APPROVED_MODEL_COULD_NOT_SCORE_THE_VECTOR"
@@ -258,9 +269,15 @@ def _frozen_model(approved: dict | None, feats: dict, *,
             "model_version": m.get("model_version"), "absent": None}
 
 
-def observation_from_row(row: dict, *, approved: dict | None = None
+def observation_from_row(row: dict, *, approved: dict | None = None,
+                         mode: str = MODE_LIVE
                          ) -> tuple[dict | None, str | None]:
-    """(observation, None) or (None, the named reason it is not one)."""
+    """(observation, None) or (None, the named reason it is not one).
+
+    Every value comes from the valuation row as stored -- the same for a
+    live observation and a backfilled one. A BACKFILL freezes no model
+    prediction: none was made at the decision, and one made now would be
+    an inference about the past."""
     from . import derek_policy as DP
     FM = _FM()
     r = dict(row or {})
@@ -286,7 +303,10 @@ def observation_from_row(row: dict, *, approved: dict | None = None
     feats = {"acquisition_price": round(float(price), 9),
              "payout_is_complement": (1.0 if r.get("payout_is_complement")
                                       else 0.0)}
-    mdl = _frozen_model(approved, feats, decided_at=decided)
+    mdl = (_frozen_model(approved, feats, decided_at=decided)
+           if mode == MODE_LIVE else
+           {"model_p": None, "model_id": None, "model_version": None,
+            "absent": A_BACKFILL})
     vid = int(r["id"])
     return {
         "observation_id": "derek-research:val:%d" % vid,
@@ -317,6 +337,7 @@ def observation_from_row(row: dict, *, approved: dict | None = None
         "features": feats, "feature_sha": FM.feature_sha(feats),
         "model_id": mdl["model_id"], "model_version": mdl["model_version"],
         "model_p": mdl["model_p"], "model_absent_reason": mdl["absent"],
+        "collection_mode": mode,
     }, None
 
 
@@ -324,7 +345,7 @@ def observation_from_row(row: dict, *, approved: dict | None = None
 # 2 · RECORDING (the scheduled path calls `observe_cycle`)
 # ═════════════════════════════════════════════════════════════════════════
 
-CANDIDATES_SQL = """
+_SELECT = """
     SELECT v.id, v.experiment_id, v.record_purpose, v.venue,
            extract(epoch FROM v.decided_at) AS decided_at,
            v.event_key, v.condition_id, v.us_market_slug, v.buy_intent,
@@ -336,11 +357,24 @@ CANDIDATES_SQL = """
       FROM external_valuations v
      WHERE v.experiment_id = $1
        AND v.record_purpose IN ('CALIBRATION_ONLY', 'ENTRY_DECISION')
-       AND v.decided_at > to_timestamp($2)
-       AND v.decided_at <= to_timestamp($3)
        AND NOT EXISTS (SELECT 1 FROM derek_research_observations o
                         WHERE o.valuation_id = v.id)
+"""
+
+#: THIS CYCLE'S WINDOW, oldest first.
+CANDIDATES_SQL = _SELECT + """
+       AND v.decided_at > to_timestamp($2)
+       AND v.decided_at <= to_timestamp($3)
      ORDER BY v.id
+     LIMIT $4
+"""
+
+#: THE BACKFILL: older than the live window, BACKWARDS by id from the cursor
+#: (NULL: from the newest), so the most recent history arrives first.
+BACKFILL_SQL = _SELECT + """
+       AND v.decided_at <= to_timestamp($2)
+       AND ($3::bigint IS NULL OR v.id < $3::bigint)
+     ORDER BY v.id DESC
      LIMIT $4
 """
 
@@ -355,7 +389,7 @@ INSERT_SQL = """
          pinnacle_p, pinnacle_observed_at, pinnacle_received_at,
          pinnacle_overround, devig_method, pinnacle_source_version,
          features, feature_sha, model_id, model_version, model_p,
-         model_absent_reason, observer_version)
+         model_absent_reason, observer_version, collection_mode)
     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,to_timestamp($13),
             $14,$15,$16,
             CASE WHEN $17::float8 IS NULL THEN NULL ELSE to_timestamp($17) END,
@@ -363,7 +397,7 @@ INSERT_SQL = """
             $19,$20,$21,$22::jsonb,$23,
             CASE WHEN $24::float8 IS NULL THEN NULL ELSE to_timestamp($24) END,
             CASE WHEN $25::float8 IS NULL THEN NULL ELSE to_timestamp($25) END,
-            $26,$27,$28,$29::jsonb,$30,$31,$32,$33,$34,$35)
+            $26,$27,$28,$29::jsonb,$30,$31,$32,$33,$34,$35,$36)
     ON CONFLICT DO NOTHING
     RETURNING observation_id
 """
@@ -386,7 +420,7 @@ def _insert_args(o: dict) -> tuple:
             o["devig_method"], o["pinnacle_source_version"],
             json.dumps(o["features"]), o["feature_sha"], o["model_id"],
             o["model_version"], o["model_p"], o["model_absent_reason"],
-            OBSERVER_VERSION)
+            OBSERVER_VERSION, o.get("collection_mode") or MODE_LIVE)
 
 
 async def _regclass(conn, name) -> bool:
@@ -430,9 +464,16 @@ async def observe(conn, *, since: float, until: float,
             approved = await DP.approved_entry_model(conn)
         except Exception as exc:                               # noqa: BLE001
             approved = {"ok": False, "error": type(exc).__name__}
+    await _record_rows(conn, rows, out, approved=approved, mode=MODE_LIVE)
+    out["ok"] = not out["errors"]
+    return out
+
+
+async def _record_rows(conn, rows, out: dict, *, approved, mode) -> None:
     for row in rows:
         try:
-            obs, why = observation_from_row(row, approved=approved)
+            obs, why = observation_from_row(row, approved=approved,
+                                            mode=mode)
             if obs is None:
                 out["not_observed"][why] = out["not_observed"].get(why, 0) + 1
                 continue
@@ -450,15 +491,94 @@ async def observe(conn, *, since: float, until: float,
             out["by_cohort"].get(obs["cohort"], 0) + 1
         if obs["model_p"] is not None:
             out["model_frozen"] += 1
+
+
+async def _state(conn) -> dict | None:
+    """The backfill's cursor, or None where ingestion_state is absent."""
+    if not await _regclass(conn, "ingestion_state"):
+        return None
+    raw = await conn.fetchval("SELECT value FROM ingestion_state WHERE key=$1",
+                              BACKFILL_STATE_KEY)
+    return dict(_j(raw) or {})
+
+
+async def _save_state(conn, state: dict) -> None:
+    await conn.execute(
+        "INSERT INTO ingestion_state (key, value) VALUES ($1, $2) "
+        "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+        BACKFILL_STATE_KEY, json.dumps(state, default=str))
+
+
+async def backfill(conn, *, older_than: float, now: float,
+                   limit: int = BACKFILL_PER_CYCLE) -> dict:
+    """THE ONE-TIME BACKFILL, one bounded step: up to `limit` stored
+    valuations decided at or before `older_than` that have no observation,
+    walked BACKWARDS by id from the cursor. Each becomes a
+    BACKFILL_FROM_STORED_VALUATION observation built from the stored row
+    alone (recorded_at is now; the valuation id is kept). When a step finds
+    nothing left the backfill is EXHAUSTED and later cycles skip it.
+    Idempotent twice over: the cursor only moves down, and a valuation that
+    already has an observation is never selected or inserted again. Never
+    raises."""
+    from .. import bettor_external_shadow as ext
+    out: dict[str, Any] = {"mode": MODE_BACKFILL, "limit": int(limit),
+                           "candidates": 0, "recorded": 0,
+                           "already_recorded": 0, "not_observed": {},
+                           "by_cohort": {}, "model_frozen": 0, "errors": {}}
+    if not await _regclass(conn, "derek_research_observations"):
+        return dict(out, ok=False, refusal="RESEARCH_TABLE_ABSENT")
+    try:
+        state = await _state(conn)
+    except Exception as exc:                                   # noqa: BLE001
+        return dict(out, ok=False, refusal="BACKFILL_STATE_UNREADABLE",
+                    error=type(exc).__name__)
+    if state is not None and state.get("exhausted"):
+        return dict(out, ok=True, exhausted=True, skipped=True,
+                    exhausted_at=state.get("exhausted_at"),
+                    backfilled_total=state.get("backfilled_total"))
+    cursor = None if state is None else state.get("cursor_below_id")
+    try:
+        rows = [dict(r) for r in await conn.fetch(
+            BACKFILL_SQL, ext.EXPERIMENT_ID, float(older_than),
+            None if cursor is None else int(cursor), int(limit))]
+    except Exception as exc:                                   # noqa: BLE001
+        return dict(out, ok=False, refusal="BACKFILL_READ_FAILED",
+                    error=type(exc).__name__)
+    out["candidates"] = len(rows)
+    await _record_rows(conn, rows, out, approved=None, mode=MODE_BACKFILL)
     out["ok"] = not out["errors"]
+    if state is not None and out["ok"]:
+        # THE CURSOR MOVES ONLY PAST ROWS THAT WERE HANDLED (recorded, or
+        # refused by name); a step with errors is retried whole next cycle.
+        new = dict(state)
+        new["backfilled_total"] = int(state.get("backfilled_total") or 0) \
+            + out["recorded"]
+        if rows:
+            new["cursor_below_id"] = min(int(r["id"]) for r in rows)
+            new["last_step_at"] = float(now)
+        else:
+            new.update(exhausted=True, exhausted_at=float(now))
+        try:
+            await _save_state(conn, new)
+        except Exception as exc:                               # noqa: BLE001
+            out["state_write_failed"] = type(exc).__name__
+        out["cursor_below_id"] = new.get("cursor_below_id")
+        out["exhausted"] = bool(new.get("exhausted"))
     return out
 
 
 async def observe_cycle(conn, *, now: float, elapsed_s: float = 0.0) -> dict:
-    """THE SCHEDULED STEP (`derek.after_cycle`): this cycle's window."""
+    """THE SCHEDULED STEP (`derek.after_cycle`): this cycle's window, LIVE,
+    then one bounded BACKFILL step below it."""
     at = float(now)
     since = at - max(LOOKBACK_S, float(elapsed_s or 0.0) + 60.0)
-    return await observe(conn, since=since, until=at + 1.0)
+    got = await observe(conn, since=since, until=at + 1.0)
+    try:
+        got["backfill"] = await backfill(conn, older_than=since, now=at)
+    except Exception as exc:                                   # noqa: BLE001
+        got["backfill"] = {"ok": False,
+                           "refusal": "BACKFILL_RAISED:%s" % type(exc).__name__}
+    return got
 
 
 # ═════════════════════════════════════════════════════════════════════════
@@ -620,7 +740,192 @@ async def prospective_coverage(conn, *, after) -> dict:
 
 
 # ═════════════════════════════════════════════════════════════════════════
-# 5 · THE WORKSPACE SUMMARY
+# 5 · DEREK'S DAILY MODEL RUN: FIT AND EVALUATE, NEVER PROMOTE
+# ═════════════════════════════════════════════════════════════════════════
+
+RUN_INSUFFICIENT = "INSUFFICIENT_LABELLED_FIXTURES"
+RUN_FITTED = "FITTED_AND_EVALUATED"
+RUN_EVALUATED = "EVALUATED_WITHOUT_REFIT"
+RUN_FIT_REFUSED = "FIT_REFUSED"
+RUN_LABELS_UNREADABLE = "LABELS_UNREADABLE"
+#: Scheduled candidates are named for their cohort and day, so a person can
+#: see which were fitted by the schedule. The schedule NEVER promotes.
+AUTO_MODEL_PREFIX = "derek-research-auto"
+#: At most this many of a cohort's scheduled candidates are re-evaluated per
+#: run (newest first).
+EVALUATE_LATEST = 3
+NEVER_PROMOTES = ("NOT_ON_A_SCHEDULE: promotion is a NAMED PERSON's act "
+                  "through bettor_funded_model.promote; this run only fits, "
+                  "registers CANDIDATES and evaluates them")
+
+
+def _day_of(epoch: float):
+    import datetime as _dt
+    return _dt.datetime.fromtimestamp(float(epoch), _dt.timezone.utc).date()
+
+
+def labelled_counts(lab: dict) -> dict:
+    """The exact have/need, per cohort, in FIXTURES (rows beside)."""
+    FM = _FM()
+    per: dict = {}
+    for c, fx in zip(lab.get("cohorts") or [], lab.get("fixtures") or []):
+        b = per.setdefault(c, {"rows": 0, "fx": set()})
+        b["rows"] += 1
+        b["fx"].add(str(fx))
+    need = FM.MIN_TRAIN_EVENTS
+    return {"unit": "FIXTURES (distinct events), rows beside",
+            "need_labelled_training_fixtures": need,
+            "need_prospective_fixtures": FM.MIN_EVALUATION_EVENTS,
+            "by_cohort": {c: {
+                "have_labelled_fixtures": len((per.get(c) or {}).get(
+                    "fx") or ()),
+                "labelled_rows": int((per.get(c) or {}).get("rows") or 0),
+                "need": need,
+                "shortfall": max(0, need - len((per.get(c) or {}).get(
+                    "fx") or ()))}
+                for c in (FM.COHORT_DISPLAYED, FM.COHORT_EXECUTABLE)}}
+
+
+def _eval_summary(ev: dict) -> dict:
+    doc = dict(ev.get("evaluation") or {})
+    mc = dict(doc.get("market_comparison") or {})
+    el = dict(doc.get("approval_eligibility") or {})
+    pr = mc.get("predictors") or {}
+
+    def _imp(k):
+        v = mc.get(k) or {}
+        return {"log_loss_improvement": v.get("log_loss_improvement"),
+                "ci95": (v.get("log_loss_improvement_uncertainty")
+                         or {}).get("ci95")}
+    return {"ok": ev.get("ok"), "refusal": ev.get("refusal"),
+            "prospective_fixtures": mc.get("n_events"),
+            "log_loss": {k: (pr.get(k) or {}).get("log_loss") for k in pr},
+            "brier": {k: (pr.get(k) or {}).get("brier") for k in pr},
+            "model_vs_raw_venue_price": _imp("model_vs_raw_venue_price"),
+            "model_vs_training_base_rate": _imp("model_vs_training_base_rate"),
+            "model_vs_pinnacle": _imp("model_vs_pinnacle"),
+            "eligible": el.get("eligible"), "failed": el.get("failed"),
+            "input_distribution_shift": (el.get("input_distribution_shift")
+                                         or {}).get("status"),
+            "promoted": False}
+
+
+async def daily_model_run(conn, *, now: float) -> dict:
+    """ONCE PER UTC DAY. When a cohort's labelled research fixtures reach
+    MIN_TRAIN_EVENTS: fit (that cohort only -- never pooled), register a
+    CANDIDATE, and evaluate the cohort's scheduled candidates against the raw
+    venue price, Pinnacle and the base rate. Otherwise record
+    INSUFFICIENT_LABELLED_FIXTURES with the exact counts. A refit happens only
+    when the cohort has grown by CANDIDATE_REFIT_MIN_NEW_EVENTS fixtures since
+    the last scheduled fit. NEVER promotes. Never raises."""
+    import datetime as _dt
+    FM = _FM()
+    at = float(now)
+    day = _day_of(at)
+    out: dict[str, Any] = {"run_day": str(day), "ran": False,
+                           "promoted": False, "promotion": NEVER_PROMOTES}
+    if not (await _regclass(conn, "derek_research_model_runs")
+            and await _regclass(conn, "derek_research_observations")):
+        return dict(out, refusal="RESEARCH_TABLES_ABSENT")
+    prior = await conn.fetchrow(
+        "SELECT run_id, outcome FROM derek_research_model_runs "
+        " WHERE run_day = $1", day)
+    if prior is not None:
+        return dict(out, already_ran=True, run_id=prior["run_id"],
+                    outcome=prior["outcome"])
+    lab = await labelled_observations(conn, through=at, outcomes_through=at)
+    fitted: dict = {}
+    evaluations: dict = {}
+    if not lab.get("ok"):
+        outcome, counts = RUN_LABELS_UNREADABLE, {"error": lab.get("error")}
+    else:
+        counts = labelled_counts(lab)
+        ready = [c for c, b in counts["by_cohort"].items()
+                 if b["have_labelled_fixtures"] >= FM.MIN_TRAIN_EVENTS]
+        outcome = RUN_INSUFFICIENT
+        through = _dt.datetime.fromtimestamp(at, _dt.timezone.utc)
+        for c in ready:
+            prefix = "%s:%s:" % (AUTO_MODEL_PREFIX, c)
+            prev = await conn.fetch(
+                "SELECT model_id, state, training_provenance "
+                "  FROM bettor_funded_models WHERE model_key = $1 "
+                "   AND model_id LIKE $2 ORDER BY created_at DESC",
+                FM.KEY_ENTRY_PAYOUT, prefix + "%")
+            have = counts["by_cohort"][c]["have_labelled_fixtures"]
+            last_n = (None if not prev else int(
+                (_j(prev[0]["training_provenance"]) or {}).get("n_events")
+                or 0))
+            grew = None if last_n is None else have - last_n
+            if last_n is None or grew >= FM.CANDIDATE_REFIT_MIN_NEW_EVENTS:
+                mid = prefix + str(day)
+                fit = await FM.fit_from_records(
+                    conn, through=through, model_key=FM.KEY_ENTRY_PAYOUT,
+                    source=FM.SOURCE_RESEARCH_OBSERVATIONS, cohorts=[c])
+                reg = (await FM.register(
+                    conn, model_id=mid, model_version=mid, fitted=fit,
+                    fit_through=through, model_key=FM.KEY_ENTRY_PAYOUT)
+                    if fit.get("ok") else {"ok": False,
+                                           "refusal": fit.get("refusal")})
+                fitted[c] = {"refit": True, "model_id": mid,
+                             "ok": bool(reg.get("ok")),
+                             "refusal": reg.get("refusal"),
+                             "training_fixtures": fit.get("n_events"),
+                             "fit_through_epoch_s": at}
+            else:
+                fitted[c] = {"refit": False, "why": (
+                    "%d new labelled fixture(s) since the last scheduled fit "
+                    "(%d); a refit needs %d" % (grew, last_n,
+                                                FM.CANDIDATE_REFIT_MIN_NEW_EVENTS
+                                                ))}
+            cands = [r["model_id"] for r in await conn.fetch(
+                "SELECT model_id FROM bettor_funded_models "
+                " WHERE model_key = $1 AND model_id LIKE $2 AND state = $3 "
+                " ORDER BY created_at DESC LIMIT $4",
+                FM.KEY_ENTRY_PAYOUT, prefix + "%", FM.STATE_CANDIDATE,
+                EVALUATE_LATEST)]
+            for mid in cands:
+                evaluations[mid] = _eval_summary(
+                    await FM.evaluate(conn, model_id=mid, now=at))
+        if ready:
+            outcome = (RUN_FITTED if any(f.get("refit") and f.get("ok")
+                                         for f in fitted.values())
+                       else RUN_EVALUATED if evaluations else RUN_FIT_REFUSED)
+    run_id = "derek-research-run:%s" % day
+    wrote = await conn.fetchval(
+        "INSERT INTO derek_research_model_runs (run_id, run_day, ran_at, "
+        " outcome, counts, fitted, evaluations, detail) "
+        "VALUES ($1, $2, to_timestamp($3), $4, $5::jsonb, $6::jsonb, "
+        "        $7::jsonb, $8::jsonb) "
+        "ON CONFLICT DO NOTHING RETURNING run_id",
+        run_id, day, at, outcome, json.dumps(counts, default=str),
+        json.dumps(fitted, default=str), json.dumps(evaluations, default=str),
+        json.dumps({"promotion": NEVER_PROMOTES,
+                    "minimums": FM.qualification_minimums(
+                        FM.KEY_ENTRY_PAYOUT),
+                    "model_description": FM.ENTRY_PAYOUT_DESCRIPTION},
+                   default=str))
+    return dict(out, ran=wrote is not None, run_id=run_id, outcome=outcome,
+                counts=counts, fitted=fitted, evaluations=evaluations)
+
+
+async def latest_model_run(conn) -> dict | None:
+    """The most recent daily run, for the workspace. Raises on a failed
+    read."""
+    r = await conn.fetchrow(
+        "SELECT run_id, run_day, ran_at, outcome, counts, fitted, "
+        "       evaluations, promoted FROM derek_research_model_runs "
+        " ORDER BY run_day DESC LIMIT 1")
+    if r is None:
+        return None
+    return {"run_id": r["run_id"], "run_day": str(r["run_day"]),
+            "ran_at": _epoch(r["ran_at"]), "outcome": r["outcome"],
+            "counts": _j(r["counts"]), "fitted": _j(r["fitted"]),
+            "evaluations": _j(r["evaluations"]),
+            "promoted": bool(r["promoted"]), "promotion": NEVER_PROMOTES}
+
+
+# ═════════════════════════════════════════════════════════════════════════
+# 6 · THE WORKSPACE SUMMARY
 # ═════════════════════════════════════════════════════════════════════════
 
 async def summary(conn) -> dict:
