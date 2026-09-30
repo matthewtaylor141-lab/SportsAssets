@@ -47,8 +47,10 @@ CC_META = {
                "blurb": ("Audits both agents daily, reports the one "
                          "authoritative company P&L, answers management and "
                          "tracks every directive to its evaluation."),
-               "persona": ("confident executive presence; a tailored blazer "
-                           "and silk blouse")},
+               "persona": ("glamorous and confident; fashion-forward evening "
+                           "styling, a fitted satin wrap dress with a V neckline "
+                           "and an asymmetric sash, statement drop earrings and "
+                           "polished waves")},
 }
 
 NAV_ORDER = ("derek", "xavier", "audrey")
@@ -240,25 +242,30 @@ _PORTRAITS = {
 <path d="M119 131 Q131 127 143 131 M157 131 Q169 127 181 131" stroke="#8d8d93" stroke-width="3.5" fill="none" stroke-linecap="round"/>
 <path d="M138 186 Q150 190 162 186" stroke="#7a4a3e" stroke-width="3" fill="none" stroke-linecap="round"/>
 <circle cx="88" cy="276" r="9" fill="#41d3e2"/><text x="88" y="280" font-size="9" font-family="monospace" font-weight="700" text-anchor="middle" fill="#04161a">AI</text></svg>""",
-    "audrey": """<svg viewBox="0 0 300 360" role="img" aria-label="Illustrated portrait card of Audrey, an AI agent: long dark wavy hair, gold earrings, plum tailored blazer over an ivory high-neck silk blouse">
-<defs><linearGradient id="fga" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#b39bff" stop-opacity=".32"/><stop offset="1" stop-color="#b39bff" stop-opacity="0"/></linearGradient></defs>
+    "audrey": """<svg viewBox="0 0 300 360" role="img" aria-label="Illustrated portrait card of Audrey, an AI agent: long polished dark waves, drop earrings, a fitted emerald satin evening dress with a V neckline and an asymmetric sash">
+<defs><linearGradient id="fga" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#b39bff" stop-opacity=".34"/><stop offset="1" stop-color="#b39bff" stop-opacity="0"/></linearGradient>
+<linearGradient id="fgd2" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#14605a"/><stop offset="1" stop-color="#0b3a37"/></linearGradient></defs>
 <circle cx="150" cy="150" r="120" fill="url(#fga)"/>
-<path d="M92 120 C80 180 84 250 100 300 L200 300 C216 250 220 180 208 120 Z" fill="#2a1a14"/>
-<path d="M44 360 C54 274 98 244 150 240 C202 244 246 274 256 360 Z" fill="#5a2340"/>
-<path d="M124 240 C132 256 168 256 176 240 L172 330 L128 330 Z" fill="#efe6da"/>
-<path d="M106 252 L150 340 L126 246 Z M194 252 L150 340 L174 246 Z" fill="#4a1c35"/>
-<path d="M128 238 Q150 252 172 238" stroke="#d4a64a" stroke-width="2" fill="none"/>
-<rect x="136" y="196" width="28" height="44" rx="11" fill="#b77f5c"/>
-<ellipse cx="150" cy="150" rx="46" ry="58" fill="#c98f6b"/>
-<path d="M102 150 C96 96 122 78 154 80 C188 82 206 104 200 150 C196 118 180 100 146 104 C128 110 112 124 102 150 Z" fill="#2a1a14"/>
-<path d="M146 90 C170 96 190 114 196 144 C190 124 172 108 150 104 Z" fill="#5a3526" opacity=".8"/>
-<circle cx="104" cy="178" r="4" fill="#d4a64a"/><circle cx="196" cy="178" r="4" fill="#d4a64a"/>
-<ellipse cx="132" cy="150" rx="6.5" ry="4.5" fill="#fff"/><ellipse cx="168" cy="150" rx="6.5" ry="4.5" fill="#fff"/>
-<circle cx="133" cy="150" r="3.2" fill="#3b2418"/><circle cx="167" cy="150" r="3.2" fill="#3b2418"/>
-<path d="M124 143 Q132 140 140 143 M160 143 Q168 140 176 143" stroke="#1a100c" stroke-width="1.6" fill="none"/>
-<path d="M122 136 Q132 130 142 134 M158 134 Q168 130 178 136" stroke="#2a1a14" stroke-width="3" fill="none" stroke-linecap="round"/>
-<path d="M139 184 Q150 191 161 184" stroke="#9b3f4d" stroke-width="3.5" fill="none" stroke-linecap="round"/>
-<circle cx="208" cy="278" r="9" fill="#b39bff"/><text x="208" y="282" font-size="9" font-family="monospace" font-weight="700" text-anchor="middle" fill="#120a24">AI</text></svg>""",
+<path d="M90 118 C76 182 80 256 98 306 L202 306 C220 256 224 182 210 118 Z" fill="#24150f"/>
+<path d="M48 360 C58 276 100 246 150 242 C200 246 242 276 252 360 Z" fill="url(#fgd2)"/>
+<path d="M120 246 L150 300 L180 246 C170 244 160 243 150 243 C140 243 130 244 120 246 Z" fill="#c98d6a"/>
+<path d="M112 250 L150 304 L188 250" stroke="#14605a" stroke-width="5" fill="none"/>
+<path d="M96 262 C130 290 176 318 214 352" stroke="#1c7a72" stroke-width="12" fill="none" stroke-linecap="round"/>
+<path d="M132 250 Q150 276 168 250" stroke="#d4a64a" stroke-width="1.6" fill="none"/><circle cx="150" cy="272" r="3.2" fill="#b39bff"/>
+<rect x="137" y="198" width="26" height="46" rx="11" fill="#b77d5b"/>
+<ellipse cx="150" cy="150" rx="46" ry="58" fill="#c98d6a"/>
+<ellipse cx="124" cy="170" rx="11" ry="7" fill="#d4776f" opacity=".28"/><ellipse cx="176" cy="170" rx="11" ry="7" fill="#d4776f" opacity=".28"/>
+<path d="M100 152 C94 94 122 76 156 78 C190 80 208 104 202 152 C198 118 182 98 146 102 C126 108 110 124 100 152 Z" fill="#24150f"/>
+<path d="M148 88 C174 94 194 114 200 146 C194 124 176 108 152 104 Z" fill="#6a3d27" opacity=".85"/>
+<circle cx="103" cy="178" r="3.4" fill="#d4a64a"/><circle cx="197" cy="178" r="3.4" fill="#d4a64a"/>
+<path d="M103 181 L103 194 M197 181 L197 194" stroke="#d4a64a" stroke-width="1.2"/><path d="M103 194 l-4 7 l4 7 l4 -7 Z M197 194 l-4 7 l4 7 l4 -7 Z" fill="#b39bff"/>
+<ellipse cx="132" cy="150" rx="7" ry="4.6" fill="#fff"/><ellipse cx="168" cy="150" rx="7" ry="4.6" fill="#fff"/>
+<circle cx="133" cy="150" r="3.4" fill="#5a3417"/><circle cx="167" cy="150" r="3.4" fill="#5a3417"/>
+<path d="M123 146 Q132 141 141 145 L145 142 M159 145 Q168 141 177 146 L181 142" stroke="#120c0a" stroke-width="2" fill="none" stroke-linecap="round"/>
+<path d="M121 135 Q132 128 143 133 M157 133 Q168 128 179 135" stroke="#24150f" stroke-width="3" fill="none" stroke-linecap="round"/>
+<path d="M138 184 Q150 192 162 184 Q150 188 138 184 Z" fill="#9c2c44" stroke="#9c2c44" stroke-width="3" stroke-linejoin="round"/>
+<circle cx="135" cy="176" r="1.3" fill="#3a2016"/>
+<circle cx="212" cy="286" r="9" fill="#b39bff"/><text x="212" y="290" font-size="9" font-family="monospace" font-weight="700" text-anchor="middle" fill="#120a24">AI</text></svg>""",
 }
 
 # ════════════════════════════════════════════════════════════════════
