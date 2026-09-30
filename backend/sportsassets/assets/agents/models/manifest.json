@@ -17,7 +17,9 @@
       "bones": "role -> exact bone name, for rigs outside the built-in Mixamo/VRM table",
       "blendshapes": "ARKit name -> exact morph target name, for faces outside the ARKit naming",
       "candidate_label": "shown on the stage while the model is under evaluation (the placeholder tag is replaced by it, never hidden)",
-      "credit": "the attribution line shown in the page footer"
+      "credit": "the attribution line shown in the page footer",
+      "hide_materials": "material names to hide (e.g. alpha-card hair whose opacity map the vendor did not supply)",
+      "arms_down": "false to keep the model's bind pose (default: a T/A pose is turned arms-down)"
     }
   },
   "characters": {
@@ -34,7 +36,13 @@
       "source": {
         "fbx": "Assets/Avatars/Adults/Male_Adult_01/Export/Male_Adult_01_facial.fbx",
         "converted_by": "FBX2glTF 0.9.7 + gltf-transform (tools/rocketbox_to_glb.mjs); textures downscaled to 2K/1K JPEG, specular mapped to roughness; morph order verified against the FBX"
-      }
+      },
+      "hide_materials": [
+        "m002_opacity"
+      ],
+      "known_gaps": [
+        "the hair-card opacity map for Male_Adult_01 is not in the Rocketbox repository (404), so the alpha-card hair (material m002_opacity) is hidden and the painted scalp shows"
+      ]
     },
     "xavier": {
       "model": null,

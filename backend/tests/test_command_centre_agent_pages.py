@@ -1102,6 +1102,7 @@ def test_the_manifest_admits_only_complete_licensed_non_test_models(monkeypatch,
             assert a["model"] == "/api/command/agents/static/models/derek_candidate.glb"
             assert a["license"]["spdx"] == "MIT" and "Rocketbox" in a["license"]["from"]
             assert a["candidate_label"] == "CANDIDATE MODEL (Rocketbox, MIT) — under evaluation"
+            assert a["hide_materials"] == ["m002_opacity"]        # no opacity map was supplied
         else:
             assert a["model"] is None and a["why"]                # still the tagged placeholder
     shutil.copy(GLTF_TEST / "RiggedFigure.glb", tmp_path / "derek.glb")

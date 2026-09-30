@@ -306,6 +306,10 @@ export async function mountAvatar(stage, cfg, opts = {}) {
   root.traverse((o) => { if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; o.frustumCulled = false; } });
   skinTune(root);
   if (cfg.arms_down !== false) armsDown(root, cfg.bones || {});
+  // materials the config names as unusable (e.g. alpha-card hair whose
+  // opacity map was not supplied) are hidden rather than drawn opaque
+  const hide = new Set(cfg.hide_materials || []);
+  if (hide.size) root.traverse((o) => { if (o.isMesh && [].concat(o.material).some((m) => hide.has(m.name))) o.visible = false; });
   if (cfg.yaw) root.rotation.y = cfg.yaw;
   if (cfg.scale) root.scale.setScalar(cfg.scale);
   scene.add(root);

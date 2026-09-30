@@ -1993,7 +1993,8 @@ def character_asset(kind: str) -> dict:
     e = dict((_manifest().get("characters") or {}).get(kind) or {})
     base = {k: e.get(k) for k in ("framing", "lighting", "yaw", "scale",
                                   "bones", "blendshapes", "candidate_label",
-                                  "credit") if e.get(k) is not None}
+                                  "credit", "hide_materials", "arms_down")
+            if e.get(k) is not None}
     why = None
     if not e.get("model"):
         why = e.get("why_absent") or "no model in the manifest"
