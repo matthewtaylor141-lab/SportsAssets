@@ -203,7 +203,7 @@ CHANGE_CLASSES: dict[str, ChangeClass] = {c.name: c for c in (
         description=("Derek's binding entry policy threshold: the minimum "
                      "GROSS probability edge in probability points "
                      "(qualified probability - executable price), "
-                     "agents.derek_policy DEFAULT_PARAMS['min_gross_edge_pp']"),
+                     "agents.derek_policy MIN_GROSS_EDGE_PP (DEFAULT_PARAMS)"),
         policy_key="DEREK_ENTRY_POLICY",
         bounds={"min_gross_edge_pp": (0.0, 0.20, False)},
         pre_authorized=False, evaluator="derek_gross_edge_replay",
@@ -215,7 +215,7 @@ CHANGE_CLASSES: dict[str, ChangeClass] = {c.name: c for c in (
         rollback=("reactivate the prior agent_policy_versions row for "
                   "(DEREK, DEREK_ENTRY_POLICY)"),
         code_default=("backend/sportsassets/agents/derek_policy.py",
-                      "DEFAULT_PARAMS['min_gross_edge_pp']")),
+                      "MIN_GROSS_EDGE_PP")),
     ChangeClass(
         name="XAVIER_POLICY_PARAMETER", kind=K_POLICY, agent=XAVIER,
         description="a bounded Xavier policy parameter; no replay registered",
@@ -1694,6 +1694,189 @@ async def _waiting_too_recently(conn, task: dict, now: float) -> bool:
     return at is not None and now - at < RETRY_WAITING_S
 
 
+# ═════════════════════════════════════════════════════════════════════
+# 8b · A MANAGEMENT DIRECTIVE BECOMES AGENT WORK
+# ═════════════════════════════════════════════════════════════════════
+#
+# A directive (agents.directives) assigns DIRECTIVE_IMPROVEMENT tasks to Derek
+# and/or Xavier. Here the assigned agent TAKES ONE UP: for a POLICY_CANDIDATE
+# directive it opens its own IMPROVEMENT task on the change class it owns
+# (deterministic id, linked to the directive and the directive's task), which
+# the evaluator below then replays like any other -- the proposer is the
+# agent, the evaluator the deterministic replay, the approver a person. The
+# directive task follows the improvement task's outcome. A directive cannot
+# name the class, the bounds or the criteria: those are the registry's.
+
+DIRECTIVE_TASK_KIND = "DIRECTIVE_IMPROVEMENT"
+#: what each agent's directive work is, when a replay for it is registered
+DIRECTIVE_WORK = {DEREK: "DEREK_ENTRY_POLICY_THRESHOLD"}
+#: objectives under which a threshold may only TIGHTEN (fewer, better
+#: entries); never loosened in the name of reducing losses or drawdown
+TIGHTEN_ONLY = ("DRAWDOWN_REDUCTION", "LOSS_REDUCTION")
+R_NO_DIRECTIVE_EVALUATOR = "NO_REGISTERED_EVALUATOR_FOR_THIS_AGENTS_DIRECTIVE_WORK"
+R_PRIORITY_ONLY = "PRIORITY_ONLY_DIRECTIVE_PRODUCES_NO_CANDIDATE"
+#: directive-task status that mirrors each improvement-task outcome
+_MIRROR = {"APPROVAL_READY": "APPROVAL_READY", "APPROVED": "APPROVED",
+           "RELEASED": "RELEASED", "REJECTED": "REJECTED",
+           "ROLLED_BACK": "ROLLED_BACK", "CLOSED_NO_CHANGE": "CLOSED_NO_CHANGE",
+           "CANDIDATE_READY": "CANDIDATE_READY"}
+
+
+def directive_work_task_id(directive_task_id: str) -> str:
+    return "imp-%s" % directive_task_id
+
+
+async def _has_event(conn, task_id: str, kind: str) -> bool:
+    return bool(await conn.fetchval(
+        "SELECT 1 FROM agent_task_events WHERE task_id=$1 AND kind=$2 "
+        "LIMIT 1", task_id, kind))
+
+
+async def take_up_directive_tasks(conn, *, now: float) -> dict:
+    """THE ASSIGNED AGENT TAKES UP EACH OPEN DIRECTIVE TASK. Idempotent:
+    the improvement task id is derived from the directive task's."""
+    out: dict[str, Any] = {"taken_up": [], "waiting": [], "skipped": []}
+    for t in await read_tasks(conn, kind=DIRECTIVE_TASK_KIND,
+                              statuses=("OPEN",)):
+        tid, agent = t["task_id"], str(t.get("assignee") or "")
+        spec = t.get("spec") or {}
+        if spec.get("change_class") != "POLICY_CANDIDATE":
+            if not await _has_event(conn, tid, "NO_CANDIDATE_WORK"):
+                await task_event(conn, tid, kind="NO_CANDIDATE_WORK",
+                                 actor=agent or AUDREY,
+                                 detail={"why": R_PRIORITY_ONLY}, now=now)
+            out["skipped"].append(tid)
+            continue
+        cls_name = DIRECTIVE_WORK.get(agent)
+        if cls_name is None:
+            await task_event(conn, tid, kind="WAITING_FOR_AN_EVALUATOR",
+                             actor=agent or AUDREY,
+                             detail={"why": R_NO_DIRECTIVE_EVALUATOR,
+                                     "agent": agent,
+                                     "registered": dict(DIRECTIVE_WORK)},
+                             status="WAITING", now=now)
+            out["waiting"].append(tid)
+            continue
+        cls = CHANGE_CLASSES[cls_name]
+        pname = next(iter(cls.bounds))
+        current = await current_policy(conn, cls)
+        cur = current["params"].get(pname)
+        cur = float(cur if cur is not None
+                    else code_default_params(cls).get(pname))
+        lo, hi, _ = cls.bounds[pname]
+        kind = str(spec.get("objective_kind") or "")
+        variants = None
+        if kind in TIGHTEN_ONLY:
+            variants = [round(cur + d, 6) for d in (0.01, 0.02)
+                        if lo <= cur + d <= hi]
+        wid = directive_work_task_id(tid)
+        wspec = {"change_class": cls_name, "variants": variants,
+                 "directive_id": spec.get("directive_id"),
+                 "directive_task_id": tid,
+                 "objective": spec.get("objective"),
+                 "objective_kind": kind or None,
+                 "hypothesis": (
+                     "Management directive %s (%s): a %s %s than the current "
+                     "%.4f selects fewer losing entries without giving up "
+                     "settled profit" % (spec.get("directive_id"),
+                                         kind or "UNCLASSIFIED", pname,
+                                         "higher" if variants else "different",
+                                         cur)),
+                 "evidence": {"directive_id": spec.get("directive_id"),
+                              "directive_task_id": tid,
+                              "current": {pname: cur,
+                                          "source": current.get("source")}},
+                 "standing_rules": spec.get("standing_rules"),
+                 "tests": ["tests/test_improvement_is_evaluated_released_"
+                           "and_rolled_back.py::test_the_derek_policy_class_"
+                           "targets_the_binding_policy_key"],
+                 "test_cwd": "backend"}
+        made = await create_task(
+            conn, assignee=agent, created_by=agent, kind=TASK_KIND,
+            title="%s for directive %s" % (cls_name, spec.get("directive_id")),
+            spec=wspec, directive_id=spec.get("directive_id"),
+            evidence=[{"kind": "agent_tasks", "id": tid}], task_id=wid,
+            now=now)
+        if not made.get("ok"):
+            out["skipped"].append({"task_id": tid, "refusal": made})
+            continue
+        await task_event(conn, tid, kind="WORK_TAKEN_UP", actor=agent,
+                         detail={"improvement_task_id": wid,
+                                 "change_class": cls_name,
+                                 "variants": variants, "current": cur},
+                         status="IN_PROGRESS", now=now)
+        out["taken_up"].append({"task_id": tid, "improvement_task_id": wid,
+                                "change_class": cls_name,
+                                "variants": variants})
+    return out
+
+
+async def reflect_directive_work(conn, *, now: float) -> dict:
+    """EACH DIRECTIVE TASK FOLLOWS ITS IMPROVEMENT TASK'S OUTCOME, naming
+    the candidate and its evaluation."""
+    out: dict[str, Any] = {"reflected": []}
+    for t in await read_tasks(conn, kind=DIRECTIVE_TASK_KIND,
+                              statuses=("IN_PROGRESS", "CANDIDATE_READY",
+                                        "APPROVAL_READY", "APPROVED")):
+        tid = t["task_id"]
+        w = await read_task(conn, directive_work_task_id(tid))
+        if w is None:
+            continue
+        to = _MIRROR.get(str(w.get("status")))
+        if to is None or to == t.get("status"):
+            continue
+        cands = [dict(c) for c in await conn.fetch(
+            "SELECT candidate_id, state, params, artifact_ref "
+            "  FROM improvement_candidates WHERE task_id=$1 "
+            " ORDER BY created_at, candidate_id", w["task_id"])]
+        await task_event(conn, tid, kind="IMPROVEMENT_OUTCOME",
+                         actor=str(t.get("assignee") or AUDREY),
+                         detail={"improvement_task_id": w["task_id"],
+                                 "improvement_status": w.get("status"),
+                                 "candidates": [
+                                     {"candidate_id": c["candidate_id"],
+                                      "state": c["state"],
+                                      "params": _obj(c["params"]),
+                                      "artifact_ref": c["artifact_ref"]}
+                                     for c in cands]},
+                         status=to, now=now)
+        out["reflected"].append({"task_id": tid, "to": to})
+    return out
+
+
+async def attach_artifact(conn, candidate_id: str, *, diff: str,
+                          artifact_ref: str, base_commit: str,
+                          test_results: dict, report: dict,
+                          now: float) -> dict:
+    """THE SANDBOX'S COMMITTED ARTIFACT, ON THE CANDIDATE THAT WAS
+    EVALUATED. Written once (migration 155 refuses a second artifact or a
+    changed diff); a REJECTED or WITHDRAWN candidate gets none."""
+    c = await candidate(conn, candidate_id)
+    if c is None:
+        return {"ok": False, "refusal": "NO_SUCH_CANDIDATE"}
+    if c.get("state") in ("REJECTED", "WITHDRAWN"):
+        return {"ok": False, "refusal": "THE_CANDIDATE_WAS_%s" % c["state"]}
+    if c.get("artifact_ref"):
+        return {"ok": False, "refusal": "THE_ARTIFACT_IS_ALREADY_RECORDED",
+                "artifact_ref": c["artifact_ref"]}
+    ev = dict(_obj(c.get("evidence")) or {})
+    ev["sandbox_report"] = report
+    await conn.execute(
+        "UPDATE improvement_candidates SET diff=$2, artifact_ref=$3, "
+        " base_commit=$4, test_results=$5::jsonb, evidence=$6::jsonb "
+        " WHERE candidate_id=$1 AND artifact_ref IS NULL",
+        candidate_id, diff, artifact_ref, base_commit, _j(test_results),
+        _j(ev))
+    await task_event(conn, c["task_id"], kind="ARTIFACT_BUILT",
+                     actor=report.get("proposed_by") or c.get("proposed_by"),
+                     detail={"candidate_id": candidate_id,
+                             "artifact_ref": artifact_ref,
+                             "tests_passed": (test_results or {}).get(
+                                 "passed")}, now=now)
+    return {"ok": True, "candidate_id": candidate_id,
+            "artifact_ref": artifact_ref}
+
+
 async def run_due(conn, *, now: float) -> dict:
     """ADVANCE THE IMPROVEMENT TASKS THAT CAN RUN IN-PROCESS. Never raises;
     bounded to MAX_TASKS_PER_RUN tasks per call."""
@@ -1707,6 +1890,12 @@ async def run_due(conn, *, now: float) -> dict:
                             "why": R_TASKS_UNAVAILABLE}
             tasks = []
         else:
+            # directive tasks first, so a task taken up now is evaluated now
+            try:
+                out["directive_work"] = await take_up_directive_tasks(
+                    conn, now=float(now))
+            except Exception as exc:                            # noqa: BLE001
+                out["directive_work"] = {"error": type(exc).__name__}
             tasks = await read_tasks(conn, kind=TASK_KIND,
                                      statuses=ADVANCEABLE)
         n = 0
@@ -1741,6 +1930,11 @@ async def run_due(conn, *, now: float) -> dict:
                                       "error": "%s: %s" % (
                                           type(exc).__name__,
                                           str(exc)[:200])})
+        try:
+            out["directive_outcomes"] = await reflect_directive_work(
+                conn, now=float(now))
+        except Exception as exc:                                # noqa: BLE001
+            out["directive_outcomes"] = {"error": type(exc).__name__}
         try:
             out["canaries"] = await check_canaries(conn, now=float(now))
         except Exception as exc:                                # noqa: BLE001

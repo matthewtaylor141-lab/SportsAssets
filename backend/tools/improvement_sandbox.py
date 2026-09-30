@@ -336,6 +336,20 @@ async def _db_replay(dsn: str, cls, params: dict, spec: dict,
                         "min_net_edge_per_contract") or 0.01)),
                 "excluded": sp["excluded"],
                 "source": "DSN:external_valuations"}
+        if cls.name == "DEREK_ENTRY_POLICY_THRESHOLD":
+            rows = await IMP.derek_rows(conn, start=start, end=eb)
+            sp = IMP.split_rows(rows, training_boundary=tb,
+                                evaluation_boundary=eb,
+                                salt=IMP.DEREK_HOLDOUT_SALT,
+                                percent=IMP.DEREK_HOLDOUT_PERCENT)
+            return {"new": IMP.replay_derek_threshold(
+                sp["holdout"], threshold=float(params["min_gross_edge_pp"]),
+                basis=IMP.BASIS_GROSS),
+                "baseline": IMP.replay_derek_threshold(
+                    sp["holdout"], threshold=float(current.get(
+                        "min_gross_edge_pp") or 0.05), basis=IMP.BASIS_GROSS),
+                "excluded": sp["excluded"],
+                "source": "DSN:external_valuations"}
     finally:
         await conn.close()
     return {}
@@ -402,6 +416,27 @@ async def _task_spec(dsn: str, task_id: str) -> dict:
     return spec
 
 
+async def _candidate(dsn: str, candidate_id: str) -> dict | None:
+    import asyncpg
+    conn = await asyncpg.connect(dsn)
+    try:
+        return await IMP.candidate(conn, candidate_id)
+    finally:
+        await conn.close()
+
+
+async def _attach(dsn: str, candidate_id: str, *, diff, artifact_ref, base,
+                  tests, report, now) -> dict:
+    import asyncpg
+    conn = await asyncpg.connect(dsn)
+    try:
+        return await IMP.attach_artifact(
+            conn, candidate_id, diff=diff, artifact_ref=artifact_ref,
+            base_commit=base, test_results=tests, report=report, now=now)
+    finally:
+        await conn.close()
+
+
 async def _record(dsn: str, *, spec: dict, cls, params, diff, sha, branch,
                   base, tests, report, now) -> dict:
     import asyncpg
@@ -448,6 +483,33 @@ def run(args) -> dict:
     task_id = str(spec.get("task_id") or "").strip()
     if not task_id:
         raise Refused("THE_SPEC_NAMES_NO_TASK")
+    evaluated = None
+    if getattr(args, "candidate_id", None):
+        if not args.dsn:
+            raise Refused("A_CANDIDATE_ID_NEEDS_A_DSN")
+        evaluated = asyncio.run(_candidate(args.dsn, args.candidate_id))
+        if evaluated is None:
+            raise Refused("NO_SUCH_CANDIDATE", candidate_id=args.candidate_id)
+        if evaluated.get("task_id") != task_id:
+            raise Refused("THE_CANDIDATE_BELONGS_TO_ANOTHER_TASK",
+                          candidate_task=evaluated.get("task_id"),
+                          task_id=task_id)
+        if evaluated.get("state") in ("REJECTED", "WITHDRAWN"):
+            raise Refused("THE_CANDIDATE_WAS_%s" % evaluated["state"])
+        # THE ARTIFACT IS OF WHAT WAS EVALUATED: its own class and params
+        spec["change_class"] = evaluated["change_class"]
+        spec["params"] = evaluated.get("params")
+        # ... replayed on the SAME windows the evaluation used
+        tbd = IMP._obj(evaluated.get("training_boundary")) or {}
+        ebd = IMP._obj(evaluated.get("evaluation_boundary")) or {}
+        if tbd.get("start") is not None:
+            spec["training_start"] = tbd["start"]
+        if tbd.get("end") is not None:
+            spec["training_boundary"] = tbd["end"]
+        if ebd.get("end") is not None:
+            spec["evaluation_boundary"] = ebd["end"]
+        spec["training_boundary_detail"] = tbd
+        spec["evaluation_boundary_detail"] = ebd
     chk = IMP.check_class(spec.get("change_class"))
     if not chk["ok"]:
         raise Refused(chk["refusal"], change_class=spec.get("change_class"))
@@ -578,6 +640,12 @@ def run(args) -> dict:
                 now, _dt.timezone.utc).isoformat(),
             "never": ["pushed", "merged", "deployed",
                       "modified the serving process"]}
+        if evaluated is not None:
+            # THE EVALUATION THIS ARTIFACT IMPLEMENTS, committed beside it
+            report["evaluated_candidate"] = {
+                k: evaluated.get(k) for k in (
+                    "candidate_id", "state", "evaluated_by", "evaluation",
+                    "proposed_by", "params")}
         rdir = test_cwd / "research" / "improvements" / safe_name(task_id)
         rdir.mkdir(parents=True, exist_ok=True)
         (rdir / "evaluation.json").write_text(
@@ -593,7 +661,14 @@ def run(args) -> dict:
         report["artifact_ref"] = "%s@%s" % (branch, sha)
         report["diff_sha256"] = hashlib.sha256(diff.encode()).hexdigest()
         recorded = None
-        if args.dsn and not args.no_record:
+        if args.dsn and not args.no_record and evaluated is not None:
+            recorded = asyncio.run(_attach(
+                args.dsn, evaluated["candidate_id"], diff=diff,
+                artifact_ref="%s@%s" % (branch, sha), base=base,
+                tests=test_results,
+                report={k: v for k, v in report.items() if k != "diff"},
+                now=now))
+        elif args.dsn and not args.no_record:
             recorded = asyncio.run(_record(
                 args.dsn, spec=spec, cls=cls, params=params, diff=diff,
                 sha=sha, branch=branch, base=base, tests=test_results,
@@ -624,6 +699,9 @@ def main(argv=None) -> int:
     p.add_argument("--test-timeout", default=600)
     p.add_argument("--keep-worktree", action="store_true")
     p.add_argument("--no-record", action="store_true")
+    p.add_argument("--candidate-id", default=None,
+                   help="build the artifact for this EVALUATED candidate's "
+                        "own parameters and attach it to that candidate")
     args = p.parse_args(argv)
     try:
         report = run(args)
