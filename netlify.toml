@@ -58,37 +58,6 @@
 # A path that is NOT one of those files 404s rather than falling through to
 # the old site. That is deliberate: an obsolete route should say it is gone,
 # not quietly serve the page it replaced.
-# THE THREE AGENT PAGES BY NAME: /derek, /xavier and /audrey.
-#
-# A REDIRECT (302), NOT A PROXY. The pages are served by the API at
-# /api/command/agents/<agent>/page, and the COMMAND session cookie is scoped
-# to /api/command -- a proxied /derek would be a path the cookie is never
-# sent to, so the page would always answer locked. Redirecting puts the
-# browser on the API path, where the cookie applies, and a refresh or a
-# shared link keeps working.
-#
-# ORDER: below the /api/command/* proxy (which must stay first) and ABOVE
-# the command.bettortoken.com host rule, which would otherwise send these
-# paths to /command/:splat and 404. Path-only, so www.bettortoken.com/derek
-# redirects too; the API page itself decides who may see it.
-[[redirects]]
-  from = "/derek"
-  to = "/api/command/agents/derek/page"
-  status = 302
-  force = true
-
-[[redirects]]
-  from = "/xavier"
-  to = "/api/command/agents/xavier/page"
-  status = 302
-  force = true
-
-[[redirects]]
-  from = "/audrey"
-  to = "/api/command/agents/audrey/page"
-  status = 302
-  force = true
-
 [[redirects]]
   from = "https://command.bettortoken.com/*"
   to = "/command/:splat"
