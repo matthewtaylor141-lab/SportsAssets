@@ -204,3 +204,5 @@ tests/test_the_observer_is_fed_by_the_catalogue_and_accounts_for_every_attempt.p
 tests/test_a_pair_is_observed_without_being_admitted.py
 # (1001) the management overview: every section named, the launch verdict
 tests/test_the_management_overview_names_every_empty_section.py
+# (1001) rehearsal: the full Xavier path through cycle(), substituted venue transport
+tests/test_rehearsal_xavier_full_scheduled_path.py

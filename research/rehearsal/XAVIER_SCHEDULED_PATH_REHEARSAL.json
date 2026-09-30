@@ -1,0 +1,179 @@
+{
+  "label": "REHEARSAL_SUBSTITUTED_VENUE_TRANSPORT_NOT_A_REAL_ORDER",
+  "account": "acct-funded-DEMONSTRATION-xavier-xc",
+  "venue": "PMUS",
+  "what_is_real": "the production cycle(), Xavier, ranking, the funded book writers, the database",
+  "what_is_substituted": "the venue transport: order books, matching and acknowledgements are SYNTHETIC",
+  "steps": [
+    {
+      "step": "1_ENTRY_FILL",
+      "label": "REHEARSAL_SUBSTITUTED_VENUE_TRANSPORT_NOT_A_REAL_ORDER",
+      "intent_id": "fpi-xavier-xc-held",
+      "contract": "aec-mlb-bos-nyy-2026-10-06",
+      "residual_qty": 10.0,
+      "basis_price": 0.6
+    },
+    {
+      "step": "2_SCHEDULED_REVIEW",
+      "label": "REHEARSAL_SUBSTITUTED_VENUE_TRANSPORT_NOT_A_REAL_ORDER",
+      "decision_id": "dec:fpi-xavier-xc-held:1790773986",
+      "forward_probability": 0.3,
+      "responsibility_state": "HELD"
+    },
+    {
+      "step": "3_RANKED_ALTERNATIVES",
+      "label": "REHEARSAL_SUBSTITUTED_VENUE_TRANSPORT_NOT_A_REAL_ORDER",
+      "alternatives": [
+        {
+          "action": "REDUCE",
+          "quantity": 7.0,
+          "expected_net_usd": -2.1599999999999993,
+          "increment_vs_hold_usd": 0.84,
+          "worst_case_remaining_loss_usd": 3.06,
+          "capital_released_usd": 2.94,
+          "fees_usd": 0.12000000000000001,
+          "blocker": null
+        },
+        {
+          "action": "DIRECT_EXIT",
+          "quantity": 4.0,
+          "expected_net_usd": -2.47,
+          "increment_vs_hold_usd": 0.53,
+          "worst_case_remaining_loss_usd": 4.27,
+          "capital_released_usd": 1.73,
+          "fees_usd": 0.07,
+          "blocker": null
+        },
+        {
+          "action": "HOLD",
+          "quantity": 10.0,
+          "expected_net_usd": -3.0,
+          "increment_vs_hold_usd": 0.0,
+          "worst_case_remaining_loss_usd": 6.0,
+          "capital_released_usd": 0.0,
+          "fees_usd": 0.0,
+          "blocker": null
+        },
+        {
+          "action": "HOLD_TO_SETTLEMENT",
+          "quantity": null,
+          "expected_net_usd": null,
+          "increment_vs_hold_usd": null,
+          "worst_case_remaining_loss_usd": null,
+          "capital_released_usd": null,
+          "fees_usd": null,
+          "blocker": "SETTLEMENT_SEMANTICS_NOT_SUPPLIED"
+        },
+        {
+          "action": "POST_COMPLEMENT",
+          "quantity": null,
+          "expected_net_usd": null,
+          "increment_vs_hold_usd": null,
+          "worst_case_remaining_loss_usd": null,
+          "capital_released_usd": null,
+          "fees_usd": null,
+          "blocker": "P_FILL_NOT_IDENTIFIED"
+        },
+        {
+          "action": "MERGE",
+          "quantity": null,
+          "expected_net_usd": null,
+          "increment_vs_hold_usd": null,
+          "worst_case_remaining_loss_usd": null,
+          "capital_released_usd": null,
+          "fees_usd": null,
+          "blocker": "MERGE_NOT_APPLICABLE"
+        },
+        {
+          "action": "TAKE_COMPLEMENT",
+          "quantity": 4.0,
+          "expected_net_usd": null,
+          "increment_vs_hold_usd": null,
+          "worst_case_remaining_loss_usd": null,
+          "capital_released_usd": null,
+          "fees_usd": null,
+          "blocker": "ON_PMUS_BUYING_THE_OTHER_SIDE_NETS_THE_POSITION_SEE_REDUCE"
+        },
+        {
+          "action": "ACQUIRE_HEDGE",
+          "quantity": null,
+          "expected_net_usd": null,
+          "increment_vs_hold_usd": null,
+          "worst_case_remaining_loss_usd": null,
+          "capital_released_usd": null,
+          "fees_usd": null,
+          "blocker": "HEDGE_SEARCH_REFUSALS"
+        }
+      ]
+    },
+    {
+      "step": "4_SELECTED_ACTION",
+      "label": "REHEARSAL_SUBSTITUTED_VENUE_TRANSPORT_NOT_A_REAL_ORDER",
+      "action": "REDUCE",
+      "quantity": 7.0,
+      "plan_digest": "df754a1749ccde9ebb6a09bc6e255d72",
+      "reasoning": {
+        "policy": "EXPECTED_NET_VALUE",
+        "refusal": null,
+        "tie_break": "at equal expected net value: the higher worst-case net (`worst_case_net_usd`, else `downside_usd`; unknown sorts last), then the smaller incremental capital",
+        "eligibility": {
+          "eligibility": "DISPATCHED",
+          "switches_off": [],
+          "gates_checked": [
+            "SCHEMA",
+            "INVENTORY",
+            "EVIDENCE_NOT_EXPIRED_REAL_CLOCK",
+            "SERVICING_OWNERSHIP"
+          ],
+          "not_evaluated_here": [
+            "pmus execution_gate.authorize",
+            "venue credentials"
+          ]
+        },
+        "chosen_action": "REDUCE",
+        "ledger_action": "REDUCE",
+        "group_decision": null,
+        "chosen_leg_role": null,
+        "selection_reason": "REDUCE has the highest EXPECTED net value (-2.1599999999999993), ahead of DIRECT_EXIT at -2.47. The worst case was applied as a constraint, not as the ranking",
+        "worst_case_net_usd": -3.06,
+        "capital_released_usd": 2.94,
+        "capital_required_usd": 0.0,
+        "increment_vs_hold_usd": 0.84,
+        "margin_over_runner_up": 0.31,
+        "history_is_not_a_reason": "a loss already taken enters only through the remaining basis every alternative is scored against; nothing is forced by it. The comparison is forward value and worst case against the capital recoverable now"
+      },
+      "selection_basis": "ROBUST_ACROSS_THE_VOID_RATE_RANGE"
+    },
+    {
+      "step": "5_DISPATCH_AND_ACKNOWLEDGEMENT",
+      "label": "REHEARSAL_SUBSTITUTED_VENUE_TRANSPORT_NOT_A_REAL_ORDER",
+      "order_sent_to_substituted_venue": {
+        "intent": "ORDER_INTENT_SELL_LONG",
+        "quantity": 7,
+        "price": {
+          "value": "0.42",
+          "currency": "USD"
+        },
+        "marketSlug": "aec-mlb-bos-nyy-2026-10-06"
+      },
+      "execution_eligibility": "DISPATCHED",
+      "acknowledged": true
+    },
+    {
+      "step": "6_UPDATED_EXPOSURE_AND_PNL",
+      "label": "REHEARSAL_SUBSTITUTED_VENUE_TRANSPORT_NOT_A_REAL_ORDER",
+      "residual_qty": 3.0,
+      "exit_proceeds_usd": 3.06,
+      "realised_pnl_usd": -1.379
+    },
+    {
+      "step": "7_NEXT_SCHEDULED_REVIEW",
+      "label": "REHEARSAL_SUBSTITUTED_VENUE_TRANSPORT_NOT_A_REAL_ORDER",
+      "decision_id": "dec:fpi-xavier-xc-held:1790773986",
+      "chosen_action": "EXIT",
+      "execution_eligibility": "DISPATCHED",
+      "residual_qty_reviewed": 3.0,
+      "funded_servicing_ran": true
+    }
+  ]
+}
