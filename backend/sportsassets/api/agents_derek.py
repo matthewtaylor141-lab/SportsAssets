@@ -83,7 +83,7 @@ POLICY_DECISION_FIELDS = (
     "policy_name", "policy_version", "p_internal", "internal_model_version",
     "internal_at", "p_pinnacle", "pinnacle_at", "p_blended", "gross_edge_pp",
     "fees_usd", "net_expected_profit_usd", "expected_return_pct",
-    "conditions", "rationale",
+    "conditions", "rationale", "instrument",
     # supporting fields of the same stored output
     "policy_key", "combination_policy", "inputs_are", "internal_qualified",
     "internal_refusal", "pinnacle_qualified", "pinnacle_qualification",

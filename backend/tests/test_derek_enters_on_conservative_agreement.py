@@ -466,6 +466,17 @@ def _assert_v2_record(row, *, p_pin, p_int, price, qty, fee):
     assert pd["expected_return_pct"] == pytest.approx(
         100.0 * net / (price * qty + fee))
     assert [c["status"] for c in pd["conditions"]] == [DP.PASS] * 5
+    # THE INSTRUMENT LABEL'S INPUTS, from the verified metadata
+    ins = pd["instrument"]
+    assert ins["market_type"] == "MONEYLINE" and ins["line"] is None
+    assert ins["unknown"]["line"] == "a moneyline has no line"
+    assert ins["side"] == "ORDER_INTENT_BUY_LONG"
+    assert ins["period"] == "FULL_GAME"
+    assert ins["competition"] == "MLB"
+    assert ins["us_market_slug"] == US_SLUG
+    assert ins["event_date"] == "2026-10-01", ins
+    assert ins["home_team"] == "New York Yankees", ins
+    assert ins["away_team"] == "Boston Red Sox", ins
     assert pd["rationale"].startswith("ENTER under %s" % DP.POLICY_V2)
     # THE COLUMNS ARE COPIES OF THE SAME COMPUTATION
     assert row["pinnacle_p"] == pytest.approx(p_pin, abs=1e-12)

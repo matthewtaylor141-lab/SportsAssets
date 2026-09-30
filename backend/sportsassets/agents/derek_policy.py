@@ -450,6 +450,7 @@ def candidate_from_rec(rec: dict, *, now: float) -> dict:
         "selection": c.get("selection"),
         "sport_family": c.get("sport_family"),
         "market": c.get("market"),
+        "line": _f(c.get("line")),
         "period": c.get("period"),
         "period_basis": c.get("period_basis"),
         "pinnacle": {"p": _f(rec.get("probability")),
@@ -541,6 +542,7 @@ def candidate_from_row(row: dict) -> dict:
         "selection": r.get("contract_selection"),
         "sport_family": r.get("sport_family"),
         "market": r.get("market"),
+        "line": _f(r.get("line")),
         "period": r.get("period"),
         "period_basis": ("RECORDED_ON_THE_VALUATION_ROW"
                          if r.get("period") else None),
@@ -760,7 +762,80 @@ RECORD_FIELDS = (
     "policy_name", "policy_version", "p_internal", "internal_model_version",
     "internal_at", "p_pinnacle", "pinnacle_at", "p_blended", "gross_edge_pp",
     "fees_usd", "net_expected_profit_usd", "expected_return_pct",
-    "conditions", "rationale")
+    "conditions", "rationale", "instrument")
+
+#: THE INSTRUMENT LABEL'S INPUTS (the record's `instrument`), for a shared
+#: label resolver. Each is taken from the verified metadata the valuation
+#: used; an unknown one is None with its reason in `instrument.unknown`.
+INSTRUMENT_FIELDS = (
+    "participant", "pays_on", "home_team", "away_team", "market_type",
+    "line", "side", "period", "competition", "event_date", "event_title",
+    "us_market_slug", "event_key")
+
+
+def instrument_label(cand: dict, *, catalogue_row: dict | None = None,
+                     fixture_row: dict | None = None) -> dict:
+    """WHAT WAS DECIDED ON, IN A MANAGER'S TERMS -- the inputs, not a
+    rendered label. Pure. Sources: the contract identity the venue resolver
+    established (selection, side, period, market, line), the fixture
+    metadata the settlement comparison read (teams, official date), and the
+    catalogue row (event title, the league token of the venue's event
+    slug). Nothing is guessed: an unknown field is None with a reason."""
+    st = dict(cand.get("settlement") or {})
+    fx = dict(fixture_row or {}) if st.get("fixture_read") is True else {}
+    cat = dict(catalogue_row or {})
+    vals: dict[str, Any] = {}
+    basis: dict[str, str] = {}
+    unknown: dict[str, str] = {}
+
+    def put(k, v, src, why):
+        if v is None or v == "":
+            vals[k] = None
+            unknown[k] = why
+        else:
+            vals[k] = v
+            basis[k] = src
+    put("participant", cand.get("selection"),
+        "contract.selection (venue identity resolver)",
+        "the contract carries no selection")
+    put("pays_on", cand.get("payout_event"),
+        "contract payout event (bound to the venue outcome)",
+        "the payout event is not recorded")
+    put("home_team", st.get("home_team") or fx.get("home_team"),
+        "fixture_metadata read by the settlement comparison",
+        "no fixture metadata was read for this valuation")
+    put("away_team", st.get("away_team") or fx.get("away_team"),
+        "fixture_metadata read by the settlement comparison",
+        "no fixture metadata was read for this valuation")
+    mk = cand.get("market")
+    put("market_type", ("MONEYLINE" if mk == "h2h" else mk),
+        "contract.market (%s)" % mk, "the contract carries no market")
+    put("line", cand.get("line"), "contract.line",
+        "a moneyline has no line" if mk == "h2h"
+        else "the contract carries no line")
+    put("side", cand.get("side"), "the order intent the resolver bound",
+        "no order intent is recorded")
+    put("period", cand.get("period"),
+        "contract.period (%s)" % cand.get("period_basis"),
+        "the period was not established")
+    slug = str(cat.get("event_slug") or "")
+    league = slug.split("-", 1)[0].upper() if "-" in slug else None
+    put("competition", league,
+        "the league token of the venue's event slug (us_premap.event_slug)",
+        "no catalogue event slug names the competition")
+    ed = st.get("official_date") or fx.get("official_date")
+    put("event_date", (None if ed is None else
+                       ed.isoformat() if hasattr(ed, "isoformat")
+                       else str(ed)),
+        "fixture_metadata.official_date read by the settlement comparison",
+        "no fixture metadata was read for this valuation")
+    put("event_title", cat.get("event_title"), "us_premap.event_title",
+        "no catalogue row for this market")
+    put("us_market_slug", cand.get("us_market_slug"), "contract identity",
+        "no venue market slug")
+    put("event_key", cand.get("event_key"), "the book's event id",
+        "no event key")
+    return dict(vals, basis=basis, unknown=unknown)
 
 #: ── THE SETTLEMENT STATES OF ONE BOUGHT CONTRACT (V2's net EV) ──────────
 #: The payout-state distribution's own convention (bettor_payout_states /
@@ -1065,6 +1140,7 @@ def decide_entry(policy: str, *, internal: dict, pinnacle: dict, econ: dict,
         "expected_return_pct": _pct(roc),
         "conditions": conds,
         "rationale": None,
+        "instrument": None,
         # ── SUPPORTING FIELDS ─────────────────────────────────────────
         "function": "agents.derek_policy.decide_entry",
         "policy_key": POLICY_KEY,
@@ -1377,7 +1453,8 @@ def _realism(cand: dict, catalogue_row: dict | None) -> dict:
 def evaluate(cand: dict, *, model: dict, params: dict | None = None,
              authority: list | None = None, catalogue_row: dict | None = None,
              fee_fn=None, policy_version: str | None = None,
-             policy: str = ACTIVE_POLICY, void: dict | None = None) -> dict:
+             policy: str = ACTIVE_POLICY, void: dict | None = None,
+             fixture_row: dict | None = None) -> dict:
     """DEREK'S VERDICT ON ONE CANDIDATE. Pure and deterministic given its
     inputs; every figure is from decision-time data on the candidate, the
     registry read in `model`, and the authority reads in `authority`.
@@ -1674,6 +1751,8 @@ def evaluate(cand: dict, *, model: dict, params: dict | None = None,
         void_refunds_price=(None if st.get("compatibility") is None
                             else st.get("compatibility") == "COMPATIBLE"),
         policy_version=policy_version)
+    pd["instrument"] = instrument_label(cand, catalogue_row=catalogue_row,
+                                        fixture_row=fixture_row)
     checks.append(combination_check(pd))
     checks.append(net_ev_check(pd))
 
@@ -1953,6 +2032,21 @@ async def void_measure(conn, *, through: float | None) -> dict:
                 "error": type(exc).__name__}
 
 
+async def fixture_row(conn, condition_id) -> dict | None:
+    """The fixture metadata row the settlement comparison reads (teams,
+    official date), for the record's instrument label. Never raises."""
+    if not condition_id:
+        return None
+    try:
+        r = await conn.fetchrow(
+            "SELECT official_date, home_team, away_team, game_pk "
+            "  FROM fixture_metadata WHERE condition_id = $1",
+            str(condition_id))
+        return None if r is None else dict(r)
+    except Exception:                                          # noqa: BLE001
+        return None
+
+
 async def catalogue_row(conn, slug) -> dict | None:
     if not slug:
         return None
@@ -2001,8 +2095,10 @@ async def gate_for_funded_entry(conn, rec: dict, *, now: float,
         auth = await authority_checks(conn, now=float(now))
         cat = await catalogue_row(conn, cand.get("us_market_slug"))
         void = await void_measure(conn, through=float(now))
+        fxr = await fixture_row(conn, cand.get("condition_id"))
         dec = evaluate(cand, model=model, params=prm, authority=auth,
-                       catalogue_row=cat, policy_version=version, void=void)
+                       catalogue_row=cat, policy_version=version, void=void,
+                       fixture_row=fxr)
         did = decision_id_for(valuation_id=cand.get("valuation_id"),
                               rec_digest=_rec_digest(rec, now=float(now)),
                               policy_version=version)

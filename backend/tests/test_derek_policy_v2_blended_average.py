@@ -92,7 +92,7 @@ def test_the_stable_record_fields():
         "internal_model_version", "internal_at", "p_pinnacle",
         "pinnacle_at", "p_blended", "gross_edge_pp", "fees_usd",
         "net_expected_profit_usd", "expected_return_pct", "conditions",
-        "rationale")
+        "rationale", "instrument")
     pd = _q()
     for k in DP.RECORD_FIELDS:
         assert k in pd, k
@@ -364,6 +364,40 @@ def test_evaluate_takes_its_combination_and_net_checks_from_decide_entry():
     names = {c["check"] for c in v1["checks"]}
     assert DP.C_AGREEMENT in names and DP.C_BLENDED not in names
     assert v1["policy_decision"]["p_blended"] is None
+
+
+def test_the_record_carries_the_instrument_label_inputs():
+    cand = dict(_cand(), selection="New York Yankees", market="h2h",
+                line=None, period="FULL_GAME")
+    cand["settlement"] = dict(cand["settlement"], home_team="New York Yankees",
+                              away_team="Boston Red Sox",
+                              official_date="2026-10-01")
+    dec = DP.evaluate(cand, model=_model(), authority=[],
+                      catalogue_row={"event_slug": "mlb-bos-nyy-2026-10-01",
+                                     "event_title": "Boston Red Sox vs. New "
+                                                    "York Yankees"})
+    ins = dec["policy_decision"]["instrument"]
+    assert set(DP.INSTRUMENT_FIELDS) <= set(ins)
+    assert ins["participant"] == "New York Yankees"
+    assert (ins["home_team"], ins["away_team"]) == ("New York Yankees",
+                                                    "Boston Red Sox")
+    assert ins["market_type"] == "MONEYLINE" and ins["side"] == DP.LONG
+    assert ins["period"] == "FULL_GAME" and ins["competition"] == "MLB"
+    assert ins["event_date"] == "2026-10-01"
+    # unknown is None WITH ITS REASON, never guessed
+    assert ins["line"] is None
+    assert ins["unknown"]["line"] == "a moneyline has no line"
+    # a valuation that read no fixture metadata leaves teams and date null
+    bare = dict(cand, settlement=dict(cand["settlement"], fixture_read=None,
+                                      home_team=None, away_team=None,
+                                      official_date=None))
+    ins = DP.instrument_label(bare, catalogue_row=None,
+                              fixture_row={"home_team": "X",
+                                           "official_date": "2026-01-01"})
+    assert ins["home_team"] is None and ins["event_date"] is None
+    assert ins["competition"] is None
+    assert "no fixture metadata" in ins["unknown"]["event_date"]
+    assert "competition" in ins["unknown"]
 
 
 def test_a_record_names_the_policy_that_judged_it():

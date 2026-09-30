@@ -178,9 +178,11 @@ async def after_cycle(conn, *, cycle: dict, now: float) -> dict:
             decided = float(cand.get("decided_at") or at)
             model = DP.model_estimate(ap, cand, at=decided)
             cat = await DP.catalogue_row(conn, cand.get("us_market_slug"))
+            fxr = await DP.fixture_row(conn, cand.get("condition_id"))
             dec = DP.evaluate(cand, model=model, params=pol["params"],
                               authority=auth, catalogue_row=cat,
-                              policy_version=pol["version"], void=void)
+                              policy_version=pol["version"], void=void,
+                              fixture_row=fxr)
             did = DP.decision_id_for(valuation_id=cand["valuation_id"],
                                      policy_version=pol["version"])
             lat = DP.latency_for(cand, decided_at=decided)
