@@ -2495,7 +2495,8 @@ async def venue_settlement_evidence(conn, us_market_slug: str) -> dict:
 
 
 def _displayed_not_for_orders(book, *, intent, slug, read_at,
-                              currency) -> dict:
+                              currency, venue_ts=None,
+                              venue_clock_basis=None) -> dict:
     """WHAT A REFUSED BOOK DISPLAYED ON THE SIDE THIS INTENT CONSUMES.
 
     Built only for a read `venue_quote` then REFUSES, so it is never usable
@@ -2525,6 +2526,11 @@ def _displayed_not_for_orders(book, *, intent, slug, read_at,
             "levels_read": lad.get("levels_read"),
             "refusal": None if ok else (lad.get("refusal") or R_NO_DEPTH),
             "intent": intent, "slug": slug, "read_at": read_at,
+            # THE VENUE'S OWN STAMP (marketData.transactTime, parsed), or
+            # None with the clock's basis when it supplied none. Provenance
+            # for research observations; its meaning is unresolved and it
+            # decides nothing (VENUE_STAMP_SEMANTICS).
+            "venue_ts": venue_ts, "venue_clock_basis": venue_clock_basis,
             "book_currency_verdict": (currency or {}).get("verdict"),
             "book_currency_mechanism": (currency or {}).get("mechanism")}
 
@@ -2846,7 +2852,7 @@ async def venue_quote(conn, *, us_slug, intent, now=None, size=None,
     refused_read = {
         "displayed_not_for_orders": _displayed_not_for_orders(
             book, intent=intent, slug=slug, read_at=read_at,
-            currency=currency),
+            currency=currency, venue_ts=vt, venue_clock_basis=age_basis),
         "venue_ts": vt, "read_at": read_at, "slug": slug, "intent": intent,
         "http_observation": book.get("http_observation")}
     # THE CONTRADICTED CASE FIRST: it is the one backed by evidence.

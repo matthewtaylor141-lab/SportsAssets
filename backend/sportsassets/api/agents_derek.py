@@ -149,6 +149,10 @@ async def versions(conn) -> dict:
                   "dependency": DP.DEP_ENGINEERING})
     except Exception as exc:                                   # noqa: BLE001
         model = {"state": "UNAVAILABLE", "why": type(exc).__name__}
+    # WHAT THE MODEL IS, AND WHAT THE POLICY'S USE OF IT IS, wherever shown.
+    model = dict(model, description=FM.ENTRY_PAYOUT_DESCRIPTION,
+                 entry_policy_use=FM.ENTRY_POLICY_AGREEMENT_IS,
+                 minimums=FM.qualification_minimums(FM.KEY_ENTRY_PAYOUT))
     try:
         from ..workers import ext_pinnacle_loop as L
         code = L._code_identity()
@@ -425,12 +429,58 @@ async def collection(conn) -> dict:
     return _sec(OK, got)
 
 
+async def model_qualification(conn) -> dict:
+    """THE INTERNAL ENTRY MODEL'S QUALIFICATION PATH: the research
+    observations by price cohort (never pooled), the exact minimums in
+    fixtures, and each registered model's declared training population and
+    recorded approval eligibility."""
+    from .. import bettor_funded_model as FM
+    data: dict[str, Any] = {
+        "model_key": FM.KEY_ENTRY_PAYOUT,
+        "description": FM.ENTRY_PAYOUT_DESCRIPTION,
+        "entry_policy_use": FM.ENTRY_POLICY_AGREEMENT_IS,
+        "minimums": FM.qualification_minimums(FM.KEY_ENTRY_PAYOUT),
+        "cohorts": [FM.COHORT_DISPLAYED, FM.COHORT_EXECUTABLE]}
+    if not await _regclass(conn, "derek_research_observations"):
+        return _sec(UNAVAILABLE, data, why="migration 170 is not applied here")
+    from ..agents import derek_research as DR
+    data["research_observations"] = await DR.summary(conn)
+    models = []
+    if await _regclass(conn, "bettor_funded_models"):
+        for r in await conn.fetch(
+                "SELECT model_id, model_version, state, approved_by, "
+                "       approved_at, training_provenance, evaluation "
+                "  FROM bettor_funded_models WHERE model_key = $1 "
+                " ORDER BY created_at DESC LIMIT 10", FM.KEY_ENTRY_PAYOUT):
+            prov = _j(r["training_provenance"]) or {}
+            ev = _j(r["evaluation"]) or {}
+            el = ev.get("approval_eligibility") or {}
+            models.append({
+                "model_id": r["model_id"], "state": r["state"],
+                "model_version": r["model_version"],
+                "approved_by": r["approved_by"],
+                "approved_at": _iso(r["approved_at"]),
+                "record_source": prov.get("source"),
+                "training_population": prov.get("training_population"),
+                "eligible": el.get("eligible"),
+                "failed": el.get("failed"),
+                "input_distribution_shift": el.get(
+                    "input_distribution_shift")})
+    data["models"] = models
+    if not (data["research_observations"].get("by_cohort") or {}):
+        return _sec(EMPTY, data, why=(
+            "no research observation has been recorded: after_cycle has not "
+            "run against this database since migration 170"))
+    return _sec(OK, data)
+
+
 SECTIONS = (("status", status), ("versions", versions),
             ("coverage", coverage), ("subscription", subscription),
             ("opportunity_queue", opportunity_queue),
             ("decisions", decisions), ("plans_fills", plans_fills),
             ("handoffs", handoffs), ("latency", latency),
-            ("performance", performance), ("collection", collection))
+            ("performance", performance), ("collection", collection),
+            ("model_qualification", model_qualification))
 
 
 async def workspace(conn) -> dict:

@@ -681,7 +681,12 @@ def model_estimate(approved: dict | None, cand: dict, *,
     ev = dict(m.get("evaluation") or {})
     comp = dict(ev.get("promotion_comparison") or {})
     pros = dict(ev.get("PROSPECTIVE") or {})
+    mc = dict(comp.get("market_comparison") or {})
     return dict(out, **base, ok=True, refusal=None, p=p,
+                description=FM.ENTRY_PAYOUT_DESCRIPTION,
+                agreement_is=FM.ENTRY_POLICY_AGREEMENT_IS,
+                promotion_vs_raw_price=(mc.get("model_vs_raw_venue_price")
+                                        or {}).get("log_loss_improvement"),
                 uncertainty={
                     "kind": "REGISTRY_EVALUATION_NOT_A_PREDICTION_INTERVAL",
                     "prospective_n_events": pros.get("n_events"),
@@ -834,6 +839,9 @@ def evaluate(cand: dict, *, model: dict, params: dict | None = None,
     inputs; every figure is from decision-time data on the candidate, the
     registry read in `model`, and the authority reads in `authority`."""
     from .. import bettor_funded_execution as FX
+    from ..bettor_funded_model import (
+        ENTRY_PAYOUT_DESCRIPTION as FM_DESCRIPTION,
+        ENTRY_POLICY_AGREEMENT_IS as FM_AGREEMENT_IS)
     prm = dict(DEFAULT_PARAMS, **(params or {}))
     checks: list = []
     lane = list(cand.get("refusals") or [])
@@ -1229,6 +1237,8 @@ def evaluate(cand: dict, *, model: dict, params: dict | None = None,
                     "the model's only live input is the venue book, so it "
                     "carries the venue arm of the same freshness rule"),
                 "uncertainty": model.get("uncertainty"),
+                "is": FM_DESCRIPTION,
+                "agreement_is": FM_AGREEMENT_IS,
                 "refusal": model.get("refusal")}},
         "economics": econ,
         "features": model.get("features"),
@@ -1512,6 +1522,7 @@ async def _link(conn, did, cand, *, verdict, refusal, decided_at, dec) -> dict:
 
 LABEL_SQL = """
     SELECT d.decision_id, d.fixture, d.features, d.feature_sha,
+           d.pinnacle_p,
            extract(epoch FROM d.decided_at) AS decided_epoch,
            v.id AS valuation_id, v.outcome, v.outcome_basis,
            extract(epoch FROM v.outcome_at) AS outcome_epoch
@@ -1538,7 +1549,12 @@ async def labelled_entries(conn, *, after=None, through=None,
                            "labels": []}
     keys = ("decision_ids", "groups", "fixtures", "decided_at",
             "feature_shas", "outcome_available_at", "leg_outcomes",
-            "pushes", "outcome_versions")
+            "pushes", "outcome_versions",
+            # THE MARKET CONTEXT the honest evaluation scores beside the model
+            # (never part of the hashed training record): the Pinnacle
+            # probability recorded on the decision, and the price cohort --
+            # always an executable price on an established book here.
+            "pinnacle_p", "price_basis", "cohorts")
     for k in keys:
         out[k] = []
     sql, args = LABEL_SQL, [ext.EXPERIMENT_ID]
@@ -1579,6 +1595,9 @@ async def labelled_entries(conn, *, after=None, through=None,
                         else round(float(r["outcome_epoch"]), 6))}])
         out["pushes"].append(False)
         out["outcome_versions"].append(None)
+        out["pinnacle_p"].append(_f(r["pinnacle_p"]))
+        out["price_basis"].append(FM.PRICE_BASIS_EXECUTABLE)
+        out["cohorts"].append(FM.COHORT_EXECUTABLE)
     out["n_events"] = len({str(f) for f in out["fixtures"]})
     return dict(out, ok=True, refusal=None, n=len(out["labels"]),
                 target=FM.TARGET_ENTRY_PAYOUT,

@@ -176,6 +176,49 @@ KEY_ENTRY_PAYOUT = "derek_entry_payout_event"
 TARGET_ENTRY_PAYOUT = "CONTRACT_PAYOUT_EVENT_OCCURRED"
 FEATURES_ENTRY_PAYOUT = ("acquisition_price", "payout_is_complement")
 SOURCE_ENTRY_DECISIONS = "DEREK_ENTRY_DECISIONS"
+#: DEREK'S NON-FUNDED RESEARCH OBSERVATIONS (migration 170,
+#: `agents.derek_research`): one frozen observation per entry-experiment
+#: valuation of EITHER purpose, labelled from the valuation's own settlement
+#: join. The source that breaks the deadlock: Derek's decisions exist only for
+#: ENTRY_DECISION valuations, which need established book currency (P5), while
+#: learning how a price relates to its settlement does not.
+SOURCE_RESEARCH_OBSERVATIONS = "DEREK_RESEARCH_OBSERVATIONS"
+ENTRY_PAYOUT_SOURCES = (SOURCE_ENTRY_DECISIONS, SOURCE_RESEARCH_OBSERVATIONS)
+
+#: ── THE ENTRY MODEL'S TWO PRICE COHORTS, NEVER POOLED SILENTLY ──────────
+#: A CALIBRATION_ONLY valuation's price was DISPLAYED on a book whose currency
+#: was not established: its age is unknown. An ENTRY_DECISION valuation's price
+#: was executable on an established book. A model declares which cohort(s) it
+#: was trained on and is evaluated on those, the other reported apart.
+COHORT_DISPLAYED = "DISPLAYED_PRICE_AGE_UNKNOWN"
+COHORT_EXECUTABLE = "EXECUTABLE_PRICE_CURRENT"
+PRICE_BASIS_DISPLAYED = "DISPLAYED_BOOK_CURRENCY_UNESTABLISHED"
+PRICE_BASIS_EXECUTABLE = "EXECUTABLE_BOOK_CURRENCY_ESTABLISHED"
+#: What the model is, stated on its record and wherever it is shown.
+ENTRY_PAYOUT_DESCRIPTION = (
+    "a separately fitted market-price calibration model (features: price, "
+    "payout side); not an independent sports forecast")
+#: What Derek's entry policy's use of it is.
+ENTRY_POLICY_AGREEMENT_IS = (
+    "POLICY_AGREEMENT_CHECK_NOT_EVIDENCE_OF_INDEPENDENT_INFORMATION: the "
+    "entry policy requires Pinnacle and this model each to clear 5 pp; the "
+    "model is a calibration of the venue price, so the two agreeing is a "
+    "policy condition, not independent confirmation")
+#: THE ADDITIONAL BAR FOR THIS KEY, declared here and not per call: on the
+#: same prospective fixtures the model must beat (a) the RAW VENUE PRICE used
+#: as a probability -- otherwise it adds nothing beyond the price it was given
+#: -- and (b) its training base rate, each by MIN_SKILL_MARGIN in event-balanced
+#: log loss AND by more than the uncertainty (the lower end of the clustered
+#: jackknife's 95% interval above zero). Pinnacle is reported beside them and
+#: is never a condition: agreement with another market price is not
+#: confirmation.
+R_NO_INFORMATION_BEYOND_THE_PRICE = \
+    "THE_MODEL_DID_NOT_BEAT_THE_RAW_VENUE_PRICE_BEYOND_ITS_UNCERTAINTY"
+R_NOT_BEYOND_THE_BASE_RATE = \
+    "THE_MODEL_DID_NOT_BEAT_ITS_BASE_RATE_BEYOND_ITS_UNCERTAINTY"
+R_ELIGIBILITY_COHORT_TOO_SMALL = \
+    "TOO_FEW_PROSPECTIVE_FIXTURES_WITH_A_PRICE_AND_A_PINNACLE_READING"
+R_TOO_FEW_TRAINING_EVENTS = "THE_MODEL_WAS_FIT_ON_FEWER_THAN_MIN_TRAIN_EVENTS"
 
 #: ── THE WEIGHTING EVERY SCORE AND EVERY FIT USES ────────────────────
 #:
@@ -214,6 +257,27 @@ MIN_EVALUATION_ROWS = 40
 MIN_EVALUATION_EVENTS = MIN_EVALUATION_ROWS
 MIN_SKILL_MARGIN = 0.01          # in log loss, against the incumbent
 PROMOTION_METRIC = "log_loss"
+
+
+def qualification_minimums(model_key: str | None = None) -> dict:
+    """THE EXACT COUNTS A MODEL OF THIS KEY NEEDS, from the constants above,
+    in FIXTURES (distinct events) -- never decisions or rows."""
+    return {"model_key": model_key or KEY_MIDDLE,
+            "unit": "FIXTURES (distinct events; repeated rows on one fixture "
+                    "are one example)",
+            "min_train_events": MIN_TRAIN_EVENTS,
+            "min_train_events_is": ("the scheduled generator's floor for a "
+                                    "fit (MIN_TRAIN_EVENTS)"),
+            "min_prospective_evaluation_events": MIN_EVALUATION_EVENTS,
+            "min_prospective_evaluation_events_is": (
+                "fixtures decided AND resolved after the model was frozen, "
+                "disjoint from training (MIN_EVALUATION_EVENTS)"),
+            "min_skill_margin_log_loss": MIN_SKILL_MARGIN,
+            "beyond_uncertainty": (
+                "KEY_ENTRY_PAYOUT only: improvement over the raw venue price "
+                "and over the base rate must each have the lower end of its "
+                "clustered-jackknife 95% interval above zero"
+                if (model_key == KEY_ENTRY_PAYOUT) else None)}
 
 
 def describe() -> dict:
@@ -824,7 +888,14 @@ async def labelled(conn, *, model_key: str = KEY_MIDDLE, after=None,
     T could have learned from.
     """
     if model_key == KEY_ENTRY_PAYOUT:
-        # DEREK'S ENTRY RECORDS, from their own source only.
+        # DEREK'S ENTRY RECORDS, from their own sources only: his decisions,
+        # or his non-funded research observations (either price cohort).
+        if source == SOURCE_RESEARCH_OBSERVATIONS:
+            from .agents import derek_research as _DR
+            return dict(await _DR.labelled_observations(
+                conn, after=after, through=through,
+                outcomes_through=outcomes_through, decision_ids=decision_ids),
+                model_key=model_key, source=source)
         if source != SOURCE_ENTRY_DECISIONS:
             return {"version": VERSION, "ok": False, "source": source,
                     "model_key": model_key,
@@ -996,7 +1067,9 @@ def _subset(lab: dict, keep: list) -> dict:
     out = dict(lab)
     for k in ("rows", "labels", "decision_ids", "groups", "fixtures",
               "decided_at", "feature_shas", "outcome_available_at",
-              "leg_outcomes", "pushes", "outcome_versions"):
+              "leg_outcomes", "pushes", "outcome_versions",
+              # KEY_ENTRY_PAYOUT's per-row market context (never hashed)
+              "pinnacle_p", "price_basis", "cohorts"):
         if lab.get(k) is not None:
             out[k] = [lab[k][i] for i in keep]
     out["n"] = len(keep)
@@ -1008,7 +1081,8 @@ async def fit_from_records(conn, *, through, model_key: str = KEY_MIDDLE,
                            account_id: str | None = None,
                            estimator: str = SCHEDULED_ESTIMATOR,
                            windows: dict | None = None,
-                           source: str = SOURCE_FUNDED, **kw) -> dict:
+                           source: str = SOURCE_FUNDED,
+                           cohorts: tuple | list | None = None, **kw) -> dict:
     """FIT ON THE LEDGER AS IT STOOD AT `through`, AND BIND WHICH ROWS.
 
     `through` is the TRAINING CUTOFF and the LABEL CUTOFF at once: every
@@ -1022,6 +1096,13 @@ async def fit_from_records(conn, *, through, model_key: str = KEY_MIDDLE,
     and schema, label, each leg's settlement reading, availability instant --
     and hashes them; `register` and `promote` re-read and re-hash. `windows`
     is the evaluation plan the caller declared BEFORE fitting, stored with it.
+
+    KEY_ENTRY_PAYOUT: `cohorts` restricts training to the named price
+    cohort(s) (COHORT_DISPLAYED / COHORT_EXECUTABLE); the provenance declares
+    the TRAINING POPULATION -- record source, cohorts and price-basis mix in
+    rows and fixtures, the model's description, and the training-vs-live
+    input difference -- and evaluation and promotion score it on those
+    cohorts, the others reported apart.
     """
     out: dict[str, Any] = {"version": VERSION, "estimator": estimator,
                            "source": source}
@@ -1037,9 +1118,16 @@ async def fit_from_records(conn, *, through, model_key: str = KEY_MIDDLE,
               if set(feats) <= set((lab["rows"][i] or {}).keys())]
     excluded_schema = lab["n"] - len(usable)
     lab = _subset(lab, usable)
+    excluded_cohort = 0
+    if cohorts is not None:
+        want = {str(c) for c in cohorts}
+        keep = [i for i, c in enumerate(_cohorts_of(lab)) if c in want]
+        excluded_cohort = lab["n"] - len(keep)
+        lab = _subset(lab, keep)
     if not lab["n"]:
         return dict(out, ok=False, refusal=R_TOO_FEW_LABELS, n=0, n_events=0,
-                    excluded_for_feature_schema=excluded_schema)
+                    excluded_for_feature_schema=excluded_schema,
+                    excluded_for_cohort=excluded_cohort)
     weights = event_weights(lab["fixtures"])
     fitted = fit(lab["rows"], lab["labels"], estimator=estimator,
                  decided_at=lab["decided_at"], weights=weights,
@@ -1073,7 +1161,97 @@ async def fit_from_records(conn, *, through, model_key: str = KEY_MIDDLE,
                 str(d): v for d, v in zip(lab["decision_ids"],
                                           lab["outcome_versions"])},
             "windows": dict(windows or {"declared_before_fitting": False})}
+    if model_key == KEY_ENTRY_PAYOUT:
+        prov["training_population"] = training_population(
+            lab, source=source, cohorts_requested=cohorts,
+            excluded_for_cohort=excluded_cohort)
     return dict(fitted, training_provenance=prov, n_events=lab["n_events"])
+
+
+def _cohorts_of(lab: dict) -> list:
+    """Each row's price cohort. A labeller that states none (Derek's decision
+    records, all taken on an established book) is EXECUTABLE_PRICE_CURRENT."""
+    got = lab.get("cohorts")
+    if got is not None:
+        return [str(c) for c in got]
+    return [COHORT_EXECUTABLE] * len(lab.get("labels") or [])
+
+
+def _mix(lab: dict) -> dict:
+    """Rows and distinct fixtures per cohort."""
+    out: dict = {}
+    for c, fx in zip(_cohorts_of(lab), lab.get("fixtures") or []):
+        b = out.setdefault(c, {"rows": 0, "fixtures": set()})
+        b["rows"] += 1
+        b["fixtures"].add(str(fx))
+    return {c: {"rows": b["rows"], "fixtures": len(b["fixtures"])}
+            for c, b in sorted(out.items())}
+
+
+def input_distribution_shift(trained_cohorts, *, prospective_mix=None
+                             ) -> dict:
+    """THE TRAINING-VS-LIVE INPUT DIFFERENCE, named. Derek scores the model
+    live on EXECUTABLE_PRICE_CURRENT prices; a model trained on
+    DISPLAYED_PRICE_AGE_UNKNOWN prices learned from inputs of unknown age on
+    books whose currency was not established. Nothing here resolves that."""
+    trained = sorted({str(c) for c in (trained_cohorts or [])})
+    shifted = COHORT_DISPLAYED in trained
+    return {
+        "status": "UNRESOLVED" if shifted else "NONE_TRAINED_ON_THE_LIVE_COHORT",
+        "trained_on_cohorts": trained,
+        "applied_live_to_cohort": COHORT_EXECUTABLE,
+        "prospective_by_cohort": prospective_mix,
+        "why": (("trained (at least partly) on %s: prices displayed on books "
+                 "whose currency was not established, of unknown age. Derek "
+                 "applies it to %s prices. Whether the price-to-outcome "
+                 "relation carries across is not measured by this evidence; "
+                 "it is measured only by prospective %s rows, reported "
+                 "separately" % (COHORT_DISPLAYED, COHORT_EXECUTABLE,
+                                 COHORT_EXECUTABLE)) if shifted else
+                "trained only on the cohort it is applied to"),
+        "executable_trading_performance": (
+            "NOT_ESTABLISHED: a price-to-settlement calibration score says "
+            "nothing about fills, depth, fees or executable edge. No P&L or "
+            "edge claim is made from this evidence, least of all from "
+            "stale-price research rows")}
+
+
+def training_population(lab: dict, *, source: str, cohorts_requested=None,
+                        excluded_for_cohort: int = 0) -> dict:
+    """KEY_ENTRY_PAYOUT's declared training population, on the model record."""
+    mix = _mix(lab)
+    basis_mix: dict = {}
+    for b, fx in zip(lab.get("price_basis")
+                     or ([PRICE_BASIS_EXECUTABLE] * lab["n"]),
+                     lab.get("fixtures") or []):
+        e = basis_mix.setdefault(str(b), {"rows": 0, "fixtures": set()})
+        e["rows"] += 1
+        e["fixtures"].add(str(fx))
+    return {
+        "record_source": source,
+        "population": (
+            "Derek's non-funded research observations (derek_research_"
+            "observations): one frozen observation per entry-experiment "
+            "valuation, calibration-only and entry-decision alike"
+            if source == SOURCE_RESEARCH_OBSERVATIONS else
+            "Derek's recorded entry decisions (derek_entry_decisions): "
+            "ENTRY_DECISION valuations only"),
+        "training_cohorts": sorted(mix),
+        "cohorts_requested": (None if cohorts_requested is None
+                              else sorted(str(c) for c in cohorts_requested)),
+        "rows_excluded_for_cohort": int(excluded_for_cohort),
+        "cohort_mix": mix,
+        "price_basis_mix": {b: {"rows": e["rows"],
+                                "fixtures": len(e["fixtures"])}
+                            for b, e in sorted(basis_mix.items())},
+        "price_basis_by_record": (
+            {str(d): str(b) for d, b in zip(lab["decision_ids"],
+                                            lab["price_basis"])}
+            if lab.get("price_basis") is not None else None),
+        "model_description": ENTRY_PAYOUT_DESCRIPTION,
+        "entry_policy_use": ENTRY_POLICY_AGREEMENT_IS,
+        "input_distribution_shift": input_distribution_shift(sorted(mix)),
+        "minimums": qualification_minimums(KEY_ENTRY_PAYOUT)}
 
 
 def _hyper(estimator: str, params: dict) -> dict:
@@ -1206,9 +1384,242 @@ async def _fixtures_seen_through(conn, boundary,
         return {str(r["fixture"]) for r in await conn.fetch(
             "SELECT DISTINCT fixture FROM derek_entry_decisions "
             " WHERE decided_at <= $1 AND fixture IS NOT NULL", boundary)}
+    if source == SOURCE_RESEARCH_OBSERVATIONS:
+        return {str(r["fixture"]) for r in await conn.fetch(
+            "SELECT DISTINCT fixture FROM derek_research_observations "
+            " WHERE decided_at <= $1", boundary)}
     return {str(r["fixture"]) for r in await conn.fetch(
         "SELECT DISTINCT fixture FROM bettor_funded_decisions "
         " WHERE decided_at <= $1", boundary)}
+
+
+def _restrict_cohorts(lab: dict, cohorts) -> tuple[dict, dict]:
+    """(rows in `cohorts`, the rest). `cohorts` None keeps everything."""
+    if cohorts is None:
+        return lab, _subset(lab, [])
+    want = {str(c) for c in cohorts}
+    cs = _cohorts_of(lab)
+    keep = [i for i in range(lab["n"]) if cs[i] in want]
+    rest = [i for i in range(lab["n"]) if cs[i] not in want]
+    return _subset(lab, keep), _subset(lab, rest)
+
+
+def declared_cohorts(model: dict):
+    """The cohorts a KEY_ENTRY_PAYOUT model declares it was trained on, or
+    None for a model whose provenance predates cohorts (then nothing is
+    filtered, and the report says so)."""
+    prov = (model or {}).get("training_provenance") or {}
+    if isinstance(prov, str):
+        prov = json.loads(prov)
+    got = (prov.get("training_population") or {}).get("training_cohorts")
+    return None if got is None else [str(c) for c in got]
+
+
+#: The four predictors scored side by side on the same fixtures.
+P_MODEL, P_PRICE, P_PINNACLE, P_BASE = (
+    "model", "raw_venue_price", "pinnacle_devigged", "training_base_rate")
+
+
+def entry_payout_comparison(obj, lab: dict, *, baseline_rate) -> dict:
+    """THE HONEST EVALUATION OF KEY_ENTRY_PAYOUT, on ONE set of fixtures.
+
+    The model's only live input is the venue price, so a score on its own
+    says nothing about whether it adds anything. Scored on the SAME rows,
+    event-balanced: the model; the raw venue price used as a probability;
+    the de-vigged Pinnacle probability; and the training base rate -- log
+    loss and Brier each with its clustered (by fixture) jackknife interval,
+    calibration, and the improvements with theirs. Rows lacking a usable
+    price or a Pinnacle reading are dropped from ALL FOUR and counted.
+
+    The model QUALIFIES against the price and the base rate only when each
+    improvement is at least MIN_SKILL_MARGIN and the lower end of its 95%
+    interval is above zero. The Pinnacle comparison is reported and decides
+    nothing: both it and the model's input are market prices for the same
+    event, so their agreement is not independent confirmation. A good score
+    here says nothing about fills or money."""
+    n = int(lab.get("n") or 0)
+    pins = lab.get("pinnacle_p") or [None] * n
+    keep, no_price, no_pin = [], [], []
+    for i in range(n):
+        px = ((lab["rows"][i] or {}).get("acquisition_price"))
+        try:
+            px = None if px is None else float(px)
+        except (TypeError, ValueError):
+            px = None
+        if px is None or not (0.0 < px < 1.0):
+            no_price.append(i)
+        elif pins[i] is None:
+            no_pin.append(i)
+        else:
+            keep.append(i)
+    fx_all = lab.get("fixtures") or []
+    out: dict[str, Any] = {
+        "same_rows_for_every_predictor": True,
+        "weighting": WEIGHTING_EVENT_BALANCED,
+        "n_rows_offered": n,
+        "n_events_offered": len({str(f) for f in fx_all}),
+        "excluded": {
+            "rows_without_a_usable_price": len(no_price),
+            "fixtures_without_a_usable_price": len(
+                {str(fx_all[i]) for i in no_price}),
+            "rows_without_a_pinnacle_reading": len(no_pin),
+            "fixtures_without_a_pinnacle_reading": len(
+                {str(fx_all[i]) for i in no_pin})},
+        "cohort_mix": _mix(lab),
+        "model_description": ENTRY_PAYOUT_DESCRIPTION,
+        "pinnacle_role": ("REPORTED_NOT_A_CONDITION: the model and Pinnacle "
+                          "are both readings of the market; agreement is "
+                          "not independent confirmation"),
+        "what_this_cannot_say": (
+            "anything about fills, depth, fees, executable edge or P&L"),
+        "bar": {"min_skill_margin_log_loss": MIN_SKILL_MARGIN,
+                "beyond_uncertainty": ("lower end of the clustered-jackknife "
+                                       "95% interval of the improvement > 0")},
+    }
+    lab = _subset(lab, keep)
+    out.update(n_rows=lab["n"], n_events=lab["n_events"])
+    if not lab["n"] or baseline_rate is None:
+        return dict(out, ok=False,
+                    why=("no row carries both a usable price and a Pinnacle "
+                         "reading" if lab["n"] else
+                         "the model declares no training base rate"))
+    ys = [float(v) for v in lab["labels"]]
+    fx = [str(f) for f in lab["fixtures"]]
+    w = event_weights(fx)
+    pins = [float(p) for p in lab["pinnacle_p"]]
+    preds = {P_MODEL: [float(obj.predict(r)) for r in lab["rows"]],
+             P_PRICE: [float(r["acquisition_price"]) for r in lab["rows"]],
+             P_PINNACLE: pins,
+             P_BASE: [float(baseline_rate)] * lab["n"]}
+    names = (P_MODEL, P_PRICE, P_PINNACLE, P_BASE)
+    # The jackknife deletes whole fixtures; each row carries all four
+    # predictions and its FIXED event-balanced weight, so every deletion
+    # scores the same rows for every predictor under the same weights.
+    packed = [tuple(preds[k][i] for k in names) + (w[i],)
+              for i in range(lab["n"])]
+
+    def _metric(fn, k):
+        j = names.index(k)
+
+        def s(p, y):
+            return fn([t[j] for t in p], y, [t[-1] for t in p]) if p else None
+        return s
+
+    def _diff(fn, a, b):
+        ja, jb = names.index(a), names.index(b)
+
+        def s(p, y):
+            if not p:
+                return None
+            ww = [t[-1] for t in p]
+            return fn([t[ja] for t in p], y, ww) - fn([t[jb] for t in p],
+                                                      y, ww)
+        return s
+
+    def _jk(stat):
+        r = M.clustered_jackknife(packed, ys, fx, stat)
+        return {k: r.get(k) for k in ("statistic", "status", "se_clustered",
+                                      "ci95", "n_groups", "why")}
+
+    scored = {}
+    for k in names:
+        scored[k] = {
+            "log_loss": M.log_loss(preds[k], ys, w),
+            "log_loss_uncertainty": _jk(_metric(M.log_loss, k)),
+            "brier": M.brier(preds[k], ys, w),
+            "brier_uncertainty": _jk(_metric(M.brier, k)),
+            "calibration": M.calibration(preds[k], ys, weights=w),
+            "mean_prediction": sum(p * wi for p, wi in zip(preds[k], w))
+            / sum(w)}
+    out["predictors"] = scored
+    out["observed_rate_event_balanced"] = sum(
+        y * wi for y, wi in zip(ys, w)) / sum(w)
+
+    def _vs(other):
+        ll = _jk(_diff(M.log_loss, other, P_MODEL))
+        br = _jk(_diff(M.brier, other, P_MODEL))
+        imp = ll.get("statistic")
+        lo = (ll.get("ci95") or [None])[0] if ll.get("status") == "OK" \
+            else None
+        beats = (imp is not None and imp >= MIN_SKILL_MARGIN
+                 and lo is not None and lo > 0.0)
+        return {"log_loss_improvement": imp,
+                "log_loss_improvement_uncertainty": ll,
+                "brier_improvement": br.get("statistic"),
+                "brier_improvement_uncertainty": br,
+                "beats_by_margin_and_beyond_uncertainty": bool(beats),
+                "reads_as": ("positive = the model's loss is lower than %s's"
+                             % other)}
+    out["model_vs_raw_venue_price"] = _vs(P_PRICE)
+    out["model_vs_training_base_rate"] = _vs(P_BASE)
+    vp = _vs(P_PINNACLE)
+    vp.pop("beats_by_margin_and_beyond_uncertainty", None)
+    vp["mean_absolute_difference_in_probability"] = sum(
+        abs(a - b) * wi for a, b, wi in zip(preds[P_MODEL], pins, w)) / sum(w)
+    vp["role"] = out["pinnacle_role"]
+    out["model_vs_pinnacle"] = vp
+    out["model_beats_raw_price"] = \
+        out["model_vs_raw_venue_price"]["beats_by_margin_and_beyond_uncertainty"]
+    out["model_beats_base_rate"] = \
+        out["model_vs_training_base_rate"][
+            "beats_by_margin_and_beyond_uncertainty"]
+    return dict(out, ok=True)
+
+
+def entry_payout_eligibility(comparison: dict, *, leaked: bool,
+                             model: dict, prospective_mix=None,
+                             separate=None, coverage=None) -> dict:
+    """APPROVAL ELIGIBILITY for KEY_ENTRY_PAYOUT, every condition named.
+    Eligible means a named person MAY promote it; `promote` re-measures all
+    of it on the cohort neither it nor an incumbent could have seen."""
+    c = dict(comparison or {})
+    n_ev = int(c.get("n_events") or 0)
+    prov = (model or {}).get("training_provenance") or {}
+    if isinstance(prov, str):
+        prov = json.loads(prov)
+    n_train = int(prov.get("n_events") or 0)
+    conds = {
+        "trained_on_at_least_min_train_events": n_train >= MIN_TRAIN_EVENTS,
+        "prospective_fixtures_with_price_and_pinnacle_at_least_minimum":
+            n_ev >= MIN_EVALUATION_EVENTS,
+        "evaluation_clean_of_training_rows": not leaked,
+        "beats_raw_venue_price_by_margin_and_beyond_uncertainty":
+            bool(c.get("model_beats_raw_price")),
+        "beats_training_base_rate_by_margin_and_beyond_uncertainty":
+            bool(c.get("model_beats_base_rate")),
+    }
+    failed = [k for k, v in conds.items() if not v]
+    trained = declared_cohorts(model)
+    return {
+        "eligible": not failed,
+        "conditions": conds, "failed": failed,
+        "still_required": ("a NAMED PERSON promotes it through "
+                           "bettor_funded_model.promote; no agent approves"),
+        "pinnacle_comparison_is_a_condition": False,
+        "minimums": qualification_minimums(KEY_ENTRY_PAYOUT),
+        "training_fixtures_counted": n_train,
+        "prospective_fixtures_counted": n_ev,
+        "trained_on_cohorts": trained,
+        "evaluated_on_cohorts": trained,
+        "input_distribution_shift": input_distribution_shift(
+            trained or [COHORT_EXECUTABLE], prospective_mix=prospective_mix),
+        "separately_reported_cohorts": separate or {},
+        "missing_data_coverage": coverage,
+        "model_description": ENTRY_PAYOUT_DESCRIPTION,
+        "entry_policy_use": ENTRY_POLICY_AGREEMENT_IS}
+
+
+#: Each eligibility condition's refusal, in the order they are checked.
+_ELIGIBILITY_REFUSAL = {
+    "trained_on_at_least_min_train_events": R_TOO_FEW_TRAINING_EVENTS,
+    "prospective_fixtures_with_price_and_pinnacle_at_least_minimum":
+        R_ELIGIBILITY_COHORT_TOO_SMALL,
+    "evaluation_clean_of_training_rows": R_EVALUATION_NOT_PROSPECTIVE,
+    "beats_raw_venue_price_by_margin_and_beyond_uncertainty":
+        R_NO_INFORMATION_BEYOND_THE_PRICE,
+    "beats_training_base_rate_by_margin_and_beyond_uncertainty":
+        R_NOT_BEYOND_THE_BASE_RATE,
+}
 
 
 def _event_log_loss(obj, lab: dict) -> float:
@@ -1313,6 +1724,17 @@ async def evaluate(conn, *, model_id: str, account_id: str | None = None,
                                  source=source_of(mdl))
     if not coh.get("ok"):
         return dict(out, ok=False, refusal=coh.get("refusal"))
+    # KEY_ENTRY_PAYOUT: SCORED ON THE COHORT(S) IT WAS TRAINED ON, the other
+    # price cohort reported beside it and never pooled into the verdict.
+    entry = mdl["model_key"] == KEY_ENTRY_PAYOUT
+    decl = declared_cohorts(mdl) if entry else None
+    pros_mix = _mix(coh[EVIDENCE_PROSPECTIVE]) if entry else None
+    pros_other = None
+    if entry:
+        coh[EVIDENCE_RETROSPECTIVE], _ = _restrict_cohorts(
+            coh[EVIDENCE_RETROSPECTIVE], decl)
+        coh[EVIDENCE_PROSPECTIVE], pros_other = _restrict_cohorts(
+            coh[EVIDENCE_PROSPECTIVE], decl)
     obj = load(mdl["params"])
     rate = mdl.get("train_base_rate")
     label = "%s@%s" % (mdl["model_key"], mdl["model_version"])
@@ -1351,6 +1773,41 @@ async def evaluate(conn, *, model_id: str, account_id: str | None = None,
                "neither of these stored figures: `promote` re-scores the "
                "candidate and the incumbent together on the prospective "
                "cohort neither could have seen")}
+    elig = None
+    if entry:
+        mc = entry_payout_comparison(obj, coh[EVIDENCE_PROSPECTIVE],
+                                     baseline_rate=rate)
+        # EVERY OTHER PRICE COHORT, ON ITS OWN -- in particular prospective
+        # EXECUTABLE_PRICE_CURRENT rows for a model trained on displayed
+        # prices. Reported; never a condition; never pooled.
+        separate = {}
+        for c in sorted(set(_cohorts_of(pros_other or {"labels": []}))):
+            sub, _ = _restrict_cohorts(pros_other, [c])
+            rep = entry_payout_comparison(obj, sub, baseline_rate=rate)
+            rep["role"] = ("REPORTED_SEPARATELY: not the cohort this model "
+                           "was trained on; decides nothing")
+            separate[c] = rep
+        by_cohort = {}
+        if decl is not None and len(decl) > 1:
+            for c in decl:
+                sub, _ = _restrict_cohorts(coh[EVIDENCE_PROSPECTIVE], [c])
+                by_cohort[c] = entry_payout_comparison(obj, sub,
+                                                       baseline_rate=rate)
+        try:
+            from .agents import derek_research as _DR
+            cov = await _DR.prospective_coverage(conn,
+                                                 after=mdl["created_at"])
+        except Exception as exc:                                # noqa: BLE001
+            cov = {"ok": False, "error": type(exc).__name__}
+        elig = entry_payout_eligibility(mc, leaked=bool(leaked), model=mdl,
+                                        prospective_mix=pros_mix,
+                                        separate=separate, coverage=cov)
+        doc.update(market_comparison=mc,
+                   market_comparison_by_training_cohort=by_cohort,
+                   approval_eligibility=elig,
+                   evaluated_on_cohorts=decl,
+                   model_description=ENTRY_PAYOUT_DESCRIPTION,
+                   minimums=qualification_minimums(KEY_ENTRY_PAYOUT))
     await conn.execute(
         "UPDATE bettor_funded_models SET evaluation=$2::jsonb "
         " WHERE model_id=$1", str(model_id), json.dumps(doc, default=str))
@@ -1366,6 +1823,12 @@ async def evaluate(conn, *, model_id: str, account_id: str | None = None,
                          "Only prospective evidence supports a promotion, and "
                          "repeated decisions on one fixture are one example"
                          % (pros["n_events"], retro["n_events"])))
+    if elig is not None:
+        out["approval_eligibility"] = elig
+        if not elig["eligible"]:
+            f = elig["failed"]
+            return dict(out, ok=False, refusal=_ELIGIBILITY_REFUSAL[f[0]],
+                        failed=f)
     return dict(out, ok=True, refusal=None)
 
 
@@ -1407,6 +1870,13 @@ async def compare_on_common_cohort(conn, *, candidate: dict,
     if not coh.get("ok"):
         return dict(out, ok=False, refusal=coh.get("refusal"))
     lab = coh[EVIDENCE_PROSPECTIVE]
+    entry = candidate.get("model_key") == KEY_ENTRY_PAYOUT
+    if entry:
+        # THE CANDIDATE'S OWN TRAINING COHORT(S), never pooled with another.
+        decl = declared_cohorts(candidate)
+        lab, other = _restrict_cohorts(lab, decl)
+        out["evaluated_on_cohorts"] = decl
+        out["other_cohorts_not_scored_here"] = _mix(other)
     out.update(n=lab["n"], n_events=lab["n_events"],
                fixtures_sha=hashlib.sha256(json.dumps(sorted(
                    {str(f) for f in lab["fixtures"]})).encode()).hexdigest())
@@ -1436,6 +1906,18 @@ async def compare_on_common_cohort(conn, *, candidate: dict,
             return dict(out, ok=False, refusal=R_INCUMBENT_CANNOT_BE_SCORED,
                         error="%s: %s" % (type(exc).__name__, str(exc)[:160]))
         against_what = "THE_INCUMBENT"
+    if entry:
+        # THE ADDITIONAL BAR, MEASURED NOW ON THESE SAME ROWS: the raw venue
+        # price and the base rate, each beaten by the margin and beyond the
+        # uncertainty. Pinnacle reported, never a condition.
+        try:
+            out["market_comparison"] = entry_payout_comparison(
+                load(candidate["params"]), lab,
+                baseline_rate=candidate.get("train_base_rate"))
+        except Exception as exc:                                # noqa: BLE001
+            return dict(out, ok=False, refusal=R_NOT_EVALUATED,
+                        error="%s: %s" % (type(exc).__name__,
+                                          str(exc)[:160]))
     return dict(out, ok=True, refusal=None, candidate=round(cand_ll, 9),
                 against=round(against, 9), against_what=against_what,
                 improvement=round(against - cand_ll, 9),
@@ -1528,6 +2010,44 @@ async def promote(conn, *, model_id: str, approved_by: str,
                             cmp_["candidate"], cmp_["against"],
                             cmp_["against_what"], cmp_["improvement"],
                             MIN_SKILL_MARGIN)))
+    # ── KEY_ENTRY_PAYOUT: IT MUST ADD INFORMATION BEYOND ITS OWN INPUT ──
+    if cand["model_key"] == KEY_ENTRY_PAYOUT:
+        mc = cmp_.get("market_comparison") or {}
+        el = entry_payout_eligibility(mc, leaked=False, model=cand)
+        cmp_["approval_eligibility"] = el
+        if not el["conditions"]["trained_on_at_least_min_train_events"]:
+            return dict(out, ok=False, refusal=R_TOO_FEW_TRAINING_EVENTS,
+                        eligibility=el,
+                        why=("fit on %d fixtures; MIN_TRAIN_EVENTS is %d"
+                             % (el["training_fixtures_counted"],
+                                MIN_TRAIN_EVENTS)))
+        if int(mc.get("n_events") or 0) < MIN_EVALUATION_EVENTS:
+            return dict(out, ok=False, refusal=R_ELIGIBILITY_COHORT_TOO_SMALL,
+                        eligibility=el)
+        if not mc.get("model_beats_raw_price"):
+            v = mc.get("model_vs_raw_venue_price") or {}
+            return dict(out, ok=False,
+                        refusal=R_NO_INFORMATION_BEYOND_THE_PRICE,
+                        eligibility=el,
+                        why=("on %s fixtures, the model's event-balanced log "
+                             "loss improves on the raw venue price by %r "
+                             "(95%% interval %r); the bar is %.4f and an "
+                             "interval above zero. A calibration of the "
+                             "price that does not beat the price adds no "
+                             "information beyond it"
+                             % (mc.get("n_events"),
+                                v.get("log_loss_improvement"),
+                                (v.get("log_loss_improvement_uncertainty")
+                                 or {}).get("ci95"), MIN_SKILL_MARGIN)))
+        if not mc.get("model_beats_base_rate"):
+            v = mc.get("model_vs_training_base_rate") or {}
+            return dict(out, ok=False, refusal=R_NOT_BEYOND_THE_BASE_RATE,
+                        eligibility=el,
+                        why=("improvement on the base rate %r, 95%% interval "
+                             "%r: not beyond the uncertainty"
+                             % (v.get("log_loss_improvement"),
+                                (v.get("log_loss_improvement_uncertainty")
+                                 or {}).get("ci95"))))
     async with conn.transaction():
         if inc is not None:
             await conn.execute(

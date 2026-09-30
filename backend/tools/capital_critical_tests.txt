@@ -85,6 +85,12 @@ tests/test_cut_whale_exit.py
 tests/test_derek_coverage_census_and_workspace.py
 # (1002) Derek: owner proofs 1-2, 5 pp gross edge on conservative agreement, net of fee_for, through cycle()
 tests/test_derek_enters_on_conservative_agreement.py
+# (170) Derek's non-funded research observations break the model-qualification
+# deadlock: collected by the scheduled cycle with nothing authorized, labelled
+# by the production join, fit/evaluated/eligibility-decided (must beat the raw
+# venue price and base rate beyond uncertainty), promoted only by a named
+# person, used by Derek's gate; the table cannot size or send
+tests/test_derek_research_observations_break_the_deadlock.py
 tests/test_desk_mirror_sides.py
 tests/test_desk_recovery.py
 tests/test_e12_catchup_side.py
