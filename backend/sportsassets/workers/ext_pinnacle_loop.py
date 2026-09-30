@@ -4486,6 +4486,20 @@ def _venue_positions_for_gate(read: dict) -> dict | None:
     return _FX.venue_positions_for_gate(read)
 
 
+#: `agents.runtime.R_DEREK_GATE_UNAVAILABLE`, repeated here so the refusal is
+#: named even when the agents package itself cannot be imported.
+R_DEREK_GATE_UNAVAILABLE = "DEREK_ENTRY_POLICY_UNAVAILABLE_SO_NOTHING_IS_SENT"
+
+
+def _agents_runtime():
+    """THE AGENTS' GUARDED RUNTIME (core, migration 152). Imported lazily;
+    every call site contains a failure, so an agent can never break the
+    cycle, the servicing pass or recovery."""
+    from ..agents import runtime as _AR
+
+    return _AR
+
+
 async def _funded_attempt(conn, rec, *, now):
     """OFFER ONE ADMITTED DECISION TO THE FUNDED CONNECTOR.
 
@@ -4533,6 +4547,22 @@ async def _funded_attempt(conn, rec, *, now):
         return {"ok": False, "refusal": R_EXECUTION_AUTHORITY_BUSY,
                 "waited_s": ENTRY_WAITS_FOR_EXECUTION_S}
     try:
+        # ── AGENTS (core, migration 152): DEREK'S ENTRY POLICY, BINDING ──
+        # The owner's entry policy (`agents.derek_policy.
+        # gate_for_funded_entry`) must answer 'ENTER' before anything is read
+        # or sent. Another verdict, a raise, an overrun or a missing module
+        # REFUSES by name and nothing is sent. Entry only: exits, management
+        # and recovery never pass through here.
+        try:
+            _gate = await _agents_runtime().gate_for_funded_entry(
+                conn, rec, now=now)
+        except Exception as exc:                               # noqa: BLE001
+            _gate = {"enter": False, "refusal": R_DEREK_GATE_UNAVAILABLE,
+                     "gate": {"error_type": type(exc).__name__}}
+        if not _gate.get("enter"):
+            return {"ok": False,
+                    "refusal": _gate.get("refusal") or R_DEREK_GATE_UNAVAILABLE,
+                    "derek_gate": _gate.get("gate"), "nothing_was_sent": True}
         # THE ACCOUNT, READ AT THE VENUE, so the execution gate can measure
         # it. A failed read passes None and the gate refuses by name, as
         # before.
@@ -6250,7 +6280,36 @@ async def _service_once(conn, *, now: float, source: str,
                   last_started_at=float(now), last_finished_at=time.time(),
                   last_elapsed_s=elapsed, last_source=source,
                   max_elapsed_s=max(elapsed, st["max_elapsed_s"] or 0.0))
-        return out
+    # ── AGENTS (core, migration 152): AFTER THE EXECUTION LOCK IS RELEASED ──
+    # Handoff repair, Xavier's truthful heartbeat and, on the slow half,
+    # Audrey / improvement -- all guarded and bounded, none holding the lock,
+    # none able to undo or delay what this pass already did.
+    out["agents"] = await _agents_after_service(conn, out, slow=slow)
+    return out
+
+
+async def _agents_after_service(conn, out: dict, *, slow: bool) -> dict:
+    """`agents.runtime.xavier_pass_finished` every pass and
+    `agents.runtime.slow_half` when the slow half ran. Never raises."""
+    got: dict = {}
+    try:
+        got["xavier"] = await _agents_runtime().xavier_pass_finished(
+            conn, res=out, now=time.time())
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:                                   # noqa: BLE001
+        got["xavier"] = {"error": "%s: %s" % (type(exc).__name__,
+                                              str(exc)[:200])}
+    if slow:
+        try:
+            got["audrey"] = await _agents_runtime().slow_half(
+                conn, now=time.time())
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:                               # noqa: BLE001
+            got["audrey"] = {"error": "%s: %s" % (type(exc).__name__,
+                                                  str(exc)[:200])}
+    return got
 
 
 def _serviced_by_the_task() -> tuple:
@@ -6569,6 +6628,8 @@ async def _persist_candidate_outcomes(conn, *, cycle_at: float, rows) -> dict:
 async def cycle(conn) -> dict:
     """Never raises. Returns what it did and, mostly, why it did not."""
     started = time.time()
+    # ── AGENTS (core, migration 152): DEREK IS EVALUATING ──────────────
+    await _derek_heartbeat_start(conn, now=started)
     # ONE SCHEDULE FETCH PER OFFICIAL DATE PER CYCLE. The candidates in a
     # cycle cluster on one or two dates; asking per candidate would be the
     # same answer many times over.
@@ -6627,6 +6688,9 @@ async def cycle(conn) -> dict:
         payload.setdefault("xavier_review", xavier_review)
         payload.setdefault("step_timing_s", {
             "servicing_in_cycle": round(_t_serviced - started, 3)})
+        # AGENTS (core): Derek's after_cycle and truthful end state (BLOCKED,
+        # naming why), guarded -- the entry lane did not run.
+        payload["agents"] = await _derek_after_cycle(conn, payload)
         await _heartbeat(conn, payload)
         return payload
 
@@ -8296,8 +8360,35 @@ async def cycle(conn) -> dict:
            "open_book_rows": (None if open_book is None else len(open_book)),
            "elapsed_s": round(time.time() - started, 2),
            "order_submitted": False}
+    # ── AGENTS (core): DEREK'S after_cycle ON THIS CYCLE'S RESULT ─────
+    # Guarded: a missing or failing Derek records its own state and the
+    # cycle's result and heartbeat are unchanged.
+    out["agents"] = await _derek_after_cycle(conn, out)
     await _heartbeat(conn, out)
     return out
+
+
+async def _derek_heartbeat_start(conn, *, now: float) -> None:
+    """Derek EVALUATING at the top of the cycle. Never raises."""
+    try:
+        await _agents_runtime().derek_cycle_started(conn, now=now)
+    except asyncio.CancelledError:
+        raise
+    except Exception:                                          # noqa: BLE001
+        log.warning("ext_pinnacle: derek start heartbeat failed",
+                    exc_info=True)
+
+
+async def _derek_after_cycle(conn, result: dict) -> dict:
+    """`agents.derek.after_cycle(conn, cycle=result, now=now)` through the
+    guarded runtime, then Derek's truthful end state. Never raises."""
+    try:
+        return await _agents_runtime().derek_cycle_finished(
+            conn, cycle=result, now=time.time())
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:                                   # noqa: BLE001
+        return {"error": "%s: %s" % (type(exc).__name__, str(exc)[:200])}
 
 
 HEARTBEAT_KEY = "ext_pinnacle_last_cycle"
@@ -9299,6 +9390,15 @@ async def run(get_pool) -> None:
                 key=STANDBY_KEY)
             await asyncio.sleep(IDLE_POLL_S)
         log.info("ext_pinnacle: writer lock held (key %s)", LOCK_KEY)
+        # ── AGENTS (core, migration 152): THE THREE IDENTITIES, ONCE ─────
+        # By the writer only (a standby never reaches here), with this
+        # process's code identity. Never fatal.
+        try:
+            await _agents_runtime().ensure_identities(
+                conn, code_version=_code_identity())
+        except Exception:                                      # noqa: BLE001
+            log.warning("ext_pinnacle: agent identities not ensured",
+                        exc_info=True)
         # ── THE STORED VENUE COOLDOWN, READ BACK BEFORE THE FIRST READ ───
         #
         # THE FAIL-OPEN THIS CLOSES. Both rate controls lived in module

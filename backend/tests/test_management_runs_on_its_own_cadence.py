@@ -434,6 +434,12 @@ async def test_the_funded_entry_attempt_takes_the_same_lock(monkeypatch):
     monkeypatch.setattr(L, "venue_account_exposure", _read)
     monkeypatch.setattr(FX, "submit_for_decision", _submit)
     monkeypatch.setattr(L, "ENTRY_WAITS_FOR_EXECUTION_S", 0.05)
+    # (1002) DEREK'S ENTRY GATE says ENTER here: this test is about the
+    # execution lock. The gate's own refusals (verdict, raise, missing
+    # module -> nothing read or sent) are proven in
+    # test_agent_entry_shutdown_preserves_exits_and_recovery.py.
+    from tests import _emptybook_fixture as _EBF
+    _EBF.derek_gate_enters(monkeypatch)
 
     lock = L._execution_lock()
     await lock.acquire()

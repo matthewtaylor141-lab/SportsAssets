@@ -77,7 +77,7 @@ TOOLS: dict[str, str] = {
     # reads
     "read.catalogue": "the venue catalogue (us_premap, markets)",
     "read.prices": "provider odds and venue books through the existing readers",
-    "read.external_valuations": "the entry lane's valuation rows",
+    "read.valuations": "the entry lane's valuation rows (read only)",
     "read.funded_book": "bettor_funded_intents / fills / economics (read only)",
     "read.xavier_records": "bettor_xavier_decisions / execution events",
     "read.all": "every table and record, read only",
@@ -134,7 +134,7 @@ IDENTITIES: dict[str, dict] = {
         "policy_key": "entry",
         "tool_permissions": {
             "allowed": ["read.catalogue", "read.prices",
-                        "read.external_valuations", "write.entry_decisions",
+                        "read.valuations", "write.entry_decisions",
                         "write.agent_tasks", "request.funded_entry"],
             "denied": ["dispatch.xavier_claim", "write.management_decisions",
                        "write.agent_audits", "write.directives",

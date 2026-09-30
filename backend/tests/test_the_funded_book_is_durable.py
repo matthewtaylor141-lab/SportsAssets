@@ -824,6 +824,11 @@ async def test_the_scheduler_hook_sends_nothing_with_the_switch_off(
         pmus, sent = _transport(monkeypatch)
         assert FX.FUNDED_SUBMISSION_ENABLED is False
         assert EX.REAL_ORDER_SUBMISSION_ENABLED is False
+        # (1002) DEREK'S ENTRY POLICY SAYS ENTER, so the connector's own gates
+        # are what answer here (the gate's refusals are proven in
+        # test_agent_entry_shutdown_preserves_exits_and_recovery.py).
+        from tests import _emptybook_fixture as _EBF
+        _EBF.derek_gate_enters(monkeypatch)
         got = await L._funded_attempt(conn, _decision(), now=time.time())
         assert got is not None
         # IN THE SHIPPED BUILD BOTH SWITCHES ARE OFF, and the execution gate is

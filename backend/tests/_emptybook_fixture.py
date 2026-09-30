@@ -469,6 +469,25 @@ def substitute(monkeypatch, venue: Venue, *, schedule_state="Pre-Game",
     monkeypatch.setattr(FX, "FUNDED_SUBMISSION_ENABLED", True)
     from sportsassets import bettor_funded_management as FM
     monkeypatch.setattr(FM, "FUNDED_EXIT_SUBMISSION_ENABLED", True)
+    # ── (5) DEREK'S ENTRY POLICY (1002): A STATED ASSUMPTION ─────────
+    # Since migration 152 the funded entry is sent only if the owner's
+    # entry policy (`agents.derek_policy.gate_for_funded_entry`) answers
+    # ENTER. The lifecycle proof runs under a policy that says ENTER; the
+    # gate's refusals (another verdict, a raise, a missing module -> nothing
+    # read or sent) are proven in
+    # test_agent_entry_shutdown_preserves_exits_and_recovery.py.
+    derek_gate_enters(monkeypatch)
+
+
+def derek_gate_enters(monkeypatch):
+    """Derek's entry gate answers ENTER (the stated assumption above)."""
+    from sportsassets.agents import runtime as AR
+
+    async def _enter(conn, rec, *, now=None):
+        return {"enter": True, "refusal": None,
+                "gate": {"verdict": "ENTER",
+                         "SUPPLIED_BY_A_TEST": "the lifecycle's assumption"}}
+    monkeypatch.setattr(AR, "gate_for_funded_entry", _enter)
 
 
 # ── THE DATABASE ────────────────────────────────────────────────────
