@@ -99,6 +99,12 @@ def test_default_policy_selects_exactly_what_decide_selects():
     for n, kw in _grid():
         base = FD.decide(**json.loads(json.dumps(kw)))
         mine = XP.decide(policy=default, **json.loads(json.dumps(kw)))
+        ran = XP.run(default, **json.loads(json.dumps(kw)))
+        assert ran["decision_policy"]["decision_function"] == \
+            "bettor_funded_decision.decide", n
+        assert ran["selected"] == base["selected"], n
+        assert _ident(ran.get("selected_candidate")) == \
+            _ident(base.get("selected_candidate")), n
         assert mine["selected"] == base["selected"], n
         assert _ident(mine.get("selected_candidate")) == \
             _ident(base.get("selected_candidate")), n
@@ -131,7 +137,8 @@ def test_the_capital_preservation_leg_is_disabled_by_default_and_named_when_set(
     # SET TO 1.00: cand-1 (EV 1.4, worst -0.5) is within the sacrifice and
     # better in the worst case; cand-2 (EV 0.9) is outside it
     pol = dict(XP.code_default(), params=dict(
-        XP.default_params(), max_ev_sacrifice_for_downside_usd=1.0))
+        XP.default_params(), selection_rule=XP.SEL_CAPITAL_PRESERVATION,
+        max_ev_sacrifice_for_downside_usd=1.0))
     got = XP.apply(base, pol)
     assert got["identical_to_approved_ev_policy"] is False
     assert got["selected_candidate"]["candidate_id"] == "cand-1"
@@ -141,11 +148,38 @@ def test_the_capital_preservation_leg_is_disabled_by_default_and_named_when_set(
     assert got["capital_preservation"]["value"] == 1.0
     assert cons["expected_value_given_up_usd"] == pytest.approx(0.6)
     assert cons["worst_case_gained_usd"] == pytest.approx(2.5)
-    rec = XP.record(base, pol)
-    assert rec["applied_to_dispatch"] is False and rec["dispatch_note"]
+    # THE REAL SELECTOR RUNS THE CANDIDATE'S DECISION FUNCTION, and its one
+    # winner is what the record says proceeds to dispatch
+    ran = XP.run(pol, **kw)
+    assert ran["decision_policy"]["decision_function"] == \
+        "agents.xavier_policy.decide"
+    assert ran["selected_candidate"]["candidate_id"] == "cand-1"
+    assert "CAPITAL_PRESERVATION_V1" in ran["selection_reason"]
+    rec = XP.record(ran, pol)
+    assert rec["applied_to_dispatch"] is True
+    assert rec["identical_to_approved_ev_policy"] is False
+    assert rec["policy_selected_candidate"][1] == "cand-1"
+    assert rec["approved_ev_selected_candidate"][1] == "cand-0"
+    # THE SHADOW: the approved policy on the same frozen inputs
+    sh = XP.shadow_comparison(ran, XP.code_default(), **kw)
+    assert sh["dispatched"] is False and sh["is"] == \
+        "DISPLAYED_NEVER_DISPATCHED"
+    assert sh["shadow_selected"]["selected_candidate"][1] == "cand-0"
+    assert sh["ev_given_up_by_capital_preservation_usd"] == pytest.approx(0.6)
+    assert sh["downside_improved_by_capital_preservation_usd"] == \
+        pytest.approx(2.5)
+    # and the other way round: the default active, the candidate shadowed
+    base_ran = XP.run(XP.code_default(), **kw)
+    sh2 = XP.shadow_comparison(base_ran, pol, **kw)
+    assert sh2["active_selected"]["selected_candidate"][1] == "cand-0"
+    assert sh2["shadow_selected"]["selected_candidate"][1] == "cand-1"
+    assert sh2["ev_given_up_by_capital_preservation_usd"] == \
+        pytest.approx(0.6)
     # SET, BUT NOTHING QUALIFIES within 0.10: the winner stands, and says so
     pol2 = dict(pol, params=dict(pol["params"],
                                  max_ev_sacrifice_for_downside_usd=0.1))
+    assert XP.run(pol2, **kw)["selected_candidate"]["candidate_id"] == \
+        "cand-0"
     got = XP.apply(base, pol2)
     assert got["identical_to_approved_ev_policy"] is True
     assert "NOTHING QUALIFIED" in got["capital_preservation"]["consequence"]
@@ -161,6 +195,13 @@ def test_risk_limits_credentials_and_approvals_are_not_policy_parameters():
     assert XP.validate({"selection_rule": "WORST_CASE"})["refusal"] == \
         XP.R_UNSUPPORTED_RULE
     assert XP.validate({"max_ev_sacrifice_for_downside_usd": -1})[
+        "refusal"] == XP.R_BAD_VALUE
+    # the rule and the sacrifice must agree: EV takes none, CP needs one
+    assert XP.validate({"max_ev_sacrifice_for_downside_usd": 0.5})[
+        "refusal"] == XP.R_RULE_NEEDS_SACRIFICE
+    assert XP.validate({"selection_rule": XP.SEL_CAPITAL_PRESERVATION})[
+        "refusal"] == XP.R_RULE_NEEDS_SACRIFICE
+    assert XP.validate({"requires_complete_comparison": "yes"})[
         "refusal"] == XP.R_BAD_VALUE
     ok = XP.validate({})
     assert ok["ok"] is True and ok["params"] == XP.default_params()
@@ -215,13 +256,14 @@ async def test_an_active_stored_version_is_loaded_and_an_invalid_one_is_refused(
                 " approved_at) VALUES ('XAVIER',$1,'V1-test',$2::jsonb,"
                 " 'ACTIVE','test','owner (SYNTHETIC)',now())",
                 XP.POLICY_KEY, json.dumps(
-                    {"max_ev_sacrifice_for_downside_usd": 0.25}))
+                    {"selection_rule": XP.SEL_CAPITAL_PRESERVATION,
+                     "max_ev_sacrifice_for_downside_usd": 0.25}))
             got = await XP.load(conn)
             assert got["source"] == XP.SOURCE_TABLE, got
             assert got["version"] == "V1-test"
             assert got["params"]["max_ev_sacrifice_for_downside_usd"] == 0.25
             assert got["params"]["selection_rule"] == \
-                XP.SEL_EXPECTED_NET_VALUE
+                XP.SEL_CAPITAL_PRESERVATION
             # A STORED ROW CARRYING A RISK LIMIT DOES NOT VALIDATE
             await conn.execute(
                 "UPDATE agent_policy_versions SET params=$2::jsonb "
