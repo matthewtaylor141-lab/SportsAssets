@@ -1,6 +1,6 @@
 # Owner decision form — funded pilot (for review; nothing chosen, nothing activated)
 
-**Dated:** 2026-09-30, revision 2.
+**Dated:** 2026-09-30, revision 3.
 
 **What this form is:** it records your decisions. It does not activate submission.
 
@@ -63,7 +63,7 @@ There are two records:
 
 Renewal never creates the first authorization, and never extends past your expiry. Any failed check leaves the record to expire. Every attempt is logged. Proven by `test_the_system_authorization_renews_only_under_the_owners` (12 cases).
 
-**One gap remains:** calling renewal from the scheduled cycle is done during the merge now in progress. Until the frozen build shows that call, treat the pilot as a **one-day trading pilot**. The final yes/no (§E) is asked only on a build that demonstrates renewal.
+**The scheduled call is wired** (commit c5ba055): the funded service calls renewal first on every cycle, and the heartbeat reports the outcome — renewed, or the named reason. Proven through `cycle()` in `test_the_scheduled_cycle_renews_the_authorization` (renews under a live owner authorization; lets it expire when the owner revoked). This is not yet in a released build. Until the frozen, gated build is serving and its heartbeat shows renewal, treat the pilot as a **one-day trading pilot**. The final yes/no (§E) is asked only on a build that demonstrates renewal.
 
 **When authorization lapses, is revoked, or is invalidated:** entries and protective hedges are refused. Exits, reductions, settlement, recovery, reconciliation, learning and Xavier's records continue, provided the exit switch is on (§D).
 
