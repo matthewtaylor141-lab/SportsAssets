@@ -53,7 +53,7 @@ def test_each_action_is_its_own_payoff_under_the_one_measure():
     assert vals["DIRECT_EXIT"] == pytest.approx(EXIT_NET - BASIS)  # 0.65
     ex = next(r for r in got["valued"] if r["action"] == "DIRECT_EXIT")
     assert ex["settlement_exposure_after"] is False
-    assert ex["void_slope_usd"] == 0.0
+    assert ex["value_at_range_low"] == ex["value_at_range_high"]
     # REDUCE: net proceeds + the residual valued on the same measure
     assert vals["REDUCE"] == pytest.approx(
         REDUCE_NET + (Q - REDUCE_QTY) * e - BASIS)                 # 0.76
@@ -73,27 +73,53 @@ def test_a_nonzero_void_rate_and_unequal_payouts_change_the_ranking():
     assert fifty["HOLD"] < fifty["DIRECT_EXIT"]
     _, refund = _vals(REFUND, 0.10)
     assert refund["HOLD"] > refund["DIRECT_EXIT"]
-    # the break-even rate is stated: HOLD and EXIT cross where
-    # 10 x (0.70 - 0.20 v) = 6.85
-    got, _ = _vals(FIFTY, 0.0)
-    rivals = {b["rival"]: b["void_rate"] for b in got["void_breakeven"]}
-    assert "DIRECT_EXIT" not in rivals or rivals["DIRECT_EXIT"] > 0
-    got_h = CV.value_actions(held_cents=FIFTY, p_win=P, void_rate=0.0,
-                             qty=Q, basis_usd=BASIS,
-                             candidates=_cands()[:2])
-    cross = got_h["void_breakeven"][0]["void_rate"]
-    assert cross == pytest.approx((7.0 - 6.85) / 2.0)          # 0.075
+    # WITH ITS UNCERTAINTY [0, 0.10] the HOLD/EXIT choice is not robust:
+    # it is a research valuation and may not be dispatched with real money
+    got = CV.value_actions(held_cents=FIFTY, p_win=P, void_rate=0.10, qty=Q,
+                           basis_usd=BASIS, candidates=_cands()[:2])
+    assert got["selection_basis"] == CV.BASIS_RESEARCH
+    assert got["funded_dispatch_permitted"] is False
+    assert got["funded_dispatch_refusal"] == CV.R_SELECTION_DEPENDS_ON_VOID
+    # with the refund payout the same range leaves HOLD on top throughout
+    got_r = CV.value_actions(held_cents=REFUND, p_win=P, void_rate=0.10,
+                             qty=Q, basis_usd=BASIS, candidates=_cands()[:2])
+    assert got_r["selection_basis"] == CV.BASIS_ROBUST
+    assert got_r["funded_dispatch_permitted"] is True
 
 
-def test_an_unmeasured_void_rate_values_every_action_at_zero_and_says_so():
+def test_an_unknown_void_rate_is_not_zero():
+    """No measured rate: every action is valued at both ends of [0, 1]. HOLD
+    wins at 0 and loses at 1 (the void pays 50c), so the ranking is a
+    conditional research valuation and funded dispatch is refused."""
     got = CV.value_actions(held_cents=FIFTY, p_win=P, void_rate=None, qty=Q,
                            basis_usd=BASIS, candidates=_cands())
     assert got["void_rate_status"] == CV.VOID_RATE_UNMEASURED
-    vals = {r["action"]: r["value_usd"] for r in got["valued"]}
-    _, zero = _vals(FIFTY, 0.0)
-    assert vals == pytest.approx(zero)
-    # and the decision states how much void mass would change it
-    assert got["the_winner_holds_for_void_rates_below"] is not None
+    assert got["void_range"] == [0.0, 1.0]
+    assert got["selection_basis"] == CV.BASIS_RESEARCH
+    assert got["funded_dispatch_permitted"] is False
+    hold = next(r for r in got["valued"] if r["action"] == "HOLD")
+    assert hold["value_at_range_low"] == pytest.approx(Q * 0.70 - BASIS)
+    assert hold["value_at_range_high"] == pytest.approx(Q * 0.50 - BASIS)
+
+
+def test_a_selection_robust_across_every_void_rate_is_permitted():
+    """An exit that beats holding whether or not the fixture voids stands
+    without a measured rate: it wins at both ends of [0, 1]."""
+    cands = [{"action": "HOLD"},
+             {"action": "DIRECT_EXIT", "qty": Q, "net_proceeds_usd": 7.50}]
+    got = CV.value_actions(held_cents=FIFTY, p_win=P, void_rate=None, qty=Q,
+                           basis_usd=BASIS, candidates=cands)
+    assert got["selection_basis"] == CV.BASIS_ROBUST
+    assert got["funded_dispatch_permitted"] is True
+    assert got["winner"]["action"] == "DIRECT_EXIT"
+
+
+def test_a_fixture_that_cannot_void_is_valued_exactly():
+    got = CV.value_actions(held_cents={"WIN": 100, "LOSE": 0}, p_win=P,
+                           void_rate=None, qty=Q, basis_usd=BASIS,
+                           candidates=_cands())
+    assert got["selection_basis"] == CV.BASIS_EXACT
+    assert got["funded_dispatch_permitted"] is True
 
 
 def test_the_omitted_basis_cancels_across_every_action_and_only_then():
@@ -119,16 +145,24 @@ def _refund_leg(leg, cost):
             "established": True, "resolution": SETTLE.RES_REFUND}})
 
 
-def _acquire(held, hedge, *, v, p=P, q_win=0.3, h=6, fee=0.25):
+def _acquire(held, hedge, *, v, p=P, q_win=0.3, h=6, fee=0.25, also=()):
     st = IS.classify(held, hedge, sport_permits_tie=False,
                      fixture_can_void=True)
     cls = PS.payout_classes(st)
-    d = PS.distribution(cls, primary={"p_win": p, "source": "CHOSEN"},
-                        conditional={o: q_win for o in
-                                     PS.learned_outcomes(cls)},
-                        void={"rate": v, "n_fixtures": 100, "upper_95": v,
-                              "source": "CHOSEN"})
-    assert d["ok"] is True, d
+
+    def dist(rate):
+        got = PS.distribution(cls, primary={"p_win": p, "source": "CHOSEN"},
+                              conditional={o: q_win for o in
+                                           PS.learned_outcomes(cls)},
+                              void={"rate": rate, "n_fixtures": 100,
+                                    "upper_95": max(rate, v),
+                                    "source": "CHOSEN"})
+        assert got["ok"] is True, got
+        return got
+    d = dist(v)
+    by_void = {v: d["probabilities"]}
+    for rate in also:
+        by_void[rate] = dist(rate)["probabilities"]
     pv = PS.merged_position_value(
         FIP.position_worst_case(held_leg=held, hedge_leg=hedge, hedge_qty=h,
                                 sport_permits_tie=False, fee_usd=fee), cls)
@@ -137,7 +171,8 @@ def _acquire(held, hedge, *, v, p=P, q_win=0.3, h=6, fee=0.25):
             "regions": pv["regions"], "region_probabilities":
                 d["probabilities"], "hedge_qty": h,
             "hedge_cost_usd": h * hedge.cost_cents_per_unit / 100.0,
-            "fees_usd": fee, "distribution_void_rate": v}, d, pv
+            "fees_usd": fee, "distribution_void_rate": v,
+            "region_probabilities_by_void": by_void}, d, pv
 
 
 @pytest.mark.parametrize("refund", [True, False])
@@ -165,8 +200,8 @@ def test_acquire_reconciles_with_hold_under_the_same_measure(refund):
     assert hc["held_cents"]["VOID"] == (62 if refund else 50)
     acq, d, pv = _acquire(held, hedge, v=v)
     got = CV.value_actions(held_cents=hc["held_cents"], p_win=P,
-                           void_rate=v, qty=Q, basis_usd=BASIS,
-                           candidates=_cands() + [acq])
+                           void_rate=v, void_lower=v, void_upper=v, qty=Q,
+                           basis_usd=BASIS, candidates=_cands() + [acq])
     assert got["ok"] is True, got
     rows = {r["action"]: r for r in got["valued"]}
     a = rows["ACQUIRE_INDIRECT_HEDGE"]
@@ -219,7 +254,8 @@ def test_the_ranking_with_all_four_actions_under_void():
     hc = CV.held_outcome_cents(held, sport_permits_tie=False,
                                fixture_can_void=True)["held_cents"]
     acq, _, _ = _acquire(held, hedge, v=0.10)
-    got = CV.value_actions(held_cents=hc, p_win=P, void_rate=0.10, qty=Q,
+    got = CV.value_actions(held_cents=hc, p_win=P, void_rate=0.10,
+                           void_lower=0.10, void_upper=0.10, qty=Q,
                            basis_usd=BASIS, candidates=_cands() + [acq])
     for r in got["valued"]:
         assert r["rankable"], r
@@ -227,3 +263,51 @@ def test_the_ranking_with_all_four_actions_under_void():
             r["value_usd"], abs=1e-9)
     best = max(got["valued"], key=lambda r: r["value_usd"])
     assert got["winner"]["action"] == best["action"]
+
+
+def _plain_pair():
+    held = dataclasses.replace(IS.BEARS_MONEYLINE, quantity=Q,
+                               cost_cents_per_unit=62)
+    hedge = dataclasses.replace(IS.PANTHERS_PLUS_4_5, quantity=6,
+                                cost_cents_per_unit=41)
+    hc = CV.held_outcome_cents(held, sport_permits_tie=False,
+                               fixture_can_void=True)["held_cents"]
+    return held, hedge, hc
+
+
+def test_an_acquisition_is_never_admitted_on_an_unmeasured_void_rate():
+    held, hedge, hc = _plain_pair()
+    acq, _, _ = _acquire(held, hedge, v=0.05)
+    got = CV.value_actions(held_cents=hc, p_win=P, void_rate=None, qty=Q,
+                           basis_usd=BASIS, candidates=[{"action": "HOLD"},
+                                                        acq])
+    a = [r for r in got["valued"] if r["action"] != "HOLD"][0]
+    assert a["refusal"] == CV.R_ACQ_NEEDS_MEASURED_VOID
+    assert a["rankable"] is False
+
+
+def test_an_acquisition_must_win_at_both_ends_of_the_measured_range():
+    """Measured 0.05 with an upper bound of 0.20: the acquisition must be
+    priced, and must still win, at 0 and at 0.20 for funded dispatch."""
+    held, hedge, hc = _plain_pair()
+    acq, _, _ = _acquire(held, hedge, v=0.05, q_win=0.9, also=(0.0, 0.20))
+    got = CV.value_actions(held_cents=hc, p_win=P, void_rate=0.05,
+                           void_lower=0.0, void_upper=0.20, qty=Q,
+                           basis_usd=BASIS, candidates=[{"action": "HOLD"},
+                                                        acq])
+    a = [r for r in got["valued"] if r["action"] != "HOLD"][0]
+    assert a["value_at_range_low"] is not None
+    assert a["value_at_range_high"] is not None
+    if got["winner"]["action"] == "ACQUIRE_INDIRECT_HEDGE":
+        assert got["funded_dispatch_permitted"] == (
+            got["winner_at_range_low"] == got["winner_at_range_high"])
+    # without the range ends priced it cannot qualify
+    acq2, _, _ = _acquire(held, hedge, v=0.05, q_win=0.9)
+    got2 = CV.value_actions(held_cents=hc, p_win=P, void_rate=0.05,
+                            void_lower=0.0, void_upper=0.20, qty=Q,
+                            basis_usd=BASIS, candidates=[{"action": "HOLD"},
+                                                         acq2])
+    a2 = [r for r in got2["valued"] if r["action"] != "HOLD"][0]
+    assert a2["value_at_range_low"] is None
+    if got2["winner"]["action"] == "ACQUIRE_INDIRECT_HEDGE":
+        assert got2["funded_dispatch_permitted"] is False

@@ -2897,10 +2897,15 @@ async def exposure(conn, *, account_id: str, venue: str) -> dict:
         per_market[r["us_market_slug"]] = per_market.get(
             r["us_market_slug"], 0.0) + mine
         rows.append(dict(r, at_risk_usd=round(mine, 6), why=why))
-    # CAPITAL-HOURS, integrated over the entry fills this lane actually holds.
+    # CAPITAL-HOURS, integrated over the time each entry fill was actually
+    # HELD: from the fill to the position's close, or to now while it is open.
+    # It used to integrate every fill ever made to now(), so a closed position
+    # kept consuming the frozen MAX_CAPITAL_HOURS rail forever and a flat book
+    # would eventually refuse every entry.
     ch = await conn.fetchval(
         "SELECT coalesce(sum(f.cash_usd * GREATEST(0, EXTRACT(EPOCH FROM "
-        "       (now() - f.at)) / 3600.0)),0)::float8 "
+        "       (LEAST(now(), coalesce(i.closed_at, now())) - f.at)) "
+        "       / 3600.0)),0)::float8 "
         "  FROM bettor_funded_fills f JOIN bettor_funded_intents i "
         "    ON i.intent_id=f.intent_id "
         " WHERE f.direction='ENTRY' AND i.account_id=$1 "

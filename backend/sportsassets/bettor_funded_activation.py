@@ -92,6 +92,7 @@ R_LIMITS_MISSING = "LIMIT_SET_INCOMPLETE"
 R_LIMITS_NOT_APPROVED = "LIMIT_SET_NOT_APPROVED_BY_THE_OWNER"
 R_READINESS_UNMET = "FUNDED_ACTIVATION_PREREQUISITES_NOT_MET"
 R_OWNER_AUTH = "FUNDED_ACTIVATION_REQUIRES_THE_OWNERS_WRITTEN_AUTHORIZATION"
+R_OWNER_AUTH_LAPSED_AT_ISSUE = "THE_OWNERS_AUTHORIZATION_HAS_EXPIRED"
 #: The owner's record exists but does not cover this request. Three separate
 #: names, because "you did not authorise this" and "you authorised something
 #: else" are different facts and need different actions.
@@ -1454,6 +1455,22 @@ async def authorize(conn, *, account_id: str, venue: str, by: str,
                               % (od[:12], eff["effective_digest"][:12])))
         out["owner_authorization_validated"] = True
 
+    # ── NEVER BEYOND THE OWNER'S OWN EXPIRY ─────────────────────────
+    # The system authorization lives at most AUTHORIZATION_TTL_S, and never
+    # past the owner's written authorization it was issued on.
+    owner_expires_at = None
+    if out.get("owner_authorization_validated"):
+        _ow = _obj(await _state(conn, OWNER_AUTH_KEY)) or {}
+        try:
+            owner_expires_at = (None if _ow.get("expires_at") is None
+                                else float(_ow["expires_at"]))
+        except (TypeError, ValueError):
+            owner_expires_at = None
+        if owner_expires_at is not None and owner_expires_at <= time.time():
+            return _stop(R_OWNER_AUTH_LAPSED_AT_ISSUE,
+                         owner_expires_at=owner_expires_at,
+                         why="the owner's authorization has expired")
+
     # ── THE AUTHORISATION IS RECORDED, THEN IMMEDIATELY CONSUMED ────
     test_only = klass == VENUE_TEST
     granted_at = time.time()
@@ -1461,8 +1478,15 @@ async def authorize(conn, *, account_id: str, venue: str, by: str,
               "venue_class": klass, "by": by, "at": granted_at,
               # AN AUTHORIZATION WITH NO END is a standing permission
               # nobody remembers granting. The execution gate enforces this.
-              "expires_at": granted_at + EX.AUTHORIZATION_TTL_S,
+              "expires_at": (granted_at + EX.AUTHORIZATION_TTL_S
+                             if owner_expires_at is None else
+                             min(granted_at + EX.AUTHORIZATION_TTL_S,
+                                 owner_expires_at)),
               "ttl_s": EX.AUTHORIZATION_TTL_S,
+              "capped_by_owner_expiry": (
+                  owner_expires_at is not None
+                  and owner_expires_at < granted_at + EX.AUTHORIZATION_TTL_S),
+              "owner_expires_at": owner_expires_at,
               "revoked": False,
               "effective_limits": eff["effective"],
               "effective_digest": eff["effective_digest"],
@@ -1541,3 +1565,120 @@ def describe() -> dict:
         "approvals_can_only_tighten": True,
         "authorises_capital": False,
     }
+
+
+
+# ── BOUNDED RENEWAL OF THE 24-HOUR SYSTEM AUTHORIZATION ──────────────
+#
+# THE GAP. The system authorization expires after AUTHORIZATION_TTL_S and
+# nothing renewed it, so an owner authorization of several days still stopped
+# acquisitions after one. Renewal is scheduled here and is BOUNDED:
+#   * it never creates the first authorization -- activation is the owner's
+#     and operator's act;
+#   * it renews only a live, unrevoked record, only in the last
+#     RENEW_WINDOW_S of its life;
+#   * only while the owner's authorization exists, is not revoked or
+#     invalidated, states an expiry, has not expired, and covers exactly the
+#     same account, venue and effective-limit digest;
+#   * by re-running `authorize` in full, so every prerequisite (account
+#     eligibility and reconciliation, calibration, limits, readiness, owner
+#     authorization) is rechecked; any failure leaves the record to expire;
+#   * the renewed record never extends past the owner's expiry.
+RENEW_WINDOW_S = 2 * 3600.0
+RENEWAL_LOG_KEY = "bettor_funded_authorization_renewals"
+RENEWAL_LOG_MAX = 200
+N_NO_SYSTEM_AUTH = "NO_SYSTEM_AUTHORIZATION_TO_RENEW"
+N_REVOKED = "THE_SYSTEM_AUTHORIZATION_IS_REVOKED"
+N_EXPIRED = "THE_SYSTEM_AUTHORIZATION_HAS_ALREADY_EXPIRED"
+N_NOT_DUE = "NOT_DUE"
+N_NO_OWNER = "NO_OWNER_AUTHORIZATION"
+N_OWNER_REVOKED = "THE_OWNER_AUTHORIZATION_IS_REVOKED_OR_INVALIDATED"
+N_OWNER_NO_EXPIRY = "THE_OWNER_AUTHORIZATION_STATES_NO_EXPIRY"
+N_OWNER_EXPIRED = "THE_OWNER_AUTHORIZATION_HAS_EXPIRED"
+N_SCOPE = "THE_OWNER_AUTHORIZATION_COVERS_A_DIFFERENT_SCOPE"
+N_RECHECK_FAILED = "A_PREREQUISITE_FAILED_ON_RECHECK"
+
+
+async def _log_renewal(conn, entry: dict) -> None:
+    prior = await _state(conn, RENEWAL_LOG_KEY)
+    prior = prior if isinstance(prior, list) else []
+    log = (prior + [entry])[-RENEWAL_LOG_MAX:]
+    await conn.execute(
+        "INSERT INTO ingestion_state (key, value) VALUES ($1, $2::jsonb) "
+        "ON CONFLICT (key) DO UPDATE SET value = $2::jsonb",
+        RENEWAL_LOG_KEY, json.dumps(log, default=str))
+
+
+async def renew_system_authorization(conn, *, now: float | None = None,
+                                     by: str = "SCHEDULED_RENEWAL") -> dict:
+    """Renew the system authorization under the owner's still-valid one, or
+    say exactly why not. Never raises into the caller's cycle."""
+    at = float(now if now is not None else time.time())
+    out: dict = {"version": VERSION, "at": at, "renewed": False}
+
+    async def _done(reason, **kw):
+        res = dict(out, reason=reason, **kw)
+        if reason not in (N_NO_SYSTEM_AUTH, N_NOT_DUE):
+            try:
+                await _log_renewal(conn, {k: res.get(k) for k in (
+                    "at", "renewed", "reason", "expires_at",
+                    "previous_expires_at", "owner_expires_at", "refusal")})
+            except Exception:                                   # noqa: BLE001
+                res["log_write_failed"] = True
+        return res
+
+    rec = _obj(await _state(conn, AUTHORIZATION_KEY))
+    if not rec:
+        return await _done(N_NO_SYSTEM_AUTH)
+    if rec.get("revoked"):
+        return await _done(N_REVOKED)
+    try:
+        exp = float(rec.get("expires_at"))
+    except (TypeError, ValueError):
+        return await _done(N_EXPIRED)
+    out["previous_expires_at"] = exp
+    if exp <= at:
+        # an expired record is not revived by a schedule; activation is
+        # the owner's and operator's act
+        return await _done(N_EXPIRED)
+    if exp - at > RENEW_WINDOW_S:
+        return await _done(N_NOT_DUE)
+    owner = None
+    if venue_class(rec.get("venue")) == VENUE_FUNDED:
+        owner = _obj(await _state(conn, OWNER_AUTH_KEY))
+        if not owner:
+            return await _done(N_NO_OWNER)
+        if owner.get("revoked") or owner.get("invalidated"):
+            return await _done(N_OWNER_REVOKED)
+        try:
+            oexp = float(owner.get("expires_at"))
+        except (TypeError, ValueError):
+            return await _done(N_OWNER_NO_EXPIRY)
+        out["owner_expires_at"] = oexp
+        if oexp <= at:
+            return await _done(N_OWNER_EXPIRED)
+        if (str(owner.get("account_id")) != str(rec.get("account_id"))
+                or str(owner.get("venue") or "").upper()
+                != str(rec.get("venue") or "").upper()
+                or str(owner.get("effective_digest") or "")
+                != str(rec.get("effective_digest") or "")):
+            return await _done(N_SCOPE)
+    got = await authorize(conn, account_id=str(rec.get("account_id")),
+                          venue=str(rec.get("venue")), by=by)
+    new = _obj(await _state(conn, AUTHORIZATION_KEY)) or {}
+    try:
+        new_at = float(new.get("at") or 0)
+    except (TypeError, ValueError):
+        new_at = 0.0
+    if new_at <= float(rec.get("at") or 0):
+        return await _done(N_RECHECK_FAILED, refusal=got.get("refusal"),
+                           readiness=got.get("readiness"))
+    nexp = float(new.get("expires_at"))
+    if owner is not None and nexp > float(owner["expires_at"]) + 1e-6:
+        # defence in depth: never beyond the owner's expiry
+        new["expires_at"] = float(owner["expires_at"])
+        await conn.execute(
+            "UPDATE ingestion_state SET value=$2::jsonb WHERE key=$1",
+            AUTHORIZATION_KEY, json.dumps(new))
+        nexp = new["expires_at"]
+    return await _done("RENEWED", renewed=True, expires_at=nexp)

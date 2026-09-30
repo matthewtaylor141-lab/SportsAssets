@@ -172,145 +172,217 @@ def held_outcome_cents(held_leg, *, sport_permits_tie: bool,
     return {"ok": True, "refusal": None, "held_cents": out}
 
 
+R_ACQ_NEEDS_MEASURED_VOID = (
+    "AN_ACQUISITION_NEEDS_A_MEASURED_VOID_RATE_WHEN_THE_FIXTURE_CAN_VOID")
+R_SELECTION_DEPENDS_ON_VOID = (
+    "THE_SELECTED_ACTION_CHANGES_WITHIN_THE_VOID_RATES_UNCERTAINTY")
+R_ACQ_BOUND_NOT_PRICED = (
+    "THE_ACQUISITION_IS_NOT_PRICED_AT_THE_ENDS_OF_THE_VOID_RATE_RANGE")
+BASIS_EXACT = "EXACT_THE_FIXTURE_CANNOT_VOID"
+BASIS_ROBUST = "ROBUST_ACROSS_THE_VOID_RATE_RANGE"
+BASIS_RESEARCH = "CONDITIONAL_RESEARCH_VALUATION_NOT_FOR_FUNDED_DISPATCH"
+
+
+def _value_one(c, *, q, basis, e_held, marginal, v, probs_at_v, m):
+    """One candidate's value at void rate `v` on the measure `m`."""
+    a = str(c.get("action") or "")
+    if a == "HOLD":
+        return {"value_usd": q * e_held - basis, "qty": q, "residual_qty": q,
+                "settlement_exposure_after": True,
+                "components": {"held_expected_payout_usd": q * e_held,
+                               "basis_usd": -basis}}
+    if a in ("DIRECT_EXIT", "REDUCE"):
+        r = _f(c.get("qty"))
+        n = _f(c.get("net_proceeds_usd"))
+        if r is None or r < 0 or r > q + _TOL:
+            return {"refusal": R_BAD_QTY}
+        if n is None:
+            return {"refusal": R_NO_PROCEEDS}
+        rem = max(0.0, q - r)
+        return {"value_usd": n + rem * e_held - basis, "qty": r,
+                "residual_qty": rem, "settlement_exposure_after": rem > _TOL,
+                "components": {"net_proceeds_usd": n,
+                               "residual_expected_payout_usd": rem * e_held,
+                               "basis_usd": -basis}}
+    if a in ("ACQUIRE_INDIRECT_HEDGE", "ACQUIRE_HEDGE"):
+        regs = list(c.get("regions") or ())
+        h = _f(c.get("hedge_qty"))
+        cost = _f(c.get("hedge_cost_usd"))
+        fee = _f(c.get("fees_usd"))
+        if probs_at_v is None:
+            return {"refusal": R_ACQ_BOUND_NOT_PRICED}
+        if not regs or h is None or cost is None or fee is None or \
+                any(probs_at_v.get(r.get("region")) is None for r in regs):
+            return {"refusal": R_NO_JOINT_TABLE}
+        joint_marg: dict = {}
+        e_hedge = 0.0
+        for r in regs:
+            pr = float(probs_at_v[r["region"]])
+            hc_, gc_ = (float(x) for x in r["per_leg_cents"][:2])
+            joint_marg[hc_] = joint_marg.get(hc_, 0.0) + pr
+            e_hedge += pr * gc_ / 100.0
+        gap = {k: joint_marg.get(k, 0.0) - marginal.get(k, 0.0)
+               for k in set(joint_marg) | set(marginal)}
+        if max(abs(x) for x in gap.values()) > 1e-9:
+            return {"refusal": R_MEASURES_DO_NOT_RECONCILE,
+                    "held_marginal_gap": gap, "at_void_rate": v}
+        hold_same = q * e_held - basis
+        inc = h * e_hedge - cost - fee
+        return {"value_usd": hold_same + inc,
+                "whole_position_expected_net_usd": hold_same + inc,
+                "hold_value_same_measure_usd": hold_same,
+                "increment_vs_hold_usd": inc, "qty": h, "residual_qty": q,
+                "settlement_exposure_after": True,
+                "components": {"held_expected_payout_usd": q * e_held,
+                               "hedge_expected_payout_usd": h * e_hedge,
+                               "hedge_cost_usd": -cost,
+                               "hedge_fees_usd": -fee, "basis_usd": -basis}}
+    return {"refusal": "NOT_A_VALUED_ACTION"}
+
+
+def _probs_for(c, v, *, point):
+    by = dict(c.get("region_probabilities_by_void") or {})
+    for k, pr in by.items():
+        try:
+            if abs(float(k) - v) <= 1e-12:
+                return pr
+        except (TypeError, ValueError):
+            continue
+    dv = _f(c.get("distribution_void_rate"))
+    if point is not None and dv is not None and abs(dv - v) <= 1e-12:
+        return c.get("region_probabilities")
+    return None
+
+
+def _rank(rows):
+    ok = [r for r in rows if r.get("value_usd") is not None]
+    return sorted(ok, key=lambda r: -r["value_usd"])
+
+
 def value_actions(*, held_cents: dict, p_win, p_partial=None,
-                  void_rate=None, qty, basis_usd, candidates) -> dict:
-    """Every candidate valued on the one measure. `candidates` are dicts:
+                  void_rate=None, void_lower=None, void_upper=None,
+                  qty, basis_usd, candidates) -> dict:
+    """Every candidate valued on the one measure, and whether the selection
+    may be dispatched with real money.
 
-      {"action": "HOLD"}
-      {"action": "DIRECT_EXIT"|"REDUCE", "qty": r, "net_proceeds_usd": N}
-      {"action": "ACQUIRE_INDIRECT_HEDGE", "candidate_id",
-       "regions": [{"region", "per_leg_cents": [held, hedge]}],
-       "region_probabilities": {region: p}, "hedge_qty": h,
-       "hedge_cost_usd", "fees_usd", "distribution_void_rate"}
+    AN UNKNOWN VOID RATE IS NOT ZERO. Where the fixture can void:
+      * measured rate -- ranked at the rate, and required to keep the same
+        winner at both ends of its stated uncertainty range
+        [`void_lower` (default 0), `void_upper` (default the rate)];
+      * no measured rate -- the only range the evidence justifies is [0, 1].
+        Every action is valued at both ends; the selection stands for funded
+        dispatch only if the SAME action wins at both (values are linear in
+        the rate, so it then wins everywhere between). Otherwise the ranking
+        is a CONDITIONAL RESEARCH VALUATION and funded dispatch is refused by
+        name. An acquisition is never admitted on an unmeasured rate.
 
-    Returns each with `value_usd` (at the rate used), `value_at_zero_void`,
-    `void_slope_usd` (d value / d v), the settlement exposure it leaves, and
-    a named refusal where it cannot be valued on this measure."""
+    `candidates` as before; an acquisition may carry
+    `region_probabilities_by_void` = {rate: probabilities} for the range
+    ends. Pure; never raises."""
     out: dict[str, Any] = {"version": VERSION, "ok": False}
-    m = measure(held_cents=held_cents, p_win=p_win, p_partial=p_partial,
-                void_rate=void_rate)
-    if not m.get("ok"):
-        return dict(out, refusal=m["refusal"], measure=m)
+    m0 = measure(held_cents=held_cents, p_win=p_win, p_partial=p_partial,
+                 void_rate=0.0)
+    if not m0.get("ok"):
+        return dict(out, refusal=m0["refusal"], measure=m0)
     q = _f(qty)
     basis = _f(basis_usd)
     if q is None or q < 0 or basis is None:
         return dict(out, refusal=R_BAD_QTY, qty=qty, basis_usd=basis_usd)
-    e_used = m["expected_held_payout_usd"]
-    e0 = m["expected_at_zero_void"]
-    e1 = m["expected_at_all_void"]
-    slope_per_unit = e1 - e0            # d E[held] / d v
-    marginal = held_marginal(m)
-    valued = []
-    for cand in candidates or ():
-        c = dict(cand)
-        a = str(c.get("action") or "")
-        row = {"action": a, "candidate_id": c.get("candidate_id"),
-               "rankable": True, "refusal": None}
-        if a == "HOLD":
-            row.update(value_usd=q * e_used - basis,
-                       value_at_zero_void=q * e0 - basis,
-                       void_slope_usd=q * slope_per_unit,
-                       qty=q, residual_qty=q,
-                       settlement_exposure_after=True,
-                       components={"held_expected_payout_usd": q * e_used,
-                                   "basis_usd": -basis})
-        elif a in ("DIRECT_EXIT", "REDUCE"):
-            r = _f(c.get("qty"))
-            n = _f(c.get("net_proceeds_usd"))
-            if r is None or r < 0 or r > q + _TOL:
-                row.update(rankable=False, refusal=R_BAD_QTY)
-            elif n is None:
-                row.update(rankable=False, refusal=R_NO_PROCEEDS)
+    can_void = m0["can_void"]
+    point = _f(void_rate)
+    if not can_void:
+        lo = hi = 0.0
+        point_v = 0.0
+        status = VOID_NOT_POSSIBLE
+    elif point is None:
+        lo, hi, point_v = 0.0, 1.0, None
+        status = VOID_RATE_UNMEASURED
+    else:
+        if not 0.0 <= point <= 1.0:
+            return dict(out, refusal=R_PROBABILITY, void_rate=void_rate)
+        lo = max(0.0, _f(void_lower) if _f(void_lower) is not None else 0.0)
+        hi = min(1.0, _f(void_upper) if _f(void_upper) is not None
+                 else point)
+        lo, hi = min(lo, point), max(hi, point)
+        point_v = point
+        status = VOID_RATE_MEASURED
+
+    def at(v):
+        m = measure(held_cents=held_cents, p_win=p_win, p_partial=p_partial,
+                    void_rate=v if can_void else None)
+        e = m["expected_held_payout_usd"]
+        marg = held_marginal(dict(m, void_rate=(v if can_void else 0.0)))
+        rows = []
+        for c in candidates or ():
+            a = str(c.get("action") or "")
+            is_acq = a in ("ACQUIRE_INDIRECT_HEDGE", "ACQUIRE_HEDGE")
+            dv = _f(c.get("distribution_void_rate")) if is_acq else None
+            if is_acq and can_void and point is None:
+                got = {"refusal": R_ACQ_NEEDS_MEASURED_VOID}
+            elif (is_acq and can_void and dv is not None
+                  and abs(dv - point) > 1e-12):
+                got = {"refusal": R_MEASURES_DO_NOT_RECONCILE,
+                       "distribution_void_rate": dv,
+                       "measure_void_rate": point}
             else:
-                rem = max(0.0, q - r)
-                row.update(value_usd=n + rem * e_used - basis,
-                           value_at_zero_void=n + rem * e0 - basis,
-                           void_slope_usd=rem * slope_per_unit,
-                           qty=r, residual_qty=rem,
-                           settlement_exposure_after=rem > _TOL,
-                           components={"net_proceeds_usd": n,
-                                       "residual_expected_payout_usd":
-                                           rem * e_used,
-                                       "basis_usd": -basis})
-        elif a in ("ACQUIRE_INDIRECT_HEDGE", "ACQUIRE_HEDGE"):
-            regs = list(c.get("regions") or ())
-            probs = dict(c.get("region_probabilities") or {})
-            h = _f(c.get("hedge_qty"))
-            cost = _f(c.get("hedge_cost_usd"))
-            fee = _f(c.get("fees_usd"))
-            if not regs or h is None or cost is None or fee is None or \
-                    any(probs.get(r.get("region")) is None for r in regs):
-                row.update(rankable=False, refusal=R_NO_JOINT_TABLE)
-                valued.append(row)
-                continue
-            dv = _f(c.get("distribution_void_rate"))
-            joint_marg: dict[float, float] = {}
-            e_hedge = 0.0
-            for r in regs:
-                pr = float(probs[r["region"]])
-                hc_, gc_ = (float(x) for x in r["per_leg_cents"][:2])
-                joint_marg[hc_] = joint_marg.get(hc_, 0.0) + pr
-                e_hedge += pr * gc_ / 100.0
-            gap = {k: joint_marg.get(k, 0.0) - marginal.get(k, 0.0)
-                   for k in set(joint_marg) | set(marginal)}
-            if (max(abs(x) for x in gap.values()) > 1e-9
-                    or (m["can_void"] and dv is not None
-                        and abs(dv - m["void_rate"]) > 1e-12)):
-                row.update(rankable=False,
-                           refusal=R_MEASURES_DO_NOT_RECONCILE,
-                           held_marginal_gap=gap,
-                           distribution_void_rate=dv,
-                           measure_void_rate=m["void_rate"])
-                valued.append(row)
-                continue
-            hold_same = q * e_used - basis
-            inc = h * e_hedge - cost - fee
-            row.update(value_usd=hold_same + inc,
-                       whole_position_expected_net_usd=hold_same + inc,
-                       hold_value_same_measure_usd=hold_same,
-                       increment_vs_hold_usd=inc,
-                       qty=h, residual_qty=q,
-                       settlement_exposure_after=True,
-                       components={"held_expected_payout_usd": q * e_used,
-                                   "hedge_expected_payout_usd": h * e_hedge,
-                                   "hedge_cost_usd": -cost,
-                                   "hedge_fees_usd": -fee,
-                                   "basis_usd": -basis},
-                       # the hedge's own void sensitivity is inside its
-                       # distribution; only the rate used is claimed here
-                       value_at_zero_void=None, void_slope_usd=None)
-        else:
-            row.update(rankable=False, refusal="NOT_A_VALUED_ACTION")
+                got = _value_one(c, q=q, basis=basis, e_held=e,
+                                 marginal=marg, v=v,
+                                 probs_at_v=(_probs_for(c, v, point=point)
+                                             if is_acq else None), m=m)
+            rows.append(dict(got, action=a,
+                             candidate_id=c.get("candidate_id")))
+        return rows
+
+    rows_lo, rows_hi = at(lo), at(hi)
+    rows_pt = at(point_v) if point_v is not None else None
+    key = lambda r: (r["action"], r.get("candidate_id"))       # noqa: E731
+    win_lo = (_rank(rows_lo) or [None])[0]
+    win_hi = (_rank(rows_hi) or [None])[0]
+    win_pt = None if rows_pt is None else (_rank(rows_pt) or [None])[0]
+    robust = (win_lo is not None and win_hi is not None
+              and key(win_lo) == key(win_hi)
+              and (win_pt is None or key(win_pt) == key(win_lo)))
+    if not can_void:
+        basis_kind = BASIS_EXACT
+    elif robust:
+        basis_kind = BASIS_ROBUST
+    else:
+        basis_kind = BASIS_RESEARCH
+    report = rows_pt if rows_pt is not None else rows_lo
+    hi_by = {key(r): r for r in rows_hi}
+    lo_by = {key(r): r for r in rows_lo}
+    valued = []
+    for r in report:
+        k = key(r)
+        v_lo = lo_by.get(k, {}).get("value_usd")
+        v_hi = hi_by.get(k, {}).get("value_usd")
+        row = dict(r, rankable=r.get("value_usd") is not None,
+                   value_at_range_low=v_lo, value_at_range_high=v_hi,
+                   worst_value_over_range=(None if v_lo is None or v_hi is None
+                                           else min(v_lo, v_hi)))
         valued.append(row)
-    ranked = sorted((r for r in valued if r["rankable"]),
-                    key=lambda r: -r["value_usd"])
-    winner = ranked[0] if ranked else None
-    breakeven = []
-    if winner is not None and m["can_void"] and \
-            winner.get("void_slope_usd") is not None:
-        for r in ranked[1:]:
-            if r.get("void_slope_usd") is None:
-                continue
-            ds = r["void_slope_usd"] - winner["void_slope_usd"]
-            d0 = winner["value_at_zero_void"] - r["value_at_zero_void"]
-            if abs(ds) > 1e-12:
-                vstar = d0 / ds
-                if 0.0 <= vstar <= 1.0:
-                    breakeven.append({"rival": r["action"],
-                                      "rival_candidate_id":
-                                          r.get("candidate_id"),
-                                      "void_rate": vstar})
-    return dict(out, ok=True, refusal=None, measure=m, valued=valued,
+    winner = win_pt if win_pt is not None else win_lo
+    permitted = basis_kind in (BASIS_EXACT, BASIS_ROBUST) and \
+        winner is not None
+    refusal = None
+    if not permitted and winner is not None:
+        refusal = R_SELECTION_DEPENDS_ON_VOID
+    return dict(out, ok=True, refusal=None, measure=m0,
+                void_rate_status=status, void_rate=point_v,
+                void_range=[lo, hi], valued=valued,
+                selection_basis=basis_kind,
+                funded_dispatch_permitted=permitted,
+                funded_dispatch_refusal=refusal,
                 winner=None if winner is None else
                 {"action": winner["action"],
                  "candidate_id": winner.get("candidate_id"),
                  "value_usd": winner["value_usd"]},
-                void_rate_status=m["void_rate_status"],
-                void_breakeven=sorted(breakeven,
-                                      key=lambda b: b["void_rate"]),
-                the_winner_holds_for_void_rates_below=(
-                    min((b["void_rate"] for b in breakeven), default=None)
-                    if winner is not None else None),
+                winner_at_range_low=None if win_lo is None else key(win_lo),
+                winner_at_range_high=None if win_hi is None else key(win_hi),
+                an_unknown_void_rate_is_not_zero=(
+                    "with no measured rate every action is valued at both "
+                    "ends of [0, 1]; a selection that differs between them is "
+                    "a conditional research valuation, never a funded one"),
                 basis_is=("the same remaining basis is subtracted from every "
                           "action, so it never changes the order; it is kept "
                           "so each value is the position's net result"))
