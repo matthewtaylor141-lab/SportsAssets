@@ -164,6 +164,19 @@ SOURCE_FUNDED = "FUNDED_DECISIONS"
 SOURCE_OBSERVATIONS = "PAIR_OBSERVATIONS"
 SOURCES = (SOURCE_FUNDED, SOURCE_OBSERVATIONS)
 
+#: ── DEREK'S SINGLE-CONTRACT ENTRY QUESTION (agents/derek_policy) ──────
+#: P(the event THIS contract pays on occurs), asked of one venue contract at
+#: its executable price. Records: `derek_entry_decisions` (the decision-time
+#: vector, written before the outcome exists) joined to the entry valuation's
+#: own outcome join (migration 118). The labeller
+#: lives beside the table, in `derek_policy.labelled_entries`; the registry
+#: path -- fit, register, evaluate, promote, approved -- is this module's,
+#: unchanged. NOT in `SOURCES`: the scheduled pair generator never fits it.
+KEY_ENTRY_PAYOUT = "derek_entry_payout_event"
+TARGET_ENTRY_PAYOUT = "CONTRACT_PAYOUT_EVENT_OCCURRED"
+FEATURES_ENTRY_PAYOUT = ("acquisition_price", "payout_is_complement")
+SOURCE_ENTRY_DECISIONS = "DEREK_ENTRY_DECISIONS"
+
 #: ── THE WEIGHTING EVERY SCORE AND EVERY FIT USES ────────────────────
 #:
 #: EVENT_BALANCED: each decision is weighted 1 / (decisions on its fixture), so
@@ -272,9 +285,11 @@ def features_of(structure, *, primary_cost_cents, hedge_cost_cents,
 FEATURES_HEDGE_GIVEN_PRIMARY = FEATURES + ("primary_won",)
 
 _FEATURES_BY_KEY = {KEY_MIDDLE: FEATURES,
-                    KEY_HEDGE_GIVEN_PRIMARY: FEATURES_HEDGE_GIVEN_PRIMARY}
+                    KEY_HEDGE_GIVEN_PRIMARY: FEATURES_HEDGE_GIVEN_PRIMARY,
+                    KEY_ENTRY_PAYOUT: FEATURES_ENTRY_PAYOUT}
 _TARGET_BY_KEY = {KEY_MIDDLE: TARGET,
-                  KEY_HEDGE_GIVEN_PRIMARY: TARGET_HEDGE_GIVEN_PRIMARY}
+                  KEY_HEDGE_GIVEN_PRIMARY: TARGET_HEDGE_GIVEN_PRIMARY,
+                  KEY_ENTRY_PAYOUT: TARGET_ENTRY_PAYOUT}
 
 
 def features_for(model_key: str | None) -> tuple:
@@ -808,6 +823,17 @@ async def labelled(conn, *, model_key: str = KEY_MIDDLE, after=None,
     made before T whose outcome was learned after T is not something a fit at
     T could have learned from.
     """
+    if model_key == KEY_ENTRY_PAYOUT:
+        # DEREK'S ENTRY RECORDS, from their own source only.
+        if source != SOURCE_ENTRY_DECISIONS:
+            return {"version": VERSION, "ok": False, "source": source,
+                    "model_key": model_key,
+                    "refusal": R_NOT_A_RECORD_SOURCE}
+        from .agents import derek_policy as _DP
+        return dict(await _DP.labelled_entries(
+            conn, after=after, through=through,
+            outcomes_through=outcomes_through, decision_ids=decision_ids),
+            model_key=model_key, source=source)
     if model_key == KEY_HEDGE_GIVEN_PRIMARY:
         # THE CONDITIONAL'S RECORDS: the same shape and windows, a different
         # label (did the hedge win) on the rows whose table makes that a
@@ -916,7 +942,13 @@ FEATURE_SCHEMA_SHA_HEDGE_GIVEN_PRIMARY = hashlib.sha256(
     json.dumps(sorted(FEATURES_HEDGE_GIVEN_PRIMARY)).encode()).hexdigest()[:16]
 
 
+FEATURE_SCHEMA_SHA_ENTRY_PAYOUT = hashlib.sha256(
+    json.dumps(sorted(FEATURES_ENTRY_PAYOUT)).encode()).hexdigest()[:16]
+
+
 def feature_schema_sha_for(model_key: str | None) -> str:
+    if model_key == KEY_ENTRY_PAYOUT:
+        return FEATURE_SCHEMA_SHA_ENTRY_PAYOUT
     return (FEATURE_SCHEMA_SHA_HEDGE_GIVEN_PRIMARY
             if model_key == KEY_HEDGE_GIVEN_PRIMARY else FEATURE_SCHEMA_SHA)
 
@@ -1170,6 +1202,10 @@ async def _fixtures_seen_through(conn, boundary,
         return {str(r["fixture"]) for r in await conn.fetch(
             "SELECT DISTINCT fixture FROM bettor_pair_observations "
             " WHERE observed_at <= $1", boundary)}
+    if source == SOURCE_ENTRY_DECISIONS:
+        return {str(r["fixture"]) for r in await conn.fetch(
+            "SELECT DISTINCT fixture FROM derek_entry_decisions "
+            " WHERE decided_at <= $1 AND fixture IS NOT NULL", boundary)}
     return {str(r["fixture"]) for r in await conn.fetch(
         "SELECT DISTINCT fixture FROM bettor_funded_decisions "
         " WHERE decided_at <= $1", boundary)}
