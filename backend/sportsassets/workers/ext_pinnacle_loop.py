@@ -8121,7 +8121,7 @@ def _observation_digest(po) -> dict | None:
                 "truncated_at_row_limit", "fixtures_seen",
                 "eligible_fixtures", "excluded_rows", "excluded_fixtures",
                 "not_offered_for_limit", "never_attempted_fixtures",
-                "attempt_memory")} if cat else None),
+                "attempt_memory", "structural_census")} if cat else None),
             "labels": {k: lab.get(k) for k in (
                 "ok", "refusal", "error", "labelled", "not_a_label",
                 "awaiting", "corrected", "unreadable", "row_errors",

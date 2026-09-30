@@ -1315,6 +1315,63 @@ def _preference(row: dict) -> tuple:
             str(row.get("market_slug") or ""))
 
 
+# ── A BOUNDED STRUCTURAL CENSUS, FROM THE CATALOGUE ALONE ─────────────
+#
+# Six attempts cannot say whether supported pairs exist. The catalogue can say
+# most of it without a venue read: two distinct instruments on one fixture,
+# each with a side the supplier can orient (the two rows of an instrument do
+# not claim one participant), graded over the same period and variable. What
+# only the venue can add -- the overtime and void wording, and a price -- is
+# left to the attempt, and the census says so rather than claiming a pair.
+
+S_ONE_CONTRACT = "ONE_GRADED_CONTRACT"
+S_NO_USABLE_SHAPE = "SIBLINGS_ARE_UNSUPPORTED_SHAPES"
+S_NO_SHARED_VARIABLE = "NO_TWO_CONTRACTS_SHARE_A_PERIOD_AND_VARIABLE"
+S_PAIRABLE = "STRUCTURALLY_PAIRABLE_PENDING_PROSE_AND_PRICE"
+
+
+def structural_verdict(rows) -> dict:
+    """One fixture's screened catalogue rows -> what the catalogue alone
+    establishes about a second settlement-compatible contract. Pure."""
+    from . import bettor_funded_hedge_supply as HSUP
+    from . import bettor_indirect_structures as IS
+
+    by_slug: dict = {}
+    for r in rows:
+        by_slug.setdefault(str(r.get("market_slug") or ""), []).append(r)
+    if len(by_slug) < 2:
+        return {"verdict": S_ONE_CONTRACT, "contracts": len(by_slug)}
+    usable, unsupported = {}, []
+    for slug, rs in by_slug.items():
+        k = HSUP.derive_kind(rs[0])
+        if k.get("refusal"):
+            unsupported.append(slug)
+            continue
+        if k.get("kind") != IS.KIND_TOTAL and len(rs) >= 2 and len(
+                {HSUP._clean(x.get("team_abbr")) for x in rs}) == 1:
+            # both rows name one participant: a per-outcome yes/no contract,
+            # refused on both sides as R_BOTH_SIDES_CLAIM_ONE_ORIENTATION
+            unsupported.append(slug)
+            continue
+        usable[slug] = (k.get("period"),
+                        "TOTAL" if k.get("kind") == IS.KIND_TOTAL
+                        else "MARGIN")
+    groups: dict = {}
+    for slug, key in usable.items():
+        groups.setdefault(key, []).append(slug)
+    shared = {"%s/%s" % k: len(v) for k, v in groups.items() if len(v) >= 2}
+    if len(usable) < 2:
+        verdict = S_NO_USABLE_SHAPE
+    elif not shared:
+        verdict = S_NO_SHARED_VARIABLE
+    else:
+        verdict = S_PAIRABLE
+    return {"verdict": verdict, "contracts": len(by_slug),
+            "usable_contracts": len(usable),
+            "unsupported_shape_contracts": len(unsupported),
+            "shared_keys": shared}
+
+
 async def catalogue_candidates(conn, *, now: float | None = None,
                                limit: int = 24) -> dict:
     """UP TO `limit` FIRST-LEG CANDIDATES, one per fixture, from the venue's
@@ -1419,6 +1476,19 @@ async def catalogue_candidates(conn, *, now: float | None = None,
     out["attempt_memory"]["attempted_fixtures"] = len(
         memory["last_attempted"])
     fresh, again = [], []
+    # THE CENSUS, EVERY FIXTURE IN THE WINDOW, before any is offered.
+    census: dict = {}
+    verdict_of: dict = {}
+    for fx in order:
+        v = structural_verdict(by_fx[fx])
+        verdict_of[fx] = v["verdict"]
+        fam = str(by_fx[fx][0].get("sports_type") or "").split("_")[0]
+        c = census.setdefault(v["verdict"], {"fixtures": 0, "contracts": 0,
+                                             "by_family": {}})
+        c["fixtures"] += 1
+        c["contracts"] += v["contracts"]
+        c["by_family"][fam] = c["by_family"].get(fam, 0) + 1
+    out["structural_census"] = census
     for fx in order:
         legs = by_fx[fx]
         if len({r["market_slug"] for r in legs}) < 2:
@@ -1434,6 +1504,7 @@ async def catalogue_candidates(conn, *, now: float | None = None,
         best = min(legs, key=_preference)
         cand = {"us_market_slug": best["market_slug"], "side": best["intent"],
                 "fixture": fx, "sports_type": best["sports_type"],
+                "structural_verdict": verdict_of.get(fx),
                 "starts_in_s": round(float(best["start_epoch"]) - at, 0),
                 "graded_contracts": len({r["market_slug"] for r in legs}),
                 "source": SOURCE_CATALOGUE}
@@ -1445,7 +1516,12 @@ async def catalogue_candidates(conn, *, now: float | None = None,
     # NEVER-ATTEMPTED FIXTURES FIRST, soonest first (their labels arrive
     # soonest); then fixtures attempted before, LEAST RECENTLY first, so the
     # same few are never the head of the queue twice running.
-    again.sort(key=lambda c: (c["last_attempted_at"], c["fixture"]))
+    again.sort(key=lambda c: (c["structural_verdict"] != S_PAIRABLE,
+                              c["last_attempted_at"], c["fixture"]))
+    # STRUCTURALLY PAIRABLE FIXTURES FIRST within each group (stable, so the
+    # soonest-first order holds inside it): a fixture the catalogue already
+    # shows cannot pair spends no book read ahead of one that might.
+    fresh.sort(key=lambda c: c["structural_verdict"] != S_PAIRABLE)
     out["never_attempted_fixtures"] = len(fresh)
     out["candidates"] = (fresh + again)[:int(limit)]
     out["eligible_fixtures"] = len(fresh) + len(again)

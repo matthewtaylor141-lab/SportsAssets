@@ -906,3 +906,59 @@ async def test_a_held_side_sharing_its_orientation_with_the_other_side_is_refuse
             assert ok["ok"] is True, ok
         finally:
             await conn.execute("DELETE FROM us_premap WHERE event_slug=$1", ev)
+
+
+# ═════════════════════════════════════════════════════════════════════
+# 7 · THE STRUCTURAL CENSUS: WHAT THE CATALOGUE ALONE ESTABLISHES
+# ═════════════════════════════════════════════════════════════════════
+
+def _cat(slug, st, abbrs, signed=(None, None), ev="x-a-b-2026-10-05"):
+    return [{"market_slug": slug, "sports_type": st, "team_abbr": a,
+             "intent": i, "signed": sg, "side_norm": "yes",
+             "event_slug": ev}
+            for a, i, sg in zip(abbrs, (LONG, SHORT), signed)]
+
+
+def test_the_census_reads_the_production_row_shapes():
+    # soccer: three per-outcome yes/no contracts, each naming ONE team on
+    # both rows (the draw row has no code and never passes the screen)
+    soccer = (_cat("atc-e-eri", "soccer_team_full_time_winner", ("eri", "eri"))
+              + _cat("atc-e-rsa", "soccer_team_full_time_winner", ("rsa", "rsa")))
+    got = PO.structural_verdict(soccer)
+    assert got["verdict"] == PO.S_NO_USABLE_SHAPE, got
+    assert got["unsupported_shape_contracts"] == 2
+    # MLB: the two-row winner and a spread share FULL_GAME / MARGIN
+    mlb = (_cat("aec-m", "baseball_team_full_game_winner", ("bos", "nyy"))
+           + _cat("asc-m-neg-1pt5", "baseball_team_full_game_spread",
+                  ("bos", "nyy"), ("-1.5", "+1.5")))
+    got = PO.structural_verdict(mlb)
+    assert got["verdict"] == PO.S_PAIRABLE, got
+    assert got["shared_keys"] == {"FULL_GAME/MARGIN": 2}
+    # one contract
+    assert PO.structural_verdict(mlb[:2])["verdict"] == PO.S_ONE_CONTRACT
+
+
+async def test_a_structurally_pairable_fixture_is_offered_before_one_that_cannot_pair():
+    ev = "afcq-eri-rsa-2026-10-05"
+    async with _conn() as conn:
+        await _clean(conn)
+        await _seed_the_catalogue(conn)
+        await _sweep_ran(conn)
+        await conn.execute("DELETE FROM us_premap WHERE event_slug=$1", ev)
+        try:
+            # a soccer fixture starting SOONER than the HW fixture
+            for suf in ("eri", "rsa"):
+                for intent, sn in ((LONG, "yes"), (SHORT, "no")):
+                    await _row(conn, event=ev, slug="atc-%s-%s" % (ev, suf),
+                               st="soccer_team_full_time_winner", abbr=suf,
+                               intent=intent, side=sn, starts="20 minutes",
+                               title="Eritrea vs. South Africa")
+            got = await PO.catalogue_candidates(conn, now=time.time())
+            order = [c["fixture"] for c in got["candidates"]]
+            assert ev in order and HW.EVENT in order, got
+            assert order.index(HW.EVENT) < order.index(ev), order
+            census = got["structural_census"]
+            assert census[PO.S_PAIRABLE]["fixtures"] >= 1
+            assert census[PO.S_NO_USABLE_SHAPE]["by_family"].get("soccer") == 1
+        finally:
+            await conn.execute("DELETE FROM us_premap WHERE event_slug=$1", ev)
