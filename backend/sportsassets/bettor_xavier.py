@@ -2078,6 +2078,13 @@ async def recover_claims(conn, *, account_id: str, venue: str,
     try:
         rows = await unresolved_claims(conn, account_id=account_id,
                                        venue=venue)
+        # AND A WORKING ORDER THE BOOK HAS SINCE MOVED ON: its later fills
+        # and its end arrive by the book's recovery (`reconcile`), which
+        # writes no execution event -- so without this a send answered with a
+        # partial fill read WORKING at that quantity for ever, while the book
+        # held the order FILLED.
+        rows = list(rows) + await working_claims_behind_the_book(
+            conn, account_id=account_id, venue=venue)
     except Exception as exc:                                    # noqa: BLE001
         return dict(out, ok=False, error=type(exc).__name__)
     for s in rows:
@@ -2104,6 +2111,43 @@ async def recover_claims(conn, *, account_id: str, venue: str,
             out["left_unresolved"].append({"xavier_decision_id": xid,
                                            "error": type(exc).__name__})
     return dict(out, ok=True)
+
+
+async def working_claims_behind_the_book(conn, *, account_id: str,
+                                         venue: str) -> list:
+    """Claimed decisions whose execution reads WORKING while the order they
+    created has, in the book, filled more than the record says or reached
+    an established end. Raises on a failed read (the caller contains it)."""
+    if not await has_event_schema(conn):
+        return []
+    # Only claims with no ending on the record yet (a terminal status, or a
+    # send that never happened / was refused): settled history is not
+    # re-read every pass.
+    ids = [r["xavier_decision_id"] for r in await conn.fetch(
+        "SELECT c.xavier_decision_id FROM bettor_xavier_execution_events c "
+        " WHERE c.event_kind='DISPATCH_CLAIMED' AND c.account_id=$1 "
+        "   AND c.venue=$2 AND NOT EXISTS ("
+        "       SELECT 1 FROM bettor_xavier_execution_events t "
+        "        WHERE t.xavier_decision_id = c.xavier_decision_id "
+        "          AND (t.terminal_status IS NOT NULL "
+        "               OR t.event_kind IN ('NOT_SENT', 'REFUSED')))",
+        account_id, venue)]
+    out = []
+    for xid, s in (await _executions_for(conn, ids)).items():
+        if s["status"] != X_WORKING:
+            continue
+        it = await conn.fetchrow(
+            "SELECT i.state, (SELECT coalesce(sum(f.qty), 0)::float8 "
+            "   FROM bettor_funded_fills f WHERE f.intent_id = i.intent_id) "
+            "   AS filled FROM bettor_funded_intents i "
+            " WHERE i.decision_ref->>'xavier_decision_id'=$1 "
+            " ORDER BY i.created_at LIMIT 1", xid)
+        if it is None:
+            continue
+        if str(it["state"] or "") in _BOOK_TERMINAL or \
+                float(it["filled"] or 0) > float(s["filled_qty"] or 0) + 1e-9:
+            out.append(dict(s, xavier_decision_id=xid))
+    return out
 
 
 async def _recover_one(conn, xid: str, state: dict, when: float) -> dict:

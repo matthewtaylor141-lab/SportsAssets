@@ -274,22 +274,42 @@ async def plans_fills(conn) -> dict:
         return _sec(UNAVAILABLE, why="bettor_funded_intents is absent")
     if not await _regclass(conn, "derek_entry_decisions"):
         return _sec(UNAVAILABLE, why="migration 153 is not applied here")
+    # BY ID, NEVER BY PROXIMITY. The intent names the Derek decision that
+    # authorised it (decision_ref.derek_decision_id, written by the funded
+    # connector from the entry gate's answer). This used to match on slug,
+    # side and a five-minute window, which pairs two ENTER decisions on one
+    # market with the same order and cannot tell which one sent it.
     rows = [dict(r) for r in await conn.fetch(
-        "SELECT d.decision_id, i.intent_id, i.state, i.quantity, "
-        "       i.limit_price, i.created_at, i.sent_at "
+        "SELECT d.decision_id, i.intent_id, i.state, "
+        "       i.quantity::float8 AS quantity, i.limit_price, i.created_at, "
+        "       i.sent_at, i.venue_order_id, "
+        "       coalesce((SELECT sum(f.qty) FROM bettor_funded_fills f "
+        "                  WHERE f.intent_id = i.intent_id "
+        "                    AND f.direction = 'ENTRY'), 0)::float8 "
+        "           AS filled_qty, "
+        "       coalesce((SELECT array_agg(f.fill_id ORDER BY f.at, f.fill_id)"
+        "                   FROM bettor_funded_fills f "
+        "                  WHERE f.intent_id = i.intent_id "
+        "                    AND f.direction = 'ENTRY'), '{}'::text[]) "
+        "           AS fill_ids "
         "  FROM derek_entry_decisions d "
         "  JOIN bettor_funded_intents i "
-        "    ON i.kind = 'ENTRY' AND i.us_market_slug = d.us_market_slug "
-        "   AND i.order_intent = d.side AND i.created_at >= d.decided_at "
-        "   AND i.created_at < d.decided_at + interval '5 minutes' "
+        "    ON i.kind = 'ENTRY' "
+        "   AND i.decision_ref->>'derek_decision_id' = d.decision_id "
         " WHERE d.verdict = 'ENTER' ORDER BY i.created_at DESC LIMIT 25")]
     for r in rows:
         for k in ("created_at", "sent_at"):
             r[k] = _iso(r[k])
         for k in ("limit_price",):
             r[k] = None if r[k] is None else float(r[k])
+        r["fill_ids"] = list(r["fill_ids"] or [])
     if not rows:
-        return _sec(EMPTY, [], why="no funded order has been sent")
+        sent = await conn.fetchval(
+            "SELECT count(*) FROM bettor_funded_intents WHERE kind = 'ENTRY'")
+        return _sec(EMPTY, [], why=(
+            "no funded order has been sent" if not sent else
+            "no funded entry order names a Derek ENTER decision "
+            "(bettor_funded_intents.decision_ref.derek_decision_id)"))
     return _sec(OK, rows, evidence=[
         {"kind": "bettor_funded_intents", "id": r["intent_id"],
          "href": "/api/command/xavier/%s" % r["intent_id"]} for r in rows])
@@ -300,10 +320,16 @@ async def handoffs(conn) -> dict:
         return _sec(UNAVAILABLE, why=(
             "agent_position_handoffs is absent: migration 152 (the agent "
             "core) is not applied here"))
+    derek_id = ("(SELECT i.decision_ref->>'derek_decision_id' "
+                "   FROM bettor_funded_intents i "
+                "  WHERE i.intent_id = h.entry_intent_id)"
+                if await _regclass(conn, "bettor_funded_intents")
+                else "NULL::text")
     rows = [dict(r) for r in await conn.fetch(
-        "SELECT * FROM agent_position_handoffs "
-        " WHERE from_agent = 'DEREK' ORDER BY handoff_at DESC NULLS LAST "
-        " LIMIT 25")]
+        "SELECT h.*, %s AS derek_decision_id "
+        "  FROM agent_position_handoffs h "
+        " WHERE h.from_agent = 'DEREK' ORDER BY h.handoff_at DESC NULLS LAST "
+        " LIMIT 25" % derek_id)]
     for r in rows:
         for k, v in list(r.items()):
             if hasattr(v, "isoformat"):

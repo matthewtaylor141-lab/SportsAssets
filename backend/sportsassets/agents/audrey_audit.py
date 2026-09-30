@@ -354,6 +354,9 @@ def search_completeness(decision: dict) -> dict:
                 "limited": True,
                 "why": ("the decision does not record how complete its "
                         "search was; it is never assumed complete")}
+    # `stop_reason` is what Xavier's ladder writes
+    # (agents.xavier_ladder.search_completeness); without it every recorded
+    # search, a COMPLETE one included, read as "ended without saying why".
     ended, _ = _first(sc, ("stop_reason", "ended", "search_ended",
                            "end_reason", "ended_because", "reason"))
     ended = str(ended).upper() if ended is not None else None
@@ -546,8 +549,30 @@ async def derek_section(conn, *, start: float, end: float) -> dict:
         out["entries"] = {"status": "UNAVAILABLE",
                           "why": "external_valuations is absent"}
         return out
+    # WHICH DECISIONS SENT A FUNDED ORDER, BY ID. `order_submitted` is the
+    # shadow row's own flag and its table CHECKs it FALSE, so on its own every
+    # Derek entry read as unplaced -- a funded order included. The funded
+    # intent names the Derek decision it executed
+    # (decision_ref.derek_decision_id) and that decision names its valuation.
+    linked = (await _regclass(conn, "derek_entry_decisions")
+              and await _regclass(conn, "bettor_funded_intents"))
+    links_sql = (
+        "       coalesce((SELECT array_agg(d.decision_id ORDER BY "
+        "                 d.decision_id) FROM derek_entry_decisions d "
+        "                  WHERE d.valuation_id = v.id), '{}'::text[]) "
+        "         AS derek_decision_ids, "
+        "       coalesce((SELECT array_agg(i.intent_id ORDER BY i.intent_id) "
+        "                   FROM derek_entry_decisions d "
+        "                   JOIN bettor_funded_intents i ON i.kind='ENTRY' "
+        "                    AND i.decision_ref->>'derek_decision_id' "
+        "                        = d.decision_id "
+        "                  WHERE d.valuation_id = v.id), '{}'::text[]) "
+        "         AS funded_intent_ids, " if linked else
+        "       '{}'::text[] AS derek_decision_ids, "
+        "       '{}'::text[] AS funded_intent_ids, ")
     rows = [dict(r) for r in await conn.fetch(
-        "SELECT id, coalesce(event_key, us_market_slug, condition_id) "
+        "SELECT id, " + links_sql +
+        "       coalesce(event_key, us_market_slug, condition_id) "
         "         AS fixture, decision, admissible, refusals, probability, "
         "       executable_price AS price, cost_per_contract AS cost, "
         "       estimated_edge_per_contract AS edge, proposed_size, "
@@ -557,7 +582,7 @@ async def derek_section(conn, *, start: float, end: float) -> dict:
         "       extract(epoch FROM observed_at)::float8 AS observed_at, "
         "       extract(epoch FROM decided_at)::float8 AS decided_at, "
         "       extract(epoch FROM outcome_at)::float8 AS outcome_at "
-        "  FROM external_valuations WHERE record_purpose='ENTRY_DECISION' "
+        "  FROM external_valuations v WHERE record_purpose='ENTRY_DECISION' "
         "   AND decided_at >= $1 AND decided_at < $2 "
         " ORDER BY decided_at, id LIMIT $3", _ts(start), _ts(end),
         MAX_DECISIONS_PER_DAY)]
@@ -604,7 +629,21 @@ async def derek_section(conn, *, start: float, end: float) -> dict:
                            "refusals": list(r["refusals"] or [])},
                 "order_placed": placed,
                 "outcome_state": ("SETTLED" if r["outcome_known"]
-                                  else S_PENDING)}
+                                  else S_PENDING),
+                # THE EXACT RECORDS: Derek's decision(s) on this valuation
+                # and the funded entry intent(s) that name them.
+                "derek_decision_ids": list(r["derek_decision_ids"] or []),
+                "funded_intent_ids": list(r["funded_intent_ids"] or []),
+                "funded_order_sent": bool(r["funded_intent_ids"])}
+        if item["funded_order_sent"]:
+            # The category below is unchanged: it values this decision-time
+            # row, which is not the executed result. What the funded order
+            # actually made is the book's (positions / book: ACTUAL).
+            item["funded_order_note"] = (
+                "a funded order executed this decision; its actual P&L is in "
+                "the positions and book sections under the intent id(s). "
+                "order_placed is the shadow valuation row's own flag, which "
+                "its table pins FALSE")
         if r["decision"] == "BUY":
             item["quality"] = quality(good, val)
             selected.append(item)
@@ -639,6 +678,7 @@ async def derek_section(conn, *, start: float, end: float) -> dict:
         "refusals": dict(sorted(ref_names.items(),
                                 key=lambda kv: (-kv[1], kv[0]))),
         "orders_placed": sum(1 for r in rows if r["order_submitted"]),
+        "funded_orders_sent": sum(1 for r in rows if r["funded_intent_ids"]),
         "sizing": {"proposed_size_median": _r6(IMP.percentile(
             [_num(r["proposed_size"]) for r in buys], 0.5)),
                    "proposed_size_max": _r6(max(

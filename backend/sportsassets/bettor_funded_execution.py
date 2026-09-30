@@ -1208,6 +1208,11 @@ async def submit_for_decision(conn, rec: dict, *, account_id: str,
                           # Carried from the admission record when the
                           # scheduled pass built one; None for an entry.
                           "decision_id": (rec or {}).get("decision_id"),
+                          # The scheduled entry's Derek decision
+                          # (derek_entry_decisions.decision_id), carried
+                          # from the entry gate; None on any other path.
+                          "derek_decision_id": (rec or {}).get(
+                              "derek_decision_id"),
                           "plan_digest": (rec or {}).get("plan_digest"),
                           "xavier_decision_id": (rec or {}).get(
                               "xavier_decision_id"),

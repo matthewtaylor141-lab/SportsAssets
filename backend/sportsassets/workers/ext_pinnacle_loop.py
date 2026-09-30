@@ -4563,6 +4563,15 @@ async def _funded_attempt(conn, rec, *, now):
             return {"ok": False,
                     "refusal": _gate.get("refusal") or R_DEREK_GATE_UNAVAILABLE,
                     "derek_gate": _gate.get("gate"), "nothing_was_sent": True}
+        # THE ORDER NAMES THE DEREK DECISION THAT AUTHORISED IT. The gate
+        # records its decision (derek_entry_decisions) before answering; its
+        # id was dropped here, so the intent -- and every fill, handoff and
+        # Xavier review keyed on it -- could be tied back to Derek only by
+        # matching slug, side and time. Carried on a copy of the record; the
+        # connector writes it onto the intent's decision_ref.
+        _derek_id = (_gate.get("gate") or {}).get("decision_id")
+        if _derek_id:
+            rec = dict(rec, derek_decision_id=str(_derek_id))
         # THE ACCOUNT, READ AT THE VENUE, so the execution gate can measure
         # it. A failed read passes None and the gate refuses by name, as
         # before.
