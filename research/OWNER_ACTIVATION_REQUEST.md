@@ -1,6 +1,6 @@
 # Owner activation request — the inputs only the owner can give
 
-**Dated:** 2026-09-29.
+**Dated:** 2026-09-29; corrected 2026-09-30. The concise decision form is `research/OWNER_DECISION_FORM.md`.
 
 **What this request does not do:** answering it does not activate capital. Funded submission stays disabled in code (`FUNDED_SUBMISSION_ENABLED`, `REAL_ORDER_SUBMISSION_ENABLED`, `FUNDED_EXIT_SUBMISSION_ENABLED` are all `False`) until the final approval in §7. That approval is **not** requested here.
 
@@ -52,10 +52,10 @@ No values are suggested.
 | field | what it actually bounds (from `bettor_entry_execution.RAIL_TYPES`) | frozen maximum | your value |
 |---|---|---|---|
 | `capital_usd` | Cost basis of **every** open position in the lane, at the decision instant | 3,000 | |
-| `per_order_usd` | Cost basis of open positions on **one market** (one condition id). Despite its name, this is a per-market cap, not a per-order cap | 1,000 | |
+| `per_order_usd` (accurate name `per_market_usd`, accepted from this release) | Cost basis of open positions on **one market** (one condition id). A per-market cap, not a per-order cap | 1,000 | |
 | `event_exposure_usd` | Cost basis of open positions on **one event** (one venue event slug). Two markets on the same game count as one bet on that game | 1,000 | |
-| `max_exposure_usd` | The whole book's total cost, on the worst-case assumption that every open position moves together | 1,000 | |
-| `daily_loss_stop_usd` | **Not daily.** A cumulative worst-case loss ceiling with no reset. It sums three terms: realised losses on settled positions (gains do not offset them), the mark-to-market loss on marked open positions, and the full cost of unmarked open positions (the proposed position included). Once reached, new entries are refused. Only starting a new book clears realised losses. | 1,000 | |
+| `max_exposure_usd` | **The same measured number as `capital_usd`**: every open position is counted in full. The lower of the two binds | 1,000 | |
+| `daily_loss_stop_usd` (accurate name `cumulative_loss_stop_usd`) | **Not daily.** A cumulative worst-case loss ceiling with no reset. It sums three terms: realised losses on settled positions (gains do not offset them), the mark-to-market loss on marked open positions, and the full cost of unmarked open positions (the proposed position included). Once reached, new entries are refused. Only starting a new book clears realised losses. | 1,000 | |
 
 **How the values become enforced:**
 1. An operator records them. This changes nothing that is enforced.
@@ -99,8 +99,8 @@ You will sign this yourself through `POST /api/admin/funded-owner-authorization`
 **Steps:**
 1. Generate the key **off-platform**, for example in a password manager: at least 32 random characters.
 2. In the Render dashboard, open service `sportsassets-api` → **Environment**.
-   - The service auto-deploys its tracked branch. `render.yaml` sets no `autoDeploy` for it, so it follows Render's default.
-   - If the dashboard offers **"Save only"** (save without deploying), use it.
+   - Live configuration, read on 2026-09-30 at 00:09Z through the read-only `render-ops api-branch-get`: the API's **autoDeploy is off** (branch `claude/session-njaewf`). The workers' autoDeploy is on. This corrects an earlier statement in this request.
+   - A dashboard environment save may still offer to redeploy the API: choose **"Save only"**.
 3. Add `FUNDED_RESOLUTION_KEY` = your generated value and `FUNDED_RESOLUTION_OPERATOR` = your name as you will sign.
 4. Reply **"resolution credentials in place"**. Nothing else is needed.
    - The settings are cached at process start, so I then restart the API by deploying the reviewed commit through the established route: `render-ops` → `deploy-api-commit`, from ref `claude/session-njaewf`, `confirm=DO`, with a 40-hex SHA.
