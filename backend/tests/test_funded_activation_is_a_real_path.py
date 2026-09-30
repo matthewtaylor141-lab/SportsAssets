@@ -1176,8 +1176,39 @@ async def test_the_funded_branch_validates_the_owners_record():
                                by="test")
         assert d["refusal"] == FA.R_OWNER_AUTH_LIMITS, d["refusal"]
 
-        # 3 · MATCHING: accepted, and the EXECUTOR is what refuses next
+        # 2b · A BARE RECORD THAT MATCHES ALL THREE FIELDS IS NO LONGER
+        # ENOUGH (D5b): it carries no authorization id, no verified factors,
+        # no expiry and no audit row, so it did not come through the
+        # authenticated writer. This fixture used to be step 3's accepted
+        # record; it is now the proof that a hand-written row is refused.
         await _owner()
+        u = await FA.authorize(conn, account_id=CLEAN, venue="PMUS",
+                               by="test")
+        assert u["refusal"] == FA.R_OWNER_AUTH_UNAUTHENTICATED, u["refusal"]
+
+        # 3 · MATCHING, WRITTEN THROUGH THE WRITER: accepted, and the
+        # EXECUTOR is what refuses next. (Changed minimally in D5b: the
+        # matching record is now signed through
+        # `record_owner_authorization`, with synthetic test factors, because
+        # a bare fixture row is refused above. The binding it requires is
+        # recorded first.)
+        from sportsassets import bettor_owner_authorization as OA
+
+        await conn.execute(
+            "INSERT INTO ingestion_state (key, value) VALUES ($1, $2::jsonb) "
+            "ON CONFLICT (key) DO UPDATE SET value = $2::jsonb",
+            FA.ACCOUNT_KEY, json.dumps({"account_id": CLEAN,
+                                        "venue": "PMUS", "bound": True}))
+        signed = await OA.record_owner_authorization(
+            conn, account_id=CLEAN, venue="PMUS",
+            effective_digest=eff["effective_digest"],
+            statement=("SYNTHETIC TEST: %s at PMUS, a test fixture, not a "
+                       "real authorisation" % CLEAN),
+            confirm=CLEAN, operator="test-owner",
+            auth={"admin_token_verified": True,
+                  "resolution_key_verified": True,
+                  "operator": "test-owner", "route": "test"})
+        assert signed["ok"] is True, signed
         e = await FA.authorize(conn, account_id=CLEAN, venue="PMUS",
                                by="test")
         assert e["ok"] is True, e

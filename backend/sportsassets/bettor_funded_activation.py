@@ -98,6 +98,23 @@ R_OWNER_AUTH = "FUNDED_ACTIVATION_REQUIRES_THE_OWNERS_WRITTEN_AUTHORIZATION"
 R_OWNER_AUTH_ACCOUNT = "THE_OWNERS_AUTHORIZATION_NAMES_A_DIFFERENT_ACCOUNT"
 R_OWNER_AUTH_VENUE = "THE_OWNERS_AUTHORIZATION_NAMES_A_DIFFERENT_VENUE"
 R_OWNER_AUTH_LIMITS = "THE_OWNERS_AUTHORIZATION_COVERS_DIFFERENT_LIMITS"
+#: THE RECORD NAMES THIS SCOPE BUT IS NOT A CURRENT SIGNATURE (D5b). More
+#: names, checked after the three above, because each needs a different act:
+#: a revoked record was taken away by the owner; an invalidated one was voided
+#: because the binding or the approved limits moved after it was signed; an
+#: expired one ran out its bounded lifetime; and an unauthenticated one did not
+#: come through `bettor_owner_authorization.record_owner_authorization` (no
+#: authorization id, no statement of verified factors, a scope_sha that does
+#: not recompute, no readable expiry, or no ACCEPTED audit row for it).
+R_OWNER_AUTH_REVOKED = "THE_OWNERS_AUTHORIZATION_WAS_REVOKED"
+R_OWNER_AUTH_INVALIDATED = \
+    "THE_OWNERS_AUTHORIZATION_WAS_INVALIDATED_BY_A_SCOPE_CHANGE"
+R_OWNER_AUTH_EXPIRED = "THE_OWNERS_AUTHORIZATION_HAS_EXPIRED"
+R_OWNER_AUTH_UNAUTHENTICATED = \
+    "THE_OWNERS_AUTHORIZATION_DID_NOT_COME_THROUGH_THE_AUTHENTICATED_WRITER"
+#: The record was replaced, revoked or invalidated between being validated and
+#: the system authorization being issued on it. Nothing is issued.
+R_OWNER_AUTH_CHANGED = "THE_OWNERS_AUTHORIZATION_CHANGED_WHILE_IT_WAS_BEING_READ"
 
 #: The owner's limits, and the FROZEN RAIL each one tightens. A rail absent from
 #: this map is untouched by any approval.
@@ -1425,17 +1442,60 @@ async def authorize(conn, *, account_id: str, venue: str, by: str,
                          why=("the owner authorised the limit set digesting "
                               "to %s; the effective set now digests to %s"
                               % (od[:12], eff["effective_digest"][:12])))
+        # A RECORD THAT NAMES THIS SCOPE IS NOT YET A CURRENT SIGNATURE.
+        #
+        # THE GAP THIS CLOSES (D5b). The three checks above were the whole
+        # test, so a record that had been revoked, that a later change of
+        # binding or limits had voided, that was years old, or that someone
+        # had typed into ingestion_state by hand, was accepted as the owner's
+        # authorization as long as its three fields matched. Each of those
+        # now refuses by its own name, AFTER the existing three so their
+        # refusals and order are unchanged -- and the record is accepted only
+        # if the append-only audit holds the ACCEPTED row that wrote it.
+        from . import bettor_owner_authorization as OA
+
+        out["owner_authorization"].update(
+            {k: owner.get(k) for k in ("authorization_id", "scope_sha",
+                                        "expires_at", "revoked",
+                                        "invalidated")})
+        chk = OA.consumer_check(owner, now=time.time())
+        if not chk.get("ok"):
+            return _stop(chk["refusal"], why=chk.get("why"),
+                         **({"malformed_fields": chk["malformed_fields"]}
+                            if chk.get("malformed_fields") else {}))
+        proof = await OA.accepted_row(conn, owner)
+        if not proof.get("ok"):
+            return _stop(R_OWNER_AUTH_UNAUTHENTICATED, why=proof.get("why"),
+                         audit_unreadable=proof.get("unreadable"))
+        out["owner_authorization_audit_id"] = proof["audit_id"]
         out["owner_authorization_validated"] = True
 
     # ── THE AUTHORISATION IS RECORDED, THEN IMMEDIATELY CONSUMED ────
     test_only = klass == VENUE_TEST
     granted_at = time.time()
+    expires_at = granted_at + EX.AUTHORIZATION_TTL_S
+    owner_link = {}
+    if out.get("owner_authorization_validated"):
+        # ISSUED ON A NAMED OWNER RECORD, AND NEVER OUTLIVING IT. The id is
+        # what `revoke_owner_authorization` and the scope invalidation look
+        # for when they revoke this record with the owner's; the expiry is
+        # the earlier of the system's 24 h and the owner's own bound, so a
+        # short owner lifetime is not stretched to 24 h here.
+        owner_link = {"owner_authorization_id": owner.get("authorization_id"),
+                      "owner_scope_sha": owner.get("scope_sha"),
+                      "owner_expires_at": float(owner["expires_at"])}
+        # The same field name the scheduled renewal writes, so a reader can
+        # tell a record truncated to the owner's expiry from a full-day one.
+        owner_link["capped_by_owner_expiry"] = \
+            owner_link["owner_expires_at"] < expires_at
+        expires_at = min(expires_at, owner_link["owner_expires_at"])
     record = {"account_id": sel["account_id"], "venue": venue,
               "venue_class": klass, "by": by, "at": granted_at,
               # AN AUTHORIZATION WITH NO END is a standing permission
               # nobody remembers granting. The execution gate enforces this.
-              "expires_at": granted_at + EX.AUTHORIZATION_TTL_S,
+              "expires_at": expires_at,
               "ttl_s": EX.AUTHORIZATION_TTL_S,
+              **owner_link,
               "revoked": False,
               "effective_limits": eff["effective"],
               "effective_digest": eff["effective_digest"],
@@ -1453,10 +1513,29 @@ async def authorize(conn, *, account_id: str, venue: str, by: str,
               "does_not_authorise": [
                   "real order submission (off in code)",
                   "raising any frozen rail"]}
-    await conn.execute(
-        "INSERT INTO ingestion_state (key, value) VALUES ($1, $2::jsonb) "
-        "ON CONFLICT (key) DO UPDATE SET value = $2::jsonb",
-        AUTHORIZATION_KEY, json.dumps(record))
+    async with conn.transaction():
+        if owner_link:
+            # UNDER THE OWNER RECORD'S LOCK, THE RECORD IS READ AGAIN. A
+            # revocation or invalidation that landed after the checks above
+            # would otherwise be overwritten by a fresh system authorization
+            # issued on the record it had just withdrawn.
+            from . import bettor_owner_authorization as OA
+
+            await conn.execute(OA.LOCK_SQL, OWNER_AUTH_KEY)
+            again = _obj(await _state(conn, OWNER_AUTH_KEY)) or {}
+            if again.get("authorization_id") != \
+                    owner_link["owner_authorization_id"] \
+                    or again.get("scope_sha") != owner_link["owner_scope_sha"]:
+                return _stop(R_OWNER_AUTH_CHANGED,
+                             why=("the owner record was replaced while this "
+                                  "authorization was being issued"))
+            chk = OA.consumer_check(again, now=time.time())
+            if not chk.get("ok"):
+                return _stop(chk["refusal"], why=chk.get("why"))
+        await conn.execute(
+            "INSERT INTO ingestion_state (key, value) VALUES ($1, $2::jsonb) "
+            "ON CONFLICT (key) DO UPDATE SET value = $2::jsonb",
+            AUTHORIZATION_KEY, json.dumps(record))
 
     # RECORDING IT IS NOT THE POINT. The execution side is asked, with this
     # record, whether a submission may go out -- so the answer in this
@@ -1504,7 +1583,17 @@ def describe() -> dict:
         "refusals": [R_NO_ACCOUNT, R_ACCOUNT_UNKNOWN, R_ACCOUNT_NOT_ACTIVE,
                      R_ACCOUNT_PAUSED, R_ACCOUNTING_UNCERTAIN,
                      R_VENUE_UNKNOWN, R_LIMITS_MISSING,
-                     R_LIMITS_NOT_APPROVED, R_READINESS_UNMET, R_OWNER_AUTH],
+                     R_LIMITS_NOT_APPROVED, R_READINESS_UNMET, R_OWNER_AUTH,
+                     R_OWNER_AUTH_ACCOUNT, R_OWNER_AUTH_VENUE,
+                     R_OWNER_AUTH_LIMITS, R_OWNER_AUTH_REVOKED,
+                     R_OWNER_AUTH_INVALIDATED, R_OWNER_AUTH_UNAUTHENTICATED,
+                     R_OWNER_AUTH_EXPIRED, R_OWNER_AUTH_CHANGED],
+        "owner_authorization": (
+            "written only by bettor_owner_authorization."
+            "record_owner_authorization behind the admin token AND the "
+            "owner's resolution key; bound to account, venue and the "
+            "approved effective-limit digest; bounded in time; revocable; "
+            "invalidated by any change of binding or approved limits"),
         "account_identity": ("the CANONICAL account_id in "
                              "bettor_desk_accounts. The pause and the "
                              "accounting state are read off that row, not "

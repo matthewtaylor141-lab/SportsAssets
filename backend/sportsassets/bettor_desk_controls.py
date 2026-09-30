@@ -125,6 +125,15 @@ from . import bettor_funded_activation as _FA_LIMITS        # noqa: E402
 
 REQUIRED_LIMITS = tuple(_FA_LIMITS.REQUIRED_LIMITS)
 
+#: THE OWNER'S AUTHORIZATION IS BOUND TO THE BINDING AND THE APPROVED LIMITS,
+#: so both writers here call its invalidation in the same transaction.
+from . import bettor_owner_authorization as OA               # noqa: E402
+
+
+async def _scope_change(conn, reason: str, by: str, write) -> dict:
+    return await OA.apply_scope_change(conn, reason=reason, write=write,
+                                       by=by)
+
 
 def _truthy(raw) -> bool:
     """A jsonb control value as a bool, explicitly. `bool("false")` is
@@ -415,7 +424,20 @@ async def set_limits(conn, *, by: str, proposed: dict) -> dict:
                                    "from there at every decision. This is "
                                    "the owner's stated intent, held for "
                                    "the activation checklist")}
-    await _write_state(conn, LIMITS_KEY, record)
+    # A NEW PROPOSAL RESETS APPROVAL, SO IT VOIDS THE OWNER'S SIGNATURE ON THE
+    # OLD ONE. The write and the invalidation are one transaction: a failure
+    # leaves neither applied, and is refused by name rather than reported as
+    # a proposal recorded under a signature that still looks current.
+    moved = await _scope_change(conn, OA.SCOPE_LIMITS_PROPOSED, by,
+                                lambda: _write_state(conn, LIMITS_KEY,
+                                                     record))
+    if not moved["ok"]:
+        return {"action": "limits", "ok": False, "requested": clean,
+                "applied": None,
+                "failed": {"refusal": moved["refusal"],
+                           "error": moved.get("error")},
+                "refusal": moved["refusal"],
+                "why": "nothing was stored; the attempt is audited"}
     stored = await _read_state(conn, LIMITS_KEY)
     return {"action": "limits", "ok": stored is not None,
             "requested": clean,
@@ -426,6 +448,7 @@ async def set_limits(conn, *, by: str, proposed: dict) -> dict:
             "stored": (json.loads(stored) if isinstance(stored, str)
                        else stored),
             "key": LIMITS_KEY,
+            "owner_authorization": moved.get("owner_authorization"),
             "changes_an_enforced_limit": False,
             "activation_still_blocked": True}
 
@@ -479,7 +502,18 @@ async def set_account(conn, *, by: str, account: dict) -> dict:
               "authorises_nothing": ("binding records the intent. "
                                      "Authorisation is a separate action "
                                      "and funded submission stays off")}
-    await _write_state(conn, ACCOUNT_KEY, record)
+    # A DIFFERENT ACCOUNT OR VENUE VOIDS THE OWNER'S SIGNATURE ON THE OLD
+    # BINDING; re-binding the same account and venue leaves it standing.
+    moved = await _scope_change(conn, OA.SCOPE_ACCOUNT_BINDING, by,
+                                lambda: _write_state(conn, ACCOUNT_KEY,
+                                                     record))
+    if not moved["ok"]:
+        return {"action": "account", "ok": False, "requested": req,
+                "applied": None,
+                "failed": {"refusal": moved["refusal"],
+                           "error": moved.get("error")},
+                "refusal": moved["refusal"],
+                "why": "nothing was stored; the attempt is audited"}
     stored = await _read_state(conn, ACCOUNT_KEY)
     return {"action": "account", "ok": stored is not None, "requested": req,
             "applied": ({"bound_account_id": ident, "venue_class":
@@ -490,6 +524,7 @@ async def set_account(conn, *, by: str, account: dict) -> dict:
             "stored": (json.loads(stored) if isinstance(stored, str)
                        else stored),
             "selection": sel,
+            "owner_authorization": moved.get("owner_authorization"),
             "resolved_from": "bettor_desk_accounts, by account_id",
             "activates_nothing": True, "activation_still_blocked": True}
 
