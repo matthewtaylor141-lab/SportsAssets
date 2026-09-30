@@ -14,6 +14,7 @@ BEGIN
                         'rolled back over them';
     END IF;
 END $$;
+DROP TABLE IF EXISTS audrey_requests;
 DROP TABLE IF EXISTS management_directive_events;
 DROP TABLE IF EXISTS management_directives;
 DROP TABLE IF EXISTS audrey_messages;

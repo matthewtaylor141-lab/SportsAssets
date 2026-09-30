@@ -49,6 +49,13 @@ CREATE TABLE IF NOT EXISTS audrey_messages (
     requester_role   text,
     body             text        NOT NULL,
     intent           text,
+    -- what became of the answer: SUCCESS, DETERMINISTIC, PROVIDER_REFUSAL,
+    -- INCOMPLETE_OUTPUT, MALFORMED_TOOL_ARGUMENTS, TEXT_WITHOUT_TOOL_CALL,
+    -- PROVIDER_UNAVAILABLE, REFUSED, REQUIRES_OPERATOR, DIRECTIVE_RECORDED,
+    -- DEADLINE_EXCEEDED
+    outcome          text,
+    -- the client's idempotency key of the request this turn answered
+    request_id       text,
     -- [{"kind": <table/record kind>, "id": <primary key>, "href": ...}]
     citations        jsonb       NOT NULL DEFAULT '[]'::jsonb,
     -- {"mode": "LLM"|"DETERMINISTIC", "model": ..., "failure": ...,
@@ -80,6 +87,9 @@ CREATE TRIGGER audrey_message_is_a_record_trg
 
 CREATE TABLE IF NOT EXISTS management_directives (
     directive_id          text        PRIMARY KEY,
+    -- the client's idempotency key: a retried or reconnected request reaches
+    -- this row again instead of a second directive
+    request_id            text        UNIQUE,
     requested_by_role     text        NOT NULL,
     requested_by_label    text,
     conversation_id       text,
@@ -177,5 +187,26 @@ DROP TRIGGER IF EXISTS management_directive_event_is_a_record_trg
 CREATE TRIGGER management_directive_event_is_a_record_trg
     BEFORE UPDATE OR DELETE ON management_directive_events
     FOR EACH ROW EXECUTE FUNCTION management_directive_event_is_a_record();
+
+
+-- IDEMPOTENCY. Every chat POST and every directive create / confirm carries a
+-- client-supplied request_id. The first request claims the key (PENDING);
+-- a replay of a DONE key returns the stored response instead of acting
+-- again; a concurrent duplicate sees PENDING; the same key with a different
+-- request is refused. A FAILED (or long-stale PENDING) key may be taken over.
+CREATE TABLE IF NOT EXISTS audrey_requests (
+    request_id      text        PRIMARY KEY,
+    kind            text        NOT NULL,
+    requester_role  text        NOT NULL,
+    request_sha     text        NOT NULL,
+    status          text        NOT NULL
+        CHECK (status IN ('PENDING', 'DONE', 'FAILED')),
+    response        jsonb,
+    created_at      timestamptz NOT NULL,
+    updated_at      timestamptz NOT NULL,
+    completed_at    timestamptz,
+    CONSTRAINT audrey_requests_done_has_response_ck CHECK (
+        status <> 'DONE' OR response IS NOT NULL)
+);
 
 COMMIT;
