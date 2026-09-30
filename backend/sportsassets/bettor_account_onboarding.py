@@ -596,13 +596,20 @@ def _completeness(rec) -> dict:
     partial = [c.get("check") for c in checks
                if c.get("complete") is False or c.get("truncated") is True
                or c.get("pages_exhausted") is False]
+    # A READ THAT RETURNED UNREADABLE OR NOT_SUPPORTED DID NOT ANSWER. The
+    # flags above are set by no read `reconcile` makes, so without this a
+    # failed read was reported as a complete one (account map §1).
+    unanswered = [c.get("check") for c in checks
+                  if c.get("verdict") in (UNREADABLE, NOT_SUPPORTED)]
+    ok = not missing and not partial and not unanswered
     return {"checks_expected": list(CHECKS),
             "checks_answered": sorted(by),
             "checks_missing": missing,
             "reads_not_fully_paged": sorted(set(partial)),
-            "complete": not missing and not partial,
+            "reads_that_did_not_answer": sorted(set(unanswered)),
+            "complete": ok,
             "why": ("every one of the four reads answered and each exhausted "
-                    "its pages" if not missing and not partial else
+                    "its pages" if ok else
                     "an unanswered or partially paged read is not evidence")}
 
 
@@ -1524,7 +1531,9 @@ async def discrepancy_report(conn, *, account_id: str, venue: str,
     # `read_venue_account` gives: a fill between the two reads is then seen
     # twice (a finding), never in neither (a silent pass). ──────────────
     if mod is not None:
-        bal = read_balances(mod)
+        # A BLOCKING VENUE CALL, run off the event loop like the three reads
+        # below: the route serving this report shares its loop with the API.
+        bal = await asyncio.to_thread(read_balances, mod)
     else:
         bal = {"check": "balances", "verdict": UNREADABLE,
                "why": "no adapter, so no balance read"}

@@ -348,9 +348,12 @@ async def account_selection(conn, account_id: str) -> dict:
                                 for k, v in c.items()} for c in contested],
                     why=("%d settled leg(s) were booked on a reading the "
                          "venue no longer gives. The booked figures are not "
-                         "rewritten by a re-read; until they are reconciled "
-                         "this account takes no new exposure. Exits are not "
-                         "gated on this" % len(contested)))
+                         "rewritten by a re-read; until a correction is "
+                         "booked by an authenticated, audited decision (POST "
+                         "/api/admin/funded-settlement-corrections/"
+                         "{intent_id}) or the venue reverts, this account "
+                         "takes no new exposure. Exits are not gated on this"
+                         % len(contested)))
     return dict(out, ok=True, account_id=ident,
                 accounting_status=st)
 

@@ -547,6 +547,30 @@ def test_the_report_path_calls_nothing_that_places_modifies_or_cancels():
     assert "client.orders.list(" in src
 
 
+def test_the_old_record_counts_a_read_that_did_not_answer_as_incomplete():
+    """`_completeness` looked only for paging flags that no read `reconcile`
+    makes ever sets, so a read that came back UNREADABLE or NOT_SUPPORTED was
+    reported as part of a COMPLETE record. It is now named and makes the
+    record incomplete; every previously incomplete case stays incomplete."""
+    full = ON._completeness({"checks": [
+        {"check": c, "verdict": ON.RECONCILED} for c in ON.CHECKS]})
+    assert full["complete"] is True
+    assert full["reads_that_did_not_answer"] == []
+    for bad in (ON.UNREADABLE, ON.NOT_SUPPORTED):
+        got = ON._completeness({"checks": [
+            {"check": c, "verdict": bad if c == "executions"
+             else ON.RECONCILED} for c in ON.CHECKS]})
+        assert got["complete"] is False, bad
+        assert got["reads_that_did_not_answer"] == ["executions"]
+        assert "not evidence" in got["why"]
+    # A DISCREPANCY is an answer: the record is complete and does not pass
+    # (eligibility, not completeness, refuses it).
+    disc = ON._completeness({"checks": [
+        {"check": c, "verdict": ON.DISCREPANCY if c == "positions"
+         else ON.RECONCILED} for c in ON.CHECKS]})
+    assert disc["complete"] is True
+
+
 @pytest.mark.parametrize("ident,kind,scheme", [
     ("acct_fc2d773a2afa4851-O-000001", "O", ON.ID_LEGACY_COUNTER),
     ("acct_fc2d773a2afa4851-D-000583", "D", ON.ID_LEGACY_COUNTER),
