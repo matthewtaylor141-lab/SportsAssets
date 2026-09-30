@@ -414,6 +414,13 @@ READERS = {
     "bettor_pilot_prerequisites.py": ("PROSE_ONLY", 1),
     "bettor_legacy_identity_repair.py": ("PROSE_ONLY_NEVER_READS", 4),
     "bettor_valuation_purpose.py": ("PROSE_ONLY", 1),
+    # (1002) Derek: candidates and model labels filter ENTRY_DECISION; the
+    # census counts both purposes and files CALIBRATION_ONLY as blocked by
+    # name; the workspace reads rows by the id a Derek decision links to
+    "agents/derek.py": ("FILTERS_ENTRY_DECISION", 3),
+    "agents/derek_policy.py": ("FILTERS_ENTRY_DECISION", 5),
+    "agents/coverage.py": ("REPORTING_CENSUS_CALIBRATION_ONLY_BLOCKED", 3),
+    "api/agents_derek.py": ("BY_ID_FROM_A_FILTERED_READER", 4),
 }
 
 
