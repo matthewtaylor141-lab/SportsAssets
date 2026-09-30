@@ -881,6 +881,10 @@ SETTLEMENT_SQL = """
            count(*) AS n
       FROM external_valuations
      WHERE experiment_id = $1
+       -- CANDIDATES ARE ENTRY DECISIONS (migration 144). A CALIBRATION_ONLY
+       -- row was valued on a refused venue read and is not a candidate: it
+       -- must neither satisfy nor stand in for any readiness check here.
+       AND record_purpose = 'ENTRY_DECISION'
        AND decided_at >= now() - ($2 || ' hours')::interval
      GROUP BY 1 ORDER BY 2 DESC
 """
@@ -948,6 +952,7 @@ SCOPE_SQL = """
     SELECT coalesce(period, 'NOT_RECORDED') AS period, count(*) AS n
       FROM external_valuations
      WHERE experiment_id = $1
+       AND record_purpose = 'ENTRY_DECISION'
        AND decided_at >= now() - ($2 || ' hours')::interval
      GROUP BY 1 ORDER BY 2 DESC
 """
@@ -1009,6 +1014,7 @@ ADMITTED_SQL = """
            count(*)                                              AS evaluated
       FROM external_valuations
      WHERE experiment_id = $1
+       AND record_purpose = 'ENTRY_DECISION'
        AND decided_at >= now() - ($2 || ' hours')::interval
 """ % (WAIVER_CONSUMED_SQL,)
 
@@ -1034,6 +1040,7 @@ ELIGIBLE_MARKET_SQL = """
            (risk_verdict->'freshness_evidence'->>'venue_age_s') AS venue_age_s
       FROM external_valuations
      WHERE experiment_id = $1
+       AND record_purpose = 'ENTRY_DECISION'
        AND decided_at >= now() - ($2 || ' hours')::interval
        AND admissible IS TRUE
        AND decision = 'BUY'

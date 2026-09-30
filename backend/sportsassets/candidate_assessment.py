@@ -341,10 +341,16 @@ def assess(rows, *, source: str, window_description: str,
 
 # ── 5 · THE LIVE READ ────────────────────────────────────────────────
 
+#: ENTRY DECISIONS ONLY (migration 144). The question is what the proposed
+#: exception would unlock among the lane's CANDIDATES; a CALIBRATION_ONLY row
+#: is a valuation recorded on a refused venue read, carries no executable
+#: price or plan, and can be unlocked by nothing -- counting it would inflate
+#: the denominator with records that were never candidates.
 CENSUS_SQL = """
     SELECT refusals, admissible
       FROM external_valuations
      WHERE experiment_id = $1
+       AND record_purpose = 'ENTRY_DECISION'
        AND decided_at >= now() - ($2::text || ' seconds')::interval
 """
 

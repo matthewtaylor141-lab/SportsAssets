@@ -62,6 +62,7 @@ from . import bettor_entry_execution as EX
 from . import bettor_funded_activation as FA
 from . import bettor_funded_book as FB
 from . import bettor_funded_reservations as RSV
+from . import bettor_valuation_purpose as VP
 
 VERSION = "BETTOR_FUNDED_EXECUTION_CONNECTION_V1"
 
@@ -205,6 +206,14 @@ def plan_from_decision(rec: dict | None) -> dict:
     """
     out = {"version": VERSION, "ok": False}
     rec = dict(rec or {})
+    # A CALIBRATION-ONLY RECORD NEVER REACHES A VENUE, FIRST AND BY NAME,
+    # whatever its admissible flag says: it was valued against a book whose
+    # currency was not established and exists only to score the odds source.
+    refused = VP.refuse_unless_entry(rec)
+    if refused is not None:
+        return dict(out, refusal=refused["refusal"],
+                    record_purpose=refused["record_purpose"],
+                    why=refused["why"])
     waived = []
     for w in (((rec.get("execution_plan") or {}).get("research_waiver")) or {},
               rec.get("research_waiver") or {},
@@ -858,6 +867,17 @@ async def submit_for_decision(conn, rec: dict, *, account_id: str,
            "adapter": ADAPTER_MODULE, "submitted": False,
            "order": None, "intent_id": None,
            "what_remains_disabled": disablements()}
+    # ── A CALIBRATION-ONLY RECORD, REFUSED BEFORE ANYTHING IS READ ──
+    #
+    # Before the schema check, the account, the limits, the rails and any
+    # reservation: such a record may never claim collateral or exposure, so
+    # nothing is consulted on its behalf. `plan_from_decision` refuses it too.
+    refused = VP.refuse_unless_entry(rec)
+    if refused is not None:
+        return dict(out, ok=False, refusal=refused["refusal"],
+                    record_purpose=refused["record_purpose"],
+                    why=refused["why"], nothing_was_written=True,
+                    exposure="NONE")
     # ── THE SCHEMA THIS RESULT WOULD BE RECORDED IN ─────────────────
     #
     # FIRST, before the venue class, the plan or any rail. `start.sh` serves

@@ -66,6 +66,8 @@ SELECT
     WHERE d.position_id IN (SELECT position_id FROM probe))     AS decisions,
   (SELECT count(*) FROM rn1x_outcomes x
     WHERE x.position_id IN (SELECT position_id FROM probe))     AS outcomes,
+  -- A COUNT ONLY, any record purpose: this audit asks whether a probe's
+  -- identifiers reached the table at all. Nothing is selected or acted on.
   (SELECT count(*) FROM external_valuations e
     WHERE e.condition_id IN (SELECT condition_id FROM probe))   AS valuations,
   (SELECT count(*) FROM rn1x_positions)                         AS all_positions

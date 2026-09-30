@@ -2276,6 +2276,10 @@ async def admin_venue_settlement_probe(response: Response,
         # THE FIXTURES THE JOIN ITSELF COULD NOT READ, taken from the
         # ledger rather than chosen by hand, so the probe is pointed at a
         # row whose unreadability is already on the record.
+        #
+        # ANY RECORD PURPOSE, deliberately (migration 144): a calibration-only
+        # row is a calibration fixture too, and this only picks slugs for a
+        # GET-only settlement probe. Nothing is priced or admitted from it.
         try:
             rows = await pool.fetch(
                 "SELECT us_market_slug, condition_id, settlement_read, "

@@ -157,6 +157,9 @@ _CHALLENGER_VALUATION = """
       FROM external_valuations
      WHERE condition_id = $1
        AND eligibility = 'ELIGIBLE'
+       -- ENTRY DECISIONS ONLY (migration 144): a CALIBRATION_ONLY row was
+       -- valued on a refused venue read and never prices a decision.
+       AND record_purpose = 'ENTRY_DECISION'
      ORDER BY observed_at DESC NULLS LAST, id DESC
      LIMIT 1
 """
@@ -547,6 +550,7 @@ async def challenger_inputs_for(conn, *, condition_id, outcome_index,
         held = await conn.fetchrow(
             "SELECT id, eligibility, ineligible_reason FROM "
             "external_valuations WHERE condition_id = $1 "
+            "AND record_purpose = 'ENTRY_DECISION' "
             "ORDER BY id DESC LIMIT 1", condition_id)
         out["reason"] = (hv.R_INELIGIBLE if held is not None
                          else hv.R_NO_SOURCE)
@@ -1879,6 +1883,11 @@ COVERED_CANDIDATES_SQL = """
       FROM markets m
  LEFT JOIN market_starts s ON s.condition_id = m.condition_id
  LEFT JOIN LATERAL (
+            -- ANY PURPOSE, DELIBERATELY (migration 144). Only the SLUG and
+            -- the observation instant are selected: this is evidence that a
+            -- venue contract EXISTS, used to ORDER the acceptance pool, and
+            -- nothing is priced, sized or admitted from it. A calibration-only
+            -- row names a venue contract exactly as well as an entry row does.
             SELECT e.us_market_slug, e.observed_at
               FROM external_valuations e
              WHERE e.condition_id = m.condition_id
@@ -1911,6 +1920,8 @@ COVERED_POOL_SQL = """
                  WHERE (SELECT count(*) FROM market_tokens t
                          WHERE t.condition_id = m.condition_id) >= 2)
                     AS with_both_tokens,
+           -- A COUNT of conditions with a known venue contract, any record
+           -- purpose (see COVERED_CANDIDATES_SQL): reporting, nothing priced.
            count(*) FILTER (
                  WHERE EXISTS (SELECT 1 FROM external_valuations e
                                 WHERE e.condition_id = m.condition_id

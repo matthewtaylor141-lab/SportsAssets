@@ -1336,6 +1336,38 @@ STAMP_OBSERVATION = vc.PROBE_2026_09_27
 R_BOOK_CURRENCY_NOT_ESTABLISHED = "VENUE_BOOK_CURRENCY_NOT_ESTABLISHED"
 R_BOOK_CURRENCY_CONTRADICTED = "VENUE_BOOK_CURRENCY_CONTRADICTED_BY_CONTRACT"
 
+#: ── A CURRENCY REFUSAL STILL VALUES THE ODDS SOURCE ────────────────────
+#:
+#: THE GAP THIS CLOSES. The valuation was written only after an ok venue read,
+#: and every read has refused on currency since d66e89e -- so no valuation
+#: was written and the calibration cohort stopped at 53 fixtures, contrary to
+#: `bettor_entry_execution`'s own claim that the calibration gate does not
+#: block recording the valuation. Calibration scores the ODDS SOURCE against
+#: the venue's settlement and needs no tradable venue price.
+#:
+#: So after exactly these refusals -- the book WAS read and displayed a
+#: price; only its currency is unestablished or contradicted -- the SAME
+#: evaluate/persist path runs with the refusal carried in, and the record is
+#: sealed CALIBRATION_ONLY (see `bettor_valuation_purpose`). A read that
+#: FAILED, errored or showed no depth is not here: there is no book to
+#: describe, and the candidate stops where it always did.
+CALIBRATION_ONLY_AFTER = (R_BOOK_CURRENCY_NOT_ESTABLISHED,
+                          R_BOOK_CURRENCY_CONTRADICTED)
+#: The named counter the spec asks for: valuations recorded inadmissible, for
+#: calibration only. Reported beside the tally, never inside it -- the event's
+#: own outcome stays REFUSED under the currency code, so "written" cannot
+#: masquerade as admitted.
+#: It is the key on the cycle result and on the heartbeat.
+C_CALIBRATION_ONLY_RECORDED = "valuations_recorded_inadmissible_for_calibration"
+#: Bounded like the entry lane: a calibration-only record costs the same
+#: settlement-rules and fixture-scope reads an evaluation does. One is
+#: attempted only while `evaluated + attempted < MAX_CALIBRATION_ONLY_PER_CYCLE`,
+#: so a cycle makes at most this many of them. They NEVER take an entry
+#: evaluation's slot: the entry lane is still bounded by `evaluated` alone, as
+#: it was, so a cycle with both kinds can spend up to twice MAX_PER_CYCLE of
+#: those reads -- the price of not letting calibration crowd out an entry.
+MAX_CALIBRATION_ONLY_PER_CYCLE = MAX_PER_CYCLE
+
 #: ── AND, SEPARATELY, OUR OWN PROCESSING DELAY ────────────────────────
 #:
 #: How long our own read may sit between arriving and being decided upon. Both
@@ -2375,7 +2407,85 @@ async def venue_settlement_evidence(conn, us_market_slug: str) -> dict:
     return out
 
 
-async def venue_quote(conn, *, us_slug, intent, now, size=None,
+def _displayed_not_for_orders(book, *, intent, slug, read_at,
+                              currency) -> dict:
+    """WHAT A REFUSED BOOK DISPLAYED ON THE SIDE THIS INTENT CONSUMES.
+
+    Built only for a read `venue_quote` then REFUSES, so it is never usable
+    for orders -- the flag is a constant, not a computation -- and it names
+    the currency verdict that made it so. Pure: it parses the payload the
+    read already returned and makes no request.
+    """
+    from .. import bettor_book_snapshot as bs
+    from .. import bettor_valuation_purpose as _vp
+
+    try:
+        lad = bs.acquisition_ladder((book or {}).get("marketData"),
+                                    intent=intent)
+    except Exception as exc:                                   # noqa: BLE001
+        lad = {"ok": False, "refusal": "DISPLAYED_LADDER_UNPARSEABLE:%s"
+               % type(exc).__name__}
+    ok = bool(lad.get("ok")) and lad.get("best_acquisition_price") is not None
+    return {"ok": ok,
+            "usable_for_orders": False,
+            "what_this_is": _vp.DISPLAYED_NOT_AN_ORDER_PRICE,
+            "acquisition_price": (lad.get("best_acquisition_price")
+                                  if ok else None),
+            "api_price": lad.get("best_api_price") if ok else None,
+            "side_consumed": lad.get("side_consumed"),
+            "pays_on": lad.get("pays_on"),
+            "depth": lad.get("displayed_depth") if ok else None,
+            "levels_read": lad.get("levels_read"),
+            "refusal": None if ok else (lad.get("refusal") or R_NO_DEPTH),
+            "intent": intent, "slug": slug, "read_at": read_at,
+            "book_currency_verdict": (currency or {}).get("verdict"),
+            "book_currency_mechanism": (currency or {}).get("mechanism")}
+
+
+def _calibration_only_basis(vq) -> dict | None:
+    """The refused venue read a CALIBRATION_ONLY record may be built on.
+
+    None unless the read refused with one of CALIBRATION_ONLY_AFTER AND
+    carries the displayed block `venue_quote` attaches to exactly those
+    refusals -- so a stubbed or older quote shape, or any other refusal,
+    stops the candidate where it always stopped.
+    """
+    vq = vq if isinstance(vq, dict) else {}
+    if vq.get("ok") or vq.get("refusal") not in CALIBRATION_ONLY_AFTER:
+        return None
+    shown = vq.get("displayed_not_for_orders")
+    if not isinstance(shown, dict):
+        return None
+    cur = vq.get("book_currency") or {}
+    return {"refusal": vq["refusal"],
+            # FLAGGED AGAIN HERE, not trusted from the quote: whatever built
+            # the block, a record built on a refused read is never orderable.
+            "displayed": dict(shown, usable_for_orders=False),
+            "book_currency": {k: cur.get(k) for k in (
+                "verdict", "mechanism", "mechanisms_unavailable", "partial",
+                "why")},
+            "venue_read_why": vq.get("why")}
+
+
+def _displayed_market_state(basis: dict) -> dict:
+    """The market state a calibration-only valuation is compared against.
+
+    The DISPLAYED price, labelled as such in `ask_basis`. `evaluate` then
+    seals the record, moving this price out of `executable_price`; it is
+    passed at all only so the gate's economics are traced at the price the
+    venue showed, which is what "every reachable admission check" means.
+    """
+    d = dict((basis or {}).get("displayed") or {})
+    return {"ask": d.get("acquisition_price"),
+            "api_price": d.get("api_price"),
+            "side_consumed": d.get("side_consumed"),
+            "depth": d.get("depth"),
+            "readable": bool(d.get("ok")),
+            "ask_basis": ("DISPLAYED_ON_A_BOOK_WHOSE_CURRENCY_IS_NOT_"
+                          "ESTABLISHED__NOT_USABLE_FOR_ORDERS")}
+
+
+async def venue_quote(conn, *, us_slug, intent, now=None, size=None,
                       subscription=None, revalidation=None):
     """Contemporaneous ACQUISITION ladder for one venue contract.
 
@@ -2418,6 +2528,26 @@ async def venue_quote(conn, *, us_slug, intent, now, size=None,
     The depth returned is DISPLAYED depth, which is an observation and
     explicitly not a queue position -- the snapshot module says so in the
     payload itself and `P_FILL` stays NOT_IDENTIFIED regardless.
+
+    ── THE VERDICT INSTANT IS NEVER BEFORE THE READ (map4 §9 D8) ──────
+    `now` is the CALLER's instant, and the scheduled cycle takes it BEFORE
+    the read. Currency used to be evaluated at that instant -- so a book was
+    judged as of a moment before we had it -- and `now - read_at` was
+    negative, so OUR_OWN_PROCESSING_DELAY could never fire here. The verdict
+    is now taken at `max(now, our post-read receipt)`: never earlier than
+    the payload existed on our side, and later only when a caller asks to
+    judge the read at a later decision. Re-ageing only ever makes the
+    verdict stricter.
+
+    ── A CURRENCY REFUSAL CARRIES WHAT THE BOOK DISPLAYED ─────────────
+    On VENUE_BOOK_CURRENCY_NOT_ESTABLISHED, _CONTRADICTED_BY_CONTRACT and
+    OUR_OWN_PROCESSING_DELAY the book WAS read. The refusal now carries the
+    ladder this intent would consume under `displayed_not_for_orders`,
+    flagged `usable_for_orders: False` -- the same labelling
+    `observation_quote` uses. It is there so the calibration-only record can
+    say what the venue displayed; no reader may size, reserve or send
+    against it, and it is deliberately NOT under `ask`, `acquisition_price`
+    or `acquisition_ladder`, the keys an order path reads.
     """
     from .. import bettor_book_snapshot as bs
 
@@ -2454,6 +2584,10 @@ async def venue_quote(conn, *, us_slug, intent, now, size=None,
                 "diagnostic": diag}
 
     read_at = time.time()
+    # THE INSTANT THE VERDICT IS TAKEN AT: never before our own receipt of
+    # the payload (see the docstring, D8).
+    verdict_at = (read_at if now is None
+                  else max(float(now), float(read_at)))
     snap = bs.snapshot(book.get("marketData"), symbol=slug,
                        captured_at=read_at)
     ask = snap.get("BEST_ASK")
@@ -2558,7 +2692,7 @@ async def venue_quote(conn, *, us_slug, intent, now, size=None,
                             "observed stale age: the age is UNMEASURED")
         else:
             vt = dt.timestamp()
-            age = float(now) - vt
+            age = float(verdict_at) - vt
             age_basis = "VENUE_TRANSACT_TIME"
     else:
         clock["why"] = ("the venue supplied no transactTime, so our read "
@@ -2600,7 +2734,7 @@ async def venue_quote(conn, *, us_slug, intent, now, size=None,
         "reported as provenance. An old value is not proof the book is stale "
         "and a recent one is not proof it is current, because what the field "
         "denotes is unresolved")
-    currency = vc.evaluate(now=now,
+    currency = vc.evaluate(now=verdict_at,
                            observation=book.get("http_observation"),
                            subscription=subscription,
                            revalidation=revalidation,
@@ -2608,11 +2742,26 @@ async def venue_quote(conn, *, us_slug, intent, now, size=None,
                            bound_s=MAX_VENUE_QUOTE_AGE_S)
     clock["book_currency"] = currency
     clock["http_observer"] = book.get("http_observer")
-    our_delay = float(now) - float(read_at)
+    # BOTH INSTANTS ON THE RECORD, so a reader can see which one judged it.
+    clock["caller_instant_epoch_s"] = (None if now is None else float(now))
+    clock["verdict_instant_epoch_s"] = float(verdict_at)
+    clock["verdict_instant_basis"] = (
+        "MAX_OF_THE_CALLERS_INSTANT_AND_OUR_POST_READ_RECEIPT: a book is never "
+        "judged as of a moment before we held it")
+    our_delay = float(verdict_at) - float(read_at)
     clock["our_processing_delay_s"] = round(our_delay, 3)
     clock["our_processing_delay_limit_s"] = MAX_OUR_PROCESSING_DELAY_S
     clock["our_processing_delay_is_not_freshness"] = \
         PROCESSING_DELAY_IS_NOT_FRESHNESS
+    # WHAT THE BOOK DISPLAYED, for the refusals below only. Carried so a
+    # calibration-only record can state the venue price beside the
+    # probability -- labelled, and under a key no order path reads.
+    refused_read = {
+        "displayed_not_for_orders": _displayed_not_for_orders(
+            book, intent=intent, slug=slug, read_at=read_at,
+            currency=currency),
+        "venue_ts": vt, "read_at": read_at, "slug": slug, "intent": intent,
+        "http_observation": book.get("http_observation")}
     # THE CONTRADICTED CASE FIRST: it is the one backed by evidence.
     if currency["verdict"] == vc.CONTRADICTED:
         return {"ok": False, "refusal": R_BOOK_CURRENCY_CONTRADICTED,
@@ -2620,7 +2769,8 @@ async def venue_quote(conn, *, us_slug, intent, now, size=None,
                 "limit_s": MAX_VENUE_QUOTE_AGE_S,
                 "age_basis": currency["mechanism"],
                 "why": currency["why"],
-                "book_currency": currency, "venue_clock": clock}
+                "book_currency": currency, "venue_clock": clock,
+                **refused_read}
     if currency["verdict"] != vc.ESTABLISHED:
         return {"ok": False, "refusal": R_BOOK_CURRENCY_NOT_ESTABLISHED,
                 "age_s": None,
@@ -2633,7 +2783,8 @@ async def venue_quote(conn, *, us_slug, intent, now, size=None,
                 "mechanisms_unavailable": currency["mechanisms_unavailable"],
                 "partial": currency.get("partial"),
                 "why": currency["why"],
-                "book_currency": currency, "venue_clock": clock}
+                "book_currency": currency, "venue_clock": clock,
+                **refused_read}
     if our_delay > MAX_OUR_PROCESSING_DELAY_S:
         return {"ok": False, "refusal": R_OUR_PROCESSING_DELAY,
                 "age_s": round(our_delay, 3),
@@ -2646,7 +2797,8 @@ async def venue_quote(conn, *, us_slug, intent, now, size=None,
                         "about our own delay and nothing upstream"
                         % (our_delay, MAX_OUR_PROCESSING_DELAY_S,
                            currency["mechanism"])),
-                "book_currency": currency, "venue_clock": clock}
+                "book_currency": currency, "venue_clock": clock,
+                **refused_read}
 
     # THE SIDE THAT ACTUALLY PAYS ON OUR OUTCOME, in cost space.
     lad = bs.acquisition_ladder(book.get("marketData"), intent=intent)
@@ -2787,6 +2939,11 @@ async def venue_quote(conn, *, us_slug, intent, now, size=None,
 # the venue reports only as a named winner is never written, so ordering
 # by `decided_at` alone would let a handful of unresolvable rows occupy
 # the whole per-run budget forever and starve every later fixture.
+#
+# EVERY RECORD PURPOSE, deliberately (migration 144): a CALIBRATION_ONLY row
+# is joined exactly like an entry decision -- labelling it with the venue's
+# settlement is the reason it is recorded. The join writes outcome columns
+# only; it cannot change a row's purpose (the 144 trigger refuses that).
 UNJOINED_SQL = """
     SELECT id, us_market_slug, buy_intent, ladder_side,
            payout_is_complement
@@ -3360,8 +3517,14 @@ R_OUTCOME_NOT_BOUND = "PAYOUT_OUTCOME_INDEX_NOT_BOUND_TO_A_TOKEN"
 R_OUTCOME_DISAGREES = "PAYOUT_OUTCOME_DISAGREES_WITH_THE_VENUE_INTENT"
 
 
-async def bind_payout_outcome(conn, *, condition_id, payout_event, intent):
+async def bind_payout_outcome(conn, *, condition_id, payout_event, intent,
+                              record_purpose=None):
     """Which GLOBAL token and index the held payout event actually is.
+
+    A CALIBRATION-ONLY RECORD IS REFUSED FIRST, by name and before any read:
+    binding an outcome index is the first step of writing inventory, and such
+    a record may never have any. `record_purpose` is the valuation's own
+    purpose; None is the pre-144 caller, whose records are entry decisions.
 
     ── WHY THIS IS NOT DERIVED FROM THE INTENT ──────────────────────
     It was: `1 if intent == BUY_SHORT else 0`. That treats the US venue's
@@ -3383,6 +3546,13 @@ async def bind_payout_outcome(conn, *, condition_id, payout_event, intent):
     resolved in favour of either. An unbindable outcome refuses the entry
     -- there is no default.
     """
+    from .. import bettor_valuation_purpose as _vp
+
+    refused = _vp.refuse_unless_entry(
+        purpose=(_vp.ENTRY_DECISION if record_purpose is None
+                 else record_purpose))
+    if refused is not None:
+        return refused
     try:
         rows = await conn.fetch(TOKENS_SQL, str(condition_id))
     except Exception as exc:                                   # noqa: BLE001
@@ -3712,6 +3882,112 @@ async def source_calibration(conn, source_version) -> dict:
                    int(d["sample_size"]), d["window_start"], d["window_end"],
                    d["measured_by"]))
     return d
+
+
+#: ── THE CALIBRATION MEASUREMENT, SCHEDULED ───────────────────────────
+#:
+#: THE GAP THIS CLOSES. `bettor_source_calibration.measure` had one caller,
+#: the admin route. Nothing ran it on a schedule, so the cohort could grow
+#: and never be measured, and a PASSED row would lapse at
+#: CALIBRATION_MAX_AGE_S (14 days) unless someone remembered the route.
+#:
+#: WHAT RUNS. `measure(write=True)` over the default 90-day window, at most
+#: once per CALIBRATION_MEASURE_EVERY_S, right after the outcome join. The
+#: evaluator writes ONLY a completed PASSED/FAILED verdict; an INSUFFICIENT
+#: result is returned and reported and never written, so running it changes
+#: no gate until the evidence exists. It does NOT change the entry gate's
+#: requirement (current evaluator, >= 300 scored fixtures, <= 14 days,
+#: within tolerance) -- `source_calibration` above is untouched.
+#:
+#: HOW RESTARTS ARE KEPT FROM HAMMERING IT. Three instants, the latest wins:
+#: this process's own last run; the newest measured row for the source (any
+#: measurer -- an admin run an hour ago is a measurement an hour old); and
+#: the last run recorded in this loop's own heartbeat, which covers the
+#: INSUFFICIENT case that writes no row.
+CALIBRATION_MEASURE_EVERY_S = 6 * 3600.0
+CALIBRATION_MEASURED_BY = "SCHEDULED_CALIBRATION_RUN"
+CALIBRATION_MEASURE_WINDOW_DAYS = 90
+_LAST_CALIBRATION_MEASURE = [0.0]
+
+NEWEST_MEASUREMENT_SQL = """
+    SELECT extract(epoch FROM max(measured_at))::float8
+      FROM external_source_calibration
+     WHERE source_version = $1
+"""
+
+#: The previous cycle's measurement digest, from this loop's own heartbeat:
+#: when it last ran, and what that run found -- so a cycle on which the
+#: measurement is not due still reports the latest result, including after a
+#: restart.
+LAST_SCHEDULED_RUN_SQL = """
+    SELECT (value::jsonb -> 'source_calibration_measurement')::text
+      FROM ingestion_state WHERE key = $1
+"""
+
+
+async def _scheduled_calibration_measurement(conn, *, now: float) -> dict:
+    """RUN THE CALIBRATION MEASUREMENT IF IT IS DUE. Never raises.
+
+    Returns the digest's input: whether it ran, when it last ran and is next
+    due, and either `measure`'s own result (it ran) or the previous run's
+    compact result carried from the heartbeat (it did not). A read that could
+    not say when the last run was is reported by name and does not stop the
+    run: the process-local guard still bounds it, and an unknown is not a
+    reason to skip evidence collection.
+    """
+    import json as _json
+
+    from .. import bettor_source_calibration as _CAL
+
+    last_local = float(_LAST_CALIBRATION_MEASURE[0] or 0.0)
+    guard = {"process_last_ran_at": last_local or None,
+             "newest_measured_row_at": None, "heartbeat_last_ran_at": None,
+             "read_errors": []}
+    prev: dict = {}
+    try:
+        guard["newest_measured_row_at"] = await conn.fetchval(
+            NEWEST_MEASUREMENT_SQL, devig.VERSION)
+    except Exception as exc:                                   # noqa: BLE001
+        guard["read_errors"].append("NEWEST_MEASUREMENT:%s"
+                                    % type(exc).__name__)
+    try:
+        raw = await conn.fetchval(LAST_SCHEDULED_RUN_SQL, HEARTBEAT_KEY)
+        prev = _json.loads(raw) if raw else {}
+        prev = prev if isinstance(prev, dict) else {}
+        if prev.get("last_ran_at") is not None:
+            guard["heartbeat_last_ran_at"] = float(prev["last_ran_at"])
+    except Exception as exc:                                   # noqa: BLE001
+        guard["read_errors"].append("HEARTBEAT_LAST_RUN:%s"
+                                    % type(exc).__name__)
+    last = max([float(x) for x in (last_local,
+                                   guard["newest_measured_row_at"],
+                                   guard["heartbeat_last_ran_at"])
+                if x is not None] or [0.0])
+    base = {"every_s": CALIBRATION_MEASURE_EVERY_S,
+            "measured_by": CALIBRATION_MEASURED_BY,
+            "window_days": CALIBRATION_MEASURE_WINDOW_DAYS,
+            "evaluator": _CAL.VERSION, "guard": guard}
+    if last and float(now) - last < CALIBRATION_MEASURE_EVERY_S:
+        return dict(base, ran=False, why="NOT_DUE",
+                    last_ran_at=last,
+                    next_due_at=last + CALIBRATION_MEASURE_EVERY_S,
+                    carried_last_run=prev.get("last_run"))
+    _LAST_CALIBRATION_MEASURE[0] = float(now)
+    try:
+        got = await _CAL.measure(conn, experiment_id=ext.EXPERIMENT_ID,
+                                 days=CALIBRATION_MEASURE_WINDOW_DAYS,
+                                 now=float(now),
+                                 measured_by=CALIBRATION_MEASURED_BY,
+                                 write=True)
+    except Exception as exc:                                   # noqa: BLE001
+        # `measure` catches its own read and write failures; anything else
+        # is a defect, reported as one rather than as "insufficient".
+        got = {"ran": False, "error": "MEASURE_RAISED:%s: %s"
+               % (type(exc).__name__, str(exc)[:160])}
+    return dict(base, ran=bool(got.get("ran")), attempted=True,
+                last_ran_at=float(now),
+                next_due_at=float(now) + CALIBRATION_MEASURE_EVERY_S,
+                result=got)
 
 
 #: ── THE SHADOW BOOK'S EVENT IDENTITY (audit finding A9) ─────────────
@@ -4066,10 +4342,18 @@ async def _funded_attempt(conn, rec, *, now):
     account row, the owner-approved limits, the complete rails against the
     funded book, the authorization gate's affirmative answer, and the code
     switch. This function only carries the decision across.
+
+    EXCEPT ONE REFUSAL, TAKEN HERE AND FIRST: a calibration-only record is
+    never offered to the connector at all -- not even to be refused there --
+    and nothing is read for it. The connector refuses it too.
     """
     from .. import bettor_funded_activation as _FA
     from .. import bettor_funded_execution as _FX
+    from .. import bettor_valuation_purpose as _vp
 
+    refused = _vp.refuse_unless_entry(rec)
+    if refused is not None:
+        return refused
     try:
         bound = _FA._obj(await _FA._state(conn, _FA.ACCOUNT_KEY)) or {}
     except Exception:                                          # noqa: BLE001
@@ -5583,6 +5867,14 @@ async def cycle(conn) -> dict:
     # its own control row. Absent or unreadable is OFF. It waives exactly
     # MODEL_TRUST_DRIFT and nothing else; see bettor_research_shadow.
     research = await rsh.authorised(conn)
+    # ── VALUATIONS RECORDED FOR CALIBRATION ONLY, counted apart ─────────
+    # Never in `evaluated` or `written`: a calibration-only record reached no
+    # execution estimate and is not an entry decision, so counting it there
+    # would let "written" read as progress of the entry lane. The event it
+    # belongs to stays REFUSED under its venue-read code.
+    cal_only: dict = {"attempted": 0, "recorded": 0, "already_recorded": 0,
+                      "not_recorded_cycle_bound": 0, "persist_errors": {},
+                      "refusals": {}, "rows": []}
 
     for sport_key, family in sports_for_cycle:
         _close_event()
@@ -6021,10 +6313,15 @@ async def cycle(conn) -> dict:
             if vq.get("ok"):
                 vq_cache[_ck] = {"first_event_id": quote.get("event_id"),
                                  "claimed_at": read_at}
+            # SET ONLY BY A CURRENCY REFUSAL ON A BOOK THAT WAS READ; see
+            # CALIBRATION_ONLY_AFTER. None everywhere else, and then every
+            # line below runs exactly as it did before.
+            calibration_only = None
             if not vq.get("ok"):
                 code = vq.get("refusal") or R_NO_VENUE_QUOTE
                 tally[code] = tally.get(code, 0) + 1
-                _ledger({"global_slug": mapped.get("global_slug")
+                _vq_entry = {
+                         "global_slug": mapped.get("global_slug")
                          or (mapped.get("market_row") or {}).get("slug"),
                          "us_market_slug": ident.get("us_market_slug"),
                          "priced_outcome": quote.get("home"),
@@ -6038,11 +6335,16 @@ async def cycle(conn) -> dict:
                          "parsed_epoch_s": (
                              (vq.get("venue_clock") or {})
                              .get("parsed_epoch_s")),
-                         "decision_instant_epoch_s": round(read_at, 6),
+                         # THE INSTANT THE VERDICT WAS ACTUALLY TAKEN AT,
+                         # which is no longer the pre-read `read_at` (D8).
+                         "decision_instant_epoch_s": round(float(
+                             (vq.get("venue_clock") or {}).get(
+                                 "verdict_instant_epoch_s") or read_at), 6),
                          "age_s": vq.get("age_s"),
                          "limit_s": vq.get("limit_s"),
                          "age_basis": vq.get("age_basis"),
-                         "age_semantics": VENUE_CLOCK_SEMANTICS})
+                         "age_semantics": VENUE_CLOCK_SEMANTICS}
+                _ledger(_vq_entry)
                 # THE VENUE'S OWN WORDS, kept. Run 22 named this refusal
                 # `VENUE_BOOK_READ_RETURNED_ERROR 2` -- which is the right
                 # counter and still not an answer: whether that is an
@@ -6080,7 +6382,25 @@ async def cycle(conn) -> dict:
                         and len(venue_errors) < MAX_VENUE_ERRORS):
                     seen_venue_errors.add(key)
                     venue_errors.append(diag)
-                continue
+                # ── THE CALIBRATION-ONLY RECORD, OR NOTHING ─────────────
+                #
+                # The refusal above is counted, ledgered and attributed to
+                # this event exactly as before; nothing here undoes it. What
+                # continues is only the VALUATION -- the settlement evidence,
+                # the fixture scope, the attestation and the gate, through the
+                # same `ext.evaluate` / `ext.persist` -- so the odds source can
+                # be scored against the venue's settlement. It is sealed
+                # CALIBRATION_ONLY and returns to the loop before the
+                # admission block below is reachable.
+                calibration_only = _calibration_only_basis(vq)
+                if calibration_only is None:
+                    continue
+                if (evaluated + cal_only["attempted"]
+                        >= MAX_CALIBRATION_ONLY_PER_CYCLE):
+                    cal_only["not_recorded_cycle_bound"] += 1
+                    continue
+                cal_only["attempted"] += 1
+                _vq_entry["calibration_only_record"] = "ATTEMPTED"
 
             # THE SETTLEMENT RULE, AND WHY THIS USUALLY STOPS HERE.
             # Pinnacle's rule is known per sport. The VENUE contract's
@@ -6157,6 +6477,12 @@ async def cycle(conn) -> dict:
             extra = ([] if srule.get("overall_established")
                      else (list(srule.get("unmet") or [])
                            or [srule.get("refusal") or R_VENUE_RULE_UNKNOWN]))
+            if calibration_only is not None:
+                # THE VENUE READ'S OWN REFUSAL LEADS the record's refusals: it
+                # is where this candidate stopped as an entry, and every later
+                # code is what the trace met after it.
+                extra = [calibration_only["refusal"]] + [
+                    c for c in extra if c != calibration_only["refusal"]]
 
             contract = {
                 "venue": "PMUS",
@@ -6232,11 +6558,18 @@ async def cycle(conn) -> dict:
                 # mis-denomination the execution lane's wire-price
                 # conversion exists to prevent (that module is
                 # deliberately not nameable from this loop).
-                market_state={"ask": vq["acquisition_price"],
-                              "api_price": vq["api_price"],
-                              "side_consumed": vq["side_consumed"],
-                              "depth": vq["depth"],
-                              "readable": True},
+                #
+                # A CALIBRATION-ONLY RECORD has no acquisition price: its book
+                # was refused. It is compared at the DISPLAYED price, labelled
+                # as such, and `evaluate` moves that price out of the
+                # executable columns when it seals the record.
+                market_state=(_displayed_market_state(calibration_only)
+                              if calibration_only is not None else
+                              {"ask": vq["acquisition_price"],
+                               "api_price": vq["api_price"],
+                               "side_consumed": vq["side_consumed"],
+                               "depth": vq["depth"],
+                               "readable": True}),
                 # THE THREE PLACEHOLDERS ARE GONE. What stood here was
                 #
                 #     execution_estimate p_fill None  -> refused, honestly
@@ -6253,7 +6586,13 @@ async def cycle(conn) -> dict:
                 # plan runs INSIDE evaluate, after the one valuation, so
                 # the limit, the size and the price all describe the same
                 # payout event as the probability.
-                execution_plan=_entry_plan(
+                #
+                # NO PLAN FOR A CALIBRATION-ONLY RECORD: nothing may be sized
+                # against a displayed price, so no size, execution estimate,
+                # exposure or risk verdict is built. The gate then refuses it
+                # on those by name, which is the trace we want.
+                execution_plan=None if calibration_only is not None else
+                _entry_plan(
                     ladder=vq.get("acquisition_ladder"),
                     fee_fn=fee_fn,
                     observation_age_s=vq.get("age_s"),
@@ -6289,9 +6628,47 @@ async def cycle(conn) -> dict:
                 # contract pays on and lets the one place that owns the
                 # comparison do the arithmetic.
                 payout_is_complement=bool(ident["payout_is_complement"]),
-                extra_refusals=extra)
-            evaluated += 1
-            step["evaluated"] += 1
+                extra_refusals=extra,
+                record_purpose=(ext.PURPOSE_ENTRY_DECISION
+                                if calibration_only is None
+                                else ext.PURPOSE_CALIBRATION_ONLY),
+                calibration_only_evidence=(
+                    None if calibration_only is None else {
+                        "venue_read_refusal": calibration_only["refusal"],
+                        "venue_read_why": _sanitize(
+                            calibration_only.get("venue_read_why") or "",
+                            limit=240),
+                        "book_currency": calibration_only["book_currency"],
+                        "displayed_quote": calibration_only["displayed"],
+                        "decision_instant_epoch_s": now,
+                        "decision_lag_s": decision_lag_s}))
+            if calibration_only is None:
+                evaluated += 1
+                step["evaluated"] += 1
+            else:
+                # EVERY GATE STATE THE RISK VERDICT WOULD HAVE READ, evaluated
+                # from the same evidence -- freshness re-aged at this instant
+                # (the venue side stays NOT_ESTABLISHED, so STALE_DATA is
+                # unknown and blocks), the settlement comparison, the declared
+                # support and the calibration read. No rail is evaluated: a
+                # rail needs a proposed position and there is none.
+                _cfr = _entry_freshness(quote, vq, now)
+                rec["calibration_only_evidence"]["state_gates"] = \
+                    entryx.state_from_evidence(
+                        freshness=_cfr,
+                        settlement=_settlement_compatibility(srule),
+                        probability=rec.get("probability"),
+                        calibration=calibration)
+                rec["calibration_only_evidence"]["freshness"] = {
+                    k: _cfr.get(k) for k in (
+                        "fresh", "why", "unknown_side", "pinnacle_age_s",
+                        "pinnacle_limit_s", "pinnacle_provider_lag_s",
+                        "pinnacle_our_processing_s",
+                        "venue_currency_verdict", "venue_age_s",
+                        "our_processing_delay_s")}
+                rec["calibration_only_evidence"]["rails"] = (
+                    "NOT_EVALUATED: a rail is measured against a proposed "
+                    "position, and a calibration-only record proposes none")
 
             # ── THE MEASUREMENT, TAKEN AT THE DECISION ──────────────
             #
@@ -6308,7 +6685,11 @@ async def cycle(conn) -> dict:
             # finding was exactly this population. It is computed as a
             # conjunction of two measured quantities, not inferred from the
             # refusal code, so a change in refusal naming cannot move it.
-            _fr = _entry_freshness(quote, vq, now)
+            #
+            # EVALUATIONS ONLY. A calibration-only record reached no decision,
+            # so it contributes no latency sample and no valid evaluation.
+            _fr = _entry_freshness(quote, vq, now) \
+                if calibration_only is None else {}
             _pl = _fr.get("pinnacle_provider_lag_s")
             _od = _fr.get("pinnacle_our_processing_s")
             _ag = _fr.get("pinnacle_age_s")
@@ -6356,6 +6737,52 @@ async def cycle(conn) -> dict:
                 fixture_play_has_begun=fmeta.get("play_has_begun"),
                 venue_rules_read=bool((vevid or {}).get("rules_text")),
                 venue_rules_source=(vevid or {}).get("rules_source"))
+            if calibration_only is not None:
+                # ── A CALIBRATION-ONLY RECORD IS WRITTEN AND GOES NO FURTHER ──
+                #
+                # THE BOUNDARY, IN CODE AS WELL AS IN THE SCHEMA. This branch
+                # returns to the loop in every outcome, so no calibration-only
+                # record reaches the admission block below: no payout binding,
+                # no inventory plan or write, no funded attempt, no in-cycle
+                # reservation. Each of those refuses such a record by name as
+                # well, and migration 144 refuses it as a row -- three layers,
+                # none relying on `admissible`.
+                try:
+                    cal_id = await ext.persist(conn, rec)
+                except Exception as exc:                       # noqa: BLE001
+                    # A FAILED WRITE IS COUNTED BY NAME, in the tally and on
+                    # the ledger line, never absorbed: on a database without
+                    # migration 144 this is where the missing column shows.
+                    name = "CALIBRATION_ONLY_PERSIST:" + type(exc).__name__
+                    cal_only["persist_errors"][name] = \
+                        cal_only["persist_errors"].get(name, 0) + 1
+                    tally[name] = tally.get(name, 0) + 1
+                    _vq_entry["calibration_only_record"] = name
+                    continue
+                if cal_id is None:
+                    # THE SAME OBSERVATION, ALREADY RECORDED (migration 105/106).
+                    cal_only["already_recorded"] += 1
+                    _vq_entry["calibration_only_record"] = "ALREADY_RECORDED"
+                    continue
+                cal_only["recorded"] += 1
+                step["recorded_for_calibration_only"] = \
+                    step.get("recorded_for_calibration_only", 0) + 1
+                for _c in rec.get("refusals") or []:
+                    cal_only["refusals"][_c] = \
+                        cal_only["refusals"].get(_c, 0) + 1
+                if len(cal_only["rows"]) < 10:
+                    cal_only["rows"].append({
+                        "valuation_id": cal_id,
+                        "us_market_slug": ident.get("us_market_slug"),
+                        "event_key": quote.get("event_id"),
+                        "probability": rec.get("probability"),
+                        "venue_read_refusal": calibration_only["refusal"],
+                        "displayed_price_not_for_orders": (
+                            calibration_only["displayed"]
+                            .get("acquisition_price"))})
+                _vq_entry["calibration_only_record"] = "RECORDED"
+                _vq_entry["calibration_only_valuation_id"] = cal_id
+                continue
             try:
                 row_id = await ext.persist(conn, rec)
                 if row_id is None:
@@ -6397,7 +6824,10 @@ async def cycle(conn) -> dict:
                     bound = await bind_payout_outcome(
                         conn, condition_id=mapped["condition_id"],
                         payout_event=rec.get("payout_event"),
-                        intent=ident["intent"])
+                        intent=ident["intent"],
+                        # THE RECORD'S OWN PURPOSE, so the binder refuses a
+                        # calibration-only record even if one got here.
+                        record_purpose=rec.get("record_purpose"))
                     rec["payout_binding"] = bound
                     if not bound.get("ok"):
                         code = bound.get("refusal") or R_OUTCOME_NOT_BOUND
@@ -6527,6 +6957,12 @@ async def cycle(conn) -> dict:
     # progress on its own: a calibration that waits for someone to
     # remember to run a backfill is a calibration that never happens.
     joined = await join_outcomes(conn)
+    # THE CALIBRATION MEASUREMENT, SCHEDULED, right after the join that
+    # feeds it. At most once per CALIBRATION_MEASURE_EVERY_S; see
+    # `_scheduled_calibration_measurement`. It writes only a completed
+    # verdict and changes nothing the entry gate requires.
+    calibration_measurement = await _scheduled_calibration_measurement(
+        conn, now=time.time())
     pair_observation = await _pair_observation_pass(conn, observable,
                                                     now=time.time())
 
@@ -6534,8 +6970,14 @@ async def cycle(conn) -> dict:
            "pair_observation": pair_observation,
            "experiment_id": ext.EXPERIMENT_ID,
            "outcome_join": joined,
+           "source_calibration_measurement": calibration_measurement,
            "funded_servicing": funded_service,
            "evaluated": evaluated, "written": written,
+           # THE NAMED COUNTER, beside `written` and never inside it: rows
+           # recorded for calibration only, whose events stay counted under
+           # their venue-read refusal in `refusals`.
+           C_CALIBRATION_ONLY_RECORDED: cal_only["recorded"],
+           "calibration_only": cal_only,
            "refusals": tally, "credits": credits,
            # ── THE FRESHNESS KNOB, AND WHAT IT COST ──────────────────
            # Both counters are 0 at the default setting, where no extra
@@ -7023,6 +7465,98 @@ def _outcome_join_digest(oj) -> dict | None:
         "by_status", "by_class")}
 
 
+def _last_run_of(result) -> dict | None:
+    """The compact result of one `measure` run, as the heartbeat carries it."""
+    from .. import bettor_source_calibration as _CAL
+
+    if not isinstance(result, dict):
+        return None
+    resolved = result.get("resolved_fixtures")
+    cohort = result.get("cohort_shortfall")
+    if cohort is None and resolved is not None:
+        cohort = _CAL.cohort_shortfall(resolved)
+    return {"at": result.get("measured_at"),
+            "ran": result.get("ran"),
+            "status": result.get("status"),
+            "resolved_fixtures": resolved,
+            "scored_events": result.get("scored_events"),
+            "shortfall": cohort,
+            "would_write": result.get("would_write"),
+            "written": result.get("written"),
+            # A WRITTEN VERDICT SAYS WHICH WAY IT WENT; an unwritten one
+            # has no verdict to report.
+            "within_tolerance": (result.get("within_tolerance")
+                                 if result.get("written") else None),
+            "write_refused_why": result.get("write_refused_why"),
+            "error": (result.get("error") or result.get("write_error"))}
+
+
+def _calibration_measurement_digest(m) -> dict | None:
+    """THE SCHEDULED CALIBRATION MEASUREMENT, for the heartbeat.
+
+    Status, resolved fixtures, scored events, the exact shortfall
+    (`bettor_source_calibration.cohort_shortfall`), would-write, written and
+    when it is next due. On a cycle where it was not due, `last_run` is the
+    previous run's result carried from the heartbeat, and `from_this_cycle`
+    says so. `last_ran_at` is what the next process reads, so a restart does
+    not re-run it early. NEVER RAISES.
+    """
+    if not isinstance(m, dict):
+        return None
+    try:
+        this = _last_run_of(m.get("result")) if m.get("result") else None
+        last = this or m.get("carried_last_run")
+        return {"ran_this_cycle": bool(m.get("ran")),
+                "attempted_this_cycle": bool(m.get("attempted")),
+                "why_not": m.get("why"),
+                "from_this_cycle": this is not None,
+                "last_run": last,
+                "status": (last or {}).get("status"),
+                "resolved_fixtures": (last or {}).get("resolved_fixtures"),
+                "scored_events": (last or {}).get("scored_events"),
+                "shortfall": (last or {}).get("shortfall"),
+                "would_write": (last or {}).get("would_write"),
+                "written": (last or {}).get("written"),
+                "last_ran_at": m.get("last_ran_at"),
+                "next_due_at": m.get("next_due_at"),
+                "every_s": m.get("every_s"),
+                "measured_by": m.get("measured_by"),
+                "window_days": m.get("window_days"),
+                "evaluator": m.get("evaluator"),
+                "guard_read_errors": (m.get("guard") or {}).get(
+                    "read_errors") or [],
+                "what_this_does_not_change": (
+                    "the entry gate's requirement: a current-evaluator row, "
+                    ">= 300 scored fixtures, <= 14 days old, within "
+                    "tolerance. INSUFFICIENT is never written")}
+    except Exception as exc:                                   # noqa: BLE001
+        return {"digest_failed": "%s: %s" % (type(exc).__name__,
+                                             str(exc)[:160])}
+
+
+def _calibration_only_digest(c) -> dict | None:
+    """Valuations recorded for calibration only this cycle. NEVER RAISES."""
+    if not isinstance(c, dict):
+        return None
+    try:
+        return {"recorded": c.get("recorded"),
+                "attempted": c.get("attempted"),
+                "already_recorded": c.get("already_recorded"),
+                "not_recorded_cycle_bound": c.get("not_recorded_cycle_bound"),
+                "persist_errors": c.get("persist_errors") or {},
+                "refusals": c.get("refusals") or {},
+                "rows": list(c.get("rows") or [])[:10],
+                "what_these_are": (
+                    "valuations recorded while the venue read refused for book "
+                    "currency, so the odds source can be scored against the "
+                    "venue's settlement. record_purpose CALIBRATION_ONLY: never "
+                    "admissible, no executable price, no plan. Their events are "
+                    "counted under the venue-read refusal in `refusals`")}
+    except Exception as exc:                                   # noqa: BLE001
+        return {"digest_failed": "%s: %s" % (type(exc).__name__,
+                                             str(exc)[:160])}
+
+
 def _servicing_digest(svc) -> dict | None:
     """ONE ROW PER POSITION: the decision, and why it could not proceed.
 
@@ -7367,6 +7901,19 @@ async def _heartbeat(conn, out: dict, *, key: str = None) -> None:
                 # And the entry lane's outcome join (valuations -> venue
                 # settlements), which feeds the calibration cohort.
                 "outcome_join": _outcome_join_digest(out.get("outcome_join")),
+                # THE SCHEDULED CALIBRATION MEASUREMENT: status, resolved
+                # fixtures, scored events, the exact shortfall, would-write,
+                # written, next due. Its `last_ran_at` is also the restart
+                # guard the next process reads.
+                "source_calibration_measurement":
+                    _calibration_measurement_digest(
+                        out.get("source_calibration_measurement")),
+                # VALUATIONS RECORDED FOR CALIBRATION ONLY, counted apart from
+                # `written` so they never read as entry-lane progress.
+                C_CALIBRATION_ONLY_RECORDED:
+                    out.get(C_CALIBRATION_ONLY_RECORDED),
+                "calibration_only": _calibration_only_digest(
+                    out.get("calibration_only")),
         }
         blob = json.dumps(payload, default=str)
         if len(blob) > HEARTBEAT_MAX_BYTES:
