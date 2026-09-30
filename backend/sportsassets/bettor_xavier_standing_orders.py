@@ -781,6 +781,28 @@ def _obj(v):
     return dict(v or {})
 
 
+def acquisition_scope(may_acquire: bool, standing_live: bool,
+                      selected_candidate_id, admitted_all) -> tuple:
+    """WHAT AN ORDINARY (FOK) ACQUISITION MAY CONSIDER FOR THIS GROUP. Pure.
+
+    STRICT FALLBACK: while a live or potentially-live hedge order exists for
+    the group, no competing hedge order of any kind is acquired beside it.
+    ONE SELECTED INSTRUMENT: once a hedge instrument has filled, another is a
+    separately evaluated transition, never an ordinary acquisition.
+    Returns (may_acquire, admitted_for_acquisition, refusals, ineligible)."""
+    if may_acquire and standing_live:
+        return False, list(admitted_all or []), [], R_LIVE_ORDER_EXISTS
+    if may_acquire and selected_candidate_id:
+        keep = [a for a in admitted_all or [] if str(a.get("condition_id"))
+                == str(selected_candidate_id)]
+        refused = [{"candidate_id": str(a.get("condition_id")),
+                    "refusal": R_INSTRUMENT_ALREADY_SELECTED}
+                   for a in admitted_all or [] if str(a.get("condition_id"))
+                   != str(selected_candidate_id)]
+        return may_acquire, keep, refused, None
+    return may_acquire, list(admitted_all or []), [], None
+
+
 def is_standing_hedge(row: dict) -> bool:
     """A HEDGE entry intent that a standing order plan created."""
     r = dict(row or {})

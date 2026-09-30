@@ -3650,6 +3650,14 @@ async def pass_once(conn, *, account_id: str, venue: str,
         # option is splatted into `_price_indirect(**option)`, where an
         # unknown key raises TypeError and removes the hedge from the
         # comparison. Xavier's record attaches each screen by candidate id.)
+        # STRICT FALLBACK and ONE SELECTED INSTRUMENT: what an ordinary
+        # acquisition may consider beside the group's standing hedge order
+        # (`bettor_xavier_standing_orders.acquisition_scope`).
+        _spo_scope = _SPO.acquisition_scope(
+            gid is not None and grp is None, _standing_live,
+            _standing_selection, admitted_all)
+        if _spo_scope[3]:
+            step["acquisition_ineligible"] = _spo_scope[3]
         if gid is None and best is not None:
             # ── A GROUP IS NEEDED TO ACQUIRE, NOT TO DECIDE ──────────
             #
@@ -3675,31 +3683,12 @@ async def pass_once(conn, *, account_id: str, venue: str,
                 "unavailable, and this used to skip the whole decision")
             step["admitted_contract_withheld"] = best["condition_id"]
             best = None
-        _may_acquire = gid is not None and grp is None
-        if _may_acquire and _standing_live:
-            # STRICT FALLBACK: a live or potentially-live hedge order exists
-            # for the group, so no competing hedge order -- of any kind --
-            # is acquired beside it.
-            _may_acquire = False
-            step["acquisition_ineligible"] = _SPO.R_LIVE_ORDER_EXISTS
-        _acq_admitted = admitted_all
-        _selection_refusals = []
-        if _may_acquire and _standing_selection:
-            # ONE SELECTED INSTRUMENT PER GROUP: once a hedge instrument has
-            # filled, another is a separately evaluated transition, never an
-            # ordinary acquisition.
-            _acq_admitted = [a for a in admitted_all if str(
-                a.get("condition_id")) == str(_standing_selection)]
-            _selection_refusals = [
-                {"candidate_id": str(a.get("condition_id")),
-                 "refusal": _SPO.R_INSTRUMENT_ALREADY_SELECTED}
-                for a in admitted_all if str(a.get("condition_id"))
-                != str(_standing_selection)]
+        _may_acquire = _spo_scope[0]
         options, acquisition_plans, option_refusals = decision_options(
-            admitted=_acq_admitted if _may_acquire else [],
+            admitted=_spo_scope[1] if _may_acquire else [],
             ranking=ranking if _may_acquire else {}, facts=facts,
             position=pos, account_id=account_id, venue=venue, now=at)
-        option_refusals = list(option_refusals) + _selection_refusals
+        option_refusals = list(option_refusals) + _spo_scope[2]
         step["hedge_decision_inputs"] = {
             "candidate_ids": [o["candidate_id"] for o in options],
             "not_eligible": option_refusals,
