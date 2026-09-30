@@ -901,6 +901,9 @@ def test_pages_may_be_framed_by_the_same_origin_only(monkeypatch, kind):
     assert "frame-ancestors 'self'" in csp
     # the model's Meshopt decoder is WebAssembly; JavaScript eval stays refused
     assert "'wasm-unsafe-eval'" in csp and "'unsafe-eval'" not in csp.replace("'wasm-unsafe-eval'", "")
+    # embedded model textures decode through this document's blob: URLs; no remote origin
+    assert "connect-src 'self' blob:;" in csp and "img-src 'self' data: blob:;" in csp
+    assert "http" not in csp and "*" not in csp
     assert "x-frame-options" not in {k.lower() for k in r.headers}
     assert "DENY" not in csp
     html = r.text

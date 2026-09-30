@@ -1909,8 +1909,11 @@ def _authorised(request: Request) -> bool:
 CC_PAGE_CSP = ("default-src 'none'; style-src 'unsafe-inline'; "
                # 'wasm-unsafe-eval' lets the vendored Meshopt decoder compile
                # its WebAssembly; it does NOT allow eval() of JavaScript
-               "script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; connect-src 'self'; "
-               "img-src 'self' data:; base-uri 'none'; form-action 'none'; "
+               "script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; "
+               # blob: is the glTF loader decoding a model's EMBEDDED
+               # textures (object URLs of this document); nothing remote
+               "connect-src 'self' blob:; "
+               "img-src 'self' data: blob:; base-uri 'none'; form-action 'none'; "
                # the management shell at /derek, /xavier and /audrey frames
                # these pages from the same origin; nothing else may frame them
                "frame-ancestors 'self'")

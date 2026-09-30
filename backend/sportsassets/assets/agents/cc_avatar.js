@@ -151,7 +151,9 @@ export class AvatarController {
   _rot(role, dx, dy, dz) { const b = this.bones[role], r = this.rest[role]; if (!b || !r) return; b.rotation.x = r.x + (dx || 0); b.rotation.y = r.y + (dy || 0); b.rotation.z = r.z + (dz || 0); }
   update(dt) {
     if (this.still) return false;
-    dt = clamp(dt, 0, 0.1);
+    // wall-clock timing up to a quarter second per frame, so a slow device
+    // still blinks and breathes on schedule (longer gaps are a stall)
+    dt = clamp(dt, 0, 0.25);
     const T = (this.t += dt), off = this.mode === 'unavailable';
     // look targets (saccades) and slow head turns, clamped to +/-12 deg
     if (!off && T >= this.lookAt) {
@@ -230,6 +232,31 @@ function studioEnvironment(renderer) {
   return t;
 }
 
+/** A bind pose (T or A) brought to a natural standing pose: each upper arm
+ *  is turned so the arm hangs down beside the body. Done once, before the
+ *  controller records its rest pose. */
+export function armsDown(root, overrides = {}) {
+  const {bones} = resolveBones(root, overrides);
+  root.updateMatrixWorld(true);
+  const turned = [];
+  for (const [up, lo, side] of [['leftUpperArm', 'leftLowerArm', 1], ['rightUpperArm', 'rightLowerArm', -1]]) {
+    const a = bones[up], b = bones[lo];
+    if (!a || !b || !a.parent) continue;
+    const pa = a.getWorldPosition(new THREE.Vector3()), pb = b.getWorldPosition(new THREE.Vector3());
+    const d = pb.clone().sub(pa).normalize();
+    if (d.y < -0.8) continue;                                   // already hanging
+    const sideSign = Math.sign(d.x) || side;
+    const want = new THREE.Vector3(0.16 * sideSign, -1, 0.04).normalize();
+    const qw = new THREE.Quaternion().setFromUnitVectors(d, want);
+    const aw = a.getWorldQuaternion(new THREE.Quaternion());
+    const pw = a.parent.getWorldQuaternion(new THREE.Quaternion());
+    a.quaternion.copy(pw.clone().invert().multiply(qw).multiply(aw));
+    a.updateMatrixWorld(true);
+    turned.push(up);
+  }
+  return turned;
+}
+
 function skinTune(root) {
   // PHYSICALLY BASED SKIN, no plastic sheen: roughness about 0.5 on skin
   // materials (by name), no clearcoat or sheen
@@ -278,6 +305,7 @@ export async function mountAvatar(stage, cfg, opts = {}) {
   const root = gltf.scene;
   root.traverse((o) => { if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; o.frustumCulled = false; } });
   skinTune(root);
+  if (cfg.arms_down !== false) armsDown(root, cfg.bones || {});
   if (cfg.yaw) root.rotation.y = cfg.yaw;
   if (cfg.scale) root.scale.setScalar(cfg.scale);
   scene.add(root);
@@ -290,8 +318,12 @@ export async function mountAvatar(stage, cfg, opts = {}) {
   const box = new THREE.Box3().setFromObject(root);
   const size = box.getSize(new THREE.Vector3());
   const headPos = bones.head ? bones.head.getWorldPosition(new THREE.Vector3()) : new THREE.Vector3(box.getCenter(new THREE.Vector3()).x, box.max.y - size.y * 0.08, 0);
-  const span = (FRAMING[cfg.framing] || FRAMING.chest) * (size.y / 1.75);
-  const target = headPos.clone().add(new THREE.Vector3(0, -span * 0.32, 0));
+  const unit = size.y / 1.75;
+  const span = (FRAMING[cfg.framing] || FRAMING.chest) * unit;
+  // the head bone sits at the top of the neck: a face shot centres ~9 cm
+  // above it, chest and waist shots lower
+  const lift = {face: 0.09, chest: -0.12, waist: -0.3}[cfg.framing] ?? -0.12;
+  const target = headPos.clone().add(new THREE.Vector3(0, lift * unit, 0));
   const camera = new THREE.PerspectiveCamera(24, 1, 0.01, 100);
   const dist = span / (2 * Math.tan(THREE.MathUtils.degToRad(12)));
   const view = cfg.view || 'front';
