@@ -149,6 +149,23 @@ def test_a_first_row_the_source_could_not_price_does_not_hide_the_first_price():
     assert got["outcome_counts"].get("RESOLVED_BUT_NO_PROBABILITY", 0) == 0
 
 
+def test_a_first_row_without_a_venue_side_does_not_hide_the_graded_one():
+    """THE NINE FIXTURES OF THE LANE'S FIRST RUN. Their earliest rows were
+    priced but carried no buy_intent, so the join could never grade them;
+    the next row, with the side, joined. The first GRADEABLE row is kept."""
+    sideless = dict(_row(1, event="e", at=100.0, p=0.58, known=False,
+                         outcome=None, basis=None), buy_intent=None)
+    graded = dict(_row(2, event="e", at=200.0, p=0.61),
+                  buy_intent="ORDER_INTENT_BUY_SHORT")
+    picked = CAL.unique_fixtures([graded, sideless])
+    assert list(picked.values())[0]["id"] == 2
+    got = CAL.evaluate([sideless, graded], measured_at=0.0)
+    assert got["resolved_fixtures"] == 1
+    # with nothing gradeable, the earliest row still stands (and is unresolved)
+    only = CAL.unique_fixtures([sideless])
+    assert list(only.values())[0]["id"] == 1
+
+
 def test_a_fixture_never_priced_keeps_its_earliest_row():
     """With no priced row at all the earliest row survives, so the fixture
     is still counted -- as resolved without a probability, never scored."""

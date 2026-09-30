@@ -175,6 +175,196 @@ def _basis_of(quote: dict) -> dict:
             "price_is": "THE_DISPLAYED_ACQUISITION_PRICE_WHEN_OBSERVED"}
 
 
+# ── WHY NO SECOND CONTRACT: EACH SIBLING'S STAGE, REFUSAL AND CATEGORY ──
+#
+# `discover` names every empty result NO_SECOND_SETTLEMENT_COMPATIBLE_CONTRACT,
+# whether the fixture had no second contract, its siblings lacked a fact we
+# capture, they needed an interpretation we do not support, the screen left
+# them out, or the pass ran out of reads before quoting them. Those are
+# different findings -- only the first and "every sibling examined and
+# incompatible" establish absence -- so each sibling is recorded with the
+# stage that stopped it and one of these categories, and the attempt with a
+# conclusion that says which it was.
+
+C_ADMITTED = "ADMITTED"
+C_INCOMPATIBLE = "SETTLEMENT_INCOMPATIBLE"
+C_METADATA = "METADATA_MISSING"
+C_INTERPRETATION = "UNSUPPORTED_INTERPRETATION"
+C_FILTERED = "FILTERED_BY_SCREEN"
+C_READ_BUDGET = "READ_BUDGET_EXHAUSTED"
+C_UNPRICED = "NO_DISPLAYED_PRICE"
+C_UNNAMED = "UNCLASSIFIED_REFUSAL"
+
+#: Refusal name -> category. A name absent here is C_UNNAMED and counted as
+#: such, so a new refusal cannot silently read as absence.
+def _sibling_categories() -> dict:
+    from . import bettor_funded_decision as FD
+    from . import bettor_funded_hedge_supply as HS
+    from . import bettor_funded_pair_cycle as PC
+
+    m = {PC.R_NOT_DISTINCT: C_INCOMPATIBLE,
+         PC.R_NOT_SETTLEMENT_COMPATIBLE: C_INCOMPATIBLE,
+         HS.R_SAME_CONTRACT: C_INCOMPATIBLE,
+         HS.R_NETTED_SAME_INSTRUMENT: C_INCOMPATIBLE,
+         FD.R_STRUCTURE_IS_UNESTABLISHABLE: C_INTERPRETATION,
+         PC.R_TIE_PARTITION_UNKNOWN: C_INTERPRETATION,
+         HS.R_OT_PROSE_STATES_BOTH: C_INTERPRETATION,
+         HS.R_OT_NO_PATTERNS: C_INTERPRETATION,
+         HS.R_KIND_NOT_DERIVABLE: C_INTERPRETATION,
+         HS.R_LINE_NOT_A_NUMBER: C_INTERPRETATION,
+         HS.R_LINE_NEEDS_ORIENTATION: C_INTERPRETATION,
+         HS.R_BOTH_SIDES_CLAIM_ONE_ORIENTATION: C_INTERPRETATION,
+         HS.R_TYPE_NOT_A_GRADED_VARIABLE: C_INTERPRETATION,
+         HS.R_OVERTIME_NOT_CAPTURED: C_METADATA,
+         HS.R_OT_NO_PROSE: C_METADATA,
+         HS.R_OT_PROSE_SILENT: C_METADATA,
+         HS.R_PERIOD_NOT_ESTABLISHED: C_METADATA,
+         HS.R_LEG_FACTS_MISSING: C_METADATA,
+         HS.R_ORIENTATION_NOT_ESTABLISHED: C_METADATA,
+         HS.R_FIXTURE_SIDES_NOT_TWO: C_METADATA,
+         HS.R_LINE_REQUIRED: C_METADATA,
+         HS.R_SIDE_NOT_STATED_ON_ROW: C_METADATA,
+         HS.R_NO_SPORTS_TYPE: C_METADATA,
+         HS.R_NO_EVENT: C_METADATA,
+         X_ORIENTATION: C_METADATA,
+         X_FIXTURE_IDENTITY: C_METADATA,
+         X_NOT_A_GRADED_VARIABLE: C_FILTERED,
+         X_NOT_REAL: C_FILTERED,
+         X_SIDE: C_FILTERED,
+         X_FAMILY_NOT_CAPTURED: C_FILTERED}
+    return m
+
+
+def sibling_category(refusal, *, quote_refusal=None) -> str:
+    """One sibling's category from the name that stopped it. An unpriced
+    sibling whose quote was refused for the pass's read budget or deadline
+    was never looked at: READ_BUDGET_EXHAUSTED, not NO_DISPLAYED_PRICE."""
+    from . import bettor_funded_hedge_supply as HS
+
+    if refusal is None:
+        return C_ADMITTED
+    if refusal == HS.R_CANDIDATE_NOT_PRICED:
+        return (C_READ_BUDGET if quote_refusal in (R_READ_BUDGET,
+                                                   R_PASS_DEADLINE)
+                else C_UNPRICED)
+    return _sibling_categories().get(str(refusal), C_UNNAMED)
+
+
+_KEY_FIELDS = ("fixture", "period", "variable", "overtime")
+
+
+def key_differs_on(held_key, cand_key) -> list:
+    """Which grading-key fields differ, by name."""
+    h, c = list(held_key or ()), list(cand_key or ())
+    return [n for i, n in enumerate(_KEY_FIELDS)
+            if (h[i] if i < len(h) else None) != (c[i] if i < len(c) else None)]
+
+
+#: How many siblings one attempt records in full; the counts cover all.
+SIBLINGS_RECORDED_PER_ATTEMPT = 120
+
+N_ABSENT = "NO_OTHER_CONTRACT_ON_THE_FIXTURE"
+N_GRADED_ABSENT = "NO_OTHER_GRADED_CONTRACT_ON_THE_FIXTURE"
+N_INCOMPATIBLE = "EVERY_EXAMINED_SIBLING_IS_SETTLEMENT_INCOMPATIBLE"
+N_BUDGET = "INCOMPLETE_READ_BUDGET_EXHAUSTED"
+N_LIMIT = "INCOMPLETE_SIBLING_LIMIT_REACHED"
+N_METADATA = "BLOCKED_BY_MISSING_METADATA"
+N_INTERPRETATION = "BLOCKED_BY_UNSUPPORTED_INTERPRETATION"
+N_UNPRICED = "BLOCKED_BY_UNPRICED_SIBLINGS"
+N_UNNAMED = "BLOCKED_BY_AN_UNCLASSIFIED_REFUSAL"
+N_ADMITTED = "ADMITTED"
+N_FIRST_LEG_UNPRICED = "FIRST_LEG_HAS_NO_DISPLAYED_PRICE"
+N_FIRST_LEG_NOT_BUILT = "FIRST_LEG_NOT_BUILT"
+
+
+def attempt_conclusion(siblings, *, fixture_pairs=None,
+                       truncated=False) -> str:
+    """WHAT ONE ATTEMPT ESTABLISHED about a second contract.
+
+    Only siblings that COULD have graded with the held leg count toward a
+    block: a sibling in another period (search rank 2) or one no leg can be
+    built from (rank 3) is never protection, so its missing prose does not
+    make the fixture "blocked". Absence is concluded only when nothing that
+    could have matched went unexamined."""
+    if any(s.get("category") == C_ADMITTED for s in siblings):
+        return N_ADMITTED
+    if not siblings and not fixture_pairs:
+        return N_ABSENT
+    relevant = [s for s in siblings
+                if s.get("search_rank") is None or s.get("search_rank") <= 1]
+    cats = {s.get("category") for s in relevant}
+    if C_READ_BUDGET in cats:
+        return N_BUDGET
+    if C_METADATA in cats:
+        return N_METADATA
+    if C_INTERPRETATION in cats:
+        return N_INTERPRETATION
+    if C_UNPRICED in cats:
+        return N_UNPRICED
+    if C_UNNAMED in cats:
+        return N_UNNAMED
+    if truncated:
+        return N_LIMIT
+    if C_INCOMPATIBLE in cats:
+        return N_INCOMPATIBLE
+    return N_GRADED_ABSENT
+
+
+def sibling_trace(cands: dict, found: dict, held_key) -> list:
+    """Every sibling the supplier examined: its contract, the stage that
+    stopped it (SCREEN, QUOTE, BUILD, DISCOVERY) or ADMITTED, the refusal, the
+    category, and for a key mismatch the fields that differ."""
+    from . import bettor_funded_hedge_supply as HS
+
+    out = []
+    for r in (cands or {}).get("refused") or []:
+        ref = r.get("refusal")
+        stage = r.get("stage") or ("QUOTE" if ref == HS.R_CANDIDATE_NOT_PRICED
+                                   else "BUILD")
+        out.append({"market_slug": r.get("market_slug"),
+                    "side": r.get("side"),
+                    "sports_type": r.get("sports_type"),
+                    "search_rank": r.get("search_rank"), "stage": stage,
+                    "refusal": ref, "quote_refusal": r.get("quote_refusal"),
+                    "category": sibling_category(
+                        ref, quote_refusal=r.get("quote_refusal"))})
+    legs = {c.get("candidate_id"): c for c in (cands or {}).get("legs") or []}
+    admitted = {a.get("condition_id") for a in (found or {}).get("admitted")
+                or []}
+    rejected = {(r or {}).get("condition_id"): r
+                for r in (found or {}).get("rejected") or []}
+    for cid, c in legs.items():
+        rank = (c.get("search_priority") or {}).get("rank")
+        base = {"market_slug": c.get("market_slug"), "side": c.get("side"),
+                "sports_type": c.get("sports_type"), "search_rank": rank,
+                "grading_key": [str(x) for x in c.get("grading_key") or ()]}
+        if cid in admitted:
+            out.append(dict(base, stage="ADMITTED", refusal=None,
+                            category=C_ADMITTED))
+            continue
+        rj = rejected.get(cid) or {}
+        ref = rj.get("refusal") or (found or {}).get("refusal")
+        e = dict(base, stage="DISCOVERY", refusal=ref,
+                 category=sibling_category(ref))
+        if rj.get("candidate_grading_key") is not None:
+            e["key_differs_on"] = key_differs_on(
+                rj.get("held_grading_key") or held_key,
+                rj.get("candidate_grading_key"))
+        if rj.get("missing_facts"):
+            e["missing_facts"] = list(rj.get("missing_facts"))
+        out.append(e)
+    return out
+
+
+def count_by(items, key) -> dict:
+    got: dict = {}
+    for i in items:
+        k = str(i.get(key))
+        got[k] = got.get(k, 0) + 1
+    return got
+
+
+
 async def observe_candidate(conn, *, us_market_slug: str, side: str,
                             quoter, prose_reader, tie_reader=None,
                             now: float | None = None) -> dict:
@@ -196,8 +386,11 @@ async def observe_candidate(conn, *, us_market_slug: str, side: str,
     q, _ = await HSUP._quote_side(quoter, us_market_slug, side)
     price = q.get("cost_per_share") or q.get("price")
     if price is None:
-        return dict(out, ok=False, refusal=R_NO_PRICE,
-                    quote_refusal=q.get("refusal") or q.get("error"))
+        qr = q.get("refusal") or q.get("error")
+        return dict(out, ok=False, refusal=R_NO_PRICE, quote_refusal=qr,
+                    conclusion=(N_BUDGET if qr in (R_READ_BUDGET,
+                                                   R_PASS_DEADLINE)
+                                else N_FIRST_LEG_UNPRICED))
     position = {"intent_id": "observation", "us_market_slug": us_market_slug,
                 "order_intent": side, "limit_price": float(price),
                 "filled_qty": 1, "residual_qty": 1}
@@ -205,7 +398,10 @@ async def observe_candidate(conn, *, us_market_slug: str, side: str,
                                    prose_reader=prose_reader, now=at)
     if not held.get("ok"):
         return dict(out, ok=False, refusal=R_NO_LEG,
-                    held_refusal=held.get("refusal"))
+                    held_refusal=held.get("refusal"),
+                    conclusion="%s:%s" % (N_FIRST_LEG_NOT_BUILT,
+                                          sibling_category(
+                                              held.get("refusal"))))
     # SIBLINGS ARE SCREENED BY THE SAME PREDICATES AS CATALOGUE CANDIDATES
     # before their book is read: a prop, a simulated fixture or an
     # unorientable row can never become a second leg, so it costs no read.
@@ -239,6 +435,26 @@ async def observe_candidate(conn, *, us_market_slug: str, side: str,
                 or "UNNAMED")
         why[k] = why.get(k, 0) + 1
     out["second_legs_refused"] = why
+    # EACH SIBLING, BY CONTRACT, and what the attempt therefore established.
+    held_key = [str(x) for x in leg.grading_key()]
+    out["held"] = {"us_market_slug": us_market_slug, "side": side,
+                   "sports_type": row.get("sports_type"),
+                   "kind": getattr(leg, "kind", None),
+                   "period": getattr(leg, "period", None),
+                   "overtime": getattr(leg, "overtime", None),
+                   "grading_key": held_key,
+                   "tie_permitted": tie.get("permits_tie")}
+    trace = sibling_trace(cands, found, held_key)
+    out["sibling_categories"] = count_by(trace, "category")
+    out["sibling_stages"] = count_by(trace, "stage")
+    out["fixture_candidate_pairs"] = cands.get("fixture_candidate_pairs")
+    out["siblings_truncated_at_limit"] = bool(cands.get("truncated_at_limit"))
+    out["conclusion"] = attempt_conclusion(
+        trace, fixture_pairs=cands.get("fixture_candidate_pairs"),
+        truncated=bool(cands.get("truncated_at_limit")))
+    out["siblings"] = trace[:SIBLINGS_RECORDED_PER_ATTEMPT]
+    out["siblings_recorded"] = len(out["siblings"])
+    out["siblings_total"] = len(trace)
     if not found.get("admitted"):
         return dict(out, ok=True, refusal=R_NOTHING_ADMITTED)
     quotes = {c["candidate_id"]: c for c in cands.get("legs") or []}
@@ -954,9 +1170,71 @@ def graded_suffix_pattern() -> str:
 
     return "(%s)$" % "|".join(_re.escape(s) for s, _ in HSUP.GRADED_SUFFIXES)
 
-#: fixture -> (attempted_at, refusal), process-local. Lost on restart, which
-#: costs one re-attempt per fixture, never a wrong observation.
+#: fixture -> (attempted_at, refusal), process-local. The durable memory is
+#: the attempt ledger (`recent_attempts`); this covers a database without it
+#: and an attempt whose ledger write failed.
 _ATTEMPTED: dict = {}
+
+#: How far back the ledger is read to order candidates: a fixture attempted
+#: at any point in the catalogue's horizon goes behind every fixture never
+#: attempted, least recently attempted first.
+ATTEMPT_ORDER_LOOKBACK_S = 96 * 3600
+
+_RECENT_ATTEMPTS_SQL = (
+    "SELECT lower(coalesce(fixture, '')) AS fixture, us_market_slug, side, "
+    "       extract(epoch FROM coalesce(finished_at, attempted_at)) AS at, "
+    "       outcome, "
+    "       (coalesce((venue_reads->>'book_refused_for_budget')::int, 0) > 0 "
+    "        OR coalesce((venue_reads->>'book_refused_for_deadline')::int, 0) "
+    "           > 0) AS budget_limited "
+    "  FROM bettor_pair_observation_attempts "
+    " WHERE attempted_at > to_timestamp($1)")
+
+_NOT_A_REFUSAL = ("RECORDED", "ALREADY_RECORDED_THIS_BUCKET")
+
+
+async def recent_attempts(conn, *, now: float) -> dict:
+    """WHAT HAS BEEN TRIED, FROM THE LEDGER, SO A RESTART DOES NOT FORGET IT.
+
+    `refused_fixtures` / `refused_identities`: refused within ATTEMPT_RETRY_S
+    and NOT budget-limited -- a judgement of the fixture, so it waits.
+    `last_attempted`: every fixture attempted within the lookback, for
+    ordering. A budget-limited attempt judged nothing: it is not a refusal,
+    but it still counts as attempted, so it queues behind fixtures never
+    tried instead of being re-selected first after every restart."""
+    at = float(now)
+    out: dict[str, Any] = {"source": "PROCESS_MEMORY", "refused_fixtures": {},
+                           "refused_identities": {}, "last_attempted": {}}
+    for fx, (t, _) in list(_ATTEMPTED.items()):
+        if at - t < ATTEMPT_RETRY_S:
+            out["refused_fixtures"][fx] = t
+        out["last_attempted"][fx] = max(t, out["last_attempted"].get(fx, 0))
+    if not await _has_attempt_ledger(conn):
+        return out
+    try:
+        rows = await conn.fetch(_RECENT_ATTEMPTS_SQL,
+                                at - max(ATTEMPT_ORDER_LOOKBACK_S,
+                                         ATTEMPT_RETRY_S))
+    except Exception as exc:                                    # noqa: BLE001
+        return dict(out, ledger_error=type(exc).__name__)
+    out["source"] = "ATTEMPT_LEDGER"
+    out["ledger_rows"] = len(rows)
+    for r in rows:
+        t = float(r["at"] or 0.0)
+        fx = str(r["fixture"] or "")
+        if fx:
+            out["last_attempted"][fx] = max(t, out["last_attempted"].get(fx,
+                                                                         0))
+        if r["outcome"] in _NOT_A_REFUSAL or r["budget_limited"] \
+                or at - t >= ATTEMPT_RETRY_S:
+            continue
+        if fx:
+            out["refused_fixtures"][fx] = max(
+                t, out["refused_fixtures"].get(fx, 0))
+        ident = "%s|%s" % (r["us_market_slug"], r["side"])
+        out["refused_identities"][ident] = max(
+            t, out["refused_identities"].get(ident, 0))
+    return out
 
 
 def note_attempt(fixture, *, at: float, refusal) -> None:
@@ -1132,6 +1410,14 @@ async def catalogue_candidates(conn, *, now: float | None = None,
         out["excluded_fixtures"][name] = out["excluded_fixtures"].get(
             name, 0) + 1
 
+    # THE LEDGER IS THE MEMORY, so a restart does not re-select the fixtures
+    # the last process already refused.
+    memory = await recent_attempts(conn, now=at)
+    out["attempt_memory"] = {k: memory.get(k) for k in (
+        "source", "ledger_rows", "ledger_error")}
+    out["attempt_memory"]["refused_fixtures"] = len(memory["refused_fixtures"])
+    out["attempt_memory"]["attempted_fixtures"] = len(
+        memory["last_attempted"])
     fresh, again = [], []
     for fx in order:
         legs = by_fx[fx]
@@ -1141,19 +1427,26 @@ async def catalogue_candidates(conn, *, now: float | None = None,
         if fx in seen_fx:
             _xf(X_OBSERVED_RECENTLY)
             continue
-        tried = _ATTEMPTED.get(fx)
-        if tried is not None and at - tried[0] < ATTEMPT_RETRY_S:
+        if fx in memory["refused_fixtures"]:
             _xf(X_ATTEMPTED_RECENTLY)
             continue
+        tried = memory["last_attempted"].get(fx)
         best = min(legs, key=_preference)
         cand = {"us_market_slug": best["market_slug"], "side": best["intent"],
                 "fixture": fx, "sports_type": best["sports_type"],
                 "starts_in_s": round(float(best["start_epoch"]) - at, 0),
                 "graded_contracts": len({r["market_slug"] for r in legs}),
                 "source": SOURCE_CATALOGUE}
-        (again if tried is not None else fresh).append(cand)
+        if tried is not None:
+            cand["last_attempted_at"] = tried
+            again.append(cand)
+        else:
+            fresh.append(cand)
     # NEVER-ATTEMPTED FIXTURES FIRST, soonest first (their labels arrive
-    # soonest); fixtures whose refusal has aged out after them.
+    # soonest); then fixtures attempted before, LEAST RECENTLY first, so the
+    # same few are never the head of the queue twice running.
+    again.sort(key=lambda c: (c["last_attempted_at"], c["fixture"]))
+    out["never_attempted_fixtures"] = len(fresh)
     out["candidates"] = (fresh + again)[:int(limit)]
     out["eligible_fixtures"] = len(fresh) + len(again)
     out["not_offered_for_limit"] = max(0, len(fresh) + len(again)
@@ -1434,7 +1727,15 @@ async def _ledger_attempt(conn, *, pass_id: str, cand: dict, got: dict,
     try:
         detail = {k: got.get(k) for k in (
             "quote_refusal", "held_refusal", "discovery_refusal", "examined",
-            "admitted", "skipped_unpriced_second_leg", "error")}
+            "admitted", "skipped_unpriced_second_leg", "error",
+            # WHAT THE ATTEMPT ESTABLISHED, AND EACH SIBLING BY CONTRACT
+            "conclusion", "held", "second_legs_refused",
+            "sibling_categories", "sibling_stages", "fixture_candidate_pairs",
+            "siblings_truncated_at_limit", "siblings_total",
+            "siblings_recorded", "siblings")}
+        detail["budget_limited"] = bool(
+            (reads or {}).get("book_refused_for_budget")
+            or (reads or {}).get("book_refused_for_deadline"))
         detail["recorded"] = [r.get("observation_id")
                               for r in got.get("recorded") or []]
         written = sum(1 for r in got.get("recorded") or [] if r.get("written"))
@@ -1497,12 +1798,24 @@ async def observation_pass(conn, *, candidates, quoter, prose_reader,
         return dict(out, ok=False, refusal=R_SCHEMA)
     seen = set()
     todo = []
+    # THE LEDGER, NOT THE PROCESS, REMEMBERS WHAT WAS REFUSED: a candidate
+    # whose identity or fixture was refused within ATTEMPT_RETRY_S (and not
+    # for want of budget) is not attempted again after a restart either.
+    memory = await recent_attempts(conn, now=at)
+    skipped_recent = 0
     for c in _candidate_list(candidates, catalogue):
         key = (c.get("us_market_slug"), c.get("side"))
         if not key[0] or key[1] not in (LONG, SHORT) or key in seen:
             continue
         seen.add(key)
+        fx = str(c.get("fixture") or "").strip().lower()
+        if "%s|%s" % key in memory["refused_identities"] or (
+                fx and fx in memory["refused_fixtures"]):
+            skipped_recent += 1
+            continue
         todo.append(c)
+    out["attempt_memory"] = {"source": memory.get("source"),
+                             "skipped_refused_recently": skipped_recent}
     out["candidates_offered"] = len(todo)
     out["candidates_offered_by_source"] = {}
     for c in todo:
@@ -1520,6 +1833,7 @@ async def observation_pass(conn, *, candidates, quoter, prose_reader,
                  if prose_reader is not None else None)
     outcomes: dict = {}
     refusals: dict = {}
+    conclusions: dict = {}
     done = 0
     for cand in todo[:int(per_pass)]:
         if time.monotonic() - t0 > obs_deadline:
@@ -1551,11 +1865,18 @@ async def observation_pass(conn, *, candidates, quoter, prose_reader,
         outcomes[outcome] = outcomes.get(outcome, 0) + 1
         if name:
             refusals[name] = refusals.get(name, 0) + 1
+        concl = got.get("conclusion") or ("ERROR" if got.get("error")
+                                          else None)
+        if concl:
+            conclusions[concl] = conclusions.get(concl, 0) + 1
         entry = {k: got.get(k) for k in
                  ("us_market_slug", "side", "ok", "refusal", "quote_refusal",
                   "held_refusal", "discovery_refusal", "examined",
                   "admitted", "second_legs_refused",
-                  "skipped_unpriced_second_leg", "recorded", "error")}
+                  "skipped_unpriced_second_leg", "recorded", "error",
+                  "conclusion", "held", "sibling_categories",
+                  "sibling_stages", "fixture_candidate_pairs",
+                  "siblings_truncated_at_limit", "siblings_total")}
         entry.update(source=cand["source"],
                      fixture=cand.get("fixture") or got.get("fixture"),
                      outcome=outcome, budget_limited=budget_limited,
@@ -1574,13 +1895,17 @@ async def observation_pass(conn, *, candidates, quoter, prose_reader,
     out["attempted"] = done
     out["outcomes"] = outcomes
     out["refusals"] = refusals
+    # WHAT THE ATTEMPTS ESTABLISHED: absence, incompatibility, or a block
+    # (metadata, interpretation, price, read budget) that is not absence.
+    out["conclusions"] = conclusions
     out["observations_written"] = sum(
         1 for e in out["observed"] for r in e.get("recorded") or []
         if r.get("written"))
     out["not_observed_this_pass"] = max(0, len(todo) - done)
     cap = min(len(todo), max(0, int(per_pass)))
     out["not_attempted"] = {"LIMIT_PER_PASS": len(todo) - cap,
-                            "PASS_DEADLINE": cap - done}
+                            "PASS_DEADLINE": cap - done,
+                            X_ATTEMPTED_RECENTLY: skipped_recent}
     reader = settlement_reader or _production_settlement
     try:
         out["labels"] = await label_pending(

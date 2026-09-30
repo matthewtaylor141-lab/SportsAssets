@@ -8086,7 +8086,9 @@ def _observation_digest(po) -> dict | None:
                     "refusal", "quote_refusal", "held_refusal",
                     "discovery_refusal", "examined", "admitted",
                     "second_legs_refused", "skipped_unpriced_second_leg",
-                    "budget_limited", "elapsed_s", "reads", "error")},
+                    "budget_limited", "elapsed_s", "reads", "error",
+                    "conclusion", "sibling_categories", "siblings_total",
+                    "siblings_truncated_at_limit")},
                 written=sum(1 for r in a.get("recorded") or []
                             if (r or {}).get("written"))))
         return {
@@ -8105,6 +8107,8 @@ def _observation_digest(po) -> dict | None:
                 "not_attempted": po.get("not_attempted")},
             "outcomes": po.get("outcomes"),
             "refusals": po.get("refusals"),
+            "conclusions": po.get("conclusions"),
+            "attempt_memory": po.get("attempt_memory"),
             "observations_written": po.get("observations_written"),
             "attempts": attempts,
             "attempts_truncated_at": (
@@ -8116,7 +8120,8 @@ def _observation_digest(po) -> dict | None:
                 "ok", "refusal", "why", "error", "sweep_age_s", "rows_read",
                 "truncated_at_row_limit", "fixtures_seen",
                 "eligible_fixtures", "excluded_rows", "excluded_fixtures",
-                "not_offered_for_limit")} if cat else None),
+                "not_offered_for_limit", "never_attempted_fixtures",
+                "attempt_memory")} if cat else None),
             "labels": {k: lab.get(k) for k in (
                 "ok", "refusal", "error", "labelled", "not_a_label",
                 "awaiting", "corrected", "unreadable", "row_errors",

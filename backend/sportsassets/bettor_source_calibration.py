@@ -362,15 +362,25 @@ def unique_fixtures(rows) -> dict:
     as unresolved exactly as before. Still point in time: the choice depends
     only on whether a probability existed when the row was written, never on
     the outcome.
+
+    AND ONE THAT CAN BE GRADED. The lane's first run (rows 1-9, 2026-09-24)
+    wrote valuations without the venue side (`buy_intent` NULL), so the
+    outcome join cannot say which side the probability pays on and leaves
+    them unjoined forever (VENUE_SIDE_IDENTITY_NOT_ESTABLISHED). Every later
+    row of those nine fixtures carries the side and joined. A row with no
+    side identity is therefore not a candidate either, by the same rule and
+    for the same reason: it is a fact fixed when the row was written. Rows
+    that do not carry the `buy_intent` key at all (pure callers) are taken
+    as stating their side.
     """
-    priced_fixtures = {str(r.get("event_key") or "") for r in rows
-                       if r.get("probability") is not None}
+    usable_fixtures = {str(r.get("event_key") or "") for r in rows
+                       if _gradeable(r)}
     best: dict = {}
     for r in rows:
         key = str(r.get("event_key") or "")
         if not key:
             continue
-        if key in priced_fixtures and r.get("probability") is None:
+        if key in usable_fixtures and not _gradeable(r):
             continue
         cur = best.get(key)
         mine = (float(r.get("observed_at_epoch") or 0.0),
@@ -378,6 +388,13 @@ def unique_fixtures(rows) -> dict:
         if cur is None or mine < cur[0]:
             best[key] = (mine, r)
     return {k: v[1] for k, v in best.items()}
+
+
+def _gradeable(r) -> bool:
+    """A probability, and a venue side the outcome join can grade it on."""
+    if r.get("probability") is None:
+        return False
+    return (not ("buy_intent" in r)) or bool(r.get("buy_intent"))
 
 
 def _brier(pairs) -> float:
@@ -794,7 +811,7 @@ def describe() -> dict:
 ROWS_SQL = """
     SELECT id, version, devig_method, sport_family, market, event_key,
            payout_event, probability, outcome_known, outcome,
-           outcome_basis,
+           outcome_basis, buy_intent,
            extract(epoch FROM observed_at)::float8 AS observed_at_epoch,
            extract(epoch FROM decided_at)::float8  AS decided_at_epoch
       FROM external_valuations

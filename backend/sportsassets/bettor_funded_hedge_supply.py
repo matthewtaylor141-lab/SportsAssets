@@ -1634,6 +1634,7 @@ async def candidate_legs_for(conn, *, held_row, quoter=None,
                 out["refused"].append(
                     {"candidate_id": cid, "market_slug": slug, "side": side,
                      "sports_type": row.get("sports_type"),
+                     "search_rank": priority.get("rank"), "stage": "SCREEN",
                      "refusal": str(screened),
                      "why": ("refused by the caller's screen before any venue "
                              "read: the row cannot become a leg (%s)"
@@ -1649,6 +1650,12 @@ async def candidate_legs_for(conn, *, held_row, quoter=None,
             out["refused"].append(
                 {"candidate_id": cid, "market_slug": slug, "side": side,
                  "sports_type": row.get("sports_type"),
+                 "search_rank": priority.get("rank"), "stage": "QUOTE",
+                 # WHY THE QUOTE FAILED, by name: a book the pass had no
+                 # budget left to read is not a book with nothing on it.
+                 "quote_refusal": (quote.get("refusal") or quote.get("error")
+                                   or ("NO_QUOTER" if quoter is None
+                                       else None)),
                  "refusal": R_CANDIDATE_NOT_PRICED,
                  "why": ("this contract's own price was not established (%s). "
                          "Pricing it off the held contract's ladder would "
@@ -1677,6 +1684,7 @@ async def candidate_legs_for(conn, *, held_row, quoter=None,
             out["refused"].append(
                 {"candidate_id": cid, "market_slug": slug, "side": side,
                  "sports_type": row.get("sports_type"),
+                 "search_rank": priority.get("rank"), "stage": "BUILD",
                  "refusal": built.get("refusal"), "field": built.get("field"),
                  "why": built.get("why")})
             continue
@@ -1748,6 +1756,8 @@ async def candidate_legs_for(conn, *, held_row, quoter=None,
                 "candidate_id": entry["candidate_id"],
                 "market_slug": entry["market_slug"], "side": entry["side"],
                 "sports_type": entry.get("sports_type"),
+                "search_rank": (entry.get("search_priority") or {}).get(
+                    "rank"), "stage": "BUILD",
                 "refusal": R_BOTH_SIDES_CLAIM_ONE_ORIENTATION,
                 "why": ("both sides of %r built a leg backing %r. The two sides "
                         "of one instrument hold opposite outcome tokens, so one "
