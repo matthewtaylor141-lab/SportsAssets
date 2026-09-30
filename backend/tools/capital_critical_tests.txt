@@ -325,3 +325,25 @@ tests/test_xavier_tradeoff_directive_becomes_an_evaluated_artifact.py
 # fill; full completion; fee and settlement invalidation; the workspace, page
 # and Audrey's audit; venue events into the same group authority
 tests/test_xavier_standing_orders_through_the_scheduled_path.py
+# (180) persona and voice profiles: versioned, immutable history, one active
+# version per agent; the voice resolver picks premade / library voices only,
+# never a cloned one, and a configured id only when the account has it
+tests/test_agent_personas_are_versioned.py
+# (180) persona chat: the three agents answer "the Yankees position" from ONE
+# fact list -- same record ids, same numbers, different perspectives; no
+# Yankees record is said truthfully; records-only mode without keys; 503
+# LLM_UNAVAILABLE without the key; a model figure no fact holds is discarded
+tests/test_agent_persona_chat_is_grounded.py
+# (180) persona chat has no authority; only Audrey records directives, through
+# the existing directive path; routine questions change nothing
+tests/test_agent_persona_chat_cannot_grant_authority.py
+# (180) a new message interrupts the answer in flight; the partial answer is
+# stored INTERRUPTED; turns move once; messages are never rewritten
+tests/test_agent_persona_chat_interruption.py
+# (180) server-side speech speaks only stored messages (their normalised
+# text), 503s without the key, never echoes or logs it, replays from cache,
+# per-agent rate limit
+tests/test_agent_speech_speaks_only_stored_messages.py
+# (180) the pronunciation normaliser (money, cents, %, pp, labelled
+# probabilities, negatives, decimals)
+tests/test_speech_pronunciation_normaliser.py
