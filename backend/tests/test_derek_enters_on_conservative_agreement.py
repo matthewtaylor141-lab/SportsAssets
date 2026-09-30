@@ -534,7 +534,12 @@ async def test_proof1_the_yankees_at_50c_on_qualified_60pct_reach_enter(
 @pg
 async def test_proof1_after_cycle_alone_reaches_the_same_enter(monkeypatch):
     """No funded gate wired: the after-cycle pass judges the cycle's own row
-    AS OF ITS DECISION INSTANT and records the same verdict."""
+    AS OF ITS DECISION INSTANT and records the same verdict.
+
+    INTEGRATED WIRING: `cycle()` itself calls `derek.after_cycle` at its end
+    (core hook), so the decision already exists when the test's own call
+    runs; that second call must record NOTHING new (one decision per
+    valuation per policy version) while the row carries the same verdict."""
     asyncpg = pytest.importorskip("asyncpg")
     conn = await asyncpg.connect(DSN)
     try:
@@ -546,9 +551,11 @@ async def test_proof1_after_cycle_alone_reaches_the_same_enter(monkeypatch):
         out = await loop.cycle(conn)
         assert out["refusals"].get("ADMITTED") == 1, out["refusals"]
         vid = captured[0]["rec"]["valuation_row_id"]
-        res = await D.after_cycle(conn, cycle=out, now=time.time())
-        assert res["decisions_recorded"] >= 1, res
         row = await _decision_for(conn, vid)
+        assert row is not None, "the cycle's own after_cycle hook recorded nothing"
+        res = await D.after_cycle(conn, cycle=out, now=time.time())
+        assert res["decisions_recorded"] == 0, res      # idempotent replay
+        assert await _decision_for(conn, vid) == row
         assert row["decided_by"] == DP.DECIDED_BY_CYCLE
         assert row["verdict"] == DP.ENTER, (row["refusal"],
                                             json.loads(row["evidence"])
@@ -693,8 +700,10 @@ async def test_proof2_unsupported_settlement_refuses(monkeypatch):
         out = await loop.cycle(conn)
         assert "ADMITTED" not in out["refusals"], out["refusals"]
         assert captured == []           # nothing reached the funded path
+        # The cycle's own after_cycle hook (core wiring) has recorded the
+        # refusal; a repeat call records nothing new.
         res = await D.after_cycle(conn, cycle=out, now=time.time())
-        assert res["decisions_recorded"] >= 1, res
+        assert res["decisions_recorded"] == 0, res
         vid = await conn.fetchval(
             "SELECT max(id) FROM external_valuations WHERE us_market_slug = $1"
             "   AND record_purpose = 'ENTRY_DECISION'", US_SLUG)

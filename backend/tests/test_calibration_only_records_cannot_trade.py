@@ -404,6 +404,11 @@ READERS = {
         "ENTRY_EVIDENCE FILTERS; TILE, TRACE AND DIAGNOSTIC ARE REPORTING", 6),
     # by id of a row a filtered reader selected
     "bettor_funded_management.py": ("BY_ID_FROM_A_FILTERED_READER", 2),
+    # Audrey: the daily audit and the improvement replay read ENTRY_DECISION
+    # rows only (record_purpose filtered) to report and to evaluate candidate
+    # thresholds by replay; neither selects a candidate or places anything
+    "agents/audrey_audit.py": ("AUDIT_REPORTING_FILTERS_ENTRY_DECISION", 4),
+    "agents/improvement.py": ("REPLAY_EVALUATION_FILTERS_ENTRY_DECISION", 3),
     # read-only reporting / prose / probes
     "bettor_capacity_fingerprint.py": ("COUNT_ONLY", 2),
     # counts rows by record_purpose for the management overview; selects

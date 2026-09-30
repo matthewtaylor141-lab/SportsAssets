@@ -553,3 +553,67 @@ async def test_a_code_task_waits_for_the_sandbox(db):
     bad = await _task(db, "audt-bad", "RISK_LIMIT")
     await IMP.run_due(db, now=T + 60)
     assert (await IMP.read_task(db, bad))["status"] == "CANCELLED"
+
+
+# ═════════════════════════════════════════════════════════════════════
+# DEREK'S BINDING ENTRY POLICY: THE GROSS-EDGE THRESHOLD, BY REPLAY
+# ═════════════════════════════════════════════════════════════════════
+
+async def _seed_gross(c, *, tb, n_train=40, n_hold=40):
+    """Per fixture: one row at a 4 pp gross edge (p 0.54 at 0.50) that LOST
+    and one at a 12 pp gross edge (p 0.62 at 0.50) that WON; only the edge
+    refused either. Today's 5 pp policy selects the winner only."""
+    fx = _names(False, n_train, "gt") + _names(True, n_hold, "gh")
+    for i, f in enumerate(fx):
+        hold = i >= n_train
+        dec = (tb + DAY + i * 60) if hold else (tb - 5 * DAY + i * 60)
+        await H.valuation(c, fixture=f, decided=dec, p=0.54, price=0.5,
+                          cost=0.5, edge=0.0, outcome=0, outcome_at=dec + 3600)
+        await H.valuation(c, fixture=f, decided=dec + 1, p=0.62, price=0.5,
+                          cost=0.5, edge=0.1, outcome=1,
+                          outcome_at=dec + 3600)
+    return fx
+
+
+def test_the_derek_policy_class_targets_the_binding_policy_key():
+    from sportsassets.agents import derek_policy as DP
+    cls = IMP.CHANGE_CLASSES["DEREK_ENTRY_POLICY_THRESHOLD"]
+    assert (cls.agent, cls.policy_key) == (DP.AGENT_ID, DP.POLICY_KEY)
+    assert list(cls.bounds) == ["min_gross_edge_pp"]
+    assert "min_gross_edge_pp" in DP.DEFAULT_PARAMS
+    assert cls.pre_authorized is False
+    # the boundary is the owner's: exactly 5 pp qualifies, 4.99 pp does not
+    row = {"probability": 0.55, "price": 0.50, "cost": 0.50, "refusals": []}
+    assert IMP.derek_selectable(row, 0.05, basis=IMP.BASIS_GROSS)
+    assert not IMP.derek_selectable(dict(row, probability=0.5499), 0.05,
+                                    basis=IMP.BASIS_GROSS)
+    # a row refused for any other reason is never selected by a threshold
+    assert not IMP.derek_selectable(dict(row, refusals=["STALE"]), 0.0,
+                                    basis=IMP.BASIS_GROSS)
+
+
+@pg
+async def test_a_gross_edge_variant_that_adds_losers_is_rejected_and_a_safe_one_waits_for_a_person(db):
+    tb, eb = T, T + 10 * DAY
+    await _seed_gross(db, tb=tb)
+    harmful = await _task(db, "gross-harm", "DEREK_ENTRY_POLICY_THRESHOLD", {
+        "variants": [0.03], "training_boundary": tb,
+        "evaluation_boundary": eb, "training_start": tb - 30 * DAY})
+    out = await IMP.run_due(db, now=eb + 60)
+    res = [a for a in out["advanced"] if a.get("task_id") == harmful][0]
+    assert res["verdict"] != IMP.V_PASS, res
+    c = await IMP.candidate(db, res["candidate_id"])
+    assert c["params"] == {"min_gross_edge_pp": 0.03}
+    assert c["state"] == "REJECTED"
+    safe = await _task(db, "gross-safe", "DEREK_ENTRY_POLICY_THRESHOLD", {
+        "variants": [0.07], "training_boundary": tb,
+        "evaluation_boundary": eb, "training_start": tb - 30 * DAY})
+    out = await IMP.run_due(db, now=eb + 120)
+    res = [a for a in out["advanced"] if a.get("task_id") == safe][0]
+    assert res["verdict"] == IMP.V_PASS, res
+    c = await IMP.candidate(db, res["candidate_id"])
+    assert c["params"] == {"min_gross_edge_pp": 0.07}
+    assert c["state"] == "APPROVAL_READY"         # never released unattended
+    assert await db.fetchval(
+        "SELECT count(*) FROM agent_policy_versions WHERE "
+        " policy_key='DEREK_ENTRY_POLICY' AND state='ACTIVE'") == 0

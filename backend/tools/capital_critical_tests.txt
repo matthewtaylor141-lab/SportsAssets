@@ -68,6 +68,8 @@ tests/test_bettor_mgmt_lifecycle.py
 tests/test_bettor_pair_engine.py
 tests/test_bettor_shadow_execution.py
 tests/test_calibration_only_records_cannot_trade.py
+# (1002) the collector uses the released pass limit inside hard bounds; rollback restores it
+tests/test_collection_pass_limit_reads_the_released_policy.py
 tests/test_cut_whale_exit.py
 # (1002) Derek: the Polymarket US coverage census sums and hides nothing; the workspace is truthful when empty
 tests/test_derek_coverage_census_and_workspace.py

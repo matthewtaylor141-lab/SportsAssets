@@ -182,8 +182,10 @@ CHANGE_CLASSES: dict[str, ChangeClass] = {c.name: c for c in (
         read_only=True),
     ChangeClass(
         name="DEREK_ENTRY_THRESHOLD", kind=K_POLICY, agent=DEREK,
-        description=("Derek's minimum net edge per contract for an entry "
-                     "(bettor_external_shadow.MIN_NET_EDGE_PER_CONTRACT)"),
+        description=("the shadow evaluator's minimum NET edge per contract "
+                     "(bettor_external_shadow.MIN_NET_EDGE_PER_CONTRACT) -- "
+                     "an existing admission filter; NOT Derek's binding "
+                     "entry policy, which is DEREK_ENTRY_POLICY_THRESHOLD"),
         policy_key="derek.entry_threshold",
         bounds={"min_net_edge_per_contract": (0.0, 0.10, False)},
         pre_authorized=False, evaluator="derek_threshold_replay",
@@ -197,9 +199,27 @@ CHANGE_CLASSES: dict[str, ChangeClass] = {c.name: c for c in (
         code_default=("backend/sportsassets/bettor_external_shadow.py",
                       "MIN_NET_EDGE_PER_CONTRACT")),
     ChangeClass(
+        name="DEREK_ENTRY_POLICY_THRESHOLD", kind=K_POLICY, agent=DEREK,
+        description=("Derek's binding entry policy threshold: the minimum "
+                     "GROSS probability edge in probability points "
+                     "(qualified probability - executable price), "
+                     "agents.derek_policy DEFAULT_PARAMS['min_gross_edge_pp']"),
+        policy_key="DEREK_ENTRY_POLICY",
+        bounds={"min_gross_edge_pp": (0.0, 0.20, False)},
+        pre_authorized=False, evaluator="derek_gross_edge_replay",
+        success_metrics={"fixture_mean_pnl_delta_per_contract": {">=": 0.0},
+                         "min_fixtures": 30},
+        harm_metrics={"fixture_mean_pnl_per_contract": {">=": 0.0},
+                      "negative_fixture_fraction": {"<=": 0.6}},
+        acceptance={"holdout_verdict": V_PASS},
+        rollback=("reactivate the prior agent_policy_versions row for "
+                  "(DEREK, DEREK_ENTRY_POLICY)"),
+        code_default=("backend/sportsassets/agents/derek_policy.py",
+                      "DEFAULT_PARAMS['min_gross_edge_pp']")),
+    ChangeClass(
         name="XAVIER_POLICY_PARAMETER", kind=K_POLICY, agent=XAVIER,
         description="a bounded Xavier policy parameter; no replay registered",
-        policy_key="xavier.policy", pre_authorized=False, evaluator=None,
+        policy_key="XAVIER_MANAGEMENT_POLICY", pre_authorized=False, evaluator=None,
         rollback="reactivate the prior agent_policy_versions row"),
     ChangeClass(
         name="COLLECTION_REFUSAL_MEMORY", kind=K_CODE, agent=DEREK,
@@ -406,11 +426,19 @@ async def tasks_available(conn) -> bool:
 
 
 async def _ensure_identity(conn, agent_id: str) -> None:
+    """The agent's identity row, written by the registry's own writer (the
+    full mandate/permissions row migration 152 requires). A SAVEPOINT keeps
+    a failure here from aborting the caller's transaction."""
     try:
-        await conn.execute(
-            "INSERT INTO agent_identities (agent_id, display_name) "
-            "VALUES ($1, $2) ON CONFLICT (agent_id) DO NOTHING",
-            agent_id, agent_id.title())
+        async with conn.transaction():
+            R = _registry()
+            if R is not None and hasattr(R, "ensure_identities"):
+                await R.ensure_identities(conn, code_version=None)
+                return
+            await conn.execute(
+                "INSERT INTO agent_identities (agent_id, display_name) "
+                "VALUES ($1, $2) ON CONFLICT (agent_id) DO NOTHING",
+                agent_id, agent_id.title())
     except Exception:                                           # noqa: BLE001
         pass
 
@@ -815,25 +843,44 @@ def split_rows(rows: list, *, training_boundary: float,
 EDGE_REFUSAL = "NO_ACTION_HAS_POSITIVE_NET_EDGE"
 
 
-def derek_selectable(row: dict, threshold: float) -> bool:
+#: Float tolerance for the gross-edge boundary (exactly 5 pp qualifies).
+GROSS_EDGE_TOLERANCE = 1e-9
+BASIS_NET = "NET_EDGE_PER_CONTRACT"
+BASIS_GROSS = "GROSS_PROBABILITY_EDGE"
+
+
+def derek_selectable(row: dict, threshold: float, *,
+                     basis: str = BASIS_NET) -> bool:
     """Would a threshold select this recorded valuation? Only a row whose
     ONLY refusal was the edge (or none), with its decision-time edge and
-    cost recorded. Every other refusal still refuses."""
-    edge, cost = _num(row.get("edge")), _num(row.get("cost"))
+    cost recorded. Every other refusal still refuses.
+
+    BASIS_NET: the shadow evaluator's net edge per contract, strictly above.
+    BASIS_GROSS: Derek's policy measure -- decision-time probability minus
+    executable price, at or above the threshold (the owner's 5 pp rule)."""
+    cost = _num(row.get("cost"))
+    other = [r for r in (row.get("refusals") or []) if r != EDGE_REFUSAL]
+    if basis == BASIS_GROSS:
+        p, price = _num(row.get("probability")), _num(row.get("price"))
+        if p is None or price is None or cost is None:
+            return False
+        return not other and (p - price) >= float(threshold) - \
+            GROSS_EDGE_TOLERANCE
+    edge = _num(row.get("edge"))
     if edge is None or cost is None:
         return False
-    other = [r for r in (row.get("refusals") or []) if r != EDGE_REFUSAL]
     return not other and edge > float(threshold)
 
 
-def replay_derek_threshold(rows: list, *, threshold: float) -> dict:
+def replay_derek_threshold(rows: list, *, threshold: float,
+                           basis: str = BASIS_NET) -> dict:
     """KNOWN SETTLEMENT, HYPOTHETICAL EXECUTION: per contract, the settled
     payout minus the decision-time cost of every row the threshold would
     select. An unplaced order is not proven to have filled."""
     sel = [dict(r, pnl=float(r["outcome"]) - float(r["cost"]))
-           for r in rows if derek_selectable(r, threshold)]
+           for r in rows if derek_selectable(r, threshold, basis=basis)]
     m = fixture_metrics(sel)
-    return dict(m, threshold=float(threshold),
+    return dict(m, threshold=float(threshold), basis=basis,
                 evidence_category=KNOWN_SETTLEMENT,
                 could_have_filled="UNPROVEN")
 
@@ -884,6 +931,13 @@ def code_default_params(cls: ChangeClass) -> dict:
                     float(ES.MIN_NET_EDGE_PER_CONTRACT)}
         except Exception:                                       # noqa: BLE001
             return {"min_net_edge_per_contract": 0.01}
+    if cls.name == "DEREK_ENTRY_POLICY_THRESHOLD":
+        try:
+            from . import derek_policy as DP                     # noqa: PLC0415
+            return {"min_gross_edge_pp":
+                    float(DP.DEFAULT_PARAMS["min_gross_edge_pp"])}
+        except Exception:                                       # noqa: BLE001
+            return {"min_gross_edge_pp": 0.05}
     if cls.name == "REPORT_THRESHOLD":
         return {"min_fixtures_for_statistic": 30,
                 "collection_alert_passes": 3,
@@ -1379,6 +1433,8 @@ async def derek_rows(conn, *, start: float, end: float) -> list:
              "outcome_at": _num(r["outcome_at"]),
              "outcome": r["outcome"], "edge": _num(r["edge"]),
              "cost": _num(r["cost"]), "refusals": list(r["refusals"] or []),
+             "probability": _num(r["probability"]),
+             "price": _num(r["executable_price"]),
              "decision": r["decision"]}
             for r in await conn.fetch(
         "SELECT id, coalesce(event_key, us_market_slug, condition_id) "
@@ -1386,7 +1442,8 @@ async def derek_rows(conn, *, start: float, end: float) -> list:
         "         AS decided_at, extract(epoch FROM outcome_at)::float8 "
         "         AS outcome_at, outcome, "
         "       estimated_edge_per_contract AS edge, "
-        "       cost_per_contract AS cost, refusals, decision "
+        "       cost_per_contract AS cost, refusals, decision, "
+        "       probability, executable_price "
         "  FROM external_valuations WHERE record_purpose='ENTRY_DECISION' "
         "   AND decided_at > $1 AND decided_at <= $2 "
         " ORDER BY decided_at, id", _ts(start), _ts(end))]
@@ -1396,8 +1453,9 @@ DEREK_HOLDOUT_SALT = "derek-entry-holdout-v1"
 DEREK_HOLDOUT_PERCENT = 30
 
 
-async def evaluate_derek_threshold_task(conn, task: dict, *,
-                                        now: float) -> dict:
+async def evaluate_derek_threshold_task(
+        conn, task: dict, *, now: float,
+        class_name: str = "DEREK_ENTRY_THRESHOLD") -> dict:
     """DEREK_ENTRY_THRESHOLD BY REPLAY OVER external_valuations.
 
     Fixture-level holdout (a fixed salt: the holdout is the same fixtures
@@ -1406,22 +1464,27 @@ async def evaluate_derek_threshold_task(conn, task: dict, *,
     variant is selected on training, tried once on the holdout against
     the current threshold, judged by the class's rule. Not pre-authorized:
     a PASS stops at APPROVAL_READY."""
-    cls = CHANGE_CLASSES["DEREK_ENTRY_THRESHOLD"]
+    cls = CHANGE_CLASSES[class_name]
+    pname = next(iter(cls.bounds))
+    basis = BASIS_GROSS if pname == "min_gross_edge_pp" else BASIS_NET
     spec = task.get("spec") or {}
     tid = task["task_id"]
     start, tb, eb = _boundaries(spec, now, holdout_days=float(
         spec.get("holdout_days") or 14))
     current = await current_policy(conn, cls)
-    cur = float(current["params"].get("min_net_edge_per_contract") or 0.01)
-    lo, hi, _ = cls.bounds["min_net_edge_per_contract"]
+    fallback = code_default_params(cls).get(pname)
+    cur = float(current["params"].get(pname) if current["params"].get(
+        pname) is not None else fallback)
+    lo, hi, _ = cls.bounds[pname]
+    step = 0.01 if basis == BASIS_GROSS else 0.005
     variants = sorted({round(float(v), 6) for v in (
-        spec.get("variants") or (cur - 0.005, cur + 0.005, cur + 0.01))
+        spec.get("variants") or (cur - step, cur + step, cur + 2 * step))
         if lo <= float(v) <= hi and abs(float(v) - cur) > 1e-12})
     rows = await derek_rows(conn, start=start, end=eb)
     sp = split_rows(rows, training_boundary=tb, evaluation_boundary=eb,
                     salt=DEREK_HOLDOUT_SALT, percent=DEREK_HOLDOUT_PERCENT)
     min_fx = int(cls.success_metrics.get("min_fixtures") or 1)
-    base_train = replay_derek_threshold(sp["training"], threshold=cur)
+    base_train = replay_derek_threshold(sp["training"], threshold=cur, basis=basis)
     if not variants:
         await task_event(conn, tid, kind="NO_VARIANT", actor=AUDREY,
                          detail={"current": cur}, status="CLOSED_NO_CHANGE",
@@ -1439,7 +1502,7 @@ async def evaluate_derek_threshold_task(conn, task: dict, *,
                 "Derek's entry threshold is miscalibrated against settled "
                 "outcomes"), evidence=spec.get("evidence") or {},
             affected_behavior=cls.description,
-            params={"min_net_edge_per_contract": v},
+            params={pname: v},
             training_boundary={"start": start, "end": tb,
                                "outcomes_known_by": tb},
             evaluation_boundary={"start": tb, "end": eb,
@@ -1450,7 +1513,7 @@ async def evaluate_derek_threshold_task(conn, task: dict, *,
         if not prop.get("ok"):
             scored.append({"limit": v, "refused": prop})
             continue
-        m = replay_derek_threshold(sp["training"], threshold=v)
+        m = replay_derek_threshold(sp["training"], threshold=v, basis=basis)
         m["baseline"] = base_train
         m["fixture_mean_pnl_delta_per_contract"] = (
             None if m["fixture_mean_pnl_per_contract"] is None
@@ -1473,7 +1536,7 @@ async def evaluate_derek_threshold_task(conn, task: dict, *,
         await record_trial(
             conn, candidate_id=s["candidate_id"], task_id=tid,
             segment="TRAINING",
-            variant={"min_net_edge_per_contract": s["threshold"]},
+            variant={pname: s["threshold"]},
             metrics=dict(s["training"], excluded=sp["excluded"],
                          training_fixtures=len(sp["training_fixtures"])),
             verdict=V_SELECTED if is_sel else V_NOT_SELECTED,
@@ -1502,8 +1565,8 @@ async def evaluate_derek_threshold_task(conn, task: dict, *,
         "fixture-level holdout of Derek's recorded valuations"),
         rule={"kind": "FIXTURE_HASH", "salt": DEREK_HOLDOUT_SALT,
               "percent": DEREK_HOLDOUT_PERCENT})
-    hm = replay_derek_threshold(sp["holdout"], threshold=best["threshold"])
-    hb = replay_derek_threshold(sp["holdout"], threshold=cur)
+    hm = replay_derek_threshold(sp["holdout"], threshold=best["threshold"], basis=basis)
+    hb = replay_derek_threshold(sp["holdout"], threshold=cur, basis=basis)
     hm["baseline"] = hb
     hm["fixture_mean_pnl_delta_per_contract"] = (
         None if hm["fixture_mean_pnl_per_contract"] is None
@@ -1521,7 +1584,7 @@ async def evaluate_derek_threshold_task(conn, task: dict, *,
     tr = await record_trial(
         conn, candidate_id=best["candidate_id"], task_id=tid,
         segment="HOLDOUT", holdout_id=hid,
-        variant={"min_net_edge_per_contract": best["threshold"]},
+        variant={pname: best["threshold"]},
         metrics=dict(hm, judgement=j), verdict=j["verdict"],
         evidence_category=KNOWN_SETTLEMENT, training_boundary=tb,
         evaluation_boundary=eb, now=now)
@@ -1666,9 +1729,10 @@ async def run_due(conn, *, now: float) -> dict:
                 cls: ChangeClass = chk["cls"]
                 if cls.evaluator == "collection_pass_limit_replay":
                     got = await evaluate_pass_limit_task(conn, t, now=now)
-                elif cls.evaluator == "derek_threshold_replay":
-                    got = await evaluate_derek_threshold_task(conn, t,
-                                                              now=now)
+                elif cls.evaluator in ("derek_threshold_replay",
+                                       "derek_gross_edge_replay"):
+                    got = await evaluate_derek_threshold_task(
+                        conn, t, now=now, class_name=cls.name)
                 else:
                     got = await advance_code_task(conn, t, now=now)
                 out["advanced"].append(got)

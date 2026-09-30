@@ -1364,9 +1364,13 @@ async def policy_params(conn) -> dict:
         params = dict(DEFAULT_PARAMS,
                       **{k: v for k, v in dict(got.get("params") or {}).items()
                          if k in DEFAULT_PARAMS})
-        return {"params": params,
-                "version": got.get("version") or POLICY_VERSION,
-                "source": got.get("source") or "REGISTRY"}
+        source = got.get("source") or "REGISTRY"
+        # The registry labels a fallback with version 'CODE_DEFAULT'; the
+        # policy that runs is still this module's declared version, and the
+        # source field says the parameters came from code, not an approval.
+        version = (POLICY_VERSION if source == "CODE_DEFAULT"
+                   else (got.get("version") or POLICY_VERSION))
+        return {"params": params, "version": version, "source": source}
     except Exception as exc:                                   # noqa: BLE001
         return {"params": dict(DEFAULT_PARAMS), "version": POLICY_VERSION,
                 "source": "CODE_DEFAULT",

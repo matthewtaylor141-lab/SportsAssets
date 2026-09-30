@@ -5141,6 +5141,40 @@ R_OBSERVER_STOPPED_WITH_THE_LANE = (
 R_OBSERVATION_NOT_DUE = "THE_LAST_OBSERVATION_PASS_WAS_TOO_RECENT"
 
 
+#: THE COLLECTION PASS LIMIT'S HARD BOUNDS. The registry's ACTIVE version
+#: (agent DEREK, key collection.pass_limit -- the pre-authorized
+#: COLLECTION_PASS_LIMIT change class, released and rolled back only by
+#: agents.improvement under its acceptance and canary rules) chooses a value
+#: INSIDE these bounds; outside them, or unreadable, the code constant applies.
+COLLECTION_PASS_LIMIT_BOUNDS = (1, 10)
+
+
+async def _collection_pass_limit(conn) -> dict:
+    """How many candidates this pass attempts, and where that number came
+    from. Never raises; the code default is labelled as such."""
+    from .. import bettor_pair_observations as _PO
+    default = int(_PO.CANDIDATES_PER_PASS)
+    out = {"candidates_per_pass": default, "source": "CODE_DEFAULT",
+           "version": None, "bounds": list(COLLECTION_PASS_LIMIT_BOUNDS)}
+    try:
+        from ..agents import registry as _REG
+        got = await _REG.active_policy(
+            conn, "DEREK", "collection.pass_limit",
+            default={"candidates_per_pass": default})
+        v = (got.get("params") or {}).get("candidates_per_pass")
+        lo, hi = COLLECTION_PASS_LIMIT_BOUNDS
+        if got.get("source") != "CODE_DEFAULT" and isinstance(v, int) \
+                and not isinstance(v, bool) and lo <= v <= hi:
+            out.update(candidates_per_pass=v, source=got.get("source"),
+                       version=got.get("version"))
+        elif got.get("source") != "CODE_DEFAULT":
+            out["refused_value"] = v
+            out["why"] = "the ACTIVE value is outside the hard bounds"
+    except Exception as exc:                                    # noqa: BLE001
+        out["why"] = "policy read failed: %s" % type(exc).__name__
+    return out
+
+
 async def _pair_observation_pass(conn, observable, *, now) -> dict:
     """THE NON-FUNDED PAIR OBSERVER, once per LIVE cycle, never fatal.
 
@@ -5157,6 +5191,7 @@ async def _pair_observation_pass(conn, observable, *, now) -> dict:
         from .. import bettor_pair_observations as _PO
 
         catalogue = await _PO.catalogue_candidates(conn, now=now)
+        pass_limit = await _collection_pass_limit(conn)
         token = _OBS_BOOK_CACHE.set({})
         try:
             got = await _PO.observation_pass(
@@ -5164,11 +5199,13 @@ async def _pair_observation_pass(conn, observable, *, now) -> dict:
                 catalogue=catalogue.get("candidates") or [],
                 quoter=lambda slug, side: observation_quote(slug, side,
                                                             now=now),
-                prose_reader=_venue_prose, now=now)
+                prose_reader=_venue_prose, now=now,
+                per_pass=pass_limit["candidates_per_pass"])
         finally:
             _OBS_BOOK_CACHE.reset(token)
         return dict(got, catalogue={k: v for k, v in catalogue.items()
-                                    if k != "candidates"})
+                                    if k != "candidates"},
+                    pass_limit=pass_limit)
     except Exception as exc:                                    # noqa: BLE001
         return {"ok": False, "refusal": "PAIR_OBSERVATION_PASS_RAISED",
                 "error": "%s: %s" % (type(exc).__name__, str(exc)[:200])}
