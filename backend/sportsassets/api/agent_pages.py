@@ -1907,7 +1907,9 @@ def _authorised(request: Request) -> bool:
 #: the vendored three.js build) -- so their script-src adds 'self'. Nothing
 #: else changes: no external origin, connect-src 'self', no form posts.
 CC_PAGE_CSP = ("default-src 'none'; style-src 'unsafe-inline'; "
-               "script-src 'self' 'unsafe-inline'; connect-src 'self'; "
+               # 'wasm-unsafe-eval' lets the vendored Meshopt decoder compile
+               # its WebAssembly; it does NOT allow eval() of JavaScript
+               "script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; connect-src 'self'; "
                "img-src 'self' data:; base-uri 'none'; form-action 'none'; "
                # the management shell at /derek, /xavier and /audrey frames
                # these pages from the same origin; nothing else may frame them

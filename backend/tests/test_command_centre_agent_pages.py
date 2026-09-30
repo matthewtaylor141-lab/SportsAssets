@@ -899,6 +899,8 @@ def test_pages_may_be_framed_by_the_same_origin_only(monkeypatch, kind):
     r = c.get(P.PAGE_PATHS[kind], headers={"X-Admin-Token": _Cfg.admin_token})
     csp = r.headers["content-security-policy"]
     assert "frame-ancestors 'self'" in csp
+    # the model's Meshopt decoder is WebAssembly; JavaScript eval stays refused
+    assert "'wasm-unsafe-eval'" in csp and "'unsafe-eval'" not in csp.replace("'wasm-unsafe-eval'", "")
     assert "x-frame-options" not in {k.lower() for k in r.headers}
     assert "DENY" not in csp
     html = r.text
