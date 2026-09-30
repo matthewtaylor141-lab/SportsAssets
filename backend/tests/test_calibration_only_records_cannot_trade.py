@@ -407,8 +407,8 @@ READERS = {
     # Audrey: the daily audit and the improvement replay read ENTRY_DECISION
     # rows only (record_purpose filtered) to report and to evaluate candidate
     # thresholds by replay; neither selects a candidate or places anything
-    "agents/audrey_audit.py": ("AUDIT_REPORTING_FILTERS_ENTRY_DECISION", 4),
-    "agents/improvement.py": ("REPLAY_EVALUATION_FILTERS_ENTRY_DECISION", 3),
+    "agents/audrey_audit.py": ("AUDIT_REPORTING_FILTERS_ENTRY_DECISION", 5),
+    "agents/improvement.py": ("REPLAY_EVALUATION_FILTERS_ENTRY_DECISION", 5),
     # Audrey's chat reads ENTRY_DECISION rows (record_purpose filtered) to
     # answer why an entry was selected or refused; the workspace pages
     # name the table only in explanatory prose. Neither selects anything.
