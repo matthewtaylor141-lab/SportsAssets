@@ -260,6 +260,13 @@ async def workspace(conn, *, now: float | None = None) -> dict:
                  "next_review_at": _epoch(d.get("next_review_at")),
                  "policy": ((d.get("reasoning") or {}).get(
                      "xavier_ladder") or {}).get("policy"),
+                 "decision_policy": (d.get("reasoning") or {}).get(
+                     "decision_policy"),
+                 "shadow_comparison": (d.get("reasoning") or {}).get(
+                     "shadow_comparison"),
+                 "selection_scope": (d.get("reasoning") or {}).get(
+                     "selection_scope"),
+                 "search_completeness": _search(d),
                  "evidence": [_ev(d["xavier_decision_id"])]}
                 for d in ds]
         nxt = [r["next_review_at"] for r in rows
@@ -280,7 +287,8 @@ async def workspace(conn, *, now: float | None = None) -> dict:
                 v = pick(d)
                 if v:
                     out.append({"xavier_decision_id": d["xavier_decision_id"],
-                                "intent_id": d.get("intent_id"), name: v})
+                                "intent_id": d.get("intent_id"), name: v,
+                                "search_completeness": _search(d)})
             if not out:
                 return _sec(EMPTY, "THE_RECORDED_REVIEWS_CARRY_NO_%s "
                             "(written before the ladder existed, or no "
@@ -288,6 +296,16 @@ async def workspace(conn, *, now: float | None = None) -> dict:
             return _sec(OK, None, out,
                         [_ev(d["xavier_decision_id"]) for d in ds])
         return _f
+
+    def _search(d):
+        sc = dict(((d.get("reasoning") or {}).get("xavier_ladder") or {})
+                  .get("search_completeness") or {})
+        if not sc:
+            return None
+        return {k: sc.get(k) for k in (
+            "complete", "stop_reason", "comparison_scope", "discovered",
+            "examined", "excluded", "unexamined", "budget_statement",
+            "every_admitted_reached_the_comparison")}
 
     def _ladder(d):
         return ((d.get("reasoning") or {}).get("xavier_ladder") or {}).get(

@@ -2766,6 +2766,22 @@ class ReviewContext:
         except Exception as exc:                                # noqa: BLE001
             _xl["error"] = "%s: %s" % (type(exc).__name__, str(exc)[:160])
         reasoning["xavier_ladder"] = _xl
+        # ── THE POLICY THAT CHOSE, ITS SHADOW, AND THE SEARCH'S SCOPE ─────
+        # `decision_policy`: key, version, source (ACTIVE_POLICY /
+        # CODE_DEFAULT), rule, decision function and parameters of the ONE
+        # decision function that ran. `shadow_comparison`: the other
+        # policy's choice on the same frozen inputs -- displayed, never
+        # dispatched. `selection_scope`: never "best available" when the
+        # hedge search was limited.
+        reasoning["decision_policy"] = (dec or {}).get("decision_policy")
+        reasoning["shadow_comparison"] = (dec or {}).get("shadow_comparison")
+        reasoning["search_policy_gate"] = (dec or {}).get(
+            "search_policy_gate")
+        _sc = dict(_xl.get("search_completeness") or {})
+        reasoning["selection_scope"] = (
+            "%s selected; HOLD / EXIT / REDUCE compared as priced; indirect "
+            "pairs: %s" % (chosen or action or "NOTHING",
+                           _sc.get("comparison_scope") or "NOT_ESTABLISHED"))
         scope = dict(step.get("filled_scope") or {})
         exposure = {"held_qty": qty, "filled_qty": scope.get("intent_filled"),
                     "matched_units": scope.get("matched_units"),

@@ -225,3 +225,6 @@ tests/test_xavier_policy_default_is_the_approved_policy.py
 # (1002) Xavier's workspace reads truthfully (EMPTY named), its decision
 # route, and after_review's links into agent_decisions
 tests/test_xavier_workspace_reads_truthfully.py
+# (1002) search completeness through _funded_service (budget spent, persisted,
+# served; EXIT/REDUCE kept) and the policy selecting the real decision function
+tests/test_xavier_search_completeness_and_policy_through_the_cycle.py
