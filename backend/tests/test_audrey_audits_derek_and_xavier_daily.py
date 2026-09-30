@@ -514,9 +514,15 @@ def test_the_workspace_names_every_section_and_discloses_no_key(monkeypatch):
         assert s["provider"]["data"] == {
             "configured": True, "variable": "ANTHROPIC_API_KEY",
             "value_disclosed": False}
-        assert s["directives"]["status"] == "UNAVAILABLE"
-        assert s["directives"]["why"] == "chat stream not merged"
-        assert s["conversations"]["why"] == "chat stream not merged"
+        # With the chat stream merged the directive and conversation tables
+        # exist: nothing in them for this test is EMPTY with its reason, and
+        # without them (an unmigrated database) the section says why.
+        for name in ("directives", "conversations"):
+            if s[name]["status"] == "UNAVAILABLE":
+                assert s[name]["why"] == "chat stream not merged"
+            else:
+                assert s[name]["status"] in ("EMPTY", "OK"), (name, s[name])
+                assert s[name]["status"] == "OK" or s[name]["why"]
         assert s["daily_reports"]["status"] == "OK"
         rid = s["daily_reports"]["data"][0]["report_id"]
         assert s["daily_reports"]["evidence"][0]["href"].endswith(rid)

@@ -459,69 +459,98 @@ EV_COLS = ("id, experiment_id, record_purpose, venue, us_market_slug, "
 
 async def _entry_rows(conn, *, decision_id: str | None = None,
                       fixture: str | None = None, limit: int = 5) -> dict:
+    """ENTRY DECISIONS FROM BOTH AUTHORITATIVE SOURCES, NEWEST FIRST.
+
+    Derek's policy decisions (derek_entry_decisions) and the entry lane's
+    valuations (external_valuations, ENTRY_DECISION rows) are merged by
+    decision time. A valuation Derek has judged appears ONCE, as Derek's
+    decision (which cites the valuation id it judged); a valuation Derek has
+    not judged is still shown. A lookup by id tries Derek's decision id
+    first, then the valuation id."""
     out = {"rows": [], "citations": [], "source": None, "notes": []}
+    rows: list = []
+    judged: set = set()
     if await _regclass(conn, "derek_entry_decisions"):
         try:
             if decision_id:
-                rows = await conn.fetch(
-                    "SELECT to_jsonb(d) AS j FROM derek_entry_decisions d "
-                    " WHERE to_jsonb(d)->>'decision_id' = $1 "
-                    "    OR to_jsonb(d)->>'id' = $1 "
-                    "    OR to_jsonb(d)->>'decision_ref' = $1 LIMIT $2",
+                got = await conn.fetch(
+                    "SELECT to_jsonb(d) AS j, extract(epoch FROM "
+                    " d.decided_at)::float8 AS t FROM derek_entry_decisions d"
+                    " WHERE d.decision_id = $1 LIMIT $2",
                     str(decision_id), int(limit))
             elif fixture:
-                rows = await conn.fetch(
-                    "SELECT to_jsonb(d) AS j FROM derek_entry_decisions d "
-                    " WHERE to_jsonb(d)::text ILIKE $1 ORDER BY "
-                    " to_jsonb(d)->>'decided_at' DESC NULLS LAST LIMIT $2",
+                got = await conn.fetch(
+                    "SELECT to_jsonb(d) AS j, extract(epoch FROM "
+                    " d.decided_at)::float8 AS t FROM derek_entry_decisions d"
+                    " WHERE d.fixture ILIKE $1 OR d.us_market_slug ILIKE $1 "
+                    " ORDER BY d.decided_at DESC LIMIT $2",
                     _like(fixture), int(limit))
             else:
-                rows = await conn.fetch(
-                    "SELECT to_jsonb(d) AS j FROM derek_entry_decisions d "
-                    " ORDER BY to_jsonb(d)->>'decided_at' DESC NULLS LAST "
-                    " LIMIT $1", int(limit))
-            for r in rows:
+                got = await conn.fetch(
+                    "SELECT to_jsonb(d) AS j, extract(epoch FROM "
+                    " d.decided_at)::float8 AS t FROM derek_entry_decisions d"
+                    " ORDER BY d.decided_at DESC LIMIT $1", int(limit))
+            for r in got:
                 j = _jsonable(r["j"])
-                out["rows"].append(dict(j, _source="derek_entry_decisions"))
-                out["citations"].append(_cite(
-                    "derek_entry_decisions", _row_id(j),
-                    "/api/command/agents/derek"))
-            if out["rows"]:
-                out["source"] = "derek_entry_decisions"
-                return out
+                if j.get("valuation_id") is not None:
+                    judged.add(str(j["valuation_id"]))
+                rows.append((float(r["t"] or 0.0),
+                             dict(j, _source="derek_entry_decisions")))
         except Exception as exc:                                # noqa: BLE001
             out["notes"].append("DEREK_ENTRY_DECISIONS_READ_FAILED:%s"
                                 % type(exc).__name__)
-    if not await _regclass(conn, "external_valuations"):
+    if decision_id and rows:
+        pass                                  # found by Derek's decision id
+    elif not await _regclass(conn, "external_valuations"):
         out["notes"].append("EXTERNAL_VALUATIONS_TABLE_ABSENT")
-        return out
-    if decision_id:
-        m = re.search(r"(\d+)", str(decision_id))
-        if not m:
-            out["notes"].append("NOT_AN_EXTERNAL_VALUATION_ID")
-            return out
-        rows = await conn.fetch(
-            "SELECT %s FROM external_valuations WHERE id=$1" % EV_COLS,
-            int(m.group(1)))
-    elif fixture:
-        rows = await conn.fetch(
-            "SELECT %s FROM external_valuations WHERE record_purpose = "
-            " 'ENTRY_DECISION' AND (event_key ILIKE $1 OR us_market_slug "
-            " ILIKE $1 OR condition_id ILIKE $1 OR market ILIKE $1 OR "
-            " contract_selection ILIKE $1) ORDER BY decided_at DESC, id DESC "
-            " LIMIT $2" % EV_COLS, _like(fixture), int(limit))
     else:
-        rows = await conn.fetch(
-            "SELECT %s FROM external_valuations WHERE record_purpose = "
-            " 'ENTRY_DECISION' ORDER BY decided_at DESC, id DESC LIMIT $1"
-            % EV_COLS, int(limit))
-    for r in rows:
-        d = _jsonable(dict(r))
-        d["_source"] = "external_valuations"
+        ev: list = []
+        if decision_id:
+            m = re.search(r"(\d+)", str(decision_id))
+            if not m:
+                out["notes"].append("NOT_AN_EXTERNAL_VALUATION_ID")
+            else:
+                ev = await conn.fetch(
+                    "SELECT %s, extract(epoch FROM decided_at)::float8 AS _t "
+                    " FROM external_valuations WHERE id=$1" % EV_COLS,
+                    int(m.group(1)))
+        elif fixture:
+            ev = await conn.fetch(
+                "SELECT %s, extract(epoch FROM decided_at)::float8 AS _t "
+                " FROM external_valuations WHERE record_purpose = "
+                " 'ENTRY_DECISION' AND (event_key ILIKE $1 OR us_market_slug "
+                " ILIKE $1 OR condition_id ILIKE $1 OR market ILIKE $1 OR "
+                " contract_selection ILIKE $1) ORDER BY decided_at DESC, "
+                " id DESC LIMIT $2" % EV_COLS, _like(fixture), int(limit))
+        else:
+            ev = await conn.fetch(
+                "SELECT %s, extract(epoch FROM decided_at)::float8 AS _t "
+                " FROM external_valuations WHERE record_purpose = "
+                " 'ENTRY_DECISION' ORDER BY decided_at DESC, id DESC "
+                " LIMIT $1" % EV_COLS, int(limit))
+        for r in ev:
+            d = _jsonable(dict(r))
+            t = float(d.pop("_t", None) or 0.0)
+            if str(d.get("id")) in judged:
+                continue                      # shown once, as Derek's decision
+            d["_source"] = "external_valuations"
+            rows.append((t, d))
+    rows.sort(key=lambda x: x[0], reverse=True)
+    for _t, d in rows[:int(limit)]:
         out["rows"].append(d)
-        out["citations"].append(_cite("external_valuations", d["id"],
-                                      "/api/command/agents/derek"))
-    out["source"] = "external_valuations"
+        if d["_source"] == "derek_entry_decisions":
+            out["citations"].append(_cite(
+                "derek_entry_decisions", _row_id(d),
+                "/api/command/agents/derek"))
+            if d.get("valuation_id") is not None:
+                out["citations"].append(_cite(
+                    "external_valuations", d["valuation_id"],
+                    "/api/command/agents/derek"))
+        else:
+            out["citations"].append(_cite("external_valuations", d["id"],
+                                          "/api/command/agents/derek"))
+    srcs = sorted({d["_source"] for d in out["rows"]})
+    out["source"] = "+".join(srcs) if srcs else None
     return out
 
 

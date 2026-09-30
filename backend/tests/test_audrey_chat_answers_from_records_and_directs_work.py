@@ -238,7 +238,12 @@ def test_a_directive_is_created_assigned_and_reported_the_next_day(
     did = d["directive_id"]
     want_tasks = [D.task_id_for(did, "DEREK"), D.task_id_for(did, "XAVIER")]
     assert d["task_ids"] == want_tasks
-    assert set(_cited(got, "agent_tasks")) == set(want_tasks)
+    # Other open work (other directives, improvement tasks) may be listed
+    # too in a shared database; THIS directive's tasks are exactly these.
+    cited = set(_cited(got, "agent_tasks"))
+    assert set(want_tasks) <= cited
+    assert {t for t in cited if t.startswith("task-%s-" % did)} == \
+        set(want_tasks)
     assert _cited(got, "management_directives") == [did]
 
     tasks = F.run(_q("SELECT task_id, assignee, status, directive_id, spec, "
@@ -304,7 +309,12 @@ def test_a_directive_is_created_assigned_and_reported_the_next_day(
     # the proposals question now shows the directive work under way
     got = _chat(client, F.desk_headers(), "What change are you proposing?",
                 "chatt-conv-next-day")
-    assert set(_cited(got, "agent_tasks")) == set(want_tasks)
+    # Other open work (other directives, improvement tasks) may be listed
+    # too in a shared database; THIS directive's tasks are exactly these.
+    cited = set(_cited(got, "agent_tasks"))
+    assert set(want_tasks) <= cited
+    assert {t for t in cited if t.startswith("task-%s-" % did)} == \
+        set(want_tasks)
 
     # both tasks close without a change: the directive is COMPLETED, truthfully
     async def _close():

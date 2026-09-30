@@ -409,6 +409,11 @@ READERS = {
     # thresholds by replay; neither selects a candidate or places anything
     "agents/audrey_audit.py": ("AUDIT_REPORTING_FILTERS_ENTRY_DECISION", 4),
     "agents/improvement.py": ("REPLAY_EVALUATION_FILTERS_ENTRY_DECISION", 3),
+    # Audrey's chat reads ENTRY_DECISION rows (record_purpose filtered) to
+    # answer why an entry was selected or refused; the workspace pages
+    # name the table only in explanatory prose. Neither selects anything.
+    "agents/audrey_chat.py": ("CHAT_READS_ENTRY_DECISION_FOR_ANSWERS", 16),
+    "api/agent_pages.py": ("PROSE_ONLY", 3),
     # read-only reporting / prose / probes
     "bettor_capacity_fingerprint.py": ("COUNT_ONLY", 2),
     # counts rows by record_purpose for the management overview; selects

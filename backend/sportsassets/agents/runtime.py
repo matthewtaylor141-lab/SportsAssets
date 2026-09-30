@@ -403,7 +403,12 @@ async def slow_half(conn, *, now: float | None = None) -> dict:
     improve = await call_hook(conn, R.AUDREY, "improvement", "run_due",
                               now=at, timeout_s=SLOW_HOOK_TIMEOUT_S,
                               record_failure=False)
-    hooks = (audit, improve)
+    # Management directives follow their linked tasks' outcomes on the
+    # schedule, not only when someone reads them (directives.monitor).
+    directives = await call_hook(conn, R.AUDREY, "directives", "monitor",
+                                 now=at, timeout_s=SLOW_HOOK_TIMEOUT_S,
+                                 record_failure=False)
+    hooks = (audit, improve, directives)
     raised = [h for h in hooks if not h.get("ok") and h.get("installed")]
     missing = [h for h in hooks if not h.get("ok") and not h.get("installed")]
     deps = {h["hook"]: {"ok": h.get("ok"), "installed": h.get("installed"),
@@ -431,4 +436,5 @@ async def slow_half(conn, *, now: float | None = None) -> dict:
                       now=at, error=error, dependencies=deps,
                       run={"finished_at": at + elapsed, "elapsed_s": elapsed})
     return {"at": at, "state": state, "audrey_audit": _digest(audit),
-            "improvement": _digest(improve)}
+            "improvement": _digest(improve),
+            "directives": _digest(directives)}
