@@ -150,6 +150,28 @@ S_RECONNECTING = "RECONNECTING"
 S_GAVE_UP = "GAVE_UP"
 S_REFUSED_BY_VENUE = "REFUSED_BY_VENUE"
 S_STOPPED = "STOPPED"
+S_WAITING_FOR_DEDICATED_KEY = "WAITING_FOR_DEDICATED_MARKET_DATA_KEY"
+
+#: WHICH CREDENTIAL THE SUBSCRIPTION MAY USE. "dedicated" (the default) uses
+#: only PMUS_MD_KEY_ID/PMUS_MD_SECRET_KEY -- a SEPARATE ORDINARY Polymarket US
+#: API key used for market data -- and waits, by name, when they are absent.
+#: "shared" uses the venue key the protected worker also streams with and must
+#: be chosen explicitly. WHAT THE SEPARATION DOES AND DOES NOT DO: it gives
+#: separate revocation and MAY isolate limits the venue applies per key; it
+#: does NOT establish protection from limits applied per account, participant,
+#: endpoint or IP, none of which is established. This application path only
+#: reads, but that does not make the credential itself read-only: the key's
+#: permissions are whatever the venue grants and enforces. Its authentication
+#: is verified only by the connection itself (a 401/403 reads REFUSED_BY_VENUE),
+#: never by the length of the configured value.
+ENV_KEY_SOURCE = "BETTOR_MARKET_SUBSCRIPTION_KEY"
+KEY_DEDICATED = "dedicated"
+KEY_SHARED = "shared"
+
+
+def credential_source() -> str:
+    v = str(os.environ.get(ENV_KEY_SOURCE, "")).strip().lower()
+    return KEY_SHARED if v == KEY_SHARED else KEY_DEDICATED
 RUNNING_STATES = (S_CONNECTING, S_CONNECTED, S_RECONNECTING, S_GAVE_UP,
                   S_REFUSED_BY_VENUE)
 
@@ -736,8 +758,21 @@ def start_default(*, settings=None) -> dict:
         if settings is None:
             from .config import settings as _settings
             settings = _settings()
-        key_id = getattr(settings, "pmus_key_id", None)
-        secret = getattr(settings, "pmus_secret_key", None)
+        source = credential_source()
+        _LAST_START["credential_source"] = source
+        if source == KEY_DEDICATED:
+            key_id = getattr(settings, "pmus_md_key_id", None)
+            secret = getattr(settings, "pmus_md_secret_key", None)
+            if not key_id or not secret:
+                _LAST_START.update(
+                    state=S_WAITING_FOR_DEDICATED_KEY,
+                    why=("PMUS_MD_KEY_ID / PMUS_MD_SECRET_KEY are not configured "
+                         "in this process; the shared venue key is not used "
+                         "unless %s=shared is set explicitly" % ENV_KEY_SOURCE))
+                return dict(_LAST_START, started=False)
+        else:
+            key_id = getattr(settings, "pmus_key_id", None)
+            secret = getattr(settings, "pmus_secret_key", None)
         if not key_id or not secret:
             _LAST_START.update(state=S_NO_CREDENTIALS,
                                why="the venue key is not configured in this "
@@ -851,9 +886,11 @@ def heartbeat_digest(*, now=None) -> dict:
                     "subscription_state": _LAST_START.get("state"),
                     "why": _LAST_START.get("why"),
                     "enabled_by": ENV_FLAG, "markets": 0, "by_readiness": {},
+                    "credential_source": _LAST_START.get("credential_source"),
                     "decision_m1_refusals_since_start": m1}
         d = sub.digest(now=now)
         d["enabled_by"] = ENV_FLAG
+        d["credential_source"] = _LAST_START.get("credential_source")
         d["decision_m1_refusals_since_start"] = m1
         return d
     except Exception as exc:  # noqa: BLE001

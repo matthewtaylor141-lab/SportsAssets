@@ -265,6 +265,14 @@ class Settings(BaseSettings):
     # for US-based accounts.
     pmus_key_id: str = ""
     pmus_secret_key: str = ""
+    # A SEPARATE ordinary Polymarket US API key used for the API process's
+    # market-data subscription (env PMUS_MD_KEY_ID / PMUS_MD_SECRET_KEY),
+    # apart from the key the protected worker streams with: separate
+    # revocation, and possibly separate per-key limits. It does not isolate
+    # limits applied per account, participant, endpoint or IP, and the key
+    # is not read-only merely because this path only reads. Never logged.
+    pmus_md_key_id: str = ""
+    pmus_md_secret_key: str = ""
     # Global CLOB (non-US accounts only) — unused when PMUS keys are set.
     pm_private_key: str = ""       # dedicated wallet key (export from PM settings)
     pm_funder: str = ""            # your Polymarket profile (proxy) address

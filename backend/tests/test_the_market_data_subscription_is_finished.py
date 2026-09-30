@@ -629,6 +629,9 @@ def test_nothing_installed_is_not_subscribed_and_the_default_is_off(
         pmus_key_id=KEY_ID, pmus_secret_key=SECRET))
     assert got["state"] == SUB.S_DISABLED and not built
     monkeypatch.setenv(SUB.ENV_FLAG, "on")
+    # The shared venue key is used only when chosen explicitly (see
+    # test_the_dedicated_key_is_the_default_and_the_shared_key_is_never_implied).
+    monkeypatch.setenv(SUB.ENV_KEY_SOURCE, SUB.KEY_SHARED)
     got = SUB.start_default(settings=types.SimpleNamespace(
         pmus_key_id="", pmus_secret_key=""))
     assert got["state"] == SUB.S_NO_CREDENTIALS and not built
@@ -640,6 +643,7 @@ def test_start_default_arms_with_the_configured_key_when_switched_on(
         monkeypatch):
     venue = FakeVenue([{"then": "stay"}])
     monkeypatch.setenv(SUB.ENV_FLAG, "on")
+    monkeypatch.setenv(SUB.ENV_KEY_SOURCE, SUB.KEY_SHARED)
     real = SUB.MarketSubscription
     monkeypatch.setattr(SUB, "MarketSubscription",
                         lambda k, s_: real(k, s_, ws_factory=venue))
@@ -652,6 +656,56 @@ def test_start_default_arms_with_the_configured_key_when_switched_on(
         assert time.time() < deadline
         time.sleep(0.01)
     assert venue.credentials_seen == [(KEY_ID, SECRET)]
+    assert SUB.shutdown_default(wait_s=5.0)["stopped"] is True
+
+
+def test_the_dedicated_key_is_the_default_and_the_shared_key_is_never_implied(
+        monkeypatch):
+    """THE PROTECTED WORKER STREAMS WITH THE SHARED VENUE KEY, and the venue's
+    per-key connection limit is not established. Switching the subscription
+    on must therefore never open a second connection on that key by default:
+    with only the shared key configured it WAITS, by name, and builds nothing.
+    """
+    built = []
+    monkeypatch.setattr(SUB, "MarketSubscription",
+                        lambda *a, **k: built.append(a))
+    monkeypatch.setenv(SUB.ENV_FLAG, "on")
+    monkeypatch.delenv(SUB.ENV_KEY_SOURCE, raising=False)
+    got = SUB.start_default(settings=types.SimpleNamespace(
+        pmus_key_id=KEY_ID, pmus_secret_key=SECRET,
+        pmus_md_key_id="", pmus_md_secret_key=""))
+    assert got["state"] == SUB.S_WAITING_FOR_DEDICATED_KEY and not built
+    assert got["credential_source"] == SUB.KEY_DEDICATED
+    d = SUB.heartbeat_digest()
+    assert d["subscription_state"] == SUB.S_WAITING_FOR_DEDICATED_KEY
+    assert d["credential_source"] == SUB.KEY_DEDICATED
+    assert SECRET not in repr(d) and KEY_ID not in repr(d)
+    # Any other value of the source variable is still the dedicated default.
+    monkeypatch.setenv(SUB.ENV_KEY_SOURCE, "SHARED-please")
+    SUB.reset()
+    got = SUB.start_default(settings=types.SimpleNamespace(
+        pmus_key_id=KEY_ID, pmus_secret_key=SECRET))
+    assert got["state"] == SUB.S_WAITING_FOR_DEDICATED_KEY and not built
+
+
+def test_the_dedicated_key_is_what_the_stream_is_built_with(monkeypatch):
+    venue = FakeVenue([{"then": "stay"}])
+    monkeypatch.setenv(SUB.ENV_FLAG, "on")
+    monkeypatch.delenv(SUB.ENV_KEY_SOURCE, raising=False)
+    real = SUB.MarketSubscription
+    monkeypatch.setattr(SUB, "MarketSubscription",
+                        lambda k, s_: real(k, s_, ws_factory=venue))
+    got = SUB.start_default(settings=types.SimpleNamespace(
+        pmus_key_id=KEY_ID, pmus_secret_key=SECRET,
+        pmus_md_key_id="md-" + KEY_ID, pmus_md_secret_key="md-" + SECRET))
+    assert got["started"] is True
+    SUB.active().stream._idle_s = 0.005
+    deadline = time.time() + 5.0
+    while not venue.sockets:
+        assert time.time() < deadline
+        time.sleep(0.01)
+    assert venue.credentials_seen == [("md-" + KEY_ID, "md-" + SECRET)]
+    assert SUB.heartbeat_digest()["credential_source"] == SUB.KEY_DEDICATED
     assert SUB.shutdown_default(wait_s=5.0)["stopped"] is True
 
 
