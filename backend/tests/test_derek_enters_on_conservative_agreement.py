@@ -370,7 +370,23 @@ async def _approve_entry_model(conn) -> dict:
     assert prom.get("ok"), prom
     ap = await FM.approved(conn, model_key=FM.KEY_ENTRY_PAYOUT)
     assert ap["ok"] and ap["provenance_verified"], ap
+    await league_reports_not_started(conn)
     return ap
+
+
+async def league_reports_not_started(conn):
+    """THE LEAGUE'S "NOT STARTED" REPORT, RESTATED JUST BEFORE THE CYCLE.
+
+    The cycle's quote is pre-game only if it was observed at or before the
+    fixture row's `retrieved_at` (bettor_fixture_metadata.context_for), and
+    `_seed` stamps that instant. Building the synthetic model between the two
+    used to take under the quote's 2-second stamp age, so the window held by
+    accident; once the approval took longer (the research step, the larger
+    cohort) the quote fell outside it and the book context became UNKNOWN
+    (VOID_ABANDONMENT_BOOK_RULE_NOT_HELD) in about half the runs. The
+    harness's premise is a fresh league report; this states it."""
+    await conn.execute("UPDATE fixture_metadata SET retrieved_at = now() "
+                       " WHERE condition_id = $1", CONDITION)
 
 
 async def _decision_for(conn, valuation_id):

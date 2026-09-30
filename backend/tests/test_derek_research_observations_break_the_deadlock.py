@@ -1008,6 +1008,7 @@ async def test_a_model_that_beats_the_price_qualifies_and_derek_uses_it(
         assert ap["model"]["approved_by"] == APPROVER
 
         # ── DEREK'S GATE USES IT, IN A REAL CYCLE ────────────────────
+        await DT.league_reports_not_started(conn)
         DT._stub(monkeypatch, p_home=0.60)
         captured: list = []
         DT._wrap_funded_attempt(monkeypatch, captured)
