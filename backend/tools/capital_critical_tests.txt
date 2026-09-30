@@ -388,3 +388,7 @@ tests/test_speech_pronunciation_normaliser.py
 # orders UNAVAILABLE when not in this build, the DEMONSTRATION payoff through
 # xavier_ladder.group_table (full and partial hedge), Audrey's FALLBACK MODE
 tests/test_command_centre_agent_pages.py
+# the three agent pages render the REAL paper modules' payload shapes (built
+# from bettor_paper_ledger / command_paper / bettor_paper_readmodel over a fake
+# connection), so a contract drift between server and page fails the gate
+tests/test_command_centre_paper_contract.py
