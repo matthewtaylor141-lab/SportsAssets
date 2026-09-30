@@ -42,7 +42,7 @@ It establishes nothing about profitability.
 | `event_exposure_usd` | **50** | This room is for a primary ($25) plus a same-game protective hedge of up to $25. If it equalled `per_market_usd`, the event rail would refuse every protective hedge. That matters under hedge policy (i). |
 | `capital_usd` | **250** | Enough for 10 concurrent markets at $25, or 5 hedged pairs. Concurrency, restart recovery and group management then occur for real. |
 | `max_exposure_usd` | **250** | This measures the same number as capital. A lower value would silently become the real capital cap, so it is set equal and one number governs. |
-| `cumulative_loss_stop_usd` | **75** | 30% of capital. Open positions with no bid count at full cost, so with $25 markets and no bids, entries stop once two such positions are open (25 + 25 + the proposed 25 = 75). Realised losses never reset: after $75 of cumulative realised plus worst-case loss, the pilot stops taking new exposure until you decide to start a new book. Exits and settlement continue. |
+| `cumulative_loss_stop_usd` | **75** | 30% of capital. Open positions with no bid count at full cost. The rail refuses only above its value, so with $25 markets and no bids, at most three such positions can be open (25 + 25 + 25 = 75 is allowed; a fourth is refused). Realised losses never reset: after $75 of cumulative realised plus worst-case loss, the pilot stops taking new exposure until you decide to start a new book. Exits and settlement continue. |
 
 **Your choice:** accept these five numbers, or write your own. Each must be above 0 and at or below its cap, and `per_market_usd` cannot exceed `capital_usd`.
 
