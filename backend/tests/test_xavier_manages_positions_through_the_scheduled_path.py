@@ -1281,10 +1281,15 @@ async def test_f_a_settlement_correction_corrects_accounting_and_invalidates_lea
         assert m["retired_reason"].startswith(
             FMD.RETIRED_EVIDENCE_INVALIDATED), m
         # XAVIER'S DAILY REVIEW MARKED THE DECISION INVALIDATED
-        rev = await XR.latest_review(conn)
+        # THIS CYCLE'S REVIEW: the row for its own UTC date (another test's
+        # review may carry a later date, so "the newest row" is not ours)
+        assert three["xavier_review"]["ran"] is True, three["xavier_review"]
+        rev = await conn.fetchrow(
+            "SELECT invalidated::text AS inv FROM bettor_xavier_reviews "
+            " WHERE review_date=$1", XR.utc_date(time.time()))
         assert rev is not None
-        inv = {i["xavier_decision_id"]: i for i in rev["invalidated"]}
-        assert rec1["xavier_decision_id"] in inv, rev["invalidated"]
+        inv = {i["xavier_decision_id"]: i for i in json.loads(rev["inv"])}
+        assert rec1["xavier_decision_id"] in inv, inv
         assert inv[rec1["xavier_decision_id"]]["reason"] == \
             XR.INV_VENUE_DISAGREES
 
