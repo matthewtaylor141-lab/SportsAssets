@@ -30,6 +30,8 @@ tests/test_acquisition_ladder_is_side_aware.py
 tests/test_admission_control.py
 tests/test_admission_fractional.py
 tests/test_admission_policies.py
+# (1002) proof 22: the Derek, Xavier and Audrey workspaces, index and demo draw the contract truthfully
+tests/test_agent_workspaces_render_the_contract.py
 tests/test_an_action_is_valued_only_on_depth_its_limit_can_reach.py
 tests/test_an_autonomous_entry_is_not_counted_twice.py
 tests/test_an_indirect_pair_is_valued_on_the_outcomes.py
