@@ -112,6 +112,7 @@ R_ANOTHER_LIVE = FB.R_ANOTHER_INTENT_IS_LIVE
 R_LOST_ACKNOWLEDGEMENT = "THE_REQUEST_LEFT_AND_THE_ANSWER_WAS_LOST"
 R_VENUE_GATE_DENIED = "THE_VENUE_BOUNDARY_GATE_DENIED_IT_BEFORE_SENDING"
 R_PRICE_UNREPRESENTABLE = "THE_LIMIT_PRICE_CANNOT_BE_SENT_WITHOUT_LOOSENING_THE_BOUND"
+R_INPUTS_EXPIRED_AT_SEND = "THE_PLANS_INPUTS_EXPIRED_ON_THE_REAL_CLOCK_BEFORE_THE_SEND"
 
 #: The one intent this lane sends. The adapter refuses an unnamed side on any
 #: market whose two sides share an identifier -- every `aec-` match -- so the
@@ -801,10 +802,46 @@ async def _consume_on_acknowledgement(conn, *, operation_id, intent_id,
     if not order_id:
         # NO ID MEANS THE VENUE NAMED NOTHING, whatever else it said. The
         # acquisition is AMBIGUOUS, not consumed, and the leg stays claimed.
-        return await RSV.mark_ambiguous(
+        amb = await RSV.mark_ambiguous(
             conn, operation_id=operation_id,
             why=("the venue answered without an order id (status %r), so no "
                  "order has been named" % ((answer or {}).get("status"),)))
+        # ── AN EXPLICIT REFUSAL IN THE ANSWER IS EVIDENCE, NOT AN UNKNOWN ──
+        #
+        # THE GAP THIS CLOSES (Xavier execution map Q4). A hedge refused in
+        # the response body (`rejected`, `preview_mismatch`, ...) left its
+        # intent REJECTED and its leg claim AMBIGUOUS, and no path resolved
+        # the claim: it held the leg and the group open forever. Only when
+        # the answer is an EXPLICIT refusal -- the book has already recorded
+        # the intent REJECTED from that very status -- is the answer written
+        # down as evidence and the claim released on it. Anything else (an
+        # unknown status, an ok answer with no id) stays AMBIGUOUS and keeps
+        # the exposure counted; an exception never reaches here at all.
+        if amb.get("ok") and str(ack.get("state") or "") == "REJECTED" \
+                and not bool((answer or {}).get("ok")):
+            ev = await RSV.record_venue_evidence(
+                conn, evidence_id="ev:refused:%s" % operation_id,
+                operation_id=operation_id, account_id=account_id,
+                venue=venue, us_market_slug=plan["us_market_slug"],
+                intent_id=intent_id, kind=RSV.EV_REFUSED_IN_ANSWER,
+                search_endpoint="%s.submit_fok" % ADAPTER_MODULE,
+                search_scope={"account_id": account_id,
+                              "us_market_slug": plan["us_market_slug"],
+                              "intent_id": intent_id},
+                covered_terminal_orders=False, results_returned=0,
+                window_from_epoch_s=at, window_to_epoch_s=at,
+                raw={"status": (answer or {}).get("status"),
+                     "ok": bool((answer or {}).get("ok")),
+                     "order_id": None,
+                     "intent_state_recorded": ack.get("state")},
+                read_at=at)
+            if ev.get("ok"):
+                rel = await RSV.release_on_explicit_refusal(
+                    conn, operation_id=operation_id)
+                return dict(amb, released_on_explicit_refusal=rel,
+                            evidence=ev)
+            return dict(amb, refusal_evidence=ev)
+        return amb
     ev = await RSV.record_venue_evidence(
         conn, evidence_id="ev:%s:%s" % (operation_id, order_id),
         operation_id=operation_id, account_id=account_id, venue=venue,
@@ -1057,6 +1094,31 @@ async def submit_for_decision(conn, rec: dict, *, account_id: str,
     if missing:
         return dict(out, ok=False, refusal=R_NO_ADAPTER, missing=missing,
                     why="the adapter does not carry the surface this needs")
+    # ── THE REAL CLOCK, IMMEDIATELY BEFORE ANYTHING IS WRITTEN OR SENT ──
+    #
+    # THE GAP THIS CLOSES (Xavier execution map Q3). A hedge's evidence expiry
+    # was checked three times, and all three used the PASS-START instant: a
+    # pass that spent its time on other positions could send a hedge priced
+    # on a quote that had already died. The record carries the plan's own
+    # `inputs_expire_at` (only a hedge admission record does), and it is read
+    # against `time.time()` HERE -- after every gate and before boundary 1,
+    # the last point at which a refusal leaves no intent row and the leg's
+    # claim is still HELD, so the caller can release it as never sent. From
+    # boundary 2 onward a claim cannot be released, which is why this is not
+    # later.
+    expiry = (rec or {}).get("inputs_expire_at")
+    if expiry is not None:
+        now_real = time.time()
+        out["inputs_expiry_at_send"] = {
+            "inputs_expire_at": float(expiry), "checked_at": now_real,
+            "remaining_s": round(float(expiry) - now_real, 3),
+            "clock": "REAL"}
+        if now_real >= float(expiry):
+            return dict(out, ok=False, refusal=R_INPUTS_EXPIRED_AT_SEND,
+                        nothing_was_written=True, exposure="NONE",
+                        why=("the plan's inputs expired %.3f s before the "
+                             "send on the real clock. Nothing was written and "
+                             "nothing was sent" % (now_real - float(expiry))))
 
     # ── INTENT IS COMMITTED BEFORE THE REQUEST LEAVES ───────────────
     #
@@ -1080,6 +1142,17 @@ async def submit_for_decision(conn, rec: dict, *, account_id: str,
                           "sized_from": plan["sized_from"],
                           "payout_event": plan.get("payout_event"),
                           "reservation_operation_id": operation_id,
+                          # ── THE ORDER NAMES THE DECISION IT EXECUTES ──
+                          # Carried from the admission record when the
+                          # scheduled pass built one; None for an entry.
+                          "decision_id": (rec or {}).get("decision_id"),
+                          "plan_digest": (rec or {}).get("plan_digest"),
+                          "xavier_decision_id": (rec or {}).get(
+                              "xavier_decision_id"),
+                          "candidate_id": (rec or {}).get("candidate_id"),
+                          # WHAT THE LEG SETTLES ON, beside what it pays on.
+                          "settlement_identity": (rec or {}).get(
+                              "settlement_identity"),
                           "sized_to_approved_rails": (
                               {k: out["sized_to_fit"].get(k) for k in
                                ("from_quantity", "to_quantity", "why")}

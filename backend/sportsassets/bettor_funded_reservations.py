@@ -514,10 +514,20 @@ EV_ATTESTED_NO_EXPOSURE = "OPERATOR_ATTESTED_NO_EXPOSURE"
 #: `consume_on_operator_naming`, and the reservation's resolution says who
 #: named it.
 EV_OPERATOR_NAMED = "OPERATOR_NAMED_THE_ORDER"
+#: THE VENUE REFUSED THE ORDER IN ITS OWN ANSWER (migration 150). The send
+#: returned, carried no order id, and stated an EXPLICIT refusal status that the
+#: book recorded as REJECTED on the intent. It is its own kind so that it can
+#: never satisfy a check written for `VENUE_HAS_NO_SUCH_ORDER` (a terminal-order
+#: search): it is read only by `release_on_explicit_refusal`, which also
+#: requires the intent itself to be REJECTED with no venue order id.
+EV_REFUSED_IN_ANSWER = "VENUE_REFUSED_THE_ORDER_IN_ITS_ANSWER"
 EVIDENCE_KINDS = (EV_NAMED, EV_NO_SUCH_ORDER, EV_ESTABLISHED_NOTHING,
-                  EV_ATTESTED_NO_EXPOSURE, EV_OPERATOR_NAMED)
+                  EV_ATTESTED_NO_EXPOSURE, EV_OPERATOR_NAMED,
+                  EV_REFUSED_IN_ANSWER)
 WHY_OPERATOR_ATTESTED_NO_EXPOSURE = "AN_OPERATOR_ATTESTED_NO_EXPOSURE_EXISTS"
 WHY_OPERATOR_NAMED_THE_ORDER = "AN_OPERATOR_NAMED_THE_ORDER"
+WHY_VENUE_REFUSED_IN_ITS_ANSWER = "THE_VENUE_REFUSED_THE_ORDER_IN_ITS_ANSWER"
+R_INTENT_NOT_REJECTED = "THE_INTENT_WAS_NOT_RECORDED_AS_REFUSED_BY_THE_VENUE"
 
 R_NO_EVIDENCE = "NO_DURABLE_EVIDENCE_IS_BOUND_TO_THIS_OPERATION"
 R_EVIDENCE_NOT_BOUND = "THE_EVIDENCE_IS_NOT_BOUND_TO_THIS_OPERATIONS_FACTS"
@@ -847,6 +857,14 @@ async def resolve_from_the_venue(conn, *, operation_id: str,
             conn, operation_id=operation_id,
             venue_order_id=(venue_order_id
                             or named["evidence"]["venue_order_id"]))
+    # AN EXPLICIT REFUSAL THE SEND RECORDED, reached again by recovery when
+    # the release in the send's own transaction did not complete. It carries
+    # its own checks (the intent must be REJECTED with no order id).
+    refused = await _usable_evidence(conn, operation_id=operation_id,
+                                     kind=EV_REFUSED_IN_ANSWER, reservation=res)
+    if refused.get("ok") and res.get("state") == AMBIGUOUS:
+        return await release_on_explicit_refusal(conn,
+                                                 operation_id=operation_id)
     absent = await _usable_evidence(conn, operation_id=operation_id,
                                     kind=EV_NO_SUCH_ORDER, reservation=res)
     if not absent.get("ok"):
@@ -934,6 +952,56 @@ async def release_on_attestation(conn, *, operation_id: str) -> dict:
     if got.get("ok"):
         got["evidence_id"] = ev["evidence"]["evidence_id"]
         got["released_on"] = "AN_AUDITED_OPERATOR_ATTESTATION"
+    return got
+
+
+async def release_on_explicit_refusal(conn, *, operation_id: str) -> dict:
+    """RELEASE AN AMBIGUOUS CLAIM WHOSE SEND THE VENUE EXPLICITLY REFUSED.
+
+    THE GAP THIS CLOSES (Xavier execution map Q4). A hedge refused in the
+    response body -- no order id, an explicit refusal status -- left the intent
+    REJECTED and the claim AMBIGUOUS, and nothing resolved it: the investigation
+    reader skips non-lost-answer rows, `resolve` refuses R_NOT_A_LOST_ACK, and
+    `resolve_from_the_venue` needs a named order or a terminal-order search.
+
+    THREE THINGS MUST AGREE, and the release refuses on any one missing: a
+    `VENUE_REFUSED_THE_ORDER_IN_ITS_ANSWER` row bound to this operation's
+    account, instrument and intent; that intent recorded REJECTED by the book;
+    and the intent carrying NO venue order id. An exception, a timeout or an
+    unknown status never produces the evidence row, so those stay AMBIGUOUS
+    and their exposure stays counted. AMBIGUOUS -> RELEASED only."""
+    out: dict[str, Any] = {"version": VERSION,
+                           "operation_id": str(operation_id), "to": RELEASED}
+    res = await _fetch(conn, operation_id)
+    if res is None:
+        return dict(out, ok=False, refusal=R_NO_SUCH_OPERATION)
+    ev = await _usable_evidence(conn, operation_id=operation_id,
+                                kind=EV_REFUSED_IN_ANSWER, reservation=res)
+    if not ev.get("ok"):
+        return dict(out, ok=False, refusal=ev["refusal"], why=ev.get("why"),
+                    exposure="PRESERVED", evidence_check=ev)
+    intent = await conn.fetchrow(
+        "SELECT state, venue_order_id FROM bettor_funded_intents "
+        " WHERE intent_id=$1", res.get("intent_id"))
+    if intent is None or intent["state"] != "REJECTED" \
+            or intent["venue_order_id"] is not None:
+        return dict(out, ok=False, refusal=R_INTENT_NOT_REJECTED,
+                    exposure="PRESERVED",
+                    intent_state=None if intent is None else intent["state"],
+                    why=("the evidence says the venue refused the order, and "
+                         "the intent does not agree (state %r, order id %r). "
+                         "Two records disagreeing about whether an order "
+                         "exists is not a resolution"
+                         % (None if intent is None else intent["state"],
+                            None if intent is None
+                            else intent["venue_order_id"])))
+    got = await _transition(
+        conn, operation_id, to=RELEASED, expect=(AMBIGUOUS,),
+        note="%s:%s" % (WHY_VENUE_REFUSED_IN_ITS_ANSWER,
+                        ev["evidence"]["evidence_id"]))
+    if got.get("ok"):
+        got["evidence_id"] = ev["evidence"]["evidence_id"]
+        got["released_on"] = "THE_VENUES_EXPLICIT_REFUSAL_IN_ITS_ANSWER"
     return got
 
 
