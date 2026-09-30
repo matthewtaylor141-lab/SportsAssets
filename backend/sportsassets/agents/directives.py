@@ -43,6 +43,7 @@ executed, and nothing here can execute it.
 
 from __future__ import annotations
 
+import contextlib
 import datetime as _dt
 import hashlib
 import json
@@ -725,6 +726,122 @@ def _criteria(kind, numbers, target, fields) -> list:
 # 3 · PERSISTENCE
 # ═════════════════════════════════════════════════════════════════════
 
+@contextlib.asynccontextmanager
+async def use(db):
+    """A connection for ONE read or write: acquired from a pool and released
+    straight after, or the connection itself when handed one. Nothing holds a
+    connection (or a transaction) across a network call."""
+    acquire = getattr(db, "acquire", None)
+    if callable(acquire):
+        async with db.acquire() as conn:
+            yield conn
+    else:
+        yield db
+
+
+# ── idempotency (migration 156 `audrey_requests`) ────────────────────
+
+R_IDEMPOTENCY_MISMATCH = "REQUEST_ID_REUSED_FOR_A_DIFFERENT_REQUEST"
+R_REQUEST_IN_FLIGHT = "REQUEST_ID_IS_ALREADY_IN_FLIGHT"
+R_BAD_REQUEST_ID = "REQUEST_ID_REQUIRED_8_TO_128_SAFE_CHARACTERS"
+_REQUEST_ID = re.compile(r"^[A-Za-z0-9][\w:.\-]{7,127}$")
+STALE_PENDING_S = 300.0
+
+
+def valid_request_id(rid) -> bool:
+    return isinstance(rid, str) and bool(_REQUEST_ID.match(rid))
+
+
+def request_sha(*, kind: str, requester_role: str, payload) -> str:
+    return hashlib.sha256(_j({"kind": kind, "role": requester_role,
+                              "payload": payload}).encode()).hexdigest()
+
+
+async def request_begin(conn, *, request_id: str, kind: str,
+                        requester_role: str, sha: str, now: float) -> tuple:
+    """Claim a request key. Returns (state, stored_response):
+    NEW (this call runs it), REPLAY (DONE: return the stored response),
+    PENDING (a concurrent copy is running), MISMATCH (the key names a
+    different request)."""
+    row = await conn.fetchrow(
+        "INSERT INTO audrey_requests (request_id, kind, requester_role, "
+        " request_sha, status, created_at, updated_at) VALUES ($1,$2,$3,$4,"
+        " 'PENDING', to_timestamp($5), to_timestamp($5)) "
+        " ON CONFLICT (request_id) DO NOTHING RETURNING request_id",
+        request_id, kind, requester_role, sha, float(now))
+    if row is not None:
+        return "NEW", None
+    cur = await conn.fetchrow(
+        "SELECT kind, requester_role, request_sha, status, response, "
+        " extract(epoch FROM updated_at)::float8 AS upd FROM audrey_requests "
+        " WHERE request_id=$1", request_id)
+    if cur is None:
+        return "PENDING", None
+    if cur["request_sha"] != sha:
+        return "MISMATCH", None
+    if cur["status"] == "DONE":
+        return "REPLAY", _obj(cur["response"], {})
+    stale = cur["status"] == "PENDING" and \
+        float(now) - float(cur["upd"] or 0) > STALE_PENDING_S
+    if cur["status"] == "FAILED" or stale:
+        took = await conn.fetchval(
+            "UPDATE audrey_requests SET status='PENDING', "
+            " updated_at=to_timestamp($3) WHERE request_id=$1 AND status=$2 "
+            " RETURNING request_id", request_id, cur["status"], float(now))
+        if took:
+            return "NEW", None
+    return "PENDING", None
+
+
+async def request_finish(conn, *, request_id: str, response: dict | None,
+                         now: float, failed: bool = False) -> None:
+    await conn.execute(
+        "UPDATE audrey_requests SET status=$2, response=$3::jsonb, "
+        " updated_at=to_timestamp($4), completed_at=CASE WHEN $2='DONE' THEN "
+        " to_timestamp($4) END WHERE request_id=$1",
+        request_id, "FAILED" if failed else "DONE",
+        None if failed else _j(response), float(now))
+
+
+async def idempotent_call(db, *, request_id: str, kind: str,
+                          requester_role: str, payload, now: float, run):
+    """Run `run()` at most once per request_id. A replay returns the stored
+    response (with replayed=True); a concurrent duplicate returns PENDING; a
+    reused key with a different request is refused. A failure marks the key
+    FAILED so a retry may run again (safe: directive and task ids are
+    deterministic)."""
+    if not valid_request_id(request_id):
+        return {"ok": False, "status": "ERROR", "refusal": R_BAD_REQUEST_ID}
+    sha = request_sha(kind=kind, requester_role=requester_role,
+                      payload=payload)
+    async with use(db) as conn:
+        state, stored = await request_begin(
+            conn, request_id=request_id, kind=kind,
+            requester_role=requester_role, sha=sha, now=now)
+    if state == "REPLAY":
+        return dict(stored, replayed=True, request_id=request_id)
+    if state == "MISMATCH":
+        return {"ok": False, "status": "ERROR", "request_id": request_id,
+                "refusal": R_IDEMPOTENCY_MISMATCH}
+    if state == "PENDING":
+        return {"ok": False, "status": "PENDING", "request_id": request_id,
+                "refusal": R_REQUEST_IN_FLIGHT, "replayed": True}
+    try:
+        result = await run()
+    except BaseException:
+        try:
+            async with use(db) as conn:
+                await request_finish(conn, request_id=request_id,
+                                     response=None, now=now, failed=True)
+        except BaseException:                                   # noqa: BLE001
+            log.warning("request %s could not be marked FAILED", request_id)
+        raise
+    async with use(db) as conn:
+        await request_finish(conn, request_id=request_id, response=result,
+                             now=now)
+    return dict(result, request_id=request_id, replayed=False)
+
+
 async def has_schema(conn) -> bool:
     try:
         return await conn.fetchval(
@@ -736,9 +853,14 @@ async def has_schema(conn) -> bool:
 
 def directive_id_for(*, requester_role: str, instruction: str, now: float,
                      conversation_id: str | None = None,
-                     message_id: str | None = None) -> str:
-    """Deterministic: the same instruction on the same message (or at the
-    same instant) reaches the same directive, so a replay creates nothing."""
+                     message_id: str | None = None,
+                     request_id: str | None = None) -> str:
+    """Deterministic: the same client request (its idempotency key), or the
+    same instruction on the same message / instant, reaches the same
+    directive, so a retry or a concurrent duplicate creates nothing."""
+    if request_id:
+        return "dir-" + hashlib.sha256(
+            ("request|" + str(request_id)).encode()).hexdigest()[:20]
     blob = "|".join([str(requester_role), str(conversation_id or ""),
                      str(message_id or ""), "%.3f" % float(now),
                      " ".join(str(instruction or "").split())])
@@ -886,9 +1008,16 @@ async def create(conn, *, instruction: str, requester_role: str,
                  conversation_id: str | None = None,
                  message_id: str | None = None,
                  fields: dict | None = None,
-                 directive_id: str | None = None) -> dict:
+                 directive_id: str | None = None,
+                 request_id: str | None = None) -> dict:
     """Record a directive from management's instruction (or the structured
     form). The requester is the AUTHENTICATED role handed in by the route.
+
+    IDEMPOTENT: the directive id derives from the client's request_id (or the
+    message), and the insert is ON CONFLICT DO NOTHING -- two concurrent
+    copies of one request commit exactly one directive; the loser returns it
+    with created=False. `created` is True only when THIS call committed the
+    row, and the returned directive is always read back after commit.
 
     Returns {"ok", "refusal", "directive", "created", "tasks"}. Never raises
     on a refusal; a database failure propagates to the caller."""
@@ -904,43 +1033,50 @@ async def create(conn, *, instruction: str, requester_role: str,
         questions_exempt=False)
     did = directive_id or directive_id_for(
         requester_role=requester_role, instruction=instruction, now=now,
-        conversation_id=conversation_id, message_id=message_id)
-    existing = await get(conn, did)
-    if existing is not None:
-        return {"ok": existing["status"] != REFUSED,
-                "refusal": existing.get("refusal"), "directive": existing,
-                "created": False, "tasks": await tasks_of(conn, existing)}
+        conversation_id=conversation_id, message_id=message_id,
+        request_id=request_id)
+
+    async def _existing() -> dict:
+        ex = await get(conn, did)
+        return {"ok": ex["status"] != REFUSED, "refusal": ex.get("refusal"),
+                "directive": ex, "created": False,
+                "tasks": await tasks_of(conn, ex)}
+
+    if await get(conn, did) is not None:
+        return await _existing()
 
     if screen["refused"]:
         req = approval_request(screen)
         log.warning("directive refused %s: %s (role=%s)", R_PROHIBITED,
                     ",".join(screen["categories"]), requester_role)
         async with conn.transaction():
-            await conn.execute(
+            st = await conn.execute(
                 "INSERT INTO management_directives (directive_id, "
                 " requested_by_role, requested_by_label, conversation_id, "
                 " message_id, instruction, objective, objective_kind, scope, "
                 " constraints, acceptance_criteria, change_class, "
                 " required_approval, assigned_agent, status, refusal, "
-                " evidence, created_at, updated_at) VALUES ($1,$2,$3,$4,$5,"
-                " $6,$7,'AUTHORITY_REQUEST','{}'::jsonb,$8::jsonb,'[]'::jsonb,"
-                " $9,$10,NULL,$11,$12,$13::jsonb,to_timestamp($14),"
-                " to_timestamp($14))",
+                " evidence, created_at, updated_at, request_id) VALUES ($1,"
+                " $2,$3,$4,$5,$6,$7,'AUTHORITY_REQUEST','{}'::jsonb,$8::jsonb,"
+                " '[]'::jsonb,$9,$10,NULL,$11,$12,$13::jsonb,to_timestamp($14),"
+                " to_timestamp($14),$15) ON CONFLICT DO NOTHING",
                 did, requester_role, requester_label, conversation_id,
                 message_id, instruction, instruction,
                 _j({"standing_rules": STANDING_RULES}), AUTHORITY_CHANGE,
                 APPROVAL_FOR[AUTHORITY_CHANGE], REFUSED, R_PROHIBITED,
                 _j({"screen": screen, "approval_request": req,
-                    "executed": False}), float(now))
-            await _event(conn, did, kind="REFUSED_" + R_PROHIBITED,
-                         actor_role=requester_role,
-                         actor_label=requester_label, now=now,
-                         to_status=REFUSED,
-                         detail={"categories": screen["categories"],
-                                 "approval_request": req})
+                    "executed": False}), float(now), request_id)
+            inserted = str(st).endswith(" 1")
+            if inserted:
+                    await _event(conn, did, kind="REFUSED_" + R_PROHIBITED,
+                             actor_role=requester_role,
+                             actor_label=requester_label, now=now,
+                             to_status=REFUSED,
+                             detail={"categories": screen["categories"],
+                                     "approval_request": req})
         d = await get(conn, did)
         return {"ok": False, "refusal": R_PROHIBITED, "directive": d,
-                "created": True, "tasks": [], "approval_request": req}
+                "created": inserted, "tasks": [], "approval_request": req}
 
     t = translate(instruction, now=now, fields=fields)
     status = ACTIVE if t["complete"] else DRAFT
@@ -948,28 +1084,40 @@ async def create(conn, *, instruction: str, requester_role: str,
                 "horizon_basis": t["horizon_basis"],
                 "requester_source": "AUTHENTICATED_ROUTE_ROLE"}
     async with conn.transaction():
-        await conn.execute(
+        st = await conn.execute(
             "INSERT INTO management_directives (directive_id, "
             " requested_by_role, requested_by_label, conversation_id, "
             " message_id, instruction, objective, objective_kind, scope, "
             " constraints, acceptance_criteria, review_at, expires_at, "
             " change_class, required_approval, assigned_agent, status, "
-            " clarifying_question, evidence, created_at, updated_at) VALUES "
+            " clarifying_question, evidence, created_at, updated_at, "
+            " request_id) VALUES "
             " ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10::jsonb,$11::jsonb,"
             " CASE WHEN $12::float8 IS NULL THEN NULL ELSE to_timestamp($12) "
             " END, CASE WHEN $13::float8 IS NULL THEN NULL ELSE "
             " to_timestamp($13) END, $14,$15,$16,$17,$18,$19::jsonb,"
-            " to_timestamp($20), to_timestamp($20))",
+            " to_timestamp($20), to_timestamp($20), $21) "
+            " ON CONFLICT DO NOTHING",
             did, requester_role, requester_label, conversation_id, message_id,
             instruction, t["objective"], t["objective_kind"], _j(t["scope"]),
             _j(t["constraints"]), _j(t["acceptance_criteria"]),
             t["review_at"], t["expires_at"], t["change_class"],
             t["required_approval"], t["assigned_agent"], status,
-            t["clarifying_question"], _j(evidence), float(now))
-        await _event(conn, did, kind="CREATED", actor_role=requester_role,
-                     actor_label=requester_label, now=now, to_status=status,
-                     detail={"missing": t["missing"],
-                             "clarifying_question": t["clarifying_question"]})
+            t["clarifying_question"], _j(evidence), float(now), request_id)
+        inserted = str(st).endswith(" 1")
+        if inserted:
+            await _event(conn, did, kind="CREATED",
+                         actor_role=requester_role,
+                         actor_label=requester_label, now=now,
+                         to_status=status,
+                         detail={"missing": t["missing"],
+                                 "clarifying_question":
+                                     t["clarifying_question"]})
+    if not inserted:
+        # a concurrent copy of this request committed first
+        if await get(conn, did) is None:
+            raise RuntimeError("directive insert conflicted on another key")
+        return await _existing()
     tasks = []
     if status == ACTIVE:
         tasks = await _ensure_tasks(conn, did, actor_role=requester_role,
@@ -988,7 +1136,16 @@ async def _set(conn, directive: dict, *, to_status: str | None, kind: str,
     if to_status:
         cols["status"] = to_status
     sets, args = [], [directive["directive_id"]]
+    where = "directive_id = $1"
     for k, v in cols.items():
+        if k == "task_ids_add":
+            # append only ids not already linked, in the given order -- two
+            # concurrent linkers can never duplicate a task id
+            args.append(list(v))
+            sets.append("task_ids = task_ids || ARRAY(SELECT x FROM "
+                        "unnest($%d::text[]) WITH ORDINALITY u(x, o) WHERE "
+                        "NOT x = ANY(task_ids) ORDER BY o)" % len(args))
+            continue
         args.append(v)
         if k in ("scope", "constraints", "acceptance_criteria", "evidence"):
             sets.append("%s = $%d::jsonb" % (k, len(args)))
@@ -1002,10 +1159,17 @@ async def _set(conn, directive: dict, *, to_status: str | None, kind: str,
             sets.append("%s = $%d" % (k, len(args)))
     args.append(float(now))
     sets.append("updated_at = to_timestamp($%d)" % len(args))
+    if to_status and directive.get("status"):
+        # compare-and-set: a concurrent writer that moved the directive first
+        # wins, and this call records nothing
+        args.append(directive["status"])
+        where += " AND status = $%d" % len(args)
     async with conn.transaction():
-        await conn.execute(
-            "UPDATE management_directives SET %s WHERE directive_id = $1"
-            % ", ".join(sets), *args)
+        st = await conn.execute(
+            "UPDATE management_directives SET %s WHERE %s"
+            % (", ".join(sets), where), *args)
+        if not str(st).endswith(" 1"):
+            return await get(conn, directive["directive_id"])
         await _event(conn, directive["directive_id"], kind=kind,
                      actor_role=actor_role, actor_label=actor_label, now=now,
                      from_status=directive.get("status"),
@@ -1114,6 +1278,8 @@ async def cancel(conn, *, directive_id: str, reason: str,
                     actor_role=requester_role, actor_label=requester_label,
                     now=now, detail={"reason": str(reason)[:500],
                                      "tasks": task_results})
+    if d2["status"] != CANCELLED:
+        return _refuse(R_NOT_OPEN, directive=d2)
     return {"ok": True, "refusal": None, "directive": d2, "created": False,
             "tasks": await tasks_of(conn, d2)}
 
@@ -1146,7 +1312,7 @@ async def assign(conn, *, directive_id: str, agent: str, title: str,
                        actor_role=requester_role, actor_label=requester_label,
                        now=now, detail={"task_id": tid, "agent": agent,
                                         "title": title},
-                       cols={"task_ids": d["task_ids"] + [tid]})
+                       cols={"task_ids_add": [tid]})
     return {"ok": bool(made.get("ok")), "refusal": made.get("refusal"),
             "directive": d, "created": False, "task": made,
             "tasks": await tasks_of(conn, d)}
@@ -1299,7 +1465,7 @@ async def _ensure_tasks(conn, directive_id: str, *, actor_role: str,
                    "TASK_CREATION_INCOMPLETE",
                    actor_role=actor_role, actor_label=actor_label, now=now,
                    detail={"results": results},
-                   cols={"task_ids": linked, "evidence": ev})
+                   cols={"task_ids_add": linked, "evidence": ev})
     return results
 
 
