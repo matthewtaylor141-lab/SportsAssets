@@ -199,3 +199,6 @@ tests/test_xavier_reviews_its_decisions_daily.py
 # (0930) the pair collector's per-contract account, conclusions and
 # ledger-backed rotation across a restart
 tests/test_the_observer_is_fed_by_the_catalogue_and_accounts_for_every_attempt.py
+# (0930) held-position management and fill recovery on their own cadence,
+# under one execution authority, never behind the collection cycle
+tests/test_management_runs_on_its_own_cadence.py
