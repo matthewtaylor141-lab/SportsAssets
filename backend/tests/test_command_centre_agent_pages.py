@@ -144,8 +144,9 @@ def test_the_data_module_and_the_character_module_are_separate(monkeypatch, kind
     c, _ = _client(monkeypatch)
     html = c.get(P.PAGE_PATHS[kind], headers={"X-Admin-Token": _Cfg.admin_token}).text
     classic, module = _scripts(html)
-    assert len(classic) == 1 and len(module) == 1
-    data, loader = classic[0], module[0]
+    data = [c for c in classic if "AG.workspace" in c]
+    assert len(data) == 1 and len(module) == 1 and len(classic) == 2
+    data, loader = data[0], module[0]
     # the data containers are in the HTML itself, whatever the canvas does
     assert 'id="cc-panels" data-cc-data' in html and 'id="app"' in html
     for pid, _t, _s, _c in CCP._PANELS[kind]:
@@ -886,3 +887,61 @@ async def test_the_labels_route_reads_the_venue_catalogue(monkeypatch):
     finally:
         await conn.execute("DELETE FROM us_premap WHERE market_slug = $1", slug)
         await conn.close()
+
+
+# ═════════════════════════════════════════════════════════════════════
+# FRAMED BY THE MANAGEMENT SHELL
+# ═════════════════════════════════════════════════════════════════════
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_pages_may_be_framed_by_the_same_origin_only(monkeypatch, kind):
+    c, _ = _client(monkeypatch)
+    r = c.get(P.PAGE_PATHS[kind], headers={"X-Admin-Token": _Cfg.admin_token})
+    csp = r.headers["content-security-policy"]
+    assert "frame-ancestors 'self'" in csp
+    assert "x-frame-options" not in {k.lower() for k in r.headers}
+    assert "DENY" not in csp
+    html = r.text
+    # the framed switch runs first and needs neither module
+    assert html.index(CCP.FRAMED_JS.strip()[:40]) < html.index('class="top cc-top"')
+    assert "window.top !== window.self" in CCP.FRAMED_JS
+    assert "classList.add('cc-framed')" in CCP.FRAMED_JS
+    assert "a.setAttribute('target', '_top')" in CCP.FRAMED_JS
+    assert ".cc-framed .cc-top .brand,.cc-framed .cc-nav,.cc-framed .cc-sub{display:none}" in html
+    for other in KINDS:
+        # unframed: the API page path, no target; framed: /<agent>, target _top
+        assert re.search(r'<a href="%s"[^>]*data-framed-href="/%s"' % (
+            re.escape(P.PAGE_PATHS[other]), other), html), other
+    assert 'target="_top"' not in html.split("<main")[0].split("</script>", 1)[1]
+
+
+def test_the_framed_switch_retargets_links_under_a_dom(monkeypatch):
+    """Execute the switch itself under node with a minimal DOM stand-in, framed
+    and unframed."""
+    if not NODE:
+        pytest.fail("node is required")
+    script = """
+      function mk(framed) {
+        var classes = [], links = [{a: {href: '/api/command/agents/xavier/page', 'data-framed-href': '/xavier'}}];
+        links.forEach(function (l) { l.getAttribute = function (k) { return l.a[k]; }; l.setAttribute = function (k, v) { l.a[k] = v; }; });
+        var self = {}; var win = {self: self, top: framed ? {} : self};
+        var doc = {readyState: 'complete', documentElement: {classList: {add: function (c) { classes.push(c); }}},
+                   querySelectorAll: function () { return links; }, addEventListener: function () {}};
+        new Function('window', 'document', %s)(win, doc);
+        return {classes: classes, link: links[0].a};
+      }
+      process.stdout.write(JSON.stringify([mk(true), mk(false)]));
+    """ % json.dumps(CCP.FRAMED_JS)
+    with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as f:
+        f.write(script)
+        path = f.name
+    try:
+        out = subprocess.run([NODE, path], capture_output=True, text=True, timeout=30)
+    finally:
+        os.unlink(path)
+    assert out.returncode == 0, out.stderr
+    framed, plain = json.loads(out.stdout)
+    assert framed["classes"] == ["cc-framed"]
+    assert framed["link"]["href"] == "/xavier" and framed["link"]["target"] == "_top"
+    assert plain["classes"] == [] and plain["link"]["href"] == "/api/command/agents/xavier/page"
+    assert "target" not in plain["link"]

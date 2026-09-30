@@ -91,6 +91,11 @@ body.cc{background:radial-gradient(1200px 600px at 12% -10%,color-mix(in oklab,v
 .cc-nav .sd{width:9px;height:9px;border-radius:50%;background:var(--ink-3);box-shadow:0 0 0 3px rgba(255,255,255,.04)}
 .cc-nav .sd[data-mode=monitoring]{background:var(--ok)}.cc-nav .sd[data-mode=reviewing]{background:var(--info)}.cc-nav .sd[data-mode=waiting]{background:var(--warn)}.cc-nav .sd[data-mode=speaking]{background:var(--acc)}.cc-nav .sd[data-mode=unavailable]{background:transparent;box-shadow:inset 0 0 0 2px var(--bad)}
 .cc-sub{display:flex;gap:4px}.cc-sub a{font:12px/1 var(--mono);color:var(--ink-3);padding:6px 8px;border-radius:7px}.cc-sub a:hover{color:var(--ink);background:var(--panel-2);text-decoration:none}
+.cc-top>nav.cc-nav{flex:0 1 auto;min-width:0}.cc-top>nav.cc-sub{flex:0 0 auto}.cc-top .meta{margin-left:auto}
+@media (max-width:1320px){.cc-sub{display:none}}
+/* framed by the management shell (/derek, /xavier, /audrey): the shell draws the navigation */
+.cc-framed .cc-top .brand,.cc-framed .cc-nav,.cc-framed .cc-sub{display:none}
+.cc-framed .cc-top{position:static;padding:6px 24px}
 /* banner */
 .cc-banner{display:none;margin:0 0 14px;padding:12px 16px;border-radius:12px;border:1px solid var(--bad);background:color-mix(in oklab,var(--bad) 12%,var(--panel));color:var(--ink);font-weight:600}
 body[data-cc-mode=unavailable] .cc-banner{display:block}
@@ -399,12 +404,12 @@ def nav_html(current: str, page_paths: dict) -> str:
     out = []
     for k in NAV_ORDER:
         m = CC_META[k]
-        out.append('<a href="%s"%s data-nav="%s"><span class="sd" '
+        out.append('<a href="%s"%s data-nav="%s" data-framed-href="/%s"><span class="sd" '
                    'data-sd="%s" title="state not read yet"></span><span>'
                    '<span class="nm">%s</span><span class="rl">%s</span>'
                    '</span></a>'
                    % (page_paths[k], ' aria-current="page"' if k == current
-                      else "", k, k, m["name"], _html.escape(m["role"])))
+                      else "", k, k, k, m["name"], _html.escape(m["role"])))
     return "".join(out)
 
 
@@ -1078,4 +1083,26 @@ CC_BOOT_JS = r"""
   setInterval(function () { if (!document.hidden) live(); }, 45000);
   window.addEventListener('cc:ready', function () { applyMode(effective()); });
 })(AG, CC);
+"""
+
+
+#: FRAMED MODE. The management shell at /derek, /xavier and /audrey frames
+#: these pages from the same origin and draws the top navigation itself, so a
+#: framed page hides its own and its agent links leave the frame (`_top`) for
+#: the shell's paths. Unframed, the links stay on the API page paths. Runs
+#: before anything else and needs neither the data nor the character module.
+FRAMED_JS = r"""
+(function () {
+  var framed = true;
+  try { framed = window.top !== window.self; } catch (e) { framed = true; }
+  if (!framed) return;
+  document.documentElement.classList.add('cc-framed');
+  function retarget() {
+    [].forEach.call(document.querySelectorAll('a[data-framed-href]'), function (a) {
+      a.setAttribute('href', a.getAttribute('data-framed-href'));
+      a.setAttribute('target', '_top');
+    });
+  }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', retarget); else retarget();
+})();
 """

@@ -1783,6 +1783,7 @@ _CC_SHELL = r"""<!doctype html>
 <title>%%TITLE%% · %%ROLE%% | BETTOR Command</title>
 <style>%%CSS%%</style></head>
 <body class="ag cc ag-%%KIND%%" data-kind="%%KIND%%" data-cc-mode="unavailable">
+<script>%%FRAMED%%</script>
 <a class="skip" href="#cc-main">Skip to the records</a>
 <header class="top cc-top"><a class="brand" href="/api/command/agents/page"><span class="mark"></span>BETTOR <b>COMMAND</b></a>
 <nav class="cc-nav" aria-label="Agents">%%NAV%%</nav>
@@ -1813,6 +1814,7 @@ def _cc_page_html(kind: str) -> str:
     chat = CCP.chat_panel_html(CHAT_PANEL_HTML) if kind == "audrey" else ""
     return (_CC_SHELL.replace("%%CSS%%", BASE_CSS + CCP.CC_CSS)
             .replace("%%JS%%", js)
+            .replace("%%FRAMED%%", CCP.FRAMED_JS)
             .replace("%%LOADER%%", CCP.LOADER_JS.replace(
                 "%%CHARACTERS%%", ENDPOINTS["characters"]))
             .replace("%%NAV%%", CCP.nav_html(kind, PAGE_PATHS))
@@ -1903,7 +1905,10 @@ def _authorised(request: Request) -> bool:
 #: else changes: no external origin, connect-src 'self', no form posts.
 CC_PAGE_CSP = ("default-src 'none'; style-src 'unsafe-inline'; "
                "script-src 'self' 'unsafe-inline'; connect-src 'self'; "
-               "img-src 'self' data:; base-uri 'none'; form-action 'none'")
+               "img-src 'self' data:; base-uri 'none'; form-action 'none'; "
+               # the management shell at /derek, /xavier and /audrey frames
+               # these pages from the same origin; nothing else may frame them
+               "frame-ancestors 'self'")
 
 
 def _cc_headers() -> dict:
