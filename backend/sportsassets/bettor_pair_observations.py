@@ -193,16 +193,26 @@ C_INTERPRETATION = "UNSUPPORTED_INTERPRETATION"
 C_FILTERED = "FILTERED_BY_SCREEN"
 C_READ_BUDGET = "READ_BUDGET_EXHAUSTED"
 C_UNPRICED = "NO_DISPLAYED_PRICE"
+#: Displayed depth exists but no order we can send reaches it (off the
+#: market's executable grid): a block, never absence.
+C_UNREPRESENTABLE = "NO_DEPTH_ON_THE_EXECUTABLE_GRID"
 C_UNNAMED = "UNCLASSIFIED_REFUSAL"
 
 #: Refusal name -> category. A name absent here is C_UNNAMED and counted as
 #: such, so a new refusal cannot silently read as absence.
 def _sibling_categories() -> dict:
+    from . import bettor_book_snapshot as BS
     from . import bettor_funded_decision as FD
     from . import bettor_funded_hedge_supply as HS
     from . import bettor_funded_pair_cycle as PC
 
-    m = {PC.R_NOT_DISTINCT: C_INCOMPATIBLE,
+    m = {BS.R_TICK_NOT_ESTABLISHED: C_METADATA,
+         BS.R_TICK_UNUSABLE: C_INTERPRETATION,
+         BS.R_NO_REPRESENTABLE_DEPTH: C_UNREPRESENTABLE,
+         BS.R_LIMIT_OFF_THE_EXECUTABLE_GRID: C_UNREPRESENTABLE,
+         BS.R_LIMIT_WOULD_BE_ROUNDED: C_UNREPRESENTABLE,
+         BS.R_COUNTED_LEVEL_UNREACHABLE: C_UNREPRESENTABLE,
+         PC.R_NOT_DISTINCT: C_INCOMPATIBLE,
          PC.R_NOT_SETTLEMENT_COMPATIBLE: C_INCOMPATIBLE,
          HS.R_SAME_CONTRACT: C_INCOMPATIBLE,
          HS.R_NETTED_SAME_INSTRUMENT: C_INCOMPATIBLE,
@@ -271,6 +281,7 @@ N_LIMIT = "INCOMPLETE_SIBLING_LIMIT_REACHED"
 N_METADATA = "BLOCKED_BY_MISSING_METADATA"
 N_INTERPRETATION = "BLOCKED_BY_UNSUPPORTED_INTERPRETATION"
 N_UNPRICED = "BLOCKED_BY_UNPRICED_SIBLINGS"
+N_UNREPRESENTABLE = "BLOCKED_BY_DEPTH_OFF_THE_EXECUTABLE_GRID"
 N_UNNAMED = "BLOCKED_BY_AN_UNCLASSIFIED_REFUSAL"
 N_ADMITTED = "ADMITTED"
 N_FIRST_LEG_UNPRICED = "FIRST_LEG_HAS_NO_DISPLAYED_PRICE"
@@ -301,6 +312,8 @@ def attempt_conclusion(siblings, *, fixture_pairs=None,
         return N_INTERPRETATION
     if C_UNPRICED in cats:
         return N_UNPRICED
+    if C_UNREPRESENTABLE in cats:
+        return N_UNREPRESENTABLE
     if C_UNNAMED in cats:
         return N_UNNAMED
     if truncated:

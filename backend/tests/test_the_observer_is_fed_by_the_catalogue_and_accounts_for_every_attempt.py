@@ -674,6 +674,9 @@ def test_absence_is_concluded_only_when_nothing_that_could_match_was_unread():
     assert C.attempt_conclusion(
         [_sib(C.C_INCOMPATIBLE), _sib(C.C_UNPRICED)],
         fixture_pairs=2) == C.N_UNPRICED
+    assert C.attempt_conclusion(
+        [_sib(C.C_INCOMPATIBLE), _sib(C.C_UNREPRESENTABLE)],
+        fixture_pairs=2) == C.N_UNREPRESENTABLE
     # a refusal nobody classified never reads as absence
     assert C.attempt_conclusion([_sib(C.C_UNNAMED)],
                                 fixture_pairs=1) == C.N_UNNAMED
@@ -707,6 +710,9 @@ def test_every_supplier_and_discovery_refusal_has_a_category():
                  HS.R_OT_PROSE_STATES_BOTH, HS.R_OVERTIME_NOT_CAPTURED,
                  HS.R_ORIENTATION_NOT_ESTABLISHED, HS.R_KIND_NOT_DERIVABLE,
                  PO.X_NOT_A_GRADED_VARIABLE, PO.X_ORIENTATION):
+        assert PO.sibling_category(name) != PO.C_UNNAMED, name
+    from sportsassets import bettor_book_snapshot as BS
+    for name in BS.GRID_REFUSALS:
         assert PO.sibling_category(name) != PO.C_UNNAMED, name
     assert PO.sibling_category("A_NAME_NO_ONE_DECLARED") == PO.C_UNNAMED
     assert PO.key_differs_on(["f", "FULL", "MARGIN", "INCL"],

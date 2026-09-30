@@ -1683,6 +1683,7 @@ async def candidate_legs_for(conn, *, held_row, quoter=None,
             out["refused"].append(
                 {"candidate_id": cid, "market_slug": slug, "side": side,
                  "sports_type": row.get("sports_type"),
+                 "search_rank": priority.get("rank"), "stage": "QUOTE",
                  "refusal": quote["refusal"],
                  "executable_grid": quote.get("executable_grid"),
                  "levels_excluded_unrepresentable": quote.get(
@@ -1720,6 +1721,7 @@ async def candidate_legs_for(conn, *, held_row, quoter=None,
             out["refused"].append(
                 {"candidate_id": cid, "market_slug": slug, "side": side,
                  "sports_type": row.get("sports_type"),
+                 "search_rank": priority.get("rank"), "stage": "QUOTE",
                  "refusal": _bs.R_LIMIT_OFF_THE_EXECUTABLE_GRID,
                  "why": ("the quoted wire price %r is not on the executable "
                          "grid %r; its cost would be rounded into the leg"
