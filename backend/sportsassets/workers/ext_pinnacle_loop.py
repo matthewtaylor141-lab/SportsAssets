@@ -4864,7 +4864,16 @@ async def _candidate_quote(conn, slug, side, *, now=None) -> dict:
     try:
         if side not in ("ORDER_INTENT_BUY_LONG", "ORDER_INTENT_BUY_SHORT"):
             return {"ok": False, "refusal": "HEDGE_SIDE_NOT_IDENTIFIED"}
-        got = await venue_quote(conn, us_slug=slug, intent=side, now=now)
+        # THROUGH THE ONE FRESHNESS SEAM, per contract, as the entry lane
+        # reads its quote (integration, XC). This called `venue_quote` with no
+        # mechanism at all, so a hedge book could never be admitted even when
+        # `book_currency_evidence` established the market's currency -- the
+        # hedge bypassed the seam both lanes are documented to share. Today
+        # the seam supplies no mechanism and the refusal is unchanged.
+        cev = book_currency_evidence(slug)
+        got = await venue_quote(conn, us_slug=slug, intent=side, now=now,
+                                subscription=cev.get("subscription"),
+                                revalidation=cev.get("revalidation"))
     except Exception as exc:                                    # noqa: BLE001
         return {"ok": False, "error": type(exc).__name__,
                 "why": ("the candidate's own ladder read failed; the candidate "

@@ -186,6 +186,41 @@ async def test_production_quote_uses_correct_side_fields_and_single_price_depth(
     assert got["inputs_expire_at"] == min(108, 100 + loop.MAX_OUR_PROCESSING_DELAY_S)
 
 
+@pytest.mark.asyncio
+async def test_the_hedge_quote_goes_through_the_one_freshness_seam(monkeypatch):
+    """INTEGRATION (XC): `book_currency_evidence` is the one seam through
+    which a freshness mechanism reaches either lane, and the entry lane passes
+    it per contract. The funded hedge quote called `venue_quote` with NO
+    mechanism, so a hedge book could never be admitted. It now passes the
+    seam's own reading for that contract -- which today is none, so the
+    production refusal is unchanged."""
+    from sportsassets.workers import ext_pinnacle_loop as loop
+    calls, asked = [], []
+
+    async def read(conn, **kwargs):
+        calls.append(kwargs)
+        return {"ok": False, "refusal": loop.R_BOOK_CURRENCY_NOT_ESTABLISHED}
+    monkeypatch.setattr(loop, "venue_quote", read)
+    sub = {"alive_at": 99.5, "last_update_at": 99.0}
+
+    def seam(slug=None):
+        asked.append(slug)
+        return {"subscription": sub, "revalidation": None}
+    monkeypatch.setattr(loop, "book_currency_evidence", seam)
+    await loop._candidate_quote(None, "hedge-slug",
+                                "ORDER_INTENT_BUY_SHORT", now=100)
+    assert asked == ["hedge-slug"]
+    assert calls[0]["subscription"] == sub
+    assert calls[0]["revalidation"] is None
+    # AND THE UNPATCHED SEAM SUPPLIES NOTHING TODAY
+    monkeypatch.undo()
+    monkeypatch.setattr(loop, "venue_quote", read)
+    calls.clear()
+    await loop._candidate_quote(None, "hedge-slug",
+                                "ORDER_INTENT_BUY_SHORT", now=100)
+    assert calls[0]["subscription"] is None
+
+
 @pytest.mark.parametrize("side,cost,wire", [
     ("ORDER_INTENT_BUY_LONG", .3, .3),
     ("ORDER_INTENT_BUY_SHORT", .3, .7),
