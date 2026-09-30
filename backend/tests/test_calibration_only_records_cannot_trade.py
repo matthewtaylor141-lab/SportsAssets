@@ -431,6 +431,15 @@ READERS = {
     "agents/derek_policy.py": ("FILTERS_ENTRY_DECISION", 5),
     "agents/coverage.py": ("REPORTING_CENSUS_CALIBRATION_ONLY_BLOCKED", 3),
     "api/agents_derek.py": ("BY_ID_FROM_A_FILTERED_READER", 4),
+    # (170) Derek's NON-FUNDED RESEARCH observer and labeller: reads BOTH
+    # purposes deliberately -- a calibration-only row's settlement is exactly
+    # what the internal model's research needs -- and writes only
+    # derek_research_observations, a table with no size, verdict or plan
+    # whose price is CHECKed unusable for orders. It selects no candidate and
+    # no execution module reads what it writes
+    # (tests/test_derek_research_observations_break_the_deadlock.py).
+    "agents/derek_research.py": (
+        "RESEARCH_ONLY_READS_BOTH_PURPOSES_NEVER_SELECTS_A_CANDIDATE", 4),
 }
 
 

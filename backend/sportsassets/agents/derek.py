@@ -3,6 +3,16 @@
 `after_cycle(conn, cycle=<ext_pinnacle_loop.cycle() result>, now=...)` is the
 hook the core stream calls after every scheduled cycle. It:
 
+  0. records ONE NON-FUNDED RESEARCH OBSERVATION per valuation of the entry
+     experiment in the cycle window, CALIBRATION_ONLY and ENTRY_DECISION
+     alike (`derek_research`, migration 170) -- the internal entry model's
+     training and evaluation records, collected whatever the venue's book
+     currency, with no dependence on a model, an account or admission --
+     then one bounded step of the one-time BACKFILL of older stored
+     valuations, and once per UTC day the MODEL RUN: fit and evaluate the
+     entry model on labelled research fixtures, or record the shortfall.
+     It never promotes;
+
   1. records ONE Derek entry decision per candidate the entry lane evaluated
      this cycle -- every `external_valuations` row with record_purpose
      ENTRY_DECISION written in the cycle window that has no Derek decision yet
@@ -126,6 +136,15 @@ async def after_cycle(conn, *, cycle: dict, now: float) -> dict:
     await _heartbeat(conn, state="EVALUATING",
                      activity="recording entry decisions for the cycle",
                      now=at)
+    # ── 0 · NON-FUNDED RESEARCH OBSERVATIONS (migration 170) ────────
+    # FIRST, and dependent on nothing but the cycle's valuation rows: not on
+    # Derek's decision tables, an approved model, an account, the submission
+    # switches or trade admission. One frozen observation per valuation of
+    # either purpose, bounded and idempotent; see `derek_research`.
+    out["research_observations"] = await research_step(
+        conn, now=at, elapsed_s=float(cyc.get("elapsed_s") or 0.0))
+    # ── 0b · THE DAILY MODEL RUN: fit + evaluate, NEVER promote ──────
+    out["model_run"] = await model_run_step(conn, now=at)
     if not await _regclass(conn, "derek_entry_decisions"):
         out.update(ok=False, refusal="DEREK_TABLES_ABSENT",
                    why="migration 153 is not applied here")
@@ -205,10 +224,43 @@ async def after_cycle(conn, *, cycle: dict, now: float) -> dict:
         activity=("%d decision(s) recorded (%s)" % (
             out["decisions_recorded"], out["verdicts"] or "none")),
         waiting_on=[d["what"] for d in deps], dependencies=deps,
-        run={"summary": {k: out.get(k) for k in (
+        run={"summary": dict({k: out.get(k) for k in (
             "decisions_recorded", "verdicts", "refusals", "candidates",
-            "census_id", "elapsed_s")}}, now=at)
+            "census_id", "elapsed_s")}, research_observations_recorded=(
+                out.get("research_observations") or {}).get("recorded"))},
+        now=at)
     return out
+
+
+async def research_step(conn, *, now: float, elapsed_s: float = 0.0) -> dict:
+    """`derek_research.observe_cycle`, guarded: never raises, never blocks
+    the decisions or the census."""
+    try:
+        from . import derek_research as DR
+        got = await DR.observe_cycle(conn, now=now, elapsed_s=elapsed_s)
+    except Exception as exc:                                   # noqa: BLE001
+        return {"ok": False, "refusal": "RESEARCH_STEP_RAISED:%s"
+                % type(exc).__name__}
+    return {k: got.get(k) for k in (
+        "ok", "refusal", "why", "candidates", "recorded", "already_recorded",
+        "not_observed", "by_cohort", "model_frozen", "errors",
+        "bound_reached", "limit", "window", "backfill")}
+
+
+async def model_run_step(conn, *, now: float) -> dict:
+    """`derek_research.daily_model_run`, guarded: once per UTC day it fits
+    and evaluates the internal entry model on research observations, or
+    records why not. It never promotes and never blocks the cycle."""
+    try:
+        from . import derek_research as DR
+        got = await DR.daily_model_run(conn, now=now)
+    except Exception as exc:                                   # noqa: BLE001
+        return {"ran": False, "refusal": "MODEL_RUN_RAISED:%s"
+                % type(exc).__name__, "error": str(exc)[:200]}
+    return {k: got.get(k) for k in (
+        "run_day", "ran", "already_ran", "run_id", "outcome", "counts",
+        "fitted", "attempted_model_ids", "refusal", "promoted",
+        "promotion")}
 
 
 async def collection(conn, *, now: float) -> dict:
@@ -338,6 +390,21 @@ async def collection(conn, *, now: float) -> dict:
         except Exception as exc:                               # noqa: BLE001
             ent = {"available": False, "why": type(exc).__name__}
     out["entry_decisions"] = ent
+    # THE NON-FUNDED RESEARCH OBSERVATIONS the entry model can now be fit on,
+    # by price cohort -- never pooled -- with the exact minimums.
+    res: dict[str, Any] = {"available": False}
+    if await _regclass(conn, "derek_research_observations"):
+        try:
+            from . import derek_research as DR
+            res = dict(await DR.summary(conn), available=True)
+        except Exception as exc:                               # noqa: BLE001
+            res = {"available": False, "why": type(exc).__name__}
+    res["minimums"] = FM.qualification_minimums(FM.KEY_ENTRY_PAYOUT)
+    res["dependency"] = DP.DEP_ELAPSED_TIME
+    res["why"] = ("collected every cycle whatever the venue's book currency; "
+                  "labels arrive as fixtures settle, so only elapsed time "
+                  "produces training and prospective fixtures")
+    out["research_observations"] = res
     out["dependencies"] = [
         {"what": "independent prospective outcomes (labels)",
          "class": DP.DEP_ELAPSED_TIME},

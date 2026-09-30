@@ -20,7 +20,11 @@ test_the_entry_lane_reaches_inventory: the odds payload, the venue ladder, the
 venue's rules prose and the fixture metadata are supplied at their transport
 boundaries; everything between them is production code. The internal model is
 SYNTHETIC TEST EVIDENCE: valuation rows generated from a stated rule (P(win) at
-price 0.30 / 0.50 / 0.70 = 0.35 / 0.60 / 0.85), decided by `derek.after_cycle`
+price 0.30 / 0.50 / 0.70 = 0.48 / 0.76 / 0.96, 25 fixtures per price -- strong
+enough that the model beats both the raw venue price and its base rate beyond
+the clustered-jackknife uncertainty, which KEY_ENTRY_PAYOUT's promotion now
+requires; the earlier 0.35 / 0.60 / 0.85 on 20 fixtures per price did not),
+decided by `derek.after_cycle`
 (which writes the decision-time vector), labelled by the outcome columns the
 production join writes, fit by `bettor_funded_model.fit_from_records`,
 registered, evaluated prospectively and promoted ONLY by `promote` with a named
@@ -292,8 +296,8 @@ def _wrap_funded_attempt(monkeypatch, captured: list, *, gate=True):
 
 # ── THE SYNTHETIC APPROVED MODEL, THROUGH THE REGISTRY ───────────────────
 
-RULE = {0.30: 7, 0.50: 12, 0.70: 17}       # wins out of 20 fixtures per price
-PER_PRICE = 20
+RULE = {0.30: 12, 0.50: 19, 0.70: 24}      # wins out of 25 fixtures per price
+PER_PRICE = 25
 
 
 async def _synthetic_valuation(conn, *, n: int, tag: str, price: float,
@@ -372,7 +376,23 @@ async def _approve_entry_model(conn) -> dict:
     assert prom.get("ok"), prom
     ap = await FM.approved(conn, model_key=FM.KEY_ENTRY_PAYOUT)
     assert ap["ok"] and ap["provenance_verified"], ap
+    await league_reports_not_started(conn)
     return ap
+
+
+async def league_reports_not_started(conn):
+    """THE LEAGUE'S "NOT STARTED" REPORT, RESTATED JUST BEFORE THE CYCLE.
+
+    The cycle's quote is pre-game only if it was observed at or before the
+    fixture row's `retrieved_at` (bettor_fixture_metadata.context_for), and
+    `_seed` stamps that instant. Building the synthetic model between the two
+    used to take under the quote's 2-second stamp age, so the window held by
+    accident; once the approval took longer (the research step, the larger
+    cohort) the quote fell outside it and the book context became UNKNOWN
+    (VOID_ABANDONMENT_BOOK_RULE_NOT_HELD) in about half the runs. The
+    harness's premise is a fresh league report; this states it."""
+    await conn.execute("UPDATE fixture_metadata SET retrieved_at = now() "
+                       " WHERE condition_id = $1", CONDITION)
 
 
 async def _decision_for(conn, valuation_id):
