@@ -282,3 +282,6 @@ tests/test_hedge_search_evidence_survives_a_presentation_failure.py
 # management directive -> Derek's improvement task -> replay evaluation ->
 # committed sandbox artifact attached to the evaluated candidate
 tests/test_a_directive_becomes_an_evaluated_artifact.py
+# the provider SDK is a declared production dependency; the real adapter is
+# imported and constructed at startup without a request
+tests/test_provider_adapter_is_a_declared_startup_checked_dependency.py

@@ -101,6 +101,7 @@ RN1X_CAPACITY_SLOT_MUST_BE_FREE=1 \
 # CAPTURED IMMEDIATELY. Anything between the run and this line clobbers $?.
 RC=$?
 
+GATE_PYTHONPATH="$PYPATH" PYTHONPATH="$PYPATH" \
 python3 - "$META" "$SHA" "$DB" "$RC" "$REPORT" "$CONSOLE" <<'PY'
 import json, os, platform, subprocess, sys
 meta, sha, db, rc, report, console = sys.argv[1:7]
@@ -138,6 +139,27 @@ doc = {
     "pytest": sh(sys.executable, "-m", "pytest", "--version"),
     "pip_freeze_sha256_16": sh(
         "bash", "-c", "python -m pip freeze | sha256sum | cut -c1-16"),
+    # THE RUNTIME THAT RAN, not only its hash: the interpreter, the full
+    # freeze (sidecar file) and where each dependency the release depends on
+    # was actually imported from -- an overlay or a stray site-packages shows
+    # up here as a path, not as a matching hash.
+    "python_executable": sys.executable,
+    "pythonpath": os.environ.get("GATE_PYTHONPATH", ""),
+    "pip_freeze_path": meta + ".freeze.txt",
+    "packages": json.loads(sh(sys.executable, "-c", (
+        "import importlib, importlib.metadata as md, json, os\n"
+        "out = {}\n"
+        "for mod, dist in (('anthropic','anthropic'), ('httpx2','httpx2'),\n"
+        "                  ('httpx','httpx'), ('polymarket_us','polymarket-us'),\n"
+        "                  ('fastapi','fastapi'), ('asyncpg','asyncpg'),\n"
+        "                  ('pydantic','pydantic'), ('pytest','pytest')):\n"
+        "    try:\n"
+        "        m = importlib.import_module(mod)\n"
+        "        out[mod] = {'version': md.version(dist),\n"
+        "                    'location': os.path.dirname(m.__file__)}\n"
+        "    except Exception as e:\n"
+        "        out[mod] = {'error': type(e).__name__}\n"
+        "print(json.dumps(out))")) or "{}"),
     # THE SCHEMA STATE OF THE DATABASE THAT RAN, which is part of what makes a
     # gate reproducible. The first version returned empty strings because
     # PGPASSWORD was not in the subprocess environment -- captured silently,
@@ -150,6 +172,8 @@ doc = {
     "migration_max": _psql(db, "SELECT coalesce(max(version::text),'none')"
                                " FROM schema_migrations") or "no_table",
 }
+with open(meta + ".freeze.txt", "w") as fh:
+    fh.write(sh(sys.executable, "-m", "pip", "freeze") + "\n")
 with open(meta, "w") as fh:
     json.dump(doc, fh, indent=1, sort_keys=True)
 print("=== GATE RUN on %s (db %s) -> pytest exit %s ==="

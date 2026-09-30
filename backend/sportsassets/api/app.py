@@ -108,6 +108,21 @@ async def lifespan(_: FastAPI):
         logging.getLogger(__name__).exception(
             "DB unavailable at boot — serving anyway, will retry lazily")
 
+    # THE PROVIDER ADAPTER, IMPORTED FROM THE INSTALLED SDK AT BOOT: a
+    # missing or broken dependency is named here, not on the first chat.
+    # No credential is read and no request is sent; failure only logs.
+    try:
+        from ..agents import audrey_chat as _ac
+        _chk = _ac.adapter_startup_check()
+        (logging.getLogger(__name__).info if _chk.get("ok") else
+         logging.getLogger(__name__).error)(
+            "audrey provider adapter startup check: ok=%s sdk=%s at %s "
+            "reason=%s", _chk.get("ok"), _chk.get("sdk_version"),
+            _chk.get("sdk_location"), _chk.get("reason"))
+    except Exception:  # noqa: BLE001
+        logging.getLogger(__name__).exception(
+            "audrey provider adapter startup check raised")
+
     # BIND THE ORDER GATE. This service hosts the manual desk --
     # _execute_manual, _execute_manual_limit and _execute_manual_sell --
     # and every one of them reaches pmus.submit_fok or

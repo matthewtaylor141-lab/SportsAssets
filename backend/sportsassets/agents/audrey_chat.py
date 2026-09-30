@@ -1564,6 +1564,52 @@ def provider_config(env=None) -> dict:
             "disclosure": None if configured else DISCLOSE_NOT_CONFIGURED}
 
 
+_STARTUP_CHECK: dict[str, Any] = {}
+
+
+def adapter_startup_check() -> dict:
+    """THE REAL PROVIDER ADAPTER, IMPORTED AND CONSTRUCTED AT STARTUP.
+
+    Imports the installed Anthropic SDK (not an overlay: the location is
+    recorded), confirms the resources the adapter calls exist, and builds
+    the client exactly as `make_client` does -- with a placeholder key, so
+    no credential is read and NO REQUEST IS SENT (constructing the client
+    performs no network I/O). Never raises; the result is served by
+    `provider_status` and logged by the API's lifespan."""
+    out: dict[str, Any] = {"ok": False, "at": _dt.datetime.now(
+                               _dt.timezone.utc).isoformat(),
+                           "request_sent": False}
+    try:
+        import anthropic
+        out["sdk_version"] = str(anthropic.__version__)
+        out["sdk_location"] = os.path.dirname(anthropic.__file__)
+        try:
+            import httpx2
+            out["http_layer"] = {"package": "httpx2",
+                                 "version": getattr(httpx2, "__version__",
+                                                    None),
+                                 "location": os.path.dirname(
+                                     httpx2.__file__)}
+        except Exception as exc:                                # noqa: BLE001
+            out["http_layer"] = {"package": "httpx2",
+                                 "error": type(exc).__name__}
+        cfg = dict(provider_config({}), max_retries=0, timeout_s=5.0)
+        client = make_client(cfg, "startup-check-placeholder-not-a-key")
+        create = getattr(getattr(getattr(client, "beta", None), "messages",
+                                 None), "create", None)
+        out["client_class"] = type(client).__name__
+        out["beta_messages_create"] = callable(create)
+        out["ok"] = callable(create)
+        if not out["ok"]:
+            out["reason"] = "SDK_LACKS_BETA_MESSAGES_CREATE"
+    except Exception as exc:                                    # noqa: BLE001
+        out["reason"] = "ADAPTER_IMPORT_OR_CONSTRUCTION_FAILED"
+        out["error"] = type(exc).__name__
+    _STARTUP_CHECK.clear()
+    _STARTUP_CHECK.update(out)
+    return dict(out)
+
+
 def provider_status(env=None) -> dict:
     """Startup / health read: configured or not (the key's PRESENCE, never
     its value), the model, and the last failure reason and time."""
@@ -1580,7 +1626,8 @@ def provider_status(env=None) -> dict:
             "last_failure": st["last_failure"],
             "last_failure_at": st["last_failure_at"],
             "last_success_at": st["last_success_at"],
-            "attempts": st["attempts"], "failures": st["failures"]}
+            "attempts": st["attempts"], "failures": st["failures"],
+            "adapter_startup_check": dict(_STARTUP_CHECK) or None}
 
 
 def _record_provider(*, ok: bool, reason: str | None, model: str,
