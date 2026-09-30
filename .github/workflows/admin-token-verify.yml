@@ -1,0 +1,85 @@
+# ADMIN-TOKEN ROTATION: IS THE REPLACEMENT LIVE IN THE RUNNING API?
+#
+# "Saved" in the hosting settings is not "rotated in production": the API
+# reads ADMIN_TOKEN at process start, so a saved value is live only after a
+# deploy has restarted the process. This job asks the RUNNING service.
+#
+# Four GETs of one read-only, admin-guarded route
+# (/api/admin/funded-activation-readiness -- it reads database state and
+# contacts nothing):
+#
+#   1. no header                          -> expect 401
+#   2. empty header                       -> expect 401
+#   3. a random wrong token, same length  -> expect 401
+#   4. the repository secret ADMIN_TOKEN  -> expect 200
+#
+# 200 on (4) proves the running process holds the same value as the GitHub
+# secret. With the old 2-character value still live, (4) returns 401. Only
+# status codes and the secret's LENGTH are printed -- never a value, never a
+# response body.
+
+name: admin-token-verify
+
+on:
+  workflow_dispatch:
+    inputs:
+      api:
+        description: "API origin"
+        required: false
+        default: "https://sportsassets-api.onrender.com"
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Probe the running API
+        env:
+          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+        run: |
+          set +e
+          [ -n "${ADMIN_TOKEN:-}" ] && echo "::add-mask::$ADMIN_TOKEN"
+          API="${{ inputs.api }}"
+          R="/api/admin/funded-activation-readiness?hours=1"
+          LEN=${#ADMIN_TOKEN}
+          WRONG=$(openssl rand -hex 64 | cut -c1-"$(( LEN > 0 ? LEN : 32 ))")
+          echo "::add-mask::$WRONG"
+          probe() {  # $1 label, $2.. extra curl args
+            local label="$1"; shift
+            curl -s -o /dev/null -w '%{http_code}' --max-time 45 "$@" "$API$R" \
+              || echo 000
+          }
+          HZ=$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 "$API/healthz" || echo 000)
+          c1=$(probe none)
+          c2=$(probe empty -H "X-Admin-Token: ")
+          c3=$(probe wrong -H "X-Admin-Token: $WRONG")
+          c4=""
+          if [ -n "${ADMIN_TOKEN:-}" ]; then
+            c4=$(probe secret -H "X-Admin-Token: $ADMIN_TOKEN")
+          fi
+          {
+            echo "## Admin-token verification"
+            echo '```'
+            echo "healthz                 HTTP $HZ"
+            echo "secret length           $LEN characters"
+            echo "1 no header             HTTP $c1   (expect 401)"
+            echo "2 empty header          HTTP $c2   (expect 401)"
+            echo "3 wrong token, same len HTTP $c3   (expect 401)"
+            echo "4 repository secret     HTTP ${c4:-SKIPPED (secret unset)}   (expect 200)"
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          FAIL=0
+          [ "$c1" = "401" ] || { echo "::error::no header answered $c1"; FAIL=1; }
+          [ "$c2" = "401" ] || { echo "::error::empty header answered $c2"; FAIL=1; }
+          [ "$c3" = "401" ] || { echo "::error::wrong token answered $c3"; FAIL=1; }
+          if [ "$c4" = "200" ]; then
+            echo "VERDICT: the running API accepts the repository secret and rejects missing, empty and wrong tokens" \
+              | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            echo "VERDICT: the running API does NOT accept the repository secret (HTTP ${c4:-unset}); the replacement is not live, or the two stores differ" \
+              | tee -a "$GITHUB_STEP_SUMMARY"
+            FAIL=1
+          fi
+          exit $FAIL
