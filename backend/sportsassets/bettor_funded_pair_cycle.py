@@ -1071,6 +1071,18 @@ async def decide_and_record(conn, *, decision_id: str, account_id: str,
                                "worst_value_over_range", "refusal")}
         for r in (_cv.get("valued") or [])]
     out["funded_dispatch_gate"] = _gate
+    # ── THE SELECTOR'S FROZEN INPUTS, FOR REPLAY ─────────────────────
+    # The exact keyword set `run` was called with (post search gate), the
+    # selection it produced and the common valuation the dispatch gate read:
+    # persisted on Xavier's record so an evaluator can re-run THIS decision
+    # function on what it saw, and never reconstruct it. Display and replay
+    # only: nothing reads it to bind, claim or send.
+    try:
+        out["decision_inputs"] = _XP.freeze_inputs(
+            _frozen, verdict=verdict, common_valuation=out["common_valuation"])
+    except Exception as exc:                                    # noqa: BLE001
+        out["decision_inputs"] = {"version": None,
+                                  "error": type(exc).__name__}
     winner = verdict.get("selected_candidate") or {}
     prediction = winner.get("prediction")
     # ── THE PREDICTION THE DECISION WAS MADE FROM, EVEN WHEN IT LOST ─

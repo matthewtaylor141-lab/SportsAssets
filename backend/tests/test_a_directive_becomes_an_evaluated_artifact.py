@@ -10,8 +10,13 @@ The chain, through the production paths:
   2. ASSIGNED WORK. The scheduled improvement pass (`improvement.run_due`)
      has each assigned agent take its task up. Derek opens his own
      IMPROVEMENT task on the class he owns (DEREK_ENTRY_POLICY_THRESHOLD),
-     tighten-only because the objective is loss reduction. Xavier has no
-     registered replay for directive work: his task WAITS and names why.
+     tighten-only because the objective is loss reduction. Xavier takes
+     his up too, on XAVIER_CAPITAL_PRESERVATION_TRADEOFF (more-protection-
+     only variants); no Xavier decision is recorded in this window, so his
+     evaluation is INSUFFICIENT_EVIDENCE and his task REJECTED -- never a
+     success (his full chain is test_xavier_tradeoff_directive_becomes_an_
+     evaluated_artifact). An objective his class cannot address (pairing)
+     leaves his task WAITING and names why.
   3. EVALUATION. The same pass replays Derek's variants on recorded entry
      valuations (training / fixture-level holdout), selects on training,
      tries once on the holdout, and judges by the class's registered rule.
@@ -188,12 +193,20 @@ def test_a_directive_becomes_an_evaluated_committed_candidate(
     out = F.run(_call(IMP.run_due, now=NOW))
     assert out.get("ok") is True, out
     wid = IMP.directive_work_task_id(dtask)
-    taken = out["directive_work"]["taken_up"]
-    assert [t["task_id"] for t in taken] == [dtask]
-    assert taken[0]["improvement_task_id"] == wid
-    assert taken[0]["change_class"] == "DEREK_ENTRY_POLICY_THRESHOLD"
-    assert taken[0]["variants"] == [0.06, 0.07]            # tighten only
-    assert xtask in out["directive_work"]["waiting"]
+    taken = {t["task_id"]: t for t in out["directive_work"]["taken_up"]}
+    assert sorted(taken) == sorted([dtask, xtask])
+    assert taken[dtask]["improvement_task_id"] == wid
+    assert taken[dtask]["change_class"] == "DEREK_ENTRY_POLICY_THRESHOLD"
+    assert taken[dtask]["variants"] == [0.06, 0.07]        # tighten only
+    # XAVIER'S CLASS NOW TAKES A LOSS DIRECTIVE UP: more protection only
+    xwid = IMP.directive_work_task_id(xtask)
+    assert taken[xtask]["change_class"] == \
+        "XAVIER_CAPITAL_PRESERVATION_TRADEOFF"
+    assert taken[xtask]["variants"] == [0.25, 0.5, 1.0]
+    assert xtask not in out["directive_work"]["waiting"]
+    xres = [a for a in out["advanced"] if a.get("task_id") == xwid][0]
+    # no Xavier decision is recorded in this window: INSUFFICIENT, not a win
+    assert xres["verdict"] == IMP.V_INSUFFICIENT, xres
 
     w = F.run(_call(IMP.read_task, wid))
     assert w["kind"] == IMP.TASK_KIND and w["assignee"] == "DEREK"
@@ -246,15 +259,12 @@ def test_a_directive_becomes_an_evaluated_committed_candidate(
     assert F.run(_q("SELECT 1 FROM agent_policy_versions WHERE "
                     " policy_key='DEREK_ENTRY_POLICY' AND state='ACTIVE'")) \
         == []
-    # Derek's directive task follows; Xavier's waits and names why
+    # Derek's directive task follows; Xavier's follows his (insufficient)
     dt = F.run(_call(IMP.read_task, dtask))
     assert dt["status"] == "APPROVAL_READY", dt
     xt = F.run(_call(IMP.read_task, xtask))
-    assert xt["status"] == "WAITING"
-    xev = F.run(_q("SELECT kind, detail FROM agent_task_events WHERE "
-                   " task_id=$1 ORDER BY at, kind", xtask))
-    assert any(e["kind"] == "WAITING_FOR_AN_EVALUATOR" and
-               IMP.R_NO_DIRECTIVE_EVALUATOR in str(e["detail"]) for e in xev)
+    assert xt["status"] == "REJECTED", xt
+    assert F.run(_call(IMP.read_task, xwid))["status"] == "REJECTED"
 
     # ── 4 · THE ARTIFACT: A COMMIT OF EXACTLY THE EVALUATED PARAMETER ──
     base = _git("rev-parse", "HEAD").strip()
@@ -337,3 +347,19 @@ def test_a_directive_becomes_an_evaluated_committed_candidate(
     n = F.run(_q("SELECT count(*) AS n FROM agent_tasks WHERE task_id=$1",
                  wid))[0]["n"]
     assert n == 1
+
+    # ── AN OBJECTIVE XAVIER'S CLASS CANNOT ADDRESS: HIS TASK WAITS ─────
+    got = _chat(client, {}, "Improve how we pair hedges on held positions.",
+                cookies=F.operator_cookie())
+    assert got["status"] == AC.S_DIRECTIVE, got
+    assert got["directive"]["objective_kind"] == "PAIRING_AND_HEDGING"
+    xtask2 = D.task_id_for(got["directive"]["directive_id"], "XAVIER")
+    out3 = F.run(_call(IMP.run_due, now=NOW + 7200))
+    assert xtask2 in out3["directive_work"]["waiting"]
+    assert out3["directive_work"]["taken_up"] == []
+    assert F.run(_call(IMP.read_task, xtask2))["status"] == "WAITING"
+    xev = F.run(_q("SELECT kind, detail FROM agent_task_events WHERE "
+                   " task_id=$1 ORDER BY at, kind", xtask2))
+    assert any(e["kind"] == "WAITING_FOR_AN_EVALUATOR" and
+               IMP.R_OBJECTIVE_NOT_ADDRESSED in str(e["detail"])
+               for e in xev)

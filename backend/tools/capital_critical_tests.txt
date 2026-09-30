@@ -292,3 +292,12 @@ tests/test_provider_adapter_is_a_declared_startup_checked_dependency.py
 # duplicates nothing; Audrey's report and every workspace endpoint return the
 # same ids and ledger amounts; status rows written by the runtime
 tests/test_three_agents_form_one_linked_trace.py
+# management directive -> Xavier's improvement task (XAVIER_CAPITAL_PRESERVATION_
+# TRADEOFF, more-protection-only) -> replay of his REAL decision function on the
+# frozen inputs persisted by the scheduled path, valued on recorded settlements
+# (REHEARSAL, demonstration books) -> training-only selection, one holdout ->
+# APPROVAL_READY -> sandbox one-line artifact on the same candidate -> approval
+# re-verifies the basis (a changed record voids it) -> live promotion refused;
+# identical selection fails, no eligible window is INSUFFICIENT, protected keys
+# refused, an objective the class cannot address WAITS by name
+tests/test_xavier_tradeoff_directive_becomes_an_evaluated_artifact.py
