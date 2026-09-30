@@ -316,3 +316,12 @@ tests/test_three_agents_form_one_linked_trace.py
 # identical selection fails, no eligible window is INSUFFICIENT, protected keys
 # refused, an objective the class cannot address WAITS by name
 tests/test_xavier_tradeoff_directive_becomes_an_evaluated_artifact.py
+# (157) Xavier's STANDING PROTECTIVE ORDERS through the real scheduled path
+# (only the venue transport substituted): confirmed-only capacity from a
+# partial entry; the first hedge fill selects the one instrument; the double-
+# fill race reproduced with the policy bypassed; no second order while one is
+# fill-capable (PENDING_CANCEL, ambiguous); a cancel ack before a delayed fill
+# report; lost ack / restart / duplicate fills; a reduction racing a hedge
+# fill; full completion; fee and settlement invalidation; the workspace, page
+# and Audrey's audit; venue events into the same group authority
+tests/test_xavier_standing_orders_through_the_scheduled_path.py

@@ -3226,8 +3226,14 @@ async def pass_once(conn, *, account_id: str, venue: str,
                     deferred_exits=None,
                     exit_dispatcher=None,
                     venue_reader=None, now: float | None = None,
-                    review_interval_s: float | None = None) -> dict:
+                    review_interval_s: float | None = None,
+                    trigger_source: str = "SCHEDULED_SERVICING") -> dict:
     """ONE SCHEDULED PAIR PASS. Never raises; reports what it did not do.
+
+    `trigger_source` names what started the pass: the servicing cadence
+    (SCHEDULED_SERVICING) or a venue order / market event routed into the
+    same group authority (VENUE_ORDER_EVENT / VENUE_MARKET_EVENT). It labels
+    the standing-order lifecycle records; nothing else depends on it.
 
     `pair_inputs` is a callable the scheduled caller supplies, returning the
     facts a pairing decision needs for one held position: the held leg, the
@@ -3281,6 +3287,38 @@ async def pass_once(conn, *, account_id: str, venue: str,
     except Exception as exc:                                   # noqa: BLE001
         return dict(out, ok=False, refusal=R_NO_SCHEMA,
                     error="%s: %s" % (type(exc).__name__, str(exc)[:200]))
+    # ── STANDING PROTECTIVE ORDERS (bettor_xavier_standing_orders) ──────
+    #
+    # An UNFILLED standing hedge order holds no inventory: it is an
+    # obligation, not a leg. Its group is reviewed as the primary alone, and
+    # the order's fill-capable quantity is counted by the standing-order
+    # step under the same group lock -- it is never a second position here.
+    from . import bettor_xavier_standing_orders as _SPO
+    held = [p for p in held if not _SPO.is_unfilled_standing_hedge(p)]
+    try:
+        _spo_policy = await _SPO.load_policy(conn)
+    except Exception:                                          # noqa: BLE001
+        _spo_policy = _SPO.code_default("POLICY_READ_RAISED")
+    out["standing_order_policy"] = {k: _spo_policy.get(k) for k in (
+        "policy_key", "version", "source", "why")}
+    out["standing_order_policy"]["enabled"] = bool(
+        (_spo_policy.get("params") or {}).get("enabled"))
+    out["standing_orders"] = []
+    # A STANDING ORDER WHOSE PRIMARY IS NO LONGER HELD is still maintained
+    # (cancelled, its terminal state confirmed, its capacity released).
+    try:
+        out["standing_order_sweep"] = await _SPO.sweep_orphaned(
+            conn, account_id=account_id, venue=venue,
+            held_primary_ids={str(p.get("intent_id")) for p in held
+                              if str(p.get("leg_role") or "PRIMARY")
+                              == "PRIMARY"},
+            at=at, source=trigger_source, adapter=adapter,
+            policy=_spo_policy)
+    except Exception as exc:                                   # noqa: BLE001
+        # CONTAINED: the pass never raises. Nothing new is placed by a sweep.
+        out["standing_order_sweep"] = {
+            "ok": False, "error": "%s: %s" % (type(exc).__name__,
+                                              str(exc)[:200])}
     out["open_entry_positions"] = len(held)
     # ── XAVIER'S RESPONSIBILITY, READ BEFORE ANY POSITION IS REVIEWED ────
     #
@@ -3374,7 +3412,8 @@ async def pass_once(conn, *, account_id: str, venue: str,
         try:
             _open_now = {str(p.get("intent_id")): p
                          for p in await FB.open_entry_positions(
-                             conn, account_id=account_id, venue=venue)}
+                             conn, account_id=account_id, venue=venue)
+                         if not _SPO.is_unfilled_standing_hedge(p)}
         except Exception:                                      # noqa: BLE001
             _open_now = None
         if _open_now is not None:
@@ -3401,6 +3440,41 @@ async def pass_once(conn, *, account_id: str, venue: str,
                 continue
         _leg_ids = [pos.get("intent_id")] + (
             [grp["HEDGE"].get("intent_id")] if grp is not None else [])
+        # ── THE GROUP'S STANDING HEDGE ORDER, RECONCILED FIRST ──────────
+        # (fills, the first fill's selection, a confirmed terminal state and
+        # the capacity it releases; a cancel when the invariant, the
+        # primary, the authorization or the market says it must stop). The
+        # venue reads it rests on already ran in `manage`.
+        _standing_live = False
+        if gid and str(pos.get("leg_role") or "PRIMARY") == "PRIMARY":
+            try:
+                _mt = await _SPO.maintain(
+                    conn, account_id=account_id, venue=venue,
+                    group_id=str(gid),
+                    primary_intent_id=str(pos.get("intent_id")), at=at,
+                    source=trigger_source, adapter=adapter,
+                    policy=_spo_policy)
+            except Exception as exc:                           # noqa: BLE001
+                # CONTAINED, and in the safe direction: an unreadable
+                # standing state withholds any acquisition beside it (the
+                # standing step's own exit gate re-reads it).
+                _mt = {"ok": False, "refusal": "STANDING_ORDER_MAINTENANCE_"
+                       "RAISED", "error": "%s: %s" % (
+                           type(exc).__name__, str(exc)[:200]),
+                       "state": {"live_or_potentially_live_orders": 1}}
+            _mst = _mt.get("state") or {}
+            _standing_live = bool(_mst.get(
+                "live_or_potentially_live_orders"))
+            step["standing_order_maintenance"] = {
+                "actions": _mt.get("actions"),
+                "lifecycle_state": _mst.get("lifecycle_state"),
+                "fill_capable_qty": _mst.get("fill_capable_qty"),
+                "invariant": _mst.get("invariant"),
+                "cancel": _mt.get("cancel"), "refusal": _mt.get("refusal")}
+            _standing_selection = (_mst.get("selection") or {}).get(
+                "candidate_id")
+        else:
+            _standing_selection = None
         step["responsibility_refresh"] = await xs.refresh(conn, _leg_ids)
         _in_flight = await XV.group_quantities(conn, intent_ids=_leg_ids,
                                                group_id=gid)
@@ -3587,6 +3661,14 @@ async def pass_once(conn, *, account_id: str, venue: str,
         # option is splatted into `_price_indirect(**option)`, where an
         # unknown key raises TypeError and removes the hedge from the
         # comparison. Xavier's record attaches each screen by candidate id.)
+        # STRICT FALLBACK and ONE SELECTED INSTRUMENT: what an ordinary
+        # acquisition may consider beside the group's standing hedge order
+        # (`bettor_xavier_standing_orders.acquisition_scope`).
+        _spo_scope = _SPO.acquisition_scope(
+            gid is not None and grp is None, _standing_live,
+            _standing_selection, admitted_all)
+        if _spo_scope[3]:
+            step["acquisition_ineligible"] = _spo_scope[3]
         if gid is None and best is not None:
             # ── A GROUP IS NEEDED TO ACQUIRE, NOT TO DECIDE ──────────
             #
@@ -3612,11 +3694,12 @@ async def pass_once(conn, *, account_id: str, venue: str,
                 "unavailable, and this used to skip the whole decision")
             step["admitted_contract_withheld"] = best["condition_id"]
             best = None
-        _may_acquire = gid is not None and grp is None
+        _may_acquire = _spo_scope[0]
         options, acquisition_plans, option_refusals = decision_options(
-            admitted=admitted_all if _may_acquire else [],
+            admitted=_spo_scope[1] if _may_acquire else [],
             ranking=ranking if _may_acquire else {}, facts=facts,
             position=pos, account_id=account_id, venue=venue, now=at)
+        option_refusals = list(option_refusals) + _spo_scope[2]
         step["hedge_decision_inputs"] = {
             "candidate_ids": [o["candidate_id"] for o in options],
             "not_eligible": option_refusals,
@@ -3766,6 +3849,44 @@ async def pass_once(conn, *, account_id: str, venue: str,
                 "sent now would name a decision nobody can read back"
                 % (xr.get("refusal") or xr.get("error")))
             continue
+        # ── THE STANDING PROTECTIVE ORDER'S PART OF THIS GROUP REVIEW ───
+        #
+        # Under the same group lock and execution lock, after the decision
+        # and Xavier's record persisted: an EXIT / REDUCE waits for a
+        # fill-capable standing hedge order to be confirmed terminal (it is
+        # cancelled first) and may not leave more hedge than primary; a
+        # live order is re-classified and re-valued against HOLD (cancelled,
+        # never competed with); and a HOLD with no live order may place ONE
+        # standing order on ONE instrument through the bound-plan dispatch.
+        if gid and str(pos.get("leg_role") or "PRIMARY") == "PRIMARY":
+            _spo = await _SPO.govern(
+                conn, xs=xs, pos=pos, grp=grp, facts=facts, dec=dec, xr=xr,
+                step=step, admitted_all=admitted_all, ranking=ranking,
+                account_id=account_id, venue=venue, adapter=adapter,
+                venue_positions=venue_positions, xavier_policy=_policy,
+                gate=_gate, at=at, source=trigger_source,
+                spo_policy=_spo_policy)
+            step["standing_order"] = {k: _spo.get(k) for k in (
+                "ok", "refusal", "placed", "block_dispatch", "intent_id",
+                "plan_id", "lifecycle_state", "cancel", "state",
+                "monitored_candidates", "revalidation", "valuation",
+                "residual",
+                "xavier_decision_id", "policy", "mode",
+                "exchange_linked_exclusivity", "error")
+                if k in _spo}
+            out["standing_orders"].append(dict(step["standing_order"],
+                                               group_id=gid))
+            if _spo.get("placed"):
+                out["opened_anything"] = True
+            if _spo.get("block_dispatch"):
+                step["refusal"] = _spo.get("refusal")
+                step["what_was_selected_instead"] = action
+                step["dispatched"] = None
+                step["why_nothing_was_sent"] = (
+                    "the group's standing hedge order must be confirmed "
+                    "terminal (or the exit would leave more hedge than "
+                    "primary) before this action is sent")
+                continue
         if action in (ACTION_HOLD, None, ACTION_NOTHING_RANKABLE):
             step["dispatched"] = None
             step["refusal"] = R_DECISION_IS_NOT_ACQUIRE

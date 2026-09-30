@@ -158,15 +158,24 @@ async def workspace(conn, *, now: float | None = None) -> dict:
 
     async def versions():
         from .. import bettor_funded_decision as FD
+        from .. import bettor_xavier_standing_orders as SPO
         from ..agents import xavier_ladder as XL
         from ..agents import xavier_policy as XP
+        from ..agents import xavier_standing_view as XSV
         pol = await XP.load(conn)
+        spo = await SPO.load_policy(conn)
         return _sec(OK, None, {
             "xavier_record": XV.VERSION, "ladder": XL.VERSION,
             "decision_policy": FD.VERSION,
             "management_policy": {k: pol.get(k) for k in (
                 "policy_key", "version", "source", "why", "params",
                 "approved_by")},
+            # THE STANDING-ORDER MANAGEMENT POLICY (not Derek's): its version,
+            # whether a person enabled it, and the capability it rests on.
+            "standing_order_policy": dict({k: spo.get(k) for k in (
+                "policy_key", "version", "source", "why", "params",
+                "approved_by")}, **{k: v for k, v in XSV.capability().items()
+                                    if k != "venue_capability"}),
             "workspace": VERSION})
 
     async def positions():
@@ -197,8 +206,23 @@ async def workspace(conn, *, now: float | None = None) -> dict:
             g["hedge_qty" if role == "HEDGE" else "primary_qty"] += float(
                 p.get("residual_qty") or 0.0)
         from . import command_xavier as CX
+        from ..agents import xavier_standing_view as XSV
         for g in groups.values():
             g["matched_qty"] = min(g["primary_qty"], g["hedge_qty"])
+            # STANDING PROTECTION, READ: filled protection and resting
+            # orders kept apart (a resting order is an obligation, not
+            # protection), the selected instrument, the fill-capable
+            # quantity, the lifecycle state, the floor class and the venue
+            # capability flag.
+            if not g["group"].startswith("intent:"):
+                try:
+                    sv = await XSV.group_view(conn, group_id=g["group"])
+                    g["standing_protection"] = (sv if sv.get("plans") or
+                                                sv.get("selected_instrument")
+                                                else None)
+                except Exception as exc:                        # noqa: BLE001
+                    g["standing_protection"] = {
+                        "unreadable": type(exc).__name__}
             g["residual_unpaired_qty"] = abs(g["primary_qty"]
                                              - g["hedge_qty"])
             first = g["legs"][0]
@@ -476,6 +500,22 @@ async def xavier_workspace(response: Response) -> dict:
     pool = await _pool()
     async with pool.acquire() as conn:
         return await workspace(conn)
+
+
+@router.get("/api/command/agents/xavier/standing-orders",
+            dependencies=[Depends(require_read)])
+async def xavier_standing_orders(response: Response) -> dict:
+    """EVERY GROUP'S STANDING PROTECTION for the bound account, read."""
+    from ..agents import xavier_standing_view as XSV
+    response.headers["Cache-Control"] = "no-store"
+    pool = await _pool()
+    async with pool.acquire() as conn:
+        b = await _bound(conn)
+        got = await XSV.account_view(conn, account_id=b["account_id"],
+                                     venue=b["venue"]) if b["bound"] else {
+            "ok": True, "groups": [], "why": "NO_FUNDED_ACCOUNT_IS_BOUND",
+            **XSV.capability()}
+    return dict(got, read_only=True)
 
 
 @router.get("/api/command/agents/xavier/decisions/{xavier_decision_id}",

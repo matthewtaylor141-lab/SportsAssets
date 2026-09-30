@@ -87,6 +87,12 @@ ADAPTER_SURFACE = ("submit_fok", "order_status", "cancel_order", "open_orders")
 #: `post_only` stays off: this lane's plan is a marketable take at a measured
 #: vwap, not a rest.
 TIF = "TIME_IN_FORCE_FILL_OR_KILL"
+#: A STANDING order's time in force: the venue expires it at `goodTillTime`
+#: (`pmus.submit_fok(good_till=...)` sets both), so it cannot outlive the
+#: process that manages it by more than its stated expiry.
+TIF_GOOD_TILL_DATE = "TIME_IN_FORCE_GOOD_TILL_DATE"
+R_STANDING_ORDER_WITHOUT_EXPIRY = (
+    "A_STANDING_ORDER_RECORD_NAMES_NO_VENUE_ENFORCED_EXPIRY")
 
 R_VENUE_CLASS = "THIS_CONNECTION_ONLY_RUNS_A_FUNDED_CLASS_VENUE"
 R_NOT_ADMISSIBLE = "THE_DECISION_WAS_NOT_ADMITTED_SO_THERE_IS_NOTHING_TO_SEND"
@@ -347,6 +353,25 @@ def plan_from_decision(rec: dict | None) -> dict:
     # record computes it (`payout_is_complement`), so it is read, not guessed.
     payout_event = (rec.get("payout_event")
                     or (rec.get("identity") or {}).get("payout_event"))
+    # ── A STANDING (RESTING) ORDER CARRIES A VENUE-ENFORCED EXPIRY ──────
+    #
+    # Xavier's standing protective orders (`bettor_xavier_standing_orders`)
+    # rest at a protective limit instead of taking at the displayed depth.
+    # Such a record names `standing_order.good_till` (an ISO instant) and the
+    # order goes out GOOD_TILL_DATE with that `goodTillTime`, so a process
+    # that dies leaves an order the VENUE expires. A standing record without
+    # an expiry is refused: a GTC rest outlives the process that manages it.
+    # Every other record is untouched (FOK, no good_till).
+    standing = rec.get("standing_order")
+    tif, good_till = TIF, None
+    if standing is not None:
+        good_till = str((standing or {}).get("good_till") or "").strip()
+        if not good_till:
+            return dict(out, refusal=R_STANDING_ORDER_WITHOUT_EXPIRY,
+                        why=("a standing order is sent GOOD_TILL_DATE so the "
+                             "venue expires it if this process dies; this "
+                             "record names no goodTillTime"))
+        tif = TIF_GOOD_TILL_DATE
     return {"version": VERSION, "ok": True, "refusal": None,
             "us_market_slug": str(slug), "event_key": str(event_key),
             "intent": intent,
@@ -359,7 +384,9 @@ def plan_from_decision(rec: dict | None) -> dict:
                 "for an exit, and select_exit says so by name rather than "
                 "deriving one"),
             "limit_price": wire, "quantity": contracts,
-            "sell": False, "tif": TIF, "post_only": False,
+            "sell": False, "tif": tif, "post_only": False,
+            "good_till": good_till,
+            "standing_order": (None if standing is None else dict(standing)),
             "collateral_usd": collateral_for(wire, contracts, intent),
             "collateral_space": ("(1 - price) x qty" if intent ==
                                  "ORDER_INTENT_BUY_SHORT" else "price x qty"),
@@ -1137,8 +1164,10 @@ async def submit_for_decision(conn, rec: dict, *, account_id: str,
         "callable": "%s.submit_fok" % ADAPTER_MODULE,
         "args": [plan["us_market_slug"], plan["limit_price"],
                  plan["quantity"], plan["sell"]],
-        "kwargs": {"tif": plan["tif"], "intent": plan["intent"],
-                   "post_only": plan["post_only"]},
+        "kwargs": dict({"tif": plan["tif"], "intent": plan["intent"],
+                        "post_only": plan["post_only"]},
+                       **({"good_till": plan["good_till"]}
+                          if plan.get("good_till") else {})),
         "and_then": ("the adapter's own execution_gate.authorize('submit'), "
                      "its orders.preview cost comparison, and orders.create")}
     if not FUNDED_SUBMISSION_ENABLED:
@@ -1220,6 +1249,9 @@ async def submit_for_decision(conn, rec: dict, *, account_id: str,
                           # WHAT THE LEG SETTLES ON, beside what it pays on.
                           "settlement_identity": (rec or {}).get(
                               "settlement_identity"),
+                          # A STANDING (RESTING) ORDER SAYS SO on its intent,
+                          # with its expiry and the plan that decided it.
+                          "standing_order": plan.get("standing_order"),
                           "sized_to_approved_rails": (
                               {k: out["sized_to_fit"].get(k) for k in
                                ("from_quantity", "to_quantity", "why")}
@@ -1292,10 +1324,14 @@ async def submit_for_decision(conn, rec: dict, *, account_id: str,
 
     # ── THE REQUEST ─────────────────────────────────────────────────
     try:
+        # A STANDING order names its venue-enforced expiry; every other
+        # order sends exactly the arguments it always did.
         answer = mod.submit_fok(
             plan["us_market_slug"], plan["limit_price"], plan["quantity"],
             plan["sell"], tif=plan["tif"], intent=plan["intent"],
-            post_only=plan["post_only"])
+            post_only=plan["post_only"],
+            **({"good_till": plan["good_till"]} if plan.get("good_till")
+               else {}))
     except Exception as exc:                               # noqa: BLE001
         # DID THE REQUEST ACTUALLY LEAVE? The two answers need opposite
         # handling, and getting this wrong in either direction is a real cost:
