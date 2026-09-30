@@ -288,15 +288,16 @@ async def test_proof13_actual_hypothetical_simulated_and_unknown_are_apart(db):
     # its REDUCE was blocked (unevaluable)
     p1 = await H.position(db, 1, fill_at=D0 + 3600, settle_at=settle)
     x1 = await H.decide(db, p1, decided=D0 + 7200, p=0.6)
-    # A REFUSED VALUATION WHOSE CONTRACT LATER SETTLED PROFITABLY: cost
-    # 0.40, outcome 1. No order existed.
+    # A REFUSED VALUATION WHOSE CONTRACT LATER SETTLED PROFITABLY: price
+    # 0.40 plus a 0.01 fee (cost_per_contract is the FEE), outcome 1. No
+    # order existed.
     v_missed = await H.valuation(
         db, fixture=H.PFX + "fx-missed", decided=D0 + 3 * 3600, p=0.55,
-        price=0.40, cost=0.40, edge=0.005, outcome=1, outcome_at=settle)
+        price=0.40, cost=0.01, edge=0.005, outcome=1, outcome_at=settle)
     # A BUY (unplaced: submission is disabled) whose outcome is not known
     v_sim = await H.valuation(
         db, fixture=H.PFX + "fx-sim", decided=D0 + 4 * 3600,
-        decision="BUY", p=0.6, price=0.5, cost=0.51, edge=0.09, size=10)
+        decision="BUY", p=0.6, price=0.5, cost=0.01, edge=0.09, size=10)
     # A REFUSED VALUATION WITH NO COST RECORDED AND NO OUTCOME
     v_unev = await H.valuation(
         db, fixture=H.PFX + "fx-unev", decided=D0 + 5 * 3600,
@@ -316,7 +317,8 @@ async def test_proof13_actual_hypothetical_simulated_and_unknown_are_apart(db):
     missed = [r for r in ks["rows"] if r.get("valuation_id") == v_missed]
     assert missed and missed[0]["refused"] is True
     assert missed[0]["could_have_filled"] == "UNPROVEN"
-    assert missed[0]["value_per_contract"] == pytest.approx(0.6)
+    # settled 1 less the price AND the fee: 1 - (0.40 + 0.01)
+    assert missed[0]["value_per_contract"] == pytest.approx(0.59)
     exit_est = [r for r in ks["rows"] if r.get("action") == "DIRECT_EXIT"]
     assert exit_est and exit_est[0]["could_have_filled"] == "UNPROVEN"
     # the exit's frozen decision-time evidence travels with it
@@ -340,7 +342,7 @@ async def test_proof13_actual_hypothetical_simulated_and_unknown_are_apart(db):
     # the blocked REDUCE is unevaluable by its blocker, not zero
     assert "BLOCKED:NO_EXECUTABLE_DEPTH" in un["reasons"]
     # NO CATEGORY'S TOTAL CONTAINS ANOTHER'S ROWS: the missed opportunity's
-    # +0.60 is nowhere in ACTUAL, and ACTUAL's usd is P1's alone
+    # +0.59 is nowhere in ACTUAL, and ACTUAL's usd is P1's alone
     assert actual["usd"]["fixture_sum"] == pytest.approx(5.0)
     # THE BOOK SECTION: realized (non-provisional) apart from provisional
     bk = got["report"]["book"]
@@ -402,12 +404,12 @@ async def test_proof15_repeated_decisions_on_one_fixture_are_one_example(db):
     for i in range(40):
         await H.valuation(db, fixture=H.PFX + "fx-many",
                           decided=D0 + 60 * (i + 1), p=0.9, price=0.5,
-                          cost=0.5, edge=0.005, outcome=0, outcome_at=settle)
+                          cost=0.01, edge=0.005, outcome=0, outcome_at=settle)
     await H.valuation(db, fixture=H.PFX + "fx-b", decided=D0 + 7200, p=0.3,
-                      price=0.5, cost=0.5, edge=0.005, outcome=1,
+                      price=0.5, cost=0.01, edge=0.005, outcome=1,
                       outcome_at=settle)
     await H.valuation(db, fixture=H.PFX + "fx-c", decided=D0 + 7300, p=0.6,
-                      price=0.5, cost=0.5, edge=0.005, outcome=1,
+                      price=0.5, cost=0.01, edge=0.005, outcome=1,
                       outcome_at=settle)
     # THREE Xavier reviews of one position
     p = await H.position(db, 1, fill_at=D0 + 600, settle_at=settle)

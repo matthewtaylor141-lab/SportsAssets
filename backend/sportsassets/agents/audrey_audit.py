@@ -579,15 +579,20 @@ async def derek_section(conn, *, start: float, end: float) -> dict:
             good = None if _num(r["edge"]) is None else _num(r["edge"]) > 0
         else:
             good = None
+        # ACQUISITION = the executable price PLUS the fee: cost_per_contract
+        # in external_valuations is the FEE (bettor_external_shadow).
+        acq = (None if _num(r["price"]) is None or _num(r["cost"]) is None
+               else float(_num(r["price"])) + float(_num(r["cost"])))
         val = None
-        if r["outcome_known"] and _num(r["cost"]) is not None:
-            val = float(r["outcome"]) - float(r["cost"])
+        if r["outcome_known"] and acq is not None:
+            val = float(r["outcome"]) - acq
         item = {"valuation_id": r["id"], "fixture": r["fixture"],
                 "decision": r["decision"],
                 "decided_at": r["decided_at"],
                 "frozen": {"probability": _r6(r["probability"]),
                            "executable_price": _r6(r["price"]),
-                           "cost_per_contract": _r6(r["cost"]),
+                           "fee_per_contract": _r6(r["cost"]),
+                           "acquisition_per_contract": _r6(acq),
                            "edge_per_contract": _r6(r["edge"]),
                            "proposed_size": _r6(r["proposed_size"]),
                            "quote_observed_at": r["observed_at"],
@@ -612,16 +617,16 @@ async def derek_section(conn, *, start: float, end: float) -> dict:
                 if val > 0:
                     missed.append(item)
         elif not r["outcome_known"] and _num(r["probability"]) is not None \
-                and _num(r["cost"]) is not None:
+                and acq is not None:
             item["category"] = SIMULATED
             item["simulated_value_per_contract"] = _r6(
-                float(r["probability"]) - float(r["cost"]))
+                float(r["probability"]) - acq)
             sim.append(item)
         else:
             item["category"] = UNEVALUABLE
-            item["why"] = ("outcome not known and no decision-time cost"
-                           if not r["outcome_known"] else
-                           "no decision-time cost recorded")
+            item["why"] = ("outcome not known and no decision-time price and "
+                           "fee" if not r["outcome_known"] else
+                           "no decision-time price and fee recorded")
             unev.append(item)
     ks = [(i["fixture"], i["value_per_contract"]) for i in selected
           if i.get("category") == KNOWN_SETTLEMENT]
@@ -646,7 +651,8 @@ async def derek_section(conn, *, start: float, end: float) -> dict:
             "per_contract": fixture_stats(ks),
             "why": ("a BUY was not submitted (submission is disabled): its "
                     "value is the settled payout minus the decision-time "
-                    "cost, and nothing shows the order would have filled")},
+                    "executable price and fee, and nothing shows the order "
+                    "would have filled")},
         "quality": _count([i["quality"] for i in selected]),
         "selected_rows": selected[:MAX_ROWS_IN_REPORT],
         "refused_known_settlement": {
@@ -662,7 +668,8 @@ async def derek_section(conn, *, start: float, end: float) -> dict:
             "fixtures": len({m["fixture"] for m in missed}),
             "rows": missed[:MAX_ROWS_IN_REPORT],
             "basis": ("refused valuations whose contract later settled above "
-                      "the decision-time cost, from captured evidence only")},
+                      "the decision-time executable price plus fee, from "
+                      "captured evidence only")},
         "simulated": {"category": SIMULATED, "count": len(sim),
                       "rows": sim[:MAX_ROWS_IN_REPORT],
                       "per_contract": fixture_stats(
@@ -670,8 +677,9 @@ async def derek_section(conn, *, start: float, end: float) -> dict:
                            for i in sim]),
                       "assumptions": ("outcome not yet known: valued at the "
                                       "decision-time probability minus the "
-                                      "decision-time cost; full quantity at "
-                                      "the displayed price")},
+                                      "decision-time executable price and "
+                                      "fee; full quantity at the displayed "
+                                      "price")},
         "unevaluable": {"category": UNEVALUABLE, "count": len(unev),
                         "rows": unev[:MAX_ROWS_IN_REPORT],
                         "reasons": _count([u["why"] for u in unev])}}

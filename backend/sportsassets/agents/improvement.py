@@ -71,6 +71,20 @@ V_HARM = "FAIL_HARM"
 V_NO_GAIN = "FAIL_NO_IMPROVEMENT"
 V_INSUFFICIENT = "INSUFFICIENT_EVIDENCE"
 V_SELECTED = "SELECTED"
+#: the Derek threshold replay's own version, bound into every evaluation
+DEREK_REPLAY_VERSION = "DEREK_THRESHOLD_REPLAY_V2"
+#: the threshold's unit, stated wherever a value is recorded
+THRESHOLD_UNITS = ("PROBABILITY_DIFFERENCE_ON_A_0_TO_1_DOLLAR_CONTRACT "
+                   "(0.05 == 5 percentage points; never 5)")
+#: what a retrospective replay can and cannot establish
+QUAL_RETROSPECTIVE = "RETROSPECTIVE_REPLAY_ON_KNOWN_SETTLEMENT"
+ECON_PENDING = "PENDING_PROSPECTIVE_QUALIFICATION_WITH_EXECUTION_EVIDENCE"
+ECON_QUALIFIED = "QUALIFIED"
+R_NO_ARTIFACT = "THE_CANDIDATE_HAS_NO_COMMITTED_ARTIFACT"
+R_ARTIFACT_TESTS = "THE_ARTIFACT_TESTS_DID_NOT_PASS"
+R_NO_BINDING = "THE_EVALUATION_RECORDS_NO_EVIDENCE_BINDING"
+R_BASIS_CHANGED = "THE_APPROVAL_BASIS_CHANGED_SINCE_EVALUATION"
+R_ECON_PENDING = "ECONOMIC_QUALIFICATION_IS_PENDING"
 V_NOT_SELECTED = "NOT_SELECTED"
 SCOPE_PREAUTH = "PRE_AUTHORIZED_UNATTENDED"
 SCOPE_APPROVAL = "REQUIRES_APPROVAL"
@@ -189,7 +203,13 @@ CHANGE_CLASSES: dict[str, ChangeClass] = {c.name: c for c in (
         policy_key="derek.entry_threshold",
         bounds={"min_net_edge_per_contract": (0.0, 0.10, False)},
         pre_authorized=False, evaluator="derek_threshold_replay",
-        success_metrics={"fixture_mean_pnl_delta_per_contract": {">=": 0.0},
+        # SUCCESS IS AN IMPROVED NET RESULT PER ELIGIBLE FIXTURE (paired
+        # against the current threshold on the same rows) WITHOUT A DEEPER
+        # DRAWDOWN -- not fewer trades, not a higher mean on fewer trades.
+        # An identical selection gains 0 and fails; no trades is
+        # INSUFFICIENT_EVIDENCE, never a success.
+        success_metrics={"delta_net_per_eligible_fixture": {">": 0.0},
+                         "delta_max_drawdown": {"<=": 0.0},
                          "min_fixtures": 30},
         harm_metrics={"fixture_mean_pnl_per_contract": {">=": 0.0},
                       "negative_fixture_fraction": {"<=": 0.6}},
@@ -203,11 +223,18 @@ CHANGE_CLASSES: dict[str, ChangeClass] = {c.name: c for c in (
         description=("Derek's binding entry policy threshold: the minimum "
                      "GROSS probability edge in probability points "
                      "(qualified probability - executable price), "
-                     "agents.derek_policy MIN_GROSS_EDGE_PP (DEFAULT_PARAMS)"),
+                     "agents.derek_policy MIN_GROSS_EDGE_PROBABILITY (DEFAULT_PARAMS); "
+                     "units: " + THRESHOLD_UNITS),
         policy_key="DEREK_ENTRY_POLICY",
         bounds={"min_gross_edge_pp": (0.0, 0.20, False)},
         pre_authorized=False, evaluator="derek_gross_edge_replay",
-        success_metrics={"fixture_mean_pnl_delta_per_contract": {">=": 0.0},
+        # SUCCESS IS AN IMPROVED NET RESULT PER ELIGIBLE FIXTURE (paired
+        # against the current threshold on the same rows) WITHOUT A DEEPER
+        # DRAWDOWN -- not fewer trades, not a higher mean on fewer trades.
+        # An identical selection gains 0 and fails; no trades is
+        # INSUFFICIENT_EVIDENCE, never a success.
+        success_metrics={"delta_net_per_eligible_fixture": {">": 0.0},
+                         "delta_max_drawdown": {"<=": 0.0},
                          "min_fixtures": 30},
         harm_metrics={"fixture_mean_pnl_per_contract": {">=": 0.0},
                       "negative_fixture_fraction": {"<=": 0.6}},
@@ -215,7 +242,7 @@ CHANGE_CLASSES: dict[str, ChangeClass] = {c.name: c for c in (
         rollback=("reactivate the prior agent_policy_versions row for "
                   "(DEREK, DEREK_ENTRY_POLICY)"),
         code_default=("backend/sportsassets/agents/derek_policy.py",
-                      "MIN_GROSS_EDGE_PP")),
+                      "MIN_GROSS_EDGE_PROBABILITY")),
     ChangeClass(
         name="XAVIER_POLICY_PARAMETER", kind=K_POLICY, agent=XAVIER,
         description="a bounded Xavier policy parameter; no replay registered",
@@ -852,37 +879,173 @@ BASIS_GROSS = "GROSS_PROBABILITY_EDGE"
 def derek_selectable(row: dict, threshold: float, *,
                      basis: str = BASIS_NET) -> bool:
     """Would a threshold select this recorded valuation? Only a row whose
-    ONLY refusal was the edge (or none), with its decision-time edge and
-    cost recorded. Every other refusal still refuses.
+    ONLY refusal was the edge (or none), with its decision-time inputs
+    recorded. Every other refusal still refuses.
 
     BASIS_NET: the shadow evaluator's net edge per contract, strictly above.
     BASIS_GROSS: Derek's policy measure -- decision-time probability minus
-    executable price, at or above the threshold (the owner's 5 pp rule)."""
-    cost = _num(row.get("cost"))
-    other = [r for r in (row.get("refusals") or []) if r != EDGE_REFUSAL]
+    executable price, at or above the threshold (the owner's 5 pp rule,
+    0.05 as a probability difference)."""
+    return derek_eligibility(row, basis=basis) is None and \
+        _meets(row, threshold, basis)
+
+
+def derek_eligibility(row: dict, *, basis: str = BASIS_NET) -> str | None:
+    """None when the row is an ELIGIBLE opportunity (any threshold could
+    select it); else the reason it is not."""
+    if [r for r in (row.get("refusals") or []) if r != EDGE_REFUSAL]:
+        return "OTHER_REFUSAL"
+    if _num(row.get("price")) is None:
+        return "NO_EXECUTABLE_PRICE"
+    if _num(row.get("cost")) is None:
+        return "NO_FEE"
+    if basis == BASIS_GROSS and _num(row.get("probability")) is None:
+        return "NO_PROBABILITY"
+    if basis == BASIS_NET and _num(row.get("edge")) is None:
+        return "NO_NET_EDGE"
+    return None
+
+
+def _meets(row: dict, threshold: float, basis: str) -> bool:
     if basis == BASIS_GROSS:
-        p, price = _num(row.get("probability")), _num(row.get("price"))
-        if p is None or price is None or cost is None:
-            return False
-        return not other and (p - price) >= float(threshold) - \
-            GROSS_EDGE_TOLERANCE
-    edge = _num(row.get("edge"))
-    if edge is None or cost is None:
-        return False
-    return not other and edge > float(threshold)
+        return (_num(row["probability"]) - _num(row["price"])) >= \
+            float(threshold) - GROSS_EDGE_TOLERANCE
+    return _num(row["edge"]) > float(threshold)
+
+
+#: HOW A SELECTED ROW IS VALUED. `cost_per_contract` in external_valuations
+#: is the FEE per contract (bettor_external_shadow: cost_per_contract =
+#: fee_per); the acquisition cost is the executable price PLUS that fee.
+EXECUTION_ASSUMPTION = (
+    "one contract per selected decision, acquired at the recorded "
+    "decision-time executable price plus the recorded fee per contract; the "
+    "order was not necessarily placed and a fill is NOT proven")
 
 
 def replay_derek_threshold(rows: list, *, threshold: float,
                            basis: str = BASIS_NET) -> dict:
-    """KNOWN SETTLEMENT, HYPOTHETICAL EXECUTION: per contract, the settled
-    payout minus the decision-time cost of every row the threshold would
-    select. An unplaced order is not proven to have filled."""
-    sel = [dict(r, pnl=float(r["outcome"]) - float(r["cost"]))
-           for r in rows if derek_selectable(r, threshold, basis=basis)]
-    m = fixture_metrics(sel)
-    return dict(m, threshold=float(threshold), basis=basis,
-                evidence_category=KNOWN_SETTLEMENT,
-                could_have_filled="UNPROVEN")
+    """KNOWN SETTLEMENT, HYPOTHETICAL EXECUTION (`DEREK_REPLAY_VERSION`).
+
+    Reports, separately: rows considered; ELIGIBLE opportunities (rows and
+    fixtures) and why the rest were not; TRADES the threshold selects (and a
+    distinct NO_TRADES flag); net result after the price and the fee;
+    capital deployed; losing trades and total loss; the maximum drawdown of
+    the chronological cumulative net; and the fixture-weighted means. It
+    measures what the selected entries would have settled to at their
+    recorded prices -- not realised performance."""
+    missing: dict[str, int] = {}
+    eligible = []
+    for r in rows:
+        why = derek_eligibility(r, basis=basis)
+        if why is None:
+            if r.get("outcome") is None:
+                why = "NO_OUTCOME"
+        if why is not None:
+            missing[why] = missing.get(why, 0) + 1
+            continue
+        eligible.append(r)
+    trades = []
+    for r in eligible:
+        if not _meets(r, threshold, basis):
+            continue
+        acq = float(_num(r["price"])) + float(_num(r["cost"]))
+        trades.append(dict(r, capital=acq, pnl=float(r["outcome"]) - acq))
+    m = fixture_metrics(trades)
+    cum = peak = dd = 0.0
+    for t in sorted(trades, key=lambda t: (t["decided_at"], str(t["id"]))):
+        cum += t["pnl"]
+        peak = max(peak, cum)
+        dd = max(dd, peak - cum)
+    per_fx: dict[str, float] = {}
+    for r in eligible:
+        per_fx.setdefault(str(r["fixture"]), 0.0)
+    for t in trades:
+        per_fx[str(t["fixture"])] += t["pnl"]
+    net = sum(t["pnl"] for t in trades)
+    cap = sum(t["capital"] for t in trades)
+    losers = [t for t in trades if t["pnl"] < 0]
+    return dict(
+        m, threshold=float(threshold), basis=basis, units=THRESHOLD_UNITS,
+        replay_version=DEREK_REPLAY_VERSION, rows_considered=len(rows),
+        eligible_opportunities=len(eligible),
+        eligible_fixtures=len(per_fx), not_eligible=missing,
+        trades=len(trades), no_trades=not trades,
+        net_total=round(net, 6), capital_deployed=round(cap, 6),
+        return_on_capital=(round(net / cap, 6) if cap > 0 else None),
+        losing_trades=len(losers),
+        loss_total=round(sum(t["pnl"] for t in losers), 6),
+        max_drawdown=round(dd, 6),
+        evidence_category=KNOWN_SETTLEMENT, could_have_filled="UNPROVEN",
+        execution_assumption=EXECUTION_ASSUMPTION,
+        measures="RETROSPECTIVE_HYPOTHETICAL_EXECUTION_ON_KNOWN_SETTLEMENT",
+        _per_fixture_net=per_fx,
+        _selected_ids=sorted(str(t["id"]) for t in trades))
+
+
+def paired_comparison(var: dict, base: dict) -> dict:
+    """THE VARIANT AGAINST THE CURRENT THRESHOLD ON THE SAME ROWS, per
+    eligible fixture (an unselected fixture nets 0): the mean change in net
+    result with a normal-approximation 95% interval, and the changes in
+    drawdown, capital, trades and losses. Classifies the outcome."""
+    a, b = var.get("_per_fixture_net") or {}, base.get("_per_fixture_net") or {}
+    fx = sorted(set(a) | set(b))
+    d = [a.get(f, 0.0) - b.get(f, 0.0) for f in fx]
+    n = len(d)
+    mean = sum(d) / n if n else None
+    se = None
+    if n > 1:
+        var_ = sum((x - mean) ** 2 for x in d) / (n - 1)
+        se = math.sqrt(var_ / n)
+    identical = var.get("_selected_ids") == base.get("_selected_ids")
+    if not var.get("trades"):
+        outcome = "NO_TRADES"
+    elif identical:
+        outcome = "IDENTICAL_SELECTION"
+    elif mean is not None and mean > 0:
+        outcome = "IMPROVED_NET_RESULT"
+    elif mean is not None and mean < 0:
+        outcome = "WORSE_NET_RESULT"
+    else:
+        outcome = "NO_CHANGE_IN_NET_RESULT"
+    return {
+        "eligible_fixtures_compared": n,
+        "delta_net_per_eligible_fixture": (None if mean is None
+                                           else round(mean, 6)),
+        "delta_net_std_error": None if se is None else round(se, 6),
+        "delta_net_ci95": (None if se is None else
+                           [round(mean - 1.96 * se, 6),
+                            round(mean + 1.96 * se, 6)]),
+        "delta_net_total": round(sum(d), 6),
+        "delta_max_drawdown": round(float(var.get("max_drawdown") or 0)
+                                    - float(base.get("max_drawdown") or 0), 6),
+        "delta_capital_deployed": round(
+            float(var.get("capital_deployed") or 0)
+            - float(base.get("capital_deployed") or 0), 6),
+        "delta_trades": int(var.get("trades") or 0)
+        - int(base.get("trades") or 0),
+        "delta_losing_trades": int(var.get("losing_trades") or 0)
+        - int(base.get("losing_trades") or 0),
+        "identical_selection": identical,
+        "objective_outcome": outcome,
+        "uncertainty": ("normal approximation over eligible fixtures; "
+                        "fixtures are treated as independent")}
+
+
+def public(m: dict) -> dict:
+    """A replay's metrics without its working sets (kept out of records)."""
+    return {k: v for k, v in (m or {}).items() if not str(k).startswith("_")}
+
+
+def rows_digest(rows: list) -> str:
+    """THE INPUT RECORDS an evaluation read, by identity and by every field
+    it used -- a changed outcome, price, fee or refusal changes it."""
+    keys = ("id", "fixture", "decided_at", "outcome", "outcome_at",
+            "probability", "price", "cost", "edge")
+    flat = sorted([[str(r.get(k)) for k in keys]
+                   + [sorted(r.get("refusals") or [])] for r in rows],
+                  key=lambda x: (x[0], x[2]))
+    return hashlib.sha256(json.dumps(flat, sort_keys=True).encode()
+                          ).hexdigest()
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -1178,6 +1341,80 @@ async def check_canaries(conn, *, now: float) -> dict:
 # 6 · APPROVAL (the API's write route)
 # ═════════════════════════════════════════════════════════════════════
 
+REPLAY_EVALUATORS = ("derek_threshold_replay", "derek_gross_edge_replay")
+
+
+async def verify_approval_basis(conn, c: dict) -> dict:
+    """WHAT AN APPROVAL IS OF, RE-ESTABLISHED AT THE MOMENT OF APPROVAL.
+
+    For a replay-evaluated class: the committed artifact (branch@sha, diff,
+    passing tests) must exist and implement exactly the evaluated
+    parameters; the evaluation must carry its binding; the evaluator
+    version must still be the one that ran; and the input records the
+    evaluation read -- re-read now over the same windows -- must hash to the
+    recorded digest (a changed outcome, price, fee or refusal changes it).
+    Any difference refuses: the old approval basis is void."""
+    cls = class_of(c.get("change_class"))
+    if cls is None or cls.evaluator not in REPLAY_EVALUATORS:
+        return {"ok": True, "basis": None}
+    if not c.get("artifact_ref") or not c.get("diff"):
+        return {"ok": False, "refusal": R_NO_ARTIFACT}
+    tr = _obj(c.get("test_results")) or {}
+    if tr.get("passed") is not True:
+        return {"ok": False, "refusal": R_ARTIFACT_TESTS,
+                "test_results": {k: tr.get(k) for k in ("passed", "counts")}}
+    ev = _obj(c.get("evaluation")) or {}
+    b = ev.get("binding") or {}
+    if not b:
+        return {"ok": False, "refusal": R_NO_BINDING}
+    rep = (_obj(c.get("evidence")) or {}).get("sandbox_report") or {}
+    changed = []
+    if rep.get("params") != c.get("params") or \
+            b.get("params") != c.get("params"):
+        changed.append("PARAMETERS")
+    if rep.get("diff_sha256") and hashlib.sha256(
+            str(c["diff"]).encode()).hexdigest() != rep["diff_sha256"]:
+        changed.append("DIFF")
+    if b.get("evaluator_version") != DEREK_REPLAY_VERSION:
+        changed.append("EVALUATOR_VERSION")
+    tbd, ebd = b.get("training_boundary") or {}, b.get(
+        "evaluation_boundary") or {}
+    rows = await derek_rows(conn, start=float(tbd["start"]),
+                            end=float(ebd["end"]))
+    sp = split_rows(rows, training_boundary=float(tbd["end"]),
+                    evaluation_boundary=float(ebd["end"]),
+                    salt=ebd.get("holdout_salt") or DEREK_HOLDOUT_SALT,
+                    percent=int(ebd.get("holdout_percent")
+                                or DEREK_HOLDOUT_PERCENT))
+    now_digest = rows_digest(sp["training"] + sp["holdout"])
+    if now_digest != (b.get("input_records") or {}).get("digest"):
+        changed.append("INPUT_RECORDS")
+    if changed:
+        return {"ok": False, "refusal": R_BASIS_CHANGED, "changed": changed}
+    return {"ok": True, "basis": {
+        "artifact_ref": c["artifact_ref"], "base_commit": c.get("base_commit"),
+        "diff_sha256": hashlib.sha256(str(c["diff"]).encode()).hexdigest(),
+        "params": c.get("params"),
+        "evaluator_version": b.get("evaluator_version"),
+        "training_boundary": tbd, "evaluation_boundary": ebd,
+        "input_digest": now_digest,
+        "tests": {k: tr.get(k) for k in ("passed", "counts", "tests")}}}
+
+
+def economic_promotion_gate(c: dict) -> dict:
+    """LIVE PROMOTION NEEDS ECONOMIC QUALIFICATION, which an approved
+    artifact does not supply: a retrospective replay at recorded prices, with
+    fills unproven, is not it. Refuses unless the evaluation records a
+    QUALIFIED economic qualification (no evaluator writes one today)."""
+    ev = _obj(c.get("evaluation")) or {}
+    q = (ev.get("qualification") or {}).get("economic_qualification")
+    if q == ECON_QUALIFIED:
+        return {"permitted": True, "economic_qualification": q}
+    return {"permitted": False, "refusal": R_ECON_PENDING,
+            "economic_qualification": q or "NOT_ASSESSED",
+            "evidence": (ev.get("qualification") or {}).get("evidence")}
+
+
 async def approve(conn, candidate_id: str, *, approver: str,
                   credential_role: str, statement: str = "",
                   now: float) -> dict:
@@ -1213,6 +1450,9 @@ async def approve(conn, candidate_id: str, *, approver: str,
     if c.get("state") != "APPROVAL_READY":
         return {"ok": False, "refusal": R_NOT_APPROVAL_READY,
                 "state": c.get("state")}
+    basis = await verify_approval_basis(conn, c)
+    if not basis["ok"]:
+        return dict(basis, candidate_id=candidate_id)
     async with conn.transaction():
         await conn.execute(
             "UPDATE improvement_candidates SET approved_by=$2, "
@@ -1245,6 +1485,10 @@ async def approve(conn, candidate_id: str, *, approver: str,
     return {"ok": True, "candidate_id": candidate_id, "approved_by": who,
             "credential_role": credential_role,
             "policy_version_written_as_candidate": wrote_policy,
+            "approval_scope": ("THE_ARTIFACT_AND_ITS_BOUND_EVIDENCE_WERE_"
+                               "REVIEWED"),
+            "approval_basis": basis.get("basis"),
+            "live_promotion": economic_promotion_gate(c),
             "deployed": False,
             "deployment": ("NOT_BY_AN_AGENT: a policy CANDIDATE row awaits a "
                            "person's activation; a code change stays on "
@@ -1484,7 +1728,8 @@ async def evaluate_derek_threshold_task(
     sp = split_rows(rows, training_boundary=tb, evaluation_boundary=eb,
                     salt=DEREK_HOLDOUT_SALT, percent=DEREK_HOLDOUT_PERCENT)
     min_fx = int(cls.success_metrics.get("min_fixtures") or 1)
-    base_train = replay_derek_threshold(sp["training"], threshold=cur, basis=basis)
+    base_train = replay_derek_threshold(sp["training"], threshold=cur,
+                                        basis=basis)
     if not variants:
         await task_event(conn, tid, kind="NO_VARIANT", actor=AUDREY,
                          detail={"current": cur}, status="CLOSED_NO_CHANGE",
@@ -1492,8 +1737,13 @@ async def evaluate_derek_threshold_task(
         return {"task_id": tid, "verdict": "NO_VARIANT_WITHIN_BOUNDS"}
     await task_event(conn, tid, kind="EVALUATING", actor=EVALUATOR_REPLAY,
                      detail={"variants": variants, "current": cur,
+                             "units": THRESHOLD_UNITS,
                              "excluded": sp["excluded"]},
                      status="EVALUATING", now=now)
+    tbd = {"start": start, "end": tb, "outcomes_known_by": tb}
+    ebd = {"start": tb, "end": eb, "outcomes_known_by": eb,
+           "holdout_salt": DEREK_HOLDOUT_SALT,
+           "holdout_percent": DEREK_HOLDOUT_PERCENT}
     scored = []
     for v in variants:
         prop = await propose(
@@ -1502,32 +1752,44 @@ async def evaluate_derek_threshold_task(
                 "Derek's entry threshold is miscalibrated against settled "
                 "outcomes"), evidence=spec.get("evidence") or {},
             affected_behavior=cls.description,
-            params={pname: v},
-            training_boundary={"start": start, "end": tb,
-                               "outcomes_known_by": tb},
-            evaluation_boundary={"start": tb, "end": eb,
-                                 "outcomes_known_by": eb,
-                                 "holdout_salt": DEREK_HOLDOUT_SALT,
-                                 "holdout_percent": DEREK_HOLDOUT_PERCENT},
-            now=now)
+            params={pname: v}, training_boundary=tbd,
+            evaluation_boundary=ebd, now=now)
         if not prop.get("ok"):
-            scored.append({"limit": v, "refused": prop})
+            scored.append({"threshold": v, "refused": prop})
             continue
         m = replay_derek_threshold(sp["training"], threshold=v, basis=basis)
-        m["baseline"] = base_train
-        m["fixture_mean_pnl_delta_per_contract"] = (
-            None if m["fixture_mean_pnl_per_contract"] is None
-            or base_train["fixture_mean_pnl_per_contract"] is None
-            else round(m["fixture_mean_pnl_per_contract"]
-                       - base_train["fixture_mean_pnl_per_contract"], 6))
+        cmp_ = paired_comparison(m, base_train)
         scored.append({"candidate_id": prop["candidate_id"], "threshold": v,
-                       "training": m})
+                       "training": dict(public(m), **cmp_,
+                                        baseline=public(base_train))})
+    # SELECTION USES TRAINING EVIDENCE ONLY. The holdout is replayed once,
+    # afterwards, for the selected variant and the current threshold.
     ok = [s for s in scored if "candidate_id" in s
           and s["training"]["fixtures"] >= min_fx
-          and s["training"]["fixture_mean_pnl_per_contract"] is not None]
-    best = max(ok, key=lambda s: (s["training"][
-        "fixture_mean_pnl_per_contract"], -abs(s["threshold"] - cur)),
-        default=None)
+          and s["training"]["delta_net_per_eligible_fixture"] is not None]
+    best = max(ok, key=lambda s: (
+        s["training"]["delta_net_per_eligible_fixture"],
+        -abs(s["threshold"] - cur)), default=None)
+    selection = {
+        "segment": "TRAINING",
+        "rule": ("among variants with at least %d selected training fixtures,"
+                 " the largest mean paired change in net result per eligible "
+                 "fixture against the current threshold (%.4f); ties go to the"
+                 " variant nearest the current threshold" % (min_fx, cur)),
+        "holdout_used_for_selection": False,
+        "current": cur, "units": THRESHOLD_UNITS,
+        "attempted": [{"threshold": s["threshold"],
+                       "candidate_id": s.get("candidate_id"),
+                       "refused": (s.get("refused") or {}).get("refusal"),
+                       "training": ({k: s["training"].get(k) for k in (
+                           "fixtures", "trades", "net_total",
+                           "delta_net_per_eligible_fixture",
+                           "delta_max_drawdown", "objective_outcome")}
+                           if "training" in s else None)}
+                      for s in scored],
+        "selected": None if best is None else {
+            "threshold": best["threshold"],
+            "candidate_id": best["candidate_id"]}}
     for s in scored:
         if "candidate_id" not in s:
             continue
@@ -1548,31 +1810,31 @@ async def evaluate_derek_threshold_task(
                 evaluated_by=EVALUATOR_REPLAY, state="REJECTED", now=now,
                 evaluation={"verdict": (V_NOT_SELECTED if best else
                                         V_INSUFFICIENT),
-                            "segment": "TRAINING",
+                            "segment": "TRAINING", "selection": selection,
                             "metrics": s["training"]})
     if best is None:
         await task_event(conn, tid, kind="REJECTED", actor=EVALUATOR_REPLAY,
-                         detail={"why": "no variant had enough training "
-                                        "fixtures", "min_fixtures": min_fx,
+                         detail={"why": "no variant had enough selected "
+                                        "training fixtures",
+                                 "min_fixtures": min_fx,
+                                 "selection": selection,
                                  "training_fixtures":
                                      len(sp["training_fixtures"])},
                          status="REJECTED", now=now)
-        return {"task_id": tid, "verdict": V_INSUFFICIENT, "split": {
-            k: v for k, v in sp.items() if k in ("excluded",)}}
+        return {"task_id": tid, "verdict": V_INSUFFICIENT,
+                "selection": selection,
+                "split": {k: v for k, v in sp.items() if k in ("excluded",)}}
     hid = "derek_threshold:%s:%dpct" % (DEREK_HOLDOUT_SALT,
                                         DEREK_HOLDOUT_PERCENT)
     await ensure_holdout(conn, holdout_id=hid, description=(
         "fixture-level holdout of Derek's recorded valuations"),
         rule={"kind": "FIXTURE_HASH", "salt": DEREK_HOLDOUT_SALT,
               "percent": DEREK_HOLDOUT_PERCENT})
-    hm = replay_derek_threshold(sp["holdout"], threshold=best["threshold"], basis=basis)
+    hv = replay_derek_threshold(sp["holdout"], threshold=best["threshold"],
+                                basis=basis)
     hb = replay_derek_threshold(sp["holdout"], threshold=cur, basis=basis)
-    hm["baseline"] = hb
-    hm["fixture_mean_pnl_delta_per_contract"] = (
-        None if hm["fixture_mean_pnl_per_contract"] is None
-        or hb["fixture_mean_pnl_per_contract"] is None
-        else round(hm["fixture_mean_pnl_per_contract"]
-                   - hb["fixture_mean_pnl_per_contract"], 6))
+    hm = dict(public(hv), **paired_comparison(hv, hb))
+    hm["baseline"] = public(hb)
     hm["min_fixtures"] = min_fx
     hm["excluded"] = sp["excluded"]
     hm["training_fixture_count"] = len(sp["training_fixtures"])
@@ -1581,6 +1843,31 @@ async def evaluate_derek_threshold_task(
                                  & set(sp["holdout_fixtures"]))
     j = judge(hm, success=cls.success_metrics, harm=cls.harm_metrics,
               min_key="min_fixtures", n_key="fixtures")
+    used = sp["training"] + sp["holdout"]
+    binding = {
+        "evaluator_version": DEREK_REPLAY_VERSION,
+        "change_class": cls.name, "params": {pname: best["threshold"]},
+        "current": {pname: cur, "source": current.get("source"),
+                    "version": current.get("version")},
+        "units": THRESHOLD_UNITS, "basis": basis,
+        "training_boundary": tbd, "evaluation_boundary": ebd,
+        "holdout_id": hid,
+        "input_records": {"table": "external_valuations "
+                                   "(record_purpose=ENTRY_DECISION)",
+                          "digest": rows_digest(used),
+                          "training_rows": len(sp["training"]),
+                          "holdout_rows": len(sp["holdout"]),
+                          "outcomes_as_of": eb}}
+    qualification = {
+        "evidence": QUAL_RETROSPECTIVE,
+        "execution": EXECUTION_ASSUMPTION, "fills": "UNPROVEN",
+        "establishes": ("that the selected threshold would have selected "
+                        "entries with a better settled net result on the "
+                        "holdout, at recorded prices and fees"),
+        "does_not_establish": ("that orders at this threshold fill, or "
+                               "realised performance; nor any prospective "
+                               "result"),
+        "economic_qualification": ECON_PENDING}
     tr = await record_trial(
         conn, candidate_id=best["candidate_id"], task_id=tid,
         segment="HOLDOUT", holdout_id=hid,
@@ -1600,15 +1887,24 @@ async def evaluate_derek_threshold_task(
         state="APPROVAL_READY" if passed else "REJECTED",
         evaluation={"verdict": j["verdict"], "segment": "HOLDOUT",
                     "holdout_id": hid, "judgement": j, "metrics": hm,
+                    "selection": selection, "binding": binding,
+                    "qualification": qualification,
+                    "approval_ready_means": (
+                        "ARTIFACT_READY_FOR_REVIEW once a committed artifact "
+                        "is attached; NOT economic qualification for live "
+                        "promotion"),
                     "evidence_category": KNOWN_SETTLEMENT,
                     "could_have_filled": "UNPROVEN"})
     await task_event(
         conn, tid, kind="APPROVAL_READY" if passed else "REJECTED",
         actor=EVALUATOR_REPLAY, detail={"candidate_id": best["candidate_id"],
-                                        "judgement": j},
+                                        "judgement": j,
+                                        "objective_outcome":
+                                            hm["objective_outcome"]},
         status="APPROVAL_READY" if passed else "REJECTED", now=now)
     return {"task_id": tid, "verdict": j["verdict"],
-            "candidate_id": best["candidate_id"], "holdout": hm}
+            "candidate_id": best["candidate_id"], "holdout": hm,
+            "selection": selection, "binding": binding}
 
 
 async def advance_code_task(conn, task: dict, *, now: float) -> dict:

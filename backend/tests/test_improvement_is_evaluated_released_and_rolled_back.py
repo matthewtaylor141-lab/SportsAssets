@@ -156,25 +156,33 @@ def test_the_judgement_puts_harm_before_gain():
 # ═════════════════════════════════════════════════════════════════════
 
 async def _seed_derek(c, *, tb, low_edge_outcome, high_edge_outcome,
-                      n_train=40, n_hold=40):
-    """Per fixture one refused row with edge 0.005 (only the edge refused
-    it) and one with edge 0.015 (BUY-able today), settled as stated. One
-    extra row per training fixture decided before the boundary but LEARNED
-    after it (outcome 1 -- if leaked it would lift the training mean)."""
+                      mid_edge_outcome=None, n_train=40, n_hold=40):
+    """Per fixture one refused row with net edge 0.005 (only the edge
+    refused it) and one with edge 0.015 (BUY-able today), settled as stated;
+    with `mid_edge_outcome`, also one at 0.011 (just above today's 0.01).
+    Every row is priced 0.50 with a 0.01 FEE (cost_per_contract is the fee),
+    so a row that settles 1 nets +0.49 and one that settles 0 nets -0.51.
+    One extra row per training fixture decided before the boundary but
+    LEARNED after it (outcome 1 -- if leaked it would lift the training
+    mean)."""
     fx = _names(False, n_train, "dt") + _names(True, n_hold, "dh")
     for i, f in enumerate(fx):
         hold = i >= n_train
         dec = (tb + DAY + i * 60) if hold else (tb - 5 * DAY + i * 60)
         out_at = dec + 3600
         await H.valuation(c, fixture=f, decided=dec, p=0.6, price=0.5,
-                          cost=0.5, edge=0.005, outcome=low_edge_outcome,
+                          cost=0.01, edge=0.005, outcome=low_edge_outcome,
                           outcome_at=out_at)
         await H.valuation(c, fixture=f, decided=dec + 1, p=0.6, price=0.5,
-                          cost=0.5, edge=0.015, outcome=high_edge_outcome,
+                          cost=0.01, edge=0.015, outcome=high_edge_outcome,
                           outcome_at=out_at)
+        if mid_edge_outcome is not None:
+            await H.valuation(c, fixture=f, decided=dec + 2, p=0.6,
+                              price=0.5, cost=0.01, edge=0.011,
+                              outcome=mid_edge_outcome, outcome_at=out_at)
         if not hold:
             await H.valuation(c, fixture=f, decided=tb - 60 + i, p=0.6,
-                              price=0.5, cost=0.5, edge=0.005, outcome=1,
+                              price=0.5, cost=0.01, edge=0.005, outcome=1,
                               outcome_at=tb + 3600)
     return fx
 
@@ -222,7 +230,8 @@ async def test_proof20_a_harmful_candidate_is_rejected_and_cannot_be_approved(
     # trained on 40 fixtures whose outcomes were known at the boundary:
     # the 40 late-learned winners are NOT in the training mean
     assert train["fixtures"] == 40
-    assert train["fixture_mean_pnl_per_contract"] == pytest.approx(-0.5)
+    # every selected row settled 0 against 0.50 + a 0.01 fee
+    assert train["fixture_mean_pnl_per_contract"] == pytest.approx(-0.51)
     assert (await IMP.read_task(db, tid))["status"] == "REJECTED"
     # ── IT CANNOT BE APPROVED: function, database, re-scoring ─────────
     got = await IMP.approve(db, res["candidate_id"], approver="owner@desk",
@@ -257,10 +266,12 @@ async def test_a_passing_threshold_stops_at_approval_ready_and_a_person_approves
         db, monkeypatch):
     import asyncpg
     tb, eb = T, T + 10 * DAY
-    # LOW-EDGE ROWS LOSE, HIGHER-EDGE ROWS WIN: raising the threshold to
-    # 0.01+ keeps the winners -- the current 0.01 already does; a variant
-    # of 0.0 would add the losers. Candidate 0.012 ties the baseline.
-    await _seed_derek(db, tb=tb, low_edge_outcome=0, high_edge_outcome=1)
+    # LOW-EDGE AND JUST-ABOVE-THRESHOLD ROWS LOSE, HIGH-EDGE ROWS WIN. The
+    # current 0.01 takes the 0.011 losers and the 0.015 winners; 0.012
+    # drops the losers and keeps every winner (a better NET result, not
+    # merely fewer trades); 0.0 would add the 0.005 losers.
+    await _seed_derek(db, tb=tb, low_edge_outcome=0, high_edge_outcome=1,
+                      mid_edge_outcome=0)
     tid = await _task(db, "audt-pass", "DEREK_ENTRY_THRESHOLD", {
         "variants": [0.0, 0.012], "training_boundary": tb,
         "evaluation_boundary": eb, "training_start": tb - 30 * DAY})
@@ -281,6 +292,33 @@ async def test_a_passing_threshold_stops_at_approval_ready_and_a_person_approves
         tid, res["candidate_id"])
     assert [(o["state"], o["v"]) for o in others] == [
         ("REJECTED", IMP.V_NOT_SELECTED)]
+    # WHAT THE EVALUATION MEASURED, AND HOW THE VARIANT WAS CHOSEN
+    ev = c["evaluation"]
+    hm = ev["metrics"]
+    assert hm["objective_outcome"] == "IMPROVED_NET_RESULT"
+    assert hm["trades"] == 40 and hm["baseline"]["trades"] == 80
+    assert hm["eligible_opportunities"] == 120 and hm["no_trades"] is False
+    assert hm["net_total"] == pytest.approx(40 * 0.49)
+    assert hm["baseline"]["net_total"] == pytest.approx(40 * 0.49 - 40 * 0.51)
+    assert hm["delta_net_per_eligible_fixture"] == pytest.approx(0.51)
+    assert hm["delta_net_ci95"][0] > 0
+    assert hm["max_drawdown"] == 0 and hm["baseline"]["max_drawdown"] > 0
+    assert hm["delta_capital_deployed"] == pytest.approx(-40 * 0.51)
+    assert hm["units"] == IMP.THRESHOLD_UNITS
+    sel = ev["selection"]
+    assert sel["segment"] == "TRAINING"
+    assert sel["holdout_used_for_selection"] is False
+    assert sorted(a["threshold"] for a in sel["attempted"]) == [0.0, 0.012]
+    assert sel["selected"]["threshold"] == 0.012
+    b = ev["binding"]
+    assert b["evaluator_version"] == IMP.DEREK_REPLAY_VERSION
+    assert b["params"] == {"min_net_edge_per_contract": 0.012}
+    assert len(b["input_records"]["digest"]) == 64
+    assert ev["qualification"]["economic_qualification"] == IMP.ECON_PENDING
+    # ONE HOLDOUT TRIAL, for the selected variant only
+    htr = await db.fetch("SELECT candidate_id FROM improvement_trials WHERE "
+                         " task_id=$1 AND segment='HOLDOUT'", tid)
+    assert [r["candidate_id"] for r in htr] == [res["candidate_id"]]
     # ── SELF-APPROVAL AND AGENT APPROVAL, REFUSED BY NAME ─────────────
     for who, why in (("DEREK", IMP.R_AGENT_APPROVER),
                      (IMP.EVALUATOR_REPLAY, IMP.R_AGENT_APPROVER),
@@ -296,6 +334,37 @@ async def test_a_passing_threshold_stops_at_approval_ready_and_a_person_approves
         await db.execute(
             "UPDATE improvement_candidates SET approved_by=evaluated_by, "
             " approved_at=now() WHERE candidate_id=$1", res["candidate_id"])
+    # ── APPROVAL IS OF A COMMITTED ARTIFACT, AND ITS BASIS IS RE-CHECKED ─
+    got = await IMP.approve(db, res["candidate_id"], approver="owner@desk",
+                            credential_role="admin", now=eb + 91)
+    assert got["refusal"] == IMP.R_NO_ARTIFACT
+    # A SYNTHETIC artifact record (the sandbox's real commit is proven in
+    # test_a_directive_becomes_an_evaluated_artifact); what matters here is
+    # what approval checks against it.
+    import hashlib
+    diff = ("-MIN_NET_EDGE_PER_CONTRACT = 0.01\n"
+            "+MIN_NET_EDGE_PER_CONTRACT = 0.012\n")
+    att = await IMP.attach_artifact(
+        db, res["candidate_id"], diff=diff,
+        artifact_ref="improve/audt-pass@" + "a" * 40, base_commit="b" * 40,
+        test_results={"passed": True, "counts": {"passed": 2}},
+        report={"params": {"min_net_edge_per_contract": 0.012},
+                "diff_sha256": hashlib.sha256(diff.encode()).hexdigest(),
+                "proposed_by": "improvement_sandbox:DEREK"}, now=eb + 92)
+    assert att["ok"] is True, att
+    # AN INPUT RECORD CHANGES AFTER EVALUATION: the approval basis is void
+    extra = await H.valuation(db, fixture=_names(False, 1, "dt")[0],
+                              decided=tb - 4 * DAY, p=0.6, price=0.5,
+                              cost=0.01, edge=0.02, outcome=0,
+                              outcome_at=tb - 3 * DAY)
+    got = await IMP.approve(db, res["candidate_id"], approver="owner@desk",
+                            credential_role="admin", now=eb + 93)
+    assert got["refusal"] == IMP.R_BASIS_CHANGED
+    assert got["changed"] == ["INPUT_RECORDS"]
+    async with db.transaction():
+        await db.execute("SET LOCAL session_replication_role = replica")
+        await db.execute("DELETE FROM external_valuations WHERE id=$1",
+                         extra)
     # ── A PERSON, WITH THE CONTROL CREDENTIAL, THROUGH THE ROUTE ──────
     from tests.test_audrey_audits_derek_and_xavier_daily import _Cfg, _client
     cl = _client(monkeypatch)
@@ -310,6 +379,12 @@ async def test_a_passing_threshold_stops_at_approval_ready_and_a_person_approves
     body = r.json()
     assert body["approved_by"] == "owner@desk"
     assert body["credential_role"] == "admin" and body["deployed"] is False
+    # REVIEWED FOR RELEASE AS A CANDIDATE -- NOT QUALIFIED FOR LIVE USE
+    assert body["live_promotion"]["permitted"] is False
+    assert body["live_promotion"]["refusal"] == IMP.R_ECON_PENDING
+    assert body["approval_basis"]["artifact_ref"].startswith("improve/")
+    assert body["approval_basis"]["input_digest"] == b["input_records"][
+        "digest"]
     c = await IMP.candidate(db, res["candidate_id"])
     assert c["state"] == "APPROVED" and c["approved_by"] == "owner@desk"
     # APPROVAL DOES NOT DEPLOY: a CANDIDATE policy row, nothing ACTIVE
@@ -560,17 +635,23 @@ async def test_a_code_task_waits_for_the_sandbox(db):
 # ═════════════════════════════════════════════════════════════════════
 
 async def _seed_gross(c, *, tb, n_train=40, n_hold=40):
-    """Per fixture: one row at a 4 pp gross edge (p 0.54 at 0.50) that LOST
-    and one at a 12 pp gross edge (p 0.62 at 0.50) that WON; only the edge
-    refused either. Today's 5 pp policy selects the winner only."""
+    """Per fixture: a 4 pp gross edge (p 0.54 at 0.50) that LOST, a 5.5 pp
+    edge (p 0.555) that LOST, and a 12 pp edge (p 0.62) that WON; each at
+    0.50 plus a 0.01 FEE; only the edge refused any. Today's 5 pp policy
+    takes the 5.5 pp losers and the winners; 7 pp keeps only the winners;
+    3 pp adds the 4 pp losers."""
     fx = _names(False, n_train, "gt") + _names(True, n_hold, "gh")
     for i, f in enumerate(fx):
         hold = i >= n_train
         dec = (tb + DAY + i * 60) if hold else (tb - 5 * DAY + i * 60)
         await H.valuation(c, fixture=f, decided=dec, p=0.54, price=0.5,
-                          cost=0.5, edge=0.0, outcome=0, outcome_at=dec + 3600)
-        await H.valuation(c, fixture=f, decided=dec + 1, p=0.62, price=0.5,
-                          cost=0.5, edge=0.1, outcome=1,
+                          cost=0.01, edge=0.0, outcome=0,
+                          outcome_at=dec + 3600)
+        await H.valuation(c, fixture=f, decided=dec + 1, p=0.555, price=0.5,
+                          cost=0.01, edge=0.0, outcome=0,
+                          outcome_at=dec + 3600)
+        await H.valuation(c, fixture=f, decided=dec + 2, p=0.62, price=0.5,
+                          cost=0.01, edge=0.1, outcome=1,
                           outcome_at=dec + 3600)
     return fx
 
@@ -596,7 +677,7 @@ def test_the_derek_policy_class_targets_the_binding_policy_key():
 async def test_a_gross_edge_variant_that_adds_losers_is_rejected_and_a_safe_one_waits_for_a_person(db):
     tb, eb = T, T + 10 * DAY
     await _seed_gross(db, tb=tb)
-    harmful = await _task(db, "gross-harm", "DEREK_ENTRY_POLICY_THRESHOLD", {
+    harmful = await _task(db, H.PFX + "gross-harm", "DEREK_ENTRY_POLICY_THRESHOLD", {
         "variants": [0.03], "training_boundary": tb,
         "evaluation_boundary": eb, "training_start": tb - 30 * DAY})
     out = await IMP.run_due(db, now=eb + 60)
@@ -605,7 +686,7 @@ async def test_a_gross_edge_variant_that_adds_losers_is_rejected_and_a_safe_one_
     c = await IMP.candidate(db, res["candidate_id"])
     assert c["params"] == {"min_gross_edge_pp": 0.03}
     assert c["state"] == "REJECTED"
-    safe = await _task(db, "gross-safe", "DEREK_ENTRY_POLICY_THRESHOLD", {
+    safe = await _task(db, H.PFX + "gross-safe", "DEREK_ENTRY_POLICY_THRESHOLD", {
         "variants": [0.07], "training_boundary": tb,
         "evaluation_boundary": eb, "training_start": tb - 30 * DAY})
     out = await IMP.run_due(db, now=eb + 120)

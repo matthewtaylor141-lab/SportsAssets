@@ -292,8 +292,10 @@ def test_the_workspace_on_an_empty_database_is_truthful(monkeypatch):
             v = secs["versions"]["data"]
             assert v["policy"]["version"] == DP.POLICY_VERSION
             assert v["policy"]["params"]["min_gross_edge_pp"] == 0.05
-            assert v["policy"]["param_units"]["min_gross_edge_pp"] == \
-                "PROBABILITY_POINTS_ON_A_0_TO_1_DOLLAR_CONTRACT"
+            # the unit is unambiguous: a probability difference, 0.05 = 5 pp
+            assert v["policy"]["param_units"]["min_gross_edge_pp"] == (
+                "PROBABILITY_DIFFERENCE_ON_A_0_TO_1_DOLLAR_CONTRACT "
+                "(0.05 == 5 percentage points; never 5)")
             assert v["internal_model"]["state"] in ("NONE", "UNAVAILABLE")
             r = client.get("/api/command/agents/derek/decisions/nope")
             assert r.status_code == 404

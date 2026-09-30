@@ -96,23 +96,27 @@ POLICY_KEY = "DEREK_ENTRY_POLICY"
 POLICY_VERSION = "DEREK_ENTRY_POLICY_V1"
 COMBINATION_POLICY = "CONSERVATIVE_AGREEMENT"
 
-#: THE ENTRY THRESHOLD'S VERSIONED DEFAULT, in probability points on a
-#: $0/$1 contract (0.05 = 5 pp; NOT a return). A module-level constant so an
-#: improvement candidate is a one-line, reviewable diff
+#: THE ENTRY THRESHOLD'S VERSIONED DEFAULT, as a PROBABILITY DIFFERENCE on
+#: a $0/$1 contract: 0.05 means 5 percentage points (qualified probability
+#: minus executable price >= 0.05). It is never written as 5, and it is not
+#: a return. (The policy key keeps its established name, min_gross_edge_pp,
+#: whose value is this same probability difference.) A module-level
+#: constant so an improvement candidate is a one-line, reviewable diff
 #: (tools/improvement_sandbox.py edits exactly this assignment).
-MIN_GROSS_EDGE_PP = 0.05  # versioned default
+MIN_GROSS_EDGE_PROBABILITY = 0.05  # versioned default
 
 #: THE CODE DEFAULT. A registry-held ACTIVE version (agents.registry) may
 #: supply other values; the version label then travels with every decision.
 DEFAULT_PARAMS = {
     #: probability points on a $0/$1 contract: 0.05 = 5 pp. NOT a return.
-    "min_gross_edge_pp": MIN_GROSS_EDGE_PP,
+    "min_gross_edge_pp": MIN_GROSS_EDGE_PROBABILITY,
     #: dollars of expected net profit after fees, for the whole quantity.
     #: The policy requires > 0 whatever this says; this adds a further bar.
     "min_net_ev_usd": 0.0,
 }
 PARAM_UNITS = {
-    "min_gross_edge_pp": "PROBABILITY_POINTS_ON_A_0_TO_1_DOLLAR_CONTRACT",
+    "min_gross_edge_pp": ("PROBABILITY_DIFFERENCE_ON_A_0_TO_1_DOLLAR_CONTRACT "
+                          "(0.05 == 5 percentage points; never 5)"),
     "min_net_ev_usd": "US_DOLLARS_FOR_THE_WHOLE_QUANTITY",
 }
 EDGE_TOLERANCE_PP = 1e-9

@@ -20,7 +20,7 @@ The chain, through the production paths:
   4. ARTIFACT. `tools/improvement_sandbox.py --candidate-id` (a subprocess,
      as CI runs it) builds the evaluated candidate's exact parameter as a
      commit on improve/<task> from THIS repository's HEAD: a one-line diff of
-     derek_policy.MIN_GROSS_EDGE_PP, the tests it ran, and evaluation.json.
+     derek_policy.MIN_GROSS_EDGE_PROBABILITY, the tests it ran, and evaluation.json.
      The artifact (branch@sha, diff, test results) is attached to the SAME
      candidate that holds the evaluation. Nothing is pushed; the branch is
      deleted afterwards.
@@ -69,15 +69,16 @@ def _names(holdout: bool, n: int, prefix: str) -> list:
 
 
 async def _seed(c, *, tb, n=40):
-    """Per fixture: a 5.5 pp entry that LOST and a 12 pp entry that WON.
+    """Per fixture: a 5.5 pp entry that LOST and a 12 pp entry that WON,
+    each priced 0.50 with a 0.01 FEE (cost_per_contract is the fee).
     Today's 5 pp threshold takes both; 6 pp takes only the winner."""
     for i, f in enumerate(_names(False, n, "t") + _names(True, n, "h")):
         dec = (tb + DAY + i * 60) if i >= n else (tb - 5 * DAY + i * 60)
         await AH.valuation(c, fixture=f, decided=dec, p=0.555, price=0.5,
-                           cost=0.5, edge=0.0, outcome=0,
+                           cost=0.01, edge=0.0, outcome=0,
                            outcome_at=dec + 3600)
         await AH.valuation(c, fixture=f, decided=dec + 1, p=0.62, price=0.5,
-                           cost=0.5, edge=0.1, outcome=1,
+                           cost=0.01, edge=0.1, outcome=1,
                            outcome_at=dec + 3600)
 
 
@@ -211,11 +212,32 @@ def test_a_directive_becomes_an_evaluated_committed_candidate(
     ev = cand["evaluation"]
     assert ev["verdict"] == IMP.V_PASS and ev["segment"] == "HOLDOUT"
     hm = ev["metrics"]
-    # on the holdout: 6 pp keeps every winner and drops every loser
+    # ON THE HOLDOUT, AFTER PRICE AND FEE: 6 pp keeps every winner and drops
+    # every loser -- a better NET result per eligible fixture with a lower
+    # drawdown and less capital, not merely fewer trades
     assert hm["fixtures"] >= 30 and hm["fixtures_in_both"] == 0
-    assert hm["fixture_mean_pnl_delta_per_contract"] > 0
-    assert hm["fixture_mean_pnl_per_contract"] > \
-        hm["baseline"]["fixture_mean_pnl_per_contract"]
+    assert hm["objective_outcome"] == "IMPROVED_NET_RESULT"
+    assert hm["no_trades"] is False and hm["trades"] == hm["fixtures"]
+    assert hm["baseline"]["trades"] == 2 * hm["fixtures"]
+    assert hm["delta_net_per_eligible_fixture"] == pytest.approx(0.51)
+    assert hm["delta_net_ci95"][0] > 0
+    assert hm["delta_max_drawdown"] < 0
+    assert hm["delta_capital_deployed"] < 0
+    assert hm["net_total"] == pytest.approx(0.49 * hm["trades"])
+    assert hm["could_have_filled"] == "UNPROVEN"
+    # SELECTED ON TRAINING; THE HOLDOUT JUDGED THE FROZEN SELECTION ONCE
+    sel = ev["selection"]
+    assert sel["segment"] == "TRAINING"
+    assert sel["holdout_used_for_selection"] is False
+    assert [a["threshold"] for a in sel["attempted"]] == [0.06, 0.07]
+    assert sel["selected"] == {"threshold": 0.06, "candidate_id": cid}
+    assert "units" in ev["binding"] and ev["binding"]["params"] == \
+        {"min_gross_edge_pp": 0.06}
+    # READY FOR REVIEW IS NOT QUALIFIED FOR LIVE PROMOTION
+    q = ev["qualification"]
+    assert q["evidence"] == IMP.QUAL_RETROSPECTIVE
+    assert q["economic_qualification"] == IMP.ECON_PENDING
+    assert IMP.economic_promotion_gate(cand)["permitted"] is False
     trials = F.run(_q("SELECT segment, verdict FROM improvement_trials "
                       " WHERE task_id=$1 ORDER BY segment, verdict", wid))
     assert {"segment": "HOLDOUT", "verdict": IMP.V_PASS} in trials
@@ -252,8 +274,8 @@ def test_a_directive_becomes_an_evaluated_committed_candidate(
         assert rep["commit"] == sha and rep["base_commit"] == base
         diff = _git("diff", base, branch, "--",
                     "backend/sportsassets/agents/derek_policy.py")
-        assert "-MIN_GROSS_EDGE_PP = 0.05  # versioned default" in diff
-        assert "+MIN_GROSS_EDGE_PP = 0.06  # versioned default" in diff
+        assert "-MIN_GROSS_EDGE_PROBABILITY = 0.05  # versioned default" in diff
+        assert "+MIN_GROSS_EDGE_PROBABILITY = 0.06  # versioned default" in diff
         tr = rep["test_results"]
         assert tr["passed"] is True, tr
         assert tr["counts"]["passed"] >= 2
@@ -273,7 +295,7 @@ def test_a_directive_becomes_an_evaluated_committed_candidate(
         assert rep["recorded"]["ok"] is True, rep["recorded"]
         cand = F.run(_call(IMP.candidate, cid))
         assert cand["artifact_ref"] == "%s@%s" % (branch, sha)
-        assert "+MIN_GROSS_EDGE_PP = 0.06" in cand["diff"]
+        assert "+MIN_GROSS_EDGE_PROBABILITY = 0.06" in cand["diff"]
         assert cand["test_results"]["passed"] is True
         assert cand["state"] == "APPROVAL_READY"
         assert cand["evaluation"]["verdict"] == IMP.V_PASS   # unchanged
