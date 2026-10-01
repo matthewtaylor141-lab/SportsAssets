@@ -20,7 +20,7 @@ on:
         required: false
         default: ""
       verify:
-        description: "site-voice = after a release: set each agent's voice through the audited persona route, speak once per agent, and render the production homepage and agent pages in mobile WebKit and phone-sized Chromium (authenticated and signed out); film = follow the homepage demo link and play the whole cinematic film signed in (prepares each chapter through the agent persona chat + stored speech; writes conversation records only), measuring voices, music and 3D frames; talk = drive the Talk-to-agent panels on /derek /xavier /audrey (typed question, follow-up, refresh-resume, spoken question via a fake microphone, voice reply, permission-denied and a simulated provider error) in desktop + phone Chromium and WebKit iPhone 13 (writes conversation records only)"
+        description: "site-voice = after a release: set each agent's voice through the audited persona route, speak once per agent, and render the production homepage and agent pages in mobile WebKit and phone-sized Chromium (authenticated and signed out); film = follow the homepage demo link and play the whole cinematic film signed in (prepares each chapter through the agent persona chat + stored speech; writes conversation records only), measuring voices, music and 3D frames; experiment = read the paper experiment API and render the homepage and agent pages signed in, checking the same positions, fills and cash (read-only); talk = drive the Talk-to-agent panels on /derek /xavier /audrey (typed question, follow-up, refresh-resume, spoken question via a fake microphone, voice reply, permission-denied and a simulated provider error) in desktop + phone Chromium and WebKit iPhone 13 (writes conversation records only)"
         required: false
         default: ""
       terms_slugs:
@@ -361,6 +361,49 @@ jobs:
           git rm -rq --cached . >/dev/null 2>&1 || true
           mkdir -p "$D" && cp tools/site_verify/site_verify_out/* "$D"/ 2>/dev/null
           git add "$D" && git commit -q -m "film evidence, run $RUN" && git push -q origin ev:claude/site-verify-evidence && echo "evidence pushed: $D"
+
+  experiment:
+    # THE PAPER EXPERIMENT, READ BACK ON THE PRODUCTION SITE. OFF UNLESS
+    # verify == experiment. READ-ONLY: the experiment API read, the homepage
+    # and the three agent pages rendered signed in (Chromium + WebKit iPhone
+    # 13), checked for the same positions, fills and cash. Writes nothing to
+    # the site. Evidence goes to claude/site-verify-evidence.
+    if: ${{ inputs.verify == 'experiment' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Read the experiment and render the pages
+        timeout-minutes: 18
+        shell: bash
+        env:
+          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+          OUT: site_verify_out
+        run: |
+          set +e
+          echo "::add-mask::$ADMIN_TOKEN"
+          cd tools/site_verify
+          npm init -y >/dev/null 2>&1
+          npm install playwright@1.48.2 >/dev/null 2>&1
+          npx playwright install --with-deps webkit chromium >/dev/null 2>&1
+          node experiment.mjs
+      - name: Commit the evidence
+        if: always()
+        shell: bash
+        run: |
+          RUN=${{ github.run_id }}
+          D="evidence/experiment/$(date -u +%Y%m%dT%H%M%SZ)_run$RUN"
+          git config user.name "site-verify"
+          git config user.email "site-verify@users.noreply.github.com"
+          git fetch -q origin claude/site-verify-evidence && git checkout -q -B ev origin/claude/site-verify-evidence || git checkout -q --orphan ev
+          git rm -rq --cached . >/dev/null 2>&1 || true
+          mkdir -p "$D" && cp tools/site_verify/site_verify_out/* "$D"/ 2>/dev/null
+          git add "$D" && git commit -q -m "experiment evidence, run $RUN" && git push -q origin ev:claude/site-verify-evidence && echo "evidence pushed: $D"
 
   narration:
     # RETRIEVES EXISTING STORED SPEECH ONLY (verify == narration): POSTs the
