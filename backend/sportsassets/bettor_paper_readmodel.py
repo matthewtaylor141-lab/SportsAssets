@@ -164,8 +164,9 @@ async def derek_payload(conn, *, account_id: str = L.ACCOUNT_ID,
             "       proposed_qty, limit_price, economics, "
             "       qualification_gaps, policy_version, alternatives, "
             "       optimistic, simulator_version "
-            "  FROM paper_decisions WHERE account_id=$1 "
-            " ORDER BY decided_at DESC LIMIT $2", account_id, limit)
+            "  FROM paper_decisions WHERE account_id=$1 AND strategy = $3 "
+            " ORDER BY decided_at DESC LIMIT $2", account_id, limit,
+            TWO_MODEL)
         return [_row(r) for r in rows]
 
     async def summary():
@@ -173,7 +174,8 @@ async def derek_payload(conn, *, account_id: str = L.ACCOUNT_ID,
             "SELECT verdict, coalesce(refusal, 'ENTER') AS reason, "
             "       count(*) AS n FROM paper_decisions WHERE account_id=$1 "
             "   AND decided_at > now() - interval '24 hours' "
-            " GROUP BY 1, 2 ORDER BY 3 DESC", account_id)
+            "   AND strategy = $2 GROUP BY 1, 2 ORDER BY 3 DESC", account_id,
+            TWO_MODEL)
         return [_row(r) for r in rows]
 
     async def orders():
@@ -267,5 +269,73 @@ async def audrey_payload(conn, *, account_id: str = L.ACCOUNT_ID,
         reports(), empty_why="NO_PAPER_DAILY_REPORT_YET")
     out["audit_entries"] = await _section(
         findings(), empty_why="NO_PAPER_AUDIT_FINDING")
+    out["last_updated_at"] = await _last_updated(conn, account_id)
+    return out
+
+
+#: Derek's decision panels show the original two-model strategy's records
+#: (migration 182); the experimental benchmark has its own payload below.
+TWO_MODEL = "DEREK_ENTRY_POLICY_V2"
+
+
+async def benchmark_payload(conn, *, account_id: str = L.ACCOUNT_ID,
+                            limit: int = 100, now: float | None = None) -> dict:
+    """THE PINNACLE_ONLY_PAPER_BENCHMARK: its decisions (refusals with their
+    shortfalls), orders, fills and handoffs, every row labelled with the
+    strategy and the disclosure that it is experimental execution, not
+    evidence of qualified or proven profitability."""
+    from .agents import paper_benchmark as PB
+    out = _base(now)
+    out["strategy"] = PB.STRATEGY
+    out["disclosure"] = PB.DISCLOSURE
+    out["book_currency"] = PB.BOOK_CURRENCY
+    out["enablement"] = await PB.enablement(conn)
+
+    async def decisions():
+        rows = await conn.fetch(
+            "SELECT decision_id, session_id, decided_at, valuation_id, "
+            "       us_market_slug, holding_side, intent, fixture, label, "
+            "       verdict, refusal, refusals, p_internal, internal_model, "
+            "       p_pinnacle, pinnacle, p_blended, book_obs_id, book, "
+            "       proposed_qty, limit_price, economics, "
+            "       qualification_gaps, policy_version, policy_decision, "
+            "       alternatives, optimistic, simulator_version, strategy "
+            "  FROM paper_decisions WHERE account_id=$1 AND strategy=$2 "
+            " ORDER BY decided_at DESC LIMIT $3", account_id, PB.STRATEGY,
+            limit)
+        return [dict(_row(r), disclosure=PB.DISCLOSURE) for r in rows]
+
+    async def orders():
+        rows = await conn.fetch(
+            "SELECT * FROM paper_orders WHERE account_id=$1 AND strategy=$2 "
+            " ORDER BY created_at DESC LIMIT $3", account_id, PB.STRATEGY,
+            limit)
+        return [dict(L.order_view(r), disclosure=PB.DISCLOSURE)
+                for r in rows]
+
+    async def fills():
+        rows = await conn.fetch(
+            "SELECT f.* FROM paper_fills f JOIN paper_orders o "
+            "    ON o.order_id = f.order_id WHERE f.account_id=$1 "
+            "   AND o.strategy=$2 ORDER BY f.filled_at DESC LIMIT $3",
+            account_id, PB.STRATEGY, limit)
+        return [dict(_row(r), strategy=PB.STRATEGY) for r in rows]
+
+    async def handoffs():
+        rows = await conn.fetch(
+            "SELECT * FROM paper_handoffs WHERE account_id=$1 AND strategy=$2"
+            " ORDER BY created_at DESC LIMIT $3", account_id, PB.STRATEGY,
+            limit)
+        return [_row(r) for r in rows]
+
+    out["decisions"] = await _section(
+        decisions(), empty_why=("NO_BENCHMARK_DECISION_YET: the benchmark "
+                                "runs only with PAPER_BENCHMARK=on, its "
+                                "control row and the paper session enabled"))
+    out["orders"] = await _section(orders(), empty_why="NO_BENCHMARK_ORDER")
+    out["fills"] = await _section(fills(),
+                                  empty_why="NO_SIMULATED_BENCHMARK_FILL")
+    out["handoffs"] = await _section(handoffs(),
+                                     empty_why="NO_BENCHMARK_HANDOFF")
     out["last_updated_at"] = await _last_updated(conn, account_id)
     return out

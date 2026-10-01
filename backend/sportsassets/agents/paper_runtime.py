@@ -130,11 +130,27 @@ async def step_equity(conn, ctx: dict) -> dict:
                                     now=ctx["now"])
 
 
+def _benchmark_env_on() -> bool:
+    """PAPER_BENCHMARK in (on, 1, true, yes): read here without importing
+    the benchmark module, so with the flag unset nothing of it loads."""
+    import os
+    return str(os.environ.get("PAPER_BENCHMARK", "")).strip().lower() in (
+        "on", "1", "true", "yes")
+
+
 def default_steps() -> list:
     steps = [("books", step_books), ("simulate", step_simulate)]
     try:
         from . import paper_derek as PD
         steps.append(("derek", PD.step))
+        # THE EXPERIMENTAL PINNACLE_ONLY_PAPER_BENCHMARK, a separate strategy
+        # on the same session and ledger: present ONLY when the process sets
+        # PAPER_BENCHMARK=on (default off -- then the pass is as before); its
+        # step also checks its kill-switch row. Its orders are simulated by
+        # the delayed-fill step that follows, like Derek's.
+        if _benchmark_env_on():
+            from . import paper_benchmark as PB
+            steps.append(("benchmark", PB.step))
         steps.append(("simulate_after_delay", PD.step_after_delay))
     except ImportError:
         pass
@@ -442,8 +458,26 @@ async def decide_valuation(conn, *, valuation_id, now: float | None = None,
             "decided_via": "IN_CYCLE_AT_THE_VALUATION_INSTANT",
             "context_cache_key": sess["session_id"]}
         from . import paper_derek as PD
-        rec = await asyncio.wait_for(PD.decide_one(conn, ctx, dict(row)),
-                                     VALUATION_HOOK_TIMEOUT_S)
+        bench_on = _benchmark_env_on()
+        try:
+            rec = await asyncio.wait_for(PD.decide_one(conn, ctx, dict(row)),
+                                         VALUATION_HOOK_TIMEOUT_S)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:                               # noqa: BLE001
+            if not bench_on:
+                raise
+            # WITH THE BENCHMARK ON, a failing two-model decision does not
+            # stop the benchmark's separate decision on the same valuation.
+            rec = {"error": "%s: %s" % (type(exc).__name__, str(exc)[:200])}
+        bench = None
+        if bench_on:
+            # THE EXPERIMENTAL PINNACLE_ONLY_PAPER_BENCHMARK, decided
+            # separately on the same valuation (its own record, strategy
+            # key), after Derek's; guarded and bounded, never raises.
+            from . import paper_benchmark as PB
+            bench = await PB.decide_for_hook(
+                conn, ctx, dict(row), timeout_s=VALUATION_HOOK_TIMEOUT_S)
         delta = int(getattr(md, "mutation_attempts", 0) or 0) - before
         if delta:
             import json as _json
@@ -453,7 +487,7 @@ async def decide_valuation(conn, *, valuation_id, now: float | None = None,
                 " WHERE session_id = $1", sess["session_id"], delta,
                 _json.dumps(getattr(md, "last_mutation_attempt", None),
                             default=str))
-        if rec.get("order_id"):
+        if rec.get("order_id") or (bench or {}).get("order_id"):
             sched = schedule_fill
             if sched is None:
                 from . import runtime as _RT
@@ -464,10 +498,15 @@ async def decide_valuation(conn, *, valuation_id, now: float | None = None,
             except Exception as exc:                           # noqa: BLE001
                 rec["fill_pass"] = {"scheduled": False,
                                     "error": type(exc).__name__}
-        return dict({k: rec.get(k) for k in (
+        out = dict({k: rec.get(k) for k in (
             "decision_id", "verdict", "refusal", "order_id", "duplicate",
             "deferred", "fill_pass")}, decided=not rec.get("deferred"),
             mutation_attempts=delta)
+        if bench is not None:
+            out["benchmark"] = bench
+            if rec.get("error"):
+                out.update(decided=False, error=rec["error"])
+        return out
     except asyncio.CancelledError:
         raise
     except Exception as exc:                                   # noqa: BLE001

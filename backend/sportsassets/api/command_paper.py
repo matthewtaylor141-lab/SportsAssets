@@ -22,6 +22,11 @@ ROUTES (shapes documented in docs/PAPER_TRADING_READ_MODELS.md):
   GET /api/command/paper/xavier      positions, standing orders,
                                      recommendations
   GET /api/command/paper/audrey      daily report and audit entries
+  GET /api/command/paper/benchmark   the EXPERIMENTAL PINNACLE_ONLY_PAPER_
+                                     BENCHMARK (decisions with shortfalls,
+                                     orders, fills, handoffs; disclosure: not
+                                     evidence of qualified or proven
+                                     profitability)
 """
 from __future__ import annotations
 
@@ -289,3 +294,17 @@ async def paper_audrey(limit: int = Query(50, ge=1, le=500)) -> dict:
         if not await _schema(conn):
             return dict(_labels(), audrey=_unavailable_schema())
         return await _readmodel("audrey_payload", conn, limit=limit)
+
+
+@router.get("/api/command/paper/benchmark",
+            dependencies=[Depends(require_read)])
+async def paper_benchmark(limit: int = Query(100, ge=1, le=1000)) -> dict:
+    """THE EXPERIMENTAL PINNACLE_ONLY_PAPER_BENCHMARK (read only): its
+    decisions with refusal shortfalls, orders, fills and handoffs, with the
+    disclosure that it is experimental execution, not evidence of qualified
+    or proven profitability."""
+    pool = await _pool()
+    async with pool.acquire() as conn:
+        if not await _schema(conn):
+            return dict(_labels(), benchmark=_unavailable_schema())
+        return await _readmodel("benchmark_payload", conn, limit=limit)

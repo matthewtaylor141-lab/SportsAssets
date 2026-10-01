@@ -53,6 +53,9 @@ from .. import bettor_paper_ledger as L
 from .. import bettor_paper_simulator as SIM
 
 VERSION = "PAPER_AUDREY_V1"
+#: The decision-quality figures are the original two-model strategy's
+#: (migration 182); the benchmark has its own section.
+TWO_MODEL = "DEREK_ENTRY_POLICY_V2"
 TASK_KIND = "PAPER_AUDIT_FINDING"
 EVIDENCE_CATEGORY = "SIMULATED_WITH_DISCLOSED_ASSUMPTIONS"
 REPORT_EVERY_S = 900.0
@@ -205,8 +208,8 @@ async def build_report(conn, *, session: dict, account_id: str, day,
         "SELECT verdict, coalesce(refusal, 'ENTER') AS reason, count(*) AS n,"
         "       count(DISTINCT us_market_slug) AS markets "
         "  FROM paper_decisions WHERE account_id=$1 AND decided_at >= $2 "
-        "   AND decided_at < $3 GROUP BY 1, 2 ORDER BY 3 DESC", account_id,
-        t0, t1)
+        "   AND decided_at < $3 AND strategy = $4 GROUP BY 1, 2 "
+        " ORDER BY 3 DESC", account_id, t0, t1, TWO_MODEL)
     decisions = [{"verdict": r["verdict"], "reason": r["reason"],
                   "decisions": int(r["n"]), "markets": int(r["markets"])}
                  for r in dec]
@@ -218,14 +221,15 @@ async def build_report(conn, *, session: dict, account_id: str, day,
         "       sum((optimistic->>'gross_usd')::float8) AS opt_gross, "
         "       sum((optimistic->>'filled_qty')::float8) AS opt_qty "
         "  FROM paper_decisions WHERE account_id=$1 AND verdict='ENTER' "
-        "   AND decided_at >= $2 AND decided_at < $3", account_id, t0, t1)
+        "   AND decided_at >= $2 AND decided_at < $3 AND strategy = $4",
+        account_id, t0, t1, TWO_MODEL)
     # AGAINST THE ALTERNATIVES CAPTURED AT DECISION TIME (knowable then)
     alt_rows = await conn.fetch(
         "SELECT verdict, alternatives, "
         "       (policy_decision->>'gross_edge_pp')::float8 AS edge_pp "
         "  FROM paper_decisions WHERE account_id=$1 AND decided_at >= $2 "
-        "   AND decided_at < $3 AND alternatives IS NOT NULL LIMIT 2000",
-        account_id, t0, t1)
+        "   AND decided_at < $3 AND alternatives IS NOT NULL "
+        "   AND strategy = $4 LIMIT 2000", account_id, t0, t1, TWO_MODEL)
     better_opp, compared = 0, 0
     for r in alt_rows:
         opp = (L._j(r["alternatives"]) or {}).get(
@@ -317,7 +321,7 @@ async def build_report(conn, *, session: dict, account_id: str, day,
                 "QUOTE_TIMING_UNCERTAINTY_P5", "EXECUTION_MODEL_ASSUMPTIONS",
                 "SETTLEMENT_INTERPRETATION"]}
     dd = await RM.drawdown(conn, account_id, since=start, until=until)
-    return {
+    rep = {
         "version": VERSION, "report_day": str(day),
         "reporting_tz": session.get("reporting_tz", "America/New_York"),
         "window": {"start": start, "end": end, "through": until},
@@ -381,6 +385,16 @@ async def build_report(conn, *, session: dict, account_id: str, day,
         "reconciliation": {"checks": checks, "reconciles": reconciles,
                            "one_ledger": "paper_ledger"},
     }
+    # THE EXPERIMENTAL PINNACLE_ONLY_PAPER_BENCHMARK, reported in its own
+    # labelled section (the decision figures above are the two-model
+    # strategy's; equity, P&L, acquisition, breadth and the reconciliation
+    # stay account-wide on the one ledger). Present only once the benchmark
+    # has recorded anything, so a report without it is unchanged.
+    from . import paper_benchmark as PB
+    if await PB.has_records(conn, account_id):
+        rep["pinnacle_only_paper_benchmark"] = await PB.report_section(
+            conn, account_id=account_id, t0=t0, t1=t1)
+    return rep
 
 
 async def write_report(conn, *, session: dict, account_id: str,
@@ -520,6 +534,12 @@ async def monitor(conn, ctx: dict) -> list:
             conn, ctx, kind="ORDER_PAST_EXPIRY_STILL_OPEN",
             subject=r["order_id"], severity="WARNING",
             detail={"expires_at": L._epoch(r["expires_at"])}))
+    # EVERY FILLED PINNACLE_ONLY_PAPER_BENCHMARK ENTRY: its fills each have
+    # their ledger entry and the group was handed to Xavier (nothing to do
+    # while the benchmark has recorded nothing).
+    from . import paper_benchmark as PB
+    if await PB.has_records(conn, acct):
+        out.extend(await PB.audit_fills(conn, ctx, finding))
     return out
 
 

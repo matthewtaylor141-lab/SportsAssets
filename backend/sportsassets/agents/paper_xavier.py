@@ -86,6 +86,13 @@ def _h(*parts) -> str:
                           ).hexdigest()[:24]
 
 
+async def _strategy(conn, group_id: str) -> str:
+    """The group's strategy (its entry order's, migration 182), carried onto
+    every management order: a position never switches policy."""
+    from . import paper_benchmark as PB
+    return await PB.group_strategy(conn, group_id)
+
+
 def _clock(ctx) -> float:
     c = ctx.get("clock")
     return float(c()) if c else float(ctx["now"])
@@ -101,7 +108,7 @@ async def step_handoff(conn, ctx: dict) -> dict:
     acct = ctx["account_id"]
     rows = await conn.fetch(
         "SELECT o.order_id, o.group_id, o.decision_id, o.qty, o.filled_qty, "
-        "       o.state, (SELECT f.fill_id FROM paper_fills f "
+        "       o.state, o.strategy, (SELECT f.fill_id FROM paper_fills f "
         "                  WHERE f.order_id = o.order_id "
         "                  ORDER BY f.filled_at, f.fill_id LIMIT 1) AS ff, "
         "       (SELECT min(f.filled_at) FROM paper_fills f "
@@ -116,8 +123,8 @@ async def step_handoff(conn, ctx: dict) -> dict:
         got = await conn.fetchval(
             "INSERT INTO paper_handoffs (handoff_id, session_id, account_id, "
             " group_id, decision_id, entry_order_id, first_fill_id, "
-            " first_fill_at, confirmed_qty, outstanding_qty) "
-            "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) "
+            " first_fill_at, confirmed_qty, outstanding_qty, strategy) "
+            "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) "
             "ON CONFLICT (group_id) DO UPDATE SET "
             " confirmed_qty = EXCLUDED.confirmed_qty, "
             " outstanding_qty = EXCLUDED.outstanding_qty, updated_at = now() "
@@ -125,7 +132,9 @@ async def step_handoff(conn, ctx: dict) -> dict:
             "    OR paper_handoffs.outstanding_qty <> EXCLUDED.outstanding_qty"
             " RETURNING (xmax = 0) AS inserted",
             hid, ctx["session_id"], acct, r["group_id"], r["decision_id"],
-            r["order_id"], r["ff"], r["ffa"], r["filled_qty"], outstanding)
+            r["order_id"], r["ff"], r["ffa"], r["filled_qty"], outstanding,
+            # THE ENTRY'S STRATEGY (migration 182): the group keeps it.
+            r["strategy"])
         if got is True:
             created.append(r["group_id"])
         elif got is False:
@@ -250,7 +259,14 @@ async def _latest_book(conn, slug: str):
 
 
 async def _measure(conn, ctx, *, pos: dict, levels_buy: list) -> dict:
-    """P(the held side pays), on the paper session's measure."""
+    """P(the held side pays), on the paper session's measure -- the measure
+    of the group's OWN strategy: a PINNACLE_ONLY_PAPER_BENCHMARK group is
+    measured on the de-vigged Pinnacle probability alone
+    (`paper_benchmark.xavier_measure`), never the two-model blend; a position
+    never switches policy."""
+    from . import paper_benchmark as PB
+    if await PB.group_strategy(conn, pos["group_id"]) == PB.STRATEGY:
+        return await PB.xavier_measure(conn, ctx, pos=pos)
     at = _clock(ctx)
     lookback = float(ctx["config"]["entry"]["valuation_lookback_s"])
     intent = DP.LONG if pos["holding_side"] == "LONG" else DP.SHORT
@@ -446,6 +462,7 @@ async def _submit_sale(conn, ctx, *, pos, role, qty, limit, wire,
          "eligible_at": at + float(sim["decision_to_execution_delay_s"]),
          "expires_at": at + float(sim["marketable_ttl_s"]),
          "simulator_version": ctx["config"]["simulator_version"]}
+    o["strategy"] = await _strategy(conn, pos["group_id"])
     got = await L.submit_order(conn, o, caps=ctx["config"]["risk"],
                                fee_fn=ctx.get("fee_fn"), now=at)
     return {"taken": "SUBMIT_%s" % role, "ok": got.get("ok"),
@@ -507,6 +524,7 @@ async def _maintain_standing(conn, ctx, *, pos, standing, prot, md, at,
          "queue_ahead_qty": q["queue_ahead_qty"],
          "queue_basis": dict(q, placement_obs_id=last_obs or 0),
          "simulator_version": ctx["config"]["simulator_version"]}
+    o["strategy"] = await _strategy(conn, pos["group_id"])
     try:
         got = await L.submit_order(conn, o, now=at)
     except Exception as exc:                                    # noqa: BLE001

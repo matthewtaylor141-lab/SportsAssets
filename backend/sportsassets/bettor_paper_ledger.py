@@ -410,6 +410,11 @@ async def submit_order(conn, order: dict, *, caps: dict | None = None,
         cols = list(ORDER_COLUMNS) + ["reserved_usd",
                                       "reserved_remaining_usd", "state"]
         args = [vals[k] for k in ORDER_COLUMNS] + [reserve, reserve, state]
+        if o.get("strategy"):
+            # THE STRATEGY KEY (migration 182), only when the order names
+            # one; otherwise the column default (the two-model label).
+            cols.append("strategy")
+            args.append(str(o["strategy"]))
         casts = {"label": "::jsonb", "queue_basis": "::jsonb"}
         ph = ",".join("$%d%s" % (i + 1, casts.get(c, ""))
                       for i, c in enumerate(cols))

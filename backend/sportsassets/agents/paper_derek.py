@@ -81,13 +81,18 @@ GAP_P5 = "QUOTE_TIMING_UNCERTAINTY_P5"
 GAP_EXECUTION = "EXECUTION_MODEL_ASSUMPTIONS"
 GAP_SETTLEMENT = "SETTLEMENT_INTERPRETATION"
 
+#: THIS strategy's own decisions only (migration 182): the experimental
+#: PINNACLE_ONLY_PAPER_BENCHMARK (agents/paper_benchmark.py) may decide the
+#: same valuation separately; its record never stands in for this one's.
+#: Every row this path writes takes the column default, DEREK_ENTRY_POLICY_V2.
 CANDIDATES_SQL = """
     SELECT v.* FROM external_valuations v
      WHERE v.experiment_id = $1
        AND v.decided_at > to_timestamp($2) AND v.decided_at <= to_timestamp($3)
        AND v.us_market_slug IS NOT NULL
        AND NOT EXISTS (SELECT 1 FROM paper_decisions d
-                        WHERE d.session_id = $4 AND d.valuation_id = v.id)
+                        WHERE d.session_id = $4 AND d.valuation_id = v.id
+                          AND d.strategy = 'DEREK_ENTRY_POLICY_V2')
      ORDER BY v.decided_at DESC, v.id DESC
      LIMIT $5
 """
