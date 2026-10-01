@@ -1,0 +1,939 @@
+{
+  "host": "https://command.bettortoken.com",
+  "at": "2026-10-01T23:54:57.224Z",
+  "checks": [
+    {
+      "name": "api_connected",
+      "ok": true,
+      "detail": {
+        "status": 200
+      }
+    },
+    {
+      "name": "chromium-desktop-1280:home_connected",
+      "ok": true,
+      "detail": "THE EXPERIMENT | What the team is doing with the paper account. | Every figure is a stored record · simulated execution · live market data"
+    },
+    {
+      "name": "chromium-desktop-1280:home_positions_match_api",
+      "ok": true,
+      "detail": [
+        {
+          "market": "atc-brb-bot-vln-2026-10-03-bot",
+          "shown": true
+        },
+        {
+          "market": "aec-mlb-cws-cle-2026-10-03",
+          "shown": true
+        },
+        {
+          "market": "atc-unl-wal-den-2026-10-04-wal",
+          "shown": true
+        },
+        {
+          "market": "atc-brb-acg-afc-2026-10-03-acg",
+          "shown": true
+        },
+        {
+          "market": "aec-mlb-phi-atl-2026-10-01",
+          "shown": true
+        },
+        {
+          "market": "aec-mlb-sd-mil-2026-10-03",
+          "shown": true
+        },
+        {
+          "market": "aec-mlb-nyy-tb-2026-10-03",
+          "shown": true
+        }
+      ]
+    },
+    {
+      "name": "chromium-desktop-1280:home_fills_match_api",
+      "ok": true,
+      "detail": [
+        {
+          "fill_id": "paperfill:3658285da73ded7e56794c76",
+          "ledger_seq": 19,
+          "shown": true
+        },
+        {
+          "fill_id": "paperfill:23faa99357ae4ca45456b37e",
+          "ledger_seq": 17,
+          "shown": true
+        },
+        {
+          "fill_id": "paperfill:d124ab848b2e6f936fccb51f",
+          "ledger_seq": 13,
+          "shown": true
+        },
+        {
+          "fill_id": "paperfill:f31a964fbac19229a88631db",
+          "ledger_seq": 11,
+          "shown": true
+        },
+        {
+          "fill_id": "paperfill:6e0ed612cf3ca7f4554f939c",
+          "ledger_seq": 7,
+          "shown": true
+        },
+        {
+          "fill_id": "paperfill:39b3409f68a96b7a94e2e079",
+          "ledger_seq": 6,
+          "shown": true
+        }
+      ]
+    },
+    {
+      "name": "chromium-desktop-1280:xavier_positions_match_api",
+      "ok": true,
+      "detail": [
+        {
+          "market": "atc-brb-bot-vln-2026-10-03-bot",
+          "shown": true
+        },
+        {
+          "market": "aec-mlb-cws-cle-2026-10-03",
+          "shown": true
+        },
+        {
+          "market": "atc-unl-wal-den-2026-10-04-wal",
+          "shown": true
+        },
+        {
+          "market": "atc-brb-acg-afc-2026-10-03-acg",
+          "shown": true
+        },
+        {
+          "market": "aec-mlb-phi-atl-2026-10-01",
+          "shown": true
+        },
+        {
+          "market": "aec-mlb-sd-mil-2026-10-03",
+          "shown": true
+        },
+        {
+          "market": "aec-mlb-nyy-tb-2026-10-03",
+          "shown": true
+        }
+      ]
+    },
+    {
+      "name": "chromium-desktop-1280:audrey_or_home_cash_match_api",
+      "ok": true,
+      "detail": {
+        "cash": "$499,306.35",
+        "home": true,
+        "audrey": true,
+        "xavier": true,
+        "derek": false
+      }
+    },
+    {
+      "name": "webkit-iphone13:home_connected",
+      "ok": true,
+      "detail": "THE EXPERIMENT | What the team is doing with the paper account. | Every figure is a stored record · simulated execution · live market data"
+    },
+    {
+      "name": "webkit-iphone13:home_positions_match_api",
+      "ok": true,
+      "detail": [
+        {
+          "market": "atc-brb-bot-vln-2026-10-03-bot",
+          "shown": true
+        },
+        {
+          "market": "aec-mlb-cws-cle-2026-10-03",
+          "shown": true
+        },
+        {
+          "market": "atc-unl-wal-den-2026-10-04-wal",
+          "shown": true
+        },
+        {
+          "market": "atc-brb-acg-afc-2026-10-03-acg",
+          "shown": true
+        },
+        {
+          "market": "aec-mlb-phi-atl-2026-10-01",
+          "shown": true
+        },
+        {
+          "market": "aec-mlb-sd-mil-2026-10-03",
+          "shown": true
+        },
+        {
+          "market": "aec-mlb-nyy-tb-2026-10-03",
+          "shown": true
+        }
+      ]
+    },
+    {
+      "name": "webkit-iphone13:home_fills_match_api",
+      "ok": true,
+      "detail": [
+        {
+          "fill_id": "paperfill:3658285da73ded7e56794c76",
+          "ledger_seq": 19,
+          "shown": true
+        },
+        {
+          "fill_id": "paperfill:23faa99357ae4ca45456b37e",
+          "ledger_seq": 17,
+          "shown": true
+        },
+        {
+          "fill_id": "paperfill:d124ab848b2e6f936fccb51f",
+          "ledger_seq": 13,
+          "shown": true
+        },
+        {
+          "fill_id": "paperfill:f31a964fbac19229a88631db",
+          "ledger_seq": 11,
+          "shown": true
+        },
+        {
+          "fill_id": "paperfill:6e0ed612cf3ca7f4554f939c",
+          "ledger_seq": 7,
+          "shown": true
+        },
+        {
+          "fill_id": "paperfill:39b3409f68a96b7a94e2e079",
+          "ledger_seq": 6,
+          "shown": true
+        }
+      ]
+    },
+    {
+      "name": "webkit-iphone13:xavier_positions_match_api",
+      "ok": true,
+      "detail": [
+        {
+          "market": "atc-brb-bot-vln-2026-10-03-bot",
+          "shown": true
+        },
+        {
+          "market": "aec-mlb-cws-cle-2026-10-03",
+          "shown": true
+        },
+        {
+          "market": "atc-unl-wal-den-2026-10-04-wal",
+          "shown": true
+        },
+        {
+          "market": "atc-brb-acg-afc-2026-10-03-acg",
+          "shown": true
+        },
+        {
+          "market": "aec-mlb-phi-atl-2026-10-01",
+          "shown": true
+        },
+        {
+          "market": "aec-mlb-sd-mil-2026-10-03",
+          "shown": true
+        },
+        {
+          "market": "aec-mlb-nyy-tb-2026-10-03",
+          "shown": true
+        }
+      ]
+    },
+    {
+      "name": "webkit-iphone13:audrey_or_home_cash_match_api",
+      "ok": true,
+      "detail": {
+        "cash": "$499,306.35",
+        "home": true,
+        "audrey": true,
+        "xavier": true,
+        "derek": false
+      }
+    }
+  ],
+  "engines": {
+    "chromium-desktop-1280": {
+      "home_connected": true,
+      "home_section_present": true,
+      "cash_text": "$499,306.35",
+      "home_has_cash": true,
+      "home_positions": [
+        {
+          "market": "atc-brb-bot-vln-2026-10-03-bot",
+          "shown": true
+        },
+        {
+          "market": "aec-mlb-cws-cle-2026-10-03",
+          "shown": true
+        },
+        {
+          "market": "atc-unl-wal-den-2026-10-04-wal",
+          "shown": true
+        },
+        {
+          "market": "atc-brb-acg-afc-2026-10-03-acg",
+          "shown": true
+        },
+        {
+          "market": "aec-mlb-phi-atl-2026-10-01",
+          "shown": true
+        },
+        {
+          "market": "aec-mlb-sd-mil-2026-10-03",
+          "shown": true
+        },
+        {
+          "market": "aec-mlb-nyy-tb-2026-10-03",
+          "shown": true
+        }
+      ],
+      "home_fills": [
+        {
+          "fill_id": "paperfill:3658285da73ded7e56794c76",
+          "ledger_seq": 19,
+          "shown": true
+        },
+        {
+          "fill_id": "paperfill:23faa99357ae4ca45456b37e",
+          "ledger_seq": 17,
+          "shown": true
+        },
+        {
+          "fill_id": "paperfill:d124ab848b2e6f936fccb51f",
+          "ledger_seq": 13,
+          "shown": true
+        },
+        {
+          "fill_id": "paperfill:f31a964fbac19229a88631db",
+          "ledger_seq": 11,
+          "shown": true
+        },
+        {
+          "fill_id": "paperfill:6e0ed612cf3ca7f4554f939c",
+          "ledger_seq": 7,
+          "shown": true
+        },
+        {
+          "fill_id": "paperfill:39b3409f68a96b7a94e2e079",
+          "ledger_seq": 6,
+          "shown": true
+        }
+      ],
+      "derek": {
+        "chars": 11827,
+        "has_cash": false,
+        "positions": [
+          {
+            "market": "atc-brb-bot-vln-2026-10-03-bot",
+            "shown": false
+          },
+          {
+            "market": "aec-mlb-cws-cle-2026-10-03",
+            "shown": false
+          },
+          {
+            "market": "atc-unl-wal-den-2026-10-04-wal",
+            "shown": false
+          },
+          {
+            "market": "atc-brb-acg-afc-2026-10-03-acg",
+            "shown": false
+          },
+          {
+            "market": "aec-mlb-phi-atl-2026-10-01",
+            "shown": false
+          },
+          {
+            "market": "aec-mlb-sd-mil-2026-10-03",
+            "shown": false
+          },
+          {
+            "market": "aec-mlb-nyy-tb-2026-10-03",
+            "shown": false
+          }
+        ],
+        "fills": [
+          {
+            "fill_id": "paperfill:3658285da73ded7e56794c76",
+            "shown": false
+          },
+          {
+            "fill_id": "paperfill:23faa99357ae4ca45456b37e",
+            "shown": false
+          },
+          {
+            "fill_id": "paperfill:d124ab848b2e6f936fccb51f",
+            "shown": false
+          },
+          {
+            "fill_id": "paperfill:f31a964fbac19229a88631db",
+            "shown": false
+          },
+          {
+            "fill_id": "paperfill:6e0ed612cf3ca7f4554f939c",
+            "shown": false
+          },
+          {
+            "fill_id": "paperfill:39b3409f68a96b7a94e2e079",
+            "shown": false
+          }
+        ]
+      },
+      "xavier": {
+        "chars": 30488,
+        "has_cash": true,
+        "positions": [
+          {
+            "market": "atc-brb-bot-vln-2026-10-03-bot",
+            "shown": true
+          },
+          {
+            "market": "aec-mlb-cws-cle-2026-10-03",
+            "shown": true
+          },
+          {
+            "market": "atc-unl-wal-den-2026-10-04-wal",
+            "shown": true
+          },
+          {
+            "market": "atc-brb-acg-afc-2026-10-03-acg",
+            "shown": true
+          },
+          {
+            "market": "aec-mlb-phi-atl-2026-10-01",
+            "shown": true
+          },
+          {
+            "market": "aec-mlb-sd-mil-2026-10-03",
+            "shown": true
+          },
+          {
+            "market": "aec-mlb-nyy-tb-2026-10-03",
+            "shown": true
+          }
+        ],
+        "fills": [
+          {
+            "fill_id": "paperfill:3658285da73ded7e56794c76",
+            "shown": false
+          },
+          {
+            "fill_id": "paperfill:23faa99357ae4ca45456b37e",
+            "shown": false
+          },
+          {
+            "fill_id": "paperfill:d124ab848b2e6f936fccb51f",
+            "shown": false
+          },
+          {
+            "fill_id": "paperfill:f31a964fbac19229a88631db",
+            "shown": false
+          },
+          {
+            "fill_id": "paperfill:6e0ed612cf3ca7f4554f939c",
+            "shown": false
+          },
+          {
+            "fill_id": "paperfill:39b3409f68a96b7a94e2e079",
+            "shown": false
+          }
+        ]
+      },
+      "audrey": {
+        "chars": 7471,
+        "has_cash": true,
+        "positions": [
+          {
+            "market": "atc-brb-bot-vln-2026-10-03-bot",
+            "shown": false
+          },
+          {
+            "market": "aec-mlb-cws-cle-2026-10-03",
+            "shown": false
+          },
+          {
+            "market": "atc-unl-wal-den-2026-10-04-wal",
+            "shown": false
+          },
+          {
+            "market": "atc-brb-acg-afc-2026-10-03-acg",
+            "shown": false
+          },
+          {
+            "market": "aec-mlb-phi-atl-2026-10-01",
+            "shown": false
+          },
+          {
+            "market": "aec-mlb-sd-mil-2026-10-03",
+            "shown": false
+          },
+          {
+            "market": "aec-mlb-nyy-tb-2026-10-03",
+            "shown": false
+          }
+        ],
+        "fills": [
+          {
+            "fill_id": "paperfill:3658285da73ded7e56794c76",
+            "shown": false
+          },
+          {
+            "fill_id": "paperfill:23faa99357ae4ca45456b37e",
+            "shown": false
+          },
+          {
+            "fill_id": "paperfill:d124ab848b2e6f936fccb51f",
+            "shown": false
+          },
+          {
+            "fill_id": "paperfill:f31a964fbac19229a88631db",
+            "shown": false
+          },
+          {
+            "fill_id": "paperfill:6e0ed612cf3ca7f4554f939c",
+            "shown": false
+          },
+          {
+            "fill_id": "paperfill:39b3409f68a96b7a94e2e079",
+            "shown": false
+          }
+        ]
+      }
+    },
+    "webkit-iphone13": {
+      "home_connected": true,
+      "home_section_present": true,
+      "cash_text": "$499,306.35",
+      "home_has_cash": true,
+      "home_positions": [
+        {
+          "market": "atc-brb-bot-vln-2026-10-03-bot",
+          "shown": true
+        },
+        {
+          "market": "aec-mlb-cws-cle-2026-10-03",
+          "shown": true
+        },
+        {
+          "market": "atc-unl-wal-den-2026-10-04-wal",
+          "shown": true
+        },
+        {
+          "market": "atc-brb-acg-afc-2026-10-03-acg",
+          "shown": true
+        },
+        {
+          "market": "aec-mlb-phi-atl-2026-10-01",
+          "shown": true
+        },
+        {
+          "market": "aec-mlb-sd-mil-2026-10-03",
+          "shown": true
+        },
+        {
+          "market": "aec-mlb-nyy-tb-2026-10-03",
+          "shown": true
+        }
+      ],
+      "home_fills": [
+        {
+          "fill_id": "paperfill:3658285da73ded7e56794c76",
+          "ledger_seq": 19,
+          "shown": true
+        },
+        {
+          "fill_id": "paperfill:23faa99357ae4ca45456b37e",
+          "ledger_seq": 17,
+          "shown": true
+        },
+        {
+          "fill_id": "paperfill:d124ab848b2e6f936fccb51f",
+          "ledger_seq": 13,
+          "shown": true
+        },
+        {
+          "fill_id": "paperfill:f31a964fbac19229a88631db",
+          "ledger_seq": 11,
+          "shown": true
+        },
+        {
+          "fill_id": "paperfill:6e0ed612cf3ca7f4554f939c",
+          "ledger_seq": 7,
+          "shown": true
+        },
+        {
+          "fill_id": "paperfill:39b3409f68a96b7a94e2e079",
+          "ledger_seq": 6,
+          "shown": true
+        }
+      ],
+      "derek": {
+        "chars": 11918,
+        "has_cash": false,
+        "positions": [
+          {
+            "market": "atc-brb-bot-vln-2026-10-03-bot",
+            "shown": false
+          },
+          {
+            "market": "aec-mlb-cws-cle-2026-10-03",
+            "shown": false
+          },
+          {
+            "market": "atc-unl-wal-den-2026-10-04-wal",
+            "shown": false
+          },
+          {
+            "market": "atc-brb-acg-afc-2026-10-03-acg",
+            "shown": false
+          },
+          {
+            "market": "aec-mlb-phi-atl-2026-10-01",
+            "shown": false
+          },
+          {
+            "market": "aec-mlb-sd-mil-2026-10-03",
+            "shown": false
+          },
+          {
+            "market": "aec-mlb-nyy-tb-2026-10-03",
+            "shown": false
+          }
+        ],
+        "fills": [
+          {
+            "fill_id": "paperfill:3658285da73ded7e56794c76",
+            "shown": false
+          },
+          {
+            "fill_id": "paperfill:23faa99357ae4ca45456b37e",
+            "shown": false
+          },
+          {
+            "fill_id": "paperfill:d124ab848b2e6f936fccb51f",
+            "shown": false
+          },
+          {
+            "fill_id": "paperfill:f31a964fbac19229a88631db",
+            "shown": false
+          },
+          {
+            "fill_id": "paperfill:6e0ed612cf3ca7f4554f939c",
+            "shown": false
+          },
+          {
+            "fill_id": "paperfill:39b3409f68a96b7a94e2e079",
+            "shown": false
+          }
+        ]
+      },
+      "xavier": {
+        "chars": 30635,
+        "has_cash": true,
+        "positions": [
+          {
+            "market": "atc-brb-bot-vln-2026-10-03-bot",
+            "shown": true
+          },
+          {
+            "market": "aec-mlb-cws-cle-2026-10-03",
+            "shown": true
+          },
+          {
+            "market": "atc-unl-wal-den-2026-10-04-wal",
+            "shown": true
+          },
+          {
+            "market": "atc-brb-acg-afc-2026-10-03-acg",
+            "shown": true
+          },
+          {
+            "market": "aec-mlb-phi-atl-2026-10-01",
+            "shown": true
+          },
+          {
+            "market": "aec-mlb-sd-mil-2026-10-03",
+            "shown": true
+          },
+          {
+            "market": "aec-mlb-nyy-tb-2026-10-03",
+            "shown": true
+          }
+        ],
+        "fills": [
+          {
+            "fill_id": "paperfill:3658285da73ded7e56794c76",
+            "shown": false
+          },
+          {
+            "fill_id": "paperfill:23faa99357ae4ca45456b37e",
+            "shown": false
+          },
+          {
+            "fill_id": "paperfill:d124ab848b2e6f936fccb51f",
+            "shown": false
+          },
+          {
+            "fill_id": "paperfill:f31a964fbac19229a88631db",
+            "shown": false
+          },
+          {
+            "fill_id": "paperfill:6e0ed612cf3ca7f4554f939c",
+            "shown": false
+          },
+          {
+            "fill_id": "paperfill:39b3409f68a96b7a94e2e079",
+            "shown": false
+          }
+        ]
+      },
+      "audrey": {
+        "chars": 7402,
+        "has_cash": true,
+        "positions": [
+          {
+            "market": "atc-brb-bot-vln-2026-10-03-bot",
+            "shown": false
+          },
+          {
+            "market": "aec-mlb-cws-cle-2026-10-03",
+            "shown": false
+          },
+          {
+            "market": "atc-unl-wal-den-2026-10-04-wal",
+            "shown": false
+          },
+          {
+            "market": "atc-brb-acg-afc-2026-10-03-acg",
+            "shown": false
+          },
+          {
+            "market": "aec-mlb-phi-atl-2026-10-01",
+            "shown": false
+          },
+          {
+            "market": "aec-mlb-sd-mil-2026-10-03",
+            "shown": false
+          },
+          {
+            "market": "aec-mlb-nyy-tb-2026-10-03",
+            "shown": false
+          }
+        ],
+        "fills": [
+          {
+            "fill_id": "paperfill:3658285da73ded7e56794c76",
+            "shown": false
+          },
+          {
+            "fill_id": "paperfill:23faa99357ae4ca45456b37e",
+            "shown": false
+          },
+          {
+            "fill_id": "paperfill:d124ab848b2e6f936fccb51f",
+            "shown": false
+          },
+          {
+            "fill_id": "paperfill:f31a964fbac19229a88631db",
+            "shown": false
+          },
+          {
+            "fill_id": "paperfill:6e0ed612cf3ca7f4554f939c",
+            "shown": false
+          },
+          {
+            "fill_id": "paperfill:39b3409f68a96b7a94e2e079",
+            "shown": false
+          }
+        ]
+      }
+    }
+  },
+  "api": {
+    "status": 200,
+    "connected": true,
+    "headline": "7 open filled positions",
+    "serving_build": "76f0119ec9dccb5b8e7398dec057f33394a0b42c",
+    "cash_usd": 499306.35,
+    "reserved_usd": 0,
+    "open_positions": [
+      {
+        "group_id": "paperexpgrp:42c9989be31cea1ceff2099b",
+        "strategy": "PINNACLE_EXPLORATION_PAPER",
+        "label": "Training / simulated execution",
+        "market": "atc-brb-bot-vln-2026-10-03-bot",
+        "open_qty": 238,
+        "cost_basis_usd": 99.17
+      },
+      {
+        "group_id": "paperexpgrp:611af30938d3f7395eaec8e7",
+        "strategy": "PINNACLE_EXPLORATION_PAPER",
+        "label": "Training / simulated execution",
+        "market": "aec-mlb-cws-cle-2026-10-03",
+        "open_qty": 163,
+        "cost_basis_usd": 98.91
+      },
+      {
+        "group_id": "paperexpgrp:715b163d214613515de4d513",
+        "strategy": "PINNACLE_EXPLORATION_PAPER",
+        "label": "Training / simulated execution",
+        "market": "atc-unl-wal-den-2026-10-04-wal",
+        "open_qty": 380,
+        "cost_basis_usd": 99.95
+      },
+      {
+        "group_id": "paperexpgrp:bd5ebe70618355ad0230a111",
+        "strategy": "PINNACLE_EXPLORATION_PAPER",
+        "label": "Training / simulated execution",
+        "market": "atc-brb-acg-afc-2026-10-03-acg",
+        "open_qty": 136,
+        "cost_basis_usd": 98.51
+      },
+      {
+        "group_id": "paperexpgrp:e16e6c216e47705741e6a91e",
+        "strategy": "PINNACLE_EXPLORATION_PAPER",
+        "label": "Training / simulated execution",
+        "market": "aec-mlb-phi-atl-2026-10-01",
+        "open_qty": 188,
+        "cost_basis_usd": 99.15
+      },
+      {
+        "group_id": "paperexpgrp:edca4bb7455003b64c16fc95",
+        "strategy": "PINNACLE_EXPLORATION_PAPER",
+        "label": "Training / simulated execution",
+        "market": "aec-mlb-sd-mil-2026-10-03",
+        "open_qty": 144,
+        "cost_basis_usd": 98.69
+      },
+      {
+        "group_id": "paperexpgrp:f1e116a3dbdee19fa35916c5",
+        "strategy": "PINNACLE_EXPLORATION_PAPER",
+        "label": "Training / simulated execution",
+        "market": "aec-mlb-nyy-tb-2026-10-03",
+        "open_qty": 172,
+        "cost_basis_usd": 99.27
+      }
+    ],
+    "fills": [
+      {
+        "fill_id": "paperfill:3658285da73ded7e56794c76",
+        "strategy": "PINNACLE_EXPLORATION_PAPER",
+        "qty": 136,
+        "price": 0.71,
+        "fee_usd": 1.95,
+        "ledger_seq": 19
+      },
+      {
+        "fill_id": "paperfill:23faa99357ae4ca45456b37e",
+        "strategy": "PINNACLE_EXPLORATION_PAPER",
+        "qty": 238,
+        "price": 0.4,
+        "fee_usd": 3.97,
+        "ledger_seq": 17
+      },
+      {
+        "fill_id": "paperfill:d124ab848b2e6f936fccb51f",
+        "strategy": "PINNACLE_EXPLORATION_PAPER",
+        "qty": 380,
+        "price": 0.25,
+        "fee_usd": 4.95,
+        "ledger_seq": 13
+      },
+      {
+        "fill_id": "paperfill:f31a964fbac19229a88631db",
+        "strategy": "PINNACLE_EXPLORATION_PAPER",
+        "qty": 172,
+        "price": 0.56,
+        "fee_usd": 2.95,
+        "ledger_seq": 11
+      },
+      {
+        "fill_id": "paperfill:6e0ed612cf3ca7f4554f939c",
+        "strategy": "PINNACLE_EXPLORATION_PAPER",
+        "qty": 163,
+        "price": 0.59,
+        "fee_usd": 2.74,
+        "ledger_seq": 7
+      },
+      {
+        "fill_id": "paperfill:39b3409f68a96b7a94e2e079",
+        "strategy": "PINNACLE_EXPLORATION_PAPER",
+        "qty": 188,
+        "price": 0.51,
+        "fee_usd": 3.27,
+        "ledger_seq": 6
+      },
+      {
+        "fill_id": "paperfill:cfaf43ae1b60a2a8e914f819",
+        "strategy": "PINNACLE_EXPLORATION_PAPER",
+        "qty": 144,
+        "price": 0.67,
+        "fee_usd": 2.21,
+        "ledger_seq": 5
+      }
+    ],
+    "entry_orders": 0,
+    "exploration_limits": {
+      "exposure_usd": 693.65,
+      "open_reservations_usd": 0,
+      "open_cost_basis_usd": 693.65,
+      "headroom_usd": 4306.35,
+      "realized_losses_usd": 0,
+      "realized_net_pnl_usd": 0,
+      "loss_stop_reached": false,
+      "positions": 7,
+      "open_positions": 7,
+      "limits": {
+        "max_entry_cost_usd": 100,
+        "max_aggregate_exposure_usd": 5000,
+        "loss_stop_usd": 1000,
+        "one_position_per_fixture": true
+      }
+    }
+  },
+  "agreement_ok": true,
+  "verdict": "EXERCISED_AND_MATCHING",
+  "ok": true,
+  "freshness": {
+    "database": "CONNECTED",
+    "read_at": 1790898897.6416838,
+    "stamps": {
+      "valuation": {
+        "at": 1790898504.656995,
+        "age_s": 393,
+        "stale_after_s": 1200,
+        "verdict": "CURRENT"
+      },
+      "decision": {
+        "at": 1790898508.196467,
+        "age_s": 389.4,
+        "stale_after_s": 1200,
+        "verdict": "CURRENT"
+      },
+      "book": {
+        "at": 1790898880.961221,
+        "age_s": 16.7,
+        "stale_after_s": 900,
+        "verdict": "CURRENT"
+      },
+      "ledger": {
+        "at": 1790894575.672266,
+        "age_s": 4322,
+        "stale_after_s": null,
+        "verdict": "NO_LIMIT"
+      },
+      "pass": {
+        "at": 1790898890.8209732,
+        "age_s": 6.8,
+        "stale_after_s": 300,
+        "verdict": "CURRENT"
+      },
+      "collector": {
+        "at": 1790898867.7047825,
+        "age_s": 29.9,
+        "stale_after_s": 1200,
+        "verdict": "CURRENT"
+      }
+    },
+    "note": "this read answered from the database; an unchanged ledger stamp means no money moved, not a lost connection"
+  }
+}
