@@ -58,7 +58,7 @@ async function waitOffice(page, agent, ms = 60000) {
     if (f) {
       try {
         await f.waitForSelector("#office-content", { timeout: 5000 });
-        await f.waitForFunction(() => /Connected to recorded workspace|Read unavailable/.test(
+        await f.waitForFunction(() => /Connected to recorded workspace|Records read|Read unavailable/.test(
           (document.getElementById("office-status") || {}).textContent || ""), null, { timeout: 30000 });
         return f;
       } catch (_) {}
