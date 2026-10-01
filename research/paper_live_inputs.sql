@@ -11,7 +11,7 @@
 -- L2 entry-experiment valuations by 10-minute bucket since 01:00Z
 -- L3 Derek's research observations by 10-minute bucket and cohort
 -- L4 the latest 10 paper decisions: market, verdict, refusals, the
---    Pinnacle age and qualification gaps (truncated)
+--    Pinnacle age and qualification gaps (shortened)
 
 \echo '== L1 · collection cycle heartbeat =='
 SELECT key,
