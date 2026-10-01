@@ -19,9 +19,9 @@
   "has_unavailable": false,
   "cash_text": "$500,000.00",
   "stamps": {
-   "server_read": "SERVER READ OK",
-   "heartbeat": "AGENT HEARTBEAT (PAPER RUNTIME) RECENT",
-   "ledger": "LEDGER TRANSACTION"
+   "server_read": null,
+   "heartbeat": null,
+   "ledger": null
   },
   "funded_label": true,
   "completed_game_label": false,
@@ -40,23 +40,7 @@
     2
    ],
    [
-    "/api/command/paper/account 200",
-    1
-   ],
-   [
     "/api/command/agents 200",
-    1
-   ],
-   [
-    "/api/command/agents/derek/orders 200",
-    3
-   ],
-   [
-    "/api/command/paper/operations 200",
-    1
-   ],
-   [
-    "/api/command/agents/static/cc_avatar.js 200",
     1
    ],
    [
@@ -64,7 +48,27 @@
     1
    ],
    [
+    "/api/command/agents/derek/orders 200",
+    3
+   ],
+   [
     "/api/command/paper/derek 200",
+    1
+   ],
+   [
+    "/api/command/paper/operations 200",
+    1
+   ],
+   [
+    "/api/command/paper/account 200",
+    1
+   ],
+   [
+    "/api/command/agents/static/cc_avatar.js 200",
+    1
+   ],
+   [
+    "/api/command/agents/derek 200",
     1
    ],
    [
@@ -74,10 +78,6 @@
    [
     "/api/command/agents/labels 200",
     2
-   ],
-   [
-    "/api/command/agents/derek 200",
-    1
    ],
    [
     "/api/command/agents/static/three.core.min.js 200",
@@ -92,11 +92,11 @@
     1
    ],
    [
-    "/api/command/agents/static/BufferGeometryUtils.js 200",
+    "/api/command/agents/static/SkeletonUtils.js 200",
     1
    ],
    [
-    "/api/command/agents/static/SkeletonUtils.js 200",
+    "/api/command/agents/static/BufferGeometryUtils.js 200",
     1
    ],
    [
@@ -138,15 +138,7 @@
     1
    ],
    [
-    "/api/command/paper/operations 200",
-    1
-   ],
-   [
-    "/api/command/paper/xavier 200",
-    1
-   ],
-   [
-    "/api/command/agents/xavier 200",
+    "/api/command/agents/xavier/standing-orders 200",
     1
    ],
    [
@@ -154,7 +146,15 @@
     1
    ],
    [
-    "/api/command/agents/xavier/standing-orders 200",
+    "/api/command/agents/xavier 200",
+    1
+   ],
+   [
+    "/api/command/agents/xavier/payoff-demonstration 200",
+    1
+   ],
+   [
+    "/api/command/paper/operations 200",
     1
    ],
    [
@@ -162,7 +162,7 @@
     1
    ],
    [
-    "/api/command/agents/xavier/payoff-demonstration 200",
+    "/api/command/paper/xavier 200",
     1
    ],
    [
@@ -182,11 +182,11 @@
     1
    ],
    [
-    "/api/command/agents/static/SkeletonUtils.js 200",
+    "/api/command/agents/static/BufferGeometryUtils.js 200",
     1
    ],
    [
-    "/api/command/agents/static/BufferGeometryUtils.js 200",
+    "/api/command/agents/static/SkeletonUtils.js 200",
     1
    ],
    [
@@ -220,23 +220,11 @@
     2
    ],
    [
-    "/api/command/paper/account 200",
-    1
-   ],
-   [
-    "/api/command/agents 200",
-    1
-   ],
-   [
-    "/api/command/agents/audrey/performance 200",
-    1
-   ],
-   [
     "/api/command/paper/session 200",
     1
    ],
    [
-    "/api/command/paper/audrey 200",
+    "/api/command/paper/operations 200",
     1
    ],
    [
@@ -244,7 +232,11 @@
     1
    ],
    [
-    "/api/command/paper/operations 200",
+    "/api/command/agents/audrey/performance 200",
+    1
+   ],
+   [
+    "/api/command/paper/account 200",
     1
    ],
    [
@@ -260,6 +252,14 @@
     1
    ],
    [
+    "/api/command/agents 200",
+    1
+   ],
+   [
+    "/api/command/paper/audrey 200",
+    1
+   ],
+   [
     "/api/command/agents/static/meshopt_decoder.module.js 200",
     1
    ],
@@ -268,11 +268,11 @@
     1
    ],
    [
-    "/api/command/agents/static/BufferGeometryUtils.js 200",
+    "/api/command/agents/static/SkeletonUtils.js 200",
     1
    ],
    [
-    "/api/command/agents/static/SkeletonUtils.js 200",
+    "/api/command/agents/static/BufferGeometryUtils.js 200",
     1
    ],
    [
@@ -302,12 +302,12 @@
   "nav": 200,
   "api_status": [
    [
-    "/api/command/snapshot 401",
-    2
-   ],
-   [
     "/api/command/paper/overview 401",
     1
+   ],
+   [
+    "/api/command/snapshot 401",
+    2
    ]
   ],
   "has_sign_in_prompt": true,
@@ -315,9 +315,9 @@
   "has_unavailable": false,
   "cash_text": null,
   "stamps": {
-   "server_read": "SERVER READ SIGN-IN",
-   "heartbeat": "AGENT HEARTBEAT (PAPER RUNTIME) SIGN-IN",
-   "ledger": "LEDGER TRANSACTION SIGN-IN"
+   "server_read": null,
+   "heartbeat": null,
+   "ledger": null
   },
   "funded_label": true,
   "completed_game_label": false,
@@ -433,9 +433,9 @@
   "has_unavailable": false,
   "cash_text": "$500,000.00",
   "stamps": {
-   "server_read": "SERVER READ OK",
-   "heartbeat": "AGENT HEARTBEAT (PAPER RUNTIME) RECENT",
-   "ledger": "LEDGER TRANSACTION"
+   "server_read": null,
+   "heartbeat": null,
+   "ledger": null
   },
   "funded_label": true,
   "completed_game_label": false,
@@ -454,12 +454,12 @@
     2
    ],
    [
-    "/api/command/agents 200",
-    1
-   ],
-   [
     "/api/command/agents/derek/orders 200",
     3
+   ],
+   [
+    "/api/command/paper/account 200",
+    1
    ],
    [
     "/api/command/paper/derek 200",
@@ -470,7 +470,7 @@
     1
    ],
    [
-    "/api/command/paper/account 200",
+    "/api/command/agents 200",
     1
    ],
    [
@@ -478,20 +478,16 @@
     1
    ],
    [
-    "/api/command/agents/labels 200",
-    2
-   ],
-   [
     "/api/command/agents/static/cc_avatar.js 200",
-    1
-   ],
-   [
-    "/api/command/agents/derek 200",
     1
    ],
    [
     "/api/command/agents/static/three.module.min.js 200",
     1
+   ],
+   [
+    "/api/command/agents/labels 200",
+    2
    ],
    [
     "/api/command/agents/static/three.core.min.js 200",
@@ -506,11 +502,15 @@
     1
    ],
    [
-    "/api/command/agents/static/BufferGeometryUtils.js 200",
+    "/api/command/agents/derek 200",
     1
    ],
    [
     "/api/command/agents/static/SkeletonUtils.js 200",
+    1
+   ],
+   [
+    "/api/command/agents/static/BufferGeometryUtils.js 200",
     1
    ],
    [
@@ -544,11 +544,19 @@
     2
    ],
    [
-    "/api/command/paper/xavier 200",
+    "/api/command/agents 200",
     1
    ],
    [
     "/api/command/paper/account 200",
+    1
+   ],
+   [
+    "/api/command/agents/static/cc_avatar.js 200",
+    1
+   ],
+   [
+    "/api/command/paper/xavier 200",
     1
    ],
    [
@@ -560,7 +568,11 @@
     1
    ],
    [
-    "/api/command/agents 200",
+    "/api/command/agents/xavier/payoff-demonstration 200",
+    1
+   ],
+   [
+    "/api/command/agents/static/three.module.min.js 200",
     1
    ],
    [
@@ -568,19 +580,7 @@
     1
    ],
    [
-    "/api/command/agents/static/cc_avatar.js 200",
-    1
-   ],
-   [
-    "/api/command/agents/xavier/payoff-demonstration 200",
-    1
-   ],
-   [
     "/api/command/paper/operations 200",
-    1
-   ],
-   [
-    "/api/command/agents/static/three.module.min.js 200",
     1
    ],
    [
@@ -596,11 +596,11 @@
     1
    ],
    [
-    "/api/command/agents/static/BufferGeometryUtils.js 200",
+    "/api/command/agents/static/SkeletonUtils.js 200",
     1
    ],
    [
-    "/api/command/agents/static/SkeletonUtils.js 200",
+    "/api/command/agents/static/BufferGeometryUtils.js 200",
     1
    ],
    [
@@ -638,11 +638,11 @@
     1
    ],
    [
-    "/api/command/agents 200",
+    "/api/command/paper/session 200",
     1
    ],
    [
-    "/api/command/paper/session 200",
+    "/api/command/paper/account 200",
     1
    ],
    [
@@ -654,19 +654,19 @@
     1
    ],
    [
+    "/api/command/agents/static/three.module.min.js 200",
+    1
+   ],
+   [
+    "/api/command/agents 200",
+    1
+   ],
+   [
     "/api/command/agents/audrey 200",
     1
    ],
    [
     "/api/command/paper/operations 200",
-    1
-   ],
-   [
-    "/api/command/paper/account 200",
-    1
-   ],
-   [
-    "/api/command/agents/static/three.module.min.js 200",
     1
    ],
    [
@@ -729,9 +729,9 @@
   "has_unavailable": false,
   "cash_text": null,
   "stamps": {
-   "server_read": "SERVER READ SIGN-IN",
-   "heartbeat": "AGENT HEARTBEAT (PAPER RUNTIME) SIGN-IN",
-   "ledger": "LEDGER TRANSACTION SIGN-IN"
+   "server_read": null,
+   "heartbeat": null,
+   "ledger": null
   },
   "funded_label": true,
   "completed_game_label": false,
