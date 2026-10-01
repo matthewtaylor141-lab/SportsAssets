@@ -79,12 +79,15 @@ function funnelCard(j) {
     + (attTxt ? '<p class="xp-note">Every attempt recorded (6 h): ' + attTxt + '</p>' : '') + '</div>';
 }
 
-function closestCard(j) {
+function closestCard(j, now) {
   var c = ok(j.closest);
   if (!c || !c.length) return '<div class="xp-card"><h3>Closest investment opportunities</h3>' + secNote(j.closest, 'closest') + '</div>';
-  return '<div class="xp-card xp-wide"><h3>Closest investment opportunities (24 h)</h3><div class="xp-tbl"><table><thead><tr><th>Market</th><th class="n">Pinnacle</th><th class="n">Price</th><th class="n">Gross</th><th class="n">Fee</th><th class="n">After fees</th><th>Result</th></tr></thead><tbody>'
-    + c.map(function (x) { return '<tr><td>' + short(x.us_market_slug) + '</td><td class="n">' + (num(x.p_pinnacle) ? x.p_pinnacle.toFixed(4) : '—') + '</td><td class="n">' + px(x.price) + '</td><td class="n">' + pp(x.gross_pp) + '</td><td class="n">' + (num(x.fee_pc) ? (x.fee_pc * 100).toFixed(2) + ' pp' : '—') + '</td><td class="n">' + pp(x.net_pp) + '</td><td class="xp-why">' + esc(x.verdict === 'ENTER' ? 'ENTERED' : String(x.refusal || '').replace(/_/g, ' ').toLowerCase()) + '</td></tr>'; }).join('')
-    + '</tbody></table></div><p class="xp-note">The investment rule: Pinnacle probability minus price ≥ 0.5 pp at every level used, and expected profit after the taker fee strictly positive.</p></div>';
+  var serving = (c[0] && c[0].serving_version) || '';
+  function ver(x) { var v = String(x.policy_version || 'not recorded'); var short = v.replace(/^PINNACLE_COMPLETED_GAME_PAPER_/, ''); return x.historical ? '<span class="xp-hist" title="' + esc(v) + '">' + esc(short) + ' · historical</span>' : '<span title="' + esc(v) + '">' + esc(short) + '</span>'; }
+  function result(x) { var r = x.verdict === 'ENTER' ? 'entered' : String(x.refusal || '').replace(/_/g, ' ').toLowerCase(); return esc(r) + (x.historical ? '<br><small>rules in force at ' + esc(String(x.policy_version || '').replace(/^PINNACLE_COMPLETED_GAME_PAPER_/, '')) + (num(x.threshold_pp) ? ' (' + x.threshold_pp.toFixed(1) + ' pp minimum)' : '') + ', not today\'s</small>' : ''); }
+  return '<div class="xp-card xp-wide"><h3>Closest investment opportunities (24 h)</h3><p class="xp-k">Latest decision per market and policy version · serving version ' + esc(serving.replace(/^PINNACLE_COMPLETED_GAME_PAPER_/, '') || '—') + ' first, historical versions after</p><div class="xp-tbl"><table><thead><tr><th>Market</th><th>Policy</th><th class="n">Age</th><th class="n">Pinnacle</th><th class="n">Price</th><th class="n">Gross</th><th class="n">Fee</th><th class="n">After fees</th><th>Result</th></tr></thead><tbody>'
+    + c.map(function (x) { return '<tr' + (x.historical ? ' class="xp-row-hist"' : '') + '><td>' + short(x.us_market_slug) + '</td><td>' + ver(x) + '</td><td class="n">' + ago(x.at, now) + '</td><td class="n">' + (num(x.p_pinnacle) ? x.p_pinnacle.toFixed(4) : '—') + '</td><td class="n">' + px(x.price) + '</td><td class="n">' + pp(x.gross_pp) + '</td><td class="n">' + (num(x.fee_pc) ? (x.fee_pc * 100).toFixed(2) + ' pp' : 'not computed') + '</td><td class="n">' + (num(x.net_pp) ? pp(x.net_pp) : 'not computed') + '</td><td class="xp-why">' + result(x) + '</td></tr>'; }).join('')
+    + '</tbody></table></div><p class="xp-note">The serving investment rule: Pinnacle probability minus price ≥ 0.5 pp at every level used, and expected profit after the taker fee strictly positive. A historical row keeps the reason it was given under the rules in force at the time. "Not computed" means the policy stopped before the fee step.</p></div>';
 }
 
 function ordersCard(j, now) {
@@ -137,7 +140,7 @@ function throughputCard(j) {
 function html() {
   var now = Date.now() / 1000, j = st.json;
   var out = '<section class="xp" aria-label="The paper experiment"><div class="xp-head"><div><span class="office-eyebrow">THE EXPERIMENT</span><h2>What the team is doing with the paper account.</h2></div><span class="xp-sub">Every figure is a stored record · simulated execution · live market data</span></div>' + banner(now);
-  if (j) out += '<div class="xp-grid">' + sessionCard(j, now) + agentsCard(j, now) + funnelCard(j) + closestCard(j) + ordersCard(j, now) + positionsCard(j) + throughputCard(j) + '</div>';
+  if (j) out += '<div class="xp-grid">' + sessionCard(j, now) + agentsCard(j, now) + funnelCard(j) + closestCard(j, now) + ordersCard(j, now) + positionsCard(j) + throughputCard(j) + '</div>';
   return out + '</section>';
 }
 
