@@ -20,11 +20,15 @@ on:
         required: false
         default: ""
       verify:
-        description: "site-voice = after a release: set each agent's voice through the audited persona route, speak once per agent, and render the production homepage and agent pages in mobile WebKit and phone-sized Chromium (authenticated and signed out); film = follow the homepage demo link and play the whole cinematic film signed in (prepares each chapter through the agent persona chat + stored speech; writes conversation records only), measuring voices, music and 3D frames; office = drive the management office pages against the persisted records with chat/voice timings (writes conversation records only); experiment = read the paper experiment API and render the homepage and agent pages signed in, checking the same positions, fills and cash (read-only); talk = drive the Talk-to-agent panels on /derek /xavier /audrey (typed question, follow-up, refresh-resume, spoken question via a fake microphone, voice reply, permission-denied and a simulated provider error) in desktop + phone Chromium and WebKit iPhone 13 (writes conversation records only)"
+        description: "site-voice = after a release: set each agent's voice through the audited persona route, speak once per agent, and render the production homepage and agent pages in mobile WebKit and phone-sized Chromium (authenticated and signed out); film = follow the homepage demo link and play the whole cinematic film signed in (prepares each chapter through the agent persona chat + stored speech; writes conversation records only), measuring voices, music and 3D frames; office = drive the management office pages against the persisted records with chat/voice timings (writes conversation records only); experiment = read the paper experiment API and render the homepage and agent pages signed in, checking the same positions, fills and cash (read-only); talk = drive the Talk-to-agent panels on /derek /xavier /audrey (typed question, follow-up, refresh-resume, spoken question via a fake microphone, voice reply, permission-denied and a simulated provider error) in desktop + phone Chromium and WebKit iPhone 13 (writes conversation records only); pinnapi = fetch the PinnAPI public docs (no key) and run the read-only in-API probe: key names, then at most 6 authenticated GETs (writes nothing, opens no stream)"
         required: false
         default: ""
       terms_slugs:
         description: "optional comma-separated venue slugs: read each contract's published rules prose through POST /api/admin/venue-settlement-probe (read-only GETs at the venue; writes nothing)"
+        required: false
+        default: ""
+      pinnapi_paths:
+        description: "verify=pinnapi only: optional comma-separated RELATIVE PinnAPI paths for the in-API probe (max 6 GETs, >= 1 s apart; the key stays in the API). Blank = /health only. The public docs are always fetched (no key)."
         required: false
         default: ""
 
@@ -190,6 +194,73 @@ jobs:
                  ((.settlement_terms // {}) | "field=\(.field) chars=\(.chars) truncated=\(.truncated)\nTEXT: \(.text)\nstated: \(.stated | tojson)\nnot_stated: \(.not_stated | tojson)\ncontradicted: \(.contradicted | tojson)")' /tmp/probe.json 2>/dev/null
           echo "== keys: $(jq -c 'keys' /tmp/probe.json 2>/dev/null)"
           [ "$code" = "200" ] || head -c 1500 /tmp/probe.json
+
+  pinnapi:
+    # READ-ONLY, OFF UNLESS verify == pinnapi.
+    # 1. PUBLIC DOCS: the provider's public documentation pages fetched from
+    #    this runner with NO key (the session container's egress cannot reach
+    #    pinnapi.com), committed to the evidence branch so the adapter is
+    #    written from the current documentation.
+    # 2. IN THE API, where the owner installed `pinnapi_key`: POST
+    #    /api/admin/pinnapi-probe -- which key NAMES are present (never a
+    #    value, length or prefix), then at most 6 authenticated GETs to the
+    #    given relative provider paths, >= 1 s apart, returning status,
+    #    timing, rate-limit headers and a sanitized structure. The key never
+    #    leaves the API. No stream is opened (an extra stream consumer could
+    #    displace the production connection), nothing is written at the
+    #    provider or in the database, nothing is ordered.
+    if: ${{ inputs.verify == 'pinnapi' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Public documentation (no key)
+        shell: bash
+        run: |
+          set +e
+          mkdir -p /tmp/pinn/docs
+          for u in llms-full.txt llms.txt docs pinnacle-websocket-api pricing; do
+            f="/tmp/pinn/docs/$(echo "$u" | tr '/.' '__').txt"
+            code=$(curl -sS -L --max-time 40 --max-filesize 6000000 -o "$f" -w '%{http_code}' "https://pinnapi.com/$u")
+            echo "$u HTTP $code bytes $(wc -c < "$f" 2>/dev/null || echo 0)" | tee -a /tmp/pinn/docs/index.txt
+          done
+      - name: Key names and authenticated readiness (in the API)
+        shell: bash
+        env:
+          API: https://sportsassets-api.onrender.com
+          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+          PATHS: ${{ inputs.pinnapi_paths }}
+        run: |
+          set +e
+          [ -n "${ADMIN_TOKEN:-}" ] || { echo "no ADMIN_TOKEN secret"; exit 0; }
+          echo "::add-mask::$ADMIN_TOKEN"
+          H="X-Admin-Token: $ADMIN_TOKEN"
+          code=$(curl -s -o /tmp/pinn/keys.json -w '%{http_code}' --max-time 30 -X POST -H "$H" \
+                 -H "Content-Type: application/json" -d '{"action":"keys"}' "$API/api/admin/pinnapi-probe")
+          echo "keys HTTP $code"; jq -c . /tmp/pinn/keys.json 2>/dev/null || head -c 300 /tmp/pinn/keys.json
+          [ "$code" = "200" ] || { echo "probe route not deployed on the serving build (HTTP $code); docs only"; exit 0; }
+          [ -n "$PATHS" ] || PATHS="/health"
+          body=$(jq -nc --arg s "$PATHS" '{action: "rest", paths: ($s | split(",") | map(gsub("\\s"; "")) | map(select(length > 0)))}')
+          code=$(curl -s -o /tmp/pinn/rest.json -w '%{http_code}' --max-time 120 -X POST -H "$H" \
+                 -H "Content-Type: application/json" -d "$body" "$API/api/admin/pinnapi-probe")
+          echo "rest HTTP $code at $(date -u +%FT%TZ)"
+          jq -r '.reads[]? | "\(.path) http=\(.http) ok=\(.ok) ms=\(.elapsed_ms) ratelimit=\(.rate_limit_headers|tojson) inventory=\(.inventory|tojson)"' /tmp/pinn/rest.json 2>/dev/null
+      - uses: actions/checkout@v4
+        if: always()
+      - name: Commit the evidence
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          RUN="${GITHUB_RUN_ID}"
+          D="evidence/pinnapi/$(date -u +%Y%m%dT%H%M%SZ)_run$RUN"
+          git config user.name "site-verify"
+          git config user.email "site-verify@users.noreply.github.com"
+          git fetch -q origin claude/site-verify-evidence && git checkout -q -B ev origin/claude/site-verify-evidence || git checkout -q --orphan ev
+          git rm -rq --cached . >/dev/null 2>&1 || true
+          mkdir -p "$D" && cp -r /tmp/pinn/. "$D"/
+          git add "$D" && git commit -q -m "pinnapi evidence, run $RUN" && git push -q origin ev:claude/site-verify-evidence && echo "evidence pushed: $D"
 
   site-voice:
     # POST-RELEASE VERIFICATION, OFF UNLESS verify == site-voice.
