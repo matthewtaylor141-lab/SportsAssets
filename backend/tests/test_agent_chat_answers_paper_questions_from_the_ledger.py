@@ -481,34 +481,53 @@ def test_g4_the_model_is_offered_the_paper_tool_and_can_call_it(
 
 # ── V1 ──────────────────────────────────────────────────────────────
 
-class _RefusingVoices(H.FakeElevenLabs):
-    """GET /v1/voices answers 401 with ElevenLabs' error body -- which, as
-    some providers do, echoes the key back. It must never be returned."""
+class _RefusingEL(H.FakeElevenLabs):
+    """GET /v1/voices and/or the TTS request answer with ElevenLabs' error
+    body -- which, as some providers do, echoes the key back -- and a
+    request-id header. The key must never be returned, stored or logged."""
+
+    def __init__(self, *, voices=True, tts=False, status=401,
+                 code="invalid_api_key"):
+        super().__init__()
+        self.refuse_voices, self.refuse_tts = voices, tts
+        self.status, self.code = status, code
 
     async def handler(self, request):
         import httpx
 
-        if request.url.path == "/v1/voices":
-            self.calls.append({"path": request.url.path})
-            return httpx.Response(401, json={"detail": {
-                "status": "invalid_api_key",
-                "message": "Invalid API key: %s" % H.FAKE_EL_KEY}})
+        path = request.url.path
+        refuse = (path == "/v1/voices" and self.refuse_voices) or (
+            path.startswith("/v1/text-to-speech/") and self.refuse_tts)
+        if refuse:
+            self.calls.append({"path": path, "method": request.method,
+                               "params": dict(request.url.params),
+                               "headers": {}, "body": None})
+            return httpx.Response(self.status, headers={
+                "request-id": "req_chatt_%s" % path.count("/")}, json={
+                "detail": {"status": self.code,
+                           "message": "Invalid API key: %s"
+                                      % H.FAKE_EL_KEY}})
         return await super().handler(request)
 
 
+def _demo_answer(client, agent):
+    return client.post("/api/command/agents/%s/persona/chat" % agent,
+                       json={"message": "Walk me through the Yankees "
+                                        "position.",
+                             "allow_records_only": True,
+                             "context": {"demonstration": True}},
+                       headers=F.desk_headers()).json()
+
+
 @pg
-def test_v1_the_voice_list_failure_keeps_the_provider_error_not_the_key(
+def test_v1_a_voice_list_failure_is_diagnosed_without_the_key(
         db, monkeypatch, caplog):
     H.no_keys(monkeypatch)
     caplog.set_level(logging.DEBUG)
-    H.use_elevenlabs(monkeypatch, _RefusingVoices())
+    monkeypatch.setenv("ELEVENLABS_VOICE_ID_XAVIER", "premadeBrian00001")
+    H.use_elevenlabs(monkeypatch, _RefusingEL(voices=True))
     client = H.build_client(monkeypatch, F.Clock(T0))
-    ans = client.post("/api/command/agents/derek/persona/chat",
-                      json={"message": "Walk me through the Yankees "
-                                       "position.",
-                            "allow_records_only": True,
-                            "context": {"demonstration": True}},
-                      headers=F.desk_headers()).json()
+    ans = _demo_answer(client, "derek")
     r = client.post("/api/command/agents/derek/speak",
                     json={"message_id": ans["message_id"]},
                     headers=F.desk_headers())
@@ -516,17 +535,22 @@ def test_v1_the_voice_list_failure_keeps_the_provider_error_not_the_key(
     b = r.json()
     assert b["reason"] == "VOICE_NOT_RESOLVED"
     assert b["resolver_reason"] == "VOICE_LIST_HTTP_401"
-    assert b["resolver_detail"]["provider_status"] == 401
-    assert b["resolver_detail"]["provider_error_status"] == "invalid_api_key"
-    assert b["resolver_detail"]["provider_message"].startswith(
-        "Invalid API key")
+    d = b["resolver_detail"]
+    assert d["endpoint"] == "GET /v1/voices"
+    assert d["required_permission"] == "voices_read"
+    assert d["http_status"] == 401
+    assert d["provider_error_status"] == "invalid_api_key"
+    assert d["provider_message"].startswith("Invalid API key")
+    assert d["provider_request_id"] == "req_chatt_2"
+    assert b["configured_voice"]["present"] is False
+    assert b["configured_voice"]["env_var"] == "ELEVENLABS_VOICE_ID_DEREK"
     # the recorded resolution (reused for the retry window) keeps it too
     r2 = client.post("/api/command/agents/derek/speak",
                      json={"message_id": ans["message_id"]},
                      headers=F.desk_headers())
+    assert r2.json()["resolver_source"] == "RECORDED"
     assert r2.json()["resolver_detail"]["provider_error_status"] == \
         "invalid_api_key"
-    assert r2.json()["resolver_source"] == "RECORDED"
     p = client.get("/api/command/agents/derek/persona",
                    headers=F.desk_headers()).json()
     assert p["voice_resolution"]["detail"]["provider_error"][
@@ -536,35 +560,90 @@ def test_v1_the_voice_list_failure_keeps_the_provider_error_not_the_key(
     vl = st["speech"]["voice_list"]
     assert vl["last_failure"] == "VOICE_LIST_HTTP_401"
     assert vl["provider_error"]["provider_error_status"] == "invalid_api_key"
+    assert st["speech"]["required_permissions"] == {
+        "GET /v1/voices": "voices_read",
+        "POST /v1/text-to-speech/{voice_id}/stream": "text_to_speech"}
+    v = st["voices"]
+    assert v["derek"]["voice_list_diagnostic"]["http_status"] == 401
+    assert v["derek"]["configured_voice"]["present"] is False
+    # a configured voice id is reported, with where it came from
+    assert v["xavier"]["configured_voice"] == {
+        "env_var": "ELEVENLABS_VOICE_ID_XAVIER",
+        "env_voice_id": "premadeBrian00001", "profile_voice_id": None,
+        "configured_voice_id": "premadeBrian00001", "present": True,
+        "source": "env", "invalid_configured_value": False}
     for text in (r.text, r2.text, json.dumps(p), json.dumps(st),
                  caplog.text):
         assert H.FAKE_EL_KEY not in text
 
 
-def test_v1_provider_error_summaries_are_scrubbed():
+@pg
+def test_v1_a_tts_failure_is_diagnosed_without_the_key(db, monkeypatch,
+                                                        caplog):
+    H.no_keys(monkeypatch)
+    caplog.set_level(logging.DEBUG)
+    H.use_elevenlabs(monkeypatch, _RefusingEL(
+        voices=False, tts=True, status=403, code="missing_permissions"))
+    client = H.build_client(monkeypatch, F.Clock(T0))
+    ans = _demo_answer(client, "xavier")
+    r = client.post("/api/command/agents/xavier/speak",
+                    json={"message_id": ans["message_id"]},
+                    headers=F.desk_headers())
+    assert r.status_code == 503
+    b = r.json()
+    assert b["reason"] == "VOICE_PROVIDER_FAILED"
+    assert b["provider_status"] == 403
+    d = b["provider_diagnostic"]
+    assert d["endpoint"] == \
+        "POST /v1/text-to-speech/premadeBrian00001/stream"
+    assert "?" not in d["endpoint"]
+    assert d["required_permission"] == "text_to_speech"
+    assert d["http_status"] == 403
+    assert d["provider_error_status"] == "missing_permissions"
+    assert d["provider_request_id"] == "req_chatt_4"
+    st = client.get("/api/command/agents/persona-status",
+                    headers=F.desk_headers()).json()
+    t = st["voices"]["xavier"]["last_tts_failure"]
+    assert t["provider_error_status"] == "missing_permissions"
+    assert t["required_permission"] == "text_to_speech"
+    assert st["speech"]["tts"]["last_failure"]["agent"] == "XAVIER"
+    for text in (r.text, json.dumps(st), caplog.text):
+        assert H.FAKE_EL_KEY not in text
+
+
+def test_v1_provider_diagnostics_are_sanitized():
     import httpx
 
     from sportsassets.agents import personas as P
     key = "xi-secret-key-0123456789abcdefghijklmnop"
-    e = P.provider_error(httpx.Response(403, json={"detail": {
-        "status": "missing_permissions",
-        "message": "The API key you used is missing the permission "
-                   "voices_read to execute this operation."}}), key)
-    assert e == {"provider_status": 403,
+    e = P.provider_error(httpx.Response(403, headers={
+        "x-request-id": "abc-123"}, json={"detail": {
+            "status": "missing_permissions",
+            "message": "The API key you used is missing the permission "
+                       "voices_read to execute this operation."}}), key)
+    assert e == {"provider": "elevenlabs", "endpoint": "GET /v1/voices",
+                 "required_permission": "voices_read", "http_status": 403,
                  "provider_error_status": "missing_permissions",
                  "provider_message": "The API key you used is missing the "
                                      "permission voices_read to execute this "
-                                     "operation."}
-    e = P.provider_error(httpx.Response(401, json={"detail": "bad %s" % key}),
-                         key)
-    assert key not in json.dumps(e) and e["provider_message"].startswith(
-        "bad ")
+                                     "operation.",
+                 "provider_request_id": "abc-123", "error_class": None}
+    e = P.provider_error(httpx.Response(401, json={
+        "detail": "bad Bearer %s and api_key=%s" % (key, key[:10])}), key)
+    assert key not in json.dumps(e) and key[:10] not in json.dumps(e)
+    assert e["provider_message"].startswith("bad Bearer [redacted]")
     e = P.provider_error(httpx.Response(500, text="<html>oops</html>"), key)
-    assert e["provider_status"] == 500 and e["provider_error_status"] is None
-    # a status that is not a plain token is dropped, not echoed
+    assert e["http_status"] == 500 and e["provider_error_status"] is None
+    # a status that is not a plain token is dropped, not echoed; a long
+    # message is cut to 300 characters
     e = P.provider_error(httpx.Response(401, json={"detail": {
-        "status": "x" * 80 + " " + key}}), key)
+        "status": "x" * 80 + " " + key, "message": "word " * 200}}), key)
     assert e["provider_error_status"] is None
+    assert len(e["provider_message"]) == 300
+    # a request id that carries the key is not kept
+    e = P.provider_error(httpx.Response(401, headers={"request-id": key},
+                                        json={}), key)
+    assert e["provider_request_id"] is None
 
 
 # ── V2 ──────────────────────────────────────────────────────────────

@@ -214,7 +214,8 @@ async def _speech(agent: str, body: SpeechBody) -> Response:
         return _speech_error(PS.SpeechFailure(
             PS.R_NOT_RESOLVED, resolver_reason=res.get("reason"),
             resolver_detail=res.get("provider_error"),
-            resolver_source=res.get("source")),
+            resolver_source=res.get("source"),
+            configured_voice=P.configured_voice_report(ag, persona)),
             extra={"message_id": mid, "browser_fallback": fallback})
     spoken = m["spoken_text"][:PS.MAX_SPOKEN_CHARS]
     key = PS.cache_key(agent=ag, persona_version=persona.get("version"),
@@ -239,7 +240,7 @@ async def _speech(agent: str, body: SpeechBody) -> Response:
     try:
         resp, client, owned = await PS.open_stream(
             voice_id=res["voice_id"], spoken_text=spoken, profile=persona,
-            cfg=cfg)
+            cfg=cfg, agent=ag)
     except PS.SpeechFailure as e:
         PS.LIMITS.release(ag)
         return _speech_error(e, extra={"message_id": mid})
@@ -289,9 +290,40 @@ async def agent_speak(agent: str, body: SpeechBody) -> Response:
 @router.get("/api/command/agents/persona-status",
             dependencies=[Depends(require_read)])
 async def persona_status(response: Response) -> dict:
+    """Chat and speech state, with each agent's voice configuration: whether
+    a voice id is configured (ELEVENLABS_VOICE_ID_<AGENT> or the profile's
+    voice_id -- ids are not secrets), the latest recorded resolution with
+    its sanitized provider diagnostic, and the last TTS failure. Never the
+    key."""
     response.headers["Cache-Control"] = "no-store"
+    tts = PS.tts_status()["by_agent"]
+    voices: dict[str, Any] = {}
+    try:
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            for ag in P.AGENTS:
+                prof = await P.active(conn, ag)
+                res = await P.latest_resolution(
+                    conn, ag, int(prof.get("version") or 0))
+                voices[ag.lower()] = {
+                    "configured_voice": P.configured_voice_report(ag, prof),
+                    "latest_resolution": None if res is None else {
+                        k: res.get(k) for k in (
+                            "status", "method", "voice_id", "voice_name",
+                            "category", "reason", "resolved_at")},
+                    "voice_list_diagnostic": ((res or {}).get("detail")
+                                              or {}).get("provider_error"),
+                    "last_tts_failure": tts.get(ag)}
+    except Exception as exc:                                    # noqa: BLE001
+        for ag in P.AGENTS:
+            voices[ag.lower()] = {
+                "configured_voice": P.configured_voice_report(
+                    ag, P.default_profile(ag)),
+                "latest_resolution": None,
+                "unreadable": type(exc).__name__,
+                "last_tts_failure": tts.get(ag)}
     return {"chat": PC.describe(), "speech": PS.describe(),
-            "personas": P.VERSION}
+            "voices": voices, "personas": P.VERSION}
 
 
 @router.get("/api/command/agents/{agent}/persona",
