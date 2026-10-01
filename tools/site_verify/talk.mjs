@@ -226,4 +226,47 @@ for (const [ename, engine, dev, fakeMic] of ENGINES) {
   }
   await browser.close();
 }
+// ── THE MANAGEMENT OFFICE (homepage) DRAWER AND THE DEMO PAGES ─────────
+{
+  const browser = await chromium.launch();
+  for (const [vname, vp] of [["desktop-1280", { viewport: { width: 1280, height: 800 } }],
+                             ["phone-390", { viewport: { width: 390, height: 844 }, deviceScaleFactor: 2, isMobile: true, hasTouch: true }]]) {
+    const ctx = await browser.newContext(vp);
+    await signedIn(ctx);
+    const page = await ctx.newPage(); const errs = []; const chats = [];
+    page.on("pageerror", (e) => errs.push(short(String(e), 160)));
+    page.on("response", async (r) => { if (/\/persona\/chat$/.test(r.url())) { try { const j = await r.json();
+      chats.push({ status: r.status(), message_id: j.message_id, provider_mode: (j.provider || {}).mode,
+        prior_turns: (j.context_supplied || {}).prior_turns }); } catch (_) {} } });
+    const row = { engine: "chromium-" + vname, page: "office", url: HOST + "/" };
+    try {
+      await page.goto(HOST + "/", { waitUntil: "domcontentloaded", timeout: 45000 });
+      await page.waitForSelector('[data-office-talk="derek"]', { timeout: 30000 });
+      await page.click('[data-office-talk="derek"]');
+      await page.waitForSelector("#office-message", { timeout: 15000 });
+      await page.fill("#office-message", "What is the active entry rule?");
+      await page.click(".office-chat-form button[type=submit]");
+      await page.waitForFunction(() => document.querySelectorAll(".office-message.assistant").length >= 1, null, { timeout: 150000 });
+      row.office_answer = short(await page.locator(".office-message.assistant").last().innerText(), 800);
+      row.office_chat = chats[chats.length - 1] || null;
+      await page.screenshot({ path: `${OUT}/office_${vname}_chat.png` });
+    } catch (e) { row.error = short(String(e), 300); await page.screenshot({ path: `${OUT}/office_${vname}_error.png` }).catch(() => {}); }
+    row.page_errors = errs.slice(0, 5);
+    report.push(row);
+    console.log(JSON.stringify({ office: vname, error: row.error || null, chat: row.office_chat, answer: (row.office_answer || "").slice(0, 200) }));
+    for (const path of ["/team-demo/index.html", "/team-demo/video.html"]) {
+      const p2 = await ctx.newPage(); const e2 = [];
+      p2.on("pageerror", (e) => e2.push(short(String(e), 160)));
+      const resp = await p2.goto(HOST + path, { waitUntil: "load", timeout: 45000 }).catch(() => null);
+      await p2.waitForTimeout(6000);
+      const ov = await p2.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth).catch(() => null);
+      await p2.screenshot({ path: `${OUT}/demo_${vname}_${path.split("/").pop().replace(".html", "")}.png` }).catch(() => {});
+      report.push({ engine: "chromium-" + vname, page: path, nav: resp && resp.status(), overflow_px: ov, page_errors: e2.slice(0, 5) });
+      console.log(JSON.stringify({ demo: path, vp: vname, nav: resp && resp.status(), overflow_px: ov, errors: e2.length }));
+      await p2.close();
+    }
+    await ctx.close();
+  }
+  await browser.close();
+}
 fs.writeFileSync(`${OUT}/talk_report.json`, JSON.stringify(report, null, 1));
