@@ -1,0 +1,4 @@
+=== head 2026-10-01T16:28:14Z start
+=== head 2026-10-01T16:54:21Z pytest-exit=0
+=== verdict vs gate_rc3_out exit=0
+=== verdict vs gate_rc2_out exit=0
