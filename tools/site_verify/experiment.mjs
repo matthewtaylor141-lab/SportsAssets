@@ -45,8 +45,20 @@ async function agentText(page, who) {
     if (f) {
       try {
         await f.waitForLoadState("load", { timeout: 10000 });
-        await page.waitForTimeout(8000);           // the page's own reads
-        return await f.evaluate(() => document.body.innerText);
+        // the office renders records only after its own reads: wait for the
+        // connected (or explicitly failed) state, never read the loading text
+        const t1 = Date.now();
+        while (Date.now() - t1 < 60000) {
+          const st = await f.evaluate(() => ((document.getElementById("office-status") || {}).textContent || "")).catch(() => "");
+          if (/Connected to recorded workspace|Records read|Read unavailable/.test(st)) break;
+          await page.waitForTimeout(500);
+        }
+        await page.waitForTimeout(2000);
+        // visible text PLUS the record ids the page binds to its cards and
+        // questions (the office shows team names, not slugs)
+        return await f.evaluate(() => document.body.innerText + "\n" +
+          [...document.querySelectorAll("[data-office-position],[data-office-question],[data-office-decision]")]
+            .map((el) => [el.dataset.officePosition, el.dataset.officeQuestion, el.dataset.officeDecision].filter(Boolean).join(" ")).join("\n"));
       } catch (_) {}
     }
     await page.waitForTimeout(500);
