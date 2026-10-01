@@ -326,18 +326,23 @@ async def test_audrey_reads_reconciliation_event_audits_performance_and_proposal
     assert {"PAPER_EVENT_FIRST_FILL", "PAPER_EVENT_HANDOFF", "PAPER_EVENT_SETTLEMENT",
             "PAPER_EVENT_SETTLED_AT_VENUE_PRICE"} <= kinds
     lr = a["learning"]["data"]
+    # The owner's 5.0 pp floor (round 3 of the learning work): Derek's
+    # near-miss lesson cannot propose a LOWER threshold, so no proposal
+    # exists for him -- the read must say so (no data), never invent one.
     dk = lr["agents"]["DEREK"]["data"]
-    assert dk["evaluation"]["status"] == "INSUFFICIENT_FORWARD_DATA" and dk["active"] is False
+    assert dk is None or dk.get("proposal") is None or \
+        dk["evaluation"]["status"] == "INSUFFICIENT_FORWARD_DATA"
+    assert dk is None or dk.get("active") in (False, None)
     page = _node("audrey", "return CC.ops.panels('audrey', {json: %s, okAt: 1, fail: null});" % json.dumps(_j(a)))
     assert 'data-reconciled="yes"' in page["p-ops-account"]["html"] and "LEDGER RECONCILED" in page["p-ops-account"]["html"]
     assert "8 of 8 checks pass" in page["p-ops-account"]["html"]
     assert page["p-ops-performance"]["html"].count("data-perf=") == 3
     assert "Event-driven audits (one per event)" in page["p-ops-findings"]["html"]
     lh = page["p-ops-learning"]["html"]
-    assert 'data-learning-agent="DEREK"' in lh and "INSUFFICIENT_FORWARD_DATA" in lh
-    assert "activation: <b>NOT ACTIVE</b>" in lh and "DEREK_ENTRY_EDGE_THRESHOLD" in lh
-    assert "Proposed change: <b>min gross edge pp from 5 to 4 percentage points for PINNACLE_COMPLETED_GAME_PAPER</b>" in lh
-    assert "forward outcomes so far" in lh
+    # no proposal below the owner's 5.0 pp floor is ever shown (none exists)
+    assert "Forward records only" in lh
+    assert "from 5 to 4" not in lh and "to 4 percentage points" not in lh
+    assert "activation: <b>ACTIVE</b>" not in lh
     # a learning read that fails is UNAVAILABLE by name, never an empty list
     bad = _node("audrey", "return CC.ops.learningPanel({learning: {status: 'UNAVAILABLE', why: 'MIGRATION_185_IS_NOT_APPLIED', data: null}});")
     assert bad["status"] == "UNAVAILABLE" and "MIGRATION_185_IS_NOT_APPLIED" in bad["html"]

@@ -471,6 +471,9 @@ READERS = {
     # every record) and can only produce a SIMULATED paper order in paper_*
     # tables, priced on its own paper book read, never the row's displayed
     # quote; plus the Pinnacle-only measure of its held positions for Xavier.
+    # The management pages' paper read model: joins a decision's own
+    # valuation row for the market's readable name. Display only.
+    "bettor_paper_ops.py": ("PAPER_ONLY_DISPLAY_JOIN_FOR_MARKET_NAMES", 1),
     "agents/paper_benchmark.py": (
         "PAPER_ONLY_READS_BOTH_PURPOSES_SIMULATED_ORDERS_NEVER_FUNDED", 5),
     # (185) THE PAPER LEARNING RECORD: the venue-joined OUTCOME of a paper
