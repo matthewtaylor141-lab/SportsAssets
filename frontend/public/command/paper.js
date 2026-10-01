@@ -230,7 +230,7 @@
     if (t && window.BTUnlock && typeof window.BTUnlock.open === "function") { e.preventDefault(); window.BTUnlock.open(); }
   });
   function renderStrip() {
-    var head = '<span class="ps-tag">PAPER · LIVE MARKET DATA · SIMULATED EXECUTION</span>', b = st.bal;
+    var head = '<span class="ps-tag">SIMULATED CAPITAL · LIVE MARKET DATA</span>', b = st.bal;
     if (!b) {
       strip.innerHTML = head + '<span class="ps-why"><b>' + esc(st.balState) + "</b>" + (st.balWhy ? ": " + esc(st.balWhy) : "") +
         (st.signedOut ? ' · <a href="/" data-paper-signin>Sign in</a>' : "") + "</span>";
@@ -322,6 +322,7 @@
       : "<b>SESSION NOT RUNNING</b> · " + esc(s.reason || "no reason given") + (s.session_id ? " · last session " + esc(s.session_id) : "")) + "</p>";
   }
   function renderPanel() {
+    if (window.BTOffice) { panel.innerHTML = window.BTOffice.render({balance: st.bal, overview: st.ov, signedOut: st.signedOut, failed: st.ovFail, readAt: st.ovOkAt, streamLabel: streamLabel(), stampsHtml: stamps(), sessionHtml: session(), signinHtml: signinHtml()}); return; }
     panel.innerHTML = '<div class="ph-head"><h2>Paper experiment <span class="ph-tag">LIVE MARKET DATA · SIMULATED EXECUTION</span></h2>' +
       '<p class="ph-sub">The active paper session: one fictional account, one ledger. This is the default view; the funded system is inactive and shown separately below.</p></div>' +
       (st.signedOut ? signinHtml() : "") + session() + stamps() + figures() + agents();
