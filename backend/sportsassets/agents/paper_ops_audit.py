@@ -21,12 +21,15 @@ evidence at all -- before anyone asks whether it is profitable:
 
 Each audit writes findings (`paper_audrey_findings`, kind OPS_AUDIT_*), and
 assigns an evidence-backed RECOMMENDATION to DEREK or XAVIER
-(`paper_recommendations`) with the metric and its baseline. The owner's
-RESPONSE is an event naming what the running build does about it (a
-capability present in the code, stated as such -- never a claim that it
-worked); every later audit appends a MEASUREMENT of the same metric, and only
-those measurements move the status to IMPROVED or NOT_IMPROVED after a
-measurement window with enough samples.
+(`paper_recommendations`) with the metric and its baseline. With it goes an
+AUTOMATED_ACKNOWLEDGEMENT event, actor SYSTEM: a predefined template naming
+the capability the running build has for that kind of finding. It is NOT a
+response from Derek or Xavier, not an independent evaluation and not
+evidence of self-improvement, and it is labelled so wherever it is shown.
+RESPONSE is reserved for a genuine agent review, recorded separately; every
+later audit appends a MEASUREMENT of the same metric, and only those
+measurements move the status to IMPROVED or NOT_IMPROVED after a measurement
+window with enough samples.
 
 OPERATIONAL, NOT LEARNING. Every recommendation here is category
 OPERATIONAL. Nothing in this module claims that an agent became more
@@ -63,9 +66,12 @@ STALE = ("PROBABILITY_EVIDENCE_STALE", "THE_PAPER_BOOK_OBSERVATION_IS_NOT_"
          "CURRENT", "QUOTE_STALE_ON_ARRIVAL")
 FEES_CONSUME = "GROSS_EDGE_CLEARS_THRESHOLD_BUT_FEES_CONSUME_IT"
 
-# ── WHAT EACH OWNER'S RUNNING BUILD DOES ABOUT A RECOMMENDATION ──────────
-# Stated as capabilities in this code, never as results. Measurements
-# decide whether they helped.
+# ── AUTOMATED ACKNOWLEDGEMENTS (templates, actor SYSTEM) ─────────────────
+# What the running build can do about each kind of recommendation, stated
+# as capabilities in this code, never as results and never as the named
+# agent's own words. Measurements decide whether anything helped.
+ACK_LABEL = ("Automated acknowledgement (predefined template; not an agent "
+             "review, not an evaluation, not evidence of improvement)")
 RESPONSES = {
     "BOOK_READ_CUTS": ("DEREK", (
         "Accepted. This build shares one venue book read per valuation (the "
@@ -341,7 +347,8 @@ async def recommend(conn, ctx, *, kind: str, metric: str, value,
                     open_now: bool, text: str, evidence: dict,
                     finding_id: str, at: float,
                     lower_is_better: bool = True) -> dict:
-    """Open (once) a recommendation of `kind`, record its owner's response,
+    """Open (once) a recommendation of `kind` with its automated (template)
+    acknowledgement,
     and append a measurement of `metric` at most every MEASURE_EVERY_S.
     Status moves only on measurements, after MEASUREMENT_WINDOW_S and
     MIN_SAMPLES."""
@@ -369,9 +376,14 @@ async def recommend(conn, ctx, *, kind: str, metric: str, value,
                      body="Assigned to %s: %s" % (owner, text),
                      detail={"finding_id": finding_id, "baseline": baseline},
                      at=at)
-        await _event(conn, rid, actor=owner, kind="RESPONSE", body=response,
-                     detail={"build_capability": True,
-                             "is_a_result": False}, at=at)
+        await _event(conn, rid, actor="SYSTEM",
+                     kind="AUTOMATED_ACKNOWLEDGEMENT",
+                     body="%s. Addressed to %s: %s" % (ACK_LABEL, owner,
+                                                       response),
+                     detail={"addressed_to": owner, "template": kind,
+                             "automated": True, "agent_review": False,
+                             "build_capability": True, "is_a_result": False,
+                             "label": ACK_LABEL}, at=at)
         return dict(out, opened=True, baseline=baseline)
     last = await conn.fetchval(
         "SELECT extract(epoch FROM max(at)) FROM paper_recommendation_events "

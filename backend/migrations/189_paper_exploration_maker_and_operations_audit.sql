@@ -59,12 +59,13 @@ BEGIN
 END $$;
 
 INSERT INTO paper_control (control_key, enabled, why, updated_by)
-VALUES ('PINNACLE_COMPLETED_GAME_MAKER_PAPER', TRUE,
-        'kill switch, inserted enabled at migration 189 (owner '
-        'authorization 2026-10-01): the maker-entry paper policy also needs '
-        'PAPER_BENCHMARK=on and the paper session enabled. PAPER ONLY; '
-        'resting orders, conservative simulated fills, taker fee charged, '
-        'maker rebate not assumed',
+VALUES ('PINNACLE_COMPLETED_GAME_MAKER_PAPER', FALSE,
+        'kill switch, inserted OFF at migration 189 (owner direction '
+        '2026-10-01): the training launch runs exploration and the '
+        'completed-game investment policy only; an unfilled resting bid '
+        'occupies its fixture, so maker entry follows with explicit fixture '
+        'allocation. PAPER ONLY; resting orders, conservative simulated '
+        'fills, taker fee charged, maker rebate not assumed',
         'migration 189'),
        ('PINNACLE_EXPLORATION_PAPER', TRUE,
         'kill switch, inserted enabled at migration 189 (owner '
@@ -148,9 +149,17 @@ CREATE TABLE IF NOT EXISTS paper_recommendation_events (
     body                text        NOT NULL,
     detail              jsonb       NOT NULL DEFAULT '{}'::jsonb,
     CONSTRAINT paper_recommendation_events_actor_ck CHECK (actor IN (
-        'DEREK', 'XAVIER', 'AUDREY')),
+        'DEREK', 'XAVIER', 'AUDREY', 'SYSTEM')),
     CONSTRAINT paper_recommendation_events_kind_ck CHECK (kind IN (
-        'ASSIGNED', 'RESPONSE', 'MEASUREMENT', 'STATUS'))
+        'ASSIGNED', 'AUTOMATED_ACKNOWLEDGEMENT', 'RESPONSE', 'MEASUREMENT',
+        'STATUS')),
+    -- A PREDEFINED TEMPLATE IS NEVER AN AGENT'S RESPONSE. The automated
+    -- acknowledgement is written by SYSTEM and only by SYSTEM; a RESPONSE
+    -- is a genuine review by the agent the recommendation is assigned to.
+    CONSTRAINT paper_recommendation_events_ack_ck CHECK (
+        (kind = 'AUTOMATED_ACKNOWLEDGEMENT') = (actor = 'SYSTEM')),
+    CONSTRAINT paper_recommendation_events_response_ck CHECK (
+        kind <> 'RESPONSE' OR actor IN ('DEREK', 'XAVIER'))
 );
 CREATE INDEX IF NOT EXISTS paper_recommendation_events_rec_idx
     ON paper_recommendation_events (recommendation_id, event_id);

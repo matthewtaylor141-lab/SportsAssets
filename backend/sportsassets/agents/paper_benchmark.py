@@ -1505,7 +1505,7 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
              "simulator_version": cfg["simulator_version"],
              "strategy": STRATEGY}
     got = await L.submit_order(conn, order, caps=cfg["risk"],
-                               fee_fn=fee_fn, now=at)
+                               fee_fn=fee_fn, now=at, exclusive_fixture=True)
     rec["order"] = {k: got.get(k) for k in ("ok", "refusal", "duplicate")}
     if got.get("ok"):
         rec["order_id"] = got["order"]["order_id"]

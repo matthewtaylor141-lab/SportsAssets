@@ -359,6 +359,18 @@ async def agents(conn, now: float) -> dict:
                 "  FROM paper_recommendation_events WHERE "
                 "  recommendation_id=$1 ORDER BY event_id DESC LIMIT 4",
                 r["recommendation_id"])]
+            # A TEMPLATE IS NOT A RESPONSE: genuine agent reviews and the
+            # automated acknowledgement are counted apart.
+            cnt = await conn.fetchrow(
+                "SELECT count(*) FILTER (WHERE kind='RESPONSE') AS resp, "
+                "       count(*) FILTER (WHERE kind="
+                "         'AUTOMATED_ACKNOWLEDGEMENT') AS ack, "
+                "       count(*) FILTER (WHERE kind='MEASUREMENT') AS meas "
+                "  FROM paper_recommendation_events "
+                " WHERE recommendation_id=$1", r["recommendation_id"])
+            rec["agent_responses"] = int(cnt["resp"] or 0)
+            rec["automated_acknowledgements"] = int(cnt["ack"] or 0)
+            rec["measurements"] = int(cnt["meas"] or 0)
             recs.append(rec)
     except Exception:                                           # noqa: BLE001
         recs = None

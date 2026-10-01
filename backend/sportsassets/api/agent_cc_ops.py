@@ -495,7 +495,7 @@ _OPS_CORE_JS_RAW = r"""
       var b = isObj(r.baseline) ? r.baseline : {}, ev = Array.isArray(r.events) ? r.events : [];
       return '<div class="orow" data-rec="' + esc(r.recommendation_id) + '"><div class="oh"><span class="ostat ' + (r.status === 'IMPROVED' ? 'OPEN' : r.status === 'NOT_IMPROVED' ? 'LOST' : 'OPEN') + '">' + esc(r.status) + '</span><b>' + esc(String(r.kind || '').replace(/_/g, ' ').toLowerCase()) + '</b> · to ' + esc(r.owner_agent) + ' · ' + esc(r.category) + '</div>'
         + '<div class="om">' + esc(r.recommendation) + '</div><div class="om">metric ' + esc(r.metric) + ' · baseline ' + esc(b.value) + '</div>'
-        + (ev.length ? '<ul class="olist">' + ev.map(function (e) { return '<li><b>' + esc(e.actor) + '</b> ' + esc(String(e.kind).toLowerCase()) + ' · ' + esc(e.body) + '</li>'; }).join('') + '</ul>' : '') + '</div>';
+        + (ev.length ? '<ul class="olist">' + ev.map(function (e) { return '<li><b>' + esc(e.actor === 'SYSTEM' ? 'Automated template' : e.actor) + '</b> ' + esc(String(e.kind).replace(/_/g, ' ').toLowerCase()) + ' · ' + esc(e.body) + '</li>'; }).join('') + '</ul>' : '') + '</div>';
     }).join('')};
   }
   function controlNote(j) {

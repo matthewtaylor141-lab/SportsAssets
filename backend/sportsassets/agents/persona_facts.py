@@ -925,9 +925,14 @@ async def _experiment(conn, f: "Facts", now) -> None:
             f.add("paper_experiment_read", r["recommendation_id"],
                   "recommendation", r["status"],
                   "Audrey's %s recommendation to %s (%s): %s -- status %s, "
-                  "metric %s" % (r["category"], r["owner_agent"], r["kind"],
-                                 r["recommendation"], r["status"],
-                                 r["metric"]))
+                  "metric %s; %s genuine agent responses on record (the "
+                  "automated acknowledgement is a predefined template, not "
+                  "%s's own review or evidence of improvement)" % (
+                      r["category"], r["owner_agent"], r["kind"],
+                      r["recommendation"], r["status"], r["metric"],
+                      sum(1 for e in (r.get("events") or [])
+                          if e.get("kind") == "RESPONSE"),
+                      r["owner_agent"].title()))
         f.check("paper_experiment_read", "MATCHED", 1)
     except Exception as exc:                                    # noqa: BLE001
         f.check("paper_experiment_read", "READ_FAILED", 0,

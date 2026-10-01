@@ -346,9 +346,58 @@ async def _open_groups(conn, account_id: str) -> int:
     return len(held | {r["group_id"] for r in pend})
 
 
+R_FIXTURE_OWNED = "ANOTHER_STRATEGY_HOLDS_EXPOSURE_TO_THIS_FIXTURE"
+R_SAME_STRATEGY_LIVE = "THIS_STRATEGY_ALREADY_HAS_A_LIVE_ENTRY_ON_THIS_FIXTURE"
+
+
+async def fixture_owner_refusal(conn, o: dict, *,
+                                same_strategy_live: bool = False):
+    """FIXTURE OWNERSHIP, read UNDER THE ACCOUNT LOCK (submit_order calls it
+    after taking the lock, so two contenders for one fixture are serialized
+    and the second sees the first's order).
+
+    Refuses an ENTRY when ANOTHER strategy on this account holds the same
+    contract or fixture -- an entry order still working, or a filled entry
+    whose position is still open (the rule of the pre-lock
+    `cross_strategy_exposure` read, which stays as the early, cheap refusal).
+    With `same_strategy_live`, also refuses when THIS strategy already has a
+    live (working) entry on it. Returns a refusal dict or None."""
+    acct, strat = o["account_id"], o.get("strategy")
+    slug, fixture = o.get("us_market_slug"), o.get("fixture")
+    rows = await conn.fetch(
+        "SELECT DISTINCT strategy, group_id, us_market_slug, state "
+        "  FROM paper_orders WHERE account_id=$1 AND role='ENTRY' "
+        "   AND (us_market_slug = $2 OR ($3::text IS NOT NULL "
+        "        AND fixture = $3)) "
+        "   AND (state = ANY($4::text[]) OR filled_qty > 0)",
+        acct, slug, fixture, list(OPEN_STATES))
+    if not rows:
+        return None
+    others = [r for r in rows if r["strategy"] != strat]
+    open_groups = None
+    if others and any(r["state"] not in OPEN_STATES for r in others):
+        open_groups = {p["group_id"] for p in await positions(conn, acct)
+                       if p["open_qty"] > 1e-9}
+    by = [{"strategy": r["strategy"], "group_id": r["group_id"],
+           "us_market_slug": r["us_market_slug"], "state": r["state"]}
+          for r in others if r["state"] in OPEN_STATES
+          or r["group_id"] in (open_groups or set())]
+    if by:
+        return {"refusal": R_FIXTURE_OWNED, "under_lock": True, "by": by}
+    if same_strategy_live:
+        mine = [r for r in rows if r["strategy"] == strat
+                and r["state"] in OPEN_STATES]
+        if mine:
+            return {"refusal": R_SAME_STRATEGY_LIVE, "under_lock": True,
+                    "by": [{"group_id": r["group_id"], "state": r["state"]}
+                           for r in mine]}
+    return None
+
+
 async def submit_order(conn, order: dict, *, caps: dict | None = None,
                        fee_fn=None, now: float | None = None,
-                       locked_check=None) -> dict:
+                       locked_check=None, exclusive_fixture: bool = False,
+                       one_live_entry_per_fixture: bool = False) -> dict:
     """RECORD A PAPER ORDER AND RESERVE ITS CASH, ATOMICALLY.
 
     One transaction: the account lock, the idempotency check, the caps, the
@@ -361,7 +410,12 @@ async def submit_order(conn, order: dict, *, caps: dict | None = None,
     runs UNDER THE ACCOUNT LOCK after the caps and returns a refusal dict to
     refuse the order, or None. A strategy's own aggregate limits (e.g. the
     exploration strategy's total exposure and loss stop) are checked there,
-    so two concurrent decisions can never both pass a limit only one fits."""
+    so two concurrent decisions can never both pass a limit only one fits.
+
+    `exclusive_fixture` (ENTRY BUY orders): FIXTURE OWNERSHIP checked under
+    the same lock (`fixture_owner_refusal`) -- no two strategies commit the
+    same fixture, however their decisions interleave.
+    `one_live_entry_per_fixture` adds this strategy's own live entry."""
     o = dict(order)
     at = float(now if now is not None else time.time())
     caps = dict(caps or {})
@@ -399,6 +453,12 @@ async def submit_order(conn, order: dict, *, caps: dict | None = None,
             if chk:
                 return dict(chk, ok=False, reservation_usd=f(reserve),
                             available_usd=f(cs["available"]))
+            if exclusive_fixture and o.get("role") == "ENTRY":
+                chk = await fixture_owner_refusal(
+                    conn, o, same_strategy_live=one_live_entry_per_fixture)
+                if chk:
+                    return dict(chk, ok=False, reservation_usd=f(reserve),
+                                available_usd=f(cs["available"]))
             if locked_check is not None:
                 chk = await locked_check(conn, o, reserve)
                 if chk:

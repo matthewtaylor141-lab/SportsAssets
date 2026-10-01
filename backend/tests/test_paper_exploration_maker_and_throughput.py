@@ -71,8 +71,9 @@ def env(monkeypatch):
     PB._CONTEXT_CACHE.clear()
     PD._CONTEXT_CACHE.clear()
     yield
-    # back to the migrated selection: CG, maker and exploration on, strict off
-    _only(CG, MAKER, EXPLORE)
+    # back to the migrated launch selection: CG and exploration on, maker
+    # and strict off
+    _only(CG, EXPLORE)
     PB._CONTEXT_CACHE.clear()
 
 
@@ -673,9 +674,26 @@ async def test_audrey_assigns_operational_recommendations_with_responses(
         ev = await conn.fetch("SELECT actor, kind, body FROM "
                               " paper_recommendation_events WHERE "
                               " recommendation_id=$1 ORDER BY event_id", rid)
+        # THE TEMPLATE IS SYSTEM'S, LABELLED; NO RESPONSE IS ATTRIBUTED TO
+        # DEREK WITHOUT HIS OWN REVIEW
         assert [(e["actor"], e["kind"]) for e in ev] == [
-            ("AUDREY", "ASSIGNED"), ("DEREK", "RESPONSE")]
-        assert "measurements below decide" in ev[1]["body"]
+            ("AUDREY", "ASSIGNED"), ("SYSTEM", "AUTOMATED_ACKNOWLEDGEMENT")]
+        assert ev[1]["body"].startswith(POA.ACK_LABEL)
+        assert "not an agent review" in ev[1]["body"]
+        assert "Addressed to DEREK" in ev[1]["body"]
+        for actor, kind in (("SYSTEM", "RESPONSE"),
+                            ("DEREK", "AUTOMATED_ACKNOWLEDGEMENT"),
+                            ("AUDREY", "RESPONSE")):
+            with pytest.raises(Exception):
+                await conn.execute(
+                    "INSERT INTO paper_recommendation_events "
+                    " (recommendation_id, actor, kind, body) VALUES "
+                    " ($1, $2, $3, 'x')", rid, actor, kind)
+        x = await EXP.agents(conn, now + 1)
+        r0 = [r for r in x["audrey"]["recommendations"]
+              if r["recommendation_id"] == rid][0]
+        assert r0["agent_responses"] == 0
+        assert r0["automated_acknowledgements"] == 1
         f = await conn.fetchrow("SELECT * FROM paper_audrey_findings WHERE "
                                 " finding_id=$1", rec["finding_id"])
         assert f["kind"] == "OPS_AUDIT_BOOK_READ_CUTS"

@@ -445,13 +445,13 @@ def _mirror_harness_clock_is_its_own_now(request, monkeypatch):
 def new_strategies_off():
     """THE MAKER-ENTRY AND EXPLORATION STRATEGIES (migration 189) OFF for a
     proof of an older policy, so its counts are that policy's alone; their
-    rows go back to the migrated state (enabled) afterwards. The new
-    strategies' own proofs switch them on explicitly."""
+    rows go back to the migrated launch state afterwards (maker OFF,
+    exploration ON). The new strategies' own proofs switch them explicitly."""
     from tests import paper_live_fixture as PL
-    keys = ("PINNACLE_COMPLETED_GAME_MAKER_PAPER",
-            "PINNACLE_EXPLORATION_PAPER")
-    for k in keys:
+    migrated = {"PINNACLE_COMPLETED_GAME_MAKER_PAPER": False,
+                "PINNACLE_EXPLORATION_PAPER": True}
+    for k in migrated:
         PL.set_policy_control(k, False)
     yield
-    for k in keys:
-        PL.set_policy_control(k, True)
+    for k, on in migrated.items():
+        PL.set_policy_control(k, on)

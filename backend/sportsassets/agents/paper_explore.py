@@ -510,6 +510,7 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
              "strategy": STRATEGY}
     got = await L.submit_order(
         conn, order, caps=cfg["risk"], fee_fn=fee_fn, now=at,
+        exclusive_fixture=True,
         locked_check=locked_check_for(cand.get("fixture"),
                                       cand["us_market_slug"]))
     rec["order"] = {k: got.get(k) for k in ("ok", "refusal", "duplicate")}

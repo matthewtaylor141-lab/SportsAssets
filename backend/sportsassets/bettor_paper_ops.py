@@ -1219,7 +1219,8 @@ async def audrey_operations(conn, *, account_id: str | None = None,
 
     async def ops_audit():
         # AUDREY'S OPERATIONAL AUDIT (migration 189): her recommendations to
-        # Derek and Xavier, each owner's response and every measurement
+        # Derek and Xavier, the automated (template) acknowledgement, any
+        # genuine agent response and every measurement
         from . import bettor_paper_experiment as EXP
         ag = await EXP.agents(conn, at)
         recs = ag["audrey"].get("recommendations")

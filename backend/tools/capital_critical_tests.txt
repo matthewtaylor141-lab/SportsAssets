@@ -428,3 +428,8 @@ tests/test_agent_talk_panel.py
 # book read and bounded retry with every attempt recorded, Audrey's
 # operational audit and the homepage experiment read
 tests/test_paper_exploration_maker_and_throughput.py
+# The training launch configuration (maker off, exploration on) through the
+# real collection cycle to fill, debit, handoff, Xavier and Audrey with no
+# duplication across a repeat and restart; fixture ownership under the
+# account lock against simultaneous contenders
+tests/test_paper_training_launch.py
