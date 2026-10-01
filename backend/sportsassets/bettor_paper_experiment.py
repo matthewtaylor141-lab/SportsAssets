@@ -210,21 +210,41 @@ async def refusals(conn, now: float) -> dict:
     return out
 
 
-async def closest(conn, now: float) -> list:
+async def closest(conn, now: float, acct: str = L.ACCOUNT_ID) -> list:
+    """The closest investment-policy evaluations of the last 24 h: the
+    LATEST decision per market and recorded policy version (not one row per
+    cycle), decisions under the SERVING version first, then historical
+    versions, each ranked by gross edge. Every row carries its recorded
+    policy_version, whether that is the serving version, and its age -- a
+    historical refusal describes the rules in force when it was made."""
+    from .agents import paper_benchmark as PB
+    serving = PB.CG_VERSION
     rows = await conn.fetch(
-        "SELECT decision_id, strategy, extract(epoch FROM decided_at) AS at,"
+        "SELECT * FROM (SELECT DISTINCT ON (us_market_slug, policy_version) "
+        "       decision_id, strategy, policy_version, "
+        "       extract(epoch FROM decided_at) AS at, "
         "       us_market_slug, fixture, p_pinnacle, refusal, verdict, "
         "       (economics->>'best_level_edge_pp')::float8 AS gross_pp, "
         "       (economics->'fee_stop'->>'fee_per_contract_usd')::float8 AS "
         "         fee_pc, (economics->'fee_stop'->>'net_edge_pp')::float8 AS "
         "         net_pp, (economics->'levels'->0->>'price')::float8 AS price,"
+        "       (economics->>'threshold_edge_pp')::float8 AS threshold_pp, "
         "       label->>'participant' AS participant "
-        "  FROM paper_decisions WHERE strategy=$1 "
+        "  FROM paper_decisions WHERE strategy=$1 AND account_id=$3 "
         "   AND decided_at > now() - interval '24 hours' "
         "   AND economics->>'best_level_edge_pp' IS NOT NULL "
-        " ORDER BY (economics->>'best_level_edge_pp')::float8 DESC LIMIT 8",
-        CG)
-    return [_row(r) for r in rows]
+        " ORDER BY us_market_slug, policy_version, decided_at DESC) x "
+        " ORDER BY (policy_version = $2) DESC, gross_pp DESC LIMIT 8",
+        CG, serving, acct)
+    out = []
+    for r in rows:
+        d = _row(r)
+        d["serving_version"] = serving
+        d["historical"] = d.get("policy_version") != serving
+        d["age_s"] = (None if d.get("at") is None
+                      else round(max(0.0, float(now) - float(d["at"])), 1))
+        out.append(d)
+    return out
 
 
 async def standing_orders(conn, now: float,
@@ -426,7 +446,7 @@ async def experiment(conn, *, now: float | None = None,
         is_empty=lambda d: not d.get("valuations"))
     out["refusals"] = await _sec(refusals(conn, at),
                                  empty_why="no decisions in 24 h")
-    out["closest"] = await _sec(closest(conn, at),
+    out["closest"] = await _sec(closest(conn, at, account_id),
                                 empty_why="no priced decisions in 24 h")
     out["orders"] = await _sec(
         standing_orders(conn, at, account_id), empty_why="no open orders",

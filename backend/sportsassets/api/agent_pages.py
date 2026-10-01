@@ -1929,7 +1929,7 @@ TALK_JS = r"""
     if (busy || !text) return;
     busy = true; send.disabled = true; stopAudio(); addQ(text); var began=Date.now(); setState(NAME + ' is reading the records…'); avatar('chatPending'); waitTimer=setInterval(function(){setState(NAME+' is reading the records · '+Math.floor((Date.now()-began)/1000)+'s. The answer is checked before it is shown.');},1000);
     try {
-      var style=document.getElementById('office-answer-style'); var outgoing=style&&style.value==='brief'?'Briefly, answer conversationally in up to three sentences; offer a detailed follow-up if needed. '+text:text;
+      var style=document.getElementById('office-answer-style'); var outgoing=style&&style.value==='brief'?'Briefly, answer conversationally in up to three sentences; offer a detailed follow-up if needed. '+text:style&&style.value==='full'?'Full analysis -- walk me through the records, figures and reasoning: '+text:text;
       var body = {message: outgoing, request_id: 'pg-' + agent + '-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8)};
       if (cid) body.conversation_id = cid;
       var r = await fetch(BASE + '/persona/chat', {method: 'POST', credentials: 'same-origin', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});

@@ -458,6 +458,39 @@ def decision_view(r) -> dict:
         else d.get("limit_price")
     if d.get("fees_usd") is None:
         d["fees_usd"] = acq.get("fees_usd")
+    # THE SAME RECORD'S OWN FIGURES WHEN THE TOP-LEVEL KEY IS EMPTY: a
+    # refusal stores its gross edge in the shortfall (or the economics' best
+    # level), an exploration decision in its estimate. Display only -- each
+    # value is labelled with where it came from; nothing is recomputed.
+    sh = pd.get("shortfall") if isinstance(pd.get("shortfall"), dict) else {}
+    est = pd.get("estimate") if isinstance(pd.get("estimate"), dict) else {}
+    src = {}
+    if d.get("edge_pp") is None:
+        for key, val in (("estimate.gross_edge_pp_at_best",
+                          est.get("gross_edge_pp_at_best")),
+                         ("shortfall.edge_pp", sh.get("edge_pp")),
+                         ("economics.best_level_edge_pp",
+                          (eco or {}).get("best_level_edge_pp")
+                          if isinstance(eco, dict) else None)):
+            if val is not None:
+                d["edge_pp"], src["edge_pp"] = val, key
+                break
+    if d.get("fees_usd") is None and est.get("fees_usd") is not None:
+        d["fees_usd"], src["fees_usd"] = est["fees_usd"], "estimate.fees_usd"
+    if d.get("net_ev_usd") is None:
+        for key, val in (("estimate.expected_net_profit_usd",
+                          est.get("expected_net_profit_usd")),
+                         ("shortfall.ev_after_fees_usd",
+                          sh.get("ev_after_fees_usd"))):
+            if val is not None:
+                d["net_ev_usd"], src["net_ev_usd"] = val, key
+                break
+    if d.get("purchase_price") is None and isinstance(eco, dict):
+        lv = eco.get("levels") or []
+        if lv and isinstance(lv[0], dict) and lv[0].get("price") is not None:
+            d["purchase_price"] = lv[0]["price"]
+            src["purchase_price"] = "economics.levels[0].price (best level)"
+    d["figure_sources"] = src
     va = {k: d.pop(k) for k in ("v_contract_selection", "v_event_key",
                                 "v_sport_family", "v_market", "v_period")
           if k in d}

@@ -433,3 +433,7 @@ tests/test_paper_exploration_maker_and_throughput.py
 # duplication across a repeat and restart; fixture ownership under the
 # account lock against simultaneous contenders
 tests/test_paper_training_launch.py
+# The management office on the real operations records: a refusal's own
+# recorded figures (never recomputed), version-aware closest opportunities
+# scoped to the account, the position-linked Ask, and speech supersession
+tests/test_agent_office_integration.py
