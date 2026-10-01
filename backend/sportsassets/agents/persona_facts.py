@@ -785,8 +785,12 @@ async def _status(conn, f: Facts) -> None:
     f.check("agent_status", "MATCHED" if rows else "NO_MATCH", len(rows))
     for r in rows:
         d = _jsonable(dict(r))
+        # THE FUNDED SYSTEM'S status row, labelled as such: "idle, funded
+        # lane not configured" describes the inactive funded system, not the
+        # paper session, whose activity is in the paper facts.
         f.add("agent_status", d["agent_id"], "state", d.get("state"),
-              "%s is %s%s (last heartbeat %s)" % (
+              "FUNDED SYSTEM (inactive) status: %s is %s%s (last heartbeat "
+              "%s); the paper session's work is reported separately" % (
                   d["agent_id"], d.get("state"),
                   (" -- %s" % d["activity"]) if d.get("activity") else "",
                   d.get("last_heartbeat_at") or "never"))
