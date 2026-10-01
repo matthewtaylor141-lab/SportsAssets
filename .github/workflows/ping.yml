@@ -20,7 +20,7 @@ on:
         required: false
         default: ""
       verify:
-        description: "site-voice = after a release: set each agent's voice through the audited persona route, speak once per agent, and render the production homepage and agent pages in mobile WebKit and phone-sized Chromium (authenticated and signed out)"
+        description: "site-voice = after a release: set each agent's voice through the audited persona route, speak once per agent, and render the production homepage and agent pages in mobile WebKit and phone-sized Chromium (authenticated and signed out); talk = drive the Talk-to-agent panels on /derek /xavier /audrey (typed question, follow-up, refresh-resume, spoken question via a fake microphone, voice reply, permission-denied and a simulated provider error) in desktop + phone Chromium and WebKit iPhone 13 (writes conversation records only)"
         required: false
         default: ""
       terms_slugs:
@@ -273,3 +273,50 @@ jobs:
           name: site-verify-screenshots
           path: tools/site_verify/site_verify_out
           retention-days: 7
+
+  talk:
+    # THE TALK-TO-AGENT PANELS, DRIVEN THROUGH THE REAL SIGNED-IN PAGES.
+    # OFF UNLESS verify == talk. Writes conversation records only (the persona
+    # chat's own tables); places no order, changes no policy. Screenshots and
+    # talk_report.json go to claude/site-verify-evidence.
+    if: ${{ inputs.verify == 'talk' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Drive the panels (desktop + phone Chromium with a fake microphone, WebKit iPhone 13)
+        timeout-minutes: 32
+        shell: bash
+        env:
+          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+          OUT: site_verify_out
+        run: |
+          set +e
+          echo "::add-mask::$ADMIN_TOKEN"
+          sudo apt-get update -qq >/dev/null 2>&1; sudo apt-get install -y -qq espeak-ng >/dev/null 2>&1
+          espeak-ng -s 150 -w /tmp/question.wav "What is the paper account cash right now, and is anything reserved?" && ls -la /tmp/question.wav
+          export QUESTION_WAV=/tmp/question.wav
+          cd tools/site_verify
+          npm init -y >/dev/null 2>&1
+          npm install playwright@1.48.2 >/dev/null 2>&1
+          npx playwright install --with-deps webkit chromium >/dev/null 2>&1
+          node talk.mjs
+      - name: Commit the evidence
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          RUN="${GITHUB_RUN_ID}"
+          D="evidence/talk/$(date -u +%Y%m%dT%H%M%SZ)_run$RUN"
+          git config user.name "site-verify"
+          git config user.email "site-verify@users.noreply.github.com"
+          git fetch -q origin claude/site-verify-evidence && git checkout -q -B ev origin/claude/site-verify-evidence || git checkout -q --orphan ev
+          git rm -rq --cached . >/dev/null 2>&1
+          mkdir -p "$D" && cp tools/site_verify/site_verify_out/* "$D"/ 2>/dev/null
+          git add "$D" && git commit -q -m "talk panel evidence, run $RUN" && git push -q origin ev:claude/site-verify-evidence && echo "evidence pushed: $D"
+
