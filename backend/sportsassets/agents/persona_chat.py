@@ -119,6 +119,9 @@ FIXED_RULES = [
     "Every count and total you may need is already a fact (for example the "
     "number of paper decisions today and their reasons): quote it; do not "
     "count rows, add figures up or work out elapsed times yourself.",
+    "Say what the records show (\"the record shows seven refusals today\"); "
+    "never say you created or recorded anything -- an answer that claims an "
+    "action is discarded.",
 ]
 
 

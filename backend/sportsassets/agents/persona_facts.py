@@ -452,8 +452,11 @@ async def _paper_live(conn, f: Facts, *, now: float | None) -> dict:
         f.check("paper_sessions", "MATCHED", 1)
         f.add("paper_sessions", se["session_id"], "paper_session",
               se["session_id"], "active paper session %s, status %s, "
-              "started %s" % (se["session_id"], se.get("status"),
-                              se.get("started_at")))
+              "started %s%s" % (
+                  se["session_id"], se.get("status"), se.get("started_at"),
+                  "" if se.get("enabled") else
+                  "; scheduled paper passes are NOT enabled (%s)"
+                  % se.get("refusal")))
         if se.get("health_recorded"):
             f.add("paper_sessions", se["session_id"], "paper_session_health",
                   se.get("passes"), "paper session health: last heartbeat "
