@@ -1,0 +1,50 @@
+Skip to the records
+READ-ONLY
+reading…
+Trace
+Refresh
+Reading the paper session…
+PAPER ACCOUNT · READING…
+LAST SUCCESSFUL SERVER READ
+no successful read yet
+A recent read is not agent health.
+LAST AGENT HEARTBEAT (PAPER RUNTIME)UNAVAILABLE
+UNAVAILABLE
+not read yet
+LAST LEDGER TRANSACTIONUNAVAILABLE
+UNAVAILABLE
+not read yet
+Live updates: CONNECTING · the stream is not open: every read is repeated every 15 s
+UNAVAILABLE: the agent's status could not be read or its heartbeat is stale. The character is shown in its offline pose; nothing here is animated as if the agent were running.
+MANAGEMENT OFFICE · AUDREY
+The account. The evidence. The next improvement.
+
+Reconciled performance and recommendations with accountable owners.
+
+Talk to Audrey ↗
+Reading the recorded workspace…
+● AI AGENT
+Audrey
+AUDIT & INTELLIGENCE
+
+the agent, an AI agent, shown as a licensed 3D character (Character model: Microsoft Rocketbox Business_Female_04 (MIT, © 2020 Microsoft)). The pose follows the agent_status record; the mouth moves only with real speech audio.
+
+Pause animation
+READING STATUS
+◉
+Talk to Audrey
+🔊 Voice on
+Stop
+New conversation
+Conversation, memory & policy boundaries
+Answer style
+Conversational
+Full analysis
+🎤 Speak
+Send
+
+Ask Audrey anything about audits, reconciliation, agent performance and proposals. Try: Does the ledger reconcile? What have you learned so far?
+
+All records, strategy detail and technical evidence
+
+Presentation of recorded state. This page sends no order and holds no credential; it reads /api/command/agents/audrey with the COMMAND session. The 3D characters are licensed Microsoft Rocketbox models (MIT licence, credited below; shipped with their licence file); a device that cannot draw them shows a 2D portrait card. The pose follows the paper runtime's own heartbeat (paper_session_health) and never stands in for data. UNKNOWN is not zero; EMPTY is not success. The 3D character on this page is a licensed model, not an original illustration. Character model: Microsoft Rocketbox Business_Female_04 (MIT, © 2020 Microsoft). Licence: MIT, shipped with the model as ROCKETBOX_LICENSE.md.
