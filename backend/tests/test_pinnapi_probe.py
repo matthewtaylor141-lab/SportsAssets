@@ -114,6 +114,43 @@ async def test_docs_never_send_the_key(monkeypatch):
     assert (await PP.docs("(")) ["reason"] == "BAD_PATTERN"
 
 
+async def test_account_returns_only_entitlement_fields(monkeypatch):
+    monkeypatch.setenv("pinnapi_key", SECRET)
+    seen = []
+
+    def handler(req):
+        seen.append(req)
+        return httpx.Response(200, json={
+            "email": "owner@example.com", "api_key": SECRET,
+            "sse_token": "tok-123", "user_id": 77,
+            "plan_id": "scale_30d", "plan_until": 1790000000,
+            "ws_addon_until": 0,
+            "features": {"sse": True, "rest": True, "ws": False},
+            "limits": {"per_second": 30},
+            "referral": {"code": "aBc12XyZ", "rate_pct": 30,
+                         "referrals": [{"email": "j***@gmail.com"}]}})
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    out = await PP.account(client=client)
+    await client.aclose()
+    blob = json.dumps(out)
+    for leaked in (SECRET, "owner@example.com", "tok-123", "aBc12XyZ",
+                   "gmail"):
+        assert leaked not in blob, leaked
+    kept = out["entitlement"]["kept"]
+    assert kept["plan_id"] == "scale_30d" and kept["ws_addon_until"] == 0
+    assert kept["features"]["kept"] == {"sse": True, "rest": True,
+                                        "ws": False}
+    assert kept["limits"]["kept"] == {"per_second": 30}
+    assert {"email", "api_key", "sse_token", "referral", "user_id"} <= set(
+        out["entitlement"]["withheld_keys"])
+    assert [r.url.path for r in seen] == ["/panel/api/me"]
+    assert seen[0].headers.get(PP.AUTH_HEADER) == SECRET
+    # the generic read refuses the account record and other panel paths
+    r = await PP.rest(["/panel/api/me", "/panel/api/signup"])
+    assert {x["reason"] for x in r["reads"]} == {
+        "ACCOUNT_PATHS_USE_THE_ACCOUNT_ACTION"}
+
+
 @pytest.mark.parametrize("bad", ["https://pinnapi.com/x", "//evil.example",
                                  "health", "/a b", "/x?y=<script>"])
 def test_the_path_pattern_refuses_non_relative_paths(bad):

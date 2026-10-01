@@ -2338,10 +2338,11 @@ async def admin_pinnapi_probe(response: Response,
 
     `action`: "keys" (which PinnAPI-looking env var NAMES this service has),
     "docs" (the provider's public documentation lines matching `pattern`,
-    fetched WITHOUT the key) or "rest" (up to 6 authenticated GETs to the
-    relative provider `paths`, >= 1 s apart, returning status, timing and a
-    sanitized structure). Never returns the key, opens no stream, writes
-    nothing, places nothing."""
+    fetched WITHOUT the key), "account" (the plan, features and limits from
+    the account record, allowlisted -- no email, referral, key or token) or
+    "rest" (up to 6 authenticated GETs to the relative provider `paths`,
+    >= 1 s apart, returning status, timing and a sanitized structure).
+    Never returns the key, opens no stream, writes nothing, places nothing."""
     from .. import pinnapi_probe as PP
     response.headers["Cache-Control"] = "no-store"
     b = dict(body or {})
@@ -2350,9 +2351,12 @@ async def admin_pinnapi_probe(response: Response,
         return PP.keys_present()
     if action == "docs":
         return await PP.docs(b.get("pattern"))
+    if action == "account":
+        return await PP.account()
     if action == "rest":
         return await PP.rest(list(b.get("paths") or []))
-    raise HTTPException(status_code=400, detail="action: keys | docs | rest")
+    raise HTTPException(status_code=400,
+                        detail="action: keys | docs | account | rest")
 
 
 @app.post("/api/admin/venue-settlement-probe",

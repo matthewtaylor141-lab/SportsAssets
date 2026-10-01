@@ -11,6 +11,10 @@ What it does, nothing more:
   docs   GET the provider's PUBLIC documentation (`/llms-full.txt`) WITHOUT
          the key, and return the lines matching a bounded pattern, so the
          integration is written from the current documentation.
+  account  ONE authenticated GET of the account record (`/panel/api/me`),
+         reduced to an allowlist of entitlement fields (plan, features,
+         limits, expiry such as `ws_addon_until`); email, referral, key and
+         token fields are never returned -- only the withheld key NAMES.
   rest   up to MAX_CALLS authenticated GETs to relative provider paths, at
          least GAP_S apart; returns each status, timing and a SANITIZED
          structure (counts, keys, short values; any field whose name looks
@@ -40,8 +44,16 @@ TIMEOUT_S = 15.0
 MAX_BYTES = 4 * 1024 * 1024
 MAX_DOC_LINES = 400
 PATH_RX = re.compile(r"^/(?!/)[A-Za-z0-9_./-]{0,200}(\?[A-Za-z0-9_=&.,:%-]{0,300})?$")
-SECRET_RX = re.compile(r"(key|token|secret|password|auth|signature|cookie)",
-                       re.I)
+SECRET_RX = re.compile(r"(key|token|secret|password|auth|signature|cookie"
+                       r"|email|referr)", re.I)
+# The account record (`/panel/api/me`) is read ONLY through `account()`,
+# which keeps an allowlist of entitlement fields; the generic `rest` refuses
+# every other /panel/ path. Public plan list and the add-on quote are reads.
+ACCOUNT_PATH = "/panel/api/me"
+PANEL_REST_ALLOWED = ("/panel/api/plans", "/panel/api/addon/ws/quote")
+ENTITLEMENT_RX = re.compile(r"(plan|tier|feature|limit|rate|quota|until|"
+                            r"expir|status|sse|ws|rest|period|cap|renew|"
+                            r"active|addon|add_on|interval|per_)", re.I)
 
 
 def keys_present() -> dict:
@@ -137,6 +149,75 @@ async def docs(pattern: str | None = None, *, client=None) -> dict:
             await client.aclose()
 
 
+def entitlement_view(v: Any, depth: int = 0) -> Any:
+    """ONLY the entitlement fields of the account record: a key is kept when
+    its name looks like plan / feature / limit / expiry / status (and not
+    secret or personal); scalars are kept, nested records filtered the same
+    way, lists summarized by length. Every other key is listed by NAME only
+    so the report says what was withheld."""
+    if not isinstance(v, dict) or depth > 4:
+        return None
+    kept, withheld = {}, []
+    for k, x in v.items():
+        name = str(k)
+        if SECRET_RX.search(name) or not ENTITLEMENT_RX.search(name):
+            if isinstance(x, dict) and not SECRET_RX.search(name):
+                sub = entitlement_view(x, depth + 1)
+                if sub and sub.get("kept"):
+                    kept[name] = sub
+                    continue
+            withheld.append(name)
+            continue
+        if isinstance(x, dict):
+            kept[name] = entitlement_view(x, depth + 1)
+        elif isinstance(x, list):
+            kept[name] = {"__len__": len(x)}
+        elif isinstance(x, str):
+            kept[name] = x[:80]
+        else:
+            kept[name] = x
+    return {"kept": kept, "withheld_keys": sorted(withheld)}
+
+
+async def account(*, client=None) -> dict:
+    """The account's PLAN, FEATURES and LIMITS from `/panel/api/me`, read
+    privately: one authenticated GET, the entitlement allowlist above, no
+    email, referral, key or token, nothing written."""
+    import httpx
+    key = os.environ.get(KEY_ENV)
+    out: dict = {"probe": "PINNAPI_ACCOUNT_ENTITLEMENT_V1",
+                 "key_present": bool(key), "path": ACCOUNT_PATH}
+    if not key:
+        out.update(ok=False, reason="KEY_NOT_PRESENT_IN_THIS_SERVICE")
+        return out
+    own = client is None
+    client = client or httpx.AsyncClient(timeout=TIMEOUT_S,
+                                         follow_redirects=False)
+    try:
+        t0 = time.monotonic()
+        r = await client.get(BASE + ACCOUNT_PATH, headers={
+            AUTH_HEADER: key, "Accept": "application/json"})
+        out.update(http=r.status_code,
+                   elapsed_ms=round((time.monotonic() - t0) * 1000))
+        if r.status_code != 200:
+            out["ok"] = False
+            return out
+        try:
+            payload = r.json()
+        except Exception:                                       # noqa: BLE001
+            out.update(ok=False, reason="BODY_NOT_JSON")
+            return out
+        out["entitlement"] = entitlement_view(payload)
+        out["ok"] = True
+        return out
+    except Exception as exc:                                    # noqa: BLE001
+        out.update(ok=False, reason=type(exc).__name__)
+        return out
+    finally:
+        if own:
+            await client.aclose()
+
+
 async def rest(paths: list, *, client=None, sleep=None) -> dict:
     import asyncio
     import httpx
@@ -154,6 +235,12 @@ async def rest(paths: list, *, client=None, sleep=None) -> dict:
         if not PATH_RX.match(p) or ".." in p:
             report["reads"].append({"path": p[:80], "ok": False,
                                     "reason": "PATH_REFUSED"})
+            continue
+        if p.startswith("/panel/") and p.split("?")[0] not in \
+                PANEL_REST_ALLOWED:
+            report["reads"].append({"path": p[:80], "ok": False,
+                                    "reason": "ACCOUNT_PATHS_USE_THE_ACCOUNT"
+                                              "_ACTION"})
             continue
         clean.append(p)
     own = client is None
