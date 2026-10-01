@@ -79,6 +79,15 @@ DISCLOSE_RECORDS = ("Records-only mode — answered directly from the cited "
 DISCLOSE_FALLBACK = ("AI answer unavailable ({why}) — answered directly from "
                      "the cited records")
 DISPLAY_NO_KEY = "AI unavailable: server key not configured"
+#: the opening of a records-only answer that REPLACES a discarded or failed
+#: model reply: the reader sees, in the answer itself, that what follows is
+#: quoted from the current records and not the model's text
+FALLBACK_LABEL = ("Records-only answer — the AI answer was not used ({why}); "
+                  "everything below is quoted from the current records.")
+
+
+def labelled_fallback(draft: str, why: str) -> str:
+    return "%s %s" % (FALLBACK_LABEL.format(why=why), draft)
 
 DEPTH_QUICK, DEPTH_NORMAL, DEPTH_MATH = "QUICK", "NORMAL", "MATH"
 
@@ -412,11 +421,20 @@ def _demo(agent: str, intent: str, depth: str, c: _Cite) -> list:
 #: the paper experiment as it stands (persona_facts._paper_live); these
 #: groups take the "PAPER" slot, or lead when the question is about paper
 PAPER_LIVE = ["paper_ledger", "paper_sessions", "paper_decisions",
-              "paper_xavier_reviews"]
+              "paper_orders", "paper_xavier_reviews"]
 PAPER_LEADS = {"paper_ledger": "The paper account now",
                "paper_sessions": "The paper session",
                "paper_decisions": "Paper decisions",
+               "paper_orders": "Paper positions and orders",
                "paper_xavier_reviews": "Xavier's paper reviews"}
+PAPER_FIRST = {"XAVIER": ["paper_ledger", "paper_orders", "paper_sessions",
+                          "paper_decisions", "paper_xavier_reviews"]}
+#: each agent's own words for its lane of the paper experiment
+PAPER_AGENT_LEADS = {
+    "DEREK": {"paper_decisions": "Paper decisions — mine, today"},
+    "XAVIER": {"paper_orders": "What I manage on paper",
+               "paper_decisions": "Derek's paper decisions"},
+    "AUDREY": {"paper_decisions": "Paper decisions to audit"}}
 LEGACY_LEAD = ("Legacy desk account, not the paper account — figures as of "
                "the time shown")
 _RX_PAPER_Q = re.compile(r"\b(paper|cash|balances?|reserved|available|"
@@ -474,8 +492,9 @@ LEADS = {
                "bettor_desk_account_state": LEGACY_LEAD,
                "agent_status": "Status"},
 }
-for _leads in LEADS.values():
+for _ag, _leads in LEADS.items():
     _leads.update(PAPER_LEADS)
+    _leads.update(PAPER_AGENT_LEADS[_ag])
 MISSING_LEAD = {"DEREK": "What I don't have",
                 "XAVIER": "Not in the record",
                 "AUDREY": "Missing evidence"}
@@ -524,8 +543,10 @@ def _generic(agent: str, bundle: dict, depth: str,
         s in groups for s in PAPER_LIVE)
     if paper_first:
         # the question is about the paper experiment: answer it first --
-        # balances, session, decisions -- then the rest of the book
-        base = PAPER_LIVE + [s for s in base if s not in PAPER_LIVE]
+        # balances, session, decisions (Xavier: what he manages) -- then the
+        # rest of the book
+        first = PAPER_FIRST.get(agent, PAPER_LIVE)
+        base = first + [s for s in base if s not in first]
     order = base + [s for s in groups if s not in base]
     lines = []
     cap_groups = 2 if depth == DEPTH_QUICK else 99
@@ -1159,8 +1180,9 @@ async def _converse_impl(db, *, agent, role, text, conversation_id, context,
             AC._record_provider(ok=False, reason=why, model=cfg["model"],
                                 now=now, live=http_client is None
                                 and AC.http_client_factory() is None)
-            return draft, dict(provider, mode=MODE_RECORDS, failure=why,
-                               disclosure=DISCLOSE_FALLBACK.format(why=why))
+            return labelled_fallback(draft, why), dict(
+                provider, mode=MODE_RECORDS, failure=why,
+                disclosure=DISCLOSE_FALLBACK.format(why=why))
         AC._record_provider(ok=True, reason=None, model=cfg["model"],
                             now=now, live=http_client is None
                             and AC.http_client_factory() is None)
@@ -1169,14 +1191,18 @@ async def _converse_impl(db, *, agent, role, text, conversation_id, context,
         if bad:
             ctx_ex = [dict(e, excerpt=AC.redact(e["excerpt"], env=env))
                       for e in ungrounded_context(got, bad)]
-            return draft, dict(provider, mode=MODE_RECORDS,
+            return labelled_fallback(
+                draft, "it stated a figure no record holds"), dict(
+                               provider, mode=MODE_RECORDS,
                                failure="UNGROUNDED_FIGURE",
                                ungrounded=bad[:5],
                                ungrounded_context=ctx_ex,
                                disclosure=DISCLOSE_FALLBACK.format(
                                    why="it stated a figure no record holds"))
         if AC._CLAIM.search(got):
-            return draft, dict(provider, mode=MODE_RECORDS,
+            return labelled_fallback(
+                draft, "it claimed an action nothing performed"), dict(
+                               provider, mode=MODE_RECORDS,
                                failure="CLAIMED_AN_ACTION",
                                disclosure=DISCLOSE_FALLBACK.format(
                                    why="it claimed an action nothing "

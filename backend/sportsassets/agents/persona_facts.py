@@ -383,7 +383,7 @@ async def _cash(conn, f: Facts, limit=10) -> None:
 
 
 PAPER_LIVE_SOURCES = ("paper_ledger", "paper_sessions", "paper_decisions",
-                      "paper_xavier_reviews")
+                      "paper_orders", "paper_xavier_reviews")
 
 
 async def _paper_live(conn, f: Facts, *, now: float | None) -> dict:
@@ -492,16 +492,55 @@ async def _paper_live(conn, f: Facts, *, now: float | None) -> dict:
                       "ENTER" if g["verdict"] == "ENTER" else "REFUSED: ",
                       "" if g["verdict"] == "ENTER" else g["reason"],
                       g["newest_at"]))
-        if d["newest"]:
-            n = d["newest"][0]
+        for n in d["newest"]:
+            # each of today's decisions, by id (newest first)
             f.add("paper_decisions", n["decision_id"],
-                  "paper_newest_decision", n["verdict"],
-                  "newest paper decision %s at %s on %s: %s%s" % (
-                      n["decision_id"], n["decided_at"], n["market"],
-                      n["verdict"], (" (%s)" % n["refusal"])
+                  "paper_decision:%s" % n["decision_id"], n["verdict"],
+                  "paper decision %s at %s in session %s on %s: %s%s" % (
+                      n["decision_id"], n["decided_at"], n["session_id"],
+                      n["market"], n["verdict"], (" -- refused: %s"
+                                                   % n["refusal"])
                       if n["refusal"] else ""))
     elif d is not None:
         f.check("paper_decisions", "TABLE_ABSENT", 0, d.get("why"))
+    mg = s.get("management")
+    if mg is not None:
+        by_role = mg.get("open_orders_by_role") or {}
+        f.check("paper_orders", "MATCHED" if by_role else "NO_MATCH",
+                sum(by_role.values()))
+        f.add("paper_orders", "%s:open-orders" % acct, "paper_management",
+              mg.get("open_management_orders"),
+              "what Xavier manages on paper: %s open paper position(s), %s "
+              "open paper management order(s) (standing protection, hedge, "
+              "exit, reduce), %s open paper entry order(s), %s handoff(s) "
+              "from Derek%s" % (
+                  mg.get("open_positions"), mg.get("open_management_orders"),
+                  mg.get("open_entry_orders"),
+                  mg.get("handoffs") if mg.get("handoffs") is not None
+                  else "unknown",
+                  " -- nothing for Xavier to manage"
+                  if mg.get("nothing_to_manage") else ""))
+    rc = s.get("reconciliation")
+    if rc is not None and rc.get("present") and "checks" in rc:
+        f.add("paper_ledger", "%s#seq%s" % (acct, rc.get("last_seq")),
+              "paper_reconciliation", bool(rc["reconciled"]),
+              "paper ledger %s: %s entries (sequence %s to %s), %s "
+              "INITIAL_FUNDING at sequence %s; sum of cash deltas %s against "
+              "cash %s; sum of reserved deltas %s against reserved %s; "
+              "available %s = cash minus reserved; running balance %s%s" % (
+                  "RECONCILES" if rc["reconciled"] else "DOES NOT RECONCILE",
+                  rc["entries_count"], rc["first_seq"], rc["last_seq"],
+                  next((c["count"] for c in rc["checks"]
+                        if c["check"] == "EXACTLY_ONE_INITIAL_FUNDING"), "?"),
+                  rc.get("initial_funding_seq"),
+                  _money(rc["checks"][0]["ledger_sum_usd"]),
+                  _money(rc["checks"][0]["balance_usd"]),
+                  _money(rc["checks"][1]["ledger_sum_usd"]),
+                  _money(rc["checks"][1]["balance_usd"]),
+                  _money(rc["checks"][2]["balance_usd"]),
+                  "agrees" if rc["checks"][3]["ok"] else "DISAGREES",
+                  "" if rc["reconciled"] else "; failed: %s"
+                  % ", ".join(rc["failed_checks"])))
     rv = s.get("xavier_reviews_today")
     if rv is not None:
         f.add("paper_xavier_reviews", rv.get("newest_review_id")

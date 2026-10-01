@@ -19,6 +19,15 @@ paper experiment, from the SAME sources it uses:
                  count by verdict and by refusal reason, and the newest.
   * reviews   -- `paper_xavier_reviews` for the same day: the count and the
                  newest, when the table exists.
+  * management -- what Xavier has to manage: open paper positions (from
+                 the same balances), open paper orders by role, handoffs.
+
+`reconcile(conn, now=...)` is the ledger read Audrey audits: entries by kind
+with their sequences, the latest entries, and the reconciliation checks
+(sum of cash deltas = cash, sum of reserved deltas = reserved, available =
+cash - reserved, the last entry's running balance agrees, exactly one
+INITIAL_FUNDING equal to the starting cash and first in sequence, the entry
+count agrees).
 
 Persona chat turns this into numbered facts (`persona_facts`); Audrey's
 management chat serves it as the read-only `paper_account` tool. The legacy
@@ -37,7 +46,10 @@ from .. import bettor_paper_session as S
 #: the paper account the conversations describe; tests substitute their own
 ACCOUNT_ID = L.ACCOUNT_ID
 DAY_BASIS = "UTC calendar day of the question"
-NEWEST_DECISIONS = 3
+#: today's decisions listed one by one (counts cover all of them)
+NEWEST_DECISIONS = 20
+LEDGER_ENTRIES_SHOWN = 50
+MANAGEMENT_ROLES = ("STANDING_PROTECTION", "HEDGE", "EXIT", "REDUCE")
 
 
 def iso(epoch) -> str | None:
@@ -181,6 +193,127 @@ async def _reviews(conn, acct: str, now: float) -> dict | None:
             "newest_review_id": r["newest_id"]}
 
 
+async def _management(conn, acct: str, account: dict | None) -> dict:
+    out: dict[str, Any] = {
+        "open_positions": (account or {}).get("open_positions"),
+        "open_orders_by_role": {}, "open_management_orders": 0,
+        "open_entry_orders": 0, "handoffs": None}
+    if await _regclass(conn, "paper_orders"):
+        for r in await conn.fetch(
+                "SELECT role, count(*)::int AS n FROM paper_orders "
+                " WHERE account_id = $1 AND state = ANY($2::text[]) "
+                " GROUP BY role ORDER BY role", acct, list(L.OPEN_STATES)):
+            out["open_orders_by_role"][r["role"]] = r["n"]
+            if r["role"] in MANAGEMENT_ROLES:
+                out["open_management_orders"] += r["n"]
+            elif r["role"] == "ENTRY":
+                out["open_entry_orders"] += r["n"]
+    if await _regclass(conn, "paper_handoffs"):
+        out["handoffs"] = int(await conn.fetchval(
+            "SELECT count(*) FROM paper_handoffs WHERE account_id = $1",
+            acct) or 0)
+    out["nothing_to_manage"] = bool(
+        not out["open_positions"] and not out["open_management_orders"]
+        and not out["open_entry_orders"] and not out["handoffs"])
+    return out
+
+
+def _d(v):
+    return L.D(v if v is not None else 0)
+
+
+async def reconcile(conn, *, now: float, account_id: str | None = None,
+                    entries: int = LEDGER_ENTRIES_SHOWN) -> dict:
+    """THE LEDGER, READ AND RECONCILED (read-only). Every check names the
+    two figures it compares; `reconciled` is True only when all pass."""
+    acct = account_id or ACCOUNT_ID
+    out: dict[str, Any] = {"present": False, "account_id": acct,
+                           "as_of": iso(now), "data_label": L.DATA_LABEL}
+    if not await _regclass(conn, "paper_ledger"):
+        out["why"] = "MIGRATION_171_IS_NOT_APPLIED"
+        return out
+    out["present"] = True
+    b = await L.balances(conn, acct, now=now)
+    if not b.get("ok"):
+        out["why"] = b.get("refusal")
+        return out
+    sess = await S.active_session(conn, acct)
+    out["session_id"] = (sess or {}).get("session_id")
+    agg = await conn.fetchrow(
+        "SELECT count(*)::int AS n, coalesce(sum(cash_delta_usd), 0) AS cash, "
+        "       coalesce(sum(reserved_delta_usd), 0) AS reserved, "
+        "       min(seq) AS first_seq, max(seq) AS last_seq, "
+        "       count(*) FILTER (WHERE kind = 'INITIAL_FUNDING')::int "
+        "         AS n_initial, "
+        "       coalesce(sum(cash_delta_usd) FILTER (WHERE kind = "
+        "         'INITIAL_FUNDING'), 0) AS initial_cash, "
+        "       min(seq) FILTER (WHERE kind = 'INITIAL_FUNDING') "
+        "         AS initial_seq "
+        "  FROM paper_ledger WHERE account_id = $1", acct)
+    kinds = await conn.fetch(
+        "SELECT kind, count(*)::int AS n, min(seq) AS first_seq, "
+        "       max(seq) AS last_seq, sum(cash_delta_usd) AS cash, "
+        "       sum(reserved_delta_usd) AS reserved "
+        "  FROM paper_ledger WHERE account_id = $1 "
+        " GROUP BY kind ORDER BY min(seq)", acct)
+    cash, res = _d(b["cash_usd"]), _d(b["reserved_usd"])
+    avail, start = _d(b["available_usd"]), _d(b["starting_cash_usd"])
+    checks = [
+        {"check": "CASH_EQUALS_SUM_OF_CASH_DELTAS",
+         "ledger_sum_usd": L.f(_d(agg["cash"])), "balance_usd": L.f(cash),
+         "ok": _d(agg["cash"]) == cash},
+        {"check": "RESERVED_EQUALS_SUM_OF_RESERVED_DELTAS",
+         "ledger_sum_usd": L.f(_d(agg["reserved"])),
+         "balance_usd": L.f(res), "ok": _d(agg["reserved"]) == res},
+        {"check": "AVAILABLE_EQUALS_CASH_MINUS_RESERVED",
+         "cash_minus_reserved_usd": L.f(cash - res),
+         "balance_usd": L.f(avail), "ok": cash - res == avail},
+        {"check": "LAST_ENTRY_RUNNING_BALANCE_AGREES",
+         "ok": bool(b.get("ledger_consistent"))},
+        {"check": "EXACTLY_ONE_INITIAL_FUNDING", "count": agg["n_initial"],
+         "ok": agg["n_initial"] == 1},
+        {"check": "INITIAL_FUNDING_EQUALS_STARTING_CASH",
+         "initial_funding_usd": L.f(_d(agg["initial_cash"])),
+         "starting_cash_usd": L.f(start),
+         "ok": _d(agg["initial_cash"]) == start},
+        {"check": "INITIAL_FUNDING_IS_THE_FIRST_ENTRY",
+         "initial_funding_seq": agg["initial_seq"],
+         "first_seq": agg["first_seq"],
+         "ok": agg["initial_seq"] is not None
+         and agg["initial_seq"] == agg["first_seq"]},
+        {"check": "ENTRY_COUNT_AGREES", "ledger_count": agg["n"],
+         "balances_count": b.get("ledger_entries"),
+         "ok": agg["n"] == b.get("ledger_entries")}]
+    latest = await L.latest_entries(conn, acct, limit=int(entries))
+    out.update(
+        reconciled=all(c["ok"] for c in checks),
+        failed_checks=[c["check"] for c in checks if not c["ok"]],
+        checks=checks, entries_count=agg["n"], first_seq=agg["first_seq"],
+        last_seq=agg["last_seq"], initial_funding_seq=agg["initial_seq"],
+        balances={k: b.get(k) for k in (
+            "cash_usd", "reserved_usd", "available_usd", "starting_cash_usd",
+            "total_equity_usd", "realized_pnl_usd", "unrealized_pnl_usd",
+            "last_sequence", "ledger_consistent")},
+        last_updated_at=iso(b.get("last_updated_at")),
+        by_kind=[{"kind": r["kind"], "count": r["n"],
+                  "first_seq": r["first_seq"], "last_seq": r["last_seq"],
+                  "cash_delta_usd": L.f(_d(r["cash"])),
+                  "reserved_delta_usd": L.f(_d(r["reserved"]))}
+                 for r in kinds],
+        latest_entries=[{
+            "seq": e["sequence"], "kind": e["kind"],
+            "session_id": e.get("session_id"),
+            "cash_delta_usd": e["cash_delta_usd"],
+            "reserved_delta_usd": e["reserved_delta_usd"],
+            "cash_after_usd": e["cash_after_usd"],
+            "reserved_after_usd": e["reserved_after_usd"],
+            "available_after_usd": e["available_after_usd"],
+            "order_id": e.get("order_id"), "fill_id": e.get("fill_id"),
+            "committed_at": iso(e.get("committed_at"))} for e in latest],
+        latest_entries_shown=len(latest))
+    return out
+
+
 async def summary(conn, *, now: float, account_id: str | None = None) -> dict:
     """The paper experiment now (see the module docstring). Never raises: a
     part that cannot be read is named in `unavailable`."""
@@ -191,7 +324,8 @@ async def summary(conn, *, now: float, account_id: str | None = None) -> dict:
         "paper_only": "paper figures; never mixed with funded or legacy "
                       "desk-account figures",
         "account": None, "session": None, "decisions_today": None,
-        "xavier_reviews_today": None, "unavailable": [], "why": None}
+        "xavier_reviews_today": None, "management": None,
+        "reconciliation": None, "unavailable": [], "why": None}
     if not await _regclass(conn, "paper_ledger"):
         out["why"] = "MIGRATION_171_IS_NOT_APPLIED"
         return out
@@ -200,6 +334,15 @@ async def summary(conn, *, now: float, account_id: str | None = None) -> dict:
                       ("session", _session(conn, acct)),
                       ("decisions_today", _decisions(conn, acct, now)),
                       ("xavier_reviews_today", _reviews(conn, acct, now))):
+        try:
+            out[key] = await coro
+        except Exception as exc:                                # noqa: BLE001
+            out["unavailable"].append("%s: READ_FAILED %s"
+                                      % (key, type(exc).__name__))
+    for key, coro in (("management", _management(conn, acct, out["account"])),
+                      ("reconciliation", reconcile(conn, now=now,
+                                                   account_id=acct,
+                                                   entries=0))):
         try:
             out[key] = await coro
         except Exception as exc:                                # noqa: BLE001
@@ -220,7 +363,7 @@ def citations(s: dict) -> list:
     if se.get("session_id"):
         out.append({"kind": "paper_sessions", "id": se["session_id"],
                     "href": "/api/command/paper/session"})
-    for d in (s.get("decisions_today") or {}).get("newest") or []:
+    for d in ((s.get("decisions_today") or {}).get("newest") or [])[:10]:
         out.append({"kind": "paper_decisions", "id": d["decision_id"],
                     "href": "/api/command/paper/derek"})
     rv = s.get("xavier_reviews_today") or {}

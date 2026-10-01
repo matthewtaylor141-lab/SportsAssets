@@ -363,7 +363,8 @@ def test_the_tool_surface_is_typed_and_permissioned():
     writes = {n for n, t in AC.TOOLS.items() if t.permission == AC.CONTROL}
     assert reads == {"agents_status", "entry_decision", "xavier_decision",
                      "why_hold", "performance_attribution", "todays_audit",
-                     "proposals", "directive_status", "paper_account"}
+                     "proposals", "directive_status", "paper_account",
+                     "paper_ledger_reconciliation"}
     assert writes == {"create_directive", "confirm_directive", "assign_task",
                       "cancel_directive"}
     for t in AC.TOOLS.values():

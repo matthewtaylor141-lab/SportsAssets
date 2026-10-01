@@ -74,11 +74,15 @@ async def _seed_paper(c, *, elapsed_min: int = 52) -> dict:
     await S.record_pass(c, acct["session_id"], result={
         "decisions_recorded": 7, "elapsed_s": 1.5}, now=beat)
     n = 0
+    acct["decisions"] = {}
     for reason, count in REASONS:
         for _ in range(count):
             n += 1
-            await _decision(c, acct, at=T0 - 3000 + n * 60, refusal=reason)
-    await _decision(c, acct, at=T0 - 86400, refusal="YESTERDAY_ONLY")
+            did = await _decision(c, acct, at=T0 - 3000 + n * 60,
+                                  refusal=reason)
+            acct["decisions"][did] = reason
+    acct["yesterday"] = await _decision(c, acct, at=T0 - 86400,
+                                        refusal="YESTERDAY_ONLY")
     acct["heartbeat"] = beat
     acct["newest_at"] = T0 - 3000 + n * 60
     return acct
@@ -210,9 +214,26 @@ def test_g1_book_facts_carry_live_balances_session_and_todays_decisions(
         g = f["paper_decisions_today:%s" % reason]
         assert g["value"] == n and reason in g["text"]
     assert "YESTERDAY_ONLY" not in json.dumps(bundle["facts"])
-    newest = f["paper_newest_decision"]
-    assert newest["source"] == "paper_decisions"
-    assert "PROBABILITY_EVIDENCE_STALE" in newest["text"]
+    assert acct["yesterday"] not in json.dumps(bundle["facts"])
+    # every one of today's decisions, by id, with session and refusal
+    for did, reason in acct["decisions"].items():
+        d = f["paper_decision:%s" % did]
+        assert d["source"] == "paper_decisions" and d["record_id"] == did
+        assert d["value"] == "REFUSE"
+        assert "refused: %s" % reason in d["text"]
+        assert acct["session_id"] in d["text"]
+    # what Xavier manages: nothing (no position, order or handoff)
+    mg = f["paper_management"]
+    assert mg["source"] == "paper_orders" and mg["value"] == 0
+    assert "0 open paper position(s)" in mg["text"]
+    assert "nothing for Xavier to manage" in mg["text"]
+    # the ledger, reconciled
+    rc = f["paper_reconciliation"]
+    assert rc["value"] is True and rc["source"] == "paper_ledger"
+    assert rc["text"].startswith("paper ledger RECONCILES: 1 entries")
+    assert "1 INITIAL_FUNDING at sequence %s" % strip["last_sequence"] \
+        in rc["text"]
+    assert "sum of cash deltas $500,000 against cash $500,000" in rc["text"]
     # the paper facts come FIRST, and no static paper_accounts dump remains
     assert [x["source"] for x in bundle["facts"][:3]] == ["paper_ledger"] * 3
     assert not any(x["source"] == "paper_accounts" for x in bundle["facts"])
@@ -235,9 +256,20 @@ def test_g1_a_model_answer_citing_the_paper_facts_is_kept(db, monkeypatch):
             cid("paper_session"), cid("paper_decisions_today"),
             cid("paper_decisions_today:NO_RESEARCH_MODEL_CANDIDATE_EXISTS"),
             cid("paper_decisions_today:PROBABILITY_EVIDENCE_STALE")))
+    stale = [k for k, v in acct["decisions"].items()
+             if v == "PROBABILITY_EVIDENCE_STALE"][0]
+    good += (" One of them, %s, was refused because the probability "
+             "evidence was stale [%s]." % (stale,
+                                           cid("paper_decision:%s" % stale)))
+    xav = ("I have nothing to manage on paper: 0 open paper positions and 0 "
+           "open management orders [%s], on $500,000 of paper cash [%s] in "
+           "session %s [%s]." % (cid("paper_management"),
+                                 cid("paper_cash_usd"), acct["session_id"],
+                                 cid("paper_session")))
     fake = H.use_claude(monkeypatch, H.FakeClaudeStream([
-        {"chunks": [good[:40], good[40:]]}]))
+        {"chunks": [good[:40], good[40:]]}, {"chunks": [xav]}]))
     client = H.build_client(monkeypatch, F.Clock(T0))
+    rx = None
     r = _ask(client, "derek")
     assert r.status_code == 200, r.text
     g = r.json()
@@ -247,6 +279,14 @@ def test_g1_a_model_answer_citing_the_paper_facts_is_kept(db, monkeypatch):
     assert g["answer"] == good
     kinds = {c["kind"] for c in g["citations"]}
     assert {"paper_ledger", "paper_sessions", "paper_decisions"} <= kinds
+    assert ("paper_decisions", stale) in {(c["kind"], c["id"])
+                                          for c in g["citations"]}
+    # Xavier: what he manages -- nothing -- kept, citing the records
+    rx = _ask(client, "xavier").json()
+    assert rx["provider"]["mode"] == "LLM", rx["provider"]
+    assert rx["answer"] == xav
+    assert ("paper_orders", "%s:open-orders" % acct["account_id"]) in {
+        (c["kind"], c["id"]) for c in rx["citations"]}
     # the model was given the paper facts and the legacy-account rule
     req = fake.requests[0]["body"]
     sent = json.dumps(req)
@@ -299,6 +339,7 @@ def test_g2_the_legacy_desk_account_is_labelled_and_never_the_paper_cash(
 @pg
 def test_g3_a_figure_the_model_works_out_itself_is_still_rejected(
         db, monkeypatch):
+    from sportsassets.agents import persona_chat as PC
     """Production's ungrounded [52.0]. The rejected reply is not stored, so
     its text cannot be recovered; the checker accepts any number a fact
     holds (and its rounding, x100 and /100), so 52 was a number NO fact held:
@@ -335,12 +376,18 @@ def test_g3_a_figure_the_model_works_out_itself_is_still_rejected(
                    % g["conversation_id"], headers=F.desk_headers()).json()
     stored = [x for x in t["messages"] if x["role"] == "ASSISTANT"][-1]
     assert stored["provider"]["ungrounded_context"] == p["ungrounded_context"]
-    # the records-only fallback answers the question asked, first
+    # the records-only fallback is LABELLED as such, in the answer itself,
+    # and answers the question asked from the same current records, first
     ans = g["answer"]
+    assert ans.startswith("Records-only answer — the AI answer was not used "
+                          "(it stated a figure no record holds); everything "
+                          "below is quoted from the current records.")
     assert "%d minutes" % m not in ans
     lead = ans.index("The paper account now:")
-    assert lead < ans.index("The paper session:") < ans.index(
-        "Paper decisions:")
+    assert lead < ans.index("What I manage on paper:") < ans.index(
+        "The paper session:") < ans.index("Derek's paper decisions:")
+    assert "nothing for Xavier to manage" in ans
+    assert not PC.ungrounded_numbers(ans, bundle["facts"], Q)
     assert "cash $500,000" in ans and "reserved $0" in ans
     assert "available $500,000" in ans
     assert acct["session_id"] in ans
@@ -407,9 +454,10 @@ def test_g4_audreys_paper_account_tool_is_read_only_and_answers(
     tool = AC.TOOLS["paper_account"]
     assert tool.permission == AC.READ
     assert "paper_account" not in AC.MUTATING_TOOLS
-    assert AC.route(Q)["calls"] == [("paper_account", {})]
-    assert AC.route("What is the cash balance?")["calls"] == \
-        [("paper_account", {})]
+    both = [("paper_account", {}), ("paper_ledger_reconciliation", {})]
+    assert AC.route(Q)["calls"] == both
+    assert AC.route("What is the cash balance?")["calls"] == both
+    assert AC.route("Does the ledger reconcile?")["calls"] == both
     # PROVABLY READ-ONLY: it runs inside a READ ONLY transaction, where any
     # write would raise, and changes no paper row
     before = _with(_paper_counts)
@@ -445,7 +493,117 @@ def test_g4_audreys_paper_account_tool_is_read_only_and_answers(
     assert "7 recorded — 0 ENTER, 7 REFUSE" in ans
     assert "5 × NO_RESEARCH_MODEL_CANDIDATE_EXISTS" in ans
     assert "paper_sessions:%s" % acct["session_id"] in ans
+    for did, reason in acct["decisions"].items():
+        assert "Paper decision %s" % did in ans
+        assert "paper_decisions:%s" % did in ans
+    assert "nothing to manage" in ans
+    # and the ledger, read and reconciled, citing its sequence
+    seq = d["account"]["last_sequence"]
+    assert "Paper ledger RECONCILES for %s (session %s): 1 entries" % (
+        acct["account_id"], acct["session_id"]) in ans
+    assert "Ledger seq %s INITIAL_FUNDING: cash $500000.00" % seq in ans
+    assert "paper_ledger:%s#seq%s" % (acct["account_id"], seq) in ans
     assert _with(_paper_counts) == before
+
+
+@pg
+def test_g4_audrey_reads_and_reconciles_the_paper_ledger(db, monkeypatch):
+    from sportsassets.agents import audrey_chat as AC
+    from sportsassets.agents import paper_brief as PB
+
+    acct, _b = _seeded(monkeypatch)
+    tool = AC.TOOLS["paper_ledger_reconciliation"]
+    assert tool.permission == AC.READ
+    assert "paper_ledger_reconciliation" not in AC.MUTATING_TOOLS
+    before = _with(_paper_counts)
+
+    async def _run(c):
+        async with c.transaction(readonly=True):
+            return await AC.run_tool(c, "paper_ledger_reconciliation",
+                                     {"entries": 5}, AC.Ctx(
+                                         role="desk", label=None, now=T0))
+    res = _with(_run)
+    assert res["status"] == "OK", res
+    assert _with(_paper_counts) == before
+    rc = res["data"]
+    assert rc["reconciled"] is True and rc["failed_checks"] == []
+    assert {c["check"] for c in rc["checks"]} == {
+        "CASH_EQUALS_SUM_OF_CASH_DELTAS",
+        "RESERVED_EQUALS_SUM_OF_RESERVED_DELTAS",
+        "AVAILABLE_EQUALS_CASH_MINUS_RESERVED",
+        "LAST_ENTRY_RUNNING_BALANCE_AGREES", "EXACTLY_ONE_INITIAL_FUNDING",
+        "INITIAL_FUNDING_EQUALS_STARTING_CASH",
+        "INITIAL_FUNDING_IS_THE_FIRST_ENTRY", "ENTRY_COUNT_AGREES"}
+    assert rc["entries_count"] == 1
+    assert rc["session_id"] == acct["session_id"]
+    assert [k["kind"] for k in rc["by_kind"]] == ["INITIAL_FUNDING"]
+    e = rc["latest_entries"][0]
+    assert e["kind"] == "INITIAL_FUNDING" and e["cash_delta_usd"] == 500000.0
+    assert e["seq"] == rc["initial_funding_seq"] == rc["last_seq"]
+    assert rc["balances"]["available_usd"] == 500000.0
+    assert {"kind": "paper_ledger", "id": "%s#seq%s" % (
+        acct["account_id"], e["seq"]),
+        "href": "/api/command/paper/account"} in res["citations"]
+    assert any(c["kind"] == "paper_sessions" and c["id"] == acct["session_id"]
+               for c in res["citations"])
+    # a disagreement is reported, named, and never smoothed over
+    real = PB.L.balances
+
+    async def _off_by_a_dollar(conn, account_id, **kw):
+        b = await real(conn, account_id, **kw)
+        return dict(b, cash_usd=b["cash_usd"] + 1.0)
+    monkeypatch.setattr(PB.L, "balances", _off_by_a_dollar)
+    bad = _with(lambda c: PB.reconcile(c, now=T0))
+    assert bad["reconciled"] is False
+    assert bad["failed_checks"] == ["CASH_EQUALS_SUM_OF_CASH_DELTAS",
+                                    "AVAILABLE_EQUALS_CASH_MINUS_RESERVED"]
+    lines = "\n".join(AC._reconciliation_lines(bad))
+    assert "DOES NOT RECONCILE" in lines
+    assert "CASH_EQUALS_SUM_OF_CASH_DELTAS" in lines
+
+
+@pg
+def test_derek_and_xavier_explain_their_actual_paper_decisions(
+        db, monkeypatch):
+    """Records-only (no key): Derek cites each of today's paper decisions by
+    id with verdict and refusal, the session and the live balances; Xavier
+    says what he manages -- nothing -- citing the records."""
+    H.no_keys(monkeypatch)
+    acct, bundle = _seeded(monkeypatch)
+    client = H.build_client(monkeypatch, F.Clock(T0))
+    got = {}
+    for agent in ("derek", "xavier"):
+        r = client.post("/api/command/agents/%s/persona/chat" % agent,
+                        json={"message": Q, "allow_records_only": True},
+                        headers=F.desk_headers())
+        assert r.status_code == 200, r.text
+        got[agent] = r.json()
+        assert got[agent]["provider"]["mode"] == "RECORDS_ONLY"
+    d = got["derek"]
+    ans = d["answer"]
+    assert ans.index("The paper account now:") < ans.index(
+        "The paper session:") < ans.index("Paper decisions — mine, today:")
+    assert "paper account %s cash $500,000" % acct["account_id"] in ans
+    assert "reserved $0" in ans and "available $500,000" in ans
+    assert "active paper session %s" % acct["session_id"] in ans
+    cited = {(c["kind"], c["id"]) for c in d["citations"]}
+    for did, reason in acct["decisions"].items():
+        assert "paper decision %s" % did in ans
+        assert ("paper_decisions", did) in cited
+    assert "REFUSE -- refused: NO_RESEARCH_MODEL_CANDIDATE_EXISTS" in ans
+    assert "REFUSE -- refused: PROBABILITY_EVIDENCE_STALE" in ans
+    assert ("paper_sessions", acct["session_id"]) in cited
+    x = got["xavier"]
+    xa = x["answer"]
+    assert xa.index("What I manage on paper:") < xa.index(
+        "Derek's paper decisions:")
+    assert "0 open paper position(s), 0 open paper management order(s)" in xa
+    assert "nothing for Xavier to manage" in xa
+    assert ("paper_orders", "%s:open-orders" % acct["account_id"]) in {
+        (c["kind"], c["id"]) for c in x["citations"]}
+    for a in (ans, xa):
+        from sportsassets.agents import persona_chat as PC
+        assert not PC.ungrounded_numbers(a, bundle["facts"], Q)
 
 
 @pg
@@ -661,9 +819,10 @@ def test_v2_audreys_management_chat_replies_can_be_spoken(db, monkeypatch):
     assert r.status_code == 200, r.text
     got = r.json()
     mid = got["message_id"]
-    # seq 0 is the management's message, seq 1 the tool record, seq 2 the
-    # reply (production's failing id was such a reply: conv-...:3)
-    assert mid.startswith("conv-") and mid.endswith(":2")
+    # seq 0 is the management's message, seq 1 and 2 the two tool records
+    # (paper_account, paper_ledger_reconciliation), seq 3 the reply -- the
+    # same shape as production's unspeakable id conv-...:3
+    assert mid.startswith("conv-") and mid.endswith(":3")
     s = client.post("/api/command/agents/audrey/speak",
                     json={"message_id": mid}, headers=F.desk_headers())
     assert s.status_code == 200, s.text
@@ -684,7 +843,8 @@ def test_v2_audreys_management_chat_replies_can_be_spoken(db, monkeypatch):
     # nor is an unknown id, nor Audrey's id through another agent
     conv = mid.rsplit(":", 1)[0]
     for agent, m in (("audrey", conv + ":0"), ("audrey", conv + ":1"),
-                     ("audrey", conv + ":9"), ("derek", mid)):
+                     ("audrey", conv + ":2"), ("audrey", conv + ":9"),
+                     ("derek", mid)):
         x = client.post("/api/command/agents/%s/speak" % agent,
                         json={"message_id": m}, headers=F.desk_headers())
         assert x.status_code == 404, (agent, m, x.text)
