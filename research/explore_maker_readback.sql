@@ -174,3 +174,41 @@ SELECT o.strategy, count(DISTINCT o.order_id) AS orders,
        coalesce(sum(f.fee_usd), 0) AS fees_usd
   FROM paper_orders o LEFT JOIN paper_fills f USING (order_id)
  GROUP BY 1 ORDER BY 1;
+
+\echo '== R12 · ONE SNAPSHOT: cash, reserved and positions at the same ledger seq =='
+-- One statement = one snapshot: the ledger head, the head row's running
+-- balances, the ledger sums, and every position rebuilt from the fills whose
+-- FILL ledger rows are at or before that head.
+WITH head AS (
+  SELECT max(seq) AS seq FROM paper_ledger WHERE account_id = 'paper_acct_main'),
+row_at_head AS (
+  SELECT l.seq, l.cash_after_usd, l.reserved_after_usd, l.committed_at
+    FROM paper_ledger l, head WHERE l.seq = head.seq),
+sums AS (
+  SELECT sum(cash_delta_usd) AS cash, sum(reserved_delta_usd) AS reserved
+    FROM paper_ledger l, head
+   WHERE l.account_id = 'paper_acct_main' AND l.seq <= head.seq),
+pos AS (
+  SELECT f.strategy, f.group_id, f.us_market_slug, f.holding_side,
+         sum(CASE WHEN f.direction = 'BUY' THEN f.qty ELSE -f.qty END) AS open_qty,
+         sum(CASE WHEN f.direction = 'BUY' THEN f.gross_usd + f.fee_usd
+                  ELSE 0 END) AS bought_incl_fees_usd,
+         min(l.seq) AS first_fill_seq, max(l.seq) AS last_fill_seq
+    FROM paper_fills f JOIN paper_ledger l ON l.fill_id = f.fill_id, head
+   WHERE f.account_id = 'paper_acct_main' AND l.kind = 'FILL'
+     AND l.seq <= head.seq
+   GROUP BY 1, 2, 3, 4)
+SELECT 'ACCOUNT' AS what, r.seq AS ledger_seq, r.committed_at,
+       r.cash_after_usd, s.cash AS cash_by_sum,
+       r.reserved_after_usd, s.reserved AS reserved_by_sum,
+       (r.cash_after_usd = s.cash AND r.reserved_after_usd = s.reserved)
+         AS head_equals_sum,
+       NULL::text AS strategy, NULL::text AS group_id, NULL::text AS market,
+       NULL::numeric AS open_qty, NULL::numeric AS bought_incl_fees_usd
+  FROM row_at_head r, sums s
+UNION ALL
+SELECT 'POSITION', p.last_fill_seq, NULL, NULL, NULL, NULL, NULL, NULL,
+       p.strategy, p.group_id, p.us_market_slug, p.open_qty,
+       p.bought_incl_fees_usd
+  FROM pos p
+ ORDER BY 1, 2;
