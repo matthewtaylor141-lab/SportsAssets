@@ -10,6 +10,8 @@ BEGIN
        OR EXISTS (SELECT 1 FROM paper_orders
                    WHERE strategy = 'PINNACLE_ONLY_PAPER_BENCHMARK')
        OR EXISTS (SELECT 1 FROM paper_handoffs
+                   WHERE strategy = 'PINNACLE_ONLY_PAPER_BENCHMARK')
+       OR EXISTS (SELECT 1 FROM paper_fills
                    WHERE strategy = 'PINNACLE_ONLY_PAPER_BENCHMARK') THEN
         RAISE EXCEPTION 'PINNACLE_ONLY_PAPER_BENCHMARK records exist; 182 is '
                         'not rolled back over them';
@@ -26,9 +28,16 @@ BEGIN
         paper_orders_strategy_ck;
     ALTER TABLE paper_handoffs DROP CONSTRAINT IF EXISTS
         paper_handoffs_strategy_ck;
+    ALTER TABLE paper_fills DROP CONSTRAINT IF EXISTS
+        paper_fills_strategy_ck;
+    ALTER TABLE paper_xavier_reviews DROP CONSTRAINT IF EXISTS
+        paper_xavier_reviews_strategy_ck;
     ALTER TABLE paper_decisions DROP COLUMN IF EXISTS strategy;
     ALTER TABLE paper_orders DROP COLUMN IF EXISTS strategy;
     ALTER TABLE paper_handoffs DROP COLUMN IF EXISTS strategy;
+    ALTER TABLE paper_fills DROP COLUMN IF EXISTS strategy;
+    ALTER TABLE paper_xavier_reviews DROP COLUMN IF EXISTS strategy;
     DELETE FROM paper_control
-     WHERE control_key = 'PINNACLE_ONLY_PAPER_BENCHMARK';
+     WHERE control_key IN ('PINNACLE_ONLY_PAPER_BENCHMARK',
+                           'PAPER_ENTRIES:DEREK_ENTRY_POLICY_V2');
 END $$;

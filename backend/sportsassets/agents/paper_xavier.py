@@ -417,9 +417,9 @@ async def review_group(conn, ctx: dict, group_id: str, *,
             " account_id, group_id, reviewed_at, trigger, recommendation, "
             " refusal, alternatives, selection, exposure, standing, "
             " confirmed_protection, incomplete_search, exceptional, measure,"
-            " action) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10::jsonb,"
-            " $11::jsonb,$12::jsonb,$13::jsonb,$14::jsonb,$15::jsonb,"
-            " $16::jsonb,$17::jsonb) ON CONFLICT DO NOTHING",
+            " action, strategy) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,"
+            " $10::jsonb,$11::jsonb,$12::jsonb,$13::jsonb,$14::jsonb,"
+            " $15::jsonb,$16::jsonb,$17::jsonb,$18) ON CONFLICT DO NOTHING",
             rid, ctx["session_id"], acct, group_id, L._ts(at), trigger,
             chosen, sel.get("refusal"), json.dumps(alts, default=str),
             json.dumps({k: sel.get(k) for k in (
@@ -436,7 +436,8 @@ async def review_group(conn, ctx: dict, group_id: str, *,
                        default=str),
             json.dumps(alts["incomplete_search"], default=str),
             json.dumps(exceptional), json.dumps(measure, default=str),
-            json.dumps(action, default=str))
+            json.dumps(action, default=str), pos.get("strategy")
+            or L.DEFAULT_STRATEGY)
         reviews.append({"review_id": rid, "position": pos["position_key"],
                         "recommendation": chosen, "trigger": trigger,
                         "action": action.get("taken")})

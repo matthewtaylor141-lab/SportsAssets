@@ -18,8 +18,20 @@
 --
 -- A POSITION NEVER SWITCHES POLICY. `paper_orders.strategy` is set from the
 -- entry decision and carried by Xavier onto every management order of the
--- group; `paper_handoffs.strategy` is the entry order's. Positions are
--- derived from fills, whose `label` carries the strategy from the order.
+-- group; `paper_fills.strategy` is its order's, so a position (derived from
+-- fills) carries it; `paper_handoffs.strategy` and
+-- `paper_xavier_reviews.strategy` are the group's.
+--
+-- EVERY KEY IS STRATEGY-SPECIFIC. A benchmark decision id ('paperbench:'),
+-- group ('paperbenchgrp:'), entry idempotency key and order id, fill keys
+-- (order id + observation + level), position key (group), handoff key
+-- (group) and Xavier order keys (group / position) are all derived from the
+-- strategy-specific decision id; the two-model strategy keeps its own
+-- ('paperdec:' / 'papergrp:'). Neither can overwrite or suppress the other.
+--
+-- ONE CASH LEDGER. No per-strategy bankroll and no second funding: both
+-- strategies reserve against the same paper_ledger under the same account
+-- row lock (migration 171), so available cash is never committed twice.
 --
 -- NOTHING ELSE CHANGES: no account, session, funding, ledger kind, rail or
 -- funded table is touched. Adding a column with a constant default fires no
@@ -46,6 +58,12 @@ ALTER TABLE paper_orders
 ALTER TABLE paper_handoffs
     ADD COLUMN IF NOT EXISTS strategy text NOT NULL
         DEFAULT 'DEREK_ENTRY_POLICY_V2';
+ALTER TABLE paper_fills
+    ADD COLUMN IF NOT EXISTS strategy text NOT NULL
+        DEFAULT 'DEREK_ENTRY_POLICY_V2';
+ALTER TABLE paper_xavier_reviews
+    ADD COLUMN IF NOT EXISTS strategy text NOT NULL
+        DEFAULT 'DEREK_ENTRY_POLICY_V2';
 
 DO $$
 BEGIN
@@ -67,6 +85,19 @@ BEGIN
             CHECK (strategy IN ('DEREK_ENTRY_POLICY_V2',
                                 'PINNACLE_ONLY_PAPER_BENCHMARK'));
     END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint
+                    WHERE conname = 'paper_fills_strategy_ck') THEN
+        ALTER TABLE paper_fills ADD CONSTRAINT paper_fills_strategy_ck
+            CHECK (strategy IN ('DEREK_ENTRY_POLICY_V2',
+                                'PINNACLE_ONLY_PAPER_BENCHMARK'));
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint
+                    WHERE conname = 'paper_xavier_reviews_strategy_ck') THEN
+        ALTER TABLE paper_xavier_reviews
+            ADD CONSTRAINT paper_xavier_reviews_strategy_ck
+            CHECK (strategy IN ('DEREK_ENTRY_POLICY_V2',
+                                'PINNACLE_ONLY_PAPER_BENCHMARK'));
+    END IF;
 END $$;
 
 DROP INDEX IF EXISTS paper_decisions_one_per_valuation_idx;
@@ -84,6 +115,18 @@ VALUES ('PINNACLE_ONLY_PAPER_BENCHMARK', TRUE,
         'needs PAPER_BENCHMARK=on in the process environment (default off) '
         'and the paper session enabled. PAPER ONLY; experimental execution, '
         'not evidence of qualified or proven profitability',
+        'migration 182')
+ON CONFLICT DO NOTHING;
+
+-- ── THE PER-STRATEGY ENTRY SWITCH OF THE TWO-MODEL STRATEGY: OFF. It keeps
+-- deciding and recording every valuation (evidence), but a decision that
+-- would ENTER is recorded REFUSE / STRATEGY_ENTRIES_DISABLED and places no
+-- paper order while this row is off (absent = off). Only the benchmark is
+-- enabled for NEW paper entries. Positions already held keep their policy.
+INSERT INTO paper_control (control_key, enabled, why, updated_by)
+VALUES ('PAPER_ENTRIES:DEREK_ENTRY_POLICY_V2', FALSE,
+        'owner: only the PINNACLE_ONLY_PAPER_BENCHMARK may open new paper '
+        'entries; the two-model strategy keeps recording its decisions',
         'migration 182')
 ON CONFLICT DO NOTHING;
 

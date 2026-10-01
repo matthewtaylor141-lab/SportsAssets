@@ -210,9 +210,9 @@ async def build_report(conn, *, session: dict, account_id: str, day,
         "  FROM paper_decisions WHERE account_id=$1 AND decided_at >= $2 "
         "   AND decided_at < $3 AND strategy = $4 GROUP BY 1, 2 "
         " ORDER BY 3 DESC", account_id, t0, t1, TWO_MODEL)
-    decisions = [{"verdict": r["verdict"], "reason": r["reason"],
-                  "decisions": int(r["n"]), "markets": int(r["markets"])}
-                 for r in dec]
+    decisions = [{"strategy": TWO_MODEL, "verdict": r["verdict"],
+                  "reason": r["reason"], "decisions": int(r["n"]),
+                  "markets": int(r["markets"])} for r in dec]
     quality = await conn.fetchrow(
         "SELECT count(*) AS n, "
         "       sum((policy_decision->>'net_expected_profit_usd')::float8) "
@@ -361,6 +361,7 @@ async def build_report(conn, *, session: dict, account_id: str, day,
         "targets": target, "shortfall_causes": causes,
         "decisions": decisions,
         "decision_quality_at_decision_time": {
+            "strategy": TWO_MODEL,
             "entries": int(quality["n"] or 0),
             "expected_net_usd": quality["ev"],
             "mean_gross_edge_pp": quality["edge"],

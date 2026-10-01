@@ -66,6 +66,15 @@ R_MODEL_CANNOT_SCORE = "RESEARCH_MODEL_CANNOT_SCORE_THIS_CANDIDATE"
 R_NO_BOOK = "THE_OBSERVED_BOOK_WAS_UNREADABLE_OR_EMPTY"
 R_NOT_PMUS = "NOT_A_SUPPORTED_POLYMARKET_US_CONTRACT"
 R_ORDER_REFUSED = "PAPER_RISK_REFUSED_THE_ORDER"
+#: THE PER-STRATEGY ENTRY SWITCH (migration 182). This strategy keeps
+#: deciding and recording every valuation, but while its entry row is off
+#: (or absent) a decision that would ENTER is recorded REFUSE with this
+#: named reason and places no paper order: only the PINNACLE_ONLY_PAPER_
+#: BENCHMARK is enabled for new paper entries. The policy decision on the
+#: record still shows what the policy concluded (admitted) and the switch.
+R_ENTRIES_DISABLED = "STRATEGY_ENTRIES_DISABLED"
+STRATEGY = "DEREK_ENTRY_POLICY_V2"
+ENTRIES_CONTROL_KEY = "PAPER_ENTRIES:%s" % STRATEGY
 
 #: WHERE A DECISION WAS FORMED. In the cycle, at the instant the valuation
 #: was written (the lane's own inputs and instant): the primary path. By the
@@ -479,13 +488,21 @@ async def decide_one(conn, ctx: dict, row: dict) -> dict:
         if not pd["refusals"] and sized["qty"] < 1:
             refusals.append(DP.R_NO_QTY)
     verdict = DP.ENTER if not refusals else DP.REFUSE
+    would_enter = verdict == DP.ENTER
+    if would_enter:
+        switch = await entries_switch(conn)
+        if pd is not None:
+            pd["entries_switch"] = switch
+        if not switch["enabled"]:
+            refusals.append(R_ENTRIES_DISABLED)
+            verdict = DP.REFUSE
     cal = await _calibration(conn, dctx, cand["pinnacle"].get(
         "source_version"))
     gaps = qualification_gaps(model=model, calibration=cal, cand=cand,
                               void=dctx["void"])
     optimistic = (SIM.optimistic_fill(md, direction="BUY", holding_side=side,
                                       qty=sized["qty"], limit=sized["limit"])
-                  if verdict == DP.ENTER else None)
+                  if would_enter else None)
     internal_rec = {"p": p_int, "label": MODEL_LABEL,
                     "model_id": model.get("model_id"),
                     "model_version": model.get("model_version"),
@@ -578,6 +595,24 @@ async def decide_one(conn, ctx: dict, row: dict) -> dict:
                                **{k: v for k, v in got.items()
                                   if k not in ("ok",)}})
     return rec
+
+
+async def entries_switch(conn) -> dict:
+    """This strategy's entry switch: its paper_control row, enabled. Absent
+    or unreadable = OFF. Never raises."""
+    try:
+        row = await conn.fetchrow(
+            "SELECT enabled, why, updated_by FROM paper_control "
+            " WHERE control_key = $1", ENTRIES_CONTROL_KEY)
+    except Exception as exc:                                    # noqa: BLE001
+        return {"control_key": ENTRIES_CONTROL_KEY, "enabled": False,
+                "why": "unreadable: %s" % type(exc).__name__}
+    if row is None:
+        return {"control_key": ENTRIES_CONTROL_KEY, "enabled": False,
+                "why": "THE_ENTRY_SWITCH_ROW_IS_ABSENT"}
+    return {"control_key": ENTRIES_CONTROL_KEY,
+            "enabled": bool(row["enabled"]), "why": row["why"],
+            "updated_by": row["updated_by"]}
 
 
 async def _finding(conn, ctx, *, kind: str, subject: str, detail: dict,

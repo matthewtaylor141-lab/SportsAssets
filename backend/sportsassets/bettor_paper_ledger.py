@@ -86,6 +86,10 @@ SRC_LEDGER = "PAPER_LEDGER"
 SRC_SIMULATOR = "SIMULATOR"
 SRC_SETTLEMENT = "AUTHORITATIVE_SETTLEMENT_EVIDENCE"
 
+#: The paper strategy of a row that names none (migration 182's default):
+#: the original two-model strategy.
+DEFAULT_STRATEGY = "DEREK_ENTRY_POLICY_V2"
+
 OPEN_STATES = ("PENDING_SIMULATION", "RESTING", "PARTIALLY_FILLED",
                "CANCEL_PENDING")
 TERMINAL_STATES = ("FILLED", "EXPIRED", "CANCELED", "REJECTED")
@@ -551,9 +555,9 @@ async def apply_fill_locked(conn, *, order: dict, qty, price, wire_price,
         " account_id, session_id, group_id, role, direction, holding_side, "
         " us_market_slug, fixture, label, qty, price, wire_price, fee_usd, "
         " gross_usd, book_obs_id, book_observed_at, filled_at, basis, "
-        " evidence, simulator_version) "
+        " evidence, simulator_version, strategy) "
         "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb,$13,$14,$15,"
-        "        $16,$17,$18,$19,$20,$21,$22::jsonb,$23)",
+        "        $16,$17,$18,$19,$20,$21,$22::jsonb,$23,$24)",
         fid, key, cur["order_id"], cur["account_id"], cur["session_id"],
         cur["group_id"], cur["role"], cur["direction"], cur["holding_side"],
         cur["us_market_slug"], cur["fixture"],
@@ -561,7 +565,10 @@ async def apply_fill_locked(conn, *, order: dict, qty, price, wire_price,
         D(wire_price), fe, gross, book_obs_id,
         (None if book_observed_at is None else _ts(book_observed_at)),
         _ts(filled_at), basis, json.dumps(evidence or {}, default=str),
-        cur["simulator_version"])
+        cur["simulator_version"],
+        # THE ORDER'S STRATEGY (migration 182), so the position it builds
+        # carries it.
+        dict(cur).get("strategy") or DEFAULT_STRATEGY)
     release = Decimal(0)
     if cur["direction"] == "BUY":
         rem_res = D(cur["reserved_remaining_usd"])
@@ -671,7 +678,7 @@ async def release_remainder(conn, *, order_id: str, reason: str, at: float,
 POSITIONS_SQL = """
     WITH f AS (
         SELECT group_id, us_market_slug, holding_side,
-               max(fixture) AS fixture,
+               max(fixture) AS fixture, max(strategy) AS strategy,
                (array_agg(label ORDER BY filled_at))[1] AS label,
                sum(qty) FILTER (WHERE direction='BUY') AS bought,
                sum(gross_usd) FILTER (WHERE direction='BUY') AS buy_gross,
@@ -713,6 +720,9 @@ def _position_from(account_id: str, r) -> dict:
         "group_id": r["group_id"], "us_market_slug": r["us_market_slug"],
         "holding_side": r["holding_side"], "fixture": r["fixture"],
         "label": _j(r["label"]) or {},
+        # ONE STRATEGY PER GROUP (migration 182): the entry's, for life.
+        "strategy": (r.get("strategy") if hasattr(r, "get") else None)
+        or DEFAULT_STRATEGY,
         "bought_qty": f(bought), "sold_qty": f(sold),
         "settled_qty": f(settled), "open_qty": f(open_qty),
         "avg_cost_per_contract_incl_fees": f(D(avg)),

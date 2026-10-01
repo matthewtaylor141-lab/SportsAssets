@@ -1265,7 +1265,7 @@ ENTRIES = [E4, E3, E2, E1]                # latest_entries(): newest first
 
 POSITION = {                              # balances()["open_positions"][0], no mark
     "position_key": PKEY, "group_id": GROUP, "us_market_slug": PSLUG, "holding_side": "LONG",
-    "fixture": "NYY @ BOS", "label": {}, "bought_qty": 800.0, "sold_qty": 0.0, "settled_qty": 0.0,
+    "fixture": "NYY @ BOS", "label": {}, "strategy": "DEREK_ENTRY_POLICY_V2", "bought_qty": 800.0, "sold_qty": 0.0, "settled_qty": 0.0,
     "open_qty": 800.0, "avg_cost_per_contract_incl_fees": 0.50025, "acquisition_cost_usd": 400.2,
     "buy_fees_usd": 0.2, "sale_proceeds_net_usd": 0.0, "sale_fees_usd": 0.0, "settlement": None,
     "cost_basis_usd": 400.2, "realized_pnl_usd": 0.0, "first_fill_at": T0 + 3, "last_fill_at": T0 + 3,
@@ -1360,7 +1360,9 @@ DECISION = {"decision_id": "paperdec:1", "session_id": "paper_session_20260930T1
             "p_pinnacle": 0.548, "pinnacle": {}, "p_blended": 0.556, "book_obs_id": 7, "book": {},
             "proposed_qty": 1000.0, "limit_price": 0.5, "economics": {}, "qualification_gaps": [],
             "policy_version": "P1", "alternatives": [], "optimistic": False,
-            "simulator_version": "PAPER_SIM_V1"}
+            "simulator_version": "PAPER_SIM_V1",
+            # (182) the strategy of the record and a one-line explanation
+            "strategy": "DEREK_ENTRY_POLICY_V2", "explanation": "ENTER"}
 DEREK_PAYLOAD = dict(_base(), opportunities=_ok([DECISION]),
                      refusal_summary_24h=_ok([{"verdict": "ENTER", "reason": "ENTER", "n": 1}]),
                      orders={"status": "EMPTY", "why": "NO_PAPER_ENTRY_ORDER: no decision said ENTER, "

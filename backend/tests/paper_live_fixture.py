@@ -172,3 +172,30 @@ async def drop_today_run(conn, at: float) -> None:
 
 async def new_account(conn, tag, *, now, cfg=None):
     return await H.new_account(conn, tag, config=cfg or config(), now=now)
+
+
+TWO_MODEL_ENTRIES_KEY = "PAPER_ENTRIES:DEREK_ENTRY_POLICY_V2"
+
+
+async def two_model_entries(conn, enabled: bool):
+    """Set the two-model strategy's paper entry switch (migration 182, off by
+    default: only the benchmark opens new entries). Returns the previous
+    value (None when the row was absent) for `restore_two_model_entries`."""
+    prev = await conn.fetchval("SELECT enabled FROM paper_control WHERE "
+                               " control_key=$1", TWO_MODEL_ENTRIES_KEY)
+    await conn.execute(
+        "INSERT INTO paper_control (control_key, enabled, why, updated_by) "
+        "VALUES ($1, $2, 'test', 'test') ON CONFLICT (control_key) DO UPDATE"
+        " SET enabled = EXCLUDED.enabled", TWO_MODEL_ENTRIES_KEY,
+        bool(enabled))
+    return prev
+
+
+async def restore_two_model_entries(conn, prev) -> None:
+    if prev is None:
+        await conn.execute("DELETE FROM paper_control WHERE control_key=$1",
+                           TWO_MODEL_ENTRIES_KEY)
+    else:
+        await conn.execute("UPDATE paper_control SET enabled=$2 WHERE "
+                           " control_key=$1", TWO_MODEL_ENTRIES_KEY,
+                           bool(prev))

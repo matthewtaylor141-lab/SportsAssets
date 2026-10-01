@@ -163,19 +163,19 @@ async def derek_payload(conn, *, account_id: str = L.ACCOUNT_ID,
             "       p_pinnacle, pinnacle, p_blended, book_obs_id, book, "
             "       proposed_qty, limit_price, economics, "
             "       qualification_gaps, policy_version, alternatives, "
-            "       optimistic, simulator_version "
-            "  FROM paper_decisions WHERE account_id=$1 AND strategy = $3 "
-            " ORDER BY decided_at DESC LIMIT $2", account_id, limit,
-            TWO_MODEL)
-        return [_row(r) for r in rows]
+            "       optimistic, simulator_version, strategy, "
+            "       policy_decision "
+            "  FROM paper_decisions WHERE account_id=$1 "
+            " ORDER BY decided_at DESC LIMIT $2", account_id, limit)
+        return [_with_explanation(_row(r)) for r in rows]
 
     async def summary():
         rows = await conn.fetch(
             "SELECT verdict, coalesce(refusal, 'ENTER') AS reason, "
-            "       count(*) AS n FROM paper_decisions WHERE account_id=$1 "
+            "       strategy, count(*) AS n FROM paper_decisions "
+            " WHERE account_id=$1 "
             "   AND decided_at > now() - interval '24 hours' "
-            "   AND strategy = $2 GROUP BY 1, 2 ORDER BY 3 DESC", account_id,
-            TWO_MODEL)
+            " GROUP BY 1, 2, 3 ORDER BY 4 DESC", account_id)
         return [_row(r) for r in rows]
 
     async def orders():
@@ -273,9 +273,49 @@ async def audrey_payload(conn, *, account_id: str = L.ACCOUNT_ID,
     return out
 
 
-#: Derek's decision panels show the original two-model strategy's records
-#: (migration 182); the experimental benchmark has its own payload below.
+#: THE STRATEGY OF A RECORD (migration 182) and a one-line explanation of
+#: its decision, on every decision the Derek panel reads.
 TWO_MODEL = "DEREK_ENTRY_POLICY_V2"
+
+
+def explanation(d: dict, pd: dict | None) -> str:
+    """WHY THIS DECISION, in one line, from what the record holds."""
+    pd = pd if isinstance(pd, dict) else {}
+    strategy = d.get("strategy") or TWO_MODEL
+    if strategy == "PINNACLE_ONLY_PAPER_BENCHMARK":
+        sh = pd.get("shortfall") or {}
+        head = ("ENTER: p_pinnacle %.4f vs the paper book; best level edge "
+                "%.2f pp >= 5.00 pp at every level used; EV after fees $%.2f"
+                % (float(d.get("p_pinnacle") or 0),
+                   float(pd.get("gross_edge_pp") or 0),
+                   float(pd.get("net_expected_profit_usd") or 0))
+                if d.get("verdict") == "ENTER" else
+                "REFUSE %s: edge %s pp vs 5.0, EV after fees %s, depth %s, "
+                "Pinnacle age %s s (limit %s s), book age %s s" % (
+                    d.get("refusal"), sh.get("edge_pp"),
+                    sh.get("ev_after_fees_usd"), sh.get("depth_within_limit"),
+                    sh.get("pinnacle_age_s"), sh.get("pinnacle_limit_s"),
+                    sh.get("book_age_s")))
+        return ("%s. PINNACLE_ONLY_PAPER_BENCHMARK: experimental execution, "
+                "not evidence of qualified or proven profitability; book "
+                "currency NOT_ESTABLISHED (P5)" % head)
+    if d.get("refusal") == "STRATEGY_ENTRIES_DISABLED":
+        return ("REFUSE STRATEGY_ENTRIES_DISABLED: the two-model policy "
+                "admitted this entry but its paper entry switch is off (only "
+                "the benchmark opens new paper entries); %s"
+                % (pd.get("rationale") or ""))
+    return str(pd.get("rationale") or (
+        "%s%s" % (d.get("verdict"), "" if not d.get("refusal")
+                  else " " + str(d.get("refusal")))))
+
+
+def _with_explanation(d: dict) -> dict:
+    pd = d.pop("policy_decision", None)
+    if isinstance(pd, str):
+        pd = L._j(pd)
+    d["strategy"] = d.get("strategy") or TWO_MODEL
+    d["explanation"] = explanation(d, pd)
+    return d
 
 
 async def benchmark_payload(conn, *, account_id: str = L.ACCOUNT_ID,
@@ -337,5 +377,16 @@ async def benchmark_payload(conn, *, account_id: str = L.ACCOUNT_ID,
                                   empty_why="NO_SIMULATED_BENCHMARK_FILL")
     out["handoffs"] = await _section(handoffs(),
                                      empty_why="NO_BENCHMARK_HANDOFF")
+
+    async def ledger():
+        rows = await conn.fetch(
+            "SELECT * FROM paper_ledger WHERE account_id=$1 AND group_id IN "
+            " (SELECT group_id FROM paper_orders WHERE account_id=$1 "
+            "   AND strategy=$2) ORDER BY seq DESC LIMIT $3", account_id,
+            PB.STRATEGY, limit)
+        return [dict(L.entry_view(r), strategy=PB.STRATEGY) for r in rows]
+    out["ledger"] = await _section(
+        ledger(), empty_why=("NO_BENCHMARK_LEDGER_ENTRY: the benchmark "
+                             "shares the account's one cash ledger"))
     out["last_updated_at"] = await _last_updated(conn, account_id)
     return out
