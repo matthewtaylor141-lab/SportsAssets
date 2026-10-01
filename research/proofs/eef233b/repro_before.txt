@@ -1,0 +1,25 @@
+FF                                                                       [100%]
+=================================== FAILURES ===================================
+_______ test_a_same_day_backfill_reaching_the_minimum_is_fitted_that_day _______
+tests/test_derek_research_bootstrap_is_not_blocked_by_an_early_daily_run.py:256: in test_a_same_day_backfill_reaching_the_minimum_is_fitted_that_day
+    assert run.get("already_ran") is not True, (
+E   AssertionError: the day's early INSUFFICIENT run still blocks the fit: {"run_day": "2028-05-23", "ran": false, "already_ran": true, "run_id": "derek-research-run:2028-05-23", "outcome": "INSUFFICIENT_LABELLED_FIXTURES"}
+E   assert True is not True
+E    +  where True = <built-in method get of dict object at 0x7f5f735610c0>('already_ran')
+E    +    where <built-in method get of dict object at 0x7f5f735610c0> = {'run_day': '2028-05-23', 'ran': False, 'already_ran': True, 'run_id': 'derek-research-run:2028-05-23', ...}.get
+_____ test_a_first_run_whose_labels_were_unreadable_does_not_close_the_day _____
+tests/test_derek_research_bootstrap_is_not_blocked_by_an_early_daily_run.py:445: in test_a_first_run_whose_labels_were_unreadable_does_not_close_the_day
+    assert again["rerun_refusal"] == DR.R_RERUN_LABELS_UNREADABLE
+           ^^^^^^^^^^^^^^^^^^^^^^
+E   KeyError: 'rerun_refusal'
+=============================== warnings summary ===============================
+sportsassets/workers/premap.py:115
+  /tmp/claude-0/rel_boot3/backend/sportsassets/workers/premap.py:115: SyntaxWarning: invalid escape sequence '\d'
+    """Every line a text states — half-point lines anywhere, plus WHOLE
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/test_derek_research_bootstrap_is_not_blocked_by_an_early_daily_run.py::test_a_same_day_backfill_reaching_the_minimum_is_fitted_that_day
+FAILED tests/test_derek_research_bootstrap_is_not_blocked_by_an_early_daily_run.py::test_a_first_run_whose_labels_were_unreadable_does_not_close_the_day
+2 failed, 1 warning in 1.66s
+pytest exit 1

@@ -1,0 +1,28 @@
+........................................................................ [ 48%]
+........................................................................ [ 97%]
+...                                                                      [100%]
+=============================== warnings summary ===============================
+tests/test_derek_coverage_census_and_workspace.py::test_the_workspace_on_an_empty_database_is_truthful
+  /tmp/claude-0/rel_boot3/backend/tests/test_derek_coverage_census_and_workspace.py:252: DeprecationWarning: 
+          on_event is deprecated, use lifespan event handlers instead.
+  
+          Read more about it in the
+          [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).
+          
+    @app.on_event("shutdown")
+
+tests/test_derek_coverage_census_and_workspace.py::test_the_workspace_on_an_empty_database_is_truthful
+  /tmp/claude-0/gatevenv312/lib/python3.12/site-packages/fastapi/applications.py:4744: DeprecationWarning: 
+          on_event is deprecated, use lifespan event handlers instead.
+  
+          Read more about it in the
+          [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).
+          
+    return self.router.on_event(event_type)  # ty: ignore[deprecated]
+
+tests/test_paper_records_cannot_reach_the_funded_path.py::test_no_funded_module_imports_the_paper_modules
+  <unknown>:115: SyntaxWarning: invalid escape sequence '\d'
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+147 passed, 3 warnings in 27.11s
+pytest exit 0

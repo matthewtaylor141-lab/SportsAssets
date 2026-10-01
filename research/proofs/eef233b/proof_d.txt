@@ -1,0 +1,68 @@
+=== d1: fresh mp2 -> migrate (rel-boot3 worktree) ===
+NOTICE:  database "rb3_d1" does not exist, skipping
+INFO:__main__:applying 170_derek_research_observations.sql
+INFO:__main__:applying 171_paper_account_and_ledger.sql
+INFO:__main__:applying 172_paper_agents.sql
+INFO:__main__:applying 180_agent_personas_chat_and_voice.sql
+INFO:__main__:applying 181_derek_research_model_runs_decisive_run_per_day.sql
+INFO:__main__:migrations complete
+  schema_migrations 170..181: 170_derek_research_observations.sql, 171_paper_account_and_ledger.sql, 172_paper_agents.sql, 180_agent_personas_chat_and_voice.sql, 181_derek_research_model_runs_decisive_run_per_day.sql
+  one_per_day constraint: 0
+  unique indexes on run_day: CREATE UNIQUE INDEX derek_research_model_runs_one_decisive_run_per_day ON public.derek_research_model_runs USING btree (run_day) WHERE (outcome <> ALL (ARRAY['INSUFFICIENT_LABELLED_FIXTURES'::text, 'LABELS_UNREADABLE'::text]))
+  rows by day: none
+--- d1: re-running migrate (expect no 'applying' line) ---
+INFO:__main__:migrations complete
+--- d1: down script on a DB with no same-day pair ---
+  down: OK
+  one_per_day constraint: 1
+  unique indexes on run_day: CREATE UNIQUE INDEX derek_research_model_runs_one_per_day ON public.derek_research_model_runs USING btree (run_day)
+  rows by day: none
+--- d1: migrate after the down is a NO-OP (181 still recorded) ---
+INFO:__main__:migrations complete
+  one_per_day constraint: 1
+  unique indexes on run_day: CREATE UNIQUE INDEX derek_research_model_runs_one_per_day ON public.derek_research_model_runs USING btree (run_day)
+  rows by day: none
+--- d1: the documented manual step, then migrate re-applies 181 ---
+INFO:__main__:applying 181_derek_research_model_runs_decisive_run_per_day.sql
+INFO:__main__:migrations complete
+  one_per_day constraint: 0
+  unique indexes on run_day: CREATE UNIQUE INDEX derek_research_model_runs_one_decisive_run_per_day ON public.derek_research_model_runs USING btree (run_day) WHERE (outcome <> ALL (ARRAY['INSUFFICIENT_LABELLED_FIXTURES'::text, 'LABELS_UNREADABLE'::text]))
+  rows by day: none
+=== d2: a DB that already holds same-day rows ===
+--- d2: mp2 -> migrate with the ddd4050 tree (through 180) ---
+INFO:__main__:applying 170_derek_research_observations.sql
+INFO:__main__:applying 171_paper_account_and_ledger.sql
+INFO:__main__:applying 172_paper_agents.sql
+INFO:__main__:applying 180_agent_personas_chat_and_voice.sql
+INFO:__main__:migrations complete
+  one_per_day constraint: 1
+  unique indexes on run_day: CREATE UNIQUE INDEX derek_research_model_runs_one_per_day ON public.derek_research_model_runs USING btree (run_day)
+  rows by day: none
+--- d2: the rejected 37814ad draft of 181 applied (as its runner would record it), then same-day rows ---
+  one_per_day constraint: 0
+  unique indexes on run_day: CREATE UNIQUE INDEX derek_research_model_runs_one_decisive_per_day ON public.derek_research_model_runs USING btree (run_day) WHERE (outcome <> 'INSUFFICIENT_LABELLED_FIXTURES'::text)
+  rows by day: 2031-01-01:2 2031-01-02:2
+--- d2: migrate (rel-boot3) applies 181 over them ---
+INFO:__main__:applying 181_derek_research_model_runs_decisive_run_per_day.sql
+INFO:__main__:migrations complete
+  one_per_day constraint: 0
+  unique indexes on run_day: CREATE UNIQUE INDEX derek_research_model_runs_one_decisive_run_per_day ON public.derek_research_model_runs USING btree (run_day) WHERE (outcome <> ALL (ARRAY['INSUFFICIENT_LABELLED_FIXTURES'::text, 'LABELS_UNREADABLE'::text]))
+  rows by day: 2031-01-01:2 2031-01-02:2
+--- d2: re-running migrate is a no-op ---
+INFO:__main__:migrations complete
+--- d2: the down script REFUSES over same-day rows (expect ERROR, nothing changed) ---
+  psql:/tmp/claude-0/rel_boot3/backend/migrations/rollback/181_derek_research_model_runs_decisive_run_per_day.down.sql:56: ERROR:  derek_research_model_runs holds more than one run for a UTC day (append-only rows); 181 is not rolled back over them
+  CONTEXT:  PL/pgSQL function inline_code_block line 8 at RAISE
+  psql exit: 3
+  one_per_day constraint: 0
+  unique indexes on run_day: CREATE UNIQUE INDEX derek_research_model_runs_one_decisive_run_per_day ON public.derek_research_model_runs USING btree (run_day) WHERE (outcome <> ALL (ARRAY['INSUFFICIENT_LABELLED_FIXTURES'::text, 'LABELS_UNREADABLE'::text]))
+  rows by day: 2031-01-01:2 2031-01-02:2
+--- d2: append-only: the same-day rows cannot be deleted to make room ---
+  ERROR:  derek_research_model_runs is append-only: a research record is what was known when it was written
+  CONTEXT:  PL/pgSQL function derek_research_record_is_append_only() line 3 at RAISE
+=== d3: CODE-ONLY ROLLBACK to ddd4050 with 181 left in place (rb3_d2) ===
+  ddd4050 daily_model_run on day with an INSUFFICIENT + FITTED pair: already_ran=True ran=False run_id=proof-d2:a
+  ddd4050 daily_model_run on day with two INSUFFICIENT rows: already_ran=True ran=False run_id=proof-d2:c
+  ddd4050 latest_model_run: run_day=2031-01-02 outcome=INSUFFICIENT_LABELLED_FIXTURES
+  ddd4050 code reads nothing that needs UNIQUE(run_day); its first-row insert uses the run_id primary key
+=== scratch DBs dropped ===
