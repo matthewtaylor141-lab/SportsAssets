@@ -97,7 +97,13 @@ def test_no_funded_module_imports_the_paper_modules():
     allowed = {"bettor_funded_execution.py",       # the refusal itself
                "api/app.py",                        # the read-only router
                "agents/runtime.py",                 # the guarded paper hook
-               "workers/ext_pinnacle_loop.py"}      # the scheduled seam
+               "workers/ext_pinnacle_loop.py",      # the scheduled seam
+               # the agents' CONVERSATIONS read the paper experiment through
+               # the read-only `agents/paper_brief` (balances, session,
+               # today's decisions); neither is a funded module, neither
+               # writes, and only the API chat routes import them
+               "agents/persona_facts.py",
+               "agents/audrey_chat.py"}
     assert set(offenders) <= allowed, sorted(set(offenders) - allowed)
 
 
