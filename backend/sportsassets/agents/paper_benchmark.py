@@ -504,7 +504,24 @@ def venue_grading_period(family, prose) -> dict:
         return {"period": None, "refusal": R_GP_TEXT_ABSENT}
     import re as _re
     hits = [p for p in tpl["all_of"] if _re.search(p, flat)]
-    bad = [p for p in tpl["none_of"] if _re.search(p, flat)]
+    conflict_prose = flat
+    if family == "soccer":
+        # A complete, unconditional exclusion is consistent with 90-minute
+        # grading. The broad conflict patterns otherwise mistake "not
+        # included" or "do not count" for inclusion. Remove ONLY these
+        # whole sentences from conflict checking; required grading phrases
+        # still come from the original text. Qualified clauses, and any
+        # contradictory sentence elsewhere, remain subject to refusal.
+        exclusion = (
+            r"(?:extra time(?: and penalties)?|penalties) "
+            r"(?:(?:is|are|will be) (?:not included|excluded)|"
+            r"(?:does|do|will) not count)[.!?]?"
+        )
+        conflict_prose = " ".join(
+            sentence for sentence in _re.split(r"(?<=[.!?])\s+", flat)
+            if not _re.fullmatch(exclusion, sentence)
+        )
+    bad = [p for p in tpl["none_of"] if _re.search(p, conflict_prose)]
     if bad:
         return {"period": "NOT_" + tpl["period"], "refusal": R_GP_MISMATCH,
                 "matched_excluding": bad}
