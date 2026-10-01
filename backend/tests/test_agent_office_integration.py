@@ -133,7 +133,10 @@ def test_each_office_page_carries_the_workboard_and_conversation(kind):
     h = _page(kind)
     assert "Management office · " in h and "office-layout" in h
     assert 'id="talk"' in h and 'id="talk-in"' in h
-    assert "office-talk-jump" in h, "mobile route to the conversation"
+    # v4: exactly one mobile launcher (the desk dock); the earlier jump
+    # button was removed so the page never shows two
+    assert "desk-mobile-talk" in h, "mobile route to the conversation"
+    assert "office-talk-jump" not in h
     assert 'office-answer-style' in h
     assert "Full analysis -- walk me through" in h
     assert "Briefly, answer conversationally" in h
