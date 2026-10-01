@@ -2,6 +2,7 @@
 --
 -- Simulated execution against live market data. Nothing here writes.
 --
+-- S0 the paper pass heartbeat in ingestion_state
 -- S1 control row and accounts (exactly one account, 500000 starting cash)
 -- S2 sessions (exactly one ACTIVE expected) and session health heartbeat,
 --    passes, errors, venue-mutation attempts (expected 0)
@@ -10,6 +11,12 @@
 -- S4 decisions by verdict/refusal (Derek), handoffs and Xavier reviews,
 --    Audrey reports, equity snapshots
 -- S5 agent status heartbeats for derek / xavier / audrey
+
+\echo '== S0 · the paper pass heartbeat (last pass result, refusal and reason) =='
+SELECT to_timestamp((value->>'written_at')::float8) AS written_at,
+       value->>'refusal' AS refusal, left(value->>'why', 300) AS why,
+       left(value::text, 1500) AS digest
+  FROM ingestion_state WHERE key = 'paper_session_last_pass';
 
 \echo '== S1 · control and accounts =='
 SELECT control_key, enabled, updated_by, updated_at FROM paper_control;
