@@ -486,25 +486,33 @@ READERS = {
         "PAPER_ONLY_OUTCOME_READS_FOR_FORWARD_EVALUATION_NEVER_SELECTS", 3),
     # (189) THE BOUNDED EXPLORATION STRATEGY: its candidate is the row the
     # cycle just wrote, handed in by the benchmark hook (paper_benchmark,
-    # above); its own read is the SAMPLING FRAME -- a count of distinct
-    # fixtures per sport in the window, for the recorded inclusion
-    # probability. It selects nothing from the table.
+    # above). Its own read is the SAMPLING FRAME -- a count of distinct
+    # fixtures per sport in the window (both purposes) -- and that count
+    # GATES ENTRY ADMISSION: it sets the recorded inclusion probability, and
+    # a fixture whose hashed draw is above it is refused (NOT_SAMPLED). It
+    # never picks a row as a candidate; its effect is a paper entry admitted
+    # or refused, never a funded order.
     "agents/paper_explore.py": (
-        "PAPER_ONLY_SAMPLING_FRAME_COUNT_NEVER_SELECTS", 1),
+        "PAPER_ONLY_SAMPLING_COUNT_GATES_ENTRY_ADMISSION_NEVER_PICKS_A_ROW",
+        1),
     # (189) THE MAKER-ENTRY POLICY: its candidate also arrives through the
-    # benchmark hook; its reads re-check an already RESTING paper order
-    # against the latest Pinnacle reading for the same contract and payout
-    # outcome (the cancellation conditions), like paper Xavier's measure.
+    # benchmark hook. Its two reads (the resting order's own valuation row by
+    # id, then the latest Pinnacle reading for the same contract and payout
+    # outcome, both purposes) DRIVE CANCELLATION: an edge gone or no recent
+    # reading requests the cancel of the standing PAPER order and releases
+    # its reservation. It never picks a row as a candidate and never places
+    # an order; its effect is a paper cancellation, never a funded one.
     "agents/paper_maker.py": (
-        "PAPER_ONLY_RESTING_ORDER_RECHECK_NEVER_SELECTS", 2),
+        "PAPER_ONLY_LATEST_READING_DRIVES_RESTING_ORDER_CANCELLATION", 2),
     # (189) AUDREY'S OPERATIONAL AUDIT: counts valuations with no decision
-    # from an enabled strategy (missing decisions). Read-only; no order.
+    # from an enabled strategy (missing decisions); the count becomes an
+    # audit finding and a recommendation measurement. No order, no cancel.
     "agents/paper_ops_audit.py": (
-        "PAPER_ONLY_AUDIT_COUNT_NEVER_SELECTS", 1),
+        "PAPER_ONLY_AUDIT_COUNT_WRITES_FINDINGS_NO_ORDER_EFFECT", 1),
     # (189) THE HOMEPAGE EXPERIMENT READ MODEL: counts of valuations,
-    # fixtures and sports evaluated. Display only.
+    # fixtures and sports evaluated. Display only; writes nothing.
     "bettor_paper_experiment.py": (
-        "PAPER_ONLY_DISPLAY_COUNTS_NEVER_SELECTS", 2),
+        "PAPER_ONLY_DISPLAY_COUNTS_NO_EFFECT", 2),
 }
 
 
