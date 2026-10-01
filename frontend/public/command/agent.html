@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>BettorToken · AI Agents</title>
 <meta name="robots" content="noindex">
 <style>
@@ -10,12 +10,27 @@
   *{box-sizing:border-box} html,body{margin:0;height:100%;background:var(--bg);color:var(--ink);
   font:14px/1.4 system-ui,-apple-system,"Segoe UI",sans-serif}
   body{display:flex;flex-direction:column}
-  nav{display:flex;gap:4px;align-items:center;padding:0 16px;height:48px;border-bottom:1px solid var(--line)}
-  nav .brand{font-weight:700;letter-spacing:.06em;margin-right:16px}
-  nav a{color:var(--mute);text-decoration:none;padding:8px 12px;border-radius:6px}
+  /* THE NAVIGATION NEVER CLIPS: at phone width (390 px) the roles drop to
+     a second line inside each link and the row scrolls sideways if it must;
+     nothing is cut off. */
+  nav{display:flex;gap:4px;align-items:center;padding:0 12px;min-height:48px;border-bottom:1px solid var(--line);
+      overflow-x:auto;-webkit-overflow-scrolling:touch;scrollbar-width:none;flex:none}
+  nav::-webkit-scrollbar{display:none}
+  nav .brand{font-weight:700;letter-spacing:.06em;margin-right:12px;color:var(--ink);text-decoration:none;white-space:nowrap;padding:8px 4px}
+  nav a{color:var(--mute);text-decoration:none;padding:8px 12px;border-radius:6px;white-space:nowrap;flex:none}
+  nav a .role{color:var(--mute)}
   nav a:hover,nav a:focus-visible{color:var(--ink);outline:2px solid var(--line)}
   nav a[aria-current="page"]{color:var(--ink);background:#151b26;box-shadow:inset 0 -2px 0 var(--acc)}
-  nav .tag{margin-left:auto;color:var(--mute);font-size:12px}
+  nav .tag{margin-left:auto;color:var(--mute);font-size:12px;white-space:nowrap;padding-left:8px}
+  @media (max-width:640px){
+    nav{gap:2px;padding:0 8px}
+    nav .brand{font-size:12px;margin-right:4px}
+    nav a{padding:6px 6px;line-height:1.15;font-size:12.5px}
+    nav .brand{letter-spacing:.02em}
+    nav a .role{display:block;font-size:10px}
+    nav a .sep{display:none}
+    nav .tag{display:none}
+  }
   iframe{flex:1;width:100%;border:0;background:var(--bg)}
   noscript{padding:24px}
   #state{margin:48px auto;max-width:640px;padding:20px 24px;border:1px solid #6b3a3a;border-radius:10px;background:#1a1012;color:#f1d3d3;font-weight:600}
@@ -23,11 +38,11 @@
 </head>
 <body>
 <nav aria-label="AI agents">
-  <span class="brand">BETTORTOKEN</span>
-  <a href="/derek" data-agent="derek">Derek · Discovery &amp; Entry</a>
-  <a href="/xavier" data-agent="xavier">Xavier · Portfolio Management</a>
-  <a href="/audrey" data-agent="audrey">Audrey · Audit &amp; Intelligence</a>
-  <span class="tag">AI agents</span>
+  <a class="brand" href="/" title="COMMAND homepage">&#8592; COMMAND</a>
+  <a href="/derek" data-agent="derek">Derek<span class="sep"> · </span><span class="role">Discovery &amp; Entry</span></a>
+  <a href="/xavier" data-agent="xavier">Xavier<span class="sep"> · </span><span class="role">Portfolio Mgmt</span></a>
+  <a href="/audrey" data-agent="audrey">Audrey<span class="sep"> · </span><span class="role">Audit &amp; Intel</span></a>
+  <span class="tag">AI agents · paper experiment</span>
 </nav>
 <iframe id="page" title="Agent page"></iframe>
 <div id="state" role="status" hidden></div>
@@ -52,7 +67,7 @@
     .then(function (r) {
       if (r.ok) { frame.src = url; return; }
       if (r.status === 401 || r.status === 403) {
-        show("Sign in to COMMAND first (Bettor desk unlock), then refresh this page.");
+        show("SIGN-IN REQUIRED: unlock COMMAND on the homepage (Bettor desk unlock), then refresh this page. No figure is shown in the meantime.");
       } else if (r.status === 404) {
         show("NOT YET RELEASED: the serving API does not have the " + name +
              " page yet. It ships with the next API release.");
