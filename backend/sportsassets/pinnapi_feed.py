@@ -41,7 +41,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
-PARSER_VERSION = "ARCADIA_RAW_V0_UNCONFIRMED"
+PARSER_VERSION = "ARCADIA_RAW_V1_OBSERVED_2026_10_01"
 MAX_EVENTS = 4000
 MAX_MARKETS = 120_000
 RING = 4096
@@ -78,6 +78,10 @@ class Quote:
     received_ms: float
     open: bool = True
     alternate: Optional[bool] = None
+    market_version: Optional[float] = None
+
+    def decimal_prices(self) -> dict:
+        return {d: american_to_decimal(p) for d, p in self.prices.items()}
 
 
 @dataclass
@@ -154,12 +158,34 @@ def _num(x):
     return v if math.isfinite(v) else None
 
 
+def american_to_decimal(a) -> Optional[float]:
+    """Pinnacle's raw frames carry AMERICAN odds (observed 2026-10-01:
+    -164 / 127). Decimal = 1 + a/100 for a >= 100, 1 + 100/|a| for
+    a <= -100; anything in (-100, 100) is not an American price."""
+    v = _num(a)
+    if v is None or -100 < v < 100:
+        return None
+    return round(1.0 + (v / 100.0 if v > 0 else 100.0 / abs(v)), 6)
+
+
+def participants(rec: dict) -> dict:
+    """{'home': name, 'away': name} from `participants[].alignment`."""
+    out = {}
+    for p in rec.get("participants") or []:
+        if isinstance(p, dict) and p.get("alignment") in ("home", "away") \
+                and p.get("name"):
+            out[p["alignment"]] = str(p["name"])
+    return out
+
+
 def extract_markets(rec: dict) -> Optional[list]:
     """Pinnacle record -> [(key, fields)], or None when the record does not
-    validate. ISOLATED SCHEMA ASSUMPTIONS (to be confirmed by the bounded
-    ws_sample; PARSER_VERSION records which): a record carries `markets`, a
-    list of dicts with `type`, optional `key`, `period`, `side`, `status`,
-    `isAlternate` and `prices` = [{designation, price, points?}]."""
+    validate. SCHEMA AS OBSERVED in the bounded ws_sample of 2026-10-01
+    (PARSER_VERSION): `markets` is a list of dicts with `key` ("s;0;m",
+    "s;0;s;0.25", ...), `type` (moneyline|spread|total|team_total),
+    `period`, `status`, `isAlternate`, `version` (epoch seconds of the
+    market record -- provenance only, never a price-change time) and
+    `prices` = [{designation, price (AMERICAN), points?}]."""
     ms = rec.get("markets")
     if ms is None:
         return []
@@ -189,8 +215,19 @@ def extract_markets(rec: dict) -> Optional[list]:
             "market_type": str(m.get("type")), "period": period,
             "side": side, "line": line, "prices": pr,
             "open": (m.get("status") in (None, "open")),
-            "alternate": m.get("isAlternate")}))
+            "alternate": m.get("isAlternate"),
+            "market_version": _num(m.get("version"))}))
     return out
+
+
+def closed_periods(rec: dict) -> set:
+    """Periods the record marks anything but open (closed / settled): every
+    market of such a period is closed, listed or not."""
+    ps = rec.get("periods")
+    if not isinstance(ps, list):
+        return set()
+    return {p.get("period") for p in ps if isinstance(p, dict)
+            and p.get("status") not in (None, "open")}
 
 
 class FeedCache:
@@ -321,8 +358,9 @@ class FeedCache:
         old = {k: q for k, q in self.quotes.items() if k[0] == eid}
         for k in old:
             del self.quotes[k]
+        closed = closed_periods(ev)
         for key, f in parsed:
-            if not f["open"]:
+            if not f["open"] or (f["period"] or 0) in closed:
                 continue
             prev = old.get((eid, key))
             changed = prev is None or prev.prices != f["prices"]
@@ -340,21 +378,17 @@ class FeedCache:
     def _merge_event(self, rec, *, stream, sport, epoch, frame_ts, rx):
         eid = rec["id"]
         self._touch_meta(rec, stream=stream, sport=sport)
-        periods = rec.get("periods")
-        if isinstance(periods, list):
-            closed = {p.get("period") for p in periods
-                      if isinstance(p, dict) and p.get("status") not in
-                      (None, "open")}
-            for k in [k for k, q in self.quotes.items()
-                      if k[0] == eid and (q.period or 0) in closed]:
-                del self.quotes[k]
+        closed = closed_periods(rec)
+        for k in [k for k, q in self.quotes.items()
+                  if k[0] == eid and (q.period or 0) in closed]:
+            del self.quotes[k]
         parsed = self.extract(rec)
         if parsed is None:
             self.counts["unparsed"] += 1
             return
         for key, f in parsed:
             k = (eid, key)
-            if not f["open"]:
+            if not f["open"] or (f["period"] or 0) in closed:
                 self.quotes.pop(k, None)
                 self.counts["markets_closed"] += 1
                 continue
@@ -373,7 +407,8 @@ class FeedCache:
             period=f["period"], market_type=f["market_type"],
             side=f["side"], line=f["line"], prices=dict(f["prices"]),
             epoch=epoch, source_change_ms=change, frame_ts_ms=frame_ts,
-            received_ms=rx, open=True, alternate=f["alternate"])
+            received_ms=rx, open=True, alternate=f["alternate"],
+            market_version=f.get("market_version"))
 
     def _bound(self):
         while len(self.events) > self.max_events:

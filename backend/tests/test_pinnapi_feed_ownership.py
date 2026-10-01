@@ -332,3 +332,62 @@ async def test_a_provider_refusal_stops_without_reconnect_storm(monkeypatch):
     await asyncio.wait_for(o.run(), 10)
     assert o.state == "REFUSED_BY_PROVIDER" and o.refused == "plan_lacks_ws"
     assert len(socks) == 1 and c.read(1, "s;0;m")["ok"] is False
+
+
+# ── the parser on the schema OBSERVED in the 2026-10-01 bounded capture ──
+OBSERVED_LIVE_UPD = {
+    "type": "live", "sport_id": 1, "op": "upd", "ts": 1790896801500,
+    "topic": "pinbook/sport/29/event/1637543257",
+    "rec": {
+        "id": 1637543257, "type": "matchup", "status": "started",
+        "startTime": "2026-10-01T21:30:00Z", "isLive": True,
+        "parentId": 1637360364, "version": 1790896801,
+        "participants": [
+            {"name": "Fuerte San Francisco", "alignment": "home", "order": 1,
+             "state": {"score": 0, "redCards": 1}},
+            {"name": "Luis Angel Firpo", "alignment": "away", "order": 0,
+             "state": {"score": 1, "redCards": 0}}],
+        "state": {"minutes": 39, "state": 3},
+        "periods": [{"period": 0, "status": "open"},
+                    {"period": 1, "status": "settled"}],
+        "markets": [
+            {"matchupId": 1637543257, "version": 1790896801, "period": 0,
+             "status": "open", "key": "s;0;s;0.25", "type": "spread",
+             "isAlternate": False,
+             "prices": [{"designation": "home", "price": -164,
+                         "points": 0.25},
+                        {"designation": "away", "price": 127,
+                         "points": -0.25}],
+             "limits": [{"type": "maxRiskStake", "amount": 400}]},
+            {"matchupId": 1637543257, "version": 1790896801, "period": 1,
+             "status": "open", "key": "s;1;m", "type": "moneyline",
+             "isAlternate": False,
+             "prices": [{"designation": "home", "price": 300},
+                        {"designation": "away", "price": -400}]}]}}
+
+
+def test_observed_schema_american_prices_participants_and_settled_period():
+    assert F.american_to_decimal(-164) == pytest.approx(1.609756, abs=1e-6)
+    assert F.american_to_decimal(127) == pytest.approx(2.27)
+    assert F.american_to_decimal(50) is None, "not an American price"
+    rec = OBSERVED_LIVE_UPD["rec"]
+    assert F.participants(rec) == {"home": "Fuerte San Francisco",
+                                   "away": "Luis Angel Firpo"}
+    c = F.FeedCache()
+    ep = c.new_connection([("live", 1)])
+    c.apply(snap("live", 1, 1790896790000, []), epoch=ep)
+    c.apply(OBSERVED_LIVE_UPD, epoch=ep, received_ms=1790896801600)
+    # period 1 is settled: its market is not kept even though listed open
+    assert (1637543257, "s;1;m") not in c.quotes
+    r = c.read(1637543257, "s;0;s;0.25", evaluated_ms=1790896803500)
+    assert r["ok"] is True
+    q = r["quote"]
+    assert q.market_type == "spread" and q.line == 0.25
+    assert q.decimal_prices() == {"home": pytest.approx(1.609756, abs=1e-6),
+                                  "away": pytest.approx(2.27)}
+    p = r["provenance"]
+    assert p["source_change_ms"] == 1790896801500   # the frame stamp
+    assert q.market_version == 1790896801            # provenance only
+    assert p["received_ms"] == 1790896801600
+    assert p["quote_age_s"] == pytest.approx(2.0)
+    assert F.PARSER_VERSION.startswith("ARCADIA_RAW_V1_OBSERVED")
