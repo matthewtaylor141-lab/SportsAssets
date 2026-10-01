@@ -183,14 +183,17 @@ BENCHMARK_STRATEGIES = tuple(p["strategy"] for p in POLICIES)
 # ── THE COMPLETED-GAME POLICY'S VERSIONED PARAMETERS (migration 186) ────
 # ONE whitelisted parameter, min_gross_edge_pp, read from the policy's
 # ACTIVE parameter version (paper_policy_parameter_heads) once per pass /
-# per hook call, through THIS decision path. Bounds 4.0..6.0 pp on a 0.5 pp
-# grid (the floor's justification is in migration 186; the database CHECKs
-# the same bounds and a test pins the three copies equal). FAIL-CLOSED: an
+# per hook call, through THIS decision path. Bounds 5.0..6.0 pp on a 0.5 pp
+# grid: THE 5.0 pp FLOOR IS AN OWNER MANDATE -- the threshold may only be
+# tightened by an approved proposal; a lower threshold needs a SEPARATE
+# OWNER DECISION and a new migration, never a proposal (the database CHECKs
+# the same bounds in migration 186 and a test pins the three copies equal).
+# FAIL-CLOSED: an
 # absent table, a failed read or a stored value outside the bounds runs the
 # SHIPPED DEFAULT (V1, 5.0 pp) and records why. The strict benchmark has no
 # parameter versions: it always runs MIN_EDGE.
 CG_PARAMETERS_V1 = {"min_gross_edge_pp": MIN_EDGE_PP}
-CG_PARAMETER_BOUNDS = {"min_gross_edge_pp": (4.0, 6.0)}
+CG_PARAMETER_BOUNDS = {"min_gross_edge_pp": (5.0, 6.0)}   # 5.0: owner floor
 CG_PARAMETER_GRID_PP = 0.5
 CG_V1_VERSION_ID = "paperparam:%s:V1" % CG_STRATEGY
 P_ACTIVE = "ACTIVE_VERSION"

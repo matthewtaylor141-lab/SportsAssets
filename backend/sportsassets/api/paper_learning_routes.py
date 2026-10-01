@@ -41,8 +41,10 @@ THE TWO WRITES (POST, the existing command CONTROL credential, audited):
         PAPER_LEARNING_PROPOSAL_ACTIVATION control row is on and every
         activation check passes (`paper_learning.activate_proposal`).
   POST /api/command/paper/learning/policy/rollback
-        body {"actor": "<named human>", "reason": "<why>"}: restores the
-        previous version atomically (`rollback_policy_parameters`).
+        body {"operator": "<named human>", "reason": "<why>"}: restores the
+        previous APPROVED version atomically, audited, also while the
+        activation control is off; never touches paper_control
+        (`rollback_policy_parameters`).
 Nothing activates automatically. PAPER ONLY: no funded module reads these
 parameters.
 """
@@ -228,4 +230,5 @@ async def paper_learning_rollback(request: Request) -> dict:
     from ..agents import paper_learning as PLRN
     b = await _body(request)
     return await _write(lambda conn: PLRN.rollback_policy_parameters(
-        conn, actor=b.get("actor"), reason=b.get("reason")))
+        conn, actor=b.get("operator") or b.get("actor"),
+        reason=b.get("reason")))

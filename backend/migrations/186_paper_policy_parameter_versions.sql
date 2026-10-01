@@ -10,20 +10,19 @@
 --
 --     policy     PINNACLE_COMPLETED_GAME_PAPER (paper_benchmark.CG_POLICY)
 --     parameter  min_gross_edge_pp   shipped default (V1) 5.0
---     bounds     4.0 <= value <= 6.0, on a 0.5 pp grid, and an activation
+--     bounds     5.0 <= value <= 6.0, on a 0.5 pp grid, and an activation
 --                moves it at most 1.0 pp from the version it replaces
 --
--- WHY THE 4.0 pp FLOOR. The deployed fee schedule charges up to ~1.75 pp
--- per contract at mid prices (theta x C x p x (1 - p), largest at p = 0.5;
--- 1.74 USD per 100 contracts at 0.50). The completed-game policy's EV is
--- CONDITIONAL on ordinary completion (exceptional settlements are priced
--- separately with UNMEASURED frequency), the venue book's currency is not
--- established (P5) and the de-vigged Pinnacle probability carries its own
--- error. 4.0 pp keeps at least ~2.25 pp of gross edge after the largest
--- fee for those unmeasured risks, and is never more than one 1 pp step
--- below the shipped 5 pp. The ceiling, 6.0 pp, bounds tightening the same
--- way. Any other parameter, policy or value is refused here (CHECK) and in
--- code.
+-- THE 5.0 pp FLOOR IS AN OWNER MANDATE FOR THIS RELEASE: the edge threshold
+-- may be TIGHTENED (up to 6.0 pp) by an evaluated, approved proposal, never
+-- loosened below the shipped 5.0 pp. A lower threshold needs a SEPARATE
+-- OWNER DECISION and a new migration; nothing here, in code or in a
+-- proposal, can produce one. (Context for that decision: the deployed fee
+-- schedule charges up to ~1.75 pp per contract at mid prices; the policy's
+-- EV is CONDITIONAL on ordinary completion with exceptional-settlement
+-- frequency UNMEASURED; the venue book's currency is not established (P5);
+-- the de-vigged Pinnacle probability carries its own error.) Any other
+-- parameter, policy or value is refused here (CHECK) and in code.
 --
 -- THE TABLES
 --   paper_policy_parameter_versions     IMMUTABLE versions (append-only):
@@ -46,6 +45,12 @@
 -- records the version id, the values used and the proposal provenance in
 -- its existing policy_decision / economics JSON; nothing is added to, or
 -- rewritten in, earlier rows.
+--
+-- ROLLBACK restores the previous APPROVED version (the shipped default or
+-- one approved from an evaluated proposal), atomically and audited; it is
+-- available while the activation control is off, needs a named operator
+-- and a reason, and never touches paper_control (a disabled strategy stays
+-- disabled).
 --
 -- NOTHING FUNDED READS THESE TABLES (an import-isolation test pins it). The
 -- only reader is the paper completed-game decision path; the only writer is
@@ -71,14 +76,16 @@ CREATE TABLE IF NOT EXISTS paper_policy_parameter_versions (
         version_id LIKE 'paper%'),
     CONSTRAINT paper_policy_parameter_versions_policy_ck CHECK (
         policy_key = 'PINNACLE_COMPLETED_GAME_PAPER'),
-    -- THE WHITELIST AND THE BOUNDS: one parameter, 4.0 .. 6.0, 0.5 grid.
+    -- THE WHITELIST AND THE BOUNDS: one parameter, 5.0 .. 6.0, 0.5 grid.
+    -- 5.0 is the owner-mandated floor; lowering it is a separate owner
+    -- decision (a new migration), never a proposal.
     CONSTRAINT paper_policy_parameter_versions_whitelist_ck CHECK (
         jsonb_typeof(params) = 'object'
         AND params ? 'min_gross_edge_pp'
         AND (params - 'min_gross_edge_pp') = '{}'::jsonb
         AND jsonb_typeof(params->'min_gross_edge_pp') = 'number'),
     CONSTRAINT paper_policy_parameter_versions_bounds_ck CHECK (
-        (params->>'min_gross_edge_pp')::numeric BETWEEN 4.0 AND 6.0
+        (params->>'min_gross_edge_pp')::numeric BETWEEN 5.0 AND 6.0
         AND mod((params->>'min_gross_edge_pp')::numeric * 2, 1) = 0),
     CONSTRAINT paper_policy_parameter_versions_source_ck CHECK (
         source IN ('SHIPPED_DEFAULT', 'EVALUATED_PROPOSAL')),

@@ -661,7 +661,7 @@ def test_the_split_rule_refuses_overlap_peeking_and_empty_periods():
 
 
 async def _decision_row(conn, acct, *, strategy, at, slug, edge_pp,
-                        price=0.50):
+                        price=0.50, enter=False):
     did = "papertest:%s" % hashlib.sha256(
         ("%s:%s:%s" % (acct["account_id"], slug, at)).encode()
     ).hexdigest()[:20]
@@ -670,12 +670,15 @@ async def _decision_row(conn, acct, *, strategy, at, slug, edge_pp,
         " decided_at, us_market_slug, holding_side, verdict, refusal, "
         " refusals, internal_model, pinnacle, book, qualification_gaps, "
         " policy_version, policy_decision, simulator_version, strategy) "
-        "VALUES ($1,$2,$3,to_timestamp($4),$5,'LONG','REFUSE',"
-        " 'BELOW_MIN_GROSS_EDGE',ARRAY['BELOW_MIN_GROSS_EDGE'],'{}'::jsonb,"
-        " '{}'::jsonb,$6::jsonb,'[]'::jsonb,$7,$8::jsonb,'PAPER_SIM_V1',$9)",
+        "VALUES ($1,$2,$3,to_timestamp($4),$5,'LONG',$10,$11,$12::text[],"
+        " '{}'::jsonb,'{}'::jsonb,$6::jsonb,'[]'::jsonb,$7,$8::jsonb,"
+        " 'PAPER_SIM_V1',$9)",
         did, acct["session_id"], acct["account_id"], float(at), slug,
         json.dumps({"levels": [{"price": price, "qty": 100}]}),
-        PB.CG_VERSION, json.dumps({"gross_edge_pp": edge_pp}), strategy)
+        PB.CG_VERSION, json.dumps({"gross_edge_pp": edge_pp}), strategy,
+        "ENTER" if enter else "REFUSE",
+        None if enter else "BELOW_MIN_GROSS_EDGE",
+        [] if enter else ["BELOW_MIN_GROSS_EDGE"])
     return did
 
 
@@ -689,7 +692,15 @@ async def test_a_proposal_refuses_overlapping_periods_and_reports_insufficient_f
         a = await H.new_account(conn, "lrprop", now=t0)
         b = await H.new_account(conn, "lrprop2", now=t0)
         accts = [a["account_id"], b["account_id"]]
-        change = {"parameter": "min_gross_edge_pp", "from": 5.0, "to": 4.0}
+        change = {"parameter": "min_gross_edge_pp", "from": 5.0, "to": 5.5}
+        # BELOW THE OWNER'S 5.0 pp FLOOR: refused by name
+        low = await PLRN.create_proposal(
+            conn, account_id=a["account_id"], proposed_at=t0,
+            training=(t0 - 100, t0), evaluation=(t0, t0 + 100),
+            agent_id="DEREK", strategy=CG, change_class=PLRN.C_EDGE,
+            proposed_change=dict(change, to=4.5), rationale="test",
+            proposed_by="DEREK")
+        assert low["refusal"] == PLRN.R_OUT_OF_BOUNDS
         kw = dict(agent_id="DEREK", strategy=CG, change_class=PLRN.C_EDGE,
                   proposed_change=change, rationale="test",
                   proposed_by="DEREK")
@@ -723,21 +734,22 @@ async def test_a_proposal_refuses_overlapping_periods_and_reports_insufficient_f
         assert ev["ok"] is False and ev["refusal"] == PLRN.R_OVERLAP
         assert ev["evaluated"] is False
 
-        # ── FORWARD RECORDS: two in TRAINING, three in EVALUATION ────────
+        # ── FORWARD RECORDS: two in TRAINING, three in EVALUATION: entries
+        # at 5.2 pp (admitted under 5.0, removed under 5.5) that LOST ──────
         week = 7 * 86400.0
         training, evaluation = (t0 - 1000, t0), (t0, t0 + week)
         for acc in (a, b):
             for k, at in enumerate((t0 - 500, t0 - 400, t0 + 100, t0 + 200,
                                     t0 + 300)):
-                v = await PL.valuation(conn, decided_at=at, p_pin=0.545)
+                v = await PL.valuation(conn, decided_at=at, p_pin=0.552)
                 # the venue's outcome, a minute after the valuation
                 await conn.execute(
                     "UPDATE external_valuations SET outcome_known=TRUE, "
-                    " outcome=1, outcome_basis='VENUE_SETTLEMENT_PRICE', "
+                    " outcome=0, outcome_basis='VENUE_SETTLEMENT_PRICE', "
                     " outcome_at=to_timestamp($2) WHERE id=$1",
                     v["valuation_id"], at + 60)
                 await _decision_row(conn, acc, strategy=CG, at=at,
-                                    slug=v["slug"], edge_pp=4.5)
+                                    slug=v["slug"], edge_pp=5.2, enter=True)
         # A: the protocol needs 10 forward outcomes
         ra = await PLRN.create_proposal(
             conn, account_id=a["account_id"], proposed_at=t0,
@@ -748,7 +760,7 @@ async def test_a_proposal_refuses_overlapping_periods_and_reports_insufficient_f
         e1 = await PLRN.evaluate_proposal(conn, pid, now=t0 + 400)
         assert e1["status"] == PLRN.S_INSUFFICIENT
         assert e1["reason"] == PLRN.R_PERIOD_OPEN
-        assert e1["counts"]["newly_admitted_settled"] == 3
+        assert e1["counts"]["affected_settled"] == 3
         assert e1["training_records_used"] == 0
         # AFTER IT ENDS: still INSUFFICIENT -- 3 forward outcomes, 10 needed
         e2 = await PLRN.evaluate_proposal(conn, pid, now=t0 + week + 1)
@@ -759,7 +771,7 @@ async def test_a_proposal_refuses_overlapping_periods_and_reports_insufficient_f
         row = await PLRN.proposal(conn, pid)
         assert row["status"] == PLRN.S_INSUFFICIENT
         assert row["verdict"] is None and row["active"] is False
-        assert row["last_attempt"]["counts"]["newly_admitted_settled"] == 3
+        assert row["last_attempt"]["counts"]["affected_settled"] == 3
         # one open proposal per change: a second is refused by name
         dup = await PLRN.create_proposal(
             conn, account_id=a["account_id"], proposed_at=t0 + 1,
@@ -781,7 +793,9 @@ async def test_a_proposal_refuses_overlapping_periods_and_reports_insufficient_f
         assert done["outcomes"] == 3          # the training records: unused
         assert done["label"] == PLRN.COUNTERFACTUAL
         assert done["executable"] is False
-        assert done["verdict"] == PLRN.V_PASS   # every contract paid out
+        # every removed trade lost: removing them improves -> PASS
+        assert done["verdict"] == PLRN.V_PASS
+        assert done["counts"]["direction"] == "TIGHTEN"
         ev_dids = {r["decision_id"] for r in done["results"]}
         trn = {r["decision_id"] for r in await conn.fetch(
             "SELECT decision_id FROM paper_decisions WHERE account_id=$1 "
@@ -810,7 +824,7 @@ async def test_a_proposal_refuses_overlapping_periods_and_reports_insufficient_f
             on = await PLRN.activate_proposal(conn, pb, approver="owner",
                                               now=t0 + week + 3)
             assert on["ok"] and on["active"] and on["scope"] == "PAPER_ONLY"
-            assert on["params"] == {"min_gross_edge_pp": 4.0}
+            assert on["params"] == {"min_gross_edge_pp": 5.5}
             assert on["previous_version_id"] == PB.CG_V1_VERSION_ID
             assert all(c["passed"] for c in on["checks"])
         finally:
@@ -826,7 +840,7 @@ async def test_a_proposal_refuses_overlapping_periods_and_reports_insufficient_f
         assert sa["proposed_change"]["proposal_id"] == pid
         assert sa["evaluation"]["status"] == PLRN.S_INSUFFICIENT
         assert sa["evaluation"]["last_attempt"]["counts"][
-            "newly_admitted_settled"] == 3
+            "affected_settled"] == 3
         assert sa["active"] is False
         sb = (await PLRN.learning_summary(conn, account_id=b["account_id"])
               )["agents"]["DEREK"]["data"]
@@ -844,12 +858,13 @@ async def test_a_proposal_refuses_overlapping_periods_and_reports_insufficient_f
 
 
 @pg
-async def test_the_scheduled_pass_proposes_from_a_lesson_and_never_activates(
+async def test_near_misses_never_propose_below_the_owners_5pp_floor(
         both_on, monkeypatch):
     """FIVE NEAR MISSES (4.5 pp against the 5 pp threshold) on the completed-
-    game policy, through a real pass: Derek's refusal-funnel lesson yields a
-    proposal whose training ends before its evaluation begins; later passes
-    report INSUFFICIENT_FORWARD_DATA; nothing is activated."""
+    game policy, through a real pass: they would argue for LOWERING the edge
+    threshold, which the owner's 5.0 pp floor forbids -- so Derek's lesson
+    records the proposal as NOT_APPLICABLE with the reason, and no proposal
+    is created (now or on later passes)."""
     conn = await H.connect()
     now = time.time() + 5.0
     acct = None
@@ -867,33 +882,19 @@ async def test_the_scheduled_pass_proposes_from_a_lesson_and_never_activates(
         assert not p["errors"], p["errors"]
         assert p["steps"]["benchmark_completed_game"]["refusals"].get(
             "BELOW_MIN_GROSS_EDGE") == 5
-        assert p["steps"]["learning"]["proposals_created"] == 1, \
+        assert p["steps"]["learning"]["proposals_created"] == 0, \
             p["steps"]["learning"]
-        props = await PLRN.proposals(conn, account_id=acct["account_id"])
-        assert len(props) == 1
-        pr = props[0]
-        assert pr["agent_id"] == "DEREK" and pr["strategy"] == CG
-        assert pr["change_class"] == PLRN.C_EDGE
-        assert pr["proposed_change"]["from"] == PB.MIN_EDGE_PP
-        assert pr["training_end"] <= pr["proposed_at"] <= \
-            pr["evaluation_start"] < pr["evaluation_end"]
-        assert pr["training_end"] > now   # this pass's decisions: training
-        assert pr["active"] is False
-        lid = pr["source_lesson_ids"][0]
-        les = await conn.fetchrow("SELECT * FROM paper_agent_lessons WHERE "
-                                  " lesson_id=$1", lid)
-        assert les["kind"] == PLRN.L_REFUSALS
-        assert H.j(les["metrics"])["near_miss_edge_refusals"] == 5
-        # the same pass already attempted it: INSUFFICIENT, with counts
-        assert pr["status"] == PLRN.S_INSUFFICIENT
-        assert pr["last_attempt"]["reason"] == PLRN.R_PERIOD_OPEN
-        assert pr["last_attempt"]["counts"]["evaluation_period_decisions"] \
-            == 0
+        assert await PLRN.proposals(conn, account_id=acct["account_id"]) \
+            == []
+        les = {(x["kind"], x["strategy"]): x for x in await PLRN.lessons(
+            conn, account_id=acct["account_id"])}[(PLRN.L_REFUSALS, CG)]
+        m = les["metrics"]
+        assert m["near_miss_edge_refusals"] == 5
+        assert m["proposal"]["status"] == "NOT_APPLICABLE"
+        assert "separate owner decision" in m["proposal"]["why"]
         p2 = await _pass(conn, acct, t, now + 5, client)
         assert not p2["errors"], p2["errors"]
         assert p2["steps"]["learning"]["proposals_created"] == 0
-        assert (await PLRN.proposal(conn, pr["proposal_id"]))["active"] \
-            is False
         assert client.mutation_attempts == 0
     finally:
         await _cleanup(conn, [acct and acct["account_id"]])
@@ -964,7 +965,7 @@ def test_the_learning_routes_need_the_command_credential_and_read_sections(
     assert r.json()["result"]["status"] == "OK"
     st = r.json()["result"]["data"]
     assert st["active"]["version_id"] == PB.CG_V1_VERSION_ID
-    assert st["bounds"] == {"min_gross_edge_pp": [4.0, 6.0]}
+    assert st["bounds"] == {"min_gross_edge_pp": [5.0, 6.0]}
     # THE TWO WRITES: POST only, the command CONTROL credential, audited;
     # refused by name when their conditions are not met
     writes = [r for r in R.router.routes
@@ -990,33 +991,41 @@ def test_the_learning_routes_need_the_command_credential_and_read_sections(
 # ═════════════════════════════════════════════════════════════════════
 
 def test_the_bounds_are_one_rule_in_code_twice_and_in_the_database():
+    """THE OWNER'S 5.0 pp FLOOR, everywhere: both code copies and migration
+    186's CHECK; nothing below 5.0 validates or can be proposed."""
     import pathlib
     assert PB.CG_PARAMETER_BOUNDS == PLRN.PARAM_BOUNDS == {
-        "min_gross_edge_pp": (4.0, 6.0)}
+        "min_gross_edge_pp": (5.0, 6.0)}
     assert PB.CG_PARAMETERS_V1 == PLRN.PARAM_DEFAULTS == {
         "min_gross_edge_pp": 5.0}
     assert PB.CG_PARAMETER_GRID_PP == PLRN.PARAM_GRID_PP == 0.5
     sql = (pathlib.Path(PB.__file__).resolve().parents[2] / "migrations"
            / "186_paper_policy_parameter_versions.sql").read_text()
-    assert "BETWEEN 4.0 AND 6.0" in sql
+    assert "BETWEEN 5.0 AND 6.0" in sql
+    assert "BETWEEN 4" not in sql
     assert "'{\"min_gross_edge_pp\": 5.0}'::jsonb" in sql
-    for bad in ({"min_gross_edge_pp": 3.5}, {"min_gross_edge_pp": 6.5},
-                {"min_gross_edge_pp": 4.25}, {"min_gross_edge_pp": "5"},
+    for bad in ({"min_gross_edge_pp": 4.0}, {"min_gross_edge_pp": 4.5},
+                {"min_gross_edge_pp": 4.99}, {"min_gross_edge_pp": 6.5},
+                {"min_gross_edge_pp": 5.25}, {"min_gross_edge_pp": "5"},
                 {"min_gross_edge_pp": 5.0, "max_qty": 1}, {}):
         assert PB.validate_cg_parameters(bad) is not None, bad
         assert PLRN.validate_parameters(bad) is not None, bad
-    assert PB.validate_cg_parameters({"min_gross_edge_pp": 4.0}) is None
-    ch = {"parameter": "min_gross_edge_pp", "from": 5.0, "to": 4.0}
+    for ok in (5.0, 5.5, 6.0):
+        assert PB.validate_cg_parameters({"min_gross_edge_pp": ok}) is None
+    ch = {"parameter": "min_gross_edge_pp", "from": 5.0, "to": 5.5}
     assert PLRN.check_change(PLRN.C_EDGE, CG, ch) is None
-    assert PLRN.check_change(PLRN.C_EDGE, PB.STRATEGY, ch) == \
-        PLRN.R_CHANGE_NOT_SUPPORTED
-    assert PLRN.check_change(PLRN.C_EDGE, CG, dict(ch, to=3.5)) == \
+    assert PLRN.check_change(PLRN.C_EDGE, CG, dict(ch, to=4.5)) == \
+        PLRN.R_OUT_OF_BOUNDS
+    assert PLRN.check_change(PLRN.C_EDGE, CG, dict(ch, to=4.0)) == \
         PLRN.R_OUT_OF_BOUNDS
     assert PLRN.check_change(PLRN.C_EDGE, CG, dict(ch, to=6.5)) == \
         PLRN.R_OUT_OF_BOUNDS
+    assert PLRN.check_change(PLRN.C_EDGE, CG, dict(ch, to=5.0)) == \
+        PLRN.R_STEP_TOO_LARGE                   # an empty change
     assert PLRN.check_change(PLRN.C_EDGE, CG, {
-        "parameter": "min_gross_edge_pp", "from": 4.0, "to": 5.5}) == \
-        PLRN.R_STEP_TOO_LARGE
+        "parameter": "min_gross_edge_pp", "from": 6.0, "to": 5.0}) is None
+    assert PLRN.check_change(PLRN.C_EDGE, PB.STRATEGY, ch) == \
+        PLRN.R_CHANGE_NOT_SUPPORTED
     assert PLRN.check_change(PLRN.C_EDGE, CG, dict(
         ch, parameter="per_order_cap_usd")) == PLRN.R_NOT_WHITELISTED
 
@@ -1068,24 +1077,25 @@ def test_no_funded_module_reads_or_imports_the_policy_parameters():
 
 
 async def _passing_proposal(conn, acct, t0):
-    """A proposal whose protocol lies entirely in the past, with its
-    evaluation FORWARD RECORDS CONSTRUCTED IN THE TEST DATABASE (3 settled
-    near-miss refusals in the evaluation period; production never fabricates
-    them), evaluated by the real evaluator to a PASS."""
+    """A TIGHTENING proposal (5.0 -> 5.5 pp) whose protocol lies entirely in
+    the past, with its evaluation FORWARD RECORDS CONSTRUCTED IN THE TEST
+    DATABASE (3 entries at 5.2 pp in the evaluation period that settled
+    LOST; production never fabricates them), evaluated by the real
+    evaluator to a PASS (removing losing trades improves the result)."""
     tr, ev = (t0 - 3000, t0 - 2000), (t0 - 2000, t0 - 1000)
     for at in (t0 - 1800, t0 - 1600, t0 - 1400):
-        v = await PL.valuation(conn, decided_at=at, p_pin=0.545)
+        v = await PL.valuation(conn, decided_at=at, p_pin=0.552)
         await conn.execute(
-            "UPDATE external_valuations SET outcome_known=TRUE, outcome=1, "
+            "UPDATE external_valuations SET outcome_known=TRUE, outcome=0, "
             " outcome_basis='VENUE_SETTLEMENT_PRICE', "
             " outcome_at=to_timestamp($2) WHERE id=$1", v["valuation_id"],
             at + 60)
         await _decision_row(conn, acct, strategy=CG, at=at, slug=v["slug"],
-                            edge_pp=4.5)
+                            edge_pp=5.2, enter=True)
     r = await PLRN.create_proposal(
         conn, account_id=acct["account_id"], agent_id="DEREK", strategy=CG,
         change_class=PLRN.C_EDGE, proposed_change={
-            "parameter": "min_gross_edge_pp", "from": 5.0, "to": 4.0},
+            "parameter": "min_gross_edge_pp", "from": 5.0, "to": 5.5},
         rationale="test", proposed_by="DEREK", proposed_at=tr[1],
         training=tr, evaluation=ev, min_evaluation_outcomes=3)
     assert r["ok"] and r["created"], r
@@ -1094,13 +1104,20 @@ async def _passing_proposal(conn, acct, t0):
     return r["proposal_id"], e["evaluation_id"]
 
 
+async def _controls(conn) -> dict:
+    return {r["control_key"]: (r["enabled"], r["why"], r["updated_by"],
+                               r["updated_at"])
+            for r in await conn.fetch("SELECT * FROM paper_control")}
+
+
 @pg
 async def test_an_activated_candidate_changes_a_future_decision_and_rollback_restores_it(  # noqa: E501
         both_on):
-    """4.5 pp of edge: REFUSE under V1 (5 pp); after the explicit, approved
-    activation, a NEW valuation with the same edge ENTERS under V2 (4 pp)
-    with the version and its provenance on the decision; the rollback
-    returns a further new valuation to REFUSE. Historical rows unchanged."""
+    """5.2 pp of edge: ENTER under V1 (5.0 pp); after the explicit, approved
+    activation of 5.5 pp, a NEW valuation with the same edge REFUSES, with
+    the version and its provenance on the decision; the rollback (made with
+    the activation control OFF) restores V1 and a further new valuation
+    ENTERS again. Historical rows unchanged; paper_control untouched."""
     conn = await H.connect()
     now = time.time() + 5.0
     acct = None
@@ -1113,7 +1130,7 @@ async def test_an_activated_candidate_changes_a_future_decision_and_rollback_res
         client = PL.client(t)
 
         async def decide(at):
-            v = await PL.valuation(conn, decided_at=at - 10, p_pin=0.545,
+            v = await PL.valuation(conn, decided_at=at - 10, p_pin=0.552,
                                    compatibility="INCOMPATIBLE")
             t.set(v["slug"], offers=[(0.50, 2000)], bids=[(0.48, 2000)])
             p = await _pass(conn, acct, t, at, client)
@@ -1123,15 +1140,14 @@ async def test_an_activated_candidate_changes_a_future_decision_and_rollback_res
                 " valuation_id=$2 AND strategy=$3", acct["session_id"],
                 v["valuation_id"], CG)
 
-        # ── V1: 4.5 pp is below the shipped 5 pp ───────────────────────
+        # ── V1: 5.2 pp clears the shipped 5.0 pp ───────────────────────
         d1 = await decide(now)
-        assert d1["verdict"] == "REFUSE"
-        assert d1["refusal"] == "BELOW_MIN_GROSS_EDGE"
+        assert d1["verdict"] == "ENTER", (d1["refusal"], d1["refusals"])
         pd1 = H.j(d1["policy_decision"])
         assert pd1["parameters"]["version_id"] == PB.CG_V1_VERSION_ID
         assert pd1["parameters"]["source"] == PB.P_ACTIVE
         assert pd1["parameters"]["values"] == {"min_gross_edge_pp": 5.0}
-        assert pd1["shortfall"]["edge_threshold_pp"] == 5.0
+        assert pd1["gross_edge_pp"] == pytest.approx(5.2)
         frozen = dict(d1)
 
         # ── ACTIVATION: refused while the control is off; then explicit ──
@@ -1151,7 +1167,7 @@ async def test_an_activated_candidate_changes_a_future_decision_and_rollback_res
                                PLRN.ACTIVATION_CONTROL_KEY)
         assert on["ok"], on
         v2 = on["version_id"]
-        assert on["params"] == {"min_gross_edge_pp": 4.0}
+        assert on["params"] == {"min_gross_edge_pp": 5.5}
         assert on["evaluation_id"] == eid
         ver = await conn.fetchrow("SELECT * FROM "
                                   " paper_policy_parameter_versions WHERE "
@@ -1160,38 +1176,42 @@ async def test_an_activated_candidate_changes_a_future_decision_and_rollback_res
                 ver["approved_by"]) == (pid, eid, "owner")
         with pytest.raises(asyncpg.PostgresError):
             await conn.execute("UPDATE paper_policy_parameter_versions SET "
-                               " params='{\"min_gross_edge_pp\": 4.5}' "
+                               " params='{\"min_gross_edge_pp\": 6.0}' "
                                " WHERE version_id=$1", v2)
-        with pytest.raises(asyncpg.CheckViolationError):
-            async with conn.transaction():
-                await conn.execute(
-                    "INSERT INTO paper_policy_parameter_versions (version_id,"
-                    " policy_key, version_no, params, params_sha256, source,"
-                    " proposal_id, evaluation_id, approved_by, created_at) "
-                    "VALUES ('paperparam:x', $1, 999, "
-                    " '{\"min_gross_edge_pp\": 3.5}', 'x', "
-                    " 'EVALUATED_PROPOSAL', $2, 'e', 'owner', now())",
-                    CG, pid)
+        # THE DATABASE REFUSES ANY VERSION BELOW THE 5.0 pp FLOOR
+        for below in ("4.5", "4.0"):
+            with pytest.raises(asyncpg.CheckViolationError):
+                async with conn.transaction():
+                    await conn.execute(
+                        "INSERT INTO paper_policy_parameter_versions ("
+                        " version_id, policy_key, version_no, params, "
+                        " params_sha256, source, proposal_id, evaluation_id,"
+                        " approved_by, created_at) VALUES ('paperparam:x', "
+                        " $1, 999, $3::jsonb, 'x', 'EVALUATED_PROPOSAL', $2,"
+                        " 'e', 'owner', now())", CG, pid,
+                        '{"min_gross_edge_pp": %s}' % below)
 
-        # ── V2: the SAME edge on a NEW valuation now ENTERS ─────────────
+        # ── V2: the SAME edge on a NEW valuation now REFUSES ────────────
         d2 = await decide(now + 30)
-        assert d2["verdict"] == "ENTER", (d2["refusal"], d2["refusals"])
+        assert d2["verdict"] == "REFUSE"
+        assert d2["refusal"] == "BELOW_MIN_GROSS_EDGE"
         pd2 = H.j(d2["policy_decision"])
         par = pd2["parameters"]
         assert par["version_id"] == v2 and par["source"] == PB.P_ACTIVE
-        assert par["values"] == {"min_gross_edge_pp": 4.0}
+        assert par["values"] == {"min_gross_edge_pp": 5.5}
         assert (par["proposal_id"], par["evaluation_id"],
                 par["approved_by"]) == (pid, eid, "owner")
+        assert pd2["shortfall"]["edge_threshold_pp"] == 5.5
         assert H.j(d2["economics"])["parameters"]["version_id"] == v2
-        assert H.j(d2["economics"])["threshold_edge_pp"] == 4.0
+        assert H.j(d2["economics"])["threshold_edge_pp"] == 5.5
         assert H.j(d2["provenance"])["versions"]["parameters"][
             "version_id"] == v2
         cond = {c["condition"]: c for c in pd2["conditions"]}
         assert cond["edge_at_least_min_gross_edge_pp_at_every_level_used"][
-            "threshold"] == 4.0
+            "threshold"] == 5.5
         assert await conn.fetchval(
             "SELECT count(*) FROM paper_orders WHERE decision_id=$1",
-            d2["decision_id"]) == 1
+            d2["decision_id"]) == 0
         # THE EARLIER DECISION IS UNTOUCHED
         again = await conn.fetchrow("SELECT * FROM paper_decisions WHERE "
                                     " decision_id=$1", d1["decision_id"])
@@ -1208,21 +1228,31 @@ async def test_an_activated_candidate_changes_a_future_decision_and_rollback_res
         cand = next(c for c in st["candidates"] if c["proposal_id"] == pid)
         assert cand["active"] is True and cand["evaluation_id"] == eid
 
-        # ── ROLLBACK: atomic, audited; a NEW valuation REFUSES again ────
+        # ── ROLLBACK, ACTIVATION CONTROL OFF: atomic, audited, restores V1,
+        # touches no paper_control row; a NEW valuation ENTERS again ──────
+        before = await _controls(conn)
+        assert before[PLRN.ACTIVATION_CONTROL_KEY][0] is False
+        assert (await PLRN.rollback_policy_parameters(
+            conn, actor="owner", reason=""))["refusal"] == \
+            PLRN.R_ROLLBACK_NEEDS_REASON
+        assert (await PLRN.rollback_policy_parameters(
+            conn, actor="", reason="x"))["refusal"] == PLRN.R_NO_APPROVER
         rb = await PLRN.rollback_policy_parameters(
             conn, actor="owner", reason="proof: restore V1", now=now + 40)
         assert rb["ok"] and rb["active_version_id"] == PB.CG_V1_VERSION_ID
         assert rb["rolled_back_version_id"] == v2
+        assert await _controls(conn) == before
         assert (await PLRN.proposal(conn, pid))["active"] is False
         d3 = await decide(now + 60)
-        assert d3["verdict"] == "REFUSE"
-        assert d3["refusal"] == "BELOW_MIN_GROSS_EDGE"
+        assert d3["verdict"] == "ENTER", (d3["refusal"], d3["refusals"])
         assert H.j(d3["policy_decision"])["parameters"]["version_id"] == \
             PB.CG_V1_VERSION_ID
         hist = (await PLRN.policy_parameter_state(conn))[
             "activation_history"]
         assert [h["kind"] for h in hist[:2]] == ["ROLLBACK", "ACTIVATE"]
         assert hist[0]["previous_version_id"] == v2
+        assert hist[0]["actor"] == "owner"
+        assert hist[0]["reason"] == "proof: restore V1"
         assert (await PLRN.rollback_policy_parameters(
             conn, actor="owner", reason="again"))["refusal"] == \
             PLRN.R_NOTHING_TO_ROLL_BACK
@@ -1232,6 +1262,119 @@ async def test_an_activated_candidate_changes_a_future_decision_and_rollback_res
         await _cleanup(conn, [acct and acct["account_id"]])
         await PL.purge_everything(conn)
         await conn.close()
+
+
+@pg
+def test_rollback_never_enables_a_disabled_strategy_and_works_with_activation_off(  # noqa: E501
+        monkeypatch):
+    """THROUGH THE AUTHENTICATED ROUTE: with the completed-game policy's own
+    control row OFF and the activation control OFF, a rollback still
+    restores the previous approved version, writes its audit row, and turns
+    neither row on (no paper_control row changes at all). Without the
+    command control credential it is refused."""
+    import asyncio
+
+    from fastapi import FastAPI
+    from starlette.testclient import TestClient
+
+    from sportsassets.api import app as A
+    from sportsassets.api import paper_learning_routes as R
+
+    state: dict = {}
+
+    async def setup():
+        conn = await H.connect()
+        try:
+            await PL.purge_everything(conn)
+            acct = await H.new_account(conn, "lrrbk", now=time.time())
+            state["acct"] = acct
+            pid, _ = await _passing_proposal(conn, acct, time.time())
+            await conn.execute("UPDATE paper_control SET enabled=TRUE WHERE "
+                               " control_key=$1", PLRN.ACTIVATION_CONTROL_KEY)
+            try:
+                on = await PLRN.activate_proposal(conn, pid, approver="owner")
+            finally:
+                await conn.execute(
+                    "UPDATE paper_control SET enabled=FALSE WHERE "
+                    " control_key=$1", PLRN.ACTIVATION_CONTROL_KEY)
+            assert on["ok"], on
+            state["v2"] = on["version_id"]
+            state["cg_prior"] = await conn.fetchval(
+                "SELECT enabled FROM paper_control WHERE control_key=$1",
+                PB.CG_POLICY["control_key"])
+            await conn.execute("UPDATE paper_control SET enabled=FALSE WHERE "
+                               " control_key=$1", PB.CG_POLICY["control_key"])
+            state["before"] = await _controls(conn)
+        finally:
+            await conn.close()
+
+    async def check():
+        conn = await H.connect()
+        try:
+            state["after"] = await _controls(conn)
+            state["head"] = await conn.fetchval(
+                "SELECT active_version_id FROM paper_policy_parameter_heads "
+                " WHERE policy_key=$1", CG)
+            state["audit"] = await conn.fetchrow(
+                "SELECT * FROM paper_policy_parameter_activations WHERE "
+                " policy_key=$1 ORDER BY at DESC, recorded_at DESC LIMIT 1",
+                CG)
+        finally:
+            await conn.close()
+
+    async def teardown():
+        conn = await H.connect()
+        try:
+            await _rollback_to_v1(conn)
+            if "cg_prior" in state:
+                await conn.execute(
+                    "UPDATE paper_control SET enabled=$2 WHERE "
+                    " control_key=$1", PB.CG_POLICY["control_key"],
+                    state["cg_prior"])
+            await _cleanup(conn, [state.get("acct", {}).get("account_id")])
+            await PL.purge_everything(conn)
+        finally:
+            await conn.close()
+
+    monkeypatch.setattr(A, "settings", lambda: _Cfg(), raising=False)
+    pools = {}
+
+    async def _pool():
+        loop = asyncio.get_running_loop()
+        if loop not in pools:
+            pools[loop] = await asyncpg.create_pool(H.DSN, min_size=1,
+                                                    max_size=2)
+        return pools[loop]
+    monkeypatch.setattr(R, "_conn_pool", _pool)
+    app = FastAPI()
+    app.include_router(R.router)
+    c = TestClient(app, raise_server_exceptions=False)
+    rbk = "/api/command/paper/learning/policy/rollback"
+    try:
+        asyncio.run(setup())
+        assert state["before"][PB.CG_POLICY["control_key"]][0] is False
+        assert state["before"][PLRN.ACTIVATION_CONTROL_KEY][0] is False
+        # NO CREDENTIAL: refused, nothing changes
+        assert c.post(rbk, json={"operator": "owner", "reason": "x"}
+                      ).status_code in (401, 403)
+        r = c.post(rbk, json={"operator": "owner",
+                              "reason": "restore the approved V1"},
+                   headers={"X-Admin-Token": _Cfg.admin_token})
+        assert r.status_code == 200, r.text
+        got = r.json()["result"]
+        assert got["rolled_back_version_id"] == state["v2"]
+        assert got["active_version_id"] == PB.CG_V1_VERSION_ID
+        asyncio.run(check())
+        assert state["head"] == PB.CG_V1_VERSION_ID
+        a = state["audit"]
+        assert (a["kind"], a["actor"], a["reason"]) == (
+            "ROLLBACK", "owner", "restore the approved V1")
+        assert a["previous_version_id"] == state["v2"]
+        # THE STRATEGY STAYS DISABLED; NO paper_control ROW CHANGED
+        assert state["after"] == state["before"]
+        assert state["after"][PB.CG_POLICY["control_key"]][0] is False
+    finally:
+        asyncio.run(teardown())
 
 
 @pg
@@ -1248,7 +1391,7 @@ async def test_without_enough_forward_outcomes_management_reads_insufficient(
         r = await PLRN.create_proposal(
             conn, account_id=acct["account_id"], agent_id="DEREK",
             strategy=CG, change_class=PLRN.C_EDGE, proposed_change={
-                "parameter": "min_gross_edge_pp", "from": 5.0, "to": 4.0},
+                "parameter": "min_gross_edge_pp", "from": 5.0, "to": 5.5},
             rationale="test", proposed_by="DEREK", proposed_at=t0 - 2000,
             training=(t0 - 3000, t0 - 2000), evaluation=(t0 - 2000,
                                                          t0 - 1000))
@@ -1272,7 +1415,7 @@ async def test_without_enough_forward_outcomes_management_reads_insufficient(
                  if x["proposal_id"] == r["proposal_id"])
         assert c["status"] == "INSUFFICIENT_FORWARD_DATA"
         assert c["evaluation_reason"] == PLRN.R_TOO_FEW
-        assert c["evaluation_counts"]["newly_admitted_settled"] == 0
+        assert c["evaluation_counts"]["affected_settled"] == 0
         assert c["activatable_now"] is False
         assert "EVALUATED_ONCE_WITH_A_PASS" in c["failed_checks"]
         d = s["agents"]["DEREK"]["data"]

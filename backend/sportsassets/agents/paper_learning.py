@@ -129,17 +129,23 @@ C_EDGE = "DEREK_ENTRY_EDGE_THRESHOLD"
 #: bounds as paper_benchmark.CG_PARAMETER_BOUNDS and the migration's CHECK.
 PARAM_POLICY = "PINNACLE_COMPLETED_GAME_PAPER"
 PARAM_DEFAULTS = {"min_gross_edge_pp": 5.0}
-PARAM_BOUNDS = {"min_gross_edge_pp": (4.0, 6.0)}
+#: THE 5.0 pp FLOOR IS AN OWNER MANDATE for this release: the threshold may
+#: be TIGHTENED (to at most 6.0 pp) by an evaluated, approved proposal and
+#: returned towards 5.0, never set below it. A lower threshold needs a
+#: SEPARATE OWNER DECISION and a new migration; no proposal, activation or
+#: rollback here can produce one.
+PARAM_BOUNDS = {"min_gross_edge_pp": (5.0, 6.0)}
 PARAM_GRID_PP = 0.5
 PARAM_MAX_STEP_PP = 1.0
 PARAM_FLOOR_WHY = (
-    "4.0 pp: the deployed fee schedule charges up to ~1.75 pp per contract "
-    "at mid prices; the policy's EV is conditional on ordinary completion "
-    "(exceptional-settlement frequency unmeasured), the venue book's "
-    "currency is not established (P5) and the de-vigged reference carries "
-    "its own error. 4.0 pp keeps >= ~2.25 pp of gross edge after the "
-    "largest fee and is one 1 pp step below the shipped 5 pp. Ceiling 6.0 "
-    "pp; 0.5 pp grid; at most 1 pp per activation.")
+    "5.0 pp: an OWNER MANDATE for this release -- the shipped threshold is "
+    "the floor; an approved proposal may only tighten it (ceiling 6.0 pp, "
+    "0.5 pp grid, at most 1 pp per activation). Going below 5.0 pp needs a "
+    "separate owner decision and a new migration. Context for that "
+    "decision: fees up to ~1.75 pp per contract at mid prices; EV "
+    "conditional on ordinary completion with exceptional-settlement "
+    "frequency unmeasured; venue book currency not established (P5); "
+    "de-vigged reference error.")
 C_STALE_EXIT = "XAVIER_EXIT_WHEN_MEASURE_STALE"
 EVALUATOR = "EVALUATOR:PAPER_FORWARD_OUTCOMES"
 ACTIVATION_CONTROL_KEY = "PAPER_LEARNING_PROPOSAL_ACTIVATION"
@@ -195,6 +201,7 @@ R_ALREADY_ACTIVE = "THE_PROPOSAL_IS_ALREADY_ACTIVE"
 R_NO_PARAMETER_HEAD = "NO_ACTIVE_PARAMETER_VERSION_ROW"
 R_NOTHING_TO_ROLL_BACK = "THE_ACTIVE_VERSION_HAS_NO_PREDECESSOR"
 R_ROLLBACK_NEEDS_REASON = "A_ROLLBACK_STATES_ITS_REASON"
+R_NOT_AN_APPROVED_CONFIGURATION = "ROLLBACK_RESTORES_ONLY_AN_APPROVED_VERSION"
 
 _JSON_COLS = frozenset((
     "label", "internal_model", "pinnacle", "book", "economics",
@@ -1290,12 +1297,28 @@ async def _derek_refusal_funnel(conn, acct, strategy, ws, we) -> list:
     if entered == 0 and len(rows) >= MIN_FUNNEL_DECISIONS:
         les["task"] = ("No %s entry in %d decisions: investigate the binding "
                        "refusal %s" % (strategy, len(rows), top))
-    if bench and near and near >= NEAR_MISS_FOR_PROPOSAL and \
-            strategy == PARAM_POLICY and check_change(C_EDGE, strategy, {
-                "parameter": "min_gross_edge_pp", "from": threshold,
-                "to": round(threshold - NEAR_MISS_PP, 6)}) is None:
+    lowered = (None if threshold is None
+               else round(threshold - NEAR_MISS_PP, 6))
+    bounded = (strategy == PARAM_POLICY and lowered is not None
+               and check_change(C_EDGE, strategy, {
+                   "parameter": "min_gross_edge_pp", "from": threshold,
+                   "to": lowered}) is None)
+    if bench and near and near >= NEAR_MISS_FOR_PROPOSAL and not bounded:
+        # NEAR MISSES WOULD ARGUE FOR A LOWER THRESHOLD; the 5.0 pp floor is
+        # an owner mandate (a lower threshold is a separate owner decision),
+        # so no in-bounds proposal exists and none is recorded -- said so.
+        metrics["proposal"] = {
+            "status": "NOT_APPLICABLE",
+            "why": ("%d near misses would argue for lowering the edge "
+                    "threshold from %s pp to %s pp, which is outside the "
+                    "owner-mandated bounds %s (or not a supported policy); "
+                    "a lower threshold needs a separate owner decision"
+                    % (near, threshold, lowered,
+                       PARAM_BOUNDS["min_gross_edge_pp"]))}
+    if bench and near and near >= NEAR_MISS_FOR_PROPOSAL and bounded:
         # ONLY THE SUPPORTED, BOUNDED CHANGE IS PROPOSED (the completed-game
-        # policy, within 4.0..6.0 pp, at most 1 pp per step).
+        # policy, within 5.0..6.0 pp, at most 1 pp per step) -- reachable
+        # only when the active threshold is above the floor.
         les["proposal"] = {
             "change_class": C_EDGE,
             "proposed_change": {"parameter": "min_gross_edge_pp",
@@ -1929,11 +1952,25 @@ async def _settled_outcome(conn, slug: str, holding_side: str,
 
 async def _eval_edge(conn, p: dict, *, until: float, now: float) -> dict:
     """THE EDGE-THRESHOLD EVALUATION, on the evaluation period's forward
-    records only. The newly admitted decisions were NEVER EXECUTED: their
-    results are COUNTERFACTUAL_NOT_EXECUTABLE_PROOF."""
+    records only, in the direction of the proposed change:
+
+      TIGHTEN (to > from)  the decisions ADMITTED in the period whose best-
+                           level edge is below the proposed threshold -- the
+                           trades the change would have removed. Removing
+                           them improves results when they lose: the
+                           metric is MINUS their mean result.
+      LOOSEN (to < from)   the decisions refused ONLY for the edge whose edge
+                           meets the proposed threshold -- trades never
+                           placed. Metric: their mean result.
+
+    Result per contract = settled payout - the decision-time best displayed
+    price - the per-contract fee of the deployed schedule. Either way the
+    comparison is against a course NOT taken: COUNTERFACTUAL_NOT_EXECUTABLE_
+    PROOF, never proof the alternative would have executed."""
     from . import derek_policy as DP
     ch = p["proposed_change"] or {}
-    new = float(ch["to"])
+    frm, new = float(ch["from"]), float(ch["to"])
+    tighten = new > frm
     rows = [_rec(r) for r in await conn.fetch(
         "SELECT decision_id, decided_at, verdict, refusals, us_market_slug, "
         "       holding_side, book, policy_decision FROM paper_decisions "
@@ -1946,7 +1983,14 @@ async def _eval_edge(conn, p: dict, *, until: float, now: float) -> dict:
         refs = list(r.get("refusals") or [])
         edge = _f((r.get("policy_decision") or {}).get("gross_edge_pp"))
         lv = (r.get("book") or {}).get("levels") or []
-        if refs != [DP.R_BELOW] or edge is None or edge < new or not lv:
+        if edge is None or not lv:
+            continue
+        if tighten:
+            hit = (r.get("verdict") == "ENTER" and not refs
+                   and edge < new - 1e-9)
+        else:
+            hit = refs == [DP.R_BELOW] and edge >= new - 1e-9
+        if not hit:
             continue
         cand.append(r["decision_id"])
         oc = await _settled_outcome(conn, r["us_market_slug"],
@@ -1967,24 +2011,31 @@ async def _eval_edge(conn, p: dict, *, until: float, now: float) -> dict:
         settled.append(r["decision_id"])
         results.append({"decision_id": r["decision_id"],
                         "outcome": oc["outcome"], "price": px,
-                        "fee_usd": fee, "result_per_contract_usd": res})
+                        "edge_pp": edge, "fee_usd": fee,
+                        "result_per_contract_usd": res})
     mean = (None if not results else
             round(sum(x["result_per_contract_usd"] for x in results)
                   / len(results), 6))
     return {"n": len(settled), "counts": {
+        "direction": "TIGHTEN" if tighten else "LOOSEN",
         "evaluation_period_decisions": len(rows),
-        "newly_admitted_by_the_proposal": len(cand),
-        "newly_admitted_settled": len(settled),
-        "newly_admitted_unsettled": unsettled,
-        "newly_admitted_fee_unpriced": unpriced},
-        "metric": mean, "label": COUNTERFACTUAL,
-        "executable": False,
-        "basis": ("decisions refused ONLY for the edge threshold whose "
-                  "recorded best-level edge meets the proposed threshold; "
-                  "result per contract = settled payout - the decision-time "
-                  "best displayed price - the per-contract fee of the "
-                  "deployed schedule. These orders were never placed: the "
-                  "figure is not proof they would have filled"),
+        "affected_by_the_proposal": len(cand),
+        "affected_settled": len(settled),
+        "affected_unsettled": unsettled,
+        "affected_fee_unpriced": unpriced},
+        "metric": (None if mean is None else
+                   round(-mean if tighten else mean, 6)),
+        "affected_mean_result_per_contract_usd": mean,
+        "label": COUNTERFACTUAL, "executable": False,
+        "basis": (("decisions ADMITTED in the evaluation period whose best-"
+                   "level edge is below the proposed threshold (the trades "
+                   "the tightening removes); metric = minus their mean "
+                   "per-contract result. Not trading them is the course not "
+                   "taken") if tighten else
+                  ("decisions refused ONLY for the edge threshold whose "
+                   "recorded best-level edge meets the proposed threshold; "
+                   "metric = their mean per-contract result. These orders "
+                   "were never placed: not proof they would have filled")),
         "records": {"paper_decisions": settled}, "results": results[:50]}
 
 
@@ -2376,9 +2427,15 @@ async def rollback_policy_parameters(conn, *, actor: str, reason: str,
     and audited: under the head's row lock, the version that introduced the
     current one names its predecessor; a ROLLBACK row records both, the head
     moves back, and the rolled-back proposal is marked inactive (the restored
-    version's proposal, if any, active again). Needs a named human; it does
-    not need the activation control (restoring is always permitted). The
-    shipped default has nothing before it."""
+    version's proposal, if any, active again).
+
+    OWNER RULES: it stays available while the activation control is OFF
+    (restoring is always permitted); it needs authenticated command access
+    (the route), a named operator and a reason, and writes an audit row; it
+    restores ONLY a previously APPROVED configuration (the shipped default
+    or a version approved from an evaluated proposal); and it NEVER touches
+    paper_control -- a disabled strategy stays disabled, the activation
+    control keeps its state. The shipped default has nothing before it."""
     pk = policy_key or PARAM_POLICY
     at = float(now if now is not None else time.time())
     who = _human(actor)
@@ -2403,8 +2460,17 @@ async def rollback_policy_parameters(conn, *, actor: str, reason: str,
             return {"ok": False, "refusal": R_NOTHING_TO_ROLL_BACK,
                     "active_version_id": cur}
         restored = await conn.fetchrow(
-            "SELECT version_id, proposal_id, evaluation_id, params FROM "
-            " paper_policy_parameter_versions WHERE version_id=$1", prev)
+            "SELECT version_id, proposal_id, evaluation_id, params, source, "
+            "       approved_by FROM paper_policy_parameter_versions "
+            " WHERE version_id=$1", prev)
+        approved = restored is not None and (
+            restored["source"] == "SHIPPED_DEFAULT"
+            or (restored["source"] == "EVALUATED_PROPOSAL"
+                and restored["approved_by"] and restored["evaluation_id"]))
+        if not approved or validate_parameters(
+                L._j(restored["params"])) is not None:
+            return {"ok": False, "refusal": R_NOT_AN_APPROVED_CONFIGURATION,
+                    "version_id": prev}
         aid = "paperact:%s" % _h(pk, prev, "ROLLBACK", cur, at)
         await conn.execute(
             "INSERT INTO paper_policy_parameter_activations (activation_id, "
@@ -2715,8 +2781,11 @@ def _agent_view(agent: str, les: list, props: list) -> dict:
             {"status": "NONE",
              "why": ("no lesson of this agent has met a proposal rule yet "
                      "(rules: %s)" % {
-                         DEREK: "%d edge near-misses within %.1f pp for a "
-                                "benchmark policy" % (
+                         DEREK: "%d edge near-misses within %.1f pp on the "
+                                "completed-game policy, AND an in-bounds "
+                                "change (the 5.0 pp floor is an owner "
+                                "mandate, so a lowering is proposed only "
+                                "from a tightened threshold)" % (
                                     NEAR_MISS_FOR_PROPOSAL, NEAR_MISS_PP),
                          XAVIER: "%d closed positions where the stale-"
                                  "measure exit beat the realized result "
