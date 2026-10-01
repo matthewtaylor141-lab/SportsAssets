@@ -1,0 +1,396 @@
+Skip to the records
+READ-ONLY
+read 2026-10-01 23:17:25Z
+Trace
+Refresh
+LIVE MARKET DATA · SIMULATED EXECUTION · $500,000 STARTING BANKROLL
+PAPER ACCOUNT · ONE LEDGER · LIVE MARKET DATA · SIMULATED EXECUTION
+CASH
+$499,306.35
+RESERVED
+$0.00
+AVAILABLE
+$499,306.35
+POSITION VALUE
+$659.64
+EQUITY
+$499,965.99
+REALIZED P&L
+$0.00
+UNREALIZED P&L
+−$34.02
+
+cash + marked open-position value · ledger entry #19 · the same read on the homepage and every agent page
+
+LAST SUCCESSFUL SERVER READOK
+2026-10-01 23:17:25Z 14 ms ago
+Server clock at that read 2026-10-01 23:17:25Z. A recent read is not agent health.
+LAST AGENT HEARTBEAT (PAPER RUNTIME)RECENT
+2026-10-01 23:17:10Z 15 s ago
+1357 pass(es) · 0 error(s) · last scheduling attempt 2026-10-01 23:17:24Z ran · stale after 5 min. Source: paper_session_health.heartbeat_at, written by every paper pass that ran; the last scheduling attempt (ran or refused) from ingestion_state['paper_session_last_pass']
+LAST LEDGER TRANSACTION
+2026-10-01 22:42:55Z 34 min ago
+FILL · entry #19 · 19 entries · an unchanged balance is not a stale one
+Live updates: CONNECTING · the stream is not open: every read is repeated every 15 s
+MANAGEMENT OFFICE · DEREK
+Find the next opportunity.
+
+Prices, fees and the reason behind each entry decision.
+
+Talk to Derek ↗
+Connected to recorded workspace · refreshed 11:17:25 PM · recommendations carry their own review times.
+Closest recorded opportunities · serving policy versions first, then historical versions; ranked by gross edge within each group. These are recorded evaluations, not executable offers. Positive gross edge can still lose after fees.
+Simulated execution
+São Bernardo to win
+Sao Bernardo FC vs. CR Brasil
+Refuse
+
+Completed-game paper policy
+Recorded policy: PINNACLE_COMPLETED_GAME_PAPER_V2
+
+Pinnacle estimate
+39.8%
+Entry price
+$0.39
+Gross edge
+0.80 pp
+the edge cleared the threshold but the fee per contract consumed it
+
+REFUSE GROSS_EDGE_CLEARS_THRESHOLD_BUT_FEES_CONSUME_IT: edge 0.803322558 pp vs 0.5, conditional EV after fees None, depth 0.0, Pinnacle age 16.445 s (limit 30.0 s), book age 1.493 s. PINNACLE_COMPLETED_GAME_PAPER: conditional, experimental economics -- not risk-adjusted, not proven positive EV; postponement/abandonment/suspension terms are disclosed research risks with unmeasured frequency
+
+Net expected profit Not recorded · Fees Not recorded
+
+Ask Derek ↗
+Evaluated 10:48:47 PM · 28 min ago
+Decision evidence & identifiers
+Simulated execution
+Grêmio Novorizontino to win
+Gremio Novorizontino vs. Goias EC
+Refuse
+
+Completed-game paper policy
+Recorded policy: PINNACLE_COMPLETED_GAME_PAPER_V2
+
+Pinnacle estimate
+61.1%
+Entry price
+$0.61
+Gross edge
+0.08 pp
+the edge was below the policy's minimum (the threshold recorded on the decision)
+
+REFUSE BELOW_MIN_GROSS_EDGE: edge 0.076361034 pp vs 0.5, conditional EV after fees None, depth 0.0, Pinnacle age 28.606 s (limit 30.0 s), book age 0.368 s. PINNACLE_COMPLETED_GAME_PAPER: conditional, experimental economics -- not risk-adjusted, not proven positive EV; postponement/abandonment/suspension terms are disclosed research risks with unmeasured frequency
+
+Net expected profit Not recorded · Fees Not recorded
+
+Ask Derek ↗
+Evaluated 11:03:45 PM · 13 min ago
+Decision evidence & identifiers
+Simulated execution
+Cuiabá to win
+Cuiaba EC vs. AA Ponte Preta
+Refuse
+
+Completed-game paper policy
+Recorded policy: PINNACLE_COMPLETED_GAME_PAPER_V2
+
+Pinnacle estimate
+83.9%
+Entry price
+$0.84
+Gross edge
+-0.14 pp
+the edge was below the policy's minimum (the threshold recorded on the decision)
+
+REFUSE BELOW_MIN_GROSS_EDGE: edge -0.137584769 pp vs 0.5, conditional EV after fees None, depth 0.0, Pinnacle age 12.238 s (limit 30.0 s), book age 1.48 s. PINNACLE_COMPLETED_GAME_PAPER: conditional, experimental economics -- not risk-adjusted, not proven positive EV; postponement/abandonment/suspension terms are disclosed research risks with unmeasured frequency
+
+Net expected profit Not recorded · Fees Not recorded
+
+Ask Derek ↗
+Evaluated 10:48:43 PM · 28 min ago
+Decision evidence & identifiers
+Simulated execution
+Londrina to win
+Londrina EC vs. Criciuma EC
+Refuse
+
+Completed-game paper policy
+Recorded policy: PINNACLE_COMPLETED_GAME_PAPER_V2
+
+Pinnacle estimate
+31.3%
+Entry price
+$0.32
+Gross edge
+-0.75 pp
+the edge was below the policy's minimum (the threshold recorded on the decision)
+
+REFUSE BELOW_MIN_GROSS_EDGE: edge -0.746954927 pp vs 0.5, conditional EV after fees None, depth 0.0, Pinnacle age 10.138 s (limit 30.0 s), book age 1.437 s. PINNACLE_COMPLETED_GAME_PAPER: conditional, experimental economics -- not risk-adjusted, not proven positive EV; postponement/abandonment/suspension terms are disclosed research risks with unmeasured frequency
+
+Net expected profit Not recorded · Fees Not recorded
+
+Ask Derek ↗
+Evaluated 10:48:41 PM · 28 min ago
+Decision evidence & identifiers
+Simulated execution
+Avai to win
+Avai FC vs. Ceara SC
+Refuse
+
+Completed-game paper policy
+Recorded policy: PINNACLE_COMPLETED_GAME_PAPER_V2
+
+Pinnacle estimate
+36.9%
+Entry price
+$0.38
+Gross edge
+-1.07 pp
+the edge was below the policy's minimum (the threshold recorded on the decision)
+
+REFUSE BELOW_MIN_GROSS_EDGE: edge -1.066515438 pp vs 0.5, conditional EV after fees None, depth 0.0, Pinnacle age 14.355 s (limit 30.0 s), book age 1.5 s. PINNACLE_COMPLETED_GAME_PAPER: conditional, experimental economics -- not risk-adjusted, not proven positive EV; postponement/abandonment/suspension terms are disclosed research risks with unmeasured frequency
+
+Net expected profit Not recorded · Fees Not recorded
+
+Ask Derek ↗
+Evaluated 10:48:45 PM · 28 min ago
+Decision evidence & identifiers
+Simulated execution
+Londrina to win
+Londrina EC vs. Criciuma EC
+Refuse
+
+Derek's original two-model research decisions
+Recorded policy: DEREK_ENTRY_POLICY_V2
+
+Pinnacle estimate
+Not recorded
+Entry price
+Not recorded
+Gross edge
+Not recorded
+no usable Pinnacle price
+
+REFUSE NO_QUALIFIED_PINNACLE_PROBABILITY
+
+Net expected profit Not recorded · Fees Not recorded
+
+Ask Derek ↗
+Evaluated 11:03:48 PM · 13 min ago
+Decision evidence & identifiers
+Simulated execution
+Grêmio Novorizontino to win
+Gremio Novorizontino vs. Goias EC
+Refuse
+
+Derek's original two-model research decisions
+Recorded policy: DEREK_ENTRY_POLICY_V2
+
+Pinnacle estimate
+61.1%
+Entry price
+Not recorded
+Gross edge
+Not recorded
+no research model exists yet
+
+REFUSE NO_RESEARCH_MODEL_CANDIDATE_EXISTS
+
+Net expected profit Not recorded · Fees Not recorded
+
+Ask Derek ↗
+Evaluated 11:03:45 PM · 13 min ago
+Decision evidence & identifiers
+Simulated execution
+Cleveland Guardians to win
+Game 1: CHI White Sox vs. CLE Guardians
+Refuse
+
+Derek's original two-model research decisions
+Recorded policy: DEREK_ENTRY_POLICY_V2
+
+Pinnacle estimate
+Not recorded
+Entry price
+Not recorded
+Gross edge
+Not recorded
+no usable Pinnacle price
+
+REFUSE NO_QUALIFIED_PINNACLE_PROBABILITY
+
+Net expected profit Not recorded · Fees Not recorded
+
+Ask Derek ↗
+Evaluated 11:03:31 PM · 13 min ago
+Decision evidence & identifiers
+Simulated execution
+Milwaukee Brewers to win
+Game 1: SD Padres vs. MIL Brewers
+Refuse
+
+Derek's original two-model research decisions
+Recorded policy: DEREK_ENTRY_POLICY_V2
+
+Pinnacle estimate
+67.8%
+Entry price
+Not recorded
+Gross edge
+Not recorded
+the venue's and Pinnacle's settlement rules are not established as the same
+
+REFUSE SETTLEMENT_NOT_SUPPORTED
+
+Net expected profit Not recorded · Fees Not recorded
+
+Ask Derek ↗
+Evaluated 11:03:17 PM · 14 min ago
+Decision evidence & identifiers
+Simulated execution
+Botafogo-SP to win
+Botafogo FC vs. Vila Nova FC
+Refuse
+
+Derek's original two-model research decisions
+Recorded policy: DEREK_ENTRY_POLICY_V2
+
+Pinnacle estimate
+39.1%
+Entry price
+Not recorded
+Gross edge
+Not recorded
+no research model exists yet
+
+REFUSE NO_RESEARCH_MODEL_CANDIDATE_EXISTS
+
+Net expected profit Not recorded · Fees Not recorded
+
+Ask Derek ↗
+Evaluated 10:48:51 PM · 28 min ago
+Decision evidence & identifiers
+Simulated execution
+Atletico Goianiense to win
+AC Goianiense vs. America FC
+Refuse
+
+Derek's original two-model research decisions
+Recorded policy: DEREK_ENTRY_POLICY_V2
+
+Pinnacle estimate
+71.7%
+Entry price
+Not recorded
+Gross edge
+Not recorded
+no research model exists yet
+
+REFUSE NO_RESEARCH_MODEL_CANDIDATE_EXISTS
+
+Net expected profit Not recorded · Fees Not recorded
+
+Ask Derek ↗
+Evaluated 10:48:49 PM · 28 min ago
+Decision evidence & identifiers
+Simulated execution
+São Bernardo to win
+Sao Bernardo FC vs. CR Brasil
+Refuse
+
+Derek's original two-model research decisions
+Recorded policy: DEREK_ENTRY_POLICY_V2
+
+Pinnacle estimate
+39.8%
+Entry price
+Not recorded
+Gross edge
+Not recorded
+no research model exists yet
+
+REFUSE NO_RESEARCH_MODEL_CANDIDATE_EXISTS
+
+Net expected profit Not recorded · Fees Not recorded
+
+Ask Derek ↗
+Evaluated 10:48:47 PM · 28 min ago
+Decision evidence & identifiers
+● AI AGENT
+Derek
+DISCOVERY & ENTRY
+
+the agent, an AI agent, shown as a licensed 3D character (Character model: Microsoft Rocketbox Business_Male_03 (MIT, © 2020 Microsoft)). The pose follows the agent_status record; the mouth moves only with real speech audio.
+
+Pause animation
+PAPER RUNTIME RUNNING
+paper runtime heartbeat 15 s ago
+◉
+Talk to Derek
+🔊 Voice on
+Stop
+New conversation
+Conversation, memory & policy boundaries
+Answer style
+Conversational
+Full analysis
+🎤 Speak
+Send
+YOU
+For a clearly labelled management product-demo REHEARSAL, answer this question in your own persona in at most 65 words. Do not claim this illustrative scenario happened in production, do not invent results, and do not change any policy or place any trade. Context: Derek records the deadline failure; Xavier keeps the existing protection until a valid replacement is confirmed. Illustrative explanation: It defines a testable change, not proven intelligence. In the rehearsal I record a timeout rather than silently losing the decision; Xavier preserves existing protection. Audrey needs separate forward results before reporting improved performance or proposing activation. Management question: Did Audrey’s recommendation make you smarter?
+DEREK
+This is a rehearsal answer, and the short version is not yet. Audrey's latest audit shows a change proposed [F50]. That is a testable change, not proven intelligence. Today the records show 17 refusals where the book read missed the decision deadline [F20], so those were logged rather than lost. A proposal doesn't change policy; only an owner or named human activates it [F54].
+Memory & evidence
+▶ Play
+YOU
+Briefly, answer conversationally in up to three sentences; offer a detailed follow-up if needed. Why did the closest recent opportunity not qualify?
+DEREK
+The most recent near-miss on record is paper decision papercg:c4c1220e25e09d9129734780, which was refused because its gross edge cleared the threshold but the fees consumed it [F38]. The active policy requires at least 0.5 percentage points of edge, a fee below that edge at every level bought, and positive expected profit after fees [F68]. The records don't show its actual edge size, so I can't confirm it was the closest by margin. I'm happy to walk through the fee-consumption refusals in detail if useful.
+Memory & evidence
+▶ Play
+YOU
+Briefly, answer conversationally in up to three sentences; offer a detailed follow-up if needed. Why did the closest recent opportunity not qualify?
+DEREK
+Fees are what stopped it: paper decision papercg:c4c1220e25e09d9129734780 cleared the gross edge threshold, but the fees consumed the edge, so it was refused [F38]. The active policy needs at least 0.5 percentage points of edge, a fee below that edge at every level bought, and positive expected profit after fees [F67]. The record doesn't show that decision's actual edge or fee, so I can't say how close it came. Happy to go through Audrey's resting-bid recommendation for these cases if useful [F60].
+Memory & evidence
+▶ Play
+YOU
+Briefly, answer conversationally in up to three sentences; offer a detailed follow-up if needed. Why did the closest recent opportunity not qualify?
+DEREK
+The nearest miss in the current records is paper decision papercg:1d90bf3dfa8cf0b91755e1f7, which cleared the gross edge threshold but was refused because fees consumed the edge [F41], and that ID corrects the one I gave earlier. The active policy requires at least 0.5 percentage points of edge, a fee below that edge at every level bought, and positive expected profit after fees [F67]. The record doesn't show that decision's actual edge or fee, so I can't say how narrowly it missed, but I can walk through Audrey's resting-bid recommendation for fee-consumed cases if useful [F60].
+Memory & evidence
+▶ Play
+YOU
+Briefly, answer conversationally in up to three sentences; offer a detailed follow-up if needed. Why did the closest recent opportunity not qualify?
+DEREK
+Paper decision papercg:1d90bf3dfa8cf0b91755e1f7, at 22:48:47 UTC, is still the nearest miss on record: it cleared the gross edge threshold, but fees consumed the edge, so it was refused [F41]. The active policy needs at least 0.5 percentage points of edge, a fee below that edge at every level bought, and positive expected profit after fees [F67]. The record doesn't show its actual edge or fee, so I can't say how narrowly it missed. One correction: Audrey's resting-bid recommendation for these cases is [F59], not [F60], and it's still being measured. I can walk through it if useful.
+Memory & evidence
+▶ Play
+Resumed your conversation with Derek (10 messages).
+All records, strategy detail and technical evidence
+
+Presentation of recorded state. This page sends no order and holds no credential; it reads /api/command/agents/derek with the COMMAND session. The 3D characters are licensed Microsoft Rocketbox models (MIT licence, credited below; shipped with their licence file); a device that cannot draw them shows a 2D portrait card. The pose follows the paper runtime's own heartbeat (paper_session_health) and never stands in for data. UNKNOWN is not zero; EMPTY is not success. The 3D character on this page is a licensed model, not an original illustration. Character model: Microsoft Rocketbox Business_Male_03 (MIT, © 2020 Microsoft). Licence: MIT, shipped with the model as ROCKETBOX_LICENSE.md.
+papercg:1d90bf3dfa8cf0b91755e1f7
+Explain the price, fees, expected value and current status of São Bernardo to win. Decision papercg:1d90bf3dfa8cf0b91755e1f7.
+papercg:c2b558ad3d56a5447db7fd0a
+Explain the price, fees, expected value and current status of Grêmio Novorizontino to win. Decision papercg:c2b558ad3d56a5447db7fd0a.
+papercg:b18cd7c5e630a1934c0eabe6
+Explain the price, fees, expected value and current status of Cuiabá to win. Decision papercg:b18cd7c5e630a1934c0eabe6.
+papercg:8df8d72520577e5088956f52
+Explain the price, fees, expected value and current status of Londrina to win. Decision papercg:8df8d72520577e5088956f52.
+papercg:c93ee57a80e560158e76b963
+Explain the price, fees, expected value and current status of Avai to win. Decision papercg:c93ee57a80e560158e76b963.
+paperdec:b1d63204188bc94b2179ad02
+Explain the price, fees, expected value and current status of Londrina to win. Decision paperdec:b1d63204188bc94b2179ad02.
+paperdec:30fb8b307b68c8a4b665dcc9
+Explain the price, fees, expected value and current status of Grêmio Novorizontino to win. Decision paperdec:30fb8b307b68c8a4b665dcc9.
+paperdec:3b573f827e5df2c00cd62a97
+Explain the price, fees, expected value and current status of Cleveland Guardians to win. Decision paperdec:3b573f827e5df2c00cd62a97.
+paperdec:4d55059495bd003af041a8e3
+Explain the price, fees, expected value and current status of Milwaukee Brewers to win. Decision paperdec:4d55059495bd003af041a8e3.
+paperdec:f05ddbc694d3347c5c7bcf3f
+Explain the price, fees, expected value and current status of Botafogo-SP to win. Decision paperdec:f05ddbc694d3347c5c7bcf3f.
+paperdec:d67bff91ca3fda916de353dd
+Explain the price, fees, expected value and current status of Atletico Goianiense to win. Decision paperdec:d67bff91ca3fda916de353dd.
+paperdec:efe976075f730ed436f749c2
+Explain the price, fees, expected value and current status of São Bernardo to win. Decision paperdec:efe976075f730ed436f749c2.

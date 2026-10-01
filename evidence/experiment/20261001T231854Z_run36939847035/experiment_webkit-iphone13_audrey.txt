@@ -1,0 +1,150 @@
+Skip to the records
+read 2026-10-01 23:18:50Z
+Trace
+Refresh
+LIVE MARKET DATA · SIMULATED EXECUTION · $500,000 STARTING BANKROLL
+PAPER ACCOUNT · ONE LEDGER · LIVE MARKET DATA · SIMULATED EXECUTION
+CASH
+$499,306.35
+RESERVED
+$0.00
+AVAILABLE
+$499,306.35
+POSITION VALUE
+$659.64
+EQUITY
+$499,965.99
+REALIZED P&L
+$0.00
+UNREALIZED P&L
+−$34.02
+cash + marked open-position value · ledger entry #19 · the same read on the homepage and every agent page
+LAST SUCCESSFUL SERVER READOK
+2026-10-01 23:18:51Z 14 ms ago
+Server clock at that read 2026-10-01 23:18:49Z. A recent read is not agent health.
+LAST AGENT HEARTBEAT (PAPER RUNTIME)RECENT
+2026-10-01 23:18:12Z 37 s ago
+1358 pass(es) · 0 error(s) · last scheduling attempt 2026-10-01 23:18:45Z ran · stale after 5 min. Source: paper_session_health.heartbeat_at, written by every paper pass that ran; the last scheduling attempt (ran or refused) from ingestion_state['paper_session_last_pass']
+LAST LEDGER TRANSACTION
+2026-10-01 22:42:55Z 36 min ago
+FILL · entry #19 · 19 entries · an unchanged balance is not a stale one
+Live updates: LIVE · ledger stream open; the agents' records are re-read every 30 s
+MANAGEMENT OFFICE · AUDREY
+The account. The evidence. The next improvement.
+Reconciled performance and recommendations with accountable owners.
+Talk to Audrey ↗
+Connected to recorded workspace · refreshed 11:18:51 PM · recommendations carry their own review times.
+Realized P&L
+$0.00
+Unrealized P&L
+-$34.02
+Ledger
+Reconciled
+Measuring
+Fees consume edge
+Owner · DEREK
+8 decisions cleared the 0.5 pp gross threshold but the taker fee consumed the edge; rest a bid below the ask where both rules hold at the price paid
+EVIDENCE → RECOMMENDATION → MEASUREMENT
+Operational findings are not proof of improved profitability. Automated acknowledgements are not independent agent review.
+Metric: maker_resting_orders_placed_6h · baseline 0
+AUDREY · Measurement
+maker_resting_orders_placed_6h now 0 (baseline 0)
+AUDREY · Measurement
+maker_resting_orders_placed_6h now 0 (baseline 0)
+AUDREY · Measurement
+maker_resting_orders_placed_6h now 0 (baseline 0)
+AUDREY · Measurement
+maker_resting_orders_placed_6h now 0 (baseline 0)
+Ask Audrey ↗
+08:42:26 PM
+Decision evidence & identifiers
+Improved
+Book read cuts
+Owner · DEREK
+39 of 125 book reads in the last 6 h were cut by the decision deadline or the venue cooldown; remove the duplicate read and retry within the freshness window
+EVIDENCE → RECOMMENDATION → MEASUREMENT
+Operational findings are not proof of improved profitability. Automated acknowledgements are not independent agent review.
+Metric: book_read_cut_rate_6h · baseline 0.312
+AUDREY · Status
+status MEASURING -> IMPROVED
+AUDREY · Measurement
+book_read_cut_rate_6h now 0.25 (baseline 0.312)
+AUDREY · Measurement
+book_read_cut_rate_6h now 0.285714 (baseline 0.312)
+AUDREY · Measurement
+book_read_cut_rate_6h now 0.276923 (baseline 0.312)
+Ask Audrey ↗
+08:42:26 PM
+Decision evidence & identifiers
+Improved
+Collection coverage
+Owner · DEREK
+63 events in the last collection cycle never reached a decision (by code: {"NO_PINNACLE_ON_EVENT": 33, "QUOTE_STALE_ON_ARRIVAL": 13, "VENUE_BOOK_READ_FAILED": 2, "NO_VENUE_CONTRACT_FOR_EVENT": 5, "VENUE_BOOK_CURRENCY_NOT_ESTABLISHED": 4, "VENUE_NATIVE_EVENT_MATCHES_ONLY_ONE_TEAM": 5, "VENUE_BOOK_CURRENCY_CONTRADICTED_BY_CONTRACT": 1}); investigate per sport without weakening identity, market or settlement matching
+EVIDENCE → RECOMMENDATION → MEASUREMENT
+Operational findings are not proof of improved profitability. Automated acknowledgements are not independent agent review.
+Metric: last_cycle_unmatched_events · baseline 63
+AUDREY · Status
+status MEASURING -> IMPROVED
+AUDREY · Measurement
+last_cycle_unmatched_events now 56 (baseline 63)
+AUDREY · Measurement
+last_cycle_unmatched_events now 56 (baseline 63)
+AUDREY · Measurement
+last_cycle_unmatched_events now 56 (baseline 63)
+Ask Audrey ↗
+08:42:26 PM
+Decision evidence & identifiers
+● AI AGENT
+Audrey
+AUDIT & INTELLIGENCE
+the agent, an AI agent, shown as a licensed 3D character (Character model: Microsoft Rocketbox Business_Female_04 (MIT, © 2020 Microsoft)). The pose follows the agent_status record; the mouth moves only with real speech audio.
+Pause animation
+PAPER RUNTIME RUNNING
+paper runtime heartbeat 37 s ago
+◉
+Talk to Audrey
+🔊 Voice on
+Stop
+New conversation
+Conversation, memory & policy boundaries
+Answer style 
+
+🎤 Speak
+Send
+YOU
+For a clearly labelled management product-demo REHEARSAL, answer this question in your own persona in at most 65 words. Do not claim this illustrative scenario happened in production, do not invent results, and do not change any policy or place any trade. Context: Bring management closer to the decisions that matter. Illustrative explanation: Open the live management office and ask each agent about the current session. This presentation is an illustrative rehearsal. Only the actual ledger, recorded decisions and evaluated outcomes establish what the system has done. Management question: What happens after this presentation?
+AUDREY
+This is a rehearsal, so nothing here counts as production. After it, the active paper session simply continues [F9]. There is no result yet: 703 decisions today, all refusals [F11], and paper P&L of $0 [F5]. What would improve the record is evidence, starting with the 297 refusals where no research model candidate existed [F15]. Policy changes only through an owner decision or a human-activated proposal [F54].
+Memory & evidence
+▶ Play
+YOU
+Briefly, answer conversationally in up to three sentences; offer a detailed follow-up if needed. Does the paper ledger reconcile right now?
+AUDREY
+Yes, the paper ledger reconciles: all 18 entries from sequence 1 to 18 line up, with cash deltas summing to $499,404.86 against cash of $499,404.86 and reserved deltas of $98.92 against reserved of $98.92 [F54]. Available of $499,305.94 equals cash minus reserved, and the running balance agrees [F54]. I'm happy to walk you through the full reconciliation step by step.
+Memory & evidence
+▶ Play
+YOU
+Briefly, answer conversationally in up to three sentences; offer a detailed follow-up if needed. Does the paper ledger reconcile right now?
+AUDREY
+It does, and the figures have moved since you last asked: the record shows all 19 entries, sequence 1 to 19, with cash deltas summing to $499,306.35 against cash of $499,306.35, and reserved deltas of $0 against reserved of $0 [F54]. Available of $499,306.35 equals cash minus reserved, and the running balance agrees [F54]. I can walk you through the full reconciliation step by step if you'd like.
+Memory & evidence
+▶ Play
+YOU
+Briefly, answer conversationally in up to three sentences; offer a detailed follow-up if needed. Does the paper ledger reconcile right now?
+AUDREY
+The record shows the ledger still reconciles, unchanged since your last check: 19 entries, sequence 1 to 19, with cash deltas of $499,306.35 against cash of $499,306.35 and reserved deltas of $0 against reserved of $0 [F54]. Available of $499,306.35 equals cash minus reserved, and the running balance agrees [F54]. I can take you through each step if you'd like the detail.
+Memory & evidence
+▶ Play
+YOU
+Briefly, answer conversationally in up to three sentences; offer a detailed follow-up if needed. Does the paper ledger reconcile right now?
+AUDREY
+Still yes, and nothing has moved since your last check: all 19 entries, sequence 1 to 19, reconcile, with cash deltas of $499,306.35 against cash of $499,306.35 and reserved deltas of $0 against reserved of $0 [F54]. Available of $499,306.35 equals cash minus reserved, and the running balance agrees [F54]. I can walk you through each step if you'd like the detail.
+Memory & evidence
+▶ Play
+Resumed your conversation with Audrey (10 messages).
+All records, strategy detail and technical evidence
+Presentation of recorded state. This page sends no order and holds no credential; it reads /api/command/agents/audrey with the COMMAND session. The 3D characters are licensed Microsoft Rocketbox models (MIT licence, credited below; shipped with their licence file); a device that cannot draw them shows a 2D portrait card. The pose follows the paper runtime's own heartbeat (paper_session_health) and never stands in for data. UNKNOWN is not zero; EMPTY is not success. The 3D character on this page is a licensed model, not an original illustration. Character model: Microsoft Rocketbox Business_Female_04 (MIT, © 2020 Microsoft). Licence: MIT, shipped with the model as ROCKETBOX_LICENSE.md.
+Talk to Audrey
+Explain recommendation paperrec:521b224a4ded906f08c02b93, its evidence, genuine agent responses and subsequent measurements.
+Explain recommendation paperrec:5d764d7fe0fc1e4895bcbb2d, its evidence, genuine agent responses and subsequent measurements.
+Explain recommendation paperrec:a72c3f4296c2548b13ea2120, its evidence, genuine agent responses and subsequent measurements.
