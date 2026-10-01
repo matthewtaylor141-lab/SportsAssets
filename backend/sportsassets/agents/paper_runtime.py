@@ -71,26 +71,42 @@ def _budget_left(ctx: dict) -> bool:
 # STEPS
 # ═════════════════════════════════════════════════════════════════════
 
+async def _stalest_first(conn, slugs: list) -> list:
+    if not slugs:
+        return []
+    ages = {r["us_market_slug"]: L._epoch(r["at"]) for r in await conn.fetch(
+        "SELECT us_market_slug, max(observed_at) AS at FROM "
+        " paper_book_observations WHERE us_market_slug = ANY($1::text[]) "
+        " GROUP BY 1", slugs)}
+    return sorted(dict.fromkeys(slugs), key=lambda s: ages.get(s) or 0.0)
+
+
 async def step_books(conn, ctx: dict) -> dict:
     """Read the books of markets with open paper orders or open positions,
-    within the per-pass read budget. Each read is recorded as observed."""
-    from .. import bettor_paper_simulator as SIM
+    within the per-pass read budget. Each read is recorded as observed.
+
+    PRIORITY (2026-10-01): (1) marketable entries waiting for their first
+    eligible book -- a fill decision is due; (2) resting orders, stalest
+    observation first -- a fill can only be simulated on a book observed
+    after placement; (3) held positions, stalest first, for marks and
+    Xavier's exit ladder. A read this process made within seconds answers
+    without a second venue request (`bettor_paper_guard`)."""
     acct = ctx["account_id"]
-    slugs = [r["us_market_slug"] for r in await conn.fetch(
-        "SELECT DISTINCT us_market_slug FROM paper_orders "
+    rows = await conn.fetch(
+        "SELECT us_market_slug, order_type, state FROM paper_orders "
         " WHERE account_id=$1 AND state = ANY($2::text[])", acct,
-        list(L.OPEN_STATES))]
-    # Positions next, the stalest observation first, so marks rotate.
-    held = [p["us_market_slug"] for p in await L.positions(conn, acct)
-            if p["us_market_slug"] not in slugs]
-    if held:
-        ages = {r["us_market_slug"]: L._epoch(r["at"]) for r in
-                await conn.fetch(
-                    "SELECT us_market_slug, max(observed_at) AS at FROM "
-                    " paper_book_observations WHERE us_market_slug = "
-                    " ANY($1::text[]) GROUP BY 1", held)}
-        held.sort(key=lambda s: ages.get(s) or 0.0)
-    slugs.extend(dict.fromkeys(held))
+        list(L.OPEN_STATES))
+    due = [r["us_market_slug"] for r in rows
+           if r["order_type"] == "MARKETABLE"
+           and r["state"] == "PENDING_SIMULATION"]
+    resting = await _stalest_first(conn, [
+        r["us_market_slug"] for r in rows
+        if r["us_market_slug"] not in due])
+    slugs = list(dict.fromkeys(due + resting))
+    held = await _stalest_first(conn, [
+        p["us_market_slug"] for p in await L.positions(conn, acct)
+        if p["us_market_slug"] not in slugs])
+    slugs.extend(held)
     # AT MOST HALF THE PASS'S READS: the other half is Derek's.
     cap = int(ctx["config"]["cadence"]["max_book_reads_per_pass"])
     return await read_books(conn, ctx, slugs, basis="OPEN_ORDER_OR_POSITION",
@@ -107,7 +123,10 @@ async def read_books(conn, ctx: dict, slugs: list, *, basis: str,
                 limit is not None and out["read"] >= limit):
             out["skipped_budget"] += 1
             continue
-        got = await ctx["market_data"].read_book(slug)
+        # BOUNDED BY THE PASS DEADLINE: a read the venue cooldown would hold
+        # past the pass budget is refused by name, never left to overrun it.
+        from . import paper_derek as _PD
+        got = await _PD.read_book_within_deadline(ctx, slug)
         ctx["books_read"] += 1
         rec = await SIM.record_book(conn, slug=slug, read=got,
                                     source="PAPER_MARKET_DATA_CLIENT",
@@ -145,7 +164,14 @@ def _benchmark_env_on() -> bool:
 
 
 def default_steps() -> list:
-    steps = [("books", step_books), ("simulate", step_simulate)]
+    steps = [("books", step_books)]
+    if _benchmark_env_on():
+        # THE MAKER POLICY'S STANDING ENTRY ORDERS, re-checked against their
+        # cancellation conditions BEFORE the simulator step, which confirms
+        # any cancel it requests.
+        from . import paper_maker as PMK
+        steps.append(("maker_maintain", PMK.step_maintain))
+    steps.append(("simulate", step_simulate))
     try:
         from . import paper_derek as PD
         steps.append(("derek", PD.step))
@@ -161,6 +187,14 @@ def default_steps() -> list:
             # version, own kill-switch row), on the same pass and ledger.
             steps.append(("benchmark_completed_game",
                           PB.step_completed_game))
+            # THE MAKER-ENTRY POLICY and THE BOUNDED EXPLORATION STRATEGY
+            # (owner-authorized 2026-10-01; each its own key, version and
+            # kill-switch row), after the investment policy so it decides a
+            # valuation first.
+            from . import paper_maker as PMK
+            from . import paper_explore as PEX
+            steps.append(("maker_entry", PMK.step))
+            steps.append(("exploration", PEX.step))
         steps.append(("simulate_after_delay", PD.step_after_delay))
     except ImportError:
         pass
@@ -175,6 +209,15 @@ def default_steps() -> list:
     try:
         from . import paper_audrey as PA
         steps.append(("audrey", PA.step))
+    except ImportError:
+        pass
+    try:
+        # AUDREY'S OPERATIONAL AUDIT (migration 189): funnel, book reads,
+        # fees, stale inputs, missing decisions, coverage, management --
+        # findings and recommendations to Derek and Xavier, at most every
+        # 10 minutes. Never places or changes an order.
+        from . import paper_ops_audit as POA
+        steps.append(("audrey_operations", POA.step))
     except ImportError:
         pass
     try:
@@ -476,10 +519,170 @@ async def _record_hook_failure(conn, *, ctx: dict, valuation_id: int,
                     valuation_id, strategy, exc_info=True)
 
 
+# ── THE BOOK-READ RETRY: BOUNDED CONCURRENCY, AN EXPLICIT BUDGET ─────────
+#
+# A strategy whose book read was cut by the venue cooldown (and whose
+# Pinnacle reading would still be inside its 30 s rule after the cooldown)
+# is decided ONCE MORE, after the cooldown, on its own pool connection, off
+# the collection cycle. At most RETRY_CONCURRENCY run at once and at most
+# RETRY_BUDGET_PER_HOUR are scheduled per rolling hour; a retry that cannot
+# be scheduled decides at once instead (and records its refusal). The retry
+# itself has no retry.
+RETRY_CONCURRENCY = 2
+RETRY_BUDGET_PER_HOUR = 60
+_RETRY: dict = {"sem": None, "loop": None, "recent": [], "tasks": set(),
+                "scheduled": 0, "refused_budget": 0}
+
+
+def _retry_sem() -> asyncio.Semaphore:
+    loop = asyncio.get_running_loop()
+    if _RETRY["sem"] is None or _RETRY["loop"] is not loop:
+        _RETRY["sem"] = asyncio.Semaphore(RETRY_CONCURRENCY)
+        _RETRY["loop"] = loop
+    return _RETRY["sem"]
+
+
+def retry_capacity(now: float | None = None) -> bool:
+    """Whether a retry could be scheduled now (hourly budget left and a
+    running loop). Checked BEFORE a decision defers, so a valuation with no
+    retry available is decided at once on its first read."""
+    at = time.time() if now is None else float(now)
+    recent = [t for t in _RETRY["recent"] if at - t < 3600.0]
+    if len(recent) >= RETRY_BUDGET_PER_HOUR:
+        return False
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return False
+    return True
+
+
+def schedule_book_retry(*, valuation_id: int, strategies: list,
+                        after_s: float, get_pool=None,
+                        now: float | None = None) -> dict:
+    """Start ONE background retry of `strategies` on this valuation after
+    `after_s`, within the concurrency and hourly budget. Returns at once."""
+    at = time.time() if now is None else float(now)
+    _RETRY["recent"] = [t for t in _RETRY["recent"] if at - t < 3600.0]
+    if len(_RETRY["recent"]) >= RETRY_BUDGET_PER_HOUR:
+        _RETRY["refused_budget"] += 1
+        return {"scheduled": False, "why": "RETRY_BUDGET_EXHAUSTED",
+                "budget_per_hour": RETRY_BUDGET_PER_HOUR}
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return {"scheduled": False, "why": "NO_RUNNING_LOOP"}
+    if get_pool is None:
+        from ..db import get_pool
+    _RETRY["recent"].append(at)
+    _RETRY["scheduled"] += 1
+
+    async def run():
+        async with _retry_sem():
+            await asyncio.sleep(max(0.0, float(after_s)))
+            try:
+                pool = await get_pool()
+                async with pool.acquire(timeout=ACQUIRE_TIMEOUT_S) as c:
+                    await decide_valuation(
+                        c, valuation_id=valuation_id,
+                        strategies=list(strategies), via="BOOK_RETRY",
+                        attempt_no=2)
+            except asyncio.CancelledError:
+                raise
+            except Exception:                                  # noqa: BLE001
+                log.warning("paper book retry failed (valuation %s)",
+                            valuation_id, exc_info=True)
+
+    t = loop.create_task(run())
+    _RETRY["tasks"].add(t)
+    t.add_done_callback(_RETRY["tasks"].discard)
+    return {"scheduled": True, "after_s": round(float(after_s), 3),
+            "in_flight": len(_RETRY["tasks"]),
+            "concurrency": RETRY_CONCURRENCY,
+            "budget_used_last_hour": len(_RETRY["recent"]),
+            "budget_per_hour": RETRY_BUDGET_PER_HOUR}
+
+
+async def _decide_paper_strategies(conn, ctx: dict, row: dict, *, vid: int,
+                                   strategies, via: str, attempt_no: int,
+                                   schedule_retry) -> dict:
+    """The investment policy first, then the maker-entry and exploration
+    strategies, on ONE shared book read; each attempt recorded. A strategy
+    whose read was cut earns the retry for itself and every strategy after
+    it in this valuation (they would meet the same cooldown)."""
+    from . import paper_benchmark as PB
+    from . import paper_maker as PMK
+    from . import paper_explore as PEX
+    T = VALUATION_HOOK_TIMEOUT_S                               # noqa: N806
+    plan = [
+        (PB.CG_STRATEGY, lambda c: PB.decide_for_hook(
+            conn, c, dict(row), timeout_s=T, pol=PB.CG_POLICY)),
+        (PB.MAKER_STRATEGY, lambda c: PMK.decide_for_hook(
+            conn, c, dict(row), timeout_s=T)),
+        (PB.EXPLORE_STRATEGY, lambda c: PEX.decide_for_hook(
+            conn, c, dict(row), timeout_s=T))]
+    results: dict = {}
+    retry_for: list = []
+    retry_after = None
+    for strat, fn in plan:
+        if strategies is not None and strat not in strategies:
+            continue
+        if retry_for:
+            res = {"deferred": True, "why": "BOOK_RETRY",
+                   "retry": {"with": retry_for[0]}}
+            retry_for.append(strat)
+        else:
+            res = await fn(ctx)
+            if res.get("deferred") and res.get("why") == "BOOK_RETRY":
+                retry_for.append(strat)
+                retry_after = res.get("retry_after_s")
+        results[strat] = res
+        await PB.record_attempt(conn, ctx, valuation_id=vid, strategy=strat,
+                                via=via, res=res, attempt_no=attempt_no)
+        if not (res.get("deferred") and res.get("why") == "BOOK_RETRY"):
+            await _record_hook_failure(conn, ctx=ctx, valuation_id=vid,
+                                       strategy=strat, res=res)
+    if retry_for:
+        sched = schedule_retry(valuation_id=vid, strategies=retry_for,
+                               after_s=float(retry_after or 1.0))
+        await PB.record_attempt(
+            conn, ctx, valuation_id=vid, strategy=retry_for[0], via=via,
+            attempt_no=attempt_no,
+            res={"retry_outcome": ("RETRY_SCHEDULED" if sched.get(
+                "scheduled") else "RETRY_NOT_SCHEDULED"),
+                "why": sched.get("why"), "retry": dict(
+                    sched, strategies=retry_for)})
+        if not sched.get("scheduled"):
+            # NO RETRY AVAILABLE: decide now, without one (the refusal is
+            # recorded), rather than leave the valuation undecided.
+            ctx2 = dict(ctx, book_retry_ok=False)
+            for strat, fn in plan:
+                if strat in retry_for:
+                    res = await fn(ctx2)
+                    results[strat] = res
+                    await PB.record_attempt(
+                        conn, ctx2, valuation_id=vid, strategy=strat,
+                        via=via, res=res, attempt_no=attempt_no)
+                    await _record_hook_failure(conn, ctx=ctx2,
+                                               valuation_id=vid,
+                                               strategy=strat, res=res)
+        results["retry"] = sched
+    return results
+
+
 async def decide_valuation(conn, *, valuation_id, now: float | None = None,
                            market_data=None, account_id: str | None = None,
-                           fee_fn=None, schedule_fill=None) -> dict:
-    """ONE PAPER DECISION FOR ONE JUST-WRITTEN VALUATION. Never raises."""
+                           fee_fn=None, schedule_fill=None,
+                           strategies=None,
+                           via: str = "IN_CYCLE_AT_THE_VALUATION_INSTANT",
+                           attempt_no: int = 1,
+                           schedule_retry=None,
+                           book_retry: bool = True) -> dict:
+    """ONE PAPER DECISION FOR ONE JUST-WRITTEN VALUATION. Never raises.
+
+    `strategies` (the book retry) limits the run to those benchmark-family
+    strategies; the retry decides only what its first attempt deferred.
+    `book_retry=False` decides a cut read at once (no retry)."""
     if not S.env_on():
         return {"decided": False, "why": S.R_ENV_OFF}
     acct = account_id or DEFAULT_ACCOUNT_ID
@@ -508,24 +711,51 @@ async def decide_valuation(conn, *, valuation_id, now: float | None = None,
             + VALUATION_HOOK_TIMEOUT_S, "fee_fn": fee_fn, "books_read": 0,
             "first_fills": [], "fills": 0, "results": {},
             "clock": (time.time if live_clock else (lambda: at)),
-            "decided_via": "IN_CYCLE_AT_THE_VALUATION_INSTANT",
-            "context_cache_key": sess["session_id"]}
+            "decided_via": via,
+            "context_cache_key": sess["session_id"],
+            # ONE BOOK READ for every strategy deciding this valuation
+            "books_by_slug": {},
+            # the first attempt may earn one bounded retry (when one can be
+            # scheduled); a retry may not
+            "book_retry_ok": (attempt_no == 1 and book_retry
+                              and retry_capacity())}
         from . import paper_derek as PD
         bench_on = _benchmark_env_on()
         bench = None
         bench_cg = None
+        family: dict = {}
         vid = int(valuation_id)
         if bench_on:
             # THE ACTIVE ENTRY EXPERIMENT FIRST. The completed-game policy is
-            # the one strategy that may open positions (migration 184), so it
-            # decides closest to the valuation instant: its book read is not
-            # queued behind the research strategies' work on the same row.
+            # the investment policy, so it decides closest to the valuation
+            # instant; the maker-entry policy and the bounded exploration
+            # strategy follow on the SAME book read.
             from . import paper_benchmark as PB
-            bench_cg = await PB.decide_for_hook(
-                conn, ctx, dict(row), timeout_s=VALUATION_HOOK_TIMEOUT_S,
-                pol=PB.CG_POLICY)
-            await _record_hook_failure(conn, ctx=ctx, valuation_id=vid,
-                                       strategy=PB.CG_STRATEGY, res=bench_cg)
+            family = await _decide_paper_strategies(
+                conn, ctx, dict(row), vid=vid, strategies=strategies,
+                via=via, attempt_no=attempt_no,
+                schedule_retry=schedule_retry or schedule_book_retry)
+            bench_cg = family.get(PB.CG_STRATEGY)
+        if via == "BOOK_RETRY":
+            # THE RETRY DECIDES ONLY WHAT ITS FIRST ATTEMPT DEFERRED: the
+            # two-model and strict records were made on the first attempt.
+            orders = [r.get("order_id") for r in family.values()
+                      if isinstance(r, dict) and r.get("order_id")]
+            if orders:
+                sched = schedule_fill
+                if sched is None:
+                    from . import runtime as _RT
+                    sched = (lambda: _RT.paper_pass_hook(
+                        trigger="VALUATION_DECISION_FILL"))
+                try:
+                    sched()
+                except Exception:                              # noqa: BLE001
+                    pass
+            return {"decided": True, "via": via, "attempt_no": attempt_no,
+                    "strategies": {k: {kk: (v or {}).get(kk) for kk in (
+                        "decision_id", "verdict", "refusal", "order_id",
+                        "deferred", "why")} for k, v in family.items()
+                        if k != "retry"}}
         t_derek = time.monotonic()
         try:
             dctx = dict(ctx, deadline=time.monotonic()
@@ -568,7 +798,8 @@ async def decide_valuation(conn, *, valuation_id, now: float | None = None,
                 _json.dumps(getattr(md, "last_mutation_attempt", None),
                             default=str))
         if rec.get("order_id") or (bench or {}).get("order_id") or \
-                (bench_cg or {}).get("order_id"):
+                any(isinstance(r, dict) and r.get("order_id")
+                    for r in family.values()):
             sched = schedule_fill
             if sched is None:
                 from . import runtime as _RT
@@ -587,6 +818,12 @@ async def decide_valuation(conn, *, valuation_id, now: float | None = None,
             out["benchmark"] = bench
             if bench_cg is not None:
                 out["benchmark_completed_game"] = bench_cg
+            for k, v in family.items():
+                if k not in ("retry",) and k != getattr(
+                        PB, "CG_STRATEGY", None):
+                    out.setdefault("paper_family", {})[k] = v
+            if family.get("retry"):
+                out["book_retry"] = family["retry"]
             if rec.get("error"):
                 out.update(decided=False, error=rec["error"])
         return out

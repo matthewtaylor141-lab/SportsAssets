@@ -67,7 +67,7 @@ async def _pass(conn, acct, transport, now, **kw):
 
 
 @pytest.fixture
-def both_on(monkeypatch):
+def both_on(monkeypatch, new_strategies_off):
     """THE PRODUCTION SELECTION since migration 184: the environment flag
     on, the completed-game policy's row ON and the strict benchmark's row
     OFF (one active entry experiment). Asserted, not assumed."""

@@ -86,7 +86,7 @@ async def _ledger_matches_balances(conn, acct_id, now) -> dict:
 
 
 @pytest.fixture
-def bench_on(monkeypatch):
+def bench_on(monkeypatch, new_strategies_off):
     # THE STRICT POLICY ALONE: its own row switched ON for the proof (its
     # migrated state since 184 is off), the completed-game policy's OFF, so
     # every count here is the strict policy's (the completed-game proofs are
@@ -162,9 +162,13 @@ def test_no_funded_module_reaches_the_benchmark():
     # agents/persona_facts.py: the agents' chat reads the ACTIVE entry
     # threshold (cg_parameters, read-only) so each answer states the policy
     # the paper decision path actually runs
+    # agents/paper_maker.py, agents/paper_explore.py: the maker-entry policy
+    # and the bounded exploration strategy (migration 189), paper modules
+    # whose decisions reuse the benchmark's match, book and attempt helpers
     assert users <= {"agents/paper_runtime.py", "agents/paper_xavier.py",
                      "agents/paper_audrey.py", "bettor_paper_readmodel.py",
-                     "bettor_paper_ops.py", "agents/persona_facts.py"}, \
+                     "bettor_paper_ops.py", "agents/persona_facts.py",
+                     "agents/paper_maker.py", "agents/paper_explore.py"}, \
         sorted(users)
     assert not any("funded" in u for u in users)
 
@@ -568,7 +572,8 @@ async def test_ev_not_positive_after_the_simulators_fees_is_refused(bench_on):
 # ═════════════════════════════════════════════════════════════════════
 
 @pg
-async def test_switch_off_writes_no_benchmark_rows(monkeypatch):
+async def test_switch_off_writes_no_benchmark_rows(monkeypatch,
+                                                    new_strategies_off):
     conn = await H.connect()
     now = time.time() + 5.0
     try:

@@ -72,7 +72,19 @@ STRATEGY_LABELS = {
         "execution, conditional on ordinary game completion; exceptional "
         "settlement risk disclosed, not risk-adjusted, not qualified for "
         "real-money trading)",
-        "/api/command/paper/benchmark?strategy=PINNACLE_COMPLETED_GAME_PAPER")}
+        "/api/command/paper/benchmark?strategy=PINNACLE_COMPLETED_GAME_PAPER"),
+    "PINNACLE_COMPLETED_GAME_MAKER_PAPER": (
+        "the PINNACLE_COMPLETED_GAME_MAKER_PAPER policy (the completed-game "
+        "rules met with RESTING bids; an order is not a fill; taker fee "
+        "charged, maker rebate not assumed; paper only)",
+        "/api/command/paper/benchmark?strategy="
+        "PINNACLE_COMPLETED_GAME_MAKER_PAPER"),
+    "PINNACLE_EXPLORATION_PAPER": (
+        "the PINNACLE_EXPLORATION_PAPER training strategy (training / "
+        "simulated execution; positions may fail the investment policy's "
+        "edge and after-fee rules by design; negative expected value is a "
+        "research cost, not investment performance)",
+        "/api/command/paper/benchmark?strategy=PINNACLE_EXPLORATION_PAPER")}
 
 
 def strategy_label(strategy) -> str:

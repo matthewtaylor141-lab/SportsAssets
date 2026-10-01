@@ -60,7 +60,9 @@ RECENT_ROWS = 50
 TWO_MODEL = RM.TWO_MODEL                              # DEREK_ENTRY_POLICY_V2
 STRICT = "PINNACLE_ONLY_PAPER_BENCHMARK"
 COMPLETED_GAME = "PINNACLE_COMPLETED_GAME_PAPER"
-STRATEGY_ORDER = (TWO_MODEL, STRICT, COMPLETED_GAME)
+MAKER = "PINNACLE_COMPLETED_GAME_MAKER_PAPER"
+EXPLORATION = "PINNACLE_EXPLORATION_PAPER"
+STRATEGY_ORDER = (TWO_MODEL, STRICT, COMPLETED_GAME, MAKER, EXPLORATION)
 
 #: THE STRATEGIES, in the order the pages show them. `kind` is what keeps
 #: them apart on the page: Derek's ORIGINAL RESEARCH decisions first, then the
@@ -96,6 +98,32 @@ STRATEGY_META = {
                     "research risks with unmeasured frequency."),
         "version": "PINNACLE_COMPLETED_GAME_PAPER_V2", "disclosure": None,
         "economics_label": "CONDITIONAL_EXPERIMENTAL_NOT_RISK_ADJUSTED"},
+    MAKER: {
+        "kind": "EXPERIMENTAL_BENCHMARK",
+        "title": "Completed-game maker-entry policy (resting bids)",
+        "label": "CONDITIONAL · RESTING ORDERS",
+        "summary": ("The completed-game policy's match, 0.5 pp threshold and "
+                    "positive after-fee rule, met by RESTING a bid below the "
+                    "ask. An order is not a fill: fills are simulated only "
+                    "when observed liquidity strictly crosses the bid after "
+                    "the queue ahead. The taker fee is charged; the venue's "
+                    "maker rebate is not assumed."),
+        "version": "PINNACLE_COMPLETED_GAME_MAKER_PAPER_V1",
+        "disclosure": None,
+        "economics_label": "CONDITIONAL_EXPERIMENTAL_NOT_RISK_ADJUSTED"},
+    EXPLORATION: {
+        "kind": "TRAINING",
+        "title": "Exploration (training / simulated execution)",
+        "label": "TRAINING",
+        "summary": ("A bounded training strategy that may take positions "
+                    "failing the 0.5 pp edge or after-fee requirement to "
+                    "generate forward experience: $100 per position incl. "
+                    "fees, $5,000 aggregate, one per fixture, stops at $1,000 "
+                    "realized losses. Negative expected value is a research "
+                    "cost, not investment performance."),
+        "version": "PINNACLE_EXPLORATION_PAPER_V1", "disclosure": None,
+        "economics_label":
+            "EXPLORATION_RESEARCH_COST_NOT_INVESTMENT_PERFORMANCE"},
 }
 
 
@@ -113,6 +141,10 @@ def _policy_meta() -> dict:
     out[COMPLETED_GAME].update(version=PB.CG_VERSION,
                                disclosure=PB.CG_DISCLOSURE,
                                economics_label=PB.ECONOMICS_LABEL)
+    out[MAKER].update(version=PB.MAKER_VERSION,
+                      disclosure=PB.MAKER_DISCLOSURE)
+    out[EXPLORATION].update(version=PB.EXPLORE_VERSION,
+                            disclosure=PB.EXPLORE_DISCLOSURE)
     return out
 
 
@@ -154,6 +186,16 @@ def _unavailable(why: str) -> dict:
 #: itself stays on the record (Technical details); an unknown code is read
 #: out as words, never hidden.
 REFUSAL_WORDS = {
+    "EXPLORATION_REALIZED_LOSS_STOP_REACHED": "exploration has reached its $1,000 realized-loss stop; no new training entries",
+    "EXPLORATION_AGGREGATE_EXPOSURE_LIMIT": "exploration is at its $5,000 aggregate exposure limit",
+    "EXPLORATION_ALREADY_HOLDS_THIS_FIXTURE": "exploration already holds a position in this fixture (one per fixture)",
+    "FIXTURE_NOT_SELECTED_BY_THE_EXPLORATION_SAMPLE": "this fixture was not drawn by the exploration sample (recorded probability and draw)",
+    "ONE_CONTRACT_EXCEEDS_THE_EXPLORATION_ENTRY_BUDGET": "a single contract would exceed the $100 exploration entry budget",
+    "NO_DEPTH_AT_THE_BEST_LEVEL": "no displayed quantity at the best level",
+    "EXPLORATION_LIMITS_UNREADABLE": "the exploration limits could not be read, so no training entry was made",
+    "NO_RESTING_PRICE_BELOW_THE_ASK_CLEARS_THE_THRESHOLD_AND_FEES": "no resting price below the ask clears the 0.5-point threshold and the fee",
+    "NO_ASK_TO_REST_BELOW": "the book showed no ask to rest a bid below",
+    "A_MAKER_ENTRY_ORDER_ALREADY_RESTS_ON_THIS_FIXTURE": "a resting maker bid already stands on this fixture (one at a time)",
     "BELOW_MIN_GROSS_EDGE": "the edge was below the policy's minimum (the threshold recorded on the decision)",
     "EDGE_BELOW_5PP": "the edge was below the 5-point minimum",
     "GROSS_EDGE_CLEARS_THRESHOLD_BUT_FEES_CONSUME_IT": "the edge cleared the threshold but the fee per contract consumed it",
@@ -622,6 +664,16 @@ async def derek_operations(conn, *, account_id: str | None = None,
                              now=at, limit=limit)
         for s in STRATEGY_ORDER]
     out["account"] = await account_section(conn, account_id=acct, now=at)
+
+    async def standing():
+        # DEREK'S STANDING ENTRY ORDERS (resting maker bids and marketable
+        # entries awaiting their book): price, size, rationale, expiry and
+        # cancellation conditions, as persisted. An order is not a fill.
+        from . import bettor_paper_experiment as EXP
+        return (await EXP.standing_orders(conn, at, acct))["entry_orders"]
+    out["standing_entry_orders"] = await _sec(standing(), empty_why=(
+        "NO_OPEN_ENTRY_ORDER: Derek has no resting or pending entry order "
+        "right now"))
     out["logos"] = ("no licensed team logo files exist in this repository; "
                     "markets are named from the records, without logos")
     out["separation"] = ("ORIGINAL_RESEARCH (DEREK_ENTRY_POLICY_V2) and each "
@@ -1164,6 +1216,19 @@ async def audrey_operations(conn, *, account_id: str | None = None,
                                  empty_why="NO_PAPER_AUDIT_FINDING")
     out["finding_counts"] = await _sec(finding_counts(),
                                        empty_why="NO_PAPER_AUDIT_FINDING")
+
+    async def ops_audit():
+        # AUDREY'S OPERATIONAL AUDIT (migration 189): her recommendations to
+        # Derek and Xavier, each owner's response and every measurement
+        from . import bettor_paper_experiment as EXP
+        ag = await EXP.agents(conn, at)
+        recs = ag["audrey"].get("recommendations")
+        if recs is None:
+            raise RuntimeError("MIGRATION_189_NOT_APPLIED")
+        return recs
+    out["operational_audit"] = await _sec(ops_audit(), empty_why=(
+        "NO_OPERATIONAL_RECOMMENDATION_YET: Audrey's operational audit runs "
+        "every 10 minutes on the paper pass"))
     out["freshness"] = await freshness(conn, account_id=acct, now=at)
     out["last_updated_at"] = await _last_updated(conn, acct)
     return out

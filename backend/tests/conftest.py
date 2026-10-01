@@ -439,3 +439,19 @@ def _mirror_harness_clock_is_its_own_now(request, monkeypatch):
             if hasattr(ml, name):
                 monkeypatch.setattr(ml, name, 0.0)
     yield
+
+
+@pytest.fixture
+def new_strategies_off():
+    """THE MAKER-ENTRY AND EXPLORATION STRATEGIES (migration 189) OFF for a
+    proof of an older policy, so its counts are that policy's alone; their
+    rows go back to the migrated state (enabled) afterwards. The new
+    strategies' own proofs switch them on explicitly."""
+    from tests import paper_live_fixture as PL
+    keys = ("PINNACLE_COMPLETED_GAME_MAKER_PAPER",
+            "PINNACLE_EXPLORATION_PAPER")
+    for k in keys:
+        PL.set_policy_control(k, False)
+    yield
+    for k in keys:
+        PL.set_policy_control(k, True)

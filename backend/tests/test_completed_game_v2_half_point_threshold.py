@@ -106,7 +106,7 @@ async def _nosleep(_):
 
 
 @pytest.fixture
-def cg_on(monkeypatch):
+def cg_on(monkeypatch, new_strategies_off):
     monkeypatch.setenv(PB.ENV_FLAG, "on")
     monkeypatch.setenv(PL.S.ENV_FLAG, "on")
     PL.set_policy_control(PB.CG_POLICY["control_key"], True)

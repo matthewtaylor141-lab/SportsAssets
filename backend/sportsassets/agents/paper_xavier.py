@@ -701,8 +701,8 @@ async def step_settle(conn, ctx: dict) -> dict:
             # THE COMPLETED-GAME POLICY'S EXCEPTIONAL SETTLEMENT: paid at
             # the venue's own published price, never an assumed refund.
             from . import paper_benchmark as PB
-            if await PB.group_strategy(conn, p["group_id"]) == \
-                    PB.CG_STRATEGY:
+            if await PB.group_strategy(conn, p["group_id"]) in \
+                    PB.COMPLETED_GAME_STRATEGIES:
                 vrows = [dict(r) for r in await conn.fetch(
                     VENUE_PRICE_SQL, p["us_market_slug"])]
                 vp = venue_price_settlement(vrows,
@@ -714,7 +714,9 @@ async def step_settle(conn, ctx: dict) -> dict:
                         holding_side=p["holding_side"],
                         settlement_event_key=key,
                         outcome="SETTLED_AT_VENUE_PRICE",
-                        evidence=dict(vp, policy=PB.CG_VERSION),
+                        evidence=dict(vp, policy=(PB.policy_for(
+                            await PB.group_strategy(conn, p["group_id"]))
+                            or PB.CG_POLICY)["version"]),
                         evidence_source="external_valuations."
                                         "settlement_read",
                         at=at, session_id=ctx["session_id"],

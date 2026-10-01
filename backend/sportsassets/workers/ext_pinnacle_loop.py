@@ -1849,6 +1849,59 @@ def _venue_diagnostic(slug, exc, *, stage, code=None, feed=None) -> dict:
     return out
 
 
+# ── ONE VENUE READ, SHARED WITHIN SECONDS (2026-10-01) ────────────────
+#
+# The cycle reads a contract's book to value it and, seconds later, the
+# paper decision on that same valuation read the SAME book again through the
+# same paced client -- two requests where one answers both. After a 429 the
+# second request met the venue cooldown (>= 5 s) and the decision was
+# refused BOOK_READ_DID_NOT_FINISH_INSIDE_THE_DECISION_DEADLINE: 6 of 17 and
+# 8 of 19 completed-game book reads in the 18:00 and 17:00 UTC hours.
+#
+# So every SUCCESSFUL read is remembered here, briefly, with OUR receipt
+# instant, and `recent_book` hands a copy to a reader that can use a read
+# that young. Nothing is ever made fresher than it is: the copy keeps its
+# original receipt instant, every decision still applies its own age limit
+# to it, an error or a gate refusal is never remembered, and the cache is
+# per process, bounded, and consulted only by the paper market-data client.
+_RECENT_BOOKS: dict = {}
+_RECENT_BOOKS_LOCK = __import__("threading").Lock()
+RECENT_BOOKS_MAX = 256
+
+
+def _remember_book(slug: str, out: dict) -> None:
+    md = out.get("marketData") if isinstance(out, dict) else None
+    if not slug or not isinstance(md, dict):
+        return
+    rec = {"marketData": md, "observed_at": time.time(),
+           "feed": out.get("feed")}
+    with _RECENT_BOOKS_LOCK:
+        _RECENT_BOOKS[str(slug)] = rec
+        if len(_RECENT_BOOKS) > RECENT_BOOKS_MAX:
+            for k in sorted(_RECENT_BOOKS,
+                            key=lambda k: _RECENT_BOOKS[k]["observed_at"]
+                            )[:RECENT_BOOKS_MAX // 2]:
+                _RECENT_BOOKS.pop(k, None)
+
+
+def recent_book(slug: str, *, max_age_s: float, now: float | None = None
+                ) -> dict | None:
+    """A copy of the last SUCCESSFUL book read of `slug` in this process if
+    our receipt of it is at most `max_age_s` old, else None. The copy keeps
+    its original receipt instant (`observed_at`) and says it was shared."""
+    at = time.time() if now is None else float(now)
+    with _RECENT_BOOKS_LOCK:
+        rec = _RECENT_BOOKS.get(str(slug or ""))
+    if rec is None:
+        return None
+    age = at - float(rec["observed_at"])
+    if age < 0 or age > float(max_age_s):
+        return None
+    return {"marketData": rec["marketData"],
+            "observed_at": rec["observed_at"], "feed": rec.get("feed"),
+            "shared_read": True, "shared_read_age_s": round(age, 3)}
+
+
 def _read_book_blocking(slug: str, *,
                         deadline_epoch_s: float | None = None) -> dict:
     """One PACED public book read, off the event loop. Never raises.
@@ -1948,6 +2001,8 @@ def _read_book_blocking(slug: str, *,
             merged["cooldown"] = out.get("cooldown")
             merged["request_accounting"] = out.get("request_accounting")
             out["diagnostic"] = merged
+        else:
+            _remember_book(slug, out)
         return out
     finally:
         # THE READ ID IS ALWAYS CLOSED AND UNBOUND. A leaked binding would

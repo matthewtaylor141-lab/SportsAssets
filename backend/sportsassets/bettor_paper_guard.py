@@ -152,12 +152,24 @@ class PaperMarketDataClient:
             READS, self._attempts)
 
 
+#: A book read by this process (the collection cycle valuing the contract,
+#: or an earlier paper read) at most this many seconds ago answers a paper
+#: read without a second venue request. Below the decisions' own 10 s book
+#: age limit, which they still apply to the shared read's receipt instant.
+SHARED_BOOK_MAX_AGE_S = 6.0
+
+
 def _default_transport(slug: str, *, deadline_epoch_s=None) -> dict:
     """The collection cycle's own paced, public book read (`pmus.book_read`
     through `_read_book_blocking`), with the caller's deadline handed to the
-    venue request gate. Imported lazily so constructing the client reaches
-    nothing."""
+    venue request gate -- or, when this process read the same book within
+    SHARED_BOOK_MAX_AGE_S, that read, with its original receipt instant and
+    `shared_read: True` (no venue request; nothing is made fresher than it
+    is). Imported lazily so constructing the client reaches nothing."""
     from .workers import ext_pinnacle_loop as L
+    shared = L.recent_book(slug, max_age_s=SHARED_BOOK_MAX_AGE_S)
+    if shared is not None:
+        return shared
     return L._read_book_blocking(slug, deadline_epoch_s=deadline_epoch_s)
 
 

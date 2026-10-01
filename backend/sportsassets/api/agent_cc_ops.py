@@ -48,6 +48,10 @@ OPS_ROUTE = "/api/command/paper/operations"
 #: The panels each page's ops read fills, in page order: (id, title, source)
 OPS_PANELS = {
     "derek": (
+        ("p-ops-standing", "Derek's standing entry orders",
+         "paper_orders (role ENTRY, open): resting maker bids and marketable "
+         "entries, with price, size, rationale, expiry and cancellation "
+         "conditions"),
         ("p-ops-bench", "Experimental benchmark decisions",
          "paper_decisions where strategy is PINNACLE_ONLY_PAPER_BENCHMARK or "
          "PINNACLE_COMPLETED_GAME_PAPER"),
@@ -74,6 +78,11 @@ OPS_PANELS = {
         ("p-ops-performance", "Agent performance by strategy",
          "paper_decisions, paper_orders and the positions of the one paper "
          "ledger, per strategy"),
+        ("p-ops-opsaudit", "Operational audit: recommendations to Derek and "
+         "Xavier",
+         "paper_recommendations and their events (migration 189): Audrey's "
+         "evidence, the owner's response and every later measurement; "
+         "OPERATIONAL, never a claim of profitable learning"),
         ("p-ops-findings", "Audrey's event-driven audits and findings",
          "paper_audrey_findings (event audits from the paper learning "
          "record: first fill, handoff, management fill, settlement, "
@@ -105,7 +114,7 @@ OPS_CSS = r"""
 .strat-h h3{margin:6px 0 4px;font:650 15.5px/1.3 var(--display)}
 .strat-meta{font:11.5px/1.45 var(--mono);color:var(--ink-3);overflow-wrap:anywhere}
 .schip{display:inline-block;font:700 10px/1 var(--mono);letter-spacing:.1em;padding:4px 6px;border-radius:5px;border:1px solid currentColor}
-.schip.k-ORIGINAL_RESEARCH{color:var(--info)}.schip.k-EXPERIMENTAL_BENCHMARK{color:var(--warn)}.schip.k-OTHER{color:var(--neutral)}
+.schip.k-ORIGINAL_RESEARCH{color:var(--info)}.schip.k-EXPERIMENTAL_BENCHMARK{color:var(--warn)}.schip.k-TRAINING{color:var(--neutral);border-style:dashed}.schip.k-OTHER{color:var(--neutral)}
 .econ{display:inline-block;margin-top:4px;font:700 10px/1.3 var(--mono);letter-spacing:.06em;color:#1a1204;background:var(--warn);border-radius:4px;padding:3px 5px;overflow-wrap:anywhere}
 .ocounts{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:1px;background:var(--line);border:1px solid var(--line);border-radius:10px;overflow:hidden;margin:10px 0}
 .ocounts>div{background:var(--panel);padding:8px 10px;min-width:0}.ocounts .v{font:600 16px/1.25 var(--display);margin-top:3px;overflow-wrap:anywhere}
@@ -252,7 +261,7 @@ _OPS_CORE_JS_RAW = r"""
   'use strict';
   var esc = AG.esc, isObj = AG.isObj;
   var SIGNIN = 'SIGN-IN REQUIRED';
-  var KIND_LABEL = {ORIGINAL_RESEARCH: 'ORIGINAL RESEARCH', EXPERIMENTAL_BENCHMARK: 'EXPERIMENTAL BENCHMARK'};
+  var KIND_LABEL = {ORIGINAL_RESEARCH: 'ORIGINAL RESEARCH', EXPERIMENTAL_BENCHMARK: 'EXPERIMENTAL BENCHMARK', TRAINING: 'TRAINING / SIMULATED EXECUTION'};
   function num(v) { return typeof v === 'number' && isFinite(v); }
   function sec(s) { return isObj(s) && (s.status === 'OK' || s.status === 'EMPTY' || s.status === 'UNAVAILABLE') ? s : null; }
   function ok(s) { s = sec(s); return s && s.status === 'OK' ? s.data : null; }
@@ -459,9 +468,35 @@ _OPS_CORE_JS_RAW = r"""
     }
     var b = part('EXPERIMENTAL_BENCHMARK', 'the read carried no experimental benchmark strategy');
     b.html = '<p class="note"><b>Experimental paper execution</b> on the fictional account: not evidence of qualified or proven profitability, never Derek\'s research decisions. Each policy is counted on its own.</p>' + b.html;
+    var t = all.filter(function (s) { return s.kind === 'TRAINING'; });
+    if (t.length) {
+      b.html += '<p class="note" style="margin-top:14px"><b>Training / simulated execution</b>: the bounded exploration strategy may take positions that fail the 0.5 pp edge or after-fee rule, to generate forward experience. Its expected value can be negative; that is a research cost, not investment performance.</p>' + t.map(stratBlock).join('');
+      if (b.status !== 'OK' && t.some(function (s) { return stStatus(s.counts) === 'OK'; })) b.status = 'OK';
+    }
     var r = part('ORIGINAL_RESEARCH', 'the read carried no research strategy');
     r.html = '<p class="note">Derek\'s own two-model policy. Counted apart from the benchmarks.' + controlNote(j) + '</p>' + r.html;
-    return {'p-ops-bench': b, 'p-ops-research': r};
+    return {'p-ops-standing': standingPanel(j), 'p-ops-bench': b, 'p-ops-research': r};
+  }
+  function standingPanel(j) {
+    var s_ = sec(j.standing_entry_orders), d = ok(j.standing_entry_orders);
+    if (!d) return {status: s_ ? s_.status : 'UNAVAILABLE', html: s_ && s_.status === 'EMPTY' ? '<p class="note">' + esc(s_.why) + '</p>' : secBox(s_, 'standing entry orders')};
+    return {status: 'OK', html: '<p class="note">An order is not a fill: it reserves cash on the one ledger until it fills, expires or is cancelled. Resting bids fill only when observed liquidity strictly crosses the price after the queue ahead.</p>' + d.map(function (o) {
+      var cc = Array.isArray(o.cancel_conditions) ? o.cancel_conditions : [];
+      return '<div class="orow" data-standing="' + esc(o.order_id) + '"><div class="oh">' + schip(o.strategy) + '<b>' + esc(o.participant || o.us_market_slug) + '</b><span class="ostat OPEN">' + esc(o.state) + '</span></div>'
+        + '<div class="om">' + esc(o.order_type) + ' ' + esc(o.time_in_force) + ' · BUY ' + esc(o.holding_side) + ' · ' + n(o.qty) + ' @ ' + (num(o.limit_price) ? Number(o.limit_price).toFixed(2) : '?') + ' · filled ' + n(o.filled_qty) + ' · reserved ' + (CC.usd(o.reserved_remaining_usd) || '?') + (num(o.queue_ahead_qty) ? ' · queue ahead ' + n(o.queue_ahead_qty) : '') + (AG.toEpoch(o.expires_at) !== null ? ' · expires ' + AG.ts(o.expires_at) : '') + '</div>'
+        + (o.rationale ? '<div class="om">' + esc(o.rationale) + '</div>' : '')
+        + (cc.length ? '<details class="tech"><summary>Cancellation conditions</summary><ul class="olist">' + cc.map(function (c) { return '<li><b>' + esc(String(c.condition || '').replace(/_/g, ' ').toLowerCase()) + '</b> · ' + esc(c.rule || '') + '</li>'; }).join('') + '</ul></details>' : '') + '</div>';
+    }).join('')};
+  }
+  function opsAuditPanel(j) {
+    var s_ = sec(j.operational_audit), d = ok(j.operational_audit);
+    if (!d) return {status: s_ ? s_.status : 'UNAVAILABLE', html: s_ && s_.status === 'EMPTY' ? '<p class="note">' + esc(s_.why) + '</p>' : secBox(s_, 'operational audit')};
+    return {status: 'OK', html: '<p class="note">Operational recommendations, each with its evidence, the owner\'s response and later measurements. An operational improvement is never reported as profitable learning.</p>' + d.map(function (r) {
+      var b = isObj(r.baseline) ? r.baseline : {}, ev = Array.isArray(r.events) ? r.events : [];
+      return '<div class="orow" data-rec="' + esc(r.recommendation_id) + '"><div class="oh"><span class="ostat ' + (r.status === 'IMPROVED' ? 'OPEN' : r.status === 'NOT_IMPROVED' ? 'LOST' : 'OPEN') + '">' + esc(r.status) + '</span><b>' + esc(String(r.kind || '').replace(/_/g, ' ').toLowerCase()) + '</b> · to ' + esc(r.owner_agent) + ' · ' + esc(r.category) + '</div>'
+        + '<div class="om">' + esc(r.recommendation) + '</div><div class="om">metric ' + esc(r.metric) + ' · baseline ' + esc(b.value) + '</div>'
+        + (ev.length ? '<ul class="olist">' + ev.map(function (e) { return '<li><b>' + esc(e.actor) + '</b> ' + esc(String(e.kind).toLowerCase()) + ' · ' + esc(e.body) + '</li>'; }).join('') + '</ul>' : '') + '</div>';
+    }).join('')};
   }
   function controlNote(j) {
     var c = ok(j.controls); if (!c) return '';
@@ -470,7 +505,7 @@ _OPS_CORE_JS_RAW = r"""
   }
 
   // ── XAVIER ────────────────────────────────────────────────────────
-  function schip(s) { return '<span class="schip k-' + (s === 'DEREK_ENTRY_POLICY_V2' ? 'ORIGINAL_RESEARCH' : /^PINNACLE_/.test(s || '') ? 'EXPERIMENTAL_BENCHMARK' : 'OTHER') + '">' + esc(s || 'strategy not recorded') + '</span>'; }
+  function schip(s) { return '<span class="schip k-' + (s === 'DEREK_ENTRY_POLICY_V2' ? 'ORIGINAL_RESEARCH' : s === 'PINNACLE_EXPLORATION_PAPER' ? 'TRAINING' : /^PINNACLE_/.test(s || '') ? 'EXPERIMENTAL_BENCHMARK' : 'OTHER') + '">' + esc(s === 'PINNACLE_EXPLORATION_PAPER' ? 'TRAINING · ' + s : (s || 'strategy not recorded')) + '</span>'; }
   function labelOf(r) { var lb = isObj(r.label) ? r.label : {}; return [lb.participant, lb.market_type, r.fixture].filter(function (x) { return x; }).map(esc).join(' · '); }
   function scenRows(list) {
     return '<ul class="olist">' + list.map(function (c) {
@@ -536,6 +571,7 @@ _OPS_CORE_JS_RAW = r"""
     var recon = rcd ? '<p class="recon ' + (rcd.reconciled ? 'ok' : 'bad') + '" data-reconciled="' + (rcd.reconciled ? 'yes' : 'no') + '">' + (rcd.reconciled ? 'LEDGER RECONCILED' : 'LEDGER NOT RECONCILED') + ' · ' + (Array.isArray(rcd.checks) ? rcd.checks.filter(function (c) { return c.ok; }).length + ' of ' + rcd.checks.length + ' checks pass' : '') + (rcd.failed_checks && rcd.failed_checks.length ? ' · failed: ' + rcd.failed_checks.map(esc).join(', ') : '') + ' · ' + n(rcd.entries_count) + ' ledger entries</p>'
       + (Array.isArray(rcd.checks) ? '<details class="tech"><summary>Reconciliation checks</summary>' + AG.table(rcd.checks, null, {}) + '</details>' : '') : '<p class="recon bad">RECONCILIATION ' + esc(rcs ? rcs.status : 'UNAVAILABLE') + ' · ' + esc((rcs && rcs.why) || 'not in the read') + '</p>';
     out['p-ops-account'] = {status: stStatus(j.account), html: recon + figs + pnl};
+    out['p-ops-opsaudit'] = opsAuditPanel(j);
     var pf = sec(j.performance_by_strategy), pfd = ok(j.performance_by_strategy);
     out['p-ops-performance'] = {status: stStatus(j.performance_by_strategy), html: pfd ? pfd.map(function (r) {
       var st_ = isObj(r.settled) ? Object.keys(r.settled).map(function (k) { return n(r.settled[k]) + ' ' + esc(k); }).join(' · ') : '';
@@ -607,7 +643,7 @@ _OPS_CORE_JS_RAW = r"""
   // ── ONE READ, EVERY PANEL ────────────────────────────────────────
   function panels(kind, st) {
     st = st || {}; var j = isObj(st.json) ? st.json : null, f = st.fail;
-    var ids = {derek: ['p-ops-bench', 'p-ops-research'], xavier: ['p-ops-handoffs', 'p-ops-reviews', 'p-ops-protection', 'p-ops-settlements'], audrey: ['p-ops-account', 'p-ops-performance', 'p-ops-findings', 'p-ops-learning', 'p-ops-report']}[kind] || [];
+    var ids = {derek: ['p-ops-standing', 'p-ops-bench', 'p-ops-research'], xavier: ['p-ops-handoffs', 'p-ops-reviews', 'p-ops-protection', 'p-ops-settlements'], audrey: ['p-ops-account', 'p-ops-opsaudit', 'p-ops-performance', 'p-ops-findings', 'p-ops-learning', 'p-ops-report']}[kind] || [];
     var out = {};
     if (!j) { ids.forEach(function (id) { out[id] = {status: f && f.state === SIGNIN ? SIGNIN : 'UNAVAILABLE', html: failBox(f || {state: 'UNAVAILABLE', why: 'not read yet'})}; }); return out; }
     var r = kind === 'derek' ? derek(j) : kind === 'xavier' ? xavier(j) : audrey(j);

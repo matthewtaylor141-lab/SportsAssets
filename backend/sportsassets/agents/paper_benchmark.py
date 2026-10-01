@@ -188,8 +188,67 @@ CG_POLICY = {"kind": "COMPLETED_GAME", "strategy": CG_STRATEGY,
              "disclosure": CG_DISCLOSURE,
              "audit_kind": "PINNACLE_COMPLETED_GAME_PAPER_FILL_AUDITED",
              "report_key": "pinnacle_completed_game_paper"}
-POLICIES = (STRICT_POLICY, CG_POLICY)
+# ── THE MAKER-ENTRY POLICY (owner-authorized 2026-10-01, PAPER ONLY) ───
+# The completed-game policy's match, threshold (its ACTIVE parameter version,
+# never below the owner's 0.5 pp floor) and positive expected profit after
+# fees, reached by RESTING a bid below the ask instead of taking the ask.
+# Its own strategy key, version and namespace; decisions in
+# `paper_maker.py`. The venue's maker rebate is PUBLISHED but NOT VERIFIED
+# AS APPLIED to this account, so every maker fill is charged the TAKER fee.
+MAKER_STRATEGY = "PINNACLE_COMPLETED_GAME_MAKER_PAPER"
+MAKER_VERSION = "PINNACLE_COMPLETED_GAME_MAKER_PAPER_V1"
+MAKER_DISCLOSURE = (
+    "PINNACLE_COMPLETED_GAME_MAKER_PAPER: EXPERIMENTAL PAPER EXECUTION on a "
+    "fictional account. A RESTING bid priced so that the de-vigged Pinnacle "
+    "probability exceeds it by at least the active threshold and the "
+    "expected profit after the TAKER fee is positive IF IT FILLS. A resting "
+    "order is not a fill: fills are SIMULATED (PAPER_SIM_V1) only when "
+    "observed liquidity strictly crosses the bid after the queue ahead; a "
+    "touch is never a fill. Economics are conditional on ordinary "
+    "completion and on being filled (adverse selection unmeasured); the "
+    "venue maker rebate is not assumed. No real money, no real venue order.")
+MAKER_POLICY = {"kind": "MAKER", "strategy": MAKER_STRATEGY,
+                "version": MAKER_VERSION, "control_key": MAKER_STRATEGY,
+                "id_prefix": "papermk", "group_prefix": "papermkgrp",
+                "disclosure": MAKER_DISCLOSURE,
+                "audit_kind": "PINNACLE_COMPLETED_GAME_MAKER_PAPER_FILL_AUDITED",
+                "report_key": "pinnacle_completed_game_maker_paper"}
+
+# ── THE EXPLORATION STRATEGY (owner-authorized 2026-10-01, PAPER ONLY) ──
+# A separate, bounded TRAINING strategy that may take positions failing the
+# investment policy's edge or after-fee requirement, to generate forward
+# experience. Every decision records its estimated edge, fees, selection
+# probability and training purpose. Its positions are labelled
+# "Training / simulated execution"; negative expected value is a research
+# cost, never investment performance. Decisions in `paper_explore.py`.
+EXPLORE_STRATEGY = "PINNACLE_EXPLORATION_PAPER"
+EXPLORE_VERSION = "PINNACLE_EXPLORATION_PAPER_V1"
+EXPLORE_DISCLOSURE = (
+    "PINNACLE_EXPLORATION_PAPER: TRAINING / SIMULATED EXECUTION on a "
+    "fictional account. Positions are taken to generate forward experience "
+    "(fills, management, settlement, audit) and MAY FAIL the investment "
+    "policy's edge and after-fee requirements; their expected value is "
+    "recorded and may be negative -- a research cost, not investment "
+    "performance and not a profitable opportunity. Same data and execution "
+    "safeguards as the investment policy. No real money, no real venue "
+    "order.")
+EXPLORE_LABEL = "Training / simulated execution"
+EXPLORE_POLICY = {"kind": "EXPLORATION", "strategy": EXPLORE_STRATEGY,
+                  "version": EXPLORE_VERSION, "control_key": EXPLORE_STRATEGY,
+                  "id_prefix": "paperexp", "group_prefix": "paperexpgrp",
+                  "disclosure": EXPLORE_DISCLOSURE,
+                  "audit_kind": "PINNACLE_EXPLORATION_PAPER_FILL_AUDITED",
+                  "report_key": "pinnacle_exploration_paper"}
+
+POLICIES = (STRICT_POLICY, CG_POLICY, MAKER_POLICY, EXPLORE_POLICY)
 BENCHMARK_STRATEGIES = tuple(p["strategy"] for p in POLICIES)
+#: THE POLICIES WHOSE MATCH IS THE COMPLETED-GAME MATCH (exact fixture,
+#: outcome, market, line and ordinary grading period): their positions are
+#: measured conditional on ordinary completion and may settle at the venue's
+#: own published price.
+COMPLETED_GAME_KINDS = ("COMPLETED_GAME", "MAKER", "EXPLORATION")
+COMPLETED_GAME_STRATEGIES = tuple(p["strategy"] for p in POLICIES
+                                  if p["kind"] in COMPLETED_GAME_KINDS)
 
 # ── THE COMPLETED-GAME POLICY'S VERSIONED PARAMETERS (186, 188) ─────────
 # ONE whitelisted parameter, min_gross_edge_pp, read from the policy's
@@ -971,6 +1030,139 @@ async def _context(conn, ctx: dict) -> dict:
 
 
 # ═════════════════════════════════════════════════════════════════════
+# ONE BOOK READ, SHARED BY EVERY STRATEGY DECIDING THE SAME MARKET
+# ═════════════════════════════════════════════════════════════════════
+
+async def book_for(conn, ctx: dict, slug: str, *, basis: str) -> dict:
+    """THE CURRENT PAPER BOOK OBSERVATION FOR `slug` IN THIS CONTEXT.
+
+    The first strategy deciding a market in a pass (or in one valuation's
+    hook call) reads the book through the read-only client and records it;
+    a later strategy deciding the same market reuses THAT observation while
+    it is still current (our receipt instant within BOOK_MAX_AGE_S of now --
+    every caller still applies the same age check to the decision). An
+    unreadable or deadline-cut read is NOT reused: the next strategy reads
+    again. Fewer venue requests, never a staler price. Returns {got, obs,
+    reused} or {deferred: True} when the pass's read budget is spent."""
+    cache = ctx.setdefault("books_by_slug", {})
+    clock = ctx.get("clock") or (lambda: float(ctx["now"]))
+    hit = cache.get(slug)
+    if hit is not None and not hit["obs"].get("error") and (
+            float(clock()) - float(hit["obs"]["observed_at"])
+            <= BOOK_MAX_AGE_S):
+        return dict(hit, reused=True)
+    cfg = ctx["config"]
+    if ctx["books_read"] >= int(cfg["cadence"]["max_book_reads_per_pass"]):
+        return {"deferred": True}
+    got = await PD.read_book_within_deadline(ctx, slug)
+    ctx["books_read"] += 1
+    obs = await SIM.record_book(conn, slug=slug, read=got,
+                                source="PAPER_MARKET_DATA_CLIENT",
+                                read_basis=basis)
+    cache[slug] = {"got": got, "obs": obs}
+    return {"got": got, "obs": obs, "reused": False}
+
+
+def book_source(bk: dict) -> str:
+    """Where a decision's book came from, for the attempt record."""
+    if bk.get("reused"):
+        return "REUSED_IN_THIS_EVALUATION"
+    got = bk.get("got") or {}
+    if got.get("shared_read"):
+        return "SHARED_RECENT_PROCESS_READ"
+    if PD.book_deadline_refusal(got):
+        return "READ_CUT_BY_DEADLINE_OR_COOLDOWN"
+    if got.get("error") or (bk.get("obs") or {}).get("error"):
+        return "READ_FAILED"
+    return "FRESH_VENUE_READ"
+
+
+#: THE BOOK-READ RETRY BUDGET: at most ONE retry per valuation, only while
+#: the venue cooldown (plus a margin for the read itself) ends before the
+#: Pinnacle reading's 30 s age limit -- a retry that could only meet a stale
+#: probability is not scheduled; the decision is recorded at once instead.
+BOOK_RETRY_MARGIN_S = 2.0
+BOOK_RETRY_MAX_WAIT_S = 20.0
+
+
+def book_retry_plan(ctx: dict, got: dict, pin: dict) -> dict:
+    """Pure: whether a deadline- or cooldown-cut book read earns its one
+    retry. `ctx['book_retry_ok']` is set only by the in-cycle hook's first
+    attempt."""
+    g = got or {}
+    detail = g.get("gate_detail") or {}
+    cool = detail.get("seconds_left")
+    try:
+        cool = None if cool is None else max(0.0, float(cool))
+    except (TypeError, ValueError):
+        cool = None
+    out = {"cooldown_s": cool, "retry": False}
+    if not ctx.get("book_retry_ok"):
+        return dict(out, why="NO_RETRY_BUDGET_IN_THIS_ATTEMPT")
+    after = (cool if cool is not None else 1.0) + 0.25
+    if after > BOOK_RETRY_MAX_WAIT_S:
+        return dict(out, why="COOLDOWN_LONGER_THAN_THE_RETRY_CAP",
+                    cap_s=BOOK_RETRY_MAX_WAIT_S)
+    age, limit = pin.get("age_s"), pin.get("limit_s")
+    if age is None or limit is None:
+        return dict(out, why="PINNACLE_AGE_UNKNOWN")
+    projected = float(age) + after + BOOK_RETRY_MARGIN_S
+    if projected > float(limit):
+        return dict(out, why="PINNACLE_WOULD_BE_STALE_AFTER_THE_COOLDOWN",
+                    projected_pinnacle_age_s=round(projected, 3),
+                    limit_s=limit)
+    return dict(out, retry=True, after_s=round(after, 3),
+                projected_pinnacle_age_s=round(projected, 3), limit_s=limit)
+
+
+# ═════════════════════════════════════════════════════════════════════
+# EVERY ATTEMPTED EVALUATION, RECORDED (migration 189)
+# ═════════════════════════════════════════════════════════════════════
+
+async def record_attempt(conn, ctx: dict, *, valuation_id, strategy: str,
+                         via: str, res: dict, attempt_no: int = 1,
+                         elapsed_s=None) -> None:
+    """One `paper_evaluation_attempts` row for one strategy's attempt on one
+    valuation, whatever happened. Never raises; an absent table is
+    skipped (the attempt is still in the decision or hook-failure record)."""
+    r = res or {}
+    if r.get("timeout"):
+        outcome = "TIMEOUT"
+    elif r.get("error"):
+        outcome = "ERROR"
+    elif r.get("deferred") and r.get("why") == "BOOK_RETRY":
+        outcome = "DEFERRED_FOR_BOOK_RETRY"
+    elif r.get("deferred"):
+        outcome = "DEFERRED_BOOK_BUDGET"
+    elif r.get("duplicate"):
+        outcome = "DUPLICATE"
+    elif r.get("retry_outcome") in ("RETRY_SCHEDULED", "RETRY_NOT_SCHEDULED"):
+        outcome = r["retry_outcome"]
+    elif r.get("decision_id") or r.get("verdict"):
+        outcome = "DECIDED"
+    else:
+        return                      # switched off: not an attempt
+    try:
+        await conn.execute(
+            "INSERT INTO paper_evaluation_attempts (session_id, account_id, "
+            " valuation_id, strategy, via, attempt_no, outcome, decision_id, "
+            " verdict, refusal, book_source, book_age_s, cooldown_s, "
+            " elapsed_s, detail) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,"
+            " $12,$13,$14,$15::jsonb)",
+            ctx.get("session_id"), ctx.get("account_id"),
+            None if valuation_id is None else int(valuation_id),
+            str(strategy), via, int(attempt_no), outcome,
+            r.get("decision_id"), r.get("verdict"), r.get("refusal"),
+            r.get("book_source"), r.get("book_age_s"), r.get("cooldown_s"),
+            elapsed_s if elapsed_s is not None else r.get("elapsed_s"),
+            json.dumps({k: r.get(k) for k in (
+                "why", "error", "retry", "order_id", "reused_book",
+                "selection") if r.get(k) is not None}, default=str))
+    except Exception:                                           # noqa: BLE001
+        pass
+
+
+# ═════════════════════════════════════════════════════════════════════
 # THE DECISION
 # ═════════════════════════════════════════════════════════════════════
 
@@ -988,6 +1180,8 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
     clock = ctx.get("clock") or (lambda: float(ctx["now"]))
     at = float(clock())
     fee_fn = ctx.get("fee_fn")
+    for k in ("last_book_source", "last_book_age_s", "last_book_cooldown_s"):
+        ctx.pop(k, None)
     bctx = await _context(conn, ctx)
     row = dict(row)
     cand = DP.candidate_from_row(row)
@@ -1043,19 +1237,27 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
     book_age = None
     if not refusals:
         # THE BOOK IS READ ONLY FOR A CANDIDATE THAT COULD STILL ENTER.
-        if ctx["books_read"] >= int(cfg["cadence"]["max_book_reads_per_pass"]):
+        bk = await book_for(conn, ctx, cand["us_market_slug"],
+                            basis=STRATEGY)
+        if bk.get("deferred"):
             return {"deferred": True, "why": "BOOK_READ_BUDGET"}
-        got = await PD.read_book_within_deadline(ctx, cand["us_market_slug"])
-        ctx["books_read"] += 1
-        obs = await SIM.record_book(conn, slug=cand["us_market_slug"],
-                                    read=got, source="PAPER_MARKET_DATA_"
-                                    "CLIENT", read_basis=STRATEGY)
+        got, obs = bk["got"], bk["obs"]
         md = obs.get("market_data")
         lv = SIM.levels_for(md, direction="BUY", holding_side=side)
         levels = lv["levels"]
         book_age = round(max(0.0, float(clock()) - float(obs["observed_at"])),
                          3)
+        ctx["last_book_source"] = book_source(bk)
+        ctx["last_book_age_s"] = book_age
         if PD.book_deadline_refusal(got):
+            retry = book_retry_plan(ctx, got, pin)
+            ctx["last_book_cooldown_s"] = retry.get("cooldown_s")
+            if retry["retry"]:
+                # NOT RECORDED YET: one bounded retry after the cooldown, while
+                # the Pinnacle reading is still inside its 30 s rule. The
+                # retry decides (and records) this valuation either way.
+                return {"deferred": True, "why": "BOOK_RETRY",
+                        "retry_after_s": retry["after_s"], "retry": retry}
             refusals.append(PD.R_BOOK_DEADLINE)
         elif obs.get("error") or not levels:
             refusals.append(R_NO_BOOK)
@@ -1234,7 +1436,10 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
         "basis": "OBSERVED_PAPER_BOOK_LEVELS_NOT_THE_VALUATION_QUOTE"}
     rec = {"decision_id": did, "verdict": verdict, "strategy": STRATEGY,
            "refusal": refusals[0] if refusals else None,
-           "refusals": refusals, "shortfall": short}
+           "refusals": refusals, "shortfall": short,
+           "book_source": ctx.get("last_book_source"),
+           "book_age_s": ctx.get("last_book_age_s"),
+           "cooldown_s": ctx.get("last_book_cooldown_s")}
     alts = _alternatives(md, side=side or "LONG", p=p)
     # THE LEARNING RECORD (migration 185): versions, the inputs as read with
     # their SHA-256, prices, fees, alternatives and a plain explanation, in
@@ -1321,9 +1526,11 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
 # THE PASS STEP AND THE PER-VALUATION HOOK
 # ═════════════════════════════════════════════════════════════════════
 
-async def step(conn, ctx: dict, pol=None) -> dict:
+async def step(conn, ctx: dict, pol=None, decide=None) -> dict:
     """THE BENCHMARK'S PAPER STEP (after Derek's, before the delayed fill
-    step, which simulates its orders too), for one policy."""
+    step, which simulates its orders too), for one policy. `decide` is the
+    policy's own decision function (the maker and exploration modules pass
+    theirs); every attempt is a `paper_evaluation_attempts` row."""
     pol = _pol(pol)
     en = await enablement(conn, pol)
     out: dict[str, Any] = {"strategy": pol["strategy"],
@@ -1341,16 +1548,28 @@ async def step(conn, ctx: dict, pol=None) -> dict:
         pol["strategy"])]
     out["candidates"] = len(rows)
     ctx.setdefault("pending_entries", [])
+    fn = decide or decide_one
     for row in rows:
         if time.monotonic() > ctx["deadline"]:
             out["budget_exhausted"] = True
             break
+        t0 = time.monotonic()
         try:
-            rec = await decide_one(conn, ctx, row, pol)
+            rec = await fn(conn, ctx, row, pol)
         except Exception as exc:                                # noqa: BLE001
             k = "BENCHMARK_DECISION:%s" % type(exc).__name__
             out.setdefault("errors", {})[k] = str(exc)[:200]
+            await record_attempt(
+                conn, ctx, valuation_id=row.get("id"),
+                strategy=pol["strategy"], via="PAPER_PASS",
+                res={"error": "%s: %s" % (type(exc).__name__,
+                                          str(exc)[:200])},
+                elapsed_s=round(time.monotonic() - t0, 3))
             continue
+        await record_attempt(conn, ctx, valuation_id=row.get("id"),
+                             strategy=pol["strategy"], via="PAPER_PASS",
+                             res=rec,
+                             elapsed_s=round(time.monotonic() - t0, 3))
         if rec.get("deferred"):
             out["deferred"] += 1
             continue
@@ -1365,7 +1584,14 @@ async def step(conn, ctx: dict, pol=None) -> dict:
                 rec["refusal"], 0) + 1
         if rec.get("order_id"):
             out["orders_submitted"] += 1
-            ctx["pending_entries"].append(rec)
+            if rec.get("resting"):
+                # a resting order is simulated on books observed after its
+                # placement (the books / simulate steps), not by the
+                # marketable entry's delayed fill step
+                out["resting_orders_placed"] = out.get(
+                    "resting_orders_placed", 0) + 1
+            else:
+                ctx["pending_entries"].append(rec)
     return out
 
 
@@ -1375,9 +1601,11 @@ async def step_completed_game(conn, ctx: dict) -> dict:
 
 
 async def decide_for_hook(conn, ctx: dict, row: dict, *,
-                          timeout_s: float, pol=None) -> dict:
+                          timeout_s: float, pol=None, decide=None) -> dict:
     """The per-valuation hook's benchmark decision: guarded, bounded, never
-    raises (CancelledError excepted)."""
+    raises (CancelledError excepted). The context is SHARED across the
+    strategies deciding this valuation (`books_by_slug`): the deadline is
+    reset per strategy, the book read is not repeated while it is current."""
     pol = _pol(pol)
     STRATEGY = pol["strategy"]                                  # noqa: N806
     t0 = time.monotonic()
@@ -1385,14 +1613,16 @@ async def decide_for_hook(conn, ctx: dict, row: dict, *,
         en = await enablement(conn, pol)
         if not en["enabled"]:
             return {"decided": False, "why": en["refusal"]}
+        ctx.setdefault("books_by_slug", {})      # shared by the copies
         ctx = dict(ctx, deadline=time.monotonic() + float(timeout_s))
         ctx.pop("benchmark", None)
-        rec = await asyncio.wait_for(decide_one(conn, ctx, row, pol),
-                                     timeout_s)
+        rec = await asyncio.wait_for((decide or decide_one)(
+            conn, ctx, row, pol), timeout_s)
         return dict({k: rec.get(k) for k in (
             "decision_id", "verdict", "refusal", "order_id", "duplicate",
-            "deferred", "strategy")}, decided=not rec.get("deferred"),
-            why=rec.get("why"),
+            "deferred", "strategy", "book_source", "book_age_s",
+            "cooldown_s", "retry_after_s", "retry", "selection")},
+            decided=not rec.get("deferred"), why=rec.get("why"),
             elapsed_s=round(time.monotonic() - t0, 3))
     except asyncio.CancelledError:
         raise
@@ -1477,7 +1707,7 @@ async def xavier_measure(conn, ctx: dict, *, pos: dict,
     base = {"strategy": STRATEGY, "p_internal": None,
             "internal_model": {"available": False},
             "void_applied": False, "disclosure": DISCLOSURE}
-    if pol["kind"] == "COMPLETED_GAME":
+    if pol["kind"] in COMPLETED_GAME_KINDS:
         # THE TWO KINDS OF STATE, NEVER BLENDED: p below is the held side's
         # probability IF THE GAME IS ORDINARILY COMPLETED. What the position
         # pays if it is not is the venue's own stated payout, with its

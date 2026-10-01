@@ -38,7 +38,7 @@ FEE = H.flat_fee(0.01)
 
 
 @pytest.fixture
-def cg_on(monkeypatch):
+def cg_on(monkeypatch, new_strategies_off):
     monkeypatch.setenv(PB.ENV_FLAG, "on")
     monkeypatch.setenv(PL.S.ENV_FLAG, "on")
     PL.set_policy_control(PB.CG_POLICY["control_key"], True)
@@ -110,7 +110,11 @@ async def test_a_slow_book_still_records_the_decision_inside_the_deadline(
             conn, valuation_id=v["valuation_id"], now=now,
             market_data=G.PaperMarketDataClient(slow),
             account_id=acct["account_id"], fee_fn=FEE,
-            schedule_fill=lambda: {"scheduled": False})
+            schedule_fill=lambda: {"scheduled": False},
+            # WITHOUT the one bounded retry (migration 189): the cut read is
+            # decided at once; the retry itself is proved in
+            # test_paper_exploration_maker_and_throughput.py
+            book_retry=False)
         took = time.monotonic() - t0
         cg = g["benchmark_completed_game"]
         assert cg["decided"] is True, cg

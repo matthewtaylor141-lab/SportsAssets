@@ -246,6 +246,10 @@ async def record_book(conn, *, slug: str, read: dict, source: str,
     md = read.get("marketData") if isinstance(read, dict) else None
     at = float((read or {}).get("observed_at") or time.time())
     err = (read or {}).get("error")
+    if isinstance(read, dict) and read.get("shared_read"):
+        # A READ THIS PROCESS ALREADY MADE seconds earlier, answered without a
+        # second venue request; recorded with its ORIGINAL receipt instant.
+        source = "%s:SHARED_READ" % source
     if not isinstance(md, dict):
         err = err or "NO_MARKET_DATA"
     bids = md.get("bids") if isinstance(md, dict) else None

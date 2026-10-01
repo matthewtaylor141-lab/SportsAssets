@@ -423,3 +423,8 @@ tests/test_command_centre_paper_management_views.py
 tests/test_netlify_command_host.py
 tests/test_completed_game_v2_half_point_threshold.py
 tests/test_agent_talk_panel.py
+# Paper-only exploration (owner limits, training label, no overlap), the
+# maker entry policy (rests, never fills on a touch, cancels), the shared
+# book read and bounded retry with every attempt recorded, Audrey's
+# operational audit and the homepage experiment read
+tests/test_paper_exploration_maker_and_throughput.py

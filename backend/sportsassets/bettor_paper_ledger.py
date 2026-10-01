@@ -347,14 +347,21 @@ async def _open_groups(conn, account_id: str) -> int:
 
 
 async def submit_order(conn, order: dict, *, caps: dict | None = None,
-                       fee_fn=None, now: float | None = None) -> dict:
+                       fee_fn=None, now: float | None = None,
+                       locked_check=None) -> dict:
     """RECORD A PAPER ORDER AND RESERVE ITS CASH, ATOMICALLY.
 
     One transaction: the account lock, the idempotency check, the caps, the
     order row, its SUBMITTED event (source SIMULATOR) and the ORDER_SUBMITTED
     ledger entry. A BUY reserves limit x qty + max fees; a SELL reserves the
     held inventory it would sell (never cash) and is refused when the group's
-    uncommitted inventory is short. Idempotent on the order's key."""
+    uncommitted inventory is short. Idempotent on the order's key.
+
+    `locked_check` (optional): an async callable (conn, order, reserve) that
+    runs UNDER THE ACCOUNT LOCK after the caps and returns a refusal dict to
+    refuse the order, or None. A strategy's own aggregate limits (e.g. the
+    exploration strategy's total exposure and loss stop) are checked there,
+    so two concurrent decisions can never both pass a limit only one fits."""
     o = dict(order)
     at = float(now if now is not None else time.time())
     caps = dict(caps or {})
@@ -392,6 +399,11 @@ async def submit_order(conn, order: dict, *, caps: dict | None = None,
             if chk:
                 return dict(chk, ok=False, reservation_usd=f(reserve),
                             available_usd=f(cs["available"]))
+            if locked_check is not None:
+                chk = await locked_check(conn, o, reserve)
+                if chk:
+                    return dict(chk, ok=False, reservation_usd=f(reserve),
+                                available_usd=f(cs["available"]))
         else:
             held = await held_uncommitted(
                 conn, acct, group_id=o["group_id"],

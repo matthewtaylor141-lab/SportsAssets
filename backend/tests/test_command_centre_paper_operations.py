@@ -84,9 +84,15 @@ async def test_derek_strategies_are_counted_apart_with_versions_labels_and_funne
         d = await OPS.derek_operations(conn, account_id=acct["account_id"], now=NOW)
     finally:
         await conn.close()
-    assert [s["strategy"] for s in d["strategies"]] == [SEED.V2, SEED.STRICT, SEED.CG]
-    assert [s["kind"] for s in d["strategies"]] == ["ORIGINAL_RESEARCH", "EXPERIMENTAL_BENCHMARK",
-                                                    "EXPERIMENTAL_BENCHMARK"]
+    # migration 189 adds the maker-entry policy and the TRAINING strategy
+    # (no records in this seed: their counts are EMPTY, never another's)
+    assert [s["strategy"] for s in d["strategies"]] == [
+        SEED.V2, SEED.STRICT, SEED.CG, OPS.MAKER, OPS.EXPLORATION]
+    assert [s["kind"] for s in d["strategies"]] == [
+        "ORIGINAL_RESEARCH", "EXPERIMENTAL_BENCHMARK", "EXPERIMENTAL_BENCHMARK",
+        "EXPERIMENTAL_BENCHMARK", "TRAINING"]
+    for k in (OPS.MAKER, OPS.EXPLORATION):
+        assert _strat(d, k)["counts"]["status"] == "EMPTY", k
     v2, strict, cg = (_strat(d, k) for k in (SEED.V2, SEED.STRICT, SEED.CG))
     # counts, each strategy on its own: never one of the others' decisions
     assert v2["counts"]["status"] == "OK" and v2["counts"]["data"]["decisions"] == 4
@@ -318,7 +324,7 @@ async def test_the_operations_route_serves_the_session_to_a_command_session_only
             assert r.status_code == 200
             j = r.json()
             assert j["agent"] == "derek" and j["account_id"] == acct["account_id"]
-            assert [s["counts"]["data"]["decisions"] for s in j["strategies"]] == [4, 3, 8]
+            assert [s["counts"]["data"]["decisions"] for s in j["strategies"][:3]] == [4, 3, 8]
             for k in ("xavier", "audrey"):
                 r = await c.get("/api/command/paper/operations?agent=" + k)
                 assert r.status_code == 200 and r.json()["agent"] == k

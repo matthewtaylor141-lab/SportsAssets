@@ -88,7 +88,7 @@ def _wire(monkeypatch, acct, transport):
 
 @pg
 async def test_the_cycle_fetches_persists_and_decides_on_the_venue_text(
-        monkeypatch):
+        monkeypatch, new_strategies_off):
     conn = await H.connect()
     t_start = time.time()
     real_rules = loop._read_venue_rules_blocking

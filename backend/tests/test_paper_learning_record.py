@@ -105,7 +105,7 @@ async def _pass(conn, acct, transport, now, client, **kw):
 
 
 @pytest.fixture
-def both_on(monkeypatch):
+def both_on(monkeypatch, new_strategies_off):
     # THE PRODUCTION SELECTION since migration 184: the completed-game
     # policy's row on, the strict benchmark's off (one entry experiment)
     monkeypatch.setenv(PB.ENV_FLAG, "on")

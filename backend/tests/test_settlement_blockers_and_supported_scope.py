@@ -380,7 +380,7 @@ async def _pass(conn, acct, transport, now, **kw):
 
 
 @pytest.fixture
-def bench_on(monkeypatch):
+def bench_on(monkeypatch, new_strategies_off):
     # THE STRICT POLICY ALONE: its own row switched ON for the proof (its
     # migrated state since 184 is off), the completed-game policy's OFF, so
     # every count here is the strict policy's (the completed-game proofs are

@@ -42,6 +42,7 @@ import datetime as _dt
 import decimal
 import json
 import re
+import time
 from typing import Any
 
 DEMO_LABEL = "DEMONSTRATION"
@@ -879,6 +880,60 @@ async def _agent_memory(conn, f: "Facts", agent: str | None) -> dict:
     return out
 
 
+async def _experiment(conn, f: "Facts", now) -> None:
+    """THE SAME RECORDS THE HOMEPAGE SHOWS (bettor_paper_experiment): Derek's
+    standing entry orders, the open positions by strategy (exploration
+    labelled training), the exploration budget and Audrey's operational
+    recommendations. Never raises; an unreadable read is a named check."""
+    try:
+        from .. import bettor_paper_experiment as EXP
+        at = float(now if now is not None else time.time())
+        so = await EXP.standing_orders(conn, at)
+        ent = so["entry_orders"]
+        f.add("paper_experiment_read", "entry_orders", "open_entry_orders",
+              len(ent), "%d open paper entry order(s) (an order is not a "
+              "fill)" % len(ent))
+        for o in ent[:3]:
+            f.add("paper_experiment_read", o["order_id"], "entry_order",
+                  o["limit_price"], "%s %s order on %s: %s contracts at "
+                  "%.2f, %s filled, state %s%s" % (
+                      o["strategy"], o["order_type"], o["us_market_slug"],
+                      o["qty"], float(o["limit_price"]), o["filled_qty"],
+                      o["state"], (" -- %s" % o["rationale"])
+                      if o.get("rationale") else ""))
+        pa = await EXP.positions_and_account(conn, at)
+        for s, a in (pa.get("by_strategy") or {}).items():
+            f.add("paper_experiment_read", "strategy:%s" % s,
+                  "positions_by_strategy", a["open"],
+                  "%s: %d open position(s), %d in total, realized P&L $%.2f "
+                  "(%s)" % (s, a["open"], a["positions"],
+                            a["realized_pnl_usd"], a["title"]))
+        ex = pa.get("exploration_limits") or {}
+        if ex.get("limits"):
+            f.add("paper_experiment_read", "exploration_limits",
+                  "exploration_exposure_usd", ex["exposure_usd"],
+                  "exploration (training / simulated execution, not "
+                  "investment performance): exposure $%.2f of $%.0f, "
+                  "realized losses $%.2f of the $%.0f stop, %d open "
+                  "position(s)" % (
+                      ex["exposure_usd"],
+                      ex["limits"]["max_aggregate_exposure_usd"],
+                      ex["realized_losses_usd"],
+                      ex["limits"]["loss_stop_usd"], ex["open_positions"]))
+        ag = await EXP.agents(conn, at)
+        for r in (ag["audrey"].get("recommendations") or [])[:3]:
+            f.add("paper_experiment_read", r["recommendation_id"],
+                  "recommendation", r["status"],
+                  "Audrey's %s recommendation to %s (%s): %s -- status %s, "
+                  "metric %s" % (r["category"], r["owner_agent"], r["kind"],
+                                 r["recommendation"], r["status"],
+                                 r["metric"]))
+        f.check("paper_experiment_read", "MATCHED", 1)
+    except Exception as exc:                                    # noqa: BLE001
+        f.check("paper_experiment_read", "READ_FAILED", 0,
+                type(exc).__name__)
+
+
 async def gather(conn, *, question: str, context: dict | None = None,
                  now: float | None = None, agent: str | None = None) -> dict:
     """The one fact list for this question (see the module docstring)."""
@@ -904,6 +959,8 @@ async def gather(conn, *, question: str, context: dict | None = None,
         live = await _paper_live(conn, f, now=now)
         paper = bool(live.get("present") and (live.get("account") or {})
                      .get("ok"))
+        if live.get("present"):
+            await _experiment(conn, f, now)
     intents = await _positions(conn, f, likes=likes, context_ids=ctx_ids)
     dids = await _derek(conn, f, likes=likes, context_ids=ctx_ids)
     xids = await _xavier(conn, f, likes=likes, intents=intents,

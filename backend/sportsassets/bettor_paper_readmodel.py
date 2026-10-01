@@ -282,19 +282,40 @@ def explanation(d: dict, pd: dict | None) -> str:
     """WHY THIS DECISION, in one line, from what the record holds."""
     pd = pd if isinstance(pd, dict) else {}
     strategy = d.get("strategy") or TWO_MODEL
+    if strategy == "PINNACLE_EXPLORATION_PAPER":
+        est = pd.get("estimate") or {}
+        sel = pd.get("selection") or {}
+        return ("%s%s. TRAINING / SIMULATED EXECUTION: estimated gross edge "
+                "%s pp, fee %s per contract, expected profit after fees %s "
+                "(may be negative: a research cost, not investment "
+                "performance); selection probability %s (%s)" % (
+                    d.get("verdict"), "" if not d.get("refusal")
+                    else " " + str(d.get("refusal")),
+                    est.get("gross_edge_pp_at_best"),
+                    est.get("fee_per_contract_usd"),
+                    est.get("expected_net_profit_usd"),
+                    sel.get("selection_probability"), sel.get("method")))
+    if strategy == "PINNACLE_COMPLETED_GAME_MAKER_PAPER":
+        return ("%s%s. RESTING ENTRY: %s Threshold %s pp; taker fee charged, "
+                "maker rebate not assumed; an order is not a fill" % (
+                    d.get("verdict"), "" if not d.get("refusal")
+                    else " " + str(d.get("refusal")),
+                    pd.get("rationale") or "", pd.get("threshold_edge_pp")))
     if strategy == "PINNACLE_COMPLETED_GAME_PAPER":
         sh = pd.get("shortfall") or {}
+        thr = float(pd.get("threshold_edge_pp") or sh.get(
+            "edge_threshold_pp") or 0.5)
         head = ("ENTER (conditional on ordinary completion): p_pinnacle %.4f "
-                "vs the paper book; best level edge %.2f pp >= 5.00 pp at "
+                "vs the paper book; best level edge %.2f pp >= %.2f pp at "
                 "every level used; modelled profit after fees $%.2f IF the "
                 "game is ordinarily completed"
                 % (float(d.get("p_pinnacle") or 0),
-                   float(pd.get("gross_edge_pp") or 0),
+                   float(pd.get("gross_edge_pp") or 0), thr,
                    float(pd.get("net_expected_profit_usd") or 0))
                 if d.get("verdict") == "ENTER" else
-                "REFUSE %s: edge %s pp vs 5.0, conditional EV after fees %s, "
+                "REFUSE %s: edge %s pp vs %s, conditional EV after fees %s, "
                 "depth %s, Pinnacle age %s s (limit %s s), book age %s s" % (
-                    d.get("refusal"), sh.get("edge_pp"),
+                    d.get("refusal"), sh.get("edge_pp"), thr,
                     sh.get("ev_after_fees_usd"), sh.get("depth_within_limit"),
                     sh.get("pinnacle_age_s"), sh.get("pinnacle_limit_s"),
                     sh.get("book_age_s")))

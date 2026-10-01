@@ -343,6 +343,21 @@ async def paper_operations(agent: str = Query(..., pattern="^(derek|xavier|audre
         return out
 
 
+@router.get("/api/command/paper/experiment",
+            dependencies=[Depends(require_read)])
+async def paper_experiment() -> dict:
+    """THE EXPERIMENT AS MANAGEMENT SEES IT (`bettor_paper_experiment`):
+    session, freshness, opportunities, refusals, closest opportunities,
+    standing orders, fills, positions, account, agents, throughput -- every
+    figure a persisted record. Answering at all means CONNECTED."""
+    from .. import bettor_paper_experiment as EXP
+    pool = await _pool()
+    async with pool.acquire() as conn:
+        if not await _schema(conn):
+            return dict(_labels(), experiment=_unavailable_schema())
+        return await EXP.experiment(conn)
+
+
 @router.get("/api/command/paper/overview",
             dependencies=[Depends(require_read)])
 async def paper_overview() -> dict:
