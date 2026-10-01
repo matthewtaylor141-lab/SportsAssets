@@ -1,0 +1,177 @@
+{
+ "DATASET": "INCENTIVE_DEPTH_PANEL",
+ "NEVER_POOLED_WITH": "BREADTH_CENSUS",
+ "SAMPLING_FROZEN_BEFORE_ECONOMICS": "YES",
+ "SELECTION_INPUTS": [
+  "PROGRAM_TYPE",
+  "REWARD_POOL",
+  "TARGET_SIZE",
+  "DISCOUNT_FACTOR",
+  "PROGRAM_PERIOD",
+  "orderPriceMinTickSize",
+  "sportsMarketTypeV2"
+ ],
+ "PANEL_SELECTION_METHOD": "LEXICOGRAPHIC_WITHIN_FROZEN_STRATA",
+ "PANEL_SALT": null,
+ "SALT_FROZEN_BEFORE_OUTCOMES": "N/A",
+ "OUTCOME_LEAKAGE": "NO",
+ "per_stratum": 4,
+ "strata": 4,
+ "STRATUM_SLOTS_FILLED": 16,
+ "DISTINCT_MARKETS_READ": 12,
+ "OBSERVATION_UNIT": "ONE_BOOK_READ_PER_MARKET_PER_ROUND",
+ "ELIGIBILITY_NEVER_POOLED_ACROSS": "TARGET_SIZE",
+ "COMPOSITION": {
+  "SPORT_DISTRIBUTION": [
+   [
+    "cfb",
+    12
+   ]
+  ],
+  "LEAGUE_DISTRIBUTION": [
+   [
+    "aec-cfb-akron",
+    1
+   ],
+   [
+    "aec-cfb-alaam",
+    1
+   ],
+   [
+    "aec-cfb-alast",
+    1
+   ],
+   [
+    "aec-cfb-alcst",
+    1
+   ],
+   [
+    "aec-cfb-ark",
+    1
+   ],
+   [
+    "aec-cfb-arkst",
+    1
+   ],
+   [
+    "aec-cfb-army",
+    1
+   ],
+   [
+    "aec-cfb-arpb",
+    1
+   ],
+   [
+    "aec-cfb-aubrn",
+    1
+   ],
+   [
+    "aec-cfb-bayl",
+    1
+   ],
+   [
+    "aec-cfb-boscol",
+    1
+   ],
+   [
+    "aec-cfb-byu",
+    1
+   ]
+  ],
+  "PROGRAM_TYPE_DISTRIBUTION": [
+   [
+    [
+     "liquidityProgram"
+    ],
+    12
+   ]
+  ],
+  "TARGET_SIZE_DISTRIBUTION": [
+   [
+    [
+     "15000"
+    ],
+    4
+   ],
+   [
+    [
+     "30000",
+     "30000"
+    ],
+    4
+   ],
+   [
+    [
+     "4000"
+    ],
+    4
+   ]
+  ],
+  "TICK_SIZE_DISTRIBUTION": [
+   [
+    0.005,
+    12
+   ]
+  ],
+  "UNIQUE_MARKETS": 12,
+  "UNIQUE_EVENTS": 12,
+  "MAX_SINGLE_SPORT_SHARE": "100.0%",
+  "MAX_SINGLE_LEAGUE_SHARE": "8.3%",
+  "CONCENTRATION_IS_REPORTED_NOT_RESAMPLED": "YES"
+ },
+ "rounds": 3,
+ "plan": [
+  {
+   "stratum": [
+    "liquidityProgram",
+    "100",
+    "30000",
+    "0.15",
+    "day_of",
+    "0.005",
+    "SPORTS_MARKET_TYPE_MONEYLINE"
+   ],
+   "available": 10,
+   "taken": 4
+  },
+  {
+   "stratum": [
+    "liquidityProgram",
+    "1400",
+    "30000",
+    "0.1",
+    "live",
+    "0.005",
+    "SPORTS_MARKET_TYPE_MONEYLINE"
+   ],
+   "available": 10,
+   "taken": 4
+  },
+  {
+   "stratum": [
+    "liquidityProgram",
+    "200",
+    "4000",
+    "0.2",
+    "live",
+    "0.005",
+    "SPORTS_MARKET_TYPE_MONEYLINE"
+   ],
+   "available": 24,
+   "taken": 4
+  },
+  {
+   "stratum": [
+    "liquidityProgram",
+    "500",
+    "15000",
+    "0.15",
+    "live",
+    "0.005",
+    "SPORTS_MARKET_TYPE_MONEYLINE"
+   ],
+   "available": 13,
+   "taken": 4
+  }
+ ]
+}
