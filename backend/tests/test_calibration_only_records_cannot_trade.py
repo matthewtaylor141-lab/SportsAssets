@@ -462,6 +462,14 @@ READERS = {
     "agents/paper_runtime.py": ("PAPER_ONLY_BY_ID_OF_THE_ROW_JUST_WRITTEN", 1),
     "agents/paper_xavier.py": (
         "PAPER_ONLY_MEASURE_AND_SETTLEMENT_EVIDENCE_READS", 6),
+    # (182) THE EXPERIMENTAL PINNACLE_ONLY_PAPER_BENCHMARK: like paper Derek
+    # it reads BOTH purposes deliberately (every production row is
+    # CALIBRATION_ONLY under P5, disclosed as book_currency NOT_ESTABLISHED on
+    # every record) and can only produce a SIMULATED paper order in paper_*
+    # tables, priced on its own paper book read, never the row's displayed
+    # quote; plus the Pinnacle-only measure of its held positions for Xavier.
+    "agents/paper_benchmark.py": (
+        "PAPER_ONLY_READS_BOTH_PURPOSES_SIMULATED_ORDERS_NEVER_FUNDED", 5),
 }
 
 

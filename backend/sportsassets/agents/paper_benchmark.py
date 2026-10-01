@@ -145,6 +145,11 @@ BOOK_CURRENCY = {
 STRATEGY_LABEL = {"strategy": STRATEGY, "disclosure": DISCLOSURE,
                   "book_currency": "NOT_ESTABLISHED"}
 
+#: The entry experiment whose valuations are decided (the value of
+#: bettor_external_shadow.EXPERIMENT_ID, stated here so this module imports
+#: nothing beyond the paper and pure-policy modules; a test pins equality).
+EXPERIMENT_ID = "EXT_PINNACLE_DEVIG_V1_SHADOW"
+
 GAP_NOT_EVIDENCE = "NOT_EVIDENCE_OF_PROFITABILITY"
 GAP_NO_MODEL = "NO_INTERNAL_MODEL_BY_DESIGN"
 
@@ -430,19 +435,19 @@ def _alternatives(md, *, side: str, p) -> dict:
     return out
 
 
-def qualification_gaps(*, calibration: dict, cand: dict) -> list:
-    cal = dict(calibration or {})
+def qualification_gaps(*, cand: dict) -> list:
     st = dict(cand.get("settlement") or {})
     return [
         {"gap": GAP_NOT_EVIDENCE, "status": "DISCLOSED", "detail": DISCLOSURE},
         {"gap": GAP_NO_MODEL, "status": "NOT_USED",
          "detail": ("no internal model is used; p_internal is NULL and "
                     "Pinnacle is never substituted into it")},
-        {"gap": PD.GAP_CALIBRATION,
-         "status": "MEASURED" if cal.get("measured") else "OPEN",
-         "detail": cal.get("why") or cal.get("verdict")
-         or ("source calibration measured" if cal.get("measured")
-             else "not measured")},
+        {"gap": PD.GAP_CALIBRATION, "status": "NOT_CLAIMED",
+         "detail": ("the Pinnacle source's calibration is not a "
+                    "qualification this benchmark claims or reads (the "
+                    "collection worker that measures it is not imported "
+                    "here); source version %s"
+                    % (cand.get("pinnacle") or {}).get("source_version"))},
         {"gap": PD.GAP_P5, "status": "OPEN",
          "detail": ("book_currency NOT_ESTABLISHED (P5): %s; the valuation "
                     "row is %s and its displayed quote is never the "
@@ -468,7 +473,7 @@ _CONTEXT_CACHE: dict = {}
 
 async def _context(conn, ctx: dict) -> dict:
     """Once per pass (or per CONTEXT_TTL_S for the per-valuation hook): the
-    measured void rate and the source-calibration reads."""
+    measured void rate."""
     if "benchmark" in ctx:
         return ctx["benchmark"]
     key = ctx.get("context_cache_key")
@@ -478,25 +483,11 @@ async def _context(conn, ctx: dict) -> dict:
         if hit is not None and 0.0 <= now - hit["at"] < CONTEXT_TTL_S:
             ctx["benchmark"] = hit["ctx"]
             return ctx["benchmark"]
-    ctx["benchmark"] = {"void": await DP.void_measure(conn, through=now),
-                        "calibration": {}}
+    ctx["benchmark"] = {"void": await DP.void_measure(conn, through=now)}
     if key is not None:
         _CONTEXT_CACHE.clear()
         _CONTEXT_CACHE[key] = {"at": now, "ctx": ctx["benchmark"]}
     return ctx["benchmark"]
-
-
-async def _calibration(conn, bctx: dict, version) -> dict:
-    k = str(version)
-    if k not in bctx["calibration"]:
-        try:
-            from ..workers import ext_pinnacle_loop as LOOP
-            bctx["calibration"][k] = await LOOP.source_calibration(
-                conn, version)
-        except Exception as exc:                                # noqa: BLE001
-            bctx["calibration"][k] = {"measured": False,
-                                      "why": type(exc).__name__}
-    return bctx["calibration"][k]
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -660,9 +651,7 @@ async def decide_one(conn, ctx: dict, row: dict) -> dict:
         "admitted": verdict == DP.ENTER,
         "refusal": refusals[0] if refusals else None,
         "refusals": refusals}
-    cal = await _calibration(conn, bctx, cand["pinnacle"].get(
-        "source_version"))
-    gaps = qualification_gaps(calibration=cal, cand=cand)
+    gaps = qualification_gaps(cand=cand)
     optimistic = (SIM.optimistic_fill(md, direction="BUY", holding_side=side,
                                       qty=sized["qty"], limit=sized["limit"])
                   if verdict == DP.ENTER else None)
@@ -757,7 +746,6 @@ async def decide_one(conn, ctx: dict, row: dict) -> dict:
 async def step(conn, ctx: dict) -> dict:
     """THE BENCHMARK'S PAPER STEP (after Derek's, before the delayed fill
     step, which simulates its orders too)."""
-    from .. import bettor_external_shadow as ext
     en = await enablement(conn)
     out: dict[str, Any] = {"strategy": STRATEGY, "enabled": en["enabled"],
                            "decisions_recorded": 0, "orders_submitted": 0,
@@ -767,7 +755,7 @@ async def step(conn, ctx: dict) -> dict:
     cfg = ctx["config"]
     at = float(ctx["now"])
     rows = [dict(r) for r in await conn.fetch(
-        CANDIDATES_SQL, ext.EXPERIMENT_ID,
+        CANDIDATES_SQL, EXPERIMENT_ID,
         at - float(cfg["entry"]["valuation_lookback_s"]), at + 1.0,
         ctx["session_id"], int(cfg["cadence"]["max_decisions_per_pass"]),
         STRATEGY)]
