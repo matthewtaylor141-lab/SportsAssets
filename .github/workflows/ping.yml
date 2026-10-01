@@ -31,6 +31,10 @@ on:
         description: "verify=pinnapi only: optional comma-separated RELATIVE PinnAPI paths for the in-API probe (max 6 GETs, >= 1 s apart; the key stays in the API). Blank = /health only. The public docs are always fetched (no key)."
         required: false
         default: ""
+      pinnapi_ws:
+        description: "verify=pinnapi only: optional comma-separated PinnAPI sport ids (e.g. 6,1) for a bounded <= 20 s raw WebSocket sample in the API, taken under the feed owner's lease (refused while the production socket is open). Blank = no sample."
+        required: false
+        default: ""
 
 jobs:
   ping:
@@ -231,6 +235,7 @@ jobs:
           API: https://sportsassets-api.onrender.com
           ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
           PATHS: ${{ inputs.pinnapi_paths }}
+          WS: ${{ inputs.pinnapi_ws }}
         run: |
           set +e
           [ -n "${ADMIN_TOKEN:-}" ] || { echo "no ADMIN_TOKEN secret"; exit 0; }
@@ -250,6 +255,13 @@ jobs:
                  -H "Content-Type: application/json" -d "$body" "$API/api/admin/pinnapi-probe")
           echo "rest HTTP $code at $(date -u +%FT%TZ)"
           jq -r '.reads[]? | "\(.path) http=\(.http) ok=\(.ok) ms=\(.elapsed_ms) ratelimit=\(.rate_limit_headers|tojson) inventory=\(.inventory|tojson)"' /tmp/pinn/rest.json 2>/dev/null
+          if [ -n "$WS" ]; then
+            body=$(jq -nc --arg s "$WS" '{action: "ws_sample", seconds: 15, streams: ["live","prematch"], sport_ids: ($s | split(",") | map(gsub("\\s"; "")) | map(select(length > 0)) | map(tonumber))}')
+            code=$(curl -s -o /tmp/pinn/ws_sample.json -w '%{http_code}' --max-time 90 -X POST -H "$H" \
+                   -H "Content-Type: application/json" -d "$body" "$API/api/admin/pinnapi-probe")
+            echo "ws_sample HTTP $code at $(date -u +%FT%TZ)"
+            jq -c '{ok, reason, connect_ms, frames, bytes, pongs_sent, frame_kinds, live_topics, snapshot_events, errors, connect_error, provider_stamp_to_receipt_ms}' /tmp/pinn/ws_sample.json 2>/dev/null || head -c 600 /tmp/pinn/ws_sample.json
+          fi
       - uses: actions/checkout@v4
         if: always()
       - name: Commit the evidence
