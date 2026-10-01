@@ -23,6 +23,19 @@
 import { webkit, chromium, devices } from "playwright";
 import fs from "node:fs";
 
+// CSP on the agent pages forbids string evaluation, and Playwright's
+// waitForFunction evaluates an argument-carrying predicate as a string. Poll
+// with frame.evaluate (a CSP-safe injected call) instead.
+async function waitInFrame(f, fn, arg, timeout) {
+  const end = Date.now() + timeout;
+  for (;;) {
+    if (await f.evaluate(fn, arg).catch(() => false)) return true;
+    if (Date.now() > end) throw new Error("waitInFrame timeout " + timeout + " ms");
+    await new Promise((r) => setTimeout(r, 100));
+  }
+}
+
+
 const HOST = process.env.HOST || "https://command.bettortoken.com";
 const OUT = process.env.OUT || "site_verify_out";
 const TOKEN = process.env.ADMIN_TOKEN || "";
@@ -201,7 +214,7 @@ for (const [ename, engine, dev, args] of ENGINES) {
         const t = await f.evaluate(() => performance.now());
         await f.fill("#talk-in", q);
         await f.click("#talk-send");
-        await f.waitForFunction((n) => document.querySelectorAll(".talk-msg.a").length > n, nA, { timeout: 150000 });
+        await waitInFrame(f, (n) => document.querySelectorAll(".talk-msg.a").length > n, nA, 150000);
         const tA = await f.evaluate(() => performance.now());
         return { t, tA };
       };
@@ -280,7 +293,7 @@ for (const [ename, engine, dev, args] of ENGINES) {
       const before = await f.locator(".talk-msg").count();
       await page.reload({ waitUntil: "domcontentloaded" });
       f = await waitOffice(page, agent);
-      await f.waitForFunction((n) => document.querySelectorAll(".talk-msg").length >= n, before, { timeout: 30000 }).catch(() => {});
+      await waitInFrame(f, (n) => document.querySelectorAll(".talk-msg").length >= n, before, 30000).catch(() => {});
       R.checks.resume = { before, after: await f.locator(".talk-msg").count(),
         state: short(await f.locator("#talk-state").innerText().catch(() => ""), 160) };
       await shot(page, `${ename}_${agent}_resumed`, f);
