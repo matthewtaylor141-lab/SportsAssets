@@ -273,10 +273,13 @@ jobs:
           D="evidence/pinnapi/$(date -u +%Y%m%dT%H%M%SZ)_run$RUN"
           git config user.name "site-verify"
           git config user.email "site-verify@users.noreply.github.com"
-          git fetch -q origin claude/site-verify-evidence && git checkout -q -B ev origin/claude/site-verify-evidence || git checkout -q --orphan ev
-          git rm -rq --cached . >/dev/null 2>&1 || true
-          mkdir -p "$D" && cp -r /tmp/pinn/. "$D"/
-          git add "$D" && git commit -q -m "pinnapi evidence, run $RUN" && git push -q origin ev:claude/site-verify-evidence && echo "evidence pushed: $D"
+          for try in 1 2 3 4; do
+            git fetch -q origin claude/site-verify-evidence && git checkout -q -f -B ev origin/claude/site-verify-evidence || git checkout -q --orphan ev
+            git rm -rq --cached . >/dev/null 2>&1 || true
+            mkdir -p "$D" && cp -r /tmp/pinn/. "$D"/
+            git add "$D" && git commit -q -m "pinnapi evidence, run $RUN" && git push -q origin ev:claude/site-verify-evidence && { echo "evidence pushed: $D"; break; }
+            echo "push attempt $try failed (concurrent evidence push?); retrying"; sleep $((try * 5))
+          done
 
   site-voice:
     # POST-RELEASE VERIFICATION, OFF UNLESS verify == site-voice.
