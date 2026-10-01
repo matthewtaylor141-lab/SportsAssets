@@ -18,7 +18,7 @@ SELECT key,
        COALESCE(value->>'written_at', value->>'at') AS written_at,
        value->>'cycle_label' AS cycle_label,
        value->>'markets_considered' AS markets_considered,
-       jsonb_array_length(COALESCE(value->'venue_errors', '[]'::jsonb)) AS venue_errors,
+       left(COALESCE(value->'venue_errors', 'null'::jsonb)::text, 300) AS venue_errors,
        value->>'elapsed_s' AS elapsed_s,
        left(COALESCE(value->'funnel_by_provider_sport', 'null'::jsonb)::text, 1200) AS funnel
   FROM ingestion_state
