@@ -701,29 +701,101 @@ def _client(timeout: float):
     return httpx.AsyncClient(timeout=timeout), True
 
 
-async def fetch_voices(key: str, *, timeout: float = 10.0) -> tuple:
-    """(voices | None, failure_reason | None). The key travels only in the
-    `xi-api-key` header; no exception text is returned or logged."""
+_STATUS_TOKEN = re.compile(r"^[A-Za-z0-9_.\-]{1,64}$")
+_LONG_TOKEN = re.compile(r"[A-Za-z0-9_\-]{24,}")
+
+
+def _scrub(text, key: str | None) -> str | None:
+    """A provider message made safe to store and return: the key (and any
+    long token-like string) removed, whitespace collapsed, 200 chars."""
+    if text is None:
+        return None
+    t = " ".join(str(text).split())
+    if key:
+        t = t.replace(key, "[redacted]")
+    t = _LONG_TOKEN.sub("[redacted]", t)
+    return t[:200] or None
+
+
+def provider_error(resp, key: str | None = None) -> dict:
+    """What the provider said when it refused: its HTTP status and, from an
+    ElevenLabs error body ({"detail": {"status": "invalid_api_key",
+    "message": ...}} or {"detail": "..."}), the error status and a scrubbed
+    message. Never the key, never a header."""
+    out: dict[str, Any] = {"provider_status": int(resp.status_code),
+                           "provider_error_status": None,
+                           "provider_message": None}
+    try:
+        body = resp.json()
+    except Exception:                                           # noqa: BLE001
+        body = None
+    detail = body.get("detail") if isinstance(body, dict) else None
+    if isinstance(detail, list) and detail and isinstance(detail[0], dict):
+        detail = detail[0]
+    if isinstance(detail, dict):
+        st = detail.get("status") or detail.get("code") or detail.get("type")
+        if isinstance(st, str) and _STATUS_TOKEN.match(st):
+            out["provider_error_status"] = st
+        out["provider_message"] = _scrub(detail.get("message")
+                                         or detail.get("msg"), key)
+    elif isinstance(detail, str):
+        out["provider_message"] = _scrub(detail, key)
+    elif body is None:
+        try:
+            out["provider_message"] = _scrub(resp.text, key)
+        except Exception:                                       # noqa: BLE001
+            pass
+    return out
+
+
+async def fetch_voices_detailed(key: str, *, timeout: float = 10.0) -> tuple:
+    """(voices | None, failure_reason | None, provider_error | None). The key
+    travels only in the `xi-api-key` header; no exception text is returned
+    or logged. On an HTTP refusal the provider's own error status and a
+    scrubbed message are kept (`provider_error`), so the cause -- e.g.
+    invalid_api_key or missing_permissions -- is visible."""
     client, owned = _client(timeout)
     try:
         r = await client.get(ELEVENLABS_BASE + VOICES_PATH,
                              headers={"xi-api-key": key,
                                       "accept": "application/json"})
         if r.status_code != 200:
-            return None, "VOICE_LIST_HTTP_%d" % r.status_code
+            return (None, "VOICE_LIST_HTTP_%d" % r.status_code,
+                    provider_error(r, key))
         data = r.json()
         voices = data.get("voices") if isinstance(data, dict) else None
         if not isinstance(voices, list):
-            return None, "VOICE_LIST_MALFORMED"
-        return voices, None
+            return None, "VOICE_LIST_MALFORMED", None
+        return voices, None, None
     except Exception as exc:                                    # noqa: BLE001
-        return None, "VOICE_LIST_%s" % type(exc).__name__.upper()
+        return (None, "VOICE_LIST_%s" % type(exc).__name__.upper(),
+                {"provider_status": None, "provider_error_status": None,
+                 "provider_message": None,
+                 "error_class": type(exc).__name__})
     finally:
         if owned:
             try:
                 await client.aclose()
             except Exception:                                   # noqa: BLE001
                 pass
+
+
+async def fetch_voices(key: str, *, timeout: float = 10.0) -> tuple:
+    """(voices | None, failure_reason | None) -- see fetch_voices_detailed."""
+    voices, failure, _err = await fetch_voices_detailed(key, timeout=timeout)
+    return voices, failure
+
+
+#: the last voice-list outcome in this process (for persona-status). Holds
+#: reasons, provider error statuses and times only -- never the key.
+_VOICE_LIST_STATE: dict[str, Any] = {"last_failure": None,
+                                     "last_failure_at": None,
+                                     "provider_error": None,
+                                     "last_success_at": None}
+
+
+def voice_list_status() -> dict:
+    return dict(_VOICE_LIST_STATE)
 
 
 _RESOLVED_CACHE: dict[tuple, dict] = {}
@@ -753,7 +825,7 @@ async def record_resolution(conn, choice: dict, *, now: float) -> None:
         return
     detail = {k: choice.get(k) for k in ("considered", "eligible",
                                           "allowed_categories", "reasons",
-                                          "score")}
+                                          "score", "provider_error")}
     await conn.execute(
         "INSERT INTO agent_voice_resolutions (agent_id, persona_version, "
         " status, method, voice_id, voice_name, category, labels, reason, "
@@ -785,6 +857,8 @@ async def resolve_voice(db, agent: str, *, now: float, env=None,
             float(now) - float(rec.get("resolved_at") or 0)
             < RETRY_UNRESOLVED_S)):
         rec["source"] = "RECORDED"
+        if (rec.get("detail") or {}).get("provider_error"):
+            rec["provider_error"] = rec["detail"]["provider_error"]
         if rec["status"] == RES_RESOLVED:
             _RESOLVED_CACHE[(agent, ver)] = dict(rec)
         return rec
@@ -796,12 +870,21 @@ async def resolve_voice(db, agent: str, *, now: float, env=None,
                 "voice_id": configured, "voice_name": None,
                 "reason": "ELEVENLABS_API_KEY_NOT_CONFIGURED",
                 "source": "NOT_ATTEMPTED"}
-    voices, failure = await fetch_voices(key)
+    voices, failure, perr = await fetch_voices_detailed(key)
     if failure:
-        log.warning("voice resolver: %s for %s (v%d)", failure, agent, ver)
+        log.warning("voice resolver: %s (%s) for %s (v%d)", failure,
+                    (perr or {}).get("provider_error_status") or "-", agent,
+                    ver)
+        _VOICE_LIST_STATE.update(last_failure=failure,
+                                 last_failure_at=float(now),
+                                 provider_error=perr)
+    else:
+        _VOICE_LIST_STATE.update(last_success_at=float(now))
     choice = choose_voice(agent, prof, voices, env=env)
     if failure and choice["status"] != RES_RESOLVED:
         choice["reason"] = failure
+    if perr:
+        choice["provider_error"] = perr
     async with use(db) as conn:
         try:
             await record_resolution(conn, choice, now=now)

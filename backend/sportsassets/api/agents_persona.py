@@ -16,7 +16,11 @@
   POST /api/command/agents/{agent}/persona/conversations/{conversation_id}/interrupt
   POST /api/command/agents/{agent}/speech  (alias /speak)  read credential
        Body {message_id} (or {text_id}). Streams audio/mpeg of the STORED
-       message's spoken_text. 503 VOICE_UNAVAILABLE_SERVER_KEY_NOT_CONFIGURED
+       message's spoken_text (for Audrey also her management-chat replies,
+       ids `conv-...:N`, spoken as the normalised stored body). A
+       VOICE_NOT_RESOLVED 503 carries `resolver_detail`: the provider's
+       HTTP status and error status (e.g. invalid_api_key,
+       missing_permissions) -- never the key. 503 VOICE_UNAVAILABLE_SERVER_KEY_NOT_CONFIGURED
        / VOICE_NOT_RESOLVED / VOICE_PROVIDER_FAILED; 404 unknown message;
        409 interrupted message; 429 over the per-agent limits.
   GET  /api/command/agents/{agent}/persona              read
@@ -208,7 +212,9 @@ async def _speech(agent: str, body: SpeechBody) -> Response:
     res = await P.resolve_voice(pool, ag, now=_clock())
     if res.get("status") != P.RES_RESOLVED or not res.get("voice_id"):
         return _speech_error(PS.SpeechFailure(
-            PS.R_NOT_RESOLVED, resolver_reason=res.get("reason")),
+            PS.R_NOT_RESOLVED, resolver_reason=res.get("reason"),
+            resolver_detail=res.get("provider_error"),
+            resolver_source=res.get("source")),
             extra={"message_id": mid, "browser_fallback": fallback})
     spoken = m["spoken_text"][:PS.MAX_SPOKEN_CHARS]
     key = PS.cache_key(agent=ag, persona_version=persona.get("version"),
