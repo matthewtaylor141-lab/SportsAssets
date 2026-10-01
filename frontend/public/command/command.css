@@ -14,3 +14,21 @@
 .mobile-brand{display:none}
 @media(max-width:1050px){.main-grid{grid-template-columns:minmax(0,1fr)}}
 @media(max-width:760px){.mobile-brand{display:block;width:112px;height:auto}.breadcrumbs{display:none}.topbar .grow{display:block;flex:1}.topbar .search-button{margin-left:0}.topbar{gap:7px}.panel-head .panel-sub{font-size:9px}.data-table{min-width:670px}.chart-wrap svg{min-width:0}.hero-account{gap:10px}.hero-number{font-size:28px}.main-content{max-width:100vw}}
+
+/* OUR AGENTS: links to /derek, /xavier, /audrey (Netlify rewrites to the agent shell). */
+.agents-section .agent-link{display:flex;align-items:center;gap:10px;padding:9px 12px;border-radius:8px;color:inherit;text-decoration:none;border:1px solid transparent}
+.agents-section .agent-link:hover,.agents-section .agent-link:focus-visible{border-color:rgba(224,181,74,.45);background:rgba(224,181,74,.06);outline:none}
+.agents-section .agent-link b{display:block;font-size:12.5px;letter-spacing:.02em}
+.agents-section .agent-link small{display:block;font-size:10.5px;opacity:.7}
+.agents-section .agent-dot{width:9px;height:9px;border-radius:50%;flex:none;box-shadow:0 0 0 3px rgba(255,255,255,.04)}
+.agents-section .agent-dot.derek{background:#3fb6ff}.agents-section .agent-dot.xavier{background:#e0b54a}.agents-section .agent-dot.audrey{background:#e46fb0}
+.agents-section .agent-note{font-size:9.5px;letter-spacing:.14em;opacity:.55;padding:4px 12px 0;text-transform:uppercase}
+
+/* PAPER ACCOUNT STRIP (LIVE MARKET DATA / SIMULATED EXECUTION) */
+#paper-strip{position:sticky;top:0;z-index:50;display:flex;flex-wrap:wrap;gap:6px 18px;align-items:center;padding:7px 16px;background:#0d1a14;border-bottom:1px solid #1f4d36;color:#d7efe2;font-size:11.5px}
+#paper-strip .ps-tag{font-weight:700;letter-spacing:.08em;color:#7fe0a8}
+#paper-strip .ps-f{display:flex;flex-direction:column;line-height:1.15}
+#paper-strip .ps-f small{opacity:.7;font-size:9.5px;letter-spacing:.04em}
+#paper-strip .ps-f b{font-variant-numeric:tabular-nums}
+#paper-strip .ps-warn{color:#f3c969;font-weight:700}
+#paper-strip .ps-meta,#paper-strip .ps-why{opacity:.75;margin-left:auto}
