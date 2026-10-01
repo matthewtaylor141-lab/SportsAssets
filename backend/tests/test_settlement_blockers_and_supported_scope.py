@@ -381,11 +381,16 @@ async def _pass(conn, acct, transport, now, **kw):
 
 @pytest.fixture
 def bench_on(monkeypatch):
+    # THE STRICT POLICY ALONE: the completed-game paper policy is switched
+    # off by its own kill-switch row, so every count here is the strict
+    # policy's (its proofs are in test_completed_game_paper_policy.py)
     monkeypatch.setenv(PB.ENV_FLAG, "on")
+    PL.set_policy_control(PB.CG_POLICY["control_key"], False)
     PB._CONTEXT_CACHE.clear()
     PD._CONTEXT_CACHE.clear()
     yield
     PB._CONTEXT_CACHE.clear()
+    PL.set_policy_control(PB.CG_POLICY["control_key"], True)
 
 
 @pg

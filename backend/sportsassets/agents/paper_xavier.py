@@ -265,8 +265,9 @@ async def _measure(conn, ctx, *, pos: dict, levels_buy: list) -> dict:
     (`paper_benchmark.xavier_measure`), never the two-model blend; a position
     never switches policy."""
     from . import paper_benchmark as PB
-    if await PB.group_strategy(conn, pos["group_id"]) == PB.STRATEGY:
-        return await PB.xavier_measure(conn, ctx, pos=pos)
+    strat = await PB.group_strategy(conn, pos["group_id"])
+    if strat in PB.BENCHMARK_STRATEGIES:
+        return await PB.xavier_measure(conn, ctx, pos=pos, strategy=strat)
     at = _clock(ctx)
     lookback = float(ctx["config"]["entry"]["valuation_lookback_s"])
     intent = DP.LONG if pos["holding_side"] == "LONG" else DP.SHORT
@@ -595,6 +596,57 @@ async def step(conn, ctx: dict) -> dict:
 # SETTLEMENT FROM AUTHORITATIVE EVIDENCE
 # ═════════════════════════════════════════════════════════════════════
 
+#: THE VENUE'S OWN NON-BINARY SETTLEMENT, as the outcome join recorded it
+#: (`settlement_read`, left unjoined: neither side was paid in full).
+VENUE_PRICE_SQL = """
+    SELECT id, buy_intent, settlement_read, settlement_read_at,
+           settlement_comparison->>'venue_rules_text' AS rules
+      FROM external_valuations
+     WHERE us_market_slug = $1 AND outcome_basis IS NULL
+       AND settlement_read IS NOT NULL AND settlement_read_at IS NOT NULL
+     ORDER BY id
+"""
+
+
+def venue_price_settlement(rows: list, *, holding_side: str) -> dict:
+    """THE VENUE'S PUBLISHED PRICE FOR A CONTRACT IT SETTLED AT A PRICE.
+    Pure. Established only when (1) the venue's recorded settlement for the
+    contract is a price strictly between 0 and 1, (2) every read agrees,
+    and (3) the contract's OWN rules text states a price settlement (the
+    last fair market price). The long side is paid that price per contract,
+    the short side its complement. Otherwise: no payout, the position stays
+    open and pending -- a refund is never assumed."""
+    from .. import bettor_settlement_terms as ST
+    prices, ev, stated = set(), [], False
+    for r in rows:
+        try:
+            sp = float(str(r.get("settlement_read")).strip())
+        except (TypeError, ValueError):
+            continue
+        if not (0.0 < sp < 1.0):
+            continue
+        prices.add(round(sp, 9))
+        ev.append({"valuation_id": r.get("id"),
+                   "settlement_read": r.get("settlement_read"),
+                   "settlement_read_at": L._epoch(r.get("settlement_read_at"))})
+        terms = ST.read_terms(r.get("rules") or "").get("terms") or {}
+        if ST.PAY_LAST_FAIR_MARKET_PRICE in terms.values():
+            stated = True
+    if not ev:
+        return {"price": None, "why": "NO_VENUE_PRICE_SETTLEMENT_RECORDED"}
+    if len(prices) > 1:
+        return {"price": None, "why": "CONFLICTING_VENUE_SETTLEMENT_PRICES",
+                "evidence": ev}
+    if not stated:
+        return {"price": None, "evidence": ev,
+                "why": ("VENUE_SETTLED_AT_A_PRICE_BUT_THE_CONTRACT_TEXT_HELD_"
+                        "STATES_NO_PRICE_SETTLEMENT")}
+    long_px = prices.pop()
+    per = long_px if holding_side == "LONG" else round(1.0 - long_px, 9)
+    return {"price": per, "venue_long_price": long_px, "evidence": ev,
+            "rule": "the contract's stated last-fair-market-price settlement"}
+
+
 def outcome_for(rows: list, *, holding_side: str) -> dict:
     """Our side's settlement from the venue-joined valuation rows. Pure."""
     ours = DP.LONG if holding_side == "LONG" else DP.SHORT
@@ -642,6 +694,39 @@ async def step_settle(conn, ctx: dict) -> dict:
             " ORDER BY id", p["us_market_slug"])]
         got = outcome_for(rows, holding_side=p["holding_side"])
         key = "venue-final:%s" % p["us_market_slug"]
+        vp = None
+        if got["outcome"] is None and got.get("why") == \
+                "NO_AUTHORITATIVE_SETTLEMENT_YET" and p["open_qty"] > 1e-9 \
+                and p.get("settlement") is None:
+            # THE COMPLETED-GAME POLICY'S EXCEPTIONAL SETTLEMENT: paid at
+            # the venue's own published price, never an assumed refund.
+            from . import paper_benchmark as PB
+            if await PB.group_strategy(conn, p["group_id"]) == \
+                    PB.CG_STRATEGY:
+                vrows = [dict(r) for r in await conn.fetch(
+                    VENUE_PRICE_SQL, p["us_market_slug"])]
+                vp = venue_price_settlement(vrows,
+                                            holding_side=p["holding_side"])
+                if vp.get("price") is not None:
+                    r = await L.settle(
+                        conn, account_id=acct, group_id=p["group_id"],
+                        slug=p["us_market_slug"],
+                        holding_side=p["holding_side"],
+                        settlement_event_key=key,
+                        outcome="SETTLED_AT_VENUE_PRICE",
+                        evidence=dict(vp, policy=PB.CG_VERSION),
+                        evidence_source="external_valuations."
+                                        "settlement_read",
+                        at=at, session_id=ctx["session_id"],
+                        price_per_contract=vp["price"])
+                    out["settled"] += 1 if r.get("ok") and not r.get(
+                        "duplicate") else 0
+                    out.setdefault("settled_at_venue_price", 0)
+                    out["settled_at_venue_price"] += 1
+                    continue
+                out.setdefault("pending_reasons", {})
+                out["pending_reasons"][vp.get("why")] = \
+                    out["pending_reasons"].get(vp.get("why"), 0) + 1
         if got["outcome"] is None:
             if got["why"] == "CONFLICTING_SETTLEMENT_EVIDENCE":
                 out["conflicts"] += 1

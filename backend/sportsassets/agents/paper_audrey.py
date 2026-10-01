@@ -392,9 +392,10 @@ async def build_report(conn, *, session: dict, account_id: str, day,
     # stay account-wide on the one ledger). Present only once the benchmark
     # has recorded anything, so a report without it is unchanged.
     from . import paper_benchmark as PB
-    if await PB.has_records(conn, account_id):
-        rep["pinnacle_only_paper_benchmark"] = await PB.report_section(
-            conn, account_id=account_id, t0=t0, t1=t1)
+    for pol in PB.POLICIES:
+        if await PB.has_records(conn, account_id, pol):
+            rep[pol["report_key"]] = await PB.report_section(
+                conn, account_id=account_id, t0=t0, t1=t1, pol=pol)
     return rep
 
 
@@ -539,8 +540,9 @@ async def monitor(conn, ctx: dict) -> list:
     # their ledger entry and the group was handed to Xavier (nothing to do
     # while the benchmark has recorded nothing).
     from . import paper_benchmark as PB
-    if await PB.has_records(conn, acct):
-        out.extend(await PB.audit_fills(conn, ctx, finding))
+    for pol in PB.POLICIES:
+        if await PB.has_records(conn, acct, pol):
+            out.extend(await PB.audit_fills(conn, ctx, finding, pol))
     return out
 
 

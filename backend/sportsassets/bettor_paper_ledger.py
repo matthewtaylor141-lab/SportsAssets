@@ -772,11 +772,14 @@ async def settle(conn, *, account_id: str, group_id: str, slug: str,
                  holding_side: str, settlement_event_key: str, outcome: str,
                  evidence: dict, evidence_source: str, at: float,
                  session_id: str | None = None,
-                 void_refund_per_contract=None) -> dict:
+                 void_refund_per_contract=None,
+                 price_per_contract=None) -> dict:
     """CREDIT A POSITION'S SETTLEMENT PAYOUT EXACTLY ONCE.
 
-    `outcome` is WON (pays $1 per contract), LOST (0) or VOID_REFUND (the
-    purchase price back). Unique per position + settlement event: a second
+    `outcome` is WON (pays $1 per contract), LOST (0), VOID_REFUND (the
+    purchase price back, only on a venue-declared void) or
+    SETTLED_AT_VENUE_PRICE (the venue's OWN published settlement price per
+    contract, passed explicitly as `price_per_contract` -- never inferred). Unique per position + settlement event: a second
     call with the same event is a no-op returning the first. A DIFFERENT
     outcome for the same event is a correction (`correct_settlement`)."""
     pk = position_key(account_id=account_id, group_id=group_id, slug=slug,
@@ -797,7 +800,8 @@ async def settle(conn, *, account_id: str, group_id: str, slug: str,
         if pos is None or pos["open_qty"] <= 1e-9:
             return {"ok": False, "refusal": "NO_OPEN_POSITION_TO_SETTLE"}
         qty = D(pos["open_qty"])
-        per = _payout_per(outcome, pos, void_refund_per_contract)
+        per = _payout_per(outcome, pos, void_refund_per_contract,
+                          price_per_contract)
         payout = D(qty * per)
         sid = "paperset:" + hashlib.sha256(
             ("%s:1" % skey).encode()).hexdigest()[:24]
@@ -824,7 +828,18 @@ async def settle(conn, *, account_id: str, group_id: str, slug: str,
             "payout_usd": f(payout), "ledger_entry": entry}
 
 
-def _payout_per(outcome: str, pos: dict, void_refund) -> Decimal:
+def _payout_per(outcome: str, pos: dict, void_refund,
+                price=None) -> Decimal:
+    if outcome == "SETTLED_AT_VENUE_PRICE":
+        # THE VENUE'S PUBLISHED PRICE, OR NOTHING. No default: a settlement
+        # at an unpublished price is not a settlement.
+        if price is None:
+            raise ValueError("SETTLED_AT_VENUE_PRICE needs the venue's "
+                             "published price per contract")
+        p = D(price)
+        if p < 0 or p > 1:
+            raise ValueError("a venue price per contract is in [0, 1]")
+        return p
     if outcome == "WON":
         return Decimal(1)
     if outcome == "LOST":

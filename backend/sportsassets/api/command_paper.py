@@ -298,7 +298,8 @@ async def paper_audrey(limit: int = Query(50, ge=1, le=500)) -> dict:
 
 @router.get("/api/command/paper/benchmark",
             dependencies=[Depends(require_read)])
-async def paper_benchmark(limit: int = Query(100, ge=1, le=1000)) -> dict:
+async def paper_benchmark(limit: int = Query(100, ge=1, le=1000),
+                          strategy: str | None = Query(None)) -> dict:
     """THE EXPERIMENTAL PINNACLE_ONLY_PAPER_BENCHMARK (read only): its
     decisions with refusal shortfalls, orders, fills and handoffs, with the
     disclosure that it is experimental execution, not evidence of qualified
@@ -307,4 +308,5 @@ async def paper_benchmark(limit: int = Query(100, ge=1, le=1000)) -> dict:
     async with pool.acquire() as conn:
         if not await _schema(conn):
             return dict(_labels(), benchmark=_unavailable_schema())
-        return await _readmodel("benchmark_payload", conn, limit=limit)
+        return await _readmodel("benchmark_payload", conn, limit=limit,
+                                strategy=strategy)

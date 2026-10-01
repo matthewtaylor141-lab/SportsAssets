@@ -66,7 +66,13 @@ STRATEGY_LABELS = {
     BENCHMARK_STRATEGY: ("the PINNACLE_ONLY_PAPER_BENCHMARK (experimental "
                          "paper execution, not evidence of qualified or "
                          "proven profitability)",
-                         "/api/command/paper/benchmark")}
+                         "/api/command/paper/benchmark"),
+    "PINNACLE_COMPLETED_GAME_PAPER": (
+        "the PINNACLE_COMPLETED_GAME_PAPER policy (experimental paper "
+        "execution, conditional on ordinary game completion; exceptional "
+        "settlement risk disclosed, not risk-adjusted, not qualified for "
+        "real-money trading)",
+        "/api/command/paper/benchmark?strategy=PINNACLE_COMPLETED_GAME_PAPER")}
 
 
 def strategy_label(strategy) -> str:

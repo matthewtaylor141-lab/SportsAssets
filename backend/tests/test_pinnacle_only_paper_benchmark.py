@@ -87,11 +87,16 @@ async def _ledger_matches_balances(conn, acct_id, now) -> dict:
 
 @pytest.fixture
 def bench_on(monkeypatch):
+    # THE STRICT POLICY ALONE: the completed-game paper policy is switched
+    # off by its own kill-switch row, so every count here is the strict
+    # policy's (its proofs are in test_completed_game_paper_policy.py)
     monkeypatch.setenv(PB.ENV_FLAG, "on")
+    PL.set_policy_control(PB.CG_POLICY["control_key"], False)
     PB._CONTEXT_CACHE.clear()
     PD._CONTEXT_CACHE.clear()
     yield
     PB._CONTEXT_CACHE.clear()
+    PL.set_policy_control(PB.CG_POLICY["control_key"], True)
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -101,9 +106,10 @@ def bench_on(monkeypatch):
 FORBIDDEN = ("funded", "entry_execution", "entry_inventory", "live",
              "adapter", "submission", "order_router", "polymarket",
              "ext_pinnacle_loop", "workers", "risk_engine", "market_stream")
-ALLOWED_IMPORTS = {"__future__", "annotations", "asyncio", "hashlib", "json", "math", "os",
+ALLOWED_IMPORTS = {"__future__", "annotations", "asyncio", "hashlib", "json", "math", "os", "re",
                    "time", "typing", "bettor_paper_ledger",
-                   "bettor_paper_simulator", "derek_policy", "paper_derek"}
+                   "bettor_paper_simulator", "bettor_settlement_terms", "derek_policy",
+                   "paper_derek"}
 
 
 def _imports(path: pathlib.Path) -> list:

@@ -151,6 +151,10 @@ def default_steps() -> list:
         if _benchmark_env_on():
             from . import paper_benchmark as PB
             steps.append(("benchmark", PB.step))
+            # THE COMPLETED-GAME PAPER POLICY (experimental, own strategy and
+            # version, own kill-switch row), on the same pass and ledger.
+            steps.append(("benchmark_completed_game",
+                          PB.step_completed_game))
         steps.append(("simulate_after_delay", PD.step_after_delay))
     except ImportError:
         pass
@@ -471,6 +475,7 @@ async def decide_valuation(conn, *, valuation_id, now: float | None = None,
             # stop the benchmark's separate decision on the same valuation.
             rec = {"error": "%s: %s" % (type(exc).__name__, str(exc)[:200])}
         bench = None
+        bench_cg = None
         if bench_on:
             # THE EXPERIMENTAL PINNACLE_ONLY_PAPER_BENCHMARK, decided
             # separately on the same valuation (its own record, strategy
@@ -478,6 +483,11 @@ async def decide_valuation(conn, *, valuation_id, now: float | None = None,
             from . import paper_benchmark as PB
             bench = await PB.decide_for_hook(
                 conn, ctx, dict(row), timeout_s=VALUATION_HOOK_TIMEOUT_S)
+            # THE COMPLETED-GAME POLICY, its own record on the same valuation
+            bench_cg = await PB.decide_for_hook(
+                conn, ctx, dict(row), timeout_s=VALUATION_HOOK_TIMEOUT_S,
+                pol=PB.CG_POLICY)
+
         delta = int(getattr(md, "mutation_attempts", 0) or 0) - before
         if delta:
             import json as _json
@@ -487,7 +497,8 @@ async def decide_valuation(conn, *, valuation_id, now: float | None = None,
                 " WHERE session_id = $1", sess["session_id"], delta,
                 _json.dumps(getattr(md, "last_mutation_attempt", None),
                             default=str))
-        if rec.get("order_id") or (bench or {}).get("order_id"):
+        if rec.get("order_id") or (bench or {}).get("order_id") or \
+                (bench_cg or {}).get("order_id"):
             sched = schedule_fill
             if sched is None:
                 from . import runtime as _RT
@@ -504,6 +515,8 @@ async def decide_valuation(conn, *, valuation_id, now: float | None = None,
             mutation_attempts=delta)
         if bench is not None:
             out["benchmark"] = bench
+            if bench_cg is not None:
+                out["benchmark_completed_game"] = bench_cg
             if rec.get("error"):
                 out.update(decided=False, error=rec["error"])
         return out

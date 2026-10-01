@@ -6,6 +6,7 @@ ALL DATA SYNTHETIC, on scratch test accounts; nothing is written into the live
 paper account."""
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 import uuid
@@ -262,3 +263,20 @@ async def restore_two_model_entries(conn, prev) -> None:
         await conn.execute("UPDATE paper_control SET enabled=$2 WHERE "
                            " control_key=$1", TWO_MODEL_ENTRIES_KEY,
                            bool(prev))
+
+
+def set_policy_control(control_key: str, enabled: bool) -> None:
+    """Set one paper policy's kill-switch row (the same row an operator
+    flips) from a synchronous fixture. Proofs of ONE policy switch the other
+    policies off so their counts are that policy's alone; the row is put
+    back to enabled (its migrated state) afterwards."""
+    async def _go():
+        c = await H.connect()
+        try:
+            await c.execute(
+                "UPDATE paper_control SET enabled=$2, updated_by='test', "
+                " updated_at=now() WHERE control_key=$1", control_key,
+                bool(enabled))
+        finally:
+            await c.close()
+    asyncio.run(_go())

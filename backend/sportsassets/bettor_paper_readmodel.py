@@ -282,6 +282,26 @@ def explanation(d: dict, pd: dict | None) -> str:
     """WHY THIS DECISION, in one line, from what the record holds."""
     pd = pd if isinstance(pd, dict) else {}
     strategy = d.get("strategy") or TWO_MODEL
+    if strategy == "PINNACLE_COMPLETED_GAME_PAPER":
+        sh = pd.get("shortfall") or {}
+        head = ("ENTER (conditional on ordinary completion): p_pinnacle %.4f "
+                "vs the paper book; best level edge %.2f pp >= 5.00 pp at "
+                "every level used; modelled profit after fees $%.2f IF the "
+                "game is ordinarily completed"
+                % (float(d.get("p_pinnacle") or 0),
+                   float(pd.get("gross_edge_pp") or 0),
+                   float(pd.get("net_expected_profit_usd") or 0))
+                if d.get("verdict") == "ENTER" else
+                "REFUSE %s: edge %s pp vs 5.0, conditional EV after fees %s, "
+                "depth %s, Pinnacle age %s s (limit %s s), book age %s s" % (
+                    d.get("refusal"), sh.get("edge_pp"),
+                    sh.get("ev_after_fees_usd"), sh.get("depth_within_limit"),
+                    sh.get("pinnacle_age_s"), sh.get("pinnacle_limit_s"),
+                    sh.get("book_age_s")))
+        return ("%s. PINNACLE_COMPLETED_GAME_PAPER: conditional, experimental "
+                "economics -- not risk-adjusted, not proven positive EV; "
+                "postponement/abandonment/suspension terms are disclosed "
+                "research risks with unmeasured frequency" % head)
     if strategy == "PINNACLE_ONLY_PAPER_BENCHMARK":
         sh = pd.get("shortfall") or {}
         head = ("ENTER: p_pinnacle %.4f vs the paper book; best level edge "
@@ -319,17 +339,29 @@ def _with_explanation(d: dict) -> dict:
 
 
 async def benchmark_payload(conn, *, account_id: str = L.ACCOUNT_ID,
-                            limit: int = 100, now: float | None = None) -> dict:
+                            limit: int = 100, now: float | None = None,
+                            strategy: str | None = None) -> dict:
     """THE PINNACLE_ONLY_PAPER_BENCHMARK: its decisions (refusals with their
     shortfalls), orders, fills and handoffs, every row labelled with the
     strategy and the disclosure that it is experimental execution, not
     evidence of qualified or proven profitability."""
-    from .agents import paper_benchmark as PB
+    from .agents import paper_benchmark as _PB
+
+    class PB:                                                   # noqa: N801
+        """The selected policy's identity (strict by default)."""
+        pol = _PB.policy_for(strategy) or _PB.STRICT_POLICY
+        STRATEGY = pol["strategy"]
+        DISCLOSURE = pol["disclosure"]
     out = _base(now)
     out["strategy"] = PB.STRATEGY
+    out["policy_version"] = PB.pol["version"]
     out["disclosure"] = PB.DISCLOSURE
-    out["book_currency"] = PB.BOOK_CURRENCY
-    out["enablement"] = await PB.enablement(conn)
+    out["book_currency"] = _PB.BOOK_CURRENCY
+    out["enablement"] = await _PB.enablement(conn, PB.pol)
+    out["policies"] = [{"strategy": p["strategy"], "version": p["version"]}
+                       for p in _PB.POLICIES]
+    if PB.pol["kind"] == "COMPLETED_GAME":
+        out["economics_label"] = _PB.ECONOMICS_LABEL
 
     async def decisions():
         rows = await conn.fetch(

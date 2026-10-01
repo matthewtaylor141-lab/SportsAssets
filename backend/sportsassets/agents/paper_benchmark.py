@@ -103,6 +103,7 @@ from typing import Any
 
 from .. import bettor_paper_ledger as L
 from .. import bettor_paper_simulator as SIM
+from .. import bettor_settlement_terms as ST
 from . import derek_policy as DP
 from . import paper_derek as PD
 
@@ -126,6 +127,69 @@ MIN_EDGE = 0.05
 MIN_EDGE_PP = 5.0
 #: A paper book observation older than this at the decision is not current.
 BOOK_MAX_AGE_S = 10.0
+
+# ═════════════════════════════════════════════════════════════════════
+# THE POLICIES: STRICT (above, unchanged) AND COMPLETED-GAME (experimental)
+# ═════════════════════════════════════════════════════════════════════
+#
+# PINNACLE_COMPLETED_GAME_PAPER (owner-authorized 2026-10-01, PAPER ONLY).
+# Same session, same ledger, same rails, same 5 pp edge and positive net EV,
+# same fresh-quote and current-book checks, same conservative fills. It
+# differs from the strict policy in exactly two places:
+#
+#   MATCH      it requires an EXACT match on fixture, participant, selected
+#              outcome, market, line and the GRADING PERIOD OF AN ORDINARILY
+#              COMPLETED GAME (regulation-only vs extra-time stays a hard
+#              distinction). The postponement / abandonment / suspension
+#              terms are NOT required to agree: they are recorded as
+#              DISCLOSED RESEARCH RISKS, never as settlement compatibility.
+#   ECONOMICS  CONDITIONAL on ordinary completion -- edge and modelled profit
+#              after fees on the completed-game outcome only -- and labelled
+#              CONDITIONAL_EXPERIMENTAL_NOT_RISK_ADJUSTED. Exceptional-
+#              settlement payoffs are shown separately, their probabilities
+#              UNMEASURED (never zero, never an invented adjustment).
+#
+# Its own strategy key and version, its own decision namespace ('papercg:'),
+# so the strict policy's decisions and history are untouched.
+
+CG_STRATEGY = "PINNACLE_COMPLETED_GAME_PAPER"
+CG_VERSION = "PINNACLE_COMPLETED_GAME_PAPER_V1"
+CG_DISCLOSURE = (
+    "PINNACLE_COMPLETED_GAME_PAPER: EXPERIMENTAL PAPER EXECUTION on a "
+    "fictional account. The reference probability is the de-vigged Pinnacle "
+    "probability alone. Its economics are CONDITIONAL on the game being "
+    "ordinarily completed and are NOT risk-adjusted or proven positive EV: "
+    "the venue's and the book's terms for postponed, abandoned or suspended "
+    "games are not established as compatible and are carried as disclosed "
+    "research risks, with their frequencies unmeasured. Every fill is "
+    "SIMULATED (PAPER_SIM_V1). It does not qualify any strategy for real "
+    "money. No real money, no real venue order.")
+ECONOMICS_LABEL = "CONDITIONAL_EXPERIMENTAL_NOT_RISK_ADJUSTED"
+
+STRICT_POLICY = {"kind": "STRICT", "strategy": STRATEGY, "version": VERSION,
+                 "control_key": CONTROL_KEY, "id_prefix": "paperbench",
+                 "group_prefix": "paperbenchgrp", "disclosure": DISCLOSURE,
+                 "audit_kind": "PINNACLE_ONLY_PAPER_BENCHMARK_FILL_AUDITED",
+                 "report_key": "pinnacle_only_paper_benchmark"}
+CG_POLICY = {"kind": "COMPLETED_GAME", "strategy": CG_STRATEGY,
+             "version": CG_VERSION, "control_key": CG_STRATEGY,
+             "id_prefix": "papercg", "group_prefix": "papercggrp",
+             "disclosure": CG_DISCLOSURE,
+             "audit_kind": "PINNACLE_COMPLETED_GAME_PAPER_FILL_AUDITED",
+             "report_key": "pinnacle_completed_game_paper"}
+POLICIES = (STRICT_POLICY, CG_POLICY)
+BENCHMARK_STRATEGIES = tuple(p["strategy"] for p in POLICIES)
+
+
+def policy_for(strategy) -> dict | None:
+    for p in POLICIES:
+        if p["strategy"] == str(strategy or ""):
+            return p
+    return None
+
+
+def _pol(pol) -> dict:
+    return pol if pol is not None else STRICT_POLICY
 
 R_ENV_OFF = "PAPER_BENCHMARK_ENVIRONMENT_FLAG_IS_NOT_ON"
 R_CONTROL_OFF = "THE_PINNACLE_ONLY_PAPER_BENCHMARK_CONTROL_ROW_IS_OFF"
@@ -192,9 +256,11 @@ def env_on() -> bool:
         "on", "1", "true", "yes")
 
 
-async def enablement(conn) -> dict:
-    """The environment flag AND the kill-switch row. Never raises."""
-    out: dict[str, Any] = {"strategy": STRATEGY, "env_flag": ENV_FLAG,
+async def enablement(conn, pol=None) -> dict:
+    """The environment flag AND the policy's kill-switch row. Never raises."""
+    pol = _pol(pol)
+    CONTROL_KEY = pol["control_key"]                            # noqa: N806
+    out: dict[str, Any] = {"strategy": pol["strategy"], "env_flag": ENV_FLAG,
                            "env_on": env_on(), "control_key": CONTROL_KEY}
     if not out["env_on"]:
         return dict(out, enabled=False, refusal=R_ENV_OFF)
@@ -214,14 +280,19 @@ async def enablement(conn) -> dict:
     return dict(out, enabled=True, refusal=None)
 
 
-def decision_id_for(session_id: str, valuation_id) -> str:
-    return "paperbench:" + hashlib.sha256(
-        ("%s:%s:%s" % (session_id, valuation_id, STRATEGY)).encode()
+def decision_id_for(session_id: str, valuation_id, pol=None) -> str:
+    pol = _pol(pol)
+    return pol["id_prefix"] + ":" + hashlib.sha256(
+        ("%s:%s:%s" % (session_id, valuation_id, pol["strategy"])).encode()
     ).hexdigest()[:24]
 
 
 def group_id_for(decision_id: str) -> str:
-    return "paperbenchgrp:" + decision_id.split(":", 1)[1]
+    prefix, h = decision_id.split(":", 1)
+    for p in POLICIES:
+        if p["id_prefix"] == prefix:
+            return p["group_prefix"] + ":" + h
+    return "paperbenchgrp:" + h
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -345,6 +416,217 @@ def contract_match(cand: dict, row: dict) -> dict:
                 "currency); execution, sizing and risk are the paper "
                 "session's own; CALIBRATION_ONLY is the row's purpose, not "
                 "a contract fact")}
+
+
+# ═════════════════════════════════════════════════════════════════════
+# THE COMPLETED-GAME MATCH (pure): ordinary-completion terms, exactly
+# ═════════════════════════════════════════════════════════════════════
+#
+# WHAT IS GRADED WHEN THE GAME IS ORDINARILY COMPLETED, on each side, read
+# from DECLARED evidence only:
+#
+#   book   the captured Pinnacle terms (bettor_settlement_terms), cited
+#   venue  the contract's OWN published rules text, persisted on the
+#          valuation row by the collector (settlement_comparison.
+#          venue_rules_text), matched against the venue's standard wording
+#          below -- every listed phrase must be present, no excluding phrase
+#          may be. An unrecognised text establishes NOTHING.
+#
+# A different grading period (e.g. a soccer contract including extra time
+# against Pinnacle's 90-minute basis) is a MISMATCH and refuses. The
+# exceptional conditions are not part of this match at all.
+
+GP_BASEBALL = "FULL_GAME_INCLUDING_EXTRA_INNINGS"
+GP_SOCCER_90 = ("NINETY_MINUTES_PLUS_STOPPAGE_EXCLUDING_EXTRA_TIME_AND_"
+                "PENALTIES_DRAW_IS_A_SEPARATE_OUTCOME")
+
+R_GP_TEXT_ABSENT = "VENUE_RULES_TEXT_NOT_RECORDED_ON_THE_VALUATION_ROW"
+R_GP_UNKNOWN = "ORDINARY_GRADING_PERIOD_NOT_ESTABLISHED"
+R_GP_MISMATCH = "ORDINARY_GRADING_PERIOD_MISMATCH"
+R_MARKET = "MARKET_OR_LINE_NOT_A_MONEYLINE_MATCH"
+R_PERIOD = "GRADING_PERIOD_NOT_FULL_GAME"
+R_FAMILY = "NO_COMPLETED_GAME_TERMS_FOR_THIS_SPORT"
+
+VENUE_GRADING_TEMPLATES = {
+    "baseball": {
+        "period": GP_BASEBALL,
+        "all_of": (r"\bwill settle to the winner of the\b[^.]*\bgame\b",
+                   r"\bextra innings are included if played\b"),
+        "none_of": (r"\bextra innings (?:are|will be) (?:not|excluded)\b",
+                    r"\bafter (?:nine|9) innings\b")},
+    "soccer": {
+        "period": GP_SOCCER_90,
+        "all_of": (r"\bwill settle to the winner at the end of 90 minutes "
+                   r"plus stoppage time\b",
+                   r"\btied following 90 minutes plus stoppage time\b"
+                   r"[^.]*\bsettle to tie\b"),
+        "none_of": (r"\bextra time\b[^.]*\binclud",
+                    r"\bpenalt(?:y|ies)\b[^.]*\b(?:includ|count)",
+                    r"\bincluding extra time\b")},
+}
+
+
+def book_grading_period(family) -> dict | None:
+    """Pinnacle's completed-game grading for the money line, cited."""
+    if family == "baseball":
+        t = ST.BOOK_TERMS[("baseball", "h2h", ST.CTX_PRE_GAME)]
+        return {"period": GP_BASEBALL,
+                "regulation": t[ST.C_FULL], "extra_innings":
+                    t[ST.C_OVERTIME],
+                "basis": ("Pinnacle's Game-period Money Line grades the "
+                          "completed game, extra innings included (the "
+                          "captured terms: COMPLETED_IN_REGULATION and "
+                          "DECIDED_AFTER_REGULATION both pay on the final "
+                          "score)")}
+    if family == "soccer":
+        return {"period": GP_SOCCER_90,
+                "quote": ST.SOCCER_NINETY_MINUTE_BASIS["quote"],
+                "source_url": ST.SOCCER_NINETY_MINUTE_BASIS["source_url"],
+                "retrieved_at": ST.SOCCER_NINETY_MINUTE_BASIS["retrieved_at"],
+                "basis": ("Pinnacle's match markets grade the result at the "
+                          "end of 90 minutes plus stoppage time, excluding "
+                          "extra time and a shootout; its 3-way market prices "
+                          "the draw as its own outcome")}
+    return None
+
+
+def venue_grading_period(family, prose) -> dict:
+    """The venue contract's completed-game grading, from its own text."""
+    tpl = VENUE_GRADING_TEMPLATES.get(str(family or ""))
+    flat = " ".join(str(prose or "").split()).lower()
+    if tpl is None:
+        return {"period": None, "refusal": R_FAMILY}
+    if not flat:
+        return {"period": None, "refusal": R_GP_TEXT_ABSENT}
+    import re as _re
+    hits = [p for p in tpl["all_of"] if _re.search(p, flat)]
+    bad = [p for p in tpl["none_of"] if _re.search(p, flat)]
+    if bad:
+        return {"period": "NOT_" + tpl["period"], "refusal": R_GP_MISMATCH,
+                "matched_excluding": bad}
+    if len(hits) != len(tpl["all_of"]):
+        return {"period": None, "refusal": R_GP_UNKNOWN,
+                "matched": hits, "required": list(tpl["all_of"])}
+    return {"period": tpl["period"], "refusal": None, "matched": hits}
+
+
+def completed_game_match(cand: dict, row: dict) -> dict:
+    """THE COMPLETED-GAME POLICY'S MATCH: fixture and participant, selected
+    outcome, market and line, and the ORDINARY grading period -- exactly.
+    The exceptional settlement terms are returned as DISCLOSED research
+    risks; they are never part of `established`."""
+    base = contract_match(cand, row)
+    keep = {DP.C_IDENTITY, "payout_outcome_match",
+            "probability_qualified_by_the_lane", "polymarket_us_contract"}
+    checks = [c for c in base["checks"] if c["check"] in keep]
+    refusals = [c["refusal"] for c in checks if not c["passed"]]
+
+    def put(name, ok, refusal, detail, **ev):
+        checks.append(dict({"check": name, "passed": bool(ok),
+                            "refusal": None if ok else refusal,
+                            "detail": detail}, **ev))
+        if not ok and refusal not in refusals:
+            refusals.append(refusal)
+
+    fam = str(cand.get("sport_family") or row.get("sport_family") or "")
+    mk_ok = (str(cand.get("market") or "") == "h2h"
+             and cand.get("line") is None)
+    put("market_and_line", mk_ok, R_MARKET,
+        "market %r, line %r (a money line has no line)"
+        % (cand.get("market"), cand.get("line")))
+    put("grading_period_full_game",
+        str(cand.get("period") or "") == "FULL_GAME", R_PERIOD,
+        "contract period %r" % (cand.get("period"),))
+    scmp = DP._j(row.get("settlement_comparison")) or {}
+    book = book_grading_period(fam)
+    venue = venue_grading_period(fam, scmp.get("venue_rules_text"))
+    gp_ok = (book is not None and venue.get("refusal") is None
+             and venue.get("period") == book["period"])
+    put("ordinary_completion_grading_period", gp_ok,
+        (R_FAMILY if book is None else (venue.get("refusal")
+                                         or R_GP_MISMATCH)),
+        ("book and venue both grade the ordinarily completed game as %s"
+         % (book or {}).get("period")) if gp_ok else (
+            "book %s vs venue %s" % ((book or {}).get("period"),
+                                     venue.get("period"))),
+        book=book, venue=dict(venue, rules_sha256=scmp.get(
+            "venue_rules_sha256")))
+    exceptional = {
+        "status": "DISCLOSED_RESEARCH_RISK_NOT_SETTLEMENT_COMPATIBILITY",
+        "compatibility_recorded": scmp.get("compatibility"),
+        "blockers": list(scmp.get("blockers") or []),
+        "per_condition": {
+            c: r for c, r in (scmp.get("per_condition") or {}).items()
+            if c not in (ST.C_FULL, ST.C_OVERTIME)},
+        "why": ("postponement, abandonment and suspension terms are not "
+                "required to agree under this experimental policy; they are "
+                "carried as research risks and never reported as proven "
+                "compatibility")}
+    return {"established": not refusals, "refusals": refusals,
+            "checks": checks, "exceptional_terms": exceptional,
+            "policy": CG_VERSION}
+
+
+def exceptional_scenarios(*, cand: dict, row: dict, qty: float,
+                          vwap) -> dict:
+    """THE EXCEPTIONAL-SETTLEMENT PAYOFFS, apart from the conditional EV.
+    Per contract and in total, from the venue's OWN stated payout where it
+    states one; probabilities UNMEASURED -- never zero, never invented."""
+    scmp = DP._j(row.get("settlement_comparison")) or {}
+    per = dict(scmp.get("per_condition") or {})
+    q = float(qty or 0.0)
+    v = None if vwap is None else float(vwap)
+    out = {}
+    for cond in (ST.C_NOT_PLAYED, ST.C_SUSPENDED_BEYOND,
+                 ST.C_SUSPENDED_RESUMED, ST.C_CALLED_FINAL,
+                 ST.C_STOPPED_EARLY):
+        r = per.get(cond)
+        if r is None:
+            continue
+        vp = r.get("venue_payout")
+        sc = {"venue_payout": vp, "book_payout": r.get("book_payout"),
+              "verdict": r.get("verdict"),
+              "probability": "UNMEASURED",
+              "probability_note": ("no measured frequency for this "
+                                   "condition is held; it is not set to "
+                                   "zero and no risk adjustment is applied")}
+        if vp == ST.PAY_LAST_FAIR_MARKET_PRICE and v is not None:
+            sc.update(payoff_per_contract_range=[round(-v, 9),
+                                                 round(1.0 - v, 9)],
+                      payoff_total_range_usd=[round(-v * q, 6),
+                                              round((1.0 - v) * q, 6)],
+                      payoff_basis=("the venue settles at the contract's "
+                                    "last fair market price S, unknown "
+                                    "until published: payoff S - entry "
+                                    "price, S in [0, 1]"))
+        elif vp in (ST.PAY_ON_FINAL, ST.PAY_ON_PARTIAL,
+                    ST.PAY_ON_PARTIAL_WALKOFF) and v is not None:
+            sc.update(payoff_per_contract_range=[round(-v, 9),
+                                                 round(1.0 - v, 9)],
+                      payoff_basis="won or lost on the graded score")
+        elif vp == ST.PAY_STAKE_BACK and v is not None:
+            sc.update(payoff_per_contract_range=[0.0, 0.0],
+                      payoff_basis="the venue states a stake return")
+        else:
+            sc.update(payoff_per_contract_range=None,
+                      payoff_basis=("the venue states no payout for this "
+                                    "condition: UNKNOWN"))
+        out[cond] = sc
+    return {"label": ECONOMICS_LABEL, "scenarios": out,
+            "included_in_conditional_ev": False}
+
+
+def conditional_economics(*, p: float, takes: list, fee_fn,
+                          at: float) -> dict:
+    """EV under ORDINARY COMPLETION ONLY: per walked level, q (p - price),
+    the simulator's fees. No void scaling and no refund assumption -- the
+    exceptional states are priced separately (`exceptional_scenarios`)."""
+    e = economics(p=p, takes=takes, fee_fn=fee_fn, at=at,
+                  void_states={"applied": False})
+    return dict(e, label=ECONOMICS_LABEL, conditional_on="ORDINARY_COMPLETION",
+                void_scale=None,
+                not_claimed=("risk-adjusted EV; proven positive EV; any "
+                             "exceptional-settlement frequency"))
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -521,9 +803,14 @@ async def _context(conn, ctx: dict) -> dict:
 # THE DECISION
 # ═════════════════════════════════════════════════════════════════════
 
-async def decide_one(conn, ctx: dict, row: dict) -> dict:
+async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
     """ONE BENCHMARK DECISION, persisted first; an ENTER then submits ONE
     paper order naming it (the simulator fills it after the delay)."""
+    pol = _pol(pol)
+    cg = pol["kind"] == "COMPLETED_GAME"
+    STRATEGY = pol["strategy"]                                  # noqa: N806
+    VERSION = pol["version"]                                    # noqa: N806
+    DISCLOSURE = pol["disclosure"]                              # noqa: N806
     cfg = ctx["config"]
     ent = cfg["entry"]
     sim_cfg = cfg["simulator"]
@@ -534,13 +821,18 @@ async def decide_one(conn, ctx: dict, row: dict) -> dict:
     row = dict(row)
     cand = DP.candidate_from_row(row)
     side = PD.holding_side_of(cand.get("side"))
-    did = decision_id_for(ctx["session_id"], cand["valuation_id"])
+    did = decision_id_for(ctx["session_id"], cand["valuation_id"], pol)
     cat = await DP.catalogue_row(conn, cand.get("us_market_slug"))
     fxr = await DP.fixture_row(conn, cand.get("condition_id"))
     label = dict(DP.instrument_label(cand, catalogue_row=cat,
-                                     fixture_row=fxr), **STRATEGY_LABEL)
+                                     fixture_row=fxr),
+                 strategy=STRATEGY, disclosure=DISCLOSURE,
+                 book_currency="NOT_ESTABLISHED",
+                 **({"policy_version": VERSION,
+                     "economics_label": ECONOMICS_LABEL} if cg else {}))
     refusals: list = []
-    match = contract_match(cand, row)
+    match = (completed_game_match(cand, row) if cg
+             else contract_match(cand, row))
     refusals.extend(match["refusals"])
     real = DP._realism(cand, cat)
     if real["status"] == DP.FAIL:
@@ -602,11 +894,25 @@ async def decide_one(conn, ctx: dict, row: dict) -> dict:
                 walk = SIM.walk(levels, consumed=consumed,
                                 limit=sized["limit"], qty=sized["qty"],
                                 direction="BUY", allow_partial=True)
-                states = DP.settlement_states(bctx["void"],
-                                              void_refunds_price=True)
-                econ = dict(economics(p=p, takes=walk["takes"],
-                                      fee_fn=fee_fn, at=at,
-                                      void_states=states),
+                if cg:
+                    # CONDITIONAL ON ORDINARY COMPLETION. No refund and no
+                    # void rate is assumed; exceptional payoffs are shown
+                    # separately with their probabilities UNMEASURED.
+                    states = {"applied": False,
+                              "why": ("not used: this policy's EV is "
+                                      "conditional on ordinary completion")}
+                    base_e = conditional_economics(
+                        p=p, takes=walk["takes"], fee_fn=fee_fn, at=at)
+                    base_e["exceptional_settlement"] = exceptional_scenarios(
+                        cand=cand, row=row, qty=base_e["qty"],
+                        vwap=base_e["vwap"])
+                else:
+                    states = DP.settlement_states(bctx["void"],
+                                                  void_refunds_price=True)
+                    base_e = economics(p=p, takes=walk["takes"],
+                                       fee_fn=fee_fn, at=at,
+                                       void_states=states)
+                econ = dict(base_e,
                             settlement_states=states,
                             walk=[{"price": t["price"], "wire": t["wire"],
                                    "take": t["take"],
@@ -645,6 +951,26 @@ async def decide_one(conn, ctx: dict, row: dict) -> dict:
         "book_currency": BOOK_CURRENCY,
         "acquisition": econ, "shortfall": short,
         "refusals": refusals}
+    if cg:
+        economics_rec.update(
+            label=ECONOMICS_LABEL, conditional_on="ORDINARY_COMPLETION",
+            ev_rule=("modelled net profit after the simulator's fees > 0, "
+                     "CONDITIONAL on the game being ordinarily completed; "
+                     "not risk-adjusted, not proven positive EV"),
+            exceptional_terms=match.get("exceptional_terms"),
+            mapping_assumptions={
+                "reference": "PINNACLE_DEVIG_V1 (stored, oriented once by "
+                             "the lane)",
+                "devig_method": (cand.get("pinnacle") or {}).get("method"),
+                "overround": (cand.get("pinnacle") or {}).get("overround"),
+                "payout_event": cand.get("payout_event"),
+                "payout_is_complement": cand.get("payout_is_complement"),
+                "sport_family": cand.get("sport_family"),
+                "grading_period": next(
+                    ((c.get("book") or {}).get("period")
+                     for c in match["checks"]
+                     if c["check"] == "ordinary_completion_grading_period"),
+                    None)})
     conditions = [
         {"condition": "contract_outcome_settlement_match",
          "passed": match["established"], "refusals": match["refusals"]},
@@ -668,6 +994,7 @@ async def decide_one(conn, ctx: dict, row: dict) -> dict:
     policy_decision = {
         "strategy": STRATEGY, "policy_version": VERSION,
         "disclosure": DISCLOSURE, "p_internal": None, "p_blended": None,
+        "economics_label": ECONOMICS_LABEL if cg else None,
         "p_pinnacle": p, "conditions": conditions,
         "gross_edge_pp": best_edge,
         "edge_at_vwap_pp": (econ or {}).get("edge_at_vwap_pp"),
@@ -683,10 +1010,10 @@ async def decide_one(conn, ctx: dict, row: dict) -> dict:
                                       qty=sized["qty"], limit=sized["limit"])
                   if verdict == DP.ENTER else None)
     internal_rec = {"available": False, "p": None, "strategy": STRATEGY,
-                    "reason": ("PINNACLE_ONLY_PAPER_BENCHMARK uses no "
+                    "reason": ("%s uses no "
                                "internal model by design; Pinnacle is never "
                                "substituted into this field (it is in "
-                               "p_pinnacle / pinnacle)")}
+                               "p_pinnacle / pinnacle)" % STRATEGY)}
     book = None if obs is None else {
         "book_obs_id": obs["obs_id"], "observed_at": obs["observed_at"],
         "observed_at_is": "OUR_RECEIPT_INSTANT",
@@ -770,11 +1097,13 @@ async def decide_one(conn, ctx: dict, row: dict) -> dict:
 # THE PASS STEP AND THE PER-VALUATION HOOK
 # ═════════════════════════════════════════════════════════════════════
 
-async def step(conn, ctx: dict) -> dict:
+async def step(conn, ctx: dict, pol=None) -> dict:
     """THE BENCHMARK'S PAPER STEP (after Derek's, before the delayed fill
-    step, which simulates its orders too)."""
-    en = await enablement(conn)
-    out: dict[str, Any] = {"strategy": STRATEGY, "enabled": en["enabled"],
+    step, which simulates its orders too), for one policy."""
+    pol = _pol(pol)
+    en = await enablement(conn, pol)
+    out: dict[str, Any] = {"strategy": pol["strategy"],
+                           "enabled": en["enabled"],
                            "decisions_recorded": 0, "orders_submitted": 0,
                            "verdicts": {}, "refusals": {}, "deferred": 0}
     if not en["enabled"]:
@@ -785,7 +1114,7 @@ async def step(conn, ctx: dict) -> dict:
         CANDIDATES_SQL, EXPERIMENT_ID,
         at - float(cfg["entry"]["valuation_lookback_s"]), at + 1.0,
         ctx["session_id"], int(cfg["cadence"]["max_decisions_per_pass"]),
-        STRATEGY)]
+        pol["strategy"])]
     out["candidates"] = len(rows)
     ctx.setdefault("pending_entries", [])
     for row in rows:
@@ -793,7 +1122,7 @@ async def step(conn, ctx: dict) -> dict:
             out["budget_exhausted"] = True
             break
         try:
-            rec = await decide_one(conn, ctx, row)
+            rec = await decide_one(conn, ctx, row, pol)
         except Exception as exc:                                # noqa: BLE001
             k = "BENCHMARK_DECISION:%s" % type(exc).__name__
             out.setdefault("errors", {})[k] = str(exc)[:200]
@@ -816,17 +1145,25 @@ async def step(conn, ctx: dict) -> dict:
     return out
 
 
+async def step_completed_game(conn, ctx: dict) -> dict:
+    """THE COMPLETED-GAME PAPER POLICY'S STEP (same pass, own strategy)."""
+    return await step(conn, ctx, CG_POLICY)
+
+
 async def decide_for_hook(conn, ctx: dict, row: dict, *,
-                          timeout_s: float) -> dict:
+                          timeout_s: float, pol=None) -> dict:
     """The per-valuation hook's benchmark decision: guarded, bounded, never
     raises (CancelledError excepted)."""
+    pol = _pol(pol)
+    STRATEGY = pol["strategy"]                                  # noqa: N806
     try:
-        en = await enablement(conn)
+        en = await enablement(conn, pol)
         if not en["enabled"]:
             return {"decided": False, "why": en["refusal"]}
         ctx = dict(ctx, deadline=time.monotonic() + float(timeout_s))
         ctx.pop("benchmark", None)
-        rec = await asyncio.wait_for(decide_one(conn, ctx, row), timeout_s)
+        rec = await asyncio.wait_for(decide_one(conn, ctx, row, pol),
+                                     timeout_s)
         return dict({k: rec.get(k) for k in (
             "decision_id", "verdict", "refusal", "order_id", "duplicate",
             "deferred", "strategy")}, decided=not rec.get("deferred"))
@@ -850,7 +1187,8 @@ async def group_strategy(conn, group_id: str) -> str:
     return s or TWO_MODEL_STRATEGY
 
 
-async def xavier_measure(conn, ctx: dict, *, pos: dict) -> dict:
+async def xavier_measure(conn, ctx: dict, *, pos: dict,
+                         strategy=None) -> dict:
     """P(the held side pays) for a BENCHMARK position, on the benchmark's
     own measure -- the de-vigged Pinnacle probability alone, for the same
     contract and payout outcome -- never the two-model blend:
@@ -860,6 +1198,9 @@ async def xavier_measure(conn, ctx: dict, *, pos: dict) -> dict:
       PINNACLE_ONLY_LATEST      the latest such reading, older (stale, said)
       ENTRY_TIME_MEASURE        the entry decision's p_pinnacle (stale, said)
     """
+    pol = policy_for(strategy) or STRICT_POLICY
+    STRATEGY = pol["strategy"]                                  # noqa: N806
+    DISCLOSURE = pol["disclosure"]                              # noqa: N806
     c = ctx.get("clock")
     at = float(c()) if c else float(ctx["now"])
     ent = ctx["config"]["entry"]
@@ -875,6 +1216,19 @@ async def xavier_measure(conn, ctx: dict, *, pos: dict) -> dict:
     base = {"strategy": STRATEGY, "p_internal": None,
             "internal_model": {"available": False},
             "void_applied": False, "disclosure": DISCLOSURE}
+    if pol["kind"] == "COMPLETED_GAME":
+        # THE TWO KINDS OF STATE, NEVER BLENDED: p below is the held side's
+        # probability IF THE GAME IS ORDINARILY COMPLETED. What the position
+        # pays if it is not is the venue's own stated payout, with its
+        # frequency unmeasured -- no hedge is described as covering it.
+        base.update(
+            measure_is="CONDITIONAL_ON_ORDINARY_COMPLETION",
+            economics_label=ECONOMICS_LABEL,
+            exceptional_states=(
+                "not priced into p: the venue's own payout applies (e.g. the "
+                "last fair market price for a game not rescheduled within "
+                "two weeks), frequency UNMEASURED; no hedge is described as "
+                "guaranteeing profit across states that are not established"))
     contract = None
     if d is not None and d["valuation_id"] is not None:
         contract = await conn.fetchrow(
@@ -916,7 +1270,8 @@ async def xavier_measure(conn, ctx: dict, *, pos: dict) -> dict:
 # AUDREY: THE BENCHMARK'S OWN SECTION AND FILL AUDIT
 # ═════════════════════════════════════════════════════════════════════
 
-async def has_records(conn, account_id: str) -> bool:
+async def has_records(conn, account_id: str, pol=None) -> bool:
+    STRATEGY = _pol(pol)["strategy"]                          # noqa: N806
     try:
         return bool(await conn.fetchval(
             "SELECT EXISTS (SELECT 1 FROM paper_decisions WHERE "
@@ -925,9 +1280,13 @@ async def has_records(conn, account_id: str) -> bool:
         return False
 
 
-async def report_section(conn, *, account_id: str, t0, t1) -> dict:
+async def report_section(conn, *, account_id: str, t0, t1,
+                         pol=None) -> dict:
     """THE BENCHMARK'S PERFORMANCE ROWS FOR THE REPORT DAY, apart from the
     two-model strategy's, each labelled with the strategy."""
+    pol = _pol(pol)
+    STRATEGY, VERSION = pol["strategy"], pol["version"]         # noqa: N806
+    DISCLOSURE = pol["disclosure"]                              # noqa: N806
     dec = await conn.fetch(
         "SELECT verdict, coalesce(refusal, 'ENTER') AS reason, count(*) AS n,"
         "       count(DISTINCT us_market_slug) AS markets "
@@ -963,7 +1322,7 @@ async def report_section(conn, *, account_id: str, t0, t1) -> dict:
     pos = [p for p in await L.positions(conn, account_id,
                                         include_closed=True)
            if p["group_id"] in groups]
-    return {
+    rep = {
         "strategy": STRATEGY, "version": VERSION, "disclosure": DISCLOSURE,
         "decisions": [{"strategy": STRATEGY, "verdict": r["verdict"],
                        "reason": r["reason"], "decisions": int(r["n"]),
@@ -990,12 +1349,18 @@ async def report_section(conn, *, account_id: str, t0, t1) -> dict:
         "included_in_account_totals": True,
         "one_ledger": "paper_ledger (the benchmark shares the account's "
                       "single cash ledger; no separate funding)"}
+    if pol["kind"] == "COMPLETED_GAME":
+        rep.update(await _completed_game_results(
+            conn, account_id=account_id, pos=pos, groups=groups))
+    return rep
 
 
-async def audit_fills(conn, actx: dict, finding) -> list:
+async def audit_fills(conn, actx: dict, finding, pol=None) -> list:
     """AUDREY'S CHECK OF EVERY BENCHMARK ENTRY THAT FILLED: each simulated
     fill has its one ledger FILL entry, and the group has been handed to
     Xavier. One INFO finding per group (WARNING when either is missing)."""
+    pol = _pol(pol)
+    STRATEGY, DISCLOSURE = pol["strategy"], pol["disclosure"]  # noqa: N806
     out = []
     rows = await conn.fetch(
         "SELECT o.group_id, o.order_id, o.decision_id, o.filled_qty, "
@@ -1015,7 +1380,7 @@ async def audit_fills(conn, actx: dict, finding) -> list:
     for r in rows:
         ok = int(r["fills"]) == int(r["ledger_fills"]) and bool(r["handed"])
         out.append(await finding(
-            conn, actx, kind="PINNACLE_ONLY_PAPER_BENCHMARK_FILL_AUDITED",
+            conn, actx, kind=pol["audit_kind"],
             subject=r["group_id"], severity="INFO" if ok else "WARNING",
             detail={"strategy": STRATEGY, "disclosure": DISCLOSURE,
                     "order_id": r["order_id"],
@@ -1028,6 +1393,70 @@ async def audit_fills(conn, actx: dict, finding) -> list:
                     "passed": ok},
             scope="%s:%s" % (r["filled_qty"], r["handed"])))
     return out
+
+
+async def _completed_game_results(conn, *, account_id: str, pos: list,
+                                  groups: set) -> dict:
+    """WHAT ACTUALLY HAPPENED TO THE COMPLETED-GAME POLICY'S POSITIONS: the
+    simulated P&L (realised, and marked where open), the assumptions each
+    entry was made under, and every exceptional settlement with its effect
+    against the ordinary-completion assumption. Nothing here promotes or
+    qualifies the strategy for real money."""
+    ents = await conn.fetch(
+        "SELECT d.decision_id, d.us_market_slug, d.p_pinnacle, "
+        "       d.economics->>'label' AS label, "
+        "       (d.economics->'acquisition'->>'expected_net_profit_usd')"
+        "         ::float8 AS conditional_ev, "
+        "       d.economics->'acquisition'->'exceptional_settlement' AS exc, "
+        "       o.group_id "
+        "  FROM paper_decisions d JOIN paper_orders o "
+        "    ON o.decision_id = d.decision_id AND o.role = 'ENTRY' "
+        " WHERE d.account_id=$1 AND d.strategy=$2 AND d.verdict='ENTER'",
+        account_id, CG_STRATEGY)
+    sets = await conn.fetch(
+        "SELECT s.group_id, s.us_market_slug, s.outcome, s.qty, "
+        "       s.payout_per_contract, s.payout_usd, s.evidence_source, "
+        "       s.settled_at FROM paper_settlements s "
+        " WHERE s.account_id=$1 AND s.group_id = ANY($2::text[]) "
+        " ORDER BY s.settled_at", account_id, list(groups))
+    by_group = {e["group_id"]: e for e in ents}
+    exc = []
+    for x in sets:
+        if x["outcome"] in ("WON", "LOST"):
+            continue
+        p = next((q for q in pos if q["group_id"] == x["group_id"]), None)
+        cost = float((p or {}).get("acquisition_cost_usd") or 0.0)
+        exc.append({"group_id": x["group_id"],
+                    "market": x["us_market_slug"], "outcome": x["outcome"],
+                    "payout_per_contract": float(x["payout_per_contract"]),
+                    "payout_usd": float(x["payout_usd"]),
+                    "evidence_source": x["evidence_source"],
+                    "acquisition_cost_usd": cost,
+                    "result_usd": round(float(x["payout_usd"]) - cost, 6),
+                    "conditional_ev_at_entry_usd": (by_group.get(
+                        x["group_id"]) or {}).get("conditional_ev"),
+                    "effect": ("an exceptional settlement: the position was "
+                               "paid the venue's own published amount, which "
+                               "the ordinary-completion EV did not price")})
+    realized = round(sum(q["realized_pnl_usd"] for q in pos), 6)
+    unreal = round(sum(float(q.get("unrealized_pnl_usd") or 0.0)
+                       for q in pos if q["open_qty"] > 1e-9), 6)
+    return {
+        "actual_simulated_pnl": {
+            "realized_usd": realized, "unrealized_marked_usd": unreal,
+            "pending_positions": sum(1 for q in pos
+                                     if q["open_qty"] > 1e-9),
+            "basis": "the one paper ledger; fills and settlements as booked"},
+        "entry_assumptions": {
+            "entries": len(ents), "economics_label": ECONOMICS_LABEL,
+            "conditional_ev_sum_usd": round(sum(
+                float(e["conditional_ev"] or 0.0) for e in ents), 6),
+            "conditional_on": "ORDINARY_COMPLETION",
+            "exceptional_probabilities": "UNMEASURED"},
+        "exceptional_outcomes": exc,
+        "exceptional_effect_usd": round(sum(e["result_usd"] for e in exc), 6),
+        "qualification": ("NONE: this experiment does not qualify or promote "
+                          "any strategy for real-money trading")}
 
 
 def describe() -> dict:
