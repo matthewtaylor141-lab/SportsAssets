@@ -96,6 +96,16 @@ const ENGINES = [
 for (const [ename, engine, dev, args] of ENGINES) {
   const E = report.engines[ename] = { agents: {} };
   const browser = await engine.launch({ args });
+  // what THIS browser build can decode -- a test browser without an MP3
+  // decoder is a harness limit, not a product verdict, and is reported so
+  try {
+    const cp = await (await browser.newContext({ ...dev })).newPage();
+    E.audio_capability = await cp.evaluate(() => ({
+      user_agent: navigator.userAgent,
+      can_play_mpeg: new Audio().canPlayType("audio/mpeg"),
+      media_source_mpeg: typeof MediaSource !== "undefined" && MediaSource.isTypeSupported ? MediaSource.isTypeSupported("audio/mpeg") : null,
+      managed_media_source: typeof ManagedMediaSource !== "undefined" }));
+  } catch (x) { E.audio_capability = { error: String(x).slice(0, 160) }; }
   for (const agent of ["xavier", "derek", "audrey"]) {
     const R = E.agents[agent] = { url: `${HOST}/${agent}`, checks: {} };
     const ctx = await browser.newContext({ ...dev });
