@@ -93,6 +93,9 @@ jobs:
             | cut -c1-2500 | tee -a "$GITHUB_STEP_SUMMARY"
           jq -c '.ledger | {status, why, entries: ((.data.entries // .data // []) | if type == "array" then map({seq: (.sequence // .seq), kind, cash_after_usd, reserved_after_usd}) else . end)}' /tmp/acct.json 2>&1 \
             | cut -c1-1500 | tee -a "$GITHUB_STEP_SUMMARY"
+          code=$(curl -s -o /tmp/bm.json -w '%{http_code}' --max-time 45 -H "$H" "$API/api/command/paper/benchmark" || echo 000)
+          echo "paper/benchmark HTTP $code" | tee -a "$GITHUB_STEP_SUMMARY"
+          jq -c '.' /tmp/bm.json 2>/dev/null | cut -c1-6000 | tee -a "$GITHUB_STEP_SUMMARY"
           code=$(curl -s -o /tmp/ag.json -w '%{http_code}' --max-time 45 -H "$H" "$API/api/command/agents" || echo 000)
           echo "agents HTTP $code" | tee -a "$GITHUB_STEP_SUMMARY"
           jq -c '.' /tmp/ag.json 2>/dev/null | cut -c1-2000 | tee -a "$GITHUB_STEP_SUMMARY"
