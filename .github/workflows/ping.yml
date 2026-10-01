@@ -20,7 +20,7 @@ on:
         required: false
         default: ""
       verify:
-        description: "site-voice = after a release: set each agent's voice through the audited persona route, speak once per agent, and render the production homepage and agent pages in mobile WebKit and phone-sized Chromium (authenticated and signed out); talk = drive the Talk-to-agent panels on /derek /xavier /audrey (typed question, follow-up, refresh-resume, spoken question via a fake microphone, voice reply, permission-denied and a simulated provider error) in desktop + phone Chromium and WebKit iPhone 13 (writes conversation records only)"
+        description: "site-voice = after a release: set each agent's voice through the audited persona route, speak once per agent, and render the production homepage and agent pages in mobile WebKit and phone-sized Chromium (authenticated and signed out); film = follow the homepage demo link and play the whole cinematic film signed in (prepares each chapter through the agent persona chat + stored speech; writes conversation records only), measuring voices, music and 3D frames; talk = drive the Talk-to-agent panels on /derek /xavier /audrey (typed question, follow-up, refresh-resume, spoken question via a fake microphone, voice reply, permission-denied and a simulated provider error) in desktop + phone Chromium and WebKit iPhone 13 (writes conversation records only)"
         required: false
         default: ""
       terms_slugs:
@@ -319,6 +319,48 @@ jobs:
           git rm -rq --cached . >/dev/null 2>&1
           mkdir -p "$D" && cp tools/site_verify/site_verify_out/* "$D"/ 2>/dev/null
           git add "$D" && git commit -q -m "talk panel evidence, run $RUN" && git push -q origin ev:claude/site-verify-evidence && echo "evidence pushed: $D"
+
+  film:
+    # THE CINEMATIC TEAM DEMO, PLAYED SIGNED IN ON THE PRODUCTION SITE.
+    # OFF UNLESS verify == film. Writes conversation records only (persona
+    # chat + stored speech); no order, policy or ledger change. Evidence goes
+    # to claude/site-verify-evidence.
+    if: ${{ inputs.verify == 'film' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Play the film (Chromium, SwiftShader WebGL)
+        timeout-minutes: 38
+        shell: bash
+        env:
+          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+          OUT: site_verify_out
+        run: |
+          set +e
+          echo "::add-mask::$ADMIN_TOKEN"
+          cd tools/site_verify
+          npm init -y >/dev/null 2>&1
+          npm install playwright@1.48.2 >/dev/null 2>&1
+          npx playwright install --with-deps chromium >/dev/null 2>&1
+          node film.mjs
+      - name: Commit the evidence
+        if: always()
+        shell: bash
+        run: |
+          RUN=${{ github.run_id }}
+          D="evidence/film/$(date -u +%Y%m%dT%H%M%SZ)_run$RUN"
+          git config user.name "site-verify"
+          git config user.email "site-verify@users.noreply.github.com"
+          git fetch -q origin claude/site-verify-evidence && git checkout -q -B ev origin/claude/site-verify-evidence || git checkout -q --orphan ev
+          git rm -rq --cached . >/dev/null 2>&1 || true
+          mkdir -p "$D" && cp tools/site_verify/site_verify_out/* "$D"/ 2>/dev/null
+          git add "$D" && git commit -q -m "film evidence, run $RUN" && git push -q origin ev:claude/site-verify-evidence && echo "evidence pushed: $D"
 
   narration:
     # RETRIEVES EXISTING STORED SPEECH ONLY (verify == narration): POSTs the
