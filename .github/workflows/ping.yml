@@ -69,7 +69,8 @@ jobs:
               "$(grep -c 'paper/account' /tmp/pg)" | tee -a "$GITHUB_STEP_SUMMARY"
           done
           curl -s --max-time 25 "https://$HOST/" > /tmp/home
-          echo "homepage loads paper.js: $(grep -c 'paper.js' /tmp/home)  OUR AGENTS nav: $(grep -ci 'our agents' /tmp/home)" \
+          curl -s --max-time 25 "https://$HOST/app.js" > /tmp/appjs
+          echo "homepage loads paper.js: $(grep -c 'paper.js' /tmp/home)  app.js OUR AGENTS nav: $(grep -c 'OUR AGENTS' /tmp/appjs)  links: $(grep -o 'href="/\(derek\|xavier\|audrey\)"' /tmp/appjs | sort -u | tr '\n' ' ')" \
             | tee -a "$GITHUB_STEP_SUMMARY"
           if [ -z "${ADMIN_TOKEN:-}" ]; then
             echo "SKIPPED authenticated reads: no ADMIN_TOKEN secret" | tee -a "$GITHUB_STEP_SUMMARY"
@@ -83,8 +84,10 @@ jobs:
           done
           code=$(curl -s -o /tmp/acct.json -w '%{http_code}' --max-time 45 -H "$H" "$API/api/command/paper/account?entries=5" || echo 000)
           echo "paper/account HTTP $code" | tee -a "$GITHUB_STEP_SUMMARY"
-          jq -c '{status: .account.status, balances: .account.data, session: .session, last_updated_at, ledger_status: .ledger.status, ledger_entries: [(.ledger.data // {}) | (.entries // .)[]? | {seq: (.sequence // .seq), kind, cash_after_usd, reserved_after_usd}]}' \
-            /tmp/acct.json 2>/dev/null | cut -c1-2500 | tee -a "$GITHUB_STEP_SUMMARY"
+          jq -c 'del(.ledger) | {account, session, last_updated_at, drawdown_status: .drawdown.status}' /tmp/acct.json 2>&1 \
+            | cut -c1-2500 | tee -a "$GITHUB_STEP_SUMMARY"
+          jq -c '.ledger | {status, why, entries: ((.data.entries // .data // []) | if type == "array" then map({seq: (.sequence // .seq), kind, cash_after_usd, reserved_after_usd}) else . end)}' /tmp/acct.json 2>&1 \
+            | cut -c1-1500 | tee -a "$GITHUB_STEP_SUMMARY"
           code=$(curl -s -o /tmp/ag.json -w '%{http_code}' --max-time 45 -H "$H" "$API/api/command/agents" || echo 000)
           echo "agents HTTP $code" | tee -a "$GITHUB_STEP_SUMMARY"
           jq -c '.' /tmp/ag.json 2>/dev/null | cut -c1-2000 | tee -a "$GITHUB_STEP_SUMMARY"
