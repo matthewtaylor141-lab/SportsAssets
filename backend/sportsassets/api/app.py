@@ -2355,8 +2355,16 @@ async def admin_pinnapi_probe(response: Response,
         return await PP.account()
     if action == "rest":
         return await PP.rest(list(b.get("paths") or []))
+    if action == "ws_sample":
+        # bounded (<= 20 s, <= 4 sports) and refused while the ingestion
+        # owner holds the feed lease: one socket per account
+        return await PP.ws_sample(list(b.get("sport_ids") or []),
+                                  list(b.get("streams") or
+                                       ["live", "prematch"]),
+                                  float(b.get("seconds") or 10))
     raise HTTPException(status_code=400,
-                        detail="action: keys | docs | account | rest")
+                        detail="action: keys | docs | account | rest | "
+                               "ws_sample")
 
 
 @app.post("/api/admin/venue-settlement-probe",

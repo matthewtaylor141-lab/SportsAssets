@@ -155,3 +155,122 @@ async def test_account_returns_only_entitlement_fields(monkeypatch):
                                  "health", "/a b", "/x?y=<script>"])
 def test_the_path_pattern_refuses_non_relative_paths(bad):
     assert not PP.PATH_RX.match(bad)
+
+
+class _FakeWS:
+    def __init__(self, frames, seen):
+        self.frames, self.seen = list(frames), seen
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *a):
+        self.seen["closed"] = True
+
+    async def send(self, s):
+        self.seen.setdefault("sent", []).append(json.loads(s))
+
+    async def recv(self):
+        import asyncio
+        if self.frames:
+            return self.frames.pop(0)
+        await asyncio.sleep(30)
+
+
+class _FakeLease:
+    def __init__(self, held):
+        self.held, self.calls = held, []
+
+    async def __call__(self):
+        return self, self.held
+
+    async def execute(self, sql, *a):
+        self.calls.append(sql)
+
+    async def close(self):
+        self.calls.append("close")
+
+
+async def test_ws_sample_refuses_while_the_owner_holds_the_lease(monkeypatch):
+    monkeypatch.setenv("pinnapi_key", SECRET)
+    opened = []
+    lease = _FakeLease(held=False)
+    out = await PP.ws_sample([6], seconds=1, lease=lease,
+                             connect=lambda u, k: opened.append(u))
+    assert out["ok"] is False
+    assert out["reason"] == "INGESTION_OWNER_HOLDS_THE_FEED_LEASE"
+    assert opened == [], "no socket opened: it would evict the owner"
+    assert lease.calls == ["close"], "nothing to unlock; connection closed"
+
+
+async def test_ws_sample_is_bounded_answers_pings_and_reports_shapes(
+        monkeypatch):
+    monkeypatch.setenv("pinnapi_key", SECRET)
+    seen, keys = {}, []
+    frames = [
+        json.dumps({"type": "subscribed", "stream": "live", "sport_id": 6}),
+        json.dumps({"type": "snapshot", "stream": "live", "sport_id": 6,
+                    "ts": 1000, "events": [{"id": 1}, {"id": 2}]}),
+        json.dumps({"type": "live", "sport_id": 6, "op": "upd",
+                    "topic": "matchups/reg/sp/3/live/ld", "ts": 1000,
+                    "rec": {"id": 1, "markets": [
+                        {"key": "s;0;m", "type": "moneyline",
+                         "prices": [{"designation": "home",
+                                     "price": -120}]}]}}),
+        json.dumps({"type": "ping", "ts": 1001}),
+    ]
+
+    def connect(url, key):
+        keys.append((url, key))
+        return _FakeWS(frames, seen)
+    lease = _FakeLease(held=True)
+    out = await PP.ws_sample([6, 99, 1], streams=["live", "bogus"],
+                             seconds=1, lease=lease, connect=connect,
+                             now_ms=lambda: 1040.0)
+    blob = json.dumps(out)
+    assert SECRET not in blob
+    assert keys == [(PP.WS_URL, SECRET)], "key passed to the header factory"
+    assert SECRET not in PP.WS_URL
+    assert seen["sent"][0] == {"type": "subscribe", "streams": ["live"],
+                               "sport_ids": [1, 6]}
+    assert seen["sent"][1] == {"type": "pong"} and out["pongs_sent"] == 1
+    assert out["frame_kinds"] == {"subscribed": 1, "snapshot": 1,
+                                  "live:upd": 1, "ping": 1}
+    assert out["snapshot_events"] == {"live/6": 2}
+    assert out["live_topics"] == {"matchups/reg/sp/{n}/live/ld": 1}
+    assert out["provider_stamp_to_receipt_ms"]["p50"] == 40.0
+    # the market merge key stays visible in the sanitized shape
+    rec = out["samples"]["live:upd"][0]["rec"]
+    assert rec["markets"]["first"][0]["key"] == "s;0;m"
+    assert out["ok"] is True and seen["closed"]
+    assert any("pg_advisory_unlock" in c for c in lease.calls)
+    assert lease.calls[-1] == "close"
+
+
+async def test_ws_sample_reports_a_refused_upgrade_without_the_key(
+        monkeypatch):
+    monkeypatch.setenv("pinnapi_key", SECRET)
+
+    class Refused(Exception):
+        class response:
+            status_code = 403
+            body = b'{"error":"plan_lacks_ws"}'
+
+    class Conn:
+        async def __aenter__(self):
+            raise Refused("forbidden")
+
+        async def __aexit__(self, *a):
+            return False
+    out = await PP.ws_sample([6], seconds=1, lease=_FakeLease(True),
+                             connect=lambda u, k: Conn())
+    assert out["ok"] is False
+    assert out["connect_error"]["http"] == 403
+    assert "plan_lacks_ws" in out["connect_error"]["body"]
+    assert SECRET not in json.dumps(out)
+
+
+def test_the_sampler_never_follows_a_redirect():
+    c = PP._ws_connect(PP.WS_URL, SECRET)
+    exc = RuntimeError("302")
+    assert c.process_redirect(exc) is exc
