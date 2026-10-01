@@ -176,3 +176,62 @@ def test_the_heartbeat_is_bounded_and_says_c1_changes_no_decision():
 def test_scope_defaults_to_baseball_and_is_bounded():
     assert FR.DEFAULT_SCOPE == {"sport_ids": [6],
                                 "streams": ["live", "prematch"]}
+
+
+# ── coverage census: every contract one state, reconciled ───────────
+def test_census_gives_every_contract_one_state_and_reconciles():
+    from sportsassets import pinnapi_census as C
+    now = 1_790_900_000.0
+    rows = [
+        # matched MLB event: moneyline supported, total not
+        {"identifier": "a", "event_slug": "e1", "event_title":
+         "Tampa Bay Rays vs New York Yankees", "kind": "moneyline",
+         "line": None, "sports_type": "baseball_mlb",
+         "game_start": now - 600},
+        {"identifier": "b", "event_slug": "e1", "event_title":
+         "Tampa Bay Rays vs New York Yankees", "kind": "total",
+         "line": "8.5", "sports_type": "baseball_mlb",
+         "game_start": now - 600},
+        # no provider event
+        {"identifier": "c", "event_slug": "e2", "event_title":
+         "Boston Red Sox vs Chicago Cubs", "kind": "moneyline", "line": None,
+         "sports_type": "baseball_mlb", "game_start": now + 3600},
+        # out of scope sport, unmapped sport, no sides
+        {"identifier": "d", "event_slug": "e3", "event_title": "A vs B",
+         "kind": "moneyline", "line": None, "sports_type": "soccer_epl",
+         "game_start": now + 60},
+        {"identifier": "e", "event_slug": "e4", "event_title": "X vs Y",
+         "kind": "moneyline", "line": None, "sports_type": "curling",
+         "game_start": now + 60},
+        {"identifier": "f", "event_slug": "e5", "event_title":
+         "Who wins the pennant", "kind": "moneyline", "line": None,
+         "sports_type": "baseball_mlb", "game_start": now + 60},
+    ]
+    view = {6: [{"id": 99, "home": "New York Yankees",
+                 "away": "Tampa Bay Rays", "start": now - 500,
+                 "live": True}]}
+    out = C.census(rows, view, subscribed_sports={6}, synced=True, now=now)
+    assert out["reconciled"] is True and out["total_contracts"] == 6
+    assert out["states"] == {"MATCHED_SUPPORTED": 1,
+                             "MATCHED_UNSUPPORTED_FAMILY": 1,
+                             "NO_FEED_EVENT": 1,
+                             "OUT_OF_FEED_SCOPE_SPORT": 1,
+                             "UNMAPPED_SPORT": 1,
+                             "NO_TWO_SIDED_TITLE": 1}
+    assert out["unsupported_reasons"] == {"TOTALS_GRADING_NOT_PROVED": 1}
+    assert out["by_sport_family_phase_state"][
+        "6|MONEYLINE|IN_PLAY|MATCHED_SUPPORTED"] == 1
+    # unsynced feed: nothing in scope reads as matched
+    out2 = C.census(rows, view, subscribed_sports={6}, synced=False, now=now)
+    assert out2["states"].get("FEED_NOT_SYNCED") == 4
+    assert "MATCHED_SUPPORTED" not in out2["states"]
+
+
+def test_census_refuses_a_squad_qualifier_mismatch_and_far_start():
+    from sportsassets import pinnapi_census as C
+    now = 1_790_900_000.0
+    feed = [{"id": 1, "home": "Arsenal Women", "away": "Chelsea Women",
+             "start": now}, {"id": 2, "home": "Arsenal", "away": "Chelsea",
+                             "start": now + 6 * 3600}]
+    assert C.match_event(("Arsenal", "Chelsea"), now, feed)[0] == \
+        C.S_NO_FEED_EVENT

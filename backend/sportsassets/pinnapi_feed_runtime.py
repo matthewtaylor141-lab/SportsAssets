@@ -43,7 +43,9 @@ HEARTBEAT_MAX_BYTES = 65536
 DEFAULT_SCOPE = {"sport_ids": [6], "streams": ["live", "prematch"]}
 ALLOWED_SPORTS = set(range(1, 13))
 
-_STATE: dict = {"owner": None, "task": None, "beat": None, "pool": None}
+_STATE: dict = {"owner": None, "task": None, "beat": None, "pool": None,
+                "census": None}
+CENSUS_S = 60.0
 
 
 def enabled() -> bool:
@@ -96,6 +98,7 @@ def digest() -> dict:
         return {"state": "NOT_STARTED", "enabled_env": enabled()}
     d = o.status()
     d["enabled_env"] = enabled()
+    d["coverage_census"] = _STATE.get("census")
     d["c1_decision_effect"] = "NONE (observe only)"
     return d
 
@@ -108,11 +111,41 @@ def _capped(d: dict) -> str:
     cache = dict(d.get("cache") or {})
     cache["markets_by_sport_type_phase"] = "TRUNCATED_FOR_SIZE"
     d["cache"] = cache
+    cen = dict(d.get("coverage_census") or {})
+    if cen:
+        cen["by_sport_family_phase_state"] = "TRUNCATED_FOR_SIZE"
+        d["coverage_census"] = cen
     return json.dumps(d, default=str)[:HEARTBEAT_MAX_BYTES]
 
 
+async def _census_once(pool) -> dict:
+    """The venue catalogue against the feed's current events: every contract
+    one named state, reconciled to the catalogue total."""
+    from . import pinnapi_census as C
+    o = _STATE.get("owner")
+    t0 = time.time()
+    async with pool.acquire() as c:
+        rows = [dict(r) for r in await c.fetch(C.catalogue_sql())]
+    view = C.feed_event_view(o.cache) if o else {}
+    out = C.census(rows, view, subscribed_sports=set(o.sport_ids if o
+                                                     else []),
+                   synced=bool(o and o.cache.authority.synced), now=t0)
+    out["computed_at"] = t0
+    out["took_ms"] = round((time.time() - t0) * 1000)
+    return out
+
+
 async def _beat_loop(pool):
+    last_census = 0.0
     while True:
+        if time.monotonic() - last_census >= CENSUS_S:
+            last_census = time.monotonic()
+            try:
+                _STATE["census"] = await _census_once(pool)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:                            # noqa: BLE001
+                _STATE["census"] = {"error": type(exc).__name__}
         try:
             async with pool.acquire() as c:
                 await c.execute(
