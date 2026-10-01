@@ -236,6 +236,7 @@ jobs:
         with:
           node-version: "20"
       - name: Render the production pages (WebKit iPhone 13 and Chromium 390x844)
+        timeout-minutes: 25
         shell: bash
         env:
           ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}

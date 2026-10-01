@@ -47,7 +47,7 @@ for (const [ename, engine, dev] of ENGINES) {
                                        timeout: 45000 });
         nav = resp ? resp.status() : null;
       } catch (e) { nav = "ERROR " + String(e).slice(0, 120); }
-      await page.waitForTimeout(12000);
+      await page.waitForTimeout(9000);
       const frames = page.frames();
       const texts = [];
       let overflow = [];
@@ -67,8 +67,11 @@ for (const [ename, engine, dev] of ENGINES) {
       const grab = (re) => { const m = all.match(re); return m ? m[0] : null; };
       const shot = `${OUT}/${ename}_${auth}_${path === "/" ? "home" :
                     path.slice(1)}.png`;
-      try { await page.screenshot({ path: shot, fullPage: true }); }
-      catch (e) { /* noop */ }
+      try { await page.screenshot({ path: shot, fullPage: true,
+                                    timeout: 20000 }); }
+      catch (e) {
+        try { await page.screenshot({ path: shot, timeout: 10000 }); }
+        catch (e2) { /* noop */ } }
       report.push({
         engine: ename, auth, path, nav,
         api_status: Object.entries(api.reduce((a, r) => {
@@ -86,7 +89,8 @@ for (const [ename, engine, dev] of ENGINES) {
         completed_game_label: /COMPLETED[_ ]GAME/i.test(all),
         overflow, console_errors: consoleErr.slice(0, 5),
         screenshot: shot });
-      await page.close();
+      await Promise.race([page.close(),
+                          new Promise((r) => setTimeout(r, 5000))]);
     }
     await ctx.close();
   }
