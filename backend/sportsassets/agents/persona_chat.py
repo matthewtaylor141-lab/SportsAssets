@@ -445,7 +445,9 @@ PAPER_FIRST = {"XAVIER": ["paper_ledger", "paper_orders", "paper_sessions",
 PAPER_AGENT_LEADS = {
     "DEREK": {"paper_decisions": "Paper decisions — mine, today"},
     "XAVIER": {"paper_orders": "What I manage on paper",
-               "paper_decisions": "Derek's paper decisions"},
+               "paper_decisions": ("Paper entry decisions, by strategy "
+                                   "(Derek's two-model policy and the "
+                                   "Pinnacle-only benchmark)")},
     "AUDREY": {"paper_decisions": "Paper decisions to audit"}}
 LEGACY_LEAD = ("Legacy desk account, not the paper account — figures as of "
                "the time shown")

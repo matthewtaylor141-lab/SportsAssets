@@ -385,7 +385,7 @@ def test_g3_a_figure_the_model_works_out_itself_is_still_rejected(
     assert "%d minutes" % m not in ans
     lead = ans.index("The paper account now:")
     assert lead < ans.index("What I manage on paper:") < ans.index(
-        "The paper session:") < ans.index("Derek's paper decisions:")
+        "The paper session:") < ans.index("Paper entry decisions, by strategy")
     assert "nothing for Xavier to manage" in ans
     assert not PC.ungrounded_numbers(ans, bundle["facts"], Q)
     assert "cash $500,000" in ans and "reserved $0" in ans
@@ -596,7 +596,7 @@ def test_derek_and_xavier_explain_their_actual_paper_decisions(
     x = got["xavier"]
     xa = x["answer"]
     assert xa.index("What I manage on paper:") < xa.index(
-        "Derek's paper decisions:")
+        "Paper entry decisions, by strategy")
     assert "0 open paper position(s), 0 open paper management order(s)" in xa
     assert "nothing for Xavier to manage" in xa
     assert ("paper_orders", "%s:open-orders" % acct["account_id"]) in {
@@ -855,3 +855,102 @@ def test_v2_audreys_management_chat_replies_can_be_spoken(db, monkeypatch):
     x = client.post("/api/command/agents/audrey/speak",
                     json={"text": "say anything"}, headers=F.desk_headers())
     assert x.status_code == 422
+
+
+# ── G6 · strategies are reported apart ───────────────────────────────
+
+async def _bench_decision(c, acct, *, at: float, refusal: str) -> str:
+    did = "paperbench_chatt_%s" % uuid.uuid4().hex[:12]
+    await c.execute(
+        "INSERT INTO paper_decisions (decision_id, session_id, account_id, "
+        " decided_at, us_market_slug, fixture, verdict, refusal, refusals, "
+        " internal_model, pinnacle, qualification_gaps, policy_version, "
+        " simulator_version, strategy) VALUES ($1,$2,$3,to_timestamp($4),"
+        " 'test-mkt-chatt', 'chatt-fixture', 'REFUSE', $5, ARRAY[$5], "
+        " '{}'::jsonb, '{}'::jsonb, '[]'::jsonb, 'TEST_POLICY', 'TEST_SIM', "
+        " 'PINNACLE_ONLY_PAPER_BENCHMARK')",
+        did, acct["session_id"], acct["account_id"], at, refusal)
+    return did
+
+
+@pg
+def test_g6_benchmark_decisions_are_never_reported_as_dereks(
+        db, monkeypatch):
+    """The live 04:22Z demonstration counted 12 PINNACLE_ONLY_PAPER_BENCHMARK
+    refusals as "Derek's paper decisions". Each strategy is a fact of its
+    own, every decision fact names its strategy, the two are never summed
+    under Derek, and Audrey's records-only answer splits them too."""
+    from sportsassets.agents import audrey_chat as AC
+    from sportsassets.agents import persona_chat as PC
+
+    acct = _with(lambda c: _seed_paper(c))
+    _use_account(monkeypatch, acct)
+    bench = {}
+
+    async def _seed_bench(c):
+        for i in range(3):
+            did = await _bench_decision(c, acct, at=T0 - 600 + i * 60,
+                                        refusal="SETTLEMENT_NOT_SUPPORTED")
+            bench[did] = "SETTLEMENT_NOT_SUPPORTED"
+    _with(_seed_bench)
+    f = _by_field(_gather())
+    total = f["paper_decisions_today"]
+    assert total["value"] == 10
+    assert "all strategies together: 10 recorded -- 0 ENTER, 10 REFUSE" \
+        in total["text"]
+    assert ("by strategy: DEREK_ENTRY_POLICY_V2 7, "
+            "PINNACLE_ONLY_PAPER_BENCHMARK 3") in total["text"]
+    derek = f["paper_decisions_today@DEREK_ENTRY_POLICY_V2"]
+    assert derek["value"] == 7
+    assert derek["text"].startswith("Derek's two-model entry policy")
+    assert "/api/command/paper/derek" in derek["text"]
+    bm = f["paper_decisions_today@PINNACLE_ONLY_PAPER_BENCHMARK"]
+    assert bm["value"] == 3 and bm["record_id"] in bench
+    assert "not evidence of qualified or proven profitability" in bm["text"]
+    assert "/api/command/paper/benchmark" in bm["text"]
+    # the benchmark's reason is keyed under the benchmark, not under Derek
+    assert "paper_decisions_today:SETTLEMENT_NOT_SUPPORTED" not in f
+    g = f["paper_decisions_today@PINNACLE_ONLY_PAPER_BENCHMARK:"
+          "SETTLEMENT_NOT_SUPPORTED"]
+    assert g["value"] == 3
+    assert "by PINNACLE_ONLY_PAPER_BENCHMARK REFUSED: " in g["text"]
+    assert f["paper_decisions_today:NO_RESEARCH_MODEL_CANDIDATE_EXISTS"][
+        "value"] == 5
+    for did in bench:
+        assert ("strategy PINNACLE_ONLY_PAPER_BENCHMARK" in
+                f["paper_decision:%s" % did]["text"])
+    for did in acct["decisions"]:
+        assert ("strategy DEREK_ENTRY_POLICY_V2" in
+                f["paper_decision:%s" % did]["text"])
+    # Xavier's section names both strategies; no "Derek's paper decisions"
+    assert "Derek's paper decisions" not in json.dumps(
+        PC.PAPER_AGENT_LEADS)
+    # the brief's citations point each decision at its own page
+    from sportsassets.agents import paper_brief as PB
+
+    async def _sum(c):
+        return await PB.summary(c, now=T0)
+    s = _with(_sum)
+    hrefs = {c["id"]: c["href"] for c in PB.citations(s)
+             if c["kind"] == "paper_decisions"}
+    assert hrefs and all(
+        (h == "/api/command/paper/benchmark") == (i in bench)
+        for i, h in hrefs.items())
+    # Audrey's records-only answer splits them, with the labels
+    F.no_network(monkeypatch)
+    client = H.build_client(monkeypatch, F.Clock(T0))
+    r = client.post("/api/command/agents/audrey/chat",
+                    json={"message": Q, "request_id": F.rid("paperstrat")},
+                    headers=F.desk_headers())
+    assert r.status_code == 200, r.text
+    ans = r.json()["answer"]
+    assert "all strategies together: 10 recorded — 0 ENTER, 10 REFUSE" in ans
+    assert ("Derek's two-model entry policy (DEREK_ENTRY_POLICY_V2): 7 "
+            "recorded — 0 ENTER, 7 REFUSE") in ans
+    assert ("PINNACLE_ONLY_PAPER_BENCHMARK (experimental paper execution, "
+            "not evidence of qualified or proven profitability): 3 recorded "
+            "— 0 ENTER, 3 REFUSE; 3 × SETTLEMENT_NOT_SUPPORTED") in ans
+    for did in bench:
+        assert ("Paper decision %s (strategy PINNACLE_ONLY_PAPER_BENCHMARK)"
+                % did) in ans
+    assert AC is not None

@@ -14,9 +14,14 @@ paper experiment, from the SAME sources it uses:
                  `.enablement` (the session banner and
                  `/api/command/paper/session`): id, start, status, last
                  heartbeat, passes, errors, venue mutation attempts.
-  * decisions -- `paper_decisions` (Derek's paper decisions, as in
-                 `/api/command/paper/derek`) for the UTC day of `now`: the
-                 count by verdict and by refusal reason, and the newest.
+  * decisions -- `paper_decisions` for the UTC day of `now`, BY STRATEGY
+                 (migration 182's `strategy` column): Derek's two-model
+                 policy (DEREK_ENTRY_POLICY_V2, `/api/command/paper/derek`)
+                 and the PINNACLE_ONLY_PAPER_BENCHMARK
+                 (`/api/command/paper/benchmark`) are counted apart -- the
+                 count by verdict and by refusal reason, and the newest, each
+                 carrying its strategy. A benchmark decision is never reported
+                 as one of Derek's.
   * reviews   -- `paper_xavier_reviews` for the same day: the count and the
                  newest, when the table exists.
   * management -- what Xavier has to manage: open paper positions (from
@@ -50,6 +55,35 @@ DAY_BASIS = "UTC calendar day of the question"
 NEWEST_DECISIONS = 20
 LEDGER_ENTRIES_SHOWN = 50
 MANAGEMENT_ROLES = ("STANDING_PROTECTION", "HEDGE", "EXIT", "REDUCE")
+#: migration 182's column default: a row written before the strategy key
+#: existed is the two-model policy's
+DEFAULT_STRATEGY = "DEREK_ENTRY_POLICY_V2"
+BENCHMARK_STRATEGY = "PINNACLE_ONLY_PAPER_BENCHMARK"
+#: who owns each strategy's decisions, in words, and where they are shown
+STRATEGY_LABELS = {
+    DEFAULT_STRATEGY: ("Derek's two-model entry policy (DEREK_ENTRY_POLICY_V2)",
+                       "/api/command/paper/derek"),
+    BENCHMARK_STRATEGY: ("the PINNACLE_ONLY_PAPER_BENCHMARK (experimental "
+                         "paper execution, not evidence of qualified or "
+                         "proven profitability)",
+                         "/api/command/paper/benchmark")}
+
+
+def strategy_label(strategy) -> str:
+    s = str(strategy or DEFAULT_STRATEGY)
+    return STRATEGY_LABELS.get(s, ("strategy %s" % s, None))[0]
+
+
+def strategy_href(strategy) -> str:
+    s = str(strategy or DEFAULT_STRATEGY)
+    return STRATEGY_LABELS.get(s, (None, "/api/command/paper/derek"))[1] \
+        or "/api/command/paper/derek"
+
+
+async def _has_column(conn, table: str, column: str) -> bool:
+    return bool(await conn.fetchval(
+        "SELECT EXISTS (SELECT 1 FROM information_schema.columns "
+        " WHERE table_name = $1 AND column_name = $2)", table, column))
 
 
 def iso(epoch) -> str | None:
@@ -140,29 +174,48 @@ async def _decisions(conn, acct: str, now: float) -> dict:
     day, start, end = utc_day(now)
     out: dict[str, Any] = {"day": day, "day_basis": DAY_BASIS, "total": 0,
                            "by_verdict": {}, "by_reason": [],
+                           "by_strategy": {},
                            "newest_decided_at": None, "newest": []}
     if not await _regclass(conn, "paper_decisions"):
         out["why"] = "PAPER_DECISIONS_TABLE_ABSENT"
         return out
+    # Before migration 182 there is no strategy column and every row is the
+    # two-model policy's (the column's default says the same).
+    strat = ("coalesce(strategy, '%s')" % DEFAULT_STRATEGY
+             if await _has_column(conn, "paper_decisions", "strategy")
+             else "'%s'::text" % DEFAULT_STRATEGY)
     rows = await conn.fetch(
-        "SELECT verdict, coalesce(refusal, 'ENTER') AS reason, "
+        "SELECT " + strat + " AS strategy, verdict, "
+        "       coalesce(refusal, 'ENTER') AS reason, "
         "       count(*)::int AS n, max(decided_at) AS newest_at, "
         "       (array_agg(decision_id ORDER BY decided_at DESC))[1] "
         "         AS newest_id "
         "  FROM paper_decisions WHERE account_id = $1 "
         "   AND decided_at >= $2 AND decided_at < $3 "
-        " GROUP BY 1, 2 ORDER BY 3 DESC, 2", acct, start, end)
+        " GROUP BY 1, 2, 3 ORDER BY 4 DESC, 1, 3", acct, start, end)
     for r in rows:
         out["total"] += r["n"]
         out["by_verdict"][r["verdict"]] = \
             out["by_verdict"].get(r["verdict"], 0) + r["n"]
-        out["by_reason"].append({"verdict": r["verdict"],
+        st = out["by_strategy"].setdefault(r["strategy"], {
+            "strategy": r["strategy"], "label": strategy_label(r["strategy"]),
+            "href": strategy_href(r["strategy"]), "total": 0,
+            "by_verdict": {}, "newest_at": None, "newest_decision_id": None})
+        st["total"] += r["n"]
+        st["by_verdict"][r["verdict"]] = \
+            st["by_verdict"].get(r["verdict"], 0) + r["n"]
+        at = _iso_any(r["newest_at"])
+        if at and (st["newest_at"] is None or at > st["newest_at"]):
+            st["newest_at"], st["newest_decision_id"] = at, r["newest_id"]
+        out["by_reason"].append({"strategy": r["strategy"],
+                                 "verdict": r["verdict"],
                                  "reason": r["reason"], "count": r["n"],
-                                 "newest_at": _iso_any(r["newest_at"]),
+                                 "newest_at": at,
                                  "newest_decision_id": r["newest_id"]})
     newest = await conn.fetch(
         "SELECT decision_id, session_id, decided_at, verdict, refusal, "
-        "       fixture, us_market_slug, holding_side "
+        "       fixture, us_market_slug, holding_side, " + strat +
+        "         AS strategy "
         "  FROM paper_decisions WHERE account_id = $1 "
         "   AND decided_at >= $2 AND decided_at < $3 "
         " ORDER BY decided_at DESC, decision_id DESC LIMIT $4", acct, start,
@@ -172,7 +225,8 @@ async def _decisions(conn, acct: str, now: float) -> dict:
                       "decided_at": _iso_any(r["decided_at"]),
                       "verdict": r["verdict"], "refusal": r["refusal"],
                       "market": r["fixture"] or r["us_market_slug"],
-                      "holding_side": r["holding_side"]} for r in newest]
+                      "holding_side": r["holding_side"],
+                      "strategy": r["strategy"]} for r in newest]
     if out["newest"]:
         out["newest_decided_at"] = out["newest"][0]["decided_at"]
     return out
@@ -365,7 +419,7 @@ def citations(s: dict) -> list:
                     "href": "/api/command/paper/session"})
     for d in ((s.get("decisions_today") or {}).get("newest") or [])[:10]:
         out.append({"kind": "paper_decisions", "id": d["decision_id"],
-                    "href": "/api/command/paper/derek"})
+                    "href": strategy_href(d.get("strategy"))})
     rv = s.get("xavier_reviews_today") or {}
     if rv.get("newest_review_id"):
         out.append({"kind": "paper_xavier_reviews",

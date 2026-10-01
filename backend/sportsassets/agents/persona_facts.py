@@ -478,17 +478,36 @@ async def _paper_live(conn, f: Facts, *, now: float | None) -> dict:
         rid = (d["newest"][0]["decision_id"] if d["newest"]
                else "%s@%s" % (acct, d["day"]))
         f.add("paper_decisions", rid, "paper_decisions_today", d["total"],
-              "Derek's paper decisions today (%s, UTC): %s recorded -- %s "
-              "ENTER, %s REFUSE%s" % (
+              "paper decisions today (%s, UTC), all strategies together: %s "
+              "recorded -- %s ENTER, %s REFUSE%s%s" % (
                   d["day"], d["total"], bv.get("ENTER", 0),
                   bv.get("REFUSE", 0),
                   ("; newest at %s" % d["newest_decided_at"])
-                  if d["newest_decided_at"] else ""))
-        for g in d["by_reason"]:
+                  if d["newest_decided_at"] else "",
+                  ("; by strategy: %s" % ", ".join(
+                      "%s %s" % (k, v["total"]) for k, v in sorted(
+                          (d.get("by_strategy") or {}).items())))
+                  if d.get("by_strategy") else ""))
+        # EACH STRATEGY APART (migration 182): a benchmark decision is never
+        # one of Derek's, and the two are never summed under one owner.
+        for st, g in sorted((d.get("by_strategy") or {}).items()):
+            gv = g["by_verdict"]
             f.add("paper_decisions", g["newest_decision_id"],
-                  "paper_decisions_today:%s" % g["reason"], g["count"],
-                  "%s paper decision%s today %s%s (newest %s)" % (
-                      g["count"], "" if g["count"] == 1 else "s",
+                  "paper_decisions_today@%s" % st, g["total"],
+                  "%s: %s paper decision%s today -- %s ENTER, %s REFUSE "
+                  "(newest %s; shown at %s)" % (
+                      g["label"], g["total"],
+                      "" if g["total"] == 1 else "s", gv.get("ENTER", 0),
+                      gv.get("REFUSE", 0), g["newest_at"], g["href"]))
+        for g in d["by_reason"]:
+            st = g.get("strategy") or PB.DEFAULT_STRATEGY
+            f.add("paper_decisions", g["newest_decision_id"],
+                  ("paper_decisions_today:%s" % g["reason"]
+                   if st == PB.DEFAULT_STRATEGY else
+                   "paper_decisions_today@%s:%s" % (st, g["reason"])),
+                  g["count"],
+                  "%s paper decision%s today by %s %s%s (newest %s)" % (
+                      g["count"], "" if g["count"] == 1 else "s", st,
                       "ENTER" if g["verdict"] == "ENTER" else "REFUSED: ",
                       "" if g["verdict"] == "ENTER" else g["reason"],
                       g["newest_at"]))
@@ -496,8 +515,11 @@ async def _paper_live(conn, f: Facts, *, now: float | None) -> dict:
             # each of today's decisions, by id (newest first)
             f.add("paper_decisions", n["decision_id"],
                   "paper_decision:%s" % n["decision_id"], n["verdict"],
-                  "paper decision %s at %s in session %s on %s: %s%s" % (
-                      n["decision_id"], n["decided_at"], n["session_id"],
+                  "paper decision %s (strategy %s) at %s in session %s on "
+                  "%s: %s%s" % (
+                      n["decision_id"],
+                      n.get("strategy") or PB.DEFAULT_STRATEGY,
+                      n["decided_at"], n["session_id"],
                       n["market"], n["verdict"], (" -- refused: %s"
                                                    % n["refusal"])
                       if n["refusal"] else ""))

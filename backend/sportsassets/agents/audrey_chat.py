@@ -136,6 +136,9 @@ SYSTEM_PROMPT = (
     "come from the paper_account tool. A legacy desk account "
     "(bettor_desk_account_state) is not the paper account: never present it "
     "as the paper account's cash.\n"
+    "- Paper decisions carry a strategy. Attribute each to its strategy: a "
+    "PINNACLE_ONLY_PAPER_BENCHMARK decision is not one of Derek's "
+    "two-model decisions, and the two are never summed under one owner.\n"
     "- Be concise and factual; prefer short paragraphs or bullet points.")
 
 
@@ -453,8 +456,11 @@ async def t_agents_status(conn, args, ctx):
        "shows -- cash, reserved, available, equity, realised / unrealised "
        "P&L, last ledger sequence and update time -- the active paper "
        "session with its health (heartbeat, passes, errors), and today's "
-       "paper decisions by verdict and refusal reason with the newest. "
-       "Read-only.", {})
+       "paper decisions BY STRATEGY (each row's `strategy`: "
+       "DEREK_ENTRY_POLICY_V2 is Derek's two-model policy; "
+       "PINNACLE_ONLY_PAPER_BENCHMARK is the experimental Pinnacle-only "
+       "benchmark, not evidence of profitability), by verdict and refusal "
+       "reason with the newest. Read-only.", {})
 async def t_paper_account(conn, args, ctx):
     from . import paper_brief as PB
     s = await PB.summary(conn, now=ctx.now)
@@ -1514,18 +1520,27 @@ def _paper_lines(s: dict) -> list:
     d = s.get("decisions_today") or {}
     if d and not d.get("why"):
         bv = d.get("by_verdict") or {}
-        out.append("Paper decisions today (%s, UTC): %s recorded — %s ENTER, "
-                   "%s REFUSE%s." % (
+        out.append("Paper decisions today (%s, UTC), all strategies "
+                   "together: %s recorded — %s ENTER, %s REFUSE." % (
                        d.get("day"), d.get("total"), bv.get("ENTER", 0),
-                       bv.get("REFUSE", 0), "; " + ", ".join(
-                           "%s × %s" % (g["count"], g["reason"])
-                           for g in d.get("by_reason") or [])
-                       if d.get("by_reason") else ""))
+                       bv.get("REFUSE", 0)))
+        # EACH STRATEGY APART: the benchmark's decisions are not Derek's.
+        for st, g in sorted((d.get("by_strategy") or {}).items()):
+            gv = g.get("by_verdict") or {}
+            out.append("%s: %s recorded — %s ENTER, %s REFUSE%s." % (
+                g.get("label") or st, g.get("total"), gv.get("ENTER", 0),
+                gv.get("REFUSE", 0), "; " + ", ".join(
+                    "%s × %s" % (r["count"], r["reason"])
+                    for r in d.get("by_reason") or []
+                    if (r.get("strategy") or st) == st)))
         for n in (d.get("newest") or [])[:10]:
-            out.append("Paper decision %s at %s (session %s) on %s: %s%s." % (
-                n["decision_id"], n["decided_at"], n.get("session_id"),
-                n.get("market"), n["verdict"], (" (%s)" % n["refusal"])
-                if n.get("refusal") else ""))
+            out.append("Paper decision %s (strategy %s) at %s (session %s) on "
+                       "%s: %s%s." % (
+                           n["decision_id"], n.get("strategy") or "UNKNOWN",
+                           n["decided_at"], n.get("session_id"),
+                           n.get("market"), n["verdict"],
+                           (" (%s)" % n["refusal"]) if n.get("refusal")
+                           else ""))
     mg = s.get("management") or {}
     if mg:
         out.append("What Xavier manages on paper: %s open position(s), %s "
