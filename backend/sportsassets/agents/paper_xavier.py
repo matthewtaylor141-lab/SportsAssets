@@ -76,6 +76,12 @@ B_NETTING_IS_EXIT = "IDENTICAL_TO_EXIT_ON_A_ONE_NET_POSITION_VENUE"
 B_INDIRECT_NOT_SEARCHED = "INDIRECT_HEDGE_SEARCH_NOT_RUN_ON_THE_PAPER_BOOK"
 B_NO_BIDS = "NO_EXECUTABLE_EXIT_DEPTH_IN_THE_OBSERVED_BOOK"
 R_NO_MEASURE = "NO_SETTLEMENT_MEASURE_FOR_THIS_POSITION"
+#: A DISCRETIONARY SALE (EXIT / REDUCE) IS NEVER RANKED ON A STALE OR ABSENT
+#: MEASURE: its value is priced against `p`, so a stale probability would be
+#: an economic action taken on evidence older than the 30 s rule. The
+#: position is held and its cost-recovery protection (priced from quantity,
+#: basis and fees only, never `p`) is maintained instead.
+B_STALE_MEASURE = "MEASURE_STALE_OR_ABSENT_NO_DISCRETIONARY_SALE"
 PROTECTION_BUFFER_USD_PER_CONTRACT = 0.01
 LABEL_BASES = ("VENUE_SETTLEMENT_PRICE", "VENUE_REPORTED_OUTCOME")
 VOID_BASIS = "CONFIRMED_VOID"
@@ -351,6 +357,13 @@ async def review_group(conn, ctx: dict, group_id: str, *,
         measure["book_obs_id"] = None if obs is None else obs["obs_id"]
         alts = alternatives(pos=pos, levels=exit_lv, p=measure.get("p"),
                             fee_fn=fee_fn, at=at)
+        if measure.get("stale") or measure.get("p") is None:
+            keep = [c for c in alts["candidates"]
+                    if c["action"] not in (A_EXIT, A_REDUCE)]
+            alts["not_rankable"] = alts["not_rankable"] + [
+                dict(c, blocker=B_STALE_MEASURE) for c in alts["candidates"]
+                if c["action"] in (A_EXIT, A_REDUCE)]
+            alts["candidates"] = keep
         policy = await XP.load(conn)
         sel = XP.run(policy, hold_ranking=alts, limits=None)
         exceptional = []
@@ -394,7 +407,9 @@ async def review_group(conn, ctx: dict, group_id: str, *,
                     limit=w.get("worst_price"), wire=w.get("worst_wire"),
                     review_key="%s:%s:%s" % (group_id, pos["position_key"],
                                              at))
-        elif chosen == A_HOLD and prot.get("ok"):
+        elif (chosen == A_HOLD or (chosen is None and (
+                measure.get("stale") or measure.get("p") is None))) \
+                and prot.get("ok"):
             action = await _maintain_standing(
                 conn, ctx, pos=pos, standing=[dict(s) for s in standing],
                 prot=prot, md=md, at=at, SPO=SPO)

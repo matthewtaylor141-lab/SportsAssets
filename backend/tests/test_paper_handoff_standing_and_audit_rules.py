@@ -269,3 +269,56 @@ async def test_audrey_opens_improvement_tasks_from_findings_and_promotes_nothing
         assert link == t1["task_id"]
     finally:
         await conn.close()
+
+
+@pg
+@pytest.mark.parametrize("stale,p,expect", [
+    (True, 0.2, "HOLD"),       # stale: no discretionary sale, hold + protect
+    (False, 0.2, "EXIT"),      # fresh: the same book and p rank EXIT
+    (True, None, None),        # absent: nothing ranked, protection kept
+])
+async def test_a_stale_or_absent_measure_never_drives_a_discretionary_sale(
+        monkeypatch, stale, p, expect):
+    conn = await H.connect()
+    try:
+        a = await H.new_account(conn, "stalem")
+        s = SL(a, "m")
+        g = G(a, "stalem")
+        e = H.order(a, key="e", qty=100, limit=0.40, slug=s, at=H.T0,
+                    group_id=g)
+        ge = await L.submit_order(conn, e, fee_fn=H.zero_fee, now=H.T0)
+        await H.observe(conn, s, H.T0 + 3, offers=[(0.40, 100)],
+                        bids=[(0.38, 100)])
+        await SIM.simulate_order(conn, ge["order"]["order_id"], now=H.T0 + 4,
+                                 fee_fn=H.zero_fee)
+        await PX.step_handoff(conn, _ctx(a, H.T0 + 5))
+        # a book whose bid would make selling worth more than holding at p
+        await H.observe(conn, s, H.T0 + 6, offers=[(0.82, 100)],
+                        bids=[(0.80, 100)])
+
+        async def measure(conn_, ctx_, *, pos, levels_buy):
+            return {"p": p, "source": "PINNACLE_ONLY_LATEST" if stale
+                    else "PINNACLE_ONLY_CURRENT", "stale": stale}
+        monkeypatch.setattr(PX, "_measure", measure)
+        out = await PX.review_group(conn, _ctx(a, H.T0 + 7), g,
+                                    trigger="SCHEDULED_BACKSTOP")
+        rv = await conn.fetchrow("SELECT * FROM paper_xavier_reviews WHERE "
+                                 " group_id=$1 ORDER BY reviewed_at DESC "
+                                 " LIMIT 1", g)
+        assert rv["recommendation"] == expect, out
+        sales = await conn.fetchval(
+            "SELECT count(*) FROM paper_orders WHERE group_id=$1 AND role "
+            " IN ('EXIT', 'REDUCE')", g)
+        alts = H.j(rv["alternatives"])
+        blocked = [x for x in alts["not_rankable"]
+                   if x.get("blocker") == PX.B_STALE_MEASURE]
+        if expect == "EXIT":
+            assert sales == 1 and not blocked
+        else:
+            assert sales == 0, "no sale on stale or absent evidence"
+            assert {x["action"] for x in blocked} <= {"EXIT", "REDUCE"}
+            assert stale and (blocked or p is None)
+            act = H.j(rv["action"])
+            assert act["taken"] in ("PLACE_STANDING", "KEEP_STANDING"), act
+    finally:
+        await conn.close()
