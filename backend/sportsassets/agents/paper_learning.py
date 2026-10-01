@@ -128,20 +128,22 @@ C_EDGE = "DEREK_ENTRY_EDGE_THRESHOLD"
 #: completed-game paper policy's minimum gross edge. The same whitelist and
 #: bounds as paper_benchmark.CG_PARAMETER_BOUNDS and the migration's CHECK.
 PARAM_POLICY = "PINNACLE_COMPLETED_GAME_PAPER"
-PARAM_DEFAULTS = {"min_gross_edge_pp": 5.0}
-#: THE 5.0 pp FLOOR IS AN OWNER MANDATE for this release: the threshold may
-#: be TIGHTENED (to at most 6.0 pp) by an evaluated, approved proposal and
-#: returned towards 5.0, never set below it. A lower threshold needs a
-#: SEPARATE OWNER DECISION and a new migration; no proposal, activation or
-#: rollback here can produce one.
-PARAM_BOUNDS = {"min_gross_edge_pp": (5.0, 6.0)}
+PARAM_DEFAULTS = {"min_gross_edge_pp": 0.5}
+#: THE 0.5 pp FLOOR IS AN OWNER MANDATE (2026-10-01, migration 188, replacing
+#: the earlier 5.0 pp floor): the threshold may be TIGHTENED (to at most
+#: 6.0 pp) by an evaluated, approved proposal and returned towards 0.5,
+#: never set below it. A lower threshold needs a SEPARATE OWNER DECISION and
+#: a new migration; no proposal, activation or rollback here can produce one.
+PARAM_BOUNDS = {"min_gross_edge_pp": (0.5, 6.0)}
 PARAM_GRID_PP = 0.5
 PARAM_MAX_STEP_PP = 1.0
 PARAM_FLOOR_WHY = (
-    "5.0 pp: an OWNER MANDATE for this release -- the shipped threshold is "
-    "the floor; an approved proposal may only tighten it (ceiling 6.0 pp, "
-    "0.5 pp grid, at most 1 pp per activation). Going below 5.0 pp needs a "
-    "separate owner decision and a new migration. Context for that "
+    "0.5 pp: an OWNER MANDATE (2026-10-01) -- the shipped threshold is the "
+    "floor; an approved proposal may only tighten it (ceiling 6.0 pp, "
+    "0.5 pp grid, at most 1 pp per activation). Going below 0.5 pp needs a "
+    "separate owner decision and a new migration. Context: at this edge the "
+    "simulator's fee (up to ~1.75 pp per contract at mid prices) usually "
+    "exceeds the gross edge, so the after-fee check binds. Further context "
     "decision: fees up to ~1.75 pp per contract at mid prices; EV "
     "conditional on ordinary completion with exceptional-settlement "
     "frequency unmeasured; venue book currency not established (P5); "
@@ -1299,12 +1301,35 @@ async def _derek_refusal_funnel(conn, acct, strategy, ws, we) -> list:
                        "refusal %s" % (strategy, len(rows), top))
     lowered = (None if threshold is None
                else round(threshold - NEAR_MISS_PP, 6))
+    # A PROPOSAL STARTS FROM THE ACTIVE THRESHOLD, never from a superseded
+    # one: decisions recorded under an earlier version (V1's 5.0 pp before
+    # the owner's 0.5 pp decision) argue nothing about the running policy.
+    active_pp = None
+    if strategy == PARAM_POLICY:
+        try:
+            head = await _active_parameters(conn, PARAM_POLICY)
+            active_pp = (None if head is None else float(
+                L._j(head["params"]).get("min_gross_edge_pp")))
+        except Exception:                                   # noqa: BLE001
+            active_pp = None
+    superseded = (threshold is not None and active_pp is not None
+                  and abs(threshold - active_pp) > 1e-9)
+    if superseded:
+        metrics["edge_threshold_pp_active"] = active_pp
     bounded = (strategy == PARAM_POLICY and lowered is not None
+               and not superseded and active_pp is not None
                and check_change(C_EDGE, strategy, {
                    "parameter": "min_gross_edge_pp", "from": threshold,
                    "to": lowered}) is None)
-    if bench and near and near >= NEAR_MISS_FOR_PROPOSAL and not bounded:
-        # NEAR MISSES WOULD ARGUE FOR A LOWER THRESHOLD; the 5.0 pp floor is
+    if bench and near and near >= NEAR_MISS_FOR_PROPOSAL and superseded:
+        metrics["proposal"] = {
+            "status": "NOT_APPLICABLE",
+            "why": ("these near misses were recorded under a %s pp "
+                    "threshold that is no longer active (the active "
+                    "threshold is %s pp); a proposal starts from the "
+                    "active threshold only" % (threshold, active_pp))}
+    elif bench and near and near >= NEAR_MISS_FOR_PROPOSAL and not bounded:
+        # NEAR MISSES WOULD ARGUE FOR A LOWER THRESHOLD; the 0.5 pp floor is
         # an owner mandate (a lower threshold is a separate owner decision),
         # so no in-bounds proposal exists and none is recorded -- said so.
         metrics["proposal"] = {
@@ -1317,7 +1342,7 @@ async def _derek_refusal_funnel(conn, acct, strategy, ws, we) -> list:
                        PARAM_BOUNDS["min_gross_edge_pp"]))}
     if bench and near and near >= NEAR_MISS_FOR_PROPOSAL and bounded:
         # ONLY THE SUPPORTED, BOUNDED CHANGE IS PROPOSED (the completed-game
-        # policy, within 5.0..6.0 pp, at most 1 pp per step) -- reachable
+        # policy, within 0.5..6.0 pp, at most 1 pp per step) -- reachable
         # only when the active threshold is above the floor.
         les["proposal"] = {
             "change_class": C_EDGE,
@@ -2453,7 +2478,8 @@ async def rollback_policy_parameters(conn, *, actor: str, reason: str,
             "SELECT activation_id, previous_version_id FROM "
             " paper_policy_parameter_activations WHERE policy_key=$1 "
             "   AND version_id=$2 AND kind IN ('ACTIVATE', "
-            "   'SHIPPED_DEFAULT') ORDER BY at DESC, recorded_at DESC "
+            "   'SHIPPED_DEFAULT', 'OWNER_DECISION') "
+            " ORDER BY at DESC, recorded_at DESC "
             " LIMIT 1", pk, cur)
         prev = None if intro is None else intro["previous_version_id"]
         if prev is None:
@@ -2465,6 +2491,8 @@ async def rollback_policy_parameters(conn, *, actor: str, reason: str,
             " WHERE version_id=$1", prev)
         approved = restored is not None and (
             restored["source"] == "SHIPPED_DEFAULT"
+            or (restored["source"] == "OWNER_DECISION"
+                and restored["approved_by"])
             or (restored["source"] == "EVALUATED_PROPOSAL"
                 and restored["approved_by"] and restored["evaluation_id"]))
         if not approved or validate_parameters(
@@ -2783,7 +2811,7 @@ def _agent_view(agent: str, les: list, props: list) -> dict:
                      "(rules: %s)" % {
                          DEREK: "%d edge near-misses within %.1f pp on the "
                                 "completed-game policy, AND an in-bounds "
-                                "change (the 5.0 pp floor is an owner "
+                                "change (the 0.5 pp floor is an owner "
                                 "mandate, so a lowering is proposed only "
                                 "from a tightened threshold)" % (
                                     NEAR_MISS_FOR_PROPOSAL, NEAR_MISS_PP),

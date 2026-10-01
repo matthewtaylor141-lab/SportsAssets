@@ -239,7 +239,8 @@ async def test_derek_names_markets_prices_orders_and_refusals_in_plain_words():
     stale = next(r for r in rows if r["refusal"] == "PINNACLE_NOT_FRESH")
     assert stale["refusal_words"] == "the Pinnacle price was too old"
     near = next(r for r in rows if r["refusal"] == "BELOW_MIN_GROSS_EDGE")
-    assert near["refusal_words"] == "the edge was below the 5-point minimum"
+    assert near["refusal_words"] == ("the edge was below the policy's minimum (the threshold "
+                                     "recorded on the decision)")
     enter = next(r for r in rows if r["verdict"] == "ENTER")
     assert enter["purchase_price"] == 0.5 and enter["fees_usd"] == 0.4 and enter["p_pinnacle"] == 0.58
     orders = cg["orders"]["data"]
@@ -326,9 +327,10 @@ async def test_audrey_reads_reconciliation_event_audits_performance_and_proposal
     assert {"PAPER_EVENT_FIRST_FILL", "PAPER_EVENT_HANDOFF", "PAPER_EVENT_SETTLEMENT",
             "PAPER_EVENT_SETTLED_AT_VENUE_PRICE"} <= kinds
     lr = a["learning"]["data"]
-    # The owner's 5.0 pp floor (round 3 of the learning work): Derek's
-    # near-miss lesson cannot propose a LOWER threshold, so no proposal
-    # exists for him -- the read must say so (no data), never invent one.
+    # The seeded near misses ran V1's 5.0 pp, which is no longer the active
+    # threshold (the owner's 0.5 pp, migration 188): Derek's lesson cannot
+    # propose from a superseded threshold, so no proposal exists for him --
+    # the read must say so (no data), never invent one.
     dk = lr["agents"]["DEREK"]["data"]
     assert dk is None or dk.get("proposal") is None or \
         dk["evaluation"]["status"] == "INSUFFICIENT_FORWARD_DATA"
@@ -339,7 +341,7 @@ async def test_audrey_reads_reconciliation_event_audits_performance_and_proposal
     assert page["p-ops-performance"]["html"].count("data-perf=") == 3
     assert "Event-driven audits (one per event)" in page["p-ops-findings"]["html"]
     lh = page["p-ops-learning"]["html"]
-    # no proposal below the owner's 5.0 pp floor is ever shown (none exists)
+    # no proposal from a superseded threshold is ever shown (none exists)
     assert "Forward records only" in lh
     assert "from 5 to 4" not in lh and "to 4 percentage points" not in lh
     assert "activation: <b>ACTIVE</b>" not in lh

@@ -94,7 +94,7 @@ STRATEGY_META = {
                     "completion and not risk-adjusted. Postponement, "
                     "abandonment and suspension terms are disclosed "
                     "research risks with unmeasured frequency."),
-        "version": "PINNACLE_COMPLETED_GAME_PAPER_V1", "disclosure": None,
+        "version": "PINNACLE_COMPLETED_GAME_PAPER_V2", "disclosure": None,
         "economics_label": "CONDITIONAL_EXPERIMENTAL_NOT_RISK_ADJUSTED"},
 }
 
@@ -154,8 +154,9 @@ def _unavailable(why: str) -> dict:
 #: itself stays on the record (Technical details); an unknown code is read
 #: out as words, never hidden.
 REFUSAL_WORDS = {
-    "BELOW_MIN_GROSS_EDGE": "the edge was below the 5-point minimum",
+    "BELOW_MIN_GROSS_EDGE": "the edge was below the policy's minimum (the threshold recorded on the decision)",
     "EDGE_BELOW_5PP": "the edge was below the 5-point minimum",
+    "GROSS_EDGE_CLEARS_THRESHOLD_BUT_FEES_CONSUME_IT": "the edge cleared the threshold but the fee per contract consumed it",
     "BELOW_MIN_NET_EV": "the expected profit after fees was below the minimum",
     "NET_EV_NOT_POSITIVE_AFTER_FEES": "no expected profit after fees",
     "FEES_NOT_ESTABLISHED": "the fees could not be established",

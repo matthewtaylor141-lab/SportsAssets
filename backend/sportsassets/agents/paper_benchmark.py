@@ -133,7 +133,8 @@ BOOK_MAX_AGE_S = 10.0
 # ═════════════════════════════════════════════════════════════════════
 #
 # PINNACLE_COMPLETED_GAME_PAPER (owner-authorized 2026-10-01, PAPER ONLY).
-# Same session, same ledger, same rails, same 5 pp edge and positive net EV,
+# Same session, same ledger, same rails, positive net EV (its own edge
+# threshold: V1 ran 5 pp; V2 runs the owner's 0.5 pp, see below),
 # same fresh-quote and current-book checks, same conservative fills. It
 # differs from the strict policy in exactly two places:
 #
@@ -153,7 +154,17 @@ BOOK_MAX_AGE_S = 10.0
 # so the strict policy's decisions and history are untouched.
 
 CG_STRATEGY = "PINNACLE_COMPLETED_GAME_PAPER"
-CG_VERSION = "PINNACLE_COMPLETED_GAME_PAPER_V1"
+#: THE VERSION EVERY NEW DECISION RECORDS. V1 (5.0 pp) decided everything up
+#: to the V2 release and its rows keep saying so; V2 is the owner's
+#: 2026-10-01 paper-only decision (migration 188):
+#:     p_pinnacle - simulated acquisition price >= 0.005 at EVERY level used
+#:     AND conditional expected profit after fees strictly > 0
+#: -- half a probability point on a $0/$1 contract, an ABSOLUTE difference,
+#: not a return target, with no upper edge limit. V2 also sizes NET OF FEES:
+#: a level whose per-contract fee consumes its edge is never bought, so a
+#: candidate that clears 0.5 pp gross but not its fees is refused by name.
+CG_VERSION_V1 = "PINNACLE_COMPLETED_GAME_PAPER_V1"
+CG_VERSION = "PINNACLE_COMPLETED_GAME_PAPER_V2"
 CG_DISCLOSURE = (
     "PINNACLE_COMPLETED_GAME_PAPER: EXPERIMENTAL PAPER EXECUTION on a "
     "fictional account. The reference probability is the de-vigged Pinnacle "
@@ -180,22 +191,27 @@ CG_POLICY = {"kind": "COMPLETED_GAME", "strategy": CG_STRATEGY,
 POLICIES = (STRICT_POLICY, CG_POLICY)
 BENCHMARK_STRATEGIES = tuple(p["strategy"] for p in POLICIES)
 
-# ── THE COMPLETED-GAME POLICY'S VERSIONED PARAMETERS (migration 186) ────
+# ── THE COMPLETED-GAME POLICY'S VERSIONED PARAMETERS (186, 188) ─────────
 # ONE whitelisted parameter, min_gross_edge_pp, read from the policy's
 # ACTIVE parameter version (paper_policy_parameter_heads) once per pass /
-# per hook call, through THIS decision path. Bounds 5.0..6.0 pp on a 0.5 pp
-# grid: THE 5.0 pp FLOOR IS AN OWNER MANDATE -- the threshold may only be
-# tightened by an approved proposal; a lower threshold needs a SEPARATE
-# OWNER DECISION and a new migration, never a proposal (the database CHECKs
-# the same bounds in migration 186 and a test pins the three copies equal).
-# FAIL-CLOSED: an
-# absent table, a failed read or a stored value outside the bounds runs the
-# SHIPPED DEFAULT (V1, 5.0 pp) and records why. The strict benchmark has no
-# parameter versions: it always runs MIN_EDGE.
+# per hook call, through THIS decision path. Bounds 0.5..6.0 pp on a 0.5 pp
+# grid: THE 0.5 pp FLOOR IS AN OWNER MANDATE (2026-10-01, replacing the
+# earlier 5.0 pp floor) -- automatic learning can never take the threshold
+# below it; anything lower needs a SEPARATE OWNER DECISION and a new
+# migration, never a proposal (the database CHECKs the same bounds in
+# migration 188 and a test pins the three copies equal). The shipped V1
+# (5.0 pp) stays in the version table, so an audited rollback to it remains
+# possible. FAIL-CLOSED: an absent table, a failed read or a stored value
+# outside the bounds runs the SHIPPED DEFAULT OF THIS CODE VERSION (V2,
+# 0.5 pp -- the owner's decision, never anything lower) and records why.
+# The strict benchmark has no parameter versions: it always runs MIN_EDGE.
+CG_MIN_EDGE_PP_V2 = 0.5
 CG_PARAMETERS_V1 = {"min_gross_edge_pp": MIN_EDGE_PP}
-CG_PARAMETER_BOUNDS = {"min_gross_edge_pp": (5.0, 6.0)}   # 5.0: owner floor
+CG_PARAMETERS_V2 = {"min_gross_edge_pp": CG_MIN_EDGE_PP_V2}
+CG_PARAMETER_BOUNDS = {"min_gross_edge_pp": (0.5, 6.0)}   # 0.5: owner floor
 CG_PARAMETER_GRID_PP = 0.5
 CG_V1_VERSION_ID = "paperparam:%s:V1" % CG_STRATEGY
+CG_V2_VERSION_ID = "paperparam:%s:V2" % CG_STRATEGY
 P_ACTIVE = "ACTIVE_VERSION"
 P_FALLBACK = "SHIPPED_DEFAULT_FALLBACK"
 
@@ -219,8 +235,8 @@ def validate_cg_parameters(params) -> str | None:
 
 def _cg_fallback(why: str) -> dict:
     return {"policy_key": CG_STRATEGY, "source": P_FALLBACK,
-            "version_id": CG_V1_VERSION_ID, "version_no": 1,
-            "values": dict(CG_PARAMETERS_V1), "fallback_reason": why,
+            "version_id": CG_V2_VERSION_ID, "version_no": 2,
+            "values": dict(CG_PARAMETERS_V2), "fallback_reason": why,
             "proposal_id": None, "evaluation_id": None, "approved_by": None,
             "activation_id": None, "activated_at": None}
 
@@ -308,6 +324,9 @@ R_CROSS_STRATEGY = "ANOTHER_STRATEGY_HOLDS_EXPOSURE_TO_THIS_FIXTURE"
 R_NO_QTY = DP.R_NO_QTY
 R_FEES = DP.R_FEES
 R_NET = DP.R_NET                              # NET_EV_NOT_POSITIVE_AFTER_FEES
+#: V2: the gross edge clears the threshold at the best level, but at every
+#: such level the simulator's fee per contract is at least the edge.
+R_FEES_CONSUME_EDGE = "GROSS_EDGE_CLEARS_THRESHOLD_BUT_FEES_CONSUME_IT"
 R_ORDER_REFUSED = PD.R_ORDER_REFUSED
 
 BOOK_CURRENCY = {
@@ -766,23 +785,51 @@ def level_edges(levels: list, p: float, *, min_edge: float = MIN_EDGE
     return out
 
 
+def fee_per_contract(fee_fn, price, at) -> float:
+    """The simulator's fee for ONE contract at `price`, from its own fee
+    function evaluated on a large block (so cent rounding of a single
+    contract does not overstate it). The ledger still charges the exact fee
+    of each simulated fill."""
+    n = 10000
+    return float(L._fee(fee_fn, n, float(price), at)) / n
+
+
 def size_within_edge(levels: list, *, p: float, consumed: dict,
                      target_usd: float, cap_usd: float,
                      fee_per_contract_max: float,
-                     min_edge: float = MIN_EDGE) -> dict:
-    """The deepest level whose price still clears 5 pp sets the limit (the
-    ladder is best first, so the clearing levels are a prefix); the quantity
-    walks the displayed depth not already consumed, up to that limit, capped
-    so that qty x limit + max fees stays within min(target, per-order cap).
-    Whole contracts."""
-    ok = []
+                     min_edge: float = MIN_EDGE,
+                     net_fee_fn=None) -> dict:
+    """The deepest level whose price still clears the threshold sets the
+    limit (the ladder is best first, so the clearing levels are a prefix);
+    the quantity walks the displayed depth not already consumed, up to that
+    limit, capped so that qty x limit + max fees stays within min(target,
+    per-order cap). Whole contracts.
+
+    NET OF FEES (`net_fee_fn`, the completed-game V2 policy): a level is
+    used only if p - price - fee per contract at that price is STRICTLY
+    positive as well -- at a 0.5 pp threshold the fee can consume the whole
+    gross edge, and such a level is never bought."""
+    ok, gross_ok, fee_stop = [], 0, None
     for lv in levels:
-        if not DP.clears(DP.gross_edge(p, lv["price"]), min_edge):
+        e = DP.gross_edge(p, lv["price"])
+        if not DP.clears(e, min_edge):
             break
+        gross_ok += 1
+        if net_fee_fn is not None:
+            fpc = float(net_fee_fn(lv["price"]))
+            if not (e - fpc > DP.EDGE_TOLERANCE_PP):
+                fee_stop = {"price": lv["price"],
+                            "gross_edge_pp": round(e * 100.0, 9),
+                            "fee_per_contract_usd": round(fpc, 9),
+                            "net_edge_pp": round((e - fpc) * 100.0, 9)}
+                break
         ok.append(lv)
     if not ok:
         return {"qty": 0, "limit": None, "wire": None,
-                "depth_within_limit": 0.0, "why": "NO_LEVEL_CLEARS_5PP"}
+                "depth_within_limit": 0.0, "levels_clearing_gross": gross_ok,
+                "fee_stop": fee_stop,
+                "why": ("FEES_CONSUME_THE_EDGE_AT_EVERY_CLEARING_LEVEL"
+                        if gross_ok else "NO_LEVEL_CLEARS_THE_THRESHOLD")}
     limit = float(ok[-1]["price"])
     depth = sum(max(0.0, float(lv["qty"]) - float(consumed.get(
         SIM._wk(lv["wire"]), 0.0))) for lv in ok)
@@ -790,7 +837,8 @@ def size_within_edge(levels: list, *, p: float, consumed: dict,
     per = limit + float(fee_per_contract_max)
     qty = math.floor(min(depth, budget / per if per > 0 else 0.0) + 1e-9)
     return {"qty": int(max(qty, 0)), "limit": limit, "wire": ok[-1]["wire"],
-            "levels_used": len(ok), "depth_within_limit": round(depth, 6),
+            "levels_used": len(ok), "levels_clearing_gross": gross_ok,
+            "fee_stop": fee_stop, "depth_within_limit": round(depth, 6),
             "budget_usd": budget, "budget_per_contract_usd": round(per, 9)}
 
 
@@ -1022,9 +1070,14 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
                 target_usd=float(ent["target_order_usd"]),
                 cap_usd=float(cfg["risk"]["per_order_cap_usd"]),
                 fee_per_contract_max=float(L.max_fee_for(
-                    1, 0.5, at=at, fee_fn=fee_fn)), min_edge=min_edge)
+                    1, 0.5, at=at, fee_fn=fee_fn)), min_edge=min_edge,
+                net_fee_fn=((lambda px: fee_per_contract(fee_fn, px, at))
+                            if cg else None))
             if not edges[0]["clears_min_edge"]:
                 refusals.append(R_EDGE)
+            elif (sized.get("why")
+                  == "FEES_CONSUME_THE_EDGE_AT_EVERY_CLEARING_LEVEL"):
+                refusals.append(R_FEES_CONSUME_EDGE)
             elif sized["qty"] < 1:
                 refusals.append(R_NO_QTY)
             else:
@@ -1071,8 +1124,13 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
         "strategy": STRATEGY, "version": VERSION, "disclosure": DISCLOSURE,
         "probability": p, "probability_basis": "PINNACLE_ONLY_DEVIGGED_STORED",
         "threshold_edge_pp": min_edge_pp,
+        "threshold_edge_probability": round(min_edge, 9),
         "edge_rule": ("p_pinnacle - level price >= %.4f at EVERY level used"
-                      % min_edge),
+                      % min_edge
+                      + ("; and p - price - fee per contract > 0 at every "
+                         "level bought" if cg else "")),
+        "levels_clearing_gross": sized.get("levels_clearing_gross"),
+        "fee_stop": sized.get("fee_stop"),
         "ev_rule": "expected net profit after the simulator's fees > 0",
         "levels": edges[:10], "best_level_edge_pp": best_edge,
         "limit_price": sized.get("limit"),
@@ -1128,11 +1186,17 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
          "value": best_edge, "threshold": min_edge_pp,
          "units": "percentage points"},
         {"condition": "positive_ev_after_fees",
-         "passed": None if econ is None else econ["net_ev_positive"],
+         "passed": (False if R_FEES_CONSUME_EDGE in refusals else
+                    None if econ is None else econ["net_ev_positive"]),
          "value": (econ or {}).get("expected_net_profit_usd"),
-         "threshold": 0.0, "units": "USD"}]
+         "threshold": 0.0, "units": "USD",
+         "rule": "strictly greater than zero",
+         **({"fee_stop": sized.get("fee_stop")}
+            if R_FEES_CONSUME_EDGE in refusals else {})}]
     policy_decision = {
         "strategy": STRATEGY, "policy_version": VERSION,
+        "threshold_edge_pp": min_edge_pp,
+        "threshold_edge_probability": round(min_edge, 9),
         "disclosure": DISCLOSURE, "p_internal": None, "p_blended": None,
         "economics_label": ECONOMICS_LABEL if cg else None,
         "p_pinnacle": p, "conditions": conditions,
@@ -1660,4 +1724,15 @@ def describe() -> dict:
     return {"strategy": STRATEGY, "version": VERSION, "env_flag": ENV_FLAG,
             "control_key": CONTROL_KEY, "min_edge_pp": MIN_EDGE_PP,
             "book_max_age_s": BOOK_MAX_AGE_S, "disclosure": DISCLOSURE,
-            "book_currency": BOOK_CURRENCY}
+            "book_currency": BOOK_CURRENCY,
+            "completed_game": {
+                "strategy": CG_STRATEGY, "version": CG_VERSION,
+                "shipped_min_edge_pp": CG_MIN_EDGE_PP_V2,
+                "shipped_min_edge_probability": CG_MIN_EDGE_PP_V2 / 100.0,
+                "bounds_pp": list(CG_PARAMETER_BOUNDS["min_gross_edge_pp"]),
+                "entry_rule": ("p_pinnacle - simulated acquisition price >= "
+                               "the active threshold at every level used, "
+                               "the fee per contract below the edge at "
+                               "every level bought, and conditional "
+                               "expected profit after fees > 0"),
+                "previous_versions": {CG_VERSION_V1: {"min_edge_pp": 5.0}}}}

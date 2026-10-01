@@ -42,6 +42,53 @@ from tests import paper_harness as H
 from tests import paper_live_fixture as PL
 
 pg = pytest.mark.skipif(not H.DSN, reason="needs RN1X_TEST_DSN")
+
+V2_ACT = "paperact:%s:V2:OWNER_DECISION" % PB.CG_STRATEGY
+V1_ACT = "paperact:%s:V1" % PB.CG_STRATEGY
+
+
+async def _set_head(conn, version_id, activation_id) -> None:
+    """The shared parameter head, set directly (proof scaffolding only)."""
+    await conn.execute(
+        "UPDATE paper_policy_parameter_heads SET active_version_id=$2, "
+        " activation_id=$3 WHERE policy_key=$1", PB.CG_STRATEGY, version_id,
+        activation_id)
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _v1_baseline_for_these_proofs():
+    """THESE PROOFS EXERCISE THE LEARNING MECHANISM FROM V1 (5.0 pp), which
+    stays a valid, restorable version inside the 0.5..6.0 pp bounds. The
+    production head is the owner's decision V2 (0.5 pp, migration 188): it
+    is put back afterwards, with the proofs' own rollback audit rows gone,
+    so the rest of the suite sees exactly what migration 188 left."""
+    import asyncio
+
+    async def go(to_v1: bool):
+        if not H.DSN:
+            return
+        conn = await H.connect()
+        try:
+            async with conn.transaction():
+                await conn.execute("SET LOCAL session_replication_role = "
+                                   "replica")
+                if to_v1:
+                    await _set_head(conn, PB.CG_V1_VERSION_ID, V1_ACT)
+                else:
+                    await conn.execute(
+                        "DELETE FROM paper_policy_parameter_activations "
+                        " WHERE actor = 'test-cleanup' AND policy_key=$1",
+                        PB.CG_STRATEGY)
+                    await _set_head(conn, PB.CG_V2_VERSION_ID, V2_ACT)
+        finally:
+            await conn.close()
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(go(True))
+        yield
+        loop.run_until_complete(go(False))
+    finally:
+        loop.close()
 FEE = H.flat_fee(0.01)
 CG = PB.CG_STRATEGY
 
@@ -693,12 +740,13 @@ async def test_a_proposal_refuses_overlapping_periods_and_reports_insufficient_f
         b = await H.new_account(conn, "lrprop2", now=t0)
         accts = [a["account_id"], b["account_id"]]
         change = {"parameter": "min_gross_edge_pp", "from": 5.0, "to": 5.5}
-        # BELOW THE OWNER'S 5.0 pp FLOOR: refused by name
+        # BELOW THE OWNER'S 0.5 pp FLOOR: refused by name
         low = await PLRN.create_proposal(
             conn, account_id=a["account_id"], proposed_at=t0,
             training=(t0 - 100, t0), evaluation=(t0, t0 + 100),
             agent_id="DEREK", strategy=CG, change_class=PLRN.C_EDGE,
-            proposed_change=dict(change, to=4.5), rationale="test",
+            proposed_change={"parameter": "min_gross_edge_pp", "from": 0.5,
+                             "to": 0.0}, rationale="test",
             proposed_by="DEREK")
         assert low["refusal"] == PLRN.R_OUT_OF_BOUNDS
         kw = dict(agent_id="DEREK", strategy=CG, change_class=PLRN.C_EDGE,
@@ -858,23 +906,25 @@ async def test_a_proposal_refuses_overlapping_periods_and_reports_insufficient_f
 
 
 @pg
-async def test_near_misses_never_propose_below_the_owners_5pp_floor(
+async def test_near_misses_never_propose_below_the_owners_floor(
         both_on, monkeypatch):
-    """FIVE NEAR MISSES (4.5 pp against the 5 pp threshold) on the completed-
-    game policy, through a real pass: they would argue for LOWERING the edge
-    threshold, which the owner's 5.0 pp floor forbids -- so Derek's lesson
-    records the proposal as NOT_APPLICABLE with the reason, and no proposal
-    is created (now or on later passes)."""
+    """FIVE NEAR MISSES (0.3 pp against the owner's 0.5 pp threshold, the
+    PRODUCTION head V2) on the completed-game policy, through a real pass:
+    they would argue for LOWERING the edge threshold, which the owner's
+    0.5 pp floor forbids -- so Derek's lesson records the proposal as
+    NOT_APPLICABLE with the reason, and no proposal is created (now or on
+    later passes)."""
     conn = await H.connect()
     now = time.time() + 5.0
     acct = None
     try:
         await PL.purge_everything(conn)
+        await _set_head(conn, PB.CG_V2_VERSION_ID, V2_ACT)
         monkeypatch.setattr(PLRN, "LEARNING_EVERY_S", 0.0)
         acct = await PL.new_account(conn, "lrauto", now=now)
         t = PL.Transport(now)
         for _ in range(5):
-            v = await PL.valuation(conn, decided_at=now - 10, p_pin=0.545,
+            v = await PL.valuation(conn, decided_at=now - 10, p_pin=0.503,
                                    compatibility="INCOMPATIBLE")
             t.set(v["slug"], offers=[(0.50, 2000)], bids=[(0.48, 2000)])
         client = PL.client(t)
@@ -897,6 +947,7 @@ async def test_near_misses_never_propose_below_the_owners_5pp_floor(
         assert p2["steps"]["learning"]["proposals_created"] == 0
         assert client.mutation_attempts == 0
     finally:
+        await _set_head(conn, PB.CG_V1_VERSION_ID, V1_ACT)
         await _cleanup(conn, [acct and acct["account_id"]])
         await PL.purge_everything(conn)
         await conn.close()
@@ -964,8 +1015,9 @@ def test_the_learning_routes_need_the_command_credential_and_read_sections(
     r = c.get("/api/command/paper/learning/policy", headers=hdr)
     assert r.json()["result"]["status"] == "OK"
     st = r.json()["result"]["data"]
+    # this module's V1 baseline (production runs V2: see the V2 proofs)
     assert st["active"]["version_id"] == PB.CG_V1_VERSION_ID
-    assert st["bounds"] == {"min_gross_edge_pp": [5.0, 6.0]}
+    assert st["bounds"] == {"min_gross_edge_pp": [0.5, 6.0]}
     # THE TWO WRITES: POST only, the command CONTROL credential, audited;
     # refused by name when their conditions are not met
     writes = [r for r in R.router.routes
@@ -991,33 +1043,40 @@ def test_the_learning_routes_need_the_command_credential_and_read_sections(
 # ═════════════════════════════════════════════════════════════════════
 
 def test_the_bounds_are_one_rule_in_code_twice_and_in_the_database():
-    """THE OWNER'S 5.0 pp FLOOR, everywhere: both code copies and migration
-    186's CHECK; nothing below 5.0 validates or can be proposed."""
+    """THE OWNER'S 0.5 pp FLOOR (2026-10-01), everywhere: both code copies
+    and migration 188's CHECK; nothing below 0.5 validates or can be
+    proposed. V1 (5.0 pp) stays a valid, restorable version."""
     import pathlib
     assert PB.CG_PARAMETER_BOUNDS == PLRN.PARAM_BOUNDS == {
-        "min_gross_edge_pp": (5.0, 6.0)}
-    assert PB.CG_PARAMETERS_V1 == PLRN.PARAM_DEFAULTS == {
-        "min_gross_edge_pp": 5.0}
+        "min_gross_edge_pp": (0.5, 6.0)}
+    assert PB.CG_PARAMETERS_V2 == PLRN.PARAM_DEFAULTS == {
+        "min_gross_edge_pp": 0.5}
+    assert PB.CG_PARAMETERS_V1 == {"min_gross_edge_pp": 5.0}
     assert PB.CG_PARAMETER_GRID_PP == PLRN.PARAM_GRID_PP == 0.5
     sql = (pathlib.Path(PB.__file__).resolve().parents[2] / "migrations"
-           / "186_paper_policy_parameter_versions.sql").read_text()
-    assert "BETWEEN 5.0 AND 6.0" in sql
-    assert "BETWEEN 4" not in sql
-    assert "'{\"min_gross_edge_pp\": 5.0}'::jsonb" in sql
-    for bad in ({"min_gross_edge_pp": 4.0}, {"min_gross_edge_pp": 4.5},
-                {"min_gross_edge_pp": 4.99}, {"min_gross_edge_pp": 6.5},
-                {"min_gross_edge_pp": 5.25}, {"min_gross_edge_pp": "5"},
+           / "188_completed_game_owner_threshold_0_5pp.sql").read_text()
+    assert "BETWEEN 0.5 AND 6.0" in sql
+    assert "BETWEEN 0.0" not in sql and "BETWEEN 0.4" not in sql
+    assert "'{\"min_gross_edge_pp\": 0.5}'::jsonb" in sql
+    for bad in ({"min_gross_edge_pp": 0.0}, {"min_gross_edge_pp": 0.25},
+                {"min_gross_edge_pp": 0.49}, {"min_gross_edge_pp": -0.5},
+                {"min_gross_edge_pp": 6.5}, {"min_gross_edge_pp": 5.25},
+                {"min_gross_edge_pp": "5"},
                 {"min_gross_edge_pp": 5.0, "max_qty": 1}, {}):
         assert PB.validate_cg_parameters(bad) is not None, bad
         assert PLRN.validate_parameters(bad) is not None, bad
-    for ok in (5.0, 5.5, 6.0):
+    for ok in (0.5, 1.0, 2.0, 5.0, 5.5, 6.0):
         assert PB.validate_cg_parameters({"min_gross_edge_pp": ok}) is None
     ch = {"parameter": "min_gross_edge_pp", "from": 5.0, "to": 5.5}
     assert PLRN.check_change(PLRN.C_EDGE, CG, ch) is None
-    assert PLRN.check_change(PLRN.C_EDGE, CG, dict(ch, to=4.5)) == \
+    # AUTOMATIC LEARNING NEVER TAKES THE THRESHOLD BELOW 0.5 pp
+    lo = {"parameter": "min_gross_edge_pp", "from": 0.5, "to": 0.0}
+    assert PLRN.check_change(PLRN.C_EDGE, CG, lo) == PLRN.R_OUT_OF_BOUNDS
+    assert PLRN.check_change(PLRN.C_EDGE, CG, dict(lo, from_=1.0,
+                                                   to=-0.5)) == \
         PLRN.R_OUT_OF_BOUNDS
-    assert PLRN.check_change(PLRN.C_EDGE, CG, dict(ch, to=4.0)) == \
-        PLRN.R_OUT_OF_BOUNDS
+    assert PLRN.check_change(PLRN.C_EDGE, CG, {
+        "parameter": "min_gross_edge_pp", "from": 1.0, "to": 0.5}) is None
     assert PLRN.check_change(PLRN.C_EDGE, CG, dict(ch, to=6.5)) == \
         PLRN.R_OUT_OF_BOUNDS
     assert PLRN.check_change(PLRN.C_EDGE, CG, dict(ch, to=5.0)) == \
@@ -1037,8 +1096,8 @@ async def test_a_failed_parameter_read_falls_back_to_the_shipped_default():
     ctx = {"now": 1.0}
     got = await PB.cg_parameters(Broken(), ctx)
     assert got["source"] == PB.P_FALLBACK
-    assert got["values"] == {"min_gross_edge_pp": 5.0}
-    assert got["version_id"] == PB.CG_V1_VERSION_ID
+    assert got["values"] == {"min_gross_edge_pp": 0.5}
+    assert got["version_id"] == PB.CG_V2_VERSION_ID
     assert got["fallback_reason"].startswith("PARAMETER_READ_FAILED")
     assert await PB.cg_parameters(Broken(), ctx) is got   # cached per pass
 
@@ -1181,8 +1240,8 @@ async def test_an_activated_candidate_changes_a_future_decision_and_rollback_res
             await conn.execute("UPDATE paper_policy_parameter_versions SET "
                                " params='{\"min_gross_edge_pp\": 6.0}' "
                                " WHERE version_id=$1", v2)
-        # THE DATABASE REFUSES ANY VERSION BELOW THE 5.0 pp FLOOR
-        for below in ("4.5", "4.0"):
+        # THE DATABASE REFUSES ANY VERSION BELOW THE 0.5 pp FLOOR
+        for below in ("0.0", "-0.5"):
             with pytest.raises(asyncpg.CheckViolationError):
                 async with conn.transaction():
                     await conn.execute(
