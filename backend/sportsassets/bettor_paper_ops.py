@@ -147,6 +147,153 @@ def _unavailable(why: str) -> dict:
 
 
 # ═════════════════════════════════════════════════════════════════════
+# REFUSALS IN PLAIN WORDS, AND READABLE MARKET NAMES
+# ═════════════════════════════════════════════════════════════════════
+
+#: What each recorded refusal code means, in management's words. The code
+#: itself stays on the record (Technical details); an unknown code is read
+#: out as words, never hidden.
+REFUSAL_WORDS = {
+    "BELOW_MIN_GROSS_EDGE": "the edge was below the 5-point minimum",
+    "EDGE_BELOW_5PP": "the edge was below the 5-point minimum",
+    "BELOW_MIN_NET_EV": "the expected profit after fees was below the minimum",
+    "NET_EV_NOT_POSITIVE_AFTER_FEES": "no expected profit after fees",
+    "FEES_NOT_ESTABLISHED": "the fees could not be established",
+    "SETTLEMENT_NOT_SUPPORTED": ("the venue's and Pinnacle's settlement rules "
+                                 "are not established as the same"),
+    "FIXTURE_IDENTITY_NOT_ESTABLISHED": ("the game could not be matched "
+                                         "exactly between Pinnacle and the "
+                                         "venue"),
+    "PAYOUT_OUTCOME_MATCH_NOT_ESTABLISHED": ("the outcome that pays could not "
+                                             "be matched to Pinnacle's"),
+    "MARKET_OR_LINE_NOT_A_MONEYLINE_MATCH": "not the same market or line",
+    "GRADING_PERIOD_NOT_FULL_GAME": "not graded on the full game",
+    "ORDINARY_GRADING_PERIOD_MISMATCH": ("the venue and Pinnacle grade a "
+                                         "completed game differently"),
+    "ORDINARY_GRADING_PERIOD_NOT_ESTABLISHED": ("how a completed game is "
+                                                "graded is not established"),
+    "VENUE_RULES_TEXT_NOT_RECORDED_ON_THE_VALUATION_ROW": (
+        "the venue's rules text was not recorded"),
+    "NO_COMPLETED_GAME_TERMS_FOR_THIS_SPORT": ("no completed-game terms are "
+                                               "held for this sport"),
+    "NO_QUALIFIED_PINNACLE_PROBABILITY": "no usable Pinnacle price",
+    "PINNACLE_PROBABILITY_NOT_QUALIFIED_BY_THE_LANE": "the Pinnacle price did not qualify",
+    "PINNACLE_NOT_FRESH": "the Pinnacle price was too old",
+    "PROBABILITY_EVIDENCE_STALE": "the Pinnacle price was too old",
+    "PROBABILITY_EVIDENCE_FRESHNESS_UNKNOWN": "the Pinnacle price's age is unknown",
+    "THE_PAPER_BOOK_OBSERVATION_IS_NOT_CURRENT": "the venue order book reading was too old",
+    "THE_OBSERVED_BOOK_WAS_UNREADABLE_OR_EMPTY": "the venue order book was empty or unreadable",
+    "NO_ESTABLISHED_EXECUTABLE_DEPTH": "not enough contracts available at the price",
+    "NO_SIZED_QUANTITY": "no quantity could be sized",
+    "LIMIT_PRICE_NOT_SUPPORTED": "the limit price is outside what the venue supports",
+    "NO_CAPACITY_UNDER_THE_LANE_RAILS": "the paper risk limits had no room",
+    "ANOTHER_STRATEGY_HOLDS_EXPOSURE_TO_THIS_FIXTURE": "another strategy already holds this game",
+    "PAPER_RISK_REFUSED_THE_ORDER": "the paper risk check refused the order",
+    "STRATEGY_ENTRIES_DISABLED": ("this strategy's paper entries are switched "
+                                  "off (it records its decision only)"),
+    "NO_APPROVED_INTERNAL_MODEL": "no approved internal model",
+    "INTERNAL_MODEL_NOT_QUALIFIED": "the internal model did not qualify",
+    "INTERNAL_MODEL_CANNOT_SCORE_THIS_CANDIDATE": "the internal model cannot score this market",
+    "RESEARCH_MODEL_CANNOT_SCORE_THIS_CANDIDATE": "the research model cannot score this market",
+    "RESEARCH_MODEL_PROVENANCE_NOT_VERIFIED": "the research model's provenance is not verified",
+    "NO_RESEARCH_MODEL_CANDIDATE_EXISTS": "no research model exists yet",
+    "ESTIMATES_DISAGREE_MODEL_BELOW_MIN_GROSS_EDGE": "the internal model disagreed with Pinnacle",
+    "REAL_EVENT_NOT_ESTABLISHED": "the event is not established as real",
+    "NOT_A_SUPPORTED_POLYMARKET_US_CONTRACT": "not a supported venue contract",
+    "ENTRY_LANE_REFUSED": "the entry lane refused it",
+}
+
+
+def refusal_words(code) -> str | None:
+    """A refusal code in plain words (None when there is no refusal)."""
+    if not code:
+        return None
+    c = str(code)
+    return REFUSAL_WORDS.get(c) or c.replace("_", " ").lower()
+
+
+def market_name(label, *, valuation: dict | None = None,
+                catalogue: dict | None = None) -> dict:
+    """A READABLE NAME FOR ONE MARKET, from the decision's recorded
+    instrument label (participants, event title, market type, line, period,
+    date -- derek_policy.instrument_label, read from the valuation and the
+    venue catalogue at the decision), then the shared catalogue resolver
+    (market_labels), then the valuation row's own selection. Never a slug as
+    the name; never an invented team. Logos: none -- no licensed team logo
+    files exist in this repository (market_labels.LOGO_NOTE)."""
+    lb = label if isinstance(label, dict) else {}
+    va = valuation if isinstance(valuation, dict) else {}
+    ca = catalogue if isinstance(catalogue, dict) else {}
+    home, away = lb.get("home_team"), lb.get("away_team")
+    title = (lb.get("event_title")
+             or ("%s at %s" % (away, home) if home and away else None)
+             or (ca.get("secondary") or "").split(" · ")[0] or None)
+    sel = lb.get("participant") or va.get("contract_selection")
+    mt = lb.get("market_type")
+    if mt and str(mt).upper() in ("MONEYLINE", "H2H"):
+        mt = "to win"
+    selection = None
+    if sel:
+        selection = "%s %s" % (sel, mt or "") if mt else str(sel)
+        if lb.get("line") not in (None, ""):
+            selection += " %s" % lb.get("line")
+    elif ca.get("primary"):
+        selection = ca.get("primary")
+    bits = [lb.get("competition"), lb.get("period"), lb.get("event_date")]
+    source = ("decision label" if (lb.get("event_title") or home
+                                   or lb.get("participant"))
+              else "venue catalogue" if ca.get("primary")
+              else "valuation row" if sel else None)
+    warnings = list(ca.get("warnings") or []) if not source == "decision label" else []
+    if not title and not selection:
+        warnings.append("METADATA_INCOMPLETE: no participant, event title or "
+                        "catalogue row recorded for this market")
+    return {"title": title, "selection": (selection or "").strip() or None,
+            "detail": " · ".join(str(b) for b in bits if b) or None,
+            "source": source, "warnings": warnings, "logo": None,
+            "logo_note": ("no licensed team logo files exist in this "
+                          "repository; none is shown")}
+
+
+async def _names_for(conn, rows: list, *, slug_key="us_market_slug",
+                     intent_key="intent") -> None:
+    """Attach `market` (market_name) to each row in place: the record's
+    label first, the venue catalogue for rows whose label names nothing."""
+    from . import market_labels as ML
+    need = [r for r in rows if not ((r.get("label") or {}).get("event_title")
+                                    or (r.get("label") or {}).get("participant")
+                                    or (r.get("label") or {}).get("home_team"))]
+    cat = {}
+    if need:
+        try:
+            got = await ML.resolve_many(conn, [
+                {"market_slug": r.get(slug_key), "intent": r.get(intent_key)}
+                for r in need])
+            cat = {id(r): g for r, g in zip(need, got)
+                   if g and g.get("source") != "NO_CATALOGUE_ROW"}
+        except Exception:                                       # noqa: BLE001
+            cat = {}
+    for r in rows:
+        r["market"] = market_name(r.get("label"), valuation=r.get("valuation"),
+                                  catalogue=cat.get(id(r)))
+
+
+async def account_section(conn, *, account_id: str, now: float) -> dict:
+    """THE ONE ACCOUNT READ every page shows (homepage, Derek, Xavier,
+    Audrey): bettor_paper_ledger.balances over the one paper ledger, the
+    same function and the same keys everywhere, so the four pages can never
+    disagree about cash, reserved, available, position value, equity or
+    P&L."""
+    async def acct():
+        b = await L.balances(conn, account_id, now=now)
+        if not b.get("ok"):
+            raise RuntimeError(b.get("refusal") or "BALANCES_REFUSED")
+        return dict(account_view(b), source=(
+            "bettor_paper_ledger.balances(%s) at %s" % (account_id, now)))
+    return await _sec(acct(), empty_why="NO_PAPER_ACCOUNT")
+
+
+# ═════════════════════════════════════════════════════════════════════
 # THE THREE FRESHNESS STAMPS
 # ═════════════════════════════════════════════════════════════════════
 
@@ -257,14 +404,35 @@ def decision_view(r) -> dict:
     d["fees_usd"] = pd.get("fees_usd")
     d["economics_label"] = pd.get("economics_label")
     d["explanation"] = RM.explanation(d, pd)
+    d["refusal_words"] = refusal_words(d.get("refusal"))
+    eco = d.pop("economics", None)
+    eco = L._j(eco) if isinstance(eco, str) else eco
+    acq = (eco or {}).get("acquisition") if isinstance(eco, dict) else None
+    acq = acq if isinstance(acq, dict) else {}
+    # THE PURCHASE PRICE: the volume-weighted price the walk would pay, else
+    # the limit; the fees from the record (policy decision, else acquisition)
+    d["purchase_price"] = acq.get("vwap") if acq.get("vwap") is not None \
+        else d.get("limit_price")
+    if d.get("fees_usd") is None:
+        d["fees_usd"] = acq.get("fees_usd")
+    va = {k: d.pop(k) for k in ("v_contract_selection", "v_event_key",
+                                "v_sport_family", "v_market", "v_period")
+          if k in d}
+    d["valuation"] = {k[2:]: v for k, v in va.items()}
     return d
 
 
 DECISION_COLS = (
-    "decision_id, decided_at, strategy, policy_version, verdict, refusal, "
-    "refusals, us_market_slug, holding_side, intent, fixture, label, "
-    "p_internal, p_pinnacle, p_blended, limit_price, proposed_qty, "
-    "policy_decision")
+    "d.decision_id, d.decided_at, d.strategy, d.policy_version, d.verdict, "
+    "d.refusal, d.refusals, d.us_market_slug, d.holding_side, d.intent, "
+    "d.fixture, d.label, d.p_internal, d.p_pinnacle, d.p_blended, "
+    "d.limit_price, d.proposed_qty, d.policy_decision, d.economics, "
+    "v.contract_selection AS v_contract_selection, v.event_key AS "
+    "v_event_key, v.sport_family AS v_sport_family, v.market AS v_market, "
+    "v.period AS v_period")
+#: the valuation row a decision was made from, when the table exists
+DECISION_FROM = ("paper_decisions d LEFT JOIN external_valuations v "
+                 "ON v.id = d.valuation_id")
 
 FUNNEL_SQL = """
     WITH d AS (
@@ -329,14 +497,52 @@ async def strategy_block(conn, *, account_id: str, strategy: str,
             "   AND verdict = 'REFUSE' GROUP BY 1 ORDER BY 2 DESC LIMIT 10",
             account_id, strategy)
         return [{"refusal": r["refusal"], "n": int(r["n"]),
+                 "refusal_words": refusal_words(r["refusal"]),
                  "latest_at": L._epoch(r["latest_at"])} for r in rows]
 
     async def recent():
         rows = await conn.fetch(
-            "SELECT %s FROM paper_decisions WHERE account_id = $1 "
-            "   AND strategy = $2 ORDER BY decided_at DESC LIMIT $3"
-            % DECISION_COLS, account_id, strategy, int(limit))
-        return [decision_view(r) for r in rows]
+            "SELECT %s FROM %s WHERE d.account_id = $1 "
+            "   AND d.strategy = $2 ORDER BY d.decided_at DESC LIMIT $3"
+            % (DECISION_COLS, DECISION_FROM), account_id, strategy,
+            int(limit))
+        out = [decision_view(r) for r in rows]
+        await _names_for(conn, out)
+        return out
+
+    async def orders():
+        """EVERY ENTRY ORDER of this strategy (newest first): the decision's
+        Pinnacle probability and edge, the purchase price actually filled
+        (volume-weighted over its simulated fills), the fees paid, the state
+        and -- for an order that ended unfilled -- its reason in words."""
+        rows = await conn.fetch(
+            "SELECT o.order_id, o.created_at, o.state, o.qty, o.filled_qty, "
+            "       o.limit_price, o.terminal_reason, o.us_market_slug, "
+            "       o.intent, o.fixture, o.label, o.group_id, o.decision_id, "
+            "       d.p_pinnacle, d.policy_decision->>'gross_edge_pp' AS edge, "
+            "       d.verdict, d.policy_version, "
+            "       (SELECT sum(f.gross_usd) / nullif(sum(f.qty), 0) "
+            "          FROM paper_fills f WHERE f.order_id = o.order_id) "
+            "         AS avg_fill_price, "
+            "       (SELECT sum(f.fee_usd) FROM paper_fills f "
+            "         WHERE f.order_id = o.order_id) AS fees_usd, "
+            "       (SELECT sum(f.gross_usd) FROM paper_fills f "
+            "         WHERE f.order_id = o.order_id) AS cost_usd "
+            "  FROM paper_orders o LEFT JOIN paper_decisions d "
+            "    ON d.decision_id = o.decision_id "
+            " WHERE o.account_id = $1 AND o.strategy = $2 "
+            "   AND o.role = 'ENTRY' ORDER BY o.created_at DESC LIMIT $3",
+            account_id, strategy, int(limit))
+        out = []
+        for r in rows:
+            x = RM._row(r)
+            x["edge_pp"] = None if x.pop("edge", None) is None \
+                else float(r["edge"])
+            x["unfilled_reason_words"] = refusal_words(
+                x.get("terminal_reason")) if not x.get("filled_qty") else None
+            out.append(x)
+        await _names_for(conn, out)
+        return out
 
     async def funnel():
         total = await conn.fetchval(
@@ -388,7 +594,10 @@ async def strategy_block(conn, *, account_id: str, strategy: str,
         refusals=await _sec(refusals(), empty_why=(
             "NO_REFUSAL_RECORDED_FOR_%s" % strategy)),
         recent=await _sec(recent(), empty_why=e24),
-        funnel=await _sec(funnel(), empty_why=e24))
+        funnel=await _sec(funnel(), empty_why=e24),
+        orders=await _sec(orders(), empty_why=(
+            "NO_PAPER_ENTRY_ORDER_FOR_%s: no decision of this strategy "
+            "has opened a paper entry" % strategy)))
 
 
 async def derek_operations(conn, *, account_id: str | None = None,
@@ -411,6 +620,9 @@ async def derek_operations(conn, *, account_id: str | None = None,
         await strategy_block(conn, account_id=acct, strategy=s, meta=meta[s],
                              now=at, limit=limit)
         for s in STRATEGY_ORDER]
+    out["account"] = await account_section(conn, account_id=acct, now=at)
+    out["logos"] = ("no licensed team logo files exist in this repository; "
+                    "markets are named from the records, without logos")
     out["separation"] = ("ORIGINAL_RESEARCH (DEREK_ENTRY_POLICY_V2) and each "
                          "EXPERIMENTAL_BENCHMARK are counted apart: a "
                          "benchmark decision is never one of Derek's "
@@ -442,6 +654,8 @@ async def xavier_operations(conn, *, account_id: str | None = None,
         return b
 
     async def handoffs():
+        if "h" in bal_box:
+            return bal_box["h"]
         rows = await conn.fetch(
             "SELECT h.handoff_id, h.group_id, h.decision_id, h.entry_order_id,"
             "       h.first_fill_id, h.first_fill_at, h.owner, h.confirmed_qty,"
@@ -452,7 +666,10 @@ async def xavier_operations(conn, *, account_id: str | None = None,
             "    ON o.order_id = h.entry_order_id "
             " WHERE h.account_id = $1 ORDER BY h.created_at DESC LIMIT $2",
             acct, int(limit))
-        return [RM._row(r) for r in rows]
+        out = [RM._row(r) for r in rows]
+        await _names_for(conn, out)
+        bal_box["h"] = out
+        return out
 
     async def handoff_counts():
         rows = await conn.fetch(
@@ -533,10 +750,11 @@ async def xavier_operations(conn, *, account_id: str | None = None,
                 "settle")
             if isinstance(st, dict):
                 last = dict(st, at=(h.get("last_pass") or {}).get("at"))
-        return {"positions": [{k: p.get(k) for k in (
+        return {"positions": [dict({k: p.get(k) for k in (
                     "position_key", "group_id", "us_market_slug",
                     "holding_side", "fixture", "label", "strategy",
-                    "open_qty", "cost_basis_usd", "first_fill_at")}
+                    "open_qty", "cost_basis_usd", "first_fill_at")},
+                    market=market_name(p.get("label")))
                     for p in openp],
                 "count": len(openp),
                 "last_settle_step": last,
@@ -545,6 +763,140 @@ async def xavier_operations(conn, *, account_id: str | None = None,
                          "game policy's exceptional case settles at the "
                          "venue's own published price "
                          "(SETTLED_AT_VENUE_PRICE), never an assumed refund")}
+
+    async def owned():
+        """EVERY POSITION XAVIER OWNS (one per handoff), with its current
+        exit recommendation (his latest review: recommendation, selection),
+        its exposure, its scenario payoffs and -- kept apart -- the profit
+        already REALIZED versus the risk that REMAINS."""
+        b = await bal()
+        hs = await handoffs()
+        allp = {p["group_id"]: p for p in await L.positions(
+            conn, acct, include_closed=True)}
+        marks = {p["group_id"]: p for p in (b.get("open_positions") or [])}
+        revs = {r["group_id"]: RM._row(r) for r in await conn.fetch(
+            "SELECT DISTINCT ON (group_id) group_id, review_id, reviewed_at, "
+            "       trigger, recommendation, refusal, selection, action, "
+            "       exposure, measure FROM paper_xavier_reviews "
+            " WHERE account_id = $1 ORDER BY group_id, reviewed_at DESC",
+            acct)}
+        stand = {}
+        for r in await conn.fetch(
+                "SELECT group_id, count(*) AS n FROM paper_orders "
+                " WHERE account_id = $1 AND role <> 'ENTRY' "
+                "   AND state = ANY($2::text[]) GROUP BY 1", acct,
+                list(L.OPEN_STATES)):
+            stand[r["group_id"]] = int(r["n"])
+        eco = {}
+        ids = [h["decision_id"] for h in hs if h.get("decision_id")]
+        if ids:
+            for r in await conn.fetch(
+                    "SELECT decision_id, economics, policy_decision, "
+                    "       p_pinnacle FROM paper_decisions "
+                    " WHERE decision_id = ANY($1::text[])", ids):
+                e = L._j(r["economics"]) if isinstance(r["economics"], str) \
+                    else r["economics"]
+                pd = L._j(r["policy_decision"]) if isinstance(
+                    r["policy_decision"], str) else r["policy_decision"]
+                eco[r["decision_id"]] = (e or {}, pd or {},
+                                         r["p_pinnacle"])
+        out = []
+        for h in hs:
+            g = h["group_id"]
+            p = allp.get(g) or {}
+            m = marks.get(g) or {}
+            e, pd, p_pin = eco.get(h.get("decision_id"), ({}, {}, None))
+            acq = (e.get("acquisition") or {}) if isinstance(e, dict) else {}
+            oq = float(p.get("open_qty") or 0.0)
+            basis = float(p.get("cost_basis_usd") or 0.0)
+            avg = float(p.get("avg_cost_per_contract_incl_fees") or 0.0)
+            exc = (acq.get("exceptional_settlement") or {}) if isinstance(
+                acq, dict) else {}
+            scen = []
+            for cond, sc in sorted((exc.get("scenarios") or {}).items()):
+                rng = sc.get("payoff_per_contract_range")
+                scen.append({
+                    "condition": cond, "venue_payout": sc.get("venue_payout"),
+                    "payoff_basis": sc.get("payoff_basis"),
+                    "probability": "UNMEASURED",
+                    "payoff_range_usd": (None if rng is None or oq <= 0 else
+                                         [round(oq * (0.0 - avg) if rng[0] < 0
+                                                else 0.0, 6),
+                                          round(oq * (1.0 - avg) if rng[1] > 0
+                                                else 0.0, 6)]),
+                    "note": sc.get("probability_note")})
+            rv = revs.get(g)
+            out.append({
+                "group_id": g, "strategy": h.get("strategy"),
+                "market": h.get("market"), "label": h.get("label"),
+                "us_market_slug": h.get("us_market_slug"),
+                "intent": h.get("intent"), "decision_id": h.get("decision_id"),
+                "first_fill_at": h.get("first_fill_at"),
+                "confirmed_qty": h.get("confirmed_qty"),
+                "status": ("SETTLED: %s" % (p.get("settlement") or {}).get(
+                    "outcome") if p.get("settlement") else
+                    "OPEN" if oq > 1e-9 else "CLOSED"),
+                "realized": {
+                    "realized_pnl_usd": p.get("realized_pnl_usd"),
+                    "settlement": p.get("settlement"),
+                    "sale_proceeds_net_usd": p.get("sale_proceeds_net_usd"),
+                    "basis": ("booked on the ledger from sales and "
+                              "settlements; never a floor or a scenario")},
+                "remaining": None if oq <= 1e-9 else {
+                    "open_qty": oq, "cost_basis_usd": basis,
+                    "avg_cost_incl_fees": avg,
+                    "marked_value_usd": m.get("marked_value_usd"),
+                    "unrealized_pnl_usd": m.get("unrealized_pnl_usd"),
+                    "mark": m.get("mark"),
+                    "ordinary_completion": {
+                        "win_usd": round(oq * 1.0 - basis, 6),
+                        "lose_usd": round(-basis, 6),
+                        "p_pinnacle_at_decision": p_pin,
+                        "basis": ("the open contracts pay $1 each if the "
+                                  "selection wins an ordinarily completed "
+                                  "game, $0 if it loses; less the cost "
+                                  "basis incl. fees")},
+                    "conditional_ev_at_decision_usd": acq.get(
+                        "expected_net_profit_usd"),
+                    "economics_label": acq.get("label") or pd.get(
+                        "economics_label"),
+                    "exceptional_settlement": scen,
+                    "exceptional_note": (
+                        "exceptional-settlement probabilities are UNMEASURED: "
+                        "never zero, never invented; not in the conditional "
+                        "EV" if scen else
+                        "no exceptional-settlement scenarios recorded on the "
+                        "entry decision (the strict policy requires every "
+                        "settlement condition to be compatible)"),
+                    "open_management_orders": stand.get(g, 0)},
+                "recommendation": None if rv is None else {
+                    "recommendation": rv.get("recommendation"),
+                    "refusal": rv.get("refusal"),
+                    "refusal_words": refusal_words(rv.get("refusal")),
+                    "selection": rv.get("selection"),
+                    "trigger": rv.get("trigger"),
+                    "reviewed_at": rv.get("reviewed_at"),
+                    "action": rv.get("action"), "review_id": rv.get("review_id")}})
+        return out
+
+    async def exposure():
+        b = await bal()
+        op = b.get("open_positions") or []
+        basis = sum(float(p.get("cost_basis_usd") or 0) for p in op)
+        return {"open_positions": len(op),
+                "cost_basis_at_risk_usd": round(basis, 6),
+                "max_loss_usd": round(-basis, 6),
+                "max_gain_usd": round(sum(float(p.get("open_qty") or 0)
+                                          for p in op) - basis, 6),
+                "marked_value_usd": b.get("open_position_value_usd"),
+                "marked_value_marked_only_usd": b.get(
+                    "open_position_value_marked_only_usd"),
+                "unrealized_pnl_usd": b.get("unrealized_pnl_usd"),
+                "reserved_for_open_orders_usd": b.get("reserved_usd"),
+                "realized_pnl_usd": b.get("realized_pnl_usd"),
+                "basis": ("max loss/gain if every open contract loses/wins "
+                          "an ordinarily completed game; realized P&L is "
+                          "booked and kept apart")}
 
     out["handoffs"] = await _sec(handoffs(), empty_why=(
         "NO_PAPER_HANDOFF: Xavier takes a group from its first simulated "
@@ -569,6 +921,11 @@ async def xavier_operations(conn, *, account_id: str | None = None,
     out["pending_settlements"] = await _sec(
         pending(), empty_why="NO_OPEN_POSITION_AWAITING_SETTLEMENT",
         is_empty=lambda d: not (d or {}).get("count"))
+    out["owned_positions"] = await _sec(owned(), empty_why=(
+        "NO_PAPER_POSITION_OWNED: Xavier owns a group from its first "
+        "simulated fill"))
+    out["exposure"] = await _sec(exposure(), empty_why="NO_PAPER_ACCOUNT")
+    out["account"] = await account_section(conn, account_id=acct, now=at)
     out["freshness"] = await freshness(conn, account_id=acct, now=at)
     out["last_updated_at"] = await _last_updated(conn, acct)
     return out
@@ -660,9 +1017,6 @@ async def audrey_operations(conn, *, account_id: str | None = None,
             raise RuntimeError(b.get("refusal") or "BALANCES_REFUSED")
         return b
 
-    async def account():
-        return account_view(await bal())
-
     async def pnl():
         b = await bal()
         allp = await L.positions(conn, acct, include_closed=True)
@@ -715,7 +1069,89 @@ async def audrey_operations(conn, *, account_id: str | None = None,
             " GROUP BY 1, 2 ORDER BY 3 DESC", acct)
         return [RM._row(r) for r in rows]
 
-    out["account"] = await _sec(account(), empty_why="NO_PAPER_ACCOUNT")
+    async def reconciliation():
+        """THE LEDGER RECONCILED (agents.paper_brief.reconcile): every check
+        names the two figures it compares; reconciled only when all pass."""
+        from .agents import paper_brief as PB
+        r = await PB.reconcile(conn, now=at, account_id=acct, entries=0)
+        if not r.get("present"):
+            raise RuntimeError(r.get("why") or "LEDGER_NOT_PRESENT")
+        if r.get("checks") is None:
+            raise RuntimeError(r.get("why") or "BALANCES_REFUSED")
+        return {k: r.get(k) for k in ("reconciled", "failed_checks", "checks",
+                                      "entries_count", "first_seq",
+                                      "last_seq", "by_kind")}
+
+    async def performance():
+        """EACH STRATEGY'S RECORD, kept apart: decisions and entries, fills,
+        positions open and settled by outcome, realized P&L (booked) and
+        what is still open."""
+        rows = {}
+
+        def row(s_):
+            return rows.setdefault(s_, {
+                "strategy": s_, "kind": STRATEGY_META.get(s_, {}).get(
+                    "kind", "OTHER"), "decisions": 0, "enter": 0,
+                "entry_orders": 0, "filled_orders": 0, "settled": {},
+                "won": 0, "lost": 0, "open_positions": 0,
+                "closed_positions": 0, "realized_pnl_usd": 0.0})
+        for r in await conn.fetch(
+                "SELECT strategy, count(*) AS n, count(*) FILTER (WHERE "
+                "       verdict = 'ENTER') AS e FROM paper_decisions "
+                " WHERE account_id = $1 GROUP BY 1", acct):
+            x = row(r["strategy"])
+            x.update(decisions=int(r["n"]), enter=int(r["e"]))
+        for r in await conn.fetch(
+                "SELECT strategy, count(*) AS n, count(*) FILTER (WHERE "
+                "       filled_qty > 0) AS f FROM paper_orders "
+                " WHERE account_id = $1 AND role = 'ENTRY' GROUP BY 1", acct):
+            x = row(r["strategy"])
+            x.update(entry_orders=int(r["n"]), filled_orders=int(r["f"]))
+        for p_ in await L.positions(conn, acct, include_closed=True):
+            x = row(p_.get("strategy") or TWO_MODEL)
+            x["realized_pnl_usd"] = round(x["realized_pnl_usd"] + float(
+                p_.get("realized_pnl_usd") or 0.0), 6)
+            if float(p_.get("open_qty") or 0) > 1e-9:
+                x["open_positions"] += 1
+            else:
+                x["closed_positions"] += 1
+            st = (p_.get("settlement") or {}).get("outcome")
+            if st:
+                x["settled"][st] = x["settled"].get(st, 0) + 1
+                x["won"] += st == "WON"
+                x["lost"] += st == "LOST"
+        return [rows[k] for k in sorted(rows, key=lambda k: (
+            STRATEGY_ORDER.index(k) if k in STRATEGY_ORDER else 99, k))]
+
+    async def learning():
+        """THE LEARNING RECORD (agents.paper_learning, the same read as GET
+        /api/command/paper/learning): per agent what was learned, the
+        proposed change, its evaluation (INSUFFICIENT_FORWARD_DATA stated as
+        such) and whether it is active; Audrey's event-audit counts; the
+        activation control."""
+        from .agents import paper_learning as PLRN
+        return await PLRN.learning_summary(conn, account_id=acct, now=at)
+
+    async def events():
+        from .agents import paper_learning as PLRN
+        if not await PLRN.has_schema(conn):
+            raise RuntimeError("MIGRATION_185_IS_NOT_APPLIED")
+        return await PLRN.event_audits(conn, account_id=acct, limit=30)
+
+    out["account"] = await account_section(conn, account_id=acct, now=at)
+    out["reconciliation"] = await _sec(reconciliation(),
+                                       empty_why="NO_LEDGER")
+    out["performance_by_strategy"] = await _sec(
+        performance(), empty_why="NO_PAPER_DECISION_OR_POSITION_YET")
+    try:
+        lr = await learning()
+        out["learning"] = {"status": "OK", "why": None, "data": lr}
+    except Exception as exc:                                    # noqa: BLE001
+        out["learning"] = _unavailable("%s: %s" % (type(exc).__name__,
+                                                   str(exc)[:160]))
+    out["event_audits"] = await _sec(events(), empty_why=(
+        "NO_EVENT_AUDITED_YET: Audrey audits each first fill, handoff, "
+        "management fill and settlement once, on the paper pass after it"))
     out["pnl_by_strategy"] = await _sec(pnl(), empty_why=(
         "NO_PAPER_POSITION_YET: P&L by strategy starts with the first "
         "simulated fill"))
@@ -743,12 +1179,6 @@ async def overview(conn, *, account_id: str | None = None,
     out = _base(at)
     out["account_id"] = acct
     since = L._ts(at - 86400.0)
-
-    async def account():
-        b = await L.balances(conn, acct, now=at)
-        if not b.get("ok"):
-            raise RuntimeError(b.get("refusal") or "BALANCES_REFUSED")
-        return account_view(b)
 
     async def derek():
         rows = await conn.fetch(
@@ -832,7 +1262,7 @@ async def overview(conn, *, account_id: str | None = None,
     except Exception as exc:                                    # noqa: BLE001
         out["session"] = _unavailable("%s: %s" % (type(exc).__name__,
                                                   str(exc)[:160]))
-    out["account"] = await _sec(account(), empty_why="NO_PAPER_ACCOUNT")
+    out["account"] = await account_section(conn, account_id=acct, now=at)
     out["agents"] = {
         "derek": await _sec(derek(), empty_why="NO_PAPER_DECISION_YET"),
         "xavier": await _sec(xavier(), empty_why=(

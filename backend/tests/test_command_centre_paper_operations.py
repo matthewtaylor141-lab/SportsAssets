@@ -92,7 +92,7 @@ async def test_derek_strategies_are_counted_apart_with_versions_labels_and_funne
     assert v2["counts"]["status"] == "OK" and v2["counts"]["data"]["decisions"] == 4
     assert v2["counts"]["data"]["enter"] == 0 and v2["counts"]["data"]["refuse"] == 4
     assert strict["counts"]["data"]["decisions"] == 3 and strict["counts"]["data"]["enter"] == 1
-    assert cg["counts"]["data"]["decisions"] == 3 and cg["counts"]["data"]["enter"] == 2
+    assert cg["counts"]["data"]["decisions"] == 8 and cg["counts"]["data"]["enter"] == 2
     for s in (v2, strict, cg):
         ids = {r["decision_id"] for r in s["recent"]["data"]}
         assert ids == set(got["decisions"][s["strategy"]]), s["strategy"]
@@ -115,10 +115,12 @@ async def test_derek_strategies_are_counted_apart_with_versions_labels_and_funne
         "INTERNAL_MODEL_NOT_QUALIFIED": 2, "BELOW_MIN_EDGE": 1, "STRATEGY_ENTRIES_DISABLED": 1}
     # THE FUNNEL, from each decision's own conditions, then the pipeline
     st = {x["stage"]: x for x in cg["funnel"]["data"]["stages"]}
-    assert st["decisions recorded"]["n"] == 3
-    assert st["contract_outcome_settlement_match"]["n"] == 3
-    assert st["pinnacle_fresh_at_the_decision_instant"]["n"] == 2
+    assert st["decisions recorded"]["n"] == 8
+    assert st["contract_outcome_settlement_match"]["n"] == 8
+    assert st["pinnacle_fresh_at_the_decision_instant"]["n"] == 7
     assert st["pinnacle_fresh_at_the_decision_instant"]["failed_here"] == 1
+    assert st["edge_at_least_5pp_at_every_level_used"]["n"] == 2
+    assert st["edge_at_least_5pp_at_every_level_used"]["failed_here"] == 5
     assert st["positive_ev_after_fees"]["n"] == 2
     assert st["verdict ENTER"]["n"] == 2 and st["paper entry orders"]["n"] == 2
     assert st["orders with a simulated fill"]["n"] == 2 and st["handed to Xavier"]["n"] == 2
@@ -176,8 +178,9 @@ async def test_audrey_reads_the_account_pnl_by_strategy_findings_and_report():
     assert rows[SEED.CG]["kind"] == "EXPERIMENTAL_BENCHMARK"
     assert a["daily_report"]["status"] == "OK" and a["daily_report"]["data"]["reconciles"] is True
     assert a["daily_report"]["data"]["benchmark_sections"] == ["pinnacle_completed_game_paper"]
-    assert len(a["findings"]["data"]) == 2
-    assert {r["severity"] for r in a["finding_counts"]["data"]} == {"INFO", "WARNING"}
+    # two seeded findings and Audrey's event audits (one per event)
+    assert len(a["findings"]["data"]) == 2 + len(a["event_audits"]["data"])
+    assert {r["severity"] for r in a["finding_counts"]["data"]} >= {"INFO", "WARNING"}
 
 
 async def test_the_three_freshness_stamps_come_from_three_different_records():
@@ -202,7 +205,7 @@ async def test_the_three_freshness_stamps_come_from_three_different_records():
     assert by[SEED.CG]["enter"] == 2 and by[SEED.CG]["kind"] == "EXPERIMENTAL_BENCHMARK"
     xv = o["agents"]["xavier"]["data"]
     assert xv["handoffs"] == 3 and xv["pending_settlement"] == 1 and xv["open_management_orders"] == 1
-    assert o["agents"]["audrey"]["data"]["findings"] == 2
+    assert o["agents"]["audrey"]["data"]["findings"] >= 2
     assert o["account"]["data"]["cash_usd"] == got["balances"]["cash_usd"]
 
 
@@ -315,7 +318,7 @@ async def test_the_operations_route_serves_the_session_to_a_command_session_only
             assert r.status_code == 200
             j = r.json()
             assert j["agent"] == "derek" and j["account_id"] == acct["account_id"]
-            assert [s["counts"]["data"]["decisions"] for s in j["strategies"]] == [4, 3, 3]
+            assert [s["counts"]["data"]["decisions"] for s in j["strategies"]] == [4, 3, 8]
             for k in ("xavier", "audrey"):
                 r = await c.get("/api/command/paper/operations?agent=" + k)
                 assert r.status_code == 200 and r.json()["agent"] == k
@@ -417,19 +420,21 @@ async def test_the_pages_render_the_seeded_session_strategies_apart():
     assert 'data-strategy="DEREK_ENTRY_POLICY_V2" data-kind="ORIGINAL_RESEARCH"' in research
     assert "PINNACLE_" not in re.sub(r"<details class=\"tech\">.*?</details>", "", research, flags=re.S).replace(
         "only the PINNACLE_ONLY_PAPER_BENCHMARK may open new paper entries", "")
-    assert bench.count('<details class="dec"') == 6 and research.count('<details class="dec"') == 4
+    assert bench.count('<details class="dec"') == 11 and research.count('<details class="dec"') == 4
     # versions and labels, the CG policy's conditional / experimental label
     assert "PINNACLE_COMPLETED_GAME_PAPER_V1" in bench and "PINNACLE_ONLY_PAPER_BENCHMARK_V1" in bench
     assert "CONDITIONAL · EXPERIMENTAL" in bench and "CONDITIONAL_EXPERIMENTAL_NOT_RISK_ADJUSTED" in bench
     assert "Eligibility funnel" in bench and "handed to Xavier" in bench and "stopped here" in bench
     assert "ENTER (conditional on ordinary completion)" in bench and "+7.40 pp" in bench and "+$18.00" in bench
     assert "STRATEGY_ENTRIES_DISABLED" in research and "Its paper entry switch is <b>OFF</b>" in research
-    assert [k["value"] for k in got["dk"][:3]] == ["4", "3", "3"]
+    assert [k["value"] for k in got["dk"][:3]] == ["4", "3", "8"]
     # Xavier: every handoff with its strategy, reviews, protection, settlements, pending
     xh = got["x"]["p-ops-handoffs"]["html"]
-    assert xh.count('<div class="orow" data-group=') == 3 and xh.count('data-strategy="PINNACLE_COMPLETED_GAME_PAPER"') == 2
-    assert '<span class="ostat WON">WON</span>' in xh and '<span class="ostat SETTLED_AT_VENUE_PRICE">' in xh
-    assert "OPEN · 400 held" in xh
+    # (the panel became "Positions Xavier owns": one card per handoff)
+    assert xh.count('<div class="orow owned" data-group=') == 3 and xh.count('data-strategy="PINNACLE_COMPLETED_GAME_PAPER"') == 2
+    assert '<span class="ostat WON">SETTLED: WON</span>' in xh
+    assert '<span class="ostat SETTLED_AT_VENUE_PRICE">SETTLED: SETTLED_AT_VENUE_PRICE</span>' in xh
+    assert '<span class="ostat OPEN">OPEN</span>' in xh and "400 contracts held" in xh
     assert "STANDING_PROTECTION" in got["x"]["p-ops-protection"]["html"]
     xs = got["x"]["p-ops-settlements"]["html"]
     assert "SETTLED_AT_VENUE_PRICE" in xs and "PENDING" in xs and "waiting 1" in xs
@@ -439,7 +444,9 @@ async def test_the_pages_render_the_seeded_session_strategies_apart():
     aa = got["a"]["p-ops-account"]["html"]
     assert 'data-acct="cash_usd"' in aa and 'data-pnl="PINNACLE_ONLY_PAPER_BENCHMARK"' in aa
     assert 'data-pnl="PINNACLE_COMPLETED_GAME_PAPER"' in aa and 'data-pnl="DEREK_ENTRY_POLICY_V2"' not in aa
-    assert got["a"]["p-ops-findings"]["html"].count("data-finding=") == 2
+    fh = got["a"]["p-ops-findings"]["html"]
+    assert fh.count("data-finding=") == len(a["findings"]["data"])           # every finding
+    assert fh.count("data-event-audit=") == min(12, len(a["event_audits"]["data"]))   # the event audits, first
     assert "reconciles" in got["a"]["p-ops-report"]["html"]
     assert got["ak"][3]["label"] == "Latest daily report"
     assert got["ak"][3]["value"] == a["daily_report"]["data"]["report_day"]

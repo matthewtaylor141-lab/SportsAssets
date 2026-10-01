@@ -59,8 +59,55 @@ def _conds(names, fail_at):
     return out
 
 
+#: SYNTHETIC GAMES (test data): the instrument label a decision records, in
+#: derek_policy.instrument_label's keys, so the pages can name the market.
+GAMES = [
+    {"participant": "New York Yankees", "home_team": "Boston Red Sox",
+     "away_team": "New York Yankees", "market_type": "MONEYLINE",
+     "competition": "MLB", "period": "FULL_GAME", "event_date": "2026-10-02"},
+    {"participant": "Los Angeles Dodgers", "home_team": "Los Angeles Dodgers",
+     "away_team": "San Diego Padres", "market_type": "MONEYLINE",
+     "competition": "MLB", "period": "FULL_GAME", "event_date": "2026-10-02"},
+    {"participant": "Seattle Mariners", "home_team": "Houston Astros",
+     "away_team": "Seattle Mariners", "market_type": "MONEYLINE",
+     "competition": "MLB", "period": "FULL_GAME", "event_date": "2026-10-03"},
+]
+
+
+def _economics(strategy, *, ev, vwap=0.5, qty=400.0):
+    """The decision's economics.acquisition, in paper_benchmark's keys; the
+    completed-game policy carries its exceptional-settlement scenarios with
+    UNMEASURED probabilities (paper_benchmark.exceptional_scenarios)."""
+    if strategy == V2:
+        return None
+    acq = {"qty": qty, "vwap": vwap, "acquisition_cost_usd": qty * vwap,
+           "fees_usd": 0.4, "expected_net_profit_usd": ev,
+           "net_ev_positive": ev > 0}
+    if strategy == CG:
+        acq.update(label="CONDITIONAL_EXPERIMENTAL_NOT_RISK_ADJUSTED",
+                   conditional_on="ORDINARY_COMPLETION")
+        acq["exceptional_settlement"] = {
+            "label": "CONDITIONAL_EXPERIMENTAL_NOT_RISK_ADJUSTED",
+            "included_in_conditional_ev": False,
+            "scenarios": {
+                "NOT_PLAYED": {
+                    "venue_payout": "PAY_LAST_FAIR_MARKET_PRICE",
+                    "probability": "UNMEASURED",
+                    "payoff_per_contract_range": [-vwap, 1.0 - vwap],
+                    "payoff_basis": ("the venue settles at the contract's "
+                                     "last fair market price S")},
+                "SUSPENDED_BEYOND_THE_WINDOW": {
+                    "venue_payout": "PAY_LAST_FAIR_MARKET_PRICE",
+                    "probability": "UNMEASURED",
+                    "payoff_per_contract_range": [-vwap, 1.0 - vwap],
+                    "payoff_basis": ("the venue settles at the contract's "
+                                     "last fair market price S")}}}
+    return {"acquisition": acq}
+
+
 async def _decision(conn, acct, *, n, strategy, verdict, refusal, at, slug,
-                    fail_at, edge, ev, p_pin=0.58, p_int=None):
+                    fail_at, edge, ev, p_pin=0.58, p_int=None, game=None,
+                    short_pp=None):
     did = "paperseed:%s:%s:%d" % (acct["account_id"][-10:], strategy[:6], n)
     names = V2_CONDITIONS if strategy == V2 else BENCH_CONDITIONS
     pd = {"strategy": strategy, "policy_version": VERSIONS[strategy],
@@ -69,6 +116,9 @@ async def _decision(conn, acct, *, n, strategy, verdict, refusal, at, slug,
           "p_pinnacle": p_pin, "admitted": verdict == "ENTER",
           "refusal": refusal, "refusals": [refusal] if refusal else [],
           "shortfall": {"edge_pp": edge, "ev_after_fees_usd": ev,
+                        "edge_threshold_pp": 5.0,
+                        "edge_shortfall_pp": (short_pp if short_pp is not None
+                                              else max(0.0, round(5.0 - edge, 6))),
                         "depth_within_limit": 400, "pinnacle_age_s": 12.0,
                         "pinnacle_limit_s": 120.0, "book_age_s": 2.0},
           "economics_label": ("CONDITIONAL_EXPERIMENTAL_NOT_RISK_ADJUSTED"
@@ -81,16 +131,19 @@ async def _decision(conn, acct, *, n, strategy, verdict, refusal, at, slug,
         " fixture, label, verdict, refusal, refusals, p_internal, "
         " internal_model, p_pinnacle, pinnacle, p_blended, proposed_qty, "
         " limit_price, qualification_gaps, policy_version, policy_decision, "
-        " simulator_version, strategy) VALUES ($1,$2,$3,$4,NULL,$5,'LONG',"
-        " 'ORDER_INTENT_BUY_LONG','fx-seed',$6::jsonb,$7,$8,$9,$10,'{}'::jsonb,"
-        " $11,'{}'::jsonb,$12,$13,$14,'[]'::jsonb,$15,$16::jsonb,$17,$18)",
+        " simulator_version, strategy, economics) VALUES ($1,$2,$3,$4,NULL,$5,"
+        " 'LONG','ORDER_INTENT_BUY_LONG','fx-seed',$6::jsonb,$7,$8,$9,$10,"
+        " '{}'::jsonb,$11,'{}'::jsonb,$12,$13,$14,'[]'::jsonb,$15,$16::jsonb,"
+        " $17,$18,$19::jsonb)",
         did, acct["session_id"], acct["account_id"], L._ts(at), slug,
-        json.dumps({"participant": "SEED TEAM", "market_type": "MONEYLINE"}),
+        json.dumps(GAMES[n % len(GAMES)] if game is None else game),
         verdict, refusal, [refusal] if refusal else [], p_int, p_pin,
         None if p_int is None else round((p_int + p_pin) / 2, 6),
         L.D(400) if verdict == "ENTER" else None,
         L.D("0.5") if verdict == "ENTER" else None, VERSIONS[strategy],
-        json.dumps(pd), SIM.VERSION, strategy)
+        json.dumps(pd), SIM.VERSION, strategy,
+        None if _economics(strategy, ev=ev) is None
+        else json.dumps(_economics(strategy, ev=ev)))
     return did
 
 
@@ -100,6 +153,10 @@ async def _entry(conn, acct, *, key, slug, strategy, decision_id, at,
                 fixture="fx-seed")
     o["strategy"] = strategy
     o["decision_id"] = decision_id
+    lb = await conn.fetchval("SELECT label FROM paper_decisions "
+                             " WHERE decision_id=$1", decision_id)
+    if lb:
+        o["label"] = json.loads(lb) if isinstance(lb, str) else lb
     got = await L.submit_order(conn, o, fee_fn=H.flat_fee(0.001), now=at)
     assert got["ok"], got
     await H.observe(conn, slug, at + 3.0, offers=[(limit, qty)],
@@ -175,6 +232,15 @@ async def seed(conn, acct: dict, *, t0: float) -> dict:
             at=t0 + 20 + i, slug=sl("cg-%d" % i), fail_at=fail_at,
             edge=7.4 if verdict == "ENTER" else 4.0,
             ev=18.0 if verdict == "ENTER" else -2.0))
+    # FIVE COMPLETED-GAME NEAR MISSES (edge within 1 pp of the 5 pp
+    # threshold): the learning record's rule for a Derek proposal
+    for i in range(5):
+        n += 1
+        out["decisions"][CG].append(await _decision(
+            conn, acct, n=n, strategy=CG, verdict="REFUSE",
+            refusal="BELOW_MIN_GROSS_EDGE", at=t0 + 25 + i,
+            slug=sl("cg-near-%d" % i), fail_at=3, edge=4.5, ev=-0.2,
+            short_pp=0.5))
     # ENTRIES ON THE ONE LEDGER, AND THEIR HANDOFFS TO XAVIER
     strict = await _entry(conn, acct, key="seed-strict", strategy=STRICT,
                           slug=sl("strict-2"),
@@ -251,6 +317,19 @@ async def seed(conn, acct: dict, *, t0: float) -> dict:
         L._ts(t0 + 110), json.dumps(rep))
     # THE RUNTIME'S HEARTBEAT (a pass that ran; the settle step left one
     # position waiting)
+    # AUDREY'S EVENT AUDITS and THE LEARNING RECORD, through the learning
+    # module's own steps (migration 185), when this build has them
+    try:
+        from sportsassets.agents import paper_learning as PLRN
+        if await PLRN.has_schema(conn):
+            ctx = {"account_id": acct["account_id"],
+                   "session_id": acct["session_id"], "now": t0 + 115}
+            out["event_audits"] = await PLRN.step_audit_events(conn, ctx)
+            out["learning"] = await PLRN.learn(
+                conn, account_id=acct["account_id"],
+                session_id=acct["session_id"], now=t0 + 116)
+    except ImportError:
+        pass
     await S.record_pass(conn, acct["session_id"], now=t0 + 120, result={
         "at": t0 + 120, "ran": True, "errors": {}, "elapsed_s": 1.2,
         "steps": {"settle": {"settled": 0, "corrected": 0, "conflicts": 0,

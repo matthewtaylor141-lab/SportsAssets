@@ -10,9 +10,20 @@
 
    READS (same origin, the HttpOnly COMMAND cookie; nothing here holds a
    credential):
-     GET /api/command/paper/account?entries=1   balances() -- the figures
-     GET /api/command/paper/overview            session, agents, freshness
-     GET /api/command/paper/stream              committed ledger entries (SSE)
+     GET /api/command/paper/overview            THE ONE READ: the account
+                                                (bettor_paper_ops.account_
+                                                section -> ledger balances(),
+                                                the same function every agent
+                                                page shows), session, agents,
+                                                freshness
+     GET /api/command/paper/stream              committed ledger entries (SSE):
+                                                each one triggers a re-read of
+                                                the overview, so the figures
+                                                are never patched piecemeal
+
+   SIGNED OUT (401/403 from a read, or the stream failing while a probe read
+   answers 401/403): a SIGN-IN prompt that opens the existing unlock
+   (unlock.js, BTUnlock.open) -- never an unexplained RECONNECTING.
 
    NEVER A DEFAULT FIGURE. A failed read shows UNAVAILABLE with the reason; a
    401 shows SIGN-IN REQUIRED; a route the serving API does not have yet says
@@ -35,20 +46,23 @@
    own labelled section, never here. */
 (function () {
   "use strict";
-  var ACCOUNT = "/api/command/paper/account?entries=1";
+  var PROBE = "/api/command/paper/account?entries=1";
   var OVERVIEW = "/api/command/paper/overview";
   var STREAM = "/api/command/paper/stream";
   var POLL_MS = 15000, LIVE_MS = 30000, STALE_HB_S = 300;
-  var FIELDS = [["cash_usd", "Cash"], ["reserved_usd", "Reserved cash"],
-    ["available_usd", "Available cash"], ["open_position_value_usd", "Open-position value"],
-    ["total_equity_usd", "Total equity"], ["realized_pnl_usd", "Realized P&L"],
+  // THE SEVEN FIGURES: the same keys, labels and formatting rule as the agent
+  // pages (agent_cc_ops.ACCOUNT_FIGURES / CC.ops.accountFigures)
+  var FIELDS = [["cash_usd", "Cash"], ["reserved_usd", "Reserved"],
+    ["available_usd", "Available"], ["open_position_value_usd", "Position value"],
+    ["total_equity_usd", "Equity"], ["realized_pnl_usd", "Realized P&L"],
     ["unrealized_pnl_usd", "Unrealized P&L"]];
   var STRIP_KEEP = {cash_usd: 1, total_equity_usd: 1, realized_pnl_usd: 1};
   var st = {
     bal: null, balWhy: null, balState: "READING",
     ov: null, ovOkAt: null, ovTryAt: null, ovFail: null,
-    stream: "CONNECTING", streamNote: "", lastSeq: null
+    stream: "CONNECTING", streamNote: "", lastSeq: null, signedOut: false
   };
+  function figText(k, v) { return num(v) ? usd(v, /pnl/.test(k)) : v === null ? "NOT STATED" : "not sent"; }
 
   // ── formatting ────────────────────────────────────────────────────
   function esc(s) { return String(s === null || s === undefined ? "" : s).replace(/[&<>"']/g, function (c) {
@@ -100,37 +114,44 @@
           function () { return {fail: {state: "UNAVAILABLE", why: "the paper " + what + " response was not JSON"}}; });
       }, function (e) { return {fail: {state: "UNAVAILABLE", why: "network error reading the paper " + what + " (" + ((e && e.name) || "Error") + ")"}}; });
   }
-  function takeBal(b) {
-    if (!b || typeof b !== "object" || b.ok !== true) { return false; }
-    if (st.bal && num(st.bal.last_sequence) && num(b.last_sequence) && b.last_sequence < st.bal.last_sequence) { return false; }
-    st.bal = b; st.balState = "OK"; st.balWhy = null;
-    if (num(b.last_sequence)) { st.lastSeq = Math.max(st.lastSeq || 0, b.last_sequence); }
-    return true;
-  }
-  function readAccount() {
-    return get(ACCOUNT, "account").then(function (o) {
-      if (o.fail) { st.bal = null; st.balState = o.fail.state; st.balWhy = o.fail.why; return; }
-      var a = sec(o.json && o.json.account);
-      if (a && a.status === "OK" && a.data && a.data.ok === true) { takeBal(a.data); if (!es && !reconnectT) { stream(); } }
-      else { st.bal = null; st.balState = a ? (a.status === "OK" ? "UNAVAILABLE" : a.status) : "UNAVAILABLE";
-             st.balWhy = (a && (a.why || (a.data && a.data.refusal))) || "the response carried no account section"; }
-    });
-  }
   function readOverview() {
     st.ovTryAt = nowS();
     return get(OVERVIEW, "overview").then(function (o) {
-      if (o.fail) { st.ovFail = o.fail; return; }
+      if (o.fail) {
+        st.ovFail = o.fail;
+        if (o.fail.state === "SIGN-IN REQUIRED") { st.signedOut = true; st.bal = null; st.balState = o.fail.state; st.balWhy = o.fail.why; }
+        else if (!st.ov) { st.bal = null; st.balState = o.fail.state; st.balWhy = o.fail.why; }
+        return;
+      }
       var whole = sec(o.json && o.json.overview);
-      if (whole && whole.status !== "OK") { st.ovFail = {state: "UNAVAILABLE", why: whole.why || "the server named no reason"}; return; }
-      st.ov = o.json; st.ovOkAt = nowS(); st.ovFail = null;
+      if (whole && whole.status !== "OK") { st.ovFail = {state: "UNAVAILABLE", why: whole.why || "the server named no reason"}; st.bal = null; st.balState = "UNAVAILABLE"; st.balWhy = st.ovFail.why; return; }
+      st.ov = o.json; st.ovOkAt = nowS(); st.ovFail = null; st.signedOut = false;
+      var a = sec(o.json.account);
+      if (a && a.status === "OK" && a.data) {
+        st.bal = a.data; st.balState = "OK"; st.balWhy = null;
+        if (num(a.data.last_sequence)) { st.lastSeq = Math.max(st.lastSeq || 0, a.data.last_sequence); }
+        if (!es && !reconnectT) { stream(); }
+      } else { st.bal = null; st.balState = a ? a.status : "UNAVAILABLE"; st.balWhy = (a && a.why) || "the overview carried no account section"; }
     });
   }
   var busy = false;
   function load() {
     if (busy) { return Promise.resolve(); }
     busy = true;
-    return Promise.all([readAccount(), readOverview()]).then(function () { busy = false; render(); },
+    return readOverview().then(function () { busy = false; render(); },
       function () { busy = false; render(); });
+  }
+  // AN EventSource CANNOT SEE A 401: on a stream error, ask a plain read
+  function probeAuth() {
+    return get(PROBE, "account").then(function (o) {
+      if (o.fail && o.fail.state === "SIGN-IN REQUIRED") {
+        if (es) { es.close(); es = null; }
+        clearTimeout(reconnectT); reconnectT = null;
+        st.signedOut = true; st.stream = "SIGN-IN REQUIRED"; st.streamNote = "the live stream needs a COMMAND session";
+        render(); return true;
+      }
+      return false;
+    });
   }
 
   // ── the stream, with backoff ─────────────────────────────────────
@@ -143,17 +164,15 @@
     var url = STREAM + (st.lastSeq !== null ? "?last=" + encodeURIComponent(st.lastSeq) : "");
     var src = es = new EventSource(url);
     src.onopen = function () { if (src !== es) { return; } retry = 0; st.stream = "LIVE"; st.streamNote = ""; render(); schedule(); };
-    src.addEventListener("snapshot", function (ev) { if (src !== es) { return; } var d = parse(ev); if (d) { takeBal(d.balances); } st.stream = "LIVE"; render(); });
+    src.addEventListener("snapshot", function () { if (src !== es) { return; } st.stream = "LIVE"; render(); });
     src.addEventListener("ledger", function (ev) {
       if (src !== es) { return; }
-      var d = parse(ev); if (!d) { return; }
-      if (d.balances) { takeBal(d.balances); }
-      else if (d.running_balances && st.bal && num(d.sequence) && (!num(st.bal.last_sequence) || d.sequence > st.bal.last_sequence)) {
-        st.bal = Object.assign({}, st.bal, d.running_balances, {last_updated_at: d.committed_at || st.bal.last_updated_at});
-      }
-      if (num(d.sequence)) { st.lastSeq = Math.max(st.lastSeq || 0, d.sequence); }
-      st.stream = "LIVE"; render();
-      clearTimeout(soonT); soonT = setTimeout(function () { readOverview().then(render, render); }, 1500);
+      var d = parse(ev);
+      if (d && num(d.sequence)) { st.lastSeq = Math.max(st.lastSeq || 0, d.sequence); }
+      st.stream = "LIVE";
+      // A COMMITTED ENTRY: re-read the one account read (debounced), so the
+      // strip, the panel and every agent page show the same figures
+      clearTimeout(soonT); soonT = setTimeout(function () { readOverview().then(render, render); }, 800);
     });
     src.addEventListener("heartbeat", function () { if (src !== es) { return; } st.stream = "LIVE"; st.streamNote = "server heartbeat " + new Date().toISOString().slice(11, 19) + "Z"; render(); });
     src.addEventListener("unavailable", function (ev) {
@@ -162,6 +181,7 @@
     });
     src.onerror = function () {
       if (src !== es) { return; }
+      probeAuth();
       if (src.readyState === 2) {
         src.close(); es = null; st.stream = "RECONNECTING";
         var wait = Math.min(30000, 1000 * Math.pow(2, retry++));
@@ -183,7 +203,7 @@
     if (document.hidden) { return; }
     if (es && es.readyState === 2) { es.close(); es = null; }
     if (!es) { clearTimeout(reconnectT); reconnectT = null; retry = 0; }
-    load().then(function () { if (!es && st.bal) { stream(); } schedule(); }, schedule);
+    load().then(function () { if (!es && st.bal && !st.signedOut) { stream(); } schedule(); }, schedule);
   }
   document.addEventListener("visibilitychange", function () { if (!document.hidden) { wake(); } });
   window.addEventListener("pageshow", function (e) {
@@ -198,18 +218,29 @@
   strip.setAttribute("aria-label", "Paper trading account");
   strip.setAttribute("aria-live", "polite");
   document.body.insertBefore(strip, document.body.firstChild);
-  function streamLabel() { return st.stream === "LIVE" ? "LIVE" : st.stream === "CONNECTING" ? "CONNECTING" : st.stream === "UNAVAILABLE" ? "STREAM UNAVAILABLE" : "POLLING 15 s"; }
+  function streamLabel() { return st.signedOut ? "SIGN-IN REQUIRED" : st.stream === "LIVE" ? "LIVE" : st.stream === "CONNECTING" ? "CONNECTING" : st.stream === "UNAVAILABLE" ? "STREAM UNAVAILABLE" : "POLLING 15 s"; }
+  // THE SIGN-IN PROMPT: opens the existing unlock (unlock.js); a plain link to
+  // the homepage when the unlock is not loaded
+  function signinHtml() {
+    return '<div class="ph-signin" role="alert"><b>SIGN-IN REQUIRED</b> · your COMMAND session is missing or has expired, so nothing here is current. ' +
+      '<a href="/" data-paper-signin>Sign in to COMMAND →</a> <span class="ph-mute">Reads retry every 15 s and resume once you are signed in.</span></div>';
+  }
+  document.addEventListener("click", function (e) {
+    var t = e.target && e.target.closest ? e.target.closest("[data-paper-signin]") : null;
+    if (t && window.BTUnlock && typeof window.BTUnlock.open === "function") { e.preventDefault(); window.BTUnlock.open(); }
+  });
   function renderStrip() {
     var head = '<span class="ps-tag">PAPER · LIVE MARKET DATA · SIMULATED EXECUTION</span>', b = st.bal;
     if (!b) {
-      strip.innerHTML = head + '<span class="ps-why"><b>' + esc(st.balState) + "</b>" + (st.balWhy ? ": " + esc(st.balWhy) : "") + "</span>";
+      strip.innerHTML = head + '<span class="ps-why"><b>' + esc(st.balState) + "</b>" + (st.balWhy ? ": " + esc(st.balWhy) : "") +
+        (st.signedOut ? ' · <a href="/" data-paper-signin>Sign in</a>' : "") + "</span>";
       return;
     }
     var warn = "";
     if (b.stale_marks && b.stale_marks.length) { warn += ' <span class="ps-warn">' + b.stale_marks.length + " STALE MARK(S)</span>"; }
     if (b.marks_complete === false) { warn += ' <span class="ps-warn">EQUITY INCOMPLETE: UNMARKED POSITIONS</span>'; }
     strip.innerHTML = head + FIELDS.map(function (f) {
-      var v = b[f[0]], shown = num(v) ? usd(v, /pnl/.test(f[0])) : v === null ? "NOT STATED" : "not sent";
+      var shown = figText(f[0], b[f[0]]);
       return '<span class="ps-f' + (STRIP_KEEP[f[0]] ? " ps-keep" : "") + '"><small>' + esc(f[1]) + "</small><b>" + esc(shown) + "</b></span>";
     }).join("") + warn + '<span class="ps-meta">' + esc(streamLabel()) + " · last ledger change " + esc(when(b.last_updated_at) || "not sent") + "</span>";
   }
@@ -253,8 +284,8 @@
     var b = st.bal;
     if (!b) { return '<div class="ph-fail"><b>' + esc(st.balState) + "</b> · " + esc(st.balWhy || "not read yet") + '<br><span class="ph-mute">No paper figure is shown: none was read. This is not a zero balance.</span></div>'; }
     return '<div class="ph-figs">' + FIELDS.map(function (f) {
-      var v = b[f[0]], shown = num(v) ? esc(usd(v, /pnl/.test(f[0]))) : v === null ? '<span class="ph-ns">NOT STATED</span>' : '<span class="ph-ns">not sent</span>';
-      return '<div><small>' + esc(f[1]) + "</small><b>" + shown + "</b></div>";
+      var t = figText(f[0], b[f[0]]), shown = t === "NOT STATED" || t === "not sent" ? '<span class="ph-ns">' + esc(t) + "</span>" : esc(t);
+      return '<div data-acct7="' + f[0] + '"><small>' + esc(f[1]) + "</small><b>" + shown + "</b></div>";
     }).join("") + '</div><p class="ph-note">' + esc(b.equity_basis || "") + (num(b.last_sequence) ? " · ledger entry #" + b.last_sequence : "") +
       (b.ledger_consistent === true ? " · running balance agrees with the ledger" : b.ledger_consistent === false ? " · LEDGER INCONSISTENT" : "") +
       " · fictional USD, never summed with the funded system · real-money submission " + esc(b.real_money_submission || "DISABLED") + ".</p>";
@@ -293,14 +324,16 @@
   function renderPanel() {
     panel.innerHTML = '<div class="ph-head"><h2>Paper experiment <span class="ph-tag">LIVE MARKET DATA · SIMULATED EXECUTION</span></h2>' +
       '<p class="ph-sub">The active paper session: one fictional account, one ledger. This is the default view; the funded system is inactive and shown separately below.</p></div>' +
-      session() + stamps() + figures() + agents();
+      (st.signedOut ? signinHtml() : "") + session() + stamps() + figures() + agents();
   }
   function render() { renderStrip(); renderPanel(); }
 
   // ── the API app.js uses ──────────────────────────────────────────
   window.BTPaper = {
     mount: function (slot) { if (slot && panel.parentNode !== slot) { slot.appendChild(panel); } },
-    status: function () { return {stream: st.stream, account: st.balState, overview: st.ovFail ? st.ovFail.state : st.ov ? "OK" : "READING"}; }
+    status: function () { return {stream: st.stream, account: st.balState, signedOut: st.signedOut, overview: st.ovFail ? st.ovFail.state : st.ov ? "OK" : "READING"}; },
+    // the formatting contract, for the proof that every page agrees
+    figures: function (a) { return FIELDS.map(function (f) { return {key: f[0], label: f[1], value: figText(f[0], a ? a[f[0]] : undefined)}; }); }
   };
   setInterval(function () { if (!document.hidden) { renderPanel(); } }, 5000);
   render();

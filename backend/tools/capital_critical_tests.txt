@@ -405,3 +405,19 @@ tests/test_command_centre_paper_contract.py
 # decision); the pass is only a labelled backstop; the hook is inert when
 # PAPER_SESSION is unset
 tests/test_paper_decides_at_the_valuation_instant.py
+# (owner decision, round 2 of the management pages) the paper experiment is
+# the management site's default view: the operational read against a seeded
+# paper session -- Derek's strategies apart with the funnel, every handoff,
+# reviews, protection, settlements and pending positions, Audrey's account and
+# P&L by strategy, three separate freshness stamps -- with a failed read
+# UNAVAILABLE by name (never a zero) and the funded system secondary
+tests/test_command_centre_paper_operations.py
+# one account on all four pages (the same read and the same seven figures on
+# the homepage and each agent page), signed-out reads as a SIGN-IN prompt,
+# Derek's readable names / prices / plain-words refusals, Xavier's owned
+# positions with scenario payoffs and realized kept apart from risk, Audrey's
+# reconciliation, event audits, performance and proposals
+tests/test_command_centre_paper_management_views.py
+# the command host's Netlify rules: the agent rewrites (/derek, /xavier,
+# /audrey) above the host catch-all, the API proxy first
+tests/test_netlify_command_host.py

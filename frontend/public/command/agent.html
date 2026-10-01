@@ -67,7 +67,9 @@
     .then(function (r) {
       if (r.ok) { frame.src = url; return; }
       if (r.status === 401 || r.status === 403) {
-        show("SIGN-IN REQUIRED: unlock COMMAND on the homepage (Bettor desk unlock), then refresh this page. No figure is shown in the meantime.");
+        show("SIGN-IN REQUIRED: your COMMAND session is missing or has expired. No figure is shown in the meantime. ");
+        var a = document.createElement("a"); a.href = "/"; a.textContent = "Sign in to COMMAND →";
+        a.style.color = "#9fd3ff"; note.appendChild(a);
       } else if (r.status === 404) {
         show("NOT YET RELEASED: the serving API does not have the " + name +
              " page yet. It ships with the next API release.");

@@ -1070,8 +1070,11 @@ def test_no_funded_module_reads_or_imports_the_policy_parameters():
     assert readers == {"agents/paper_benchmark.py",
                        "agents/paper_learning.py"}, readers
     assert not any("funded" in r or "live" in r for r in readers)
+    # bettor_paper_ops is the management pages' PAPER read model: Audrey's
+    # page reads the learning summary and event audits through it (read-only)
     assert importers <= {"agents/paper_runtime.py", "agents/paper_derek.py",
-                         "api/app.py", "api/paper_learning_routes.py"}, \
+                         "api/app.py", "api/paper_learning_routes.py",
+                         "bettor_paper_ops.py"}, \
         importers
     assert not any("funded" in i for i in importers)
 
