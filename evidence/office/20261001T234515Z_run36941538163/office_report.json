@@ -1,0 +1,1100 @@
+{
+  "host": "https://command.bettortoken.com",
+  "at": "2026-10-01T23:35:44.370Z",
+  "engines": {
+    "chromium-desktop-1440": {
+      "agents": {
+        "xavier": {
+          "url": "https://command.bettortoken.com/xavier",
+          "checks": {
+            "page": {
+              "status": "Records read 1s agoAgent pass 57s ago",
+              "overflow": false,
+              "talk": true,
+              "mobile_jump_display": "none",
+              "js_errors": []
+            },
+            "account": {
+              "strip": "",
+              "ledger_entry_shown": null,
+              "account_read": {
+                "cash_usd": 499306.35,
+                "reserved_usd": 0,
+                "open_positions": 7,
+                "ledger_consistent": true,
+                "ledger_head_seq": 0,
+                "keys": [
+                  "ok",
+                  "version",
+                  "account_id",
+                  "data_label",
+                  "labels",
+                  "currency",
+                  "as_of",
+                  "last_updated_at",
+                  "last_sequence",
+                  "starting_cash_usd",
+                  "cash_usd",
+                  "reserved_usd",
+                  "reserved_is",
+                  "available_usd",
+                  "open_positions",
+                  "open_position_value_usd",
+                  "open_position_value_marked_only_usd",
+                  "marks_complete",
+                  "unmarked_positions",
+                  "unmarked_cost_basis_usd",
+                  "stale_marks",
+                  "total_equity_usd",
+                  "equity_excluding_unmarked_usd",
+                  "equity_basis",
+                  "realized_pnl_usd",
+                  "unrealized_pnl_usd",
+                  "unrealized_pnl_marked_only_usd",
+                  "fees_paid_usd",
+                  "mark_method",
+                  "mark_stale_after_s",
+                  "ledger_entries",
+                  "ledger_consistent",
+                  "real_money_submission"
+                ]
+              },
+              "match": false
+            },
+            "positions": [
+              {
+                "group_id": "paperexpgrp:bd5ebe70618355ad0230a111",
+                "open_qty": 136,
+                "cost_basis_usd": 98.51,
+                "marked_value_usd": 95.2,
+                "review_id": "paperrev:0f8e7fc6e5a505479f839def",
+                "recommendation": "HOLD",
+                "shown": true,
+                "qty_shown": true,
+                "orders": [
+                  {
+                    "order_id": "paperord:8ce9d007ba8147d0e803d8d4",
+                    "remaining": 136,
+                    "limit": 0.75,
+                    "state": "RESTING",
+                    "in_card": true
+                  }
+                ],
+                "ask_carries_group": true
+              },
+              {
+                "group_id": "paperexpgrp:42c9989be31cea1ceff2099b",
+                "open_qty": 238,
+                "cost_basis_usd": 99.17,
+                "marked_value_usd": 90.44,
+                "review_id": "paperrev:72ad9fdc36a8ec4aab4a1f01",
+                "recommendation": "HOLD",
+                "shown": true,
+                "qty_shown": true,
+                "orders": [
+                  {
+                    "order_id": "paperord:8012c565f33a8ab79408cc2f",
+                    "remaining": 238,
+                    "limit": 0.45,
+                    "state": "RESTING",
+                    "in_card": true
+                  }
+                ],
+                "ask_carries_group": true
+              },
+              {
+                "group_id": "paperexpgrp:715b163d214613515de4d513",
+                "open_qty": 380,
+                "cost_basis_usd": 99.95,
+                "marked_value_usd": 95,
+                "review_id": "paperrev:712a98f57339741d11b42781",
+                "recommendation": "HOLD",
+                "shown": true,
+                "qty_shown": true,
+                "orders": [
+                  {
+                    "order_id": "paperord:7f6e92ac128390291e8a44d2",
+                    "remaining": 380,
+                    "limit": 0.29,
+                    "state": "RESTING",
+                    "in_card": true
+                  }
+                ],
+                "ask_carries_group": true
+              },
+              {
+                "group_id": "paperexpgrp:f1e116a3dbdee19fa35916c5",
+                "open_qty": 172,
+                "cost_basis_usd": 99.27,
+                "marked_value_usd": 94.6,
+                "review_id": "paperrev:6fbdf7417c8668304ebe19ef",
+                "recommendation": "HOLD",
+                "shown": true,
+                "qty_shown": true,
+                "orders": [
+                  {
+                    "order_id": "paperord:601599f06463d54b1daa7a85",
+                    "remaining": 172,
+                    "limit": 0.61,
+                    "state": "RESTING",
+                    "in_card": true
+                  }
+                ],
+                "ask_carries_group": true
+              },
+              {
+                "group_id": "paperexpgrp:611af30938d3f7395eaec8e7",
+                "open_qty": 163,
+                "cost_basis_usd": 98.91,
+                "marked_value_usd": 95.355,
+                "review_id": "paperrev:d866a19e17b7cd25ec143914",
+                "recommendation": "HOLD",
+                "shown": true,
+                "qty_shown": true,
+                "orders": [
+                  {
+                    "order_id": "paperord:46e31cd281b8adda2dff47a8",
+                    "remaining": 163,
+                    "limit": 0.64,
+                    "state": "RESTING",
+                    "in_card": true
+                  }
+                ],
+                "ask_carries_group": true
+              },
+              {
+                "group_id": "paperexpgrp:e16e6c216e47705741e6a91e",
+                "open_qty": 188,
+                "cost_basis_usd": 99.15,
+                "marked_value_usd": 94,
+                "review_id": "paperrev:4c476384edca25b132a593b4",
+                "recommendation": "HOLD",
+                "shown": true,
+                "qty_shown": true,
+                "orders": [
+                  {
+                    "order_id": "paperord:659346be89b653c136ab788b",
+                    "remaining": 188,
+                    "limit": 0.56,
+                    "state": "RESTING",
+                    "in_card": true
+                  }
+                ],
+                "ask_carries_group": true
+              },
+              {
+                "group_id": "paperexpgrp:edca4bb7455003b64c16fc95",
+                "open_qty": 144,
+                "cost_basis_usd": 98.69,
+                "marked_value_usd": 95.04,
+                "review_id": "paperrev:f72487ac09a08f24a7da4e49",
+                "recommendation": "HOLD",
+                "shown": true,
+                "qty_shown": true,
+                "orders": [
+                  {
+                    "order_id": "paperord:efb28beb00cf5589b4279c2b",
+                    "remaining": 144,
+                    "limit": 0.71,
+                    "state": "RESTING",
+                    "in_card": true
+                  }
+                ],
+                "ask_carries_group": true
+              }
+            ],
+            "positions_ok": true,
+            "failed_read": {
+              "status": "Records read 16s agoAgent pass 1m ago",
+              "positions_after": 7,
+              "decisions_after": 0,
+              "kept": false
+            },
+            "timing": {
+              "question": "What are you doing with the San Diego position right now?",
+              "style": "brief",
+              "replay_after_autoplay_block": null,
+              "first_visible_answer_ms": 7288,
+              "first_audible_speech_ms": 10987,
+              "speech_after_text_ms": 3698,
+              "playback_mode_reported": "streaming",
+              "chat": {
+                "at": 1790897781174,
+                "status": 200,
+                "message_id": "pc-xavier-9272605681154a1e:15",
+                "conversation_id": "pc-xavier-9272605681154a1e",
+                "depth": "QUICK",
+                "prior_turns": 11,
+                "persona": {
+                  "version": 2,
+                  "display_name": "Xavier",
+                  "role_title": "the composed investment manager"
+                },
+                "chars": 491
+              },
+              "speech_response": {
+                "at": 1790897784438,
+                "status": 200,
+                "type": "audio/mpeg",
+                "cached": "MISS",
+                "voice": "configured"
+              }
+            },
+            "interrupt": {
+              "send_enabled_during_speech": true,
+              "full_answer_chars": 2050,
+              "brief_answer_chars": 491,
+              "depth_full": "NORMAL",
+              "depth_brief": "QUICK",
+              "earlier_audio_played_after_new_question": false,
+              "events_after": [
+                "0:abort",
+                "0:emptied",
+                "4:created",
+                "4:playing"
+              ],
+              "first_visible_answer_ms_full": 14971,
+              "same_conversation": true,
+              "prior_turns": 11
+            },
+            "stop": {
+              "last_events": [
+                "4:emptied",
+                "4:abort",
+                "4:playing",
+                "4:created"
+              ],
+              "stop_disabled_after": true
+            },
+            "provider_error": {
+              "state": "Voice unavailable: VOICE_PROVIDER_FAILED. The text reply above is complete.",
+              "answers_still_shown": 9,
+              "before": 9
+            },
+            "resume": {
+              "before": 18,
+              "after": 18,
+              "state": "Resumed your conversation with Xavier (18 messages)."
+            }
+          },
+          "js_errors": [
+            "Failed to load resource: the server responded with a status of 503 (Service Unavailable)"
+          ]
+        },
+        "derek": {
+          "url": "https://command.bettortoken.com/derek",
+          "checks": {
+            "page": {
+              "status": "Records read 0s agoAgent pass 1m ago",
+              "overflow": false,
+              "talk": true,
+              "mobile_jump_display": "none",
+              "js_errors": []
+            },
+            "account": {
+              "strip": "",
+              "ledger_entry_shown": null,
+              "account_read": {
+                "cash_usd": 499306.35,
+                "reserved_usd": 0,
+                "open_positions": 7,
+                "ledger_consistent": true,
+                "ledger_head_seq": 0,
+                "keys": [
+                  "ok",
+                  "version",
+                  "account_id",
+                  "data_label",
+                  "labels",
+                  "currency",
+                  "as_of",
+                  "last_updated_at",
+                  "last_sequence",
+                  "starting_cash_usd",
+                  "cash_usd",
+                  "reserved_usd",
+                  "reserved_is",
+                  "available_usd",
+                  "open_positions",
+                  "open_position_value_usd",
+                  "open_position_value_marked_only_usd",
+                  "marks_complete",
+                  "unmarked_positions",
+                  "unmarked_cost_basis_usd",
+                  "stale_marks",
+                  "total_equity_usd",
+                  "equity_excluding_unmarked_usd",
+                  "equity_basis",
+                  "realized_pnl_usd",
+                  "unrealized_pnl_usd",
+                  "unrealized_pnl_marked_only_usd",
+                  "fees_paid_usd",
+                  "mark_method",
+                  "mark_stale_after_s",
+                  "ledger_entries",
+                  "ledger_consistent",
+                  "real_money_submission"
+                ]
+              },
+              "match": false
+            },
+            "versions": {
+              "serving": [
+                {
+                  "strategy": "DEREK_ENTRY_POLICY_V2",
+                  "serving": "DEREK_ENTRY_POLICY_V2"
+                },
+                {
+                  "strategy": "PINNACLE_ONLY_PAPER_BENCHMARK",
+                  "serving": "PINNACLE_ONLY_PAPER_BENCHMARK_V1"
+                },
+                {
+                  "strategy": "PINNACLE_COMPLETED_GAME_PAPER",
+                  "serving": "PINNACLE_COMPLETED_GAME_PAPER_V2"
+                },
+                {
+                  "strategy": "PINNACLE_COMPLETED_GAME_MAKER_PAPER",
+                  "serving": "PINNACLE_COMPLETED_GAME_MAKER_PAPER_V1"
+                },
+                {
+                  "strategy": "PINNACLE_EXPLORATION_PAPER",
+                  "serving": "PINNACLE_EXPLORATION_PAPER_V1"
+                }
+              ],
+              "cards": 12,
+              "historical_label_shown": false,
+              "version_label_shown": false
+            },
+            "failed_read": {
+              "status": "Records read 18s agoAgent pass 1m ago",
+              "positions_after": 0,
+              "decisions_after": 12,
+              "kept": false
+            },
+            "timing": {
+              "question": "Why did the closest recent opportunity not qualify?",
+              "style": "brief",
+              "replay_after_autoplay_block": null,
+              "first_visible_answer_ms": 14521,
+              "first_audible_speech_ms": 18693,
+              "speech_after_text_ms": 4172,
+              "playback_mode_reported": "streaming",
+              "chat": {
+                "at": 1790897862318,
+                "status": 200,
+                "message_id": "pc-derek-62bf121d654e4e58:11",
+                "conversation_id": "pc-derek-62bf121d654e4e58",
+                "depth": "QUICK",
+                "prior_turns": 10,
+                "persona": {
+                  "version": 2,
+                  "display_name": "Derek",
+                  "role_title": "the enthusiastic quant"
+                },
+                "chars": 660
+              },
+              "speech_response": {
+                "at": 1790897866120,
+                "status": 200,
+                "type": "audio/mpeg",
+                "cached": "MISS",
+                "voice": "configured"
+              }
+            },
+            "resume": {
+              "before": 12,
+              "after": 12,
+              "state": "Resumed your conversation with Derek (12 messages)."
+            }
+          },
+          "js_errors": []
+        },
+        "audrey": {
+          "url": "https://command.bettortoken.com/audrey",
+          "checks": {
+            "page": {
+              "status": "Records read 4s agoAgent pass 1m ago",
+              "overflow": false,
+              "talk": true,
+              "mobile_jump_display": "none",
+              "js_errors": []
+            },
+            "account": {
+              "strip": "",
+              "ledger_entry_shown": null,
+              "account_read": {
+                "cash_usd": 499306.35,
+                "reserved_usd": 0,
+                "open_positions": 7,
+                "ledger_consistent": true,
+                "ledger_head_seq": 0,
+                "keys": [
+                  "ok",
+                  "version",
+                  "account_id",
+                  "data_label",
+                  "labels",
+                  "currency",
+                  "as_of",
+                  "last_updated_at",
+                  "last_sequence",
+                  "starting_cash_usd",
+                  "cash_usd",
+                  "reserved_usd",
+                  "reserved_is",
+                  "available_usd",
+                  "open_positions",
+                  "open_position_value_usd",
+                  "open_position_value_marked_only_usd",
+                  "marks_complete",
+                  "unmarked_positions",
+                  "unmarked_cost_basis_usd",
+                  "stale_marks",
+                  "total_equity_usd",
+                  "equity_excluding_unmarked_usd",
+                  "equity_basis",
+                  "realized_pnl_usd",
+                  "unrealized_pnl_usd",
+                  "unrealized_pnl_marked_only_usd",
+                  "fees_paid_usd",
+                  "mark_method",
+                  "mark_stale_after_s",
+                  "ledger_entries",
+                  "ledger_consistent",
+                  "real_money_submission"
+                ]
+              },
+              "match": false
+            },
+            "recommendations": {
+              "ids": [
+                "paperrec:521b224a4ded906f08c02b93",
+                "paperrec:5d764d7fe0fc1e4895bcbb2d",
+                "paperrec:a72c3f4296c2548b13ea2120"
+              ],
+              "shown": [
+                true,
+                true,
+                true
+              ],
+              "automated_labelled": true
+            },
+            "failed_read": {
+              "status": "Records read 23s agoAgent pass 1m ago",
+              "positions_after": 0,
+              "decisions_after": 0,
+              "kept": false
+            },
+            "timing": {
+              "question": "Does the paper ledger reconcile right now?",
+              "style": "brief",
+              "replay_after_autoplay_block": null,
+              "first_visible_answer_ms": 7135,
+              "first_audible_speech_ms": 11269,
+              "speech_after_text_ms": 4134,
+              "playback_mode_reported": "streaming",
+              "chat": {
+                "at": 1790897908440,
+                "status": 200,
+                "message_id": "pc-audrey-07bb6f0bcb57471f:11",
+                "conversation_id": "pc-audrey-07bb6f0bcb57471f",
+                "depth": "QUICK",
+                "prior_turns": 10,
+                "persona": {
+                  "version": 2,
+                  "display_name": "Audrey",
+                  "role_title": "the charismatic auditor"
+                },
+                "chars": 324
+              },
+              "speech_response": {
+                "at": 1790897912059,
+                "status": 200,
+                "type": "audio/mpeg",
+                "cached": "MISS",
+                "voice": "configured"
+              }
+            },
+            "resume": {
+              "before": 12,
+              "after": 12,
+              "state": "Resumed your conversation with Audrey (12 messages)."
+            }
+          },
+          "js_errors": []
+        }
+      },
+      "audio_capability": {
+        "user_agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/130.0.6723.31 Safari/537.36",
+        "can_play_mpeg": "probably",
+        "media_source_mpeg": true,
+        "managed_media_source": false
+      }
+    },
+    "webkit-iphone13": {
+      "agents": {
+        "xavier": {
+          "url": "https://command.bettortoken.com/xavier",
+          "checks": {
+            "page": {
+              "status": "Records read 1s agoAgent pass 59s ago",
+              "overflow": false,
+              "talk": true,
+              "mobile_jump_display": "block",
+              "js_errors": []
+            },
+            "account": {
+              "strip": "",
+              "ledger_entry_shown": null,
+              "account_read": {
+                "cash_usd": 499306.35,
+                "reserved_usd": 0,
+                "open_positions": 7,
+                "ledger_consistent": true,
+                "ledger_head_seq": 0,
+                "keys": [
+                  "ok",
+                  "version",
+                  "account_id",
+                  "data_label",
+                  "labels",
+                  "currency",
+                  "as_of",
+                  "last_updated_at",
+                  "last_sequence",
+                  "starting_cash_usd",
+                  "cash_usd",
+                  "reserved_usd",
+                  "reserved_is",
+                  "available_usd",
+                  "open_positions",
+                  "open_position_value_usd",
+                  "open_position_value_marked_only_usd",
+                  "marks_complete",
+                  "unmarked_positions",
+                  "unmarked_cost_basis_usd",
+                  "stale_marks",
+                  "total_equity_usd",
+                  "equity_excluding_unmarked_usd",
+                  "equity_basis",
+                  "realized_pnl_usd",
+                  "unrealized_pnl_usd",
+                  "unrealized_pnl_marked_only_usd",
+                  "fees_paid_usd",
+                  "mark_method",
+                  "mark_stale_after_s",
+                  "ledger_entries",
+                  "ledger_consistent",
+                  "real_money_submission"
+                ]
+              },
+              "match": false
+            },
+            "positions": [
+              {
+                "group_id": "paperexpgrp:bd5ebe70618355ad0230a111",
+                "open_qty": 136,
+                "cost_basis_usd": 98.51,
+                "marked_value_usd": 95.2,
+                "review_id": "paperrev:542fbc5c0d3c56c3c61f0180",
+                "recommendation": "HOLD",
+                "shown": true,
+                "qty_shown": true,
+                "orders": [
+                  {
+                    "order_id": "paperord:8ce9d007ba8147d0e803d8d4",
+                    "remaining": 136,
+                    "limit": 0.75,
+                    "state": "RESTING",
+                    "in_card": true
+                  }
+                ],
+                "ask_carries_group": true
+              },
+              {
+                "group_id": "paperexpgrp:42c9989be31cea1ceff2099b",
+                "open_qty": 238,
+                "cost_basis_usd": 99.17,
+                "marked_value_usd": 90.44,
+                "review_id": "paperrev:f192abb50cb47d3e058b47d0",
+                "recommendation": "HOLD",
+                "shown": true,
+                "qty_shown": true,
+                "orders": [
+                  {
+                    "order_id": "paperord:8012c565f33a8ab79408cc2f",
+                    "remaining": 238,
+                    "limit": 0.45,
+                    "state": "RESTING",
+                    "in_card": true
+                  }
+                ],
+                "ask_carries_group": true
+              },
+              {
+                "group_id": "paperexpgrp:715b163d214613515de4d513",
+                "open_qty": 380,
+                "cost_basis_usd": 99.95,
+                "marked_value_usd": 95,
+                "review_id": "paperrev:831634af979727d384ae2c2d",
+                "recommendation": "HOLD",
+                "shown": true,
+                "qty_shown": true,
+                "orders": [
+                  {
+                    "order_id": "paperord:7f6e92ac128390291e8a44d2",
+                    "remaining": 380,
+                    "limit": 0.29,
+                    "state": "RESTING",
+                    "in_card": true
+                  }
+                ],
+                "ask_carries_group": true
+              },
+              {
+                "group_id": "paperexpgrp:f1e116a3dbdee19fa35916c5",
+                "open_qty": 172,
+                "cost_basis_usd": 99.27,
+                "marked_value_usd": 94.6,
+                "review_id": "paperrev:91c227f6325121ef6d7e35ca",
+                "recommendation": "HOLD",
+                "shown": true,
+                "qty_shown": true,
+                "orders": [
+                  {
+                    "order_id": "paperord:601599f06463d54b1daa7a85",
+                    "remaining": 172,
+                    "limit": 0.61,
+                    "state": "RESTING",
+                    "in_card": true
+                  }
+                ],
+                "ask_carries_group": true
+              },
+              {
+                "group_id": "paperexpgrp:611af30938d3f7395eaec8e7",
+                "open_qty": 163,
+                "cost_basis_usd": 98.91,
+                "marked_value_usd": 95.355,
+                "review_id": "paperrev:f56d69bad48c49748379c510",
+                "recommendation": "HOLD",
+                "shown": true,
+                "qty_shown": true,
+                "orders": [
+                  {
+                    "order_id": "paperord:46e31cd281b8adda2dff47a8",
+                    "remaining": 163,
+                    "limit": 0.64,
+                    "state": "RESTING",
+                    "in_card": true
+                  }
+                ],
+                "ask_carries_group": true
+              },
+              {
+                "group_id": "paperexpgrp:e16e6c216e47705741e6a91e",
+                "open_qty": 188,
+                "cost_basis_usd": 99.15,
+                "marked_value_usd": 94,
+                "review_id": "paperrev:5a1dfa32c85ee304660d1149",
+                "recommendation": "HOLD",
+                "shown": true,
+                "qty_shown": true,
+                "orders": [
+                  {
+                    "order_id": "paperord:659346be89b653c136ab788b",
+                    "remaining": 188,
+                    "limit": 0.56,
+                    "state": "RESTING",
+                    "in_card": true
+                  }
+                ],
+                "ask_carries_group": true
+              },
+              {
+                "group_id": "paperexpgrp:edca4bb7455003b64c16fc95",
+                "open_qty": 144,
+                "cost_basis_usd": 98.69,
+                "marked_value_usd": 95.04,
+                "review_id": "paperrev:bb8855d622dccd1dbea7617c",
+                "recommendation": "HOLD",
+                "shown": true,
+                "qty_shown": true,
+                "orders": [
+                  {
+                    "order_id": "paperord:efb28beb00cf5589b4279c2b",
+                    "remaining": 144,
+                    "limit": 0.71,
+                    "state": "RESTING",
+                    "in_card": true
+                  }
+                ],
+                "ask_carries_group": true
+              }
+            ],
+            "positions_ok": true,
+            "failed_read": {
+              "status": "Read unavailable · HTTP 503 · SIMULATED read failure (test). Last records retained.",
+              "positions_after": 7,
+              "decisions_after": 0,
+              "kept": false
+            },
+            "timing": {
+              "question": "What are you doing with the San Diego position right now?",
+              "style": "brief",
+              "replay_after_autoplay_block": {
+                "autoplay_state_before": "Voice could not play: Audio stream could not be decoded. Use replay or another browser.",
+                "play_press_to_audible_ms": null,
+                "playback_mode_reported": null,
+                "speech_response": {
+                  "at": 1790898005236,
+                  "status": 200,
+                  "type": "audio/mpeg",
+                  "cached": "MISS",
+                  "voice": "configured"
+                }
+              },
+              "first_visible_answer_ms": 5118,
+              "first_audible_speech_ms": null,
+              "speech_after_text_ms": null,
+              "playback_mode_reported": null,
+              "chat": {
+                "at": 1790897954957,
+                "status": 200,
+                "message_id": "pc-xavier-9272605681154a1e:19",
+                "conversation_id": "pc-xavier-9272605681154a1e",
+                "depth": "QUICK",
+                "prior_turns": 11,
+                "persona": {
+                  "version": 2,
+                  "display_name": "Xavier",
+                  "role_title": "the composed investment manager"
+                },
+                "chars": 487
+              },
+              "speech_response": {
+                "at": 1790898005236,
+                "status": 200,
+                "type": "audio/mpeg",
+                "cached": "MISS",
+                "voice": "configured"
+              }
+            },
+            "interrupt": {
+              "send_enabled_during_speech": true,
+              "full_answer_chars": 1935,
+              "brief_answer_chars": 487,
+              "depth_full": "NORMAL",
+              "depth_brief": "QUICK",
+              "earlier_audio_played_after_new_question": false,
+              "events_after": [
+                "4:created",
+                "4:emptied"
+              ],
+              "first_visible_answer_ms_full": 11185,
+              "same_conversation": true,
+              "prior_turns": 11
+            },
+            "stop": {
+              "last_events": [
+                "4:emptied",
+                "4:created",
+                "2:emptied",
+                "2:created"
+              ],
+              "stop_disabled_after": true
+            },
+            "provider_error": {
+              "state": "Voice unavailable: VOICE_PROVIDER_FAILED. The text reply above is complete.",
+              "answers_still_shown": 11,
+              "before": 11
+            },
+            "resume": {
+              "before": 22,
+              "after": 22,
+              "state": "Resumed your conversation with Xavier (22 messages)."
+            }
+          },
+          "js_errors": [
+            "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+            "Failed to load resource: the server responded with a status of 503 (Service Unavailable)"
+          ]
+        },
+        "derek": {
+          "url": "https://command.bettortoken.com/derek",
+          "checks": {
+            "page": {
+              "status": "Records read 2s agoAgent pass 37s ago",
+              "overflow": false,
+              "talk": true,
+              "mobile_jump_display": "block",
+              "js_errors": []
+            },
+            "account": {
+              "strip": "",
+              "ledger_entry_shown": null,
+              "account_read": {
+                "cash_usd": 499306.35,
+                "reserved_usd": 0,
+                "open_positions": 7,
+                "ledger_consistent": true,
+                "ledger_head_seq": 0,
+                "keys": [
+                  "ok",
+                  "version",
+                  "account_id",
+                  "data_label",
+                  "labels",
+                  "currency",
+                  "as_of",
+                  "last_updated_at",
+                  "last_sequence",
+                  "starting_cash_usd",
+                  "cash_usd",
+                  "reserved_usd",
+                  "reserved_is",
+                  "available_usd",
+                  "open_positions",
+                  "open_position_value_usd",
+                  "open_position_value_marked_only_usd",
+                  "marks_complete",
+                  "unmarked_positions",
+                  "unmarked_cost_basis_usd",
+                  "stale_marks",
+                  "total_equity_usd",
+                  "equity_excluding_unmarked_usd",
+                  "equity_basis",
+                  "realized_pnl_usd",
+                  "unrealized_pnl_usd",
+                  "unrealized_pnl_marked_only_usd",
+                  "fees_paid_usd",
+                  "mark_method",
+                  "mark_stale_after_s",
+                  "ledger_entries",
+                  "ledger_consistent",
+                  "real_money_submission"
+                ]
+              },
+              "match": false
+            },
+            "versions": {
+              "serving": [
+                {
+                  "strategy": "DEREK_ENTRY_POLICY_V2",
+                  "serving": "DEREK_ENTRY_POLICY_V2"
+                },
+                {
+                  "strategy": "PINNACLE_ONLY_PAPER_BENCHMARK",
+                  "serving": "PINNACLE_ONLY_PAPER_BENCHMARK_V1"
+                },
+                {
+                  "strategy": "PINNACLE_COMPLETED_GAME_PAPER",
+                  "serving": "PINNACLE_COMPLETED_GAME_PAPER_V2"
+                },
+                {
+                  "strategy": "PINNACLE_COMPLETED_GAME_MAKER_PAPER",
+                  "serving": "PINNACLE_COMPLETED_GAME_MAKER_PAPER_V1"
+                },
+                {
+                  "strategy": "PINNACLE_EXPLORATION_PAPER",
+                  "serving": "PINNACLE_EXPLORATION_PAPER_V1"
+                }
+              ],
+              "cards": 12,
+              "historical_label_shown": false,
+              "version_label_shown": false
+            },
+            "failed_read": {
+              "status": "Read unavailable · HTTP 503 · SIMULATED read failure (test). Last records retained.",
+              "positions_after": 0,
+              "decisions_after": 12,
+              "kept": false
+            },
+            "timing": {
+              "question": "Why did the closest recent opportunity not qualify?",
+              "style": "brief",
+              "replay_after_autoplay_block": {
+                "autoplay_state_before": "Voice could not play: Audio stream could not be decoded. Use replay or another browser.",
+                "play_press_to_audible_ms": null,
+                "playback_mode_reported": null,
+                "speech_response": {
+                  "at": 1790898169241,
+                  "status": 200,
+                  "type": "audio/mpeg",
+                  "cached": "MISS",
+                  "voice": "configured"
+                }
+              },
+              "first_visible_answer_ms": 7520,
+              "first_audible_speech_ms": null,
+              "speech_after_text_ms": null,
+              "playback_mode_reported": null,
+              "chat": {
+                "at": 1790898118781,
+                "status": 200,
+                "message_id": "pc-derek-62bf121d654e4e58:13",
+                "conversation_id": "pc-derek-62bf121d654e4e58",
+                "depth": "QUICK",
+                "prior_turns": 11,
+                "persona": {
+                  "version": 2,
+                  "display_name": "Derek",
+                  "role_title": "the enthusiastic quant"
+                },
+                "chars": 646
+              },
+              "speech_response": {
+                "at": 1790898169241,
+                "status": 200,
+                "type": "audio/mpeg",
+                "cached": "MISS",
+                "voice": "configured"
+              }
+            },
+            "resume": {
+              "before": 14,
+              "after": 14,
+              "state": "Resumed your conversation with Derek (14 messages)."
+            }
+          },
+          "js_errors": [
+            "Failed to load resource: the server responded with a status of 503 (Service Unavailable)"
+          ]
+        },
+        "audrey": {
+          "url": "https://command.bettortoken.com/audrey",
+          "checks": {
+            "page": {
+              "status": "Records read 2s agoAgent pass 29s ago",
+              "overflow": false,
+              "talk": true,
+              "mobile_jump_display": "block",
+              "js_errors": []
+            },
+            "account": {
+              "strip": "",
+              "ledger_entry_shown": null,
+              "account_read": {
+                "cash_usd": 499306.35,
+                "reserved_usd": 0,
+                "open_positions": 7,
+                "ledger_consistent": true,
+                "ledger_head_seq": 0,
+                "keys": [
+                  "ok",
+                  "version",
+                  "account_id",
+                  "data_label",
+                  "labels",
+                  "currency",
+                  "as_of",
+                  "last_updated_at",
+                  "last_sequence",
+                  "starting_cash_usd",
+                  "cash_usd",
+                  "reserved_usd",
+                  "reserved_is",
+                  "available_usd",
+                  "open_positions",
+                  "open_position_value_usd",
+                  "open_position_value_marked_only_usd",
+                  "marks_complete",
+                  "unmarked_positions",
+                  "unmarked_cost_basis_usd",
+                  "stale_marks",
+                  "total_equity_usd",
+                  "equity_excluding_unmarked_usd",
+                  "equity_basis",
+                  "realized_pnl_usd",
+                  "unrealized_pnl_usd",
+                  "unrealized_pnl_marked_only_usd",
+                  "fees_paid_usd",
+                  "mark_method",
+                  "mark_stale_after_s",
+                  "ledger_entries",
+                  "ledger_consistent",
+                  "real_money_submission"
+                ]
+              },
+              "match": false
+            },
+            "recommendations": {
+              "ids": [
+                "paperrec:521b224a4ded906f08c02b93",
+                "paperrec:5d764d7fe0fc1e4895bcbb2d",
+                "paperrec:a72c3f4296c2548b13ea2120"
+              ],
+              "shown": [
+                true,
+                true,
+                true
+              ],
+              "automated_labelled": true
+            },
+            "failed_read": {
+              "status": "Read unavailable · HTTP 503 · SIMULATED read failure (test). Last records retained.",
+              "positions_after": 0,
+              "decisions_after": 0,
+              "kept": false
+            },
+            "timing": {
+              "question": "Does the paper ledger reconcile right now?",
+              "style": "brief",
+              "replay_after_autoplay_block": {
+                "autoplay_state_before": "Voice could not play: Audio stream could not be decoded. Use replay or another browser.",
+                "play_press_to_audible_ms": null,
+                "playback_mode_reported": null,
+                "speech_response": {
+                  "at": 1790898278543,
+                  "status": 200,
+                  "type": "audio/mpeg",
+                  "cached": "MISS",
+                  "voice": "configured"
+                }
+              },
+              "first_visible_answer_ms": 5403,
+              "first_audible_speech_ms": null,
+              "speech_after_text_ms": null,
+              "playback_mode_reported": null,
+              "chat": {
+                "at": 1790898227797,
+                "status": 200,
+                "message_id": "pc-audrey-07bb6f0bcb57471f:13",
+                "conversation_id": "pc-audrey-07bb6f0bcb57471f",
+                "depth": "QUICK",
+                "prior_turns": 11,
+                "persona": {
+                  "version": 2,
+                  "display_name": "Audrey",
+                  "role_title": "the charismatic auditor"
+                },
+                "chars": 429
+              },
+              "speech_response": {
+                "at": 1790898278543,
+                "status": 200,
+                "type": "audio/mpeg",
+                "cached": "MISS",
+                "voice": "configured"
+              }
+            },
+            "resume": {
+              "before": 14,
+              "after": 14,
+              "state": "Resumed your conversation with Audrey (14 messages)."
+            }
+          },
+          "js_errors": [
+            "Failed to load resource: the server responded with a status of 503 (Service Unavailable)"
+          ]
+        }
+      },
+      "audio_capability": {
+        "user_agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 15_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1",
+        "can_play_mpeg": "maybe",
+        "media_source_mpeg": true,
+        "managed_media_source": false
+      }
+    }
+  }
+}
