@@ -9,9 +9,13 @@ hook the core stream calls after every scheduled cycle. It:
      training and evaluation records, collected whatever the venue's book
      currency, with no dependence on a model, an account or admission --
      then one bounded step of the one-time BACKFILL of older stored
-     valuations, and once per UTC day the MODEL RUN: fit and evaluate the
-     entry model on labelled research fixtures, or record the shortfall.
-     It never promotes;
+     valuations, and the daily MODEL RUN: fit and evaluate the entry model
+     on labelled research fixtures, or record the shortfall. One DECISIVE
+     run per UTC day; a run that could fit nothing (too few labelled
+     fixtures, or a failed label read) does not close the day, so when the
+     backfill step just above brings a cohort to the minimum, this step
+     fits it the same day (migration 181). The paper path never fits; this
+     step does. It never promotes;
 
   1. records ONE Derek entry decision per candidate the entry lane evaluated
      this cycle -- every `external_valuations` row with record_purpose
@@ -255,9 +259,15 @@ async def research_step(conn, *, now: float, elapsed_s: float = 0.0) -> dict:
 
 
 async def model_run_step(conn, *, now: float) -> dict:
-    """`derek_research.daily_model_run`, guarded: once per UTC day it fits
-    and evaluates the internal entry model on research observations, or
-    records why not. It never promotes and never blocks the cycle."""
+    """`derek_research.daily_model_run`, guarded: the ONLY scheduled caller
+    that fits. One decisive run per UTC day fits and evaluates the internal
+    entry model on research observations, or records why not. Called right
+    after `research_step` (whose backfill step may just have brought a
+    cohort to MIN_TRAIN_EVENTS), it also makes the SAME-DAY run after a
+    run that could fit nothing (migration 181), reporting the current
+    shortfall (`counts_now`) or why it did not (`rerun_refusal`) while it
+    has not. Serialized per UTC day with every other caller (advisory lock,
+    one transaction). It never promotes and never blocks the cycle."""
     try:
         from . import derek_research as DR
         got = await DR.daily_model_run(conn, now=now)
@@ -266,7 +276,8 @@ async def model_run_step(conn, *, now: float) -> dict:
                 % type(exc).__name__, "error": str(exc)[:200]}
     return {k: got.get(k) for k in (
         "run_day", "ran", "already_ran", "run_id", "outcome", "counts",
-        "fitted", "attempted_model_ids", "refusal", "promoted",
+        "counts_now", "fitted", "attempted_model_ids", "refusal", "why",
+        "rerun_refusal", "deferral", "same_day_rerun", "promoted",
         "promotion")}
 
 

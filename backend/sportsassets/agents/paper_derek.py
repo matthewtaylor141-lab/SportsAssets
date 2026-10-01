@@ -11,13 +11,20 @@ newest CANDIDATE `bettor_funded_model` row for KEY_ENTRY_PAYOUT fitted on
 DEREK_RESEARCH_OBSERVATIONS, registered before the decision instant. In the
 PAPER session only it is used as a qualified input, labelled
 EXPERIMENTAL_RESEARCH_MODEL with its approval status (CANDIDATE, not
-approved); it is never promoted. When no such model exists the existing daily
-fit (`derek_research.daily_model_run`, once per UTC day, fit through the run
-instant on outcomes available by then -- never an outcome unavailable at
-decision time) is attempted and recorded, and every decision refuses BY NAME
-(NO_RESEARCH_MODEL_CANDIDATE_EXISTS). Nothing is invented: no internal
-probability is made up, Pinnacle is never duplicated into it, and there is no
-Pinnacle-only fallback.
+approved); it is never promoted. When no such model exists every decision
+refuses BY NAME (NO_RESEARCH_MODEL_CANDIDATE_EXISTS) and the existing daily
+run (`derek_research.daily_model_run`) is asked, in its NON-FITTING mode: the
+paper path never fits inside a decision's time bound. It reports the day's
+run when there is one, records the day's first run when no cohort has
+enough labelled fixtures (a non-decisive INSUFFICIENT row, which does not
+close the day), and when a cohort is ready returns
+FIT_DEFERRED_TO_SCHEDULED_STEP and writes nothing. The fit itself is the
+scheduled step's (`derek.model_run_step`, right after the collection step,
+through the run instant on outcomes available by then -- never an outcome
+unavailable at decision time), and the next paper context picks the
+candidate up, inside the context cache's TTL too. Nothing is invented: no
+internal probability is made up, Pinnacle is never duplicated into it, and
+there is no Pinnacle-only fallback.
 
 THE BOOK, NOT THE HEADLINE. The price is the observed book the paper
 market-data client read at decision time: the consumed side's levels with
@@ -171,21 +178,29 @@ def score(model: dict, *, price: float, payout_is_complement: bool) -> dict:
 
 
 async def ensure_model_attempt(conn, *, at: float) -> dict:
-    """NO RESEARCH MODEL: run (or find) today's existing daily fit, which
-    records its attempt. Its cutoff is the run instant: training rows decided
-    and outcomes available by then. Never promotes; never raises."""
+    """NO RESEARCH MODEL: ask today's daily run WITHOUT FITTING
+    (`daily_model_run(allow_fit=False)`). It reports the day's run when one
+    exists; records the day's first, non-decisive INSUFFICIENT (or
+    LABELS_UNREADABLE) row when no cohort is ready; and when a cohort IS
+    ready returns the named deferral FIT_DEFERRED_TO_SCHEDULED_STEP and
+    writes nothing -- the fit is `derek.model_run_step`'s, under the cycle
+    hook's bound, never inside this per-valuation bound. It does not wait
+    for another caller's lock on the day (DAILY_RUN_IN_PROGRESS_ELSEWHERE).
+    Never promotes; never raises."""
     try:
         from . import derek_research as DR
-        got = await DR.daily_model_run(conn, now=at)
+        got = await DR.daily_model_run(conn, now=at, allow_fit=False)
     except Exception as exc:                                    # noqa: BLE001
         return {"ran": False, "refusal": "MODEL_RUN_RAISED:%s"
                 % type(exc).__name__}
     return {k: got.get(k) for k in ("run_day", "ran", "already_ran",
                                     "run_id", "outcome", "counts",
                                     "attempted_model_ids", "refusal",
-                                    "promoted")} | {
-        "cutoff": ("fit through the run instant, on labelled research "
-                   "observations whose outcomes were available by then")}
+                                    "rerun_refusal", "deferral",
+                                    "ready_cohorts", "promoted")} | {
+        "cutoff": ("a fit (the scheduled step's) is through its run "
+                   "instant, on labelled research observations whose "
+                   "outcomes were available by then")}
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -301,17 +316,32 @@ CONTEXT_TTL_S = 300.0
 _CONTEXT_CACHE: dict = {}
 
 
+async def _a_model_appeared(conn, cached: dict, *, at: float) -> bool:
+    """A cached context that found NO research model is not served once a
+    candidate exists (the scheduled step may have fitted one since): one
+    registry read, no provenance check -- the recomputed context verifies
+    it."""
+    m = cached.get("model") or {}
+    if m.get("ok") or m.get("refusal") != R_NO_RESEARCH_MODEL:
+        return False
+    probe = await research_model(conn, at=at, verify=False)
+    return bool(probe.get("ok"))
+
+
 async def _context(conn, ctx: dict) -> dict:
     """Once per pass (or per CONTEXT_TTL_S for the per-valuation hook): the
     research model, its daily attempt, the void measure and the source
-    calibration."""
+    calibration. A cached context without a model is recomputed as soon as
+    a candidate is registered."""
     if "derek" in ctx:
         return ctx["derek"]
     key = ctx.get("context_cache_key")
     if key is not None:
         hit = _CONTEXT_CACHE.get(key)
         if hit is not None and float(ctx["now"]) - hit["at"] < \
-                CONTEXT_TTL_S and float(ctx["now"]) >= hit["at"]:
+                CONTEXT_TTL_S and float(ctx["now"]) >= hit["at"] \
+                and not await _a_model_appeared(conn, hit["derek"],
+                                                at=float(ctx["now"])):
             ctx["derek"] = hit["derek"]
             return ctx["derek"]
     at = ctx["now"]

@@ -164,8 +164,9 @@ async def drop_today_run(conn, at: float) -> None:
         await conn.execute("SET LOCAL session_replication_role = replica")
         await conn.execute("DELETE FROM derek_research_model_runs "
                            " WHERE run_day=$1", DR._day_of(at))
+        # the day's first run, and any same-day run after it (181)
         await conn.execute("DELETE FROM derek_research_model_attempts "
-                           " WHERE run_id=$1",
+                           " WHERE run_id=$1 OR run_id LIKE $1 || ':%'",
                            "derek-research-run:%s" % DR._day_of(at))
 
 

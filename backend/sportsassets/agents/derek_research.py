@@ -889,7 +889,14 @@ async def attempt_fit(conn, *, model_id: str, cohort: str, through,
     registers a CANDIDATE, and writes one `derek_research_model_attempts`
     row whatever happened -- refused, degenerate, raised or registered --
     with the training rows and fixtures, the attempted set's hash and, when
-    registered, the records' hash. Never promotes. Never raises."""
+    registered, the records' hash. Never promotes. Never raises.
+
+    The fit and the registration run in ONE SAVEPOINT (their own transaction
+    when the caller has none): a database error inside them -- raised, or
+    swallowed by a reader and leaving the transaction aborted, which the
+    closing probe finds -- rolls back whatever they wrote, the attempt is
+    recorded as RAISED, and the caller's transaction (daily_model_run's)
+    stays usable."""
     import datetime as _dt
     import hashlib
     FM = _FM()
@@ -900,16 +907,18 @@ async def attempt_fit(conn, *, model_id: str, cohort: str, through,
     out: dict[str, Any] = {"attempt_id": str(model_id), "cohort": cohort,
                            "run_id": run_id, "evaluation_cohort": ecoh,
                            "promoted": False}
-    rows_n = fx_n = 0
-    set_sha = hashlib.sha256(b"[]").hexdigest()
-    outcome, refusal, records_sha, detail = ATTEMPT_RAISED, None, None, {}
-    try:
+    got: dict[str, Any] = {"rows_n": 0, "fx_n": 0,
+                           "set_sha": hashlib.sha256(b"[]").hexdigest(),
+                           "outcome": ATTEMPT_RAISED, "refusal": None,
+                           "records_sha": None, "detail": {}}
+
+    async def _fit_and_register() -> None:
         lab = await labelled_observations(conn, through=th,
                                           outcomes_through=th,
                                           cohorts=[cohort])
         if lab.get("ok"):
-            rows_n, fx_n = int(lab["n"]), int(lab["n_events"])
-            set_sha = hashlib.sha256(json.dumps(sorted(
+            got["rows_n"], got["fx_n"] = int(lab["n"]), int(lab["n_events"])
+            got["set_sha"] = hashlib.sha256(json.dumps(sorted(
                 str(d) for d in lab["decision_ids"])).encode()).hexdigest()
         fit = await FM.fit_from_records(
             conn, through=through_dt, model_key=FM.KEY_ENTRY_PAYOUT,
@@ -920,80 +929,275 @@ async def attempt_fit(conn, *, model_id: str, cohort: str, through,
         out["fit"] = {k: fit.get(k) for k in ("ok", "refusal", "n_events",
                                                "train_rows")}
         if not fit.get("ok"):
-            outcome, refusal = ATTEMPT_FIT_REFUSED, str(fit.get("refusal"))
-        else:
-            rows_n = int(fit.get("train_rows") or rows_n)
-            fx_n = int(fit.get("n_events") or fx_n)
-            reg = await FM.register(
-                conn, model_id=str(model_id), model_version=str(model_id),
-                fitted=fit, fit_through=through_dt,
-                model_key=FM.KEY_ENTRY_PAYOUT)
-            out["registration"] = {k: reg.get(k) for k in (
-                "ok", "refusal", "why", "inserted")}
-            if not reg.get("ok"):
-                outcome = ATTEMPT_REG_REFUSED
-                refusal = str(reg.get("refusal"))
-            else:
-                records_sha = fit["training_provenance"]["records_sha"]
-                created = _epoch((reg.get("model") or {}).get("created_at"))
-                detail["prospective_window_start_epoch_s"] = created
-                why = _degenerate(fit, lab.get("rows") or [],
-                                  lab.get("labels") or [])
-                outcome = ATTEMPT_DEGENERATE if why else ATTEMPT_REGISTERED
-                if why:
-                    detail["degenerate_because"] = why
-    except Exception as exc:                                   # noqa: BLE001
-        outcome, refusal = ATTEMPT_RAISED, "%s: %s" % (
-            type(exc).__name__, str(exc)[:200])
-    out.update(outcome=outcome, refusal=refusal, train_rows=rows_n,
-               train_fixtures=fx_n, attempted_set_sha=set_sha,
-               records_sha=records_sha, detail=detail)
+            got["outcome"] = ATTEMPT_FIT_REFUSED
+            got["refusal"] = str(fit.get("refusal"))
+            return
+        got["rows_n"] = int(fit.get("train_rows") or got["rows_n"])
+        got["fx_n"] = int(fit.get("n_events") or got["fx_n"])
+        reg = await FM.register(
+            conn, model_id=str(model_id), model_version=str(model_id),
+            fitted=fit, fit_through=through_dt,
+            model_key=FM.KEY_ENTRY_PAYOUT)
+        out["registration"] = {k: reg.get(k) for k in (
+            "ok", "refusal", "why", "inserted")}
+        if not reg.get("ok"):
+            got["outcome"] = ATTEMPT_REG_REFUSED
+            got["refusal"] = str(reg.get("refusal"))
+            return
+        got["records_sha"] = fit["training_provenance"]["records_sha"]
+        created = _epoch((reg.get("model") or {}).get("created_at"))
+        got["detail"]["prospective_window_start_epoch_s"] = created
+        why = _degenerate(fit, lab.get("rows") or [], lab.get("labels") or [])
+        got["outcome"] = ATTEMPT_DEGENERATE if why else ATTEMPT_REGISTERED
+        if why:
+            got["detail"]["degenerate_because"] = why
+
     try:
-        out["recorded"] = await conn.fetchval(
-            "INSERT INTO derek_research_model_attempts (attempt_id, run_id, "
-            " model_key, source, cohort, attempted_at, fit_through, "
-            " evaluation_cohort, outcome, train_rows, train_fixtures, "
-            " attempted_set_sha, records_sha, refusal, detail) "
-            "VALUES ($1,$2,$3,$4,$5,to_timestamp($6),to_timestamp($7),"
-            " $8::jsonb,$9,$10,$11,$12,$13,$14,$15::jsonb) "
-            "ON CONFLICT DO NOTHING RETURNING attempt_id",
-            str(model_id), run_id, FM.KEY_ENTRY_PAYOUT,
-            FM.SOURCE_RESEARCH_OBSERVATIONS, str(cohort), at, th,
-            json.dumps(ecoh), outcome, rows_n, fx_n, set_sha, records_sha,
-            refusal, json.dumps(detail, default=str)) is not None
+        async with conn.transaction():
+            await _fit_and_register()
+            # an error swallowed above leaves the transaction aborted: this
+            # raises, and the savepoint is rolled back
+            await conn.fetchval("SELECT 1")
+    except Exception as exc:                                   # noqa: BLE001
+        # ROLLED BACK: nothing this attempt fitted or registered remains
+        got.update(outcome=ATTEMPT_RAISED, refusal="%s: %s" % (
+            type(exc).__name__, str(exc)[:200]), records_sha=None,
+            detail={"rolled_back": True})
+        out.pop("registration", None)
+    out.update(outcome=got["outcome"], refusal=got["refusal"],
+               train_rows=got["rows_n"], train_fixtures=got["fx_n"],
+               attempted_set_sha=got["set_sha"],
+               records_sha=got["records_sha"], detail=got["detail"])
+    try:
+        async with conn.transaction():
+            out["recorded"] = await conn.fetchval(
+                "INSERT INTO derek_research_model_attempts (attempt_id, "
+                " run_id, model_key, source, cohort, attempted_at, "
+                " fit_through, evaluation_cohort, outcome, train_rows, "
+                " train_fixtures, attempted_set_sha, records_sha, refusal, "
+                " detail) "
+                "VALUES ($1,$2,$3,$4,$5,to_timestamp($6),to_timestamp($7),"
+                " $8::jsonb,$9,$10,$11,$12,$13,$14,$15::jsonb) "
+                "ON CONFLICT DO NOTHING RETURNING attempt_id",
+                str(model_id), run_id, FM.KEY_ENTRY_PAYOUT,
+                FM.SOURCE_RESEARCH_OBSERVATIONS, str(cohort), at, th,
+                json.dumps(ecoh), got["outcome"], got["rows_n"], got["fx_n"],
+                got["set_sha"], got["records_sha"], got["refusal"],
+                json.dumps(got["detail"], default=str)) is not None
     except Exception as exc:                                   # noqa: BLE001
         out["recorded"] = False
         out["record_error"] = type(exc).__name__
     return out
 
 
-async def daily_model_run(conn, *, now: float) -> dict:
-    """ONCE PER UTC DAY. When a cohort's labelled research fixtures reach
-    MIN_TRAIN_EVENTS: ATTEMPT a fit on that cohort only (never pooled) --
-    every attempt recorded, its evaluation cohort declared and frozen before
-    fitting -- and evaluate the cohort's scheduled candidates, each on its
-    OWN frozen cohort, against the raw venue price, Pinnacle and the base
-    rate. Otherwise record INSUFFICIENT_LABELLED_FIXTURES with the exact
-    counts. A refit happens only when the cohort has grown by
-    CANDIDATE_REFIT_MIN_NEW_EVENTS fixtures since the last scheduled
-    attempt, and is a NEW model. NEVER promotes. Never raises (the caller
-    guards)."""
-    FM = _FM()
+#: ── ONE DECISIVE RUN PER UTC DAY (migration 181) ────────────────────────
+#: A run that could fit nothing at its instant -- too few labelled fixtures,
+#: or a label read that failed -- does NOT close the day. Only these are
+#: non-decisive; the partial unique index of 181 says the same thing.
+NON_DECISIVE_OUTCOMES = (RUN_INSUFFICIENT, RUN_LABELS_UNREADABLE)
+RUNS_DECISIVE_INDEX = "derek_research_model_runs_one_decisive_run_per_day"
+#: Why this call did not make the day's same-day run (it reports the day's
+#: latest row instead and writes nothing).
+R_RERUN_NEEDS_MIGRATION_181 = "SAME_DAY_RUN_NEEDS_MIGRATION_181"
+R_RERUN_NOT_AFTER_LAST_RUN = ("SAME_DAY_RUN_REFUSED_NOT_AFTER_THE_DAYS_LAST_"
+                              "RECORDED_RUN")
+R_RERUN_LABELS_UNREADABLE = "SAME_DAY_RUN_SKIPPED_THE_LABELS_COULD_NOT_BE_READ"
+R_RERUN_LEFT_TO_THE_SCHEDULE = (
+    "SAME_DAY_RUN_IS_THE_SCHEDULED_STEPS (derek.model_run_step, right after "
+    "the collection step that adds the labelled rows)")
+#: The paper path (`allow_fit=False`) never fits. With a cohort ready it
+#: says so and writes nothing; while another caller holds the day's lock it
+#: does not wait.
+R_FIT_DEFERRED = "FIT_DEFERRED_TO_SCHEDULED_STEP"
+R_DAILY_RUN_IN_PROGRESS = "DAILY_RUN_IN_PROGRESS_ELSEWHERE"
+#: A run whose attempts or row could not all be written is rolled back as a
+#: whole: no attempt or model without the run row that lists it.
+R_RUN_ROLLED_BACK = "DAILY_RUN_ROLLED_BACK"
+
+RUN_INSERT_SQL = (
+    "INSERT INTO derek_research_model_runs (run_id, run_day, ran_at, "
+    " outcome, counts, fitted, evaluations, detail, attempted_model_ids) "
+    "VALUES ($1, $2, to_timestamp($3), $4, $5::jsonb, $6::jsonb, "
+    "        $7::jsonb, $8::jsonb, $9::text[]) "
+    "ON CONFLICT DO NOTHING RETURNING run_id")
+
+
+def daily_run_lock_key(day) -> str:
+    """pg_advisory_xact_lock(hashtext(<this>)) serializes the day's runs."""
+    return "derek_research_daily_run:%s" % day
+
+
+class _RunRolledBack(Exception):
+    """Raised inside the run's transaction to roll all of it back."""
+
+    def __init__(self, why: str, result: dict | None = None):
+        super().__init__(why)
+        self.why, self.result = why, result
+
+
+class _SavepointRollback(Exception):
+    def __init__(self, value):
+        super().__init__("rolled back to the savepoint")
+        self.value = value
+
+
+async def _labels_in_savepoint(conn, *, at: float) -> dict:
+    """`labelled_observations` through `at`, in a savepoint: a FAILED read
+    (a database error, which aborts the transaction) is rolled back to the
+    savepoint, so the run's transaction can still record what happened."""
+    try:
+        async with conn.transaction():
+            lab = await labelled_observations(conn, through=at,
+                                              outcomes_through=at)
+            if not lab.get("ok"):
+                raise _SavepointRollback(lab)
+            return lab
+    except _SavepointRollback as rb:
+        return rb.value
+
+
+async def _guarded_in_savepoint(conn, fn):
+    """`await fn()` in a savepoint; a raise, or a transaction left aborted by
+    an error swallowed inside, rolls the savepoint back. Returns (value,
+    error)."""
+    try:
+        async with conn.transaction():
+            value = await fn()
+            await conn.fetchval("SELECT 1")
+            return value, None
+    except Exception as exc:                                   # noqa: BLE001
+        return None, "%s: %s" % (type(exc).__name__, str(exc)[:200])
+
+
+async def _same_day_run_possible(conn) -> bool:
+    """Migration 181 is applied to the `derek_research_model_runs` the
+    search path names: no NON-partial unique index on (run_day) alone (170's
+    UNIQUE (run_day)), and a partial unique one (one decisive run per day).
+    Read from the catalog, not by index name."""
+    try:
+        return bool(await conn.fetchval(
+            "WITH ix AS ("
+            "  SELECT i.indpred IS NOT NULL AS partial "
+            "    FROM pg_index i "
+            "    JOIN pg_attribute a ON a.attrelid = i.indrelid "
+            "                       AND a.attnum = i.indkey[0] "
+            "   WHERE i.indrelid = to_regclass('derek_research_model_runs') "
+            "     AND i.indisunique AND i.indnkeyatts = 1 "
+            "     AND a.attname = 'run_day') "
+            "SELECT NOT EXISTS (SELECT 1 FROM ix WHERE NOT partial) "
+            "   AND EXISTS (SELECT 1 FROM ix WHERE partial)"))
+    except Exception:                                          # noqa: BLE001
+        return False
+
+
+async def daily_model_run(conn, *, now: float,
+                          allow_fit: bool = True) -> dict:
+    """ONE DECISIVE RUN PER UTC DAY. When a cohort's labelled research
+    fixtures reach MIN_TRAIN_EVENTS: ATTEMPT a fit on that cohort only (never
+    pooled) -- every attempt recorded, its evaluation cohort declared and
+    frozen before fitting, its training cutoff this run's instant -- and
+    evaluate the cohort's scheduled candidates, each on its OWN frozen
+    cohort, against the raw venue price, Pinnacle and the base rate. A refit
+    happens only when the cohort has grown by CANDIDATE_REFIT_MIN_NEW_EVENTS
+    fixtures since the last scheduled attempt, and is a NEW model. Otherwise
+    record INSUFFICIENT_LABELLED_FIXTURES with the exact counts, or
+    LABELS_UNREADABLE when the label read failed. NEVER promotes.
+
+    A SHORTFALL OR A FAILED LABEL READ DOES NOT CLOSE THE DAY (migration
+    181). The day's first run can come before any collection step (the paper
+    path asks within seconds of boot). Later the same day, once a cohort HAS
+    reached MIN_TRAIN_EVENTS, the scheduled call makes the run again as a
+    NEW row ('derek-research-run:<day>:<n>'); the earlier row stays exactly
+    as written (append-only). While every cohort is still short, or the
+    labels cannot be read, nothing new is written and the current state is
+    reported (`counts_now` / `rerun_refusal`). Once the day has a decisive
+    run, every later call returns `already_ran`. A same-day run at or before
+    the day's last recorded run instant is refused by name. A schema without
+    181 refuses the same-day run by name.
+
+    SERIALIZED PER UTC DAY. pg_advisory_xact_lock(hashtext(
+    daily_run_lock_key(day))) is taken BEFORE the day's rows are read and
+    held through every attempt and the run insert, all in ONE transaction:
+    concurrent callers (the 60 s paper pass, the in-cycle paper hook, the
+    scheduled model_run_step) cannot fit twice, and a run whose row or
+    attempts could not all be written is rolled back whole -- never an
+    attempt or a model without the run row that lists it.
+
+    `allow_fit=False` (THE PAPER PATH, inside its per-valuation time bound)
+    never fits: it does not wait for the lock (DAILY_RUN_IN_PROGRESS_
+    ELSEWHERE), only reports a day that already has rows, may record the
+    day's first, non-decisive INSUFFICIENT / LABELS_UNREADABLE row, and with
+    a cohort ready returns FIT_DEFERRED_TO_SCHEDULED_STEP and writes nothing;
+    `derek.model_run_step` makes that fit right after the collection step.
+
+    Never raises on a refusal; a database error propagates (the callers
+    guard) after rolling the whole run back."""
     at = float(now)
     day = _day_of(at)
-    run_id = "derek-research-run:%s" % day
     out: dict[str, Any] = {"run_day": str(day), "ran": False,
                            "promoted": False, "promotion": NEVER_PROMOTES}
     if not (await _regclass(conn, "derek_research_model_runs")
             and await _regclass(conn, "derek_research_observations")):
         return dict(out, refusal="RESEARCH_TABLES_ABSENT")
-    prior = await conn.fetchrow(
-        "SELECT run_id, outcome FROM derek_research_model_runs "
-        " WHERE run_day = $1", day)
-    if prior is not None:
-        return dict(out, already_ran=True, run_id=prior["run_id"],
-                    outcome=prior["outcome"])
-    lab = await labelled_observations(conn, through=at, outcomes_through=at)
+    try:
+        async with conn.transaction():
+            return await _daily_model_run_locked(conn, at=at, day=day,
+                                                 out=out, allow_fit=allow_fit)
+    except _RunRolledBack as rb:
+        return dict(out, **(rb.result or {}), ran=False,
+                    refusal=R_RUN_ROLLED_BACK, why=rb.why)
+
+
+async def _daily_model_run_locked(conn, *, at: float, day, out: dict,
+                                  allow_fit: bool) -> dict:
+    FM = _FM()
+    key = daily_run_lock_key(day)
+    if allow_fit:
+        await conn.execute("SELECT pg_advisory_xact_lock(hashtext($1))", key)
+    elif not await conn.fetchval(
+            "SELECT pg_try_advisory_xact_lock(hashtext($1))", key):
+        return dict(out, deferral=R_DAILY_RUN_IN_PROGRESS)
+    prior = [dict(r) for r in await conn.fetch(
+        "SELECT run_id, outcome, ran_at >= to_timestamp($2) AS not_before "
+        "  FROM derek_research_model_runs "
+        " WHERE run_day = $1 ORDER BY ran_at, recorded_at, run_id", day, at)]
+    decisive = [r for r in prior if r["outcome"] not in NON_DECISIVE_OUTCOMES]
+    if decisive:
+        return dict(out, already_ran=True, run_id=decisive[0]["run_id"],
+                    outcome=decisive[0]["outcome"])
+    same_day = None
+    run_id = "derek-research-run:%s" % day
+    if prior:
+        # EVERY RUN SO FAR TODAY COULD FIT NOTHING. The day is open, but
+        # only the scheduled step re-runs it, and only once a cohort is
+        # ready; otherwise this call reports the day's latest row.
+        closed = dict(out, already_ran=True, run_id=prior[-1]["run_id"],
+                      outcome=prior[-1]["outcome"])
+        if not allow_fit:
+            return dict(closed, rerun_refusal=R_RERUN_LEFT_TO_THE_SCHEDULE)
+        if not await _same_day_run_possible(conn):
+            return dict(closed, rerun_refusal=R_RERUN_NEEDS_MIGRATION_181)
+        if any(r["not_before"] for r in prior):
+            return dict(closed, rerun_refusal=R_RERUN_NOT_AFTER_LAST_RUN)
+        lab = await _labels_in_savepoint(conn, at=at)
+        if not lab.get("ok"):
+            # never a second LABELS_UNREADABLE row: nothing new is known
+            return dict(closed, rerun_refusal=R_RERUN_LABELS_UNREADABLE,
+                        error=lab.get("error"))
+        counts_now = labelled_counts(lab)
+        if not any(b["have_labelled_fixtures"] >= FM.MIN_TRAIN_EVENTS
+                   for b in counts_now["by_cohort"].values()):
+            return dict(closed, counts_now=counts_now)
+        run_id = "derek-research-run:%s:%d" % (day, len(prior) + 1)
+        same_day = {"after_run_ids": [r["run_id"] for r in prior],
+                    "after_outcomes": [r["outcome"] for r in prior],
+                    "why": ("a cohort reached MIN_TRAIN_EVENTS (%d labelled "
+                            "fixtures) after the day's earlier run(s), which "
+                            "could fit nothing; those rows are unchanged and "
+                            "this run's training cutoff is its own instant"
+                            % FM.MIN_TRAIN_EVENTS)}
+    else:
+        lab = await _labels_in_savepoint(conn, at=at)
     fitted: dict = {}
     evaluations: dict = {}
     attempted: list = []
@@ -1003,6 +1207,11 @@ async def daily_model_run(conn, *, now: float) -> dict:
         counts = labelled_counts(lab)
         ready = [c for c, b in counts["by_cohort"].items()
                  if b["have_labelled_fixtures"] >= FM.MIN_TRAIN_EVENTS]
+        if ready and not allow_fit:
+            # THE PAPER PATH NEVER FITS (its per-valuation bound): named,
+            # and nothing is written -- the scheduled step fits next
+            return dict(out, deferral=R_FIT_DEFERRED, ready_cohorts=ready,
+                        counts=counts)
         outcome = RUN_INSUFFICIENT
         for c in ready:
             prefix = "%s:%s:" % (AUTO_MODEL_PREFIX, c)
@@ -1014,10 +1223,21 @@ async def daily_model_run(conn, *, now: float) -> dict:
             have = counts["by_cohort"][c]["have_labelled_fixtures"]
             last_n = None if prev is None else int(prev["train_fixtures"])
             grew = None if last_n is None else have - last_n
-            if last_n is None or grew >= FM.CANDIDATE_REFIT_MIN_NEW_EVENTS:
+            if prev is not None and prev["attempt_id"] == prefix + str(day):
+                # an attempt id names ONE fit: today's is already recorded
+                fitted[c] = {"refit": False, "why": (
+                    "this cohort's scheduled attempt for %s is already "
+                    "recorded (%s)" % (day, prev["attempt_id"]))}
+            elif last_n is None or grew >= FM.CANDIDATE_REFIT_MIN_NEW_EVENTS:
                 att = await attempt_fit(conn, model_id=prefix + str(day),
                                         cohort=c, through=at, run_id=run_id,
                                         now=at)
+                if not att.get("recorded"):
+                    raise _RunRolledBack(
+                        "the attempt %s could not be recorded (%s); the "
+                        "whole run is rolled back" % (
+                            att["attempt_id"],
+                            att.get("record_error") or "already present"))
                 attempted.append(att["attempt_id"])
                 fitted[c] = {"refit": True,
                              "model_id": att["attempt_id"],
@@ -1043,38 +1263,52 @@ async def daily_model_run(conn, *, now: float) -> dict:
             for mid in cands:
                 # ITS OWN FROZEN COHORT (read from its provenance by the
                 # registry); never another model's.
-                evaluations[mid] = _eval_summary(
-                    await FM.evaluate(conn, model_id=mid, now=at))
+                ev, err = await _guarded_in_savepoint(
+                    conn, lambda mid=mid: FM.evaluate(conn, model_id=mid,
+                                                      now=at))
+                evaluations[mid] = (_eval_summary(ev) if err is None else
+                                    {"ok": False, "refusal":
+                                     "EVALUATION_RAISED", "error": err,
+                                     "promoted": False})
         if ready:
             outcome = (RUN_FITTED if any(f.get("refit") and f.get("ok")
                                          for f in fitted.values())
                        else RUN_EVALUATED if evaluations else RUN_FIT_REFUSED)
+    detail: dict[str, Any] = {
+        "promotion": NEVER_PROMOTES,
+        "minimums": FM.qualification_minimums(FM.KEY_ENTRY_PAYOUT),
+        "model_description": FM.ENTRY_PAYOUT_DESCRIPTION,
+        "serialized_by": ("pg_advisory_xact_lock(hashtext('%s'))" % key)}
+    if same_day is not None:
+        detail["same_day_rerun"] = same_day
     wrote = await conn.fetchval(
-        "INSERT INTO derek_research_model_runs (run_id, run_day, ran_at, "
-        " outcome, counts, fitted, evaluations, detail, attempted_model_ids) "
-        "VALUES ($1, $2, to_timestamp($3), $4, $5::jsonb, $6::jsonb, "
-        "        $7::jsonb, $8::jsonb, $9::text[]) "
-        "ON CONFLICT DO NOTHING RETURNING run_id",
-        run_id, day, at, outcome, json.dumps(counts, default=str),
-        json.dumps(fitted, default=str), json.dumps(evaluations, default=str),
-        json.dumps({"promotion": NEVER_PROMOTES,
-                    "minimums": FM.qualification_minimums(
-                        FM.KEY_ENTRY_PAYOUT),
-                    "model_description": FM.ENTRY_PAYOUT_DESCRIPTION},
-                   default=str), attempted)
-    return dict(out, ran=wrote is not None, run_id=run_id, outcome=outcome,
+        RUN_INSERT_SQL, run_id, day, at, outcome,
+        json.dumps(counts, default=str), json.dumps(fitted, default=str),
+        json.dumps(evaluations, default=str), json.dumps(detail, default=str),
+        attempted)
+    if wrote is None:
+        # under the day's lock this cannot happen; if it does, nothing this
+        # run did may stand without its row
+        raise _RunRolledBack("the run row %s was not written (a conflicting "
+                             "row exists)" % run_id,
+                             {"attempted_model_ids": attempted})
+    return dict(out, ran=True, run_id=run_id, outcome=outcome,
                 counts=counts, fitted=fitted, evaluations=evaluations,
-                attempted_model_ids=attempted)
+                attempted_model_ids=attempted, same_day_rerun=same_day)
 
 
 async def latest_model_run(conn) -> dict | None:
-    """The most recent daily run, for the workspace. Raises on a failed
-    read."""
+    """The most recent daily run, for the workspace: the newest day, and
+    within it the DECISIVE row (one per day, migration 181) before any row
+    that could fit nothing, then the latest. Raises on a failed read."""
     r = await conn.fetchrow(
         "SELECT run_id, run_day, ran_at, outcome, counts, fitted, "
         "       evaluations, promoted, attempted_model_ids "
         "  FROM derek_research_model_runs "
-        " ORDER BY run_day DESC LIMIT 1")
+        " ORDER BY run_day DESC, "
+        "          (outcome <> ALL($1::text[])) DESC, "
+        "          ran_at DESC, recorded_at DESC LIMIT 1",
+        list(NON_DECISIVE_OUTCOMES))
     if r is None:
         return None
     return {"run_id": r["run_id"], "run_day": str(r["run_day"]),
