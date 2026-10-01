@@ -310,3 +310,46 @@ async def paper_benchmark(limit: int = Query(100, ge=1, le=1000),
             return dict(_labels(), benchmark=_unavailable_schema())
         return await _readmodel("benchmark_payload", conn, limit=limit,
                                 strategy=strategy)
+
+
+# ═════════════════════════════════════════════════════════════════════
+# THE OPERATIONAL VIEW: THE PAPER SESSION AS THE PAGES' DEFAULT
+# ═════════════════════════════════════════════════════════════════════
+#
+# bettor_paper_ops: Derek's strategies apart (the original two-model research
+# policy, then each EXPERIMENTAL benchmark with its policy version and
+# labels) with the eligibility funnel from each decision's own conditions;
+# every paper position handed to Xavier with its strategy, his reviews,
+# protection orders, settlements and what is pending; Audrey's account,
+# P&L by strategy, audits and daily report; and THREE freshness stamps
+# (server read, the paper runtime's own heartbeat, the last committed ledger
+# transaction). Every section independently OK / EMPTY / UNAVAILABLE; a
+# failed read is UNAVAILABLE by name, never a zero.
+
+@router.get("/api/command/paper/operations",
+            dependencies=[Depends(require_read)])
+async def paper_operations(agent: str = Query(..., pattern="^(derek|xavier|audrey)$"),
+                           limit: int = Query(25, ge=1, le=200)) -> dict:
+    from .. import bettor_paper_ledger as L
+    from .. import bettor_paper_ops as OPS
+    pool = await _pool()
+    async with pool.acquire() as conn:
+        if not await _schema(conn):
+            return dict(_labels(), agent=agent,
+                        operations=_unavailable_schema())
+        out = await OPS.OPERATIONS[agent](conn, account_id=L.ACCOUNT_ID,
+                                          limit=limit)
+        out["agent"] = agent
+        return out
+
+
+@router.get("/api/command/paper/overview",
+            dependencies=[Depends(require_read)])
+async def paper_overview() -> dict:
+    from .. import bettor_paper_ledger as L
+    from .. import bettor_paper_ops as OPS
+    pool = await _pool()
+    async with pool.acquire() as conn:
+        if not await _schema(conn):
+            return dict(_labels(), overview=_unavailable_schema())
+        return await OPS.overview(conn, account_id=L.ACCOUNT_ID)

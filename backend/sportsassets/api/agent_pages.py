@@ -76,9 +76,13 @@ ENDPOINTS = {
     "paper_derek": "/api/command/paper/derek",
     "paper_xavier": "/api/command/paper/xavier",
     "paper_audrey": "/api/command/paper/audrey",
+    # the operational view the pages lead with (bettor_paper_ops)
+    "paper_operations": "/api/command/paper/operations",
+    "paper_overview": "/api/command/paper/overview",
 }
 PAPER_EP_KEYS = ("paper_account", "paper_stream", "paper_session",
-                 "paper_derek", "paper_xavier", "paper_audrey")
+                 "paper_derek", "paper_xavier", "paper_audrey",
+                 "paper_operations")
 
 REQUIRED_SECTIONS = {
     "derek": ("status", "versions", "coverage", "subscription",
@@ -1834,20 +1838,24 @@ _CC_SHELL = r"""<!doctype html>
 <div class="meta"><span class="ro">READ-ONLY</span><span id="readat">reading&#8230;</span><button id="trace-btn" type="button">Trace</button><button id="refresh" type="button">Refresh</button></div></header>
 <main id="cc-main" tabindex="-1">
 <div class="cc-paper-banner" id="paper-banner" data-state="READING" role="status" aria-live="polite">Reading the paper session&#8230;</div>
+%%FRESH%%
 <div class="cc-banner" role="alert" id="cc-banner">%%BANNER%%</div>
 <div class="cc-hero">%%STAGE%%%%BRIEF%%</div>
-%%PANELS%%
+%%OPS%%
 %%PAPER%%
+%%FUNDED_OPEN%%
+%%PANELS%%
 <section class="card wide" id="trace" hidden aria-label="Trace linked records" style="margin-top:16px"><header><span class="idx">&#8594;</span><div class="ttl"><h3>Trace linked records</h3><code class="key">entry decision &#8594; handoff &#8594; Xavier decisions &#8594; audit &#8594; directive &#8594; task &#8594; candidate</code></div><button id="trace-close" type="button">Close</button></header>
 <p class="note">Follows the ids the records carry (entry_intent_id, portfolio_group_id, xavier_decision_id, directive_id, task_id, candidate_id, and evidence references) across the four same-origin reads. Every step says what linked it.</p><div id="trace-body"></div></section>
-<h2 class="cc-h2" id="full-record">Full workspace record</h2>
-<div id="app"><p class="boot">Reading %%ENDPOINT%% &#8230;</p></div></main>
-<p class="foot">Presentation of recorded state. This page sends no order and holds no credential; it reads %%ENDPOINT%% with the COMMAND session. The character is an original stylised illustration of an AI agent; its pose follows the agent_status record and never stands in for data. UNKNOWN is not zero; EMPTY is not success.%%CREDIT%%</p>
+<h2 class="cc-h2" id="full-record">Full workspace record (funded)</h2>
+<div id="app"><p class="boot">Reading %%ENDPOINT%% &#8230;</p></div>%%FUNDED_CLOSE%%</main>
+<p class="foot">Presentation of recorded state. This page sends no order and holds no credential; it reads %%ENDPOINT%% with the COMMAND session. The character is an original stylised illustration of an AI agent; its pose follows the paper runtime's own heartbeat (paper_session_health) and never stands in for data. UNKNOWN is not zero; EMPTY is not success.%%CREDIT%%</p>
 <script>%%JS%%</script>
 <script type="module">%%LOADER%%</script></body></html>"""
 
 
 def _cc_page_html(kind: str) -> str:
+    from . import agent_cc_ops as OPS
     from . import agent_cc_page as CCP
     js = (CORE_JS + COMMON_JS + TRACE_JS
           + {"derek": DEREK_JS, "xavier": XAVIER_JS, "audrey": AUDREY_JS}[kind]
@@ -1855,11 +1863,16 @@ def _cc_page_html(kind: str) -> str:
               "var E = AG.ENDPOINTS,",
               "var E = Object.assign({}, AG.ENDPOINTS, %s)," % _cc_endpoints_js(),
               1)
-          + CCP.PAPER_CORE_JS + CCP.PAPER_BOOT_JS.replace(
+          + CCP.PAPER_CORE_JS + OPS.OPS_CORE_JS + CCP.PAPER_BOOT_JS.replace(
               "%%PAPER_EP%%", _json_ep(PAPER_EP_KEYS))
           + BOOT_JS)
     chat = CCP.chat_panel_html(CHAT_PANEL_HTML) if kind == "audrey" else ""
-    return (_CC_SHELL.replace("%%CSS%%", BASE_CSS + CCP.CC_CSS + CCP.PAPER_CSS)
+    return (_CC_SHELL.replace("%%CSS%%", BASE_CSS + CCP.CC_CSS + CCP.PAPER_CSS
+                              + OPS.OPS_CSS)
+            .replace("%%FRESH%%", OPS.fresh_html())
+            .replace("%%OPS%%", OPS.ops_html(kind))
+            .replace("%%FUNDED_OPEN%%", OPS.funded_open())
+            .replace("%%FUNDED_CLOSE%%", OPS.FUNDED_CLOSE)
             .replace("%%PAPER%%", CCP.paper_html(kind))
             .replace("%%JS%%", js)
             .replace("%%FRAMED%%", CCP.FRAMED_JS)
@@ -1915,10 +1928,12 @@ def page_html(kind: str) -> str:
 
 def render_js(kind: str) -> str:
     """The pure render code a page carries, without its DOM boot (for tests)."""
+    from . import agent_cc_ops as OPS
     from . import agent_cc_page as CCP
     return CORE_JS + COMMON_JS + TRACE_JS + {"index": INDEX_JS, "derek": DEREK_JS,
                                   "xavier": XAVIER_JS, "audrey": AUDREY_JS}[kind] + (
-        CCP.CC_CORE_JS + CCP.PAPER_CORE_JS if kind in ("derek", "xavier", "audrey") else "")
+        CCP.CC_CORE_JS + CCP.PAPER_CORE_JS + OPS.OPS_CORE_JS
+        if kind in ("derek", "xavier", "audrey") else "")
 
 
 LOCKED_PAGE_HTML = r"""<!doctype html>

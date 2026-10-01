@@ -58,6 +58,37 @@
 # A path that is NOT one of those files 404s rather than falling through to
 # the old site. That is deliberate: an obsolete route should say it is gone,
 # not quietly serve the page it replaced.
+# THE THREE AGENT PAGES AT MANAGEMENT URLS: /derek, /xavier, /audrey.
+#
+# REWRITES (status 200), so the address bar keeps the management URL on a
+# direct link and on refresh. They go to ONE static shell, not straight to
+# the API: the COMMAND session cookie is HttpOnly and scoped to
+# /api/command, so a request for /derek never carries it. The shell draws
+# the persistent navigation and frames /api/command/agents/<agent>/page --
+# same origin through the /api/command/* rule above, so the frame's request
+# DOES carry the cookie and the API enforces authentication as it does for
+# every other COMMAND page. The shell itself holds no data.
+#
+# ORDER: below the /api/command/* proxy (which must stay first) and ABOVE the
+# command-host catch-all, which would otherwise map /derek to /command/derek.
+[[redirects]]
+  from = "https://command.bettortoken.com/derek"
+  to = "/command/agent.html"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "https://command.bettortoken.com/xavier"
+  to = "/command/agent.html"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "https://command.bettortoken.com/audrey"
+  to = "/command/agent.html"
+  status = 200
+  force = true
+
 [[redirects]]
   from = "https://command.bettortoken.com/*"
   to = "/command/:splat"

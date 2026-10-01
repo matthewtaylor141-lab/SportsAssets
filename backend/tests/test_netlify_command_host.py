@@ -51,7 +51,17 @@ def _index_of(predicate):
 class TestTheHostServesCommand:
 
     def test_the_host_rule_exists_and_rewrites_to_command(self):
-        rule = _redirects()[_index_of(lambda r: HOST in r["from"])]
+        # THE CATCH-ALL is the host's `/*` rule. Since the agent pages
+        # (/derek, /xavier, /audrey) the host has more than one rule, and the
+        # agent rewrites sit ABOVE the catch-all (it would otherwise map
+        # /derek to /command/derek); that order is pinned here too.
+        catch = _index_of(lambda r: r["from"] == "https://%s/*" % HOST)
+        assert catch is not None
+        rule = _redirects()[catch]
+        for agent in ("derek", "xavier", "audrey"):
+            i = _index_of(lambda r, a=agent: r["from"] == "https://%s/%s" % (HOST, a))
+            assert i is not None and i < catch, agent
+            assert _redirects()[i]["to"] == "/command/agent.html" and _redirects()[i]["status"] == 200
         assert rule["from"] == "https://%s/*" % HOST
         assert rule["to"] == "/command/:splat"
         # 200 is a REWRITE: the browser keeps the command hostname rather

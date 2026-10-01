@@ -434,45 +434,55 @@ def stage_html(kind: str, endpoint: str, asset: dict | None = None) -> str:
     import json as _json
     m = CC_META[kind]
     asset = asset or {"model": None, "why": "no character config"}
+    # THE FIGURE AREA HOLDS ONLY THE FIGURE. The name and role sit above it,
+    # the status line, the placeholder caption, the 2D note and the pause
+    # control below it, so no label or operational text is ever drawn over
+    # the character (a phone at 390 px wide used to show the status line and
+    # the placeholder tag across the figure). The placeholder caption keeps
+    # its id and data-placeholder; the CSS hides it for a licensed model via
+    # :has() on the wrapper.
     return (
+        '<div class="cc-stagewrap" data-agent="%(k)s">'
+        '<div class="cc-ov"><span class="cc-ai">&#9679; AI AGENT</span>'
+        '<h1 id="cc-name">%(n)s</h1><span class="cc-role">%(r)s</span></div>'
         '<section class="cc-stage" id="cc-stage" data-cc-stage '
         'data-agent="%(k)s" data-cc-asset="%(asset)s" aria-labelledby="cc-name" '
         'aria-describedby="cc-alt">'
         '<canvas id="cc-canvas" role="img" aria-label="Placeholder character, '
         'final model pending: animated 3D stand-in for %(n)s, an AI agent. Pose '
         'reflects the recorded status."></canvas>'
-        '<span class="cc-placeholder" id="cc-placeholder" data-placeholder>'
-        '%(ph)s</span>'
-        '<div class="cc-fallback" id="cc-fallback">%(svg)s'
+        '<div class="cc-fallback" id="cc-fallback">%(svg)s</div>'
+        '<p class="sr-only" id="cc-alt">%(ph)s. %(n)s is an AI agent (%(r)s), '
+        'shown by an original procedural stand-in (%(p)s) until the licensed '
+        'model is installed. The pose follows the paper runtime\'s own '
+        'heartbeat: monitoring, reviewing, waiting, speaking or '
+        'unavailable.</p>'
+        '</section>'
+        '<div class="cc-cap"><span class="cc-placeholder" id="cc-placeholder" '
+        'data-placeholder>%(ph)s</span>'
         '<span class="fbnote" id="cc-fbnote">2D PORTRAIT &#183; 3D character '
-        'not loaded</span></div>'
-        '<div class="cc-ov"><span class="cc-ai">&#9679; AI AGENT</span>'
-        '<h1 id="cc-name">%(n)s</h1><span class="cc-role">%(r)s</span></div>'
+        'not loaded</span>'
         '<div class="cc-ctl"><button type="button" id="cc-pause" '
-        'aria-pressed="false">Pause animation</button></div>'
+        'aria-pressed="false">Pause animation</button></div></div>'
         '<div class="cc-st" aria-live="polite"><span id="cc-state">'
         '<span class="sb sb-NONE"><i></i>READING STATUS</span></span>'
         '<span class="anim" id="cc-anim">Animation: <b>waiting for the '
         'status read</b></span><span id="cc-hb"></span></div>'
-        '<p class="sr-only" id="cc-alt">%(ph)s. %(n)s is an AI agent (%(r)s), '
-        'shown by an original procedural stand-in (%(p)s) until the licensed '
-        'model is installed. The pose follows the '
-        'agent_status record: monitoring, reviewing, waiting, speaking or '
-        'unavailable.</p>'
-        '<noscript><p class="note" style="position:absolute;left:18px;'
-        'bottom:18px;right:18px">Scripts are disabled, so neither the live '
+        '<noscript><p class="note">Scripts are disabled, so neither the live '
         'records nor the character can be drawn here. The records are '
         'available as JSON at <a href="%(ep)s">%(ep)s</a>.</p></noscript>'
-        '</section>' % {"k": kind, "n": m["name"], "r": _html.escape(m["role"]),
-                        "p": _html.escape(m["persona"]), "ep": endpoint,
-                        "svg": _PORTRAITS[kind], "ph": PLACEHOLDER_TAG,
-                        "asset": _html.escape(_json.dumps(asset), quote=True)})
+        '</div>' % {"k": kind, "n": m["name"], "r": _html.escape(m["role"]),
+                    "p": _html.escape(m["persona"]), "ep": endpoint,
+                    "svg": _PORTRAITS[kind], "ph": PLACEHOLDER_TAG,
+                    "asset": _html.escape(_json.dumps(asset), quote=True)})
 
 
 def brief_html(kind: str) -> str:
     m = CC_META[kind]
     return ('<section class="panel cc-brief" id="cc-brief" aria-label="Key '
             'figures"><p class="lbl">Mandate</p><p class="blurb">%s</p>'
+            '<p class="lbl" style="margin:0">Paper session &#183; key figures '
+            '<span class="sim">SIMULATED</span></p>'
             '<div class="cc-kpis" id="cc-kpis"><div class="cc-kpi"><div '
             'class="lbl">Reading</div><div class="v">&#8230;</div></div></div>'
             '<p class="note" style="margin:0">Every figure links to the record '
@@ -880,8 +890,11 @@ CC_BOOT_JS = r"""
     if (b && CC.labelize) CC.labelize(b).then(function () { if ((id === 'p-audit' || id === 'p-history') && CC.relabelText) CC.relabelText(b); });
   }
   function failPanel(id, o, url) { setPanel(id, o.kind === 'LOCKED' ? 'LOCKED' : o.kind === 'NOT_DEPLOYED' ? 'NOT DEPLOYED' : 'UNAVAILABLE', AG.gate(o, url)); }
+  // THE FUNDED SYSTEM'S FIGURES go to its own collapsed section
+  // (#cc-funded-kpis); the brief's key figures (#cc-kpis) are the paper
+  // session's, written by the paper boot from the operations read.
   function kpis(list) {
-    var el = $('cc-kpis'); if (!el) return;
+    var el = $('cc-funded-kpis'); if (!el) return;
     el.innerHTML = list.map(function (k) {
       var h = AG.safeHref(k.href);
       return '<div class="cc-kpi"><div class="lbl">' + esc(k.label) + '</div>' + (h ? '<a class="v" href="' + esc(h) + '">' + k.value + '</a>' : '<div class="v">' + k.value + '</div>') + (k.sub ? '<div class="s">' + k.sub + '</div>' : '') + '</div>';
@@ -895,35 +908,39 @@ CC_BOOT_JS = r"""
     var c = $('cc-canvas'); if (c) c.setAttribute('aria-label', (real ? 'Animated 3D character of ' : 'Placeholder character, final model pending: animated 3D stand-in for ') + document.getElementById('cc-name').textContent + ', an AI agent, shown ' + m.mode + (m.why ? ' (' + m.why + ')' : '') + '.');
     try { window.dispatchEvent(new CustomEvent('cc:mode', {detail: {mode: m.mode, recorded: m.recorded, why: m.why}})); } catch (_) {}
   }
+  // THE POSE FOLLOWS THE PAPER RUNTIME (CC.setPaperMode, from the paper
+  // operations read's own heartbeat stamp). The funded agent_status record is
+  // reported in the funded section only; it never drives the character.
   function effective() {
-    var m = st.base || {mode: 'unavailable', why: 'status not read yet'};
+    var m = st.paper || {mode: 'unavailable', why: 'the paper runtime status has not been read yet'};
     if (st.chat && m.mode !== 'unavailable') return {mode: st.chat, recorded: m.recorded, why: null, activity: st.chat === 'speaking' ? 'answering in the management chat' : 'reading the records for a chat answer'};
     return m;
   }
+  function fundedState(html) { var el = $('cc-funded-state'); if (el) el.innerHTML = 'Funded agent status (agent_status, the funded lane\'s own record; it does not drive the character): ' + html; }
+  CC.setPaperMode = function (m) {
+    st.paper = m;
+    ['derek', 'xavier', 'audrey'].forEach(function (k) { var d = document.querySelector('[data-sd="' + k + '"]'); if (d) { d.setAttribute('data-mode', m.mode); d.title = 'paper runtime · ' + m.mode + (m.why ? ' · ' + m.why : ''); } });
+    applyMode(effective());
+  };
   async function readIndex() {
     var o = await AG.load(E.index, F);
     if (o.kind !== 'OK') {
       st.base = {mode: 'unavailable', recorded: null, why: 'status read failed: ' + (o.why || o.kind)};
-      ['derek', 'xavier', 'audrey'].forEach(function (k) { var d = document.querySelector('[data-sd="' + k + '"]'); if (d) { d.setAttribute('data-mode', 'unavailable'); d.title = 'status unreadable'; } });
-      $('cc-state').innerHTML = '<span class="sb sb-UNRECOGNISED"><i></i>UNAVAILABLE</span>';
-      applyMode(effective()); return;
+      fundedState('<span class="sb sb-UNRECOGNISED"><i></i>' + (o.kind === 'LOCKED' ? 'SIGN-IN REQUIRED' : 'UNAVAILABLE') + '</span> ' + esc(o.why || o.kind));
+      return;
     }
     st.index = o.json;
     var rd = AG.toEpoch(o.json.read_at);
     (o.json.agents || []).forEach(function (a) {
       var k = String(a.agent_id || '').toLowerCase();
-      var m = CC.modeOf(a, rd);
-      var d = document.querySelector('[data-sd="' + k + '"]');
-      if (d) { d.setAttribute('data-mode', m.mode); d.title = (a.state || 'no state') + ' · ' + m.mode + (m.why ? ' · ' + m.why : ''); }
       if (k === kind) {
+        var m = CC.modeOf(a, rd);
         st.base = m;
-        $('cc-state').innerHTML = AG.stateBadge(a.state);
         var hb = AG.toEpoch(a.last_heartbeat_at);
-        $('cc-hb').innerHTML = hb === null ? 'no heartbeat recorded' : 'heartbeat ' + AG.ts(hb, rd) + ' · <a href="' + E.index + '">agent_status</a>';
+        fundedState(AG.stateBadge(a.state) + ' · ' + esc(m.mode) + (m.why ? ' — ' + esc(m.why) : '') + ' · ' + (hb === null ? 'no heartbeat recorded' : 'heartbeat ' + AG.ts(hb, rd)) + ' · <a href="' + E.index + '">agent_status</a>');
       }
     });
-    if (!st.base) st.base = {mode: 'unavailable', why: 'the index returned no row for this agent'};
-    applyMode(effective());
+    if (!st.base) { st.base = {mode: 'unavailable', why: 'the index returned no row for this agent'}; fundedState(esc(st.base.why)); }
   }
   // ── DEREK ─────────────────────────────────────────────────────────
   function qs(o) { return Object.keys(o).map(function (k) { return encodeURIComponent(k) + '=' + encodeURIComponent(o[k]); }).join('&'); }
@@ -1259,6 +1276,7 @@ PAPER_CSS = r"""
 .cc-paper-banner[data-state=ACTIVE]{border:1px solid #58a6ff;color:#cfe3ff;background:linear-gradient(90deg,rgba(88,166,255,.16),rgba(88,166,255,.04))}
 .cc-paper-banner[data-state=OFF]{border-color:var(--warn);color:var(--warn)}
 .cc-paper-banner[data-state=UNAVAILABLE]{border-color:var(--bad);color:var(--bad)}
+.cc-raw{margin-top:16px}.cc-raw>summary{cursor:pointer;font:600 12.5px/1.4 var(--mono);color:var(--ink-2);padding:10px 2px;overflow-wrap:anywhere}.cc-raw[open]>summary{margin-bottom:10px}
 .cc-p.paper{border-style:dashed;border-color:#3a5a86;background:repeating-linear-gradient(135deg,rgba(88,166,255,.035) 0 12px,transparent 12px 24px),var(--panel)}
 .sim{display:inline-block;font:700 9.5px/1 var(--mono);letter-spacing:.1em;color:#9fc6ff;border:1px solid #3a6aa8;border-radius:4px;padding:3px 5px;margin-left:6px;vertical-align:middle}
 .pfig{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:1px;background:var(--line);border:1px solid var(--line);border-radius:12px;overflow:hidden}
@@ -1305,9 +1323,16 @@ def paper_html(kind: str) -> str:
     route = "%s/%s" % (PAPER_BASE, kind)
     secs = "".join(_paper_panel(key, route, kind, key, t)
                    for key, t in PAPER_SECTIONS[kind])
-    return ('<h2 class="cc-h2" id="paper">Paper session <span class="sim">'
+    return ('<h2 class="cc-h2" id="paper">Paper account, ledger and session '
+            'records <span class="sim">'
             'SIMULATED</span></h2><div class="cc-panels" id="cc-paper" '
-            'data-cc-paper>%s%s%s</div>' % (acct, sess, secs))
+            'data-cc-paper>%s%s</div>'
+            # THE RAW PER-AGENT SECTIONS (up to 100 rows each) sit under one
+            # expandable element: the operational panels above already lead
+            # with them, and on a phone they would otherwise run for metres.
+            '<details class="cc-raw" id="paper-raw"><summary>Raw paper records '
+            '&#183; GET %s (every section as the route returns it)</summary>'
+            '<div class="cc-panels">%s</div></details>' % (acct, sess, route, secs))
 
 
 PAPER_CORE_JS = r"""
@@ -1578,12 +1603,24 @@ PAPER_CORE_JS = r"""
 })(AG, CC);
 """
 
+#: THE PAPER BOOT: the account (GET + the ledger stream), the session and
+#: per-agent sections, and the OPERATIONAL read that leads the page
+#: (agent_cc_ops). LIVE ON A PHONE: same-origin credentials on every read; the
+#: stream reconnects with exponential backoff; while it is not open every read
+#: is repeated every 15 s (POLL_MS); a page brought back from the background
+#: (visibilitychange) or from the back-forward cache (pageshow, persisted)
+#: re-reads at once and reopens the stream -- mobile Safari freezes timers and
+#: drops EventSource connections in both cases.
 PAPER_BOOT_JS = r"""
 (function (AG, CC) {
   'use strict';
   var E = Object.assign({}, AG.ENDPOINTS, %%PAPER_EP%%), F = fetch.bind(window);
+  var kind = document.body.getAttribute('data-kind');
   var $ = function (id) { return document.getElementById(id); };
-  var P = CC.paper, S = P.newState(), prev = null, es = null, opened = false, retry = 0, timer = null, acctO = null, sessO = null;
+  var P = CC.paper, O = CC.ops, S = P.newState(), prev = null, es = null, opened = false, retry = 0, timer = null, acctO = null, sessO = null;
+  var POLL_MS = 15000, LIVE_MS = 30000, pollT = null, opsT = null, busy = false;
+  var OPS = {json: null, okAt: null, tryAt: null, fail: null, stream: 'CONNECTING', streamNote: ''};
+  function nowS() { return Date.now() / 1000; }
   function setPanel(id, status, html) {
     var p = $(id); if (!p) return;
     p.setAttribute('data-status', status);
@@ -1591,37 +1628,71 @@ PAPER_BOOT_JS = r"""
     var b = p.querySelector('[data-body]'); if (b) { b.innerHTML = html; if (CC.labelize) CC.labelize(b); }
   }
   function setBanner() { var b = P.banner(acctO, sessO), el = $('paper-banner'); if (el) { el.setAttribute('data-state', b.state); el.textContent = b.text; } }
-  function conn(state, note) { var el = $('paper-conn'); if (!el) return; el.setAttribute('data-conn', state); el.textContent = state + ' · ' + (note || new Date().toISOString().slice(11, 19) + 'Z'); }
+  function streamOpen() { return !!(es && es.readyState === 1); }
+  function paintFresh() {
+    var el = $('paper-fresh'); if (el && O) el.innerHTML = O.freshHtml(O.fresh(OPS, nowS()));
+  }
+  function conn(state, note) {
+    var el = $('paper-conn');
+    if (el) { el.setAttribute('data-conn', state); el.textContent = state + ' · ' + (note || new Date().toISOString().slice(11, 19) + 'Z'); }
+    OPS.stream = state === 'LIVE' ? 'LIVE' : state === 'RECONNECTING' ? 'RECONNECTING' : state === 'UNAVAILABLE' ? 'UNAVAILABLE' : 'POLLING';
+    OPS.streamNote = note || '';
+    paintFresh();
+  }
   function paint() {
     var r = P.account(P.view(S), prev); if (r.values) prev = r.values;
     var l = S.ledgerSec;
     setPanel('p-paper-account', r.status, r.html + P.drawdown(S.drawdown) + P.ledger(P.entries(S), S.fresh, l && l.status !== 'OK' ? l.status + ' · ' + (l.why || 'no reason given') : null));
   }
+  // THE OPERATIONAL READ: one GET for every panel this page leads with
+  function paintOps() {
+    if (!O) return;
+    var ps = O.panels(kind, OPS);
+    Object.keys(ps).forEach(function (id) { setPanel(id, ps[id].status, ps[id].html); });
+    var k = $('cc-kpis');
+    var kl = O.kpis(kind, OPS);   // one figure (a failed read) spans the row: the state is never broken mid-word
+    if (k) k.innerHTML = kl.map(function (x) { return '<div class="cc-kpi"' + (kl.length === 1 ? ' style="grid-column:1/-1"' : '') + '><div class="lbl">' + AG.esc(x.label) + '</div><div class="v">' + x.value + '</div>' + (x.sub ? '<div class="s">' + x.sub + '</div>' : '') + '</div>'; }).join('');
+    var sl = O.stageLine(OPS, nowS());
+    if ($('cc-state')) $('cc-state').innerHTML = sl.state;
+    if ($('cc-hb')) $('cc-hb').innerHTML = sl.hb;
+    if (CC.setPaperMode) CC.setPaperMode(O.mode(OPS, nowS()));
+    paintFresh();
+  }
+  async function ops() {
+    var url = E.paper_operations + '?agent=' + encodeURIComponent(kind) + (kind === 'derek' ? '&limit=10' : '');
+    OPS.tryAt = nowS();
+    var o = await AG.load(url, F), f = O ? O.failure(o, url) : {state: 'UNAVAILABLE', why: 'the operations renderer is not loaded'};
+    if (f) OPS.fail = f; else { OPS.fail = null; OPS.json = o.json; OPS.okAt = nowS(); }
+    paintOps();
+  }
+  function opsSoon() { clearTimeout(opsT); opsT = setTimeout(ops, 1500); }
   function frame(src, name) {
     return function (ev) {
       if (src !== es) return;
       var d; try { d = JSON.parse(ev.data); } catch (_) { return; }
       var what = P.onEvent(S, name, d);
       if (what === 'heartbeat') conn('LIVE', 'server heartbeat ' + (P.iso(S.beat) || 'without a time'));
-      else if (what === 'unavailable') { src.close(); es = null; conn('UNAVAILABLE', S.streamWhy); }
-      else if (what === 'figures' || what === 'replay') paint();
+      else if (what === 'unavailable') { src.close(); es = null; conn('UNAVAILABLE', S.streamWhy); schedule(); }
+      else if (what === 'figures' || what === 'replay') { paint(); if (what === 'figures') opsSoon(); }
     };
   }
   // The first connection takes the server's snapshot and lets the browser resume
   // by Last-Event-ID; after the browser gives up, a manual reconnect resumes
   // from the last sequence this page holds with ?last=<sequence>.
   function stream() {
-    if (!window.EventSource) { conn('DISCONNECTED', 'this browser has no EventSource'); return; }
+    if (!window.EventSource) { conn('DISCONNECTED', 'this browser has no EventSource; polling every 15 s'); return; }
+    if (es || timer) return;
     var url = E.paper_stream + (opened && S.seq !== null ? '?last=' + encodeURIComponent(S.seq) : '');
     var src = es = new EventSource(url); opened = true;
-    src.onopen = function () { if (src === es) { retry = 0; conn('LIVE'); } };
+    src.onopen = function () { if (src === es) { retry = 0; conn('LIVE'); schedule(); } };
     ['snapshot', 'ledger', 'heartbeat', 'unavailable'].forEach(function (n) { src.addEventListener(n, frame(src, n)); });
     src.onerror = function () {
       if (src !== es) return;
       if (src.readyState === 2) {
-        conn('DISCONNECTED'); src.close(); es = null;
-        clearTimeout(timer); timer = setTimeout(function () { conn('RECONNECTING'); stream(); }, Math.min(30000, 1000 * Math.pow(2, retry++)));
-      } else conn('RECONNECTING');
+        conn('DISCONNECTED', 'polling every 15 s until the stream reopens'); src.close(); es = null;
+        clearTimeout(timer); timer = setTimeout(function () { timer = null; conn('RECONNECTING'); stream(); }, Math.min(30000, 1000 * Math.pow(2, retry++)));
+      } else conn('RECONNECTING', 'polling every 15 s until the stream reopens');
+      schedule();
     };
   }
   async function sections() {
@@ -1637,20 +1708,37 @@ PAPER_BOOT_JS = r"""
       });
     }));
   }
-  async function load() {
+  async function account() {
     acctO = await AG.load(E.paper_account + '?entries=' + P.KEEP, F);
     setBanner();
     if (acctO.kind !== 'OK') {
-      if (!es) conn(acctO.kind === 'NOT_DEPLOYED' ? 'UNAVAILABLE' : 'DISCONNECTED', acctO.kind === 'NOT_DEPLOYED' ? P.UNAV : (acctO.why || acctO.kind));
+      if (!es) conn(acctO.kind === 'NOT_DEPLOYED' ? 'UNAVAILABLE' : 'DISCONNECTED', acctO.kind === 'NOT_DEPLOYED' ? P.UNAV : acctO.kind === 'LOCKED' ? 'SIGN-IN REQUIRED' : (acctO.why || acctO.kind));
       setPanel('p-paper-account', 'UNAVAILABLE', acctO.kind === 'NOT_DEPLOYED' ? '<div class="plain"><p class="big">UNAVAILABLE · ' + P.UNAV + '</p><p class="mute">No paper figure is shown: none was sent. This is not a zero balance.</p></div>' : AG.gate(acctO, E.paper_account));
     } else {
       P.fromAccount(S, acctO.json); paint();
       var a = acctO.json.account;
       if (!es) { if (a && a.status !== 'UNAVAILABLE') stream(); else conn('UNAVAILABLE', (a && a.why) || 'the account read named no reason'); }
     }
-    await sections();
   }
-  load();
-  setInterval(function () { if (!document.hidden) load(); }, 60000);
+  async function load() {
+    if (busy) return; busy = true;
+    try { await Promise.all([account(), ops(), sections()]); } finally { busy = false; }
+  }
+  // THE POLLING FALLBACK: every 15 s while the stream is not open, 30 s while
+  // it is (the operational records are not on the ledger stream).
+  function schedule() {
+    clearTimeout(pollT);
+    pollT = setTimeout(function () { if (document.hidden) { schedule(); return; } load().then(schedule, schedule); }, streamOpen() ? LIVE_MS : POLL_MS);
+  }
+  function wake() {
+    if (document.hidden) return;
+    if (!es || es.readyState === 2) { if (es) { es.close(); es = null; } clearTimeout(timer); timer = null; retry = 0; }
+    load().then(schedule, schedule);
+  }
+  document.addEventListener('visibilitychange', function () { if (!document.hidden) wake(); });
+  window.addEventListener('pageshow', function (e) { if (e && e.persisted) { if (es) { es.close(); es = null; } clearTimeout(timer); timer = null; retry = 0; wake(); } });
+  window.addEventListener('online', wake);
+  setInterval(function () { if (!document.hidden) { paintFresh(); if (OPS.json && CC.setPaperMode) CC.setPaperMode(O.mode(OPS, nowS())); } }, 5000);
+  load().then(schedule, schedule);
 })(AG, CC);
 """
