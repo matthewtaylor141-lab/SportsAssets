@@ -29,6 +29,18 @@ HOW AN ANSWER IS PRODUCED
      facts, what evidence is missing, the persona version and the provider
      record (never a credential).
 
+THE PAPER EXPERIMENT. A question about the book carries, as facts, the live
+paper account (the Command Centre strip's own `bettor_paper_ledger.balances`),
+the ledger's reconciliation, the active paper session and its health, each
+of today's paper decisions (id, verdict, refusal) with the counts, and what
+Xavier manages (open paper positions / orders / handoffs). A question about
+paper, cash, balances, the session or decisions is answered from them first.
+The legacy desk account is labelled as such with its as-of time and never
+stands in for the paper account. A reply that works out a figure of its own
+(a tally, a sum, an elapsed time) is still discarded -- the excerpt around
+the rejected figure is kept in the stored provider record -- and replaced by
+a records-only answer LABELLED as such in its first sentence.
+
 INTERRUPTION. One answer is in flight per conversation. A new user message
 (or `interrupt`) cancels it: the partial text streamed so far is stored with
 status INTERRUPTED, linked to the message that interrupted it.
@@ -79,6 +91,15 @@ DISCLOSE_RECORDS = ("Records-only mode — answered directly from the cited "
 DISCLOSE_FALLBACK = ("AI answer unavailable ({why}) — answered directly from "
                      "the cited records")
 DISPLAY_NO_KEY = "AI unavailable: server key not configured"
+#: the opening of a records-only answer that REPLACES a discarded or failed
+#: model reply: the reader sees, in the answer itself, that what follows is
+#: quoted from the current records and not the model's text
+FALLBACK_LABEL = ("Records-only answer — the AI answer was not used ({why}); "
+                  "everything below is quoted from the current records.")
+
+
+def labelled_fallback(draft: str, why: str) -> str:
+    return "%s %s" % (FALLBACK_LABEL.format(why=why), draft)
 
 DEPTH_QUICK, DEPTH_NORMAL, DEPTH_MATH = "QUICK", "NORMAL", "MATH"
 
@@ -111,6 +132,17 @@ FIXED_RULES = [
     "Match depth to the question: a quick question gets one to three "
     "sentences; 'show the math' gets every step, using the facts' figures.",
     "Do not open the way your previous answer opened. No catchphrases.",
+    "The paper account's cash, reserved, available and equity are ONLY the "
+    "paper-ledger facts. A LEGACY desk account (bettor_desk_account_state) "
+    "is a different, older account: never present it as the paper "
+    "account or its cash, and always say it is the legacy desk account and "
+    "when it is as of.",
+    "Every count and total you may need is already a fact (for example the "
+    "number of paper decisions today and their reasons): quote it; do not "
+    "count rows, add figures up or work out elapsed times yourself.",
+    "Say what the records show (\"the record shows seven refusals today\"); "
+    "never say you created or recorded anything -- an answer that claims an "
+    "action is discarded.",
 ]
 
 
@@ -398,6 +430,29 @@ def _demo(agent: str, intent: str, depth: str, c: _Cite) -> list:
             "after settlement."]
 
 
+#: the paper experiment as it stands (persona_facts._paper_live); these
+#: groups take the "PAPER" slot, or lead when the question is about paper
+PAPER_LIVE = ["paper_ledger", "paper_sessions", "paper_decisions",
+              "paper_orders", "paper_xavier_reviews"]
+PAPER_LEADS = {"paper_ledger": "The paper account now",
+               "paper_sessions": "The paper session",
+               "paper_decisions": "Paper decisions",
+               "paper_orders": "Paper positions and orders",
+               "paper_xavier_reviews": "Xavier's paper reviews"}
+PAPER_FIRST = {"XAVIER": ["paper_ledger", "paper_orders", "paper_sessions",
+                          "paper_decisions", "paper_xavier_reviews"]}
+#: each agent's own words for its lane of the paper experiment
+PAPER_AGENT_LEADS = {
+    "DEREK": {"paper_decisions": "Paper decisions — mine, today"},
+    "XAVIER": {"paper_orders": "What I manage on paper",
+               "paper_decisions": "Derek's paper decisions"},
+    "AUDREY": {"paper_decisions": "Paper decisions to audit"}}
+LEGACY_LEAD = ("Legacy desk account, not the paper account — figures as of "
+               "the time shown")
+_RX_PAPER_Q = re.compile(r"\b(paper|cash|balances?|reserved|available|"
+                         r"equity|ledger|session|decid\w*|decisions?|"
+                         r"p&l|pnl)\b", re.I)
+
 SOURCE_ORDER = {
     "DEREK": ["derek_entry_decisions", "PAPER", "bettor_funded_intents",
               "bettor_funded_fills", "bettor_xavier_decisions",
@@ -424,7 +479,7 @@ LEADS = {
               "bettor_standing_order_plans": "Xavier's protective order",
               "bettor_funded_economics": "Booked so far",
               "audrey_audit_reports": "Audrey's latest audit",
-              "bettor_desk_account_state": "Cash",
+              "bettor_desk_account_state": LEGACY_LEAD,
               "agent_status": "Where the agents are"},
     "XAVIER": {"bettor_funded_intents": "Exposure first — the positions",
                "bettor_funded_fills": "Filled",
@@ -434,7 +489,7 @@ LEADS = {
                                               "table",
                "derek_entry_decisions": "The original thesis was Derek's",
                "bettor_funded_economics": "Booked",
-               "bettor_desk_account_state": "Cash on the desk accounts",
+               "bettor_desk_account_state": LEGACY_LEAD,
                "audrey_audit_reports": "Audrey's audit",
                "agent_status": "Status"},
     "AUDREY": {"bettor_funded_economics": "Result first — what's booked",
@@ -446,9 +501,12 @@ LEADS = {
                "bettor_funded_intents": "The positions behind it",
                "bettor_funded_fills": "Fills",
                "PAPER": "On the paper ledger",
-               "bettor_desk_account_state": "Cash",
+               "bettor_desk_account_state": LEGACY_LEAD,
                "agent_status": "Status"},
 }
+for _ag, _leads in LEADS.items():
+    _leads.update(PAPER_LEADS)
+    _leads.update(PAPER_AGENT_LEADS[_ag])
 MISSING_LEAD = {"DEREK": "What I don't have",
                 "XAVIER": "Not in the record",
                 "AUDREY": "Missing evidence"}
@@ -466,23 +524,46 @@ BOOK_TIME_NOTE = ("Each figure is as of the record time shown; nothing "
                   "here is a forecast.")
 
 
-def _group(facts: list) -> dict:
+def _group(facts: list, *, live_paper: bool = False) -> dict:
+    """Facts by source. Paper tables fold into one "PAPER" group, except the
+    paper experiment's live facts of a book question (`live_paper`), which
+    keep their own groups (account, session, decisions, reviews)."""
     out: dict[str, list] = {}
     for f in facts:
         src = f["source"]
-        if src not in LEADS["DEREK"]:
+        if src in PAPER_LIVE and not live_paper:
+            src = "PAPER"
+        elif src not in LEADS["DEREK"]:
             src = "PAPER" if "paper" in src else src
         out.setdefault(src, []).append(f)
     return out
 
 
-def _generic(agent: str, bundle: dict, depth: str) -> list:
+def is_paper_question(text: str) -> bool:
+    return bool(_RX_PAPER_Q.search(str(text or "")))
+
+
+def _generic(agent: str, bundle: dict, depth: str,
+             question: str = "") -> list:
     facts = bundle["facts"]
-    groups = _group(facts)
-    order = SOURCE_ORDER[agent] + [s for s in groups
-                                   if s not in SOURCE_ORDER[agent]]
+    live = bundle.get("scope") == "BOOK"
+    groups = _group(facts, live_paper=live)
+    base = []
+    for s in SOURCE_ORDER[agent]:
+        base += (PAPER_LIVE + ["PAPER"]) if s == "PAPER" and live else [s]
+    paper_first = live and is_paper_question(question) and any(
+        s in groups for s in PAPER_LIVE)
+    if paper_first:
+        # the question is about the paper experiment: answer it first --
+        # balances, session, decisions (Xavier: what he manages) -- then the
+        # rest of the book
+        first = PAPER_FIRST.get(agent, PAPER_LIVE)
+        base = first + [s for s in base if s not in first]
+    order = base + [s for s in groups if s not in base]
     lines = []
     cap_groups = 2 if depth == DEPTH_QUICK else 99
+    if paper_first and depth == DEPTH_QUICK:
+        cap_groups = 3
     cap_facts = 3 if depth == DEPTH_QUICK else (99 if depth == DEPTH_MATH
                                                  else 12)
     if agent == "AUDREY" and "bettor_funded_economics" not in groups \
@@ -495,8 +576,8 @@ def _generic(agent: str, bundle: dict, depth: str) -> list:
         cap_groups -= 1
         items = groups[src][:cap_facts]
         lead = LEADS[agent].get(src, src)
-        if agent == "XAVIER" and not lines and not lead.startswith(
-                "Exposure"):
+        if agent == "XAVIER" and not lines and not paper_first \
+                and not lead.startswith("Exposure"):
             lead = "Exposure first — " + lead[0].lower() + lead[1:]
         lines.append("%s: %s." % (lead, "; ".join(
             "%s [%s]" % (f["text"], f["fact_id"]) for f in items)))
@@ -538,7 +619,7 @@ def compose_records_only(agent: str, bundle: dict, question: str, *,
         body = _not_found(agent, bundle, depth)
         plain = True
     else:
-        body = _generic(agent, bundle, depth)
+        body = _generic(agent, bundle, depth, question)
         if depth != DEPTH_QUICK:
             miss = bundle.get("missing") or []
             if miss:
@@ -605,6 +686,29 @@ def ungrounded_numbers(text: str, facts: list, question: str = "") -> list:
                    for a in allowed):
             bad.append(x)
     return bad
+
+
+def ungrounded_context(text: str, figures: list, *, width: int = 48,
+                       limit: int = 5) -> list:
+    """Where each rejected figure sat in the discarded reply: a short
+    excerpt per figure, so the reason a reply was rejected (an invented
+    number, a tally, a computed difference or elapsed time) can be read
+    later from the stored message's provider record. The reply itself is
+    still discarded; the caller redacts the excerpts."""
+    t = _FACT_REF.sub(" ", str(text or ""))
+    out = []
+    for x in figures[:limit]:
+        for m in _NUMBER.finditer(t):
+            try:
+                v = float(m.group(1).replace(",", ""))
+            except ValueError:
+                continue
+            if abs(v - x) < 1e-9:
+                a, b = max(0, m.start() - width), min(len(t), m.end() + width)
+                out.append({"figure": x, "excerpt": " ".join(
+                    t[a:b].split())})
+                break
+    return out
 
 
 def cited_facts(text: str, facts: list) -> list:
@@ -1088,21 +1192,29 @@ async def _converse_impl(db, *, agent, role, text, conversation_id, context,
             AC._record_provider(ok=False, reason=why, model=cfg["model"],
                                 now=now, live=http_client is None
                                 and AC.http_client_factory() is None)
-            return draft, dict(provider, mode=MODE_RECORDS, failure=why,
-                               disclosure=DISCLOSE_FALLBACK.format(why=why))
+            return labelled_fallback(draft, why), dict(
+                provider, mode=MODE_RECORDS, failure=why,
+                disclosure=DISCLOSE_FALLBACK.format(why=why))
         AC._record_provider(ok=True, reason=None, model=cfg["model"],
                             now=now, live=http_client is None
                             and AC.http_client_factory() is None)
         provider["answered_model"] = meta.get("answered_model")
         bad = ungrounded_numbers(got, bundle["facts"], text)
         if bad:
-            return draft, dict(provider, mode=MODE_RECORDS,
+            ctx_ex = [dict(e, excerpt=AC.redact(e["excerpt"], env=env))
+                      for e in ungrounded_context(got, bad)]
+            return labelled_fallback(
+                draft, "it stated a figure no record holds"), dict(
+                               provider, mode=MODE_RECORDS,
                                failure="UNGROUNDED_FIGURE",
                                ungrounded=bad[:5],
+                               ungrounded_context=ctx_ex,
                                disclosure=DISCLOSE_FALLBACK.format(
                                    why="it stated a figure no record holds"))
         if AC._CLAIM.search(got):
-            return draft, dict(provider, mode=MODE_RECORDS,
+            return labelled_fallback(
+                draft, "it claimed an action nothing performed"), dict(
+                               provider, mode=MODE_RECORDS,
                                failure="CLAIMED_AN_ACTION",
                                disclosure=DISCLOSE_FALLBACK.format(
                                    why="it claimed an action nothing "

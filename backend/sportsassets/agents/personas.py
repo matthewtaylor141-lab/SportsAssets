@@ -701,29 +701,165 @@ def _client(timeout: float):
     return httpx.AsyncClient(timeout=timeout), True
 
 
-async def fetch_voices(key: str, *, timeout: float = 10.0) -> tuple:
-    """(voices | None, failure_reason | None). The key travels only in the
-    `xi-api-key` header; no exception text is returned or logged."""
+#: the ElevenLabs permission each request needs (a restricted key without
+#: it is refused with 401 / 403 missing_permissions)
+PERM_VOICES_READ = "voices_read"
+PERM_TTS = "text_to_speech"
+REQUEST_ID_HEADERS = ("request-id", "x-request-id", "xi-request-id",
+                      "elevenlabs-request-id", "x-trace-id")
+MAX_PROVIDER_MESSAGE = 300
+
+_STATUS_TOKEN = re.compile(r"^[A-Za-z0-9_.\-]{1,64}$")
+_REQUEST_ID = re.compile(r"^[A-Za-z0-9_.:\-]{1,128}$")
+_LONG_TOKEN = re.compile(r"[A-Za-z0-9_\-]{24,}")
+_BEARER = re.compile(r"(?i)\b(bearer)\s+\S+|\b(xi-api-key|api[_ -]?key)"
+                     r"\s*[:=]\s*\S+")
+
+
+def _scrub(text, key: str | None) -> str | None:
+    """A provider message made safe to store and return: the key, anything
+    after "Bearer" / "xi-api-key" / "api key:", and any long token-like
+    string removed; whitespace collapsed; at most 300 chars."""
+    if text is None:
+        return None
+    t = " ".join(str(text).split())
+    if key and len(key) >= 8:
+        t = t.replace(key, "[redacted]")
+    t = _BEARER.sub(lambda m: (m.group(1) or m.group(2)) + " [redacted]", t)
+    t = _LONG_TOKEN.sub("[redacted]", t)
+    return t[:MAX_PROVIDER_MESSAGE] or None
+
+
+def provider_diagnostic(resp=None, key: str | None = None, *,
+                        endpoint: str, permission: str,
+                        exc: BaseException | None = None,
+                        body: Any = None) -> dict:
+    """A SANITIZED record of one failed ElevenLabs request: the endpoint
+    (method and path; never a query string), the permission it needs, the
+    HTTP status, the provider's error status and message from its JSON body
+    ({"detail": {"status": "invalid_api_key", "message": ...}} or
+    {"detail": "..."}), and the provider's request id from the response
+    headers. Never the key, never a request header."""
+    out: dict[str, Any] = {"provider": "elevenlabs", "endpoint": endpoint,
+                           "required_permission": permission,
+                           "http_status": None, "provider_error_status": None,
+                           "provider_message": None,
+                           "provider_request_id": None, "error_class": None}
+    if exc is not None:
+        out["error_class"] = type(exc).__name__
+        return out
+    if resp is None:
+        return out
+    out["http_status"] = int(resp.status_code)
+    try:
+        hdrs = resp.headers
+        for h in REQUEST_ID_HEADERS:
+            v = hdrs.get(h)
+            if v and _REQUEST_ID.match(str(v)) and (not key
+                                                     or key not in str(v)):
+                out["provider_request_id"] = str(v)
+                break
+    except Exception:                                           # noqa: BLE001
+        pass
+    if body is None:
+        try:
+            body = resp.json()
+        except Exception:                                       # noqa: BLE001
+            body = None
+            try:
+                out["provider_message"] = _scrub(resp.text, key)
+            except Exception:                                   # noqa: BLE001
+                pass
+    detail = body.get("detail") if isinstance(body, dict) else None
+    if detail is None and isinstance(body, dict) and isinstance(
+            body.get("error"), dict):
+        detail = body["error"]
+    if isinstance(detail, list) and detail and isinstance(detail[0], dict):
+        detail = detail[0]
+    if isinstance(detail, dict):
+        st = detail.get("status") or detail.get("code") or detail.get("type")
+        if isinstance(st, str) and _STATUS_TOKEN.match(st):
+            out["provider_error_status"] = st
+        out["provider_message"] = _scrub(detail.get("message")
+                                         or detail.get("msg"), key)
+    elif isinstance(detail, str):
+        out["provider_message"] = _scrub(detail, key)
+    return out
+
+
+def provider_error(resp, key: str | None = None) -> dict:
+    """The GET /v1/voices diagnostic (see provider_diagnostic)."""
+    return provider_diagnostic(resp, key, endpoint="GET " + VOICES_PATH,
+                               permission=PERM_VOICES_READ)
+
+
+async def fetch_voices_detailed(key: str, *, timeout: float = 10.0) -> tuple:
+    """(voices | None, failure_reason | None, diagnostic | None). The key
+    travels only in the `xi-api-key` header; no exception text is returned
+    or logged. On a failure the sanitized provider diagnostic is kept, so the
+    cause -- e.g. invalid_api_key or missing_permissions for voices_read --
+    is visible."""
     client, owned = _client(timeout)
     try:
         r = await client.get(ELEVENLABS_BASE + VOICES_PATH,
                              headers={"xi-api-key": key,
                                       "accept": "application/json"})
         if r.status_code != 200:
-            return None, "VOICE_LIST_HTTP_%d" % r.status_code
+            return (None, "VOICE_LIST_HTTP_%d" % r.status_code,
+                    provider_error(r, key))
         data = r.json()
         voices = data.get("voices") if isinstance(data, dict) else None
         if not isinstance(voices, list):
-            return None, "VOICE_LIST_MALFORMED"
-        return voices, None
+            return None, "VOICE_LIST_MALFORMED", provider_diagnostic(
+                r, key, endpoint="GET " + VOICES_PATH,
+                permission=PERM_VOICES_READ, body={})
+        return voices, None, None
     except Exception as exc:                                    # noqa: BLE001
-        return None, "VOICE_LIST_%s" % type(exc).__name__.upper()
+        return (None, "VOICE_LIST_%s" % type(exc).__name__.upper(),
+                provider_diagnostic(endpoint="GET " + VOICES_PATH,
+                                    permission=PERM_VOICES_READ, exc=exc))
     finally:
         if owned:
             try:
                 await client.aclose()
             except Exception:                                   # noqa: BLE001
                 pass
+
+
+async def fetch_voices(key: str, *, timeout: float = 10.0) -> tuple:
+    """(voices | None, failure_reason | None) -- see fetch_voices_detailed."""
+    voices, failure, _err = await fetch_voices_detailed(key, timeout=timeout)
+    return voices, failure
+
+
+#: the last voice-list outcome in this process (for persona-status). Holds
+#: reasons, sanitized provider diagnostics and times only -- never the key.
+_VOICE_LIST_STATE: dict[str, Any] = {"last_failure": None,
+                                     "last_failure_at": None,
+                                     "provider_error": None,
+                                     "last_success_at": None}
+
+
+def voice_list_status() -> dict:
+    return dict(_VOICE_LIST_STATE)
+
+
+def configured_voice_report(agent: str, profile: dict, env=None) -> dict:
+    """Whether a voice id is configured for this agent, and where (voice ids
+    are not secrets; the API key is never read here)."""
+    env = os.environ if env is None else env
+    vp = profile.get("voice_profile") or {}
+    name = str(vp.get("voice_id_env") or ("ELEVENLABS_VOICE_ID_%s" % agent))
+    env_v = (env.get(name) or "").strip() or None
+    prof_v = (vp.get("voice_id") or None)
+    eff = configured_voice_id(agent, profile, env)
+    return {"env_var": name, "env_voice_id": env_v,
+            "profile_voice_id": prof_v, "configured_voice_id": eff,
+            "present": eff is not None,
+            "source": None if eff is None else (
+                "env" if env_v and eff == env_v else "profile"),
+            "invalid_configured_value": bool((env_v or prof_v)
+                                             and eff is None)}
 
 
 _RESOLVED_CACHE: dict[tuple, dict] = {}
@@ -753,7 +889,7 @@ async def record_resolution(conn, choice: dict, *, now: float) -> None:
         return
     detail = {k: choice.get(k) for k in ("considered", "eligible",
                                           "allowed_categories", "reasons",
-                                          "score")}
+                                          "score", "provider_error")}
     await conn.execute(
         "INSERT INTO agent_voice_resolutions (agent_id, persona_version, "
         " status, method, voice_id, voice_name, category, labels, reason, "
@@ -785,6 +921,8 @@ async def resolve_voice(db, agent: str, *, now: float, env=None,
             float(now) - float(rec.get("resolved_at") or 0)
             < RETRY_UNRESOLVED_S)):
         rec["source"] = "RECORDED"
+        if (rec.get("detail") or {}).get("provider_error"):
+            rec["provider_error"] = rec["detail"]["provider_error"]
         if rec["status"] == RES_RESOLVED:
             _RESOLVED_CACHE[(agent, ver)] = dict(rec)
         return rec
@@ -796,12 +934,21 @@ async def resolve_voice(db, agent: str, *, now: float, env=None,
                 "voice_id": configured, "voice_name": None,
                 "reason": "ELEVENLABS_API_KEY_NOT_CONFIGURED",
                 "source": "NOT_ATTEMPTED"}
-    voices, failure = await fetch_voices(key)
+    voices, failure, perr = await fetch_voices_detailed(key)
     if failure:
-        log.warning("voice resolver: %s for %s (v%d)", failure, agent, ver)
+        log.warning("voice resolver: %s (%s) for %s (v%d)", failure,
+                    (perr or {}).get("provider_error_status") or "-", agent,
+                    ver)
+        _VOICE_LIST_STATE.update(last_failure=failure,
+                                 last_failure_at=float(now),
+                                 provider_error=perr)
+    else:
+        _VOICE_LIST_STATE.update(last_success_at=float(now))
     choice = choose_voice(agent, prof, voices, env=env)
     if failure and choice["status"] != RES_RESOLVED:
         choice["reason"] = failure
+    if perr:
+        choice["provider_error"] = perr
     async with use(db) as conn:
         try:
             await record_resolution(conn, choice, now=now)

@@ -11,11 +11,17 @@ WHERE FACTS COME FROM, in order
   1. the DEMONSTRATION position -- only when the caller asks for it
      (context {"demonstration": true} or position_id "DEMONSTRATION"). Every
      fact is labelled DEMONSTRATION and none is a record in any table.
-  2. the PAPER LEDGER, when its tables exist in this database (any table
-     named like `paper_*` / `*_paper_*`); otherwise the answer says "paper
-     ledger not in this build".
+  2. the PAPER LEDGER, when its tables exist in this database; otherwise the
+     answer says "paper ledger not in this build". For a question about the
+     book (no named position) these are the paper experiment as it stands,
+     from `paper_brief.summary` -- the live balances the Command Centre strip
+     shows (`bettor_paper_ledger.balances`), the active session and its
+     health, and today's paper decisions by verdict and refusal. For a named
+     position every paper table (`paper_*` / `*_paper_*`) is searched for it.
   3. the funded book's positions (`bettor_funded_intents`, `_fills`,
-     `_economics`) and the desk accounts' cash (`bettor_desk_account_state`).
+     `_economics`) and the LEGACY desk accounts' cash
+     (`bettor_desk_account_state`) -- labelled as the legacy desk account
+     with its as-of time; never presented as the paper account's cash.
   4. the agents' own records: Derek's entry decisions with the stored V2
      policy decision (`derek_entry_decisions.evidence.policy_decision`),
      Xavier's decisions (`bettor_xavier_decisions`) and standing protective
@@ -347,7 +353,14 @@ async def _positions(conn, f: Facts, *, likes, context_ids,
     return ids
 
 
+LEGACY_DESK = "LEGACY desk account"
+LEGACY_NOTE = "bettor_desk_account_state; NOT the paper account"
+
+
 async def _cash(conn, f: Facts, limit=10) -> None:
+    """The LEGACY desk accounts (`bettor_desk_account_state`). Every fact is
+    labelled as such, with its as-of time: this is not the paper account,
+    and it never stands in for the paper ledger's balances."""
     if not await _regclass(conn, "bettor_desk_account_state"):
         f.check("bettor_desk_account_state", "TABLE_ABSENT")
         return
@@ -359,13 +372,183 @@ async def _cash(conn, f: Facts, limit=10) -> None:
             len(rows))
     for r in rows:
         d = _jsonable(dict(r))
-        f.add("bettor_desk_account_state", d["account_id"], "cash_usd",
-              d["cash_usd"], "desk account %s cash %s (started %s, realised "
-              "P&L %s, fees %s, as of %s)" % (
-                  d["account_id"], _money(d["cash_usd"]),
+        f.add("bettor_desk_account_state", d["account_id"],
+              "legacy_desk_cash_usd", d["cash_usd"],
+              "%s %s (%s) cash %s as of %s (started %s, realised P&L %s, "
+              "fees %s)" % (
+                  LEGACY_DESK, d["account_id"], LEGACY_NOTE,
+                  _money(d["cash_usd"]), d["updated_at"] or "an unknown time",
                   _money(d["starting_cash_usd"]),
-                  _money(d["realized_pnl_usd"]), _money(d["fees_usd"]),
-                  d["updated_at"]))
+                  _money(d["realized_pnl_usd"]), _money(d["fees_usd"])))
+
+
+PAPER_LIVE_SOURCES = ("paper_ledger", "paper_sessions", "paper_decisions",
+                      "paper_orders", "paper_xavier_reviews")
+
+
+async def _paper_live(conn, f: Facts, *, now: float | None) -> dict:
+    """THE PAPER EXPERIMENT NOW, as numbered facts: the live ledger balances
+    (the same `bettor_paper_ledger.balances` the Command Centre strip shows),
+    the active session and its health, and today's paper decisions. Every
+    count and total the question may need is a fact, so an answer never has
+    to tally rows or do arithmetic of its own."""
+    import time as _time
+
+    from . import paper_brief as PB
+    s = await PB.summary(conn, now=float(now if now is not None
+                                         else _time.time()))
+    if not s["present"]:
+        f.check("paper_ledger", "NOT_IN_THIS_BUILD", 0, PAPER_NOT_IN_BUILD)
+        f.miss(PAPER_NOT_IN_BUILD)
+        return s
+    for u in s["unavailable"]:
+        f.check(u.split(":")[0], "READ_FAILED", 0, u)
+    a = s.get("account") or {}
+    acct = s["account_id"]
+    if a.get("ok"):
+        rid = "%s#seq%s" % (acct, a.get("last_sequence"))
+        f.check("paper_ledger", "MATCHED", 1)
+        f.add("paper_ledger", rid, "paper_cash_usd", a["cash_usd"],
+              "paper account %s cash %s (from the paper ledger)"
+              % (acct, _money(a["cash_usd"])))
+        f.add("paper_ledger", rid, "paper_reserved_usd", a["reserved_usd"],
+              "paper account reserved %s (part of cash, not extra)"
+              % _money(a["reserved_usd"]))
+        f.add("paper_ledger", rid, "paper_available_usd", a["available_usd"],
+              "paper account available %s" % _money(a["available_usd"]))
+        if a.get("total_equity_usd") is not None:
+            f.add("paper_ledger", rid, "paper_equity_usd",
+                  a["total_equity_usd"], "paper account total equity %s "
+                  "(cash plus marked open positions)"
+                  % _money(a["total_equity_usd"]))
+        else:
+            f.add("paper_ledger", rid, "paper_equity_usd", None,
+                  "paper account total equity NOT STATED: %s (marked-only "
+                  "equity %s)" % (a.get("equity_basis"), _money(
+                      a.get("equity_excluding_unmarked_usd"))))
+        f.add("paper_ledger", rid, "paper_realized_pnl_usd",
+              a["realized_pnl_usd"], "paper realised P&L %s"
+              % _money(a["realized_pnl_usd"]))
+        f.add("paper_ledger", rid, "paper_unrealized_pnl_usd",
+              a.get("unrealized_pnl_usd"),
+              "paper unrealised P&L %s" % (
+                  _money(a["unrealized_pnl_usd"])
+                  if a.get("unrealized_pnl_usd") is not None else
+                  "unknown (an open position has no mark)"))
+        f.add("paper_ledger", rid, "paper_open_positions",
+              a["open_positions"], "paper open positions %s"
+              % a["open_positions"])
+        f.add("paper_ledger", rid, "paper_last_sequence",
+              a.get("last_sequence"), "paper ledger last sequence %s, last "
+              "updated %s (starting cash %s)" % (
+                  a.get("last_sequence"), a.get("last_updated_at") or "never",
+                  _money(a.get("starting_cash_usd"))))
+    else:
+        f.check("paper_ledger", "NO_MATCH", 0, a.get("refusal"))
+        f.miss("the paper account's balances (%s)" % (
+            a.get("refusal") or "the paper ledger could not be read"))
+    se = s.get("session") or {}
+    if se.get("active"):
+        f.check("paper_sessions", "MATCHED", 1)
+        f.add("paper_sessions", se["session_id"], "paper_session",
+              se["session_id"], "active paper session %s, status %s, "
+              "started %s%s" % (
+                  se["session_id"], se.get("status"), se.get("started_at"),
+                  "" if se.get("enabled") else
+                  "; scheduled paper passes are NOT enabled (%s)"
+                  % se.get("refusal")))
+        if se.get("health_recorded"):
+            f.add("paper_sessions", se["session_id"], "paper_session_health",
+                  se.get("passes"), "paper session health: last heartbeat "
+                  "%s, %s passes, %s errors, %s venue mutation attempts%s" % (
+                      se.get("last_heartbeat_at") or "never",
+                      se.get("passes"), se.get("errors"),
+                      se.get("mutation_attempts"),
+                      ("; last error %s" % se["last_error"])
+                      if se.get("last_error") else ""))
+    elif s.get("session") is not None:
+        f.check("paper_sessions", "NO_MATCH", 0, se.get("why"))
+        f.add("paper_sessions", acct, "paper_session", None,
+              "no paper session is active (%s)" % se.get("why"))
+    d = s.get("decisions_today")
+    if d is not None and not d.get("why"):
+        f.check("paper_decisions", "MATCHED" if d["total"] else "NO_MATCH",
+                d["total"])
+        bv = d["by_verdict"]
+        rid = (d["newest"][0]["decision_id"] if d["newest"]
+               else "%s@%s" % (acct, d["day"]))
+        f.add("paper_decisions", rid, "paper_decisions_today", d["total"],
+              "Derek's paper decisions today (%s, UTC): %s recorded -- %s "
+              "ENTER, %s REFUSE%s" % (
+                  d["day"], d["total"], bv.get("ENTER", 0),
+                  bv.get("REFUSE", 0),
+                  ("; newest at %s" % d["newest_decided_at"])
+                  if d["newest_decided_at"] else ""))
+        for g in d["by_reason"]:
+            f.add("paper_decisions", g["newest_decision_id"],
+                  "paper_decisions_today:%s" % g["reason"], g["count"],
+                  "%s paper decision%s today %s%s (newest %s)" % (
+                      g["count"], "" if g["count"] == 1 else "s",
+                      "ENTER" if g["verdict"] == "ENTER" else "REFUSED: ",
+                      "" if g["verdict"] == "ENTER" else g["reason"],
+                      g["newest_at"]))
+        for n in d["newest"]:
+            # each of today's decisions, by id (newest first)
+            f.add("paper_decisions", n["decision_id"],
+                  "paper_decision:%s" % n["decision_id"], n["verdict"],
+                  "paper decision %s at %s in session %s on %s: %s%s" % (
+                      n["decision_id"], n["decided_at"], n["session_id"],
+                      n["market"], n["verdict"], (" -- refused: %s"
+                                                   % n["refusal"])
+                      if n["refusal"] else ""))
+    elif d is not None:
+        f.check("paper_decisions", "TABLE_ABSENT", 0, d.get("why"))
+    mg = s.get("management")
+    if mg is not None:
+        by_role = mg.get("open_orders_by_role") or {}
+        f.check("paper_orders", "MATCHED" if by_role else "NO_MATCH",
+                sum(by_role.values()))
+        f.add("paper_orders", "%s:open-orders" % acct, "paper_management",
+              mg.get("open_management_orders"),
+              "what Xavier manages on paper: %s open paper position(s), %s "
+              "open paper management order(s) (standing protection, hedge, "
+              "exit, reduce), %s open paper entry order(s), %s handoff(s) "
+              "from Derek%s" % (
+                  mg.get("open_positions"), mg.get("open_management_orders"),
+                  mg.get("open_entry_orders"),
+                  mg.get("handoffs") if mg.get("handoffs") is not None
+                  else "unknown",
+                  " -- nothing for Xavier to manage"
+                  if mg.get("nothing_to_manage") else ""))
+    rc = s.get("reconciliation")
+    if rc is not None and rc.get("present") and "checks" in rc:
+        f.add("paper_ledger", "%s#seq%s" % (acct, rc.get("last_seq")),
+              "paper_reconciliation", bool(rc["reconciled"]),
+              "paper ledger %s: %s entries (sequence %s to %s), %s "
+              "INITIAL_FUNDING at sequence %s; sum of cash deltas %s against "
+              "cash %s; sum of reserved deltas %s against reserved %s; "
+              "available %s = cash minus reserved; running balance %s%s" % (
+                  "RECONCILES" if rc["reconciled"] else "DOES NOT RECONCILE",
+                  rc["entries_count"], rc["first_seq"], rc["last_seq"],
+                  next((c["count"] for c in rc["checks"]
+                        if c["check"] == "EXACTLY_ONE_INITIAL_FUNDING"), "?"),
+                  rc.get("initial_funding_seq"),
+                  _money(rc["checks"][0]["ledger_sum_usd"]),
+                  _money(rc["checks"][0]["balance_usd"]),
+                  _money(rc["checks"][1]["ledger_sum_usd"]),
+                  _money(rc["checks"][1]["balance_usd"]),
+                  _money(rc["checks"][2]["balance_usd"]),
+                  "agrees" if rc["checks"][3]["ok"] else "DISAGREES",
+                  "" if rc["reconciled"] else "; failed: %s"
+                  % ", ".join(rc["failed_checks"])))
+    rv = s.get("xavier_reviews_today")
+    if rv is not None:
+        f.add("paper_xavier_reviews", rv.get("newest_review_id")
+              or "%s@%s" % (acct, rv["day"]), "paper_reviews_today",
+              rv["total"], "Xavier's paper reviews today (%s, UTC): %s%s" % (
+                  rv["day"], rv["total"], ("; newest at %s" % rv["newest_at"])
+                  if rv.get("newest_at") else ""))
+    return s
 
 
 PD_FIELDS = (("verdict", None), ("policy_version", None),
@@ -619,7 +802,16 @@ async def gather(conn, *, question: str, context: dict | None = None,
     ctx_ids = _context_ids(context)
     likes = _likes(subj["terms"]) if subj else []
     scoped = bool(subj or ctx_ids)
-    paper = await _paper(conn, f, likes=likes, context_ids=ctx_ids)
+    live = None
+    if scoped:
+        # a named position: the paper tables are searched for it
+        paper = await _paper(conn, f, likes=likes, context_ids=ctx_ids)
+    else:
+        # the book: the paper experiment as it stands (balances, session,
+        # today's decisions) -- never an unordered dump of paper rows
+        live = await _paper_live(conn, f, now=now)
+        paper = bool(live.get("present") and (live.get("account") or {})
+                     .get("ok"))
     intents = await _positions(conn, f, likes=likes, context_ids=ctx_ids)
     dids = await _derek(conn, f, likes=likes, context_ids=ctx_ids)
     xids = await _xavier(conn, f, likes=likes, intents=intents,
@@ -636,7 +828,8 @@ async def gather(conn, *, question: str, context: dict | None = None,
         found = bool(f.items)
         if not any(x["source"] == "bettor_desk_account_state"
                    for x in f.items):
-            f.miss("desk account cash (no bettor_desk_account_state row)")
+            f.miss("legacy desk account cash (no bettor_desk_account_state "
+                   "row)")
         if not intents:
             f.miss("open funded positions (none recorded)")
     if scoped and found and not any(x["source"] == "bettor_funded_economics"
@@ -649,4 +842,4 @@ async def gather(conn, *, question: str, context: dict | None = None,
             "checked": f.checked, "missing": f.missing,
             "paper": {"present": bool(tables), "tables": tables,
                       "why": None if tables else PAPER_NOT_IN_BUILD,
-                      "matched": paper}}
+                      "matched": paper, "live": live}}

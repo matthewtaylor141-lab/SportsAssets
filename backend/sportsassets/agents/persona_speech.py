@@ -198,12 +198,32 @@ def model_for(profile: dict, cfg: dict) -> str:
         or cfg["model_id"]
 
 
+#: the last TTS failure in this process, overall and per agent (for
+#: persona-status). Sanitized diagnostics and times only -- never the key.
+_TTS_STATE: dict = {"last_failure": None, "by_agent": {}}
+
+
+def tts_status() -> dict:
+    return {"last_failure": _TTS_STATE["last_failure"],
+            "by_agent": dict(_TTS_STATE["by_agent"])}
+
+
+def _note_tts_failure(agent: str | None, diag: dict) -> dict:
+    rec = dict(diag, agent=agent, at=time.time())
+    _TTS_STATE["last_failure"] = rec
+    if agent:
+        _TTS_STATE["by_agent"][agent] = rec
+    return diag
+
+
 async def open_stream(*, voice_id: str, spoken_text: str, profile: dict,
-                      cfg: dict, env=None):
+                      cfg: dict, env=None, agent: str | None = None):
     """Send the TTS request and return (response, client, owned) once the
     provider has ANSWERED 2xx; the caller iterates `response.aiter_bytes()`
-    and closes both. Raises SpeechFailure (503) otherwise. The key is read
-    here, put in one header, and nowhere else."""
+    and closes both. Raises SpeechFailure (503) otherwise, carrying the
+    SANITIZED provider diagnostic (endpoint, required permission
+    text_to_speech, HTTP status, provider error status / message, provider
+    request id). The key is read here, put in one header, and nowhere else."""
     import httpx
     key = P.elevenlabs_key(env)
     if not key:
@@ -211,7 +231,9 @@ async def open_stream(*, voice_id: str, spoken_text: str, profile: dict,
     injected = http_client_factory()
     client = injected or httpx.AsyncClient(timeout=cfg["timeout_s"])
     owned = injected is None
-    url = P.ELEVENLABS_BASE + TTS_PATH.format(voice_id=voice_id)
+    path = TTS_PATH.format(voice_id=voice_id)
+    endpoint = "POST " + path
+    url = P.ELEVENLABS_BASE + path
     body = {"text": spoken_text, "model_id": model_for(profile, cfg),
             "voice_settings": voice_settings(profile)}
     try:
@@ -226,24 +248,49 @@ async def open_stream(*, voice_id: str, spoken_text: str, profile: dict,
             await client.aclose()
         why = type(exc).__name__.upper()
         log.warning("speech provider request failed: %s", why)
-        raise SpeechFailure(R_PROVIDER, provider_error=why) from None
+        diag = _note_tts_failure(agent, P.provider_diagnostic(
+            endpoint=endpoint, permission=P.PERM_TTS, exc=exc))
+        raise SpeechFailure(R_PROVIDER, provider_error=why,
+                            provider_diagnostic=diag) from None
     if resp.status_code // 100 != 2:
         code = resp.status_code
+        diag = None
         try:
-            await resp.aclose()
+            try:
+                await resp.aread()
+            except Exception:                                   # noqa: BLE001
+                pass
+            diag = P.provider_diagnostic(resp, key, endpoint=endpoint,
+                                         permission=P.PERM_TTS)
         finally:
-            if owned:
-                await client.aclose()
-        log.warning("speech provider answered HTTP %d", code)
-        raise SpeechFailure(R_PROVIDER, provider_status=code)
+            try:
+                await resp.aclose()
+            finally:
+                if owned:
+                    await client.aclose()
+        log.warning("speech provider answered HTTP %d (%s)", code,
+                    (diag or {}).get("provider_error_status") or "-")
+        diag = _note_tts_failure(agent, diag or {})
+        raise SpeechFailure(R_PROVIDER, provider_status=code,
+                            provider_diagnostic=diag)
     return resp, client, owned
 
 
 async def load_speakable(conn, *, agent: str, message_id: str) -> dict:
     """The stored assistant message to speak. Raises SpeechFailure (404 /
-    409) when it is not one."""
+    409) when it is not one.
+
+    Two stores hold assistant text: the persona chat's
+    `agent_chat_messages` (all three agents), and -- for AUDREY only -- her
+    management chat's `audrey_messages` (POST /api/command/agents/audrey/
+    chat, ids `conv-...:N`). From the latter only her own replies (role
+    AUDREY) are spoken, as the pronunciation-normalised form of exactly the
+    stored body; a management (user) or tool message is not speakable, and
+    there is still no free text."""
     from . import persona_chat as PC
     m = await PC.message(conn, message_id)
+    if m is None and agent == "AUDREY":
+        m = await _audrey_management_message(conn, message_id)
     if m is None or m.get("role") != "ASSISTANT":
         raise SpeechFailure(R_NOT_FOUND, status=404)
     if m.get("agent_id") != agent:
@@ -257,6 +304,29 @@ async def load_speakable(conn, *, agent: str, message_id: str) -> dict:
     return m
 
 
+async def _audrey_management_message(conn, message_id: str) -> dict | None:
+    """One of Audrey's own stored replies in the management chat
+    (`audrey_messages`, migration 156), shaped like a persona-chat message,
+    or None. Read-only."""
+    from . import audrey_chat as AC
+    from .speech_text import normalise
+    if not await AC.has_schema(conn):
+        return None
+    r = await conn.fetchrow(
+        "SELECT message_id, conversation_id, seq, role, body, outcome "
+        "  FROM audrey_messages WHERE message_id = $1", str(message_id))
+    if r is None:
+        return None
+    role = {"AUDREY": "ASSISTANT", "MANAGEMENT": "USER"}.get(r["role"],
+                                                           r["role"])
+    return {"message_id": r["message_id"],
+            "conversation_id": r["conversation_id"], "seq": r["seq"],
+            "agent_id": "AUDREY", "role": role, "status": "COMPLETE",
+            "outcome": r["outcome"], "body": r["body"],
+            "spoken_text": normalise(r["body"] or "") if role == "ASSISTANT"
+            else None, "store": "audrey_messages"}
+
+
 def describe(env=None) -> dict:
     cfg = voice_config(env)
     return {"version": VERSION,
@@ -265,4 +335,11 @@ def describe(env=None) -> dict:
                                           "model_id", "output_format",
                                           "concurrency", "rate_per_min")},
             "cache": CACHE.stats(),
-            "speaks": "only stored assistant messages (their spoken_text)"}
+            "voice_list": P.voice_list_status(),
+            "tts": tts_status(),
+            "required_permissions": {
+                "GET " + P.VOICES_PATH: P.PERM_VOICES_READ,
+                "POST " + TTS_PATH: P.PERM_TTS},
+            "speaks": "only stored assistant messages (their spoken_text): "
+                      "persona-chat answers, and for Audrey also her "
+                      "management-chat (agents_chat) answers"}

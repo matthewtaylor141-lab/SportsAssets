@@ -132,6 +132,10 @@ SYSTEM_PROMPT = (
     "asked, say that this must go through the owner's approval process.\n"
     "- A profit target is an objective, not a guarantee, and never a "
     "permission to expand risk.\n"
+    "- The paper experiment's balances, session and today's paper decisions "
+    "come from the paper_account tool. A legacy desk account "
+    "(bettor_desk_account_state) is not the paper account: never present it "
+    "as the paper account's cash.\n"
     "- Be concise and factual; prefer short paragraphs or bullet points.")
 
 
@@ -438,6 +442,62 @@ async def t_agents_status(conn, args, ctx):
                     "RECORDED" + ("; " + "; ".join(data["notes"])
                                   if data["notes"] else ""))
     return _res("OK", data, citations=cites)
+
+
+# ── paper_account (READ-ONLY: the paper experiment now) ────────────
+
+@_tool("paper_account",
+       "The PAPER experiment now (simulated execution on the fictional "
+       "paper account; never the funded book and never the legacy desk "
+       "account): the live paper-ledger balances the Command Centre strip "
+       "shows -- cash, reserved, available, equity, realised / unrealised "
+       "P&L, last ledger sequence and update time -- the active paper "
+       "session with its health (heartbeat, passes, errors), and today's "
+       "paper decisions by verdict and refusal reason with the newest. "
+       "Read-only.", {})
+async def t_paper_account(conn, args, ctx):
+    from . import paper_brief as PB
+    s = await PB.summary(conn, now=ctx.now)
+    if not s["present"]:
+        return _res("UNAVAILABLE", s, why="PAPER_LEDGER_NOT_IN_THIS_BUILD: "
+                    "%s" % s.get("why"))
+    if not ((s.get("account") or {}).get("ok") or (s.get("session") or {})
+            .get("active") or (s.get("decisions_today") or {}).get("total")):
+        return _res("EMPTY", s, why="NO_PAPER_ACCOUNT_SESSION_OR_DECISION: "
+                    "%s" % ((s.get("account") or {}).get("refusal")
+                            or (s.get("session") or {}).get("why")
+                            or "; ".join(s.get("unavailable") or [])
+                            or "nothing recorded"))
+    return _res("OK", s, citations=PB.citations(s))
+
+
+@_tool("paper_ledger_reconciliation",
+       "READ AND RECONCILE the PAPER ledger (read-only): the ledger entries "
+       "by kind with their sequence numbers, the latest entries (seq, kind, "
+       "cash / reserved deltas and running balances), the active session id, "
+       "and the reconciliation checks -- sum of cash deltas = cash, sum of "
+       "reserved deltas = reserved, available = cash - reserved, the last "
+       "entry's running balance agrees, exactly one INITIAL_FUNDING equal to "
+       "the starting cash and first in sequence, the entry count agrees.",
+       {"entries": {"type": "integer", "minimum": 1, "maximum": 200,
+                    "description": "how many of the latest entries to "
+                                   "list (default 20)"}})
+async def t_paper_ledger_reconciliation(conn, args, ctx):
+    from . import paper_brief as PB
+    rc = await PB.reconcile(conn, now=ctx.now,
+                            entries=int(args.get("entries") or 20))
+    if not rc["present"]:
+        return _res("UNAVAILABLE", rc, why="PAPER_LEDGER_NOT_IN_THIS_BUILD: "
+                    "%s" % rc.get("why"))
+    if "checks" not in rc:
+        return _res("EMPTY", rc, why="NO_PAPER_ACCOUNT: %s" % rc.get("why"))
+    cites = [{"kind": "paper_ledger", "id": "%s#seq%s" % (
+        rc["account_id"], e["seq"]), "href": "/api/command/paper/account"}
+        for e in rc["latest_entries"][:20]]
+    if rc.get("session_id"):
+        cites.append({"kind": "paper_sessions", "id": rc["session_id"],
+                      "href": "/api/command/paper/session"})
+    return _res("OK", rc, citations=cites)
 
 
 def _task_href(t: dict) -> str:
@@ -1167,6 +1227,12 @@ def route(text: str, *, pending_draft: dict | None = None) -> dict:
         return r("directive_status", [("directive_status", {"ref": ref})])
 
     if question:
+        explicit = refs["xavier_decision_id"] or refs["entry_id"]
+        if not explicit and re.search(r"\b(paper|reconcil\w*)\b", low):
+            # the paper experiment: balances, session, today's decisions,
+            # and the ledger read and reconciled
+            return r("paper_account", [("paper_account", {}),
+                                       ("paper_ledger_reconciliation", {})])
         if re.search(r"\bhold\w*\b", low) and re.search(
                 r"\b(pair\w*|hedg\w*|instead)\b", low):
             args = dict(acct)
@@ -1198,6 +1264,10 @@ def route(text: str, *, pending_draft: dict | None = None) -> dict:
         if re.search(r"\b(propos\w*|candidates?|improvement\w*|recommend\w*|"
                      r"change\s+(?:are|do|would)\s+you)\b", low):
             return r("proposals", [("proposals", {})])
+        if re.search(r"\b(cash|balances?|reserved|equity|ledger|"
+                     r"session)\b", low):
+            return r("paper_account", [("paper_account", {}),
+                                       ("paper_ledger_reconciliation", {})])
         if re.search(r"\b(doing|status|up\s+to|working|busy|state|"
                      r"heartbeat|what\s+are\s+derek|what\s+is\s+xavier)\b",
                      low):
@@ -1388,6 +1458,10 @@ def _render(name: str, res: dict) -> list:
                 if t_.get("directive_id") else "", _q(t_.get("title"), 120)))
         out.append("No proposal acts until it passes evaluation and the "
                    "owner's approval.")
+    elif name == "paper_account":
+        out += _paper_lines(data)
+    elif name == "paper_ledger_reconciliation":
+        out += _reconciliation_lines(data)
     elif name == "directive_status":
         for n in data.get("notes") or []:
             out.append("Note: %s." % n)
@@ -1400,6 +1474,122 @@ def _render(name: str, res: dict) -> list:
             out += _directive_lines(d, got.get("tasks") or [])
     else:
         out.append(_q(_j(data), 400))
+    return out
+
+
+def _paper_lines(s: dict) -> list:
+    """The paper experiment, as the Command Centre shows it. Paper figures
+    only: never the funded book or the legacy desk account."""
+    out = []
+    a = s.get("account") or {}
+    if a.get("ok"):
+        out.append(
+            "Paper account %s (paper ledger, %s): cash %s, reserved %s (part "
+            "of cash), available %s; total equity %s; realised P&L %s, "
+            "unrealised P&L %s; %s open position(s); last ledger sequence "
+            "%s, last updated %s." % (
+                a.get("account_id"), s.get("data_label"),
+                _money(a.get("cash_usd")), _money(a.get("reserved_usd")),
+                _money(a.get("available_usd")),
+                _money(a.get("total_equity_usd"))
+                if a.get("total_equity_usd") is not None else
+                "not stated (%s)" % a.get("equity_basis"),
+                _money(a.get("realized_pnl_usd")),
+                _money(a.get("unrealized_pnl_usd")),
+                a.get("open_positions"), a.get("last_sequence"),
+                a.get("last_updated_at") or "never"))
+    elif a:
+        out.append("Paper account: not readable (%s)." % a.get("refusal"))
+    se = s.get("session") or {}
+    if se.get("active"):
+        out.append("Active paper session %s (%s), started %s; last "
+                   "heartbeat %s, %s passes, %s errors, %s venue mutation "
+                   "attempts." % (se["session_id"], se.get("status"),
+                                  se.get("started_at"),
+                                  se.get("last_heartbeat_at") or "never",
+                                  se.get("passes"), se.get("errors"),
+                                  se.get("mutation_attempts")))
+    elif se:
+        out.append("No paper session is active: %s." % se.get("why"))
+    d = s.get("decisions_today") or {}
+    if d and not d.get("why"):
+        bv = d.get("by_verdict") or {}
+        out.append("Paper decisions today (%s, UTC): %s recorded — %s ENTER, "
+                   "%s REFUSE%s." % (
+                       d.get("day"), d.get("total"), bv.get("ENTER", 0),
+                       bv.get("REFUSE", 0), "; " + ", ".join(
+                           "%s × %s" % (g["count"], g["reason"])
+                           for g in d.get("by_reason") or [])
+                       if d.get("by_reason") else ""))
+        for n in (d.get("newest") or [])[:10]:
+            out.append("Paper decision %s at %s (session %s) on %s: %s%s." % (
+                n["decision_id"], n["decided_at"], n.get("session_id"),
+                n.get("market"), n["verdict"], (" (%s)" % n["refusal"])
+                if n.get("refusal") else ""))
+    mg = s.get("management") or {}
+    if mg:
+        out.append("What Xavier manages on paper: %s open position(s), %s "
+                   "open management order(s), %s open entry order(s), %s "
+                   "handoff(s)%s." % (
+                       mg.get("open_positions"),
+                       mg.get("open_management_orders"),
+                       mg.get("open_entry_orders"), mg.get("handoffs"),
+                       " — nothing to manage" if mg.get("nothing_to_manage")
+                       else ""))
+    rv = s.get("xavier_reviews_today") or {}
+    if rv:
+        out.append("Xavier's paper reviews today: %s." % rv.get("total"))
+    for u in s.get("unavailable") or []:
+        out.append("Could not read: %s." % u)
+    return out
+
+
+def _reconciliation_lines(rc: dict) -> list:
+    acct = rc.get("account_id")
+    out = ["Paper ledger %s for %s (session %s): %s entries, sequence %s to "
+           "%s%s." % ("RECONCILES" if rc.get("reconciled")
+                      else "DOES NOT RECONCILE", acct,
+                      rc.get("session_id") or "none active",
+                      rc.get("entries_count"), rc.get("first_seq"),
+                      rc.get("last_seq"), "" if rc.get("reconciled") else
+                      "; failed: " + ", ".join(rc.get("failed_checks") or []))]
+    ck = {c["check"]: c for c in rc.get("checks") or []}
+    c1 = ck.get("CASH_EQUALS_SUM_OF_CASH_DELTAS") or {}
+    c2 = ck.get("RESERVED_EQUALS_SUM_OF_RESERVED_DELTAS") or {}
+    c3 = ck.get("AVAILABLE_EQUALS_CASH_MINUS_RESERVED") or {}
+    c5 = ck.get("EXACTLY_ONE_INITIAL_FUNDING") or {}
+    c6 = ck.get("INITIAL_FUNDING_EQUALS_STARTING_CASH") or {}
+    out.append(
+        "Sum of cash deltas %s vs cash %s (%s); sum of reserved deltas %s vs "
+        "reserved %s (%s); cash minus reserved %s vs available %s (%s); last "
+        "entry's running balance %s; INITIAL_FUNDING entries: %s, at "
+        "sequence %s, %s vs starting cash %s (%s)." % (
+            _money(c1.get("ledger_sum_usd")), _money(c1.get("balance_usd")),
+            "agrees" if c1.get("ok") else "DISAGREES",
+            _money(c2.get("ledger_sum_usd")), _money(c2.get("balance_usd")),
+            "agrees" if c2.get("ok") else "DISAGREES",
+            _money(c3.get("cash_minus_reserved_usd")),
+            _money(c3.get("balance_usd")),
+            "agrees" if c3.get("ok") else "DISAGREES",
+            "agrees" if (ck.get("LAST_ENTRY_RUNNING_BALANCE_AGREES")
+                         or {}).get("ok") else "DISAGREES",
+            c5.get("count"), rc.get("initial_funding_seq"),
+            _money(c6.get("initial_funding_usd")),
+            _money(c6.get("starting_cash_usd")),
+            "agrees" if c6.get("ok") else "DISAGREES"))
+    if rc.get("by_kind"):
+        out.append("Entries by kind: %s." % "; ".join(
+            "%s × %s (seq %s–%s, cash %s, reserved %s)" % (
+                k["kind"], k["count"], k["first_seq"], k["last_seq"],
+                _money(k["cash_delta_usd"]), _money(k["reserved_delta_usd"]))
+            for k in rc["by_kind"]))
+    for e in (rc.get("latest_entries") or [])[:10]:
+        out.append("Ledger seq %s %s: cash %s, reserved %s -> cash after %s, "
+                   "reserved after %s, at %s." % (
+                       e["seq"], e["kind"], _money(e["cash_delta_usd"]),
+                       _money(e["reserved_delta_usd"]),
+                       _money(e["cash_after_usd"]),
+                       _money(e["reserved_after_usd"]), e["committed_at"]))
     return out
 
 
