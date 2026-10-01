@@ -414,7 +414,8 @@ def _stub(monkeypatch, *, ladder=LADDER, prose=VENUE_PROSE,
                          # takes. A stub that refuses these kwargs cannot stand
                          # in for it, and the TypeError was reported as an
                          # entry-lane failure rather than as a stale stub.
-                         subscription=None, revalidation=None):
+                         subscription=None, revalidation=None,
+                         freshness_deadline_epoch_s=None):
         return {"ok": True, "ask": 0.62, "api_price": 0.62,
                 "acquisition_price": 0.62, "side_consumed": "ASK",
                 "pays_on": "THE_PRICED_OUTCOME", "intent": intent,

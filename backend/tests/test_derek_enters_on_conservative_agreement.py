@@ -265,7 +265,8 @@ def _stub(monkeypatch, *, p_home=0.60, stamp_age_s=2.0, prose=VENUE_PROSE,
     monkeypatch.setattr(_pm, "resolve", fake_resolve)
 
     async def fake_quote(conn_, *, us_slug, intent, now, size=None,
-                         subscription=None, revalidation=None):
+                         subscription=None, revalidation=None,
+                         freshness_deadline_epoch_s=None):
         # A LIVE SUBSCRIPTION (M1) whose last update for this market arrived
         # at the read: the mechanism that admits a book, stated.
         return {"ok": True, "ask": 0.50, "api_price": 0.50,
