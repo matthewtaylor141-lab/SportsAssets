@@ -142,7 +142,17 @@ for (const [name, eng, opts] of ENGINES) {
     await browser.close();
   }
 }
-report.ok = report.checks.every((c) => c.ok);
+// AGREEING ON ZERO IS NOT A PASS. The pages can only be said to show the
+// experiment once there is at least one filled position on the ledger; until
+// then the verdict is CONNECTED_NOT_EXERCISED (the checks above say only
+// that the pages and the API agree).
+const exercised = open.length > 0 && fills.length > 0 &&
+  fills.every((f) => f.ledger_seq != null);
+report.agreement_ok = report.checks.every((c) => c.ok);
+report.verdict = !report.agreement_ok ? "MISMATCH_OR_DISCONNECTED"
+  : exercised ? "EXERCISED_AND_MATCHING" : "CONNECTED_NOT_EXERCISED";
+report.ok = report.verdict === "EXERCISED_AND_MATCHING";
+report.freshness = sec("freshness");
 fs.writeFileSync(`${OUT}/experiment_report.json`, JSON.stringify(report, null, 2));
-console.log(JSON.stringify({ ok: report.ok, api: report.api,
+console.log(JSON.stringify({ verdict: report.verdict, ok: report.ok, api: report.api,
   failed: report.checks.filter((c) => !c.ok) }, null, 2));
