@@ -79,4 +79,9 @@
 /* the strip on a phone: three figures and the state, not sticky, so it never covers the app */
 @media(max-width:760px){#paper-strip{position:static;gap:4px 12px;padding:6px 12px}#paper-strip .ps-f:not(.ps-keep){display:none}#paper-strip .ps-meta,#paper-strip .ps-why{margin-left:0;flex-basis:100%;overflow-wrap:anywhere}#paper-strip .ps-tag{font-size:10px}}
 /* the funded section's animated hero must not widen the page on a phone */
-.funded-section{overflow:hidden;max-width:100%}.funded-section .command-hero{overflow:hidden}
+.funded-section{overflow:hidden;max-width:100%;position:relative}.funded-section .command-hero{overflow:hidden;position:relative}
+/* signed out: one prompt with the way to sign in */
+.paper-home .ph-signin{margin:10px 0 0;padding:10px 12px;border-radius:9px;border:1px solid #8a6d2a;background:#221b0e;color:#f3e2b5;font-size:12.5px;line-height:1.5;overflow-wrap:anywhere}
+.paper-home .ph-signin b{color:#f3c969;letter-spacing:.06em}.paper-home .ph-signin a,#paper-strip a{color:#9fd3ff;font-weight:700}
+/* the top bar's source badge never pushes the bar wider than a phone */
+@media(max-width:760px){#source-badge{min-width:0;flex:0 1 auto;overflow:hidden}#source-badge .pill{max-width:118px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
