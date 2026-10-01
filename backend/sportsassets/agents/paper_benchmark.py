@@ -67,6 +67,23 @@ switch, the row the kill switch). It runs only inside the paper session
 pass has no benchmark step and the per-valuation hook returns exactly as
 before.
 
+EVERY KEY IS STRATEGY-SPECIFIC. The decision id ('paperbench:' + sha of
+session, valuation and STRATEGY) roots every other key: the group
+('paperbenchgrp:'), the entry's idempotency key and order id, the fill keys
+(order id + book observation + level), the position key (group), the handoff
+key (group) and Xavier's management-order keys (group / position). The
+two-model strategy keeps its own namespace ('paperdec:' / 'papergrp:'), and
+migration 182's unique index is (session, valuation, strategy): neither
+strategy can overwrite or suppress the other.
+
+ONE CASH LEDGER. No bankroll of its own and no second funding: its orders
+reserve on the account's one `paper_ledger` through
+`bettor_paper_ledger.submit_order`, under the same account row lock as every
+other paper order, so available cash is never committed twice across
+strategies. Only this strategy is enabled for NEW paper entries; the
+two-model strategy keeps recording its decisions with its entry switch
+(paper_control 'PAPER_ENTRIES:DEREK_ENTRY_POLICY_V2') off.
+
 UNREACHABLE FROM REAL MONEY. This module imports only the paper ledger, the
 paper simulator, the pure policy helpers (`derek_policy`) and paper Derek's
 pure helpers; it never imports a funded, live or order-submitting module, and
