@@ -1965,7 +1965,11 @@ CC_PAGE_CSP = ("default-src 'none'; style-src 'unsafe-inline'; "
                # blob: is the glTF loader decoding a model's EMBEDDED
                # textures (object URLs of this document); nothing remote
                "connect-src 'self' blob:; "
-               "img-src 'self' data: blob:; base-uri 'none'; form-action 'none'; "
+               "img-src 'self' data: blob:; "
+               # the agent's speech audio (the same-origin /speech route, or a
+               # blob: of it) so the character's mouth can follow real audio
+               "media-src 'self' blob:; "
+               "base-uri 'none'; form-action 'none'; "
                # the management shell at /derek, /xavier and /audrey frames
                # these pages from the same origin; nothing else may frame them
                "frame-ancestors 'self'")

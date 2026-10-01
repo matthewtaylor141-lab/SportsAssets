@@ -411,7 +411,10 @@ def credit_html(asset: dict) -> str:
     if not asset.get("model") or not asset.get("credit"):
         return ""
     lic = asset.get("license") or {}
-    return (' <span class="cc-credit" data-credit>%s. Licence: %s, shipped with the '
+    # the footer's general sentence describes the procedural stand-in; a
+    # licensed model says plainly that it is one
+    return (' <span class="cc-credit" data-credit>The 3D character on this page is '
+            'a licensed model, not an original illustration. %s. Licence: %s, shipped with the '
             'model as %s.</span>' % (_html.escape(asset["credit"]),
                                     _html.escape(str(lic.get("spdx"))),
                                     _html.escape(str(lic.get("file", "")).rsplit("/", 1)[-1])))

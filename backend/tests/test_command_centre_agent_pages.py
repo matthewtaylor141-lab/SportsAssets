@@ -909,6 +909,9 @@ def test_pages_may_be_framed_by_the_same_origin_only(monkeypatch, kind):
     assert "'wasm-unsafe-eval'" in csp and "'unsafe-eval'" not in csp.replace("'wasm-unsafe-eval'", "")
     # embedded model textures decode through this document's blob: URLs; no remote origin
     assert "connect-src 'self' blob:;" in csp and "img-src 'self' data: blob:;" in csp
+    # the agent's speech audio plays from this origin (or a blob: of it) so the
+    # character's mouth can follow it; still no remote origin
+    assert "media-src 'self' blob:;" in csp
     assert "http" not in csp and "*" not in csp
     assert "x-frame-options" not in {k.lower() for k in r.headers}
     assert "DENY" not in csp
@@ -1104,13 +1107,11 @@ def test_the_manifest_admits_only_complete_licensed_non_test_models(monkeypatch,
     for k in KINDS:
         a = P.character_asset(k)
         assert a["framing"] in ("face", "chest", "waist") and a["lighting"].startswith("cinematic_")
-        if k == "derek":                                          # the Rocketbox candidate
-            assert a["model"] == "/api/command/agents/static/models/derek_candidate.glb"
-            assert a["license"]["spdx"] == "MIT" and "Rocketbox" in a["license"]["from"]
-            assert a["candidate_label"] == "CANDIDATE MODEL (Rocketbox, MIT) — under evaluation"
-            assert a["hide_materials"] == ["m002_opacity"]        # no opacity map was supplied
-        else:
-            assert a["model"] is None and a["why"]                # still the tagged placeholder
+        # V2: all three agents are licensed Rocketbox characters (MIT); the
+        # hair cards render from the vendor's own opacity maps, nothing hidden
+        assert a["model"] == "/api/command/agents/static/models/%s.glb" % k
+        assert a["license"]["spdx"] == "MIT" and "Rocketbox" in a["license"]["from"]
+        assert "candidate_label" not in a and "hide_materials" not in a
     shutil.copy(GLTF_TEST / "RiggedFigure.glb", tmp_path / "derek.glb")
     (tmp_path / "derek.LICENSE.txt").write_text("licence text")
     entry = {"model": "derek.glb", "license_file": "derek.LICENSE.txt", "license_spdx": "LicenseRef-Test",
@@ -1151,7 +1152,7 @@ def test_the_loader_prefers_a_licensed_model_and_falls_back_to_the_placeholder()
     loader = module[0]
     assert "asset.model ? import('%s')" % P.ENDPOINTS["avatar"] in loader
     assert "m.mountAvatar(stage, asset" in loader and "return placeholder();" in loader
-    assert 'data-cc-asset="{&quot;framing&quot;: &quot;waist&quot;' in html
+    assert 'data-cc-asset="{&quot;framing&quot;: &quot;chest&quot;' in html     # V2: all three framed at the chest
     assert ".cc-real-model .cc-placeholder{display:none}" in html
     src = (STATIC / "cc_avatar.js").read_text()
     for need in ("Math.min(window.devicePixelRatio || 1, 1.5)", "document.hidden", "ema > 20",
@@ -1161,21 +1162,67 @@ def test_the_loader_prefers_a_licensed_model_and_falls_back_to_the_placeholder()
 
 
 
-def test_the_rocketbox_derek_candidate_carries_what_the_pipeline_needs():
-    """The converted model's own names, and the pipeline resolving them."""
+MODEL_MAX_BYTES = 8_000_000          # each character, for phones on a mobile network
+ROCKETBOX = {"derek": ("Business_Male_03", "m020", True), "xavier": ("Business_Male_05", "m016", False),
+             "audrey": ("Business_Female_04", "f020", True)}
+
+
+def _glb_json(path):
     import struct
-    glb = (STATIC / "models" / "derek_candidate.glb").read_bytes()
-    assert glb[:4] == b"glTF" and len(glb) < 8_000_000
+    glb = path.read_bytes()
+    assert glb[:4] == b"glTF" and struct.unpack("<I", glb[4:8])[0] == 2
     n = struct.unpack("<I", glb[12:16])[0]
-    j = json.loads(glb[20:20 + n])
+    return glb, json.loads(glb[20:20 + n])
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_every_shipped_character_is_licensed_hashed_attributed_and_mobile_sized(kind):
+    """The CHARACTER ASSET MANIFEST, per model: the file exists, its licence
+    text ships beside it, its hash matches what the manifest recorded, the
+    source is named down to the files converted, and it stays under the
+    mobile size bound."""
+    import hashlib
+    e = json.loads((STATIC / "models" / "manifest.json").read_text())["characters"][kind]
+    name, prefix, hair_cards = ROCKETBOX[kind]
+    model = STATIC / "models" / e["model"]
+    assert e["model"] == kind + ".glb" and model.is_file()
+    assert model.stat().st_size < MODEL_MAX_BYTES, model.stat().st_size
+    assert e["test_asset"] is False and e["license_spdx"] == "MIT"
+    lic = STATIC / "models" / e["license_file"]
+    assert lic.is_file() and lic.read_text().startswith("MIT License")
+    assert "Copyright (c) 2020 Microsoft" in lic.read_text()
+    assert "Permission is hereby granted, free of charge" in lic.read_text()
+    assert ("Assets/Avatars/Professions/" + name) in e["licensed_from"]
+    assert e["credit"] == "Character model: Microsoft Rocketbox %s (MIT, © 2020 Microsoft)" % name
+    src = e["source"]
+    assert src["repository"] == "https://github.com/microsoft/Microsoft-Rocketbox"
+    assert src["sha256"] == hashlib.sha256(model.read_bytes()).hexdigest()
+    assert src["files"][0] == "Assets/Avatars/Professions/%s/Export/%s_facial.fbx" % (name, name)
+    assert any(f.endswith("%s_opacity_color.tga" % prefix) for f in src["files"]) is hair_cards
+    assert e["casting"] and e["known_gaps"]                   # the honest gaps travel with the asset
+    assert e["framing"] in ("face", "chest", "waist") and e["lighting"].startswith("cinematic_")
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_each_rocketbox_character_carries_what_the_pipeline_needs(kind):
+    """The converted model's own names, and the pipeline resolving them."""
+    name, prefix, hair_cards = ROCKETBOX[kind]
+    _glb, j = _glb_json(STATIC / "models" / (kind + ".glb"))
     targets = j["meshes"][0]["extras"]["targetNames"]
     joints = [j["nodes"][i]["name"] for i in j["skins"][0]["joints"]]
-    assert len(targets) == 175 and len(joints) == 80
+    # pruned to the targets the pipeline drives: 15 visemes + ARKit 52
+    assert len(targets) == 67 and len(joints) == 80
+    assert all(len(p["targets"]) == 67 for p in j["meshes"][0]["primitives"])
     assert "EXT_meshopt_compression" in j["extensionsUsed"]
-    assert {m["name"] for m in j["materials"]} == {"m002_body", "m002_head", "m002_opacity"}
-    assert all(m["pbrMetallicRoughness"].get("metallicRoughnessTexture") and m.get("normalTexture") for m in j["materials"])
-    lic = (STATIC / "models" / "ROCKETBOX_LICENSE.md").read_text()
-    assert lic.startswith("MIT License") and "Copyright (c) 2020 Microsoft" in lic
+    mats = {m["name"]: m for m in j["materials"]}
+    assert set(mats) == {prefix + "_body", prefix + "_head"} | ({prefix + "_opacity"} if hair_cards else set())
+    for nm in (prefix + "_body", prefix + "_head"):
+        assert mats[nm]["pbrMetallicRoughness"].get("metallicRoughnessTexture") and mats[nm].get("normalTexture")
+    if hair_cards:                                            # the vendor's RGBA opacity map, alpha-tested
+        op = mats[prefix + "_opacity"]
+        assert op["alphaMode"] == "MASK" and op.get("doubleSided") is True
+        tex = j["textures"][op["pbrMetallicRoughness"]["baseColorTexture"]["index"]]
+        assert j["images"][tex["source"]]["mimeType"] == "image/png"
     got = _node_mjs("""
       const targets = %s, joints = %s;
       const root = new THREE.Group(); for (const n of joints) { const b = new THREE.Bone(); b.name = n.replace(/ /g, '_'); root.add(b); }
@@ -1186,25 +1233,141 @@ def test_the_rocketbox_derek_candidate_carries_what_the_pipeline_needs():
     """ % (json.dumps(targets), json.dumps(joints)))
     assert got["missing"] == []
     assert got["source"]["head"] == "Bip01_Head" and got["source"]["chest"] == "Bip01_Spine2"
-    assert got["source"]["leftEye"] == "Bip01_LEye"
+    assert got["source"]["leftEye"] == "Bip01_LEye" and got["source"]["rightLowerArm"] == "Bip01_R_Forearm"
     assert got["arkit"] == 52 and got["arkitMissing"] == []
     assert got["blink"] == ["AK_09_EyeBlinkLeft"]
     assert got["visemes"] == sorted(["sil", "PP", "FF", "TH", "DD", "kk", "CH", "SS", "nn", "RR", "aa", "E", "I", "O", "U"])
 
 
-def test_the_candidate_is_labelled_and_credited_on_the_derek_page(monkeypatch):
+def test_the_licensed_characters_are_credited_on_their_pages(monkeypatch):
     c, _ = _client(monkeypatch)
-    html = c.get(P.PAGE_PATHS["derek"], headers={"X-Admin-Token": _Cfg.admin_token}).text
-    assert "derek_candidate.glb" in html and "CANDIDATE MODEL (Rocketbox, MIT)" in html
-    assert "Character model: Microsoft Rocketbox Male_Adult_01 (MIT, © 2020 Microsoft)" in html
-    assert ".cc-real-model.cc-candidate .cc-placeholder{display:block}" in html
-    r = c.get("/api/command/agents/static/models/derek_candidate.glb", headers={"X-Admin-Token": _Cfg.admin_token})
-    assert r.status_code == 200 and r.headers["content-type"] == "model/gltf-binary"
+    for kind in KINDS:
+        name = ROCKETBOX[kind][0]
+        html = c.get(P.PAGE_PATHS[kind], headers={"X-Admin-Token": _Cfg.admin_token}).text
+        assert "/api/command/agents/static/models/%s.glb" % kind in html
+        assert "Character model: Microsoft Rocketbox %s (MIT, © 2020 Microsoft)" % name in html
+        assert "a licensed model, not an original illustration" in html
+        assert "CANDIDATE MODEL" not in html                  # no candidate tag over the stage
+        r = c.get("/api/command/agents/static/models/%s.glb" % kind, headers={"X-Admin-Token": _Cfg.admin_token})
+        assert r.status_code == 200 and r.headers["content-type"] == "model/gltf-binary"
     lic = c.get("/api/command/agents/static/models/ROCKETBOX_LICENSE.md", headers={"X-Admin-Token": _Cfg.admin_token})
     assert lic.status_code == 200 and "Copyright (c) 2020 Microsoft" in lic.text
-    for k in ("xavier", "audrey"):
-        h = c.get(P.PAGE_PATHS[k], headers={"X-Admin-Token": _Cfg.admin_token}).text
-        assert "Rocketbox" not in h and CCP.PLACEHOLDER_TAG in h
+    # the superseded candidate is gone from the build and from the route
+    assert not (STATIC / "models" / "derek_candidate.glb").exists()
+    assert c.get("/api/command/agents/static/models/derek_candidate.glb",
+                 headers={"X-Admin-Token": _Cfg.admin_token}).status_code == 404
+
+
+_BIPED = """
+  // a small 3ds Max Biped-like rig, standing, arms hanging, facing +Z; like
+  // a real Biped its bones' local X runs along the bone
+  function biped() {
+    const root = new THREE.Group(), B = {};
+    const bone = (name, parent, pos) => { const b = new THREE.Bone(); b.name = name; b.position.set(...pos); (parent || root).add(b); B[name] = b; return b; };
+    const pelvis = bone('Bip01 Pelvis', null, [0, 1.0, 0]); pelvis.rotation.set(0, 0, Math.PI / 2);
+    const spine = bone('Bip01 Spine', pelvis, [0.1, 0, 0]), s2 = bone('Bip01 Spine2', spine, [0.25, 0, 0]);
+    const neck = bone('Bip01 Neck', s2, [0.2, 0, 0]), head = bone('Bip01 Head', neck, [0.1, 0, 0]);
+    bone('Bip01 LEye', head, [0.08, 0.03, 0.08]); bone('Bip01 REye', head, [0.08, -0.03, 0.08]);
+    for (const [s, L] of [[1, 'L'], [-1, 'R']]) {
+      const cl = bone('Bip01 ' + L + ' Clavicle', neck, [0, -0.02 * s, 0]); cl.rotation.set(0, 0, -s * Math.PI / 2);
+      const up = bone('Bip01 ' + L + ' UpperArm', cl, [0.18, 0, 0]); up.rotation.set(0, 0, -s * Math.PI / 2 * 0.98);
+      const fo = bone('Bip01 ' + L + ' Forearm', up, [0.28, 0, 0]); bone('Bip01 ' + L + ' Hand', fo, [0.26, 0, 0]);
+    }
+    root.updateMatrixWorld(true);
+    return {root, B};
+  }
+"""
+
+
+def test_v2_joints_turn_biped_bones_about_the_models_axes_and_gestures_stay_restrained():
+    got = _node_mjs(_BIPED + """
+      const {root, B} = biped();
+      const r = av.resolveBones(root);
+      const joints = av.buildJoints(root, r.bones);
+      const V = (o) => o.getWorldPosition(new THREE.Vector3());
+      const hand = B['Bip01 R Hand'], head = B['Bip01 Head'], eye = B['Bip01 LEye'];
+      const rest = {hand: V(hand), eye: V(eye)};
+      const c = new av.AvatarController(r.bones, {}, {mode: 'monitoring', seed: 4, joints});
+      // a look DOWN must move the eye forward-down (a nod), not twist the head
+      c.update(1 / 60); c.head.pitch = 0; c.look.pitch = -0.2; c.look.yaw = 0; c.lookAt = 1e9;
+      for (let i = 0; i < 240; i++) c.update(1 / 60);
+      root.updateMatrixWorld(true);
+      const eyeNod = V(eye).sub(rest.eye);
+      // speech: amplitude and bands from audio; the beat gesture lifts a hand forward
+      let maxFwd = 0, maxUp = 0, maxFore = 0;
+      for (let i = 0; i < 60 * 20; i++) {
+        c.setSpeech({amplitude: 0.5 + 0.4 * Math.sin(i / 4), bands: {low: 3, mid: 2, high: 1}});
+        c.update(1 / 60); root.updateMatrixWorld(true);
+        for (const s of [1, -1]) maxFore = Math.max(maxFore, c.arm[s].fore);
+        const h = V(hand).sub(rest.hand); maxFwd = Math.max(maxFwd, h.z); maxUp = Math.max(maxUp, h.y);
+      }
+      c.setSpeech(null); c.setMode('unavailable'); let n = 0; while (c.update(1 / 60) && n < 3600) n++;
+      return {joints: Object.keys(joints).sort(), eyeNod: eyeNod.toArray(), maxFwd, maxUp, maxFore, gestures: c.stats.gestures,
+              onsets: c.stats.onsets, settled: n < 3600, armRest: [c.arm[1].fore, c.arm[-1].fore]};
+    """)
+    assert got["joints"] == sorted(["hips", "spine", "chest", "neck", "head", "leftEye", "rightEye", "leftShoulder",
+                                    "rightShoulder", "leftUpperArm", "leftLowerArm", "rightUpperArm", "rightLowerArm"])
+    dx, dy, dz = got["eyeNod"]
+    assert dy < -0.002 and abs(dx) < 0.002                 # the head nodded down; it did not twist sideways
+    assert got["gestures"] >= 3 and got["onsets"] >= 10      # beats while speaking, onsets nod
+    assert got["maxFwd"] > 0.05 and got["maxUp"] > 0.03      # the hand came forward and up
+    assert got["maxFore"] < 1.4                              # restrained: never a full fold or a wave
+    assert got["settled"] and all(abs(v - 0.14) < 1e-3 for v in got["armRest"])
+
+
+def test_v2_speech_bands_drive_visemes_within_a_conversational_range():
+    got = _node_mjs("""
+      const bones = {}; for (const n of ['hips', 'spine', 'chest', 'neck', 'head']) { const b = new THREE.Bone(); bones[n] = b; }
+      const mesh = {morphTargetInfluences: new Array(9).fill(0)};
+      const shapes = {jawOpen: [{mesh, index: 0}]};
+      const vis = {aa: [{mesh, index: 1}], O: [{mesh, index: 2}], E: [{mesh, index: 3}], SS: [{mesh, index: 4}], PP: [{mesh, index: 5}]};
+      const c = new av.AvatarController(bones, shapes, {mode: 'speaking', seed: 2, visemes: vis});
+      const run = (bands) => { const mx = new Array(9).fill(0); for (let i = 0; i < 90; i++) { c.setSpeech({amplitude: 0.8, bands}); c.update(1 / 60); mesh.morphTargetInfluences.forEach((v, k) => { mx[k] = Math.max(mx[k], v); }); } return mx; };
+      const vowel = run({low: 8, mid: 1, high: 0.2}), hiss = run({low: 0.2, mid: 0.5, high: 6});
+      c.setSpeech(null); c.update(1 / 60);
+      return {vowel, hiss, after: mesh.morphTargetInfluences.slice()};
+    """)
+    v, h = got["vowel"], got["hiss"]
+    assert v[1] > 0.3 and v[1] > h[1]                         # open vowel from low-band energy
+    assert h[4] > 0.3 and h[4] > v[4]                         # sibilant from high-band energy
+    assert max(v[1:6] + h[1:6]) <= 0.56                       # no viseme past ~0.55: speech, not a gape
+    assert 0 < v[0] <= 0.2                                    # the jaw opens a little under the visemes
+    assert got["after"][0] == 0                               # silence closes the mouth
+
+
+def test_v2_layout_keeps_the_labels_off_the_character():
+    got = _node_mjs("""
+      const rect = (l, t, w, h) => ({left: l, top: t, right: l + w, bottom: t + h, width: w, height: h});
+      globalThis.getComputedStyle = () => ({display: 'block', visibility: 'visible'});
+      globalThis.document = {createRange: () => ({selectNodeContents(el) { this.el = el; }, getBoundingClientRect() { return this.el.text; }})};
+      const el = (r, text) => ({getBoundingClientRect: () => r, text: text || r});
+      function stage(W, H) {
+        const name = [el(rect(0, 0, W, 20), rect(20, 18, 90, 18)), el(rect(0, 40, W, 40), rect(20, 44, 110, 38)), el(rect(0, 84, W, 14), rect(20, 86, 180, 14))];
+        const ctl = [el(rect(W - 130, 14, 116, 26))];
+        const low = [el(rect(18, H - 90, 128, 28)), el(rect(18, H - 54, W - 36, 36))];
+        return {getBoundingClientRect: () => rect(0, 0, W, H),
+                querySelectorAll: (q) => q.includes('.cc-ov') ? name : q.includes('.cc-ctl') ? ctl : q.includes('.cc-st') ? low : []};
+      }
+      const region = {h: 0.66, w: 0.56, head: 0.26};
+      return {narrow: av.layoutStage(stage(358, 520), region), wide: av.layoutStage(stage(698, 441), region)};
+    """)
+    n, w = got["narrow"], got["wide"]
+    # a phone: below the name block (bottom 100) and the controls, above the status line
+    assert n["how"] == "below" and n["top"] >= 100 and n["Hc"] <= n["statusTop"]
+    assert n["top"] + 0.66 * n["s"] <= n["Hc"] + 1                   # the framed region fits the band
+    # a wide stage: beside the name block (right edge 200), clear of the controls
+    assert w["how"] == "beside" and w["cx"] - w["w"] / 2 >= 200 and w["Hc"] <= w["statusTop"]
+    assert w["cx"] + 0.26 * w["s"] / 2 <= 698 - 130 or w["top"] >= 40  # the head misses the Pause button
+
+
+def test_v2_audio_is_found_on_the_page_and_never_from_text():
+    src = (STATIC / "cc_avatar.js").read_text()
+    # the page's own audio, same-origin only, one WebAudio source per element
+    for need in ("createMediaElementSource", "HTMLMediaElement.prototype", "document.addEventListener('play'",
+                 "new URL(u, location.href).origin === location.origin", "_attached.has(mediaElement)",
+                 "bands: {low: band(100, 900), mid: band(900, 2600), high: band(2600, 8000)}", "autoAudio();"):
+        assert need in src, need
+    assert "speechSynthesis" not in src and "fetch(" not in src and "/api/" not in src
 
 
 # ═════════════════════════════════════════════════════════════════════

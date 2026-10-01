@@ -5,6 +5,10 @@
 Colour: head 2048, body 1024 (JPEG q86). Normal: 1024 (JPEG q90).
 Specular -> glTF metallicRoughness (G = roughness = 0.85 - 0.5 * specular,
 clamped to 0.35..0.85 so skin reads as skin, not plastic; B = metal = 0).
+Opacity (hair cards, lashes): <prefix>_opacity_color.tga is RGBA; it is kept
+RGBA as PNG (longest side 1024) so the alpha cards render with their own
+coverage. Some Rocketbox avatars ship no opacity map (short hair modelled
+in the head mesh): then no opacity.png is written.
 """
 import os
 import sys
@@ -23,6 +27,12 @@ def main(src, prefix, out):
         rough = s.point(lambda v: int(255 * max(0.35, min(0.85, 0.85 - 0.5 * v / 255.0))))
         zero = Image.new("L", rough.size, 0)
         Image.merge("RGB", (zero, rough, zero)).save(os.path.join(out, "%s_mr.jpg" % part), quality=90, optimize=True)
+    op = os.path.join(src, "%s_opacity_color.tga" % prefix)
+    if os.path.isfile(op):
+        o = Image.open(op).convert("RGBA")
+        k = min(1.0, 1024.0 / max(o.size))
+        o = o.resize((int(o.size[0] * k), int(o.size[1] * k)), Image.LANCZOS)
+        o.save(os.path.join(out, "opacity.png"), optimize=True)
 
 
 if __name__ == "__main__":
