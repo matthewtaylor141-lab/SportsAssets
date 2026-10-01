@@ -19,6 +19,10 @@ on:
         description: "blank = read-only ping only; chat-voice = also run the authorized agent chat + speech demonstration (writes conversation records only)"
         required: false
         default: ""
+      verify:
+        description: "site-voice = after a release: set each agent's voice through the audited persona route, speak once per agent, and render the production homepage and agent pages in mobile WebKit and phone-sized Chromium (authenticated and signed out)"
+        required: false
+        default: ""
       terms_slugs:
         description: "optional comma-separated venue slugs: read each contract's published rules prose through POST /api/admin/venue-settlement-probe (read-only GETs at the venue; writes nothing)"
         required: false
@@ -186,3 +190,67 @@ jobs:
                  ((.settlement_terms // {}) | "field=\(.field) chars=\(.chars) truncated=\(.truncated)\nTEXT: \(.text)\nstated: \(.stated | tojson)\nnot_stated: \(.not_stated | tojson)\ncontradicted: \(.contradicted | tojson)")' /tmp/probe.json 2>/dev/null
           echo "== keys: $(jq -c 'keys' /tmp/probe.json 2>/dev/null)"
           [ "$code" = "200" ] || head -c 1500 /tmp/probe.json
+
+  site-voice:
+    # POST-RELEASE VERIFICATION, OFF UNLESS verify == site-voice.
+    # 1. VOICE: appends one persona version per agent naming an ElevenLabs
+    #    PUBLIC PREMADE voice id from that profile's own preferred names
+    #    (audited, versioned; the server key lacks voices_read, so the list
+    #    cannot be read and names cannot be matched), forces a resolution, asks
+    #    one grounded question and speaks the stored answer. Audio bytes are
+    #    counted, never printed; the key never leaves the server.
+    # 2. BROWSER: tools/site_verify/verify.mjs (read-only GETs).
+    if: ${{ inputs.verify == 'site-voice' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Voice through the configured provider
+        shell: bash
+        env:
+          API: https://sportsassets-api.onrender.com
+          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+        run: |
+          set +e
+          [ -n "${ADMIN_TOKEN:-}" ] || { echo "no ADMIN_TOKEN secret"; exit 1; }
+          echo "::add-mask::$ADMIN_TOKEN"
+          H="X-Admin-Token: $ADMIN_TOKEN"
+          for pair in derek:TX3LPaxmHKxFdv7VOQHJ:Liam xavier:nPczCjzI2devNBz1zQrb:Brian audrey:XB0fDUnXU5powFXDhCwa:Charlotte; do
+            a=${pair%%:*}; rest=${pair#*:}; vid=${rest%%:*}; name=${rest#*:}
+            echo "================ $a ($name $vid) ================"
+            body=$(jq -nc --arg v "$vid" --arg n "$name" '{reason: ("voice: ElevenLabs public premade voice " + $n + " (the server key cannot list voices: voices_read missing)"), changes: {voice_profile: {voice_id: $v}}}')
+            code=$(curl -s -o /tmp/p_$a.json -w '%{http_code}' --max-time 45 -X POST -H "$H" -H "Content-Type: application/json" -d "$body" "$API/api/command/agents/$a/persona")
+            echo "persona append HTTP $code $(jq -c '{ok, version: .profile.version, refusal}' /tmp/p_$a.json 2>/dev/null)"
+            code=$(curl -s -o /tmp/r_$a.json -w '%{http_code}' --max-time 45 -X POST -H "$H" "$API/api/command/agents/$a/persona/voice/resolve")
+            echo "resolve HTTP $code $(jq -c '.resolution | {status, method, voice_id, reason}' /tmp/r_$a.json 2>/dev/null)"
+            q=$(jq -nc --arg r "verify-$a-$(date -u +%s)" '{message: "In two sentences: what is your role, and what is the paper account cash right now? Cite the record.", request_id: $r}')
+            code=$(curl -s -o /tmp/c_$a.json -w '%{http_code}' --max-time 120 -X POST -H "$H" -H "Content-Type: application/json" -d "$q" "$API/api/command/agents/$a/chat")
+            MID=$(jq -r '.message_id // empty' /tmp/c_$a.json)
+            echo "chat HTTP $code message_id=$MID"
+            jq -r '.answer // .' /tmp/c_$a.json | head -c 900; echo
+            [ -n "$MID" ] || continue
+            code=$(curl -s -D /tmp/sh_$a.txt -o /tmp/s_$a.bin -w '%{http_code}' --max-time 120 -X POST -H "$H" -H "Content-Type: application/json" -d "$(jq -nc --arg m "$MID" '{message_id:$m}')" "$API/api/command/agents/$a/speak")
+            echo "speak HTTP $code bytes=$(wc -c < /tmp/s_$a.bin) $(grep -i '^content-type' /tmp/sh_$a.txt | tr -d '\r')"
+            if [ "$code" != "200" ]; then head -c 900 /tmp/s_$a.bin; echo; fi
+          done
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Render the production pages (WebKit iPhone 13 and Chromium 390x844)
+        shell: bash
+        env:
+          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+          OUT: site_verify_out
+        run: |
+          set +e
+          echo "::add-mask::$ADMIN_TOKEN"
+          cd tools/site_verify
+          npm init -y >/dev/null 2>&1
+          npm install playwright@1.48.2 >/dev/null 2>&1
+          npx playwright install --with-deps webkit chromium >/dev/null 2>&1
+          node verify.mjs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: site-verify-screenshots
+          path: tools/site_verify/site_verify_out
+          retention-days: 7
