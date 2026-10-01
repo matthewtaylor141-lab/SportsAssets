@@ -156,6 +156,31 @@ async def persona_transcript(agent: str, conversation_id: str,
     return dict(got, read_only=True)
 
 
+@router.get("/api/command/agents/{agent}/persona/latest-conversation")
+async def persona_latest(agent: str, response: Response,
+                         role: str = Depends(resolve_role)) -> dict:
+    """THE MANAGEMENT USER'S CURRENT CONVERSATION WITH THIS AGENT, so the
+    Talk panel resumes it after a refresh without storing anything in the
+    browser: the most recently updated conversation of this agent started
+    by the same authenticated role. 404 when there is none yet."""
+    ag = _agent(agent)
+    response.headers["Cache-Control"] = "no-store"
+    pool = await _pool()
+    async with pool.acquire() as conn:
+        if not await PC.has_schema(conn):
+            raise HTTPException(status_code=503, detail={
+                "reason": P.R_NO_SCHEMA})
+        cid = await conn.fetchval(
+            "SELECT conversation_id FROM agent_chat_conversations WHERE "
+            " agent_id=$1 AND requester_role=$2 ORDER BY updated_at DESC "
+            " LIMIT 1", ag, role)
+        got = await PC.transcript(conn, cid) if cid else None
+    if got is None:
+        raise HTTPException(status_code=404, detail={
+            "reason": "NO_CONVERSATION_YET_FOR_THIS_AGENT_AND_ROLE"})
+    return dict(got, read_only=True, scoped_to={"agent": ag, "role": role})
+
+
 @router.post("/api/command/agents/{agent}/persona/conversations/"
              "{conversation_id}/interrupt")
 async def persona_interrupt(agent: str, conversation_id: str,

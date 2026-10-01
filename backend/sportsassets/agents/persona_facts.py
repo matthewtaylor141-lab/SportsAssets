@@ -829,7 +829,7 @@ async def _agent_memory(conn, f: "Facts", agent: str | None) -> dict:
         prm = await PBM.cg_parameters(conn, {"now": 0.0})
         thr = float(prm["values"]["min_gross_edge_pp"])
         fid = f.add(
-            "paper_policy_parameter_heads", prm.get("version_id"),
+            "paper_entry_policy", prm.get("version_id"),
             "active_entry_threshold_pp", thr,
             "ACTIVE paper entry policy %s (parameter version %s, %s): enter "
             "only if the Pinnacle probability minus the simulated "
@@ -844,9 +844,9 @@ async def _agent_memory(conn, f: "Facts", agent: str | None) -> dict:
                 prm.get("source"), thr / 100.0, thr))
         out["policy"] = {"fact_id": fid, "version_id": prm.get("version_id"),
                          "threshold_pp": thr, "source": prm.get("source")}
-        f.check("paper_policy_parameter_heads", "MATCHED", 1)
+        f.check("paper_entry_policy", "MATCHED", 1)
     except Exception as exc:                                    # noqa: BLE001
-        f.check("paper_policy_parameter_heads", "READ_FAILED", 0,
+        f.check("paper_entry_policy", "READ_FAILED", 0,
                 type(exc).__name__)
     if not agent:
         return out

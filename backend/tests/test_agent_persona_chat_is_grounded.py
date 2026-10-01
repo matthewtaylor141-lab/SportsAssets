@@ -89,7 +89,7 @@ def test_no_yankees_position_is_said_truthfully(db, monkeypatch):
         # (the agent's memory -- the active policy and its stored lessons --
         # is read for every answer and is not a search for the position)
         paper = [c for c in g["checked"] if c["source"].startswith("paper")
-                 and c["source"] not in ("paper_policy_parameter_heads",
+                 and c["source"] not in ("paper_entry_policy",
                                          "paper_agent_lessons")]
         assert paper, g["checked"]
         if any(c["status"] == "NOT_IN_THIS_BUILD" for c in paper):

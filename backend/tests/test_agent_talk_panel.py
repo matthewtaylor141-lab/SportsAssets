@@ -53,10 +53,12 @@ def test_each_agent_page_has_its_own_talk_panel_above_the_records(kind, name):
     # the routes the panel calls are that agent's own
     js = A.TALK_JS
     for route in ("'/api/command/agents/' + agent", "/persona/chat",
-                  "/persona/conversations/", "/speech", "/transcribe"):
+                  "/persona/latest-conversation", "/speech", "/transcribe"):
         assert route in js
     # persistence per agent across refresh, and the explicit states
-    assert "'cc.talk.' + agent + '.conversation'" in js
+    # the conversation is resumed from the server, never browser storage
+    assert "/persona/latest-conversation" in js
+    assert "localStorage" not in js and "sessionStorage" not in js
     for state in ("Microphone permission denied", "Transcription unavailable",
                   "Voice unavailable", "SIGN-IN REQUIRED", "Memory supplied",
                   "Stop recording"):
@@ -200,6 +202,16 @@ def test_every_answer_reports_what_the_model_received(db, monkeypatch):
     assert t.status_code == 200
     roles = [m["role"] for m in t.json()["messages"]]
     assert roles == ["USER", "ASSISTANT", "USER", "ASSISTANT"]
+    # a refreshed page resumes it from the server, per agent and role
+    lt = client.get("/api/command/agents/xavier/persona/latest-conversation",
+                    headers=F.desk_headers())
+    assert lt.status_code == 200, lt.text
+    assert lt.json()["conversation"]["conversation_id"] == cid
+    assert len(lt.json()["messages"]) == 4
+    assert client.get("/api/command/agents/derek/persona/latest-conversation",
+                      headers=F.desk_headers()).status_code == 404
+    assert client.get("/api/command/agents/xavier/persona/latest-conversation"
+                      ).status_code in (401, 403)
     # another agent cannot read it
     assert client.get("/api/command/agents/derek/persona/conversations/%s"
                       % cid, headers=F.desk_headers()).status_code == 404

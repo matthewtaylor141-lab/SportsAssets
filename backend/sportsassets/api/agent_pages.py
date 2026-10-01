@@ -1847,16 +1847,12 @@ TALK_JS = r"""
   var root = document.getElementById('talk'); if (!root) return;
   var agent = root.getAttribute('data-agent'), NAME = agent.charAt(0).toUpperCase() + agent.slice(1);
   var BASE = '/api/command/agents/' + agent;
-  var KEY = 'cc.talk.' + agent + '.conversation';
   var $ = function (id) { return document.getElementById(id); };
   var log = $('talk-log'), input = $('talk-in'), form = $('talk-form'), stateEl = $('talk-state');
   var send = $('talk-send'), mic = $('talk-mic'), muteB = $('talk-mute'), stopB = $('talk-stop');
   var cid = null, muted = false, audio = null, rec = null, chunks = [], busy = false;
-  function store(k, v) { try { if (v == null) localStorage.removeItem(k); else localStorage.setItem(k, v); } catch (_) {} }
-  function load(k) { try { return localStorage.getItem(k); } catch (_) { return null; } }
   function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return {'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]; }); }
   function setState(t) { if (!t) { stateEl.hidden = true; stateEl.textContent = ''; return; } stateEl.hidden = false; stateEl.textContent = t; }
-  muted = load('cc.talk.muted') === '1';
   function paintMute() { muteB.setAttribute('aria-pressed', muted ? 'true' : 'false'); muteB.innerHTML = muted ? '&#128263; Voice off' : '&#128266; Voice on'; }
   paintMute();
   function avatar(fn, a) { try { if (typeof CC !== 'undefined' && CC[fn]) CC[fn](a); } catch (_) {} }
@@ -1899,12 +1895,14 @@ TALK_JS = r"""
   }
   async function readJson(r) { try { return await r.json(); } catch (_) { return null; } }
   async function resume() {
-    cid = load(KEY); if (!cid) return;
     try {
-      var r = await fetch(BASE + '/persona/conversations/' + encodeURIComponent(cid), {credentials: 'same-origin', cache: 'no-store'});
-      if (r.status === 404) { store(KEY, null); cid = null; return; }
+      // the conversation is kept by the server, per agent and signed-in
+      // role -- nothing is stored in this browser
+      var r = await fetch(BASE + '/persona/latest-conversation', {credentials: 'same-origin', cache: 'no-store'});
+      if (r.status === 404) { cid = null; return; }
       if (!r.ok) { setState('Earlier conversation not loaded: ' + why(r.status, await readJson(r))); return; }
       var t = await r.json();
+      cid = (t.conversation || {}).conversation_id || null;
       (t.messages || []).forEach(function (m) {
         if (m.role === 'USER') addQ(m.body); else if (m.role === 'ASSISTANT') addA(m);
       });
@@ -1935,7 +1933,7 @@ TALK_JS = r"""
       var r = await fetch(BASE + '/persona/chat', {method: 'POST', credentials: 'same-origin', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
       var j = await readJson(r);
       if (!r.ok && r.status !== 202) { addErr(why(r.status, j)); setState(null); avatar('chatDone'); return; }
-      if (j && j.conversation_id) { cid = j.conversation_id; store(KEY, cid); }
+      if (j && j.conversation_id) { cid = j.conversation_id; }
       addA(j || {}); setState(null);
       if (j && j.message_id) await speak(j.message_id, false); else avatar('chatDone');
     } catch (e) { addErr('Network error: ' + (e && e.message || e)); setState(null); avatar('chatDone'); }
@@ -1945,9 +1943,9 @@ TALK_JS = r"""
   input.addEventListener('keydown', function (ev) { if (ev.key === 'Enter' && !ev.shiftKey) { ev.preventDefault(); form.requestSubmit ? form.requestSubmit() : form.dispatchEvent(new Event('submit')); } });
   log.addEventListener('click', function (ev) { var b = ev.target.closest('.talk-replay'); if (b) speak(b.getAttribute('data-mid'), true); });
   root.addEventListener('click', function (ev) { var s = ev.target.closest('.talk-sugg'); if (s) { input.value = s.textContent; input.focus(); } });
-  muteB.addEventListener('click', function () { muted = !muted; store('cc.talk.muted', muted ? '1' : null); paintMute(); if (muted) stopAudio(); });
+  muteB.addEventListener('click', function () { muted = !muted; paintMute(); if (muted) stopAudio(); });
   stopB.addEventListener('click', function () { stopAudio(); setState(null); });
-  $('talk-new').addEventListener('click', function () { stopAudio(); store(KEY, null); cid = null; log.innerHTML = ''; setState('New conversation started. Earlier conversations stay in the record.'); });
+  $('talk-new').addEventListener('click', function () { stopAudio(); cid = null; log.innerHTML = ''; setState('New conversation started with your next message. Earlier conversations stay in the record.'); });
   // ── the microphone: explicit start / stop, server transcription, text fallback
   function micSupported() { return !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia && window.MediaRecorder); }
   if (!micSupported()) { mic.disabled = true; mic.title = 'This browser cannot record audio here; type your question instead.'; }
@@ -2065,7 +2063,6 @@ _CC_SHELL = r"""<!doctype html>
 <div id="app"><p class="boot">Reading %%ENDPOINT%% &#8230;</p></div>%%FUNDED_CLOSE%%</main>
 <p class="foot">Presentation of recorded state. This page sends no order and holds no credential; it reads %%ENDPOINT%% with the COMMAND session. The 3D characters are licensed Microsoft Rocketbox models (MIT licence, credited below; shipped with their licence file); a device that cannot draw them shows a 2D portrait card. The pose follows the paper runtime's own heartbeat (paper_session_health) and never stands in for data. UNKNOWN is not zero; EMPTY is not success.%%CREDIT%%</p>
 <script>%%JS%%</script>
-<script>%%TALK_JS%%</script>
 <script type="module">%%LOADER%%</script></body></html>"""
 
 
@@ -2080,12 +2077,11 @@ def _cc_page_html(kind: str) -> str:
               1)
           + CCP.PAPER_CORE_JS + OPS.OPS_CORE_JS + CCP.PAPER_BOOT_JS.replace(
               "%%PAPER_EP%%", _json_ep(PAPER_EP_KEYS))
-          + BOOT_JS)
+          + BOOT_JS + TALK_JS)
     chat = CCP.chat_panel_html(CHAT_PANEL_HTML) if kind == "audrey" else ""
     return (_CC_SHELL.replace("%%CSS%%", BASE_CSS + CCP.CC_CSS + CCP.PAPER_CSS
                               + OPS.OPS_CSS + TALK_CSS)
             .replace("%%TALK%%", talk_panel_html(kind))
-            .replace("%%TALK_JS%%", TALK_JS)
             .replace("%%FRESH%%", OPS.fresh_html())
             .replace("%%OPS%%", OPS.ops_html(kind))
             .replace("%%FUNDED_OPEN%%", OPS.funded_open())
