@@ -9880,6 +9880,22 @@ async def run(get_pool) -> None:
         from .. import bettor_market_subscription as _msub
         log.info("ext_pinnacle: market-data subscription %s",
                  _msub.start_default().get("state"))
+        # ── THE PINNAPI FEED (C1, OBSERVE ONLY), BESIDE THE DECIDER ──────
+        # After the writer lock and with THIS connection's backend pid: the
+        # feed owner re-checks every liveness pass that this pid still holds
+        # LOCK_KEY and stops for good if not, so the one provider socket only
+        # ever lives beside the process that decides. Off unless PINNAPI_FEED
+        # is set AND the 'pinnapi_feed' control row reads true. Never raises.
+        from .. import pinnapi_feed_runtime as _feed
+        try:
+            _writer_pid = await conn.fetchval("SELECT pg_backend_pid()")
+            log.info("ext_pinnacle: pinnapi feed %s", (await
+                     _feed.start_default(pool, writer_pid=_writer_pid,
+                                         writer_lock_key=LOCK_KEY)
+                     ).get("state"))
+        except Exception:                                      # noqa: BLE001
+            log.warning("ext_pinnacle: pinnapi feed start failed",
+                        exc_info=True)
         # ── MANAGEMENT AND RECOVERY, ON THEIR OWN CADENCE ────────────────
         #
         # AFTER THE LOCK, so only the writer services (a standby never
@@ -9925,6 +9941,12 @@ async def run(get_pool) -> None:
                     log.warning("ext_pinnacle: cycle failed", exc_info=True)
                 await asyncio.sleep(delay)
         finally:
+            # THE FEED FIRST, BOUNDED: its socket closes and its lease is
+            # released before this connection (and LOCK_KEY) is returned.
+            try:
+                await _feed.shutdown_default(wait_s=8.0)
+            except Exception:                                  # noqa: BLE001
+                pass
             # CLEAN SHUTDOWN of the subscription's socket. Never raises, and
             # does not block the event loop: the socket thread sees the stop
             # and closes on its own next pass.

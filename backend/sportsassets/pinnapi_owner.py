@@ -51,6 +51,16 @@ HOLDS_SQL = """SELECT EXISTS (SELECT 1 FROM pg_locks
    WHERE locktype = 'advisory' AND granted AND pid = pg_backend_pid()
      AND ((classid::bigint << 32) | objid::bigint) = $1)"""
 
+WRITER_SQL = """SELECT EXISTS (SELECT 1 FROM pg_locks
+   WHERE locktype = 'advisory' AND granted AND pid = $2
+     AND ((classid::bigint << 32) | objid::bigint) = $1)"""
+EVICTIONS_MAX = 3            # unrequested closes after a healthy stream...
+EVICTION_WINDOW_S = 600.0    # ...within this window -> stop, never fight
+BIG_FRAME = 256 * 1024       # decoded off the event loop
+
+R_WRITER_LOST = "FEED_DECIDER_WRITER_LOCK_NOT_HELD"
+R_DISARMED = "FEED_DISARMED_BY_CONTROL_ROW"
+R_EVICTION_LOOP = "FEED_EVICTION_LOOP_SUSPECTED"
 R_LEASE_LOST = "FEED_LEASE_CONNECTION_LOST_OR_NOT_HELD"
 R_SOCKET_CLOSED = "FEED_SOCKET_CLOSED"
 R_SILENCE = "FEED_PROVIDER_SILENT"
@@ -67,7 +77,12 @@ class Lease:
     @classmethod
     async def open(cls, dsn: str):
         import asyncpg
-        return cls(await asyncpg.connect(dsn))
+        # keepalives: a partitioned holder is noticed by the server within
+        # ~25 s and its lock freed; statement_timeout bounds every check
+        return cls(await asyncpg.connect(dsn, server_settings={
+            "application_name": "pinnapi-feed-owner",
+            "tcp_keepalives_idle": "10", "tcp_keepalives_interval": "5",
+            "tcp_keepalives_count": "3", "statement_timeout": "5000"}))
 
     async def try_acquire(self) -> bool:
         return bool(await self.conn.fetchval(
@@ -75,6 +90,12 @@ class Lease:
 
     async def holds(self) -> bool:
         return bool(await self.conn.fetchval(HOLDS_SQL, FEED_LOCK_KEY))
+
+    async def writer_holds(self, writer_pid: int, writer_key: int) -> bool:
+        """The decider's writer lock is still granted to the decider's
+        backend: the feed exists only beside the process that decides."""
+        return bool(await self.conn.fetchval(WRITER_SQL, writer_key,
+                                             writer_pid))
 
     async def release(self):
         try:
@@ -97,7 +118,9 @@ class FeedOwner:
     def __init__(self, cache: F.FeedCache, *, sport_ids, streams=(
             "live", "prematch"), lease_factory: Callable, connect: Callable,
             key_env: str = PP.KEY_ENV, clock=time.time, sleep=asyncio.sleep,
-            liveness_s: float = LIVENESS_S, standby_s: float = STANDBY_S):
+            liveness_s: float = LIVENESS_S, standby_s: float = STANDBY_S,
+            writer_pid: Optional[int] = None, writer_key: Optional[int] = None,
+            armed: Optional[Callable] = None):
         self.cache = cache
         self.sport_ids = sorted({int(s) for s in sport_ids})
         self.streams = list(streams)
@@ -108,6 +131,9 @@ class FeedOwner:
         self.state = "STARTING"
         self.events: list = []            # bounded transition log
         self.refused: Optional[str] = None
+        self.writer_pid, self.writer_key = writer_pid, writer_key
+        self.armed = armed              # async () -> bool, fail-closed
+        self.evictions: list = []
 
     def _note(self, what, **kw):
         self.events.append(dict(at=round(self.clock(), 3), what=what, **kw))
@@ -124,6 +150,10 @@ class FeedOwner:
         attempt = 0
         while not self.stop_event.is_set():
             lease = None
+            if not await self._armed():
+                self.state = "DISARMED"
+                await self._wait(self.standby_s)
+                continue
             try:
                 lease = await self.lease_factory()
                 if not await lease.try_acquire():
@@ -146,12 +176,38 @@ class FeedOwner:
                     await lease.close()
                     self._note("LEASE_RELEASED")
             if self.refused:
-                self.state = "REFUSED_BY_PROVIDER"
+                self.state = ("WRITER_LOCK_LOST" if self.refused == R_WRITER_LOST
+                              else "EVICTION_LOOP_SUSPECTED"
+                              if self.refused == R_EVICTION_LOOP
+                              else "REFUSED_BY_PROVIDER")
                 return
             if not self.stop_event.is_set():
                 await self._wait(BACKOFF[min(attempt, len(BACKOFF) - 1)])
                 attempt += 1
         self.state = "STOPPED"
+
+    async def _armed(self) -> bool:
+        if self.armed is None:
+            return True
+        try:
+            return bool(await self.armed())
+        except Exception:                                       # noqa: BLE001
+            return False                  # unreadable control -> disarmed
+
+    async def _guards(self, lease):
+        """(ok, reason): lease held, decider's writer lock held, still armed."""
+        try:
+            if not await asyncio.wait_for(lease.holds(), self.liveness_s):
+                return False, R_LEASE_LOST
+            if self.writer_pid is not None and not await asyncio.wait_for(
+                    lease.writer_holds(self.writer_pid, self.writer_key),
+                    self.liveness_s):
+                return False, R_WRITER_LOST
+        except Exception:                                       # noqa: BLE001
+            return False, R_LEASE_LOST
+        if not await self._armed():
+            return False, R_DISARMED
+        return True, None
 
     async def _wait(self, s):
         try:
@@ -179,15 +235,13 @@ class FeedOwner:
             while not self.stop_event.is_set():
                 now = time.monotonic()
                 if now - last_live >= self.liveness_s:
-                    try:
-                        ok = await asyncio.wait_for(lease.holds(),
-                                                    self.liveness_s)
-                    except Exception:                           # noqa: BLE001
-                        ok = False
+                    ok, why = await self._guards(lease)
                     if not ok:
                         # FIRST stop being an authority, THEN close
-                        self.cache.lost(R_LEASE_LOST)
-                        self._note("LEASE_LOST", epoch=epoch)
+                        self.cache.lost(why)
+                        self._note(why, epoch=epoch)
+                        if why == R_WRITER_LOST:
+                            self.refused = R_WRITER_LOST   # never re-contend
                         return 0
                     last_live = now
                 if now - last_rx > SILENCE_S:
@@ -199,9 +253,24 @@ class FeedOwner:
                         self.liveness_s, 1.0))
                 except asyncio.TimeoutError:
                     continue
+                except Exception:                               # noqa: BLE001
+                    # a close we did not ask for after a healthy stream may
+                    # be another holder of the account key evicting us
+                    if delivered:
+                        t = time.monotonic()
+                        self.evictions = [x for x in self.evictions
+                                          if t - x < EVICTION_WINDOW_S] + [t]
+                        self._note("UNREQUESTED_CLOSE",
+                                   recent=len(self.evictions))
+                        if len(self.evictions) >= EVICTIONS_MAX:
+                            self.refused = R_EVICTION_LOOP
+                            self.cache.lost(R_EVICTION_LOOP)
+                    return attempt
+                rx_ms = self.clock() * 1000.0     # before decoding
                 last_rx = time.monotonic()
                 try:
-                    msg = json.loads(raw)
+                    msg = (await asyncio.to_thread(json.loads, raw)
+                           if len(raw) > BIG_FRAME else json.loads(raw))
                 except Exception:                               # noqa: BLE001
                     continue
                 if isinstance(msg, dict) and msg.get("type") == "ping":
@@ -213,8 +282,7 @@ class FeedOwner:
                         self.cache.lost(R_PROVIDER_REFUSED)
                         self._note("PROVIDER_REFUSED", code=code)
                         return attempt
-                self.cache.apply(msg, epoch=epoch,
-                                 received_ms=self.clock() * 1000.0)
+                self.cache.apply(msg, epoch=epoch, received_ms=rx_ms)
                 if not delivered:
                     delivered = True
                     attempt = 0       # backoff resets only on delivery
@@ -231,6 +299,8 @@ class FeedOwner:
 
     def status(self) -> dict:
         return {"state": self.state, "refused": self.refused,
+                "writer_pid": self.writer_pid,
+                "recent_unrequested_closes": len(self.evictions),
                 "lease_key": FEED_LOCK_KEY, "sport_ids": self.sport_ids,
                 "streams": self.streams, "transitions": self.events[-10:],
                 "cache": self.cache.census()}

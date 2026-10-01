@@ -353,6 +353,9 @@ WRITER_LOCKS = {
     7723901544120033: "workers/rn1x_learn_loop",
     7723901544120034: "workers/ext_pinnacle_loop",
     7723901544120035: "workers/rn1x_model_loop",
+    # the ONE PinnAPI socket (pinnapi_owner, held on its own connection, only
+    # beside the ext_pinnacle_loop writer); the bounded sampler takes it too
+    7723901544120036: "pinnapi_owner (PinnAPI feed lease)",
 }
 
 #: pg_locks splits a bigint advisory key into (classid, objid). Reassemble

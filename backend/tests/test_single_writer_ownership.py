@@ -49,9 +49,14 @@ def test_the_four_keys_are_distinct():
 def test_the_command_centre_maps_exactly_those_keys():
     """The tile must report the real keys, not a hand-copied list that
     drifts the first time a loop is added."""
-    assert set(CR.WRITER_LOCKS) == {m.LOCK_KEY for m in LOOPS}
+    from sportsassets import pinnapi_owner as FEED
+    assert set(CR.WRITER_LOCKS) == {m.LOCK_KEY for m in LOOPS} | {
+        FEED.FEED_LOCK_KEY}
     for m in LOOPS:
         assert m.__name__.split(".")[-1] in CR.WRITER_LOCKS[m.LOCK_KEY]
+    # the feed lease is distinct from every loop's key and named as such
+    assert FEED.FEED_LOCK_KEY not in {m.LOCK_KEY for m in LOOPS}
+    assert "pinnapi_owner" in CR.WRITER_LOCKS[FEED.FEED_LOCK_KEY]
 
 
 def _run_fn(module):

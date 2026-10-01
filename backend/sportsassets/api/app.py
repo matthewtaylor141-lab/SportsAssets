@@ -2367,6 +2367,53 @@ async def admin_pinnapi_probe(response: Response,
                                "ws_sample")
 
 
+@app.get("/api/admin/pinnapi-feed/state",
+         dependencies=[Depends(require_admin)])
+async def admin_pinnapi_feed_state(response: Response) -> dict:
+    """The PinnAPI feed as THIS process sees it (owner state, authority,
+    census, latency) plus the last heartbeat any owner wrote. Never returns
+    the key, headers or raw frames."""
+    from .. import pinnapi_feed_runtime as FR
+    from ..db import get_pool
+    response.headers["Cache-Control"] = "no-store"
+    out = {"this_process": FR.digest()}
+    try:
+        pool = await get_pool()
+        async with pool.acquire() as c:
+            rows = await c.fetch(
+                "SELECT key, value FROM ingestion_state WHERE key = ANY($1)",
+                [FR.HEARTBEAT_KEY, FR.CONTROL_KEY, FR.SCOPE_KEY])
+        out["rows"] = {r["key"]: FR._jsonish(r["value"]) for r in rows}
+    except Exception as exc:                                    # noqa: BLE001
+        out["rows_error"] = type(exc).__name__
+    return out
+
+
+@app.post("/api/admin/pinnapi-feed/{state}",
+          dependencies=[Depends(require_admin)])
+async def admin_pinnapi_feed_arm(state: str, response: Response) -> dict:
+    """Arm (on) or disarm (off) the feed: writes the fail-closed control row
+    and reads it back. Disarming revokes the owner's authority and closes
+    its socket within one liveness pass. Changes no decision (C1)."""
+    from .. import pinnapi_feed_runtime as FR
+    from ..db import get_pool
+    response.headers["Cache-Control"] = "no-store"
+    if state not in ("on", "off"):
+        raise HTTPException(status_code=400, detail="on | off")
+    pool = await get_pool()
+    async with pool.acquire() as c:
+        await c.execute(
+            "INSERT INTO ingestion_state (key, value) VALUES ($1, $2::jsonb) "
+            "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+            FR.CONTROL_KEY, "true" if state == "on" else "false")
+        back = await c.fetchval(
+            "SELECT value FROM ingestion_state WHERE key = $1",
+            FR.CONTROL_KEY)
+    return {"wrote": state, "read_back": FR._jsonish(back),
+            "armed": FR._jsonish(back) is True,
+            "env_enabled": FR.enabled()}
+
+
 @app.post("/api/admin/venue-settlement-probe",
           dependencies=[Depends(require_admin)])
 async def admin_venue_settlement_probe(response: Response,
