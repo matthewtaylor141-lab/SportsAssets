@@ -218,7 +218,26 @@ for (const [ename, engine, dev, args] of ENGINES) {
         if (/streaming audio/.test(st)) mode = "streaming";
         else if (/buffered playback/.test(st)) mode = mode || "buffered";
       }
-      R.checks.timing = { question: Q, style: "brief",
+      // AUTOPLAY BLOCKED (e.g. WebKit after an async fetch): measure the
+      // voice from an explicit Play press instead, and say so.
+      let replay = null;
+      if (tPlay === null) {
+        const st0 = await f.locator("#talk-state").innerText().catch(() => "");
+        const n0 = await f.evaluate(() => window.__sp.length);
+        const tc = await f.evaluate(() => performance.now());
+        await f.locator(".talk-replay").last().click().catch(() => {});
+        let tp = null, m2 = null;
+        for (let i = 0; i < 60 && tp === null; i++) {
+          await page.waitForTimeout(500);
+          const s2 = await f.evaluate((n) => window.__sp.slice(n), n0);
+          const p2 = s2.find((x) => x.ev === "playing"); if (p2) tp = p2.t;
+          const st = await f.locator("#talk-state").innerText().catch(() => "");
+          if (/streaming audio/.test(st)) m2 = "streaming"; else if (/buffered playback/.test(st)) m2 = m2 || "buffered";
+        }
+        replay = { autoplay_state_before: short(st0, 200), play_press_to_audible_ms: tp === null ? null : Math.round(tp - tc),
+          playback_mode_reported: m2, speech_response: seen.speech.slice(-1)[0] || null };
+      }
+      R.checks.timing = { question: Q, style: "brief", replay_after_autoplay_block: replay,
         first_visible_answer_ms: Math.round(a1.tA - a1.t),
         first_audible_speech_ms: tPlay === null ? null : Math.round(tPlay - a1.t),
         speech_after_text_ms: tPlay === null ? null : Math.round(tPlay - a1.tA),
