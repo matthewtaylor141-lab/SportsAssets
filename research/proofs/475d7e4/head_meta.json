@@ -1,0 +1,17 @@
+{
+ "commit": "475d7e45cce81aeb2d66ab426b9bf242e8ab0ed2",
+ "console_bytes": 77309,
+ "database": "gate_rc3_head",
+ "funded_tables": "17",
+ "migration_max": "187_paper_hook_failures.sql",
+ "pip_freeze_path": "/tmp/claude-0/gate_rc3_out/head_meta.json.freeze.txt",
+ "pip_freeze_sha256_16": "e0761a71d26b64ee",
+ "public_tables": "197",
+ "pytest": "pytest 9.1.1",
+ "pytest_exitstatus": 1,
+ "python": "3.12.3",
+ "python_executable": "/tmp/claude-0/gatevenv312/bin/python3",
+ "pythonpath": "/tmp/claude-0/gate_tools_v3",
+ "report_path": "/tmp/claude-0/gate_rc3_out/head_report.json",
+ "report_present": true
+}

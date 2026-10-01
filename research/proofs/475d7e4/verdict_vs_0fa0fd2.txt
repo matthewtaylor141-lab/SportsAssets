@@ -1,0 +1,18 @@
+BASELINE  exitstatus=1  collected=16274 executed=16274 deselected=0
+  counts: {"failed": 70, "passed": 16153, "skipped": 48, "xfailed": 3}
+  commit-ish argv: ['tests/', '-q', '-p', 'no:randomly', '--tb=short', '-rf', '-p', 'gate_report', '--timeout=600']
+  database: gate_cg_head   python 3.12.3   pytest 9.1.1
+HEAD  exitstatus=1  collected=16349 executed=16349 deselected=0
+  counts: {"failed": 70, "passed": 16228, "skipped": 48, "xfailed": 3}
+  commit-ish argv: ['tests/', '-q', '-p', 'no:randomly', '--tb=short', '-rf', '-p', 'gate_report', '--timeout=600']
+  database: gate_rc3_head   python 3.12.3   pytest 9.1.1
+
+NEW FAILURES (in HEAD, not in the baseline): 0
+
+NO LONGER FAILING (in the baseline, not in HEAD): 0
+
+COMMON (pre-existing, unchanged): 70
+SKIPPED in HEAD: 48   XPASSED in HEAD: 0
+
+VERDICT: ACCEPTED -- both runs completed, both manifests reconcile, and every failure in HEAD is one the matched baseline already had.
+         This is NOT 'all tests green': 70 baseline failures remain.
