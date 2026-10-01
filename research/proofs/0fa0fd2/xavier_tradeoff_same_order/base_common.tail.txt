@@ -1,0 +1,2 @@
+FAILED tests/test_agent_persona_chat_is_grounded.py::test_depth_adapts_and_answers_do_not_open_the_same_way
+1 failed, 750 passed, 3 warnings in 330.18s (0:05:30)

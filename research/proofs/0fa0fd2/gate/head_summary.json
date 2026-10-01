@@ -1,0 +1,16 @@
+{
+ "collected_count": 16274,
+ "executed_count": 16274,
+ "exitstatus": 1,
+ "finished_at": 1790862571.021796,
+ "interrupted": null,
+ "schema": "GATE_REPORT_V1",
+ "session_complete": true,
+ "started_at": 1790860878.8274379,
+ "counts": {
+  "failed": 70,
+  "passed": 16153,
+  "skipped": 48,
+  "xfailed": 3
+ }
+}

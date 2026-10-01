@@ -1,0 +1,5 @@
+base common exit=1 1 failed, 750 passed, 3 warnings in 330.18s (0:05:30)
+base full exit=1 2 failed, 749 passed, 2 warnings in 299.96s (0:04:59)
+cand common exit=0 751 passed, 3 warnings in 290.38s (0:04:50)
+cand full exit=1 2 failed, 786 passed, 2 warnings in 297.67s (0:04:57)
+DONE
