@@ -1,0 +1,406 @@
+Skip to the records
+read 2026-10-01 20:48:01Z
+Trace
+Refresh
+LIVE MARKET DATA · SIMULATED EXECUTION · $500,000 STARTING BANKROLL
+PAPER ACCOUNT · ONE LEDGER · LIVE MARKET DATA · SIMULATED EXECUTION
+CASH
+$499,703.25
+RESERVED
+$0.00
+AVAILABLE
+$499,703.25
+POSITION VALUE
+$284.40
+EQUITY
+$499,987.65
+REALIZED P&L
+$0.00
+UNREALIZED P&L
+−$12.36
+cash + marked open-position value · ledger entry #7 · the same read on the homepage and every agent page
+LAST SUCCESSFUL SERVER READOK
+2026-10-01 20:48:01Z 3.9 s ago
+Server clock at that read 2026-10-01 20:48:01Z. A recent read is not agent health.
+LAST AGENT HEARTBEAT (PAPER RUNTIME)RECENT
+2026-10-01 20:47:19Z 46 s ago
+1205 pass(es) · 0 error(s) · last scheduling attempt 2026-10-01 20:47:20Z ran · stale after 5 min. Source: paper_session_health.heartbeat_at, written by every paper pass that ran; the last scheduling attempt (ran or refused) from ingestion_state['paper_session_last_pass']
+LAST LEDGER TRANSACTION
+2026-10-01 20:43:33Z 5 min ago
+FILL · entry #7 · 7 entries · an unchanged balance is not a stale one
+Live updates: LIVE · ledger stream open; the agents' records are re-read every 30 s
+● AI AGENT
+Audrey
+AUDIT & INTELLIGENCE
+the agent, an AI agent, shown as a licensed 3D character (Character model: Microsoft Rocketbox Business_Female_04 (MIT, © 2020 Microsoft)). The pose follows the agent_status record; the mouth moves only with real speech audio.
+Pause animation
+PAPER RUNTIME RUNNING
+Animation: monitoring — paper runtime heartbeat 46 s ago
+paper runtime heartbeat 42 s ago
+MANDATE
+
+Audits both agents daily, reports the one authoritative company P&L, answers management and tracks every directive to its evaluation.
+PAPER SESSION · KEY FIGURES SIMULATED
+PAPER EQUITY
+$499,987.65
+cash + marked open-position value
+REALIZED P&L
+$0.00
+unrealized −$12.36
+AUDIT FINDINGS
+19
+4 warning or critical
+LATEST DAILY REPORT
+2026-10-01
+version 66 · provisional · reconciles
+Every figure links to the record or JSON route it was read from. UNKNOWN is not zero; EMPTY is not success.
+◉
+Talk to Audrey
+Audrey answers from the paper records, the active policy and stored lessons · paper only
+🔊 Voice on
+Stop
+New conversation
+A conversation never changes a policy or places an order. Audrey can explain and propose; a policy changes only by an owner decision or an evaluated proposal a named human activates.
+
+YOU
+For a clearly labelled management product-demo REHEARSAL, answer this question in your own persona in at most 65 words. Do not claim this illustrative scenario happened in production, do not invent results, and do not change any policy or place any trade. Context: Bring management closer to the decisions that matter. Illustrative explanation: Open the live management office and ask each agent about the current session. This presentation is an illustrative rehearsal. Only the actual ledger, recorded decisions and evaluated outcomes establish what the system has done. Management question: What happens after this presentation?
+AUDREY
+This is a rehearsal, so nothing here counts as production. After it, the active paper session simply continues [F9]. There is no result yet: 703 decisions today, all refusals [F11], and paper P&L of $0 [F5]. What would improve the record is evidence, starting with the 297 refusals where no research model candidate existed [F15]. Policy changes only through an owner decision or a human-activated proposal [F54].
+Answered by claude-opus-5-5 in Audrey's voice from the cited facts
+Records cited (5)
+Not in the records
+▶ Play
+Resumed your conversation with Audrey (2 messages).
+
+🎤 Speak
+Send
+Audrey's paper audit and account
+LIVE MARKET DATA · SIMULATED EXECUTION
+
+GET /api/command/paper/operations?agent=audrey · the active paper session, one account, one ledger. The funded system is inactive and is shown only in its own section at the end of this page.
+
+Paper account performance SIMULATED
+OK
+bettor_paper_ledger.balances over the one paper ledger; P&L by the strategy each position keeps for life
+LEDGER RECONCILED · 8 of 8 checks pass · 7 ledger entries
+
+Reconciliation checks
+CASH
+$499,703.25
+RESERVED
+$0.00
+AVAILABLE
+$499,703.25
+TOTAL EQUITY
+$499,987.65
+REALIZED P&L
+$0.00
+UNREALIZED P&L
+−$12.36
+cash + marked open-position value · fees paid $8.22 · 3 open position(s) · ledger entry #7, running balance agrees with the ledger sum · reserved is part of cash, not extra · real-money submission DISABLED.
+
+P&L BY STRATEGY
+
+STRATEGY	REALIZED	UNREALIZED	OPEN / CLOSED	FEES
+TRAINING · PINNACLE_EXPLORATION_PAPER	$0.00	−$12.36	3 / 0	$8.22
+Realized from every position, open or closed; unrealized from marked open positions only. Strategies are never summed with the funded book.
+
+Agent performance by strategy SIMULATED
+OK
+paper_decisions, paper_orders and the positions of the one paper ledger, per strategy
+DEREK_ENTRY_POLICY_V2
+453 decisions · 0 ENTER · 0 entry orders (0 filled) · 0 open / 0 closed
+realized $0.00 (booked)
+PINNACLE_ONLY_PAPER_BENCHMARK
+207 decisions · 0 ENTER · 0 entry orders (0 filled) · 0 open / 0 closed
+realized $0.00 (booked)
+PINNACLE_COMPLETED_GAME_PAPER
+187 decisions · 0 ENTER · 0 entry orders (0 filled) · 0 open / 0 closed
+realized $0.00 (booked)
+TRAINING · PINNACLE_EXPLORATION_PAPER
+18 decisions · 3 ENTER · 3 entry orders (3 filled) · 3 open / 0 closed
+realized $0.00 (booked)
+Each strategy on its own; never summed with the funded system.
+
+Operational audit: recommendations to Derek and Xavier SIMULATED
+OK
+paper_recommendations and their events (migration 189): Audrey's evidence, the owner's response and every later measurement; OPERATIONAL, never a claim of profitable learning
+Operational recommendations, each with its evidence, the owner's response and later measurements. An operational improvement is never reported as profitable learning.
+
+ACKNOWLEDGED
+book read cuts
+· to DEREK · OPERATIONAL
+39 of 125 book reads in the last 6 h were cut by the decision deadline or the venue cooldown; remove the duplicate read and retry within the freshness window
+metric book_read_cut_rate_6h · baseline 0.312
+Automated template automated acknowledgement · Automated acknowledgement (predefined template; not an agent review, not an evaluation, not evidence of improvement). Addressed to DEREK: Accepted. This build shares one venue book read per valuation (the collection cycle's own read, reused while it is at most 6 s old) and gives a cut read ONE bounded retry after the venue cooldown while the Pinnacle reading stays inside its 30 s rule (at most 2 retries at once, 60 per hour). Freshness checks are unchanged. The measurements below decide whether the cut rate fell.
+AUDREY assigned · Assigned to DEREK: 39 of 125 book reads in the last 6 h were cut by the decision deadline or the venue cooldown; remove the duplicate read and retry within the freshness window
+ACKNOWLEDGED
+fees consume edge
+· to DEREK · OPERATIONAL
+8 decisions cleared the 0.5 pp gross threshold but the taker fee consumed the edge; rest a bid below the ask where both rules hold at the price paid
+metric maker_resting_orders_placed_6h · baseline 0
+Automated template automated acknowledgement · Automated acknowledgement (predefined template; not an agent review, not an evaluation, not evidence of improvement). Addressed to DEREK: Accepted. The maker-entry policy (PINNACLE_COMPLETED_GAME_MAKER_PAPER_V1) now rests a bid below the ask where the 0.5 pp threshold and the after-fee rule hold at that price, charging the taker fee (the maker rebate is not assumed). The investment policy's taker rule is unchanged. Measured by resting orders placed and filled.
+AUDREY assigned · Assigned to DEREK: 8 decisions cleared the 0.5 pp gross threshold but the taker fee consumed the edge; rest a bid below the ask where both rules hold at the price paid
+ACKNOWLEDGED
+collection coverage
+· to DEREK · OPERATIONAL
+63 events in the last collection cycle never reached a decision (by code: {"NO_PINNACLE_ON_EVENT": 33, "QUOTE_STALE_ON_ARRIVAL": 13, "VENUE_BOOK_READ_FAILED": 2, "NO_VENUE_CONTRACT_FOR_EVENT": 5, "VENUE_BOOK_CURRENCY_NOT_ESTABLISHED": 4, "VENUE_NATIVE_EVENT_MATCHES_ONLY_ONE_TEAM": 5, "VENUE_BOOK_CURRENCY_CONTRADICTED_BY_CONTRACT": 1}); investigate per sport without weakening identity, market or settlement matching
+metric last_cycle_unmatched_events · baseline 63
+Automated template automated acknowledgement · Automated acknowledgement (predefined template; not an agent review, not an evaluation, not evidence of improvement). Addressed to DEREK: Acknowledged. The unmatched events are recorded per code and sport; no identity, market or settlement matching rule is weakened to raise the count. Coverage changes need a correct mapping, not a looser one.
+AUDREY assigned · Assigned to DEREK: 63 events in the last collection cycle never reached a decision (by code: {"NO_PINNACLE_ON_EVENT": 33, "QUOTE_STALE_ON_ARRIVAL": 13, "VENUE_BOOK_READ_FAILED": 2, "NO_VENUE_CONTRACT_FOR_EVENT": 5, "VENUE_BOOK_CURRENCY_NOT_ESTABLISHED": 4, "VENUE_NATIVE_EVENT_MATCHES_ONLY_ONE_TEAM": 5, "VENUE_BOOK_CURRENCY_CONTRADICTED_BY_CONTRACT": 1}); investigate per sport without weakening identity, market or settlement matching
+Audrey's event-driven audits and findings SIMULATED
+OK
+paper_audrey_findings (event audits from the paper learning record: first fill, handoff, management fill, settlement, SETTLED_AT_VENUE_PRICE, exceptional outcome, ledger)
+EVENT-DRIVEN AUDITS (ONE PER EVENT)
+
+INFO
+first fill
+PASSED
+TRAINING · PINNACLE_EXPLORATION_PAPER
+2026-10-01 20:43:19Z
+Technical details
+INFO
+handoff
+PASSED
+TRAINING · PINNACLE_EXPLORATION_PAPER
+2026-10-01 20:43:19Z
+Technical details
+INFO
+handoff
+PASSED
+TRAINING · PINNACLE_EXPLORATION_PAPER
+2026-10-01 20:43:19Z
+Technical details
+INFO
+first fill
+PASSED
+TRAINING · PINNACLE_EXPLORATION_PAPER
+2026-10-01 20:43:19Z
+Technical details
+INFO
+handoff
+PASSED
+TRAINING · PINNACLE_EXPLORATION_PAPER
+2026-10-01 20:42:26Z
+Technical details
+INFO
+first fill
+PASSED
+TRAINING · PINNACLE_EXPLORATION_PAPER
+2026-10-01 20:42:26Z
+Technical details
+ALL FINDINGS BY KIND
+
+INFO PINNACLE_EXPLORATION_PAPER_FILL_AUDITED × 3
+INFO PAPER_EVENT_FIRST_FILL × 3
+INFO PAPER_EVENT_HANDOFF × 3
+WARNING OBJECTIVE_SHORTFALL × 2
+INFO OPS_AUDIT_POSITION_MANAGEMENT × 1
+INFO OPS_AUDIT_STALE_INPUTS × 1
+WARNING OPS_AUDIT_BOOK_READ_CUTS × 1
+INFO OPS_AUDIT_COLLECTION_COVERAGE × 1
+WARNING OPS_AUDIT_FEES_CONSUME_EDGE × 1
+INFO OPS_AUDIT_FEES × 1
+INFO OPS_AUDIT_FUNNEL × 1
+INFO OPS_AUDIT_MISSING_DECISIONS × 1
+INFO
+PAPER_EVENT_HANDOFF
+2026-10-01 20:43:19Z
+Technical details
+INFO
+PINNACLE_EXPLORATION_PAPER_FILL_AUDITED
+2026-10-01 20:43:19Z
+Technical details
+INFO
+PINNACLE_EXPLORATION_PAPER_FILL_AUDITED
+2026-10-01 20:43:19Z
+Technical details
+INFO
+PAPER_EVENT_FIRST_FILL
+2026-10-01 20:43:19Z
+Technical details
+INFO
+PAPER_EVENT_FIRST_FILL
+2026-10-01 20:43:19Z
+Technical details
+INFO
+PAPER_EVENT_HANDOFF
+2026-10-01 20:43:19Z
+Technical details
+INFO
+PINNACLE_EXPLORATION_PAPER_FILL_AUDITED
+2026-10-01 20:42:26Z
+Technical details
+INFO
+PAPER_EVENT_FIRST_FILL
+2026-10-01 20:42:26Z
+Technical details
+INFO
+PAPER_EVENT_HANDOFF
+2026-10-01 20:42:26Z
+Technical details
+INFO
+OPS_AUDIT_STALE_INPUTS
+2026-10-01 20:42:26Z
+Technical details
+WARNING
+OPS_AUDIT_BOOK_READ_CUTS
+2026-10-01 20:42:26Z
+Technical details
+INFO
+OPS_AUDIT_COLLECTION_COVERAGE
+2026-10-01 20:42:26Z
+Technical details
+INFO
+OPS_AUDIT_FEES
+2026-10-01 20:42:26Z
+Technical details
+WARNING
+OPS_AUDIT_FEES_CONSUME_EDGE
+2026-10-01 20:42:26Z
+Technical details
+INFO
+OPS_AUDIT_FUNNEL
+2026-10-01 20:42:26Z
+Technical details
+INFO
+OPS_AUDIT_MISSING_DECISIONS
+2026-10-01 20:42:26Z
+Technical details
+INFO
+OPS_AUDIT_POSITION_MANAGEMENT
+2026-10-01 20:42:26Z
+Technical details
+WARNING
+OBJECTIVE_SHORTFALL
+2026-10-01 04:00:27Z · task paper-task:f59f4137622fca843d368f2a
+Technical details
+WARNING
+OBJECTIVE_SHORTFALL
+2026-10-01 01:47:16Z · task paper-task:333d028f361c28a8a8923453
+Technical details
+Lessons and improvement proposals SIMULATED
+OK
+GET /api/command/paper/learning (agents.paper_learning): lessons, proposals, evaluation status, activation state
+Forward records only. A proposal becomes ACTIVE only after an evaluated PASS, every activation check, a named human approver and the activation control (currently OFF). Counterfactual results are labelled COUNTERFACTUAL_NOT_EXECUTABLE_PROOF.
+
+Derek
+Learned:
+DEREK_ENTRY_POLICY_V2: of 438 decisions in the window, 0 entered (0.0%); the most frequent refusal was NO_RESEARCH_MODEL_CANDIDATE_EXISTS (328). (438 records, v6)
+PINNACLE_COMPLETED_GAME_PAPER: of 172 decisions in the window, 0 entered (0.0%); the most frequent refusal was BELOW_MIN_GROSS_EDGE (90). (172 records, v6)
+PINNACLE_ONLY_PAPER_BENCHMARK: of 207 decisions in the window, 0 entered (0.0%); the most frequent refusal was SETTLEMENT_NOT_SUPPORTED (207). (207 records, v1)
+Proposed change: none · no lesson of this agent has met a proposal rule yet (rules: 5 edge near-misses within 1.0 pp on the completed-game policy, AND an in-bounds change (the 0.5 pp floor is an owner mandate, so a lowering is proposed only from a tightened threshold))
+Xavier
+NO_LESSON_YET: the forward records have not produced one for XAVIER
+Audrey
+NO_LESSON_YET: the forward records have not produced one for AUDREY
+Audrey's daily report SIMULATED
+OK
+paper_audrey_reports (latest version per day)
+day
+2026-10-01 (America/New_York)
+version
+66 · provisional until the day closes
+generated
+2026-10-01 20:32:59Z
+reconciles
+YES
+labelled sections
+pinnacle_completed_game_paper, pinnacle_only_paper_benchmark
+Report figures
+Reconciliation checks (6)
+EARLIER DAYS
+
+2026-09-30 · v10
+Paper account, ledger and session records SIMULATED
+
+Paper account LIVE MARKET DATA · SIMULATED EXECUTION
+OK
+LIVE · 20:48:01Z
+GET /api/command/paper/account · stream /api/command/paper/stream · simulated figures, never summed with the funded book
+CASHSIMULATED
+$499,703.25
+RESERVED CASHSIMULATED
+$0.00
+AVAILABLE CASHSIMULATED
+$499,703.25
+OPEN-POSITION VALUESIMULATED
+$284.40
+TOTAL EQUITYSIMULATED
+$499,987.65
+REALIZED P&LSIMULATED
+$0.00
+UNREALIZED P&LSIMULATED
+−$12.36
+Marks: COMPLETE · TOP_OF_BOOK_EXIT_PRICE
+
+Reconciles: cash + open-position value = total equity (reserved cash is part of cash).
+
+Last committed change 2026-10-01 20:43:33Z (Oct 1, 16:43:33 ET) · ledger entry #7 · 7 entries, running balance agrees with the ledger sum · fees paid $8.22 · session heartbeat 2026-10-01 20:47:19Z. Reserved is part of cash, not extra. LIVE MARKET DATA · SIMULATED EXECUTION · fictional USD, never summed with the funded book · real-money submission DISABLED.
+
+Drawdown SIMULATED: current $12.36 · max $12.36 (0.00%) · peak equity $500,000.00 · 1205 equity snapshot(s)
+
+LEDGER, NEWEST FIRST (AMERICA/NEW_YORK) SIMULATED
+
+COMMITTED	#	KIND	INSTRUMENT	CASH Δ	RESERVED Δ	CASH AFTER	AVAILABLE AFTER
+Oct 1, 16:43:33 ET	#7	FILL purchase
+ENTRY	
+CLE
+Cleveland Guardians Moneyline
+Cleveland Guardians vs. Chicago White Sox · MLB · Full Game · Oct 3, 2026
+Technical details
+−$98.91	−$99.00	$499,703.25SIMULATED	$499,703.25
+Oct 1, 16:43:33 ET	#6	FILL purchase
+ENTRY	
+ATL
+Atlanta Braves Moneyline
+Atlanta Braves vs. Philadelphia Phillies · MLB · Full Game · Oct 2, 2026
+Technical details
+−$99.15	−$99.15	$499,802.16SIMULATED	$499,703.16
+Oct 1, 16:42:28 ET	#5	FILL purchase
+ENTRY	
+MIL
+Milwaukee Brewers Moneyline
+Milwaukee Brewers vs. San Diego Padres · MLB · Full Game · Oct 4, 2026
+Technical details
+−$98.69	−$98.98	$499,901.31SIMULATED	$499,703.16
+Oct 1, 16:42:28 ET	#4	ORDER_SUBMITTED reserve
+ENTRY	group paperexpgrp:611af30938d3f7395eaec8e7
+Technical details
+$0.00	+$99.00	$500,000.00SIMULATED	$499,702.87
+Oct 1, 16:42:26 ET	#3	ORDER_SUBMITTED reserve
+ENTRY	group paperexpgrp:e16e6c216e47705741e6a91e
+Technical details
+$0.00	+$99.15	$500,000.00SIMULATED	$499,801.87
+Oct 1, 16:42:23 ET	#2	ORDER_SUBMITTED reserve
+ENTRY	group paperexpgrp:edca4bb7455003b64c16fc95
+Technical details
+$0.00	+$98.98	$500,000.00SIMULATED	$499,901.02
+Sep 30, 21:30:20 ET	#1	INITIAL_FUNDING funding	—
+Technical details
++$500,000.00	$0.00	$500,000.00SIMULATED	$500,000.00
+Paper session and health SIMULATED
+OK
+GET /api/command/paper/session · session
+session
+paper_session_20261001T014716Z
+started
+2026-10-01 01:47:16Z (Sep 30, 21:47:16 ET)
+status
+ACTIVE
+simulator
+PAPER_SIM_V1
+frozen config
+a83f0e2611a8
+reporting time zone
+America/New_York
+config, simulator version, start and account are frozen by migration 171's trigger
+
+Health: last heartbeat 2026-10-01 20:47:19Z · 1205 pass(es) · 0 error(s) · venue mutation attempts from the paper path: 0 (expected 0)
+
+Enablement: ENABLED · environment flag PAPER_SESSION on · control row on
+
+Raw paper records · GET /api/command/paper/audrey (every section as the route returns it)
+Funded system (inactive)
+secondary · real-money execution is disabled; these are the funded lane's own records, never the paper experiment
+Presentation of recorded state. This page sends no order and holds no credential; it reads /api/command/agents/audrey with the COMMAND session. The 3D characters are licensed Microsoft Rocketbox models (MIT licence, credited below; shipped with their licence file); a device that cannot draw them shows a 2D portrait card. The pose follows the paper runtime's own heartbeat (paper_session_health) and never stands in for data. UNKNOWN is not zero; EMPTY is not success. The 3D character on this page is a licensed model, not an original illustration. Character model: Microsoft Rocketbox Business_Female_04 (MIT, © 2020 Microsoft). Licence: MIT, shipped with the model as ROCKETBOX_LICENSE.md.

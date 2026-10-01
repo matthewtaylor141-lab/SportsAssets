@@ -1,0 +1,720 @@
+Skip to the records
+READ-ONLY
+read 2026-10-01 20:46:46Z
+Trace
+Refresh
+LIVE MARKET DATA · SIMULATED EXECUTION · $500,000 STARTING BANKROLL
+PAPER ACCOUNT · ONE LEDGER · LIVE MARKET DATA · SIMULATED EXECUTION
+CASH
+$499,703.25
+RESERVED
+$0.00
+AVAILABLE
+$499,703.25
+POSITION VALUE
+$284.40
+EQUITY
+$499,987.65
+REALIZED P&L
+$0.00
+UNREALIZED P&L
+−$12.36
+
+cash + marked open-position value · ledger entry #7 · the same read on the homepage and every agent page
+
+LAST SUCCESSFUL SERVER READOK
+2026-10-01 20:46:46Z 6.1 s ago
+Server clock at that read 2026-10-01 20:46:46Z. A recent read is not agent health.
+LAST AGENT HEARTBEAT (PAPER RUNTIME)RECENT
+2026-10-01 20:46:19Z 34 s ago
+1203 pass(es) · 0 error(s) · last scheduling attempt 2026-10-01 20:46:29Z ran · stale after 5 min. Source: paper_session_health.heartbeat_at, written by every paper pass that ran; the last scheduling attempt (ran or refused) from ingestion_state['paper_session_last_pass']
+LAST LEDGER TRANSACTION
+2026-10-01 20:43:33Z 3 min ago
+FILL · entry #7 · 7 entries · an unchanged balance is not a stale one
+Live updates: LIVE · ledger stream open; the agents' records are re-read every 30 s
+● AI AGENT
+Derek
+DISCOVERY & ENTRY
+
+the agent, an AI agent, shown as a licensed 3D character (Character model: Microsoft Rocketbox Business_Male_03 (MIT, © 2020 Microsoft)). The pose follows the agent_status record; the mouth moves only with real speech audio.
+
+Pause animation
+PAPER RUNTIME RUNNING
+Animation: monitoring — paper runtime heartbeat 34 s ago
+paper runtime heartbeat 27 s ago
+
+MANDATE
+
+Scans the Polymarket US catalogue, prices each candidate against Pinnacle and the internal model, and records every entry decision and order.
+
+PAPER SESSION · KEY FIGURES SIMULATED
+
+RESEARCH DECISIONS (TWO-MODEL)
+453
+0 ENTER · 453 REFUSE · 453 in 24 h
+BENCHMARK DECISIONS (STRICT)
+207
+0 ENTER · 207 REFUSE · 207 in 24 h
+COMPLETED-GAME DECISIONS
+187
+0 ENTER · 187 REFUSE · 187 in 24 h
+LATEST DECISION
+2026-10-01 20:43:04Z
+any strategy
+
+Every figure links to the record or JSON route it was read from. UNKNOWN is not zero; EMPTY is not success.
+
+◉
+Talk to Derek
+Derek answers from the paper records, the active policy and stored lessons · paper only
+🔊 Voice on
+Stop
+New conversation
+
+A conversation never changes a policy or places an order. Derek can explain and propose; a policy changes only by an owner decision or an evaluated proposal a named human activates.
+
+YOU
+For a clearly labelled management product-demo REHEARSAL, answer this question in your own persona in at most 65 words. Do not claim this illustrative scenario happened in production, do not invent results, and do not change any policy or place any trade. Context: Derek records the deadline failure; Xavier keeps the existing protection until a valid replacement is confirmed. Illustrative explanation: It defines a testable change, not proven intelligence. In the rehearsal I record a timeout rather than silently losing the decision; Xavier preserves existing protection. Audrey needs separate forward results before reporting improved performance or proposing activation. Management question: Did Audrey’s recommendation make you smarter?
+DEREK
+This is a rehearsal answer, and the short version is not yet. Audrey's latest audit shows a change proposed [F50]. That is a testable change, not proven intelligence. Today the records show 17 refusals where the book read missed the decision deadline [F20], so those were logged rather than lost. A proposal doesn't change policy; only an owner or named human activates it [F54].
+Answered by claude-opus-5-5 in Derek's voice from the cited facts
+Records cited (3)
+Not in the records
+▶ Play
+Resumed your conversation with Derek (2 messages).
+🎤 Speak
+Send
+Derek's paper decisions
+LIVE MARKET DATA · SIMULATED EXECUTION
+
+GET /api/command/paper/operations?agent=derek · the active paper session, one account, one ledger. The funded system is inactive and is shown only in its own section at the end of this page.
+
+Derek's standing entry orders SIMULATED
+EMPTY
+paper_orders (role ENTRY, open): resting maker bids and marketable entries, with price, size, rationale, expiry and cancellation conditions
+
+NO_OPEN_ENTRY_ORDER: Derek has no resting or pending entry order right now
+
+Experimental benchmark decisions SIMULATED
+OK
+paper_decisions where strategy is PINNACLE_ONLY_PAPER_BENCHMARK or PINNACLE_COMPLETED_GAME_PAPER
+
+Experimental paper execution on the fictional account: not evidence of qualified or proven profitability, never Derek's research decisions. Each policy is counted on its own.
+
+EXPERIMENTAL
+Pinnacle-only paper benchmark (strict settlement match)
+strategy PINNACLE_ONLY_PAPER_BENCHMARK · policy version PINNACLE_ONLY_PAPER_BENCHMARK_V1
+
+Decides on the de-vigged Pinnacle probability alone; every settlement condition must be compatible.
+
+Disclosure
+DECISIONS
+207
+ENTER
+0
+REFUSE
+207
+LAST 24 H
+207
+MARKETS
+20
+LATEST
+2026-10-01 13:37:33Z
+
+ELIGIBILITY FUNNEL
+
+decisions recorded
+207
+contract outcome settlement match
+0
+207 stopped here
+pinnacle fresh at the decision instant
+0
+current paper book with depth
+0
+edge at least 5pp at every level used
+0
+positive ev after fees
+0
+verdict ENTER
+0
+paper entry orders
+0
+orders with a simulated fill
+0
+handed to Xavier
+0
+
+each decision's own recorded policy_decision.conditions, in order: a stage counts the decisions that passed it AND every stage before it; nothing is recomputed
+
+REFUSALS BY REASON
+
+207 · the venue's and Pinnacle's settlement rules are not established as the same
+
+ENTRY ORDERS (EVERY ONE, NEWEST FIRST)
+
+NO_PAPER_ENTRY_ORDER_FOR_PINNACLE_ONLY_PAPER_BENCHMARK: no decision of this strategy has opened a paper entry
+
+RECENT DECISIONS (NEWEST 10 OF 207)
+
+2026-10-01 13:37:33Z
+REFUSE
+the venue's and Pinnacle's settlement rules are not established as the same
+Londrina to win
+Londrina EC vs. Criciuma EC · BRB · FULL_GAME
+price not recorded · Pinnacle — · edge not recorded · fees not recorded · net EV not recorded
+2026-10-01 13:37:24Z
+REFUSE
+the venue's and Pinnacle's settlement rules are not established as the same
+Grêmio Novorizontino to win
+Gremio Novorizontino vs. Goias EC · BRB · FULL_GAME
+price not recorded · Pinnacle 0.604 · edge not recorded · fees not recorded · net EV not recorded
+2026-10-01 13:37:20Z
+REFUSE
+the venue's and Pinnacle's settlement rules are not established as the same
+Greece to win
+Greece vs. Germany · UNL · FULL_GAME
+price not recorded · Pinnacle — · edge not recorded · fees not recorded · net EV not recorded
+2026-10-01 13:37:04Z
+REFUSE
+the venue's and Pinnacle's settlement rules are not established as the same
+Wales to win
+Wales vs. Norway · UNL · FULL_GAME
+price not recorded · Pinnacle 0.139 · edge not recorded · fees not recorded · net EV not recorded
+2026-10-01 13:37:01Z
+REFUSE
+the venue's and Pinnacle's settlement rules are not established as the same
+Cleveland Guardians to win
+Game 1: CHI White Sox vs. CLE Guardians · MLB · FULL_GAME
+price not recorded · Pinnacle — · edge not recorded · fees not recorded · net EV not recorded
+2026-10-01 13:18:12Z
+REFUSE
+the venue's and Pinnacle's settlement rules are not established as the same
+Atletico Goianiense to win
+AC Goianiense vs. America FC · BRB · FULL_GAME
+price not recorded · Pinnacle 0.716 · edge not recorded · fees not recorded · net EV not recorded
+2026-10-01 13:18:01Z
+REFUSE
+the venue's and Pinnacle's settlement rules are not established as the same
+Avai to win
+Avai FC vs. Ceara SC · BRB · FULL_GAME
+price not recorded · Pinnacle 0.369 · edge not recorded · fees not recorded · net EV not recorded
+2026-10-01 13:18:00Z
+REFUSE
+the venue's and Pinnacle's settlement rules are not established as the same
+Cuiabá to win
+Cuiaba EC vs. AA Ponte Preta · BRB · FULL_GAME
+price not recorded · Pinnacle 0.839 · edge not recorded · fees not recorded · net EV not recorded
+2026-10-01 13:18:00Z
+REFUSE
+the venue's and Pinnacle's settlement rules are not established as the same
+Londrina to win
+Londrina EC vs. Criciuma EC · BRB · FULL_GAME
+price not recorded · Pinnacle 0.313 · edge not recorded · fees not recorded · net EV not recorded
+2026-10-01 13:17:35Z
+REFUSE
+the venue's and Pinnacle's settlement rules are not established as the same
+Cleveland Guardians to win
+Game 1: CHI White Sox vs. CLE Guardians · MLB · FULL_GAME
+price not recorded · Pinnacle 0.588 · edge not recorded · fees not recorded · net EV not recorded
+CONDITIONAL · EXPERIMENTAL
+Completed-game paper policy
+strategy PINNACLE_COMPLETED_GAME_PAPER · policy version PINNACLE_COMPLETED_GAME_PAPER_V1, PINNACLE_COMPLETED_GAME_PAPER_V2
+CONDITIONAL_EXPERIMENTAL_NOT_RISK_ADJUSTED
+
+Pinnacle-only, matched on the ordinarily completed game; its economics are CONDITIONAL on ordinary completion and not risk-adjusted. Postponement, abandonment and suspension terms are disclosed research risks with unmeasured frequency.
+
+Disclosure
+DECISIONS
+187
+ENTER
+0
+REFUSE
+187
+LAST 24 H
+187
+MARKETS
+19
+LATEST
+2026-10-01 20:43:04Z
+
+ELIGIBILITY FUNNEL
+
+decisions recorded
+187
+contract outcome settlement match
+154
+33 stopped here
+pinnacle fresh at the decision instant
+146
+8 stopped here
+current paper book with depth
+107
+39 stopped here
+edge at least 5pp at every level used
+8
+99 stopped here
+positive ev after fees
+0
+8 stopped here
+verdict ENTER
+0
+paper entry orders
+0
+orders with a simulated fill
+0
+handed to Xavier
+0
+
+each decision's own recorded policy_decision.conditions, in order: a stage counts the decisions that passed it AND every stage before it; nothing is recomputed
+
+REFUSALS BY REASON
+
+99 · the edge was below the policy's minimum (the threshold recorded on the decision)
+39 · book read did not finish inside the decision deadline
+31 · the Pinnacle price did not qualify
+8 · the Pinnacle price was too old
+8 · the edge cleared the threshold but the fee per contract consumed it
+2 · the venue's rules text was not recorded
+
+ENTRY ORDERS (EVERY ONE, NEWEST FIRST)
+
+NO_PAPER_ENTRY_ORDER_FOR_PINNACLE_COMPLETED_GAME_PAPER: no decision of this strategy has opened a paper entry
+
+RECENT DECISIONS (NEWEST 10 OF 187)
+
+2026-10-01 20:43:04Z
+REFUSE
+the Pinnacle price did not qualify
+São Bernardo to win
+Sao Bernardo FC vs. CR Brasil · BRB · FULL_GAME
+price not recorded · Pinnacle — · edge not recorded · fees not recorded · net EV not recorded
+2026-10-01 20:43:00Z
+REFUSE
+the edge was below the policy's minimum (the threshold recorded on the decision)
+Avai to win
+Avai FC vs. Ceara SC · BRB · FULL_GAME
+price not recorded · Pinnacle 0.369 · edge −1.07 pp · fees not recorded · net EV not recorded
+2026-10-01 20:42:58Z
+REFUSE
+the edge was below the policy's minimum (the threshold recorded on the decision)
+Cuiabá to win
+Cuiaba EC vs. AA Ponte Preta · BRB · FULL_GAME
+price not recorded · Pinnacle 0.839 · edge −0.09 pp · fees not recorded · net EV not recorded
+2026-10-01 20:42:56Z
+REFUSE
+the edge was below the policy's minimum (the threshold recorded on the decision)
+Londrina to win
+Londrina EC vs. Criciuma EC · BRB · FULL_GAME
+price not recorded · Pinnacle 0.313 · edge −0.75 pp · fees not recorded · net EV not recorded
+2026-10-01 20:42:52Z
+REFUSE
+the edge was below the policy's minimum (the threshold recorded on the decision)
+Grêmio Novorizontino to win
+Gremio Novorizontino vs. Goias EC · BRB · FULL_GAME
+price not recorded · Pinnacle 0.592 · edge −0.82 pp · fees not recorded · net EV not recorded
+2026-10-01 20:42:44Z
+REFUSE
+the edge was below the policy's minimum (the threshold recorded on the decision)
+Greece to win
+Greece vs. Germany · UNL · FULL_GAME
+price not recorded · Pinnacle 0.248 · edge −0.15 pp · fees not recorded · net EV not recorded
+2026-10-01 20:42:29Z
+REFUSE
+the Pinnacle price did not qualify
+Tampa Bay Rays to win
+Game 1: NY Yankees vs. TB Rays · MLB · FULL_GAME
+price not recorded · Pinnacle — · edge not recorded · fees not recorded · net EV not recorded
+2026-10-01 20:42:28Z
+REFUSE
+the edge was below the policy's minimum (the threshold recorded on the decision)
+Cleveland Guardians to win
+Game 1: CHI White Sox vs. CLE Guardians · MLB · FULL_GAME
+price not recorded · Pinnacle 0.590 · edge +0.04 pp · fees not recorded · net EV not recorded
+2026-10-01 20:42:26Z
+REFUSE
+the edge was below the policy's minimum (the threshold recorded on the decision)
+Atlanta Braves to win
+Game 3: PHI Phillies vs. ATL Braves · MLB · FULL_GAME · 2026-10-01
+price not recorded · Pinnacle 0.503 · edge −0.74 pp · fees not recorded · net EV not recorded
+2026-10-01 20:42:23Z
+REFUSE
+the edge cleared the threshold but the fee per contract consumed it
+Milwaukee Brewers to win
+Game 1: SD Padres vs. MIL Brewers · MLB · FULL_GAME · 2026-10-04
+price not recorded · Pinnacle 0.678 · edge +0.82 pp · fees not recorded · net EV not recorded
+CONDITIONAL · RESTING ORDERS
+Completed-game maker-entry policy (resting bids)
+strategy PINNACLE_COMPLETED_GAME_MAKER_PAPER · policy version PINNACLE_COMPLETED_GAME_MAKER_PAPER_V1
+CONDITIONAL_EXPERIMENTAL_NOT_RISK_ADJUSTED
+
+The completed-game policy's match, 0.5 pp threshold and positive after-fee rule, met by RESTING a bid below the ask. An order is not a fill: fills are simulated only when observed liquidity strictly crosses the bid after the queue ahead. The taker fee is charged; the venue's maker rebate is not assumed.
+
+Disclosure
+
+Nothing recorded
+
+NO_DECISION_RECORDED_FOR_PINNACLE_COMPLETED_GAME_MAKER_PAPER
+
+This is not a result.
+
+Nothing recorded
+
+NO_DECISION_RECORDED_FOR_PINNACLE_COMPLETED_GAME_MAKER_PAPER
+
+This is not a result.
+
+ENTRY ORDERS (EVERY ONE, NEWEST FIRST)
+
+NO_PAPER_ENTRY_ORDER_FOR_PINNACLE_COMPLETED_GAME_MAKER_PAPER: no decision of this strategy has opened a paper entry
+
+RECENT DECISIONS (NEWEST )
+
+Nothing recorded
+
+NO_DECISION_RECORDED_FOR_PINNACLE_COMPLETED_GAME_MAKER_PAPER
+
+This is not a result.
+
+Training / simulated execution: the bounded exploration strategy may take positions that fail the 0.5 pp edge or after-fee rule, to generate forward experience. Its expected value can be negative; that is a research cost, not investment performance.
+
+TRAINING
+Exploration (training / simulated execution)
+strategy PINNACLE_EXPLORATION_PAPER · policy version PINNACLE_EXPLORATION_PAPER_V1
+EXPLORATION_RESEARCH_COST_NOT_INVESTMENT_PERFORMANCE
+
+A bounded training strategy that may take positions failing the 0.5 pp edge or after-fee requirement to generate forward experience: $100 per position incl. fees, $5,000 aggregate, one per fixture, stops at $1,000 realized losses. Negative expected value is a research cost, not investment performance.
+
+Disclosure
+DECISIONS
+18
+ENTER
+3
+REFUSE
+15
+LAST 24 H
+18
+MARKETS
+10
+LATEST
+2026-10-01 20:43:04Z
+
+ELIGIBILITY FUNNEL
+
+decisions recorded
+18
+contract outcome settlement match
+14
+4 stopped here
+pinnacle fresh at the decision instant
+8
+6 stopped here
+exploration limits and sample
+3
+5 stopped here
+current paper book with depth
+3
+entry cost incl fees within 100 usd
+3
+verdict ENTER
+3
+paper entry orders
+3
+orders with a simulated fill
+3
+handed to Xavier
+3
+
+each decision's own recorded policy_decision.conditions, in order: a stage counts the decisions that passed it AND every stage before it; nothing is recomputed
+
+REFUSALS BY REASON
+
+6 · the Pinnacle price was too old
+5 · this fixture was not drawn by the exploration sample (recorded probability and draw)
+4 · the Pinnacle price did not qualify
+
+ENTRY ORDERS (EVERY ONE, NEWEST FIRST)
+
+FILLED
+Cleveland Guardians to win
+Game 1: CHI White Sox vs. CLE Guardians · MLB · FULL_GAME
+163 of 163 filled · purchase price $0.59 · cost $96.17 · fees $2.74 · Pinnacle 0.590 · edge +0.04 pp · 2026-10-01 20:42:28Z
+Technical details
+FILLED
+Atlanta Braves to win
+Game 3: PHI Phillies vs. ATL Braves · MLB · FULL_GAME · 2026-10-01
+188 of 188 filled · purchase price $0.51 · cost $95.88 · fees $3.27 · Pinnacle 0.503 · edge −0.74 pp · 2026-10-01 20:42:26Z
+Technical details
+FILLED
+Milwaukee Brewers to win
+Game 1: SD Padres vs. MIL Brewers · MLB · FULL_GAME · 2026-10-04
+144 of 144 filled · purchase price $0.67 · cost $96.48 · fees $2.21 · Pinnacle 0.678 · edge +0.82 pp · 2026-10-01 20:42:23Z
+Technical details
+
+RECENT DECISIONS (NEWEST 10 OF 18)
+
+2026-10-01 20:43:04Z
+REFUSE
+the Pinnacle price did not qualify
+São Bernardo to win
+Sao Bernardo FC vs. CR Brasil · BRB · FULL_GAME
+price not recorded · Pinnacle — · edge not recorded · fees not recorded · net EV not recorded
+2026-10-01 20:43:01Z
+REFUSE
+this fixture was not drawn by the exploration sample (recorded probability and draw)
+Avai to win
+Avai FC vs. Ceara SC · BRB · FULL_GAME
+price not recorded · Pinnacle 0.369 · edge not recorded · fees not recorded · net EV not recorded
+2026-10-01 20:42:58Z
+REFUSE
+this fixture was not drawn by the exploration sample (recorded probability and draw)
+Cuiabá to win
+Cuiaba EC vs. AA Ponte Preta · BRB · FULL_GAME
+price not recorded · Pinnacle 0.839 · edge not recorded · fees not recorded · net EV not recorded
+2026-10-01 20:42:56Z
+REFUSE
+this fixture was not drawn by the exploration sample (recorded probability and draw)
+Londrina to win
+Londrina EC vs. Criciuma EC · BRB · FULL_GAME
+price not recorded · Pinnacle 0.313 · edge not recorded · fees not recorded · net EV not recorded
+2026-10-01 20:42:52Z
+REFUSE
+this fixture was not drawn by the exploration sample (recorded probability and draw)
+Grêmio Novorizontino to win
+Gremio Novorizontino vs. Goias EC · BRB · FULL_GAME
+price not recorded · Pinnacle 0.592 · edge not recorded · fees not recorded · net EV not recorded
+2026-10-01 20:42:45Z
+REFUSE
+this fixture was not drawn by the exploration sample (recorded probability and draw)
+Greece to win
+Greece vs. Germany · UNL · FULL_GAME
+price not recorded · Pinnacle 0.248 · edge not recorded · fees not recorded · net EV not recorded
+2026-10-01 20:42:29Z
+REFUSE
+the Pinnacle price did not qualify
+Tampa Bay Rays to win
+Game 1: NY Yankees vs. TB Rays · MLB · FULL_GAME
+price not recorded · Pinnacle — · edge not recorded · fees not recorded · net EV not recorded
+2026-10-01 20:42:28Z
+ENTER
+Cleveland Guardians to win
+Game 1: CHI White Sox vs. CLE Guardians · MLB · FULL_GAME
+price $0.59 · Pinnacle 0.590 · edge +0.04 pp · fees $2.74 · net EV −$2.67
+2026-10-01 20:42:26Z
+ENTER
+Atlanta Braves to win
+Game 3: PHI Phillies vs. ATL Braves · MLB · FULL_GAME · 2026-10-01
+price $0.51 · Pinnacle 0.503 · edge −0.74 pp · fees $3.27 · net EV −$4.66
+2026-10-01 20:42:23Z
+REFUSE
+the Pinnacle price was too old
+Cuiabá to win
+Cuiaba EC vs. AA Ponte Preta · BRB · FULL_GAME
+price not recorded · Pinnacle 0.839 · edge not recorded · fees not recorded · net EV not recorded
+Derek's original research decisions SIMULATED
+OK
+paper_decisions where strategy is DEREK_ENTRY_POLICY_V2
+
+Derek's own two-model policy. Counted apart from the benchmarks. Its paper entry switch is OFF (owner: only the PINNACLE_ONLY_PAPER_BENCHMARK may open new paper entries; the two-model strategy keeps recording its decisions).
+
+RESEARCH
+Derek's original two-model research decisions
+strategy DEREK_ENTRY_POLICY_V2 · policy version DEREK_ENTRY_POLICY_V2
+
+Derek's own entry policy: the internal research model and Pinnacle, blended. It keeps recording a decision per evaluated market; whether it may open paper entries is its own switch (PAPER_ENTRIES:DEREK_ENTRY_POLICY_V2).
+
+DECISIONS
+453
+ENTER
+0
+REFUSE
+453
+LAST 24 H
+453
+MARKETS
+23
+LATEST
+2026-10-01 20:43:04Z
+
+ELIGIBILITY FUNNEL
+
+decisions recorded
+453
+verdict ENTER
+0
+paper entry orders
+0
+orders with a simulated fill
+0
+handed to Xavier
+0
+
+each decision's own recorded policy_decision.conditions, in order: a stage counts the decisions that passed it AND every stage before it; nothing is recomputed · 453 decision(s) carry no recorded conditions
+
+REFUSALS BY REASON
+
+337 · no research model exists yet
+64 · the venue's and Pinnacle's settlement rules are not established as the same
+49 · no usable Pinnacle price
+3 · the Pinnacle price was too old
+
+ENTRY ORDERS (EVERY ONE, NEWEST FIRST)
+
+NO_PAPER_ENTRY_ORDER_FOR_DEREK_ENTRY_POLICY_V2: no decision of this strategy has opened a paper entry
+
+RECENT DECISIONS (NEWEST 10 OF 453)
+
+2026-10-01 20:43:04Z
+REFUSE
+no usable Pinnacle price
+São Bernardo to win
+Sao Bernardo FC vs. CR Brasil · BRB · FULL_GAME
+price not recorded · Pinnacle — · edge not recorded · fees not recorded · net EV not recorded
+2026-10-01 20:43:02Z
+REFUSE
+no research model exists yet
+Avai to win
+Avai FC vs. Ceara SC · BRB · FULL_GAME
+price not recorded · Pinnacle 0.369 · edge not recorded · fees not recorded · net EV not recorded
+2026-10-01 20:42:58Z
+REFUSE
+no research model exists yet
+Cuiabá to win
+Cuiaba EC vs. AA Ponte Preta · BRB · FULL_GAME
+price not recorded · Pinnacle 0.839 · edge not recorded · fees not recorded · net EV not recorded
+2026-10-01 20:42:56Z
+REFUSE
+no research model exists yet
+Londrina to win
+Londrina EC vs. Criciuma EC · BRB · FULL_GAME
+price not recorded · Pinnacle 0.313 · edge not recorded · fees not recorded · net EV not recorded
+2026-10-01 20:42:52Z
+REFUSE
+no research model exists yet
+Grêmio Novorizontino to win
+Gremio Novorizontino vs. Goias EC · BRB · FULL_GAME
+price not recorded · Pinnacle 0.592 · edge not recorded · fees not recorded · net EV not recorded
+2026-10-01 20:42:45Z
+REFUSE
+no research model exists yet
+Greece to win
+Greece vs. Germany · UNL · FULL_GAME
+price not recorded · Pinnacle 0.248 · edge not recorded · fees not recorded · net EV not recorded
+2026-10-01 20:42:29Z
+REFUSE
+no usable Pinnacle price
+Tampa Bay Rays to win
+Game 1: NY Yankees vs. TB Rays · MLB · FULL_GAME
+price not recorded · Pinnacle — · edge not recorded · fees not recorded · net EV not recorded
+2026-10-01 20:42:28Z
+REFUSE
+no research model exists yet
+Cleveland Guardians to win
+Game 1: CHI White Sox vs. CLE Guardians · MLB · FULL_GAME
+price not recorded · Pinnacle 0.590 · edge not recorded · fees not recorded · net EV not recorded
+2026-10-01 20:42:26Z
+REFUSE
+the venue's and Pinnacle's settlement rules are not established as the same
+Atlanta Braves to win
+Game 3: PHI Phillies vs. ATL Braves · MLB · FULL_GAME · 2026-10-01
+price not recorded · Pinnacle 0.503 · edge not recorded · fees not recorded · net EV not recorded
+2026-10-01 20:42:23Z
+REFUSE
+the venue's and Pinnacle's settlement rules are not established as the same
+Milwaukee Brewers to win
+Game 1: SD Padres vs. MIL Brewers · MLB · FULL_GAME · 2026-10-04
+price not recorded · Pinnacle 0.678 · edge not recorded · fees not recorded · net EV not recorded
+Paper account, ledger and session records SIMULATED
+Paper account LIVE MARKET DATA · SIMULATED EXECUTION
+OK
+LIVE · 20:46:53Z
+GET /api/command/paper/account · stream /api/command/paper/stream · simulated figures, never summed with the funded book
+CASHSIMULATED
+$499,703.25
+RESERVED CASHSIMULATED
+$0.00
+AVAILABLE CASHSIMULATED
+$499,703.25
+OPEN-POSITION VALUESIMULATED
+$284.40
+TOTAL EQUITYSIMULATED
+$499,987.65
+REALIZED P&LSIMULATED
+$0.00
+UNREALIZED P&LSIMULATED
+−$12.36
+
+Marks: COMPLETE · TOP_OF_BOOK_EXIT_PRICE
+
+Reconciles: cash + open-position value = total equity (reserved cash is part of cash).
+
+Last committed change 2026-10-01 20:43:33Z (Oct 1, 16:43:33 ET) · ledger entry #7 · 7 entries, running balance agrees with the ledger sum · fees paid $8.22 · session heartbeat 2026-10-01 20:46:19Z. Reserved is part of cash, not extra. LIVE MARKET DATA · SIMULATED EXECUTION · fictional USD, never summed with the funded book · real-money submission DISABLED.
+
+Drawdown SIMULATED: current $12.36 · max $12.36 (0.00%) · peak equity $500,000.00 · 1203 equity snapshot(s)
+
+LEDGER, NEWEST FIRST (AMERICA/NEW_YORK) SIMULATED
+
+COMMITTED	#	KIND	INSTRUMENT	CASH Δ	RESERVED Δ	CASH AFTER	AVAILABLE AFTER
+Oct 1, 16:43:33 ET	#7	FILL purchase
+ENTRY	
+CLE
+Cleveland Guardians Moneyline
+Cleveland Guardians vs. Chicago White Sox · MLB · Full Game · Oct 3, 2026
+Technical details
+	−$98.91	−$99.00	$499,703.25SIMULATED	$499,703.25
+Oct 1, 16:43:33 ET	#6	FILL purchase
+ENTRY	
+ATL
+Atlanta Braves Moneyline
+Atlanta Braves vs. Philadelphia Phillies · MLB · Full Game · Oct 2, 2026
+Technical details
+	−$99.15	−$99.15	$499,802.16SIMULATED	$499,703.16
+Oct 1, 16:42:28 ET	#5	FILL purchase
+ENTRY	
+MIL
+Milwaukee Brewers Moneyline
+Milwaukee Brewers vs. San Diego Padres · MLB · Full Game · Oct 4, 2026
+Technical details
+	−$98.69	−$98.98	$499,901.31SIMULATED	$499,703.16
+Oct 1, 16:42:28 ET	#4	ORDER_SUBMITTED reserve
+ENTRY	group paperexpgrp:611af30938d3f7395eaec8e7
+Technical details
+	$0.00	+$99.00	$500,000.00SIMULATED	$499,702.87
+Oct 1, 16:42:26 ET	#3	ORDER_SUBMITTED reserve
+ENTRY	group paperexpgrp:e16e6c216e47705741e6a91e
+Technical details
+	$0.00	+$99.15	$500,000.00SIMULATED	$499,801.87
+Oct 1, 16:42:23 ET	#2	ORDER_SUBMITTED reserve
+ENTRY	group paperexpgrp:edca4bb7455003b64c16fc95
+Technical details
+	$0.00	+$98.98	$500,000.00SIMULATED	$499,901.02
+Sep 30, 21:30:20 ET	#1	INITIAL_FUNDING funding	—
+Technical details
+	+$500,000.00	$0.00	$500,000.00SIMULATED	$500,000.00
+Paper session and health SIMULATED
+OK
+GET /api/command/paper/session · session
+session
+paper_session_20261001T014716Z
+started
+2026-10-01 01:47:16Z (Sep 30, 21:47:16 ET)
+status
+ACTIVE
+simulator
+PAPER_SIM_V1
+frozen config
+a83f0e2611a8
+reporting time zone
+America/New_York
+
+config, simulator version, start and account are frozen by migration 171's trigger
+
+Health: last heartbeat 2026-10-01 20:46:19Z · 1203 pass(es) · 0 error(s) · venue mutation attempts from the paper path: 0 (expected 0)
+
+Enablement: ENABLED · environment flag PAPER_SESSION on · control row on
+
+Raw paper records · GET /api/command/paper/derek (every section as the route returns it)
+Funded system (inactive)
+secondary · real-money execution is disabled; these are the funded lane's own records, never the paper experiment
+
+Presentation of recorded state. This page sends no order and holds no credential; it reads /api/command/agents/derek with the COMMAND session. The 3D characters are licensed Microsoft Rocketbox models (MIT licence, credited below; shipped with their licence file); a device that cannot draw them shows a 2D portrait card. The pose follows the paper runtime's own heartbeat (paper_session_health) and never stands in for data. UNKNOWN is not zero; EMPTY is not success. The 3D character on this page is a licensed model, not an original illustration. Character model: Microsoft Rocketbox Business_Male_03 (MIT, © 2020 Microsoft). Licence: MIT, shipped with the model as ROCKETBOX_LICENSE.md.

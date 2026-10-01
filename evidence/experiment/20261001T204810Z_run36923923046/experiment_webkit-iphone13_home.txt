@@ -1,0 +1,193 @@
+SIMULATED CAPITAL · LIVE MARKET DATA
+Cash
+$499,703.25
+Equity
+$499,987.65
+Realized P&L
+$0.00
+CONNECTING · last ledger change Oct 1, 16:43:33 ET
+Skip to dashboard
+
+
+UPDATING · 15s
+
+
+BETTORTOKEN / MANAGEMENT OFFICE
+Your team. Your capital.
+One clear picture.
+A shared workspace for decisions, conversations and accountability.
+Meet your AI team ▷
+Download briefing
+Ask Audrey ↗
+Session running
+Simulated capital · Live market data
+TOTAL EQUITY
+$499,987.65
+One account. One reconciled ledger.
+Available to deploy
+$499,703.25
+Realized P&L
+$0.00
+Settled and realized results
+Cash
+$499,703.25
+Reserved
+$0.00
+Position value
+$284.40
+Unrealized P&L
+-$12.36
+THE EXPERIMENT
+What the team is doing with the paper account.
+Every figure is a stored record · simulated execution · live market data
+CONNECTED · database read 10 s ago · 3 open filled positions
+Session & data freshness
+
+paper_session_20261001T014716Z · started 2026-10-01 01:47Z
+
+Latest valuation
+4 min ago
+Latest decision
+4 min ago
+Latest order book
+11 s ago
+Agent pass
+11 s ago
+Collection cycle
+33 s ago
+Latest ledger entry
+4 min ago
+Pass ran in 1.7 s · collector ZERO_EVALUATED__INPUT_PATH_BLOCKED · build 5a00cd3 · real money DISABLED
+Agent activity
+
+Derek · latest decision
+4 min ago · REFUSE no qualified pinnacle probability
+Xavier · reviews (24 h)
+10 · 3 handoffs
+Audrey · findings
+8 latest
+Audrey's operational recommendations
+
+ACKNOWLEDGED · to DEREK · 39 of 125 book reads in the last 6 h were cut by the decision deadline or the venue cooldown; remove the duplicate read and retry within the freshness window
+0 agent responses · 0 measurements · automated acknowledgement (template, not an agent review)
+ACKNOWLEDGED · to DEREK · 8 decisions cleared the 0.5 pp gross threshold but the taker fee consumed the edge; rest a bid below the ask where both rules hold at the price paid
+0 agent responses · 0 measurements · automated acknowledgement (template, not an agent review)
+ACKNOWLEDGED · to DEREK · 63 events in the last collection cycle never reached a decision (by code: {"NO_PINNACLE_ON_EVENT": 33, "QUOTE_STALE_ON_ARRIVAL": 13, "VENUE_BOOK_READ_FAILED": 2, "NO_VENUE_CONTRACT_FOR_EVENT": 5, "VENUE_BOOK_CURRENCY_NOT_ESTABLISHED": 4, "VENUE_NATIVE_EVENT_MATCHES_ONLY_ONE_TEAM": 5, "VENUE_BOOK_CURRENCY_CONTRADICTED_BY_CONTRACT": 1}); investigate per sport without weakening identity, market or settlement matching
+0 agent responses · 0 measurements · automated acknowledgement (template, not an agent review)
+Operational improvements only — never reported as profitable learning.
+Opportunities evaluated (24 h)
+
+459 valuations · 25 fixtures · 2 sports
+
+STRATEGY	DECISIONS	ENTERED	TOP REFUSALS
+TRAINING Training / simulated execution	18	3	6 · the Pinnacle price was too old
+5 · this fixture was not drawn by the exploration sample (recorded probability and draw)
+4 · the Pinnacle price did not qualify
+RESEARCH Strict benchmark (entries off)	207	0	207 · the venue's and Pinnacle's settlement rules are not established as the same
+INVESTMENT Investment policy (0.5 pp, taker)	187	0	99 · the edge was below the policy's minimum (the threshold recorded on the decision)
+39 · book read did not finish inside the decision deadline
+31 · the Pinnacle price did not qualify
+RESEARCH Derek research (entries off)	453	0	337 · no research model exists yet
+64 · the venue's and Pinnacle's settlement rules are not established as the same
+49 · no usable Pinnacle price
+Every attempt recorded (6 h): decided 28
+Closest investment opportunities (24 h)
+
+MARKET	PINNACLE	PRICE	GROSS	FEE	AFTER FEES	RESULT
+mlb-sd-mil-2026-10-03	0.6782	0.67	0.82 pp	—	—	below min gross edge
+mlb-sd-mil-2026-10-03	0.6782	0.67	0.82 pp	—	—	below min gross edge
+mlb-sd-mil-2026-10-03	0.6782	0.67	0.82 pp	—	—	below min gross edge
+mlb-sd-mil-2026-10-03	0.6782	0.67	0.82 pp	—	—	below min gross edge
+mlb-sd-mil-2026-10-03	0.6782	0.67	0.82 pp	—	—	below min gross edge
+mlb-sd-mil-2026-10-03	0.6782	0.67	0.82 pp	—	—	below min gross edge
+mlb-sd-mil-2026-10-03	0.6782	0.67	0.82 pp	—	—	below min gross edge
+mlb-sd-mil-2026-10-03	0.6782	0.67	0.82 pp	—	—	below min gross edge
+The investment rule: Pinnacle probability minus price ≥ 0.5 pp at every level used, and expected profit after the taker fee strictly positive.
+Standing orders 0 entry · 3 protection
+
+STRATEGY	MARKET	ROLE	TYPE	PRICE	QTY / FILLED	RESERVED	EXPIRES
+TRAINING	mlb-phi-atl-2026-10-01	STANDING_PROTECTION	RESTING GTD	0.56	188 / 0	$0.00	21:43Z
+TRAINING	mlb-cws-cle-2026-10-03	STANDING_PROTECTION	RESTING GTD	0.64	163 / 0	$0.00	21:43Z
+TRAINING	mlb-sd-mil-2026-10-03	STANDING_PROTECTION	RESTING GTD	0.71	144 / 0	$0.00	21:42Z
+An order is not a fill: it reserves cash until it fills, expires or is cancelled.
+Positions 3 open · 3 recent fills
+
+STRATEGY	MARKET	SIDE	OPEN QTY	COST BASIS	UNREALIZED
+TRAINING Training / simulated execution	mlb-cws-cle-2026-10-03	SHORT	163	$98.91	-$3.56
+TRAINING Training / simulated execution	mlb-phi-atl-2026-10-01	SHORT	188	$99.15	-$5.15
+TRAINING Training / simulated execution	mlb-sd-mil-2026-10-03	SHORT	144	$98.69	-$3.65
+By strategy (one ledger; strategies sum to the account)
+
+STRATEGY	OPEN / ALL	REALIZED	UNREALIZED	FEES
+TRAINING Training / simulated execution (exploration)	3 / 3	$0.00	-$12.36	$8.22
+Exploration budget · exposure $296.75 of $5,000.00 · realized losses $0.00 of the $1,000.00 stop · $100.00 max per position incl. fees · one per fixture. Negative expected value here is a research cost, not investment performance.
+Latest simulated fills
+
+TRAINING ENTRY BUY 188 @ 0.51 · mlb-phi-atl-2026-10-01
+fee $3.27 · ledger #6
+TRAINING ENTRY BUY 163 @ 0.59 · mlb-cws-cle-2026-10-03
+fee $2.74 · ledger #7
+TRAINING ENTRY BUY 144 @ 0.67 · mlb-sd-mil-2026-10-03
+fee $2.21 · ledger #5
+Acquisition throughput (6 h)
+
+HOUR	BOOK READS	SHARED	FAILED	CUT BY DEADLINE
+20:00Z	41	12	4	4
+19:00Z	21	0	11	11
+18:00Z	19	0	7	7
+17:00Z	19	0	8	8
+16:00Z	25	0	6	6
+15:00Z	25	0	3	3
+14:00Z	6	0	0	0
+A shared read answers a decision from this server's own seconds-old venue read (same freshness limits), saving a venue request.
+YOUR AI TEAM
+The people behind the process.
+3 specialist agents · Shared accountability
+D
+01 / AI AGENT
+DISCOVERY & ENTRY
+Derek
+Find the opportunity. Explain the conviction.
+
+865 recorded decisions · 3 entry decisions
+Talk to Derek
+Workspace ↗
+X
+02 / AI AGENT
+PORTFOLIO MANAGEMENT
+Xavier
+Own the position. Manage the outcome.
+
+3 open positions · 3 protection orders
+Talk to Xavier
+Workspace ↗
+A
+03 / AI AGENT
+AUDIT & INTELLIGENCE
+Audrey
+Verify the result. Improve the process.
+
+19 audit findings · Latest report 2026-10-01
+Talk to Audrey
+Workspace ↗
+MANAGEMENT DESK
+Start with a better question.
+Ask the team to show its work. Every conversation should lead back to the decisions, evidence and account.
+Why did we pass on the latest opportunity? ↗
+What needs my attention today? ↗
+How would you manage the next position? ↗
+LEARNING & OVERSIGHT
+Experience into evidence.
+Audrey connects decisions with outcomes and improvement proposals. Ask for the recorded learning and activation status.
+Record the decision and its inputs
+Audit actions against outcomes
+Evaluate and approve a policy change
+Review learning with Audrey ↗
+Data freshness & session details
+CONNECTING
+Funded system (inactive)
+secondary · real-money execution disabled · LIVE
+READ ONLY
+/
+NO ORDER SUBMISSION PATH
+INTERNAL WORKSPACE/COMMAND MOTION EDITION / 1.1
