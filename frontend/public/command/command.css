@@ -32,3 +32,51 @@
 #paper-strip .ps-f b{font-variant-numeric:tabular-nums}
 #paper-strip .ps-warn{color:#f3c969;font-weight:700}
 #paper-strip .ps-meta,#paper-strip .ps-why{opacity:.75;margin-left:auto}
+
+/* THE PAPER EXPERIMENT AS THE DEFAULT VIEW (paper.js): the overview's lead panel */
+.paper-home-slot{margin:0 0 22px}
+.paper-home{border:1px solid #1f4d36;border-radius:12px;background:linear-gradient(180deg,#0c1a14,#0a121a);padding:16px 18px;color:#d7efe2;min-width:0}
+.paper-home .ph-head h2{margin:0;font-size:19px;line-height:1.25;display:flex;flex-wrap:wrap;gap:6px 10px;align-items:baseline}
+.paper-home .ph-tag{font:700 10px/1.3 ui-monospace,Menlo,monospace;letter-spacing:.08em;color:#7fe0a8;border:1px solid #2c6b4b;border-radius:4px;padding:3px 6px}
+.paper-home .ph-sub,.paper-home .ph-note,.paper-home .ph-sess{margin:6px 0 0;font-size:12px;line-height:1.45;color:#a9c7b8;overflow-wrap:anywhere}
+.paper-home .ph-sess b{color:#7fe0a8}
+.paper-home .ph-stamps{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:1px;background:#1f3a2e;border:1px solid #1f3a2e;border-radius:10px;overflow:hidden;margin:12px 0 0}
+.paper-home .ph-stamp{background:#0b1611;padding:9px 11px;min-width:0}
+.paper-home .ph-l{font:600 9.5px/1.3 ui-monospace,Menlo,monospace;letter-spacing:.1em;text-transform:uppercase;color:#8fb3a2}
+.paper-home .ph-v{font-size:13.5px;font-weight:600;margin-top:4px;overflow-wrap:anywhere}
+.paper-home .ph-s{font:11px/1.35 ui-monospace,Menlo,monospace;color:#8fa79b;margin-top:3px;overflow-wrap:anywhere}
+.paper-home .ph-age{color:#8fa79b;font-weight:400}
+.paper-home .ph-chip{font:700 9px/1 ui-monospace,Menlo,monospace;padding:2px 4px;border-radius:3px;border:1px solid currentColor;margin-left:4px}
+.ph-chip.RECENT,.ph-chip.OK{color:#7fe0a8}.ph-chip.STALE{color:#f3c969}.ph-chip.UNAVAILABLE,.ph-chip.SIGN-IN{color:#ff9d93}
+.paper-home .ph-conn{font:11.5px/1.4 ui-monospace,Menlo,monospace;color:#a9c7b8;margin:6px 0 0;overflow-wrap:anywhere}
+.paper-home .ph-figs{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin:12px 0 0}
+.paper-home .ph-figs>div{background:#0b1611;border:1px solid #1f3a2e;border-radius:8px;padding:8px 10px;min-width:0}
+.paper-home .ph-figs small{display:block;font-size:10px;letter-spacing:.04em;color:#8fb3a2}
+.paper-home .ph-figs b{display:block;font-size:15px;font-variant-numeric:tabular-nums;margin-top:2px;overflow-wrap:anywhere}
+.paper-home .ph-ns{color:#f3c969;font-size:12px}
+.paper-home .ph-fail{margin:10px 0 0;color:#ffb3bd;font-size:12.5px;overflow-wrap:anywhere}
+.paper-home .ph-mute{color:#8fa79b;font-size:11.5px;margin:4px 0 0}
+.paper-home .ph-agents{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin:14px 0 0}
+.paper-home .ph-agent{display:block;border:1px solid #1f3a2e;border-radius:10px;background:#0b1611;padding:10px 12px;color:inherit;text-decoration:none;min-width:0}
+.paper-home .ph-agent:hover,.paper-home .ph-agent:focus-visible{border-color:#3d8f66;outline:none}
+.paper-home .ph-an{display:flex;flex-wrap:wrap;align-items:center;gap:4px 8px}
+.paper-home .ph-an small{color:#8fb3a2;font-size:11px}
+.paper-home .ph-go{margin-left:auto;font-size:11px;color:#7fe0a8}
+.paper-home .agent-dot{width:9px;height:9px;border-radius:50%;flex:none}
+.paper-home .agent-dot.derek{background:#3fb6ff}.paper-home .agent-dot.xavier{background:#e0b54a}.paper-home .agent-dot.audrey{background:#e46fb0}
+.paper-home .ph-list{margin:6px 0 0;padding-left:16px;font-size:12px;line-height:1.45;overflow-wrap:anywhere}
+/* THE FUNDED SYSTEM (INACTIVE): secondary, collapsed, always labelled */
+.funded-section{margin:6px 0 0;border:1px dashed #2a3445;border-radius:12px;padding:0 14px;background:#0a0f17}
+.funded-section>summary{cursor:pointer;list-style:none;display:flex;flex-wrap:wrap;gap:4px 12px;align-items:baseline;padding:12px 2px}
+.funded-section>summary::-webkit-details-marker{display:none}
+.funded-section .funded-title{font-weight:700;color:#aab6c8}
+.funded-section .funded-sub{font:11px/1.4 ui-monospace,Menlo,monospace;color:#7d8aa0;overflow-wrap:anywhere}
+.funded-section>summary::after{content:"Show";margin-left:auto;font-size:11px;color:#7d8aa0;border:1px solid #2a3445;border-radius:6px;padding:4px 8px}
+.funded-section[open]>summary::after{content:"Hide"}
+.funded-section[open]{padding-bottom:14px}
+.mode-banner.funded-banner{background:#121822;border-color:#2a3445;color:#aab6c8}
+@media(max-width:900px){.paper-home .ph-stamps,.paper-home .ph-agents{grid-template-columns:minmax(0,1fr)}.paper-home .ph-figs{grid-template-columns:repeat(2,minmax(0,1fr))}}
+/* the strip on a phone: three figures and the state, not sticky, so it never covers the app */
+@media(max-width:760px){#paper-strip{position:static;gap:4px 12px;padding:6px 12px}#paper-strip .ps-f:not(.ps-keep){display:none}#paper-strip .ps-meta,#paper-strip .ps-why{margin-left:0;flex-basis:100%;overflow-wrap:anywhere}#paper-strip .ps-tag{font-size:10px}}
+/* the funded section's animated hero must not widen the page on a phone */
+.funded-section{overflow:hidden;max-width:100%}.funded-section .command-hero{overflow:hidden}
