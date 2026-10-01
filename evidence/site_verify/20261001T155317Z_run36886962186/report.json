@@ -1,0 +1,830 @@
+[
+ {
+  "engine": "webkit-iphone13",
+  "auth": "authenticated",
+  "path": "/",
+  "nav": 200,
+  "api_status": [
+   [
+    "/api/command/paper/overview 200",
+    1
+   ],
+   [
+    "/api/command/snapshot 200",
+    2
+   ]
+  ],
+  "has_sign_in_prompt": false,
+  "has_disconnected": false,
+  "has_unavailable": false,
+  "cash_text": "$500,000.00",
+  "stamps": {
+   "server_read": "SERVER READ OK",
+   "heartbeat": "AGENT HEARTBEAT (PAPER RUNTIME) RECENT",
+   "ledger": "LEDGER TRANSACTION"
+  },
+  "funded_label": true,
+  "completed_game_label": false,
+  "overflow": [],
+  "console_errors": [],
+  "screenshot": "site_verify_out/webkit-iphone13_authenticated_home.png"
+ },
+ {
+  "engine": "webkit-iphone13",
+  "auth": "authenticated",
+  "path": "/derek",
+  "nav": 200,
+  "api_status": [
+   [
+    "/api/command/agents/derek/page 200",
+    2
+   ],
+   [
+    "/api/command/paper/session 200",
+    1
+   ],
+   [
+    "/api/command/agents/derek/orders 200",
+    3
+   ],
+   [
+    "/api/command/agents 200",
+    1
+   ],
+   [
+    "/api/command/agents/static/cc_avatar.js 200",
+    1
+   ],
+   [
+    "/api/command/paper/account 200",
+    1
+   ],
+   [
+    "/api/command/paper/derek 200",
+    1
+   ],
+   [
+    "/api/command/agents/static/three.module.min.js 200",
+    1
+   ],
+   [
+    "/api/command/paper/operations 200",
+    1
+   ],
+   [
+    "/api/command/agents/labels 200",
+    2
+   ],
+   [
+    "/api/command/agents/static/three.core.min.js 200",
+    1
+   ],
+   [
+    "/api/command/agents/derek 200",
+    1
+   ],
+   [
+    "/api/command/agents/static/meshopt_decoder.module.js 200",
+    1
+   ],
+   [
+    "/api/command/agents/static/GLTFLoader.js 200",
+    1
+   ],
+   [
+    "/api/command/agents/static/BufferGeometryUtils.js 200",
+    1
+   ],
+   [
+    "/api/command/agents/static/SkeletonUtils.js 200",
+    1
+   ],
+   [
+    "/api/command/agents/static/models/derek.glb 200",
+    1
+   ]
+  ],
+  "has_sign_in_prompt": false,
+  "has_disconnected": false,
+  "has_unavailable": false,
+  "cash_text": "$500,000",
+  "stamps": {
+   "server_read": "SERVER READOK",
+   "heartbeat": "AGENT HEARTBEAT (PAPER RUNTIME)RECENT",
+   "ledger": "ledger entry #1 · the same read on the homepage and every agent page"
+  },
+  "funded_label": true,
+  "completed_game_label": true,
+  "overflow": [],
+  "console_errors": [],
+  "screenshot": "site_verify_out/webkit-iphone13_authenticated_derek.png"
+ },
+ {
+  "engine": "webkit-iphone13",
+  "auth": "authenticated",
+  "path": "/xavier",
+  "nav": 200,
+  "api_status": [
+   [
+    "/api/command/agents/xavier/page 200",
+    2
+   ],
+   [
+    "/api/command/agents 200",
+    1
+   ],
+   [
+    "/api/command/paper/account 200",
+    1
+   ],
+   [
+    "/api/command/agents/xavier/standing-orders 200",
+    1
+   ],
+   [
+    "/api/command/paper/session 200",
+    1
+   ],
+   [
+    "/api/command/agents/xavier/payoff-demonstration 200",
+    1
+   ],
+   [
+    "/api/command/paper/xavier 200",
+    1
+   ],
+   [
+    "/api/command/agents/static/cc_avatar.js 200",
+    1
+   ],
+   [
+    "/api/command/agents/xavier 200",
+    1
+   ],
+   [
+    "/api/command/paper/operations 200",
+    1
+   ],
+   [
+    "/api/command/agents/static/three.module.min.js 200",
+    1
+   ],
+   [
+    "/api/command/agents/static/three.core.min.js 200",
+    1
+   ],
+   [
+    "/api/command/agents/static/meshopt_decoder.module.js 200",
+    1
+   ],
+   [
+    "/api/command/agents/static/GLTFLoader.js 200",
+    1
+   ],
+   [
+    "/api/command/agents/static/BufferGeometryUtils.js 200",
+    1
+   ],
+   [
+    "/api/command/agents/static/SkeletonUtils.js 200",
+    1
+   ],
+   [
+    "/api/command/agents/static/models/xavier.glb 200",
+    1
+   ]
+  ],
+  "has_sign_in_prompt": false,
+  "has_disconnected": false,
+  "has_unavailable": false,
+  "cash_text": "$500,000",
+  "stamps": {
+   "server_read": "SERVER READOK",
+   "heartbeat": "AGENT HEARTBEAT (PAPER RUNTIME)RECENT",
+   "ledger": "ledger entry #1 · the same read on the homepage and every agent page"
+  },
+  "funded_label": true,
+  "completed_game_label": true,
+  "overflow": [],
+  "console_errors": [],
+  "screenshot": "site_verify_out/webkit-iphone13_authenticated_xavier.png"
+ },
+ {
+  "engine": "webkit-iphone13",
+  "auth": "authenticated",
+  "path": "/audrey",
+  "nav": 200,
+  "api_status": [
+   [
+    "/api/command/agents/audrey/page 200",
+    2
+   ],
+   [
+    "/api/command/agents 200",
+    1
+   ],
+   [
+    "/api/command/paper/session 200",
+    1
+   ],
+   [
+    "/api/command/paper/audrey 200",
+    1
+   ],
+   [
+    "/api/command/paper/account 200",
+    1
+   ],
+   [
+    "/api/command/agents/static/cc_avatar.js 200",
+    1
+   ],
+   [
+    "/api/command/agents/audrey/performance 200",
+    1
+   ],
+   [
+    "/api/command/agents/audrey 200",
+    1
+   ],
+   [
+    "/api/command/paper/operations 200",
+    1
+   ],
+   [
+    "/api/command/agents/static/three.module.min.js 200",
+    1
+   ],
+   [
+    "/api/command/agents/static/three.core.min.js 200",
+    1
+   ],
+   [
+    "/api/command/agents/static/meshopt_decoder.module.js 200",
+    1
+   ],
+   [
+    "/api/command/agents/static/GLTFLoader.js 200",
+    1
+   ],
+   [
+    "/api/command/agents/static/SkeletonUtils.js 200",
+    1
+   ],
+   [
+    "/api/command/agents/static/BufferGeometryUtils.js 200",
+    1
+   ],
+   [
+    "/api/command/agents/static/models/audrey.glb 200",
+    1
+   ]
+  ],
+  "has_sign_in_prompt": false,
+  "has_disconnected": false,
+  "has_unavailable": false,
+  "cash_text": "$500,000",
+  "stamps": {
+   "server_read": "SERVER READOK",
+   "heartbeat": "AGENT HEARTBEAT (PAPER RUNTIME)RECENT",
+   "ledger": "ledger entry #1 · the same read on the homepage and every agent page"
+  },
+  "funded_label": true,
+  "completed_game_label": true,
+  "overflow": [],
+  "console_errors": [],
+  "screenshot": "site_verify_out/webkit-iphone13_authenticated_audrey.png"
+ },
+ {
+  "engine": "webkit-iphone13",
+  "auth": "signed-out",
+  "path": "/",
+  "nav": 200,
+  "api_status": [
+   [
+    "/api/command/paper/overview 401",
+    1
+   ],
+   [
+    "/api/command/snapshot 401",
+    2
+   ]
+  ],
+  "has_sign_in_prompt": true,
+  "has_disconnected": true,
+  "has_unavailable": false,
+  "cash_text": null,
+  "stamps": {
+   "server_read": "SERVER READ SIGN-IN",
+   "heartbeat": "AGENT HEARTBEAT (PAPER RUNTIME) SIGN-IN",
+   "ledger": "LEDGER TRANSACTION SIGN-IN"
+  },
+  "funded_label": true,
+  "completed_game_label": false,
+  "overflow": [],
+  "console_errors": [
+   "Failed to load resource: the server responded with a status of 401 (Unauthorized)",
+   "Failed to load resource: the server responded with a status of 401 (Unauthorized)",
+   "Failed to load resource: the server responded with a status of 401 (Unauthorized)"
+  ],
+  "screenshot": "site_verify_out/webkit-iphone13_signed-out_home.png"
+ },
+ {
+  "engine": "webkit-iphone13",
+  "auth": "signed-out",
+  "path": "/derek",
+  "nav": 200,
+  "api_status": [
+   [
+    "/api/command/agents/derek/page 401",
+    1
+   ]
+  ],
+  "has_sign_in_prompt": true,
+  "has_disconnected": false,
+  "has_unavailable": false,
+  "cash_text": null,
+  "stamps": {
+   "server_read": null,
+   "heartbeat": null,
+   "ledger": null
+  },
+  "funded_label": false,
+  "completed_game_label": false,
+  "overflow": [],
+  "console_errors": [
+   "Failed to load resource: the server responded with a status of 401 (Unauthorized)"
+  ],
+  "screenshot": "site_verify_out/webkit-iphone13_signed-out_derek.png"
+ },
+ {
+  "engine": "webkit-iphone13",
+  "auth": "signed-out",
+  "path": "/xavier",
+  "nav": 200,
+  "api_status": [
+   [
+    "/api/command/agents/xavier/page 401",
+    1
+   ]
+  ],
+  "has_sign_in_prompt": true,
+  "has_disconnected": false,
+  "has_unavailable": false,
+  "cash_text": null,
+  "stamps": {
+   "server_read": null,
+   "heartbeat": null,
+   "ledger": null
+  },
+  "funded_label": false,
+  "completed_game_label": false,
+  "overflow": [],
+  "console_errors": [
+   "Failed to load resource: the server responded with a status of 401 (Unauthorized)"
+  ],
+  "screenshot": "site_verify_out/webkit-iphone13_signed-out_xavier.png"
+ },
+ {
+  "engine": "webkit-iphone13",
+  "auth": "signed-out",
+  "path": "/audrey",
+  "nav": 200,
+  "api_status": [
+   [
+    "/api/command/agents/audrey/page 401",
+    1
+   ]
+  ],
+  "has_sign_in_prompt": true,
+  "has_disconnected": false,
+  "has_unavailable": false,
+  "cash_text": null,
+  "stamps": {
+   "server_read": null,
+   "heartbeat": null,
+   "ledger": null
+  },
+  "funded_label": false,
+  "completed_game_label": false,
+  "overflow": [],
+  "console_errors": [
+   "Failed to load resource: the server responded with a status of 401 (Unauthorized)"
+  ],
+  "screenshot": "site_verify_out/webkit-iphone13_signed-out_audrey.png"
+ },
+ {
+  "engine": "chromium-390x844",
+  "auth": "authenticated",
+  "path": "/",
+  "nav": 200,
+  "api_status": [
+   [
+    "/api/command/paper/overview 200",
+    1
+   ],
+   [
+    "/api/command/snapshot 200",
+    2
+   ]
+  ],
+  "has_sign_in_prompt": false,
+  "has_disconnected": false,
+  "has_unavailable": false,
+  "cash_text": "$500,000.00",
+  "stamps": {
+   "server_read": "SERVER READ OK",
+   "heartbeat": "AGENT HEARTBEAT (PAPER RUNTIME) RECENT",
+   "ledger": "LEDGER TRANSACTION"
+  },
+  "funded_label": true,
+  "completed_game_label": false,
+  "overflow": [],
+  "console_errors": [],
+  "screenshot": "site_verify_out/chromium-390x844_authenticated_home.png"
+ },
+ {
+  "engine": "chromium-390x844",
+  "auth": "authenticated",
+  "path": "/derek",
+  "nav": 200,
+  "api_status": [
+   [
+    "/api/command/agents/derek/page 200",
+    2
+   ],
+   [
+    "/api/command/agents/static/cc_avatar.js 200",
+    1
+   ],
+   [
+    "/api/command/paper/session 200",
+    1
+   ],
+   [
+    "/api/command/agents/derek/orders 200",
+    3
+   ],
+   [
+    "/api/command/agents/static/three.module.min.js 200",
+    1
+   ],
+   [
+    "/api/command/paper/derek 200",
+    1
+   ],
+   [
+    "/api/command/agents 200",
+    1
+   ],
+   [
+    "/api/command/agents/static/three.core.min.js 200",
+    1
+   ],
+   [
+    "/api/command/agents/static/meshopt_decoder.module.js 200",
+    1
+   ],
+   [
+    "/api/command/paper/account 200",
+    1
+   ],
+   [
+    "/api/command/agents/static/GLTFLoader.js 200",
+    1
+   ],
+   [
+    "/api/command/agents/static/BufferGeometryUtils.js 200",
+    1
+   ],
+   [
+    "/api/command/agents/static/SkeletonUtils.js 200",
+    1
+   ],
+   [
+    "/api/command/agents/labels 200",
+    2
+   ],
+   [
+    "/api/command/paper/operations 200",
+    1
+   ],
+   [
+    "/api/command/agents/static/models/derek.glb 200",
+    1
+   ],
+   [
+    "/api/command/agents/derek 200",
+    1
+   ]
+  ],
+  "has_sign_in_prompt": false,
+  "has_disconnected": false,
+  "has_unavailable": false,
+  "cash_text": "$500,000",
+  "stamps": {
+   "server_read": "SERVER READOK",
+   "heartbeat": "AGENT HEARTBEAT (PAPER RUNTIME)RECENT",
+   "ledger": "ledger entry #1 · the same read on the homepage and every agent page"
+  },
+  "funded_label": true,
+  "completed_game_label": true,
+  "overflow": [],
+  "console_errors": [],
+  "screenshot": "site_verify_out/chromium-390x844_authenticated_derek.png"
+ },
+ {
+  "engine": "chromium-390x844",
+  "auth": "authenticated",
+  "path": "/xavier",
+  "nav": 200,
+  "api_status": [
+   [
+    "/api/command/agents/xavier/page 200",
+    2
+   ],
+   [
+    "/api/command/agents 200",
+    1
+   ],
+   [
+    "/api/command/paper/session 200",
+    1
+   ],
+   [
+    "/api/command/agents/static/cc_avatar.js 200",
+    1
+   ],
+   [
+    "/api/command/agents/xavier/standing-orders 200",
+    1
+   ],
+   [
+    "/api/command/paper/account 200",
+    1
+   ],
+   [
+    "/api/command/paper/xavier 200",
+    1
+   ],
+   [
+    "/api/command/agents/xavier 200",
+    1
+   ],
+   [
+    "/api/command/paper/operations 200",
+    1
+   ],
+   [
+    "/api/command/agents/xavier/payoff-demonstration 200",
+    1
+   ],
+   [
+    "/api/command/agents/static/three.module.min.js 200",
+    1
+   ],
+   [
+    "/api/command/agents/static/three.core.min.js 200",
+    1
+   ],
+   [
+    "/api/command/agents/static/meshopt_decoder.module.js 200",
+    1
+   ],
+   [
+    "/api/command/agents/static/GLTFLoader.js 200",
+    1
+   ],
+   [
+    "/api/command/agents/static/SkeletonUtils.js 200",
+    1
+   ],
+   [
+    "/api/command/agents/static/BufferGeometryUtils.js 200",
+    1
+   ],
+   [
+    "/api/command/agents/static/models/xavier.glb 200",
+    1
+   ]
+  ],
+  "has_sign_in_prompt": false,
+  "has_disconnected": false,
+  "has_unavailable": false,
+  "cash_text": "$500,000",
+  "stamps": {
+   "server_read": "SERVER READOK",
+   "heartbeat": "AGENT HEARTBEAT (PAPER RUNTIME)RECENT",
+   "ledger": "ledger entry #1 · the same read on the homepage and every agent page"
+  },
+  "funded_label": true,
+  "completed_game_label": true,
+  "overflow": [],
+  "console_errors": [],
+  "screenshot": "site_verify_out/chromium-390x844_authenticated_xavier.png"
+ },
+ {
+  "engine": "chromium-390x844",
+  "auth": "authenticated",
+  "path": "/audrey",
+  "nav": 200,
+  "api_status": [
+   [
+    "/api/command/agents/audrey/page 200",
+    2
+   ],
+   [
+    "/api/command/agents/static/cc_avatar.js 200",
+    1
+   ],
+   [
+    "/api/command/agents 200",
+    1
+   ],
+   [
+    "/api/command/paper/audrey 200",
+    1
+   ],
+   [
+    "/api/command/paper/account 200",
+    1
+   ],
+   [
+    "/api/command/agents/static/three.module.min.js 200",
+    1
+   ],
+   [
+    "/api/command/agents/static/three.core.min.js 200",
+    1
+   ],
+   [
+    "/api/command/agents/static/meshopt_decoder.module.js 200",
+    1
+   ],
+   [
+    "/api/command/agents/static/GLTFLoader.js 200",
+    1
+   ],
+   [
+    "/api/command/agents/static/BufferGeometryUtils.js 200",
+    1
+   ],
+   [
+    "/api/command/agents/static/SkeletonUtils.js 200",
+    1
+   ],
+   [
+    "/api/command/agents/static/models/audrey.glb 200",
+    1
+   ],
+   [
+    "/api/command/agents/audrey 200",
+    1
+   ],
+   [
+    "/api/command/paper/session 200",
+    1
+   ],
+   [
+    "/api/command/agents/audrey/performance 200",
+    1
+   ],
+   [
+    "/api/command/paper/operations 200",
+    1
+   ]
+  ],
+  "has_sign_in_prompt": false,
+  "has_disconnected": false,
+  "has_unavailable": false,
+  "cash_text": "$500,000",
+  "stamps": {
+   "server_read": "SERVER READOK",
+   "heartbeat": "AGENT HEARTBEAT (PAPER RUNTIME)RECENT",
+   "ledger": "ledger entry #1 · the same read on the homepage and every agent page"
+  },
+  "funded_label": true,
+  "completed_game_label": true,
+  "overflow": [],
+  "console_errors": [],
+  "screenshot": "site_verify_out/chromium-390x844_authenticated_audrey.png"
+ },
+ {
+  "engine": "chromium-390x844",
+  "auth": "signed-out",
+  "path": "/",
+  "nav": 200,
+  "api_status": [
+   [
+    "/api/command/paper/overview 401",
+    1
+   ],
+   [
+    "/api/command/snapshot 401",
+    2
+   ]
+  ],
+  "has_sign_in_prompt": true,
+  "has_disconnected": true,
+  "has_unavailable": false,
+  "cash_text": null,
+  "stamps": {
+   "server_read": "SERVER READ SIGN-IN",
+   "heartbeat": "AGENT HEARTBEAT (PAPER RUNTIME) SIGN-IN",
+   "ledger": "LEDGER TRANSACTION SIGN-IN"
+  },
+  "funded_label": true,
+  "completed_game_label": false,
+  "overflow": [],
+  "console_errors": [
+   "Failed to load resource: the server responded with a status of 401 ()",
+   "Failed to load resource: the server responded with a status of 401 ()",
+   "Failed to load resource: the server responded with a status of 401 ()"
+  ],
+  "screenshot": "site_verify_out/chromium-390x844_signed-out_home.png"
+ },
+ {
+  "engine": "chromium-390x844",
+  "auth": "signed-out",
+  "path": "/derek",
+  "nav": 200,
+  "api_status": [
+   [
+    "/api/command/agents/derek/page 401",
+    1
+   ]
+  ],
+  "has_sign_in_prompt": true,
+  "has_disconnected": false,
+  "has_unavailable": false,
+  "cash_text": null,
+  "stamps": {
+   "server_read": null,
+   "heartbeat": null,
+   "ledger": null
+  },
+  "funded_label": false,
+  "completed_game_label": false,
+  "overflow": [],
+  "console_errors": [
+   "Failed to load resource: the server responded with a status of 401 ()"
+  ],
+  "screenshot": "site_verify_out/chromium-390x844_signed-out_derek.png"
+ },
+ {
+  "engine": "chromium-390x844",
+  "auth": "signed-out",
+  "path": "/xavier",
+  "nav": 200,
+  "api_status": [
+   [
+    "/api/command/agents/xavier/page 401",
+    1
+   ]
+  ],
+  "has_sign_in_prompt": true,
+  "has_disconnected": false,
+  "has_unavailable": false,
+  "cash_text": null,
+  "stamps": {
+   "server_read": null,
+   "heartbeat": null,
+   "ledger": null
+  },
+  "funded_label": false,
+  "completed_game_label": false,
+  "overflow": [],
+  "console_errors": [
+   "Failed to load resource: the server responded with a status of 401 ()"
+  ],
+  "screenshot": "site_verify_out/chromium-390x844_signed-out_xavier.png"
+ },
+ {
+  "engine": "chromium-390x844",
+  "auth": "signed-out",
+  "path": "/audrey",
+  "nav": 200,
+  "api_status": [
+   [
+    "/api/command/agents/audrey/page 401",
+    1
+   ]
+  ],
+  "has_sign_in_prompt": true,
+  "has_disconnected": false,
+  "has_unavailable": false,
+  "cash_text": null,
+  "stamps": {
+   "server_read": null,
+   "heartbeat": null,
+   "ledger": null
+  },
+  "funded_label": false,
+  "completed_game_label": false,
+  "overflow": [],
+  "console_errors": [
+   "Failed to load resource: the server responded with a status of 401 ()"
+  ],
+  "screenshot": "site_verify_out/chromium-390x844_signed-out_audrey.png"
+ }
+]
