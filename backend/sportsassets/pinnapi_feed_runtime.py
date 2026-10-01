@@ -5,10 +5,13 @@ Started by ext_pinnacle_loop.run ONLY after it holds its writer lock
 only beside the process that decides; the owner re-checks that pid still
 holds the writer lock every liveness pass and stops for good if it does not.
 
-ARMING (both, fail-closed): env PINNAPI_FEED in {on,1,true,yes} decides
-whether this module starts at all; the ingestion_state row 'pinnapi_feed'
-must read exactly true, re-read every liveness pass -- absent, unreadable or
-anything else disarms (authority revoked, socket closed).
+ARMING (fail-closed): the ingestion_state row 'pinnapi_feed' must read
+exactly true, re-read every liveness pass -- absent, unreadable or anything
+else disarms (authority revoked, socket closed). Disarmed, the owner takes no
+lease and opens no socket; it only re-reads the row. Env PINNAPI_FEED in
+{off,0,false,no} is a kill switch that keeps the module from starting at all.
+(It is a kill switch, not an arm: changing a Render env var redeploys the
+service, and arming must not need a deploy.)
 
 SCOPE: ingestion_state 'pinnapi_feed_scope' = {"sport_ids": [...],
 "streams": [...]}; absent -> baseball only ([6], live + prematch). The soccer
@@ -49,8 +52,9 @@ CENSUS_S = 60.0
 
 
 def enabled() -> bool:
-    return (os.environ.get("PINNAPI_FEED") or "").strip().lower() in (
-        "on", "1", "true", "yes")
+    """False only for an explicit kill switch; arming is the control row."""
+    return (os.environ.get("PINNAPI_FEED") or "").strip().lower() not in (
+        "off", "0", "false", "no")
 
 
 async def _read_row(pool, key):
@@ -138,7 +142,13 @@ async def _census_once(pool) -> dict:
 async def _beat_loop(pool):
     last_census = 0.0
     while True:
-        if time.monotonic() - last_census >= CENSUS_S:
+        o = _STATE.get("owner")
+        synced = bool(o and o.cache.authority.synced)
+        if not synced:
+            # nothing to match against: no catalogue read while unsynced
+            _STATE["census"] = {"skipped": "FEED_NOT_SYNCED"}
+            last_census = 0.0
+        elif time.monotonic() - last_census >= CENSUS_S:
             last_census = time.monotonic()
             try:
                 _STATE["census"] = await _census_once(pool)
@@ -166,7 +176,7 @@ async def start_default(pool, *, writer_pid: int, writer_lock_key: int,
     """Never raises. Returns what it did and why."""
     try:
         if not enabled():
-            return {"state": "NOT_ENABLED_ENV"}
+            return {"state": "KILLED_BY_ENV_PINNAPI_FEED_OFF"}
         if _STATE.get("task") is not None:
             return {"state": "ALREADY_STARTED"}
         sc = await scope(pool)

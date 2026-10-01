@@ -9884,8 +9884,9 @@ async def run(get_pool) -> None:
         # After the writer lock and with THIS connection's backend pid: the
         # feed owner re-checks every liveness pass that this pid still holds
         # LOCK_KEY and stops for good if not, so the one provider socket only
-        # ever lives beside the process that decides. Off unless PINNAPI_FEED
-        # is set AND the 'pinnapi_feed' control row reads true. Never raises.
+        # ever lives beside the process that decides. Disarmed (no lease, no
+        # socket) unless the 'pinnapi_feed' control row reads true; env
+        # PINNAPI_FEED=off keeps it from starting at all. Never raises.
         from .. import pinnapi_feed_runtime as _feed
         try:
             _writer_pid = await conn.fetchval("SELECT pg_backend_pid()")

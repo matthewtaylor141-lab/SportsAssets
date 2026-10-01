@@ -173,6 +173,65 @@ def test_the_heartbeat_is_bounded_and_says_c1_changes_no_decision():
     assert FR.digest()["state"] == "NOT_STARTED"
 
 
+def test_env_is_a_kill_switch_not_the_arm(monkeypatch):
+    """Arming must not need a deploy (a Render env change redeploys): the
+    module starts unless PINNAPI_FEED is explicitly off; the control row is
+    the arm."""
+    monkeypatch.delenv("PINNAPI_FEED", raising=False)
+    assert FR.enabled() is True
+    for off in ("off", "0", "false", "NO", " Off "):
+        monkeypatch.setenv("PINNAPI_FEED", off)
+        assert FR.enabled() is False
+        r = asyncio.run(FR.start_default(None, writer_pid=1,
+                                         writer_lock_key=WRITER_KEY))
+        assert r["state"] == "KILLED_BY_ENV_PINNAPI_FEED_OFF"
+    assert FR.digest()["state"] == "NOT_STARTED"
+
+
+@pg
+async def test_started_but_unarmed_takes_no_lease_and_reads_no_catalogue(
+        monkeypatch):
+    """The default after deploy: started, control row absent -> DISARMED, no
+    lease, no socket, and the heartbeat skips the census (no us_premap read)."""
+    conn = await H.connect()
+    pool = Pool(conn)
+    try:
+        await _set(conn, FR.CONTROL_KEY, None)
+        monkeypatch.delenv("PINNAPI_FEED", raising=False)
+        monkeypatch.setattr(FR, "HEARTBEAT_S", 0.05)
+        leases, sockets, census_calls = [], [], []
+
+        async def lf():
+            leases.append(1)
+            return await O.Lease.open(H.DSN)
+
+        async def connect(url, key):
+            sockets.append(1)
+            return FakeWS(frames_for())
+
+        async def no_census(_pool):
+            census_calls.append(1)
+            return {}
+        monkeypatch.setattr(FR, "_census_once", no_census)
+        r = await FR.start_default(pool, writer_pid=None,
+                                   writer_lock_key=WRITER_KEY,
+                                   lease_factory=lf, connect=connect)
+        assert r["state"] == "STARTED"
+        await asyncio.sleep(0.5)
+        d = FR.digest()
+        assert d["state"] == "DISARMED"
+        assert leases == [] and sockets == [] and census_calls == []
+        assert d["coverage_census"] == {"skipped": "FEED_NOT_SYNCED"}
+        beat = FR._jsonish(await conn.fetchval(
+            "SELECT value FROM ingestion_state WHERE key=$1",
+            FR.HEARTBEAT_KEY))
+        assert beat["state"] == "DISARMED"
+    finally:
+        await FR.shutdown_default(wait_s=2.0)
+        await _set(conn, FR.HEARTBEAT_KEY, None)
+        await conn.close()
+
+
 def test_scope_defaults_to_baseball_and_is_bounded():
     assert FR.DEFAULT_SCOPE == {"sport_ids": [6],
                                 "streams": ["live", "prematch"]}
