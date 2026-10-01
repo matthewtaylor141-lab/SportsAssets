@@ -29,6 +29,18 @@ HOW AN ANSWER IS PRODUCED
      facts, what evidence is missing, the persona version and the provider
      record (never a credential).
 
+THE PAPER EXPERIMENT. A question about the book carries, as facts, the live
+paper account (the Command Centre strip's own `bettor_paper_ledger.balances`),
+the ledger's reconciliation, the active paper session and its health, each
+of today's paper decisions (id, verdict, refusal) with the counts, and what
+Xavier manages (open paper positions / orders / handoffs). A question about
+paper, cash, balances, the session or decisions is answered from them first.
+The legacy desk account is labelled as such with its as-of time and never
+stands in for the paper account. A reply that works out a figure of its own
+(a tally, a sum, an elapsed time) is still discarded -- the excerpt around
+the rejected figure is kept in the stored provider record -- and replaced by
+a records-only answer LABELLED as such in its first sentence.
+
 INTERRUPTION. One answer is in flight per conversation. A new user message
 (or `interrupt`) cancels it: the partial text streamed so far is stored with
 status INTERRUPTED, linked to the message that interrupted it.
