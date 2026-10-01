@@ -19,6 +19,10 @@ on:
         description: "blank = read-only ping only; chat-voice = also run the authorized agent chat + speech demonstration (writes conversation records only)"
         required: false
         default: ""
+      terms_slugs:
+        description: "optional comma-separated venue slugs: read each contract's published rules prose through POST /api/admin/venue-settlement-probe (read-only GETs at the venue; writes nothing)"
+        required: false
+        default: ""
 
 jobs:
   ping:
@@ -154,3 +158,31 @@ jobs:
           code=$(curl -s -o /tmp/acct2.json -w '%{http_code}' --max-time 45 -H "$H" "$API/api/command/paper/account?entries=5")
           echo "paper/account after HTTP $code"
           jq -c '{session: .session.session_id, cash: .account.data.cash_usd, reserved: .account.data.reserved_usd, available: .account.data.available_usd, ledger_entries: .account.data.ledger_entries}' /tmp/acct2.json
+
+  venue-terms:
+    # READ-ONLY. The admin probe makes two GETs per slug at the venue (the
+    # settlement endpoint and the listing) through the existing reader and
+    # returns the listing's prose verbatim with the production reader's
+    # per-condition reading. It writes nothing and submits nothing.
+    if: ${{ inputs.terms_slugs != '' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Venue rules prose for the named contracts
+        shell: bash
+        env:
+          API: https://sportsassets-api.onrender.com
+          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+          SLUGS: ${{ inputs.terms_slugs }}
+        run: |
+          set +e
+          [ -n "${ADMIN_TOKEN:-}" ] || { echo "no ADMIN_TOKEN secret"; exit 1; }
+          echo "::add-mask::$ADMIN_TOKEN"
+          H="X-Admin-Token: $ADMIN_TOKEN"
+          body=$(jq -nc --arg s "$SLUGS" '{slugs: ($s | split(",") | map(gsub("\\s"; "")) | map(select(length > 0)))}')
+          code=$(curl -s -o /tmp/probe.json -w '%{http_code}' --max-time 120 -X POST -H "$H" \
+                 -H "Content-Type: application/json" -d "$body" "$API/api/admin/venue-settlement-probe")
+          echo "probe HTTP $code at $(date -u +%FT%TZ)"
+          jq -r '(.results // .slugs // .probes // [])[]? | "== \(.slug // .market_slug)\n" +
+                 ((.settlement_terms // {}) | "field=\(.field) chars=\(.chars) truncated=\(.truncated)\nTEXT: \(.text)\nstated: \(.stated | tojson)\nnot_stated: \(.not_stated | tojson)\ncontradicted: \(.contradicted | tojson)")' /tmp/probe.json 2>/dev/null
+          echo "== keys: $(jq -c 'keys' /tmp/probe.json 2>/dev/null)"
+          [ "$code" = "200" ] || head -c 1500 /tmp/probe.json
