@@ -101,6 +101,9 @@ async def test_the_vertical_slice_decides_fills_hands_off_protects_settles_and_r
     conn = await H.connect()
     try:
         mid = "derek-research-model-paper-slice"
+        # (182) this proof is about the two-model strategy's entries: its
+        # paper entry switch (off by default) is turned on for it
+        prev_entries = await PL.two_model_entries(conn, True)
         await PL.train_model(conn, monkeypatch, model_id=mid)
         now = time.time() + 5.0
         acct = await PL.new_account(conn, "slice", now=now)
@@ -231,6 +234,7 @@ async def test_the_vertical_slice_decides_fills_hands_off_protects_settles_and_r
         h = await S.health(conn, acct["session_id"])
         assert h["mutation_attempts"] == 0 and h["passes"] >= 4
     finally:
+        await PL.restore_two_model_entries(conn, prev_entries)
         await PL.purge_research_models(conn)
         await PL.purge_everything(conn)
         await conn.close()
@@ -241,6 +245,9 @@ async def test_a_strict_cross_after_the_queue_fills_the_protection_and_a_restart
     conn = await H.connect()
     try:
         mid = "derek-research-model-paper-restart"
+        # (182) this proof is about the two-model strategy's entries: its
+        # paper entry switch (off by default) is turned on for it
+        prev_entries = await PL.two_model_entries(conn, True)
         await PL.train_model(conn, monkeypatch, model_id=mid)
         now = time.time() + 5.0
         acct = await PL.new_account(conn, "restart", now=now)
@@ -311,6 +318,7 @@ async def test_a_strict_cross_after_the_queue_fills_the_protection_and_a_restart
                                               - 60.0)
         assert b["realized_pnl_usd"] == pytest.approx(60.0)
     finally:
+        await PL.restore_two_model_entries(conn, prev_entries)
         await PL.purge_research_models(conn)
         await PL.purge_everything(conn)
         await conn.close()
