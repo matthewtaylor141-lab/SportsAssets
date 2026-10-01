@@ -20,11 +20,11 @@ SELECT sport_key, outcome, coalesce(first_refusal, '-') AS first_refusal,
 \echo '== U2 · NO_PINNACLE_ON_EVENT by sport/family and time to start =='
 SELECT sport_key, family, count(*) AS records,
        count(DISTINCT provider_event_id) AS events,
-       count(*) FILTER (WHERE commence_time > cycle_at + interval '24 hours')
+       count(*) FILTER (WHERE commence_time::timestamptz > cycle_at + interval '24 hours')
          AS starts_after_24h,
-       count(*) FILTER (WHERE commence_time BETWEEN cycle_at
+       count(*) FILTER (WHERE commence_time::timestamptz BETWEEN cycle_at
                         AND cycle_at + interval '24 hours') AS starts_within_24h,
-       count(*) FILTER (WHERE commence_time < cycle_at) AS already_started
+       count(*) FILTER (WHERE commence_time::timestamptz < cycle_at) AS already_started
   FROM ext_candidate_outcomes
  WHERE cycle_at > now() - interval '24 hours'
    AND (first_refusal = 'NO_PINNACLE_ON_EVENT'
