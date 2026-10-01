@@ -6,7 +6,9 @@
 -- qualified or proven profitability; every fill is SIMULATED (PAPER_SIM_V1)
 -- and the venue book's currency is NOT_ESTABLISHED (P5).
 --
--- B1  the switch: the paper_control rows, migration 182, the active session
+-- B1  the switches: the paper_control rows (the session, the benchmark's
+--     kill switch, the two-model strategy's entry switch), migration 182,
+--     the active session
 -- B2  the newest benchmark decisions (p_internal / p_blended must be NULL)
 -- B3  benchmark decisions by verdict and named refusal (24 h and all time)
 -- B4  the strongest candidates by edge, with their exact shortfalls
@@ -26,7 +28,8 @@
 \echo '== B1 · switch, migration 182, active session =='
 SELECT control_key, enabled, why, updated_by, updated_at
   FROM paper_control
- WHERE control_key IN ('PAPER_SESSION', 'PINNACLE_ONLY_PAPER_BENCHMARK');
+ WHERE control_key IN ('PAPER_SESSION', 'PINNACLE_ONLY_PAPER_BENCHMARK',
+                       'PAPER_ENTRIES:DEREK_ENTRY_POLICY_V2');
 SELECT version, applied_at FROM schema_migrations
  WHERE version LIKE '182_%';
 SELECT session_id, account_id, started_at, status, simulator_version
@@ -110,7 +113,7 @@ SELECT o.created_at, o.order_id, o.decision_id, o.group_id, o.role,
 SELECT f.filled_at, f.fill_id, f.order_id, o.role, f.direction, f.qty,
        f.price, f.fee_usd, f.gross_usd, f.basis, f.book_obs_id,
        f.book_observed_at, o.eligible_at, f.event_source,
-       f.label->>'strategy' AS label_strategy
+       f.label->>'strategy' AS label_strategy, f.strategy
   FROM paper_fills f JOIN paper_orders o ON o.order_id = f.order_id
  WHERE o.strategy = 'PINNACLE_ONLY_PAPER_BENCHMARK'
  ORDER BY f.filled_at DESC LIMIT 100;
@@ -154,7 +157,8 @@ SELECT DISTINCT ON (r.group_id) r.group_id, r.reviewed_at, r.trigger,
        r.recommendation, r.refusal, r.measure->>'strategy' AS measure_strategy,
        r.measure->>'source' AS measure_source,
        (r.measure->>'p')::float8 AS measure_p,
-       r.measure->>'stale' AS measure_stale, r.action->>'taken' AS action
+       r.measure->>'stale' AS measure_stale, r.action->>'taken' AS action,
+       r.strategy
   FROM paper_xavier_reviews r
  WHERE r.group_id IN (SELECT h.group_id FROM paper_handoffs h
                        WHERE h.strategy = 'PINNACLE_ONLY_PAPER_BENCHMARK')
@@ -215,3 +219,14 @@ SELECT count(*) AS valuations_with_both,
           FROM paper_decisions d WHERE d.valuation_id IS NOT NULL
          GROUP BY 1, 2
         HAVING count(DISTINCT d.strategy) = 2) x;
+-- the two-model strategy keeps recording; with its entry switch off a
+-- decision its policy admitted is REFUSE / STRATEGY_ENTRIES_DISABLED
+SELECT d.strategy, d.verdict, coalesce(d.refusal, 'ENTER') AS reason,
+       count(*) AS decisions,
+       count(*) FILTER (WHERE d.policy_decision->>'admitted' = 'true')
+           AS policy_admitted
+  FROM paper_decisions d
+ WHERE d.decided_at > now() - interval '24 hours'
+ GROUP BY 1, 2, 3 ORDER BY 1, 4 DESC;
+SELECT o.strategy, o.role, o.state, count(*) AS orders
+  FROM paper_orders o GROUP BY 1, 2, 3 ORDER BY 1, 2, 3;
