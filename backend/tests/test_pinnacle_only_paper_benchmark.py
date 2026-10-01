@@ -157,8 +157,11 @@ def test_no_funded_module_reaches_the_benchmark():
             continue
         if any("paper_benchmark" in (n or "") for n in _imports(p)):
             users.add(str(p.relative_to(ROOT)))
+    # bettor_paper_ops.py: the management pages' paper read model (read-only,
+    # imports only paper modules)
     assert users <= {"agents/paper_runtime.py", "agents/paper_xavier.py",
-                     "agents/paper_audrey.py", "bettor_paper_readmodel.py"}, \
+                     "agents/paper_audrey.py", "bettor_paper_readmodel.py",
+                     "bettor_paper_ops.py"}, \
         sorted(users)
     assert not any("funded" in u for u in users)
 
