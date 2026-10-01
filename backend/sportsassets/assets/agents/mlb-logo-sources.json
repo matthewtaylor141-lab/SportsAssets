@@ -1,0 +1,277 @@
+{
+  "retrieved_at": "2026-10-01T21:48:10.657855+00:00",
+  "identity_source": "https://statsapi.mlb.com/api/v1/teams?sportId=1&season=2026",
+  "note": "MLB and team marks belong to their respective owners. Identifying artwork from the official MLB CDN; not part of the Microsoft Rocketbox or Three.js MIT licences. No affiliation or endorsement is implied.",
+  "teams": [
+    {
+      "id": 133,
+      "name": "Athletics",
+      "team_name": "Athletics",
+      "abbreviation": "ATH",
+      "file": "mlb-logo-133.svg",
+      "source": "https://www.mlbstatic.com/team-logos/133.svg",
+      "sha256": "598538b486eef1fc4834f0a88093fc03b26c558e264afc21f5c3c4b2ba209f0c"
+    },
+    {
+      "id": 134,
+      "name": "Pittsburgh Pirates",
+      "team_name": "Pirates",
+      "abbreviation": "PIT",
+      "file": "mlb-logo-134.svg",
+      "source": "https://www.mlbstatic.com/team-logos/134.svg",
+      "sha256": "a88e4a6bd86217dd2e1c66f48de97113a7edde01f03d7a9c280b6b05bd0ddaa3"
+    },
+    {
+      "id": 135,
+      "name": "San Diego Padres",
+      "team_name": "Padres",
+      "abbreviation": "SD",
+      "file": "mlb-logo-135.svg",
+      "source": "https://www.mlbstatic.com/team-logos/135.svg",
+      "sha256": "c0d5f92ef4a58f097c74aedebb9fd1ff4270217d45b75ef7aa6eeded115131da"
+    },
+    {
+      "id": 136,
+      "name": "Seattle Mariners",
+      "team_name": "Mariners",
+      "abbreviation": "SEA",
+      "file": "mlb-logo-136.svg",
+      "source": "https://www.mlbstatic.com/team-logos/136.svg",
+      "sha256": "c9508331d23c9a20493210e9cd23d29978fc5e599efeffe6e180118885ff4d06"
+    },
+    {
+      "id": 137,
+      "name": "San Francisco Giants",
+      "team_name": "Giants",
+      "abbreviation": "SF",
+      "file": "mlb-logo-137.svg",
+      "source": "https://www.mlbstatic.com/team-logos/137.svg",
+      "sha256": "04d8deeb9e7dd172edae9c1a202bf91461d89a973dd243edddb99329cfe99f3c"
+    },
+    {
+      "id": 138,
+      "name": "St. Louis Cardinals",
+      "team_name": "Cardinals",
+      "abbreviation": "STL",
+      "file": "mlb-logo-138.svg",
+      "source": "https://www.mlbstatic.com/team-logos/138.svg",
+      "sha256": "c1f1aa692b825d69521a724ca0848b337bd4fe57120daf3760a4e2eb12e3653d"
+    },
+    {
+      "id": 139,
+      "name": "Tampa Bay Rays",
+      "team_name": "Rays",
+      "abbreviation": "TB",
+      "file": "mlb-logo-139.svg",
+      "source": "https://www.mlbstatic.com/team-logos/139.svg",
+      "sha256": "b50fd02140a8fe66e57eb5c421fc6847a52abfbc7469bc3099a49d1e09ff77fc"
+    },
+    {
+      "id": 140,
+      "name": "Texas Rangers",
+      "team_name": "Rangers",
+      "abbreviation": "TEX",
+      "file": "mlb-logo-140.svg",
+      "source": "https://www.mlbstatic.com/team-logos/140.svg",
+      "sha256": "775ec1e70b6655e087249f7306c8ea033c2cc5c52bd1da71339df02160190a38"
+    },
+    {
+      "id": 141,
+      "name": "Toronto Blue Jays",
+      "team_name": "Blue Jays",
+      "abbreviation": "TOR",
+      "file": "mlb-logo-141.svg",
+      "source": "https://www.mlbstatic.com/team-logos/141.svg",
+      "sha256": "1920a269c4dce0f8f38d338c4a47380144922a7d84f92ad4609188cac0f4d8e3"
+    },
+    {
+      "id": 142,
+      "name": "Minnesota Twins",
+      "team_name": "Twins",
+      "abbreviation": "MIN",
+      "file": "mlb-logo-142.svg",
+      "source": "https://www.mlbstatic.com/team-logos/142.svg",
+      "sha256": "9f062b8e0a2626babce4f051f2d3f1bee163fa6d74ff12ff3501be2e2767b090"
+    },
+    {
+      "id": 143,
+      "name": "Philadelphia Phillies",
+      "team_name": "Phillies",
+      "abbreviation": "PHI",
+      "file": "mlb-logo-143.svg",
+      "source": "https://www.mlbstatic.com/team-logos/143.svg",
+      "sha256": "465da43739de56c09d5f8ec3328be11e9318f53959cc05979d3ab3d0a547a3bb"
+    },
+    {
+      "id": 144,
+      "name": "Atlanta Braves",
+      "team_name": "Braves",
+      "abbreviation": "ATL",
+      "file": "mlb-logo-144.svg",
+      "source": "https://www.mlbstatic.com/team-logos/144.svg",
+      "sha256": "11162237c379e6e6e54916ee4eebe4407961b4d37293b71b21868077d1bead0d"
+    },
+    {
+      "id": 145,
+      "name": "Chicago White Sox",
+      "team_name": "White Sox",
+      "abbreviation": "CWS",
+      "file": "mlb-logo-145.svg",
+      "source": "https://www.mlbstatic.com/team-logos/145.svg",
+      "sha256": "ca1ee0dc0e5a0f848703d0081ba60a12d44b0364da5c3b146985b6fe33f2e994"
+    },
+    {
+      "id": 146,
+      "name": "Miami Marlins",
+      "team_name": "Marlins",
+      "abbreviation": "MIA",
+      "file": "mlb-logo-146.svg",
+      "source": "https://www.mlbstatic.com/team-logos/146.svg",
+      "sha256": "6a6e50ca9bad01e65aaeb0557d9e7b4dc94647aea42fdd2549643aca35a767df"
+    },
+    {
+      "id": 147,
+      "name": "New York Yankees",
+      "team_name": "Yankees",
+      "abbreviation": "NYY",
+      "file": "mlb-logo-147.svg",
+      "source": "https://www.mlbstatic.com/team-logos/147.svg",
+      "sha256": "a9041069f46b033c0ecaa1472fd5a12da22f1f5af53fd8a686687540d5586fdd"
+    },
+    {
+      "id": 158,
+      "name": "Milwaukee Brewers",
+      "team_name": "Brewers",
+      "abbreviation": "MIL",
+      "file": "mlb-logo-158.svg",
+      "source": "https://www.mlbstatic.com/team-logos/158.svg",
+      "sha256": "9271da480f41d07eaa124a20dd4bc2dfaf879c17721b61bef9c45d8e6cc837d4"
+    },
+    {
+      "id": 108,
+      "name": "Los Angeles Angels",
+      "team_name": "Angels",
+      "abbreviation": "LAA",
+      "file": "mlb-logo-108.svg",
+      "source": "https://www.mlbstatic.com/team-logos/108.svg",
+      "sha256": "0b73a6c9523ac0a35a817516e13c4e96a7908dc0df389f01f8dba5d6c47d21e6"
+    },
+    {
+      "id": 109,
+      "name": "Arizona Diamondbacks",
+      "team_name": "D-backs",
+      "abbreviation": "AZ",
+      "file": "mlb-logo-109.svg",
+      "source": "https://www.mlbstatic.com/team-logos/109.svg",
+      "sha256": "b63b3aaf303ff3bd856c480ef855a0bdab1794e78185e3b791492c860fdf804a"
+    },
+    {
+      "id": 110,
+      "name": "Baltimore Orioles",
+      "team_name": "Orioles",
+      "abbreviation": "BAL",
+      "file": "mlb-logo-110.svg",
+      "source": "https://www.mlbstatic.com/team-logos/110.svg",
+      "sha256": "9e6476d34cd2e98e792cb73ef06e99b2c243089b3a7e102465db427ec3d26535"
+    },
+    {
+      "id": 111,
+      "name": "Boston Red Sox",
+      "team_name": "Red Sox",
+      "abbreviation": "BOS",
+      "file": "mlb-logo-111.svg",
+      "source": "https://www.mlbstatic.com/team-logos/111.svg",
+      "sha256": "53eb07384a14fcc54efb807581672b793c75cc1bfdc0c6610345051820cd92af"
+    },
+    {
+      "id": 112,
+      "name": "Chicago Cubs",
+      "team_name": "Cubs",
+      "abbreviation": "CHC",
+      "file": "mlb-logo-112.svg",
+      "source": "https://www.mlbstatic.com/team-logos/112.svg",
+      "sha256": "8fe99678c053859b50adbbe769aade0011ed6b2349962a9963dcc0b6db162aef"
+    },
+    {
+      "id": 113,
+      "name": "Cincinnati Reds",
+      "team_name": "Reds",
+      "abbreviation": "CIN",
+      "file": "mlb-logo-113.svg",
+      "source": "https://www.mlbstatic.com/team-logos/113.svg",
+      "sha256": "112b22efe0bb3f7352a0630068977526d2fbaf36c67a10683a8b2c9e966c1618"
+    },
+    {
+      "id": 114,
+      "name": "Cleveland Guardians",
+      "team_name": "Guardians",
+      "abbreviation": "CLE",
+      "file": "mlb-logo-114.svg",
+      "source": "https://www.mlbstatic.com/team-logos/114.svg",
+      "sha256": "5fada1700c1622777d64d1971e028ea7aca7729a11537736d4e88c6acada763e"
+    },
+    {
+      "id": 115,
+      "name": "Colorado Rockies",
+      "team_name": "Rockies",
+      "abbreviation": "COL",
+      "file": "mlb-logo-115.svg",
+      "source": "https://www.mlbstatic.com/team-logos/115.svg",
+      "sha256": "f4ac929c740e482a4c62127cbb0b04c9aa48848f6481dcabfd66f7c064abdd47"
+    },
+    {
+      "id": 116,
+      "name": "Detroit Tigers",
+      "team_name": "Tigers",
+      "abbreviation": "DET",
+      "file": "mlb-logo-116.svg",
+      "source": "https://www.mlbstatic.com/team-logos/116.svg",
+      "sha256": "90602ddfa5130edf47241fcde4152d7c7421b881af67ed3d66d0b5d700446c39"
+    },
+    {
+      "id": 117,
+      "name": "Houston Astros",
+      "team_name": "Astros",
+      "abbreviation": "HOU",
+      "file": "mlb-logo-117.svg",
+      "source": "https://www.mlbstatic.com/team-logos/117.svg",
+      "sha256": "fd2e9fa1d895e8cb88fb9ee3562acb6a1b9852158aa4793aa3a742097cc5556e"
+    },
+    {
+      "id": 118,
+      "name": "Kansas City Royals",
+      "team_name": "Royals",
+      "abbreviation": "KC",
+      "file": "mlb-logo-118.svg",
+      "source": "https://www.mlbstatic.com/team-logos/118.svg",
+      "sha256": "55678f28a752ec5ac86e290b2481b8a5e3d7de7460a3f469412147dc224eb32c"
+    },
+    {
+      "id": 119,
+      "name": "Los Angeles Dodgers",
+      "team_name": "Dodgers",
+      "abbreviation": "LAD",
+      "file": "mlb-logo-119.svg",
+      "source": "https://www.mlbstatic.com/team-logos/119.svg",
+      "sha256": "9840fd7c20fb4614a1797f1fcf9613586fb54dac49dbe4b894086aa07555280f"
+    },
+    {
+      "id": 120,
+      "name": "Washington Nationals",
+      "team_name": "Nationals",
+      "abbreviation": "WSH",
+      "file": "mlb-logo-120.svg",
+      "source": "https://www.mlbstatic.com/team-logos/120.svg",
+      "sha256": "69e019986481b7844b548fe2d1cdc88a58815d0b1b8cbf22bd65fcf17f3458d8"
+    },
+    {
+      "id": 121,
+      "name": "New York Mets",
+      "team_name": "Mets",
+      "abbreviation": "NYM",
+      "file": "mlb-logo-121.svg",
+      "source": "https://www.mlbstatic.com/team-logos/121.svg",
+      "sha256": "b8214420e8588f91928f45829e9abd8c5ac30df6293a29597b1aa7cc9bc972e0"
+    }
+  ]
+}

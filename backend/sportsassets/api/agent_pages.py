@@ -2255,6 +2255,11 @@ STATIC_FILES = {
                                   "private, max-age=604800, immutable"),
 }
 
+# Identifying MLB artwork, from the official MLB CDN; see source manifest.
+STATIC_FILES.update({"mlb-logo-%s.svg" % team_id: ("image/svg+xml", "private, max-age=86400")
+                     for team_id in (133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 158, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121)})
+STATIC_FILES["mlb-logo-sources.json"] = ("application/json", "private, max-age=86400")
+
 # ── LICENSED CHARACTER MODELS ───────────────────────────────────────
 MODELS_DIR = STATIC_DIR / "models"
 MODELS_URL = "/api/command/agents/static/models/"
