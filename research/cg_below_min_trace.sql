@@ -25,7 +25,7 @@ SELECT a.at, a.valuation_id, a.strategy, a.via, a.outcome, a.verdict,
 
 \echo '== T3 · the books those decisions used =='
 SELECT b.obs_id, b.observed_at, b.source, b.read_basis, b.error,
-       left(b.market_data::text, 700) AS market_data
+       left(b.offers::text, 300) AS offers, left(b.bids::text, 300) AS bids, b.venue_ts
   FROM paper_book_observations b
  WHERE b.obs_id IN (SELECT book_obs_id FROM paper_decisions
                      WHERE us_market_slug = 'aec-mlb-sd-mil-2026-10-03'
