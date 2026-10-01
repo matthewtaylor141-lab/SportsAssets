@@ -484,6 +484,27 @@ READERS = {
     # order of any kind.
     "agents/paper_learning.py": (
         "PAPER_ONLY_OUTCOME_READS_FOR_FORWARD_EVALUATION_NEVER_SELECTS", 3),
+    # (189) THE BOUNDED EXPLORATION STRATEGY: its candidate is the row the
+    # cycle just wrote, handed in by the benchmark hook (paper_benchmark,
+    # above); its own read is the SAMPLING FRAME -- a count of distinct
+    # fixtures per sport in the window, for the recorded inclusion
+    # probability. It selects nothing from the table.
+    "agents/paper_explore.py": (
+        "PAPER_ONLY_SAMPLING_FRAME_COUNT_NEVER_SELECTS", 1),
+    # (189) THE MAKER-ENTRY POLICY: its candidate also arrives through the
+    # benchmark hook; its reads re-check an already RESTING paper order
+    # against the latest Pinnacle reading for the same contract and payout
+    # outcome (the cancellation conditions), like paper Xavier's measure.
+    "agents/paper_maker.py": (
+        "PAPER_ONLY_RESTING_ORDER_RECHECK_NEVER_SELECTS", 2),
+    # (189) AUDREY'S OPERATIONAL AUDIT: counts valuations with no decision
+    # from an enabled strategy (missing decisions). Read-only; no order.
+    "agents/paper_ops_audit.py": (
+        "PAPER_ONLY_AUDIT_COUNT_NEVER_SELECTS", 1),
+    # (189) THE HOMEPAGE EXPERIMENT READ MODEL: counts of valuations,
+    # fixtures and sports evaluated. Display only.
+    "bettor_paper_experiment.py": (
+        "PAPER_ONLY_DISPLAY_COUNTS_NEVER_SELECTS", 2),
 }
 
 
