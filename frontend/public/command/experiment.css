@@ -1,0 +1,32 @@
+/* The experiment section of the management office (experiment.js). */
+.xp{margin:34px 0 8px;color:var(--office-ink,#edf2ed)}
+.xp-head{display:flex;align-items:flex-end;justify-content:space-between;gap:18px;flex-wrap:wrap;margin-bottom:14px}
+.xp-head h2{font-size:clamp(20px,2vw,28px);font-weight:500;letter-spacing:-.02em;margin:8px 0 0}
+.xp-sub{font-size:11.5px;color:var(--office-muted,#94a6ac);font-weight:400}
+.xp-banner{border:1px solid var(--office-line,#27383e);border-radius:10px;padding:10px 14px;font-size:13px;line-height:1.45;background:#101c22;margin-bottom:14px;overflow-wrap:anywhere}
+.xp-banner b{letter-spacing:.06em;font-size:11.5px}
+.xp-up{border-color:#36553f;background:#112019}.xp-up b{color:#a9e6b4}
+.xp-down{border-color:#6b4433;background:#24160f}.xp-down b{color:#f2b38f}
+.xp-signin{border-color:#6a5c2f;background:#211d0f}.xp-signin b{color:#f0d68a}
+.xp-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.xp-card{border:1px solid var(--office-line,#27383e);border-radius:12px;background:#0f1a20;padding:16px 18px;min-width:0}
+.xp-wide{grid-column:1/-1}
+.xp-card h3{font-size:14px;font-weight:600;margin:0 0 10px;letter-spacing:-.01em}
+.xp-k{font:12px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace;color:#b9cacb;margin:0 0 8px;overflow-wrap:anywhere}
+.xp-note{font-size:12px;line-height:1.5;color:var(--office-muted,#94a6ac);margin:10px 0 0}
+.xp-list{list-style:none;margin:0;padding:0;display:grid;gap:6px}
+.xp-list li{display:flex;justify-content:space-between;gap:12px;font-size:12.5px;border-bottom:1px dashed #22323a;padding-bottom:5px;min-width:0}
+.xp-list li span{color:#b9cacb;min-width:0;overflow-wrap:anywhere}.xp-list li b{font-weight:600;text-align:right;font-variant-numeric:tabular-nums}
+.xp-v-CURRENT{color:#a9e6b4}.xp-v-STALE{color:#f2b38f}.xp-v-NONE_YET,.xp-v-NONE{color:#94a6ac}
+.xp-tbl{overflow-x:auto;-webkit-overflow-scrolling:touch}
+.xp-tbl table{border-collapse:collapse;width:100%;font-size:12.5px;min-width:520px}
+.xp-tbl th{font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:#8fa3a8;font-weight:600;text-align:left;padding:6px 8px;border-bottom:1px solid #2a3b42}
+.xp-tbl td{padding:7px 8px;border-bottom:1px solid #1d2b32;vertical-align:top}
+.xp-tbl .n{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+.xp-why{color:#b9cacb;font-size:12px}
+.xp-chip{display:inline-block;font:700 9.5px/1 ui-monospace,monospace;letter-spacing:.08em;padding:3px 5px;border-radius:4px;border:1px solid currentColor;vertical-align:middle}
+.xp-INVESTMENT{color:#a9e6b4}.xp-MAKER{color:#9fd3ef}.xp-TRAINING{color:#f0d68a;border-style:dashed}.xp-RESEARCH{color:#94a6ac}
+.xp-lab{font-size:11px;color:#b9cacb}
+.xp-recs{margin:0;padding-left:18px;display:grid;gap:8px;font-size:12.5px;line-height:1.45}
+.xp-recs i{color:#94a6ac;font-style:normal}
+@media (max-width:900px){.xp-grid{grid-template-columns:minmax(0,1fr)}.xp-card{padding:14px}}

@@ -10,6 +10,7 @@
   <link rel="stylesheet" href="motion.css">
   <link rel="stylesheet" href="shadow.css">
   <link rel="stylesheet" href="office.css">
+  <link rel="stylesheet" href="experiment.css">
 </head>
 <body>
   <a class="skip-link" href="#pagebody">Skip to dashboard</a>
@@ -35,6 +36,9 @@
        -- the guard that refuses any host but this one. -->
   <script src="shadow.js"></script>
   <script src="app.js"></script>
+  <!-- THE EXPERIMENT: its own read (GET /api/command/paper/experiment), its
+       own polling; office.js places its section on the homepage. -->
+  <script src="experiment.js"></script>
   <script src="office.js"></script>
   <script src="paper.js"></script>
 
