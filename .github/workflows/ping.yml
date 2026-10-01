@@ -14,6 +14,11 @@ name: ping
 
 on:
   workflow_dispatch:
+    inputs:
+      demo:
+        description: "blank = read-only ping only; chat-voice = also run the authorized agent chat + speech demonstration (writes conversation records only)"
+        required: false
+        default: ""
 
 jobs:
   ping:
@@ -96,3 +101,53 @@ jobs:
           jq -c '{chat_llm: .chat.llm, voice: .speech.voice, personas}' /tmp/ps.json 2>/dev/null \
             | cut -c1-1500 | tee -a "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+  demo:
+    # AUTHORIZED DEMONSTRATION, OFF UNLESS demo == chat-voice. Each agent is
+    # asked one grounded question about the live paper session (POST .../chat
+    # writes a conversation record and nothing else), then one stored
+    # assistant message per agent is spoken (POST .../speak, audio bytes
+    # counted, not printed). No paper ledger, session, order or directive.
+    if: ${{ inputs.demo == 'chat-voice' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Chat and voice for Derek, Xavier and Audrey
+        shell: bash
+        env:
+          API: https://sportsassets-api.onrender.com
+          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+        run: |
+          set +e
+          [ -n "${ADMIN_TOKEN:-}" ] || { echo "no ADMIN_TOKEN secret"; exit 1; }
+          echo "::add-mask::$ADMIN_TOKEN"
+          H="X-Admin-Token: $ADMIN_TOKEN"
+          code=$(curl -s -o /tmp/acct.json -w '%{http_code}' --max-time 45 -H "$H" "$API/api/command/paper/account?entries=5")
+          echo "paper/account HTTP $code"
+          jq -c '{session: .session.session_id, active: .session.active, cash: .account.data.cash_usd, reserved: .account.data.reserved_usd, available: .account.data.available_usd, ledger_entries: .account.data.ledger_entries, consistent: .account.data.ledger_consistent}' /tmp/acct.json
+          Q="What are the paper account's cash, reserved and available balances right now, which paper session is running, and what have you decided today and why? Cite the records."
+          RID_BASE="demo-$(date -u +%Y%m%dT%H%M%S)"
+          for a in derek xavier audrey; do
+            echo "================ $a ================"
+            body=$(jq -nc --arg m "$Q" --arg r "$RID_BASE-$a" '{message:$m, request_id:$r}')
+            code=$(curl -s -o /tmp/chat_$a.json -w '%{http_code}' --max-time 120 -X POST -H "$H" \
+                   -H "Content-Type: application/json" -d "$body" "$API/api/command/agents/$a/chat")
+            echo "chat HTTP $code"
+            jq -r 'keys | join(",")' /tmp/chat_$a.json 2>/dev/null | sed 's/^/keys: /'
+            jq -c '{status, agent, role, conversation_id, user_message_id, assistant_message_id, message_id, provider: (.provider // .llm // null), persona: .persona.display_name}' /tmp/chat_$a.json 2>/dev/null
+            echo "--- answer ---"
+            jq -r '(.reply.text // .answer // .text // .assistant.text // .message.text // .reply // "") | tostring' /tmp/chat_$a.json 2>/dev/null | cut -c1-1800
+            echo "--- grounding ---"
+            jq -c '(.facts // .grounding // .citations // .reply.citations // null)' /tmp/chat_$a.json 2>/dev/null | cut -c1-1500
+            [ "$code" = "200" ] || head -c 1200 /tmp/chat_$a.json; echo
+            MID=$(jq -r '.assistant_message_id // .reply.message_id // .message_id // .assistant.message_id // empty' /tmp/chat_$a.json 2>/dev/null)
+            echo "speak message_id=$MID"
+            if [ -n "$MID" ]; then
+              code=$(curl -s -D /tmp/sh_$a.txt -o /tmp/speak_$a.bin -w '%{http_code}' --max-time 120 -X POST -H "$H" \
+                     -H "Content-Type: application/json" -d "$(jq -nc --arg m "$MID" '{message_id:$m}')" "$API/api/command/agents/$a/speak")
+              echo "speak HTTP $code bytes=$(wc -c < /tmp/speak_$a.bin) $(grep -i '^content-type' /tmp/sh_$a.txt | tr -d '\r') $(grep -i '^x-speech' /tmp/sh_$a.txt | tr -d '\r' | tr '\n' ' ')"
+              [ "$code" = "200" ] || head -c 600 /tmp/speak_$a.bin; echo
+            fi
+          done
+          code=$(curl -s -o /tmp/acct2.json -w '%{http_code}' --max-time 45 -H "$H" "$API/api/command/paper/account?entries=5")
+          echo "paper/account after HTTP $code"
+          jq -c '{session: .session.session_id, cash: .account.data.cash_usd, reserved: .account.data.reserved_usd, available: .account.data.available_usd, ledger_entries: .account.data.ledger_entries}' /tmp/acct2.json
