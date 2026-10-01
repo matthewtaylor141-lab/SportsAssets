@@ -764,6 +764,9 @@ STAGES = (
         "ONE_CLOCK_IS_NOT_MEASURED",
         # Lever A: already past the 30 s rule before any venue read.
         "QUOTE_STALE_ON_ARRIVAL",
+        # The candidate's 30 s budget ran out before or during its venue
+        # book read (ext_pinnacle_loop.BOOK_READ_DEADLINE_MARGIN_S).
+        "BOOK_READ_DEADLINE_WOULD_EXCEED_FRESHNESS",
         # THE VENUE READ'S OWN FRESHNESS REFUSALS. They used to stop the lane
         # before any row existed, so no row carried them; a calibration-only
         # record now does, and without these the census would attribute it
@@ -956,6 +959,9 @@ EVALUABILITY_OF = {
     # A MEASURED AGE PAST THE LIMIT, measured before the venue read instead
     # of after it. The same decision as QUOTE_STALE, taken earlier.
     "QUOTE_STALE_ON_ARRIVAL": DECIDED,
+    # The same 30 s rule, reached while the venue book was being read: the
+    # read could not finish before the price passed the limit.
+    "BOOK_READ_DEADLINE_WOULD_EXCEED_FRESHNESS": DECIDED,
     # THE GLOBAL MATCH FOUND TWO ROWS AND COULD NOT CHOOSE. Ours: the match
     # ignores dates, which is why the venue-native path exists.
     "VENUE_MAPPING_AMBIGUOUS": COULD_NOT_EVALUATE,

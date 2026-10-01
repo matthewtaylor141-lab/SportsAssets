@@ -1017,6 +1017,23 @@ ODDS_REFETCH_IS_NOT_A_RETRY = (
 #: hold the cycle open.
 VENUE_TIMEOUT_S = 10.0
 
+#: ── THE BOOK READ'S DEADLINE IS THE CANDIDATE'S OWN FRESHNESS BUDGET ──
+#:
+#: Measured 2026-09-30: 257 of 448 QUOTE_STALE_ON_ARRIVAL refusals were
+#: inside the 30 s rule when the provider handed them over and pushed past it
+#: by OUR processing -- each VENUE_BOOK_READ_FAILED timeout added ~10 s to
+#: every later candidate in the batch. The read was given no deadline, so the
+#: request gate could hold it for up to its 20 s undeadlined cap, longer than
+#: the 10 s bound, and the timeout arrived anonymous.
+#:
+#: The read now gets `provider_epoch + PINNACLE_MAX_AGE_S - this margin` as
+#: its deadline: the gate refuses by name instead of waiting past it, and the
+#: await is bounded by `min(VENUE_TIMEOUT_S, time left)`. A read that cannot
+#: finish inside that window could never have been admitted under the 30 s
+#: rule, so no threshold moves. The margin leaves the post-read work (rules,
+#: fixture metadata, the decision itself) a second before the rule expires.
+BOOK_READ_DEADLINE_MARGIN_S = 1.0
+
 #: The sharp books whose agreement counts toward per-outcome depth. Taken
 #: from `edge/fairvalue/feed.py`'s ANCHOR_BOOKS/SHARP_BOOKS set, which was
 #: built from observed production payloads. Pinnacle is the anchor and is
@@ -1279,6 +1296,10 @@ R_INTENT_NOT_LONG = "VENUE_CONTRACT_IS_NOT_LONG_ON_THE_PRICED_OUTCOME"
 R_NO_SLUG = "VENUE_MARKET_ROW_HAS_NO_SLUG"
 R_VENUE_READ_FAILED = "VENUE_BOOK_READ_FAILED"
 R_VENUE_READ_ERROR = "VENUE_BOOK_READ_RETURNED_ERROR"
+#: The candidate's Pinnacle freshness budget (see BOOK_READ_DEADLINE_MARGIN_S)
+#: ran out before, or while, its venue book was read. Refused by name, with
+#: the read's timing record, instead of an anonymous timeout.
+R_BOOK_READ_DEADLINE = "BOOK_READ_DEADLINE_WOULD_EXCEED_FRESHNESS"
 
 #: ── WHEN THE VENUE'S OWN CATALOGUE MAY STAND IN FOR THE GLOBAL ONE ───
 #:
@@ -1848,6 +1869,22 @@ def _venue_diagnostic(slug, exc, *, stage, code=None, feed=None) -> dict:
     return out
 
 
+#: THE AWAITING CALLER'S CHANNEL INTO THE READ THREAD. `venue_quote` sets a
+#: fresh dict here before `asyncio.to_thread`, which copies the context into
+#: the worker thread, so the thread sees the same dict:
+#:   deadline_epoch_s  in: the read's deadline when the caller passed none
+#:                     explicitly (the candidate's freshness budget);
+#:   read_id           out: the gate's per-read id, so an awaiting caller that
+#:                     times out can still read `grt.read_state` -- where the
+#:                     time went -- instead of discarding it with the thread;
+#:   final_state       out: the closed read's counters, for a thread that
+#:                     finished between the timeout and that read.
+#: Carried by context rather than a new argument so every existing stub of
+#: `_read_book_blocking(slug)` keeps its signature.
+_BOOK_READ_BUDGET: contextvars.ContextVar = contextvars.ContextVar(
+    "ext_pinnacle_book_read_budget", default=None)
+
+
 def _read_book_blocking(slug: str, *,
                         deadline_epoch_s: float | None = None) -> dict:
     """One PACED public book read, off the event loop. Never raises.
@@ -1886,7 +1923,14 @@ def _read_book_blocking(slug: str, *,
     # request's gap.
     from .. import venue_request_gate as grt
 
+    budget = _BOOK_READ_BUDGET.get()
+    if not isinstance(budget, dict):
+        budget = None
+    if deadline_epoch_s is None and budget is not None:
+        deadline_epoch_s = budget.get("deadline_epoch_s")
     read_id = grt.begin_read(slug=slug, deadline_epoch_s=deadline_epoch_s)
+    if budget is not None:
+        budget["read_id"] = read_id
     grt.bind_read(read_id)
     try:
         try:
@@ -1953,7 +1997,48 @@ def _read_book_blocking(slug: str, *,
         # attribute the NEXT read's requests to this one, which is exactly
         # the cross-read contamination the per-read id exists to prevent.
         grt.bind_read(None)
-        grt.end_read(read_id)
+        final = grt.end_read(read_id)
+        if budget is not None:
+            budget["final_state"] = final
+
+
+def _book_read_timing(budget, sent_at: float, timeout_s: float) -> dict:
+    """WHERE THE READ'S TIME WENT, kept when the await gives up on it.
+
+    `gate_wait_s` is time our own request gate held the read (completed holds
+    plus any hold still in progress); `venue_s` is the rest of the elapsed
+    time -- the pacing gap, the SDK and the network. `deadline_s` is the
+    budget the read was given, from the instant it was sent. Fields are None,
+    never 0, when the read never opened an id (it did not reach the gate).
+    """
+    from .. import venue_request_gate as grt
+
+    now = time.time()
+    b = budget if isinstance(budget, dict) else {}
+    rid = b.get("read_id")
+    st = (grt.read_state(rid) if rid else None) or b.get("final_state") or None
+    gate_wait = None
+    if st:
+        gate_wait = float(st.get("waited_s") or 0.0)
+        since = st.get("gate_wait_started_at")
+        if since is not None:
+            gate_wait += max(0.0, min(now, float(
+                st.get("gate_waiting_until") or now)) - float(since))
+    elapsed = now - float(sent_at)
+    dl = b.get("deadline_epoch_s")
+    return {
+        "read_id": rid,
+        "elapsed_s": round(elapsed, 3),
+        "gate_wait_s": None if gate_wait is None else round(gate_wait, 3),
+        "venue_s": (None if gate_wait is None
+                    else round(max(0.0, elapsed - gate_wait), 3)),
+        "deadline_s": None if dl is None else round(float(dl) - sent_at, 3),
+        "timeout_s": round(float(timeout_s), 3),
+        "dispatched": (st or {}).get("dispatched"),
+        "responses": (st or {}).get("responses"),
+        "gate_refusals": (st or {}).get("gate_refusals"),
+        "venue_s_basis": ("elapsed minus our gate's holds: the pacing gap, "
+                          "the SDK and the network")}
 
 
 #: Fields a live-progress observation would have to arrive in. Matched
@@ -2579,7 +2664,8 @@ def _displayed_market_state(basis: dict) -> dict:
 
 
 async def venue_quote(conn, *, us_slug, intent, now=None, size=None,
-                      subscription=None, revalidation=None):
+                      subscription=None, revalidation=None,
+                      freshness_deadline_epoch_s=None):
     """Contemporaneous ACQUISITION ladder for one venue contract.
 
     `intent` IS THE SIDE, AND IT IS REQUIRED. This used to take an
@@ -2641,8 +2727,17 @@ async def venue_quote(conn, *, us_slug, intent, now=None, size=None,
     say what the venue displayed; no reader may size, reserve or send
     against it, and it is deliberately NOT under `ask`, `acquisition_price`
     or `acquisition_ladder`, the keys an order path reads.
+
+    ── THE READ'S DEADLINE (BOOK_READ_DEADLINE_MARGIN_S) ──────────────
+    `freshness_deadline_epoch_s` is the instant the candidate's Pinnacle
+    price passes PINNACLE_MAX_AGE_S. When given, the read is refused by name
+    (R_BOOK_READ_DEADLINE) without a request if less than the margin is
+    left; otherwise the gate gets `deadline - margin` as the read's deadline
+    and the await is bounded by the time left, never by more than
+    VENUE_TIMEOUT_S. Every failed read carries `read_timing`.
     """
     from .. import bettor_book_snapshot as bs
+    from .. import venue_request_gate as grt
 
     # THE VENUE'S OWN SLUG, SUPPLIED BY THE CALLER. This used to read
     # `markets.slug` -- the GLOBAL catalogue's id -- and hand it to a US
@@ -2659,16 +2754,60 @@ async def venue_quote(conn, *, us_slug, intent, now=None, size=None,
     # our own latency is worth knowing -- NOT because it bounds the age of
     # the book. See the note on our own clocks below.
     request_sent_at = time.time()
+    timeout_s = VENUE_TIMEOUT_S
+    budget = {"deadline_epoch_s": None, "read_id": None}
+    if freshness_deadline_epoch_s is not None:
+        read_deadline = (float(freshness_deadline_epoch_s)
+                         - BOOK_READ_DEADLINE_MARGIN_S)
+        budget["deadline_epoch_s"] = read_deadline
+        remaining = read_deadline - request_sent_at
+        if remaining <= 0:
+            # NO READ AT ALL: it could only finish after the 30 s rule.
+            timing = _book_read_timing(budget, request_sent_at, 0.0)
+            diag = _venue_diagnostic(slug, None, stage="BOOK_READ_BUDGET",
+                                     code=R_BOOK_READ_DEADLINE)
+            diag["read_timing"] = timing
+            return {"ok": False, "refusal": R_BOOK_READ_DEADLINE,
+                    "read_issued": False,
+                    "why": ("%.3f s of the candidate's freshness budget left, "
+                            "under the %.1f s margin; not read"
+                            % (remaining + BOOK_READ_DEADLINE_MARGIN_S,
+                               BOOK_READ_DEADLINE_MARGIN_S)),
+                    "read_timing": timing, "diagnostic": diag}
+        timeout_s = min(VENUE_TIMEOUT_S, remaining)
+    token = _BOOK_READ_BUDGET.set(budget)
     try:
         book = await asyncio.wait_for(
             asyncio.to_thread(_read_book_blocking, slug),
-            timeout=VENUE_TIMEOUT_S)
+            timeout=timeout_s)
     except Exception as exc:                                   # noqa: BLE001
-        return {"ok": False, "refusal": R_VENUE_READ_FAILED,
+        timing = _book_read_timing(budget, request_sent_at, timeout_s)
+        diag = _venue_diagnostic(slug, exc, stage="BOOK_READ_AWAIT")
+        diag["read_timing"] = timing
+        # BOUND BY THE BUDGET, NOT BY VENUE_TIMEOUT_S: the freshness rule, not
+        # the venue bound, is what ended this read.
+        by_budget = (isinstance(exc, asyncio.TimeoutError)
+                     and timeout_s < VENUE_TIMEOUT_S)
+        return {"ok": False,
+                "refusal": R_BOOK_READ_DEADLINE if by_budget
+                else R_VENUE_READ_FAILED,
                 "why": "book read failed: %s" % type(exc).__name__,
                 "exception": type(exc).__name__,
-                "diagnostic": _venue_diagnostic(slug, exc,
-                                                stage="BOOK_READ_AWAIT")}
+                "read_timing": timing, "diagnostic": diag}
+    finally:
+        _BOOK_READ_BUDGET.reset(token)
+    if (book.get("refused_by") == "OUR_REQUEST_GATE"
+            and freshness_deadline_epoch_s is not None
+            and book.get("error") in (grt.R_DEADLINE_PASSED,
+                                      grt.R_COOLDOWN_EXCEEDS_DEADLINE)):
+        # OUR GATE REFUSED RATHER THAN HOLD PAST THE FRESHNESS DEADLINE.
+        timing = _book_read_timing(budget, request_sent_at, timeout_s)
+        diag = dict(book.get("diagnostic") or {})
+        diag["read_timing"] = timing
+        return {"ok": False, "refusal": R_BOOK_READ_DEADLINE,
+                "why": "our request gate refused: %s" % book["error"],
+                "gate_refusal": book["error"],
+                "read_timing": timing, "diagnostic": diag}
     if book.get("error"):
         diag = book.get("diagnostic") or {}
         return {"ok": False, "refusal": R_VENUE_READ_ERROR,
@@ -7717,8 +7856,15 @@ async def cycle(conn) -> dict:
                 conn, us_slug=ident["us_market_slug"],
                 intent=ident["intent"], now=read_at,
                 subscription=_cev.get("subscription"),
-                revalidation=_cev.get("revalidation"))
-            lat["venue_requests"] += 1
+                revalidation=_cev.get("revalidation"),
+                # THE READ'S DEADLINE IS THIS CANDIDATE'S OWN 30 s BUDGET, so
+                # a slow or held read costs later candidates at most what
+                # this one had left (BOOK_READ_DEADLINE_MARGIN_S).
+                freshness_deadline_epoch_s=(
+                    None if _pe is None
+                    else float(_pe) + PINNACLE_MAX_AGE_S))
+            if vq.get("read_issued", True):
+                lat["venue_requests"] += 1
             # ONLY A SUCCESSFUL READ CLAIMS THE INSTRUMENT. Recording a
             # refusal would suppress every retry on that instrument for the
             # rest of the cycle, so one transient venue error would refuse
@@ -7763,6 +7909,10 @@ async def cycle(conn) -> dict:
                          "limit_s": vq.get("limit_s"),
                          "age_basis": vq.get("age_basis"),
                          "age_semantics": VENUE_CLOCK_SEMANTICS}
+                # WHERE A FAILED READ'S TIME WENT (gate wait vs venue, and
+                # the deadline it had), kept rather than lost with the thread.
+                if vq.get("read_timing") is not None:
+                    _vq_entry["read_timing"] = vq.get("read_timing")
                 _ledger(_vq_entry)
                 # THE VENUE'S OWN WORDS, kept. Run 22 named this refusal
                 # `VENUE_BOOK_READ_RETURNED_ERROR 2` -- which is the right

@@ -243,11 +243,20 @@ def check_before_dispatch(*, read_id: str = None, deadline_epoch_s=None,
         _note_gate_refusal(read_id, detail)
         raise VenueGateRefusal(R_COOLDOWN_EXCEEDS_DEADLINE, detail)
 
+    # A HOLD IN PROGRESS IS VISIBLE. `waited_s` is only added once the sleep
+    # ends, so a caller that stops awaiting mid-hold would otherwise read the
+    # whole hold as venue time.
+    with _LOCK:
+        if read_id and read_id in _reads:
+            _reads[read_id]["gate_wait_started_at"] = wall
+            _reads[read_id]["gate_waiting_until"] = wall + wait
     (sleep or time.sleep)(wait)
     with _LOCK:
         _totals["waited_s"] += wait
         if read_id and read_id in _reads:
             _reads[read_id]["waited_s"] += wait
+            _reads[read_id].pop("gate_wait_started_at", None)
+            _reads[read_id].pop("gate_waiting_until", None)
     return {"waited_s": wait, "gated": True, "reason": g["reason"]}
 
 
