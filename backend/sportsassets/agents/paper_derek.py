@@ -528,6 +528,18 @@ async def decide_one(conn, ctx: dict, row: dict) -> dict:
     rec = {"decision_id": did, "verdict": verdict,
            "refusal": refusals[0] if refusals else None,
            "refusals": refusals}
+    alts = _alternatives(md, side=side or "LONG", p_blended=p_blend)
+    # THE LEARNING RECORD (migration 185): versions, the inputs as read with
+    # their SHA-256, prices, fees, alternatives and a plain explanation, in
+    # the same INSERT. Building it never stops the decision being recorded.
+    provenance = decision_provenance(
+        strategy=STRATEGY, code_version=VERSION, policy_version=DP.POLICY_V2,
+        row=row, session=ctx.get("session"), verdict=verdict,
+        refusals=refusals, policy_decision=pd, internal_model=internal_rec,
+        pinnacle=pin, book=book, limit_price=sized.get("limit"),
+        qty=sized.get("qty"), alternatives=alts, optimistic=optimistic,
+        simulator_version=cfg["simulator_version"],
+        decided_via=pin.get("decided_via"), at=at)
     inserted = await conn.fetchval(
         "INSERT INTO paper_decisions (decision_id, session_id, account_id, "
         " decided_at, valuation_id, us_market_slug, holding_side, intent, "
@@ -535,9 +547,10 @@ async def decide_one(conn, ctx: dict, row: dict) -> dict:
         " internal_model, p_pinnacle, pinnacle, p_blended, book_obs_id, "
         " book, proposed_qty, limit_price, economics, qualification_gaps, "
         " policy_version, policy_decision, alternatives, optimistic, "
-        " simulator_version) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,"
-        " $11,$12,$13,$14,$15::jsonb,$16,$17::jsonb,$18,$19,$20::jsonb,$21,"
-        " $22,$23::jsonb,$24::jsonb,$25,$26::jsonb,$27::jsonb,$28::jsonb,$29)"
+        " simulator_version, provenance) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,"
+        " $10::jsonb,$11,$12,$13,$14,$15::jsonb,$16,$17::jsonb,$18,$19,"
+        " $20::jsonb,$21,$22,$23::jsonb,$24::jsonb,$25,$26::jsonb,$27::jsonb,"
+        " $28::jsonb,$29,$30::jsonb)"
         " ON CONFLICT DO NOTHING RETURNING decision_id",
         did, ctx["session_id"], ctx["account_id"], L._ts(at),
         cand["valuation_id"], cand.get("us_market_slug"), side,
@@ -552,10 +565,9 @@ async def decide_one(conn, ctx: dict, row: dict) -> dict:
         None if econ is None else json.dumps(econ, default=str),
         json.dumps(gaps, default=str), DP.POLICY_V2,
         None if pd is None else json.dumps(pd, default=str),
-        json.dumps(_alternatives(md, side=side or "LONG",
-                                 p_blended=p_blend), default=str),
+        json.dumps(alts, default=str),
         None if optimistic is None else json.dumps(optimistic, default=str),
-        cfg["simulator_version"])
+        cfg["simulator_version"], json.dumps(provenance, default=str))
     if inserted is None:
         # ANOTHER WRITER (the in-cycle hook or a racing pass) RECORDED THIS
         # VALUATION'S DECISION FIRST. Its record stands; nothing is sent on
@@ -595,6 +607,19 @@ async def decide_one(conn, ctx: dict, row: dict) -> dict:
                                **{k: v for k, v in got.items()
                                   if k not in ("ok",)}})
     return rec
+
+
+def decision_provenance(**kw) -> dict:
+    """THE LEARNING RECORD OF ONE PAPER DECISION (migration 185), for this
+    strategy and the benchmark policies alike: built by
+    `paper_learning.safe_provenance` (loaded only when a decision is made).
+    Never raises -- a failure is recorded on the decision instead."""
+    try:
+        from . import paper_learning as PLRN
+    except Exception as exc:                                    # noqa: BLE001
+        return {"error": "PAPER_LEARNING_UNAVAILABLE: %s"
+                % type(exc).__name__}
+    return PLRN.safe_provenance(**kw)
 
 
 async def entries_switch(conn) -> dict:

@@ -511,6 +511,13 @@ try:
     app.include_router(_command_paper_router)
 except ImportError:
     log.warning("paper: api.command_paper not loaded", exc_info=True)
+# ── THE PAPER LEARNING RECORD (migration 185): /api/command/paper/learning*
+# Read-only, COMMAND auth: chains, Audrey's event audits, lessons, proposals.
+try:
+    from .paper_learning_routes import router as _paper_learning_router
+    app.include_router(_paper_learning_router)
+except ImportError:
+    log.warning("paper: api.paper_learning_routes not loaded", exc_info=True)
 # AFTER agents_chat: its literal /api/command/agents/audrey/chat keeps
 # Audrey's management-chat contract; the persona chat answers
 # /api/command/agents/{derek,xavier}/chat and /{agent}/persona/chat for all

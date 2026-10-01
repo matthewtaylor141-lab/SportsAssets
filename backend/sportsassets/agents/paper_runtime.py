@@ -26,6 +26,9 @@ run):
               scheduled backstop); standing protection
     equity    one equity snapshot (drawdown is measured on these)
     audrey    continuous monitoring and the daily report (America/New_York)
+    audrey_events  Audrey's audit of each meaningful event, as it happens
+    learning  lessons in each agent's memory and improvement proposals
+              from forward records (at most hourly; paper only)
 
 THE MARKET-DATA CLIENT is a `bettor_paper_guard.PaperMarketDataClient`: one
 read, every mutation refused before transmission and counted in the
@@ -169,6 +172,18 @@ def default_steps() -> list:
     try:
         from . import paper_audrey as PA
         steps.append(("audrey", PA.step))
+    except ImportError:
+        pass
+    try:
+        # THE LEARNING RECORD (migration 185): Audrey audits each meaningful
+        # event of this pass as it happens (first fill, handoff, management
+        # fill, settlement incl. SETTLED_AT_VENUE_PRICE, exceptional outcome,
+        # ledger inconsistency) -- once per event -- and, at most hourly,
+        # the agents' lessons and improvement proposals are derived from the
+        # forward records. Neither places, cancels or changes an order.
+        from . import paper_learning as PLRN
+        steps.append(("audrey_events", PLRN.step_audit_events))
+        steps.append(("learning", PLRN.step_learning))
     except ImportError:
         pass
     return steps

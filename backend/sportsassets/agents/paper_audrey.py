@@ -444,7 +444,15 @@ OWNER_OF = {"LEDGER_INCONSISTENT": "AUDREY",
             "REPORT_DOES_NOT_RECONCILE": "AUDREY",
             "CONFLICTING_SETTLEMENT_EVIDENCE": "AUDREY",
             "OBJECTIVE_SHORTFALL": "DEREK",
-            "PAPER_RISK_REFUSED_THE_ORDER": "DEREK"}
+            "PAPER_RISK_REFUSED_THE_ORDER": "DEREK",
+            # THE EVENT AUDITS (agents/paper_learning.py, migration 185)
+            "PAPER_EVENT_FIRST_FILL": "DEREK",
+            "PAPER_EVENT_HANDOFF": "XAVIER",
+            "PAPER_EVENT_MANAGEMENT_FILL": "XAVIER",
+            "PAPER_EVENT_SETTLEMENT": "AUDREY",
+            "PAPER_EVENT_SETTLED_AT_VENUE_PRICE": "AUDREY",
+            "PAPER_EVENT_EXCEPTIONAL_OUTCOME": "DEREK",
+            "PAPER_EVENT_LEDGER_INCONSISTENCY": "AUDREY"}
 
 
 async def finding(conn, ctx: dict, *, kind: str, subject: str,

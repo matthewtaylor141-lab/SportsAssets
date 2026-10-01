@@ -1053,6 +1053,19 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
     rec = {"decision_id": did, "verdict": verdict, "strategy": STRATEGY,
            "refusal": refusals[0] if refusals else None,
            "refusals": refusals, "shortfall": short}
+    alts = _alternatives(md, side=side or "LONG", p=p)
+    # THE LEARNING RECORD (migration 185): versions, the inputs as read with
+    # their SHA-256, prices, fees, alternatives and a plain explanation, in
+    # the same INSERT. Building it never stops the decision being recorded.
+    provenance = PD.decision_provenance(
+        strategy=STRATEGY, code_version=VERSION, policy_version=VERSION,
+        row=row, session=ctx.get("session"), verdict=verdict,
+        refusals=refusals, policy_decision=policy_decision,
+        internal_model=internal_rec, pinnacle=pin, book=book,
+        limit_price=sized.get("limit"), qty=sized.get("qty"),
+        alternatives=alts, optimistic=optimistic,
+        simulator_version=cfg["simulator_version"],
+        decided_via=pin.get("decided_via"), at=at)
     inserted = await conn.fetchval(
         "INSERT INTO paper_decisions (decision_id, session_id, account_id, "
         " decided_at, valuation_id, us_market_slug, holding_side, intent, "
@@ -1060,10 +1073,11 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
         " internal_model, p_pinnacle, pinnacle, p_blended, book_obs_id, "
         " book, proposed_qty, limit_price, economics, qualification_gaps, "
         " policy_version, policy_decision, alternatives, optimistic, "
-        " simulator_version, strategy) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,"
-        " $10::jsonb,$11,$12,$13,NULL,$14::jsonb,$15,$16::jsonb,NULL,$17,"
-        " $18::jsonb,$19,$20,$21::jsonb,$22::jsonb,$23,$24::jsonb,$25::jsonb,"
-        " $26::jsonb,$27,$28) ON CONFLICT DO NOTHING RETURNING decision_id",
+        " simulator_version, strategy, provenance) VALUES ($1,$2,$3,$4,$5,"
+        " $6,$7,$8,$9,$10::jsonb,$11,$12,$13,NULL,$14::jsonb,$15,$16::jsonb,"
+        " NULL,$17,$18::jsonb,$19,$20,$21::jsonb,$22::jsonb,$23,$24::jsonb,"
+        " $25::jsonb,$26::jsonb,$27,$28,$29::jsonb) ON CONFLICT DO NOTHING "
+        " RETURNING decision_id",
         did, ctx["session_id"], ctx["account_id"], L._ts(at),
         cand["valuation_id"], cand.get("us_market_slug"), side,
         cand.get("side"), cand.get("fixture"),
@@ -1076,9 +1090,10 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
         (None if sized.get("limit") is None else L.D(sized["limit"])),
         json.dumps(economics_rec, default=str), json.dumps(gaps, default=str),
         VERSION, json.dumps(policy_decision, default=str),
-        json.dumps(_alternatives(md, side=side or "LONG", p=p), default=str),
+        json.dumps(alts, default=str),
         None if optimistic is None else json.dumps(optimistic, default=str),
-        cfg["simulator_version"], STRATEGY)
+        cfg["simulator_version"], STRATEGY,
+        json.dumps(provenance, default=str))
     if inserted is None:
         return dict(rec, duplicate=True)
     if verdict != DP.ENTER:
