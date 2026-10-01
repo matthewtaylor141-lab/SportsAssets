@@ -1650,7 +1650,8 @@ PAPER_BOOT_JS = r"""
     var ps = O.panels(kind, OPS);
     Object.keys(ps).forEach(function (id) { setPanel(id, ps[id].status, ps[id].html); });
     var k = $('cc-kpis');
-    if (k) k.innerHTML = O.kpis(kind, OPS).map(function (x) { return '<div class="cc-kpi"><div class="lbl">' + AG.esc(x.label) + '</div><div class="v">' + x.value + '</div>' + (x.sub ? '<div class="s">' + x.sub + '</div>' : '') + '</div>'; }).join('');
+    var kl = O.kpis(kind, OPS);   // one figure (a failed read) spans the row: the state is never broken mid-word
+    if (k) k.innerHTML = kl.map(function (x) { return '<div class="cc-kpi"' + (kl.length === 1 ? ' style="grid-column:1/-1"' : '') + '><div class="lbl">' + AG.esc(x.label) + '</div><div class="v">' + x.value + '</div>' + (x.sub ? '<div class="s">' + x.sub + '</div>' : '') + '</div>'; }).join('');
     var sl = O.stageLine(OPS, nowS());
     if ($('cc-state')) $('cc-state').innerHTML = sl.state;
     if ($('cc-hb')) $('cc-hb').innerHTML = sl.hb;
