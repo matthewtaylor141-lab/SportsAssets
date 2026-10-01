@@ -697,7 +697,8 @@ var AG = (function () {
     var r;
     try { r = await f(url, FETCH_OPTS); }
     catch (e) { return {kind: 'UNAVAILABLE', why: 'network error: ' + ((e && e.name) || 'Error')}; }
-    if (r.status === 401) return {kind: 'LOCKED', status: 401};
+    // 401 (no session) and 403 (expired or wrong scope) both mean: sign in
+    if (r.status === 401 || r.status === 403) return {kind: 'LOCKED', status: r.status};
     if (r.status === 404) return {kind: 'NOT_DEPLOYED', status: 404};
     if (!r.ok) {
       var why = 'HTTP ' + r.status;
@@ -1849,7 +1850,7 @@ _CC_SHELL = r"""<!doctype html>
 <p class="note">Follows the ids the records carry (entry_intent_id, portfolio_group_id, xavier_decision_id, directive_id, task_id, candidate_id, and evidence references) across the four same-origin reads. Every step says what linked it.</p><div id="trace-body"></div></section>
 <h2 class="cc-h2" id="full-record">Full workspace record (funded)</h2>
 <div id="app"><p class="boot">Reading %%ENDPOINT%% &#8230;</p></div>%%FUNDED_CLOSE%%</main>
-<p class="foot">Presentation of recorded state. This page sends no order and holds no credential; it reads %%ENDPOINT%% with the COMMAND session. The character is an original stylised illustration of an AI agent; its pose follows the paper runtime's own heartbeat (paper_session_health) and never stands in for data. UNKNOWN is not zero; EMPTY is not success.%%CREDIT%%</p>
+<p class="foot">Presentation of recorded state. This page sends no order and holds no credential; it reads %%ENDPOINT%% with the COMMAND session. The 3D characters are licensed Microsoft Rocketbox models (MIT licence, credited below; shipped with their licence file); a device that cannot draw them shows a 2D portrait card. The pose follows the paper runtime's own heartbeat (paper_session_health) and never stands in for data. UNKNOWN is not zero; EMPTY is not success.%%CREDIT%%</p>
 <script>%%JS%%</script>
 <script type="module">%%LOADER%%</script></body></html>"""
 

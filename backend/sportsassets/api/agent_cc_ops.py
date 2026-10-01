@@ -55,9 +55,10 @@ OPS_PANELS = {
          "paper_decisions where strategy is DEREK_ENTRY_POLICY_V2"),
     ),
     "xavier": (
-        ("p-ops-handoffs", "Paper positions handed to Xavier",
-         "paper_handoffs (every one, with its strategy) and the open "
-         "positions from the one paper ledger"),
+        ("p-ops-handoffs", "Positions Xavier owns",
+         "paper_handoffs (every one, with its strategy), the positions of "
+         "the one paper ledger, his latest review per position and the "
+         "entry decision's scenario economics"),
         ("p-ops-reviews", "Xavier's management reviews",
          "paper_xavier_reviews"),
         ("p-ops-protection", "Standing protection and management orders",
@@ -70,8 +71,16 @@ OPS_PANELS = {
         ("p-ops-account", "Paper account performance",
          "bettor_paper_ledger.balances over the one paper ledger; P&amp;L by "
          "the strategy each position keeps for life"),
-        ("p-ops-findings", "Audrey's audits and findings",
-         "paper_audrey_findings"),
+        ("p-ops-performance", "Agent performance by strategy",
+         "paper_decisions, paper_orders and the positions of the one paper "
+         "ledger, per strategy"),
+        ("p-ops-findings", "Audrey's event-driven audits and findings",
+         "paper_audrey_findings (event audits from the paper learning "
+         "record: first fill, handoff, management fill, settlement, "
+         "SETTLED_AT_VENUE_PRICE, exceptional outcome, ledger)"),
+        ("p-ops-learning", "Lessons and improvement proposals",
+         "GET /api/command/paper/learning (agents.paper_learning): lessons, "
+         "proposals, evaluation status, activation state"),
         ("p-ops-report", "Audrey's daily report",
          "paper_audrey_reports (latest version per day)"),
     ),
@@ -125,7 +134,7 @@ details.dec .expl{margin:8px 0;font-size:12.5px;line-height:1.45;overflow-wrap:a
 .pfig6{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:1px;background:var(--line);border:1px solid var(--line);border-radius:12px;overflow:hidden;margin-bottom:10px}
 .pfig6>div{background:var(--panel);padding:9px 11px;min-width:0}.pfig6 .v{font:600 17px/1.25 var(--display);margin-top:3px;overflow-wrap:anywhere}
 .pfig6 .v .ns{color:var(--warn);font:700 12px/1.3 var(--mono)}
-.cc-funded{margin-top:28px;border:1px dashed var(--line-2);border-radius:16px;background:var(--bg-2);padding:0 14px}
+.cc-funded{overflow-x:hidden;max-width:100%;margin-top:28px;border:1px dashed var(--line-2);border-radius:16px;background:var(--bg-2);padding:0 14px}
 .cc-funded>summary{list-style:none;cursor:pointer;padding:14px 4px;display:flex;flex-wrap:wrap;gap:6px 12px;align-items:baseline}
 .cc-funded>summary::-webkit-details-marker{display:none}
 .cc-funded>summary h2{margin:0;font:600 18px/1.2 var(--serif);color:var(--ink-2)}
@@ -133,6 +142,7 @@ details.dec .expl{margin:8px 0;font-size:12.5px;line-height:1.45;overflow-wrap:a
 .cc-funded>summary::after{content:"Show";margin-left:auto;font:600 11px/1 var(--mono);color:var(--ink-3);border:1px solid var(--line-2);border-radius:6px;padding:5px 8px}
 .cc-funded[open]>summary::after{content:"Hide"}
 .cc-funded[open]{padding-bottom:14px}
+.cc-funded .evs,.cc-funded a.ev,.cc-funded .mandate,.cc-funded .chips{overflow-wrap:anywhere;flex-wrap:wrap}
 .cc-funded .fstate{font:12px/1.45 var(--mono);color:var(--ink-3);margin:0 0 10px;overflow-wrap:anywhere}
 /* the character: names above, status and captions below; nothing over the figure */
 .cc-stagewrap{display:flex;flex-direction:column;gap:8px;min-width:0}
@@ -146,11 +156,27 @@ details.dec .expl{margin:8px 0;font-size:12.5px;line-height:1.45;overflow-wrap:a
 .cc-stagewrap:has(.cc-real-model.cc-candidate) .cc-placeholder{display:inline-block}
 .cc-stagewrap .cc-st{position:static;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:10px 12px;overflow-wrap:anywhere}
 .cc-stagewrap .cc-stage{min-height:400px}
+/* the one account strip and the sign-in prompt */
+.cc-acct{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:10px 12px;margin:0 0 14px}
+.cc-acct .acct7{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:8px;margin-top:6px}
+.cc-acct .acct7>div{min-width:0}.cc-acct small{display:block;font:600 10px/1.3 var(--mono);letter-spacing:.06em;color:var(--ink-3);text-transform:uppercase}
+.cc-acct b{display:block;font:600 15px/1.3 var(--display);font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
+.cc-signin{margin:0 0 14px;padding:12px 14px;border-radius:12px;border:1px solid var(--warn);background:color-mix(in oklab,var(--warn) 12%,var(--panel));color:var(--ink);font-size:13.5px;line-height:1.5;overflow-wrap:anywhere}
+.cc-signin b{color:var(--warn);font:700 12px/1.3 var(--mono);letter-spacing:.08em}
+.cc-signin a{font-weight:700;color:var(--acc-2)}
+.mname{min-width:0}.mname .mn1{font:650 13.5px/1.3 var(--display);color:var(--ink);overflow-wrap:anywhere}.mname .mn2{font:12px/1.35 var(--sans);color:var(--ink-2);overflow-wrap:anywhere}
+details.dec .dfig{flex-basis:100%;font:12px/1.4 var(--mono);color:var(--ink-2);overflow-wrap:anywhere}
+.pboxes{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.6fr);gap:8px;margin-top:8px}
+.pbox{border:1px solid var(--line);border-radius:10px;padding:8px 10px;min-width:0}.pbox .v{font:600 16px/1.3 var(--display)}
+.pbox.real{border-color:color-mix(in oklab,var(--ok) 45%,var(--line))}.pbox.risk{border-style:dashed;border-color:color-mix(in oklab,var(--warn) 45%,var(--line))}
+.unm{color:var(--warn)}.recon{font:650 12px/1.4 var(--mono);margin:0 0 10px;padding:7px 10px;border-radius:8px;border:1px solid currentColor;overflow-wrap:anywhere}.recon.ok{color:var(--ok)}.recon.bad{color:var(--bad)}
 /* long technical strings wrap; nothing is clipped at phone width */
+.cc-p.ops,.cc-p.paper,.cc-raw,.cc-acct,.cc-fresh{overflow-wrap:anywhere}
+.cc-p.ops time,.cc-fresh time,.cc-acct time,.cc-signin time,.cc-kpis time,.cc-funded time{white-space:normal}
 .orow .oh>*,.ocounts .v,.ocounts .v *,.cc-kpi .s,.cc-kpi .v,.olist li *{min-width:0;overflow-wrap:anywhere;white-space:normal}
 .schip,.ostat{white-space:normal;overflow-wrap:anywhere;max-width:100%}
-@media (max-width:1000px){.cc-fresh{grid-template-columns:1fr}.pfig6{grid-template-columns:repeat(2,minmax(0,1fr))}}
-@media (max-width:760px){.cc-stagewrap .cc-stage{min-height:300px}.cc-kpi .v{font-size:17px}.ocounts{grid-template-columns:repeat(2,minmax(0,1fr))}.cc-top .meta{flex-wrap:wrap;white-space:normal}}
+@media (max-width:1000px){.cc-acct .acct7{grid-template-columns:repeat(4,minmax(0,1fr))}.pboxes{grid-template-columns:1fr}.cc-fresh{grid-template-columns:1fr}.pfig6{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:760px){.cc-acct .acct7{grid-template-columns:repeat(2,minmax(0,1fr))}.cc-stagewrap .cc-stage{min-height:300px}.cc-kpi .v{font-size:17px}.ocounts{grid-template-columns:repeat(2,minmax(0,1fr))}.cc-top .meta{flex-wrap:wrap;white-space:normal}}
 """
 
 
@@ -163,9 +189,28 @@ def _panel(pid: str, title: str, src: str) -> str:
             % (pid, pid, pid, title, src))
 
 
+#: THE SEVEN ACCOUNT FIGURES every page shows, in this order, from the one
+#: account read (bettor_paper_ops.account_section -> ledger balances()). The
+#: homepage (paper.js) uses the same keys, labels and formatting rule.
+ACCOUNT_FIGURES = (
+    ("cash_usd", "Cash"), ("reserved_usd", "Reserved"),
+    ("available_usd", "Available"), ("open_position_value_usd", "Position value"),
+    ("total_equity_usd", "Equity"), ("realized_pnl_usd", "Realized P&L"),
+    ("unrealized_pnl_usd", "Unrealized P&L"))
+
+#: WHERE A SIGNED-OUT VIEWER SIGNS IN: the COMMAND homepage's unlock (the
+#: frame's parent, opened in the top window); unframed, the desk page.
+SIGNIN_HREF = "/"
+
+
 def fresh_html() -> str:
-    """The three freshness stamps, before any read (filled by CC.ops.fresh)."""
-    return ('<section class="cc-fresh" id="paper-fresh" aria-label="Freshness '
+    """The sign-in prompt (hidden until a read answers 401/403), the three
+    freshness stamps and the one account strip, before any read (filled by
+    CC.ops.fresh / CC.ops.accountStrip)."""
+    return ('<div class="cc-signin" id="cc-signin" role="alert" hidden></div>'
+            '<section class="cc-acct" id="paper-acct" aria-label="Paper account '
+            'figures" data-status="READING"><div class="lbl">Paper account '
+            '&#183; reading&#8230;</div></section>' + ('<section class="cc-fresh" id="paper-fresh" aria-label="Freshness '
             'of the paper view" aria-live="polite">'
             '<div data-fresh="read"><div class="lbl">Last successful server read'
             '</div><div class="fv">reading&#8230;</div></div>'
@@ -174,7 +219,7 @@ def fresh_html() -> str:
             '<div data-fresh="ledger"><div class="lbl">Last ledger transaction'
             '</div><div class="fv">reading&#8230;</div></div>'
             '<div class="fconn" data-fresh="conn">Live updates: connecting'
-            '&#8230;</div></section>')
+            '&#8230;</div></section>'))
 
 
 def ops_html(kind: str) -> str:
@@ -202,7 +247,7 @@ FUNDED_CLOSE = "</details>"
 # ════════════════════════════════════════════════════════════════════
 # THE RENDERERS (pure: they take the read's outcome and return HTML)
 # ════════════════════════════════════════════════════════════════════
-OPS_CORE_JS = r"""
+_OPS_CORE_JS_RAW = r"""
 (function (AG, CC) {
   'use strict';
   var esc = AG.esc, isObj = AG.isObj;
@@ -283,8 +328,8 @@ OPS_CORE_JS = r"""
         (l.kind ? esc(l.kind) + ' · ' : '') + (num(l.sequence) ? 'entry #' + l.sequence + ' · ' : '') + (num(l.entries) ? l.entries + ' entries · ' : '') + 'an unchanged balance is not a stale one', null);
     }
     var sm = st.stream || 'CONNECTING';
-    out.conn = 'Live updates: <span class="fchip ' + esc(sm === 'LIVE' ? 'LIVE' : sm === 'POLLING' ? 'POLLING' : sm === 'RECONNECTING' ? 'RECONNECTING' : 'UNAVAILABLE') + '">' + esc(sm) + '</span> '
-      + esc(st.streamNote || '') + (sm === 'LIVE' ? ' · ledger stream open; the agents\' records are re-read every 30 s' : ' · the stream is not open: every read is repeated every 15 s');
+    out.conn = 'Live updates: <span class="fchip ' + esc(sm === 'LIVE' ? 'LIVE' : sm === 'SIGN-IN' ? 'SIGN-IN' : sm === 'POLLING' ? 'POLLING' : sm === 'RECONNECTING' ? 'RECONNECTING' : 'UNAVAILABLE') + '">' + esc(sm === 'SIGN-IN' ? 'SIGN-IN REQUIRED' : sm) + '</span> '
+      + esc(st.streamNote || '') + (sm === 'LIVE' ? ' · ledger stream open; the agents\' records are re-read every 30 s' : sm === 'SIGN-IN' ? ' · the stream and the reads need a COMMAND session' : ' · the stream is not open: every read is repeated every 15 s');
     return out;
   }
   function freshHtml(fs) {
@@ -344,18 +389,38 @@ OPS_CORE_JS = r"""
   }
 
   // ── DEREK ─────────────────────────────────────────────────────────
+  // ── MARKET NAMES (server: bettor_paper_ops.market_name) ───────────
+  function mname(r) {
+    var m = isObj(r && r.market) ? r.market : {};
+    var title = m.title || null, selc = m.selection || null;
+    return {primary: selc || title || 'Market name not recorded', secondary: [selc ? title : null, m.detail].filter(function (x) { return x; }).join(' · '),
+            warn: (m.warnings || []).map(function (w) { return '<span class="mdw">' + esc(w) + '</span>'; }).join('')};
+  }
+  function nameHtml(r) {
+    var x = mname(r);
+    return '<div class="mname"><div class="mn1" data-market-name>' + esc(x.primary) + '</div>' + (x.secondary ? '<div class="mn2">' + esc(x.secondary) + '</div>' : '') + x.warn + '</div>';
+  }
+  function refusalHtml(code, words) {
+    return code ? '<span class="ref" title="' + esc(code) + '">' + esc(words || String(code).replace(/_/g, ' ').toLowerCase()) + '</span>' : '';
+  }
+  // ── DEREK ─────────────────────────────────────────────────────────
   function decRow(d) {
     d = isObj(d) ? d : {};
-    var lb = isObj(d.label) ? d.label : {};
-    var who = [lb.participant, lb.market_type, d.fixture].filter(function (x) { return x; }).map(esc).join(' · ');
-    var tech = [['decision id', d.decision_id], ['market slug', d.us_market_slug], ['order intent', d.intent], ['strategy', d.strategy], ['policy version', d.policy_version], ['economics label', d.economics_label]];
+    var tech = [['decision id', d.decision_id], ['market slug', d.us_market_slug], ['order intent', d.intent], ['strategy', d.strategy], ['policy version', d.policy_version], ['refusal code', d.refusal], ['economics label', d.economics_label], ['name source', d.market && d.market.source]];
     return '<details class="dec" data-decision="' + esc(d.decision_id || '') + '" data-strategy="' + esc(d.strategy || '') + '"><summary><span class="dt">' + (AG.toEpoch(d.decided_at) !== null ? AG.ts(d.decided_at) : 'time not recorded') + '</span>'
-      + '<span class="vb vb-' + esc(d.verdict) + '">' + esc(d.verdict || '?') + '</span>' + (d.refusal ? '<span class="ref">' + esc(d.refusal) + '</span>' : '')
-      + '<span>edge ' + (CC.pp(d.edge_pp) || '<span class="mute">not recorded</span>') + '</span><span>net EV ' + (CC.usdS(d.net_ev_usd) || '<span class="mute">not recorded</span>') + '</span>'
-      + '<span class="dm">' + (who || 'market label below') + '</span></summary><div class="decb">'
-      + (d.us_market_slug ? CC.labelSlot('slug:' + d.us_market_slug + '|' + (d.intent || ''), tech) : CC.techDetails(tech))
+      + '<span class="vb vb-' + esc(d.verdict) + '">' + esc(d.verdict || '?') + '</span>' + refusalHtml(d.refusal, d.refusal_words)
+      + '<span class="dm">' + nameHtml(d) + '</span>'
+      + '<span class="dfig">price ' + (CC.price(d.purchase_price) || '<span class="mute">not recorded</span>') + ' · Pinnacle ' + (CC.prob(d.p_pinnacle) || '—') + ' · edge ' + (CC.pp(d.edge_pp) || '<span class="mute">not recorded</span>') + ' · fees ' + (CC.usd(d.fees_usd) || '<span class="mute">not recorded</span>') + ' · net EV ' + (CC.usdS(d.net_ev_usd) || '<span class="mute">not recorded</span>') + '</span></summary><div class="decb">'
       + '<p class="expl">' + esc(d.explanation || 'no explanation recorded') + '</p>'
-      + '<p class="note" style="margin:0">p Pinnacle ' + (CC.prob(d.p_pinnacle) || '—') + ' · p internal ' + (CC.prob(d.p_internal) || '—') + ' · p blended ' + (CC.prob(d.p_blended) || '—') + (num(d.proposed_qty) ? ' · proposed ' + n(d.proposed_qty) + ' @ ' + (CC.price(d.limit_price) || '?') : '') + '</p></div></details>';
+      + '<p class="note" style="margin:0">p internal ' + (CC.prob(d.p_internal) || '—') + ' · p blended ' + (CC.prob(d.p_blended) || '—') + (num(d.proposed_qty) ? ' · proposed ' + n(d.proposed_qty) + ' @ limit ' + (CC.price(d.limit_price) || '?') : '') + '</p>'
+      + CC.techDetails(tech) + '</div></details>';
+  }
+  function orderRow(o) {
+    o = isObj(o) ? o : {};
+    var tech = [['order id', o.order_id], ['decision id', o.decision_id], ['group id', o.group_id], ['market slug', o.us_market_slug], ['order intent', o.intent], ['terminal reason', o.terminal_reason], ['policy version', o.policy_version]];
+    return '<div class="orow" data-entry-order="' + esc(o.order_id || '') + '"><div class="oh"><span class="ostat ' + (o.filled_qty ? 'OPEN' : 'VOID_REFUND') + '">' + esc(o.state || '?') + '</span>' + nameHtml(o) + '</div>'
+      + '<div class="om">' + (n(o.filled_qty) || '0') + ' of ' + (n(o.qty) || '?') + ' filled · purchase price ' + (CC.price(o.avg_fill_price) || ('limit ' + (CC.price(o.limit_price) || '?'))) + ' · cost ' + (CC.usd(o.cost_usd) || '—') + ' · fees ' + (CC.usd(o.fees_usd) || '—') + ' · Pinnacle ' + (CC.prob(o.p_pinnacle) || '—') + ' · edge ' + (CC.pp(o.edge_pp) || '—')
+      + (o.unfilled_reason_words ? ' · not filled: ' + esc(o.unfilled_reason_words) : '') + ' · ' + (AG.toEpoch(o.created_at) !== null ? AG.ts(o.created_at) : '') + '</div>' + CC.techDetails(tech) + '</div>';
   }
   function funnel(s) {
     var f = sec(s.funnel); if (!f || f.status !== 'OK') return secBox(f, 'funnel');
@@ -376,10 +441,12 @@ OPS_CORE_JS = r"""
     var counts = cd ? '<div class="ocounts"><div><div class="lbl">Decisions</div><div class="v">' + n(cd.decisions) + '</div></div><div><div class="lbl">ENTER</div><div class="v">' + n(cd.enter) + '</div></div><div><div class="lbl">REFUSE</div><div class="v">' + n(cd.refuse) + '</div></div>'
       + '<div><div class="lbl">Last 24 h</div><div class="v">' + n(cd.last_24h) + '</div></div><div><div class="lbl">Markets</div><div class="v">' + n(cd.markets) + '</div></div><div><div class="lbl">Latest</div><div class="v" style="font-size:12.5px">' + (num(cd.latest_at) ? AG.ts(cd.latest_at) : '—') + '</div></div></div>' : secBox(c, 'counts');
     var rf = sec(s.refusals), rfd = ok(s.refusals);
-    var refs = rfd ? '<p class="lbl" style="margin:10px 0 2px">Refusals by reason</p><ul class="olist">' + rfd.map(function (r) { return '<li><b class="mono">' + n(r.n) + '</b> · ' + esc(r.refusal) + '</li>'; }).join('') + '</ul>' : (rf && rf.status === 'EMPTY' ? '' : secBox(rf, 'refusals'));
+    var refs = rfd ? '<p class="lbl" style="margin:10px 0 2px">Refusals by reason</p><ul class="olist">' + rfd.map(function (r) { return '<li><b class="mono">' + n(r.n) + '</b> · ' + refusalHtml(r.refusal, r.refusal_words) + '</li>'; }).join('') + '</ul>' : (rf && rf.status === 'EMPTY' ? '' : secBox(rf, 'refusals'));
     var rc = sec(s.recent), rcd = ok(s.recent);
     var recent = '<p class="lbl" style="margin:10px 0 6px">Recent decisions (newest ' + (rcd ? rcd.length : '') + (cd ? ' of ' + n(cd.decisions) : '') + ')</p>' + (rcd ? rcd.map(decRow).join('') : secBox(rc, 'recent decisions'));
-    return '<div class="strat" data-strategy="' + esc(s.strategy) + '" data-kind="' + esc(s.kind || '') + '">' + head + counts + funnel(s) + refs + recent + '</div>';
+    var os_ = sec(s.orders), osd = ok(s.orders);
+    var orders = '<p class="lbl" style="margin:10px 0 6px">Entry orders (every one, newest first)</p>' + (osd ? osd.map(orderRow).join('') : (os_ && os_.status === 'EMPTY' ? '<p class="note">' + esc(os_.why) + '</p>' : secBox(os_, 'entry orders')));
+    return '<div class="strat" data-strategy="' + esc(s.strategy) + '" data-kind="' + esc(s.kind || '') + '">' + head + counts + funnel(s) + refs + orders + recent + '</div>';
   }
   function derek(j) {
     var all = Array.isArray(j.strategies) ? j.strategies.filter(isObj) : [];
@@ -405,6 +472,25 @@ OPS_CORE_JS = r"""
   // ── XAVIER ────────────────────────────────────────────────────────
   function schip(s) { return '<span class="schip k-' + (s === 'DEREK_ENTRY_POLICY_V2' ? 'ORIGINAL_RESEARCH' : /^PINNACLE_/.test(s || '') ? 'EXPERIMENTAL_BENCHMARK' : 'OTHER') + '">' + esc(s || 'strategy not recorded') + '</span>'; }
   function labelOf(r) { var lb = isObj(r.label) ? r.label : {}; return [lb.participant, lb.market_type, r.fixture].filter(function (x) { return x; }).map(esc).join(' · '); }
+  function scenRows(list) {
+    return '<ul class="olist">' + list.map(function (c) {
+      var r = c.payoff_range_usd;
+      return '<li data-scenario="' + esc(c.condition) + '"><b>' + esc(String(c.condition).replace(/_/g, ' ').toLowerCase()) + '</b> · venue pays ' + esc(String(c.venue_payout || 'not stated').replace(/_/g, ' ').toLowerCase()) + ' · payoff ' + (Array.isArray(r) ? (CC.usdS(r[0]) || '?') + ' to ' + (CC.usdS(r[1]) || '?') : 'UNKNOWN') + ' · probability <b class="unm">UNMEASURED</b></li>';
+    }).join('') + '</ul>';
+  }
+  function ownedCard(p) {
+    p = isObj(p) ? p : {};
+    var rz = p.realized || {}, rm = p.remaining, rc = p.recommendation;
+    var tech = [['group id', p.group_id], ['decision id', p.decision_id], ['market slug', p.us_market_slug], ['order intent', p.intent], ['review id', rc && rc.review_id]];
+    var real = '<div class="pbox real"><div class="lbl">Realized profit (booked on the ledger)</div><div class="v">' + (CC.usdS(rz.realized_pnl_usd) || '$0.00') + '</div><div class="om">' + (rz.settlement ? 'settled ' + esc(rz.settlement.outcome) + ' · payout ' + (CC.usd(rz.settlement.payout_usd) || '?') : 'nothing settled or sold yet') + '</div></div>';
+    var risk = rm ? '<div class="pbox risk"><div class="lbl">Remaining risk (conditional, not realized)</div><div class="om">' + n(rm.open_qty) + ' contracts held · cost basis ' + (CC.usd(rm.cost_basis_usd) || '?') + ' · marked ' + (num(rm.marked_value_usd) ? CC.usd(rm.marked_value_usd) + ' (unrealized ' + CC.usdS(rm.unrealized_pnl_usd) + ')' : '<span class="ns">NO MARK</span>') + '</div>'
+      + '<p class="lbl" style="margin:8px 0 2px">Ordinary completion</p><div class="om">wins ' + (CC.usdS((rm.ordinary_completion || {}).win_usd) || '?') + ' · loses ' + (CC.usdS((rm.ordinary_completion || {}).lose_usd) || '?') + ' · Pinnacle at entry ' + (CC.prob((rm.ordinary_completion || {}).p_pinnacle_at_decision) || '—') + (num(rm.conditional_ev_at_decision_usd) ? ' · conditional EV at entry ' + CC.usdS(rm.conditional_ev_at_decision_usd) : '') + (rm.economics_label ? ' <span class="econ">' + esc(rm.economics_label) + '</span>' : '') + '</div>'
+      + '<p class="lbl" style="margin:8px 0 2px">Exceptional settlement (postponed, abandoned, suspended)</p>' + (rm.exceptional_settlement && rm.exceptional_settlement.length ? scenRows(rm.exceptional_settlement) : '') + '<p class="note" style="margin:2px 0 0">' + esc(rm.exceptional_note || '') + '</p>'
+      + (rm.open_management_orders ? '<div class="om">' + n(rm.open_management_orders) + ' open protection / management order(s)</div>' : '') + '</div>' : '';
+    var rec = rc ? '<div class="om">Current recommendation: <b>' + esc(rc.recommendation || 'NONE') + '</b>' + (rc.refusal ? ' · ' + refusalHtml(rc.refusal, rc.refusal_words) : '') + ' · ' + esc(rc.trigger || '') + ' · ' + (AG.toEpoch(rc.reviewed_at) !== null ? AG.ts(rc.reviewed_at) : '') + '</div>' + (isObj(rc.selection) && Object.keys(rc.selection).length ? '<details class="tech"><summary>Selection</summary>' + AG.kv(rc.selection) + '</details>' : '') : '<div class="om">No review recorded yet</div>';
+    return '<div class="orow owned" data-group="' + esc(p.group_id) + '" data-strategy="' + esc(p.strategy) + '"><div class="oh">' + schip(p.strategy) + '<span class="ostat ' + (p.status === 'OPEN' ? 'OPEN' : /WON/.test(p.status) ? 'WON' : /LOST/.test(p.status) ? 'LOST' : 'SETTLED_AT_VENUE_PRICE') + '">' + esc(p.status || '?') + '</span></div>'
+      + nameHtml(p) + rec + '<div class="pboxes">' + real + risk + '</div>' + CC.techDetails(tech) + '</div>';
+  }
   function xavier(j) {
     var out = {}, pos = ok(j.positions) || [], setl = ok(j.settlements) || [];
     function statusOf(g) {
@@ -413,14 +499,10 @@ OPS_CORE_JS = r"""
       var p = pos.filter(function (x) { return x.group_id === g; })[0];
       return p ? '<span class="ostat OPEN">OPEN · ' + (n(p.open_qty) || '?') + ' held</span>' : '<span class="mute">no open position in this read</span>';
     }
-    var h = sec(j.handoffs), hd = ok(j.handoffs);
-    var counts = ok(j.handoff_counts);
-    out['p-ops-handoffs'] = {status: stStatus(j.handoffs), html: hd ? (counts ? '<p class="note">' + counts.map(function (r) { return schip(r.strategy) + ' ' + n(r.n); }).join(' · ') + '</p>' : '') + hd.map(function (r) {
-      var tech = [['group id', r.group_id], ['handoff id', r.handoff_id], ['entry order id', r.entry_order_id], ['first fill id', r.first_fill_id], ['decision id', r.decision_id], ['market slug', r.us_market_slug]];
-      return '<div class="orow" data-group="' + esc(r.group_id) + '" data-strategy="' + esc(r.strategy) + '"><div class="oh">' + schip(r.strategy) + statusOf(r.group_id) + '<span>' + (n(r.confirmed_qty) || '?') + ' confirmed' + (num(r.outstanding_qty) && r.outstanding_qty ? ', ' + n(r.outstanding_qty) + ' outstanding' : '') + (num(r.limit_price) ? ' @ ' + CC.price(r.limit_price) : '') + '</span></div>'
-        + '<div class="om">' + (labelOf(r) || 'label below') + ' · first fill ' + (AG.toEpoch(r.first_fill_at) !== null ? AG.ts(r.first_fill_at) : '?') + ' · owner ' + esc(r.owner || '?') + '</div>'
-        + (r.us_market_slug ? CC.labelSlot('slug:' + r.us_market_slug + '|' + (r.intent || ''), tech) : CC.techDetails(tech)) + '</div>';
-    }).join('') : secBox(h, 'handoffs')};
+    var own = sec(j.owned_positions), od = ok(j.owned_positions), counts = ok(j.handoff_counts), ex = ok(j.exposure);
+    var expo = ex ? '<div class="pfig6" data-exposure><div><div class="lbl">Open positions</div><div class="v">' + n(ex.open_positions) + '</div></div><div><div class="lbl">Cost basis at risk</div><div class="v">' + (CC.usd(ex.cost_basis_at_risk_usd) || '?') + '</div></div><div><div class="lbl">Marked value</div><div class="v">' + (num(ex.marked_value_usd) ? CC.usd(ex.marked_value_usd) : '<span class="ns">NOT STATED</span>') + '</div></div>'
+      + '<div><div class="lbl">If every open contract loses</div><div class="v">' + (CC.usdS(ex.max_loss_usd) || '?') + '</div></div><div><div class="lbl">If every open contract wins</div><div class="v">' + (CC.usdS(ex.max_gain_usd) || '?') + '</div></div><div><div class="lbl">Realized (booked)</div><div class="v">' + (CC.usdS(ex.realized_pnl_usd) || '?') + '</div></div></div><p class="note">' + esc(ex.basis || '') + '</p>' : secBox(j.exposure, 'exposure');
+    out['p-ops-handoffs'] = {status: stStatus(j.owned_positions), html: expo + (counts ? '<p class="note">Handed to Xavier: ' + counts.map(function (r) { return schip(r.strategy) + ' ' + n(r.n); }).join(' · ') + '</p>' : '') + (od ? od.map(ownedCard).join('') : secBox(own, 'owned positions'))};
     var rv = sec(j.reviews), rvd = ok(j.reviews), rc = ok(j.review_counts);
     out['p-ops-reviews'] = {status: stStatus(j.reviews), html: (rc ? '<ul class="olist">' + rc.map(function (r) { return '<li>' + schip(r.strategy) + ' <b>' + esc(r.recommendation) + '</b> × ' + n(r.n) + (AG.toEpoch(r.latest_at) !== null ? ' · latest ' + AG.ts(r.latest_at) : '') + '</li>'; }).join('') + '</ul>' : '')
       + (rvd ? rvd.map(function (r) { return '<div class="orow" data-review="' + esc(r.review_id) + '"><div class="oh">' + schip(r.strategy) + '<b>' + esc(r.recommendation || 'REFUSED') + '</b>' + (r.refusal ? '<span class="ref">' + esc(r.refusal) + '</span>' : '') + '<span class="mute">' + esc(r.trigger || '') + '</span></div><div class="om">' + (AG.toEpoch(r.reviewed_at) !== null ? AG.ts(r.reviewed_at) : '?') + '</div>' + CC.techDetails([['review id', r.review_id], ['group id', r.group_id]]) + '</div>'; }).join('') : secBox(rv, 'reviews'))};
@@ -430,7 +512,7 @@ OPS_CORE_JS = r"""
     var sc = ok(j.settlement_counts), sl = sec(j.settlements), pd = sec(j.pending_settlements), pdd = ok(j.pending_settlements);
     var pend = '<p class="lbl" style="margin:12px 0 6px">Pending settlement</p>' + (pdd ? '<p class="note">' + n(pdd.count) + ' open position(s) await the venue\'s authoritative settlement. ' + esc(pdd.rule || '') + '</p>'
       + (isObj(pdd.last_settle_step) ? '<p class="note">Last settle step' + (AG.toEpoch(pdd.last_settle_step.at) !== null ? ' at ' + AG.ts(pdd.last_settle_step.at) : '') + ': ' + ['settled', 'settled_at_venue_price', 'corrected', 'conflicts', 'waiting'].filter(function (k) { return num(pdd.last_settle_step[k]); }).map(function (k) { return esc(k.replace(/_/g, ' ')) + ' ' + n(pdd.last_settle_step[k]); }).join(' · ') + '</p>' : '')
-      + (pdd.positions || []).map(function (p) { return '<div class="orow"><div class="oh">' + schip(p.strategy) + '<span class="ostat PENDING">PENDING</span><span>' + (n(p.open_qty) || '?') + ' held · cost ' + (CC.usd(p.cost_basis_usd) || '?') + '</span></div><div class="om">' + (labelOf(p) || '') + '</div>' + (p.us_market_slug ? CC.labelSlot('slug:' + p.us_market_slug + '|' + (p.holding_side === 'SHORT' ? 'ORDER_INTENT_BUY_SHORT' : 'ORDER_INTENT_BUY_LONG'), [['position key', p.position_key], ['group id', p.group_id], ['market slug', p.us_market_slug]]) : '') + '</div>'; }).join('') : (pd && pd.status === 'EMPTY' ? '<p class="note">' + esc(pd.why) + '</p>' : secBox(pd, 'pending settlements')));
+      + (pdd.positions || []).map(function (p) { return '<div class="orow"><div class="oh">' + schip(p.strategy) + '<span class="ostat PENDING">PENDING</span><span>' + (n(p.open_qty) || '?') + ' held · cost ' + (CC.usd(p.cost_basis_usd) || '?') + '</span></div>' + nameHtml(p) + CC.techDetails([['position key', p.position_key], ['group id', p.group_id], ['market slug', p.us_market_slug]]) + '</div>'; }).join('') : (pd && pd.status === 'EMPTY' ? '<p class="note">' + esc(pd.why) + '</p>' : secBox(pd, 'pending settlements')));
     out['p-ops-settlements'] = {status: stStatus(j.settlements) === 'UNAVAILABLE' || stStatus(j.pending_settlements) === 'UNAVAILABLE' ? 'UNAVAILABLE' : (stStatus(j.settlements) === 'OK' || stStatus(j.pending_settlements) === 'OK') ? 'OK' : 'EMPTY',
       html: (sc ? '<ul class="olist">' + sc.map(function (r) { return '<li>' + schip(r.strategy) + ' <span class="ostat ' + esc(r.outcome) + '">' + esc(r.outcome) + '</span> × ' + n(r.n) + ' · paid ' + (CC.usd(r.payout_usd) || '?') + '</li>'; }).join('') + '</ul>' : '')
         + (ok(j.settlements) ? ok(j.settlements).map(function (s) { return '<div class="orow" data-settlement="' + esc(s.settlement_id) + '"><div class="oh">' + schip(s.strategy) + '<span class="ostat ' + esc(s.outcome) + '">' + esc(s.outcome) + '</span><span>' + (n(s.qty) || '?') + ' × ' + (CC.price(s.payout_per_contract) || '?') + ' = ' + (CC.usd(s.payout_usd) || '?') + '</span></div><div class="om">settled ' + (AG.toEpoch(s.settled_at) !== null ? AG.ts(s.settled_at) : '?') + ' · version ' + esc(s.version) + ' · ' + esc(s.evidence_source || '') + '</div>' + CC.techDetails([['settlement id', s.settlement_id], ['position key', s.position_key], ['group id', s.group_id]]) + '</div>'; }).join('') : secBox(sl, 'settlements'))
@@ -450,10 +532,23 @@ OPS_CORE_JS = r"""
     var pnl = '<p class="lbl" style="margin:12px 0 6px">P&amp;L by strategy</p>' + (pdt ? '<div class="tbl"><table><thead><tr><th>strategy</th><th class="num">realized</th><th class="num">unrealized</th><th class="num">open / closed</th><th class="num">fees</th></tr></thead><tbody>' + pdt.map(function (r) {
       return '<tr data-pnl="' + esc(r.strategy) + '"><td>' + schip(r.strategy) + '</td><td class="num">' + (CC.usdS(r.realized_pnl_usd) || '?') + '</td><td class="num">' + (num(r.unrealized_pnl_usd) ? CC.usdS(r.unrealized_pnl_usd) : '<span class="ns">NOT STATED</span><br><span class="mute">marked-only ' + (CC.usdS(r.unrealized_marked_only_usd) || '?') + ', ' + n(r.unmarked_positions) + ' unmarked</span>') + '</td><td class="num">' + n(r.open_positions) + ' / ' + n(r.closed_positions) + '</td><td class="num">' + (CC.usd(r.fees_usd) || '?') + '</td></tr>';
     }).join('') + '</tbody></table></div><p class="note">Realized from every position, open or closed; unrealized from marked open positions only. Strategies are never summed with the funded book.</p>' : (p && p.status === 'EMPTY' ? CC.emptyLine(p.why) : secBox(p, 'P&L by strategy')));
-    out['p-ops-account'] = {status: stStatus(j.account), html: figs + pnl};
-    var fs = sec(j.findings), fd = ok(j.findings), fc = ok(j.finding_counts);
-    out['p-ops-findings'] = {status: stStatus(j.findings), html: (fc ? '<ul class="olist">' + fc.map(function (r) { return '<li><span class="ostat ' + (r.severity === 'INFO' ? 'OPEN' : 'LOST') + '">' + esc(r.severity) + '</span> ' + esc(r.kind) + ' × ' + n(r.n) + '</li>'; }).join('') + '</ul>' : '')
+    var rcs = sec(j.reconciliation), rcd = ok(j.reconciliation);
+    var recon = rcd ? '<p class="recon ' + (rcd.reconciled ? 'ok' : 'bad') + '" data-reconciled="' + (rcd.reconciled ? 'yes' : 'no') + '">' + (rcd.reconciled ? 'LEDGER RECONCILED' : 'LEDGER NOT RECONCILED') + ' · ' + (Array.isArray(rcd.checks) ? rcd.checks.filter(function (c) { return c.ok; }).length + ' of ' + rcd.checks.length + ' checks pass' : '') + (rcd.failed_checks && rcd.failed_checks.length ? ' · failed: ' + rcd.failed_checks.map(esc).join(', ') : '') + ' · ' + n(rcd.entries_count) + ' ledger entries</p>'
+      + (Array.isArray(rcd.checks) ? '<details class="tech"><summary>Reconciliation checks</summary>' + AG.table(rcd.checks, null, {}) + '</details>' : '') : '<p class="recon bad">RECONCILIATION ' + esc(rcs ? rcs.status : 'UNAVAILABLE') + ' · ' + esc((rcs && rcs.why) || 'not in the read') + '</p>';
+    out['p-ops-account'] = {status: stStatus(j.account), html: recon + figs + pnl};
+    var pf = sec(j.performance_by_strategy), pfd = ok(j.performance_by_strategy);
+    out['p-ops-performance'] = {status: stStatus(j.performance_by_strategy), html: pfd ? pfd.map(function (r) {
+      var st_ = isObj(r.settled) ? Object.keys(r.settled).map(function (k) { return n(r.settled[k]) + ' ' + esc(k); }).join(' · ') : '';
+      return '<div class="orow" data-perf="' + esc(r.strategy) + '"><div class="oh">' + schip(r.strategy) + '</div><div class="om">' + n(r.decisions) + ' decisions · ' + n(r.enter) + ' ENTER · ' + n(r.entry_orders) + ' entry orders (' + n(r.filled_orders) + ' filled) · ' + n(r.open_positions) + ' open / ' + n(r.closed_positions) + ' closed' + (st_ ? ' · settled ' + st_ : '') + '</div><div class="om">realized ' + (CC.usdS(r.realized_pnl_usd) || '$0.00') + ' (booked)</div></div>';
+    }).join('') + '<p class="note">Each strategy on its own; never summed with the funded system.</p>' : secBox(pf, 'performance')};
+    var fs = sec(j.findings), fd = ok(j.findings), fc = ok(j.finding_counts), ea = sec(j.event_audits), ead = ok(j.event_audits);
+    var evh = '<p class="lbl" style="margin:0 0 6px">Event-driven audits (one per event)</p>' + (ead ? ead.slice(0, 12).map(function (f) {
+      var d = isObj(f.detail) ? f.detail : {};
+      return '<div class="orow" data-event-audit="' + esc(f.finding_id) + '"><div class="oh"><span class="ostat ' + (f.severity === 'INFO' ? 'OPEN' : 'LOST') + '">' + esc(f.severity) + '</span><b>' + esc(String(f.kind || '').replace(/^PAPER_EVENT_/, '').replace(/_/g, ' ').toLowerCase()) + '</b>' + (d.passed === true ? '<span class="ostat OPEN">PASSED</span>' : d.passed === false ? '<span class="ostat LOST">FAILED</span>' : '') + (d.strategy ? schip(d.strategy) : '') + '</div><div class="om">' + (AG.toEpoch(f.found_at) !== null ? AG.ts(f.found_at) : '?') + (f.improvement_task_id ? ' · improvement task ' + esc(f.improvement_task_id) : '') + '</div>' + CC.techDetails([['finding id', f.finding_id], ['subject', f.subject], ['chain', d.chain], ['detail', JSON.stringify(d)]]) + '</div>';
+    }).join('') : (ea && ea.status === 'EMPTY' ? '<p class="note">' + esc(ea.why) + '</p>' : secBox(ea, 'event audits')));
+    out['p-ops-findings'] = {status: stStatus(j.event_audits) === 'OK' ? 'OK' : stStatus(j.findings), html: evh + '<p class="lbl" style="margin:12px 0 6px">All findings by kind</p>' + (fc ? '<ul class="olist">' + fc.map(function (r) { return '<li><span class="ostat ' + (r.severity === 'INFO' ? 'OPEN' : 'LOST') + '">' + esc(r.severity) + '</span> ' + esc(r.kind) + ' × ' + n(r.n) + '</li>'; }).join('') + '</ul>' : '')
       + (fd ? fd.map(function (f) { return '<div class="orow" data-finding="' + esc(f.finding_id) + '"><div class="oh"><span class="ostat ' + (f.severity === 'INFO' ? 'OPEN' : 'LOST') + '">' + esc(f.severity) + '</span><b>' + esc(f.kind) + '</b></div><div class="om">' + (AG.toEpoch(f.found_at) !== null ? AG.ts(f.found_at) : '?') + (f.improvement_task_id ? ' · task ' + esc(f.improvement_task_id) : '') + '</div>' + CC.techDetails([['finding id', f.finding_id], ['subject', f.subject], ['detail', JSON.stringify(f.detail || {})]]) + '</div>'; }).join('') : secBox(fs, 'findings'))};
+    out['p-ops-learning'] = learningPanel(j);
     var r = sec(j.daily_report), rd = ok(j.daily_report), list = ok(j.daily_reports);
     out['p-ops-report'] = {status: stStatus(j.daily_report), html: rd ? '<dl class="pdl"><dt>day</dt><dd>' + esc(rd.report_day) + ' (' + esc(rd.reporting_tz || '') + ')</dd><dt>version</dt><dd>' + esc(rd.version) + (rd.final ? ' · final' : ' · provisional until the day closes') + '</dd><dt>generated</dt><dd>' + (AG.toEpoch(rd.generated_at) !== null ? AG.ts(rd.generated_at) : '?') + '</dd><dt>reconciles</dt><dd>' + (rd.reconciles === true ? 'YES' : rd.reconciles === false ? '<b class="neg">NO</b>' : '?') + '</dd>'
         + (Array.isArray(rd.benchmark_sections) && rd.benchmark_sections.length ? '<dt>labelled sections</dt><dd>' + rd.benchmark_sections.map(esc).join(', ') + '</dd>' : '') + '</dl>'
@@ -464,10 +559,55 @@ OPS_CORE_JS = r"""
     return out;
   }
 
+  function learningPanel(j) {
+    var l = sec(j.learning), ld = ok(j.learning);
+    if (!ld) return {status: l ? l.status : 'UNAVAILABLE', html: secBox(l, 'learning')};
+    var ag = isObj(ld.agents) ? ld.agents : {}, ac = ok(ld.activation_control);
+    var html = '<p class="note">Forward records only. A proposal becomes ACTIVE only after an evaluated PASS, every activation check, a named human approver and the activation control' + (ac ? ' (currently <b>' + (ac.enabled ? 'ON' : 'OFF') + '</b>)' : '') + '. Counterfactual results are labelled ' + esc(ld.counterfactual_label || 'COUNTERFACTUAL') + '.</p>';
+    var any = false;
+    ['DEREK', 'XAVIER', 'AUDREY'].forEach(function (a) {
+      var s_ = sec(ag[a]), d = ok(ag[a]);
+      html += '<div class="orow" data-learning-agent="' + a + '"><div class="oh"><b>' + esc(a.charAt(0) + a.slice(1).toLowerCase()) + '</b></div>';
+      if (!d) { html += (s_ && s_.status === 'EMPTY' ? '<div class="om">' + esc(s_.why) + '</div>' : secBox(s_, a + ' learning')) + '</div>'; return; }
+      any = true;
+      var pc = isObj(d.proposed_change) ? d.proposed_change : {}, ev = isObj(d.evaluation) ? d.evaluation : null;
+      html += '<div class="om">Learned: ' + ((d.learned || []).length ? '</div><ul class="olist">' + d.learned.slice(0, 4).map(function (x) { return '<li>' + esc(x.statement) + ' <span class="mute">(' + n(x.records) + ' records, v' + esc(x.version) + ')</span></li>'; }).join('') + '</ul>' : 'nothing yet</div>');
+      if (pc.status === 'NONE') html += '<div class="om">Proposed change: none · ' + esc(pc.why || '') + '</div>';
+      else {
+        var ch = isObj(pc.proposed_change) ? pc.proposed_change : {};
+        var words = ch.parameter ? esc(String(ch.parameter).replace(/_/g, ' ')) + ' from ' + esc(ch.from) + ' to ' + esc(ch.to) + (ch.units ? ' ' + esc(ch.units) : '') + (ch.applies_to ? ' for ' + esc(ch.applies_to) : '') : esc(JSON.stringify(ch));
+        var la = ev && isObj(ev.last_attempt) ? ev.last_attempt : {};
+        var ep = Array.isArray(pc.evaluation_period) ? pc.evaluation_period : [];
+        html += '<div class="om" data-proposal="' + esc(pc.proposal_id || '') + '">Proposed change: <b>' + words + '</b> · ' + esc(pc.rationale || '') + '</div>'
+          + '<div class="om">Evaluation: <b class="evst">' + esc(ev ? ev.status : 'NOT EVALUATED') + '</b>' + (ev && ev.verdict ? ' · verdict ' + esc(ev.verdict) : '') + (num(la.outcomes) && num(la.min_evaluation_outcomes) ? ' · ' + n(la.outcomes) + ' of ' + n(la.min_evaluation_outcomes) + ' forward outcomes so far' : '') + (AG.toEpoch(ep[1]) !== null ? ' · evaluation period ends ' + AG.ts(ep[1]) : '') + ' · activation: <b>' + (d.active ? 'ACTIVE' : 'NOT ACTIVE') + '</b></div>'
+          + CC.techDetails([['proposal id', pc.proposal_id], ['change class', pc.change_class], ['proposed change', JSON.stringify(ch)], ['evaluation detail', la.why], ['counts', JSON.stringify(la.counts || {})], ['training period', JSON.stringify(pc.training_period || [])], ['evaluation period', JSON.stringify(pc.evaluation_period || [])], ['source lessons', JSON.stringify(pc.source_lesson_ids || [])]]);
+      }
+      html += '</div>';
+    });
+    return {status: any ? 'OK' : 'EMPTY', html: html};
+  }
+  // ── THE ONE ACCOUNT, THE SAME ON EVERY PAGE ──────────────────────
+  var ACCT7 = %%ACCOUNT_FIGURES%%;
+  function figText(k, v) { return num(v) ? (/pnl/.test(k) ? CC.usdS(v) : CC.usd(v)) : v === null ? 'NOT STATED' : 'not sent'; }
+  function accountFigures(a) { return ACCT7.map(function (f) { return {key: f[0], label: f[1], value: figText(f[0], isObj(a) ? a[f[0]] : undefined)}; }); }
+  function accountStrip(st) {
+    st = st || {}; var j = isObj(st.json) ? st.json : null, f = st.fail;
+    if (!j) return {status: f && f.state === SIGNIN ? SIGNIN : 'UNAVAILABLE', html: '<div class="lbl">Paper account</div>' + failBox(f || {state: 'UNAVAILABLE', why: 'not read yet'})};
+    var s_ = sec(j.account), a = ok(j.account);
+    if (!a) return {status: s_ ? s_.status : 'UNAVAILABLE', html: '<div class="lbl">Paper account</div>' + secBox(s_, 'account')};
+    return {status: 'OK', html: '<div class="lbl">Paper account · one ledger · LIVE MARKET DATA · SIMULATED EXECUTION</div><div class="acct7">' + accountFigures(a).map(function (x) {
+      return '<div data-acct7="' + x.key + '"><small>' + esc(x.label) + '</small><b>' + (x.value === 'NOT STATED' ? '<span class="ns">NOT STATED</span>' : esc(x.value)) + '</b></div>'; }).join('') + '</div>'
+      + '<p class="note" style="margin:6px 0 0">' + esc(a.equity_basis || '') + (num(a.last_sequence) ? ' · ledger entry #' + a.last_sequence : '') + ' · the same read on the homepage and every agent page' + (f ? ' · <b class="neg">last read failed: ' + esc(f.why) + '</b>' : '') + '</p>'};
+  }
+  // ── SIGNED OUT: A PROMPT, NEVER AN UNEXPLAINED FAILURE ───────────
+  function signinHtml(framed, why) {
+    return '<b>SIGN-IN REQUIRED</b> · ' + esc(why || 'your COMMAND session is missing or has expired') + '. Nothing below is current until you sign in. '
+      + '<a class="cc-signin-go" href="' + (framed ? '%%SIGNIN%%' : AG.DESK) + '"' + (framed ? ' target="_top"' : '') + '>Sign in to COMMAND →</a> <span class="mute">Reads keep retrying every 15 s and resume on their own once you are signed in.</span>';
+  }
   // ── ONE READ, EVERY PANEL ────────────────────────────────────────
   function panels(kind, st) {
     st = st || {}; var j = isObj(st.json) ? st.json : null, f = st.fail;
-    var ids = {derek: ['p-ops-bench', 'p-ops-research'], xavier: ['p-ops-handoffs', 'p-ops-reviews', 'p-ops-protection', 'p-ops-settlements'], audrey: ['p-ops-account', 'p-ops-findings', 'p-ops-report']}[kind] || [];
+    var ids = {derek: ['p-ops-bench', 'p-ops-research'], xavier: ['p-ops-handoffs', 'p-ops-reviews', 'p-ops-protection', 'p-ops-settlements'], audrey: ['p-ops-account', 'p-ops-performance', 'p-ops-findings', 'p-ops-learning', 'p-ops-report']}[kind] || [];
     var out = {};
     if (!j) { ids.forEach(function (id) { out[id] = {status: f && f.state === SIGNIN ? SIGNIN : 'UNAVAILABLE', html: failBox(f || {state: 'UNAVAILABLE', why: 'not read yet'})}; }); return out; }
     var r = kind === 'derek' ? derek(j) : kind === 'xavier' ? xavier(j) : audrey(j);
@@ -480,7 +620,14 @@ OPS_CORE_JS = r"""
     return {state: m.mode === 'unavailable' ? '<span class="sb sb-UNRECOGNISED"><i></i>PAPER RUNTIME ' + (st && st.fail && !st.json ? esc(st.fail.state) : 'UNAVAILABLE') + '</span>' : '<span class="sb sb-IDLE"><i></i>PAPER RUNTIME RUNNING</span>',
             hb: m.why ? esc(m.why) : esc(m.activity || '')};
   }
-  CC.ops = {SIGNIN: SIGNIN, failure: failure, failBox: failBox, fresh: fresh, freshHtml: freshHtml, mode: mode, kpis: kpis, panels: panels, stageLine: stageLine,
+  CC.ops = {ACCT7: ACCT7, accountFigures: accountFigures, accountStrip: accountStrip, signinHtml: signinHtml, ownedCard: ownedCard, orderRow: orderRow, learningPanel: learningPanel, SIGNIN: SIGNIN, failure: failure, failBox: failBox, fresh: fresh, freshHtml: freshHtml, mode: mode, kpis: kpis, panels: panels, stageLine: stageLine,
             derek: derek, xavier: xavier, audrey: audrey, decRow: decRow};
 })(AG, CC);
 """
+
+import json as _json
+
+OPS_CORE_JS = (_OPS_CORE_JS_RAW
+               .replace("%%ACCOUNT_FIGURES%%",
+                        _json.dumps([list(x) for x in ACCOUNT_FIGURES]))
+               .replace("%%SIGNIN%%", SIGNIN_HREF))

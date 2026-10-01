@@ -122,6 +122,13 @@
     }).catch(function () { /* offline: COMMAND's own banner covers it */ });
   }
 
+  // THE SAME UNLOCK, ON DEMAND: the paper panel's SIGN-IN prompt (paper.js)
+  // opens it when a paper read or the stream answers 401/403 after the page
+  // loaded (an expired session). One dialog at a time.
+  window.BTUnlock = {
+    open: function () { if (!document.getElementById('command-unlock')) panel(submit); }
+  };
+
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', check);
   } else {

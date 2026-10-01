@@ -1376,6 +1376,7 @@ PAPER_CORE_JS = r"""
   }
   function banner(o, so) {
     if (!o || o.kind === 'NOT_DEPLOYED') return {state: 'UNAVAILABLE', text: 'PAPER SESSION NOT RUNNING — ' + UNAV};
+    if (o.kind === 'LOCKED') return {state: 'UNAVAILABLE', text: 'SIGN-IN REQUIRED — the paper session cannot be read without a COMMAND session'};
     if (o.kind !== 'OK') return {state: 'UNAVAILABLE', text: 'PAPER SESSION NOT RUNNING — the paper account read failed (' + (o.why || o.kind) + ')'};
     var j = isObj(o.json) ? o.json : {}, s = isObj(j.session) ? j.session : null, a = sec(j.account);
     if (!s) return {state: a && a.status === 'UNAVAILABLE' ? 'UNAVAILABLE' : 'OFF', text: 'PAPER SESSION NOT RUNNING — ' + ((a && a.why) || fallback(so) || 'the server sent no session')};
@@ -1638,7 +1639,7 @@ PAPER_BOOT_JS = r"""
   function conn(state, note) {
     var el = $('paper-conn');
     if (el) { el.setAttribute('data-conn', state); el.textContent = state + ' · ' + (note || new Date().toISOString().slice(11, 19) + 'Z'); }
-    OPS.stream = state === 'LIVE' ? 'LIVE' : state === 'RECONNECTING' ? 'RECONNECTING' : state === 'UNAVAILABLE' ? 'UNAVAILABLE' : 'POLLING';
+    OPS.stream = state === 'LIVE' ? 'LIVE' : state === 'SIGN-IN REQUIRED' ? 'SIGN-IN' : state === 'RECONNECTING' ? 'RECONNECTING' : state === 'UNAVAILABLE' ? 'UNAVAILABLE' : 'POLLING';
     OPS.streamNote = note || '';
     paintFresh();
   }
@@ -1647,9 +1648,34 @@ PAPER_BOOT_JS = r"""
     var l = S.ledgerSec;
     setPanel('p-paper-account', r.status, r.html + P.drawdown(S.drawdown) + P.ledger(P.entries(S), S.fresh, l && l.status !== 'OK' ? l.status + ' · ' + (l.why || 'no reason given') : null));
   }
+  // SIGNED OUT (401/403 from any read, or the stream failing while a probe
+  // read answers 401/403): ONE prompt with the way to sign in -- never an
+  // unexplained feed failure. Polling continues, so the page recovers on its
+  // own once the session is back.
+  var auth = {lost: false, why: null};
+  function signin(lost, why) {
+    auth.lost = !!lost; auth.why = why || null;
+    var el = $('cc-signin'); if (!el || !O) return;
+    if (lost) { el.innerHTML = O.signinHtml(document.documentElement.classList.contains('cc-framed'), why); el.hidden = false; }
+    else { el.hidden = true; el.innerHTML = ''; }
+  }
+  function locked(o) { return !!o && o.kind === 'LOCKED'; }
+  async function probeAuth() {
+    var o = await AG.load(E.paper_account + '?entries=1', F);
+    if (locked(o)) {
+      if (es) { es.close(); es = null; }
+      clearTimeout(timer); timer = null;
+      signin(true, 'the live stream needs a COMMAND session (the API answered ' + (o.status || 401) + ')');
+      conn('SIGN-IN REQUIRED', 'sign in to resume live updates; polling every 15 s meanwhile');
+      return true;
+    }
+    return false;
+  }
   // THE OPERATIONAL READ: one GET for every panel this page leads with
   function paintOps() {
     if (!O) return;
+    var ac = O.accountStrip(OPS), ae = $('paper-acct');
+    if (ae) { ae.setAttribute('data-status', ac.status); ae.innerHTML = ac.html; }
     var ps = O.panels(kind, OPS);
     Object.keys(ps).forEach(function (id) { setPanel(id, ps[id].status, ps[id].html); });
     var k = $('cc-kpis');
@@ -1666,6 +1692,8 @@ PAPER_BOOT_JS = r"""
     OPS.tryAt = nowS();
     var o = await AG.load(url, F), f = O ? O.failure(o, url) : {state: 'UNAVAILABLE', why: 'the operations renderer is not loaded'};
     if (f) OPS.fail = f; else { OPS.fail = null; OPS.json = o.json; OPS.okAt = nowS(); }
+    if (locked(o)) signin(true, 'the paper read answered ' + (o.status || 401));
+    else if (o && o.kind === 'OK' && auth.lost) signin(false);
     paintOps();
   }
   function opsSoon() { clearTimeout(opsT); opsT = setTimeout(ops, 1500); }
@@ -1691,6 +1719,9 @@ PAPER_BOOT_JS = r"""
     ['snapshot', 'ledger', 'heartbeat', 'unavailable'].forEach(function (n) { src.addEventListener(n, frame(src, n)); });
     src.onerror = function () {
       if (src !== es) return;
+      // AN EventSource CANNOT SEE A 401: ask a plain read whether the session
+      // is the cause before saying RECONNECTING
+      probeAuth().then(function (gone) { if (gone) schedule(); });
       if (src.readyState === 2) {
         conn('DISCONNECTED', 'polling every 15 s until the stream reopens'); src.close(); es = null;
         clearTimeout(timer); timer = setTimeout(function () { timer = null; conn('RECONNECTING'); stream(); }, Math.min(30000, 1000 * Math.pow(2, retry++)));
@@ -1715,7 +1746,8 @@ PAPER_BOOT_JS = r"""
     acctO = await AG.load(E.paper_account + '?entries=' + P.KEEP, F);
     setBanner();
     if (acctO.kind !== 'OK') {
-      if (!es) conn(acctO.kind === 'NOT_DEPLOYED' ? 'UNAVAILABLE' : 'DISCONNECTED', acctO.kind === 'NOT_DEPLOYED' ? P.UNAV : acctO.kind === 'LOCKED' ? 'SIGN-IN REQUIRED' : (acctO.why || acctO.kind));
+      if (locked(acctO)) { signin(true, 'the paper account read answered ' + (acctO.status || 401)); if (es) { es.close(); es = null; } conn('SIGN-IN REQUIRED', 'sign in to resume live updates'); }
+      else if (!es) conn(acctO.kind === 'NOT_DEPLOYED' ? 'UNAVAILABLE' : 'DISCONNECTED', acctO.kind === 'NOT_DEPLOYED' ? P.UNAV : (acctO.why || acctO.kind));
       setPanel('p-paper-account', 'UNAVAILABLE', acctO.kind === 'NOT_DEPLOYED' ? '<div class="plain"><p class="big">UNAVAILABLE · ' + P.UNAV + '</p><p class="mute">No paper figure is shown: none was sent. This is not a zero balance.</p></div>' : AG.gate(acctO, E.paper_account));
     } else {
       P.fromAccount(S, acctO.json); paint();
