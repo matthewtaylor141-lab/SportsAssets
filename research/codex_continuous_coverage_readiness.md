@@ -22,6 +22,8 @@ At approximately $100 per position, $5,000 supports approximately 50 concurrent 
 
 ## Feed capability is the first dependency
 
+**Owner update:** PinnAPI has now been purchased, with `pinnapi_key` installed on multiple Render servers. See `codex_pinnapi_priority.md` and the read-only probe. Test this entitlement first; the following Odds API limit describes the existing adapter, not necessarily the newly purchased source.
+
 The Odds API's published intervals are 40 seconds in-play for main moneyline/spread/total markets, 60 seconds for additional/alternate/period markets, and 10 seconds for exchange data. Polling faster cannot make its reference observations one second old. Its v4 API supports live and upcoming events; this repository's `h2h` selection is a separate restriction.
 
 Polymarket **US** documents authenticated market WebSockets for books and trades, with a maximum of 100 markets per subscription and multiple subscriptions available. Its trader-guide market-data page also describes a different HTTP-stream approach. Resolve the applicable protocol/version by a read-only connection using the existing entitled account before implementation. Do not substitute the international Polymarket API.
