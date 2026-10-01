@@ -53,6 +53,7 @@ import math
 import time
 from typing import Any
 
+from .. import bettor_paper_guard as G
 from .. import bettor_paper_ledger as L
 from .. import bettor_paper_simulator as SIM
 from . import derek_policy as DP
@@ -427,7 +428,7 @@ async def decide_one(conn, ctx: dict, row: dict) -> dict:
         # THE BOOK IS READ ONLY FOR A CANDIDATE THAT COULD STILL ENTER.
         if ctx["books_read"] >= int(cfg["cadence"]["max_book_reads_per_pass"]):
             return {"deferred": True, "why": "BOOK_READ_BUDGET"}
-        got = await ctx["market_data"].read_book(cand["us_market_slug"])
+        got = await read_book_within_deadline(ctx, cand["us_market_slug"])
         ctx["books_read"] += 1
         obs = await SIM.record_book(conn, slug=cand["us_market_slug"],
                                     read=got, source="PAPER_MARKET_DATA_"
@@ -435,7 +436,9 @@ async def decide_one(conn, ctx: dict, row: dict) -> dict:
         md = obs.get("market_data")
         lv = SIM.levels_for(md, direction="BUY", holding_side=side)
         levels = lv["levels"]
-        if obs.get("error") or not levels:
+        if book_deadline_refusal(got):
+            refusals.append(R_BOOK_DEADLINE)
+        elif obs.get("error") or not levels:
             refusals.append(R_NO_BOOK)
         else:
             internal = score(model, price=levels[0]["price"],
@@ -758,3 +761,44 @@ async def step_after_delay(conn, ctx: dict) -> dict:
         res.append({k: r.get(k) for k in ("order_id", "state", "filled_qty",
                                           "refusal", "pending")})
     return {"pending": len(pend), "books": got["read"], "results": res}
+
+
+
+# ═════════════════════════════════════════════════════════════════════
+# THE BOOK READ, INSIDE THE DECISION'S OWN DEADLINE
+# ═════════════════════════════════════════════════════════════════════
+#
+# A decision that runs out of time must still RECORD a refusal. The book read
+# therefore stops this much before the decision's deadline, leaving room to
+# persist the decision; a read that cannot finish in time returns a named
+# refusal (PAPER_BOOK_READ_DEADLINE_EXCEEDED, or the venue request gate's own
+# refusal, which it raises rather than queue past the deadline).
+
+BOOK_READ_RESERVE_S = 1.5
+R_BOOK_DEADLINE = "BOOK_READ_DID_NOT_FINISH_INSIDE_THE_DECISION_DEADLINE"
+
+
+async def read_book_within_deadline(ctx: dict, slug: str) -> dict:
+    md = ctx["market_data"]
+    dl = ctx.get("deadline")
+    if dl is None:
+        return await md.read_book(slug)
+    remaining = float(dl) - time.monotonic() - BOOK_READ_RESERVE_S
+    if remaining <= 0.0:
+        return {"marketData": None, "error": G.R_BOOK_READ_DEADLINE,
+                "observed_at": time.time(), "timeout_s": round(remaining, 3),
+                "why": "no time left inside the decision deadline"}
+    try:
+        return await md.read_book(slug, deadline_epoch_s=time.time()
+                                  + remaining, timeout_s=remaining)
+    except TypeError:
+        # a market-data client without deadline support (a test stand-in)
+        return await md.read_book(slug)
+
+
+def book_deadline_refusal(got: dict) -> bool:
+    """The read was cut by the decision deadline: our own timeout, or the
+    venue request gate refusing to outlive the deadline it was given."""
+    g = got or {}
+    return (g.get("error") == G.R_BOOK_READ_DEADLINE
+            or g.get("refused_by") == "OUR_REQUEST_GATE")

@@ -9730,6 +9730,16 @@ IDLE_POLL_S = 60.0
 LOCK_KEY = 7723901544120034
 
 
+def next_cycle_delay(*, ran: bool, elapsed_s: float) -> float:
+    """Seconds to wait before the next cycle: START TO START at CYCLE_S for a
+    cycle that ran (the provider budget is per cycle, so this spends exactly
+    what the budget states), never less than IDLE_POLL_S; IDLE_POLL_S for a
+    cycle that was stopped or blocked."""
+    if not ran:
+        return IDLE_POLL_S
+    return max(IDLE_POLL_S, CYCLE_S - max(0.0, float(elapsed_s)))
+
+
 async def run(get_pool) -> None:
     """The long-running task. Armed from the API's startup.
 
@@ -9842,10 +9852,18 @@ async def run(get_pool) -> None:
                     except Exception:                          # noqa: BLE001
                         log.warning("ext_pinnacle: cooldown drain failed",
                                     exc_info=True)
+                    t_cycle = time.monotonic()
                     out = await cycle(conn)
                     log.info("ext_pinnacle: %s", out)
                     if out.get("ran"):
-                        delay = CYCLE_S
+                        # START TO START, as the budget above is written
+                        # ("~7.2k/day at 15 minutes"). Sleeping the full
+                        # CYCLE_S AFTER a 4-5 minute cycle made the real
+                        # period ~19.5 minutes (measured 13:02, 13:21, 13:41,
+                        # 13:58 UTC on 2026-10-01): a quarter fewer scans than
+                        # the budget pays for. Never shorter than IDLE_POLL_S.
+                        delay = next_cycle_delay(
+                            ran=True, elapsed_s=time.monotonic() - t_cycle)
                 except asyncio.CancelledError:
                     raise
                 except Exception:                              # noqa: BLE001

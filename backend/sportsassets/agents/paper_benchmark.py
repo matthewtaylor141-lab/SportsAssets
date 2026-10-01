@@ -994,7 +994,7 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
         # THE BOOK IS READ ONLY FOR A CANDIDATE THAT COULD STILL ENTER.
         if ctx["books_read"] >= int(cfg["cadence"]["max_book_reads_per_pass"]):
             return {"deferred": True, "why": "BOOK_READ_BUDGET"}
-        got = await ctx["market_data"].read_book(cand["us_market_slug"])
+        got = await PD.read_book_within_deadline(ctx, cand["us_market_slug"])
         ctx["books_read"] += 1
         obs = await SIM.record_book(conn, slug=cand["us_market_slug"],
                                     read=got, source="PAPER_MARKET_DATA_"
@@ -1004,7 +1004,9 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
         levels = lv["levels"]
         book_age = round(max(0.0, float(clock()) - float(obs["observed_at"])),
                          3)
-        if obs.get("error") or not levels:
+        if PD.book_deadline_refusal(got):
+            refusals.append(PD.R_BOOK_DEADLINE)
+        elif obs.get("error") or not levels:
             refusals.append(R_NO_BOOK)
         elif book_age > BOOK_MAX_AGE_S:
             refusals.append(R_BOOK_NOT_CURRENT)
@@ -1311,6 +1313,7 @@ async def decide_for_hook(conn, ctx: dict, row: dict, *,
     raises (CancelledError excepted)."""
     pol = _pol(pol)
     STRATEGY = pol["strategy"]                                  # noqa: N806
+    t0 = time.monotonic()
     try:
         en = await enablement(conn, pol)
         if not en["enabled"]:
@@ -1321,12 +1324,20 @@ async def decide_for_hook(conn, ctx: dict, row: dict, *,
                                      timeout_s)
         return dict({k: rec.get(k) for k in (
             "decision_id", "verdict", "refusal", "order_id", "duplicate",
-            "deferred", "strategy")}, decided=not rec.get("deferred"))
+            "deferred", "strategy")}, decided=not rec.get("deferred"),
+            why=rec.get("why"),
+            elapsed_s=round(time.monotonic() - t0, 3))
     except asyncio.CancelledError:
         raise
+    except asyncio.TimeoutError:
+        return {"decided": False, "strategy": STRATEGY, "timeout": True,
+                "error": "TimeoutError: the in-cycle decision exceeded its "
+                         "%.1f s budget" % float(timeout_s),
+                "elapsed_s": round(time.monotonic() - t0, 3)}
     except Exception as exc:                                    # noqa: BLE001
         return {"decided": False, "strategy": STRATEGY,
-                "error": "%s: %s" % (type(exc).__name__, str(exc)[:200])}
+                "error": "%s: %s" % (type(exc).__name__, str(exc)[:200]),
+                "elapsed_s": round(time.monotonic() - t0, 3)}
 
 
 # ═════════════════════════════════════════════════════════════════════

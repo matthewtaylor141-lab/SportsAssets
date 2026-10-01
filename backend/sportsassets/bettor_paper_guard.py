@@ -24,6 +24,8 @@ id or a paper record can never enter the funded path.
 from __future__ import annotations
 
 import asyncio
+import functools
+import inspect
 import time
 from typing import Any, Callable
 
@@ -39,6 +41,8 @@ MUTATION_NAMES = (
 READS = ("read_book",)
 
 R_MUTATION_REFUSED = "PAPER_PATH_VENUE_MUTATION_REFUSED_BEFORE_TRANSMISSION"
+#: The paper book read did not return inside the decision's own deadline.
+R_BOOK_READ_DEADLINE = "PAPER_BOOK_READ_DEADLINE_EXCEEDED"
 R_PAPER_TO_FUNDED = "A_PAPER_RECORD_NEVER_REACHES_THE_FUNDED_PATH"
 
 
@@ -71,13 +75,33 @@ class PaperMarketDataClient:
         object.__setattr__(self, "_on_attempt", on_attempt)
 
     # ── the one read ────────────────────────────────────────────────
-    async def read_book(self, slug: str) -> dict:
+    async def read_book(self, slug: str, *, deadline_epoch_s=None,
+                        timeout_s=None) -> dict:
         """One book read, off the event loop. Returns {marketData, error,
-        observed_at}; never raises."""
+        observed_at}; never raises.
+
+        WITH A DEADLINE (the in-cycle decision's), the read is BOUNDED by it:
+        the venue request gate is told the deadline (it refuses by name rather
+        than queue past it), and the wait is cut at `timeout_s`. Before this,
+        the read carried NO deadline, so the gate could hold it for its 20 s
+        undeadlined cap (plus the SDK's 30 s HTTP timeout) while the in-cycle
+        decision around it was cancelled at 8 s -- and a cancelled decision
+        recorded nothing at all."""
         object.__setattr__(self, "_calls", self._calls + 1)
         t0 = time.time()
+        call = (functools.partial(self._transport, slug,
+                                  deadline_epoch_s=deadline_epoch_s)
+                if deadline_epoch_s is not None
+                and _accepts_deadline(self._transport)
+                else functools.partial(self._transport, slug))
         try:
-            got = await asyncio.to_thread(self._transport, slug)
+            fut = asyncio.to_thread(call)
+            got = (await asyncio.wait_for(fut, float(timeout_s))
+                   if timeout_s is not None else await fut)
+        except asyncio.TimeoutError:
+            return {"marketData": None, "error": R_BOOK_READ_DEADLINE,
+                    "observed_at": t0, "waited_s": round(time.time() - t0, 3),
+                    "timeout_s": timeout_s}
         except Exception as exc:                               # noqa: BLE001
             return {"marketData": None, "error": type(exc).__name__,
                     "observed_at": t0}
@@ -128,12 +152,22 @@ class PaperMarketDataClient:
             READS, self._attempts)
 
 
-def _default_transport(slug: str) -> dict:
+def _default_transport(slug: str, *, deadline_epoch_s=None) -> dict:
     """The collection cycle's own paced, public book read (`pmus.book_read`
-    through `_read_book_blocking`). Imported lazily so constructing the
-    client reaches nothing."""
+    through `_read_book_blocking`), with the caller's deadline handed to the
+    venue request gate. Imported lazily so constructing the client reaches
+    nothing."""
     from .workers import ext_pinnacle_loop as L
-    return L._read_book_blocking(slug)
+    return L._read_book_blocking(slug, deadline_epoch_s=deadline_epoch_s)
+
+
+def _accepts_deadline(transport) -> bool:
+    """Whether a transport takes `deadline_epoch_s` (the default does; a
+    test's one-argument transport does not, and is called as before)."""
+    try:
+        return "deadline_epoch_s" in inspect.signature(transport).parameters
+    except (TypeError, ValueError):
+        return False
 
 
 # ═════════════════════════════════════════════════════════════════════

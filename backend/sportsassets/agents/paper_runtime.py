@@ -37,12 +37,15 @@ session's health record (expected 0).
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from typing import Any
 
 from .. import bettor_paper_guard as G
 from .. import bettor_paper_ledger as L
 from .. import bettor_paper_session as S
+
+log = logging.getLogger(__name__)
 
 VERSION = "PAPER_RUNTIME_V1"
 ADVISORY_LOCK_KEY = 0x50415052            # "PAPR"
@@ -442,6 +445,37 @@ def _client() -> G.PaperMarketDataClient:
     return _CLIENT["client"]
 
 
+async def _record_hook_failure(conn, *, ctx: dict, valuation_id: int,
+                               strategy: str, res: dict | None) -> None:
+    """A decision the hook did not make, as a row (migration 187): raised,
+    timed out, or deferred. A strategy that is switched off is not a
+    failure. Never raises; an absent table is skipped."""
+    r = res or {}
+    if r.get("timeout"):
+        outcome = "TIMEOUT"
+    elif r.get("error"):
+        outcome = "ERROR"
+    elif r.get("deferred"):
+        outcome = "DEFERRED"
+    else:
+        return
+    try:
+        import json as _json
+        await conn.execute(
+            "INSERT INTO paper_hook_failures (session_id, account_id, "
+            " valuation_id, strategy, stage, outcome, elapsed_s, error, "
+            " detail) VALUES ($1,$2,$3,$4,'IN_CYCLE_VALUATION_HOOK',$5,$6,$7,"
+            " $8::jsonb)", ctx.get("session_id"), ctx.get("account_id"),
+            int(valuation_id), str(strategy), outcome, r.get("elapsed_s"),
+            (str(r.get("error"))[:500] if r.get("error") else r.get("why")),
+            _json.dumps({k: r.get(k) for k in ("why", "decision_id",
+                                                "refusal", "deferred")},
+                        default=str))
+    except Exception:                                           # noqa: BLE001
+        log.warning("paper hook failure not recorded (valuation %s, %s)",
+                    valuation_id, strategy, exc_info=True)
+
+
 async def decide_valuation(conn, *, valuation_id, now: float | None = None,
                            market_data=None, account_id: str | None = None,
                            fee_fn=None, schedule_fill=None) -> dict:
@@ -478,30 +512,51 @@ async def decide_valuation(conn, *, valuation_id, now: float | None = None,
             "context_cache_key": sess["session_id"]}
         from . import paper_derek as PD
         bench_on = _benchmark_env_on()
+        bench = None
+        bench_cg = None
+        vid = int(valuation_id)
+        if bench_on:
+            # THE ACTIVE ENTRY EXPERIMENT FIRST. The completed-game policy is
+            # the one strategy that may open positions (migration 184), so it
+            # decides closest to the valuation instant: its book read is not
+            # queued behind the research strategies' work on the same row.
+            from . import paper_benchmark as PB
+            bench_cg = await PB.decide_for_hook(
+                conn, ctx, dict(row), timeout_s=VALUATION_HOOK_TIMEOUT_S,
+                pol=PB.CG_POLICY)
+            await _record_hook_failure(conn, ctx=ctx, valuation_id=vid,
+                                       strategy=PB.CG_STRATEGY, res=bench_cg)
+        t_derek = time.monotonic()
         try:
-            rec = await asyncio.wait_for(PD.decide_one(conn, ctx, dict(row)),
+            dctx = dict(ctx, deadline=time.monotonic()
+                        + VALUATION_HOOK_TIMEOUT_S)
+            rec = await asyncio.wait_for(PD.decide_one(conn, dctx, dict(row)),
                                          VALUATION_HOOK_TIMEOUT_S)
+            await _record_hook_failure(
+                conn, ctx=ctx, valuation_id=vid,
+                strategy="DEREK_ENTRY_POLICY_V2",
+                res=dict(rec, elapsed_s=round(time.monotonic() - t_derek, 3)))
         except asyncio.CancelledError:
             raise
         except Exception as exc:                               # noqa: BLE001
+            await _record_hook_failure(
+                conn, ctx=ctx, valuation_id=vid,
+                strategy="DEREK_ENTRY_POLICY_V2",
+                res={"error": "%s: %s" % (type(exc).__name__, str(exc)[:200]),
+                     "timeout": isinstance(exc, asyncio.TimeoutError),
+                     "elapsed_s": round(time.monotonic() - t_derek, 3)})
             if not bench_on:
                 raise
             # WITH THE BENCHMARK ON, a failing two-model decision does not
             # stop the benchmark's separate decision on the same valuation.
             rec = {"error": "%s: %s" % (type(exc).__name__, str(exc)[:200])}
-        bench = None
-        bench_cg = None
         if bench_on:
-            # THE EXPERIMENTAL PINNACLE_ONLY_PAPER_BENCHMARK, decided
-            # separately on the same valuation (its own record, strategy
-            # key), after Derek's; guarded and bounded, never raises.
-            from . import paper_benchmark as PB
+            # THE STRICT PINNACLE_ONLY_PAPER_BENCHMARK, its own record on the
+            # same valuation (new entries off since 184: it returns at once).
             bench = await PB.decide_for_hook(
                 conn, ctx, dict(row), timeout_s=VALUATION_HOOK_TIMEOUT_S)
-            # THE COMPLETED-GAME POLICY, its own record on the same valuation
-            bench_cg = await PB.decide_for_hook(
-                conn, ctx, dict(row), timeout_s=VALUATION_HOOK_TIMEOUT_S,
-                pol=PB.CG_POLICY)
+            await _record_hook_failure(conn, ctx=ctx, valuation_id=vid,
+                                       strategy=PB.STRATEGY, res=bench)
 
         delta = int(getattr(md, "mutation_attempts", 0) or 0) - before
         if delta:
