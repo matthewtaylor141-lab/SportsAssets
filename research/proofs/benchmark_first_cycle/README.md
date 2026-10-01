@@ -76,3 +76,13 @@ So the benchmark's contract match (`compatibility == COMPATIBLE`) can never pass
   - `GET /v1/voices` → 401, `provider_error_status: missing_permissions`, "The API key you used is missing the permission voices_read to execute this operation." (request IDs 124889b99cf48c48e493646a0ae13f2a, cb6a350a7b9a5ab813bbdd4e1696c823, ab6eccf90d36994b6554c09fdf8ab2fa).
   - Provisioning correction named by the provider: grant the key `voices_read`. Alternatively, configure ELEVENLABS_VOICE_ID_{DEREK,XAVIER,AUDREY} so the voice list read is not needed (env_voice_id is null today).
   - Audrey's speak now resolves `conv-…:3`; the earlier 404 is fixed.
+
+## Follow-up readback (04:33Z, run 36815631590)
+- Still 12 benchmark decisions, all SETTLEMENT_NOT_SUPPORTED. No valuations arrived after 04:20Z.
+- 0 orders, 0 fills, 0 handoffs.
+- Account unchanged: $500,000 cash, 1 ledger entry. Session: 177 passes, 0 errors, 0 mutation attempts.
+- Audrey's daily report version 3 (04:31:25Z) carries the benchmark section and reconciles: fills 0, positions 0, decisions 12 refused, with the disclosure.
+
+## Label fix 70aec64 (claude/rel-label, on a8bf09a)
+- Focused suites: 64 files (persona / paper / audrey / agent / chat / benchmark / xavier / derek / voice), 570 passed (label_fix_focused_tests.txt).
+- Full gate started 04:36:09Z, against a8bf09a, e348ebf and e4dc132 baselines. Verdict to follow.

@@ -1,0 +1,37 @@
+........................................................................ [ 12%]
+........................................................................ [ 25%]
+........................................................................ [ 37%]
+........................................................................ [ 50%]
+........................................................................ [ 63%]
+........................................................................ [ 75%]
+........................................................................ [ 88%]
+..................................................................       [100%]
+=============================== warnings summary ===============================
+sportsassets/workers/premap.py:115
+  /tmp/claude-0/wt_label/backend/sportsassets/workers/premap.py:115: SyntaxWarning: invalid escape sequence '\d'
+    """Every line a text states — half-point lines anywhere, plus WHOLE
+
+tests/test_derek_coverage_census_and_workspace.py::test_the_workspace_on_an_empty_database_is_truthful
+  /tmp/claude-0/wt_label/backend/tests/test_derek_coverage_census_and_workspace.py:252: DeprecationWarning: 
+          on_event is deprecated, use lifespan event handlers instead.
+  
+          Read more about it in the
+          [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).
+          
+    @app.on_event("shutdown")
+
+tests/test_derek_coverage_census_and_workspace.py::test_the_workspace_on_an_empty_database_is_truthful
+  /tmp/claude-0/gatevenv312/lib/python3.12/site-packages/fastapi/applications.py:4744: DeprecationWarning: 
+          on_event is deprecated, use lifespan event handlers instead.
+  
+          Read more about it in the
+          [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).
+          
+    return self.router.on_event(event_type)  # ty: ignore[deprecated]
+
+tests/test_paper_records_cannot_reach_the_funded_path.py::test_no_funded_module_imports_the_paper_modules
+tests/test_pinnacle_only_paper_benchmark.py::test_no_funded_module_reaches_the_benchmark
+  <unknown>:115: SyntaxWarning: invalid escape sequence '\d'
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+570 passed, 5 warnings in 274.42s (0:04:34)
