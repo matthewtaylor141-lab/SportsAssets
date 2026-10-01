@@ -152,11 +152,15 @@ for (const [ename, engine, dev, args] of ENGINES) {
         overflow: document.documentElement.scrollWidth > document.documentElement.clientWidth + 1,
         talkVisible: !!document.getElementById("talk-in"),
         jump: (() => { const j = document.querySelector(".office-talk-jump"); return j ? getComputedStyle(j).display : null; })(),
+        // ONE LAUNCHER: every talk launcher the page carries, and how many are visible
+        launchers: [...document.querySelectorAll(".desk-mobile-talk,.office-mobile-talk,.office-talk-jump")].map((b) => {
+          const r = b.getBoundingClientRect(); return { cls: b.className, visible: getComputedStyle(b).display !== "none" && r.width > 0 && r.height > 0 }; }),
         strip: (document.body.innerText.match(/CASH\s*\$[\d,]+\.\d\d/) || [""])[0],
         ledgerEntry: (document.body.innerText.match(/ledger entry #(\d+)/) || [])[1] || null,
       }));
       R.checks.page = { status: short(shown.status, 200), overflow: shown.overflow, talk: shown.talkVisible,
-        mobile_jump_display: shown.jump, js_errors: seen.errs.slice(0, 6) };
+        mobile_jump_display: shown.jump, launchers: shown.launchers,
+        visible_launchers: shown.launchers.filter((l) => l.visible).length, js_errors: seen.errs.slice(0, 6) };
       // ACCOUNT: the strip's cash vs the account read the page received
       const acc = (seen.account.filter((x) => x.json).slice(-1)[0] || {}).json || {};
       const accd = ((acc.account || {}).data) || {};
@@ -206,10 +210,12 @@ for (const [ename, engine, dev, args] of ENGINES) {
       await f.evaluate(() => { const b = document.querySelector("[data-act='refresh'],#refresh-btn,.cc-refresh"); if (b) b.click(); });
       await page.waitForTimeout(17000);
       const after = await f.evaluate(() => ({ status: (document.getElementById("office-status") || {}).textContent || "",
+        note: [...document.querySelectorAll(".desk-live-note,.desk-empty")].map((n) => n.textContent).join(" | "),
         positions: document.querySelectorAll("[data-office-position]").length,
         decisions: document.querySelectorAll("[data-office-decision]").length }));
       R.checks.failed_read = { status: short(after.status, 200), positions_after: after.positions,
-        decisions_after: after.decisions, kept: /Last successful records retained/.test(after.status) };
+        decisions_after: after.decisions, kept: /Last successful records retained/.test(after.status),
+        note: short(after.note, 240), marked_stale: /displaying the last successful records|latest read failed/i.test(after.note) };
       await page.unroute(`${HOST}/api/command/paper/operations*`);
       await shot(page, `${ename}_${agent}_failed_read`, f);
 
@@ -219,7 +225,20 @@ for (const [ename, engine, dev, args] of ENGINES) {
       const Q = { xavier: "What are you doing with the San Diego position right now?",
         derek: "Why did the closest recent opportunity not qualify?",
         audrey: "Does the paper ledger reconcile right now?" }[agent];
+      // PHONE: the conversation lives behind the fixed Talk dock; open it the
+      // way a person would (only when the dock is the visible launcher)
+      const openTalk = async () => f.evaluate(() => {
+        const d = document.querySelector(".desk-mobile-talk");
+        if (!d || getComputedStyle(d).display === "none") return { dock: false };
+        if (d.getAttribute("aria-expanded") !== "true") d.click();
+        const side = document.querySelector(".office-side");
+        return { dock: true, expanded: d.getAttribute("aria-expanded"),
+          panel_open: !!(side && side.classList.contains("desk-conversation-open")),
+          input_visible: !!document.getElementById("talk-in") && document.getElementById("talk-in").getBoundingClientRect().height > 0 };
+      });
+      R.checks.phone_panel = { opened: await openTalk() };
       const ask = async (q) => {
+        await openTalk();
         const nA = await f.locator(".talk-msg.a").count();
         const t = await f.evaluate(() => performance.now());
         await f.fill("#talk-in", q);
@@ -299,10 +318,22 @@ for (const [ename, engine, dev, args] of ENGINES) {
         R.checks.provider_error = { state: short(await f.locator("#talk-state").innerText().catch(() => ""), 200),
           answers_still_shown: await f.locator(".talk-msg.a").count(), before: nMsgs };
       }
+      // PHONE: Escape closes the panel and returns focus to the dock
+      if (R.checks.phone_panel.opened.dock) {
+        await f.locator("#talk-in").press("Escape").catch(() => {});
+        await page.waitForTimeout(600);
+        R.checks.phone_panel.after_escape = await f.evaluate(() => {
+          const side = document.querySelector(".office-side"), d = document.querySelector(".desk-mobile-talk");
+          return { panel_open: !!(side && side.classList.contains("desk-conversation-open")),
+            focus_on_dock: document.activeElement === d, expanded: d && d.getAttribute("aria-expanded") };
+        });
+        await shot(page, `${ename}_${agent}_phone_closed`, f);
+      }
       // RELOAD: the conversation resumes from the server
       const before = await f.locator(".talk-msg").count();
       await page.reload({ waitUntil: "domcontentloaded" });
       f = await waitOffice(page, agent);
+      await openTalk().catch(() => {});
       await waitInFrame(f, (n) => document.querySelectorAll(".talk-msg").length >= n, before, 30000).catch(() => {});
       R.checks.resume = { before, after: await f.locator(".talk-msg").count(),
         state: short(await f.locator("#talk-state").innerText().catch(() => ""), 160) };
