@@ -1,0 +1,52 @@
+{
+ "commit": "70aec64e81378223e67ac16e1689557dd9b0c78a",
+ "console_bytes": 77492,
+ "console_path": "/tmp/claude-0/gate_lbl_out/head_console.txt",
+ "database": "gate_lbl_head",
+ "funded_tables": "17",
+ "migration_max": "182_paper_strategy_key_and_pinnacle_only_benchmark.sql",
+ "packages": {
+  "anthropic": {
+   "location": "/tmp/claude-0/gatevenv312/lib/python3.12/site-packages/anthropic",
+   "version": "1.9.0"
+  },
+  "asyncpg": {
+   "location": "/tmp/claude-0/gatevenv312/lib/python3.12/site-packages/asyncpg",
+   "version": "0.31.0"
+  },
+  "fastapi": {
+   "location": "/tmp/claude-0/gatevenv312/lib/python3.12/site-packages/fastapi",
+   "version": "0.142.2"
+  },
+  "httpx": {
+   "location": "/tmp/claude-0/gatevenv312/lib/python3.12/site-packages/httpx",
+   "version": "0.28.1"
+  },
+  "httpx2": {
+   "location": "/tmp/claude-0/gatevenv312/lib/python3.12/site-packages/httpx2",
+   "version": "2.13.1"
+  },
+  "polymarket_us": {
+   "location": "/tmp/claude-0/gatevenv312/lib/python3.12/site-packages/polymarket_us",
+   "version": "1.0.2"
+  },
+  "pydantic": {
+   "location": "/tmp/claude-0/gatevenv312/lib/python3.12/site-packages/pydantic",
+   "version": "2.13.5"
+  },
+  "pytest": {
+   "location": "/tmp/claude-0/gatevenv312/lib/python3.12/site-packages/pytest",
+   "version": "9.1.1"
+  }
+ },
+ "pip_freeze_path": "/tmp/claude-0/gate_lbl_out/head_meta.json.freeze.txt",
+ "pip_freeze_sha256_16": "e0761a71d26b64ee",
+ "public_tables": "189",
+ "pytest": "pytest 9.1.1",
+ "pytest_exitstatus": 1,
+ "python": "3.12.3",
+ "python_executable": "/tmp/claude-0/gatevenv312/bin/python3",
+ "pythonpath": "/tmp/claude-0/gate_tools_v3",
+ "report_path": "/tmp/claude-0/gate_lbl_out/head_report.json",
+ "report_present": true
+}
