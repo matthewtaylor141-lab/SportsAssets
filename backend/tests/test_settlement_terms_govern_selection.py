@@ -425,11 +425,22 @@ def test_an_unestablished_phase_or_format_admits_no_terms():
     assert ST.book_terms(game_format=ST.FMT_NINE, **base) == {}, "phase missing"
     assert ST.book_terms(phase=ST.PHASE_REGULAR,
                          game_format=ST.FMT_NINE, **base)
-    # AND AN EXCLUDED SCOPE IS REFUSED BY NAME, not merely unknown
+    # A PLAYOFF FIXTURE IS ADMITTED ONLY WITH ITS OWN CAPTURE (2026-10-01):
+    # its terms are the playoff table's, never the regular-season table's.
     pl = ST.admit_scope(sport_family="baseball", phase=ST.PHASE_PLAYOFF,
                         game_format=ST.FMT_NINE)
-    assert pl["ok"] is False and ST.R_PHASE_EXCLUDED in pl["refusals"]
-    assert "whenever the game is completed" in pl["why"]
+    assert pl["ok"] is True
+    po = ST.book_terms(phase=ST.PHASE_PLAYOFF, game_format=ST.FMT_NINE,
+                       **base)
+    assert po and po != ST.book_terms(phase=ST.PHASE_REGULAR,
+                                      game_format=ST.FMT_NINE, **base)
+    assert all("whenever the game is completed" in t["cite"]["quote"]
+               or t["cite"]["retrieved_at"] == "2026-10-01T11:51:10Z"
+               for t in po.values())
+    # AND AN EXCLUDED SCOPE IS STILL REFUSED BY NAME, not merely unknown
+    ko = ST.admit_scope(sport_family="soccer", phase=ST.PHASE_KNOCKOUT,
+                        game_format=ST.FMT_KNOCKOUT)
+    assert ko["ok"] is False and ST.R_PHASE_EXCLUDED in ko["refusals"]
     dh = ST.admit_scope(sport_family="baseball", phase=ST.PHASE_REGULAR,
                         game_format=ST.FMT_SEVEN)
     assert dh["ok"] is False and ST.R_FORMAT_EXCLUDED in dh["refusals"]

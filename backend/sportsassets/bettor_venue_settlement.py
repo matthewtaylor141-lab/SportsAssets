@@ -814,3 +814,106 @@ def attest(*, sport_family, market="h2h", venue_evidence=None,
                              and r.get("evidence_class") in ATTESTING_CLASSES)
     out["overall_established"] = not out["unmet"]
     return out
+
+
+# ═════════════════════════════════════════════════════════════════════
+# THE PRECISE SETTLEMENT BLOCKERS, NAMED FOR MANAGEMENT
+# ═════════════════════════════════════════════════════════════════════
+#
+# "SETTLEMENT_NOT_SUPPORTED" says that a contract cannot be priced on the
+# bookmaker's probability; it does not say what to go and establish. These
+# codes do. Each is "<CLASS>:<subject>" and is derived ONLY from evidence on
+# the record: a condition is named incompatible when both sides STATE a
+# payout and the payouts differ, ambiguous when the captured book text gives
+# it two readings, unstated when a side says nothing. Silence is never read
+# as agreement, and the absence of a code is never read as establishment --
+# `established` below is True only for a COMPATIBLE comparison with every
+# rule attested.
+
+B_FIXTURE = "SETTLEMENT_FIXTURE_METADATA_ABSENT"
+B_CONTEXT = "SETTLEMENT_QUOTE_CONTEXT_NOT_ESTABLISHED"
+B_SCOPE = "SETTLEMENT_SCOPE_NOT_ESTABLISHED"
+B_INCOMPATIBLE = "SETTLEMENT_TERMS_INCOMPATIBLE"
+B_BOOK_AMBIGUOUS = "SETTLEMENT_BOOK_TERMS_AMBIGUOUS"
+B_BOOK_SILENT = "SETTLEMENT_BOOK_RULE_NOT_STATED"
+B_VENUE_SILENT = "SETTLEMENT_VENUE_RULE_NOT_STATED"
+B_VENUE_NOT_READ = "SETTLEMENT_VENUE_RULES_NOT_READ"
+B_VENUE_CONTRADICTORY = "SETTLEMENT_VENUE_RULES_SELF_CONTRADICTORY"
+B_RULE_UNMET = "SETTLEMENT_RULE_UNMET"
+B_NOT_COMPARED = "SETTLEMENT_COMPARISON_NOT_RECORDED"
+
+
+def settlement_blockers(srule, *, fixture=None) -> dict:
+    """Every named reason this contract's settlement is not established.
+
+    Pure. `srule` is `attest`'s output; `fixture` the fixture-scope read
+    (`acquire_fixture_scope`). Returns {"established", "blockers",
+    "per_condition"}: `established` is True ONLY when the condition-to-
+    payout verdict is COMPATIBLE and attest left no rule unmet.
+    """
+    s = dict(srule or {})
+    void = dict((s.get("rules") or {}).get("void") or {})
+    cmp_ = dict(void.get("terms_comparison") or s.get("terms_comparison")
+                or {})
+    fx = dict(fixture or {})
+    out: list = []
+
+    def add(code, subject=None):
+        c = code if subject is None else "%s:%s" % (code, subject)
+        if c not in out:
+            out.append(c)
+
+    if not cmp_:
+        add(B_NOT_COMPARED)
+    if fixture is not None and not fx.get("read"):
+        acq = dict(fx.get("acquisition") or {})
+        add(B_FIXTURE, acq.get("refusal") or fx.get("refusal")
+            or "FIXTURE_NOT_READ")
+    ctx = dict(cmp_.get("quote_context") or {})
+    if ctx.get("refusal"):
+        add(B_CONTEXT, ctx["refusal"])
+    scope = dict(cmp_.get("scope") or {})
+    for r in scope.get("refusals") or []:
+        add(B_SCOPE, r)
+    if cmp_ and not (cmp_.get("venue_read") or {}).get("read"):
+        add(B_VENUE_NOT_READ)
+    for c in cmp_.get("venue_self_contradictory") or []:
+        add(B_VENUE_CONTRADICTORY, c)
+    per = dict(cmp_.get("per_condition") or {})
+    amb = dict(cmp_.get("book_ambiguous_conditions") or {})
+    compact = {}
+    for cond, r in per.items():
+        bp, vp, v = r.get("book_payout"), r.get("venue_payout"), \
+            r.get("verdict")
+        compact[cond] = {"verdict": v, "book_payout": bp,
+                         "venue_payout": vp}
+        if v == _ST.V_MISMATCH:
+            add(B_INCOMPATIBLE, "%s(book=%s;venue=%s)" % (cond, bp, vp))
+    if cmp_.get("book_terms_held"):
+        for cond, r in per.items():
+            if r.get("verdict") in (_ST.V_BOOK_SILENT, _ST.V_BOTH_SILENT):
+                add(B_BOOK_AMBIGUOUS if cond in amb else B_BOOK_SILENT,
+                    cond)
+    for cond, r in per.items():
+        if r.get("verdict") in (_ST.V_VENUE_SILENT, _ST.V_BOTH_SILENT):
+            add(B_VENUE_SILENT, cond)
+    for k, r in (s.get("rules") or {}).items():
+        if k != "void" and r.get("applicable") and not r.get("established") \
+                and r.get("refusal"):
+            add(B_RULE_UNMET, r["refusal"])
+    verdict = cmp_.get("verdict")
+    established = bool(verdict == _ST.COMPATIBLE
+                       and s.get("overall_established") is True
+                       and not out)
+    if verdict != _ST.COMPATIBLE and not out:
+        # Nothing specific found, and still not compatible: say so rather
+        # than leave an empty list that reads as "nothing wrong".
+        add(B_NOT_COMPARED if not verdict else "SETTLEMENT_VERDICT",
+            verdict)
+    return {"established": established, "verdict": verdict,
+            "blockers": out, "per_condition": compact,
+            "book_ambiguous_conditions": amb,
+            "book_capture": {k: (cmp_.get("book_capture") or {}).get(k)
+                             for k in ("url", "retrieved_at", "sha256",
+                                       "job", "phase")}
+            if cmp_.get("book_capture") else None}

@@ -186,7 +186,17 @@ async def _decisions(conn, acct: str, now: float) -> dict:
              else "'%s'::text" % DEFAULT_STRATEGY)
     rows = await conn.fetch(
         "SELECT " + strat + " AS strategy, verdict, "
-        "       coalesce(refusal, 'ENTER') AS reason, "
+        # THE CATEGORY AND ITS FIRST NAMED BLOCKER: a settlement refusal is
+        # reported with the precise reason recorded behind it (a conflicting
+        # payout, an out-of-scope phase, absent fixture metadata), so the
+        # count says what to establish rather than only that it failed.
+        "       CASE WHEN refusal = 'SETTLEMENT_NOT_SUPPORTED' "
+        "             AND array_position(refusals, refusal) IS NOT NULL "
+        "             AND refusals[array_position(refusals, refusal) + 1] "
+        "                 LIKE 'SETTLEMENT\\_%' "
+        "            THEN refusal || ' -> ' || "
+        "                 refusals[array_position(refusals, refusal) + 1] "
+        "            ELSE coalesce(refusal, 'ENTER') END AS reason, "
         "       count(*)::int AS n, max(decided_at) AS newest_at, "
         "       (array_agg(decision_id ORDER BY decided_at DESC))[1] "
         "         AS newest_id "

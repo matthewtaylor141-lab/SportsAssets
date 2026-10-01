@@ -1,0 +1,3641 @@
+{
+ "_what": "THE UEFA MATCH API'S OWN PAYLOAD, VERBATIM, for UEFA Nations League matches on 2026-10-04 (the first five complete match objects; the reader printed 60000 of 97100 bytes).",
+ "_source": "https://match.uefa.com/v5/matches?competitionId=2014&fromDate=2026-10-04&toDate=2026-10-04&limit=40&offset=0&order=ASC",
+ "_captured_at": "2026-10-01T11:58:41Z",
+ "_evidence": "fetch-docs run 36858740040, job 110357446800; full response sha256 ca1c19c16cbb391e47777c5765dafb6525f39e8029aa808113a0f58c210cf2f8",
+ "matches": [
+  {
+   "awayTeam": {
+    "associationId": "256557",
+    "associationLogoUrl": "https://img.uefa.com/imgml/uefacom/elements/logos/ma/LTU.svg",
+    "bigLogoUrl": "https://img.uefa.com/imgml/flags/700x700/LTU.png",
+    "confederationType": "UEFA",
+    "countryCode": "LTU",
+    "id": "56557",
+    "idProvider": "FAME",
+    "internationalName": "Lithuania",
+    "isPlaceHolder": false,
+    "logoUrl": "https://img.uefa.com/imgml/flags/70x70/LTU.png",
+    "mediumLogoUrl": "https://img.uefa.com/imgml/flags/240x240/LTU.png",
+    "organizationId": "256557",
+    "teamCode": "LTU",
+    "teamTypeDetail": "NATIONAL_MEN_TEAM_A",
+    "translations": {
+     "countryName": {
+      "EN": "Lithuania",
+      "FR": "Lituanie",
+      "DE": "Litauen",
+      "ES": "Lituania",
+      "PT": "Lituânia",
+      "IT": "Lituania",
+      "RU": "Литва",
+      "ZH": "立陶宛",
+      "AR": "ليتوانيا"
+     },
+     "displayName": {
+      "EN": "Lithuania",
+      "FR": "Lituanie",
+      "DE": "Litauen",
+      "ES": "Lituania",
+      "PT": "Lituânia",
+      "IT": "Lituania",
+      "RU": "Литва",
+      "ZH": "立陶宛",
+      "AR": "ليتوانيا"
+     },
+     "displayOfficialName": {
+      "EN": "Lithuania",
+      "FR": "Lituanie",
+      "DE": "Litauen",
+      "ES": "Lituania",
+      "PT": "Lituânia",
+      "IT": "Lituania",
+      "RU": "Литва",
+      "ZH": "立陶宛",
+      "AR": "ليتوانيا"
+     },
+     "displayTeamCode": {
+      "EN": "LTU",
+      "FR": "LTU",
+      "DE": "LTU",
+      "ES": "LTU",
+      "PT": "LTU",
+      "IT": "LTU",
+      "RU": "LTU",
+      "ZH": "LTU",
+      "AR": "LTU"
+     },
+     "shortName": {
+      "EN": "LTU",
+      "FR": "LTU",
+      "DE": "LTU",
+      "ES": "LTU",
+      "PT": "LTU",
+      "IT": "LTU",
+      "RU": "Литва",
+      "ZH": "LFF",
+      "AR": "LTU"
+     }
+    },
+    "typeIsNational": true,
+    "typeTeam": "NATIONAL"
+   },
+   "behindClosedDoors": false,
+   "competition": {
+    "age": "ADULT",
+    "code": "UNL",
+    "id": "2014",
+    "images": {
+     "FULL_LOGO": "https://img.uefa.com/imgml/uefacom/elements/logos/competitions/color/full/2014.svg"
+    },
+    "metaData": {
+     "name": "UEFA Nations League"
+    },
+    "region": "CONTINENTAL",
+    "sex": "MALE",
+    "sportsType": "FOOTBALL",
+    "teamCategory": "NATIONAL",
+    "translations": {
+     "name": {
+      "EN": "UEFA Nations League",
+      "FR": "UEFA Nations League",
+      "DE": "UEFA Nations League",
+      "ES": "UEFA Nations League",
+      "PT": "UEFA Nations League",
+      "IT": "UEFA Nations League",
+      "RU": "Лига наций УЕФА",
+      "ZH": "UEFA Nations League",
+      "AR": "دوري الأمم الأوروبية UEFA"
+     },
+     "prequalifyingName": {
+      "EN": "UEFA Nations League",
+      "FR": "UEFA Nations League",
+      "DE": "UEFA Nations League",
+      "ES": "UEFA Nations League",
+      "PT": "UEFA Nations League",
+      "IT": "UEFA Nations League",
+      "RU": "Лига наций УЕФА",
+      "ZH": "UEFA Nations League",
+      "AR": "دوري الأمم الأوروبية UEFA"
+     },
+     "qualifyingName": {
+      "EN": "UEFA Nations League",
+      "FR": "UEFA Nations League",
+      "DE": "UEFA Nations League",
+      "ES": "UEFA Nations League",
+      "PT": "UEFA Nations League",
+      "IT": "UEFA Nations League",
+      "RU": "Лига наций УЕФА",
+      "ZH": "UEFA Nations League",
+      "AR": "دوري الأمم الأوروبية UEFA"
+     },
+     "tournamentName": {
+      "EN": "UEFA Nations League",
+      "FR": "UEFA Nations League",
+      "DE": "UEFA Nations League",
+      "ES": "UEFA Nations League",
+      "PT": "UEFA Nations League",
+      "IT": "UEFA Nations League",
+      "RU": "Лига наций УЕФА",
+      "ZH": "UEFA Nations League",
+      "AR": "دوري الأمم الأوروبية UEFA"
+     }
+    },
+    "type": "CUP"
+   },
+   "competitionPhase": "TOURNAMENT",
+   "group": {
+    "competitionId": "2014",
+    "id": "2014204",
+    "league": {
+     "competitionId": "2014",
+     "id": "129",
+     "metaData": {
+      "leagueName": "League D",
+      "leagueShortName": "LD"
+     },
+     "order": 4,
+     "phase": "TOURNAMENT",
+     "roundId": "2002276",
+     "seasonYear": "2027",
+     "translations": {
+      "name": {
+       "EN": "League D",
+       "FR": "Ligue D",
+       "DE": "Liga D",
+       "ES": "Liga D",
+       "PT": "Liga D",
+       "IT": "Lega D",
+       "RU": "Лига D",
+       "ZH": "League D",
+       "AR": "المستوى الرابع"
+      },
+      "shortName": {
+       "EN": "LD",
+       "FR": "LD",
+       "DE": "LD",
+       "ES": "LD",
+       "PT": "LD",
+       "IT": "LD",
+       "RU": "D",
+       "ZH": "LD",
+       "AR": "د"
+      }
+     }
+    },
+    "metaData": {
+     "groupName": "Group D2",
+     "groupShortName": "GrpD2"
+    },
+    "order": 14,
+    "phase": "TOURNAMENT",
+    "roundId": "2002276",
+    "seasonYear": "2027",
+    "teams": [
+     "56557",
+     "81",
+     "57154"
+    ],
+    "teamsQualifiedNumber": 1,
+    "translations": {
+     "name": {
+      "EN": "Group D2",
+      "FR": "Groupe D2",
+      "DE": "Gruppe D2",
+      "ES": "Grupo D2",
+      "PT": "Grupo D2",
+      "IT": "Gruppo D2",
+      "RU": "Группа D2",
+      "ZH": "Group D2",
+      "AR": "المجموعة D2"
+     },
+     "shortName": {
+      "EN": "D2",
+      "FR": "D2",
+      "DE": "D2",
+      "ES": "D2",
+      "PT": "D2",
+      "IT": "D2",
+      "RU": "D2",
+      "ZH": "2",
+      "AR": "D2"
+     }
+    },
+    "type": "STANDARD"
+   },
+   "homeTeam": {
+    "associationId": "257154",
+    "associationLogoUrl": "https://img.uefa.com/imgml/uefacom/elements/logos/ma/AZE.svg",
+    "bigLogoUrl": "https://img.uefa.com/imgml/flags/700x700/AZE.png",
+    "confederationType": "UEFA",
+    "countryCode": "AZE",
+    "id": "57154",
+    "idProvider": "FAME",
+    "internationalName": "Azerbaijan",
+    "isPlaceHolder": false,
+    "logoUrl": "https://img.uefa.com/imgml/flags/70x70/AZE.png",
+    "mediumLogoUrl": "https://img.uefa.com/imgml/flags/240x240/AZE.png",
+    "organizationId": "257154",
+    "teamCode": "AZE",
+    "teamTypeDetail": "NATIONAL_MEN_TEAM_A",
+    "translations": {
+     "countryName": {
+      "EN": "Azerbaijan",
+      "FR": "Azerbaïdjan",
+      "DE": "Aserbaidschan",
+      "ES": "Azerbaiyán",
+      "PT": "Azerbaijão",
+      "IT": "Azerbaigian",
+      "RU": "Азербайджан",
+      "ZH": "阿赛拜疆",
+      "AR": "أذربيجان"
+     },
+     "displayName": {
+      "EN": "Azerbaijan",
+      "FR": "Azerbaïdjan",
+      "DE": "Aserbaidschan",
+      "ES": "Azerbaiyán",
+      "PT": "Azerbaijão",
+      "IT": "Azerbaigian",
+      "RU": "Азербайджан",
+      "ZH": "阿塞拜疆",
+      "AR": "أذربيجان"
+     },
+     "displayOfficialName": {
+      "EN": "Azerbaijan",
+      "FR": "Azerbaïdjan",
+      "DE": "Aserbaidschan",
+      "ES": "Azerbaiyán",
+      "PT": "Azerbaijão",
+      "IT": "Azerbaigian",
+      "RU": "Азербайджан",
+      "ZH": "阿塞拜疆",
+      "AR": "أذربيجان"
+     },
+     "displayTeamCode": {
+      "EN": "AZE",
+      "FR": "AZE",
+      "DE": "AZE",
+      "ES": "AZE",
+      "PT": "AZE",
+      "IT": "AZE",
+      "RU": "AZE",
+      "ZH": "AZE",
+      "AR": "AZE"
+     },
+     "shortName": {
+      "EN": "AZE",
+      "FR": "AZE",
+      "DE": "AZE",
+      "ES": "AZE",
+      "PT": "AZE",
+      "IT": "AZE",
+      "RU": "Азербайджан",
+      "ZH": "AFFA",
+      "AR": "AZE"
+     }
+    },
+    "typeIsNational": true,
+    "typeTeam": "NATIONAL"
+   },
+   "id": "2047931",
+   "kickOffTime": {
+    "date": "2026-10-04",
+    "dateTime": "2026-10-04T13:00:00Z",
+    "utcOffsetInHours": 4
+   },
+   "lineupStatus": "NOT_AVAILABLE",
+   "matchday": {
+    "competitionId": "2014",
+    "dateFrom": "2026-10-04T06:00:00+0000",
+    "dateTo": "2026-10-06T21:59:59+0000",
+    "format": "REGULAR",
+    "id": "36685",
+    "longName": "Matchday 4",
+    "name": "MD4",
+    "phase": "TOURNAMENT",
+    "roundId": "2002276",
+    "seasonYear": "2027",
+    "sequenceNumber": "4",
+    "translations": {
+     "longName": {
+      "EN": "Matchday 4",
+      "FR": "Journée 4",
+      "DE": "Spieltag 4",
+      "ES": "Jornada 4",
+      "PT": "Jornada 4",
+      "IT": "Giornata 4",
+      "RU": "Тур 4",
+      "ZH": "比赛日 4",
+      "AR": "الجولة 4"
+     },
+     "name": {
+      "EN": "MD 4",
+      "FR": "J 4",
+      "DE": "ST 4",
+      "ES": "JOR 4",
+      "PT": "J 4",
+      "IT": "G 4",
+      "RU": "Тур 4",
+      "ZH": "比赛日 4",
+      "AR": "MD 4"
+     }
+    },
+    "type": "MATCHDAY"
+   },
+   "referees": [
+    {
+     "images": {
+      "SMALL_SQUARE": "https://img.uefa.com/imgml/referees/75x75/1906694.jpg"
+     },
+     "person": {
+      "countryCode": "SRB",
+      "gender": "MALE",
+      "id": "1906694",
+      "translations": {
+       "countryName": {
+        "EN": "Serbia",
+        "FR": "Serbie",
+        "DE": "Serbien",
+        "ES": "Serbia",
+        "PT": "Sérvia",
+        "IT": "Serbia",
+        "RU": "Сербия",
+        "ZH": "塞尔维亚",
+        "AR": "صربيا"
+       },
+       "firstName": {
+        "EN": "Boško",
+        "FR": "Boško",
+        "DE": "Boško",
+        "ES": "Boško",
+        "PT": "Boško",
+        "IT": "Boško",
+        "RU": "Boško",
+        "ZH": "Boško",
+        "AR": "بوشكو "
+       },
+       "lastName": {
+        "EN": "Jovanetić",
+        "FR": "Jovanetić",
+        "DE": "Jovanetić",
+        "ES": "Jovanetić",
+        "PT": "Jovanetić",
+        "IT": "Jovanetić",
+        "RU": "Jovanetic",
+        "ZH": "Jovanetic",
+        "AR": "جوفانيتيتش"
+       },
+       "name": {
+        "EN": "Boško Jovanetić",
+        "FR": "Boško Jovanetić",
+        "DE": "Boško Jovanetić",
+        "ES": "Boško Jovanetić",
+        "PT": "Boško Jovanetić",
+        "IT": "Boško Jovanetić",
+        "RU": "Бошко Йованетич",
+        "ZH": "博斯科·约万内蒂奇",
+        "AR": "بوشكو جوفانيتيتش"
+       },
+       "shortName": {
+        "EN": "Jovanetić",
+        "FR": "Jovanetić",
+        "DE": "Jovanetić",
+        "ES": "Jovanetić",
+        "PT": "Jovanetić",
+        "IT": "Jovanetić",
+        "RU": "Йованетич",
+        "ZH": "约万内蒂奇",
+        "AR": "جوفانيتيتش"
+       }
+      }
+     },
+     "role": "REFEREE_OBSERVER",
+     "translations": {
+      "roleName": {
+       "EN": "Referee observer",
+       "FR": "Observateur d'arbitres",
+       "DE": "Referee observer",
+       "ES": "Observador arbitral",
+       "PT": "Observador de árbitro",
+       "IT": "Referee observer",
+       "RU": "Судейский наблюдатель",
+       "ZH": "Referee observer",
+       "AR": "مراقب الحكام"
+      }
+     }
+    },
+    {
+     "images": {
+      "SMALL_SQUARE": "https://img.uefa.com/imgml/referees/75x75/150108937.jpg"
+     },
+     "person": {
+      "countryCode": "CYP",
+      "gender": "MALE",
+      "id": "150108937",
+      "translations": {
+       "countryName": {
+        "EN": "Cyprus",
+        "FR": "Chypre",
+        "DE": "Zypern",
+        "ES": "Chipre",
+        "PT": "Chipre",
+        "IT": "Cipro",
+        "RU": "Кипр",
+        "ZH": "塞浦路斯",
+        "AR": "قبرص"
+       },
+       "firstName": {
+        "EN": "Evangelos",
+        "FR": "Evangelos",
+        "DE": "Evangelos",
+        "ES": "Evangelos",
+        "PT": "Evangelos",
+        "IT": "Evangelos",
+        "RU": "Evangelos",
+        "ZH": "Evangelos",
+        "AR": "Evangelos"
+       },
+       "lastName": {
+        "EN": "Mouscos",
+        "FR": "Mouscos",
+        "DE": "Mouscos",
+        "ES": "Mouscos",
+        "PT": "Mouscos",
+        "IT": "Mouscos",
+        "RU": "Mouscos",
+        "ZH": "Mouscos",
+        "AR": "Mouscos"
+       },
+       "name": {
+        "EN": "Evangelos Mouscos",
+        "FR": "Evangelos Mouscos",
+        "DE": "Evangelos Mouscos",
+        "ES": "Evangelos Mouscos",
+        "PT": "Evangelos Mouscos",
+        "IT": "Evangelos Mouscos",
+        "RU": "Evangelos Mouscos",
+        "ZH": "Evangelos Mouscos",
+        "AR": "Evangelos Mouscos"
+       },
+       "shortName": {
+        "EN": "Mouscos",
+        "FR": "Mouscos",
+        "DE": "Mouscos",
+        "ES": "Mouscos",
+        "PT": "Mouscos",
+        "IT": "Mouscos",
+        "RU": "Mouscos",
+        "ZH": "Mouscos",
+        "AR": "Mouscos"
+       }
+      }
+     },
+     "role": "UEFA_DELEGATE",
+     "translations": {
+      "roleName": {
+       "EN": "UEFA Delegate",
+       "FR": "Délégué ou déléguée UEFA",
+       "DE": "UEFA-Delegierter",
+       "ES": "Delegado UEFA",
+       "PT": "Delegado da UEFA",
+       "IT": "Delegata UEFA",
+       "RU": "Делегат УЕФА",
+       "ZH": "UEFA delegate",
+       "AR": "مندوب UEFA"
+      }
+     }
+    }
+   ],
+   "round": {
+    "active": true,
+    "benchGKCount": 3,
+    "benchPlayersCount": 12,
+    "benchStaffCount": 11,
+    "coefficientWinnerBonus": 0.0,
+    "competitionId": "2014",
+    "dateFrom": "2026-09-24T06:00:00+0000",
+    "dateTo": "2026-11-17T22:59:59+0000",
+    "fieldPlayersCount": 11,
+    "groupCount": 14,
+    "id": "2002276",
+    "metaData": {
+     "name": "League phase",
+     "type": "GROUP_STANDINGS"
+    },
+    "mode": "GROUP",
+    "modeDetail": "GROUP",
+    "orderInCompetition": 1,
+    "phase": "TOURNAMENT",
+    "seasonYear": "2027",
+    "stadiumNameType": "SPONSOR_NAME",
+    "standingsRankingFormulaId": "620",
+    "status": "CURRENT",
+    "substitutionCount": 5,
+    "teamCount": 54,
+    "teams": [
+     "88",
+     "47",
+     "49",
+     "2614246",
+     "2614247",
+     "56370",
+     "110",
+     "113",
+     "59205",
+     "94080",
+     "117",
+     "2614249",
+     "95",
+     "58837",
+     "58836",
+     "2608110",
+     "13",
+     "57",
+     "58",
+     "2614310",
+     "92853",
+     "57154",
+     "57155",
+     "122",
+     "2",
+     "57157",
+     "127",
+     "128",
+     "8",
+     "50168",
+     "51218",
+     "63",
+     "20",
+     "64",
+     "65",
+     "66",
+     "65146",
+     "57163",
+     "57166",
+     "57160",
+     "56556",
+     "56557",
+     "135",
+     "56558",
+     "2614307",
+     "2614308",
+     "2614309",
+     "60094",
+     "33",
+     "35",
+     "39",
+     "60618",
+     "144",
+     "101",
+     "147",
+     "81",
+     "82",
+     "109",
+     "42",
+     "57419",
+     "43"
+    ],
+    "translations": {
+     "abbreviation": {
+      "EN": "LP",
+      "FR": "Ph. lig.",
+      "DE": "Ligaphase",
+      "ES": "FL",
+      "PT": "FL",
+      "IT": "FC",
+      "RU": "ОЭ",
+      "ZH": "LP",
+      "AR": "LP"
+     },
+     "name": {
+      "EN": "League phase",
+      "FR": "Phase de ligues",
+      "DE": "Ligaphase",
+      "ES": "Fase liga",
+      "PT": "Fase das Ligas",
+      "IT": "Fase campionato",
+      "RU": "Общий этап",
+      "ZH": "League phase",
+      "AR": "مرحلة الدوري"
+     },
+     "shortName": {
+      "EN": "League phase",
+      "FR": "Phase de ligues",
+      "DE": "Ligaphase",
+      "ES": "Fase liga",
+      "PT": "Fase das Ligas",
+      "IT": "Fase campionato",
+      "RU": "Общий этап",
+      "ZH": "League phase",
+      "AR": "مرحلة الدوري"
+     }
+    }
+   },
+   "seasonYear": "2027",
+   "sessionNumber": 1,
+   "stadium": {
+    "address": "Bahruz Nuriyev 23 / 97",
+    "capacity": 10466,
+    "city": {
+     "countryCode": "AZE",
+     "id": "1162",
+     "translations": {
+      "name": {
+       "EN": "Baku",
+       "FR": "Bakou",
+       "DE": "Baku",
+       "ES": "Bakú",
+       "PT": "Bacu",
+       "IT": "Baku",
+       "RU": "Баку",
+       "ZH": "巴库",
+       "AR": "باكو"
+      }
+     }
+    },
+    "countryCode": "AZE",
+    "geolocation": {
+     "latitude": 40.400163,
+     "longitude": 49.944019
+    },
+    "id": "250001476",
+    "images": {
+     "MEDIUM_WIDE": "https://img.uefa.com/imgml/stadium/matchinfo/w1/250001476.jpg",
+     "LARGE_ULTRA_WIDE": "https://img.uefa.com/imgml/stadium/matchinfo/uw/250001476.jpg"
+    },
+    "openingDate": "2012-01-01",
+    "pitch": {
+     "length": 105,
+     "width": 68
+    },
+    "translations": {
+     "mediaName": {
+      "EN": "8 KM Stadium",
+      "FR": "8 KM Stadium",
+      "DE": "8 KM Stadium",
+      "ES": "8 KM Stadium",
+      "PT": "8 KM Stadium",
+      "IT": "8 KM Stadium",
+      "RU": "8-й километр",
+      "ZH": "8 KM Stadionu",
+      "AR": "ملعب 8 كيلومتر"
+     },
+     "name": {
+      "EN": "8KM Stadium",
+      "FR": "8KM Stadium",
+      "DE": "8KM Stadium",
+      "ES": "8KM Stadium",
+      "PT": "8KM Stadium",
+      "IT": "8KM Stadium",
+      "RU": "8-й километр",
+      "ZH": "Bakcell Arena",
+      "AR": "ملعب 8 كيلومتر"
+     },
+     "officialName": {
+      "EN": "8 KM Stadium",
+      "FR": "8 KM Stadium",
+      "DE": "8 KM Stadium",
+      "ES": "8 KM Stadium",
+      "PT": "8 KM Stadium",
+      "IT": "8 KM Stadium",
+      "RU": "8-й километр",
+      "ZH": "8 KM Stadionu",
+      "AR": "ملعب 8 كيلومتر"
+     },
+     "specialEventsName": {
+      "EN": "8 KM Stadionu",
+      "FR": "8 KM Stadionu",
+      "DE": "8 KM Stadionu",
+      "ES": "8 KM Stadionu",
+      "PT": "8 KM Stadionu",
+      "IT": "8 KM Stadionu",
+      "RU": "8-й километр",
+      "ZH": "8 KM Stadionu",
+      "AR": "ملعب 8 كيلومتر"
+     },
+     "sponsorName": {
+      "EN": "8KM Stadium",
+      "FR": "8KM Stadium",
+      "DE": "8KM Stadium",
+      "ES": "8KM Stadium",
+      "PT": "8KM Stadium",
+      "IT": "8KM Stadium",
+      "RU": "8-й километр",
+      "ZH": "Bakcell Arena",
+      "AR": "ملعب 8 كيلومتر"
+     }
+    }
+   },
+   "status": "UPCOMING",
+   "type": "GROUP_STAGE"
+  },
+  {
+   "awayTeam": {
+    "associationId": "200008",
+    "associationLogoUrl": "https://img.uefa.com/imgml/uefacom/elements/logos/ma/AUT.svg",
+    "bigLogoUrl": "https://img.uefa.com/imgml/flags/700x700/AUT.png",
+    "confederationType": "UEFA",
+    "countryCode": "AUT",
+    "id": "8",
+    "idProvider": "FAME",
+    "internationalName": "Austria",
+    "isPlaceHolder": false,
+    "logoUrl": "https://img.uefa.com/imgml/flags/70x70/AUT.png",
+    "mediumLogoUrl": "https://img.uefa.com/imgml/flags/240x240/AUT.png",
+    "organizationId": "200008",
+    "teamCode": "AUT",
+    "teamTypeDetail": "NATIONAL_MEN_TEAM_A",
+    "translations": {
+     "countryName": {
+      "EN": "Austria",
+      "FR": "Autriche",
+      "DE": "Österreich",
+      "ES": "Austria",
+      "PT": "Áustria",
+      "IT": "Austria",
+      "RU": "Австрия",
+      "ZH": "奥地利",
+      "AR": "النمسا"
+     },
+     "displayName": {
+      "EN": "Austria",
+      "FR": "Autriche",
+      "DE": "Österreich",
+      "ES": "Austria",
+      "PT": "Áustria",
+      "IT": "Austria",
+      "RU": "Австрия",
+      "ZH": "奥地利",
+      "AR": "النمسا"
+     },
+     "displayOfficialName": {
+      "EN": "Austria",
+      "FR": "Autriche",
+      "DE": "Österreich",
+      "ES": "Austria",
+      "PT": "Áustria",
+      "IT": "Austria",
+      "RU": "Австрия",
+      "ZH": "奥地利",
+      "AR": "النمسا"
+     },
+     "displayTeamCode": {
+      "EN": "AUT",
+      "FR": "AUT",
+      "DE": "AUT",
+      "ES": "AUT",
+      "PT": "AUT",
+      "IT": "AUT",
+      "RU": "AUT",
+      "ZH": "AUT",
+      "AR": "AUT"
+     },
+     "shortName": {
+      "EN": "AUT",
+      "FR": "AUT",
+      "DE": "AUT",
+      "ES": "AUT",
+      "PT": "AUT",
+      "IT": "AUT",
+      "RU": "Австрия",
+      "ZH": "ÖFB",
+      "AR": "AUT"
+     }
+    },
+    "typeIsNational": true,
+    "typeTeam": "NATIONAL"
+   },
+   "behindClosedDoors": false,
+   "competition": {
+    "age": "ADULT",
+    "code": "UNL",
+    "id": "2014",
+    "images": {
+     "FULL_LOGO": "https://img.uefa.com/imgml/uefacom/elements/logos/competitions/color/full/2014.svg"
+    },
+    "metaData": {
+     "name": "UEFA Nations League"
+    },
+    "region": "CONTINENTAL",
+    "sex": "MALE",
+    "sportsType": "FOOTBALL",
+    "teamCategory": "NATIONAL",
+    "translations": {
+     "name": {
+      "EN": "UEFA Nations League",
+      "FR": "UEFA Nations League",
+      "DE": "UEFA Nations League",
+      "ES": "UEFA Nations League",
+      "PT": "UEFA Nations League",
+      "IT": "UEFA Nations League",
+      "RU": "Лига наций УЕФА",
+      "ZH": "UEFA Nations League",
+      "AR": "دوري الأمم الأوروبية UEFA"
+     },
+     "prequalifyingName": {
+      "EN": "UEFA Nations League",
+      "FR": "UEFA Nations League",
+      "DE": "UEFA Nations League",
+      "ES": "UEFA Nations League",
+      "PT": "UEFA Nations League",
+      "IT": "UEFA Nations League",
+      "RU": "Лига наций УЕФА",
+      "ZH": "UEFA Nations League",
+      "AR": "دوري الأمم الأوروبية UEFA"
+     },
+     "qualifyingName": {
+      "EN": "UEFA Nations League",
+      "FR": "UEFA Nations League",
+      "DE": "UEFA Nations League",
+      "ES": "UEFA Nations League",
+      "PT": "UEFA Nations League",
+      "IT": "UEFA Nations League",
+      "RU": "Лига наций УЕФА",
+      "ZH": "UEFA Nations League",
+      "AR": "دوري الأمم الأوروبية UEFA"
+     },
+     "tournamentName": {
+      "EN": "UEFA Nations League",
+      "FR": "UEFA Nations League",
+      "DE": "UEFA Nations League",
+      "ES": "UEFA Nations League",
+      "PT": "UEFA Nations League",
+      "IT": "UEFA Nations League",
+      "RU": "Лига наций УЕФА",
+      "ZH": "UEFA Nations League",
+      "AR": "دوري الأمم الأوروبية UEFA"
+     }
+    },
+    "type": "CUP"
+   },
+   "competitionPhase": "TOURNAMENT",
+   "group": {
+    "competitionId": "2014",
+    "id": "2014197",
+    "league": {
+     "competitionId": "2014",
+     "id": "127",
+     "metaData": {
+      "leagueName": "League B",
+      "leagueShortName": "LB"
+     },
+     "order": 2,
+     "phase": "TOURNAMENT",
+     "roundId": "2002276",
+     "seasonYear": "2027",
+     "translations": {
+      "name": {
+       "EN": "League B",
+       "FR": "Ligue B",
+       "DE": "Liga B",
+       "ES": "Liga B",
+       "PT": "Liga B",
+       "IT": "Lega B",
+       "RU": "Лига B",
+       "ZH": "League B",
+       "AR": "المستوى الثاني"
+      },
+      "shortName": {
+       "EN": "LB",
+       "FR": "LB",
+       "DE": "LB",
+       "ES": "LB",
+       "PT": "LB",
+       "IT": "LB",
+       "RU": "B",
+       "ZH": "LB",
+       "AR": "ب"
+      }
+     }
+    },
+    "metaData": {
+     "groupName": "Group B3",
+     "groupShortName": "GrpB3"
+    },
+    "order": 7,
+    "phase": "TOURNAMENT",
+    "roundId": "2002276",
+    "seasonYear": "2027",
+    "teams": [
+     "8",
+     "64",
+     "65",
+     "2608110"
+    ],
+    "teamsQualifiedNumber": 1,
+    "translations": {
+     "name": {
+      "EN": "Group B3",
+      "FR": "Groupe B3",
+      "DE": "Gruppe B3",
+      "ES": "Grupo B3",
+      "PT": "Grupo B3",
+      "IT": "Gruppo B3",
+      "RU": "Группа B3",
+      "ZH": "Group 3",
+      "AR": "المجموعة B3"
+     },
+     "shortName": {
+      "EN": "B3",
+      "FR": "B3",
+      "DE": "B3",
+      "ES": "B3",
+      "PT": "B3",
+      "IT": "B3",
+      "RU": "B3",
+      "ZH": "3",
+      "AR": "B3"
+     }
+    },
+    "type": "STANDARD"
+   },
+   "homeTeam": {
+    "associationId": "250005899",
+    "associationLogoUrl": "https://img.uefa.com/imgml/uefacom/elements/logos/ma/KOS.svg",
+    "bigLogoUrl": "https://img.uefa.com/imgml/flags/700x700/KOS.png",
+    "confederationType": "UEFA",
+    "countryCode": "KOS",
+    "id": "2608110",
+    "idProvider": "FAME",
+    "internationalName": "Kosovo",
+    "isPlaceHolder": false,
+    "logoUrl": "https://img.uefa.com/imgml/flags/70x70/KOS.png",
+    "mediumLogoUrl": "https://img.uefa.com/imgml/flags/240x240/KOS.png",
+    "organizationId": "250005899",
+    "teamCode": "KOS",
+    "teamTypeDetail": "NATIONAL_MEN_TEAM_A",
+    "translations": {
+     "countryName": {
+      "EN": "Kosovo",
+      "FR": "Kosovo",
+      "DE": "Kosovo",
+      "ES": "Kosovo",
+      "PT": "Kosovo",
+      "IT": "Kosovo",
+      "RU": "Косово",
+      "ZH": "科索沃",
+      "AR": "كوسوفو"
+     },
+     "displayName": {
+      "EN": "Kosovo",
+      "FR": "Kosovo",
+      "DE": "Kosovo",
+      "ES": "Kosovo",
+      "PT": "Kosovo",
+      "IT": "Kosovo",
+      "RU": "Косово",
+      "ZH": "科索沃",
+      "AR": "كوسوفو"
+     },
+     "displayOfficialName": {
+      "EN": "Kosovo",
+      "FR": "Kosovo",
+      "DE": "Kosovo",
+      "ES": "Kosovo",
+      "PT": "Kosovo",
+      "IT": "Kosovo",
+      "RU": "Косово",
+      "ZH": "科索沃",
+      "AR": "كوسوفو"
+     },
+     "displayTeamCode": {
+      "EN": "KOS",
+      "FR": "KOS",
+      "DE": "KOS",
+      "ES": "KOS",
+      "PT": "KOS",
+      "IT": "KOS",
+      "RU": "KOS",
+      "ZH": "科索沃",
+      "AR": "KOS"
+     },
+     "shortName": {
+      "EN": "Kosovo",
+      "FR": "KOS",
+      "DE": "KOS",
+      "ES": "Kosovo",
+      "PT": "Kosovo",
+      "IT": "KOS",
+      "RU": "Косово",
+      "ZH": "科索沃",
+      "AR": "كوسوفو"
+     }
+    },
+    "typeIsNational": true,
+    "typeTeam": "NATIONAL"
+   },
+   "id": "2047927",
+   "kickOffTime": {
+    "date": "2026-10-04",
+    "dateTime": "2026-10-04T16:00:00Z",
+    "utcOffsetInHours": 2
+   },
+   "lineupStatus": "NOT_AVAILABLE",
+   "matchday": {
+    "competitionId": "2014",
+    "dateFrom": "2026-10-04T06:00:00+0000",
+    "dateTo": "2026-10-06T21:59:59+0000",
+    "format": "REGULAR",
+    "id": "36685",
+    "longName": "Matchday 4",
+    "name": "MD4",
+    "phase": "TOURNAMENT",
+    "roundId": "2002276",
+    "seasonYear": "2027",
+    "sequenceNumber": "4",
+    "translations": {
+     "longName": {
+      "EN": "Matchday 4",
+      "FR": "Journée 4",
+      "DE": "Spieltag 4",
+      "ES": "Jornada 4",
+      "PT": "Jornada 4",
+      "IT": "Giornata 4",
+      "RU": "Тур 4",
+      "ZH": "比赛日 4",
+      "AR": "الجولة 4"
+     },
+     "name": {
+      "EN": "MD 4",
+      "FR": "J 4",
+      "DE": "ST 4",
+      "ES": "JOR 4",
+      "PT": "J 4",
+      "IT": "G 4",
+      "RU": "Тур 4",
+      "ZH": "比赛日 4",
+      "AR": "MD 4"
+     }
+    },
+    "type": "MATCHDAY"
+   },
+   "referees": [
+    {
+     "images": {
+      "SMALL_SQUARE": "https://img.uefa.com/imgml/referees/75x75/261653.jpg"
+     },
+     "person": {
+      "countryCode": "POL",
+      "gender": "MALE",
+      "id": "261653",
+      "translations": {
+       "countryName": {
+        "EN": "Poland",
+        "FR": "Pologne",
+        "DE": "Polen",
+        "ES": "Polonia",
+        "PT": "Polónia",
+        "IT": "Polonia",
+        "RU": "Польша",
+        "ZH": "波兰",
+        "AR": "بولندا"
+       },
+       "firstName": {
+        "EN": "Miroslaw",
+        "FR": "Miroslaw",
+        "DE": "Miroslaw",
+        "ES": "Miroslaw",
+        "PT": "Miroslaw",
+        "IT": "Miroslaw",
+        "RU": "Мирослав",
+        "ZH": "Miroslaw",
+        "AR": "ميروسلاف "
+       },
+       "lastName": {
+        "EN": "Ryszka",
+        "FR": "Ryszka",
+        "DE": "Ryszka",
+        "ES": "Ryszka",
+        "PT": "Ryszka",
+        "IT": "Ryszka",
+        "RU": "Рыжка",
+        "ZH": "Ryszka",
+        "AR": "ريشكا"
+       },
+       "name": {
+        "EN": "Miroslaw Ryszka",
+        "FR": "Miroslaw Ryszka",
+        "DE": "Miroslaw Ryszka",
+        "ES": "Miroslaw Ryszka",
+        "PT": "Miroslaw Ryszka",
+        "IT": "Miroslaw Ryszka",
+        "RU": "Мирослав Рышка",
+        "ZH": "米洛斯拉夫·里斯泽卡",
+        "AR": "ميروسلاف ريشكا"
+       },
+       "shortName": {
+        "EN": "Ryszka",
+        "FR": "Ryszka",
+        "DE": "Ryszka",
+        "ES": "Ryszka",
+        "PT": "Ryszka",
+        "IT": "Ryszka",
+        "RU": "Рышка",
+        "ZH": "里斯泽卡",
+        "AR": "ريشكا"
+       }
+      }
+     },
+     "role": "UEFA_DELEGATE",
+     "translations": {
+      "roleName": {
+       "EN": "UEFA Delegate",
+       "FR": "Délégué ou déléguée UEFA",
+       "DE": "UEFA-Delegierter",
+       "ES": "Delegado UEFA",
+       "PT": "Delegado da UEFA",
+       "IT": "Delegata UEFA",
+       "RU": "Делегат УЕФА",
+       "ZH": "UEFA delegate",
+       "AR": "مندوب UEFA"
+      }
+     }
+    },
+    {
+     "images": {
+      "SMALL_SQUARE": "https://img.uefa.com/imgml/referees/75x75/281591.jpg"
+     },
+     "person": {
+      "countryCode": "CRO",
+      "gender": "MALE",
+      "id": "281591",
+      "translations": {
+       "countryName": {
+        "EN": "Croatia",
+        "FR": "Croatie",
+        "DE": "Kroatien",
+        "ES": "Croacia",
+        "PT": "Croácia",
+        "IT": "Croazia",
+        "RU": "Хорватия",
+        "ZH": "克罗地亚",
+        "AR": "كرواتيا"
+       },
+       "firstName": {
+        "EN": "Igor",
+        "FR": "Igor",
+        "DE": "Igor",
+        "ES": "Igor",
+        "PT": "Igor",
+        "IT": "Igor",
+        "RU": "Igor",
+        "ZH": "Igor",
+        "AR": "Igor"
+       },
+       "lastName": {
+        "EN": "Pristovnik",
+        "FR": "Pristovnik",
+        "DE": "Pristovnik",
+        "ES": "Pristovnik",
+        "PT": "Pristovnik",
+        "IT": "Pristovnik",
+        "RU": "Pristovnik",
+        "ZH": "Pristovnik",
+        "AR": "Pristovnik"
+       },
+       "name": {
+        "EN": "Igor Pristovnik",
+        "FR": "Igor Pristovnik",
+        "DE": "Igor Pristovnik",
+        "ES": "Igor Pristovnik",
+        "PT": "Igor Pristovnik",
+        "IT": "Igor Pristovnik",
+        "RU": "Игор Пристовник",
+        "ZH": "伊戈尔·普里斯托弗尼克",
+        "AR": "Igor Pristovnik"
+       },
+       "shortName": {
+        "EN": "Pristovnik",
+        "FR": "Pristovnik",
+        "DE": "Pristovnik",
+        "ES": "Pristovnik",
+        "PT": "Pristovnik",
+        "IT": "Pristovnik",
+        "RU": "Пристовник",
+        "ZH": "普里斯托弗尼克",
+        "AR": "Pristovnik"
+       }
+      }
+     },
+     "role": "REFEREE_OBSERVER",
+     "translations": {
+      "roleName": {
+       "EN": "Referee observer",
+       "FR": "Observateur d'arbitres",
+       "DE": "Referee observer",
+       "ES": "Observador arbitral",
+       "PT": "Observador de árbitro",
+       "IT": "Referee observer",
+       "RU": "Судейский наблюдатель",
+       "ZH": "Referee observer",
+       "AR": "مراقب الحكام"
+      }
+     }
+    }
+   ],
+   "round": {
+    "active": true,
+    "benchGKCount": 3,
+    "benchPlayersCount": 12,
+    "benchStaffCount": 11,
+    "coefficientWinnerBonus": 0.0,
+    "competitionId": "2014",
+    "dateFrom": "2026-09-24T06:00:00+0000",
+    "dateTo": "2026-11-17T22:59:59+0000",
+    "fieldPlayersCount": 11,
+    "groupCount": 14,
+    "id": "2002276",
+    "metaData": {
+     "name": "League phase",
+     "type": "GROUP_STANDINGS"
+    },
+    "mode": "GROUP",
+    "modeDetail": "GROUP",
+    "orderInCompetition": 1,
+    "phase": "TOURNAMENT",
+    "seasonYear": "2027",
+    "stadiumNameType": "SPONSOR_NAME",
+    "standingsRankingFormulaId": "620",
+    "status": "CURRENT",
+    "substitutionCount": 5,
+    "teamCount": 54,
+    "teams": [
+     "88",
+     "47",
+     "49",
+     "2614246",
+     "2614247",
+     "56370",
+     "110",
+     "113",
+     "59205",
+     "94080",
+     "117",
+     "2614249",
+     "95",
+     "58837",
+     "58836",
+     "2608110",
+     "13",
+     "57",
+     "58",
+     "2614310",
+     "92853",
+     "57154",
+     "57155",
+     "122",
+     "2",
+     "57157",
+     "127",
+     "128",
+     "8",
+     "50168",
+     "51218",
+     "63",
+     "20",
+     "64",
+     "65",
+     "66",
+     "65146",
+     "57163",
+     "57166",
+     "57160",
+     "56556",
+     "56557",
+     "135",
+     "56558",
+     "2614307",
+     "2614308",
+     "2614309",
+     "60094",
+     "33",
+     "35",
+     "39",
+     "60618",
+     "144",
+     "101",
+     "147",
+     "81",
+     "82",
+     "109",
+     "42",
+     "57419",
+     "43"
+    ],
+    "translations": {
+     "abbreviation": {
+      "EN": "LP",
+      "FR": "Ph. lig.",
+      "DE": "Ligaphase",
+      "ES": "FL",
+      "PT": "FL",
+      "IT": "FC",
+      "RU": "ОЭ",
+      "ZH": "LP",
+      "AR": "LP"
+     },
+     "name": {
+      "EN": "League phase",
+      "FR": "Phase de ligues",
+      "DE": "Ligaphase",
+      "ES": "Fase liga",
+      "PT": "Fase das Ligas",
+      "IT": "Fase campionato",
+      "RU": "Общий этап",
+      "ZH": "League phase",
+      "AR": "مرحلة الدوري"
+     },
+     "shortName": {
+      "EN": "League phase",
+      "FR": "Phase de ligues",
+      "DE": "Ligaphase",
+      "ES": "Fase liga",
+      "PT": "Fase das Ligas",
+      "IT": "Fase campionato",
+      "RU": "Общий этап",
+      "ZH": "League phase",
+      "AR": "مرحلة الدوري"
+     }
+    }
+   },
+   "seasonYear": "2027",
+   "sessionNumber": 1,
+   "stadium": {
+    "address": "Rr. Enver Zymberi",
+    "capacity": 12629,
+    "city": {
+     "countryCode": "KOS",
+     "id": "50000297",
+     "translations": {
+      "name": {
+       "EN": "Pristina",
+       "FR": "Pristina",
+       "DE": "Pristina",
+       "ES": "Pristina",
+       "PT": "Pristina",
+       "IT": "Pristina",
+       "RU": "Приштина",
+       "ZH": "Pristina",
+       "AR": "بريشتينا"
+      }
+     }
+    },
+    "countryCode": "KOS",
+    "geolocation": {
+     "latitude": 42.66311,
+     "longitude": 21.157107
+    },
+    "id": "250003320",
+    "images": {
+     "MEDIUM_WIDE": "https://img.uefa.com/imgml/stadium/matchinfo/w1/250003320.jpg",
+     "LARGE_ULTRA_WIDE": "https://img.uefa.com/imgml/stadium/matchinfo/uw/250003320.jpg"
+    },
+    "openingDate": "1963-01-01",
+    "pitch": {
+     "length": 105,
+     "width": 68
+    },
+    "translations": {
+     "mediaName": {
+      "EN": "Stadiumi Fadil Vokrri",
+      "FR": "Stadiumi Fadil Vokrri",
+      "DE": "Stadiumi Fadil Vokrri",
+      "ES": "Stadiumi Fadil Vokrri",
+      "PT": "Stadiumi Fadil Vokrri",
+      "IT": "Stadiumi Fadil Vokrri",
+      "RU": "Фадиль Вокри",
+      "ZH": "Stadiumi Fadil Vokrri",
+      "AR": "استاد فاضل فوكري"
+     },
+     "name": {
+      "EN": "Stadiumi Fadil Vokrri",
+      "FR": "Stadiumi Fadil Vokrri",
+      "DE": "Stadiumi Fadil Vokrri",
+      "ES": "Stadiumi Fadil Vokrri",
+      "PT": "Stadiumi Fadil Vokrri",
+      "IT": "Stadiumi Fadil Vokrri",
+      "RU": "Фадиль Вокри",
+      "ZH": "Stadiumi Fadil Vokrri",
+      "AR": "استاد فاضل فوكري"
+     },
+     "officialName": {
+      "EN": "Stadiumi Fadil Vokrri",
+      "FR": "Stadiumi Fadil Vokrri",
+      "DE": "Stadiumi Fadil Vokrri",
+      "ES": "Stadiumi Fadil Vokrri",
+      "PT": "Stadiumi Fadil Vokrri",
+      "IT": "Stadiumi Fadil Vokrri",
+      "RU": "Фадиль Вокри",
+      "ZH": "Stadiumi Fadil Vokrri",
+      "AR": "استاد فاضل فوكري"
+     },
+     "specialEventsName": {
+      "EN": "Stadiumi Fadil Vokrri",
+      "FR": "Stadiumi Fadil Vokrri",
+      "DE": "Stadiumi Fadil Vokrri",
+      "ES": "Stadiumi Fadil Vokrri",
+      "PT": "Stadiumi Fadil Vokrri",
+      "IT": "Stadiumi Fadil Vokrri",
+      "RU": "Фадиль Вокри",
+      "ZH": "Stadiumi Fadil Vokrri",
+      "AR": "استاد فاضل فوكري"
+     },
+     "sponsorName": {
+      "EN": "Stadiumi Fadil Vokrri",
+      "FR": "Stadiumi Fadil Vokrri",
+      "DE": "Stadiumi Fadil Vokrri",
+      "ES": "Stadiumi Fadil Vokrri",
+      "PT": "Stadiumi Fadil Vokrri",
+      "IT": "Stadiumi Fadil Vokrri",
+      "RU": "Фадиль Вокри",
+      "ZH": "Stadiumi Fadil Vokrri",
+      "AR": "استاد فاضل فوكري"
+     }
+    }
+   },
+   "status": "UPCOMING",
+   "type": "GROUP_STAGE"
+  },
+  {
+   "awayTeam": {
+    "associationId": "260618",
+    "associationLogoUrl": "https://img.uefa.com/imgml/uefacom/elements/logos/ma/AND.svg",
+    "bigLogoUrl": "https://img.uefa.com/imgml/flags/700x700/AND.png",
+    "confederationType": "UEFA",
+    "countryCode": "AND",
+    "id": "60618",
+    "idProvider": "FAME",
+    "internationalName": "Andorra",
+    "isPlaceHolder": false,
+    "logoUrl": "https://img.uefa.com/imgml/flags/70x70/AND.png",
+    "mediumLogoUrl": "https://img.uefa.com/imgml/flags/240x240/AND.png",
+    "organizationId": "260618",
+    "teamCode": "AND",
+    "teamTypeDetail": "NATIONAL_MEN_TEAM_A",
+    "translations": {
+     "countryName": {
+      "EN": "Andorra",
+      "FR": "Andorre",
+      "DE": "Andorra",
+      "ES": "Andorra",
+      "PT": "Andorra",
+      "IT": "Andorra",
+      "RU": "Андорра",
+      "ZH": "安道尔",
+      "AR": "أندورا"
+     },
+     "displayName": {
+      "EN": "Andorra",
+      "FR": "Andorre",
+      "DE": "Andorra",
+      "ES": "Andorra",
+      "PT": "Andorra",
+      "IT": "Andorra",
+      "RU": "Андорра",
+      "ZH": "安道尔",
+      "AR": "أندورا"
+     },
+     "displayOfficialName": {
+      "EN": "Andorra",
+      "FR": "Andorre",
+      "DE": "Andorra",
+      "ES": "Andorra",
+      "PT": "Andorra",
+      "IT": "Andorra",
+      "RU": "Андорра",
+      "ZH": "安道尔",
+      "AR": "أندورا"
+     },
+     "displayTeamCode": {
+      "EN": "AND",
+      "FR": "AND",
+      "DE": "AND",
+      "ES": "AND",
+      "PT": "AND",
+      "IT": "AND",
+      "RU": "AND",
+      "ZH": "AND",
+      "AR": "AND"
+     },
+     "shortName": {
+      "EN": "AND",
+      "FR": "AND",
+      "DE": "AND",
+      "ES": "AND",
+      "PT": "AND",
+      "IT": "AND",
+      "RU": "Андорра",
+      "ZH": "FAF",
+      "AR": "AND"
+     }
+    },
+    "typeIsNational": true,
+    "typeTeam": "NATIONAL"
+   },
+   "behindClosedDoors": false,
+   "competition": {
+    "age": "ADULT",
+    "code": "UNL",
+    "id": "2014",
+    "images": {
+     "FULL_LOGO": "https://img.uefa.com/imgml/uefacom/elements/logos/competitions/color/full/2014.svg"
+    },
+    "metaData": {
+     "name": "UEFA Nations League"
+    },
+    "region": "CONTINENTAL",
+    "sex": "MALE",
+    "sportsType": "FOOTBALL",
+    "teamCategory": "NATIONAL",
+    "translations": {
+     "name": {
+      "EN": "UEFA Nations League",
+      "FR": "UEFA Nations League",
+      "DE": "UEFA Nations League",
+      "ES": "UEFA Nations League",
+      "PT": "UEFA Nations League",
+      "IT": "UEFA Nations League",
+      "RU": "Лига наций УЕФА",
+      "ZH": "UEFA Nations League",
+      "AR": "دوري الأمم الأوروبية UEFA"
+     },
+     "prequalifyingName": {
+      "EN": "UEFA Nations League",
+      "FR": "UEFA Nations League",
+      "DE": "UEFA Nations League",
+      "ES": "UEFA Nations League",
+      "PT": "UEFA Nations League",
+      "IT": "UEFA Nations League",
+      "RU": "Лига наций УЕФА",
+      "ZH": "UEFA Nations League",
+      "AR": "دوري الأمم الأوروبية UEFA"
+     },
+     "qualifyingName": {
+      "EN": "UEFA Nations League",
+      "FR": "UEFA Nations League",
+      "DE": "UEFA Nations League",
+      "ES": "UEFA Nations League",
+      "PT": "UEFA Nations League",
+      "IT": "UEFA Nations League",
+      "RU": "Лига наций УЕФА",
+      "ZH": "UEFA Nations League",
+      "AR": "دوري الأمم الأوروبية UEFA"
+     },
+     "tournamentName": {
+      "EN": "UEFA Nations League",
+      "FR": "UEFA Nations League",
+      "DE": "UEFA Nations League",
+      "ES": "UEFA Nations League",
+      "PT": "UEFA Nations League",
+      "IT": "UEFA Nations League",
+      "RU": "Лига наций УЕФА",
+      "ZH": "UEFA Nations League",
+      "AR": "دوري الأمم الأوروبية UEFA"
+     }
+    },
+    "type": "CUP"
+   },
+   "competitionPhase": "TOURNAMENT",
+   "group": {
+    "competitionId": "2014",
+    "id": "2014203",
+    "league": {
+     "competitionId": "2014",
+     "id": "129",
+     "metaData": {
+      "leagueName": "League D",
+      "leagueShortName": "LD"
+     },
+     "order": 4,
+     "phase": "TOURNAMENT",
+     "roundId": "2002276",
+     "seasonYear": "2027",
+     "translations": {
+      "name": {
+       "EN": "League D",
+       "FR": "Ligue D",
+       "DE": "Liga D",
+       "ES": "Liga D",
+       "PT": "Liga D",
+       "IT": "Lega D",
+       "RU": "Лига D",
+       "ZH": "League D",
+       "AR": "المستوى الرابع"
+      },
+      "shortName": {
+       "EN": "LD",
+       "FR": "LD",
+       "DE": "LD",
+       "ES": "LD",
+       "PT": "LD",
+       "IT": "LD",
+       "RU": "D",
+       "ZH": "LD",
+       "AR": "د"
+      }
+     }
+    },
+    "metaData": {
+     "groupName": "Group D1",
+     "groupShortName": "GrpD1"
+    },
+    "order": 13,
+    "phase": "TOURNAMENT",
+    "roundId": "2002276",
+    "seasonYear": "2027",
+    "teams": [
+     "88",
+     "94080",
+     "60618"
+    ],
+    "teamsQualifiedNumber": 1,
+    "translations": {
+     "name": {
+      "EN": "Group D1",
+      "FR": "Groupe D1",
+      "DE": "Gruppe D1",
+      "ES": "Grupo D1",
+      "PT": "Grupo D1",
+      "IT": "Gruppo D1",
+      "RU": "Группа D1",
+      "ZH": "Group D1",
+      "AR": "المجموعة D1"
+     },
+     "shortName": {
+      "EN": "D1",
+      "FR": "D1",
+      "DE": "D1",
+      "ES": "D1",
+      "PT": "D1",
+      "IT": "D1",
+      "RU": "D1",
+      "ZH": "1",
+      "AR": "D1"
+     }
+    },
+    "type": "STANDARD"
+   },
+   "homeTeam": {
+    "associationId": "200088",
+    "associationLogoUrl": "https://img.uefa.com/imgml/uefacom/elements/logos/ma/MLT.svg",
+    "bigLogoUrl": "https://img.uefa.com/imgml/flags/700x700/MLT.png",
+    "confederationType": "UEFA",
+    "countryCode": "MLT",
+    "id": "88",
+    "idProvider": "FAME",
+    "internationalName": "Malta",
+    "isPlaceHolder": false,
+    "logoUrl": "https://img.uefa.com/imgml/flags/70x70/MLT.png",
+    "mediumLogoUrl": "https://img.uefa.com/imgml/flags/240x240/MLT.png",
+    "organizationId": "200088",
+    "teamCode": "MLT",
+    "teamTypeDetail": "NATIONAL_MEN_TEAM_A",
+    "translations": {
+     "countryName": {
+      "EN": "Malta",
+      "FR": "Malte",
+      "DE": "Malta",
+      "ES": "Malta",
+      "PT": "Malta",
+      "IT": "Malta",
+      "RU": "Мальта",
+      "ZH": "马耳他",
+      "AR": "مالطا"
+     },
+     "displayName": {
+      "EN": "Malta",
+      "FR": "Malte",
+      "DE": "Malta",
+      "ES": "Malta",
+      "PT": "Malta",
+      "IT": "Malta",
+      "RU": "Мальта",
+      "ZH": "马耳他",
+      "AR": "مالطا"
+     },
+     "displayOfficialName": {
+      "EN": "Malta",
+      "FR": "Malte",
+      "DE": "Malta",
+      "ES": "Malta",
+      "PT": "Malta",
+      "IT": "Malta",
+      "RU": "Мальта",
+      "ZH": "马耳他",
+      "AR": "مالطا"
+     },
+     "displayTeamCode": {
+      "EN": "MLT",
+      "FR": "MLT",
+      "DE": "MLT",
+      "ES": "MLT",
+      "PT": "MLT",
+      "IT": "MLT",
+      "RU": "MLT",
+      "ZH": "MLT",
+      "AR": "MLT"
+     },
+     "shortName": {
+      "EN": "MFA",
+      "FR": "MFA",
+      "DE": "MFA",
+      "ES": "MFA",
+      "PT": "MFA",
+      "IT": "MFA",
+      "RU": "Мальта",
+      "ZH": "MFA",
+      "AR": "MFA"
+     }
+    },
+    "typeIsNational": true,
+    "typeTeam": "NATIONAL"
+   },
+   "id": "2047928",
+   "kickOffTime": {
+    "date": "2026-10-04",
+    "dateTime": "2026-10-04T16:00:00Z",
+    "utcOffsetInHours": 2
+   },
+   "lineupStatus": "NOT_AVAILABLE",
+   "matchday": {
+    "competitionId": "2014",
+    "dateFrom": "2026-10-04T06:00:00+0000",
+    "dateTo": "2026-10-06T21:59:59+0000",
+    "format": "REGULAR",
+    "id": "36685",
+    "longName": "Matchday 4",
+    "name": "MD4",
+    "phase": "TOURNAMENT",
+    "roundId": "2002276",
+    "seasonYear": "2027",
+    "sequenceNumber": "4",
+    "translations": {
+     "longName": {
+      "EN": "Matchday 4",
+      "FR": "Journée 4",
+      "DE": "Spieltag 4",
+      "ES": "Jornada 4",
+      "PT": "Jornada 4",
+      "IT": "Giornata 4",
+      "RU": "Тур 4",
+      "ZH": "比赛日 4",
+      "AR": "الجولة 4"
+     },
+     "name": {
+      "EN": "MD 4",
+      "FR": "J 4",
+      "DE": "ST 4",
+      "ES": "JOR 4",
+      "PT": "J 4",
+      "IT": "G 4",
+      "RU": "Тур 4",
+      "ZH": "比赛日 4",
+      "AR": "MD 4"
+     }
+    },
+    "type": "MATCHDAY"
+   },
+   "referees": [
+    {
+     "images": {
+      "SMALL_SQUARE": "https://img.uefa.com/imgml/referees/75x75/262433.jpg"
+     },
+     "person": {
+      "countryCode": "ISR",
+      "gender": "MALE",
+      "id": "262433",
+      "translations": {
+       "countryName": {
+        "EN": "Israel",
+        "FR": "Israël",
+        "DE": "Israel",
+        "ES": "Israel",
+        "PT": "Israel",
+        "IT": "Israele",
+        "RU": "Израиль",
+        "ZH": "以色列",
+        "AR": "إسرائيل"
+       },
+       "firstName": {
+        "EN": "Shmuel",
+        "FR": "Shmuel",
+        "DE": "Shmuel",
+        "ES": "Shmuel",
+        "PT": "Shmuel",
+        "IT": "Shmuel",
+        "RU": "Шмуэль",
+        "ZH": "Shmuel",
+        "AR": "شموئيل "
+       },
+       "lastName": {
+        "EN": "Shteif",
+        "FR": "Shteif",
+        "DE": "Shteif",
+        "ES": "Shteif",
+        "PT": "Shteif",
+        "IT": "Shteif",
+        "RU": "Штейф",
+        "ZH": "SHTEIF",
+        "AR": "شتيف"
+       },
+       "name": {
+        "EN": "Shmuel Shteif",
+        "FR": "Shmuel Shteif",
+        "DE": "Shmuel Shteif",
+        "ES": "Shmuel Shteif",
+        "PT": "Shmuel Shteif",
+        "IT": "Shmuel Shteif",
+        "RU": "Шмуэль Штейф",
+        "ZH": "施穆埃尔·施特伊夫",
+        "AR": "شموئيل شتيف"
+       },
+       "shortName": {
+        "EN": "Shteif",
+        "FR": "Shteif",
+        "DE": "Shteif",
+        "ES": "Shteif",
+        "PT": "Shteif",
+        "IT": "Shteif",
+        "RU": "Штейф",
+        "ZH": "施特伊夫",
+        "AR": "شتيف"
+       }
+      }
+     },
+     "role": "REFEREE_OBSERVER",
+     "translations": {
+      "roleName": {
+       "EN": "Referee observer",
+       "FR": "Observateur d'arbitres",
+       "DE": "Referee observer",
+       "ES": "Observador arbitral",
+       "PT": "Observador de árbitro",
+       "IT": "Referee observer",
+       "RU": "Судейский наблюдатель",
+       "ZH": "Referee observer",
+       "AR": "مراقب الحكام"
+      }
+     }
+    },
+    {
+     "images": {
+      "SMALL_SQUARE": "https://img.uefa.com/imgml/referees/75x75/250207488.jpg"
+     },
+     "person": {
+      "countryCode": "IRL",
+      "gender": "MALE",
+      "id": "250207488",
+      "translations": {
+       "countryName": {
+        "EN": "Republic of Ireland",
+        "FR": "Eire",
+        "DE": "Republik Irland",
+        "ES": "República de Irlanda",
+        "PT": "República da Irlanda",
+        "IT": "Repubblica d'Irlanda",
+        "RU": "Ирландия",
+        "ZH": "爱尔兰",
+        "AR": "جمهورية أيرلندا"
+       },
+       "firstName": {
+        "EN": "Gerard",
+        "FR": "Gerard",
+        "DE": "Gerard",
+        "ES": "Gerard",
+        "PT": "Gerard",
+        "IT": "Gerard",
+        "RU": "Gerard",
+        "ZH": "Gerard",
+        "AR": "Gerard"
+       },
+       "lastName": {
+        "EN": "Kennedy",
+        "FR": "Kennedy",
+        "DE": "Kennedy",
+        "ES": "Kennedy",
+        "PT": "Kennedy",
+        "IT": "Kennedy",
+        "RU": "Kennedy",
+        "ZH": "Kennedy",
+        "AR": "Kennedy"
+       },
+       "name": {
+        "EN": "Gerard Kennedy",
+        "FR": "Gerard Kennedy",
+        "DE": "Gerard Kennedy",
+        "ES": "Gerard Kennedy",
+        "PT": "Gerard Kennedy",
+        "IT": "Gerard Kennedy",
+        "RU": "Gerard Kennedy",
+        "ZH": "Gerard Kennedy",
+        "AR": "Gerard Kennedy"
+       },
+       "shortName": {
+        "EN": "Kennedy",
+        "FR": "Kennedy",
+        "DE": "Kennedy",
+        "ES": "Kennedy",
+        "PT": "Kennedy",
+        "IT": "Kennedy",
+        "RU": "Kennedy",
+        "ZH": "Kennedy",
+        "AR": "Kennedy"
+       }
+      }
+     },
+     "role": "UEFA_DELEGATE",
+     "translations": {
+      "roleName": {
+       "EN": "UEFA Delegate",
+       "FR": "Délégué ou déléguée UEFA",
+       "DE": "UEFA-Delegierter",
+       "ES": "Delegado UEFA",
+       "PT": "Delegado da UEFA",
+       "IT": "Delegata UEFA",
+       "RU": "Делегат УЕФА",
+       "ZH": "UEFA delegate",
+       "AR": "مندوب UEFA"
+      }
+     }
+    }
+   ],
+   "round": {
+    "active": true,
+    "benchGKCount": 3,
+    "benchPlayersCount": 12,
+    "benchStaffCount": 11,
+    "coefficientWinnerBonus": 0.0,
+    "competitionId": "2014",
+    "dateFrom": "2026-09-24T06:00:00+0000",
+    "dateTo": "2026-11-17T22:59:59+0000",
+    "fieldPlayersCount": 11,
+    "groupCount": 14,
+    "id": "2002276",
+    "metaData": {
+     "name": "League phase",
+     "type": "GROUP_STANDINGS"
+    },
+    "mode": "GROUP",
+    "modeDetail": "GROUP",
+    "orderInCompetition": 1,
+    "phase": "TOURNAMENT",
+    "seasonYear": "2027",
+    "stadiumNameType": "SPONSOR_NAME",
+    "standingsRankingFormulaId": "620",
+    "status": "CURRENT",
+    "substitutionCount": 5,
+    "teamCount": 54,
+    "teams": [
+     "88",
+     "47",
+     "49",
+     "2614246",
+     "2614247",
+     "56370",
+     "110",
+     "113",
+     "59205",
+     "94080",
+     "117",
+     "2614249",
+     "95",
+     "58837",
+     "58836",
+     "2608110",
+     "13",
+     "57",
+     "58",
+     "2614310",
+     "92853",
+     "57154",
+     "57155",
+     "122",
+     "2",
+     "57157",
+     "127",
+     "128",
+     "8",
+     "50168",
+     "51218",
+     "63",
+     "20",
+     "64",
+     "65",
+     "66",
+     "65146",
+     "57163",
+     "57166",
+     "57160",
+     "56556",
+     "56557",
+     "135",
+     "56558",
+     "2614307",
+     "2614308",
+     "2614309",
+     "60094",
+     "33",
+     "35",
+     "39",
+     "60618",
+     "144",
+     "101",
+     "147",
+     "81",
+     "82",
+     "109",
+     "42",
+     "57419",
+     "43"
+    ],
+    "translations": {
+     "abbreviation": {
+      "EN": "LP",
+      "FR": "Ph. lig.",
+      "DE": "Ligaphase",
+      "ES": "FL",
+      "PT": "FL",
+      "IT": "FC",
+      "RU": "ОЭ",
+      "ZH": "LP",
+      "AR": "LP"
+     },
+     "name": {
+      "EN": "League phase",
+      "FR": "Phase de ligues",
+      "DE": "Ligaphase",
+      "ES": "Fase liga",
+      "PT": "Fase das Ligas",
+      "IT": "Fase campionato",
+      "RU": "Общий этап",
+      "ZH": "League phase",
+      "AR": "مرحلة الدوري"
+     },
+     "shortName": {
+      "EN": "League phase",
+      "FR": "Phase de ligues",
+      "DE": "Ligaphase",
+      "ES": "Fase liga",
+      "PT": "Fase das Ligas",
+      "IT": "Fase campionato",
+      "RU": "Общий этап",
+      "ZH": "League phase",
+      "AR": "مرحلة الدوري"
+     }
+    }
+   },
+   "seasonYear": "2027",
+   "sessionNumber": 1,
+   "stadium": {
+    "address": "Crafts Village",
+    "capacity": 16882,
+    "city": {
+     "countryCode": "MLT",
+     "id": "2904",
+     "translations": {
+      "name": {
+       "EN": "Ta' Qali",
+       "FR": "Ta' Qali",
+       "DE": "Ta' Qali",
+       "ES": "Ta' Qali",
+       "PT": "Ta' Qali",
+       "IT": "Ta' Qali",
+       "RU": "Та-Али",
+       "ZH": "瓦莱塔",
+       "AR": "تا كالي"
+      }
+     }
+    },
+    "countryCode": "MLT",
+    "geolocation": {
+     "latitude": 35.89485,
+     "longitude": 14.4151056
+    },
+    "id": "55236",
+    "images": {
+     "MEDIUM_WIDE": "https://img.uefa.com/imgml/stadium/matchinfo/w1/55236.jpg",
+     "LARGE_ULTRA_WIDE": "https://img.uefa.com/imgml/stadium/matchinfo/uw/55236.jpg"
+    },
+    "openingDate": "1980-01-01",
+    "pitch": {
+     "length": 105,
+     "width": 68
+    },
+    "translations": {
+     "mediaName": {
+      "EN": "National Stadium",
+      "FR": "National Stadium",
+      "DE": "National Stadium",
+      "ES": "National Stadium",
+      "PT": "National Stadium",
+      "IT": "National Stadium",
+      "RU": "Национальный",
+      "ZH": "National Stadium",
+      "AR": "استاد ناشونال"
+     },
+     "name": {
+      "EN": "National Stadium",
+      "FR": "National Stadium",
+      "DE": "National Stadium",
+      "ES": "National Stadium",
+      "PT": "National Stadium",
+      "IT": "National Stadium",
+      "RU": "Национальный",
+      "ZH": "National Stadium",
+      "AR": "استاد ناشونال"
+     },
+     "officialName": {
+      "EN": "National Stadium",
+      "FR": "National Stadium",
+      "DE": "National Stadium",
+      "ES": "National Stadium",
+      "PT": "National Stadium",
+      "IT": "National Stadium",
+      "RU": "Национальный",
+      "ZH": "瓦莱塔国家球场",
+      "AR": "استاد ناشونال"
+     },
+     "specialEventsName": {
+      "EN": "National Stadium",
+      "FR": "National Stadium",
+      "DE": "National Stadium",
+      "ES": "National Stadium",
+      "PT": "National Stadium",
+      "IT": "National Stadium",
+      "RU": "Национальный",
+      "ZH": "National Stadium",
+      "AR": "استاد ناشونال"
+     },
+     "sponsorName": {
+      "EN": "National Stadium",
+      "FR": "National Stadium",
+      "DE": "National Stadium",
+      "ES": "National Stadium",
+      "PT": "National Stadium",
+      "IT": "National Stadium",
+      "RU": "Национальный",
+      "ZH": "National Stadium",
+      "AR": "استاد ناشونال"
+     }
+    }
+   },
+   "status": "UPCOMING",
+   "type": "GROUP_STAGE"
+  },
+  {
+   "awayTeam": {
+    "associationId": "200101",
+    "associationLogoUrl": "https://img.uefa.com/imgml/uefacom/elements/logos/ma/NOR.svg",
+    "bigLogoUrl": "https://img.uefa.com/imgml/flags/700x700/NOR.png",
+    "confederationType": "UEFA",
+    "countryCode": "NOR",
+    "id": "101",
+    "idProvider": "FAME",
+    "internationalName": "Norway",
+    "isPlaceHolder": false,
+    "logoUrl": "https://img.uefa.com/imgml/flags/70x70/NOR.png",
+    "mediumLogoUrl": "https://img.uefa.com/imgml/flags/240x240/NOR.png",
+    "organizationId": "200101",
+    "teamCode": "NOR",
+    "teamTypeDetail": "NATIONAL_MEN_TEAM_A",
+    "translations": {
+     "countryName": {
+      "EN": "Norway",
+      "FR": "Norvège",
+      "DE": "Norwegen",
+      "ES": "Noruega",
+      "PT": "Noruega",
+      "IT": "Norvegia",
+      "RU": "Норвегия",
+      "ZH": "挪威",
+      "AR": "النرويج"
+     },
+     "displayName": {
+      "EN": "Norway",
+      "FR": "Norvège",
+      "DE": "Norwegen",
+      "ES": "Noruega",
+      "PT": "Noruega",
+      "IT": "Norvegia",
+      "RU": "Норвегия",
+      "ZH": "挪威",
+      "AR": "النرويج"
+     },
+     "displayOfficialName": {
+      "EN": "Norway",
+      "FR": "Norvège",
+      "DE": "Norwegen",
+      "ES": "Noruega",
+      "PT": "Noruega",
+      "IT": "Norvegia",
+      "RU": "Норвегия",
+      "ZH": "挪威",
+      "AR": "النرويج"
+     },
+     "displayTeamCode": {
+      "EN": "NOR",
+      "FR": "NOR",
+      "DE": "NOR",
+      "ES": "NOR",
+      "PT": "NOR",
+      "IT": "NOR",
+      "RU": "NOR",
+      "ZH": "NOR",
+      "AR": "NOR"
+     },
+     "shortName": {
+      "EN": "NOR",
+      "FR": "NOR",
+      "DE": "NOR",
+      "ES": "NOR",
+      "PT": "NOR",
+      "IT": "NOR",
+      "RU": "Норвегия",
+      "ZH": "NFF",
+      "AR": "NOR"
+     }
+    },
+    "typeIsNational": true,
+    "typeTeam": "NATIONAL"
+   },
+   "behindClosedDoors": false,
+   "competition": {
+    "age": "ADULT",
+    "code": "UNL",
+    "id": "2014",
+    "images": {
+     "FULL_LOGO": "https://img.uefa.com/imgml/uefacom/elements/logos/competitions/color/full/2014.svg"
+    },
+    "metaData": {
+     "name": "UEFA Nations League"
+    },
+    "region": "CONTINENTAL",
+    "sex": "MALE",
+    "sportsType": "FOOTBALL",
+    "teamCategory": "NATIONAL",
+    "translations": {
+     "name": {
+      "EN": "UEFA Nations League",
+      "FR": "UEFA Nations League",
+      "DE": "UEFA Nations League",
+      "ES": "UEFA Nations League",
+      "PT": "UEFA Nations League",
+      "IT": "UEFA Nations League",
+      "RU": "Лига наций УЕФА",
+      "ZH": "UEFA Nations League",
+      "AR": "دوري الأمم الأوروبية UEFA"
+     },
+     "prequalifyingName": {
+      "EN": "UEFA Nations League",
+      "FR": "UEFA Nations League",
+      "DE": "UEFA Nations League",
+      "ES": "UEFA Nations League",
+      "PT": "UEFA Nations League",
+      "IT": "UEFA Nations League",
+      "RU": "Лига наций УЕФА",
+      "ZH": "UEFA Nations League",
+      "AR": "دوري الأمم الأوروبية UEFA"
+     },
+     "qualifyingName": {
+      "EN": "UEFA Nations League",
+      "FR": "UEFA Nations League",
+      "DE": "UEFA Nations League",
+      "ES": "UEFA Nations League",
+      "PT": "UEFA Nations League",
+      "IT": "UEFA Nations League",
+      "RU": "Лига наций УЕФА",
+      "ZH": "UEFA Nations League",
+      "AR": "دوري الأمم الأوروبية UEFA"
+     },
+     "tournamentName": {
+      "EN": "UEFA Nations League",
+      "FR": "UEFA Nations League",
+      "DE": "UEFA Nations League",
+      "ES": "UEFA Nations League",
+      "PT": "UEFA Nations League",
+      "IT": "UEFA Nations League",
+      "RU": "Лига наций УЕФА",
+      "ZH": "UEFA Nations League",
+      "AR": "دوري الأمم الأوروبية UEFA"
+     }
+    },
+    "type": "CUP"
+   },
+   "competitionPhase": "TOURNAMENT",
+   "group": {
+    "competitionId": "2014",
+    "id": "2014194",
+    "league": {
+     "competitionId": "2014",
+     "id": "126",
+     "metaData": {
+      "leagueName": "League A",
+      "leagueShortName": "LA"
+     },
+     "order": 1,
+     "phase": "TOURNAMENT",
+     "roundId": "2002276",
+     "seasonYear": "2027",
+     "translations": {
+      "name": {
+       "EN": "League A",
+       "FR": "Ligue A",
+       "DE": "Liga A",
+       "ES": "Liga A",
+       "PT": "Liga A",
+       "IT": "Lega A",
+       "RU": "Лига A",
+       "ZH": "League A",
+       "AR": "المستوى الأول"
+      },
+      "shortName": {
+       "EN": "LA",
+       "FR": "LA",
+       "DE": "LA",
+       "ES": "LA",
+       "PT": "LA",
+       "IT": "LA",
+       "RU": "A",
+       "ZH": "LA",
+       "AR": "أ"
+      }
+     }
+    },
+    "metaData": {
+     "groupName": "Group A4",
+     "groupShortName": "GrpA4"
+    },
+    "order": 4,
+    "phase": "TOURNAMENT",
+    "roundId": "2002276",
+    "seasonYear": "2027",
+    "teams": [
+     "110",
+     "144",
+     "35",
+     "101"
+    ],
+    "teamsQualifiedNumber": 2,
+    "translations": {
+     "name": {
+      "EN": "Group A4",
+      "FR": "Groupe A4",
+      "DE": "Gruppe A4",
+      "ES": "Grupo A4",
+      "PT": "Grupo A4",
+      "IT": "Gruppo A4",
+      "RU": "Группа A4",
+      "ZH": "Group 4",
+      "AR": "المجموعة A4"
+     },
+     "shortName": {
+      "EN": "A4",
+      "FR": "A4",
+      "DE": "A4",
+      "ES": "A4",
+      "PT": "A4",
+      "IT": "A4",
+      "RU": "A4",
+      "ZH": "4",
+      "AR": "A4"
+     }
+    },
+    "type": "STANDARD"
+   },
+   "homeTeam": {
+    "associationId": "200110",
+    "associationLogoUrl": "https://img.uefa.com/imgml/uefacom/elements/logos/ma/POR.svg",
+    "bigLogoUrl": "https://img.uefa.com/imgml/flags/700x700/POR.png",
+    "confederationType": "UEFA",
+    "countryCode": "POR",
+    "id": "110",
+    "idProvider": "FAME",
+    "internationalName": "Portugal",
+    "isPlaceHolder": false,
+    "logoUrl": "https://img.uefa.com/imgml/flags/70x70/POR.png",
+    "mediumLogoUrl": "https://img.uefa.com/imgml/flags/240x240/POR.png",
+    "organizationId": "200110",
+    "teamCode": "POR",
+    "teamTypeDetail": "NATIONAL_MEN_TEAM_A",
+    "translations": {
+     "countryName": {
+      "EN": "Portugal",
+      "FR": "Portugal",
+      "DE": "Portugal",
+      "ES": "Portugal",
+      "PT": "Portugal",
+      "IT": "Portogallo",
+      "RU": "Португалия",
+      "ZH": "葡萄牙",
+      "AR": "البرتغال"
+     },
+     "displayName": {
+      "EN": "Portugal",
+      "FR": "Portugal",
+      "DE": "Portugal",
+      "ES": "Portugal",
+      "PT": "Portugal",
+      "IT": "Portogallo",
+      "RU": "Португалия",
+      "ZH": "葡萄牙",
+      "AR": "البرتغال"
+     },
+     "displayOfficialName": {
+      "EN": "Portugal",
+      "FR": "Portugal",
+      "DE": "Portugal",
+      "ES": "Portugal",
+      "PT": "Portugal",
+      "IT": "Portogallo",
+      "RU": "Португалия",
+      "ZH": "葡萄牙",
+      "AR": "البرتغال"
+     },
+     "displayTeamCode": {
+      "EN": "POR",
+      "FR": "POR",
+      "DE": "POR",
+      "ES": "POR",
+      "PT": "POR",
+      "IT": "POR",
+      "RU": "POR",
+      "ZH": "POR",
+      "AR": "POR"
+     },
+     "shortName": {
+      "EN": "POR",
+      "FR": "POR",
+      "DE": "POR",
+      "ES": "POR",
+      "PT": "POR",
+      "IT": "POR",
+      "RU": "Португалия",
+      "ZH": "FPF",
+      "AR": "POR"
+     }
+    },
+    "typeIsNational": true,
+    "typeTeam": "NATIONAL"
+   },
+   "id": "2047924",
+   "kickOffTime": {
+    "date": "2026-10-04",
+    "dateTime": "2026-10-04T18:45:00Z",
+    "utcOffsetInHours": 1
+   },
+   "lineupStatus": "NOT_AVAILABLE",
+   "matchday": {
+    "competitionId": "2014",
+    "dateFrom": "2026-10-04T06:00:00+0000",
+    "dateTo": "2026-10-06T21:59:59+0000",
+    "format": "REGULAR",
+    "id": "36685",
+    "longName": "Matchday 4",
+    "name": "MD4",
+    "phase": "TOURNAMENT",
+    "roundId": "2002276",
+    "seasonYear": "2027",
+    "sequenceNumber": "4",
+    "translations": {
+     "longName": {
+      "EN": "Matchday 4",
+      "FR": "Journée 4",
+      "DE": "Spieltag 4",
+      "ES": "Jornada 4",
+      "PT": "Jornada 4",
+      "IT": "Giornata 4",
+      "RU": "Тур 4",
+      "ZH": "比赛日 4",
+      "AR": "الجولة 4"
+     },
+     "name": {
+      "EN": "MD 4",
+      "FR": "J 4",
+      "DE": "ST 4",
+      "ES": "JOR 4",
+      "PT": "J 4",
+      "IT": "G 4",
+      "RU": "Тур 4",
+      "ZH": "比赛日 4",
+      "AR": "MD 4"
+     }
+    },
+    "type": "MATCHDAY"
+   },
+   "referees": [
+    {
+     "images": {
+      "SMALL_SQUARE": "https://img.uefa.com/imgml/referees/75x75/267486.jpg"
+     },
+     "person": {
+      "countryCode": "SCO",
+      "gender": "MALE",
+      "id": "267486",
+      "translations": {
+       "countryName": {
+        "EN": "Scotland",
+        "FR": "Écosse",
+        "DE": "Schottland",
+        "ES": "Escocia",
+        "PT": "Escócia",
+        "IT": "Scozia",
+        "RU": "Шотландия",
+        "ZH": "苏格兰",
+        "AR": "اسكتلندا"
+       },
+       "firstName": {
+        "EN": "Iain Robertson",
+        "FR": "Iain Robertson",
+        "DE": "Iain Robertson",
+        "ES": "Iain Robertson",
+        "PT": "Iain Robertson",
+        "IT": "Iain Robertson",
+        "RU": "Йэн Робертсон",
+        "ZH": "Iain Robertson",
+        "AR": "Iain Robertson"
+       },
+       "lastName": {
+        "EN": "Brines",
+        "FR": "Brines",
+        "DE": "Brines",
+        "ES": "Brines",
+        "PT": "Brines",
+        "IT": "Brines",
+        "RU": "Брайнс",
+        "ZH": "BRINES",
+        "AR": "Brines"
+       },
+       "name": {
+        "EN": "Iain Robertson Brines",
+        "FR": "Iain Robertson Brines",
+        "DE": "Iain Robertson Brines",
+        "ES": "Iain Robertson Brines",
+        "PT": "Iain Robertson Brines",
+        "IT": "Iain Robertson Brines",
+        "RU": "Иэн Брайнс",
+        "ZH": "雷恩-罗伯岑-布理内斯",
+        "AR": "Iain Robertson Brines"
+       },
+       "shortName": {
+        "EN": "Brines",
+        "FR": "Brines",
+        "DE": "Brines",
+        "ES": "Brines",
+        "PT": "Brines",
+        "IT": "Brines",
+        "RU": "Брайнс",
+        "ZH": "布理内斯",
+        "AR": "Brines"
+       }
+      }
+     },
+     "role": "REFEREE_OBSERVER",
+     "translations": {
+      "roleName": {
+       "EN": "Referee observer",
+       "FR": "Observateur d'arbitres",
+       "DE": "Referee observer",
+       "ES": "Observador arbitral",
+       "PT": "Observador de árbitro",
+       "IT": "Referee observer",
+       "RU": "Судейский наблюдатель",
+       "ZH": "Referee observer",
+       "AR": "مراقب الحكام"
+      }
+     }
+    },
+    {
+     "images": {
+      "SMALL_SQUARE": "https://img.uefa.com/imgml/referees/75x75/283520.jpg"
+     },
+     "person": {
+      "countryCode": "BEL",
+      "gender": "MALE",
+      "id": "283520",
+      "translations": {
+       "countryName": {
+        "EN": "Belgium",
+        "FR": "Belgique",
+        "DE": "Belgien",
+        "ES": "Bélgica",
+        "PT": "Bélgica",
+        "IT": "Belgio",
+        "RU": "Бельгия",
+        "ZH": "比利时",
+        "AR": "بلجيكا"
+       },
+       "firstName": {
+        "EN": "Filips",
+        "FR": "Filips",
+        "DE": "Filips",
+        "ES": "Filips",
+        "PT": "Filips",
+        "IT": "Filips",
+        "RU": "Filips",
+        "ZH": "Filips",
+        "AR": "Filips"
+       },
+       "lastName": {
+        "EN": "Dhondt",
+        "FR": "Dhondt",
+        "DE": "Dhondt",
+        "ES": "Dhondt",
+        "PT": "Dhondt",
+        "IT": "Dhondt",
+        "RU": "Dhondt",
+        "ZH": "Dhondt",
+        "AR": "Dhondt"
+       },
+       "name": {
+        "EN": "Filips Dhondt",
+        "FR": "Filips Dhondt",
+        "DE": "Filips Dhondt",
+        "ES": "Filips Dhondt",
+        "PT": "Filips Dhondt",
+        "IT": "Filips Dhondt",
+        "RU": "Filips Dhondt",
+        "ZH": "Filips Dhondt",
+        "AR": "Filips Dhondt"
+       },
+       "shortName": {
+        "EN": "Dhondt",
+        "FR": "Dhondt",
+        "DE": "Dhondt",
+        "ES": "Dhondt",
+        "PT": "Dhondt",
+        "IT": "Dhondt",
+        "RU": "Dhondt",
+        "ZH": "Dhondt",
+        "AR": "Dhondt"
+       }
+      }
+     },
+     "role": "UEFA_DELEGATE",
+     "translations": {
+      "roleName": {
+       "EN": "UEFA Delegate",
+       "FR": "Délégué ou déléguée UEFA",
+       "DE": "UEFA-Delegierter",
+       "ES": "Delegado UEFA",
+       "PT": "Delegado da UEFA",
+       "IT": "Delegata UEFA",
+       "RU": "Делегат УЕФА",
+       "ZH": "UEFA delegate",
+       "AR": "مندوب UEFA"
+      }
+     }
+    }
+   ],
+   "round": {
+    "active": true,
+    "benchGKCount": 3,
+    "benchPlayersCount": 12,
+    "benchStaffCount": 11,
+    "coefficientWinnerBonus": 0.0,
+    "competitionId": "2014",
+    "dateFrom": "2026-09-24T06:00:00+0000",
+    "dateTo": "2026-11-17T22:59:59+0000",
+    "fieldPlayersCount": 11,
+    "groupCount": 14,
+    "id": "2002276",
+    "metaData": {
+     "name": "League phase",
+     "type": "GROUP_STANDINGS"
+    },
+    "mode": "GROUP",
+    "modeDetail": "GROUP",
+    "orderInCompetition": 1,
+    "phase": "TOURNAMENT",
+    "seasonYear": "2027",
+    "stadiumNameType": "SPONSOR_NAME",
+    "standingsRankingFormulaId": "620",
+    "status": "CURRENT",
+    "substitutionCount": 5,
+    "teamCount": 54,
+    "teams": [
+     "88",
+     "47",
+     "49",
+     "2614246",
+     "2614247",
+     "56370",
+     "110",
+     "113",
+     "59205",
+     "94080",
+     "117",
+     "2614249",
+     "95",
+     "58837",
+     "58836",
+     "2608110",
+     "13",
+     "57",
+     "58",
+     "2614310",
+     "92853",
+     "57154",
+     "57155",
+     "122",
+     "2",
+     "57157",
+     "127",
+     "128",
+     "8",
+     "50168",
+     "51218",
+     "63",
+     "20",
+     "64",
+     "65",
+     "66",
+     "65146",
+     "57163",
+     "57166",
+     "57160",
+     "56556",
+     "56557",
+     "135",
+     "56558",
+     "2614307",
+     "2614308",
+     "2614309",
+     "60094",
+     "33",
+     "35",
+     "39",
+     "60618",
+     "144",
+     "101",
+     "147",
+     "81",
+     "82",
+     "109",
+     "42",
+     "57419",
+     "43"
+    ],
+    "translations": {
+     "abbreviation": {
+      "EN": "LP",
+      "FR": "Ph. lig.",
+      "DE": "Ligaphase",
+      "ES": "FL",
+      "PT": "FL",
+      "IT": "FC",
+      "RU": "ОЭ",
+      "ZH": "LP",
+      "AR": "LP"
+     },
+     "name": {
+      "EN": "League phase",
+      "FR": "Phase de ligues",
+      "DE": "Ligaphase",
+      "ES": "Fase liga",
+      "PT": "Fase das Ligas",
+      "IT": "Fase campionato",
+      "RU": "Общий этап",
+      "ZH": "League phase",
+      "AR": "مرحلة الدوري"
+     },
+     "shortName": {
+      "EN": "League phase",
+      "FR": "Phase de ligues",
+      "DE": "Ligaphase",
+      "ES": "Fase liga",
+      "PT": "Fase das Ligas",
+      "IT": "Fase campionato",
+      "RU": "Общий этап",
+      "ZH": "League phase",
+      "AR": "مرحلة الدوري"
+     }
+    }
+   },
+   "seasonYear": "2027",
+   "sessionNumber": 1,
+   "stadium": {
+    "address": "Via FC Porto",
+    "capacity": 50033,
+    "city": {
+     "countryCode": "POR",
+     "id": "2547",
+     "translations": {
+      "name": {
+       "EN": "Porto",
+       "FR": "Porto",
+       "DE": "Porto",
+       "ES": "Oporto",
+       "PT": "Porto",
+       "IT": "Oporto",
+       "RU": "Порту",
+       "ZH": "波尔图",
+       "AR": "بورتو"
+      }
+     }
+    },
+    "countryCode": "POR",
+    "geolocation": {
+     "latitude": 41.1617944,
+     "longitude": -8.5836861
+    },
+    "id": "85429",
+    "images": {
+     "MEDIUM_WIDE": "https://img.uefa.com/imgml/stadium/matchinfo/w1/85429.jpg",
+     "LARGE_ULTRA_WIDE": "https://img.uefa.com/imgml/stadium/matchinfo/uw/85429.jpg"
+    },
+    "openingDate": "2003-01-01",
+    "pitch": {
+     "length": 105,
+     "width": 68
+    },
+    "translations": {
+     "mediaName": {
+      "EN": "Estádio do Dragão",
+      "FR": "Estádio do Dragão",
+      "DE": "Estádio do Dragão",
+      "ES": "Estádio do Dragão",
+      "PT": "Estádio do Dragão",
+      "IT": "Estádio do Dragão",
+      "RU": "Драгау",
+      "ZH": "巨龙球场",
+      "AR": "استاد دو دراجاو"
+     },
+     "name": {
+      "EN": "Estádio do Dragão",
+      "FR": "Estádio do Dragão",
+      "DE": "Estádio do Dragão",
+      "ES": "Estádio do Dragão",
+      "PT": "Estádio do Dragão",
+      "IT": "Estádio do Dragão",
+      "RU": "Драгау",
+      "ZH": "巨龙球场",
+      "AR": "استاد دو دراجاو"
+     },
+     "officialName": {
+      "EN": "Estádio do Dragão",
+      "FR": "Estádio do Dragão",
+      "DE": "Estádio do Dragão",
+      "ES": "Estádio do Dragão",
+      "PT": "Estádio do Dragão",
+      "IT": "Estádio do Dragão",
+      "RU": "Драгау",
+      "ZH": "巨龙球场",
+      "AR": "استاد دو دراجاو"
+     },
+     "specialEventsName": {
+      "EN": "Estádio do Dragão",
+      "FR": "Estádio do Dragão",
+      "DE": "Estádio do Dragão",
+      "ES": "Estádio do Dragão",
+      "PT": "Estádio do Dragão",
+      "IT": "Estádio do Dragão",
+      "RU": "Драгау",
+      "ZH": "巨龙球场",
+      "AR": "استاد دو دراجاو"
+     },
+     "sponsorName": {
+      "EN": "Estádio do Dragão",
+      "FR": "Estádio do Dragão",
+      "DE": "Estádio do Dragão",
+      "ES": "Estádio do Dragão",
+      "PT": "Estádio do Dragão",
+      "IT": "Estádio do Dragão",
+      "RU": "Драгау",
+      "ZH": "巨龙球场",
+      "AR": "استاد دو دراجاو"
+     }
+    }
+   },
+   "status": "UPCOMING",
+   "type": "GROUP_STAGE"
+  },
+  {
+   "awayTeam": {
+    "associationId": "200147",
+    "associationLogoUrl": "https://img.uefa.com/imgml/uefacom/elements/logos/ma/SRB.svg",
+    "bigLogoUrl": "https://img.uefa.com/imgml/flags/700x700/SRB.png",
+    "confederationType": "UEFA",
+    "countryCode": "SRB",
+    "id": "147",
+    "idProvider": "FAME",
+    "internationalName": "Serbia",
+    "isPlaceHolder": false,
+    "logoUrl": "https://img.uefa.com/imgml/flags/70x70/SRB.png",
+    "mediumLogoUrl": "https://img.uefa.com/imgml/flags/240x240/SRB.png",
+    "organizationId": "200147",
+    "teamCode": "SRB",
+    "teamTypeDetail": "NATIONAL_MEN_TEAM_A",
+    "translations": {
+     "countryName": {
+      "EN": "Serbia",
+      "FR": "Serbie",
+      "DE": "Serbien",
+      "ES": "Serbia",
+      "PT": "Sérvia",
+      "IT": "Serbia",
+      "RU": "Сербия",
+      "ZH": "塞尔维亚",
+      "AR": "صربيا"
+     },
+     "displayName": {
+      "EN": "Serbia",
+      "FR": "Serbie",
+      "DE": "Serbien",
+      "ES": "Serbia",
+      "PT": "Sérvia",
+      "IT": "Serbia",
+      "RU": "Сербия",
+      "ZH": "塞尔维亚",
+      "AR": "صربيا"
+     },
+     "displayOfficialName": {
+      "EN": "Serbia",
+      "FR": "Serbie",
+      "DE": "Serbien",
+      "ES": "Serbia",
+      "PT": "Sérvia",
+      "IT": "Serbia",
+      "RU": "Сербия",
+      "ZH": "塞尔维亚",
+      "AR": "صربيا"
+     },
+     "displayTeamCode": {
+      "EN": "SRB",
+      "FR": "SRB",
+      "DE": "SRB",
+      "ES": "SRB",
+      "PT": "SRB",
+      "IT": "SRB",
+      "RU": "SRB",
+      "ZH": "SRB",
+      "AR": "SRB"
+     },
+     "shortName": {
+      "EN": "SRB",
+      "FR": "SRB",
+      "DE": "SRB",
+      "ES": "SRB",
+      "PT": "SRB",
+      "IT": "SRB",
+      "RU": "Сербия",
+      "ZH": "FSS",
+      "AR": "SRB"
+     }
+    },
+    "typeIsNational": true,
+    "typeTeam": "NATIONAL"
+   },
+   "behindClosedDoors": false,
+   "competition": {
+    "age": "ADULT",
+    "code": "UNL",
+    "id": "2014",
+    "images": {
+     "FULL_LOGO": "https://img.uefa.com/imgml/uefacom/elements/logos/competitions/color/full/2014.svg"
+    },
+    "metaData": {
+     "name": "UEFA Nations League"
+    },
+    "region": "CONTINENTAL",
+    "sex": "MALE",
+    "sportsType": "FOOTBALL",
+    "teamCategory": "NATIONAL",
+    "translations": {
+     "name": {
+      "EN": "UEFA Nations League",
+      "FR": "UEFA Nations League",
+      "DE": "UEFA Nations League",
+      "ES": "UEFA Nations League",
+      "PT": "UEFA Nations League",
+      "IT": "UEFA Nations League",
+      "RU": "Лига наций УЕФА",
+      "ZH": "UEFA Nations League",
+      "AR": "دوري الأمم الأوروبية UEFA"
+     },
+     "prequalifyingName": {
+      "EN": "UEFA Nations League",
+      "FR": "UEFA Nations League",
+      "DE": "UEFA Nations League",
+      "ES": "UEFA Nations League",
+      "PT": "UEFA Nations League",
+      "IT": "UEFA Nations League",
+      "RU": "Лига наций УЕФА",
+      "ZH": "UEFA Nations League",
+      "AR": "دوري الأمم الأوروبية UEFA"
+     },
+     "qualifyingName": {
+      "EN": "UEFA Nations League",
+      "FR": "UEFA Nations League",
+      "DE": "UEFA Nations League",
+      "ES": "UEFA Nations League",
+      "PT": "UEFA Nations League",
+      "IT": "UEFA Nations League",
+      "RU": "Лига наций УЕФА",
+      "ZH": "UEFA Nations League",
+      "AR": "دوري الأمم الأوروبية UEFA"
+     },
+     "tournamentName": {
+      "EN": "UEFA Nations League",
+      "FR": "UEFA Nations League",
+      "DE": "UEFA Nations League",
+      "ES": "UEFA Nations League",
+      "PT": "UEFA Nations League",
+      "IT": "UEFA Nations League",
+      "RU": "Лига наций УЕФА",
+      "ZH": "UEFA Nations League",
+      "AR": "دوري الأمم الأوروبية UEFA"
+     }
+    },
+    "type": "CUP"
+   },
+   "competitionPhase": "TOURNAMENT",
+   "group": {
+    "competitionId": "2014",
+    "id": "2014192",
+    "league": {
+     "competitionId": "2014",
+     "id": "126",
+     "metaData": {
+      "leagueName": "League A",
+      "leagueShortName": "LA"
+     },
+     "order": 1,
+     "phase": "TOURNAMENT",
+     "roundId": "2002276",
+     "seasonYear": "2027",
+     "translations": {
+      "name": {
+       "EN": "League A",
+       "FR": "Ligue A",
+       "DE": "Liga A",
+       "ES": "Liga A",
+       "PT": "Liga A",
+       "IT": "Lega A",
+       "RU": "Лига A",
+       "ZH": "League A",
+       "AR": "المستوى الأول"
+      },
+      "shortName": {
+       "EN": "LA",
+       "FR": "LA",
+       "DE": "LA",
+       "ES": "LA",
+       "PT": "LA",
+       "IT": "LA",
+       "RU": "A",
+       "ZH": "LA",
+       "AR": "أ"
+      }
+     }
+    },
+    "metaData": {
+     "groupName": "Group A2",
+     "groupShortName": "GrpA2"
+    },
+    "order": 2,
+    "phase": "TOURNAMENT",
+    "roundId": "2002276",
+    "seasonYear": "2027",
+    "teams": [
+     "47",
+     "147",
+     "49",
+     "95"
+    ],
+    "teamsQualifiedNumber": 2,
+    "translations": {
+     "name": {
+      "EN": "Group A2",
+      "FR": "Groupe A2",
+      "DE": "Gruppe A2",
+      "ES": "Grupo A2",
+      "PT": "Grupo A2",
+      "IT": "Gruppo A2",
+      "RU": "Группа A2",
+      "ZH": "Group 2",
+      "AR": "المجموعة A2"
+     },
+     "shortName": {
+      "EN": "A2",
+      "FR": "A2",
+      "DE": "A2",
+      "ES": "A2",
+      "PT": "A2",
+      "IT": "A2",
+      "RU": "A2",
+      "ZH": "2",
+      "AR": "A2"
+     }
+    },
+    "type": "STANDARD"
+   },
+   "homeTeam": {
+    "associationId": "200095",
+    "associationLogoUrl": "https://img.uefa.com/imgml/uefacom/elements/logos/ma/NED.svg",
+    "bigLogoUrl": "https://img.uefa.com/imgml/flags/700x700/NED.png",
+    "confederationType": "UEFA",
+    "countryCode": "NED",
+    "id": "95",
+    "idProvider": "FAME",
+    "internationalName": "Netherlands",
+    "isPlaceHolder": false,
+    "logoUrl": "https://img.uefa.com/imgml/flags/70x70/NED.png",
+    "mediumLogoUrl": "https://img.uefa.com/imgml/flags/240x240/NED.png",
+    "organizationId": "200095",
+    "teamCode": "NED",
+    "teamTypeDetail": "NATIONAL_MEN_TEAM_A",
+    "translations": {
+     "countryName": {
+      "EN": "Netherlands",
+      "FR": "Pays-Bas",
+      "DE": "Niederlande",
+      "ES": "Holanda",
+      "PT": "Holanda",
+      "IT": "Olanda",
+      "RU": "Нидерланды",
+      "ZH": "荷兰",
+      "AR": "هولندا"
+     },
+     "displayName": {
+      "EN": "Netherlands",
+      "FR": "Pays-Bas",
+      "DE": "Niederlande",
+      "ES": "Países Bajos",
+      "PT": "Países Baixos",
+      "IT": "Paesi Bassi",
+      "RU": "Нидерланды",
+      "ZH": "荷兰",
+      "AR": "هولندا"
+     },
+     "displayOfficialName": {
+      "EN": "Netherlands",
+      "FR": "Pays-Bas",
+      "DE": "Niederlande",
+      "ES": "Países Bajos",
+      "PT": "Países Baixos",
+      "IT": "Paesi Bassi",
+      "RU": "Нидерланды",
+      "ZH": "荷兰",
+      "AR": "هولندا"
+     },
+     "displayTeamCode": {
+      "EN": "NED",
+      "FR": "NED",
+      "DE": "NED",
+      "ES": "NED",
+      "PT": "NED",
+      "IT": "NED",
+      "RU": "NED",
+      "ZH": "NED",
+      "AR": "NED"
+     },
+     "shortName": {
+      "EN": "NED",
+      "FR": "NED",
+      "DE": "NED",
+      "ES": "NED",
+      "PT": "NED",
+      "IT": "NED",
+      "RU": "Нидерланды",
+      "ZH": "KNVB",
+      "AR": "NED"
+     }
+    },
+    "typeIsNational": true,
+    "typeTeam": "NATIONAL"
+   },
+   "id": "2047925",
+   "kickOffTime": {
+    "date": "2026-10-04",
+    "dateTime": "2026-10-04T18:45:00Z",
+    "utcOffsetInHours": 2
+   },
+   "lineupStatus": "NOT_AVAILABLE",
+   "matchday": {
+    "competitionId": "2014",
+    "dateFrom": "2026-10-04T06:00:00+0000",
+    "dateTo": "2026-10-06T21:59:59+0000",
+    "format": "REGULAR",
+    "id": "36685",
+    "longName": "Matchday 4",
+    "name": "MD4",
+    "phase": "TOURNAMENT",
+    "roundId": "2002276",
+    "seasonYear": "2027",
+    "sequenceNumber": "4",
+    "translations": {
+     "longName": {
+      "EN": "Matchday 4",
+      "FR": "Journée 4",
+      "DE": "Spieltag 4",
+      "ES": "Jornada 4",
+      "PT": "Jornada 4",
+      "IT": "Giornata 4",
+      "RU": "Тур 4",
+      "ZH": "比赛日 4",
+      "AR": "الجولة 4"
+     },
+     "name": {
+      "EN": "MD 4",
+      "FR": "J 4",
+      "DE": "ST 4",
+      "ES": "JOR 4",
+      "PT": "J 4",
+      "IT": "G 4",
+      "RU": "Тур 4",
+      "ZH": "比赛日 4",
+      "AR": "MD 4"
+     }
+    },
+    "type": "MATCHDAY"
+   },
+   "referees": [
+    {
+     "images": {
+      "SMALL_SQUARE": "https://img.uefa.com/imgml/referees/75x75/262935.jpg"
+     },
+     "person": {
+      "countryCode": "TUR",
+      "gender": "MALE",
+      "id": "262935",
+      "translations": {
+       "countryName": {
+        "EN": "Türkiye",
+        "FR": "Turquie",
+        "DE": "Türkei",
+        "ES": "Turquía",
+        "PT": "Turquia",
+        "IT": "Turchia",
+        "RU": "Турция",
+        "ZH": "土耳其",
+        "AR": "تركيا"
+       },
+       "firstName": {
+        "EN": "Mehmet",
+        "FR": "Mehmet",
+        "DE": "Mehmet",
+        "ES": "Mehmet",
+        "PT": "Mehmet",
+        "IT": "Mehmet",
+        "RU": "Mehmet Murat",
+        "ZH": "Mehmet Murat",
+        "AR": "محمد "
+       },
+       "lastName": {
+        "EN": "Ilgaz",
+        "FR": "Ilgaz",
+        "DE": "Ilgaz",
+        "ES": "Ilgaz",
+        "PT": "Ilgaz",
+        "IT": "Ilgaz",
+        "RU": "Ilgaz",
+        "ZH": "Ilgaz",
+        "AR": "إلغاز"
+       },
+       "name": {
+        "EN": "Mehmet Ilgaz",
+        "FR": "Mehmet Ilgaz",
+        "DE": "Mehmet Ilgaz",
+        "ES": "Mehmet Ilgaz",
+        "PT": "Mehmet Ilgaz",
+        "IT": "Mehmet Ilgaz",
+        "RU": "Мурат Илгаз",
+        "ZH": "穆拉特·伊尔加兹",
+        "AR": "محمد إلغاز"
+       },
+       "shortName": {
+        "EN": "Ilgaz",
+        "FR": "Ilgaz",
+        "DE": "Ilgaz",
+        "ES": "Ilgaz",
+        "PT": "Ilgaz",
+        "IT": "Ilgaz",
+        "RU": "Илгаз",
+        "ZH": "伊尔加兹",
+        "AR": "إلغاز"
+       }
+      }
+     },
+     "role": "REFEREE_OBSERVER",
+     "translations": {
+      "roleName": {
+       "EN": "Referee observer",
+       "FR": "Observateur d'arbitres",
+       "DE": "Referee observer",
+       "ES": "Observador arbitral",
+       "PT": "Observador de árbitro",
+       "IT": "Referee observer",
+       "RU": "Судейский наблюдатель",
+       "ZH": "Referee observer",
+       "AR": "مراقب الحكام"
+      }
+     }
+    },
+    {
+     "images": {
+      "SMALL_SQUARE": "https://img.uefa.com/imgml/referees/75x75/150033329.jpg"
+     },
+     "person": {
+      "countryCode": "SWE",
+      "gender": "MALE",
+      "id": "150033329",
+      "translations": {
+       "countryName": {
+        "EN": "Sweden",
+        "FR": "Suède",
+        "DE": "Schweden",
+        "ES": "Suecia",
+        "PT": "Suécia",
+        "IT": "Svezia",
+        "RU": "Швеция",
+        "ZH": "瑞典",
+        "AR": "السويد"
+       },
+       "firstName": {
+        "EN": "Per",
+        "FR": "Per",
+        "DE": "Per",
+        "ES": "Per",
+        "PT": "Per",
+        "IT": "Per",
+        "RU": "Per",
+        "ZH": "Per",
+        "AR": "Per"
+       },
+       "lastName": {
+        "EN": "Svärd",
+        "FR": "Svärd",
+        "DE": "Svärd",
+        "ES": "Svärd",
+        "PT": "Svärd",
+        "IT": "Svärd",
+        "RU": "Svärd",
+        "ZH": "Svärd",
+        "AR": "Svärd"
+       },
+       "name": {
+        "EN": "Per Svärd",
+        "FR": "Per Svärd",
+        "DE": "Per Svärd",
+        "ES": "Per Svärd",
+        "PT": "Per Svärd",
+        "IT": "Per Svärd",
+        "RU": "Пер Сверд",
+        "ZH": "Per Svärd",
+        "AR": "Per Svärd"
+       },
+       "shortName": {
+        "EN": "Svärd",
+        "FR": "Svärd",
+        "DE": "Svärd",
+        "ES": "Svärd",
+        "PT": "Svärd",
+        "IT": "Svärd",
+        "RU": "Сверд",
+        "ZH": "Svärd",
+        "AR": "Svärd"
+       }
+      }
+     },
+     "role": "UEFA_DELEGATE",
+     "translations": {
+      "roleName": {
+       "EN": "UEFA Delegate",
+       "FR": "Délégué ou déléguée UEFA",
+       "DE": "UEFA-Delegierter",
+       "ES": "Delegado UEFA",
+       "PT": "Delegado da UEFA",
+       "IT": "Delegata UEFA",
+       "RU": "Делегат УЕФА",
+       "ZH": "UEFA delegate",
+       "AR": "مندوب UEFA"
+      }
+     }
+    }
+   ],
+   "round": {
+    "active": true,
+    "benchGKCount": 3,
+    "benchPlayersCount": 12,
+    "benchStaffCount": 11,
+    "coefficientWinnerBonus": 0.0,
+    "competitionId": "2014",
+    "dateFrom": "2026-09-24T06:00:00+0000",
+    "dateTo": "2026-11-17T22:59:59+0000",
+    "fieldPlayersCount": 11,
+    "groupCount": 14,
+    "id": "2002276",
+    "metaData": {
+     "name": "League phase",
+     "type": "GROUP_STANDINGS"
+    },
+    "mode": "GROUP",
+    "modeDetail": "GROUP",
+    "orderInCompetition": 1,
+    "phase": "TOURNAMENT",
+    "seasonYear": "2027",
+    "stadiumNameType": "SPONSOR_NAME",
+    "standingsRankingFormulaId": "620",
+    "status": "CURRENT",
+    "substitutionCount": 5,
+    "teamCount": 54,
+    "teams": [
+     "88",
+     "47",
+     "49",
+     "2614246",
+     "2614247",
+     "56370",
+     "110",
+     "113",
+     "59205",
+     "94080",
+     "117",
+     "2614249",
+     "95",
+     "58837",
+     "58836",
+     "2608110",
+     "13",
+     "57",
+     "58",
+     "2614310",
+     "92853",
+     "57154",
+     "57155",
+     "122",
+     "2",
+     "57157",
+     "127",
+     "128",
+     "8",
+     "50168",
+     "51218",
+     "63",
+     "20",
+     "64",
+     "65",
+     "66",
+     "65146",
+     "57163",
+     "57166",
+     "57160",
+     "56556",
+     "56557",
+     "135",
+     "56558",
+     "2614307",
+     "2614308",
+     "2614309",
+     "60094",
+     "33",
+     "35",
+     "39",
+     "60618",
+     "144",
+     "101",
+     "147",
+     "81",
+     "82",
+     "109",
+     "42",
+     "57419",
+     "43"
+    ],
+    "translations": {
+     "abbreviation": {
+      "EN": "LP",
+      "FR": "Ph. lig.",
+      "DE": "Ligaphase",
+      "ES": "FL",
+      "PT": "FL",
+      "IT": "FC",
+      "RU": "ОЭ",
+      "ZH": "LP",
+      "AR": "LP"
+     },
+     "name": {
+      "EN": "League phase",
+      "FR": "Phase de ligues",
+      "DE": "Ligaphase",
+      "ES": "Fase liga",
+      "PT": "Fase das Ligas",
+      "IT": "Fase campionato",
+      "RU": "Общий этап",
+      "ZH": "League phase",
+      "AR": "مرحلة الدوري"
+     },
+     "shortName": {
+      "EN": "League phase",
+      "FR": "Phase de ligues",
+      "DE": "Ligaphase",
+      "ES": "Fase liga",
+      "PT": "Fase das Ligas",
+      "IT": "Fase campionato",
+      "RU": "Общий этап",
+      "ZH": "League phase",
+      "AR": "مرحلة الدوري"
+     }
+    }
+   },
+   "seasonYear": "2027",
+   "sessionNumber": 1,
+   "stadium": {
+    "address": "Frederiklaan 10a",
+    "capacity": 32043,
+    "city": {
+     "countryCode": "NED",
+     "id": "1568",
+     "translations": {
+      "name": {
+       "EN": "Eindhoven",
+       "FR": "Eindhoven",
+       "DE": "Eindhoven",
+       "ES": "Eindhoven",
+       "PT": "Eindhoven",
+       "IT": "Eindhoven",
+       "RU": "Эйндховен",
+       "ZH": "埃因霍温",
+       "AR": "أيندهوفن"
+      }
+     }
+    },
+    "countryCode": "NED",
+    "geolocation": {
+     "latitude": 51.4416444,
+     "longitude": 5.4673028
+    },
+    "id": "52853",
+    "images": {
+     "MEDIUM_WIDE": "https://img.uefa.com/imgml/stadium/matchinfo/w1/52853.jpg",
+     "LARGE_ULTRA_WIDE": "https://img.uefa.com/imgml/stadium/matchinfo/uw/52853.jpg"
+    },
+    "openingDate": "1916-01-01",
+    "pitch": {
+     "length": 105,
+     "width": 68
+    },
+    "translations": {
+     "mediaName": {
+      "EN": "PSV Stadion",
+      "FR": "PSV Stadion",
+      "DE": "PSV Stadion",
+      "ES": "PSV Stadion",
+      "PT": "PSV Stadion",
+      "IT": "PSV Stadion",
+      "RU": "ПСВ-Стадион",
+      "ZH": "Phillips Stadium",
+      "AR": "استاد بي إس في"
+     },
+     "name": {
+      "EN": "Philips Stadion",
+      "FR": "Philips Stadion",
+      "DE": "Philips Stadion",
+      "ES": "Philips Stadion",
+      "PT": "Philips Stadion",
+      "IT": "Philips Stadion",
+      "RU": "Филипс Стэдиум",
+      "ZH": "Philips Stadium",
+      "AR": "فيليبس ستاديون"
+     },
+     "officialName": {
+      "EN": "PSV Stadion",
+      "FR": "PSV Stadion",
+      "DE": "PSV Stadion",
+      "ES": "PSV Stadion",
+      "PT": "PSV Stadion",
+      "IT": "PSV Stadion",
+      "RU": "ПСВ-Стадион",
+      "ZH": "PSV体育场",
+      "AR": "استاد بي إس في"
+     },
+     "specialEventsName": {
+      "EN": "PSV Stadion",
+      "FR": "PSV Stadion",
+      "DE": "PSV Stadion",
+      "ES": "PSV Stadion",
+      "PT": "PSV Stadion",
+      "IT": "PSV Stadion",
+      "RU": "ПСВ-Стадион",
+      "ZH": "PSV Stadion",
+      "AR": "استاد بي إس في"
+     },
+     "sponsorName": {
+      "EN": "Philips Stadion",
+      "FR": "Philips Stadion",
+      "DE": "Philips Stadion",
+      "ES": "Philips Stadion",
+      "PT": "Philips Stadion",
+      "IT": "Philips Stadion",
+      "RU": "Филипс Стэдиум",
+      "ZH": "Philips Stadium",
+      "AR": "فيليبس ستاديون"
+     }
+    }
+   },
+   "status": "UPCOMING",
+   "type": "GROUP_STAGE"
+  }
+ ]
+}

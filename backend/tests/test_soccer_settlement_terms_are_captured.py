@@ -183,8 +183,12 @@ def test_a_nine_inning_format_cannot_be_used_to_admit_a_soccer_fixture():
 # ── 5 · BASEBALL IS UNTOUCHED ────────────────────────────────────────
 
 def test_the_baseball_terms_and_scope_did_not_move():
+    # The playoff phase is admitted since the 2026-10-01 capture, and ONLY
+    # through its own table: the regular-season terms below are unchanged.
     assert T.CAPTURED_SCOPE[("baseball", "h2h")] == {
-        "phases": (T.PHASE_REGULAR,), "formats": (T.FMT_NINE,)}
+        "phases": (T.PHASE_REGULAR, T.PHASE_PLAYOFF), "formats": (T.FMT_NINE,)}
+    assert ("baseball", "h2h", T.CTX_PRE_GAME, T.PHASE_PLAYOFF) in \
+        T.PHASE_BOOK_TERMS
     pre = T.BOOK_TERMS[("baseball", "h2h", T.CTX_PRE_GAME)]
     live = T.BOOK_TERMS[("baseball", "h2h", T.CTX_LIVE)]
     assert set(pre) == set(T.CONDITIONS)

@@ -617,6 +617,10 @@ def book_context_for(*, observed_at=None, start_at=None,
 # UNESTABLISHED phase or format admits nothing.
 PHASE_REGULAR = "REGULAR_SEASON"
 PHASE_PLAYOFF = "PLAYOFF_OR_PLAY_IN"
+#: SOCCER: a league-table or group-stage match (no extra time, no shootout),
+#: as the competition organiser classifies it. Distinct from a knockout tie.
+PHASE_LEAGUE = "LEAGUE_OR_GROUP_STAGE"
+PHASE_KNOCKOUT = "KNOCKOUT_STAGE"
 FMT_NINE = "STANDARD_NINE_INNING"
 FMT_SEVEN = "SEVEN_INNING_DOUBLEHEADER"
 #: SOCCER'S OWN FORMAT VOCABULARY. The soccer section grades match markets
@@ -631,7 +635,12 @@ FMT_KNOCKOUT = "TIE_DECIDABLE_BY_EXTRA_TIME_OR_SHOOTOUT"
 
 #: What the retrieved page's rules actually cover, per sport.
 CAPTURED_SCOPE = {
-    ("baseball", "h2h"): {"phases": (PHASE_REGULAR,),
+    # PLAYOFF_OR_PLAY_IN IS ADMITTED ONLY BECAUSE IT HAS ITS OWN CAPTURE
+    # (PHASE_BOOK_TERMS, retrieved 2026-10-01). `book_terms` answers a
+    # playoff fixture from that table and NEVER from the regular-season one:
+    # the publisher's playoff exception changes the suspension payouts, so
+    # the regular-season map would describe a different contract.
+    ("baseball", "h2h"): {"phases": (PHASE_REGULAR, PHASE_PLAYOFF),
                           "formats": (FMT_NINE,)},
     # SOCCER, ADDED FROM THE RUN-67 CAPTURE. Two carve-outs come straight
     # out of the prose and both are enforced rather than noted:
@@ -652,7 +661,16 @@ CAPTURED_SCOPE = {
     # produced NO_CAPTURED_SCOPE_FOR_THIS_MARKET, which reads as "we never
     # captured soccer" when in fact the rules are captured and the
     # FIXTURE EVIDENCE is what is missing. Different remedies.
-    ("soccer", "h2h"): {"phases": (PHASE_REGULAR,),
+    #
+    # LEAGUE_OR_GROUP_STAGE (2026-10-01): the soccer section states its
+    # 90-minute basis and its 12-hour void rule for "All match markets ...
+    # unless otherwise stated", and names the World Cup as the exception. A
+    # league or group-stage match that the ORGANISER classifies as such
+    # (e.g. UEFA's own match API: round mode GROUP, matchday format REGULAR)
+    # is a scheduled-ninety-minute match inside that statement. A KNOCKOUT
+    # tie stays outside (FMT_KNOCKOUT), and so does any phase no source
+    # classified.
+    ("soccer", "h2h"): {"phases": (PHASE_REGULAR, PHASE_LEAGUE),
                         "formats": (FMT_NINETY,)},
 }
 
@@ -1041,8 +1059,9 @@ CAPTURE_LIMITS = (
     "SEVEN-INNING DOUBLEHEADERS restate rules 3, 7 and 8 with a 7-inning "
     "threshold, so a fixture not established as a standard nine-inning game "
     "is outside these terms",
-    "MLB PLAYOFF AND PLAY-IN fixtures carry an explicit exception and are "
-    "outside these terms",
+    "MLB PLAYOFF AND PLAY-IN fixtures carry an explicit exception, so the "
+    "regular-season terms never describe them; they are answered only from "
+    "PHASE_BOOK_TERMS (capture of 2026-10-01, CAPTURE_RUN_PLAYOFF)",
     "MARKET RULES outrank sport rules by the publisher's own precedence "
     "statement, and no market-specific rule for this contract was captured",
     "the SUPPORT-CENTRE grading article returned 403 to the reader, so "
@@ -1089,6 +1108,145 @@ CAPTURE_ATTEMPTS = (
 )
 
 
+# ── MLB PLAYOFF AND PLAY-IN: A SEPARATE CAPTURE, A SEPARATE TABLE ─────
+#
+# RETRIEVED 2026-10-01 by the GitHub Actions runner (fetch-docs run
+# 36857955284), the page's sha256 recorded below. The operative sentences
+# are the publisher's own words as served. They are kept APART from the
+# regular-season table because the playoff exception changes what a
+# suspended game pays, and a table keyed only by (family, market, context)
+# would hand a playoff fixture the regular-season answer.
+_AT_PLAYOFF = "2026-10-01T11:51:10Z"
+
+CAPTURE_RUN_PLAYOFF = {
+    "reader": "github-actions runner, ubuntu-latest (fetch-docs)",
+    "job": ("https://github.com/matthewtaylor141-lab/SportsAssets/actions/"
+            "runs/36857955284/job/110354861334"),
+    "url": _URL,
+    "retrieved_at": _AT_PLAYOFF,
+    "http": 200,
+    "bytes": 119592,
+    "sha256": ("63d6432114be131dfbab98baf91f8777a98549221a59c288fa76916c"
+               "3d8303fd"),
+    "phase": PHASE_PLAYOFF,
+}
+
+_Q_PLAYOFF_RULE7 = (
+    "If a game is suspended in order to be resumed more than 12 hours from "
+    "the first pitch, all pre-game bets on the Game-period markets will be "
+    "deemed void and bets on completed periods will have action. With the "
+    "exceptions of: MLB Playoff and Play-In games, which will have action "
+    "whenever the game is completed. Game-period Money Line bets, which have "
+    "action based on the score at the end of the last completed inning as "
+    "long as at least 5 innings (or 4.5 innings if the Home team is winning) "
+    "are completed.")
+
+_Q_PLAYOFF_RULE8 = (
+    "If a game is suspended in order to be resumed more than 30 hours from "
+    "the first pitch, all Live bets on the Game-period markets will be deemed "
+    "void and bets on completed periods will have action. If a game is "
+    "suspended and resumed within 30 hours of the first pitch, all Live bets "
+    "will have action when their periods are completed. Live bets on MLB "
+    "Playoff and Play-In games will have action whenever the game is "
+    "completed.")
+
+
+def _cite_playoff(quote, rule):
+    return {"source": "%s -- %s" % (_SRC, rule), "source_url": _URL,
+            "retrieved_at": _AT_PLAYOFF, "quote": quote,
+            "page_sha256": CAPTURE_RUN_PLAYOFF["sha256"]}
+
+
+#: CONDITIONS THE PLAYOFF CAPTURE DOES NOT ANSWER UNAMBIGUOUSLY, with the
+#: reason. They are LEFT OUT of the table (so `compare` reads them as
+#: book-silent and blocks) and named here so the blocker says WHY rather
+#: than "unstated".
+#:
+#: SUSPENDED BEYOND THE WINDOW, PRE-GAME: rule 7 lists two exceptions and a
+#: playoff money line falls under BOTH -- "action whenever the game is
+#: completed" (pays on the completed game) and "action based on the score
+#: at the end of the last completed inning as long as at least 5 innings"
+#: (pays on the partial score). Two payouts for one condition is not a rule.
+#:
+#: CALLED / STOPPED EARLY: rule 3's called-game grading and the playoff
+#: exception ("action whenever the game is completed") can both be read to
+#: govern a playoff game halted early; the page does not say which.
+PLAYOFF_BOOK_AMBIGUOUS = {
+    ("baseball", "h2h", CTX_PRE_GAME): {
+        C_SUSPENDED_BEYOND: (
+            "rule 7's two exceptions both apply to a playoff money line and "
+            "pay differently (the completed game vs the last completed "
+            "inning)"),
+        C_CALLED_FINAL: (
+            "rule 3's called-game grading and the playoff exception's "
+            "'action whenever the game is completed' both claim this case"),
+        C_STOPPED_EARLY: (
+            "rule 3's minimum-innings void and the playoff exception's "
+            "'action whenever the game is completed' both claim this case"),
+    },
+    ("baseball", "h2h", CTX_LIVE): {
+        C_CALLED_FINAL: (
+            "rule 4 requires completion for in-play action and rule 8's "
+            "playoff sentence gives action whenever completed; neither says "
+            "what a called playoff game pays"),
+        C_STOPPED_EARLY: (
+            "rule 4 and rule 8's playoff sentence; neither says what a "
+            "playoff game halted before the minimum pays"),
+    },
+}
+
+#: THE PLAYOFF TERMS, keyed by (family, market, context, phase).
+PHASE_BOOK_TERMS: dict = {
+    ("baseball", "h2h", CTX_PRE_GAME, PHASE_PLAYOFF): {
+        C_FULL: {"payout": PAY_ON_FINAL, "cite": _cite_playoff(
+            _Q_RULE3, "rule 3 (applies to every MLB game)")},
+        C_OVERTIME: {"payout": PAY_ON_FINAL, "cite": _cite_playoff(
+            _Q_RULE3, "rule 3 (applies to every MLB game)")},
+        # RESUMED: the game completes, and the playoff exception gives action
+        # "whenever the game is completed" -- graded on the completed game.
+        C_SUSPENDED_RESUMED: {"payout": PAY_ON_FINAL, "cite": _cite_playoff(
+            _Q_PLAYOFF_RULE7, "rule 7, playoff exception")},
+        # NEVER STARTED: the general rule voids any fixture not started 12
+        # hours after its scheduled start. The playoff exception is in the
+        # SUSPENSION rule and does not speak to a game that never began.
+        C_NOT_PLAYED: {"payout": PAY_STAKE_BACK, "cite": _cite_playoff(
+            _Q_GENERAL_NOT_STARTED, "general rule")},
+    },
+    ("baseball", "h2h", CTX_LIVE, PHASE_PLAYOFF): {
+        C_FULL: {"payout": PAY_ON_FINAL, "cite": _cite_playoff(
+            _Q_RULE4, "rule 4")},
+        C_OVERTIME: {"payout": PAY_ON_FINAL, "cite": _cite_playoff(
+            _Q_RULE4, "rule 4")},
+        C_SUSPENDED_RESUMED: {"payout": PAY_ON_FINAL, "cite": _cite_playoff(
+            _Q_PLAYOFF_RULE8, "rule 8, playoff sentence")},
+        # BEYOND 30 HOURS: an ordinary in-play bet is void, but a playoff
+        # in-play bet "will have action whenever the game is completed" --
+        # it stays open until the game finishes.
+        C_SUSPENDED_BEYOND: {"payout": PAY_LATER, "cite": _cite_playoff(
+            _Q_PLAYOFF_RULE8, "rule 8, playoff sentence")},
+        C_NOT_PLAYED: {"payout": PAY_STAKE_BACK, "cite": _cite_playoff(
+            _Q_GENERAL_NOT_STARTED, "general rule")},
+    },
+}
+
+#: The phases the general (non-phase-keyed) BOOK_TERMS describe. Anything
+#: else is answered from PHASE_BOOK_TERMS or not at all.
+GENERAL_TABLE_PHASES = frozenset({PHASE_REGULAR, PHASE_LEAGUE})
+
+#: Which capture each phase's terms rest on, for the comparison's provenance.
+PHASE_CAPTURE = {PHASE_PLAYOFF: CAPTURE_RUN_PLAYOFF}
+
+
+def book_ambiguous(*, sport_family, market="h2h", context=None,
+                   phase=None) -> dict:
+    """Conditions the captured terms for this scope state AMBIGUOUSLY, with
+    the reason. Empty outside the playoff capture."""
+    if str(phase) != PHASE_PLAYOFF or context is None:
+        return {}
+    return dict(PLAYOFF_BOOK_AMBIGUOUS.get(
+        (str(sport_family), str(market), str(context))) or {})
+
+
 def book_terms(*, sport_family, market="h2h", context=None, phase=None,
                game_format=None) -> dict:
     """The captured terms for this market IN THIS CONTEXT AND SCOPE.
@@ -1104,6 +1262,14 @@ def book_terms(*, sport_family, market="h2h", context=None, phase=None,
         return {}
     if not admit_scope(sport_family=sport_family, market=market,
                        phase=phase, game_format=game_format)["ok"]:
+        return {}
+    # A PHASE WITH ITS OWN CAPTURE IS ANSWERED ONLY FROM IT. The general
+    # table is the REGULAR-SEASON capture; it is never a fallback for a
+    # phase whose exception changes the payouts.
+    key = (str(sport_family), str(market), str(context), str(phase))
+    if key in PHASE_BOOK_TERMS:
+        return dict(PHASE_BOOK_TERMS[key])
+    if str(phase) not in GENERAL_TABLE_PHASES:
         return {}
     return dict(BOOK_TERMS.get(
         (str(sport_family), str(market), str(context))) or {})
@@ -1246,11 +1412,17 @@ def compare_prose(*, sport_family, market="h2h", venue_prose="",
                         "unknown" % (sport_family, market))}
     cmp_ = compare(book=bk, venue=read["terms"], conditions=conds,
                    venue_triggers=read.get("trigger_qualifiers"))
+    amb = book_ambiguous(sport_family=sport_family, market=market,
+                         context=ctx.get("context"), phase=phase)
     cmp_.update(venue_read=read, book_terms_held=bool(bk),
                 applicable_conditions=list(conds),
                 quote_context=ctx,
                 scope=scope,
-                book_capture=(dict(CAPTURE_RUN) if bk else None),
+                book_ambiguous_conditions=(
+                    {c: w for c, w in amb.items() if c in conds}
+                    if bk else {}),
+                book_capture=((dict(PHASE_CAPTURE.get(str(phase))
+                                    or CAPTURE_RUN)) if bk else None),
                 book_capture_limits=(list(CAPTURE_LIMITS) if bk else None),
                 rule_hierarchy=(dict(RULE_HIERARCHY) if bk else None),
                 book_capture_request=(None if bk else CAPTURE_REQUEST))

@@ -57,6 +57,69 @@ def config(**over) -> dict:
     return cfg
 
 
+#: A SYNTHETIC venue rules text, written for tests ONLY, that states every
+#: baseball money-line condition the way the captured Pinnacle pre-game
+#: regular-season terms do. It is NOT a venue's text: it exists so the
+#: eligible path is exercised through the REAL comparison (attest ->
+#: settlement_blockers -> the collector's projection) rather than through a
+#: hand-written {"compatibility": "COMPATIBLE"}.
+SYNTHETIC_COMPATIBLE_VENUE_PROSE = (
+    "A game completed in regulation is settled on its final score. A game "
+    "decided in extra innings is settled on its final score. Extra innings "
+    "are included if played. A called game that has gone at least five innings "
+    "is graded on the score at the end of the last completed inning, unless "
+    "it ends during the bottom half after the home team has taken the lead, "
+    "in which case the actual score grades it. If fewer than five innings "
+    "are completed, all stakes are refunded. A game suspended and resumed "
+    "within 12 hours of the first pitch is settled on its final score. A "
+    "game suspended for more than 12 hours from the first pitch is graded on "
+    "the score at the end of the last completed inning. If the game is "
+    "postponed and not started within 12 hours of its scheduled start, all "
+    "stakes are refunded.")
+
+#: THE VENUE'S OWN TEXT for the 2026-10-01 NL Wild Card Game 3 (valuation
+#: 2059), as the admin probe read it at 11:53:00Z (ping run 36858137184).
+RECORDED_PHI_ATL_VENUE_PROSE = (
+    "This market will settle to the winner of the Philadelphia Phillies vs "
+    "Atlanta Braves MLB NL Wild Card Game 3 scheduled for 2026-10-01 at "
+    "2:00PM ET. Extra innings are included if played. If the game is "
+    "delayed, postponed, or suspended and not rescheduled to a date within "
+    "two weeks of the originally scheduled date, the market will settle to "
+    "the last fair market price. Outcome sourced from MLB.")
+
+
+def settlement_comparison(kind: str = "COMPATIBLE") -> dict:
+    """The row's settlement_comparison as the COLLECTOR would write it,
+    computed through the real attest -> projection path.
+
+      COMPATIBLE    synthetic fully-stated text, regular season, pre-game
+      INCOMPATIBLE  the recorded Phillies v Braves text, PLAYOFF_OR_PLAY_IN
+      UNKNOWN       the same text with the competition phase unestablished
+      anything else the legacy hand-written {"compatibility": kind}
+    """
+    from sportsassets import bettor_settlement_terms as T
+    from sportsassets import bettor_venue_settlement as V
+    from sportsassets.workers import ext_pinnacle_loop as X
+    if kind == "COMPATIBLE":
+        prose, phase = SYNTHETIC_COMPATIBLE_VENUE_PROSE, T.PHASE_REGULAR
+    elif kind == "INCOMPATIBLE":
+        prose, phase = RECORDED_PHI_ATL_VENUE_PROSE, T.PHASE_PLAYOFF
+    elif kind == "UNKNOWN":
+        prose, phase = RECORDED_PHI_ATL_VENUE_PROSE, None
+    else:
+        return {"compatibility": kind}
+    a = V.attest(sport_family="baseball",
+                 venue_evidence={"rules_text": prose,
+                                 "rules_source": "TEST_FIXTURE"},
+                 book_evidence={"outcome_names": ["HOME", "AWAY"]},
+                 book_context=T.CTX_PRE_GAME, phase=phase,
+                 game_format=T.FMT_NINE)
+    a["fixture_metadata"] = {"read": True, "phase": phase}
+    return dict(X._settlement_compatibility(a), scope_phase=phase,
+                fixture_read=True, venue_rules_read=True,
+                venue_rules_text=prose)
+
+
 async def valuation(conn, *, slug=None, p_pin=0.62, decided_at=None,
                     pin_age_s=5.0, purpose="CALIBRATION_ONLY",
                     compatibility="COMPATIBLE") -> dict:
@@ -82,7 +145,7 @@ async def valuation(conn, *, slug=None, p_pin=0.62, decided_at=None,
         " $9::jsonb) "
         "RETURNING id", ext.EXPERIMENT_ID, slug, at - float(pin_age_s),
         float(p_pin), LONG, purpose, at,
-        json.dumps({"compatibility": compatibility}),
+        json.dumps(settlement_comparison(compatibility), default=str),
         (json.dumps({"usable_for_orders": False,
                      "venue_read_refusal": "VENUE_BOOK_CURRENCY_NOT_"
                                            "ESTABLISHED"})

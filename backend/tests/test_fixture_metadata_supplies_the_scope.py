@@ -118,16 +118,30 @@ def test_a_doubleheader_is_ambiguous_and_refused_rather_than_picked():
     assert "DOUBLEHEADER" in m["why"]
 
 
-def test_a_postseason_fixture_is_a_known_uncovered_phase_not_an_unknown_one():
+def test_a_postseason_fixture_is_answered_only_by_the_playoff_capture():
+    """A postseason fixture is a KNOWN phase. Since the 2026-10-01 capture
+    it is admitted -- but answered ONLY from the playoff table, never from
+    the regular-season terms the playoff exception changes."""
     ps = {"dates": [{"games": [
         dict(_PAYLOAD["dates"][0]["games"][0], gameType="D")]}]}
     _, ev = _ev(payload=ps)
     assert ev["phase"] == ST.PHASE_PLAYOFF
-    assert ev["ok"] is True, "the phase IS established -- it is just excluded"
+    assert ev["ok"] is True, "the phase IS established"
     sc = ST.admit_scope(sport_family="baseball", market="h2h",
                         phase=ev["phase"], game_format=ev["game_format"])
-    assert sc["ok"] is False
-    assert ST.R_PHASE_EXCLUDED in sc["refusals"]
+    assert sc["ok"] is True
+    po = ST.book_terms(sport_family="baseball", market="h2h",
+                       context=ST.CTX_PRE_GAME, phase=ev["phase"],
+                       game_format=ev["game_format"])
+    rs = ST.book_terms(sport_family="baseball", market="h2h",
+                       context=ST.CTX_PRE_GAME, phase=ST.PHASE_REGULAR,
+                       game_format=ev["game_format"])
+    assert po and po != rs
+    assert all(t["cite"]["retrieved_at"] == "2026-10-01T11:51:10Z"
+               for t in po.values())
+    # the conditions the playoff page answers ambiguously are NOT filled in
+    assert ST.C_SUSPENDED_BEYOND not in po
+    assert ST.C_SUSPENDED_BEYOND in rs
 
 
 def test_an_undeclared_game_type_or_state_is_refused_by_name():

@@ -479,8 +479,11 @@ def candidate_from_rec(rec: dict, *, now: float) -> dict:
         "venue_read_at": _f((vq or {}).get("read_at"))
         if isinstance(vq, dict) else None,
         "settlement": {"compatibility": scmp.get("compatibility"),
-                       "overall_established": srule.get("overall_established"),
+                       "overall_established": (
+                           srule.get("overall_established") is True
+                           and scmp.get("compatibility") == "COMPATIBLE"),
                        "unmet": srule.get("unmet"),
+                       "blockers": list(scmp.get("blockers") or []),
                        "fixture_read": (scmp.get("fixture_read")
                                         if "fixture_read" in scmp
                                         else fmeta.get("read")),
@@ -565,10 +568,20 @@ def candidate_from_row(row: dict) -> dict:
             if r.get("record_purpose") == "ENTRY_DECISION" else None),
             "mechanism": fr.get("venue_age_basis")},
         "venue_read_at": None,
+        # ESTABLISHED ONLY ON POSITIVE EVIDENCE. The absence of a recognised
+        # settlement-stage refusal on the row is NOT evidence that the rules
+        # were established -- valuation 2059 carried compatibility=UNKNOWN
+        # and read here as overall_established=True. Now: the row's own
+        # recorded establishment (written since the blocker projection) AND
+        # a COMPATIBLE comparison AND no settlement-stage refusal; a row
+        # that predates the recorded field reads as not established.
         "settlement": {"compatibility": scmp.get("compatibility"),
-                       "overall_established": (not settle_unmet
-                                               if scmp else None),
+                       "overall_established": (
+                           (scmp.get("overall_established") is True
+                            and scmp.get("compatibility") == "COMPATIBLE"
+                            and not settle_unmet) if scmp else None),
                        "unmet": settle_unmet,
+                       "blockers": list(scmp.get("blockers") or []),
                        "fixture_read": scmp.get("fixture_read"),
                        "game_pk": scmp.get("fixture_game_pk"),
                        "official_date": None, "home_team": None,

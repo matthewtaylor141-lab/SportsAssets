@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import hashlib
 import logging
 import os
 import re
@@ -3502,8 +3503,106 @@ def _fetch_schedule_blocking(date_str):
 R_FIXTURE_KEY_ABSENT = "FIXTURE_METADATA_HAS_NO_CONDITION_KEY"
 
 
+async def acquire_venue_fixture_scope(conn, *, event_slug, sport_key, home,
+                                      away, commence_iso, now, cache,
+                                      fetcher=None) -> dict:
+    """THE SCOPE EVIDENCE FOR A VENUE-NATIVE SOCCER CONTRACT.
+
+    Keyed by the venue's OWN namespaced event identity (migration 183),
+    never by a global condition id. Acquired from the competition
+    organiser's published schedule when `bettor_soccer_fixture.SOURCES`
+    declares one; refused by name otherwise. The returned dict has the same
+    reading keys as `fstore.read` so the settlement path consumes it
+    unchanged; every failure is a named refusal and NO row.
+    """
+    from .. import bettor_soccer_fixture as SF
+    key = SF.venue_fixture_key(event_slug)
+    base = {"read": False, "venue_fixture_key": key, "key_kind":
+            "VENUE_NATIVE_EVENT", "error": None}
+    if key is None:
+        acq = {"attempted": False, "refusal": SF.R_NO_EVENT_KEY,
+               "why": ("the venue catalogue gave no event slug for this "
+                       "contract, so there is no venue-native key to bind "
+                       "fixture evidence to")}
+        return dict(base, refusal=SF.R_NO_EVENT_KEY, acquisition=acq)
+    src = SF.source_for(sport_key)
+    if src is None:
+        r = "%s:%s" % (SF.R_NO_SOURCE, sport_key)
+        acq = {"attempted": False, "refusal": r,
+               "why": ("no organiser-published schedule source is declared "
+                       "for %r, so the competition phase, the match format "
+                       "and the event state cannot be established from an "
+                       "authoritative source" % (sport_key,))}
+        return dict(base, refusal=r, acquisition=acq)
+    row = await SF.read(conn, key)
+    need = fstore.needs_acquisition(row, now=now)
+    acq = {"attempted": False, "decided": need, "source": src["source"]}
+    if not need.get("acquire"):
+        return dict(row, venue_fixture_key=key, key_kind="VENUE_NATIVE_EVENT",
+                    acquisition=acq)
+    if not (str(home or "").strip() and str(away or "").strip()):
+        acq.update(refusal=SF.R_BINDING,
+                   why="the odds provider gave no pair of team names")
+        return dict(row, venue_fixture_key=key, acquisition=acq)
+    at = fmeta_mod._epoch(commence_iso)
+    if at is None:
+        acq.update(refusal="COMMENCE_TIME_NOT_READABLE",
+                   why="the event's commence time could not be read")
+        return dict(row, venue_fixture_key=key, acquisition=acq)
+    import datetime as _dt
+    d = _dt.datetime.fromtimestamp(float(at), _dt.timezone.utc).date()
+    # The organiser files a match under its LOCAL date: the UTC date first,
+    # then the dates either side, each required to give a unique match.
+    dates = [d.isoformat(), (d + _dt.timedelta(days=1)).isoformat(),
+             (d - _dt.timedelta(days=1)).isoformat()]
+    fetch = fetcher or SF.fetch_blocking
+    acq.update(attempted=True, dates_tried=[])
+    for date_str in dates:
+        ck = "%s:%s:%s" % (src["kind"], src["competition_id"], date_str)
+        if ck not in cache:
+            if len([k for k in cache if cache[k] is not None]) >= \
+                    FIXTURE_MAX_DATES_PER_CYCLE:
+                acq.update(refusal="FIXTURE_FETCH_BUDGET_SPENT",
+                           why="this cycle's schedule-read bound is spent")
+                return dict(row, venue_fixture_key=key, acquisition=acq)
+            got = await asyncio.to_thread(fetch, src, date_str)
+            cache[ck] = got if got.get("ok") else None
+            if not got.get("ok"):
+                acq.setdefault("fetch_errors", []).append(
+                    {"date": date_str, "error": got.get("error"),
+                     "url": got.get("url")})
+        got = cache.get(ck)
+        if got is None:
+            continue
+        ev = SF.parse(got["payload"], home=home, away=away,
+                      date_str=date_str, retrieved_at=got["retrieved_at"],
+                      url=got["url"], src=src)
+        acq["dates_tried"].append({"date": date_str, "matched": ev["ok"],
+                                   "refusals": ev.get("refusals")})
+        if not ev["ok"]:
+            if SF.R_AMBIGUOUS in (ev.get("refusals") or []):
+                acq.update(refusal=SF.R_AMBIGUOUS, why=ev.get("why"))
+                return dict(row, venue_fixture_key=key, acquisition=acq)
+            continue
+        acq["write"] = await SF.upsert(conn, key, ev)
+        acq["evidence_refusals"] = list(ev.get("refusals") or [])
+        fresh = await SF.read(conn, key)
+        return dict(fresh, venue_fixture_key=key,
+                    key_kind="VENUE_NATIVE_EVENT", acquisition=acq)
+    acq["refusal"] = acq.get("refusal") or (
+        SF.R_FETCH if acq.get("fetch_errors") and not any(
+            t.get("matched") is False for t in acq["dates_tried"])
+        else SF.R_NO_MATCH)
+    acq["why"] = acq.get("why") or (
+        "the organiser schedule gave no unique match for %r vs %r on %s"
+        % (home, away, dates))
+    return dict(row, venue_fixture_key=key, acquisition=acq)
+
+
 async def acquire_fixture_scope(conn, *, condition_id, home, away,
-                                commence_iso, now, cache, fetcher=None):
+                                commence_iso, now, cache, fetcher=None,
+                                sport_family=None, sport_key=None,
+                                venue_event_slug=None, venue_fetcher=None):
     """The scope evidence for ONE candidate's fixture, acquired if needed.
 
     ── THE DEFECT THIS CLOSES ───────────────────────────────────────
@@ -3540,6 +3639,14 @@ async def acquire_fixture_scope(conn, *, condition_id, home, away,
     have been handed the first one's game state. Refused by name instead;
     the scope stays unestablished and the settlement comparison says so.
     """
+    if not str(condition_id or "").strip() and \
+            str(sport_family or "") == "soccer":
+        # A VENUE-NATIVE SOCCER CONTRACT: its own namespaced key and the
+        # organiser's schedule, never a borrowed or invented condition id.
+        return await acquire_venue_fixture_scope(
+            conn, event_slug=venue_event_slug, sport_key=sport_key,
+            home=home, away=away, commence_iso=commence_iso, now=now,
+            cache=cache, fetcher=venue_fetcher)
     if not str(condition_id or "").strip():
         acq = {"attempted": False, "refusal": R_FIXTURE_KEY_ABSENT,
                "why": ("no global condition id to key the fixture row by "
@@ -4252,11 +4359,23 @@ def _settlement_compatibility(srule) -> dict:
     """
     void = ((srule or {}).get("rules") or {}).get("void") or {}
     cmp_ = void.get("terms_comparison") or {}
+    # THE ESTABLISHMENT IS POSITIVE EVIDENCE OR NOTHING. `overall_established`
+    # is attest's own verdict AND a COMPATIBLE comparison with no named
+    # blocker; a projection that lacked a recognised refusal used to read as
+    # established beside compatibility=UNKNOWN.
+    sb = vset.settlement_blockers(srule, fixture=(srule or {}).get(
+        "fixture_metadata"))
     return {"compatibility": cmp_.get("verdict"),
             "mismatched_conditions": cmp_.get("mismatched_conditions"),
             "applicable_conditions": cmp_.get("applicable_conditions"),
             "unstated_conditions": cmp_.get("unstated_conditions"),
-            "compared_on": void.get("compared_on")}
+            "compared_on": void.get("compared_on"),
+            "overall_established": sb["established"],
+            "attest_unmet": list((srule or {}).get("unmet") or []),
+            "blockers": sb["blockers"],
+            "per_condition": sb["per_condition"],
+            "book_ambiguous_conditions": sb["book_ambiguous_conditions"],
+            "book_capture": sb["book_capture"]}
 
 
 def _entry_plan(*, ladder, fee_fn, observation_age_s, action, condition_id,
@@ -7860,7 +7979,9 @@ async def cycle(conn) -> dict:
                 conn, condition_id=mapped["condition_id"],
                 home=quote.get("home"), away=quote.get("away"),
                 commence_iso=quote.get("commence_time"),
-                now=time.time(), cache=fixture_cache)
+                now=time.time(), cache=fixture_cache,
+                sport_family=family, sport_key=sport_key,
+                venue_event_slug=(vevid or {}).get("event_slug"))
             ctx_ev = None
             if fmeta.get("read") and fmeta.get("play_has_begun") is not None:
                 ctx_ev = fmeta_mod.context_for(
@@ -8151,6 +8272,8 @@ async def cycle(conn) -> dict:
                 fixture_source_url=fmeta.get("source_url"),
                 fixture_retrieved_at=fmeta.get("retrieved_at"),
                 fixture_game_pk=fmeta.get("game_pk"),
+                fixture_venue_key=fmeta.get("venue_fixture_key"),
+                fixture_source_match_id=fmeta.get("source_match_id"),
                 fixture_read=fmeta.get("read"),
                 # WHETHER THE LANE ACQUIRED IT THIS CYCLE, AND WHY NOT.
                 # An absent scope used to be indistinguishable from an
@@ -8159,7 +8282,16 @@ async def cycle(conn) -> dict:
                 fixture_event_state=fmeta.get("event_state_raw"),
                 fixture_play_has_begun=fmeta.get("play_has_begun"),
                 venue_rules_read=bool((vevid or {}).get("rules_text")),
-                venue_rules_source=(vevid or {}).get("rules_source"))
+                venue_rules_source=(vevid or {}).get("rules_source"),
+                # THE VENUE'S OWN WORDS, kept with the verdict they produced,
+                # so the comparison can be re-run and audited from the row.
+                venue_rules_text=(str((vevid or {}).get("rules_text"))[:4000]
+                                  if (vevid or {}).get("rules_text")
+                                  else None),
+                venue_rules_sha256=(
+                    hashlib.sha256(str((vevid or {}).get("rules_text"))
+                                   .encode("utf-8")).hexdigest()
+                    if (vevid or {}).get("rules_text") else None))
             if calibration_only is not None:
                 # ── A CALIBRATION-ONLY RECORD IS WRITTEN AND GOES NO FURTHER ──
                 #

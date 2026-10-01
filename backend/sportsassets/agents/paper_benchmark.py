@@ -305,19 +305,29 @@ def contract_match(cand: dict, row: dict) -> dict:
         payout_event_basis=row.get("payout_event_basis"))
     # 3 · SETTLEMENT TERMS (evaluate's C_SETTLEMENT)
     st = dict(cand.get("settlement") or {})
+    blockers = [str(b) for b in (st.get("blockers") or [])]
     s_ok = (st.get("compatibility") == "COMPATIBLE"
             and st.get("overall_established") is True
-            and not lane["settlement"])
+            and not lane["settlement"] and not blockers)
     put(DP.C_SETTLEMENT, s_ok, R_SETTLEMENT,
         ("venue and book settlement terms compared COMPATIBLE and every "
          "rule established") if s_ok else (
             "settlement not established: compatibility=%s, "
-            "overall_established=%s, lane=%s" % (
+            "overall_established=%s, blockers=%s, lane=%s" % (
                 st.get("compatibility"), st.get("overall_established"),
-                lane["settlement"])),
+                blockers or "NONE_RECORDED", lane["settlement"])),
         compatibility=st.get("compatibility"),
         overall_established=st.get("overall_established"),
+        blockers=blockers,
         lane_refusals=lane["settlement"])
+    # THE PRECISE REASONS RIDE BEHIND THE CATEGORY, so the decision's
+    # refusals name what to establish (a missing rule, a conflicting
+    # payout, absent fixture metadata), not only that settlement failed.
+    # A row written before blockers were recorded says that instead.
+    if not s_ok:
+        for b in (blockers or ["SETTLEMENT_BLOCKERS_NOT_RECORDED_ON_THIS_ROW"]):
+            if b not in refusals:
+                refusals.append(b)
     # 4 · THE LANE QUALIFIED THE PROBABILITY ITSELF (de-vig, mapping, books)
     put("probability_qualified_by_the_lane", not lane["probability"],
         R_PROBABILITY_UNQUALIFIED,
