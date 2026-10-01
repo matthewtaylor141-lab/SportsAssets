@@ -1861,6 +1861,55 @@ jobs:
       # even when a preceding check failed, because the refusals it reports
       # are exactly what the failure needs interpreting against. The job
       # still fails: this does not turn a red run green.
+      - name: Agent pages and the paper account strip (READ-ONLY)
+        env:
+          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+        run: |
+          # GETs only. The three management URLs must serve the agent shell
+          # (status 200, the address kept by the netlify rewrite), paper.js
+          # must be published, and with a COMMAND role the framed pages,
+          # the one paper ledger and the agents' state must read back.
+          # Chat and speech are POST routes that write conversation
+          # records, so only their configuration status is read here.
+          set +e
+          HOST="${{ inputs.host }}"
+          API="${{ inputs.api }}"
+          {
+            echo "### Agent pages"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          for path in /derek /xavier /audrey /paper.js /agent.html; do
+            code=$(curl -s -o /tmp/pg -w '%{http_code}' --max-time 25 "https://$HOST$path" || echo 000)
+            printf '%-12s %s %s bytes  frames-agent-page:%s  account-strip:%s\n' "$path" "$code" \
+              "$(wc -c < /tmp/pg)" "$(grep -c 'agents/.*page\|/page' /tmp/pg)" \
+              "$(grep -c 'paper/account' /tmp/pg)" | tee -a "$GITHUB_STEP_SUMMARY"
+          done
+          curl -s --max-time 25 "https://$HOST/" > /tmp/home
+          echo "homepage loads paper.js: $(grep -c 'paper.js' /tmp/home)  OUR AGENTS nav: $(grep -ci 'our agents' /tmp/home)" \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+          if [ -z "${ADMIN_TOKEN:-}" ]; then
+            echo "SKIPPED authenticated reads: no ADMIN_TOKEN secret" | tee -a "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"; exit 0
+          fi
+          echo "::add-mask::$ADMIN_TOKEN"
+          H="X-Admin-Token: $ADMIN_TOKEN"
+          for a in derek xavier audrey; do
+            code=$(curl -s -o /tmp/ap -w '%{http_code}' --max-time 45 -H "$H" "$API/api/command/agents/$a/page" || echo 000)
+            echo "api agents/$a/page HTTP $code $(wc -c < /tmp/ap) bytes" | tee -a "$GITHUB_STEP_SUMMARY"
+          done
+          code=$(curl -s -o /tmp/acct.json -w '%{http_code}' --max-time 45 -H "$H" "$API/api/command/paper/account?entries=5" || echo 000)
+          echo "paper/account HTTP $code" | tee -a "$GITHUB_STEP_SUMMARY"
+          jq -c '{status: .account.status, balances: .account.data, session: .session, last_updated_at, ledger_status: .ledger.status, ledger_entries: [(.ledger.data // {}) | (.entries // .)[]? | {seq: (.sequence // .seq), kind, cash_after_usd, reserved_after_usd}]}' \
+            /tmp/acct.json 2>/dev/null | cut -c1-2500 | tee -a "$GITHUB_STEP_SUMMARY"
+          code=$(curl -s -o /tmp/ag.json -w '%{http_code}' --max-time 45 -H "$H" "$API/api/command/agents" || echo 000)
+          echo "agents HTTP $code" | tee -a "$GITHUB_STEP_SUMMARY"
+          jq -c '.' /tmp/ag.json 2>/dev/null | cut -c1-2000 | tee -a "$GITHUB_STEP_SUMMARY"
+          code=$(curl -s -o /tmp/ps.json -w '%{http_code}' --max-time 45 -H "$H" "$API/api/command/agents/persona-status" || echo 000)
+          echo "persona-status HTTP $code" | tee -a "$GITHUB_STEP_SUMMARY"
+          jq -c '{chat_llm: .chat.llm, voice: .speech.voice, personas}' /tmp/ps.json 2>/dev/null \
+            | cut -c1-1500 | tee -a "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
       - name: External valuation — arm, cycle, and read production back
         if: ${{ !cancelled() && github.event.inputs.arm_external != '' }}
         env:
