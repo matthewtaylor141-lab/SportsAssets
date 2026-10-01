@@ -1,0 +1,70 @@
+{
+  "version": 1,
+  "source": "Actual authenticated agent responses, October 1 2026",
+  "chapters": [
+    {
+      "chapter": 0,
+      "agent": "derek",
+      "answer": "This is the rehearsal view of our desk: I handle entry, Xavier manages positions, Audrey audits, and we share one paper account. The paper account holds $500,000 cash with zero open positions [F1][F7]. Today my entry policy logged 367 paper decisions, all refusals [F12], so Xavier has nothing to manage [F46]. Every decision traces back to its record.",
+      "message_id": "pc-derek-ea97df57ac3c49a4:1",
+      "recorded_at": "2026-10-01T17:21:16.624696Z",
+      "file": "00-derek.mp3"
+    },
+    {
+      "chapter": 1,
+      "agent": "derek",
+      "answer": "This is a rehearsal: the price looked good before fees, but fees ate the edge, so I refused. The records show a real case today: one paper refusal coded GROSS_EDGE_CLEARS_THRESHOLD_BUT_FEES_CONSUME_IT [F25], decision papercg:c9ccb615cca099282e705df9 [F35]. Its payout and cost figures aren't in the records I have, so I won't quote them.",
+      "message_id": "pc-derek-d0a79fd29ad84c08:1",
+      "recorded_at": "2026-10-01T17:21:33.317705Z",
+      "file": "01-derek.mp3"
+    },
+    {
+      "chapter": 2,
+      "agent": "derek",
+      "answer": "For this rehearsal, the handoff would be the contracts, acquisition price, fees, market identity, my entry assumptions and the decision record, with cash reflecting the fill. That is illustrative only. The records show 0 handoffs from me and 0 open paper positions, so there is nothing for Xavier to manage [F46]. Paper cash stands at $500,000 [F1].",
+      "message_id": "pc-derek-7d543fb732f5479d:1",
+      "recorded_at": "2026-10-01T17:21:50.845226Z",
+      "file": "02-derek.mp3"
+    },
+    {
+      "chapter": 3,
+      "agent": "xavier",
+      "answer": "This is a rehearsal illustration, not a recorded trade. The records hold no Red Sox position, and the only market shown is Yankees versus Tampa Bay [F8]. The pairing covers both sides: one leg normally pays, and a Yankees win by one or two pays both. The cost is both premiums plus fees, and an exceptional settlement such as a void remains a real risk. It is not a guaranteed profit.",
+      "message_id": "pc-xavier-c589a38e20524907:1",
+      "recorded_at": "2026-10-01T17:22:04.62396Z",
+      "file": "03-xavier.mp3"
+    },
+    {
+      "chapter": 4,
+      "agent": "audrey",
+      "answer": "For this rehearsal, there's no result yet. Paper realised P&L is $0 [F5] with zero open positions [F7], so outcomes can't be graded. What I can grade is discipline: the ledger reconciles [F47], and all 675 decisions today were refusals with recorded reasons [F11], 293 because no research model candidate exists [F15]. Derek, that evidence gap is what needs fixing.",
+      "message_id": "pc-audrey-e6fbdd1408df4b29:1",
+      "recorded_at": "2026-10-01T17:22:19.75354Z",
+      "file": "04-audrey.mp3"
+    },
+    {
+      "chapter": 5,
+      "agent": "audrey",
+      "answer": "This is a rehearsal, so there's no result to report yet. The records show 0 paper open positions [F7]. As an illustration, I'd recommend a bounded book-read deadline with an explicit timeout record. Derek shouldn't enter on an expired quote, and Xavier should keep protection in place when a refresh fails. We'd evaluate that before calling it an improvement. Nothing here changes policy.",
+      "message_id": "pc-audrey-8b9176ef897e46b6:1",
+      "recorded_at": "2026-10-01T17:22:50.102898Z",
+      "file": "05-audrey.mp3"
+    },
+    {
+      "chapter": 6,
+      "agent": "derek",
+      "answer": "This is a rehearsal, so no, not smarter, just more testable. Audrey's latest audit shows a change proposed [F50]. In the scenario, I'd log a deadline timeout instead of losing the decision quietly, and Xavier keeps existing protection. Today's records show 9 paper refusals where the book read missed the decision deadline [F21]. Any claim of improvement needs Audrey's separate forward results, which aren't recorded yet.",
+      "message_id": "pc-derek-0bf7c7d7feba42af:1",
+      "recorded_at": "2026-10-01T17:23:06.947624Z",
+      "file": "06-derek.mp3"
+    },
+    {
+      "chapter": 7,
+      "agent": "xavier",
+      "answer": "This is a rehearsal, and nothing is at risk: the records show no open paper positions and no protection orders [F46]. Audrey's latest audit shows a change proposed [F50], but adopting it changes nothing by itself. In the rehearsal, a timed-out quote leaves existing protection in place until a verified replacement arrives. The cost is a slower reprice. Audrey still has to judge the forward evidence.",
+      "message_id": "pc-xavier-614843123adf4c23:1",
+      "recorded_at": "2026-10-01T17:23:21.766937Z",
+      "file": "07-xavier.mp3"
+    }
+  ]
+}

@@ -16,7 +16,7 @@ on:
   workflow_dispatch:
     inputs:
       demo:
-        description: "blank = read-only ping only; chat-voice = also run the authorized agent chat + speech demonstration (writes conversation records only)"
+        description: "blank = read-only ping only; chat-voice = also run the authorized agent chat + speech demonstration (writes conversation records only); narration = fetch the stored speech for tools/narration/narration-manifest.json (speech reads only)"
         required: false
         default: ""
       verify:
@@ -319,4 +319,38 @@ jobs:
           git rm -rq --cached . >/dev/null 2>&1
           mkdir -p "$D" && cp tools/site_verify/site_verify_out/* "$D"/ 2>/dev/null
           git add "$D" && git commit -q -m "talk panel evidence, run $RUN" && git push -q origin ev:claude/site-verify-evidence && echo "evidence pushed: $D"
+
+  narration:
+    # RETRIEVES EXISTING STORED SPEECH ONLY (verify == narration): POSTs the
+    # stored message ids in tools/narration/narration-manifest.json to
+    # /api/command/agents/{agent}/speak and packages the audio. No chat,
+    # order, directive, policy, environment or ledger write. The token stays
+    # in this runner (masked); the zip goes to the evidence branch.
+    if: ${{ inputs.verify == 'narration' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch the actual agent narration
+        shell: bash
+        env:
+          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+        run: |
+          echo "::add-mask::$ADMIN_TOKEN"
+          cd tools/narration && python3 fetch_actual_narration.py && ls -la Actual-Agent-Narration.zip && python3 -c "import zipfile;[print(i.file_size,i.filename) for i in zipfile.ZipFile('Actual-Agent-Narration.zip').infolist()]"
+      - name: Commit the narration zip
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          RUN="${GITHUB_RUN_ID}"
+          D="evidence/narration/$(date -u +%Y%m%dT%H%M%SZ)_run$RUN"
+          git config user.name "site-verify"
+          git config user.email "site-verify@users.noreply.github.com"
+          git fetch -q origin claude/site-verify-evidence && git checkout -q -B ev origin/claude/site-verify-evidence || git checkout -q --orphan ev
+          git rm -rq --cached . >/dev/null 2>&1
+          mkdir -p "$D" && cp tools/narration/Actual-Agent-Narration.zip tools/narration/actual-narration/manifest.json "$D"/ 2>/dev/null
+          git add "$D" && git commit -q -m "actual agent narration, run $RUN" && git push -q origin ev:claude/site-verify-evidence && echo "evidence pushed: $D"
 
