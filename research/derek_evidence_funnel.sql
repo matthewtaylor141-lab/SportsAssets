@@ -17,6 +17,9 @@
 -- E6 eligible fixtures by settlement day (accrual rate)
 -- E7 upstream funnel of the latest collection cycle per provider sport
 -- E8 research observations recorded by the app, per cohort
+-- E9 ENTRY_DECISION rows refused for BACKFILL_NO_PRICE_RECEIPT: which keys
+--    their stored evidence actually holds, by day (is the receipt stored
+--    under another path, or genuinely absent?)
 
 \echo '== E0 · stored valuations by purpose and day =='
 SELECT date_trunc('day', decided_at)::date AS day, record_purpose,
@@ -168,7 +171,7 @@ SELECT date_trunc('day', outcome_at)::date AS settled_day,
  GROUP BY 1 ORDER BY 1 DESC LIMIT 30;
 
 \echo '== E7 · upstream funnel of the latest collection cycle, per provider sport =='
-SELECT to_timestamp((value->>'written_at')::float8) AS cycle_written_at,
+SELECT to_timestamp((ingestion_state.value->>'written_at')::float8) AS cycle_written_at,
        s.key AS provider_sport,
        s.value->>'provider_events' AS provider_events,
        s.value->>'identity_resolved' AS identity_resolved,
@@ -179,7 +182,7 @@ SELECT to_timestamp((value->>'written_at')::float8) AS cycle_written_at,
        s.value->>'written' AS written,
        s.value->>'recorded_for_calibration_only' AS calib_only,
        left((s.value->'refusals')::text, 300) AS refusals
-  FROM ingestion_state, jsonb_each(value->'funnel_by_provider_sport') s
+  FROM ingestion_state, jsonb_each(ingestion_state.value->'funnel_by_provider_sport') s
  WHERE ingestion_state.key = 'ext_pinnacle_last_cycle'
  ORDER BY (s.value->>'provider_events')::int DESC NULLS LAST;
 
@@ -187,3 +190,29 @@ SELECT to_timestamp((value->>'written_at')::float8) AS cycle_written_at,
 SELECT cohort, record_purpose, count(*) AS observations, count(DISTINCT fixture) AS fixtures,
        min(decided_at) AS oldest, max(decided_at) AS newest
   FROM derek_research_observations GROUP BY 1, 2 ORDER BY 1, 2;
+
+\echo '== E9a · ENTRY_DECISION evidence keys, receipt present vs absent, by day =='
+SELECT date_trunc('day', decided_at)::date AS day,
+       (risk_verdict #>> '{freshness_evidence,venue_clock,our_response_received_at}') IS NOT NULL AS has_receipt,
+       count(*) AS valuations,
+       string_agg(DISTINCT coalesce((SELECT string_agg(k, ',' ORDER BY k) FROM jsonb_object_keys(COALESCE(risk_verdict, '{}'::jsonb)) k), '-'), ' | ') AS risk_verdict_keys
+  FROM external_valuations
+ WHERE experiment_id = 'EXT_PINNACLE_DEVIG_V1_SHADOW' AND record_purpose = 'ENTRY_DECISION'
+ GROUP BY 1, 2 ORDER BY 1, 2;
+
+\echo '== E9b · freshness_evidence and venue_clock keys on rows WITHOUT the receipt =='
+SELECT (SELECT string_agg(k, ',' ORDER BY k) FROM jsonb_object_keys(COALESCE(risk_verdict->'freshness_evidence', '{}'::jsonb)) k) AS freshness_keys,
+       (SELECT string_agg(k, ',' ORDER BY k) FROM jsonb_object_keys(COALESCE(risk_verdict #> '{freshness_evidence,venue_clock}', '{}'::jsonb)) k) AS venue_clock_keys,
+       count(*) AS valuations, min(decided_at) AS oldest, max(decided_at) AS newest
+  FROM external_valuations
+ WHERE experiment_id = 'EXT_PINNACLE_DEVIG_V1_SHADOW' AND record_purpose = 'ENTRY_DECISION'
+   AND (risk_verdict #>> '{freshness_evidence,venue_clock,our_response_received_at}') IS NULL
+ GROUP BY 1, 2 ORDER BY 3 DESC LIMIT 12;
+
+\echo '== E9c · one sample of the evidence on a row WITHOUT the receipt (shortened) =='
+SELECT id, decided_at, left(risk_verdict::text, 1500) AS risk_verdict
+  FROM external_valuations
+ WHERE experiment_id = 'EXT_PINNACLE_DEVIG_V1_SHADOW' AND record_purpose = 'ENTRY_DECISION'
+   AND (risk_verdict #>> '{freshness_evidence,venue_clock,our_response_received_at}') IS NULL
+   AND probability IS NOT NULL
+ ORDER BY decided_at DESC LIMIT 1;
