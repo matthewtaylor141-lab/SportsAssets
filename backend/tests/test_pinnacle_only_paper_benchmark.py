@@ -286,7 +286,10 @@ async def test_lifecycle_enter_order_fill_cash_xavier_audrey_settle(bench_on):
         r = await conn.fetchrow("SELECT * FROM paper_xavier_reviews WHERE "
                                 " group_id=$1 ORDER BY reviewed_at",
                                 o["group_id"])
-        assert r["trigger"] == "FIRST_FILL"
+        assert r["trigger"] == "FIRST_FILL" and r["strategy"] == PB.STRATEGY
+        assert pos[0]["strategy"] == PB.STRATEGY
+        assert pos[0]["open_qty"] == float(h["confirmed_qty"]) == 5000.0
+        assert {f["strategy"] for f in fills} == {PB.STRATEGY}
         m = H.j(r["measure"])
         assert m["strategy"] == PB.STRATEGY and m["p_internal"] is None
         assert m["source"] == "PINNACLE_ONLY_CURRENT"
@@ -318,6 +321,27 @@ async def test_lifecycle_enter_order_fill_cash_xavier_audrey_settle(bench_on):
         fd = H.j(f["detail"])
         assert fd["passed"] is True and fd["ledger_fill_entries"] == 2
         assert fd["handed_to_xavier"] is True
+        # ── WHAT MANAGEMENT READS: strategy, explanation, balance, handoff
+        from sportsassets import bettor_paper_readmodel as RM
+        dp = await RM.derek_payload(conn, account_id=acct["account_id"],
+                                    now=now + 5)
+        rows = {x["strategy"]: x for x in dp["opportunities"]["data"]
+                if x["valuation_id"] == v["valuation_id"]}
+        assert set(rows) == {"DEREK_ENTRY_POLICY_V2", PB.STRATEGY}
+        assert "PINNACLE_ONLY_PAPER_BENCHMARK" in rows[PB.STRATEGY][
+            "explanation"] and "not evidence" in rows[PB.STRATEGY][
+            "explanation"]
+        assert rows[PB.STRATEGY]["explanation"].startswith("ENTER")
+        bp = await RM.benchmark_payload(conn, account_id=acct["account_id"],
+                                        now=now + 5)
+        assert bp["disclosure"] == PB.DISCLOSURE
+        assert bp["decisions"]["status"] == "OK"
+        assert bp["handoffs"]["data"][0]["group_id"] == o["group_id"]
+        assert {e["kind"] for e in bp["ledger"]["data"]} >= {
+            "ORDER_SUBMITTED", "FILL"}
+        xp = await RM.xavier_payload(conn, account_id=acct["account_id"],
+                                     now=now + 5)
+        assert xp["positions"]["data"][0]["strategy"] == PB.STRATEGY
         # ── SETTLEMENT, EXACTLY ONCE ───────────────────────────────────
         await PL.settle_valuation(conn, v["valuation_id"], outcome=1)
         p2 = await _pass(conn, acct, t, now + 120, client=client)
@@ -631,3 +655,362 @@ def test_readback_sql_is_read_only():
     found = [w for w in words if re.search(r"\b%s\b" % w, body, re.I)]
     assert not found, found
     assert "PINNACLE_ONLY_PAPER_BENCHMARK" in body
+
+
+
+# ═════════════════════════════════════════════════════════════════════
+# 6 · OWNER PROOFS: KEYS, ONE LEDGER UNDER CONCURRENCY, REPEATS AND
+#     RESTARTS, BOTH STRATEGIES RECONCILED, ENTRY SWITCH, ISOLATION
+# ═════════════════════════════════════════════════════════════════════
+
+SUBMITTERS = ("bettor_funded_execution", "bettor_entry_execution",
+              "bettor_funded_management", "bettor_funded_activation",
+              "live_executor", "calibration_execute", "calibration_adapter",
+              "bettor_shadow_loop", "bettor_test_venue_executor", "pmus",
+              "pmx")
+
+
+def test_no_paper_module_imports_a_submission_path():
+    mods = [p for p in ROOT.rglob("*.py")
+            if p.name.startswith("bettor_paper") or p.name.startswith("paper_")
+            or (p.parent.name == "api" and p.name == "command_paper.py")]
+    assert BENCH in mods and len(mods) >= 10
+    bad = {}
+    for p in mods:
+        leaves = {n.split(".")[-1] for n in _imports(p) if n}
+        hit = sorted(leaves & set(SUBMITTERS))
+        if hit:
+            bad[str(p.relative_to(ROOT))] = hit
+    assert not bad, bad
+
+
+def test_every_key_is_strategy_specific():
+    sid, vid = "paper_session_X", 4242
+    d2, db = PD.decision_id_for(sid, vid), PB.decision_id_for(sid, vid)
+    assert d2 != db and db.startswith("paperbench:")
+    g2, gb = PD.group_id_for(d2), PB.group_id_for(db)
+    assert g2 != gb and gb.startswith("paperbenchgrp:")
+    k2, kb = "%s:ENTRY" % d2, "%s:ENTRY" % db
+    assert L.order_id_for(k2) != L.order_id_for(kb)
+    for slug in ("same-market",):
+        assert L.position_key(account_id="a", group_id=g2, slug=slug,
+                              holding_side="LONG") != \
+            L.position_key(account_id="a", group_id=gb, slug=slug,
+                           holding_side="LONG")
+    # fill keys embed the order id; handoff keys hash the group
+    assert "%s:obs1:0.500000" % L.order_id_for(k2) != \
+        "%s:obs1:0.500000" % L.order_id_for(kb)
+
+
+@pg
+async def test_both_strategies_reserving_concurrently_never_overcommit():
+    """ONE SHARED CASH LEDGER: a two-model and a benchmark entry, each
+    reserving $800 against $1,000 available, submitted at the same instant
+    on two connections -- the account row lock serializes them, exactly one
+    reserves, the other is refused INSUFFICIENT; repeated 6 times."""
+    import asyncio
+    c0, c1, c2 = await H.connect(), await H.connect(), await H.connect()
+    try:
+        a = await H.new_account(c0, "benchconc")
+        filler = H.order(a, key="fill", qty=998000, limit=0.50,
+                         role="HEDGE", slug=a["account_id"] + ":filler")
+        got = await L.submit_order(c0, filler, fee_fn=H.zero_fee, now=H.T0)
+        assert got["ok"], got
+        cs = await L.cash_state(c0, a["account_id"])
+        assert float(cs["available"]) == 1000.0
+        for i in range(6):
+            o2 = H.order(a, key="tm-%d" % i, qty=1600, limit=0.50,
+                         slug=a["account_id"] + ":m%d" % i,
+                         group_id="papergrp:conc%d" % i)
+            ob = dict(H.order(a, key="bm-%d" % i, qty=1600, limit=0.50,
+                              slug=a["account_id"] + ":m%d" % i,
+                              group_id="paperbenchgrp:conc%d" % i),
+                      strategy=PB.STRATEGY)
+            r2, rb = await asyncio.gather(
+                L.submit_order(c1, o2, fee_fn=H.zero_fee, now=H.T0 + i),
+                L.submit_order(c2, ob, fee_fn=H.zero_fee, now=H.T0 + i))
+            oks = [r for r in (r2, rb) if r.get("ok")]
+            refused = [r for r in (r2, rb) if not r.get("ok")]
+            assert len(oks) == 1 and len(refused) == 1, (r2, rb)
+            assert refused[0]["refusal"] == L.R_INSUFFICIENT
+            cs = await L.cash_state(c0, a["account_id"])
+            assert float(cs["available"]) == pytest.approx(200.0)
+            assert cs["running_balance_agrees"] is True
+            # release the winner so the next round starts from $1,000
+            await L.release_remainder(c0, order_id=oks[0]["order"]["order_id"],
+                                      reason="TEST_ROUND_END", at=H.T0 + i)
+        s = await c0.fetchrow(
+            "SELECT count(*) FILTER (WHERE kind='ORDER_SUBMITTED') AS sub, "
+            "       min(cash_after_usd - reserved_after_usd) AS min_avail "
+            "  FROM paper_ledger WHERE account_id=$1", a["account_id"])
+        assert int(s["sub"]) == 7 and float(s["min_avail"]) >= 0.0
+        strat = await c0.fetch(
+            "SELECT strategy, count(*) AS n FROM paper_orders WHERE "
+            " account_id=$1 AND role='ENTRY' GROUP BY 1", a["account_id"])
+        assert sum(int(r["n"]) for r in strat) == 6
+        b = await _ledger_matches_balances(c0, a["account_id"], H.T0 + 10)
+        assert b["cash_usd"] == 500000.0
+    finally:
+        for c in (c0, c1, c2):
+            await c.close()
+
+
+async def _counts(conn, acct) -> dict:
+    q = {"decisions": "SELECT count(*) FROM paper_decisions WHERE "
+                      "session_id=$1",
+         "orders": "SELECT count(*) FROM paper_orders WHERE session_id=$1",
+         "fills": "SELECT count(*) FROM paper_fills WHERE session_id=$1",
+         "ledger": "SELECT count(*) FROM paper_ledger l JOIN paper_accounts a"
+                   " ON a.account_id=l.account_id JOIN paper_sessions s ON "
+                   " s.account_id=a.account_id WHERE s.session_id=$1",
+         "handoffs": "SELECT count(*) FROM paper_handoffs WHERE "
+                     "session_id=$1",
+         "reviews": "SELECT count(*) FROM paper_xavier_reviews WHERE "
+                    "session_id=$1"}
+    return {k: int(await conn.fetchval(v, acct["session_id"]))
+            for k, v in q.items()}
+
+
+@pg
+async def test_repeated_valuations_and_restarts_duplicate_nothing(
+        bench_on, monkeypatch):
+    conn = await H.connect()
+    now = time.time() + 5.0
+    try:
+        await PL.purge_everything(conn)
+        await PL.purge_research_models(conn)
+        monkeypatch.setenv(S.ENV_FLAG, "on")
+        acct = await PL.new_account(conn, "benchrst", now=now)
+        v = await PL.valuation(conn, decided_at=now - 2, p_pin=0.62)
+        t = PL.Transport(now)
+        t.step = 0.1
+        t.set(v["slug"], offers=[(0.50, 1000)], bids=[(0.48, 1000)])
+
+        async def hook(c):
+            return await PR.decide_valuation(
+                c, valuation_id=v["valuation_id"], now=now,
+                market_data=PL.client(t), account_id=acct["account_id"],
+                fee_fn=FEE, schedule_fill=lambda: {"scheduled": False})
+        g1 = await hook(conn)
+        assert g1["benchmark"]["verdict"] == "ENTER"
+        s0 = await _counts(conn, acct)
+        assert s0 == {"decisions": 2, "orders": 1, "fills": 0, "ledger": 2,
+                      "handoffs": 0, "reviews": 0}
+        # THE SAME VALUATION AGAIN: the in-cycle hook, then the backstop
+        g2 = await hook(conn)
+        assert g2["duplicate"] is True and g2["benchmark"]["duplicate"]
+        row = await conn.fetchrow("SELECT * FROM external_valuations WHERE "
+                                  " id=$1", v["valuation_id"])
+        ctx = {"session_id": acct["session_id"],
+               "account_id": acct["account_id"], "config": acct["config"],
+               "market_data": PL.client(t), "books_read": 0, "now": now + 1,
+               "deadline": time.monotonic() + 30, "fee_fn": FEE}
+        rec = await PB.decide_one(conn, ctx, dict(row))
+        assert rec.get("duplicate") is True and not rec.get("order_id")
+        assert await _counts(conn, acct) == s0
+        # RESTART 1: after the order was submitted, before any fill
+        await conn.close()
+        conn = await H.connect()
+        PR._LOCK.update(lock=None, loop=None)
+        PB._CONTEXT_CACHE.clear()
+        PD._CONTEXT_CACHE.clear()
+        cut = [s for s in PR.default_steps()
+               if s[0] in ("books", "simulate", "derek", "benchmark",
+                           "simulate_after_delay")]
+        p1 = await _pass(conn, acct, t, now + 5, steps=cut)
+        assert not p1["errors"], p1["errors"]
+        s1 = await _counts(conn, acct)
+        assert s1 == dict(s0, fills=1, ledger=3)        # one FILL entry
+        p1b = await _pass(conn, acct, t, now + 6, steps=cut)
+        assert not p1b["errors"] and await _counts(conn, acct) == s1
+        # RESTART 2: after the fill, before the handoff
+        await conn.close()
+        conn = await H.connect()
+        PR._LOCK.update(lock=None, loop=None)
+        p2 = await _pass(conn, acct, t, now + 10)
+        assert not p2["errors"], p2["errors"]
+        s2 = await _counts(conn, acct)
+        assert s2["handoffs"] == 1 and s2["fills"] == 1
+        assert s2["decisions"] == 2 and s2["ledger"] == 3
+        assert s2["reviews"] == 1                       # FIRST_FILL
+        p3 = await _pass(conn, acct, t, now + 10)       # replayed
+        assert not p3["errors"] and await _counts(conn, acct) == s2
+        h = await conn.fetchrow("SELECT * FROM paper_handoffs WHERE "
+                                " session_id=$1", acct["session_id"])
+        assert h["strategy"] == PB.STRATEGY
+        assert float(h["confirmed_qty"]) == 1000.0
+        b = await _ledger_matches_balances(conn, acct["account_id"], now + 11)
+        assert b["cash_usd"] == pytest.approx(500000.0 - 500.0 - 10.0)
+    finally:
+        await PL.drop_today_run(conn, now)
+        await PL.purge_everything(conn)
+        await conn.close()
+
+
+def _fake_research_model(monkeypatch, p_internal=0.66):
+    """A stand-in research model for the TWO-MODEL strategy (its real fit is
+    proven in test_paper_vertical_slice_derek_to_audrey); here only so both
+    strategies can hold positions in one account."""
+    model = {"ok": True, "refusal": None, "model": {},
+             "model_id": "test-fake-research-model", "model_version": "v1",
+             "approval_status": "CANDIDATE", "label": PD.MODEL_LABEL,
+             "created_at": 0.0, "promoted": False,
+             "provenance_verified": True,
+             "features": ["acquisition_price", "payout_is_complement"]}
+
+    async def research_model(conn, *, at, verify=True):
+        return dict(model)
+
+    def score(m, *, price, payout_is_complement):
+        return {"ok": True, "p": p_internal, "feature_sha": "test",
+                "features": {"acquisition_price": price,
+                             "payout_is_complement": 0.0},
+                "feature_basis": "test stand-in"}
+    monkeypatch.setattr(PD, "research_model", research_model)
+    monkeypatch.setattr(PD, "score", score)
+    PD._CONTEXT_CACHE.clear()
+
+
+@pg
+async def test_two_model_entries_switch_off_records_but_places_nothing(
+        bench_on, monkeypatch):
+    conn = await H.connect()
+    now = time.time() + 5.0
+    try:
+        await PL.purge_everything(conn)
+        _fake_research_model(monkeypatch)
+        prev = await PL.two_model_entries(conn, False)
+        try:
+            acct = await PL.new_account(conn, "benchsw", now=now)
+            v = await PL.valuation(conn, decided_at=now - 5, p_pin=0.62)
+            t = PL.Transport(now)
+            t.set(v["slug"], offers=[(0.50, 3000), (0.56, 2000)],
+                  bids=[(0.48, 5000)])
+            p = await _pass(conn, acct, t, now)
+            assert not p["errors"], p["errors"]
+        finally:
+            await PL.restore_two_model_entries(conn, prev)
+        ds = await _decisions(conn, acct, v["valuation_id"])
+        d2 = ds["DEREK_ENTRY_POLICY_V2"]
+        assert d2["verdict"] == "REFUSE"
+        assert d2["refusal"] == PD.R_ENTRIES_DISABLED == \
+            "STRATEGY_ENTRIES_DISABLED"
+        pd2 = H.j(d2["policy_decision"])
+        assert pd2["admitted"] is True                  # the evidence stays
+        assert pd2["entries_switch"]["enabled"] is False
+        assert d2["p_internal"] is not None             # it decided fully
+        assert ds[PB.STRATEGY]["verdict"] == "ENTER"
+        orders = await conn.fetch("SELECT strategy FROM paper_orders WHERE "
+                                  " account_id=$1 AND role='ENTRY'",
+                                  acct["account_id"])
+        assert [o["strategy"] for o in orders] == [PB.STRATEGY]
+    finally:
+        await PL.drop_today_run(conn, now)
+        await PL.purge_everything(conn)
+        await conn.close()
+
+
+@pg
+async def test_both_strategies_purchases_sales_settlements_reconcile(
+        bench_on, monkeypatch):
+    """Both strategies enter the SAME two markets on one account (the
+    two-model entry switch on for this proof): four groups, four handoffs
+    with the right strategy, quantity and position; market A's protections
+    are sold by a strict cross (SALE), market B settles (SETTLEMENT); every
+    figure reconciles to the one shared ledger, per strategy and in total."""
+    conn = await H.connect()
+    now = time.time() + 5.0
+    try:
+        await PL.purge_everything(conn)
+        _fake_research_model(monkeypatch)
+        prev = await PL.two_model_entries(conn, True)
+        try:
+            cfg = PL.config(entry={"target_order_usd": 2000.0})
+            acct = await PL.new_account(conn, "benchboth", now=now, cfg=cfg)
+            va = await PL.valuation(conn, decided_at=now - 5, p_pin=0.62)
+            vb = await PL.valuation(conn, decided_at=now - 5, p_pin=0.62)
+            t = PL.Transport(now)
+            for v in (va, vb):
+                t.set(v["slug"], offers=[(0.50, 6000), (0.56, 6000)],
+                      bids=[(0.48, 5000)])
+            client = PL.client(t)
+            p1 = await _pass(conn, acct, t, now, client=client)
+            assert not p1["errors"], p1["errors"]
+            orders = await conn.fetch(
+                "SELECT * FROM paper_orders WHERE account_id=$1 AND "
+                " role='ENTRY' ORDER BY strategy, us_market_slug",
+                acct["account_id"])
+            assert len(orders) == 4
+            assert sorted(o["strategy"] for o in orders) == sorted(
+                ["DEREK_ENTRY_POLICY_V2"] * 2 + [PB.STRATEGY] * 2)
+            assert {o["state"] for o in orders} == {"FILLED"}
+            for o in orders:
+                fl = await conn.fetch("SELECT * FROM paper_fills WHERE "
+                                      " order_id=$1", o["order_id"])
+                assert {f["strategy"] for f in fl} == {o["strategy"]}
+                assert sum(float(f["qty"]) for f in fl) == float(o["qty"])
+                assert all(L._epoch(f["book_observed_at"]) >=
+                           L._epoch(o["eligible_at"]) for f in fl)
+                h = await conn.fetchrow("SELECT * FROM paper_handoffs WHERE "
+                                        " group_id=$1", o["group_id"])
+                assert h["strategy"] == o["strategy"]
+                assert float(h["confirmed_qty"]) == float(o["qty"])
+                pos = [p for p in await L.positions(conn, acct["account_id"])
+                       if p["group_id"] == o["group_id"]]
+                assert len(pos) == 1 and pos[0]["strategy"] == o["strategy"]
+                assert pos[0]["open_qty"] == float(o["qty"])
+                r = await conn.fetchrow(
+                    "SELECT strategy, measure FROM paper_xavier_reviews "
+                    " WHERE group_id=$1", o["group_id"])
+                assert r["strategy"] == o["strategy"]
+                if o["strategy"] == PB.STRATEGY:
+                    assert H.j(r["measure"])["strategy"] == PB.STRATEGY
+                else:
+                    assert H.j(r["measure"])["source"] == "CURRENT_BLEND"
+            mid = await _ledger_matches_balances(conn, acct["account_id"],
+                                                 now + 5)
+            assert mid["reserved_usd"] == 0.0
+            # A: a strict cross sells every protection; B: settles WON
+            t.set(va["slug"], offers=[(0.82, 100)], bids=[(0.80, 100000)])
+            await PL.settle_valuation(conn, vb["valuation_id"], outcome=1)
+            p2 = await _pass(conn, acct, t, now + 120, client=client)
+            assert not p2["errors"], p2["errors"]
+        finally:
+            await PL.restore_two_model_entries(conn, prev)
+        sales = await conn.fetch(
+            "SELECT f.strategy, f.qty, f.price FROM paper_fills f WHERE "
+            " f.account_id=$1 AND f.direction='SELL'", acct["account_id"])
+        assert sorted(x["strategy"] for x in sales) == sorted(
+            ["DEREK_ENTRY_POLICY_V2", PB.STRATEGY]), sales
+        b = await _ledger_matches_balances(conn, acct["account_id"],
+                                           now + 130)
+        assert b["reserved_usd"] == 0.0 and not b["open_positions"]
+        assert b["available_usd"] == pytest.approx(b["cash_usd"])
+        per = {r["strategy"]: r for r in await conn.fetch(
+            "SELECT o.strategy, sum(l.cash_delta_usd) AS cash, "
+            "       sum(l.reserved_delta_usd) AS res, "
+            "       array_agg(DISTINCT l.kind) AS kinds "
+            "  FROM paper_ledger l JOIN (SELECT DISTINCT group_id, strategy "
+            "    FROM paper_orders WHERE account_id=$1) o "
+            "    ON o.group_id = l.group_id WHERE l.account_id=$1 "
+            " GROUP BY 1", acct["account_id"])}
+        assert set(per) == {"DEREK_ENTRY_POLICY_V2", PB.STRATEGY}
+        for k in per.values():
+            assert set(k["kinds"]) == {"ORDER_SUBMITTED", "FILL", "SALE",
+                                       "SETTLEMENT"}, k["kinds"]
+            assert float(k["res"]) == 0.0
+        total = 500000.0 + sum(float(k["cash"]) for k in per.values())
+        assert b["cash_usd"] == pytest.approx(total)
+        rep = await conn.fetchrow(
+            "SELECT * FROM paper_audrey_reports WHERE session_id=$1 "
+            " ORDER BY version DESC LIMIT 1", acct["session_id"])
+        assert rep["reconciles"] is True
+        sec = H.j(rep["report"])["pinnacle_only_paper_benchmark"]
+        assert sec["handoffs_to_xavier_total"] == 2
+        assert client.mutation_attempts == 0
+        assert (await S.health(conn, acct["session_id"]))[
+            "mutation_attempts"] == 0
+    finally:
+        await PL.drop_today_run(conn, now)
+        await PL.purge_everything(conn)
+        await conn.close()
