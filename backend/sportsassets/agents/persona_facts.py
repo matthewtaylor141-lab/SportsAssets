@@ -813,8 +813,74 @@ def wants_demonstration(context: dict | None) -> bool:
         c.get("position_id") or "").upper().startswith(DEMO_LABEL)
 
 
+AGENT_LESSONS_IN_CONTEXT = 3
+
+
+async def _agent_memory(conn, f: "Facts", agent: str | None) -> dict:
+    """WHAT THE AGENT CARRIES INTO EVERY ANSWER, as facts the model is given
+    (and the response reports): the ACTIVE paper entry policy as the decision
+    path reads it, and this agent's most recent STORED LESSONS
+    (paper_agent_lessons, migration 185). A lesson is memory only because it
+    is placed here, in the model's input -- a stored transcript alone is not.
+    Never raises; an unreadable source is a named check, not a fact."""
+    out = {"policy": None, "lessons": []}
+    try:
+        from . import paper_benchmark as PBM
+        prm = await PBM.cg_parameters(conn, {"now": 0.0})
+        thr = float(prm["values"]["min_gross_edge_pp"])
+        fid = f.add(
+            "paper_policy_parameter_heads", prm.get("version_id"),
+            "active_entry_threshold_pp", thr,
+            "ACTIVE paper entry policy %s (parameter version %s, %s): enter "
+            "only if the Pinnacle probability minus the simulated "
+            "acquisition price is at least %.3f (%.1f percentage points) at "
+            "every level used, the fee per contract is below the edge at "
+            "every level bought, AND conditional expected profit after fees "
+            "is strictly positive. Paper only; real-money execution is "
+            "disabled. A conversation or an improvement proposal does not "
+            "change this policy: only an owner decision or an evaluated "
+            "proposal a named human activates does" % (
+                PBM.CG_VERSION, prm.get("version_id"),
+                prm.get("source"), thr / 100.0, thr))
+        out["policy"] = {"fact_id": fid, "version_id": prm.get("version_id"),
+                         "threshold_pp": thr, "source": prm.get("source")}
+        f.check("paper_policy_parameter_heads", "MATCHED", 1)
+    except Exception as exc:                                    # noqa: BLE001
+        f.check("paper_policy_parameter_heads", "READ_FAILED", 0,
+                type(exc).__name__)
+    if not agent:
+        return out
+    try:
+        if not await _regclass(conn, "paper_agent_lessons"):
+            f.check("paper_agent_lessons", "TABLE_ABSENT")
+            return out
+        rows = await conn.fetch(
+            "SELECT DISTINCT ON (series_key) lesson_id, kind, strategy, "
+            "       statement, window_end FROM paper_agent_lessons "
+            " WHERE agent_id=$1 ORDER BY series_key, version DESC",
+            str(agent).upper())
+        rows = sorted(rows, key=lambda r: r["window_end"],
+                      reverse=True)[:AGENT_LESSONS_IN_CONTEXT]
+        f.check("paper_agent_lessons", "MATCHED" if rows else "NO_MATCH",
+                len(rows))
+        for r in rows:
+            fid = f.add("paper_agent_lessons", r["lesson_id"], "lesson",
+                        r["kind"], "stored lesson of %s (%s, %s, window to "
+                        "%s): %s" % (str(agent).upper(), r["kind"],
+                                     r["strategy"] or "all strategies",
+                                     r["window_end"].isoformat()
+                                     if r["window_end"] else "?",
+                                     r["statement"]))
+            out["lessons"].append({"fact_id": fid,
+                                   "lesson_id": r["lesson_id"],
+                                   "kind": r["kind"]})
+    except Exception as exc:                                    # noqa: BLE001
+        f.check("paper_agent_lessons", "READ_FAILED", 0, type(exc).__name__)
+    return out
+
+
 async def gather(conn, *, question: str, context: dict | None = None,
-                 now: float | None = None) -> dict:
+                 now: float | None = None, agent: str | None = None) -> dict:
     """The one fact list for this question (see the module docstring)."""
     subj = subject_of(question)
     if wants_demonstration(context):
@@ -862,8 +928,12 @@ async def gather(conn, *, question: str, context: dict | None = None,
                                     for x in f.items):
         f.miss("a booked result (no settlement is recorded for this "
                "position, so nothing is realised)")
+    # AFTER `found`: the policy and lessons never make an unknown position
+    # look found
+    memory = await _agent_memory(conn, f, agent)
     tables = await paper_tables(conn)
     return {"subject": subj, "demonstration": False, "found": found,
+            "memory": memory,
             "scope": "POSITION" if scoped else "BOOK", "facts": f.items,
             "checked": f.checked, "missing": f.missing,
             "paper": {"present": bool(tables), "tables": tables,

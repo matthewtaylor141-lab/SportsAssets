@@ -422,3 +422,4 @@ tests/test_command_centre_paper_management_views.py
 # /audrey) above the host catch-all, the API proxy first
 tests/test_netlify_command_host.py
 tests/test_completed_game_v2_half_point_threshold.py
+tests/test_agent_talk_panel.py

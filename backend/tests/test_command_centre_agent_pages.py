@@ -151,7 +151,8 @@ def test_the_data_module_and_the_character_module_are_separate(monkeypatch, kind
     html = c.get(P.PAGE_PATHS[kind], headers={"X-Admin-Token": _Cfg.admin_token}).text
     classic, module = _scripts(html)
     data = [c for c in classic if "AG.workspace" in c]
-    assert len(data) == 1 and len(module) == 1 and len(classic) == 2
+    # classic scripts: the data module, the frame guard and the Talk panel
+    assert len(data) == 1 and len(module) == 1 and len(classic) == 3
     data, loader = data[0], module[0]
     # the data containers are in the HTML itself, whatever the canvas does
     assert 'id="cc-panels" data-cc-data' in html and 'id="app"' in html

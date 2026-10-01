@@ -159,9 +159,12 @@ def test_no_funded_module_reaches_the_benchmark():
             users.add(str(p.relative_to(ROOT)))
     # bettor_paper_ops.py: the management pages' paper read model (read-only,
     # imports only paper modules)
+    # agents/persona_facts.py: the agents' chat reads the ACTIVE entry
+    # threshold (cg_parameters, read-only) so each answer states the policy
+    # the paper decision path actually runs
     assert users <= {"agents/paper_runtime.py", "agents/paper_xavier.py",
                      "agents/paper_audrey.py", "bettor_paper_readmodel.py",
-                     "bettor_paper_ops.py"}, \
+                     "bettor_paper_ops.py", "agents/persona_facts.py"}, \
         sorted(users)
     assert not any("funded" in u for u in users)
 

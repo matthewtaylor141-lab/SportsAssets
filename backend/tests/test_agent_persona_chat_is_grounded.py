@@ -86,7 +86,11 @@ def test_no_yankees_position_is_said_truthfully(db, monkeypatch):
         # nothing: either its tables are absent and that is named, or (with
         # migrations 171/172 applied) every paper table was read and matched
         # no Yankees row -- never silently skipped, never a read failure.
-        paper = [c for c in g["checked"] if c["source"].startswith("paper")]
+        # (the agent's memory -- the active policy and its stored lessons --
+        # is read for every answer and is not a search for the position)
+        paper = [c for c in g["checked"] if c["source"].startswith("paper")
+                 and c["source"] not in ("paper_policy_parameter_heads",
+                                         "paper_agent_lessons")]
         assert paper, g["checked"]
         if any(c["status"] == "NOT_IN_THIS_BUILD" for c in paper):
             assert "paper ledger not in this build" in g["missing_evidence"]

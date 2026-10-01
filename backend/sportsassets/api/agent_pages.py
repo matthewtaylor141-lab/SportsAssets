@@ -1784,6 +1784,218 @@ CHAT_PANEL_HTML = r"""
 </section>
 """
 
+# ═════════════════════════════════════════════════════════════════════
+# TALK TO DEREK / XAVIER / AUDREY -- the management conversation on every
+# agent page (persona chat + speech + the microphone), always visible above
+# the records, never inside the collapsed funded section.
+# ═════════════════════════════════════════════════════════════════════
+
+TALK_NAMES = {"derek": "Derek", "xavier": "Xavier", "audrey": "Audrey"}
+
+TALK_PANEL_HTML = r"""
+<section class="card wide talk" id="talk" data-agent="%%AGENT%%" aria-label="Talk to %%NAME%%">
+<header><span class="idx">&#9673;</span><div class="ttl"><h3>Talk to %%NAME%%</h3><code class="key">%%NAME%% answers from the paper records, the active policy and stored lessons &#183; paper only</code></div>
+<div class="talk-ctl"><button type="button" id="talk-mute" aria-pressed="false" title="Speak replies aloud">&#128266; Voice on</button><button type="button" id="talk-stop" disabled>Stop</button><button type="button" id="talk-new">New conversation</button></div></header>
+<p class="talk-note">A conversation never changes a policy or places an order. %%NAME%% can explain and propose; a policy changes only by an owner decision or an evaluated proposal a named human activates.</p>
+<div class="talk-log" id="talk-log" aria-live="polite"><p class="talk-empty" id="talk-empty">Ask %%NAME%% anything about %%SCOPE%%. Try: <button type="button" class="talk-sugg">%%SUGG1%%</button> <button type="button" class="talk-sugg">%%SUGG2%%</button></p></div>
+<div class="talk-state" id="talk-state" role="status" hidden></div>
+<form class="talk-form" id="talk-form"><textarea id="talk-in" maxlength="4000" rows="2" placeholder="Type a question for %%NAME%%&#8230;" aria-label="Message to %%NAME%%"></textarea>
+<div class="talk-btns"><button type="button" id="talk-mic" class="talk-mic" aria-pressed="false" title="Record a spoken question">&#127908; Speak</button><button class="primary" type="submit" id="talk-send">Send</button></div></form>
+</section>
+"""
+
+TALK_SCOPE = {
+    "derek": ("entries, markets, prices, edges, fees and why a candidate "
+              "was refused",
+              "What is the active entry rule?",
+              "Why did nothing qualify today?"),
+    "xavier": ("owned positions, protection, exits and exposure",
+               "What are you managing right now?",
+               "What would you do with a new position?"),
+    "audrey": ("audits, reconciliation, agent performance and proposals",
+               "Does the ledger reconcile?",
+               "What have you learned so far?"),
+}
+
+TALK_CSS = r"""
+.talk{margin:16px 0;border:1px solid #2e6fd8;background:linear-gradient(180deg,#0e1726,#0b111c)}
+.talk header{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.talk .talk-ctl{margin-left:auto;display:flex;gap:6px;flex-wrap:wrap}
+.talk .talk-ctl button,.talk .talk-btns button,.talk-sugg,.talk-replay{font:inherit;font-size:12.5px;padding:6px 10px;border-radius:8px;border:1px solid #33465f;background:#132034;color:#dbe7f7;cursor:pointer}
+.talk .talk-ctl button[aria-pressed=true]{background:#2a1c10;border-color:#8a6d2a}
+.talk button:disabled{opacity:.45;cursor:default}
+.talk-note{font-size:12px;color:#9fb2c8;margin:6px 0 8px}
+.talk-log{max-height:420px;overflow-y:auto;display:flex;flex-direction:column;gap:8px;padding:4px 2px}
+.talk-empty{color:#9fb2c8;font-size:13px;line-height:1.8}
+.talk-msg{max-width:92%;padding:9px 11px;border-radius:10px;font-size:14px;line-height:1.5;overflow-wrap:anywhere}
+.talk-msg.q{align-self:flex-end;background:#1d3557;color:#eef4ff}
+.talk-msg.a{align-self:flex-start;background:#121c2b;border:1px solid #26354a;color:#e3ebf5}
+.talk-msg .who{font-size:10.5px;letter-spacing:.08em;color:#8fb6e8;margin-bottom:3px;text-transform:uppercase}
+.talk-msg .meta{font-size:11.5px;color:#93a6bd;margin-top:6px}
+.talk-msg .meta details{margin-top:4px}.talk-msg .meta li{margin:2px 0}
+.talk-msg.err{border-color:#7a2f2f;background:#251314}
+.talk-state{font-size:12.5px;padding:7px 10px;border-radius:8px;background:#221b0e;color:#f3e2b5;border:1px solid #8a6d2a;margin:6px 0}
+.talk-form{display:flex;gap:8px;align-items:flex-end;margin-top:8px}
+.talk-form textarea{flex:1;min-width:0;font:inherit;font-size:16px;padding:9px;border-radius:9px;border:1px solid #33465f;background:#0b1320;color:#eef4ff;resize:vertical}
+.talk-btns{display:flex;gap:6px;flex-shrink:0}
+.talk-mic[aria-pressed=true]{background:#5a1717;border-color:#c24b4b;color:#fff}
+@media(max-width:640px){.talk-form{flex-direction:column;align-items:stretch}.talk-btns{justify-content:flex-end}.talk-msg{max-width:100%}}
+"""
+
+TALK_JS = r"""
+(function () {
+  var root = document.getElementById('talk'); if (!root) return;
+  var agent = root.getAttribute('data-agent'), NAME = agent.charAt(0).toUpperCase() + agent.slice(1);
+  var BASE = '/api/command/agents/' + agent;
+  var KEY = 'cc.talk.' + agent + '.conversation';
+  var $ = function (id) { return document.getElementById(id); };
+  var log = $('talk-log'), input = $('talk-in'), form = $('talk-form'), stateEl = $('talk-state');
+  var send = $('talk-send'), mic = $('talk-mic'), muteB = $('talk-mute'), stopB = $('talk-stop');
+  var cid = null, muted = false, audio = null, rec = null, chunks = [], busy = false;
+  function store(k, v) { try { if (v == null) localStorage.removeItem(k); else localStorage.setItem(k, v); } catch (_) {} }
+  function load(k) { try { return localStorage.getItem(k); } catch (_) { return null; } }
+  function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return {'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]; }); }
+  function setState(t) { if (!t) { stateEl.hidden = true; stateEl.textContent = ''; return; } stateEl.hidden = false; stateEl.textContent = t; }
+  muted = load('cc.talk.muted') === '1';
+  function paintMute() { muteB.setAttribute('aria-pressed', muted ? 'true' : 'false'); muteB.innerHTML = muted ? '&#128263; Voice off' : '&#128266; Voice on'; }
+  paintMute();
+  function avatar(fn, a) { try { if (typeof CC !== 'undefined' && CC[fn]) CC[fn](a); } catch (_) {} }
+  function clearEmpty() { var e = $('talk-empty'); if (e) e.remove(); }
+  function metaHtml(m) {
+    var out = [], p = m.provider || {}, cs = m.context_supplied || null;
+    if (p.disclosure) out.push(esc(p.disclosure));
+    if (cs) {
+      var parts = [];
+      parts.push(cs.model_composed ? (cs.prior_turns + ' earlier turn' + (cs.prior_turns === 1 ? '' : 's') + ' of this conversation sent to the model') : 'records-only answer (no model)');
+      parts.push(cs.facts + ' record facts');
+      if (cs.policy) parts.push('active policy ' + esc(cs.policy.version_id) + ' (' + cs.policy.threshold_pp + ' pp)');
+      parts.push((cs.lessons || []).length + ' stored lesson' + ((cs.lessons || []).length === 1 ? '' : 's'));
+      out.push('Memory supplied: ' + parts.join(' · '));
+    }
+    var facts = m.facts || m.citations || [];
+    var li = (m.facts || []).slice(0, 12).map(function (f) { return '<li><b>' + esc(f.fact_id) + '</b> ' + esc(f.source) + ' · ' + esc(f.record_id) + ': ' + esc(f.text || f.field) + '</li>'; }).join('');
+    var html = out.map(function (x) { return '<div>' + x + '</div>'; }).join('');
+    if (li) html += '<details><summary>Records cited (' + (m.facts || []).length + ')</summary><ul>' + li + '</ul></details>';
+    if ((m.missing_evidence || []).length) html += '<details><summary>Not in the records</summary><ul>' + m.missing_evidence.slice(0, 8).map(function (x) { return '<li>' + esc(x) + '</li>'; }).join('') + '</ul></details>';
+    return html;
+  }
+  function addQ(text) { clearEmpty(); log.insertAdjacentHTML('beforeend', '<div class="talk-msg q"><div class="who">You</div>' + esc(text) + '</div>'); log.scrollTop = log.scrollHeight; }
+  function addA(m) {
+    clearEmpty();
+    var id = m.message_id || '';
+    var div = document.createElement('div'); div.className = 'talk-msg a'; div.setAttribute('data-mid', id);
+    div.innerHTML = '<div class="who">' + esc(NAME) + '</div><div class="body">' + esc(m.answer || m.body || '').replace(/\n/g, '<br>') + '</div>' +
+      '<div class="meta">' + metaHtml(m) + (id ? ' <button type="button" class="talk-replay" data-mid="' + esc(id) + '">&#9654; Play</button>' : '') + '</div>';
+    log.appendChild(div); log.scrollTop = log.scrollHeight; return div;
+  }
+  function addErr(t) { clearEmpty(); log.insertAdjacentHTML('beforeend', '<div class="talk-msg a err"><div class="who">' + esc(NAME) + ' · not answered</div>' + esc(t) + '</div>'); log.scrollTop = log.scrollHeight; }
+  function why(status, body) {
+    if (status === 401 || status === 403) return 'SIGN-IN REQUIRED: your COMMAND session is missing or has expired. Sign in on the homepage, then try again.';
+    var d = (body && (body.detail || body)) || {};
+    var r = d.reason || d.status || d.error || ('HTTP ' + status);
+    var pd = d.provider_diagnostic || null;
+    var extra = pd ? (' — provider HTTP ' + (pd.http_status || '?') + (pd.provider_error_status ? ' ' + pd.provider_error_status : '') + (pd.required_permission ? ' (needs ' + pd.required_permission + ')' : '')) : '';
+    return String(r) + extra + (d.display ? ' — ' + d.display : '');
+  }
+  async function readJson(r) { try { return await r.json(); } catch (_) { return null; } }
+  async function resume() {
+    cid = load(KEY); if (!cid) return;
+    try {
+      var r = await fetch(BASE + '/persona/conversations/' + encodeURIComponent(cid), {credentials: 'same-origin', cache: 'no-store'});
+      if (r.status === 404) { store(KEY, null); cid = null; return; }
+      if (!r.ok) { setState('Earlier conversation not loaded: ' + why(r.status, await readJson(r))); return; }
+      var t = await r.json();
+      (t.messages || []).forEach(function (m) {
+        if (m.role === 'USER') addQ(m.body); else if (m.role === 'ASSISTANT') addA(m);
+      });
+      if ((t.messages || []).length) setState('Resumed your conversation with ' + NAME + ' (' + t.messages.length + ' messages).');
+    } catch (e) { setState('Earlier conversation not loaded: ' + (e && e.message || e)); }
+  }
+  function stopAudio() { if (audio) { try { audio.pause(); } catch (_) {} audio = null; } stopB.disabled = true; avatar('chatDone'); }
+  async function speak(mid, manual) {
+    if (!mid || (muted && !manual)) return;
+    stopAudio(); setState('Fetching ' + NAME + "'s voice…");
+    try {
+      var r = await fetch(BASE + '/speech', {method: 'POST', credentials: 'same-origin', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({message_id: mid})});
+      if (!r.ok) { setState('Voice unavailable: ' + why(r.status, await readJson(r)) + '. The text reply above is complete.'); return; }
+      var blob = await r.blob();
+      audio = new Audio(URL.createObjectURL(blob)); stopB.disabled = false;
+      audio.onended = function () { stopAudio(); setState(null); };
+      audio.onerror = function () { stopAudio(); setState('The voice could not be played on this device. The text reply above is complete.'); };
+      avatar('chatReply', 400);
+      await audio.play(); setState(NAME + ' is speaking (' + (r.headers.get('X-Speech-Voice-Id') ? 'configured voice' : 'voice') + ').');
+    } catch (e) { stopAudio(); setState('Voice could not play: ' + (e && e.name === 'NotAllowedError' ? 'the browser blocked autoplay — press Play on the reply' : (e && e.message || e))); }
+  }
+  async function ask(text) {
+    if (busy || !text) return;
+    busy = true; send.disabled = true; addQ(text); setState(NAME + ' is reading the records…'); avatar('chatPending');
+    try {
+      var body = {message: text, request_id: 'pg-' + agent + '-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8)};
+      if (cid) body.conversation_id = cid;
+      var r = await fetch(BASE + '/persona/chat', {method: 'POST', credentials: 'same-origin', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
+      var j = await readJson(r);
+      if (!r.ok && r.status !== 202) { addErr(why(r.status, j)); setState(null); avatar('chatDone'); return; }
+      if (j && j.conversation_id) { cid = j.conversation_id; store(KEY, cid); }
+      addA(j || {}); setState(null);
+      if (j && j.message_id) await speak(j.message_id, false); else avatar('chatDone');
+    } catch (e) { addErr('Network error: ' + (e && e.message || e)); setState(null); avatar('chatDone'); }
+    finally { busy = false; send.disabled = false; }
+  }
+  form.addEventListener('submit', function (ev) { ev.preventDefault(); var q = input.value.trim(); input.value = ''; ask(q); });
+  input.addEventListener('keydown', function (ev) { if (ev.key === 'Enter' && !ev.shiftKey) { ev.preventDefault(); form.requestSubmit ? form.requestSubmit() : form.dispatchEvent(new Event('submit')); } });
+  log.addEventListener('click', function (ev) { var b = ev.target.closest('.talk-replay'); if (b) speak(b.getAttribute('data-mid'), true); });
+  root.addEventListener('click', function (ev) { var s = ev.target.closest('.talk-sugg'); if (s) { input.value = s.textContent; input.focus(); } });
+  muteB.addEventListener('click', function () { muted = !muted; store('cc.talk.muted', muted ? '1' : null); paintMute(); if (muted) stopAudio(); });
+  stopB.addEventListener('click', function () { stopAudio(); setState(null); });
+  $('talk-new').addEventListener('click', function () { stopAudio(); store(KEY, null); cid = null; log.innerHTML = ''; setState('New conversation started. Earlier conversations stay in the record.'); });
+  // ── the microphone: explicit start / stop, server transcription, text fallback
+  function micSupported() { return !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia && window.MediaRecorder); }
+  if (!micSupported()) { mic.disabled = true; mic.title = 'This browser cannot record audio here; type your question instead.'; }
+  function pickType() { var c = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4', 'audio/ogg']; for (var i = 0; i < c.length; i++) { if (MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(c[i])) return c[i]; } return ''; }
+  async function startRec() {
+    stopAudio();
+    var stream;
+    try { stream = await navigator.mediaDevices.getUserMedia({audio: true}); }
+    catch (e) {
+      var n = e && e.name;
+      setState(n === 'NotAllowedError' || n === 'SecurityError' ? 'Microphone permission denied. Allow the microphone for this site to speak, or type your question below.' : n === 'NotFoundError' ? 'No microphone was found. Type your question below.' : 'The microphone could not start (' + (n || e) + '). Type your question below.');
+      input.focus(); return;
+    }
+    var type = pickType(); chunks = [];
+    try { rec = new MediaRecorder(stream, type ? {mimeType: type} : undefined); } catch (e) { stream.getTracks().forEach(function (t) { t.stop(); }); setState('Recording is not supported here (' + (e && e.message || e) + '). Type your question below.'); return; }
+    rec.ondataavailable = function (ev) { if (ev.data && ev.data.size) chunks.push(ev.data); };
+    rec.onstop = async function () {
+      stream.getTracks().forEach(function (t) { t.stop(); });
+      mic.setAttribute('aria-pressed', 'false'); mic.innerHTML = '&#127908; Speak';
+      var blob = new Blob(chunks, {type: (rec.mimeType || type || 'audio/webm').split(';')[0]});
+      if (!blob.size) { setState('Nothing was recorded. Try again or type your question.'); return; }
+      setState('Transcribing your question…');
+      try {
+        var r = await fetch(BASE + '/transcribe', {method: 'POST', credentials: 'same-origin', headers: {'Content-Type': blob.type || 'audio/webm'}, body: blob});
+        var j = await readJson(r);
+        if (!r.ok) { setState('Transcription unavailable: ' + why(r.status, j) + '. Type your question below.'); input.focus(); return; }
+        input.value = j.text || ''; setState('Heard: “' + (j.text || '') + '” — sending.');
+        var q = input.value.trim(); input.value = ''; await ask(q);
+      } catch (e) { setState('Transcription failed: ' + (e && e.message || e) + '. Type your question below.'); }
+    };
+    rec.start(); mic.setAttribute('aria-pressed', 'true'); mic.innerHTML = '&#9632; Stop recording';
+    setState('Recording… press “Stop recording” when you have finished your question.');
+  }
+  mic.addEventListener('click', function () { if (rec && rec.state === 'recording') rec.stop(); else startRec(); });
+  window.CCTalk = {ask: ask, speak: speak, state: function () { return {cid: cid, muted: muted, busy: busy}; }};
+  resume();
+})();
+"""
+
+
+def talk_panel_html(kind: str) -> str:
+    scope, s1, s2 = TALK_SCOPE[kind]
+    return (TALK_PANEL_HTML.replace("%%AGENT%%", kind)
+            .replace("%%NAME%%", TALK_NAMES[kind])
+            .replace("%%SCOPE%%", scope)
+            .replace("%%SUGG1%%", s1).replace("%%SUGG2%%", s2))
+
+
 _PAGE_TITLES = {"index": "Agents", "derek": "Derek", "xavier": "Xavier",
                 "audrey": "Audrey"}
 
@@ -1842,6 +2054,7 @@ _CC_SHELL = r"""<!doctype html>
 %%FRESH%%
 <div class="cc-banner" role="alert" id="cc-banner">%%BANNER%%</div>
 <div class="cc-hero">%%STAGE%%%%BRIEF%%</div>
+%%TALK%%
 %%OPS%%
 %%PAPER%%
 %%FUNDED_OPEN%%
@@ -1852,6 +2065,7 @@ _CC_SHELL = r"""<!doctype html>
 <div id="app"><p class="boot">Reading %%ENDPOINT%% &#8230;</p></div>%%FUNDED_CLOSE%%</main>
 <p class="foot">Presentation of recorded state. This page sends no order and holds no credential; it reads %%ENDPOINT%% with the COMMAND session. The 3D characters are licensed Microsoft Rocketbox models (MIT licence, credited below; shipped with their licence file); a device that cannot draw them shows a 2D portrait card. The pose follows the paper runtime's own heartbeat (paper_session_health) and never stands in for data. UNKNOWN is not zero; EMPTY is not success.%%CREDIT%%</p>
 <script>%%JS%%</script>
+<script>%%TALK_JS%%</script>
 <script type="module">%%LOADER%%</script></body></html>"""
 
 
@@ -1869,7 +2083,9 @@ def _cc_page_html(kind: str) -> str:
           + BOOT_JS)
     chat = CCP.chat_panel_html(CHAT_PANEL_HTML) if kind == "audrey" else ""
     return (_CC_SHELL.replace("%%CSS%%", BASE_CSS + CCP.CC_CSS + CCP.PAPER_CSS
-                              + OPS.OPS_CSS)
+                              + OPS.OPS_CSS + TALK_CSS)
+            .replace("%%TALK%%", talk_panel_html(kind))
+            .replace("%%TALK_JS%%", TALK_JS)
             .replace("%%FRESH%%", OPS.fresh_html())
             .replace("%%OPS%%", OPS.ops_html(kind))
             .replace("%%FUNDED_OPEN%%", OPS.funded_open())

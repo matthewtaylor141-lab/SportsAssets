@@ -1158,7 +1158,8 @@ async def _converse_impl(db, *, agent, role, text, conversation_id, context,
     async with D.use(db) as conn:
         q = text if PF.subject_of(text) or not eff.get("subject") else \
             "%s (about the %s)" % (text, eff["subject"])
-        bundle = await PF.gather(conn, question=q, context=eff, now=now)
+        bundle = await PF.gather(conn, question=q, context=eff, now=now,
+                                 agent=agent)
         history = await _history(conn, cid)
         turn_id = await _start_turn(conn, cid, agent=agent,
                                     user_mid=user_mid, now=now)
@@ -1271,7 +1272,32 @@ async def _converse_impl(db, *, agent, role, text, conversation_id, context,
                 found=bundle.get("found"),
                 demonstration=bool(bundle.get("demonstration")),
                 paper=bundle.get("paper"), depth=depth, intent=intent,
-                provider=provider, voice=_voice_hint(agent, env))
+                provider=provider, voice=_voice_hint(agent, env),
+                context_supplied=_context_supplied(history, bundle,
+                                                   provider))
+
+
+def _context_supplied(history: list, bundle: dict, provider: dict) -> dict:
+    """WHAT THE MODEL WAS ACTUALLY GIVEN for this answer (not what is merely
+    stored): the prior turns of this conversation sent as message history,
+    the facts (records, the active policy, the agent's stored lessons) and
+    whether a model composed the answer at all."""
+    prior = max(0, len(history or []) - 1)
+    mem = bundle.get("memory") or {}
+    to_model = (provider or {}).get("mode") == MODE_LLM
+    return {"model_composed": to_model,
+            "prior_turns": prior if to_model else 0,
+            "prior_turns_stored": prior,
+            "prior_turns_basis": ("the last up to 12 completed messages of "
+                                  "this conversation, sent to the model as "
+                                  "the message history"),
+            "facts": len(bundle.get("facts") or []),
+            "policy": mem.get("policy"),
+            "lessons": mem.get("lessons") or [],
+            "basis": ("facts, policy and lessons are in the model's input "
+                      "for this turn" if to_model else
+                      "records-only answer: no model composed it; the same "
+                      "facts were used")}
 
 
 async def _store_interrupted(db, turn: _Turn, out, *, agent, cid, user_mid,

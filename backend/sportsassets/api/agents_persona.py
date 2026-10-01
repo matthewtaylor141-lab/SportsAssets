@@ -37,7 +37,7 @@ import hashlib
 import time
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -283,6 +283,24 @@ async def agent_speech(agent: str, body: SpeechBody) -> Response:
              dependencies=[Depends(require_read)])
 async def agent_speak(agent: str, body: SpeechBody) -> Response:
     return await _speech(agent, body)
+
+
+@router.post("/api/command/agents/{agent}/transcribe",
+             dependencies=[Depends(require_read)])
+async def agent_transcribe(agent: str, request: Request) -> Response:
+    """The management microphone: the raw recorded clip (Content-Type
+    audio/webm, audio/mp4, ...) -> {"text"}. 503 VOICE_UNAVAILABLE with the
+    sanitized provider diagnostic when the provider refuses (e.g. the key
+    lacks speech_to_text); the page then says so and keeps typing open."""
+    _agent(agent)
+    audio = await request.body()
+    try:
+        got = await PS.transcribe(audio, request.headers.get(
+            "content-type", ""), agent=agent)
+    except PS.SpeechFailure as e:
+        return _speech_error(e)
+    return JSONResponse(content=dict(got, status="TRANSCRIBED"),
+                        headers={"Cache-Control": "no-store"})
 
 
 # ── persona profiles ────────────────────────────────────────────────

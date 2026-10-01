@@ -343,3 +343,76 @@ def describe(env=None) -> dict:
             "speaks": "only stored assistant messages (their spoken_text): "
                       "persona-chat answers, and for Audrey also her "
                       "management-chat (agents_chat) answers"}
+
+
+# ── speech to text (the management microphone) ───────────────────────
+
+STT_PATH = "/v1/speech-to-text"
+STT_MODEL = "scribe_v1"
+PERM_STT = "speech_to_text"
+MAX_AUDIO_BYTES = 10 * 1024 * 1024
+STT_CONTENT_TYPES = ("audio/webm", "audio/ogg", "audio/mp4", "audio/mpeg",
+                     "audio/wav", "audio/x-wav", "audio/aac",
+                     "video/webm", "video/mp4")
+R_STT_EMPTY = "NO_SPEECH_RECOGNISED"
+R_STT_TYPE = "AUDIO_TYPE_NOT_SUPPORTED"
+R_STT_SIZE = "AUDIO_TOO_LARGE_OR_EMPTY"
+
+
+async def transcribe(audio: bytes, content_type: str, *, env=None,
+                     agent: str | None = None) -> dict:
+    """THE MANAGEMENT MICROPHONE: one recorded clip -> text, through the
+    configured provider's speech-to-text (ElevenLabs, the same server-side
+    key as the voice; it needs the key's speech_to_text permission). Returns
+    {"text", "language", "provider", "model"}. Raises SpeechFailure with the
+    SANITIZED provider diagnostic -- never the key -- so the page can state
+    the exact cause and fall back to typing. Nothing is stored."""
+    import httpx
+    ctype = (content_type or "").split(";")[0].strip().lower()
+    if ctype not in STT_CONTENT_TYPES:
+        raise SpeechFailure(R_STT_TYPE, status=415, content_type=ctype[:60])
+    if not audio or len(audio) > MAX_AUDIO_BYTES:
+        raise SpeechFailure(R_STT_SIZE, status=413,
+                            bytes=len(audio or b""))
+    cfg = voice_config(env)
+    if not cfg["configured"]:
+        raise SpeechFailure(cfg["reason"] or R_NO_KEY)
+    key = P.elevenlabs_key(env)
+    injected = http_client_factory()
+    client = injected or httpx.AsyncClient(timeout=cfg["timeout_s"])
+    owned = injected is None
+    endpoint = "POST " + STT_PATH
+    ext = {"audio/webm": "webm", "video/webm": "webm", "audio/ogg": "ogg",
+           "audio/mp4": "mp4", "video/mp4": "mp4", "audio/mpeg": "mp3",
+           "audio/aac": "aac"}.get(ctype, "wav")
+    try:
+        try:
+            resp = await client.post(
+                P.ELEVENLABS_BASE + STT_PATH,
+                headers={"xi-api-key": key, "accept": "application/json"},
+                data={"model_id": STT_MODEL},
+                files={"file": ("clip.%s" % ext, audio, ctype)})
+        except Exception as exc:                                # noqa: BLE001
+            why = type(exc).__name__.upper()
+            log.warning("transcription request failed: %s", why)
+            raise SpeechFailure(R_PROVIDER, provider_error=why,
+                                provider_diagnostic=P.provider_diagnostic(
+                                    endpoint=endpoint, permission=PERM_STT,
+                                    exc=exc)) from None
+        if resp.status_code // 100 != 2:
+            diag = P.provider_diagnostic(resp, key, endpoint=endpoint,
+                                         permission=PERM_STT)
+            log.warning("transcription provider answered HTTP %d (%s)",
+                        resp.status_code,
+                        diag.get("provider_error_status") or "-")
+            raise SpeechFailure(R_PROVIDER, provider_status=resp.status_code,
+                                provider_diagnostic=diag)
+        body = resp.json()
+    finally:
+        if owned:
+            await client.aclose()
+    text = " ".join(str((body or {}).get("text") or "").split())
+    if not text:
+        raise SpeechFailure(R_STT_EMPTY, status=422)
+    return {"text": text[:4000], "language": (body or {}).get(
+        "language_code"), "provider": "elevenlabs", "model": STT_MODEL}

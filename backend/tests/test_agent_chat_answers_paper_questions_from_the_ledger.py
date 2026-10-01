@@ -137,8 +137,21 @@ def _use_account(monkeypatch, acct):
 
 
 def _gather():
+    """The facts as the chat gathers them -- including what each agent
+    carries into every answer (the active policy, its stored lessons), so a
+    figure quoted from any agent's memory counts as grounded."""
     from sportsassets.agents import persona_facts as PF
-    return _with(lambda c: PF.gather(c, question=Q, context={}, now=T0))
+    out = _with(lambda c: PF.gather(c, question=Q, context={}, now=T0))
+    seen = {(f["source"], f["record_id"], f["field"]) for f in out["facts"]}
+    for ag in ("DEREK", "XAVIER", "AUDREY"):
+        b = _with(lambda c, ag=ag: PF.gather(c, question=Q, context={},
+                                             now=T0, agent=ag))
+        for f in b["facts"]:
+            k = (f["source"], f["record_id"], f["field"])
+            if k not in seen:
+                seen.add(k)
+                out["facts"].append(f)
+    return out
 
 
 def _by_field(bundle) -> dict:
