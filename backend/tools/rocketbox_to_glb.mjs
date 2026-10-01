@@ -51,14 +51,37 @@ console.log('ORDER', JSON.stringify(report));
 if (bad) throw new Error('morph target order does not match the FBX');
 // gltf-transform writes extras.targetNames from each target's own name
 for (const p of prims) p.listTargets().forEach((tg, t) => tg.setName(names[t].split('.').pop()));
+// ONLY THE TARGETS THE PIPELINE DRIVES: the 15 visemes (AA_VI_*) and the
+// ARKit 52 (AK_*). The FACS (AU_*), HB_* and SR_* sets duplicate them and
+// cost every vertex a texture fetch per target per frame (175 -> 67), which
+// matters on phones and in software GL. Pruned AFTER the order check.
+const KEEP = (n) => /^(AA_VI_|AK_)/.test(n.split('.').pop());
+const kept = names.filter(KEEP);
+for (const p of prims) for (const tg of p.listTargets()) if (!KEEP(tg.getName())) { p.removeTarget(tg); tg.dispose(); }
+const w = mesh.getWeights();
+mesh.setWeights(names.map((n, i) => [n, w[i] || 0]).filter(([n]) => KEEP(n)).map(([, v]) => v));
+names.length = 0; names.push(...kept);
 mesh.setExtras(Object.assign({}, mesh.getExtras(), {targetNames: names.map(n => n.split('.').pop())}));
 const tex = (f, mime) => doc.createTexture(f).setImage(fs.readFileSync(TEX + '/' + f)).setMimeType(mime);
+// THE OPACITY MATERIAL (hair cards, lashes) takes the vendor's RGBA opacity
+// map when it was supplied (tools/rocketbox_textures.py writes opacity.png):
+// its own colour and coverage, alpha-tested and double sided, rough and
+// non-metallic like hair. Without that map it falls back to the head maps
+// (and the manifest hides it, as for the first Derek candidate).
+const hasOpacity = fs.existsSync(TEX + '/opacity.png');
 for (const m of root.listMaterials()) {
+  const isOp = /opacity/.test(m.getName());
+  if (isOp && hasOpacity) {
+    m.setBaseColorTexture(tex('opacity.png', 'image/png')).setBaseColorFactor([1, 1, 1, 1]);
+    m.setNormalTexture(null).setMetallicRoughnessTexture(null).setMetallicFactor(0).setRoughnessFactor(0.72);
+    m.setAlphaMode('MASK').setAlphaCutoff(0.32).setDoubleSided(true);
+    continue;
+  }
   const part = /head|opacity/.test(m.getName()) ? 'head' : 'body';
   m.setBaseColorTexture(tex(part + '_color.jpg', 'image/jpeg')).setBaseColorFactor([1, 1, 1, 1]);
   m.setNormalTexture(tex(part + '_normal.jpg', 'image/jpeg'));
   m.setMetallicRoughnessTexture(tex(part + '_mr.jpg', 'image/jpeg')).setMetallicFactor(0).setRoughnessFactor(1);
-  if (/opacity/.test(m.getName())) m.setAlphaMode('MASK').setAlphaCutoff(0.5).setDoubleSided(true);
+  if (isOp) m.setAlphaMode('MASK').setAlphaCutoff(0.5).setDoubleSided(true);
 }
 for (const t of root.listTextures()) if (!t.getImage() || t.getImage().byteLength < 200) t.dispose();
 await doc.transform(prune(), dedup(), quantize({quantizePosition: 14, quantizeNormal: 10, quantizeTexcoord: 12, quantizeWeight: 8}), meshopt({encoder: MeshoptEncoder, level: 'medium'}));
