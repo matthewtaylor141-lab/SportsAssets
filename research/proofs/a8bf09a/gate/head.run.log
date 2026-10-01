@@ -1,0 +1,4 @@
+=== GATE RUN on a8bf09ad0940 (db gate_a8bf_head) -> pytest exit 1 ===
+  report present: True
+FAILED tests/test_workflow_size_guard.py::test_the_whole_repository_passes - ...
+70 failed, 16115 passed, 48 skipped, 3 xfailed, 35 warnings in 1394.73s (0:23:14)
