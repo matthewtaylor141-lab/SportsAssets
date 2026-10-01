@@ -180,6 +180,97 @@ CG_POLICY = {"kind": "COMPLETED_GAME", "strategy": CG_STRATEGY,
 POLICIES = (STRICT_POLICY, CG_POLICY)
 BENCHMARK_STRATEGIES = tuple(p["strategy"] for p in POLICIES)
 
+# ── THE COMPLETED-GAME POLICY'S VERSIONED PARAMETERS (migration 186) ────
+# ONE whitelisted parameter, min_gross_edge_pp, read from the policy's
+# ACTIVE parameter version (paper_policy_parameter_heads) once per pass /
+# per hook call, through THIS decision path. Bounds 4.0..6.0 pp on a 0.5 pp
+# grid (the floor's justification is in migration 186; the database CHECKs
+# the same bounds and a test pins the three copies equal). FAIL-CLOSED: an
+# absent table, a failed read or a stored value outside the bounds runs the
+# SHIPPED DEFAULT (V1, 5.0 pp) and records why. The strict benchmark has no
+# parameter versions: it always runs MIN_EDGE.
+CG_PARAMETERS_V1 = {"min_gross_edge_pp": MIN_EDGE_PP}
+CG_PARAMETER_BOUNDS = {"min_gross_edge_pp": (4.0, 6.0)}
+CG_PARAMETER_GRID_PP = 0.5
+CG_V1_VERSION_ID = "paperparam:%s:V1" % CG_STRATEGY
+P_ACTIVE = "ACTIVE_VERSION"
+P_FALLBACK = "SHIPPED_DEFAULT_FALLBACK"
+
+
+def validate_cg_parameters(params) -> str | None:
+    """The whitelist and the bounds (pure). None when valid."""
+    if not isinstance(params, dict) or set(params) != set(
+            CG_PARAMETER_BOUNDS):
+        return "PARAMETERS_NOT_THE_WHITELISTED_SET"
+    for k, (lo, hi) in CG_PARAMETER_BOUNDS.items():
+        v = params.get(k)
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            return "PARAMETER_NOT_A_NUMBER:%s" % k
+        if not (lo - 1e-9 <= float(v) <= hi + 1e-9):
+            return "PARAMETER_OUT_OF_BOUNDS:%s" % k
+        steps = float(v) / CG_PARAMETER_GRID_PP
+        if abs(steps - round(steps)) > 1e-9:
+            return "PARAMETER_OFF_GRID:%s" % k
+    return None
+
+
+def _cg_fallback(why: str) -> dict:
+    return {"policy_key": CG_STRATEGY, "source": P_FALLBACK,
+            "version_id": CG_V1_VERSION_ID, "version_no": 1,
+            "values": dict(CG_PARAMETERS_V1), "fallback_reason": why,
+            "proposal_id": None, "evaluation_id": None, "approved_by": None,
+            "activation_id": None, "activated_at": None}
+
+
+async def cg_parameters(conn, ctx: dict) -> dict:
+    """THE ACTIVE PARAMETER VERSION OF THE COMPLETED-GAME POLICY, read once
+    per pass (the pass context is new every pass; the per-valuation hook
+    builds a new one per call) and fail-closed to the shipped default.
+    Never raises."""
+    cache = ctx.setdefault("policy_parameters", {})
+    if CG_STRATEGY in cache:
+        return cache[CG_STRATEGY]
+    try:
+        present = await conn.fetchval(
+            "SELECT to_regclass('paper_policy_parameter_heads') IS NOT NULL")
+        if not present:
+            out = _cg_fallback("PARAMETER_TABLES_ABSENT")
+        else:
+            r = await conn.fetchrow(
+                "SELECT h.active_version_id, h.activation_id, v.version_no, "
+                "       v.params, v.params_sha256, v.source, v.proposal_id, "
+                "       v.evaluation_id, v.approved_by, a.at AS activated_at,"
+                "       a.kind AS activation_kind "
+                "  FROM paper_policy_parameter_heads h "
+                "  JOIN paper_policy_parameter_versions v "
+                "    ON v.version_id = h.active_version_id "
+                "   AND v.policy_key = h.policy_key "
+                "  JOIN paper_policy_parameter_activations a "
+                "    ON a.activation_id = h.activation_id "
+                " WHERE h.policy_key = $1", CG_STRATEGY)
+            vals = None if r is None else L._j(r["params"])
+            bad = ("NO_ACTIVE_VERSION_ROW" if r is None
+                   else validate_cg_parameters(vals))
+            out = (_cg_fallback(bad) if bad else {
+                "policy_key": CG_STRATEGY, "source": P_ACTIVE,
+                "version_id": r["active_version_id"],
+                "version_no": r["version_no"],
+                "values": {k: float(v) for k, v in vals.items()},
+                "params_sha256": r["params_sha256"],
+                "version_source": r["source"],
+                "proposal_id": r["proposal_id"],
+                "evaluation_id": r["evaluation_id"],
+                "approved_by": r["approved_by"],
+                "activation_id": r["activation_id"],
+                "activation_kind": r["activation_kind"],
+                "activated_at": L._epoch(r["activated_at"]),
+                "fallback_reason": None})
+    except Exception as exc:                                    # noqa: BLE001
+        out = _cg_fallback("PARAMETER_READ_FAILED:%s" % type(exc).__name__)
+    out["read_at"] = float(ctx["now"])
+    cache[CG_STRATEGY] = out
+    return out
+
 
 def policy_for(strategy) -> dict | None:
     for p in POLICIES:
@@ -654,20 +745,28 @@ def conditional_economics(*, p: float, takes: list, fee_fn,
 # THE ECONOMICS ON THE OBSERVED BOOK (pure but for the fee function)
 # ═════════════════════════════════════════════════════════════════════
 
-def level_edges(levels: list, p: float) -> list:
+def level_edges(levels: list, p: float, *, min_edge: float = MIN_EDGE
+                ) -> list:
+    """Each level's gross edge; `clears_5pp` is the fixed 5 pp check and
+    `clears_min_edge` the check against the threshold this decision runs
+    (MIN_EDGE for the strict policy; the completed-game policy's ACTIVE
+    parameter version)."""
     out = []
     for lv in levels:
         e = DP.gross_edge(p, lv["price"])
         out.append({"price": lv["price"], "wire": lv["wire"],
                     "qty": float(lv["qty"]),
                     "edge_pp": None if e is None else round(e * 100.0, 9),
-                    "clears_5pp": DP.clears(e, MIN_EDGE)})
+                    "clears_5pp": DP.clears(e, MIN_EDGE),
+                    "clears_min_edge": DP.clears(e, min_edge),
+                    "min_edge_pp": round(min_edge * 100.0, 9)})
     return out
 
 
 def size_within_edge(levels: list, *, p: float, consumed: dict,
                      target_usd: float, cap_usd: float,
-                     fee_per_contract_max: float) -> dict:
+                     fee_per_contract_max: float,
+                     min_edge: float = MIN_EDGE) -> dict:
     """The deepest level whose price still clears 5 pp sets the limit (the
     ladder is best first, so the clearing levels are a prefix); the quantity
     walks the displayed depth not already consumed, up to that limit, capped
@@ -675,7 +774,7 @@ def size_within_edge(levels: list, *, p: float, consumed: dict,
     Whole contracts."""
     ok = []
     for lv in levels:
-        if not DP.clears(DP.gross_edge(p, lv["price"]), MIN_EDGE):
+        if not DP.clears(DP.gross_edge(p, lv["price"]), min_edge):
             break
         ok.append(lv)
     if not ok:
@@ -735,10 +834,10 @@ def economics(*, p: float, takes: list, fee_fn, at: float,
 
 
 def _shortfall(*, pin: dict, best_edge_pp=None, ev=None, depth=None,
-               qty=None, book_age=None) -> dict:
-    return {"edge_pp": best_edge_pp, "edge_threshold_pp": MIN_EDGE_PP,
+               qty=None, book_age=None, threshold_pp=MIN_EDGE_PP) -> dict:
+    return {"edge_pp": best_edge_pp, "edge_threshold_pp": threshold_pp,
             "edge_shortfall_pp": (None if best_edge_pp is None else
-                                  round(max(0.0, MIN_EDGE_PP - best_edge_pp),
+                                  round(max(0.0, threshold_pp - best_edge_pp),
                                         9)),
             "ev_after_fees_usd": ev, "ev_threshold_usd": 0.0,
             "depth_within_limit": depth, "qty": qty,
@@ -852,6 +951,12 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
                  **({"policy_version": VERSION,
                      "economics_label": ECONOMICS_LABEL} if cg else {}))
     refusals: list = []
+    # THE THRESHOLD THIS DECISION RUNS: the completed-game policy's ACTIVE
+    # parameter version (fail-closed to V1); the strict policy's constant.
+    params = await cg_parameters(conn, ctx) if cg else None
+    min_edge_pp = (float(params["values"]["min_gross_edge_pp"]) if cg
+                   else MIN_EDGE_PP)
+    min_edge = min_edge_pp / 100.0
     match = (completed_game_match(cand, row) if cg
              else contract_match(cand, row))
     refusals.extend(match["refusals"])
@@ -904,7 +1009,7 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
         elif book_age > BOOK_MAX_AGE_S:
             refusals.append(R_BOOK_NOT_CURRENT)
         else:
-            edges = level_edges(levels, p)
+            edges = level_edges(levels, p, min_edge=min_edge)
             consumed = await SIM._consumed(conn, cand["us_market_slug"],
                                            lv["side"], obs["obs_id"])
             sized = size_within_edge(
@@ -912,8 +1017,8 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
                 target_usd=float(ent["target_order_usd"]),
                 cap_usd=float(cfg["risk"]["per_order_cap_usd"]),
                 fee_per_contract_max=float(L.max_fee_for(
-                    1, 0.5, at=at, fee_fn=fee_fn)))
-            if not edges[0]["clears_5pp"]:
+                    1, 0.5, at=at, fee_fn=fee_fn)), min_edge=min_edge)
+            if not edges[0]["clears_min_edge"]:
                 refusals.append(R_EDGE)
             elif sized["qty"] < 1:
                 refusals.append(R_NO_QTY)
@@ -955,12 +1060,14 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
     short = _shortfall(pin=pin, best_edge_pp=best_edge,
                        ev=(econ or {}).get("expected_net_profit_usd"),
                        depth=sized.get("depth_within_limit"),
-                       qty=sized.get("qty"), book_age=book_age)
+                       qty=sized.get("qty"), book_age=book_age,
+                       threshold_pp=min_edge_pp)
     economics_rec = {
         "strategy": STRATEGY, "version": VERSION, "disclosure": DISCLOSURE,
         "probability": p, "probability_basis": "PINNACLE_ONLY_DEVIGGED_STORED",
-        "threshold_edge_pp": MIN_EDGE_PP,
-        "edge_rule": "p_pinnacle - level price >= 0.05 at EVERY level used",
+        "threshold_edge_pp": min_edge_pp,
+        "edge_rule": ("p_pinnacle - level price >= %.4f at EVERY level used"
+                      % min_edge),
         "ev_rule": "expected net profit after the simulator's fees > 0",
         "levels": edges[:10], "best_level_edge_pp": best_edge,
         "limit_price": sized.get("limit"),
@@ -1010,9 +1117,10 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
                     bool(levels) and book_age is not None
                     and book_age <= BOOK_MAX_AGE_S),
          "value": book_age, "threshold": BOOK_MAX_AGE_S, "units": "seconds"},
-        {"condition": "edge_at_least_5pp_at_every_level_used",
-         "passed": None if not edges else bool(edges[0]["clears_5pp"]),
-         "value": best_edge, "threshold": MIN_EDGE_PP,
+        {"condition": ("edge_at_least_min_gross_edge_pp_at_every_level_used"
+                       if cg else "edge_at_least_5pp_at_every_level_used"),
+         "passed": None if not edges else bool(edges[0]["clears_min_edge"]),
+         "value": best_edge, "threshold": min_edge_pp,
          "units": "percentage points"},
         {"condition": "positive_ev_after_fees",
          "passed": None if econ is None else econ["net_ev_positive"],
@@ -1032,6 +1140,11 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
         "admitted": verdict == DP.ENTER,
         "refusal": refusals[0] if refusals else None,
         "refusals": refusals}
+    if cg:
+        # WHICH PARAMETER VERSION DECIDED THIS, AND WHERE IT CAME FROM
+        # (migration 186), in the record's existing JSON.
+        policy_decision["parameters"] = params
+        economics_rec["parameters"] = params
     gaps = qualification_gaps(cand=cand)
     optimistic = (SIM.optimistic_fill(md, direction="BUY", holding_side=side,
                                       qty=sized["qty"], limit=sized["limit"])

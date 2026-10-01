@@ -29,17 +29,30 @@ table. The pages consume these JSON shapes (the logic is
   GET /api/command/paper/learning/events?kind=&limit=
         Audrey's event audits (one finding per event).
 
-THERE IS NO ACTIVATION ROUTE: activating a passed paper proposal is the
-explicit `paper_learning.activate_proposal` call, behind the
-PAPER_LEARNING_PROPOSAL_ACTIVATION control row and a named approver.
+  GET /api/command/paper/learning/policy
+        the completed-game paper policy's parameters (migration 186): the
+        ACTIVE version with its provenance, every version, the candidates
+        with their evaluation status (INSUFFICIENT_FORWARD_DATA stated as
+        such) and failed activation checks, and the activation history.
+
+THE TWO WRITES (POST, the existing command CONTROL credential, audited):
+  POST /api/command/paper/learning/proposals/{proposal_id}/activate
+        body {"approver": "<named human>"}. Refused unless the
+        PAPER_LEARNING_PROPOSAL_ACTIVATION control row is on and every
+        activation check passes (`paper_learning.activate_proposal`).
+  POST /api/command/paper/learning/policy/rollback
+        body {"actor": "<named human>", "reason": "<why>"}: restores the
+        previous version atomically (`rollback_policy_parameters`).
+Nothing activates automatically. PAPER ONLY: no funded module reads these
+parameters.
 """
 from __future__ import annotations
 
 import time
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
-from .agents_core import require_read
+from .agents_core import require_read, require_write
 
 router = APIRouter()
 
@@ -163,3 +176,56 @@ async def paper_learning_events(kind: str | None = Query(None),
     return await _read(lambda conn: PLRN.event_audits(
         conn, account_id=acct, kind=kind, limit=limit),
         why_empty="NO_EVENT_AUDITED_YET")
+
+
+@router.get("/api/command/paper/learning/policy",
+            dependencies=[Depends(require_read)])
+async def paper_learning_policy() -> dict:
+    from ..agents import paper_learning as PLRN
+    return await _read(lambda conn: PLRN.policy_parameter_state(conn),
+                       why_empty="NO_PARAMETER_STATE",
+                       empty=lambda d: (d or {}).get("status")
+                       == "UNAVAILABLE")
+
+
+async def _body(request) -> dict:
+    try:
+        b = await request.json()
+    except Exception:                                           # noqa: BLE001
+        b = None
+    if not isinstance(b, dict):
+        raise HTTPException(status_code=400, detail={
+            "reason": "A_JSON_OBJECT_BODY_IS_REQUIRED"})
+    return b
+
+
+async def _write(fn) -> dict:
+    from ..agents import paper_learning as PLRN
+    pool = await _conn_pool()
+    async with pool.acquire() as conn:
+        if not await PLRN.has_schema(conn):
+            raise HTTPException(status_code=503, detail={
+                "reason": "MIGRATION_185_IS_NOT_APPLIED"})
+        got = await fn(conn)
+    if not got.get("ok"):
+        raise HTTPException(status_code=409, detail=got)
+    return dict(_labels(), result=got)
+
+
+@router.post("/api/command/paper/learning/proposals/{proposal_id}/activate",
+             dependencies=[Depends(require_write)])
+async def paper_learning_activate(proposal_id: str, request: Request
+                                  ) -> dict:
+    from ..agents import paper_learning as PLRN
+    b = await _body(request)
+    return await _write(lambda conn: PLRN.activate_proposal(
+        conn, proposal_id, approver=b.get("approver")))
+
+
+@router.post("/api/command/paper/learning/policy/rollback",
+             dependencies=[Depends(require_write)])
+async def paper_learning_rollback(request: Request) -> dict:
+    from ..agents import paper_learning as PLRN
+    b = await _body(request)
+    return await _write(lambda conn: PLRN.rollback_policy_parameters(
+        conn, actor=b.get("actor"), reason=b.get("reason")))

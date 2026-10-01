@@ -473,6 +473,14 @@ READERS = {
     # quote; plus the Pinnacle-only measure of its held positions for Xavier.
     "agents/paper_benchmark.py": (
         "PAPER_ONLY_READS_BOTH_PURPOSES_SIMULATED_ORDERS_NEVER_FUNDED", 5),
+    # (185) THE PAPER LEARNING RECORD: the venue-joined OUTCOME of a paper
+    # decision's contract, by slug, for the forward evaluation of a paper
+    # improvement proposal (outcomes known by the evaluation instant only),
+    # plus two mentions in labels (the decision-inputs SHA basis and a
+    # settlement's evidence source). It selects no candidate and writes no
+    # order of any kind.
+    "agents/paper_learning.py": (
+        "PAPER_ONLY_OUTCOME_READS_FOR_FORWARD_EVALUATION_NEVER_SELECTS", 3),
 }
 
 

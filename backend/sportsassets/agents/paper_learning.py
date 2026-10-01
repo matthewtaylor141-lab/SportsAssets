@@ -2,9 +2,12 @@
 EVENT AUDITS, LESSONS IN EACH AGENT'S MEMORY, AND IMPROVEMENT PROPOSALS.
 
 PAPER ONLY. Real-money execution stays disabled. Nothing here places,
-cancels or modifies an order, reads a funded table, or changes what a paper
-policy does: it RECORDS what the paper book's own forward records show, and
-reads it back for management (migration 185).
+cancels or modifies an order or reads a funded table. It RECORDS what the
+paper book's own forward records show and reads it back for management
+(migration 185); and ONE bounded paper-policy change -- the completed-game
+policy's minimum gross edge -- can become the running paper agent's ACTIVE
+parameter version, only through the explicit, audited `activate_proposal`
+of an evaluated PASS, with atomic `rollback_policy_parameters` (186).
 
 WHAT IT KEEPS, AND WHERE
   1 · DECISION PROVENANCE (`paper_decisions.provenance`, going forward).
@@ -121,6 +124,22 @@ CHAINS_PER_COVERAGE_LESSON = 200
 
 # ── PROPOSALS ─────────────────────────────────────────────────────────
 C_EDGE = "DEREK_ENTRY_EDGE_THRESHOLD"
+#: THE ONE SUPPORTED, BOUNDED PAPER-POLICY CHANGE (migration 186): the
+#: completed-game paper policy's minimum gross edge. The same whitelist and
+#: bounds as paper_benchmark.CG_PARAMETER_BOUNDS and the migration's CHECK.
+PARAM_POLICY = "PINNACLE_COMPLETED_GAME_PAPER"
+PARAM_DEFAULTS = {"min_gross_edge_pp": 5.0}
+PARAM_BOUNDS = {"min_gross_edge_pp": (4.0, 6.0)}
+PARAM_GRID_PP = 0.5
+PARAM_MAX_STEP_PP = 1.0
+PARAM_FLOOR_WHY = (
+    "4.0 pp: the deployed fee schedule charges up to ~1.75 pp per contract "
+    "at mid prices; the policy's EV is conditional on ordinary completion "
+    "(exceptional-settlement frequency unmeasured), the venue book's "
+    "currency is not established (P5) and the de-vigged reference carries "
+    "its own error. 4.0 pp keeps >= ~2.25 pp of gross edge after the "
+    "largest fee and is one 1 pp step below the shipped 5 pp. Ceiling 6.0 "
+    "pp; 0.5 pp grid; at most 1 pp per activation.")
 C_STALE_EXIT = "XAVIER_EXIT_WHEN_MEASURE_STALE"
 EVALUATOR = "EVALUATOR:PAPER_FORWARD_OUTCOMES"
 ACTIVATION_CONTROL_KEY = "PAPER_LEARNING_PROPOSAL_ACTIVATION"
@@ -167,6 +186,15 @@ R_SELF_APPROVER = "THE_PROPOSER_CANNOT_ACTIVATE_ITS_OWN_PROPOSAL"
 R_NOT_PASSED = "ONLY_AN_EVALUATED_PASS_CAN_BE_ACTIVATED"
 R_PERIOD_OPEN = "EVALUATION_PERIOD_NOT_ENDED"
 R_TOO_FEW = "TOO_FEW_FORWARD_OUTCOMES"
+R_CHANGE_NOT_SUPPORTED = "ONLY_THE_COMPLETED_GAME_POLICY_EDGE_IS_SUPPORTED"
+R_NOT_WHITELISTED = "THE_PARAMETER_IS_NOT_WHITELISTED"
+R_OUT_OF_BOUNDS = "THE_PARAMETER_VALUE_IS_OUT_OF_BOUNDS_OR_OFF_GRID"
+R_STEP_TOO_LARGE = "THE_CHANGE_EXCEEDS_THE_MAXIMUM_STEP_OR_IS_EMPTY"
+R_ACTIVATION_CHECKS = "THE_ACTIVATION_CHECKS_DID_NOT_PASS"
+R_ALREADY_ACTIVE = "THE_PROPOSAL_IS_ALREADY_ACTIVE"
+R_NO_PARAMETER_HEAD = "NO_ACTIVE_PARAMETER_VERSION_ROW"
+R_NOTHING_TO_ROLL_BACK = "THE_ACTIVE_VERSION_HAS_NO_PREDECESSOR"
+R_ROLLBACK_NEEDS_REASON = "A_ROLLBACK_STATES_ITS_REASON"
 
 _JSON_COLS = frozenset((
     "label", "internal_model", "pinnacle", "book", "economics",
@@ -375,7 +403,8 @@ def decision_provenance(*, strategy: str, code_version: str,
                      "policy": policy_version, "strategy": strategy,
                      "model": model, "simulator": simulator_version,
                      "pinnacle_source": (pinnacle or {}).get(
-                         "source_version")},
+                         "source_version"),
+                     "parameters": pd.get("parameters")},
         "inputs": dict(valuation_snapshot(row),
                        pinnacle={k: (pinnacle or {}).get(k) for k in (
                            "p", "at", "age_s", "limit_s", "qualification",
@@ -1261,7 +1290,12 @@ async def _derek_refusal_funnel(conn, acct, strategy, ws, we) -> list:
     if entered == 0 and len(rows) >= MIN_FUNNEL_DECISIONS:
         les["task"] = ("No %s entry in %d decisions: investigate the binding "
                        "refusal %s" % (strategy, len(rows), top))
-    if bench and near and near >= NEAR_MISS_FOR_PROPOSAL:
+    if bench and near and near >= NEAR_MISS_FOR_PROPOSAL and \
+            strategy == PARAM_POLICY and check_change(C_EDGE, strategy, {
+                "parameter": "min_gross_edge_pp", "from": threshold,
+                "to": round(threshold - NEAR_MISS_PP, 6)}) is None:
+        # ONLY THE SUPPORTED, BOUNDED CHANGE IS PROPOSED (the completed-game
+        # policy, within 4.0..6.0 pp, at most 1 pp per step).
         les["proposal"] = {
             "change_class": C_EDGE,
             "proposed_change": {"parameter": "min_gross_edge_pp",
@@ -1807,6 +1841,10 @@ async def create_proposal(conn, *, account_id: str, agent_id: str,
     if cls["agent"] != agent_id:
         return {"ok": False, "refusal": R_WRONG_AGENT,
                 "belongs_to": cls["agent"]}
+    chg = check_change(change_class, strategy, proposed_change)
+    if chg:
+        return {"ok": False, "refusal": chg, "bounds": PARAM_BOUNDS,
+                "max_step_pp": PARAM_MAX_STEP_PP}
     ref = check_protocol(training_start=training[0],
                          training_end=training[1],
                          evaluation_start=evaluation[0],
@@ -2045,7 +2083,10 @@ async def run_evaluation(conn, p: dict, *, now: float) -> dict:
                          "protocol needs %d" % (got["n"], need)))
     m = float(got["metric"])
     verdict = V_PASS if m > 0 else V_HARM if m < 0 else V_NO_GAIN
-    return dict(base, evaluated=True, status=S_EVALUATED, verdict=verdict)
+    return dict(base, evaluated=True, status=S_EVALUATED, verdict=verdict,
+                evaluation_id="papereval:%s" % _h(
+                    p["proposal_id"], float(now), m, got["n"],
+                    _sha(got["records"])))
 
 
 async def evaluate_proposal(conn, proposal_id: str, *, now: float) -> dict:
@@ -2115,23 +2156,141 @@ async def activation_control(conn) -> dict:
             "updated_at": L._epoch(r["updated_at"])}
 
 
+def _human(name) -> str | None:
+    """A named human: not empty, not an agent, not an evaluator."""
+    who = str(name or "").strip()
+    if not who or who.upper() in AGENT_IDS or who.upper().startswith(
+            ("EVALUATOR", "AGENT")):
+        return None
+    return who
+
+
+def validate_parameters(params) -> str | None:
+    """THE WHITELIST AND BOUNDS of the completed-game policy's parameters
+    (pure; the same rule as paper_benchmark.validate_cg_parameters and the
+    migration 186 CHECK -- a test pins the three equal)."""
+    if not isinstance(params, dict) or set(params) != set(PARAM_BOUNDS):
+        return R_NOT_WHITELISTED
+    for k, (lo, hi) in PARAM_BOUNDS.items():
+        v = params.get(k)
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            return R_OUT_OF_BOUNDS
+        if not (lo - 1e-9 <= float(v) <= hi + 1e-9):
+            return R_OUT_OF_BOUNDS
+        steps = float(v) / PARAM_GRID_PP
+        if abs(steps - round(steps)) > 1e-9:
+            return R_OUT_OF_BOUNDS
+    return None
+
+
+def check_change(change_class: str, strategy, change: dict) -> str | None:
+    """THE ONE SUPPORTED, BOUNDED PAPER-POLICY CHANGE (pure): the edge
+    threshold of the completed-game policy, to a whitelisted, in-bounds,
+    on-grid value at most PARAM_MAX_STEP_PP from where it starts."""
+    if change_class != C_EDGE:
+        return None                       # not a parameter change class
+    if strategy != PARAM_POLICY:
+        return R_CHANGE_NOT_SUPPORTED
+    if (change or {}).get("parameter") not in PARAM_BOUNDS:
+        return R_NOT_WHITELISTED
+    try:
+        frm, to = float(change["from"]), float(change["to"])
+    except (KeyError, TypeError, ValueError):
+        return R_OUT_OF_BOUNDS
+    bad = (validate_parameters({change["parameter"]: to})
+           or validate_parameters({change["parameter"]: frm}))
+    if bad:
+        return bad
+    if abs(to - frm) > PARAM_MAX_STEP_PP + 1e-9 or abs(to - frm) < 1e-9:
+        return R_STEP_TOO_LARGE
+    return None
+
+
+async def _active_parameters(conn, policy_key: str, *, lock: bool = False):
+    return await conn.fetchrow(
+        "SELECT h.policy_key, h.active_version_id, h.activation_id, "
+        "       v.version_no, v.params, v.proposal_id, v.evaluation_id "
+        "  FROM paper_policy_parameter_heads h "
+        "  JOIN paper_policy_parameter_versions v "
+        "    ON v.version_id = h.active_version_id "
+        " WHERE h.policy_key = $1" + (" FOR UPDATE OF h" if lock else ""),
+        policy_key)
+
+
+def activation_checks(p: dict, active_value) -> list:
+    """THE DEFINED EVALUATION CHECKS a proposal must pass before a human may
+    activate it (pure). Each is named with its values."""
+    ev = p.get("evaluation") or {}
+    prot = p.get("protocol") or {}
+    need = int(prot.get("min_evaluation_outcomes") or CHANGE_CLASSES.get(
+        p.get("change_class"), {}).get("min_evaluation_outcomes") or 0)
+    ch = p.get("proposed_change") or {}
+    split = check_protocol(training_start=p["training_start"],
+                           training_end=p["training_end"],
+                           evaluation_start=p["evaluation_start"],
+                           evaluation_end=p["evaluation_end"],
+                           proposed_at=p["proposed_at"])
+    chg = check_change(p.get("change_class"), p.get("strategy"), ch)
+    out = [
+        {"check": "SUPPORTED_BOUNDED_CHANGE", "passed": chg is None
+         and p.get("change_class") == C_EDGE, "refusal": chg,
+         "policy_key": p.get("strategy"), "change": ch,
+         "bounds": PARAM_BOUNDS, "max_step_pp": PARAM_MAX_STEP_PP},
+        {"check": "TRAINING_STRICTLY_BEFORE_EVALUATION",
+         "passed": split is None, "refusal": split},
+        {"check": "EVALUATED_ONCE_WITH_A_PASS",
+         "passed": (p.get("status") == S_EVALUATED
+                    and p.get("verdict") == V_PASS
+                    and ev.get("evaluated") is True
+                    and ev.get("verdict") == V_PASS),
+         "status": p.get("status"), "verdict": p.get("verdict")},
+        {"check": "FORWARD_OUTCOMES_ONLY",
+         "passed": (ev.get("training_records_used") == 0
+                    and _f(ev.get("at")) is not None
+                    and float(ev["at"]) >= float(p["evaluation_end"])
+                    and [float(x) for x in ev.get("evaluation_period")
+                         or [0, 0]] == [float(p["evaluation_start"]),
+                                        float(p["evaluation_end"])]),
+         "training_records_used": ev.get("training_records_used"),
+         "evaluated_at": ev.get("at")},
+        {"check": "MINIMUM_FORWARD_OUTCOMES",
+         "passed": need > 0 and int(ev.get("outcomes") or 0) >= need,
+         "outcomes": ev.get("outcomes"), "required": need},
+        {"check": "EVALUATOR_IS_NOT_THE_PROPOSER",
+         "passed": bool(p.get("evaluated_by"))
+         and p.get("evaluated_by") != p.get("proposed_by")},
+        {"check": "EVALUATION_IDENTIFIED",
+         "passed": bool(ev.get("evaluation_id")),
+         "evaluation_id": ev.get("evaluation_id")},
+        {"check": "STARTS_FROM_THE_ACTIVE_VALUE",
+         "passed": (active_value is not None and _f(ch.get("from"))
+                    is not None and abs(float(ch["from"])
+                                        - float(active_value)) < 1e-9),
+         "active_value": active_value, "from": ch.get("from")}]
+    return out
+
+
 async def activate_proposal(conn, proposal_id: str, *, approver: str,
                             now: float | None = None) -> dict:
-    """THE EXPLICIT ACTIVATION OF A PASSED PAPER PROPOSAL. Never called by
-    any step: it needs the control row on, a named human approver who is
-    not the proposer, and an evaluated PASS. PAPER ONLY. Recording ACTIVE
-    does not by itself change any paper policy: no policy reads proposals
-    automatically -- wiring one to a proposal is a separate reviewed
-    change."""
+    """THE EXPLICIT, AUDITED ACTIVATION OF A PASSED PAPER PROPOSAL -- the
+    only way a parameter version becomes ACTIVE. Never called by any step.
+    It needs the PAPER_LEARNING_PROPOSAL_ACTIVATION control row on, a named
+    human approver who is not the proposer, and every activation check
+    (supported bounded change, split, PASS, forward-only, minimum outcomes,
+    independent evaluator, evaluation id, starts from the active value).
+    In ONE transaction under the policy head's row lock: a new IMMUTABLE
+    version (the proposal, its evaluation id and the approver), the audit
+    row, the head moved to it, the proposal marked active (any proposal it
+    supersedes marked inactive). PAPER ONLY: the completed-game paper policy
+    reads it on its next decision."""
     at = float(now if now is not None else time.time())
     ctl = await activation_control(conn)
     if not ctl["enabled"]:
         return {"ok": False, "refusal": R_ACTIVATION_OFF, "control": ctl}
-    who = str(approver or "").strip()
-    if not who:
+    if not str(approver or "").strip():
         return {"ok": False, "refusal": R_NO_APPROVER}
-    if who.upper() in AGENT_IDS or who.upper().startswith(("EVALUATOR",
-                                                           "AGENT")):
+    who = _human(approver)
+    if who is None:
         return {"ok": False, "refusal": R_AGENT_APPROVER}
     p = await proposal(conn, proposal_id)
     if p is None:
@@ -2141,29 +2300,216 @@ async def activate_proposal(conn, proposal_id: str, *, approver: str,
     if p["status"] != S_EVALUATED or p["verdict"] != V_PASS:
         return {"ok": False, "refusal": R_NOT_PASSED,
                 "status": p["status"], "verdict": p["verdict"]}
-    await conn.execute(
-        "UPDATE paper_improvement_proposals SET active=TRUE, activated_by=$2,"
-        " activated_at=$3, deactivated_at=NULL, updated_at=now() "
-        " WHERE proposal_id=$1", proposal_id, who, L._ts(at))
-    await _proposal_event(conn, proposal_id, kind="ACTIVATED", actor=who,
-                          detail={"control": ctl, "scope": "PAPER_ONLY",
-                                  "consumption": "NO_PAPER_POLICY_READS_"
-                                                 "PROPOSALS_AUTOMATICALLY"},
-                          now=at)
+    if p.get("active"):
+        return {"ok": False, "refusal": R_ALREADY_ACTIVE}
+    ch = p["proposed_change"]
+    async with conn.transaction():
+        head = await _active_parameters(conn, PARAM_POLICY, lock=True)
+        if head is None:
+            return {"ok": False, "refusal": R_NO_PARAMETER_HEAD}
+        cur = L._j(head["params"]) or {}
+        checks = activation_checks(p, cur.get(ch.get("parameter")))
+        if not all(c["passed"] for c in checks):
+            return {"ok": False, "refusal": R_ACTIVATION_CHECKS,
+                    "failed": [c["check"] for c in checks
+                               if not c["passed"]], "checks": checks}
+        new = dict(cur, **{ch["parameter"]: float(ch["to"])})
+        bad = validate_parameters(new)
+        if bad:
+            return {"ok": False, "refusal": bad}
+        no = int(await conn.fetchval(
+            "SELECT max(version_no) FROM paper_policy_parameter_versions "
+            " WHERE policy_key=$1", PARAM_POLICY)) + 1
+        vid = "paperparam:%s:V%d" % (PARAM_POLICY, no)
+        eid = p["evaluation"]["evaluation_id"]
+        body = json.dumps(new, sort_keys=True)
+        await conn.execute(
+            "INSERT INTO paper_policy_parameter_versions (version_id, "
+            " policy_key, version_no, params, params_sha256, source, "
+            " proposal_id, evaluation_id, approved_by, created_at) VALUES "
+            " ($1,$2,$3,$4::jsonb,$5,'EVALUATED_PROPOSAL',$6,$7,$8,$9)",
+            vid, PARAM_POLICY, no, body,
+            hashlib.sha256(body.encode()).hexdigest(), proposal_id, eid,
+            who, L._ts(at))
+        aid = "paperact:%s" % _h(PARAM_POLICY, vid, "ACTIVATE", at)
+        await conn.execute(
+            "INSERT INTO paper_policy_parameter_activations (activation_id, "
+            " policy_key, kind, version_id, previous_version_id, "
+            " proposal_id, evaluation_id, actor, reason, control, at) "
+            "VALUES ($1,$2,'ACTIVATE',$3,$4,$5,$6,$7,$8,$9::jsonb,$10)",
+            aid, PARAM_POLICY, vid, head["active_version_id"], proposal_id,
+            eid, who, "activation of an evaluated PASS (%s: %s -> %s)" % (
+                ch["parameter"], ch["from"], ch["to"]),
+            json.dumps(ctl, default=str), L._ts(at))
+        await conn.execute(
+            "UPDATE paper_policy_parameter_heads SET active_version_id=$2, "
+            " activation_id=$3, updated_at=now() WHERE policy_key=$1",
+            PARAM_POLICY, vid, aid)
+        await conn.execute(
+            "UPDATE paper_improvement_proposals SET active=FALSE, "
+            " deactivated_at=$2, updated_at=now() WHERE active AND "
+            " strategy=$1 AND change_class=$3", PARAM_POLICY, L._ts(at),
+            C_EDGE)
+        await conn.execute(
+            "UPDATE paper_improvement_proposals SET active=TRUE, "
+            " activated_by=$2, activated_at=$3, deactivated_at=NULL, "
+            " updated_at=now() WHERE proposal_id=$1", proposal_id, who,
+            L._ts(at))
+        await _proposal_event(conn, proposal_id, kind="ACTIVATED", actor=who,
+                              detail={"control": ctl, "scope": "PAPER_ONLY",
+                                      "version_id": vid, "activation_id": aid,
+                                      "previous_version_id":
+                                          head["active_version_id"],
+                                      "evaluation_id": eid, "params": new,
+                                      "checks": checks}, now=at)
     return {"ok": True, "proposal_id": proposal_id, "active": True,
-            "activated_by": who, "scope": "PAPER_ONLY"}
+            "activated_by": who, "scope": "PAPER_ONLY", "version_id": vid,
+            "version_no": no, "params": new, "activation_id": aid,
+            "previous_version_id": head["active_version_id"],
+            "evaluation_id": eid, "checks": checks}
 
 
-async def deactivate_proposal(conn, proposal_id: str, *, actor: str,
-                              now: float | None = None) -> dict:
+async def rollback_policy_parameters(conn, *, actor: str, reason: str,
+                                     policy_key: str = None,
+                                     now: float | None = None) -> dict:
+    """RESTORE THE VERSION THAT WAS ACTIVE BEFORE THE CURRENT ONE, atomically
+    and audited: under the head's row lock, the version that introduced the
+    current one names its predecessor; a ROLLBACK row records both, the head
+    moves back, and the rolled-back proposal is marked inactive (the restored
+    version's proposal, if any, active again). Needs a named human; it does
+    not need the activation control (restoring is always permitted). The
+    shipped default has nothing before it."""
+    pk = policy_key or PARAM_POLICY
     at = float(now if now is not None else time.time())
-    await conn.execute(
-        "UPDATE paper_improvement_proposals SET active=FALSE, "
-        " deactivated_at=$2, updated_at=now() WHERE proposal_id=$1 "
-        "   AND active", proposal_id, L._ts(at))
-    await _proposal_event(conn, proposal_id, kind="DEACTIVATED",
-                          actor=str(actor), detail={}, now=at)
-    return {"ok": True, "proposal_id": proposal_id, "active": False}
+    who = _human(actor)
+    if who is None:
+        return {"ok": False, "refusal": R_AGENT_APPROVER
+                if str(actor or "").strip() else R_NO_APPROVER}
+    if not str(reason or "").strip():
+        return {"ok": False, "refusal": R_ROLLBACK_NEEDS_REASON}
+    async with conn.transaction():
+        head = await _active_parameters(conn, pk, lock=True)
+        if head is None:
+            return {"ok": False, "refusal": R_NO_PARAMETER_HEAD}
+        cur = head["active_version_id"]
+        intro = await conn.fetchrow(
+            "SELECT activation_id, previous_version_id FROM "
+            " paper_policy_parameter_activations WHERE policy_key=$1 "
+            "   AND version_id=$2 AND kind IN ('ACTIVATE', "
+            "   'SHIPPED_DEFAULT') ORDER BY at DESC, recorded_at DESC "
+            " LIMIT 1", pk, cur)
+        prev = None if intro is None else intro["previous_version_id"]
+        if prev is None:
+            return {"ok": False, "refusal": R_NOTHING_TO_ROLL_BACK,
+                    "active_version_id": cur}
+        restored = await conn.fetchrow(
+            "SELECT version_id, proposal_id, evaluation_id, params FROM "
+            " paper_policy_parameter_versions WHERE version_id=$1", prev)
+        aid = "paperact:%s" % _h(pk, prev, "ROLLBACK", cur, at)
+        await conn.execute(
+            "INSERT INTO paper_policy_parameter_activations (activation_id, "
+            " policy_key, kind, version_id, previous_version_id, "
+            " proposal_id, evaluation_id, actor, reason, control, at) "
+            "VALUES ($1,$2,'ROLLBACK',$3,$4,$5,$6,$7,$8,$9::jsonb,$10)",
+            aid, pk, prev, cur, head["proposal_id"], head["evaluation_id"],
+            who, str(reason), json.dumps(await activation_control(conn),
+                                         default=str), L._ts(at))
+        await conn.execute(
+            "UPDATE paper_policy_parameter_heads SET active_version_id=$2, "
+            " activation_id=$3, updated_at=now() WHERE policy_key=$1",
+            pk, prev, aid)
+        if head["proposal_id"]:
+            await conn.execute(
+                "UPDATE paper_improvement_proposals SET active=FALSE, "
+                " deactivated_at=$2, updated_at=now() WHERE proposal_id=$1",
+                head["proposal_id"], L._ts(at))
+            await _proposal_event(conn, head["proposal_id"],
+                                  kind="ROLLED_BACK", actor=who, detail={
+                                      "from_version_id": cur,
+                                      "to_version_id": prev,
+                                      "activation_id": aid,
+                                      "reason": str(reason)}, now=at)
+        if restored["proposal_id"]:
+            await conn.execute(
+                "UPDATE paper_improvement_proposals SET active=TRUE, "
+                " deactivated_at=NULL, updated_at=now() WHERE "
+                " proposal_id=$1 AND activated_by IS NOT NULL",
+                restored["proposal_id"])
+    return {"ok": True, "policy_key": pk, "rolled_back_version_id": cur,
+            "active_version_id": prev, "activation_id": aid,
+            "params": L._j(restored["params"]), "actor": who}
+
+
+async def policy_parameter_state(conn, policy_key: str = None) -> dict:
+    """FOR MANAGEMENT: the ACTIVE version (values and provenance), every
+    version, the CANDIDATES (proposals of the supported change, with their
+    evaluation status -- INSUFFICIENT_FORWARD_DATA stated as such -- and the
+    activation checks they would face now), and the activation history."""
+    pk = policy_key or PARAM_POLICY
+    if not await conn.fetchval(
+            "SELECT to_regclass('paper_policy_parameter_heads') IS NOT NULL"):
+        return {"policy_key": pk, "status": "UNAVAILABLE",
+                "why": "MIGRATION_186_IS_NOT_APPLIED"}
+    head = await _active_parameters(conn, pk)
+    active_vals = None if head is None else L._j(head["params"])
+    versions = [_rec(r) for r in await conn.fetch(
+        "SELECT version_id, version_no, params, params_sha256, source, "
+        "       proposal_id, evaluation_id, approved_by, created_at "
+        "  FROM paper_policy_parameter_versions WHERE policy_key=$1 "
+        " ORDER BY version_no", pk)]
+    for v in versions:
+        v["state"] = ("ACTIVE" if head is not None and v["version_id"]
+                      == head["active_version_id"] else "INACTIVE")
+    history = [_rec(r) for r in await conn.fetch(
+        "SELECT activation_id, kind, version_id, previous_version_id, "
+        "       proposal_id, evaluation_id, actor, reason, control, at "
+        "  FROM paper_policy_parameter_activations WHERE policy_key=$1 "
+        " ORDER BY at DESC, recorded_at DESC LIMIT 100", pk)]
+    cands = []
+    for r in await conn.fetch(
+            "SELECT * FROM paper_improvement_proposals WHERE strategy=$1 "
+            "   AND change_class=$2 ORDER BY proposed_at DESC LIMIT 50",
+            pk, C_EDGE):
+        p = _rec(r)
+        ch = p["proposed_change"] or {}
+        checks = activation_checks(p, (active_vals or {}).get(
+            ch.get("parameter")))
+        cands.append({
+            "proposal_id": p["proposal_id"], "account_id": p["account_id"],
+            "proposed_change": ch, "candidate_params": (
+                None if active_vals is None else dict(
+                    active_vals, **{ch.get("parameter"): ch.get("to")})),
+            "status": p["status"], "verdict": p.get("verdict"),
+            "evaluation_id": (p.get("evaluation") or {}).get(
+                "evaluation_id"),
+            "evaluation_counts": (p.get("last_attempt") or {}).get("counts"),
+            "evaluation_reason": (p.get("last_attempt") or {}).get("reason"),
+            "evaluation_period": [p["evaluation_start"],
+                                  p["evaluation_end"]],
+            "training_period": [p["training_start"], p["training_end"]],
+            "active": bool(p.get("active")),
+            "activated_by": p.get("activated_by"),
+            "activatable_now": all(c["passed"] for c in checks),
+            "failed_checks": [c["check"] for c in checks
+                              if not c["passed"]]})
+    return {"policy_key": pk, "parameter": list(PARAM_BOUNDS),
+            "bounds": {k: list(v) for k, v in PARAM_BOUNDS.items()},
+            "grid_pp": PARAM_GRID_PP, "max_step_pp": PARAM_MAX_STEP_PP,
+            "shipped_default": dict(PARAM_DEFAULTS),
+            "floor_justification": PARAM_FLOOR_WHY,
+            "active": (None if head is None else {
+                "version_id": head["active_version_id"],
+                "version_no": head["version_no"], "values": active_vals,
+                "proposal_id": head["proposal_id"],
+                "evaluation_id": head["evaluation_id"],
+                "activation_id": head["activation_id"]}),
+            "versions": versions, "candidates": cands,
+            "activation_history": history,
+            "activation_control": await activation_control(conn),
+            "fallback": ("if the active version cannot be read or is out of "
+                         "bounds, the policy runs the shipped default V1 "
+                         "and records why on each decision"),
+            "funded": "NONE: no funded module reads these parameters"}
 
 
 async def _propose_from_lesson(conn, *, account_id, les, lesson_id,
@@ -2398,9 +2744,12 @@ def _agent_view(agent: str, les: list, props: list) -> dict:
                                        "outcomes", "min_evaluation_outcomes",
                                        "label", "at")}}),
         "active": bool(latest and latest.get("active")),
-        "active_basis": ("ACTIVE needs a PASS, a named human approver and "
-                         "the %s control row; no paper policy reads "
-                         "proposals automatically" % ACTIVATION_CONTROL_KEY),
+        "active_basis": ("ACTIVE needs an evaluated PASS meeting every "
+                         "activation check, a named human approver and the "
+                         "%s control row; an active proposal of the "
+                         "supported change IS the completed-game policy's "
+                         "running parameter version (see policy_parameters)"
+                         % ACTIVATION_CONTROL_KEY),
         "proposals_total": len(props)}
 
 
@@ -2424,7 +2773,7 @@ async def learning_summary(conn, *, account_id: str = L.ACCOUNT_ID,
         un = {"status": "UNAVAILABLE", "why": "MIGRATION_185_IS_NOT_APPLIED",
               "data": None}
         out.update(agents={a: un for a in AGENT_IDS}, event_audits=un,
-                   chains=un, activation_control=un)
+                   chains=un, activation_control=un, policy_parameters=un)
         return out
     agents = {}
     for a in AGENT_IDS:
@@ -2458,6 +2807,15 @@ async def learning_summary(conn, *, account_id: str = L.ACCOUNT_ID,
         why_empty="NO_SIMULATED_FILL_YET")
     out["activation_control"] = await _safe(
         activation_control(conn), why_empty="ABSENT")
+    # THE RUNNING PARAMETER VERSION OF THE COMPLETED-GAME PAPER POLICY: the
+    # active version, every version, the candidates with their evaluation
+    # status, and the activation / rollback history.
+    pp = await _safe(policy_parameter_state(conn),
+                     why_empty="NO_PARAMETER_STATE")
+    if (pp.get("data") or {}).get("status") == "UNAVAILABLE":
+        pp = {"status": "UNAVAILABLE", "why": pp["data"]["why"],
+              "data": None}
+    out["policy_parameters"] = pp
     return out
 
 
