@@ -145,10 +145,12 @@ def test_each_office_page_carries_the_workboard_and_conversation(kind):
 def test_the_position_question_carries_the_group_id_and_versions_are_disclosed():
     js = OFFICE.OFFICE_JS
     assert "Position group '+p.group_id" in js
+    # v3: MLB logos only for an exact MLB identity; served as static files
+    assert "club-logo" in js
     assert "Decision '+r.decision_id" in js
     assert "Explain recommendation '+r.recommendation_id" in js
-    assert "Historical policy version." in js
-    assert "Its refusal uses the rules in effect at evaluation" in js
+    assert "Historical policy version" in js
+    assert "its refusal uses the rules at evaluation, not today" in js
     # missing values are said, never zero
     assert "Not recorded" in js
     assert "This is not an empty portfolio." in js

@@ -2330,6 +2330,31 @@ async def admin_rn1x_run_management(response: Response,
     return out
 
 
+@app.post("/api/admin/pinnapi-probe",
+          dependencies=[Depends(require_admin)])
+async def admin_pinnapi_probe(response: Response,
+                              body: dict | None = None) -> dict:
+    """PINNAPI READINESS, read-only (`sportsassets.pinnapi_probe`).
+
+    `action`: "keys" (which PinnAPI-looking env var NAMES this service has),
+    "docs" (the provider's public documentation lines matching `pattern`,
+    fetched WITHOUT the key) or "rest" (up to 6 authenticated GETs to the
+    relative provider `paths`, >= 1 s apart, returning status, timing and a
+    sanitized structure). Never returns the key, opens no stream, writes
+    nothing, places nothing."""
+    from .. import pinnapi_probe as PP
+    response.headers["Cache-Control"] = "no-store"
+    b = dict(body or {})
+    action = str(b.get("action") or "keys")
+    if action == "keys":
+        return PP.keys_present()
+    if action == "docs":
+        return await PP.docs(b.get("pattern"))
+    if action == "rest":
+        return await PP.rest(list(b.get("paths") or []))
+    raise HTTPException(status_code=400, detail="action: keys | docs | rest")
+
+
 @app.post("/api/admin/venue-settlement-probe",
           dependencies=[Depends(require_admin)])
 async def admin_venue_settlement_probe(response: Response,

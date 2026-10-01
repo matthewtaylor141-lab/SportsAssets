@@ -437,3 +437,6 @@ tests/test_paper_training_launch.py
 # recorded figures (never recomputed), version-aware closest opportunities
 # scoped to the account, the position-linked Ask, and speech supersession
 tests/test_agent_office_integration.py
+# The PinnAPI readiness probe never discloses the key: header-only, provider
+# host only, no redirects, bounded relative paths, secret fields redacted
+tests/test_pinnapi_probe.py
