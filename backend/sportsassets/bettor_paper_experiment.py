@@ -217,8 +217,11 @@ async def closest(conn, now: float, acct: str = L.ACCOUNT_ID) -> list:
     versions, each ranked by gross edge. Every row carries its recorded
     policy_version, whether that is the serving version, and its age -- a
     historical refusal describes the rules in force when it was made."""
-    from .agents import paper_benchmark as PB
-    serving = PB.CG_VERSION
+    # the serving version as the operations read names it (the policy
+    # module's own constant, read through bettor_paper_ops -- this read
+    # model never imports the benchmark module)
+    from . import bettor_paper_ops as OPS
+    serving = OPS._policy_meta()[OPS.COMPLETED_GAME]["version"]
     rows = await conn.fetch(
         "SELECT * FROM (SELECT DISTINCT ON (us_market_slug, policy_version) "
         "       decision_id, strategy, policy_version, "
