@@ -229,6 +229,9 @@ def test_an_unknown_extra_section_is_still_drawn():
 
 # ── transport: same-origin, credentials, locked, not deployed ────────
 ALLOWED_PATHS = set(P.ENDPOINTS.values()) | set(P.PAGE_PATHS.values()) | {P.DESK_PAGE}
+# the same-origin files `agents_static` actually serves (e.g. the MLB club
+# logos the office draws as <img>); a stem must still complete into one
+ALLOWED_PATHS |= {"/api/command/agents/static/" + n for n in P.STATIC_FILES}
 
 
 def _allowed(u):
