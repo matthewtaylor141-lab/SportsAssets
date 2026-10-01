@@ -240,6 +240,10 @@ jobs:
                  -H "Content-Type: application/json" -d '{"action":"keys"}' "$API/api/admin/pinnapi-probe")
           echo "keys HTTP $code"; jq -c . /tmp/pinn/keys.json 2>/dev/null || head -c 300 /tmp/pinn/keys.json
           [ "$code" = "200" ] || { echo "probe route not deployed on the serving build (HTTP $code); docs only"; exit 0; }
+          code=$(curl -s -o /tmp/pinn/account.json -w '%{http_code}' --max-time 30 -X POST -H "$H" \
+                 -H "Content-Type: application/json" -d '{"action":"account"}' "$API/api/admin/pinnapi-probe")
+          echo "account HTTP $code (entitlement fields only)"; jq -c . /tmp/pinn/account.json 2>/dev/null | head -c 3000; echo
+          sleep 1
           [ -n "$PATHS" ] || PATHS="/health"
           body=$(jq -nc --arg s "$PATHS" '{action: "rest", paths: ($s | split(",") | map(gsub("\\s"; "")) | map(select(length > 0)))}')
           code=$(curl -s -o /tmp/pinn/rest.json -w '%{http_code}' --max-time 120 -X POST -H "$H" \
