@@ -207,6 +207,10 @@ R_FRESHNESS_UNKNOWN = DP.R_FRESHNESS_UNKNOWN
 R_NO_BOOK = PD.R_NO_BOOK
 R_BOOK_NOT_CURRENT = "THE_PAPER_BOOK_OBSERVATION_IS_NOT_CURRENT"
 R_EDGE = DP.R_BELOW                           # BELOW_MIN_GROSS_EDGE
+#: ANOTHER STRATEGY ALREADY HOLDS (or is buying) THIS GAME on the one shared
+#: account. Two policies never independently spend the same bankroll on
+#: duplicate exposure to one fixture.
+R_CROSS_STRATEGY = "ANOTHER_STRATEGY_HOLDS_EXPOSURE_TO_THIS_FIXTURE"
 R_NO_QTY = DP.R_NO_QTY
 R_FEES = DP.R_FEES
 R_NET = DP.R_NET                              # NET_EV_NOT_POSITIVE_AFTER_FEES
@@ -853,6 +857,12 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
                displayed_quote_used_as_price=False)
     if pin.get("refusal"):
         refusals.append(pin["refusal"])
+    cross = await cross_strategy_exposure(
+        conn, account_id=ctx["account_id"], strategy=STRATEGY,
+        slug=cand.get("us_market_slug"), fixture=cand.get("fixture"))
+    pin["cross_strategy_exposure"] = cross
+    if cross["held"]:
+        refusals.append(R_CROSS_STRATEGY)
     p = pin.get("p")
     obs, md, levels, edges = None, None, [], []
     sized: dict = {"qty": 0, "limit": None, "wire": None}
@@ -1177,6 +1187,34 @@ async def decide_for_hook(conn, ctx: dict, row: dict, *,
 # ═════════════════════════════════════════════════════════════════════
 # XAVIER: THE SAME POLICY FOR THE LIFE OF THE POSITION
 # ═════════════════════════════════════════════════════════════════════
+
+async def cross_strategy_exposure(conn, *, account_id: str, strategy: str,
+                                  slug, fixture) -> dict:
+    """OPEN EXPOSURE TO THE SAME CONTRACT OR FIXTURE HELD BY ANOTHER
+    STRATEGY on this account: an entry order still working, or a filled
+    entry whose position is still open. Read-only; never raises (an
+    unreadable answer is treated as held, so it refuses)."""
+    try:
+        rows = await conn.fetch(
+            "SELECT DISTINCT o.strategy, o.group_id, o.us_market_slug, "
+            "       o.state, o.filled_qty "
+            "  FROM paper_orders o WHERE o.account_id=$1 AND o.role='ENTRY' "
+            "   AND o.strategy <> $2 AND (o.us_market_slug = $3 "
+            "        OR ($4::text IS NOT NULL AND o.fixture = $4)) "
+            "   AND (o.state = ANY($5::text[]) OR o.filled_qty > 0)",
+            account_id, strategy, slug, fixture, list(L.OPEN_STATES))
+        if not rows:
+            return {"held": False, "by": []}
+        open_groups = {p["group_id"] for p in await L.positions(
+            conn, account_id) if p["open_qty"] > 1e-9}
+        by = [{"strategy": r["strategy"], "group_id": r["group_id"],
+               "us_market_slug": r["us_market_slug"], "state": r["state"]}
+              for r in rows if r["state"] in L.OPEN_STATES
+              or r["group_id"] in open_groups]
+        return {"held": bool(by), "by": by}
+    except Exception as exc:                                    # noqa: BLE001
+        return {"held": True, "by": [], "error": type(exc).__name__}
+
 
 async def group_strategy(conn, group_id: str) -> str:
     """The strategy of a paper group: its entry order's (migration 182). A

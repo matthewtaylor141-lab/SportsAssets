@@ -273,10 +273,11 @@ def set_policy_control(control_key: str, enabled: bool) -> None:
     async def _go():
         c = await H.connect()
         try:
+            # the switch alone: the row's provenance (why, updated_by) is
+            # the migration's and is left as it was
             await c.execute(
-                "UPDATE paper_control SET enabled=$2, updated_by='test', "
-                " updated_at=now() WHERE control_key=$1", control_key,
-                bool(enabled))
+                "UPDATE paper_control SET enabled=$2 WHERE control_key=$1",
+                control_key, bool(enabled))
         finally:
             await c.close()
     asyncio.run(_go())

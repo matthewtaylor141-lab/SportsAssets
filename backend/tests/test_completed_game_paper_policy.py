@@ -68,14 +68,26 @@ async def _pass(conn, acct, transport, now, **kw):
 
 @pytest.fixture
 def both_on(monkeypatch):
-    """Both paper policies on, by the environment flag and their rows."""
+    """THE PRODUCTION SELECTION since migration 184: the environment flag
+    on, the completed-game policy's row ON and the strict benchmark's row
+    OFF (one active entry experiment). Asserted, not assumed."""
     monkeypatch.setenv(PB.ENV_FLAG, "on")
     monkeypatch.setenv(PL.S.ENV_FLAG, "on")
     PL.set_policy_control(PB.CG_POLICY["control_key"], True)
+    PL.set_policy_control(PB.CONTROL_KEY, False)
     PB._CONTEXT_CACHE.clear()
     PD._CONTEXT_CACHE.clear()
     yield
     PB._CONTEXT_CACHE.clear()
+
+
+@pytest.fixture
+def strict_too(both_on):
+    """Both benchmark rows ON, to prove the cross-strategy guard; put back
+    to the production selection afterwards."""
+    PL.set_policy_control(PB.CONTROL_KEY, True)
+    yield
+    PL.set_policy_control(PB.CONTROL_KEY, False)
 
 
 async def _decision(conn, acct, vid, strategy):
@@ -182,11 +194,10 @@ async def test_conditional_entry_refusals_fill_and_xavier_handoff(both_on):
         assert p1["steps"]["benchmark_completed_game"][
             "decisions_recorded"] >= 4
 
-        # THE STRICT POLICY IS UNCHANGED: it refuses the playoff contract
-        st = await _decision(conn, acct, vals["playoff"]["valuation_id"],
-                             PB.STRATEGY)
-        assert st["verdict"] == "REFUSE"
-        assert st["refusal"] == "SETTLEMENT_NOT_SUPPORTED"
+        # ONE ACTIVE ENTRY POLICY: the strict benchmark's row is off, so it
+        # records nothing new (its history is untouched)
+        assert await _decision(conn, acct, vals["playoff"]["valuation_id"],
+                               PB.STRATEGY) is None
 
         ok = await _decision(conn, acct, vals["playoff"]["valuation_id"], CG)
         assert ok["verdict"] == "ENTER", (ok["refusal"], ok["refusals"])
@@ -387,7 +398,7 @@ async def test_repeated_passes_hooks_and_restarts_duplicate_nothing(both_on):
         g1 = await hook(now)
         assert "benchmark_completed_game" in g1, g1
         assert g1["benchmark_completed_game"]["verdict"] == "ENTER"
-        assert g1["benchmark"]["verdict"] == "REFUSE"
+        assert g1["benchmark"]["decided"] is False
         c0 = await _counts(conn, acct, CG)
         assert c0["paper_orders"] == 1, [dict(r) for r in await conn.fetch(
             "SELECT order_id, role, decision_id, state, strategy FROM "
@@ -410,10 +421,71 @@ async def test_repeated_passes_hooks_and_restarts_duplicate_nothing(both_on):
             "SELECT fill_id FROM paper_fills WHERE account_id=$1 AND "
             " strategy=$2", acct["account_id"], CG)
         assert len({f["fill_id"] for f in fills}) == len(fills)
-        # the strict policy's one refusal is its own record, untouched
+        # the strict policy, switched off, recorded nothing
         assert await conn.fetchval(
             "SELECT count(*) FROM paper_decisions WHERE account_id=$1 AND "
-            " strategy=$2", acct["account_id"], PB.STRATEGY) == 1
+            " strategy=$2", acct["account_id"], PB.STRATEGY) == 0
+    finally:
+        await PL.purge_everything(conn)
+        await conn.close()
+
+
+# ═════════════════════════════════════════════════════════════════════
+# 4b · ACTIVE ENTRY POLICIES, READ BACK; NO DUPLICATE EXPOSURE ACROSS THEM
+# ═════════════════════════════════════════════════════════════════════
+
+@pg
+async def test_the_active_entry_policies_read_back(both_on):
+    conn = await H.connect()
+    try:
+        rows = {r["control_key"]: r for r in await conn.fetch(
+            "SELECT control_key, enabled, updated_by FROM paper_control")}
+        assert rows[PB.CG_POLICY["control_key"]]["enabled"] is True
+        assert rows[PB.CONTROL_KEY]["enabled"] is False
+        assert rows[PB.CONTROL_KEY]["updated_by"] == "migration 184"
+        two = rows.get("PAPER_ENTRIES:DEREK_ENTRY_POLICY_V2")
+        assert two is None or two["enabled"] is False
+        assert (await PB.enablement(conn, PB.CG_POLICY))["enabled"] is True
+        assert (await PB.enablement(conn))["enabled"] is False
+    finally:
+        await conn.close()
+
+
+@pg
+async def test_a_second_strategy_never_duplicates_exposure(strict_too):
+    """The strict benchmark holds a game (synthetic fully compatible terms);
+    a later valuation of the SAME contract carrying the recorded Wild Card
+    text would pass the completed-game match and edge -- it is refused by
+    name, before any book read, because another strategy holds the game."""
+    conn = await H.connect()
+    now = time.time() + 5.0
+    try:
+        await PL.purge_everything(conn)
+        await PL.purge_research_models(conn)
+        acct = await PL.new_account(conn, "cgdup", now=now)
+        t = PL.Transport(now)
+        first = await PL.valuation(conn, decided_at=now - 10, p_pin=0.62,
+                                   compatibility="COMPATIBLE")
+        t.set(first["slug"], offers=[(0.50, 2000)], bids=[(0.48, 2000)])
+        client = PL.client(t)
+        assert not (await _pass(conn, acct, t, now, client=client))["errors"]
+        st = await _decision(conn, acct, first["valuation_id"], PB.STRATEGY)
+        assert st["verdict"] == "ENTER", (st["refusal"], st["refusals"])
+        second = await PL.valuation(conn, slug=first["slug"],
+                                    decided_at=now - 2, p_pin=0.62,
+                                    compatibility="INCOMPATIBLE")
+        assert not (await _pass(conn, acct, t, now + 1,
+                                client=client))["errors"]
+        cg = await _decision(conn, acct, second["valuation_id"], CG)
+        assert cg["verdict"] == "REFUSE"
+        assert cg["refusal"] == PB.R_CROSS_STRATEGY
+        held = H.j(cg["pinnacle"])["cross_strategy_exposure"]
+        assert held["held"] is True
+        assert {b["strategy"] for b in held["by"]} == {PB.STRATEGY}
+        assert cg["book_obs_id"] is None
+        assert await conn.fetchval(
+            "SELECT count(*) FROM paper_orders WHERE account_id=$1 AND "
+            " strategy=$2", acct["account_id"], CG) == 0
     finally:
         await PL.purge_everything(conn)
         await conn.close()
@@ -439,7 +511,8 @@ async def test_its_own_kill_switch_stops_it_alone(both_on):
         try:
             en = await PB.enablement(conn, PB.CG_POLICY)
             assert en["enabled"] is False
-            assert (await PB.enablement(conn))["enabled"] is True
+            assert en["refusal"] == PB.R_CONTROL_OFF
+            assert (await PB.enablement(conn))["enabled"] is False
             assert not (await _pass(conn, acct, t, now))["errors"]
             assert (await _counts(conn, acct, CG))["paper_decisions"] == 0
         finally:

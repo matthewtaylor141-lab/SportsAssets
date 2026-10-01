@@ -460,8 +460,11 @@ READERS = {
     "agents/paper_derek.py": (
         "PAPER_ONLY_READS_BOTH_PURPOSES_SIMULATED_ORDERS_NEVER_FUNDED", 3),
     "agents/paper_runtime.py": ("PAPER_ONLY_BY_ID_OF_THE_ROW_JUST_WRITTEN", 1),
+    # (184) plus the venue's published settlement PRICE for a contract it
+    # settled at a price (VENUE_PRICE_SQL): a settlement-evidence read by
+    # slug for an already-held paper position, never a candidate selection.
     "agents/paper_xavier.py": (
-        "PAPER_ONLY_MEASURE_AND_SETTLEMENT_EVIDENCE_READS", 6),
+        "PAPER_ONLY_MEASURE_AND_SETTLEMENT_EVIDENCE_READS", 8),
     # (182) THE EXPERIMENTAL PINNACLE_ONLY_PAPER_BENCHMARK: like paper Derek
     # it reads BOTH purposes deliberately (every production row is
     # CALIBRATION_ONLY under P5, disclosed as book_currency NOT_ESTABLISHED on

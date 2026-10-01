@@ -87,16 +87,20 @@ async def _ledger_matches_balances(conn, acct_id, now) -> dict:
 
 @pytest.fixture
 def bench_on(monkeypatch):
-    # THE STRICT POLICY ALONE: the completed-game paper policy is switched
-    # off by its own kill-switch row, so every count here is the strict
-    # policy's (its proofs are in test_completed_game_paper_policy.py)
+    # THE STRICT POLICY ALONE: its own row switched ON for the proof (its
+    # migrated state since 184 is off), the completed-game policy's OFF, so
+    # every count here is the strict policy's (the completed-game proofs are
+    # in test_completed_game_paper_policy.py). Both rows go back to their
+    # migrated state afterwards.
     monkeypatch.setenv(PB.ENV_FLAG, "on")
+    PL.set_policy_control(PB.CONTROL_KEY, True)
     PL.set_policy_control(PB.CG_POLICY["control_key"], False)
     PB._CONTEXT_CACHE.clear()
     PD._CONTEXT_CACHE.clear()
     yield
     PB._CONTEXT_CACHE.clear()
     PL.set_policy_control(PB.CG_POLICY["control_key"], True)
+    PL.set_policy_control(PB.CONTROL_KEY, False)
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -586,6 +590,8 @@ async def test_switch_off_writes_no_benchmark_rows(monkeypatch):
                           "mutation_attempts"}
         # flag on, kill-switch row off: still nothing
         monkeypatch.setenv(PB.ENV_FLAG, "on")
+        prior = await conn.fetchval("SELECT enabled FROM paper_control "
+                                    " WHERE control_key=$1", PB.CONTROL_KEY)
         await conn.execute("UPDATE paper_control SET enabled=FALSE WHERE "
                            " control_key=$1", PB.CONTROL_KEY)
         try:
@@ -599,8 +605,9 @@ async def test_switch_off_writes_no_benchmark_rows(monkeypatch):
             assert g2["benchmark"] == {"decided": False,
                                        "why": PB.R_CONTROL_OFF}
         finally:
-            await conn.execute("UPDATE paper_control SET enabled=TRUE WHERE "
-                               " control_key=$1", PB.CONTROL_KEY)
+            # back to the row's state before this proof (off since 184)
+            await conn.execute("UPDATE paper_control SET enabled=$2 WHERE "
+                               " control_key=$1", PB.CONTROL_KEY, prior)
         assert await conn.fetchval(
             "SELECT count(*) FROM paper_decisions WHERE session_id=$1 "
             "   AND strategy=$2", acct["session_id"], PB.STRATEGY) == 0
@@ -631,9 +638,14 @@ async def test_migration_182_keeps_existing_rows_on_the_two_model_label():
         assert await conn.fetchval(
             "SELECT count(*) FROM pg_indexes WHERE indexname="
             "'paper_decisions_one_per_valuation_idx'") == 0
-        row = await conn.fetchrow("SELECT enabled FROM paper_control WHERE "
-                                  " control_key=$1", PB.CONTROL_KEY)
-        assert row is not None and row["enabled"] is True
+        row = await conn.fetchrow("SELECT enabled, updated_by FROM "
+                                  " paper_control WHERE control_key=$1",
+                                  PB.CONTROL_KEY)
+        # the row 182 inserted is still there; since 184 its NEW ENTRIES are
+        # off (one active entry experiment: the completed-game policy)
+        assert row is not None
+        assert row["enabled"] is False and row["updated_by"] == \
+            "migration 184"
         # the live account is untouched: one funding entry, no new kind
         assert await conn.fetchval(
             "SELECT count(*) FROM paper_ledger WHERE account_id=$1 "
@@ -853,7 +865,7 @@ async def test_repeated_valuations_and_restarts_duplicate_nothing(
         await conn.close()
 
 
-def _fake_research_model(monkeypatch, p_internal=0.66):
+def _fake_research_model(monkeypatch, p_internal=0.66, low_at_or_above=None):
     """A stand-in research model for the TWO-MODEL strategy (its real fit is
     proven in test_paper_vertical_slice_derek_to_audrey); here only so both
     strategies can hold positions in one account."""
@@ -868,7 +880,11 @@ def _fake_research_model(monkeypatch, p_internal=0.66):
         return dict(model)
 
     def score(m, *, price, payout_is_complement):
-        return {"ok": True, "p": p_internal, "feature_sha": "test",
+        # optionally a LOW reading at or above a price, so the two-model
+        # strategy declines those books and the benchmark can hold them
+        p = (0.30 if low_at_or_above is not None
+             and float(price) >= float(low_at_or_above) else p_internal)
+        return {"ok": True, "p": p, "feature_sha": "test",
                 "features": {"acquisition_price": price,
                              "payout_is_complement": 0.0},
                 "feature_basis": "test stand-in"}
@@ -919,25 +935,34 @@ async def test_two_model_entries_switch_off_records_but_places_nothing(
 @pg
 async def test_both_strategies_purchases_sales_settlements_reconcile(
         bench_on, monkeypatch):
-    """Both strategies enter the SAME two markets on one account (the
-    two-model entry switch on for this proof): four groups, four handoffs
-    with the right strategy, quantity and position; market A's protections
-    are sold by a strict cross (SALE), market B settles (SETTLEMENT); every
-    figure reconciles to the one shared ledger, per strategy and in total."""
+    """Both strategies hold positions on one account (the two-model entry
+    switch on for this proof) -- on DIFFERENT games, because a strategy never
+    duplicates another's exposure (migration 184 rule): the two-model
+    strategy enters markets A2/B2 and the benchmark is refused there by name;
+    the benchmark enters A1/B1, which the two-model strategy declines. Four
+    groups, four handoffs with the right strategy, quantity and position; the
+    A markets' protections are sold by a strict cross (SALE), the B markets
+    settle (SETTLEMENT); every figure reconciles to the one shared ledger, per
+    strategy and in total."""
     conn = await H.connect()
     now = time.time() + 5.0
     try:
         await PL.purge_everything(conn)
-        _fake_research_model(monkeypatch)
+        _fake_research_model(monkeypatch, low_at_or_above=0.55)
         prev = await PL.two_model_entries(conn, True)
         try:
             cfg = PL.config(entry={"target_order_usd": 2000.0})
             acct = await PL.new_account(conn, "benchboth", now=now, cfg=cfg)
             va = await PL.valuation(conn, decided_at=now - 5, p_pin=0.62)
             vb = await PL.valuation(conn, decided_at=now - 5, p_pin=0.62)
+            va2 = await PL.valuation(conn, decided_at=now - 5, p_pin=0.62)
+            vb2 = await PL.valuation(conn, decided_at=now - 5, p_pin=0.62)
             t = PL.Transport(now)
-            for v in (va, vb):
-                t.set(v["slug"], offers=[(0.50, 6000), (0.56, 6000)],
+            for v in (va, vb):           # the benchmark's: 7 pp at 0.55
+                t.set(v["slug"], offers=[(0.55, 6000), (0.56, 6000)],
+                      bids=[(0.48, 5000)])
+            for v in (va2, vb2):         # the two-model strategy's
+                t.set(v["slug"], offers=[(0.50, 6000), (0.54, 6000)],
                       bids=[(0.48, 5000)])
             client = PL.client(t)
             p1 = await _pass(conn, acct, t, now, client=client)
@@ -947,8 +972,14 @@ async def test_both_strategies_purchases_sales_settlements_reconcile(
                 " role='ENTRY' ORDER BY strategy, us_market_slug",
                 acct["account_id"])
             assert len(orders) == 4
-            assert sorted(o["strategy"] for o in orders) == sorted(
-                ["DEREK_ENTRY_POLICY_V2"] * 2 + [PB.STRATEGY] * 2)
+            by = {o["us_market_slug"]: o["strategy"] for o in orders}
+            assert by == {va["slug"]: PB.STRATEGY, vb["slug"]: PB.STRATEGY,
+                          va2["slug"]: "DEREK_ENTRY_POLICY_V2",
+                          vb2["slug"]: "DEREK_ENTRY_POLICY_V2"}
+            for v in (va2, vb2):
+                d = (await _decisions(conn, acct, v["valuation_id"]))[
+                    PB.STRATEGY]
+                assert d["refusal"] == PB.R_CROSS_STRATEGY
             assert {o["state"] for o in orders} == {"FILLED"}
             for o in orders:
                 fl = await conn.fetch("SELECT * FROM paper_fills WHERE "
@@ -976,9 +1007,12 @@ async def test_both_strategies_purchases_sales_settlements_reconcile(
             mid = await _ledger_matches_balances(conn, acct["account_id"],
                                                  now + 5)
             assert mid["reserved_usd"] == 0.0
-            # A: a strict cross sells every protection; B: settles WON
-            t.set(va["slug"], offers=[(0.82, 100)], bids=[(0.80, 100000)])
-            await PL.settle_valuation(conn, vb["valuation_id"], outcome=1)
+            # A markets: a strict cross sells every protection; B: settle WON
+            for v in (va, va2):
+                t.set(v["slug"], offers=[(0.82, 100)],
+                      bids=[(0.80, 100000)])
+            for v in (vb, vb2):
+                await PL.settle_valuation(conn, v["valuation_id"], outcome=1)
             p2 = await _pass(conn, acct, t, now + 120, client=client)
             assert not p2["errors"], p2["errors"]
         finally:

@@ -28,4 +28,9 @@ BEGIN
         CHECK (outcome IN ('WON', 'LOST', 'VOID_REFUND'));
     DELETE FROM paper_control
      WHERE control_key = 'PINNACLE_COMPLETED_GAME_PAPER';
+    UPDATE paper_control SET enabled = TRUE,
+           why = 'restored by the 184 rollback', updated_by = '184 down',
+           updated_at = now()
+     WHERE control_key = 'PINNACLE_ONLY_PAPER_BENCHMARK'
+       AND updated_by = 'migration 184';
 END $$;

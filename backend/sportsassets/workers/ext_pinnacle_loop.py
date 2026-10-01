@@ -8291,7 +8291,21 @@ async def cycle(conn) -> dict:
                 venue_rules_sha256=(
                     hashlib.sha256(str((vevid or {}).get("rules_text"))
                                    .encode("utf-8")).hexdigest()
-                    if (vevid or {}).get("rules_text") else None))
+                    if (vevid or {}).get("rules_text") else None),
+                # WHERE AND WHEN THE WORDS WERE READ: the listing field they
+                # came from, the reader, the instant of the venue read (an
+                # hourly-cached answer keeps its ORIGINAL read instant and
+                # says it was cached), and a named failure when none came.
+                venue_rules_field=((vevid or {}).get("rules_read")
+                                   or {}).get("rules_field"),
+                venue_rules_reader=((vevid or {}).get("rules_read")
+                                    or {}).get("reader"),
+                venue_rules_retrieved_at=((vevid or {}).get("rules_read")
+                                          or {}).get("read_at"),
+                venue_rules_from_cache=((vevid or {}).get("rules_read")
+                                        or {}).get("from_cache"),
+                venue_rules_error=((vevid or {}).get("rules_read")
+                                   or {}).get("error"))
             if calibration_only is not None:
                 # ── A CALIBRATION-ONLY RECORD IS WRITTEN AND GOES NO FURTHER ──
                 #

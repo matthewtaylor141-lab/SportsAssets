@@ -51,6 +51,20 @@ VALUES ('PINNACLE_COMPLETED_GAME_PAPER', TRUE,
         'migration 184')
 ON CONFLICT DO NOTHING;
 
+-- ONE ENTRY POLICY AT A TIME. The owner enabled the completed-game
+-- experiment ONLY: the strict benchmark stops opening new entries (its
+-- decisions, orders and history stay readable and untouched), so two
+-- benchmark policies never spend the one bankroll on the same games. The
+-- two-model strategy's entry row (PAPER_ENTRIES:DEREK_ENTRY_POLICY_V2) was
+-- already off at migration 182 and is not touched here.
+UPDATE paper_control
+   SET enabled = FALSE,
+       why = 'new entries off at migration 184: the completed-game paper '
+             'policy (PINNACLE_COMPLETED_GAME_PAPER) is the one active entry '
+             'experiment; the strict benchmark''s records remain readable',
+       updated_by = 'migration 184', updated_at = now()
+ WHERE control_key = 'PINNACLE_ONLY_PAPER_BENCHMARK' AND enabled;
+
 COMMENT ON COLUMN paper_decisions.strategy IS
     'DEREK_ENTRY_POLICY_V2 (the original two-model paper strategy), '
     'PINNACLE_ONLY_PAPER_BENCHMARK (strict: every settlement condition must '
