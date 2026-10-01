@@ -193,6 +193,9 @@ jobs:
 
   site-voice:
     # POST-RELEASE VERIFICATION, OFF UNLESS verify == site-voice.
+    # The screenshots and report are also committed to the evidence branch
+    # claude/site-verify-evidence (never the protected branch) so they can be
+    # read where the artifact store cannot be reached.
     # 1. VOICE: appends one persona version per agent naming an ElevenLabs
     #    PUBLIC PREMADE voice id from that profile's own preferred names
     #    (audited, versioned; the server key lacks voices_read, so the list
@@ -202,6 +205,8 @@ jobs:
     # 2. BROWSER: tools/site_verify/verify.mjs (read-only GETs).
     if: ${{ inputs.verify == 'site-voice' }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
       - name: Voice through the configured provider
@@ -249,6 +254,19 @@ jobs:
           npm install playwright@1.48.2 >/dev/null 2>&1
           npx playwright install --with-deps webkit chromium >/dev/null 2>&1
           node verify.mjs
+      - name: Commit the screenshots to the evidence branch
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          RUN="${GITHUB_RUN_ID}"
+          D="evidence/site_verify/$(date -u +%Y%m%dT%H%M%SZ)_run$RUN"
+          git config user.name "site-verify"
+          git config user.email "site-verify@users.noreply.github.com"
+          git fetch -q origin claude/site-verify-evidence && git checkout -q -B ev origin/claude/site-verify-evidence || git checkout -q --orphan ev
+          git rm -rq --cached . >/dev/null 2>&1
+          mkdir -p "$D" && cp tools/site_verify/site_verify_out/* "$D"/ 2>/dev/null
+          git add "$D" && git commit -q -m "site verify evidence, run $RUN" && git push -q origin ev:claude/site-verify-evidence && echo "evidence pushed: $D"
       - uses: actions/upload-artifact@v4
         if: always()
         with:

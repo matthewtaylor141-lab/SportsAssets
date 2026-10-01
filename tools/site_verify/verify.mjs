@@ -56,10 +56,20 @@ for (const [ename, engine, dev] of ENGINES) {
           const t = await f.evaluate(() => document.body ?
             document.body.innerText.slice(0, 20000) : "");
           texts.push(t);
-          const o = await f.evaluate(() => ({
-            url: location.pathname,
-            scrollW: document.documentElement.scrollWidth,
-            clientW: document.documentElement.clientWidth }));
+          const o = await f.evaluate(() => {
+            const cw = document.documentElement.clientWidth;
+            const wide = [];
+            for (const el of document.querySelectorAll("body *")) {
+              const r = el.getBoundingClientRect();
+              if (r.right > cw + 1 && r.width > 0 && wide.length < 5)
+                wide.push((el.tagName + "." + (el.className || "")
+                           .toString().slice(0, 40) + "#" + (el.id || ""))
+                          + " right=" + Math.round(r.right));
+            }
+            return { url: location.pathname,
+                     scrollW: document.documentElement.scrollWidth,
+                     clientW: cw, wide };
+          });
           if (o.scrollW > o.clientW + 1) overflow.push(o);
         } catch (e) { /* cross-origin or detached */ }
       }
@@ -101,6 +111,6 @@ for (const r of report) {
   console.log(JSON.stringify({ e: r.engine, a: r.auth, p: r.path, nav: r.nav,
     signin: r.has_sign_in_prompt, disc: r.has_disconnected,
     cash: r.cash_text, stamps: r.stamps, funded_label: r.funded_label,
-    cg: r.completed_game_label, overflow: r.overflow.length,
+    cg: r.completed_game_label, overflow: r.overflow,
     api: r.api_status.slice(0, 12), console: r.console_errors.length }));
 }
