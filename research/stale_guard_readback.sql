@@ -13,7 +13,7 @@ SELECT coalesce(measure->>'stale', '?') AS stale,
        recommendation, action->>'taken' AS action_taken, count(*),
        min(reviewed_at) AS first_at, max(reviewed_at) AS last_at
   FROM paper_xavier_reviews
- WHERE reviewed_at >= '2026-10-01 23:43:00+00'
+ WHERE reviewed_at >= '2026-10-01 23:44:10+00'
  GROUP BY 1, 2, 3, 4, 5, 6 ORDER BY 1, 2, 3, 4;
 
 \echo '== G2 · one guarded review in full (latest) =='
@@ -22,14 +22,14 @@ SELECT review_id, group_id, reviewed_at, recommendation, measure->>'source' AS s
        left((alternatives->'not_rankable')::text, 600) AS not_rankable,
        left(action::text, 300) AS action, left(standing::text, 300) AS standing
   FROM paper_xavier_reviews
- WHERE reviewed_at >= '2026-10-01 23:43:00+00'
+ WHERE reviewed_at >= '2026-10-01 23:44:10+00'
    AND (measure->>'stale' = 'true' OR measure->>'p' IS NULL)
  ORDER BY reviewed_at DESC LIMIT 1;
 
 \echo '== G3 · EXIT/REDUCE orders since the deploy (expected: none driven by a stale measure) =='
 SELECT order_id, group_id, role, state, qty, limit_price, decided_at, strategy
   FROM paper_orders
- WHERE role IN ('EXIT', 'REDUCE') AND decided_at >= '2026-10-01 23:43:00+00'
+ WHERE role IN ('EXIT', 'REDUCE') AND decided_at >= '2026-10-01 23:44:10+00'
  ORDER BY decided_at;
 
 \echo '== G4 · standing protective orders per open group (kept by HOLD) =='
