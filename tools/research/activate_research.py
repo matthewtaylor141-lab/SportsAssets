@@ -10,10 +10,14 @@ import httpx
 
 BASE='https://sportsassets-api.onrender.com'
 PATH='/api/command/agents/capabilities'
+# 2026-10-02 (b): the owner's second set (Slack activation brief). Each goal
+# names an owner, the evidence to use, a concrete question, the peer review
+# and a measurable next action; the flow is owner investigates -> the next
+# agent reviews (and may disagree) -> Audrey audits.
 GOALS=[
- ('coverage-missed-pinnapi','DEREK','Derek: market coverage, missed opportunities and PinnAPI integration. From recorded evidence, quantify markets evaluated vs missed and why (refusal codes, stale-on-arrival, unmapped) and what the PinnAPI feed contributes (sync, census, supported contracts, latency); an unsynced feed is not a census of zero. State hypothesis, evidence for and against, and one measurable next action with an owner. No claim that the feed changes decisions without recorded proof.'),
- ('management-execution-exits','XAVIER','Xavier: position management, execution quality and exit alternatives for the open paper positions. From recorded reviews, resting orders, fills and marks, assess execution quality (fill rates, slippage versus quoted price, fees) and compare exit alternatives (hold to settlement, resting exit, marketable exit) with their recorded inputs and uncertainty. State a recommendation as a recommendation, not an activated change, and one measurable next action with an owner.'),
- ('independent-review-accounting','AUDREY','Audrey: independent review of Derek\'s and Xavier\'s findings, the ledger accounting and proposed improvements. Reconcile cash, reserved, exposure, realized and unrealized P&L to the ledger; check each claim against its cited records; separate training from investment results and acknowledgements from genuine reviews; record disagreements and uncertainty; define the forward measurement required before any improvement claim.')]
+ ('coverage-freshness-matching-calibration','DEREK','Derek: from recorded decisions, refusals and the PinnAPI census, answer: which markets did we evaluate vs miss today and why (unmapped, no Pinnacle, stale, SETTLEMENT_NOT_SUPPORTED); how fresh were probabilities at decision; how many matches failed and why; is the probability model calibrated on settled outcomes? Quote recorded figures only; state the largest fixable blocker and one measurable next action with an owner.'),
+ ('execution-standing-exits-paper-vs-live','XAVIER','Xavier: from recorded positions, standing orders, fills and marks (and the live 1:1,000 mirror records when present), answer: how good was execution (fill rate, slippage vs quoted price, fees); are standing orders sized to held inventory; which exit alternative (hold, resting exit, marketable exit) the records favour per open position; what differs between paper and live execution. Recommendation only; one measurable next action with an owner.'),
+ ('reconciliation-review-defects-proposals','AUDREY','Audrey: reconcile cash, reserved, exposure, realized and unrealized P&L to the ledger; independently test Derek\'s and Xavier\'s latest findings against their cited records and say where you disagree; list operational defects seen today; propose measurable improvements, each with the forward measurement that would show it worked. Keep training apart from investment.')]
 
 def request(client,method,suffix='',payload=None):
     r=client.request(method,PATH+suffix,json=payload)
@@ -28,7 +32,7 @@ def run(client,actor,apply=False,now=None):
     request(client,'POST','/control',{'actor':actor,'enabled':True,'hourly_limit':24})
     flows=[]
     for key,first,title in GOALS:
-        r=request(client,'POST','/goals',{'actor':actor,'request_id':'owner-20261002-'+key+'-v2','title':title,'first':first,'priority':4,'due_at':now+86400})
+        r=request(client,'POST','/goals',{'actor':actor,'request_id':'owner-20261002b-'+key+'-v1','title':title,'first':first,'priority':4,'due_at':now+86400})
         flows.append({'goal':key,**r})
     after=request(client,'GET')
     if after.get('control',{}).get('enabled') is not True:raise RuntimeError('RESEARCH_ENABLE_READBACK_FAILED')
@@ -48,7 +52,7 @@ REISSUE={'management-execution-exits':('v5','Xavier: position management, execut
 
 def reissue(client,actor,key,now=None):
     now=time.time() if now is None else now
-    first=next(f for k,f,_ in GOALS if k==key)
+    first=next((f for k,f,_ in GOALS if k==key),'XAVIER')   # v5 goal predates set (b)
     suffix,title=REISSUE[key]
     if len(title)>500:raise ValueError('GOAL_TITLE_TOO_LONG')
     r=request(client,'POST','/goals',{'actor':actor,'request_id':'owner-20261002-'+key+'-'+suffix,'title':title,'first':first,'priority':4,'due_at':now+86400})
