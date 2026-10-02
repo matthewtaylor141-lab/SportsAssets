@@ -647,6 +647,59 @@ jobs:
           echo "events HTTP $code"
           jq -r '((.events // .) | if type=="array" then .[:40][] else empty end) | "\(.at // .created_at) \(.actor) \(.kind) \(.task_id) \((.detail // .summary // "") | tostring | .[0:240])"' /tmp/ev.json 2>/dev/null
 
+  execmirror:
+    # OFF UNLESS verify starts with execmirror or slack. Calls the API's own
+    # authenticated routes with the ADMIN_TOKEN secret (masked, never
+    # printed); the venue credential never leaves the API service.
+    #   execmirror          read-only: credential names present, account
+    #                       identity/balance/positions/open orders, the market
+    #                       rules of recent paper markets, the mirror view
+    #   execmirror-enable   the mirror's own control: enable (account must be
+    #                       empty; records baseline + cutover), actor = owner
+    #   execmirror-stop     emergency stop (cancel open mirror orders)
+    #   execmirror-flatten  emergency stop and close live positions
+    #   slack               the Slack bridge status (configuration booleans)
+    #   slack-enable        enable the Slack bridge (actor = owner)
+    if: ${{ startsWith(inputs.verify, 'execmirror') || startsWith(inputs.verify, 'slack') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Mirror / Slack control and read-back (authenticated routes)
+        shell: bash
+        env:
+          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+          MODE: ${{ inputs.verify }}
+          SLUGS: ${{ inputs.terms_slugs }}
+          API: https://sportsassets-api.onrender.com
+        run: |
+          set +e
+          [ -n "${ADMIN_TOKEN:-}" ] || { echo "no ADMIN_TOKEN secret"; exit 1; }
+          echo "::add-mask::$ADMIN_TOKEN"
+          H="X-Admin-Token: $ADMIN_TOKEN"
+          post() { curl -s -o /tmp/r.json -w '%{http_code}' --max-time 60 -H "$H" -H 'Content-Type: application/json' -X POST "$API$1" -d "$2"; }
+          get() { curl -s -o /tmp/r.json -w '%{http_code}' --max-time 60 -H "$H" "$API$1"; }
+          show() { echo "== $1 · HTTP $2 =="; jq . /tmp/r.json 2>/dev/null | head -${3:-200} || head -c 3000 /tmp/r.json; echo; }
+          ACTOR="Matt Taylor (owner instruction 2026-10-02)"
+          case "$MODE" in
+            execmirror)
+              c=$(post /api/admin/execmirror/probe '{"action":"keys"}'); show keys $c
+              c=$(post /api/admin/execmirror/probe '{"action":"account"}'); show account $c 260
+              if [ -n "$SLUGS" ]; then J=$(printf '%s' "$SLUGS" | jq -Rc 'split(",")'); else J='["atc-brb-ber-crb-2026-10-02-ber","aec-mlb-sd-mil-2026-10-03"]'; fi
+              c=$(post /api/admin/execmirror/probe "{\"action\":\"markets\",\"slugs\":$J}"); show markets $c 160
+              c=$(get /api/command/execmirror); echo "== view · HTTP $c =="; jq '{title, control, coverage, pnl: (.pnl|{paper_total,expected_live_total,live_total,difference,tracking_ratio}), account: (.account|{at,balances,open_orders,reconciliation}), orders: [.orders[:12][]|{paper_order_id,role,market,expected_scaled_qty,live:(.live|{qty,state,exclusion,venue_order_id,filled_qty,avg_px,fees_usd,submit_latency_ms})}], events: .events[:12]}' /tmp/r.json 2>/dev/null | head -220;;
+            execmirror-enable)
+              c=$(post /api/admin/execmirror/control "{\"action\":\"enable\",\"actor\":\"$ACTOR\"}"); show enable $c;;
+            execmirror-stop)
+              c=$(post /api/admin/execmirror/control "{\"action\":\"stop\",\"actor\":\"$ACTOR\"}"); show stop $c;;
+            execmirror-flatten)
+              c=$(post /api/admin/execmirror/control "{\"action\":\"stop\",\"flatten\":true,\"actor\":\"$ACTOR\"}"); show flatten $c;;
+            slack)
+              c=$(get /api/command/agents/slack); show slack $c;;
+            slack-enable)
+              c=$(post /api/command/agents/slack/control "{\"enabled\":true,\"actor\":\"$ACTOR\"}"); show slack-enable $c;;
+            *) echo "unknown mode $MODE"; exit 1;;
+          esac
+
   team-logos:
     # OFF UNLESS verify == team-logos. Reads the venue's OWN team records
     # (public gateway GET /v1/sports/teams/provider, no key) for the given
