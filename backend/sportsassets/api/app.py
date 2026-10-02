@@ -439,12 +439,17 @@ async def lifespan(_: FastAPI):
     capability_task = asyncio.create_task(_CAP.run(_cap_pool))
     from .. import slack_bridge as _SLACK
     slack_task = asyncio.create_task(_SLACK.run(_cap_pool))
+    # Evidence for the post-boot health-check misses: records every thread's
+    # stack when the loop is blocked >= 2 s; changes no behaviour.
+    from .. import loop_watchdog as _WATCHDOG
+    watchdog_tasks = _WATCHDOG.start(_cap_pool)
     try:
         yield
     finally:
         tasks = [t for t in (desk_task, rn1x_task, rn1x_learn_task,
                              ext_task, rn1x_model_task, trim_task,
-                             poller_task, capability_task, slack_task)
+                             poller_task, capability_task, slack_task,
+                             *watchdog_tasks)
                  if t is not None]
         for task in tasks:
             task.cancel()
