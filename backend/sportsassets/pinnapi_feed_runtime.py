@@ -146,12 +146,16 @@ async def _census_once(pool) -> dict:
     from . import pinnapi_census as C
     o = _STATE.get("owner")
     t0 = time.time()
+    subscribed = set(o.sport_ids if o else [])
     async with pool.acquire() as c:
-        rows = [dict(r) for r in await c.fetch(C.catalogue_sql())]
+        rows = [dict(r) for r in await c.fetch(
+            C.catalogue_sql(sport_ids=subscribed))]
+        others = [(r["sports_type"], r["n"]) for r in await c.fetch(
+            C.catalogue_totals_sql())]
     view = C.feed_event_view(o.cache) if o else {}
-    out = C.census(rows, view, subscribed_sports=set(o.sport_ids if o
-                                                     else []),
-                   synced=bool(o and o.cache.authority.synced), now=t0)
+    out = C.census(rows, view, subscribed_sports=subscribed,
+                   synced=bool(o and o.cache.authority.synced), now=t0,
+                   others=others)
     out["computed_at"] = t0
     out["took_ms"] = round((time.time() - t0) * 1000)
     return out

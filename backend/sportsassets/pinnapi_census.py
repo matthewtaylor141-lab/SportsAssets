@@ -49,7 +49,13 @@ S_UNSUPPORTED = "MATCHED_UNSUPPORTED_FAMILY"
 S_SUPPORTED = "MATCHED_SUPPORTED"
 
 
-def catalogue_sql() -> str:
+def _norm_sql() -> str:
+    """sport_id_of's normalisation, in SQL."""
+    return ("replace(replace(lower(coalesce(sports_type, '')), '_', ''), "
+            "'-', '')")
+
+
+def _base_where() -> str:
     from . import bettor_venue_realism as vreal
     for m in vreal.SIMULATED_MARKERS:
         assert m.replace("-", "").isalpha() and m.islower(), m
@@ -61,13 +67,37 @@ def catalogue_sql() -> str:
     types = "\n   ".join(
         "AND coalesce(sports_type, '') NOT LIKE '%s%%'" % p
         for p in vreal.SIMULATED_SPORTS_TYPE_PREFIXES)
+    return ("""game_start > now() - interval '6 hours'
+   %s
+   %s""" % (prose, types))
+
+
+def catalogue_sql(sport_ids=None) -> str:
+    """Contract rows. With sport_ids, ONLY those sports' rows (the limit then
+    applies to the subscribed sports alone, so a large unsubscribed catalogue
+    cannot truncate them); the rest is counted by catalogue_totals_sql."""
+    scope = ""
+    if sport_ids is not None:
+        pfx = sorted({p for p, sid in SPORT_IDS if sid in set(sport_ids)})
+        for p in pfx:
+            assert p.isalpha() and p.islower(), p
+        scope = ("AND (%s)" % " OR ".join(
+            "%s LIKE '%s%%'" % (_norm_sql(), p) for p in pfx)
+            if pfx else "AND false")
     return ("""SELECT identifier, side_norm, event_slug, event_title, kind,
        line, sports_type, extract(epoch FROM game_start)::float8 AS game_start
   FROM us_premap
- WHERE game_start > now() - interval '6 hours'
+ WHERE %s
    %s
-   %s
- ORDER BY game_start LIMIT %d""" % (prose, types, MAX_CONTRACTS))
+ ORDER BY game_start LIMIT %d""" % (_base_where(), scope, MAX_CONTRACTS))
+
+
+def catalogue_totals_sql() -> str:
+    """Every current contract counted by venue sports_type (no rows)."""
+    return ("""SELECT coalesce(sports_type, '') AS sports_type, count(*) AS n
+  FROM us_premap
+ WHERE %s
+ GROUP BY 1""" % _base_where())
 
 
 def sport_id_of(sports_type: Optional[str]) -> Optional[int]:
@@ -167,9 +197,14 @@ def feed_event_view(cache) -> dict:
 
 
 def census(rows, feed_view: dict, *, subscribed_sports, synced: bool,
-           now: float) -> dict:
+           now: float, others=None) -> dict:
+    """`rows` are contract rows (the subscribed sports when `others` is
+    given); `others` = [(sports_type, n)] for the WHOLE catalogue, of which
+    the non-subscribed part is counted here as OUT_OF_FEED_SCOPE_SPORT /
+    UNMAPPED_SPORT (family ALL, phase ANY) so the total still reconciles."""
     counts = collections.Counter()
     by_event: dict = {}
+    titles: dict = {}
     total = 0
     for r in rows:
         total += 1
@@ -186,6 +221,7 @@ def census(rows, feed_view: dict, *, subscribed_sports, synced: bool,
         else:
             ek = r.get("event_slug")
             if ek not in by_event:
+                titles[ek] = (r.get("event_title"), gs, ph)
                 sides = _sides(r.get("event_title"))
                 by_event[ek] = ((S_NO_SIDES, None) if not sides else
                                 match_event(sides, gs,
@@ -197,6 +233,30 @@ def census(rows, feed_view: dict, *, subscribed_sports, synced: bool,
         counts[key] += 1
         if state == S_UNSUPPORTED:
             counts["reason|%s" % why] += 1
+    rows_total = total
+    for st, n in (others or []):
+        sid = sport_id_of(st)
+        if sid is not None and sid in subscribed_sports:
+            continue                      # already counted row by row
+        state = S_UNMAPPED_SPORT if sid is None else S_OUT_OF_SCOPE
+        counts["%s|ALL|ANY|%s" % (sid, state)] += int(n)
+        total += int(n)
+    ev_states = collections.Counter(st for st, _ in by_event.values())
+    def _iso(t):
+        return (None if t is None else
+                datetime.fromtimestamp(t, timezone.utc).isoformat())
+    unmatched = []
+    for ek, (st, _) in by_event.items():
+        if st in (S_NO_FEED_EVENT, S_AMBIGUOUS, S_NO_SIDES) and \
+                len(unmatched) < 10:
+            title, gs_ev, ph_ev = titles.get(ek, (None, None, None))
+            unmatched.append({"title": title, "venue_start": _iso(gs_ev),
+                              "phase": ph_ev, "state": st})
+    feed_sample = [{"home": e.get("home"), "away": e.get("away"),
+                    "start": _iso(e.get("start")),
+                    "live": e.get("live")}
+                   for sid in sorted(subscribed_sports)
+                   for e in (feed_view.get(sid) or [])][:10]
     states = collections.Counter()
     for k, n in counts.items():
         if not k.startswith("reason|"):
@@ -210,5 +270,10 @@ def census(rows, feed_view: dict, *, subscribed_sports, synced: bool,
             "reconciled": sum(states.values()) == total,
             "matched_events": sum(1 for s, _ in by_event.values()
                                   if s == S_SUPPORTED),
-            "truncated_at": MAX_CONTRACTS if total >= MAX_CONTRACTS else None,
+            "subscribed_rows": rows_total,
+            "events_by_state": dict(ev_states),
+            "unmatched_event_sample": unmatched,
+            "feed_event_sample": feed_sample,
+            "truncated_at": (MAX_CONTRACTS if rows_total >= MAX_CONTRACTS
+                             else None),
             "phase_basis": "VENUE_START_TIME"}
