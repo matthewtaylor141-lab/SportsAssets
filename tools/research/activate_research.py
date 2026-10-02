@@ -11,9 +11,9 @@ import httpx
 BASE='https://sportsassets-api.onrender.com'
 PATH='/api/command/agents/capabilities'
 GOALS=[
- ('coverage','DEREK','Investigate recorded PinnAPI coverage and quote freshness. Distinguish cached, matched, grading-supported, price-eligible and actually evaluated markets. Cite the feed evidence timestamp and source IDs; name missing evidence, an engineering owner and a measurable acceptance check. Do not claim the feed changes decisions unless recorded evidence proves it.'),
- ('modeling','XAVIER','Review how fresh reference probabilities, fees, execution depth and exceptional settlement assumptions affect position management. Propose a falsifiable modeling improvement and a prospective evaluation protocol. Cite recorded evidence, separate peer opinion from facts, and do not activate policy or claim profitability improvement.'),
- ('audit','AUDREY','Audit the team research chain and reconcile decisions, fills, management reviews and outcomes. Identify missing links and proposed improvements with traceable evidence. Separate training costs from investment performance and automated acknowledgments from genuine reviews. Define a forward measurement before any improvement claim.')]
+ ('coverage-missed-pinnapi','DEREK','Derek investigation: market coverage, missed opportunities and PinnAPI integration. From recorded evidence, quantify which catalogue markets were evaluated, which were missed and why (refusal codes, stale-on-arrival, unmapped), and what the PinnAPI feed currently contributes (synced or not, census state, supported contracts, receipt-to-evaluation latency). Distinguish an unsynced feed from a completed census showing zero supported markets. State a hypothesis, the evidence for and against it, and one measurable next action with an owner. Do not claim the feed changes decisions unless recorded evidence proves it.'),
+ ('management-execution-exits','XAVIER','Xavier investigation: position management, execution quality and exit alternatives for the open paper positions. From recorded reviews, resting orders, fills and marks, assess execution quality (fill rates, slippage versus quoted price, fees) and compare exit alternatives (hold to settlement, resting exit, marketable exit) with their recorded inputs and uncertainty. State a recommendation as a recommendation, not an activated change, and one measurable next action with an owner.'),
+ ('independent-review-accounting','AUDREY','Audrey investigation: independent review of Derek\'s and Xavier\'s findings, the ledger accounting and the proposed improvements. Reconcile cash, reserved cash, exposure, realized and unrealized P&L against the ledger; check each claim in the other agents\' findings against its cited records; separate training-strategy results from investment-strategy results and automated acknowledgements from genuine reviews; record disagreements and uncertainty explicitly; define the forward measurement required before any improvement claim.')]
 
 def request(client,method,suffix='',payload=None):
     r=client.request(method,PATH+suffix,json=payload)
@@ -28,7 +28,7 @@ def run(client,actor,apply=False,now=None):
     request(client,'POST','/control',{'actor':actor,'enabled':True,'hourly_limit':24})
     flows=[]
     for key,first,title in GOALS:
-        r=request(client,'POST','/goals',{'actor':actor,'request_id':'owner-20261002-'+key+'-v1','title':title,'first':first,'priority':4,'due_at':now+86400})
+        r=request(client,'POST','/goals',{'actor':actor,'request_id':'owner-20261002-'+key+'-v2','title':title,'first':first,'priority':4,'due_at':now+86400})
         flows.append({'goal':key,**r})
     after=request(client,'GET')
     if after.get('control',{}).get('enabled') is not True:raise RuntimeError('RESEARCH_ENABLE_READBACK_FAILED')
