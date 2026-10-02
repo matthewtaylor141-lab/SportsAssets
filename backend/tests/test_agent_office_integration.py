@@ -21,6 +21,7 @@ No order, policy, threshold or ledger write.
 from __future__ import annotations
 
 import json
+import re
 import time
 
 import pytest
@@ -164,13 +165,15 @@ def test_the_position_question_carries_the_group_id_and_versions_are_disclosed()
 def test_speech_is_superseded_by_a_new_question_or_stop():
     tj = P.TALK_JS
     # every new question stops (aborts) the previous speech first
-    assert "stopAudio(); addQ(text)" in tj
+    # (v5: the question row is added once, not again on a same-id retry)
+    assert re.search(r"stopAudio\(\);\s*if\(!retry\)addQ\(text\)", tj)
     # Stop aborts the outstanding request and advances the generation
     assert "speechEpoch++; if(speechAbort){speechAbort.abort()" in tj
     # a response that arrives after a newer request never plays
     assert "if(generation!==speechEpoch)return;" in tj
     # text send is not blocked by speech download
-    assert "speak(j.message_id, false); else" in tj
+    # the answer is shown, then speech starts WITHOUT being awaited
+    assert re.search(r";\s*speak\(j\.message_id, ?false\);", tj)
     assert "await speak(j.message_id" not in tj
     sj = OFFICE.SPEECH_JS
     assert "MediaSource" in sj and "isTypeSupported('audio/mpeg')" in sj

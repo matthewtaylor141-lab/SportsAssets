@@ -450,3 +450,7 @@ tests/test_pinnapi_feed_ownership.py
 tests/test_pinnapi_feed_runtime.py
 tests/test_a_future_stamp_is_never_fresh.py
 tests/test_paper_handoff_standing_and_audit_rules.py
+# Agent learning context (office v5): scoped to the main paper account and
+# the agent, latest versions only, provenance verified, future time refused,
+# observations never policy.
+tests/test_learning_context.py
