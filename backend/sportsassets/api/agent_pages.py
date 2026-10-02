@@ -2113,6 +2113,7 @@ def _cc_page_html(kind: str) -> str:
     from . import agent_office_experience as DESK
     from . import agent_office_finish as FINISH
     from . import agent_capability_panel as CAPABILITIES
+    from . import agent_office_management as MANAGEMENT
     js = (CORE_JS + COMMON_JS + TRACE_JS
           + {"derek": DEREK_JS, "xavier": XAVIER_JS, "audrey": AUDREY_JS}[kind]
           + CCP.CC_CORE_JS + CCP.CC_BOOT_JS.replace(
@@ -2121,10 +2122,10 @@ def _cc_page_html(kind: str) -> str:
               1)
           + CCP.PAPER_CORE_JS + OPS.OPS_CORE_JS + CCP.PAPER_BOOT_JS.replace(
               "%%PAPER_EP%%", _json_ep(PAPER_EP_KEYS))
-          + BOOT_JS + OFFICE.OFFICE_JS + OFFICE.SPEECH_JS + TALK_JS + DESK.JS + FINISH.JS + CAPABILITIES.JS)
+          + BOOT_JS + OFFICE.OFFICE_JS + OFFICE.SPEECH_JS + TALK_JS + DESK.JS + FINISH.JS + CAPABILITIES.JS + MANAGEMENT.JS)
     chat = CCP.chat_panel_html(CHAT_PANEL_HTML) if kind == "audrey" else ""
     return (_CC_SHELL.replace("%%CSS%%", BASE_CSS + CCP.CC_CSS + CCP.PAPER_CSS
-                              + OPS.OPS_CSS + TALK_CSS + OFFICE.OFFICE_CSS + DESK.CSS + FINISH.CSS + CAPABILITIES.CSS)
+                              + OPS.OPS_CSS + TALK_CSS + OFFICE.OFFICE_CSS + DESK.CSS + FINISH.CSS + CAPABILITIES.CSS + MANAGEMENT.CSS)
             .replace("%%TALK%%", talk_panel_html(kind))
             .replace("%%FRESH%%", OPS.fresh_html())
             .replace("%%OPS%%", OPS.ops_html(kind))

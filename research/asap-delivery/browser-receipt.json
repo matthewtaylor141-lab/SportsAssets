@@ -1,0 +1,66 @@
+{
+  "passed": true,
+  "checks": [
+    {
+      "kind": "xavier",
+      "width": 1440,
+      "compare": true,
+      "draft": true,
+      "tabs": true,
+      "stale_retained": true,
+      "brief": true,
+      "no_overflow": true
+    },
+    {
+      "kind": "derek",
+      "width": 1440,
+      "compare": true,
+      "draft": true,
+      "tabs": true,
+      "stale_retained": true,
+      "brief": true,
+      "no_overflow": true
+    },
+    {
+      "kind": "audrey",
+      "width": 1440,
+      "compare": true,
+      "draft": true,
+      "tabs": true,
+      "stale_retained": true,
+      "brief": true,
+      "no_overflow": true
+    },
+    {
+      "kind": "xavier",
+      "width": 390,
+      "compare": true,
+      "draft": true,
+      "tabs": true,
+      "stale_retained": true,
+      "brief": true,
+      "no_overflow": true
+    },
+    {
+      "kind": "derek",
+      "width": 390,
+      "compare": true,
+      "draft": true,
+      "tabs": true,
+      "stale_retained": true,
+      "brief": true,
+      "no_overflow": true
+    },
+    {
+      "kind": "audrey",
+      "width": 390,
+      "compare": true,
+      "draft": true,
+      "tabs": true,
+      "stale_retained": true,
+      "brief": true,
+      "no_overflow": true
+    }
+  ],
+  "basis": "Synthetic records in real page template. Not live acceptance; avatar module unavailable in local fixture."
+}
