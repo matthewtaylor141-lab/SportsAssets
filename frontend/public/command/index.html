@@ -12,6 +12,7 @@
   <link rel="stylesheet" href="office.css">
   <link rel="stylesheet" href="management-v6.css">
   <link rel="stylesheet" href="experiment.css">
+  <link rel="stylesheet" href="instreports.css">
 </head>
 <body>
   <a class="skip-link" href="#pagebody">Skip to dashboard</a>
@@ -36,6 +37,11 @@
        window.BTShadow, and AFTER core.js because it uses BTCore.endpoint
        -- the guard that refuses any host but this one. -->
   <script src="shadow.js"></script>
+  <!-- INSTITUTIONAL REPORTS on the paper account: its own read-only contract
+       (/api/command/paper/reports/*, plus the separately labelled live
+       mirror /api/command/execmirror), its own polling. It loads BEFORE
+       app.js because app.js renders its page on a #instreports boot. -->
+  <script src="instreports.js"></script>
   <script src="app.js"></script>
   <!-- THE EXPERIMENT: its own read (GET /api/command/paper/experiment), its
        own polling; office.js places its section on the homepage. -->
