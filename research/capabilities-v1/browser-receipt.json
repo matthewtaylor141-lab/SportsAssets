@@ -1,0 +1,35 @@
+{
+  "pass": true,
+  "checks": [
+    "derek scoped plans and five views",
+    "derek linked collaboration",
+    "derek typed evidence request",
+    "derek sample metrics and honest outcome disclosure",
+    "derek phone layout no horizontal overflow",
+    "xavier scoped plans and five views",
+    "xavier linked collaboration",
+    "xavier typed evidence request",
+    "xavier sample metrics and honest outcome disclosure",
+    "xavier phone layout no horizontal overflow",
+    "audrey scoped plans and five views",
+    "audrey linked collaboration",
+    "audrey typed evidence request",
+    "audrey sample metrics and honest outcome disclosure",
+    "audrey phone layout no horizontal overflow",
+    "Goal form sends typed fields and one stable request ID",
+    "Periodic read retains edited form",
+    "Task discussion carries exact scoped task ID into real chat path",
+    "Prospective experiment form registers hypothesis and fixed cohort",
+    "503 preserves last known plans and labels stale read",
+    "No JavaScript errors"
+  ],
+  "records": "LOCAL SYNTHETIC FIXTURES",
+  "browsers": [
+    "Chromium desktop and phone viewport"
+  ],
+  "not_verified": [
+    "Real Postgres concurrency",
+    "Production provider and Slack delivery",
+    "iPhone Safari"
+  ]
+}

@@ -1133,6 +1133,9 @@ def test_no_funded_module_reads_or_imports_the_policy_parameters():
     # page reads the learning summary and event audits through it (read-only)
     assert importers <= {"agents/paper_runtime.py", "agents/paper_derek.py",
                          "api/app.py", "api/paper_learning_routes.py",
+                         # Research-only typed evidence and protocol registration.
+                         # Neither grants activation or venue-order authority.
+                         "agents/capability_tools.py", "agents/capability_experiments.py",
                          "bettor_paper_ops.py"}, \
         importers
     assert not any("funded" in i for i in importers)

@@ -103,7 +103,7 @@ def labelled_fallback(draft: str, why: str) -> str:
 
 DEPTH_QUICK, DEPTH_NORMAL, DEPTH_MATH = "QUICK", "NORMAL", "MATH"
 
-_CONTEXT_KEYS = ("position_id", "decision_id", "intent_id",
+_CONTEXT_KEYS = ("position_id", "decision_id", "intent_id", "capability_task_id",
                  "xavier_decision_id", "demonstration", "subject")
 
 # ═════════════════════════════════════════════════════════════════════
@@ -1294,6 +1294,7 @@ def _context_supplied(history: list, bundle: dict, provider: dict) -> dict:
             "facts": len(bundle.get("facts") or []),
             "policy": mem.get("policy"),
             "lessons": mem.get("lessons") or [],
+            "work_context": bundle.get("work_context"),
             "basis": ("facts, policy and lessons are in the model's input "
                       "for this turn" if to_model else
                       "records-only answer: no model composed it; the same "

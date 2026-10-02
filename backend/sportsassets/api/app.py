@@ -432,12 +432,17 @@ async def lifespan(_: FastAPI):
             _RN1XM.run(_rn1xm_pool))
         log.info("rn1x model fitting armed (control row gates every cycle)")
 
+    # Independent, bounded research work. Durable control defaults off; no
+    # LLM request is placed inside the market-data or paper execution loop.
+    from ..agents import capability_runtime as _CAP
+    from ..db import get_pool as _cap_pool
+    capability_task = asyncio.create_task(_CAP.run(_cap_pool))
     try:
         yield
     finally:
         tasks = [t for t in (desk_task, rn1x_task, rn1x_learn_task,
                              ext_task, rn1x_model_task, trim_task,
-                             poller_task)
+                             poller_task, capability_task)
                  if t is not None]
         for task in tasks:
             task.cancel()
@@ -518,6 +523,8 @@ try:
     app.include_router(_paper_learning_router)
 except ImportError:
     log.warning("paper: api.paper_learning_routes not loaded", exc_info=True)
+from .agent_capabilities import router as _capabilities_router
+app.include_router(_capabilities_router)
 # AFTER agents_chat: its literal /api/command/agents/audrey/chat keeps
 # Audrey's management-chat contract; the persona chat answers
 # /api/command/agents/{derek,xavier}/chat and /{agent}/persona/chat for all

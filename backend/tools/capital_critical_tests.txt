@@ -454,3 +454,7 @@ tests/test_paper_handoff_standing_and_audit_rules.py
 # the agent, latest versions only, provenance verified, future time refused,
 # observations never policy.
 tests/test_learning_context.py
+# Independent research plans and forward evaluation: no trade or promotion authority.
+tests/test_agent_capabilities.py
+tests/test_agent_capabilities_postgres.py
+tests/test_agent_capability_routes.py

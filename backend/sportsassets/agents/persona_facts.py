@@ -998,9 +998,25 @@ async def gather(conn, *, question: str, context: dict | None = None,
     # AFTER `found`: the policy and lessons never make an unknown position
     # look found
     memory = await _agent_memory(conn, f, agent, question=question, now=now)
+    work_context = None
+    if agent and (context or {}).get("capability_task_id"):
+        from .capability_tools import context_facts
+        try:
+            work_context = await context_facts(conn, f, agent, context["capability_task_id"])
+        except Exception as exc:
+            work_context = {"status": "UNAVAILABLE", "why": type(exc).__name__}
+            f.miss("Assigned research context could not be read")
+    elif agent:
+        from .capability_tools import active_work_facts
+        try:
+            work_context = await active_work_facts(conn, f, agent)
+        except Exception as exc:
+            work_context = {"status": "UNAVAILABLE", "why": type(exc).__name__}
+            f.miss("Assigned research plans could not be read")
     tables = await paper_tables(conn)
     return {"subject": subj, "demonstration": False, "found": found,
             "memory": memory,
+            "work_context": work_context,
             "scope": "POSITION" if scoped else "BOOK", "facts": f.items,
             "checked": f.checked, "missing": f.missing,
             "paper": {"present": bool(tables), "tables": tables,
