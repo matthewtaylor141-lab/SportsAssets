@@ -100,10 +100,26 @@ class _Conn:
     the held contract's catalogue row."""
 
     def __init__(self, *, reading_age=900.0, payout="Flamengo", comp=False,
-                 title="Flamengo vs Palmeiras", sports_type="soccer_brazil"):
+                 title="Flamengo vs Palmeiras", sports_type="soccer_team_full_time_winner",
+                 teams=("Flamengo", "Palmeiras")):
         self.reading_age, self.payout, self.comp = reading_age, payout, comp
-        self.title, self.sports_type = title, sports_type
+        self.title, self.sports_type, self.teams = title, sports_type, teams
         self.queries = []
+
+    def _premap(self, team):
+        # the venue's structured team record (census identity), one per side
+        return {"identifier": "c-%s" % team, "side_norm": None,
+                "event_slug": "ev-held", "event_title": self.title,
+                "kind": "moneyline", "team_name": team, "team_id": team,
+                "team_league": None, "question": None, "signed": None,
+                "line": None, "sports_type": self.sports_type,
+                "game_start": START}
+
+    async def fetch(self, sql, *a):
+        self.queries.append(sql)
+        if "FROM us_premap" in sql:
+            return [self._premap(t) for t in self.teams]
+        return []
 
     async def fetchrow(self, sql, *a):
         self.queries.append(sql)
@@ -121,9 +137,7 @@ class _Conn:
                     "observed_at": dt.datetime.fromtimestamp(
                         AT - self.reading_age, dt.timezone.utc)}
         if "FROM us_premap" in sql:
-            return {"event_title": self.title, "kind": "moneyline",
-                    "line": None, "sports_type": self.sports_type,
-                    "game_start": START}
+            return self._premap(self.teams[0])
         return None
 
 
@@ -174,7 +188,8 @@ async def test_baseball_is_a_2way_devig_and_orientation_is_by_team(
                              moved=BASEBALL_MOVED))
     out = await _measure(_Conn(payout="Tampa Bay Rays",
                                title="Rays vs Yankees",
-                               sports_type="baseball_mlb"))
+                               sports_type="baseball_team_full_game_winner",
+                               teams=("Tampa Bay Rays", "New York Yankees")))
     assert out["stale"] is False
     assert out["feed"]["designation"] == "away"
     assert out["p"] == pytest.approx(_devigged(BASEBALL_MOVED)["away"])
@@ -243,19 +258,21 @@ async def test_an_unmatched_market_stays_stale_with_the_census_reason(
 
 def test_the_held_match_is_the_census_match():
     """One matcher: the held read's contract_match gives the same state the
-    census counts for that row."""
+    census counts for that contract, from the same structured team records
+    (identity is the two venue team names, never the display title)."""
     view = C.feed_event_view(_cache())
-    for title, want in (("Flamengo vs Palmeiras", C.S_SUPPORTED),
-                        ("Santos vs Corinthians", C.S_NO_FEED_EVENT),
-                        ("Flamengo", C.S_NO_SIDES)):
-        row = {"event_title": title, "kind": "moneyline", "line": None,
-               "sports_type": "soccer_brazil", "game_start": START,
-               "event_slug": title}
-        st, _, _ = C.contract_match(row, view, subscribed_sports={1},
-                                    synced=True)
-        got = C.census([row], view, subscribed_sports={1}, synced=True,
+    for teams, want in ((("Flamengo", "Palmeiras"), C.S_SUPPORTED),
+                        (("Santos", "Corinthians"), C.S_NO_FEED_EVENT),
+                        (("Flamengo",), "STRUCTURED_PARTICIPANTS_NOT_TWO")):
+        rows = [{"event_title": " vs ".join(teams), "kind": "moneyline",
+                 "line": None, "sports_type": "soccer_team_full_time_winner",
+                 "game_start": START, "event_slug": "ev-" + teams[0],
+                 "team_name": t, "team_league": None} for t in teams]
+        st, _, _ = C.contract_match(rows[0], rows, view,
+                                    subscribed_sports={1}, synced=True)
+        got = C.census(rows, view, subscribed_sports={1}, synced=True,
                        now=AT)
-        assert st == want and got["states"] == {want: 1}
+        assert st == want and got["states"] == {want: len(rows)}
 
 
 # ── GUARD: the stale-price guard is unchanged ────────────────────────

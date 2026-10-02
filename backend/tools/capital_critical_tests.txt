@@ -471,3 +471,10 @@ tests/test_capability_feed_evidence.py
 
 # Signed Slack transport, read-only personas and recorded research publication.
 tests/test_slack_agent_bridge.py
+
+# Market-coverage identity (structured venue team records, explicit family,
+# clock-artifact proof) and the venue/management comparators; Xavier's held
+# positions read the live feed only under the 30 s limit and the same census
+# identity, with the stale-measure guard unchanged.
+tests/test_market_coverage_v1.py
+tests/test_held_positions_read_the_live_feed.py

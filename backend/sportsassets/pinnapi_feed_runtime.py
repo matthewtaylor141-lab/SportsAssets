@@ -323,12 +323,26 @@ R_OUTCOME_UNMAPPED = "HELD_OUTCOME_NOT_ONE_FEED_DESIGNATION"
 R_NOT_FULL_GAME_ML = "FEED_QUOTE_NOT_A_FULL_GAME_MONEYLINE"
 
 #: the census's own columns, for the ONE held contract
-HELD_CATALOGUE_SQL = """SELECT event_title, kind, line, sports_type,
-       extract(epoch FROM game_start)::float8 AS game_start
+HELD_CATALOGUE_SQL = """SELECT identifier, side_norm, event_slug, event_title,
+       kind, team_name, team_id, team_league, question, signed, line,
+       sports_type, extract(epoch FROM game_start)::float8 AS game_start
   FROM us_premap WHERE market_slug = $1 LIMIT 1"""
 
 
-def held_quote(row: dict, *, payout_event, payout_is_complement: bool,
+def held_event_sql() -> str:
+    """Every catalogue row of the held contract's event, under the census's
+    own base filter, so the held read groups the same structured team
+    records the census groups (pinnapi_census.event_identity)."""
+    from . import pinnapi_census as C
+    return ("""SELECT event_slug, team_name, team_league, sports_type,
+       extract(epoch FROM game_start)::float8 AS game_start
+  FROM us_premap
+ WHERE event_slug = $1 AND %s
+ LIMIT 200""" % C._base_where())
+
+
+def held_quote(row: dict, *, event_rows=None, payout_event,
+               payout_is_complement: bool,
                at: float, max_age_s: float, sport_ids, synced: bool,
                view: dict) -> dict:
     """P(the held contract's payout event) from the feed, or a named
@@ -343,7 +357,7 @@ def held_quote(row: dict, *, payout_event, payout_is_complement: bool,
         if not (pay.startswith("NOT(") and pay.endswith(")") and pay[4:-1]):
             return {"ok": False, "reason": R_BAD_COMPLEMENT}
         sel = pay[4:-1]
-    state, eid, sid = C.contract_match(row, view, subscribed_sports=set(
+    state, eid, sid = C.contract_match(row, event_rows or [row], view, subscribed_sports=set(
         sport_ids), synced=synced)
     if state != C.S_SUPPORTED:
         return {"ok": False, "reason": state, "sport_id": sid}
@@ -409,8 +423,15 @@ async def held_moneyline(conn, *, us_market_slug, payout_event,
                 "error": type(exc).__name__}
     if row is None:
         return {"ok": False, "reason": R_NOT_IN_CATALOGUE}
+    try:
+        event_rows = [dict(r) for r in await conn.fetch(
+            held_event_sql(), row["event_slug"])] if row["event_slug"] else []
+    except Exception as exc:                                    # noqa: BLE001
+        return {"ok": False, "reason": R_CATALOGUE_UNREADABLE,
+                "error": type(exc).__name__}
     from . import pinnapi_census as C
-    return held_quote(dict(row), payout_event=payout_event,
+    return held_quote(dict(row), event_rows=event_rows,
+                      payout_event=payout_event,
                       payout_is_complement=payout_is_complement, at=at,
                       max_age_s=max_age_s, sport_ids=o.sport_ids,
                       synced=bool(o.cache.authority.synced),
