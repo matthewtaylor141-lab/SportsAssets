@@ -45,7 +45,9 @@ const MARKS = () => [...document.querySelectorAll(".team-mark, .xp-team")].map((
 });
 const SHIFT = () => { window.__cls = 0; window.__shifts = []; try { new PerformanceObserver((l) => { for (const e of l.getEntries()) { if (e.hadRecentInput) continue; window.__cls += e.value; window.__shifts.push({ v: Math.round(e.value * 1000) / 1000, t: Math.round(e.startTime), src: (e.sources || []).slice(0, 3).map((s) => { const n = s.node; return n && n.nodeType === 1 ? (n.tagName.toLowerCase() + (n.id ? "#" + n.id : "") + (n.className && typeof n.className === "string" ? "." + n.className.trim().split(/\s+/).slice(0, 2).join(".") : "")) : "?"; }) }); } }).observe({ type: "layout-shift", buffered: true }); } catch (_) {} };
 // load lazy images the way a reader does: bring each mark into view in turn
-const REVEAL = async () => { for (const el of document.querySelectorAll(".team-mark, .xp-team")) { el.scrollIntoView({ block: "center" }); await new Promise((r) => setTimeout(r, 60)); } window.scrollTo(0, 0); };
+// (bounded: the first 30 marks of a view; enough to prove they load)
+const REVEAL = async () => { const els = [...document.querySelectorAll(".team-mark, .xp-team")].slice(0, 30); for (const el of els) { el.scrollIntoView({ block: "center" }); await new Promise((r) => setTimeout(r, 60)); } window.scrollTo(0, 0); };
+const within = (ms, p) => Promise.race([p, new Promise((r) => setTimeout(() => r("TIMEOUT"), ms))]);
 
 async function signed(ctx) {
   if (!TOKEN) return;
@@ -96,9 +98,11 @@ for (const [ename, engine, dev] of ENGINES) {
         R.views = {};
         const views = await f.evaluate(() => [...document.querySelectorAll("button[data-mg-view]")].map((b) => b.getAttribute("data-mg-view"))).catch(() => []);
         for (const v of views) {
+          const t0 = Date.now();
+          const res = await within(60000, (async () => {
           await f.evaluate((v) => document.querySelector('button[data-mg-view="' + v + '"]').click(), v).catch(() => {});
           await page.waitForTimeout(1500);
-          await f.evaluate(() => document.querySelectorAll("details").forEach((d) => { if (!d.closest(".tech")) d.open = true; })).catch(() => {});
+          await f.evaluate(() => [...document.querySelectorAll("details.work-item, details.ops, details[data-panel]")].slice(0, 40).forEach((d) => { d.open = true; })).catch(() => {});
           await f.evaluate(REVEAL).catch(() => {});
           await page.waitForTimeout(2500);
           const vm = await f.evaluate(MARKS).catch(() => []);
@@ -106,6 +110,8 @@ for (const [ename, engine, dev] of ENGINES) {
           R.views[v] = { total: vm.length, visible: vis.length, loaded: vis.filter((m) => m.loaded).length,
                          broken: vm.filter((m) => m.broken).length, names: [...new Set(vis.map((m) => m.title))].slice(0, 40) };
           try { await f.locator(".office-layout").screenshot({ path: `${OUT}/logos_${ename}_${where}_${v}.png`, timeout: 20000 }); } catch (_) {}
+          })());
+          if (res === "TIMEOUT") R.views[v] = Object.assign(R.views[v] || {}, { timed_out_after_ms: Date.now() - t0 });
         }
         await f.evaluate(() => { const b = document.querySelector('button[data-mg-view="work"]'); if (b) b.click(); }).catch(() => {});
         await page.waitForTimeout(1000);
@@ -132,6 +138,7 @@ for (const [ename, engine, dev] of ENGINES) {
       }
     } catch (x) { R.error = String(x).slice(0, 300); }
     await ctx.close();
+    fs.writeFileSync(`${OUT}/logos_report.json`, JSON.stringify(report, null, 1));   // partial evidence survives a timeout
   }
   // EXPIRED / ABSENT SESSION: no credential at all
   const ctx = await browser.newContext({ ...dev });
