@@ -335,3 +335,53 @@ async def test_catalogue_sql_runs_on_real_postgres_and_returns_floats():
         await conn.execute("ROLLBACK")
     finally:
         await conn.close()
+
+
+def test_census_rows_are_scoped_to_subscribed_sports_and_totals_reconcile():
+    """Production 2026-10-02 01:32Z: one LIMIT over the whole catalogue (by
+    start time) truncated at 20,000 and cut the subscribed sport's prematch
+    rows. Rows are now the subscribed sports only; every other contract is
+    counted from a GROUP BY, never fetched, and the total still reconciles
+    without counting the subscribed sport twice."""
+    from sportsassets import pinnapi_census as C
+    sql = C.catalogue_sql(sport_ids={6})
+    assert "LIKE 'baseball%'" in sql and "LIMIT 20000" in sql
+    assert "LIKE 'soccer%'" not in sql
+    assert "AND false" in C.catalogue_sql(sport_ids=set())
+    assert "GROUP BY 1" in C.catalogue_totals_sql()
+    rows = [{"identifier": "x", "side_norm": "a", "event_slug": "e1",
+             "event_title": "Chicago White Sox vs. Cleveland Guardians",
+             "kind": "moneyline", "line": None, "sports_type": "baseball_mlb",
+             "game_start": 1790950000.0},
+            {"identifier": "y", "side_norm": "a", "event_slug": "e2",
+             "event_title": "New York Mets vs. Atlanta Braves",
+             "kind": "moneyline", "line": None, "sports_type": "baseball_mlb",
+             "game_start": 1790950000.0}]
+    view = {6: [{"id": 1, "home": "Cleveland Guardians",
+                 "away": "Chicago White Sox", "start": 1790950000.0,
+                 "live": False}]}
+    others = [("baseball_mlb", 2), ("soccer_epl", 7), ("", 3),
+              ("icehockey_nhl", 4)]
+    out = C.census(rows, view, subscribed_sports={6}, synced=True,
+                   now=1790900000.0, others=others)
+    assert out["total_contracts"] == 2 + 7 + 3 + 4
+    assert out["reconciled"]
+    assert out["states"] == {C.S_SUPPORTED: 1, C.S_NO_FEED_EVENT: 1,
+                             C.S_OUT_OF_SCOPE: 11, C.S_UNMAPPED_SPORT: 3}
+    assert out["subscribed_rows"] == 2 and out["truncated_at"] is None
+    assert out["events_by_state"] == {C.S_SUPPORTED: 1, C.S_NO_FEED_EVENT: 1}
+    assert out["unmatched_event_sample"][0]["title"].startswith("New York")
+    assert out["feed_event_sample"][0]["home"] == "Cleveland Guardians"
+
+
+@pg
+async def test_scoped_catalogue_and_totals_sql_run_on_real_postgres():
+    from sportsassets import pinnapi_census as C
+    conn = await H.connect()
+    try:
+        await conn.fetch(C.catalogue_sql(sport_ids={6}))
+        totals = await conn.fetch(C.catalogue_totals_sql())
+        for r in totals:
+            assert isinstance(r["n"], int)
+    finally:
+        await conn.close()
