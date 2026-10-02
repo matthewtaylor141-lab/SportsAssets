@@ -113,7 +113,11 @@ FORBIDDEN = ("funded", "entry_execution", "entry_inventory", "live",
 ALLOWED_IMPORTS = {"__future__", "annotations", "asyncio", "hashlib", "json", "math", "os", "re",
                    "time", "typing", "bettor_paper_ledger",
                    "bettor_paper_simulator", "bettor_settlement_terms", "derek_policy",
-                   "paper_derek"}
+                   "paper_derek",
+                   # the owner's capital policy for the main PAPER account:
+                   # pure dict transforms (imports only copy), no I/O, no
+                   # funded or venue path
+                   "bettor_paper_limits"}
 
 
 def _imports(path: pathlib.Path) -> list:

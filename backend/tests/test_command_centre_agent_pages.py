@@ -1550,7 +1550,13 @@ SESSION_ROW = {"session_id": "paper_session_20260930T133000Z", "account_id": ACC
                "started_at": T0 - 23400.0, "config": {"reporting_tz": "America/New_York"},
                "config_sha": "a" * 64, "simulator_version": "PAPER_SIM_V1",
                "reporting_tz": "America/New_York", "status": "ACTIVE",
-               "frozen": "config, simulator version, start and account are frozen by migration 171's trigger"}
+               "frozen": "config, simulator version, start and account are frozen by migration 171's trigger",
+               # the owner's capital policy, reported BESIDE the frozen config
+               # (bettor_paper_limits); the frozen config and its sha are unchanged
+               "effective_config": {"reporting_tz": "America/New_York",
+                                    "entry": {"target_order_usd": 1000.0}},
+               "capital_policy": {"version": "PAPER_CAPITAL_1000_AVERAGE_TARGET_V1",
+                                  "entry_target_usd_including_fees": 1000.0}}
 SESSION_PAYLOAD = dict(_base(), enablement=_ok(ENABLED), session=_ok(SESSION_ROW), health=_ok(HEALTH),
                        mutation_attempts=0, heartbeats=[], last_updated_at=T0 + 55)
 SESSION_PAYLOAD_OFF = dict(_base(), enablement=_ok(dict(ENABLED, env_on=False, enabled=False,

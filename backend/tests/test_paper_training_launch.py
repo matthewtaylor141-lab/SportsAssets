@@ -178,7 +178,10 @@ async def test_the_launch_configuration_trains_through_the_real_cycle(
                                 " decision_id=$1", ex["decision_id"])
         assert o["strategy"] == EXPLORE and o["state"] == \
             "PENDING_SIMULATION"
-        assert float(o["reserved_usd"]) <= PEX.MAX_ENTRY_COST_USD
+        # V3: no per-entry ceiling; the sizer still spends at most the
+        # ~$1,000 target (budget = min(target, available cash)) per entry
+        assert PEX.MAX_ENTRY_COST_USD is None
+        assert float(o["reserved_usd"]) <= PEX.TARGET_ENTRY_COST_USD + 1e-6
         att = await conn.fetch(
             "SELECT strategy, outcome FROM paper_evaluation_attempts WHERE "
             " valuation_id=$1 ORDER BY attempt_id", v["id"])
@@ -207,7 +210,7 @@ async def test_the_launch_configuration_trains_through_the_real_cycle(
             assert L._epoch(f["book_observed_at"]) >= eligible
         cost = sum(float(f["qty"]) * float(f["price"]) for f in fills)
         fees = sum(float(f["fee_usd"]) for f in fills)
-        assert cost + fees <= PEX.MAX_ENTRY_COST_USD
+        assert cost + fees <= PEX.TARGET_ENTRY_COST_USD + 1e-6
         debit = await conn.fetchval(
             "SELECT -sum(cash_delta_usd) FROM paper_ledger WHERE "
             " order_id=$1 AND kind='FILL'", o["order_id"])
