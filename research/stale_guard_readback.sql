@@ -3,8 +3,8 @@
 -- whether EXIT/REDUCE were moved to not_rankable with the guard's blocker,
 -- what was selected, and whether any EXIT/REDUCE order followed. Plus the
 -- standing protection kept.
-\echo '== G0 · who holds the ext writer lock now (backend start vs the 23:44:07Z deploy) =='
-SELECT l.pid, a.backend_start, a.application_name, a.backend_start > '2026-10-01 23:44:07+00' AS started_after_deploy
+\echo '== G0 · who holds the ext writer lock now (backend start vs the fa41a91 deploy, live 2026-10-02T00:09:36Z) =='
+SELECT l.pid, a.backend_start, a.application_name, a.backend_start > '2026-10-02 00:09:36+00' AS started_after_deploy
   FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid
  WHERE l.locktype = 'advisory' AND l.granted
    AND ((l.classid::bigint << 32) | l.objid::bigint) = 7723901544120034;
@@ -16,7 +16,7 @@ SELECT date_trunc('minute', reviewed_at) AS minute, count(*) AS stale_reviews,
        count(*) FILTER (WHERE EXISTS (SELECT 1 FROM jsonb_array_elements(coalesce(alternatives->'candidates', '[]'::jsonb)) c
                 WHERE c->>'action' IN ('EXIT', 'REDUCE'))) AS sale_rankable
   FROM paper_xavier_reviews
- WHERE reviewed_at >= '2026-10-01 23:30:00+00'
+ WHERE reviewed_at >= '2026-10-01 23:44:00+00'
    AND (measure->>'stale' = 'true' OR measure->>'p' IS NULL)
  GROUP BY 1 ORDER BY 1;
 
