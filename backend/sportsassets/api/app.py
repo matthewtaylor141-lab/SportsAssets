@@ -2383,6 +2383,33 @@ async def admin_pinnapi_probe(response: Response,
                                "ws_sample")
 
 
+@app.post("/api/admin/execmirror/probe",
+          dependencies=[Depends(require_admin)])
+async def admin_execmirror_probe(response: Response,
+                                 body: dict | None = None) -> dict:
+    """EXECUTION-MIRROR ACCOUNT, read-only (`sportsassets.execmirror_probe`).
+
+    `action`: "keys" (are PMUS_EXECMIRROR_KEY_ID / _SECRET_KEY present, and is
+    the key distinct from the funded one -- booleans and a fingerprint),
+    "account" (authentication, balances, positions, open orders, recent
+    activity counts) or "markets" (order-constraining fields of up to 8
+    public market records, `slugs`). Reads only: the probe's interface has
+    no mutation, writes nothing and never returns the credential."""
+    from .. import execmirror_probe as EP
+    response.headers["Cache-Control"] = "no-store"
+    b = dict(body or {})
+    action = str(b.get("action") or "keys")
+    if action == "keys":
+        return EP.keys_present()
+    if action == "account":
+        return await asyncio.to_thread(EP.account_snapshot)
+    if action == "markets":
+        return await asyncio.to_thread(EP.market_rules,
+                                       list(b.get("slugs") or []))
+    raise HTTPException(status_code=400,
+                        detail="action: keys | account | markets")
+
+
 @app.get("/api/admin/pinnapi-feed/state",
          dependencies=[Depends(require_admin)])
 async def admin_pinnapi_feed_state(response: Response) -> dict:
