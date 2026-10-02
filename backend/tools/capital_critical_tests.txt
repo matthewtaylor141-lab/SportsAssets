@@ -487,3 +487,6 @@ tests/test_slack_followup_mentions.py
 # PinnAPI raw-WebSocket h2h as the primary Pinnacle reference for entry
 # evaluation (one structured pair, atomic outcome set, epoch/runtime recheck).
 tests/test_pinnapi_primary_source.py
+# WebSocket-triggered paper evaluations: bounded change queue, discovery seeds,
+# audited attempts, single-event paper-only collector path.
+tests/test_pinnapi_reactive.py

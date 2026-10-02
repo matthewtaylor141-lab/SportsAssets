@@ -222,9 +222,16 @@ async def test_started_but_unarmed_takes_no_lease_and_reads_no_catalogue(
         assert d["state"] == "DISARMED"
         assert leases == [] and sockets == [] and census_calls == []
         assert d["coverage_census"] == {"skipped": "FEED_NOT_SYNCED"}
-        beat = FR._jsonish(await conn.fetchval(
-            "SELECT value FROM ingestion_state WHERE key=$1",
-            FR.HEARTBEAT_KEY))
+        # Read on a connection of its own: the heartbeat loop writes through
+        # `pool` (this test's `conn`) every 50 ms, and asyncpg refuses two
+        # operations on one connection at once.
+        reader = await H.connect()
+        try:
+            beat = FR._jsonish(await reader.fetchval(
+                "SELECT value FROM ingestion_state WHERE key=$1",
+                FR.HEARTBEAT_KEY))
+        finally:
+            await reader.close()
         assert beat["state"] == "DISARMED"
     finally:
         await FR.shutdown_default(wait_s=2.0)

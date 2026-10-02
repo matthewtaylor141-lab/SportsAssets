@@ -7037,11 +7037,12 @@ async def _persist_candidate_outcomes(conn, *, cycle_at: float, rows) -> dict:
     return out
 
 
-async def cycle(conn) -> dict:
+async def cycle(conn, *, stream_seed=None) -> dict:
     """Never raises. Returns what it did and, mostly, why it did not."""
     started = time.time()
     # ── AGENTS (core, migration 152): DEREK IS EVALUATING ──────────────
-    await _derek_heartbeat_start(conn, now=started)
+    if stream_seed is None:
+        await _derek_heartbeat_start(conn, now=started)
     # ONE SCHEDULE FETCH PER OFFICIAL DATE PER CYCLE. The candidates in a
     # cycle cluster on one or two dates; asking per candidate would be the
     # same answer many times over.
@@ -7070,7 +7071,9 @@ async def cycle(conn) -> dict:
     # exactly as before, under the same execution lock.
     async def _service_here():
         return await _funded_service(conn, now=time.time())
-    if _SERVICING["task_active"]:
+    if stream_seed is not None:
+        funded_service, xavier_review = {"ran": False, "paper_stream": True}, None
+    elif _SERVICING["task_active"]:
         funded_service, xavier_review = _serviced_by_the_task()
     else:
         # XAVIER'S DAILY REVIEW runs inside, after the learning pass inside
@@ -7097,6 +7100,8 @@ async def cycle(conn) -> dict:
     # the table missing, the credential absent. `_beat` writes what was
     # decided and then returns the same dict.
     async def _beat(payload: dict) -> dict:
+        if stream_seed is not None:
+            return payload
         payload.setdefault("xavier_review", xavier_review)
         payload.setdefault("step_timing_s", {
             "servicing_in_cycle": round(_t_serviced - started, 3)})
@@ -7123,8 +7128,9 @@ async def cycle(conn) -> dict:
         return await _beat({
             "ran": False, "state": "BLOCKED", "why": R_NO_TABLE,
             "funded_servicing": funded_service,
-            "pair_observation": await _observation_when_entry_is_blocked(
-                conn, now=time.time(), blocked_by=R_NO_TABLE),
+            "pair_observation": ({"ran": False} if stream_seed is not None else
+                await _observation_when_entry_is_blocked(
+                    conn, now=time.time(), blocked_by=R_NO_TABLE)),
             "servicing_ran_anyway": True})
 
     cred = ext.credential_present()
@@ -7135,8 +7141,9 @@ async def cycle(conn) -> dict:
             "funded_servicing": funded_service,
             # NOT AN ODDS-PROVIDER READ: the observer prices nothing from
             # the provider, so a missing provider credential does not stop it.
-            "pair_observation": await _observation_when_entry_is_blocked(
-                conn, now=time.time(), blocked_by=str(cred["refusal"])),
+            "pair_observation": ({"ran": False} if stream_seed is not None else
+                await _observation_when_entry_is_blocked(
+                    conn, now=time.time(), blocked_by=str(cred["refusal"]))),
             "servicing_ran_anyway": ("the odds provider prices NEW "
                                      "candidates. An open funded position "
                                      "is managed from the VENUE's book "
@@ -7252,23 +7259,33 @@ async def cycle(conn) -> dict:
     # on 2026-09-28 it was almost entirely national-team football, because late
     # September is an international window. A candidate list frozen in source
     # would be wrong within a fortnight, so it is read.
-    _cat = await fetch_sport_catalogue(api_key=api_key)
-    _board = await venue_soccer_competitions(conn)
-    # THE FIXTURE DATES TRAVEL WITH THE TITLES (map4 section 9 D1). The board
-    # read has carried `title_days` since the return-leg defect was fixed, and
-    # this call dropped it, so every candidate reached
-    # `confirm_mapping_by_fixtures` with `venue_title_days == {}` and the date
-    # comparison never ran on the scheduled path -- only in a test that called
-    # the helper directly.
-    sports_selection = select_sports(
-        _cat, candidates=candidates_from_board(_board["board"],
-                                               _board.get("titles"),
-                                               _board.get("title_days")))
-    sports_selection["venue_board"] = _board
-    sports_for_cycle = tuple(sports_selection["sports"])
-    labels = sorted({lbl for _, fam in sports_for_cycle
-                     for lbl in VENUE_SPORT_LABELS.get(fam, ())})
-    markets = [dict(r) for r in await conn.fetch(MARKETS_SQL, labels, MARKET_STALE_AFTER_S)]
+    if stream_seed is not None:
+        # Discovery/competition was confirmed by the scheduled collector.
+        # Re-resolve the venue-native identity below; never scan its full
+        # catalogue or make another metered REST discovery request per tick.
+        sports_selection = {"sports": [(stream_seed["sport_key"],
+                                         stream_seed["family"])],
+                            "confirmed_by_provider": []}
+        sports_for_cycle = tuple(sports_selection["sports"])
+        markets = []
+    else:
+        _cat = await fetch_sport_catalogue(api_key=api_key)
+        _board = await venue_soccer_competitions(conn)
+        # THE FIXTURE DATES TRAVEL WITH THE TITLES (map4 section 9 D1). The board
+        # read has carried `title_days` since the return-leg defect was fixed, and
+        # this call dropped it, so every candidate reached
+        # `confirm_mapping_by_fixtures` with `venue_title_days == {}` and the date
+        # comparison never ran on the scheduled path -- only in a test that called
+        # the helper directly.
+        sports_selection = select_sports(
+            _cat, candidates=candidates_from_board(_board["board"],
+                                                   _board.get("titles"),
+                                                   _board.get("title_days")))
+        sports_selection["venue_board"] = _board
+        sports_for_cycle = tuple(sports_selection["sports"])
+        labels = sorted({lbl for _, fam in sports_for_cycle
+                         for lbl in VENUE_SPORT_LABELS.get(fam, ())})
+        markets = [dict(r) for r in await conn.fetch(MARKETS_SQL, labels, MARKET_STALE_AFTER_S)]
     # ── THE OBSERVED UNIVERSE, AND WHERE IT NARROWS ──────────────────
     #
     # `markets_considered` was ONE number over BOTH supported sports, and
@@ -7283,7 +7300,7 @@ async def cycle(conn) -> dict:
         _lbl = str(_m.get("sport") or "UNLABELLED")
         universe[_lbl] = universe.get(_lbl, 0) + 1
     funnel: dict = {}
-    if not markets:
+    if not markets and stream_seed is None:
         # SAY SO BY NAME rather than letting 44 mapping refusals imply the
         # mapper is at fault.
         tally[R_NO_CANDIDATE_MARKETS] = 1
@@ -7396,7 +7413,10 @@ async def cycle(conn) -> dict:
                            "global_refusal_replaced":
                                ",".join(str(c) for c in replaced)})
 
-        got = await fetch_odds(sport_key, api_key=api_key)
+        got = ({"ok": True, "events": [stream_seed["event"]],
+                "received_at": stream_seed["received_at"]}
+               if stream_seed is not None else
+               await fetch_odds(sport_key, api_key=api_key))
         credits["used"] = got.get("credits_used") or credits["used"]
         credits["remaining"] = (got.get("credits_remaining")
                                 or credits["remaining"])
@@ -7583,7 +7603,7 @@ async def cycle(conn) -> dict:
             # Lowered deliberately, it bounds our OWN contribution to
             # `pinnacle_age_s` at roughly that many events' worth of paced
             # venue reads instead of the whole cycle's.
-            if served_by_this_fetch >= EVENTS_PER_ODDS_FETCH:
+            if stream_seed is None and served_by_this_fetch >= EVENTS_PER_ODDS_FETCH:
                 again = await fetch_odds(sport_key, api_key=api_key)
                 credits["used"] = again.get("credits_used") or credits["used"]
                 credits["remaining"] = (again.get("credits_remaining")
@@ -7614,11 +7634,28 @@ async def cycle(conn) -> dict:
             served_by_this_fetch += 1
             quote = primary_pinnacle_h2h(
                 event, received_at=received_at, family=family, at=time.time())
+            if stream_seed is None:
+                from .. import pinnapi_reactive as reactive
+                reactive.register(event, sport_key=sport_key, family=family,
+                                  received_at=received_at)
+            elif (quote or {}).get("reference_input", {}).get("provider") != "pinnapi.com/raw-websocket":
+                tally["WS_REFERENCE_NOT_USABLE"] = tally.get("WS_REFERENCE_NOT_USABLE", 0) + 1
+                continue
             if quote is None:
                 tally["NO_PINNACLE_ON_EVENT"] = \
                     tally.get("NO_PINNACLE_ON_EVENT", 0) + 1
                 _step_refuse("NO_PINNACLE_ON_EVENT")
                 continue
+            if stream_seed is not None:
+                source = quote["reference_input"]
+                version = (source["epoch"], source["source_change_ms"],
+                           tuple(sorted(source["raw_odds"].items())))
+                if version != stream_seed["trigger"]["version"]:
+                    tally["WS_TRIGGER_SUPERSEDED"] = 1
+                    continue
+                source["evaluation_trigger"] = {
+                    k: stream_seed["trigger"][k] for k in
+                    ("attempt_id", "received_at", "queued_at", "evaluation_started_at")}
             step["with_pinnacle_h2h"] += 1
             # ── HOW OLD THE PRICE WAS WHEN WE REACHED IT, FOR EVERY EVENT ──
             #
@@ -8463,6 +8500,8 @@ async def cycle(conn) -> dict:
                             .get("acquisition_price"))})
                 _vq_entry["calibration_only_record"] = "RECORDED"
                 _vq_entry["calibration_only_valuation_id"] = cal_id
+                if stream_seed is not None:
+                    stream_seed["valuation_ids"].append(cal_id)
                 await _paper_valuation(conn, cal_id)
                 continue
             try:
@@ -8481,7 +8520,12 @@ async def cycle(conn) -> dict:
                 tally["PERSIST:" + type(exc).__name__] = \
                     tally.get("PERSIST:" + type(exc).__name__, 0) + 1
                 continue
+            if stream_seed is not None:
+                stream_seed["valuation_ids"].append(row_id)
             await _paper_valuation(conn, row_id)
+            if stream_seed is not None:
+                # Never reach inventory or funded execution on a WS wakeup.
+                continue
             key = "ADMITTED" if rec.get("admissible") else None
             if key:
                 tally[key] = tally.get(key, 0) + 1
@@ -8639,6 +8683,10 @@ async def cycle(conn) -> dict:
     candidate_outcomes["persisted"] = await _persist_candidate_outcomes(
         conn, cycle_at=started, rows=event_ledger)
     _t_persisted = time.time()
+    if stream_seed is not None:
+        return {"ran": True, "state": "WS_PAPER_EVALUATED", "written": written,
+                "refusals": dict(tally), "candidate_outcomes": candidate_outcomes,
+                "valuation_ids": list(stream_seed["valuation_ids"])}
 
     # THE OUTCOME JOIN RUNS EVERY CYCLE, bounded. Collection has to
     # progress on its own: a calibration that waits for someone to
@@ -9954,6 +10002,8 @@ async def run(get_pool) -> None:
         except Exception:                                      # noqa: BLE001
             log.warning("ext_pinnacle: pinnapi feed start failed",
                         exc_info=True)
+        from .. import pinnapi_reactive as _reactive
+        reactive_task = _reactive.start(pool, cycle=cycle)
         # ── MANAGEMENT AND RECOVERY, ON THEIR OWN CADENCE ────────────────
         #
         # AFTER THE LOCK, so only the writer services (a standby never
@@ -9999,6 +10049,7 @@ async def run(get_pool) -> None:
                     log.warning("ext_pinnacle: cycle failed", exc_info=True)
                 await asyncio.sleep(delay)
         finally:
+            await _reactive.stop(reactive_task)
             # THE FEED FIRST, BOUNDED: its socket closes and its lease is
             # released before this connection (and LOCK_KEY) is returned.
             try:

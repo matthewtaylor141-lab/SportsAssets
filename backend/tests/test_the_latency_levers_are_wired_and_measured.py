@@ -109,7 +109,11 @@ def test_lever_a_separates_provider_staleness_from_our_own():
     """
     assert "lat[\"provider_stale_on_arrival\"] += 1" in CYCLE_SRC
     assert "lat[\"skipped_stale_on_arrival\"] += 1" in CYCLE_SRC
-    assert "(float(received_at) - _pe) > PINNACLE_MAX_AGE_S" in CYCLE_SRC
+    # The provider's own handover instant is the quote's (each candidate's
+    # own `received_at`, kept by the primary WS selector or its fallback).
+    assert 'reference_received_at = quote["received_at"]' in CYCLE_SRC
+    assert ("(float(reference_received_at) - _pe) > PINNACLE_MAX_AGE_S"
+            in CYCLE_SRC)
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -260,7 +264,13 @@ def test_lever_c_retains_each_candidates_own_observation_time():
     times -- which is what "retain correct instrument identity and
     observation times" requires.
     """
-    assert "quote = pinnacle_h2h(event, received_at=received_at)" in CYCLE_SRC
+    # Rebuilt per event: the primary WS selector reads THIS event and, when
+    # the feed cannot serve it, falls back to this event's own REST quote.
+    assert ("quote = primary_pinnacle_h2h(\n"
+            "                event, received_at=received_at, family=family,"
+            in CYCLE_SRC)
+    assert "pinnacle_h2h(event, received_at=received_at), family=family," \
+        in CYCLE_SRC
     # The claim holds an event id and an instant -- never a provider quote,
     # and never a book payload.
     assert "vq_cache[_ck] = quote" not in CYCLE_SRC

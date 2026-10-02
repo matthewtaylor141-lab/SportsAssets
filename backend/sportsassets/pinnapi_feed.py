@@ -244,6 +244,8 @@ class FeedCache:
         self.events: "collections.OrderedDict[int, dict]" = \
             collections.OrderedDict()
         self.quotes: dict = {}          # (event_id, key) -> Quote
+        self.on_change = None  # synchronous, bounded notification; never I/O
+        self._touched = set()
         self.counts = collections.Counter()
         self.provider_to_receipt = Ring()
         self.receipt_to_eval = Ring()
@@ -265,6 +267,22 @@ class FeedCache:
     # ── ingestion ────────────────────────────────────────────────────
     def apply(self, msg: dict, *, epoch: int,
               received_ms: Optional[float] = None) -> str:
+        self._touched.clear()
+        result = self._apply(msg, epoch=epoch, received_ms=received_ms)
+        # Notify after the entire frame (including closed periods and bounds)
+        # has applied. Consumers re-read authority; no callback can trade here.
+        if self.on_change is not None:
+            for key in self._touched:
+                quote = self.quotes.get(key)
+                if quote is not None and quote.source_change_ms is not None:
+                    try:
+                        self.on_change(quote)
+                    except Exception:
+                        self.counts["change_notification_errors"] += 1
+        return result
+
+    def _apply(self, msg: dict, *, epoch: int,
+               received_ms: Optional[float] = None) -> str:
         """Apply one envelope from connection `epoch`. Returns what it was."""
         rx = received_ms if received_ms is not None else _now_ms()
         if epoch != self.authority.epoch or not self.authority.granted:
@@ -405,6 +423,7 @@ class FeedCache:
         self._bound()
 
     def _put(self, eid, key, f, stream, sport, epoch, change, frame_ts, rx):
+        self._touched.add((eid, key))
         self.quotes[(eid, key)] = Quote(
             key=key, event_id=eid, sport_id=sport, stream=stream,
             period=f["period"], market_type=f["market_type"],
