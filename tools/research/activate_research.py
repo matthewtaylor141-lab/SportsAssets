@@ -35,12 +35,28 @@ def run(client,actor,apply=False,now=None):
     return {'changed':True,'control':after['control'],'flows':flows,'heartbeat':after.get('heartbeat'),
             'completed_learning':False,'next_check':'Verify genuine reviewed outcomes and peer dependencies; enablement alone is not improvement.'}
 
+# A re-issue opens a NEW flow for one goal under a new request id (the
+# rejected flow and its records stay as they are). v3 of Xavier's goal adds
+# the grounding rule its v2 answer broke: the persona guard replaced that
+# answer because it stated a computed figure no record holds.
+REISSUE={'management-execution-exits':('v3','Xavier: position management, execution quality and exit alternatives for the open paper positions. From recorded reviews, resting orders, fills and marks, assess execution quality and compare hold-to-settlement, resting exit and marketable exit. Quote only figures in the cited records; give recorded inputs and describe comparisons rather than computing new totals. Label it a recommendation, not an activated change; one measurable next action with an owner.')}
+
+def reissue(client,actor,key,now=None):
+    now=time.time() if now is None else now
+    first=next(f for k,f,_ in GOALS if k==key)
+    suffix,title=REISSUE[key]
+    if len(title)>500:raise ValueError('GOAL_TITLE_TOO_LONG')
+    r=request(client,'POST','/goals',{'actor':actor,'request_id':'owner-20261002-'+key+'-'+suffix,'title':title,'first':first,'priority':4,'due_at':now+86400})
+    after=request(client,'GET')
+    return {'changed':True,'reissued':key,'request_id':'owner-20261002-'+key+'-'+suffix,**r,'control':after.get('control')}
+
 def main():
-    p=argparse.ArgumentParser();p.add_argument('--apply',action='store_true');p.add_argument('--actor',required=True);a=p.parse_args()
+    p=argparse.ArgumentParser();p.add_argument('--apply',action='store_true');p.add_argument('--actor',required=True)
+    p.add_argument('--reissue',choices=sorted(REISSUE));a=p.parse_args()
     if not 2<=len(a.actor.strip())<=100 or a.actor.upper() in ('DEREK','XAVIER','AUDREY','SYSTEM'):p.error('a named management actor is required')
     token=os.environ.get('ADMIN_TOKEN','')
     if not token:raise SystemExit('ADMIN_TOKEN is absent; keep it in the deployment environment, never paste it into chat.')
     try:
-        with httpx.Client(base_url=BASE,headers={'x-admin-token':token},timeout=20,follow_redirects=False) as c:print(json.dumps(run(c,a.actor,a.apply),default=str,indent=2))
+        with httpx.Client(base_url=BASE,headers={'x-admin-token':token},timeout=20,follow_redirects=False) as c:print(json.dumps(reissue(c,a.actor,a.reissue) if a.reissue else run(c,a.actor,a.apply),default=str,indent=2))
     except Exception as exc:raise SystemExit(type(exc).__name__+': '+str(exc))
 if __name__=='__main__':main()

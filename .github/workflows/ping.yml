@@ -20,7 +20,7 @@ on:
         required: false
         default: ""
       verify:
-        description: "site-voice = after a release: set each agent's voice through the audited persona route, speak once per agent, and render the production homepage and agent pages in mobile WebKit and phone-sized Chromium (authenticated and signed out); film = follow the homepage demo link and play the whole cinematic film signed in (prepares each chapter through the agent persona chat + stored speech; writes conversation records only), measuring voices, music and 3D frames; office = drive the management office pages against the persisted records with chat/voice timings (writes conversation records only); experiment = read the paper experiment API and render the homepage and agent pages signed in, checking the same positions, fills and cash (read-only); talk = drive the Talk-to-agent panels on /derek /xavier /audrey (typed question, follow-up, refresh-resume, spoken question via a fake microphone, voice reply, permission-denied and a simulated provider error) in desktop + phone Chromium and WebKit iPhone 13 (writes conversation records only); pinnapi = fetch the PinnAPI public docs (no key) and run the read-only in-API probe: key names, then at most 6 authenticated GETs (writes nothing, opens no stream); research = read the research worker control and work (GET only); research-apply = enable the research worker and create the three owner goals through the authenticated capability controls (idempotent request ids)"
+        description: "site-voice = after a release: set each agent's voice through the audited persona route, speak once per agent, and render the production homepage and agent pages in mobile WebKit and phone-sized Chromium (authenticated and signed out); film = follow the homepage demo link and play the whole cinematic film signed in (prepares each chapter through the agent persona chat + stored speech; writes conversation records only), measuring voices, music and 3D frames; office = drive the management office pages against the persisted records with chat/voice timings (writes conversation records only); experiment = read the paper experiment API and render the homepage and agent pages signed in, checking the same positions, fills and cash (read-only); talk = drive the Talk-to-agent panels on /derek /xavier /audrey (typed question, follow-up, refresh-resume, spoken question via a fake microphone, voice reply, permission-denied and a simulated provider error) in desktop + phone Chromium and WebKit iPhone 13 (writes conversation records only); pinnapi = fetch the PinnAPI public docs (no key) and run the read-only in-API probe: key names, then at most 6 authenticated GETs (writes nothing, opens no stream); research = read the research worker control and work (GET only); research-apply = enable the research worker and create the three owner goals through the authenticated capability controls (idempotent request ids); research-reissue-xavier = open one new flow for Xavier's owner goal (v3 request id)"
         required: false
         default: ""
       terms_slugs:
@@ -609,7 +609,7 @@ jobs:
     # modeling/XAVIER, audit/AUDREY) with fixed request ids, so a repeat run
     # is idempotent; then read the work and its events back. Paper research
     # only: no order, policy activation or funded path is reachable here.
-    if: ${{ inputs.verify == 'research' || inputs.verify == 'research-apply' }}
+    if: ${{ inputs.verify == 'research' || inputs.verify == 'research-apply' || inputs.verify == 'research-reissue-xavier' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -625,6 +625,9 @@ jobs:
           echo "::add-mask::$ADMIN_TOKEN"
           pip install -q httpx >/dev/null 2>&1
           if [ "$MODE" = "research-apply" ]; then A="--apply"; else A=""; fi
+          # research-reissue-xavier: one new flow for Xavier's goal (v3 request
+          # id); the rejected v2 flow and its records are left as recorded
+          if [ "$MODE" = "research-reissue-xavier" ]; then A="--reissue management-execution-exits"; fi
           python3 tools/research/activate_research.py --actor "Matt Taylor" $A
           echo "script exit=$?"
       - name: Read the research work and its events back (GET only)
