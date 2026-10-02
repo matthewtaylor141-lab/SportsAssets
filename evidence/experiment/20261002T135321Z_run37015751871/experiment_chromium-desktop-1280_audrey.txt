@@ -1,6 +1,6 @@
 Skip to the records
 READ-ONLY
-read 2026-10-02 03:11:21Z
+read 2026-10-02 13:52:31Z
 Trace
 Refresh
 LIVE MARKET DATA · SIMULATED EXECUTION · $500,000 STARTING BANKROLL
@@ -13,26 +13,31 @@ Talk to Audrey ↗
 Work & learning ↘
 PAPER ACCOUNT · ONE LEDGER · LIVE MARKET DATA · SIMULATED EXECUTION
 CASH
-$499,573.93
+$495,170.11
 RESERVED
 $0.00
 AVAILABLE
-$499,573.93
+$495,170.11
 POSITION VALUE
-$561.72
+$4,466.42
 EQUITY
-$500,135.65
+$499,636.53
 REALIZED P&L
 +$168.43
 UNREALIZED P&L
-−$32.78
+−$531.90
 
-cash + marked open-position value · ledger entry #29 · the same read on the homepage and every agent page
+cash + marked open-position value · ledger entry #97 · the same read on the homepage and every agent page
 
-Records read 1s ago
-Agent pass 1m ago
+Workboard
+Activity
+Work & learning
+Compact view
+Meeting brief ↓
+Records read 2s ago
+Agent pass 52s ago
 LATEST RECORDED WORK · AUDREY
-6h ago
+17h ago
 Fees consume edge
 
 Responsible agent · DEREK
@@ -58,12 +63,12 @@ Awaiting response
 Measured
 3 / 3
 Export view ↓
-Ledger check
+LEDGER CHECK
 Reconciled
-Realized P&L
+REALIZED P&L
 $168.43
-Unrealized P&L
--$32.78
+UNREALIZED P&L
+-$531.90
 INTELLIGENCE DESK
 Recommendations & follow-through
 
@@ -74,9 +79,10 @@ Fees consume edge
 
 8 decisions cleared the 0.5 pp gross threshold but the taker fee consumed the edge; rest a bid below the ask where both rules hold at the price paid
 
+Compare +
 Responsible agent
 DEREK
-6h ago
+17h ago
 Measuring
 
 Measurement recorded
@@ -87,9 +93,10 @@ Book read cuts
 
 39 of 125 book reads in the last 6 h were cut by the decision deadline or the venue cooldown; remove the duplicate read and retry within the freshness window
 
+Compare +
 Responsible agent
 DEREK
-6h ago
+17h ago
 Improved
 
 Measurement recorded
@@ -100,44 +107,15 @@ Collection coverage
 
 63 events in the last collection cycle never reached a decision (by code: {"NO_PINNACLE_ON_EVENT": 33, "QUOTE_STALE_ON_ARRIVAL": 13, "VENUE_BOOK_READ_FAILED": 2, "NO_VENUE_CONTRACT_FOR_EVENT": 5, "VENUE_BOOK_CURRENCY_NOT_ESTABLISHED": 4, "VENUE_NATIVE_EVENT_MATCHES_ONLY_ONE_TEAM": 5, "VENUE_BOOK_CURRENCY_CONTRADICTED_BY_CONTRACT": 1}); investigate per sport without weakening identity, market or settlement matching
 
+Compare +
 Responsible agent
 DEREK
-6h ago
+17h ago
 Improved
 
 Measurement recorded
 
 +
-Activity journal
-Latest records in this read
-Measuring · Fees consume edge
-Recommendation
-6h ago
-Improved · Book read cuts
-Recommendation
-6h ago
-Improved · Collection coverage
-Recommendation
-6h ago
-THE LEARNING WORKBENCH
-Work. Investigate. Improve.
-Records read 10/2/2026, 3:11:20 AM · Research paused
-Plans
-Collaboration
-Investigate
-Experiments
-Scorecard
-
-Research worker paused · 24 model calls per hour maximum. Latest 60 team tasks shown.
-
-Assign a research goal
-Management control access
-Research schedule
-Management control access
-
-No research plan has been assigned to this agent.
-
-Research reviews are attributed opinions backed by recorded evidence. Completed reviews are not proven performance gains. Policy activation remains separately controlled.
 IN CONVERSATION · AUDREY
 
 Resumed your conversation with Audrey (28 messages).

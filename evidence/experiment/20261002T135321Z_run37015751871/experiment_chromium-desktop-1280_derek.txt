@@ -1,6 +1,6 @@
 Skip to the records
 READ-ONLY
-read 2026-10-02 03:11:01Z
+read 2026-10-02 13:52:13Z
 Trace
 Refresh
 LIVE MARKET DATA · SIMULATED EXECUTION · $500,000 STARTING BANKROLL
@@ -13,29 +13,34 @@ Talk to Derek ↗
 Work & learning ↘
 PAPER ACCOUNT · ONE LEDGER · LIVE MARKET DATA · SIMULATED EXECUTION
 CASH
-$499,573.93
+$495,170.11
 RESERVED
 $0.00
 AVAILABLE
-$499,573.93
+$495,170.11
 POSITION VALUE
-$561.72
+$4,466.42
 EQUITY
-$500,135.65
+$499,636.53
 REALIZED P&L
 +$168.43
 UNREALIZED P&L
-−$32.78
+−$531.90
 
-cash + marked open-position value · ledger entry #29 · the same read on the homepage and every agent page
+cash + marked open-position value · ledger entry #97 · the same read on the homepage and every agent page
 
-Records read 1s ago
-Agent pass 52s ago
+Workboard
+Activity
+Work & learning
+Compact view
+Meeting brief ↓
+Records read 6s ago
+Agent pass 30s ago
 LATEST RECORDED WORK · DEREK
-7m ago
-Tampa Bay Rays to win
+4m ago
+Botafogo-SP to win
 
-Game 1: NY Yankees vs. TB Rays
+Botafogo FC vs. Vila Nova FC
 
 Entry decision
 Refused
@@ -58,98 +63,83 @@ Current policy
 Approved
 12 / 12
 Export view ↓
-Evaluations shown
+EVALUATIONS SHOWN
 12
-Working entry orders
+WORKING ENTRY ORDERS
 0
-Approved in this view
+APPROVED IN THIS VIEW
 0
 DISCOVERY DESK
 Opportunity queue
 
 Recorded evaluations · serving policy versions first, then historical; gross edge within each group.
 
-PO
-Portugal to win
+BO
+Botafogo-SP to win
 
-Portugal vs. Norway
+Botafogo FC vs. Vila Nova FC
 
-Simulated execution
+Simulated executionCompare +
 Gross edge
-0.24 pp
+Not recorded
 Not recorded net EV
 Refused
 
-the edge was below the policy's minimum (the threshold recorded on the decision)
+no research model exists yet
 
-Evaluated 14m ago
+Evaluated 4m ago
 +
-CR
-Croatia to win
+AT
+Atletico Goianiense to win
 
-Croatia vs. England
+AC Goianiense vs. America FC
 
-Simulated execution
+Simulated executionCompare +
 Gross edge
--0.02 pp
+Not recorded
 Not recorded net EV
 Refused
 
-the edge was below the policy's minimum (the threshold recorded on the decision)
+no research model exists yet
 
-Evaluated 14m ago
+Evaluated 4m ago
++
+SÃ
+São Bernardo to win
+
+Sao Bernardo FC vs. CR Brasil
+
+Simulated executionCompare +
+Gross edge
+Not recorded
+Not recorded net EV
+Refused
+
+no research model exists yet
+
+Evaluated 4m ago
++
+CU
+Cuiabá to win
+
+Cuiaba EC vs. AA Ponte Preta
+
+Simulated executionCompare +
+Gross edge
+Not recorded
+Not recorded net EV
+Refused
+
+no research model exists yet
+
+Evaluated 4m ago
 +
 LO
 Londrina to win
 
 Londrina EC vs. Criciuma EC
 
-Simulated execution
-Gross edge
--0.67 pp
-Not recorded net EV
-Refused
-
-the edge was below the policy's minimum (the threshold recorded on the decision)
-
-Evaluated 14m ago
-+
-GR
-Greece to win
-
-Greece vs. Germany
-
-Simulated execution
-Gross edge
--1.13 pp
-Not recorded net EV
-Refused
-
-the edge was below the policy's minimum (the threshold recorded on the decision)
-
-Evaluated 14m ago
-+
-FR
-France to win
-
-France vs. Italy
-
-Simulated execution
-Gross edge
--1.25 pp
-Not recorded net EV
-Refused
-
-the edge was below the policy's minimum (the threshold recorded on the decision)
-
-Evaluated 14m ago
-+
-TA
-Tampa Bay Rays to win
-
-Game 1: NY Yankees vs. TB Rays
-
-Simulated execution
+Simulated executionCompare +
 Gross edge
 Not recorded
 Not recorded net EV
@@ -157,44 +147,14 @@ Refused
 
 no research model exists yet
 
-Evaluated 7m ago
-+
-MI
-Milwaukee Brewers to win
-
-Game 1: SD Padres vs. MIL Brewers
-
-Simulated execution
-Gross edge
-Not recorded
-Not recorded net EV
-Refused
-
-the venue's and Pinnacle's settlement rules are not established as the same
-
-Evaluated 8m ago
-+
-LO
-Londrina to win
-
-Londrina EC vs. Criciuma EC
-
-Simulated execution
-Gross edge
-Not recorded
-Not recorded net EV
-Refused
-
-no research model exists yet
-
-Evaluated 14m ago
+Evaluated 4m ago
 +
 CR
 Croatia to win
 
 Croatia vs. England
 
-Simulated execution
+Simulated executionCompare +
 Gross edge
 Not recorded
 Not recorded net EV
@@ -202,29 +162,29 @@ Refused
 
 no research model exists yet
 
-Evaluated 14m ago
+Evaluated 4m ago
 +
 FR
 France to win
 
 France vs. Italy
 
-Simulated execution
+Simulated executionCompare +
 Gross edge
 Not recorded
 Not recorded net EV
 Refused
 
-the venue's and Pinnacle's settlement rules are not established as the same
+no research model exists yet
 
-Evaluated 14m ago
+Evaluated 4m ago
 +
 PO
 Portugal to win
 
 Portugal vs. Norway
 
-Simulated execution
+Simulated executionCompare +
 Gross edge
 Not recorded
 Not recorded net EV
@@ -232,14 +192,14 @@ Refused
 
 the venue's and Pinnacle's settlement rules are not established as the same
 
-Evaluated 14m ago
+Evaluated 4m ago
 +
 NE
 Netherlands to win
 
 Netherlands vs. Serbia
 
-Simulated execution
+Simulated executionCompare +
 Gross edge
 Not recorded
 Not recorded net EV
@@ -247,47 +207,53 @@ Refused
 
 the venue's and Pinnacle's settlement rules are not established as the same
 
-Evaluated 14m ago
+Evaluated 4m ago
 +
-Activity journal
-Latest records in this read
-Refused · Tampa Bay Rays to win
-Entry decision
-7m ago
-Refused · Tampa Bay Rays to win
-Entry decision
-7m ago
-Refused · Tampa Bay Rays to win
-Entry decision
-7m ago
-Refused · Milwaukee Brewers to win
-Entry decision
-8m ago
-Refused · Milwaukee Brewers to win
-Entry decision
-8m ago
-Refused · Milwaukee Brewers to win
-Entry decision
-8m ago
-THE LEARNING WORKBENCH
-Work. Investigate. Improve.
-Records read 10/2/2026, 3:11:00 AM · Research paused
-Plans
-Collaboration
-Investigate
-Experiments
-Scorecard
+FR
+France to win
 
-Research worker paused · 24 model calls per hour maximum. Latest 60 team tasks shown.
+France vs. Belgium
 
-Assign a research goal
-Management control access
-Research schedule
-Management control access
+Simulated executionCompare +
+Gross edge
+Not recorded
+Not recorded net EV
+Refused
 
-No research plan has been assigned to this agent.
+the venue's and Pinnacle's settlement rules are not established as the same
 
-Research reviews are attributed opinions backed by recorded evidence. Completed reviews are not proven performance gains. Policy activation remains separately controlled.
+Evaluated 4m ago
++
+LO
+Londrina to win
+
+Londrina EC vs. Criciuma EC
+
+Simulated executionCompare +
+Gross edge
+Not recorded
+Not recorded net EV
+Refused
+
+the venue's and Pinnacle's settlement rules are not established as the same
+
+Evaluated 24h ago
++
+GR
+Grêmio Novorizontino to win
+
+Gremio Novorizontino vs. Goias EC
+
+Simulated executionCompare +
+Gross edge
+Not recorded
+Not recorded net EV
+Refused
+
+the venue's and Pinnacle's settlement rules are not established as the same
+
+Evaluated 24h ago
++
 IN CONVERSATION · DEREK
 
 Resumed your conversation with Derek (28 messages).
@@ -416,27 +382,27 @@ Resumed your conversation with Derek (28 messages).
 All records, strategy detail and technical evidence
 
 Presentation of recorded state. This page sends no order and holds no credential; it reads /api/command/agents/derek with the COMMAND session. The 3D characters are licensed Microsoft Rocketbox models (MIT licence, credited below; shipped with their licence file); a device that cannot draw them shows a 2D portrait card. The pose follows the paper runtime's own heartbeat (paper_session_health) and never stands in for data. UNKNOWN is not zero; EMPTY is not success. The 3D character on this page is a licensed model, not an original illustration. Character model: Microsoft Rocketbox Business_Male_03 (MIT, © 2020 Microsoft). Licence: MIT, shipped with the model as ROCKETBOX_LICENSE.md.
-papercg:a463766b9046839154a13e3b
-Explain the price, fees, expected value and current status of Portugal to win. Decision papercg:a463766b9046839154a13e3b.
-papercg:bb66eb4166d997b3de32d608
-Explain the price, fees, expected value and current status of Croatia to win. Decision papercg:bb66eb4166d997b3de32d608.
-papercg:29e367278127068c0510cf6b
-Explain the price, fees, expected value and current status of Londrina to win. Decision papercg:29e367278127068c0510cf6b.
-papercg:b80a11ede0eaf3f520978302
-Explain the price, fees, expected value and current status of Greece to win. Decision papercg:b80a11ede0eaf3f520978302.
-papercg:ac1f4edb41fc91af93ee356a
-Explain the price, fees, expected value and current status of France to win. Decision papercg:ac1f4edb41fc91af93ee356a.
-paperdec:e3368d9df2c0cf1acca3eabe
-Explain the price, fees, expected value and current status of Tampa Bay Rays to win. Decision paperdec:e3368d9df2c0cf1acca3eabe.
-paperdec:68bfe2c225a78eeb503bdc91
-Explain the price, fees, expected value and current status of Milwaukee Brewers to win. Decision paperdec:68bfe2c225a78eeb503bdc91.
-paperdec:2ce04d564f4aed56a40a453c
-Explain the price, fees, expected value and current status of Londrina to win. Decision paperdec:2ce04d564f4aed56a40a453c.
-paperdec:af76b18e6e26b6957d5a0ee8
-Explain the price, fees, expected value and current status of Croatia to win. Decision paperdec:af76b18e6e26b6957d5a0ee8.
-paperdec:48c721fa817d74256ef33513
-Explain the price, fees, expected value and current status of France to win. Decision paperdec:48c721fa817d74256ef33513.
-paperdec:65e88ca4b19889e31437b678
-Explain the price, fees, expected value and current status of Portugal to win. Decision paperdec:65e88ca4b19889e31437b678.
-paperdec:b06cc197bdf115176245b1dd
-Explain the price, fees, expected value and current status of Netherlands to win. Decision paperdec:b06cc197bdf115176245b1dd.
+paperdec:353fb7802e3dd72d0947dca0
+Explain the price, fees, expected value and current status of Botafogo-SP to win. Decision paperdec:353fb7802e3dd72d0947dca0.
+paperdec:37d92537bdaf7cae1ab2a7d7
+Explain the price, fees, expected value and current status of Atletico Goianiense to win. Decision paperdec:37d92537bdaf7cae1ab2a7d7.
+paperdec:de490a82796672deb9c138cc
+Explain the price, fees, expected value and current status of São Bernardo to win. Decision paperdec:de490a82796672deb9c138cc.
+paperdec:00ce0400a64a41f8e12f06c8
+Explain the price, fees, expected value and current status of Cuiabá to win. Decision paperdec:00ce0400a64a41f8e12f06c8.
+paperdec:9360f07de05dd1069fba8edb
+Explain the price, fees, expected value and current status of Londrina to win. Decision paperdec:9360f07de05dd1069fba8edb.
+paperdec:453ce307aaf4f9058f22071b
+Explain the price, fees, expected value and current status of Croatia to win. Decision paperdec:453ce307aaf4f9058f22071b.
+paperdec:6b3ebbf4b35b3af9b74c2ab3
+Explain the price, fees, expected value and current status of France to win. Decision paperdec:6b3ebbf4b35b3af9b74c2ab3.
+paperdec:8d4000c1f706ac1e9fbabaa9
+Explain the price, fees, expected value and current status of Portugal to win. Decision paperdec:8d4000c1f706ac1e9fbabaa9.
+paperdec:71c7678aea59fd81770542b1
+Explain the price, fees, expected value and current status of Netherlands to win. Decision paperdec:71c7678aea59fd81770542b1.
+paperdec:5643954e0e980127b3ba1971
+Explain the price, fees, expected value and current status of France to win. Decision paperdec:5643954e0e980127b3ba1971.
+paperbench:e8ee5f5a154ce5b5af6cc555
+Explain the price, fees, expected value and current status of Londrina to win. Decision paperbench:e8ee5f5a154ce5b5af6cc555.
+paperbench:b2a937f0defb76ca527b7251
+Explain the price, fees, expected value and current status of Grêmio Novorizontino to win. Decision paperbench:b2a937f0defb76ca527b7251.

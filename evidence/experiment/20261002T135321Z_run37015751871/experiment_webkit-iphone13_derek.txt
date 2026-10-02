@@ -1,0 +1,210 @@
+Skip to the records
+Trace
+Refresh
+LIVE MARKET DATA · SIMULATED EXECUTION · $500,000 STARTING BANKROLL
+MANAGEMENT OFFICE · DEREK
+Derek’s office
+Discovery & entry
+PAPER ACCOUNT · ONE LEDGER · LIVE MARKET DATA · SIMULATED EXECUTION
+CASH
+$495,170.11
+EQUITY
+$499,660.23
+Account details +
+Workboard
+Activity
+Work & learning
+Compact view
+Meeting brief ↓
+Records read 1s ago
+Agent pass 22s ago
+LATEST RECORDED WORK · DEREK
+5m ago
+Botafogo-SP to win
+Botafogo FC vs. Vila Nova FC
+
+Entry decision
+Refused
+Gross edge not recorded · net EV Not recorded
+Recorded rationale
+REFUSE NO_RESEARCH_MODEL_CANDIDATE_EXISTS
+Explain this decision ↗
+Open full record
+Recorded rationale · freshness shown above.
+Search Derek records
+All evaluations
+Current policy
+Approved
+12 / 12
+Export view ↓
+EVALUATIONS SHOWN
+12
+WORKING ENTRY ORDERS
+0
+APPROVED IN THIS VIEW
+0
+DISCOVERY DESK
+Opportunity queue
+Recorded evaluations · serving policy versions first, then historical; gross edge within each group.
+BO
+Botafogo-SP to win
+Botafogo FC vs. Vila Nova FC
+Simulated executionCompare +
+Gross edge
+Not recorded
+Not recorded net EV
+Refused
+no research model exists yet
+Evaluated 5m ago
++
+AT
+Atletico Goianiense to win
+AC Goianiense vs. America FC
+Simulated executionCompare +
+Gross edge
+Not recorded
+Not recorded net EV
+Refused
+no research model exists yet
+Evaluated 5m ago
++
+SÃ
+São Bernardo to win
+Sao Bernardo FC vs. CR Brasil
+Simulated executionCompare +
+Gross edge
+Not recorded
+Not recorded net EV
+Refused
+no research model exists yet
+Evaluated 5m ago
++
+CU
+Cuiabá to win
+Cuiaba EC vs. AA Ponte Preta
+Simulated executionCompare +
+Gross edge
+Not recorded
+Not recorded net EV
+Refused
+no research model exists yet
+Evaluated 5m ago
++
+LO
+Londrina to win
+Londrina EC vs. Criciuma EC
+Simulated executionCompare +
+Gross edge
+Not recorded
+Not recorded net EV
+Refused
+no research model exists yet
+Evaluated 5m ago
++
+CR
+Croatia to win
+Croatia vs. England
+Simulated executionCompare +
+Gross edge
+Not recorded
+Not recorded net EV
+Refused
+no research model exists yet
+Evaluated 5m ago
++
+FR
+France to win
+France vs. Italy
+Simulated executionCompare +
+Gross edge
+Not recorded
+Not recorded net EV
+Refused
+no research model exists yet
+Evaluated 5m ago
++
+PO
+Portugal to win
+Portugal vs. Norway
+Simulated executionCompare +
+Gross edge
+Not recorded
+Not recorded net EV
+Refused
+the venue's and Pinnacle's settlement rules are not established as the same
+Evaluated 5m ago
++
+NE
+Netherlands to win
+Netherlands vs. Serbia
+Simulated executionCompare +
+Gross edge
+Not recorded
+Not recorded net EV
+Refused
+the venue's and Pinnacle's settlement rules are not established as the same
+Evaluated 5m ago
++
+FR
+France to win
+France vs. Belgium
+Simulated executionCompare +
+Gross edge
+Not recorded
+Not recorded net EV
+Refused
+the venue's and Pinnacle's settlement rules are not established as the same
+Evaluated 5m ago
++
+LO
+Londrina to win
+Londrina EC vs. Criciuma EC
+Simulated executionCompare +
+Gross edge
+Not recorded
+Not recorded net EV
+Refused
+the venue's and Pinnacle's settlement rules are not established as the same
+Evaluated 24h ago
++
+GR
+Grêmio Novorizontino to win
+Gremio Novorizontino vs. Goias EC
+Simulated executionCompare +
+Gross edge
+Not recorded
+Not recorded net EV
+Refused
+the venue's and Pinnacle's settlement rules are not established as the same
+Evaluated 24h ago
++
+All records, strategy detail and technical evidence
+Presentation of recorded state. This page sends no order and holds no credential; it reads /api/command/agents/derek with the COMMAND session. The 3D characters are licensed Microsoft Rocketbox models (MIT licence, credited below; shipped with their licence file); a device that cannot draw them shows a 2D portrait card. The pose follows the paper runtime's own heartbeat (paper_session_health) and never stands in for data. UNKNOWN is not zero; EMPTY is not success. The 3D character on this page is a licensed model, not an original illustration. Character model: Microsoft Rocketbox Business_Male_03 (MIT, © 2020 Microsoft). Licence: MIT, shipped with the model as ROCKETBOX_LICENSE.md.
+
+Talk to Derek
+Ask about a game, decision or exit plan
+↗
+paperdec:353fb7802e3dd72d0947dca0
+Explain the price, fees, expected value and current status of Botafogo-SP to win. Decision paperdec:353fb7802e3dd72d0947dca0.
+paperdec:37d92537bdaf7cae1ab2a7d7
+Explain the price, fees, expected value and current status of Atletico Goianiense to win. Decision paperdec:37d92537bdaf7cae1ab2a7d7.
+paperdec:de490a82796672deb9c138cc
+Explain the price, fees, expected value and current status of São Bernardo to win. Decision paperdec:de490a82796672deb9c138cc.
+paperdec:00ce0400a64a41f8e12f06c8
+Explain the price, fees, expected value and current status of Cuiabá to win. Decision paperdec:00ce0400a64a41f8e12f06c8.
+paperdec:9360f07de05dd1069fba8edb
+Explain the price, fees, expected value and current status of Londrina to win. Decision paperdec:9360f07de05dd1069fba8edb.
+paperdec:453ce307aaf4f9058f22071b
+Explain the price, fees, expected value and current status of Croatia to win. Decision paperdec:453ce307aaf4f9058f22071b.
+paperdec:6b3ebbf4b35b3af9b74c2ab3
+Explain the price, fees, expected value and current status of France to win. Decision paperdec:6b3ebbf4b35b3af9b74c2ab3.
+paperdec:8d4000c1f706ac1e9fbabaa9
+Explain the price, fees, expected value and current status of Portugal to win. Decision paperdec:8d4000c1f706ac1e9fbabaa9.
+paperdec:71c7678aea59fd81770542b1
+Explain the price, fees, expected value and current status of Netherlands to win. Decision paperdec:71c7678aea59fd81770542b1.
+paperdec:5643954e0e980127b3ba1971
+Explain the price, fees, expected value and current status of France to win. Decision paperdec:5643954e0e980127b3ba1971.
+paperbench:e8ee5f5a154ce5b5af6cc555
+Explain the price, fees, expected value and current status of Londrina to win. Decision paperbench:e8ee5f5a154ce5b5af6cc555.
+paperbench:b2a937f0defb76ca527b7251
+Explain the price, fees, expected value and current status of Grêmio Novorizontino to win. Decision paperbench:b2a937f0defb76ca527b7251.
