@@ -1,174 +1,54 @@
 Skip to the records
+READ-ONLY
+read 2026-10-02 00:12:14Z
 Trace
 Refresh
 LIVE MARKET DATA · SIMULATED EXECUTION · $500,000 STARTING BANKROLL
 MANAGEMENT OFFICE · DEREK
 Derek’s office
+
 Discovery & entry
+
 Talk to Derek ↗
-Records read 1s ago
-Agent pass 26s ago
-Evaluations shown
-12
-Working entry orders
-0
-Approved in this view
-0
-DISCOVERY DESK
-Opportunity queue
-Recorded evaluations · serving policy versions first, then historical; gross edge within each group.
-Greece to win
-Greece vs. Germany
+Read unavailable · HTTP 502. Last records retained.
+AT THE DESK · DEREK
+Waiting for recorded work.
 
-Simulated execution
-Gross edge
--0.13 pp
-Not recorded net EV
-Refused
-the edge was below the policy's minimum (the threshold recorded on the decision)
-Evaluated 8m ago
-+
-Greece to win
-Greece vs. Germany
+The latest read failed. Earlier records remain visible when available.
 
-Simulated execution
-Gross edge
--0.13 pp
-Not recorded net EV
-Refused
-the edge was below the policy's minimum (the threshold recorded on the decision)
-Evaluated 19m ago
-+
-Londrina to win
-Londrina EC vs. Criciuma EC
+Search Derek records
+/
+All evaluations
+Current policy
+Approved
+Export view ↓
+IN CONVERSATION · DEREK
 
-Simulated execution
-Gross edge
--0.67 pp
-Not recorded net EV
-Refused
-the edge was below the policy's minimum (the threshold recorded on the decision)
-Evaluated 7m ago
-+
-Cuiabá to win
-Cuiaba EC vs. AA Ponte Preta
+Resumed your conversation with Derek (14 messages).
 
-Simulated execution
-Gross edge
-Not recorded
-Not recorded net EV
-Refused
-no usable Pinnacle price
-Evaluated 7m ago
-+
-Londrina to win
-Londrina EC vs. Criciuma EC
-
-Simulated execution
-Gross edge
-Not recorded
-Not recorded net EV
-Refused
-no research model exists yet
-Evaluated 7m ago
-+
-Netherlands to win
-Netherlands vs. Serbia
-
-Simulated execution
-Gross edge
-Not recorded
-Not recorded net EV
-Refused
-the venue's and Pinnacle's settlement rules are not established as the same
-Evaluated 8m ago
-+
-Greece to win
-Greece vs. Germany
-
-Simulated execution
-Gross edge
-Not recorded
-Not recorded net EV
-Refused
-the venue's and Pinnacle's settlement rules are not established as the same
-Evaluated 8m ago
-+
-Wales to win
-Wales vs. Denmark
-
-Simulated execution
-Gross edge
-Not recorded
-Not recorded net EV
-Refused
-the venue's and Pinnacle's settlement rules are not established as the same
-Evaluated 8m ago
-+
-MI
-
-Milwaukee Brewers to win
-Game 1: SD Padres vs. MIL Brewers
-
-Simulated execution
-Gross edge
-Not recorded
-Not recorded net EV
-Refused
-the venue's and Pinnacle's settlement rules are not established as the same
-Evaluated 8m ago
-+
-Portugal to win
-Portugal vs. Norway
-
-Simulated execution
-Gross edge
-Not recorded
-Not recorded net EV
-Refused
-the venue's and Pinnacle's settlement rules are not established as the same
-Evaluated 19m ago
-+
-Netherlands to win
-Netherlands vs. Serbia
-
-Simulated execution
-Gross edge
-Not recorded
-Not recorded net EV
-Refused
-the venue's and Pinnacle's settlement rules are not established as the same
-Evaluated 19m ago
-+
-Greece to win
-Greece vs. Germany
-
-Simulated execution
-Gross edge
-Not recorded
-Not recorded net EV
-Refused
-the venue's and Pinnacle's settlement rules are not established as the same
-Evaluated 19m ago
-+
 ● AI AGENT
 Derek
-
 AI
+
 PLACEHOLDER CHARACTER — final model pending. Derek is an AI agent (Discovery & Entry), shown by an original procedural stand-in (confident, energetic, opportunity-hunting; a sharp open-collar finance look) until the licensed model is installed. The pose follows the paper runtime's own heartbeat: monitoring, reviewing, waiting, speaking or unavailable.
+
 PLACEHOLDER CHARACTER — final model pending
-2D PORTRAIT · 3D character not loaded
+2D PORTRAIT · 3D character failed to load (TypeError)
 Pause animation
-PAPER RUNTIME RUNNING
-paper runtime heartbeat 24 s ago
+PAPER RUNTIME UNAVAILABLE
+UNAVAILABLE: HTTP 502
 ◉
 Talk to Derek
 🔊 Voice on
 Stop
 New conversation
 Conversation, memory & policy boundaries
-Answer style 
-
+Answer style
+Conversational
+Full analysis
+Brief me
+What changed?
+What needs attention?
 🎤 Speak
 Send
 YOU
@@ -215,29 +95,5 @@ Memory & evidence
 ▶ Play
 Resumed your conversation with Derek (14 messages).
 All records, strategy detail and technical evidence
+
 Presentation of recorded state. This page sends no order and holds no credential; it reads /api/command/agents/derek with the COMMAND session. The 3D characters are licensed Microsoft Rocketbox models (MIT licence, credited below; shipped with their licence file); a device that cannot draw them shows a 2D portrait card. The pose follows the paper runtime's own heartbeat (paper_session_health) and never stands in for data. UNKNOWN is not zero; EMPTY is not success. The 3D character on this page is a licensed model, not an original illustration. Character model: Microsoft Rocketbox Business_Male_03 (MIT, © 2020 Microsoft). Licence: MIT, shipped with the model as ROCKETBOX_LICENSE.md.
-Talk to Derek
-papercg:e4b43c5f64463733bc33532b
-Explain the price, fees, expected value and current status of Greece to win. Decision papercg:e4b43c5f64463733bc33532b.
-papercg:d2a6832c453efbd205b0a45d
-Explain the price, fees, expected value and current status of Greece to win. Decision papercg:d2a6832c453efbd205b0a45d.
-papercg:4ac68fc94c194da0f4085cdb
-Explain the price, fees, expected value and current status of Londrina to win. Decision papercg:4ac68fc94c194da0f4085cdb.
-paperdec:91d7812b3a0c13a21d9f17dd
-Explain the price, fees, expected value and current status of Cuiabá to win. Decision paperdec:91d7812b3a0c13a21d9f17dd.
-paperdec:94be0910a0e93db2129ff15e
-Explain the price, fees, expected value and current status of Londrina to win. Decision paperdec:94be0910a0e93db2129ff15e.
-paperdec:9c61557c01c86597cf77ffb8
-Explain the price, fees, expected value and current status of Netherlands to win. Decision paperdec:9c61557c01c86597cf77ffb8.
-paperdec:ab9975c7c719502576aa3fea
-Explain the price, fees, expected value and current status of Greece to win. Decision paperdec:ab9975c7c719502576aa3fea.
-paperdec:38030d0128f7a8c57fdb1802
-Explain the price, fees, expected value and current status of Wales to win. Decision paperdec:38030d0128f7a8c57fdb1802.
-paperdec:4b24c176db54c41a14d56599
-Explain the price, fees, expected value and current status of Milwaukee Brewers to win. Decision paperdec:4b24c176db54c41a14d56599.
-paperdec:c09b55f301419e265754b103
-Explain the price, fees, expected value and current status of Portugal to win. Decision paperdec:c09b55f301419e265754b103.
-paperdec:c99c357443b6065f3a658cfe
-Explain the price, fees, expected value and current status of Netherlands to win. Decision paperdec:c99c357443b6065f3a658cfe.
-paperdec:8f143e50e3b231c4912f688d
-Explain the price, fees, expected value and current status of Greece to win. Decision paperdec:8f143e50e3b231c4912f688d.

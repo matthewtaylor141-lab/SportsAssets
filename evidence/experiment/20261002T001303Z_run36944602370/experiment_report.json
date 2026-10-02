@@ -1,0 +1,139 @@
+{
+  "host": "https://command.bettortoken.com",
+  "at": "2026-10-02T00:11:32.560Z",
+  "checks": [
+    {
+      "name": "api_connected",
+      "ok": false,
+      "detail": {
+        "status": 504
+      }
+    },
+    {
+      "name": "chromium-desktop-1280:home_connected",
+      "ok": true,
+      "detail": "THE EXPERIMENT | What the team is doing with the paper account. | Every figure is a stored record · simulated execution · live market data"
+    },
+    {
+      "name": "chromium-desktop-1280:home_positions_match_api",
+      "ok": true,
+      "detail": []
+    },
+    {
+      "name": "chromium-desktop-1280:home_fills_match_api",
+      "ok": true,
+      "detail": []
+    },
+    {
+      "name": "chromium-desktop-1280:xavier_positions_match_api",
+      "ok": true,
+      "detail": []
+    },
+    {
+      "name": "chromium-desktop-1280:audrey_or_home_cash_match_api",
+      "ok": false,
+      "detail": {
+        "cash": null,
+        "home": false,
+        "audrey": false,
+        "xavier": false,
+        "derek": false
+      }
+    },
+    {
+      "name": "webkit-iphone13:home_connected",
+      "ok": true,
+      "detail": "THE EXPERIMENT | What the team is doing with the paper account. | Every figure is a stored record · simulated execution · live market data"
+    },
+    {
+      "name": "webkit-iphone13:home_positions_match_api",
+      "ok": true,
+      "detail": []
+    },
+    {
+      "name": "webkit-iphone13:home_fills_match_api",
+      "ok": true,
+      "detail": []
+    },
+    {
+      "name": "webkit-iphone13:xavier_positions_match_api",
+      "ok": true,
+      "detail": []
+    },
+    {
+      "name": "webkit-iphone13:audrey_or_home_cash_match_api",
+      "ok": false,
+      "detail": {
+        "cash": null,
+        "home": false,
+        "audrey": false,
+        "xavier": false,
+        "derek": false
+      }
+    }
+  ],
+  "engines": {
+    "chromium-desktop-1280": {
+      "home_connected": true,
+      "home_section_present": true,
+      "cash_text": null,
+      "home_has_cash": false,
+      "home_positions": [],
+      "home_fills": [],
+      "derek": {
+        "chars": 7830,
+        "has_cash": false,
+        "positions": [],
+        "fills": []
+      },
+      "xavier": {
+        "chars": 31200,
+        "has_cash": false,
+        "positions": [],
+        "fills": []
+      },
+      "audrey": {
+        "chars": 8267,
+        "has_cash": false,
+        "positions": [],
+        "fills": []
+      }
+    },
+    "webkit-iphone13": {
+      "home_connected": true,
+      "home_section_present": true,
+      "cash_text": null,
+      "home_has_cash": false,
+      "home_positions": [],
+      "home_fills": [],
+      "derek": {
+        "chars": 6318,
+        "has_cash": false,
+        "positions": [],
+        "fills": []
+      },
+      "xavier": {
+        "chars": 4450,
+        "has_cash": false,
+        "positions": [],
+        "fills": []
+      },
+      "audrey": {
+        "chars": 3193,
+        "has_cash": false,
+        "positions": [],
+        "fills": []
+      }
+    }
+  },
+  "api": {
+    "status": 504,
+    "open_positions": [],
+    "fills": [],
+    "entry_orders": 0
+  },
+  "agreement_ok": false,
+  "verdict": "MISMATCH_OR_DISCONNECTED",
+  "ok": false,
+  "freshness": null
+}

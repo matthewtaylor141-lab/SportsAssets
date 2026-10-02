@@ -1,6 +1,6 @@
 Skip to the records
 READ-ONLY
-read 2026-10-01 23:55:36Z
+read 2026-10-02 00:12:22Z
 Trace
 Refresh
 LIVE MARKET DATA · SIMULATED EXECUTION · $500,000 STARTING BANKROLL
@@ -11,13 +11,40 @@ Audit & intelligence
 
 Talk to Audrey ↗
 Records read 0s ago
-Agent pass 1m ago
+Agent pass 51s ago
+LATEST RECORDED WORK · AUDREY
+3h ago
+Fees consume edge
+
+Responsible agent · DEREK
+
+Recommendation
+Measuring
+
+Measurement recorded
+
+Recorded rationale
+
+8 decisions cleared the 0.5 pp gross threshold but the taker fee consumed the edge; rest a bid below the ask where both rules hold at the price paid
+
+Explain this decision ↗
+Open full record
+
+Recorded rationale · freshness shown above.
+
+Search Audrey records
+/
+All findings
+Awaiting response
+Measured
+3 / 3
+Export view ↓
 Ledger check
 Reconciled
 Realized P&L
 $0.00
 Unrealized P&L
--$33.08
+-$33.81
 INTELLIGENCE DESK
 Recommendations & follow-through
 
@@ -62,6 +89,21 @@ Improved
 Measurement recorded
 
 +
+Activity journal
+Latest records in this read
+Measuring · Fees consume edge
+Recommendation
+3h ago
+Improved · Book read cuts
+Recommendation
+3h ago
+Improved · Collection coverage
+Recommendation
+3h ago
+IN CONVERSATION · AUDREY
+
+Resumed your conversation with Audrey (14 messages).
+
 ● AI AGENT
 Audrey
 
@@ -69,7 +111,7 @@ the agent, an AI agent, shown as a licensed 3D character (Character model: Micro
 
 Pause animation
 PAPER RUNTIME RUNNING
-paper runtime heartbeat 71 s ago
+paper runtime heartbeat 51 s ago
 ◉
 Talk to Audrey
 🔊 Voice on
@@ -79,6 +121,9 @@ Conversation, memory & policy boundaries
 Answer style
 Conversational
 Full analysis
+Brief me
+What changed?
+What needs attention?
 🎤 Speak
 Send
 YOU
