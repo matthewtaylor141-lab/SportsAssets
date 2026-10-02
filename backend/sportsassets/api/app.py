@@ -528,6 +528,13 @@ try:
     app.include_router(_command_paper_router)
 except ImportError:
     log.warning("paper: api.command_paper not loaded", exc_info=True)
+# ── INSTITUTIONAL REPORTS ON THE PAPER ACCOUNT: /api/command/paper/reports/*
+# Read-only, COMMAND auth (same dependency as the paper experiment read).
+try:
+    from .paper_reports_routes import router as _paper_reports_router
+    app.include_router(_paper_reports_router)
+except ImportError:
+    log.warning("paper: api.paper_reports_routes not loaded", exc_info=True)
 # ── THE PAPER LEARNING RECORD (migration 185): /api/command/paper/learning*
 # Read-only, COMMAND auth: chains, Audrey's event audits, lessons, proposals.
 try:
