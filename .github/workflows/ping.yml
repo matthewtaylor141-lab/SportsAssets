@@ -699,6 +699,12 @@ jobs:
               c=$(get /api/command/agents/slack); show slack $c;;
             slack-enable)
               c=$(post /api/command/agents/slack/control "{\"enabled\":true,\"actor\":\"$ACTOR\"}"); show slack-enable $c;;
+            slack-check)
+              # Slack auth.test per bot token: ok/error, bot user, team, value KIND only
+              c=$(post /api/command/agents/slack/control "{\"action\":\"check_tokens\",\"actor\":\"$ACTOR\"}"); show slack-check $c;;
+            slack-requeue)
+              # re-send stored answers Slack refused BEFORE posting (invalid_auth etc.)
+              c=$(post /api/command/agents/slack/control "{\"action\":\"requeue_refused\",\"actor\":\"$ACTOR\"}"); show slack-requeue $c;;
             *) echo "unknown mode $MODE"; exit 1;;
           esac
 
