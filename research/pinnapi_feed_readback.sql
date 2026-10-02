@@ -1,5 +1,5 @@
 -- PinnAPI feed C1 readback (read-only). Never reads or prints the key.
-\echo '== F0 · lease 7723901544120036 and ext writer 7723901544120034 holders (same backend process expected only while the feed owns) =='
+\echo '== F0 · lease 7723901544120036 and ext writer 7723901544120034 holders (the lease is a DEDICATED connection beside the writer: same host, distinct pid) =='
 SELECT l.objid::bigint + (l.classid::bigint << 32) AS lock_key, l.pid, a.backend_start,
        a.application_name, a.state, a.client_addr
   FROM pg_locks l JOIN pg_stat_activity a USING (pid)
