@@ -1681,16 +1681,27 @@ async def group_strategy(conn, group_id: str) -> str:
     return s or TWO_MODEL_STRATEGY
 
 
+SOURCE_FEED_CURRENT = "PINNAPI_FEED_CURRENT"
+
+
 async def xavier_measure(conn, ctx: dict, *, pos: dict,
-                         strategy=None) -> dict:
+                         strategy=None, feed=None) -> dict:
     """P(the held side pays) for a BENCHMARK position, on the benchmark's
     own measure -- the de-vigged Pinnacle probability alone, for the same
     contract and payout outcome -- never the two-model blend:
 
       PINNACLE_ONLY_CURRENT     a reading for the same contract within the
                                 lookback that is fresh under the 30 s rule
+      PINNAPI_FEED_CURRENT      no fresh reading, but `feed` (the caller's
+                                in-process PinnAPI cache read for the held
+                                contract, paper_xavier._held_feed) answered
+                                ok under the same 30 s rule: fresh, with the
+                                feed's provenance
       PINNACLE_ONLY_LATEST      the latest such reading, older (stale, said)
       ENTRY_TIME_MEASURE        the entry decision's p_pinnacle (stale, said)
+
+    A feed that refuses leaves the stale measure exactly as it was, with
+    the refusal named in `feed_refusal`. Without `feed` nothing is read.
     """
     pol = policy_for(strategy) or STRICT_POLICY
     STRATEGY = pol["strategy"]                                  # noqa: N806
@@ -1728,6 +1739,7 @@ async def xavier_measure(conn, ctx: dict, *, pos: dict,
         contract = await conn.fetchrow(
             "SELECT payout_event, payout_is_complement FROM "
             " external_valuations WHERE id=$1", int(d["valuation_id"]))
+    stale_out = None
     if contract is not None:
         v = await conn.fetchrow(
             "SELECT id, probability, observed_at FROM external_valuations "
@@ -1746,22 +1758,70 @@ async def xavier_measure(conn, ctx: dict, *, pos: dict,
             # Compare before display rounding: -0.0004 rounds to -0.0,
             # and 30.0004 rounds to 30.0. Neither is inside [0, 30].
             fresh = raw_age is not None and 0 <= raw_age <= max_age
-            return dict(base, p=float(v["probability"]),
-                        source=("PINNACLE_ONLY_CURRENT" if fresh
-                                else "PINNACLE_ONLY_LATEST"),
-                        p_pinnacle=float(v["probability"]),
-                        pinnacle_at=obs, pinnacle_age_s=age,
-                        pinnacle_limit_s=max_age, valuation_id=v["id"],
-                        stale=not fresh)
-    if d is not None and d["p_pinnacle"] is not None:
-        return dict(base, p=float(d["p_pinnacle"]),
-                    source="ENTRY_TIME_MEASURE",
-                    at=L._epoch(d["decided_at"]), stale=True,
-                    why=("no Pinnacle reading for this contract within the "
-                         "lookback; the entry decision's p_pinnacle is used "
-                         "and labelled stale"))
-    return dict(base, p=None, source=None, stale=True,
-                why="NO_SETTLEMENT_MEASURE_FOR_THIS_POSITION")
+            reading = dict(base, p=float(v["probability"]),
+                           source=("PINNACLE_ONLY_CURRENT" if fresh
+                                   else "PINNACLE_ONLY_LATEST"),
+                           p_pinnacle=float(v["probability"]),
+                           pinnacle_at=obs, pinnacle_age_s=age,
+                           pinnacle_limit_s=max_age, valuation_id=v["id"],
+                           stale=not fresh)
+            if fresh:
+                return reading
+            stale_out = reading
+    if stale_out is None and d is not None and d["p_pinnacle"] is not None:
+        stale_out = dict(base, p=float(d["p_pinnacle"]),
+                         source="ENTRY_TIME_MEASURE",
+                         at=L._epoch(d["decided_at"]), stale=True,
+                         why=("no Pinnacle reading for this contract within "
+                              "the lookback; the entry decision's p_pinnacle "
+                              "is used and labelled stale"))
+    if stale_out is None:
+        stale_out = dict(base, p=None, source=None, stale=True,
+                         why="NO_SETTLEMENT_MEASURE_FOR_THIS_POSITION")
+    if feed is None:
+        return stale_out
+    # THE HELD CONTRACT ON THE IN-PROCESS FEED: only an ok read under the
+    # same limit becomes fresh; any refusal keeps the stale measure as is.
+    try:
+        cur = await feed(
+            conn, pos=pos, at=at, max_age_s=max_age,
+            payout_event=None if contract is None
+            else contract["payout_event"],
+            payout_is_complement=bool(contract is not None
+                                      and contract["payout_is_complement"]))
+    except Exception as exc:                                    # noqa: BLE001
+        cur = {"ok": False, "reason": "FEED_READ_FAILED",
+               "error": type(exc).__name__}
+    if not cur.get("ok"):
+        return dict(stale_out, feed_refusal=cur.get("reason"),
+                    feed_detail={k: cur[k] for k in (
+                        "sport_id", "feed_event_id", "market_key",
+                        "designation", "provenance", "why", "error")
+                        if cur.get(k) is not None})
+    prov = cur["provenance"]
+    return dict(base, p=float(cur["p"]), source=SOURCE_FEED_CURRENT,
+                p_pinnacle=float(cur["p"]),
+                pinnacle_at=prov["source_change_ms"] / 1000.0,
+                pinnacle_age_s=prov.get("quote_age_s"),
+                pinnacle_limit_s=max_age, stale=False,
+                feed={"epoch": prov.get("epoch"),
+                      "quote_age_s": prov.get("quote_age_s"),
+                      "source_change_ms": prov.get("source_change_ms"),
+                      "frame_ts_ms": prov.get("frame_ts_ms"),
+                      "received_ms": prov.get("received_ms"),
+                      "evaluated_ms": prov.get("evaluated_ms"),
+                      "parser": prov.get("parser"),
+                      "stream": prov.get("stream"),
+                      "sport_id": cur.get("sport_id"),
+                      "feed_event_id": cur.get("feed_event_id"),
+                      "market_key": cur.get("market_key"),
+                      "designation": cur.get("designation"),
+                      "payout_event": cur.get("payout_event"),
+                      "payout_is_complement": cur.get("payout_is_complement"),
+                      "p_selection": cur.get("p_selection"),
+                      "devig": cur.get("devig")},
+                replaced_stale_source=stale_out.get("source"),
+                replaced_stale_age_s=stale_out.get("pinnacle_age_s"))
 
 
 # ═════════════════════════════════════════════════════════════════════

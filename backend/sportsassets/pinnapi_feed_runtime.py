@@ -1,4 +1,5 @@
-"""THE PINNAPI FEED IN THE DECIDING PROCESS (C1: observe only).
+"""THE PINNAPI FEED IN THE DECIDING PROCESS (C1: observe; one read-only
+consumer, Xavier's held-position measure).
 
 Started by ext_pinnacle_loop.run ONLY after it holds its writer lock
 (7723901544120034), with that connection's backend pid, so the feed exists
@@ -18,10 +19,16 @@ SCOPE: ingestion_state 'pinnapi_feed_scope' = {"sport_ids": [...],
 prematch firehose was 1,291 events in one snapshot (bounded capture
 2026-10-01), so wider scopes are an explicit choice.
 
-C1 CHANGES NO DECISION: nothing here is read by Derek or Xavier yet. It
-publishes a bounded heartbeat ('pinnapi_feed_last', overwritten, capped)
-with the owner state, the census of the provider's current state by sport /
-market type / phase, and the provider-stamp->receipt distribution.
+ONE READ BY A DECISION: Xavier's measure of a HELD benchmark position
+(`held_moneyline`, called from paper_xavier when the external valuation is
+not fresh). It reads only this process's cache through `read` (no socket,
+no network), matches the held contract with the census's own
+`contract_match`, and de-vigs with bettor_pinnacle_devig.valuation. Every
+refusal is named and leaves the measure stale; it never places or sizes an
+order, and Derek reads nothing here. It also publishes a bounded heartbeat
+('pinnapi_feed_last', overwritten, capped) with the owner state, the census
+of the provider's current state by sport / market type / phase, and the
+provider-stamp->receipt distribution.
 """
 from __future__ import annotations
 
@@ -54,6 +61,8 @@ ALLOWED_SPORTS = set(range(1, 13))
 _STATE: dict = {"owner": None, "task": None, "beat": None, "pool": None,
                 "census": None, "runtime_id": None}
 CENSUS_S = 60.0
+#: held_moneyline is the only decision read; no order path reads the feed
+DECISION_EFFECT = "XAVIER_HELD_MEASURE_ONLY (read-only, held positions)"
 
 
 def enabled() -> bool:
@@ -113,7 +122,7 @@ def digest() -> dict:
     d["runtime_id"] = _STATE.get("runtime_id")
     d["enabled_env"] = enabled()
     d["coverage_census"] = _STATE.get("census")
-    d["c1_decision_effect"] = "NONE (observe only)"
+    d["c1_decision_effect"] = DECISION_EFFECT
     return d
 
 
@@ -175,7 +184,7 @@ def _capped(d: dict) -> str:
         "enabled_env": d.get("enabled_env") is True,
         "heartbeat_truncated": True,
         "reason": "HEARTBEAT_EXCEEDED_SIZE_CAP",
-        "c1_decision_effect": "NONE (observe only)",
+        "c1_decision_effect": DECISION_EFFECT,
     })
 
 
@@ -288,7 +297,7 @@ async def shutdown_default(wait_s: float = 8.0) -> dict:
             "state": "RELEASED" if verdict == "CLOSED" else "STOPPING_UNCONFIRMED",
             "runtime_id": _STATE.get("runtime_id"), "beat_at": time.time(),
             "shutdown_verdict": verdict, "authority_proven": False,
-            "c1_decision_effect": "NONE (observe only)"}, final=True)
+            "c1_decision_effect": DECISION_EFFECT}, final=True)
     except Exception as exc:
         final_status = "UNAVAILABLE:" + type(exc).__name__
         log.warning("pinnapi terminal heartbeat unavailable: %s", type(exc).__name__)
@@ -298,8 +307,111 @@ async def shutdown_default(wait_s: float = 8.0) -> dict:
 
 
 def read(event_id, key, **kw) -> dict:
-    """The one accessor (unused by decisions in C1)."""
+    """The one accessor (read by decisions only via held_moneyline)."""
     o = _STATE.get("owner")
     if o is None:
         return {"ok": False, "reason": F.R_NO_AUTHORITY}
     return o.cache.read(event_id, key, **kw)
+
+
+# ── XAVIER'S HELD POSITION: ONE CONTRACT, READ FROM THIS PROCESS'S CACHE ──
+R_NO_PAYOUT_EVENT = "HELD_PAYOUT_EVENT_NOT_RECORDED"
+R_BAD_COMPLEMENT = "HELD_PAYOUT_COMPLEMENT_NOT_NOT_OF_A_SELECTION"
+R_CATALOGUE_UNREADABLE = "HELD_MARKET_CATALOGUE_UNREADABLE"
+R_NOT_IN_CATALOGUE = "HELD_MARKET_NOT_IN_VENUE_CATALOGUE"
+R_OUTCOME_UNMAPPED = "HELD_OUTCOME_NOT_ONE_FEED_DESIGNATION"
+R_NOT_FULL_GAME_ML = "FEED_QUOTE_NOT_A_FULL_GAME_MONEYLINE"
+
+#: the census's own columns, for the ONE held contract
+HELD_CATALOGUE_SQL = """SELECT event_title, kind, line, sports_type,
+       extract(epoch FROM game_start)::float8 AS game_start
+  FROM us_premap WHERE market_slug = $1 LIMIT 1"""
+
+
+def held_quote(row: dict, *, payout_event, payout_is_complement: bool,
+               at: float, max_age_s: float, sport_ids, synced: bool,
+               view: dict) -> dict:
+    """P(the held contract's payout event) from the feed, or a named
+    refusal. `row` is the contract's catalogue row (HELD_CATALOGUE_SQL),
+    `view` the census's feed_event_view of the owner's cache. Pure apart
+    from `read`, which is the cache's own read with its own refusals."""
+    from . import bettor_pinnacle_devig as devig
+    from . import pinnapi_census as C
+    pay = str(payout_event or "")
+    sel = pay
+    if payout_is_complement:
+        if not (pay.startswith("NOT(") and pay.endswith(")") and pay[4:-1]):
+            return {"ok": False, "reason": R_BAD_COMPLEMENT}
+        sel = pay[4:-1]
+    state, eid, sid = C.contract_match(row, view, subscribed_sports=set(
+        sport_ids), synced=synced)
+    if state != C.S_SUPPORTED:
+        return {"ok": False, "reason": state, "sport_id": sid}
+    ev = next((e for e in view.get(sid, []) if e["id"] == eid), None) or {}
+    des = C.designation_of(sel, ev)
+    if des is None:
+        return {"ok": False, "reason": R_OUTCOME_UNMAPPED, "sport_id": sid,
+                "feed_event_id": eid}
+    key = F.FULL_GAME_MONEYLINE_KEY
+    got = read(eid, key, evaluated_ms=float(at) * 1000.0,
+               max_age_s=float(max_age_s))
+    where = {"sport_id": sid, "feed_event_id": eid, "market_key": key,
+             "designation": des}
+    if not got.get("ok"):
+        return dict(where, ok=False, reason=got.get("reason"),
+                    provenance=got.get("provenance"))
+    q = got["quote"]
+    if q.market_type != "moneyline" or (q.period or 0) != 0 or q.alternate:
+        return dict(where, ok=False, reason=R_NOT_FULL_GAME_ML,
+                    provenance=got.get("provenance"))
+    prov = got["provenance"]
+    period = "FULL_GAME"
+    val = devig.valuation(
+        contract={"sport_family": C.sport_family_of(sid), "market": "h2h",
+                  "selection": des, "event_key": eid, "period": period,
+                  "line": None},
+        quote={"book": devig.BOOK, "outcomes": q.decimal_prices(),
+               "observed_at": prov["source_change_ms"] / 1000.0,
+               "received_at": prov["received_ms"] / 1000.0,
+               "event_key": eid, "period": period, "line": None},
+        now=float(at), max_age_s=float(max_age_s))
+    if val.get("probability") is None:
+        return dict(where, ok=False,
+                    reason=(val.get("refusals") or ["DEVIG_REFUSED"])[0],
+                    why=val.get("why"), provenance=prov)
+    p_sel = float(val["probability"])
+    return dict(where, ok=True,
+                p=(1.0 - p_sel) if payout_is_complement else p_sel,
+                p_selection=p_sel, payout_event=pay,
+                payout_is_complement=bool(payout_is_complement),
+                provenance=dict(prov, stream=q.stream),
+                devig={"version": devig.VERSION, "method": val["devig_method"],
+                       "outcomes": val["expected_outcomes"],
+                       "raw_odds": val["raw_odds"],
+                       "devigged": val["devigged"],
+                       "overround": val["overround"]})
+
+
+async def held_moneyline(conn, *, us_market_slug, payout_event,
+                         payout_is_complement: bool, at: float,
+                         max_age_s: float) -> dict:
+    """Xavier's read for ONE held contract. No owner in this process ->
+    FEED_OWNERSHIP_NOT_HELD before anything else (no catalogue read)."""
+    o = _STATE.get("owner")
+    if o is None:
+        return {"ok": False, "reason": F.R_NO_AUTHORITY}
+    if not payout_event:
+        return {"ok": False, "reason": R_NO_PAYOUT_EVENT}
+    try:
+        row = await conn.fetchrow(HELD_CATALOGUE_SQL, us_market_slug)
+    except Exception as exc:                                    # noqa: BLE001
+        return {"ok": False, "reason": R_CATALOGUE_UNREADABLE,
+                "error": type(exc).__name__}
+    if row is None:
+        return {"ok": False, "reason": R_NOT_IN_CATALOGUE}
+    from . import pinnapi_census as C
+    return held_quote(dict(row), payout_event=payout_event,
+                      payout_is_complement=payout_is_complement, at=at,
+                      max_age_s=max_age_s, sport_ids=o.sport_ids,
+                      synced=bool(o.cache.authority.synced),
+                      view=C.feed_event_view(o.cache))
