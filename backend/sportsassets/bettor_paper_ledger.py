@@ -95,6 +95,8 @@ OPEN_STATES = ("PENDING_SIMULATION", "RESTING", "PARTIALLY_FILLED",
 TERMINAL_STATES = ("FILLED", "EXPIRED", "CANCELED", "REJECTED")
 
 #: ── REFUSALS ─────────────────────────────────────────────────────────
+from . import bettor_paper_limits as _LIMITS  # noqa: E402
+
 R_NO_ACCOUNT = "THE_PAPER_ACCOUNT_DOES_NOT_EXIST"
 R_INSUFFICIENT = "INSUFFICIENT_AVAILABLE_PAPER_CASH"
 R_HEDGE_RESERVE = "AN_ENTRY_MAY_NOT_SPEND_THE_HEDGE_RESERVE"
@@ -348,6 +350,38 @@ async def _open_groups(conn, account_id: str) -> int:
 
 R_FIXTURE_OWNED = "ANOTHER_STRATEGY_HOLDS_EXPOSURE_TO_THIS_FIXTURE"
 R_SAME_STRATEGY_LIVE = "THIS_STRATEGY_ALREADY_HAS_A_LIVE_ENTRY_ON_THIS_FIXTURE"
+#: Main account under the owner's capital policy: no fixture-count, exposure
+#: or concentration limit, but a strategy does not re-enter the exact contract
+#: and side it already holds (working entry or open position). Each new
+#: valuation of a held contract is a new decision key, so without this a lane
+#: would add another ~$1,000 to the same position on every valuation; that is
+#: an add to an existing position, not a new ~$1,000 initial position.
+R_SAME_CONTRACT_HELD = "THIS_STRATEGY_ALREADY_HOLDS_THIS_CONTRACT"
+
+
+async def same_contract_held(conn, account_id: str, strategy, slug,
+                             holding_side) -> list:
+    """This strategy's working entries or open positions on this exact
+    contract and side, on this account. Read-only; [] when none."""
+    if not strategy or not slug:
+        return []
+    rows = await conn.fetch(
+        "SELECT DISTINCT group_id, state FROM paper_orders "
+        " WHERE account_id=$1 AND strategy=$2 AND role='ENTRY' "
+        "   AND us_market_slug=$3 AND holding_side=$4 "
+        "   AND (state = ANY($5::text[]) OR filled_qty > 0)",
+        account_id, str(strategy), slug, holding_side, list(OPEN_STATES))
+    if not rows:
+        return []
+    live = [r for r in rows if r["state"] in OPEN_STATES]
+    rest = {r["group_id"] for r in rows if r["state"] not in OPEN_STATES}
+    held = []
+    if rest:
+        held = [g for g in rest if g in {
+            p["group_id"] for p in await positions(conn, account_id)
+            if p["open_qty"] > 1e-9}]
+    return ([{"group_id": r["group_id"], "state": r["state"]} for r in live]
+            + [{"group_id": g, "state": "OPEN_POSITION"} for g in sorted(held)])
 
 
 async def fixture_owner_refusal(conn, o: dict, *,
@@ -456,6 +490,15 @@ async def submit_order(conn, order: dict, *, caps: dict | None = None,
             if chk:
                 return dict(chk, ok=False, reservation_usd=f(reserve),
                             available_usd=f(cs["available"]))
+            if o.get("role") == "ENTRY" and _LIMITS.uses_owner_policy(acct):
+                held = await same_contract_held(
+                    conn, acct, o.get("strategy"), o.get("us_market_slug"),
+                    o.get("holding_side"))
+                if held:
+                    return {"ok": False, "refusal": R_SAME_CONTRACT_HELD,
+                            "under_lock": True, "by": held,
+                            "reservation_usd": f(reserve),
+                            "available_usd": f(cs["available"])}
             if exclusive_fixture and o.get("role") == "ENTRY":
                 chk = await fixture_owner_refusal(
                     conn, o, same_strategy_live=one_live_entry_per_fixture)

@@ -326,8 +326,9 @@ async def test_each_owner_limit_and_safeguard_refuses_by_name(explore_only,
         assert st["loss_stop_reached"] is False
         assert st["headroom_basis"] == "AVAILABLE_SIMULATED_CASH"
         chk = PEX.locked_check_for("condition:other", "other-slug")
+        # V3: $1,000 is a sizing target, not a ceiling -- 1001 is not refused
         got = await chk(conn, {"account_id": acct["account_id"]}, L.D(1001))
-        assert got["refusal"] == PEX.R_TOO_DEAR
+        assert got is None
         got = await chk(conn, {"account_id": acct["account_id"]}, L.D(50))
         assert got is None
         got = await PEX.locked_check_for(

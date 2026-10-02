@@ -130,9 +130,20 @@ async def test_real_ledger_allows_six_1000_reservations_without_reset(monkeypatc
         await conn.close()
 
 
+@pytest.fixture
+def cg_only():
+    """Strategy switches flip SYNCHRONOUSLY, before the async proof runs
+    (the helper uses its own event loop), and are put back afterwards."""
+    from tests import test_paper_exploration_maker_and_throughput as T
+    from sportsassets.agents import paper_benchmark as B
+    T._only(B.CG_STRATEGY)
+    yield
+    T._only(B.CG_STRATEGY, B.EXPLORE_STRATEGY)
+
+
 @pytest.mark.skipif(not H.DSN, reason="needs RN1X_TEST_DSN")
 @pytest.mark.asyncio
-async def test_completed_game_uses_1000_with_an_existing_5000_session(monkeypatch):
+async def test_completed_game_uses_1000_with_an_existing_5000_session(monkeypatch, cg_only):
     import time
     from tests import paper_live_fixture as PL
     from tests import test_paper_exploration_maker_and_throughput as T
@@ -143,7 +154,6 @@ async def test_completed_game_uses_1000_with_an_existing_5000_session(monkeypatc
     try:
         acct, transport = await T._setup(conn, "capital_cg", now)
         monkeypatch.setattr(P, "ACCOUNT_ID", acct["account_id"])
-        T._only(B.CG_STRATEGY)
         frozen = await S.active_session(conn, acct["account_id"])
         assert frozen["config"]["entry"]["target_order_usd"] == 5000
         valuation = await PL.valuation(conn, decided_at=now - 10, p_pin=.70,
@@ -168,6 +178,57 @@ async def test_completed_game_uses_1000_with_an_existing_5000_session(monkeypatc
         assert resumed["session_id"] == frozen["session_id"]
         assert client.mutation_attempts == 0
     finally:
-        T._only(B.CG_STRATEGY, B.EXPLORE_STRATEGY)
         await PL.purge_everything(conn)
+        await conn.close()
+
+
+@pytest.mark.skipif(not H.DSN, reason="needs RN1X_TEST_DSN")
+@pytest.mark.asyncio
+async def test_a_strategy_does_not_re_enter_the_contract_it_holds(monkeypatch):
+    """Owner policy: other contracts on the same fixture, and other
+    strategies, are allowed; the SAME strategy re-entering the SAME contract
+    and side it holds is refused under the lock (an add, not a new initial
+    position). It is allowed again once nothing is working or open there."""
+    conn = await H.connect()
+    try:
+        acct = await H.new_account(conn, "samecontract")
+        monkeypatch.setattr(P, "ACCOUNT_ID", acct["account_id"])
+        caps = legacy_config()["risk"]
+
+        def order(key, slug, strategy="PINNACLE_EXPLORATION_PAPER"):
+            o = H.order(acct, key=key, slug=slug, fixture="one-fixture",
+                        qty=2000, limit=.5)
+            o["strategy"] = strategy
+            return o
+
+        first = await L.submit_order(conn, order("a1", "contract-a"), caps=caps,
+                                     fee_fn=H.flat_fee(0), now=H.T0)
+        assert first["ok"], first
+        again = await L.submit_order(conn, order("a2", "contract-a"), caps=caps,
+                                     fee_fn=H.flat_fee(0), now=H.T0)
+        assert again["ok"] is False
+        assert again["refusal"] == L.R_SAME_CONTRACT_HELD and again["under_lock"]
+        assert again["by"][0]["group_id"] == first["order"]["group_id"]
+        other_contract = await L.submit_order(conn, order("b1", "contract-b"),
+                                              caps=caps, fee_fn=H.flat_fee(0),
+                                              now=H.T0)
+        assert other_contract["ok"], other_contract
+        other_strategy = await L.submit_order(
+            conn, order("c1", "contract-a", "PINNACLE_COMPLETED_GAME_PAPER"),
+            caps=caps, fee_fn=H.flat_fee(0), now=H.T0)
+        assert other_strategy["ok"], other_strategy
+        # the repeated identical order is still an idempotent duplicate
+        dup = await L.submit_order(conn, order("a1", "contract-a"), caps=caps,
+                                   fee_fn=H.flat_fee(0), now=H.T0)
+        assert dup["duplicate"]
+        # once the first entry is no longer working (and never filled),
+        # a new entry on that contract is allowed
+        await conn.execute("UPDATE paper_orders SET state='EXPIRED' "
+                           "WHERE order_id=$1", first["order"]["order_id"])
+        later = await L.submit_order(conn, order("a3", "contract-a"), caps=caps,
+                                     fee_fn=H.flat_fee(0), now=H.T0)
+        assert later["ok"], later
+        assert P.describe(acct["account_id"])["same_strategy_same_contract"]\
+            .startswith("NOT_RE_ENTERED")
+    finally:
         await conn.close()

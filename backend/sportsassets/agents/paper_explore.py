@@ -297,6 +297,10 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
                                  cand.get("fixture"),
                                  cand.get("us_market_slug")):
             refusals.append(R_FIXTURE_TAKEN)
+        elif LIMITS.uses_owner_policy(ctx["account_id"]) and \
+                await L.same_contract_held(conn, ctx["account_id"], STRATEGY,
+                                           cand.get("us_market_slug"), side):
+            refusals.append(L.R_SAME_CONTRACT_HELD)
         elif not sel["selected"]:
             refusals.append(R_NOT_SAMPLED)
     p = pin.get("p")

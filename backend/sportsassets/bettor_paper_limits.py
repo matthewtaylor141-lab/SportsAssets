@@ -22,6 +22,10 @@ def describe(account_id):
             "per_market_cap_usd": None, "per_fixture_cap_usd": None,
             "max_concurrent_groups": None, "hedge_reserve_fraction": 0.0,
             "funding_boundary": "AVAILABLE_SIMULATED_CASH",
+            "same_strategy_same_contract": (
+                "NOT_RE_ENTERED_WHILE_THAT_STRATEGY_HOLDS_IT: a new ~$1,000 "
+                "entry is an initial position, not an add to a held one; other "
+                "contracts on the fixture and other strategies are unaffected"),
             "scope": "NEW_PAPER_ORDERS_ONLY"}
 
 
