@@ -74,6 +74,15 @@ MUTATION_SURFACE = {
     "post_order": "polymarket-CLOB: submits a built order. A SECOND venue and a "
                   "SECOND path -- it does not pass through pmus at all",
     "create_order": "polymarket-CLOB: builds the order post_order sends",
+    "execmirror.Venue.place / cancel / cancel_all / close": (
+        "polymarket-us, a SEPARATE ACCOUNT: the 1:1,000 execution mirror "
+        "(execmirror.py). Its own credential (PMUS_EXECMIRROR_KEY_ID / "
+        "_SECRET_KEY, never PMUS_KEY_ID), its own durable control "
+        "(execmirror_control, off by default, emergency stop), an account "
+        "fingerprint checked every cycle and a per-order notional cap. It "
+        "does not pass through pmus or the funded gates by design: it trades "
+        "only the mirror account, only from new paper orders after the "
+        "cutover"),
 }
 
 #: The names the scanner treats as venue mutations.

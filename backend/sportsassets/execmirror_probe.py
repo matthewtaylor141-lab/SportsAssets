@@ -24,8 +24,8 @@ what does it hold?" with READS ONLY:
             that constrain an order (tick, increments, minimums, state).
 
 THE INTERFACE CANNOT MUTATE. `_Reader` holds the SDK client privately and
-exposes an ALLOWLIST of five reads; it has no create / cancel / modify /
-cancel_all / close_position / preview attribute at all, and
+exposes an ALLOWLIST of five reads; it has no order-placing, cancelling,
+amending, position-closing or previewing attribute at all, and
 `tests/test_execmirror_probe.py` walks this file's AST to keep it that way.
 Nothing here writes to our database. The secret is passed only to the SDK
 constructor; no response field whose name looks secret is returned.

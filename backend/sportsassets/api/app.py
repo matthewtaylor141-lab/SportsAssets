@@ -439,6 +439,10 @@ async def lifespan(_: FastAPI):
     capability_task = asyncio.create_task(_CAP.run(_cap_pool))
     from .. import slack_bridge as _SLACK
     slack_task = asyncio.create_task(_SLACK.run(_cap_pool))
+    # 1:1,000 execution mirror: its own durable control (off by default) and
+    # its own credential; idle until the control row is enabled.
+    from .. import execmirror as _EXM
+    execmirror_task = asyncio.create_task(_EXM.run(_cap_pool))
     # Evidence for the post-boot health-check misses: records every thread's
     # stack when the loop is blocked >= 2 s; changes no behaviour.
     from .. import loop_watchdog as _WATCHDOG
@@ -449,6 +453,7 @@ async def lifespan(_: FastAPI):
         tasks = [t for t in (desk_task, rn1x_task, rn1x_learn_task,
                              ext_task, rn1x_model_task, trim_task,
                              poller_task, capability_task, slack_task,
+                             execmirror_task,
                              *watchdog_tasks)
                  if t is not None]
         for task in tasks:
@@ -578,6 +583,12 @@ async def seen_origins():
         {"host": h, "ago_s": round(now - t, 1)}
         for h, t in sorted(_SEEN_ORIGINS.items(), key=lambda kv: -kv[1])
     ]}
+
+
+async def _execmirror_read(request: Request) -> str:
+    """The command centre's read authorization (agents_core.require_read)."""
+    from .agents_core import require_read as _rr
+    return await _rr(request)
 
 
 def require_admin(x_admin_token: str = Header(default="")) -> None:
@@ -2408,6 +2419,116 @@ async def admin_execmirror_probe(response: Response,
                                        list(b.get("slugs") or []))
     raise HTTPException(status_code=400,
                         detail="action: keys | account | markets")
+
+
+@app.post("/api/admin/execmirror/control",
+          dependencies=[Depends(require_admin)])
+async def admin_execmirror_control(response: Response,
+                                   body: dict | None = None) -> dict:
+    """THE 1:1,000 EXECUTION MIRROR'S OWN CONTROL (separate from every other
+    lane). `action`:
+      enable   verifies the mirror credential (present, distinct from the
+               funded key), reads the account (authenticated, balances,
+               positions, open orders), refuses an account that already
+               holds positions or open orders unless `acknowledge_existing`
+               is true, records that baseline and the key fingerprint, and
+               sets the cutover: only paper orders decided from now on are
+               mirrored -- nothing historical is replayed.
+      disable  stops planning and submitting; open live orders and
+               positions stay as they are (and keep being polled? no: the
+               lane is idle) -- use `stop` to cancel them.
+      stop     EMERGENCY STOP: cancels every open mirror order (and the
+               account's open orders), drops planned orders, and closes
+               live positions only if `flatten` is true.
+      resume   clears a completed stop (keeps the original cutover).
+      cap      sets `max_order_usd`, the per-order live notional cap.
+    Requires `actor` (a named person)."""
+    from .. import execmirror_probe as EP
+    from ..db import get_pool
+    response.headers["Cache-Control"] = "no-store"
+    b = dict(body or {})
+    action = str(b.get("action") or "")
+    actor = str(b.get("actor") or "").strip()
+    if not (2 <= len(actor) <= 100):
+        raise HTTPException(status_code=400, detail="actor (a named person) required")
+    pool = await get_pool()
+    async with pool.acquire() as c:
+        if not await c.fetchval("SELECT to_regclass('execmirror_control') IS NOT NULL"):
+            raise HTTPException(status_code=503, detail="EXECMIRROR_SCHEMA_ABSENT")
+        if action == "enable":
+            keys = EP.keys_present()
+            if not keys["complete"]:
+                raise HTTPException(status_code=409, detail="EXECMIRROR_CREDENTIAL_ABSENT")
+            if keys["distinct_from_funded_key"] is False:
+                raise HTTPException(status_code=409, detail="EXECMIRROR_KEY_IS_THE_FUNDED_KEY")
+            snap = await asyncio.to_thread(EP.account_snapshot)
+            if snap.get("state") != "OK":
+                raise HTTPException(status_code=409,
+                                    detail="EXECMIRROR_ACCOUNT_NOT_READABLE:%s" % snap.get("state"))
+            existing = bool(snap.get("open_orders")) or snap.get("open_positions", 0) > 0
+            if existing and not b.get("acknowledge_existing"):
+                raise HTTPException(status_code=409,
+                                    detail="EXECMIRROR_ACCOUNT_NOT_EMPTY (positions or open "
+                                           "orders exist; pass acknowledge_existing)")
+            positions_net = {}
+            for p in snap.get("positions") or []:
+                try:
+                    positions_net[p["slug"]] = abs(int(float(p.get("netPosition") or 0)))
+                except (TypeError, ValueError):
+                    positions_net[p["slug"]] = 0
+            baseline = {"at": snap.get("at"), "balances": snap.get("balances"),
+                        "positions_net": positions_net,
+                        "open_orders": len(snap.get("open_orders") or [])}
+            await c.execute(
+                """UPDATE execmirror_control SET enabled = true, stopped = false,
+                     stop_done_at = NULL, cutover_at = now(), account_fingerprint = $1,
+                     baseline = $2::jsonb, actor = $3, revision = revision + 1,
+                     updated_at = now() WHERE id = 1""",
+                keys["key_fingerprint"], json.dumps(baseline, default=str), actor)
+        elif action == "disable":
+            await c.execute("UPDATE execmirror_control SET enabled = false, actor = $1,"
+                            " revision = revision + 1, updated_at = now() WHERE id = 1", actor)
+        elif action == "stop":
+            await c.execute("UPDATE execmirror_control SET stopped = true, stop_done_at = NULL,"
+                            " flatten_on_stop = $2, actor = $1, revision = revision + 1,"
+                            " updated_at = now() WHERE id = 1", actor, bool(b.get("flatten")))
+        elif action == "resume":
+            await c.execute("UPDATE execmirror_control SET stopped = false, stop_done_at = NULL,"
+                            " flatten_on_stop = false, actor = $1, revision = revision + 1,"
+                            " updated_at = now() WHERE id = 1", actor)
+        elif action == "cap":
+            cap = float(b.get("max_order_usd") or 0)
+            if not (0 < cap <= 1000):
+                raise HTTPException(status_code=400, detail="max_order_usd in (0, 1000]")
+            await c.execute("UPDATE execmirror_control SET max_order_usd = $2, actor = $1,"
+                            " revision = revision + 1, updated_at = now() WHERE id = 1",
+                            actor, cap)
+        else:
+            raise HTTPException(status_code=400,
+                                detail="action: enable | disable | stop | resume | cap")
+        await c.execute("INSERT INTO execmirror_events (kind, detail) VALUES ($1, $2::jsonb)",
+                        "CONTROL_" + action.upper(),
+                        json.dumps({"actor": actor, "flatten": bool(b.get("flatten")),
+                                    "acknowledge_existing": bool(b.get("acknowledge_existing"))}))
+        row = await c.fetchrow("SELECT enabled, stopped, flatten_on_stop, cutover_at,"
+                               " account_fingerprint, max_order_usd, scale, revision"
+                               " FROM execmirror_control WHERE id = 1")
+    return {"action": action, "control": dict(row)}
+
+
+@app.get("/api/command/execmirror", dependencies=[Depends(_execmirror_read)])
+async def command_execmirror(response: Response) -> dict:
+    """Live execution mirror · 1:1,000 (`sportsassets.execmirror_view`):
+    paper orders beside the live orders derived from them, venue fills,
+    fees, positions, P&L (paper / 1,000 vs live) and every exclusion."""
+    from .. import execmirror_view as V
+    from ..db import get_pool
+    response.headers["Cache-Control"] = "no-store"
+    pool = await get_pool()
+    async with pool.acquire() as c:
+        if not await c.fetchval("SELECT to_regclass('execmirror_control') IS NOT NULL"):
+            return {"status": "UNAVAILABLE", "why": "execution mirror schema not applied"}
+        return await V.view(c)
 
 
 @app.get("/api/admin/pinnapi-feed/state",

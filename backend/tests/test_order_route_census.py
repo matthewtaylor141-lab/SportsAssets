@@ -127,6 +127,19 @@ def test_every_submitting_call_site_is_accounted_for():
         # settlement and status reconciliation beside them submit nothing at
         # all, so they are reads and are never gated.
         "sportsassets/bettor_funded_management.py",
+        # ── ADDED 2026-10-02: THE 1:1,000 EXECUTION MIRROR ─────────────────
+        #
+        # `execmirror` trades a SEPARATE, freshly provisioned Polymarket US
+        # account, owner-authorized for live execution at 1/1,000 of each new
+        # paper order. It deliberately does NOT go through pmus: pmus holds
+        # the funded account's credential and gate, and the mirror must never
+        # be able to reach that account. THE CONTROLS IT GETS, asserted in
+        # `test_the_execution_mirror_declares_its_controls` below: its own
+        # credential names only; its own durable control row, OFF by
+        # default; an emergency stop; the account fingerprint checked every
+        # cycle; a per-order notional cap; and a cutover so nothing historical
+        # is replayed. Its close_position call is the emergency-stop flatten.
+        "sportsassets/execmirror.py",
     }
     assert set(modules) == expected, (
         "order-capable modules changed.\n  now: %s\n  was: %s"
@@ -210,14 +223,21 @@ def test_no_order_path_bypasses_the_adapter():
     allowed = {"sportsassets/pmus.py", "sportsassets/live_executor.py",
                "sportsassets/api/pmus_account.py",
                "sportsassets/api/track_record.py",
-               "sportsassets/venue_sdk.py"}
+               "sportsassets/venue_sdk.py",
+               # the execution mirror's read-only account probe (asserted
+               # below to hold no submitting verb) and the mirror lane
+               # itself (its controls asserted in
+               # test_the_execution_mirror_declares_its_controls)
+               "sportsassets/execmirror_probe.py",
+               "sportsassets/execmirror.py"}
     offenders = {s[0] for s in sites} - allowed
     assert not offenders, (
         "venue client constructed outside the known adapters: %s"
         % sorted(offenders))
 
     for mod in ("sportsassets/api/pmus_account.py",
-                "sportsassets/api/track_record.py"):
+                "sportsassets/api/track_record.py",
+                "sportsassets/execmirror_probe.py"):
         src = open(os.path.join(BACKEND, mod)).read()
         for verb in ("post_order", "create_order", "orders.create",
                      "close_position"):
@@ -337,3 +357,32 @@ def test_the_funded_ev_route_declares_its_controls():
     # 6 · AND IT WRITES NO ROWS, so it cannot record an order it did not send
     assert "INSERT INTO" not in src.upper()
     assert EX.REAL_ORDER_SUBMISSION_ENABLED is False
+
+
+def test_the_execution_mirror_declares_its_controls():
+    """The decision the census asks for, for the 1:1,000 mirror lane."""
+    src = open(os.path.join(PKG, "execmirror.py")).read()
+    # its own credential, never the funded one, and never through pmus
+    assert "PMUS_KEY_ID" not in src and "pmus_key_id" not in src
+    assert "from . import pmus" not in src and "import pmus\n" not in src
+    from sportsassets import execmirror_probe as EP
+    assert (EP.KEY_ID_ENV, EP.SECRET_ENV) == ("PMUS_EXECMIRROR_KEY_ID",
+                                             "PMUS_EXECMIRROR_SECRET_KEY")
+    # its own control row, off by default, with a stop and a cap
+    mig = open(os.path.join(BACKEND, "migrations",
+                            "192_execution_mirror.sql")).read()
+    assert "enabled             boolean     NOT NULL DEFAULT false" in mig
+    assert "stopped" in mig and "max_order_usd" in mig and "cutover_at" in mig
+    # every cycle: disabled -> nothing; another account -> halt; stop -> stop
+    assert "if not ctl.get(\"enabled\"):" in src
+    assert "HALTED_ACCOUNT_CHANGED" in src and "emergency_stop" in src
+    assert "ABOVE_ORDER_CAP" in src and "cutover_at" in src
+    # the flatten (close_position) is reachable only from the emergency stop
+    tree = ast.parse(src)
+    owners = []
+    for fn in ast.walk(tree):
+        if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            body = ast.unparse(fn)
+            if "close_position" in body or ".close," in body:
+                owners.append(fn.name)
+    assert sorted(set(owners)) == ["close", "emergency_stop"], owners
