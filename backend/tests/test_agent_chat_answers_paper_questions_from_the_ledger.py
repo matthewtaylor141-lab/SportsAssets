@@ -967,3 +967,15 @@ def test_g6_benchmark_decisions_are_never_reported_as_dereks(
         assert ("Paper decision %s (strategy PINNACLE_ONLY_PAPER_BENCHMARK)"
                 % did) in ans
     assert AC is not None
+
+
+def test_a_clock_time_is_not_a_figure_but_an_invented_amount_still_is():
+    from sportsassets.agents import persona_chat as PC
+    facts = [{"fact_id": "F1", "value": 2.91, "text": "realised $2.91",
+              "record_id": "paperfill:1"}]
+    ok = "Realised $2.91 [F1]; filled at 2026-10-01T22:42:55 UTC, reviewed 09:05."
+    got = PC.ungrounded_numbers(ok, facts)
+    assert 55.0 not in got and 42.0 not in got and 5.0 not in got   # the clock times
+    assert set(got) <= {2026.0, 10.0}       # the calendar date is still checked
+    bad = "Realised $2.91 [F1] and a further $7.13 at 22:42:55."
+    assert PC.ungrounded_numbers(bad, facts) == [7.13]

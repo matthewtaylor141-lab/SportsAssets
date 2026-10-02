@@ -642,8 +642,12 @@ def compose_records_only(agent: str, bundle: dict, question: str, *,
 # 4 · GROUNDING CHECKS ON A MODEL'S REPLY
 # ═════════════════════════════════════════════════════════════════════
 
-_NUMBER = re.compile(r"(?<![\w.])[-−]?\$?(\d{1,3}(?:,\d{3})+(?:\.\d+)?|"
-                     r"\d+(?:\.\d+)?|\.\d+)")
+# A clock time (22:42:55) is not a figure: its parts neither start after a
+# colon nor end before ":digit". Production 2026-10-02 16:04Z: Xavier's
+# answer "filled at 2026-10-01T22:42:55 UTC" was discarded as an ungrounded
+# figure 55. Every other number is still checked against the facts.
+_NUMBER = re.compile(r"(?<![\w.:])[-−]?\$?(\d{1,3}(?:,\d{3})+(?:\.\d+)?|"
+                     r"\d+(?:\.\d+)?|\.\d+)(?!:\d)")
 _FACT_REF = re.compile(r"\[F(\d+)\]")
 
 
