@@ -1,1 +1,0 @@
-{"probe":"PINNAPI_WS_SAMPLE_V1","key_present":true,"lease_key":7723901544120036,"sport_ids":[6],"streams":["live","prematch"],"seconds":15.0,"ok":false,"reason":"INGESTION_OWNER_HOLDS_THE_FEED_LEASE","note":"the production socket is open; a sample would evict it, so none was opened"}
