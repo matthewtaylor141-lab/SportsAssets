@@ -19,14 +19,15 @@ States (one per contract):
   MATCHED_SUPPORTED              matched, full-game moneyline (the only family
                                  the existing de-vig and grading support)
 
-Phase comes from the venue start time (basis VENUE_START_TIME). Team identity
-uses ext_pinnacle_loop's own _team_tokens/_same_team (squad qualifiers, one-to-
-one), so the census and any later decision agree on what "the same event" is.
+Phase is a schedule estimate (VENUE_START_TIME), not verified in-play status.
+Identity uses both structured venue team names; display titles are not IDs.
+An event/family match does not establish contract settlement or eligibility.
 Pure: the caller supplies rows and the feed's event view.
 """
 from __future__ import annotations
 
 import collections
+import math
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -85,6 +86,7 @@ def catalogue_sql(sport_ids=None) -> str:
             "%s LIKE '%s%%'" % (_norm_sql(), p) for p in pfx)
             if pfx else "AND false")
     return ("""SELECT identifier, side_norm, event_slug, event_title, kind,
+       team_name, team_id, team_league, question, signed,
        line, sports_type, extract(epoch FROM game_start)::float8 AS game_start
   FROM us_premap
  WHERE %s
@@ -108,8 +110,35 @@ def sport_id_of(sports_type: Optional[str]) -> Optional[int]:
     return None
 
 
-def family_of(kind: Optional[str], line) -> tuple:
-    """(family, supported, reason) from the venue's own kind/line."""
+def family_of(kind: Optional[str], line, sports_type=None, row=None) -> tuple:
+    """The venue's explicit type wins over generic kind='side'.
+
+    A blank line is also used by player props and inning winners. It is
+    NOT evidence of a full-game moneyline. 'supported' is a family-level
+    census label only; settlement/price/contract eligibility is downstream.
+    """
+    st = str(sports_type or '').lower()
+    if st in ('baseball_team_full_game_winner',
+              'soccer_team_full_time_winner'):
+        if line not in (None, '') and row is not None:
+            # Reuse the existing side-aware clock proof. Never just strip
+            # numeric zero: real signed/side lines veto this correction.
+            from .market_clock_artifact import _clock_artifact
+            if _clock_artifact(str(line), row):
+                return 'MONEYLINE', True, 'PROVED_CLOCK_ARTIFACT'
+        return ('MONEYLINE', True, None) if line in (None, '') else (
+            'UNKNOWN', False, 'WINNER_WITH_UNEXPECTED_LINE')
+    if st:
+        if '_player_' in st:
+            return 'PLAYER_PROP', False, 'PLAYER_PROP_GRADING_NOT_PROVED'
+        if any(w in st for w in ('first_five', 'inning', 'half', 'quarter',
+                                  '_period', '_set')):
+            return 'PERIOD', False, 'PERIOD_GRADING_NOT_PROVED'
+        if 'spread' in st or 'handicap' in st:
+            return 'SPREAD', False, 'SPREAD_SIGN_AND_PUSH_NOT_PROVED'
+        if 'total' in st:
+            return 'TOTAL', False, 'TOTAL_SCOPE_AND_GRADING_NOT_PROVED'
+        return 'UNKNOWN', False, 'VENUE_MARKET_TYPE_NOT_PROVED'
     k = (kind or "").lower()
     if line not in (None, "") or any(w in k for w in ("total", "over",
                                                       "under")):
@@ -122,14 +151,15 @@ def family_of(kind: Optional[str], line) -> tuple:
         return "LINE_MARKET", False, "LINE_MARKET_GRADING_NOT_PROVED"
     if any(w in k for w in ("half", "period", "inning", "quarter", "set")):
         return "PERIOD", False, "PERIOD_NOT_FULL_GAME"
-    return "MONEYLINE", True, None
+    return "UNKNOWN", False, "VENUE_MARKET_TYPE_MISSING"
 
 
 def _epoch(v) -> Optional[float]:
     """Postgres extract(epoch) is numeric (asyncpg: Decimal); the feed's
     starts are floats. One numeric type, or None."""
     try:
-        return None if v is None else float(v)
+        n = None if v is None else float(v)
+        return n if n is not None and math.isfinite(n) else None
     except (TypeError, ValueError):
         return None
 
@@ -153,15 +183,20 @@ def match_event(sides, game_start, feed_events) -> tuple:
     within START_TOLERANCE_S."""
     from .workers import ext_pinnacle_loop as X
     game_start = _epoch(game_start)
-    a, b = (X._team_tokens(s)[0] for s in sides)
+    if game_start is None:
+        return 'START_TIME_MISSING', None
+    # Structured full names: no token containment or invented nickname alias.
+    norm = lambda s: ' '.join(X._fold(s).split())
+    a, b = (norm(s) for s in sides)
+    if not a or not b or a == b:
+        return 'STRUCTURED_PARTICIPANTS_NOT_TWO', None
     hits = []
     for e in feed_events:
-        if game_start is not None and e.get("start") is not None and abs(
-                e["start"] - game_start) > START_TOLERANCE_S:
+        start = _epoch(e.get('start'))
+        if start is None or abs(start - game_start) > START_TOLERANCE_S:
             continue
-        h, w = X._team_tokens(e["home"])[0], X._team_tokens(e["away"])[0]
-        if (X._same_team(a, h) and X._same_team(b, w)) or (
-                X._same_team(a, w) and X._same_team(b, h)):
+        h, w = norm(e.get('home')), norm(e.get('away'))
+        if (a == h and b == w) or (a == w and b == h):
             hits.append(e["id"])
     if not hits:
         return S_NO_FEED_EVENT, None
@@ -205,11 +240,26 @@ def census(rows, feed_view: dict, *, subscribed_sports, synced: bool,
     counts = collections.Counter()
     by_event: dict = {}
     titles: dict = {}
+    # Group before matching: each venue row describes one selection; both
+    # participants come from the event's structured team records. Never
+    # strip a 'Game 1:' title prefix or invent city abbreviations here.
+    rows = list(rows)
+    teams = collections.defaultdict(set)
+    starts = collections.defaultdict(set)
+    leagues = collections.defaultdict(set)
+    for r in rows:
+        ek = (sport_id_of(r.get('sports_type')), r.get('event_slug'))
+        if r.get('team_league'):
+            leagues[ek].add(str(r['team_league']).lower())
+        if str(r.get('team_name') or '').strip():
+            teams[ek].add(str(r['team_name']).strip())
+        starts[ek].add(_epoch(r.get('game_start')))
     total = 0
     for r in rows:
         total += 1
         sid = sport_id_of(r.get("sports_type"))
-        fam, supported, why = family_of(r.get("kind"), r.get("line"))
+        fam, supported, why = family_of(r.get("kind"), r.get("line"),
+                                         r.get('sports_type'), r)
         gs = _epoch(r.get("game_start"))
         ph = phase_of(gs, now)
         if sid is None:
@@ -219,13 +269,19 @@ def census(rows, feed_view: dict, *, subscribed_sports, synced: bool,
         elif not synced:
             state = S_FEED_NOT_SYNCED
         else:
-            ek = r.get("event_slug")
+            ek = (sid, r.get('event_slug'))
             if ek not in by_event:
                 titles[ek] = (r.get("event_title"), gs, ph)
-                sides = _sides(r.get("event_title"))
-                by_event[ek] = ((S_NO_SIDES, None) if not sides else
-                                match_event(sides, gs,
-                                            feed_view.get(sid, [])))
+                sides = sorted(teams[ek])
+                if len(leagues[ek]) > 1:
+                    by_event[ek] = ('VENUE_EVENT_LEAGUE_CONFLICT', None)
+                elif not ek[1] or len(sides) != 2:
+                    by_event[ek] = ('STRUCTURED_PARTICIPANTS_NOT_TWO', None)
+                elif None in starts[ek] or len(starts[ek]) != 1:
+                    by_event[ek] = ('VENUE_EVENT_START_CONFLICT', None)
+                else:
+                    by_event[ek] = match_event(sides, gs,
+                                              feed_view.get(sid, []))
             state = by_event[ek][0]
             if state == S_SUPPORTED and not supported:
                 state = S_UNSUPPORTED
@@ -233,6 +289,8 @@ def census(rows, feed_view: dict, *, subscribed_sports, synced: bool,
         counts[key] += 1
         if state == S_UNSUPPORTED:
             counts["reason|%s" % why] += 1
+        if why == 'PROVED_CLOCK_ARTIFACT':
+            counts['clock_artifact'] += 1
     rows_total = total
     for st, n in (others or []):
         sid = sport_id_of(st)
@@ -243,11 +301,14 @@ def census(rows, feed_view: dict, *, subscribed_sports, synced: bool,
         total += int(n)
     ev_states = collections.Counter(st for st, _ in by_event.values())
     def _iso(t):
-        return (None if t is None else
-                datetime.fromtimestamp(t, timezone.utc).isoformat())
+        t = _epoch(t)
+        try:
+            return None if t is None else datetime.fromtimestamp(t, timezone.utc).isoformat()
+        except (ValueError, OverflowError, OSError):
+            return None
     unmatched = []
     for ek, (st, _) in by_event.items():
-        if st in (S_NO_FEED_EVENT, S_AMBIGUOUS, S_NO_SIDES) and \
+        if st != S_SUPPORTED and \
                 len(unmatched) < 10:
             title, gs_ev, ph_ev = titles.get(ek, (None, None, None))
             unmatched.append({"title": title, "venue_start": _iso(gs_ev),
@@ -259,11 +320,14 @@ def census(rows, feed_view: dict, *, subscribed_sports, synced: bool,
                    for e in (feed_view.get(sid) or [])][:10]
     states = collections.Counter()
     for k, n in counts.items():
-        if not k.startswith("reason|"):
+        if not k.startswith("reason|") and k != 'clock_artifact':
             states[k.rsplit("|", 1)[1]] += n
     return {"total_contracts": total,
+            "identity_basis": "VENUE_STRUCTURED_TEAM_NAMES_AND_START_TIME",
+            "decision_eligibility_proven": False,
+            "proved_clock_artifact_rows": counts.get('clock_artifact', 0),
             "by_sport_family_phase_state": {k: v for k, v in counts.items()
-                                            if not k.startswith("reason|")},
+                                            if not k.startswith("reason|") and k != 'clock_artifact'},
             "unsupported_reasons": {k[7:]: v for k, v in counts.items()
                                     if k.startswith("reason|")},
             "states": dict(states),

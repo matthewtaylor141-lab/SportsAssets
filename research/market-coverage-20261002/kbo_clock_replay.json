@@ -1,0 +1,66 @@
+{
+  "basis": "OFFLINE_REPLAY_OF_PRODUCTION_KBO_ROWS_AND_CAPTURED_FEED_NAME_START",
+  "before": {
+    "MATCHED_UNSUPPORTED_FAMILY": 2
+  },
+  "after": {
+    "total_contracts": 2,
+    "identity_basis": "VENUE_STRUCTURED_TEAM_NAMES_AND_START_TIME",
+    "decision_eligibility_proven": false,
+    "proved_clock_artifact_rows": 2,
+    "by_sport_family_phase_state": {
+      "6|MONEYLINE|PRE_GAME|MATCHED_SUPPORTED": 2
+    },
+    "unsupported_reasons": {},
+    "states": {
+      "MATCHED_SUPPORTED": 2
+    },
+    "reconciled": true,
+    "matched_events": 1,
+    "subscribed_rows": 2,
+    "events_by_state": {
+      "MATCHED_SUPPORTED": 1
+    },
+    "unmatched_event_sample": [],
+    "feed_event_sample": [
+      {
+        "home": "Hanwha Eagles",
+        "away": "Kiwoom Heroes",
+        "start": "2026-10-03T05:00:00+00:00",
+        "live": null
+      }
+    ],
+    "truncated_at": null,
+    "phase_basis": "VENUE_START_TIME"
+  },
+  "production_rows": [
+    {
+      "event_slug": "kbo-hea-khi-2026-10-03",
+      "event_title": "Hanwha Eagles vs. Kiwoom Heroes",
+      "game_start": 1791003600,
+      "kind": "side",
+      "line": "00",
+      "question": "Who will win in the upcoming baseball event Hanwha Eagles vs Kiwoom Heroes scheduled for October 3, 2026 at 5:00 AM UTC?",
+      "side_norm": "hanwha eagles",
+      "signed": "",
+      "sports_type": "baseball_team_full_game_winner",
+      "team_id": 11375,
+      "team_league": "kbo",
+      "team_name": "hanwha eagles"
+    },
+    {
+      "event_slug": "kbo-hea-khi-2026-10-03",
+      "event_title": "Hanwha Eagles vs. Kiwoom Heroes",
+      "game_start": 1791003600,
+      "kind": "side",
+      "line": "00",
+      "question": "Who will win in the upcoming baseball event Hanwha Eagles vs Kiwoom Heroes scheduled for October 3, 2026 at 5:00 AM UTC?",
+      "side_norm": "kiwoom heroes",
+      "signed": "",
+      "sports_type": "baseball_team_full_game_winner",
+      "team_id": 11383,
+      "team_league": "kbo",
+      "team_name": "kiwoom heroes"
+    }
+  ]
+}

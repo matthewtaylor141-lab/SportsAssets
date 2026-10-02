@@ -1,0 +1,11 @@
+{
+  "basis": "OFFLINE_REPLAY_OF_SEPARATELY_CAPTURED_PRODUCTION_IDENTITIES_NOT_CURRENT_LIVE_COVERAGE",
+  "provider_ids": "Synthetic replay IDs; names/start times from 19:23Z production heartbeat sample",
+  "rows": 608,
+  "before": {
+    "NO_FEED_EVENT": 608
+  },
+  "after": {
+    "MATCHED_UNSUPPORTED_FAMILY": 608
+  }
+}

@@ -269,20 +269,25 @@ def test_census_gives_every_contract_one_state_and_reconciles():
     view = {6: [{"id": 99, "home": "New York Yankees",
                  "away": "Tampa Bay Rays", "start": now - 500,
                  "live": True}]}
+    # Production catalogue: structured per-side names and explicit market type.
+    rows[0].update(team_name='Tampa Bay Rays', sports_type='baseball_team_full_game_winner')
+    rows[1].update(team_name='New York Yankees', sports_type='baseball_team_full_game_total')
+    rows[2].update(team_name='Boston Red Sox', sports_type='baseball_team_full_game_winner')
+    rows.append(dict(rows[2], identifier='c2', team_name='Chicago Cubs'))
     out = C.census(rows, view, subscribed_sports={6}, synced=True, now=now)
-    assert out["reconciled"] is True and out["total_contracts"] == 6
+    assert out["reconciled"] is True and out["total_contracts"] == 7
     assert out["states"] == {"MATCHED_SUPPORTED": 1,
                              "MATCHED_UNSUPPORTED_FAMILY": 1,
-                             "NO_FEED_EVENT": 1,
+                             "NO_FEED_EVENT": 2,
                              "OUT_OF_FEED_SCOPE_SPORT": 1,
                              "UNMAPPED_SPORT": 1,
-                             "NO_TWO_SIDED_TITLE": 1}
-    assert out["unsupported_reasons"] == {"TOTALS_GRADING_NOT_PROVED": 1}
+                             "STRUCTURED_PARTICIPANTS_NOT_TWO": 1}
+    assert out["unsupported_reasons"] == {"TOTAL_SCOPE_AND_GRADING_NOT_PROVED": 1}
     assert out["by_sport_family_phase_state"][
         "6|MONEYLINE|IN_PLAY|MATCHED_SUPPORTED"] == 1
     # unsynced feed: nothing in scope reads as matched
     out2 = C.census(rows, view, subscribed_sports={6}, synced=False, now=now)
-    assert out2["states"].get("FEED_NOT_SYNCED") == 4
+    assert out2["states"].get("FEED_NOT_SYNCED") == 5
     assert "MATCHED_SUPPORTED" not in out2["states"]
 
 
@@ -310,9 +315,11 @@ def test_census_accepts_postgres_numeric_epochs():
     view = {6: [{"id": 1, "home": "Cleveland Guardians",
                  "away": "Chicago White Sox", "start": 1790950000.0,
                  "live": False}]}
+    rows[0].update(team_name='Chicago White Sox', sports_type='baseball_team_full_game_winner')
+    rows.append(dict(rows[0], identifier='x2', team_name='Cleveland Guardians'))
     out = C.census(rows, view, subscribed_sports={6}, synced=True,
                    now=1790900000.0)
-    assert out["reconciled"] and out["states"] == {C.S_SUPPORTED: 1}
+    assert out["reconciled"] and out["states"] == {C.S_SUPPORTED: 2}
 
 
 @pg
@@ -360,15 +367,19 @@ def test_census_rows_are_scoped_to_subscribed_sports_and_totals_reconcile():
     view = {6: [{"id": 1, "home": "Cleveland Guardians",
                  "away": "Chicago White Sox", "start": 1790950000.0,
                  "live": False}]}
-    others = [("baseball_mlb", 2), ("soccer_epl", 7), ("", 3),
+    rows[0].update(team_name='Chicago White Sox', sports_type='baseball_team_full_game_winner')
+    rows[1].update(team_name='New York Mets', sports_type='baseball_team_full_game_winner')
+    rows.extend([dict(rows[0],identifier='x2',team_name='Cleveland Guardians'),
+                 dict(rows[1],identifier='y2',team_name='Atlanta Braves')])
+    others = [("baseball_team_full_game_winner", 4), ("soccer_epl", 7), ("", 3),
               ("icehockey_nhl", 4)]
     out = C.census(rows, view, subscribed_sports={6}, synced=True,
                    now=1790900000.0, others=others)
-    assert out["total_contracts"] == 2 + 7 + 3 + 4
+    assert out["total_contracts"] == 4 + 7 + 3 + 4
     assert out["reconciled"]
-    assert out["states"] == {C.S_SUPPORTED: 1, C.S_NO_FEED_EVENT: 1,
+    assert out["states"] == {C.S_SUPPORTED: 2, C.S_NO_FEED_EVENT: 2,
                              C.S_OUT_OF_SCOPE: 11, C.S_UNMAPPED_SPORT: 3}
-    assert out["subscribed_rows"] == 2 and out["truncated_at"] is None
+    assert out["subscribed_rows"] == 4 and out["truncated_at"] is None
     assert out["events_by_state"] == {C.S_SUPPORTED: 1, C.S_NO_FEED_EVENT: 1}
     assert out["unmatched_event_sample"][0]["title"].startswith("New York")
     assert out["feed_event_sample"][0]["home"] == "Cleveland Guardians"
