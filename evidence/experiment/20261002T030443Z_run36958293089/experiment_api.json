@@ -2,10 +2,10 @@
   "status": 200,
   "json": {
     "version": "PAPER_EXPERIMENT_READ_V1",
-    "as_of": 1790907773.312908,
+    "as_of": 1790910164.6636722,
     "paper_only": true,
     "data_label": "LIVE MARKET DATA / SIMULATED EXECUTION",
-    "serving_build": "b5670c3bef4932b70bc3a1cd92c9c7e6c96e88e6",
+    "serving_build": "3f96dbc6ccefa0973638aed57ce081c6006b9a98",
     "real_money": "DISABLED",
     "account_id": "paper_acct_main",
     "session": {
@@ -48,27 +48,28 @@
           }
         },
         "paper_pass": {
-          "at": 1790907752.4964223,
-          "age_s": 20.8,
+          "at": 1790910040.8578498,
+          "age_s": 123.8,
           "ran": true,
           "refusal": null,
           "errors": {},
-          "elapsed_s": 18.016,
+          "elapsed_s": 19.068,
           "trigger": "SERVICING_TASK"
         },
         "collector": {
-          "at": 1790907407.1093981,
-          "age_s": 366.2,
+          "at": 1790909335.544266,
+          "age_s": 829.1,
           "state": "LIVE",
           "label": "ZERO_EVALUATED__INPUT_PATH_BLOCKED",
-          "elapsed_s": 313.65,
+          "elapsed_s": 440.96,
           "build": "b5670c3bef4932b70bc3a1cd92c9c7e6c96e88e6",
           "refusals": {
-            "NO_PINNACLE_ON_EVENT": 28,
-            "QUOTE_STALE_ON_ARRIVAL": 10,
+            "NO_PINNACLE_ON_EVENT": 29,
+            "QUOTE_STALE_ON_ARRIVAL": 2,
+            "VENUE_BOOK_READ_FAILED": 2,
             "NO_VENUE_CONTRACT_FOR_EVENT": 5,
             "NO_VENUE_NATIVE_EVENT_FOR_FIXTURE": 1,
-            "VENUE_BOOK_CURRENCY_NOT_ESTABLISHED": 6,
+            "VENUE_BOOK_CURRENCY_NOT_ESTABLISHED": 11,
             "VENUE_NATIVE_EVENT_MATCHES_ONLY_ONE_TEAM": 4
           }
         },
@@ -80,41 +81,41 @@
       "why": null,
       "data": {
         "database": "CONNECTED",
-        "read_at": 1790907773.312908,
+        "read_at": 1790910164.6636722,
         "stamps": {
           "valuation": {
-            "at": 1790907159.163357,
-            "age_s": 614.1,
+            "at": 1790909816.65756,
+            "age_s": 348,
             "stale_after_s": 1200,
             "verdict": "CURRENT"
           },
           "decision": {
-            "at": 1790907159.269884,
-            "age_s": 614,
+            "at": 1790909816.760058,
+            "age_s": 347.9,
             "stale_after_s": 1200,
             "verdict": "CURRENT"
           },
           "book": {
-            "at": 1790907751.700658,
-            "age_s": 21.6,
+            "at": 1790910040.284432,
+            "age_s": 124.4,
             "stale_after_s": 900,
             "verdict": "CURRENT"
           },
           "ledger": {
-            "at": 1790906448.734207,
-            "age_s": 1324.6,
+            "at": 1790909012.850733,
+            "age_s": 1151.8,
             "stale_after_s": null,
             "verdict": "NO_LIMIT"
           },
           "pass": {
-            "at": 1790907752.4964223,
-            "age_s": 20.8,
+            "at": 1790910040.8578498,
+            "age_s": 123.8,
             "stale_after_s": 300,
             "verdict": "CURRENT"
           },
           "collector": {
-            "at": 1790907407.1093981,
-            "age_s": 366.2,
+            "at": 1790909335.544266,
+            "age_s": 829.1,
             "stale_after_s": 1200,
             "verdict": "CURRENT"
           }
@@ -127,13 +128,13 @@
       "why": null,
       "data": {
         "window": "24 h",
-        "valuations": 607,
+        "valuations": 624,
         "fixtures": 22,
         "sports": 2,
         "by_strategy": {
           "PINNACLE_EXPLORATION_PAPER": {
             "title": "Training / simulated execution (exploration)",
-            "decisions": 183,
+            "decisions": 210,
             "enter": 9
           },
           "PINNACLE_ONLY_PAPER_BENCHMARK": {
@@ -143,21 +144,21 @@
           },
           "PINNACLE_COMPLETED_GAME_PAPER": {
             "title": "Investment policy (0.5 pp, taker)",
-            "decisions": 352,
+            "decisions": 379,
             "enter": 2
           },
           "DEREK_ENTRY_POLICY_V2": {
             "title": "Derek two-model research (entries off)",
-            "decisions": 607,
+            "decisions": 624,
             "enter": 0
           }
         },
         "attempts_6h": {
           "DECIDED": {
-            "REUSED_IN_THIS_EVALUATION": 9,
-            "SHARED_RECENT_PROCESS_READ": 71,
+            "REUSED_IN_THIS_EVALUATION": 5,
+            "SHARED_RECENT_PROCESS_READ": 74,
             "FRESH_VENUE_READ": 5,
-            "NO_BOOK_READ": 273
+            "NO_BOOK_READ": 290
           }
         }
       }
@@ -169,17 +170,17 @@
         "DEREK_ENTRY_POLICY_V2": [
           {
             "reason": "NO_RESEARCH_MODEL_CANDIDATE_EXISTS",
-            "n": 420,
+            "n": 422,
             "words": "no research model exists yet"
           },
           {
             "reason": "SETTLEMENT_NOT_SUPPORTED",
-            "n": 117,
+            "n": 131,
             "words": "the venue's and Pinnacle's settlement rules are not established as the same"
           },
           {
             "reason": "NO_QUALIFIED_PINNACLE_PROBABILITY",
-            "n": 68,
+            "n": 69,
             "words": "no usable Pinnacle price"
           },
           {
@@ -198,17 +199,17 @@
         "PINNACLE_COMPLETED_GAME_PAPER": [
           {
             "reason": "BELOW_MIN_GROSS_EDGE",
-            "n": 155,
+            "n": 169,
             "words": "the edge was below the policy's minimum (the threshold recorded on the decision)"
           },
           {
             "reason": "PINNACLE_PROBABILITY_NOT_QUALIFIED_BY_THE_LANE",
-            "n": 65,
+            "n": 71,
             "words": "the Pinnacle price did not qualify"
           },
           {
             "reason": "ANOTHER_STRATEGY_HOLDS_EXPOSURE_TO_THIS_FIXTURE",
-            "n": 63,
+            "n": 70,
             "words": "another strategy already holds this game"
           },
           {
@@ -227,30 +228,30 @@
             "words": "the Pinnacle price was too old"
           },
           {
-            "reason": "ENTER",
-            "n": 2,
-            "words": null
-          },
-          {
             "reason": "VENUE_RULES_TEXT_NOT_RECORDED_ON_THE_VALUATION_ROW",
             "n": 2,
             "words": "the venue's rules text was not recorded"
+          },
+          {
+            "reason": "ENTER",
+            "n": 2,
+            "words": null
           }
         ],
         "PINNACLE_EXPLORATION_PAPER": [
           {
-            "reason": "EXPLORATION_ALREADY_HOLDS_THIS_FIXTURE",
-            "n": 65,
-            "words": "exploration already holds a position in this fixture (one per fixture)"
-          },
-          {
             "reason": "FIXTURE_NOT_SELECTED_BY_THE_EXPLORATION_SAMPLE",
-            "n": 61,
+            "n": 74,
             "words": "this fixture was not drawn by the exploration sample (recorded probability and draw)"
           },
           {
+            "reason": "EXPLORATION_ALREADY_HOLDS_THIS_FIXTURE",
+            "n": 72,
+            "words": "exploration already holds a position in this fixture (one per fixture)"
+          },
+          {
             "reason": "PINNACLE_PROBABILITY_NOT_QUALIFIED_BY_THE_LANE",
-            "n": 38,
+            "n": 44,
             "words": "the Pinnacle price did not qualify"
           },
           {
@@ -265,7 +266,7 @@
           },
           {
             "reason": "ANOTHER_STRATEGY_HOLDS_EXPOSURE_TO_THIS_FIXTURE",
-            "n": 2,
+            "n": 3,
             "words": "another strategy already holds this game"
           }
         ]
@@ -293,7 +294,7 @@
           "participant": "Milwaukee Brewers",
           "serving_version": "PINNACLE_COMPLETED_GAME_PAPER_V2",
           "historical": false,
-          "age_s": 20429.7
+          "age_s": 22821.1
         },
         {
           "decision_id": "papercg:c4c1220e25e09d9129734780",
@@ -313,7 +314,27 @@
           "participant": "Atletico Goianiense",
           "serving_version": "PINNACLE_COMPLETED_GAME_PAPER_V2",
           "historical": false,
-          "age_s": 13278.6
+          "age_s": 15669.9
+        },
+        {
+          "decision_id": "papercg:a463766b9046839154a13e3b",
+          "strategy": "PINNACLE_COMPLETED_GAME_PAPER",
+          "policy_version": "PINNACLE_COMPLETED_GAME_PAPER_V2",
+          "at": 1790909811.328313,
+          "us_market_slug": "atc-unl-por-nor-2026-10-04-por",
+          "fixture": "event:a902c361d1a8c4fd596ffb93d71ab378",
+          "p_pinnacle": 0.5924092522989007,
+          "refusal": "BELOW_MIN_GROSS_EDGE",
+          "verdict": "REFUSE",
+          "gross_pp": 0.24092523,
+          "fee_pc": null,
+          "net_pp": null,
+          "price": 0.59,
+          "threshold_pp": 0.5,
+          "participant": "Portugal",
+          "serving_version": "PINNACLE_COMPLETED_GAME_PAPER_V2",
+          "historical": false,
+          "age_s": 353.3
         },
         {
           "decision_id": "papercg:d700d90357edddfa17728520",
@@ -333,7 +354,27 @@
           "participant": "Cleveland Guardians",
           "serving_version": "PINNACLE_COMPLETED_GAME_PAPER_V2",
           "historical": false,
-          "age_s": 20425.2
+          "age_s": 22816.5
+        },
+        {
+          "decision_id": "papercg:bb66eb4166d997b3de32d608",
+          "strategy": "PINNACLE_COMPLETED_GAME_PAPER",
+          "policy_version": "PINNACLE_COMPLETED_GAME_PAPER_V2",
+          "at": 1790909814.778551,
+          "us_market_slug": "atc-unl-cro-eng-2026-10-03-cro",
+          "fixture": "event:ead81aac8131ba7e2f42e6989f4ba3c2",
+          "p_pinnacle": 0.22980733919439053,
+          "refusal": "BELOW_MIN_GROSS_EDGE",
+          "verdict": "REFUSE",
+          "gross_pp": -0.019266081,
+          "fee_pc": null,
+          "net_pp": null,
+          "price": 0.23,
+          "threshold_pp": 0.5,
+          "participant": "Croatia",
+          "serving_version": "PINNACLE_COMPLETED_GAME_PAPER_V2",
+          "historical": false,
+          "age_s": 349.9
         },
         {
           "decision_id": "papercg:6a67aae595b750b228d9dcc4",
@@ -353,13 +394,13 @@
           "participant": "Grêmio Novorizontino",
           "serving_version": "PINNACLE_COMPLETED_GAME_PAPER_V2",
           "historical": false,
-          "age_s": 10835.4
+          "age_s": 13226.7
         },
         {
-          "decision_id": "papercg:fa21f4115f01b5a5ac350038",
+          "decision_id": "papercg:6c3a4c3a6de401c834fc6977",
           "strategy": "PINNACLE_COMPLETED_GAME_PAPER",
           "policy_version": "PINNACLE_COMPLETED_GAME_PAPER_V2",
-          "at": 1790904773.652389,
+          "at": 1790908928.573985,
           "us_market_slug": "atc-brb-ber-crb-2026-10-02-ber",
           "fixture": "event:93704173a25de24b2fbe254ba32f3a3a",
           "p_pinnacle": 0.3788631193577897,
@@ -373,13 +414,13 @@
           "participant": "São Bernardo",
           "serving_version": "PINNACLE_COMPLETED_GAME_PAPER_V2",
           "historical": false,
-          "age_s": 2999.7
+          "age_s": 1236.1
         },
         {
-          "decision_id": "papercg:546ce767cf38122d9f460ed1",
+          "decision_id": "papercg:3a165b6d5ed3f66c6d7d3597",
           "strategy": "PINNACLE_COMPLETED_GAME_PAPER",
           "policy_version": "PINNACLE_COMPLETED_GAME_PAPER_V2",
-          "at": 1790905613.073746,
+          "at": 1790908924.36778,
           "us_market_slug": "atc-brb-cui-pop-2026-10-03-cui",
           "fixture": "event:650866b10c18149fc1b528c4f2e263a5",
           "p_pinnacle": 0.8453530195019981,
@@ -393,47 +434,7 @@
           "participant": "Cuiabá",
           "serving_version": "PINNACLE_COMPLETED_GAME_PAPER_V2",
           "historical": false,
-          "age_s": 2160.2
-        },
-        {
-          "decision_id": "papercg:49e00907a3e531af5c7b2e48",
-          "strategy": "PINNACLE_COMPLETED_GAME_PAPER",
-          "policy_version": "PINNACLE_COMPLETED_GAME_PAPER_V2",
-          "at": 1790890067.016008,
-          "us_market_slug": "atc-unl-wal-den-2026-10-04-wal",
-          "fixture": "event:18c29d24c37e4fa9c5c2a12218c87944",
-          "p_pinnacle": 0.24390877239260955,
-          "refusal": "BELOW_MIN_GROSS_EDGE",
-          "verdict": "REFUSE",
-          "gross_pp": -0.609122761,
-          "fee_pc": null,
-          "net_pp": null,
-          "price": 0.25,
-          "threshold_pp": 0.5,
-          "participant": "Wales",
-          "serving_version": "PINNACLE_COMPLETED_GAME_PAPER_V2",
-          "historical": false,
-          "age_s": 17706.3
-        },
-        {
-          "decision_id": "papercg:917c6eb0d60ce89348aee3b3",
-          "strategy": "PINNACLE_COMPLETED_GAME_PAPER",
-          "policy_version": "PINNACLE_COMPLETED_GAME_PAPER_V2",
-          "at": 1790889154.208046,
-          "us_market_slug": "aec-mlb-nyy-tb-2026-10-03",
-          "fixture": "event:cb4d07dc15440acf3d9ebe1ad41756c1",
-          "p_pinnacle": 0.5537142850892989,
-          "refusal": "BELOW_MIN_GROSS_EDGE",
-          "verdict": "REFUSE",
-          "gross_pp": -0.628571491,
-          "fee_pc": null,
-          "net_pp": null,
-          "price": 0.56,
-          "threshold_pp": 0.5,
-          "participant": "Tampa Bay Rays",
-          "serving_version": "PINNACLE_COMPLETED_GAME_PAPER_V2",
-          "historical": false,
-          "age_s": 18619.1
+          "age_s": 1240.3
         }
       ]
     },
@@ -443,6 +444,126 @@
       "data": {
         "entry_orders": [],
         "management_orders": [
+          {
+            "order_id": "paperord:4656a527d94348267d374893",
+            "strategy": "PINNACLE_EXPLORATION_PAPER",
+            "role": "STANDING_PROTECTION",
+            "us_market_slug": "aec-mlb-cws-cle-2026-10-03",
+            "fixture": "event:5d13b613a334039f0694d8c95af28728",
+            "holding_side": "SHORT",
+            "order_type": "RESTING",
+            "time_in_force": "GTD",
+            "qty": 163,
+            "filled_qty": 0,
+            "limit_price": 0.64,
+            "reserved_remaining_usd": 0,
+            "state": "RESTING",
+            "created_at": 1790909380.01629,
+            "expires_at": 1790912979.968635,
+            "queue_ahead_qty": 103044.11,
+            "decision_id": null,
+            "participant": "Cleveland Guardians",
+            "rationale": null,
+            "cancel_conditions": null,
+            "position_label": "Training / simulated execution",
+            "training": true
+          },
+          {
+            "order_id": "paperord:9a0e2954783090774be37bac",
+            "strategy": "PINNACLE_EXPLORATION_PAPER",
+            "role": "STANDING_PROTECTION",
+            "us_market_slug": "atc-brb-bot-vln-2026-10-03-bot",
+            "fixture": "event:b4d5817327ab9a1e854c93056604843f",
+            "holding_side": "LONG",
+            "order_type": "RESTING",
+            "time_in_force": "GTD",
+            "qty": 238,
+            "filled_qty": 0,
+            "limit_price": 0.45,
+            "reserved_remaining_usd": 0,
+            "state": "RESTING",
+            "created_at": 1790909379.940521,
+            "expires_at": 1790912979.901416,
+            "queue_ahead_qty": 2242,
+            "decision_id": null,
+            "participant": "Botafogo-SP",
+            "rationale": null,
+            "cancel_conditions": null,
+            "position_label": "Training / simulated execution",
+            "training": true
+          },
+          {
+            "order_id": "paperord:7dd611cb78042e5ba383a470",
+            "strategy": "PINNACLE_EXPLORATION_PAPER",
+            "role": "STANDING_PROTECTION",
+            "us_market_slug": "aec-mlb-sd-mil-2026-10-03",
+            "fixture": "condition:0xb7d43e8a7784a1420d734c7d76c725bc5523bbc560a283e9c40edfab6cc60c6c",
+            "holding_side": "SHORT",
+            "order_type": "RESTING",
+            "time_in_force": "GTD",
+            "qty": 144,
+            "filled_qty": 0,
+            "limit_price": 0.71,
+            "reserved_remaining_usd": 0,
+            "state": "RESTING",
+            "created_at": 1790909318.563269,
+            "expires_at": 1790912918.539507,
+            "queue_ahead_qty": 318294.23,
+            "decision_id": null,
+            "participant": "Milwaukee Brewers",
+            "rationale": null,
+            "cancel_conditions": null,
+            "position_label": "Training / simulated execution",
+            "training": true
+          },
+          {
+            "order_id": "paperord:274fd8e39197b9cab23e47d3",
+            "strategy": "PINNACLE_EXPLORATION_PAPER",
+            "role": "STANDING_PROTECTION",
+            "us_market_slug": "atc-brb-acg-afc-2026-10-03-acg",
+            "fixture": "event:ac6c8a4fa9f7c3f6caf15b1e3b5c77d4",
+            "holding_side": "LONG",
+            "order_type": "RESTING",
+            "time_in_force": "GTD",
+            "qty": 136,
+            "filled_qty": 0,
+            "limit_price": 0.75,
+            "reserved_remaining_usd": 0,
+            "state": "RESTING",
+            "created_at": 1790909318.516129,
+            "expires_at": 1790912918.490293,
+            "queue_ahead_qty": 3132,
+            "decision_id": null,
+            "participant": "Atletico Goianiense",
+            "rationale": null,
+            "cancel_conditions": null,
+            "position_label": "Training / simulated execution",
+            "training": true
+          },
+          {
+            "order_id": "paperord:0a5e4462e4a85eb075c72068",
+            "strategy": "PINNACLE_EXPLORATION_PAPER",
+            "role": "STANDING_PROTECTION",
+            "us_market_slug": "atc-unl-wal-den-2026-10-04-wal",
+            "fixture": "event:18c29d24c37e4fa9c5c2a12218c87944",
+            "holding_side": "LONG",
+            "order_type": "RESTING",
+            "time_in_force": "GTD",
+            "qty": 380,
+            "filled_qty": 0,
+            "limit_price": 0.29,
+            "reserved_remaining_usd": 0,
+            "state": "RESTING",
+            "created_at": 1790908594.125491,
+            "expires_at": 1790912194.092241,
+            "queue_ahead_qty": 7029,
+            "decision_id": null,
+            "participant": "Wales",
+            "rationale": null,
+            "cancel_conditions": null,
+            "position_label": "Training / simulated execution",
+            "training": true
+          },
           {
             "order_id": "paperord:da65f6b11854e357ee0b6001",
             "strategy": "PINNACLE_EXPLORATION_PAPER",
@@ -466,174 +587,6 @@
             "cancel_conditions": null,
             "position_label": "Training / simulated execution",
             "training": true
-          },
-          {
-            "order_id": "paperord:59673bd176b72a0ec98fcaa3",
-            "strategy": "PINNACLE_COMPLETED_GAME_PAPER",
-            "role": "STANDING_PROTECTION",
-            "us_market_slug": "aec-mlb-phi-atl-2026-10-01",
-            "fixture": "condition:0x56843c39ee842fae25c33d55a160628192506e5a4d3df922ebd7f1faee8114dc",
-            "holding_side": "SHORT",
-            "order_type": "RESTING",
-            "time_in_force": "GTD",
-            "qty": 5102,
-            "filled_qty": 0,
-            "limit_price": 0.98,
-            "reserved_remaining_usd": 0,
-            "state": "RESTING",
-            "created_at": 1790906448.939001,
-            "expires_at": 1790910048.897168,
-            "queue_ahead_qty": 64687.7,
-            "decision_id": null,
-            "participant": "Atlanta Braves",
-            "rationale": null,
-            "cancel_conditions": null,
-            "position_label": null,
-            "training": false
-          },
-          {
-            "order_id": "paperord:a56d654de9ca951a20382af1",
-            "strategy": "PINNACLE_EXPLORATION_PAPER",
-            "role": "STANDING_PROTECTION",
-            "us_market_slug": "aec-mlb-cws-cle-2026-10-03",
-            "fixture": "event:5d13b613a334039f0694d8c95af28728",
-            "holding_side": "SHORT",
-            "order_type": "RESTING",
-            "time_in_force": "GTD",
-            "qty": 163,
-            "filled_qty": 0,
-            "limit_price": 0.64,
-            "reserved_remaining_usd": 0,
-            "state": "RESTING",
-            "created_at": 1790905775.488218,
-            "expires_at": 1790909375.468178,
-            "queue_ahead_qty": 102062.54,
-            "decision_id": null,
-            "participant": "Cleveland Guardians",
-            "rationale": null,
-            "cancel_conditions": null,
-            "position_label": "Training / simulated execution",
-            "training": true
-          },
-          {
-            "order_id": "paperord:ac7a7c59f8215f5cd6f6545d",
-            "strategy": "PINNACLE_EXPLORATION_PAPER",
-            "role": "STANDING_PROTECTION",
-            "us_market_slug": "atc-brb-bot-vln-2026-10-03-bot",
-            "fixture": "event:b4d5817327ab9a1e854c93056604843f",
-            "holding_side": "LONG",
-            "order_type": "RESTING",
-            "time_in_force": "GTD",
-            "qty": 238,
-            "filled_qty": 0,
-            "limit_price": 0.45,
-            "reserved_remaining_usd": 0,
-            "state": "RESTING",
-            "created_at": 1790905775.435423,
-            "expires_at": 1790909375.413388,
-            "queue_ahead_qty": 0,
-            "decision_id": null,
-            "participant": "Botafogo-SP",
-            "rationale": null,
-            "cancel_conditions": null,
-            "position_label": "Training / simulated execution",
-            "training": true
-          },
-          {
-            "order_id": "paperord:29364d24ff4acfaf9922ba15",
-            "strategy": "PINNACLE_COMPLETED_GAME_PAPER",
-            "role": "STANDING_PROTECTION",
-            "us_market_slug": "aec-mlb-phi-atl-2026-10-01",
-            "fixture": "condition:0x56843c39ee842fae25c33d55a160628192506e5a4d3df922ebd7f1faee8114dc",
-            "holding_side": "SHORT",
-            "order_type": "RESTING",
-            "time_in_force": "GTD",
-            "qty": 5102,
-            "filled_qty": 0,
-            "limit_price": 0.98,
-            "reserved_remaining_usd": 0,
-            "state": "RESTING",
-            "created_at": 1790905661.818628,
-            "expires_at": 1790909261.774639,
-            "queue_ahead_qty": 116015.98,
-            "decision_id": null,
-            "participant": "Atlanta Braves",
-            "rationale": null,
-            "cancel_conditions": null,
-            "position_label": null,
-            "training": false
-          },
-          {
-            "order_id": "paperord:ea4d76d3ccb7d4e5c07ad572",
-            "strategy": "PINNACLE_EXPLORATION_PAPER",
-            "role": "STANDING_PROTECTION",
-            "us_market_slug": "aec-mlb-sd-mil-2026-10-03",
-            "fixture": "condition:0xb7d43e8a7784a1420d734c7d76c725bc5523bbc560a283e9c40edfab6cc60c6c",
-            "holding_side": "SHORT",
-            "order_type": "RESTING",
-            "time_in_force": "GTD",
-            "qty": 144,
-            "filled_qty": 0,
-            "limit_price": 0.71,
-            "reserved_remaining_usd": 0,
-            "state": "RESTING",
-            "created_at": 1790905600.616539,
-            "expires_at": 1790909200.59945,
-            "queue_ahead_qty": 302682.28,
-            "decision_id": null,
-            "participant": "Milwaukee Brewers",
-            "rationale": null,
-            "cancel_conditions": null,
-            "position_label": "Training / simulated execution",
-            "training": true
-          },
-          {
-            "order_id": "paperord:6ae28bb13e1c24130a14473a",
-            "strategy": "PINNACLE_EXPLORATION_PAPER",
-            "role": "STANDING_PROTECTION",
-            "us_market_slug": "atc-brb-acg-afc-2026-10-03-acg",
-            "fixture": "event:ac6c8a4fa9f7c3f6caf15b1e3b5c77d4",
-            "holding_side": "LONG",
-            "order_type": "RESTING",
-            "time_in_force": "GTD",
-            "qty": 136,
-            "filled_qty": 0,
-            "limit_price": 0.75,
-            "reserved_remaining_usd": 0,
-            "state": "RESTING",
-            "created_at": 1790905600.568408,
-            "expires_at": 1790909200.547985,
-            "queue_ahead_qty": 2194,
-            "decision_id": null,
-            "participant": "Atletico Goianiense",
-            "rationale": null,
-            "cancel_conditions": null,
-            "position_label": "Training / simulated execution",
-            "training": true
-          },
-          {
-            "order_id": "paperord:74a5c8ec800b2dcb11c2a811",
-            "strategy": "PINNACLE_EXPLORATION_PAPER",
-            "role": "STANDING_PROTECTION",
-            "us_market_slug": "atc-unl-wal-den-2026-10-04-wal",
-            "fixture": "event:18c29d24c37e4fa9c5c2a12218c87944",
-            "holding_side": "LONG",
-            "order_type": "RESTING",
-            "time_in_force": "GTD",
-            "qty": 380,
-            "filled_qty": 0,
-            "limit_price": 0.29,
-            "reserved_remaining_usd": 0,
-            "state": "RESTING",
-            "created_at": 1790904941.773788,
-            "expires_at": 1790908541.75117,
-            "queue_ahead_qty": 0,
-            "decision_id": null,
-            "participant": "Wales",
-            "rationale": null,
-            "cancel_conditions": null,
-            "position_label": "Training / simulated execution",
-            "training": true
           }
         ],
         "an_order_is_not_a_fill": true
@@ -643,6 +596,42 @@
       "status": "OK",
       "why": null,
       "data": [
+        {
+          "fill_id": "paperfill:6221f6aa3506f56cd746c493",
+          "strategy": "PINNACLE_COMPLETED_GAME_PAPER",
+          "role": "STANDING_PROTECTION",
+          "direction": "SELL",
+          "us_market_slug": "aec-mlb-phi-atl-2026-10-01",
+          "holding_side": "SHORT",
+          "qty": 5102,
+          "price": 0.98,
+          "fee_usd": 6.95,
+          "gross_usd": 4999.96,
+          "basis": "CROSSING_LIQUIDITY_AFTER_QUEUE",
+          "filled_at": 1790909012.681515,
+          "participant": "Atlanta Braves",
+          "ledger_seq": 28,
+          "cash_delta_usd": 4993.01,
+          "cash_after_usd": 494580.9244
+        },
+        {
+          "fill_id": "paperfill:5435b2f17aacfebbc5bfdb47",
+          "strategy": "PINNACLE_COMPLETED_GAME_PAPER",
+          "role": "STANDING_PROTECTION",
+          "direction": "SELL",
+          "us_market_slug": "aec-mlb-phi-atl-2026-10-01",
+          "holding_side": "SHORT",
+          "qty": 5102,
+          "price": 0.98,
+          "fee_usd": 6.95,
+          "gross_usd": 4999.96,
+          "basis": "CROSSING_LIQUIDITY_AFTER_QUEUE",
+          "filled_at": 1790909012.681515,
+          "participant": "Atlanta Braves",
+          "ledger_seq": 29,
+          "cash_delta_usd": 4993.01,
+          "cash_after_usd": 499573.9344
+        },
         {
           "fill_id": "paperfill:11605420c29f2c17b36fe4b9",
           "strategy": "PINNACLE_COMPLETED_GAME_PAPER",
@@ -660,6 +649,24 @@
           "ledger_seq": 27,
           "cash_delta_usd": -4661.7776,
           "cash_after_usd": 489587.9144
+        },
+        {
+          "fill_id": "paperfill:b81738586f87adfc0f93d0c1",
+          "strategy": "PINNACLE_COMPLETED_GAME_PAPER",
+          "role": "ENTRY",
+          "direction": "BUY",
+          "us_market_slug": "aec-mlb-phi-atl-2026-10-01",
+          "holding_side": "SHORT",
+          "qty": 5,
+          "price": 0.93,
+          "fee_usd": 0.02,
+          "gross_usd": 4.65,
+          "basis": "DEPTH_WALK_WITHIN_LIMIT",
+          "filled_at": 1790906448.571459,
+          "participant": "Atlanta Braves",
+          "ledger_seq": 24,
+          "cash_delta_usd": -4.67,
+          "cash_after_usd": 494492.2
         },
         {
           "fill_id": "paperfill:54ff78a0685a029c86a7b1aa",
@@ -696,24 +703,6 @@
           "ledger_seq": 25,
           "cash_delta_usd": -4.72,
           "cash_after_usd": 494487.48
-        },
-        {
-          "fill_id": "paperfill:b81738586f87adfc0f93d0c1",
-          "strategy": "PINNACLE_COMPLETED_GAME_PAPER",
-          "role": "ENTRY",
-          "direction": "BUY",
-          "us_market_slug": "aec-mlb-phi-atl-2026-10-01",
-          "holding_side": "SHORT",
-          "qty": 5,
-          "price": 0.93,
-          "fee_usd": 0.02,
-          "gross_usd": 4.65,
-          "basis": "DEPTH_WALK_WITHIN_LIMIT",
-          "filled_at": 1790906448.571459,
-          "participant": "Atlanta Braves",
-          "ledger_seq": 24,
-          "cash_delta_usd": -4.67,
-          "cash_after_usd": 494492.2
         },
         {
           "fill_id": "paperfill:6c1e6c04029bd367f5b2a7a2",
@@ -884,14 +873,14 @@
       "why": null,
       "data": {
         "account": {
-          "cash_usd": 489587.9144,
+          "cash_usd": 499573.9344,
           "reserved_usd": 0,
-          "available_usd": 489587.9144,
-          "total_equity_usd": 500046.6544,
-          "open_position_value_usd": 10458.74,
-          "realized_pnl_usd": 2.91,
-          "unrealized_pnl_usd": 43.7444,
-          "fees_paid_usd": 52.66,
+          "available_usd": 499573.9344,
+          "total_equity_usd": 500134.7944,
+          "open_position_value_usd": 560.86,
+          "realized_pnl_usd": 168.4344,
+          "unrealized_pnl_usd": -33.64,
+          "fees_paid_usd": 66.56,
           "ledger_consistent": true,
           "marks_complete": true,
           "starting_cash_usd": 500000
@@ -900,11 +889,11 @@
           "PINNACLE_COMPLETED_GAME_PAPER": {
             "title": "Investment policy (0.5 pp, taker)",
             "positions": 2,
-            "open": 2,
-            "realized_pnl_usd": 0,
-            "unrealized_pnl_usd": 77.3844,
-            "fees_usd": 27.4,
-            "open_cost_basis_usd": 9820.4956
+            "open": 0,
+            "realized_pnl_usd": 165.5244,
+            "unrealized_pnl_usd": 0,
+            "fees_usd": 41.3,
+            "open_cost_basis_usd": 0
           },
           "PINNACLE_EXPLORATION_PAPER": {
             "title": "Training / simulated execution (exploration)",
@@ -917,58 +906,6 @@
           }
         },
         "open_positions": [
-          {
-            "position_key": "paperpos:paper_acct_main:papercggrp:03156274682739bc07db6133:aec-mlb-phi-atl-2026-10-01:SHORT",
-            "group_id": "papercggrp:03156274682739bc07db6133",
-            "strategy": "PINNACLE_COMPLETED_GAME_PAPER",
-            "label": "Investment policy (0.5 pp, taker)",
-            "market": "aec-mlb-phi-atl-2026-10-01",
-            "participant": "Atlanta Braves",
-            "side": "SHORT",
-            "open_qty": 5102,
-            "avg_cost_incl_fees": 0.962163,
-            "cost_basis_usd": 4908.9556,
-            "realized_pnl_usd": 0,
-            "settlement": null,
-            "mark": {
-              "status": "OK",
-              "price": 0.97,
-              "source": "paper_book_observations:2103",
-              "observed_at": 1790907737.328647,
-              "age_s": 35.984,
-              "stale": false,
-              "method": "TOP_OF_BOOK_EXIT_PRICE: what closing one contract would receive at the best displayed level of the side a close consumes (bettor_book_snapshot.exit_ladder), from the paper path's latest observed book; no depth adjustment"
-            },
-            "marked_value_usd": 4948.94,
-            "unrealized_pnl_usd": 39.9844,
-            "first_fill_at": 1790906448.571459
-          },
-          {
-            "position_key": "paperpos:paper_acct_main:papercggrp:4873c3ebab0d61e945c948d0:aec-mlb-phi-atl-2026-10-01:SHORT",
-            "group_id": "papercggrp:4873c3ebab0d61e945c948d0",
-            "strategy": "PINNACLE_COMPLETED_GAME_PAPER",
-            "label": "Investment policy (0.5 pp, taker)",
-            "market": "aec-mlb-phi-atl-2026-10-01",
-            "participant": "Atlanta Braves",
-            "side": "SHORT",
-            "open_qty": 5102,
-            "avg_cost_incl_fees": 0.96267,
-            "cost_basis_usd": 4911.54,
-            "realized_pnl_usd": 0,
-            "settlement": null,
-            "mark": {
-              "status": "OK",
-              "price": 0.97,
-              "source": "paper_book_observations:2103",
-              "observed_at": 1790907737.328647,
-              "age_s": 35.984,
-              "stale": false,
-              "method": "TOP_OF_BOOK_EXIT_PRICE: what closing one contract would receive at the best displayed level of the side a close consumes (bettor_book_snapshot.exit_ladder), from the paper path's latest observed book; no depth adjustment"
-            },
-            "marked_value_usd": 4948.94,
-            "unrealized_pnl_usd": 37.4,
-            "first_fill_at": 1790905661.489681
-          },
           {
             "position_key": "paperpos:paper_acct_main:paperexpgrp:42c9989be31cea1ceff2099b:atc-brb-bot-vln-2026-10-03-bot:LONG",
             "group_id": "paperexpgrp:42c9989be31cea1ceff2099b",
@@ -985,9 +922,9 @@
             "mark": {
               "status": "OK",
               "price": 0.37,
-              "source": "paper_book_observations:2106",
-              "observed_at": 1790907751.700658,
-              "age_s": 21.612,
+              "source": "paper_book_observations:2354",
+              "observed_at": 1790910023.737423,
+              "age_s": 140.926,
               "stale": false,
               "method": "TOP_OF_BOOK_EXIT_PRICE: what closing one contract would receive at the best displayed level of the side a close consumes (bettor_book_snapshot.exit_ladder), from the paper path's latest observed book; no depth adjustment"
             },
@@ -1011,9 +948,9 @@
             "mark": {
               "status": "OK",
               "price": 0.58,
-              "source": "paper_book_observations:2101",
-              "observed_at": 1790907735.143946,
-              "age_s": 38.169,
+              "source": "paper_book_observations:2356",
+              "observed_at": 1790910027.624553,
+              "age_s": 137.039,
               "stale": false,
               "method": "TOP_OF_BOOK_EXIT_PRICE: what closing one contract would receive at the best displayed level of the side a close consumes (bettor_book_snapshot.exit_ladder), from the paper path's latest observed book; no depth adjustment"
             },
@@ -1037,9 +974,9 @@
             "mark": {
               "status": "OK",
               "price": 0.25,
-              "source": "paper_book_observations:2102",
-              "observed_at": 1790907736.707312,
-              "age_s": 36.606,
+              "source": "paper_book_observations:2357",
+              "observed_at": 1790910028.187807,
+              "age_s": 136.476,
               "stale": false,
               "method": "TOP_OF_BOOK_EXIT_PRICE: what closing one contract would receive at the best displayed level of the side a close consumes (bettor_book_snapshot.exit_ladder), from the paper path's latest observed book; no depth adjustment"
             },
@@ -1063,9 +1000,9 @@
             "mark": {
               "status": "OK",
               "price": 0.7,
-              "source": "paper_book_observations:2104",
-              "observed_at": 1790907738.794974,
-              "age_s": 34.518,
+              "source": "paper_book_observations:2346",
+              "observed_at": 1790909918.793829,
+              "age_s": 245.87,
               "stale": false,
               "method": "TOP_OF_BOOK_EXIT_PRICE: what closing one contract would receive at the best displayed level of the side a close consumes (bettor_book_snapshot.exit_ladder), from the paper path's latest observed book; no depth adjustment"
             },
@@ -1087,12 +1024,12 @@
             "realized_pnl_usd": 0,
             "settlement": null,
             "mark": {
-              "status": "OK",
+              "status": "STALE",
               "price": 0.655,
-              "source": "paper_book_observations:2105",
-              "observed_at": 1790907739.519696,
-              "age_s": 33.793,
-              "stale": false,
+              "source": "paper_book_observations:2330",
+              "observed_at": 1790909796.064432,
+              "age_s": 368.599,
+              "stale": true,
               "method": "TOP_OF_BOOK_EXIT_PRICE: what closing one contract would receive at the best displayed level of the side a close consumes (bettor_book_snapshot.exit_ladder), from the paper path's latest observed book; no depth adjustment"
             },
             "marked_value_usd": 94.32,
@@ -1115,9 +1052,9 @@
             "mark": {
               "status": "OK",
               "price": 0.545,
-              "source": "paper_book_observations:2100",
-              "observed_at": 1790907688.18948,
-              "age_s": 85.123,
+              "source": "paper_book_observations:2355",
+              "observed_at": 1790910026.021087,
+              "age_s": 138.643,
               "stale": false,
               "method": "TOP_OF_BOOK_EXIT_PRICE: what closing one contract would receive at the best displayed level of the side a close consumes (bettor_book_snapshot.exit_ladder), from the paper path's latest observed book; no depth adjustment"
             },
@@ -1127,6 +1064,42 @@
           }
         ],
         "closed_positions": [
+          {
+            "position_key": "paperpos:paper_acct_main:papercggrp:03156274682739bc07db6133:aec-mlb-phi-atl-2026-10-01:SHORT",
+            "group_id": "papercggrp:03156274682739bc07db6133",
+            "strategy": "PINNACLE_COMPLETED_GAME_PAPER",
+            "label": "Investment policy (0.5 pp, taker)",
+            "market": "aec-mlb-phi-atl-2026-10-01",
+            "participant": "Atlanta Braves",
+            "side": "SHORT",
+            "open_qty": 0,
+            "avg_cost_incl_fees": 0.962163,
+            "cost_basis_usd": 0,
+            "realized_pnl_usd": 84.0544,
+            "settlement": null,
+            "mark": null,
+            "marked_value_usd": null,
+            "unrealized_pnl_usd": null,
+            "first_fill_at": 1790906448.571459
+          },
+          {
+            "position_key": "paperpos:paper_acct_main:papercggrp:4873c3ebab0d61e945c948d0:aec-mlb-phi-atl-2026-10-01:SHORT",
+            "group_id": "papercggrp:4873c3ebab0d61e945c948d0",
+            "strategy": "PINNACLE_COMPLETED_GAME_PAPER",
+            "label": "Investment policy (0.5 pp, taker)",
+            "market": "aec-mlb-phi-atl-2026-10-01",
+            "participant": "Atlanta Braves",
+            "side": "SHORT",
+            "open_qty": 0,
+            "avg_cost_incl_fees": 0.96267,
+            "cost_basis_usd": 0,
+            "realized_pnl_usd": 81.47,
+            "settlement": null,
+            "mark": null,
+            "marked_value_usd": null,
+            "unrealized_pnl_usd": null,
+            "first_fill_at": 1790905661.489681
+          },
           {
             "position_key": "paperpos:paper_acct_main:paperexpgrp:e16e6c216e47705741e6a91e:aec-mlb-phi-atl-2026-10-01:SHORT",
             "group_id": "paperexpgrp:e16e6c216e47705741e6a91e",
@@ -1157,7 +1130,7 @@
           "positions": 7,
           "open_positions": 6,
           "limits": {
-            "max_entry_cost_usd": 100,
+            "max_entry_cost_usd": 1000,
             "max_aggregate_exposure_usd": 5000,
             "loss_stop_usd": 1000,
             "one_position_per_fixture": true
@@ -1172,40 +1145,40 @@
       "data": {
         "derek": {
           "latest_decision": {
-            "decision_id": "paperdec:864e668cff26eda7944ce105",
+            "decision_id": "paperdec:2ce04d564f4aed56a40a453c",
             "strategy": "DEREK_ENTRY_POLICY_V2",
             "verdict": "REFUSE",
-            "refusal": "NO_QUALIFIED_PINNACLE_PROBABILITY",
-            "us_market_slug": "atc-unl-gre-ger-2026-10-04-gre",
-            "at": 1790907159.269884
+            "refusal": "NO_RESEARCH_MODEL_CANDIDATE_EXISTS",
+            "us_market_slug": "atc-brb-lon-cri-2026-10-02-lon",
+            "at": 1790909816.760058
           }
         },
         "xavier": {
-          "reviews_24h": 1200,
-          "last_review_at": 1790907752.336471,
+          "reviews_24h": 1352,
+          "last_review_at": 1790910040.723437,
           "handoffs": 9
         },
         "audrey": {
           "latest_findings": [
             {
-              "finding_id": "paperfind:b6b982078ec235ca6537aefe",
-              "kind": "OPS_AUDIT_FEES",
+              "finding_id": "paperfind:14312739484fafc531871d29",
+              "kind": "PAPER_EVENT_MANAGEMENT_FILL",
               "severity": "INFO",
-              "subject": "ops:FEES:2026-10-02T02",
-              "found_at": 1790906759.701637
+              "subject": "paperfill:6221f6aa3506f56cd746c493",
+              "found_at": 1790909002.180909
+            },
+            {
+              "finding_id": "paperfind:07b702fa33c2c708510e968c",
+              "kind": "PAPER_EVENT_MANAGEMENT_FILL",
+              "severity": "INFO",
+              "subject": "paperfill:5435b2f17aacfebbc5bfdb47",
+              "found_at": 1790909002.180909
             },
             {
               "finding_id": "paperfind:79469c099e6a4ab3b802ae6a",
               "kind": "OPS_AUDIT_COLLECTION_COVERAGE",
               "severity": "INFO",
               "subject": "ops:COLLECTION_COVERAGE:2026-10-02T02",
-              "found_at": 1790906759.701637
-            },
-            {
-              "finding_id": "paperfind:bcf39c4b239760e4c0c891c8",
-              "kind": "OPS_AUDIT_FEES_CONSUME_EDGE",
-              "severity": "WARNING",
-              "subject": "ops:FEES_CONSUME_EDGE:2026-10-02T02",
               "found_at": 1790906759.701637
             },
             {
@@ -1237,10 +1210,10 @@
               "found_at": 1790906759.701637
             },
             {
-              "finding_id": "paperfind:d6d889ade23cf8217bd8262a",
-              "kind": "OPS_AUDIT_POSITION_MANAGEMENT",
-              "severity": "INFO",
-              "subject": "ops:POSITION_MANAGEMENT:2026-10-02T02",
+              "finding_id": "paperfind:bcf39c4b239760e4c0c891c8",
+              "kind": "OPS_AUDIT_FEES_CONSUME_EDGE",
+              "severity": "WARNING",
+              "subject": "ops:FEES_CONSUME_EDGE:2026-10-02T02",
               "found_at": 1790906759.701637
             }
           ],
@@ -1265,6 +1238,12 @@
                   "actor": "AUDREY",
                   "kind": "MEASUREMENT",
                   "body": "maker_resting_orders_placed_6h now 0 (baseline 0)",
+                  "at": 1790908594.299054
+                },
+                {
+                  "actor": "AUDREY",
+                  "kind": "MEASUREMENT",
+                  "body": "maker_resting_orders_placed_6h now 0 (baseline 0)",
                   "at": 1790906759.701637
                 },
                 {
@@ -1278,17 +1257,11 @@
                   "kind": "MEASUREMENT",
                   "body": "maker_resting_orders_placed_6h now 0 (baseline 0)",
                   "at": 1790902990.786191
-                },
-                {
-                  "actor": "AUDREY",
-                  "kind": "MEASUREMENT",
-                  "body": "maker_resting_orders_placed_6h now 0 (baseline 0)",
-                  "at": 1790901126.283374
                 }
               ],
               "agent_responses": 0,
               "automated_acknowledgements": 1,
-              "measurements": 11
+              "measurements": 12
             },
             {
               "recommendation_id": "paperrec:5d764d7fe0fc1e4895bcbb2d",
@@ -1309,6 +1282,12 @@
                 {
                   "actor": "AUDREY",
                   "kind": "MEASUREMENT",
+                  "body": "book_read_cut_rate_6h now 0.0 (baseline 0.312)",
+                  "at": 1790908594.299054
+                },
+                {
+                  "actor": "AUDREY",
+                  "kind": "MEASUREMENT",
                   "body": "book_read_cut_rate_6h now 0.042553 (baseline 0.312)",
                   "at": 1790906759.701637
                 },
@@ -1323,17 +1302,11 @@
                   "kind": "MEASUREMENT",
                   "body": "book_read_cut_rate_6h now 0.148515 (baseline 0.312)",
                   "at": 1790902990.786191
-                },
-                {
-                  "actor": "AUDREY",
-                  "kind": "MEASUREMENT",
-                  "body": "book_read_cut_rate_6h now 0.163265 (baseline 0.312)",
-                  "at": 1790901126.283374
                 }
               ],
               "agent_responses": 0,
               "automated_acknowledgements": 1,
-              "measurements": 11
+              "measurements": 12
             },
             {
               "recommendation_id": "paperrec:a72c3f4296c2548b13ea2120",
@@ -1354,6 +1327,12 @@
                 {
                   "actor": "AUDREY",
                   "kind": "MEASUREMENT",
+                  "body": "last_cycle_unmatched_events now 54 (baseline 63)",
+                  "at": 1790908594.299054
+                },
+                {
+                  "actor": "AUDREY",
+                  "kind": "MEASUREMENT",
                   "body": "last_cycle_unmatched_events now 4 (baseline 63)",
                   "at": 1790906759.701637
                 },
@@ -1368,17 +1347,11 @@
                   "kind": "MEASUREMENT",
                   "body": "last_cycle_unmatched_events now 58 (baseline 63)",
                   "at": 1790902990.786191
-                },
-                {
-                  "actor": "AUDREY",
-                  "kind": "MEASUREMENT",
-                  "body": "last_cycle_unmatched_events now 4 (baseline 63)",
-                  "at": 1790901126.283374
                 }
               ],
               "agent_responses": 0,
               "automated_acknowledgements": 1,
-              "measurements": 11
+              "measurements": 12
             }
           ],
           "category_rule": "OPERATIONAL recommendations are never reported as profitable learning"
@@ -1391,10 +1364,17 @@
       "data": {
         "hours": [
           {
+            "hour": 1790910000,
+            "book_reads": 6,
+            "shared_reads": 0,
+            "failed_reads": 2,
+            "decisions_cut_by_deadline": 0
+          },
+          {
             "hour": 1790906400,
-            "book_reads": 136,
-            "shared_reads": 2,
-            "failed_reads": 22,
+            "book_reads": 383,
+            "shared_reads": 16,
+            "failed_reads": 62,
             "decisions_cut_by_deadline": 0
           },
           {
@@ -1427,27 +1407,20 @@
           },
           {
             "hour": 1790888400,
-            "book_reads": 309,
+            "book_reads": 297,
             "shared_reads": 24,
             "failed_reads": 48,
             "decisions_cut_by_deadline": 0
-          },
-          {
-            "hour": 1790884800,
-            "book_reads": 79,
-            "shared_reads": 17,
-            "failed_reads": 6,
-            "decisions_cut_by_deadline": 1
           }
         ]
       }
     },
     "state": {
       "connected": true,
-      "filled_positions_open": 8,
-      "fills_recorded": 13,
+      "filled_positions_open": 6,
+      "fills_recorded": 15,
       "open_entry_orders": 0,
-      "headline": "8 open filled positions"
+      "headline": "6 open filled positions"
     }
   },
   "text": null

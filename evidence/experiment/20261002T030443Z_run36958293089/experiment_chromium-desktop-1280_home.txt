@@ -1,0 +1,132 @@
+SIMULATED CAPITAL · LIVE MARKET DATA
+UNAVAILABLE: the paper overview read answered HTTP 502
+Skip to dashboard
+C O M M A N D
+Management office
+RESEARCH · OPERATIONS · OVERSIGHT
+OPERATIONS
+Overview
+Portfolio
+Orders
+EV decisions
+Shadow
+Risk & exposure
+OUR AGENTS
+Derek
+Discovery & Entry
+Xavier
+Portfolio Management
+Audrey
+Audit & Intelligence
+AI AGENTS
+GOVERNANCE
+Intelligence
+Reporting
+Audit trail
+Investor briefing
+EXECUTION AUTHORITY
+Order submission
+DISABLED
+Auto promotion
+OFF
+Connection settings
+BT
+Workspace observer
+Institutional preview
+BettorToken
+/
+Overview
+Search the workspace
+⌘ K
+PAPER · UNAVAILABLE
+Pause motion
+BETTORTOKEN / MANAGEMENT OFFICE
+Your team. Your capital.
+One clear picture.
+
+A shared workspace for decisions, conversations and accountability.
+
+Meet your AI team ▷
+Download briefing
+Ask Audrey ↗
+Data needs attention
+Simulated capital · Live market data
+TOTAL EQUITY
+Awaiting account
+Account figures appear after a successful authenticated read.
+Available to deploy
+—
+Realized P&L
+—
+Settled and realized results
+Cash
+—
+Reserved
+—
+Position value
+—
+Unrealized P&L
+—
+the paper overview read answered HTTP 502
+THE EXPERIMENT
+What the team is doing with the paper account.
+Every figure is a stored record · simulated execution · live market data
+DISCONNECTED · the API answered HTTP 502. These are not zero balances: nothing has been read.
+YOUR AI TEAM
+The people behind the process.
+3 specialist agents · Shared accountability
+D
+01 / AI AGENT
+DISCOVERY & ENTRY
+Derek
+
+Find the opportunity. Explain the conviction.
+
+Activity is not available in this read.
+Talk to Derek
+Workspace ↗
+X
+02 / AI AGENT
+PORTFOLIO MANAGEMENT
+Xavier
+
+Own the position. Manage the outcome.
+
+Activity is not available in this read.
+Talk to Xavier
+Workspace ↗
+A
+03 / AI AGENT
+AUDIT & INTELLIGENCE
+Audrey
+
+Verify the result. Improve the process.
+
+Activity is not available in this read.
+Talk to Audrey
+Workspace ↗
+MANAGEMENT DESK
+Start with a better question.
+
+Ask the team to show its work. Every conversation should lead back to the decisions, evidence and account.
+
+Why did we pass on the latest opportunity? ↗
+What needs my attention today? ↗
+How would you manage the next position? ↗
+LEARNING & OVERSIGHT
+Experience into evidence.
+
+Audrey connects decisions with outcomes and improvement proposals. Ask for the recorded learning and activation status.
+
+Record the decision and its inputs
+Audit actions against outcomes
+Evaluate and approve a policy change
+Review learning with Audrey ↗
+Data freshness & session details
+CONNECTING
+Funded system (inactive)
+secondary · real-money execution disabled · DISCONNECTED
+READ ONLY
+/
+NO ORDER SUBMISSION PATH
+INTERNAL WORKSPACE/COMMAND MOTION EDITION / 1.1

@@ -7,14 +7,14 @@ Xavier’s office
 Portfolio management
 PAPER ACCOUNT · ONE LEDGER · LIVE MARKET DATA · SIMULATED EXECUTION
 CASH
-$489,587.91
+$499,573.93
 EQUITY
-$500,046.65
+$500,134.79
 Account details +
 Records read 1s ago
-Agent pass 58s ago
+Agent pass 28s ago
 LATEST RECORDED WORK · XAVIER
-1m ago
+10s ago
 Tampa Bay Rays to win
 Game 1: NY Yankees vs. TB Rays
 
@@ -30,43 +30,17 @@ Search Xavier records
 All positions
 Needs review
 Working orders
-8 / 8
+6 / 6
 Export view ↓
 Open positions in view
-8
+6
 Capital in positions
-$10,415.00
+$594.50
 Realized P&L
-$2.91
+$168.43
 PORTFOLIO DESK
 Positions & exit plans
 Latest recorded decisions · select a position for the full plan.
-AT
-
-Atlanta Braves to win
-Game 3: PHI Phillies vs. ATL Braves · 5102 contracts
-
-Simulated execution
-Marked value
-$4,948.94
-$39.98 unrealized
-Hold
-Sell 5102 @ $0.98
-Review 1m ago
-+
-AT
-
-Atlanta Braves to win
-Game 3: PHI Phillies vs. ATL Braves · 5102 contracts
-
-Simulated execution
-Marked value
-$4,948.94
-$37.40 unrealized
-Hold
-Sell 5102 @ $0.98
-Review 1m ago
-+
 Atletico Goianiense to win
 AC Goianiense vs. America FC · 136 contracts
 
@@ -76,7 +50,7 @@ $95.20
 -$3.31 unrealized
 Hold
 Sell 136 @ $0.75
-Review 1m ago
+Review 10s ago
 +
 Botafogo-SP to win
 Botafogo FC vs. Vila Nova FC · 238 contracts
@@ -87,7 +61,7 @@ $88.06
 -$11.11 unrealized
 Hold
 Sell 238 @ $0.45
-Review 1m ago
+Review 10s ago
 +
 Wales to win
 Wales vs. Denmark · 380 contracts
@@ -98,7 +72,7 @@ $95.00
 -$4.95 unrealized
 Hold
 Sell 380 @ $0.29
-Review 1m ago
+Review 10s ago
 +
 TA
 
@@ -111,7 +85,7 @@ $93.74
 -$5.53 unrealized
 Hold
 Sell 172 @ $0.61
-Review 1m ago
+Review 10s ago
 +
 CL
 
@@ -124,7 +98,7 @@ $94.54
 -$4.37 unrealized
 Hold
 Sell 163 @ $0.64
-Review 1m ago
+Review 10s ago
 +
 MI
 
@@ -137,38 +111,51 @@ $94.32
 -$4.37 unrealized
 Hold
 Sell 144 @ $0.71
-Review 1m ago
+Review 10s ago
 +
 Activity journal
 Latest records in this read
 Hold · Tampa Bay Rays to win
 Position review
-1m ago
+10s ago
 Hold · Milwaukee Brewers to win
 Position review
-1m ago
+10s ago
 Hold · Atletico Goianiense to win
 Position review
-1m ago
+10s ago
 Hold · Wales to win
 Position review
-1m ago
+10s ago
 Hold · Cleveland Guardians to win
 Position review
-1m ago
+10s ago
 Hold · Botafogo-SP to win
 Position review
-1m ago
+10s ago
+THE LEARNING WORKBENCH
+Work. Investigate. Improve.
+Records read 10/2/2026, 3:04:36 AM · Research paused
+Plans
+Collaboration
+Investigate
+Experiments
+Scorecard
+Research worker paused · 24 model calls per hour maximum. Latest 60 team tasks shown.
+
+Assign a research goal
+Management control access
+Research schedule
+Management control access
+No research plan has been assigned to this agent.
+
+Research reviews are attributed opinions backed by recorded evidence. Completed reviews are not proven performance gains. Policy activation remains separately controlled.
 All records, strategy detail and technical evidence
 Presentation of recorded state. This page sends no order and holds no credential; it reads /api/command/agents/xavier with the COMMAND session. The 3D characters are licensed Microsoft Rocketbox models (MIT licence, credited below; shipped with their licence file); a device that cannot draw them shows a 2D portrait card. The pose follows the paper runtime's own heartbeat (paper_session_health) and never stands in for data. UNKNOWN is not zero; EMPTY is not success. The 3D character on this page is a licensed model, not an original illustration. Character model: Microsoft Rocketbox Business_Male_05 (MIT, © 2020 Microsoft). Licence: MIT, shipped with the model as ROCKETBOX_LICENSE.md.
 
 Talk to Xavier
 Ask about a game, decision or exit plan
 ↗
-papercggrp:03156274682739bc07db6133
-Explain your current exit plan, standing orders and remaining risk for Atlanta Braves to win. Position group papercggrp:03156274682739bc07db6133.
-papercggrp:4873c3ebab0d61e945c948d0
-Explain your current exit plan, standing orders and remaining risk for Atlanta Braves to win. Position group papercggrp:4873c3ebab0d61e945c948d0.
 paperexpgrp:bd5ebe70618355ad0230a111
 Explain your current exit plan, standing orders and remaining risk for Atletico Goianiense to win. Position group paperexpgrp:bd5ebe70618355ad0230a111.
 paperexpgrp:42c9989be31cea1ceff2099b

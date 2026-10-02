@@ -1,6 +1,6 @@
 Skip to the records
 READ-ONLY
-read 2026-10-02 02:23:27Z
+read 2026-10-02 03:04:00Z
 Trace
 Refresh
 LIVE MARKET DATA · SIMULATED EXECUTION · $500,000 STARTING BANKROLL
@@ -10,28 +10,29 @@ Audrey’s office
 Audit & intelligence
 
 Talk to Audrey ↗
+Work & learning ↘
 PAPER ACCOUNT · ONE LEDGER · LIVE MARKET DATA · SIMULATED EXECUTION
 CASH
-$489,587.91
+$499,573.93
 RESERVED
 $0.00
 AVAILABLE
-$489,587.91
+$499,573.93
 POSITION VALUE
-$10,458.74
+$560.86
 EQUITY
-$500,046.65
+$500,134.79
 REALIZED P&L
-+$2.91
++$168.43
 UNREALIZED P&L
-+$43.74
+−$33.64
 
-cash + marked open-position value · ledger entry #27 · the same read on the homepage and every agent page
+cash + marked open-position value · ledger entry #29 · the same read on the homepage and every agent page
 
-Records read 1s ago
-Agent pass 1m ago
+Records read 3s ago
+Agent pass 54s ago
 LATEST RECORDED WORK · AUDREY
-5h ago
+6h ago
 Fees consume edge
 
 Responsible agent · DEREK
@@ -60,9 +61,9 @@ Export view ↓
 Ledger check
 Reconciled
 Realized P&L
-$2.91
+$168.43
 Unrealized P&L
-$43.74
+-$33.64
 INTELLIGENCE DESK
 Recommendations & follow-through
 
@@ -75,7 +76,7 @@ Fees consume edge
 
 Responsible agent
 DEREK
-5h ago
+6h ago
 Measuring
 
 Measurement recorded
@@ -88,7 +89,7 @@ Book read cuts
 
 Responsible agent
 DEREK
-5h ago
+6h ago
 Improved
 
 Measurement recorded
@@ -101,7 +102,7 @@ Collection coverage
 
 Responsible agent
 DEREK
-5h ago
+6h ago
 Improved
 
 Measurement recorded
@@ -111,13 +112,32 @@ Activity journal
 Latest records in this read
 Measuring · Fees consume edge
 Recommendation
-5h ago
+6h ago
 Improved · Book read cuts
 Recommendation
-5h ago
+6h ago
 Improved · Collection coverage
 Recommendation
-5h ago
+6h ago
+THE LEARNING WORKBENCH
+Work. Investigate. Improve.
+Records read 10/2/2026, 3:04:00 AM · Research paused
+Plans
+Collaboration
+Investigate
+Experiments
+Scorecard
+
+Research worker paused · 24 model calls per hour maximum. Latest 60 team tasks shown.
+
+Assign a research goal
+Management control access
+Research schedule
+Management control access
+
+No research plan has been assigned to this agent.
+
+Research reviews are attributed opinions backed by recorded evidence. Completed reviews are not proven performance gains. Policy activation remains separately controlled.
 IN CONVERSATION · AUDREY
 
 Resumed your conversation with Audrey (24 messages).

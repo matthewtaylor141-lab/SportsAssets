@@ -1,11 +1,12 @@
 SIMULATED CAPITAL · LIVE MARKET DATA
 Cash
-$489,587.91
+$499,573.93
 Equity
-$500,046.65
+$500,134.79
 Realized P&L
-+$2.91
-CONNECTING · last ledger change Oct 1, 22:00:48 ET
++$168.43
+1 STALE MARK(S)
+CONNECTING · last ledger change Oct 1, 22:43:32 ET
 Skip to dashboard
 
 
@@ -22,75 +23,76 @@ Ask Audrey ↗
 Session running
 Simulated capital · Live market data
 TOTAL EQUITY
-$500,046.65
+$500,134.79
 One account. One reconciled ledger.
 Available to deploy
-$489,587.91
+$499,573.93
 Realized P&L
-$2.91
+$168.43
 Settled and realized results
 Cash
-$489,587.91
+$499,573.93
 Reserved
 $0.00
 Position value
-$10,458.74
+$560.86
 Unrealized P&L
-$43.74
+-$33.64
+1 position marks are stale.
 THE EXPERIMENT
 What the team is doing with the paper account.
 Every figure is a stored record · simulated execution · live market data
-CONNECTED · database read 10 s ago · 8 open filled positions
+CONNECTED · database read 10 s ago · 6 open filled positions
 Session & data freshness
 
 paper_session_20261001T014716Z · started 2026-10-01 01:47Z
 
 Latest valuation
-11 min ago
+79 s ago
 Latest decision
-11 min ago
+79 s ago
 Latest order book
-25 s ago
+13 s ago
 Agent pass
-25 s ago
+55 s ago
 Collection cycle
-7 min ago
+15 min ago
 Latest ledger entry
-23 min ago
-Pass ran in 14.1 s · collector ZERO_EVALUATED__INPUT_PATH_BLOCKED · build b5670c3 · real money DISABLED
+21 min ago
+Pass ran in 18.9 s · collector ZERO_EVALUATED__INPUT_PATH_BLOCKED · build 3f96dbc · real money DISABLED
 Agent activity
 
 Derek · latest decision
-11 min ago · REFUSE no qualified pinnacle probability
+79 s ago · REFUSE no research model candidate exists
 Xavier · reviews (24 h)
-1200 · 9 handoffs
+1358 · 9 handoffs
 Audrey · findings
 8 latest
 Audrey's operational recommendations
 
 MEASURING · to DEREK · 8 decisions cleared the 0.5 pp gross threshold but the taker fee consumed the edge; rest a bid below the ask where both rules hold at the price paid
-0 agent responses · 11 measurements · automated acknowledgement (template, not an agent review)
+0 agent responses · 12 measurements · automated acknowledgement (template, not an agent review)
 IMPROVED · to DEREK · 39 of 125 book reads in the last 6 h were cut by the decision deadline or the venue cooldown; remove the duplicate read and retry within the freshness window
-0 agent responses · 11 measurements · automated acknowledgement (template, not an agent review)
+0 agent responses · 12 measurements · automated acknowledgement (template, not an agent review)
 IMPROVED · to DEREK · 63 events in the last collection cycle never reached a decision (by code: {"NO_PINNACLE_ON_EVENT": 33, "QUOTE_STALE_ON_ARRIVAL": 13, "VENUE_BOOK_READ_FAILED": 2, "NO_VENUE_CONTRACT_FOR_EVENT": 5, "VENUE_BOOK_CURRENCY_NOT_ESTABLISHED": 4, "VENUE_NATIVE_EVENT_MATCHES_ONLY_ONE_TEAM": 5, "VENUE_BOOK_CURRENCY_CONTRADICTED_BY_CONTRACT": 1}); investigate per sport without weakening identity, market or settlement matching
-0 agent responses · 11 measurements · automated acknowledgement (template, not an agent review)
+0 agent responses · 12 measurements · automated acknowledgement (template, not an agent review)
 Operational improvements only — never reported as profitable learning.
 Opportunities evaluated (24 h)
 
-607 valuations · 22 fixtures · 2 sports
+626 valuations · 22 fixtures · 2 sports
 
 STRATEGY	DECISIONS	ENTERED	TOP REFUSALS
-TRAINING Training / simulated execution	183	9	65 · exploration already holds a position in this fixture (one per fixture)
-61 · this fixture was not drawn by the exploration sample (recorded probability and draw)
-38 · the Pinnacle price did not qualify
+TRAINING Training / simulated execution	212	9	74 · this fixture was not drawn by the exploration sample (recorded probability and draw)
+74 · exploration already holds a position in this fixture (one per fixture)
+44 · the Pinnacle price did not qualify
 RESEARCH Strict benchmark (entries off)	207	0	207 · the venue's and Pinnacle's settlement rules are not established as the same
-INVESTMENT Investment policy (0.5 pp, taker)	352	2	155 · the edge was below the policy's minimum (the threshold recorded on the decision)
-65 · the Pinnacle price did not qualify
-63 · another strategy already holds this game
-RESEARCH Derek research (entries off)	607	0	420 · no research model exists yet
-117 · the venue's and Pinnacle's settlement rules are not established as the same
-68 · no usable Pinnacle price
-Every attempt recorded (6 h): decided 358
+INVESTMENT Investment policy (0.5 pp, taker)	381	2	169 · the edge was below the policy's minimum (the threshold recorded on the decision)
+72 · another strategy already holds this game
+71 · the Pinnacle price did not qualify
+RESEARCH Derek research (entries off)	626	0	423 · no research model exists yet
+132 · the venue's and Pinnacle's settlement rules are not established as the same
+69 · no usable Pinnacle price
+Every attempt recorded (6 h): decided 378
 Closest investment opportunities (24 h)
 
 Latest decision per market and policy version · serving version V2 first, historical versions after
@@ -98,30 +100,26 @@ Latest decision per market and policy version · serving version V2 first, histo
 MARKET	POLICY	AGE	PINNACLE	PRICE	GROSS	FEE	AFTER FEES	RESULT
 mlb-sd-mil-2026-10-03	V2	6 h ago	0.6782	0.67	0.82 pp	1.54 pp	-0.71 pp	gross edge clears threshold but fees consume it
 brb-acg-afc-2026-10-03-acg	V2	4 h ago	0.7172	0.71	0.72 pp	1.43 pp	-0.71 pp	gross edge clears threshold but fees consume it
+unl-por-nor-2026-10-04-por	V2	8 min ago	0.5924	0.59	0.24 pp	not computed	not computed	below min gross edge
 mlb-cws-cle-2026-10-03	V2	6 h ago	0.5904	0.59	0.04 pp	not computed	not computed	below min gross edge
-brb-nov-goi-2026-10-01-nov	V2	3 h ago	0.6193	0.62	-0.07 pp	not computed	not computed	below min gross edge
-brb-ber-crb-2026-10-02-ber	V2	51 min ago	0.3789	0.38	-0.11 pp	not computed	not computed	below min gross edge
-brb-cui-pop-2026-10-03-cui	V2	37 min ago	0.8454	0.85	-0.46 pp	not computed	not computed	below min gross edge
-unl-wal-den-2026-10-04-wal	V2	5 h ago	0.2439	0.25	-0.61 pp	not computed	not computed	below min gross edge
-mlb-nyy-tb-2026-10-03	V2	5 h ago	0.5537	0.56	-0.63 pp	not computed	not computed	below min gross edge
+unl-cro-eng-2026-10-03-cro	V2	7 min ago	0.2298	0.23	-0.02 pp	not computed	not computed	below min gross edge
+brb-nov-goi-2026-10-01-nov	V2	4 h ago	0.6193	0.62	-0.07 pp	not computed	not computed	below min gross edge
+brb-ber-crb-2026-10-02-ber	V2	22 min ago	0.3789	0.38	-0.11 pp	not computed	not computed	below min gross edge
+brb-cui-pop-2026-10-03-cui	V2	22 min ago	0.8454	0.85	-0.46 pp	not computed	not computed	below min gross edge
 The serving investment rule: Pinnacle probability minus price ≥ 0.5 pp at every level used, and expected profit after the taker fee strictly positive. A historical row keeps the reason it was given under the rules in force at the time. "Not computed" means the policy stopped before the fee step.
-Standing orders 0 entry · 8 protection
+Standing orders 0 entry · 6 protection
 
 STRATEGY	MARKET	ROLE	TYPE	PRICE	QTY / FILLED	RESERVED	EXPIRES
+TRAINING	mlb-cws-cle-2026-10-03	STANDING_PROTECTION	RESTING GTD	0.64	163 / 0	$0.00	03:49Z
+TRAINING	brb-bot-vln-2026-10-03-bot	STANDING_PROTECTION	RESTING GTD	0.45	238 / 0	$0.00	03:49Z
+TRAINING	mlb-sd-mil-2026-10-03	STANDING_PROTECTION	RESTING GTD	0.71	144 / 0	$0.00	03:48Z
+TRAINING	brb-acg-afc-2026-10-03-acg	STANDING_PROTECTION	RESTING GTD	0.75	136 / 0	$0.00	03:48Z
+TRAINING	unl-wal-den-2026-10-04-wal	STANDING_PROTECTION	RESTING GTD	0.29	380 / 0	$0.00	03:36Z
 TRAINING	mlb-nyy-tb-2026-10-03	STANDING_PROTECTION	RESTING GTD	0.61	172 / 0	$0.00	03:16Z
-INVESTMENT	mlb-phi-atl-2026-10-01	STANDING_PROTECTION	RESTING GTD	0.98	5102 / 0	$0.00	03:00Z
-TRAINING	mlb-cws-cle-2026-10-03	STANDING_PROTECTION	RESTING GTD	0.64	163 / 0	$0.00	02:49Z
-TRAINING	brb-bot-vln-2026-10-03-bot	STANDING_PROTECTION	RESTING GTD	0.45	238 / 0	$0.00	02:49Z
-INVESTMENT	mlb-phi-atl-2026-10-01	STANDING_PROTECTION	RESTING GTD	0.98	5102 / 0	$0.00	02:47Z
-TRAINING	mlb-sd-mil-2026-10-03	STANDING_PROTECTION	RESTING GTD	0.71	144 / 0	$0.00	02:46Z
-TRAINING	brb-acg-afc-2026-10-03-acg	STANDING_PROTECTION	RESTING GTD	0.75	136 / 0	$0.00	02:46Z
-TRAINING	unl-wal-den-2026-10-04-wal	STANDING_PROTECTION	RESTING GTD	0.29	380 / 0	$0.00	02:35Z
 An order is not a fill: it reserves cash until it fills, expires or is cancelled.
-Positions 8 open · 13 recent fills
+Positions 6 open · 15 recent fills
 
 STRATEGY	MARKET	SIDE	OPEN QTY	COST BASIS	UNREALIZED
-INVESTMENT Investment policy (0.5 pp, taker)	mlb-phi-atl-2026-10-01	SHORT	5102	$4,908.96	$39.98
-INVESTMENT Investment policy (0.5 pp, taker)	mlb-phi-atl-2026-10-01	SHORT	5102	$4,911.54	$37.40
 TRAINING Training / simulated execution	brb-bot-vln-2026-10-03-bot	LONG	238	$99.17	-$11.11
 TRAINING Training / simulated execution	mlb-cws-cle-2026-10-03	SHORT	163	$98.91	-$4.37
 TRAINING Training / simulated execution	unl-wal-den-2026-10-04-wal	LONG	380	$99.95	-$4.95
@@ -131,33 +129,33 @@ TRAINING Training / simulated execution	mlb-nyy-tb-2026-10-03	SHORT	172	$99.27	-
 By strategy (one ledger; strategies sum to the account)
 
 STRATEGY	OPEN / ALL	REALIZED	UNREALIZED	FEES
-INVESTMENT Investment policy (0.5 pp, taker)	2 / 2	$0.00	$77.38	$27.40
+INVESTMENT Investment policy (0.5 pp, taker)	0 / 2	$165.52	$0.00	$41.30
 TRAINING Training / simulated execution (exploration)	6 / 7	$2.91	-$33.64	$25.26
-Exploration budget · exposure $594.50 of $5,000.00 · realized losses $0.00 of the $1,000.00 stop · $100.00 max per position incl. fees · one per fixture. Negative expected value here is a research cost, not investment performance.
+Exploration budget · exposure $594.50 of $5,000.00 · realized losses $0.00 of the $1,000.00 stop · $1,000.00 max per position incl. fees · one per fixture. Negative expected value here is a research cost, not investment performance.
 Latest simulated fills
 
+INVESTMENT STANDING_PROTECTION SELL 5102 @ 0.98 · mlb-phi-atl-2026-10-01
+fee $6.95 · ledger #28
+INVESTMENT STANDING_PROTECTION SELL 5102 @ 0.98 · mlb-phi-atl-2026-10-01
+fee $6.95 · ledger #29
 INVESTMENT ENTRY BUY 4842.56 @ 0.96 · mlb-phi-atl-2026-10-01
 fee $12.92 · ledger #27
+INVESTMENT ENTRY BUY 5 @ 0.93 · mlb-phi-atl-2026-10-01
+fee $0.02 · ledger #24
 INVESTMENT ENTRY BUY 249.44 @ 0.95 · mlb-phi-atl-2026-10-01
 fee $0.82 · ledger #26
 INVESTMENT ENTRY BUY 5 @ 0.94 · mlb-phi-atl-2026-10-01
 fee $0.02 · ledger #25
-INVESTMENT ENTRY BUY 5 @ 0.93 · mlb-phi-atl-2026-10-01
-fee $0.02 · ledger #24
-INVESTMENT ENTRY BUY 5102 @ 0.96 · mlb-phi-atl-2026-10-01
-fee $13.62 · ledger #22
-TRAINING STANDING_PROTECTION SELL 188 @ 0.56 · mlb-phi-atl-2026-10-01
-fee $3.22 · ledger #20
 Acquisition throughput (6 h)
 
 HOUR	BOOK READS	SHARED	FAILED	CUT BY DEADLINE
-02:00Z	142	2	22	0
+03:00Z	19	0	5	0
+02:00Z	383	16	62	0
 01:00Z	389	15	70	0
 00:00Z	356	11	116	0
 23:00Z	365	12	176	0
 22:00Z	336	15	154	0
-21:00Z	309	24	48	0
-20:00Z	79	17	6	1
+21:00Z	294	24	48	0
 A shared read answers a decision from this server's own seconds-old venue read (same freshness limits), saving a venue request.
 YOUR AI TEAM
 The people behind the process.
@@ -168,7 +166,7 @@ DISCOVERY & ENTRY
 Derek
 Find the opportunity. Explain the conviction.
 
-1360 recorded decisions · 11 entry decisions
+1447 recorded decisions · 11 entry decisions
 Talk to Derek
 Workspace ↗
 X
@@ -177,7 +175,7 @@ PORTFOLIO MANAGEMENT
 Xavier
 Own the position. Manage the outcome.
 
-8 open positions · 8 protection orders
+6 open positions · 6 protection orders
 Talk to Xavier
 Workspace ↗
 A
@@ -186,7 +184,7 @@ AUDIT & INTELLIGENCE
 Audrey
 Verify the result. Improve the process.
 
-93 audit findings · Latest report 2026-10-01
+95 audit findings · Latest report 2026-10-01
 Talk to Audrey
 Workspace ↗
 MANAGEMENT DESK
