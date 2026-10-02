@@ -38,13 +38,22 @@ def verify(body,timestamp,signature,secret,now=None):
 def approved_event(payload,cfg):
  if payload.get('team_id')!=cfg['team'] or not cfg['team'] or payload.get('api_app_id')!=cfg['app'] or not cfg['app']:return None
  e=payload.get('event') or {}
- if not isinstance(e,dict) or e.get('type')!='app_mention' or e.get('bot_id') or e.get('subtype'):return None
+ if not isinstance(e,dict) or e.get('bot_id') or e.get('subtype'):return None
+ followup=False
+ if e.get('type')=='message':
+  # A manager's reply INSIDE a thread, without an @mention (a mention
+  # arrives as its own app_mention event, so it is skipped here). Only the
+  # agent that already answered in that thread takes it (admit checks).
+  if e.get('channel_type') not in (None,'channel','group') or '<@' in str(e.get('text') or ''):return None
+  if not e.get('thread_ts') or e.get('thread_ts')==e.get('ts'):return None
+  followup=True
+ elif e.get('type')!='app_mention':return None
  if e.get('channel') not in cfg['channels'] or e.get('user') not in cfg['managers']:return None
  if not isinstance(e.get('text'),str) or not 1<=len(e['text'])<=4000:return None
  if not isinstance(payload.get('event_id'),str) or len(payload['event_id'])>150:return None
  ts=e.get('thread_ts') or e.get('ts')
  if not isinstance(ts,str) or len(ts)>40:return None
- return {'source':payload['event_id'],'channel':e['channel'],'thread':ts,'text':e['text'],'user':e['user']}
+ return {'source':payload['event_id'],'channel':e['channel'],'thread':ts,'text':e['text'],'user':e['user'],'followup':followup}
 
 def decode(v):return json.loads(v) if isinstance(v,str) else v or {}
 
@@ -57,6 +66,9 @@ async def admit(conn,agent,cfg,event):
   if control.get('enabled') is not True:return 'OFF'
   did=delivery_id(agent,cfg['team'],event['source'])
   if await conn.fetchval('SELECT 1 FROM agent_slack_delivery WHERE delivery_id=$1',did):return 'DUPLICATE'
+  if event.get('followup') and not await conn.fetchval(
+     "SELECT 1 FROM agent_slack_delivery WHERE agent=$1 AND team_id=$2 AND channel_id=$3 AND thread_ts=$4 AND state='SENT' LIMIT 1",
+     agent,cfg['team'],event['channel'],event['thread']):return 'IGNORED_NOT_THIS_AGENTS_THREAD'
   n=await conn.fetchval("SELECT count(*) FROM agent_slack_delivery WHERE state IN ('QUEUED','WORKING','READY','SENDING')")
   if n>=QUEUE_CAP:return 'QUEUE_FULL'
   await conn.execute('INSERT INTO agent_slack_delivery(delivery_id,agent,team_id,channel_id,thread_ts,source_key,question,requested_by) VALUES($1,$2,$3,$4,$5,$6,$7,$8)',did,agent,cfg['team'],event['channel'],event['thread'],event['source'],event['text'],event.get('user'))
@@ -145,6 +157,9 @@ async def process(pool,job):
  text=answer[:3500]+ ('\nRecorded response: '+str(message_id) if message_id and not job['answer'] else '')
  # Plain text prevents an answer from issuing Slack mentions or link unfurls.
  text=text.replace('&','&amp;').replace('<','&lt;').replace('>','&gt;')
+ # Management escalations name a listed manager with {{@U...}}; that is the
+ # ONLY mention a delivery can carry, and only for the verified managers.
+ text=re.sub(r'\{\{@(U[A-Z0-9]{6,15})\}\}',lambda m:('<@'+m.group(1)+'>') if m.group(1) in cfg['managers'] else '',text)
  payload={'channel':job['channel_id'],'text':text,'mrkdwn':False,'unfurl_links':False,'unfurl_media':False}
  if job['thread_ts']:payload['thread_ts']=job['thread_ts']
  state='DELIVERY_UNKNOWN';error=None;ts=None

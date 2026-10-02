@@ -146,3 +146,41 @@ async def test_review_publisher_query_runs_on_real_schema(database,cfg,monkeypat
     await use(database,S.publish_reviews)
     rows=await use(database,lambda c:c.fetch('SELECT source_key,answer FROM agent_slack_delivery'))
     assert all(r['source_key'].startswith('review:') and 'Source message:' in r['answer'] for r in rows)
+
+
+def followup_payload(thread='123.456', text='And what about the second position?'):
+    return {'team_id':'T_TEST','api_app_id':'A_TEST','event_id':uuid.uuid4().hex,
+            'event':{'type':'message','channel':'C_TEST','channel_type':'channel','user':'U_TEST',
+                     'text':text,'ts':'125.000','thread_ts':thread}}
+
+def test_a_thread_reply_without_a_mention_is_a_follow_up_candidate(cfg):
+    e=S.approved_event(followup_payload(),cfg)
+    assert e and e['followup'] is True and e['thread']=='123.456'
+    assert S.approved_event(followup_payload(text='<@A_TEST> again'),cfg) is None   # app_mention handles it
+    p=followup_payload();p['event'].pop('thread_ts')
+    assert S.approved_event(p,cfg) is None                                          # not in a thread
+    p=followup_payload();p['event']['user']='OTHER'
+    assert S.approved_event(p,cfg) is None                                          # not a manager
+
+@pytest.mark.asyncio
+async def test_only_the_agent_already_in_the_thread_takes_the_follow_up(database,cfg):
+    e=S.approved_event(followup_payload(thread='900.001'),cfg)
+    assert await use(database,lambda c:S.admit(c,'derek',cfg,e))=='IGNORED_NOT_THIS_AGENTS_THREAD'
+    await use(database,lambda c:c.execute("INSERT INTO agent_slack_delivery(delivery_id,agent,team_id,channel_id,thread_ts,source_key,question,state) VALUES('d-prev','derek','T_TEST','C_TEST','900.001','prev','first question','SENT')"))
+    e=S.approved_event(followup_payload(thread='900.001'),cfg)
+    assert await use(database,lambda c:S.admit(c,'derek',cfg,e))=='QUEUED'
+
+@pytest.mark.asyncio
+async def test_an_escalation_can_mention_only_a_listed_manager(database,cfg,monkeypatch):
+    monkeypatch.setenv('SLACK_MANAGEMENT_USER_IDS','U_TEST,U0C64BKD2JE')
+    await use(database,lambda c:c.execute("INSERT INTO agent_slack_delivery(delivery_id,agent,team_id,channel_id,source_key,answer,state) VALUES('d-esc','derek','T_TEST','C_TEST','escalation:x','{{@U0C64BKD2JE}} {{@U0EVIL99999}} <@everyone> decision needed','READY')"))
+    job=await use(database,S.claim)
+    calls=[]
+    async def transport(request):
+        calls.append(json.loads(request.content));return httpx.Response(200,json={'ok':True,'ts':'130.000'})
+    cls=httpx.AsyncClient
+    monkeypatch.setattr(S.httpx,'AsyncClient',lambda **kw:cls(transport=httpx.MockTransport(transport),**kw))
+    await S.process(database,job)
+    t=calls[0]['text']
+    assert t.startswith('<@U0C64BKD2JE>  &lt;@everyone&gt; decision needed')
+    assert 'U0EVIL' not in t

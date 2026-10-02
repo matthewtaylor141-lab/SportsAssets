@@ -6,15 +6,22 @@ the OFF switch are the bridge's. Nothing here changes a position, a policy or
 a control.
 
   * INITIAL briefing once per connection (source key update:initial:<rev>)
-  * HOURLY summary, at most one per UTC hour (update:hourly:<YYYY-MM-DDTHH>)
-  * DAILY performance and learning report after 22:00 UTC
-    (update:daily:<YYYY-MM-DD>)
+  * PROGRESS every 30 minutes, 9 a.m.-6 p.m. Eastern
+    (update:progress:<ET date>T<HH:MM>): what changed, why it matters, what
+    happens next and whether management action is needed
+  * Audrey's HOURLY reconciled account update (update:hourly:<UTC hour>),
+    merged into the on-the-hour progress update during business hours
+  * DAILY research and performance report after 6 p.m. Eastern
+    (update:daily:<ET date>)
+  * ESCALATIONS addressed to the verified managers for a genuine decision
+    (no paper entry for 3 h; the live mirror underfunded), once a day each
   * ALERTS for a service failure, a reconciliation discrepancy or a research
     blocker. An alert's source key is its condition fingerprint plus a 6-hour
     bucket, so an unchanged condition is not re-posted within 6 h, and an
     hourly summary consolidates everything routine.
 
-Figures are separate and labelled: simulated cash, reserved cash, exposure
+SIMULATED (paper) and ACTUAL (live 1:1,000 mirror account) figures are in
+separate, labelled sections. Figures are separate and labelled: simulated cash, reserved cash, exposure
 (open cost basis), realized P&L and unrealized P&L, with the ledger sequence
 and timestamp they come from; training strategies are reported apart from
 investment and benchmark strategies. Discussion is never labelled learning or
@@ -177,44 +184,271 @@ def alerts(s: dict, now: float) -> list:
     return out
 
 
+ET = "America/New_York"
+BUSINESS_START_H, BUSINESS_END_H = 9, 18          # 9 a.m. - 6 p.m. Eastern
+DAILY_AFTER_ET_H = 18
+DECISION_BUCKET_S = 24 * 3600
+NO_ENTRY_ESCALATE_S = 3 * 3600
+UNANSWERED_AFTER_S = 600
+
+
+def _et(at: float) -> datetime:
+    from zoneinfo import ZoneInfo
+    return datetime.fromtimestamp(at, ZoneInfo(ET))
+
+
+def progress_slot(now: float) -> str | None:
+    """'YYYY-MM-DDTHH:MM' (Eastern, on :00 or :30) when a 30-minute progress
+    update belongs to this moment's slot, inside 9:00-18:00 Eastern."""
+    t = _et(now)
+    if not (BUSINESS_START_H <= t.hour < BUSINESS_END_H or
+            (t.hour == BUSINESS_END_H and t.minute < 30)):
+        return None
+    return t.strftime("%Y-%m-%dT%H:") + ("00" if t.minute < 30 else "30")
+
+
+def managers_tag() -> str:
+    ids = [x.strip() for x in os.getenv("SLACK_MANAGEMENT_USER_IDS", "").split(",")
+           if x.strip()]
+    return " ".join("{{@%s}}" % i for i in ids)
+
+
+async def mirror_snapshot(conn) -> dict | None:
+    """The ACTUAL (live account) figures of the 1:1,000 mirror, or None when
+    the mirror schema is absent or it has never been enabled."""
+    if not await conn.fetchval("SELECT to_regclass('execmirror_control') IS NOT NULL"):
+        return None
+    ctl = await conn.fetchrow("SELECT enabled, stopped, cutover_at FROM execmirror_control WHERE id=1")
+    if not ctl or not ctl["cutover_at"]:
+        return None
+    from . import execmirror_view as V
+    v = await V.view(conn, limit=50)
+    return {"enabled": ctl["enabled"], "stopped": ctl["stopped"],
+            "pnl": v["pnl"], "coverage": v["coverage"],
+            "account": v["account"], "events": v["events"][:5]}
+
+
+def mirror_block(m: dict | None) -> str:
+    if not m:
+        return "ACTUAL (live account, 1:1,000 mirror): not enabled."
+    p, c = m["pnl"], m["coverage"]
+    rec = (m["account"] or {}).get("reconciliation") or {}
+    bal = ((m["account"] or {}).get("balances") or [{}])[0]
+    return ("ACTUAL (live account, 1:1,000 mirror) · %s · live P&L %s vs paper/1,000 %s "
+            "(difference %s, tracking %s) · %s of %s paper orders mirrored · "
+            "buying power %s · venue reconciliation %s" % (
+                "STOPPED" if m["stopped"] else ("ON" if m["enabled"] else "OFF"),
+                _usd(p.get("live_total")), _usd(p.get("expected_live_total")),
+                _usd(p.get("difference")), p.get("tracking_ratio") or "n/a",
+                c.get("mirrored"), c.get("paper_orders_seen"),
+                _usd(bal.get("buyingPower")),
+                "OK" if rec.get("reconciled") else ("DIFFERENCE" if rec else "not yet read")))
+
+
+async def activity(conn, since: float, now: float) -> dict:
+    """What happened in the paper experiment since the last update."""
+    r = await conn.fetchrow(
+        """SELECT count(*) AS decisions,
+                  count(*) FILTER (WHERE verdict <> 'REFUSE') AS approved
+             FROM paper_decisions WHERE decided_at > to_timestamp($1)""", since)
+    top = await conn.fetch(
+        """SELECT refusal, count(*) AS n FROM paper_decisions
+            WHERE decided_at > to_timestamp($1) AND refusal IS NOT NULL
+            GROUP BY 1 ORDER BY 2 DESC LIMIT 3""", since)
+    o = await conn.fetchrow(
+        """SELECT count(*) FILTER (WHERE role='ENTRY') AS entries,
+                  count(*) FILTER (WHERE role<>'ENTRY') AS other
+             FROM paper_orders WHERE account_id=$1 AND decided_at > to_timestamp($2)""",
+        ACCOUNT, since)
+    last_entry = await conn.fetchval(
+        "SELECT extract(epoch FROM max(decided_at)) FROM paper_orders "
+        " WHERE account_id=$1 AND role='ENTRY'", ACCOUNT)
+    unanswered = await conn.fetch(
+        """SELECT delivery_id, agent, state, created_at FROM agent_slack_delivery
+            WHERE question IS NOT NULL AND state NOT IN ('SENT')
+              AND created_at < now() - make_interval(secs => $1)
+            ORDER BY created_at LIMIT 10""", float(UNANSWERED_AFTER_S)) \
+        if await conn.fetchval("SELECT to_regclass('agent_slack_delivery') IS NOT NULL") else []
+    return {"decisions": int(r["decisions"] or 0), "approved": int(r["approved"] or 0),
+            "refusals": [(x["refusal"], int(x["n"])) for x in top],
+            "entries": int(o["entries"] or 0), "other_orders": int(o["other"] or 0),
+            "last_entry_at": float(last_entry) if last_entry else None,
+            "unanswered": [dict(x) for x in unanswered]}
+
+
+def _delta(prev: dict, s: dict) -> list:
+    a = s["account"]
+    out = []
+    for key, label in (("realized_pnl_usd", "realized P&L"),
+                       ("unrealized_pnl_usd", "unrealized P&L"),
+                       ("cash_usd", "simulated cash")):
+        try:
+            d = float(a.get(key) or 0) - float(prev.get(key) or 0)
+        except (TypeError, ValueError):
+            continue
+        if prev and abs(d) >= 0.005:
+            out.append("%s %s%s" % (label, "+" if d > 0 else "-", _usd(abs(d))[0:]))
+    if prev and a.get("open_positions") != prev.get("open_positions"):
+        out.append("open positions %s -> %s" % (prev.get("open_positions"),
+                                                a.get("open_positions")))
+    return out
+
+
+def progress_text(s: dict, act: dict, m: dict | None, prev: dict, *, label: str,
+                  with_reconciliation: bool) -> str:
+    changed = _delta(prev, s)
+    changed.append("%d decisions (%d approved), %d new entries, %d other orders"
+                   % (act["decisions"], act["approved"], act["entries"],
+                      act["other_orders"]))
+    why, nxt, action = [], [], "None."
+    if act["entries"] == 0 and act["refusals"]:
+        why.append("No new paper entries: every decision was refused, mostly "
+                   + ", ".join("%s (%d)" % r for r in act["refusals"]) + ".")
+        nxt.append("Derek keeps evaluating; the refusal reasons are under "
+                   "research in #agent-workroom.")
+    if s["reconcile"].get("reconciled") is False:
+        why.append("The paper ledger does NOT reconcile; Audrey is escalating.")
+        action = "Yes — see Audrey's escalation."
+    if act["unanswered"]:
+        why.append("%d management question(s) without a delivered answer "
+                   "(oldest %s)." % (len(act["unanswered"]),
+                                     act["unanswered"][0]["created_at"]))
+        nxt.append("The bridge retries within its limits; failures are named, "
+                   "not reposted.")
+    if not why:
+        why.append("Routine: accounts reconcile and services are current.")
+    if not nxt:
+        nxt.append("Next consolidated update in 30 minutes (business hours).")
+    lines = [label,
+             "What changed: " + "; ".join(changed) + ".",
+             "Why it matters: " + " ".join(why),
+             "Next: " + " ".join(nxt),
+             "Management action needed: " + action,
+             "SIMULATED (paper account):"]
+    lines.append(account_block(s) if with_reconciliation else
+                 "Realized %s · unrealized %s · %s open · ledger %s" % (
+                     _usd(s["account"].get("realized_pnl_usd")),
+                     _usd(s["account"].get("unrealized_pnl_usd")),
+                     s["account"].get("open_positions"),
+                     "reconciled" if s["reconcile"].get("reconciled") else "see Audrey"))
+    lines.append(mirror_block(m))
+    lines.append(research_line(s))
+    return "\n".join(lines)
+
+
+def decision_escalations(s: dict, act: dict, m: dict | None, now: float) -> list:
+    """Genuine questions for management, each at most once a day."""
+    out = []
+    tag = managers_tag()
+    if act["last_entry_at"] and now - act["last_entry_at"] > NO_ENTRY_ESCALATE_S \
+            and act["refusals"]:
+        top = act["refusals"][0]
+        out.append(("no-entries", _fp(top[0]),
+                    "%s Decision needed · no paper entry for %d h. The leading refusal is "
+                    "%s (%d in the last period). The live 1:1,000 mirror can only trade "
+                    "what paper trades. Do you want Derek to prioritise research on "
+                    "this blocker (reply in thread), or keep the current policy?"
+                    % (tag, (now - act["last_entry_at"]) // 3600, top[0], top[1])))
+    if m and m["enabled"]:
+        bal = ((m["account"] or {}).get("balances") or [{}])[0]
+        try:
+            bp = float(bal.get("buyingPower"))
+        except (TypeError, ValueError):
+            bp = None
+        if bp is not None and bp < 500:
+            out.append(("mirror-funding", _fp(round(bp)),
+                        "%s Decision needed · the live mirror account has %s buying "
+                        "power; mirroring the whole $500,000 paper account at 1:1,000 "
+                        "needs about $500. Orders beyond the balance are recorded as "
+                        "INSUFFICIENT_CASH, so live P&L will cover only part of paper. "
+                        "Fund the account, or accept partial coverage?" % (tag, _usd(bp))))
+    return out
+
+
 async def due(conn, now: float, *, revision) -> list:
     """[(source_key, text)] due now; caller queues them (idempotent keys)."""
     st = await _row(conn, STATE_KEY)
     t = _utc(now)
-    hour, day = t.strftime("%Y-%m-%dT%H"), t.strftime("%Y-%m-%d")
+    et = _et(now)
+    hour, day_et = t.strftime("%Y-%m-%dT%H"), et.strftime("%Y-%m-%d")
+    slot = progress_slot(now)
     scheduled = (st.get("initial_rev") != revision or st.get("hourly") != hour
-                 or (t.hour >= DAILY_AFTER_H and st.get("daily") != day))
+                 or (slot and st.get("progress") != slot)
+                 or (et.hour >= DAILY_AFTER_ET_H and st.get("daily") != day_et))
     if not scheduled and now - float(st.get("alerts_checked_at") or 0) < 300:
         return []                       # nothing due: no read at all
     s = await snapshot(conn, now)
+    since = float(st.get("last_update_at") or now - 1800)
+    act = await activity(conn, since, now)
+    m = await mirror_snapshot(conn)
+    prev = st.get("prev") or {}
     st["alerts_checked_at"] = now
     out = []
+    posted = False
     if st.get("initial_rev") != revision:
         out.append(("update:initial:%s" % revision,
-                    "Status briefing · Derek, Xavier and Audrey are connected "
-                    "to this channel.\n" + account_block(s) + "\n"
-                    + research_line(s)))
+                    "Status briefing · Derek, Xavier and Audrey are connected to this "
+                    "channel.\n"
+                    "Derek (discovery & entry): evaluates every market against Pinnacle; "
+                    "researching PinnAPI coverage, missed opportunities, freshness, "
+                    "market matching and calibration.\n"
+                    "Xavier (portfolio management): manages open positions and standing "
+                    "orders; researching execution quality, exit alternatives and paper "
+                    "vs live execution differences.\n"
+                    "Audrey (audit & intelligence): reconciles the ledger, reviews Derek's "
+                    "and Xavier's reasoning, reports hourly and daily.\n"
+                    "Ask any of us with @Derek / @Xavier / @Audrey; reply in the thread "
+                    "for follow-ups; '@Agent assign: <question>' opens a research task.\n"
+                    + progress_text(s, act, m, prev, label="Current state",
+                                    with_reconciliation=True)))
         st["initial_rev"] = revision
+        posted = True
+    if slot and st.get("progress") != slot:
+        on_hour = slot.endswith(":00")
+        out.append(("update:progress:" + slot,
+                    progress_text(s, act, m, prev,
+                                  label="Progress update · %s ET%s" % (
+                                      slot[-5:], " · with Audrey's hourly reconciliation"
+                                      if on_hour else ""),
+                                  with_reconciliation=on_hour)))
+        st["progress"] = slot
+        if on_hour:
+            st["hourly"] = hour          # merged: no separate hourly message
+        posted = True
     if st.get("hourly") != hour:
         out.append(("update:hourly:" + hour,
-                    "Hourly summary · " + t.strftime("%H:00 UTC") + "\n"
-                    + account_block(s) + "\n" + research_line(s)))
+                    "Audrey · hourly reconciled account update · "
+                    + t.strftime("%H:00 UTC") + "\nSIMULATED (paper account):\n"
+                    + account_block(s) + "\n" + mirror_block(m)))
         st["hourly"] = hour
-    if t.hour >= DAILY_AFTER_H and st.get("daily") != day:
-        out.append(("update:daily:" + day,
-                    "Daily performance and learning report · " + day + "\n"
-                    + account_block(s) + "\n" + research_line(s) + "\n"
-                    "Training-strategy results are research costs, reported "
-                    "apart from investment results. Learning is reported only "
-                    "where a forward evaluation is recorded."))
-        st["daily"] = day
+        posted = True
+    if et.hour >= DAILY_AFTER_ET_H and st.get("daily") != day_et:
+        out.append(("update:daily:" + day_et,
+                    "Audrey · daily research and performance report · " + day_et + "\n"
+                    + progress_text(s, act, m, prev, label="Today",
+                                    with_reconciliation=True) + "\n"
+                    "Training-strategy results are research costs, reported apart from "
+                    "investment results. Learning is reported only where a forward "
+                    "evaluation is recorded."))
+        st["daily"] = day_et
+        posted = True
     bucket = int(now // ALERT_BUCKET_S)
     for kind, fp, text in alerts(s, now):
-        out.append(("alert:%s:%s:%d" % (kind, fp, bucket), text))
+        out.append(("alert:%s:%s:%d" % (kind, fp, bucket),
+                    (managers_tag() + " " + text) if kind in
+                    ("reconciliation", "service:cycle", "service:pass") else text))
+    dbucket = int(now // DECISION_BUCKET_S)
+    for kind, fp, text in decision_escalations(s, act, m, now):
+        out.append(("escalation:%s:%s:%d" % (kind, fp, dbucket), text))
+    if posted:
+        st["last_update_at"] = now
+        st["prev"] = {k: s["account"].get(k) for k in
+                      ("realized_pnl_usd", "unrealized_pnl_usd", "cash_usd",
+                       "open_positions")}
     await conn.execute(
         "INSERT INTO ingestion_state(key,value) VALUES($1,$2::jsonb) "
         "ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value",
-        STATE_KEY, json.dumps(st))
+        STATE_KEY, json.dumps(st, default=str))
     return out
 
 

@@ -54,32 +54,88 @@ def test_alerts_name_the_condition_and_stay_quiet_when_healthy():
 @pytest.mark.skipif(not H.DSN, reason="needs RN1X_TEST_DSN")
 @pytest.mark.asyncio
 async def test_updates_are_scheduled_once_and_not_recomputed_between(monkeypatch):
+    """Owner cadence (2026-10-02): a consolidated progress update every 30
+    minutes 9 a.m.-6 p.m. Eastern, Audrey's hourly reconciliation (merged
+    into the on-the-hour update in business hours), the daily report after
+    6 p.m. Eastern; nothing recomputed between due times."""
     conn = await H.connect()
     calls = []
 
     async def snap(c, now):
         calls.append(now)
         return dict(SNAP, at=now, cycle_at=now - 60, pass_at=now - 30)
+
+    async def act(c, since, now):
+        return {"decisions": 0, "approved": 0, "refusals": [], "entries": 0,
+                "other_orders": 0, "last_entry_at": now, "unanswered": []}
+
+    async def no_mirror(c):
+        return None
     monkeypatch.setattr(U, "snapshot", snap)
+    monkeypatch.setattr(U, "activity", act)
+    monkeypatch.setattr(U, "mirror_snapshot", no_mirror)
     try:
         await conn.execute("DELETE FROM ingestion_state WHERE key=$1",
                            U.STATE_KEY)
-        t0 = 1790949600.0                       # 14:00 UTC
+        t0 = 1790949600.0                       # 14:00 UTC = 10:00 EDT
         first = [k for k, _ in await U.due(conn, t0, revision=1)]
-        assert first == ["update:initial:1", "update:hourly:2026-10-02T14"]
+        assert first == ["update:initial:1", "update:progress:2026-10-02T10:00"]
         assert await U.due(conn, t0 + 60, revision=1) == []     # no read
         assert len(calls) == 1
+        assert [k for k, _ in await U.due(conn, t0 + 1800, revision=1)] == \
+            ["update:progress:2026-10-02T10:30"]
         assert [k for k, _ in await U.due(conn, t0 + 3600, revision=1)] == \
-            ["update:hourly:2026-10-02T15"]
-        late = 1790978400.0                     # 22:00 UTC the same day
+            ["update:progress:2026-10-02T11:00"]                # hourly merged
+        late = 1790978400.0                     # 22:00 UTC = 18:00 EDT
         keys = [k for k, _ in await U.due(conn, late + 600, revision=1)]
+        assert "update:progress:2026-10-02T18:00" in keys
         assert "update:daily:2026-10-02" in keys
+        night = late + 5 * 3600                 # 23:00 EDT: hourly only
+        assert [k for k, _ in await U.due(conn, night, revision=1)] == \
+            ["update:hourly:2026-10-03T03"]
         assert [k for k, _ in await U.due(conn, t0, revision=2)][0] == \
             "update:initial:2"                  # a re-enable briefs again
     finally:
         await conn.execute("DELETE FROM ingestion_state WHERE key=$1",
                            U.STATE_KEY)
         await conn.close()
+
+
+def test_every_progress_update_answers_the_four_management_questions():
+    s = dict(SNAP, at=1790949600.0)
+    act = {"decisions": 12, "approved": 0, "refusals": [("SETTLEMENT_NOT_SUPPORTED", 9)],
+           "entries": 0, "other_orders": 1, "last_entry_at": 1790930000.0,
+           "unanswered": []}
+    text = U.progress_text(s, act, None, {}, label="Progress update",
+                           with_reconciliation=False)
+    for part in ("What changed:", "Why it matters:", "Next:",
+                 "Management action needed:", "SIMULATED (paper account):",
+                 "ACTUAL (live account, 1:1,000 mirror)"):
+        assert part in text
+    assert "SETTLEMENT_NOT_SUPPORTED (9)" in text
+
+
+def test_progress_slots_are_eastern_business_hours_only():
+    assert U.progress_slot(1790949600.0) == "2026-10-02T10:00"     # 10:00 EDT
+    assert U.progress_slot(1790949600.0 + 29 * 60) == "2026-10-02T10:00"
+    assert U.progress_slot(1790949600.0 + 31 * 60) == "2026-10-02T10:30"
+    assert U.progress_slot(1790949600.0 - 2 * 3600) is None        # 08:00 EDT
+    assert U.progress_slot(1790978400.0 + 10 * 60) == "2026-10-02T18:00"
+    assert U.progress_slot(1790978400.0 + 40 * 60) is None         # 18:40 EDT
+
+
+def test_escalations_address_only_the_verified_managers(monkeypatch):
+    monkeypatch.setenv("SLACK_MANAGEMENT_USER_IDS", "U0C64BKD2JE,U0C6ADEKMTQ")
+    now = 1790949600.0
+    act = {"decisions": 5, "approved": 0, "refusals": [("SETTLEMENT_NOT_SUPPORTED", 5)],
+           "entries": 0, "other_orders": 0, "last_entry_at": now - 4 * 3600,
+           "unanswered": []}
+    m = {"enabled": True, "account": {"balances": [{"buyingPower": 40.0}]}}
+    out = U.decision_escalations(dict(SNAP, at=now), act, m, now)
+    kinds = [k for k, _, _ in out]
+    assert kinds == ["no-entries", "mirror-funding"]
+    for _, _, text in out:
+        assert text.startswith("{{@U0C64BKD2JE}} {{@U0C6ADEKMTQ}} Decision needed")
 
 
 @pytest.mark.skipif(not H.DSN, reason="needs RN1X_TEST_DSN")
