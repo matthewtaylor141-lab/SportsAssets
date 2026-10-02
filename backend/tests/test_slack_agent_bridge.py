@@ -156,7 +156,12 @@ def followup_payload(thread='123.456', text='And what about the second position?
 def test_a_thread_reply_without_a_mention_is_a_follow_up_candidate(cfg):
     e=S.approved_event(followup_payload(),cfg)
     assert e and e['followup'] is True and e['thread']=='123.456'
-    assert S.approved_event(followup_payload(text='<@A_TEST> again'),cfg) is None   # app_mention handles it
+    # a mention of THIS bot is left to its app_mention event: with Slack's
+    # signed authorizations naming the bot, or refused when that is unproved
+    selfp=followup_payload(text='<@U0BOTDEREK1> again')
+    selfp['authorizations']=[{'team_id':'T_TEST','user_id':'U0BOTDEREK1','is_bot':True}]
+    assert S.approved_event(selfp,cfg) is None                                      # app_mention handles it
+    assert S.approved_event(followup_payload(text='<@U0BOTDEREK1> again'),cfg) is None  # identity unproved
     p=followup_payload();p['event'].pop('thread_ts')
     assert S.approved_event(p,cfg) is None                                          # not in a thread
     p=followup_payload();p['event']['user']='OTHER'

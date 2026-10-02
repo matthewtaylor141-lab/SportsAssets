@@ -321,6 +321,12 @@ R_CATALOGUE_UNREADABLE = "HELD_MARKET_CATALOGUE_UNREADABLE"
 R_NOT_IN_CATALOGUE = "HELD_MARKET_NOT_IN_VENUE_CATALOGUE"
 R_OUTCOME_UNMAPPED = "HELD_OUTCOME_NOT_ONE_FEED_DESIGNATION"
 R_NOT_FULL_GAME_ML = "FEED_QUOTE_NOT_A_FULL_GAME_MONEYLINE"
+R_HELD_TYPE_UNPROVED = "HELD_VENUE_TYPE_NOT_PROVED_FULL_GAME_MONEYLINE"
+R_HELD_TIME_UNPROVED = "HELD_FIXTURE_TIME_NOT_PROVED"
+R_HELD_LOOKUP_TIMEOUT = "HELD_MARKET_CATALOGUE_TIMEOUT"
+HELD_LOOKUP_TIMEOUT_S = 2.0
+HELD_FULL_GAME_TYPES = frozenset((
+    "baseball_team_full_game_winner", "soccer_team_full_time_winner"))
 
 #: the census's own columns, for the ONE held contract
 HELD_CATALOGUE_SQL = """SELECT identifier, side_norm, event_slug, event_title,
@@ -351,6 +357,18 @@ def held_quote(row: dict, *, event_rows=None, payout_event,
     from `read`, which is the cache's own read with its own refusals."""
     from . import bettor_pinnacle_devig as devig
     from . import pinnapi_census as C
+    # kind='side' and an empty line also occur on player/period contracts.
+    # A held contract does not acquire full-game grading from a fresh feed.
+    if row.get("sports_type") not in HELD_FULL_GAME_TYPES:
+        return {"ok": False, "reason": R_HELD_TYPE_UNPROVED}
+    try:
+        start = float(row["game_start"])
+        valid_times = all(math.isfinite(x) for x in
+                          (start, float(at), float(max_age_s)))
+        if not valid_times or float(max_age_s) < 0:
+            raise ValueError("invalid time")
+    except (TypeError, ValueError, KeyError, OverflowError):
+        return {"ok": False, "reason": R_HELD_TIME_UNPROVED}
     pay = str(payout_event or "")
     sel = pay
     if payout_is_complement:
@@ -362,6 +380,14 @@ def held_quote(row: dict, *, event_rows=None, payout_event,
     if state != C.S_SUPPORTED:
         return {"ok": False, "reason": state, "sport_id": sid}
     ev = next((e for e in view.get(sid, []) if e["id"] == eid), None) or {}
+    try:
+        feed_start = float(ev["start"])
+        if (not math.isfinite(feed_start) or
+                abs(feed_start - start) > C.START_TOLERANCE_S):
+            raise ValueError("unproved fixture time")
+    except (TypeError, ValueError, KeyError, OverflowError):
+        return {"ok": False, "reason": R_HELD_TIME_UNPROVED,
+                "sport_id": sid, "feed_event_id": eid}
     des = C.designation_of(sel, ev)
     if des is None:
         return {"ok": False, "reason": R_OUTCOME_UNMAPPED, "sport_id": sid,
@@ -416,23 +442,34 @@ async def held_moneyline(conn, *, us_market_slug, payout_event,
         return {"ok": False, "reason": F.R_NO_AUTHORITY}
     if not payout_event:
         return {"ok": False, "reason": R_NO_PAYOUT_EVENT}
+    if not o.cache.authority.granted or not o.cache.authority.synced:
+        return {"ok": False, "reason": F.R_NO_AUTHORITY}
+    started = time.monotonic()
     try:
-        row = await conn.fetchrow(HELD_CATALOGUE_SQL, us_market_slug)
+        # one bound over BOTH catalogue reads (the contract and its event)
+        async with asyncio.timeout(HELD_LOOKUP_TIMEOUT_S):
+            row = await conn.fetchrow(HELD_CATALOGUE_SQL, us_market_slug)
+            event_rows = ([dict(r) for r in await conn.fetch(
+                held_event_sql(), row["event_slug"])]
+                if row is not None and row["event_slug"] else [])
+    except TimeoutError:
+        return {"ok": False, "reason": R_HELD_LOOKUP_TIMEOUT}
     except Exception as exc:                                    # noqa: BLE001
         return {"ok": False, "reason": R_CATALOGUE_UNREADABLE,
                 "error": type(exc).__name__}
     if row is None:
         return {"ok": False, "reason": R_NOT_IN_CATALOGUE}
-    try:
-        event_rows = [dict(r) for r in await conn.fetch(
-            held_event_sql(), row["event_slug"])] if row["event_slug"] else []
-    except Exception as exc:                                    # noqa: BLE001
-        return {"ok": False, "reason": R_CATALOGUE_UNREADABLE,
-                "error": type(exc).__name__}
+    if _STATE.get("owner") is not o:
+        return {"ok": False, "reason": F.R_NO_AUTHORITY}
     from . import pinnapi_census as C
+    # Do not evaluate against the clock captured before an awaited DB read.
+    # Include view construction as well; source timestamps stay untouched.
+    view = C.feed_event_view(o.cache)
+    evaluated_at = float(at) + max(0.0, time.monotonic() - started)
     return held_quote(dict(row), event_rows=event_rows,
                       payout_event=payout_event,
-                      payout_is_complement=payout_is_complement, at=at,
+                      payout_is_complement=payout_is_complement,
+                      at=evaluated_at,
                       max_age_s=max_age_s, sport_ids=o.sport_ids,
                       synced=bool(o.cache.authority.synced),
-                      view=C.feed_event_view(o.cache))
+                      view=view)

@@ -64,11 +64,21 @@ def classify(payload,cfg):
  if e.get('bot_id') or e.get('subtype'):return None,'BOT_OR_SUBTYPE'
  followup=False
  if e.get('type')=='message':
-  # A manager's reply INSIDE a thread, without an @mention (a mention
-  # arrives as its own app_mention event, so it is skipped here). Only the
+  # Only a mention of THIS app's bot arrives as its app_mention event.
+  # Mentions of teammates/other tools must not discard a manager's reply.
+  # Resolve this bot from Slack's signed, app/team-checked envelope, not
+  # from the text, the sender, or an unverified display name. Only the
   # agent that already answered in that thread takes it (admit checks).
   if e.get('channel_type') not in (None,'channel','group'):return None,'NOT_A_CHANNEL'
-  if '<@' in str(e.get('text') or ''):return None,'MENTION_HANDLED_AS_APP_MENTION'
+  mentions=set(re.findall(r'<@([A-Z0-9]+)(?:\|[^>]*)?>',str(e.get('text') or '')))
+  if mentions:
+   auth=payload.get('authorizations')
+   if not isinstance(auth,list):return None,'MENTION_BOT_IDENTITY_UNPROVED'
+   bot_users={a['user_id'] for a in auth if isinstance(a,dict) and
+              a.get('team_id')==cfg['team'] and a.get('is_bot') is True and
+              isinstance(a.get('user_id'),str) and a['user_id']}
+   if len(bot_users)!=1:return None,'MENTION_BOT_IDENTITY_UNPROVED'
+   if mentions & bot_users:return None,'MENTION_HANDLED_AS_APP_MENTION'
   if not e.get('thread_ts') or e.get('thread_ts')==e.get('ts'):return None,'NOT_A_THREAD_REPLY'
   followup=True
  elif e.get('type')!='app_mention':return None,'UNSUPPORTED_EVENT_TYPE'

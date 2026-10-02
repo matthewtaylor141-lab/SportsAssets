@@ -478,3 +478,9 @@ tests/test_slack_agent_bridge.py
 # identity, with the stale-measure guard unchanged.
 tests/test_market_coverage_v1.py
 tests/test_held_positions_read_the_live_feed.py
+# Held-feed boundary (explicit full-game type, fixture-time proof, bounded
+# catalogue read, evaluation clock after awaits, owner replacement) and Slack
+# follow-ups that mention a teammate or tool (only THIS bot's mention is left
+# to app_mention, from Slack's signed authorizations).
+tests/test_held_feed_boundary.py
+tests/test_slack_followup_mentions.py
