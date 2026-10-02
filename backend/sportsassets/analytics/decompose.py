@@ -36,6 +36,7 @@ markets. Payout is the venue's resolution for the outcome he bought.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any
 
@@ -138,6 +139,20 @@ def score(rows: list[dict]) -> dict:
     return out
 
 
+def _score_rows(rows: Any) -> tuple[dict, int]:
+    """Attach payouts and score; pure, so it may run off the event loop."""
+    scored = []
+    unresolvable = 0
+    for r in rows:
+        d = dict(r)
+        d["payout"] = payout_of(d.pop("resolved_prices"), d.get("outcome_index"))
+        if d["payout"] is None:
+            unresolvable += 1
+            continue
+        scored.append(d)
+    return score(scored), unresolvable
+
+
 async def cohort_decompose(pool: Any, whale: str, days: int = 30) -> dict:
     """Score one whale's resolved BUYs over the window."""
     w = whale.lower()
@@ -159,16 +174,11 @@ async def cohort_decompose(pool: Any, whale: str, days: int = 30) -> dict:
            AND m.resolved_prices IS NOT NULL
            AND t.outcome_index IS NOT NULL
         """, w, int(days))
-    scored = []
-    unresolvable = 0
-    for r in rows:
-        d = dict(r)
-        d["payout"] = payout_of(d.pop("resolved_prices"), d.get("outcome_index"))
-        if d["payout"] is None:
-            unresolvable += 1
-            continue
-        scored.append(d)
-    out = score(scored)
+    # The scoring (bootstrap intervals over every resolved buy) is pure CPU
+    # and ran on the API event loop: the loop watchdog recorded 3-5 s
+    # stalls inside it (2026-10-02 14:48Z), long enough to miss the 5 s
+    # health deadline. It runs in a worker thread; the result is the same.
+    out, unresolvable = await asyncio.to_thread(_score_rows, rows)
     cov = await pool.fetchrow(
         """
         SELECT count(*)::int AS buys,

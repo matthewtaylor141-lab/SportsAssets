@@ -15033,8 +15033,13 @@ async def api_bid_truth(limit: int = 4, slug: str = "",
         except Exception as exc:  # noqa: BLE001
             item["slug_bid_today"] = f"error:{type(exc).__name__}"
         client = pmus._get_client()
+        # The venue client is synchronous and its request gate paces with a
+        # blocking wait; called here on the event loop it held the loop for
+        # 3-4 s per read (loop watchdog, 2026-10-02 14:49-14:50Z). Each read
+        # runs in a worker thread, like slug_bid above.
         try:
-            m = (client.markets.retrieve_by_slug(us) or {}).get(
+            m = (await asyncio.to_thread(
+                client.markets.retrieve_by_slug, us) or {}).get(
                 "market") or {}
             item["sides"] = [
                 {"long": s.get("long"), "price": s.get("price"),
@@ -15051,7 +15056,8 @@ async def api_bid_truth(limit: int = 4, slug: str = "",
                 item[meth] = "no such method"
                 continue
             try:
-                d = (fn(us) or {}).get("marketData") or {}
+                d = (await asyncio.to_thread(fn, us) or {}).get(
+                    "marketData") or {}
                 if meth == "bbo":
                     item["bestBid"] = d.get("bestBid")
                     item["bestAsk"] = d.get("bestAsk")
