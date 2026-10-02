@@ -123,6 +123,7 @@ for (const [ename, engine, dev, args] of ENGINES) {
         } else if (u.includes("/api/command/paper/account")) {
           seen.account.push({ at: Date.now(), status: r.status(), json: r.status() === 200 ? await r.json() : null });
         } else if (u.endsWith(`/agents/${agent}/persona/chat`)) {
+          seen.chatStatus = (seen.chatStatus || []).concat([{ at: Date.now(), status: r.status() }]);
           const j = await r.json();
           seen.chats.push({ at: Date.now(), status: r.status(), message_id: j.message_id,
             conversation_id: j.conversation_id, depth: (j.context_supplied || {}).depth || j.depth || null,
@@ -208,18 +209,28 @@ for (const [ename, engine, dev, args] of ENGINES) {
       await page.route(`${HOST}/api/command/paper/operations*`, (route) => route.fulfill({ status: 503,
         contentType: "application/json", body: JSON.stringify({ detail: "SIMULATED read failure (test)" }) }));
       await f.evaluate(() => { const b = document.querySelector("[data-act='refresh'],#refresh-btn,.cc-refresh"); if (b) b.click(); });
-      await page.waitForTimeout(17000);
+      for (let i = 0; i < 45; i++) {
+        await page.waitForTimeout(1000);
+        const st = await f.evaluate(() => (document.getElementById("office-status") || {}).textContent || "");
+        if (/unavailable|failed|retained/i.test(st)) break;
+      }
       const after = await f.evaluate(() => ({ status: (document.getElementById("office-status") || {}).textContent || "",
         note: [...document.querySelectorAll(".desk-live-note,.desk-empty")].map((n) => n.textContent).join(" | "),
         positions: document.querySelectorAll("[data-office-position]").length,
         decisions: document.querySelectorAll("[data-office-decision]").length }));
       R.checks.failed_read = { status: short(after.status, 200), positions_after: after.positions,
-        decisions_after: after.decisions, kept: /Last successful records retained/.test(after.status),
+        decisions_after: after.decisions, kept: /Last (successful )?records retained/.test(after.status),
         note: short(after.note, 240), marked_stale: /displaying the last successful records|latest read failed/i.test(after.note) };
       await page.unroute(`${HOST}/api/command/paper/operations*`);
       await shot(page, `${ename}_${agent}_failed_read`, f);
 
       // ── CHAT AND VOICE ──────────────────────────────────────────────
+      const openTalkEarly = await f.evaluate(() => {
+        const d = document.querySelector(".desk-mobile-talk");
+        if (d && getComputedStyle(d).display !== "none" && d.getAttribute("aria-expanded") !== "true") d.click();
+        return !!d;
+      });
+      await page.waitForTimeout(400);
       const sel = await f.$("#office-answer-style");
       if (sel) await f.selectOption("#office-answer-style", "brief");
       const Q = { xavier: "What are you doing with the San Diego position right now?",
@@ -302,7 +313,8 @@ for (const [ename, engine, dev, args] of ENGINES) {
           events_after: ev.map((x) => x.id + ":" + x.ev).slice(0, 20),
           first_visible_answer_ms_full: Math.round(a2.tA - a2.t),
           same_conversation: (seen.chats.slice(-1)[0] || {}).conversation_id === (seen.chats.slice(-2)[0] || {}).conversation_id,
-          prior_turns: (seen.chats.slice(-1)[0] || {}).prior_turns };
+          prior_turns: (seen.chats.slice(-1)[0] || {}).prior_turns,
+          chat_statuses: (seen.chatStatus || []).map((x) => x.status) };
         // STOP
         await f.click("#talk-stop").catch(() => {});
         await page.waitForTimeout(1200);
