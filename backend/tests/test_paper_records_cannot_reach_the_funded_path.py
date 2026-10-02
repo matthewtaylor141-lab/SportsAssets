@@ -109,13 +109,19 @@ def test_no_funded_module_imports_the_paper_modules():
                # registration writes only paper_improvement_proposals via
                # paper_learning; neither grants activation or order authority
                "agents/capability_tools.py",
-               "agents/capability_experiments.py"}
+               "agents/capability_experiments.py",
+               # the management Slack updates compose briefings from the
+               # read-only paper operations/brief readers; the module writes
+               # only its own schedule row and agent_slack_delivery, and
+               # nothing in Slack can place, change or approve an order
+               "slack_updates.py"}
     assert set(offenders) <= allowed, sorted(set(offenders) - allowed)
     # ...and neither capability module reaches a funded or execution module,
     # directly or through the rest of the capability package
     for rel in ("agents/capability_tools.py", "agents/capability_experiments.py",
                 "agents/capability_runtime.py", "agents/capability_work.py",
-                "agents/capability_scorecards.py", "api/agent_capabilities.py"):
+                "agents/capability_scorecards.py", "api/agent_capabilities.py",
+                "slack_updates.py", "slack_bridge.py"):
         tree = ast.parse((ROOT / rel).read_text())
         for node in ast.walk(tree):
             mods = []
