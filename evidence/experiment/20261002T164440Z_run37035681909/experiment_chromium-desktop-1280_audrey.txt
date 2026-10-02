@@ -1,0 +1,277 @@
+Skip to the records
+READ-ONLY
+read 2026-10-02 16:43:38Z
+Trace
+Refresh
+LIVE MARKET DATA · SIMULATED EXECUTION · $500,000 STARTING BANKROLL
+MANAGEMENT OFFICE · AUDREY
+Audrey’s office
+
+Audit & intelligence
+
+Talk to Audrey ↗
+Work & learning ↘
+PAPER ACCOUNT · ONE LEDGER · LIVE MARKET DATA · SIMULATED EXECUTION
+CASH
+$495,170.11
+RESERVED
+$0.00
+AVAILABLE
+$495,170.11
+POSITION VALUE
+$4,505.02
+EQUITY
+$499,675.13
+REALIZED P&L
++$168.43
+UNREALIZED P&L
+−$493.31
+
+cash + marked open-position value · ledger entry #97 · the same read on the homepage and every agent page
+
+Workboard
+Activity
+Work & learning
+Compact view
+Meeting brief ↓
+Records read 1s ago
+Agent pass 1m ago
+LATEST RECORDED WORK · AUDREY
+20h ago
+Fees consume edge
+
+Responsible agent · DEREK
+
+Recommendation
+Measuring
+
+Measurement recorded
+
+Recorded rationale
+
+8 decisions cleared the 0.5 pp gross threshold but the taker fee consumed the edge; rest a bid below the ask where both rules hold at the price paid
+
+Explain this decision ↗
+Open full record
+
+Recorded rationale · freshness shown above.
+
+Search Audrey records
+/
+All findings
+Awaiting response
+Measured
+3 / 3
+Export view ↓
+LEDGER CHECK
+Reconciled
+REALIZED P&L
+$168.43
+UNREALIZED P&L
+-$493.31
+INTELLIGENCE DESK
+Recommendations & follow-through
+
+Recorded findings, accountable owners and measured outcomes.
+
+↗
+Fees consume edge
+
+8 decisions cleared the 0.5 pp gross threshold but the taker fee consumed the edge; rest a bid below the ask where both rules hold at the price paid
+
+Compare +
+Responsible agent
+DEREK
+20h ago
+Measuring
+
+Measurement recorded
+
++
+↗
+Book read cuts
+
+39 of 125 book reads in the last 6 h were cut by the decision deadline or the venue cooldown; remove the duplicate read and retry within the freshness window
+
+Compare +
+Responsible agent
+DEREK
+20h ago
+Improved
+
+Measurement recorded
+
++
+↗
+Collection coverage
+
+63 events in the last collection cycle never reached a decision (by code: {"NO_PINNACLE_ON_EVENT": 33, "QUOTE_STALE_ON_ARRIVAL": 13, "VENUE_BOOK_READ_FAILED": 2, "NO_VENUE_CONTRACT_FOR_EVENT": 5, "VENUE_BOOK_CURRENCY_NOT_ESTABLISHED": 4, "VENUE_NATIVE_EVENT_MATCHES_ONLY_ONE_TEAM": 5, "VENUE_BOOK_CURRENCY_CONTRADICTED_BY_CONTRACT": 1}); investigate per sport without weakening identity, market or settlement matching
+
+Compare +
+Responsible agent
+DEREK
+20h ago
+Improved
+
+Measurement recorded
+
++
+IN CONVERSATION · AUDREY
+
+Resumed your conversation with Audrey (36 messages).
+
+● AI AGENT
+Audrey
+
+the agent, an AI agent, shown as a licensed 3D character (Character model: Microsoft Rocketbox Business_Female_04 (MIT, © 2020 Microsoft)). The pose follows the agent_status record; the mouth moves only with real speech audio.
+
+Pause animation
+PAPER RUNTIME RUNNING
+◉
+Talk to Audrey
+🔊 Voice on
+Stop
+New conversation
+Conversation, memory & policy boundaries
+Answer style
+Conversational
+Full analysis
+Brief me
+What changed?
+What needs attention?
+🎤 Speak
+Send
+Download conversation ↓
+YOU
+For a clearly labelled management product-demo REHEARSAL, answer this question in your own persona in at most 65 words. Do not claim this illustrative scenario happened in production, do not invent results, and do not change any policy or place any trade. Context: Bring management closer to the decisions that matter. Illustrative explanation: Open the live management office and ask each agent about the current session. This presentation is an illustrative rehearsal. Only the actual ledger, recorded decisions and evaluated outcomes establish what the system has done. Management question: What happens after this presentation?
+AUDREY
+This is a rehearsal, so nothing here counts as production. After it, the active paper session simply continues [F9]. There is no result yet: 703 decisions today, all refusals [F11], and paper P&L of $0 [F5]. What would improve the record is evidence, starting with the 297 refusals where no research model candidate existed [F15]. Policy changes only through an owner decision or a human-activated proposal [F54].
+Memory & evidence
+▶ Play
+Copy
+YOU
+Briefly, answer conversationally in up to three sentences; offer a detailed follow-up if needed. Does the paper ledger reconcile right now?
+AUDREY
+Yes, the paper ledger reconciles: all 18 entries from sequence 1 to 18 line up, with cash deltas summing to $499,404.86 against cash of $499,404.86 and reserved deltas of $98.92 against reserved of $98.92 [F54]. Available of $499,305.94 equals cash minus reserved, and the running balance agrees [F54]. I'm happy to walk you through the full reconciliation step by step.
+Memory & evidence
+▶ Play
+Copy
+YOU
+Briefly, answer conversationally in up to three sentences; offer a detailed follow-up if needed. Does the paper ledger reconcile right now?
+AUDREY
+It does, and the figures have moved since you last asked: the record shows all 19 entries, sequence 1 to 19, with cash deltas summing to $499,306.35 against cash of $499,306.35, and reserved deltas of $0 against reserved of $0 [F54]. Available of $499,306.35 equals cash minus reserved, and the running balance agrees [F54]. I can walk you through the full reconciliation step by step if you'd like.
+Memory & evidence
+▶ Play
+Copy
+YOU
+Briefly, answer conversationally in up to three sentences; offer a detailed follow-up if needed. Does the paper ledger reconcile right now?
+AUDREY
+The record shows the ledger still reconciles, unchanged since your last check: 19 entries, sequence 1 to 19, with cash deltas of $499,306.35 against cash of $499,306.35 and reserved deltas of $0 against reserved of $0 [F54]. Available of $499,306.35 equals cash minus reserved, and the running balance agrees [F54]. I can take you through each step if you'd like the detail.
+Memory & evidence
+▶ Play
+Copy
+YOU
+Briefly, answer conversationally in up to three sentences; offer a detailed follow-up if needed. Does the paper ledger reconcile right now?
+AUDREY
+Still yes, and nothing has moved since your last check: all 19 entries, sequence 1 to 19, reconcile, with cash deltas of $499,306.35 against cash of $499,306.35 and reserved deltas of $0 against reserved of $0 [F54]. Available of $499,306.35 equals cash minus reserved, and the running balance agrees [F54]. I can walk you through each step if you'd like the detail.
+Memory & evidence
+▶ Play
+Copy
+YOU
+Briefly, answer conversationally in up to three sentences; offer a detailed follow-up if needed. Does the paper ledger reconcile right now?
+AUDREY
+**Yes, the paper ledger reconciles, unchanged from your last check.** All 19 entries, sequence 1 to 19, line up: cash deltas of $499,306.35 match cash of $499,306.35, reserved deltas of $0 match reserved of $0, and available of $499,306.35 equals cash minus reserved [F54]. Say the word and I'll walk you through every step.
+Memory & evidence
+▶ Play
+Copy
+YOU
+Briefly, answer conversationally in up to three sentences; offer a detailed follow-up if needed. Does the paper ledger reconcile right now?
+AUDREY
+It still reconciles, with no movement since you last asked. The record shows 19 entries, sequence 1 to 19, with cash deltas of $499,306.35 matching cash of $499,306.35, reserved deltas of $0 matching reserved of $0, available of $499,306.35 equal to cash minus reserved, and the running balance agreeing [F54], as of the last ledger update at 2026-10-01T22:42:55+00:00 [F8]. If you'd like, I can take you through it line by line.
+Memory & evidence
+▶ Play
+Copy
+YOU
+Briefly, answer conversationally in up to three sentences; offer a detailed follow-up if needed. Does the paper ledger reconcile right now?
+AUDREY
+Yes, the record shows the paper ledger reconciles: 19 entries, sequence 1 to 19, with cash deltas of $499,306.35 matching cash of $499,306.35, reserved deltas of $0 matching reserved of $0, available of $499,306.35 equal to cash minus reserved, and the running balance agreeing [F41]. The last ledger update was at 2026-10-01T22:42:55+00:00 [F8]. I can walk through the steps if you'd like the detail.
+Memory & evidence
+▶ Play
+Copy
+YOU
+Briefly, answer conversationally in up to three sentences; offer a detailed follow-up if needed. Does the paper ledger reconcile right now?
+AUDREY
+Nothing has moved: the paper ledger still reconciles, with 19 entries running sequence 1 to 19, cash deltas of $499,306.35 against cash of $499,306.35, reserved deltas of $0 against reserved of $0, available of $499,306.35 equal to cash minus reserved, and the running balance agreeing [F43]. The last ledger update is still 2026-10-01T22:42:55+00:00 [F8]. One correction for the file: the reconciliation fact is [F43], not the ids cited in my earlier answers, and I'm happy to walk through each step.
+Memory & evidence
+▶ Play
+Copy
+YOU
+Briefly, answer conversationally in up to three sentences; offer a detailed follow-up if needed. Does the paper ledger reconcile right now?
+AUDREY
+Yes, the paper ledger reconciles: all 19 entries, sequence 1 to 19, with cash deltas of $499,306.35 matching cash of $499,306.35, reserved deltas of $0 matching reserved of $0, and available of $499,306.35 equal to cash minus reserved, with the running balance agreeing [F43]. The last ledger update is still 2026-10-01T22:42:55+00:00, so nothing has posted since you last asked [F8]. Happy to walk you through each step if you'd like.
+Memory & evidence
+▶ Play
+Copy
+YOU
+Briefly, answer conversationally in up to three sentences; offer a detailed follow-up if needed. Does the paper ledger reconcile right now?
+AUDREY
+It does reconcile, but the ledger has moved since you last asked: the record now shows 27 entries, sequence 1 to 27, with cash deltas of $489,587.91 matching cash of $489,587.91, reserved deltas of $0 matching reserved of $0, available of $489,587.91 equal to cash minus reserved, and the running balance agreeing [F49]. The last update was at 2026-10-02T02:00:48+00:00 [F8]. For the file, the reconciliation fact in this record is [F49], not the ids cited in my earlier answers, and I'm happy to walk through each step or the new entries.
+Memory & evidence
+▶ Play
+Copy
+YOU
+Briefly, answer conversationally in up to three sentences; offer a detailed follow-up if needed. Does the paper ledger reconcile right now?
+AUDREY
+The paper ledger still reconciles, and nothing new has posted since your last check: 27 entries, sequence 1 to 27, with cash deltas of $489,587.91 matching cash of $489,587.91, reserved deltas of $0 matching reserved of $0, available of $489,587.91 equal to cash minus reserved, and the running balance agreeing [F49]. The last ledger update is still 2026-10-02T02:00:48+00:00 [F8]. I can take you through the reconciliation step by step if you want the detail.
+Memory & evidence
+▶ Play
+Copy
+YOU
+Briefly, answer conversationally in up to three sentences; offer a detailed follow-up if needed. Does the paper ledger reconcile right now?
+AUDREY
+Good news, and it's fresh: the ledger has moved on since your last check and still reconciles, now showing 29 entries, sequence 1 to 29, with cash deltas of $499,573.93 matching cash of $499,573.93, reserved deltas of $0 matching reserved of $0, available of $499,573.93 equal to cash minus reserved, and the running balance agreeing [F49]. The latest posting was at 2026-10-02T02:43:32+00:00 [F8]. Say the word and I'll walk through the reconciliation or the new entries step by step.
+Memory & evidence
+▶ Play
+Copy
+YOU
+Briefly, answer conversationally in up to three sentences; offer a detailed follow-up if needed. Does the paper ledger reconcile right now?
+AUDREY
+Yes, it still reconciles, and nothing has posted since your last check: 29 entries, sequence 1 to 29, with cash deltas of $499,573.93 matching cash of $499,573.93, reserved deltas of $0 matching reserved of $0, available of $499,573.93 equal to cash minus reserved, and the running balance agreeing [F49]. The last ledger update is still 2026-10-02T02:43:32+00:00 [F8]. I can walk through the reconciliation step by step if you'd like the detail.
+Memory & evidence
+▶ Play
+Copy
+YOU
+Briefly, answer conversationally in up to three sentences; offer a detailed follow-up if needed. Does the paper ledger reconcile right now?
+AUDREY
+Records-only answer — the AI answer was not used (HTTP_400); everything below is quoted from the current records. The paper account now: paper account paper_acct_main cash $495,170.11 (from the paper ledger) [F1]; paper account reserved $0 (part of cash, not extra) [F2]; paper account available $495,170.11 [F3]. The paper session: active paper session paper_session_20261001T014716Z, status ACTIVE, started 2026-10-01T01:47:16+00:00 [F9]; paper session health: last heartbeat 2026-10-02T14:04:52+00:00, 2281 passes, 0 errors, 0 venue mutation attempts [F10]. Paper decisions to audit: paper decisions today (2026-10-02, UTC), all strategies together: 1284 recorded -- 36 ENTER, 1248 REFUSE; newest at 2026-10-02T14:05:30+00:00; by strategy: DEREK_ENTRY_POLICY_V2 428, PINNACLE_COMPLETED_GAME_PAPER 428, PINNACLE_EXPLORATION_PAPER 428 [F11]; Derek's two-model entry policy (DEREK_ENTRY_POLICY_V2): 428 paper decisions today -- 0 ENTER, 428 REFUSE (newest 2026-10-02T14:05:30+00:00; shown at /api/command/paper/derek) [F12]; the PINNACLE_COMPLETED_GAME_PAPER policy (experimental paper execution, conditional on ordinary game completion; exceptional settlement risk disclosed, not risk-adjusted, not qualified for real-money trading): 428 paper decisions today -- 2 ENTER, 426 REFUSE (newest 2026-10-02T14:05:30+00:00; shown at /api/command/paper/benchmark?strategy=PINNACLE_COMPLETED_GAME_PAPER) [F13].
+Memory & evidence
+▶ Play
+Copy
+YOU
+Briefly, answer conversationally in up to three sentences; offer a detailed follow-up if needed. Does the paper ledger reconcile right now?
+AUDREY
+Records-only answer — the AI answer was not used (HTTP_400); everything below is quoted from the current records. The paper account now: paper account paper_acct_main cash $495,170.11 (from the paper ledger) [F1]; paper account reserved $0 (part of cash, not extra) [F2]; paper account available $495,170.11 [F3]. The paper session: active paper session paper_session_20261001T014716Z, status ACTIVE, started 2026-10-01T01:47:16+00:00 [F9]; paper session health: last heartbeat 2026-10-02T14:06:52+00:00, 2283 passes, 0 errors, 0 venue mutation attempts [F10]. Paper decisions to audit: paper decisions today (2026-10-02, UTC), all strategies together: 1284 recorded -- 36 ENTER, 1248 REFUSE; newest at 2026-10-02T14:05:30+00:00; by strategy: DEREK_ENTRY_POLICY_V2 428, PINNACLE_COMPLETED_GAME_PAPER 428, PINNACLE_EXPLORATION_PAPER 428 [F11]; Derek's two-model entry policy (DEREK_ENTRY_POLICY_V2): 428 paper decisions today -- 0 ENTER, 428 REFUSE (newest 2026-10-02T14:05:30+00:00; shown at /api/command/paper/derek) [F12]; the PINNACLE_COMPLETED_GAME_PAPER policy (experimental paper execution, conditional on ordinary game completion; exceptional settlement risk disclosed, not risk-adjusted, not qualified for real-money trading): 428 paper decisions today -- 2 ENTER, 426 REFUSE (newest 2026-10-02T14:05:30+00:00; shown at /api/command/paper/benchmark?strategy=PINNACLE_COMPLETED_GAME_PAPER) [F13].
+Memory & evidence
+▶ Play
+Copy
+YOU
+Briefly, answer conversationally in up to three sentences; offer a detailed follow-up if needed. Does the paper ledger reconcile right now?
+AUDREY
+The ledger has moved a long way since the last clean check, and it still balances. It now shows 97 entries, sequence 1 to 97; cash deltas of $495,170.11 match cash of $495,170.11; reserved deltas of $0 match reserved of $0; available of $495,170.11 equals cash minus reserved; and the running balance agrees [F53]. The latest posting was at 2026-10-02T13:47:34+00:00 [F8], and I can walk you through the reconciliation or the new entries in detail if you'd like.
+Memory & evidence
+▶ Play
+Copy
+YOU
+Briefly, answer conversationally in up to three sentences; offer a detailed follow-up if needed. Does the paper ledger reconcile right now?
+AUDREY
+Still clean, and nothing new has posted since you last asked. The ledger reconciles across 97 entries, sequence 1 to 97: cash deltas of $495,170.11 match cash of $495,170.11, reserved deltas of $0 match reserved of $0, available of $495,170.11 equals cash minus reserved, and the running balance agrees [F53]. The last posting is still 2026-10-02T13:47:34+00:00 [F8], and I'm happy to walk through the reconciliation step by step if you'd like the detail.
+Memory & evidence
+▶ Play
+Copy
+Resumed your conversation with Audrey (36 messages).
+All records, strategy detail and technical evidence
+
+Presentation of recorded state. This page sends no order and holds no credential; it reads /api/command/agents/audrey with the COMMAND session. The 3D characters are licensed Microsoft Rocketbox models (MIT licence, credited below; shipped with their licence file); a device that cannot draw them shows a 2D portrait card. The pose follows the paper runtime's own heartbeat (paper_session_health) and never stands in for data. UNKNOWN is not zero; EMPTY is not success. The 3D character on this page is a licensed model, not an original illustration. Character model: Microsoft Rocketbox Business_Female_04 (MIT, © 2020 Microsoft). Licence: MIT, shipped with the model as ROCKETBOX_LICENSE.md.
+Explain recommendation paperrec:521b224a4ded906f08c02b93, its evidence, genuine agent responses and subsequent measurements.
+Explain recommendation paperrec:5d764d7fe0fc1e4895bcbb2d, its evidence, genuine agent responses and subsequent measurements.
+Explain recommendation paperrec:a72c3f4296c2548b13ea2120, its evidence, genuine agent responses and subsequent measurements.
