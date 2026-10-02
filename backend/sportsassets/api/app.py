@@ -592,12 +592,6 @@ async def seen_origins():
     ]}
 
 
-async def _execmirror_read(request: Request) -> str:
-    """The command centre's read authorization (agents_core.require_read)."""
-    from .agents_core import require_read as _rr
-    return await _rr(request)
-
-
 def require_admin(x_admin_token: str = Header(default="")) -> None:
     import hmac
 
@@ -2523,7 +2517,7 @@ async def admin_execmirror_control(response: Response,
     return {"action": action, "control": dict(row)}
 
 
-@app.get("/api/command/execmirror", dependencies=[Depends(_execmirror_read)])
+@app.get("/api/command/execmirror", dependencies=[Depends(require_command)])
 async def command_execmirror(response: Response) -> dict:
     """Live execution mirror · 1:1,000 (`sportsassets.execmirror_view`):
     paper orders beside the live orders derived from them, venue fills,
