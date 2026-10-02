@@ -391,3 +391,21 @@ def test_observed_schema_american_prices_participants_and_settled_period():
     assert p["received_ms"] == 1790896801600
     assert p["quote_age_s"] == pytest.approx(2.0)
     assert F.PARSER_VERSION.startswith("ARCADIA_RAW_V1_OBSERVED")
+
+
+@pytest.mark.asyncio
+async def test_a_guard_timeout_fails_closed_under_its_own_name():
+    """A check that does not answer is not a lost lease: both revoke, but the
+    heartbeat must say which so a stalled loop is not misread as eviction."""
+    class Hung:
+        async def holds(self):
+            await asyncio.sleep(10)
+
+    class Broken:
+        async def holds(self):
+            raise ConnectionError("connection reset")
+
+    o = O.FeedOwner(F.FeedCache(), sport_ids=[6], lease_factory=None,
+                    connect=None, liveness_s=0.05)
+    assert await o._guards(Hung()) == (False, O.R_GUARD_TIMEOUT)
+    assert await o._guards(Broken()) == (False, O.R_LEASE_LOST)

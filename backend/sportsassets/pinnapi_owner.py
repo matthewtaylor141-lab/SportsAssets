@@ -62,6 +62,10 @@ R_WRITER_LOST = "FEED_DECIDER_WRITER_LOCK_NOT_HELD"
 R_DISARMED = "FEED_DISARMED_BY_CONTROL_ROW"
 R_EVICTION_LOOP = "FEED_EVICTION_LOOP_SUSPECTED"
 R_LEASE_LOST = "FEED_LEASE_CONNECTION_LOST_OR_NOT_HELD"
+# The guard query did not answer within liveness_s. Still fails closed (the
+# lease cannot be confirmed), but named apart: on 2026-10-02 every "lease
+# lost" was indistinguishable from a stalled event loop or a slow database.
+R_GUARD_TIMEOUT = "FEED_GUARD_CHECK_TIMED_OUT"
 R_SOCKET_CLOSED = "FEED_SOCKET_CLOSED"
 R_SILENCE = "FEED_PROVIDER_SILENT"
 R_STOPPED = "FEED_OWNER_STOPPED"
@@ -211,6 +215,8 @@ class FeedOwner:
                     lease.writer_holds(self.writer_pid, self.writer_key),
                     self.liveness_s):
                 return False, R_WRITER_LOST
+        except asyncio.TimeoutError:
+            return False, R_GUARD_TIMEOUT
         except Exception:                                       # noqa: BLE001
             return False, R_LEASE_LOST
         if not await self._armed():
