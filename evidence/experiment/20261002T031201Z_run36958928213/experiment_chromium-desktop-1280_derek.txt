@@ -1,0 +1,442 @@
+Skip to the records
+READ-ONLY
+read 2026-10-02 03:11:01Z
+Trace
+Refresh
+LIVE MARKET DATA · SIMULATED EXECUTION · $500,000 STARTING BANKROLL
+MANAGEMENT OFFICE · DEREK
+Derek’s office
+
+Discovery & entry
+
+Talk to Derek ↗
+Work & learning ↘
+PAPER ACCOUNT · ONE LEDGER · LIVE MARKET DATA · SIMULATED EXECUTION
+CASH
+$499,573.93
+RESERVED
+$0.00
+AVAILABLE
+$499,573.93
+POSITION VALUE
+$561.72
+EQUITY
+$500,135.65
+REALIZED P&L
++$168.43
+UNREALIZED P&L
+−$32.78
+
+cash + marked open-position value · ledger entry #29 · the same read on the homepage and every agent page
+
+Records read 1s ago
+Agent pass 52s ago
+LATEST RECORDED WORK · DEREK
+7m ago
+Tampa Bay Rays to win
+
+Game 1: NY Yankees vs. TB Rays
+
+Entry decision
+Refused
+
+Gross edge not recorded · net EV Not recorded
+
+Recorded rationale
+
+REFUSE NO_RESEARCH_MODEL_CANDIDATE_EXISTS
+
+Explain this decision ↗
+Open full record
+
+Recorded rationale · freshness shown above.
+
+Search Derek records
+/
+All evaluations
+Current policy
+Approved
+12 / 12
+Export view ↓
+Evaluations shown
+12
+Working entry orders
+0
+Approved in this view
+0
+DISCOVERY DESK
+Opportunity queue
+
+Recorded evaluations · serving policy versions first, then historical; gross edge within each group.
+
+PO
+Portugal to win
+
+Portugal vs. Norway
+
+Simulated execution
+Gross edge
+0.24 pp
+Not recorded net EV
+Refused
+
+the edge was below the policy's minimum (the threshold recorded on the decision)
+
+Evaluated 14m ago
++
+CR
+Croatia to win
+
+Croatia vs. England
+
+Simulated execution
+Gross edge
+-0.02 pp
+Not recorded net EV
+Refused
+
+the edge was below the policy's minimum (the threshold recorded on the decision)
+
+Evaluated 14m ago
++
+LO
+Londrina to win
+
+Londrina EC vs. Criciuma EC
+
+Simulated execution
+Gross edge
+-0.67 pp
+Not recorded net EV
+Refused
+
+the edge was below the policy's minimum (the threshold recorded on the decision)
+
+Evaluated 14m ago
++
+GR
+Greece to win
+
+Greece vs. Germany
+
+Simulated execution
+Gross edge
+-1.13 pp
+Not recorded net EV
+Refused
+
+the edge was below the policy's minimum (the threshold recorded on the decision)
+
+Evaluated 14m ago
++
+FR
+France to win
+
+France vs. Italy
+
+Simulated execution
+Gross edge
+-1.25 pp
+Not recorded net EV
+Refused
+
+the edge was below the policy's minimum (the threshold recorded on the decision)
+
+Evaluated 14m ago
++
+TA
+Tampa Bay Rays to win
+
+Game 1: NY Yankees vs. TB Rays
+
+Simulated execution
+Gross edge
+Not recorded
+Not recorded net EV
+Refused
+
+no research model exists yet
+
+Evaluated 7m ago
++
+MI
+Milwaukee Brewers to win
+
+Game 1: SD Padres vs. MIL Brewers
+
+Simulated execution
+Gross edge
+Not recorded
+Not recorded net EV
+Refused
+
+the venue's and Pinnacle's settlement rules are not established as the same
+
+Evaluated 8m ago
++
+LO
+Londrina to win
+
+Londrina EC vs. Criciuma EC
+
+Simulated execution
+Gross edge
+Not recorded
+Not recorded net EV
+Refused
+
+no research model exists yet
+
+Evaluated 14m ago
++
+CR
+Croatia to win
+
+Croatia vs. England
+
+Simulated execution
+Gross edge
+Not recorded
+Not recorded net EV
+Refused
+
+no research model exists yet
+
+Evaluated 14m ago
++
+FR
+France to win
+
+France vs. Italy
+
+Simulated execution
+Gross edge
+Not recorded
+Not recorded net EV
+Refused
+
+the venue's and Pinnacle's settlement rules are not established as the same
+
+Evaluated 14m ago
++
+PO
+Portugal to win
+
+Portugal vs. Norway
+
+Simulated execution
+Gross edge
+Not recorded
+Not recorded net EV
+Refused
+
+the venue's and Pinnacle's settlement rules are not established as the same
+
+Evaluated 14m ago
++
+NE
+Netherlands to win
+
+Netherlands vs. Serbia
+
+Simulated execution
+Gross edge
+Not recorded
+Not recorded net EV
+Refused
+
+the venue's and Pinnacle's settlement rules are not established as the same
+
+Evaluated 14m ago
++
+Activity journal
+Latest records in this read
+Refused · Tampa Bay Rays to win
+Entry decision
+7m ago
+Refused · Tampa Bay Rays to win
+Entry decision
+7m ago
+Refused · Tampa Bay Rays to win
+Entry decision
+7m ago
+Refused · Milwaukee Brewers to win
+Entry decision
+8m ago
+Refused · Milwaukee Brewers to win
+Entry decision
+8m ago
+Refused · Milwaukee Brewers to win
+Entry decision
+8m ago
+THE LEARNING WORKBENCH
+Work. Investigate. Improve.
+Records read 10/2/2026, 3:11:00 AM · Research paused
+Plans
+Collaboration
+Investigate
+Experiments
+Scorecard
+
+Research worker paused · 24 model calls per hour maximum. Latest 60 team tasks shown.
+
+Assign a research goal
+Management control access
+Research schedule
+Management control access
+
+No research plan has been assigned to this agent.
+
+Research reviews are attributed opinions backed by recorded evidence. Completed reviews are not proven performance gains. Policy activation remains separately controlled.
+IN CONVERSATION · DEREK
+
+Resumed your conversation with Derek (28 messages).
+
+● AI AGENT
+Derek
+
+the agent, an AI agent, shown as a licensed 3D character (Character model: Microsoft Rocketbox Business_Male_03 (MIT, © 2020 Microsoft)). The pose follows the agent_status record; the mouth moves only with real speech audio.
+
+Pause animation
+PAPER RUNTIME RUNNING
+◉
+Talk to Derek
+🔊 Voice on
+Stop
+New conversation
+Conversation, memory & policy boundaries
+Answer style
+Conversational
+Full analysis
+Brief me
+What changed?
+What needs attention?
+🎤 Speak
+Send
+Download conversation ↓
+YOU
+For a clearly labelled management product-demo REHEARSAL, answer this question in your own persona in at most 65 words. Do not claim this illustrative scenario happened in production, do not invent results, and do not change any policy or place any trade. Context: Derek records the deadline failure; Xavier keeps the existing protection until a valid replacement is confirmed. Illustrative explanation: It defines a testable change, not proven intelligence. In the rehearsal I record a timeout rather than silently losing the decision; Xavier preserves existing protection. Audrey needs separate forward results before reporting improved performance or proposing activation. Management question: Did Audrey’s recommendation make you smarter?
+DEREK
+This is a rehearsal answer, and the short version is not yet. Audrey's latest audit shows a change proposed [F50]. That is a testable change, not proven intelligence. Today the records show 17 refusals where the book read missed the decision deadline [F20], so those were logged rather than lost. A proposal doesn't change policy; only an owner or named human activates it [F54].
+Memory & evidence
+▶ Play
+Copy
+YOU
+Briefly, answer conversationally in up to three sentences; offer a detailed follow-up if needed. Why did the closest recent opportunity not qualify?
+DEREK
+The most recent near-miss on record is paper decision papercg:c4c1220e25e09d9129734780, which was refused because its gross edge cleared the threshold but the fees consumed it [F38]. The active policy requires at least 0.5 percentage points of edge, a fee below that edge at every level bought, and positive expected profit after fees [F68]. The records don't show its actual edge size, so I can't confirm it was the closest by margin. I'm happy to walk through the fee-consumption refusals in detail if useful.
+Memory & evidence
+▶ Play
+Copy
+YOU
+Briefly, answer conversationally in up to three sentences; offer a detailed follow-up if needed. Why did the closest recent opportunity not qualify?
+DEREK
+Fees are what stopped it: paper decision papercg:c4c1220e25e09d9129734780 cleared the gross edge threshold, but the fees consumed the edge, so it was refused [F38]. The active policy needs at least 0.5 percentage points of edge, a fee below that edge at every level bought, and positive expected profit after fees [F67]. The record doesn't show that decision's actual edge or fee, so I can't say how close it came. Happy to go through Audrey's resting-bid recommendation for these cases if useful [F60].
+Memory & evidence
+▶ Play
+Copy
+YOU
+Briefly, answer conversationally in up to three sentences; offer a detailed follow-up if needed. Why did the closest recent opportunity not qualify?
+DEREK
+The nearest miss in the current records is paper decision papercg:1d90bf3dfa8cf0b91755e1f7, which cleared the gross edge threshold but was refused because fees consumed the edge [F41], and that ID corrects the one I gave earlier. The active policy requires at least 0.5 percentage points of edge, a fee below that edge at every level bought, and positive expected profit after fees [F67]. The record doesn't show that decision's actual edge or fee, so I can't say how narrowly it missed, but I can walk through Audrey's resting-bid recommendation for fee-consumed cases if useful [F60].
+Memory & evidence
+▶ Play
+Copy
+YOU
+Briefly, answer conversationally in up to three sentences; offer a detailed follow-up if needed. Why did the closest recent opportunity not qualify?
+DEREK
+Paper decision papercg:1d90bf3dfa8cf0b91755e1f7, at 22:48:47 UTC, is still the nearest miss on record: it cleared the gross edge threshold, but fees consumed the edge, so it was refused [F41]. The active policy needs at least 0.5 percentage points of edge, a fee below that edge at every level bought, and positive expected profit after fees [F67]. The record doesn't show its actual edge or fee, so I can't say how narrowly it missed. One correction: Audrey's resting-bid recommendation for these cases is [F59], not [F60], and it's still being measured. I can walk through it if useful.
+Memory & evidence
+▶ Play
+Copy
+YOU
+Briefly, answer conversationally in up to three sentences; offer a detailed follow-up if needed. Why did the closest recent opportunity not qualify?
+DEREK
+Today's closest misses look like the 17 completed-game decisions that cleared the gross edge threshold but had the fees consume the edge, the newest at 23:18:49 UTC under papercg:4c4eea9b6221864f7bf254e1 [F27]. The policy needs at least 0.5 percentage points of edge, a fee below that edge at every level bought, and positive expected profit after fees, but the record doesn't show that decision's actual edge or fee, so I can't say how narrowly it missed [F67]. This record replaces the decision IDs I gave earlier, which aren't in the current facts; I can walk through Audrey's resting-bid recommendation for these cases, which is still being measured [F59].
+Memory & evidence
+▶ Play
+Copy
+YOU
+Briefly, answer conversationally in up to three sentences; offer a detailed follow-up if needed. Why did the closest recent opportunity not qualify?
+DEREK
+Fees are still the reason. The closest misses in today's records are the 17 completed-game decisions that cleared the gross edge threshold but had the fees consume the edge, the newest being papercg:4c4eea9b6221864f7bf254e1 at 23:18:49 UTC [F27]. The active policy requires at least 0.5 percentage points of edge, a fee below that edge at every level bought, and positive expected profit after fees, but the record doesn't show that decision's actual edge or fee, so I can't say how narrowly it missed [F67]. If it helps, I can walk through Audrey's recommendation to rest a bid below the ask for these cases, which is still being measured [F59].
+Memory & evidence
+▶ Play
+Copy
+YOU
+Briefly, answer conversationally in up to three sentences; offer a detailed follow-up if needed. Why did the closest recent opportunity not qualify?
+DEREK
+Today's records don't single out a near miss: all 18 paper decisions so far on 2026-10-02 were refused for structural reasons, such as another strategy already holding the fixture, unsupported settlement, or no qualified model or Pinnacle probability, and none of them records an edge figure [F11][F15][F17][F18][F19]. The nearest misses in kind are the 8 decisions in Audrey's fee recommendation, which cleared the 0.5 percentage point gross threshold before the taker fee consumed the edge. Her suggestion to rest a bid below the ask is still being measured [F46][F54]. That also replaces the specific decision IDs I gave earlier, which aren't in the current records; I can go through the fee recommendation in detail if that helps.
+Memory & evidence
+▶ Play
+Copy
+YOU
+Briefly, answer conversationally in up to three sentences; offer a detailed follow-up if needed. Why did the closest recent opportunity not qualify?
+DEREK
+None of today's 18 paper decisions got as far as an edge test. All were refused for structural reasons: another strategy or exploration already held the fixture, settlement wasn't supported, there was no research model candidate, or the Pinnacle probability didn't qualify [F11][F15][F16][F17][F18][F19]. The closest misses on record are the 8 decisions in Audrey's fee recommendation, which cleared the 0.5 percentage point gross threshold before the taker fee consumed the edge, though the record doesn't give their actual edge or fee figures [F46][F54]. I can walk through her suggestion to rest a bid below the ask, which is still being measured, if that helps [F46].
+Memory & evidence
+▶ Play
+Copy
+YOU
+Briefly, answer conversationally in up to three sentences; offer a detailed follow-up if needed. Why did the closest recent opportunity not qualify?
+DEREK
+Every one of today's 30 paper decisions was refused before price came into it, because another strategy or exploration already held the fixture, settlement wasn't supported, no research model candidate existed, or no qualified Pinnacle probability was available [F11][F15][F16][F17][F18][F19][F20][F21]. The closest misses on record are the 8 decisions in Audrey's fee recommendation, which cleared the 0.5 percentage point gross threshold before the taker fee consumed the edge, though the record doesn't give their edge or fee figures [F48][F56]. That count of 30 updates the 18 I quoted last time, and I can walk through her suggestion to rest a bid below the ask, still being measured, if that helps [F48].
+Memory & evidence
+▶ Play
+Copy
+YOU
+Briefly, answer conversationally in up to three sentences; offer a detailed follow-up if needed. Why did the closest recent opportunity not qualify?
+DEREK
+The closest miss today was one completed-game decision, papercg:117655a43207f911334b2cd1 at 00:49:11 UTC, which cleared the gross edge threshold but **had the fees consume the edge** [F25]. The active policy requires at least 0.5 percentage points of edge, a fee below that edge at every level bought, and positive expected profit after fees, but the record doesn't give that decision's actual edge or fee, so I can't say how narrowly it missed [F63]. This corrects my earlier claim that nothing reached a price test: of 183 decisions today, 2 entered and 18 others fell below the minimum gross edge [F11][F19]. I can walk through Audrey's resting-bid recommendation, still being measured, if useful [F55].
+Memory & evidence
+▶ Play
+Copy
+YOU
+Briefly, answer conversationally in up to three sentences; offer a detailed follow-up if needed. Why did the closest recent opportunity not qualify?
+DEREK
+Fees again: one completed-game decision today, papercg:117655a43207f911334b2cd1 at 00:49:11 UTC, cleared the gross edge threshold but the fees consumed the edge [F25]. The active policy needs at least 0.5 percentage points of edge at every level used, a fee below that edge at every level bought, and positive expected profit after fees, but the record doesn't give that decision's actual edge or fee, so I can't say how close it came [F63]. The other near-price refusals today were the 18 that fell below the minimum gross edge [F19], and I can go through Audrey's resting-bid recommendation, still being measured, if useful [F55].
+Memory & evidence
+▶ Play
+Copy
+YOU
+Briefly, answer conversationally in up to three sentences; offer a detailed follow-up if needed. Why did the closest recent opportunity not qualify?
+DEREK
+Records-only answer — the AI answer was not used (it stated a figure no record holds); everything below is quoted from the current records. The paper account now: paper account paper_acct_main cash $499,573.93 (from the paper ledger) [F1]; paper account reserved $0 (part of cash, not extra) [F2]; paper account available $499,573.93 [F3]. The paper session: active paper session paper_session_20261001T014716Z, status ACTIVE, started 2026-10-01T01:47:16+00:00 [F9]; paper session health: last heartbeat 2026-10-02T03:05:10+00:00, 1589 passes, 0 errors, 0 venue mutation attempts [F10].
+Memory & evidence
+▶ Play
+Copy
+YOU
+Briefly, answer conversationally in up to three sentences; offer a detailed follow-up if needed. Why did the closest recent opportunity not qualify?
+DEREK
+The nearest miss on record is still papercg:117655a43207f911334b2cd1 at 00:49:11 UTC: it cleared the gross edge threshold, but **the fees consumed the edge** [F26]. The active policy needs at least 0.5 percentage points of edge, a fee below that edge at every level bought, and positive expected profit after fees, but the record doesn't give that decision's actual edge or fee, so I can't say how narrowly it missed [F63]. Of 288 paper decisions today, 2 entered and 33 others fell short on gross edge alone [F11][F19]. If it's useful, I can walk through Audrey's resting-bid recommendation for fee-bound cases, which is still being measured [F55].
+Memory & evidence
+▶ Play
+Copy
+Resumed your conversation with Derek (28 messages).
+All records, strategy detail and technical evidence
+
+Presentation of recorded state. This page sends no order and holds no credential; it reads /api/command/agents/derek with the COMMAND session. The 3D characters are licensed Microsoft Rocketbox models (MIT licence, credited below; shipped with their licence file); a device that cannot draw them shows a 2D portrait card. The pose follows the paper runtime's own heartbeat (paper_session_health) and never stands in for data. UNKNOWN is not zero; EMPTY is not success. The 3D character on this page is a licensed model, not an original illustration. Character model: Microsoft Rocketbox Business_Male_03 (MIT, © 2020 Microsoft). Licence: MIT, shipped with the model as ROCKETBOX_LICENSE.md.
+papercg:a463766b9046839154a13e3b
+Explain the price, fees, expected value and current status of Portugal to win. Decision papercg:a463766b9046839154a13e3b.
+papercg:bb66eb4166d997b3de32d608
+Explain the price, fees, expected value and current status of Croatia to win. Decision papercg:bb66eb4166d997b3de32d608.
+papercg:29e367278127068c0510cf6b
+Explain the price, fees, expected value and current status of Londrina to win. Decision papercg:29e367278127068c0510cf6b.
+papercg:b80a11ede0eaf3f520978302
+Explain the price, fees, expected value and current status of Greece to win. Decision papercg:b80a11ede0eaf3f520978302.
+papercg:ac1f4edb41fc91af93ee356a
+Explain the price, fees, expected value and current status of France to win. Decision papercg:ac1f4edb41fc91af93ee356a.
+paperdec:e3368d9df2c0cf1acca3eabe
+Explain the price, fees, expected value and current status of Tampa Bay Rays to win. Decision paperdec:e3368d9df2c0cf1acca3eabe.
+paperdec:68bfe2c225a78eeb503bdc91
+Explain the price, fees, expected value and current status of Milwaukee Brewers to win. Decision paperdec:68bfe2c225a78eeb503bdc91.
+paperdec:2ce04d564f4aed56a40a453c
+Explain the price, fees, expected value and current status of Londrina to win. Decision paperdec:2ce04d564f4aed56a40a453c.
+paperdec:af76b18e6e26b6957d5a0ee8
+Explain the price, fees, expected value and current status of Croatia to win. Decision paperdec:af76b18e6e26b6957d5a0ee8.
+paperdec:48c721fa817d74256ef33513
+Explain the price, fees, expected value and current status of France to win. Decision paperdec:48c721fa817d74256ef33513.
+paperdec:65e88ca4b19889e31437b678
+Explain the price, fees, expected value and current status of Portugal to win. Decision paperdec:65e88ca4b19889e31437b678.
+paperdec:b06cc197bdf115176245b1dd
+Explain the price, fees, expected value and current status of Netherlands to win. Decision paperdec:b06cc197bdf115176245b1dd.

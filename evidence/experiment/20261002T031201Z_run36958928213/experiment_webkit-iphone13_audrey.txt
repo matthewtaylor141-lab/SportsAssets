@@ -1,0 +1,107 @@
+Skip to the records
+Trace
+Refresh
+LIVE MARKET DATA · SIMULATED EXECUTION · $500,000 STARTING BANKROLL
+MANAGEMENT OFFICE · AUDREY
+Audrey’s office
+Audit & intelligence
+PAPER ACCOUNT · ONE LEDGER · LIVE MARKET DATA · SIMULATED EXECUTION
+CASH
+$499,573.93
+EQUITY
+$500,135.65
+Account details +
+Records read 0s ago
+Agent pass 49s ago
+LATEST RECORDED WORK · AUDREY
+6h ago
+Fees consume edge
+Responsible agent · DEREK
+
+Recommendation
+Measuring
+Measurement recorded
+Recorded rationale
+8 decisions cleared the 0.5 pp gross threshold but the taker fee consumed the edge; rest a bid below the ask where both rules hold at the price paid
+Explain this decision ↗
+Open full record
+Recorded rationale · freshness shown above.
+Search Audrey records
+All findings
+Awaiting response
+Measured
+3 / 3
+Export view ↓
+Ledger check
+Reconciled
+Realized P&L
+$168.43
+Unrealized P&L
+-$32.78
+INTELLIGENCE DESK
+Recommendations & follow-through
+Recorded findings, accountable owners and measured outcomes.
+Fees consume edge
+8 decisions cleared the 0.5 pp gross threshold but the taker fee consumed the edge; rest a bid below the ask where both rules hold at the price paid
+
+Responsible agent
+DEREK
+6h ago
+Measuring
+Measurement recorded
++
+Book read cuts
+39 of 125 book reads in the last 6 h were cut by the decision deadline or the venue cooldown; remove the duplicate read and retry within the freshness window
+
+Responsible agent
+DEREK
+6h ago
+Improved
+Measurement recorded
++
+Collection coverage
+63 events in the last collection cycle never reached a decision (by code: {"NO_PINNACLE_ON_EVENT": 33, "QUOTE_STALE_ON_ARRIVAL": 13, "VENUE_BOOK_READ_FAILED": 2, "NO_VENUE_CONTRACT_FOR_EVENT": 5, "VENUE_BOOK_CURRENCY_NOT_ESTABLISHED": 4, "VENUE_NATIVE_EVENT_MATCHES_ONLY_ONE_TEAM": 5, "VENUE_BOOK_CURRENCY_CONTRADICTED_BY_CONTRACT": 1}); investigate per sport without weakening identity, market or settlement matching
+
+Responsible agent
+DEREK
+6h ago
+Improved
+Measurement recorded
++
+Activity journal
+Latest records in this read
+Measuring · Fees consume edge
+Recommendation
+6h ago
+Improved · Book read cuts
+Recommendation
+6h ago
+Improved · Collection coverage
+Recommendation
+6h ago
+THE LEARNING WORKBENCH
+Work. Investigate. Improve.
+Records read 10/2/2026, 3:11:57 AM · Research paused
+Plans
+Collaboration
+Investigate
+Experiments
+Scorecard
+Research worker paused · 24 model calls per hour maximum. Latest 60 team tasks shown.
+
+Assign a research goal
+Management control access
+Research schedule
+Management control access
+No research plan has been assigned to this agent.
+
+Research reviews are attributed opinions backed by recorded evidence. Completed reviews are not proven performance gains. Policy activation remains separately controlled.
+All records, strategy detail and technical evidence
+Presentation of recorded state. This page sends no order and holds no credential; it reads /api/command/agents/audrey with the COMMAND session. The 3D characters are licensed Microsoft Rocketbox models (MIT licence, credited below; shipped with their licence file); a device that cannot draw them shows a 2D portrait card. The pose follows the paper runtime's own heartbeat (paper_session_health) and never stands in for data. UNKNOWN is not zero; EMPTY is not success. The 3D character on this page is a licensed model, not an original illustration. Character model: Microsoft Rocketbox Business_Female_04 (MIT, © 2020 Microsoft). Licence: MIT, shipped with the model as ROCKETBOX_LICENSE.md.
+
+Talk to Audrey
+Ask about a game, decision or exit plan
+↗
+Explain recommendation paperrec:521b224a4ded906f08c02b93, its evidence, genuine agent responses and subsequent measurements.
+Explain recommendation paperrec:5d764d7fe0fc1e4895bcbb2d, its evidence, genuine agent responses and subsequent measurements.
+Explain recommendation paperrec:a72c3f4296c2548b13ea2120, its evidence, genuine agent responses and subsequent measurements.
