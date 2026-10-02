@@ -50,6 +50,22 @@ def run(client,actor,apply=False,now=None):
 # stripped, so it called those recorded figures invented.
 REISSUE={'management-execution-exits':('v5','Xavier: position management, execution quality and exit alternatives for the open paper positions. From recorded reviews, resting orders, fills and marks, assess execution quality and compare hold-to-settlement, resting exit and marketable exit. Quote only figures in the cited records; give recorded inputs and describe comparisons rather than computing new totals. Label it a recommendation, not an activated change; one measurable next action with an owner.')}
 
+# IMPROVEMENT FLOWS (2026-10-02): a finding the agents' own review surfaced,
+# sent through the same capability route as a goal with its owner, evidence,
+# question, peer review and the forward measurement that would show the
+# change worked. Opening one changes no policy: a change still goes through a
+# forward-evaluated proposal, the gate and a named approver.
+IMPROVE={'stale-measure':('DEREK','Improvement (from execution flow f4a1359a): Xavier lesson v22 shows 8,609 of 8,705 exploration reviews ran on a stale measure; recent ones cite no Pinnacle reading for the contract within the lookback (one aged 1,470 s). Derek: from the PinnAPI census and recorded valuations, find why held contracts lose fresh readings; propose one change. Xavier, Audrey: review, say where you disagree. Name the forward metric (share of reviews with a fresh measure) and target.')}
+
+def improve(client,actor,key,now=None):
+    now=time.time() if now is None else now
+    first,title=IMPROVE[key]
+    if len(title)>500:raise ValueError('GOAL_TITLE_TOO_LONG')
+    rid='owner-20261002-improve-'+key+'-v1'
+    r=request(client,'POST','/goals',{'actor':actor,'request_id':rid,'title':title,'first':first,'priority':3,'due_at':now+86400})
+    after=request(client,'GET')
+    return {'changed':True,'improvement':key,'request_id':rid,**r,'control':after.get('control')}
+
 def reissue(client,actor,key,now=None):
     now=time.time() if now is None else now
     first=next((f for k,f,_ in GOALS if k==key),'XAVIER')   # v5 goal predates set (b)
@@ -61,11 +77,11 @@ def reissue(client,actor,key,now=None):
 
 def main():
     p=argparse.ArgumentParser();p.add_argument('--apply',action='store_true');p.add_argument('--actor',required=True)
-    p.add_argument('--reissue',choices=sorted(REISSUE));a=p.parse_args()
+    p.add_argument('--reissue',choices=sorted(REISSUE));p.add_argument('--improve',choices=sorted(IMPROVE));a=p.parse_args()
     if not 2<=len(a.actor.strip())<=100 or a.actor.upper() in ('DEREK','XAVIER','AUDREY','SYSTEM'):p.error('a named management actor is required')
     token=os.environ.get('ADMIN_TOKEN','')
     if not token:raise SystemExit('ADMIN_TOKEN is absent; keep it in the deployment environment, never paste it into chat.')
     try:
-        with httpx.Client(base_url=BASE,headers={'x-admin-token':token},timeout=20,follow_redirects=False) as c:print(json.dumps(reissue(c,a.actor,a.reissue) if a.reissue else run(c,a.actor,a.apply),default=str,indent=2))
+        with httpx.Client(base_url=BASE,headers={'x-admin-token':token},timeout=20,follow_redirects=False) as c:print(json.dumps(improve(c,a.actor,a.improve) if a.improve else reissue(c,a.actor,a.reissue) if a.reissue else run(c,a.actor,a.apply),default=str,indent=2))
     except Exception as exc:raise SystemExit(type(exc).__name__+': '+str(exc))
 if __name__=='__main__':main()

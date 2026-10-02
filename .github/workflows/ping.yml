@@ -609,7 +609,7 @@ jobs:
     # modeling/XAVIER, audit/AUDREY) with fixed request ids, so a repeat run
     # is idempotent; then read the work and its events back. Paper research
     # only: no order, policy activation or funded path is reachable here.
-    if: ${{ inputs.verify == 'research' || inputs.verify == 'research-apply' || inputs.verify == 'research-reissue-xavier' }}
+    if: ${{ inputs.verify == 'research' || inputs.verify == 'research-apply' || inputs.verify == 'research-reissue-xavier' || inputs.verify == 'research-improve-stale' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -628,6 +628,8 @@ jobs:
           # research-reissue-xavier: one new flow for Xavier's goal (v3 request
           # id); the rejected v2 flow and its records are left as recorded
           if [ "$MODE" = "research-reissue-xavier" ]; then A="--reissue management-execution-exits"; fi
+          # research-improve-stale: one improvement flow (fixed request id)
+          if [ "$MODE" = "research-improve-stale" ]; then A="--improve stale-measure"; fi
           python3 tools/research/activate_research.py --actor "Matt Taylor" $A
           echo "script exit=$?"
       - name: Read the research work and its events back (GET only)
