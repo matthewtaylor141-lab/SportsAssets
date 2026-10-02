@@ -17,6 +17,7 @@ import urllib.parse
 import urllib.request
 
 GATEWAY = "https://gateway.polymarket.us/v1/sports/teams/provider"
+MARKET = "https://gateway.polymarket.us/v1/market/slug/"
 MAX_BYTES = 600_000
 OK_TYPES = ("image/svg+xml", "image/png", "image/webp", "image/jpeg")
 EXT = {"image/svg+xml": "svg", "image/png": "png", "image/webp": "webp",
@@ -47,7 +48,35 @@ def main(ids, out):
         elif isinstance(got, list):
             teams.update({str(v.get("id")): v for v in got if isinstance(v, dict)})
         time.sleep(1.0)
-    manifest = {"source": GATEWAY, "retrieved_at": time.strftime(
+    # The venue's market records carry the SAME team object on each side
+    # (team.id / team.logo). Read one market per team when the teams
+    # endpoint does not answer for venue ids.
+    raw_markets = {}
+    for slug in SLUGS:
+        try:
+            st, ct, body = get(MARKET + urllib.parse.quote(slug))
+            data = json.loads(body)
+        except Exception as exc:                                # noqa: BLE001
+            raw_markets[slug] = "ERROR:" + type(exc).__name__
+            continue
+        found = []
+        def walk(o):
+            if isinstance(o, dict):
+                t = o.get("team")
+                if isinstance(t, dict) and isinstance(t.get("id"), int):
+                    found.append(t)
+                for v in o.values():
+                    walk(v)
+            elif isinstance(o, list):
+                for v in o:
+                    walk(v)
+        walk(data)
+        raw_markets[slug] = [t.get("id") for t in found]
+        for t in found:
+            teams.setdefault(str(t["id"]), dict(t, _from_market=slug))
+        time.sleep(0.5)
+    manifest = {"source": GATEWAY, "market_source": MARKET,
+                "markets_read": raw_markets, "retrieved_at": time.strftime(
         "%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "requested": ids, "teams": []}
     for tid in ids:
         rec = teams.get(str(tid))
@@ -89,5 +118,9 @@ def main(ids, out):
     print(json.dumps(by), len(teams), "records")
 
 
+SLUGS = []
+
 if __name__ == "__main__":
+    SLUGS = [x for x in (sys.argv[3] if len(sys.argv) > 3 else "").replace(
+        ",", " ").split() if x][:200]
     main(sys.argv[2].replace(",", " ").split(), sys.argv[1])

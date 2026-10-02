@@ -35,6 +35,10 @@ on:
         description: "verify=pinnapi only: optional comma-separated PinnAPI sport ids (e.g. 6,1) for a bounded <= 20 s raw WebSocket sample in the API, taken under the feed owner's lease (refused while the production socket is open). Blank = no sample."
         required: false
         default: ""
+      team_slugs:
+        description: "verify=team-logos only: comma-separated venue market slugs whose sides carry those teams (the venue market record's team object, incl. logo)"
+        required: false
+        default: ""
       team_ids:
         description: "verify=team-logos only: comma-separated VENUE team ids (us_premap.team_id) whose venue team records and logo images are fetched from the venue's public gateway (no key) with provenance, and committed to claude/site-verify-evidence"
         required: false
@@ -657,11 +661,13 @@ jobs:
         shell: bash
         env:
           IDS: ${{ inputs.team_ids }}
+          SLUGS: ${{ inputs.team_slugs }}
         run: |
           set +e
           case "$IDS" in *[!0-9,\ ]*) echo "team_ids must be digits and commas"; exit 1 ;; esac
           [ -n "$IDS" ] || { echo "no team_ids"; exit 1; }
-          python3 tools/team_logos/fetch_venue_team_logos.py /tmp/team_logos "$IDS"
+          case "$SLUGS" in *[!a-z0-9,-]*) echo "team_slugs must be slugs and commas"; exit 1 ;; esac
+          python3 tools/team_logos/fetch_venue_team_logos.py /tmp/team_logos "$IDS" "$SLUGS"
           ls -la /tmp/team_logos | head -60
           python3 -c "import json;m=json.load(open('/tmp/team_logos/manifest.json'));[print(r['requested_id'],r['status'],(r.get('venue_record') or {}).get('name'),(r.get('venue_record') or {}).get('league'),r.get('content_type'),r.get('bytes'),(r.get('logo_url') or '')[:90]) for r in m['teams']]"
       - name: Commit the logos and manifest
