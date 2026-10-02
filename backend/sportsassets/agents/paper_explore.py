@@ -28,8 +28,8 @@ WHAT IS NOT RELAXED -- the data and execution safeguards, all of them:
 
 THE OWNER'S LIMITS, checked UNDER THE ACCOUNT LOCK (`submit_order`'s
 `locked_check`), so two concurrent decisions cannot both pass a limit:
-  * $250 maximum total entry cost per position INCLUDING FEES (the order's
-    reservation -- limit x qty + the maximum fee -- is at most $250, and a
+  * $1,000 maximum total entry cost per position INCLUDING FEES (the order's
+    reservation -- limit x qty + the maximum fee -- is at most $1,000, and a
     fill can only cost less than its reservation);
   * $5,000 maximum aggregate exploration exposure: open reservations plus
     the cost basis of open exploration positions (Xavier's protective sales
@@ -75,9 +75,9 @@ VERSION = PB.EXPLORE_VERSION
 DISCLOSURE = PB.EXPLORE_DISCLOSURE
 LABEL = PB.EXPLORE_LABEL
 
-#: Training V2: larger entries and broader inclusion requested by the owner.
+#: Training V2: owner explicitly requested around $1,000 per entry.
 #: Aggregate exposure and loss stop remain at their existing bounds.
-MAX_ENTRY_COST_USD = 250.0
+MAX_ENTRY_COST_USD = 1000.0
 MAX_AGGREGATE_EXPOSURE_USD = 5000.0
 LOSS_STOP_USD = 1000.0
 
@@ -415,7 +415,7 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
                     book_age is not None and book_age <= PB.BOOK_MAX_AGE_S),
          "value": book_age, "threshold": PB.BOOK_MAX_AGE_S,
          "units": "seconds"},
-        {"condition": "entry_cost_incl_fees_within_100_usd",
+        {"condition": "entry_cost_incl_fees_within_budget",
          "passed": None if not sized.get("qty") else True,
          "value": sized.get("reservation_usd"),
          "threshold": MAX_ENTRY_COST_USD, "units": "USD"}]

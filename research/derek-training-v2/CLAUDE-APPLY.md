@@ -16,15 +16,15 @@ from the separate exploration cap, not necessarily the investment setting.
 
 | Setting | Existing training V1 | Proposed training V2 |
 |---|---:|---:|
-| Maximum entry cost including fees | $100 | $250 |
+| Maximum entry cost including fees | $100 | $1,000 |
 | Per-sport sampling target in the six-hour frame | 6 | 12 |
 | Minimum inclusion probability | 35% | 70% |
 | Aggregate open training exposure + reservations | $5,000 | $5,000 |
 | Gross realized training-loss stop | $1,000 | $1,000 |
 
-These are a modest initial implementation of the owner's directional request,
-not numbers the owner dictated. Review the concrete values with this receipt.
-At the full $250 cap, the existing aggregate budget supports about 20 concurrent
+The owner explicitly corrected the entry target to around $1,000 per position.
+This supersedes Codex's earlier $250 proposal. The sampling expansion is retained.
+At the full $1,000 cap, the existing aggregate budget supports about five concurrent
 training positions. It does NOT promise 200–500 daily fills or unrestricted
 deployment of the full account.
 
@@ -63,10 +63,10 @@ socket connection or 70% sampling floor as all-market, once-per-second coverage.
 
 ## Tests and release
 
-Local tests: see `python-receipt.txt`. The new tests cover five price levels,
+Local tests: see `../derek-training-1000/python-receipt.txt`. The new tests cover five price levels,
 depth, fees, monotonic inclusion, old fixture draws, stable decision IDs, and
 the entry/exposure/loss/fixture lock checks. The existing real lifecycle test now
-requires an entry and fill costing **more than $100 and no more than $250**;
+requires an entry and fill costing **more than $990 and no more than $1,000**;
 its debit, handoff and reconciliation checks remain. The old pure $100 sizing
 proof is retained. Real-Postgres cases skipped locally and must run in your gate.
 
@@ -89,3 +89,7 @@ Post-release report:
 
 No production limit, environment, ledger, deployment or trade was changed by
 Codex here. The local patch is ready for your integration and release gate.
+
+This document supersedes the earlier $250 sizing proposal. The first local
+python receipt in this directory belongs to that earlier proposal; the new
+$1,000 verification is in research/derek-training-1000/python-receipt.txt.

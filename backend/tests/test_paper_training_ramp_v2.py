@@ -7,23 +7,23 @@ from sportsassets.agents import paper_explore as E, paper_benchmark as B
 
 def test_versioned_ramp_preserves_investment_requirements_and_total_bounds():
     assert E.VERSION=='PINNACLE_EXPLORATION_PAPER_V2'
-    assert E.MAX_ENTRY_COST_USD==250
+    assert E.MAX_ENTRY_COST_USD==1000
     assert E.MAX_AGGREGATE_EXPOSURE_USD==5000 and E.LOSS_STOP_USD==1000
     assert B.CG_PARAMETERS_V2=={'min_gross_edge_pp':.5}
     assert B.EXPLORE_POLICY['strategy']=='PINNACLE_EXPLORATION_PAPER'
     assert 'not investment performance' in B.EXPLORE_DISCLOSURE
     from sportsassets import bettor_paper_ops as OPS
     meta=OPS._policy_meta()[E.STRATEGY]
-    assert meta['version']==E.VERSION and '$250 per position' in meta['summary']
+    assert meta['version']==E.VERSION and '$1,000 per position' in meta['summary']
 
 
 @pytest.mark.parametrize('price',[.05,.27,.50,.71,.95])
 def test_larger_order_is_within_budget_after_fees_and_current_depth(price):
     levels=[{'price':price,'wire':price,'qty':100000}]
     old=E.size_entry(levels,consumed={},fee_fn=None,at=1800000000,budget_usd=100)
-    new=E.size_entry(levels,consumed={},fee_fn=None,at=1800000000,budget_usd=250)
-    assert new['qty']>old['qty'] and 240<new['reservation_usd']<=250
-    shallow=E.size_entry([{'price':price,'wire':price,'qty':7}],consumed={},fee_fn=None,at=1800000000,budget_usd=250)
+    new=E.size_entry(levels,consumed={},fee_fn=None,at=1800000000,budget_usd=1000)
+    assert new['qty']>old['qty'] and 990<new['reservation_usd']<=1000
+    shallow=E.size_entry([{'price':price,'wire':price,'qty':7}],consumed={},fee_fn=None,at=1800000000,budget_usd=1000)
     assert shallow['qty']==7
 
 
@@ -50,11 +50,11 @@ def test_version_change_does_not_duplicate_existing_valuation_decision_keys():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('reserve,exposure,loss,held,reason',[
-    (251,0,False,False,E.R_TOO_DEAR),
-    (250,4900,False,False,E.R_AGGREGATE),
-    (250,0,True,False,E.R_LOSS_STOP),
-    (250,0,False,True,E.R_FIXTURE_TAKEN),
-    (250,0,False,False,None)])
+    (1001,0,False,False,E.R_TOO_DEAR),
+    (1000,4100,False,False,E.R_AGGREGATE),
+    (1000,0,True,False,E.R_LOSS_STOP),
+    (1000,0,False,True,E.R_FIXTURE_TAKEN),
+    (1000,4000,False,False,None)])
 async def test_locked_checks_still_enforce_all_bounds(monkeypatch,reserve,exposure,loss,held,reason):
     monkeypatch.setattr(E,'limits_state',AsyncMock(return_value={'loss_stop_reached':loss,'exposure_usd':exposure}))
     monkeypatch.setattr(E,'fixture_taken',AsyncMock(return_value=held))

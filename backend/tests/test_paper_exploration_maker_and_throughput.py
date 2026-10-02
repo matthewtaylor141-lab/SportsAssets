@@ -128,7 +128,7 @@ async def _setup(conn, tag, now):
 
 def test_the_owner_limits_and_labels_are_the_authorized_ones():
     d = PEX.describe()
-    assert d["limits"] == {"max_entry_cost_usd_incl_fees": 250.0,
+    assert d["limits"] == {"max_entry_cost_usd_incl_fees": 1000.0,
                            "max_aggregate_exposure_usd": 5000.0,
                            "loss_stop_realized_usd": 1000.0,
                            "positions_per_fixture": 1,
@@ -195,6 +195,10 @@ async def test_exploration_enters_a_losing_candidate_and_the_chain_completes(
             d and d["refusals"])
         assert d["decision_id"].startswith("paperexp:")
         pdx = H.j(d["policy_decision"])
+        entry_check = next(c for c in pdx["conditions"]
+                           if c["condition"] == "entry_cost_incl_fees_within_budget")
+        assert entry_check["threshold"] == 1000.0
+        assert entry_check["passed"] is True
         est = pdx["estimate"]
         assert est["gross_edge_pp_at_best"] == pytest.approx(0.5)
         assert est["fee_per_contract_usd"] == pytest.approx(0.017375,
@@ -209,13 +213,13 @@ async def test_exploration_enters_a_losing_candidate_and_the_chain_completes(
         assert sel["draw"] < sel["selection_probability"]
         assert pdx["threshold_edge_pp"] is None
         assert pdx["investment_policy_threshold_pp_not_applied"] == 0.5
-        # the order: marketable IOC at the best level, within $250 including fees
+        # the order: marketable IOC at the best level, within $1,000 including fees
         o = await conn.fetchrow("SELECT * FROM paper_orders WHERE "
                                 " decision_id=$1", d["decision_id"])
         assert o["strategy"] == EXPLORE and o["role"] == "ENTRY"
         assert o["order_type"] == "MARKETABLE"
         assert float(o["limit_price"]) == 0.50
-        assert 100.0 < float(o["reserved_usd"]) <= 250.0
+        assert 990.0 < float(o["reserved_usd"]) <= 1000.0
         assert H.j(o["label"])["position_label"] == \
             "Training / simulated execution"
         # the investment policy made no decision here (it was off)
@@ -232,7 +236,7 @@ async def test_exploration_enters_a_losing_candidate_and_the_chain_completes(
         assert fills and {f["strategy"] for f in fills} == {EXPLORE}
         cost = sum(float(f["qty"]) * float(f["price"]) for f in fills)
         fees = sum(float(f["fee_usd"]) for f in fills)
-        assert 100.0 < cost + fees <= 250.0
+        assert 990.0 < cost + fees <= 1000.0
         debit = await conn.fetchval(
             "SELECT -sum(cash_delta_usd) FROM paper_ledger WHERE "
             " order_id=$1 AND kind='FILL'", o["order_id"])
