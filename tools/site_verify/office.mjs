@@ -227,7 +227,7 @@ for (const [ename, engine, dev, args] of ENGINES) {
       // ── CHAT AND VOICE ──────────────────────────────────────────────
       const openTalkEarly = await f.evaluate(() => {
         const d = document.querySelector(".desk-mobile-talk");
-        if (d && getComputedStyle(d).display !== "none" && d.getAttribute("aria-expanded") !== "true") d.click();
+        if (d && getComputedStyle(d).display !== "none" && d.getAttribute("aria-expanded") !== "true") { d.focus(); d.click(); }
         return !!d;
       });
       await page.waitForTimeout(400);
@@ -241,7 +241,9 @@ for (const [ename, engine, dev, args] of ENGINES) {
       const openTalk = async () => f.evaluate(() => {
         const d = document.querySelector(".desk-mobile-talk");
         if (!d || getComputedStyle(d).display === "none") return { dock: false };
-        if (d.getAttribute("aria-expanded") !== "true") d.click();
+        // a real tap focuses the dock before activating it (focus restore
+        // on close returns to whatever held focus when the panel opened)
+        if (d.getAttribute("aria-expanded") !== "true") { d.focus(); d.click(); }
         const side = document.querySelector(".office-side");
         return { dock: true, expanded: d.getAttribute("aria-expanded"),
           panel_open: !!(side && side.classList.contains("desk-conversation-open")),
