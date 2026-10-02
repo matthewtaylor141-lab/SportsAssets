@@ -48,6 +48,8 @@ const SHIFT = () => { window.__cls = 0; window.__shifts = []; try { new Performa
 // (bounded: the first 30 marks of a view; enough to prove they load)
 const REVEAL = async () => { const els = [...document.querySelectorAll(".team-mark, .xp-team")].slice(0, 30); for (const el of els) { el.scrollIntoView({ block: "center" }); await new Promise((r) => setTimeout(r, 60)); } window.scrollTo(0, 0); };
 const within = (ms, p) => Promise.race([p, new Promise((r) => setTimeout(() => r("TIMEOUT"), ms))]);
+const T0 = Date.now();
+const step = (...a) => console.error(`[${((Date.now() - T0) / 1000).toFixed(1)}s]`, ...a);   // where a hang happened
 
 async function signed(ctx) {
   if (!TOKEN) return;
@@ -81,6 +83,7 @@ for (const [ename, engine, dev] of ENGINES) {
       }
     });
     try {
+      step(ename, where, "goto");
       await page.goto(HOST + (where === "home" ? "/" : "/" + where), { waitUntil: "domcontentloaded", timeout: 60000 });
       let f = page.mainFrame();
       if (where !== "home") {
@@ -99,6 +102,7 @@ for (const [ename, engine, dev] of ENGINES) {
         const views = await f.evaluate(() => [...document.querySelectorAll("button[data-mg-view]")].map((b) => b.getAttribute("data-mg-view"))).catch(() => []);
         for (const v of views) {
           const t0 = Date.now();
+          step(ename, where, "view", v);
           const res = await within(60000, (async () => {
           await f.evaluate((v) => document.querySelector('button[data-mg-view="' + v + '"]').click(), v).catch(() => {});
           await page.waitForTimeout(1500);
@@ -111,7 +115,7 @@ for (const [ename, engine, dev] of ENGINES) {
                          broken: vm.filter((m) => m.broken).length, names: [...new Set(vis.map((m) => m.title))].slice(0, 40) };
           try { await f.locator(".office-layout").screenshot({ path: `${OUT}/logos_${ename}_${where}_${v}.png`, timeout: 20000 }); } catch (_) {}
           })());
-          if (res === "TIMEOUT") R.views[v] = Object.assign(R.views[v] || {}, { timed_out_after_ms: Date.now() - t0 });
+          if (res === "TIMEOUT") { step(ename, where, "view TIMEOUT", v); R.views[v] = Object.assign(R.views[v] || {}, { timed_out_after_ms: Date.now() - t0 }); }
         }
         await f.evaluate(() => { const b = document.querySelector('button[data-mg-view="work"]'); if (b) b.click(); }).catch(() => {});
         await page.waitForTimeout(1000);
@@ -119,7 +123,8 @@ for (const [ename, engine, dev] of ENGINES) {
         await page.evaluate(REVEAL).catch(() => {});
       }
       await page.waitForTimeout(4000);
-      const marks = await f.evaluate(MARKS).catch((e) => ({ error: String(e) }));
+      step(ename, where, "marks");
+      const marks = await within(20000, f.evaluate(MARKS).catch((e) => ({ error: String(e) }))).then((m) => m === "TIMEOUT" ? { error: "MARKS_READ_TIMED_OUT (renderer busy)" } : m);
       R.marks = Array.isArray(marks) ? {
         total: marks.length, loaded: marks.filter((m) => m.loaded).length,
         initials_only: marks.filter((m) => !m.img).length,
@@ -130,9 +135,10 @@ for (const [ename, engine, dev] of ENGINES) {
       R.image_responses = imgs.slice(0, 80);
       R.image_status = imgs.reduce((a, x) => (a[x.s] = (a[x.s] || 0) + 1, a), {});
       R.csp_errors = csp;
-      R.layout_shift = await page.evaluate(() => window.__cls).catch(() => null);
-      R.shift_sources = await page.evaluate(() => (window.__shifts || []).sort((a, b) => b.v - a.v).slice(0, 8)).catch(() => null);
-      await page.screenshot({ path: `${OUT}/logos_${ename}_${where}.png`, fullPage: where === "home" });
+      R.layout_shift = await within(10000, page.evaluate(() => window.__cls).catch(() => null));
+      R.shift_sources = await within(10000, page.evaluate(() => (window.__shifts || []).sort((a, b) => b.v - a.v).slice(0, 8)).catch(() => null));
+      step(ename, where, "screenshot");
+      await page.screenshot({ path: `${OUT}/logos_${ename}_${where}.png`, fullPage: where === "home", timeout: 30000 }).catch((e) => step("screenshot failed", String(e).slice(0, 120)));
       if (where !== "home") {
         try { await f.locator(".office-layout").screenshot({ path: `${OUT}/logos_${ename}_${where}_board.png`, timeout: 20000 }); } catch (_) {}
       }
