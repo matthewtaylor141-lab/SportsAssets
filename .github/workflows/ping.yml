@@ -35,6 +35,10 @@ on:
         description: "verify=pinnapi only: optional comma-separated PinnAPI sport ids (e.g. 6,1) for a bounded <= 20 s raw WebSocket sample in the API, taken under the feed owner's lease (refused while the production socket is open). Blank = no sample."
         required: false
         default: ""
+      pinnapi_feed:
+        description: "verify=pinnapi only: blank = no feed call; state = read the C1 feed owner state (GET); on / off = write the 'pinnapi_feed' arm row through POST /api/admin/pinnapi-feed/{on|off} (read-back returned), then read the state. C1 is observe-only: it changes no decision."
+        required: false
+        default: ""
 
 jobs:
   ping:
@@ -236,6 +240,7 @@ jobs:
           ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
           PATHS: ${{ inputs.pinnapi_paths }}
           WS: ${{ inputs.pinnapi_ws }}
+          FEED: ${{ inputs.pinnapi_feed }}
         run: |
           set +e
           [ -n "${ADMIN_TOKEN:-}" ] || { echo "no ADMIN_TOKEN secret"; exit 0; }
@@ -245,6 +250,18 @@ jobs:
                  -H "Content-Type: application/json" -d '{"action":"keys"}' "$API/api/admin/pinnapi-probe")
           echo "keys HTTP $code"; jq -c . /tmp/pinn/keys.json 2>/dev/null || head -c 300 /tmp/pinn/keys.json
           [ "$code" = "200" ] || { echo "probe route not deployed on the serving build (HTTP $code); docs only"; exit 0; }
+          case "$FEED" in
+            on|off)
+              code=$(curl -s -o /tmp/pinn/feed_$FEED.json -w '%{http_code}' --max-time 30 -X POST -H "$H" "$API/api/admin/pinnapi-feed/$FEED")
+              echo "feed $FEED HTTP $code at $(date -u +%FT%TZ)"; jq -c . /tmp/pinn/feed_$FEED.json 2>/dev/null || head -c 300 /tmp/pinn/feed_$FEED.json
+              sleep 20 ;;
+          esac
+          if [ -n "$FEED" ]; then
+            code=$(curl -s -o /tmp/pinn/feed_state.json -w '%{http_code}' --max-time 30 -H "$H" "$API/api/admin/pinnapi-feed/state")
+            echo "feed state HTTP $code at $(date -u +%FT%TZ)"
+            jq -c '{this_process: (.this_process | {state, refused, enabled_env, c1_decision_effect}), arm: .rows.pinnapi_feed, scope: .rows.pinnapi_feed_scope, heartbeat: (.rows.pinnapi_feed_last // {} | {state, refused, beat_at, sport_ids, streams, transitions, cache, coverage_census})}' /tmp/pinn/feed_state.json 2>/dev/null | head -c 6000 || head -c 600 /tmp/pinn/feed_state.json
+            echo
+          fi
           code=$(curl -s -o /tmp/pinn/account.json -w '%{http_code}' --max-time 30 -X POST -H "$H" \
                  -H "Content-Type: application/json" -d '{"action":"account"}' "$API/api/admin/pinnapi-probe")
           echo "account HTTP $code (entitlement fields only)"; jq -c . /tmp/pinn/account.json 2>/dev/null | head -c 3000; echo
