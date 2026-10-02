@@ -523,7 +523,8 @@ def trade_stats(positions: list) -> dict:
         x, p = t
         return {"position_key": p.get("position_key"),
                 "us_market_slug": p.get("us_market_slug"),
-                "strategy": p.get("strategy"),
+                "market": p.get("market"), "matchup": p.get("matchup"),
+                "strategy": p.get("strategy"), "book": p.get("book"),
                 "realized_pnl_usd": round(x, 6),
                 "outcome": (p.get("settlement") or {}).get("outcome")}
     pf, pf_why = None, None
