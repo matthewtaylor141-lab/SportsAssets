@@ -617,7 +617,7 @@ jobs:
           echo "::add-mask::$ADMIN_TOKEN"
           pip install -q httpx >/dev/null 2>&1
           if [ "$MODE" = "research-apply" ]; then A="--apply"; else A=""; fi
-          python3 tools/research/activate_research.py --actor owner $A
+          python3 tools/research/activate_research.py --actor "Matt Taylor" $A
           echo "script exit=$?"
       - name: Read the research work and its events back (GET only)
         shell: bash
