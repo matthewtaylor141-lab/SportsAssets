@@ -28,8 +28,9 @@ function ok(s) { return s && s.status === 'OK' ? s.data : null; }
 function chip(s) { var t = s === 'PINNACLE_EXPLORATION_PAPER' ? 'TRAINING' : s === 'PINNACLE_COMPLETED_GAME_MAKER_PAPER' ? 'MAKER' : s === 'PINNACLE_COMPLETED_GAME_PAPER' ? 'INVESTMENT' : 'RESEARCH'; return '<span class="xp-chip xp-' + t + '" title="' + esc(s) + '">' + t + '</span>'; }
 function short(slug) { return esc(String(slug || '').replace(/^(aec|atc)-/, '')); }
 function teamMark(t) { return '<span class="xp-team" title="' + esc(t.name + (t.logo && t.logo.kind === 'flag' ? ' · national flag' : '')) + '"><span class="xp-team-ini" aria-hidden="true">' + esc(t.initials || '?') + '</span>' + (t.logo && t.logo.url ? '<img src="' + esc(t.logo.url) + '" alt="" width="20" height="20" loading="lazy" decoding="async">' : '') + '</span>'; }
-// Both teams of the record's event (server-verified logos by venue team id + league), names kept; the code stays in the tooltip.
-function mkt(x, slug) { var m = (x && x.matchup) || []; if (!m.length) return short(slug); return '<span class="xp-mu" title="' + esc(slug) + '">' + m.slice(0, 2).map(function (t) { return teamMark(t) + '<span class="xp-team-name">' + esc(t.name) + '</span>'; }).join('<span class="xp-vs">vs</span>') + '</span>'; }
+// Both teams of the record's event (server-verified logos by venue team id + league), names kept,
+// and the contract code stays visible: it names the outcome held (…-ned), which the matchup alone does not.
+function mkt(x, slug) { var m = (x && x.matchup) || []; if (!m.length) return short(slug); return '<span class="xp-mu" title="' + esc(slug) + '">' + m.slice(0, 2).map(function (t) { return teamMark(t) + '<span class="xp-team-name">' + esc(t.name) + '</span>'; }).join('<span class="xp-vs">vs</span>') + '</span><span class="xp-code">' + short(slug) + '</span>'; }
 function secNote(s, what) { return '<p class="xp-note">' + esc(what) + ': ' + esc(s ? (s.status + (s.why ? ' · ' + s.why : '')) : 'not in the read') + '</p>'; }
 
 // an unavailable logo leaves the initials, never a broken image
