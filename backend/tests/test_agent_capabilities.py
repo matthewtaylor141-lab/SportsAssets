@@ -261,3 +261,24 @@ def test_offices_include_all_five_tabs_and_context_request():
         h=_cc_page_html(agent)
         for token in ('THE LEARNING WORKBENCH',"['Plans','Collaboration','Investigate','Experiments','Scorecard']",'body.context={capability_task_id:',"/api/command/agents/capabilities"):
             assert token in h
+
+
+@pytest.mark.asyncio
+async def test_a_new_attempt_asks_afresh_but_a_rerun_of_the_same_claim_does_not(monkeypatch):
+    from sportsassets.agents import persona_chat as P
+    c=conn();pool=MagicMock();pool.acquire=lambda:transaction_conn(c)
+    monkeypatch.setattr(R,'evidence',AsyncMock(return_value=True))
+    model=AsyncMock(return_value=answer());monkeypatch.setattr(P,'converse',model)
+    monkeypatch.setattr(W,'finish',AsyncMock())
+    def at(n):
+        t=task();t['spec']['attempts']=n;return t
+    first,second,third=at(1),at(2),at(3)
+    for t in (first,first,second,second,third):await R.execute(pool,t)
+    ids=[x.kwargs['request_id'] for x in model.call_args_list]
+    assert ids[0]==ids[1] and ids[2]==ids[3]
+    assert len({ids[0],ids[2],ids[4]})==3
+    # attempt 1 keeps the id earlier releases used, so an in-flight request
+    # survives the deploy
+    assert ids[0]=='capreview:'+W.stable('capwork:test')
+    from sportsassets.agents import directives as D
+    assert all(D.valid_request_id(i) for i in ids)
