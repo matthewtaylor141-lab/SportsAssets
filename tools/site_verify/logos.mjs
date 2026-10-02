@@ -43,7 +43,9 @@ const MARKS = () => [...document.querySelectorAll(".team-mark, .xp-team")].map((
            w: Math.round(r.width), h: Math.round(r.height),
            pair: el.parentElement ? el.parentElement.querySelectorAll(".team-mark, .xp-team").length : 0 };
 });
-const SHIFT = () => { window.__cls = 0; try { new PerformanceObserver((l) => { for (const e of l.getEntries()) if (!e.hadRecentInput) window.__cls += e.value; }).observe({ type: "layout-shift", buffered: true }); } catch (_) {} };
+const SHIFT = () => { window.__cls = 0; window.__shifts = []; try { new PerformanceObserver((l) => { for (const e of l.getEntries()) { if (e.hadRecentInput) continue; window.__cls += e.value; window.__shifts.push({ v: Math.round(e.value * 1000) / 1000, t: Math.round(e.startTime), src: (e.sources || []).slice(0, 3).map((s) => { const n = s.node; return n && n.nodeType === 1 ? (n.tagName.toLowerCase() + (n.id ? "#" + n.id : "") + (n.className && typeof n.className === "string" ? "." + n.className.trim().split(/\s+/).slice(0, 2).join(".") : "")) : "?"; }) }); } }).observe({ type: "layout-shift", buffered: true }); } catch (_) {} };
+// load lazy images the way a reader does: bring each mark into view in turn
+const REVEAL = async () => { for (const el of document.querySelectorAll(".team-mark, .xp-team")) { el.scrollIntoView({ block: "center" }); await new Promise((r) => setTimeout(r, 60)); } window.scrollTo(0, 0); };
 
 async function signed(ctx) {
   if (!TOKEN) return;
@@ -89,8 +91,26 @@ for (const [ename, engine, dev] of ENGINES) {
         if (n) break; await page.waitForTimeout(1000);
       }
       if (where !== "home") {
-        // open every work item so linked records render
-        await f.evaluate(() => document.querySelectorAll("details.work-item").forEach((d) => d.open = true)).catch(() => {});
+        // every office view (Workboard, Activity, Work & learning): open its
+        // collapsed records, bring each mark into view, count, screenshot
+        R.views = {};
+        const views = await f.evaluate(() => [...document.querySelectorAll("button[data-mg-view]")].map((b) => b.getAttribute("data-mg-view"))).catch(() => []);
+        for (const v of views) {
+          await f.evaluate((v) => document.querySelector('button[data-mg-view="' + v + '"]').click(), v).catch(() => {});
+          await page.waitForTimeout(1500);
+          await f.evaluate(() => document.querySelectorAll("details").forEach((d) => { if (!d.closest(".tech")) d.open = true; })).catch(() => {});
+          await f.evaluate(REVEAL).catch(() => {});
+          await page.waitForTimeout(2500);
+          const vm = await f.evaluate(MARKS).catch(() => []);
+          const vis = vm.filter((m) => m.w > 0 && m.h > 0);
+          R.views[v] = { total: vm.length, visible: vis.length, loaded: vis.filter((m) => m.loaded).length,
+                         broken: vm.filter((m) => m.broken).length, names: [...new Set(vis.map((m) => m.title))].slice(0, 40) };
+          try { await f.locator(".office-layout").screenshot({ path: `${OUT}/logos_${ename}_${where}_${v}.png`, timeout: 20000 }); } catch (_) {}
+        }
+        await f.evaluate(() => { const b = document.querySelector('button[data-mg-view="work"]'); if (b) b.click(); }).catch(() => {});
+        await page.waitForTimeout(1000);
+      } else {
+        await page.evaluate(REVEAL).catch(() => {});
       }
       await page.waitForTimeout(4000);
       const marks = await f.evaluate(MARKS).catch((e) => ({ error: String(e) }));
@@ -105,6 +125,7 @@ for (const [ename, engine, dev] of ENGINES) {
       R.image_status = imgs.reduce((a, x) => (a[x.s] = (a[x.s] || 0) + 1, a), {});
       R.csp_errors = csp;
       R.layout_shift = await page.evaluate(() => window.__cls).catch(() => null);
+      R.shift_sources = await page.evaluate(() => (window.__shifts || []).sort((a, b) => b.v - a.v).slice(0, 8)).catch(() => null);
       await page.screenshot({ path: `${OUT}/logos_${ename}_${where}.png`, fullPage: where === "home" });
       if (where !== "home") {
         try { await f.locator(".office-layout").screenshot({ path: `${OUT}/logos_${ename}_${where}_board.png`, timeout: 20000 }); } catch (_) {}
@@ -139,4 +160,4 @@ report.payload = Object.fromEntries(Object.entries(leagues).map(([lg, L]) => {
 }));
 fs.writeFileSync(`${OUT}/logos_report.json`, JSON.stringify(report, null, 1));
 console.log(JSON.stringify({ payload: report.payload, session: report.session,
-  engines: Object.fromEntries(Object.entries(report.engines).map(([e, v]) => [e, Object.fromEntries(Object.entries(v).map(([w, r]) => [w, r.marks && { total: r.marks.total, loaded: r.marks.loaded, initials: r.marks.initials_only, broken: r.marks.broken, pairs: r.marks.pairs, csp: (r.csp_errors || []).length, cls: r.layout_shift, err: r.error }]))])) }, null, 1));
+  engines: Object.fromEntries(Object.entries(report.engines).map(([e, v]) => [e, Object.fromEntries(Object.entries(v).map(([w, r]) => [w, r.marks && { total: r.marks.total, loaded: r.marks.loaded, initials: r.marks.initials_only, broken: r.marks.broken, pairs: r.marks.pairs, csp: (r.csp_errors || []).length, cls: r.layout_shift, shifts: r.shift_sources, views: r.views, err: r.error }]))])) }, null, 1));
