@@ -99,8 +99,9 @@ class Lease:
 
     async def release(self):
         try:
-            await self.conn.execute("SELECT pg_advisory_unlock($1)",
-                                    FEED_LOCK_KEY)
+            await asyncio.wait_for(self.conn.execute(
+                "SELECT pg_advisory_unlock($1)", FEED_LOCK_KEY),
+                CLOSE_TIMEOUT_S)
         except Exception:                                       # noqa: BLE001
             pass
 
@@ -143,6 +144,9 @@ class FeedOwner:
         return [(s, sp) for s in self.streams for sp in self.sport_ids]
 
     def stop(self):
+        # Revoke synchronously: async cleanup may be waiting on a DB read
+        # or socket operation. No consumer may use the cache in that gap.
+        self.cache.lost(R_STOPPED)
         self.stop_event.set()
 
     async def run(self):
@@ -190,7 +194,11 @@ class FeedOwner:
         if self.armed is None:
             return True
         try:
-            return bool(await self.armed())
+            # This callback uses the shared pool, unlike lease checks on
+            # the dedicated connection. Pool exhaustion must not leave
+            # an already-synced cache authoritative indefinitely.
+            return (await asyncio.wait_for(self.armed(),
+                                           self.liveness_s)) is True
         except Exception:                                       # noqa: BLE001
             return False                  # unreadable control -> disarmed
 
@@ -220,10 +228,17 @@ class FeedOwner:
         if not key:
             self.refused = "KEY_NOT_PRESENT_IN_THIS_SERVICE"
             return attempt
+        if not await self._can_open(lease):
+            return attempt
         self.state = "CONNECTING"
-        ws = await self.connect(PP.WS_URL, key)
+        ws = await asyncio.wait_for(self.connect(PP.WS_URL, key),
+                                    self.liveness_s)
         delivered = False
         try:
+            # Ownership or the arm row may have changed during connect.
+            # Verify again before granting even an unsynced cache epoch.
+            if not await self._can_open(lease):
+                return attempt
             epoch = self.cache.new_connection(self.subscriptions())
             self._note("EPOCH_GRANTED", epoch=epoch)
             await ws.send(json.dumps({"type": "subscribe",
@@ -296,6 +311,21 @@ class FeedOwner:
             except Exception:                                   # noqa: BLE001
                 pass
             self._note("SOCKET_CLOSED")
+
+    async def _can_open(self, lease) -> bool:
+        if self.stop_event.is_set():
+            self.cache.lost(R_STOPPED)
+            return False
+        ok, reason = await self._guards(lease)
+        if self.stop_event.is_set():
+            self.cache.lost(R_STOPPED)
+            return False
+        if not ok:
+            self.cache.lost(reason)
+            self._note(reason)
+            if reason == R_WRITER_LOST:
+                self.refused = R_WRITER_LOST
+        return ok
 
     def status(self) -> dict:
         return {"state": self.state, "refused": self.refused,

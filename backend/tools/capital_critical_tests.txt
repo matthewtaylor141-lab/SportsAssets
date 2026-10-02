@@ -440,3 +440,13 @@ tests/test_agent_office_integration.py
 # The PinnAPI readiness probe never discloses the key: header-only, provider
 # host only, no redirects, bounded relative paths, secret fields redacted
 tests/test_pinnapi_probe.py
+# PinnAPI feed ownership and freshness (Codex C1 review + hardening of
+# 83e59f3): authority revocation, writer-lock and arm guards before connect
+# and before epoch, bounded control/lease/row reads, valid capped heartbeat,
+# unrounded/future-stamp freshness, and Xavier's stale-measure guard.
+tests/test_pinnapi_c1_review.py
+tests/test_pinnapi_c1_addendum.py
+tests/test_pinnapi_feed_ownership.py
+tests/test_pinnapi_feed_runtime.py
+tests/test_a_future_stamp_is_never_fresh.py
+tests/test_paper_handoff_standing_and_audit_rules.py

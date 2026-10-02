@@ -1737,9 +1737,12 @@ async def xavier_measure(conn, ctx: dict, *, pos: dict,
             bool(contract["payout_is_complement"]), at - lookback)
         if v is not None:
             obs = L._epoch(v["observed_at"])
-            age = None if obs is None else round(at - obs, 3)
+            raw_age = None if obs is None else at - obs
+            age = None if raw_age is None else round(raw_age, 3)
             # a stamp after `at` is a clock disagreement, never fresh
-            fresh = age is not None and 0 <= age <= max_age
+            # Compare before display rounding: -0.0004 rounds to -0.0,
+            # and 30.0004 rounds to 30.0. Neither is inside [0, 30].
+            fresh = raw_age is not None and 0 <= raw_age <= max_age
             return dict(base, p=float(v["probability"]),
                         source=("PINNACLE_ONLY_CURRENT" if fresh
                                 else "PINNACLE_ONLY_LATEST"),
