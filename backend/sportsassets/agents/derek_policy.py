@@ -378,8 +378,8 @@ def _freshness_view(fr: dict | None, *, basis: str) -> dict:
         p_lim = L.PINNACLE_MAX_AGE_S
 
     def _q(age, lim):
-        if age is None or lim is None:
-            return "UNKNOWN"
+        if age is None or lim is None or age < 0:
+            return "UNKNOWN"              # a future stamp is not freshness
         return "FRESH" if age <= lim else "STALE"
     venue_q = _q(v_age, v_lim)
     if venue_q == "FRESH" and d is not None and d_lim is not None \

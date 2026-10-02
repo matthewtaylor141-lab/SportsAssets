@@ -4088,6 +4088,13 @@ def _entry_freshness(quote, vq, now) -> dict:
                       "processing delay is unmeasured and cannot be checked")
         out["unknown_side"] = "our_processing_delay"
         return out
+    if p_age < 0:
+        out["fresh"] = False
+        out["why"] = ("the bookmaker's observation is stamped %.2fs AFTER "
+                      "the decision instant; a clock disagreement is not "
+                      "freshness" % (-p_age,))
+        out["unknown_side"] = "pinnacle_clock"
+        return out
     ok = (p_age <= PINNACLE_MAX_AGE_S
           and float(v_age) <= MAX_VENUE_QUOTE_AGE_S
           and float(v_delay) <= MAX_OUR_PROCESSING_DELAY_S)

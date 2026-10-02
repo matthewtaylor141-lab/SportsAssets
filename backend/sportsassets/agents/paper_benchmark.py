@@ -1738,7 +1738,8 @@ async def xavier_measure(conn, ctx: dict, *, pos: dict,
         if v is not None:
             obs = L._epoch(v["observed_at"])
             age = None if obs is None else round(at - obs, 3)
-            fresh = age is not None and age <= max_age
+            # a stamp after `at` is a clock disagreement, never fresh
+            fresh = age is not None and 0 <= age <= max_age
             return dict(base, p=float(v["probability"]),
                         source=("PINNACLE_ONLY_CURRENT" if fresh
                                 else "PINNACLE_ONLY_LATEST"),

@@ -291,6 +291,17 @@ def _pinnacle(cand: dict, *, at: float, max_age: float) -> dict:
                 "qualification": "UNKNOWN", "at": None,
                 "why": "the Pinnacle reading carries no observed_at"}
     age = float(at) - float(obs)
+    if age < 0:
+        # A STAMP AFTER THE DECISION INSTANT IS A CLOCK DISAGREEMENT, NOT
+        # FRESHNESS (the rule bettor_hold_value and the devig gate apply).
+        return {"p": float(p), "qualified": False,
+                "refusal": DP.R_FRESHNESS_UNKNOWN,
+                "qualification": "CLOCKS_DISAGREE", "at": float(obs),
+                "age_s": round(age, 3), "limit_s": max_age,
+                "received_at": pin.get("received_at"),
+                "why": ("the Pinnacle reading is stamped %.1fs AFTER the "
+                        "decision instant; a future stamp is not a fresh "
+                        "one" % (-age,))}
     fresh = age <= float(max_age)
     return {"p": float(p), "qualified": fresh,
             "refusal": None if fresh else DP.R_STALE,
