@@ -6,7 +6,7 @@
 \echo '== M0 · paper orders by role and strategy, last 7 days =='
 SELECT role, strategy, count(*) AS orders,
        round(avg(qty * limit_price), 2) AS avg_paper_notional_usd,
-       round(percentile_cont(0.5) WITHIN GROUP (ORDER BY qty), 2) AS median_qty,
+       round((percentile_cont(0.5) WITHIN GROUP (ORDER BY qty))::numeric, 2) AS median_qty,
        round(min(qty), 4) AS min_qty, round(max(qty), 4) AS max_qty
   FROM paper_orders
  WHERE account_id = 'paper_acct_main' AND decided_at > now() - interval '7 days'
