@@ -16,10 +16,10 @@ Activity
 Work & learning
 Compact view
 Meeting brief ↓
-Records read 2s ago
-Agent pass 1m ago
+Records read 1s ago
+Agent pass 51s ago
 LATEST RECORDED WORK · DEREK
-1m ago
+7m ago
 São Bernardo to win
 Sao Bernardo FC vs. CR Brasil
 
@@ -55,7 +55,7 @@ Gross edge
 Not recorded net EV
 Refused
 the edge was below the policy's minimum (the threshold recorded on the decision)
-Evaluated 1m ago
+Evaluated 7m ago
 +
 WA
 Wales to win
@@ -66,7 +66,7 @@ Gross edge
 Not recorded net EV
 Refused
 the edge was below the policy's minimum (the threshold recorded on the decision)
-Evaluated 1m ago
+Evaluated 7m ago
 +
 NE
 Netherlands to win
@@ -77,7 +77,7 @@ Gross edge
 Not recorded net EV
 Refused
 the edge was below the policy's minimum (the threshold recorded on the decision)
-Evaluated 1m ago
+Evaluated 7m ago
 +
 GR
 Greece to win
@@ -88,7 +88,7 @@ Gross edge
 Not recorded net EV
 Refused
 the edge was below the policy's minimum (the threshold recorded on the decision)
-Evaluated 1m ago
+Evaluated 7m ago
 +
 FR
 France to win
@@ -99,7 +99,7 @@ Gross edge
 Not recorded net EV
 Refused
 the edge was below the policy's minimum (the threshold recorded on the decision)
-Evaluated 1m ago
+Evaluated 7m ago
 +
 AV
 Avai to win
@@ -110,7 +110,7 @@ Gross edge
 Not recorded net EV
 Refused
 the edge was below the policy's minimum (the threshold recorded on the decision)
-Evaluated 1m ago
+Evaluated 7m ago
 +
 CU
 Cuiabá to win
@@ -121,7 +121,7 @@ Gross edge
 Not recorded net EV
 Refused
 the edge was below the policy's minimum (the threshold recorded on the decision)
-Evaluated 1m ago
+Evaluated 7m ago
 +
 SÃ
 São Bernardo to win
@@ -132,7 +132,7 @@ Not recorded
 Not recorded net EV
 Refused
 no usable Pinnacle price
-Evaluated 1m ago
+Evaluated 7m ago
 +
 AV
 Avai to win
@@ -143,7 +143,7 @@ Not recorded
 Not recorded net EV
 Refused
 no research model exists yet
-Evaluated 1m ago
+Evaluated 7m ago
 +
 CU
 Cuiabá to win
@@ -154,7 +154,7 @@ Not recorded
 Not recorded net EV
 Refused
 no research model exists yet
-Evaluated 1m ago
+Evaluated 7m ago
 +
 LO
 Londrina to win
@@ -165,7 +165,7 @@ Not recorded
 Not recorded net EV
 Refused
 no research model exists yet
-Evaluated 1m ago
+Evaluated 7m ago
 +
 PO
 Portugal to win
@@ -176,7 +176,7 @@ Not recorded
 Not recorded net EV
 Refused
 the venue's and Pinnacle's settlement rules are not established as the same
-Evaluated 1m ago
+Evaluated 7m ago
 +
 All records, strategy detail and technical evidence
 Presentation of recorded state. This page sends no order and holds no credential; it reads /api/command/agents/derek with the COMMAND session. The 3D characters are licensed Microsoft Rocketbox models (MIT licence, credited below; shipped with their licence file); a device that cannot draw them shows a 2D portrait card. The pose follows the paper runtime's own heartbeat (paper_session_health) and never stands in for data. UNKNOWN is not zero; EMPTY is not success. The 3D character on this page is a licensed model, not an original illustration. Character model: Microsoft Rocketbox Business_Male_03 (MIT, © 2020 Microsoft). Licence: MIT, shipped with the model as ROCKETBOX_LICENSE.md.

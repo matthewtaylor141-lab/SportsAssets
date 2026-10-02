@@ -17,9 +17,9 @@ Work & learning
 Compact view
 Meeting brief ↓
 Records read 1s ago
-Agent pass 1m ago
+Agent pass 56s ago
 LATEST RECORDED WORK · XAVIER
-1m ago
+36s ago
 Tampa Bay Rays to win
 Game 1: NY Yankees vs. TB Rays
 
@@ -56,7 +56,7 @@ $236.46
 -$7.44 unrealized
 Hold
 Sell 361 @ $0.71
-Review 1m ago
+Review 37s ago
 +
 NE
 Netherlands to win
@@ -67,7 +67,7 @@ $105.00
 -$1.17 unrealized
 Hold
 Sell 125 @ $0.87
-Review 1m ago
+Review 37s ago
 +
 CR
 Croatia to win
@@ -78,7 +78,7 @@ $1.32
 -$0.13 unrealized
 Hold
 Sell 6 @ $0.27
-Review 1m ago
+Review 36s ago
 +
 FR
 France to win
@@ -89,7 +89,7 @@ $356.58
 -$14.72 unrealized
 Hold
 Sell 566 @ $0.69
-Review 1m ago
+Review 36s ago
 +
 CU
 Cuiabá to win
@@ -100,7 +100,7 @@ $3.32
 -$0.12 unrealized
 Hold
 Sell 4 @ $0.88
-Review 1m ago
+Review 37s ago
 +
 FR
 France to win
@@ -111,7 +111,7 @@ $546.72
 -$20.50 unrealized
 Hold
 Sell 816 @ $0.72
-Review 1m ago
+Review 37s ago
 +
 LO
 Londrina to win
@@ -122,7 +122,7 @@ $85.80
 -$10.05 unrealized
 Hold
 Sell 286 @ $0.37
-Review 1m ago
+Review 37s ago
 +
 SÃ
 São Bernardo to win
@@ -133,7 +133,7 @@ $794.84
 -$195.38 unrealized
 Hold
 Sell 2564 @ $0.42
-Review 1m ago
+Review 36s ago
 +
 AV
 Avai to win
@@ -144,7 +144,7 @@ $876.90
 -$86.59 unrealized
 Hold
 Sell 2370 @ $0.44
-Review 1m ago
+Review 36s ago
 +
 PO
 Portugal to win
@@ -155,7 +155,7 @@ $245.44
 -$6.99 unrealized
 Hold
 Sell 416 @ $0.64
-Review 1m ago
+Review 36s ago
 +
 GR
 Greece to win
@@ -166,7 +166,7 @@ $680.11
 -$128.25 unrealized
 Hold
 Sell 2957 @ $0.30
-Review 1m ago
+Review 37s ago
 +
 AT
 Atletico Goianiense to win
@@ -177,7 +177,7 @@ $95.20
 -$3.31 unrealized
 Hold
 Sell 136 @ $0.75
-Review 1m ago
+Review 36s ago
 +
 BO
 Botafogo-SP to win
@@ -188,7 +188,7 @@ $90.44
 -$8.73 unrealized
 Hold
 Sell 238 @ $0.45
-Review 1m ago
+Review 37s ago
 +
 WA
 Wales to win
@@ -199,7 +199,7 @@ $91.20
 -$8.75 unrealized
 Hold
 Sell 380 @ $0.29
-Review 1m ago
+Review 37s ago
 +
 TA
 
@@ -211,7 +211,7 @@ $94.60
 -$4.67 unrealized
 Hold
 Sell 172 @ $0.61
-Review 1m ago
+Review 36s ago
 +
 CL
 
@@ -223,7 +223,7 @@ $94.54
 -$4.37 unrealized
 Hold
 Sell 163 @ $0.64
-Review 1m ago
+Review 37s ago
 +
 MI
 
@@ -235,7 +235,7 @@ $94.32
 -$4.37 unrealized
 Hold
 Sell 144 @ $0.71
-Review 1m ago
+Review 36s ago
 +
 All records, strategy detail and technical evidence
 Presentation of recorded state. This page sends no order and holds no credential; it reads /api/command/agents/xavier with the COMMAND session. The 3D characters are licensed Microsoft Rocketbox models (MIT licence, credited below; shipped with their licence file); a device that cannot draw them shows a 2D portrait card. The pose follows the paper runtime's own heartbeat (paper_session_health) and never stands in for data. UNKNOWN is not zero; EMPTY is not success. The 3D character on this page is a licensed model, not an original illustration. Character model: Microsoft Rocketbox Business_Male_05 (MIT, © 2020 Microsoft). Licence: MIT, shipped with the model as ROCKETBOX_LICENSE.md.

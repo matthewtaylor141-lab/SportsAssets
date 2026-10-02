@@ -1,22 +1,66 @@
 SIMULATED CAPITAL · LIVE MARKET DATA
 Cash
 $495,170.11
+Reserved
+$0.00
+Available
+$495,170.11
+Position value
+$4,492.79
 Equity
 $499,662.90
 Realized P&L
 +$168.43
-1 STALE MARK(S)
+Unrealized P&L
+−$505.54
+2 STALE MARK(S)
 CONNECTING · last ledger change Oct 2, 09:47:34 ET
 Skip to dashboard
-
-
+C O M M A N D
+Management office
+RESEARCH · OPERATIONS · OVERSIGHT
+OPERATIONS
+Overview
+Portfolio
+Orders
+EV decisions
+Shadow
+Risk & exposure
+OUR AGENTS
+Derek
+Discovery & Entry
+Xavier
+Portfolio Management
+Audrey
+Audit & Intelligence
+AI AGENTS
+GOVERNANCE
+Intelligence
+Reporting
+Audit trail
+Investor briefing
+EXECUTION AUTHORITY
+Order submission
+DISABLED
+Auto promotion
+OFF
+Connection settings
+BT
+Workspace observer
+Institutional preview
+BettorToken
+/
+Overview
+Search the workspace
+⌘ K
 UPDATING · 15s
-
-
+Pause motion
 BETTORTOKEN / MANAGEMENT OFFICE
 Your team. Your capital.
 One clear picture.
+
 A shared workspace for decisions, conversations and accountability.
+
 Meet your AI team ▷
 Download briefing
 Ask Audrey ↗
@@ -47,7 +91,7 @@ Position value
 $4,492.79
 Unrealized P&L
 -$505.54
-1 position marks are stale.
+2 position marks are stale.
 THE EXPERIMENT
 What the team is doing with the paper account.
 Every figure is a stored record · simulated execution · live market data
@@ -57,26 +101,28 @@ Session & data freshness
 paper_session_20261001T014716Z · started 2026-10-01 01:47Z
 
 Latest valuation
-61 s ago
+6 min ago
 Latest decision
-60 s ago
+6 min ago
 Latest order book
-26 s ago
+34 s ago
 Agent pass
-18 s ago
+33 s ago
 Collection cycle
-11 min ago
+2 min ago
 Latest ledger entry
-59 min ago
-Pass ran in 25.6 s · collector ZERO_EVALUATED__INPUT_PATH_BLOCKED · build e1514ec · real money DISABLED
-Agent activity
+64 min ago
 
+Pass ran in 14.0 s · collector ZERO_EVALUATED__INPUT_PATH_BLOCKED · build e1514ec · real money DISABLED
+
+Agent activity
 Derek · latest decision
-60 s ago · REFUSE no qualified pinnacle probability
+6 min ago · REFUSE no qualified pinnacle probability
 Xavier · reviews (24 h)
-6727 · 20 handoffs
+6744 · 20 handoffs
 Audrey · findings
 8 latest
+
 Audrey's operational recommendations
 
 MEASURING · to DEREK · 8 decisions cleared the 0.5 pp gross threshold but the taker fee consumed the edge; rest a bid below the ask where both rules hold at the price paid
@@ -85,7 +131,9 @@ IMPROVED · to DEREK · 39 of 125 book reads in the last 6 h were cut by the dec
 0 agent responses · 35 measurements · automated acknowledgement (template, not an agent review)
 IMPROVED · to DEREK · 63 events in the last collection cycle never reached a decision (by code: {"NO_PINNACLE_ON_EVENT": 33, "QUOTE_STALE_ON_ARRIVAL": 13, "VENUE_BOOK_READ_FAILED": 2, "NO_VENUE_CONTRACT_FOR_EVENT": 5, "VENUE_BOOK_CURRENCY_NOT_ESTABLISHED": 4, "VENUE_NATIVE_EVENT_MATCHES_ONLY_ONE_TEAM": 5, "VENUE_BOOK_CURRENCY_CONTRADICTED_BY_CONTRACT": 1}); investigate per sport without weakening identity, market or settlement matching
 0 agent responses · 35 measurements · automated acknowledgement (template, not an agent review)
+
 Operational improvements only — never reported as profitable learning.
+
 Opportunities evaluated (24 h)
 
 704 valuations · 24 fixtures · 2 sports
@@ -100,7 +148,9 @@ INVESTMENT Investment policy (0.5 pp, taker)	704	2	326 · another strategy alrea
 RESEARCH Derek research (entries off)	704	0	343 · no research model exists yet
 300 · the venue's and Pinnacle's settlement rules are not established as the same
 59 · no usable Pinnacle price
-Every attempt recorded (6 h): decided 406
+
+Every attempt recorded (6 h): decided 398
+
 Closest investment opportunities (24 h)
 
 Latest decision per market and policy version · serving version V2 first, historical versions after
@@ -108,16 +158,19 @@ Latest decision per market and policy version · serving version V2 first, histo
 MARKET	POLICY	AGE	PINNACLE	PRICE	GROSS	FEE	AFTER FEES	RESULT
 brb-acg-afc-2026-10-03-acg	V2	16 h ago	0.7172	0.71	0.72 pp	1.43 pp	-0.71 pp	gross edge clears threshold but fees consume it
 unl-cro-eng-2026-10-03-cro	V2	5 h ago	0.2348	0.23	0.48 pp	not computed	not computed	below min gross edge
-brb-lon-cri-2026-10-02-lon	V2	72 s ago	0.3131	0.31	0.31 pp	not computed	not computed	below min gross edge
-mlb-sd-mil-2026-10-03	V2	15 min ago	0.6602	0.66	0.02 pp	not computed	not computed	below min gross edge
+brb-lon-cri-2026-10-02-lon	V2	6 min ago	0.3131	0.31	0.31 pp	not computed	not computed	below min gross edge
+mlb-sd-mil-2026-10-03	V2	20 min ago	0.6602	0.66	0.02 pp	not computed	not computed	below min gross edge
 brb-nov-goi-2026-10-01-nov	V2	15 h ago	0.6193	0.62	-0.07 pp	not computed	not computed	below min gross edge
-brb-ber-crb-2026-10-02-ber	V2	41 min ago	0.3185	0.32	-0.15 pp	not computed	not computed	below min gross edge
-unl-wal-den-2026-10-04-wal	V2	85 s ago	0.2484	0.25	-0.16 pp	not computed	not computed	below min gross edge
-unl-por-nor-2026-10-04-por	V2	26 min ago	0.5979	0.60	-0.21 pp	not computed	not computed	below min gross edge
-The serving investment rule: Pinnacle probability minus price ≥ 0.5 pp at every level used, and expected profit after the taker fee strictly positive. A historical row keeps the reason it was given under the rules in force at the time. "Not computed" means the policy stopped before the fee step.
-Standing orders 0 entry · 17 protection
+brb-ber-crb-2026-10-02-ber	V2	46 min ago	0.3185	0.32	-0.15 pp	not computed	not computed	below min gross edge
+unl-wal-den-2026-10-04-wal	V2	6 min ago	0.2484	0.25	-0.16 pp	not computed	not computed	below min gross edge
+unl-por-nor-2026-10-04-por	V2	31 min ago	0.5979	0.60	-0.21 pp	not computed	not computed	below min gross edge
 
+The serving investment rule: Pinnacle probability minus price ≥ 0.5 pp at every level used, and expected profit after the taker fee strictly positive. A historical row keeps the reason it was given under the rules in force at the time. "Not computed" means the policy stopped before the fee step.
+
+Standing orders 0 entry · 17 protection
 STRATEGY	MARKET	ROLE	TYPE	PRICE	QTY / FILLED	RESERVED	EXPIRES
+TRAINING	unl-wal-den-2026-10-04-wal	STANDING_PROTECTION	RESTING GTD	0.29	380 / 0	$0.00	15:49Z
+TRAINING	mlb-atl-lad-2026-10-03	STANDING_PROTECTION	RESTING GTD	0.71	361 / 0	$0.00	15:49Z
 TRAINING	brb-ava-csc-2026-10-03-ava	STANDING_PROTECTION	RESTING GTD	0.44	2370 / 0	$0.00	15:40Z
 TRAINING	unl-ned-srb-2026-10-04-ned	STANDING_PROTECTION	RESTING GTD	0.87	125 / 0	$0.00	15:35Z
 TRAINING	unl-gre-ger-2026-10-04-gre	STANDING_PROTECTION	RESTING GTD	0.30	2957 / 0	$0.00	15:31Z
@@ -133,11 +186,10 @@ TRAINING	mlb-cws-cle-2026-10-03	STANDING_PROTECTION	RESTING GTD	0.64	163 / 0	$0.
 TRAINING	brb-bot-vln-2026-10-03-bot	STANDING_PROTECTION	RESTING GTD	0.45	238 / 0	$0.00	14:58Z
 TRAINING	unl-cro-eng-2026-10-03-cro	STANDING_PROTECTION	RESTING GTD	0.27	6 / 0	$0.00	14:54Z
 TRAINING	unl-por-nor-2026-10-04-por	STANDING_PROTECTION	RESTING GTD	0.64	416 / 0	$0.00	14:54Z
-TRAINING	mlb-atl-lad-2026-10-03	STANDING_PROTECTION	RESTING GTD	0.71	361 / 0	$0.00	14:47Z
-TRAINING	unl-wal-den-2026-10-04-wal	STANDING_PROTECTION	RESTING GTD	0.29	380 / 0	$0.00	14:46Z
-An order is not a fill: it reserves cash until it fills, expires or is cancelled.
-Positions 17 open · 25 recent fills
 
+An order is not a fill: it reserves cash until it fills, expires or is cancelled.
+
+Positions 17 open · 25 recent fills
 STRATEGY	MARKET	SIDE	OPEN QTY	COST BASIS	UNREALIZED
 TRAINING Training / simulated execution	unl-ned-srb-2026-10-04-ned	LONG	125	$106.17	-$1.17
 TRAINING Training / simulated execution	unl-fra-ita-2026-10-02-fra	LONG	816	$567.22	-$20.50
@@ -156,11 +208,13 @@ TRAINING Training / simulated execution	unl-fra-bel-2026-10-05-fra	LONG	566	$371
 TRAINING Training / simulated execution	unl-cro-eng-2026-10-03-cro	LONG	6	$1.45	-$0.13
 TRAINING Training / simulated execution	mlb-sd-mil-2026-10-03	SHORT	144	$98.69	-$4.37
 TRAINING Training / simulated execution	mlb-nyy-tb-2026-10-03	SHORT	172	$99.27	-$4.67
+
 By strategy (one ledger; strategies sum to the account)
 
 STRATEGY	OPEN / ALL	REALIZED	UNREALIZED	FEES
 INVESTMENT Investment policy (0.5 pp, taker)	0 / 2	$165.52	$0.00	$41.30
 TRAINING Training / simulated execution (exploration)	17 / 18	$2.91	-$505.54	$185.16
+
 Latest simulated fills
 
 TRAINING ENTRY BUY 361 @ 0.66 · mlb-atl-lad-2026-10-03
@@ -176,16 +230,17 @@ fee $0.04 · ledger #81
 TRAINING ENTRY BUY 816 @ 0.68 · unl-fra-ita-2026-10-02-fra
 fee $12.34 · ledger #62
 Acquisition throughput (6 h)
-
 HOUR	BOOK READS	SHARED	FAILED	CUT BY DEADLINE
-14:00Z	267	21	65	0
+14:00Z	297	21	77	0
 13:00Z	368	3	54	0
 12:00Z	366	1	52	0
 11:00Z	388	7	35	0
 10:00Z	374	3	31	0
 09:00Z	393	16	40	0
-08:00Z	92	2	10	0
+08:00Z	54	0	1	0
+
 A shared read answers a decision from this server's own seconds-old venue read (same freshness limits), saving a venue request.
+
 YOUR AI TEAM
 The people behind the process.
 3 specialist agents · Shared accountability
@@ -193,6 +248,7 @@ D
 01 / AI AGENT
 DISCOVERY & ENTRY
 Derek
+
 Find the opportunity. Explain the conviction.
 
 2497 recorded decisions · 45 entry decisions
@@ -202,6 +258,7 @@ X
 02 / AI AGENT
 PORTFOLIO MANAGEMENT
 Xavier
+
 Own the position. Manage the outcome.
 
 17 open positions · 17 protection orders
@@ -211,6 +268,7 @@ A
 03 / AI AGENT
 AUDIT & INTELLIGENCE
 Audrey
+
 Verify the result. Improve the process.
 
 236 audit findings · Latest report 2026-10-02
@@ -218,13 +276,17 @@ Talk to Audrey
 Workspace ↗
 MANAGEMENT DESK
 Start with a better question.
+
 Ask the team to show its work. Every conversation should lead back to the decisions, evidence and account.
+
 Why did we pass on the latest opportunity? ↗
 What needs my attention today? ↗
 How would you manage the next position? ↗
 LEARNING & OVERSIGHT
 Experience into evidence.
+
 Audrey connects decisions with outcomes and improvement proposals. Ask for the recorded learning and activation status.
+
 Record the decision and its inputs
 Audit actions against outcomes
 Evaluate and approve a policy change
@@ -232,7 +294,7 @@ Review learning with Audrey ↗
 Data freshness & session details
 CONNECTING
 Funded system (inactive)
-secondary · real-money execution disabled · LIVE
+secondary · real-money execution disabled · DISCONNECTED
 READ ONLY
 /
 NO ORDER SUBMISSION PATH
