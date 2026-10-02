@@ -62,7 +62,7 @@ def catalogue_sql() -> str:
         "AND coalesce(sports_type, '') NOT LIKE '%s%%'" % p
         for p in vreal.SIMULATED_SPORTS_TYPE_PREFIXES)
     return ("""SELECT identifier, side_norm, event_slug, event_title, kind,
-       line, sports_type, extract(epoch FROM game_start) AS game_start
+       line, sports_type, extract(epoch FROM game_start)::float8 AS game_start
   FROM us_premap
  WHERE game_start > now() - interval '6 hours'
    %s
@@ -95,6 +95,15 @@ def family_of(kind: Optional[str], line) -> tuple:
     return "MONEYLINE", True, None
 
 
+def _epoch(v) -> Optional[float]:
+    """Postgres extract(epoch) is numeric (asyncpg: Decimal); the feed's
+    starts are floats. One numeric type, or None."""
+    try:
+        return None if v is None else float(v)
+    except (TypeError, ValueError):
+        return None
+
+
 def phase_of(game_start: Optional[float], now: float) -> str:
     if game_start is None:
         return "UNKNOWN"
@@ -113,6 +122,7 @@ def match_event(sides, game_start, feed_events) -> tuple:
     [{id, home, away, start}] -- both teams, either orientation, one-to-one,
     within START_TOLERANCE_S."""
     from .workers import ext_pinnacle_loop as X
+    game_start = _epoch(game_start)
     a, b = (X._team_tokens(s)[0] for s in sides)
     hits = []
     for e in feed_events:
@@ -165,7 +175,8 @@ def census(rows, feed_view: dict, *, subscribed_sports, synced: bool,
         total += 1
         sid = sport_id_of(r.get("sports_type"))
         fam, supported, why = family_of(r.get("kind"), r.get("line"))
-        ph = phase_of(r.get("game_start"), now)
+        gs = _epoch(r.get("game_start"))
+        ph = phase_of(gs, now)
         if sid is None:
             state = S_UNMAPPED_SPORT
         elif sid not in subscribed_sports:
@@ -177,7 +188,7 @@ def census(rows, feed_view: dict, *, subscribed_sports, synced: bool,
             if ek not in by_event:
                 sides = _sides(r.get("event_title"))
                 by_event[ek] = ((S_NO_SIDES, None) if not sides else
-                                match_event(sides, r.get("game_start"),
+                                match_event(sides, gs,
                                             feed_view.get(sid, [])))
             state = by_event[ek][0]
             if state == S_SUPPORTED and not supported:

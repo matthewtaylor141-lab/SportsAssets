@@ -294,3 +294,44 @@ def test_census_refuses_a_squad_qualifier_mismatch_and_far_start():
                              "start": now + 6 * 3600}]
     assert C.match_event(("Arsenal", "Chelsea"), now, feed)[0] == \
         C.S_NO_FEED_EVENT
+
+
+def test_census_accepts_postgres_numeric_epochs():
+    """Production 2026-10-02 01:00Z: the census reported TypeError because
+    extract(epoch) is numeric (asyncpg Decimal) and the feed's starts are
+    floats. The SQL casts to float8 and the census coerces either way."""
+    from decimal import Decimal
+    from sportsassets import pinnapi_census as C
+    assert "::float8 AS game_start" in C.catalogue_sql()
+    rows = [{"identifier": "x", "side_norm": "a", "event_slug": "e1",
+             "event_title": "Chicago White Sox vs. Cleveland Guardians",
+             "kind": "moneyline", "line": None, "sports_type": "baseball_mlb",
+             "game_start": Decimal("1790950000.000000")}]
+    view = {6: [{"id": 1, "home": "Cleveland Guardians",
+                 "away": "Chicago White Sox", "start": 1790950000.0,
+                 "live": False}]}
+    out = C.census(rows, view, subscribed_sports={6}, synced=True,
+                   now=1790900000.0)
+    assert out["reconciled"] and out["states"] == {C.S_SUPPORTED: 1}
+
+
+@pg
+async def test_catalogue_sql_runs_on_real_postgres_and_returns_floats():
+    from sportsassets import pinnapi_census as C
+    conn = await H.connect()
+    try:
+        await conn.execute("BEGIN")
+        cols = await conn.fetch(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = 'us_premap'")
+        names = {r["column_name"] for r in cols}
+        need = {"identifier", "side_norm", "event_slug", "event_title",
+                "kind", "line", "sports_type", "game_start"}
+        assert need <= names, need - names
+        rows = await conn.fetch(C.catalogue_sql())
+        for r in rows:
+            assert r["game_start"] is None or isinstance(r["game_start"],
+                                                         float)
+        await conn.execute("ROLLBACK")
+    finally:
+        await conn.close()

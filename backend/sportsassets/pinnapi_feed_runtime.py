@@ -173,7 +173,8 @@ async def _beat_loop(pool):
             except asyncio.CancelledError:
                 raise
             except Exception as exc:                            # noqa: BLE001
-                _STATE["census"] = {"error": type(exc).__name__}
+                _STATE["census"] = {"error": type(exc).__name__,
+                                    "detail": str(exc)[:200]}
         try:
             async with pool.acquire() as c:
                 await c.execute(
