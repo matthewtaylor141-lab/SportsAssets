@@ -181,7 +181,8 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
     pin["cross_strategy_exposure"] = cross
     if cross["held"]:
         refusals.append(PB.R_CROSS_STRATEGY)
-    if not refusals and await conn.fetchval(
+    from .. import bettor_paper_limits as LIMITS
+    if not refusals and not LIMITS.uses_owner_policy(ctx["account_id"]) and await conn.fetchval(
             "SELECT EXISTS (SELECT 1 FROM paper_orders WHERE account_id=$1 "
             "   AND strategy=$2 AND role='ENTRY' AND state = ANY($3::text[]) "
             "   AND (us_market_slug=$4 OR ($5::text IS NOT NULL AND "
@@ -227,8 +228,9 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
                 refusals.append(price["refusal"])
             else:
                 lim = float(price["limit"])
-                budget = min(float(ent["target_order_usd"]),
-                             float(cfg["risk"]["per_order_cap_usd"]))
+                budget = float(ent["target_order_usd"])
+                if cfg["risk"].get("per_order_cap_usd") is not None:
+                    budget = min(budget, float(cfg["risk"]["per_order_cap_usd"]))
                 per = lim + float(L.max_fee_for(1, lim, at=at,
                                                 fee_fn=fee_fn))
                 qty = int(max(0, math.floor(budget / per + 1e-9)))

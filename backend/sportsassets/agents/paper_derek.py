@@ -235,7 +235,7 @@ def size_and_limit(levels: list, *, p_blended: float, threshold: float,
     limit = max(lv["price"] for lv in ok)
     wire = next(lv["wire"] for lv in ok if lv["price"] == limit)
     depth = sum(float(lv["qty"]) for lv in ok)
-    budget = min(float(target_usd), float(cap_usd))
+    budget = float(target_usd) if cap_usd is None else min(float(target_usd), float(cap_usd))
     per = float(limit) + float(fee_per_contract_max)
     qty = math.floor(min(depth, budget / per if per > 0 else 0.0))
     return {"qty": int(max(qty, 0)), "limit": float(limit), "wire": wire,
@@ -470,7 +470,7 @@ async def decide_one(conn, ctx: dict, row: dict) -> dict:
             levels, p_blended=p_blend,
             threshold=params["min_gross_edge_pp"],
             target_usd=float(ent["target_order_usd"]),
-            cap_usd=float(cfg["risk"]["per_order_cap_usd"]),
+            cap_usd=cfg["risk"].get("per_order_cap_usd"),
             fee_per_contract_max=maxfee1)
         walk_qty = sized["qty"] if sized["qty"] >= 1 else min(
             1.0, float(levels[0]["qty"]))
@@ -633,7 +633,11 @@ def decision_provenance(**kw) -> dict:
     except Exception as exc:                                    # noqa: BLE001
         return {"error": "PAPER_LEARNING_UNAVAILABLE: %s"
                 % type(exc).__name__}
-    return PLRN.safe_provenance(**kw)
+    result = PLRN.safe_provenance(**kw)
+    session = kw.get("session") or {}
+    if session.get("capital_policy"):
+        result["capital_policy"] = session["capital_policy"]
+    return result
 
 
 async def entries_switch(conn) -> dict:

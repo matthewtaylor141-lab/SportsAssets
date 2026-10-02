@@ -254,7 +254,11 @@ async def ensure_session(conn, *, now: float | None = None,
 
 def session_view(row) -> dict:
     d = dict(row)
-    return {"session_id": d["session_id"], "account_id": d["account_id"],
+    from . import bettor_paper_limits as LIMITS
+    frozen_config = L._j(d["config"])
+    return {"effective_config": LIMITS.effective_config(frozen_config, d["account_id"]),
+            "capital_policy": LIMITS.describe(d["account_id"]),
+            "session_id": d["session_id"], "account_id": d["account_id"],
             "started_at": L._epoch(d["started_at"]),
             "config": L._j(d["config"]), "config_sha": d["config_sha"],
             "simulator_version": d["simulator_version"],

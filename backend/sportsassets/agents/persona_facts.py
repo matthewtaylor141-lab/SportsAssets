@@ -918,13 +918,16 @@ async def _experiment(conn, f: "Facts", now) -> None:
             f.add("paper_experiment_read", "exploration_limits",
                   "exploration_exposure_usd", ex["exposure_usd"],
                   "exploration (training / simulated execution, not "
-                  "investment performance): exposure $%.2f of $%.0f, "
-                  "realized losses $%.2f of the $%.0f stop, %d open "
-                  "position(s)" % (
+                  "investment performance): exposure $%.2f; aggregate cap %s; "
+                  "realized losses $%.2f; loss stop %s; %d open position(s). "
+                  "Average entry sizing target $%.0f including fees; no per-order ceiling, subject to available cash." % (
                       ex["exposure_usd"],
-                      ex["limits"]["max_aggregate_exposure_usd"],
+                      ("none" if ex["limits"]["max_aggregate_exposure_usd"] is None
+                       else "$%.0f" % ex["limits"]["max_aggregate_exposure_usd"]),
                       ex["realized_losses_usd"],
-                      ex["limits"]["loss_stop_usd"], ex["open_positions"]))
+                      ("none" if ex["limits"]["loss_stop_usd"] is None
+                       else "$%.0f" % ex["limits"]["loss_stop_usd"]),
+                      ex["open_positions"], ex["limits"]["target_entry_cost_usd"]))
         ag = await EXP.agents(conn, at)
         for r in (ag["audrey"].get("recommendations") or [])[:3]:
             f.add("paper_experiment_read", r["recommendation_id"],

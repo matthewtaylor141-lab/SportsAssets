@@ -128,11 +128,11 @@ async def _setup(conn, tag, now):
 
 def test_the_owner_limits_and_labels_are_the_authorized_ones():
     d = PEX.describe()
-    assert d["limits"] == {"max_entry_cost_usd_incl_fees": 1000.0,
-                           "max_aggregate_exposure_usd": 5000.0,
-                           "loss_stop_realized_usd": 1000.0,
-                           "positions_per_fixture": 1,
-                           "overlap_with_other_strategies": "refused"}
+    assert d["limits"] == {"max_entry_cost_usd_incl_fees": None, "target_entry_cost_usd": 1000.0,
+                           "max_aggregate_exposure_usd": None,
+                           "loss_stop_realized_usd": None,
+                           "positions_per_fixture": None,
+                           "overlap_with_other_strategies": "allowed on main account"}
     assert PEX.LABEL == "Training / simulated execution"
     assert "not investment performance" in PB.EXPLORE_DISCLOSURE
     assert PB.EXPLORE_POLICY["kind"] == "EXPLORATION"
@@ -196,8 +196,8 @@ async def test_exploration_enters_a_losing_candidate_and_the_chain_completes(
         assert d["decision_id"].startswith("paperexp:")
         pdx = H.j(d["policy_decision"])
         entry_check = next(c for c in pdx["conditions"]
-                           if c["condition"] == "entry_cost_incl_fees_within_budget")
-        assert entry_check["threshold"] == 1000.0
+                           if c["condition"] == "entry_cost_incl_fees_against_target")
+        assert entry_check["threshold"] is None and entry_check["target"] == 1000.0
         assert entry_check["passed"] is True
         est = pdx["estimate"]
         assert est["gross_edge_pp_at_best"] == pytest.approx(0.5)
@@ -319,22 +319,15 @@ async def test_each_owner_limit_and_safeguard_refuses_by_name(explore_only,
         await _pass(conn, acct, t, now, client)
         d2 = await _dec(conn, acct, v2["valuation_id"], EXPLORE)
         assert d2["refusal"] == PEX.R_FIXTURE_TAKEN
-        # the aggregate limit: with $100 aggregate, the next fixture refuses
-        monkeypatch.setattr(PEX, "MAX_AGGREGATE_EXPOSURE_USD", 100.0)
-        v3, d3 = await one()
-        assert d3["refusal"] == PEX.R_AGGREGATE
-        monkeypatch.setattr(PEX, "MAX_AGGREGATE_EXPOSURE_USD", 5000.0)
-        # the realized-loss stop
-        monkeypatch.setattr(PEX, "LOSS_STOP_USD", 0.0)
-        v4, d4 = await one()
-        assert d4["refusal"] == PEX.R_LOSS_STOP
-        monkeypatch.setattr(PEX, "LOSS_STOP_USD", 1000.0)
-        # UNDER THE LOCK too: the check refuses an order the limits forbid
+        # V3 removes the aggregate/loss gates; per-entry and cash remain.
         st = await PEX.limits_state(conn, acct["account_id"])
+        assert st["limits"]["max_aggregate_exposure_usd"] is None
+        assert st["limits"]["loss_stop_usd"] is None
+        assert st["loss_stop_reached"] is False
+        assert st["headroom_basis"] == "AVAILABLE_SIMULATED_CASH"
         chk = PEX.locked_check_for("condition:other", "other-slug")
-        got = await chk(conn, {"account_id": acct["account_id"]},
-                        L.D(5000.0 - st["exposure_usd"] + 1.0))
-        assert got["refusal"] in (PEX.R_AGGREGATE, PEX.R_TOO_DEAR)
+        got = await chk(conn, {"account_id": acct["account_id"]}, L.D(1001))
+        assert got["refusal"] == PEX.R_TOO_DEAR
         got = await chk(conn, {"account_id": acct["account_id"]}, L.D(50))
         assert got is None
         got = await PEX.locked_check_for(

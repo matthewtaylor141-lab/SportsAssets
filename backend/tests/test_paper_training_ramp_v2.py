@@ -6,15 +6,15 @@ from sportsassets.agents import paper_explore as E, paper_benchmark as B
 
 
 def test_versioned_ramp_preserves_investment_requirements_and_total_bounds():
-    assert E.VERSION=='PINNACLE_EXPLORATION_PAPER_V2'
-    assert E.MAX_ENTRY_COST_USD==1000
-    assert E.MAX_AGGREGATE_EXPOSURE_USD==5000 and E.LOSS_STOP_USD==1000
+    assert E.VERSION=='PINNACLE_EXPLORATION_PAPER_V3'
+    assert E.MAX_ENTRY_COST_USD is None and E.TARGET_ENTRY_COST_USD==1000
+    assert E.MAX_AGGREGATE_EXPOSURE_USD is None and E.LOSS_STOP_USD is None
     assert B.CG_PARAMETERS_V2=={'min_gross_edge_pp':.5}
     assert B.EXPLORE_POLICY['strategy']=='PINNACLE_EXPLORATION_PAPER'
     assert 'not investment performance' in B.EXPLORE_DISCLOSURE
     from sportsassets import bettor_paper_ops as OPS
     meta=OPS._policy_meta()[E.STRATEGY]
-    assert meta['version']==E.VERSION and '$1,000 per position' in meta['summary']
+    assert meta['version']==E.VERSION and '$1,000 average sizing target' in meta['summary']
 
 
 @pytest.mark.parametrize('price',[.05,.27,.50,.71,.95])
@@ -50,9 +50,9 @@ def test_version_change_does_not_duplicate_existing_valuation_decision_keys():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('reserve,exposure,loss,held,reason',[
-    (1001,0,False,False,E.R_TOO_DEAR),
-    (1000,4100,False,False,E.R_AGGREGATE),
-    (1000,0,True,False,E.R_LOSS_STOP),
+    (1001,0,False,False,None),
+    (1000,41000,False,False,None),
+    (1000,0,True,False,None),
     (1000,0,False,True,E.R_FIXTURE_TAKEN),
     (1000,4000,False,False,None)])
 async def test_locked_checks_still_enforce_all_bounds(monkeypatch,reserve,exposure,loss,held,reason):

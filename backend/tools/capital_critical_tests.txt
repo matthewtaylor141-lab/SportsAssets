@@ -461,3 +461,6 @@ tests/test_agent_capability_routes.py
 
 # Paper training V2: sizing, inclusion and unchanged exposure/loss limits.
 tests/test_paper_training_ramp_v2.py
+
+# Owner capital policy (main paper account): $1,000 average target, cash-bounded.
+tests/test_paper_cash_bounded_capital.py

@@ -1,0 +1,13 @@
+test_cash_and_large_orders (__main__.Capital.test_cash_and_large_orders) ... ok
+test_cross_strategy_no_cap (__main__.Capital.test_cross_strategy_no_cap) ... ok
+test_exploration_fixture_no_cap (__main__.Capital.test_exploration_fixture_no_cap) ... ok
+test_fixture_ownership_no_cap (__main__.Capital.test_fixture_ownership_no_cap) ... ok
+test_main_sampling_selects_every_eligible_valuation (__main__.Capital.test_main_sampling_selects_every_eligible_valuation) ... ok
+test_no_oversize_cancellation (__main__.Capital.test_no_oversize_cancellation) ... ok
+test_other_accounts_unchanged (__main__.Capital.test_other_accounts_unchanged) ... ok
+test_target_not_ceiling (__main__.Capital.test_target_not_ceiling) ... ok
+
+----------------------------------------------------------------------
+Ran 8 tests in 0.044s
+
+OK

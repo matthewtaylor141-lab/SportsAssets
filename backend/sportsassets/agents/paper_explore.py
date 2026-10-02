@@ -26,36 +26,25 @@ WHAT IS NOT RELAXED -- the data and execution safeguards, all of them:
     or unreadable book never fills;
   * idempotent accounting on the ONE shared ledger.
 
-THE OWNER'S LIMITS, checked UNDER THE ACCOUNT LOCK (`submit_order`'s
-`locked_check`), so two concurrent decisions cannot both pass a limit:
-  * $1,000 maximum total entry cost per position INCLUDING FEES (the order's
-    reservation -- limit x qty + the maximum fee -- is at most $1,000, and a
-    fill can only cost less than its reservation);
-  * $5,000 maximum aggregate exploration exposure: open reservations plus
-    the cost basis of open exploration positions (Xavier's protective sales
-    reserve inventory, not cash; the inventory's cost basis is counted);
-  * ONE exploration position per fixture, and no overlap with another
-    strategy (`paper_benchmark.cross_strategy_exposure`, both directions:
-    the other policies refuse a fixture an exploration order holds);
-  * new exploration entries STOP once cumulative REALIZED exploration losses
-    reach $1,000 (gross: the sum of every losing position's realized P&L,
-    so gains never re-open the budget).
+THE OWNER'S CAPITAL POLICY (V3): around $1,000 per new entry including
+fees, with no aggregate training exposure cap or realized-loss stop. Available
+simulated cash is checked under the account lock. Price quality, idempotency
+and consumed-liquidity checks continue to apply. In the main account there
+is no per-fixture allocation limit; $1,000 is a sizing objective, not a ceiling.
 
-SELECTION, RECORDED. Eligible fixtures are sampled across the sports present
-with a recorded method (HASHED_BERNOULLI_INVERSE_SPORT_FREQUENCY_V2): the
-fixture's inclusion probability is p = clamp(K / n_sport, FLOOR, 1), n_sport
-the distinct fixtures of that sport family with entry-experiment valuations
-in the last SAMPLING_WINDOW_S; the draw u = sha256(draw_version, fixture) in
-[0, 1) is deterministic per fixture, so a fixture is in or out once. p, u,
-n_sport and the method are written on the decision, so Audrey can weight and
-separate exploration results from the investment policy's. Market types:
-only full-game moneylines have an ESTABLISHED mapping; other market types are
-excluded because their mapping is not established, never sampled loosely.
+SELECTION, RECORDED. Every eligible main-account valuation is admitted to
+selection (probability 1); existing decision/order idempotency still prevents
+reprocessing the same observation. Isolated accounts retain the deterministic
+sport-balanced sampling method. The method and probability are recorded for
+Audrey. Only full-game moneylines have an established mapping; other market
+types remain excluded until their mapping is established.
 
 UNREACHABLE FROM REAL MONEY. Imports only the paper ledger, the simulator,
 the pure policy helpers and the paper benchmark / Derek helpers.
 """
 from __future__ import annotations
+
+from .. import bettor_paper_limits as LIMITS
 
 import hashlib
 import json
@@ -75,11 +64,12 @@ VERSION = PB.EXPLORE_VERSION
 DISCLOSURE = PB.EXPLORE_DISCLOSURE
 LABEL = PB.EXPLORE_LABEL
 
-#: Training V2: owner explicitly requested around $1,000 per entry.
-#: Aggregate exposure and loss stop remain at their existing bounds.
-MAX_ENTRY_COST_USD = 1000.0
-MAX_AGGREGATE_EXPOSURE_USD = 5000.0
-LOSS_STOP_USD = 1000.0
+#: Training V3: owner removed aggregate exposure and realized-loss limits.
+#: Entries remain $1,000 including fees and spend only available simulated cash.
+TARGET_ENTRY_COST_USD = 1000.0
+MAX_ENTRY_COST_USD = None
+MAX_AGGREGATE_EXPOSURE_USD = None
+LOSS_STOP_USD = None
 
 #: THE SAMPLING METHOD.
 SELECTION_METHOD = "HASHED_BERNOULLI_INVERSE_SPORT_FREQUENCY_V2"
@@ -136,25 +126,29 @@ async def limits_state(conn, account_id: str) -> dict:
                  if float(p["realized_pnl_usd"]) < 0)
     net = sum(float(p["realized_pnl_usd"]) for p in pos)
     exposure = float(res) + open_basis
+    cash = await L.cash_state(conn, account_id)
     return {"exposure_usd": round(exposure, 6),
             "open_reservations_usd": round(float(res), 6),
             "open_cost_basis_usd": round(open_basis, 6),
-            "headroom_usd": round(max(0.0, MAX_AGGREGATE_EXPOSURE_USD
-                                      - exposure), 6),
+            "headroom_usd": round(max(0.0, float(cash["available"])), 6),
+            "headroom_basis": "AVAILABLE_SIMULATED_CASH",
             "realized_losses_usd": round(losses, 6),
             "realized_net_pnl_usd": round(net, 6),
-            "loss_stop_reached": losses >= LOSS_STOP_USD - 1e-9,
+            "loss_stop_reached": False,
             "positions": len(pos),
             "open_positions": sum(1 for p in pos if p["open_qty"] > 1e-9),
             "limits": {"max_entry_cost_usd": MAX_ENTRY_COST_USD,
+                       "target_entry_cost_usd": TARGET_ENTRY_COST_USD,
                        "max_aggregate_exposure_usd":
                            MAX_AGGREGATE_EXPOSURE_USD,
                        "loss_stop_usd": LOSS_STOP_USD,
-                       "one_position_per_fixture": True}}
+                       "one_position_per_fixture": not LIMITS.uses_owner_policy(account_id)}}
 
 
 async def fixture_taken(conn, account_id: str, fixture, slug) -> bool:
     """An exploration entry on this fixture that is open or has filled."""
+    if LIMITS.uses_owner_policy(account_id):
+        return False
     return bool(await conn.fetchval(
         "SELECT EXISTS (SELECT 1 FROM paper_orders WHERE account_id=$1 "
         "   AND strategy=$2 AND role='ENTRY' AND (us_market_slug=$3 OR "
@@ -168,13 +162,8 @@ def locked_check_for(fixture, slug):
     `submit_order` just before the reservation is written."""
     async def check(conn, o: dict, reserve) -> dict | None:
         st = await limits_state(conn, o["account_id"])
-        if st["loss_stop_reached"]:
-            return {"refusal": R_LOSS_STOP, "limits": st}
-        if float(reserve) > MAX_ENTRY_COST_USD + 1e-9:
+        if MAX_ENTRY_COST_USD is not None and float(reserve) > MAX_ENTRY_COST_USD + 1e-9:
             return {"refusal": R_TOO_DEAR, "limits": st}
-        if st["exposure_usd"] + float(reserve) > \
-                MAX_AGGREGATE_EXPOSURE_USD + 1e-9:
-            return {"refusal": R_AGGREGATE, "limits": st}
         if await fixture_taken(conn, o["account_id"], fixture, slug):
             return {"refusal": R_FIXTURE_TAKEN}
         return None
@@ -197,7 +186,7 @@ def inclusion_probability(n_sport: int) -> float:
                               SAMPLING_TARGET_PER_SPORT / n)), 6)
 
 
-async def selection(conn, *, cand: dict, at: float) -> dict:
+async def selection(conn, *, cand: dict, at: float, account_id=None) -> dict:
     fam = str(cand.get("sport_family") or "UNKNOWN")
     n = await conn.fetchval(
         "SELECT count(DISTINCT coalesce(condition_id, event_key, "
@@ -206,19 +195,19 @@ async def selection(conn, *, cand: dict, at: float) -> dict:
         "   AND coalesce(sport_family, 'UNKNOWN') = $2 "
         "   AND decided_at > to_timestamp($3) AND us_market_slug IS NOT NULL",
         PB.EXPERIMENT_ID, fam, at - SAMPLING_WINDOW_S)
-    p = inclusion_probability(int(n or 0))
+    owner = LIMITS.uses_owner_policy(account_id)
+    p = 1.0 if owner else inclusion_probability(int(n or 0))
     u = draw(cand.get("fixture"))
-    return {"method": SELECTION_METHOD, "policy_version": VERSION,
+    return {"method": "ALL_ELIGIBLE_VALUATIONS_V3" if owner else SELECTION_METHOD, "policy_version": VERSION,
             "draw_version": SAMPLING_DRAW_VERSION,
             "sport_family": fam, "n_sport_fixtures_in_window": int(n or 0),
             "window_s": SAMPLING_WINDOW_S,
-            "target_per_sport": SAMPLING_TARGET_PER_SPORT,
-            "floor": SAMPLING_FLOOR, "selection_probability": p,
+            "target_per_sport": None if owner else SAMPLING_TARGET_PER_SPORT,
+            "floor": 1.0 if owner else SAMPLING_FLOOR, "selection_probability": p,
             "draw": round(u, 9), "selected": u < p,
-            "unit": "FIXTURE (one draw per fixture, deterministic)",
-            "contract_choice": ("the first eligible contract of a selected "
-                                "fixture observed by the lane (recorded; a "
-                                "known order effect, not randomised)"),
+            "unit": "ELIGIBLE_VALUATION" if owner else "FIXTURE (one draw per fixture, deterministic)",
+            "contract_choice": ("every eligible valuation; repeated decision keys stay idempotent" if owner
+                                else "first eligible contract of selected fixture; known order effect"),
             "market_types": ("full-game moneylines only: the one market "
                              "type whose mapping is established")}
 
@@ -300,12 +289,10 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
     except Exception as exc:                                    # noqa: BLE001
         lim = {"error": type(exc).__name__}
         refusals.append(R_LIMITS_UNREADABLE)
-    sel = await selection(conn, cand=cand, at=at)
+    sel = await selection(conn, cand=cand, at=at, account_id=ctx["account_id"])
     if not refusals:
-        if lim.get("loss_stop_reached"):
-            refusals.append(R_LOSS_STOP)
-        elif float(lim.get("headroom_usd") or 0.0) < 1.0:
-            refusals.append(R_AGGREGATE)
+        if float(lim.get("headroom_usd") or 0.0) <= 0.0:
+            refusals.append(L.R_INSUFFICIENT)
         elif await fixture_taken(conn, ctx["account_id"],
                                  cand.get("fixture"),
                                  cand.get("us_market_slug")):
@@ -344,7 +331,7 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
         else:
             consumed = await SIM._consumed(conn, cand["us_market_slug"],
                                            lv["side"], obs["obs_id"])
-            budget = min(MAX_ENTRY_COST_USD,
+            budget = min(TARGET_ENTRY_COST_USD,
                          float(lim.get("headroom_usd") or 0.0))
             sized = size_entry(levels, consumed=consumed, fee_fn=fee_fn,
                                at=at, budget_usd=budget)
@@ -415,10 +402,10 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
                     book_age is not None and book_age <= PB.BOOK_MAX_AGE_S),
          "value": book_age, "threshold": PB.BOOK_MAX_AGE_S,
          "units": "seconds"},
-        {"condition": "entry_cost_incl_fees_within_budget",
+        {"condition": "entry_cost_incl_fees_against_target",
          "passed": None if not sized.get("qty") else True,
          "value": sized.get("reservation_usd"),
-         "threshold": MAX_ENTRY_COST_USD, "units": "USD"}]
+         "threshold": MAX_ENTRY_COST_USD, "target": TARGET_ENTRY_COST_USD, "units": "USD"}]
     policy_decision = {
         "strategy": STRATEGY, "policy_version": VERSION,
         "disclosure": DISCLOSURE, "economics_label": ECONOMICS_LABEL,
@@ -550,13 +537,14 @@ def describe() -> dict:
             "disclosure": DISCLOSURE, "economics_label": ECONOMICS_LABEL,
             "training_purpose": TRAINING_PURPOSE,
             "limits": {"max_entry_cost_usd_incl_fees": MAX_ENTRY_COST_USD,
+                       "target_entry_cost_usd": TARGET_ENTRY_COST_USD,
                        "max_aggregate_exposure_usd":
                            MAX_AGGREGATE_EXPOSURE_USD,
                        "loss_stop_realized_usd": LOSS_STOP_USD,
-                       "positions_per_fixture": 1,
-                       "overlap_with_other_strategies": "refused"},
-            "selection": {"method": SELECTION_METHOD,
+                       "positions_per_fixture": None,
+                       "overlap_with_other_strategies": "allowed on main account"},
+            "selection": {"method": "ALL_ELIGIBLE_VALUATIONS_V3",
                           "draw_version": SAMPLING_DRAW_VERSION,
-                          "target_per_sport": SAMPLING_TARGET_PER_SPORT,
-                          "floor": SAMPLING_FLOOR,
+                          "target_per_sport": None,
+                          "floor": 1.0,
                           "window_s": SAMPLING_WINDOW_S}}

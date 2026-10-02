@@ -362,6 +362,9 @@ async def fixture_owner_refusal(conn, o: dict, *,
     `cross_strategy_exposure` read, which stays as the early, cheap refusal).
     With `same_strategy_live`, also refuses when THIS strategy already has a
     live (working) entry on it. Returns a refusal dict or None."""
+    from . import bettor_paper_limits as LIMITS
+    if LIMITS.uses_owner_policy(o["account_id"]):
+        return None
     acct, strat = o["account_id"], o.get("strategy")
     slug, fixture = o.get("us_market_slug"), o.get("fixture")
     rows = await conn.fetch(
@@ -526,6 +529,8 @@ async def submit_order(conn, order: dict, *, caps: dict | None = None,
 async def _check_caps(conn, o: dict, *, reserve: Decimal, cs: dict,
                       caps: dict) -> dict | None:
     acct = o["account_id"]
+    from . import bettor_paper_limits as LIMITS
+    caps = LIMITS.effective_caps(caps, acct, o.get("role"))
     if reserve > cs["available"]:
         return {"refusal": R_INSUFFICIENT}
     if caps.get("per_order_cap_usd") is not None and \

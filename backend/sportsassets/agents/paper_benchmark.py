@@ -222,7 +222,7 @@ MAKER_POLICY = {"kind": "MAKER", "strategy": MAKER_STRATEGY,
 # "Training / simulated execution"; negative expected value is a research
 # cost, never investment performance. Decisions in `paper_explore.py`.
 EXPLORE_STRATEGY = "PINNACLE_EXPLORATION_PAPER"
-EXPLORE_VERSION = "PINNACLE_EXPLORATION_PAPER_V2"
+EXPLORE_VERSION = "PINNACLE_EXPLORATION_PAPER_V3"
 EXPLORE_DISCLOSURE = (
     "PINNACLE_EXPLORATION_PAPER: TRAINING / SIMULATED EXECUTION on a "
     "fictional account. Positions are taken to generate forward experience "
@@ -892,7 +892,7 @@ def size_within_edge(levels: list, *, p: float, consumed: dict,
     limit = float(ok[-1]["price"])
     depth = sum(max(0.0, float(lv["qty"]) - float(consumed.get(
         SIM._wk(lv["wire"]), 0.0))) for lv in ok)
-    budget = min(float(target_usd), float(cap_usd))
+    budget = float(target_usd) if cap_usd is None else min(float(target_usd), float(cap_usd))
     per = limit + float(fee_per_contract_max)
     qty = math.floor(min(depth, budget / per if per > 0 else 0.0) + 1e-9)
     return {"qty": int(max(qty, 0)), "limit": limit, "wire": ok[-1]["wire"],
@@ -1270,7 +1270,7 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
             sized = size_within_edge(
                 levels, p=p, consumed=consumed,
                 target_usd=float(ent["target_order_usd"]),
-                cap_usd=float(cfg["risk"]["per_order_cap_usd"]),
+                cap_usd=cfg["risk"].get("per_order_cap_usd"),
                 fee_per_contract_max=float(L.max_fee_for(
                     1, 0.5, at=at, fee_fn=fee_fn)), min_edge=min_edge,
                 net_fee_fn=((lambda px: fee_per_contract(fee_fn, px, at))
@@ -1647,6 +1647,9 @@ async def cross_strategy_exposure(conn, *, account_id: str, strategy: str,
     STRATEGY on this account: an entry order still working, or a filled
     entry whose position is still open. Read-only; never raises (an
     unreadable answer is treated as held, so it refuses)."""
+    from .. import bettor_paper_limits as LIMITS
+    if LIMITS.uses_owner_policy(account_id):
+        return {"held": False, "by": [], "allocation_rule": "NO_FIXTURE_ALLOCATION_LIMIT", "capital_policy": LIMITS.VERSION}
     try:
         rows = await conn.fetch(
             "SELECT DISTINCT o.strategy, o.group_id, o.us_market_slug, "

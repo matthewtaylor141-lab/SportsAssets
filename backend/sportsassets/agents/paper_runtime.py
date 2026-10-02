@@ -304,7 +304,7 @@ async def _run(conn, out, *, at, t0, account_id, market_data, steps, config,
     if not sess.get("ok"):
         out["refusal"] = sess.get("refusal")
         return out
-    cfg = sess["config"]
+    cfg = sess.get("effective_config") or sess["config"]
     md = market_data if market_data is not None else \
         G.PaperMarketDataClient()
     attempts_before = int(getattr(md, "mutation_attempts", 0) or 0)
@@ -703,7 +703,7 @@ async def decide_valuation(conn, *, valuation_id, now: float | None = None,
             return {"decided": False, "why": "NOT_AN_ENTRY_EXPERIMENT_ROW"}
         md = market_data if market_data is not None else _client()
         before = int(getattr(md, "mutation_attempts", 0) or 0)
-        cfg = sess["config"]
+        cfg = sess.get("effective_config") or sess["config"]
         ctx: dict[str, Any] = {
             "session": sess, "session_id": sess["session_id"],
             "account_id": acct, "config": cfg, "market_data": md,

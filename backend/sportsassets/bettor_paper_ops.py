@@ -117,11 +117,12 @@ STRATEGY_META = {
         "label": "TRAINING",
         "summary": ("A bounded training strategy that may take positions "
                     "failing the 0.5 pp edge or after-fee requirement to "
-                    "generate forward experience: $1,000 per position incl. "
-                    "fees, $5,000 aggregate, one per fixture, stops at $1,000 "
-                    "realized losses. Negative expected value is a research "
+                    "generate forward experience: $1,000 average sizing target incl. "
+                    "fees; available cash only, no fixture allocation cap. "
+                    "No aggregate exposure cap or realized-loss stop. "
+                    "Negative expected value is a research "
                     "cost, not investment performance."),
-        "version": "PINNACLE_EXPLORATION_PAPER_V2", "disclosure": None,
+        "version": "PINNACLE_EXPLORATION_PAPER_V3", "disclosure": None,
         "economics_label":
             "EXPLORATION_RESEARCH_COST_NOT_INVESTMENT_PERFORMANCE"},
 }
