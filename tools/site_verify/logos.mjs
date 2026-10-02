@@ -93,11 +93,10 @@ for (const [ename, engine, dev] of ENGINES) {
         for (let i = 0; i < 120 && !frameOf(page, where); i++) await page.waitForTimeout(500);
         f = frameOf(page, where) || f;
       }
-      // marks are rendered once the records arrive; give the reads time
-      for (let i = 0; i < 60; i++) {
-        const n = await f.evaluate(() => document.querySelectorAll(".team-mark, .xp-team").length).catch(() => 0);
-        if (n) break; await page.waitForTimeout(1000);
-      }
+      // marks are rendered once the records arrive; one bounded wait (a
+      // per-second evaluate loop never returned on a busy WebKit renderer)
+      step(ename, where, "await marks");
+      await f.waitForSelector(".team-mark, .xp-team", { state: "attached", timeout: 60000 }).catch(() => step(ename, where, "no marks within 60 s"));
       if (where !== "home") {
         // every office view (Workboard, Activity, Work & learning): open its
         // collapsed records, bring each mark into view, count, screenshot
@@ -123,7 +122,8 @@ for (const [ename, engine, dev] of ENGINES) {
         await f.evaluate(() => { const b = document.querySelector('button[data-mg-view="work"]'); if (b) b.click(); }).catch(() => {});
         await page.waitForTimeout(1000);
       } else {
-        await page.evaluate(REVEAL).catch(() => {});
+        step(ename, where, "reveal");
+        await within(30000, page.evaluate(REVEAL).catch(() => {}));
       }
       await page.waitForTimeout(4000);
       step(ename, where, "marks");
