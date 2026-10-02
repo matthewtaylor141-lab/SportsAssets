@@ -27,7 +27,13 @@ function hhmm(at) { return num(at) ? new Date(at * 1000).toISOString().slice(11,
 function ok(s) { return s && s.status === 'OK' ? s.data : null; }
 function chip(s) { var t = s === 'PINNACLE_EXPLORATION_PAPER' ? 'TRAINING' : s === 'PINNACLE_COMPLETED_GAME_MAKER_PAPER' ? 'MAKER' : s === 'PINNACLE_COMPLETED_GAME_PAPER' ? 'INVESTMENT' : 'RESEARCH'; return '<span class="xp-chip xp-' + t + '" title="' + esc(s) + '">' + t + '</span>'; }
 function short(slug) { return esc(String(slug || '').replace(/^(aec|atc)-/, '')); }
+function teamMark(t) { return '<span class="xp-team" title="' + esc(t.name + (t.logo && t.logo.kind === 'flag' ? ' · national flag' : '')) + '"><span class="xp-team-ini" aria-hidden="true">' + esc(t.initials || '?') + '</span>' + (t.logo && t.logo.url ? '<img src="' + esc(t.logo.url) + '" alt="" width="20" height="20" loading="lazy" decoding="async">' : '') + '</span>'; }
+// Both teams of the record's event (server-verified logos by venue team id + league), names kept; the code stays in the tooltip.
+function mkt(x, slug) { var m = (x && x.matchup) || []; if (!m.length) return short(slug); return '<span class="xp-mu" title="' + esc(slug) + '">' + m.slice(0, 2).map(function (t) { return teamMark(t) + '<span class="xp-team-name">' + esc(t.name) + '</span>'; }).join('<span class="xp-vs">vs</span>') + '</span>'; }
 function secNote(s, what) { return '<p class="xp-note">' + esc(what) + ': ' + esc(s ? (s.status + (s.why ? ' · ' + s.why : '')) : 'not in the read') + '</p>'; }
+
+// an unavailable logo leaves the initials, never a broken image
+document.addEventListener('error', function (e) { var t = e.target; if (t && t.matches && t.matches('.xp-team img')) t.remove(); }, true);
 
 function load() {
   if (st.busy) return; st.busy = true;
@@ -95,7 +101,7 @@ function ordersCard(j, now) {
   var ent = o ? o.entry_orders || [] : [], mg = o ? o.management_orders || [] : [];
   var body = !o ? secNote(j.orders, 'orders') : (!ent.length && !mg.length) ? '<p class="xp-note">No open orders right now.</p>'
     : '<div class="xp-tbl"><table><thead><tr><th>Strategy</th><th>Market</th><th>Role</th><th>Type</th><th class="n">Price</th><th class="n">Qty / filled</th><th class="n">Reserved</th><th>Expires</th></tr></thead><tbody>'
-    + ent.concat(mg).map(function (x) { return '<tr title="' + esc(x.rationale || '') + '"><td>' + chip(x.strategy) + '</td><td>' + short(x.us_market_slug) + '</td><td>' + esc(x.role) + '</td><td>' + esc(x.order_type + ' ' + x.time_in_force) + '</td><td class="n">' + px(x.limit_price) + '</td><td class="n">' + x.qty + ' / ' + x.filled_qty + '</td><td class="n">' + usd(x.reserved_remaining_usd) + '</td><td>' + hhmm(x.expires_at) + '</td></tr>'; }).join('')
+    + ent.concat(mg).map(function (x) { return '<tr title="' + esc(x.rationale || '') + '"><td>' + chip(x.strategy) + '</td><td>' + mkt(x, x.us_market_slug) + '</td><td>' + esc(x.role) + '</td><td>' + esc(x.order_type + ' ' + x.time_in_force) + '</td><td class="n">' + px(x.limit_price) + '</td><td class="n">' + x.qty + ' / ' + x.filled_qty + '</td><td class="n">' + usd(x.reserved_remaining_usd) + '</td><td>' + hhmm(x.expires_at) + '</td></tr>'; }).join('')
     + '</tbody></table></div>';
   return '<div class="xp-card xp-wide"><h3>Standing orders <span class="xp-sub">' + ent.length + ' entry · ' + mg.length + ' protection</span></h3>' + body + '<p class="xp-note">An order is not a fill: it reserves cash until it fills, expires or is cancelled.</p></div>';
 }
@@ -104,7 +110,7 @@ function positionsCard(j) {
   var p = ok(j.positions), f = ok(j.fills) || [];
   if (!p) return '<div class="xp-card xp-wide"><h3>Positions</h3>' + secNote(j.positions, 'positions') + '</div>';
   var open = p.open_positions || [];
-  var rows = open.map(function (x) { return '<tr><td>' + chip(x.strategy) + ' <span class="xp-lab">' + esc(x.label) + '</span></td><td>' + short(x.market) + '</td><td>' + esc(x.side) + '</td><td class="n">' + x.open_qty + '</td><td class="n">' + usd(x.cost_basis_usd) + '</td><td class="n">' + (num(x.unrealized_pnl_usd) ? usd(x.unrealized_pnl_usd) : 'not marked') + '</td></tr>'; }).join('');
+  var rows = open.map(function (x) { return '<tr><td>' + chip(x.strategy) + ' <span class="xp-lab">' + esc(x.label) + '</span></td><td>' + mkt(x, x.market) + '</td><td>' + esc(x.side) + '</td><td class="n">' + x.open_qty + '</td><td class="n">' + usd(x.cost_basis_usd) + '</td><td class="n">' + (num(x.unrealized_pnl_usd) ? usd(x.unrealized_pnl_usd) : 'not marked') + '</td></tr>'; }).join('');
   var strat = Object.keys(p.by_strategy || {}).map(function (k) { var a = p.by_strategy[k]; return '<tr><td>' + chip(k) + ' ' + esc(a.title) + '</td><td class="n">' + a.open + ' / ' + a.positions + '</td><td class="n">' + usd(a.realized_pnl_usd) + '</td><td class="n">' + usd(a.unrealized_pnl_usd) + '</td><td class="n">' + usd(a.fees_usd) + '</td></tr>'; }).join('');
   var ex = p.exploration_limits || {}, lim = ex.limits || {};
   var exTxt = lim.max_aggregate_exposure_usd ? '<p class="xp-note"><b>Exploration budget</b> · exposure ' + usd(ex.exposure_usd) + ' of ' + usd(lim.max_aggregate_exposure_usd) + ' · realized losses ' + usd(ex.realized_losses_usd) + ' of the ' + usd(lim.loss_stop_usd) + ' stop · ' + usd(lim.max_entry_cost_usd) + ' max per position incl. fees · one per fixture' + (ex.loss_stop_reached ? ' · <b>LOSS STOP REACHED</b>' : '') + '. Negative expected value here is a research cost, not investment performance.</p>' : '';
@@ -112,7 +118,7 @@ function positionsCard(j) {
     + (open.length ? '<div class="xp-tbl"><table><thead><tr><th>Strategy</th><th>Market</th><th>Side</th><th class="n">Open qty</th><th class="n">Cost basis</th><th class="n">Unrealized</th></tr></thead><tbody>' + rows + '</tbody></table></div>' : '<p class="xp-note">No filled positions are open. The account is connected; the refusals above say why nothing has filled.</p>')
     + (strat ? '<p class="xp-k" style="margin-top:12px">By strategy (one ledger; strategies sum to the account)</p><div class="xp-tbl"><table><thead><tr><th>Strategy</th><th class="n">Open / all</th><th class="n">Realized</th><th class="n">Unrealized</th><th class="n">Fees</th></tr></thead><tbody>' + strat + '</tbody></table></div>' : '')
     + exTxt
-    + (f.length ? '<p class="xp-k" style="margin-top:12px">Latest simulated fills</p><ul class="xp-list">' + f.slice(0, 6).map(function (x) { return '<li><span>' + chip(x.strategy) + ' ' + esc(x.role) + ' ' + esc(x.direction) + ' ' + x.qty + ' @ ' + px(x.price) + ' · ' + short(x.us_market_slug) + '</span><b>fee ' + usd(x.fee_usd) + ' · ledger #' + esc(x.ledger_seq) + '</b></li>'; }).join('') + '</ul>' : '')
+    + (f.length ? '<p class="xp-k" style="margin-top:12px">Latest simulated fills</p><ul class="xp-list">' + f.slice(0, 6).map(function (x) { return '<li><span>' + chip(x.strategy) + ' ' + esc(x.role) + ' ' + esc(x.direction) + ' ' + x.qty + ' @ ' + px(x.price) + ' · ' + mkt(x, x.us_market_slug) + '</span><b>fee ' + usd(x.fee_usd) + ' · ledger #' + esc(x.ledger_seq) + '</b></li>'; }).join('') + '</ul>' : '')
     + '</div>';
 }
 
