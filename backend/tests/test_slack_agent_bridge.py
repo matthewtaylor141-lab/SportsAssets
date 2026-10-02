@@ -184,3 +184,55 @@ async def test_an_escalation_can_mention_only_a_listed_manager(database,cfg,monk
     t=calls[0]['text']
     assert t.startswith('<@U0C64BKD2JE>  &lt;@everyone&gt; decision needed')
     assert 'U0EVIL' not in t
+
+def test_a_pasted_credential_loses_whitespace_and_quotes_but_never_appears(monkeypatch):
+    monkeypatch.setenv('SLACK_DEREK_BOT_TOKEN','  "xoxb-1-abc"\n')
+    assert S.settings('derek')['token']=='xoxb-1-abc'
+    shape=S.token_shape(' "xoxb-1-abc"\n')
+    assert shape=={'kind':'xoxb','length':10,'had_whitespace_or_quotes':True}
+    assert 'abc' not in json.dumps(shape)
+    assert S.token_shape('xapp-1-x')['kind']=='xapp' and S.token_shape('')['kind']=='absent'
+    assert S.token_shape('notatoken')['kind']=='other'
+
+@pytest.mark.parametrize('field,value,reason',[('team_id','WRONG','WRONG_TEAM'),('api_app_id','WRONG','WRONG_APP'),('user','OTHER','USER_NOT_A_MANAGER'),('channel','OTHER','CHANNEL_NOT_ALLOWED'),('bot_id','B','BOT_OR_SUBTYPE'),('type','reaction_added','UNSUPPORTED_EVENT_TYPE')])
+def test_an_ignored_event_names_its_reason(cfg,field,value,reason):
+    p=payload();(p if field in ('team_id','api_app_id') else p['event'])[field]=value
+    assert S.classify(p,cfg)==(None,reason)
+    assert S.classify(payload(),cfg)[1] is None
+
+@pytest.mark.asyncio
+async def test_the_route_records_each_receipt_without_text(cfg):
+    app=FastAPI();app.include_router(router);S.RECEIPTS.clear()
+    p=payload();p['team_id']='WRONG';b=json.dumps(p).encode()
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),base_url='http://test') as c:
+        r=await c.post('/api/integrations/slack/derek/events',content=b,headers=headers(b))
+    assert r.json()['status']=='IGNORED'
+    assert S.RECEIPTS[-1]['outcome']=='IGNORED_WRONG_TEAM' and S.RECEIPTS[-1]['type']=='app_mention'
+    assert 'Explain' not in json.dumps(S.RECEIPTS)
+
+@pytest.mark.asyncio
+async def test_check_tokens_reports_identity_and_kind_never_the_token(cfg,monkeypatch):
+    for a in ('xavier','audrey'):monkeypatch.delenv('SLACK_'+a.upper()+'_BOT_TOKEN',raising=False)
+    seen=[]
+    async def transport(request):
+        seen.append(request.url.path);assert request.headers['authorization']=='Bearer test-token'
+        return httpx.Response(200,json={'ok':False,'error':'invalid_auth'})
+    cls=httpx.AsyncClient;monkeypatch.setattr(S.httpx,'AsyncClient',lambda **kw:cls(transport=httpx.MockTransport(transport),**kw))
+    got=await S.check_tokens()
+    assert seen==['/api/auth.test']
+    assert got['derek']['ok'] is False and got['derek']['error']=='invalid_auth' and got['derek']['token']['kind']=='other'
+    assert got['xavier']=={'token':{'kind':'absent','length':0,'had_whitespace_or_quotes':False},'ok':False,'error':'ABSENT'}
+    assert 'test-token' not in json.dumps(got)
+
+@pytest.mark.asyncio
+async def test_only_answers_slack_refused_before_posting_are_requeued(database,cfg):
+    job=await queued(database,cfg)
+    await use(database,lambda c:c.execute("UPDATE agent_slack_delivery SET state='FAILED',error_code='invalid_auth',answer='Stored answer',attempts=1"))
+    await use(database,lambda c:c.execute("INSERT INTO agent_slack_delivery(delivery_id,agent,team_id,channel_id,source_key,answer,state,error_code) VALUES('u1','derek','T_TEST','C_TEST','update:hourly:x','old summary','FAILED','invalid_auth'),('u2','derek','T_TEST','C_TEST','review:9','review','DELIVERY_UNKNOWN',NULL)"))
+    got=await use(database,lambda c:S.requeue_refused(c,'Test manager'))
+    assert got['requeued']==1 and got['items'][0]['source']==job['source_key']
+    states=dict(await use(database,lambda c:c.fetch('SELECT delivery_id,state FROM agent_slack_delivery')))
+    assert states[job['delivery_id']]=='READY' and states['u1']=='FAILED' and states['u2']=='DELIVERY_UNKNOWN'
+    again=await use(database,S.claim)
+    assert again['delivery_id']==job['delivery_id'] and again['answer']=='Stored answer'
+    assert await use(database,lambda c:c.fetchval("SELECT count(*) FROM agent_slack_control_audit WHERE actor LIKE 'requeue_refused:%'"))>=1

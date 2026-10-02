@@ -18,14 +18,34 @@ CONTROL='agent.slack.bridge'
 AGENTS=('derek','xavier','audrey')
 QUEUE_CAP=300
 
+def _clean(v):
+ # A pasted credential sometimes carries a trailing newline, spaces or
+ # surrounding quotes; none of those is ever part of a Slack value.
+ return (v or '').strip().strip('"\'').strip()
+
 def settings(agent):
  if agent not in AGENTS:raise ValueError('UNKNOWN_AGENT')
  prefix='SLACK_'+agent.upper()+'_'
- return {'secret':os.getenv(prefix+'SIGNING_SECRET',''),'token':os.getenv(prefix+'BOT_TOKEN',''),
-         'app':os.getenv(prefix+'APP_ID',''),'team':os.getenv('SLACK_TEAM_ID',''),
+ return {'secret':_clean(os.getenv(prefix+'SIGNING_SECRET')),'token':_clean(os.getenv(prefix+'BOT_TOKEN')),
+         'app':_clean(os.getenv(prefix+'APP_ID')),'team':_clean(os.getenv('SLACK_TEAM_ID')),
          'channels':{x.strip() for x in os.getenv('SLACK_ALLOWED_CHANNEL_IDS','').split(',') if x.strip()},
          'managers':{x.strip() for x in os.getenv('SLACK_MANAGEMENT_USER_IDS','').split(',') if x.strip()},
-         'workroom':os.getenv('SLACK_WORKROOM_CHANNEL_ID','')}
+         'workroom':_clean(os.getenv('SLACK_WORKROOM_CHANNEL_ID'))}
+
+def token_shape(raw):
+ """What KIND of value is stored, never the value: its Slack prefix class,
+ its length and whether it carried whitespace or quotes."""
+ v=_clean(raw)
+ kind=next((k for k in ('xoxb','xoxp','xapp','xoxe') if v.startswith(k+'-') or v.startswith(k+'.')),'other' if v else 'absent')
+ return {'kind':kind,'length':len(v),'had_whitespace_or_quotes':(raw or '')!=v}
+
+# Inbound receipt trace: the outcome of each signed request, in memory only
+# (no text, no credential). Survives nothing; it answers "did Slack reach us
+# and why was it accepted or ignored" for the last requests.
+RECEIPTS=[]
+def note_receipt(agent,event_id,kind,outcome):
+ RECEIPTS.append({'at':round(time.time(),3),'agent':agent,'event_id':str(event_id or '')[:40],'type':str(kind or '')[:30],'outcome':outcome})
+ del RECEIPTS[:-50]
 
 def verify(body,timestamp,signature,secret,now=None):
  try:
@@ -35,25 +55,33 @@ def verify(body,timestamp,signature,secret,now=None):
   return hmac.compare_digest(expected,signature or '')
  except (ValueError,TypeError):return False
 
-def approved_event(payload,cfg):
- if payload.get('team_id')!=cfg['team'] or not cfg['team'] or payload.get('api_app_id')!=cfg['app'] or not cfg['app']:return None
+def classify(payload,cfg):
+ """(event, None) for an authorized manager message, else (None, reason)."""
+ if not cfg['team'] or payload.get('team_id')!=cfg['team']:return None,'WRONG_TEAM'
+ if not cfg['app'] or payload.get('api_app_id')!=cfg['app']:return None,'WRONG_APP'
  e=payload.get('event') or {}
- if not isinstance(e,dict) or e.get('bot_id') or e.get('subtype'):return None
+ if not isinstance(e,dict):return None,'NO_EVENT'
+ if e.get('bot_id') or e.get('subtype'):return None,'BOT_OR_SUBTYPE'
  followup=False
  if e.get('type')=='message':
   # A manager's reply INSIDE a thread, without an @mention (a mention
   # arrives as its own app_mention event, so it is skipped here). Only the
   # agent that already answered in that thread takes it (admit checks).
-  if e.get('channel_type') not in (None,'channel','group') or '<@' in str(e.get('text') or ''):return None
-  if not e.get('thread_ts') or e.get('thread_ts')==e.get('ts'):return None
+  if e.get('channel_type') not in (None,'channel','group'):return None,'NOT_A_CHANNEL'
+  if '<@' in str(e.get('text') or ''):return None,'MENTION_HANDLED_AS_APP_MENTION'
+  if not e.get('thread_ts') or e.get('thread_ts')==e.get('ts'):return None,'NOT_A_THREAD_REPLY'
   followup=True
- elif e.get('type')!='app_mention':return None
- if e.get('channel') not in cfg['channels'] or e.get('user') not in cfg['managers']:return None
- if not isinstance(e.get('text'),str) or not 1<=len(e['text'])<=4000:return None
- if not isinstance(payload.get('event_id'),str) or len(payload['event_id'])>150:return None
+ elif e.get('type')!='app_mention':return None,'UNSUPPORTED_EVENT_TYPE'
+ if e.get('channel') not in cfg['channels']:return None,'CHANNEL_NOT_ALLOWED'
+ if e.get('user') not in cfg['managers']:return None,'USER_NOT_A_MANAGER'
+ if not isinstance(e.get('text'),str) or not 1<=len(e['text'])<=4000:return None,'TEXT_SIZE'
+ if not isinstance(payload.get('event_id'),str) or len(payload['event_id'])>150:return None,'EVENT_ID'
  ts=e.get('thread_ts') or e.get('ts')
- if not isinstance(ts,str) or len(ts)>40:return None
- return {'source':payload['event_id'],'channel':e['channel'],'thread':ts,'text':e['text'],'user':e['user'],'followup':followup}
+ if not isinstance(ts,str) or len(ts)>40:return None,'TS'
+ return {'source':payload['event_id'],'channel':e['channel'],'thread':ts,'text':e['text'],'user':e['user'],'followup':followup},None
+
+def approved_event(payload,cfg):
+ return classify(payload,cfg)[0]
 
 def decode(v):return json.loads(v) if isinstance(v,str) else v or {}
 
@@ -209,7 +237,41 @@ async def status(conn):
  return {'enabled':control.get('enabled') is True,'actor':control.get('actor'),
          'delivery_counts':{r['state']:r['n'] for r in counts},
          'agents':{a:{'configured':all(settings(a)[k] for k in ('token','secret','app','team','channels','managers'))} for a in AGENTS},
+         'errors':{r['error_code']:r['n'] for r in await conn.fetch("SELECT error_code,count(*) AS n FROM agent_slack_delivery WHERE error_code IS NOT NULL AND updated_at>now()-interval '6 hours' GROUP BY 1")},
+         'receipts':RECEIPTS[-20:],
          'authority':'READ_ONLY_PERSONA_AND_RECORDED_RESEARCH','ambiguous_delivery':'MANUAL_RECONCILIATION_REQUIRED'}
+
+async def check_tokens():
+ """Slack's auth.test per agent: ok/error, the bot user and team it
+ resolves to, and the stored value's KIND. The token itself is never
+ returned. A read: it posts nothing."""
+ out={}
+ async with httpx.AsyncClient(timeout=10,follow_redirects=False) as client:
+  for a in AGENTS:
+   cfg=settings(a);shape=token_shape(os.getenv('SLACK_'+a.upper()+'_BOT_TOKEN'))
+   row={'token':shape}
+   if not cfg['token']:out[a]=dict(row,ok=False,error='ABSENT');continue
+   try:
+    r=await client.post('https://slack.com/api/auth.test',headers={'Authorization':'Bearer '+cfg['token']})
+    j=r.json() if r.status_code==200 else {}
+    row.update(ok=j.get('ok') is True,error=None if j.get('ok') else str(j.get('error') or 'HTTP_'+str(r.status_code))[:60],
+               bot_user_id=j.get('user_id'),team_id=j.get('team_id'),team_matches=bool(j.get('team_id')) and j.get('team_id')==cfg['team'],
+               bot_id=j.get('bot_id'))
+   except Exception as exc:row.update(ok=False,error=type(exc).__name__)
+   out[a]=row
+ return out
+
+# Slack answered ok:false for these BEFORE posting anything: re-sending the
+# stored answer cannot duplicate a message. Only answers to a manager's
+# question and recorded reviews, from the last 6 hours, and only on an
+# explicit control request.
+REFUSED_BEFORE_POST=('invalid_auth','not_authed','token_revoked','token_expired','account_inactive','not_in_channel','channel_not_found','missing_scope')
+
+async def requeue_refused(conn,actor):
+ if not isinstance(actor,str) or not 2<=len(actor.strip())<=100:raise ValueError('NAMED_MANAGER_REQUIRED')
+ rows=await conn.fetch("UPDATE agent_slack_delivery SET state='READY',attempts=0,error_code=NULL,claim_token=NULL,lease_until=NULL,updated_at=now() WHERE state='FAILED' AND error_code=ANY($1::text[]) AND answer IS NOT NULL AND (question IS NOT NULL OR source_key LIKE 'review:%') AND created_at>now()-interval '6 hours' RETURNING delivery_id,agent,source_key",list(REFUSED_BEFORE_POST))
+ await conn.execute('INSERT INTO agent_slack_control_audit(enabled,actor) VALUES((SELECT (value->>\'enabled\')::boolean FROM ingestion_state WHERE key=$1),$2)',CONTROL,('requeue_refused:'+actor.strip())[:100])
+ return {'requeued':len(rows),'items':[{'agent':r['agent'],'source':r['source_key']} for r in rows]}
 
 async def configure(conn,enabled,actor):
  if not isinstance(enabled,bool):raise ValueError('BOOLEAN_ENABLED_REQUIRED')

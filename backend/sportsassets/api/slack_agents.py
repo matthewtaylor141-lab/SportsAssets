@@ -23,14 +23,20 @@ async def events(agent:str,request:Request):
   challenge=body.get('challenge')
   if not isinstance(challenge,str) or len(challenge)>500:raise HTTPException(400,'INVALID_CHALLENGE')
   return {'challenge':challenge}
- event=S.approved_event(body,cfg)
- if event is None:return {'ok':True,'status':'IGNORED'}
+ event,why=S.classify(body,cfg)
+ ev=body.get('event') if isinstance(body.get('event'),dict) else {}
+ if event is None:
+  S.note_receipt(agent,body.get('event_id'),ev.get('type'),'IGNORED_'+why)
+  return {'ok':True,'status':'IGNORED'}
  from ..db import get_pool
  try:
   async with asyncio.timeout(2):
    pool=await get_pool()
    async with pool.acquire() as c:result=await S.admit(c,agent,cfg,event)
- except TimeoutError:raise HTTPException(503,'QUEUE_UNAVAILABLE')
+ except TimeoutError:
+  S.note_receipt(agent,body.get('event_id'),ev.get('type'),'QUEUE_UNAVAILABLE')
+  raise HTTPException(503,'QUEUE_UNAVAILABLE')
+ S.note_receipt(agent,body.get('event_id'),ev.get('type'),result)
  if result in ('OFF','QUEUE_FULL'):raise HTTPException(503,result)
  return {'ok':True,'status':result}
 
@@ -45,6 +51,12 @@ async def slack_status(response:Response):
 
 @router.post('/api/command/agents/slack/control',dependencies=[Depends(require_write)])
 async def slack_control(request:Request,response:Response):
- b=await body(request,{'enabled'})
+ b=await body(request,{'enabled','action'})
  response.headers['Cache-Control']='no-store'
+ if b.get('action')=='check_tokens':
+  # auth.test only: what each stored bot token authenticates as. No value.
+  return {'tokens':await S.check_tokens()}
+ if b.get('action')=='requeue_refused':
+  return await use(lambda c:S.requeue_refused(c,b['actor']),write=True)
+ if b.get('action') is not None:raise HTTPException(400,'UNKNOWN_ACTION')
  return await use(lambda c:S.configure(c,b.get('enabled'),b['actor']),write=True)
