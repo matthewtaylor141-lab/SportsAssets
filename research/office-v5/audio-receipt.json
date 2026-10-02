@@ -1,0 +1,1 @@
+{"pass":true,"checks":["progressive MP3 starts","no-MSE native playback","decoder failure recovers with same response bytes","one HTTP response per clip","autoplay refusal retains clip for gesture replay","non-audio response rejected"],"scope":"Chromium; native path forced and decoder error injected. Does not prove real iPhone Safari."}

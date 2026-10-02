@@ -106,25 +106,33 @@ OFFICE_JS = r"""
 # Progressive playback of the EXISTING authenticated streaming speech response.
 # Text is still grounded and stored before it is spoken. No speculative tokens.
 SPEECH_JS = r"""
-window.CCStreamSpeech = async function(response, audio, signal, onStart) {
- var MS=window.MediaSource, url=null, reader=null, ms=null;
- var cleaned=false;var cleanup=function(){if(cleaned)return;cleaned=true;signal.removeEventListener('abort',cleanup);if(reader)reader.cancel().catch(function(){});audio.pause();audio.removeAttribute('src');audio.load();if(url)URL.revokeObjectURL(url);};
+window.CCStreamSpeech = async function(response,audio,signal,onStart){
+ var MS=window.MediaSource,url=null,reader=null,ms=null,sb=null,parts=[],bytes=0,started=false,buffered=false,cleaned=false;
+ var type=(response.headers.get('Content-Type')||'').split(';')[0].trim().toLowerCase();
+ if(type!=='audio/mpeg'&&type!=='audio/mp3')throw Error('Voice response was not MP3 audio.');
+ var deadline=Date.now()+45000;
+ function aborted(){if(signal.aborted)throw new DOMException('Aborted','AbortError');}
+ function reset(){audio.pause();audio.removeAttribute('src');audio.load();if(url){URL.revokeObjectURL(url);url=null;}}
+ function cleanup(){if(cleaned)return;cleaned=true;signal.removeEventListener('abort',cleanup);if(reader)reader.cancel().catch(function(){});parts=[];reset();}
+ function bounded(p,ms_){return new Promise(function(resolve,reject){var timer=setTimeout(function(){off();reject(Error('Voice download timed out.'));},Math.max(1,Math.min(ms_||45000,deadline-Date.now())));function off(){clearTimeout(timer);signal.removeEventListener('abort',stop);}function stop(){off();reject(new DOMException('Aborted','AbortError'));}signal.addEventListener('abort',stop,{once:true});p.then(function(v){off();resolve(v);},function(e){off();reject(e);});});}
+ async function play(progressive){aborted();try{await bounded(audio.play(),5000);aborted();onStart(progressive);return null;}catch(e){if(e.name==='NotAllowedError')return {blocked:true,play:async function(){aborted();await audio.play();onStart(false);}};throw e;}}
  signal.addEventListener('abort',cleanup,{once:true});
- try {
-  if(!MS||!MS.isTypeSupported('audio/mpeg')||!response.body){
-   var blob=await response.blob();if(signal.aborted)return;url=URL.createObjectURL(blob);audio.src=url;await audio.play();onStart(false);
-   audio.addEventListener('ended',cleanup,{once:true});return;
+ try{
+  aborted();if(!response.body)throw Error('Voice stream was empty.');
+  reader=response.body.getReader();
+  buffered=!MS||!MS.isTypeSupported('audio/mpeg');
+  if(!buffered){try{ms=new MS();url=URL.createObjectURL(ms);audio.src=url;await bounded(new Promise(function(resolve){ms.addEventListener('sourceopen',resolve,{once:true});}),5000);sb=ms.addSourceBuffer('audio/mpeg');}catch(e){aborted();buffered=true;reset();}}
+  while(true){aborted();var part=await bounded(reader.read());if(part.done)break;if(!part.value.length)continue;bytes+=part.value.length;if(bytes>8*1024*1024)throw Error('Voice clip exceeded the 8 MB playback limit.');parts.push(part.value);
+   if(!buffered){try{
+    await bounded(new Promise(function(resolve,reject){function off(){sb.removeEventListener('error',bad);sb.removeEventListener('updateend',done);audio.removeEventListener('error',bad);}function done(){off();resolve();}function bad(){off();reject(Error('Stream decoder failed'));}sb.addEventListener('error',bad,{once:true});sb.addEventListener('updateend',done,{once:true});audio.addEventListener('error',bad,{once:true});try{sb.appendBuffer(part.value);}catch(e){off();reject(e);}}),5000);
+    if(!started&&sb.buffered.length){var blocked=await play(true);if(blocked){buffered=true;reset();}else started=true;}
+   }catch(e){aborted();if(started)throw Error('Playback was interrupted. Press Play to replay the complete reply.');buffered=true;reset();}}
   }
-  ms=new MS();url=URL.createObjectURL(ms);audio.src=url;
-  await new Promise(function(resolve,reject){ms.addEventListener('sourceopen',resolve,{once:true});signal.addEventListener('abort',function(){reject(new DOMException('Aborted','AbortError'));},{once:true});});
-  if(signal.aborted)return;
-  var sb=ms.addSourceBuffer('audio/mpeg'),started=false;reader=response.body.getReader();
-  while(!signal.aborted){var part=await reader.read();if(part.done)break;if(!part.value.length)continue;
-   await new Promise(function(resolve,reject){var off=function(){sb.removeEventListener('error',bad);sb.removeEventListener('updateend',done);signal.removeEventListener('abort',aborted);},done=function(){off();resolve();},bad=function(){off();reject(Error('Audio stream could not be decoded. Use replay or another browser.'));},aborted=function(){off();reject(new DOMException('Aborted','AbortError'));};signal.addEventListener('abort',aborted,{once:true});sb.addEventListener('updateend',done,{once:true});sb.addEventListener('error',bad,{once:true});try{sb.appendBuffer(part.value);}catch(e){off();reject(e);}});
-   if(!signal.aborted&&!started&&sb.buffered.length){await audio.play();if(signal.aborted)return;started=true;onStart(true);}
-  }
-  if(!signal.aborted&&ms.readyState==='open')ms.endOfStream();
+  aborted();if(!bytes)throw Error('Voice clip was empty.');
   audio.addEventListener('ended',cleanup,{once:true});
- } catch(e){cleanup();throw e;}
+  if(buffered){url=URL.createObjectURL(new Blob(parts,{type:'audio/mpeg'}));parts=[];audio.src=url;return await play(false);}
+  parts=[];if(ms.readyState==='open')ms.endOfStream();
+  if(!started)return await play(true);
+ }catch(e){cleanup();throw e;}
 };
 """

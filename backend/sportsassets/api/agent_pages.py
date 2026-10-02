@@ -1850,7 +1850,7 @@ TALK_JS = r"""
   var $ = function (id) { return document.getElementById(id); };
   var log = $('talk-log'), input = $('talk-in'), form = $('talk-form'), stateEl = $('talk-state');
   var send = $('talk-send'), mic = $('talk-mic'), muteB = $('talk-mute'), stopB = $('talk-stop');
-  var cid = null, muted = false, audio = null, rec = null, chunks = [], busy = false, speechAbort = null, speechEpoch = 0, waitTimer = null;
+  var cid = null, muted = false, audio = null, rec = null, chunks = [], busy = false, speechAbort = null, speechEpoch = 0, waitTimer = null, activeRequest = null, chatEpoch = 0, readySpeech = null;
   function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return {'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]; }); }
   function setState(t) { if (!t) { stateEl.hidden = true; stateEl.textContent = ''; return; } stateEl.hidden = false; stateEl.textContent = t; }
   function paintMute() { muteB.setAttribute('aria-pressed', muted ? 'true' : 'false'); muteB.innerHTML = muted ? '&#128263; Voice off' : '&#128266; Voice on'; }
@@ -1867,6 +1867,7 @@ TALK_JS = r"""
       if (cs.policy) parts.push('active policy ' + esc(cs.policy.version_id) + ' (' + cs.policy.threshold_pp + ' pp)');
       parts.push((cs.lessons || []).length + ' stored lesson' + ((cs.lessons || []).length === 1 ? '' : 's'));
       out.push('Memory supplied: ' + parts.join(' · '));
+      if((cs.lessons||[]).length)out.push('<details><summary>Lessons available to this answer</summary><ul>'+(cs.lessons||[]).map(function(l){return '<li>'+esc(l.kind)+' · '+esc(l.lesson_id)+(l.evidence_category?' · '+esc(l.evidence_category):'')+(l.historical?' · historical; needs revalidation':'')+'</li>';}).join('')+'</ul></details>');
     }
     var facts = m.facts || m.citations || [];
     var li = (m.facts || []).slice(0, 12).map(function (f) { return '<li><b>' + esc(f.fact_id) + '</b> ' + esc(f.source) + ' · ' + esc(f.record_id) + ': ' + esc(f.text || f.field) + '</li>'; }).join('');
@@ -1895,13 +1896,15 @@ TALK_JS = r"""
   }
   async function readJson(r) { try { return await r.json(); } catch (_) { return null; } }
   async function resume() {
+    var initialEpoch=chatEpoch;
     try {
       // the conversation is kept by the server, per agent and signed-in
       // role -- nothing is stored in this browser
       var r = await fetch(BASE + '/persona/latest-conversation', {credentials: 'same-origin', cache: 'no-store'});
-      if (r.status === 404) { cid = null; return; }
+      if (r.status === 404) { if(initialEpoch===chatEpoch)cid = null; return; }
       if (!r.ok) { setState('Earlier conversation not loaded: ' + why(r.status, await readJson(r))); return; }
       var t = await r.json();
+      if(initialEpoch!==chatEpoch || busy)return;
       cid = (t.conversation || {}).conversation_id || null;
       (t.messages || []).forEach(function (m) {
         if (m.role === 'USER') addQ(m.body); else if (m.role === 'ASSISTANT') addA(m);
@@ -1909,37 +1912,67 @@ TALK_JS = r"""
       if ((t.messages || []).length) setState('Resumed your conversation with ' + NAME + ' (' + t.messages.length + ' messages).');
     } catch (e) { setState('Earlier conversation not loaded: ' + (e && e.message || e)); }
   }
-  function stopAudio() { speechEpoch++; if(speechAbort){speechAbort.abort();speechAbort=null;} if (audio) { try { audio.pause(); } catch (_) {} audio = null; } stopB.disabled = true; avatar('chatDone'); }
+  function stopAudio() { readySpeech=null; speechEpoch++; if(speechAbort){speechAbort.abort();speechAbort=null;} if (audio) { try { audio.pause(); } catch (_) {} audio = null; } stopB.disabled = true; avatar('chatDone'); }
   async function speak(mid, manual) {
     if (!mid || (muted && !manual)) return;
+    if(manual&&readySpeech&&readySpeech.mid===mid){try{await readySpeech.play();setState(NAME+' is speaking.');}catch(e){setState('Playback unavailable in this browser. Your complete text is available.');}return;}
     stopAudio(); var generation=speechEpoch; speechAbort=new AbortController(); var signal=speechAbort.signal;
     stopB.disabled=false;setState('Connecting '+NAME+"'s voice…");
+    var voiceTimeout=setTimeout(function(){if(generation===speechEpoch){speechAbort.abort();stopB.disabled=true;setState('Voice request timed out. Your text reply remains available; press Play to retry.');}},45000);
     try {
       var r = await fetch(BASE + '/speech', {method: 'POST', credentials: 'same-origin', signal:signal, headers: {'Content-Type': 'application/json'}, body: JSON.stringify({message_id: mid})});
       if(generation!==speechEpoch)return;
       if (!r.ok) { var errorBody=await readJson(r);if(generation!==speechEpoch)return;setState('Voice unavailable: ' + why(r.status, errorBody) + '. The text reply above is complete.');stopB.disabled=true;return; }
       audio=new Audio();var speaking=audio;
       speaking.onended=function(){if(generation===speechEpoch){stopAudio();setState(null);}};
-      speaking.onerror=function(){if(generation===speechEpoch){stopAudio();setState('Audio playback failed. The complete text remains available.');}};
+      // The decoder owns errors while it attempts native playback recovery.
       import('/api/command/agents/static/cc_avatar.js').then(function(m){if(generation===speechEpoch)m.attachAudio(speaking);}).catch(function(){});
-      await window.CCStreamSpeech(r,speaking,signal,function(progressive){if(generation===speechEpoch)setState(NAME+' is speaking · '+(progressive?'streaming audio':'buffered playback on this browser')+'. You can interrupt or send your next question.');});
-    } catch (e) { if(generation!==speechEpoch||e.name==='AbortError')return;stopAudio();setState('Voice could not play: '+(e.name==='NotAllowedError'?'press Play on the reply to allow audio':e.message)); }
+      var playback=await window.CCStreamSpeech(r,speaking,signal,function(progressive){if(generation===speechEpoch)setState(NAME+' is speaking · '+(progressive?'streaming audio':'buffered playback on this browser')+'. You can interrupt or send your next question.');});
+      if(generation!==speechEpoch)return;
+      if(playback&&playback.blocked){readySpeech={mid:mid,play:playback.play};setState('Voice is ready. Press Play on this reply to allow audio in your browser.');}
+      speaking.onerror=function(){if(generation===speechEpoch){stopAudio();setState('Audio playback unavailable. Your complete text remains available.');}};
+    } catch (e) { if(generation!==speechEpoch||e.name==='AbortError')return;stopAudio();setState('Voice could not play: '+(e.name==='NotAllowedError'?'press Play on the reply to allow audio':e.message)); } finally {clearTimeout(voiceTimeout);}
   }
-  async function ask(text) {
+  function cancelWait() {
+    if (!activeRequest) return;
+    activeRequest.cancelled = true; activeRequest.controller.abort();
+  }
+  async function ask(text, retry) {
     if (busy || !text) return;
-    busy = true; send.disabled = true; stopAudio(); addQ(text); var began=Date.now(); setState(NAME + ' is reading the records…'); avatar('chatPending'); waitTimer=setInterval(function(){setState(NAME+' is reading the records · '+Math.floor((Date.now()-began)/1000)+'s. The answer is checked before it is shown.');},1000);
+    var style=document.getElementById('office-answer-style');
+    var outgoing=style&&style.value==='brief'?'Briefly, answer conversationally in up to three sentences; offer a detailed follow-up if needed. '+text:style&&style.value==='full'?'Full analysis -- walk me through the records, figures and reasoning: '+text:text;
+    var body=retry || {message:outgoing,request_id:'pg-'+agent+'-'+Date.now().toString(36)+Math.random().toString(36).slice(2,8)};
+    if (!retry && cid) body.conversation_id=cid;
+    var epoch=++chatEpoch, controller=new AbortController(), request={controller:controller,cancelled:false};
+    activeRequest=request; busy=true; send.disabled=true; stopAudio();
+    if(!retry)addQ(text);
+    var pending=document.createElement('div');pending.className='talk-msg a talk-pending';pending.setAttribute('role','status');
+    pending.innerHTML='<div class="who">'+esc(NAME)+'</div><div class="body">Waiting for a verified answer…</div><button type="button" class="talk-cancel">Stop waiting</button>';
+    pending.querySelector('button').onclick=cancelWait;log.append(pending);log.scrollTop=log.scrollHeight;
+    var began=Date.now();root.setAttribute('aria-busy','true');avatar('chatPending');
+    function tick(){var seconds=Math.floor((Date.now()-began)/1000);setState('Request sent · '+seconds+'s'+(seconds>=12?' · taking longer than usual':'')+'. Waiting for '+NAME+"'s response.");}
+    tick();waitTimer=setInterval(tick,1000);
+    var timeout=setTimeout(function(){request.timedOut=true;controller.abort();},45000);
+    function failed(message,pendingServer){
+      pending.classList.remove('talk-pending');pending.classList.add('err');pending.setAttribute('role','status');
+      pending.innerHTML='<div class="who">'+esc(NAME)+(pendingServer?' · response pending':' · not answered')+'</div><div class="body">'+esc(message)+'</div><div class="talk-recovery"><button type="button" class="talk-retry">Check / retry this request</button><button type="button" class="talk-restore">Edit question</button></div><small>Request '+esc(body.request_id)+'</small>';
+      pending.querySelector('.talk-retry').onclick=function(){if(!busy){pending.remove();ask(text,body);}};
+      pending.querySelector('.talk-restore').onclick=function(){input.value=text;input.focus();};
+      setState('This request has no new answer. Earlier replies are conversation history.');avatar('chatDone');
+    }
     try {
-      var style=document.getElementById('office-answer-style'); var outgoing=style&&style.value==='brief'?'Briefly, answer conversationally in up to three sentences; offer a detailed follow-up if needed. '+text:style&&style.value==='full'?'Full analysis -- walk me through the records, figures and reasoning: '+text:text;
-      var body = {message: outgoing, request_id: 'pg-' + agent + '-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8)};
-      if (cid) body.conversation_id = cid;
-      var r = await fetch(BASE + '/persona/chat', {method: 'POST', credentials: 'same-origin', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
-      var j = await readJson(r);
-      if (!r.ok && r.status !== 202) { addErr(why(r.status, j)); setState(null); avatar('chatDone'); return; }
-      if (j && j.conversation_id) { cid = j.conversation_id; }
-      clearInterval(waitTimer); addA(j || {}); setState(null);
-      if (j && j.message_id) speak(j.message_id, false); else avatar('chatDone');
-    } catch (e) { addErr('Network error: ' + (e && e.message || e)); setState(null); avatar('chatDone'); }
-    finally { clearInterval(waitTimer); busy = false; send.disabled = false; }
+      var r=await fetch(BASE+'/persona/chat',{method:'POST',credentials:'same-origin',signal:controller.signal,headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+      var j=await readJson(r);if(epoch!==chatEpoch)return;
+      clearInterval(waitTimer);
+      if(r.status===202){failed('The server is still processing this request. Check it again using the same request ID.',true);return;}
+      if(!r.ok){failed(why(r.status,j),false);return;}
+      if(!j||!j.message_id||typeof j.answer!=='string'||!j.answer.trim()){failed('The server returned no completed answer. Check this request again; no answer is inferred.',true);return;}
+      if(j.conversation_id)cid=j.conversation_id;
+      pending.remove();var answer=addA(j);answer.dataset.requestId=body.request_id;
+      answer.querySelector('.who').textContent=NAME+' · '+((Date.now()-began)/1000).toFixed(1)+'s';setState(null);
+      speak(j.message_id,false);
+    } catch(e){if(epoch===chatEpoch)failed(request.timedOut?'No response arrived within 45 seconds. The server may still finish; check this same request before sending it again.':request.cancelled?'Stopped waiting in this browser. Server processing may still finish; use Check / retry to retrieve the same request.':'Connection interrupted. The server may have received your question; check this same request.',true);}
+    finally{clearInterval(waitTimer);clearTimeout(timeout);if(epoch===chatEpoch){activeRequest=null;busy=false;send.disabled=false;root.setAttribute('aria-busy','false');}}
   }
   form.addEventListener('submit', function (ev) { ev.preventDefault(); if(busy)return;var q = input.value.trim(); input.value = ''; ask(q); });
   input.addEventListener('keydown', function (ev) { if (ev.key === 'Enter' && !ev.shiftKey) { ev.preventDefault(); form.requestSubmit ? form.requestSubmit() : form.dispatchEvent(new Event('submit')); } });
@@ -1947,7 +1980,7 @@ TALK_JS = r"""
   root.addEventListener('click', function (ev) { var s = ev.target.closest('.talk-sugg'); if (s) { input.value = s.textContent; input.focus(); } });
   muteB.addEventListener('click', function () { muted = !muted; paintMute(); if (muted) stopAudio(); });
   stopB.addEventListener('click', function () { stopAudio(); setState(null); });
-  $('talk-new').addEventListener('click', function () { if(busy){setState('Wait for the current reply before starting a new conversation.');return;}stopAudio(); cid = null; log.innerHTML = ''; setState('New conversation started with your next message. Earlier conversations stay in the record.'); });
+  $('talk-new').addEventListener('click', function () { if(busy){setState('Wait for the current reply before starting a new conversation.');return;}stopAudio(); chatEpoch++; cid = null; log.innerHTML = ''; setState('New conversation started with your next message. Earlier conversations stay in the record.'); });
   // ── the microphone: explicit start / stop, server transcription, text fallback
   function micSupported() { return !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia && window.MediaRecorder); }
   if (!micSupported()) { mic.disabled = true; mic.title = 'This browser cannot record audio here; type your question instead.'; }
@@ -2073,6 +2106,7 @@ def _cc_page_html(kind: str) -> str:
     from . import agent_cc_page as CCP
     from . import agent_office as OFFICE
     from . import agent_office_experience as DESK
+    from . import agent_office_finish as FINISH
     js = (CORE_JS + COMMON_JS + TRACE_JS
           + {"derek": DEREK_JS, "xavier": XAVIER_JS, "audrey": AUDREY_JS}[kind]
           + CCP.CC_CORE_JS + CCP.CC_BOOT_JS.replace(
@@ -2081,10 +2115,10 @@ def _cc_page_html(kind: str) -> str:
               1)
           + CCP.PAPER_CORE_JS + OPS.OPS_CORE_JS + CCP.PAPER_BOOT_JS.replace(
               "%%PAPER_EP%%", _json_ep(PAPER_EP_KEYS))
-          + BOOT_JS + OFFICE.OFFICE_JS + OFFICE.SPEECH_JS + TALK_JS + DESK.JS)
+          + BOOT_JS + OFFICE.OFFICE_JS + OFFICE.SPEECH_JS + TALK_JS + DESK.JS + FINISH.JS)
     chat = CCP.chat_panel_html(CHAT_PANEL_HTML) if kind == "audrey" else ""
     return (_CC_SHELL.replace("%%CSS%%", BASE_CSS + CCP.CC_CSS + CCP.PAPER_CSS
-                              + OPS.OPS_CSS + TALK_CSS + OFFICE.OFFICE_CSS + DESK.CSS)
+                              + OPS.OPS_CSS + TALK_CSS + OFFICE.OFFICE_CSS + DESK.CSS + FINISH.CSS)
             .replace("%%TALK%%", talk_panel_html(kind))
             .replace("%%FRESH%%", OPS.fresh_html())
             .replace("%%OPS%%", OPS.ops_html(kind))
