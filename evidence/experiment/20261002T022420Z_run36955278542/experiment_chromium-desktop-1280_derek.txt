@@ -1,6 +1,6 @@
 Skip to the records
 READ-ONLY
-read 2026-10-02 02:10:54Z
+read 2026-10-02 02:23:07Z
 Trace
 Refresh
 LIVE MARKET DATA · SIMULATED EXECUTION · $500,000 STARTING BANKROLL
@@ -18,23 +18,23 @@ $0.00
 AVAILABLE
 $489,587.91
 POSITION VALUE
-$10,305.68
+$10,458.74
 EQUITY
-$499,893.59
+$500,046.65
 REALIZED P&L
 +$2.91
 UNREALIZED P&L
-−$109.32
++$43.74
 
 cash + marked open-position value · ledger entry #27 · the same read on the homepage and every agent page
 
-Records read 2s ago
-Agent pass 21s ago
+Records read 1s ago
+Agent pass 55s ago
 LATEST RECORDED WORK · DEREK
-11m ago
-Atlanta Braves to win
+10m ago
+Greece to win
 
-Game 3: PHI Phillies vs. ATL Braves
+Greece vs. Germany
 
 Entry decision
 Refused
@@ -43,7 +43,7 @@ Gross edge not recorded · net EV Not recorded
 
 Recorded rationale
 
-REFUSE SETTLEMENT_NOT_SUPPORTED
+REFUSE NO_QUALIFIED_PINNACLE_PROBABILITY
 
 Explain this decision ↗
 Open full record
@@ -62,7 +62,7 @@ Evaluations shown
 Working entry orders
 0
 Approved in this view
-2
+1
 DISCOVERY DESK
 Opportunity queue
 
@@ -81,7 +81,7 @@ Approved
 
 Approved for entry
 
-Evaluated 11m ago
+Evaluated 23m ago
 +
 AT
 Atlanta Braves to win
@@ -90,58 +90,73 @@ Game 3: PHI Phillies vs. ATL Braves
 
 Simulated execution
 Gross edge
-0.57 pp
-$15.31 net EV
-Approved
-
-Approved for entry
-
-Evaluated 24m ago
-+
-CU
-Cuiabá to win
-
-Cuiaba EC vs. AA Ponte Preta
-
-Simulated execution
-Gross edge
--0.46 pp
+-5.30 pp
 Not recorded net EV
 Refused
 
 the edge was below the policy's minimum (the threshold recorded on the decision)
 
-Evaluated 24m ago
+Evaluated 10m ago
 +
-LO
-Londrina to win
+GR
+Greece to win
 
-Londrina EC vs. Criciuma EC
+Greece vs. Germany
 
 Simulated execution
 Gross edge
--0.67 pp
+Not recorded
 Not recorded net EV
 Refused
 
-the edge was below the policy's minimum (the threshold recorded on the decision)
+no usable Pinnacle price
 
-Evaluated 24m ago
+Evaluated 10m ago
 +
-AV
-Avai to win
+WA
+Wales to win
 
-Avai FC vs. Ceara SC
+Wales vs. Denmark
 
 Simulated execution
 Gross edge
--2.07 pp
+Not recorded
 Not recorded net EV
 Refused
 
-the edge was below the policy's minimum (the threshold recorded on the decision)
+no research model exists yet
 
-Evaluated 24m ago
+Evaluated 10m ago
++
+TA
+Tampa Bay Rays to win
+
+Game 1: NY Yankees vs. TB Rays
+
+Simulated execution
+Gross edge
+Not recorded
+Not recorded net EV
+Refused
+
+no research model exists yet
+
+Evaluated 10m ago
++
+CL
+Cleveland Guardians to win
+
+Game 1: CHI White Sox vs. CLE Guardians
+
+Simulated execution
+Gross edge
+Not recorded
+Not recorded net EV
+Refused
+
+no research model exists yet
+
+Evaluated 10m ago
 +
 AT
 Atlanta Braves to win
@@ -154,9 +169,9 @@ Not recorded
 Not recorded net EV
 Refused
 
-the venue's and Pinnacle's settlement rules are not established as the same
+no research model exists yet
 
-Evaluated 11m ago
+Evaluated 10m ago
 +
 MI
 Milwaukee Brewers to win
@@ -171,7 +186,37 @@ Refused
 
 the venue's and Pinnacle's settlement rules are not established as the same
 
-Evaluated 11m ago
+Evaluated 10m ago
++
+AT
+Atlanta Braves to win
+
+Game 3: PHI Phillies vs. ATL Braves
+
+Simulated execution
+Gross edge
+Not recorded
+Not recorded net EV
+Refused
+
+the venue's and Pinnacle's settlement rules are not established as the same
+
+Evaluated 23m ago
++
+MI
+Milwaukee Brewers to win
+
+Game 1: SD Padres vs. MIL Brewers
+
+Simulated execution
+Gross edge
+Not recorded
+Not recorded net EV
+Refused
+
+the venue's and Pinnacle's settlement rules are not established as the same
+
+Evaluated 23m ago
 +
 BO
 Botafogo-SP to win
@@ -186,7 +231,7 @@ Refused
 
 no research model exists yet
 
-Evaluated 23m ago
+Evaluated 36m ago
 +
 AT
 Atletico Goianiense to win
@@ -201,85 +246,37 @@ Refused
 
 no research model exists yet
 
-Evaluated 23m ago
-+
-AV
-Avai to win
-
-Avai FC vs. Ceara SC
-
-Simulated execution
-Gross edge
-Not recorded
-Not recorded net EV
-Refused
-
-no research model exists yet
-
-Evaluated 24m ago
-+
-CU
-Cuiabá to win
-
-Cuiaba EC vs. AA Ponte Preta
-
-Simulated execution
-Gross edge
-Not recorded
-Not recorded net EV
-Refused
-
-no research model exists yet
-
-Evaluated 24m ago
-+
-LO
-Londrina to win
-
-Londrina EC vs. Criciuma EC
-
-Simulated execution
-Gross edge
-Not recorded
-Not recorded net EV
-Refused
-
-no research model exists yet
-
-Evaluated 24m ago
+Evaluated 36m ago
 +
 Activity journal
 Latest records in this read
-Refused · Atlanta Braves to win
+Refused · Greece to win
 Entry decision
-11m ago
-Refused · Atlanta Braves to win
+10m ago
+Refused · Greece to win
 Entry decision
-11m ago
-Approved for entry · Atlanta Braves to win
+10m ago
+Refused · Greece to win
 Entry decision
-11m ago
-Refused · Milwaukee Brewers to win
+10m ago
+Refused · Wales to win
 Entry decision
-11m ago
-Refused · Milwaukee Brewers to win
+10m ago
+Refused · Wales to win
 Entry decision
-11m ago
-Refused · Milwaukee Brewers to win
+10m ago
+Refused · Wales to win
 Entry decision
-11m ago
+10m ago
 IN CONVERSATION · DEREK
 
 Resumed your conversation with Derek (24 messages).
 
 ● AI AGENT
 Derek
-AI
 
-PLACEHOLDER CHARACTER — final model pending. Derek is an AI agent (Discovery & Entry), shown by an original procedural stand-in (confident, energetic, opportunity-hunting; a sharp open-collar finance look) until the licensed model is installed. The pose follows the paper runtime's own heartbeat: monitoring, reviewing, waiting, speaking or unavailable.
+the agent, an AI agent, shown as a licensed 3D character (Character model: Microsoft Rocketbox Business_Male_03 (MIT, © 2020 Microsoft)). The pose follows the agent_status record; the mouth moves only with real speech audio.
 
-PLACEHOLDER CHARACTER — final model pending
-2D PORTRAIT · 3D character failed to load (TypeError)
 Pause animation
 PAPER RUNTIME RUNNING
 ◉
@@ -387,14 +384,20 @@ All records, strategy detail and technical evidence
 Presentation of recorded state. This page sends no order and holds no credential; it reads /api/command/agents/derek with the COMMAND session. The 3D characters are licensed Microsoft Rocketbox models (MIT licence, credited below; shipped with their licence file); a device that cannot draw them shows a 2D portrait card. The pose follows the paper runtime's own heartbeat (paper_session_health) and never stands in for data. UNKNOWN is not zero; EMPTY is not success. The 3D character on this page is a licensed model, not an original illustration. Character model: Microsoft Rocketbox Business_Male_03 (MIT, © 2020 Microsoft). Licence: MIT, shipped with the model as ROCKETBOX_LICENSE.md.
 papercg:03156274682739bc07db6133
 Explain the price, fees, expected value and current status of Atlanta Braves to win. Decision papercg:03156274682739bc07db6133.
-papercg:4873c3ebab0d61e945c948d0
-Explain the price, fees, expected value and current status of Atlanta Braves to win. Decision papercg:4873c3ebab0d61e945c948d0.
-papercg:546ce767cf38122d9f460ed1
-Explain the price, fees, expected value and current status of Cuiabá to win. Decision papercg:546ce767cf38122d9f460ed1.
-papercg:31078047d54bbb123308e2e6
-Explain the price, fees, expected value and current status of Londrina to win. Decision papercg:31078047d54bbb123308e2e6.
-papercg:70494eb7d6a83b6dd75e24ea
-Explain the price, fees, expected value and current status of Avai to win. Decision papercg:70494eb7d6a83b6dd75e24ea.
+papercg:70d73fb3486f7128622d008f
+Explain the price, fees, expected value and current status of Atlanta Braves to win. Decision papercg:70d73fb3486f7128622d008f.
+paperdec:864e668cff26eda7944ce105
+Explain the price, fees, expected value and current status of Greece to win. Decision paperdec:864e668cff26eda7944ce105.
+paperdec:9ed427d5025dd05a8a0dfe0d
+Explain the price, fees, expected value and current status of Wales to win. Decision paperdec:9ed427d5025dd05a8a0dfe0d.
+paperdec:35a3c275825941f1c74defca
+Explain the price, fees, expected value and current status of Tampa Bay Rays to win. Decision paperdec:35a3c275825941f1c74defca.
+paperdec:4d262152f59265f5c7fe2198
+Explain the price, fees, expected value and current status of Cleveland Guardians to win. Decision paperdec:4d262152f59265f5c7fe2198.
+paperdec:68a0a5ecfbcbf06fc2d100e7
+Explain the price, fees, expected value and current status of Atlanta Braves to win. Decision paperdec:68a0a5ecfbcbf06fc2d100e7.
+paperdec:566cecf16f8b56067b9c0d98
+Explain the price, fees, expected value and current status of Milwaukee Brewers to win. Decision paperdec:566cecf16f8b56067b9c0d98.
 paperdec:9da09f828bb8323820f1fe06
 Explain the price, fees, expected value and current status of Atlanta Braves to win. Decision paperdec:9da09f828bb8323820f1fe06.
 paperdec:e6060eb90a9bc451c65f0f5f
@@ -403,9 +406,3 @@ paperdec:72a32c80e9a894cd7c869002
 Explain the price, fees, expected value and current status of Botafogo-SP to win. Decision paperdec:72a32c80e9a894cd7c869002.
 paperdec:a356232f3310d5f24092491a
 Explain the price, fees, expected value and current status of Atletico Goianiense to win. Decision paperdec:a356232f3310d5f24092491a.
-paperdec:8638765a57f3aa2349e5ce2b
-Explain the price, fees, expected value and current status of Avai to win. Decision paperdec:8638765a57f3aa2349e5ce2b.
-paperdec:3cd309c2283ff56591235783
-Explain the price, fees, expected value and current status of Cuiabá to win. Decision paperdec:3cd309c2283ff56591235783.
-paperdec:f6b0daeb3dc6aecb5df467cb
-Explain the price, fees, expected value and current status of Londrina to win. Decision paperdec:f6b0daeb3dc6aecb5df467cb.

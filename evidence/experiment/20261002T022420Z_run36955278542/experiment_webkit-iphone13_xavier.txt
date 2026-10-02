@@ -9,12 +9,12 @@ PAPER ACCOUNT · ONE LEDGER · LIVE MARKET DATA · SIMULATED EXECUTION
 CASH
 $489,587.91
 EQUITY
-$499,842.57
+$500,046.65
 Account details +
-Records read 2s ago
-Agent pass 1m ago
+Records read 1s ago
+Agent pass 58s ago
 LATEST RECORDED WORK · XAVIER
-53s ago
+1m ago
 Tampa Bay Rays to win
 Game 1: NY Yankees vs. TB Rays
 
@@ -22,7 +22,7 @@ Position review
 Hold
 Sell 172 @ $0.61
 Recorded rationale
-HOLD has the highest EXPECTED net value (95.238857). The worst case was applied as a constraint, not as the ranking
+HOLD has the highest EXPECTED net value (95.06433). The worst case was applied as a constraint, not as the ranking
 Explain this decision ↗
 Open full record
 Recorded rationale · freshness shown above.
@@ -48,11 +48,11 @@ Game 3: PHI Phillies vs. ATL Braves · 5102 contracts
 
 Simulated execution
 Marked value
-$4,846.90
--$62.06 unrealized
+$4,948.94
+$39.98 unrealized
 Hold
 Sell 5102 @ $0.98
-Review 54s ago
+Review 1m ago
 +
 AT
 
@@ -61,11 +61,11 @@ Game 3: PHI Phillies vs. ATL Braves · 5102 contracts
 
 Simulated execution
 Marked value
-$4,846.90
--$64.64 unrealized
+$4,948.94
+$37.40 unrealized
 Hold
 Sell 5102 @ $0.98
-Review 54s ago
+Review 1m ago
 +
 Atletico Goianiense to win
 AC Goianiense vs. America FC · 136 contracts
@@ -76,7 +76,7 @@ $95.20
 -$3.31 unrealized
 Hold
 Sell 136 @ $0.75
-Review 54s ago
+Review 1m ago
 +
 Botafogo-SP to win
 Botafogo FC vs. Vila Nova FC · 238 contracts
@@ -87,7 +87,7 @@ $88.06
 -$11.11 unrealized
 Hold
 Sell 238 @ $0.45
-Review 54s ago
+Review 1m ago
 +
 Wales to win
 Wales vs. Denmark · 380 contracts
@@ -98,7 +98,7 @@ $95.00
 -$4.95 unrealized
 Hold
 Sell 380 @ $0.29
-Review 54s ago
+Review 1m ago
 +
 TA
 
@@ -111,7 +111,7 @@ $93.74
 -$5.53 unrealized
 Hold
 Sell 172 @ $0.61
-Review 53s ago
+Review 1m ago
 +
 CL
 
@@ -124,7 +124,7 @@ $94.54
 -$4.37 unrealized
 Hold
 Sell 163 @ $0.64
-Review 54s ago
+Review 1m ago
 +
 MI
 
@@ -137,28 +137,28 @@ $94.32
 -$4.37 unrealized
 Hold
 Sell 144 @ $0.71
-Review 54s ago
+Review 1m ago
 +
 Activity journal
 Latest records in this read
 Hold · Tampa Bay Rays to win
 Position review
-53s ago
+1m ago
 Hold · Milwaukee Brewers to win
 Position review
-54s ago
+1m ago
 Hold · Atletico Goianiense to win
 Position review
-54s ago
+1m ago
 Hold · Wales to win
 Position review
-54s ago
+1m ago
 Hold · Cleveland Guardians to win
 Position review
-54s ago
+1m ago
 Hold · Botafogo-SP to win
 Position review
-54s ago
+1m ago
 All records, strategy detail and technical evidence
 Presentation of recorded state. This page sends no order and holds no credential; it reads /api/command/agents/xavier with the COMMAND session. The 3D characters are licensed Microsoft Rocketbox models (MIT licence, credited below; shipped with their licence file); a device that cannot draw them shows a 2D portrait card. The pose follows the paper runtime's own heartbeat (paper_session_health) and never stands in for data. UNKNOWN is not zero; EMPTY is not success. The 3D character on this page is a licensed model, not an original illustration. Character model: Microsoft Rocketbox Business_Male_05 (MIT, © 2020 Microsoft). Licence: MIT, shipped with the model as ROCKETBOX_LICENSE.md.
 

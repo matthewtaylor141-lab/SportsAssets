@@ -2,7 +2,7 @@
   "status": 200,
   "json": {
     "version": "PAPER_EXPERIMENT_READ_V1",
-    "as_of": 1790907036.4509315,
+    "as_of": 1790907773.312908,
     "paper_only": true,
     "data_label": "LIVE MARKET DATA / SIMULATED EXECUTION",
     "serving_build": "b5670c3bef4932b70bc3a1cd92c9c7e6c96e88e6",
@@ -48,24 +48,28 @@
           }
         },
         "paper_pass": {
-          "at": 1790907010.830577,
-          "age_s": 25.6,
+          "at": 1790907752.4964223,
+          "age_s": 20.8,
           "ran": true,
           "refusal": null,
           "errors": {},
-          "elapsed_s": 38.359,
+          "elapsed_s": 18.016,
           "trigger": "SERVICING_TASK"
         },
         "collector": {
-          "at": 1790906643.8954291,
-          "age_s": 392.6,
+          "at": 1790907407.1093981,
+          "age_s": 366.2,
           "state": "LIVE",
           "label": "ZERO_EVALUATED__INPUT_PATH_BLOCKED",
-          "elapsed_s": 330.51,
+          "elapsed_s": 313.65,
           "build": "b5670c3bef4932b70bc3a1cd92c9c7e6c96e88e6",
           "refusals": {
-            "QUOTE_STALE_ON_ARRIVAL": 2,
-            "VENUE_BOOK_CURRENCY_NOT_ESTABLISHED": 2
+            "NO_PINNACLE_ON_EVENT": 28,
+            "QUOTE_STALE_ON_ARRIVAL": 10,
+            "NO_VENUE_CONTRACT_FOR_EVENT": 5,
+            "NO_VENUE_NATIVE_EVENT_FOR_FIXTURE": 1,
+            "VENUE_BOOK_CURRENCY_NOT_ESTABLISHED": 6,
+            "VENUE_NATIVE_EVENT_MATCHES_ONLY_ONE_TEAM": 4
           }
         },
         "real_money": "DISABLED"
@@ -76,41 +80,41 @@
       "why": null,
       "data": {
         "database": "CONNECTED",
-        "read_at": 1790907036.4509315,
+        "read_at": 1790907773.312908,
         "stamps": {
           "valuation": {
-            "at": 1790906374.765268,
-            "age_s": 661.7,
+            "at": 1790907159.163357,
+            "age_s": 614.1,
             "stale_after_s": 1200,
             "verdict": "CURRENT"
           },
           "decision": {
-            "at": 1790906376.725325,
-            "age_s": 659.7,
+            "at": 1790907159.269884,
+            "age_s": 614,
             "stale_after_s": 1200,
             "verdict": "CURRENT"
           },
           "book": {
-            "at": 1790906972.533238,
-            "age_s": 63.9,
+            "at": 1790907751.700658,
+            "age_s": 21.6,
             "stale_after_s": 900,
             "verdict": "CURRENT"
           },
           "ledger": {
             "at": 1790906448.734207,
-            "age_s": 587.7,
+            "age_s": 1324.6,
             "stale_after_s": null,
             "verdict": "NO_LIMIT"
           },
           "pass": {
-            "at": 1790907010.830577,
-            "age_s": 25.6,
+            "at": 1790907752.4964223,
+            "age_s": 20.8,
             "stale_after_s": 300,
             "verdict": "CURRENT"
           },
           "collector": {
-            "at": 1790906643.8954291,
-            "age_s": 392.6,
+            "at": 1790907407.1093981,
+            "age_s": 366.2,
             "stale_after_s": 1200,
             "verdict": "CURRENT"
           }
@@ -123,13 +127,13 @@
       "why": null,
       "data": {
         "window": "24 h",
-        "valuations": 601,
+        "valuations": 607,
         "fixtures": 22,
         "sports": 2,
         "by_strategy": {
           "PINNACLE_EXPLORATION_PAPER": {
             "title": "Training / simulated execution (exploration)",
-            "decisions": 177,
+            "decisions": 183,
             "enter": 9
           },
           "PINNACLE_ONLY_PAPER_BENCHMARK": {
@@ -139,21 +143,21 @@
           },
           "PINNACLE_COMPLETED_GAME_PAPER": {
             "title": "Investment policy (0.5 pp, taker)",
-            "decisions": 346,
+            "decisions": 352,
             "enter": 2
           },
           "DEREK_ENTRY_POLICY_V2": {
             "title": "Derek two-model research (entries off)",
-            "decisions": 601,
+            "decisions": 607,
             "enter": 0
           }
         },
         "attempts_6h": {
           "DECIDED": {
             "REUSED_IN_THIS_EVALUATION": 9,
-            "SHARED_RECENT_PROCESS_READ": 70,
+            "SHARED_RECENT_PROCESS_READ": 71,
             "FRESH_VENUE_READ": 5,
-            "NO_BOOK_READ": 262
+            "NO_BOOK_READ": 273
           }
         }
       }
@@ -165,17 +169,17 @@
         "DEREK_ENTRY_POLICY_V2": [
           {
             "reason": "NO_RESEARCH_MODEL_CANDIDATE_EXISTS",
-            "n": 416,
+            "n": 420,
             "words": "no research model exists yet"
           },
           {
             "reason": "SETTLEMENT_NOT_SUPPORTED",
-            "n": 116,
+            "n": 117,
             "words": "the venue's and Pinnacle's settlement rules are not established as the same"
           },
           {
             "reason": "NO_QUALIFIED_PINNACLE_PROBABILITY",
-            "n": 67,
+            "n": 68,
             "words": "no usable Pinnacle price"
           },
           {
@@ -194,17 +198,17 @@
         "PINNACLE_COMPLETED_GAME_PAPER": [
           {
             "reason": "BELOW_MIN_GROSS_EDGE",
-            "n": 154,
+            "n": 155,
             "words": "the edge was below the policy's minimum (the threshold recorded on the decision)"
           },
           {
             "reason": "PINNACLE_PROBABILITY_NOT_QUALIFIED_BY_THE_LANE",
-            "n": 64,
+            "n": 65,
             "words": "the Pinnacle price did not qualify"
           },
           {
             "reason": "ANOTHER_STRATEGY_HOLDS_EXPOSURE_TO_THIS_FIXTURE",
-            "n": 59,
+            "n": 63,
             "words": "another strategy already holds this game"
           },
           {
@@ -236,7 +240,7 @@
         "PINNACLE_EXPLORATION_PAPER": [
           {
             "reason": "EXPLORATION_ALREADY_HOLDS_THIS_FIXTURE",
-            "n": 61,
+            "n": 65,
             "words": "exploration already holds a position in this fixture (one per fixture)"
           },
           {
@@ -246,7 +250,7 @@
           },
           {
             "reason": "PINNACLE_PROBABILITY_NOT_QUALIFIED_BY_THE_LANE",
-            "n": 37,
+            "n": 38,
             "words": "the Pinnacle price did not qualify"
           },
           {
@@ -261,7 +265,7 @@
           },
           {
             "reason": "ANOTHER_STRATEGY_HOLDS_EXPOSURE_TO_THIS_FIXTURE",
-            "n": 1,
+            "n": 2,
             "words": "another strategy already holds this game"
           }
         ]
@@ -271,26 +275,6 @@
       "status": "OK",
       "why": null,
       "data": [
-        {
-          "decision_id": "papercg:03156274682739bc07db6133",
-          "strategy": "PINNACLE_COMPLETED_GAME_PAPER",
-          "policy_version": "PINNACLE_COMPLETED_GAME_PAPER_V2",
-          "at": 1790906374.780852,
-          "us_market_slug": "aec-mlb-phi-atl-2026-10-01",
-          "fixture": "condition:0x56843c39ee842fae25c33d55a160628192506e5a4d3df922ebd7f1faee8114dc",
-          "p_pinnacle": 0.9656700722776778,
-          "refusal": null,
-          "verdict": "ENTER",
-          "gross_pp": 4.567007228,
-          "fee_pc": null,
-          "net_pp": null,
-          "price": 0.92,
-          "threshold_pp": 0.5,
-          "participant": "Atlanta Braves",
-          "serving_version": "PINNACLE_COMPLETED_GAME_PAPER_V2",
-          "historical": false,
-          "age_s": 661.7
-        },
         {
           "decision_id": "papercg:500cd3001ecb9a40625d476c",
           "strategy": "PINNACLE_COMPLETED_GAME_PAPER",
@@ -309,7 +293,7 @@
           "participant": "Milwaukee Brewers",
           "serving_version": "PINNACLE_COMPLETED_GAME_PAPER_V2",
           "historical": false,
-          "age_s": 19692.9
+          "age_s": 20429.7
         },
         {
           "decision_id": "papercg:c4c1220e25e09d9129734780",
@@ -329,7 +313,7 @@
           "participant": "Atletico Goianiense",
           "serving_version": "PINNACLE_COMPLETED_GAME_PAPER_V2",
           "historical": false,
-          "age_s": 12541.7
+          "age_s": 13278.6
         },
         {
           "decision_id": "papercg:d700d90357edddfa17728520",
@@ -349,7 +333,7 @@
           "participant": "Cleveland Guardians",
           "serving_version": "PINNACLE_COMPLETED_GAME_PAPER_V2",
           "historical": false,
-          "age_s": 19688.3
+          "age_s": 20425.2
         },
         {
           "decision_id": "papercg:6a67aae595b750b228d9dcc4",
@@ -369,7 +353,7 @@
           "participant": "Grêmio Novorizontino",
           "serving_version": "PINNACLE_COMPLETED_GAME_PAPER_V2",
           "historical": false,
-          "age_s": 10098.5
+          "age_s": 10835.4
         },
         {
           "decision_id": "papercg:fa21f4115f01b5a5ac350038",
@@ -389,7 +373,7 @@
           "participant": "São Bernardo",
           "serving_version": "PINNACLE_COMPLETED_GAME_PAPER_V2",
           "historical": false,
-          "age_s": 2262.8
+          "age_s": 2999.7
         },
         {
           "decision_id": "papercg:546ce767cf38122d9f460ed1",
@@ -409,7 +393,7 @@
           "participant": "Cuiabá",
           "serving_version": "PINNACLE_COMPLETED_GAME_PAPER_V2",
           "historical": false,
-          "age_s": 1423.4
+          "age_s": 2160.2
         },
         {
           "decision_id": "papercg:49e00907a3e531af5c7b2e48",
@@ -429,7 +413,27 @@
           "participant": "Wales",
           "serving_version": "PINNACLE_COMPLETED_GAME_PAPER_V2",
           "historical": false,
-          "age_s": 16969.4
+          "age_s": 17706.3
+        },
+        {
+          "decision_id": "papercg:917c6eb0d60ce89348aee3b3",
+          "strategy": "PINNACLE_COMPLETED_GAME_PAPER",
+          "policy_version": "PINNACLE_COMPLETED_GAME_PAPER_V2",
+          "at": 1790889154.208046,
+          "us_market_slug": "aec-mlb-nyy-tb-2026-10-03",
+          "fixture": "event:cb4d07dc15440acf3d9ebe1ad41756c1",
+          "p_pinnacle": 0.5537142850892989,
+          "refusal": "BELOW_MIN_GROSS_EDGE",
+          "verdict": "REFUSE",
+          "gross_pp": -0.628571491,
+          "fee_pc": null,
+          "net_pp": null,
+          "price": 0.56,
+          "threshold_pp": 0.5,
+          "participant": "Tampa Bay Rays",
+          "serving_version": "PINNACLE_COMPLETED_GAME_PAPER_V2",
+          "historical": false,
+          "age_s": 18619.1
         }
       ]
     },
@@ -439,6 +443,30 @@
       "data": {
         "entry_orders": [],
         "management_orders": [
+          {
+            "order_id": "paperord:da65f6b11854e357ee0b6001",
+            "strategy": "PINNACLE_EXPLORATION_PAPER",
+            "role": "STANDING_PROTECTION",
+            "us_market_slug": "aec-mlb-nyy-tb-2026-10-03",
+            "fixture": "event:cb4d07dc15440acf3d9ebe1ad41756c1",
+            "holding_side": "SHORT",
+            "order_type": "RESTING",
+            "time_in_force": "GTD",
+            "qty": 172,
+            "filled_qty": 0,
+            "limit_price": 0.61,
+            "reserved_remaining_usd": 0,
+            "state": "RESTING",
+            "created_at": 1790907392.921245,
+            "expires_at": 1790910992.891259,
+            "queue_ahead_qty": 141341.51,
+            "decision_id": null,
+            "participant": "Tampa Bay Rays",
+            "rationale": null,
+            "cancel_conditions": null,
+            "position_label": "Training / simulated execution",
+            "training": true
+          },
           {
             "order_id": "paperord:59673bd176b72a0ec98fcaa3",
             "strategy": "PINNACLE_COMPLETED_GAME_PAPER",
@@ -602,30 +630,6 @@
             "queue_ahead_qty": 0,
             "decision_id": null,
             "participant": "Wales",
-            "rationale": null,
-            "cancel_conditions": null,
-            "position_label": "Training / simulated execution",
-            "training": true
-          },
-          {
-            "order_id": "paperord:675578d350ea54877d5b667f",
-            "strategy": "PINNACLE_EXPLORATION_PAPER",
-            "role": "STANDING_PROTECTION",
-            "us_market_slug": "aec-mlb-nyy-tb-2026-10-03",
-            "fixture": "event:cb4d07dc15440acf3d9ebe1ad41756c1",
-            "holding_side": "SHORT",
-            "order_type": "RESTING",
-            "time_in_force": "GTD",
-            "qty": 172,
-            "filled_qty": 0,
-            "limit_price": 0.61,
-            "reserved_remaining_usd": 0,
-            "state": "RESTING",
-            "created_at": 1790903703.06843,
-            "expires_at": 1790907303.043804,
-            "queue_ahead_qty": 96954.69,
-            "decision_id": null,
-            "participant": "Tampa Bay Rays",
             "rationale": null,
             "cancel_conditions": null,
             "position_label": "Training / simulated execution",
@@ -883,10 +887,10 @@
           "cash_usd": 489587.9144,
           "reserved_usd": 0,
           "available_usd": 489587.9144,
-          "total_equity_usd": 499893.5944,
-          "open_position_value_usd": 10305.68,
+          "total_equity_usd": 500046.6544,
+          "open_position_value_usd": 10458.74,
           "realized_pnl_usd": 2.91,
-          "unrealized_pnl_usd": -109.3156,
+          "unrealized_pnl_usd": 43.7444,
           "fees_paid_usd": 52.66,
           "ledger_consistent": true,
           "marks_complete": true,
@@ -898,7 +902,7 @@
             "positions": 2,
             "open": 2,
             "realized_pnl_usd": 0,
-            "unrealized_pnl_usd": -75.6756,
+            "unrealized_pnl_usd": 77.3844,
             "fees_usd": 27.4,
             "open_cost_basis_usd": 9820.4956
           },
@@ -928,15 +932,15 @@
             "settlement": null,
             "mark": {
               "status": "OK",
-              "price": 0.955,
-              "source": "paper_book_observations:2013",
-              "observed_at": 1790906792.795901,
-              "age_s": 243.655,
+              "price": 0.97,
+              "source": "paper_book_observations:2103",
+              "observed_at": 1790907737.328647,
+              "age_s": 35.984,
               "stale": false,
               "method": "TOP_OF_BOOK_EXIT_PRICE: what closing one contract would receive at the best displayed level of the side a close consumes (bettor_book_snapshot.exit_ladder), from the paper path's latest observed book; no depth adjustment"
             },
-            "marked_value_usd": 4872.41,
-            "unrealized_pnl_usd": -36.5456,
+            "marked_value_usd": 4948.94,
+            "unrealized_pnl_usd": 39.9844,
             "first_fill_at": 1790906448.571459
           },
           {
@@ -954,15 +958,15 @@
             "settlement": null,
             "mark": {
               "status": "OK",
-              "price": 0.955,
-              "source": "paper_book_observations:2013",
-              "observed_at": 1790906792.795901,
-              "age_s": 243.655,
+              "price": 0.97,
+              "source": "paper_book_observations:2103",
+              "observed_at": 1790907737.328647,
+              "age_s": 35.984,
               "stale": false,
               "method": "TOP_OF_BOOK_EXIT_PRICE: what closing one contract would receive at the best displayed level of the side a close consumes (bettor_book_snapshot.exit_ladder), from the paper path's latest observed book; no depth adjustment"
             },
-            "marked_value_usd": 4872.41,
-            "unrealized_pnl_usd": -39.13,
+            "marked_value_usd": 4948.94,
+            "unrealized_pnl_usd": 37.4,
             "first_fill_at": 1790905661.489681
           },
           {
@@ -981,9 +985,9 @@
             "mark": {
               "status": "OK",
               "price": 0.37,
-              "source": "paper_book_observations:2016",
-              "observed_at": 1790906795.846617,
-              "age_s": 240.604,
+              "source": "paper_book_observations:2106",
+              "observed_at": 1790907751.700658,
+              "age_s": 21.612,
               "stale": false,
               "method": "TOP_OF_BOOK_EXIT_PRICE: what closing one contract would receive at the best displayed level of the side a close consumes (bettor_book_snapshot.exit_ladder), from the paper path's latest observed book; no depth adjustment"
             },
@@ -1007,9 +1011,9 @@
             "mark": {
               "status": "OK",
               "price": 0.58,
-              "source": "paper_book_observations:2017",
-              "observed_at": 1790906796.132017,
-              "age_s": 240.319,
+              "source": "paper_book_observations:2101",
+              "observed_at": 1790907735.143946,
+              "age_s": 38.169,
               "stale": false,
               "method": "TOP_OF_BOOK_EXIT_PRICE: what closing one contract would receive at the best displayed level of the side a close consumes (bettor_book_snapshot.exit_ladder), from the paper path's latest observed book; no depth adjustment"
             },
@@ -1033,9 +1037,9 @@
             "mark": {
               "status": "OK",
               "price": 0.25,
-              "source": "paper_book_observations:2018",
-              "observed_at": 1790906807.010746,
-              "age_s": 229.44,
+              "source": "paper_book_observations:2102",
+              "observed_at": 1790907736.707312,
+              "age_s": 36.606,
               "stale": false,
               "method": "TOP_OF_BOOK_EXIT_PRICE: what closing one contract would receive at the best displayed level of the side a close consumes (bettor_book_snapshot.exit_ladder), from the paper path's latest observed book; no depth adjustment"
             },
@@ -1059,9 +1063,9 @@
             "mark": {
               "status": "OK",
               "price": 0.7,
-              "source": "paper_book_observations:2019",
-              "observed_at": 1790906855.040963,
-              "age_s": 181.41,
+              "source": "paper_book_observations:2104",
+              "observed_at": 1790907738.794974,
+              "age_s": 34.518,
               "stale": false,
               "method": "TOP_OF_BOOK_EXIT_PRICE: what closing one contract would receive at the best displayed level of the side a close consumes (bettor_book_snapshot.exit_ladder), from the paper path's latest observed book; no depth adjustment"
             },
@@ -1085,9 +1089,9 @@
             "mark": {
               "status": "OK",
               "price": 0.655,
-              "source": "paper_book_observations:2021",
-              "observed_at": 1790906928.150952,
-              "age_s": 108.3,
+              "source": "paper_book_observations:2105",
+              "observed_at": 1790907739.519696,
+              "age_s": 33.793,
               "stale": false,
               "method": "TOP_OF_BOOK_EXIT_PRICE: what closing one contract would receive at the best displayed level of the side a close consumes (bettor_book_snapshot.exit_ladder), from the paper path's latest observed book; no depth adjustment"
             },
@@ -1111,9 +1115,9 @@
             "mark": {
               "status": "OK",
               "price": 0.545,
-              "source": "paper_book_observations:2015",
-              "observed_at": 1790906794.210287,
-              "age_s": 242.241,
+              "source": "paper_book_observations:2100",
+              "observed_at": 1790907688.18948,
+              "age_s": 85.123,
               "stale": false,
               "method": "TOP_OF_BOOK_EXIT_PRICE: what closing one contract would receive at the best displayed level of the side a close consumes (bettor_book_snapshot.exit_ladder), from the paper path's latest observed book; no depth adjustment"
             },
@@ -1168,17 +1172,17 @@
       "data": {
         "derek": {
           "latest_decision": {
-            "decision_id": "paperdec:9da09f828bb8323820f1fe06",
+            "decision_id": "paperdec:864e668cff26eda7944ce105",
             "strategy": "DEREK_ENTRY_POLICY_V2",
             "verdict": "REFUSE",
-            "refusal": "SETTLEMENT_NOT_SUPPORTED",
-            "us_market_slug": "aec-mlb-phi-atl-2026-10-01",
-            "at": 1790906376.725325
+            "refusal": "NO_QUALIFIED_PINNACLE_PROBABILITY",
+            "us_market_slug": "atc-unl-gre-ger-2026-10-04-gre",
+            "at": 1790907159.269884
           }
         },
         "xavier": {
-          "reviews_24h": 1126,
-          "last_review_at": 1790906932.221823,
+          "reviews_24h": 1200,
+          "last_review_at": 1790907752.336471,
           "handoffs": 9
         },
         "audrey": {
@@ -1388,9 +1392,9 @@
         "hours": [
           {
             "hour": 1790906400,
-            "book_reads": 57,
-            "shared_reads": 1,
-            "failed_reads": 13,
+            "book_reads": 136,
+            "shared_reads": 2,
+            "failed_reads": 22,
             "decisions_cut_by_deadline": 0
           },
           {
@@ -1430,10 +1434,10 @@
           },
           {
             "hour": 1790884800,
-            "book_reads": 85,
+            "book_reads": 79,
             "shared_reads": 17,
-            "failed_reads": 9,
-            "decisions_cut_by_deadline": 4
+            "failed_reads": 6,
+            "decisions_cut_by_deadline": 1
           }
         ]
       }

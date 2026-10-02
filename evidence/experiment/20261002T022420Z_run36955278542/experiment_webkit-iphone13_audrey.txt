@@ -9,9 +9,9 @@ PAPER ACCOUNT · ONE LEDGER · LIVE MARKET DATA · SIMULATED EXECUTION
 CASH
 $489,587.91
 EQUITY
-$499,842.57
+$500,046.65
 Account details +
-Records read 1s ago
+Records read 0s ago
 Agent pass 1m ago
 LATEST RECORDED WORK · AUDREY
 5h ago
@@ -37,7 +37,7 @@ Reconciled
 Realized P&L
 $2.91
 Unrealized P&L
--$160.34
+$43.74
 INTELLIGENCE DESK
 Recommendations & follow-through
 Recorded findings, accountable owners and measured outcomes.

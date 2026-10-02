@@ -2,10 +2,9 @@ SIMULATED CAPITAL · LIVE MARKET DATA
 Cash
 $489,587.91
 Equity
-$499,842.57
+$500,046.65
 Realized P&L
 +$2.91
-1 STALE MARK(S)
 CONNECTING · last ledger change Oct 1, 22:00:48 ET
 Skip to dashboard
 
@@ -23,7 +22,7 @@ Ask Audrey ↗
 Session running
 Simulated capital · Live market data
 TOTAL EQUITY
-$499,842.57
+$500,046.65
 One account. One reconciled ledger.
 Available to deploy
 $489,587.91
@@ -35,37 +34,36 @@ $489,587.91
 Reserved
 $0.00
 Position value
-$10,254.66
+$10,458.74
 Unrealized P&L
--$160.34
-1 position marks are stale.
+$43.74
 THE EXPERIMENT
 What the team is doing with the paper account.
 Every figure is a stored record · simulated execution · live market data
-CONNECTED · database read 5 s ago · 8 open filled positions
+CONNECTED · database read 10 s ago · 8 open filled positions
 Session & data freshness
 
 paper_session_20261001T014716Z · started 2026-10-01 01:47Z
 
 Latest valuation
-28 s ago
+11 min ago
 Latest decision
-28 s ago
+11 min ago
 Latest order book
-38 s ago
+25 s ago
 Agent pass
-38 s ago
+25 s ago
 Collection cycle
-9 min ago
+7 min ago
 Latest ledger entry
-12 min ago
-Pass ran in 15.0 s · collector ZERO_EVALUATED__INPUT_PATH_BLOCKED · build b5670c3 · real money DISABLED
+23 min ago
+Pass ran in 14.1 s · collector ZERO_EVALUATED__INPUT_PATH_BLOCKED · build b5670c3 · real money DISABLED
 Agent activity
 
 Derek · latest decision
-28 s ago · REFUSE no qualified pinnacle probability
+11 min ago · REFUSE no qualified pinnacle probability
 Xavier · reviews (24 h)
-1142 · 9 handoffs
+1200 · 9 handoffs
 Audrey · findings
 8 latest
 Audrey's operational recommendations
@@ -102,14 +100,15 @@ mlb-sd-mil-2026-10-03	V2	6 h ago	0.6782	0.67	0.82 pp	1.54 pp	-0.71 pp	gross edge
 brb-acg-afc-2026-10-03-acg	V2	4 h ago	0.7172	0.71	0.72 pp	1.43 pp	-0.71 pp	gross edge clears threshold but fees consume it
 mlb-cws-cle-2026-10-03	V2	6 h ago	0.5904	0.59	0.04 pp	not computed	not computed	below min gross edge
 brb-nov-goi-2026-10-01-nov	V2	3 h ago	0.6193	0.62	-0.07 pp	not computed	not computed	below min gross edge
-brb-ber-crb-2026-10-02-ber	V2	40 min ago	0.3789	0.38	-0.11 pp	not computed	not computed	below min gross edge
-brb-cui-pop-2026-10-03-cui	V2	26 min ago	0.8454	0.85	-0.46 pp	not computed	not computed	below min gross edge
+brb-ber-crb-2026-10-02-ber	V2	51 min ago	0.3789	0.38	-0.11 pp	not computed	not computed	below min gross edge
+brb-cui-pop-2026-10-03-cui	V2	37 min ago	0.8454	0.85	-0.46 pp	not computed	not computed	below min gross edge
 unl-wal-den-2026-10-04-wal	V2	5 h ago	0.2439	0.25	-0.61 pp	not computed	not computed	below min gross edge
 mlb-nyy-tb-2026-10-03	V2	5 h ago	0.5537	0.56	-0.63 pp	not computed	not computed	below min gross edge
 The serving investment rule: Pinnacle probability minus price ≥ 0.5 pp at every level used, and expected profit after the taker fee strictly positive. A historical row keeps the reason it was given under the rules in force at the time. "Not computed" means the policy stopped before the fee step.
 Standing orders 0 entry · 8 protection
 
 STRATEGY	MARKET	ROLE	TYPE	PRICE	QTY / FILLED	RESERVED	EXPIRES
+TRAINING	mlb-nyy-tb-2026-10-03	STANDING_PROTECTION	RESTING GTD	0.61	172 / 0	$0.00	03:16Z
 INVESTMENT	mlb-phi-atl-2026-10-01	STANDING_PROTECTION	RESTING GTD	0.98	5102 / 0	$0.00	03:00Z
 TRAINING	mlb-cws-cle-2026-10-03	STANDING_PROTECTION	RESTING GTD	0.64	163 / 0	$0.00	02:49Z
 TRAINING	brb-bot-vln-2026-10-03-bot	STANDING_PROTECTION	RESTING GTD	0.45	238 / 0	$0.00	02:49Z
@@ -117,13 +116,12 @@ INVESTMENT	mlb-phi-atl-2026-10-01	STANDING_PROTECTION	RESTING GTD	0.98	5102 / 0	
 TRAINING	mlb-sd-mil-2026-10-03	STANDING_PROTECTION	RESTING GTD	0.71	144 / 0	$0.00	02:46Z
 TRAINING	brb-acg-afc-2026-10-03-acg	STANDING_PROTECTION	RESTING GTD	0.75	136 / 0	$0.00	02:46Z
 TRAINING	unl-wal-den-2026-10-04-wal	STANDING_PROTECTION	RESTING GTD	0.29	380 / 0	$0.00	02:35Z
-TRAINING	mlb-nyy-tb-2026-10-03	STANDING_PROTECTION	RESTING GTD	0.61	172 / 0	$0.00	02:15Z
 An order is not a fill: it reserves cash until it fills, expires or is cancelled.
 Positions 8 open · 13 recent fills
 
 STRATEGY	MARKET	SIDE	OPEN QTY	COST BASIS	UNREALIZED
-INVESTMENT Investment policy (0.5 pp, taker)	mlb-phi-atl-2026-10-01	SHORT	5102	$4,908.96	-$62.06
-INVESTMENT Investment policy (0.5 pp, taker)	mlb-phi-atl-2026-10-01	SHORT	5102	$4,911.54	-$64.64
+INVESTMENT Investment policy (0.5 pp, taker)	mlb-phi-atl-2026-10-01	SHORT	5102	$4,908.96	$39.98
+INVESTMENT Investment policy (0.5 pp, taker)	mlb-phi-atl-2026-10-01	SHORT	5102	$4,911.54	$37.40
 TRAINING Training / simulated execution	brb-bot-vln-2026-10-03-bot	LONG	238	$99.17	-$11.11
 TRAINING Training / simulated execution	mlb-cws-cle-2026-10-03	SHORT	163	$98.91	-$4.37
 TRAINING Training / simulated execution	unl-wal-den-2026-10-04-wal	LONG	380	$99.95	-$4.95
@@ -133,7 +131,7 @@ TRAINING Training / simulated execution	mlb-nyy-tb-2026-10-03	SHORT	172	$99.27	-
 By strategy (one ledger; strategies sum to the account)
 
 STRATEGY	OPEN / ALL	REALIZED	UNREALIZED	FEES
-INVESTMENT Investment policy (0.5 pp, taker)	2 / 2	$0.00	-$126.70	$27.40
+INVESTMENT Investment policy (0.5 pp, taker)	2 / 2	$0.00	$77.38	$27.40
 TRAINING Training / simulated execution (exploration)	6 / 7	$2.91	-$33.64	$25.26
 Exploration budget · exposure $594.50 of $5,000.00 · realized losses $0.00 of the $1,000.00 stop · $100.00 max per position incl. fees · one per fixture. Negative expected value here is a research cost, not investment performance.
 Latest simulated fills
@@ -153,7 +151,7 @@ fee $3.22 · ledger #20
 Acquisition throughput (6 h)
 
 HOUR	BOOK READS	SHARED	FAILED	CUT BY DEADLINE
-02:00Z	70	2	18	0
+02:00Z	142	2	22	0
 01:00Z	389	15	70	0
 00:00Z	356	11	116	0
 23:00Z	365	12	176	0

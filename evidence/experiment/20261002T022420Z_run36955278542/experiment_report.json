@@ -1,6 +1,6 @@
 {
   "host": "https://command.bettortoken.com",
-  "at": "2026-10-02T02:10:33.407Z",
+  "at": "2026-10-02T02:22:52.907Z",
   "checks": [
     {
       "name": "api_connected",
@@ -90,39 +90,39 @@
     },
     {
       "name": "chromium-desktop-1280:xavier_positions_match_api",
-      "ok": false,
+      "ok": true,
       "detail": [
         {
           "market": "aec-mlb-phi-atl-2026-10-01",
-          "shown": false
+          "shown": true
         },
         {
           "market": "aec-mlb-phi-atl-2026-10-01",
-          "shown": false
+          "shown": true
         },
         {
           "market": "atc-brb-bot-vln-2026-10-03-bot",
-          "shown": false
+          "shown": true
         },
         {
           "market": "aec-mlb-cws-cle-2026-10-03",
-          "shown": false
+          "shown": true
         },
         {
           "market": "atc-unl-wal-den-2026-10-04-wal",
-          "shown": false
+          "shown": true
         },
         {
           "market": "atc-brb-acg-afc-2026-10-03-acg",
-          "shown": false
+          "shown": true
         },
         {
           "market": "aec-mlb-sd-mil-2026-10-03",
-          "shown": false
+          "shown": true
         },
         {
           "market": "aec-mlb-nyy-tb-2026-10-03",
-          "shown": false
+          "shown": true
         }
       ]
     },
@@ -132,8 +132,8 @@
       "detail": {
         "cash": "$489,587.91",
         "home": true,
-        "audrey": false,
-        "xavier": false,
+        "audrey": true,
+        "xavier": true,
         "derek": true
       }
     },
@@ -339,7 +339,7 @@
         }
       ],
       "derek": {
-        "chars": 17580,
+        "chars": 17335,
         "has_cash": true,
         "positions": [
           {
@@ -403,46 +403,46 @@
         ]
       },
       "xavier": {
-        "chars": 0,
-        "has_cash": false,
+        "chars": 47649,
+        "has_cash": true,
         "positions": [
           {
             "market": "aec-mlb-phi-atl-2026-10-01",
-            "shown": false
+            "shown": true
           },
           {
             "market": "aec-mlb-phi-atl-2026-10-01",
-            "shown": false
+            "shown": true
           },
           {
             "market": "atc-brb-bot-vln-2026-10-03-bot",
-            "shown": false
+            "shown": true
           },
           {
             "market": "aec-mlb-cws-cle-2026-10-03",
-            "shown": false
+            "shown": true
           },
           {
             "market": "atc-unl-wal-den-2026-10-04-wal",
-            "shown": false
+            "shown": true
           },
           {
             "market": "atc-brb-acg-afc-2026-10-03-acg",
-            "shown": false
+            "shown": true
           },
           {
             "market": "aec-mlb-sd-mil-2026-10-03",
-            "shown": false
+            "shown": true
           },
           {
             "market": "aec-mlb-nyy-tb-2026-10-03",
-            "shown": false
+            "shown": true
           }
         ],
         "fills": [
           {
             "fill_id": "paperfill:11605420c29f2c17b36fe4b9",
-            "shown": false
+            "shown": true
           },
           {
             "fill_id": "paperfill:54ff78a0685a029c86a7b1aa",
@@ -467,8 +467,8 @@
         ]
       },
       "audrey": {
-        "chars": 0,
-        "has_cash": false,
+        "chars": 11856,
+        "has_cash": true,
         "positions": [
           {
             "market": "aec-mlb-phi-atl-2026-10-01",
@@ -506,7 +506,7 @@
         "fills": [
           {
             "fill_id": "paperfill:11605420c29f2c17b36fe4b9",
-            "shown": false
+            "shown": true
           },
           {
             "fill_id": "paperfill:54ff78a0685a029c86a7b1aa",
@@ -603,7 +603,7 @@
         }
       ],
       "derek": {
-        "chars": 6261,
+        "chars": 6262,
         "has_cash": true,
         "positions": [
           {
@@ -667,7 +667,7 @@
         ]
       },
       "xavier": {
-        "chars": 4954,
+        "chars": 4937,
         "has_cash": true,
         "positions": [
           {
@@ -731,7 +731,7 @@
         ]
       },
       "audrey": {
-        "chars": 3315,
+        "chars": 3313,
         "has_cash": true,
         "positions": [
           {
@@ -970,46 +970,46 @@
       }
     }
   },
-  "agreement_ok": false,
-  "verdict": "MISMATCH_OR_DISCONNECTED",
-  "ok": false,
+  "agreement_ok": true,
+  "verdict": "EXERCISED_AND_MATCHING",
+  "ok": true,
   "freshness": {
     "database": "CONNECTED",
-    "read_at": 1790907036.4509315,
+    "read_at": 1790907773.312908,
     "stamps": {
       "valuation": {
-        "at": 1790906374.765268,
-        "age_s": 661.7,
+        "at": 1790907159.163357,
+        "age_s": 614.1,
         "stale_after_s": 1200,
         "verdict": "CURRENT"
       },
       "decision": {
-        "at": 1790906376.725325,
-        "age_s": 659.7,
+        "at": 1790907159.269884,
+        "age_s": 614,
         "stale_after_s": 1200,
         "verdict": "CURRENT"
       },
       "book": {
-        "at": 1790906972.533238,
-        "age_s": 63.9,
+        "at": 1790907751.700658,
+        "age_s": 21.6,
         "stale_after_s": 900,
         "verdict": "CURRENT"
       },
       "ledger": {
         "at": 1790906448.734207,
-        "age_s": 587.7,
+        "age_s": 1324.6,
         "stale_after_s": null,
         "verdict": "NO_LIMIT"
       },
       "pass": {
-        "at": 1790907010.830577,
-        "age_s": 25.6,
+        "at": 1790907752.4964223,
+        "age_s": 20.8,
         "stale_after_s": 300,
         "verdict": "CURRENT"
       },
       "collector": {
-        "at": 1790906643.8954291,
-        "age_s": 392.6,
+        "at": 1790907407.1093981,
+        "age_s": 366.2,
         "stale_after_s": 1200,
         "verdict": "CURRENT"
       }
