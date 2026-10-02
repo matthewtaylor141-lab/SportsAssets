@@ -66,6 +66,12 @@ R_LEASE_LOST = "FEED_LEASE_CONNECTION_LOST_OR_NOT_HELD"
 # lease cannot be confirmed), but named apart: on 2026-10-02 every "lease
 # lost" was indistinguishable from a stalled event loop or a slow database.
 R_GUARD_TIMEOUT = "FEED_GUARD_CHECK_TIMED_OUT"
+# The arm control row could not be read (timeout, or pool/DB error). Still
+# fails closed, but named apart from a row that actually reads disarmed: on
+# 2026-10-02 14:48:50Z a revocation was labelled FEED_DISARMED_BY_CONTROL_ROW
+# while the row read true before and after it.
+R_CONTROL_TIMEOUT = "FEED_CONTROL_READ_TIMED_OUT"
+R_CONTROL_UNREADABLE = "FEED_CONTROL_UNREADABLE"
 R_SOCKET_CLOSED = "FEED_SOCKET_CLOSED"
 R_SILENCE = "FEED_PROVIDER_SILENT"
 R_STOPPED = "FEED_OWNER_STOPPED"
@@ -194,17 +200,23 @@ class FeedOwner:
                 attempt += 1
         self.state = "STOPPED"
 
-    async def _armed(self) -> bool:
+    async def _arm_state(self):
+        """None when armed, else the reason it is not (all fail closed)."""
         if self.armed is None:
-            return True
+            return None
         try:
             # This callback uses the shared pool, unlike lease checks on
             # the dedicated connection. Pool exhaustion must not leave
             # an already-synced cache authoritative indefinitely.
-            return (await asyncio.wait_for(self.armed(),
-                                           self.liveness_s)) is True
+            got = await asyncio.wait_for(self.armed(), self.liveness_s)
+        except asyncio.TimeoutError:
+            return R_CONTROL_TIMEOUT
         except Exception:                                       # noqa: BLE001
-            return False                  # unreadable control -> disarmed
+            return R_CONTROL_UNREADABLE
+        return None if got is True else R_DISARMED
+
+    async def _armed(self) -> bool:
+        return await self._arm_state() is None
 
     async def _guards(self, lease):
         """(ok, reason): lease held, decider's writer lock held, still armed."""
@@ -219,8 +231,9 @@ class FeedOwner:
             return False, R_GUARD_TIMEOUT
         except Exception:                                       # noqa: BLE001
             return False, R_LEASE_LOST
-        if not await self._armed():
-            return False, R_DISARMED
+        why = await self._arm_state()
+        if why is not None:
+            return False, why
         return True, None
 
     async def _wait(self, s):

@@ -409,3 +409,33 @@ async def test_a_guard_timeout_fails_closed_under_its_own_name():
                     connect=None, liveness_s=0.05)
     assert await o._guards(Hung()) == (False, O.R_GUARD_TIMEOUT)
     assert await o._guards(Broken()) == (False, O.R_LEASE_LOST)
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_arm_control_fails_closed_under_its_own_name():
+    """Only a control row that reads not-true is a disarm. A read that times
+    out or errors also revokes authority, but is named for what happened."""
+    class Held:
+        async def holds(self):
+            return True
+
+    async def hung():
+        await asyncio.sleep(10)
+
+    async def broken():
+        raise ConnectionError("pool exhausted")
+
+    async def off():
+        return False
+
+    async def on():
+        return True
+
+    for armed, want in ((hung, (False, O.R_CONTROL_TIMEOUT)),
+                        (broken, (False, O.R_CONTROL_UNREADABLE)),
+                        (off, (False, O.R_DISARMED)),
+                        (on, (True, None))):
+        o = O.FeedOwner(F.FeedCache(), sport_ids=[6], lease_factory=None,
+                        connect=None, liveness_s=0.05, armed=armed)
+        assert await o._guards(Held()) == want, armed.__name__
+        assert await o._armed() is (want == (True, None))
