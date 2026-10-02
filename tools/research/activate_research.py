@@ -38,8 +38,10 @@ def run(client,actor,apply=False,now=None):
 # A re-issue opens a NEW flow for one goal under a new request id (the
 # rejected flow and its records stay as they are). v3 of Xavier's goal adds
 # the grounding rule its v2 answer broke: the persona guard replaced that
-# answer because it stated a computed figure no record holds.
-REISSUE={'management-execution-exits':('v3','Xavier: position management, execution quality and exit alternatives for the open paper positions. From recorded reviews, resting orders, fills and marks, assess execution quality and compare hold-to-settlement, resting exit and marketable exit. Quote only figures in the cited records; give recorded inputs and describe comparisons rather than computing new totals. Label it a recommendation, not an activated change; one measurable next action with an owner.')}
+# answer because it stated a computed figure no record holds. v4 is the same
+# goal re-opened once after 9a1d422, whose retries ask the model afresh
+# instead of replaying the stored attempt-1 reply.
+REISSUE={'management-execution-exits':('v4','Xavier: position management, execution quality and exit alternatives for the open paper positions. From recorded reviews, resting orders, fills and marks, assess execution quality and compare hold-to-settlement, resting exit and marketable exit. Quote only figures in the cited records; give recorded inputs and describe comparisons rather than computing new totals. Label it a recommendation, not an activated change; one measurable next action with an owner.')}
 
 def reissue(client,actor,key,now=None):
     now=time.time() if now is None else now
