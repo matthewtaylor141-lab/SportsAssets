@@ -119,7 +119,20 @@ def _capped(d: dict) -> str:
     if cen:
         cen["by_sport_family_phase_state"] = "TRUNCATED_FOR_SIZE"
         d["coverage_census"] = cen
-    return json.dumps(d, default=str)[:HEARTBEAT_MAX_BYTES]
+    d["heartbeat_truncated"] = True
+    s = json.dumps(d, default=str)
+    if len(s) <= HEARTBEAT_MAX_BYTES:
+        return s
+    # Never slice serialized JSON: the heartbeat is cast to jsonb, so an
+    # oversized unrelated field must still give a valid payload. Default
+    # ensure_ascii=True makes the character cap a byte cap as well.
+    return json.dumps({
+        "state": str(d.get("state", "UNKNOWN"))[:128],
+        "enabled_env": d.get("enabled_env") is True,
+        "heartbeat_truncated": True,
+        "reason": "HEARTBEAT_EXCEEDED_SIZE_CAP",
+        "c1_decision_effect": "NONE (observe only)",
+    })
 
 
 async def _census_once(pool) -> dict:
