@@ -651,9 +651,15 @@ _NUMBER = re.compile(r"(?<![\w.:])[-−]?\$?(\d{1,3}(?:,\d{3})+(?:\.\d+)?|"
 _FACT_REF = re.compile(r"\[F(\d+)\]")
 
 
-def _numbers(text: str) -> list:
+def _numbers(text: str, *, strip_labels: bool = True) -> list:
     t = _FACT_REF.sub(" ", str(text or ""))
-    t = re.sub(r"\[[^\]]{0,120}:[^\]]{0,200}\]", " ", t)
+    # "[label: detail]" spans are dropped from an ANSWER only. A fact's text
+    # is often JSON, where the same pattern matches a small array: on
+    # 2026-10-02 it deleted [{..., "realized_pnl_usd": 2.91, ...,
+    # "exit_at_first_review_net_usd": -8.42}] from Xavier's lesson evidence,
+    # so his answer citing that recorded -8.42 was rejected as ungrounded.
+    if strip_labels:
+        t = re.sub(r"\[[^\]]{0,120}:[^\]]{0,200}\]", " ", t)
     out = []
     for m in _NUMBER.finditer(t):
         s = m.group(1).replace(",", "")
@@ -671,7 +677,7 @@ def allowed_numbers(facts: list, question: str = "") -> set:
         if isinstance(v, (int, float)) and not isinstance(v, bool):
             vals.add(float(v))
             vals.add(abs(float(v)))
-        for x, _d in _numbers(f.get("text") or ""):
+        for x, _d in _numbers(f.get("text") or "", strip_labels=False):
             vals.add(x)
         for x, _d in _numbers(str(f.get("record_id") or "")):
             vals.add(x)

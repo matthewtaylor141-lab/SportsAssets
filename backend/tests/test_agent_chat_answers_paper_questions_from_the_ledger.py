@@ -979,3 +979,19 @@ def test_a_clock_time_is_not_a_figure_but_an_invented_amount_still_is():
     assert set(got) <= {2026.0, 10.0}       # the calendar date is still checked
     bad = "Realised $2.91 [F1] and a further $7.13 at 22:42:55."
     assert PC.ungrounded_numbers(bad, facts) == [7.13]
+
+
+def test_a_figure_inside_a_json_array_of_a_fact_grounds_the_answer():
+    """Production 2026-10-02 (pc-xavier-02fd72cef0f54673:1): the fact held
+    "exit_at_first_review_net_usd": -8.42 inside a small JSON array, and the
+    guard's label-stripping deleted the array before reading the fact."""
+    from sportsassets.agents import persona_chat as PC
+    fact = {"fact_id": "F72", "value": None, "record_id": "capwork:x",
+            "text": 'Stored investigation evidence: {"positions": [{"group_id": '
+                    '"paperexpgrp:e16e", "realized_pnl_usd": 2.91, "exit_minus_realized_usd": '
+                    '-11.33, "exit_at_first_review_net_usd": -8.42}], "exit_minus_realized_usd": -11.33}'}
+    reply = ("Exiting at the first review would have netted -$8.42 against a "
+             "realised $2.91, $11.33 worse [F72].")
+    assert PC.ungrounded_numbers(reply, [fact]) == []
+    # the guard is not loosened: a figure in no fact is still refused
+    assert PC.ungrounded_numbers(reply + " Fees were $3.17.", [fact]) == [3.17]
