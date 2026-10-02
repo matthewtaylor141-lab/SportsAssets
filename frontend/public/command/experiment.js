@@ -49,7 +49,7 @@ function load() {
     })
     .then(function (j) { if (j && typeof j === 'object') { st.json = j; st.fail = null; st.okAt = Date.now() / 1000; } })
     .catch(function (e) { st.fail = {kind: 'DISCONNECTED', why: (e && e.name === 'AbortError') ? 'the read timed out after ' + (TIMEOUT_MS / 1000) + ' s' : 'network error: ' + (e && e.message || e)}; })
-    .then(function () { clearTimeout(t); st.busy = false; });
+    .then(function () { clearTimeout(t); st.busy = false; try { document.dispatchEvent(new Event('bt-experiment-read')); } catch (_) {} });
 }
 
 function banner(now) {

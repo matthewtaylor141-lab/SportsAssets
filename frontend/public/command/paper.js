@@ -321,7 +321,21 @@
     return '<p class="ph-sess">' + (s.active ? "<b>SESSION ACTIVE</b> · " + esc(s.session_id) + " · started " + esc(when(s.started_at) || "?")
       : "<b>SESSION NOT RUNNING</b> · " + esc(s.reason || "no reason given") + (s.session_id ? " · last session " + esc(s.session_id) : "")) + "</p>";
   }
+  // Layout stability: until the first overview AND experiment reads settle
+  // (data or a named failure), the homepage slot keeps a screen of space so
+  // the funded section and the footer below it are not thrown down the page
+  // when the records arrive (measured CLS 1.01 at 0.7 s before this).
+  var T_RESERVE = Date.now();
+  function reserve() {
+    var slot = panel.parentNode; if (!slot || !slot.classList) { return; }
+    var xp = window.BTExperiment ? window.BTExperiment.state() : null;
+    var settled = !!(st.ov || st.ovFail || st.signedOut) && (!xp || !!(xp.json || xp.fail));
+    slot.classList.toggle("awaiting-first-read", !settled && Date.now() - T_RESERVE < 15000);
+  }
   function renderPanel() {
+    try { renderPanelBody(); } finally { reserve(); }
+  }
+  function renderPanelBody() {
     if (window.BTOffice) { panel.innerHTML = window.BTOffice.render({balance: st.bal, overview: st.ov, signedOut: st.signedOut, failed: st.ovFail, readAt: st.ovOkAt, streamLabel: streamLabel(), stampsHtml: stamps(), sessionHtml: session(), signinHtml: signinHtml()}); return; }
     panel.innerHTML = '<div class="ph-head"><h2>Paper experiment <span class="ph-tag">LIVE MARKET DATA · SIMULATED EXECUTION</span></h2>' +
       '<p class="ph-sub">The active paper session: one fictional account, one ledger. This is the default view; the funded system is inactive and shown separately below.</p></div>' +
@@ -331,12 +345,14 @@
 
   // ── the API app.js uses ──────────────────────────────────────────
   window.BTPaper = {
-    mount: function (slot) { if (slot && panel.parentNode !== slot) { slot.appendChild(panel); } },
+    mount: function (slot) { if (slot && panel.parentNode !== slot) { slot.appendChild(panel); } reserve(); },
     status: function () { return {stream: st.stream, account: st.balState, signedOut: st.signedOut, overview: st.ovFail ? st.ovFail.state : st.ov ? "OK" : "READING"}; },
     // the formatting contract, for the proof that every page agrees
     figures: function (a) { return FIELDS.map(function (f) { return {key: f[0], label: f[1], value: figText(f[0], a ? a[f[0]] : undefined)}; }); }
   };
   setInterval(function () { if (!document.hidden) { renderPanel(); } }, 5000);
+  // paint the experiment as soon as its read settles, not at the next 5 s tick
+  document.addEventListener("bt-experiment-read", function () { renderPanel(); });
   render();
   var slot0 = document.getElementById("paper-home-slot"); if (slot0) { window.BTPaper.mount(slot0); }
   load().then(schedule, schedule);
