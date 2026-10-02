@@ -250,11 +250,11 @@ for (const [ename, engine, dev, args] of ENGINES) {
       R.checks.phone_panel = { opened: await openTalk() };
       const ask = async (q) => {
         await openTalk();
-        const nA = await f.locator(".talk-msg.a").count();
+        const nA = await f.locator(".talk-msg.a:not(.talk-pending):not(.err)").count();
         const t = await f.evaluate(() => performance.now());
         await f.fill("#talk-in", q);
         await f.click("#talk-send");
-        await waitInFrame(f, (n) => document.querySelectorAll(".talk-msg.a").length > n, nA, 150000);
+        await waitInFrame(f, (n) => document.querySelectorAll(".talk-msg.a:not(.talk-pending):not(.err)").length > n, nA, 150000);
         const tA = await f.evaluate(() => performance.now());
         return { t, tA };
       };
@@ -324,11 +324,11 @@ for (const [ename, engine, dev, args] of ENGINES) {
         await page.route(`${HOST}/api/command/agents/${agent}/speech`, (route) => route.fulfill({ status: 503,
           contentType: "application/json", body: JSON.stringify({ status: "VOICE_UNAVAILABLE",
             reason: "VOICE_PROVIDER_FAILED", simulated_by_the_test: true }) }), { times: 1 });
-        const nMsgs = await f.locator(".talk-msg.a").count();
+        const nMsgs = await f.locator(".talk-msg.a:not(.talk-pending):not(.err)").count();
         await f.locator(".talk-replay").last().click().catch(() => {});
         await page.waitForTimeout(2500);
         R.checks.provider_error = { state: short(await f.locator("#talk-state").innerText().catch(() => ""), 200),
-          answers_still_shown: await f.locator(".talk-msg.a").count(), before: nMsgs };
+          answers_still_shown: await f.locator(".talk-msg.a:not(.talk-pending):not(.err)").count(), before: nMsgs };
       }
       // PHONE: Escape closes the panel and returns focus to the dock
       if (R.checks.phone_panel.opened.dock) {
