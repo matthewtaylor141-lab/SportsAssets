@@ -542,6 +542,29 @@ FUNNEL_SQL = """
 """
 
 
+async def enter_outcomes(conn, account_id: str, strategy: str,
+                         enter: int) -> dict:
+    """AN ENTER IS A RECOMMENDATION, NOT ACTIVITY. Of a strategy's ENTER
+    decisions: how many became an accepted ENTRY order, how many of those
+    filled, and how many have no order (refused at submission -- under the
+    account lock, by cash, caps or the same-contract rule -- and recorded as
+    an Audrey PAPER_RISK_REFUSED_THE_ORDER finding). Activity and learning
+    read orders and fills; `enter` alone never measures either."""
+    r = await conn.fetchrow(
+        "SELECT count(DISTINCT o.decision_id) AS ordered, "
+        "       count(DISTINCT o.decision_id) FILTER (WHERE o.filled_qty > 0)"
+        "         AS filled "
+        "  FROM paper_orders o JOIN paper_decisions d "
+        "    ON d.decision_id = o.decision_id AND d.verdict = 'ENTER' "
+        " WHERE o.account_id = $1 AND o.strategy = $2 AND o.role = 'ENTRY'",
+        account_id, strategy)
+    ordered = int((r or {}).get("ordered") or 0)
+    return {"enter_recommended": enter,
+            "enter_order_accepted": ordered,
+            "enter_filled": int((r or {}).get("filled") or 0),
+            "enter_without_order": max(0, enter - ordered)}
+
+
 async def strategy_block(conn, *, account_id: str, strategy: str,
                          meta: dict, now: float,
                          limit: int = RECENT_DECISIONS) -> dict:
@@ -565,6 +588,8 @@ async def strategy_block(conn, *, account_id: str, strategy: str,
         return {"decisions": int(r["n"]), "enter": int(r["enter"]),
                 "refuse": int(r["refuse"]), "last_24h": int(r["last_24h"]),
                 "enter_24h": int(r["enter_24h"]),
+                **(await enter_outcomes(conn, account_id, strategy,
+                                        int(r["enter"]))),
                 "markets": int(r["markets"]),
                 "first_at": L._epoch(r["first_at"]),
                 "latest_at": L._epoch(r["latest_at"]),
@@ -1326,6 +1351,8 @@ async def overview(conn, *, account_id: str | None = None,
                               "kind": STRATEGY_META.get(
                                   r["strategy"], {}).get("kind", "OTHER")}
               for r in rows}
+        for s_, v in by.items():
+            v.update(await enter_outcomes(conn, acct, s_, v["enter"]))
         return {"by_strategy": by,
                 "last_activity_at": max((v["latest_at"] for v in by.values()
                                          if v["latest_at"]), default=None)}

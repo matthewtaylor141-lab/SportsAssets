@@ -412,6 +412,15 @@ async def test_a_changed_frame_evaluates_through_the_real_cycle_and_paper_hook(
     assert d["verdict"] == "ENTER", (d["refusal"], d["refusals"])
     assert d["book_obs_id"] is not None
     assert e.venue.calls["paper"] >= 1 and e.venue.calls["book"] >= 2
+    # THE LATENCY CHAIN, FROM RECORDED TIMESTAMPS: WS receipt -> worker
+    # start -> persisted decision -> attempt finished; and the writer that
+    # recorded the attempt is this process's feed owner
+    decided = d["decided_at"].timestamp()
+    assert (a["received_at"] <= a["evaluation_started_at"] <= decided
+            <= a["finished_at"]), (a, decided)
+    import os
+    assert a["writer"]["pid"] == os.getpid(), a["writer"]
+    assert a["writer"]["runtime_id"] == RUNTIME_ID, a["writer"]
 
     # paper only: no funded or inventory write; no provider fetch
     assert await _counts(e.conn) == funded_before
@@ -648,51 +657,108 @@ async def _burst_then_one_more(e):
     return rows
 
 
-@pg
-async def test_a_burst_coalesces_and_a_held_contract_gets_no_second_entry_order(
-        env, monkeypatch):
-    """THE PRODUCTION CAPITAL POLICY's same-contract rule
-    (bettor_paper_ledger.same_contract_held, under the account lock) applies
-    to `paper_acct_main` only (`bettor_paper_limits.uses_owner_policy`). No
-    test may trade on that account, so its predicate is extended to THIS
-    scratch account; nothing else about the policy is changed."""
-    from sportsassets import bettor_paper_ledger as L
+def _owner_policy_on_scratch(monkeypatch, e):
+    """THE PRODUCTION CAPITAL POLICY (bettor_paper_limits.uses_owner_policy:
+    `paper_acct_main` only, the account production's reactive path decides
+    on -- paper_runtime.DEFAULT_ACCOUNT_ID). No test may trade on that
+    account, so its predicate is extended to THIS scratch account; nothing
+    else about the policy is changed and no other account is broadened."""
     from sportsassets import bettor_paper_limits as LIMITS
-    e = env
     real = LIMITS.uses_owner_policy
     monkeypatch.setattr(LIMITS, "uses_owner_policy",
                         lambda a: a == e.acct["account_id"] or real(a))
-    rows = await _burst_then_one_more(e)
-    orders = await _entry_orders(e)
-    assert len(orders) == 1, orders
-    d2 = _cg(await _decisions(e, rows[1]["detail"]["valuation_ids"]))
-    assert len(d2) == 1
-    # the second valuation's decision placed nothing: either it refused, or
-    # its order was refused under the lock by the same-contract rule
-    assert not [o for o in orders if o["decision_id"] == d2[0]["decision_id"]]
-    if d2[0]["verdict"] == "ENTER":
-        f = await e.conn.fetchrow(
-            "SELECT kind, detail FROM paper_audrey_findings "
-            " WHERE session_id=$1 AND subject=$2",
-            e.acct["session_id"], d2[0]["decision_id"])
-        assert f is not None and f["kind"] == PD.R_ORDER_REFUSED, f
-        assert H.j(f["detail"])["refusal"] == L.R_SAME_CONTRACT_HELD
+
+
+async def _finding(e, decision_id):
+    return await e.conn.fetchrow(
+        "SELECT kind, detail FROM paper_audrey_findings "
+        " WHERE session_id=$1 AND subject=$2",
+        e.acct["session_id"], decision_id)
 
 
 @pg
-@pytest.mark.xfail(strict=True, reason=(
-    "DECISION-LEVEL DUPLICATE ENTER. paper_benchmark.decide_one persists an "
-    "ENTER decision for every new valuation whose edge holds; the only "
-    "same-contract protection is ORDER-level (bettor_paper_ledger."
-    "same_contract_held, paper_acct_main only). Each drained WS change is a "
-    "new valuation, so a held contract records a second ENTER decision (and, "
-    "on any account outside the owner capital policy, a second ENTRY order). "
-    "Not fixable in the test or the reactive scheduler alone."))
-async def test_a_second_drained_change_on_a_held_contract_records_no_second_enter(
-        env):
+async def test_a_held_contract_under_the_owner_policy_records_a_named_refusal_not_a_second_enter(
+        env, monkeypatch):
+    """THE DUPLICATE-ENTER CASE, UNDER THE PRODUCTION ACCOUNT POLICY. Before
+    the decision-level read (candidate 14 9c89f55), the second drained change
+    recorded an ENTER decision whose order the account lock refused
+    (Audrey PAPER_RISK_REFUSED_THE_ORDER / THIS_STRATEGY_ALREADY_HOLDS_THIS_
+    CONTRACT): a recommendation that could never become an order, counted as
+    ENTER activity. Now the decision itself is the named REFUSE; exactly one
+    ENTER, one ENTRY order, and no refused-order finding on the contract."""
+    from sportsassets import bettor_paper_ledger as L
     e = env
-    await _burst_then_one_more(e)
+    _owner_policy_on_scratch(monkeypatch, e)
+    rows = await _burst_then_one_more(e)
+    orders = await _entry_orders(e)
+    assert len(orders) == 1, orders
+    d1 = _cg(await _decisions(e, rows[0]["detail"]["valuation_ids"]))
+    d2 = _cg(await _decisions(e, rows[1]["detail"]["valuation_ids"]))
+    assert [d["verdict"] for d in d1] == ["ENTER"], d1
+    assert orders[0]["decision_id"] == d1[0]["decision_id"]
+    assert len(d2) == 1
+    assert d2[0]["verdict"] == "REFUSE", d2
+    assert d2[0]["refusal"] == L.R_SAME_CONTRACT_HELD, d2
+    assert await _finding(e, d2[0]["decision_id"]) is None
     assert await _enters_on_contract(e) == 1
+    from sportsassets import bettor_paper_ops as OPS
+    split = await OPS.enter_outcomes(e.conn, e.acct["account_id"],
+                                     PB.CG_STRATEGY, 1)
+    assert split == {"enter_recommended": 1, "enter_order_accepted": 1,
+                     "enter_filled": 0, "enter_without_order": 0}, split
+
+
+@pg
+async def test_a_burst_coalesces_and_a_held_contract_gets_no_second_entry_order(
+        env, monkeypatch):
+    """THE ACCOUNT-LOCK GUARD STAYS THE AUTHORITY. The decision-level read is
+    made to miss (as in a race where the first order lands between that read
+    and the lock): the decision is an ENTER, and submit_order -- under the
+    account lock, with the production same-contract rule -- refuses its
+    order. Still exactly one ENTRY order; the refused submission is an
+    Audrey finding naming the rule, never an order or a fill."""
+    import inspect
+    from sportsassets import bettor_paper_ledger as L
+    e = env
+    _owner_policy_on_scratch(monkeypatch, e)
+    real_held = L.same_contract_held
+    misses = []
+
+    async def racing_read(*a, **kw):
+        if inspect.stack()[1].function == "decide_one":
+            misses.append(a)
+            return []
+        return await real_held(*a, **kw)
+    monkeypatch.setattr(L, "same_contract_held", racing_read)
+    rows = await _burst_then_one_more(e)
+    assert misses, "the decision-level read was not reached"
+    orders = await _entry_orders(e)
+    assert len(orders) == 1, orders
+    d2 = _cg(await _decisions(e, rows[1]["detail"]["valuation_ids"]))
+    assert len(d2) == 1 and d2[0]["verdict"] == "ENTER", d2
+    assert not [o for o in orders if o["decision_id"] == d2[0]["decision_id"]]
+    f = await _finding(e, d2[0]["decision_id"])
+    assert f is not None and f["kind"] == PD.R_ORDER_REFUSED, f
+    assert H.j(f["detail"])["refusal"] == L.R_SAME_CONTRACT_HELD
+    assert H.j(f["detail"])["under_lock"] is True
+    fills = await e.conn.fetchval(
+        "SELECT count(*) FROM paper_fills f JOIN paper_orders o "
+        "  ON o.order_id = f.order_id WHERE o.decision_id = $1",
+        d2[0]["decision_id"])
+    assert fills == 0
+    # the status readers keep the recommendation, the accepted order and the
+    # fill apart: the refused submission is counted as an ENTER without an
+    # order, never as an order or a fill
+    from sportsassets import bettor_paper_ops as OPS
+    enters = await e.conn.fetchval(
+        "SELECT count(*) FROM paper_decisions WHERE account_id=$1 "
+        "   AND strategy=$2 AND verdict='ENTER'", e.acct["account_id"],
+        PB.CG_STRATEGY)
+    assert enters == 2
+    split = await OPS.enter_outcomes(e.conn, e.acct["account_id"],
+                                     PB.CG_STRATEGY, enters)
+    assert split == {"enter_recommended": 2, "enter_order_accepted": 1,
+                     "enter_filled": 0, "enter_without_order": 1}, split
 
 
 # ═════════════════════════════════════════════════════════════════════

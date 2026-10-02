@@ -490,3 +490,9 @@ tests/test_pinnapi_primary_source.py
 # WebSocket-triggered paper evaluations: bounded change queue, discovery seeds,
 # audited attempts, single-event paper-only collector path.
 tests/test_pinnapi_reactive.py
+# WebSocket-triggered evaluation through the REAL collector cycle and paper
+# hook on Postgres: refusals, epoch/authority, coalescing, the owner-policy
+# held-contract refusal and the account-lock duplicate-order guard. (The one
+# non-owner-account known gap is isolated in test_pinnapi_reactive_known_gaps.py,
+# strict xfail, deliberately not on this list.)
+tests/test_pinnapi_reactive_integration.py

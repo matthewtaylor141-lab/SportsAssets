@@ -154,6 +154,12 @@ def start(pool, *, cycle):
         async with pool.acquire() as conn:
             return await cycle(conn, stream_seed=seed)
 
+    # WHICH PROCESS WROTE THE ATTEMPT: the deployed build and this feed
+    # owner's runtime, so a readback proves the writer -- not merely the web
+    # service -- runs the released code.
+    writer = dict(build=os.environ.get('RENDER_GIT_COMMIT'), pid=os.getpid(),
+                  runtime_id=runtime._STATE.get('runtime_id'))
+
     async def audit(attempt):
         async with pool.acquire() as conn:
             await conn.execute('''INSERT INTO pinnapi_reactive_attempts
@@ -161,7 +167,7 @@ def start(pool, *, cycle):
                 ON CONFLICT (attempt_id) DO UPDATE SET
                 state=EXCLUDED.state, detail=EXCLUDED.detail, updated_at=now()''',
                 attempt['attempt_id'], str(attempt['event_id']), attempt['state'],
-                json.dumps(attempt, default=str))
+                json.dumps(dict(attempt, writer=writer), default=str))
 
     ACTIVE = Scheduler(owner.cache, evaluate, audit)
     owner.cache.on_change = ACTIVE.changed

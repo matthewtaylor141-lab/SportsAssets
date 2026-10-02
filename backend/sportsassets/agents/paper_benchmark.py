@@ -1230,6 +1230,29 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
     pin["cross_strategy_exposure"] = cross
     if cross["held"]:
         refusals.append(R_CROSS_STRATEGY)
+    # ── SAME STRATEGY, SAME CONTRACT, UNDER THE OWNER CAPITAL POLICY ────
+    #
+    # A held contract is not re-entered (bettor_paper_limits.describe:
+    # same_strategy_same_contract). Every new valuation of a held contract --
+    # each drained WebSocket change, each periodic re-read -- is a new
+    # decision key, so without this read the decision records an ENTER whose
+    # order the account lock then refuses: an ENTER recommendation that can
+    # never become an order, counted as activity. It is read HERE, before the
+    # decision is recorded, so the decision itself is a named REFUSE. The
+    # under-lock check in submit_order stays the authority for the order
+    # (a race between this read and the lock is still refused there). Other
+    # accounts' policies are unchanged. An unreadable answer refuses.
+    from .. import bettor_paper_limits as LIMITS
+    if LIMITS.uses_owner_policy(ctx["account_id"]):
+        try:
+            held_same = await L.same_contract_held(
+                conn, ctx["account_id"], STRATEGY,
+                cand.get("us_market_slug"), side)
+        except Exception as exc:                                # noqa: BLE001
+            held_same = [{"error": type(exc).__name__}]
+        pin["same_contract_held"] = held_same
+        if held_same:
+            refusals.append(L.R_SAME_CONTRACT_HELD)
     p = pin.get("p")
     obs, md, levels, edges = None, None, [], []
     sized: dict = {"qty": 0, "limit": None, "wire": None}
