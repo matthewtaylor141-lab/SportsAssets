@@ -40,8 +40,11 @@ def run(client,actor,apply=False,now=None):
 # the grounding rule its v2 answer broke: the persona guard replaced that
 # answer because it stated a computed figure no record holds. v4 is the same
 # goal re-opened once after 9a1d422, whose retries ask the model afresh
-# instead of replaying the stored attempt-1 reply.
-REISSUE={'management-execution-exits':('v4','Xavier: position management, execution quality and exit alternatives for the open paper positions. From recorded reviews, resting orders, fills and marks, assess execution quality and compare hold-to-settlement, resting exit and marketable exit. Quote only figures in the cited records; give recorded inputs and describe comparisons rather than computing new totals. Label it a recommendation, not an activated change; one measurable next action with an owner.')}
+# instead of replaying the stored attempt-1 reply. v5 is the same goal
+# re-opened after 102572f: v4's answer quoted -8.42 and 2.91 from Xavier's
+# recorded lesson, and the guard then read facts with their JSON arrays
+# stripped, so it called those recorded figures invented.
+REISSUE={'management-execution-exits':('v5','Xavier: position management, execution quality and exit alternatives for the open paper positions. From recorded reviews, resting orders, fills and marks, assess execution quality and compare hold-to-settlement, resting exit and marketable exit. Quote only figures in the cited records; give recorded inputs and describe comparisons rather than computing new totals. Label it a recommendation, not an activated change; one measurable next action with an owner.')}
 
 def reissue(client,actor,key,now=None):
     now=time.time() if now is None else now
