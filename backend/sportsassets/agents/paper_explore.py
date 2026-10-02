@@ -351,6 +351,7 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
                     cand=cand, row=row, qty=econ["qty"], vwap=econ["vwap"])
                 if not econ["fees_ok"]:
                     refusals.append(PB.R_FEES)
+    PD.recheck_primary_reference(cand, pin, ctx, refusals)
     verdict = DP.ENTER if not refusals else DP.REFUSE
     best_px = levels[0]["price"] if levels else None
     gross = (None if best_px is None or p is None

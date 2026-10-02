@@ -1315,6 +1315,7 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
                     refusals.append(R_FEES)
                 elif not econ["net_ev_positive"]:
                     refusals.append(R_NET)
+    PD.recheck_primary_reference(cand, pin, ctx, refusals)
     verdict = DP.ENTER if not refusals else DP.REFUSE
     best_edge = edges[0]["edge_pp"] if edges else None
     short = _shortfall(pin=pin, best_edge_pp=best_edge,

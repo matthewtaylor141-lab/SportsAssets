@@ -582,7 +582,8 @@ async def persist(conn, rec: dict) -> int | None:
         rec.get("experiment_id") or EXPERIMENT_ID,
         rec.get("version") or devig.VERSION,
         rec.get("source_class") or devig.SOURCE_CLASS,
-        devig.PROVIDER, devig.BOOK,
+        ("pinnapi.com/raw-websocket" if rec.get("provider") ==
+         "pinnapi.com/raw-websocket" else devig.PROVIDER), devig.BOOK,
         rec.get("devig_method") or devig.DEFAULT_METHOD,
         str(c.get("venue") or ""), c.get("condition_id"),
         # THE VENUE-NATIVE IDENTITY, beside the global one and never

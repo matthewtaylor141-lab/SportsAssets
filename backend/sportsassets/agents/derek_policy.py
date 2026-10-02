@@ -550,6 +550,8 @@ def candidate_from_row(row: dict) -> dict:
         "period_basis": ("RECORDED_ON_THE_VALUATION_ROW"
                          if r.get("period") else None),
         "pinnacle": {"p": _f(r.get("probability")),
+                     "provider": r.get("provider"),
+                     "reference_input": scmp.get("reference_input"),
                      "observed_at": _epoch(r.get("observed_at")),
                      "received_at": _epoch(r.get("received_at")),
                      "overround": _f(r.get("overround")),

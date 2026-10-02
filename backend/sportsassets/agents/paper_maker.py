@@ -264,6 +264,7 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
                         conn, slug=cand["us_market_slug"], direction="BUY",
                         holding_side=side, limit=lim, market_data=md,
                         account_id=ctx["account_id"])
+    PD.recheck_primary_reference(cand, pin, ctx, refusals)
     verdict = DP.ENTER if not refusals else DP.REFUSE
     best_gross = (None if not levels or p is None else round(
         DP.gross_edge(p, levels[0]["price"]) * 100.0, 9))

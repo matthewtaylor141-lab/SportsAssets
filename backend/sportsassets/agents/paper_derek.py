@@ -282,6 +282,24 @@ def qualification_gaps(*, model: dict, calibration: dict, cand: dict,
 def _pinnacle(cand: dict, *, at: float, max_age: float) -> dict:
     pin = dict(cand.get("pinnacle") or {})
     p, obs = pin.get("p"), pin.get("observed_at")
+    ref = pin.get("reference_input") or {}
+    if (pin.get("provider") == "pinnapi.com/raw-websocket"
+            or ref.get("provider") == "pinnapi.com/raw-websocket"):
+        from .. import pinnapi_feed_runtime as feed
+        from .. import pinnapi_primary as primary
+        owner = feed._STATE.get("owner")
+        try:
+            check = (primary.validate(
+                owner.cache if owner else None, {"reference_input": ref},
+                at=at, max_age_s=max_age,
+                runtime_id=feed._STATE.get("runtime_id")) if ref else
+                {"ok": False, "reason": "PINNAPI_PRIMARY_PROVENANCE_MISSING"})
+        except (KeyError, TypeError, ValueError):
+            check = {"ok": False, "reason": "PINNAPI_PRIMARY_PROVENANCE_INVALID"}
+        if not check.get("ok"):
+            return {"p": None, "qualified": False,
+                    "refusal": check.get("reason"), "qualification": "REFUSED",
+                    "at": obs, "reference_input": ref, "source_check": check}
     if p is None:
         return {"p": None, "qualified": False, "refusal": DP.R_NO_PINNACLE,
                 "qualification": "ABSENT", "at": obs}
@@ -310,8 +328,28 @@ def _pinnacle(cand: dict, *, at: float, max_age: float) -> dict:
             "received_at": pin.get("received_at"),
             "overround": pin.get("overround"), "method": pin.get("method"),
             "source_version": pin.get("source_version"),
+            "provider": pin.get("provider"), "reference_input": ref,
             "why": ("re-aged at the paper decision instant: %.1fs %s %.1fs"
                     % (age, "<=" if fresh else ">", max_age))}
+
+
+def recheck_primary_reference(cand, pin, ctx, refusals):
+    """After awaited book/economics reads, before choosing ENTER.
+
+    Re-age and check the same source version. Never replace probability
+    without recomputing economics. Legacy rows preserve existing behavior.
+    """
+    source = cand.get("pinnacle") or {}
+    ref = source.get("reference_input") or {}
+    if (source.get("provider") != "pinnapi.com/raw-websocket"
+            and ref.get("provider") != "pinnapi.com/raw-websocket"):
+        return
+    at = float(ctx["clock"]()) if ctx.get("clock") else float(ctx["now"])
+    check = _pinnacle(cand, at=at,
+                      max_age=float(ctx["config"]["entry"]["pinnacle_max_age_s"]))
+    pin["final_reference_check"] = check
+    if check.get("refusal") and check["refusal"] not in refusals:
+        refusals.append(check["refusal"])
 
 
 def _alternatives(md: dict | None, *, side: str, p_blended) -> dict:
@@ -501,6 +539,7 @@ async def decide_one(conn, ctx: dict, row: dict) -> dict:
         refusals.extend(r for r in pd["refusals"] if r not in refusals)
         if not pd["refusals"] and sized["qty"] < 1:
             refusals.append(DP.R_NO_QTY)
+    recheck_primary_reference(cand, pin, ctx, refusals)
     verdict = DP.ENTER if not refusals else DP.REFUSE
     would_enter = verdict == DP.ENTER
     if would_enter:

@@ -1780,6 +1780,33 @@ def pinnacle_h2h(event: dict, *, received_at: float) -> dict | None:
             "commence_time": event.get("commence_time")}
 
 
+def primary_pinnacle_h2h(event: dict, *, received_at: float,
+                         family: str, at: float) -> dict | None:
+    """Preferred live WS source, with the original collector as fallback.
+
+    Reads the existing owner in this process; never opens another socket.
+    Discovery/independent-book evidence stays with the original event.
+    """
+    from .. import pinnapi_feed_runtime as feed
+    from .. import pinnapi_primary as primary
+    owner = feed._STATE.get("owner")
+    return primary.select(
+        owner.cache if owner else None, event,
+        pinnacle_h2h(event, received_at=received_at), family=family,
+        sharp_books=SHARP_BOOKS, at=at, max_age_s=PINNACLE_MAX_AGE_S,
+        runtime_id=feed._STATE.get("runtime_id"))
+
+
+def validate_primary_pinnacle(quote: dict, *, at: float) -> dict:
+    from .. import pinnapi_feed_runtime as feed
+    from .. import pinnapi_primary as primary
+    owner = feed._STATE.get("owner")
+    return primary.validate(
+        owner.cache if owner else None, quote, at=at,
+        max_age_s=PINNACLE_MAX_AGE_S,
+        runtime_id=feed._STATE.get("runtime_id"))
+
+
 # ── the venue side, read in the same cycle ──────────────────────────
 
 #: A market our table still calls open, that the venue has forgotten. Run
@@ -7585,7 +7612,8 @@ async def cycle(conn) -> dict:
             event = events[_i]
             _open_event(sport_key, family, _i, event)
             served_by_this_fetch += 1
-            quote = pinnacle_h2h(event, received_at=received_at)
+            quote = primary_pinnacle_h2h(
+                event, received_at=received_at, family=family, at=time.time())
             if quote is None:
                 tally["NO_PINNACLE_ON_EVENT"] = \
                     tally.get("NO_PINNACLE_ON_EVENT", 0) + 1
@@ -7602,7 +7630,7 @@ async def cycle(conn) -> dict:
             # price is measured here, on the row; lever A re-measures at its
             # own instant for the events that get that far.
             _pe = _quote_epoch(quote)
-            _first = arrival_split(_pe, received_at, time.time())
+            _first = arrival_split(_pe, quote["received_at"], time.time())
             _event_fields(_first)
             if _first["provider_lag_s"] is not None:
                 lat["arrival_lag_every_priced"].append(_first["provider_lag_s"])
@@ -7754,14 +7782,15 @@ async def cycle(conn) -> dict:
             # the PROVIDER's lag alone already exceeded the limit; the
             # combined case is `skipped_stale_on_arrival`.
             _pe = _quote_epoch(quote)
+            reference_received_at = quote["received_at"]
             _arr = time.time()
-            _event_fields(arrival_split(_pe, received_at, _arr))
+            _event_fields(arrival_split(_pe, reference_received_at, _arr))
             if _pe is not None and (_arr - _pe) > PINNACLE_MAX_AGE_S:
                 lat["skipped_stale_on_arrival"] += 1
-                if (received_at is not None
-                        and (float(received_at) - _pe) > PINNACLE_MAX_AGE_S):
+                if (reference_received_at is not None
+                        and (float(reference_received_at) - _pe) > PINNACLE_MAX_AGE_S):
                     lat["provider_stale_on_arrival"] += 1
-                elif received_at is not None:
+                elif reference_received_at is not None:
                     # OURS, BY NAME. The provider handed this price over
                     # INSIDE the limit and our own accumulated processing
                     # took it past. It used to be derivable only as
@@ -7772,10 +7801,10 @@ async def cycle(conn) -> dict:
                 # medians sampled evaluated candidates only, so the events
                 # most likely to be stale were the ones left out of the
                 # measurement of staleness.
-                if received_at is not None:
+                if reference_received_at is not None:
                     lat["provider_lag_samples"].append(
-                        float(received_at) - _pe)
-                    lat["our_delay_samples"].append(_arr - float(received_at))
+                        float(reference_received_at) - _pe)
+                    lat["our_delay_samples"].append(_arr - float(reference_received_at))
                 lat["age_samples"].append(_arr - _pe)
                 lat["arrival_skip_samples"] += 1
                 code = R_QUOTE_STALE_ON_ARRIVAL
@@ -7792,11 +7821,11 @@ async def cycle(conn) -> dict:
                          "age_s": round(_arr - _pe, 3),
                          "limit_s": PINNACLE_MAX_AGE_S,
                          "provider_lag_s": (
-                             None if received_at is None
-                             else round(float(received_at) - _pe, 3)),
+                             None if reference_received_at is None
+                             else round(float(reference_received_at) - _pe, 3)),
                          "our_processing_s": (
-                             None if received_at is None
-                             else round(_arr - float(received_at), 3)),
+                             None if reference_received_at is None
+                             else round(_arr - float(reference_received_at), 3)),
                          "age_basis": "PROVIDER_LAST_UPDATE_AT_ARRIVAL",
                          "why": WHY_SKIPPED_ON_ARRIVAL})
                 continue
@@ -8055,7 +8084,10 @@ async def cycle(conn) -> dict:
                 sport_family=family, market="h2h",
                 venue_evidence=vevid,
                 book_evidence={"outcome_names": list(quote["prices"].keys()),
-                               "source": "theoddsapi:h2h:%s" % devig.BOOK},
+                               "source": ("pinnapi:ws:h2h:%s" % devig.BOOK
+                                          if (quote.get("reference_input") or {}).get("provider")
+                                          == "pinnapi.com/raw-websocket" else
+                                          "theoddsapi:h2h:%s" % devig.BOOK)},
                 observed_at=_quote_epoch(quote),
                 book_context=(ctx_ev or {}).get("context"),
                 phase=fmeta.get("phase"),
@@ -8085,6 +8117,19 @@ async def cycle(conn) -> dict:
                 # code is what the trace met after it.
                 extra = [calibration_only["refusal"]] + [
                     c for c in extra if c != calibration_only["refusal"]]
+
+            # Independent-book depth is re-aged too; a cached discovery
+            # payload must not supply stale corroboration for a WS price.
+            if ((quote.get("reference_input") or {}).get("provider")
+                    == "pinnapi.com/raw-websocket"):
+                from .. import pinnapi_primary as primary
+                quote["depth"], _independent = primary.book_depth(
+                    event, quote["prices"], SHARP_BOOKS,
+                    at=now, max_age_s=PINNACLE_MAX_AGE_S)
+                quote["reference_input"]["independent_books"] = _independent
+            reference_check = validate_primary_pinnacle(quote, at=now)
+            if not reference_check["ok"]:
+                extra = [reference_check["reason"]] + extra
 
             contract = {
                 "venue": "PMUS",
@@ -8368,6 +8413,11 @@ async def cycle(conn) -> dict:
                                         or {}).get("from_cache"),
                 venue_rules_error=((vevid or {}).get("rules_read")
                                    or {}).get("error"))
+            # Persist actual source + epoch/clocks beside settlement evidence.
+            # Invalid authority/input removes probability as well as admission:
+            # paper policies may intentionally disregard other lane refusals.
+            from .. import pinnapi_primary as primary
+            primary.stamp_record(rec, quote, reference_check)
             if calibration_only is not None:
                 # ── A CALIBRATION-ONLY RECORD IS WRITTEN AND GOES NO FURTHER ──
                 #
