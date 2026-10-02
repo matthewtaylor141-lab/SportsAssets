@@ -1,0 +1,593 @@
+SIMULATED CAPITAL · LIVE MARKET DATA
+Cash
+$495,170.11
+Equity
+$499,672.75
+Realized P&L
++$168.43
+2 STALE MARK(S)
+CONNECTING · last ledger change Oct 2, 09:47:34 ET
+Skip to dashboard
+
+
+UPDATING · 15s
+
+
+BETTORTOKEN / MANAGEMENT OFFICE
+Your team. Your capital.
+One clear picture.
+A shared workspace for decisions, conversations and accountability.
+Meet your AI team ▷
+Download briefing
+Ask Audrey ↗
+Derek’s office
+Opportunities · entry decisions · research
+↗
+Xavier’s office
+Positions · working orders · exit plans
+↗
+Audrey’s office
+Reconciliation · team reviews · improvements
+↗
+Session running
+Simulated capital · Live market data
+TOTAL EQUITY
+$499,672.75
+One account. One reconciled ledger.
+Available to deploy
+$495,170.11
+Realized P&L
+$168.43
+Settled and realized results
+Cash
+$495,170.11
+Reserved
+$0.00
+Position value
+$4,502.64
+Unrealized P&L
+-$495.69
+2 position marks are stale.
+THE EXPERIMENT
+What the team is doing with the paper account.
+Every figure is a stored record · simulated execution · live market data
+CONNECTED · database read 15 s ago · 17 open filled positions
+Session & data freshness
+
+paper_session_20261001T014716Z · started 2026-10-01 01:47Z
+
+Latest valuation
+7 min ago
+Latest decision
+7 min ago
+Latest order book
+30 s ago
+Agent pass
+25 s ago
+Collection cycle
+27 s ago
+Latest ledger entry
+3 h ago
+Pass ran in 21.1 s · collector ZERO_EVALUATED__INPUT_PATH_BLOCKED · build 09670a5 · real money DISABLED
+Agent activity
+
+Derek · latest decision
+7 min ago · REFUSE no research model candidate exists
+Xavier · reviews (24 h)
+8000 · 20 handoffs
+Audrey · findings
+8 latest
+Audrey's operational recommendations
+
+MEASURING · to DEREK · 8 decisions cleared the 0.5 pp gross threshold but the taker fee consumed the edge; rest a bid below the ask where both rules hold at the price paid
+0 agent responses · 39 measurements · automated acknowledgement (template, not an agent review)
+IMPROVED · to DEREK · 39 of 125 book reads in the last 6 h were cut by the decision deadline or the venue cooldown; remove the duplicate read and retry within the freshness window
+0 agent responses · 39 measurements · automated acknowledgement (template, not an agent review)
+IMPROVED · to DEREK · 63 events in the last collection cycle never reached a decision (by code: {"NO_PINNACLE_ON_EVENT": 33, "QUOTE_STALE_ON_ARRIVAL": 13, "VENUE_BOOK_READ_FAILED": 2, "NO_VENUE_CONTRACT_FOR_EVENT": 5, "VENUE_BOOK_CURRENCY_NOT_ESTABLISHED": 4, "VENUE_NATIVE_EVENT_MATCHES_ONLY_ONE_TEAM": 5, "VENUE_BOOK_CURRENCY_CONTRADICTED_BY_CONTRACT": 1}); investigate per sport without weakening identity, market or settlement matching
+0 agent responses · 39 measurements · automated acknowledgement (template, not an agent review)
+Operational improvements only — never reported as profitable learning.
+Opportunities evaluated (24 h)
+
+734 valuations · 25 fixtures · 2 sports
+
+STRATEGY	DECISIONS	ENTERED	TOP REFUSALS
+TRAINING Training / simulated execution	658	43	328 · exploration already holds a position in this fixture (one per fixture)
+105 · this strategy already holds this contract
+92 · the Pinnacle price did not qualify
+INVESTMENT Investment policy (0.5 pp, taker)	734	2	326 · another strategy already holds this game
+244 · the edge was below the policy's minimum (the threshold recorded on the decision)
+106 · the Pinnacle price did not qualify
+RESEARCH Derek research (entries off)	734	0	348 · no research model exists yet
+325 · the venue's and Pinnacle's settlement rules are not established as the same
+57 · no usable Pinnacle price
+Every attempt recorded (6 h): decided 450
+Closest investment opportunities (24 h)
+
+Latest decision per market and policy version · serving version V2 first, historical versions after
+
+MARKET	POLICY	AGE	PINNACLE	PRICE	GROSS	FEE	AFTER FEES	RESULT
+brb-acg-afc-2026-10-03-acg	V2	2 h ago	0.7172	0.71	0.72 pp	1.43 pp	-0.71 pp	gross edge clears threshold but fees consume it
+brb-ber-crb-2026-10-02-ber	V2	68 min ago	0.3238	0.32	0.38 pp	not computed	not computed	below min gross edge
+brb-lon-cri-2026-10-02-lon	V2	7 min ago	0.3131	0.31	0.31 pp	not computed	not computed	below min gross edge
+brb-bot-vln-2026-10-03-bot	V2	74 min ago	0.3913	0.39	0.13 pp	not computed	not computed	below min gross edge
+mlb-sd-mil-2026-10-03	V2	22 min ago	0.6607	0.66	0.07 pp	not computed	not computed	below min gross edge
+mlb-cws-cle-2026-10-03	V2	7 min ago	0.5803	0.58	0.03 pp	not computed	not computed	below min gross edge
+mlb-atl-lad-2026-10-03	V2	8 min ago	0.6697	0.67	-0.03 pp	not computed	not computed	below min gross edge
+brb-nov-goi-2026-10-01-nov	V2	18 h ago	0.6193	0.62	-0.07 pp	not computed	not computed	below min gross edge
+The serving investment rule: Pinnacle probability minus price ≥ 0.5 pp at every level used, and expected profit after the taker fee strictly positive. A historical row keeps the reason it was given under the rules in force at the time. "Not computed" means the policy stopped before the fee step.
+Standing orders 0 entry · 17 protection
+
+STRATEGY	MARKET	ROLE	TYPE	PRICE	QTY / FILLED	RESERVED	EXPIRES
+TRAINING	
+BOT
+
+Botafogo FC
+vs
+VLN
+
+Vila Nova FC
+brb-bot-vln-2026-10-03-bot
+STANDING_PROTECTION	RESTING GTD	0.45	238 / 0	$0.00	18:00Z
+TRAINING	
+CRO
+
+Croatia
+vs
+ENG
+
+England
+unl-cro-eng-2026-10-03-cro
+STANDING_PROTECTION	RESTING GTD	0.27	6 / 0	$0.00	17:58Z
+TRAINING	
+POR
+
+Portugal
+vs
+NOR
+
+Norway
+unl-por-nor-2026-10-04-por
+STANDING_PROTECTION	RESTING GTD	0.64	416 / 0	$0.00	17:58Z
+TRAINING	
+WAL
+
+Wales
+vs
+DEN
+
+Denmark
+unl-wal-den-2026-10-04-wal
+STANDING_PROTECTION	RESTING GTD	0.29	380 / 0	$0.00	17:51Z
+TRAINING	
+ATL
+
+Atlanta Braves
+vs
+LAD
+
+Los Angeles Dodgers
+mlb-atl-lad-2026-10-03
+STANDING_PROTECTION	RESTING GTD	0.71	361 / 0	$0.00	17:51Z
+TRAINING	
+AVA
+
+Avai FC
+vs
+CSC
+
+Ceara SC
+brb-ava-csc-2026-10-03-ava
+STANDING_PROTECTION	RESTING GTD	0.44	2370 / 0	$0.00	17:41Z
+TRAINING	
+NED
+
+Netherlands
+vs
+SRB
+
+Serbia
+unl-ned-srb-2026-10-04-ned
+STANDING_PROTECTION	RESTING GTD	0.87	125 / 0	$0.00	17:37Z
+TRAINING	
+GRE
+
+Greece
+vs
+GER
+
+Germany
+unl-gre-ger-2026-10-04-gre
+STANDING_PROTECTION	RESTING GTD	0.30	2957 / 0	$0.00	17:33Z
+TRAINING	
+NYY
+
+New York Yankees
+vs
+TB
+
+Tampa Bay Rays
+mlb-nyy-tb-2026-10-03
+STANDING_PROTECTION	RESTING GTD	0.61	172 / 0	$0.00	17:29Z
+TRAINING	
+LON
+
+Londrina Ec
+vs
+CRI
+
+Criciuma Ec
+brb-lon-cri-2026-10-02-lon
+STANDING_PROTECTION	RESTING GTD	0.37	286 / 0	$0.00	17:29Z
+TRAINING	
+FRA
+
+France
+vs
+BEL
+
+Belgium
+unl-fra-bel-2026-10-05-fra
+STANDING_PROTECTION	RESTING GTD	0.69	566 / 0	$0.00	17:26Z
+TRAINING	
+BER
+
+Sao Bernardo FC
+vs
+CRB
+
+Cr Brasil
+brb-ber-crb-2026-10-02-ber
+STANDING_PROTECTION	RESTING GTD	0.42	2564 / 0	$0.00	17:14Z
+TRAINING	
+CUI
+
+Cuiaba Ec
+vs
+POP
+
+Aa Ponte Preta
+brb-cui-pop-2026-10-03-cui
+STANDING_PROTECTION	RESTING GTD	0.88	4 / 0	$0.00	17:14Z
+TRAINING	
+FRA
+
+France
+vs
+ITA
+
+Italy
+unl-fra-ita-2026-10-02-fra
+STANDING_PROTECTION	RESTING GTD	0.72	816 / 0	$0.00	17:14Z
+TRAINING	
+SD
+
+San Diego Padres
+vs
+MIL
+
+Milwaukee Brewers
+mlb-sd-mil-2026-10-03
+STANDING_PROTECTION	RESTING GTD	0.71	144 / 0	$0.00	17:03Z
+TRAINING	
+ACG
+
+AC Goianiense
+vs
+AFC
+
+America FC
+brb-acg-afc-2026-10-03-acg
+STANDING_PROTECTION	RESTING GTD	0.75	136 / 0	$0.00	17:03Z
+TRAINING	
+CWS
+
+Chicago White Sox
+vs
+CLE
+
+Cleveland Guardians
+mlb-cws-cle-2026-10-03
+STANDING_PROTECTION	RESTING GTD	0.64	163 / 0	$0.00	17:03Z
+An order is not a fill: it reserves cash until it fills, expires or is cancelled.
+Positions 17 open · 25 recent fills
+
+STRATEGY	MARKET	SIDE	OPEN QTY	COST BASIS	UNREALIZED
+TRAINING Training / simulated execution	
+NED
+
+Netherlands
+vs
+SRB
+
+Serbia
+unl-ned-srb-2026-10-04-ned
+LONG	125	$106.17	-$1.17
+TRAINING Training / simulated execution	
+FRA
+
+France
+vs
+ITA
+
+Italy
+unl-fra-ita-2026-10-02-fra
+LONG	816	$567.22	-$12.34
+TRAINING Training / simulated execution	
+CUI
+
+Cuiaba Ec
+vs
+POP
+
+Aa Ponte Preta
+brb-cui-pop-2026-10-03-cui
+LONG	4	$3.44	-$0.12
+TRAINING Training / simulated execution	
+BOT
+
+Botafogo FC
+vs
+VLN
+
+Vila Nova FC
+brb-bot-vln-2026-10-03-bot
+LONG	238	$99.17	-$11.11
+TRAINING Training / simulated execution	
+GRE
+
+Greece
+vs
+GER
+
+Germany
+unl-gre-ger-2026-10-04-gre
+LONG	2957	$808.36	-$128.25
+TRAINING Training / simulated execution	
+CWS
+
+Chicago White Sox
+vs
+CLE
+
+Cleveland Guardians
+mlb-cws-cle-2026-10-03
+SHORT	163	$98.91	-$5.19
+TRAINING Training / simulated execution	
+ATL
+
+Atlanta Braves
+vs
+LAD
+
+Los Angeles Dodgers
+mlb-atl-lad-2026-10-03
+SHORT	361	$243.89	-$5.63
+TRAINING Training / simulated execution	
+WAL
+
+Wales
+vs
+DEN
+
+Denmark
+unl-wal-den-2026-10-04-wal
+LONG	380	$99.95	-$4.95
+TRAINING Training / simulated execution	
+LON
+
+Londrina Ec
+vs
+CRI
+
+Criciuma Ec
+brb-lon-cri-2026-10-02-lon
+LONG	286	$95.85	-$10.05
+TRAINING Training / simulated execution	
+AVA
+
+Avai FC
+vs
+CSC
+
+Ceara SC
+brb-ava-csc-2026-10-03-ava
+LONG	2370	$963.49	-$86.59
+TRAINING Training / simulated execution	
+BER
+
+Sao Bernardo FC
+vs
+CRB
+
+Cr Brasil
+brb-ber-crb-2026-10-02-ber
+LONG	2564	$990.22	-$195.38
+TRAINING Training / simulated execution	
+ACG
+
+AC Goianiense
+vs
+AFC
+
+America FC
+brb-acg-afc-2026-10-03-acg
+LONG	136	$98.51	-$3.31
+TRAINING Training / simulated execution	
+POR
+
+Portugal
+vs
+NOR
+
+Norway
+unl-por-nor-2026-10-04-por
+LONG	416	$252.43	-$6.99
+TRAINING Training / simulated execution	
+FRA
+
+France
+vs
+BEL
+
+Belgium
+unl-fra-bel-2026-10-05-fra
+LONG	566	$371.30	-$14.72
+TRAINING Training / simulated execution	
+CRO
+
+Croatia
+vs
+ENG
+
+England
+unl-cro-eng-2026-10-03-cro
+LONG	6	$1.45	-$0.13
+TRAINING Training / simulated execution	
+SD
+
+San Diego Padres
+vs
+MIL
+
+Milwaukee Brewers
+mlb-sd-mil-2026-10-03
+SHORT	144	$98.69	-$5.09
+TRAINING Training / simulated execution	
+NYY
+
+New York Yankees
+vs
+TB
+
+Tampa Bay Rays
+mlb-nyy-tb-2026-10-03
+SHORT	172	$99.27	-$4.67
+By strategy (one ledger; strategies sum to the account)
+
+STRATEGY	OPEN / ALL	REALIZED	UNREALIZED	FEES
+INVESTMENT Investment policy (0.5 pp, taker)	0 / 2	$165.52	$0.00	$41.30
+TRAINING Training / simulated execution (exploration)	17 / 18	$2.91	-$495.69	$185.16
+Latest simulated fills
+
+TRAINING ENTRY BUY 361 @ 0.66 ·
+ATL
+
+Atlanta Braves
+vs
+LAD
+
+Los Angeles Dodgers
+mlb-atl-lad-2026-10-03
+fee $5.63 · ledger #97
+TRAINING ENTRY BUY 125 @ 0.84 ·
+NED
+
+Netherlands
+vs
+SRB
+
+Serbia
+unl-ned-srb-2026-10-04-ned
+fee $1.17 · ledger #95
+TRAINING ENTRY BUY 6 @ 0.23 ·
+CRO
+
+Croatia
+vs
+ENG
+
+England
+unl-cro-eng-2026-10-03-cro
+fee $0.07 · ledger #89
+TRAINING ENTRY BUY 566 @ 0.64 ·
+FRA
+
+France
+vs
+BEL
+
+Belgium
+unl-fra-bel-2026-10-05-fra
+fee $9.06 · ledger #83
+TRAINING ENTRY BUY 4 @ 0.85 ·
+CUI
+
+Cuiaba Ec
+vs
+POP
+
+Aa Ponte Preta
+brb-cui-pop-2026-10-03-cui
+fee $0.04 · ledger #81
+TRAINING ENTRY BUY 816 @ 0.68 · 
+FRA
+
+France
+vs
+ITA
+
+Italy
+unl-fra-ita-2026-10-02-fra
+fee $12.34 · ledger #62
+Acquisition throughput (6 h)
+
+HOUR	BOOK READS	SHARED	FAILED	CUT BY DEADLINE
+17:00Z	18	0	5	0
+16:00Z	397	37	78	0
+15:00Z	400	51	67	0
+14:00Z	354	24	83	0
+13:00Z	368	3	54	0
+12:00Z	366	1	52	0
+11:00Z	368	5	34	0
+A shared read answers a decision from this server's own seconds-old venue read (same freshness limits), saving a venue request.
+YOUR AI TEAM
+The people behind the process.
+3 specialist agents · Shared accountability
+D
+01 / AI AGENT
+DISCOVERY & ENTRY
+Derek
+Find the opportunity. Explain the conviction.
+
+2785 recorded decisions · 45 entry decisions
+Talk to Derek
+Workspace ↗
+X
+02 / AI AGENT
+PORTFOLIO MANAGEMENT
+Xavier
+Own the position. Manage the outcome.
+
+17 open positions · 17 protection orders
+Talk to Xavier
+Workspace ↗
+A
+03 / AI AGENT
+AUDIT & INTELLIGENCE
+Audrey
+Verify the result. Improve the process.
+
+252 audit findings · Latest report 2026-10-02
+Talk to Audrey
+Workspace ↗
+MANAGEMENT DESK
+Start with a better question.
+Ask the team to show its work. Every conversation should lead back to the decisions, evidence and account.
+Why did we pass on the latest opportunity? ↗
+What needs my attention today? ↗
+How would you manage the next position? ↗
+LEARNING & OVERSIGHT
+Experience into evidence.
+Audrey connects decisions with outcomes and improvement proposals. Ask for the recorded learning and activation status.
+Record the decision and its inputs
+Audit actions against outcomes
+Evaluate and approve a policy change
+Review learning with Audrey ↗
+Data freshness & session details
+CONNECTING
+Funded system (inactive)
+secondary · real-money execution disabled · LIVE
+READ ONLY
+/
+NO ORDER SUBMISSION PATH
+INTERNAL WORKSPACE/COMMAND MOTION EDITION / 1.1
