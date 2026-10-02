@@ -20,7 +20,7 @@ on:
         required: false
         default: ""
       verify:
-        description: "site-voice = after a release: set each agent's voice through the audited persona route, speak once per agent, and render the production homepage and agent pages in mobile WebKit and phone-sized Chromium (authenticated and signed out); film = follow the homepage demo link and play the whole cinematic film signed in (prepares each chapter through the agent persona chat + stored speech; writes conversation records only), measuring voices, music and 3D frames; office = drive the management office pages against the persisted records with chat/voice timings (writes conversation records only); experiment = read the paper experiment API and render the homepage and agent pages signed in, checking the same positions, fills and cash (read-only); talk = drive the Talk-to-agent panels on /derek /xavier /audrey (typed question, follow-up, refresh-resume, spoken question via a fake microphone, voice reply, permission-denied and a simulated provider error) in desktop + phone Chromium and WebKit iPhone 13 (writes conversation records only); pinnapi = fetch the PinnAPI public docs (no key) and run the read-only in-API probe: key names, then at most 6 authenticated GETs (writes nothing, opens no stream)"
+        description: "site-voice = after a release: set each agent's voice through the audited persona route, speak once per agent, and render the production homepage and agent pages in mobile WebKit and phone-sized Chromium (authenticated and signed out); film = follow the homepage demo link and play the whole cinematic film signed in (prepares each chapter through the agent persona chat + stored speech; writes conversation records only), measuring voices, music and 3D frames; office = drive the management office pages against the persisted records with chat/voice timings (writes conversation records only); experiment = read the paper experiment API and render the homepage and agent pages signed in, checking the same positions, fills and cash (read-only); talk = drive the Talk-to-agent panels on /derek /xavier /audrey (typed question, follow-up, refresh-resume, spoken question via a fake microphone, voice reply, permission-denied and a simulated provider error) in desktop + phone Chromium and WebKit iPhone 13 (writes conversation records only); pinnapi = fetch the PinnAPI public docs (no key) and run the read-only in-API probe: key names, then at most 6 authenticated GETs (writes nothing, opens no stream); research = read the research worker control and work (GET only); research-apply = enable the research worker and create the three owner goals through the authenticated capability controls (idempotent request ids)"
         required: false
         default: ""
       terms_slugs:
@@ -589,3 +589,49 @@ jobs:
           mkdir -p "$D" && cp tools/narration/Actual-Agent-Narration.zip tools/narration/actual-narration/manifest.json "$D"/ 2>/dev/null
           git add "$D" && git commit -q -m "actual agent narration, run $RUN" && git push -q origin ev:claude/site-verify-evidence && echo "evidence pushed: $D"
 
+
+  research:
+    # OFF UNLESS verify == research (read-only) or research-apply.
+    # Runs the completion package's activation script (tools/research/
+    # activate_research.py) through the existing authenticated capability
+    # controls with the ADMIN_TOKEN secret, which never leaves the runner's
+    # environment and is masked. research = read the control, heartbeat and
+    # work (GET only). research-apply = enable the research worker
+    # (hourly_limit 24) and create the three owner goals (coverage/DEREK,
+    # modeling/XAVIER, audit/AUDREY) with fixed request ids, so a repeat run
+    # is idempotent; then read the work and its events back. Paper research
+    # only: no order, policy activation or funded path is reachable here.
+    if: ${{ inputs.verify == 'research' || inputs.verify == 'research-apply' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Activation script (authenticated control route)
+        shell: bash
+        env:
+          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+          MODE: ${{ inputs.verify }}
+        run: |
+          set +e
+          [ -n "${ADMIN_TOKEN:-}" ] || { echo "no ADMIN_TOKEN secret"; exit 1; }
+          echo "::add-mask::$ADMIN_TOKEN"
+          pip install -q httpx >/dev/null 2>&1
+          if [ "$MODE" = "research-apply" ]; then A="--apply"; else A=""; fi
+          python3 tools/research/activate_research.py --actor owner $A
+          echo "script exit=$?"
+      - name: Read the research work and its events back (GET only)
+        shell: bash
+        env:
+          API: https://sportsassets-api.onrender.com/api/command/agents/capabilities
+          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+        run: |
+          set +e
+          echo "::add-mask::$ADMIN_TOKEN"
+          H="X-Admin-Token: $ADMIN_TOKEN"
+          code=$(curl -s -o /tmp/cap.json -w '%{http_code}' --max-time 30 -H "$H" "$API")
+          echo "capabilities HTTP $code at $(date -u +%FT%TZ)"
+          jq -c '{control, heartbeat, work_count: ((.work // []) | length)}' /tmp/cap.json 2>/dev/null
+          jq -r '(.work // [])[:20][] | "\(.task_id // .id) \(.kind) \(.status) owner=\(.claimed_by // .owner // .first // "-") updated=\(.updated_at // "-")"' /tmp/cap.json 2>/dev/null
+          code=$(curl -s -o /tmp/ev.json -w '%{http_code}' --max-time 30 -H "$H" "$API/events")
+          echo "events HTTP $code"
+          jq -r '((.events // .) | if type=="array" then .[:40][] else empty end) | "\(.at // .created_at) \(.actor) \(.kind) \(.task_id) \((.detail // .summary // "") | tostring | .[0:240])"' /tmp/ev.json 2>/dev/null
