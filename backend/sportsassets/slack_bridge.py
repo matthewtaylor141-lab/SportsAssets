@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+import re
 import json
 import os
 import time
@@ -43,7 +44,7 @@ def approved_event(payload,cfg):
  if not isinstance(payload.get('event_id'),str) or len(payload['event_id'])>150:return None
  ts=e.get('thread_ts') or e.get('ts')
  if not isinstance(ts,str) or len(ts)>40:return None
- return {'source':payload['event_id'],'channel':e['channel'],'thread':ts,'text':e['text']}
+ return {'source':payload['event_id'],'channel':e['channel'],'thread':ts,'text':e['text'],'user':e['user']}
 
 def decode(v):return json.loads(v) if isinstance(v,str) else v or {}
 
@@ -58,7 +59,7 @@ async def admit(conn,agent,cfg,event):
   if await conn.fetchval('SELECT 1 FROM agent_slack_delivery WHERE delivery_id=$1',did):return 'DUPLICATE'
   n=await conn.fetchval("SELECT count(*) FROM agent_slack_delivery WHERE state IN ('QUEUED','WORKING','READY','SENDING')")
   if n>=QUEUE_CAP:return 'QUEUE_FULL'
-  await conn.execute('INSERT INTO agent_slack_delivery(delivery_id,agent,team_id,channel_id,thread_ts,source_key,question) VALUES($1,$2,$3,$4,$5,$6,$7)',did,agent,cfg['team'],event['channel'],event['thread'],event['source'],event['text'])
+  await conn.execute('INSERT INTO agent_slack_delivery(delivery_id,agent,team_id,channel_id,thread_ts,source_key,question,requested_by) VALUES($1,$2,$3,$4,$5,$6,$7,$8)',did,agent,cfg['team'],event['channel'],event['thread'],event['source'],event['text'],event.get('user'))
  return 'QUEUED'
 
 async def publish_reviews(conn):
@@ -72,7 +73,7 @@ async def publish_reviews(conn):
    outcome=decode(r['outcome'])
    if outcome.get('reviewed') is not True or not outcome.get('message_id'):continue
    source='review:'+str(r['event_id']);answer=str(outcome.get('answer') or '')[:3000]
-   text='Recorded '+agent.title()+' research review · '+r['task_id']+'\n'+answer+'\nSource message: '+str(outcome['message_id'])+'\nResearch opinion; no policy activation or profitability claim.'
+   text='Recorded '+agent.title()+' research review · '+r['task_id']+'\n'+answer+'\nSource message: '+str(outcome['message_id'])+' · record: https://command.bettortoken.com/'+agent+'\nStage: review of a hypothesis · research opinion; no policy activation or profitability claim.'
    await conn.execute("INSERT INTO agent_slack_delivery(delivery_id,agent,team_id,channel_id,source_key,answer,message_id,state) VALUES($1,$2,$3,$4,$5,$6,$7,'READY') ON CONFLICT DO NOTHING",delivery_id(agent,cfg['team'],source),agent,cfg['team'],cfg['workroom'],source,text,outcome['message_id'])
 
 async def claim(conn):
@@ -92,12 +93,33 @@ async def claim(conn):
 async def update(conn,job,state,*,answer=None,message_id=None,slack_ts=None,error=None):
  return await conn.execute("UPDATE agent_slack_delivery SET state=$3,answer=coalesce($4,answer),message_id=coalesce($5,message_id),slack_ts=$6,error_code=$7,updated_at=now() WHERE delivery_id=$1 AND claim_token=$2 AND lease_until>now()",job['delivery_id'],job['claim_token'],state,answer,message_id,slack_ts,error)
 
+ASSIGN=re.compile(r'^\s*(?:assign|research)\s*[:\-]\s*(.{8,480})$',re.I|re.S)
+
+async def assignment(pool,job):
+ """`@Agent assign: <question>` from a verified manager creates one durable
+ research flow (capability_work.create_flow: this agent investigates, the
+ next reviews, Audrey audits) and answers with its task ids. Research only:
+ no order, policy or control is reachable from here."""
+ text=re.sub(r'<@[A-Z0-9]+>','',str(job.get('question') or '')).strip()
+ m=ASSIGN.match(text)
+ if not m:return None
+ from .agents import capability_work as W
+ now=time.time()
+ async with pool.acquire() as c:
+  got=await W.create_flow(c,source_key='slack:'+job['delivery_id'],title=m.group(1).strip()[:480],first=job['agent'].upper(),priority=3,due=now+86400,actor='slack:'+str(job.get('requested_by') or 'manager'),now=now)
+ ids=got['task_ids']
+ return ('Research assigned · '+' → '.join(ids)+'\nOrder: '+job['agent'].title()+' investigates, the next agent reviews, Audrey audits. '
+         'Stage: hypothesis under investigation; nothing is approved or activated.\nRecord: https://command.bettortoken.com/'+job['agent'])
+
 async def process(pool,job):
  cfg=settings(job['agent'])
  if not cfg['token'] or job['team_id']!=cfg['team'] or job['channel_id'] not in cfg['channels']:
   async with pool.acquire() as c:await update(c,job,'FAILED',error='CONFIGURATION_NOT_AUTHORIZED')
   return
  answer=job['answer'];message_id=job['message_id']
+ if not answer:
+  assigned=await assignment(pool,job)
+  if assigned:answer,message_id=assigned,None
  if not answer:
   from .agents import persona_chat as P
   async with asyncio.timeout(60):
@@ -142,8 +164,17 @@ async def run(get_pool):
   try:
    # Default off without a configured workspace; no provider call on boot.
    if os.getenv('SLACK_TEAM_ID'):
+    pool=await get_pool()
+    try:
+     # management updates on their own connection, outside the claim lock:
+     # an update read can never delay an incoming mention
+     async with asyncio.timeout(30):
+      async with pool.acquire() as c:
+       from . import slack_updates as U
+       await U.queue(c)
+    except asyncio.CancelledError:raise
+    except Exception:pass
     async with asyncio.timeout(5):
-     pool=await get_pool()
      async with pool.acquire() as c:job=await claim(c)
     if job:
      try:
