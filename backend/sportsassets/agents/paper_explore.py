@@ -28,8 +28,8 @@ WHAT IS NOT RELAXED -- the data and execution safeguards, all of them:
 
 THE OWNER'S LIMITS, checked UNDER THE ACCOUNT LOCK (`submit_order`'s
 `locked_check`), so two concurrent decisions cannot both pass a limit:
-  * $100 maximum total entry cost per position INCLUDING FEES (the order's
-    reservation -- limit x qty + the maximum fee -- is at most $100, and a
+  * $250 maximum total entry cost per position INCLUDING FEES (the order's
+    reservation -- limit x qty + the maximum fee -- is at most $250, and a
     fill can only cost less than its reservation);
   * $5,000 maximum aggregate exploration exposure: open reservations plus
     the cost basis of open exploration positions (Xavier's protective sales
@@ -42,10 +42,10 @@ THE OWNER'S LIMITS, checked UNDER THE ACCOUNT LOCK (`submit_order`'s
     so gains never re-open the budget).
 
 SELECTION, RECORDED. Eligible fixtures are sampled across the sports present
-with a recorded method (HASHED_BERNOULLI_INVERSE_SPORT_FREQUENCY_V1): the
+with a recorded method (HASHED_BERNOULLI_INVERSE_SPORT_FREQUENCY_V2): the
 fixture's inclusion probability is p = clamp(K / n_sport, FLOOR, 1), n_sport
 the distinct fixtures of that sport family with entry-experiment valuations
-in the last SAMPLING_WINDOW_S; the draw u = sha256(version, fixture) in
+in the last SAMPLING_WINDOW_S; the draw u = sha256(draw_version, fixture) in
 [0, 1) is deterministic per fixture, so a fixture is in or out once. p, u,
 n_sport and the method are written on the decision, so Audrey can weight and
 separate exploration results from the investment policy's. Market types:
@@ -75,15 +75,19 @@ VERSION = PB.EXPLORE_VERSION
 DISCLOSURE = PB.EXPLORE_DISCLOSURE
 LABEL = PB.EXPLORE_LABEL
 
-#: THE OWNER'S LIMITS (2026-10-01).
-MAX_ENTRY_COST_USD = 100.0
+#: Training V2: larger entries and broader inclusion requested by the owner.
+#: Aggregate exposure and loss stop remain at their existing bounds.
+MAX_ENTRY_COST_USD = 250.0
 MAX_AGGREGATE_EXPOSURE_USD = 5000.0
 LOSS_STOP_USD = 1000.0
 
 #: THE SAMPLING METHOD.
-SELECTION_METHOD = "HASHED_BERNOULLI_INVERSE_SPORT_FREQUENCY_V1"
-SAMPLING_TARGET_PER_SPORT = 6.0       # K
-SAMPLING_FLOOR = 0.35
+SELECTION_METHOD = "HASHED_BERNOULLI_INVERSE_SPORT_FREQUENCY_V2"
+# Preserve the original fixture draw so broader inclusion never reshuffles
+# previously eligible fixtures out of the sample.
+SAMPLING_DRAW_VERSION = "PINNACLE_EXPLORATION_PAPER_V1"
+SAMPLING_TARGET_PER_SPORT = 12.0      # K; was 6
+SAMPLING_FLOOR = 0.70                # was .35
 SAMPLING_WINDOW_S = 6 * 3600.0
 
 ECONOMICS_LABEL = "EXPLORATION_RESEARCH_COST_NOT_INVESTMENT_PERFORMANCE"
@@ -182,8 +186,8 @@ def locked_check_for(fixture, slug):
 # ═════════════════════════════════════════════════════════════════════
 
 def draw(fixture) -> float:
-    """u in [0, 1): deterministic per (version, fixture)."""
-    h = hashlib.sha256(("%s:%s" % (VERSION, fixture)).encode()).hexdigest()
+    """u in [0, 1): preserve the V1 fixture draw through the V2 ramp."""
+    h = hashlib.sha256(("%s:%s" % (SAMPLING_DRAW_VERSION, fixture)).encode()).hexdigest()
     return int(h[:15], 16) / float(16 ** 15)
 
 
@@ -205,6 +209,7 @@ async def selection(conn, *, cand: dict, at: float) -> dict:
     p = inclusion_probability(int(n or 0))
     u = draw(cand.get("fixture"))
     return {"method": SELECTION_METHOD, "policy_version": VERSION,
+            "draw_version": SAMPLING_DRAW_VERSION,
             "sport_family": fam, "n_sport_fixtures_in_window": int(n or 0),
             "window_s": SAMPLING_WINDOW_S,
             "target_per_sport": SAMPLING_TARGET_PER_SPORT,
@@ -551,6 +556,7 @@ def describe() -> dict:
                        "positions_per_fixture": 1,
                        "overlap_with_other_strategies": "refused"},
             "selection": {"method": SELECTION_METHOD,
+                          "draw_version": SAMPLING_DRAW_VERSION,
                           "target_per_sport": SAMPLING_TARGET_PER_SPORT,
                           "floor": SAMPLING_FLOOR,
                           "window_s": SAMPLING_WINDOW_S}}

@@ -458,3 +458,6 @@ tests/test_learning_context.py
 tests/test_agent_capabilities.py
 tests/test_agent_capabilities_postgres.py
 tests/test_agent_capability_routes.py
+
+# Paper training V2: sizing, inclusion and unchanged exposure/loss limits.
+tests/test_paper_training_ramp_v2.py

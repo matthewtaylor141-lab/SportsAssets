@@ -222,7 +222,7 @@ MAKER_POLICY = {"kind": "MAKER", "strategy": MAKER_STRATEGY,
 # "Training / simulated execution"; negative expected value is a research
 # cost, never investment performance. Decisions in `paper_explore.py`.
 EXPLORE_STRATEGY = "PINNACLE_EXPLORATION_PAPER"
-EXPLORE_VERSION = "PINNACLE_EXPLORATION_PAPER_V1"
+EXPLORE_VERSION = "PINNACLE_EXPLORATION_PAPER_V2"
 EXPLORE_DISCLOSURE = (
     "PINNACLE_EXPLORATION_PAPER: TRAINING / SIMULATED EXECUTION on a "
     "fictional account. Positions are taken to generate forward experience "

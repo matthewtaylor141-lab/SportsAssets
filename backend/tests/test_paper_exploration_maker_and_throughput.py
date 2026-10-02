@@ -128,7 +128,7 @@ async def _setup(conn, tag, now):
 
 def test_the_owner_limits_and_labels_are_the_authorized_ones():
     d = PEX.describe()
-    assert d["limits"] == {"max_entry_cost_usd_incl_fees": 100.0,
+    assert d["limits"] == {"max_entry_cost_usd_incl_fees": 250.0,
                            "max_aggregate_exposure_usd": 5000.0,
                            "loss_stop_realized_usd": 1000.0,
                            "positions_per_fixture": 1,
@@ -143,7 +143,7 @@ def test_the_owner_limits_and_labels_are_the_authorized_ones():
     assert PB.CG_PARAMETERS_V2 == {"min_gross_edge_pp": 0.5}
 
 
-@pytest.mark.parametrize("n,p", [(1, 1.0), (6, 1.0), (12, 0.5), (60, 0.35)])
+@pytest.mark.parametrize("n,p", [(1, 1.0), (6, 1.0), (12, 1.0), (60, 0.70)])
 def test_the_inclusion_probability_is_inverse_to_sport_frequency(n, p):
     assert PEX.inclusion_probability(n) == pytest.approx(p)
 
@@ -209,13 +209,13 @@ async def test_exploration_enters_a_losing_candidate_and_the_chain_completes(
         assert sel["draw"] < sel["selection_probability"]
         assert pdx["threshold_edge_pp"] is None
         assert pdx["investment_policy_threshold_pp_not_applied"] == 0.5
-        # the order: marketable IOC at the best level, within $100
+        # the order: marketable IOC at the best level, within $250 including fees
         o = await conn.fetchrow("SELECT * FROM paper_orders WHERE "
                                 " decision_id=$1", d["decision_id"])
         assert o["strategy"] == EXPLORE and o["role"] == "ENTRY"
         assert o["order_type"] == "MARKETABLE"
         assert float(o["limit_price"]) == 0.50
-        assert float(o["reserved_usd"]) <= 100.0
+        assert 100.0 < float(o["reserved_usd"]) <= 250.0
         assert H.j(o["label"])["position_label"] == \
             "Training / simulated execution"
         # the investment policy made no decision here (it was off)
@@ -232,7 +232,7 @@ async def test_exploration_enters_a_losing_candidate_and_the_chain_completes(
         assert fills and {f["strategy"] for f in fills} == {EXPLORE}
         cost = sum(float(f["qty"]) * float(f["price"]) for f in fills)
         fees = sum(float(f["fee_usd"]) for f in fills)
-        assert cost + fees <= 100.0
+        assert 100.0 < cost + fees <= 250.0
         debit = await conn.fetchval(
             "SELECT -sum(cash_delta_usd) FROM paper_ledger WHERE "
             " order_id=$1 AND kind='FILL'", o["order_id"])
