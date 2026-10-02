@@ -103,8 +103,29 @@ def test_no_funded_module_imports_the_paper_modules():
                # today's decisions); neither is a funded module, neither
                # writes, and only the API chat routes import them
                "agents/persona_facts.py",
-               "agents/audrey_chat.py"}
+               "agents/audrey_chat.py",
+               # the capability workbench's evidence tools read the paper
+               # ledger inside a READ ONLY transaction, and its experiment
+               # registration writes only paper_improvement_proposals via
+               # paper_learning; neither grants activation or order authority
+               "agents/capability_tools.py",
+               "agents/capability_experiments.py"}
     assert set(offenders) <= allowed, sorted(set(offenders) - allowed)
+    # ...and neither capability module reaches a funded or execution module,
+    # directly or through the rest of the capability package
+    for rel in ("agents/capability_tools.py", "agents/capability_experiments.py",
+                "agents/capability_runtime.py", "agents/capability_work.py",
+                "agents/capability_scorecards.py", "api/agent_capabilities.py"):
+        tree = ast.parse((ROOT / rel).read_text())
+        for node in ast.walk(tree):
+            mods = []
+            if isinstance(node, ast.ImportFrom):
+                mods = [node.module or ""] + [a.name for a in node.names]
+            elif isinstance(node, ast.Import):
+                mods = [a.name for a in node.names]
+            for m in mods:
+                assert not any(k in (m or "") for k in
+                               ("funded", "entry_execution", "execution_gate", "pmus")), (rel, m)
 
 
 @pg

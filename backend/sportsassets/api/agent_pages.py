@@ -68,6 +68,10 @@ ENDPOINTS = {
     "characters": "/api/command/agents/static/cc_characters.js",
     "avatar": "/api/command/agents/static/cc_avatar.js",
     "labels": "/api/command/agents/labels",
+    # the capability workbench (api/agent_capabilities.py): reads with COMMAND
+    # auth; its goal/control/experiment writes need CONTROL auth server-side
+    # and touch only agent_tasks and the paper-learning proposals
+    "capabilities": "/api/command/agents/capabilities",
     # the paper session, as api/command_paper.py serves it (404 in a build
     # without it, and the pages say so): see agent_cc_page.PAPER_CONTRACT
     "paper_account": "/api/command/paper/account",
