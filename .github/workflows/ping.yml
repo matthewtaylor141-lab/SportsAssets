@@ -683,3 +683,46 @@ jobs:
           git rm -rq --cached . >/dev/null 2>&1
           mkdir -p "$D" && cp /tmp/team_logos/* "$D"/ 2>/dev/null
           git add "$D" && git commit -q -m "venue team logos, run $RUN" && git push -q origin ev:claude/site-verify-evidence && echo "evidence pushed: $D"
+
+  logos:
+    # TEAM LOGOS ON THE PRODUCTION SITE. OFF UNLESS verify == logos. Read-only:
+    # homepage and the three offices on Chromium desktop and WebKit iPhone 13;
+    # payload coverage by league, rendered marks (loaded / initials / broken),
+    # signed-out image refusal, CSP errors, layout shift, screenshots.
+    if: ${{ inputs.verify == 'logos' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Render the logos (Chromium desktop, WebKit iPhone 13)
+        timeout-minutes: 20
+        shell: bash
+        env:
+          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+          OUT: site_verify_out
+        run: |
+          set +e
+          echo "::add-mask::$ADMIN_TOKEN"
+          cd tools/site_verify
+          npm init -y >/dev/null 2>&1
+          npm install playwright@1.48.2 >/dev/null 2>&1
+          npx playwright install --with-deps webkit chromium >/dev/null 2>&1
+          node logos.mjs
+      - name: Commit the evidence
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          RUN="${GITHUB_RUN_ID}"
+          D="evidence/logos/$(date -u +%Y%m%dT%H%M%SZ)_run$RUN"
+          git config user.name "site-verify"
+          git config user.email "site-verify@users.noreply.github.com"
+          git fetch -q origin claude/site-verify-evidence && git checkout -q -f -B ev origin/claude/site-verify-evidence || git checkout -q --orphan ev
+          git rm -rq --cached . >/dev/null 2>&1
+          mkdir -p "$D" && cp tools/site_verify/site_verify_out/* "$D"/ 2>/dev/null
+          git add "$D" && git commit -q -m "logos evidence, run $RUN" && git push -q origin ev:claude/site-verify-evidence && echo "evidence pushed: $D"
