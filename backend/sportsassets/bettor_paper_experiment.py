@@ -463,6 +463,16 @@ async def experiment(conn, *, now: float | None = None,
     out["throughput"] = await _sec(
         throughput(conn, at), empty_why="no book reads in 6 h",
         is_empty=lambda d: not d["hours"])
+    # both teams of each record's event, logos only where verified by venue
+    # team id + league (team_logos); a read decoration, never a decision input
+    from . import team_logos as TL
+    od = out["orders"].get("data") or {}
+    await TL.decorate(conn, (out["closest"].get("data") or [])
+                      + (od.get("entry_orders") or [])
+                      + (od.get("management_orders") or [])
+                      + (out["fills"].get("data") or []))
+    await TL.decorate(conn, (out["positions"].get("data") or {}).get(
+        "open_positions") or [], slug_key="market")
     pos = (out["positions"].get("data") or {})
     n_open = len(pos.get("open_positions") or [])
     n_fills = len(out["fills"].get("data") or [])

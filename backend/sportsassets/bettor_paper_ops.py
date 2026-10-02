@@ -320,6 +320,10 @@ async def _names_for(conn, rows: list, *, slug_key="us_market_slug",
     for r in rows:
         r["market"] = market_name(r.get("label"), valuation=r.get("valuation"),
                                   catalogue=cat.get(id(r)))
+    # both teams of the record's event, each with a logo only when one is
+    # verified for that venue team id + league (team_logos); read-only
+    from . import team_logos as TL
+    await TL.decorate(conn, rows, slug_key=slug_key)
 
 
 async def account_section(conn, *, account_id: str, now: float) -> dict:
@@ -704,12 +708,15 @@ async def derek_operations(conn, *, account_id: str | None = None,
         # entries awaiting their book): price, size, rationale, expiry and
         # cancellation conditions, as persisted. An order is not a fill.
         from . import bettor_paper_experiment as EXP
-        return (await EXP.standing_orders(conn, at, acct))["entry_orders"]
+        from . import team_logos as TL
+        rows = (await EXP.standing_orders(conn, at, acct))["entry_orders"]
+        return await TL.decorate(conn, rows)
     out["standing_entry_orders"] = await _sec(standing(), empty_why=(
         "NO_OPEN_ENTRY_ORDER: Derek has no resting or pending entry order "
         "right now"))
-    out["logos"] = ("no licensed team logo files exist in this repository; "
-                    "markets are named from the records, without logos")
+    out["logos"] = ("team logos are shown only where the team-logo manifest "
+                    "verifies one for the venue team id and league "
+                    "(team_logos); every other team shows its initials")
     out["separation"] = ("ORIGINAL_RESEARCH (DEREK_ENTRY_POLICY_V2) and each "
                          "EXPERIMENTAL_BENCHMARK are counted apart: a "
                          "benchmark decision is never one of Derek's "
@@ -1147,7 +1154,16 @@ async def audrey_operations(conn, *, account_id: str | None = None,
             "       improvement_task_id FROM paper_audrey_findings "
             " WHERE account_id = $1 ORDER BY found_at DESC LIMIT $2",
             acct, int(limit))
-        return [RM._row(r) for r in rows]
+        out = [RM._row(r) for r in rows]
+        # a finding about a position names it as
+        # paperpos:<account>:<group>:<market slug>:<side>; the slug links the
+        # finding to its matchup (read decoration only)
+        for r in out:
+            parts = str(r.get("subject") or "").split(":")
+            if parts[0] == "paperpos" and len(parts) >= 5:
+                r["us_market_slug"] = parts[-2]
+        from . import team_logos as TL
+        return await TL.decorate(conn, out)
 
     async def finding_counts():
         rows = await conn.fetch(

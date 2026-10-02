@@ -250,7 +250,10 @@ async def test_derek_names_markets_prices_orders_and_refusals_in_plain_words():
         assert o["p_pinnacle"] == 0.58 and o["market"]["selection"]
     v2 = next(s for s in d["strategies"] if s["strategy"] == SEED.V2)
     assert v2["orders"]["status"] == "EMPTY"                       # entries switched off: no order, named
-    assert "logo" in d["logos"] and "no licensed team logo" in d["logos"]
+    # logos only where verified for the venue team id + league; the seeded
+    # markets are not in the venue catalogue, so they carry no matchup
+    assert "venue team id and league" in d["logos"]
+    assert all("matchup" not in r for r in rows)
     page = _node("derek", "return CC.ops.panels('derek', {json: %s, okAt: 1, fail: null});" % json.dumps(_j(d)))
     bench = page["p-ops-bench"]["html"]
     names = re.findall(r"data-market-name>(.*?)</div>", bench)

@@ -2302,6 +2302,15 @@ STATIC_FILES.update({"mlb-logo-%s.svg" % team_id: ("image/svg+xml", "private, ma
                      for team_id in (133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 158, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121)})
 STATIC_FILES["mlb-logo-sources.json"] = ("application/json", "private, max-age=86400")
 
+# Team logos of every league in the account's markets: exactly the files in
+# the verified team-logo manifest (team_logos.static_files), each keyed by the
+# venue team id it belongs to; a file whose sha256 no longer matches is not
+# served. Published by basename, read from team-logos/.
+from .. import team_logos as _TEAM_LOGOS  # noqa: E402
+TEAM_LOGO_FILES = {name: (rel, (ctype, "private, max-age=86400"))
+                   for name, (rel, ctype) in _TEAM_LOGOS.static_files().items()
+                   if rel.startswith("team-logos/")}
+
 # ── LICENSED CHARACTER MODELS ───────────────────────────────────────
 MODELS_DIR = STATIC_DIR / "models"
 MODELS_URL = "/api/command/agents/static/models/"
@@ -2381,11 +2390,14 @@ async def agents_model(name: str):
             dependencies=[Depends(require_command)])
 async def agents_static(name: str):
     from fastapi.responses import Response as _R
+    rel = name
     got = STATIC_FILES.get(name)
+    if got is None and name in TEAM_LOGO_FILES:
+        rel, got = TEAM_LOGO_FILES[name]
     if got is None:
         raise HTTPException(status_code=404, detail="not a served file")
     try:
-        body = (STATIC_DIR / name).read_bytes()
+        body = (STATIC_DIR / rel).read_bytes()
     except OSError:
         raise HTTPException(status_code=404, detail="file absent in this build")
     return _R(content=body, media_type=got[0].split(";")[0],

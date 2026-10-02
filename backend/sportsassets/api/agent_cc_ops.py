@@ -100,6 +100,11 @@ OPS_TITLES = {"derek": "Derek's paper decisions",
               "audrey": "Audrey's paper audit and account"}
 
 OPS_CSS = r"""
+.team-line{display:inline-flex;align-items:center;gap:6px;margin-left:8px;font-size:11px;color:#cfe0ec}
+.team-line .team-vs{color:#8ea6ba;font-size:10px}
+.team-mark.sm{position:relative;display:inline-grid;place-items:center;width:20px;height:20px;border-radius:5px;background:#f5f7fa;overflow:hidden;vertical-align:middle}
+.team-mark.sm img{position:absolute;inset:1px;width:18px;height:18px;object-fit:contain;background:#f5f7fa}
+.team-mark.sm .team-ini{font:600 7px sans-serif;color:#2d4254}
 .cc-fresh{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:1px;background:var(--line);border:1px solid var(--line);border-radius:12px;overflow:hidden;margin:0 0 14px}
 .cc-fresh>div{background:var(--panel);padding:10px 12px;min-width:0}
 .cc-fresh .fv{font:600 14px/1.3 var(--display);margin-top:4px;overflow-wrap:anywhere}
@@ -577,13 +582,26 @@ _OPS_CORE_JS_RAW = r"""
       var st_ = isObj(r.settled) ? Object.keys(r.settled).map(function (k) { return n(r.settled[k]) + ' ' + esc(k); }).join(' · ') : '';
       return '<div class="orow" data-perf="' + esc(r.strategy) + '"><div class="oh">' + schip(r.strategy) + '</div><div class="om">' + n(r.decisions) + ' decisions · ' + n(r.enter) + ' ENTER · ' + n(r.entry_orders) + ' entry orders (' + n(r.filled_orders) + ' filled) · ' + n(r.open_positions) + ' open / ' + n(r.closed_positions) + ' closed' + (st_ ? ' · settled ' + st_ : '') + '</div><div class="om">realized ' + (CC.usdS(r.realized_pnl_usd) || '$0.00') + ' (booked)</div></div>';
     }).join('') + '<p class="note">Each strategy on its own; never summed with the funded system.</p>' : secBox(pf, 'performance')};
+    function teamLine(ms) {
+      // both teams of the finding's position, logos only where verified
+      if (typeof document !== 'undefined' && !document.__teamMarkErr) {
+        // an unavailable image leaves the initials underneath, never a broken icon
+        document.__teamMarkErr = 1;
+        document.addEventListener('error', function (e) { var t = e.target; if (t && t.matches && t.matches('.team-mark img')) t.remove(); }, true);
+      }
+      if (!ms || !ms.length) return '';
+      return ' <span class="team-line">' + ms.slice(0, 2).map(function (t) {
+        return '<span class="team-mark sm" title="' + esc(t.name + (t.logo && t.logo.kind === 'flag' ? ' · national flag' : '')) + '"><span class="team-ini" aria-hidden="true">' + esc(t.initials || '?') + '</span>'
+          + (t.logo && t.logo.url ? '<img src="' + esc(t.logo.url) + '" alt="" width="18" height="18" loading="lazy" decoding="async">' : '') + '</span>' + esc(t.name);
+      }).join(' <span class="team-vs">vs</span> ') + '</span>';
+    }
     var fs = sec(j.findings), fd = ok(j.findings), fc = ok(j.finding_counts), ea = sec(j.event_audits), ead = ok(j.event_audits);
     var evh = '<p class="lbl" style="margin:0 0 6px">Event-driven audits (one per event)</p>' + (ead ? ead.slice(0, 12).map(function (f) {
       var d = isObj(f.detail) ? f.detail : {};
       return '<div class="orow" data-event-audit="' + esc(f.finding_id) + '"><div class="oh"><span class="ostat ' + (f.severity === 'INFO' ? 'OPEN' : 'LOST') + '">' + esc(f.severity) + '</span><b>' + esc(String(f.kind || '').replace(/^PAPER_EVENT_/, '').replace(/_/g, ' ').toLowerCase()) + '</b>' + (d.passed === true ? '<span class="ostat OPEN">PASSED</span>' : d.passed === false ? '<span class="ostat LOST">FAILED</span>' : '') + (d.strategy ? schip(d.strategy) : '') + '</div><div class="om">' + (AG.toEpoch(f.found_at) !== null ? AG.ts(f.found_at) : '?') + (f.improvement_task_id ? ' · improvement task ' + esc(f.improvement_task_id) : '') + '</div>' + CC.techDetails([['finding id', f.finding_id], ['subject', f.subject], ['chain', d.chain], ['detail', JSON.stringify(d)]]) + '</div>';
     }).join('') : (ea && ea.status === 'EMPTY' ? '<p class="note">' + esc(ea.why) + '</p>' : secBox(ea, 'event audits')));
     out['p-ops-findings'] = {status: stStatus(j.event_audits) === 'OK' ? 'OK' : stStatus(j.findings), html: evh + '<p class="lbl" style="margin:12px 0 6px">All findings by kind</p>' + (fc ? '<ul class="olist">' + fc.map(function (r) { return '<li><span class="ostat ' + (r.severity === 'INFO' ? 'OPEN' : 'LOST') + '">' + esc(r.severity) + '</span> ' + esc(r.kind) + ' × ' + n(r.n) + '</li>'; }).join('') + '</ul>' : '')
-      + (fd ? fd.map(function (f) { return '<div class="orow" data-finding="' + esc(f.finding_id) + '"><div class="oh"><span class="ostat ' + (f.severity === 'INFO' ? 'OPEN' : 'LOST') + '">' + esc(f.severity) + '</span><b>' + esc(f.kind) + '</b></div><div class="om">' + (AG.toEpoch(f.found_at) !== null ? AG.ts(f.found_at) : '?') + (f.improvement_task_id ? ' · task ' + esc(f.improvement_task_id) : '') + '</div>' + CC.techDetails([['finding id', f.finding_id], ['subject', f.subject], ['detail', JSON.stringify(f.detail || {})]]) + '</div>'; }).join('') : secBox(fs, 'findings'))};
+      + (fd ? fd.map(function (f) { return '<div class="orow" data-finding="' + esc(f.finding_id) + '"><div class="oh"><span class="ostat ' + (f.severity === 'INFO' ? 'OPEN' : 'LOST') + '">' + esc(f.severity) + '</span><b>' + esc(f.kind) + '</b>' + teamLine(f.matchup) + '</div><div class="om">' + (AG.toEpoch(f.found_at) !== null ? AG.ts(f.found_at) : '?') + (f.improvement_task_id ? ' · task ' + esc(f.improvement_task_id) : '') + '</div>' + CC.techDetails([['finding id', f.finding_id], ['subject', f.subject], ['detail', JSON.stringify(f.detail || {})]]) + '</div>'; }).join('') : secBox(fs, 'findings'))};
     out['p-ops-learning'] = learningPanel(j);
     var r = sec(j.daily_report), rd = ok(j.daily_report), list = ok(j.daily_reports);
     out['p-ops-report'] = {status: stStatus(j.daily_report), html: rd ? '<dl class="pdl"><dt>day</dt><dd>' + esc(rd.report_day) + ' (' + esc(rd.reporting_tz || '') + ')</dd><dt>version</dt><dd>' + esc(rd.version) + (rd.final ? ' · final' : ' · provisional until the day closes') + '</dd><dt>generated</dt><dd>' + (AG.toEpoch(rd.generated_at) !== null ? AG.ts(rd.generated_at) : '?') + '</dd><dt>reconciles</dt><dd>' + (rd.reconciles === true ? 'YES' : rd.reconciles === false ? '<b class="neg">NO</b>' : '?') + '</dd>'
