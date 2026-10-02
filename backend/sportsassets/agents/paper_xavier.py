@@ -264,6 +264,16 @@ async def _latest_book(conn, slug: str):
         " ORDER BY observed_at DESC LIMIT 1", slug)
 
 
+async def _held_feed(conn, *, pos: dict, payout_event, payout_is_complement,
+                     at: float, max_age_s: float) -> dict:
+    """The held contract on THIS process's PinnAPI cache (read only: no
+    socket, no network); FEED_OWNERSHIP_NOT_HELD when no owner runs here."""
+    from .. import pinnapi_feed_runtime as FR
+    return await FR.held_moneyline(
+        conn, us_market_slug=pos["us_market_slug"], payout_event=payout_event,
+        payout_is_complement=payout_is_complement, at=at, max_age_s=max_age_s)
+
+
 async def _measure(conn, ctx, *, pos: dict, levels_buy: list) -> dict:
     """P(the held side pays), on the paper session's measure -- the measure
     of the group's OWN strategy: a PINNACLE_ONLY_PAPER_BENCHMARK group is
@@ -273,7 +283,8 @@ async def _measure(conn, ctx, *, pos: dict, levels_buy: list) -> dict:
     from . import paper_benchmark as PB
     strat = await PB.group_strategy(conn, pos["group_id"])
     if strat in PB.BENCHMARK_STRATEGIES:
-        return await PB.xavier_measure(conn, ctx, pos=pos, strategy=strat)
+        return await PB.xavier_measure(conn, ctx, pos=pos, strategy=strat,
+                                       feed=_held_feed)
     at = _clock(ctx)
     lookback = float(ctx["config"]["entry"]["valuation_lookback_s"])
     intent = DP.LONG if pos["holding_side"] == "LONG" else DP.SHORT

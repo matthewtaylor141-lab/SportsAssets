@@ -22,6 +22,8 @@ States (one per contract):
 Phase comes from the venue start time (basis VENUE_START_TIME). Team identity
 uses ext_pinnacle_loop's own _team_tokens/_same_team (squad qualifiers, one-to-
 one), so the census and any later decision agree on what "the same event" is.
+`contract_match` is that per-row classification for ONE contract (Xavier's
+held-position read in pinnapi_feed_runtime.held_moneyline uses it).
 Pure: the caller supplies rows and the feed's event view.
 """
 from __future__ import annotations
@@ -170,6 +172,56 @@ def match_event(sides, game_start, feed_events) -> tuple:
     return S_SUPPORTED, hits[0]
 
 
+def _event_match(row, sid, feed_view) -> tuple:
+    """(state, feed_event_id) for one contract row's EVENT in a subscribed,
+    synced sport: the census's own title split and match_event."""
+    sides = _sides(row.get("event_title"))
+    if not sides:
+        return S_NO_SIDES, None
+    return match_event(sides, _epoch(row.get("game_start")),
+                       feed_view.get(sid, []))
+
+
+def contract_match(row, feed_view: dict, *, subscribed_sports,
+                   synced: bool) -> tuple:
+    """(state, feed_event_id, sport_id) for ONE contract row -- the same
+    states, in the same order, as `census` gives that row, so a decision
+    that reads the feed for a held contract agrees with the census about
+    which provider event it is (or names why there is none)."""
+    sid = sport_id_of(row.get("sports_type"))
+    if sid is None:
+        return S_UNMAPPED_SPORT, None, None
+    if sid not in subscribed_sports:
+        return S_OUT_OF_SCOPE, None, sid
+    if not synced:
+        return S_FEED_NOT_SYNCED, None, sid
+    state, eid = _event_match(row, sid, feed_view)
+    if state == S_SUPPORTED and not family_of(row.get("kind"),
+                                              row.get("line"))[1]:
+        return S_UNSUPPORTED, None, sid
+    return state, eid, sid
+
+
+def sport_family_of(sid) -> Optional[str]:
+    """The first SPORT_IDS name for a PinnAPI sport id ('soccer' for 1,
+    'baseball' for 6), the spelling bettor_pinnacle_devig.SUPPORTED uses."""
+    return next((p for p, s in SPORT_IDS if s == sid), None)
+
+
+def designation_of(outcome, feed_event: dict) -> Optional[str]:
+    """Which moneyline designation of a matched provider event an outcome
+    name is: 'draw' for a draw, else the ONE of home/away that is the same
+    team under ext_pinnacle_loop's _team_tokens/_same_team; None when it is
+    neither or both."""
+    from .workers import ext_pinnacle_loop as X
+    t = X._team_tokens(outcome or "")[0]
+    if t == frozenset(("draw",)):
+        return "draw"
+    hits = [d for d in ("home", "away") if X._same_team(
+        t, X._team_tokens(feed_event.get(d) or "")[0])]
+    return hits[0] if len(hits) == 1 else None
+
+
 def _iso_epoch(v) -> Optional[float]:
     try:
         return datetime.fromisoformat(str(v).replace("Z", "+00:00")
@@ -222,10 +274,7 @@ def census(rows, feed_view: dict, *, subscribed_sports, synced: bool,
             ek = r.get("event_slug")
             if ek not in by_event:
                 titles[ek] = (r.get("event_title"), gs, ph)
-                sides = _sides(r.get("event_title"))
-                by_event[ek] = ((S_NO_SIDES, None) if not sides else
-                                match_event(sides, gs,
-                                            feed_view.get(sid, [])))
+                by_event[ek] = _event_match(r, sid, feed_view)
             state = by_event[ek][0]
             if state == S_SUPPORTED and not supported:
                 state = S_UNSUPPORTED

@@ -42,6 +42,9 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
 PARSER_VERSION = "ARCADIA_RAW_V1_OBSERVED_2026_10_01"
+#: the full-game (period 0) moneyline's market key in the observed schema
+#: (see extract_markets); designations home / away (and draw on a 3-way)
+FULL_GAME_MONEYLINE_KEY = "s;0;m"
 MAX_EVENTS = 4000
 MAX_MARKETS = 120_000
 RING = 4096
