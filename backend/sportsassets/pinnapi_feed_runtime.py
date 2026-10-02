@@ -28,8 +28,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import os
 import time
+import uuid
 from typing import Optional
 
 from . import pinnapi_feed as F
@@ -44,11 +46,13 @@ HEARTBEAT_KEY = "pinnapi_feed_last"
 HEARTBEAT_S = 30.0
 HEARTBEAT_MAX_BYTES = 65536
 ROW_READ_TIMEOUT_S = 5.0
+HEARTBEAT_WRITE_TIMEOUT_S = 3.0
+CENSUS_TIMEOUT_S = 10.0
 DEFAULT_SCOPE = {"sport_ids": [6], "streams": ["live", "prematch"]}
 ALLOWED_SPORTS = set(range(1, 13))
 
 _STATE: dict = {"owner": None, "task": None, "beat": None, "pool": None,
-                "census": None}
+                "census": None, "runtime_id": None}
 CENSUS_S = 60.0
 
 
@@ -106,10 +110,45 @@ def digest() -> dict:
     if o is None:
         return {"state": "NOT_STARTED", "enabled_env": enabled()}
     d = o.status()
+    d["runtime_id"] = _STATE.get("runtime_id")
     d["enabled_env"] = enabled()
     d["coverage_census"] = _STATE.get("census")
     d["c1_decision_effect"] = "NONE (observe only)"
     return d
+
+
+def heartbeat_view(value, *, now=None) -> dict:
+    """Persisted telemetry is not a lease or a grant of price authority."""
+    v = _jsonish(value)
+    if not isinstance(v, dict):
+        return {"status": "UNAVAILABLE", "authority_proven": False}
+    now = time.time() if now is None else now
+    try:
+        age = now - float(v["beat_at"])
+        if not math.isfinite(age):
+            raise ValueError("nonfinite heartbeat time")
+        current = 0 <= age <= 3 * HEARTBEAT_S
+    except (TypeError, ValueError, KeyError):
+        age, current = None, False
+    return {"status": "RECENT_TELEMETRY" if current else "STALE_TELEMETRY",
+            "age_s": age, "recorded_state": v.get("state"),
+            "authority_proven": False,
+            "note": "Only the live owner/lease accessor may authorize a price."}
+
+
+async def _write_heartbeat(pool, payload, *, final=False):
+    """A retiring instance cannot overwrite a replacement's heartbeat."""
+    async with asyncio.timeout(HEARTBEAT_WRITE_TIMEOUT_S):
+        async with pool.acquire() as c:
+            if final:
+                return await c.execute(
+                    "UPDATE ingestion_state SET value=$2::jsonb WHERE key=$1 "
+                    "AND value->>'runtime_id'=$3", HEARTBEAT_KEY,
+                    _capped(payload), payload.get("runtime_id"))
+            return await c.execute(
+                "INSERT INTO ingestion_state (key,value) VALUES ($1,$2::jsonb) "
+                "ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value",
+                HEARTBEAT_KEY, _capped(payload))
 
 
 def _capped(d: dict) -> str:
@@ -173,20 +212,15 @@ async def _beat_loop(pool):
         elif time.monotonic() - last_census >= CENSUS_S:
             last_census = time.monotonic()
             try:
-                _STATE["census"] = await _census_once(pool)
+                async with asyncio.timeout(CENSUS_TIMEOUT_S):
+                    _STATE["census"] = await _census_once(pool)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:                            # noqa: BLE001
                 _STATE["census"] = {"error": type(exc).__name__,
                                     "detail": str(exc)[:200]}
         try:
-            async with pool.acquire() as c:
-                await c.execute(
-                    "INSERT INTO ingestion_state (key, value) VALUES "
-                    "($1, $2::jsonb) ON CONFLICT (key) DO UPDATE SET "
-                    "value = EXCLUDED.value",
-                    HEARTBEAT_KEY, _capped(dict(digest(),
-                                                beat_at=time.time())))
+            await _write_heartbeat(pool, dict(digest(), beat_at=time.time()))
         except asyncio.CancelledError:
             raise
         except Exception:                                       # noqa: BLE001
@@ -214,7 +248,7 @@ async def start_default(pool, *, writer_pid: int, writer_lock_key: int,
             writer_pid=writer_pid, writer_key=writer_lock_key,
             armed=lambda: armed(pool))
         loop = asyncio.get_running_loop()
-        _STATE.update(owner=owner, pool=pool,
+        _STATE.update(owner=owner, pool=pool, runtime_id=uuid.uuid4().hex,
                       task=loop.create_task(owner.run()),
                       beat=loop.create_task(_beat_loop(pool)))
         return {"state": "STARTED", "scope": sc}
@@ -229,6 +263,15 @@ async def shutdown_default(wait_s: float = 8.0) -> dict:
     if o is None:
         return {"verdict": "NEVER_STARTED"}
     o.stop()
+    # Stop the periodic writer before producing the terminal record.
+    if b is not None:
+        b.cancel()
+        try:
+            await b
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            log.warning("pinnapi heartbeat task ended with error", exc_info=True)
     verdict = "CLOSED"
     try:
         if t is not None:
@@ -238,11 +281,20 @@ async def shutdown_default(wait_s: float = 8.0) -> dict:
         t.cancel()
     except Exception:                                           # noqa: BLE001
         verdict = "CLOSED_WITH_ERROR"
-    if b is not None:
-        b.cancel()
     o.cache.lost(O.R_STOPPED)
-    _STATE.update(owner=None, task=None, beat=None)
-    return {"verdict": verdict}
+    final_status = "WRITTEN_OR_SUPERSEDED"
+    try:
+        await _write_heartbeat(_STATE["pool"], {
+            "state": "RELEASED" if verdict == "CLOSED" else "STOPPING_UNCONFIRMED",
+            "runtime_id": _STATE.get("runtime_id"), "beat_at": time.time(),
+            "shutdown_verdict": verdict, "authority_proven": False,
+            "c1_decision_effect": "NONE (observe only)"}, final=True)
+    except Exception as exc:
+        final_status = "UNAVAILABLE:" + type(exc).__name__
+        log.warning("pinnapi terminal heartbeat unavailable: %s", type(exc).__name__)
+    _STATE.update(owner=None, task=None, beat=None, pool=None, runtime_id=None,
+                  census=None)
+    return {"verdict": verdict, "terminal_heartbeat": final_status}
 
 
 def read(event_id, key, **kw) -> dict:

@@ -2,10 +2,42 @@
 from __future__ import annotations
 import asyncio
 import json
+import math
 import time
 from . import capability_work as W
 
-TOOLS={'account','position','decision','market','rules','recommendation','lessons','proposals','work'}
+TOOLS={'account','position','decision','market','rules','recommendation','lessons','proposals','work','feed_coverage'}
+
+
+def feed_coverage_evidence(raw, now):
+    """Allowlisted persisted counters, never credentials, raw frames or prices."""
+    try:
+        v=json.loads(raw) if isinstance(raw,str) else raw
+        if not isinstance(v,dict):return None
+        stamp=float(v['beat_at']); age=now-stamp
+        if not math.isfinite(age):raise ValueError('nonfinite timestamp')
+    except (ValueError,TypeError,KeyError):
+        return {'status':'UNAVAILABLE','reason':'MISSING_OR_INVALID_FEED_HEARTBEAT','execution_authority':False}
+    c=v.get('cache') if isinstance(v.get('cache'),dict) else {}
+    coverage=v.get('coverage_census') if isinstance(v.get('coverage_census'),dict) else {}
+    def number(d,k):
+        x=d.get(k)
+        return x if type(x) is int and x>=0 else None
+    def counters(d):
+        if not isinstance(d,dict):return {}
+        return {k:n for k,n in list(d.items())[:40] if isinstance(k,str)
+                and len(k)<=100 and type(n) is int and n>=0}
+    return {'status':'RECENT_TELEMETRY' if 0<=age<=90 else 'STALE_TELEMETRY',
+            'record_id':'ingestion_state:pinnapi_feed_last','source_at':stamp,'age_s':age,
+            'execution_authority':False,'basis':'PERSISTED_FEED_COUNTERS_NOT_LIVE_PRICE_AUTHORITY',
+            'decision_effect':str(v.get('c1_decision_effect','UNRECORDED'))[:100],
+            'cache':{k:number(c,k) for k in ('events','markets','markets_age_unknown')},
+            'coverage':{'total_contracts':number(coverage,'total_contracts'),
+                        'subscribed_rows':number(coverage,'subscribed_rows'),
+                        'reconciled':coverage.get('reconciled') is True,
+                        'states':counters(coverage.get('states')),
+                        'events_by_state':counters(coverage.get('events_by_state'))},
+            'limitation':'Connection and cache counts do not establish usable coverage or model improvement.'}
 
 
 class Toolkit:
@@ -35,6 +67,9 @@ class Toolkit:
         if name=='work':return await W.tasks(c,self.agent,20)
         if name=='lessons':return await P.lessons(c,account_id=W.ACCOUNT,agent=self.agent,limit=10)
         if name=='proposals':return await P.proposals(c,account_id=W.ACCOUNT,agent=self.agent,limit=10)
+        if name=='feed_coverage':
+            raw=await c.fetchval("SELECT value FROM ingestion_state WHERE key=$1",'pinnapi_feed_last')
+            return feed_coverage_evidence(raw,self.now)
         if not rid:raise ValueError('RECORD_ID_REQUIRED')
         if name=='recommendation':
             rec=await c.fetchrow('SELECT * FROM paper_recommendations WHERE account_id=$1 AND recommendation_id=$2',W.ACCOUNT,rid)

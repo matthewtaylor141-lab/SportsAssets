@@ -1375,12 +1375,13 @@ PAPER_CORE_JS = r"""
     var s = sec(so.json.session); return s && s.status !== 'OK' ? s.why : null;
   }
   function banner(o, so) {
-    if (!o || o.kind === 'NOT_DEPLOYED') return {state: 'UNAVAILABLE', text: 'PAPER SESSION NOT RUNNING — ' + UNAV};
+    if (!o || o.kind === 'NOT_DEPLOYED') return {state: 'UNAVAILABLE', text: 'SESSION STATUS UNAVAILABLE — ' + UNAV};
     if (o.kind === 'LOCKED') return {state: 'UNAVAILABLE', text: 'SIGN-IN REQUIRED — the paper session cannot be read without a COMMAND session'};
-    if (o.kind !== 'OK') return {state: 'UNAVAILABLE', text: 'PAPER SESSION NOT RUNNING — the paper account read failed (' + (o.why || o.kind) + ')'};
+    if (o.kind !== 'OK') return {state: 'UNAVAILABLE', text: 'SESSION STATUS UNAVAILABLE — the account read failed (' + (o.why || o.kind) + ')'};
     var j = isObj(o.json) ? o.json : {}, s = isObj(j.session) ? j.session : null, a = sec(j.account);
-    if (!s) return {state: a && a.status === 'UNAVAILABLE' ? 'UNAVAILABLE' : 'OFF', text: 'PAPER SESSION NOT RUNNING — ' + ((a && a.why) || fallback(so) || 'the server sent no session')};
-    if (s.active !== true) return {state: 'OFF', text: 'PAPER SESSION NOT RUNNING — ' + (s.reason || fallback(so) || 'the server reports no active session and gave no reason')};
+    if (!s) return {state: 'UNAVAILABLE', text: 'SESSION STATUS UNAVAILABLE — ' + ((a && a.why) || fallback(so) || 'the server sent no session')};
+    if (s.active !== true && s.active !== false) return {state: 'UNAVAILABLE', text: 'SESSION STATUS UNAVAILABLE — active state was not recorded'};
+    if (s.active === false) return {state: 'OFF', text: 'PAPER SESSION NOT RUNNING — ' + (s.reason || fallback(so) || 'the server reports no active session and gave no reason')};
     var bank = num(s.starting_cash_usd) ? ' · ' + CC.usd(s.starting_cash_usd).replace(/\.00$/, '') + ' STARTING BANKROLL' : ' · STARTING BANKROLL NOT SENT';
     return {state: 'ACTIVE', text: 'LIVE MARKET DATA · SIMULATED EXECUTION' + bank};
   }

@@ -248,7 +248,12 @@ async def test_the_fixtures_are_the_real_paper_modules_shapes(monkeypatch):
         assert set(r) == set(payload), name
     assert set(real["session"]["health"]["data"]) == set(HEALTH)
     assert set(real["session"]["enablement"]["data"]) == set(ENABLED)
-    assert set(real["session"]["session"]["data"]) == set(SESSION_ROW)
+    session = real["session"]["session"]["data"]
+    assert set(session) == set(SESSION_ROW) | {"effective_config", "capital_policy"}
+    assert session["config"] == SESSION_ROW["config"]  # original frozen receipt survives
+    assert session["effective_config"]["entry"]["target_order_usd"] == 1000.0
+    assert session["capital_policy"]["entry_target_is"] == "AVERAGE_SIZING_OBJECTIVE_NOT_A_CEILING"
+    assert session["capital_policy"]["per_order_cap_usd"] is None
     assert set(real["derek"]["opportunities"]["data"][0]) == set(DECISION)
     assert set(CCP.PAPER_BALANCE_KEYS) - {"refusal"} <= set(real["marked"])
     assert set(CCP.PAPER_ENTRY_KEYS) <= set(real["entry"])
@@ -270,7 +275,7 @@ async def test_the_pages_render_the_real_paper_modules_output(monkeypatch):
               sess: P.sessionPanel(ok(R.session))};
     """ % _j(real))
     assert got["banner"] == {"state": "ACTIVE", "text": "LIVE MARKET DATA · SIMULATED EXECUTION · $500,000 STARTING BANKROLL"}
-    assert got["off"]["text"] == "PAPER SESSION NOT RUNNING — MIGRATION_171_IS_NOT_APPLIED"
+    assert got["off"]["text"] == "SESSION STATUS UNAVAILABLE — MIGRATION_171_IS_NOT_APPLIED"
     assert got["acc"]["status"] == "OK" and "$499,599.80" in got["acc"]["html"]
     assert got["acc"]["html"].count('<span class="ns">NOT STATED</span>') == 3
     assert 'data-label-item="slug:%s|ORDER_INTENT_BUY_LONG"' % PSLUG in got["ledger"] and got["ledger"].count("<tr data-seq=") == 4

@@ -140,6 +140,12 @@ def test_the_benchmark_imports_only_paper_and_pure_policy_modules():
     assert not bad, bad
 
 
+def test_owner_limits_helper_is_pure_configuration_only():
+    from sportsassets import bettor_paper_limits
+    imports = set(_imports(pathlib.Path(bettor_paper_limits.__file__)))
+    assert imports <= {"copy", "deepcopy"}, imports
+
+
 def test_importing_the_benchmark_loads_no_funded_or_submission_module():
     code = ("import sys; import sportsassets.agents.paper_benchmark; "
             "print('\\n'.join(sorted(m for m in sys.modules "

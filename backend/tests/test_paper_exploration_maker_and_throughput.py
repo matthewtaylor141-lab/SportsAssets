@@ -319,7 +319,7 @@ async def test_each_owner_limit_and_safeguard_refuses_by_name(explore_only,
         await _pass(conn, acct, t, now, client)
         d2 = await _dec(conn, acct, v2["valuation_id"], EXPLORE)
         assert d2["refusal"] == PEX.R_FIXTURE_TAKEN
-        # V3 removes the aggregate/loss gates; per-entry and cash remain.
+        # V3 removes allocation gates; the shared cash check remains.
         st = await PEX.limits_state(conn, acct["account_id"])
         assert st["limits"]["max_aggregate_exposure_usd"] is None
         assert st["limits"]["loss_stop_usd"] is None
@@ -328,7 +328,7 @@ async def test_each_owner_limit_and_safeguard_refuses_by_name(explore_only,
         chk = PEX.locked_check_for("condition:other", "other-slug")
         # V3: $1,000 is a sizing target, not a ceiling -- 1001 is not refused
         got = await chk(conn, {"account_id": acct["account_id"]}, L.D(1001))
-        assert got is None
+        assert got is None  # $1,000 is a target, not a maximum
         got = await chk(conn, {"account_id": acct["account_id"]}, L.D(50))
         assert got is None
         got = await PEX.locked_check_for(

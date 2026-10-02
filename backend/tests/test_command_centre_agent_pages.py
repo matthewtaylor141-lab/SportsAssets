@@ -1610,15 +1610,15 @@ def test_the_paper_banner_reads_the_session_brief_and_shows_the_bankroll_only_as
     """ % (_j(_account()), _j(ACCOUNT_NO_SCHEMA), _j(SESSION_PAYLOAD_OFF)))
     assert got[0] == {"state": "ACTIVE", "text": "LIVE MARKET DATA · SIMULATED EXECUTION · $500,000 STARTING BANKROLL"}
     assert got[1] == {"state": "OFF", "text": "PAPER SESSION NOT RUNNING — PAPER_SESSION_ENVIRONMENT_FLAG_IS_NOT_ON"}
-    assert got[2]["text"] == "PAPER SESSION NOT RUNNING — paper account routes not in this build"
+    assert got[2]["text"] == "SESSION STATUS UNAVAILABLE — paper account routes not in this build"
     assert got[3]["state"] == "UNAVAILABLE" and "HTTP 503" in got[3]["text"]
     # the schema-absent payload has no session: its account section names why
-    assert got[4] == {"state": "UNAVAILABLE", "text": "PAPER SESSION NOT RUNNING — MIGRATION_171_IS_NOT_APPLIED"}
+    assert got[4] == {"state": "UNAVAILABLE", "text": "SESSION STATUS UNAVAILABLE — MIGRATION_171_IS_NOT_APPLIED"}
     # no reason in the brief: the session route's own reason
     assert got[5] == {"state": "OFF", "text": "PAPER SESSION NOT RUNNING — NO_ACTIVE_PAPER_SESSION: "
                                               "PAPER_SESSION_ENVIRONMENT_FLAG_IS_NOT_ON"}
     assert "STARTING BANKROLL NOT SENT" in got[6]["text"] and "$" not in got[6]["text"]
-    assert got[7]["state"] == "OFF" and "LIVE MARKET DATA" not in got[7]["text"]
+    assert got[7]["state"] == "UNAVAILABLE" and "LIVE MARKET DATA" not in got[7]["text"]
     for g in got[1:]:
         assert "500,000" not in g["text"]
 
@@ -1813,3 +1813,11 @@ def test_the_written_contract_is_the_servers_routes_and_keys():
         f = fr[ev][-1] if ev == "ledger" else fr[ev]
         assert set(keys) <= set(f), ev
     assert set(CCP.VOICE_PROFILES) == set(KINDS)        # voice is designed, not built
+
+
+def test_failed_account_read_does_not_claim_the_runtime_stopped():
+    rows = _node("xavier", "return [CC.paper.banner({kind:'UNAVAILABLE',why:'HTTP 503'}),CC.paper.banner({kind:'OK',json:{session:{}}})];")
+    for row in rows:
+        assert row["state"] == "UNAVAILABLE"
+        assert "NOT RUNNING" not in row["text"]
+        assert "STATUS UNAVAILABLE" in row["text"]

@@ -1,5 +1,6 @@
 """Owner-authorized main paper account: $1k entries, cash-bounded portfolio."""
 from copy import deepcopy
+import asyncio
 from decimal import Decimal
 from unittest.mock import AsyncMock
 import pytest
@@ -230,5 +231,113 @@ async def test_a_strategy_does_not_re_enter_the_contract_it_holds(monkeypatch):
         assert later["ok"], later
         assert P.describe(acct["account_id"])["same_strategy_same_contract"]\
             .startswith("NOT_RE_ENTERED")
+    finally:
+        await conn.close()
+
+
+@pytest.mark.skipif(not H.DSN, reason="needs RN1X_TEST_DSN")
+@pytest.mark.asyncio
+async def test_two_concurrent_entries_on_one_contract_exactly_one_wins(monkeypatch):
+    """CONCURRENCY: two connections submit the same strategy/contract/side
+    at once. The account lock serializes them; the second sees the first's
+    order under the lock and is refused, so exactly one reservation exists."""
+    import asyncio
+    c0 = await H.connect()
+    c1, c2 = await H.connect(), await H.connect()
+    try:
+        acct = await H.new_account(c0, "concurrent")
+        monkeypatch.setattr(P, "ACCOUNT_ID", acct["account_id"])
+        caps = legacy_config()["risk"]
+
+        def order(key):
+            o = H.order(acct, key=key, slug="contract-x", fixture="fx-c",
+                        qty=2000, limit=.5)
+            o["strategy"] = "PINNACLE_EXPLORATION_PAPER"
+            return o
+
+        for _ in range(5):          # repeat to exercise both interleavings
+            await c0.execute("UPDATE paper_orders SET state='EXPIRED' "
+                             "WHERE account_id=$1 AND state <> 'EXPIRED'",
+                             acct["account_id"])
+            n = await c0.fetchval("SELECT count(*) FROM paper_orders "
+                                  "WHERE account_id=$1", acct["account_id"])
+            a, b = await asyncio.gather(
+                L.submit_order(c1, order("k%da" % n), caps=caps,
+                               fee_fn=H.flat_fee(0), now=H.T0),
+                L.submit_order(c2, order("k%db" % n), caps=caps,
+                               fee_fn=H.flat_fee(0), now=H.T0))
+            oks = [g for g in (a, b) if g.get("ok")]
+            refused = [g for g in (a, b) if not g.get("ok")]
+            assert len(oks) == 1 and len(refused) == 1, (a, b)
+            assert refused[0]["refusal"] == L.R_SAME_CONTRACT_HELD
+            assert refused[0]["under_lock"] is True
+            live = await c0.fetchval(
+                "SELECT count(*) FROM paper_orders WHERE account_id=$1 AND "
+                "state = ANY($2::text[])", acct["account_id"],
+                list(L.OPEN_STATES))
+            assert live == 1
+        bal = await L.balances(c0, acct["account_id"], now=H.T0)
+        assert bal["ledger_consistent"]
+    finally:
+        for c in (c0, c1, c2):
+            await c.close()
+
+
+@pytest.mark.skipif(not H.DSN, reason="needs RN1X_TEST_DSN")
+@pytest.mark.asyncio
+async def test_re_entry_is_refused_while_open_and_allowed_after_closure(monkeypatch):
+    """A FILLED entry with open inventory blocks a new entry on that contract
+    and side; once the position is sold to zero, a new entry is allowed.
+    $1,000 stays a target: the third entry is $1,500 and is accepted."""
+    from sportsassets import bettor_paper_simulator as SIM
+    conn = await H.connect()
+    try:
+        acct = await H.new_account(conn, "reentry")
+        monkeypatch.setattr(P, "ACCOUNT_ID", acct["account_id"])
+        caps = legacy_config()["risk"]
+        strat = "PINNACLE_EXPLORATION_PAPER"
+        # book observations are keyed by slug and outlive the account, so
+        # the slug is per-account: a rerun must not read an earlier book
+        slug = "contract-r-" + acct["account_id"].rsplit(":", 1)[-1]
+
+        def entry(key, qty, at):
+            o = H.order(acct, key=key, slug=slug, fixture="fx-r", qty=qty,
+                        limit=.5, at=at)
+            o["strategy"] = strat
+            return o
+
+        first = await L.submit_order(conn, entry("e1", 100, H.T0), caps=caps,
+                                     fee_fn=H.zero_fee, now=H.T0)
+        assert first["ok"], first
+        await H.observe(conn, slug, H.T0 + 2.5, offers=[(0.50, 100)])
+        r = await SIM.simulate_order(conn, first["order"]["order_id"],
+                                     now=H.T0 + 3, fee_fn=H.zero_fee)
+        assert r["state"] == "FILLED", r
+        held = await L.submit_order(conn, entry("e2", 100, H.T0 + 4),
+                                    caps=caps, fee_fn=H.zero_fee, now=H.T0 + 4)
+        assert held["refusal"] == L.R_SAME_CONTRACT_HELD
+        assert held["by"][0]["state"] == "OPEN_POSITION"
+        # close the position: sell the 100 held contracts
+        gid = first["order"]["group_id"]
+        sell = H.order(acct, key="x1", slug=slug, fixture="fx-r", qty=100,
+                       limit=.40, direction="SELL", role="EXIT",
+                       group_id=gid, at=H.T0 + 5)
+        sell["strategy"] = strat
+        s = await L.submit_order(conn, sell, caps=caps, fee_fn=H.zero_fee,
+                                 now=H.T0 + 5)
+        assert s["ok"], s
+        await H.observe(conn, slug, H.T0 + 7.5, bids=[(0.52, 100)])
+        r = await SIM.simulate_order(conn, s["order"]["order_id"],
+                                     now=H.T0 + 8, fee_fn=H.zero_fee)
+        assert r["state"] == "FILLED", r
+        assert not [p for p in await L.positions(conn, acct["account_id"])
+                    if p["group_id"] == gid and p["open_qty"] > 1e-9]
+        again = await L.submit_order(conn, entry("e3", 3000, H.T0 + 9),
+                                     caps=caps, fee_fn=H.zero_fee,
+                                     now=H.T0 + 9)
+        assert again["ok"], again
+        assert float(again["order"]["reserved_usd"]) == pytest.approx(1500.0)
+        bal = await L.balances(conn, acct["account_id"], now=H.T0 + 9)
+        assert bal["ledger_consistent"]
     finally:
         await conn.close()

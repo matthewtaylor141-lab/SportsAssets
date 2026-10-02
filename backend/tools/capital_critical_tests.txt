@@ -464,3 +464,10 @@ tests/test_paper_training_ramp_v2.py
 
 # Owner capital policy (main paper account): $1,000 average target, cash-bounded.
 tests/test_paper_cash_bounded_capital.py
+
+# Feed terminal telemetry and research evidence freshness.
+tests/test_pinnapi_terminal_heartbeat.py
+tests/test_capability_feed_evidence.py
+
+# Signed Slack transport, read-only personas and recorded research publication.
+tests/test_slack_agent_bridge.py

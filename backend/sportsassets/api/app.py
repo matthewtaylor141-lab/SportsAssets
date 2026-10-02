@@ -437,12 +437,14 @@ async def lifespan(_: FastAPI):
     from ..agents import capability_runtime as _CAP
     from ..db import get_pool as _cap_pool
     capability_task = asyncio.create_task(_CAP.run(_cap_pool))
+    from .. import slack_bridge as _SLACK
+    slack_task = asyncio.create_task(_SLACK.run(_cap_pool))
     try:
         yield
     finally:
         tasks = [t for t in (desk_task, rn1x_task, rn1x_learn_task,
                              ext_task, rn1x_model_task, trim_task,
-                             poller_task, capability_task)
+                             poller_task, capability_task, slack_task)
                  if t is not None]
         for task in tasks:
             task.cancel()
@@ -525,6 +527,8 @@ except ImportError:
     log.warning("paper: api.paper_learning_routes not loaded", exc_info=True)
 from .agent_capabilities import router as _capabilities_router
 app.include_router(_capabilities_router)
+from .slack_agents import router as _slack_agents_router
+app.include_router(_slack_agents_router)
 # AFTER agents_chat: its literal /api/command/agents/audrey/chat keeps
 # Audrey's management-chat contract; the persona chat answers
 # /api/command/agents/{derek,xavier}/chat and /{agent}/persona/chat for all
@@ -2391,6 +2395,7 @@ async def admin_pinnapi_feed_state(response: Response) -> dict:
                 "SELECT key, value FROM ingestion_state WHERE key = ANY($1)",
                 [FR.HEARTBEAT_KEY, FR.CONTROL_KEY, FR.SCOPE_KEY])
         out["rows"] = {r["key"]: FR._jsonish(r["value"]) for r in rows}
+        out["heartbeat_view"] = FR.heartbeat_view(out["rows"].get(FR.HEARTBEAT_KEY))
     except Exception as exc:                                    # noqa: BLE001
         out["rows_error"] = type(exc).__name__
     return out

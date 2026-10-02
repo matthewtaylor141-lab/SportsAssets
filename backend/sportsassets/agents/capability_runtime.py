@@ -38,6 +38,9 @@ async def evidence(pool,task,now):
     if ctx.get('position_id'):requests.append(('position',ctx['position_id']))
     if ctx.get('decision_id'):requests.append(('decision',ctx['decision_id']))
     if ctx.get('recommendation_id'):requests.append(('recommendation',ctx['recommendation_id']))
+    # General modeling/coverage investigations need actual feed evidence.
+    # Keep the existing source-context priority and four-fact chat limit.
+    if len(requests)<4:requests.append(('feed_coverage',None))
     records=[]
     async with asyncio.timeout(10):
         async with pool.acquire() as conn:
