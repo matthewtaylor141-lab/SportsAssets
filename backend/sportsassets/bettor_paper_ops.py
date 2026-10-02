@@ -773,7 +773,11 @@ async def xavier_operations(conn, *, account_id: str | None = None,
         return [RM._row(r) for r in rows]
 
     async def positions():
-        return (await bal()).get("open_positions") or []
+        # copies: bal() is shared with the other sections of this read
+        from . import team_logos as TL
+        return await TL.decorate(
+            conn, [dict(x) for x in (await bal()).get("open_positions") or []
+                   if isinstance(x, dict)])
 
     async def reviews():
         rows = await conn.fetch(
@@ -796,8 +800,10 @@ async def xavier_operations(conn, *, account_id: str | None = None,
             "SELECT * FROM paper_orders WHERE account_id = $1 "
             "   AND role <> 'ENTRY' ORDER BY created_at DESC LIMIT $2",
             acct, int(limit))
-        return [dict(L.order_view(r), strategy=r["strategy"],
-                     open=r["state"] in L.OPEN_STATES) for r in rows]
+        from . import team_logos as TL
+        return await TL.decorate(conn, [
+            dict(L.order_view(r), strategy=r["strategy"],
+                 open=r["state"] in L.OPEN_STATES) for r in rows])
 
     async def standing_summary():
         rows = await conn.fetch(
@@ -844,12 +850,13 @@ async def xavier_operations(conn, *, account_id: str | None = None,
                 "settle")
             if isinstance(st, dict):
                 last = dict(st, at=(h.get("last_pass") or {}).get("at"))
-        return {"positions": [dict({k: p.get(k) for k in (
+        from . import team_logos as TL
+        return {"positions": await TL.decorate(conn, [dict({k: p.get(k) for k in (
                     "position_key", "group_id", "us_market_slug",
                     "holding_side", "fixture", "label", "strategy",
                     "open_qty", "cost_basis_usd", "first_fill_at")},
                     market=market_name(p.get("label")))
-                    for p in openp],
+                    for p in openp]),
                 "count": len(openp),
                 "last_settle_step": last,
                 "rule": ("an open position stays pending until the venue's "
@@ -971,7 +978,10 @@ async def xavier_operations(conn, *, account_id: str | None = None,
                     "trigger": rv.get("trigger"),
                     "reviewed_at": rv.get("reviewed_at"),
                     "action": rv.get("action"), "review_id": rv.get("review_id")}})
-        return out
+        # both teams beside each owned position (venue team id + league;
+        # names and initials when no verified logo)
+        from . import team_logos as TL
+        return await TL.decorate(conn, out)
 
     async def exposure():
         b = await bal()

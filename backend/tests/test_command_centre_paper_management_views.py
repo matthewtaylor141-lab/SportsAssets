@@ -376,3 +376,37 @@ def test_raw_identifiers_sit_under_technical_details():
     assert "New York Yankees to win" in visible and "the Pinnacle price was too old" in visible
     tech = re.search(r'<details class="tech">(.*?)</details>', html, re.S).group(1)
     assert 'data-copy="aec-mlb-nyy-bos-2026-10-02"' in tech and 'data-copy="paperdec:abc"' in tech
+
+
+async def test_xavier_positions_and_standing_orders_carry_both_teams():
+    """Production 2026-10-02 (logos run 37030590653): Xavier's office drew no
+    team marks because owned_positions, positions and standing orders were
+    never decorated. Each now carries `matchup` when the venue catalogue maps
+    its slug, and nothing when it does not."""
+    import uuid
+    conn, acct, got = await _seeded("logos")
+    tag = uuid.uuid4().hex[:6]
+    try:
+        x = await OPS.xavier_operations(conn, account_id=acct["account_id"], now=NOW)
+        own = x["owned_positions"]["data"]
+        assert own and all("matchup" not in p for p in own)     # unmapped: none
+        slug = own[0]["us_market_slug"]
+        ev = "unl-cro-eng-2099-02-" + tag
+        for ms, tid, name in ((slug, 34911, "croatia"),
+                              ("atc-%s-eng" % ev, 34909, "england")):
+            await conn.execute(
+                "INSERT INTO us_premap (identifier, market_slug, event_slug, "
+                " team_id, team_name, team_safe_name, team_abbr, team_league) "
+                "VALUES ($1,$2,$3,$4,$5,$5,$6,'unl')",
+                "t-%s-%s" % (tag, tid), ms, ev, tid, name, name[:3])
+        x = await OPS.xavier_operations(conn, account_id=acct["account_id"], now=NOW)
+        mine = [p for p in x["owned_positions"]["data"] if p["us_market_slug"] == slug]
+        assert mine and [t["name"] for t in mine[0]["matchup"]] == ["Croatia", "England"]
+        assert all(t["logo"]["kind"] == "flag" for t in mine[0]["matchup"])
+        pos = [p for p in (x["positions"]["data"] or []) if p.get("us_market_slug") == slug]
+        assert all(len(p["matchup"]) == 2 for p in pos)
+        so = [o for o in (x["standing_orders"]["data"] or []) if o.get("us_market_slug") == slug]
+        assert all(len(o["matchup"]) == 2 for o in so)
+    finally:
+        await conn.execute("DELETE FROM us_premap WHERE identifier LIKE $1", "t-" + tag + "-%")
+        await conn.close()
