@@ -94,6 +94,33 @@ class Toolkit:
         return b
 
 
+EVIDENCE_FACT_CHARS=9000
+
+
+def _shrink(v,keep):
+    if isinstance(v,dict):return {k:_shrink(x,keep) for k,x in v.items()}
+    if isinstance(v,list):return [_shrink(x,keep) for x in v[:keep]]
+    return v
+
+
+def bounded_evidence(item,limit=EVIDENCE_FACT_CHARS):
+    """Fit one stored evidence item into the fact budget instead of dropping it.
+
+    An item over the budget used to be left out of the facts entirely and
+    silently: in production (2026-10-02) Derek's stored lessons evidence was
+    15,615 characters, so neither of his two owner-research turns had his own
+    lessons among its facts (capwork:320c1ed5..., capwork:dbe18325...).
+    Lists are cut to their first items (the tools return newest first) and
+    the cut is stated in the item; values are never altered or summarised.
+    """
+    content=json.dumps(item,default=str)
+    if len(content)<=limit:return item,content
+    for keep in (8,5,3,2,1):
+        fitted=dict(_shrink(item,keep),shortened_for_fact_budget={'list_items_kept':keep,'full_chars':len(content)})
+        c=json.dumps(fitted,default=str)
+        if len(c)<=limit:return fitted,c
+    return None,None
+
 async def context_facts(conn,facts,agent,task_id):
     """A peer's saved review is attributed as opinion, never promoted to fact."""
     async with asyncio.timeout(2):
@@ -108,8 +135,8 @@ async def context_facts(conn,facts,agent,task_id):
         snap=t['outcome'].get('investigation') or []
         for i,item in enumerate(snap[:4]):
             if item.get('status')=='OK':
-                content=json.dumps(item,default=str)
-                if len(content)<=9000:facts.add('agent_tasks',task_id,'investigation_'+str(i),item,'Stored investigation evidence (check source timestamps): '+content)
+                fitted,content=bounded_evidence(item)
+                if fitted is not None:facts.add('agent_tasks',task_id,'investigation_'+str(i),fitted,'Stored investigation evidence (check source timestamps): '+content)
         return {'status':'OK','task_id':task_id,'dependencies':t['spec']['dependencies']}
 
 

@@ -282,3 +282,35 @@ async def test_a_new_attempt_asks_afresh_but_a_rerun_of_the_same_claim_does_not(
     assert ids[0]=='capreview:'+W.stable('capwork:test')
     from sportsassets.agents import directives as D
     assert all(D.valid_request_id(i) for i in ids)
+
+
+def _lesson(n):
+    return {'lesson_id':'paperlesson:%02d'%n,'kind':'MANAGEMENT_OUTCOMES','learned_at':NOW-3600*n,
+            'statement':'exiting at the first review would have differed by $-11.33',
+            'metrics':{'reviews':6000+n,'counterfactual_exit_at_first_review':{'positions':[
+                {'group_id':'paperexpgrp:%d:%d'%(n,g),'realized_pnl_usd':2.91,'exit_minus_realized_usd':-11.33,
+                 'exit_at_first_review_net_usd':-8.42,'note':'x'*300} for g in range(6)]}}}
+
+
+def test_an_oversized_evidence_item_is_shortened_not_dropped():
+    item={'status':'OK','tool':'lessons','read_at':NOW,'data':[_lesson(n) for n in range(10)]}
+    assert len(json.dumps(item))>T.EVIDENCE_FACT_CHARS
+    fitted,content=T.bounded_evidence(item)
+    assert fitted is not None and len(content)<=T.EVIDENCE_FACT_CHARS
+    assert fitted['data'][0]['lesson_id']=='paperlesson:00'          # newest kept
+    assert fitted['shortened_for_fact_budget']['full_chars']==len(json.dumps(item))
+    assert '-8.42' in content and '2.91' in content                    # values unchanged
+    small={'status':'OK','tool':'account','read_at':NOW}
+    assert T.bounded_evidence(small)==(small,json.dumps(small))        # untouched
+
+
+@pytest.mark.asyncio
+async def test_the_shortened_lessons_ground_their_own_figures():
+    from sportsassets.agents.persona_facts import Facts
+    from sportsassets.agents import persona_chat as P
+    c=conn();t=task('XAVIER')
+    t['outcome']={'investigation':[{'status':'OK','tool':'lessons','read_at':NOW,'data':[_lesson(n) for n in range(10)]}]}
+    c.fetchrow.side_effect=[t];f=Facts();out=await T.context_facts(c,f,'xavier',t['task_id'])
+    assert out['status']=='OK' and any(x['field']=='investigation_0' for x in f.items)
+    reply='Exiting at the first review would have netted minus $8.42 against a realised $2.91.'
+    assert P.ungrounded_numbers(reply,f.items)==[]
