@@ -35,6 +35,10 @@ on:
         description: "verify=pinnapi only: optional comma-separated PinnAPI sport ids (e.g. 6,1) for a bounded <= 20 s raw WebSocket sample in the API, taken under the feed owner's lease (refused while the production socket is open). Blank = no sample."
         required: false
         default: ""
+      team_ids:
+        description: "verify=team-logos only: comma-separated VENUE team ids (us_premap.team_id) whose venue team records and logo images are fetched from the venue's public gateway (no key) with provenance, and committed to claude/site-verify-evidence"
+        required: false
+        default: ""
       pinnapi_feed:
         description: "verify=pinnapi only: blank = no feed call; state = read the C1 feed owner state (GET); on / off = write the 'pinnapi_feed' arm row through POST /api/admin/pinnapi-feed/{on|off} (read-back returned), then read the state. C1 is observe-only: it changes no decision."
         required: false
@@ -635,3 +639,41 @@ jobs:
           code=$(curl -s -o /tmp/ev.json -w '%{http_code}' --max-time 30 -H "$H" "$API/events")
           echo "events HTTP $code"
           jq -r '((.events // .) | if type=="array" then .[:40][] else empty end) | "\(.at // .created_at) \(.actor) \(.kind) \(.task_id) \((.detail // .summary // "") | tostring | .[0:240])"' /tmp/ev.json 2>/dev/null
+
+  team-logos:
+    # OFF UNLESS verify == team-logos. Reads the venue's OWN team records
+    # (public gateway GET /v1/sports/teams/provider, no key) for the given
+    # venue team ids and downloads each record's logo image, bounded, with
+    # provenance (id, record, URL, content type, sha256, time). Writes only
+    # to the evidence branch; nothing reaches trading or decision code.
+    if: ${{ inputs.verify == 'team-logos' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Venue team records and logos
+        shell: bash
+        env:
+          IDS: ${{ inputs.team_ids }}
+        run: |
+          set +e
+          case "$IDS" in *[!0-9,\ ]*) echo "team_ids must be digits and commas"; exit 1 ;; esac
+          [ -n "$IDS" ] || { echo "no team_ids"; exit 1; }
+          python3 tools/team_logos/fetch_venue_team_logos.py /tmp/team_logos "$IDS"
+          ls -la /tmp/team_logos | head -60
+          python3 -c "import json;m=json.load(open('/tmp/team_logos/manifest.json'));[print(r['requested_id'],r['status'],(r.get('venue_record') or {}).get('name'),(r.get('venue_record') or {}).get('league'),r.get('content_type'),r.get('bytes'),(r.get('logo_url') or '')[:90]) for r in m['teams']]"
+      - name: Commit the logos and manifest
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          RUN="${GITHUB_RUN_ID}"
+          D="evidence/team_logos/$(date -u +%Y%m%dT%H%M%SZ)_run$RUN"
+          git config user.name "site-verify"
+          git config user.email "site-verify@users.noreply.github.com"
+          git fetch -q origin claude/site-verify-evidence && git checkout -q -f -B ev origin/claude/site-verify-evidence || git checkout -q --orphan ev
+          git rm -rq --cached . >/dev/null 2>&1
+          mkdir -p "$D" && cp /tmp/team_logos/* "$D"/ 2>/dev/null
+          git add "$D" && git commit -q -m "venue team logos, run $RUN" && git push -q origin ev:claude/site-verify-evidence && echo "evidence pushed: $D"
