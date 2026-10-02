@@ -71,18 +71,21 @@ for (const [ename, engine, dev] of ENGINES) {
     const R = E[where] = {};
     const ctx = await browser.newContext({ ...dev });
     await signed(ctx);
-    await ctx.addInitScript(SHIFT);
+    if (engine === chromium) await ctx.addInitScript(SHIFT);
     const page = await ctx.newPage();
     const csp = [], imgs = [];
     page.on("console", (m) => { if (m.type() === "error" && /Content Security Policy|CSP/i.test(m.text())) csp.push(m.text().slice(0, 200)); });
     page.on("response", async (r) => {
       const u = r.url();
       if (/\/api\/command\/agents\/static\/(venue-team|mlb-logo)/.test(u)) imgs.push({ u: u.split("/").pop(), s: r.status(), t: r.headers()["content-type"] });
-      if (/\/api\/command\/(paper\/(operations|experiment)|agents\/.*operations)/.test(u) && r.ok()) {
+      if (engine === chromium && /\/api\/command\/(paper\/(operations|experiment)|agents\/.*operations)/.test(u) && r.ok()) {
         try { walk(await r.json()); } catch (_) {}
       }
     });
-    try {
+    if (E.__wedged) { R.error = "SKIPPED: " + E.__wedged; await within(10000, ctx.close().catch(() => {})); continue; }
+    // the whole visit is bounded: a WebKit goto once hung for 17 min past its
+    // own 60 s timeout (run 37037853946), so the timeout cannot be left to it
+    const visit = async () => { try {
       step(ename, where, "goto");
       await page.goto(HOST + (where === "home" ? "/" : "/" + where), { waitUntil: "domcontentloaded", timeout: 60000 });
       let f = page.mainFrame();
@@ -125,6 +128,19 @@ for (const [ename, engine, dev] of ENGINES) {
       await page.waitForTimeout(4000);
       step(ename, where, "marks");
       const marks = await within(20000, f.evaluate(MARKS).catch((e) => ({ error: String(e) }))).then((m) => m === "TIMEOUT" ? { error: "MARKS_READ_TIMED_OUT (renderer busy)" } : m);
+      if (Array.isArray(marks) && marks.some((m) => m.img && !m.loaded)) {
+        R.unloaded = await within(20000, f.evaluate(async () => {
+          const out = [];
+          for (const el of [...document.querySelectorAll(".team-mark, .xp-team")].filter((e) => { const i = e.querySelector("img"); return i && !(i.complete && i.naturalWidth > 0); }).slice(0, 6)) {
+            const i = el.querySelector("img");
+            el.scrollIntoView({ block: "center" }); await new Promise((r) => setTimeout(r, 400));
+            const r = el.getBoundingClientRect(), anc = [];
+            for (let a = el.parentElement; a && anc.length < 6; a = a.parentElement) { const cs = getComputedStyle(a); anc.push(a.tagName.toLowerCase() + (a.id ? "#" + a.id : "") + (typeof a.className === "string" && a.className ? "." + a.className.trim().split(/\s+/).slice(0, 2).join(".") : "") + (cs.overflowY !== "visible" ? "[ov:" + cs.overflowY + "]" : "") + (cs.display === "none" ? "[none]" : "") + (a.tagName === "DETAILS" && !a.open ? "[closed]" : "")); }
+            out.push({ title: el.getAttribute("title"), loading: i.loading, complete: i.complete, nw: i.naturalWidth, src: (i.getAttribute("src") || "").split("/").pop(), cur: (i.currentSrc || "").split("/").pop(), rect: [Math.round(r.top), Math.round(r.left), Math.round(r.width), Math.round(r.height)], vh: innerHeight, anc });
+          }
+          return out;
+        }).catch((e) => ({ error: String(e).slice(0, 200) })));
+      }
       R.marks = Array.isArray(marks) ? {
         total: marks.length, loaded: marks.filter((m) => m.loaded).length,
         initials_only: marks.filter((m) => !m.img).length,
@@ -142,15 +158,20 @@ for (const [ename, engine, dev] of ENGINES) {
       if (where !== "home") {
         try { await f.locator(".office-layout").screenshot({ path: `${OUT}/logos_${ename}_${where}_board.png`, timeout: 20000 }); } catch (_) {}
       }
-    } catch (x) { R.error = String(x).slice(0, 300); }
-    await ctx.close();
+    } catch (x) { R.error = String(x).slice(0, 300); } };
+    if (await within(240000, visit()) === "TIMEOUT") {
+      step(ename, where, "VISIT TIMEOUT");
+      R.error = "VISIT_TIMED_OUT_240S"; E.__wedged = "an earlier page in this engine timed out (" + where + ")";
+    }
+    await within(10000, ctx.close().catch(() => {}));
     fs.writeFileSync(`${OUT}/logos_report.json`, JSON.stringify(report, null, 1));   // partial evidence survives a timeout
   }
   // EXPIRED / ABSENT SESSION: no credential at all
+  if (E.__wedged) { report.session[ename] = { error: "SKIPPED: " + E.__wedged }; await within(10000, browser.close().catch(() => {})); continue; }
   const ctx = await browser.newContext({ ...dev });
   const page = await ctx.newPage();
   const S = report.session[ename] = {};
-  try {
+  if (await within(120000, (async () => { try {
     const r = await page.request.get(HOST + "/api/command/agents/static/venue-team-16888.png");
     S.image_without_session = r.status();
     await page.goto(HOST + "/xavier", { waitUntil: "domcontentloaded", timeout: 60000 });
@@ -159,9 +180,10 @@ for (const [ename, engine, dev] of ENGINES) {
     S.broken_images = await f.evaluate(() => [...document.images].filter((i) => i.complete && i.naturalWidth === 0).length).catch(() => null);
     S.marks = await f.evaluate(() => document.querySelectorAll(".team-mark").length).catch(() => null);
     await page.screenshot({ path: `${OUT}/logos_${ename}_signed_out.png` });
-  } catch (x) { S.error = String(x).slice(0, 300); }
-  await ctx.close();
-  await browser.close();
+  } catch (x) { S.error = String(x).slice(0, 300); } })()) === "TIMEOUT") S.error = "SESSION_CHECK_TIMED_OUT_120S";
+  await within(10000, ctx.close().catch(() => {}));
+  await within(10000, browser.close().catch(() => {}));
+  delete E.__wedged;
 }
 report.payload = Object.fromEntries(Object.entries(leagues).map(([lg, L]) => {
   const ids = Object.keys(L.teams);
@@ -174,3 +196,4 @@ report.payload = Object.fromEntries(Object.entries(leagues).map(([lg, L]) => {
 fs.writeFileSync(`${OUT}/logos_report.json`, JSON.stringify(report, null, 1));
 console.log(JSON.stringify({ payload: report.payload, session: report.session,
   engines: Object.fromEntries(Object.entries(report.engines).map(([e, v]) => [e, Object.fromEntries(Object.entries(v).map(([w, r]) => [w, r.marks && { total: r.marks.total, loaded: r.marks.loaded, initials: r.marks.initials_only, broken: r.marks.broken, pairs: r.marks.pairs, csp: (r.csp_errors || []).length, cls: r.layout_shift, shifts: r.shift_sources, views: r.views, err: r.error }]))])) }, null, 1));
+process.exit(0);   // a wedged browser process must not hold the job open
