@@ -1,6 +1,6 @@
 {
  "host": "https://command.bettortoken.com",
- "at": "2026-10-02T17:25:39.108Z",
+ "at": "2026-10-02T17:41:02.656Z",
  "engines": {
   "chromium-desktop-1440": {
    "home": {
@@ -154,11 +154,20 @@
       "22x22"
      ],
      "names": [
+      "Netherlands · national flag",
+      "Serbia · national flag",
+      "Greece · national flag",
+      "Germany · national flag",
+      "New York Yankees",
+      "Tampa Bay Rays",
+      "Londrina Ec",
+      "Criciuma Ec",
+      "France · national flag",
+      "Belgium · national flag",
       "Sao Bernardo FC",
       "Cr Brasil",
       "Cuiaba Ec",
       "Aa Ponte Preta",
-      "France · national flag",
       "Italy · national flag",
       "San Diego Padres",
       "Milwaukee Brewers",
@@ -177,21 +186,12 @@
       "Atlanta Braves",
       "Los Angeles Dodgers",
       "Avai FC",
-      "Ceara SC",
-      "Netherlands · national flag",
-      "Serbia · national flag",
-      "Greece · national flag",
-      "Germany · national flag",
-      "New York Yankees",
-      "Tampa Bay Rays",
-      "Londrina Ec",
-      "Criciuma Ec",
-      "Belgium · national flag"
+      "Ceara SC"
      ]
     },
     "image_responses": [
      {
-      "u": "venue-team-16908.png",
+      "u": "venue-team-34907.png",
       "s": 200,
       "t": "image/png"
      },
@@ -201,27 +201,12 @@
       "t": "image/png"
      },
      {
-      "u": "mlb-logo-158.svg",
-      "s": 200,
-      "t": "image/svg+xml"
-     },
-     {
-      "u": "mlb-logo-114.svg",
-      "s": 200,
-      "t": "image/svg+xml"
-     },
-     {
-      "u": "venue-team-34903.png",
+      "u": "venue-team-34906.png",
       "s": 200,
       "t": "image/png"
      },
      {
-      "u": "venue-team-16897.png",
-      "s": 200,
-      "t": "image/png"
-     },
-     {
-      "u": "mlb-logo-119.svg",
+      "u": "mlb-logo-139.svg",
       "s": 200,
       "t": "image/svg+xml"
      },
@@ -231,172 +216,7 @@
       "t": "image/png"
      },
      {
-      "u": "venue-team-16907.png",
-      "s": 200,
-      "t": "image/png"
-     },
-     {
-      "u": "mlb-logo-135.svg",
-      "s": 200,
-      "t": "image/svg+xml"
-     },
-     {
-      "u": "mlb-logo-139.svg",
-      "s": 200,
-      "t": "image/svg+xml"
-     },
-     {
-      "u": "venue-team-34885.png",
-      "s": 200,
-      "t": "image/png"
-     },
-     {
-      "u": "venue-team-16896.png",
-      "s": 200,
-      "t": "image/png"
-     },
-     {
-      "u": "venue-team-16909.png",
-      "s": 200,
-      "t": "image/png"
-     },
-     {
-      "u": "venue-team-16916.png",
-      "s": 200,
-      "t": "image/png"
-     },
-     {
-      "u": "venue-team-16888.png",
-      "s": 200,
-      "t": "image/png"
-     },
-     {
-      "u": "venue-team-34879.png",
-      "s": 200,
-      "t": "image/png"
-     },
-     {
-      "u": "mlb-logo-144.svg",
-      "s": 200,
-      "t": "image/svg+xml"
-     },
-     {
-      "u": "mlb-logo-145.svg",
-      "s": 200,
-      "t": "image/svg+xml"
-     },
-     {
-      "u": "venue-team-34909.png",
-      "s": 200,
-      "t": "image/png"
-     },
-     {
-      "u": "venue-team-34880.png",
-      "s": 200,
-      "t": "image/png"
-     },
-     {
-      "u": "venue-team-34906.png",
-      "s": 200,
-      "t": "image/png"
-     },
-     {
-      "u": "venue-team-34907.png",
-      "s": 200,
-      "t": "image/png"
-     },
-     {
-      "u": "venue-team-16914.png",
-      "s": 200,
-      "t": "image/png"
-     },
-     {
-      "u": "mlb-logo-147.svg",
-      "s": 200,
-      "t": "image/svg+xml"
-     },
-     {
-      "u": "venue-team-34913.png",
-      "s": 200,
-      "t": "image/png"
-     },
-     {
-      "u": "venue-team-34900.png",
-      "s": 200,
-      "t": "image/png"
-     },
-     {
-      "u": "venue-team-16901.png",
-      "s": 200,
-      "t": "image/png"
-     },
-     {
-      "u": "venue-team-16891.png",
-      "s": 200,
-      "t": "image/png"
-     },
-     {
-      "u": "venue-team-34911.png",
-      "s": 200,
-      "t": "image/png"
-     },
-     {
-      "u": "venue-team-34898.png",
-      "s": 200,
-      "t": "image/png"
-     },
-     {
-      "u": "venue-team-34929.png",
-      "s": 200,
-      "t": "image/png"
-     },
-     {
       "u": "venue-team-16889.png",
-      "s": 200,
-      "t": "image/png"
-     },
-     {
-      "u": "venue-team-16909.png",
-      "s": 200,
-      "t": "image/png"
-     },
-     {
-      "u": "venue-team-16908.png",
-      "s": 200,
-      "t": "image/png"
-     },
-     {
-      "u": "venue-team-34885.png",
-      "s": 200,
-      "t": "image/png"
-     },
-     {
-      "u": "venue-team-16896.png",
-      "s": 200,
-      "t": "image/png"
-     },
-     {
-      "u": "venue-team-16916.png",
-      "s": 200,
-      "t": "image/png"
-     },
-     {
-      "u": "mlb-logo-135.svg",
-      "s": 200,
-      "t": "image/svg+xml"
-     },
-     {
-      "u": "venue-team-34903.png",
-      "s": 200,
-      "t": "image/png"
-     },
-     {
-      "u": "venue-team-34911.png",
-      "s": 200,
-      "t": "image/png"
-     },
-     {
-      "u": "venue-team-34909.png",
       "s": 200,
       "t": "image/png"
      },
@@ -406,17 +226,87 @@
       "t": "image/svg+xml"
      },
      {
-      "u": "venue-team-16907.png",
+      "u": "venue-team-16909.png",
       "s": 200,
       "t": "image/png"
      },
      {
-      "u": "mlb-logo-144.svg",
+      "u": "mlb-logo-135.svg",
+      "s": 200,
+      "t": "image/svg+xml"
+     },
+     {
+      "u": "venue-team-34909.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-34913.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-16891.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-34885.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-16888.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-16897.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-34911.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-16908.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-34900.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-16896.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-34880.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "mlb-logo-119.svg",
+      "s": 200,
+      "t": "image/svg+xml"
+     },
+     {
+      "u": "mlb-logo-145.svg",
       "s": 200,
       "t": "image/svg+xml"
      },
      {
       "u": "venue-team-16914.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-34903.png",
       "s": 200,
       "t": "image/png"
      },
@@ -431,102 +321,7 @@
       "t": "image/png"
      },
      {
-      "u": "venue-team-16912.png",
-      "s": 200,
-      "t": "image/png"
-     },
-     {
-      "u": "venue-team-34900.png",
-      "s": 200,
-      "t": "image/png"
-     },
-     {
-      "u": "venue-team-16897.png",
-      "s": 200,
-      "t": "image/png"
-     },
-     {
-      "u": "venue-team-34907.png",
-      "s": 200,
-      "t": "image/png"
-     },
-     {
-      "u": "mlb-logo-119.svg",
-      "s": 200,
-      "t": "image/svg+xml"
-     },
-     {
-      "u": "venue-team-34901.png",
-      "s": 200,
-      "t": "image/png"
-     },
-     {
-      "u": "venue-team-34906.png",
-      "s": 200,
-      "t": "image/png"
-     },
-     {
-      "u": "venue-team-16888.png",
-      "s": 200,
-      "t": "image/png"
-     },
-     {
-      "u": "mlb-logo-145.svg",
-      "s": 200,
-      "t": "image/svg+xml"
-     },
-     {
-      "u": "mlb-logo-139.svg",
-      "s": 200,
-      "t": "image/svg+xml"
-     },
-     {
-      "u": "venue-team-34880.png",
-      "s": 200,
-      "t": "image/png"
-     },
-     {
-      "u": "mlb-logo-147.svg",
-      "s": 200,
-      "t": "image/svg+xml"
-     },
-     {
-      "u": "venue-team-34913.png",
-      "s": 200,
-      "t": "image/png"
-     },
-     {
-      "u": "venue-team-16901.png",
-      "s": 200,
-      "t": "image/png"
-     },
-     {
       "u": "venue-team-34898.png",
-      "s": 200,
-      "t": "image/png"
-     },
-     {
-      "u": "venue-team-34929.png",
-      "s": 200,
-      "t": "image/png"
-     },
-     {
-      "u": "venue-team-16891.png",
-      "s": 200,
-      "t": "image/png"
-     },
-     {
-      "u": "venue-team-16889.png",
-      "s": 200,
-      "t": "image/png"
-     },
-     {
-      "u": "venue-team-16909.png",
-      "s": 200,
-      "t": "image/png"
-     },
-     {
-      "u": "venue-team-16891.png",
       "s": 200,
       "t": "image/png"
      },
@@ -541,7 +336,52 @@
       "t": "image/png"
      },
      {
-      "u": "venue-team-34913.png",
+      "u": "mlb-logo-147.svg",
+      "s": 200,
+      "t": "image/svg+xml"
+     },
+     {
+      "u": "mlb-logo-144.svg",
+      "s": 200,
+      "t": "image/svg+xml"
+     },
+     {
+      "u": "venue-team-34929.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-16916.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-16891.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-16907.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-34900.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-16901.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-16897.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-16909.png",
       "s": 200,
       "t": "image/png"
      },
@@ -551,17 +391,7 @@
       "t": "image/png"
      },
      {
-      "u": "venue-team-34911.png",
-      "s": 200,
-      "t": "image/png"
-     },
-     {
-      "u": "venue-team-34879.png",
-      "s": 200,
-      "t": "image/png"
-     },
-     {
-      "u": "mlb-logo-135.svg",
+      "u": "mlb-logo-144.svg",
       "s": 200,
       "t": "image/svg+xml"
      },
@@ -571,7 +401,172 @@
       "t": "image/svg+xml"
      },
      {
+      "u": "venue-team-16908.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-34911.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-34901.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-34879.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-34903.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "mlb-logo-135.svg",
+      "s": 200,
+      "t": "image/svg+xml"
+     },
+     {
+      "u": "venue-team-34929.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "mlb-logo-119.svg",
+      "s": 200,
+      "t": "image/svg+xml"
+     },
+     {
+      "u": "venue-team-34913.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "mlb-logo-158.svg",
+      "s": 200,
+      "t": "image/svg+xml"
+     },
+     {
+      "u": "mlb-logo-139.svg",
+      "s": 200,
+      "t": "image/svg+xml"
+     },
+     {
+      "u": "venue-team-34909.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-16896.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-16916.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "mlb-logo-139.svg",
+      "s": 200,
+      "t": "image/svg+xml"
+     },
+     {
+      "u": "venue-team-34907.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-34929.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-34906.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-34901.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-34885.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "mlb-logo-147.svg",
+      "s": 200,
+      "t": "image/svg+xml"
+     },
+     {
+      "u": "venue-team-16889.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-34913.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-16908.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-16896.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-16912.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "mlb-logo-135.svg",
+      "s": 200,
+      "t": "image/svg+xml"
+     },
+     {
+      "u": "mlb-logo-144.svg",
+      "s": 200,
+      "t": "image/svg+xml"
+     },
+     {
+      "u": "venue-team-16916.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-34911.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-16909.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
       "u": "venue-team-34900.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "mlb-logo-145.svg",
+      "s": 200,
+      "t": "image/svg+xml"
+     },
+     {
+      "u": "venue-team-16914.png",
       "s": 200,
       "t": "image/png"
      },
@@ -581,9 +576,14 @@
       "t": "image/png"
      },
      {
-      "u": "venue-team-16908.png",
+      "u": "venue-team-34903.png",
       "s": 200,
       "t": "image/png"
+     },
+     {
+      "u": "mlb-logo-114.svg",
+      "s": 200,
+      "t": "image/svg+xml"
      },
      {
       "u": "mlb-logo-158.svg",
@@ -592,14 +592,14 @@
      }
     ],
     "image_status": {
-     "200": 89
+     "200": 112
     },
     "csp_errors": [],
-    "layout_shift": 1.0092696900167584,
+    "layout_shift": 1.0090911928530093,
     "shift_sources": [
      {
       "v": 1,
-      "t": 725,
+      "t": 503,
       "src": [
        "div#app",
        "details#funded-home.funded-section",
@@ -608,14 +608,14 @@
      },
      {
       "v": 0.005,
-      "t": 1431,
+      "t": 706,
       "src": [
        "div#app"
       ]
      },
      {
       "v": 0.002,
-      "t": 813,
+      "t": 562,
       "src": [
        "div.nav-section",
        "div.workspace",
@@ -624,20 +624,11 @@
      },
      {
       "v": 0.002,
-      "t": 6841,
+      "t": 950,
       "src": [
        "div.nav-section",
        "div.workspace",
-       "div.sidebar-bottom"
-      ]
-     },
-     {
-      "v": 0,
-      "t": 1546,
-      "src": [
-       "span#top-clock.top-clock",
-       "span.topbar-divider",
-       "span#source-badge"
+       "div.nav-title"
       ]
      }
     ]
@@ -650,19 +641,23 @@
       "loaded": 24,
       "broken": 0,
       "names": [
-       "Londrina Ec",
-       "Criciuma Ec",
-       "Croatia · national flag",
-       "England · national flag",
+       "Sao Bernardo FC",
+       "Cr Brasil",
+       "Chicago White Sox",
+       "Cleveland Guardians",
+       "Atlanta Braves",
+       "Los Angeles Dodgers",
        "Portugal · national flag",
        "Norway · national flag",
        "Netherlands · national flag",
        "Serbia · national flag",
-       "Greece · national flag",
-       "Germany · national flag",
        "France · national flag",
-       "Italy · national flag",
-       "Belgium · national flag"
+       "Belgium · national flag",
+       "Botafogo FC",
+       "Vila Nova FC",
+       "Wales · national flag",
+       "Denmark · national flag",
+       "Italy · national flag"
       ]
      },
      "activity": {
@@ -682,58 +677,12 @@
     },
     "unloaded": [
      {
-      "title": "Botafogo FC",
+      "title": "Wales · national flag",
       "loading": "lazy",
       "complete": true,
-      "nw": 82,
-      "src": "venue-team-16888.png",
-      "cur": "venue-team-16888.png",
-      "rect": [
-       463,
-       77,
-       26,
-       26
-      ],
-      "vh": 952,
-      "anc": [
-       "span.work-avatar.team-pair",
-       "div.work-name",
-       "summary",
-       "details.work-item[closed]",
-       "div.work-list",
-       "div#office-content"
-      ]
-     },
-     {
-      "title": "Vila Nova FC",
-      "loading": "lazy",
-      "complete": true,
-      "nw": 109,
-      "src": "venue-team-16914.png",
-      "cur": "venue-team-16914.png",
-      "rect": [
-       463,
-       77,
-       26,
-       26
-      ],
-      "vh": 952,
-      "anc": [
-       "span.work-avatar.team-pair",
-       "div.work-name",
-       "summary",
-       "details.work-item[closed]",
-       "div.work-list",
-       "div#office-content"
-      ]
-     },
-     {
-      "title": "Avai FC",
-      "loading": "lazy",
-      "complete": true,
-      "nw": 101,
-      "src": "venue-team-16907.png",
-      "cur": "venue-team-16907.png",
+      "nw": 128,
+      "src": "venue-team-34898.png",
+      "cur": "venue-team-34898.png",
       "rect": [
        463,
        77,
@@ -751,12 +700,12 @@
       ]
      },
      {
-      "title": "Ceara SC",
+      "title": "Denmark · national flag",
       "loading": "lazy",
       "complete": true,
-      "nw": 115,
-      "src": "venue-team-16891.png",
-      "cur": "venue-team-16891.png",
+      "nw": 128,
+      "src": "venue-team-34880.png",
+      "cur": "venue-team-34880.png",
       "rect": [
        463,
        77,
@@ -774,12 +723,12 @@
       ]
      },
      {
-      "title": "Botafogo FC",
+      "title": "France · national flag",
       "loading": "lazy",
       "complete": true,
-      "nw": 82,
-      "src": "venue-team-16888.png",
-      "cur": "venue-team-16888.png",
+      "nw": 128,
+      "src": "venue-team-34885.png",
+      "cur": "venue-team-34885.png",
       "rect": [
        463,
        77,
@@ -791,18 +740,18 @@
        "span.work-avatar.team-pair",
        "div.work-name",
        "summary",
-       "details.work-item[closed]",
+       "details.work-item",
        "div.work-list",
        "div#office-content"
       ]
      },
      {
-      "title": "Vila Nova FC",
+      "title": "Italy · national flag",
       "loading": "lazy",
       "complete": true,
-      "nw": 109,
-      "src": "venue-team-16914.png",
-      "cur": "venue-team-16914.png",
+      "nw": 128,
+      "src": "venue-team-34903.png",
+      "cur": "venue-team-34903.png",
       "rect": [
        463,
        77,
@@ -814,7 +763,53 @@
        "span.work-avatar.team-pair",
        "div.work-name",
        "summary",
-       "details.work-item[closed]",
+       "details.work-item",
+       "div.work-list",
+       "div#office-content"
+      ]
+     },
+     {
+      "title": "Portugal · national flag",
+      "loading": "lazy",
+      "complete": true,
+      "nw": 128,
+      "src": "venue-team-34900.png",
+      "cur": "venue-team-34900.png",
+      "rect": [
+       463,
+       77,
+       26,
+       26
+      ],
+      "vh": 952,
+      "anc": [
+       "span.work-avatar.team-pair",
+       "div.work-name",
+       "summary",
+       "details.work-item",
+       "div.work-list",
+       "div#office-content"
+      ]
+     },
+     {
+      "title": "Norway · national flag",
+      "loading": "lazy",
+      "complete": true,
+      "nw": 128,
+      "src": "venue-team-34879.png",
+      "cur": "venue-team-34879.png",
+      "rect": [
+       463,
+       77,
+       26,
+       26
+      ],
+      "vh": 952,
+      "anc": [
+       "span.work-avatar.team-pair",
+       "div.work-name",
+       "summary",
+       "details.work-item",
        "div.work-list",
        "div#office-content"
       ]
@@ -832,162 +827,66 @@
      "names": [
       "Sao Bernardo FC",
       "Cr Brasil",
-      "Londrina Ec",
-      "Criciuma Ec",
-      "Cuiaba Ec",
-      "Aa Ponte Preta",
+      "Chicago White Sox",
+      "Cleveland Guardians",
+      "Atlanta Braves",
+      "Los Angeles Dodgers",
       "Portugal · national flag",
       "Norway · national flag",
       "Netherlands · national flag",
       "Serbia · national flag",
-      "Greece · national flag",
-      "Germany · national flag",
       "France · national flag",
       "Belgium · national flag",
       "Botafogo FC",
       "Vila Nova FC",
-      "Avai FC",
-      "Ceara SC"
+      "Wales · national flag",
+      "Denmark · national flag",
+      "Italy · national flag"
      ]
     },
     "image_responses": [
-     {
-      "u": "venue-team-16912.png",
-      "s": 200,
-      "t": "image/png"
-     },
-     {
-      "u": "venue-team-16889.png",
-      "s": 200,
-      "t": "image/png"
-     },
-     {
-      "u": "venue-team-34911.png",
-      "s": 200,
-      "t": "image/png"
-     },
-     {
-      "u": "venue-team-34900.png",
-      "s": 200,
-      "t": "image/png"
-     },
-     {
-      "u": "venue-team-34901.png",
-      "s": 200,
-      "t": "image/png"
-     },
-     {
-      "u": "venue-team-34879.png",
-      "s": 200,
-      "t": "image/png"
-     },
-     {
-      "u": "venue-team-34909.png",
-      "s": 200,
-      "t": "image/png"
-     },
-     {
-      "u": "venue-team-34907.png",
-      "s": 200,
-      "t": "image/png"
-     },
-     {
-      "u": "venue-team-34929.png",
-      "s": 200,
-      "t": "image/png"
-     },
-     {
-      "u": "venue-team-34906.png",
-      "s": 200,
-      "t": "image/png"
-     },
-     {
-      "u": "venue-team-34903.png",
-      "s": 200,
-      "t": "image/png"
-     },
-     {
-      "u": "venue-team-34913.png",
-      "s": 200,
-      "t": "image/png"
-     },
-     {
-      "u": "venue-team-34885.png",
-      "s": 200,
-      "t": "image/png"
-     },
-     {
-      "u": "venue-team-16908.png",
-      "s": 200,
-      "t": "image/png"
-     },
-     {
-      "u": "venue-team-34900.png",
-      "s": 200,
-      "t": "image/png"
-     },
-     {
-      "u": "venue-team-16912.png",
-      "s": 200,
-      "t": "image/png"
-     },
-     {
-      "u": "venue-team-34879.png",
-      "s": 200,
-      "t": "image/png"
-     },
-     {
-      "u": "venue-team-16916.png",
-      "s": 200,
-      "t": "image/png"
-     },
-     {
-      "u": "venue-team-34901.png",
-      "s": 200,
-      "t": "image/png"
-     },
-     {
-      "u": "venue-team-34907.png",
-      "s": 200,
-      "t": "image/png"
-     },
-     {
-      "u": "venue-team-34913.png",
-      "s": 200,
-      "t": "image/png"
-     },
-     {
-      "u": "venue-team-16889.png",
-      "s": 200,
-      "t": "image/png"
-     },
      {
       "u": "venue-team-16909.png",
       "s": 200,
       "t": "image/png"
      },
      {
-      "u": "venue-team-16896.png",
+      "u": "venue-team-34900.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-34901.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "mlb-logo-114.svg",
+      "s": 200,
+      "t": "image/svg+xml"
+     },
+     {
+      "u": "venue-team-16888.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-34898.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "mlb-logo-119.svg",
+      "s": 200,
+      "t": "image/svg+xml"
+     },
+     {
+      "u": "venue-team-34880.png",
       "s": 200,
       "t": "image/png"
      },
      {
       "u": "venue-team-34929.png",
-      "s": 200,
-      "t": "image/png"
-     },
-     {
-      "u": "venue-team-34906.png",
-      "s": 200,
-      "t": "image/png"
-     },
-     {
-      "u": "venue-team-34885.png",
-      "s": 200,
-      "t": "image/png"
-     },
-     {
-      "u": "venue-team-16907.png",
       "s": 200,
       "t": "image/png"
      },
@@ -997,7 +896,77 @@
       "t": "image/png"
      },
      {
-      "u": "venue-team-16891.png",
+      "u": "venue-team-34879.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "mlb-logo-145.svg",
+      "s": 200,
+      "t": "image/svg+xml"
+     },
+     {
+      "u": "venue-team-34885.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-34913.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-16916.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-34903.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "mlb-logo-144.svg",
+      "s": 200,
+      "t": "image/svg+xml"
+     },
+     {
+      "u": "mlb-logo-114.svg",
+      "s": 200,
+      "t": "image/svg+xml"
+     },
+     {
+      "u": "mlb-logo-145.svg",
+      "s": 200,
+      "t": "image/svg+xml"
+     },
+     {
+      "u": "mlb-logo-144.svg",
+      "s": 200,
+      "t": "image/svg+xml"
+     },
+     {
+      "u": "venue-team-34900.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-34929.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "mlb-logo-119.svg",
+      "s": 200,
+      "t": "image/svg+xml"
+     },
+     {
+      "u": "venue-team-34901.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-34879.png",
       "s": 200,
       "t": "image/png"
      },
@@ -1007,7 +976,17 @@
       "t": "image/png"
      },
      {
-      "u": "venue-team-16909.png",
+      "u": "venue-team-34913.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-16914.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-34885.png",
       "s": 200,
       "t": "image/png"
      },
@@ -1015,10 +994,130 @@
       "u": "venue-team-16916.png",
       "s": 200,
       "t": "image/png"
+     },
+     {
+      "u": "venue-team-16909.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "mlb-logo-119.svg",
+      "s": 200,
+      "t": "image/svg+xml"
+     },
+     {
+      "u": "venue-team-16909.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "mlb-logo-145.svg",
+      "s": 200,
+      "t": "image/svg+xml"
+     },
+     {
+      "u": "mlb-logo-114.svg",
+      "s": 200,
+      "t": "image/svg+xml"
+     },
+     {
+      "u": "venue-team-34900.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "mlb-logo-144.svg",
+      "s": 200,
+      "t": "image/svg+xml"
+     },
+     {
+      "u": "venue-team-34879.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-34901.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-16914.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-34913.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-34885.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-16888.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-34929.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-16916.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-34900.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-34880.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-34898.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-34901.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-34913.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-34885.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-34879.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-34903.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-34929.png",
+      "s": 200,
+      "t": "image/png"
      }
     ],
     "image_status": {
-     "200": 33
+     "200": 54
     },
     "csp_errors": [],
     "layout_shift": 0,
@@ -1029,7 +1128,7 @@
      "work": {
       "total": 34,
       "visible": 34,
-      "loaded": 17,
+      "loaded": 34,
       "broken": 0,
       "names": [
        "Atlanta Braves",
@@ -1086,10 +1185,10 @@
      {
       "title": "Londrina Ec",
       "loading": "lazy",
-      "complete": true,
-      "nw": 112,
+      "complete": false,
+      "nw": 0,
       "src": "venue-team-16889.png",
-      "cur": "venue-team-16889.png",
+      "cur": "",
       "rect": [
        463,
        77,
@@ -1269,34 +1368,14 @@
     },
     "image_responses": [
      {
-      "u": "mlb-logo-144.svg",
-      "s": 200,
-      "t": "image/svg+xml"
-     },
-     {
-      "u": "venue-team-34913.png",
-      "s": 200,
-      "t": "image/png"
-     },
-     {
       "u": "mlb-logo-119.svg",
       "s": 200,
       "t": "image/svg+xml"
      },
      {
-      "u": "venue-team-34901.png",
+      "u": "mlb-logo-144.svg",
       "s": 200,
-      "t": "image/png"
-     },
-     {
-      "u": "venue-team-34909.png",
-      "s": 200,
-      "t": "image/png"
-     },
-     {
-      "u": "venue-team-34911.png",
-      "s": 200,
-      "t": "image/png"
+      "t": "image/svg+xml"
      },
      {
       "u": "venue-team-34929.png",
@@ -1304,47 +1383,7 @@
       "t": "image/png"
      },
      {
-      "u": "venue-team-34903.png",
-      "s": 200,
-      "t": "image/png"
-     },
-     {
-      "u": "venue-team-16889.png",
-      "s": 200,
-      "t": "image/png"
-     },
-     {
-      "u": "venue-team-16912.png",
-      "s": 200,
-      "t": "image/png"
-     },
-     {
-      "u": "venue-team-16908.png",
-      "s": 200,
-      "t": "image/png"
-     },
-     {
-      "u": "venue-team-16907.png",
-      "s": 200,
-      "t": "image/png"
-     },
-     {
-      "u": "venue-team-16891.png",
-      "s": 200,
-      "t": "image/png"
-     },
-     {
-      "u": "venue-team-16909.png",
-      "s": 200,
-      "t": "image/png"
-     },
-     {
-      "u": "venue-team-34879.png",
-      "s": 200,
-      "t": "image/png"
-     },
-     {
-      "u": "venue-team-34900.png",
+      "u": "venue-team-34901.png",
       "s": 200,
       "t": "image/png"
      },
@@ -1354,7 +1393,42 @@
       "t": "image/png"
      },
      {
+      "u": "venue-team-34911.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-16907.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-34903.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-16909.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-34909.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-16916.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
       "u": "venue-team-34906.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-16901.png",
       "s": 200,
       "t": "image/png"
      },
@@ -1364,7 +1438,7 @@
       "t": "image/png"
      },
      {
-      "u": "venue-team-16897.png",
+      "u": "venue-team-16888.png",
       "s": 200,
       "t": "image/png"
      },
@@ -1374,32 +1448,12 @@
       "t": "image/png"
      },
      {
-      "u": "mlb-logo-135.svg",
+      "u": "mlb-logo-114.svg",
       "s": 200,
       "t": "image/svg+xml"
      },
      {
-      "u": "venue-team-16896.png",
-      "s": 200,
-      "t": "image/png"
-     },
-     {
-      "u": "venue-team-34880.png",
-      "s": 200,
-      "t": "image/png"
-     },
-     {
-      "u": "mlb-logo-139.svg",
-      "s": 200,
-      "t": "image/svg+xml"
-     },
-     {
-      "u": "venue-team-16916.png",
-      "s": 200,
-      "t": "image/png"
-     },
-     {
-      "u": "venue-team-16888.png",
+      "u": "venue-team-34913.png",
       "s": 200,
       "t": "image/png"
      },
@@ -1409,12 +1463,17 @@
       "t": "image/svg+xml"
      },
      {
-      "u": "mlb-logo-145.svg",
+      "u": "venue-team-34879.png",
       "s": 200,
-      "t": "image/svg+xml"
+      "t": "image/png"
      },
      {
-      "u": "mlb-logo-114.svg",
+      "u": "venue-team-34880.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "mlb-logo-145.svg",
       "s": 200,
       "t": "image/svg+xml"
      },
@@ -1424,47 +1483,7 @@
       "t": "image/svg+xml"
      },
      {
-      "u": "venue-team-16901.png",
-      "s": 200,
-      "t": "image/png"
-     },
-     {
-      "u": "venue-team-34898.png",
-      "s": 200,
-      "t": "image/png"
-     },
-     {
-      "u": "venue-team-34911.png",
-      "s": 200,
-      "t": "image/png"
-     },
-     {
-      "u": "mlb-logo-144.svg",
-      "s": 200,
-      "t": "image/svg+xml"
-     },
-     {
-      "u": "mlb-logo-119.svg",
-      "s": 200,
-      "t": "image/svg+xml"
-     },
-     {
-      "u": "venue-team-34901.png",
-      "s": 200,
-      "t": "image/png"
-     },
-     {
-      "u": "venue-team-34909.png",
-      "s": 200,
-      "t": "image/png"
-     },
-     {
-      "u": "venue-team-34913.png",
-      "s": 200,
-      "t": "image/png"
-     },
-     {
-      "u": "venue-team-34929.png",
+      "u": "venue-team-16891.png",
       "s": 200,
       "t": "image/png"
      },
@@ -1474,29 +1493,9 @@
       "t": "image/png"
      },
      {
-      "u": "venue-team-34885.png",
+      "u": "mlb-logo-135.svg",
       "s": 200,
-      "t": "image/png"
-     },
-     {
-      "u": "venue-team-16909.png",
-      "s": 200,
-      "t": "image/png"
-     },
-     {
-      "u": "venue-team-34903.png",
-      "s": 200,
-      "t": "image/png"
-     },
-     {
-      "u": "venue-team-16912.png",
-      "s": 200,
-      "t": "image/png"
-     },
-     {
-      "u": "venue-team-16907.png",
-      "s": 200,
-      "t": "image/png"
+      "t": "image/svg+xml"
      },
      {
       "u": "venue-team-16889.png",
@@ -1509,52 +1508,37 @@
       "t": "image/png"
      },
      {
-      "u": "venue-team-16916.png",
-      "s": 200,
-      "t": "image/png"
-     },
-     {
-      "u": "venue-team-34901.png",
-      "s": 200,
-      "t": "image/png"
-     },
-     {
-      "u": "mlb-logo-119.svg",
+      "u": "mlb-logo-139.svg",
       "s": 200,
       "t": "image/svg+xml"
      },
      {
-      "u": "venue-team-34903.png",
+      "u": "venue-team-16912.png",
       "s": 200,
       "t": "image/png"
      },
      {
-      "u": "venue-team-34909.png",
+      "u": "venue-team-16897.png",
       "s": 200,
       "t": "image/png"
      },
      {
-      "u": "venue-team-34885.png",
+      "u": "venue-team-34900.png",
       "s": 200,
       "t": "image/png"
      },
      {
-      "u": "venue-team-34913.png",
-      "s": 200,
-      "t": "image/png"
-     },
-     {
-      "u": "venue-team-16908.png",
-      "s": 200,
-      "t": "image/png"
-     },
-     {
-      "u": "venue-team-34911.png",
+      "u": "venue-team-34898.png",
       "s": 200,
       "t": "image/png"
      },
      {
       "u": "mlb-logo-144.svg",
+      "s": 200,
+      "t": "image/svg+xml"
+     },
+     {
+      "u": "mlb-logo-119.svg",
       "s": 200,
       "t": "image/svg+xml"
      },
@@ -1569,27 +1553,37 @@
       "t": "image/png"
      },
      {
-      "u": "venue-team-16909.png",
+      "u": "venue-team-34901.png",
       "s": 200,
       "t": "image/png"
      },
      {
-      "u": "venue-team-34906.png",
+      "u": "venue-team-34909.png",
       "s": 200,
       "t": "image/png"
      },
      {
-      "u": "venue-team-16912.png",
+      "u": "venue-team-34911.png",
       "s": 200,
       "t": "image/png"
      },
      {
-      "u": "venue-team-16916.png",
+      "u": "venue-team-34903.png",
       "s": 200,
       "t": "image/png"
      },
      {
-      "u": "venue-team-34907.png",
+      "u": "venue-team-34885.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-16908.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-34913.png",
       "s": 200,
       "t": "image/png"
      },
@@ -1604,12 +1598,7 @@
       "t": "image/png"
      },
      {
-      "u": "venue-team-34879.png",
-      "s": 200,
-      "t": "image/png"
-     },
-     {
-      "u": "venue-team-16889.png",
+      "u": "venue-team-34907.png",
       "s": 200,
       "t": "image/png"
      },
@@ -1619,7 +1608,32 @@
       "t": "image/png"
      },
      {
+      "u": "venue-team-16909.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-34879.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-34906.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-16889.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
       "u": "venue-team-16901.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-16912.png",
       "s": 200,
       "t": "image/png"
      },
@@ -1629,12 +1643,22 @@
       "t": "image/png"
      },
      {
-      "u": "venue-team-16888.png",
+      "u": "venue-team-16916.png",
       "s": 200,
       "t": "image/png"
      },
      {
       "u": "venue-team-16914.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-16888.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-34880.png",
       "s": 200,
       "t": "image/png"
      },
@@ -1645,7 +1669,7 @@
      }
     ],
     "image_status": {
-     "200": 75
+     "200": 60
     },
     "csp_errors": [],
     "layout_shift": 0,
@@ -1693,17 +1717,577 @@
   },
   "webkit-iphone13": {
    "home": {
-    "error": "Error: page.waitForTimeout: Target page, context or browser has been closed"
+    "unloaded": "TIMEOUT",
+    "marks": {
+     "total": 80,
+     "loaded": 0,
+     "initials_only": 0,
+     "broken": 0,
+     "pairs": 80,
+     "sizes": [
+      "22x22"
+     ],
+     "names": [
+      "Avai FC",
+      "Ceara SC",
+      "Netherlands · national flag",
+      "Serbia · national flag",
+      "Greece · national flag",
+      "Germany · national flag",
+      "New York Yankees",
+      "Tampa Bay Rays",
+      "Londrina Ec",
+      "Criciuma Ec",
+      "France · national flag",
+      "Belgium · national flag",
+      "Sao Bernardo FC",
+      "Cr Brasil",
+      "Cuiaba Ec",
+      "Aa Ponte Preta",
+      "Italy · national flag",
+      "San Diego Padres",
+      "Milwaukee Brewers",
+      "AC Goianiense",
+      "America FC",
+      "Chicago White Sox",
+      "Cleveland Guardians",
+      "Botafogo FC",
+      "Vila Nova FC",
+      "Croatia · national flag",
+      "England · national flag",
+      "Portugal · national flag",
+      "Norway · national flag",
+      "Wales · national flag",
+      "Denmark · national flag",
+      "Atlanta Braves",
+      "Los Angeles Dodgers"
+     ]
+    },
+    "image_responses": [],
+    "image_status": {},
+    "csp_errors": [],
+    "shift_sources": []
    },
-   "__wedged": "an earlier page in this engine timed out (home)",
    "derek": {
-    "error": "SKIPPED: an earlier page in this engine timed out (home)"
+    "views": {
+     "work": {
+      "total": 24,
+      "visible": 24,
+      "loaded": 24,
+      "broken": 0,
+      "names": [
+       "Atlanta Braves",
+       "Los Angeles Dodgers",
+       "Portugal · national flag",
+       "Norway · national flag",
+       "Netherlands · national flag",
+       "Serbia · national flag",
+       "Greece · national flag",
+       "Germany · national flag",
+       "France · national flag",
+       "Belgium · national flag",
+       "Wales · national flag",
+       "Denmark · national flag",
+       "Italy · national flag"
+      ]
+     },
+     "activity": {
+      "total": 24,
+      "visible": 0,
+      "loaded": 0,
+      "broken": 0,
+      "names": []
+     },
+     "learning": {
+      "total": 24,
+      "visible": 0,
+      "loaded": 0,
+      "broken": 0,
+      "names": []
+     }
+    },
+    "marks": {
+     "total": 24,
+     "loaded": 24,
+     "initials_only": 0,
+     "broken": 0,
+     "pairs": 24,
+     "sizes": [
+      "21x21"
+     ],
+     "names": [
+      "Atlanta Braves",
+      "Los Angeles Dodgers",
+      "Portugal · national flag",
+      "Norway · national flag",
+      "Netherlands · national flag",
+      "Serbia · national flag",
+      "Greece · national flag",
+      "Germany · national flag",
+      "France · national flag",
+      "Belgium · national flag",
+      "Wales · national flag",
+      "Denmark · national flag",
+      "Italy · national flag"
+     ]
+    },
+    "image_responses": [
+     {
+      "u": "mlb-logo-144.svg",
+      "s": 200,
+      "t": "image/svg+xml"
+     },
+     {
+      "u": "mlb-logo-119.svg",
+      "s": 200,
+      "t": "image/svg+xml"
+     },
+     {
+      "u": "venue-team-34900.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-34879.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-34901.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-34929.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-34907.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-34906.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-34913.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-34885.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-34880.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-34898.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-34903.png",
+      "s": 200,
+      "t": "image/png"
+     }
+    ],
+    "image_status": {
+     "200": 13
+    },
+    "csp_errors": [],
+    "shift_sources": []
    },
    "xavier": {
-    "error": "SKIPPED: an earlier page in this engine timed out (home)"
+    "views": {
+     "work": {
+      "total": 34,
+      "visible": 34,
+      "loaded": 31,
+      "broken": 0,
+      "names": [
+       "Atlanta Braves",
+       "Los Angeles Dodgers",
+       "Netherlands · national flag",
+       "Serbia · national flag",
+       "Croatia · national flag",
+       "England · national flag",
+       "France · national flag",
+       "Belgium · national flag",
+       "Cuiaba Ec",
+       "Aa Ponte Preta",
+       "Italy · national flag",
+       "Londrina Ec",
+       "Criciuma Ec",
+       "Sao Bernardo FC",
+       "Cr Brasil",
+       "Avai FC",
+       "Ceara SC",
+       "Portugal · national flag",
+       "Norway · national flag",
+       "Greece · national flag",
+       "Germany · national flag",
+       "AC Goianiense",
+       "America FC",
+       "Botafogo FC",
+       "Vila Nova FC",
+       "Wales · national flag",
+       "Denmark · national flag",
+       "New York Yankees",
+       "Tampa Bay Rays",
+       "Chicago White Sox",
+       "Cleveland Guardians",
+       "San Diego Padres",
+       "Milwaukee Brewers"
+      ]
+     },
+     "activity": {
+      "total": 34,
+      "visible": 0,
+      "loaded": 0,
+      "broken": 0,
+      "names": []
+     },
+     "learning": {
+      "total": 34,
+      "visible": 0,
+      "loaded": 0,
+      "broken": 0,
+      "names": []
+     }
+    },
+    "unloaded": [
+     {
+      "title": "Cleveland Guardians",
+      "loading": "lazy",
+      "complete": true,
+      "nw": 11,
+      "src": "mlb-logo-114.svg",
+      "cur": "mlb-logo-114.svg",
+      "rect": [
+       297,
+       46,
+       21,
+       21
+      ],
+      "vh": 616,
+      "anc": [
+       "span.work-avatar.team-pair",
+       "div.work-name",
+       "summary",
+       "details#office-pos-paperexpgrp:611af30938d3f7395eaec8e7.work-item",
+       "div.work-list",
+       "div#office-content"
+      ]
+     },
+     {
+      "title": "San Diego Padres",
+      "loading": "lazy",
+      "complete": true,
+      "nw": 13,
+      "src": "mlb-logo-135.svg",
+      "cur": "mlb-logo-135.svg",
+      "rect": [
+       297,
+       46,
+       21,
+       21
+      ],
+      "vh": 616,
+      "anc": [
+       "span.work-avatar.team-pair",
+       "div.work-name",
+       "summary",
+       "details#office-pos-paperexpgrp:edca4bb7455003b64c16fc95.work-item",
+       "div.work-list",
+       "div#office-content"
+      ]
+     },
+     {
+      "title": "Milwaukee Brewers",
+      "loading": "lazy",
+      "complete": true,
+      "nw": 15,
+      "src": "mlb-logo-158.svg",
+      "cur": "mlb-logo-158.svg",
+      "rect": [
+       297,
+       46,
+       21,
+       21
+      ],
+      "vh": 616,
+      "anc": [
+       "span.work-avatar.team-pair",
+       "div.work-name",
+       "summary",
+       "details#office-pos-paperexpgrp:edca4bb7455003b64c16fc95.work-item",
+       "div.work-list",
+       "div#office-content"
+      ]
+     }
+    ],
+    "marks": {
+     "total": 34,
+     "loaded": 31,
+     "initials_only": 0,
+     "broken": 0,
+     "pairs": 34,
+     "sizes": [
+      "21x21"
+     ],
+     "names": [
+      "Atlanta Braves",
+      "Los Angeles Dodgers",
+      "Netherlands · national flag",
+      "Serbia · national flag",
+      "Croatia · national flag",
+      "England · national flag",
+      "France · national flag",
+      "Belgium · national flag",
+      "Cuiaba Ec",
+      "Aa Ponte Preta",
+      "Italy · national flag",
+      "Londrina Ec",
+      "Criciuma Ec",
+      "Sao Bernardo FC",
+      "Cr Brasil",
+      "Avai FC",
+      "Ceara SC",
+      "Portugal · national flag",
+      "Norway · national flag",
+      "Greece · national flag",
+      "Germany · national flag",
+      "AC Goianiense",
+      "America FC",
+      "Botafogo FC",
+      "Vila Nova FC",
+      "Wales · national flag",
+      "Denmark · national flag",
+      "New York Yankees",
+      "Tampa Bay Rays",
+      "Chicago White Sox",
+      "Cleveland Guardians",
+      "San Diego Padres",
+      "Milwaukee Brewers"
+     ]
+    },
+    "image_responses": [
+     {
+      "u": "mlb-logo-144.svg",
+      "s": 200,
+      "t": "image/svg+xml"
+     },
+     {
+      "u": "venue-team-34901.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "mlb-logo-119.svg",
+      "s": 200,
+      "t": "image/svg+xml"
+     },
+     {
+      "u": "venue-team-34929.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-34911.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-34909.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-34913.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-34885.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-16908.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-16896.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-34903.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-16912.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-16889.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-16916.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-16909.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-16891.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-16907.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-34900.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-34879.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-34907.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-16901.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-16897.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-34906.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-16914.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-16888.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-34880.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "venue-team-34898.png",
+      "s": 200,
+      "t": "image/png"
+     },
+     {
+      "u": "mlb-logo-139.svg",
+      "s": 200,
+      "t": "image/svg+xml"
+     },
+     {
+      "u": "mlb-logo-147.svg",
+      "s": 200,
+      "t": "image/svg+xml"
+     },
+     {
+      "u": "mlb-logo-145.svg",
+      "s": 200,
+      "t": "image/svg+xml"
+     },
+     {
+      "u": "mlb-logo-114.svg",
+      "s": 200,
+      "t": "image/svg+xml"
+     },
+     {
+      "u": "mlb-logo-135.svg",
+      "s": 200,
+      "t": "image/svg+xml"
+     },
+     {
+      "u": "mlb-logo-158.svg",
+      "s": 200,
+      "t": "image/svg+xml"
+     }
+    ],
+    "image_status": {
+     "200": 33
+    },
+    "csp_errors": [],
+    "shift_sources": []
    },
    "audrey": {
-    "error": "SKIPPED: an earlier page in this engine timed out (home)"
+    "views": {
+     "work": {
+      "total": 0,
+      "visible": 0,
+      "loaded": 0,
+      "broken": 0,
+      "names": []
+     },
+     "activity": {
+      "total": 0,
+      "visible": 0,
+      "loaded": 0,
+      "broken": 0,
+      "names": []
+     },
+     "learning": {
+      "total": 0,
+      "visible": 0,
+      "loaded": 0,
+      "broken": 0,
+      "names": []
+     }
+    },
+    "marks": {
+     "total": 0,
+     "loaded": 0,
+     "initials_only": 0,
+     "broken": 0,
+     "pairs": 0,
+     "sizes": [],
+     "names": []
+    },
+    "image_responses": [],
+    "image_status": {},
+    "csp_errors": [],
+    "shift_sources": []
    }
   }
  },
@@ -1737,7 +2321,9 @@
    "marks": 0
   },
   "webkit-iphone13": {
-   "error": "SKIPPED: an earlier page in this engine timed out (home)"
+   "image_without_session": 401,
+   "broken_images": 0,
+   "marks": 0
   }
  }
 }
