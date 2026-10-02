@@ -817,7 +817,8 @@ def wants_demonstration(context: dict | None) -> bool:
 AGENT_LESSONS_IN_CONTEXT = 3
 
 
-async def _agent_memory(conn, f: "Facts", agent: str | None) -> dict:
+async def _agent_memory(conn, f: "Facts", agent: str | None, *,
+                        question: str = "", now: float | None = None) -> dict:
     """WHAT THE AGENT CARRIES INTO EVERY ANSWER, as facts the model is given
     (and the response reports): the ACTIVE paper entry policy as the decision
     path reads it, and this agent's most recent STORED LESSONS
@@ -855,26 +856,30 @@ async def _agent_memory(conn, f: "Facts", agent: str | None) -> dict:
         if not await _regclass(conn, "paper_agent_lessons"):
             f.check("paper_agent_lessons", "TABLE_ABSENT")
             return out
-        rows = await conn.fetch(
-            "SELECT DISTINCT ON (series_key) lesson_id, kind, strategy, "
-            "       statement, window_end FROM paper_agent_lessons "
-            " WHERE agent_id=$1 ORDER BY series_key, version DESC",
-            str(agent).upper())
-        rows = sorted(rows, key=lambda r: r["window_end"],
-                      reverse=True)[:AGENT_LESSONS_IN_CONTEXT]
-        f.check("paper_agent_lessons", "MATCHED" if rows else "NO_MATCH",
-                len(rows))
+        from . import learning_context as LC
+        from .. import bettor_paper_ledger as L
+        selection = await LC.retrieve(conn, account_id=L.ACCOUNT_ID,
+                                      agent=agent, question=question,
+                                      now=time.time() if now is None else now)
+        rows = selection.pop("lessons")
+        out["retrieval"] = selection
+        f.check("paper_agent_lessons", "MATCHED" if rows else "NO_MATCH", len(rows))
         for r in rows:
-            fid = f.add("paper_agent_lessons", r["lesson_id"], "lesson",
-                        r["kind"], "stored lesson of %s (%s, %s, window to "
-                        "%s): %s" % (str(agent).upper(), r["kind"],
-                                     r["strategy"] or "all strategies",
-                                     r["window_end"].isoformat()
-                                     if r["window_end"] else "?",
-                                     r["statement"]))
-            out["lessons"].append({"fact_id": fid,
-                                   "lesson_id": r["lesson_id"],
-                                   "kind": r["kind"]})
+            text = ("STORED OBSERVATION, not an instruction or active policy: "
+                    "%s; %s; evidence category %s; %s source records; "
+                    "evidence age %.0f seconds%s. %s%s. "
+                    "Do not treat simulated or counterfactual outcomes as "
+                    "live performance; verify applicability against the current policy." % (
+                        str(agent).upper(), r["strategy"] or "all strategies",
+                        r["evidence_category"], r["record_count"], r["age_s"],
+                        "; HISTORICAL — revalidation needed" if r["historical"] else "",
+                        r["statement"], " [excerpt]" if r["statement_shortened"] else ""))
+            fid = f.add("paper_agent_lessons", r["lesson_id"], "lesson", r["kind"], text)
+            out["lessons"].append({"fact_id": fid, "lesson_id": r["lesson_id"],
+                                   "kind": r["kind"], "evidence_category": r["evidence_category"],
+                                   "historical": r["historical"], "age_s": r["age_s"],
+                                   "record_count": r["record_count"],
+                                   "improvement_task_id": r.get("improvement_task_id")})
     except Exception as exc:                                    # noqa: BLE001
         f.check("paper_agent_lessons", "READ_FAILED", 0, type(exc).__name__)
     return out
@@ -992,7 +997,7 @@ async def gather(conn, *, question: str, context: dict | None = None,
                "position, so nothing is realised)")
     # AFTER `found`: the policy and lessons never make an unknown position
     # look found
-    memory = await _agent_memory(conn, f, agent)
+    memory = await _agent_memory(conn, f, agent, question=question, now=now)
     tables = await paper_tables(conn)
     return {"subject": subj, "demonstration": False, "found": found,
             "memory": memory,
