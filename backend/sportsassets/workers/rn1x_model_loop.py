@@ -617,7 +617,12 @@ async def cycle(conn, *, now=None) -> dict:
     out["prepare"] = {k: v for k, v in prep.items()
                       if k not in ("closed", "open")}
 
-    fitted = fit(prep["closed"])
+    # OFF THE EVENT LOOP. The pure-Python fit held the API's loop for 49 s
+    # (loop watchdog, 2026-10-02 14:43:48Z: LOOP MainThread in
+    # rn1x_model_loop.fit -> learn/kernel.fit), longer than /healthz's 5 s
+    # deadline. In a worker thread the loop keeps serving between GIL
+    # switches; `fit` is pure (no connection, no shared state).
+    fitted = await asyncio.to_thread(fit, prep["closed"])
     out["fit"] = {k: v for k, v in fitted.items()
                   if k not in ("model", "baseline")}
     if not fitted.get("ok"):
