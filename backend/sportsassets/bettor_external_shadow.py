@@ -110,7 +110,7 @@ def evaluate(*, contract, quote, market_state, execution_estimate, size,
              min_net_edge_per_contract=MIN_NET_EDGE_PER_CONTRACT,
              extra_refusals=None, payout_is_complement=False,
              execution_plan=None, record_purpose=vp.ENTRY_DECISION,
-             calibration_only_evidence=None) -> dict:
+             calibration_only_evidence=None, corroboration=None) -> dict:
     """One contract, end to end, through the REAL gate.
 
     Returns a record that is persisted whether or not it clears, because
@@ -214,6 +214,14 @@ def evaluate(*, contract, quote, market_state, execution_estimate, size,
         if code not in rec["refusals"]:
             rec["refusals"].append(str(code))
     rec["caller_refusals"] = [str(c) for c in (extra_refusals or [])]
+    if corroboration is not None:
+        # Attached before anything can return, so every record that was
+        # handed corroboration evidence persists it (migration 195). The
+        # PinnAPI probability is the one de-vig above, never recomputed.
+        rec["corroboration"] = corroboration
+        pin = corroboration.setdefault("pinnapi", {})
+        pin["probability_of_selection"] = _p_sel
+        pin["probability"] = _p_pay
 
     if not armed:
         # Checked BEFORE anything else consumes budget or claims a
@@ -227,9 +235,46 @@ def evaluate(*, contract, quote, market_state, execution_estimate, size,
     # error; the feed module's own audit is cited in MIN_OUTCOME_BOOKS.
     books = outcome_books if outcome_books is None else int(outcome_books)
     rec["outcome_books"] = books
-    if _p_pay is not None and (
-            books is None or books < MIN_OUTCOME_BOOKS):
+    # ── CORROBORATION (valuation_corroboration, migration 195) ──────────
+    #
+    # THE FLOOR IS NOT LOWERED AND THIS CHECK IS NOT WEAKENED. A PinnAPI read
+    # is Pinnacle alone and keeps `outcome_books` = 1 on the record. A
+    # SEPARATE, independent multi-book observation may satisfy the SAME
+    # `MIN_OUTCOME_BOOKS` floor only when its verdict qualified (exact
+    # identity, current within PINNACLE_MAX_AGE_S, not the same source) and
+    # its own count, under its own name, reaches the floor here. Otherwise the
+    # record keeps R_THIN_OUTCOME and gains the corroboration's specific
+    # refusal beside it. `corroborating_outcome_books` is never copied into
+    # `outcome_books`.
+    corr_books, corr_ok = None, False
+    if corroboration is not None:
+        corr_books = corroboration.get("corroborating_outcome_books")
+        corr_ok = (corroboration.get("qualified") is True
+                   and isinstance(corr_books, int)
+                   and not isinstance(corr_books, bool)
+                   and corr_books >= MIN_OUTCOME_BOOKS
+                   and corroboration.get("refusal") is None
+                   and (corroboration.get("identity") or {}).get("matched")
+                   is True
+                   and str((corroboration.get("identity") or {})
+                           .get("outcome")) == str(contract.get("selection")))
+    floor_by_this_read = books is not None and books >= MIN_OUTCOME_BOOKS
+    rec["outcome_depth"] = {
+        "outcome_books": books,
+        "outcome_books_is": "THIS_READ_ONLY",
+        "corroborating_outcome_books": corr_books,
+        "corroboration_qualified": bool(corr_ok),
+        "min_outcome_books": MIN_OUTCOME_BOOKS,
+        "floor_satisfied_by": ("THIS_READ" if floor_by_this_read else
+                               "INDEPENDENT_CORROBORATION" if corr_ok
+                               else None)}
+    if _p_pay is not None and not floor_by_this_read and not corr_ok:
         rec["refusals"].append(R_THIN_OUTCOME)
+        if corroboration is not None:
+            code = str(corroboration.get("refusal")
+                       or "CORROBORATION_IDENTITY_MISMATCH")
+            if code not in rec["refusals"]:
+                rec["refusals"].append(code)
 
     # THE PLAN, BUILT ON THE VALUATION THIS FUNCTION JUST COMPUTED.
     # Invoked after the complement inversion and before anything reads a
@@ -577,6 +622,20 @@ async def persist(conn, rec: dict) -> int | None:
         evidence_json = json.dumps(ev, default=str)
     c = rec.get("contract") or {}
     v = rec.get("valuation") or {}
+    corroboration = rec.get("corroboration")
+    if corroboration is not None:
+        # A RECORD CARRYING CORROBORATION EVIDENCE IS WRITTEN WITH ITS ROW, in
+        # one transaction (migration 195): the valuation never exists without
+        # the separate, explicit record of what did or did not corroborate it.
+        # The valuation row itself is the unchanged statement below.
+        from . import valuation_corroboration as corr
+        async with conn.transaction():
+            row_id = await persist(conn, {k: x for k, x in rec.items()
+                                          if k != "corroboration"})
+            if row_id is not None:
+                await conn.execute(corr.INSERT,
+                                   *corr.insert_args(row_id, corroboration))
+        return row_id
     return await conn.fetchval(
         INSERT,
         rec.get("experiment_id") or EXPERIMENT_ID,
@@ -755,6 +814,16 @@ STAGES = (
         "NO_QUALIFIED_MODEL",
         "THIN_OUTCOME_COVERAGE",
         R_THIN_OUTCOME,
+        # WHY AN INDEPENDENT OBSERVATION DID NOT SATISFY THE OUTCOME-DEPTH
+        # FLOOR FOR A PINNAPI READ (valuation_corroboration). Each rides
+        # beside R_THIN_OUTCOME, never instead of it.
+        "CORROBORATION_UNAVAILABLE",
+        "CORROBORATION_NOT_CURRENT",
+        "CORROBORATION_FUTURE_STAMPED",
+        "CORROBORATION_IDENTITY_MISMATCH",
+        "CORROBORATION_SAME_SOURCE",
+        "CORROBORATION_BELOW_FLOOR",
+        "CORROBORATION_READ_BUDGET",
         # NO PROVIDER PRICE AT ALL: the book does not quote this event yet.
         # No catalogue or alias can repair it, which is why it is a
         # probability-stage refusal and never an identity one (map4 D9).

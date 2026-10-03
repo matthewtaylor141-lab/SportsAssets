@@ -1807,6 +1807,196 @@ def validate_primary_pinnacle(quote: dict, *, at: float) -> dict:
         runtime_id=feed._STATE.get("runtime_id"))
 
 
+# ── CORROBORATING A PINNAPI READ'S OUTCOME DEPTH (migration 195) ─────
+#
+# A PinnAPI read is Pinnacle alone: its valuation carries outcome_books = 1
+# and the UNCHANGED floor (`ext.MIN_OUTCOME_BOOKS`, 2) refuses it. An
+# independent odds-API observation of the exact same event/outcome/period/
+# line/market/settlement may satisfy that floor, assessed by
+# `valuation_corroboration.assess` and persisted beside the valuation, never
+# copied onto it.
+#
+# THE AGE BOUND IS `PINNACLE_MAX_AGE_S` (30 s), not a new number. In the
+# odds-API path a valuation's book count arrives in the SAME read as its
+# probability, and that read is bounded by the 30 s rule; the PinnAPI path's
+# own independent-book check (`pinnapi_primary.book_depth`) already applied
+# PINNACLE_MAX_AGE_S per book. No other documented rule governs the age of
+# book-count evidence, so corroboration may be no older than that.
+
+async def fetch_event_odds(sport_key: str, event_id, *, api_key: str,
+                           timeout=None) -> dict:
+    """ONE EVENT's h2h, read to corroborate a WebSocket valuation.
+
+    The provider's single-event endpoint, with exactly the bulk read's
+    regions/markets/format, so the books it returns are the same population
+    `pinnacle_h2h` counts. Metered (request x market x region); the cost of
+    THIS request is the response's `x-requests-last` header and is recorded,
+    never assumed. Bounded by `valuation_corroboration.BUDGET` at the caller.
+    Never raises: a transport failure is a named, unread observation.
+    """
+    import httpx
+    from urllib.parse import quote as _q
+
+    from .. import valuation_corroboration as corr
+
+    t0 = time.time()
+    url = ("https://api.the-odds-api.com/v4/sports/%s/events/%s/odds"
+           % (_q(str(sport_key), safe=""), _q(str(event_id), safe="")))
+    params = {"apiKey": api_key, "regions": "eu,uk,us",
+              "markets": "h2h", "oddsFormat": "decimal"}
+    try:
+        async with httpx.AsyncClient(
+                timeout=corr.READ_TIMEOUT_S if timeout is None else timeout
+        ) as client:
+            r = await client.get(url, params=params)
+            used = r.headers.get("x-requests-used")
+            remaining = r.headers.get("x-requests-remaining")
+            last = r.headers.get("x-requests-last")
+            if r.status_code != 200:
+                # The body can echo the query string, so it is NOT included.
+                return {"ok": False, "status": r.status_code,
+                        "refusal": R_PROVIDER_ERROR,
+                        "credits_used": used, "credits_remaining": remaining,
+                        "credits_last": last,
+                        "latency_ms": round((time.time() - t0) * 1000, 1)}
+            body = r.json()
+    except Exception as exc:                                   # noqa: BLE001
+        return {"ok": False, "status": None, "refusal": R_PROVIDER_ERROR,
+                "error": type(exc).__name__, "credits_used": None,
+                "credits_remaining": None, "credits_last": None,
+                "latency_ms": round((time.time() - t0) * 1000, 1)}
+    received = time.time()
+    if not isinstance(body, dict):
+        return {"ok": False, "status": 200, "refusal": R_PROVIDER_ERROR,
+                "error": "NOT_ONE_EVENT", "credits_used": used,
+                "credits_remaining": remaining, "credits_last": last,
+                "latency_ms": round((received - t0) * 1000, 1)}
+    return {"ok": True, "status": 200, "event": body,
+            "credits_used": used, "credits_remaining": remaining,
+            "credits_last": last, "received_at": received,
+            "latency_ms": round((received - t0) * 1000, 1)}
+
+
+#: The operator's stop for the bounded corroboration read. Off means a budget
+#: of zero: every read is refused CORROBORATION_READ_BUDGET by name, and only
+#: an already-held observation can corroborate.
+CORROBORATION_READS_ENV = "PINNAPI_CORROBORATION_READS"
+
+
+def _corroboration_stats() -> dict:
+    return {"assessed": 0, "qualified": 0, "refusals": {},
+            "reads": {"attempted": 0, "ok": 0, "failed": 0,
+                      "budget_refused": 0, "latency_ms": [],
+                      "credits_last": []}}
+
+
+def _corroboration_assess(quote: dict, observation, contract: dict,
+                          *, at: float) -> dict:
+    """`valuation_corroboration.assess` with THIS collector's rules bound in:
+    the odds-API path's own counter (`pinnacle_h2h`) over the same
+    SHARP_BOOKS, the unchanged floor (`ext.MIN_OUTCOME_BOOKS`) and the age
+    bound `PINNACLE_MAX_AGE_S` (see the note above `fetch_event_odds`)."""
+    from .. import valuation_corroboration as corr
+    return corr.assess(
+        reference=quote.get("reference_input"), wanted=list(quote["prices"]),
+        selection=quote.get("home"), observation=observation,
+        count_fn=pinnacle_h2h, counted_books=SHARP_BOOKS,
+        min_books=ext.MIN_OUTCOME_BOOKS, max_age_s=PINNACLE_MAX_AGE_S,
+        at=at, contract=contract, settlement_of=vset.BOOK_SETTLEMENT)
+
+
+async def _corroboration_observation(quote: dict, event: dict, contract: dict,
+                                     *, sport_key: str, received_at,
+                                     stream: bool, api_key: str,
+                                     credits: dict, stats: dict) -> tuple:
+    """WHICH independent observation the decision will be assessed on.
+
+    The held odds-API read first: the cycle's own fetch (periodic) or the WS
+    seed's stored discovery read. If it does not qualify and this is a
+    WebSocket evaluation, ONE bounded single-event read, under
+    `valuation_corroboration.BUDGET` (per event per 60 s, per minute, per
+    hour). The periodic path never reads again: its own fetch is the newest
+    odds-API read there is, and a per-event read there would multiply the
+    metered spend. Returns (observation, read evidence, held assessment).
+    """
+    from .. import valuation_corroboration as corr
+    held = {"provider": devig.PROVIDER, "event": event,
+            "received_at": received_at, "sport_key": sport_key,
+            "source": (corr.SRC_STORED_DISCOVERY if stream
+                       else corr.SRC_THIS_CYCLE)}
+    pre = _corroboration_assess(quote, held, contract, at=time.time())
+    read = {"attempted": False, "ok": None, "refusal": None}
+    if pre["qualified"]:
+        read["why_not"] = "THE_HELD_OBSERVATION_QUALIFIED"
+        return held, read, pre
+    if not stream:
+        read["why_not"] = "PERIODIC_PATH_USES_ITS_OWN_READ"
+        return held, read, pre
+    if str(os.environ.get(CORROBORATION_READS_ENV, "on")).strip().lower() in (
+            "off", "0", "false", "no"):
+        budget = {"ok": False, "refusal": corr.R_BUDGET,
+                  "limit": CORROBORATION_READS_ENV + "_OFF"}
+    else:
+        budget = corr.BUDGET.acquire(event.get("id"))
+    read["budget"] = budget
+    if not budget.get("ok"):
+        read["refusal"] = corr.R_BUDGET
+        stats["reads"]["budget_refused"] += 1
+        return held, read, pre
+    got = await fetch_event_odds(sport_key, event.get("id"), api_key=api_key)
+    stats["reads"]["attempted"] += 1
+    read.update(attempted=True, ok=bool(got.get("ok")),
+                status=got.get("status"), error=got.get("error"),
+                latency_ms=got.get("latency_ms"),
+                credits_used=got.get("credits_used"),
+                credits_remaining=got.get("credits_remaining"),
+                credits_last=got.get("credits_last"),
+                endpoint="/v4/sports/{sport}/events/{eventId}/odds",
+                received_at=got.get("received_at"))
+    credits["used"] = got.get("credits_used") or credits["used"]
+    credits["remaining"] = (got.get("credits_remaining")
+                            or credits["remaining"])
+    if got.get("latency_ms") is not None:
+        stats["reads"]["latency_ms"].append(got["latency_ms"])
+    if got.get("credits_last") is not None:
+        stats["reads"]["credits_last"].append(got["credits_last"])
+    if not got.get("ok"):
+        stats["reads"]["failed"] += 1
+        read["refusal"] = got.get("refusal")
+        return held, read, pre
+    stats["reads"]["ok"] += 1
+    return ({"provider": devig.PROVIDER, "event": got["event"],
+             "received_at": got["received_at"], "sport_key": sport_key,
+             "source": corr.SRC_BOUNDED_READ}, read, pre)
+
+
+def _corroboration_final(quote, observation, contract, read, pre,
+                         *, at: float, stats: dict) -> dict:
+    """The verdict AT THE DECISION INSTANT, with how the observation was got.
+    A refused budget is the reason when nothing current was held."""
+    from .. import valuation_corroboration as corr
+    out = _corroboration_assess(quote, observation, contract, at=at)
+    out["read"] = read
+    out["held_observation_assessment"] = {
+        "source": (pre.get("corroborating") or {}).get("source"),
+        "qualified": pre.get("qualified"), "refusal": pre.get("refusal"),
+        "why": pre.get("why"), "assessed_at": pre.get("decision_at")}
+    if not out["qualified"] and read.get("refusal") == corr.R_BUDGET:
+        out["observation_refusal"] = out["refusal"]
+        out["refusal"] = corr.R_BUDGET
+        out["why"] = ("no current observation was held (%s) and the bounded "
+                      "read was refused by its budget (%s)"
+                      % (out["observation_refusal"],
+                         (read.get("budget") or {}).get("limit")))
+    stats["assessed"] += 1
+    if out["qualified"]:
+        stats["qualified"] += 1
+    else:
+        stats["refusals"][out["refusal"]] = \
+            stats["refusals"].get(out["refusal"], 0) + 1
+    return out
+
+
 # ── the venue side, read in the same cycle ──────────────────────────
 
 #: A market our table still calls open, that the venue has forgotten. Run
@@ -7308,6 +7498,9 @@ async def cycle(conn, *, stream_seed=None) -> dict:
     written = 0
     evaluated = 0
     credits = {"used": None, "remaining": None}
+    # PINNAPI OUTCOME-DEPTH CORROBORATION: assessed, qualified, refused by
+    # name, and every bounded single-event read with its latency and cost.
+    corroboration = _corroboration_stats()
     # WHAT THE FRESHNESS KNOB ACTUALLY DID THIS CYCLE, reported rather than
     # inferred from the credit count. Both are 0 at the default setting.
     odds_refetches = 0
@@ -8133,6 +8326,26 @@ async def cycle(conn, *, stream_seed=None) -> dict:
             srule["fixture_metadata"] = fmeta
             srule["quote_context_evidence"] = ctx_ev
 
+            # ── THE INDEPENDENT OBSERVATION FOR A PINNAPI READ ──────────
+            # Chosen BEFORE the decision instant, so a bounded read's time is
+            # inside `decision_lag_s` and its stamps can never post-date the
+            # decision by construction. Assessed AT the decision instant below.
+            _ws_ref = ((quote.get("reference_input") or {}).get("provider")
+                       == "pinnapi.com/raw-websocket")
+            _corr_contract = {"event_key": quote.get("event_id"),
+                              "selection": quote.get("home"),
+                              "period": ident["period"], "line": None,
+                              "market": "h2h",
+                              "us_market_slug": ident.get("us_market_slug"),
+                              "settlement_rule": srule["book_rule"]}
+            if _ws_ref:
+                _corr_obs, _corr_read, _corr_pre = \
+                    await _corroboration_observation(
+                        quote, event, _corr_contract, sport_key=sport_key,
+                        received_at=received_at,
+                        stream=stream_seed is not None, api_key=api_key,
+                        credits=credits, stats=corroboration)
+
             # ── THE DECISION INSTANT, TAKEN HERE ────────────────────
             # After the venue book read, the venue rules read and the
             # fixture-metadata read. Both clocks are re-aged against it
@@ -8155,15 +8368,19 @@ async def cycle(conn, *, stream_seed=None) -> dict:
                 extra = [calibration_only["refusal"]] + [
                     c for c in extra if c != calibration_only["refusal"]]
 
-            # Independent-book depth is re-aged too; a cached discovery
-            # payload must not supply stale corroboration for a WS price.
-            if ((quote.get("reference_input") or {}).get("provider")
-                    == "pinnapi.com/raw-websocket"):
-                from .. import pinnapi_primary as primary
-                quote["depth"], _independent = primary.book_depth(
-                    event, quote["prices"], SHARP_BOOKS,
-                    at=now, max_age_s=PINNACLE_MAX_AGE_S)
-                quote["reference_input"]["independent_books"] = _independent
+            # A PINNAPI READ IS ONE BOOK, AND ITS RECORD SAYS 1. Other books
+            # never enter `outcome_books`: they are an independent observation,
+            # assessed at THIS instant (re-aged, so a cached discovery payload
+            # cannot supply stale corroboration) and carried as its own
+            # evidence. Only a qualified verdict can meet the unchanged floor,
+            # inside `ext.evaluate`.
+            corr_verdict = None
+            if _ws_ref:
+                quote["depth"] = {n: 1 for n in quote["prices"]}
+                quote["reference_input"].pop("independent_books", None)
+                corr_verdict = _corroboration_final(
+                    quote, _corr_obs, _corr_contract, _corr_read, _corr_pre,
+                    at=now, stats=corroboration)
             reference_check = validate_primary_pinnacle(quote, at=now)
             if not reference_check["ok"]:
                 extra = [reference_check["reason"]] + extra
@@ -8310,6 +8527,7 @@ async def cycle(conn, *, stream_seed=None) -> dict:
                 fee_fn=fee_fn,
                 now=now,
                 outcome_books=quote["depth"].get(str(quote["home"])),
+                corroboration=corr_verdict,
                 armed=True,
                 # INVERTED ONCE, INSIDE evaluate. The loop does not
                 # pre-invert the probability; it states which event the
@@ -8454,6 +8672,23 @@ async def cycle(conn, *, stream_seed=None) -> dict:
             # Invalid authority/input removes probability as well as admission:
             # paper policies may intentionally disregard other lane refusals.
             from .. import pinnapi_primary as primary
+            if corr_verdict is not None:
+                # THE COMPACT BLOCK IN THE REFERENCE EVIDENCE, so the paper
+                # decision that reads this valuation carries it; the full
+                # verdict is its own row (migration 195), written with this one.
+                quote["reference_input"]["corroboration"] = {
+                    k: corr_verdict.get(k) for k in (
+                        "version", "qualified", "refusal", "why",
+                        "decision_at", "corroborating_outcome_books",
+                        "min_outcome_books", "max_age_s", "max_age_basis",
+                        "outcome_books_basis", "pinnapi", "identity")}
+                quote["reference_input"]["corroboration"]["corroborating"] = {
+                    k: (corr_verdict.get("corroborating") or {}).get(k)
+                    for k in ("provider", "source", "event_id", "observed_at",
+                              "received_at", "age_s", "outcome_books",
+                              "books", "count_function")}
+                quote["reference_input"]["corroboration"]["pinnapi_outcome_books"] = \
+                    rec.get("outcome_books")
             primary.stamp_record(rec, quote, reference_check)
             if calibration_only is not None:
                 # ── A CALIBRATION-ONLY RECORD IS WRITTEN AND GOES NO FURTHER ──
@@ -8686,7 +8921,8 @@ async def cycle(conn, *, stream_seed=None) -> dict:
     if stream_seed is not None:
         return {"ran": True, "state": "WS_PAPER_EVALUATED", "written": written,
                 "refusals": dict(tally), "candidate_outcomes": candidate_outcomes,
-                "valuation_ids": list(stream_seed["valuation_ids"])}
+                "valuation_ids": list(stream_seed["valuation_ids"]),
+                "corroboration": corroboration, "credits": credits}
 
     # THE OUTCOME JOIN RUNS EVERY CYCLE, bounded. Collection has to
     # progress on its own: a calibration that waits for someone to
@@ -8729,6 +8965,9 @@ async def cycle(conn, *, stream_seed=None) -> dict:
            C_CALIBRATION_ONLY_RECORDED: cal_only["recorded"],
            "calibration_only": cal_only,
            "refusals": tally, "credits": credits,
+           # PINNAPI OUTCOME-DEPTH CORROBORATION (migration 195): the
+           # periodic path assesses its own read; no extra fetch is made here.
+           "corroboration": corroboration,
            # ── THE FRESHNESS KNOB, AND WHAT IT COST ──────────────────
            # Both counters are 0 at the default setting, where no extra
            # fetch is ever issued. Reported unconditionally so that a
