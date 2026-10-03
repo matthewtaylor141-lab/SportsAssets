@@ -511,6 +511,84 @@ def compare_to_baseline(pairs, baseline_p) -> dict:
     }
 
 
+#: Probabilities are clipped to [LOG_LOSS_EPS, 1 - LOG_LOSS_EPS] before the
+#: logarithm, so a stated 0 or 1 that turns out wrong scores a large finite
+#: penalty (-ln 1e-6 = 13.8) instead of infinity. Declared, and reported with
+#: every log loss, because the clip changes the number.
+LOG_LOSS_EPS = 1e-6
+
+
+def log_loss(pairs, *, eps=LOG_LOSS_EPS):
+    """Mean negative log likelihood of the outcomes under the stated
+    probabilities (natural log). None on an empty set: no events, no score.
+
+    Added for the shadow calibration engine (sportsassets/intel/
+    calibration.py), which extends this module rather than re-deriving the
+    scoring rules: a Brier and a log loss answer different questions --
+    the log loss punishes confident misses far harder -- so both are
+    reported."""
+    pairs = list(pairs)
+    if not pairs:
+        return None
+    total = 0.0
+    for p, o in pairs:
+        q = min(max(float(p), eps), 1.0 - eps)
+        total += -math.log(q) if int(o) == 1 else -math.log(1.0 - q)
+    return total / len(pairs)
+
+
+def wilson_interval(successes, n, *, z=CONFIDENCE_Z):
+    """The Wilson score interval for a binomial proportion, (lo, hi).
+
+    (None, None) when n is 0: no trials is no interval, never [0, 0]. Wilson
+    rather than the normal approximation because the normal interval
+    collapses to a point at 0 or n successes and leaves [0, 1] for small n."""
+    n = int(n)
+    if n <= 0:
+        return (None, None)
+    k = float(successes)
+    phat = k / n
+    z2 = z * z
+    denom = 1.0 + z2 / n
+    centre = (phat + z2 / (2.0 * n)) / denom
+    half = (z / denom) * math.sqrt(max(0.0, phat * (1.0 - phat) / n
+                                       + z2 / (4.0 * n * n)))
+    return (max(0.0, centre - half), min(1.0, centre + half))
+
+
+def bootstrap_ci(pairs, stat, *, reps=400, seed=20261003, alpha=0.05):
+    """A percentile bootstrap interval for `stat(pairs)`, (lo, hi).
+
+    DETERMINISTIC: a fixed seed, so the same rows always produce the same
+    interval (the reproducibility rule above). (None, None) with fewer than
+    two pairs -- one observation has no sampling distribution."""
+    import random
+
+    pairs = list(pairs)
+    n = len(pairs)
+    if n < 2:
+        return (None, None)
+    rng = random.Random(seed)
+    stats = []
+    for _ in range(int(reps)):
+        sample = [pairs[rng.randrange(n)] for _ in range(n)]
+        v = stat(sample)
+        if v is not None:
+            stats.append(float(v))
+    if not stats:
+        return (None, None)
+    stats.sort()
+    lo_i = int(math.floor((alpha / 2.0) * (len(stats) - 1)))
+    hi_i = int(math.ceil((1.0 - alpha / 2.0) * (len(stats) - 1)))
+    return (stats[lo_i], stats[hi_i])
+
+
+def brier(pairs):
+    """The Brier score, or None on an empty set (never 0)."""
+    pairs = list(pairs)
+    return _brier(pairs) if pairs else None
+
+
 def evaluate(rows, *, measured_at=None) -> dict:
     """The calibration measurement. Pure: it reads rows and nothing else.
 

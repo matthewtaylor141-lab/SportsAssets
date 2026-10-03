@@ -588,3 +588,13 @@ tests/test_workers_hold_no_venue_write.py
 # The authorized workers release actions: branch set (autoDeploy off) and
 # exact-SHA deploy that refuses while autoDeploy is on.
 tests/test_render_ops_workers_release.py
+# The SHADOW investment-intelligence layer (migration 208): it can reach no
+# venue, order or limit, writes only intel_* tables (Audrey: a finding), and
+# its calibration, attribution, risk (with Audrey's independent recompute),
+# regime, sizing and allocation arithmetic is pinned.
+tests/test_intel_is_shadow_only.py
+tests/test_intel_calibration.py
+tests/test_intel_attribution.py
+tests/test_intel_risk.py
+tests/test_intel_regime.py
+tests/test_intel_sizing_allocator.py
