@@ -639,24 +639,22 @@ def test_nothing_installed_is_not_subscribed_and_the_default_is_off(
     assert SUB.want(["aec-a"])["queued"] == 0
 
 
-def test_start_default_arms_with_the_configured_key_when_switched_on(
-        monkeypatch):
-    venue = FakeVenue([{"then": "stay"}])
+def test_the_shared_source_is_the_funded_key_and_is_refused(monkeypatch):
+    """OWNER TOPOLOGY 2026-10-03: no execution identity reads market data.
+    `shared` names the funded key (pmus_key_id), so choosing it explicitly no
+    longer arms anything: it refuses by name and builds no stream. (Arming
+    with a dedicated key is test_the_dedicated_key_is_what_the_stream_is_built_with.)"""
+    built = []
+    monkeypatch.setattr(SUB, "MarketSubscription",
+                        lambda *a, **k: built.append(a))
     monkeypatch.setenv(SUB.ENV_FLAG, "on")
     monkeypatch.setenv(SUB.ENV_KEY_SOURCE, SUB.KEY_SHARED)
-    real = SUB.MarketSubscription
-    monkeypatch.setattr(SUB, "MarketSubscription",
-                        lambda k, s_: real(k, s_, ws_factory=venue))
     got = SUB.start_default(settings=types.SimpleNamespace(
         pmus_key_id=KEY_ID, pmus_secret_key=SECRET))
-    assert got["started"] is True
-    SUB.active().stream._idle_s = 0.005
-    deadline = time.time() + 5.0
-    while not venue.sockets:
-        assert time.time() < deadline
-        time.sleep(0.01)
-    assert venue.credentials_seen == [(KEY_ID, SECRET)]
-    assert SUB.shutdown_default(wait_s=5.0)["stopped"] is True
+    assert got["state"] == SUB.S_MD_KEY_IS_EXECUTION_KEY and not built
+    assert got["started"] is False
+    assert KEY_ID not in repr(SUB.heartbeat_digest())
+    assert SECRET not in repr(SUB.heartbeat_digest())
 
 
 def test_the_dedicated_key_is_the_default_and_the_shared_key_is_never_implied(
@@ -970,6 +968,20 @@ def test_no_order_path_is_reachable_from_the_subscription():
                       + ":" + a.name for a in node.names}
     allowed = {"logging", "os", "threading", "time", "__future__:annotations",
                ".:bettor_market_stream", ".:bettor_stream_currency",
-               ".config:settings"}
+               ".config:settings",
+               # the identity guard (2026-10-03); its own imports are
+               # enumerated below
+               ".:market_data_identity"}
     assert names <= allowed, names - allowed
     assert SUB.describe()["submits_orders"] is False
+    from sportsassets import market_data_identity as MDI
+    tree = ast.parse(inspect.getsource(MDI))
+    mdi_names = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            mdi_names |= {a.name for a in node.names}
+        elif isinstance(node, ast.ImportFrom):
+            mdi_names |= {"%s%s" % ("." * node.level, node.module or "")
+                          + ":" + a.name for a in node.names}
+    assert mdi_names <= {"hashlib", "os", "__future__:annotations",
+                         ".:pmx_institutional"}, mdi_names

@@ -94,6 +94,8 @@ def market_data_key() -> dict:
     """Presence and fingerprint of the market-data key, and that it is a
     DIFFERENT identity from both execution keys. Names and fingerprints
     only; no value leaves the process."""
+    from . import market_data_identity as mdi
+
     md, msec = _env(MD_KEY_ID_ENV), _env(MD_SECRET_ENV)
     kid, funded = _env(KEY_ID_ENV), _env(FUNDED_KEY_ID_ENV)
     return {"names": {MD_KEY_ID_ENV: bool(md), MD_SECRET_ENV: bool(msec)},
@@ -102,7 +104,12 @@ def market_data_key() -> dict:
             "distinct_from_execution_mirror_key": (None if not (md and kid)
                                                    else md != kid),
             "distinct_from_funded_key": (None if not (md and funded)
-                                         else md != funded)}
+                                         else md != funded),
+            # EVERY candidate market-data credential in this process -- the
+            # institutional PMX client as well as the PMUS_MD key -- with its
+            # type, presence, identifier fingerprints, verifiable scopes and
+            # distinctness from the retail execution and funded keys.
+            "inventory": mdi.inventory()}
 
 
 def _amount(v: Any) -> Any:

@@ -156,8 +156,9 @@ S_MD_KEY_IS_EXECUTION_KEY = "MARKET_DATA_KEY_IS_AN_EXECUTION_KEY"
 #: WHICH CREDENTIAL THE SUBSCRIPTION MAY USE. "dedicated" (the default) uses
 #: only PMUS_MD_KEY_ID/PMUS_MD_SECRET_KEY -- a SEPARATE ORDINARY Polymarket US
 #: API key used for market data -- and waits, by name, when they are absent.
-#: "shared" uses the venue key the protected worker also streams with and must
-#: be chosen explicitly. WHAT THE SEPARATION DOES AND DOES NOT DO: it gives
+#: "shared" named the venue key the protected worker also streams with -- the
+#: FUNDED key -- and is now REFUSED (MARKET_DATA_KEY_IS_AN_EXECUTION_KEY): no
+#: execution identity is used for market data. WHAT THE SEPARATION DOES AND DOES NOT DO: it gives
 #: separate revocation and MAY isolate limits the venue applies per key; it
 #: does NOT establish protection from limits applied per account, participant,
 #: endpoint or IP, none of which is established. This application path only
@@ -772,10 +773,17 @@ def start_default(*, settings=None) -> dict:
                          "unless %s=shared is set explicitly" % ENV_KEY_SOURCE))
                 return dict(_LAST_START, started=False)
             # NEVER MIX IDENTITIES: the market-data key must not be the
-            # retail execution key or the funded key.
+            # retail execution key or the funded key -- by key id OR by
+            # secret, from the environment OR from settings.
+            from . import market_data_identity as _mdi
             execution_ids = {str(os.environ.get("PMUS_EXECMIRROR_KEY_ID") or "").strip(),
                              str(getattr(settings, "pmus_key_id", "") or "").strip()}
-            if str(key_id).strip() in execution_ids - {""}:
+            execution_secrets = {
+                str(os.environ.get("PMUS_EXECMIRROR_SECRET_KEY") or "").strip(),
+                str(getattr(settings, "pmus_secret_key", "") or "").strip()}
+            if (str(key_id).strip() in execution_ids - {""}
+                    or str(secret).strip() in execution_secrets - {""}
+                    or _mdi.guard_key_pair(key_id, secret) is not None):
                 _LAST_START.update(
                     state=S_MD_KEY_IS_EXECUTION_KEY,
                     why=("PMUS_MD_KEY_ID is an execution identity (the retail "
@@ -783,8 +791,19 @@ def start_default(*, settings=None) -> dict:
                          "subscription refuses to use it"))
                 return dict(_LAST_START, started=False)
         else:
+            # "shared" IS THE FUNDED KEY (PMUS_KEY_ID / PMUS_SECRET_KEY). The
+            # identity rule refuses any market-data use of the funded key or
+            # the retail execution key, so the shared source is refused by
+            # name rather than honoured (owner topology, 2026-10-03).
             key_id = getattr(settings, "pmus_key_id", None)
             secret = getattr(settings, "pmus_secret_key", None)
+            if key_id or secret:
+                _LAST_START.update(
+                    state=S_MD_KEY_IS_EXECUTION_KEY,
+                    why=("%s=shared names the funded key; the market-data "
+                         "subscription refuses to use an execution identity"
+                         % ENV_KEY_SOURCE))
+                return dict(_LAST_START, started=False)
         if not key_id or not secret:
             _LAST_START.update(state=S_NO_CREDENTIALS,
                                why="the venue key is not configured in this "

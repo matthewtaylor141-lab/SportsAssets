@@ -540,3 +540,15 @@ tests/test_agent_intelligence_reports.py
 # FRESH / STALE_ENTRY_TIME / UNAVAILABLE evidence; stale EV never shown as
 # current; no sale or liquidation on stale or missing probability.
 tests/test_xavier_review_probability_freshness.py
+# Institutional market-data identity (2026-10-03): every candidate credential
+# (PMX institutional client, PMUS_MD retail key) reported by type, presence,
+# identifier fingerprint, verifiable scopes and distinctness; the guard
+# refuses any market-data use of the retail execution key or the funded key
+# (incl. BETTOR_MARKET_SUBSCRIPTION_KEY=shared); the read-only permissions
+# probe makes a granted write:orders visible.
+tests/test_institutional_market_data_identity.py
+# Institutional gRPC stream: resident books with connection/market identity,
+# venue and receipt timestamps, depth and state; a connection drop, a
+# backwards venue clock or a venue refusal fails closed until a fresh full
+# snapshot; no scale, hidden, crossed or not-open books refused by name.
+tests/test_institutional_stream.py

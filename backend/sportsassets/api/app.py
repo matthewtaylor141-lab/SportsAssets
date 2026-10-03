@@ -2421,8 +2421,26 @@ async def admin_execmirror_probe(response: Response,
     if action == "markets":
         return await asyncio.to_thread(EP.market_rules,
                                        list(b.get("slugs") or []))
+    if action in ("market_data", "md_verify"):
+        # THE MARKET-DATA IDENTITY (`sportsassets.market_data_identity`).
+        # "market_data": every candidate credential in THIS process -- type,
+        # presence, identifier fingerprints, distinctness (optionally against
+        # `peer_fingerprints` printed by the other service). "md_verify": the
+        # PMX credential's granted scopes and /v1/whoami -- a token mint and
+        # one GET, nothing else. Neither returns a value or a token.
+        from .. import market_data_identity as MDI
+        from .. import institutional_stream as IS
+        peers = {k: str(v) for k, v in dict(b.get("peer_fingerprints")
+                                            or {}).items()
+                 if k in ("retail_execution", "funded") and v}
+        if action == "market_data":
+            return dict(MDI.inventory(peer_fingerprints=peers),
+                        stream=IS.digest())
+        return await asyncio.to_thread(MDI.verify_permissions,
+                                       peer_fingerprints=peers)
     raise HTTPException(status_code=400,
-                        detail="action: keys | account | markets")
+                        detail="action: keys | account | markets | "
+                               "market_data | md_verify")
 
 
 @app.post("/api/admin/execmirror/control",
