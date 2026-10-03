@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#090d14">
+  <meta name="robots" content="noindex,nofollow">
+  <meta name="description" content="Bettor EV Engine — small live execution: each paper (simulated) order beside the actual venue order derived from it.">
+  <title>Small Live · Paper vs Actual | Bettor EV Engine</title>
+  <link rel="stylesheet" href="command.css">
+  <link rel="stylesheet" href="desk.css">
+</head>
+<body class="deskbody">
+  <a class="skip-link" href="#livemain">Skip to the trades</a>
+
+  <header class="deskbar">
+    <div class="deskbar-brand">
+      <span class="deskmark">B</span>
+      <span class="deskname">Small Live · Paper vs Actual</span>
+      <span id="mirror-pill" class="pill pill-grey">MIRROR —</span>
+    </div>
+    <nav class="desknav" aria-label="Command navigation">
+      <a href="index.html">Command</a>
+      <a href="desk.html">Desk</a>
+      <a href="center.html">Command Centre</a>
+      <a href="live.html" aria-current="page">Small live</a>
+    </nav>
+  </header>
+
+  <main id="livemain" class="deskmain">
+    <div id="livestrip"></div>
+    <div id="livefilters" class="sl-filters" role="group" aria-label="Filters"></div>
+    <div id="livestate" class="deskstate" role="status" aria-live="polite">
+      Reading the execution mirror…
+    </div>
+    <div id="liverows"></div>
+  </main>
+
+  <footer class="deskfoot">
+    <span id="asof">—</span>
+    <span>PAPER is simulated. ACTUAL is the live venue account, read from the venue's own order records. The two are never summed. A missing figure reads "unavailable", never zero. This page is read-only and sends nothing to any venue.</span>
+  </footer>
+
+  <script src="config.js"></script>
+  <script src="unlock.js"></script>
+  <script src="core.js"></script>
+  <script src="live.js"></script>
+</body>
+</html>

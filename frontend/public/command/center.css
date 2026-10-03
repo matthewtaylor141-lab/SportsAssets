@@ -131,6 +131,7 @@ body.cc {
   cursor: pointer; white-space: nowrap;
 }
 .cc-tab.cc-on { color: var(--cc-ink); border-bottom-color: var(--cc-accent); }
+a.cc-tab { text-decoration: none; }
 .cc-tab:focus-visible { outline: 2px solid var(--cc-accent); outline-offset: -2px; }
 
 /* ── panels ─────────────────────────────────────────────────────── */

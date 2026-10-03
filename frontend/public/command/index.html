@@ -24,6 +24,15 @@
             border:1px solid #1d3e5e;background:#10263c;color:#8fc4ff;
             font:600 13px/1 ui-sans-serif,system-ui,sans-serif;
             text-decoration:none">Bettor desk →</a>
+  <!-- SMALL LIVE · PAPER vs ACTUAL: the same plain-anchor pattern as the
+       desk jump above, stacked over it, so the live execution view stays
+       reachable even if app.js fails. -->
+  <a class="live-jump" href="live.html"
+     style="position:fixed;right:14px;bottom:56px;z-index:40;
+            padding:9px 14px;border-radius:999px;
+            border:1px solid #1d4437;background:#102b22;color:#3ddc97;
+            font:600 13px/1 ui-sans-serif,system-ui,sans-serif;
+            text-decoration:none">Small live · paper vs actual →</a>
   <div id="app"><div class="boot"><div class="boot-mark">B</div><p>Opening Command…</p></div></div>
   <div id="overlay-root"></div>
   <div id="toast" role="status" aria-live="polite"></div>

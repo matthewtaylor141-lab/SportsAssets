@@ -2532,6 +2532,29 @@ async def command_execmirror(response: Response) -> dict:
         return await V.view(c)
 
 
+@app.get("/api/command/small-live", dependencies=[Depends(require_command)])
+async def command_small_live(
+        response: Response,
+        view: str | None = Query(None, pattern="^(paper|polymarket|kalshi)$"),
+        status: str | None = Query(None, pattern="^(open|filled|closed|refused)$"),
+        limit: int = Query(100, ge=1, le=500)) -> dict:
+    """Small Live · Paper vs Actual (`execmirror_view.small_live`): one row
+    per order the execution mirror considered -- the paper decision, the
+    SIMULATED paper order and fills, the ACTUAL venue order (or the reason
+    none was sent) and venue fills, the difference, and the Xavier / Audrey
+    records. Read-only; a missing figure is null, never zero. KALSHI is
+    listed as NOT_CONNECTED (credentials not configured)."""
+    from .. import execmirror_view as V
+    response.headers["Cache-Control"] = "no-store"
+    pool = await get_pool()
+    async with pool.acquire() as c:
+        if not await c.fetchval("SELECT to_regclass('execmirror_control') IS NOT NULL"):
+            return {"status": "UNAVAILABLE", "why": "execution mirror schema not applied",
+                    "title": "Small Live · Paper vs Actual", "rows": [],
+                    "venues": V.venues({}, None)}
+        return await V.small_live(c, view=view, status=status, limit=limit)
+
+
 @app.get("/api/admin/pinnapi-feed/state",
          dependencies=[Depends(require_admin)])
 async def admin_pinnapi_feed_state(response: Response) -> dict:

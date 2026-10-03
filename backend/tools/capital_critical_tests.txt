@@ -502,3 +502,5 @@ tests/test_pinnapi_reactive_integration.py
 # unknown/un-promoted versions never reach the live adapter.
 tests/test_execmirror.py
 tests/test_execmirror_probe.py
+# Small Live · Paper vs Actual management view (/api/command/small-live): decision -> paper -> mirror -> venue fill rows, exclusion reasons, filters, null-not-zero, KALSHI NOT_CONNECTED, command read guard.
+tests/test_small_live_view.py
