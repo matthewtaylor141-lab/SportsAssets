@@ -41,12 +41,18 @@ ZERO_FEE = H.flat_fee(0.0)
 # ═════════════════════════════════════════════════════════════════════
 
 def test_the_shipped_rule_is_half_a_probability_point():
-    assert PB.CG_VERSION == "PINNACLE_COMPLETED_GAME_PAPER_V2"
+    # V3 (2026-10-03) keeps V2's threshold and fee rules unchanged; only the
+    # probability's qualification differs (PinnAPI is the sole authority).
+    assert PB.CG_VERSION == "PINNACLE_COMPLETED_GAME_PAPER_V3"
+    assert PB.CG_VERSION_V2 == "PINNACLE_COMPLETED_GAME_PAPER_V2"
     assert PB.CG_PARAMETERS_V2 == {"min_gross_edge_pp": 0.5}
     assert PB.CG_PARAMETER_BOUNDS["min_gross_edge_pp"][0] == 0.5
     d = PB.describe()["completed_game"]
     assert d["shipped_min_edge_probability"] == 0.005
-    assert d["previous_versions"] == {PB.CG_VERSION_V1: {"min_edge_pp": 5.0}}
+    assert d["previous_versions"] == {
+        PB.CG_VERSION_V1: {"min_edge_pp": 5.0},
+        PB.CG_VERSION_V2: {"min_edge_pp": 0.5,
+                           "probability_authority": "MULTI_BOOK_OUTCOME_FLOOR"}}
 
 
 @pytest.mark.parametrize("p,price,clears", [

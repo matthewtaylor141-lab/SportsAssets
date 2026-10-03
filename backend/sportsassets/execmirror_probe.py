@@ -80,7 +80,29 @@ def keys_present() -> dict:
             "distinct_from_funded_key": (None if not (kid and funded)
                                          else kid != funded),
             "funded_key_present_in_this_service": bool(funded),
-            "key_fingerprint": fingerprint(kid)}
+            "key_fingerprint": fingerprint(kid),
+            "market_data": market_data_key()}
+
+
+#: THE INSTITUTIONAL MARKET-DATA IDENTITY ($0 balance, market data only) --
+#: never the retail execution key, never the funded key.
+MD_KEY_ID_ENV = "PMUS_MD_KEY_ID"
+MD_SECRET_ENV = "PMUS_MD_SECRET_KEY"
+
+
+def market_data_key() -> dict:
+    """Presence and fingerprint of the market-data key, and that it is a
+    DIFFERENT identity from both execution keys. Names and fingerprints
+    only; no value leaves the process."""
+    md, msec = _env(MD_KEY_ID_ENV), _env(MD_SECRET_ENV)
+    kid, funded = _env(KEY_ID_ENV), _env(FUNDED_KEY_ID_ENV)
+    return {"names": {MD_KEY_ID_ENV: bool(md), MD_SECRET_ENV: bool(msec)},
+            "complete": bool(md and msec),
+            "key_fingerprint": fingerprint(md),
+            "distinct_from_execution_mirror_key": (None if not (md and kid)
+                                                   else md != kid),
+            "distinct_from_funded_key": (None if not (md and funded)
+                                         else md != funded)}
 
 
 def _amount(v: Any) -> Any:

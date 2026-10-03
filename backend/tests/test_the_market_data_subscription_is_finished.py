@@ -688,6 +688,28 @@ def test_the_dedicated_key_is_the_default_and_the_shared_key_is_never_implied(
     assert got["state"] == SUB.S_WAITING_FOR_DEDICATED_KEY and not built
 
 
+def test_the_market_data_key_is_never_an_execution_identity(monkeypatch):
+    """The institutional market-data identity and the retail execution
+    identity are never mixed: a PMUS_MD_KEY_ID equal to the retail mirror key
+    or to the funded key refuses by name and builds nothing."""
+    built = []
+    monkeypatch.setattr(SUB, "MarketSubscription",
+                        lambda *a, **k: built.append(a))
+    monkeypatch.setenv(SUB.ENV_FLAG, "on")
+    monkeypatch.delenv(SUB.ENV_KEY_SOURCE, raising=False)
+    monkeypatch.setenv("PMUS_EXECMIRROR_KEY_ID", "retail-" + KEY_ID)
+    got = SUB.start_default(settings=types.SimpleNamespace(
+        pmus_key_id=KEY_ID, pmus_secret_key=SECRET,
+        pmus_md_key_id="retail-" + KEY_ID, pmus_md_secret_key="x"))
+    assert got["state"] == SUB.S_MD_KEY_IS_EXECUTION_KEY and not built
+    SUB.reset()
+    got = SUB.start_default(settings=types.SimpleNamespace(
+        pmus_key_id=KEY_ID, pmus_secret_key=SECRET,
+        pmus_md_key_id=KEY_ID, pmus_md_secret_key="x"))
+    assert got["state"] == SUB.S_MD_KEY_IS_EXECUTION_KEY and not built
+    assert KEY_ID not in repr(SUB.heartbeat_digest())
+
+
 def test_the_dedicated_key_is_what_the_stream_is_built_with(monkeypatch):
     venue = FakeVenue([{"then": "stay"}])
     monkeypatch.setenv(SUB.ENV_FLAG, "on")

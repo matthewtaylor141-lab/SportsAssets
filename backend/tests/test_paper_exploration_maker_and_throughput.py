@@ -139,7 +139,7 @@ def test_the_owner_limits_and_labels_are_the_authorized_ones():
     assert EXPLORE in PB.BENCHMARK_STRATEGIES
     assert EXPLORE in PB.COMPLETED_GAME_STRATEGIES
     # the investment policy and its entry requirements are unchanged
-    assert PB.CG_VERSION == "PINNACLE_COMPLETED_GAME_PAPER_V2"
+    assert PB.CG_VERSION == "PINNACLE_COMPLETED_GAME_PAPER_V3"
     assert PB.CG_PARAMETERS_V2 == {"min_gross_edge_pp": 0.5}
 
 

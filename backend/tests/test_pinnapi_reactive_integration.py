@@ -44,6 +44,7 @@ import types
 
 import pytest
 
+from sportsassets import bettor_external_shadow as EXT
 from sportsassets import bettor_paper_guard as G
 from sportsassets import bettor_paper_session as S
 from sportsassets import pinnapi_feed as F
@@ -426,6 +427,91 @@ async def test_a_changed_frame_evaluates_through_the_real_cycle_and_paper_hook(
     assert await _counts(e.conn) == funded_before
     assert len(e.fetches) == e.fetches_after_discovery
     assert R.ACTIVE.counts["COMPLETED"] == 1
+
+
+# ═════════════════════════════════════════════════════════════════════
+# 1b · PINNAPI IS THE SOLE PROBABILITY AUTHORITY (V3, owner 2026-10-03)
+# ═════════════════════════════════════════════════════════════════════
+
+def _single_source(e):
+    """The discovery payload carries Pinnacle ALONE, as production's usually
+    does by the time a WS change arrives: the PinnAPI quote's own outcome
+    count is 1 and nothing else is offered as a second book."""
+    def only_pinnacle(now):
+        ev = VN.odds_event(e.game, "rx%d" % e.eid, at=now)
+        ev["bookmakers"] = [b for b in ev["bookmakers"]
+                            if b["key"] == "pinnacle"]
+        return [ev]
+    e.discovery = only_pinnacle
+
+
+@pg
+async def test_a_fresh_single_source_pinnapi_valuation_reaches_paper_enter(env):
+    e = env
+    _single_source(e)
+    rows = await _one_reactive(e)
+    assert [r["state"] for r in rows] == ["COMPLETED"], rows
+    vids = rows[0]["detail"]["valuation_ids"]
+    assert len(vids) == 1, rows[0]["detail"]
+    v = await _valuation(e, vids[0])
+    # THE ROW STATES THE FACTS: PinnAPI, one book, the general floor unmet
+    assert v["provider"] == P.PROVIDER and v["outcome_books"] == 1
+    assert EXT.R_THIN_OUTCOME in [str(c) for c in (v["refusals"] or [])]
+    ds = _cg(await _decisions(e, vids))
+    assert len(ds) == 1, ds
+    d = ds[0]
+    assert d["verdict"] == "ENTER", (d["refusal"], d["refusals"])
+    assert d["policy_version"] == PB.CG_VERSION
+    auth = H.j(d["pinnacle"])["probability_authority"]
+    assert auth["basis"] == PB.PINNAPI_SOLE and auth["outcome_books"] == 1
+    assert auth["evidence"] == "SINGLE_SOURCE_PINNAPI"
+    # execution still had to be established on the venue's own book
+    econ = H.j(d["economics"])
+    assert d["book_obs_id"] is not None and econ["proposed_qty"] > 0
+    assert econ["book_age_s"] <= PB.BOOK_MAX_AGE_S
+    assert await _enters_on_contract(e) == 1
+
+
+@pg
+async def test_a_stale_single_source_pinnapi_change_never_enters(env):
+    e = env
+    _single_source(e)
+    await _start_and_discover(e)
+    funded_before = await _counts(e.conn)
+    # the provider's own change stamp is older than the Pinnacle limit
+    tick(e.cache, e.eid, WS_EDGE, lag_s=loop.PINNACLE_MAX_AGE_S + 60.0)
+    await asyncio.sleep(1.0)
+    rows = await _attempts(e)
+    if rows:
+        rows = await _wait_terminal(e)
+        vids = [vid for r in rows for vid in (r["detail"].get("valuation_ids") or [])]
+        for d in _cg(await _decisions(e, vids)):
+            assert d["verdict"] == "REFUSE", (d["refusal"], d["refusals"])
+    else:                       # refused before an attempt: an unusable change
+        assert R.ACTIVE.counts["UNUSABLE_CHANGE"] >= 1, dict(R.ACTIVE.counts)
+    assert await _enters_on_contract(e) == 0
+    assert await _counts(e.conn) == funded_before
+
+
+@pg
+async def test_a_mis_mapped_pinnapi_event_is_never_evaluated(env):
+    e = env
+    # the discovery names a DIFFERENT fixture's teams: no confirmed mapping
+    e.discovery = lambda now: [VN.odds_event(e.game, "rx%d" % e.eid, at=now,
+                                             home="Nowhere Nine",
+                                             away="Elsewhere Eleven")]
+    import asyncpg
+    e.pool = await asyncpg.create_pool(H.DSN, min_size=1, max_size=4)
+    e.task = R.start(e.pool, cycle=loop.cycle)
+    assert e.task is not None
+    out = await loop.cycle(e.conn)
+    assert out.get("ran") is True, out.get("why")
+    assert e.eid not in R.ACTIVE.seeds
+    tick(e.cache, e.eid, WS_EDGE)
+    await asyncio.sleep(1.0)
+    assert await _attempts(e) == []
+    assert R.ACTIVE.counts["NO_CONFIRMED_DISCOVERY"] >= 1, dict(R.ACTIVE.counts)
+    assert await _enters_on_contract(e) == 0
 
 
 # ═════════════════════════════════════════════════════════════════════

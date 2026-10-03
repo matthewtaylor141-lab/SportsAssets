@@ -516,6 +516,12 @@ tests/test_kalshi_mapping_and_selection.py
 tests/test_kalshi_isolation.py
 tests/test_kalshi_smalllive_migration.py
 tests/test_smalllive_not_mirrored_migration.py
+# PinnAPI the sole probability authority of the investment policy (V3,
+# owner 2026-10-03): a single-source PinnAPI valuation qualifies, recorded
+# as SINGLE_SOURCE_PINNAPI with its own count; other providers keep the
+# multi-book floor; every other probability, identity and execution check
+# still refuses.
+tests/test_pinnapi_sole_authority.py
 # Agent role briefs: bounded read-only role_brief tool (distinct-contract
 # refusals, Xavier latest reviews, Audrey findings; truncation disclosed).
 tests/test_agent_role_briefs.py

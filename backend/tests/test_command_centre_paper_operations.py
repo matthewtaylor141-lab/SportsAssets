@@ -106,7 +106,7 @@ async def test_derek_strategies_are_counted_apart_with_versions_labels_and_funne
     # versions and labels: from the policy module, and on the records
     assert cg["counts"]["data"]["policy_versions"] == ["PINNACLE_COMPLETED_GAME_PAPER_V1"]
     assert strict["counts"]["data"]["policy_versions"] == ["PINNACLE_ONLY_PAPER_BENCHMARK_V1"]
-    assert cg["version"] == "PINNACLE_COMPLETED_GAME_PAPER_V2" and cg["label"] == "CONDITIONAL · EXPERIMENTAL"
+    assert cg["version"] == "PINNACLE_COMPLETED_GAME_PAPER_V3" and cg["label"] == "CONDITIONAL · EXPERIMENTAL"
     assert cg["economics_label"] == "CONDITIONAL_EXPERIMENTAL_NOT_RISK_ADJUSTED"
     assert "CONDITIONAL" in cg["disclosure"] and "NOT evidence of qualified" in strict["disclosure"]
     assert v2["label"] == "RESEARCH" and v2["economics_label"] is None

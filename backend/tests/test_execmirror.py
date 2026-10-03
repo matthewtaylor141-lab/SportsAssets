@@ -665,6 +665,11 @@ def test_only_the_allowlisted_investment_policy_version_is_live_eligible():
                                  "decision_policy_version": "PINNACLE_COMPLETED_GAME_PAPER_V2",
                                  "role": "ENTRY"})
     assert ok and ev["class"] == "INVESTMENT_POLICY"
+    # V3 (owner 2026-10-03, PinnAPI the sole probability authority) is promoted
+    ok, ev = M.live_eligibility({"strategy": "PINNACLE_COMPLETED_GAME_PAPER",
+                                 "decision_policy_version": "PINNACLE_COMPLETED_GAME_PAPER_V3",
+                                 "role": "ENTRY"})
+    assert ok and ev["class"] == "INVESTMENT_POLICY"
     for strategy, cls in (("PINNACLE_EXPLORATION_PAPER", "EXPLORATION_RESEARCH_COST_PAPER_ONLY"),
                           ("PINNACLE_ONLY_PAPER_BENCHMARK", "BENCHMARK_RESEARCH_ONLY"),
                           ("PINNACLE_COMPLETED_GAME_MAKER_PAPER", "EXPERIMENT_NOT_PROMOTED"),
@@ -675,7 +680,7 @@ def test_only_the_allowlisted_investment_policy_version_is_live_eligible():
                                      "decision_policy_version": "ANY"})
         assert not ok and ev["class"] == cls, (strategy, ev)
     # an un-promoted version of the investment policy is not eligible
-    for version in ("PINNACLE_COMPLETED_GAME_PAPER_V3", None, ""):
+    for version in ("PINNACLE_COMPLETED_GAME_PAPER_V4", None, ""):
         ok, ev = M.live_eligibility({"strategy": "PINNACLE_COMPLETED_GAME_PAPER",
                                      "decision_policy_version": version, "role": "ENTRY"})
         assert not ok and ev["class"] == "POLICY_VERSION_NOT_PROMOTED"
@@ -724,12 +729,12 @@ async def test_unknown_strategy_and_unpromoted_version_fail_closed(monkeypatch):
         unknown = await _paper_order(conn, acct, qty=2702,
                                      strategy="PINNACLE_ONLY_PAPER_BENCHMARK",
                                      policy_version="PINNACLE_ONLY_PAPER_BENCHMARK_V1")
-        v3 = await _paper_order(conn, acct, qty=2702,
-                                policy_version="PINNACLE_COMPLETED_GAME_PAPER_V3")
+        v4 = await _paper_order(conn, acct, qty=2702,
+                                policy_version="PINNACLE_COMPLETED_GAME_PAPER_V4")
         none = await _paper_order(conn, acct, qty=2702, policy_version=None)
         await mirror.tick(conn)
         assert venue.placed == []
-        for oid in (unknown["order_id"], v3["order_id"], none["order_id"]):
+        for oid in (unknown["order_id"], v4["order_id"], none["order_id"]):
             r = await _row(conn, oid)
             assert r["state"] == "EXCLUDED" and r["exclusion"] == M.STRATEGY_NOT_LIVE_ELIGIBLE
     finally:
@@ -944,5 +949,41 @@ async def test_audrey_records_an_excluded_only_group_as_not_mirrored_never_match
         codes = [d["code"] for d in (json.loads(r2["discrepancies"])
                                      if isinstance(r2["discrepancies"], str) else r2["discrepancies"])]
         assert r2["status"] == "DISCREPANCY" and "LIVE_FILLED_MORE_THAN_INTENDED" in codes
+    finally:
+        await conn.close()
+
+
+@pg
+@pytest.mark.asyncio
+async def test_a_hedge_is_live_only_for_a_group_whose_entry_acquired_live_inventory(monkeypatch):
+    """A cross-venue/opposite-side HEDGE is an additional BUY leg. With no live
+    entry fill in the group it would be new, unprotected exposure: EXCLUDED
+    NO_LIVE_INVENTORY. After the live entry fills, the hedge is planned."""
+    conn = await _conn()
+    try:
+        acct, venue, mirror = await _setup(conn, monkeypatch)
+        # a group whose entry never reached the venue (paper-only fill)
+        lone = await _paper_order(conn, acct, role="HEDGE",
+                                  intent="ORDER_INTENT_BUY_SHORT", qty=2702)
+        await mirror.tick(conn)
+        r = await _row(conn, lone["order_id"])
+        assert r["state"] == "EXCLUDED" and r["exclusion"] == M.NO_LIVE_INVENTORY, r
+        assert venue.placed == []
+        # a group whose live entry filled on the venue: the hedge goes live
+        po = await _paper_order(conn, acct, qty=2702)
+        venue.behaviour = [{"fill": 3}]
+        await mirror.tick(conn)
+        assert len(venue.placed) == 1
+        assert await M.live_entry_qty(conn, po["group_id"]) == 3
+        hedge = await _paper_order(conn, acct, role="HEDGE", group=po["group_id"],
+                                   intent="ORDER_INTENT_BUY_SHORT", qty=2702)
+        venue.behaviour = [{"fill": 3}]
+        await mirror.tick(conn)
+        h = await _row(conn, hedge["order_id"])
+        assert h["exclusion"] is None and h["state"] != "EXCLUDED", h
+        assert len(venue.placed) == 2
+        assert venue.placed[1]["intent"] == "ORDER_INTENT_BUY_SHORT"
+        # the hedge's own fill never counts as the inventory it protects
+        assert await M.live_entry_qty(conn, po["group_id"]) == 3
     finally:
         await conn.close()

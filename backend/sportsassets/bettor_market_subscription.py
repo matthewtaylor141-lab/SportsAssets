@@ -151,6 +151,7 @@ S_GAVE_UP = "GAVE_UP"
 S_REFUSED_BY_VENUE = "REFUSED_BY_VENUE"
 S_STOPPED = "STOPPED"
 S_WAITING_FOR_DEDICATED_KEY = "WAITING_FOR_DEDICATED_MARKET_DATA_KEY"
+S_MD_KEY_IS_EXECUTION_KEY = "MARKET_DATA_KEY_IS_AN_EXECUTION_KEY"
 
 #: WHICH CREDENTIAL THE SUBSCRIPTION MAY USE. "dedicated" (the default) uses
 #: only PMUS_MD_KEY_ID/PMUS_MD_SECRET_KEY -- a SEPARATE ORDINARY Polymarket US
@@ -769,6 +770,17 @@ def start_default(*, settings=None) -> dict:
                     why=("PMUS_MD_KEY_ID / PMUS_MD_SECRET_KEY are not configured "
                          "in this process; the shared venue key is not used "
                          "unless %s=shared is set explicitly" % ENV_KEY_SOURCE))
+                return dict(_LAST_START, started=False)
+            # NEVER MIX IDENTITIES: the market-data key must not be the
+            # retail execution key or the funded key.
+            execution_ids = {str(os.environ.get("PMUS_EXECMIRROR_KEY_ID") or "").strip(),
+                             str(getattr(settings, "pmus_key_id", "") or "").strip()}
+            if str(key_id).strip() in execution_ids - {""}:
+                _LAST_START.update(
+                    state=S_MD_KEY_IS_EXECUTION_KEY,
+                    why=("PMUS_MD_KEY_ID is an execution identity (the retail "
+                         "mirror key or the funded key); the market-data "
+                         "subscription refuses to use it"))
                 return dict(_LAST_START, started=False)
         else:
             key_id = getattr(settings, "pmus_key_id", None)

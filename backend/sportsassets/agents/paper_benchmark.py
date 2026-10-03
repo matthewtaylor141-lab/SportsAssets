@@ -163,8 +163,31 @@ CG_STRATEGY = "PINNACLE_COMPLETED_GAME_PAPER"
 #: not a return target, with no upper edge limit. V2 also sizes NET OF FEES:
 #: a level whose per-contract fee consumes its edge is never bought, so a
 #: candidate that clears 0.5 pp gross but not its fees is refused by name.
+#:
+#: V3 is the owner's 2026-10-03 decision: PinnAPI/Pinnacle is the SOLE
+#: probability and EV authority of this investment policy. The V2 threshold
+#: and fee rules are unchanged; what changes is the probability's
+#: qualification. Under V2 a PinnAPI valuation also had to meet the
+#: multi-book outcome floor (`bettor_external_shadow.MIN_OUTCOME_BOOKS`); under
+#: V3 a fresh, exactly mapped PinnAPI valuation qualifies on PinnAPI alone and
+#: is recorded as SINGLE-SOURCE PinnAPI evidence (`pinnapi_sole_authority`) --
+#: its outcome_books stays the read's own count, never raised, never called
+#: corroborated. Every other probability check (identity, payout outcome,
+#: de-vig, freshness re-aged at the decision) and every execution check
+#: (executable price, depth, fees, net edge, sizing) still applies. A valuation
+#: from any other provider keeps the multi-book floor.
 CG_VERSION_V1 = "PINNACLE_COMPLETED_GAME_PAPER_V1"
-CG_VERSION = "PINNACLE_COMPLETED_GAME_PAPER_V2"
+CG_VERSION_V2 = "PINNACLE_COMPLETED_GAME_PAPER_V2"
+CG_VERSION = "PINNACLE_COMPLETED_GAME_PAPER_V3"
+#: The PinnAPI provider string as the valuation row records it
+#: (`pinnapi_primary.PROVIDER`; stated here so this module imports nothing
+#: beyond the paper and pure-policy modules -- a test pins equality).
+PINNAPI_PROVIDER = "pinnapi.com/raw-websocket"
+#: The multi-book outcome floor's refusal (`bettor_external_shadow.
+#: R_THIN_OUTCOME`, pinned by a test): the ONE probability-stage code V3 does
+#: not apply to a PinnAPI valuation.
+R_THIN_OUTCOME = "OUTCOME_DEPTH_BELOW_FLOOR"
+PINNAPI_SOLE = "PINNAPI_SOLE_PROBABILITY_AUTHORITY"
 CG_DISCLOSURE = (
     "PINNACLE_COMPLETED_GAME_PAPER: EXPERIMENTAL PAPER EXECUTION on a "
     "fictional account. The reference probability is the de-vigged Pinnacle "
@@ -475,13 +498,17 @@ def group_id_for(decision_id: str) -> str:
 # THE CONTRACT / OUTCOME / SETTLEMENT-TERMS MATCH (pure)
 # ═════════════════════════════════════════════════════════════════════
 
-def _lane_codes(cand: dict) -> dict:
-    """The lane's own refusals on the row, by the check that owns them."""
+def _lane_codes(cand: dict, *, not_applied=()) -> dict:
+    """The lane's own refusals on the row, by the check that owns them.
+    `not_applied` names probability-stage codes the calling POLICY does not
+    apply (recorded under `not_applied_by_policy`, never dropped)."""
     out: dict = {"probability": [], "identity": [], "settlement": [],
-                 "not_blocking": []}
+                 "not_blocking": [], "not_applied_by_policy": []}
     for code in cand.get("refusals") or []:
         stage = DP._lane_stage(code)
-        if stage == "1_PROBABILITY":
+        if stage == "1_PROBABILITY" and str(code).split(":")[0] in not_applied:
+            out["not_applied_by_policy"].append(code)
+        elif stage == "1_PROBABILITY":
             out["probability"].append(code)
         elif stage == "3_IDENTITY":
             out["identity"].append(code)
@@ -493,7 +520,36 @@ def _lane_codes(cand: dict) -> dict:
     return out
 
 
-def contract_match(cand: dict, row: dict) -> dict:
+def pinnapi_sole_authority(cand: dict, row: dict) -> dict:
+    """V3: IS THIS VALUATION PINNAPI'S OWN, so that PinnAPI alone is the
+    probability authority? Provider and the read's own outcome count, from
+    the row as recorded -- nothing is raised, copied or inferred. It decides
+    ONLY whether the multi-book floor applies; freshness, identity, payout
+    outcome and de-vig are still checked by name elsewhere."""
+    pin = cand.get("pinnacle") or {}
+    prov = pin.get("provider") or row.get("provider")
+    books = row.get("outcome_books")
+    try:
+        books = None if books is None else int(books)
+    except (TypeError, ValueError):
+        books = None
+    applies = prov == PINNAPI_PROVIDER and books is not None and books >= 1
+    return {"applies": applies,
+            "basis": PINNAPI_SOLE if applies else None,
+            "evidence": "SINGLE_SOURCE_PINNAPI" if applies else None,
+            "provider": prov, "outcome_books": books,
+            "outcome_books_is": "THE_READ'S_OWN_COUNT",
+            "source_observed_at": pin.get("observed_at"),
+            "received_at": pin.get("received_at"),
+            "multi_book_floor": ("NOT_APPLIED_PINNAPI_IS_THE_SOLE_AUTHORITY"
+                                 if applies else "APPLIES"),
+            "why": (None if applies else
+                    "not a PinnAPI valuation with a recorded outcome count"
+                    if prov != PINNAPI_PROVIDER else
+                    "the PinnAPI valuation records no outcome count")}
+
+
+def contract_match(cand: dict, row: dict, *, not_applied=()) -> dict:
     """THE MATCH BETWEEN THE STORED PROBABILITY AND THE CONTRACT TRADED.
 
     Identity and settlement are `derek_policy.evaluate`'s checks 1 and 3 on
@@ -502,7 +558,7 @@ def contract_match(cand: dict, row: dict) -> dict:
     refusal is on the row). The payout outcome match: the probability is of
     the event the contract pays on -- the same event as the de-vig's when
     payout_is_complement is false, NOT(selection) when it is true."""
-    lane = _lane_codes(cand)
+    lane = _lane_codes(cand, not_applied=not_applied)
     checks, refusals = [], []
 
     def put(name, ok, refusal, detail, **ev):
@@ -580,7 +636,8 @@ def contract_match(cand: dict, row: dict) -> dict:
         R_PROBABILITY_UNQUALIFIED,
         ("no probability-stage refusal on the row" if not lane["probability"]
          else "the lane refused the probability: %s" % lane["probability"]),
-        lane_refusals=lane["probability"])
+        lane_refusals=lane["probability"],
+        not_applied_by_policy=lane["not_applied_by_policy"])
     # 5 · VENUE
     put("polymarket_us_contract", cand.get("venue") in (None, "PMUS"),
         R_NOT_PMUS, "venue %s" % cand.get("venue"))
@@ -708,7 +765,9 @@ def completed_game_match(cand: dict, row: dict) -> dict:
     outcome, market and line, and the ORDINARY grading period -- exactly.
     The exceptional settlement terms are returned as DISCLOSED research
     risks; they are never part of `established`."""
-    base = contract_match(cand, row)
+    authority = pinnapi_sole_authority(cand, row)
+    base = contract_match(cand, row, not_applied=(
+        (R_THIN_OUTCOME,) if authority["applies"] else ()))
     keep = {DP.C_IDENTITY, "payout_outcome_match",
             "probability_qualified_by_the_lane", "polymarket_us_contract"}
     checks = [c for c in base["checks"] if c["check"] in keep]
@@ -757,6 +816,7 @@ def completed_game_match(cand: dict, row: dict) -> dict:
                 "compatibility")}
     return {"established": not refusals, "refusals": refusals,
             "checks": checks, "exceptional_terms": exceptional,
+            "probability_authority": authority,
             "policy": CG_VERSION}
 
 
@@ -1220,6 +1280,7 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
                    "this contract pays on (external_valuations.probability, "
                    "oriented once by the lane)"),
                contract_match=match, real_event=real,
+               probability_authority=match.get("probability_authority"),
                valuation_record_purpose=cand.get("record_purpose"),
                displayed_quote_used_as_price=False)
     if pin.get("refusal"):
@@ -2056,4 +2117,8 @@ def describe() -> dict:
                                "the fee per contract below the edge at "
                                "every level bought, and conditional "
                                "expected profit after fees > 0"),
-                "previous_versions": {CG_VERSION_V1: {"min_edge_pp": 5.0}}}}
+                "previous_versions": {
+                    CG_VERSION_V1: {"min_edge_pp": 5.0},
+                    CG_VERSION_V2: {"min_edge_pp": 0.5,
+                                    "probability_authority":
+                                        "MULTI_BOOK_OUTCOME_FLOOR"}}}}

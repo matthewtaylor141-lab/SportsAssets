@@ -105,6 +105,27 @@ def test_the_credential_comes_from_its_own_names_only(monkeypatch):
     assert KID not in blob and SEC not in blob
 
 
+def test_the_market_data_identity_is_reported_apart_from_both_execution_keys(monkeypatch):
+    monkeypatch.setenv(EP.KEY_ID_ENV, KID)
+    monkeypatch.setenv(EP.SECRET_ENV, SEC)
+    monkeypatch.setenv("PMUS_KEY_ID", "funded-kid")
+    monkeypatch.delenv(EP.MD_KEY_ID_ENV, raising=False)
+    monkeypatch.delenv(EP.MD_SECRET_ENV, raising=False)
+    md = EP.keys_present()["market_data"]
+    assert md["complete"] is False and md["key_fingerprint"] is None
+    assert md["distinct_from_execution_mirror_key"] is None
+    monkeypatch.setenv(EP.MD_KEY_ID_ENV, "md-kid")
+    monkeypatch.setenv(EP.MD_SECRET_ENV, "md-secret")
+    md = EP.keys_present()["market_data"]
+    assert md["complete"] is True and md["key_fingerprint"] == EP.fingerprint("md-kid")
+    assert md["distinct_from_execution_mirror_key"] is True
+    assert md["distinct_from_funded_key"] is True
+    monkeypatch.setenv(EP.MD_KEY_ID_ENV, KID)
+    assert EP.keys_present()["market_data"]["distinct_from_execution_mirror_key"] is False
+    blob = json.dumps(EP.keys_present())
+    assert "md-secret" not in blob and KID not in blob and SEC not in blob
+
+
 def test_a_fresh_account_reads_back_whole(monkeypatch):
     monkeypatch.setenv(EP.KEY_ID_ENV, KID)
     monkeypatch.setenv(EP.SECRET_ENV, SEC)

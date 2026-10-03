@@ -22,6 +22,11 @@ THE RULES (owner: "set the rules to achieve the closest outcome")
              the paper position closes the live one. No live inventory:
              EXCLUDED NO_LIVE_INVENTORY (a protection is re-planned when
              live inventory arrives). Never sells what was not bought.
+  hedges     a paper HEDGE is a BUY of an additional leg, never a sale of
+             the original position: it is live only for a group whose
+             live-eligible ENTRY acquired live inventory (venue fills);
+             otherwise EXCLUDED NO_LIVE_INVENTORY -- a hedge of nothing would
+             be new, unprotected exposure.
   fills      only from the venue's order record (cumulative quantity,
              average price, commission); an accepted order is not a fill.
   orphans    live inventory left after the paper position closed by order
@@ -109,7 +114,10 @@ MAX_INTENT_AGE_S = 30.0
 # version. A new version is NOT eligible until it is added here through the
 # approved policy process.
 LIVE_ELIGIBLE = {
-    "PINNACLE_COMPLETED_GAME_PAPER": ("PINNACLE_COMPLETED_GAME_PAPER_V2",),
+    # V3 (owner 2026-10-03): PinnAPI is the sole probability authority. V2
+    # stays eligible: its orders met the stricter multi-book floor.
+    "PINNACLE_COMPLETED_GAME_PAPER": ("PINNACLE_COMPLETED_GAME_PAPER_V2",
+                                      "PINNACLE_COMPLETED_GAME_PAPER_V3"),
 }
 PAPER_ONLY_CLASS = {
     "PINNACLE_EXPLORATION_PAPER": "EXPLORATION_RESEARCH_COST_PAPER_ONLY",
@@ -428,6 +436,17 @@ async def live_inventory(conn, group_id) -> dict:
             "opened_intent": opened}
 
 
+async def live_entry_qty(conn, group_id) -> Decimal:
+    """Venue-confirmed live contracts bought by the group's ENTRY orders only
+    (a hedge's own fills never count as the inventory it protects)."""
+    q = await conn.fetchval(
+        """SELECT coalesce(sum(f.qty), 0) FROM execmirror_fills f
+             JOIN execmirror_orders m USING (mirror_id)
+            WHERE f.group_id = $1 AND m.role = 'ENTRY'
+              AND f.intent LIKE 'ORDER_INTENT_BUY%'""", group_id)
+    return Decimal(str(q or 0))
+
+
 async def paper_open_qty(conn, group_id) -> Decimal:
     r = await conn.fetchrow(
         """SELECT coalesce(sum(qty) FILTER (WHERE direction = 'BUY'), 0) AS b,
@@ -553,6 +572,12 @@ class Mirror:
             if not eligible:
                 plan = Plan("EXCLUDED", exclusion=STRATEGY_NOT_LIVE_ELIGIBLE,
                             detail={"live_eligibility": why})
+            elif o["role"] == "HEDGE" and await live_entry_qty(
+                    conn, o["group_id"]) <= 0:
+                plan = Plan("EXCLUDED", exclusion=NO_LIVE_INVENTORY,
+                            detail={"why": "a hedge protects live inventory; "
+                                           "this group's live-eligible entry "
+                                           "acquired none"})
             elif o["role"] in BUY_ROLES:
                 plan = plan_buy(o, scale=ctl["scale"], buying_power=self._buying_power,
                                 max_order_usd=ctl["max_order_usd"])

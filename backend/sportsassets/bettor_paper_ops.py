@@ -96,7 +96,7 @@ STRATEGY_META = {
                     "completion and not risk-adjusted. Postponement, "
                     "abandonment and suspension terms are disclosed "
                     "research risks with unmeasured frequency."),
-        "version": "PINNACLE_COMPLETED_GAME_PAPER_V2", "disclosure": None,
+        "version": "PINNACLE_COMPLETED_GAME_PAPER_V3", "disclosure": None,
         "economics_label": "CONDITIONAL_EXPERIMENTAL_NOT_RISK_ADJUSTED"},
     MAKER: {
         "kind": "EXPERIMENTAL_BENCHMARK",
