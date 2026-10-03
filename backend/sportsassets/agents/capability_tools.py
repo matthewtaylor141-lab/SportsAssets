@@ -6,7 +6,7 @@ import math
 import time
 from . import capability_work as W
 
-TOOLS={'account','position','decision','market','rules','recommendation','lessons','proposals','work','feed_coverage'}
+TOOLS={'account','position','decision','market','rules','recommendation','lessons','proposals','work','feed_coverage','role_brief','missed_opportunities','forecast_evaluation','connector_health','cross_venue'}
 
 
 def feed_coverage_evidence(raw, now):
@@ -61,6 +61,19 @@ class Toolkit:
             return {'status':'UNAVAILABLE','tool':name,'why':str(exc) if isinstance(exc,ValueError) else 'EVIDENCE_READ_TIMEOUT'}
 
     async def _read(self,c,name,rid):
+        if name in ('missed_opportunities','forecast_evaluation','connector_health'):
+            from . import intelligence_reports
+            return await intelligence_reports.read(c,name,self.now)
+        if name=='cross_venue':
+            from . import cross_venue_research
+            return await cross_venue_research.read(c,W.ACCOUNT,rid,self.now)
+        if name=='role_brief':
+            from . import role_brief
+            from . import intelligence_reports
+            brief=await role_brief.read(c,self.agent,self.now,W.ACCOUNT)
+            report={'DEREK':'missed_opportunities','XAVIER':'connector_health','AUDREY':'forecast_evaluation'}[self.agent]
+            brief['measured_research']=await intelligence_reports.read(c,report,self.now)
+            return brief
         from .. import bettor_paper_ledger as L
         from . import paper_learning as P
         if name=='account':return await L.cash_state(c,W.ACCOUNT)
@@ -80,9 +93,11 @@ class Toolkit:
             if not exists:raise ValueError('POSITION_NOT_IN_ACCOUNT')
             # Bounded detail instead of the unlimited historical chain renderer.
             orders=[dict(x) for x in await c.fetch('SELECT order_id,direction,role,qty,filled_qty,limit_price,state,created_at FROM paper_orders WHERE account_id=$1 AND group_id=$2 ORDER BY created_at DESC LIMIT 30',W.ACCOUNT,rid)]
-            reviews=[dict(x) for x in await c.fetch('SELECT review_id,reviewed_at,recommendation,refusal,measure,selection,action FROM paper_xavier_reviews WHERE account_id=$1 AND group_id=$2 ORDER BY reviewed_at DESC LIMIT 5',W.ACCOUNT,rid)]
+            reviews=[dict(x) for x in await c.fetch('SELECT review_id,reviewed_at,recommendation,refusal,measure,selection,action,alternatives,confirmed_protection,incomplete_search FROM paper_xavier_reviews WHERE account_id=$1 AND group_id=$2 ORDER BY reviewed_at DESC LIMIT 5',W.ACCOUNT,rid)]
             settlements=[dict(x) for x in await c.fetch('SELECT settlement_id,settled_at,recorded_at,outcome,payout_per_contract,evidence,evidence_source FROM paper_settlements WHERE account_id=$1 AND group_id=$2 ORDER BY recorded_at DESC LIMIT 5',W.ACCOUNT,rid)]
-            return {'group_id':rid,'orders':orders,'reviews':reviews,'settlements':settlements,'bounded_history':True}
+            from . import cross_venue_research
+            comparison=await cross_venue_research.read(c,W.ACCOUNT,rid,self.now)
+            return {'group_id':rid,'orders':orders,'reviews':reviews,'settlements':settlements,'cross_venue_comparison':comparison,'bounded_history':True}
         d=await c.fetchrow('SELECT * FROM paper_decisions WHERE account_id=$1 AND decision_id=$2',W.ACCOUNT,rid)
         if not d:raise ValueError('DECISION_NOT_IN_ACCOUNT')
         if name=='decision':return dict(d)

@@ -121,7 +121,8 @@ def test_no_funded_module_imports_the_paper_modules():
     for rel in ("agents/capability_tools.py", "agents/capability_experiments.py",
                 "agents/capability_runtime.py", "agents/capability_work.py",
                 "agents/capability_scorecards.py", "api/agent_capabilities.py",
-                "slack_updates.py", "slack_bridge.py"):
+                "slack_updates.py", "slack_bridge.py",
+                "agents/intelligence_reports.py", "agents/cross_venue_research.py"):
         tree = ast.parse((ROOT / rel).read_text())
         for node in ast.walk(tree):
             mods = []

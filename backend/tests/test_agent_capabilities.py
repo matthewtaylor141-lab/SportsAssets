@@ -255,11 +255,11 @@ def test_queries_parse_as_postgres():
     assert count>=30
 
 
-def test_offices_include_all_five_tabs_and_context_request():
+def test_offices_include_intelligence_and_existing_tabs_and_context_request():
     from sportsassets.api.agent_pages import _cc_page_html
     for agent in ('derek','xavier','audrey'):
         h=_cc_page_html(agent)
-        for token in ('THE LEARNING WORKBENCH',"['Plans','Collaboration','Investigate','Experiments','Scorecard']",'body.context={capability_task_id:',"/api/command/agents/capabilities"):
+        for token in ('THE LEARNING WORKBENCH',"['Plans','Collaboration','Investigate','Intelligence','Experiments','Scorecard']",'body.context={capability_task_id:',"/api/command/agents/capabilities"):
             assert token in h
 
 
