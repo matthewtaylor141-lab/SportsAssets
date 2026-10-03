@@ -95,7 +95,7 @@ jobs:
             echo "### Agent pages"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
-          for path in /derek /xavier /audrey /paper.js /agent.html; do
+          for path in /derek /xavier /audrey /paper.js /agent.html /live.html /live.js; do
             code=$(curl -s -o /tmp/pg -w '%{http_code}' --max-time 25 "https://$HOST$path" || echo 000)
             printf '%-12s %s %s bytes  frames-agent-page:%s  account-strip:%s\n' "$path" "$code" \
               "$(wc -c < /tmp/pg)" "$(grep -c 'agents/.*page\|/page' /tmp/pg)" \
@@ -127,6 +127,12 @@ jobs:
           code=$(curl -s -o /tmp/ag.json -w '%{http_code}' --max-time 45 -H "$H" "$API/api/command/agents" || echo 000)
           echo "agents HTTP $code" | tee -a "$GITHUB_STEP_SUMMARY"
           jq -c '.' /tmp/ag.json 2>/dev/null | cut -c1-2000 | tee -a "$GITHUB_STEP_SUMMARY"
+          # Small Live · Paper vs Actual: signed out through the published
+          # proxy must be refused; with the read role the summary reads back.
+          echo "small-live signed out via $HOST: HTTP $(curl -s -o /dev/null -w '%{http_code}' --max-time 25 "https://$HOST/api/command/small-live" || echo 000)" | tee -a "$GITHUB_STEP_SUMMARY"
+          code=$(curl -s -o /tmp/sl.json -w '%{http_code}' --max-time 45 -H "$H" "$API/api/command/small-live?limit=5" || echo 000)
+          echo "small-live HTTP $code" | tee -a "$GITHUB_STEP_SUMMARY"
+          jq -c 'del(.rows) | del(.basis)' /tmp/sl.json 2>/dev/null | cut -c1-3000 | tee -a "$GITHUB_STEP_SUMMARY"
           code=$(curl -s -o /tmp/ps.json -w '%{http_code}' --max-time 45 -H "$H" "$API/api/command/agents/persona-status" || echo 000)
           echo "persona-status HTTP $code" | tee -a "$GITHUB_STEP_SUMMARY"
           jq -c '{chat_llm: .chat.llm, voice: .speech.voice, personas}' /tmp/ps.json 2>/dev/null \
