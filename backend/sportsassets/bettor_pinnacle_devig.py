@@ -452,6 +452,29 @@ def valuation(*, contract: dict, quote: dict, now: float,
         out["supported"] = sorted("%s/%s" % k for k in SUPPORTED)
         out["why"] = ("%s/%s is not in the measured supported set %s"
                       % (sport, market, out["supported"]))
+        # THE MEASUREMENT THAT DECIDES THE SET, RECORDED (cand22). The set is
+        # "decided by measurement" -- whether the book quotes this market with
+        # a complete outcome set -- and a refusal that discarded the book's
+        # prices left nothing to measure, so football could never qualify.
+        # The book's own priced set is kept as EVIDENCE: no de-vig, no
+        # probability, the refusal unchanged.
+        if _norm(quote.get("book")) == BOOK:
+            seen = {}
+            for n, o in dict(quote.get("outcomes") or {}).items():
+                try:
+                    f = float(o)
+                except (TypeError, ValueError):
+                    continue
+                if f > 1.0 and f == f and f != float("inf"):
+                    seen[str(n)] = f
+            if seen:
+                out["raw_odds"] = seen
+                out["outcomes_priced"] = len(seen)
+                out["overround"] = sum(implied(list(seen.values()))) - 1.0
+                out["recorded_for_measurement"] = (
+                    "the book's priced set for an UNSUPPORTED market, kept so "
+                    "the measured-set rule can be evaluated; no probability "
+                    "is derived from it")
         return out
     out["expected_outcomes"] = expected
 

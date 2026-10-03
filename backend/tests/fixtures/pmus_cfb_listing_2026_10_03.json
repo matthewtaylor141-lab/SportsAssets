@@ -1,0 +1,109 @@
+{
+ "_what": "THE VENUE'S OWN cfb MONEY-LINE LISTINGS, as served by the public gateway, for cand22 settlement compatibility.",
+ "_source": "GET https://gateway.polymarket.us/v1/markets?slug=aec-cfb-cin-arz-2026-10-03&slug=aec-cfb-frest-washst-2026-10-03&slug=aec-cfb-bayl-arzst-2026-10-03",
+ "_captured_at": "2026-10-03T23:14:23Z",
+ "_reader": "github-actions runner (fetch-docs)",
+ "_evidence": {
+  "workflow": "fetch-docs",
+  "run_id": 37161115118,
+  "job_id": 111314569211,
+  "response_bytes": 15018,
+  "response_sha256": "1df8dc714088b1a2045e13ccb07aa6f4982314b25826e769c56c53ecc10106cc"
+ },
+ "_subset": "the fields this repository reads (description, types, sides); icons/colours/prices omitted",
+ "markets": [
+  {
+   "slug": "aec-cfb-frest-washst-2026-10-03",
+   "question": "Who will win in the upcoming football event Fresno State vs Washington State scheduled for October 4, 2026 at 1:30 AM UTC?",
+   "description": "This market will settle to the winner of the Fresno State vs Washington State College Football game scheduled for Oct 3, 2026. Overtime is included if played. If a tied final score is reported and no official winner is declared, this market will not resolve automatically and will be reviewed against the official governing-body result. If the game is delayed, postponed, or suspended and not rescheduled to a date within two weeks of the originally scheduled date, the market will settle to the last fair market price. Outcome sourced from the relevant governing body.",
+   "marketType": "moneyline",
+   "sportsMarketType": "football_team_full_game_winner",
+   "sportsMarketTypeV2": "SPORTS_MARKET_TYPE_MONEYLINE",
+   "gameStartTime": "2026-10-04T01:30:00Z",
+   "orderPriceMinTickSize": 0.005,
+   "assetPriceTerms": null,
+   "marketSides": [
+    {
+     "description": "Bulldogs",
+     "long": true,
+     "team_name": "Fresno State",
+     "team_alias": "Bulldogs",
+     "team_abbreviation": "frest",
+     "team_league": "cfb",
+     "team_ranking": "0"
+    },
+    {
+     "description": "Cougars",
+     "long": false,
+     "team_name": "Washington State",
+     "team_alias": "Cougars",
+     "team_abbreviation": "washst",
+     "team_league": "cfb",
+     "team_ranking": "0"
+    }
+   ]
+  },
+  {
+   "slug": "aec-cfb-bayl-arzst-2026-10-03",
+   "question": "Who will win in the upcoming football event Baylor vs Arizona State scheduled for October 4, 2026 at 2:30 AM UTC?",
+   "description": "This market will settle to the winner of the Baylor vs Arizona State College Football game scheduled for Oct 3, 2026. Overtime is included if played. If a tied final score is reported and no official winner is declared, this market will not resolve automatically and will be reviewed against the official governing-body result. If the game is delayed, postponed, or suspended and not rescheduled to a date within two weeks of the originally scheduled date, the market will settle to the last fair market price. Outcome sourced from the relevant governing body.",
+   "marketType": "moneyline",
+   "sportsMarketType": "football_team_full_game_winner",
+   "sportsMarketTypeV2": "SPORTS_MARKET_TYPE_MONEYLINE",
+   "gameStartTime": "2026-10-04T02:30:00Z",
+   "orderPriceMinTickSize": 0.005,
+   "assetPriceTerms": null,
+   "marketSides": [
+    {
+     "description": "Bears",
+     "long": true,
+     "team_name": "Baylor",
+     "team_alias": "Bears",
+     "team_abbreviation": "bayl",
+     "team_league": "cfb",
+     "team_ranking": "0"
+    },
+    {
+     "description": "Sun Devils",
+     "long": false,
+     "team_name": "Arizona State",
+     "team_alias": "Sun Devils",
+     "team_abbreviation": "arzst",
+     "team_league": "cfb",
+     "team_ranking": "0"
+    }
+   ]
+  },
+  {
+   "slug": "aec-cfb-cin-arz-2026-10-03",
+   "question": "Who will win in the upcoming football event Cincinnati vs Arizona scheduled for October 4, 2026 at 3:00 AM UTC?",
+   "description": "This market will settle to the winner of the Cincinnati vs Arizona College Football game scheduled for Oct 3, 2026. Overtime is included if played. If a tied final score is reported and no official winner is declared, this market will not resolve automatically and will be reviewed against the official governing-body result. If the game is delayed, postponed, or suspended and not rescheduled to a date within two weeks of the originally scheduled date, the market will settle to the last fair market price. Outcome sourced from the relevant governing body.",
+   "marketType": "moneyline",
+   "sportsMarketType": "football_team_full_game_winner",
+   "sportsMarketTypeV2": "SPORTS_MARKET_TYPE_MONEYLINE",
+   "gameStartTime": "2026-10-04T03:00:00Z",
+   "orderPriceMinTickSize": 0.005,
+   "assetPriceTerms": null,
+   "marketSides": [
+    {
+     "description": "Bearcats",
+     "long": true,
+     "team_name": "Cincinnati",
+     "team_alias": "Bearcats",
+     "team_abbreviation": "cin",
+     "team_league": "cfb",
+     "team_ranking": "0"
+    },
+    {
+     "description": "Wildcats",
+     "long": false,
+     "team_name": "Arizona",
+     "team_alias": "Wildcats",
+     "team_abbreviation": "arz",
+     "team_league": "cfb",
+     "team_ranking": "0"
+    }
+   ]
+  }
+ ]
+}

@@ -50,6 +50,10 @@ R_NOT_ESTABLISHED = "VENUE_SETTLEMENT_RULE_NOT_ESTABLISHED"
 BOOK_SETTLEMENT = {
     "soccer": "REGULATION_90_PLUS_STOPPAGE_NO_EXTRA_TIME",
     "baseball": "FULL_GAME_INCLUDING_EXTRA_INNINGS",
+    # cand22, captured with its page hash: bettor_settlement_terms.
+    # CAPTURE_RUN_FOOTBALL ("Bets on the Game and 2nd Half-periods include
+    # points scored in overtime.").
+    "football": "FULL_GAME_INCLUDING_OVERTIME",
 }
 
 # ── the four rules, separately, because only one is even answerable ──
@@ -89,6 +93,19 @@ OVERTIME_PROSE = {
                      r"(?:only|first)\s+nine\s+innings",
                      r"after\s+nine\s+innings\s+only",
                      r"regulation\s+(?:nine\s+)?innings\s+only"),
+    },
+    # cand22. The venue's cfb listing (GET /v1/markets?slug=aec-cfb-..., read
+    # 2026-10-03T23:14:23Z by fetch-docs run 37161115118, response sha256
+    # 1df8dc71...): "Overtime is included if played." The book: "Bets on the
+    # Game and 2nd Half-periods include points scored in overtime."
+    "football": {
+        "book_rule_includes_overtime": True,
+        "includes": (r"overtime\s+(?:is|are|will\s+be)\s+included",
+                     r"includ\w*\s+(?:any\s+)?overtime"),
+        "excludes": (r"exclud\w*\s+(?:any\s+)?overtime",
+                     r"(?:does|will)\s+not\s+includ\w*\s+overtime",
+                     r"regulation\s+(?:time\s+)?only",
+                     r"overtime\s+(?:is|will\s+be)\s+not\s+(?:included|counted)"),
     },
     "soccer": {
         "book_rule_includes_overtime": False,
@@ -375,7 +392,10 @@ VOID_BOOK_NOTE = (
 
 #: How many outcomes the BOOK prices, per sport family. Soccer h2h is
 #: three-way; MLB is two-way.
-BOOK_OUTCOMES = {"soccer": 3, "baseball": 2}
+BOOK_OUTCOMES = {"soccer": 3, "baseball": 2,
+                 # a college game cannot end level (overtime to a result) and
+                 # the book's money line prices two outcomes
+                 "football": 2}
 
 #: THE DRAW ASYMMETRY, which is the one that would quietly cost money.
 #:

@@ -78,17 +78,113 @@ CATALOGUE_SQL = """
 """
 
 
-def mandate() -> dict:
+#: How recent the collector's heartbeat must be for its REQUESTED set to
+#: count as the lane's current mandate: three scheduled cycles.
+REQUESTED_FRESH_S = 3 * 900.0
+REQUESTED_KEY = "ext_pinnacle_last_cycle"
+X_LEAGUE = "LEAGUE_NOT_IN_THE_REQUESTED_SET"
+
+
+def _jsonish(v):
+    if isinstance(v, (str, bytes)):
+        try:
+            return json.loads(v)
+        except ValueError:
+            return None
+    return v
+
+
+async def requested_set(conn, *, now: float) -> dict:
+    """THE COMPETITIONS THE COLLECTOR ACTUALLY REQUESTED, from its own
+    heartbeat (`ext_pinnacle_last_cycle.sports_selection.requested`). Stale,
+    absent or unreadable -> no keys, with the reason named: the mandate then
+    falls back to the configured set alone. Never raises."""
+    out = {"read": False, "fresh": False, "keys": [], "at": None,
+           "source": "ingestion_state.%s.sports_selection.requested"
+                     % REQUESTED_KEY}
+    try:
+        raw = await conn.fetchval(
+            "SELECT value FROM ingestion_state WHERE key = $1", REQUESTED_KEY)
+    except Exception as exc:                                   # noqa: BLE001
+        return dict(out, why="read failed (%s)" % type(exc).__name__)
+    v = _jsonish(raw)
+    if not isinstance(v, dict):
+        return dict(out, why="no collector heartbeat")
+    out["read"] = True
+    try:
+        at = float(v.get("at"))
+    except (TypeError, ValueError):
+        return dict(out, why="the heartbeat carries no readable `at`")
+    out["at"] = at
+    keys = [str(k) for k in ((v.get("sports_selection") or {})
+                             .get("requested") or []) if k]
+    if not 0 <= float(now) - at <= REQUESTED_FRESH_S:
+        return dict(out, why=("the heartbeat is %.0f s old, past %.0f s; its "
+                              "requested set is not current"
+                              % (float(now) - at, REQUESTED_FRESH_S)))
+    return dict(out, fresh=True, keys=keys)
+
+
+def mandate(requested_keys=()) -> dict:
     """THE APPROVED ENTRY MANDATE, read from the lane that executes it:
-    the sports the entry lane is configured to value (ext_pinnacle_loop.SPORTS),
-    full-game moneyline winners, real fixtures, Polymarket US."""
+    the sports the entry lane is configured to value (ext_pinnacle_loop.SPORTS)
+    PLUS the competitions the collector requested on its current cycle,
+    full-game moneyline winners, real fixtures, Polymarket US.
+
+    THE DEFECT THIS CLOSES (cand22). The mandate was `L.SPORTS` alone --
+    baseball -- while the collector was valuing soccer and (after cand22)
+    college football, so every `cfb` and `unl` contract the lane priced was
+    filed OUTSIDE_MANDATE:SPORT_NOT_IN_THE_ENTRY_MANDATE. A family that is
+    in the mandate ONLY through requested competitions is held to those
+    competitions' venue league tokens (`cfb`, not `nfl`); a configured
+    family keeps its family-level scope, unchanged."""
     from ..workers import ext_pinnacle_loop as L
-    fams = sorted({fam for _key, fam in L.SPORTS})
+    configured = {key: fam for key, fam in L.SPORTS}
+    requested = {}
+    for key in requested_keys or ():
+        fam = L.family_for_provider_key(key)
+        if fam and key not in configured:
+            requested[str(key)] = fam
+    fams = sorted(set(configured.values()) | set(requested.values()))
+    leagues: dict = {}
+    for key, fam in requested.items():
+        if fam in configured.values():
+            continue
+        leagues.setdefault(fam, set()).update(L.venue_league_tokens(key))
     return {"families": fams,
-            "sport_keys": sorted({key for key, _fam in L.SPORTS}),
+            "sport_keys": sorted(set(configured) | set(requested)),
+            "requested_keys": sorted(requested),
+            "league_tokens_by_family": {f: sorted(t)
+                                        for f, t in leagues.items()},
             "kind": "MONEYLINE", "period": "FULL",
             "catalogue": "POLYMARKET_US (us_premap)",
-            "source": "ext_pinnacle_loop.SPORTS"}
+            "source": ("ext_pinnacle_loop.SPORTS + the collector's requested "
+                       "set (%s)" % REQUESTED_KEY)}
+
+
+_TOKEN_MAP: dict = {}
+
+
+def league_of_row(row: dict) -> dict:
+    """The contract's league in the ONE identity the lane and
+    coverage_integrity use: venue token -> provider key -> display name
+    (`cfb` -> americanfootball_ncaaf -> "NCAAF"). `lane_maps` says whether
+    the COLLECTOR maps that token (ext_pinnacle_loop.provider_key_for_venue_
+    token); coverage_integrity's wider counting map only supplies a name."""
+    from ..workers import ext_pinnacle_loop as L
+    from .coverage_integrity import catalogue_token_map, league_name
+    if not _TOKEN_MAP:
+        _TOKEN_MAP.update(catalogue_token_map())
+    ev = str(row.get("event_slug") or "")
+    tok = (ev.split("-", 1)[0] if ev else
+           (str(row.get("market_slug") or "").split("-") + ["", ""])[1])
+    tok = tok.strip().lower()
+    lane_key = L.provider_key_for_venue_token(tok)
+    key = lane_key or _TOKEN_MAP.get(tok)
+    return {"token": tok, "provider_key": key,
+            "lane_maps": lane_key is not None,
+            "league_name": league_name(key) if key else
+            ("UNMAPPED:%s" % tok if tok else "UNMAPPED")}
 
 
 def classify_listing(row: dict, *, mand: dict) -> tuple:
@@ -114,6 +210,11 @@ def classify_listing(row: dict, *, mand: dict) -> tuple:
     fam = st.split("_")[0]
     if fam not in mand["families"]:
         return S_OUTSIDE, "%s:%s" % (X_SPORT, fam)
+    toks = (mand.get("league_tokens_by_family") or {}).get(fam)
+    if toks is not None:
+        lg = league_of_row(row)
+        if lg["token"] not in toks:
+            return S_OUTSIDE, "%s:%s" % (X_LEAGUE, lg["token"] or "UNKNOWN")
     kind = HSUP.derive_kind(row)
     if kind.get("kind") != IS.KIND_MONEYLINE:
         return S_OUTSIDE, "%s:%s" % (X_MARKET_TYPE, st)
@@ -156,7 +257,10 @@ async def census(conn, *, now: float) -> dict:
     from .. import bettor_pair_observations as PO
 
     at = float(now)
-    mand = mandate()
+    req = await requested_set(conn, now=at)
+    mand = mandate(req["keys"])
+    mand["requested_set"] = {k: req.get(k) for k in (
+        "read", "fresh", "at", "source", "why")}
     out: dict[str, Any] = {"version": VERSION, "at": at, "mandate": mand,
                            "polymarket_us_only": True,
                            "never_substituted": (
@@ -238,6 +342,7 @@ async def census(conn, *, now: float) -> dict:
     fixtures = {s: set() for s in FINAL_STATES}
     listed_fixtures: set = set()
     derek_verdicts = {"ENTER": 0, "REFUSE": 0}
+    by_league: dict = {}
     for row in rows:
         slug = row["market_slug"]
         fx = str(row.get("event_slug") or slug)
@@ -272,6 +377,11 @@ async def census(conn, *, now: float) -> dict:
         elif state == S_UNSUPPORTED:
             funnel["within_mandate"] += 1
         states[state] += 1
+        lg = league_of_row(row)
+        bl = by_league.setdefault(lg["league_name"], {
+            "provider_key": lg["provider_key"], "venue_token": lg["token"],
+            "states": {}})
+        bl["states"][state] = bl["states"].get(state, 0) + 1
         fixtures[state].add(fx)
         reasons[state][reason] = reasons[state].get(reason, 0) + 1
         if len(sample[state]) < SAMPLE_PER_STATE:
@@ -307,6 +417,11 @@ async def census(conn, *, now: float) -> dict:
             lane_slugs - catalogue_slugs),
         "unit": "Polymarket US contracts (us_premap.market_slug); fixtures "
                 "are counted by event_slug beside them",
+        # PER LEAGUE, under the SAME name coverage_integrity uses (`cfb` ->
+        # americanfootball_ncaaf -> "NCAAF"), largest first and bounded.
+        "by_league": dict(sorted(
+            by_league.items(),
+            key=lambda kv: -sum(kv[1]["states"].values()))[:40]),
     }
     return dict(out, ok=True, refusal=None, categories=categories,
                 blocked_by_reason=blocked_by_reason, reasons_by_state=reasons,

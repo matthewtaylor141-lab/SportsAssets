@@ -637,3 +637,7 @@ tests/test_karen_challenge_lifecycle.py
 tests/test_karen_metrics_and_runner.py
 tests/test_karen_api_pages_slack.py
 tests/test_karen_management_url.py
+# cand22 P0-A: one league identity (cfb <-> americanfootball_ncaaf <-> NCAAF),
+# a census that files a requested league honestly, college names that map
+# exactly or refuse by name, captured football settlement terms.
+tests/test_ncaaf_identity_settlement_and_coverage.py

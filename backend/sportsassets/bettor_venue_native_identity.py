@@ -113,10 +113,14 @@ R_COMPETITION = "VENUE_NATIVE_COMPETITION_NOT_ESTABLISHED"
 #: error is named on the event instead of ending the cycle it runs inside.
 R_MATCH_RAISED = "VENUE_NATIVE_MATCH_RAISED"
 
+#: A college school contain-matched but the venue's own nickname is not in
+#: the provider's name: Ohio / Ohio State, Miami (FL) / Miami (OH).
+R_NICKNAME = "VENUE_NATIVE_NICKNAME_DOES_NOT_CONFIRM_THE_TEAM"
+
 REFUSALS = (R_NO_EVENT, R_AMBIGUOUS, R_ONE_TEAM_ONLY, R_ASSIGNMENT_AMBIGUOUS,
             R_NO_PRICED_CONTRACT, R_PRICED_CONTRACT_AMBIGUOUS,
             R_CONTRACT_SIDES, R_FAMILY, R_PROVIDER_EVENT, R_READ_FAILED,
-            R_READ_TRUNCATED, R_COMPETITION, R_MATCH_RAISED)
+            R_READ_TRUNCATED, R_COMPETITION, R_MATCH_RAISED, R_NICKNAME)
 
 LONG = "ORDER_INTENT_BUY_LONG"
 SHORT = "ORDER_INTENT_BUY_SHORT"
@@ -304,15 +308,83 @@ def _is_generic(tok: str) -> bool:
     return tok in GENERIC_TOKENS or len(tok) < 2 or tok.isdigit()
 
 
-def team_profile(name) -> dict:
+#: ── COLLEGE NAMES: THE ONLY REWRITES, AND THE GUARD ON THEM (cand22) ──
+#:
+#: Each is a RENDERING difference between two sources for ONE school, never
+#: a similarity between two schools, and each is applied to BOTH sides:
+#:
+#:   ranked prefix   "#5 Alabama", "(5) Alabama", "No. 5 Alabama" -> alabama.
+#:                   A poll rank is not part of the name.
+#:   St.             "Mississippi St." -> mississippi state; a LEADING St.
+#:                   is Saint ("St. Thomas (MN)" -> saint thomas mn).
+#:   abbreviation    ABBREVIATIONS below, expanded to the school's full word
+#:                   ("UL Monroe" -> louisiana monroe). An expansion can make
+#:                   two renderings of different schools look alike, so a
+#:                   match that used one stands ONLY when the venue's own
+#:                   nickname is in the provider's name (warhawks).
+#:
+#: AND EVERY FOOTBALL MATCH NEEDS THE VENUE NICKNAME IN THE PROVIDER NAME.
+#: The provider renders college teams as school + nickname ("Ohio Bobcats",
+#: "Miami (OH) RedHawks"). A bare school would be CONTAINED in a longer
+#: one -- "Ohio" in "ohio state buckeyes", "Miami" in "miami oh redhawks" --
+#: and containment would cross-map them. Requiring the venue's nickname
+#: (side_norm) closes that: "buckeyes" is not in "Ohio Bobcats". No fuzzy
+#: score, no edit distance: an unmatched rendering refuses by name.
+_RANK_PREFIX = re.compile(
+    r"^\s*(?:#\s*\d{1,2}|\(\s*\d{1,2}\s*\)|no\.?\s*\d{1,2})\s+",
+    re.IGNORECASE)
+
+#: (folded token sequence) -> (expansion). Short on purpose; each entry is
+#: one school's abbreviation as a source renders it.
+ABBREVIATIONS = {
+    ("ul",): ("louisiana",),                 # UL Monroe / UL Lafayette
+    ("ole", "miss"): ("mississippi",),       # Ole Miss Rebels
+    ("app",): ("appalachian",),              # App State Mountaineers
+}
+
+def _college_tokens(raw: list) -> tuple:
+    """(tokens, rewrites) after the St. and abbreviation rewrites. Pure."""
+    toks, rew = [], []
+    i = 0
+    while i < len(raw):
+        hit = None
+        for k, v in ABBREVIATIONS.items():
+            if tuple(raw[i:i + len(k)]) == k:
+                hit = (k, v)
+                break
+        if hit:
+            toks.extend(hit[1])
+            rew.append("%s->%s" % (" ".join(hit[0]), " ".join(hit[1])))
+            i += len(hit[0])
+            continue
+        t = raw[i]
+        if t == "st":
+            t = "saint" if i == 0 else "state"
+            rew.append("st->%s" % t)
+        toks.append(t)
+        i += 1
+    return toks, rew
+
+
+def team_profile(name, family=None, nickname=None) -> dict:
     """One team's name, as the comparison sees it, with what was dropped.
 
     `tokens` excludes affiliation markers and squad qualifiers (both reported);
     `distinctive` is the subset that may carry a match on its own. A name that
     is ONLY affiliation markers keeps them, because an empty token set would
-    be contained in every other team.
+    be contained in every other team. For NICKNAME_QUALIFIED_FAMILIES the
+    college rewrites above apply (reported in `rewrites`), and `nickname`
+    (the venue's side_norm) is carried as `nickname_tokens`.
     """
-    raw = fold(name).split()
+    college = family in NICKNAME_QUALIFIED_FAMILIES
+    text = _RANK_PREFIX.sub("", str(name or "")) if college else name
+    raw = fold(text).split()
+    rewrites: list = []
+    if college:
+        if text != name:
+            rewrites.append("ranked prefix dropped")
+        raw, rw = _college_tokens(raw)
+        rewrites.extend(rw)
     quals = frozenset(t for t in raw if t in SQUAD_QUALIFIERS)
     body = [t for t in raw if t not in SQUAD_QUALIFIERS]
     kept = [t for t in body if t not in AFFILIATION_TOKENS]
@@ -320,9 +392,31 @@ def team_profile(name) -> dict:
     if not kept:
         kept, dropped = body, []
     toks = frozenset(kept)
-    return {"name": name, "folded": fold(name), "tokens": toks,
-            "distinctive": frozenset(t for t in toks if not _is_generic(t)),
-            "qualifiers": quals, "dropped": sorted(set(dropped))}
+    out = {"name": name, "folded": fold(name), "tokens": toks,
+           "distinctive": frozenset(t for t in toks if not _is_generic(t)),
+           "qualifiers": quals, "dropped": sorted(set(dropped))}
+    if college:
+        nick = _college_tokens(fold(nickname).split())[0] if nickname else []
+        out.update(rewrites=rewrites, nickname_tokens=frozenset(nick),
+                   expanded=any("->" in r and not r.startswith("st->")
+                                for r in rewrites))
+    return out
+
+
+def same_college_team(provider: dict, venue: dict) -> dict:
+    """`same_team`, plus the football guard: the venue's own nickname must be
+    in the provider's name. Pure."""
+    got = same_team(provider, venue)
+    nick = venue.get("nickname_tokens") or frozenset()
+    got["venue_nickname"] = sorted(nick)
+    if got["same"] and not (nick and nick <= provider["tokens"]):
+        got.update(same=False, nickname_blocked=True,
+                   why=("the venue's nickname %s is not in the provider's "
+                        "name %r, so containment alone cannot say these are "
+                        "the same school (Ohio is contained in Ohio State)"
+                        % (sorted(nick) or "(none listed)",
+                           provider.get("name"))))
+    return got
 
 
 def same_team(provider: dict, venue: dict, *, womens_competition=False) -> dict:
@@ -446,7 +540,12 @@ def _events_in_window(rows, *, family, commence_epoch, league_tokens=None):
         if len(names) != 2:
             set_aside["not_two_participants"].append(ev)
             continue
+        nicks = {}
+        for r in rs:
+            nicks.setdefault(participant_name(r, family),
+                             str(r.get("side_norm") or ""))
         inside.append({"event_slug": ev, "rows": rs, "participants": names,
+                       "nicknames": nicks,
                        "start_epoch": start, "offset_s": round(offset, 3)})
     return inside, set_aside
 
@@ -490,7 +589,7 @@ def match_event(*, home, away, commence_epoch, family, rows,
     except (TypeError, ValueError):
         return _refuse(out, R_PROVIDER_EVENT,
                        "the provider's commence time is not readable")
-    hp, ap = team_profile(home), team_profile(away)
+    hp, ap = team_profile(home, family), team_profile(away, family)
     if not hp["tokens"] or not ap["tokens"] or hp["tokens"] == ap["tokens"]:
         return _refuse(out, R_PROVIDER_EVENT, (
             "the provider event does not name two distinct teams after "
@@ -511,13 +610,26 @@ def match_event(*, home, away, commence_epoch, family, rows,
     out["events_in_window"] = len(events)
     out["set_aside"] = {k: v[:6] for k, v in set_aside.items() if v}
     full = []
+    nickname_blocked = []
+    college = family in NICKNAME_QUALIFIED_FAMILIES
     for ev in events:
         a, b = ev["participants"]
-        pa, pb = team_profile(a), team_profile(b)
-        h_a = same_team(hp, pa, womens_competition=womens)
-        h_b = same_team(hp, pb, womens_competition=womens)
-        a_a = same_team(ap, pa, womens_competition=womens)
-        a_b = same_team(ap, pb, womens_competition=womens)
+        if college:
+            nk = ev.get("nicknames") or {}
+            pa = team_profile(a, family, nickname=nk.get(a))
+            pb = team_profile(b, family, nickname=nk.get(b))
+            h_a, h_b = same_college_team(hp, pa), same_college_team(hp, pb)
+            a_a, a_b = same_college_team(ap, pa), same_college_team(ap, pb)
+            for v in (h_a, h_b, a_a, a_b):
+                if v.get("nickname_blocked") and \
+                        ev["event_slug"] not in nickname_blocked:
+                    nickname_blocked.append(ev["event_slug"])
+        else:
+            pa, pb = team_profile(a), team_profile(b)
+            h_a = same_team(hp, pa, womens_competition=womens)
+            h_b = same_team(hp, pb, womens_competition=womens)
+            a_a = same_team(ap, pa, womens_competition=womens)
+            a_b = same_team(ap, pb, womens_competition=womens)
         # THE ONE-TO-ONE ASSIGNMENT, BOTH ORIENTATIONS. Home to one
         # participant and away to THE OTHER; one participant never serves
         # twice.
@@ -539,7 +651,15 @@ def match_event(*, home, away, commence_epoch, family, rows,
                     "offset_s": ev["offset_s"]})
     out["candidates"] = len(full)
     out["candidate_events"] = [e["event_slug"] for e in full][:6]
+    out["nickname_blocked_events"] = nickname_blocked[:6]
     if not full:
+        if nickname_blocked:
+            return _refuse(out, R_NICKNAME, (
+                "%r / %r contain-match a venue school in %s, but the venue's "
+                "own nickname is not in the provider's name, so the two may "
+                "be different schools (Ohio / Ohio State, Miami FL / Miami "
+                "OH). Refused rather than cross-mapped"
+                % (home, away, ", ".join(nickname_blocked[:6]))))
         if out["partial_matches"]:
             return _refuse(out, R_ONE_TEAM_ONLY, (
                 "%d venue event(s) within %.0f min name one of %r / %r and "
