@@ -69,6 +69,38 @@ jobs:
             fi
             exit 0
           fi
+          # ZIP BRANCH. The venue publishes its gRPC .proto definitions as a
+          # zip (the "Download Proto Files" link on
+          # /streaming-endpoints/proto-reference), and an HTML reader turns a
+          # zip into noise. Detected by magic bytes. Lists every entry with
+          # its sha256, then prints the TEXT of the .proto entries whose path
+          # matches the filter (all .proto entries when no filter is given).
+          # Nothing is executed; nothing is extracted beyond reading in memory.
+          if head -c 2 /tmp/page.html | grep -q 'PK'; then
+            echo "== content: ZIP =="
+            python3 - <<'PY'
+          import hashlib, os, re, zipfile
+          z = zipfile.ZipFile('/tmp/page.html')
+          flt = os.environ.get('FILTER') or ''
+          print("== ENTRIES ==")
+          for i in z.infolist():
+              b = z.read(i.filename) if not i.is_dir() else b''
+              print("%-90s %8d %s" % (i.filename, i.file_size,
+                                       hashlib.sha256(b).hexdigest()))
+          for i in z.infolist():
+              n = i.filename
+              if i.is_dir() or not n.endswith('.proto'):
+                  continue
+              if flt and not re.search(flt, n):
+                  continue
+              b = z.read(n)
+              print("== FILE %s sha256=%s bytes=%d ==" % (
+                  n, hashlib.sha256(b).hexdigest(), len(b)))
+              print(b.decode('utf-8', errors='replace'))
+              print("== END FILE %s ==" % n)
+          PY
+            exit 0
+          fi
           echo "== content: HTML =="
           python3 - <<'PY'
           import html, re
