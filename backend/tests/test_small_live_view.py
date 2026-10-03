@@ -64,7 +64,8 @@ async def _setup(conn, *, enabled=True, cutover=True):
 
 
 async def _decision(conn, acct, *, p=0.62, limit=0.55, qty=2702, vwap=0.548,
-                    net_ev=171.4, gross=7.0, provider="pinnapi.com/raw-websocket"):
+                    net_ev=171.4, gross=7.0, provider="pinnapi.com/raw-websocket",
+                    p_blended=None, decided_at=None):
     did = "paper_d_%s" % uuid.uuid4().hex[:12]
     pd = {"strategy": "PINNACLE_COMPLETED_GAME_PAPER",
           "policy_version": "PINNACLE_COMPLETED_GAME_PAPER_V2",
@@ -77,15 +78,15 @@ async def _decision(conn, acct, *, p=0.62, limit=0.55, qty=2702, vwap=0.548,
              decided_at, valuation_id, us_market_slug, holding_side, intent,
              label, verdict, internal_model, p_pinnacle, pinnacle, proposed_qty,
              limit_price, economics, qualification_gaps, policy_version,
-             policy_decision, simulator_version, strategy)
-           VALUES ($1,$2,$3,now(),$4,'mlb-slv','LONG','ORDER_INTENT_BUY_LONG',
+             policy_decision, simulator_version, strategy, p_blended)
+           VALUES ($1,$2,$3,coalesce($11::timestamptz, now()),$4,'mlb-slv','LONG','ORDER_INTENT_BUY_LONG',
                    '{"team":"Synthetic Nine"}'::jsonb,'ENTER','{}'::jsonb,$5,$6::jsonb,
                    $7,$8,$9::jsonb,'[]'::jsonb,'PINNACLE_COMPLETED_GAME_PAPER_V2',
-                   $10::jsonb,'TEST','PINNACLE_COMPLETED_GAME_PAPER')""",
+                   $10::jsonb,'TEST','PINNACLE_COMPLETED_GAME_PAPER',$12)""",
         did, acct["session_id"], acct["account_id"],
         int(uuid.uuid4().int % 10 ** 12), p,
         json.dumps({"provider": provider, "p": p}), qty, limit,
-        json.dumps(eco), json.dumps(pd))
+        json.dumps(eco), json.dumps(pd), decided_at, p_blended)
     return did
 
 
@@ -166,7 +167,7 @@ async def _venue_fill(conn, mid, po, *, vid, qty, price, fee):
         "%s:%s" % (vid, qty), mid, vid, po["group_id"], po["slug"], qty, price, fee)
 
 
-async def _xavier_and_audrey(conn, acct, po, fid, did):
+async def _xavier_and_audrey(conn, acct, po, fid, did, measure=None):
     hid = "paper_h_%s" % uuid.uuid4().hex[:10]
     await conn.execute(
         """INSERT INTO paper_handoffs (handoff_id, session_id, account_id, group_id,
@@ -178,12 +179,14 @@ async def _xavier_and_audrey(conn, acct, po, fid, did):
     for i, rec in enumerate(("HOLD", "PASSIVE_EXIT")):
         await conn.execute(
             """INSERT INTO paper_xavier_reviews (review_id, session_id, account_id,
-                 group_id, reviewed_at, trigger, recommendation, alternatives, exposure)
+                 group_id, reviewed_at, trigger, recommendation, alternatives, exposure,
+                 measure)
                VALUES ($1,$2,$3,$4,now() + make_interval(secs => $5),$6,$7,
-                       '[]'::jsonb,'{}'::jsonb)""",
+                       '[]'::jsonb,'{}'::jsonb,$8::jsonb)""",
             "paper_xr_%s" % uuid.uuid4().hex[:10], acct["session_id"],
             acct["account_id"], po["group_id"], float(i),
-            "FIRST_FILL" if i == 0 else "FILL_EVENT", rec)
+            "FIRST_FILL" if i == 0 else "FILL_EVENT", rec,
+            json.dumps(measure) if (measure is not None and i == 1) else None)
     fnd = "paper_af_%s" % uuid.uuid4().hex[:10]
     await conn.execute(
         """INSERT INTO paper_audrey_findings (finding_id, session_id, account_id,
@@ -312,6 +315,245 @@ async def test_an_actual_position_xavier_record_is_shown_when_one_exists():
         assert xa["latest_action"] == "HOLD" and xa["unrealized_usd"] == pytest.approx(0.06)
     finally:
         await conn.close()
+
+
+# ─────────────────────── the operating view: one complete chain ───────────────────────
+
+async def _complete_chain(conn, acct):
+    """decision -> paper order -> simulated fill -> mirror order -> venue
+    order -> venue fill -> Xavier (paper + actual) -> Audrey, plus a resting
+    paper protective sale (partly filled) and a resting live protective sale
+    (unfilled), with controlled instants."""
+    did = await _decision(conn, acct, p_blended=0.61,
+                          decided_at=NOW - dt.timedelta(milliseconds=1500))
+    po = await _paper_order(conn, acct, decision_id=did, qty=2702)
+    fid = await _paper_fill(conn, acct, po, qty=2702, price=0.55, fee=27.02)
+    mid = await _mirror(conn, po, state="FILLED", live_qty=3, venue_order_id="v-cc1",
+                        cum=3, avg=0.56, fees=0.06)
+    await conn.execute(
+        "UPDATE execmirror_orders SET submit_started_at = $2, accepted_at = $3,"
+        " latency_ms = 250 WHERE mirror_id = $1",
+        mid, NOW, NOW + dt.timedelta(milliseconds=250))
+    await _venue_fill(conn, mid, po, vid="v-cc1", qty=3, price=0.56, fee=0.06)
+    hid, fnd = await _xavier_and_audrey(
+        conn, acct, po, fid, did,
+        measure={"p": 0.61, "source": "CURRENT_BLEND", "stale": False,
+                 "probability_evidence_state": "FRESH_CURRENT_PROBABILITY"})
+    # paper standing protection: a resting sale of the whole position, 1000 filled
+    pp = await _paper_order(conn, acct, qty=2702, group=po["group_id"], state="RESTING")
+    await conn.execute(
+        """UPDATE paper_orders SET role = 'STANDING_PROTECTION', direction = 'SELL',
+                  intent = 'ORDER_INTENT_SELL_LONG', order_type = 'RESTING',
+                  time_in_force = 'GTD', filled_qty = 1000, state = 'PARTIALLY_FILLED',
+                  wire_price = 0.57, limit_price = 0.57
+            WHERE order_id = $1""", pp["order_id"])
+    await conn.execute(
+        """INSERT INTO paper_fills (fill_id, idempotency_key, order_id, account_id,
+             session_id, group_id, role, direction, holding_side, us_market_slug,
+             qty, price, wire_price, fee_usd, gross_usd, filled_at, basis,
+             simulator_version)
+           VALUES ($1,$1,$2,$3,$4,$5,'STANDING_PROTECTION','SELL','LONG',$6,1000,0.57,0.57,
+                   5.0,570,now(),'CROSSING_LIQUIDITY_AFTER_QUEUE','TEST')""",
+        "paper_f_%s" % uuid.uuid4().hex[:10], pp["order_id"], acct["account_id"],
+        acct["session_id"], po["group_id"], po["slug"])
+    # live standing protection: resting on the venue, nothing filled
+    pm = await _mirror(conn, dict(pp, wire=0.57), state="OPEN", live_qty=3,
+                       venue_order_id="v-prot1", cum=0, polled=False, created_offset_s=5)
+    await conn.execute(
+        "UPDATE execmirror_orders SET role = 'STANDING_PROTECTION',"
+        " intent = 'ORDER_INTENT_SELL_LONG', tif = 'GTD' WHERE mirror_id = $1", pm)
+    await conn.execute(
+        """INSERT INTO smalllive_handoffs (handoff_id, venue, group_id,
+             us_market_slug, entry_mirror_id, opened_intent, live_held, live_bought,
+             avg_entry_px, fees_usd, first_live_fill_at)
+           VALUES ($1, 'POLYMARKET', $2, $3, $4, 'ORDER_INTENT_BUY_LONG', 3, 3, 0.56,
+                   0.06, now())""", "livehand:cc:" + po["group_id"], po["group_id"],
+        po["slug"], mid)
+    await conn.execute(
+        """INSERT INTO smalllive_reviews (review_id, handoff_id, reviewed_at, live_held,
+             committed_exit_qty, resting_protection_qty, filled_protection_qty,
+             quote, mark_value_usd, cost_basis_usd, unrealized_usd,
+             paper_recommendation, action)
+           VALUES ($1, $2, $3, 3, 0, 3, 0, '{"read": true}'::jsonb, 1.74, 1.68, 0.0,
+                   'PASSIVE_EXIT', 'HOLD_FOLLOWS_PAPER_DECISION')""",
+        "liverev:cc:" + po["group_id"], "livehand:cc:" + po["group_id"], NOW)
+    await conn.execute(
+        """INSERT INTO smalllive_reconciliations (group_id, venue, status,
+             discrepancies, chain)
+           VALUES ($1, 'POLYMARKET', 'MATCHED', '[]'::jsonb, $2::jsonb)""",
+        po["group_id"], json.dumps({"links": [{"mirror_id": mid, "live_fill_qty": "3"}]}))
+    return {"did": did, "po": po, "mid": mid, "pm": pm, "pp": pp, "hid": hid}
+
+
+@pg
+@pytest.mark.asyncio
+async def test_the_operating_view_on_one_complete_chain():
+    conn = await _conn()
+    try:
+        acct = await _setup(conn)
+        c = await _complete_chain(conn, acct)
+        v = await V.small_live(conn)
+        r = _row(v, c["mid"])
+        d, a, x, m, ch = (r["decision"], r["actual"], r["difference"], r["management"],
+                          r["chain"])
+        # PAPER: the probability the decision acted on; one not recorded is null
+        assert d["p_blended"] == pytest.approx(0.61) and d["p_internal"] is None
+        # ACTUAL: retail account prefix, mirror intent
+        assert a["account_fingerprint_prefix"] == FP[:8]
+        assert a["mirror_intent"]["mirror_id"] == c["mid"]
+        assert a["mirror_intent"]["intent"] == "ORDER_INTENT_BUY_LONG"
+        assert a["mirror_intent"]["role"] == "ENTRY"
+        # ACTUAL P&L: open live position -> the latest Xavier mark (a real 0.0)
+        assert a["group_pnl_kind"] == "UNREALIZED_MARK"
+        assert a["group_pnl_usd"] == 0.0 and a["group_pnl_why_unavailable"] is None
+        # paper P&L stays its own figure (the paper group is still open)
+        assert r["paper"]["group_realized_pnl_usd"] is None
+        # PAPER vs ACTUAL
+        assert x["live_minus_paper_fill_wire_price"] == pytest.approx(0.01)
+        assert x["price_adverse_per_contract"] == pytest.approx(0.01)
+        assert x["slippage_vs_submitted_adverse_per_contract"] == pytest.approx(0.01)
+        assert x["live_minus_expected_qty"] == pytest.approx(0.298)
+        assert x["live_fees_minus_scaled_paper_fees_usd"] == pytest.approx(0.06 - 0.02702)
+        assert x["decision_to_submit_ms"] == 1500
+        assert x["submit_to_ack_ms"] == 250 and x["submit_latency_ms_recorded"] == 250
+        assert x["scaled_qty"] == pytest.approx(2.702) and x["intended_live_qty"] == 3
+        assert x["rounded_qty"] == pytest.approx(0.298)
+        # MANAGEMENT: probability freshness read from the review's json
+        pf = m["probability_freshness"]
+        assert pf["evidence_state"] == "FRESH_CURRENT_PROBABILITY"
+        assert pf["evidence_state_source"] == \
+            "paper_xavier_reviews.measure.probability_evidence_state"
+        assert pf["evidence_state_recognised"] is True and pf["why_unavailable"] is None
+        assert pf["measure_source"] == "CURRENT_BLEND" and pf["measure_stale"] is False
+        # standing (resting) protection is NOT filled protection
+        pr = m["protection"]
+        assert pr["paper"]["open_qty"] == pytest.approx(1702)
+        assert pr["paper"]["standing_resting_qty"] == pytest.approx(1702)
+        assert pr["paper"]["standing_resting_orders"] == 1
+        assert pr["paper"]["filled_protection_qty"] == pytest.approx(1000)
+        assert pr["paper"]["unprotected_qty"] == pytest.approx(0)
+        assert pr["actual"]["held_qty"] == pytest.approx(3)
+        assert pr["actual"]["standing_resting_qty"] == pytest.approx(3)
+        assert pr["actual"]["filled_protection_qty"] == 0.0
+        assert pr["actual"]["pending_submission_qty"] == 0.0
+        assert "NOT filled protection" in pr["rule"]
+        # next review: latest review + the recorded / coded cadence
+        nr = m["next_review"]
+        latest = await conn.fetchval(
+            "SELECT max(reviewed_at) FROM paper_xavier_reviews WHERE group_id = $1",
+            c["po"]["group_id"])
+        assert nr["paper"]["due_by"] == (latest + dt.timedelta(seconds=60)).isoformat()
+        assert "xavier_backstop_s" in nr["paper"]["basis"]
+        assert nr["actual"]["due_by"] == (NOW + dt.timedelta(seconds=60)).isoformat()
+        assert "MANAGEMENT_EVERY_S" in nr["actual"]["basis"]
+        assert m["xavier_actual"]["paper_recommendation_followed"] == "PASSIVE_EXIT"
+        # AUDIT: Audrey, and every link of the chain present
+        rec = m["audrey_reconciliation"]
+        assert rec["status"] == "MATCHED" and rec["paper_only"] is False
+        assert rec["meaning"] and rec["audrey_chain_link"]["mirror_id"] == c["mid"]
+        assert [ln["link"] for ln in ch["links"]] == [
+            "decision", "paper_order", "paper_fill", "mirror_intent", "venue_order",
+            "venue_fill", "xavier_paper_handoff", "xavier_actual_handoff", "reconciliation"]
+        assert all(ln["state"] == "PRESENT" for ln in ch["links"]), ch["links"]
+        assert ch["complete"] is True and ch["absent"] == []
+        assert ch["links"][0]["ref"] == c["did"]
+        assert ch["links"][4]["ref"] == "v-cc1"
+        # the live protective sale's own row: sent, venue record not yet read
+        prow = _row(v, c["pm"])
+        assert prow["chain"]["links"][5]["state"] == "ABSENT"      # venue fill
+        assert prow["chain"]["complete"] is False
+        assert prow["chain"]["absent"] == ["venue_fill"]
+        assert prow["chain"]["links"][0]["state"] == "NOT_APPLICABLE"
+
+        # the protective sale fills on the venue: filled protection, and the
+        # ACTUAL position is flat -> REALIZED from venue fills, never summed
+        # with paper
+        await conn.execute(
+            "UPDATE execmirror_orders SET state = 'FILLED', cum_qty = 3, avg_px = 0.60,"
+            " fees_usd = 0.03, venue_state = 'ORDER_STATE_FILLED' WHERE mirror_id = $1",
+            c["pm"])
+        await conn.execute(
+            """INSERT INTO execmirror_fills (fill_key, mirror_id, venue_order_id,
+                 group_id, us_market_slug, intent, qty, price, fee_usd)
+               VALUES ('v-prot1:3', $1, 'v-prot1', $2, $3, 'ORDER_INTENT_SELL_LONG',
+                       3, 0.60, 0.03)""", c["pm"], c["po"]["group_id"], c["po"]["slug"])
+        r2 = _row(await V.small_live(conn), c["mid"])
+        pr2 = r2["management"]["protection"]["actual"]
+        assert pr2["standing_resting_qty"] == 0.0 and pr2["filled_protection_qty"] == 3.0
+        assert pr2["held_qty"] == 0.0
+        a2 = r2["actual"]
+        assert a2["group_pnl_kind"] == "REALIZED"
+        assert a2["group_pnl_usd"] == pytest.approx(-1.68 - 0.06 + 1.80 - 0.03)
+        assert r2["paper"]["group_realized_pnl_usd"] is None
+    finally:
+        await conn.close()
+
+
+@pg
+@pytest.mark.asyncio
+async def test_not_mirrored_and_absent_management_records_are_null_not_zero():
+    conn = await _conn()
+    try:
+        acct = await _setup(conn)
+        po = await _paper_order(conn, acct, qty=300)
+        mid = await _mirror(conn, po, state="EXCLUDED", live_qty=0,
+                            exclusion="BELOW_VENUE_MINIMUM")
+        await conn.execute(
+            """INSERT INTO smalllive_reconciliations (group_id, venue, status,
+                 discrepancies, chain)
+               VALUES ($1, 'POLYMARKET', 'NOT_MIRRORED', '[]'::jsonb, '{"links": []}'::jsonb)""",
+            po["group_id"])
+        r = _row(await V.small_live(conn), mid)
+        a, x, m, ch = r["actual"], r["difference"], r["management"], r["chain"]
+        rec = m["audrey_reconciliation"]
+        assert rec["status"] == "NOT_MIRRORED" and rec["paper_only"] is True
+        assert "nothing was sent to the venue" in rec["meaning"]
+        assert rec["audrey_chain_link"] is None
+        # nothing sent: no ACTUAL P&L, latency or live quantity -- null, with why
+        assert a["group_pnl_usd"] is None and a["group_pnl_kind"] is None
+        assert a["group_pnl_why_unavailable"]
+        assert a["mirror_intent"]["mirror_id"] == mid
+        for k in ("decision_to_submit_ms", "submit_to_ack_ms", "submit_latency_ms_recorded",
+                  "intended_live_qty"):
+            assert x[k] is None, k
+        assert x["scaled_qty"] == pytest.approx(0.3)
+        # no review: freshness unavailable, never inferred
+        pf = m["probability_freshness"]
+        assert pf["evidence_state"] is None and pf["evidence_state_source"] is None
+        assert pf["evidence_state_recognised"] is None and pf["why_unavailable"]
+        # no position on either side: no protection figure, never 0
+        for side in ("paper", "actual"):
+            p = m["protection"][side]
+            for k in ("standing_resting_qty", "filled_protection_qty", "unprotected_qty"):
+                assert p[k] is None, (side, k)
+            assert p["why_unavailable"]
+        for side in ("paper", "actual"):
+            assert m["next_review"][side]["due_by"] is None
+            assert m["next_review"][side]["why_unavailable"]
+        st = {ln["link"]: ln["state"] for ln in ch["links"]}
+        assert st == {"decision": "ABSENT", "paper_order": "PRESENT", "paper_fill": "ABSENT",
+                      "mirror_intent": "PRESENT", "venue_order": "NOT_APPLICABLE",
+                      "venue_fill": "NOT_APPLICABLE", "xavier_paper_handoff": "NOT_APPLICABLE",
+                      "xavier_actual_handoff": "NOT_APPLICABLE", "reconciliation": "PRESENT"}
+        assert ch["complete"] is False and ch["absent"] == ["decision", "paper_fill"]
+        assert next(ln for ln in ch["links"] if ln["link"] == "venue_order")["why"] \
+            == "not sent: excluded (BELOW_VENUE_MINIMUM)"
+    finally:
+        await conn.close()
+
+
+def test_the_evidence_state_is_read_defensively():
+    assert V._evidence_state([("a", None), ("b", "not json"), ("c", [])]) == (None, None)
+    assert V._evidence_state([("m", {"evidence_state": "STALE_ENTRY_TIME_PROBABILITY"})]) == \
+        ("STALE_ENTRY_TIME_PROBABILITY", "m.evidence_state")
+    assert V._evidence_state([("m", '{"probability_evidence": {"state": "PROBABILITY_UNAVAILABLE"}}')]) \
+        == ("PROBABILITY_UNAVAILABLE", "m.probability_evidence.state")
+    f = V._probability_freshness(None, None)
+    assert f["evidence_state"] is None and f["why_unavailable"] == "no Xavier review of this group yet"
+    f = V._probability_freshness({"review_id": "r", "measure": {"source": "ENTRY_TIME_MEASURE",
+                                                                 "stale": True, "p": 0.5}}, None)
+    assert f["evidence_state"] is None and f["measure_stale"] is True
+    assert f["why_unavailable"].startswith("the latest Xavier review records no")
 
 
 # ─────────────────────────── exclusions ───────────────────────────
@@ -509,7 +751,9 @@ def test_kalshi_is_listed_as_not_connected_with_nothing_filled_in():
 def test_the_small_live_builder_holds_no_mutating_statement():
     src = "".join(inspect.getsource(f) for f in (
         V.small_live, V._management, V._counts, V._decision_section,
-        V._paper_section, V._actual_section, V._difference))
+        V._paper_section, V._actual_section, V._difference, V._management_section,
+        V._chain, V._protection, V._next_review, V._probability_freshness,
+        V._actual_pnl))
     for word in ("INSERT ", "UPDATE ", "DELETE ", "TRUNCATE", "ALTER "):
         assert word not in src.upper(), word
 

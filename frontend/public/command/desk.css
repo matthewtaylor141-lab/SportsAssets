@@ -307,3 +307,15 @@ details.sl-more > summary {
   letter-spacing: .04em; text-transform: uppercase; margin-bottom: 8px;
 }
 details.sl-more > summary:focus-visible { outline: 1px solid var(--dk-accent); }
+/* operating summary: the checks management reads first on every row */
+.sl-ops {
+  margin: 0 0 14px; padding: 10px 12px; border: 1px solid var(--dk-line);
+  border-radius: 8px; background: #0b1016;
+}
+.sl-tag {
+  display: inline-block; min-width: 46px; font-size: 10.5px; letter-spacing: .06em;
+  text-transform: uppercase; color: var(--dk-ink-3);
+}
+.sl-chain { margin: 0; padding-left: 20px; }
+.sl-chain li { margin: 5px 0; overflow-wrap: anywhere; }
+.sl-decision .h3 .pill { margin-left: 6px; vertical-align: 1px; }
