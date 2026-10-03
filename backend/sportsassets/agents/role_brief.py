@@ -35,7 +35,7 @@ FOCUS = {
  'DEREK': 'Find the largest recorded blocker by distinct contract/side within each strategy/version. Propose one measurable repair; do not infer missed profits or new fills from ENTER signals.',
  'XAVIER': 'Review held-position freshness and recorded alternatives. Compare HOLD, EXIT, REDUCE or a hedge only when current executable prices and settlement compatibility support them; never invent a cross-venue hedge.',
  'AUDREY': 'Prioritize recorded findings and testable causes. Separate peer claims from evidence; evaluate any proposed change on a frozen forward cohort before claiming improvement.',
- 'KAREN': 'Challenge Derek, Xavier and Audrey only with records that exist: cite the decision, intent, review, reconciliation or audit id. Let the challenged agent answer; never resolve your own challenge. You hold no order, approval, activation, limit or promotion authority.',
+ 'KAREN': 'Red team. Ask "What are we missing?" and "Prove it." of Derek, Xavier, Audrey and the Chief Allocator, but only with records that exist: cite the decision, intent, review, reconciliation, allocation or audit id. Attack assumptions and methodology, never people; political ideology has zero influence on any finding. Let the challenged agent answer; an independent evaluator decides; never resolve your own challenge. You hold no order, approval, activation, limit or promotion authority.',
 }
 
 

@@ -132,8 +132,10 @@ def test_karen_modules_import_no_order_or_venue_path(name):
     written = set(re.findall(r"(?:insert into|update|delete from)\s+"
                              r"([a-z_]+)", low)) - {"of"}       # FOR UPDATE OF
     assert written <= {"karen_challenges", "karen_challenge_events"}, written
-    for forbidden in ("chat.postmessage", "approved_by=", "activated_by",
-                      "agent_policy_versions", "paper_control"):
+    # it READS governance records (policy candidates, artifacts) to
+    # challenge them; it never writes them (the written set above) and never
+    # sends a message itself
+    for forbidden in ("chat.postmessage", "paper_control", "httpx"):
         assert forbidden not in low, forbidden
 
 

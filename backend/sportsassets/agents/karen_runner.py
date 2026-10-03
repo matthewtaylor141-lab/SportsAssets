@@ -40,7 +40,9 @@ import os
 import time
 import uuid
 
+from . import collaboration_loop as CL
 from . import karen as K
+from . import karen_evidence as KE
 from . import registry as R
 
 log = logging.getLogger(__name__)
@@ -51,7 +53,7 @@ PASS_TIMEOUT_S = 90
 DETECTOR_TIMEOUT_S = 10
 LOOKBACK_S = 7 * 86400
 MAX_NEW_PER_DETECTOR = 3
-MAX_NEW_PER_PASS = 10
+MAX_NEW_PER_PASS = 12
 MAX_OPEN_PER_DETECTOR = 25
 #: An Audrey discrepancy with no improvement task after this long is "left
 #: open".
@@ -78,38 +80,123 @@ def _j(v):
 
 
 _NOT_YET = ("NOT EXISTS (SELECT 1 FROM karen_challenges k WHERE "
-            "k.detector=$1 AND k.target_kind=$2 AND k.target_id=%s)")
+            "k.detector=$1 AND k.target_kind=$2 AND k.target_id=(%s)::text)")
+
+_OPERATING = "ARRAY['DEREK','XAVIER','AUDREY']"
+
+
+# ═════════════════════════════════════════════════════════════════════
+# THE RULES. Each detector's defect is ONE predicate over one table (alias
+# t). The detector selects the records the predicate holds for; the peer
+# responder and the independent evaluator re-apply THE SAME predicate to
+# the challenged record (`rule_holds`), so "the record really is defective
+# under the same rule" is literally the same SQL.
+# ═════════════════════════════════════════════════════════════════════
+
+STALE_SUBMIT_REFUSALS = ("DECISION_STALE_AT_ACTUAL_SUBMIT",
+                         "EXECUTABLE_BOOK_STALE_AT_ACTUAL_SUBMIT",
+                         "ADMISSION_IDENTITY_NOT_EXACT")
+
+_NO_REFS = ("NOT coalesce(jsonb_typeof(%(c)s->'evidence_refs') = 'array' "
+            "AND jsonb_array_length(%(c)s->'evidence_refs') > 0, false)")
+
+RULES = {
+    # detector: (table, key expression, predicate)
+    "DECISION_WITHOUT_EVIDENCE": (
+        "agent_decisions", "t.decision_ref",
+        "t.agent_id = ANY(%s) AND jsonb_array_length(t.evidence_refs) = 0"
+        % _OPERATING),
+    "ENTRY_WITHOUT_PROBABILITY": (
+        "paper_decisions", "t.decision_id",
+        "t.verdict = 'ENTER' AND t.p_pinnacle IS NULL "
+        "AND t.p_internal IS NULL AND t.p_blended IS NULL"),
+    "HOLD_ON_STALE_PROBABILITY": (
+        "paper_xavier_reviews", "t.review_id",
+        "t.recommendation = 'HOLD' AND (t.measure->>'stale' = 'true' OR ("
+        "jsonb_typeof(t.measure->'probability_age_s') = 'number' "
+        "AND jsonb_typeof(t.measure->'probability_limit_s') = 'number' "
+        "AND (t.measure->>'probability_age_s')::numeric > "
+        "(t.measure->>'probability_limit_s')::numeric))"),
+    "AUDIT_DISCREPANCY_LEFT_OPEN": (
+        "paper_audrey_findings", "t.finding_id",
+        "upper(t.severity) IN ('WARNING', 'ERROR', 'CRITICAL', 'HIGH') "
+        "AND t.improvement_task_id IS NULL"),
+    "RECONCILIATION_DISCREPANCY_OPEN": (
+        "smalllive_reconciliations", "t.group_id",
+        "t.status = 'DISCREPANCY'"),
+    "ADMISSION_REFUSED_DECISION": (
+        "execution_intents", "t.intent_id",
+        "t.actual_state = 'REFUSED' AND t.actual_refusal = ANY(ARRAY[%s])"
+        % ", ".join("'%s'" % r for r in STALE_SUBMIT_REFUSALS)),
+    "POLICY_CANDIDATE_WITHOUT_EVIDENCE": (
+        "agent_policy_versions",
+        "(t.agent_id || '|' || t.policy_key || '|' || t.version)",
+        "t.state = 'CANDIDATE' AND " + _NO_REFS % {"c": "t.params"}),
+    "POLICY_ARTIFACT_READY_WITHOUT_EVIDENCE": (
+        "agent_policy_artifacts", "(t.policy_id || '@' || t.version)",
+        "t.status = 'READY_FOR_OWNER_APPROVAL' AND "
+        + _NO_REFS % {"c": "t.document"}),
+    "LIVE_RULE_READY_WITHOUT_EVIDENCE": (
+        "live_rule_artifacts", "(t.rule_id || '@' || t.version)",
+        "t.status = 'READY_FOR_OWNER_APPROVAL' AND "
+        + _NO_REFS % {"c": "t.document"}),
+    "STRATEGY_CANDIDATE_WITHOUT_EVIDENCE": (
+        "improvement_candidates", "t.candidate_id",
+        "t.state = 'APPROVAL_READY' AND (t.evidence IS NULL OR t.evidence "
+        "IN ('{}'::jsonb, '[]'::jsonb, 'null'::jsonb))"),
+}
+
+
+async def _exists(conn, table: str) -> bool:
+    return await conn.fetchval("SELECT to_regclass($1)", table) is not None
+
+
+async def _rule_rows(conn, det: str, select: str, *, window: str = "",
+                     order: str, now: float, lo: float, hi: float,
+                     limit: int):
+    """The records `det`'s predicate holds for, not yet challenged by it,
+    inside the window. `select` and `window` are fixed SQL over alias t."""
+    table, key, pred = RULES[det]
+    if not await _exists(conn, table):
+        return []
+    return await conn.fetch(
+        "SELECT %s, (%s)::text AS _key FROM %s t WHERE (%s) %s AND %s "
+        "ORDER BY %s LIMIT $5" % (select, key, table, pred,
+                                  ("AND " + window) if window else
+                                  "AND $3::float8 IS NOT NULL AND "
+                                  "$4::float8 IS NOT NULL",
+                                  _NOT_YET % key, order),
+        det, table, lo, hi, limit)
 
 
 # ═════════════════════════════════════════════════════════════════════
 # DETECTORS: one bounded read each; every candidate cites its evidence
 # ═════════════════════════════════════════════════════════════════════
 
+_WIN = "%s BETWEEN to_timestamp($3) AND to_timestamp($4)"
+
+
 async def detect_decision_without_evidence(conn, now: float, limit: int):
     """A Derek / Xavier / Audrey decision indexed with NO evidence
     reference: the decision index promises links to the authoritative
     records and this one carries none."""
     det, kind = "DECISION_WITHOUT_EVIDENCE", "agent_decisions"
-    rows = await conn.fetch(
-        "SELECT decision_ref, agent_id, kind, subject, verdict, decided_at "
-        "  FROM agent_decisions d "
-        " WHERE d.agent_id = ANY($3::text[]) "
-        "   AND jsonb_array_length(d.evidence_refs) = 0 "
-        "   AND d.decided_at BETWEEN to_timestamp($4) AND to_timestamp($5) "
-        "   AND " + _NOT_YET % "d.decision_ref" +
-        " ORDER BY d.decided_at, d.decision_ref LIMIT $6",
-        det, kind, list(K.TARGETS), now - LOOKBACK_S, now, limit)
+    rows = await _rule_rows(
+        conn, det, "t.decision_ref, t.agent_id, t.kind, t.subject, "
+        "t.verdict, t.decided_at", window=_WIN % "t.decided_at",
+        order="t.decided_at, t.decision_ref", now=now, lo=now - LOOKBACK_S,
+        hi=now, limit=limit)
     return [{
         "detector": det, "target_agent": r["agent_id"], "target_kind": kind,
         "target_id": r["decision_ref"], "severity": "MEDIUM",
         "record_at": _ep(r["decided_at"]),
         "claim": ("Decision %s (%s, verdict %s, subject %s) is indexed with "
                   "no evidence reference: nothing links it to the "
-                  "authoritative records it rests on."
+                  "authoritative records it rests on. Prove it."
                   % (r["decision_ref"], r["kind"], r["verdict"] or "none",
                      r["subject"] or "none")),
         "evidence_refs": [{"kind": kind, "id": r["decision_ref"]}],
-        "body": {"rule": "agent_decisions.evidence_refs is an empty array"},
+        "body": {"rule": RULES[det][2]},
     } for r in rows]
 
 
@@ -117,27 +204,22 @@ async def detect_entry_without_probability(conn, now: float, limit: int):
     """A paper ENTER verdict recorded with neither a Pinnacle nor an
     internal probability: an entry with no probability evidence at all."""
     det, kind = "ENTRY_WITHOUT_PROBABILITY", "paper_decisions"
-    rows = await conn.fetch(
-        "SELECT decision_id, account_id, decided_at, us_market_slug, "
-        "       holding_side, strategy "
-        "  FROM paper_decisions p "
-        " WHERE p.verdict = 'ENTER' AND p.p_pinnacle IS NULL "
-        "   AND p.p_internal IS NULL AND p.p_blended IS NULL "
-        "   AND p.decided_at BETWEEN to_timestamp($3) AND to_timestamp($4) "
-        "   AND " + _NOT_YET % "p.decision_id" +
-        " ORDER BY p.decided_at, p.decision_id LIMIT $5",
-        det, kind, now - LOOKBACK_S, now, limit)
+    rows = await _rule_rows(
+        conn, det, "t.decision_id, t.account_id, t.decided_at, "
+        "t.us_market_slug, t.holding_side, t.strategy",
+        window=_WIN % "t.decided_at", order="t.decided_at, t.decision_id",
+        now=now, lo=now - LOOKBACK_S, hi=now, limit=limit)
     return [{
         "detector": det, "target_agent": R.DEREK, "target_kind": kind,
         "target_id": r["decision_id"], "severity": "HIGH",
         "record_at": _ep(r["decided_at"]), "account_id": r["account_id"],
         "claim": ("Paper decision %s entered %s %s (strategy %s) with no "
-                  "Pinnacle, internal or blended probability recorded."
+                  "Pinnacle, internal or blended probability recorded. What "
+                  "are we missing?"
                   % (r["decision_id"], r["us_market_slug"],
                      r["holding_side"], r["strategy"])),
         "evidence_refs": [{"kind": kind, "id": r["decision_id"]}],
-        "body": {"rule": "verdict ENTER and p_pinnacle, p_internal, "
-                         "p_blended all NULL"},
+        "body": {"rule": RULES[det][2]},
     } for r in rows]
 
 
@@ -146,20 +228,11 @@ async def detect_hold_on_stale_probability(conn, now: float, limit: int):
     probability was stale (measure.stale = true, or its age beyond its own
     recorded limit)."""
     det, kind = "HOLD_ON_STALE_PROBABILITY", "paper_xavier_reviews"
-    rows = await conn.fetch(
-        "SELECT review_id, account_id, group_id, reviewed_at, "
-        "       recommendation, measure "
-        "  FROM paper_xavier_reviews x "
-        " WHERE x.recommendation = 'HOLD' "
-        "   AND (x.measure->>'stale' = 'true' OR ("
-        "        jsonb_typeof(x.measure->'probability_age_s') = 'number' "
-        "    AND jsonb_typeof(x.measure->'probability_limit_s') = 'number' "
-        "    AND (x.measure->>'probability_age_s')::numeric > "
-        "        (x.measure->>'probability_limit_s')::numeric)) "
-        "   AND x.reviewed_at BETWEEN to_timestamp($3) AND to_timestamp($4) "
-        "   AND " + _NOT_YET % "x.review_id" +
-        " ORDER BY x.reviewed_at, x.review_id LIMIT $5",
-        det, kind, now - LOOKBACK_S, now, limit)
+    rows = await _rule_rows(
+        conn, det, "t.review_id, t.account_id, t.group_id, t.reviewed_at, "
+        "t.measure", window=_WIN % "t.reviewed_at",
+        order="t.reviewed_at, t.review_id", now=now, lo=now - LOOKBACK_S,
+        hi=now, limit=limit)
     out = []
     for r in rows:
         m = _j(r["measure"])
@@ -169,13 +242,12 @@ async def detect_hold_on_stale_probability(conn, now: float, limit: int):
             "record_at": _ep(r["reviewed_at"]), "account_id": r["account_id"],
             "claim": ("Review %s of group %s recommended HOLD on a stale "
                       "probability (stale=%s, age %s s against a %s s "
-                      "limit, as the review itself records)."
+                      "limit, as the review itself records). Prove it."
                       % (r["review_id"], r["group_id"], m.get("stale"),
                          m.get("probability_age_s"),
                          m.get("probability_limit_s"))),
             "evidence_refs": [{"kind": kind, "id": r["review_id"]}],
-            "body": {"rule": "recommendation HOLD with measure.stale true "
-                             "or probability_age_s > probability_limit_s"},
+            "body": {"rule": RULES[det][2]},
         })
     return out
 
@@ -184,16 +256,11 @@ async def detect_audit_discrepancy_left_open(conn, now: float, limit: int):
     """An Audrey WARNING / ERROR / CRITICAL finding with no improvement task
     after AUDIT_OPEN_AFTER_S: a discrepancy found and left open."""
     det, kind = "AUDIT_DISCREPANCY_LEFT_OPEN", "paper_audrey_findings"
-    rows = await conn.fetch(
-        "SELECT finding_id, account_id, found_at, kind, severity, subject "
-        "  FROM paper_audrey_findings a "
-        " WHERE upper(a.severity) IN ('WARNING', 'ERROR', 'CRITICAL', "
-        "                             'HIGH') "
-        "   AND a.improvement_task_id IS NULL "
-        "   AND a.found_at BETWEEN to_timestamp($3) AND to_timestamp($4) "
-        "   AND " + _NOT_YET % "a.finding_id" +
-        " ORDER BY a.found_at, a.finding_id LIMIT $5",
-        det, kind, now - LOOKBACK_S, now - AUDIT_OPEN_AFTER_S, limit)
+    rows = await _rule_rows(
+        conn, det, "t.finding_id, t.account_id, t.found_at, t.kind, "
+        "t.severity, t.subject", window=_WIN % "t.found_at",
+        order="t.found_at, t.finding_id", now=now, lo=now - LOOKBACK_S,
+        hi=now - AUDIT_OPEN_AFTER_S, limit=limit)
     return [{
         "detector": det, "target_agent": R.AUDREY, "target_kind": kind,
         "target_id": r["finding_id"],
@@ -202,13 +269,13 @@ async def detect_audit_discrepancy_left_open(conn, now: float, limit: int):
         "record_at": _ep(r["found_at"]), "account_id": r["account_id"],
         "claim": ("Audit finding %s (%s %s on %s) has had no improvement "
                   "task for more than %d h: the discrepancy is recorded but "
-                  "nothing is assigned to resolve it."
+                  "nothing is assigned to resolve it. What are we missing?"
                   % (r["finding_id"], r["severity"], r["kind"],
                      r["subject"] or "no subject",
                      AUDIT_OPEN_AFTER_S // 3600)),
         "evidence_refs": [{"kind": kind, "id": r["finding_id"]}],
-        "body": {"rule": "severity WARNING+ and improvement_task_id NULL "
-                         "after %d s" % AUDIT_OPEN_AFTER_S},
+        "body": {"rule": RULES[det][2],
+                 "open_after_s": AUDIT_OPEN_AFTER_S},
     } for r in rows]
 
 
@@ -217,18 +284,10 @@ async def detect_reconciliation_discrepancy_open(conn, now: float,
     """A small-live reconciliation still in DISCREPANCY: Audrey audits the
     book against the venue and this discrepancy is unresolved."""
     det, kind = "RECONCILIATION_DISCREPANCY_OPEN", "smalllive_reconciliations"
-    if await conn.fetchval(
-            "SELECT to_regclass('smalllive_reconciliations')") is None:
-        return []
-    rows = await conn.fetch(
-        "SELECT group_id, venue, reconciled_at, discrepancies "
-        "  FROM smalllive_reconciliations s "
-        " WHERE s.status = 'DISCREPANCY' "
-        "   AND s.reconciled_at BETWEEN to_timestamp($3) "
-        "                           AND to_timestamp($4) "
-        "   AND " + _NOT_YET % "s.group_id" +
-        " ORDER BY s.reconciled_at, s.group_id LIMIT $5",
-        det, kind, now - LOOKBACK_S, now - 3600, limit)
+    rows = await _rule_rows(
+        conn, det, "t.group_id, t.venue, t.reconciled_at, t.discrepancies",
+        window=_WIN % "t.reconciled_at", order="t.reconciled_at, t.group_id",
+        now=now, lo=now - LOOKBACK_S, hi=now - 3600, limit=limit)
     return [{
         "detector": det, "target_agent": R.AUDREY, "target_kind": kind,
         "target_id": r["group_id"], "severity": "HIGH",
@@ -239,13 +298,8 @@ async def detect_reconciliation_discrepancy_open(conn, now: float,
                   % (r["group_id"], r["venue"],
                      len(_j(r["discrepancies"]) or []))),
         "evidence_refs": [{"kind": kind, "id": r["group_id"]}],
-        "body": {"rule": "status DISCREPANCY for more than 3600 s"},
+        "body": {"rule": RULES[det][2], "open_after_s": 3600},
     } for r in rows]
-
-
-STALE_SUBMIT_REFUSALS = ("DECISION_STALE_AT_ACTUAL_SUBMIT",
-                         "EXECUTABLE_BOOK_STALE_AT_ACTUAL_SUBMIT",
-                         "ADMISSION_IDENTITY_NOT_EXACT")
 
 
 async def detect_admission_refusal(conn, now: float, limit: int):
@@ -253,16 +307,11 @@ async def detect_admission_refusal(conn, now: float, limit: int):
     went stale before submission, or named an inexact contract identity:
     the admission rail caught what the decision should not have sent."""
     det, kind = "ADMISSION_REFUSED_DECISION", "execution_intents"
-    rows = await conn.fetch(
-        "SELECT intent_id, decision_id, decided_at, created_at, "
-        "       actual_refusal, us_market_slug "
-        "  FROM execution_intents e "
-        " WHERE e.actual_state = 'REFUSED' "
-        "   AND e.actual_refusal = ANY($3::text[]) "
-        "   AND e.created_at BETWEEN to_timestamp($4) AND to_timestamp($5) "
-        "   AND " + _NOT_YET % "e.intent_id" +
-        " ORDER BY e.created_at, e.intent_id LIMIT $6",
-        det, kind, list(STALE_SUBMIT_REFUSALS), now - LOOKBACK_S, now, limit)
+    rows = await _rule_rows(
+        conn, det, "t.intent_id, t.decision_id, t.decided_at, t.created_at,"
+        " t.actual_refusal, t.us_market_slug", window=_WIN % "t.created_at",
+        order="t.created_at, t.intent_id", now=now, lo=now - LOOKBACK_S,
+        hi=now, limit=limit)
     out = []
     for r in rows:
         lag = None
@@ -278,11 +327,227 @@ async def detect_admission_refusal(conn, now: float, limit: int):
                                    r["us_market_slug"], r["actual_refusal"],
                                    "unknown" if lag is None else lag)),
             "evidence_refs": [{"kind": kind, "id": r["intent_id"]}],
-            "body": {"rule": "actual_state REFUSED with refusal in %s"
-                             % ", ".join(STALE_SUBMIT_REFUSALS),
-                     "decision_to_intent_s": lag},
+            "body": {"rule": RULES[det][2], "decision_to_intent_s": lag},
         })
     return out
+
+
+def _operating(v) -> str | None:
+    s = str(v or "").strip().upper()
+    return s if s in R.OPERATING_AGENTS else None
+
+
+async def detect_policy_candidate_without_evidence(conn, now: float,
+                                                   limit: int):
+    """A NEW policy candidate (agent_policy_versions, state CANDIDATE) whose
+    parameters cite no evidence reference: a candidate nobody has proven."""
+    det, kind = "POLICY_CANDIDATE_WITHOUT_EVIDENCE", "agent_policy_versions"
+    rows = await _rule_rows(
+        conn, det, "t.agent_id, t.policy_key, t.version, t.created_by, "
+        "t.created_at", window=_WIN % "t.created_at",
+        order="t.created_at, t.agent_id, t.policy_key, t.version", now=now,
+        lo=now - LOOKBACK_S, hi=now, limit=limit)
+    return [{
+        "detector": det,
+        "target_agent": _operating(r["created_by"]) or r["agent_id"],
+        "target_kind": kind, "target_id": r["_key"], "severity": "MEDIUM",
+        "record_at": _ep(r["created_at"]),
+        "claim": ("Policy candidate %s %s v%s (created by %s) cites no "
+                  "evidence reference in its parameters. A new policy with "
+                  "no evidence is an opinion. Prove it."
+                  % (r["agent_id"], r["policy_key"], r["version"],
+                     r["created_by"])),
+        "evidence_refs": [{"kind": kind, "id": r["_key"]}],
+        "body": {"rule": RULES[det][2]},
+    } for r in rows if (_operating(r["created_by"]) or r["agent_id"])
+        in K.TARGETS]
+
+
+async def detect_policy_artifact_ready_without_evidence(conn, now: float,
+                                                        limit: int):
+    """A policy artifact stored READY_FOR_OWNER_APPROVAL whose document
+    carries no evidence references: it asks the owner to approve what no
+    record supports. (No time window: an artifact waits until decided.)"""
+    det, kind = ("POLICY_ARTIFACT_READY_WITHOUT_EVIDENCE",
+                 "agent_policy_artifacts")
+    rows = await _rule_rows(
+        conn, det, "t.policy_id, t.version, t.agent_id, t.title, "
+        "t.created_at", order="t.created_at, t.policy_id", now=now,
+        lo=0.0, hi=now, limit=limit)
+    return [{
+        "detector": det, "target_agent": r["agent_id"], "target_kind": kind,
+        "target_id": r["_key"], "severity": "HIGH",
+        "record_at": min(_ep(r["created_at"]), now),
+        "claim": ("Policy artifact %s v%s (%s) is READY_FOR_OWNER_APPROVAL "
+                  "and its document cites no evidence reference. Approval "
+                  "on prose alone? What are we missing?"
+                  % (r["policy_id"], r["version"], r["title"])),
+        "evidence_refs": [{"kind": kind, "id": r["_key"]}],
+        "body": {"rule": RULES[det][2]},
+    } for r in rows if r["agent_id"] in K.TARGETS]
+
+
+async def detect_live_rule_ready_without_evidence(conn, now: float,
+                                                  limit: int):
+    """A live rule artifact READY_FOR_OWNER_APPROVAL with no evidence
+    references. A live rule governs the entry decision (Derek's lane) unless
+    its document names another agent."""
+    det, kind = "LIVE_RULE_READY_WITHOUT_EVIDENCE", "live_rule_artifacts"
+    rows = await _rule_rows(
+        conn, det, "t.rule_id, t.version, t.title, t.created_at, "
+        "t.document->>'agent_id' AS agent_id", order="t.created_at, t.rule_id",
+        now=now, lo=0.0, hi=now, limit=limit)
+    return [{
+        "detector": det, "target_agent": _operating(r["agent_id"]) or R.DEREK,
+        "target_kind": kind, "target_id": r["_key"], "severity": "HIGH",
+        "record_at": min(_ep(r["created_at"]), now),
+        "claim": ("Live rule %s v%s (%s) is READY_FOR_OWNER_APPROVAL and its "
+                  "document cites no evidence reference; documentation quotes "
+                  "are not records. Prove it with recorded evidence."
+                  % (r["rule_id"], r["version"], r["title"])),
+        "evidence_refs": [{"kind": kind, "id": r["_key"]}],
+        "body": {"rule": RULES[det][2],
+                 "attribution": "document agent_id" if _operating(
+                     r["agent_id"]) else "entry lane (Derek) by default"},
+    } for r in rows]
+
+
+async def detect_strategy_candidate_without_evidence(conn, now: float,
+                                                     limit: int):
+    """A strategy / improvement candidate in APPROVAL_READY with an empty
+    evidence record."""
+    det, kind = "STRATEGY_CANDIDATE_WITHOUT_EVIDENCE", "improvement_candidates"
+    rows = await _rule_rows(
+        conn, det, "t.candidate_id, t.assigned_agent, t.proposed_by, "
+        "t.change_kind, t.created_at", window=_WIN % "t.created_at",
+        order="t.created_at, t.candidate_id", now=now, lo=now - LOOKBACK_S,
+        hi=now, limit=limit)
+    return [{
+        "detector": det,
+        "target_agent": _operating(r["assigned_agent"]) or _operating(
+            r["proposed_by"]) or R.AUDREY,
+        "target_kind": kind, "target_id": r["candidate_id"],
+        "severity": "HIGH", "record_at": _ep(r["created_at"]),
+        "claim": ("Candidate %s (%s) is APPROVAL_READY with an empty "
+                  "evidence record. Ready for approval on what evidence?"
+                  % (r["candidate_id"], r["change_kind"])),
+        "evidence_refs": [{"kind": kind, "id": r["candidate_id"]}],
+        "body": {"rule": RULES[det][2]},
+    } for r in rows]
+
+
+# ── THE CHIEF ALLOCATOR (shadow allocator tables, migration 208) ─────
+AMOUNT_COLS = ("allocation_usd", "allocated_usd", "amount_usd",
+               "capital_usd", "notional_usd", "size_usd", "stake_usd")
+TIME_COLS = ("decided_at", "allocated_at", "created_at", "recorded_at", "at")
+EVIDENCE_COLS = ("evidence_refs", "evidence")
+
+
+def large_allocation_usd() -> float:
+    try:
+        v = float(os.getenv("KAREN_LARGE_ALLOCATION_USD", "250"))
+        return v if v > 0 else 250.0
+    except ValueError:
+        return 250.0
+
+
+async def allocator_shape(conn, table: str) -> dict | None:
+    """The discovered shape of one allocator table, or None when it is
+    absent or lacks a single-column key or an amount column. Column names
+    come only from the catalogue and are matched against fixed lists."""
+    if not await _exists(conn, table):
+        return None
+    cols = {r["column_name"]: r["data_type"] for r in await conn.fetch(
+        "SELECT column_name, data_type FROM information_schema.columns "
+        " WHERE table_name=$1", table)}
+    key = await CL.key_column(conn, table, None)
+    amount = next((c for c in AMOUNT_COLS if c in cols), None)
+    if key is None or amount is None:
+        return None
+    ev = next((c for c in EVIDENCE_COLS if c in cols
+               and cols[c] == "jsonb"), None)
+    return {"table": table, "key": key, "amount": amount,
+            "time": next((c for c in TIME_COLS if c in cols), None),
+            "evidence": ev}
+
+
+def _allocator_predicate(shape: dict, detector: str) -> str:
+    ev = shape["evidence"]
+    if ev is None:
+        no_refs = "true"
+    else:
+        no_refs = ("NOT coalesce((jsonb_typeof(t.%(e)s) = 'array' AND "
+                   "jsonb_array_length(t.%(e)s) > 0) OR (jsonb_typeof("
+                   "t.%(e)s) = 'object' AND coalesce(jsonb_typeof(t.%(e)s->"
+                   "'evidence_refs') = 'array' AND jsonb_array_length("
+                   "t.%(e)s->'evidence_refs') > 0, false)), false)"
+                   % {"e": ev})
+    if detector == "ALLOCATION_WITHOUT_EVIDENCE":
+        return no_refs
+    return "t.%s >= %s" % (shape["amount"], repr(float(large_allocation_usd())))
+
+
+async def _allocator_candidates(conn, now: float, limit: int, detector: str):
+    out = []
+    for table in KE.ALLOCATOR_TABLES:
+        shape = await allocator_shape(conn, table)
+        if shape is None:
+            continue
+        pred = _allocator_predicate(shape, detector)
+        tcol = shape["time"]
+        rows = await conn.fetch(
+            "SELECT (t.%(k)s)::text AS _key, t.%(a)s AS amount, %(tsel)s "
+            "  FROM %(tb)s t WHERE (%(p)s) %(win)s AND %(ny)s "
+            " ORDER BY %(ord)s LIMIT $5" % {
+                "k": shape["key"].strip('"'), "a": shape["amount"],
+                "tsel": "t.%s AS at" % tcol if tcol else "NULL::timestamptz "
+                        "AS at", "tb": table, "p": pred,
+                "win": ("AND t.%s BETWEEN to_timestamp($3) AND "
+                        "to_timestamp($4)" % tcol) if tcol else
+                       "AND $3::float8 IS NOT NULL AND $4::float8 IS NOT NULL",
+                "ny": _NOT_YET % ("t." + shape["key"].strip('"')),
+                "ord": ("t.%s" % tcol) if tcol else "1"},
+            detector, table, now - LOOKBACK_S, now, limit)
+        for r in rows:
+            amt = float(r["amount"]) if r["amount"] is not None else None
+            large = amt is not None and amt >= large_allocation_usd()
+            if detector == "ALLOCATION_WITHOUT_EVIDENCE":
+                claim = ("Allocation %s (%s USD) in %s cites no evidence "
+                         "reference. Capital moved on what? Prove it."
+                         % (r["_key"], amt, table))
+                sev = "HIGH" if large else "MEDIUM"
+            else:
+                claim = ("Allocation %s is large: %s USD against the %s USD "
+                         "threshold. What are we missing? Show the evidence "
+                         "that justifies the size." % (
+                             r["_key"], amt, large_allocation_usd()))
+                sev = "MEDIUM"
+            out.append({
+                "detector": detector, "target_agent": K.CHIEF_ALLOCATOR,
+                "target_kind": table, "target_id": r["_key"],
+                "severity": sev,
+                "record_at": min(_ep(r["at"]), now) if r["at"] else now,
+                "claim": claim,
+                "evidence_refs": [{"kind": table, "id": r["_key"]}],
+                "body": {"rule": pred, "amount_usd": amt,
+                         "threshold_usd": large_allocation_usd()}})
+            if len(out) >= limit:
+                return out
+    return out
+
+
+async def detect_allocation_without_evidence(conn, now: float, limit: int):
+    """A Chief Allocator (shadow allocator) decision that cites no evidence
+    reference. Skips cleanly when no allocator table exists."""
+    return await _allocator_candidates(conn, now, limit,
+                                       "ALLOCATION_WITHOUT_EVIDENCE")
+
+
+async def detect_large_allocation(conn, now: float, limit: int):
+    """A Chief Allocator allocation at or above KAREN_LARGE_ALLOCATION_USD:
+    challenged to show its evidence. Skips cleanly when no allocator table
+    exists."""
+    return await _allocator_candidates(conn, now, limit, "LARGE_ALLOCATION")
 
 
 async def detect_finding_on_upheld_defect(conn, now: float, limit: int):
@@ -308,7 +573,7 @@ async def detect_finding_on_upheld_defect(conn, now: float, limit: int):
         "   AND NOT EXISTS (SELECT 1 FROM karen_challenges c "
         "                    WHERE c.finding_id = f.finding_id) "
         " ORDER BY f.updated_at, f.finding_id LIMIT $2",
-        list(K.TARGETS), limit)
+        list(R.OPERATING_AGENTS), limit)
     seen, out = set(), []
     for r in rows:
         if r["finding_id"] in seen:
@@ -339,8 +604,59 @@ DETECTORS = (
     ("RECONCILIATION_DISCREPANCY_OPEN",
      detect_reconciliation_discrepancy_open),
     ("ADMISSION_REFUSED_DECISION", detect_admission_refusal),
+    ("POLICY_CANDIDATE_WITHOUT_EVIDENCE",
+     detect_policy_candidate_without_evidence),
+    ("POLICY_ARTIFACT_READY_WITHOUT_EVIDENCE",
+     detect_policy_artifact_ready_without_evidence),
+    ("LIVE_RULE_READY_WITHOUT_EVIDENCE",
+     detect_live_rule_ready_without_evidence),
+    ("STRATEGY_CANDIDATE_WITHOUT_EVIDENCE",
+     detect_strategy_candidate_without_evidence),
+    ("ALLOCATION_WITHOUT_EVIDENCE", detect_allocation_without_evidence),
+    ("LARGE_ALLOCATION", detect_large_allocation),
     ("FINDING_RESTS_ON_UPHELD_DEFECT", detect_finding_on_upheld_defect),
 )
+
+
+# ═════════════════════════════════════════════════════════════════════
+# THE SAME RULE, RE-APPLIED TO ONE CHALLENGED RECORD
+# ═════════════════════════════════════════════════════════════════════
+
+async def rule_holds(conn, detector: str, target_kind: str,
+                     target_id: str) -> bool | None:
+    """Does `detector`'s predicate STILL hold for the challenged record?
+    True / False, or None when it cannot be re-applied (an unknown or
+    manual detector, an absent table, a vanished record). Read only."""
+    if detector in RULES:
+        table, key, pred = RULES[detector]
+        if table != target_kind or not await _exists(conn, table):
+            return None
+        row = await conn.fetchrow(
+            "SELECT (%s) AS holds FROM %s t WHERE (%s)::text = $1 LIMIT 1"
+            % (pred, table, key), str(target_id))
+        return None if row is None else bool(row["holds"])
+    if detector in ("ALLOCATION_WITHOUT_EVIDENCE", "LARGE_ALLOCATION"):
+        if target_kind not in KE.ALLOCATOR_TABLES:
+            return None
+        shape = await allocator_shape(conn, target_kind)
+        if shape is None:
+            return None
+        row = await conn.fetchrow(
+            "SELECT (%s) AS holds FROM %s t WHERE (t.%s)::text = $1 LIMIT 1"
+            % (_allocator_predicate(shape, detector), target_kind,
+               shape["key"].strip('"')), str(target_id))
+        return None if row is None else bool(row["holds"])
+    if detector == "FINDING_RESTS_ON_UPHELD_DEFECT":
+        row = await conn.fetchrow(
+            "SELECT EXISTS (SELECT 1 FROM agent_findings f "
+            "  JOIN agent_finding_stages h ON h.finding_id=f.finding_id "
+            "   AND h.seq=2 JOIN karen_challenges k ON k.state='UPHELD' "
+            "   AND EXISTS (SELECT 1 FROM jsonb_array_elements("
+            "       f.evidence_refs || h.evidence_refs) e "
+            "        WHERE e->>'kind'=k.target_kind AND e->>'id'=k.target_id)"
+            " WHERE f.finding_id=$1) AS holds", str(target_id))
+        return bool(row["holds"]) if row is not None else None
+    return None
 
 
 # ═════════════════════════════════════════════════════════════════════

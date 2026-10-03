@@ -449,6 +449,15 @@ async def lifespan(_: FastAPI):
         karen_task = asyncio.create_task(_KAREN.run(_cap_pool))
     except Exception:                                           # noqa: BLE001
         log.warning("karen: runner not armed", exc_info=True)
+    # Karen's targets answer her (rule-based, as the TARGET agent) and an
+    # independent evaluator (Audrey; Xavier for Audrey) records the outcome.
+    # Not Karen's code; writes only challenge responses / outcomes.
+    peer_task = None
+    try:
+        from ..agents import peer_responder as _PEER
+        peer_task = asyncio.create_task(_PEER.run(_cap_pool))
+    except Exception:                                           # noqa: BLE001
+        log.warning("karen: peer responder not armed", exc_info=True)
     # 1:1,000 execution mirror: its own durable control (off by default) and
     # its own credential; idle until the control row is enabled.
     from .. import execmirror as _EXM
@@ -510,7 +519,8 @@ async def lifespan(_: FastAPI):
         tasks = [t for t in (desk_task, rn1x_task, rn1x_learn_task,
                              ext_task, rn1x_model_task, trim_task,
                              poller_task, capability_task, slack_task,
-                             karen_task, execmirror_task, intel_task,
+                             karen_task, peer_task, execmirror_task,
+                             intel_task,
                              *watchdog_tasks)
                  if t is not None]
         for task in tasks:

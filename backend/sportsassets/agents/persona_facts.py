@@ -947,9 +947,136 @@ async def _experiment(conn, f: "Facts", now) -> None:
                 type(exc).__name__)
 
 
+# ═════════════════════════════════════════════════════════════════════
+# KAREN: HER CHALLENGES AND THE EVIDENCE THEY CITE -- AND NOTHING ELSE
+# ═════════════════════════════════════════════════════════════════════
+
+_KCH = re.compile(r"\bkch:[0-9a-f]{24}\b")
+KAREN_CHALLENGES_IN_FACTS = 8
+KAREN_EVIDENCE_IN_FACTS = 8
+
+
+async def karen_facts(conn, *, question: str,
+                      context: dict | None = None) -> dict:
+    """Karen's fact list: her status, her challenges (the ones the question
+    or context names, else the open ones first), each one's peer response
+    and independent evaluation, the evidence records they cite as those
+    records stand now, and her metrics with numerators and denominators.
+    No book, paper, market or other agent's narrative is read: she answers
+    only from her records and the evidence reads."""
+    from . import collaboration_loop as CL
+    from . import karen as K
+    f = Facts()
+    if not await K.schema(conn):
+        f.check("karen_challenges", "TABLE_ABSENT")
+        f.miss("Karen's challenge records (migrations 207 / 207a not "
+               "applied)")
+        return {"subject": None, "demonstration": False, "found": False,
+                "scope": "BOOK", "facts": f.items, "checked": f.checked,
+                "missing": f.missing, "paper": {"present": False,
+                                                "why": "not read for Karen"},
+                "memory": None, "work_context": None}
+    st = await conn.fetchrow(
+        "SELECT state, activity, last_heartbeat_at, runs, errors FROM "
+        " agent_status WHERE agent_id='KAREN'")
+    if st is not None:
+        d = _jsonable(dict(st))
+        f.add("karen_status", "KAREN", "state", d.get("state"),
+              "Karen's runner is %s (%s); last heartbeat %s; runs %s, "
+              "errors %s" % (d.get("state"), d.get("activity") or "no "
+                             "activity", d.get("last_heartbeat_at") or "never",
+                             d.get("runs"), d.get("errors")))
+    named = set(_KCH.findall(str(question or "")))
+    ctx = context or {}
+    for k in ("challenge_id", "subject", "decision_id", "intent_id",
+              "position_id"):
+        v = ctx.get(k)
+        if isinstance(v, str) and v:
+            named.add(v)
+    rows = []
+    if named:
+        rows = await conn.fetch(
+            "SELECT * FROM karen_challenges WHERE challenge_id = ANY($1) "
+            "   OR target_id = ANY($1) ORDER BY challenged_at DESC LIMIT $2",
+            sorted(named), KAREN_CHALLENGES_IN_FACTS)
+        if not rows:
+            f.miss("a challenge about %s (none recorded)"
+                   % ", ".join(sorted(named))[:200])
+    if not rows:
+        rows = await conn.fetch(
+            "SELECT * FROM karen_challenges ORDER BY (state IN ('OPEN', "
+            "'RESPONDED')) DESC, challenged_at DESC, challenge_id LIMIT $1",
+            KAREN_CHALLENGES_IN_FACTS)
+    f.check("karen_challenges", "MATCHED" if rows else "NO_MATCH", len(rows))
+    cited: list = []
+    for r in rows:
+        c = K._with_links(K._row(r))
+        cid = c["challenge_id"]
+        f.add("karen_challenges", cid, "claim", c["claim"],
+              "Challenge %s (%s, %s) to %s about %s %s: %s State: %s." % (
+                  cid, c["severity"], c.get("category"),
+                  c["target_agent"], c["target_kind"], c["target_id"],
+                  str(c["claim"])[:300], c["state"]))
+        if c.get("peer_response"):
+            pr = c["peer_response"]
+            f.add("karen_peer_responses", cid, "response", pr["response"],
+                  "%s answered %s on %s: %s" % (
+                      pr["by"], pr["stance"], cid, str(pr["response"])[:240]))
+        else:
+            f.miss("%s's response to %s" % (c["target_agent"].title(), cid))
+        ie = c.get("independent_evaluation") or {}
+        if ie.get("status") == "RECORDED":
+            f.add("karen_evaluations", cid, "outcome", ie.get("outcome"),
+                  "%s evaluated %s: %s. %s" % (
+                      ie.get("by"), cid, ie.get("outcome"),
+                      str(ie.get("reason") or "")[:240]))
+        for e in (c.get("evidence_refs") or []):
+            if e not in cited:
+                cited.append(e)
+    for e in cited[:KAREN_EVIDENCE_IN_FACTS]:
+        spec = CL.EVIDENCE_KINDS.get(e.get("kind"))
+        if spec is None or not await _regclass(conn, spec[0]):
+            f.add("karen_evidence", "%s:%s" % (e.get("kind"), e.get("id")),
+                  "resolves", False, "Evidence %s %s cannot be read now"
+                  % (e.get("kind"), e.get("id")))
+            continue
+        col = await CL.key_column(conn, spec[0], spec[1])
+        row = None if col is None else await conn.fetchrow(
+            "SELECT * FROM %s WHERE %s::text = $1 LIMIT 1" % (spec[0], col),
+            str(e.get("id")))
+        if row is None:
+            f.add("karen_evidence", "%s:%s" % (e["kind"], e["id"]),
+                  "resolves", False, "Evidence %s %s does not resolve to a "
+                  "record now" % (e["kind"], e["id"]))
+            continue
+        fields = _scalar_fields(_jsonable(dict(row)), limit=8)
+        f.add("karen_evidence", "%s:%s" % (e["kind"], e["id"]), "record",
+              dict(fields), "Evidence %s %s, as recorded: %s" % (
+                  e["kind"], e["id"], "; ".join(
+                      "%s=%s" % (k, v) for k, v in fields)[:400]))
+    try:
+        met = (await K.metrics(conn))["metrics"]
+    except Exception as exc:                                    # noqa: BLE001
+        met = {}
+        f.miss("Karen's metrics (%s)" % type(exc).__name__)
+    for name, m in met.items():
+        f.add("karen_metrics", name, name, m.get("value"),
+              ("%s: %s (%s / %s)" % (name, m["value"], m["numerator"],
+                                     m["denominator"]))
+              if m.get("value") is not None else
+              "%s: unmeasured (%s), not zero" % (name, m.get("why")))
+    return {"subject": None, "demonstration": False, "found": bool(rows),
+            "scope": "BOOK", "facts": f.items, "checked": f.checked,
+            "missing": f.missing, "memory": None, "work_context": None,
+            "paper": {"present": False, "why": "not read for Karen: she "
+                      "answers only from her challenge records"}}
+
+
 async def gather(conn, *, question: str, context: dict | None = None,
                  now: float | None = None, agent: str | None = None) -> dict:
     """The one fact list for this question (see the module docstring)."""
+    if str(agent or "").upper() == "KAREN":
+        return await karen_facts(conn, question=question, context=context)
     subj = subject_of(question)
     if wants_demonstration(context):
         f = demonstration_facts()
