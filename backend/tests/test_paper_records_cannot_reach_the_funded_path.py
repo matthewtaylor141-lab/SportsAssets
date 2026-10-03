@@ -129,7 +129,11 @@ def test_no_funded_module_imports_the_paper_modules():
                # (theses, assessments, value-add). It holds no order, submit
                # or cancel call; the actual lane hands its review hook in
                # from app.py, so execmirror imports no paper module
-               "agents/xavier_management.py"}
+               "agents/xavier_management.py",
+               # the held-position watch on the PinnAPI feed: on a held
+               # market's price change it SCHEDULES a paper Xavier review
+               # (paper_runtime.schedule_held_review); no write, no order
+               "pinnapi_held.py"}
     assert set(offenders) <= allowed, sorted(set(offenders) - allowed)
     # ...and neither capability module reaches a funded or execution module,
     # directly or through the rest of the capability package
