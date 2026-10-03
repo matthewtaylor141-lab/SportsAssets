@@ -51,6 +51,12 @@ NOT_ADMISSIBLE = "NOT_ADMISSIBLE"
 #: evidence, exact semantics, tests and audit record -- never to enable trading.
 #: Review of the current venue documentation (2026-10-03, verdict B, the gate
 #: stays closed): research/p5_live_book_currency_review.md.
+#: THIS CONSTANT STAYS EMPTY. The callers (execution_intent.create and
+#: ActualLane._run) pass `approved_book_rules` = this constant UNION the rule
+#: ids whose owner-approval artifact (live_rule_artifacts, migration 204) is
+#: APPROVED with an owner record AND whose stored sha256 equals the deployed
+#: code's rule hash (live_rule_artifacts.approved_live_book_rules; any read
+#: failure -> this constant alone). This module stays pure.
 APPROVED_LIVE_BOOK_RULES: frozenset = frozenset()
 
 #: The PinnAPI probability authority basis the V3 investment policy records.

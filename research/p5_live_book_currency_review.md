@@ -296,6 +296,10 @@ the deciding process. Failing any one fails closed.
 
 Until D1–D4 exist, the rule above is inert by construction, and the current refusal stands.
 
+> **Note added 2026-10-03 (later):** the id `P5_LIVE_STREAM_BOOK_V1` is now used by
+> `research/p5_live_stream_book_v1.md` for a *locally bounded* rule over the institutional resident stream,
+> stored `READY_FOR_OWNER_APPROVAL` (migration 204). It does **not** meet D1–D4; verdict B above stands.
+
 ---
 
 ## 5. What would move this

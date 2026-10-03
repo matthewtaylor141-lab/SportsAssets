@@ -54,6 +54,9 @@ from . import actual_admission as AA
 from . import decision_hooks
 from . import execmirror as M
 from . import execmirror_probe as EP
+from . import live_book_currency as LBC
+from . import live_book_evidence as LBE
+from . import live_rule_artifacts as LRA
 from . import venue_pace
 
 log = logging.getLogger(__name__)
@@ -136,8 +139,14 @@ async def create(conn, *, decision_id: str, valuation_id, strategy: str,
     # eligible only when every recorded execution and settlement fact is
     # explicitly admissible; otherwise it is REFUSED here, before any lane
     # can see it, with the first failing requirement as its refusal.
+    # THE APPROVED LIVE BOOK RULES: the code constant (empty) plus any rule
+    # whose owner-approval artifact is APPROVED with an owner record and
+    # whose stored sha256 is this code's (live_rule_artifacts; any failure
+    # -> the constant alone).
+    approved_rules = await LRA.approved_live_book_rules(conn)
     adm = AA.evaluate((evidence or {}).get("admission_facts"), slug=slug,
-                      order_intent=order_intent)
+                      order_intent=order_intent,
+                      approved_book_rules=approved_rules)
     why = dict(why, strategy_approved=approved, admission=adm)
     eligible = approved and adm["verdict"] == AA.LIVE_ADMISSIBLE
     if not approved:
@@ -259,13 +268,25 @@ class ActualLane:
                                       eligibility=why)
         ev = it["evidence"]
         ev = json.loads(ev) if isinstance(ev, str) else dict(ev or {})
+        # the approved live book rules, re-read NOW (an approval withdrawn or
+        # a code hash that moved since the intent was written never admits)
+        approved_rules = await LRA.approved_live_book_rules(conn)
         adm = AA.evaluate(ev.get("admission_facts"),
                           slug=it["us_market_slug"],
-                          order_intent=it["order_intent"])
+                          order_intent=it["order_intent"],
+                          approved_book_rules=approved_rules)
         if adm["verdict"] != AA.LIVE_ADMISSIBLE:
             return await self._refuse(conn, it, adm["refusal"], t,
                                       admission_refusals=adm["refusals"],
                                       admission_version=AA.VERSION)
+        # a live stream-book verdict is current only briefly: the rule's own
+        # verdict-age bound at submission (P5_LIVE_STREAM_BOOK_V1 C13)
+        vstale = LBC.verdict_age_refusal(
+            ((ev.get("admission_facts") or {}).get("book") or {}).get(
+                "book_currency"), now=now)
+        if vstale is not None:
+            return await self._refuse(conn, it, vstale.pop("refusal"), t,
+                                      **vstale)
         # 3 · THE DECISION AND ITS EXECUTABLE BOOK, STILL CURRENT
         _mark(t, "book_check_start")
         d_age = now - it["decided_at"].timestamp()
@@ -311,7 +332,8 @@ class ActualLane:
         adm_q = AA.evaluate(ev.get("admission_facts"),
                             slug=it["us_market_slug"],
                             order_intent=it["order_intent"],
-                            live_qty=size["live_qty"])
+                            live_qty=size["live_qty"],
+                            approved_book_rules=approved_rules)
         if adm_q["verdict"] != AA.LIVE_ADMISSIBLE:
             return await self._refuse(conn, it, adm_q["refusal"], t,
                                       admission_refusals=adm_q["refusals"],
@@ -454,6 +476,10 @@ def start(get_pool, mirror) -> "ActualLane":
     global LANE
     LANE = ActualLane(get_pool, mirror)
     decision_hooks.DECISION_HOOK = on_decision
+    # the live book-currency evidence the decision records for admission
+    # (P5_LIVE_STREAM_BOOK_V1; NOT_ESTABLISHED until an identity mapper is
+    # installed in live_book_evidence.IDENTITY_MAPPER)
+    decision_hooks.LIVE_BOOK_EVIDENCE = LBE.for_decision
     return LANE
 
 
@@ -461,3 +487,4 @@ def stop() -> None:
     global LANE
     LANE = None
     decision_hooks.DECISION_HOOK = None
+    decision_hooks.LIVE_BOOK_EVIDENCE = None

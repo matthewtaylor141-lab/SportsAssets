@@ -1227,14 +1227,42 @@ async def record_attempt(conn, ctx: dict, *, valuation_id, strategy: str,
 # THE DECISION
 # ═════════════════════════════════════════════════════════════════════
 
+def live_book_evidence(ctx: dict, cand: dict, *, obs, now: float):
+    """THE LIVE BOOK-CURRENCY EVIDENCE for this decision's contract, from the
+    executing process's installed `decision_hooks.LIVE_BOOK_EVIDENCE`
+    (live_book_evidence.for_decision), or None when none is installed.
+    Never raises; nothing in the paper decision reads it."""
+    fn = DH.LIVE_BOOK_EVIDENCE
+    if fn is None:
+        return None
+    try:
+        got = fn(ctx, cand, obs=obs, now=now)
+        return got if isinstance(got, dict) else None
+    except Exception as exc:                                    # noqa: BLE001
+        return {"verdict": "NOT_ESTABLISHED", "rule": "P5_LIVE_STREAM_BOOK_V1",
+                "reason": "LIVE_BOOK_EVIDENCE_FAILED:%s" % type(exc).__name__,
+                "stream_read": False}
+
+
 def admission_facts(*, cand: dict, pin: dict, match: dict, p, obs, md,
-                    sized: dict, econ, book_age, book_source=None) -> dict:
+                    sized: dict, econ, book_age, book_source=None,
+                    live_book: dict | None = None) -> dict:
     """THE QUALIFIED DECISION'S RECORDED FACTS, as the execution intent
     carries them for the actual lane's admission (`actual_admission`). Pure
     and descriptive: nothing here is upgraded -- the book's currency verdict
-    is this module's own BOOK_CURRENCY, the settlement comparison is the
-    row's, the completed-game exceptional terms are named as the research
-    disclosure they are."""
+    is this module's own BOOK_CURRENCY (or, when `live_book` evaluated a
+    resident stream book, the P5_LIVE_STREAM_BOOK_V1 record -- the paper
+    label is kept beside it as `paper_book_currency`), the settlement comparison is
+    the row's, the completed-game exceptional terms are named as the
+    research disclosure they are."""
+    # THE BOOK CURRENCY THE ACTUAL LANE'S ADMISSION READS. The live rule's
+    # record replaces the REST label ONLY when it evaluated a resident stream
+    # book for the exactly mapped contract (`stream_read`); otherwise the
+    # REST path stands and the live record (e.g. NOT_ESTABLISHED,
+    # IDENTITY_MAPPING_NOT_ESTABLISHED) is kept beside it.
+    live = dict(live_book) if isinstance(live_book, dict) else None
+    stream = bool(live and live.get("stream_read") is True)
+    bc = live if stream else dict(BOOK_CURRENCY)
     auth = dict(match.get("probability_authority") or {})
     checks = [{"check": c.get("check"), "passed": c.get("passed") is True}
               for c in match.get("checks") or []]
@@ -1269,7 +1297,10 @@ def admission_facts(*, cand: dict, pin: dict, match: dict, p, obs, md,
                  "age_at_decision_s": book_age, "source": book_source,
                  "market_state": None if state is None else str(state),
                  "depth_within_limit": sized.get("depth_within_limit"),
-                 "book_currency": dict(BOOK_CURRENCY)},
+                 "book_currency": bc,
+                 **({"paper_book_currency": dict(BOOK_CURRENCY)}
+                    if stream else
+                    {"live_book_currency": live} if live else {})},
         "price": {"wire": sized.get("wire"), "limit": sized.get("limit")},
         "fees": {"known": econ is not None and econ.get("fees_ok") is True
                  and fees_usd is not None,
@@ -1674,7 +1705,9 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
                     "admission_facts": admission_facts(
                         cand=cand, pin=pin, match=match, p=p, obs=obs,
                         md=md, sized=sized, econ=econ, book_age=book_age,
-                        book_source=ctx.get("last_book_source"))},
+                        book_source=ctx.get("last_book_source"),
+                        live_book=live_book_evidence(
+                            ctx, cand, obs=obs, now=float(clock())))},
                 "timeline": {
                     "pinnapi_provider_ts": {"utc_s": (cand.get("pinnacle") or {}).get("observed_at")},
                     "pinnapi_receipt": {"utc_s": (cand.get("pinnacle") or {}).get("received_at")},
