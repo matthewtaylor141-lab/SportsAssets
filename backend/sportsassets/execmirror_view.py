@@ -1451,6 +1451,109 @@ async def decisions(conn, *, limit: int = 50) -> dict:
         "for the paper order"), "latency_ms": stats, "rows": out}
 
 
+LAUNCH_STATES = ("STOPPED", "DISABLED", "ACTIVE")
+
+
+async def launch_state(conn, ctl: dict | None = None) -> dict:
+    """LAUNCH CONTROL: everything that decides whether an ACTUAL order can be
+    sent, read from the serving process and the database. Read-only; every
+    unavailable item is null with its reason."""
+    import os
+    from . import actual_admission as AA
+    ctl = ctl if ctl is not None else dict(
+        await conn.fetchrow("SELECT * FROM execmirror_control WHERE id = 1") or {})
+    out: dict = {"serving_build": os.environ.get("RENDER_GIT_COMMIT"),
+                 "serving_build_why_unavailable": (
+                     None if os.environ.get("RENDER_GIT_COMMIT")
+                     else "RENDER_GIT_COMMIT is not set in this process")}
+    lane = ("DISABLED" if not ctl.get("enabled") else
+            "STOPPED" if ctl.get("stopped") else "ACTIVE")
+    out["actual_lane"] = {
+        "state": lane, "enabled": bool(ctl.get("enabled")),
+        "stopped": bool(ctl.get("stopped")),
+        "scale": _f(ctl.get("scale")), "max_order_usd": _f(ctl.get("max_order_usd")),
+        "account_fingerprint_prefix": (ctl.get("account_fingerprint") or "")[:12] or None,
+        "control_revision": ctl.get("revision"),
+        "activation": ("owner action: execmirror-enable (resets stopped) only after "
+                       "a fresh read-only retail reconciliation")}
+    approved = await approved_live_book_rules(conn)
+    out["book_currency"] = {
+        "approved_live_rules": sorted(approved["rules"]),
+        "source": approved["source"],
+        "artifacts": approved.get("artifacts"),
+        "admits_actual": bool(approved["rules"]),
+        "why": (None if approved["rules"] else
+                "no live book-currency rule is approved: every actual order is "
+                "refused ADMISSION_BOOK_CURRENCY_NOT_LIVE_ADMISSIBLE")}
+    try:
+        from .agents import xavier_small_live_policy as XP
+        out["xavier_management_policy"] = await XP.load_view(conn)
+    except Exception as exc:                                    # noqa: BLE001
+        out["xavier_management_policy"] = {"status": None,
+                                           "why": "unreadable: %s" % type(exc).__name__}
+    try:
+        from . import market_data_identity as MDI
+        inv = MDI.inventory()
+        out["market_data"] = {"verdict": inv.get("verdict"),
+                              "usable_for_market_data": inv.get("usable_for_market_data"),
+                              "institutional_credential": inv.get(
+                                  "institutional_market_data_credential")}
+    except Exception as exc:                                    # noqa: BLE001
+        out["market_data"] = {"verdict": None, "why": "unreadable: %s" % type(exc).__name__}
+    try:
+        from . import institutional_stream as IS
+        d = IS.digest()
+        out["market_data"]["institutional_stream"] = {
+            "state": (d.get("start") or {}).get("state"),
+            "why": (d.get("start") or {}).get("why")}
+    except Exception as exc:                                    # noqa: BLE001
+        out["market_data"]["institutional_stream"] = {
+            "state": None, "why": "unreadable: %s" % type(exc).__name__}
+    blockers = []
+    if await conn.fetchval("SELECT to_regclass('execution_intents') IS NOT NULL"):
+        blockers = [{"actual_state": r["actual_state"], "refusal": r["actual_refusal"],
+                     "n": r["n"], "last_at": _iso(r["last_at"])}
+                    for r in await conn.fetch(
+                        """SELECT actual_state, actual_refusal, count(*) AS n,
+                                  max(created_at) AS last_at
+                             FROM execution_intents
+                            WHERE created_at > now() - interval '24 hours'
+                            GROUP BY 1, 2 ORDER BY 3 DESC LIMIT 12""")]
+    out["intents_last_24h"] = blockers
+    ready = (lane == "ACTIVE" and bool(approved["rules"]))
+    out["actual_orders_possible_now"] = ready
+    out["why_not"] = [w for w in (
+        "the actual lane is %s" % lane if lane != "ACTIVE" else None,
+        "no approved live book-currency rule" if not approved["rules"] else None)
+        if w]
+    return out
+
+
+async def approved_live_book_rules(conn) -> dict:
+    """The live book-currency rules admission accepts: the code constant (empty)
+    plus any rule an owner has approved through its artifact, when the
+    admission module exposes that reader. Fail closed to the constant."""
+    from . import actual_admission as AA
+    reader = getattr(AA, "approved_rules_from_db", None)
+    if reader is None:
+        try:
+            from . import execution_intent as EI
+            reader = getattr(EI, "approved_live_book_rules", None)
+        except Exception:                                       # noqa: BLE001
+            reader = None
+    if reader is None:
+        return {"rules": set(AA.APPROVED_LIVE_BOOK_RULES), "source": "CODE_CONSTANT"}
+    try:
+        got = await reader(conn)
+        rules = set(got) if not isinstance(got, dict) else set(got.get("rules") or ())
+        arts = None if not isinstance(got, dict) else got.get("artifacts")
+        return {"rules": rules | set(AA.APPROVED_LIVE_BOOK_RULES),
+                "source": "CODE_CONSTANT_AND_OWNER_APPROVED_ARTIFACTS", "artifacts": arts}
+    except Exception as exc:                                    # noqa: BLE001
+        return {"rules": set(AA.APPROVED_LIVE_BOOK_RULES),
+                "source": "CODE_CONSTANT (artifact read failed: %s)" % type(exc).__name__}
+
+
 async def small_live(conn, *, view: str | None = None, status: str | None = None,
                      limit: int = 100) -> dict:
     """SMALL LIVE · PAPER vs ACTUAL (read-only).
@@ -1562,5 +1665,6 @@ async def small_live(conn, *, view: str | None = None, status: str | None = None
         "kalshi": ({"status": "NOT_CONNECTED", "why": "credentials not configured",
                     "rows": None} if view == "kalshi" else None),
         "decisions": await decisions(conn),
+        "launch": await launch_state(conn, ctl),
         "rows": out_rows,
     }

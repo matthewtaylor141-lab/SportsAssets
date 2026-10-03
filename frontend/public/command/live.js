@@ -561,6 +561,38 @@
       '</div>' + why(m.why_unavailable) + '<p class="sl-why">' + esc(m.protection_rule || '') +
       '</p></details></article>';
   }
+  function launchBlock(L) {
+    if (!L) { return ''; }
+    var lane = L.actual_lane || {}, bc = L.book_currency || {}, xp = L.xavier_management_policy || {};
+    var md = L.market_data || {}, st = md.institutional_stream || {};
+    var ready = L.actual_orders_possible_now === true;
+    var why = (L.why_not || []).map(function (w) { return '<li>' + esc(w) + '</li>'; }).join('');
+    var blockers = (L.intents_last_24h || []).map(function (b) {
+      return '<li>' + esc(b.actual_state) + (b.refusal ? ' · ' + esc(b.refusal) : '') +
+        ' — ' + esc(String(b.n)) + '</li>';
+    }).join('');
+    return '<h2 class="sl-h2">Launch control</h2>' +
+      '<div class="verdict"><b>' + (ready ? 'Actual orders are possible now.'
+        : 'No actual order can be sent now.') + '</b>' +
+      (why ? '<ul class="sl-reasons">' + why + '</ul>' : '') + '</div>' +
+      '<div class="facts">' +
+      fact('Serving build', has(L.serving_build) ? '<span class="mono">' + esc(String(L.serving_build).slice(0, 12)) + '</span>'
+        : NA + why_(L.serving_build_why_unavailable)) +
+      fact('Actual lane', pill(lane.state || 'unknown', lane.state === 'ACTIVE' ? 'good' : 'warn')) +
+      fact('Scale', has(lane.scale) ? esc('1 : ' + Number(lane.scale).toLocaleString('en-US')) : NA) +
+      fact('Cap per order', usd(lane.max_order_usd)) +
+      fact('Retail account', txt(lane.account_fingerprint_prefix)) +
+      fact('Approved live book rules', (bc.approved_live_rules || []).length
+        ? esc(bc.approved_live_rules.join(', ')) : pill('NONE', 'bad') + why_(bc.why)) +
+      fact('Xavier management policy', pill(xp.status || 'unavailable',
+        xp.status === 'APPROVED' ? 'good' : 'warn') + why_(xp.sha256 ? 'sha256 ' + String(xp.sha256).slice(0, 16) : xp.why)) +
+      fact('Market data (this process)', txt(md.verdict)) +
+      fact('Institutional stream', txt(st.state) + why_(st.why)) +
+      '</div>' +
+      (blockers ? '<details class="sl-more"><summary>Execution intents, last 24 h</summary><ul>' +
+        blockers + '</ul></details>' : '');
+  }
+  function why_(t) { return why(t); }
   function decisionsBlock(ds) {
     if (!ds || ds.status !== 'OK') {
       return '<div class="verdict"><b>One decision → paper + actual</b>' +
@@ -577,7 +609,7 @@
   function render(d) {
     state.data = d;
     var decEl = document.getElementById('livedecisions');
-    if (decEl) { decEl.innerHTML = decisionsBlock(d.decisions); }
+    if (decEl) { decEl.innerHTML = launchBlock(d.launch) + decisionsBlock(d.decisions); }
     var stateEl = document.getElementById('livestate');
     var rowsEl = document.getElementById('liverows');
     document.getElementById('livestrip').innerHTML = d.status === 'UNAVAILABLE' && !d.control

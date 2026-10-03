@@ -842,3 +842,36 @@ def test_the_page_reads_the_route_and_labels_both_sides():
     assert 'href="live.html"' in (bundle / "desk.html").read_text()
     assert 'href="live.html"' in (bundle / "index.html").read_text()
     assert 'href="live.html"' in (bundle / "center.js").read_text()
+
+
+@pg
+@pytest.mark.asyncio
+async def test_launch_control_states_why_no_actual_order_can_be_sent():
+    """The launch block reads the switch, the approved live book rules, the
+    Xavier policy state and the market-data identity; with the lane stopped
+    and no approved book rule it says no actual order can be sent, and why."""
+    conn = await _conn()
+    try:
+        before = dict(await conn.fetchrow("SELECT * FROM execmirror_control WHERE id = 1"))
+        await conn.execute("UPDATE execmirror_control SET enabled = true, stopped = true,"
+                           " scale = 1000, max_order_usd = 25 WHERE id = 1")
+        try:
+            page = await V.small_live(conn)
+        finally:
+            await conn.execute("UPDATE execmirror_control SET enabled = $1, stopped = $2"
+                               " WHERE id = 1", before["enabled"], before["stopped"])
+        L = page["launch"]
+        assert L["actual_lane"]["state"] == "STOPPED"
+        assert L["actual_lane"]["scale"] == 1000.0 and L["actual_lane"]["max_order_usd"] == 25.0
+        assert L["book_currency"]["approved_live_rules"] == []
+        assert L["book_currency"]["admits_actual"] is False and L["book_currency"]["why"]
+        assert L["actual_orders_possible_now"] is False
+        assert any("STOPPED" in w for w in L["why_not"])
+        assert any("book-currency" in w for w in L["why_not"])
+        assert L["xavier_management_policy"]["status"] in (
+            "READY_FOR_OWNER_APPROVAL", None)
+        assert "verdict" in L["market_data"]
+        assert "institutional_stream" in L["market_data"]
+        assert isinstance(L["intents_last_24h"], list)
+    finally:
+        await conn.close()
