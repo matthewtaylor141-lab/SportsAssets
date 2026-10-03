@@ -195,6 +195,10 @@ class FakeVenue:
         o["state"] = ("ORDER_STATE_FILLED" if o["cumQuantity"] >= o["quantity"]
                       else "ORDER_STATE_PARTIALLY_FILLED")
 
+    def quote(self, slug):
+        return {"bid": self.book["bestBid"]["value"], "ask": self.book["bestAsk"]["value"],
+                "state": "MARKET_STATE_OPEN", "error": None}
+
     def place(self, params):
         self.placed.append(params)
         b = self.behaviour.pop(0) if self.behaviour else {}
@@ -262,6 +266,8 @@ async def _setup(conn, monkeypatch, *, cap=25, ago_s=5):
     monkeypatch.setenv(EP.SECRET_ENV, SEC)
     from tests.paper_harness import new_account
     acct = await new_account(conn, "exm")
+    await conn.execute("TRUNCATE smalllive_reviews, smalllive_handoffs, "
+                       "smalllive_reconciliations")
     await conn.execute("TRUNCATE execmirror_fills, execmirror_events, "
                        "execmirror_snapshots, execmirror_orders")
     await conn.execute(
@@ -786,5 +792,116 @@ async def test_a_fresh_qualified_intent_is_still_sent_once(monkeypatch):
         r = await _row(conn, po["order_id"])
         assert r["state"] in ("FILLED", "OPEN", "PARTIALLY_FILLED", "CANCELLED")
         assert r["exclusion"] is None
+    finally:
+        await conn.close()
+
+
+
+# ═════════════════════════════════════════════════════════════════════
+# XAVIER OWNS THE ACTUAL POSITION; AUDREY RECONCILES THE CHAIN
+# ═════════════════════════════════════════════════════════════════════
+
+async def _decision(conn, acct, slug, *, version="PINNACLE_COMPLETED_GAME_PAPER_V2"):
+    did = "papercg:%s" % uuid.uuid4().hex[:24]
+    await conn.execute(
+        "INSERT INTO paper_decisions (decision_id, session_id, account_id, decided_at, "
+        " valuation_id, us_market_slug, holding_side, intent, fixture, label, verdict, "
+        " refusal, refusals, p_internal, internal_model, p_pinnacle, pinnacle, p_blended, "
+        " proposed_qty, limit_price, qualification_gaps, policy_version, policy_decision, "
+        " simulator_version, strategy, economics) VALUES ($1,$2,$3,now(),NULL,$4,'LONG',"
+        " 'ORDER_INTENT_BUY_LONG','fx-test','{}'::jsonb,'ENTER',NULL,'{}',NULL,'{}'::jsonb,"
+        " 0.6,'{}'::jsonb,NULL,2702,0.55,'[]'::jsonb,$5,'{}'::jsonb,'TEST',"
+        " 'PINNACLE_COMPLETED_GAME_PAPER','{}'::jsonb)",
+        did, acct["session_id"], acct["account_id"], slug, version)
+    return did
+
+
+@pg
+@pytest.mark.asyncio
+async def test_an_actual_fill_hands_the_actual_position_to_xavier_with_a_fresh_quote(monkeypatch):
+    conn = await _conn()
+    try:
+        acct, venue, mirror = await _setup(conn, monkeypatch)
+        po = await _paper_order(conn, acct, qty=2702)
+        await _paper_fill(conn, acct, po, qty=2702)
+        venue.behaviour = [{"fill": 3}]
+        await mirror.tick(conn)                       # entry placed and filled
+        h = await conn.fetchrow("SELECT * FROM smalllive_handoffs WHERE group_id = $1",
+                                po["group_id"])
+        assert h is not None and h["venue"] == "POLYMARKET" and h["owner"] == "XAVIER"
+        assert h["live_held"] == 3 and h["live_bought"] == 3 and h["state"] == "OPEN"
+        assert h["avg_entry_px"] == Decimal("0.55") and h["fees_usd"] == Decimal("0.03")
+        rv = await conn.fetchrow(
+            "SELECT * FROM smalllive_reviews WHERE handoff_id = $1", h["handoff_id"])
+        assert rv is not None and rv["live_held"] == 3
+        q = json.loads(rv["quote"]) if isinstance(rv["quote"], str) else rv["quote"]
+        assert q["read"] is True and q["bid"] == "0.40"
+        assert rv["mark_value_usd"] == Decimal("1.20")          # exit side: 3 x bid
+        assert rv["cost_basis_usd"] == Decimal("1.65")
+        assert rv["unrealized_usd"] == Decimal("1.20") - Decimal("1.65") - Decimal("0.03")
+        assert rv["action"] == "HOLD_FOLLOWS_PAPER_DECISION"
+        assert rv["resting_protection_qty"] == 0 and rv["filled_protection_qty"] == 0
+        d = json.loads(rv["detail"]) if isinstance(rv["detail"], str) else rv["detail"]
+        assert d["position"] == "ACTUAL" and d["resting_protection_is_not_filled_protection"]
+    finally:
+        await conn.close()
+
+
+@pg
+@pytest.mark.asyncio
+async def test_no_handoff_without_an_actual_fill(monkeypatch):
+    conn = await _conn()
+    try:
+        acct, venue, mirror = await _setup(conn, monkeypatch)
+        po = await _paper_order(conn, acct, qty=2702, tif="GTD", otype="RESTING")
+        await mirror.tick(conn)                       # accepted, resting, nothing filled
+        assert await conn.fetchval("SELECT count(*) FROM smalllive_handoffs WHERE group_id = $1",
+                                   po["group_id"]) == 0
+    finally:
+        await conn.close()
+
+
+@pg
+@pytest.mark.asyncio
+async def test_audrey_matches_a_clean_chain_and_names_each_discrepancy(monkeypatch):
+    conn = await _conn()
+    try:
+        acct, venue, mirror = await _setup(conn, monkeypatch)
+        # a clean chain: decision -> paper order -> paper fill -> live order -> live fill
+        po = await _paper_order(conn, acct, qty=2702)
+        did = await _decision(conn, acct, po["slug"])
+        await conn.execute("UPDATE paper_orders SET decision_id = $2 WHERE order_id = $1",
+                           po["order_id"], did)
+        await _paper_fill(conn, acct, po, qty=2702)
+        venue.behaviour = [{"fill": 3}]
+        await mirror.tick(conn)
+        rec = await conn.fetchrow("SELECT * FROM smalllive_reconciliations WHERE group_id = $1",
+                                  po["group_id"])
+        assert rec is not None and rec["status"] == "MATCHED", rec
+        chain = json.loads(rec["chain"]) if isinstance(rec["chain"], str) else rec["chain"]
+        link = chain["links"][0]
+        assert link["decision_id"] == did and link["decision_found"] is True
+        assert link["live_fill_qty"] == "3.000000" or Decimal(link["live_fill_qty"]) == 3
+        assert chain["handoff_id"] and chain["paper_and_actual_pnl_are_separate"] is True
+        # a live order whose paper order has no decision is named
+        orphan = await _paper_order(conn, acct, qty=2702)
+        venue.behaviour = [{"fill": 3}]
+        mirror._last_management = 0.0
+        await mirror.tick(conn)
+        r2 = await conn.fetchrow("SELECT * FROM smalllive_reconciliations WHERE group_id = $1",
+                                 orphan["group_id"])
+        codes = [d["code"] for d in (json.loads(r2["discrepancies"])
+                                     if isinstance(r2["discrepancies"], str) else r2["discrepancies"])]
+        assert r2["status"] == "DISCREPANCY" and "LIVE_ORDER_WITHOUT_PAPER_DECISION" in codes
+        # recorded fills that disagree with the venue's cumulative quantity are named
+        await conn.execute("DELETE FROM execmirror_fills WHERE group_id = $1", po["group_id"])
+        mirror._last_management = 0.0
+        await mirror.tick(conn)
+        r3 = await conn.fetchrow("SELECT * FROM smalllive_reconciliations WHERE group_id = $1",
+                                 po["group_id"])
+        codes = [d["code"] for d in (json.loads(r3["discrepancies"])
+                                     if isinstance(r3["discrepancies"], str) else r3["discrepancies"])]
+        assert r3["status"] == "DISCREPANCY"
+        assert "VENUE_CUM_QTY_NOT_EQUAL_RECORDED_FILLS" in codes
     finally:
         await conn.close()

@@ -57,6 +57,8 @@ UNKNOWN_GRACE_S = 45.0
 SUBMITTING_STALE_S = 30.0
 PACE_S = 0.25
 MAX_PROTECTION_ROWS = 12
+MANAGEMENT_EVERY_S = 60.0
+VENUE = "POLYMARKET"
 PAPER_ACCOUNT = "paper_acct_main"
 BUY_ROLES = ("ENTRY", "HEDGE")
 SELL_ROLES = ("EXIT", "REDUCE", "STANDING_PROTECTION")
@@ -251,6 +253,22 @@ def fill_delta(prev_cum, prev_avg, prev_fee, cum, avg, fee):
             "fee": max(fee_d, Decimal(0))}
 
 
+def _quote_px(m: dict, *keys: str):
+    for k in keys:
+        v = m.get(k)
+        if isinstance(v, dict):
+            v = v.get("value")
+        if v is None:
+            continue
+        try:
+            px = Decimal(str(v))
+        except Exception:                                     # noqa: BLE001
+            continue
+        if 0 < px < 1:
+            return px
+    return None
+
+
 def _amt(v):
     if isinstance(v, dict):
         v = v.get("value")
@@ -346,6 +364,21 @@ class Venue:
         self._pace()
         return self._c.markets.bbo(slug) or {}
 
+    def quote(self, slug: str) -> dict:
+        """{"bid", "ask", "state", "error"} from the mirror account's own
+        `markets.bbo(slug)["marketData"]`, read the way pmus.bbo_read reads
+        it (a quote is `{"value": "0.78", ...}` or a bare number, kept only
+        inside (0, 1)). Parsed here, not imported: this lane never imports
+        pmus, whose module carries the funded credential."""
+        self._pace()
+        d = (self._c.markets.bbo(slug) or {}).get("marketData") or {}
+        if not isinstance(d, dict):
+            return {"bid": None, "ask": None, "state": None,
+                    "error": "marketData:%s" % type(d).__name__}
+        return {"bid": _quote_px(d, "bestBid", "best_bid", "bid"),
+                "ask": _quote_px(d, "bestAsk", "best_ask", "ask"),
+                "state": d.get("state"), "error": None}
+
 
 def _classify(exc: Exception) -> str:
     """'REJECTED' when the venue answered and refused (nothing placed);
@@ -410,6 +443,7 @@ class Mirror:
         self._venue_factory = venue_factory
         self._venue = None
         self._now = now
+        self._last_management = 0.0
         self._last_snapshot = 0.0
         self._buying_power = None
 
@@ -445,6 +479,11 @@ class Mirror:
         out["polled"] = await self.poll(conn)
         out["protection"] = await self.resync_protection(conn, ctl)
         out["orphans"] = await self.close_orphans(conn)
+        out["handoffs"] = await self.live_handoffs(conn)
+        if self._now() - self._last_management >= MANAGEMENT_EVERY_S:
+            self._last_management = self._now()
+            out["xavier_live_reviews"] = await self.xavier_live_reviews(conn)
+            out["audrey_reconciled"] = await self.audrey_reconcile(conn)
         if self._now() - self._last_snapshot >= SNAPSHOT_EVERY_S:
             out["snapshot"] = await self.snapshot(conn, ctl)
         return out
@@ -865,6 +904,215 @@ class Mirror:
         if diffs:
             await _event(conn, "RECONCILIATION_DIFFERENCE", **rec)
         return rec
+
+    # --- Xavier owns the ACTUAL position ------------------------------------
+    async def live_handoffs(self, conn) -> int:
+        """One handoff per paper group with ACTUAL filled inventory (venue
+        fills only). Updated as fills arrive; CLOSED when held reaches 0."""
+        rows = await conn.fetch(
+            """SELECT f.group_id, min(f.us_market_slug) AS slug,
+                      coalesce(sum(f.qty) FILTER (WHERE f.intent LIKE 'ORDER_INTENT_BUY%'), 0) AS bought,
+                      coalesce(sum(f.qty) FILTER (WHERE f.intent LIKE 'ORDER_INTENT_SELL%'), 0) AS sold,
+                      sum(f.qty * f.price) FILTER (WHERE f.intent LIKE 'ORDER_INTENT_BUY%') AS cost,
+                      coalesce(sum(f.fee_usd), 0) AS fees, min(f.observed_at) AS first_at
+                 FROM execmirror_fills f WHERE f.group_id IS NOT NULL GROUP BY 1""")
+        n = 0
+        for r in rows:
+            bought = Decimal(str(r["bought"]))
+            if bought <= 0:
+                continue
+            held = bought - Decimal(str(r["sold"]))
+            entry = await conn.fetchrow(
+                """SELECT mirror_id, intent FROM execmirror_orders WHERE group_id = $1
+                      AND role IN ('ENTRY','HEDGE') AND cum_qty > 0
+                    ORDER BY created_at LIMIT 1""", r["group_id"])
+            if entry is None:
+                continue
+            ph = await conn.fetchval(
+                "SELECT handoff_id FROM paper_handoffs WHERE group_id = $1", r["group_id"])
+            avg = (Decimal(str(r["cost"])) / bought) if r["cost"] is not None else None
+            hid = "livehand:%s:%s" % (VENUE.lower(), r["group_id"])
+            await conn.execute(
+                """INSERT INTO smalllive_handoffs (handoff_id, venue, group_id, us_market_slug,
+                     entry_mirror_id, paper_handoff_id, opened_intent, live_held, live_bought,
+                     avg_entry_px, fees_usd, first_live_fill_at, state)
+                   VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+                   ON CONFLICT (handoff_id) DO UPDATE SET live_held = EXCLUDED.live_held,
+                     live_bought = EXCLUDED.live_bought, avg_entry_px = EXCLUDED.avg_entry_px,
+                     fees_usd = EXCLUDED.fees_usd, state = EXCLUDED.state,
+                     paper_handoff_id = coalesce(smalllive_handoffs.paper_handoff_id,
+                                                 EXCLUDED.paper_handoff_id),
+                     updated_at = now()
+                   WHERE smalllive_handoffs.live_held IS DISTINCT FROM EXCLUDED.live_held
+                      OR smalllive_handoffs.fees_usd IS DISTINCT FROM EXCLUDED.fees_usd
+                      OR smalllive_handoffs.state IS DISTINCT FROM EXCLUDED.state
+                      OR (smalllive_handoffs.paper_handoff_id IS NULL
+                          AND EXCLUDED.paper_handoff_id IS NOT NULL)""",
+                hid, VENUE, r["group_id"], r["slug"], entry["mirror_id"], ph, entry["intent"],
+                held, bought, avg, Decimal(str(r["fees"])), r["first_at"],
+                "OPEN" if held > 0 else "CLOSED")
+            n += 1
+        return n
+
+    async def xavier_live_reviews(self, conn) -> int:
+        """Xavier's review of each OPEN actual position with a FRESH venue
+        quote. The actual position is managed by the same management
+        decisions Xavier makes on the paper position (mirrored exits and
+        protection at the live fraction) and by the orphan close; this
+        record states the actual state those decisions act on. A resting
+        live protection is reported separately from filled protection."""
+        hs = await conn.fetch("SELECT * FROM smalllive_handoffs WHERE state = 'OPEN'")
+        n = 0
+        for h in hs:
+            h = dict(h)
+            inv = await live_inventory(conn, h["group_id"])
+            resting = await conn.fetchval(
+                """SELECT coalesce(sum(live_qty - cum_qty), 0) FROM execmirror_orders
+                    WHERE group_id = $1 AND role = 'STANDING_PROTECTION'
+                      AND state IN ('OPEN','PARTIALLY_FILLED')""", h["group_id"])
+            filled_prot = await conn.fetchval(
+                """SELECT coalesce(sum(cum_qty), 0) FROM execmirror_orders
+                    WHERE group_id = $1 AND role = 'STANDING_PROTECTION'""", h["group_id"])
+            quote, mark = {"read": False}, None
+            try:
+                q = await self.call(self.venue().quote, h["us_market_slug"])
+                bid, ask = _amt(q.get("bid")), _amt(q.get("ask"))
+                quote = {"read": q.get("error") is None, "at": self._now(),
+                         "bid": None if bid is None else str(bid),
+                         "ask": None if ask is None else str(ask),
+                         "state": q.get("state"), "error": q.get("error"),
+                         "basis": "the mirror account's own venue BBO read at review time"}
+                long_side = str(h.get("opened_intent") or "").endswith("BUY_LONG")
+                exit_px = bid if long_side else (None if ask is None else Decimal(1) - ask)
+                if exit_px is not None:
+                    mark = exit_px * Decimal(inv["held"])
+            except Exception as exc:                          # noqa: BLE001
+                quote = {"read": False, "error": EP._error(exc)}
+            # cost per contract follows collateral_per_contract: a long
+            # paid the price, a short buy the complement
+            cost = (None if h["avg_entry_px"] is None else
+                    collateral_per_contract(str(h.get("opened_intent") or ""),
+                                            h["avg_entry_px"]) * Decimal(inv["held"]))
+            unreal = None if (mark is None or cost is None) else mark - cost - Decimal(str(h["fees_usd"]))
+            pr = await conn.fetchrow(
+                """SELECT review_id, recommendation FROM paper_xavier_reviews
+                    WHERE group_id = $1 ORDER BY reviewed_at DESC LIMIT 1""", h["group_id"])
+            paper_open = await paper_open_qty(conn, h["group_id"])
+            if inv["held"] <= 0:
+                action = "NOTHING_HELD"
+            elif paper_open <= 0:
+                action = "ORPHAN_CLOSE_PENDING"
+            elif inv["committed"] > 0:
+                action = "EXIT_WORKING_FOLLOWS_PAPER_DECISION"
+            else:
+                action = "HOLD_FOLLOWS_PAPER_DECISION"
+            rid = "liverev:%s:%d" % (h["group_id"], int(self._now()))
+            await conn.execute(
+                """INSERT INTO smalllive_reviews (review_id, handoff_id, live_held,
+                     committed_exit_qty, resting_protection_qty, filled_protection_qty, quote,
+                     mark_value_usd, cost_basis_usd, unrealized_usd, paper_review_id,
+                     paper_recommendation, action, detail)
+                   VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10,$11,$12,$13,$14::jsonb)
+                   ON CONFLICT (review_id) DO NOTHING""",
+                rid, h["handoff_id"], inv["held"], inv["committed"], resting or 0,
+                filled_prot or 0, _j(quote), mark, cost, unreal,
+                None if pr is None else pr["review_id"],
+                None if pr is None else pr["recommendation"], action,
+                _j({"paper_open_qty": str(paper_open), "position": "ACTUAL",
+                    "venue": VENUE, "mark_basis": "exit side of the fresh venue BBO",
+                    "resting_protection_is_not_filled_protection": True}))
+            n += 1
+        return n
+
+    # --- Audrey reconciles the chain independently ---------------------------
+    async def audrey_reconcile(self, conn) -> int:
+        groups = await conn.fetch(
+            """SELECT DISTINCT group_id FROM execmirror_orders
+                WHERE group_id IS NOT NULL AND (venue_order_id IS NOT NULL OR state = 'EXCLUDED')
+                  AND created_at > now() - interval '14 days'""")
+        snap = await conn.fetchrow(
+            "SELECT reconciliation, at FROM execmirror_snapshots ORDER BY at DESC LIMIT 1")
+        n = 0
+        for g in groups:
+            gid = g["group_id"]
+            rows = [dict(r) for r in await conn.fetch(
+                """SELECT m.*, p.decision_id, p.qty AS p_qty, p.state AS p_state
+                     FROM execmirror_orders m LEFT JOIN paper_orders p ON p.order_id = m.paper_order_id
+                    WHERE m.group_id = $1 ORDER BY m.created_at""", gid)]
+            disc, chain = [], []
+            for m in rows:
+                pf = await conn.fetchrow(
+                    "SELECT coalesce(sum(qty), 0) AS q, avg(price) AS px, coalesce(sum(fee_usd),0) AS fee "
+                    "FROM paper_fills WHERE order_id = $1", m["paper_order_id"]) if m["paper_order_id"] else None
+                lf = await conn.fetchrow(
+                    "SELECT coalesce(sum(qty), 0) AS q, coalesce(sum(fee_usd),0) AS fee "
+                    "FROM execmirror_fills WHERE mirror_id = $1", m["mirror_id"])
+                dec = None
+                if m.get("decision_id"):
+                    dec = await conn.fetchrow(
+                        "SELECT decision_id, verdict, strategy, policy_version FROM paper_decisions "
+                        "WHERE decision_id = $1", m["decision_id"])
+                link = {"mirror_id": m["mirror_id"], "role": m["role"],
+                        "paper_order_id": m["paper_order_id"], "decision_id": m.get("decision_id"),
+                        "decision_found": dec is not None,
+                        "paper_fill_qty": None if pf is None else str(pf["q"]),
+                        "live_state": m["state"], "exclusion": m["exclusion"],
+                        "venue_order_id": m["venue_order_id"],
+                        "live_intended_qty": m["live_qty"], "live_fill_qty": str(lf["q"]),
+                        "venue_cum_qty": None if m["cum_qty"] is None else str(m["cum_qty"]),
+                        "live_fees_usd": str(lf["fee"])}
+                chain.append(link)
+                if m["role"] in BUY_ROLES and m["paper_order_id"] and dec is None:
+                    disc.append({"code": "LIVE_ORDER_WITHOUT_PAPER_DECISION", "mirror_id": m["mirror_id"]})
+                if m["venue_order_id"] and m["cum_qty"] is not None and \
+                        Decimal(str(m["cum_qty"])) != Decimal(str(lf["q"])):
+                    disc.append({"code": "VENUE_CUM_QTY_NOT_EQUAL_RECORDED_FILLS",
+                                 "mirror_id": m["mirror_id"], "venue": str(m["cum_qty"]),
+                                 "fills": str(lf["q"])})
+                if Decimal(str(lf["q"])) > Decimal(m["live_qty"] or 0):
+                    disc.append({"code": "LIVE_FILLED_MORE_THAN_INTENDED", "mirror_id": m["mirror_id"]})
+                if m["paper_qty"] is not None and m["scaled_qty"] is not None and m["live_qty"]:
+                    if abs(Decimal(m["live_qty"]) - Decimal(str(m["scaled_qty"]))) > Decimal("0.5"):
+                        disc.append({"code": "LIVE_QTY_NOT_THE_ROUNDED_SCALED_QTY",
+                                     "mirror_id": m["mirror_id"]})
+                if pf is not None and Decimal(str(lf["q"])) > 0 and Decimal(str(pf["q"])) == 0 \
+                        and m.get("p_state") in PAPER_DEAD:
+                    disc.append({"code": "LIVE_FILLED_PAPER_DID_NOT", "mirror_id": m["mirror_id"],
+                                 "note": "an execution difference, recorded; not an error by itself"})
+            held = (await live_inventory(conn, gid))["held"]
+            hrow = await conn.fetchrow(
+                "SELECT handoff_id FROM smalllive_handoffs WHERE group_id = $1", gid)
+            if held > 0 and hrow is None:
+                disc.append({"code": "ACTUAL_POSITION_WITHOUT_XAVIER_HANDOFF"})
+            rec = (snap["reconciliation"] if snap else None)
+            rec = json.loads(rec) if isinstance(rec, str) else rec
+            slug = rows[0]["us_market_slug"] if rows else None
+            if rec and slug in (rec.get("differences") or {}):
+                disc.append({"code": "VENUE_POSITION_DIFFERS_FROM_MIRROR_FILLS",
+                             "detail": rec["differences"][slug]})
+            pending = any(c["live_state"] in OPEN_STATES for c in chain)
+            status = "DISCREPANCY" if disc else ("PENDING" if pending else "MATCHED")
+            chain_doc = {"links": chain, "live_held": held,
+                         "handoff_id": None if hrow is None else hrow["handoff_id"],
+                         "account_snapshot_at": None if snap is None else snap["at"],
+                         "paper_and_actual_pnl_are_separate": True}
+            prev = await conn.fetchval(
+                "SELECT status FROM smalllive_reconciliations WHERE group_id = $1", gid)
+            await conn.execute(
+                """INSERT INTO smalllive_reconciliations (group_id, venue, status, discrepancies, chain)
+                   VALUES ($1,$2,$3,$4::jsonb,$5::jsonb)
+                   ON CONFLICT (group_id) DO UPDATE SET status = EXCLUDED.status,
+                     discrepancies = EXCLUDED.discrepancies, chain = EXCLUDED.chain,
+                     reconciled_at = now(),
+                     changed_at = CASE WHEN smalllive_reconciliations.status
+                                       IS DISTINCT FROM EXCLUDED.status
+                                       THEN now() ELSE smalllive_reconciliations.changed_at END""",
+                gid, VENUE, status, _j(disc), _j(chain_doc))
+            if prev != status:
+                await _event(conn, "AUDREY_RECONCILIATION_" + status, group_id=gid,
+                             discrepancies=disc)
+            n += 1
+        return n
 
     # --- emergency stop -------------------------------------------------------
     async def emergency_stop(self, conn, ctl) -> dict:
