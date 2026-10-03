@@ -30,6 +30,11 @@ checked to exist; a finding can open from a `paper_agent_lessons` row
 (`open_from_lesson`); a candidate can name its `paper_improvement_proposals`
 row (read, never written).
 
+KAREN (migration 207, the red-team agent) takes part ONLY as a challenger:
+she may record the PEER_CHALLENGE stage of another agent's finding and no
+other stage -- she proposes nothing, evaluates nothing and marks nothing
+release-eligible. The database's actor CHECK says the same.
+
 WHAT IT CANNOT DO, BY CONSTRUCTION. Activate a policy, approve anything, or
 change a risk limit, capital, credential or submission switch: this module
 writes only the two loop tables, refuses any such key in what it records
@@ -47,6 +52,8 @@ from datetime import datetime, timezone
 from typing import Any
 
 AGENTS = ("DEREK", "XAVIER", "AUDREY")
+#: Agents that may act in the loop ONLY by recording a PEER_CHALLENGE.
+CHALLENGERS_ONLY = ("KAREN",)
 
 EVIDENCE = "EVIDENCE"
 HYPOTHESIS = "HYPOTHESIS"
@@ -85,6 +92,18 @@ EVIDENCE_KINDS = {
     "paper_improvement_proposals": ("paper_improvement_proposals",
                                     "proposal_id"),
     "external_valuations": ("external_valuations", "id"),
+    # (207) the records Karen challenges, and her challenges themselves
+    "execution_intents": ("execution_intents", "intent_id"),
+    "derek_entry_decisions": ("derek_entry_decisions", "decision_id"),
+    "bettor_xavier_reviews": ("bettor_xavier_reviews", "review_id"),
+    "smalllive_reconciliations": ("smalllive_reconciliations", "group_id"),
+    "kalshi_account_reconciliations": ("kalshi_account_reconciliations",
+                                       "reconciliation_id"),
+    "bettor_account_reconciliation_reports": (
+        "bettor_account_reconciliation_reports", "report_id"),
+    "audrey_audit_reports": ("audrey_audit_reports", "report_id"),
+    "agent_findings": ("agent_findings", "finding_id"),
+    "karen_challenges": ("karen_challenges", "challenge_id"),
 }
 
 #: Keys no stage may carry, at any depth: the loop is not an approval or
@@ -97,6 +116,7 @@ AUTHORITY_KEYS = frozenset((
     "activation", "active", "policy_activation"))
 
 R_UNKNOWN_AGENT = "THAT_IS_NOT_ONE_OF_THE_THREE_AGENTS"
+R_CHALLENGER_ONLY = "KAREN_RECORDS_ONLY_THE_PEER_CHALLENGE_STAGE"
 R_UNGROUNDED = "A_FINDING_NEEDS_AT_LEAST_ONE_EVIDENCE_REFERENCE"
 R_BAD_REF = "AN_EVIDENCE_REFERENCE_NEEDS_A_KIND_AND_AN_ID"
 R_UNKNOWN_KIND = "THAT_EVIDENCE_KIND_IS_NOT_A_RECORD_THE_AGENTS_KEEP"
@@ -245,7 +265,10 @@ def check_advance(finding: dict, stages: list, new: dict) -> str | None:
     f = dict(finding or {})
     by_seq = {int(s["seq"]): s for s in stages or []}
     stage, actor = new.get("stage"), new.get("actor")
-    if actor not in AGENTS:
+    if actor in CHALLENGERS_ONLY:
+        if stage != PEER_CHALLENGE:
+            return R_CHALLENGER_ONLY
+    elif actor not in AGENTS:
         return R_UNKNOWN_AGENT
     if f.get("stage") == CLOSED:
         return R_CLOSED

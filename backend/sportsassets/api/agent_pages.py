@@ -57,6 +57,8 @@ ENDPOINTS = {
     "derek": "/api/command/agents/derek",
     "xavier": "/api/command/agents/xavier",
     "audrey": "/api/command/agents/audrey",
+    # Karen (red team / challenge, migration 207): api/agents_karen.py
+    "karen": "/api/command/karen",
     "chat": "/api/command/agents/audrey/chat",
     "directives": "/api/command/agents/audrey/directives",
     # the Command Centre pages' extra read-only routes (agents_cc_reads) and
@@ -98,6 +100,8 @@ REQUIRED_SECTIONS = {
     "audrey": ("status", "versions", "daily_reports", "findings", "outcomes",
                "cohort_quality", "tasks", "candidates", "evaluations",
                "releases", "directives", "conversations", "provider"),
+    "karen": ("status", "authority", "current_challenges",
+              "recent_challenges", "metrics", "detectors"),
 }
 
 PAGE_PATHS = {
@@ -105,6 +109,7 @@ PAGE_PATHS = {
     "derek": "/api/command/agents/derek/page",
     "xavier": "/api/command/agents/xavier/page",
     "audrey": "/api/command/agents/audrey/page",
+    "karen": "/api/command/agents/karen/page",
     "demo": "/api/command/agents/demo/page",
 }
 
@@ -418,6 +423,7 @@ var AG = (function () {
   var ENDPOINTS = {
     index: '/api/command/agents', derek: '/api/command/agents/derek',
     xavier: '/api/command/agents/xavier', audrey: '/api/command/agents/audrey',
+    karen: '/api/command/karen',
     chat: '/api/command/agents/audrey/chat', directives: '/api/command/agents/audrey/directives'
   };
   var FETCH_OPTS = {credentials: 'same-origin', cache: 'no-store', headers: {'Accept': 'application/json'}};
@@ -639,7 +645,8 @@ var AG = (function () {
   var AGENT_META = {
     DEREK: {letter: 'D', role: 'Discovery · entry', kind: 'derek'},
     XAVIER: {letter: 'X', role: 'Position management · exits', kind: 'xavier'},
-    AUDREY: {letter: 'A', role: 'Audit · management chat · improvement', kind: 'audrey'}
+    AUDREY: {letter: 'A', role: 'Audit · management chat · improvement', kind: 'audrey'},
+    KAREN: {letter: 'K', role: 'Red team · challenge · no authority', kind: 'karen'}
   };
   function depList(v) {
     if (v === null || v === undefined) return '';
@@ -1526,13 +1533,55 @@ AUDREY_JS = r"""
 })(AG);
 """
 
+# Karen (red team, migration 207): her challenges and the six metrics, each
+# with its numerator and denominator. Read only; no write control here.
+KAREN_JS = r"""
+(function (AG) {
+  'use strict';
+  var esc = AG.esc, pick = AG.pick, isObj = AG.isObj, R = AG.R;
+  function challengeTable(sec, ctx) {
+    var rows = AG.rowsOf(sec.data, ['challenges', 'rows', 'items']);
+    if (!rows.length) return AG.genericBody(sec, ctx.rd);
+    return AG.table(rows, [
+      {label: 'Challenge', keys: ['challenge_id']}, {label: 'Target', keys: ['target_agent']},
+      {label: 'Record', render: function (r) { return '<span class="mono">' + esc(r.target_kind) + ' · ' + esc(r.target_id) + '</span>'; }},
+      {label: 'Detector', keys: ['detector']}, {label: 'Severity', keys: ['severity']},
+      {label: 'State', render: function (r) { return AG.statusPill(r.state); }},
+      {label: 'Claim', keys: ['claim']}, {label: 'Peer response', render: function (r) { return r.responded_by ? esc(r.response_stance) + ' · ' + esc(r.response) : '<span class="mute">awaiting ' + esc(r.target_agent) + '</span>'; }},
+      {label: 'Outcome', render: function (r) { return r.outcome ? esc(r.outcome) + ' · ' + esc(r.resolved_by) : '<span class="mute">none yet</span>'; }},
+      {label: 'Time to challenge', keys: ['time_to_challenge_s'], num: 1},
+      {label: 'Challenged', keys: ['challenged_at'], u: 'ts'}, {label: 'Evidence', keys: ['evidence']}], {rd: ctx.rd});
+  }
+  function metricsTable(sec, ctx) {
+    var d = isObj(sec.data) ? sec.data : {}, m = isObj(d.metrics) ? d.metrics : {};
+    var rows = Object.keys(m).map(function (k) { return m[k]; });
+    if (!rows.length) return AG.genericBody(sec, ctx.rd);
+    return '<p class="note">' + esc(d.rule || '') + '</p>' + AG.table(rows, [
+      {label: 'Metric', keys: ['name']},
+      {label: 'Value', render: function (r) { return r.value === null || r.value === undefined ? AG.unk(r.why || 'unmeasurable') : esc(r.value); }},
+      {label: 'Numerator', render: function (r) { return r.numerator === null || r.numerator === undefined ? AG.unk() : esc(r.numerator); }},
+      {label: 'Denominator', keys: ['denominator'], num: 1},
+      {label: 'Why null', render: function (r) { return r.why ? esc(r.why) : ''; }},
+      {label: 'Definition', keys: ['definition']}], {rd: ctx.rd});
+  }
+  AG.SPECS.karen = {sections: [
+    {key: 'status', title: 'Status & heartbeat', render: R.status},
+    {key: 'authority', title: 'Authority · none', note: 'Karen holds no order, approval, activation, limit or promotion authority. Enforced in code and in the database.'},
+    {key: 'current_challenges', title: 'Current challenges', render: challengeTable, wide: true},
+    {key: 'metrics', title: 'Metrics · numerator / denominator', render: metricsTable, wide: true, note: 'Null means unmeasurable, never zero.'},
+    {key: 'recent_challenges', title: 'All recent challenges', render: challengeTable, wide: true},
+    {key: 'detectors', title: 'Scheduled detectors'}
+  ]};
+})(AG);
+"""
+
 INDEX_JS = r"""
 (function (AG) {
   'use strict';
   var esc = AG.esc, pick = AG.pick, isObj = AG.isObj;
-  var IDS = ['DEREK', 'XAVIER', 'AUDREY'];
+  var IDS = ['DEREK', 'XAVIER', 'AUDREY', 'KAREN'];
   var TERMINAL = ['RELEASED', 'REJECTED', 'CLOSED_NO_CHANGE', 'CANCELLED', 'ROLLED_BACK'];
-  var MANDATE = {DEREK: 'Finds and enters opportunities', XAVIER: 'Manages owned positions and exits', AUDREY: 'Audits both, talks with management, runs improvement'};
+  var MANDATE = {DEREK: 'Finds and enters opportunities', XAVIER: 'Manages owned positions and exits', AUDREY: 'Audits both, talks with management, runs improvement', KAREN: 'Challenges all three with evidence; holds no authority'};
   function agentCard(a, id, tasks, rd) {
     var meta = AG.AGENT_META[id];
     if (!isObj(a)) return '<div class="panel acard ag-' + meta.kind + '" data-agent="' + id + '"><div class="ident"><div class="sigil">' + meta.letter + '</div><div><div class="role">' + esc(meta.role) + '</div><h1>' + id.charAt(0) + id.slice(1).toLowerCase() + '</h1></div></div>'
@@ -2035,12 +2084,13 @@ def talk_panel_html(kind: str) -> str:
 
 
 _PAGE_TITLES = {"index": "Agents", "derek": "Derek", "xavier": "Xavier",
-                "audrey": "Audrey"}
+                "audrey": "Audrey", "karen": "Karen"}
 
 
 def _nav(current: str) -> str:
     items = [("index", "Agents"), ("derek", "Derek"), ("xavier", "Xavier"),
-             ("audrey", "Audrey"), ("demo", "Product demo")]
+             ("audrey", "Audrey"), ("karen", "Karen"),
+             ("demo", "Product demo")]
     return "".join(
         '<a href="%s"%s>%s</a>' % (PAGE_PATHS[k],
                                   ' aria-current="page"' if k == current else "", t)
@@ -2069,6 +2119,7 @@ _DESCS = {
     "derek": "Derek: catalogue coverage, opportunity queue, entry decisions, fills and handoffs. Read-only.",
     "xavier": "Xavier: owned positions, the spread ladder, every alternative, payouts and servicing. Read-only.",
     "audrey": "Audrey: reports, findings, outcomes, improvement tasks, releases, directives and management chat.",
+    "karen": "Karen: red-team challenges to Derek, Xavier and Audrey, their peer responses, outcomes and metrics. No authority. Read-only.",
 }
 
 
@@ -2085,7 +2136,7 @@ _CC_SHELL = r"""<!doctype html>
 <a class="skip" href="#cc-main">Skip to the records</a>
 <header class="top cc-top"><a class="brand" href="/api/command/agents/page"><span class="mark"></span>BETTOR <b>COMMAND</b></a>
 <nav class="cc-nav" aria-label="Agents">%%NAV%%</nav>
-<nav class="cc-sub" aria-label="More"><a href="/api/command/agents/page">All agents</a><a href="/api/command/agents/demo/page">Product demo</a></nav>
+<nav class="cc-sub" aria-label="More"><a href="/api/command/agents/page">All agents</a><a href="/api/command/agents/karen/page">Karen · red team</a><a href="/api/command/agents/demo/page">Product demo</a></nav>
 <div class="meta"><span class="ro">READ-ONLY</span><span id="readat">reading&#8230;</span><button id="trace-btn" type="button">Trace</button><button id="refresh" type="button">Refresh</button></div></header>
 <main id="cc-main" tabindex="-1">
 <div class="cc-paper-banner" id="paper-banner" data-state="READING" role="status" aria-live="polite">Reading the paper session&#8230;</div>
@@ -2172,7 +2223,7 @@ def page_html(kind: str) -> str:
         return _cc_page_html(kind)
     js = CORE_JS + COMMON_JS + TRACE_JS
     js += {"index": INDEX_JS, "derek": DEREK_JS, "xavier": XAVIER_JS,
-           "audrey": AUDREY_JS}[kind]
+           "audrey": AUDREY_JS, "karen": KAREN_JS}[kind]
     js += BOOT_JS
     return (_SHELL.replace("%%CSS%%", BASE_CSS)
             .replace("%%JS%%", js)
@@ -2189,7 +2240,8 @@ def render_js(kind: str) -> str:
     from . import agent_cc_ops as OPS
     from . import agent_cc_page as CCP
     return CORE_JS + COMMON_JS + TRACE_JS + {"index": INDEX_JS, "derek": DEREK_JS,
-                                  "xavier": XAVIER_JS, "audrey": AUDREY_JS}[kind] + (
+                                  "xavier": XAVIER_JS, "audrey": AUDREY_JS,
+                                  "karen": KAREN_JS}[kind] + (
         CCP.CC_CORE_JS + CCP.PAPER_CORE_JS + OPS.OPS_CORE_JS
         if kind in ("derek", "xavier", "audrey") else "")
 
@@ -2424,6 +2476,11 @@ async def agents_xavier_page(request: Request):
 @router.get("/api/command/agents/audrey/page", include_in_schema=False)
 async def agents_audrey_page(request: Request):
     return _serve(request, lambda: page_html("audrey"), _cc_headers)
+
+
+@router.get("/api/command/agents/karen/page", include_in_schema=False)
+async def agents_karen_page(request: Request):
+    return _serve(request, lambda: page_html("karen"))
 
 
 @router.get("/api/command/agents/demo/page", include_in_schema=False)

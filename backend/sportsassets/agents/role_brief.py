@@ -23,11 +23,19 @@ SQL = {
  FROM paper_audrey_findings WHERE account_id=$1
  AND recorded_at BETWEEN to_timestamp($2-86400) AND to_timestamp($2)
  ORDER BY recorded_at DESC,finding_id LIMIT 101""",
+ # Karen's own challenges: account-scoped when the challenged record has an
+ # account, otherwise unscoped (a funded decision, an execution intent).
+ 'KAREN': """SELECT challenge_id,challenged_at,target_agent,target_kind,
+ target_id,detector,severity,state FROM karen_challenges
+ WHERE (account_id=$1 OR account_id IS NULL)
+ AND challenged_at BETWEEN to_timestamp($2-86400) AND to_timestamp($2)
+ ORDER BY challenged_at DESC,challenge_id LIMIT 101""",
 }
 FOCUS = {
  'DEREK': 'Find the largest recorded blocker by distinct contract/side within each strategy/version. Propose one measurable repair; do not infer missed profits or new fills from ENTER signals.',
  'XAVIER': 'Review held-position freshness and recorded alternatives. Compare HOLD, EXIT, REDUCE or a hedge only when current executable prices and settlement compatibility support them; never invent a cross-venue hedge.',
  'AUDREY': 'Prioritize recorded findings and testable causes. Separate peer claims from evidence; evaluate any proposed change on a frozen forward cohort before claiming improvement.',
+ 'KAREN': 'Challenge Derek, Xavier and Audrey only with records that exist: cite the decision, intent, review, reconciliation or audit id. Let the challenged agent answer; never resolve your own challenge. You hold no order, approval, activation, limit or promotion authority.',
 }
 
 
@@ -95,6 +103,13 @@ def summarize(agent, rows, now, account_id):
         result.update(distinct_reviewed_groups=len(latest),freshness_at_review={k:buckets[k] for k in ('STALE','RECORDED_FRESH','UNKNOWN')},
                       recent_groups=attention,source_ids=[r['review_id'] for r in selected[:10]],
                       limitation='Groups are reviewed positions, not necessarily still open. Freshness is at the recorded review, not now. Read the position tool for actual orders, alternatives and settlements.')
+    elif agent=='KAREN':
+        result.update(by_state=dict(Counter(r.get('state') or 'UNKNOWN' for r in selected)),
+                      by_target=dict(Counter(r.get('target_agent') or 'UNKNOWN' for r in selected)),
+                      by_detector=dict(Counter(r.get('detector') or 'UNKNOWN' for r in selected)),
+                      challenges=selected[:12],source_ids=[r['challenge_id'] for r in selected[:10]],
+                      authority='NONE',
+                      limitation='A challenge is a grounded question, not a proven defect: only an UPHELD outcome recorded by someone other than Karen counts as one.')
     else:
         result.update(by_severity=dict(Counter(r.get('severity') or 'UNKNOWN' for r in selected)),
                       by_kind=dict(Counter(r.get('kind') or 'UNKNOWN' for r in selected)),

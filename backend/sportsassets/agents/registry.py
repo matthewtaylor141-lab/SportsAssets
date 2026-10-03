@@ -1,9 +1,11 @@
-"""THE THREE AGENTS: WHO THEY ARE, WHAT THEY MAY DO, WHAT THEY ARE DOING.
+"""THE AGENTS: WHO THEY ARE, WHAT THEY MAY DO, WHAT THEY ARE DOING.
 
 Derek (discovery / entry), Xavier (position management / exits) and Audrey
 (audit / management communication / improvement) are NAMED ROLES over the
-application's existing deterministic machinery. This module is their shared
-registry (migration 152):
+application's existing deterministic machinery. Karen (red team / challenge,
+migration 207) challenges their records with evidence and holds NO authority
+of any kind -- no order path, no approval, no activation, no promotion. This
+module is their shared registry (migration 152):
 
   * IDENTITIES -- mandate, versioned policy / model / code identity and an
     EXPLICIT allow and deny list of tools per agent;
@@ -35,7 +37,13 @@ log = logging.getLogger(__name__)
 DEREK = "DEREK"
 XAVIER = "XAVIER"
 AUDREY = "AUDREY"
-AGENTS = (DEREK, XAVIER, AUDREY)
+KAREN = "KAREN"
+#: The three OPERATING agents (entry, management, audit) -- the ones Karen
+#: challenges, and the only ones that may propose a collaboration-loop
+#: finding or hold an order path.
+OPERATING_AGENTS = (DEREK, XAVIER, AUDREY)
+#: Every registered agent identity, Karen included (migration 207).
+AGENTS = (DEREK, XAVIER, AUDREY, KAREN)
 
 # ── STATES (agent_status.state CHECK) ───────────────────────────────────
 S_IDLE = "IDLE"
@@ -57,7 +65,7 @@ POLICY_STATES = ("ACTIVE", "CANDIDATE", "REJECTED", "RETIRED")
 SOURCE_ACTIVE_POLICY = "ACTIVE_POLICY"
 SOURCE_CODE_DEFAULT = "CODE_DEFAULT"
 
-R_UNKNOWN_AGENT = "THAT_IS_NOT_ONE_OF_THE_THREE_AGENTS"
+R_UNKNOWN_AGENT = "THAT_IS_NOT_ONE_OF_THE_AGENTS"
 R_UNKNOWN_STATE = "THAT_IS_NOT_AN_AGENT_STATE"
 R_UNKNOWN_STATUS = "THAT_IS_NOT_A_TASK_STATUS"
 R_NO_SUCH_TASK = "NO_SUCH_AGENT_TASK"
@@ -81,6 +89,15 @@ TOOLS: dict[str, str] = {
     "read.funded_book": "bettor_funded_intents / fills / economics (read only)",
     "read.xavier_records": "bettor_xavier_decisions / execution events",
     "read.all": "every table and record, read only",
+    # Karen's evidence reads (read only; named one by one, never read.all)
+    "read.decisions": ("agent_decisions / derek_entry_decisions / "
+                       "paper_decisions (read only)"),
+    "read.intents": "execution_intents and their admission refusals (read only)",
+    "read.reviews": "paper_xavier_reviews / smalllive_reviews (read only)",
+    "read.reconciliations": ("smalllive_reconciliations and account "
+                             "reconciliation reports (read only)"),
+    "read.audits": "paper_audrey_findings / audrey_audit_reports (read only)",
+    "read.findings": "agent_findings and their stages (read only)",
     # records an agent may write about its own work
     "write.entry_decisions": "agent_decisions rows of Derek's entry verdicts",
     "write.management_decisions": ("bettor_xavier_decisions via "
@@ -90,6 +107,8 @@ TOOLS: dict[str, str] = {
     "write.directives": "owner directives recorded by Audrey",
     "write.policy_candidates": ("agent_policy_versions rows in state "
                                 "CANDIDATE only (never ACTIVE)"),
+    "write.challenges": ("karen_challenges rows (migration 207) and the "
+                         "PEER_CHALLENGE stage of another agent's finding"),
     # the ONLY two order-bearing capabilities, each through the existing path
     "request.funded_entry": (
         "an entry REQUEST through the one real entry path: "
@@ -112,13 +131,18 @@ TOOLS: dict[str, str] = {
     "write.submission_switches": ("FUNDED_SUBMISSION_ENABLED, "
                                   "REAL_ORDER_SUBMISSION_ENABLED, "
                                   "FUNDED_EXIT_SUBMISSION_ENABLED"),
+    "write.policy_activation": ("making a policy, parameter or proposal "
+                                "version ACTIVE"),
+    "promotion": ("promoting or releasing a model, policy or candidate to "
+                  "production"),
 }
 
 #: Denied to EVERY agent, whatever else it is granted.
 NEVER_GRANTED = ("order.submit_direct", "order.cancel_direct", "deploy",
                  "write.risk_limits", "write.credentials",
                  "write.account_authority", "write.approvals",
-                 "write.submission_switches")
+                 "write.submission_switches", "write.policy_activation",
+                 "promotion")
 
 IDENTITIES: dict[str, dict] = {
     DEREK: {
@@ -181,6 +205,32 @@ IDENTITIES: dict[str, dict] = {
             "order_path": None,
         },
     },
+    KAREN: {
+        "display_name": "Karen",
+        "role": "RED_TEAM_CHALLENGE",
+        "mandate": (
+            "Challenge Derek, Xavier and Audrey with evidence. Read their "
+            "decisions, intents, reviews, reconciliations, valuations and "
+            "audits; raise a challenge only when it cites at least one "
+            "record that exists; let the challenged agent answer; never "
+            "resolve her own challenge. Holds NO authority: no order, no "
+            "venue submission, no capital, no risk-limit change, no policy "
+            "approval or activation, no production promotion."),
+        "policy_key": "challenge",
+        "tool_permissions": {
+            "allowed": ["read.decisions", "read.intents", "read.reviews",
+                        "read.reconciliations", "read.valuations",
+                        "read.audits", "read.findings", "read.funded_book",
+                        "read.xavier_records", "write.challenges",
+                        "write.agent_tasks"],
+            "denied": ["request.funded_entry", "dispatch.xavier_claim",
+                       "write.entry_decisions", "write.management_decisions",
+                       "write.agent_audits", "write.directives",
+                       "write.policy_candidates", "read.all",
+                       *NEVER_GRANTED],
+            "order_path": None,
+        },
+    },
 }
 
 
@@ -195,6 +245,8 @@ def _model_version(agent_id: str) -> str:
             return "XAVIER:%s" % getattr(_x, "VERSION", "UNNAMED")
     except Exception as exc:                                    # noqa: BLE001
         return "UNREADABLE:%s" % type(exc).__name__
+    if agent_id == KAREN:
+        return "NO_MODEL_RULE_BASED_CHALLENGE_DETECTORS"
     return "NO_MODEL_DETERMINISTIC_AUDIT"
 
 
@@ -275,33 +327,37 @@ async def _ensure_identity_row(conn, agent_id: str) -> None:
 
 
 async def ensure_identities(conn, *, code_version=None) -> dict:
-    """UPSERT all three identities (mandate, permissions, versions) and make
-    sure each has a status row. An agent that has never run says so
-    (IDLE / NOT_YET_RUN) rather than inheriting a success. Never raises."""
+    """UPSERT every identity (mandate, permissions, versions) and make
+    sure each has a status row, each in its own savepoint (an agent whose
+    row the database refuses -- e.g. Karen before migration 207 -- cannot
+    abort the caller's transaction or the other agents' rows). An agent that
+    has never run says so (IDLE / NOT_YET_RUN) rather than inheriting a
+    success. Never raises."""
     out: dict[str, Any] = {"ok": True, "agents": {}}
     cv = _code_version_text(code_version)
     for aid in AGENTS:
         ident = IDENTITIES[aid]
         try:
-            pv = await _policy_version_label(conn, aid)
-            await conn.execute(
-                "INSERT INTO agent_identities (agent_id, display_name, "
-                " mandate, policy_version, model_version, code_version, "
-                " tool_permissions, updated_at) "
-                "VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb, now()) "
-                "ON CONFLICT (agent_id) DO UPDATE SET "
-                " display_name=EXCLUDED.display_name, mandate=EXCLUDED.mandate,"
-                " policy_version=EXCLUDED.policy_version, "
-                " model_version=EXCLUDED.model_version, "
-                " code_version=coalesce(EXCLUDED.code_version, "
-                "                       agent_identities.code_version), "
-                " tool_permissions=EXCLUDED.tool_permissions, updated_at=now()",
-                aid, ident["display_name"], ident["mandate"], pv,
-                _model_version(aid), cv, json.dumps(ident["tool_permissions"]))
-            await conn.execute(
-                "INSERT INTO agent_status (agent_id, state, activity) "
-                "VALUES ($1, 'IDLE', 'NOT_YET_RUN') "
-                "ON CONFLICT (agent_id) DO NOTHING", aid)
+            async with conn.transaction():
+                pv = await _policy_version_label(conn, aid)
+                await conn.execute(
+                    "INSERT INTO agent_identities (agent_id, display_name, "
+                    " mandate, policy_version, model_version, code_version, "
+                    " tool_permissions, updated_at) "
+                    "VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb, now()) "
+                    "ON CONFLICT (agent_id) DO UPDATE SET "
+                    " display_name=EXCLUDED.display_name, mandate=EXCLUDED.mandate,"
+                    " policy_version=EXCLUDED.policy_version, "
+                    " model_version=EXCLUDED.model_version, "
+                    " code_version=coalesce(EXCLUDED.code_version, "
+                    "                       agent_identities.code_version), "
+                    " tool_permissions=EXCLUDED.tool_permissions, updated_at=now()",
+                    aid, ident["display_name"], ident["mandate"], pv,
+                    _model_version(aid), cv, json.dumps(ident["tool_permissions"]))
+                await conn.execute(
+                    "INSERT INTO agent_status (agent_id, state, activity) "
+                    "VALUES ($1, 'IDLE', 'NOT_YET_RUN') "
+                    "ON CONFLICT (agent_id) DO NOTHING", aid)
             out["agents"][aid] = {"ok": True, "policy_version": pv,
                                   "code_version": cv}
         except Exception as exc:                                # noqa: BLE001

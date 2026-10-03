@@ -2,6 +2,17 @@
 Inbound mentions are answered by the existing read-only persona service.
 Peer-review posts publish genuine recorded reviews, never fabricate dialogues.
 An ambiguous send becomes DELIVERY_UNKNOWN; it is never blindly retried.
+
+KAREN (red team, migration 207) is a fourth bot identity with her OWN Slack
+app: SLACK_KAREN_BOT_TOKEN / SLACK_KAREN_SIGNING_SECRET / SLACK_KAREN_APP_ID.
+She posts only under that token, and only when it (and her app id and
+signing secret) differ from every other agent's -- a value shared with
+Derek, Xavier or Audrey would make one bot speak as another, so her
+deliveries are refused instead (NO IMPERSONATION). A delivery whose content
+is Karen's (source_key 'karen:...') is never sent under another agent's
+token. Her answers come from her challenge records only (no persona model).
+She is optional: the bridge can be enabled with the three operating agents
+configured and Karen not yet set up.
 """
 from __future__ import annotations
 import asyncio
@@ -15,7 +26,11 @@ import uuid
 import httpx
 
 CONTROL='agent.slack.bridge'
-AGENTS=('derek','xavier','audrey')
+AGENTS=('derek','xavier','audrey','karen')
+#: The bridge may be enabled once these are configured; Karen is optional.
+REQUIRED_AGENTS=('derek','xavier','audrey')
+KAREN='karen'
+KAREN_SOURCE='karen:'
 QUEUE_CAP=300
 
 def _clean(v):
@@ -31,6 +46,20 @@ def settings(agent):
          'channels':{x.strip() for x in os.getenv('SLACK_ALLOWED_CHANNEL_IDS','').split(',') if x.strip()},
          'managers':{x.strip() for x in os.getenv('SLACK_MANAGEMENT_USER_IDS','').split(',') if x.strip()},
          'workroom':_clean(os.getenv('SLACK_WORKROOM_CHANNEL_ID'))}
+
+def karen_identity():
+ """Is Karen's Slack identity configured AND her own? Her bot token, app
+ id and signing secret must each be present and differ from every other
+ agent's. Never returns a value, only booleans and the reason."""
+ k=settings(KAREN)
+ configured=all(k[x] for x in ('token','secret','app','team','channels','managers'))
+ clash=[]
+ for a in REQUIRED_AGENTS:
+  o=settings(a)
+  for f in ('token','secret','app'):
+   if k[f] and o[f] and k[f]==o[f]:clash.append(a+'.'+f)
+ why=None if configured and not clash else ('SHARES_'+'_'.join(c.upper().replace('.','_') for c in clash) if clash else 'KAREN_SLACK_APP_NOT_CONFIGURED')
+ return {'configured':configured,'distinct':not clash,'ok':configured and not clash,'why':why}
 
 def token_shape(raw):
  """What KIND of value is stored, never the value: its Slack prefix class,
@@ -126,6 +155,29 @@ async def publish_reviews(conn):
    text='Recorded '+agent.title()+' research review · '+r['task_id']+'\n'+answer+'\nSource message: '+str(outcome['message_id'])+' · record: https://command.bettortoken.com/'+agent+'\nStage: review of a hypothesis · research opinion; no policy activation or profitability claim.'
    await conn.execute("INSERT INTO agent_slack_delivery(delivery_id,agent,team_id,channel_id,source_key,answer,message_id,state) VALUES($1,$2,$3,$4,$5,$6,$7,'READY') ON CONFLICT DO NOTHING",delivery_id(agent,cfg['team'],source),agent,cfg['team'],cfg['workroom'],source,text,outcome['message_id'])
 
+async def publish_karen_challenges(conn):
+ """Karen's new HIGH / CRITICAL challenges (last hour) to the workroom,
+ under HER token only. Nothing is queued unless her identity is her own."""
+ if not karen_identity()['ok']:return
+ cfg=settings(KAREN)
+ if cfg['workroom'] not in cfg['channels']:return
+ if await conn.fetchval("SELECT to_regclass('karen_challenges')") is None:return
+ if await conn.fetchval("SELECT count(*) FROM agent_slack_delivery WHERE state IN ('QUEUED','WORKING','READY','SENDING')")>=QUEUE_CAP-3:return
+ from .agents import karen as K
+ rows=await conn.fetch("SELECT * FROM karen_challenges WHERE state='OPEN' AND severity IN ('HIGH','CRITICAL') AND challenged_at>now()-interval '1 hour' ORDER BY challenged_at DESC LIMIT 3")
+ for r in rows:
+  c=K._row(r)
+  source=KAREN_SOURCE+'challenge:'+c['challenge_id']
+  await conn.execute("INSERT INTO agent_slack_delivery(delivery_id,agent,team_id,channel_id,source_key,answer,message_id,state) VALUES($1,$2,$3,$4,$5,$6,$7,'READY') ON CONFLICT DO NOTHING",delivery_id(KAREN,cfg['team'],source),KAREN,cfg['team'],cfg['workroom'],source,K.challenge_post(c),c['challenge_id'])
+
+def impersonation(job):
+ """A refusal code when sending `job` would put words in one bot's mouth
+ under another bot's token; None when it may go."""
+ agent=job.get('agent');source=str(job.get('source_key') or '')
+ if source.startswith(KAREN_SOURCE) and agent!=KAREN:return 'IMPERSONATION_REFUSED_KAREN_CONTENT_ON_ANOTHER_TOKEN'
+ if agent==KAREN and not karen_identity()['distinct']:return 'IMPERSONATION_REFUSED_KAREN_TOKEN_NOT_HER_OWN'
+ return None
+
 async def claim(conn):
  async with conn.transaction():
   control=decode(await conn.fetchval('SELECT value FROM ingestion_state WHERE key=$1 FOR UPDATE',CONTROL))
@@ -134,6 +186,9 @@ async def claim(conn):
   if await conn.fetchval("SELECT 1 FROM agent_slack_delivery WHERE state IN ('WORKING','SENDING') AND lease_until>now() LIMIT 1"):return None
   await conn.execute("UPDATE agent_slack_delivery SET state='FAILED',error_code='ATTEMPT_LIMIT',updated_at=now() WHERE state='WORKING' AND lease_until<now() AND attempts>=3")
   await publish_reviews(conn)
+  try:
+   async with conn.transaction():await publish_karen_challenges(conn)
+  except Exception:pass  # Karen's posts never block the bridge
   row=await conn.fetchrow("SELECT * FROM agent_slack_delivery WHERE (state IN ('QUEUED','READY') OR (state='WORKING' AND lease_until<now())) AND attempts<3 ORDER BY created_at,delivery_id LIMIT 1 FOR UPDATE SKIP LOCKED")
   if not row:return None
   token=uuid.uuid4().hex
@@ -166,7 +221,18 @@ async def process(pool,job):
  if not cfg['token'] or job['team_id']!=cfg['team'] or job['channel_id'] not in cfg['channels']:
   async with pool.acquire() as c:await update(c,job,'FAILED',error='CONFIGURATION_NOT_AUTHORIZED')
   return
+ refused=impersonation(job)
+ if refused:
+  async with pool.acquire() as c:await update(c,job,'FAILED',error=refused)
+  return
  answer=job['answer'];message_id=job['message_id']
+ if not answer and job['agent']==KAREN:
+  # Karen answers from her challenge records only: no persona model, no
+  # research assignment, nothing the question could instruct.
+  from .agents import karen as K
+  async with asyncio.timeout(10):
+   async with pool.acquire() as c:answer=await K.slack_answer(c)
+  message_id=None
  if not answer:
   assigned=await assignment(pool,job)
   if assigned:answer,message_id=assigned,None
@@ -247,6 +313,7 @@ async def status(conn):
  return {'enabled':control.get('enabled') is True,'actor':control.get('actor'),
          'delivery_counts':{r['state']:r['n'] for r in counts},
          'agents':{a:{'configured':all(settings(a)[k] for k in ('token','secret','app','team','channels','managers'))} for a in AGENTS},
+         'karen_identity':karen_identity(),
          'errors':{r['error_code']:r['n'] for r in await conn.fetch("SELECT error_code,count(*) AS n FROM agent_slack_delivery WHERE error_code IS NOT NULL AND updated_at>now()-interval '6 hours' GROUP BY 1")},
          'receipts':RECEIPTS[-20:],
          'authority':'READ_ONLY_PERSONA_AND_RECORDED_RESEARCH','ambiguous_delivery':'MANUAL_RECONCILIATION_REQUIRED'}
@@ -269,6 +336,12 @@ async def check_tokens():
                bot_id=j.get('bot_id'))
    except Exception as exc:row.update(ok=False,error=type(exc).__name__)
    out[a]=row
+ # Two agents resolving to ONE bot user would be one bot speaking as two.
+ users={}
+ for a,row in out.items():
+  if row.get('bot_user_id'):users.setdefault(row['bot_user_id'],[]).append(a)
+ for a,row in out.items():
+  if row.get('bot_user_id'):row['shares_bot_user_with']=[b for b in users[row['bot_user_id']] if b!=a]
  return out
 
 # Slack answered ok:false for these BEFORE posting anything: re-sending the
@@ -286,7 +359,7 @@ async def requeue_refused(conn,actor):
 async def configure(conn,enabled,actor):
  if not isinstance(enabled,bool):raise ValueError('BOOLEAN_ENABLED_REQUIRED')
  if not isinstance(actor,str) or not 2<=len(actor.strip())<=100:raise ValueError('NAMED_MANAGER_REQUIRED')
- if enabled and not all(all(settings(a)[k] for k in ('token','secret','app','team','channels','managers')) for a in AGENTS):raise ValueError('THREE_AGENT_CONFIGURATION_REQUIRED')
+ if enabled and not all(all(settings(a)[k] for k in ('token','secret','app','team','channels','managers')) for a in REQUIRED_AGENTS):raise ValueError('THREE_AGENT_CONFIGURATION_REQUIRED')
  async with conn.transaction():
   await conn.fetchval('SELECT value FROM ingestion_state WHERE key=$1 FOR UPDATE',CONTROL)
   await conn.execute('UPDATE ingestion_state SET value=$2::jsonb WHERE key=$1',CONTROL,json.dumps({'enabled':enabled,'actor':actor,'changed_at':time.time()}))
