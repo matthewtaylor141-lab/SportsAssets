@@ -581,11 +581,17 @@ def _row_out(r) -> dict:
 def summarize(rows: list) -> dict:
     """Per-component totals over measured rows only; counts of unmeasured
     stated beside them (never summed as zero)."""
+    # a book with no closed position has no realized P&L: null with its
+    # reason, never an invented 0
     out: dict[str, Any] = {"positions": len(rows),
                            "realized_pnl_usd": round(sum(
-                               r["realized_pnl_usd"] for r in rows), 6),
+                               r["realized_pnl_usd"] for r in rows), 6)
+                           if rows else None,
                            "unexplained_usd": round(sum(
-                               r["unexplained_usd"] for r in rows), 6),
+                               r["unexplained_usd"] for r in rows), 6)
+                           if rows else None,
+                           "why_null": None if rows
+                           else "NO_CLOSED_POSITION_IN_THIS_BOOK",
                            "complete": sum(1 for r in rows
                                            if r["decomposition_complete"])}
     for c in COMPONENTS:
