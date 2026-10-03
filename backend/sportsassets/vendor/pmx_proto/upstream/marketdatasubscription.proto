@@ -1,0 +1,206 @@
+// Polymarket US Exchange API
+syntax = "proto3";
+
+package polymarket.v1;
+
+import "google/api/annotations.proto";
+import "google/protobuf/timestamp.proto";
+import "polymarket/v1/refdata.proto";
+import "polymarket/v1/types.proto";
+import "protoc-gen-openapiv2/options/annotations.proto";
+
+option go_package = "polymarket/v1;polymarketv1";
+option (grpc.gateway.protoc_gen_openapiv2.options.openapiv2_swagger) = {
+  base_path: "/rest/api/"
+  schemes: HTTPS
+  consumes: "application/json"
+  produces: "application/json"
+};
+
+// MarketDataSubscriptionAPI is the API Surface for connected clients to consume market data.
+// NOTE: All endpoints are streaming - use gRPC or Connect protocol, not REST.
+service MarketDataSubscriptionAPI {
+  // CreateMarketDataSubscription creates a subscription for market data.
+  // This is a server-streaming RPC - symbols are fixed at subscription time.
+  rpc CreateMarketDataSubscription(CreateMarketDataSubscriptionRequest) returns (stream CreateMarketDataSubscriptionResponse);
+
+  // BiDirectionalStreamMarketData creates a bidirectional streaming subscription for market data.
+  // Clients can dynamically add and remove symbols during the subscription lifetime.
+  rpc BiDirectionalStreamMarketData(stream BiDirectionalStreamMarketDataRequest) returns (stream BiDirectionalStreamMarketDataResponse);
+}
+
+// Request to create a market data subscription (server-streaming).
+message CreateMarketDataSubscriptionRequest {
+  repeated string symbols = 1;
+  bool unaggregated = 2;
+  int32 depth = 3;
+  bool snapshot_only = 4;
+  // slow_consumer_skip_to_head controls behavior when the client falls behind:
+  // - true: Skip to latest data, dropping missed messages (for real-time displays)
+  // - false: Disconnect the client (default, for applications requiring all messages)
+  bool slow_consumer_skip_to_head = 5;
+}
+
+// Response for market data subscription (streaming).
+message CreateMarketDataSubscriptionResponse {
+  oneof event {
+    Heartbeat heartbeat = 1;
+    MarketDataUpdate update = 2;
+  }
+}
+
+// Request for bidirectional market data stream.
+// Send commands to dynamically add/remove symbols.
+message BiDirectionalStreamMarketDataRequest {
+  // Command for dynamic subscription management
+  oneof command {
+    // Subscribe to symbols (initial or additional)
+    SubscribeCommand subscribe = 1;
+    // Unsubscribe from symbols
+    UnsubscribeCommand unsubscribe = 2;
+    // Application-level keepalive. Server is a no-op handler; the message
+    // exists so clients can put traffic on the wire periodically to satisfy
+    // AWS ALB's client-to-server idle_timeout, which would otherwise
+    // RST_STREAM long-lived server-streaming subscriptions at ~1h.
+    KeepAliveCommand keepalive = 7;
+  }
+
+  // Options (read from first subscribe request only)
+  bool unaggregated = 3;
+  int32 depth = 4;
+  bool snapshot_only = 5;
+  bool slow_consumer_skip_to_head = 6;
+}
+
+// Response for bidirectional market data stream.
+message BiDirectionalStreamMarketDataResponse {
+  oneof event {
+    Heartbeat heartbeat = 1;
+    MarketDataUpdate update = 2;
+    // Acknowledgment for subscription changes (add/remove symbols)
+    SubscriptionAck subscription_ack = 3;
+    // Error for subscription operations
+    SubscriptionError subscription_error = 4;
+  }
+}
+
+// Subscribe to one or more symbols.
+message SubscribeCommand {
+  // Symbols to subscribe to
+  repeated string symbols = 1;
+}
+
+// Unsubscribe from one or more symbols.
+message UnsubscribeCommand {
+  // Symbols to unsubscribe from
+  repeated string symbols = 1;
+}
+
+// Application-level keepalive for BiDirectionalStreamMarketData. Sending one
+// puts a client-to-server frame on the wire without modifying subscription
+// state; the server returns no response. Recommended cadence is well below
+// the ALB's connection idle_timeout (typically 3600s).
+message KeepAliveCommand {}
+
+// Acknowledgment for subscription changes.
+message SubscriptionAck {
+  // Symbols successfully added in this operation.
+  // Omitted when the added symbol set is larger than 1000 symbols; use
+  // symbols_added_count and symbols_added_truncated to detect that case.
+  repeated string symbols_added = 1;
+  // Symbols successfully removed in this operation.
+  // Omitted when the removed symbol set is larger than 1000 symbols; use
+  // symbols_removed_count and symbols_removed_truncated to detect that case.
+  repeated string symbols_removed = 2;
+  // Current list of all active symbols in this subscription.
+  // Omitted when the active symbol set is larger than 1000 symbols; use
+  // active_symbol_count and active_symbols_truncated to detect that case.
+  repeated string active_symbols = 3;
+  // Scale information for added symbols (gateway-only, for wildcard subscriptions).
+  // Omitted when symbols_added is truncated.
+  repeated SymbolScales symbol_scales = 4;
+  // Current count of active symbols in this subscription.
+  int32 active_symbol_count = 5;
+  // True when active_symbols was intentionally omitted because the active
+  // symbol set is larger than 1000 symbols.
+  bool active_symbols_truncated = 6;
+  // Number of symbols successfully added in this operation.
+  int32 symbols_added_count = 7;
+  // True when symbols_added and symbol_scales were intentionally omitted
+  // because the added symbol set is larger than 1000 symbols.
+  bool symbols_added_truncated = 8;
+  // Number of symbols successfully removed in this operation.
+  int32 symbols_removed_count = 9;
+  // True when symbols_removed was intentionally omitted because the removed
+  // symbol set is larger than 1000 symbols.
+  bool symbols_removed_truncated = 10;
+}
+
+// Scale information for a symbol.
+message SymbolScales {
+  string symbol = 1;
+  int64 price_scale = 2; // Number of decimal places for price
+  int64 quantity_scale = 3; // Number of decimal places for quantity
+}
+
+// Error for subscription operations.
+message SubscriptionError {
+  // Error code (e.g., "INVALID_SYMBOL", "ALREADY_SUBSCRIBED", "NOT_SUBSCRIBED")
+  string error_code = 1;
+  // Human-readable error message
+  string message = 2;
+  // Symbols that caused the error
+  repeated string symbols = 3;
+}
+
+// BookEntry lists a price and volume for a market data record.
+message BookEntry {
+  int64 px = 1;
+  int64 qty = 2;
+  string symbol_sub_type = 3;
+}
+
+// InstrumentStats contains statistics about an instrument.
+message InstrumentStats {
+  optional int64 open_px = 1;
+  optional int64 close_px = 2;
+  optional int64 low_px = 3;
+  optional int64 high_px = 4;
+  optional int64 last_trade_px = 5;
+  optional int64 indicative_open_px = 6;
+  optional int64 settlement_px = 7;
+  optional int64 shares_traded = 8;
+  optional int64 notional_traded = 9;
+  optional int64 open_interest = 10;
+  // Settlement metadata — only populated when instrument is in a settled state (CLOSED, TERMINATED, EXPIRED).
+  // Indicates whether this settlement is preliminary (subject to change during trade day sweep) or final.
+  optional bool settlement_preliminary = 11;
+  // The method used to calculate the settlement price (e.g., "SETTLEMENT_PRICE_CALCULATION_METHOD_EVENT_TIER_1").
+  // String representation for forward compatibility with new enum values.
+  optional string settlement_price_calculation_method = 12;
+  // Free-form text describing how the settlement price was determined
+  // (e.g., the exact outcome of the underlying event used for resolution).
+  optional string settlement_price_calculation_text = 13;
+  // Quantity of the most recent trade.
+  optional int64 last_trade_qty = 14;
+  // Time at which the settlement price was set. Only populated for settled states.
+  optional google.protobuf.Timestamp settlement_set_time = 15;
+}
+
+// MarketDataUpdate is streamed on a market data update.
+message MarketDataUpdate {
+  string symbol = 1;
+  repeated BookEntry bids = 2;
+  repeated BookEntry offers = 3;
+  // Instrument state when the exchange provides a non-default state on the market-data update.
+  // For full lifecycle state tracking, use ListInstruments or InstrumentStateChangeSubscription.
+  optional InstrumentState state = 4;
+  InstrumentStats stats = 5;
+  google.protobuf.Timestamp transact_time = 6;
+  bool book_hidden = 7;
+
+  // Market scale information (optional, included by gateway for wildcard subscriptions)
+  // These fields are gateway-only additions - computed by the gateway
+  optional int64 price_scale = 8; // Number of decimal places for price (from Instrument.PriceScale)
+  optional int64 quantity_scale = 9; // Number of decimal places for quantity (from Instrument.FractionalQtyScale)
+}

@@ -350,8 +350,9 @@ class FakeVenue:
     def ssl_channel_credentials(self):
         return "TLS"
 
-    def secure_channel(self, target, creds):
+    def secure_channel(self, target, creds, options=None):
         assert creds == "TLS"
+        assert dict(options or ()) == dict(IS.CHANNEL_OPTIONS)
         self.targets.append(target)
         venue = self
 

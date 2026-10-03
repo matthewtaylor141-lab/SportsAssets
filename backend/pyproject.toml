@@ -40,12 +40,23 @@ dependencies = [
     # when ANTHROPIC_API_KEY is provisioned; without it the chat answers from
     # records and says so.
     "anthropic>=1.9.0,<2",
+    # The institutional READ-ONLY market-data stream
+    # (sportsassets/institutional_stream.py) speaks gRPC to the venue's
+    # polymarket.v1.MarketDataSubscriptionAPI through stubs committed in
+    # sportsassets/vendor/pmx_proto. Pinned exactly: the generated code
+    # checks grpcio >= 1.84.0 and protobuf >= 7.35.1 at import, and the lock
+    # is the closure the gate ran.
+    "grpcio==1.84.0",
+    "protobuf==7.36.2",
 ]
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "ruff>=0.5", "pglast>=6",
        # the Audrey chat tests drive the real SDK over httpx2.MockTransport
-       "httpx2>=2.0"]
+       "httpx2>=2.0",
+       # regenerates the vendored market-data stubs; a test diffs the output
+       # against the committed files
+       "grpcio-tools==1.84.0"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

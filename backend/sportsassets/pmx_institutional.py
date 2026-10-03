@@ -286,6 +286,14 @@ class Institutional:
         status, token, _exp, _why = self._mint()
         return token if status == 200 else None
 
+    def invalidate_token(self) -> None:
+        """Forget the cached bearer token so the next token() mints afresh.
+        The venue's guidance for a gRPC UNAUTHENTICATED is "refresh token and
+        retry"; a cached token the venue has stopped accepting would
+        otherwise be replayed until its own expiry. Touches no venue state."""
+        self._token = None
+        self._token_expires_at = 0.0
+
     def _headers(self, token, rid) -> dict:
         return {"Authorization": "Bearer %s" % token,
                 "X-Client-Id": self._env["PMX_CLIENT_ID"],
