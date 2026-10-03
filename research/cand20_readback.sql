@@ -2,7 +2,7 @@
 -- actual-lane admission on every execution intent, V3 decisions, the mirror
 -- control and latest account snapshot, Audrey, latency.
 \echo '== R0 · migrations 198-203 =='
-SELECT version FROM schema_migrations WHERE version::text ~ '^(198|199|200|201|202|203)' ORDER BY 1;
+SELECT version FROM schema_migrations WHERE version::text ~ '^(198|199|200|201|202|203|204|205)' ORDER BY 1;
 \echo '== R0b · admission guard objects =='
 SELECT conname, convalidated FROM pg_constraint WHERE conname = 'execution_intents_admission_ck';
 SELECT tgname FROM pg_trigger WHERE tgname = 'execmirror_orders_intent_admitted';
@@ -52,4 +52,7 @@ SELECT policy_id, version, status, left(sha256, 16) AS sha256_prefix, created_at
   FROM agent_policy_artifacts ORDER BY created_at;
 SELECT count(*) AS findings FROM agent_findings;
 \echo '== R9 · migrations applied since 199 (with time) =='
-SELECT version, applied_at FROM schema_migrations WHERE version::text ~ '^(199|200|201|202|203)' ORDER BY 1;
+SELECT version, applied_at FROM schema_migrations WHERE version::text ~ '^(199|200|201|202|203|204|205)' ORDER BY 1;
+\echo '== R10 · live book-rule artifacts (migration 204) =='
+SELECT rule_id, version, status, left(sha256, 16) AS sha256_prefix, owner_approval_actor
+  FROM live_rule_artifacts ORDER BY rule_id, version;
