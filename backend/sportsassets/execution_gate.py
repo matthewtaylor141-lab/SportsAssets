@@ -228,12 +228,14 @@ def process_lock() -> str | None:
     return _PROCESS_LOCK
 
 
-def authorize_cancel(operation: str = "cancel", *,
+def refuse_if_locked(operation: str = "cancel", *,
                      slug: str | None = None) -> None:
     """Raise Denied in a locked process; a no-op everywhere else.
 
-    Deliberately NOT a database read: cancellation stays ungated for every
-    process that is not locked, exactly as the module docstring says."""
+    NOT AN AUTHORIZATION. It reads no switch and no database: a paused,
+    halted, unauthorized process that is not locked still cancels, exactly
+    as the module docstring says. Only a process that holds no rests by
+    construction (workers/all.py's lock) is refused."""
     if _PROCESS_LOCK is not None:
         raise Denied("process_locked",
                      "%s refused in this process: %s" % (operation, _PROCESS_LOCK))
@@ -598,7 +600,9 @@ def describe() -> dict:
         "global_only_lanes": sorted(GLOBAL_ONLY_LANES),
         "known_copy_lanes": sorted(KNOWN_COPY_LANES),
         "cancellation": "NOT gated; cancels reduce exposure and stay "
-                        "available while paused",
+                        "available while paused (refused only in a process "
+                        "locked against every venue write, which holds no "
+                        "rests: the workers)",
     }
 
 

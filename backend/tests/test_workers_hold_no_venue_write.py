@@ -158,11 +158,11 @@ def test_the_async_path_is_refused_too(locked):
 
 
 def test_cancel_is_refused_when_locked_and_untouched_when_not():
-    gate.authorize_cancel("cancel", slug="s")        # unlocked: a no-op
+    gate.refuse_if_locked("cancel", slug="s")        # unlocked: a no-op
     gate.lock_process("test")
     try:
         with pytest.raises(gate.Denied) as e:
-            gate.authorize_cancel("cancel", slug="s")
+            gate.refuse_if_locked("cancel", slug="s")
         assert e.value.reason == "process_locked"
         assert gate.describe()["process_lock"] == "test"
     finally:
@@ -200,6 +200,27 @@ def test_pmus_cancel_refuses_before_a_client_exists(locked, monkeypatch):
     _no_client(monkeypatch)
     out = pmus.cancel_order("OID", "aec-x")
     assert out["ok"] is False and "process_locked" in out["error"]
+
+
+def test_a_paused_unlocked_process_still_cancels(monkeypatch):
+    """The API's stance is untouched: the kill switch never blocks a
+    cancel. Only the process lock does, and only where it is set."""
+    import inspect
+    gate._install_snapshot_for_tests(gate.Snapshot(
+        paused=True, venue=None, read_at=time.time(), ok=True,
+        why="test: paused, no venue"))
+    sent = []
+
+    class _Orders:
+        def cancel(self, oid, params):
+            sent.append((oid, params))
+
+    class _Client:
+        orders = _Orders()
+    monkeypatch.setattr(pmus, "_get_client", lambda: _Client())
+    assert pmus.cancel_order("OID", "aec-x") == {"ok": True}
+    assert sent == [("OID", {"marketSlug": "aec-x"})]
+    assert "authorize" not in inspect.getsource(pmus.cancel_order)
 
 
 def test_pmus_submit_raises_before_a_client_exists(locked, monkeypatch):

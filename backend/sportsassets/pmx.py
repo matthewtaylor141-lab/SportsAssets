@@ -512,7 +512,7 @@ def _request(method: str, path: str, *, json_body: Any = None, params: Any = Non
     insert, the preview and the cancel -- before a token is minted."""
     if method.upper() != "GET" and path.startswith("/v1/trading/orders"):
         from . import execution_gate as _eg
-        _eg.authorize_cancel("pmx %s %s" % (method.upper(), path))
+        _eg.refuse_if_locked("pmx %s %s" % (method.upper(), path))
     headers = _headers() if auth else {"X-Request-Id": str(uuid.uuid4())}
     if claims is None or claims.next():
         pace()

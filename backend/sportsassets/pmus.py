@@ -3984,7 +3984,7 @@ def cancel_order(order_id: str, us_market_slug: str) -> dict:
     is refused here BEFORE a client is built, as {"ok": False, "error":
     "Denied: process_locked: ..."} -- and again at the transport."""
     try:
-        _gate.authorize_cancel("cancel", slug=us_market_slug)
+        _gate.refuse_if_locked("cancel", slug=us_market_slug)
         _get_client().orders.cancel(order_id,
                                     {"marketSlug": us_market_slug})
         return {"ok": True}
