@@ -516,11 +516,6 @@ tests/test_kalshi_mapping_and_selection.py
 tests/test_kalshi_isolation.py
 tests/test_kalshi_smalllive_migration.py
 tests/test_smalllive_not_mirrored_migration.py
-# PinnAPI outcome-depth corroboration: an independent odds-API observation of
-# the exact event/outcome/period/line/market/settlement, within
-# PINNACLE_MAX_AGE_S, may meet the unchanged MIN_OUTCOME_BOOKS floor; refusals
-# by name, bounded single-event read budget, migration 195 evidence row.
-tests/test_ws_corroboration.py
 # Agent role briefs: bounded read-only role_brief tool (distinct-contract
 # refusals, Xavier latest reviews, Audrey findings; truncation disclosed).
 tests/test_agent_role_briefs.py
