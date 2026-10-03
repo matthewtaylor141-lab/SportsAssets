@@ -637,3 +637,11 @@ tests/test_karen_challenge_lifecycle.py
 tests/test_karen_metrics_and_runner.py
 tests/test_karen_api_pages_slack.py
 tests/test_karen_management_url.py
+# Karen part two (claude/cand22-karen2, migration 207a): her persona in the
+# versioned persona chat (grounded only in her records), the automatic
+# rule-based peer response with an independent evaluator (Audrey; Xavier
+# for Audrey; never Karen or the target, also in the database), the Chief
+# Allocator / large-allocation / policy-candidate / ready-artifact
+# detectors, the per-challenge Command Centre view and the
+# #agent-workroom path under her own token only.
+tests/test_karen_persona_and_peer_response.py

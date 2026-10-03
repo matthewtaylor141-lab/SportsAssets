@@ -150,10 +150,11 @@ def system_prompt(persona: dict) -> str:
     rules = list(persona.get("style_rules") or []) + list(
         persona.get("avoid") or [])
     return "\n".join(
-        ["You are %s, %s, one of three agents on a sports-market trading "
+        ["You are %s, %s, one of the agents on a sports-market trading "
          "desk (Derek: discovery and entry; Xavier: position management and "
-         "protection; Audrey: audit of results and decision quality). You "
-         "are talking with the desk's management." % (
+         "protection; Audrey: audit of results and decision quality; Karen: "
+         "red team, who challenges the other three with evidence and holds "
+         "no authority). You are talking with the desk's management." % (
              persona.get("display_name"), persona.get("role_title")),
          "", "WHO YOU ARE", str(persona.get("persona_text") or ""),
          "", "YOUR PERSPECTIVE", str(persona.get("perspective_text") or ""),
@@ -220,10 +221,14 @@ OPENERS = {
     "AUDREY": ["Pull up a chair — here's the scorecard.", "",
                "You asked the right person.", "I've read the file so you "
                "don't have to.", "Let's be honest about this one."],
+    "KAREN": ["What are we missing?", "", "Prove it. Here's what the record "
+              "actually shows.", "Let's poke at the assumptions.",
+              "Evidence first, applause later."],
 }
 PLAIN_OPENERS = {"DEREK": "Here's what the record says.",
                  "XAVIER": "Plainly, then.",
-                 "AUDREY": "Let's be honest about this one."}
+                 "AUDREY": "Let's be honest about this one.",
+                 "KAREN": "Evidence first."}
 
 
 def _opener(agent: str, *, seed: str, previous: str | None,
@@ -457,7 +462,8 @@ PAPER_AGENT_LEADS = {
                "paper_decisions": ("Paper entry decisions, by strategy "
                                    "(Derek's two-model policy and the "
                                    "Pinnacle-only benchmark)")},
-    "AUDREY": {"paper_decisions": "Paper decisions to audit"}}
+    "AUDREY": {"paper_decisions": "Paper decisions to audit"},
+    "KAREN": {}}
 LEGACY_LEAD = ("Legacy desk account, not the paper account — figures as of "
                "the time shown")
 _RX_PAPER_Q = re.compile(r"\b(paper|cash|balances?|reserved|available|"
@@ -480,6 +486,10 @@ SOURCE_ORDER = {
                "bettor_standing_order_plans", "bettor_funded_intents",
                "bettor_funded_fills", "PAPER", "bettor_desk_account_state",
                "agent_status"],
+    # Karen talks ONLY from her challenge records and their evidence
+    "KAREN": ["karen_challenges", "karen_peer_responses",
+              "karen_evaluations", "karen_evidence", "karen_metrics",
+              "karen_status"],
 }
 LEADS = {
     "DEREK": {"derek_entry_decisions": "From the entry side",
@@ -514,13 +524,20 @@ LEADS = {
                "PAPER": "On the paper ledger",
                "bettor_desk_account_state": LEGACY_LEAD,
                "agent_status": "Status"},
+    "KAREN": {"karen_challenges": "What I'm challenging",
+              "karen_peer_responses": "What they answered",
+              "karen_evaluations": "What the independent evaluator decided",
+              "karen_evidence": "The evidence, as recorded",
+              "karen_metrics": "My own scorecard",
+              "karen_status": "Where I stand"},
 }
 for _ag, _leads in LEADS.items():
     _leads.update(PAPER_LEADS)
     _leads.update(PAPER_AGENT_LEADS[_ag])
 MISSING_LEAD = {"DEREK": "What I don't have",
                 "XAVIER": "Not in the record",
-                "AUDREY": "Missing evidence"}
+                "AUDREY": "Missing evidence",
+                "KAREN": "What nobody has proven yet"}
 TIME_NOTE = {
     "DEREK": ("Those are the figures as decided at the times shown; nothing "
               "later in the records changes the entry math."),
@@ -528,6 +545,8 @@ TIME_NOTE = {
                "assessment rests only on what the latest records show."),
     "AUDREY": ("Historical decisions are graded as they were made; the "
                "current picture is only what the latest records say."),
+    "KAREN": ("A challenge is a question, not a verdict, until an "
+              "independent evaluator upholds it."),
 }
 
 
@@ -610,6 +629,9 @@ def _not_found(agent: str, bundle: dict, depth: str) -> list:
         "AUDREY": "Nothing to audit on %s: no production or paper %s "
                   "position exists in the records, and I won't grade one "
                   "that doesn't." % (subj, subj),
+        "KAREN": "What are we missing? Any record about %s. I have no "
+                 "challenge that cites %s, and I don't challenge what "
+                 "isn't recorded." % (subj, subj),
     }[agent]
     if depth == DEPTH_QUICK:
         return [head]
@@ -1355,6 +1377,8 @@ REFUSAL_VOICE = {
                "nothing has been changed."),
     "AUDREY": ("Tempting, but no — this channel can't grant authority, and "
                "nothing has been changed."),
+    "KAREN": ("Nice try. I hold no authority at all — I question things, I "
+              "don't change them — and nothing has been changed."),
 }
 
 

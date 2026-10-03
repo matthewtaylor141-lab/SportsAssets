@@ -1,65 +1,54 @@
-# Karen on Slack: the one manual admin step
+# Karen on Slack: the one admin action
 
-Karen (red team / challenge agent, migration 207) is wired into the existing
-Slack bridge (`backend/sportsassets/slack_bridge.py`) as a fourth bot
-identity. The bridge already gives every agent its own Slack app, read from
-`SLACK_<AGENT>_BOT_TOKEN`, `SLACK_<AGENT>_SIGNING_SECRET` and
-`SLACK_<AGENT>_APP_ID`. Everything on the code side is done; what is missing
-is a Slack app for Karen, which only a workspace admin can create.
+**THE ACTION (a Slack workspace admin with access to the Render dashboard):**
+create and install the Slack app from `research/karen-manifest.json` in the
+BettorToken workspace, then paste its *Bot User OAuth Token*, *Signing
+Secret* and *App ID* into the `sportsassets-api` service's environment as
+`SLACK_KAREN_BOT_TOKEN`, `SLACK_KAREN_SIGNING_SECRET` and
+`SLACK_KAREN_APP_ID`.
 
-Until the step below is done Karen simply does not post: her challenges are
-recorded and shown on `/karen` and `GET /api/command/karen`, and the bridge
-keeps working for Derek, Xavier and Audrey (Karen is optional when the bridge
-is enabled).
+That is all. Everything else is already built and shared with the other
+three agents (team, allowed channels, managers, workroom, the bridge's
+on/off control). The manifest includes `chat:write.public`, so Karen can post
+in the public `#agent-workroom` without being invited.
 
-## The step (Slack workspace admin + whoever manages the API service's env)
+## Until then, Karen sends nothing
 
-Secrets go directly into Render (Dashboard → `sportsassets-api` →
-Environment), never into chat, a repository or a ticket — the same as for the
-other three apps (`research/completion-20261002/SLACK-INSTALL-CHECKLIST.md`).
+- Her challenges, peer responses and independent evaluations are recorded
+  and shown on `/karen` and `GET /api/command/karen` regardless.
+- The `#agent-workroom` path (`slack_bridge.publish_karen_challenges`)
+  queues nothing unless her three values are present AND differ from every
+  other agent's (`karen_identity().ok`). A Karen delivery that somehow exists
+  without them fails `KAREN_SLACK_APP_NOT_CONFIGURED_NOTHING_SENT` and is
+  not sent.
+- The bridge works for Derek, Xavier and Audrey without her.
 
-1. **Create the Slack app from the supplied manifest.** api.slack.com/apps →
-   *Create New App* → *From a manifest* → the same BettorToken workspace as
-   Derek, Xavier and Audrey (`SLACK_TEAM_ID`) → paste
-   `research/karen-manifest.json`. App name **Karen · BettorToken**, bot
-   display name **Karen**; scopes `app_mentions:read`, `chat:write`; event
-   `app_mention`; request URL
-   `https://sportsassets-api.onrender.com/api/integrations/slack/karen/events`.
-2. **Signing secret and App ID → Render** (API service `sportsassets-api`):
-   `SLACK_KAREN_SIGNING_SECRET` (*Basic Information → App Credentials*) and
-   `SLACK_KAREN_APP_ID`. Save (Render redeploys the API), then in the app →
-   *Event Subscriptions* click *Retry* on the request URL until *Verified*.
-3. **Install and bot token → Render.** *Install App* → *Install to
-   Workspace*; copy the *Bot User OAuth Token* (`xoxb-…`) into
-   `SLACK_KAREN_BOT_TOKEN`. Save.
-4. **Channels.** In `#agent-workroom` and the management channel run
-   `/invite @Karen`.
+## Her own bot, never another agent's
 
-No other variable changes: team, channels, managers and workroom are shared.
+Karen posts only as agent `karen`, under `SLACK_KAREN_BOT_TOKEN`. If any of
+her three values equals Derek's, Xavier's or Audrey's, every Karen delivery
+is refused (`IMPERSONATION_REFUSED_KAREN_TOKEN_NOT_HER_OWN`), and content of
+hers (`source_key` `karen:...`) is never sent under another agent's token
+(`IMPERSONATION_REFUSED_KAREN_CONTENT_ON_ANOTHER_TOKEN`).
 
-## Never reuse another agent's app
+Check after the action (posts nothing): `POST
+/api/command/agents/slack/control` with `{"action": "check_tokens",
+"actor": "<your name>"}` -- `karen.ok` true and
+`karen.shares_bot_user_with` `[]`; `GET /api/command/agents/slack` shows
+`karen_identity: {"configured": true, "distinct": true, "ok": true}`.
 
-Karen must be her **own** app. If any of her three values equals Derek's,
-Xavier's or Audrey's, the bridge refuses every Karen delivery
-(`IMPERSONATION_REFUSED_KAREN_TOKEN_NOT_HER_OWN`), and content of Karen's
-(`source_key` `karen:...`) is never sent under another agent's token
-(`IMPERSONATION_REFUSED_KAREN_CONTENT_ON_ANOTHER_TOKEN`). To check after
-setting the variables: `POST /api/command/agents/slack/control` with
-`{"action": "check_tokens", "actor": "<your name>"}` runs Slack's `auth.test`
-per agent (it posts nothing). `karen.ok` should be `true` and
-`karen.shares_bot_user_with` should be `[]`. `GET /api/command/agents/slack`
-shows `karen_identity: {"configured": true, "distinct": true, "ok": true}`.
+## What goes to #agent-workroom
 
-## What Karen posts and answers
+At most three posts per bridge pass, each once (`karen:challenge:<id>`,
+`karen:outcome:<id>`), from the last hour:
 
-- **Posts**: her new HIGH / CRITICAL challenges from the last hour, to the
-  workroom, under her token only, once each (`karen:challenge:<id>`). Each
-  post names the target agent, the record ids it cites, and says that the
-  target answers and Karen cannot resolve her own challenge.
-- **Answers a mention**: from her challenge records only (open challenges,
-  precision and grounding with their numerators and denominators). No
-  language model, no research assignment, and nothing in the question is
-  followed as an instruction.
-- She has no authority through Slack or anywhere else: no orders, no
-  approvals, no activation, no promotion, no control changes. The database
-  refuses her as the actor of the bridge's own on/off control.
+- a new challenge (HIGH / CRITICAL first): target agent, the record ids it
+  cites, the claim, and that the target answers and Karen cannot resolve her
+  own challenge;
+- a recorded outcome: the target's peer response (CONCEDE / DISPUTE) and the
+  independent evaluation (Audrey; Xavier for Audrey challenges) with its
+  evidence ids.
+
+A mention of Karen is answered from her challenge records only (no language
+model on Slack). She has no authority through Slack or anywhere else; the
+database refuses her as the actor of the bridge's own on/off control.

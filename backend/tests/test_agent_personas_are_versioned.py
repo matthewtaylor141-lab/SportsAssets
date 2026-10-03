@@ -25,7 +25,7 @@ def test_profiles_are_versioned_and_history_is_immutable(db, monkeypatch):
         c = await F.connect()
         try:
             seeded = await P.ensure_defaults(c, now=H.T0)
-            assert set(seeded) == {"DEREK", "XAVIER", "AUDREY"}
+            assert set(seeded) == {"DEREK", "XAVIER", "AUDREY", "KAREN"}
             assert await P.ensure_defaults(c, now=H.T0) == []
             d1 = await P.active(c, "derek")
             assert d1["version"] == 1 and d1["source"] == "DATABASE"

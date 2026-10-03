@@ -51,10 +51,42 @@ from datetime import datetime
 from typing import Any
 
 from . import collaboration_loop as CL
+from . import karen_evidence as KE  # noqa: F401  (registers kinds)
 from . import registry as R
 
 KAREN = R.KAREN
-TARGETS = R.OPERATING_AGENTS
+#: The Chief Allocator (the shadow allocator's decisions, migration 208 on
+#: the intel workstream) is a challenge TARGET, not an agent identity: it
+#: holds no tool and no authority. Its rule-based responder answers for it.
+CHIEF_ALLOCATOR = "CHIEF_ALLOCATOR"
+TARGETS = R.OPERATING_AGENTS + (CHIEF_ALLOCATOR,)
+#: Who evaluates a disputed challenge: never Karen, never the target.
+EVALUATOR_FOR = {R.DEREK: R.AUDREY, R.XAVIER: R.AUDREY,
+                 R.AUDREY: R.XAVIER, CHIEF_ALLOCATOR: R.AUDREY}
+
+CATEGORIES = ("EVIDENCE_GAP", "STALE_INPUT", "OPEN_DISCREPANCY",
+              "EXECUTION_REFUSAL", "ALLOCATION_RISK", "GOVERNANCE_GAP",
+              "LOOP_DEFECT", "OTHER")
+DETECTOR_CATEGORY = {
+    "DECISION_WITHOUT_EVIDENCE": "EVIDENCE_GAP",
+    "ENTRY_WITHOUT_PROBABILITY": "EVIDENCE_GAP",
+    "HOLD_ON_STALE_PROBABILITY": "STALE_INPUT",
+    "AUDIT_DISCREPANCY_LEFT_OPEN": "OPEN_DISCREPANCY",
+    "RECONCILIATION_DISCREPANCY_OPEN": "OPEN_DISCREPANCY",
+    "ADMISSION_REFUSED_DECISION": "EXECUTION_REFUSAL",
+    "FINDING_RESTS_ON_UPHELD_DEFECT": "LOOP_DEFECT",
+    "LOOP_PEER_CHALLENGE": "LOOP_DEFECT",
+    "ALLOCATION_WITHOUT_EVIDENCE": "ALLOCATION_RISK",
+    "LARGE_ALLOCATION": "ALLOCATION_RISK",
+    "POLICY_CANDIDATE_WITHOUT_EVIDENCE": "GOVERNANCE_GAP",
+    "POLICY_ARTIFACT_READY_WITHOUT_EVIDENCE": "GOVERNANCE_GAP",
+    "LIVE_RULE_READY_WITHOUT_EVIDENCE": "GOVERNANCE_GAP",
+    "STRATEGY_CANDIDATE_WITHOUT_EVIDENCE": "GOVERNANCE_GAP",
+}
+
+
+def category_of(detector: str) -> str:
+    return DETECTOR_CATEGORY.get(str(detector or ""), "OTHER")
 
 OPEN, RESPONDED, UPHELD, REJECTED, WITHDRAWN = (
     "OPEN", "RESPONDED", "UPHELD", "REJECTED", "WITHDRAWN")
@@ -78,7 +110,9 @@ FORBIDDEN_ACTIONS = (
 FORBIDDEN_PREFIXES = ("order.", "dispatch.", "request.")
 
 R_NO_AUTHORITY = "KAREN_HAS_NO_AUTHORITY"
-R_UNKNOWN_TARGET = "KAREN_CHALLENGES_ONLY_DEREK_XAVIER_OR_AUDREY"
+R_UNKNOWN_TARGET = "KAREN_CHALLENGES_ONLY_DEREK_XAVIER_AUDREY_OR_THE_ALLOCATOR"
+R_BAD_CATEGORY = "THAT_IS_NOT_A_CHALLENGE_CATEGORY"
+R_NOT_INDEPENDENT = "A_DISPUTE_IS_RESOLVED_BY_NEITHER_THE_TARGET_NOR_KAREN"
 R_BAD_SEVERITY = "THAT_IS_NOT_A_CHALLENGE_SEVERITY"
 R_TEXT = "A_NON_EMPTY_CLAIM_AND_DETECTOR_ARE_REQUIRED"
 R_TIME = "A_CHALLENGE_CANNOT_PREDATE_THE_RECORD_IT_CHALLENGES"
@@ -212,7 +246,8 @@ def _row(r) -> dict:
     out = {}
     for k, v in dict(r).items():
         if k in ("evidence_refs", "body", "response_evidence_refs",
-                 "false_block_evidence_refs", "downstream_impact", "detail"):
+                 "false_block_evidence_refs", "downstream_impact", "detail",
+                 "resolution_evidence_refs"):
             v = _j(v)
         out[k] = _ep(v)
     return out
@@ -230,9 +265,12 @@ def _actor(v) -> str | None:
 
 
 async def schema(conn) -> bool:
+    """Migrations 207 AND 207a (the category column) are applied."""
     try:
         return await conn.fetchval(
-            "SELECT to_regclass('karen_challenges') IS NOT NULL") is True
+            "SELECT EXISTS (SELECT 1 FROM information_schema.columns "
+            " WHERE table_name='karen_challenges' AND column_name='category')"
+        ) is True
     except Exception:                                           # noqa: BLE001
         return False
 
@@ -254,6 +292,8 @@ def check_open(rec: dict) -> str | None:
         return R_UNKNOWN_TARGET
     if rec.get("severity") not in SEVERITIES:
         return R_BAD_SEVERITY
+    if rec.get("category") is not None and rec["category"] not in CATEGORIES:
+        return R_BAD_CATEGORY
     if not _text(rec.get("claim")) or not _text(rec.get("detector"), 100) \
             or not _text(rec.get("target_kind"), 100) \
             or rec.get("target_id") is None \
@@ -280,21 +320,23 @@ async def _insert(conn, rec: dict, refs: list) -> bool:
     res = await conn.execute(
         "INSERT INTO karen_challenges (challenge_id, target_agent, "
         " target_kind, target_id, finding_id, detector, claim, severity, "
-        " evidence_refs, body, account_id, record_at, challenged_at, blocked)"
-        " VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10::jsonb,$11,"
-        " to_timestamp($12),to_timestamp($13),$14) ON CONFLICT DO NOTHING",
+        " evidence_refs, body, account_id, record_at, challenged_at, blocked,"
+        " category) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10::jsonb,$11,"
+        " to_timestamp($12),to_timestamp($13),$14,$15) ON CONFLICT DO NOTHING",
         cid, rec["target_agent"], rec["target_kind"], str(rec["target_id"]),
         rec.get("finding_id"), rec["detector"], rec["claim"].strip(),
         rec["severity"], json.dumps(refs),
         json.dumps(rec.get("body") or {}, default=str), rec.get("account_id"),
         float(rec["record_at"]), float(rec["at"]),
-        bool(rec.get("blocked")))
+        bool(rec.get("blocked")),
+        rec.get("category") or category_of(rec["detector"]))
     if not res.endswith("1"):
         return False
     await _event(conn, cid, "OPENED", KAREN, rec["at"], {
         "target_agent": rec["target_agent"],
         "target": {"kind": rec["target_kind"], "id": str(rec["target_id"])},
         "severity": rec["severity"], "detector": rec["detector"],
+        "category": rec.get("category") or category_of(rec["detector"]),
         "evidence_refs": refs})
     return True
 
@@ -309,7 +351,8 @@ async def open_challenge(conn, *, target_agent: str, target_kind: str,
                          record_at: float, at: float,
                          account_id: str | None = None,
                          body: dict | None = None,
-                         challenge_id: str | None = None) -> dict:
+                         challenge_id: str | None = None,
+                         category: str | None = None) -> dict:
     """OPEN A GROUNDED CHALLENGE, idempotently on (detector, target).
 
     The challenged record and EVERY cited evidence record must exist; at
@@ -318,7 +361,8 @@ async def open_challenge(conn, *, target_agent: str, target_kind: str,
            "target_kind": target_kind, "target_id": target_id,
            "detector": detector, "claim": claim, "severity": severity,
            "evidence_refs": evidence_refs, "record_at": record_at, "at": at,
-           "account_id": account_id, "body": body or {}}
+           "account_id": account_id, "body": body or {},
+           "category": category or category_of(detector)}
     why = check_open(rec)
     if why:
         return _no(why)
@@ -479,10 +523,18 @@ async def respond(conn, challenge_id: str, *, agent: str, stance: str,
 
 
 async def resolve(conn, challenge_id: str, *, resolver: str, outcome: str,
-                  reason: str, at: float) -> dict:
-    """RECORD THE OUTCOME (RESPONDED -> UPHELD | REJECTED). Never by Karen;
-    the target may concede (UPHELD) but never reject; only after the peer
-    response."""
+                  reason: str, at: float,
+                  evidence_refs: list | None = None) -> dict:
+    """RECORD THE OUTCOME (RESPONDED -> UPHELD | REJECTED), with the
+    independent evaluation's evidence. Never by Karen; the target may
+    concede (UPHELD) but never reject, and a DISPUTED challenge is resolved
+    by neither the target nor Karen; only after the peer response."""
+    refs = None
+    if evidence_refs:
+        n = CL.normalise_refs(evidence_refs)
+        if not n["ok"]:
+            return n
+        refs = n["refs"]
     who = _actor(resolver)
     if who is None:
         return _no(R_BAD_ACTOR)
@@ -505,15 +557,25 @@ async def resolve(conn, challenge_id: str, *, resolver: str, outcome: str,
                 return _no(R_WRONG_STATE, state=c["state"])
             if outcome == REJECTED and who.upper() == c["target_agent"]:
                 return _no(R_TARGET_CANNOT_REJECT)
+            if c["response_stance"] == "DISPUTE" and \
+                    who.upper() == c["target_agent"]:
+                return _no(R_NOT_INDEPENDENT)
             if float(at) < _ep(c["responded_at"]):
                 return _no(R_TIME)
+            if refs:
+                v = await CL.verify_refs_exist(conn, refs)
+                if not v["ok"]:
+                    return v
             await conn.execute(
                 "UPDATE karen_challenges SET state=$2, outcome=$2, "
                 " outcome_reason=$3, resolved_by=$4, "
-                " resolved_at=to_timestamp($5) WHERE challenge_id=$1",
-                c["challenge_id"], outcome, reason.strip(), who, float(at))
+                " resolved_at=to_timestamp($5), "
+                " resolution_evidence_refs=$6::jsonb WHERE challenge_id=$1",
+                c["challenge_id"], outcome, reason.strip(), who, float(at),
+                None if refs is None else json.dumps(refs))
             await _event(conn, c["challenge_id"], outcome, who, at,
-                         {"reason": reason.strip()[:2000]})
+                         {"reason": reason.strip()[:2000],
+                          "evidence_refs": refs or []})
     except Exception as exc:                                    # noqa: BLE001
         return _no(R_DB_REFUSED, error="%s: %s" % (type(exc).__name__,
                                                    str(exc)[:200]))
@@ -662,6 +724,45 @@ def _with_links(c: dict) -> dict:
     rec_at, ch_at = _num(c.get("record_at")), _num(c.get("challenged_at"))
     c["time_to_challenge_s"] = (None if rec_at is None or ch_at is None
                                 else round(ch_at - rec_at, 3))
+    c["target_decision"] = {"kind": c.get("target_kind"),
+                            "id": c.get("target_id")}
+    c["peer_response"] = None if not c.get("responded_by") else {
+        "by": c["responded_by"], "stance": c.get("response_stance"),
+        "response": c.get("response"), "at": c.get("responded_at"),
+        "evidence_refs": c.get("response_evidence_refs") or []}
+    ev = EVALUATOR_FOR.get(c.get("target_agent"))
+    if c.get("state") in (UPHELD, REJECTED):
+        c["independent_evaluation"] = {
+            "status": "RECORDED", "outcome": c.get("outcome"),
+            "by": c.get("resolved_by"), "reason": c.get("outcome_reason"),
+            "at": c.get("resolved_at"),
+            "evidence_refs": c.get("resolution_evidence_refs") or [],
+            "independent": str(c.get("resolved_by") or "").upper() not in (
+                KAREN, c.get("target_agent"))}
+    elif c.get("state") == WITHDRAWN:
+        c["independent_evaluation"] = {"status": "NOT_NEEDED_WITHDRAWN",
+                                       "by": None}
+    else:
+        c["independent_evaluation"] = {
+            "status": "AWAITING_PEER_RESPONSE" if c.get("state") == OPEN
+            else "AWAITING_EVALUATION", "evaluator": ev, "by": None}
+    if not c.get("blocked"):
+        c["false_block_outcome"] = "NOT_BLOCKING"
+    elif c.get("false_block") is None:
+        c["false_block_outcome"] = "BLOCKING_NOT_YET_ASSESSED"
+    else:
+        c["false_block_outcome"] = ("FALSE_BLOCK" if c["false_block"]
+                                    else "BLOCK_JUSTIFIED")
+    if c.get("improvement_linked_by"):
+        c["downstream"] = {
+            "status": "IMPROVEMENT_LINKED",
+            "finding_id": c.get("improvement_finding_id"),
+            "proposal_id": c.get("improvement_proposal_id"),
+            "linked_by": c.get("improvement_linked_by"),
+            "impact": c.get("downstream_impact")}
+    else:
+        c["downstream"] = {"status": "NONE_RECORDED" if c.get("state") ==
+                           UPHELD else "NOT_APPLICABLE_UNTIL_UPHELD"}
     return c
 
 
@@ -746,6 +847,9 @@ async def _resolvable(conn, refs_by_kind: dict) -> set:
         table, col = CL.EVIDENCE_KINDS[kind]
         try:
             if await conn.fetchval("SELECT to_regclass($1)", table) is None:
+                continue
+            col = await CL.key_column(conn, table, col)
+            if col is None:
                 continue
             rows = await conn.fetch(
                 "SELECT %s::text AS k FROM %s WHERE %s::text = ANY($1::text[])"
@@ -915,3 +1019,21 @@ async def slack_answer(conn, *, limit: int = 5) -> str:
         else "%s/%s" % (g["numerator"], g["denominator"])))
     lines.append("Record: https://command.bettortoken.com/karen")
     return "\n".join(lines)
+
+
+def outcome_post(c: dict) -> str:
+    """The workroom text of a resolved challenge: the peer response and the
+    independent evaluation, with their record ids. Pure."""
+    pr = c.get("peer_response") or {}
+    ie = c.get("independent_evaluation") or {}
+    refs = ", ".join("%s %s" % (e.get("kind"), e.get("id"))
+                     for e in (ie.get("evidence_refs") or [])[:5])
+    return ("Karen · challenge %s · %s by %s (independent evaluation)\n"
+            "Target: %s, %s %s. Peer response: %s by %s.\nEvaluation: %s\n"
+            "Evidence: %s\nStage: recorded outcome; nothing is approved, "
+            "activated or changed by this message."
+            % (c.get("challenge_id"), c.get("outcome"), ie.get("by"),
+               str(c.get("target_agent") or "").title(), c.get("target_kind"),
+               c.get("target_id"), pr.get("stance") or "none",
+               pr.get("by") or "nobody", str(ie.get("reason") or "")[:1200],
+               refs or "none"))

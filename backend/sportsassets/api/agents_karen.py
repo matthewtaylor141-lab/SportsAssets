@@ -38,6 +38,7 @@ async def _workspace() -> dict:
     from ..agents import karen as K
     from ..agents import registry as R
     from ..agents import karen_runner as KR
+    from ..agents import peer_responder as PR
 
     pool = await _pool()
     async with pool.acquire() as conn:
@@ -81,6 +82,15 @@ async def _workspace() -> dict:
                "tool_permissions": ident["tool_permissions"],
                "forbidden_actions": list(K.FORBIDDEN_ACTIONS),
                "authority": "NONE",
+               "targets": list(K.TARGETS),
+               "independent_evaluators": dict(K.EVALUATOR_FOR),
+               "categories": list(K.CATEGORIES),
+               "persona": {"lines": ["What are we missing?", "Prove it."],
+                           "grounding": "her challenge records and the "
+                                        "evidence they cite, only",
+                           "politics": "zero influence on any finding"},
+               "peer_responder": {"enabled": PR.enabled(),
+                                  "interval_s": PR.INTERVAL_S},
                "runner": {"enabled": KR.enabled(),
                           "interval_s": KR.INTERVAL_S,
                           "detectors": [d for d, _ in KR.DETECTORS],

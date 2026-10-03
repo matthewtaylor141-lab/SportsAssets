@@ -155,20 +155,31 @@ async def publish_reviews(conn):
    text='Recorded '+agent.title()+' research review · '+r['task_id']+'\n'+answer+'\nSource message: '+str(outcome['message_id'])+' · record: https://command.bettortoken.com/'+agent+'\nStage: review of a hypothesis · research opinion; no policy activation or profitability claim.'
    await conn.execute("INSERT INTO agent_slack_delivery(delivery_id,agent,team_id,channel_id,source_key,answer,message_id,state) VALUES($1,$2,$3,$4,$5,$6,$7,'READY') ON CONFLICT DO NOTHING",delivery_id(agent,cfg['team'],source),agent,cfg['team'],cfg['workroom'],source,text,outcome['message_id'])
 
+KAREN_POSTS_PER_PASS=3
+
 async def publish_karen_challenges(conn):
- """Karen's new HIGH / CRITICAL challenges (last hour) to the workroom,
- under HER token only. Nothing is queued unless her identity is her own."""
+ """THE #agent-workroom POSTING PATH FOR KAREN (SLACK_WORKROOM_CHANNEL_ID):
+ her new challenges (HIGH / CRITICAL first) and the recorded outcomes of her
+ challenges (peer response + independent evaluation), from the last hour,
+ once each, at most KAREN_POSTS_PER_PASS per pass -- queued ONLY as agent
+ 'karen', so they go out under HER token only. Nothing is queued until her
+ Slack app is configured and her own (karen_identity()['ok']): before the
+ manual admin step this sends nothing."""
  if not karen_identity()['ok']:return
  cfg=settings(KAREN)
- if cfg['workroom'] not in cfg['channels']:return
+ if not cfg['workroom'] or cfg['workroom'] not in cfg['channels']:return
  if await conn.fetchval("SELECT to_regclass('karen_challenges')") is None:return
  if await conn.fetchval("SELECT count(*) FROM agent_slack_delivery WHERE state IN ('QUEUED','WORKING','READY','SENDING')")>=QUEUE_CAP-3:return
  from .agents import karen as K
- rows=await conn.fetch("SELECT * FROM karen_challenges WHERE state='OPEN' AND severity IN ('HIGH','CRITICAL') AND challenged_at>now()-interval '1 hour' ORDER BY challenged_at DESC LIMIT 3")
- for r in rows:
-  c=K._row(r)
-  source=KAREN_SOURCE+'challenge:'+c['challenge_id']
-  await conn.execute("INSERT INTO agent_slack_delivery(delivery_id,agent,team_id,channel_id,source_key,answer,message_id,state) VALUES($1,$2,$3,$4,$5,$6,$7,'READY') ON CONFLICT DO NOTHING",delivery_id(KAREN,cfg['team'],source),KAREN,cfg['team'],cfg['workroom'],source,K.challenge_post(c),c['challenge_id'])
+ posts=[]
+ for r in await conn.fetch("SELECT * FROM karen_challenges WHERE state='OPEN' AND challenged_at>now()-interval '1 hour' ORDER BY (severity IN ('HIGH','CRITICAL')) DESC, challenged_at DESC LIMIT $1",KAREN_POSTS_PER_PASS):
+  c=K._with_links(K._row(r));posts.append(('challenge:'+c['challenge_id'],K.challenge_post(c),c['challenge_id']))
+ for r in await conn.fetch("SELECT * FROM karen_challenges WHERE state IN ('UPHELD','REJECTED') AND resolved_at>now()-interval '1 hour' ORDER BY resolved_at DESC LIMIT $1",KAREN_POSTS_PER_PASS):
+  c=K._with_links(K._row(r));posts.append(('outcome:'+c['challenge_id'],K.outcome_post(c),c['challenge_id']))
+ for key,text,cid in posts[:KAREN_POSTS_PER_PASS]:
+  source=KAREN_SOURCE+key
+  if await conn.fetchval("SELECT 1 FROM agent_slack_delivery WHERE agent=$1 AND team_id=$2 AND source_key=$3",KAREN,cfg['team'],source):continue
+  await conn.execute("INSERT INTO agent_slack_delivery(delivery_id,agent,team_id,channel_id,source_key,answer,message_id,state) VALUES($1,$2,$3,$4,$5,$6,$7,'READY') ON CONFLICT DO NOTHING",delivery_id(KAREN,cfg['team'],source),KAREN,cfg['team'],cfg['workroom'],source,text,cid)
 
 def impersonation(job):
  """A refusal code when sending `job` would put words in one bot's mouth
@@ -176,6 +187,7 @@ def impersonation(job):
  agent=job.get('agent');source=str(job.get('source_key') or '')
  if source.startswith(KAREN_SOURCE) and agent!=KAREN:return 'IMPERSONATION_REFUSED_KAREN_CONTENT_ON_ANOTHER_TOKEN'
  if agent==KAREN and not karen_identity()['distinct']:return 'IMPERSONATION_REFUSED_KAREN_TOKEN_NOT_HER_OWN'
+ if agent==KAREN and not karen_identity()['configured']:return 'KAREN_SLACK_APP_NOT_CONFIGURED_NOTHING_SENT'
  return None
 
 async def claim(conn):

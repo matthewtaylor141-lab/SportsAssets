@@ -1,6 +1,6 @@
 {
   "display_information": {
-    "name": "Karen · BettorToken",
+    "name": "Karen \u00b7 BettorToken",
     "description": "Red-team challenges grounded in recorded evidence; no authority",
     "background_color": "#2e1010"
   },
@@ -14,7 +14,8 @@
     "scopes": {
       "bot": [
         "app_mentions:read",
-        "chat:write"
+        "chat:write",
+        "chat:write.public"
       ]
     }
   },

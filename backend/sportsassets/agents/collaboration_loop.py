@@ -106,6 +106,20 @@ EVIDENCE_KINDS = {
     "karen_challenges": ("karen_challenges", "challenge_id"),
 }
 
+
+async def key_column(conn, table: str, col):
+    """The fixed key expression of an evidence kind, or -- for a kind whose
+    key is None -- the table's single-column primary key from the catalogue
+    (None when the table has no such key). Never a caller-supplied name."""
+    if col is not None:
+        return col
+    rows = await conn.fetch(
+        "SELECT a.attname FROM pg_index i JOIN pg_attribute a ON "
+        " a.attrelid=i.indrelid AND a.attnum=ANY(i.indkey) "
+        " WHERE i.indrelid=to_regclass($1) AND i.indisprimary", table)
+    return '"%s"' % rows[0]["attname"].replace('"', '') if len(rows) == 1 \
+        else None
+
 #: Keys no stage may carry, at any depth: the loop is not an approval or
 #: activation path and touches no limit or authority.
 AUTHORITY_KEYS = frozenset((
@@ -220,6 +234,9 @@ async def verify_refs_exist(conn, refs: list) -> dict:
         try:
             if await conn.fetchval("SELECT to_regclass($1)", table) is None:
                 return _no(R_REF_NOT_FOUND, ref=r, why="table absent")
+            col = await key_column(conn, table, col)
+            if col is None:
+                return _no(R_REF_NOT_FOUND, ref=r, why="no single key")
             hit = await conn.fetchval(
                 "SELECT 1 FROM %s WHERE %s::text = $1 LIMIT 1" % (table, col),
                 r["id"])

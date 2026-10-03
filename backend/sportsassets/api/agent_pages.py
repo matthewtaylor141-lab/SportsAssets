@@ -1539,18 +1539,46 @@ KAREN_JS = r"""
 (function (AG) {
   'use strict';
   var esc = AG.esc, pick = AG.pick, isObj = AG.isObj, R = AG.R;
+  function refs(list) { return Array.isArray(list) && list.length ? list.map(function (e) { return '<span class="mono">' + esc(e.kind) + ' · ' + esc(e.id) + '</span>'; }).join('<br>') : '<span class="mute">none cited</span>'; }
+  function peer(r) {
+    var p = r.peer_response;
+    if (!isObj(p)) return '<span class="mute">awaiting ' + esc(r.target_agent) + '</span>';
+    return '<b>' + esc(p.stance) + '</b> by ' + esc(p.by) + ' · ' + esc(p.response) + (p.evidence_refs && p.evidence_refs.length ? '<br>' + refs(p.evidence_refs) : '');
+  }
+  function evaluation(r) {
+    var e = r.independent_evaluation;
+    if (!isObj(e)) return AG.unk('no evaluation field in this record');
+    if (e.status !== 'RECORDED') return '<span class="mute">' + esc(String(e.status || '').replace(/_/g, ' ').toLowerCase()) + (e.evaluator ? ' · evaluator ' + esc(e.evaluator) : '') + '</span>';
+    return '<b>' + esc(e.outcome) + '</b> by ' + esc(e.by) + (e.independent ? '' : ' <span class="unk">NOT INDEPENDENT</span>') + ' · ' + esc(e.reason || '') + (e.evidence_refs && e.evidence_refs.length ? '<br>' + refs(e.evidence_refs) : '');
+  }
+  function falseBlock(r) {
+    var o = r.false_block_outcome;
+    return o ? esc(String(o).replace(/_/g, ' ').toLowerCase()) : AG.unk('not in this record');
+  }
+  function downstream(r) {
+    var d = r.downstream;
+    if (!isObj(d)) return AG.unk('not in this record');
+    if (d.status !== 'IMPROVEMENT_LINKED') return '<span class="mute">' + esc(String(d.status || '').replace(/_/g, ' ').toLowerCase()) + '</span>';
+    return 'improvement ' + esc(d.finding_id || d.proposal_id) + ' · linked by ' + esc(d.linked_by) + (isObj(d.impact) ? '<br>' + AG.kv(d.impact) : '');
+  }
   function challengeTable(sec, ctx) {
     var rows = AG.rowsOf(sec.data, ['challenges', 'rows', 'items']);
     if (!rows.length) return AG.genericBody(sec, ctx.rd);
     return AG.table(rows, [
-      {label: 'Challenge', keys: ['challenge_id']}, {label: 'Target', keys: ['target_agent']},
-      {label: 'Record', render: function (r) { return '<span class="mono">' + esc(r.target_kind) + ' · ' + esc(r.target_id) + '</span>'; }},
-      {label: 'Detector', keys: ['detector']}, {label: 'Severity', keys: ['severity']},
+      {label: 'Challenge', keys: ['challenge_id']},
+      {label: 'Target agent', keys: ['target_agent']},
+      {label: 'Target decision', render: function (r) { return '<span class="mono">' + esc(r.target_kind) + ' · ' + esc(r.target_id) + '</span>'; }},
+      {label: 'Category', keys: ['category']},
+      {label: 'Severity', keys: ['severity']},
       {label: 'State', render: function (r) { return AG.statusPill(r.state); }},
-      {label: 'Claim', keys: ['claim']}, {label: 'Peer response', render: function (r) { return r.responded_by ? esc(r.response_stance) + ' · ' + esc(r.response) : '<span class="mute">awaiting ' + esc(r.target_agent) + '</span>'; }},
-      {label: 'Outcome', render: function (r) { return r.outcome ? esc(r.outcome) + ' · ' + esc(r.resolved_by) : '<span class="mute">none yet</span>'; }},
-      {label: 'Time to challenge', keys: ['time_to_challenge_s'], num: 1},
-      {label: 'Challenged', keys: ['challenged_at'], u: 'ts'}, {label: 'Evidence', keys: ['evidence']}], {rd: ctx.rd});
+      {label: 'Claim', keys: ['claim']},
+      {label: 'Evidence', render: function (r) { return refs(r.evidence_refs); }},
+      {label: 'Peer response', render: peer},
+      {label: 'Independent evaluation', render: evaluation},
+      {label: 'False-block outcome', render: falseBlock},
+      {label: 'Downstream impact', render: downstream},
+      {label: 'Time to challenge (s)', keys: ['time_to_challenge_s'], num: 1},
+      {label: 'Challenged', keys: ['challenged_at'], u: 'ts'}], {rd: ctx.rd});
   }
   function metricsTable(sec, ctx) {
     var d = isObj(sec.data) ? sec.data : {}, m = isObj(d.metrics) ? d.metrics : {};
@@ -1843,7 +1871,8 @@ CHAT_PANEL_HTML = r"""
 # the records, never inside the collapsed funded section.
 # ═════════════════════════════════════════════════════════════════════
 
-TALK_NAMES = {"derek": "Derek", "xavier": "Xavier", "audrey": "Audrey"}
+TALK_NAMES = {"derek": "Derek", "xavier": "Xavier", "audrey": "Audrey",
+              "karen": "Karen"}
 
 TALK_PANEL_HTML = r"""
 <section class="card wide talk" id="talk" data-agent="%%AGENT%%" aria-label="Talk to %%NAME%%">
@@ -1868,6 +1897,10 @@ TALK_SCOPE = {
     "audrey": ("audits, reconciliation, agent performance and proposals",
                "Does the ledger reconcile?",
                "What have you learned so far?"),
+    "karen": ("her challenges, the evidence they cite, the peer responses "
+              "and the independent evaluations",
+              "What are you challenging right now?",
+              "Which of your challenges were rejected, and why?"),
 }
 
 TALK_CSS = r"""
@@ -2083,6 +2116,64 @@ def talk_panel_html(kind: str) -> str:
             .replace("%%SUGG1%%", s1).replace("%%SUGG2%%", s2))
 
 
+# ═════════════════════════════════════════════════════════════════════
+# KAREN'S HERO: an original flat-vector portrait card (no external or
+# licensed asset), her persona line and the talk panel. The satirical
+# activist look is a costume; her analysis is records only.
+# ═════════════════════════════════════════════════════════════════════
+
+KAREN_PORTRAIT_SVG = """<svg viewBox="0 0 300 360" role="img" aria-label="Illustrated portrait card of Karen, an AI agent: asymmetric teal-and-magenta undercut, oversized round glasses, a nose ring, a denim jacket covered in slogan pins, holding a hand-lettered protest placard that reads PROVE IT">
+<defs><linearGradient id="fgk" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ff6b8b" stop-opacity=".34"/><stop offset="1" stop-color="#ff6b8b" stop-opacity="0"/></linearGradient>
+<linearGradient id="fgkh" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#20c4b4"/><stop offset="1" stop-color="#d63a9a"/></linearGradient></defs>
+<circle cx="150" cy="150" r="120" fill="url(#fgk)"/>
+<path d="M38 360 C48 270 96 240 150 236 C204 240 252 270 262 360 Z" fill="#3c5a86"/>
+<path d="M120 244 L150 300 L180 244 Z" fill="#f4e9d8"/>
+<path d="M100 252 L150 330 L126 246 Z M200 252 L150 330 L174 246 Z" fill="#2f4a70"/>
+<circle cx="112" cy="290" r="9" fill="#ffd23f"/><text x="112" y="293" font-size="9" font-family="monospace" font-weight="700" text-anchor="middle" fill="#1a1204">?</text>
+<circle cx="190" cy="282" r="10" fill="#ff6b8b"/><text x="190" y="285" font-size="6" font-family="monospace" font-weight="700" text-anchor="middle" fill="#fff">CITE</text>
+<rect x="96" y="306" width="34" height="11" rx="3" fill="#20c4b4"/><text x="113" y="314" font-size="6.5" font-family="monospace" font-weight="700" text-anchor="middle" fill="#03201d">SOURCES?</text>
+<rect x="134" y="196" width="32" height="46" rx="12" fill="#e2b08f"/>
+<ellipse cx="150" cy="150" rx="49" ry="59" fill="#efc2a0"/>
+<path d="M100 150 C96 104 118 80 150 80 C176 80 196 92 202 112 L202 128 C188 112 166 104 150 104 C132 104 116 112 108 126 C104 134 101 142 100 150 Z" fill="url(#fgkh)"/>
+<path d="M196 104 C206 112 208 126 204 138 L198 136 Z" fill="#8a8f98"/>
+<circle cx="130" cy="150" r="15" fill="none" stroke="#7a3b1e" stroke-width="4"/><circle cx="170" cy="150" r="15" fill="none" stroke="#7a3b1e" stroke-width="4"/><path d="M145 149 L155 149" stroke="#7a3b1e" stroke-width="4"/>
+<circle cx="131" cy="151" r="3.2" fill="#2b2b2b"/><circle cx="171" cy="151" r="3.2" fill="#2b2b2b"/>
+<path d="M114 128 Q126 120 140 128 M160 126 Q174 118 186 124" stroke="#5b2a4a" stroke-width="4" fill="none" stroke-linecap="round"/>
+<circle cx="157" cy="171" r="3" fill="none" stroke="#c9ccd2" stroke-width="1.8"/>
+<path d="M136 188 Q150 184 166 190" stroke="#b0414f" stroke-width="3.5" fill="none" stroke-linecap="round"/>
+<rect x="206" y="150" width="7" height="170" rx="3" fill="#a8743f"/>
+<rect x="172" y="96" width="112" height="64" rx="6" fill="#fdf6e3" stroke="#1d1d1d" stroke-width="3" transform="rotate(-6 228 128)"/>
+<text x="228" y="126" font-size="20" font-family="Impact, 'Arial Black', sans-serif" font-weight="900" text-anchor="middle" fill="#d6304f" transform="rotate(-6 228 128)">PROVE IT.</text>
+<text x="228" y="146" font-size="8.5" font-family="monospace" font-weight="700" text-anchor="middle" fill="#1d1d1d" transform="rotate(-6 228 128)">WHAT ARE WE MISSING?</text>
+<circle cx="68" cy="276" r="9" fill="#ff6b8b"/><text x="68" y="280" font-size="9" font-family="monospace" font-weight="700" text-anchor="middle" fill="#2a0712">AI</text></svg>"""
+
+KAREN_CSS = r"""
+.k-hero{display:grid;grid-template-columns:minmax(0,300px) minmax(0,1fr);gap:18px;margin:0 0 16px;align-items:stretch}
+.k-card{position:relative;border-radius:16px;border:1px solid #5a2a3a;background:radial-gradient(120% 90% at 50% 0%,#2a1520 0%,#120a10 60%,#08060a 100%);min-height:320px;display:flex;align-items:flex-end;justify-content:center;overflow:hidden}
+.k-card svg{width:100%;height:auto;max-height:360px}
+.k-card .k-ai{position:absolute;left:12px;top:12px;font:700 10.5px/1 ui-monospace,monospace;letter-spacing:.16em;padding:5px 8px;border-radius:6px;border:1px solid #ff6b8b;color:#ffc2cf;background:rgba(0,0,0,.4)}
+.k-brief{display:flex;flex-direction:column;gap:10px;padding:16px 18px;border-radius:16px;border:1px solid #3a2430;background:#120d12}
+.k-brief h1{margin:0;font:600 34px/1 Georgia,serif;color:#fff}
+.k-brief .k-role{font:650 12px/1 ui-monospace,monospace;letter-spacing:.2em;text-transform:uppercase;color:#ff9db2}
+.k-brief .k-lines{font:700 18px/1.3 Georgia,serif;color:#ffd23f;margin:4px 0}
+.k-brief p{margin:0;color:#d9cbd2}
+.k-brief .k-rules{font-size:12.5px;color:#b9a8b1}
+@media(max-width:760px){.k-hero{grid-template-columns:1fr}.k-card{min-height:260px}}
+"""
+
+KAREN_HERO_HTML = """<section class="k-hero" id="karen-hero" aria-label="Karen, the red-team agent">
+<div class="k-card" data-agent="karen"><span class="k-ai">&#9679; AI AGENT</span>%%PORTRAIT%%</div>
+<div class="k-brief"><span class="k-role">Red team &#183; challenge &#183; no authority</span><h1>Karen</h1>
+<div class="k-lines">&#8220;What are we missing?&#8221; &#8220;Prove it.&#8221;</div>
+<p>Aggressive, skeptical, contrarian and funny &#8212; and obsessed with evidence. Karen challenges Derek, Xavier, Audrey and the Chief Allocator only with records that exist; the challenged agent answers, and an independent evaluator (Audrey; Xavier for Audrey) decides. She never resolves her own challenge.</p>
+<p class="k-rules">The placard and pins are a comedic costume: political ideology has zero influence on her analysis. She attacks assumptions and methodology, never people. She holds no order, approval, activation, limit or promotion authority, in code and in the database. Karen is an AI agent; this portrait is original vector art.</p></div>
+</section>"""
+
+
+def karen_hero_html() -> str:
+    return KAREN_HERO_HTML.replace("%%PORTRAIT%%", KAREN_PORTRAIT_SVG)
+
+
 _PAGE_TITLES = {"index": "Agents", "derek": "Derek", "xavier": "Xavier",
                 "audrey": "Audrey", "karen": "Karen"}
 
@@ -2225,7 +2316,20 @@ def page_html(kind: str) -> str:
     js += {"index": INDEX_JS, "derek": DEREK_JS, "xavier": XAVIER_JS,
            "audrey": AUDREY_JS, "karen": KAREN_JS}[kind]
     js += BOOT_JS
-    return (_SHELL.replace("%%CSS%%", BASE_CSS)
+    shell = _SHELL
+    if kind == "karen":
+        # her portrait, persona and the persona chat above the records
+        talk = talk_panel_html("karen").replace(
+            "Karen answers from the paper records, the active policy and "
+            "stored lessons &#183; paper only",
+            "Karen answers only from her challenge records and the evidence "
+            "they cite").replace("Karen can explain and propose;",
+                                  "Karen can question and challenge;")
+        shell = shell.replace('<div id="app">', karen_hero_html() + talk
+                              + '<div id="app">', 1)
+        js += TALK_JS
+    return (shell.replace("%%CSS%%", BASE_CSS + (
+                TALK_CSS + KAREN_CSS if kind == "karen" else ""))
             .replace("%%JS%%", js)
             .replace("%%EXTRA%%", CHAT_PANEL_HTML if kind == "audrey" else "")
             .replace("%%NAV%%", _nav(kind))
@@ -2480,7 +2584,9 @@ async def agents_audrey_page(request: Request):
 
 @router.get("/api/command/agents/karen/page", include_in_schema=False)
 async def agents_karen_page(request: Request):
-    return _serve(request, lambda: page_html("karen"))
+    # the Command Centre CSP: media-src for her spoken answers, framed by
+    # the /karen management shell (frame-ancestors 'self')
+    return _serve(request, lambda: page_html("karen"), _cc_headers)
 
 
 @router.get("/api/command/agents/demo/page", include_in_schema=False)
