@@ -514,6 +514,12 @@ READERS = {
     # fixtures and sports evaluated. Display only; writes nothing.
     "bettor_paper_experiment.py": (
         "PAPER_ONLY_DISPLAY_COUNTS_NO_EFFECT", 2),
+    # (203) THE AGENTS' COLLABORATION LOOP: a finding may cite a valuation
+    # row as EVIDENCE; the loop only checks that the cited id exists
+    # (SELECT 1 ... WHERE id = $1). It selects no candidate, reads no
+    # probability, and has no execution or policy effect.
+    "agents/collaboration_loop.py": (
+        "EVIDENCE_REFERENCE_EXISTENCE_BY_ID_NO_SELECTION", 2),
 }
 
 

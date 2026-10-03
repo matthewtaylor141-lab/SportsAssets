@@ -71,7 +71,7 @@ TYPE_PMX = "POLYMARKET_EXCHANGE_INSTITUTIONAL_M2M_CLIENT"
 TYPE_PMUS = "POLYMARKET_US_RETAIL_API_KEY"
 
 PMX_INTERFACE = {
-    "venue": "Polymarket Exchange (institutional API)",
+    "interface": "Polymarket Exchange (institutional API)",
     "auth": ("Auth0 private-key JWT (RS256 client assertion) -> OAuth2 "
              "client_credentials bearer token"),
     "token_endpoint": "https://pmx-prod.us.auth0.com/oauth/token",
@@ -88,7 +88,7 @@ PMX_INTERFACE = {
     ],
 }
 PMUS_INTERFACE = {
-    "venue": "Polymarket US retail gateway",
+    "interface": "Polymarket US retail gateway",
     "auth": "Ed25519 API key (X-PM-Access-Key / X-PM-Signature)",
     "market_data": "retail websocket (bettor_market_stream)",
     "sources": ["https://docs.polymarket.us/api-reference/authentication"],
