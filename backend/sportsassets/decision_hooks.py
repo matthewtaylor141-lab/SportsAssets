@@ -11,6 +11,14 @@ and does no I/O: it only holds the installed callable.
 
 Absent (a process that does not execute, or a test), a decision proceeds
 paper-only and records that no execution hook ran in its process.
+
+    LIVE_BOOK_EVIDENCE(ctx, cand, obs=..., now=...) -> dict | None   (sync)
+
+The live book-currency evidence (P5_LIVE_STREAM_BOOK_V1) for the decision's
+contract, installed beside DECISION_HOOK by `execution_intent.start` as
+`live_book_evidence.for_decision`. The decision modules record what it
+returns in the intent's admission facts and decide nothing from it.
 """
 
 DECISION_HOOK = None
+LIVE_BOOK_EVIDENCE = None

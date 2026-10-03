@@ -561,3 +561,10 @@ tests/test_institutional_market_data_identity.py
 # backwards venue clock or a venue refusal fails closed until a fresh full
 # snapshot; no scale, hidden, crossed or not-open books refused by name.
 tests/test_institutional_stream.py
+# P5_LIVE_STREAM_BOOK_V1: the versioned live book-currentness rule (every
+# component, the evidence split, the pinned hash) and its owner-approval
+# artifact (migration 204): approval only with a non-agent owner record,
+# immutable text, matching hash; production default (READY_FOR_OWNER_APPROVAL)
+# still refuses ADMISSION_BOOK_CURRENCY_NOT_LIVE_ADMISSIBLE, Venue.place zero.
+tests/test_live_book_currency.py
+tests/test_live_rule_artifacts.py
