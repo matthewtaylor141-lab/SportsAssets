@@ -307,3 +307,33 @@ details.sl-more > summary {
   letter-spacing: .04em; text-transform: uppercase; margin-bottom: 8px;
 }
 details.sl-more > summary:focus-visible { outline: 1px solid var(--dk-accent); }
+/* operating summary: the checks management reads first on every row */
+.sl-ops {
+  margin: 0 0 14px; padding: 10px 12px; border: 1px solid var(--dk-line);
+  border-radius: 8px; background: #0b1016;
+}
+.sl-tag {
+  display: inline-block; min-width: 46px; font-size: 10.5px; letter-spacing: .06em;
+  text-transform: uppercase; color: var(--dk-ink-3);
+}
+.sl-chain { margin: 0; padding-left: 20px; }
+.sl-chain li { margin: 5px 0; overflow-wrap: anywhere; }
+.sl-decision .h3 .pill { margin-left: 6px; vertical-align: 1px; }
+
+/* ── ONE DECISION -> PAPER + ACTUAL ─────────────────────────────────── */
+.sl-h2 { font-size: 15px; margin: 18px 0 4px; letter-spacing: .02em; }
+.sl-lat { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 8px; margin: 8px 0 14px; }
+.sl-latcell { border: 1px solid var(--dk-line, #242e3b); border-radius: 8px; padding: 8px 10px;
+  display: flex; flex-direction: column; gap: 2px; font-variant-numeric: tabular-nums; }
+.sl-latcell .k { font-size: 11px; text-transform: uppercase; letter-spacing: .06em;
+  color: var(--dk-ink-2, #9fb0c4); }
+.sl-dec { border: 1px solid var(--dk-line, #242e3b); border-radius: 10px; padding: 12px;
+  margin: 0 0 12px; }
+.sl-dechead .mono { overflow-wrap: anywhere; }
+.sl-decfacts { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 6px 12px; margin-top: 8px; }
+.sl-decbranches { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 10px; }
+.sl-branch { border-top: 2px solid var(--dk-line, #242e3b); padding-top: 8px; min-width: 0; }
+.sl-branch h4 { margin: 0 0 6px; font-size: 13px; }
+@media (max-width: 640px) { .sl-decbranches { grid-template-columns: 1fr; } }
