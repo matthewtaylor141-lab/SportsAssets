@@ -613,3 +613,13 @@ tests/test_ncaaf_reaches_a_recorded_decision.py
 tests/test_institutional_stream_evidence.py
 tests/test_institutional_same_book.py
 tests/test_p5_runtime_evidence.py
+# Workstream Q (migration 209): coverage integrity with the NCAAF
+# regression, automatic postmortems, the quality scorecard and its forward
+# sample rule, the improvement driver's stop at a PAPER_ONLY experiment, the
+# read routes and the institutional page.
+tests/test_coverage_integrity_funnel.py
+tests/test_position_postmortems.py
+tests/test_quality_scorecard.py
+tests/test_improvement_driver.py
+tests/test_command_quality_routes.py
+tests/test_institutional_page.py

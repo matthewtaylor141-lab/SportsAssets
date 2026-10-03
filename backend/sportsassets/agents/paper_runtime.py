@@ -236,6 +236,22 @@ def default_steps() -> list:
         steps.append(("learning", PLRN.step_learning))
     except ImportError:
         pass
+    try:
+        # COVERAGE INTEGRITY, POSTMORTEMS AND THE IMPROVEMENT DRIVER
+        # (migration 209): on the main paper account's pass only, each on its
+        # own watermark (15 min / 15 min / hourly). The funnel snapshots and
+        # collapse alerts (-> Audrey findings), every closed position's
+        # postmortem, and ordinary deficits moved through the collaboration
+        # loop up to a PAPER_ONLY experiment registration. None of them
+        # places, cancels or changes an order, a limit or a policy.
+        from . import coverage_integrity as COV
+        from . import improvement_driver as IDRV
+        from . import postmortems as PMT
+        steps.append(("audrey_coverage", COV.step))
+        steps.append(("audrey_postmortems", PMT.step))
+        steps.append(("improvement_driver", IDRV.step))
+    except ImportError:
+        pass
     return steps
 
 
