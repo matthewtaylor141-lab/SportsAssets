@@ -1,4 +1,4 @@
-"""KAREN, PART TWO (migration 207a): HER PERSONA, THE AUTOMATIC PEER
+"""KAREN, PART TWO (migration 212): HER PERSONA, THE AUTOMATIC PEER
 RESPONSE AND THE INDEPENDENT EVALUATION, THE NEW CHALLENGE TARGETS, THE
 COMMAND CENTRE VIEW AND THE #agent-workroom PATH.
 
@@ -45,9 +45,9 @@ from sportsassets.api import agent_pages as AP
 DSN = os.environ.get("RN1X_TEST_DSN", "")
 pg = pytest.mark.skipif(not DSN, reason="needs RN1X_TEST_DSN")
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-UP = (ROOT / "migrations" / "207a_karen_persona_peer_review.sql").read_text()
+UP = (ROOT / "migrations" / "212_karen_persona_peer_review.sql").read_text()
 DOWN = (ROOT / "migrations" / "rollback" /
-        "207a_karen_persona_peer_review.down.sql").read_text()
+        "212_karen_persona_peer_review.down.sql").read_text()
 T0 = 1_790_000_000.0
 
 
@@ -328,53 +328,120 @@ async def test_a_cured_record_is_disputed_and_xavier_evaluates_audrey():
         await conn.close()
 
 
+_ALLOC_INSERT = (
+    "INSERT INTO intel_allocations (run_id, candidate_id, computed_at, rank,"
+    " candidate_kind, decision_id, group_id, us_market_slug, score, "
+    " net_ev_per_dollar, shadow_weight, shadow_usd, binding_constraint, "
+    " reasons, inputs) VALUES ($1,$2,to_timestamp($3),1,$4,$5,$6,'slug',"
+    " 0.1,0.05,0.01,$7,NULL,$8::jsonb,$9::jsonb)")
+
+
+async def _alloc(conn, run, cand, at, usd, *, reasons=None, inputs=None):
+    kind = "NEW_DECISION" if cand.startswith("decision:") else \
+        "OPEN_POSITION"
+    await conn.execute(
+        _ALLOC_INSERT, run, cand, at, kind,
+        cand.split(":", 1)[1] if kind == "NEW_DECISION" else None,
+        cand.split(":", 1)[1] if kind == "OPEN_POSITION" else None, usd,
+        json.dumps(reasons if reasons is not None else ["SPORT_CAP"]),
+        json.dumps(inputs if inputs is not None else {"game": "g"}))
+
+
 @pg
 @pytest.mark.asyncio
-async def test_the_chief_allocator_is_challenged_and_answers_when_its_tables_exist():
+async def test_the_chief_allocator_is_challenged_once_per_candidate_on_the_real_208_schema():
     conn, tx = await _tx()
     try:
         now = time.time()
-        # ABSENT: the detectors skip cleanly
-        for t in ("shadow_allocator_decisions", "shadow_allocations",
-                  "chief_allocator_decisions", "allocator_shadow_decisions",
-                  "shadow_allocator_allocations"):
-            assert await conn.fetchval("SELECT to_regclass($1)", t) is None
+        # THE REAL TABLE (migration 208): composite (run_id, candidate_id)
+        pk = await conn.fetch(
+            "SELECT a.attname FROM pg_index i JOIN pg_attribute a ON "
+            " a.attrelid=i.indrelid AND a.attnum=ANY(i.indkey) WHERE "
+            " i.indrelid='intel_allocations'::regclass AND i.indisprimary")
+        assert {r["attname"] for r in pk} == {"run_id", "candidate_id"}
+        assert KR.ALLOCATOR_TABLE == "intel_allocations"
+        assert set(K.CL.EVIDENCE_KINDS["intel_allocations"]) == {
+            "intel_allocations", "candidate_id"}
+        await conn.execute("DELETE FROM intel_allocations")
+        # run 1 and run 2 rewrite the same candidates (600 s apart)
+        for run, at in (("run-1", now - 700), ("run-2", now - 100)):
+            await _alloc(conn, run, "decision:dec_noev", at, 40.0)
+            await _alloc(conn, run, "position:grp_big", at, 5000.0,
+                         inputs={"game": "g", "decision_id": "dec_src"})
+            await _alloc(conn, run, "decision:dec_str", at, 30.0,
+                         reasons=["SPORT_CAP", "decision:dec_str"])
+            await _alloc(conn, run, "decision:dec_zero", at, 0.0)
+        dets = (("ALLOCATION_WITHOUT_EVIDENCE",
+                 KR.detect_allocation_without_evidence),
+                ("LARGE_ALLOCATION", KR.detect_large_allocation))
+        s = await KR.pass_once(conn, now=now, detectors=dets)
+        assert s["detector_errors"] == {}, s
+        rows = {(r["detector"], r["target_id"]): r
+                for r in await K.challenges(conn, limit=20)}
+        # ONE challenge per stable candidate, keyed on candidate_id (never
+        # run_id); evidence in reasons / inputs counts; $0 is no allocation
+        assert set(rows) == {("ALLOCATION_WITHOUT_EVIDENCE",
+                              "decision:dec_noev"),
+                             ("LARGE_ALLOCATION", "position:grp_big")}, rows
+        for c in rows.values():
+            assert c["target_agent"] == "CHIEF_ALLOCATOR"
+            assert c["target_kind"] == "intel_allocations"
+            assert c["category"] == "ALLOCATION_RISK"
+            assert "run-" not in c["target_id"]
+            assert c["evidence_refs"] == [{"kind": "intel_allocations",
+                                           "id": c["target_id"]}]
+        assert rows[("LARGE_ALLOCATION", "position:grp_big")]["body"][
+            "latest_run_id"] == "run-2"
+        # run 3 rewrites everything again: still no new challenge
+        await _alloc(conn, "run-3", "decision:dec_noev", now - 10, 41.0)
+        await _alloc(conn, "run-3", "position:grp_big", now - 10, 5100.0,
+                     inputs={"decision_id": "dec_src"})
+        s = await KR.pass_once(conn, now=now + 1, detectors=dets)
+        assert s["opened"] == [], s
+        # the LATEST row decides: run 4 gives dec_noev evidence, so its
+        # responder disputes and Audrey rejects; grp_big is still large, so
+        # it concedes and Audrey upholds
+        await _alloc(conn, "run-4", "decision:dec_noev", now - 5, 41.0,
+                     inputs={"valuation_id": 123})
+        assert await KR.rule_holds(conn, "ALLOCATION_WITHOUT_EVIDENCE",
+                                   "intel_allocations",
+                                   "decision:dec_noev") is False
+        assert await KR.rule_holds(conn, "LARGE_ALLOCATION",
+                                   "intel_allocations",
+                                   "position:grp_big") is True
+        s = await PR.pass_once(conn, now=now + 5)
+        r = s["responses"]["CHIEF_ALLOCATOR"]
+        noev = rows[("ALLOCATION_WITHOUT_EVIDENCE",
+                     "decision:dec_noev")]["challenge_id"]
+        big = rows[("LARGE_ALLOCATION", "position:grp_big")]["challenge_id"]
+        assert r["disputed"] == [noev] and r["conceded"] == [big], r
+        got = {c: (await K.challenge(conn, c))["challenge"]
+               for c in (noev, big)}
+        assert got[noev]["state"] == "REJECTED"
+        assert got[big]["state"] == "UPHELD"
+        assert {g["resolved_by"] for g in got.values()} == {"AUDREY"}
+        assert "CHIEF_ALLOCATOR" not in PR.EVALUATORS
+    finally:
+        await tx.rollback()
+        await conn.close()
+
+
+@pg
+@pytest.mark.asyncio
+async def test_the_allocator_detectors_skip_cleanly_without_migration_208():
+    conn, tx = await _tx()
+    try:
+        await conn.execute("ALTER TABLE intel_allocations RENAME TO "
+                           "intel_allocations_k3_hidden")
+        now = time.time()
         assert await KR.detect_allocation_without_evidence(conn, now, 5) == []
         assert await KR.detect_large_allocation(conn, now, 5) == []
-        # PRESENT (a stand-in of migration 208's shape)
-        await conn.execute(
-            "CREATE TABLE shadow_allocator_decisions (decision_id text "
-            " PRIMARY KEY, allocation_usd numeric, decided_at timestamptz, "
-            " evidence_refs jsonb)")
-        await _decision(conn, "adr:k2-alloc-ev")
-        await conn.execute(
-            "INSERT INTO shadow_allocator_decisions VALUES "
-            " ('sa-small', 20, to_timestamp($1), NULL),"
-            " ('sa-big', 5000, to_timestamp($1), $2::jsonb)", now - 60,
-            json.dumps([{"kind": "agent_decisions", "id": "adr:k2-alloc-ev"}]))
+        assert await KR.rule_holds(conn, "LARGE_ALLOCATION",
+                                   "intel_allocations", "decision:x") is None
         s = await KR.pass_once(conn, now=now, detectors=(
             ("ALLOCATION_WITHOUT_EVIDENCE",
-             KR.detect_allocation_without_evidence),
-            ("LARGE_ALLOCATION", KR.detect_large_allocation)))
-        assert len(s["opened"]) == 2, s
-        rows = {(r["detector"], r["target_id"]): r
-                for r in await K.challenges(conn, limit=10)}
-        a = rows[("ALLOCATION_WITHOUT_EVIDENCE", "sa-small")]
-        b = rows[("LARGE_ALLOCATION", "sa-big")]
-        for c in (a, b):
-            assert c["target_agent"] == "CHIEF_ALLOCATOR"
-            assert c["category"] == "ALLOCATION_RISK"
-            assert c["target_kind"] == "shadow_allocator_decisions"
-        # its responder concedes both (the same rule still holds), Audrey
-        # evaluates
-        s = await PR.pass_once(conn, now=now + 5)
-        assert set(s["responses"]["CHIEF_ALLOCATOR"]["conceded"]) == {
-            a["challenge_id"], b["challenge_id"]}
-        for c in (a, b):
-            got = (await K.challenge(conn, c["challenge_id"]))["challenge"]
-            assert got["state"] == "UPHELD" and got["resolved_by"] == "AUDREY"
-        # the evaluation ignores Karen and the target as evaluator
-        assert "CHIEF_ALLOCATOR" not in PR.EVALUATORS
+             KR.detect_allocation_without_evidence),))
+        assert s["detector_errors"] == {} and s["opened"] == []
     finally:
         await tx.rollback()
         await conn.close()
@@ -432,11 +499,26 @@ async def test_policy_candidates_and_ready_artifacts_without_evidence_are_challe
 
 @pg
 @pytest.mark.asyncio
-async def test_207a_is_idempotent_and_its_rollback_refuses_over_its_records():
+async def test_212_is_idempotent_and_its_rollback_refuses_over_its_records():
     conn, tx = await _tx()
     try:
+        # a database that applied this file under its first name (207a)
+        # carries the old-named guard: re-applying as 212 replaces it
+        await conn.execute(
+            "CREATE OR REPLACE FUNCTION karen_challenges_207a_guard() "
+            "RETURNS trigger AS $$ BEGIN RETURN NEW; END $$ LANGUAGE plpgsql;"
+            "CREATE TRIGGER karen_challenges_207a_guard_trg BEFORE INSERT OR "
+            "UPDATE ON karen_challenges FOR EACH ROW EXECUTE FUNCTION "
+            "karen_challenges_207a_guard()")
         await conn.execute(UP)
         await conn.execute(UP)
+        trg = {r["tgname"] for r in await conn.fetch(
+            "SELECT tgname FROM pg_trigger WHERE tgrelid="
+            "'karen_challenges'::regclass AND NOT tgisinternal")}
+        assert "karen_challenges_212_guard_trg" in trg
+        assert "karen_challenges_207a_guard_trg" not in trg
+        assert await conn.fetchval(
+            "SELECT to_regprocedure('karen_challenges_207a_guard()')") is None
         await conn.execute("INSERT INTO agent_persona_versions (agent_id, "
                            " version, display_name, role_title, perspective, "
                            " persona_text, voice_profile, content_sha, "

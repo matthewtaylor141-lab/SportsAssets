@@ -1,4 +1,4 @@
-"""THE RECORDS KAREN MAY CITE BEYOND THE LOOP'S OWN (migration 207a).
+"""THE RECORDS KAREN MAY CITE BEYOND THE LOOP'S OWN (migration 212).
 
 Registered into collaboration_loop.EVIDENCE_KINDS when Karen's module is
 imported, so a challenge, a peer response or an evaluation citing one of
@@ -23,14 +23,12 @@ GOVERNANCE_KINDS = {
     "improvement_candidates": ("improvement_candidates", "candidate_id"),
 }
 
-#: the shadow allocator's tables (migration 208, the intel workstream), by
-#: every name it may land under. Their key is the table's own single-column
-#: primary key, read from the catalogue (None); a table absent from this
-#: database resolves nothing and its detector skips.
-ALLOCATOR_TABLES = ("shadow_allocator_decisions", "shadow_allocations",
-                    "chief_allocator_decisions", "allocator_shadow_decisions",
-                    "shadow_allocator_allocations")
-ALLOCATOR_KINDS = {t: (t, None) for t in ALLOCATOR_TABLES}
+#: the Chief Allocator's shadow allocations (migration 208). The primary key
+#: is (run_id, candidate_id) and every run rewrites every candidate, so the
+#: evidence key is the STABLE candidate identity: a reference resolves when
+#: any run holds that candidate. Absent table: resolves nothing.
+ALLOCATOR_TABLE = "intel_allocations"
+ALLOCATOR_KINDS = {ALLOCATOR_TABLE: (ALLOCATOR_TABLE, "candidate_id")}
 
 
 def register() -> None:

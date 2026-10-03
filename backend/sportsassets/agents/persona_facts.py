@@ -969,7 +969,7 @@ async def karen_facts(conn, *, question: str,
     f = Facts()
     if not await K.schema(conn):
         f.check("karen_challenges", "TABLE_ABSENT")
-        f.miss("Karen's challenge records (migrations 207 / 207a not "
+        f.miss("Karen's challenge records (migrations 207 / 212 not "
                "applied)")
         return {"subject": None, "demonstration": False, "found": False,
                 "scope": "BOOK", "facts": f.items, "checked": f.checked,

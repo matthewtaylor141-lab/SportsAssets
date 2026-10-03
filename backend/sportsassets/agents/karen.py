@@ -55,9 +55,9 @@ from . import karen_evidence as KE  # noqa: F401  (registers kinds)
 from . import registry as R
 
 KAREN = R.KAREN
-#: The Chief Allocator (the shadow allocator's decisions, migration 208 on
-#: the intel workstream) is a challenge TARGET, not an agent identity: it
-#: holds no tool and no authority. Its rule-based responder answers for it.
+#: The Chief Allocator (its shadow allocations: intel_allocations, migration
+#: 208) is a challenge TARGET, not an agent identity: it holds no tool and no
+#: authority. Its rule-based responder answers for it.
 CHIEF_ALLOCATOR = "CHIEF_ALLOCATOR"
 TARGETS = R.OPERATING_AGENTS + (CHIEF_ALLOCATOR,)
 #: Who evaluates a disputed challenge: never Karen, never the target.
@@ -265,7 +265,7 @@ def _actor(v) -> str | None:
 
 
 async def schema(conn) -> bool:
-    """Migrations 207 AND 207a (the category column) are applied."""
+    """Migrations 207 AND 212 (the category column) are applied."""
     try:
         return await conn.fetchval(
             "SELECT EXISTS (SELECT 1 FROM information_schema.columns "

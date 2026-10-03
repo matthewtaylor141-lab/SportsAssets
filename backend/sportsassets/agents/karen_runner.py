@@ -40,7 +40,6 @@ import os
 import time
 import uuid
 
-from . import collaboration_loop as CL
 from . import karen as K
 from . import karen_evidence as KE
 from . import registry as R
@@ -436,11 +435,28 @@ async def detect_strategy_candidate_without_evidence(conn, now: float,
     } for r in rows]
 
 
-# ── THE CHIEF ALLOCATOR (shadow allocator tables, migration 208) ─────
-AMOUNT_COLS = ("allocation_usd", "allocated_usd", "amount_usd",
-               "capital_usd", "notional_usd", "size_usd", "stake_usd")
-TIME_COLS = ("decided_at", "allocated_at", "created_at", "recorded_at", "at")
-EVIDENCE_COLS = ("evidence_refs", "evidence")
+# ── THE CHIEF ALLOCATOR: intel_allocations (migration 208) ───────────
+#
+# One row per (run_id, candidate_id); a new run rewrites EVERY candidate
+# every ~600 s. A challenge is therefore keyed on the STABLE candidate
+# identity (candidate_id: "decision:<decision_id>" / "position:<group_id>"),
+# never on run_id, and the rule is applied to the candidate's LATEST row --
+# so one allocation is challenged once, not once per run.
+ALLOCATOR_TABLE = KE.ALLOCATOR_TABLE
+
+#: evidence = a decision / valuation id carried anywhere in `reasons` or
+#: `inputs`: a key decision_id / valuation_id / evidence_refs, or a string
+#: such as "decision:<id>" / "valuation:<id>"
+_ALLOC_EV_PATH = ('$.** ? (exists(@.decision_id) || exists(@.valuation_id) '
+                  '|| exists(@.evidence_refs) || (@.type() == "string" && @ '
+                  'like_regex "^(decision|valuation)[_:= ]+[A-Za-z0-9]"))')
+_ALLOC_HAS_EVIDENCE = (
+    "(jsonb_path_exists(t.reasons, '%(p)s') OR "
+    "jsonb_path_exists(t.inputs, '%(p)s'))" % {"p": _ALLOC_EV_PATH})
+_ALLOC_LATEST = (
+    "SELECT DISTINCT ON (a.candidate_id) a.* FROM intel_allocations a "
+    " WHERE a.label = 'SHADOW' %s "
+    " ORDER BY a.candidate_id, a.computed_at DESC, a.run_id DESC")
 
 
 def large_allocation_usd() -> float:
@@ -451,102 +467,78 @@ def large_allocation_usd() -> float:
         return 250.0
 
 
-async def allocator_shape(conn, table: str) -> dict | None:
-    """The discovered shape of one allocator table, or None when it is
-    absent or lacks a single-column key or an amount column. Column names
-    come only from the catalogue and are matched against fixed lists."""
-    if not await _exists(conn, table):
-        return None
-    cols = {r["column_name"]: r["data_type"] for r in await conn.fetch(
-        "SELECT column_name, data_type FROM information_schema.columns "
-        " WHERE table_name=$1", table)}
-    key = await CL.key_column(conn, table, None)
-    amount = next((c for c in AMOUNT_COLS if c in cols), None)
-    if key is None or amount is None:
-        return None
-    ev = next((c for c in EVIDENCE_COLS if c in cols
-               and cols[c] == "jsonb"), None)
-    return {"table": table, "key": key, "amount": amount,
-            "time": next((c for c in TIME_COLS if c in cols), None),
-            "evidence": ev}
-
-
-def _allocator_predicate(shape: dict, detector: str) -> str:
-    ev = shape["evidence"]
-    if ev is None:
-        no_refs = "true"
-    else:
-        no_refs = ("NOT coalesce((jsonb_typeof(t.%(e)s) = 'array' AND "
-                   "jsonb_array_length(t.%(e)s) > 0) OR (jsonb_typeof("
-                   "t.%(e)s) = 'object' AND coalesce(jsonb_typeof(t.%(e)s->"
-                   "'evidence_refs') = 'array' AND jsonb_array_length("
-                   "t.%(e)s->'evidence_refs') > 0, false)), false)"
-                   % {"e": ev})
+def _allocator_predicate(detector: str) -> str:
+    """THE RULE over one (latest) intel_allocations row, alias t. Only a
+    positive shadow allocation is an allocation."""
     if detector == "ALLOCATION_WITHOUT_EVIDENCE":
-        return no_refs
-    return "t.%s >= %s" % (shape["amount"], repr(float(large_allocation_usd())))
+        return "t.shadow_usd > 0 AND NOT %s" % _ALLOC_HAS_EVIDENCE
+    return "t.shadow_usd > 0 AND t.shadow_usd >= %r" % float(
+        large_allocation_usd())
 
 
 async def _allocator_candidates(conn, now: float, limit: int, detector: str):
+    if not await _exists(conn, ALLOCATOR_TABLE):
+        return []                     # migration 208 absent: skip cleanly
+    pred = _allocator_predicate(detector)
+    rows = await conn.fetch(
+        "SELECT t.candidate_id AS _key, t.run_id, t.candidate_kind, "
+        "       t.decision_id, t.group_id, t.us_market_slug, t.shadow_usd, "
+        "       t.computed_at "
+        "  FROM (" + _ALLOC_LATEST % (
+            "AND a.computed_at BETWEEN to_timestamp($3) AND "
+            "to_timestamp($4)") + ") t "
+        " WHERE (" + pred + ") AND " + _NOT_YET % "t.candidate_id" +
+        " ORDER BY t.computed_at, t.candidate_id LIMIT $5",
+        detector, ALLOCATOR_TABLE, now - LOOKBACK_S, now, limit)
     out = []
-    for table in KE.ALLOCATOR_TABLES:
-        shape = await allocator_shape(conn, table)
-        if shape is None:
-            continue
-        pred = _allocator_predicate(shape, detector)
-        tcol = shape["time"]
-        rows = await conn.fetch(
-            "SELECT (t.%(k)s)::text AS _key, t.%(a)s AS amount, %(tsel)s "
-            "  FROM %(tb)s t WHERE (%(p)s) %(win)s AND %(ny)s "
-            " ORDER BY %(ord)s LIMIT $5" % {
-                "k": shape["key"].strip('"'), "a": shape["amount"],
-                "tsel": "t.%s AS at" % tcol if tcol else "NULL::timestamptz "
-                        "AS at", "tb": table, "p": pred,
-                "win": ("AND t.%s BETWEEN to_timestamp($3) AND "
-                        "to_timestamp($4)" % tcol) if tcol else
-                       "AND $3::float8 IS NOT NULL AND $4::float8 IS NOT NULL",
-                "ny": _NOT_YET % ("t." + shape["key"].strip('"')),
-                "ord": ("t.%s" % tcol) if tcol else "1"},
-            detector, table, now - LOOKBACK_S, now, limit)
-        for r in rows:
-            amt = float(r["amount"]) if r["amount"] is not None else None
-            large = amt is not None and amt >= large_allocation_usd()
-            if detector == "ALLOCATION_WITHOUT_EVIDENCE":
-                claim = ("Allocation %s (%s USD) in %s cites no evidence "
-                         "reference. Capital moved on what? Prove it."
-                         % (r["_key"], amt, table))
-                sev = "HIGH" if large else "MEDIUM"
-            else:
-                claim = ("Allocation %s is large: %s USD against the %s USD "
-                         "threshold. What are we missing? Show the evidence "
-                         "that justifies the size." % (
-                             r["_key"], amt, large_allocation_usd()))
-                sev = "MEDIUM"
-            out.append({
-                "detector": detector, "target_agent": K.CHIEF_ALLOCATOR,
-                "target_kind": table, "target_id": r["_key"],
-                "severity": sev,
-                "record_at": min(_ep(r["at"]), now) if r["at"] else now,
-                "claim": claim,
-                "evidence_refs": [{"kind": table, "id": r["_key"]}],
-                "body": {"rule": pred, "amount_usd": amt,
-                         "threshold_usd": large_allocation_usd()}})
-            if len(out) >= limit:
-                return out
+    for r in rows:
+        amt = float(r["shadow_usd"])
+        large = amt >= large_allocation_usd()
+        subject = ("decision %s" % r["decision_id"] if r["decision_id"]
+                   else "position %s" % r["group_id"] if r["group_id"]
+                   else r["_key"])
+        if detector == "ALLOCATION_WITHOUT_EVIDENCE":
+            claim = ("Shadow allocation %s (%s, %s USD, latest run %s) "
+                     "carries no decision or valuation id in its reasons or "
+                     "inputs. Capital moved on what? Prove it."
+                     % (r["_key"], subject, amt, r["run_id"]))
+            sev = "HIGH" if large else "MEDIUM"
+        else:
+            claim = ("Shadow allocation %s (%s) is large: %s USD against the "
+                     "%s USD threshold (latest run %s). What are we missing? "
+                     "Show the evidence that justifies the size."
+                     % (r["_key"], subject, amt, large_allocation_usd(),
+                        r["run_id"]))
+            sev = "MEDIUM"
+        out.append({
+            "detector": detector, "target_agent": K.CHIEF_ALLOCATOR,
+            "target_kind": ALLOCATOR_TABLE, "target_id": r["_key"],
+            "severity": sev,
+            "record_at": min(_ep(r["computed_at"]), now),
+            "claim": claim,
+            "evidence_refs": [{"kind": ALLOCATOR_TABLE, "id": r["_key"]}],
+            "body": {"rule": pred, "amount_usd": amt,
+                     "threshold_usd": large_allocation_usd(),
+                     "candidate_kind": r["candidate_kind"],
+                     "decision_id": r["decision_id"],
+                     "group_id": r["group_id"],
+                     "latest_run_id": r["run_id"],
+                     "label": "SHADOW"}})
     return out
 
 
 async def detect_allocation_without_evidence(conn, now: float, limit: int):
-    """A Chief Allocator (shadow allocator) decision that cites no evidence
-    reference. Skips cleanly when no allocator table exists."""
+    """A Chief Allocator shadow allocation (intel_allocations, latest row
+    per candidate) whose reasons / inputs carry no decision or valuation id.
+    Skips cleanly when migration 208 is absent."""
     return await _allocator_candidates(conn, now, limit,
                                        "ALLOCATION_WITHOUT_EVIDENCE")
 
 
 async def detect_large_allocation(conn, now: float, limit: int):
     """A Chief Allocator allocation at or above KAREN_LARGE_ALLOCATION_USD:
-    challenged to show its evidence. Skips cleanly when no allocator table
-    exists."""
+    challenged to show its evidence. Once per candidate, never per run.
+    Skips cleanly when migration 208 is absent."""
     return await _allocator_candidates(conn, now, limit, "LARGE_ALLOCATION")
 
 
@@ -636,15 +628,14 @@ async def rule_holds(conn, detector: str, target_kind: str,
             % (pred, table, key), str(target_id))
         return None if row is None else bool(row["holds"])
     if detector in ("ALLOCATION_WITHOUT_EVIDENCE", "LARGE_ALLOCATION"):
-        if target_kind not in KE.ALLOCATOR_TABLES:
+        if target_kind != ALLOCATOR_TABLE or not await _exists(
+                conn, ALLOCATOR_TABLE):
             return None
-        shape = await allocator_shape(conn, target_kind)
-        if shape is None:
-            return None
+        # the same rule, on the candidate's LATEST row (runs rewrite it)
         row = await conn.fetchrow(
-            "SELECT (%s) AS holds FROM %s t WHERE (t.%s)::text = $1 LIMIT 1"
-            % (_allocator_predicate(shape, detector), target_kind,
-               shape["key"].strip('"')), str(target_id))
+            "SELECT (" + _allocator_predicate(detector) + ") AS holds FROM ("
+            + _ALLOC_LATEST % "AND a.candidate_id = $1" + ") t",
+            str(target_id))
         return None if row is None else bool(row["holds"])
     if detector == "FINDING_RESTS_ON_UPHELD_DEFECT":
         row = await conn.fetchrow(

@@ -1,5 +1,5 @@
 -- Refuses while Karen has a persona version or a conversation, or any
--- challenge carries what 207a added (a CHIEF_ALLOCATOR target or an
+-- challenge carries what 212 added (a CHIEF_ALLOCATOR target or an
 -- evaluation's evidence): those records are never dropped as cleanup.
 DO $$
 DECLARE
@@ -15,7 +15,7 @@ BEGIN
                 ' target_agent = ''CHIEF_ALLOCATOR'' OR '
                 ' resolution_evidence_refs IS NOT NULL)' INTO STRICT present;
         IF present THEN
-            RAISE EXCEPTION 'karen_challenges hold 207a records; rollback '
+            RAISE EXCEPTION 'karen_challenges hold 212 records; rollback '
                             'refused';
         END IF;
     END IF;
@@ -24,6 +24,8 @@ END $$;
 DO $$
 BEGIN
     IF to_regclass('karen_challenges') IS NOT NULL THEN
+        DROP TRIGGER IF EXISTS karen_challenges_212_guard_trg
+            ON karen_challenges;
         DROP TRIGGER IF EXISTS karen_challenges_207a_guard_trg
             ON karen_challenges;
         ALTER TABLE karen_challenges
@@ -42,6 +44,7 @@ BEGIN
             DROP COLUMN IF EXISTS resolution_evidence_refs;
     END IF;
 END $$;
+DROP FUNCTION IF EXISTS karen_challenges_212_guard();
 DROP FUNCTION IF EXISTS karen_challenges_207a_guard();
 
 ALTER TABLE agent_persona_versions
