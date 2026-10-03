@@ -70,7 +70,7 @@ async def test_identities_and_permissions_are_persisted_with_versions():
         assert got["ok"] is True, got
         rows = {r["agent_id"]: dict(r) for r in await conn.fetch(
             "SELECT * FROM agent_identities")}
-        assert set(rows) == {"DEREK", "XAVIER", "AUDREY"}
+        assert set(rows) == {"DEREK", "XAVIER", "AUDREY", "KAREN"}
         for aid, row in rows.items():
             perms = R._j(row["tool_permissions"])
             assert perms == R.IDENTITIES[aid]["tool_permissions"]
@@ -338,7 +338,7 @@ async def test_the_migration_is_idempotent_and_its_rollback_refuses_over_rows():
         finally:
             await tr.rollback()
         assert await conn.fetchval("SELECT count(*) FROM agent_identities") \
-            == 3
+            == len(R.AGENTS)
     finally:
         await H.clean_agents(conn)
         await conn.close()

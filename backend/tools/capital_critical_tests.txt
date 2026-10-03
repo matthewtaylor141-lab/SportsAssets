@@ -623,3 +623,17 @@ tests/test_quality_scorecard.py
 tests/test_improvement_driver.py
 tests/test_command_quality_routes.py
 tests/test_institutional_page.py
+# Karen, the red-team / challenge agent (claude/cand22-karen, migration 207):
+# a persisted identity with NO authority (registry deny list + karen.may in
+# code; a trigger on every approval / activation / promotion / control table
+# and the task history refuses her as the actor; in the collaboration loop
+# she may only record PEER_CHALLENGE); grounded challenges whose peer
+# response is the target's and which she can never resolve; metrics with
+# numerator/denominator, null when unmeasurable; the bounded, failure-
+# isolated runner and its heartbeat; her page, read API and her own Slack
+# bot token (no impersonation).
+tests/test_karen_identity_and_no_authority.py
+tests/test_karen_challenge_lifecycle.py
+tests/test_karen_metrics_and_runner.py
+tests/test_karen_api_pages_slack.py
+tests/test_karen_management_url.py

@@ -439,6 +439,16 @@ async def lifespan(_: FastAPI):
     capability_task = asyncio.create_task(_CAP.run(_cap_pool))
     from .. import slack_bridge as _SLACK
     slack_task = asyncio.create_task(_SLACK.run(_cap_pool))
+    # Karen (red team, migration 207): heartbeat + grounded challenges from
+    # the recorded decisions, reviews, audits and admission refusals. Writes
+    # only her own challenge records; bounded per pass; never raises into
+    # this process. Off with KAREN_RUNNER_ENABLED=0.
+    karen_task = None
+    try:
+        from ..agents import karen_runner as _KAREN
+        karen_task = asyncio.create_task(_KAREN.run(_cap_pool))
+    except Exception:                                           # noqa: BLE001
+        log.warning("karen: runner not armed", exc_info=True)
     # 1:1,000 execution mirror: its own durable control (off by default) and
     # its own credential; idle until the control row is enabled.
     from .. import execmirror as _EXM
@@ -460,7 +470,7 @@ async def lifespan(_: FastAPI):
         tasks = [t for t in (desk_task, rn1x_task, rn1x_learn_task,
                              ext_task, rn1x_model_task, trim_task,
                              poller_task, capability_task, slack_task,
-                             execmirror_task,
+                             karen_task, execmirror_task,
                              *watchdog_tasks)
                  if t is not None]
         for task in tasks:
@@ -523,6 +533,13 @@ try:
     app.include_router(_agents_audrey_router)
 except ImportError:
     log.warning("agents: api.agents_audrey not loaded", exc_info=True)
+try:
+    # Karen (red team / challenge, migration 207): /api/command/karen and
+    # /api/command/agents/karen, plus the peer-response writes.
+    from .agents_karen import router as _agents_karen_router
+    app.include_router(_agents_karen_router)
+except ImportError:
+    log.warning("agents: api.agents_karen not loaded", exc_info=True)
 try:
     from .agents_chat import router as _agents_chat_router
     app.include_router(_agents_chat_router)
