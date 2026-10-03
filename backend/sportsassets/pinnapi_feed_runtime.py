@@ -25,7 +25,14 @@ not fresh). It reads only this process's cache through `read` (no socket,
 no network), matches the held contract with the census's own
 `contract_match`, and de-vigs with bettor_pinnacle_devig.valuation. Every
 refusal is named and leaves the measure stale; it never places or sizes an
-order, and Derek reads nothing here. It also publishes a bounded heartbeat
+order, and Derek reads nothing here. HELD PRIORITY TARGETS (pinnapi_held): the runtime installs the held watch on
+this owner's cache change notification and refreshes, every
+pinnapi_held.HELD_REFRESH_S, which provider events Xavier's OPEN paper and
+actual positions are (`held_event_id`, the census identity). A held market's
+change triggers Xavier's review; the reactive scheduler serves held events
+before discovery. Same socket, same owner, same budget. Xavier's review
+reads `held_moneyline` on demand within HELD_ON_DEMAND_BUDGET_S (1 s).
+It also publishes a bounded heartbeat
 ('pinnapi_feed_last', overwritten, capped) with the owner state, the census
 of the provider's current state by sport / market type / phase, and the
 provider-stamp->receipt distribution.
@@ -59,7 +66,7 @@ DEFAULT_SCOPE = {"sport_ids": [6], "streams": ["live", "prematch"]}
 ALLOWED_SPORTS = set(range(1, 13))
 
 _STATE: dict = {"owner": None, "task": None, "beat": None, "pool": None,
-                "census": None, "runtime_id": None}
+                "census": None, "runtime_id": None, "held": None}
 CENSUS_S = 60.0
 #: held_moneyline is the only decision read; no order path reads the feed
 DECISION_EFFECT = "XAVIER_HELD_MEASURE_ONLY (read-only, held positions)"
@@ -123,6 +130,8 @@ def digest() -> dict:
     d["enabled_env"] = enabled()
     d["coverage_census"] = _STATE.get("census")
     d["c1_decision_effect"] = DECISION_EFFECT
+    from . import pinnapi_held as PH
+    d["held_priority_targets"] = PH.WATCH.status()
     return d
 
 
@@ -257,9 +266,17 @@ async def start_default(pool, *, writer_pid: int, writer_lock_key: int,
             writer_pid=writer_pid, writer_key=writer_lock_key,
             armed=lambda: armed(pool))
         loop = asyncio.get_running_loop()
+        # HELD POSITIONS ARE THE PRIORITY TARGETS (pinnapi_held): the watch
+        # rides this owner's cache change notification and its targets are
+        # refreshed from the open positions by this runtime -- no second
+        # owner, no socket, no other provider.
+        from . import pinnapi_held as PH
+        PH.install(owner.cache)
+        PH.add_listener(PH.paper_review_listener)
         _STATE.update(owner=owner, pool=pool, runtime_id=uuid.uuid4().hex,
                       task=loop.create_task(owner.run()),
-                      beat=loop.create_task(_beat_loop(pool)))
+                      beat=loop.create_task(_beat_loop(pool)),
+                      held=loop.create_task(PH.refresh_loop(pool)))
         return {"state": "STARTED", "scope": sc}
     except Exception as exc:                                    # noqa: BLE001
         log.warning("pinnapi feed start failed", exc_info=True)
@@ -272,6 +289,13 @@ async def shutdown_default(wait_s: float = 8.0) -> dict:
     if o is None:
         return {"verdict": "NEVER_STARTED"}
     o.stop()
+    hz = _STATE.get("held")
+    if hz is not None:
+        hz.cancel()
+        try:
+            await hz
+        except (asyncio.CancelledError, Exception):             # noqa: BLE001
+            pass
     # Stop the periodic writer before producing the terminal record.
     if b is not None:
         b.cancel()
@@ -302,7 +326,7 @@ async def shutdown_default(wait_s: float = 8.0) -> dict:
         final_status = "UNAVAILABLE:" + type(exc).__name__
         log.warning("pinnapi terminal heartbeat unavailable: %s", type(exc).__name__)
     _STATE.update(owner=None, task=None, beat=None, pool=None, runtime_id=None,
-                  census=None)
+                  census=None, held=None)
     return {"verdict": verdict, "terminal_heartbeat": final_status}
 
 
@@ -325,6 +349,10 @@ R_HELD_TYPE_UNPROVED = "HELD_VENUE_TYPE_NOT_PROVED_FULL_GAME_MONEYLINE"
 R_HELD_TIME_UNPROVED = "HELD_FIXTURE_TIME_NOT_PROVED"
 R_HELD_LOOKUP_TIMEOUT = "HELD_MARKET_CATALOGUE_TIMEOUT"
 HELD_LOOKUP_TIMEOUT_S = 2.0
+#: THE ON-DEMAND READ BEFORE A REVIEW: at most this long, end to end
+#: (catalogue rows + the in-process cache read), else a named refusal.
+HELD_ON_DEMAND_BUDGET_S = 1.0
+R_ON_DEMAND_TIMEOUT = "HELD_ON_DEMAND_READ_OVER_BUDGET"
 HELD_FULL_GAME_TYPES = frozenset((
     "baseball_team_full_game_winner", "soccer_team_full_time_winner"))
 
@@ -473,3 +501,34 @@ async def held_moneyline(conn, *, us_market_slug, payout_event,
                       max_age_s=max_age_s, sport_ids=o.sport_ids,
                       synced=bool(o.cache.authority.synced),
                       view=view)
+
+
+async def held_event_id(conn, us_market_slug) -> tuple:
+    """(feed event id, None) for a held contract matched to ONE provider
+    event of this process's cache under the census's own identity (same
+    teams, start within tolerance, full-game moneyline family), else
+    (None, named reason). Read only; no network."""
+    from . import pinnapi_census as C
+    o = _STATE.get("owner")
+    if o is None:
+        return None, F.R_NO_AUTHORITY
+    if not o.cache.authority.synced:
+        return None, C.S_FEED_NOT_SYNCED
+    try:
+        row = await conn.fetchrow(HELD_CATALOGUE_SQL, us_market_slug)
+        if row is None:
+            return None, R_NOT_IN_CATALOGUE
+        if row["sports_type"] not in HELD_FULL_GAME_TYPES:
+            return None, R_HELD_TYPE_UNPROVED
+        event_rows = ([dict(r) for r in await conn.fetch(
+            held_event_sql(), row["event_slug"])] if row["event_slug"]
+            else [])
+    except Exception as exc:                                    # noqa: BLE001
+        return None, "%s:%s" % (R_CATALOGUE_UNREADABLE, type(exc).__name__)
+    state, eid, _sid = C.contract_match(
+        dict(row), event_rows or [dict(row)], C.feed_event_view(o.cache),
+        subscribed_sports=set(o.sport_ids),
+        synced=bool(o.cache.authority.synced))
+    if state != C.S_SUPPORTED or eid is None:
+        return None, state
+    return eid, None

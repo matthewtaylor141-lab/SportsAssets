@@ -21,16 +21,41 @@ log = logging.getLogger(__name__)
 ACTIVE = None
 
 
+#: A held event's discovery seed is pinned while the position is held (no
+#: eviction, no 30-minute expiry), up to this age: the evaluation itself
+#: still re-proves identity, venue, settlement, depth and fees.
+HELD_SEED_TTL_S = 6 * 3600
+
+
 class Scheduler:
+    """One worker, one deadline. HELD EVENTS FIRST: a held event's change is
+    queued on `held_pending`, served before any discovery change, never
+    evicted by discovery; its seed is pinned while held. Discovery keeps its
+    FIFO queue, cap and eviction exactly as before."""
+
     def __init__(self, cache, evaluate, audit, *, clock=time.time,
-                 queue_cap=128, seed_cap=512, seed_ttl=1800, deadline=12):
+                 queue_cap=128, seed_cap=512, seed_ttl=1800, deadline=12,
+                 held=None):
+        from . import pinnapi_held as PH
         self.cache, self.evaluate, self.audit, self.clock = cache, evaluate, audit, clock
         self.queue_cap, self.seed_cap = queue_cap, seed_cap
         self.seed_ttl, self.deadline = seed_ttl, deadline
         self.seeds, self.pending, self.seen = OrderedDict(), OrderedDict(), {}
+        self.held_pending = OrderedDict()
+        self.held = held if held is not None else PH.WATCH
         self.wake = asyncio.Event()
         self.counts = Counter()
         self.closed = False
+
+    def _is_held(self, eid) -> bool:
+        try:
+            return bool(self.held.is_held(eid))
+        except Exception:                                       # noqa: BLE001
+            return False
+
+    def _seed_live(self, eid, seed) -> bool:
+        ttl = HELD_SEED_TTL_S if self._is_held(eid) else self.seed_ttl
+        return 0 <= self.clock() - seed['registered_at'] <= ttl
 
     def register(self, event, *, sport_key, family, received_at):
         # Registration is called only AFTER competition confirmation.
@@ -46,8 +71,15 @@ class Scheduler:
                                family=family, received_at=received_at,
                                registered_at=self.clock())
         self.seeds.move_to_end(eid)
+        self._evict_seeds()
+
+    def _evict_seeds(self):
         while len(self.seeds) > self.seed_cap:
-            old, _ = self.seeds.popitem(last=False)
+            # the oldest NON-HELD seed goes; a held event's seed is pinned
+            old = next((k for k in self.seeds if not self._is_held(k)), None)
+            if old is None:
+                break
+            self.seeds.pop(old)
             self.pending.pop(old, None)
             self.seen.pop(old, None)
             self.counts['SEED_EVICTED'] += 1
@@ -56,11 +88,13 @@ class Scheduler:
         if self.closed or quote.key != F.FULL_GAME_MONEYLINE_KEY:
             return
         eid = quote.event_id
+        held = self._is_held(eid)
         seed = self.seeds.get(eid)
         if seed is None:
-            self.counts['NO_CONFIRMED_DISCOVERY'] += 1
+            self.counts['HELD_NO_DISCOVERY_SEED' if held
+                        else 'NO_CONFIRMED_DISCOVERY'] += 1
             return
-        if not 0 <= self.clock() - seed['registered_at'] <= self.seed_ttl:
+        if not self._seed_live(eid, seed):
             self.counts['DISCOVERY_EXPIRED'] += 1
             return
         if not self.cache.read(eid, quote.key, evaluated_ms=self.clock()*1000).get('ok'):
@@ -71,24 +105,44 @@ class Scheduler:
             self.counts['UNCHANGED'] += 1
             return
         self.seen[eid] = version
+        tick = dict(version=version, received_at=quote.received_ms/1000,
+                    queued_at=self.clock(), held=held)
+        if held:
+            # HELD FIRST: its own queue, never evicted by discovery, and a
+            # change already queued for discovery is moved here
+            self.pending.pop(eid, None)
+            if eid in self.held_pending:
+                self.counts['HELD_COALESCED'] += 1
+            self.held_pending[eid] = tick
+            self.counts['HELD_QUEUED'] += 1
+            self.wake.set()
+            return
         if eid in self.pending:
             self.counts['COALESCED'] += 1
         elif len(self.pending) >= self.queue_cap:
             old, _ = self.pending.popitem(last=False)
             self.seen.pop(old, None)
             self.counts['QUEUE_EVICTED'] += 1
-        self.pending[eid] = dict(version=version, received_at=quote.received_ms/1000,
-                                 queued_at=self.clock())
+        self.pending[eid] = tick
         self.wake.set()
+
+    def next_job(self):
+        """(event id, tick) to evaluate next: held before discovery."""
+        if self.held_pending:
+            return self.held_pending.popitem(last=False)
+        if self.pending:
+            return self.pending.popitem(last=False)
+        return None
 
     async def run(self):
         while not self.closed:
             await self.wake.wait()
-            if not self.pending:
+            job = self.next_job()
+            if job is None:
                 self.wake.clear()
                 continue
-            eid, tick = self.pending.popitem(last=False)
-            if not self.pending:
+            eid, tick = job
+            if not self.pending and not self.held_pending:
                 self.wake.clear()
             attempt = dict(attempt_id=uuid.uuid4().hex, event_id=eid, **tick,
                            evaluation_started_at=self.clock(), state='STARTED',
@@ -100,7 +154,7 @@ class Scheduler:
             version = None if q is None else (q.epoch, q.source_change_ms,
                                               tuple(sorted(q.prices.items())))
             if (not got.get('ok') or version != tick['version'] or seed is None or
-                    not 0 <= self.clock()-seed['registered_at'] <= self.seed_ttl):
+                    not self._seed_live(eid, seed)):
                 attempt.update(state='REFUSED', reason=got.get('reason') or 'SUPERSEDED_OR_EXPIRED')
             try:
                 # Audit failure blocks execution, it never becomes an unaudited trade.
@@ -126,6 +180,8 @@ class Scheduler:
                     async with asyncio.timeout(2):
                         await self.audit(attempt)
                 self.counts[attempt['state']] += 1
+                if tick.get('held'):
+                    self.counts['HELD_' + attempt['state']] += 1
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -178,6 +234,10 @@ def start(pool, *, cycle):
 
     ACTIVE = Scheduler(owner.cache, evaluate, audit)
     owner.cache.on_change = ACTIVE.changed
+    # the held watch stays first on the change notification (priority
+    # targets and review triggers), the scheduler after it
+    from . import pinnapi_held as PH
+    PH.reinstall_if_installed(owner.cache)
     return asyncio.create_task(ACTIVE.run(), name='pinnapi-reactive-paper')
 
 
@@ -188,6 +248,10 @@ async def stop(task):
         scheduler.closed = True
         scheduler.cache.on_change = None
         scheduler.pending.clear()
+        scheduler.held_pending.clear()
+        from . import pinnapi_held as PH
+        # the held watch keeps watching (on the feed runtime's cache only)
+        PH.reinstall_if_installed(scheduler.cache)
     if task is not None:
         task.cancel()
         try:
