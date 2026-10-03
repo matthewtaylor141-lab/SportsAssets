@@ -485,16 +485,27 @@ UNAVAILABLE_PROBABILITY = {
 #: cancels and sizes nothing.
 LIVE_T_FIRST, LIVE_T_FILL, LIVE_T_BACKSTOP = ("FIRST_FILL", "FILL_EVENT",
                                               "SCHEDULED_BACKSTOP")
-LIVE_TRIGGER_PRIORITY = {LIVE_T_FIRST: 0, LIVE_T_FILL: 1, LIVE_T_BACKSTOP: 2}
+#: the held market moved on the PinnAPI feed (pinnapi_held): a fresh
+#: probability exists for the 30 s limit, so the position is reviewed on the
+#: next tick instead of at the cadence
+LIVE_T_MARKET = "MARKET_EVENT"
+#: a feed-change re-review at most this often per position (venue pacing:
+#: one BBO read per review); a change is still well inside its 30 s life
+LIVE_MARKET_MIN_GAP_S = 10.0
+LIVE_TRIGGER_PRIORITY = {LIVE_T_FIRST: 0, LIVE_T_MARKET: 1, LIVE_T_FILL: 2,
+                         LIVE_T_BACKSTOP: 3}
 
 
 def live_review_trigger(*, last_reviewed_at, last_held, held,
-                        now: float) -> str | None:
+                        now: float, feed_change_at=None) -> str | None:
     """Which review an OPEN actual position is due, or None. Pure."""
     if last_reviewed_at is None:
         return LIVE_T_FIRST
     if last_held is None or Decimal(str(last_held)) != Decimal(str(held)):
         return LIVE_T_FILL
+    if feed_change_at is not None and float(feed_change_at) > float(
+            last_reviewed_at) and now - float(last_reviewed_at) >= LIVE_MARKET_MIN_GAP_S:
+        return LIVE_T_MARKET
     if now - float(last_reviewed_at) >= MANAGEMENT_EVERY_S:
         return LIVE_T_BACKSTOP
     return None
@@ -1087,17 +1098,21 @@ class Mirror:
                       WHERE r.handoff_id = h.handoff_id
                       ORDER BY reviewed_at DESC, review_id DESC LIMIT 1) lr ON true
                 WHERE h.state = 'OPEN'""")
+        from . import pinnapi_held as PH
         due = []
         for h in hs:
             h = dict(h)
+            fc = PH.changed_at(h["us_market_slug"])
             trig = live_review_trigger(
                 last_reviewed_at=h.get("last_reviewed_at"),
-                last_held=h.get("last_reviewed_held"), held=h["live_held"], now=now)
+                last_held=h.get("last_reviewed_held"), held=h["live_held"], now=now,
+                feed_change_at=fc)
             if trig is None and due_only:
                 continue
             trig = trig or LIVE_T_BACKSTOP
             due_at = (h["first_live_fill_at"].timestamp()
                       if trig == LIVE_T_FIRST and h.get("first_live_fill_at") is not None
+                      else fc if trig == LIVE_T_MARKET
                       else (h.get("updated_at").timestamp()
                             if trig == LIVE_T_FILL and h.get("updated_at") is not None
                             else (None if h.get("last_reviewed_at") is None

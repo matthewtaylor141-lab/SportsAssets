@@ -852,3 +852,111 @@ async def decide_valuation(conn, *, valuation_id, now: float | None = None,
     except Exception as exc:                                   # noqa: BLE001
         return {"decided": False, "error": "%s: %s" % (type(exc).__name__,
                                                        str(exc)[:200])}
+
+
+# ═════════════════════════════════════════════════════════════════════
+# XAVIER'S HELD REVIEW ON A HELD MARKET'S PRICE CHANGE (pinnapi_held)
+# ═════════════════════════════════════════════════════════════════════
+#
+# A held market's price changed on the PinnAPI feed: a fresh probability
+# exists for the 30 s limit from now. Waiting for the next servicing pass
+# (every 60 s) would usually miss it, so Xavier reviews the groups holding
+# that contract at once -- Xavier's step only, on the paper pass's own
+# locks (busy -> skipped: the running pass reviews it as a MARKET_EVENT),
+# no book read, no entry decision. Debounced: one run at a time, at least
+# HELD_REVIEW_MIN_GAP_S between runs, slugs coalesced meanwhile.
+
+HELD_REVIEW_MIN_GAP_S = 5.0
+HELD_REVIEW_BUDGET_S = 10.0
+HELD_REVIEW_TIMEOUT_S = 20.0
+_HELD: dict = {"task": None, "pending": set(), "runs": 0, "coalesced": 0,
+               "last": None}
+
+
+async def held_review(conn, *, slugs, now: float | None = None,
+                      account_id: str | None = None, fee_fn=None) -> dict:
+    """XAVIER'S STEP FOR THE GROUPS HOLDING `slugs`, now. Never raises."""
+    from . import paper_xavier as PX
+    acct = account_id or DEFAULT_ACCOUNT_ID
+    live_clock = now is None
+    at = float(now if now is not None else time.time())
+    out: dict[str, Any] = {"at": at, "slugs": sorted(slugs or []),
+                           "ran": False}
+    if not S.env_on():
+        return dict(out, refusal=S.R_ENV_OFF)
+    try:
+        en = await S.enablement(conn)
+    except Exception as exc:                                   # noqa: BLE001
+        return dict(out, refusal=R_DISABLED, why=type(exc).__name__)
+    if not en.get("enabled"):
+        return dict(out, refusal=R_DISABLED, why=en.get("refusal"))
+    lock = _proc_lock()
+    if lock.locked():
+        return dict(out, refusal=R_BUSY, why="PROCESS_LOCK_HELD")
+    async with lock:
+        if not await conn.fetchval("SELECT pg_try_advisory_lock($1)",
+                                   ADVISORY_LOCK_KEY):
+            return dict(out, refusal=R_BUSY, why="ADVISORY_LOCK_HELD")
+        try:
+            sess = await S.ensure_session(conn, now=at, account_id=acct)
+            if not sess.get("ok"):
+                return dict(out, refusal=sess.get("refusal"))
+            groups = [r["group_id"] for r in await conn.fetch(
+                "SELECT DISTINCT o.group_id FROM paper_orders o "
+                "  JOIN paper_handoffs h ON h.group_id = o.group_id "
+                " WHERE o.account_id = $1 AND o.role = 'ENTRY' "
+                "   AND o.us_market_slug = ANY($2::text[])", acct,
+                sorted(slugs or []))]
+            ctx: dict[str, Any] = {
+                "session": sess, "session_id": sess["session_id"],
+                "account_id": acct,
+                "config": sess.get("effective_config") or sess["config"],
+                "now": at, "fee_fn": fee_fn,
+                "deadline": time.monotonic() + HELD_REVIEW_BUDGET_S,
+                "clock": (time.time if live_clock else (lambda: at))}
+            got = await PX.step(conn, ctx, only_groups=groups)
+            return dict(out, ran=True, groups=groups, xavier=got)
+        except Exception as exc:                               # noqa: BLE001
+            return dict(out, error=type(exc).__name__,
+                        detail=str(exc)[:200])
+        finally:
+            try:
+                await conn.execute("SELECT pg_advisory_unlock($1)",
+                                   ADVISORY_LOCK_KEY)
+            except Exception:                                  # noqa: BLE001
+                pass
+
+
+def schedule_held_review(slugs, *, get_pool=None) -> dict:
+    """Synchronous (the feed's change notification): schedule a bounded
+    background held review on its own connection. Returns at once."""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return {"scheduled": False, "why": "NO_RUNNING_LOOP"}
+    _HELD["pending"].update(slugs or [])
+    t = _HELD.get("task")
+    if t is not None and not t.done():
+        _HELD["coalesced"] += 1
+        return {"scheduled": False, "why": "COALESCED_INTO_THE_RUNNING_REVIEW"}
+    if get_pool is None:
+        from ..db import get_pool
+
+    async def run():
+        while _HELD["pending"]:
+            batch = set(_HELD["pending"])
+            _HELD["pending"].clear()
+            try:
+                pool = await get_pool()
+                async with pool.acquire(timeout=ACQUIRE_TIMEOUT_S) as c:
+                    _HELD["last"] = await asyncio.wait_for(
+                        held_review(c, slugs=batch), HELD_REVIEW_TIMEOUT_S)
+                _HELD["runs"] += 1
+            except asyncio.CancelledError:
+                raise
+            except Exception:                                  # noqa: BLE001
+                log.warning("xavier held review failed", exc_info=True)
+            await asyncio.sleep(HELD_REVIEW_MIN_GAP_S)
+
+    _HELD["task"] = loop.create_task(run())
+    return {"scheduled": True}

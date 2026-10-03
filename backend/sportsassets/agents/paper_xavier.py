@@ -67,6 +67,7 @@ nothing and is recorded as a finding.
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import math
@@ -426,12 +427,22 @@ async def _latest_book(conn, slug: str):
 
 async def _held_feed(conn, *, pos: dict, payout_event, payout_is_complement,
                      at: float, max_age_s: float) -> dict:
-    """The held contract on THIS process's PinnAPI cache (read only: no
-    socket, no network); FEED_OWNERSHIP_NOT_HELD when no owner runs here."""
+    """THE ON-DEMAND READ BEFORE A REVIEW: the held contract on THIS
+    process's PinnAPI cache (read only: no socket, no network), bounded to
+    pinnapi_feed_runtime.HELD_ON_DEMAND_BUDGET_S (1 s) end to end; fresh only
+    when the quote's source change is within the 30 s limit and the event,
+    full-game moneyline market, period and side identity match.
+    FEED_OWNERSHIP_NOT_HELD when no owner runs here."""
     from .. import pinnapi_feed_runtime as FR
-    return await FR.held_moneyline(
-        conn, us_market_slug=pos["us_market_slug"], payout_event=payout_event,
-        payout_is_complement=payout_is_complement, at=at, max_age_s=max_age_s)
+    try:
+        async with asyncio.timeout(FR.HELD_ON_DEMAND_BUDGET_S):
+            return await FR.held_moneyline(
+                conn, us_market_slug=pos["us_market_slug"],
+                payout_event=payout_event,
+                payout_is_complement=payout_is_complement, at=at,
+                max_age_s=max_age_s)
+    except TimeoutError:
+        return {"ok": False, "reason": FR.R_ON_DEMAND_TIMEOUT}
 
 
 async def _measure(conn, ctx, *, pos: dict, levels_buy: list) -> dict:
@@ -490,11 +501,15 @@ async def _measure(conn, ctx, *, pos: dict, levels_buy: list) -> dict:
 
 def _trigger(*, group: str, new_handoffs: list, last: dict | None,
              last_fill_at, book_at, best_exit, at: float,
-             backstop_s: float) -> str | None:
+             backstop_s: float, feed_change_at=None) -> str | None:
     if group in new_handoffs or last is None:
         return T_FIRST
     if last_fill_at is not None and last_fill_at > last["reviewed_at"]:
         return T_FILL
+    # THE HELD MARKET MOVED ON THE PINNAPI FEED since the last review
+    # (pinnapi_held): a fresh probability exists for ~30 s from now on
+    if feed_change_at is not None and feed_change_at > last["reviewed_at"]:
+        return T_MARKET
     prev_exit = ((last.get("measure") or {}).get("best_exit_at_review"))
     if book_at is not None and book_at > last["reviewed_at"] and \
             best_exit is not None and prev_exit is not None and \
@@ -768,6 +783,9 @@ async def _maintain_standing(conn, ctx, *, pos, standing, prot, md, at,
 #: THE TRIGGERS' PRIORITY: a position never reviewed goes first, then one
 #: with a new fill, a market event, the scheduled backstop.
 TRIGGER_PRIORITY = {T_FIRST: 0, T_FILL: 1, T_MARKET: 2, T_BACKSTOP: 3}
+#: a held market that just moved on the feed is reviewed right after the
+#: first reviews: its fresh probability lasts only the 30 s limit
+FEED_CHANGE_PRIORITY = 0.5
 #: XAVIER'S RESERVED BUDGET (s): the pass budget is shared with the steps
 #: that run first (books, simulation, every entry strategy); when they
 #: spend it, Xavier still reviews the due positions -- most urgent first --
@@ -787,7 +805,7 @@ def _due_at(trig: str, *, first_fill_at, last: dict | None, last_fill_at,
     return None if last is None else last["reviewed_at"] + backstop_s
 
 
-async def step(conn, ctx: dict) -> dict:
+async def step(conn, ctx: dict, *, only_groups=None) -> dict:
     """REVIEW EVERY HELD GROUP THAT IS DUE (first fill, fill event, market
     event or the scheduled backstop): the due list is built first and
     reviewed most urgent first (FIRST_FILL, FILL_EVENT, MARKET_EVENT,
@@ -800,7 +818,10 @@ async def step(conn, ctx: dict) -> dict:
     backstop = float(cad.get("xavier_backstop_s", 60.0))
     reserve = float(cad.get("xavier_reserved_budget_s", RESERVED_BUDGET_S))
     deadline = max(float(ctx["deadline"]), time.monotonic() + reserve)
+    from .. import pinnapi_held as PH
     groups = sorted({p["group_id"] for p in await L.positions(conn, acct)})
+    if only_groups is not None:
+        groups = [g for g in groups if g in set(only_groups)]
     handed = {r["group_id"]: L._epoch(r["first_fill_at"]) for r in
               await conn.fetch("SELECT group_id, first_fill_at FROM "
                                " paper_handoffs WHERE account_id=$1", acct)}
@@ -833,15 +854,22 @@ async def step(conn, ctx: dict) -> dict:
                                 direction="SELL", holding_side=side)
             best_exit = lv["levels"][0]["price"] if lv["levels"] else None
         book_at = None if book is None else L._epoch(book["observed_at"])
+        fc = None if slug is None else PH.changed_at(slug)
         trig = _trigger(group=g, new_handoffs=ctx.get("new_handoffs") or [],
                         last=lastd, last_fill_at=lf, book_at=book_at,
-                        best_exit=best_exit, at=at, backstop_s=backstop)
+                        best_exit=best_exit, at=at, backstop_s=backstop,
+                        feed_change_at=fc)
         if trig is None:
             continue
-        d_at = _due_at(trig, first_fill_at=handed[g], last=lastd,
-                       last_fill_at=lf, book_at=book_at, backstop_s=backstop)
-        due.append((TRIGGER_PRIORITY[trig], d_at if d_at is not None else at,
-                    g, trig, d_at))
+        by_feed = (trig == T_MARKET and fc is not None and lastd is not None
+                   and fc > lastd["reviewed_at"])
+        d_at = (fc if by_feed else
+                _due_at(trig, first_fill_at=handed[g], last=lastd,
+                        last_fill_at=lf, book_at=book_at,
+                        backstop_s=backstop))
+        due.append((FEED_CHANGE_PRIORITY if by_feed else
+                    TRIGGER_PRIORITY[trig],
+                    d_at if d_at is not None else at, g, trig, d_at))
     due.sort()
     out["due"] = len(due)
     for i, (_, _, g, trig, d_at) in enumerate(due):

@@ -655,3 +655,13 @@ tests/test_intel_attribution.py
 tests/test_intel_risk.py
 tests/test_intel_regime.py
 tests/test_intel_sizing_allocator.py
+# Xavier obtains a fresh probability for each held position
+# (claude/cand22-xavier-fresh): open paper / actual positions are the PinnAPI
+# path's priority targets (held events served before discovery by the one
+# reactive worker, seed pinned while held), a held market's price change
+# triggers the review (paper Xavier-only held review; mirror MARKET_EVENT on
+# the next tick, paced), the on-demand cache read is bounded to 1 s and used
+# only when its source change is within 30 s with the same identity; a
+# stale-only world stays STALE / UNAVAILABLE with no EXIT / REDUCE /
+# REALLOCATE.
+tests/test_xavier_fresh_probability.py
