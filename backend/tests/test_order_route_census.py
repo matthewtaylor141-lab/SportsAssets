@@ -229,7 +229,13 @@ def test_no_order_path_bypasses_the_adapter():
                # itself (its controls asserted in
                # test_the_execution_mirror_declares_its_controls)
                "sportsassets/execmirror_probe.py",
-               "sportsassets/execmirror.py"}
+               "sportsassets/execmirror.py",
+               # (210) the same-book probe's KEYLESS retail client: public
+               # gateway only, every transport wrapped GET-only and gated
+               # (institutional_same_book.install_read_only); held below to
+               # the same no-submitting-verb assertion as the read-only
+               # api modules
+               "sportsassets/institutional_same_book.py"}
     offenders = {s[0] for s in sites} - allowed
     assert not offenders, (
         "venue client constructed outside the known adapters: %s"
@@ -237,7 +243,8 @@ def test_no_order_path_bypasses_the_adapter():
 
     for mod in ("sportsassets/api/pmus_account.py",
                 "sportsassets/api/track_record.py",
-                "sportsassets/execmirror_probe.py"):
+                "sportsassets/execmirror_probe.py",
+                "sportsassets/institutional_same_book.py"):
         src = open(os.path.join(BACKEND, mod)).read()
         for verb in ("post_order", "create_order", "orders.create",
                      "close_position"):
