@@ -1575,3 +1575,142 @@ VALUES of the operator FLAGS only -- never a key, token, URL or
 credential. The switches that decide whether money moves
 (LIVE_COPY_HALT: 'on'/'1'/'true'/'yes'/'halt'/'stop' halt) must
 be readable without a screenshot; everything else stays masked.
+
+## [R82]
+
+Documents:
+
+```
+deploy-api-commit)
+```
+
+API-ONLY RELEASE.
+
+WHY THIS EXISTS AT ALL. `services` reports that
+sportsassets-api AND sportsassets-workers both track the
+branch claude/session-njaewf with autoDeploy=yes. Separate
+services do NOT give isolation when they share an
+auto-deploy branch: one push to that branch deploys the web
+service and RESTARTS THE COLLECTOR, mid-window, losing the
+connection epoch and writing a PROCESS_REPLACED gap. That
+has already happened once in this run.
+
+A worker deploy has exactly three triggers:
+  (a) a push to the branch it tracks;
+  (b) a Blueprint sync, i.e. a render.yaml change on that
+      branch;
+  (c) an explicit API call naming the worker's service id.
+
+This action does none of them. It pushes nothing, changes
+no render.yaml, and the service it calls is not a
+parameter: the name is a literal below, the type is
+asserted to be web_service, and a worker id cannot be
+reached through it however `service` is set. `service` is
+ignored entirely.
+
+arg = the 40-character commit to deploy. It need not be on
+the branch the service tracks -- that is the point: the
+release rides a commit id, not a push.
+
+## [R83]
+
+Documents:
+
+```
+api-branch-get)
+```
+
+The API service's OWN tracked branch, read and set.
+Pointing the web service at its own branch is what ends the
+shared-branch coupling for good: after it, a command-centre
+push can never reach the collector because the collector
+does not watch that branch. Like the action above, the
+service is a literal and a worker cannot be named.
+
+## [R84]
+
+Documents:
+
+```
+evidence-schema) need_confirm; SQL="CREATE TABLE IF NOT EXISTS bettor_evidence_artifact (id BIGSERIA
+```
+
+THE EVIDENCE TABLE. Three statements, one per
+step of the release, and each is separately runnable.
+
+evidence-schema (DO)  create it, then READ BACK the
+                      columns and indexes. A CREATE
+                      that returned no error is not
+                      evidence the table is right;
+                      the catalog is.
+evidence-inventory    what is in it, by name and
+                      version, without bodies.
+evidence-drop (DO)    the rollback, and it REFUSES
+                      while rows exist. Published
+                      evidence is append-only and
+                      superseded versions are kept on
+                      purpose; a rollback that could
+                      erase them would be a worse
+                      outcome than the thing it undid.
+                      The API needs no rollback of its
+                      own here: with the table absent
+                      it falls back to the working
+                      tree and says so in provenance.
+
+## [R93]
+
+Documents:
+
+```
+# [R88] THE LEARNING TABLES. Migration, then a
+```
+
+FERRARI'S DECOMPOSITION, from the fills.
+Identity FIRST: the wallet is
+0xfe787d2d... per 021_seed_dossier_promotions.sql,
+and BETA48_STATE records that Ferrari is NOT 0x2c33,
+which is a separate account -- so all three rows are
+returned and the join keys on the WALLET, never the
+username, whose casing differs between code and data.
+
+Then per condition: quantity and cost on each leg,
+the PAIRED quantity (the lesser leg), the RESIDUAL
+(the difference), and the pair price. A pair price
+below 1.00 is a pair that clears; above it is a pair
+that locks a loss, which is why pairing FREQUENTLY is
+not the same as pairing PROFITABLY. SELECT only.
+
+## [R94]
+
+Documents:
+
+```
+workers-branch-set)
+workers-commit-deploy)
+```
+
+WORKERS: PIN, THEN RELEASE BY COMMIT ID (cand21, 2026-10-03).
+
+Until these existed nothing in this workflow could set the workers' branch
+or deploy the workers by commit: `deploy` takes the latest commit of
+whatever branch the service tracks, `env-set` redeploys that service, and
+the two API actions above are literal to the web service. So
+sportsassets-workers sat on 47086de from claude/session-njaewf with
+autoDeploy=yes -- a branch that had diverged from the release lineage --
+while the API ran the release by commit id.
+
+workers-branch-set (confirm=DO, arg = branch). One PATCH that sets the
+branch AND autoDeploy=no together, so there is no instant at which the
+workers track a new branch with auto-deploy still on. The service is a
+literal and its type is asserted to be background_worker; the API cannot
+be reached through it. A PATCH does not deploy.
+
+workers-commit-deploy (confirm=DO, arg = 40-hex sha). REFUSES unless the
+workers' autoDeploy already reads "no" -- otherwise the next push to the
+tracked branch would silently replace the commit just deployed, and the
+exact-SHA lineage would be a claim rather than a fact. The API's deploys
+are printed before and after and must be unchanged. The commit need not be
+on the tracked branch. The deployed id is read back from the workers'
+own boot row: `sql mirror-preflight` prints workers_boot, whose
+commit_sha (cand21) is the full id the process booted with, beside
+venue_writes and the loops it did not start.

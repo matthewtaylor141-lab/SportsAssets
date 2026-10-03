@@ -188,6 +188,66 @@ class Denied(Exception):
         super().__init__("%s%s" % (reason, (": " + detail) if detail else ""))
 
 
+# THE PROCESS LOCK (cand21, 2026-10-03). A PROCESS-WIDE, ONE-WAY,
+# DATABASE-FREE refusal of every venue write -- submit, close AND cancel.
+#
+# WHY IT EXISTS. On 2026-10-03 the workers service held the FUNDED retail
+# key with LIVE_TRADING_ENABLED=1 and LIVE_COPY_HALT=0, and the only thing
+# between a whale fill and a funded order was one database row
+# (live_trading_paused = true), one confirm=DO preset (`pause-off`) away.
+# The workers' job is ingestion and measurement; venue writes are not it.
+#
+# HOW IT DIFFERS FROM EVERY OTHER CONTROL HERE.
+#   * It is read from MEMORY, not the database: nothing can make it
+#     unreadable, so nothing can make it fail open, and it cannot be
+#     cleared by a SQL preset or an env edit.
+#   * It covers CANCELS. The module docstring keeps cancellation ungated
+#     on purpose -- a paused system must still pull its rests -- and that
+#     stays true for every process that is NOT locked (the API). A locked
+#     process holds no rests by construction (its order loops are not
+#     started), so blocking its cancels traps nothing; it removes the
+#     last venue write it could still make.
+#   * There is no unlock outside tests. A process that should write to a
+#     venue is a different deploy, not a flag.
+_PROCESS_LOCK: str | None = None
+
+
+def lock_process(reason: str) -> None:
+    """Refuse every venue write from this process from now on. Idempotent;
+    the first reason is kept (it is the one the boot marker reports)."""
+    global _PROCESS_LOCK
+    if _PROCESS_LOCK is None:
+        _PROCESS_LOCK = str(reason or "process locked")
+        log.warning("execution gate: PROCESS LOCKED -- no venue writes "
+                    "(submit, close, cancel) from this process: %s",
+                    _PROCESS_LOCK)
+
+
+def process_lock() -> str | None:
+    """The lock's reason, or None when this process is not locked."""
+    return _PROCESS_LOCK
+
+
+def refuse_if_locked(operation: str = "cancel", *,
+                     slug: str | None = None) -> None:
+    """Raise Denied in a locked process; a no-op everywhere else.
+
+    NOT AN AUTHORIZATION. It reads no switch and no database: a paused,
+    halted, unauthorized process that is not locked still cancels, exactly
+    as the module docstring says. Only a process that holds no rests by
+    construction (workers/all.py's lock) is refused."""
+    if _PROCESS_LOCK is not None:
+        raise Denied("process_locked",
+                     "%s refused in this process: %s" % (operation, _PROCESS_LOCK))
+
+
+def _unlock_process_for_tests() -> None:
+    global _PROCESS_LOCK
+    if not os.environ.get("PYTEST_CURRENT_TEST"):
+        raise RuntimeError("the process lock is one-way outside tests")
+    _PROCESS_LOCK = None
+
+
 @dataclass
 class Snapshot:
     paused: bool = True
@@ -435,6 +495,10 @@ def _authorize_read() -> Snapshot:
 def _decide(snap: Snapshot, operation: str, lane: str,
             slug: str | None) -> Snapshot:
     """The control checks, given a snapshot that was just read."""
+    if _PROCESS_LOCK is not None:
+        # first, and independent of the snapshot: a locked process is
+        # refused even when the read succeeded and every switch says yes
+        raise Denied("process_locked", _PROCESS_LOCK)
     if not snap.ok:
         raise Denied("authorization_unavailable", snap.why)
     if snap.paused:
@@ -524,6 +588,7 @@ def describe() -> dict:
         "copy_halted": snap.copy_halted,
         "loss_stop": snap.loss_stop,
         "overspend": snap.overspend,
+        "process_lock": _PROCESS_LOCK,
         "age_s": round(time.time() - snap.read_at, 3) if snap.read_at else None,
         "stale": (snap.read_at == 0.0
                   or (time.time() - snap.read_at) > MAX_STALE_S),
@@ -535,7 +600,9 @@ def describe() -> dict:
         "global_only_lanes": sorted(GLOBAL_ONLY_LANES),
         "known_copy_lanes": sorted(KNOWN_COPY_LANES),
         "cancellation": "NOT gated; cancels reduce exposure and stay "
-                        "available while paused",
+                        "available while paused (refused only in a process "
+                        "locked against every venue write, which holds no "
+                        "rests: the workers)",
     }
 
 
@@ -565,6 +632,9 @@ def _install_snapshot_for_tests(snap: Snapshot) -> None:
 
 def _restore_for_tests() -> None:
     globals()["_authorize_read"] = _authorize_read_real
+    # a test that ran workers/all.main() locked the process; the next
+    # test must start from the production default for ITS process
+    globals()["_PROCESS_LOCK"] = None
     unbind()
 
 

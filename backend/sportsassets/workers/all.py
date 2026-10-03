@@ -443,6 +443,49 @@ LOOPS: list[tuple[str, Callable[[], Awaitable[None]]]] = [
     ("memory", memory_watch),
 ]
 
+# THE WORKERS HOLD NO VENUE WRITE (cand21, 2026-10-03).
+#
+# WHAT WAS FOUND. This process ran with the FUNDED retail key,
+# LIVE_TRADING_ENABLED=1, LIVE_COPY_HALT=0 and PMUS_MIRROR=on. Four loops
+# above can reach a venue write -- copy_sweep (maybe_execute's entries and
+# the reapers' cancels), underdog (entries, cash-outs, copy exits),
+# whale_exits (mirror_exit's sells) and mirror_live (rests, takes,
+# flattens and its ALWAYS-ON cancel path) -- and so can the ingestion
+# loops, through pipeline -> execute_copy on every fresh whale fill. The
+# one thing standing between a fill and a funded order was a single
+# database row, live_trading_paused, one confirm=DO preset away.
+#
+# WHAT THIS DOES, IN THREE INDEPENDENT LAYERS, EACH SUFFICIENT ALONE:
+#   1. the four loops are NOT STARTED (they stay registered above, as the
+#      record of what the service used to run; `startable_loops` filters);
+#   2. the process is LOCKED in the execution gate before anything else
+#      runs: submit, close_position, the CLOB path AND cancel are refused
+#      from memory, with no database read that could fail open;
+#   3. the retail client's transport refuses every non-read request, and
+#      the ingestion pipeline hands no fill to the copy lane.
+#
+# RE-ENABLING ANY OF IT IS A CODE CHANGE AND AN EXACT-SHA DEPLOY, never an
+# env edit or a SQL preset. There is deliberately no flag here.
+VENUE_WRITE_LOOPS = frozenset({"copy_sweep", "underdog", "whale_exits",
+                               "mirror_live"})
+PROCESS_LOCK_REASON = ("sportsassets-workers holds no venue write (cand21): "
+                       "ingestion and measurement only")
+
+
+def startable_loops(loops=None) -> list:
+    """The loops main() starts: LOOPS minus VENUE_WRITE_LOOPS, order kept."""
+    return [(n, fn) for n, fn in (LOOPS if loops is None else loops)
+            if n not in VENUE_WRITE_LOOPS]
+
+
+def _lock_venue_writes() -> str:
+    """Lock this process in the execution gate. Synchronous and DB-free,
+    so it cannot fail open and it runs before any loop or read."""
+    from .. import execution_gate as gate
+
+    gate.lock_process(PROCESS_LOCK_REASON)
+    return gate.process_lock()
+
 
 async def supervise(name: str, factory: Callable[[], Awaitable[None]], *,
                     boot_delay: float = 0.0) -> None:
@@ -463,6 +506,25 @@ async def supervise(name: str, factory: Callable[[], Awaitable[None]], *,
         await asyncio.sleep(RESTART_DELAY_SECONDS)
 
 
+def _boot_marker(at: str) -> dict:
+    """The workers_boot row. `commit` stays seven characters (the probe and
+    /api readers know that shape); `commit_sha` is the full id, so the
+    exact-SHA lineage is observable from `render-ops sql mirror-preflight`
+    without a deploy listing. `venue_writes` is the process lock read
+    back from the gate itself, never assumed."""
+    import os
+
+    from .. import execution_gate as gate
+
+    sha = os.environ.get("RENDER_GIT_COMMIT") or "?"
+    lock = gate.process_lock()
+    return {"commit": sha[:7], "commit_sha": sha, "at": at,
+            "venue_writes": "LOCKED" if lock else "NOT_LOCKED",
+            "lock_reason": lock,
+            "not_started": sorted(VENUE_WRITE_LOOPS),
+            "started": [n for n, _fn in startable_loops()]}
+
+
 async def _record_boot() -> None:
     """Workers-side /healthz (2026-08-24): three probes in a row read a
     silent premap sweep and the diagnosis stalled on 'is the worker even
@@ -481,10 +543,8 @@ async def _record_boot() -> None:
             "INSERT INTO ingestion_state (key, value) "
             "VALUES ('workers_boot', $1::jsonb) "
             "ON CONFLICT (key) DO UPDATE SET value=$1::jsonb",
-            json.dumps({
-                "commit": (os.environ.get("RENDER_GIT_COMMIT") or "?")[:7],
-                "at": datetime.now(tz=timezone.utc)
-                .isoformat(timespec="seconds")}))
+            json.dumps(_boot_marker(datetime.now(tz=timezone.utc)
+                                    .isoformat(timespec="seconds"))))
     except Exception:  # noqa: BLE001 — the marker must not block boot
         log.exception("workers_boot marker write failed")
 
@@ -514,6 +574,10 @@ async def _bind_execution_gate() -> None:
 
 
 async def main() -> None:
+    # cand21: the process is LOCKED before anything else -- before the
+    # gate is bound, before the boot marker, before any loop. Synchronous
+    # and in memory: there is nothing to wait for and nothing to fail.
+    _lock_venue_writes()
     # The gate is bound first and awaited. Everything else in this
     # function is deliberately concurrent; this one is not.
     await _bind_execution_gate()
@@ -525,7 +589,7 @@ async def main() -> None:
     # commit is booting.
     await asyncio.gather(_record_boot(),
                          *(supervise(name, fn, boot_delay=i * BOOT_STAGGER_S)
-                           for i, (name, fn) in enumerate(LOOPS)))
+                           for i, (name, fn) in enumerate(startable_loops())))
 
 
 if __name__ == "__main__":
