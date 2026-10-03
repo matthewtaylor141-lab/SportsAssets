@@ -599,3 +599,7 @@ tests/test_render_ops_workers_release.py
 # REALLOCATE, value-add against counterfactuals frozen at entry.
 tests/test_xavier_management_loop.py
 tests/test_xavier_thesis_reallocate_value_add.py
+# cand22: NCAAF (venue cfb board) reaches a recorded, named paper decision
+# through the real cycle -- selection, fixture confirmation, venue-native
+# identity (school + nickname), valuation, Derek -- never a silent drop.
+tests/test_ncaaf_reaches_a_recorded_decision.py
