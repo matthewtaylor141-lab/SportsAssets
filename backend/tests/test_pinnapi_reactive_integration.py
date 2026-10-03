@@ -19,7 +19,8 @@ started by a feed frame.
 WHAT IS SUBSTITUTED, AT ITS TRANSPORT BOUNDARY ONLY (the seams the existing
 harnesses use -- tests/test_venue_native_identity_matches_the_measured_fixture
 `substitute` / `seed_venue` / `Game`, tests/test_completed_game_collector_path
-`_wire`): the odds provider's catalogue/odds/scores fetches, the league
+`_wire`): the odds provider's catalogue/odds/scores fetches and its
+bounded single-event corroboration read (`fetch_event_odds`), the league
 schedule, the venue client's listing/book calls, venue pacing, and the paper
 market-data transport. ONE synthetic venue book (`_Venue`) answers both the
 collector's book read and the paper book read, so the two can never disagree
@@ -51,6 +52,7 @@ from sportsassets import pinnapi_feed_runtime as FR
 from sportsassets import pinnapi_primary as P
 from sportsassets import pinnapi_reactive as R
 from sportsassets import pmus
+from sportsassets import valuation_corroboration as CORR
 from sportsassets import venue_pace
 from sportsassets.agents import paper_benchmark as PB
 from sportsassets.agents import paper_derek as PD
@@ -66,6 +68,7 @@ pg = pytest.mark.skipif(not H.DSN, reason="needs RN1X_TEST_DSN")
 
 BACKEND = pathlib.Path(__file__).resolve().parents[1]
 MIGRATION_194 = BACKEND / "migrations" / "194_pinnapi_reactive_attempts.sql"
+MIGRATION_195 = BACKEND / "migrations" / "195_valuation_corroboration.sql"
 SPORT_ID = 6                      # PinnAPI baseball
 RUNTIME_ID = "rt-reactive-integration"
 TERMINAL = ("COMPLETED", "REFUSED", "TIMEOUT", "ERROR", "CANCELLED")
@@ -200,6 +203,8 @@ async def _ensure_schema(conn):
     # the harness's way of putting a migration it needs in place
     # (test_derek_enters_on_conservative_agreement._ensure_schema)
     await conn.execute(MIGRATION_194.read_text())
+    # every PinnAPI valuation is written with its corroboration row (195)
+    await conn.execute(MIGRATION_195.read_text())
     await pm._ensure_table(conn)
     await conn.execute("CREATE TABLE IF NOT EXISTS ingestion_state "
                        "(key TEXT PRIMARY KEY, value TEXT)")
@@ -210,6 +215,9 @@ async def _clean(conn, game, eid):
     async with conn.transaction():
         # paper_decisions keep their valuation id (PL.purge_everything)
         await conn.execute("SET LOCAL session_replication_role = replica")
+        await conn.execute(
+            "DELETE FROM valuation_corroboration WHERE us_market_slug=$1",
+            game.us_slug)
         await conn.execute(
             "DELETE FROM external_valuations WHERE us_market_slug=$1",
             game.us_slug)
@@ -277,6 +285,26 @@ async def env(monkeypatch, new_strategies_off):
         e.fetches.append(sport_key)
         return await real_fetch(sport_key, **kw)
     monkeypatch.setattr(loop, "fetch_odds", counted_fetch)
+    # THE BOUNDED SINGLE-EVENT CORROBORATION READ, at its transport boundary
+    # (`ext_pinnacle_loop.fetch_event_odds`). Counted APART from the bulk
+    # fetch so a test can assert exactly which provider request was made. Its
+    # answer is `e.corroboration(now)`: by default the same event, freshly
+    # stamped. The read budget starts empty for every test.
+    e.corr_fetches = []
+    e.corroboration = lambda now: VN.odds_event(e.game, "rx%d" % e.eid,
+                                                at=now)
+
+    async def counted_event_read(sport_key, event_id, *, api_key,
+                                 timeout=None):
+        now = time.time()
+        e.corr_fetches.append((sport_key, event_id))
+        return {"ok": True, "status": 200, "event": e.corroboration(now),
+                "received_at": now, "credits_used": "101",
+                "credits_remaining": "899", "credits_last": "3",
+                "latency_ms": 12.5}
+    monkeypatch.setattr(loop, "fetch_event_odds", counted_event_read)
+    monkeypatch.setattr(CORR, "BUDGET", CORR.ReadBudget())
+    monkeypatch.delenv(loop.CORROBORATION_READS_ENV, raising=False)
     monkeypatch.setattr(pmus, "_get_client", lambda: e.venue)
     monkeypatch.setattr(venue_pace, "pace", lambda *a, **k: 0.0)
     loop.rules_cache_reset()
@@ -344,6 +372,11 @@ async def _wait_terminal(e, n=1, timeout=45.0) -> list:
         await asyncio.sleep(0.1)
     raise AssertionError("no terminal attempt within %ss: %r counts=%r" % (
         timeout, await _attempts(e), dict(R.ACTIVE.counts)))
+
+
+async def _corroboration_row(e, vid):
+    return await e.conn.fetchrow(
+        "SELECT * FROM valuation_corroboration WHERE valuation_id=$1", vid)
 
 
 async def _valuation(e, vid):
@@ -422,9 +455,24 @@ async def test_a_changed_frame_evaluates_through_the_real_cycle_and_paper_hook(
     assert a["writer"]["pid"] == os.getpid(), a["writer"]
     assert a["writer"]["runtime_id"] == RUNTIME_ID, a["writer"]
 
-    # paper only: no funded or inventory write; no provider fetch
+    # THE PINNAPI READ'S OWN COUNT IS 1; the floor was met by the separate,
+    # persisted corroboration -- here the seed's own odds-API read, still
+    # inside PINNACLE_MAX_AGE_S because discovery ran seconds ago
+    assert v["outcome_books"] == 1
+    c = ref["corroboration"]
+    assert c["qualified"] is True, c
+    assert c["corroborating"]["source"] == CORR.SRC_STORED_DISCOVERY
+    assert c["corroborating_outcome_books"] >= 2
+    row = await _corroboration_row(e, vids[0])
+    assert row["qualified"] is True and row["pinnapi_outcome_books"] == 1
+
+    # paper only: no funded or inventory write; NO PROVIDER FETCH OF EITHER
+    # KIND. The bulk fetch never runs on the reactive path, and the bounded
+    # corroboration read (`fetch_event_odds`) is made only when the held
+    # odds-API read is not current -- here it is, so none was made.
     assert await _counts(e.conn) == funded_before
     assert len(e.fetches) == e.fetches_after_discovery
+    assert e.corr_fetches == []
     assert R.ACTIVE.counts["COMPLETED"] == 1
 
 
@@ -439,6 +487,7 @@ async def _one_reactive(e, *, prices=WS_EDGE):
     rows = await _wait_terminal(e)
     assert await _counts(e.conn) == funded_before
     assert len(e.fetches) == e.fetches_after_discovery
+    assert e.corr_fetches == []          # the held read was current
     return rows
 
 
@@ -592,6 +641,135 @@ async def test_feed_epoch_changed_during_evaluation_removes_the_ws_probability(
         second = rows[1]
         assert second["detail"]["version"][0] == 2, second
         assert second["attempt_id"] != first["attempt_id"]
+
+
+# ═════════════════════════════════════════════════════════════════════
+# 2b · CORROBORATION OF THE PINNAPI READ'S OUTCOME DEPTH (migration 195)
+# ═════════════════════════════════════════════════════════════════════
+#
+# In production the WS seed's odds-API read is minutes old by the time a frame
+# arrives (the periodic cycle runs every 15 minutes), so it can never meet the
+# PINNACLE_MAX_AGE_S bound. These start from such a seed: its books stamped
+# well outside the bound.
+
+STALE_S = loop.PINNACLE_MAX_AGE_S + 90.0
+
+
+def _stale_discovery(e):
+    e.discovery = lambda now: [VN.odds_event(e.game, "rx%d" % e.eid, at=now,
+                                             stamp_age_s=STALE_S)]
+
+
+@pg
+async def test_a_stale_seed_makes_exactly_one_bounded_corroboration_read_and_enters(
+        env):
+    """WS change + CURRENT corroboration -> qualified probability -> paper
+    decision with a book read. The seed's held read is stale, so the reactive
+    evaluation makes the ONE bounded single-event read for exactly this event
+    -- and nothing else: no bulk fetch, no second read. This is the one
+    deliberate exception to "the reactive path makes no provider fetch"."""
+    e = env
+    _stale_discovery(e)
+    await _start_and_discover(e)
+    funded_before = await _counts(e.conn)
+    tick(e.cache, e.eid, WS_EDGE)
+    rows = await _wait_terminal(e)
+    assert [r["state"] for r in rows] == ["COMPLETED"], rows
+    a = rows[0]["detail"]
+    vids = a["valuation_ids"]
+    assert len(vids) == 1, a
+
+    # exactly the bounded corroboration read, for this event, and no other
+    assert e.corr_fetches == [("baseball_mlb", VN.PREFIX + "rx%d" % e.eid)]
+    assert len(e.fetches) == e.fetches_after_discovery
+    stats = a["result"]["corroboration"]
+    assert stats["reads"]["attempted"] == 1 and stats["reads"]["ok"] == 1
+    assert stats["reads"]["latency_ms"] == [12.5]
+    assert stats["reads"]["credits_last"] == ["3"]
+    assert a["result"]["credits"] == {"used": "101", "remaining": "899"}
+
+    v = await _valuation(e, vids[0])
+    assert v["provider"] == P.PROVIDER and v["outcome_books"] == 1
+    assert "OUTCOME_DEPTH_BELOW_FLOOR" not in v["refusals"]
+    ref = H.j(v["settlement_comparison"])["reference_input"]
+    c = ref["corroboration"]
+    assert c["qualified"] is True, c
+    assert c["pinnapi_outcome_books"] == 1
+    assert c["corroborating"]["source"] == CORR.SRC_BOUNDED_READ
+    assert c["corroborating"]["provider"] == "the-odds-api.com/v4"
+    assert c["corroborating"]["outcome_books"] == 2
+    assert 0 <= c["corroborating"]["age_s"] <= loop.PINNACLE_MAX_AGE_S
+    assert c["identity"]["matched"] is True
+    assert c["identity"]["us_market_slug"] == e.game.us_slug
+    row = await _corroboration_row(e, vids[0])
+    assert row["qualified"] is True and row["refusal"] is None
+    assert row["pinnapi_outcome_books"] == 1
+    assert row["corroborating_outcome_books"] == 2
+    assert row["corroborating_source"] == CORR.SRC_BOUNDED_READ
+    assert row["pinnapi_source_change_ms"] == ref["source_change_ms"]
+    assert row["pinnapi_epoch"] == ref["epoch"]
+    assert row["feed_event_id"] == str(e.eid)
+    assert row["us_market_slug"] == e.game.us_slug
+    held = H.j(row["detail"])["held_observation_assessment"]
+    assert held["source"] == CORR.SRC_STORED_DISCOVERY
+    assert held["refusal"] == CORR.R_NOT_CURRENT
+
+    ds = _cg(await _decisions(e, vids))
+    assert len(ds) == 1, ds
+    d = ds[0]
+    assert d["verdict"] == "ENTER", (d["refusal"], d["refusals"])
+    assert d["book_obs_id"] is not None
+    assert PB.R_PROBABILITY_UNQUALIFIED not in (d["refusals"] or [])
+    assert await _counts(e.conn) == funded_before
+
+
+@pg
+async def test_stale_corroboration_is_an_explicit_refusal_and_never_enters(env):
+    """The bounded read answers, but its books are stale too: the valuation
+    keeps OUTCOME_DEPTH_BELOW_FLOOR AND records CORROBORATION_NOT_CURRENT; the
+    paper lane refuses the probability by name and nothing enters."""
+    e = env
+    _stale_discovery(e)
+    e.corroboration = lambda now: VN.odds_event(
+        e.game, "rx%d" % e.eid, at=now, stamp_age_s=STALE_S)
+    await _start_and_discover(e)
+    tick(e.cache, e.eid, WS_EDGE)
+    rows = await _wait_terminal(e)
+    assert [r["state"] for r in rows] == ["COMPLETED"], rows
+    vids = rows[0]["detail"]["valuation_ids"]
+    assert len(vids) == 1, rows
+    assert len(e.corr_fetches) == 1
+    v = await _valuation(e, vids[0])
+    assert v["outcome_books"] == 1
+    assert "OUTCOME_DEPTH_BELOW_FLOOR" in v["refusals"]
+    assert CORR.R_NOT_CURRENT in v["refusals"]
+    row = await _corroboration_row(e, vids[0])
+    assert row["qualified"] is False and row["refusal"] == CORR.R_NOT_CURRENT
+    assert row["corroborating_outcome_books"] is None
+    ds = _cg(await _decisions(e, vids))
+    assert len(ds) == 1 and ds[0]["verdict"] == "REFUSE", ds
+    assert PB.R_PROBABILITY_UNQUALIFIED in (ds[0]["refusals"] or []), ds[0]
+    assert await _enters_on_contract(e) == 0
+
+
+@pg
+async def test_a_spent_read_budget_is_refused_by_name_with_no_read(env,
+                                                                    monkeypatch):
+    e = env
+    _stale_discovery(e)
+    monkeypatch.setattr(CORR, "BUDGET", CORR.ReadBudget(per_minute=0))
+    await _start_and_discover(e)
+    tick(e.cache, e.eid, WS_EDGE)
+    rows = await _wait_terminal(e)
+    vids = rows[0]["detail"]["valuation_ids"]
+    assert len(vids) == 1, rows
+    assert e.corr_fetches == []
+    v = await _valuation(e, vids[0])
+    assert "OUTCOME_DEPTH_BELOW_FLOOR" in v["refusals"]
+    assert CORR.R_BUDGET in v["refusals"]
+    row = await _corroboration_row(e, vids[0])
+    assert row["refusal"] == CORR.R_BUDGET
+    assert await _enters_on_contract(e) == 0
 
 
 # ═════════════════════════════════════════════════════════════════════
