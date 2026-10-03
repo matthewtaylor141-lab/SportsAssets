@@ -203,6 +203,10 @@ def default_steps() -> list:
         steps.append(("settle", PX.step_settle))
         steps.append(("handoff", PX.step_handoff))
         steps.append(("xavier", PX.step))
+        # XAVIER'S VALUE-ADD (migration 206): the counterfactuals frozen at
+        # entry, computed once an outcome is known. Records only.
+        from . import xavier_management as XM
+        steps.append(("xavier_value_add", XM.step_value_add))
     except ImportError:
         pass
     steps.append(("equity", step_equity))

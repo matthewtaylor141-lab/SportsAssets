@@ -716,8 +716,10 @@ async def _management(conn, rows: list) -> dict:
     out = {"handoffs": {}, "reviews": {}, "findings": {}, "live_handoffs": {},
            "live_reviews": {}, "reconciliations": {}, "smalllive_schema": False,
            "groups_pnl": {}, "paper_protection": {}, "live_protection": {},
-           "groups_live": {}}
+           "groups_live": {}, "assessments": {}, "theses": {}, "value_add": {},
+           "xavier_schema": False, "management_policy": None}
     if groups:
+        await _xavier_management_records(conn, groups, out)
         for h in await conn.fetch(
                 """SELECT handoff_id, group_id, owner, confirmed_qty, outstanding_qty,
                           first_fill_at FROM paper_handoffs WHERE group_id = ANY($1)""", groups):
@@ -835,6 +837,86 @@ async def _management(conn, rows: list) -> dict:
             out["findings"].setdefault(f["subject"], []).append(
                 {"finding_id": f["finding_id"], "found_at": _iso(f["found_at"]),
                  "kind": f["kind"], "severity": f["severity"], "subject": f["subject"]})
+    return out
+
+
+async def _xavier_management_records(conn, groups: list, out: dict) -> None:
+    """Xavier's management record for the groups (migration 206): the
+    latest assessment per (group, PAPER/ACTUAL), the entry theses, the
+    latest value-add, and the management-policy record. Read only; absent
+    tables leave the section empty with the reason."""
+    from .agents import xavier_management as XM
+    from .agents import xavier_small_live_policy as XSP
+    out["management_policy"] = await XSP.load_review_record(conn)
+    if not await XM.has_schema(conn):
+        return
+    out["xavier_schema"] = True
+    for r in await conn.fetch(
+            """SELECT DISTINCT ON (group_id, position_kind) assessment_id, review_id,
+                      group_id, position_kind, assessed_at, trigger, review_latency_s,
+                      latency_bound_s, within_bound, evidence_state, probability,
+                      probability_source, probability_age_s, thesis_state, recommendation,
+                      discretionary_permitted, reallocate, thesis_id
+                 FROM xavier_management_assessments WHERE group_id = ANY($1)
+                ORDER BY group_id, position_kind, assessed_at DESC, assessment_id DESC""",
+            groups):
+        out["assessments"][(r["group_id"], r["position_kind"])] = dict(r)
+    for r in await conn.fetch(
+            """SELECT thesis_id, group_id, position_kind, entry_probability,
+                      probability_source, entry_ev_usd, entered_at, evidence_expires_at,
+                      thesis_expires_at, expiry_basis
+                 FROM xavier_entry_theses WHERE group_id = ANY($1)""", groups):
+        out["theses"][(r["group_id"], r["position_kind"])] = dict(r)
+    for v in await conn.fetch(
+            """SELECT DISTINCT ON (thesis_id) thesis_id, group_id, position_kind, status,
+                      incremental, computed_at
+                 FROM xavier_value_add WHERE group_id = ANY($1)
+                ORDER BY thesis_id, (status = 'FINAL') DESC, computed_at DESC""", groups):
+        out["value_add"][(v["group_id"], v["position_kind"])] = dict(v)
+
+
+def _xavier_management(g, mg: dict) -> dict:
+    """The management section's Xavier record for one group (paper and
+    actual): evidence and thesis state, the recommendation, the shadow
+    REALLOCATE, review latency against its bound, value-add and the
+    management-policy record. Unavailable is null with the reason."""
+    pol = mg.get("management_policy")
+    out = {"management_policy": pol,
+           "management_policy_status": (pol or {}).get("status"),
+           "management_policy_approved": bool((pol or {}).get("approved")),
+           "href": "/api/command/xavier/management"}
+    for kind in ("PAPER", "ACTUAL"):
+        a = (mg.get("assessments") or {}).get((g, kind))
+        t = (mg.get("theses") or {}).get((g, kind))
+        v = (mg.get("value_add") or {}).get((g, kind))
+        re_ = _js(a.get("reallocate")) if a else {}
+        out[kind.lower()] = {
+            "assessment_id": a["assessment_id"] if a else None,
+            "reviewed_at": _iso(a["assessed_at"]) if a else None,
+            "trigger": a["trigger"] if a else None,
+            "review_latency_s": _f(a["review_latency_s"], 3) if a else None,
+            "latency_bound_s": _f(a["latency_bound_s"], 3) if a else None,
+            "within_bound": a["within_bound"] if a else None,
+            "evidence_state": a["evidence_state"] if a else None,
+            "probability": _f(a["probability"], 9) if a else None,
+            "thesis_state": (a["thesis_state"] if a else
+                             "NO_ENTRY_THESIS" if t is None else None),
+            "thesis_id": t["thesis_id"] if t else None,
+            "entry_probability": _f(t["entry_probability"], 9) if t else None,
+            "entry_ev_usd": _f(t["entry_ev_usd"]) if t else None,
+            "thesis_expires_at": _iso(t["thesis_expires_at"]) if t else None,
+            "evidence_expires_at": _iso(t["evidence_expires_at"]) if t else None,
+            "recommendation": a["recommendation"] if a else None,
+            "discretionary_permitted": a["discretionary_permitted"] if a else None,
+            "reallocate_shadow": ({"recommended": bool(re_.get("recommended")),
+                                   "blocker": re_.get("blocker"), "mode": "SHADOW"}
+                                  if a else None),
+            "value_add_status": v["status"] if v else None,
+            "value_add_incremental": _js(v["incremental"]) if v else None,
+            "why_unavailable": (None if a else
+                                "no Xavier management record for this group yet"
+                                if mg.get("xavier_schema") else
+                                "migration 206 not applied")}
     return out
 
 
@@ -972,14 +1054,16 @@ def _next_review(g, h, v, lh, lv, mg, now) -> dict:
         actual["why_unavailable"] = "the ACTUAL position is closed: no further review"
     elif not lv:
         actual["why_unavailable"] = ("live handoff recorded; no review of the ACTUAL position "
-                                     "yet (first one on the next management pass)")
+                                     "yet (first one on the next mirror tick)")
     else:
         from .execmirror import MANAGEMENT_EVERY_S
         due = lv["reviewed_at"] + dt.timedelta(seconds=MANAGEMENT_EVERY_S)
         actual.update({"due_by": _iso(due), "overdue_at_read": now > due,
-                       "basis": ("latest ACTUAL review at %s + the mirror's management pass "
-                                 "every %g s (execmirror.MANAGEMENT_EVERY_S), while the mirror "
-                                 "service runs" % (_iso(lv["reviewed_at"]), MANAGEMENT_EVERY_S))})
+                       "basis": ("latest ACTUAL review at %s + the per-position review "
+                                 "cadence of %g s (execmirror.MANAGEMENT_EVERY_S; sooner on a "
+                                 "change of held quantity), while the mirror service runs -- "
+                                 "also while the lane is disabled"
+                                 % (_iso(lv["reviewed_at"]), MANAGEMENT_EVERY_S))})
     return {"paper": paper, "actual": actual}
 
 
@@ -1126,6 +1210,7 @@ def _management_section(r: dict, mg: dict, now=None) -> dict:
                 chain_link = ln
                 break
     return {"xavier_paper": xp, "xavier_actual": xa,
+            "xavier_management": _xavier_management(g, mg),
             "probability_freshness": _probability_freshness(v, lv),
             "protection": _protection(g, mg),
             "next_review": _next_review(g, h, v, lh, lv, mg, now),
@@ -1324,6 +1409,7 @@ def _decision_management(mg: dict, g) -> dict:
             "protection_rule": PROTECTION_RULE,
             "last_review_at": _iso(rv.get("reviewed_at")),
             "next_review_by": nxt,
+            "xavier_management": _xavier_management(g, mg),
             "why_unavailable": (None if rv or lr else
                                 "no Xavier review for this group yet")}
 

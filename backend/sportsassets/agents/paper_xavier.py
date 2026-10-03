@@ -8,7 +8,14 @@ a second owner.
 
 REVIEWS. Each held group is reviewed immediately on its first fill, then on a
 new fill (FILL_EVENT), on a market event (a newly observed book whose best
-exit moved) and on the scheduled backstop (`cadence.xavier_backstop_s`). A
+exit moved) and on the scheduled backstop (`cadence.xavier_backstop_s`). The
+due list is reviewed most urgent first (first fill, fill, market, backstop;
+then longest waiting) within the pass budget OR Xavier's reserved budget
+(`cadence.xavier_reserved_budget_s`, RESERVED_BUDGET_S), whichever is later:
+the decision steps that run first can no longer leave the step with no time,
+and no group is starved by its id. Every review also writes its management
+assessment (agents.xavier_management: latency against the bound, thesis
+state, shadow REALLOCATE, the management-policy record). A
 review compares HOLD, EXIT, REDUCE, NETTING and the INDIRECT HEDGE on the
 SAME settlement measure through the existing comparison
 (`agents.xavier_policy.run` -> `bettor_funded_decision.decide`, unchanged):
@@ -163,7 +170,33 @@ async def step_handoff(conn, ctx: dict) -> dict:
         elif got is False:
             updated += 1
     ctx["new_handoffs"] = created
-    return {"handoffs_created": len(created), "handoffs_updated": updated}
+    # THE ENTRY THESIS (migration 206), written AT ENTRY -- the handoff --
+    # never later: a handoff of this window whose thesis write did not land
+    # is retried; an older one stays NO_ENTRY_THESIS (no hindsight).
+    theses = await _entry_theses(conn, ctx, created)
+    return {"handoffs_created": len(created), "handoffs_updated": updated,
+            "theses_written": theses}
+
+
+async def _entry_theses(conn, ctx: dict, created: list) -> int:
+    from . import xavier_management as XM
+    if not await XM.has_schema(conn):
+        return 0
+    at = _clock(ctx)
+    try:
+        todo = set(created) | {r["group_id"] for r in await conn.fetch(
+            "SELECT h.group_id FROM paper_handoffs h WHERE h.account_id=$1 "
+            "   AND h.first_fill_at > to_timestamp($2) AND NOT EXISTS ("
+            "   SELECT 1 FROM xavier_entry_theses t "
+            "    WHERE t.position_kind='PAPER' AND t.group_id=h.group_id)",
+            ctx["account_id"], at - XM.THESIS_ENTRY_WINDOW_S)}
+    except Exception:                                           # noqa: BLE001
+        todo = set(created)
+    n = 0
+    for g in sorted(todo):
+        got = await XM.record_paper_thesis(conn, ctx, g)
+        n += 1 if got.get("created") else 0
+    return n
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -473,14 +506,20 @@ def _trigger(*, group: str, new_handoffs: list, last: dict | None,
 
 
 async def review_group(conn, ctx: dict, group_id: str, *,
-                       trigger: str) -> dict:
+                       trigger: str, due_at=None) -> dict:
+    from . import xavier_management as XM
     from . import xavier_policy as XP
+    from . import xavier_small_live_policy as XSP
     from .. import bettor_xavier_standing_orders as SPO
     at = _clock(ctx)
     fee_fn = ctx.get("fee_fn")
     acct = ctx["account_id"]
     allpos = [p for p in await L.positions(conn, acct)
               if p["group_id"] == group_id]
+    # THE MANAGEMENT POLICY THIS REVIEW RUNS UNDER, as recorded: the owner-
+    # approved artifact (exact id / version / sha256 / approver) only when
+    # approved with a matching hash; otherwise READY_FOR_OWNER_APPROVAL.
+    mpol = await XSP.load_review_record(conn) if allpos else None
     reviews = []
     for pos in allpos:
         obs = await _latest_book(conn, pos["us_market_slug"])
@@ -595,10 +634,11 @@ async def review_group(conn, ctx: dict, group_id: str, *,
             " $15::jsonb,$16::jsonb,$17::jsonb,$18) ON CONFLICT DO NOTHING",
             rid, ctx["session_id"], acct, group_id, L._ts(at), trigger,
             chosen, sel.get("refusal"), json.dumps(alts, default=str),
-            json.dumps({k: sel.get(k) for k in (
+            json.dumps(dict({k: sel.get(k) for k in (
                 "selected", "refusal", "selection_reason",
                 "margin_over_runner_up", "decision_policy", "tie_break",
-                "hold_is_priced", "limits_applied")}, default=str),
+                "hold_is_priced", "limits_applied")},
+                management_policy=mpol), default=str),
             json.dumps(exposure, default=str),
             json.dumps({"live_orders": [L.order_view(s) for s in standing],
                         "protective_price": prot,
@@ -611,9 +651,21 @@ async def review_group(conn, ctx: dict, group_id: str, *,
             json.dumps(exceptional), json.dumps(measure, default=str),
             json.dumps(action, default=str), pos.get("strategy")
             or L.DEFAULT_STRATEGY)
+        # THE MANAGEMENT ASSESSMENT (migration 206): latency against the
+        # bound, thesis state, every alternative incl. the SHADOW
+        # REALLOCATE, the policy record. Record only -- the action above
+        # is already decided and nothing here changes it.
+        mg = await XM.paper_review_hook(
+            conn, ctx, group_id=group_id, pos=pos, review_id=rid,
+            trigger=trigger, at=at, measure=measure, alts=alts,
+            recommendation=chosen, exit_levels=exit_lv, policy=mpol,
+            due_at=due_at)
         reviews.append({"review_id": rid, "position": pos["position_key"],
                         "recommendation": chosen, "trigger": trigger,
-                        "action": action.get("taken")})
+                        "action": action.get("taken"),
+                        "thesis_state": mg.get("thesis_state"),
+                        "review_latency_s": mg.get("review_latency_s"),
+                        "within_bound": mg.get("within_bound")})
     return {"group_id": group_id, "reviews": reviews}
 
 
@@ -713,23 +765,52 @@ async def _maintain_standing(conn, ctx, *, pos, standing, prot, md, at,
             "floor_is": prot.get("floor_is")}
 
 
+#: THE TRIGGERS' PRIORITY: a position never reviewed goes first, then one
+#: with a new fill, a market event, the scheduled backstop.
+TRIGGER_PRIORITY = {T_FIRST: 0, T_FILL: 1, T_MARKET: 2, T_BACKSTOP: 3}
+#: XAVIER'S RESERVED BUDGET (s): the pass budget is shared with the steps
+#: that run first (books, simulation, every entry strategy); when they
+#: spend it, Xavier still reviews the due positions -- most urgent first --
+#: for at least this long instead of reviewing nothing.
+RESERVED_BUDGET_S = 10.0
+
+
+def _due_at(trig: str, *, first_fill_at, last: dict | None, last_fill_at,
+            book_at, backstop_s: float):
+    """When a review with this trigger became due (the latency's origin)."""
+    if trig == T_FIRST:
+        return first_fill_at
+    if trig == T_FILL:
+        return last_fill_at
+    if trig == T_MARKET:
+        return book_at
+    return None if last is None else last["reviewed_at"] + backstop_s
+
+
 async def step(conn, ctx: dict) -> dict:
     """REVIEW EVERY HELD GROUP THAT IS DUE (first fill, fill event, market
-    event or the scheduled backstop), within the pass budget."""
+    event or the scheduled backstop): the due list is built first and
+    reviewed most urgent first (FIRST_FILL, FILL_EVENT, MARKET_EVENT,
+    SCHEDULED_BACKSTOP; then the longest overdue), within the pass budget
+    or Xavier's reserved budget, whichever is later. Due groups left over
+    are listed (`deferred`) with how long they have waited."""
     acct = ctx["account_id"]
     at = _clock(ctx)
-    backstop = float(ctx["config"]["cadence"].get("xavier_backstop_s", 60.0))
+    cad = ctx["config"]["cadence"]
+    backstop = float(cad.get("xavier_backstop_s", 60.0))
+    reserve = float(cad.get("xavier_reserved_budget_s", RESERVED_BUDGET_S))
+    deadline = max(float(ctx["deadline"]), time.monotonic() + reserve)
     groups = sorted({p["group_id"] for p in await L.positions(conn, acct)})
-    handed = {r["group_id"] for r in await conn.fetch(
-        "SELECT group_id FROM paper_handoffs WHERE account_id=$1", acct)}
+    handed = {r["group_id"]: L._epoch(r["first_fill_at"]) for r in
+              await conn.fetch("SELECT group_id, first_fill_at FROM "
+                               " paper_handoffs WHERE account_id=$1", acct)}
     out = {"reviews": 0, "groups_held": len(groups), "by_trigger": {},
-           "not_handed_off": sorted(set(groups) - handed)}
+           "not_handed_off": sorted(set(groups) - set(handed)),
+           "due": 0, "deferred": [], "first_review_latency_s": []}
+    due = []
     for g in groups:
         if g not in handed:
             continue
-        if time.monotonic() > ctx["deadline"]:
-            out["budget_exhausted"] = True
-            break
         last = await conn.fetchrow(
             "SELECT reviewed_at, measure FROM paper_xavier_reviews "
             " WHERE group_id=$1 ORDER BY reviewed_at DESC LIMIT 1", g)
@@ -751,16 +832,31 @@ async def step(conn, ctx: dict) -> dict:
                                  "offers": L._j(book["offers"]) or []},
                                 direction="SELL", holding_side=side)
             best_exit = lv["levels"][0]["price"] if lv["levels"] else None
+        book_at = None if book is None else L._epoch(book["observed_at"])
         trig = _trigger(group=g, new_handoffs=ctx.get("new_handoffs") or [],
-                        last=lastd, last_fill_at=lf,
-                        book_at=(None if book is None
-                                 else L._epoch(book["observed_at"])),
+                        last=lastd, last_fill_at=lf, book_at=book_at,
                         best_exit=best_exit, at=at, backstop_s=backstop)
         if trig is None:
             continue
-        got = await review_group(conn, ctx, g, trigger=trig)
+        d_at = _due_at(trig, first_fill_at=handed[g], last=lastd,
+                       last_fill_at=lf, book_at=book_at, backstop_s=backstop)
+        due.append((TRIGGER_PRIORITY[trig], d_at if d_at is not None else at,
+                    g, trig, d_at))
+    due.sort()
+    out["due"] = len(due)
+    for i, (_, _, g, trig, d_at) in enumerate(due):
+        if time.monotonic() > deadline:
+            out["budget_exhausted"] = True
+            out["deferred"] = [
+                {"group_id": dg, "trigger": dt_,
+                 "waiting_s": None if da is None else round(at - da, 3)}
+                for (_, _, dg, dt_, da) in due[i:]]
+            break
+        got = await review_group(conn, ctx, g, trigger=trig, due_at=d_at)
         out["reviews"] += len(got["reviews"])
         out["by_trigger"][trig] = out["by_trigger"].get(trig, 0) + 1
+        if trig == T_FIRST and d_at is not None:
+            out["first_review_latency_s"].append(round(at - d_at, 3))
     return out
 
 

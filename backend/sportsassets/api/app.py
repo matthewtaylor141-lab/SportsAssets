@@ -444,8 +444,12 @@ async def lifespan(_: FastAPI):
     from .. import execmirror as _EXM
     # the actual positions' probability freshness (record only, never sells)
     from ..agents import paper_xavier as _PX
+    # Xavier's assessment of each actual review: thesis, alternatives,
+    # shadow REALLOCATE, policy record (record only, never an order)
+    from ..agents import xavier_management as _XM
     execmirror_task = asyncio.create_task(_EXM.run(
-        _cap_pool, probability_reader=_PX.live_position_evidence))
+        _cap_pool, probability_reader=_PX.live_position_evidence,
+        management_assessor=_XM.actual_review_hook))
     # Evidence for the post-boot health-check misses: records every thread's
     # stack when the loop is blocked >= 2 s; changes no behaviour.
     from .. import loop_watchdog as _WATCHDOG

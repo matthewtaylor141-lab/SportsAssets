@@ -79,7 +79,24 @@ async def _annotate_policy(conn, agents: list) -> None:
         if pv == R.SOURCE_CODE_DEFAULT:
             a["policy_version_meaning"] = XSP.CODE_DEFAULT_MEANING
         if a.get("agent_id") == R.XAVIER:
-            a["management_policy"] = await XSP.load_view(conn)
+            view = await XSP.load_view(conn)
+            a["management_policy"] = view
+            # WHAT XAVIER'S REVIEWS RECORD: the small-live management policy
+            # artifact (agent_policy_artifacts), APPROVED with its exact id /
+            # version / sha256 / approver only on an owner-approved row whose
+            # hash matches the code; otherwise READY_FOR_OWNER_APPROVAL.
+            # `policy_version` above stays the registry's label (the funded
+            # lane's XAVIER_MANAGEMENT_POLICY parameters; CODE_DEFAULT when
+            # no ACTIVE agent_policy_versions row exists).
+            rec = XSP.review_record(view)
+            a["management_policy_record"] = rec
+            a["management_policy_approved"] = rec["approved"]
+            a["management_policy_label"] = (
+                "%s@%s (sha256 %s, APPROVED by %s)" % (
+                    rec["policy_id"], rec["version"], rec["sha256"],
+                    rec["approved_by"]) if rec["approved"] else
+                "%s@%s %s (not approved)" % (rec["policy_id"],
+                                             rec["version"], rec["status"]))
 
 
 @router.get("/api/command/agents", dependencies=[Depends(require_read)])

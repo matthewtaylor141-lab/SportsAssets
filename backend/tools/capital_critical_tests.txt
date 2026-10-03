@@ -588,3 +588,14 @@ tests/test_workers_hold_no_venue_write.py
 # The authorized workers release actions: branch set (autoDeploy off) and
 # exact-SHA deploy that refuses while autoDeploy is on.
 tests/test_render_ops_workers_release.py
+# Xavier management loop (claude/cand22-xavier, migration 206): every new
+# paper / actual position is reviewed within its bound and on cadence (paper:
+# reserved budget, due-first; actual: per-handoff triggers, also while the
+# lane is off, one failure never stops the rest), FRESH / STALE / UNAVAILABLE
+# explicit and a stale probability never drives EXIT / REDUCE / REALLOCATE;
+# reviews and the agents endpoint record the management-policy artifact
+# APPROVED only on an owner row whose hash matches the code; immutable entry
+# theses (STILL_VALID / THESIS_CHANGED / EVIDENCE_EXPIRED), SHADOW-only
+# REALLOCATE, value-add against counterfactuals frozen at entry.
+tests/test_xavier_management_loop.py
+tests/test_xavier_thesis_reallocate_value_add.py

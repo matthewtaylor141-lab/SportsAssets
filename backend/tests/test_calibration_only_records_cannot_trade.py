@@ -466,6 +466,14 @@ READERS = {
     # slug for an already-held paper position, never a candidate selection.
     "agents/paper_xavier.py": (
         "PAPER_ONLY_MEASURE_AND_SETTLEMENT_EVIDENCE_READS", 8),
+    # (206) XAVIER'S MANAGEMENT RECORD: the entry thesis reads the held
+    # position's own decision valuation BY ID (its source stamp, its
+    # condition's event start) and the value-add reads venue settlement
+    # evidence by slug for an already-held position (via paper_xavier's
+    # outcome rules) or checks that outcome evidence exists for it; the
+    # rest is prose. Never selects a candidate.
+    "agents/xavier_management.py": (
+        "BY_ID_OF_THE_HELD_POSITIONS_DECISION_AND_SETTLEMENT_EVIDENCE", 8),
     # (182) THE EXPERIMENTAL PINNACLE_ONLY_PAPER_BENCHMARK: like paper Derek
     # it reads BOTH purposes deliberately (every production row is
     # CALIBRATION_ONLY under P5, disclosed as book_currency NOT_ESTABLISHED on

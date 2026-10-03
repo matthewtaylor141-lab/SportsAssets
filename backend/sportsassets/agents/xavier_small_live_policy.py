@@ -20,6 +20,13 @@ WHAT IT IS NOT.
     APPROVED; even an APPROVED row would only RECORD the approval (`activated`
     stays False here) -- activating anything is a separate, reviewed change.
 
+WHAT REVIEWS RECORD (`review_record`). Every Xavier review (paper and
+actual) and the agents endpoint carry the artifact's state: APPROVED with
+the exact {policy_id, version, sha256, approved_by, approved_at} only when
+the stored row is APPROVED with an owner record AND its sha256 equals this
+code's; otherwise READY_FOR_OWNER_APPROVAL (not approved). Recording the
+state changes no behaviour and grants nothing.
+
 THE HASH. `sha256` is the SHA-256 of `canonical_json(DOCUMENT)` (sorted keys,
 compact separators, ASCII). Migration 201 stores that exact text and the
 table CHECKs that the stored hash is the hash of the stored text, so the
@@ -333,6 +340,69 @@ async def load_view(conn) -> dict:
                                            else at)},
                  why=(None if integrity == INTEGRITY_OK else
                       "the stored text is not this code's document"))
+
+
+def review_record(view: dict | None) -> dict:
+    """THE MANAGEMENT POLICY AS EVERY XAVIER REVIEW RECORDS IT. Pure.
+
+    WHY PRODUCTION SAID CODE_DEFAULT. The runtime's policy label is read
+    from `agent_policy_versions` ACTIVE rows (agents.registry.
+    _policy_version_label; agents.xavier_policy.load for the funded lane's
+    XAVIER_MANAGEMENT_POLICY parameters). This artifact lives in
+    `agent_policy_artifacts` (migration 201), which nothing on the review
+    path read -- so even an owner-approved artifact would still have been
+    reported as CODE_DEFAULT / "no approved management policy". Reviews now
+    record THIS record beside the selection parameters.
+
+    APPROVED only when the stored row is APPROVED, carries the owner record
+    (actor and approved_at) and its stored sha256 equals this code's
+    SHA256; then {policy_id, version, sha256, status: APPROVED, approved_by,
+    approved_at} name the exact document. Anything else is NOT approved:
+    READY_FOR_OWNER_APPROVAL (or the stored REJECTED / SUPERSEDED), with the
+    reason. Never self-approved; CODE_DEFAULT is never read as approval."""
+    v = dict(view or {})
+    appr = v.get("owner_approval") or {}
+    stored_status = v.get("status") if v.get("source") == SRC_STORED else None
+    approved = bool(
+        v.get("approved") is True and stored_status == STATUS_APPROVED
+        and v.get("integrity") == INTEGRITY_OK
+        and v.get("stored_sha256") == SHA256
+        and appr.get("actor") and appr.get("approved_at") is not None)
+    if approved:
+        status, why = STATUS_APPROVED, None
+    else:
+        status = (stored_status if stored_status in (STATUS_REJECTED,
+                                                     STATUS_SUPERSEDED)
+                  else STATUS_READY)
+        why = ("the stored sha256 differs from the code's document"
+               if v.get("integrity") == INTEGRITY_MISMATCH else
+               "the artifact is not stored (%s)" % (v.get("why") or
+                                                    "no row")
+               if stored_status is None else
+               "no owner approval record (stored status %s)" % stored_status
+               if stored_status in (STATUS_READY, STATUS_DRAFT) else
+               "stored status %s" % stored_status)
+    return {"policy_id": POLICY_ID, "version": VERSION,
+            "sha256": v.get("stored_sha256") if approved else SHA256,
+            "status": status, "approved": approved,
+            "approved_by": appr.get("actor") if approved else None,
+            "approved_at": appr.get("approved_at") if approved else None,
+            "stored_status": stored_status,
+            "stored_sha256": v.get("stored_sha256"),
+            "integrity": v.get("integrity"), "source": v.get("source"),
+            "why_not_approved": why,
+            "self_approval_possible": False,
+            "code_default_is_not_approval": CODE_DEFAULT_MEANING,
+            "authority_granted": "NONE"}
+
+
+async def load_review_record(conn) -> dict:
+    """`review_record` of the stored artifact. Never raises."""
+    try:
+        return review_record(await load_view(conn))
+    except Exception as exc:                                    # noqa: BLE001
+        return review_record(code_view(
+            why="ARTIFACT_READ_FAILED:%s" % type(exc).__name__))
 
 
 async def read_artifact(conn) -> dict:

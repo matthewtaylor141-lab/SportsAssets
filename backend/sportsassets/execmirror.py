@@ -32,6 +32,12 @@ THE RULES (owner: "set the rules to achieve the closest outcome")
   orphans    live inventory left after the paper position closed by order
              (not by settlement) is closed with an IOC at the venue bid,
              recorded as ORPHAN_CLOSE.
+  xavier     each OPEN actual position (smalllive_handoffs) is reviewed on
+             the tick that hands it off, on a change of held quantity and
+             every MANAGEMENT_EVERY_S -- also while the lane is disabled or
+             stopped (a review is a record: a BBO read, a probability read,
+             a row; it places and cancels nothing); one failing review never
+             stops the others.
   safety     a separate durable control (off by default), an emergency
              stop that cancels every open mirror order (and, if asked,
              closes positions), a per-order notional cap, an account
@@ -472,11 +478,38 @@ UNAVAILABLE_PROBABILITY = {
     "current_hold_value_usd": None, "entry_time_hold_value_usd": None}
 
 
+#: XAVIER'S ACTUAL-POSITION REVIEW TRIGGERS (per handoff, every tick): the
+#: tick that hands a position off reviews it (FIRST_FILL), a change of held
+#: quantity re-reviews it (FILL_EVENT), and every MANAGEMENT_EVERY_S it is
+#: re-reviewed (SCHEDULED_BACKSTOP). Records only -- a review places,
+#: cancels and sizes nothing.
+LIVE_T_FIRST, LIVE_T_FILL, LIVE_T_BACKSTOP = ("FIRST_FILL", "FILL_EVENT",
+                                              "SCHEDULED_BACKSTOP")
+LIVE_TRIGGER_PRIORITY = {LIVE_T_FIRST: 0, LIVE_T_FILL: 1, LIVE_T_BACKSTOP: 2}
+
+
+def live_review_trigger(*, last_reviewed_at, last_held, held,
+                        now: float) -> str | None:
+    """Which review an OPEN actual position is due, or None. Pure."""
+    if last_reviewed_at is None:
+        return LIVE_T_FIRST
+    if last_held is None or Decimal(str(last_held)) != Decimal(str(held)):
+        return LIVE_T_FILL
+    if now - float(last_reviewed_at) >= MANAGEMENT_EVERY_S:
+        return LIVE_T_BACKSTOP
+    return None
+
+
 class Mirror:
     def __init__(self, venue_factory=Venue, *, now=time.time,
-                 paper_account: str = PAPER_ACCOUNT, probability_reader=None):
+                 paper_account: str = PAPER_ACCOUNT, probability_reader=None,
+                 management_assessor=None):
         self.paper_account = paper_account
         self._probability_reader = probability_reader
+        # Xavier's assessment of each actual review (thesis, alternatives,
+        # shadow REALLOCATE): handed in by the process that starts the lane
+        # (agents.xavier_management.actual_review_hook), record only.
+        self._management_assessor = management_assessor
         self._venue_factory = venue_factory
         self._venue = None
         self._now = now
@@ -496,7 +529,11 @@ class Mirror:
     async def tick(self, conn) -> dict:
         ctl = await control(conn)
         if not ctl.get("enabled"):
-            return {"state": "DISABLED"}
+            # ACTUAL POSITIONS ARE STILL MANAGED WHILE THE LANE IS OFF: the
+            # review is a record (a BBO read, a probability read, a row);
+            # nothing is planned, submitted or cancelled here.
+            return {"state": "DISABLED",
+                    "xavier_live_reviews": await self._reviews_only(conn)}
         fp = EP.keys_present()["key_fingerprint"]
         if ctl.get("account_fingerprint") and fp != ctl["account_fingerprint"]:
             await conn.execute("UPDATE execmirror_control SET enabled = false,"
@@ -505,7 +542,11 @@ class Mirror:
                          found=fp)
             return {"state": "HALTED_ACCOUNT_CHANGED"}
         if ctl.get("stopped"):
-            return await self.emergency_stop(conn, ctl)
+            out = await self.emergency_stop(conn, ctl)
+            if out.get("state") == "STOPPED" and ctl.get("stop_done_at"):
+                # after the stop has completed: reviews only (records)
+                out["xavier_live_reviews"] = await self._reviews_only(conn)
+            return out
         out = {"state": "RUNNING"}
         if self._buying_power is None:
             out["snapshot"] = await self.snapshot(conn, ctl)
@@ -517,9 +558,12 @@ class Mirror:
         out["protection"] = await self.resync_protection(conn, ctl)
         out["orphans"] = await self.close_orphans(conn)
         out["handoffs"] = await self.live_handoffs(conn)
+        # every tick: only the positions that are DUE (first / fill /
+        # cadence) are reviewed, so a new position is reviewed on the tick
+        # that hands it off instead of waiting for a process-wide timer
+        out["xavier_live_reviews"] = await self.xavier_live_reviews(conn)
         if self._now() - self._last_management >= MANAGEMENT_EVERY_S:
             self._last_management = self._now()
-            out["xavier_live_reviews"] = await self.xavier_live_reviews(conn)
             out["audrey_reconciled"] = await self.audrey_reconcile(conn)
         if self._now() - self._last_snapshot >= SNAPSHOT_EVERY_S:
             out["snapshot"] = await self.snapshot(conn, ctl)
@@ -1010,83 +1054,166 @@ class Mirror:
             return dict(UNAVAILABLE_PROBABILITY, why="PROBABILITY_READ_FAILED",
                         error=type(exc).__name__)
 
-    async def xavier_live_reviews(self, conn) -> int:
-        """Xavier's review of each OPEN actual position with a FRESH venue
-        quote. The actual position is managed by the same management
-        decisions Xavier makes on the paper position (mirrored exits and
-        protection at the live fraction) and by the orphan close; this
-        record states the actual state those decisions act on. A resting
-        live protection is reported separately from filled protection."""
-        hs = await conn.fetch("SELECT * FROM smalllive_handoffs WHERE state = 'OPEN'")
-        n = 0
+    async def _reviews_only(self, conn) -> int:
+        """Reviews of OPEN actual positions while the lane is off or stopped:
+        records only; never raises into the runner."""
+        try:
+            if not await conn.fetchval(
+                    "SELECT EXISTS (SELECT 1 FROM smalllive_handoffs "
+                    " WHERE state = 'OPEN')"):
+                return 0
+            return await self.xavier_live_reviews(conn)
+        except Exception:                                     # noqa: BLE001
+            log.exception("xavier live reviews (lane off) failed")
+            return 0
+
+    async def xavier_live_reviews(self, conn, *, due_only: bool = True) -> int:
+        """Xavier's review of each OPEN actual position that is DUE (the
+        tick that hands it off, a change of held quantity, every
+        MANAGEMENT_EVERY_S), most urgent first, with a FRESH venue quote.
+        The actual position is managed by the same management decisions
+        Xavier makes on the paper position (mirrored exits and protection at
+        the live fraction) and by the orphan close; this record states the
+        actual state those decisions act on. A resting live protection is
+        reported separately from filled protection. One failing review never
+        stops the others."""
+        now = self._now()
+        hs = await conn.fetch(
+            """SELECT h.*, extract(epoch FROM lr.reviewed_at)::float8 AS last_reviewed_at,
+                      lr.live_held AS last_reviewed_held
+                 FROM smalllive_handoffs h
+                 LEFT JOIN LATERAL (
+                     SELECT reviewed_at, live_held FROM smalllive_reviews r
+                      WHERE r.handoff_id = h.handoff_id
+                      ORDER BY reviewed_at DESC, review_id DESC LIMIT 1) lr ON true
+                WHERE h.state = 'OPEN'""")
+        due = []
         for h in hs:
             h = dict(h)
-            inv = await live_inventory(conn, h["group_id"])
-            resting = await conn.fetchval(
-                """SELECT coalesce(sum(live_qty - cum_qty), 0) FROM execmirror_orders
-                    WHERE group_id = $1 AND role = 'STANDING_PROTECTION'
-                      AND state IN ('OPEN','PARTIALLY_FILLED')""", h["group_id"])
-            filled_prot = await conn.fetchval(
-                """SELECT coalesce(sum(cum_qty), 0) FROM execmirror_orders
-                    WHERE group_id = $1 AND role = 'STANDING_PROTECTION'""", h["group_id"])
-            quote, mark = {"read": False}, None
+            trig = live_review_trigger(
+                last_reviewed_at=h.get("last_reviewed_at"),
+                last_held=h.get("last_reviewed_held"), held=h["live_held"], now=now)
+            if trig is None and due_only:
+                continue
+            trig = trig or LIVE_T_BACKSTOP
+            due_at = (h["first_live_fill_at"].timestamp()
+                      if trig == LIVE_T_FIRST and h.get("first_live_fill_at") is not None
+                      else (h.get("updated_at").timestamp()
+                            if trig == LIVE_T_FILL and h.get("updated_at") is not None
+                            else (None if h.get("last_reviewed_at") is None
+                                  else h["last_reviewed_at"] + MANAGEMENT_EVERY_S)))
+            due.append((LIVE_TRIGGER_PRIORITY[trig], due_at or now, h["handoff_id"],
+                        h, trig, due_at))
+        due.sort(key=lambda x: x[:3])
+        n = 0
+        for _, _, _, h, trig, due_at in due:
             try:
-                q = await self.call(self.venue().quote, h["us_market_slug"])
-                bid, ask = _amt(q.get("bid")), _amt(q.get("ask"))
-                quote = {"read": q.get("error") is None, "at": self._now(),
-                         "bid": None if bid is None else str(bid),
-                         "ask": None if ask is None else str(ask),
-                         "state": q.get("state"), "error": q.get("error"),
-                         "basis": "the mirror account's own venue BBO read at review time"}
-                long_side = str(h.get("opened_intent") or "").endswith("BUY_LONG")
-                exit_px = bid if long_side else (None if ask is None else Decimal(1) - ask)
-                if exit_px is not None:
-                    mark = exit_px * Decimal(inv["held"])
+                await self._review_one(conn, h, trigger=trig, due_at=due_at)
+                n += 1
             except Exception as exc:                          # noqa: BLE001
-                quote = {"read": False, "error": EP._error(exc)}
-            # cost per contract follows collateral_per_contract: a long
-            # paid the price, a short buy the complement
-            cost = (None if h["avg_entry_px"] is None else
-                    collateral_per_contract(str(h.get("opened_intent") or ""),
-                                            h["avg_entry_px"]) * Decimal(inv["held"]))
-            unreal = None if (mark is None or cost is None) else mark - cost - Decimal(str(h["fees_usd"]))
-            # THE PROBABILITY'S FRESHNESS FOR THE ACTUAL POSITION: a fresh
-            # PinnAPI probability is attempted for the held contract on the
-            # same reader as the paper review; its evidence state is
-            # recorded, never used to sell (the action follows the paper
-            # decision; an unavailable probability liquidates nothing).
-            prob = await self._live_probability(conn, h, inv["held"])
-            pr = await conn.fetchrow(
-                """SELECT review_id, recommendation FROM paper_xavier_reviews
-                    WHERE group_id = $1 ORDER BY reviewed_at DESC LIMIT 1""", h["group_id"])
-            paper_open = await paper_open_qty(conn, h["group_id"])
-            if inv["held"] <= 0:
-                action = "NOTHING_HELD"
-            elif paper_open <= 0:
-                action = "ORPHAN_CLOSE_PENDING"
-            elif inv["committed"] > 0:
-                action = "EXIT_WORKING_FOLLOWS_PAPER_DECISION"
-            else:
-                action = "HOLD_FOLLOWS_PAPER_DECISION"
-            rid = "liverev:%s:%d" % (h["group_id"], int(self._now()))
-            await conn.execute(
-                """INSERT INTO smalllive_reviews (review_id, handoff_id, live_held,
-                     committed_exit_qty, resting_protection_qty, filled_protection_qty, quote,
-                     mark_value_usd, cost_basis_usd, unrealized_usd, paper_review_id,
-                     paper_recommendation, action, detail)
-                   VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10,$11,$12,$13,$14::jsonb)
-                   ON CONFLICT (review_id) DO NOTHING""",
-                rid, h["handoff_id"], inv["held"], inv["committed"], resting or 0,
-                filled_prot or 0, _j(quote), mark, cost, unreal,
-                None if pr is None else pr["review_id"],
-                None if pr is None else pr["recommendation"], action,
-                _j({"paper_open_qty": str(paper_open), "position": "ACTUAL",
-                    "venue": VENUE, "mark_basis": "exit side of the fresh venue BBO",
-                    "resting_protection_is_not_filled_protection": True,
-                    "evidence_state": prob["evidence_state"],
-                    "probability_evidence": prob}))
-            n += 1
+                log.exception("xavier live review failed for %s", h.get("handoff_id"))
+                try:
+                    await _event(conn, "XAVIER_LIVE_REVIEW_FAILED",
+                                 group_id=h.get("group_id"),
+                                 handoff_id=h.get("handoff_id"),
+                                 error=type(exc).__name__)
+                except Exception:                             # noqa: BLE001
+                    pass
         return n
+
+    async def _review_one(self, conn, h: dict, *, trigger: str, due_at) -> str:
+        """ONE review of one actual position (record only)."""
+        inv = await live_inventory(conn, h["group_id"])
+        resting = await conn.fetchval(
+            """SELECT coalesce(sum(live_qty - cum_qty), 0) FROM execmirror_orders
+                WHERE group_id = $1 AND role = 'STANDING_PROTECTION'
+                  AND state IN ('OPEN','PARTIALLY_FILLED')""", h["group_id"])
+        filled_prot = await conn.fetchval(
+            """SELECT coalesce(sum(cum_qty), 0) FROM execmirror_orders
+                WHERE group_id = $1 AND role = 'STANDING_PROTECTION'""", h["group_id"])
+        quote, mark = {"read": False}, None
+        try:
+            q = await self.call(self.venue().quote, h["us_market_slug"])
+            bid, ask = _amt(q.get("bid")), _amt(q.get("ask"))
+            quote = {"read": q.get("error") is None, "at": self._now(),
+                     "bid": None if bid is None else str(bid),
+                     "ask": None if ask is None else str(ask),
+                     "state": q.get("state"), "error": q.get("error"),
+                     "basis": "the mirror account's own venue BBO read at review time"}
+            long_side = str(h.get("opened_intent") or "").endswith("BUY_LONG")
+            exit_px = bid if long_side else (None if ask is None else Decimal(1) - ask)
+            if exit_px is not None:
+                mark = exit_px * Decimal(inv["held"])
+        except Exception as exc:                              # noqa: BLE001
+            quote = {"read": False, "error": EP._error(exc)}
+        # cost per contract follows collateral_per_contract: a long
+        # paid the price, a short buy the complement
+        cost = (None if h["avg_entry_px"] is None else
+                collateral_per_contract(str(h.get("opened_intent") or ""),
+                                        h["avg_entry_px"]) * Decimal(inv["held"]))
+        unreal = None if (mark is None or cost is None) else mark - cost - Decimal(str(h["fees_usd"]))
+        # THE PROBABILITY'S FRESHNESS FOR THE ACTUAL POSITION: a fresh
+        # PinnAPI probability is attempted for the held contract on the
+        # same reader as the paper review; its evidence state is
+        # recorded, never used to sell (the action follows the paper
+        # decision; an unavailable probability liquidates nothing).
+        prob = await self._live_probability(conn, h, inv["held"])
+        pr = await conn.fetchrow(
+            """SELECT review_id, recommendation FROM paper_xavier_reviews
+                WHERE group_id = $1 ORDER BY reviewed_at DESC LIMIT 1""", h["group_id"])
+        paper_open = await paper_open_qty(conn, h["group_id"])
+        if inv["held"] <= 0:
+            action = "NOTHING_HELD"
+        elif paper_open <= 0:
+            action = "ORPHAN_CLOSE_PENDING"
+        elif inv["committed"] > 0:
+            action = "EXIT_WORKING_FOLLOWS_PAPER_DECISION"
+        else:
+            action = "HOLD_FOLLOWS_PAPER_DECISION"
+        now = self._now()
+        rid = "liverev:%s:%d" % (h["group_id"], int(now * 1000))
+        # THE MANAGEMENT POLICY THIS REVIEW RAN UNDER (the owner-approved
+        # artifact with its exact hash, else READY_FOR_OWNER_APPROVAL)
+        from .agents import xavier_small_live_policy as XSP
+        mpol = await XSP.load_review_record(conn)
+        mgmt = {"state": "NO_MANAGEMENT_ASSESSOR_IN_THIS_PROCESS"}
+        if self._management_assessor is not None:
+            try:
+                mgmt = await self._management_assessor(
+                    conn, h, review_id=rid, at=now, trigger=trigger, due_at=due_at,
+                    cadence_s=MANAGEMENT_EVERY_S, quote=quote, prob=prob,
+                    held=inv["held"],
+                    paper_recommendation=None if pr is None else pr["recommendation"],
+                    policy=mpol)
+            except Exception as exc:                          # noqa: BLE001
+                mgmt = {"ok": False, "why": "ASSESSOR_FAILED:%s" % type(exc).__name__}
+        first_at = h.get("first_live_fill_at")
+        lat = (None if due_at is None else round(now - float(due_at), 3))
+        await conn.execute(
+            """INSERT INTO smalllive_reviews (review_id, handoff_id, reviewed_at, live_held,
+                 committed_exit_qty, resting_protection_qty, filled_protection_qty, quote,
+                 mark_value_usd, cost_basis_usd, unrealized_usd, paper_review_id,
+                 paper_recommendation, action, detail)
+               VALUES ($1,$2,to_timestamp($3),$4,$5,$6,$7,$8::jsonb,$9,$10,$11,$12,$13,$14,
+                       $15::jsonb)
+               ON CONFLICT (review_id) DO NOTHING""",
+            rid, h["handoff_id"], now, inv["held"], inv["committed"], resting or 0,
+            filled_prot or 0, _j(quote), mark, cost, unreal,
+            None if pr is None else pr["review_id"],
+            None if pr is None else pr["recommendation"], action,
+            _j({"paper_open_qty": str(paper_open), "position": "ACTUAL",
+                "venue": VENUE, "mark_basis": "exit side of the fresh venue BBO",
+                "resting_protection_is_not_filled_protection": True,
+                "evidence_state": prob["evidence_state"],
+                "probability_evidence": prob,
+                "review_trigger": trigger, "due_at": due_at,
+                "review_latency_s": lat,
+                "first_live_fill_at": (first_at.timestamp()
+                                       if hasattr(first_at, "timestamp") else first_at),
+                "cadence_s": MANAGEMENT_EVERY_S,
+                "management_policy": mpol,
+                "management": mgmt}))
+        return rid
 
     # --- Audrey reconciles the chain independently ---------------------------
     async def audrey_reconcile(self, conn) -> int:
@@ -1287,11 +1414,15 @@ class Mirror:
         return out
 
 
-async def run(get_pool, *, probability_reader=None) -> None:
+async def run(get_pool, *, probability_reader=None, management_assessor=None) -> None:
     """The API's background lane. One runner across processes (advisory
-    lock); disabled until the control row is enabled. `probability_reader`
-    is the actual position's probability-evidence reader (record only)."""
-    mirror = Mirror(probability_reader=probability_reader)
+    lock); disabled until the control row is enabled (actual positions are
+    still REVIEWED while it is off -- records only). `probability_reader` is
+    the actual position's probability-evidence reader and
+    `management_assessor` Xavier's assessment of each review (both record
+    only)."""
+    mirror = Mirror(probability_reader=probability_reader,
+                    management_assessor=management_assessor)
     # ONE DECISION -> PAPER + ACTUAL: the actual entry lane of this process
     # shares this runner's retail venue client, recovery and fill ingestion.
     from . import execution_intent as EI

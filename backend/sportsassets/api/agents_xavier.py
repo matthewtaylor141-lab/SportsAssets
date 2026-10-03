@@ -24,7 +24,7 @@ import json
 import time
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 
 from ..db import get_pool
 
@@ -535,6 +535,24 @@ async def xavier_management_policy(response: Response) -> dict:
     async with pool.acquire() as conn:
         got = await XSP.read_artifact(conn)
     return dict(got, read_only=True)
+
+
+@router.get("/api/command/xavier/management",
+            dependencies=[Depends(require_read)])
+async def xavier_management(response: Response,
+                            limit: int = Query(default=100, ge=1, le=500)
+                            ) -> dict:
+    """XAVIER'S MANAGEMENT OF EVERY POSITION (paper and actual): the latest
+    review's probability evidence state, thesis state, alternatives (HOLD /
+    EXIT / REDUCE / VERIFIED_HEDGE / shadow REALLOCATE), review latency
+    against its bound, the management-policy record and the value-add
+    against the counterfactuals frozen at entry. Command Centre data, read
+    only (agents.xavier_management.management_view)."""
+    from ..agents import xavier_management as XM
+    response.headers["Cache-Control"] = "no-store"
+    pool = await _pool()
+    async with pool.acquire() as conn:
+        return await XM.management_view(conn, limit=limit)
 
 
 @router.get("/api/command/agents/xavier/decisions/{xavier_decision_id}",
