@@ -601,3 +601,4 @@ tests/test_karen_identity_and_no_authority.py
 tests/test_karen_challenge_lifecycle.py
 tests/test_karen_metrics_and_runner.py
 tests/test_karen_api_pages_slack.py
+tests/test_karen_management_url.py
