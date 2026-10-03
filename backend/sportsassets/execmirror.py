@@ -561,6 +561,7 @@ class Mirror:
                         AS decision_policy_version
                  FROM paper_orders o LEFT JOIN paper_decisions d USING (decision_id)
                 WHERE o.account_id = $1 AND o.decided_at >= $2
+                  AND o.role <> 'ENTRY'
                   AND NOT EXISTS (SELECT 1 FROM execmirror_orders m
                                    WHERE m.paper_order_id = o.order_id)
                 ORDER BY o.decided_at, o.order_id LIMIT 25""",
@@ -1066,6 +1067,19 @@ class Mirror:
                     WHERE m.group_id = $1 ORDER BY m.created_at""", gid)]
             disc, chain = [], []
             for m in rows:
+                if m.get("execution_intent_id") and not m.get("paper_order_id"):
+                    # an ACTUAL sibling of a decision: its paper sibling is the
+                    # ENTRY paper order of the same decision (never its parent)
+                    ei = await conn.fetchrow(
+                        """SELECT i.decision_id, p.order_id, p.qty AS p_qty,
+                                  p.state AS p_state
+                             FROM execution_intents i LEFT JOIN paper_orders p
+                               ON p.decision_id = i.decision_id AND p.role = 'ENTRY'
+                            WHERE i.intent_id = $1""", m["execution_intent_id"])
+                    if ei is not None:
+                        m = dict(m, decision_id=ei["decision_id"],
+                                 paper_order_id=ei["order_id"], p_qty=ei["p_qty"],
+                                 p_state=ei["p_state"], _sibling=True)
                 pf = await conn.fetchrow(
                     "SELECT coalesce(sum(qty), 0) AS q, avg(price) AS px, coalesce(sum(fee_usd),0) AS fee "
                     "FROM paper_fills WHERE order_id = $1", m["paper_order_id"]) if m["paper_order_id"] else None
@@ -1078,6 +1092,9 @@ class Mirror:
                         "SELECT decision_id, verdict, strategy, policy_version FROM paper_decisions "
                         "WHERE decision_id = $1", m["decision_id"])
                 link = {"mirror_id": m["mirror_id"], "role": m["role"],
+                        "execution_intent_id": m.get("execution_intent_id"),
+                        "relation": ("SIBLING_OF_ONE_DECISION" if m.get("_sibling")
+                                     else "MIRRORED_FROM_PAPER_ORDER"),
                         "paper_order_id": m["paper_order_id"], "decision_id": m.get("decision_id"),
                         "decision_found": dec is not None,
                         "paper_fill_qty": None if pf is None else str(pf["q"]),
@@ -1086,6 +1103,31 @@ class Mirror:
                         "live_intended_qty": m["live_qty"], "live_fill_qty": str(lf["q"]),
                         "venue_cum_qty": None if m["cum_qty"] is None else str(m["cum_qty"]),
                         "live_fees_usd": str(lf["fee"])}
+                if m.get("execution_intent_id"):
+                    # PAPER vs ACTUAL of ONE decision: what the simulator
+                    # predicted beside what the venue did (neither waits)
+                    pp = None if pf is None or pf["px"] is None else Decimal(str(pf["px"]))
+                    lp = None if m.get("avg_px") is None else Decimal(str(m["avg_px"]))
+                    link["divergence"] = {
+                        "paper_fill_px": None if pp is None else str(pp),
+                        "live_avg_px": None if lp is None else str(lp),
+                        "price_difference": (None if pp is None or lp is None
+                                             else str(lp - pp)),
+                        "paper_fees_usd": None if pf is None else str(pf["fee"]),
+                        "live_fees_usd": str(lf["fee"]),
+                        "paper_qty_scaled": (None if m.get("scaled_qty") is None
+                                             else str(m["scaled_qty"])),
+                        "live_qty": m["live_qty"],
+                        "decision_to_accept_ms": (
+                            None if not (m.get("accepted_at") and m.get("paper_decided_at"))
+                            else int((m["accepted_at"] - m["paper_decided_at"])
+                                     .total_seconds() * 1000)),
+                        "paper_sibling": ("PRESENT" if m["paper_order_id"]
+                                          else "ABSENT")}
+                    if dec is None:
+                        disc.append({"code": "ACTUAL_ORDER_WITHOUT_DECISION",
+                                     "mirror_id": m["mirror_id"],
+                                     "execution_intent_id": m["execution_intent_id"]})
                 chain.append(link)
                 # an excluded row sent nothing: there is no live order to orphan
                 if m["role"] in BUY_ROLES and m["paper_order_id"] and dec is None \
@@ -1184,6 +1226,10 @@ async def run(get_pool) -> None:
     """The API's background lane. One runner across processes (advisory
     lock); disabled until the control row is enabled."""
     mirror = Mirror()
+    # ONE DECISION -> PAPER + ACTUAL: the actual entry lane of this process
+    # shares this runner's retail venue client, recovery and fill ingestion.
+    from . import execution_intent as EI
+    EI.start(get_pool, mirror)
     while True:
         try:
             pool = await get_pool()

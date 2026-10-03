@@ -25,6 +25,7 @@ from decimal import Decimal
 import pytest
 
 from sportsassets import execmirror as M
+from sportsassets import execution_intent as EI
 from sportsassets import execmirror_probe as EP
 from sportsassets import execmirror_view as V
 
@@ -276,16 +277,39 @@ async def _setup(conn, monkeypatch, *, cap=25, ago_s=5):
              cutover_at = now() - make_interval(secs => $1),
              account_fingerprint = $2, baseline = '{}'::jsonb, max_order_usd = $3,
              scale = 1000 WHERE id = 1""", float(ago_s), EP.fingerprint(KID), cap)
+    await conn.execute("DELETE FROM execution_intents")
     venue = FakeVenue()
     mirror = M.Mirror(lambda: venue, paper_account=acct["account_id"])
+    # ONE DECISION -> PAPER + ACTUAL: an ENTRY reaches the venue through its
+    # execution intent's actual lane (dispatched at the decision in
+    # production, i.e. before the runner's next tick), never by mirroring the
+    # paper order. The runner's account snapshot exists first, as in
+    # production where the enabled runner snapshots on its first tick.
+    lane = EI.ActualLane(None, mirror)
+    real_tick = mirror.tick
+
+    async def tick(conn):
+        ctl = await M.control(conn)
+        if ctl.get("enabled") and not ctl.get("stopped") and mirror._buying_power is None:
+            await mirror.snapshot(conn, ctl)
+        for r in await conn.fetch("SELECT intent_id FROM execution_intents"
+                                  " WHERE actual_state = 'DISPATCHED' ORDER BY created_at"):
+            await lane._run(conn, r["intent_id"])
+        return await real_tick(conn)
+    mirror.tick = tick
+    mirror.lane = lane
     return acct, venue, mirror
+
+
+_INTENT_OF: dict = {}
 
 
 async def _paper_order(conn, acct, *, role="ENTRY", direction="BUY",
                        intent="ORDER_INTENT_BUY_LONG", qty=2000, wire=0.55,
                        tif="IOC", otype="MARKETABLE", group=None, state="PENDING_SIMULATION",
                        decided_offset_s=0.0, strategy="PINNACLE_COMPLETED_GAME_PAPER",
-                       policy_version="PINNACLE_COMPLETED_GAME_PAPER_V2"):
+                       policy_version="PINNACLE_COMPLETED_GAME_PAPER_V2",
+                       book_offset_s=None):
     oid = "paper_%s" % uuid.uuid4().hex[:12]
     group = group or "paper_group_%s" % uuid.uuid4().hex[:8]
     now = dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=decided_offset_s)
@@ -304,7 +328,20 @@ async def _paper_order(conn, acct, *, role="ENTRY", direction="BUY",
     ph = ", ".join("$%d" % (i + 1) for i in range(len(cols)))
     await conn.execute("INSERT INTO paper_orders (%s) VALUES (%s)" % (names, ph),
                        *cols.values())
-    return {"order_id": oid, "group_id": group, "slug": cols["us_market_slug"]}
+    if role == "ENTRY":
+        # the decision's ONE execution intent (what decide_one writes)
+        b_at = now.timestamp() + (0.0 if book_offset_s is None else book_offset_s)
+        it = await EI.create(
+            conn, decision_id="dec_" + oid, valuation_id=None,
+            strategy=strategy or "UNKNOWN", policy_version=policy_version,
+            slug=cols["us_market_slug"], order_intent=intent, holding_side="LONG",
+            group_id=group, order_type=otype, time_in_force=tif,
+            paper_target_qty=qty, limit_price=wire, wire_price=wire,
+            book_obs_id=None, book_observed_at=b_at,
+            decided_at=now.timestamp(), evidence={}, timeline={})
+        _INTENT_OF[oid] = it["intent_id"]
+    return {"order_id": oid, "group_id": group, "slug": cols["us_market_slug"],
+            "intent_id": _INTENT_OF.get(oid)}
 
 
 async def _paper_fill(conn, acct, po, *, qty, direction="BUY", price=0.55, role="ENTRY"):
@@ -321,8 +358,28 @@ async def _paper_fill(conn, acct, po, *, qty, direction="BUY", price=0.55, role=
 
 
 async def _row(conn, paper_order_id):
-    return dict(await conn.fetchrow(
-        "SELECT * FROM execmirror_orders WHERE paper_order_id = $1", paper_order_id))
+    """The actual-side row of a paper order: its mirror row, or for an ENTRY
+    the actual sibling of the same decision (or the intent's refusal)."""
+    r = await conn.fetchrow(
+        "SELECT * FROM execmirror_orders WHERE paper_order_id = $1", paper_order_id)
+    if r is not None:
+        return dict(r)
+    iid = _INTENT_OF[paper_order_id]
+    r = await conn.fetchrow(
+        "SELECT * FROM execmirror_orders WHERE execution_intent_id = $1", iid)
+    if r is not None:
+        return dict(r)
+    it = dict(await conn.fetchrow(
+        "SELECT * FROM execution_intents WHERE intent_id = $1", iid))
+    return {"state": "EXCLUDED", "exclusion": it["actual_refusal"],
+            "live_qty": it["live_qty"] or 0, "scaled_qty": it["live_raw_qty"],
+            "rounding_delta": it["rounding_delta"], "mirror_id": None,
+            "intent_state": it["actual_state"],
+            "detail": dict(json.loads(it["evidence"]) if isinstance(it["evidence"], str)
+                           else (it["evidence"] or {}),
+                           live_eligibility=(json.loads(it["live_eligibility"])
+                                             if isinstance(it["live_eligibility"], str)
+                                             else it["live_eligibility"]))}
 
 
 @pg
@@ -416,9 +473,13 @@ async def test_an_ambiguous_submission_is_reconciled_before_anything_is_retried(
         acct, venue, mirror = await _setup(conn, monkeypatch)
         po = await _paper_order(conn, acct, tif="GTD", otype="RESTING")
         venue.behaviour = [{"raise": 504, "create_anyway": True}]   # lost response
-        await mirror.tick(conn)
+        await mirror.snapshot(conn, await M.control(conn))
+        await mirror.lane._run(conn, po["intent_id"])   # the actual lane submits
         r = await _row(conn, po["order_id"])
         assert r["state"] == "UNKNOWN" and r["venue_order_id"] is None
+        it = await conn.fetchrow("SELECT actual_state FROM execution_intents"
+                                 " WHERE intent_id = $1", po["intent_id"])
+        assert it["actual_state"] == EI.A_UNKNOWN
         await mirror.tick(conn)                         # recover: adopt, never resend
         r = await _row(conn, po["order_id"])
         assert r["state"] == "OPEN" and r["venue_order_id"] == "v1"
@@ -555,9 +616,14 @@ async def test_a_cancel_that_loses_the_race_to_a_fill_counts_the_fill(monkeypatc
         await mirror.tick(conn)
         r = await _row(conn, po["order_id"])
         venue.race.add(r["venue_order_id"])
+        # the PAPER sibling ending never cancels the ACTUAL order (siblings,
+        # not parent and child)
         await conn.execute("UPDATE paper_orders SET state = 'CANCELED' WHERE order_id = $1",
                            po["order_id"])
         await mirror.tick(conn)
+        assert venue.cancelled == [] and (await _row(conn, po["order_id"]))["state"] == "OPEN"
+        # an actual-side cancel that loses the race to a fill counts the fill
+        await mirror._cancel(conn, await _row(conn, po["order_id"]), "ACTUAL_CANCEL")
         r = await _row(conn, po["order_id"])
         assert r["state"] == "FILLED" and r["cum_qty"] == 2
         assert (await M.live_inventory(conn, po["group_id"]))["held"] == 2
