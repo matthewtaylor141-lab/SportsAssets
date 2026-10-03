@@ -49,6 +49,8 @@ NOT_ADMISSIBLE = "NOT_ADMISSIBLE"
 #: establish a live-currentness rule (P5 stays NOT_ESTABLISHED), so no actual
 #: order can be admitted. A new rule is added here only with its cited
 #: evidence, exact semantics, tests and audit record -- never to enable trading.
+#: Review of the current venue documentation (2026-10-03, verdict B, the gate
+#: stays closed): research/p5_live_book_currency_review.md.
 APPROVED_LIVE_BOOK_RULES: frozenset = frozenset()
 
 #: The PinnAPI probability authority basis the V3 investment policy records.
