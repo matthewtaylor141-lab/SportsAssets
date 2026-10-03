@@ -367,7 +367,15 @@ def test_review_the_preset_runs_and_its_since_label_is_the_workers_start():
                 labels = {r["window"] for r in rows}
                 assert len(labels) == 2 and "sleeve 24h" in labels, (value, labels)
                 since = next(x for x in labels if x != "sleeve 24h")
-                assert since.startswith("since ") and since[6:] == ml._iso(start)[11:19], (value, since, ml._iso(start))
+                # A label derived from the query's own now() - 24 h is taken a
+                # moment after this test's time.time(): across a second
+                # boundary it reads one second later. Those shapes accept
+                # exactly that instant or the next second; a label derived
+                # from a STORED timestamp (the rearm shape) must match exactly.
+                ok = {ml._iso(start)[11:19]}
+                if start != rearm:
+                    ok.add(ml._iso(start + 1)[11:19])
+                assert since.startswith("since ") and since[6:] in ok, (value, since, ml._iso(start))
                 # the worker's own reading over the same rows: the since-text,
                 # excluding manual / underdog -- what the preset's rows sum to
                 # only once those two whales are dropped
