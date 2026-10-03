@@ -269,14 +269,25 @@ def _fold(text) -> str:
     return _re.sub(r"[^a-z0-9 ]+", " ", t.lower())
 
 
-def _team_tokens(name):
+def _team_tokens(name, family=None):
     """One team's DISTINGUISHING tokens, and what was dropped.
 
     Affiliation markers are dropped only when something remains: a team whose
     whole rendered name is a marker keeps it, because an empty token set would
-    match every other team.
+    match every other team. For a college family (football) the venue-native
+    resolver's own rendering rewrites apply first -- a poll-rank prefix
+    ("#5 Alabama") is dropped and "St." reads as State / leading Saint -- so a
+    ranked venue title still confirms the competition (cand22).
     """
-    raw = [w for w in _fold(name).split() if w]
+    if family is not None:
+        # imported here so this helper stays self-contained (it is lifted on
+        # its own by tests/test_held_feed_boundary.py)
+        from .. import bettor_venue_native_identity as _vn
+    if family is not None and family in _vn.NICKNAME_QUALIFIED_FAMILIES:
+        name = _vn._RANK_PREFIX.sub("", str(name or ""))
+        raw = _vn._college_tokens([w for w in _fold(name).split() if w])[0]
+    else:
+        raw = [w for w in _fold(name).split() if w]
     kept = [w for w in raw if w not in AFFILIATION_MARKERS and len(w) > 1]
     dropped = [w for w in raw if w not in kept]
     if not kept:
@@ -417,7 +428,7 @@ MIN_FIXTURE_MATCHES = 1
 
 
 def confirm_mapping_by_fixtures(*, provider_events, venue_event_titles,
-                                venue_event_days=None) -> dict:
+                                venue_event_days=None, family=None) -> dict:
     """Does the provider's competition name the SAME FIXTURES as the venue's?
 
     THE HOLE THIS CLOSES. `select_sports` established that a provider key EXISTS
@@ -467,8 +478,8 @@ def confirm_mapping_by_fixtures(*, provider_events, venue_event_titles,
             out["rejected_fixtures"].append(
                 {"venue": str(title)[:60], "refusal": R_SIDES_NOT_TWO})
             continue
-        a_tok, a_drop = _team_tokens(sides[0])
-        b_tok, b_drop = _team_tokens(sides[1])
+        a_tok, a_drop = _team_tokens(sides[0], family)
+        b_tok, b_drop = _team_tokens(sides[1], family)
         if a_tok == b_tok or not a_tok or not b_tok:
             # Two sides that normalise identically cannot support a one-to-one
             # match either, and it is the shape the old defect produced.
@@ -499,8 +510,8 @@ def confirm_mapping_by_fixtures(*, provider_events, venue_event_titles,
 
     for ev in events:
         ev = ev or {}
-        home, h_drop = _team_tokens(ev.get("home_team"))
-        away, a_drop = _team_tokens(ev.get("away_team"))
+        home, h_drop = _team_tokens(ev.get("home_team"), family)
+        away, a_drop = _team_tokens(ev.get("away_team"), family)
         if not home or not away or home == away:
             out["rejected_fixtures"].append(
                 {"provider": "%s vs %s" % (ev.get("home_team"),
@@ -1149,6 +1160,10 @@ SHARP_BOOKS = ("pinnacle", "betfair_ex_eu", "betfair_ex_uk", "betfair_ex_au",
 PINNACLE_SETTLEMENT = {
     "soccer": "REGULATION_90_PLUS_STOPPAGE_NO_EXTRA_TIME",
     "baseball": "FULL_GAME_INCLUDING_EXTRA_INNINGS",
+    # cand22: the publisher's American Football section, "Bets on the Game
+    # and 2nd Half-periods include points scored in overtime" (captured with
+    # its page hash in bettor_settlement_terms.CAPTURE_RUN_FOOTBALL).
+    "football": "FULL_GAME_INCLUDING_OVERTIME",
 }
 
 #: family -> the labels `markets.sport` actually carries. Read out of
@@ -1440,6 +1455,36 @@ def venue_league_tokens(sport_key) -> tuple:
     got |= {t for t, k in VENUE_FOOTBALL_TOKEN_TO_PROVIDER_KEY.items()
             if k == str(sport_key)}
     return tuple(sorted(got))
+
+
+def provider_key_for_venue_token(token):
+    """THE ONE LEAGUE IDENTITY: venue league token -> provider competition key
+    (`cfb` -> `americanfootball_ncaaf`), from the same maps the cycle selects
+    and resolves with; None when this lane maps no competition to it. The
+    coverage census and coverage_integrity read league identity HERE, so the
+    three can never disagree on what `cfb` is."""
+    t = str(token or "").strip().lower()
+    if t in VENUE_FOOTBALL_TOKEN_TO_PROVIDER_KEY:
+        return VENUE_FOOTBALL_TOKEN_TO_PROVIDER_KEY[t]
+    if t in VENUE_TOKEN_TO_PROVIDER_KEY:
+        return VENUE_TOKEN_TO_PROVIDER_KEY[t]
+    for key, toks in VENUE_LEAGUE_TOKENS_CONFIRMED.items():
+        if t in toks:
+            return key
+    return None
+
+
+def family_for_provider_key(key):
+    """The sport family this lane prices a provider key under, or None."""
+    k = str(key or "")
+    for kk, fam in SPORTS_CONFIRMED:
+        if kk == k:
+            return fam
+    if k in VENUE_FOOTBALL_TOKEN_TO_PROVIDER_KEY.values():
+        return "football"
+    if k in VENUE_TOKEN_TO_PROVIDER_KEY.values():
+        return "soccer"
+    return None
 
 
 def venue_native_may_replace(codes) -> bool:
@@ -7587,7 +7632,8 @@ async def cycle(conn, *, stream_seed=None) -> dict:
                 venue_event_titles=_cand.get("venue_titles") or [],
                 # THE VENUE'S OWN FIXTURE DATES, so the date check runs on the
                 # scheduled path rather than only in a test.
-                venue_event_days=_cand.get("venue_title_days") or {})
+                venue_event_days=_cand.get("venue_title_days") or {},
+                family=_cand.get("family") or family)
             step["mapping_confirmation"] = {
                 k: conf[k] for k in ("ok", "refusal", "matches", "examined",
                                      "min_required", "matched_fixtures", "why")}

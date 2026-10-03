@@ -673,3 +673,7 @@ tests/test_xavier_fresh_probability.py
 # detectors, the per-challenge Command Centre view and the
 # #agent-workroom path under her own token only.
 tests/test_karen_persona_and_peer_response.py
+# cand22 P0-A: one league identity (cfb <-> americanfootball_ncaaf <-> NCAAF),
+# a census that files a requested league honestly, college names that map
+# exactly or refuse by name, captured football settlement terms.
+tests/test_ncaaf_identity_settlement_and_coverage.py

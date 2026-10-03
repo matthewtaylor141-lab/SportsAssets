@@ -321,11 +321,17 @@ def catalogue_token_map() -> dict:
             out[t] = key
     try:
         from ..workers import ext_pinnacle_loop as L
-        for t, key in L.VENUE_TOKEN_TO_PROVIDER_KEY.items():
-            out.setdefault(t, key)
-        for key, toks in L.VENUE_LEAGUE_TOKENS_CONFIRMED.items():
-            for t in toks:
-                out.setdefault(t, key)
+        # THE LANE'S OWN LEAGUE IDENTITY WINS (cand22): what the collector
+        # maps a token to is what this count attributes it to, so the
+        # coverage census, this funnel and the cycle agree that `cfb` is
+        # americanfootball_ncaaf ("NCAAF").
+        for t in (list(L.VENUE_FOOTBALL_TOKEN_TO_PROVIDER_KEY)
+                  + list(L.VENUE_TOKEN_TO_PROVIDER_KEY)
+                  + [t for toks in L.VENUE_LEAGUE_TOKENS_CONFIRMED.values()
+                     for t in toks]):
+            key = L.provider_key_for_venue_token(t)
+            if key:
+                out[t] = key
     except Exception:                                           # noqa: BLE001
         pass
     return out

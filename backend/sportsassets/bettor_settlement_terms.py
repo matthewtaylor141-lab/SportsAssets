@@ -149,6 +149,12 @@ APPLICABLE_CONDITIONS = {
     ("baseball", "h2h"): CONDITIONS,
     ("soccer", "h2h"): (C_FULL, C_OVERTIME, C_SUSPENDED_RESUMED,
                         C_SUSPENDED_BEYOND, C_NOT_PLAYED),
+    # AMERICAN FOOTBALL (cand22): the book conditions the Game period on 55
+    # minutes of play, so a game suspended and never resumed inside its
+    # 12-hour window is a CALLED game past that minimum or a STOPPED one
+    # before it -- those two conditions ARE football's suspended-beyond case.
+    ("football", "h2h"): (C_FULL, C_OVERTIME, C_CALLED_FINAL,
+                          C_STOPPED_EARLY, C_SUSPENDED_RESUMED, C_NOT_PLAYED),
 }
 
 R_NO_APPLICABLE_SET = "NO_APPLICABLE_CONDITION_SET_DECLARED"
@@ -672,6 +678,21 @@ CAPTURED_SCOPE = {
     # classified.
     ("soccer", "h2h"): {"phases": (PHASE_REGULAR, PHASE_LEAGUE),
                         "formats": (FMT_NINETY,)},
+    # AMERICAN FOOTBALL (cand22, capture CAPTURE_RUN_FOOTBALL): the sport
+    # section states ONE rule set for every phase of the leagues it names --
+    # "All American Football rules apply to NFL, NCAA, UFL, and CFL unless a
+    # specific league is mentioned within the rule" -- and the only
+    # league-specific Game-period exception is the NFL Pro Bowl. The lane maps
+    # only the college board (`cfb`), so for it no phase or format selects a
+    # different rule and none is required. Revisit before mapping `nfl`.
+    ("football", "h2h"): {"phases": (), "formats": (),
+                          "phase_independent": True,
+                          "phase_independent_because": (
+                              "All American Football rules apply to NFL, "
+                              "NCAA, UFL, and CFL unless a specific league "
+                              "is mentioned within the rule."),
+                          "leagues_covered": ("NCAA",),
+                          "not_covered": ("NFL Pro Bowl",)},
 }
 
 R_PHASE_UNKNOWN = "COMPETITION_PHASE_NOT_ESTABLISHED"
@@ -716,6 +737,13 @@ def admit_scope(*, sport_family, market="h2h", phase=None,
                 "phase": phase, "game_format": game_format,
                 "why": ("no capture covers %s/%s, so there are no terms to "
                         "admit" % (sport_family, market))}
+    if cap.get("phase_independent"):
+        return {"ok": True, "refusals": [], "phase": phase,
+                "game_format": game_format, "phase_independent": True,
+                "covers": {"leagues": list(cap.get("leagues_covered") or ()),
+                           "not_covered": list(cap.get("not_covered") or ())},
+                "why": ("the captured sport rules state one rule set for "
+                        "every phase: %s" % cap["phase_independent_because"])}
     refusals, why = [], []
     if phase is None:
         refusals.append(R_PHASE_UNKNOWN)
@@ -1229,6 +1257,90 @@ PHASE_BOOK_TERMS: dict = {
     },
 }
 
+# ── AMERICAN FOOTBALL: A SEPARATE CAPTURE OF THE SAME PAGE (cand22) ──────
+#
+# RETRIEVED, NOT RECALLED, by the GitHub Actions runner (fetch-docs run
+# 37161033936, job 111314325662) at 2026-10-03T23:12:56Z: HTTP 200, 119,592
+# bytes, sha256 63d64321...3d8303fd -- byte-identical to the 2026-10-01
+# playoff capture (CAPTURE_RUN_PLAYOFF), so the page did not change. The
+# sentences below are the publisher's American Football section, verbatim.
+_AT_FOOTBALL = "2026-10-03T23:12:56Z"
+
+CAPTURE_RUN_FOOTBALL = {
+    "reader": "github-actions runner, ubuntu-latest (fetch-docs)",
+    "job": ("https://github.com/matthewtaylor141-lab/SportsAssets/actions/"
+            "runs/37161033936/job/111314325662"),
+    "url": _URL,
+    "retrieved_at": _AT_FOOTBALL,
+    "http": 200,
+    "bytes": 119592,
+    "sha256": ("63d6432114be131dfbab98baf91f8777a98549221a59c288fa76916c"
+               "3d8303fd"),
+    "section": "American Football (sport rules)",
+}
+
+_Q_AF_SUSPENDED = (
+    "If a game is suspended with fewer than 55 minutes completed and is not "
+    "completed within 12 hours of suspension, all bets on the Game-period "
+    "will be voided and bets on completed periods will have action. If a "
+    "game is suspended after 55 minutes of play and not resumed within 12 "
+    "hours of suspension, then regardless of whether the game is completed "
+    "at a later date or not, all bets will have action and the score when "
+    "the game was suspended will be considered final. In addition, if the "
+    "cumulative playing time of all quarters is less than 55 minutes, "
+    "Full-game markets will have no action and bets will be deemed void.")
+_Q_AF_NOT_STARTED = (
+    "If a game is not started within 12 hours of its originally scheduled "
+    "time all bets will be voided.")
+_Q_AF_OVERTIME = (
+    "Bets on the Game and 2nd Half-periods include points scored in "
+    "overtime.")
+_Q_AF_LEAGUES = (
+    "All American Football rules apply to NFL, NCAA, UFL, and CFL unless a "
+    "specific league is mentioned within the rule.")
+
+
+def _cite_football(quote, rule):
+    return {"source": "%s -- American Football, %s" % (_SRC, rule),
+            "source_url": _URL, "retrieved_at": _AT_FOOTBALL, "quote": quote,
+            "page_sha256": CAPTURE_RUN_FOOTBALL["sha256"]}
+
+
+#: ONE MAP FOR BOTH CONTEXTS, because the section states one rule set and
+#: does not distinguish pre-game from in-play bets (the soccer reasoning).
+_FOOTBALL_H2H_TERMS = {
+    C_FULL: {"payout": PAY_ON_FINAL,
+             "cite": _cite_football(_Q_AF_OVERTIME, "overtime sentence")},
+    C_OVERTIME: {"payout": PAY_ON_FINAL,
+                 "cite": _cite_football(_Q_AF_OVERTIME, "overtime sentence"),
+                 "note": "overtime INCLUDED -- the baseball direction, not "
+                         "soccer's"},
+    # past 55 minutes and not resumed inside 12 hours: the score at the
+    # suspension is final
+    C_CALLED_FINAL: {"payout": PAY_ON_PARTIAL,
+                     "cite": _cite_football(_Q_AF_SUSPENDED,
+                                            "suspension sentence")},
+    # fewer than 55 minutes and not completed inside 12 hours: void
+    C_STOPPED_EARLY: {"payout": PAY_STAKE_BACK,
+                      "cite": _cite_football(_Q_AF_SUSPENDED,
+                                             "suspension sentence")},
+    # completed inside the 12-hour window: graded on the completed game
+    C_SUSPENDED_RESUMED: {"payout": PAY_ON_FINAL,
+                          "cite": _cite_football(_Q_AF_SUSPENDED,
+                                                 "suspension sentence")},
+    C_NOT_PLAYED: {"payout": PAY_STAKE_BACK,
+                   "cite": _cite_football(
+                       _Q_AF_NOT_STARTED + " " + _Q_GENERAL_NOT_STARTED,
+                       "not-started sentence and the general rule")},
+}
+BOOK_TERMS[("football", "h2h", CTX_PRE_GAME)] = dict(_FOOTBALL_H2H_TERMS)
+BOOK_TERMS[("football", "h2h", CTX_LIVE)] = dict(_FOOTBALL_H2H_TERMS)
+
+#: Captures whose terms are the SAME in every context, so an unproven quote
+#: context does not withhold them (the pre-game / in-play split that makes
+#: context matter for baseball does not exist in the section).
+CONTEXT_INVARIANT_CAPTURES = {("football", "h2h"): CAPTURE_RUN_FOOTBALL}
+
 #: The phases the general (non-phase-keyed) BOOK_TERMS describe. Anything
 #: else is answered from PHASE_BOOK_TERMS or not at all.
 GENERAL_TABLE_PHASES = frozenset({PHASE_REGULAR, PHASE_LEAGUE})
@@ -1258,6 +1370,15 @@ def book_terms(*, sport_family, market="h2h", context=None, phase=None,
     cover one competition phase and one game format, so applying them
     outside that is the overreach CAPTURE_LIMITS describes.
     """
+    fm = (str(sport_family), str(market))
+    if fm in CONTEXT_INVARIANT_CAPTURES:
+        # ONE RULE SET FOR EVERY CONTEXT AND PHASE (asserted by the tests:
+        # the pre-game and in-play maps are identical), so neither an
+        # unproven context nor an unsupplied phase withholds it.
+        if not admit_scope(sport_family=sport_family, market=market,
+                           phase=phase, game_format=game_format)["ok"]:
+            return {}
+        return dict(BOOK_TERMS.get(fm + (CTX_PRE_GAME,)) or {})
     if context is None:
         return {}
     if not admit_scope(sport_family=sport_family, market=market,
@@ -1394,6 +1515,14 @@ def compare_prose(*, sport_family, market="h2h", venue_prose="",
            book_context_for(observed_at=observed_at, start_at=start_at,
                             start_evidence=start_evidence,
                             quote_is_in_play=quote_is_in_play))
+    if (str(sport_family), str(market)) in CONTEXT_INVARIANT_CAPTURES:
+        # THE QUOTE'S CONTEXT SELECTS NOTHING HERE: the captured section
+        # states one rule set for pre-game and in-play bets alike, so an
+        # unproven context is recorded but is not a blocker.
+        ctx = {"context": ctx.get("context"), "refusal": None,
+               "context_invariant": True, "unproven_context": ctx,
+               "why": ("the captured terms for %s/%s are identical in every "
+                       "context" % (sport_family, market))}
     scope = admit_scope(sport_family=sport_family, market=market,
                         phase=phase, game_format=game_format)
     bk = dict(book_terms(sport_family=sport_family, market=market,
@@ -1421,8 +1550,11 @@ def compare_prose(*, sport_family, market="h2h", venue_prose="",
                 book_ambiguous_conditions=(
                     {c: w for c, w in amb.items() if c in conds}
                     if bk else {}),
-                book_capture=((dict(PHASE_CAPTURE.get(str(phase))
-                                    or CAPTURE_RUN)) if bk else None),
+                book_capture=((dict(
+                    CONTEXT_INVARIANT_CAPTURES.get(
+                        (str(sport_family), str(market)))
+                    or PHASE_CAPTURE.get(str(phase)) or CAPTURE_RUN))
+                    if bk else None),
                 book_capture_limits=(list(CAPTURE_LIMITS) if bk else None),
                 rule_hierarchy=(dict(RULE_HIERARCHY) if bk else None),
                 book_capture_request=(None if bk else CAPTURE_REQUEST))

@@ -196,14 +196,21 @@ def _stub(monkeypatch, kickoff: float, *, with_catalogue=True):
     monkeypatch.setattr(loop, "fetch_odds", fake_odds)
     monkeypatch.setattr(loop, "_read_book_blocking",
                         lambda _slug, **_k: _book())
-    # SYNTHETIC listing prose (the venue's real cfb text was not captured): it
-    # states no overtime rule, so football settlement stays NOT ESTABLISHED.
+    # THE VENUE'S OWN cfb LISTING PROSE, as captured from the public gateway
+    # (tests/fixtures/pmus_cfb_listing_2026_10_03.json, cand22): overtime
+    # included; postponed/suspended beyond two weeks settles to the last fair
+    # market price -- which the book's void rule contradicts.
+    import json as _json
+    import pathlib as _pl
+    _fx = _json.loads((_pl.Path(__file__).parent / "fixtures" /
+                       "pmus_cfb_listing_2026_10_03.json").read_text())
+    _prose = _fx["markets"][0]["description"]
     monkeypatch.setattr(loop, "_read_venue_rules_blocking",
                         lambda slug, **_k: {
                             "ok": True, "slug": slug,
-                            "rules_text": ("This market resolves to the team "
-                                           "that wins the game."),
-                            "tick_size": "0.01",
+                            "rules_text": _prose,
+                            "rules_field": "description",
+                            "tick_size": "0.005",
                             "tick_field": "orderPriceMinTickSize",
                             "read_at": time.time(), "from_cache": False,
                             "source": "pmus:/markets?slug=<slug>:rules_text"})
@@ -372,8 +379,15 @@ async def test_ncaaf_reaches_a_recorded_paper_decision_never_silence(
             assert v["admissible"] is False
             for code in (loop.R_BOOK_CURRENCY_NOT_ESTABLISHED,
                          "MARKET_NOT_IN_SUPPORTED_SET",
-                         "OVERTIME_RULE_NOT_ESTABLISHED"):
+                         # the captured documents CONFLICT on abandonment
+                         "VOID_ABANDONMENT_RULE_CONFLICTS_WITH_BOOK_RULE"):
                 assert code in v["refusals"], (code, v["refusals"])
+            # ...and AGREE on overtime, so that rule is established
+            assert "OVERTIME_RULE_NOT_ESTABLISHED" not in v["refusals"]
+            # THE MEASUREMENT ACCRUES: the book's two-outcome set is on the
+            # row although no probability is derived from it
+            assert v["probability"] is None
+            assert len(H.j(v["raw_odds"])) == 2 and v["outcomes_priced"] == 2
 
         # 3 · Derek recorded a decision for every one -- ENTER or NAMED REFUSE
         decs = [dict(r) for r in await conn.fetch(
