@@ -64,8 +64,12 @@ PINNAPI_AUTHORITY = "PINNAPI_SOLE_PROBABILITY_AUTHORITY"
 
 #: Venue market states that are explicitly tradable. Anything else -- absent,
 #: halted, suspended, closed, resolved, unknown -- is not.
+#: INSTRUMENT_STATE_OPEN is the exchange's own explicit OPEN state, carried by
+#: a book priced from the institutional stream (P5 C12: the state comes from
+#: the same observation as the price); it is the only state P5's C10 accepts.
 TRADABLE_MARKET_STATES = frozenset({
-    "MARKET_STATE_OPEN", "MARKET_STATUS_OPEN", "OPEN"})
+    "MARKET_STATE_OPEN", "MARKET_STATUS_OPEN", "OPEN",
+    "INSTRUMENT_STATE_OPEN"})
 
 #: The identity checks the decision's contract match must have PASSED.
 REQUIRED_IDENTITY_CHECKS = ("fixture_participants_date_side_period",

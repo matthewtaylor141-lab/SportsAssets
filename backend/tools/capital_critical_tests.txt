@@ -637,3 +637,11 @@ tests/test_karen_challenge_lifecycle.py
 tests/test_karen_metrics_and_runner.py
 tests/test_karen_api_pages_slack.py
 tests/test_karen_management_url.py
+# P5 C1 + C2 + C12 in the deciding process (claude/cand22-stream): the API
+# arms the same read-only stream only when INSTITUTIONAL_MD_STREAM=on and
+# PMX_* pass the identity guard, bootstraps refdata with the workers' code,
+# installs an exact-only identity mapper, and stops cleanly; the actual
+# lane's facts are priced from ONE current stream observation or REST stands
+# and C12 refuses; stale / crossed / gap / other-symbol books never place.
+tests/test_p5_api_stream.py
+tests/test_p5_c12_stream_priced_actual.py

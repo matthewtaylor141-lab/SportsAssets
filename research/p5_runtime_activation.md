@@ -188,30 +188,41 @@ Adding PMX_* to the API grants no order capability in code:
 
 Note that the API process is not venue-write-locked the way the workers are.
 
-### Other blockers the endpoint will list
+### What else the endpoint will list (after the C1 / C2 / C12 commit)
 
-The endpoint names each of these exactly; they are listed here so nobody reads the single C2 predicate as the whole story.
+The engineering gaps C1, C2 and C12 are closed in code; see "P5 in the deciding process" below. With today's env on sportsassets-api, the endpoint lists **no INTERNAL blocker**:
 
-- **`first_blocking`** = `C1_IDENTITY_EXACT`, INTERNAL, `IDENTITY_MAPPER_NOT_INSTALLED_IN_DECIDING_PROCESS`. At this SHA, `live_book_evidence.IDENTITY_MAPPER` is `None` in the API. The decision path therefore reads no stream book, and C3..C11 are DEPENDENT.
-- **C2's later sub-checks:**
-  - EXTERNAL `INSTITUTIONAL_MD_STREAM_NOT_ON_IN_DECIDING_PROCESS`: the flag must also be on for sportsassets-api.
-  - INTERNAL `NO_CODE_PATH_STARTS_THE_STREAM_IN_THE_DECIDING_PROCESS`: the API lifespan never calls `institutional_stream.start_default()`. The API also has no refdata path to give the stream instrument scales (`set_instrument`). Without scales, every API-side read would refuse `INSTRUMENT_SCALES_UNKNOWN`.
-- **C12**, INTERNAL `DECISION_PRICED_FROM_REST_PAPER_BOOK_NOT_THE_STREAM_BOOK`: `live_book_evidence.evaluate_for` passes `REST_PAPER_BOOK` as the price source, by design. The rule requires the executable price and depth to come from the evaluated stream observation.
+- **`first_blocking`** = `C1_IDENTITY_EXACT`, DEPENDENT on C2. The API's exact identity mapper is installed, but it answers only over refdata the API holds, and the API holds refdata only while its stream runs. C3..C12 are DEPENDENT on C2 for the same reason.
+- **C2's later external sub-check:** `INSTITUTIONAL_MD_STREAM_NOT_ON_IN_DECIDING_PROCESS`. The flag must also be on for sportsassets-api, where the lifespan's `start()` reads it.
 - **A1**, EXTERNAL `OWNER_APPROVAL_NOT_RECORDED_FOR_THIS_RULE_HASH`: the artifact is `READY_FOR_OWNER_APPROVAL`, sha256 `b2a49354...564a`. The owner approval action is in `research/p5_live_stream_book_v1.md`.
-- **S1**, EXTERNAL `SAME_BOOK_PROBE_HAS_NO_COMPARABLE_SAMPLES` until (a) has run long enough. That needs at least 30 comparable samples, and the probe takes one per EXACTly mapped symbol per minute. The probe's outcome is itself an external fact about the venue:
+- **S1**, EXTERNAL `SAME_BOOK_PROBE_HAS_NO_COMPARABLE_SAMPLES` until (a) has run long enough. That needs at least 30 comparable samples in 24 h, at least 95 % agreement and zero disagreement while the stream book was stable. The probe takes one sample per EXACTly mapped focus symbol per minute. Its outcome is itself an external fact about the venue:
   - If no focus symbol maps EXACTly (only moneylines and exact one-to-one instruments do), every sample reads `NOT_COMPARABLE / IDENTITY_NOT_EXACT` and S1 stays UNTESTED.
   - If the retail and exchange books disagree while the stream book is stable, as the unresolved 2026-09-19 0.97/0.99 vs 0.59/0.60 side-by-side did, S1 is `SINGLE_BOOK_PREMISE_CONTRADICTED_BY_RECORDED_SAMPLES`. No action fixes that: it means the institutional book is not the retail executable price.
 - **C13** is PROVEN: `ActualLane._run` enforces `verdict_age_refusal`, with a 2 s limit.
 
-So LIVE_ADMISSIBLE needs every one of the following. None of it is done by this branch.
+So LIVE_ADMISSIBLE needs exactly these four external predicates:
 
-1. PMX_* names on sportsassets-api (owner).
-2. `INSTITUTIONAL_MD_STREAM=on` on sportsassets-api.
-3. Code that starts the stream, supplies scales and subscribes symbols in the API process.
-4. An exact identity mapper installed in the API.
-5. A decision path that prices from the stream observation.
-6. Owner approval of the artifact.
-7. S1 SUPPORTED on recorded samples.
+1. PMX_* names on sportsassets-api (owner, Render dashboard).
+2. `INSTITUTIONAL_MD_STREAM=on` on sportsassets-api. Setting it redeploys the API from its tracked branch; the same ordering note as (a) applies.
+3. A1 owner approval of the artifact.
+4. S1 SUPPORTED on recorded samples.
+
+## P5 in the deciding process (C1, C2, C12)
+
+- **C2: the stream in the API.**
+  - The API lifespan calls `institutional_api_stream.start()`, which is the workers' own `institutional_stream.start_default`.
+  - It starts only when `INSTITUTIONAL_MD_STREAM=on` and the PMX_* credential passes the market-data identity guard in the API process. Otherwise it records `DISABLED_BY_CONFIGURATION` or `CREDENTIAL_REFUSED_BY_IDENTITY_GUARD` (`MARKET_DATA_CREDENTIAL_ABSENT`), exactly as the workers do, and starts no thread, no task and no venue call.
+  - When it does start, one background task reads instrument refdata with the workers' `bootstrap_instrument`, which is the allow-listed `instruments` read, paced. It covers the workers' focus set plus the symbols the decision path asked about. Each read is repeated only when due: an hour for a listed symbol, 5 minutes for an unlisted one. The task then calls `set_instrument` and `want`.
+  - API shutdown stops the task and the stream.
+- **C1: the identity mapper.** `live_book_evidence.IDENTITY_MAPPER` = `institutional_api_stream.identity_mapper`. It answers EXACT only on an exact `institutional_contract_map` mapping (YES / long leg, symbol = slug) over the refdata record the API holds. Anything else is `None`, which fails closed.
+- **C12: pricing the actual lane.**
+  - `execution_intent.start` installs `decision_hooks.LIVE_BOOK_STREAM` = `live_book_evidence.observe`. That makes the decision's one identity answer and one resident stream read.
+  - When the read is a current book of the exactly mapped symbol, and that symbol equals the slug, `paper_benchmark` prices the actual lane from that one observation. Book, IOC limit, depth, fees and EV all come from it, using the paper lane's own sizing and economics rules (same min edge, target, cap, fee function and 10 s book bound). The observation's id and age are recorded.
+  - P5 is evaluated on the same read with `priced_from` = that observation, and the intent's wire, limit, quantity and receipt instant are the stream's. The REST pricing is kept beside it as `paper_rest_pricing`.
+  - With no such book, `REST_PAPER_BOOK` stands and C12 refuses as before. A stale, crossed, gapped or other-symbol book refuses, and `Venue.place` is never called.
+  - Paper simulation, thresholds, the 2 s bound, the $25 cap and the 1:1,000 scale are unchanged.
+  - The admission accepts the exchange's explicit `INSTRUMENT_STATE_OPEN` as tradable, because the market state now comes from the same observation as the price.
+- **Stream off (today's production): the decision path is unchanged.** The mapper holds no refdata and answers `None`, and the intent is exactly the REST path's. A test proves this through the real decision path.
 
 ## Tests
 
@@ -225,6 +236,12 @@ All run against fakes: in-process gRPC venue, fake retail reader, httpx MockTran
   - LIVE_ADMISSIBLE end to end against the in-process gRPC venue;
   - each fact flipped alone;
   - the endpoint.
-- `backend/tests/test_institutional_md_orderless.py` §6: the new code paths are structurally orderless.
+- `backend/tests/test_institutional_md_orderless.py` §6 and §7: the new code paths, including the API start path, are structurally orderless.
+- `backend/tests/test_p5_api_stream.py`: C1 mapper and C2 start, refdata, shutdown.
+- `backend/tests/test_p5_c12_stream_priced_actual.py`, end to end through the real reactive decision path:
+  - C12 proven with a current stream book, and one order at the stream price;
+  - C12 refused with no stream book;
+  - stale, crossed, gap, other-symbol and below-edge books refuse with zero placements;
+  - stream off leaves the path unchanged.
 
-All three new files are in `backend/tools/capital_critical_tests.txt`.
+All new files are in `backend/tools/capital_critical_tests.txt`.
