@@ -235,12 +235,21 @@ def _opener(agent: str, *, seed: str, previous: str | None,
         return "" if previous and previous.startswith(o) else o
     opts = OPENERS[agent]
     start = int(hashlib.sha256(seed.encode()).hexdigest(), 16) % len(opts)
+    # THE NEXT ANSWER NEVER OPENS THE WAY THE PREVIOUS ONE DID. The empty
+    # opener ("" -- straight into the body) is itself an opening: two
+    # consecutive answers both opening with no opener both start with the
+    # same first sentence of the body (e.g. the demonstration disclaimer),
+    # which is the repetition this rule exists to prevent.
+    body = (previous or "").lstrip("[ ")
+    prev_opener = next((x for x in opts if x and body.startswith(x)), None)
     for i in range(len(opts)):
         o = opts[(start + i) % len(opts)]
-        if not previous or not o or not previous.lstrip("[ ").startswith(o):
-            if o and previous and previous.startswith(o):
+        if previous:
+            if o and (body.startswith(o) or previous.startswith(o)):
                 continue
-            return o
+            if not o and prev_opener is None:
+                continue
+        return o
     return ""
 
 

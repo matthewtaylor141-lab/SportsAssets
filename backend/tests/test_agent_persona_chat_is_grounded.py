@@ -238,3 +238,22 @@ def test_depth_adapts_and_answers_do_not_open_the_same_way(db, monkeypatch):
     assert len(answers) == 4
     assert all(m["spoken_text"] and m["body"] for m in answers)
     assert all(m["persona_version"] == 1 for m in answers)
+
+
+
+def test_consecutive_openers_never_repeat_including_the_empty_opener():
+    """Pure: for every agent and many seeds, the opener chosen after a
+    previous answer differs from that answer's opening -- and when the
+    previous answer used the EMPTY opener, the next one is not empty."""
+    from sportsassets.agents import persona_chat as PC
+    for agent, opts in PC.OPENERS.items():
+        for n in range(200):
+            seed = "seed-%d" % n
+            for prev_opener in opts:
+                previous = ((prev_opener + " ") if prev_opener else "") + \
+                    "This is the DEMONSTRATION position, not a real trade [F1]. Body."
+                o = PC._opener(agent, seed=seed, previous=previous, depth="NORMAL")
+                if prev_opener:
+                    assert o != prev_opener, (agent, seed, o)
+                else:
+                    assert o != "", (agent, seed)
