@@ -1530,25 +1530,20 @@ async def launch_state(conn, ctl: dict | None = None) -> dict:
 
 
 async def approved_live_book_rules(conn) -> dict:
-    """The live book-currency rules admission accepts: the code constant (empty)
-    plus any rule an owner has approved through its artifact, when the
-    admission module exposes that reader. Fail closed to the constant."""
+    """The live book-currency rules admission accepts -- the SAME reader the
+    actual lane uses (`live_rule_artifacts.approved_live_book_rules`: the code
+    constant plus rules an owner approved whose stored hash matches the
+    code's) -- and each artifact's state. Fail closed to the constant."""
     from . import actual_admission as AA
-    reader = getattr(AA, "approved_rules_from_db", None)
-    if reader is None:
-        try:
-            from . import execution_intent as EI
-            reader = getattr(EI, "approved_live_book_rules", None)
-        except Exception:                                       # noqa: BLE001
-            reader = None
-    if reader is None:
-        return {"rules": set(AA.APPROVED_LIVE_BOOK_RULES), "source": "CODE_CONSTANT"}
     try:
-        got = await reader(conn)
-        rules = set(got) if not isinstance(got, dict) else set(got.get("rules") or ())
-        arts = None if not isinstance(got, dict) else got.get("artifacts")
-        return {"rules": rules | set(AA.APPROVED_LIVE_BOOK_RULES),
-                "source": "CODE_CONSTANT_AND_OWNER_APPROVED_ARTIFACTS", "artifacts": arts}
+        from . import live_rule_artifacts as LRA
+        rules = set(await LRA.approved_live_book_rules(conn))
+        try:
+            arts = await LRA.describe(conn)
+        except Exception as exc:                                # noqa: BLE001
+            arts = {"why": "unreadable: %s" % type(exc).__name__}
+        return {"rules": rules, "artifacts": arts,
+                "source": "CODE_CONSTANT_AND_OWNER_APPROVED_ARTIFACTS"}
     except Exception as exc:                                    # noqa: BLE001
         return {"rules": set(AA.APPROVED_LIVE_BOOK_RULES),
                 "source": "CODE_CONSTANT (artifact read failed: %s)" % type(exc).__name__}
