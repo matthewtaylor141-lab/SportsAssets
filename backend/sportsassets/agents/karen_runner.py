@@ -450,9 +450,15 @@ ALLOCATOR_TABLE = KE.ALLOCATOR_TABLE
 _ALLOC_EV_PATH = ('$.** ? (exists(@.decision_id) || exists(@.valuation_id) '
                   '|| exists(@.evidence_refs) || (@.type() == "string" && @ '
                   'like_regex "^(decision|valuation)[_:= ]+[A-Za-z0-9]"))')
+#: ...or the row's own decision_id / group_id column naming a decision or a
+#: held paper group that EXISTS (the allocator's candidate IS that record)
 _ALLOC_HAS_EVIDENCE = (
     "(jsonb_path_exists(t.reasons, '%(p)s') OR "
-    "jsonb_path_exists(t.inputs, '%(p)s'))" % {"p": _ALLOC_EV_PATH})
+    "jsonb_path_exists(t.inputs, '%(p)s') OR "
+    "(t.decision_id IS NOT NULL AND EXISTS (SELECT 1 FROM paper_decisions d "
+    "  WHERE d.decision_id = t.decision_id)) OR "
+    "(t.group_id IS NOT NULL AND EXISTS (SELECT 1 FROM paper_fills f "
+    "  WHERE f.group_id = t.group_id)))" % {"p": _ALLOC_EV_PATH})
 _ALLOC_LATEST = (
     "SELECT DISTINCT ON (a.candidate_id) a.* FROM intel_allocations a "
     " WHERE a.label = 'SHADOW' %s "
