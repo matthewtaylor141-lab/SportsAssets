@@ -1,8 +1,8 @@
 -- Candidate 19 readback (read-only): the serving writer build, migration 198,
 -- the V3 investment policy's PinnAPI-only qualification on WS decisions,
 -- Audrey's NOT_MIRRORED rows, the mirror control and its latest snapshot.
-\echo '== R0 · migrations 195-198 =='
-SELECT version FROM schema_migrations WHERE version::text ~ '^(195|196|197|198)' ORDER BY 1;
+\echo '== R0 · migrations 195-199 =='
+SELECT version FROM schema_migrations WHERE version::text ~ '^(195|196|197|198|199)' ORDER BY 1;
 \echo '== R1 · writer builds (collector cycle; reactive attempts last 2 h) =='
 SELECT key, value->'writer'->>'build' AS cycle_writer_build, value->>'state' AS state,
        to_timestamp(coalesce((value->>'at')::float8, (value->>'beat_at')::float8)) AS at
