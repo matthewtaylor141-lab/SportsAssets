@@ -230,6 +230,17 @@ async def test_actual_is_submitted_while_the_paper_simulator_is_stalled(env, mon
         assert row["latency_ms"]["decision_to_submit_ms"] is not None
         assert row["latency_ms"]["decision_to_submit_ms"] >= 0
         assert page["decisions"]["latency_ms"]["decision_to_submit_ms"]["n"] >= 1
+        assert row["actual"]["admission"]["status"] == "LIVE_ADMISSIBLE"
+        assert row["decision"]["settlement_admission"]["status"] == "LIVE_ADMISSIBLE"
+        assert row["decision"]["book_currency_admission"]["status"] == "LIVE_ADMISSIBLE"
+        assert row["decision"]["probability_fresh"] is True
+        for leg in ("receipt_to_decision_ms", "decision_to_intent_ms",
+                    "intent_to_submit_ms", "submit_to_ack_ms", "ack_to_first_fill_ms"):
+            assert leg in page["decisions"]["latency_ms"], leg
+        assert row["pnl"]["never_summed"] is True
+        assert set(row["management"]) >= {"xavier_recommendation", "standing_protection",
+                                          "filled_protection", "next_review_by"}
+        assert "audrey_status" in row["audit"]
     finally:
         await _disarm(e)
 
@@ -295,6 +306,18 @@ async def test_the_audited_defect_a_real_v3_decision_with_unestablished_book_and
             "SELECT count(*) FROM execmirror_orders WHERE execution_intent_id = $1",
             it["intent_id"]) == 0
         assert await _paper_entries(e) == 1                 # PAPER proceeded
+        # the management page states the refusal and why -- never zeros
+        from sportsassets import execmirror_view as V
+        page = await V.small_live(e.conn)
+        row = next(x for x in page["decisions"]["rows"]
+                   if x["execution_intent_id"] == it["intent_id"])
+        assert row["actual"]["admission"]["status"] == "NOT_ADMISSIBLE"
+        assert row["actual"]["refusal"] == it["actual_refusal"]
+        assert row["decision"]["book_currency_admission"]["verdict"] == "NOT_ESTABLISHED"
+        assert row["decision"]["settlement_admission"]["compatibility"] == "UNKNOWN"
+        assert row["decision"]["settlement_admission"]["research_disclosure_counts_for_actual"] is False
+        assert row["actual"]["venue_order_id"] is None and row["actual"]["filled_qty"] is None
+        assert row["pnl"]["actual_realized_usd"] is None and row["pnl"]["actual_why_unavailable"]
     finally:
         await _disarm(e)
 

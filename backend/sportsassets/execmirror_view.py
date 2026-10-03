@@ -1241,9 +1241,105 @@ LATENCY_LEGS = (
     ("receipt_to_decision_ms", "pinnapi_receipt", "decision_complete"),
     ("decision_to_intent_ms", "decision_complete", "intent_created"),
     ("decision_to_submit_ms", "decision_complete", "submit_start"),
+    ("intent_to_submit_ms", "intent_created", "submit_start"),
     ("submit_to_ack_ms", "submit_start", "ack"),
+    ("ack_to_first_fill_ms", "ack", "first_fill_seen"),
     ("decision_to_first_fill_ms", "decision_complete", "first_fill_seen"),
     ("book_check_ms", "book_check_start", "book_check_end"))
+
+
+def _settlement_admission(adm: dict, facts: dict) -> dict:
+    sa = adm.get("settlement") or {}
+    st = facts.get("settlement") or {}
+    if not sa and not st:
+        return {"status": "UNAVAILABLE", "why": "no admission facts on this intent"}
+    return {"status": sa.get("status") or "UNAVAILABLE",
+            "compatibility": sa.get("compatibility", st.get("compatibility")),
+            "overall_established": sa.get("overall_established",
+                                          st.get("overall_established")),
+            "blockers": sa.get("blockers", st.get("blockers")),
+            "research_disclosure": sa.get("research_disclosure",
+                                          st.get("research_disclosure")),
+            "research_disclosure_counts_for_actual": False}
+
+
+def _book_admission(adm: dict, facts: dict) -> dict:
+    ba = adm.get("book_currency") or {}
+    bc = (facts.get("book") or {}).get("book_currency") or {}
+    if not ba and not bc:
+        return {"status": "UNAVAILABLE", "why": "no admission facts on this intent"}
+    return {"status": ba.get("status") or "UNAVAILABLE",
+            "verdict": ba.get("verdict", bc.get("verdict")),
+            "rule": ba.get("rule", bc.get("rule")),
+            "approved_live_rules": ba.get("approved_live_rules"),
+            "why": ba.get("why")}
+
+
+def _decision_pnl(mg: dict, g) -> dict:
+    """SIMULATED and ACTUAL P&L of the decision's group, side by side and
+    never summed; unavailable is null with the reason."""
+    p = mg["groups_pnl"].get(g) or {}
+    lv = mg["groups_live"].get(g) or {}
+    sim = None if not p.get("realized") else _f(p.get("cash"))
+    act = None
+    if lv and lv.get("live_held") == 0 and lv.get("live_cash") is not None:
+        act = _f(lv.get("live_cash"))
+    return {"simulated_realized_usd": sim,
+            "simulated_why_unavailable": (None if sim is not None else
+                                          "no realized paper P&L yet (open, unfilled "
+                                          "or unsettled)"),
+            "actual_realized_usd": act,
+            "actual_unrealized_usd": _f(lv.get("unrealized_usd")) if lv else None,
+            "actual_why_unavailable": (None if act is not None else
+                                       "no closed actual position (no venue fill, or "
+                                       "inventory still held)"),
+            "never_summed": True}
+
+
+def _decision_management(mg: dict, g) -> dict:
+    rv = mg["reviews"].get(g) or {}
+    lh = mg["live_handoffs"].get(g) or {}
+    lr = mg["live_reviews"].get(lh.get("handoff_id")) if lh else None
+    lr = lr or {}
+    pp = mg["paper_protection"].get(g) or {}
+    lp = mg["live_protection"].get(g) or {}
+    nxt = None
+    if rv.get("reviewed_at") is not None and rv.get("backstop_s"):
+        try:
+            nxt = _iso(rv["reviewed_at"] + dt.timedelta(seconds=float(rv["backstop_s"])))
+        except (TypeError, ValueError):
+            nxt = None
+    return {"xavier_recommendation": rv.get("recommendation"),
+            "xavier_actual_action": lr.get("action"),
+            "probability_evidence_state": (lr.get("evidence_state")
+                                           or rv.get("evidence_state")),
+            "probability_limitation": (lr.get("probability_limitation")
+                                       or rv.get("probability_limitation")),
+            "alternatives": (_js(rv.get("selection")) or {}).get("alternatives")
+            if rv.get("selection") is not None else None,
+            "standing_protection": {"paper_resting_qty": _f(pp.get("resting")),
+                                    "actual_resting_qty": _f(lp.get("resting"))},
+            "filled_protection": {"paper_filled_qty": _f(pp.get("filled")),
+                                  "actual_filled_qty": _f(lp.get("filled"))},
+            "protection_rule": PROTECTION_RULE,
+            "last_review_at": _iso(rv.get("reviewed_at")),
+            "next_review_by": nxt,
+            "why_unavailable": (None if rv or lr else
+                                "no Xavier review for this group yet")}
+
+
+def _decision_audit(mg: dict, g, r: dict) -> dict:
+    rc = mg["reconciliations"].get(g) or {}
+    disc = _js(rc.get("discrepancies")) if rc else None
+    return {"audrey_status": rc.get("status") or None,
+            "meaning": RECONCILIATION_MEANING.get(rc.get("status")),
+            "discrepancies": disc,
+            "reconciled_at": _iso(rc.get("reconciled_at")),
+            "paper_vs_actual_price_diff": (
+                None if r.get("pf_avg_px") is None or r.get("m_avg_px") is None
+                else _f(_d(r["m_avg_px"]) - _d(r["pf_avg_px"]))),
+            "why_unavailable": (None if rc else
+                                "Audrey has not reconciled this group yet")}
 
 
 async def decisions(conn, *, limit: int = 50) -> dict:
@@ -1272,6 +1368,8 @@ async def decisions(conn, *, limit: int = 50) -> dict:
              LEFT JOIN execmirror_orders m ON m.execution_intent_id = i.intent_id
             ORDER BY i.created_at DESC LIMIT $1""", max(1, min(int(limit), 200)))]
     out, legs = [], {name: [] for name, _, _ in LATENCY_LEGS}
+    mg = await _management(conn, [{"group_id": r["group_id"], "d_id": r["decision_id"],
+                                   "mirror_id": r.get("mirror_id")} for r in rows])
     for r in rows:
         tl = _js(r["timeline"]) or {}
         lat = {name: _ms(_tl_s(tl, a), _tl_s(tl, b)) for name, a, b in LATENCY_LEGS}
@@ -1279,16 +1377,35 @@ async def decisions(conn, *, limit: int = 50) -> dict:
             legs[k].append(v)
         pdx = _js(r.get("policy_decision")) or {}
         ev = _js(r["evidence"]) or {}
+        facts = ev.get("admission_facts") or {}
+        prob = facts.get("probability") or {}
+        lel = _js(r.get("live_eligibility")) or {}
+        adm = dict(lel.get("admission") or {})
+        if adm and lel.get("strategy_approved") is False:
+            # the evidence may pass, but a paper-only strategy is never admitted
+            adm["verdict"] = "NOT_ADMISSIBLE"
+            adm["refusals"] = ["STRATEGY_NOT_LIVE_ELIGIBLE"] + list(adm.get("refusals") or [])
+        g = r["group_id"]
         out.append({
             "execution_intent_id": r["intent_id"],
             "decision": {"decision_id": r["decision_id"], "strategy": r["strategy"],
                          "policy_version": r["policy_version"],
                          "decided_at": _iso(r["decided_at"]), "market": r["us_market_slug"],
                          "intent": r["order_intent"],
-                         "probability": _f(r.get("p_pinnacle")),
-                         "probability_authority": (ev.get("probability_authority") or {}).get("basis"),
+                         "probability": _f(r.get("p_pinnacle") if r.get("p_pinnacle")
+                                           is not None else prob.get("p")),
+                         "probability_authority": ((ev.get("probability_authority") or {}).get(
+                             "basis") or prob.get("authority_basis")),
                          "gross_edge_pp": _f(pdx.get("gross_edge_pp")),
-                         "net_expected_profit_usd": _f(pdx.get("net_expected_profit_usd"))},
+                         "net_expected_profit_usd": _f(pdx.get("net_expected_profit_usd")),
+                         "probability_evidence": (ev.get("probability_authority") or {}).get(
+                             "evidence") or prob.get("evidence"),
+                         "probability_age_s": _f(prob.get("age_s")),
+                         "probability_age_limit_s": _f(prob.get("limit_s")),
+                         "probability_fresh": (None if not prob else
+                                               prob.get("qualified") is True),
+                         "settlement_admission": _settlement_admission(adm, facts),
+                         "book_currency_admission": _book_admission(adm, facts)},
             "simulated": {"label": "SIMULATED",
                           "target_qty": _f(r["paper_target_qty"]),
                           "paper_order_id": r.get("p_order_id"),
@@ -1301,6 +1418,14 @@ async def decisions(conn, *, limit: int = 50) -> dict:
             "actual": {"label": "ACTUAL", "venue": LIVE_VENUE,
                        "account_fingerprint_prefix": (ctl.get("account_fingerprint") or "")[:8] or None,
                        "live_eligible": r["live_eligible"],
+                       "admission": {
+                           "status": adm.get("verdict") or "UNAVAILABLE",
+                           "version": adm.get("version"),
+                           "refusals": adm.get("refusals"),
+                           "facts_digest": adm.get("digest"),
+                           "why_unavailable": (None if adm else
+                                               "intent written before admission was "
+                                               "recorded (pre-200)")},
                        "state": r["actual_state"], "refusal": r["actual_refusal"],
                        "target_raw_qty": _f(r["live_raw_qty"]),
                        "rounded_qty": r["live_qty"],
@@ -1314,8 +1439,9 @@ async def decisions(conn, *, limit: int = 50) -> dict:
                        "fees_usd": _f(r.get("m_fees")) if r.get("mirror_id") else None,
                        "submit_latency_ms": r.get("m_latency_ms")},
             "latency_ms": lat,
-            "pnl": {"simulated": None, "actual": None,
-                    "why": "per-group P&L is on the rows below; never summed"}})
+            "pnl": _decision_pnl(mg, g),
+            "management": _decision_management(mg, g),
+            "audit": _decision_audit(mg, g, r)})
     stats = {name: {"n": len([x for x in xs if x is not None]),
                     "p50": _pct(xs, .50), "p95": _pct(xs, .95), "p99": _pct(xs, .99)}
              for name, xs in legs.items()}
