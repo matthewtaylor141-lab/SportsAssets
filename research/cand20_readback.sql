@@ -47,5 +47,9 @@ SELECT status, count(*) AS n, max(reconciled_at) AS last_at FROM smalllive_recon
 \echo '== R7 · market-data subscription block (last cycle) =='
 SELECT left((value->'market_subscription')::text, 700) AS market_subscription
   FROM ingestion_state WHERE key = 'ext_pinnacle_last_cycle';
-\echo '== R8 · Xavier policy artifact (if migration 201 present) =='
-SELECT to_regclass('xavier_policy_artifacts') AS xavier_policy_table;
+\echo '== R8 · Xavier policy artifact (migration 201) and collaboration loop (203) =='
+SELECT policy_id, version, status, left(sha256, 16) AS sha256_prefix, created_at
+  FROM agent_policy_artifacts ORDER BY created_at;
+SELECT count(*) AS findings FROM agent_findings;
+\echo '== R9 · migrations applied since 199 (with time) =='
+SELECT version, applied_at FROM schema_migrations WHERE version::text ~ '^(199|200|201|202|203)' ORDER BY 1;
