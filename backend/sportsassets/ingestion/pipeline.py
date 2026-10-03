@@ -38,6 +38,17 @@ from .dedupe import make_dedupe_key
 
 log = logging.getLogger(__name__)
 
+# cand21: fresh fills NOT handed to the copy lane because this process is
+# locked against venue writes (execution_gate.lock_process). Process total.
+COPY_SKIPPED_LOCKED = {"n": 0}
+
+
+def copy_execution_locked() -> bool:
+    """True in a process the execution gate has locked (the workers): its
+    fills are ingested and measured, never executed."""
+    from .. import execution_gate as _eg
+    return _eg.process_lock() is not None
+
 
 @dataclass
 class TradeEvent:
@@ -505,7 +516,14 @@ async def ingest_trade_result(ev: TradeEvent,
         # snapshots — and the probe's 120s measurement gate silently
         # forfeited every slower detection to the 10-minute sweep.
         asyncio.get_running_loop().create_task(probe_trade(payload))
-        asyncio.get_running_loop().create_task(execute_copy(payload))
+        if copy_execution_locked():
+            # cand21: a PROCESS-LOCKED process (the workers) records the
+            # fill and measures it, and hands NOTHING to the copy lane --
+            # no BUY entry, no SELL exit, no live_orders row. Counted, so
+            # the skip is visible rather than silent.
+            COPY_SKIPPED_LOCKED["n"] += 1
+        else:
+            asyncio.get_running_loop().create_task(execute_copy(payload))
 
     # Notification bookkeeping runs OFF the hot path (latency map
     # 2026-08-17): its 2-4 sequential inserts used to sit awaited between

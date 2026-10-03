@@ -82,7 +82,28 @@ _reads: dict = {}
 #: Process totals, kept as SEPARATELY LABELLED telemetry -- useful, and
 #: never confused with a per-read count.
 _totals = {"dispatched": 0, "responses": 0, "rate_limited": 0,
-           "refused_by_gate": 0, "waited_s": 0.0}
+           "refused_by_gate": 0, "waited_s": 0.0, "refused_write_locked": 0}
+
+#: THE METHODS A PROCESS-LOCKED CLIENT MAY STILL SEND (cand21). Every order
+#: mutation the SDK exposes -- create, cancel, modify, cancel_all,
+#: close_position, and preview -- is a POST; every read is a GET. So the
+#: transport refuses by METHOD, which also covers an SDK call added
+#: tomorrow that no inventory has listed yet.
+READ_ONLY_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+
+
+def check_write_lock(method: str, path: str = "") -> None:
+    """Raise execution_gate.Denied for a non-read request in a process the
+    execution gate has LOCKED (workers/all.py locks the workers process).
+    A no-op in every process that is not locked."""
+    from . import execution_gate as _eg
+    why = _eg.process_lock()
+    if why is None or str(method or "").upper() in READ_ONLY_METHODS:
+        return
+    with _LOCK:
+        _totals["refused_write_locked"] += 1
+    raise _eg.Denied("process_locked",
+                     "%s %s refused at the transport: %s" % (method, path, why))
 
 
 class VenueGateRefusal(Exception):
@@ -315,6 +336,10 @@ if httpx is not None:
 
         def handle_request(self, request):
             rid = current_read()
+            # 0 · THE PROCESS WRITE LOCK (cand21): in a locked process no
+            #     request that is not a read leaves, whatever called it.
+            check_write_lock(getattr(request, "method", ""),
+                             getattr(getattr(request, "url", None), "path", ""))
             # 1 · THE HARD GATE, immediately before dispatch. This is the
             #     recheck: nothing happens between it and the send.
             check_before_dispatch(read_id=rid)
@@ -343,7 +368,8 @@ else:                                                          # pragma: no cove
 
 __all__ = ["PacedTransport", "begin_read", "end_read", "read_state",
            "attempts_for_read", "totals", "hold_until", "gate_state",
-           "clear_hold", "check_before_dispatch", "note_dispatch",
+           "clear_hold", "check_before_dispatch", "check_write_lock",
+           "READ_ONLY_METHODS", "note_dispatch",
            "note_response", "bind_read", "current_read",
            "VenueGateRefusal", "R_COOLDOWN_EXCEEDS_DEADLINE",
            "R_DEADLINE_PASSED", "R_HOLD_EXCEEDS_UNDEADLINED_CAP",

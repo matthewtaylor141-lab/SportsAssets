@@ -188,14 +188,20 @@ def test_main_hands_each_loop_its_index_times_the_stagger_in_loops_order(monkeyp
 def test_the_real_list_starts_the_poller_at_once_and_spreads_the_rest_by_index(monkeypatch):
     """The real LOOPS, in its real order, through the faked supervise:
     the poller is index 0 and starts at once; every later loop waits
-    exactly one stagger more than the one before it."""
+    exactly one stagger more than the one before it.
+
+    cand21: the four venue-write loops are registered but NOT started, so
+    the start order is LOOPS minus VENUE_WRITE_LOOPS, order kept, and the
+    stagger indexes the loops that actually start."""
     real = list(all_mod.LOOPS)
     handed, _booted = _fake_main(monkeypatch, real)
 
     asyncio.run(all_mod.main())
 
-    assert [(n, f) for n, f, _d in handed] == real, "LOOPS order is the start order"
+    started = [(n, f) for n, f in real if n not in all_mod.VENUE_WRITE_LOOPS]
+    assert [(n, f) for n, f, _d in handed] == started, "LOOPS order is the start order"
+    assert not {n for n, _f, _d in handed} & all_mod.VENUE_WRITE_LOOPS
     delays = [d for _n, _f, d in handed]
     assert handed[0][0] == "poller" and delays[0] == 0.0
-    assert delays == [i * all_mod.BOOT_STAGGER_S for i in range(len(real))]
+    assert delays == [i * all_mod.BOOT_STAGGER_S for i in range(len(started))]
     assert all(b - a == all_mod.BOOT_STAGGER_S for a, b in zip(delays, delays[1:]))

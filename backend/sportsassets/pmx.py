@@ -505,7 +505,14 @@ def _request(method: str, path: str, *, json_body: Any = None, params: Any = Non
     any other >= 400 raises APIStatusError with the int status and the
     body; a 200 without a JSON body raises PmxError (unreadable is a
     raise, never {}). A 401 drops the cached token so the NEXT call
-    re-mints; this one is reported, never retried blind."""
+    re-mints; this one is reported, never retried blind.
+
+    A PROCESS-LOCKED process (execution_gate.lock_process; the workers)
+    raises Denied here for any non-GET under /v1/trading/orders -- the
+    insert, the preview and the cancel -- before a token is minted."""
+    if method.upper() != "GET" and path.startswith("/v1/trading/orders"):
+        from . import execution_gate as _eg
+        _eg.authorize_cancel("pmx %s %s" % (method.upper(), path))
     headers = _headers() if auth else {"X-Request-Id": str(uuid.uuid4())}
     if claims is None or claims.next():
         pace()

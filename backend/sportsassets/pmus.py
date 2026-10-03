@@ -3978,8 +3978,13 @@ def order_status(order_id: str) -> dict | None:
 
 def cancel_order(order_id: str, us_market_slug: str) -> dict:
     """Cancel one resting order. The venue's cancel returns no body;
-    success is the absence of an error. Never raises."""
+    success is the absence of an error. Never raises.
+
+    A PROCESS-LOCKED process (execution_gate.lock_process; the workers)
+    is refused here BEFORE a client is built, as {"ok": False, "error":
+    "Denied: process_locked: ..."} -- and again at the transport."""
     try:
+        _gate.authorize_cancel("cancel", slug=us_market_slug)
         _get_client().orders.cancel(order_id,
                                     {"marketSlug": us_market_slug})
         return {"ok": True}
