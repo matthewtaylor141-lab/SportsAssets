@@ -22,6 +22,13 @@ incomplete searches are all on the record.
                 lookback; otherwise the entry decision's blended probability,
                 labelled ENTRY_TIME_MEASURE (stale, stated). Void is not
                 applied (conditional on the fixture being played).
+    evidence    every review records `measure.evidence_state`
+                (FRESH_CURRENT_PROBABILITY / STALE_ENTRY_TIME_PROBABILITY /
+                PROBABILITY_UNAVAILABLE) with the probability's source, its
+                source and receipt stamps, age and the freshness limit; on
+                anything but fresh it states `probability_limitation`, ranks
+                no discretionary sale and shows the hold value as entry-time,
+                never as the current expected value.
     HOLD        value = q x p (the payout expected from here)
     EXIT        value = walked proceeds of a sale of q into the observed bids
                 (after fees) + the unsold remainder held at q' x p
@@ -82,6 +89,16 @@ R_NO_MEASURE = "NO_SETTLEMENT_MEASURE_FOR_THIS_POSITION"
 #: position is held and its cost-recovery protection (priced from quantity,
 #: basis and fees only, never `p`) is maintained instead.
 B_STALE_MEASURE = "MEASURE_STALE_OR_ABSENT_NO_DISCRETIONARY_SALE"
+#: THE EVIDENCE STATE OF THE PROBABILITY EVERY REVIEW STANDS ON, exactly
+#: one, on `measure.evidence_state`. FRESH only when the measure is current
+#: AND its own source stamp is within the Pinnacle freshness limit
+#: (`pinnacle_max_age_s` = ext_pinnacle_loop.PINNACLE_MAX_AGE_S) at the
+#: review instant; any older probability -- a stale reading or the entry
+#: decision's -- is STALE_ENTRY_TIME (the source says which); none at all is
+#: UNAVAILABLE. Unavailable is null, never 0, and is never a reason to sell.
+E_FRESH = "FRESH_CURRENT_PROBABILITY"
+E_STALE = "STALE_ENTRY_TIME_PROBABILITY"
+E_NONE = "PROBABILITY_UNAVAILABLE"
 PROTECTION_BUFFER_USD_PER_CONTRACT = 0.01
 LABEL_BASES = ("VENUE_SETTLEMENT_PRICE", "VENUE_REPORTED_OUTCOME")
 VOID_BASIS = "CONFIRMED_VOID"
@@ -236,6 +253,116 @@ def alternatives(*, pos: dict, levels: list, p: float | None, fee_fn,
                                   "why": B_INDIRECT_NOT_SEARCHED}}
 
 
+def probability_evidence(measure: dict, *, at: float, limit_s: float,
+                         qty=None) -> dict:
+    """THE EVIDENCE STATE of a measure at `at` (pure). A measure that says
+    it is current but whose own source stamp is outside [0, limit] is NOT
+    fresh (a future stamp is a clock disagreement); a current measure that
+    carries no stamp is taken as its provider stated it, `age_s` null. The
+    hold value q x p is split by state: `current_hold_value_usd` only on
+    fresh evidence, `entry_time_hold_value_usd` (labelled stale) otherwise,
+    null when there is no probability -- never a placeholder 0."""
+    m = measure or {}
+    p = m.get("p")
+    src_at = m.get("pinnacle_at")
+    rcv = m.get("pinnacle_received_at")
+    if src_at is None:
+        src_at = m.get("entry_pinnacle_at")
+        rcv = m.get("entry_pinnacle_received_at")
+    limit = float(m.get("pinnacle_limit_s") or limit_s)
+    # the feed's own age (evaluated after its read) when it gave one
+    age = m.get("pinnacle_age_s")
+    if age is None and src_at is not None:
+        age = round(float(at) - float(src_at), 3)
+    if p is None:
+        state = E_NONE
+    elif m.get("stale"):
+        state = E_STALE
+    elif age is not None and not (0 <= float(age) <= limit):
+        state = E_STALE
+    else:
+        state = E_FRESH
+    limitation = None
+    if state == E_STALE:
+        limitation = (
+            "no fresh PinnAPI/Pinnacle probability for this contract within "
+            "the %.0fs freshness limit at review time; the probability used "
+            "is %s (source %s, age %s s), so the hold value derived from it "
+            "is entry-time/stale and NOT a current expected value. No "
+            "discretionary sale is ranked on it; the position is held with "
+            "this limitation stated and its cost-recovery protection is "
+            "unaffected" % (limit, "the entry decision's" if
+                            m.get("source") == "ENTRY_TIME_MEASURE"
+                            else "an older reading", m.get("source"), age))
+    elif state == E_NONE:
+        limitation = (
+            "no probability for this contract (neither a current reading "
+            "nor the entry decision's); none is invented, nothing is ranked "
+            "on one, and its absence alone never liquidates the position; "
+            "its cost-recovery protection is unaffected")
+    if limitation and m.get("feed_refusal"):
+        limitation += "; PinnAPI feed: %s" % m["feed_refusal"]
+    hv = (None if p is None or qty is None
+          else round(float(qty) * float(p), 6))
+    return {"evidence_state": state,
+            "probability": None if p is None else float(p),
+            "probability_source": m.get("source"),
+            "probability_source_at": src_at,
+            "probability_received_at": rcv,
+            "probability_age_s": age,
+            "probability_limit_s": limit,
+            "probability_limitation": limitation,
+            "current_hold_value_usd": hv if state == E_FRESH else None,
+            "entry_time_hold_value_usd": hv if state == E_STALE else None}
+
+
+async def actual_position_evidence(conn, *, group_id: str,
+                                   us_market_slug: str, holding_side: str,
+                                   at: float, qty, entry: dict) -> dict:
+    """THE EVIDENCE STATE for an ACTUAL (small-live) position of a paper
+    group, on the paper review's own measure for the group's strategy
+    (`paper_benchmark.xavier_measure`: a valuation for the same contract and
+    payout outcome within the freshness limit, else this process's PinnAPI
+    feed cache, else the entry decision's probability, labelled stale).
+    Record only -- the actual position's action follows the paper decision.
+    Never raises: a failed read is PROBABILITY_UNAVAILABLE, null."""
+    from . import paper_benchmark as PB
+    limit = float(entry["pinnacle_max_age_s"])
+    try:
+        strategy = await PB.group_strategy(conn, group_id)
+        if strategy not in PB.BENCHMARK_STRATEGIES:
+            m = {"p": None, "stale": True,
+                 "why": "STRATEGY_HAS_NO_PINNACLE_MEASURE"}
+        else:
+            m = await PB.xavier_measure(
+                conn, {"now": at, "config": {"entry": entry}},
+                pos={"group_id": group_id, "holding_side": holding_side,
+                     "us_market_slug": us_market_slug},
+                strategy=strategy, feed=_held_feed)
+    except Exception as exc:                                    # noqa: BLE001
+        m = {"p": None, "stale": True, "why": "PROBABILITY_READ_FAILED",
+             "error": type(exc).__name__}
+    out = probability_evidence(m, at=at, limit_s=limit,
+                               qty=None if qty is None else float(qty))
+    out.update({k: m[k] for k in ("feed_refusal", "valuation_id", "why",
+                                  "error") if m.get(k) is not None})
+    return out
+
+
+async def live_position_evidence(conn, h: dict, *, at: float,
+                                 qty=None) -> dict:
+    """THE READER handed to the execution mirror (execmirror.run) for an
+    actual position's handoff row: its holding side from the opened intent,
+    the paper session's Pinnacle freshness limit."""
+    from .. import bettor_paper_session as S
+    side = ("LONG" if str(h.get("opened_intent") or "").endswith("BUY_LONG")
+            else "SHORT")
+    return await actual_position_evidence(
+        conn, group_id=h["group_id"], us_market_slug=h["us_market_slug"],
+        holding_side=side, at=at, qty=qty,
+        entry=S.default_config()["entry"])
+
+
 def protective_price(*, qty: float, cost_basis: float, fee_fn, at,
                      buffer_per_contract: float =
                      PROTECTION_BUFFER_USD_PER_CONTRACT) -> dict:
@@ -289,7 +416,8 @@ async def _measure(conn, ctx, *, pos: dict, levels_buy: list) -> dict:
     lookback = float(ctx["config"]["entry"]["valuation_lookback_s"])
     intent = DP.LONG if pos["holding_side"] == "LONG" else DP.SHORT
     v = await conn.fetchrow(
-        "SELECT probability, observed_at, payout_is_complement, version "
+        "SELECT probability, observed_at, received_at, "
+        "       payout_is_complement, version "
         "  FROM external_valuations WHERE us_market_slug=$1 "
         "   AND buy_intent=$2 AND probability IS NOT NULL "
         "   AND decided_at > to_timestamp($3) "
@@ -309,6 +437,7 @@ async def _measure(conn, ctx, *, pos: dict, levels_buy: list) -> dict:
                     "model_label": PD.MODEL_LABEL,
                     "p_pinnacle": float(v["probability"]),
                     "pinnacle_at": L._epoch(v["observed_at"]),
+                    "pinnacle_received_at": L._epoch(v["received_at"]),
                     "stale": False, "void_applied": False}
     d = await conn.fetchrow(
         "SELECT d.p_blended, d.decided_at FROM paper_decisions d "
@@ -366,9 +495,13 @@ async def review_group(conn, ctx: dict, group_id: str, *,
         measure["best_exit_at_review"] = (exit_lv[0]["price"] if exit_lv
                                           else None)
         measure["book_obs_id"] = None if obs is None else obs["obs_id"]
+        measure.update(probability_evidence(
+            measure, at=at, qty=pos["open_qty"],
+            limit_s=float(ctx["config"]["entry"]["pinnacle_max_age_s"])))
+        fresh = measure["evidence_state"] == E_FRESH
         alts = alternatives(pos=pos, levels=exit_lv, p=measure.get("p"),
                             fee_fn=fee_fn, at=at)
-        if measure.get("stale") or measure.get("p") is None:
+        if not fresh or measure.get("stale") or measure.get("p") is None:
             keep = [c for c in alts["candidates"]
                     if c["action"] not in (A_EXIT, A_REDUCE)]
             alts["not_rankable"] = alts["not_rankable"] + [
@@ -377,6 +510,17 @@ async def review_group(conn, ctx: dict, group_id: str, *,
             alts["candidates"] = keep
         policy = await XP.load(conn)
         sel = XP.run(policy, hold_ranking=alts, limits=None)
+        # THE HOLD VALUE IS LABELLED BY ITS EVIDENCE (after ranking, record
+        # only): a value priced on a stale probability is never shown as
+        # the current expected value.
+        alts["candidates"] = [
+            c if c["action"] != A_HOLD else dict(
+                c, ev_basis=measure["evidence_state"], ev_is_current=fresh,
+                **({} if fresh else {
+                    "expected_net_usd": None,
+                    "entry_time_expected_net_usd": c.get(
+                        "expected_net_usd")}))
+            for c in alts["candidates"]]
         exceptional = []
         if obs is None:
             exceptional.append("NO_BOOK_OBSERVED_FOR_THIS_MARKET")
@@ -387,6 +531,8 @@ async def review_group(conn, ctx: dict, group_id: str, *,
         if measure.get("stale"):
             exceptional.append("MEASURE_%s" % (measure.get("source")
                                                or "ABSENT"))
+        if not fresh:
+            exceptional.append(measure["evidence_state"])
         # ── STANDING PROTECTION AND THE ACTION ──────────────────────
         standing = await conn.fetch(
             "SELECT * FROM paper_orders WHERE group_id=$1 "
@@ -419,8 +565,8 @@ async def review_group(conn, ctx: dict, group_id: str, *,
                     review_key="%s:%s:%s" % (group_id, pos["position_key"],
                                              at))
         elif (chosen == A_HOLD or (chosen is None and (
-                measure.get("stale") or measure.get("p") is None))) \
-                and prot.get("ok"):
+                not fresh or measure.get("stale")
+                or measure.get("p") is None))) and prot.get("ok"):
             action = await _maintain_standing(
                 conn, ctx, pos=pos, standing=[dict(s) for s in standing],
                 prot=prot, md=md, at=at, SPO=SPO)

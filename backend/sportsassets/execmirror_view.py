@@ -725,6 +725,8 @@ async def _management(conn, rows: list) -> dict:
         for v in await conn.fetch(
                 """SELECT DISTINCT ON (r.group_id) r.group_id, r.review_id, r.reviewed_at,
                           r.trigger, r.recommendation, r.refusal, r.measure,
+                          r.measure->>'evidence_state' AS evidence_state,
+                          r.measure->>'probability_limitation' AS probability_limitation,
                           r.exceptional, r.selection, r.exposure,
                           s.config -> 'cadence' ->> 'xavier_backstop_s' AS backstop_s
                      FROM paper_xavier_reviews r
@@ -808,7 +810,10 @@ async def _management(conn, rows: list) -> dict:
                                   action, live_held, mark_value_usd, unrealized_usd,
                                   paper_recommendation, paper_review_id,
                                   resting_protection_qty, filled_protection_qty,
-                                  committed_exit_qty, detail, quote
+                                  committed_exit_qty, detail, quote,
+                                  detail->>'evidence_state' AS evidence_state,
+                                  detail->'probability_evidence'->>'probability_limitation'
+                                      AS probability_limitation
                              FROM smalllive_reviews WHERE handoff_id = ANY($1)
                             ORDER BY handoff_id, reviewed_at DESC, review_id DESC""", hids):
                     out["live_reviews"][v["handoff_id"]] = dict(v)
@@ -1086,6 +1091,9 @@ def _management_section(r: dict, mg: dict, now=None) -> dict:
           "latest_review_at": _iso(v["reviewed_at"]) if v else None,
           "latest_review_trigger": v["trigger"] if v else None,
           "latest_recommendation": v["recommendation"] if v else None,
+          # the probability's freshness on that review (paper_xavier E_*)
+          "latest_probability_evidence_state": v.get("evidence_state") if v else None,
+          "latest_probability_limitation": v.get("probability_limitation") if v else None,
           "why_unavailable": (None if h else
                               "no Xavier handoff for this paper group (a handoff "
                               "starts at the first simulated fill)")}
@@ -1099,6 +1107,9 @@ def _management_section(r: dict, mg: dict, now=None) -> dict:
               "latest_action": lv["action"] if lv else None,
               "mark_value_usd": _f(lv["mark_value_usd"]) if lv else None,
               "unrealized_usd": _f(lv["unrealized_usd"]) if lv else None,
+              "latest_probability_evidence_state": lv.get("evidence_state") if lv else None,
+              "latest_probability_limitation": (lv.get("probability_limitation")
+                                                if lv else None),
               "why_unavailable": None if lv else "handoff recorded; no review of the actual position yet"}
     else:
         xa = {"label": "ACTUAL POSITION", "present": False, "handoff_id": None,
