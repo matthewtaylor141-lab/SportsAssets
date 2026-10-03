@@ -580,3 +580,11 @@ tests/test_institutional_md_proto_vendor.py
 tests/test_institutional_md_grpc_transport.py
 tests/test_institutional_md_orderless.py
 tests/test_institutional_contract_map.py
+# Workers process venue-write lock (2026-10-03): the workers service locks
+# the execution gate before any loop starts; submit/close/CLOB/cancel and the
+# retail transport's non-read requests are refused in that process; the
+# legacy order-capable loops are registered but never started.
+tests/test_workers_hold_no_venue_write.py
+# The authorized workers release actions: branch set (autoDeploy off) and
+# exact-SHA deploy that refuses while autoDeploy is on.
+tests/test_render_ops_workers_release.py
