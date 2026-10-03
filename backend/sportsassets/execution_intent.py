@@ -50,6 +50,7 @@ import time
 from decimal import Decimal
 from typing import Any
 
+from . import actual_admission as AA
 from . import decision_hooks
 from . import execmirror as M
 from . import execmirror_probe as EP
@@ -127,11 +128,24 @@ async def create(conn, *, decision_id: str, valuation_id, strategy: str,
     is decided HERE, before the actual lane can see it. Returns the intent;
     `created` is False when it already existed (a duplicate pass)."""
     iid = intent_id_for(decision_id)
-    eligible, why = M.live_eligibility({"strategy": strategy,
+    approved, why = M.live_eligibility({"strategy": strategy,
                                         "decision_policy_version": policy_version,
                                         "role": "ENTRY"})
-    state = A_DISPATCHED if eligible else A_PAPER_ONLY
-    refusal = None if eligible else M.STRATEGY_NOT_LIVE_ELIGIBLE
+    # THE DECISION-TIME ADMISSION (actual_admission): an approved strategy
+    # and version are necessary, never sufficient. The intent is live
+    # eligible only when every recorded execution and settlement fact is
+    # explicitly admissible; otherwise it is REFUSED here, before any lane
+    # can see it, with the first failing requirement as its refusal.
+    adm = AA.evaluate((evidence or {}).get("admission_facts"), slug=slug,
+                      order_intent=order_intent)
+    why = dict(why, strategy_approved=approved, admission=adm)
+    eligible = approved and adm["verdict"] == AA.LIVE_ADMISSIBLE
+    if not approved:
+        state, refusal = A_PAPER_ONLY, M.STRATEGY_NOT_LIVE_ELIGIBLE
+    elif not eligible:
+        state, refusal = A_REFUSED, adm["refusal"]
+    else:
+        state, refusal = A_DISPATCHED, None
     _mark(timeline, "intent_created")
     row = await conn.fetchrow(
         """INSERT INTO execution_intents (intent_id, decision_id, valuation_id,
@@ -235,7 +249,23 @@ class ActualLane:
                 keys["key_fingerprint"] != ctl["account_fingerprint"]:
             return await self._refuse(conn, it, R_ACCOUNT_CHANGED, t,
                                       expected=ctl["account_fingerprint"])
-        # 2 · ELIGIBILITY was decided at the intent (live_eligible = true here)
+        # 2 · ELIGIBILITY AND ADMISSION, RE-DERIVED FROM THE INTENT'S OWN
+        #     DECISION-TIME FACTS -- the stored boolean is never trusted alone.
+        approved, why = M.live_eligibility({
+            "strategy": it["strategy"],
+            "decision_policy_version": it["policy_version"], "role": "ENTRY"})
+        if not it["live_eligible"] or not approved:
+            return await self._refuse(conn, it, M.STRATEGY_NOT_LIVE_ELIGIBLE, t,
+                                      eligibility=why)
+        ev = it["evidence"]
+        ev = json.loads(ev) if isinstance(ev, str) else dict(ev or {})
+        adm = AA.evaluate(ev.get("admission_facts"),
+                          slug=it["us_market_slug"],
+                          order_intent=it["order_intent"])
+        if adm["verdict"] != AA.LIVE_ADMISSIBLE:
+            return await self._refuse(conn, it, adm["refusal"], t,
+                                      admission_refusals=adm["refusals"],
+                                      admission_version=AA.VERSION)
         # 3 · THE DECISION AND ITS EXECUTABLE BOOK, STILL CURRENT
         _mark(t, "book_check_start")
         d_age = now - it["decided_at"].timestamp()
@@ -277,6 +307,15 @@ class ActualLane:
             return await self._refuse(conn, it, M.BELOW_VENUE_MINIMUM, t,
                                       live_raw_qty=str(size["live_raw_qty"]),
                                       why="never enlarged to reach the minimum")
+        # the decision's displayed depth must cover the ACTUAL quantity
+        adm_q = AA.evaluate(ev.get("admission_facts"),
+                            slug=it["us_market_slug"],
+                            order_intent=it["order_intent"],
+                            live_qty=size["live_qty"])
+        if adm_q["verdict"] != AA.LIVE_ADMISSIBLE:
+            return await self._refuse(conn, it, adm_q["refusal"], t,
+                                      admission_refusals=adm_q["refusals"],
+                                      live_qty=size["live_qty"])
         if plan is None:
             return await self._refuse(conn, it, R_ACCOUNT_UNKNOWN, t,
                                       snapshot_at=bp_at,
@@ -397,7 +436,9 @@ async def on_decision(conn, payload: dict) -> dict:
     Returns at once; the caller writes the paper order next."""
     intent = await create(conn, **payload)
     if not intent["live_eligible"]:
-        return {"intent_id": intent["intent_id"], "actual_lane": A_PAPER_ONLY}
+        return {"intent_id": intent["intent_id"],
+                "actual_lane": intent["actual_state"],
+                "actual_refusal": intent["actual_refusal"]}
     if not intent["created"]:
         return {"intent_id": intent["intent_id"], "actual_lane": "ALREADY_DISPATCHED"}
     dispatched = (not conn.is_in_transaction()) and dispatch(intent)

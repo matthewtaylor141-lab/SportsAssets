@@ -108,6 +108,7 @@ class _Venue:
         self.bids = [(0.50, 400)]          # the home (SHORT) row pays 1 - bid
         self.offers = [(0.52, 400)]
         self.age_s = 1.0
+        self.market_state = None           # the book's venue market state
         self.on_book = None
         self.calls = {"list": 0, "book": 0, "paper": 0}
 
@@ -153,8 +154,10 @@ class _Venue:
         if slug != self.slug:
             return {"marketData": None, "error": "NO_BOOK_FIXTURE",
                     "observed_at": time.time()}
-        return {"marketData": H.md(bids=self.bids, offers=self.offers),
-                "observed_at": time.time() - self.age_s}
+        md = H.md(bids=self.bids, offers=self.offers)
+        if self.market_state is not None:
+            md["state"] = self.market_state
+        return {"marketData": md, "observed_at": time.time() - self.age_s}
 
 
 # ── THE FEED: real FeedCache, frames in the shapes of the unit tests ────

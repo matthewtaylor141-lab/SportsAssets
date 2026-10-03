@@ -528,6 +528,7 @@ tests/test_pinnapi_sole_authority.py
 # strategies, below-minimum sizing, ambiguous submission; actual fill straight
 # to Xavier; Audrey links both siblings to one decision; migration 199.
 tests/test_execution_intent_fanout.py
+tests/test_actual_admission.py
 tests/test_execution_intents_migration.py
 # Agent role briefs: bounded read-only role_brief tool (distinct-contract
 # refusals, Xavier latest reviews, Audrey findings; truncation disclosed).

@@ -29,6 +29,18 @@ from sportsassets import execution_intent as EI
 from sportsassets import execmirror_probe as EP
 from sportsassets import execmirror_view as V
 
+try:    # pytest collects tests/ as a package; unittest discovery does not
+    from tests import admission_fixture as AF
+except ImportError:
+    import admission_fixture as AF
+
+
+@pytest.fixture(autouse=True)
+def _approved_test_book_rule(monkeypatch):
+    """These tests exercise the lane past admission: the fixture facts name
+    a test-only live book rule, approved only for the duration of a test."""
+    AF.approve_test_rule(monkeypatch)
+
 DSN = os.environ.get("RN1X_TEST_DSN", "")
 pg = pytest.mark.skipif(not DSN, reason="needs RN1X_TEST_DSN")
 KID, SEC = "kid-execmirror-test", "c2VjcmV0LWV4ZWNtaXJyb3ItdGVzdA=="
@@ -263,6 +275,7 @@ async def _conn():
 
 
 async def _setup(conn, monkeypatch, *, cap=25, ago_s=5):
+    AF.approve_test_rule(monkeypatch)
     monkeypatch.setenv(EP.KEY_ID_ENV, KID)
     monkeypatch.setenv(EP.SECRET_ENV, SEC)
     from tests.paper_harness import new_account
@@ -342,7 +355,10 @@ async def _paper_order(conn, acct, *, role="ENTRY", direction="BUY",
             group_id=group, order_type=otype, time_in_force=tif,
             paper_target_qty=qty, limit_price=wire, wire_price=wire,
             book_obs_id=None, book_observed_at=b_at,
-            decided_at=now.timestamp(), evidence={}, timeline={})
+            decided_at=now.timestamp(),
+            evidence={"admission_facts": AF.admissible_facts(
+                slug=cols["us_market_slug"], order_intent=intent, wire=wire)},
+            timeline={})
         _INTENT_OF[oid] = it["intent_id"]
     return {"order_id": oid, "group_id": group, "slug": cols["us_market_slug"],
             "intent_id": _INTENT_OF.get(oid)}

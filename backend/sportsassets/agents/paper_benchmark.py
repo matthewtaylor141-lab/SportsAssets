@@ -1227,6 +1227,70 @@ async def record_attempt(conn, ctx: dict, *, valuation_id, strategy: str,
 # THE DECISION
 # ═════════════════════════════════════════════════════════════════════
 
+def admission_facts(*, cand: dict, pin: dict, match: dict, p, obs, md,
+                    sized: dict, econ, book_age, book_source=None) -> dict:
+    """THE QUALIFIED DECISION'S RECORDED FACTS, as the execution intent
+    carries them for the actual lane's admission (`actual_admission`). Pure
+    and descriptive: nothing here is upgraded -- the book's currency verdict
+    is this module's own BOOK_CURRENCY, the settlement comparison is the
+    row's, the completed-game exceptional terms are named as the research
+    disclosure they are."""
+    auth = dict(match.get("probability_authority") or {})
+    checks = [{"check": c.get("check"), "passed": c.get("passed") is True}
+              for c in match.get("checks") or []]
+    names = {c["check"]: c["passed"] for c in checks}
+    st = dict(cand.get("settlement") or {})
+    lane = _lane_codes(cand)
+    exc = dict(match.get("exceptional_terms") or {})
+    state = None
+    if isinstance(md, dict):
+        state = md.get("state") or md.get("marketState")
+    fees_usd = (econ or {}).get("fees_usd")
+    return {
+        "probability": {
+            "p": p, "qualified": pin.get("qualified") is True,
+            "age_s": pin.get("age_s"), "limit_s": pin.get("limit_s"),
+            "refusal": pin.get("refusal"),
+            "provider": (cand.get("pinnacle") or {}).get("provider"),
+            "authority_basis": auth.get("basis"),
+            "evidence": auth.get("evidence"),
+            "outcome_books": auth.get("outcome_books"),
+            "mapped": bool(names.get(DP.C_IDENTITY)
+                           and names.get("payout_outcome_match")
+                           and names.get("probability_qualified_by_the_lane"))},
+        "identity": {"us_market_slug": cand.get("us_market_slug"),
+                     "order_intent": cand.get("side"),
+                     "payout_event": cand.get("payout_event"),
+                     "period": cand.get("period"),
+                     "fixture": cand.get("fixture"), "checks": checks},
+        "book": {"obs_id": None if obs is None else obs.get("obs_id"),
+                 "observed_at": None if obs is None else obs.get("observed_at"),
+                 "observed_at_is": "OUR_RECEIPT_INSTANT",
+                 "age_at_decision_s": book_age, "source": book_source,
+                 "market_state": None if state is None else str(state),
+                 "depth_within_limit": sized.get("depth_within_limit"),
+                 "book_currency": dict(BOOK_CURRENCY)},
+        "price": {"wire": sized.get("wire"), "limit": sized.get("limit")},
+        "fees": {"known": econ is not None and econ.get("fees_ok") is True
+                 and fees_usd is not None,
+                 "fees_usd": fees_usd, "model": "VENUE_FEE_FUNCTION_AT_DECISION"},
+        "slippage": {"model": "IOC_LIMIT_AT_THE_DECISION_WIRE_PRICE",
+                     "max_price": sized.get("wire"),
+                     "why": "an IOC limit order cannot fill worse than its "
+                            "limit; unfilled quantity is cancelled"},
+        "economics": {"net_ev_positive": (econ or {}).get("net_ev_positive")
+                      is True,
+                      "net_expected_profit_usd": (econ or {}).get(
+                          "expected_net_profit_usd"),
+                      "conditional_on": ("ORDINARY_COMPLETION"
+                                         if exc else None)},
+        "settlement": {"compatibility": st.get("compatibility"),
+                       "overall_established": st.get("overall_established"),
+                       "blockers": list(st.get("blockers") or []),
+                       "lane_refusals": list(lane["settlement"]),
+                       "research_disclosure": exc.get("status")}}
+
+
 async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
     """ONE BENCHMARK DECISION, persisted first; an ENTER then submits ONE
     paper order naming it (the simulator fills it after the delay)."""
@@ -1603,7 +1667,14 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
                     "gross_edge_pp": best_edge,
                     "net_expected_profit_usd": (econ or {}).get(
                         "expected_net_profit_usd"),
-                    "book_age_at_decision_s": book_age},
+                    "book_age_at_decision_s": book_age,
+                    # THE DECISION-TIME FACTS THE ACTUAL LANE'S ADMISSION
+                    # READS (facts only; this module decides nothing about
+                    # execution).
+                    "admission_facts": admission_facts(
+                        cand=cand, pin=pin, match=match, p=p, obs=obs,
+                        md=md, sized=sized, econ=econ, book_age=book_age,
+                        book_source=ctx.get("last_book_source"))},
                 "timeline": {
                     "pinnapi_provider_ts": {"utc_s": (cand.get("pinnacle") or {}).get("observed_at")},
                     "pinnapi_receipt": {"utc_s": (cand.get("pinnacle") or {}).get("received_at")},

@@ -24,9 +24,11 @@ DOWN = (MIG / "rollback" / "199_execution_intents.down.sql").read_text()
 
 INS = ("INSERT INTO execution_intents (intent_id, decision_id, strategy, us_market_slug,"
        " order_intent, group_id, order_type, time_in_force, paper_target_qty, wire_price,"
-       " decided_at, live_eligible, actual_state, actual_refusal)"
+       " decided_at, live_eligible, actual_state, actual_refusal, live_eligibility)"
        " VALUES ($1,$2,'S','slug','ORDER_INTENT_BUY_LONG','g','MARKETABLE','IOC',100,0.5,"
-       " now(),$3,$4,$5)")
+       " now(),$3,$4,$5, CASE WHEN $3 THEN"
+       " '{\"admission\": {\"verdict\": \"LIVE_ADMISSIBLE\"}}'::jsonb"
+       " ELSE '{}'::jsonb END)")
 
 
 async def _expect(conn, exc, sql, *args):

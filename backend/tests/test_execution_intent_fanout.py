@@ -48,6 +48,33 @@ except ImportError:
     from test_pinnapi_reactive_integration import env, pg  # noqa: F401
     from test_execmirror import FakeVenue, KID, SEC
 
+try:
+    from tests import admission_fixture as AF
+except ImportError:
+    import admission_fixture as AF
+
+
+def _admissible_world(e, monkeypatch):
+    """The venue state an actual order requires, made explicit for the fake
+    venue: an OPEN market and a book whose currency is ESTABLISHED under an
+    approved live rule (a test-only rule; production approves none)."""
+    AF.approve_test_rule(monkeypatch)
+    monkeypatch.setattr(PB, "BOOK_CURRENCY", {
+        "verdict": "ESTABLISHED", "rule": AF.TEST_RULE,
+        "subscription_state": "RUNNING",
+        "mechanism": "TEST_FIXTURE", "basis": "test-only approved live rule"})
+    e.venue.market_state = "MARKET_STATE_OPEN"
+    # THE SETTLEMENT FIXTURE: the venue's and the book's terms compare
+    # COMPATIBLE with every rule established (the real fixture prose leaves
+    # six conditions unstated, which the admission correctly refuses).
+    from sportsassets.workers import ext_pinnacle_loop as LOOP
+    real = LOOP._settlement_compatibility
+
+    def compatible(srule):
+        return dict(real(srule), compatibility="COMPATIBLE",
+                    overall_established=True, blockers=[], attest_unmet=[])
+    monkeypatch.setattr(LOOP, "_settlement_compatibility", compatible)
+
 
 async def _arm_actual(e, monkeypatch, *, cap=25):
     """The retail account's control enabled for this test, its key present,
@@ -131,6 +158,7 @@ async def _paper_entries(e):
 async def test_actual_is_submitted_while_the_paper_simulator_is_stalled(env, monkeypatch):
     e = env
     RI._single_source(e)
+    _admissible_world(e, monkeypatch)
     e.venue.bids = [(0.50, 2500)]         # enough depth for >= 1 live contract
     await RI._start_and_discover(e)
     await _arm_actual(e, monkeypatch)
@@ -210,6 +238,7 @@ async def test_actual_is_submitted_while_the_paper_simulator_is_stalled(env, mon
 async def test_a_below_minimum_live_quantity_refuses_actual_and_paper_proceeds(env, monkeypatch):
     e = env
     RI._single_source(e)
+    _admissible_world(e, monkeypatch)
     e.venue.bids = [(0.50, 300)]          # paper target 300 -> 0.3 live contracts
     await RI._start_and_discover(e)
     await _arm_actual(e, monkeypatch)
@@ -232,6 +261,44 @@ async def test_a_below_minimum_live_quantity_refuses_actual_and_paper_proceeds(e
         await _disarm(e)
 
 
+@pg
+async def test_the_audited_defect_a_real_v3_decision_with_unestablished_book_and_unknown_settlement_is_never_placed(env, monkeypatch):
+    """The independent audit's case through the REAL path: a fresh PinnAPI
+    change -> a V3 ENTER whose decision record says book currency
+    NOT_ESTABLISHED and settlement UNKNOWN. The intent is REFUSED (not live
+    eligible), Venue.place is called zero times, and PAPER proceeds."""
+    e = env
+    RI._single_source(e)
+    e.venue.bids = [(0.50, 2500)]
+    await RI._start_and_discover(e)
+    await _arm_actual(e, monkeypatch)
+    try:
+        RI.tick(e.cache, e.eid, RI.WS_EDGE)
+        rows = await RI._wait_terminal(e)
+        assert [r["state"] for r in rows] == ["COMPLETED"], rows
+        ds = await _cg_decisions(e)
+        assert len(ds) == 1 and ds[0]["verdict"] == "ENTER", ds
+        it = dict(await e.conn.fetchrow(
+            "SELECT * FROM execution_intents WHERE decision_id = $1", ds[0]["decision_id"]))
+        assert it["live_eligible"] is False and it["actual_state"] == EI.A_REFUSED
+        lel = json.loads(it["live_eligibility"]) if isinstance(it["live_eligibility"], str) \
+            else it["live_eligibility"]
+        refusals = lel["admission"]["refusals"]
+        from sportsassets import actual_admission as AA
+        assert AA.R_BOOK_CURRENCY in refusals and AA.R_SETTLEMENT in refusals, refusals
+        assert lel["admission"]["book_currency"]["verdict"] == "NOT_ESTABLISHED"
+        assert lel["admission"]["settlement"]["compatibility"] == "UNKNOWN"
+        assert lel["admission"]["settlement"]["research_disclosure_counts"] is False
+        await asyncio.sleep(0.5)
+        assert e.retail.placed == []                        # zero Venue.place
+        assert await e.conn.fetchval(
+            "SELECT count(*) FROM execmirror_orders WHERE execution_intent_id = $1",
+            it["intent_id"]) == 0
+        assert await _paper_entries(e) == 1                 # PAPER proceeded
+    finally:
+        await _disarm(e)
+
+
 async def _async(v):
     return v
 
@@ -247,6 +314,7 @@ async def _async_val(coro, want):
 async def _lane_env(monkeypatch):
     import asyncpg
     conn = await asyncpg.connect(RI.H.DSN)
+    AF.approve_test_rule(monkeypatch)
     monkeypatch.setenv(EP.KEY_ID_ENV, KID)
     monkeypatch.setenv(EP.SECRET_ENV, SEC)
     before = dict(await conn.fetchrow("SELECT * FROM execmirror_control WHERE id = 1"))
@@ -274,17 +342,20 @@ async def _restore(conn, before):
 
 
 async def _intent(conn, *, strategy="PINNACLE_COMPLETED_GAME_PAPER",
-                  version=PB.CG_VERSION, qty=2702, decided_ago=0.5, book_ago=0.5):
+                  version=PB.CG_VERSION, qty=2702, decided_ago=0.5, book_ago=0.5,
+                  facts=None, slug=None):
     now = time.time()
     did = "dec_lane_%s" % uuid.uuid4().hex[:12]
+    slug = slug or "mlb-lane-%s" % did[-4:]
     return await EI.create(
         conn, decision_id=did, valuation_id=None, strategy=strategy,
-        policy_version=version, slug="mlb-lane-%s" % did[-4:],
+        policy_version=version, slug=slug,
         order_intent="ORDER_INTENT_BUY_LONG", holding_side="LONG",
         group_id="grp_" + did, order_type="MARKETABLE", time_in_force="IOC",
         paper_target_qty=qty, limit_price=0.55, wire_price=0.55, book_obs_id=None,
         book_observed_at=now - book_ago, decided_at=now - decided_ago,
-        evidence={}, timeline={})
+        evidence={"admission_facts": facts if facts is not None else
+                  AF.admissible_facts(slug=slug)}, timeline={})
 
 
 @pg
