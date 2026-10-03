@@ -161,9 +161,11 @@ async def workspace(conn, *, now: float | None = None) -> dict:
         from .. import bettor_xavier_standing_orders as SPO
         from ..agents import xavier_ladder as XL
         from ..agents import xavier_policy as XP
+        from ..agents import xavier_small_live_policy as XSP
         from ..agents import xavier_standing_view as XSV
         pol = await XP.load(conn)
         spo = await SPO.load_policy(conn)
+        slp = await XSP.load_view(conn)
         return _sec(OK, None, {
             "xavier_record": XV.VERSION, "ladder": XL.VERSION,
             "decision_policy": FD.VERSION,
@@ -176,6 +178,10 @@ async def workspace(conn, *, now: float | None = None) -> dict:
                 "policy_key", "version", "source", "why", "params",
                 "approved_by")}, **{k: v for k, v in XSV.capability().items()
                                     if k != "venue_capability"}),
+            # THE SMALL-LIVE MANAGEMENT POLICY ARTIFACT (migration 201):
+            # READY_FOR_OWNER_APPROVAL until an owner approval record exists;
+            # it governs nothing at runtime (activated is always False).
+            "small_live_management_policy": slp,
             "workspace": VERSION})
 
     async def positions():
@@ -515,6 +521,19 @@ async def xavier_standing_orders(response: Response) -> dict:
                                      venue=b["venue"]) if b["bound"] else {
             "ok": True, "groups": [], "why": "NO_FUNDED_ACCOUNT_IS_BOUND",
             **XSV.capability()}
+    return dict(got, read_only=True)
+
+
+@router.get("/api/command/agents/xavier/management-policy",
+            dependencies=[Depends(require_read)])
+async def xavier_management_policy(response: Response) -> dict:
+    """XAVIER_SMALL_LIVE_MANAGEMENT_V1: the document, its sha256 and its
+    stored status. Read only; approving it is not an API here."""
+    from ..agents import xavier_small_live_policy as XSP
+    response.headers["Cache-Control"] = "no-store"
+    pool = await _pool()
+    async with pool.acquire() as conn:
+        got = await XSP.read_artifact(conn)
     return dict(got, read_only=True)
 
 

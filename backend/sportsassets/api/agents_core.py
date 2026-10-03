@@ -63,6 +63,25 @@ def _row_evidence(r: dict) -> list:
     return list(r.get("evidence") or r.get("evidence_links") or [])
 
 
+async def _annotate_policy(conn, agents: list) -> None:
+    """SAY WHAT `policy_version` MEANS, without changing it. CODE_DEFAULT is
+    the code's fallback, never a management-approved policy; Xavier's row
+    also carries its small-live management policy ARTIFACT (id, version,
+    sha256, status -- READY_FOR_OWNER_APPROVAL until an owner approval
+    record exists), which governs nothing at runtime. Never raises."""
+    from ..agents import registry as R
+    from ..agents import xavier_small_live_policy as XSP
+
+    for a in agents:
+        pv = a.get("policy_version")
+        a["policy_version_approved"] = bool(
+            pv and pv != R.SOURCE_CODE_DEFAULT)
+        if pv == R.SOURCE_CODE_DEFAULT:
+            a["policy_version_meaning"] = XSP.CODE_DEFAULT_MEANING
+        if a.get("agent_id") == R.XAVIER:
+            a["management_policy"] = await XSP.load_view(conn)
+
+
 @router.get("/api/command/agents", dependencies=[Depends(require_read)])
 async def agents_index(response: Response) -> dict:
     from ..agents import handoff as AH
@@ -82,6 +101,7 @@ async def agents_index(response: Response) -> dict:
                 agents.append({"agent_id": aid, "state": None,
                                "status": "UNAVAILABLE",
                                "why": type(exc).__name__})
+        await _annotate_policy(conn, agents)
         handoffs = await _read_section(
             AH.handoffs(conn, limit=20),
             empty_why="NO_CONFIRMED_ENTRY_FILL_HAS_BEEN_HANDED_TO_XAVIER",
@@ -169,3 +189,48 @@ async def agents_decisions(response: Response,
             evidence_of=_row_evidence)
     return {"agent": None if agent is None else agent.upper(),
             "decisions": sec, "read_at": time.time(), "read_only": True}
+
+
+@router.get("/api/command/agents/findings",
+            dependencies=[Depends(require_read)])
+async def agents_findings(response: Response,
+                          stage: str | None = Query(default=None),
+                          limit: int = Query(default=50, ge=1, le=500)
+                          ) -> dict:
+    """THE COLLABORATION LOOP (migration 203): each finding and its current
+    stage. Read only; production_effect is NONE by construction."""
+    from ..agents import collaboration_loop as CL
+
+    response.headers["Cache-Control"] = "no-store"
+    if stage is not None and stage not in CL.SEQ:
+        raise HTTPException(status_code=400, detail={
+            "reason": "THAT_IS_NOT_A_LOOP_STAGE", "stage": stage})
+    pool = await _pool()
+    async with pool.acquire() as conn:
+        sec = await _read_section(
+            CL.findings(conn, stage=stage, limit=limit),
+            empty_why="NO_FINDING_HAS_ENTERED_THE_COLLABORATION_LOOP",
+            evidence_of=lambda r: list(r.get("evidence_refs") or []))
+    return {"findings": sec, "stages": list(CL.STAGES) + [CL.CLOSED],
+            "production_effect": "NONE", "read_at": time.time(),
+            "read_only": True}
+
+
+@router.get("/api/command/agents/findings/{finding_id}",
+            dependencies=[Depends(require_read)])
+async def agents_finding(finding_id: str, response: Response) -> dict:
+    from ..agents import collaboration_loop as CL
+
+    response.headers["Cache-Control"] = "no-store"
+    pool = await _pool()
+    async with pool.acquire() as conn:
+        try:
+            got = await CL.finding(conn, finding_id)
+        except Exception as exc:                                # noqa: BLE001
+            raise HTTPException(status_code=503, detail={
+                "reason": "FINDING_READ_FAILED",
+                "detail": type(exc).__name__})
+    if got is None:
+        raise HTTPException(status_code=404, detail={
+            "reason": CL.R_NO_SUCH_FINDING, "finding_id": finding_id})
+    return dict(got, read_at=time.time(), read_only=True)

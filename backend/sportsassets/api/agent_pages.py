@@ -663,8 +663,8 @@ var AG = (function () {
   function versionChips(o) {
     if (!isObj(o)) return '';
     return '<div class="chips">' + [['policy', 'policy_version'], ['model', 'model_version'], ['code', 'code_version']].map(function (p) {
-      return '<span class="chip">' + p[0] + ' <b>' + (has(o, p[1]) && o[p[1]] !== null ? esc(o[p[1]]) : 'UNKNOWN') + '</b></span>';
-    }).join('') + '</div>';
+      return '<span class="chip">' + p[0] + ' <b>' + (has(o, p[1]) && o[p[1]] !== null ? esc(o[p[1]]) : 'UNKNOWN') + '</b>' + (p[1] === 'policy_version' && o[p[1]] === 'CODE_DEFAULT' ? ' <span class="s">code fallback, not approved</span>' : '') + '</span>';
+    }).join('') + (isObj(o.management_policy) ? '<span class="chip">management policy <b>' + esc(o.management_policy.policy_id) + ' v' + esc(o.management_policy.version) + '</b> <span class="s">' + esc(o.management_policy.status) + (o.management_policy.activated ? '' : ' · not activated') + ' · sha256 ' + esc(String(o.management_policy.sha256 || '').slice(0, 12)) + '</span></span>' : '') + '</div>';
   }
   function hero(a, rd, id) {
     a = isObj(a) ? a : {};
