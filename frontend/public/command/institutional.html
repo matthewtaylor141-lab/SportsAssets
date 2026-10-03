@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#090d14">
+  <meta name="robots" content="noindex,nofollow">
+  <meta name="description" content="Bettor EV Engine — the institutional view: what BETTOR owns (paper and actual separately), why, what each position is worth, what can go wrong (including the P5 stream gate), and whether BETTOR is adding value.">
+  <title>Institutional View | Bettor EV Engine</title>
+  <link rel="stylesheet" href="command.css">
+  <link rel="stylesheet" href="desk.css">
+  <style>
+    /* Page-local layout only; every colour is a desk.css token. */
+    .iv-questions { display: grid; gap: 10px; grid-template-columns: 1fr; margin: 0 0 18px; }
+    @media (min-width: 760px) { .iv-questions { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+    @media (min-width: 1280px) { .iv-questions { grid-template-columns: repeat(5, minmax(0, 1fr)); } }
+    .iv-q { background: var(--dk-surface); border: 1px solid var(--dk-line); border-radius: var(--dk-radius);
+            padding: 12px 14px; min-width: 0; }
+    .iv-q .n { font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--dk-ink-3); }
+    .iv-q .t { font-weight: 640; margin: 2px 0 6px; font-size: 13px; }
+    .iv-q .a { font-size: 12.5px; color: var(--dk-ink-2); overflow-wrap: anywhere; }
+    .iv-grid { display: grid; gap: 0 16px; grid-template-columns: 1fr; }
+    @media (min-width: 1100px) { .iv-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+    .iv-grid .card.wide { grid-column: 1 / -1; }
+    .iv-src { font-size: 11px; color: var(--dk-ink-3); margin: 0 0 10px; overflow-wrap: anywhere; }
+    .iv-src .pill { margin-right: 4px; }
+    .iv-metric { border: 1px solid var(--dk-line-soft); border-radius: 8px; padding: 10px 12px; margin: 0 0 8px; }
+    .iv-metric .row1 { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: baseline; justify-content: space-between; }
+    .iv-metric .nm { font-weight: 600; font-size: 13px; }
+    .iv-metric .val { font-variant-numeric: tabular-nums; font-size: 15px; }
+    .iv-metric .meta { font-size: 11.5px; color: var(--dk-ink-3); margin-top: 4px; overflow-wrap: anywhere; }
+    .iv-dom { font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--dk-ink-3); margin: 12px 0 6px; }
+    .iv-na { color: var(--dk-warn); font-size: 12px; overflow-wrap: anywhere; }
+    .iv-why { color: var(--dk-ink-3); font-size: 11.5px; overflow-wrap: anywhere; }
+    .iv-basis { margin: 0 0 10px; font-size: 12.5px; color: var(--dk-ink-2); }
+    .iv-shadow { letter-spacing: .04em; }
+    .iv-line { margin: 0 0 4px; }
+    .iv-line .pill { margin-right: 2px; }
+    .iv-note { font-size: 11px; color: var(--dk-ink-3); text-transform: uppercase; letter-spacing: .06em; }
+    .iv-block { overflow-wrap: anywhere; }
+    .iv-list { margin: 4px 0 0; padding-left: 18px; }
+    .iv-chs { display: grid; gap: 10px; grid-template-columns: 1fr; }
+    @media (min-width: 1100px) { .iv-chs { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+    .iv-ch { border: 1px solid var(--dk-line-soft); border-radius: 8px; padding: 10px 12px; min-width: 0; background: var(--dk-surface-2); }
+    .iv-ch .row1 { display: flex; flex-wrap: wrap; gap: 6px 10px; justify-content: space-between; align-items: baseline; font-size: 12px; }
+    .iv-ch .mono { overflow-wrap: anywhere; }
+    .iv-claim { margin: 6px 0 8px; font-weight: 600; font-size: 13px; }
+    .iv-dl { display: grid; grid-template-columns: minmax(0, 9.5em) minmax(0, 1fr); gap: 4px 10px; margin: 0; font-size: 12.5px; }
+    .iv-dl dt { color: var(--dk-ink-3); font-size: 11px; text-transform: uppercase; letter-spacing: .04em; padding-top: 2px; }
+    .iv-dl dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+    @media (max-width: 480px) { .iv-dl { grid-template-columns: 1fr; } .iv-dl dd { margin-bottom: 4px; } }
+    .card h2 .pill { vertical-align: middle; }
+    .iv-grid .verdict, .iv-grid .card-body p, .iv-grid .fact .v, .iv-metric .nm { overflow-wrap: anywhere; min-width: 0; }
+  </style>
+</head>
+<body class="deskbody">
+  <a class="skip-link" href="#ivmain">Skip to the institutional view</a>
+
+  <header class="deskbar">
+    <div class="deskbar-brand">
+      <span class="deskmark">B</span>
+      <span class="deskname">Institutional View</span>
+      <span id="iv-pill" class="pill pill-grey">READING —</span>
+    </div>
+    <nav class="desknav" aria-label="Command navigation">
+      <a href="index.html">Command</a>
+      <a href="desk.html">Desk</a>
+      <a href="center.html">Command Centre</a>
+      <a href="live.html">Small live</a>
+      <a href="institutional.html" aria-current="page">Institutional</a>
+    </nav>
+  </header>
+
+  <main id="ivmain" class="deskmain">
+    <section id="ivquestions" class="iv-questions" aria-label="The five questions"></section>
+    <div id="ivstate" class="deskstate" role="status" aria-live="polite">Reading every institutional read model…</div>
+    <div id="ivgrid" class="iv-grid"></div>
+  </main>
+
+  <footer class="deskfoot">
+    <span id="asof">—</span>
+    <span>PAPER is simulated execution on a fictional account. ACTUAL is the venue account of the 1:1,000 execution mirror. The two are never summed. Everything marked SHADOW is computed and displayed only: it has no authority, places nothing and changes no limit, size or probability. A read that is missing or fails shows "UNAVAILABLE — reason" — never zero. Profitability is UNPROVEN until the predeclared forward sample is sufficient. This page is read-only and sends nothing to any venue.</span>
+  </footer>
+
+  <script src="config.js"></script>
+  <script src="unlock.js"></script>
+  <script src="core.js"></script>
+  <script src="institutional.js"></script>
+</body>
+</html>

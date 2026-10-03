@@ -58,7 +58,7 @@
 # A path that is NOT one of those files 404s rather than falling through to
 # the old site. That is deliberate: an obsolete route should say it is gone,
 # not quietly serve the page it replaced.
-# THE THREE AGENT PAGES AT MANAGEMENT URLS: /derek, /xavier, /audrey.
+# THE AGENT PAGES AT MANAGEMENT URLS: /derek, /xavier, /audrey, /karen.
 #
 # REWRITES (status 200), so the address bar keeps the management URL on a
 # direct link and on refresh. They go to ONE static shell, not straight to
@@ -85,6 +85,12 @@
 
 [[redirects]]
   from = "https://command.bettortoken.com/audrey"
+  to = "/command/agent.html"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "https://command.bettortoken.com/karen"
   to = "/command/agent.html"
   status = 200
   force = true
