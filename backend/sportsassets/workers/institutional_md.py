@@ -43,7 +43,10 @@ import time
 from datetime import datetime, timezone
 
 from .. import institutional_book as ib
+from .. import institutional_contract_map as icm
+from .. import institutional_same_book as samebook
 from .. import institutional_stream as istream
+from .. import institutional_stream_evidence as sevid
 from .. import market_data_identity as mdi
 from .. import pmx_institutional as pmx
 from .. import shadow_experimental_store as xstore
@@ -81,6 +84,13 @@ EVIDENCE_EVERY_S = 60.0
 # between ticks. The write is deduped by the binding's own sha, so a
 # re-resolution that agrees costs one no-op insert.
 IDENTITY_EVERY_S = 60.0
+
+# THE STREAM'S DURABLE EVIDENCE (migration 210), only while the gRPC stream
+# is enabled here: one row per wanted symbol (and one process row) per
+# minute, and one same-book probe sample per mapped symbol per minute.
+# Kill the probe alone with INSTITUTIONAL_SAME_BOOK_PROBE=off.
+STREAM_EVIDENCE_EVERY_S = 60.0
+SAME_BOOK_EVERY_S = 60.0
 
 
 def _off(name: str, default: str = "on") -> bool:
@@ -216,6 +226,57 @@ async def persist_trail(pool, store, symbols) -> int:
     return written
 
 
+def _identity(symbol, store, retail) -> dict:
+    """The exact-identity answer for (retail slug = symbol, YES), compact.
+    Pure over data this process already holds; no venue call."""
+    inst = store.instrument(symbol) or {}
+    m = icm.map_retail_to_institutional(
+        symbol, "yes", inst.get("record"),
+        retail_row=(retail or {}).get((symbol, "yes")))
+    return {k: m.get(k) for k in ("version", "ok", "refusal",
+                                  "institutional_symbol", "price_scale",
+                                  "qty_scale")}
+
+
+async def record_stream_evidence(pool, recorder, store, books=None) -> dict:
+    """One minute of stream evidence -> institutional_stream_evidence."""
+    books = books if books is not None else istream.BOOKS
+    wanted = books.wanted()
+    try:
+        retail = await xstore.retail_rows(pool, wanted) if wanted else {}
+    except Exception:                                          # noqa: BLE001
+        retail = {}
+    rows = recorder.rows(books, identity_for=lambda s: _identity(
+        s, store, retail))
+    return {"rows": len(rows), "written": await sevid.persist(pool, rows)}
+
+
+async def probe_same_book(pool, store, symbols, *, process_id,
+                          current=None, retail_read=None) -> dict:
+    """One same-book sample per symbol (read-only) ->
+    institutional_same_book_probe. The blocking reads run off the loop."""
+    syms = list(symbols or ())[:MAX_INSTRUMENTS]
+    try:
+        retail = await xstore.retail_rows(pool, syms) if syms else {}
+    except Exception:                                          # noqa: BLE001
+        retail = {}
+    cur = current or istream.current
+    read = retail_read or samebook.retail_book_read
+
+    def run_all():
+        return [samebook.sample(
+            s, record=(store.instrument(s) or {}).get("record"),
+            retail_row=retail.get((s, "yes")), books_current=cur,
+            retail_read=read) for s in syms]
+    rows = await asyncio.to_thread(run_all)
+    by: dict = {}
+    for r in rows:
+        by[r["verdict"]] = by.get(r["verdict"], 0) + 1
+    written = await samebook.persist(pool, rows, process_id=process_id,
+                                     service=SERVICE)
+    return {"samples": len(rows), "written": written, "by": by}
+
+
 async def run() -> None:
     if _off("INSTITUTIONAL_MD"):
         log.info("institutional_md: off by switch")
@@ -260,6 +321,10 @@ async def run() -> None:
     # the identity guard for an execution key. grpcio/protobuf are locked and
     # the market-data stubs are vendored (sportsassets/vendor/pmx_proto);
     # TRANSPORT_UNAVAILABLE only if they fail to import. Never raises.
+    # The evidence recorder is attached BEFORE the stream starts, so the
+    # first connect is recorded too. Only when the stream is enabled here.
+    recorder = (sevid.install(istream.BOOKS, service=SERVICE)
+                if istream.enabled() else None)
     stream_start = istream.start_default()
     log.info("institutional_md: stream %s (%s)", stream_start.get("state"),
              stream_start.get("why"))
@@ -270,6 +335,8 @@ async def run() -> None:
     # decisions are stamped NOT_IDENTIFIED, and a minute of those is a
     # minute of prospective signals that can never execute.
     last_identity = 0.0
+    last_stream_evidence = time.monotonic()
+    last_same_book = time.monotonic()
     beats = 0
     while True:
         started = time.monotonic()
@@ -324,6 +391,28 @@ async def run() -> None:
                         type(exc).__name__, exc)
                     log.warning("institutional_md: identity resolve failed",
                                 exc_info=True)
+
+        # THE STREAM'S EVIDENCE: recorded whether or not a focus set exists
+        # (the process row says what the stream is doing); probed only for
+        # symbols the stream holds. Never on the decision path.
+        if recorder is not None and \
+                time.monotonic() - last_stream_evidence >= \
+                STREAM_EVIDENCE_EVERY_S:
+            last_stream_evidence = time.monotonic()
+            try:
+                stats["streamEvidence"] = await record_stream_evidence(
+                    pool, recorder, store)
+            except Exception as exc:                           # noqa: BLE001
+                stats["streamEvidenceError"] = type(exc).__name__
+        if recorder is not None and symbols and \
+                not _off("INSTITUTIONAL_SAME_BOOK_PROBE") and \
+                time.monotonic() - last_same_book >= SAME_BOOK_EVERY_S:
+            last_same_book = time.monotonic()
+            try:
+                stats["sameBook"] = await probe_same_book(
+                    pool, store, symbols, process_id=recorder.process_id)
+            except Exception as exc:                           # noqa: BLE001
+                stats["sameBookError"] = type(exc).__name__
 
         venue_ms = stats.pop("venueMs", []) or []
         if venue_ms:
