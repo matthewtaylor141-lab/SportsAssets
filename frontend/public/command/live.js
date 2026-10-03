@@ -264,7 +264,8 @@
           ' · action ' + txt(xa.latest_action) + ' · unrealized ' + usd(xa.unrealized_usd)
         : NA + '<span class="sl-why">' + txt(xa.why_unavailable) + '</span>') +
       fact('Audrey · chain reconciliation', rec
-        ? pill(rec.status, rec.status === 'MATCHED' ? 'good' : rec.status === 'DISCREPANCY' ? 'bad' : 'warn')
+        ? pill(rec.status, rec.status === 'MATCHED' ? 'good' : rec.status === 'DISCREPANCY' ? 'bad'
+          : rec.status === 'NOT_MIRRORED' ? 'grey' : 'warn')
         : NA + '<span class="sl-why">' + txt(m.audrey_reconciliation_why_unavailable) + '</span>') +
       '</div>' +
       '<h3 class="h3">Audrey findings for this decision</h3>' +

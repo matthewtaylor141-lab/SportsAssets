@@ -1062,7 +1062,9 @@ class Mirror:
                         "venue_cum_qty": None if m["cum_qty"] is None else str(m["cum_qty"]),
                         "live_fees_usd": str(lf["fee"])}
                 chain.append(link)
-                if m["role"] in BUY_ROLES and m["paper_order_id"] and dec is None:
+                # an excluded row sent nothing: there is no live order to orphan
+                if m["role"] in BUY_ROLES and m["paper_order_id"] and dec is None \
+                        and m["state"] != "EXCLUDED":
                     disc.append({"code": "LIVE_ORDER_WITHOUT_PAPER_DECISION", "mirror_id": m["mirror_id"]})
                 if m["venue_order_id"] and m["cum_qty"] is not None and \
                         Decimal(str(m["cum_qty"])) != Decimal(str(lf["q"])):
@@ -1091,7 +1093,13 @@ class Mirror:
                 disc.append({"code": "VENUE_POSITION_DIFFERS_FROM_MIRROR_FILLS",
                              "detail": rec["differences"][slug]})
             pending = any(c["live_state"] in OPEN_STATES for c in chain)
-            status = "DISCREPANCY" if disc else ("PENDING" if pending else "MATCHED")
+            # Every row excluded before submission, no venue order, no live
+            # fill: there is no actual leg to match -- paper only by design.
+            paper_only = bool(chain) and all(
+                c["live_state"] == "EXCLUDED" and not c["venue_order_id"]
+                and Decimal(c["live_fill_qty"]) == 0 for c in chain)
+            status = ("DISCREPANCY" if disc else "PENDING" if pending
+                      else "NOT_MIRRORED" if paper_only else "MATCHED")
             chain_doc = {"links": chain, "live_held": held,
                          "handoff_id": None if hrow is None else hrow["handoff_id"],
                          "account_snapshot_at": None if snap is None else snap["at"],

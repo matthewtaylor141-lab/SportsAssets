@@ -905,3 +905,44 @@ async def test_audrey_matches_a_clean_chain_and_names_each_discrepancy(monkeypat
         assert "VENUE_CUM_QTY_NOT_EQUAL_RECORDED_FILLS" in codes
     finally:
         await conn.close()
+
+
+@pg
+@pytest.mark.asyncio
+async def test_audrey_records_an_excluded_only_group_as_not_mirrored_never_matched(monkeypatch):
+    """A paper-only group (every row excluded before submission) has no actual
+    leg: NOT_MIRRORED, not MATCHED. A live fill found against it is still a
+    DISCREPANCY."""
+    conn = await _conn()
+    try:
+        acct, venue, mirror = await _setup(conn, monkeypatch)
+        po = await _paper_order(conn, acct, qty=2702, strategy="PINNACLE_EXPLORATION_PAPER",
+                                policy_version="PINNACLE_EXPLORATION_PAPER_V3")
+        await mirror.tick(conn)
+        assert venue.placed == []
+        r = await _row(conn, po["order_id"])
+        assert r["state"] == "EXCLUDED" and r["exclusion"] == M.STRATEGY_NOT_LIVE_ELIGIBLE
+        rec = await conn.fetchrow("SELECT * FROM smalllive_reconciliations WHERE group_id = $1",
+                                  po["group_id"])
+        assert rec is not None and rec["status"] == "NOT_MIRRORED", rec
+        assert (json.loads(rec["discrepancies"]) if isinstance(rec["discrepancies"], str)
+                else rec["discrepancies"]) == []
+        ev = await conn.fetchval(
+            "SELECT count(*) FROM execmirror_events WHERE kind = 'AUDREY_RECONCILIATION_MATCHED'"
+            " AND detail->>'group_id' = $1", po["group_id"])
+        assert ev == 0
+        # a live fill against the excluded row: never NOT_MIRRORED, never MATCHED
+        await conn.execute(
+            """INSERT INTO execmirror_fills (fill_key, mirror_id, venue_order_id, group_id,
+                   us_market_slug, intent, qty, price) VALUES ($1,$2,'leak',$3,$4,$5,1,0.55)""",
+            "leak-%s" % po["order_id"], r["mirror_id"], po["group_id"], po["slug"],
+            "ORDER_INTENT_BUY_LONG")
+        mirror._last_management = 0.0
+        await mirror.tick(conn)
+        r2 = await conn.fetchrow("SELECT * FROM smalllive_reconciliations WHERE group_id = $1",
+                                 po["group_id"])
+        codes = [d["code"] for d in (json.loads(r2["discrepancies"])
+                                     if isinstance(r2["discrepancies"], str) else r2["discrepancies"])]
+        assert r2["status"] == "DISCREPANCY" and "LIVE_FILLED_MORE_THAN_INTENDED" in codes
+    finally:
+        await conn.close()
