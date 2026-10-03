@@ -1,0 +1,1 @@
+{"body":{"detail":{"detail":"InvalidCatalogNameError: database \"cc22_does_not_exist\" does not exist","reason":"READ_FAILED"}},"http":503,"route":"/api/command/coverage?tz=America/New_York&days=7"}
