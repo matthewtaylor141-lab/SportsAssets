@@ -1055,6 +1055,13 @@ class Mirror:
         groups = await conn.fetch(
             """SELECT DISTINCT group_id FROM execmirror_orders
                 WHERE group_id IS NOT NULL AND (venue_order_id IS NOT NULL OR state = 'EXCLUDED')
+                  AND created_at > now() - interval '14 days'
+               UNION
+               -- a decision whose ACTUAL branch sent nothing (paper only, refused,
+               -- or no lane): reconciled too, so a missed or refused actual
+               -- execution is recorded beside its paper sibling
+               SELECT DISTINCT group_id FROM execution_intents
+                WHERE actual_state IN ('PAPER_ONLY', 'REFUSED', 'LANE_NOT_RUNNING')
                   AND created_at > now() - interval '14 days'""")
         snap = await conn.fetchrow(
             "SELECT reconciliation, at FROM execmirror_snapshots ORDER BY at DESC LIMIT 1")
@@ -1065,9 +1072,28 @@ class Mirror:
                 """SELECT m.*, p.decision_id, p.qty AS p_qty, p.state AS p_state
                      FROM execmirror_orders m LEFT JOIN paper_orders p ON p.order_id = m.paper_order_id
                     WHERE m.group_id = $1 ORDER BY m.created_at""", gid)]
+            if not rows:
+                # no actual order exists: the intent's own refusal is the link
+                for i in await conn.fetch(
+                        """SELECT i.*, p.order_id AS p_order_id FROM execution_intents i
+                             LEFT JOIN paper_orders p ON p.decision_id = i.decision_id
+                                                     AND p.role = 'ENTRY'
+                            WHERE i.group_id = $1""", gid):
+                    rows.append({"mirror_id": None, "role": "ENTRY",
+                                 "execution_intent_id": i["intent_id"],
+                                 "paper_order_id": i["p_order_id"],
+                                 "decision_id": i["decision_id"], "_sibling": True,
+                                 "state": "EXCLUDED", "exclusion": i["actual_refusal"]
+                                 or i["actual_state"], "venue_order_id": None,
+                                 "live_qty": i["live_qty"] or 0, "cum_qty": None,
+                                 "paper_qty": None, "scaled_qty": i["live_raw_qty"],
+                                 "us_market_slug": i["us_market_slug"],
+                                 "avg_px": None, "accepted_at": None,
+                                 "paper_decided_at": i["decided_at"]})
             disc, chain = [], []
             for m in rows:
-                if m.get("execution_intent_id") and not m.get("paper_order_id"):
+                if m.get("execution_intent_id") and not m.get("paper_order_id") \
+                        and m.get("mirror_id"):
                     # an ACTUAL sibling of a decision: its paper sibling is the
                     # ENTRY paper order of the same decision (never its parent)
                     ei = await conn.fetchrow(
@@ -1085,7 +1111,8 @@ class Mirror:
                     "FROM paper_fills WHERE order_id = $1", m["paper_order_id"]) if m["paper_order_id"] else None
                 lf = await conn.fetchrow(
                     "SELECT coalesce(sum(qty), 0) AS q, coalesce(sum(fee_usd),0) AS fee "
-                    "FROM execmirror_fills WHERE mirror_id = $1", m["mirror_id"])
+                    "FROM execmirror_fills WHERE mirror_id = $1", m["mirror_id"]) \
+                    if m.get("mirror_id") else {"q": Decimal(0), "fee": Decimal(0)}
                 dec = None
                 if m.get("decision_id"):
                     dec = await conn.fetchrow(
@@ -1124,7 +1151,7 @@ class Mirror:
                                      .total_seconds() * 1000)),
                         "paper_sibling": ("PRESENT" if m["paper_order_id"]
                                           else "ABSENT")}
-                    if dec is None:
+                    if dec is None and m.get("mirror_id"):
                         disc.append({"code": "ACTUAL_ORDER_WITHOUT_DECISION",
                                      "mirror_id": m["mirror_id"],
                                      "execution_intent_id": m["execution_intent_id"]})

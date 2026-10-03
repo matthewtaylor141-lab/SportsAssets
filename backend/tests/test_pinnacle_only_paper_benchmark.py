@@ -117,7 +117,12 @@ ALLOWED_IMPORTS = {"__future__", "annotations", "asyncio", "hashlib", "json", "m
                    # the owner's capital policy for the main PAPER account:
                    # pure dict transforms (imports only copy), no I/O, no
                    # funded or venue path
-                   "bettor_paper_limits"}
+                   "bettor_paper_limits",
+                   # ONE DECISION -> PAPER + ACTUAL: the registry holding the
+                   # executing process's decision hook. It imports NOTHING and
+                   # does no I/O (pinned below); the benchmark never imports
+                   # an execution, venue or funded module through it.
+                   "decision_hooks"}
 
 
 def _imports(path: pathlib.Path) -> list:
@@ -138,6 +143,12 @@ def test_the_benchmark_imports_only_paper_and_pure_policy_modules():
     assert leaves <= ALLOWED_IMPORTS | {"Any"}, sorted(leaves - ALLOWED_IMPORTS)
     bad = [n for n in names if any(f in (n or "").lower() for f in FORBIDDEN)]
     assert not bad, bad
+
+
+def test_the_decision_hook_registry_imports_nothing():
+    from sportsassets import decision_hooks
+    assert _imports(pathlib.Path(decision_hooks.__file__)) == []
+    assert decision_hooks.DECISION_HOOK is None or callable(decision_hooks.DECISION_HOOK)
 
 
 def test_owner_limits_helper_is_pure_configuration_only():

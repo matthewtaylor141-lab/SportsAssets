@@ -102,6 +102,7 @@ import time
 from typing import Any
 
 from .. import bettor_paper_ledger as L
+from .. import decision_hooks as DH
 from .. import bettor_paper_simulator as SIM
 from .. import bettor_settlement_terms as ST
 from . import derek_policy as DP
@@ -1572,42 +1573,49 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
         return rec
     # ── ONE DECISION -> ONE EXECUTION INTENT -> PAPER + ACTUAL ─────────
     # The qualified decision, not the paper order, is the authoritative
-    # object. Its ONE immutable intent is written now and the ACTUAL lane is
-    # dispatched BEFORE the paper order: neither sibling waits for the other
-    # (execution_intent). Live eligibility is decided inside `create`.
-    from .. import execution_intent as EI
-    timeline = {
-        "pinnapi_provider_ts": {"utc_s": (cand.get("pinnacle") or {}).get("observed_at")},
-        "pinnapi_receipt": {"utc_s": (cand.get("pinnacle") or {}).get("received_at")},
-        "valuation_complete": {"utc_s": cand.get("decided_at")},
-        "decision_complete": {"utc_s": at, "utc_ns": time.time_ns(),
-                              "mono_ns": time.perf_counter_ns()},
-        "book_observed": {"utc_s": None if obs is None else obs["observed_at"]}}
-    intent = await EI.create(
-        conn, decision_id=did, valuation_id=cand["valuation_id"],
-        strategy=STRATEGY, policy_version=VERSION,
-        slug=cand["us_market_slug"], order_intent=cand.get("side"),
-        holding_side=side, group_id=group_id_for(did),
-        order_type=ent["order_type"], time_in_force=ent["time_in_force"],
-        paper_target_qty=sized["qty"], limit_price=sized["limit"],
-        wire_price=sized["wire"],
-        book_obs_id=None if obs is None else obs["obs_id"],
-        book_observed_at=None if obs is None else float(obs["observed_at"]),
-        decided_at=at,
-        evidence={"valuation_id": cand["valuation_id"],
-                  "probability": p, "pinnacle_provider": (cand.get("pinnacle") or {}).get("provider"),
-                  "probability_authority": match.get("probability_authority"),
-                  "gross_edge_pp": best_edge,
-                  "net_expected_profit_usd": (econ or {}).get("expected_net_profit_usd"),
-                  "book_age_at_decision_s": book_age},
-        timeline=timeline)
-    rec["execution_intent_id"] = intent["intent_id"]
-    rec["actual_lane"] = "PAPER_ONLY" if not intent["live_eligible"] else None
-    if intent["created"] and intent["live_eligible"]:
-        dispatched = (not conn.is_in_transaction()) and EI.dispatch(intent)
-        rec["actual_lane"] = "DISPATCHED" if dispatched else EI.A_NO_LANE
-        if not dispatched:
-            await EI.mark_no_lane(conn, intent["intent_id"])
+    # object. The executing process's hook (decision_hooks; installed by
+    # execution_intent) writes its ONE immutable intent and dispatches the
+    # ACTUAL lane BEFORE the paper order below: neither sibling waits for the
+    # other, and a failure on the actual side never stops the paper side.
+    rec["execution_intent_id"], rec["actual_lane"] = None, None
+    hook = DH.DECISION_HOOK
+    if hook is None:
+        rec["actual_lane"] = "NO_EXECUTION_HOOK_IN_THIS_PROCESS"
+    else:
+        try:
+            got_i = await hook(conn, {
+                "decision_id": did, "valuation_id": cand["valuation_id"],
+                "strategy": STRATEGY, "policy_version": VERSION,
+                "slug": cand["us_market_slug"], "order_intent": cand.get("side"),
+                "holding_side": side, "group_id": group_id_for(did),
+                "order_type": ent["order_type"],
+                "time_in_force": ent["time_in_force"],
+                "paper_target_qty": sized["qty"], "limit_price": sized["limit"],
+                "wire_price": sized["wire"],
+                "book_obs_id": None if obs is None else obs["obs_id"],
+                "book_observed_at": (None if obs is None
+                                     else float(obs["observed_at"])),
+                "decided_at": at,
+                "evidence": {
+                    "valuation_id": cand["valuation_id"], "probability": p,
+                    "pinnacle_provider": (cand.get("pinnacle") or {}).get("provider"),
+                    "probability_authority": match.get("probability_authority"),
+                    "gross_edge_pp": best_edge,
+                    "net_expected_profit_usd": (econ or {}).get(
+                        "expected_net_profit_usd"),
+                    "book_age_at_decision_s": book_age},
+                "timeline": {
+                    "pinnapi_provider_ts": {"utc_s": (cand.get("pinnacle") or {}).get("observed_at")},
+                    "pinnapi_receipt": {"utc_s": (cand.get("pinnacle") or {}).get("received_at")},
+                    "valuation_complete": {"utc_s": cand.get("decided_at")},
+                    "decision_complete": {"utc_s": at, "utc_ns": time.time_ns(),
+                                          "mono_ns": time.perf_counter_ns()},
+                    "book_observed": {"utc_s": None if obs is None
+                                      else obs["observed_at"]}}}) or {}
+            rec["execution_intent_id"] = got_i.get("intent_id")
+            rec["actual_lane"] = got_i.get("actual_lane")
+        except Exception as exc:                                # noqa: BLE001
+            rec["actual_lane"] = "EXECUTION_HOOK_FAILED:%s" % type(exc).__name__
     # ── THE PAPER SIBLING ──────────────────────────────────────────────
     delay = float(sim_cfg["decision_to_execution_delay_s"])
     order = {"idempotency_key": "%s:ENTRY" % did,

@@ -56,8 +56,10 @@ paced quote read, its positions walk, the resolver's reads) take the
 mirror's lane without a keyword on every shared callee. The priority
 claimants are the money paths only: the protected workers' live mirror
 tick (its process) and, in the API process (2026-10-03), the WS-triggered
-single-event evaluation (pinnapi_reactive.evaluate) and the small-live
-execution mirror's tick (execmirror.run); the shadow's, price_path's and
+single-event evaluation (pinnapi_reactive.evaluate), the small-live
+execution mirror's tick (execmirror.run) and the actual entry lane's one
+venue submission per execution intent (execution_intent.ActualLane._run);
+the shadow's, price_path's and
 the periodic collector's reads and pmus's default stay normal. THE GAP DOES NOT
 MOVE and the venue's rate is not raised: whoever claims next computes
 its wait from the LAST claim's record and sleeps it out holding the

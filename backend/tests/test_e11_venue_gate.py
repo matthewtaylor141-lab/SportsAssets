@@ -454,7 +454,13 @@ def test_e11_the_only_priority_claimant_is_the_mirrors_tick_by_ast_and_the_shado
     # protected workers' mirror does not share -- the WS-triggered single-event
     # evaluation and the small-live execution mirror's tick.
     assert entries == {("workers/mirror_live.py", "tick_once"), ("workers/mirror_live.py", "fast_tick_once"),
-                       ("pinnapi_reactive.py", "evaluate"), ("execmirror.py", "run")}
+                       ("pinnapi_reactive.py", "evaluate"), ("execmirror.py", "run"),
+                       # ONE DECISION -> PAPER + ACTUAL (owner, 2026-10-03): the
+                       # actual entry lane's single venue submission
+                       ("execution_intent.py", "_run")}
+    ei = (PKG / "execution_intent.py").read_text()
+    assert ei.index("with venue_pace.priority_claims():") < ei.index(
+        "resp = await asyncio.to_thread(self.mirror.venue().place, plan.params)")
     react = (PKG / "pinnapi_reactive.py").read_text()
     assert react.index("with venue_pace.priority_claims():") < react.index("return await cycle(conn, stream_seed=seed)")
     em = (PKG / "execmirror.py").read_text()

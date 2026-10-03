@@ -53,6 +53,7 @@ import time
 from typing import Any
 
 from .. import bettor_paper_ledger as L
+from .. import decision_hooks as DH
 from .. import bettor_paper_simulator as SIM
 from . import derek_policy as DP
 from . import paper_benchmark as PB
@@ -488,25 +489,31 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
     if verdict != DP.ENTER:
         return rec
     # ── ONE DECISION -> ONE EXECUTION INTENT: PAPER ONLY ───────────────
-    # Exploration is training: `execution_intent.create` records the intent
-    # with live_eligible = false (STRATEGY_NOT_LIVE_ELIGIBLE), so the actual
-    # lane never sees it; nothing is dispatched.
-    from .. import execution_intent as EI
-    intent = await EI.create(
-        conn, decision_id=did, valuation_id=cand["valuation_id"],
-        strategy=STRATEGY, policy_version=VERSION,
-        slug=cand["us_market_slug"], order_intent=cand.get("side"),
-        holding_side=side, group_id=PB.group_id_for(did),
-        order_type="MARKETABLE", time_in_force="IOC",
-        paper_target_qty=sized["qty"], limit_price=sized["limit"],
-        wire_price=sized["wire"],
-        book_obs_id=None if obs is None else obs["obs_id"],
-        book_observed_at=None if obs is None else float(obs["observed_at"]),
-        decided_at=at, evidence={"valuation_id": cand["valuation_id"],
-                                 "training": True},
-        timeline={"decision_complete": {"utc_s": at}})
-    rec["execution_intent_id"] = intent["intent_id"]
-    rec["actual_lane"] = "PAPER_ONLY"
+    # Exploration is training: the executing process's hook records the
+    # intent with live_eligible = false (STRATEGY_NOT_LIVE_ELIGIBLE); the
+    # actual lane never sees it and nothing is dispatched.
+    rec["execution_intent_id"], rec["actual_lane"] = None, "PAPER_ONLY"
+    hook = DH.DECISION_HOOK
+    if hook is not None:
+        try:
+            got_i = await hook(conn, {
+                "decision_id": did, "valuation_id": cand["valuation_id"],
+                "strategy": STRATEGY, "policy_version": VERSION,
+                "slug": cand["us_market_slug"], "order_intent": cand.get("side"),
+                "holding_side": side, "group_id": PB.group_id_for(did),
+                "order_type": "MARKETABLE", "time_in_force": "IOC",
+                "paper_target_qty": sized["qty"], "limit_price": sized["limit"],
+                "wire_price": sized["wire"],
+                "book_obs_id": None if obs is None else obs["obs_id"],
+                "book_observed_at": (None if obs is None
+                                     else float(obs["observed_at"])),
+                "decided_at": at,
+                "evidence": {"valuation_id": cand["valuation_id"], "training": True},
+                "timeline": {"decision_complete": {"utc_s": at}}}) or {}
+            rec["execution_intent_id"] = got_i.get("intent_id")
+            rec["actual_lane"] = got_i.get("actual_lane") or "PAPER_ONLY"
+        except Exception as exc:                                # noqa: BLE001
+            rec["actual_lane"] = "EXECUTION_HOOK_FAILED:%s" % type(exc).__name__
     # ── ONLY NOW, THE PAPER ORDER (limits re-checked under the lock) ──
     delay = float(sim_cfg["decision_to_execution_delay_s"])
     order = {"idempotency_key": "%s:ENTRY" % did,

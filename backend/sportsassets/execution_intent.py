@@ -50,6 +50,7 @@ import time
 from decimal import Decimal
 from typing import Any
 
+from . import decision_hooks
 from . import execmirror as M
 from . import execmirror_probe as EP
 from . import venue_pace
@@ -390,13 +391,32 @@ class ActualLane:
         return None, at
 
 
+async def on_decision(conn, payload: dict) -> dict:
+    """THE DECISION HOOK (decision_hooks.DECISION_HOOK): write the qualified
+    decision's ONE intent, then dispatch the actual lane without awaiting it.
+    Returns at once; the caller writes the paper order next."""
+    intent = await create(conn, **payload)
+    if not intent["live_eligible"]:
+        return {"intent_id": intent["intent_id"], "actual_lane": A_PAPER_ONLY}
+    if not intent["created"]:
+        return {"intent_id": intent["intent_id"], "actual_lane": "ALREADY_DISPATCHED"}
+    dispatched = (not conn.is_in_transaction()) and dispatch(intent)
+    if not dispatched:
+        await mark_no_lane(conn, intent["intent_id"])
+    return {"intent_id": intent["intent_id"],
+            "actual_lane": A_DISPATCHED if dispatched else A_NO_LANE}
+
+
 def start(get_pool, mirror) -> "ActualLane":
-    """Install the process's actual lane (one per process that decides)."""
+    """Install the process's actual lane and the decision hook (one per
+    process that decides and executes)."""
     global LANE
     LANE = ActualLane(get_pool, mirror)
+    decision_hooks.DECISION_HOOK = on_decision
     return LANE
 
 
 def stop() -> None:
     global LANE
     LANE = None
+    decision_hooks.DECISION_HOOK = None

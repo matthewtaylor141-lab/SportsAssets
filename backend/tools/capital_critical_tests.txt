@@ -522,6 +522,13 @@ tests/test_smalllive_not_mirrored_migration.py
 # multi-book floor; every other probability, identity and execution check
 # still refuses.
 tests/test_pinnapi_sole_authority.py
+# ONE DECISION -> ONE EXECUTION INTENT -> PAPER + ACTUAL (owner correction
+# 2026-10-03): the actual order is submitted while the paper simulator is
+# stalled; duplicate WS frames, stale decision/book, unapproved/exploration
+# strategies, below-minimum sizing, ambiguous submission; actual fill straight
+# to Xavier; Audrey links both siblings to one decision; migration 199.
+tests/test_execution_intent_fanout.py
+tests/test_execution_intents_migration.py
 # Agent role briefs: bounded read-only role_brief tool (distinct-contract
 # refusals, Xavier latest reviews, Audrey findings; truncation disclosed).
 tests/test_agent_role_briefs.py

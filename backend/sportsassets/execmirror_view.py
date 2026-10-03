@@ -124,22 +124,24 @@ async def view(conn, *, limit: int = 200) -> dict:
     snap = await conn.fetchrow(
         "SELECT * FROM execmirror_snapshots ORDER BY at DESC LIMIT 1")
     rows = await conn.fetch(
-        """SELECT m.*, p.state AS paper_state, p.filled_qty AS paper_filled_qty,
+        """SELECT m.*, p.order_id AS sibling_paper_order_id,
+                  p.state AS paper_state, p.filled_qty AS paper_filled_qty,
                   p.label AS paper_label,
                   (SELECT sum(f.qty * f.price) / nullif(sum(f.qty), 0)
-                     FROM paper_fills f WHERE f.order_id = m.paper_order_id) AS paper_avg_px,
+                     FROM paper_fills f WHERE f.order_id = p.order_id) AS paper_avg_px,
                   (SELECT sum(f.fee_usd) FROM paper_fills f
-                    WHERE f.order_id = m.paper_order_id) AS paper_fees
-             FROM execmirror_orders m LEFT JOIN paper_orders p
-               ON p.order_id = m.paper_order_id
-            ORDER BY m.created_at DESC LIMIT $1""", limit)
+                    WHERE f.order_id = p.order_id) AS paper_fees
+             FROM execmirror_orders m %s
+            ORDER BY m.created_at DESC LIMIT $1""" % PAPER_JOIN_SQL, limit)
     orders = []
     for r in rows:
         r = dict(r)
         det = _js(r.get("detail"))
         live_px = r.get("avg_px")
         orders.append({
-            "mirror_id": r["mirror_id"], "paper_order_id": r["paper_order_id"],
+            "mirror_id": r["mirror_id"],
+            "paper_order_id": r["paper_order_id"] or r.get("sibling_paper_order_id"),
+            "execution_intent_id": r.get("execution_intent_id"),
             "decided_at": r["paper_decided_at"], "role": r["role"],
             "strategy": strategy_kind(r.get("strategy"), r.get("paper_label")),
             "market": r["us_market_slug"], "group_id": r["group_id"],
@@ -179,10 +181,12 @@ async def view(conn, *, limit: int = 200) -> dict:
               for r in await conn.fetch(
                   "SELECT state, exclusion, count(*) AS n FROM execmirror_orders GROUP BY 1, 2")}
     eligible = await conn.fetchval(
-        """SELECT count(*) FROM execmirror_orders WHERE paper_order_id IS NOT NULL""") or 0
+        """SELECT count(*) FROM execmirror_orders
+            WHERE paper_order_id IS NOT NULL OR execution_intent_id IS NOT NULL""") or 0
     mirrored = await conn.fetchval(
-        """SELECT count(*) FROM execmirror_orders WHERE paper_order_id IS NOT NULL
-             AND state <> 'EXCLUDED'""") or 0
+        """SELECT count(*) FROM execmirror_orders
+            WHERE (paper_order_id IS NOT NULL OR execution_intent_id IS NOT NULL)
+              AND state <> 'EXCLUDED'""") or 0
 
     # ── P&L: per market, paper / scale beside live ──
     markets = []
@@ -304,8 +308,15 @@ PAPER_BUCKET_SQL = (
     " WHEN p.state IN ('FILLED','EXPIRED','CANCELED') AND p.filled_qty > 0 THEN 'filled'"
     " WHEN p.state IN ('FILLED','EXPIRED','CANCELED') THEN 'closed'"
     " ELSE 'open' END")
-PAPER_JOIN_SQL = ("LEFT JOIN paper_orders p ON p.order_id = "
-                  "coalesce(m.paper_order_id, m.detail->>'for_paper_order')")
+#: The PAPER side of an ACTUAL row: the paper order it follows (exits and
+#: protection), or -- ONE DECISION -> PAPER + ACTUAL -- the ENTRY paper order
+#: of the same decision as its execution intent (a sibling, never a parent).
+SIBLING_PAPER_SQL = (
+    "coalesce(m.paper_order_id, m.detail->>'for_paper_order',"
+    " (SELECT ps.order_id FROM execution_intents ei JOIN paper_orders ps"
+    "    ON ps.decision_id = ei.decision_id AND ps.role = 'ENTRY'"
+    "   WHERE ei.intent_id = m.execution_intent_id LIMIT 1))")
+PAPER_JOIN_SQL = "LEFT JOIN paper_orders p ON p.order_id = " + SIBLING_PAPER_SQL
 STATUS_DEFINITIONS = {
     "open": "not yet ended: planned, submitting, unresolved, resting or partly filled",
     "filled": "ended with at least one fill (fully or partly filled)",
@@ -390,8 +401,9 @@ def venues(ctl: dict, snap) -> list:
     c = control_summary(ctl)
     pm_status = ("UNAVAILABLE" if c.get("state") == "UNAVAILABLE" else
                  "MIRROR_" + c["state"])
-    pm_why = {"MIRROR_ENABLED": "the 1:%s mirror is enabled and copies qualifying paper orders"
-              % (int(ctl.get("scale") or 1000) if ctl else 1000),
+    pm_why = {"MIRROR_ENABLED": ("the actual lane is enabled: each qualified investment "
+                                 "decision is executed at 1:%s beside its paper sibling"
+                                 % (int(ctl.get("scale") or 1000) if ctl else 1000)),
               "MIRROR_DISABLED": "the mirror is disabled: no new live order is placed",
               "MIRROR_STOPPED": "emergency stop engaged: no new live order is placed",
               "UNAVAILABLE": "execution mirror control row missing"}[pm_status]
@@ -1188,6 +1200,120 @@ async def _counts(conn) -> dict:
             "status_definitions": STATUS_DEFINITIONS}
 
 
+# ═════════════════════════════════════════════════════════════════════
+# ONE DECISION -> PAPER + ACTUAL (owner correction 2026-10-03)
+# ═════════════════════════════════════════════════════════════════════
+
+def _tl_s(tl: dict, key: str):
+    """A timeline instant in epoch seconds (nanoseconds when recorded)."""
+    v = (tl or {}).get(key) or {}
+    if v.get("utc_ns") is not None:
+        return v["utc_ns"] / 1e9
+    return v.get("utc_s") if isinstance(v.get("utc_s"), (int, float)) else None
+
+
+def _ms(a, b):
+    return None if a is None or b is None else round((b - a) * 1000.0, 3)
+
+
+def _pct(xs, q):
+    xs = sorted(x for x in xs if x is not None)
+    if not xs:
+        return None
+    k = (len(xs) - 1) * q
+    lo, hi = int(k), min(int(k) + 1, len(xs) - 1)
+    return round(xs[lo] + (xs[hi] - xs[lo]) * (k - lo), 3)
+
+
+LATENCY_LEGS = (
+    ("provider_to_receipt_ms", "pinnapi_provider_ts", "pinnapi_receipt"),
+    ("receipt_to_decision_ms", "pinnapi_receipt", "decision_complete"),
+    ("decision_to_intent_ms", "decision_complete", "intent_created"),
+    ("decision_to_submit_ms", "decision_complete", "submit_start"),
+    ("submit_to_ack_ms", "submit_start", "ack"),
+    ("decision_to_first_fill_ms", "decision_complete", "first_fill_seen"),
+    ("book_check_ms", "book_check_start", "book_check_end"))
+
+
+async def decisions(conn, *, limit: int = 50) -> dict:
+    """EACH QUALIFIED DECISION WITH ITS TWO SIBLINGS: SIMULATED (paper) and
+    ACTUAL (Polymarket retail), from the ONE execution intent linking them,
+    with the decision -> venue latency chain and its p50/p95/p99. Unavailable
+    is null with the reason, never zero; paper and actual are never summed."""
+    if not await conn.fetchval("SELECT to_regclass('execution_intents') IS NOT NULL"):
+        return {"status": "UNAVAILABLE", "why": "migration 199 not applied", "rows": []}
+    ctl = dict(await conn.fetchrow("SELECT * FROM execmirror_control WHERE id = 1") or {})
+    rows = [dict(r) for r in await conn.fetch(
+        """SELECT i.*, d.p_pinnacle, d.verdict, d.policy_decision,
+                  p.order_id AS p_order_id, p.state AS p_state, p.qty AS p_qty,
+                  p.filled_qty AS p_filled, pf.avg_px AS pf_avg_px, pf.fees AS pf_fees,
+                  m.mirror_id, m.state AS m_state, m.venue_order_id, m.venue_state,
+                  m.live_qty AS m_live_qty, m.cum_qty AS m_cum, m.avg_px AS m_avg_px,
+                  m.fees_usd AS m_fees, m.submit_started_at, m.accepted_at,
+                  m.latency_ms AS m_latency_ms
+             FROM execution_intents i
+             LEFT JOIN paper_decisions d ON d.decision_id = i.decision_id
+             LEFT JOIN paper_orders p ON p.decision_id = i.decision_id AND p.role = 'ENTRY'
+             LEFT JOIN LATERAL (
+                 SELECT sum(f.qty * f.price) / nullif(sum(f.qty), 0) AS avg_px,
+                        sum(f.fee_usd) AS fees
+                   FROM paper_fills f WHERE f.order_id = p.order_id) pf ON true
+             LEFT JOIN execmirror_orders m ON m.execution_intent_id = i.intent_id
+            ORDER BY i.created_at DESC LIMIT $1""", max(1, min(int(limit), 200)))]
+    out, legs = [], {name: [] for name, _, _ in LATENCY_LEGS}
+    for r in rows:
+        tl = _js(r["timeline"]) or {}
+        lat = {name: _ms(_tl_s(tl, a), _tl_s(tl, b)) for name, a, b in LATENCY_LEGS}
+        for k, v in lat.items():
+            legs[k].append(v)
+        pdx = _js(r.get("policy_decision")) or {}
+        ev = _js(r["evidence"]) or {}
+        out.append({
+            "execution_intent_id": r["intent_id"],
+            "decision": {"decision_id": r["decision_id"], "strategy": r["strategy"],
+                         "policy_version": r["policy_version"],
+                         "decided_at": _iso(r["decided_at"]), "market": r["us_market_slug"],
+                         "intent": r["order_intent"],
+                         "probability": _f(r.get("p_pinnacle")),
+                         "probability_authority": (ev.get("probability_authority") or {}).get("basis"),
+                         "gross_edge_pp": _f(pdx.get("gross_edge_pp")),
+                         "net_expected_profit_usd": _f(pdx.get("net_expected_profit_usd"))},
+            "simulated": {"label": "SIMULATED",
+                          "target_qty": _f(r["paper_target_qty"]),
+                          "paper_order_id": r.get("p_order_id"),
+                          "state": r.get("p_state"),
+                          "filled_qty": _f(r.get("p_filled")),
+                          "avg_fill_price": _f(r.get("pf_avg_px")),
+                          "fees_usd": _f(r.get("pf_fees")),
+                          "why_unavailable": (None if r.get("p_order_id") else
+                                              "no paper order written (yet, or refused)")},
+            "actual": {"label": "ACTUAL", "venue": LIVE_VENUE,
+                       "account_fingerprint_prefix": (ctl.get("account_fingerprint") or "")[:8] or None,
+                       "live_eligible": r["live_eligible"],
+                       "state": r["actual_state"], "refusal": r["actual_refusal"],
+                       "target_raw_qty": _f(r["live_raw_qty"]),
+                       "rounded_qty": r["live_qty"],
+                       "rounding_delta": _f(r["rounding_delta"]),
+                       "submitted_at": _iso(r.get("submit_started_at")),
+                       "venue_order_id": r.get("venue_order_id"),
+                       "acknowledged_at": _iso(r.get("accepted_at")),
+                       "venue_state": r.get("venue_state"),
+                       "filled_qty": _f(r.get("m_cum")) if r.get("mirror_id") else None,
+                       "avg_fill_price": _f(r.get("m_avg_px")),
+                       "fees_usd": _f(r.get("m_fees")) if r.get("mirror_id") else None,
+                       "submit_latency_ms": r.get("m_latency_ms")},
+            "latency_ms": lat,
+            "pnl": {"simulated": None, "actual": None,
+                    "why": "per-group P&L is on the rows below; never summed"}})
+    stats = {name: {"n": len([x for x in xs if x is not None]),
+                    "p50": _pct(xs, .50), "p95": _pct(xs, .95), "p99": _pct(xs, .99)}
+             for name, xs in legs.items()}
+    return {"status": "OK", "basis": (
+        "ONE qualified decision -> ONE execution intent -> PAPER (simulated) and "
+        "ACTUAL (Polymarket retail) as siblings; the actual order never waits "
+        "for the paper order"), "latency_ms": stats, "rows": out}
+
+
 async def small_live(conn, *, view: str | None = None, status: str | None = None,
                      limit: int = 100) -> dict:
     """SMALL LIVE · PAPER vs ACTUAL (read-only).
@@ -1278,12 +1404,13 @@ async def small_live(conn, *, view: str | None = None, status: str | None = None
     counts = await _counts(conn)
     return {
         "title": "Small Live · Paper vs Actual",
-        "basis": ("PAPER is SIMULATED: paper orders and simulated fills from the "
-                  "paper experiment. ACTUAL is the live venue: orders placed on the "
-                  "separate execution-mirror account at paper quantity / %s (nearest "
-                  "whole contract), with fills read only from the venue's own order "
-                  "records. The two are never summed. A missing figure is null "
-                  "(shown as 'unavailable'), never zero." % int(_d(scale))),
+        "basis": ("ONE qualified decision -> PAPER and ACTUAL, as siblings. PAPER is "
+                  "SIMULATED: the paper order and its simulated fills. ACTUAL is the "
+                  "live venue: the separate retail account's order at the decision's "
+                  "target quantity / %s (nearest whole contract), submitted without "
+                  "waiting for the paper order, with fills read only from the venue's "
+                  "own order records. The two are never summed. A missing figure is "
+                  "null (shown as 'unavailable'), never zero." % int(_d(scale))),
         "filters": {"view": view, "status": status, "limit": limit,
                     "status_applies_to": ("paper" if view == "paper" else
                                           None if view == "kalshi" else "actual"),
@@ -1297,5 +1424,6 @@ async def small_live(conn, *, view: str | None = None, status: str | None = None
         "empty_state": no_live_order_reason(ctl, counts),
         "kalshi": ({"status": "NOT_CONNECTED", "why": "credentials not configured",
                     "rows": None} if view == "kalshi" else None),
+        "decisions": await decisions(conn),
         "rows": out_rows,
     }

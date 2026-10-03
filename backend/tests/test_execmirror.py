@@ -309,8 +309,10 @@ async def _paper_order(conn, acct, *, role="ENTRY", direction="BUY",
                        tif="IOC", otype="MARKETABLE", group=None, state="PENDING_SIMULATION",
                        decided_offset_s=0.0, strategy="PINNACLE_COMPLETED_GAME_PAPER",
                        policy_version="PINNACLE_COMPLETED_GAME_PAPER_V2",
-                       book_offset_s=None):
+                       book_offset_s=None, decision_id=None):
     oid = "paper_%s" % uuid.uuid4().hex[:12]
+    if role == "ENTRY":
+        decision_id = decision_id or "dec_" + oid
     group = group or "paper_group_%s" % uuid.uuid4().hex[:8]
     now = dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=decided_offset_s)
     cols = dict(order_id=oid, idempotency_key=oid, account_id=acct["account_id"],
@@ -320,6 +322,8 @@ async def _paper_order(conn, acct, *, role="ENTRY", direction="BUY",
                 time_in_force=tif, allow_partial=True, qty=qty, limit_price=wire,
                 wire_price=wire, state=state, decided_at=now, eligible_at=now,
                 expires_at=now + dt.timedelta(minutes=30), simulator_version="TEST")
+    if decision_id:
+        cols["decision_id"] = decision_id
     if strategy:
         cols["strategy"] = strategy
     if policy_version:
@@ -332,7 +336,7 @@ async def _paper_order(conn, acct, *, role="ENTRY", direction="BUY",
         # the decision's ONE execution intent (what decide_one writes)
         b_at = now.timestamp() + (0.0 if book_offset_s is None else book_offset_s)
         it = await EI.create(
-            conn, decision_id="dec_" + oid, valuation_id=None,
+            conn, decision_id=decision_id, valuation_id=None,
             strategy=strategy or "UNKNOWN", policy_version=policy_version,
             slug=cols["us_market_slug"], order_intent=intent, holding_side="LONG",
             group_id=group, order_type=otype, time_in_force=tif,
@@ -495,11 +499,21 @@ async def test_restart_mid_submission_recovers_without_a_second_order(monkeypatc
     try:
         acct, venue, mirror = await _setup(conn, monkeypatch)
         po = await _paper_order(conn, acct, tif="GTD", otype="RESTING")
-        await mirror.plan_new(conn, await M.control(conn))
-        # the process died after claiming and sending, before recording the id
+        await mirror.snapshot(conn, await M.control(conn))
+        # the lane claimed and sent; the process died before recording the id
+        class _Died(Exception):
+            pass
+
+        def send_then_die(params):
+            venue.place(params)
+            raise _Died("process died")
+        mirror._venue = type("V", (), {"place": staticmethod(send_then_die)})()
+        try:
+            await mirror.lane._run(conn, po["intent_id"])
+        finally:
+            mirror._venue = None
         r = await _row(conn, po["order_id"])
-        params = json.loads(r["detail"])["params"]
-        venue.place(params)
+        assert r["state"] == "UNKNOWN" and r["venue_order_id"] is None
         await conn.execute("UPDATE execmirror_orders SET state='SUBMITTING',"
                            " submit_started_at = now() - interval '2 minutes'"
                            " WHERE mirror_id = $1", r["mirror_id"])
@@ -508,9 +522,15 @@ async def test_restart_mid_submission_recovers_without_a_second_order(monkeypatc
         r = await _row(conn, po["order_id"])
         assert r["state"] == "OPEN" and r["venue_order_id"] == "v1"
         assert len(venue.placed) == 1
+        # re-dispatching the same intent never creates a second submission
+        await conn.execute("UPDATE execution_intents SET actual_state = 'DISPATCHED'"
+                           " WHERE intent_id = $1", po["intent_id"])
+        again = await mirror.lane._run(conn, po["intent_id"])
+        assert again["state"] == "DUPLICATE" and len(venue.placed) == 1
         # nothing resting after the grace window: rejected, not resent
         po2 = await _paper_order(conn, acct)
-        await fresh.plan_new(conn, await M.control(conn))
+        venue.behaviour = [{"raise": 504}]              # lost, and nothing created
+        await mirror.lane._run(conn, po2["intent_id"])
         r2 = await _row(conn, po2["order_id"])
         await conn.execute("UPDATE execmirror_orders SET state='SUBMITTING',"
                            " submit_started_at = now() - interval '5 minutes'"
@@ -519,7 +539,7 @@ async def test_restart_mid_submission_recovers_without_a_second_order(monkeypatc
         r2 = await _row(conn, po2["order_id"])
         assert r2["state"] == "REJECTED"
         assert json.loads(r2["error"])["code"] == "NOT_FOUND_AFTER_RECONCILE"
-        assert len(venue.placed) == 1
+        assert len(venue.placed) == 2                   # the lost one, never resent
     finally:
         await conn.close()
 
@@ -826,26 +846,28 @@ async def test_an_intent_older_than_the_freshness_rule_is_excluded_not_sent(monk
         await mirror.tick(conn)
         assert venue.placed == []
         r = await _row(conn, po["order_id"])
-        assert r["state"] == "EXCLUDED" and r["exclusion"] == M.INTENT_STALE
+        assert r["state"] == "EXCLUDED" and r["exclusion"] == EI.R_DECISION_STALE
         d = json.loads(r["detail"]) if isinstance(r["detail"], str) else r["detail"]
-        rv = d["revalidation"]
-        assert rv["refused"] == M.INTENT_STALE and rv["intent_age_s"] > 30.0
-        assert rv["max_intent_age_s"] == 30.0
+        rv = d["actual_refusal_evidence"]
+        assert rv["refusal"] == EI.R_DECISION_STALE and rv["decision_age_s"] > 30.0
+        assert rv["limit_s"] == EI.MAX_DECISION_AGE_S
     finally:
         await conn.close()
 
 
 @pg
 @pytest.mark.asyncio
-async def test_a_paper_order_that_ended_before_submission_is_excluded(monkeypatch):
+async def test_a_paper_sibling_that_ended_never_stops_the_actual_sibling(monkeypatch):
+    """ONE DECISION -> PAPER + ACTUAL: a paper failure is not an actual
+    failure while the decision and the actual-lane gates hold."""
     conn = await _conn()
     try:
         acct, venue, mirror = await _setup(conn, monkeypatch)
         po = await _paper_order(conn, acct, qty=2702, state="CANCELED")
         await mirror.tick(conn)
-        assert venue.placed == []
+        assert len(venue.placed) == 1 and venue.placed[0]["quantity"] == 3
         r = await _row(conn, po["order_id"])
-        assert r["state"] == "EXCLUDED" and r["exclusion"] == M.PAPER_ORDER_ENDED
+        assert r["execution_intent_id"] == po["intent_id"] and r["exclusion"] is None
     finally:
         await conn.close()
 
@@ -939,10 +961,9 @@ async def test_audrey_matches_a_clean_chain_and_names_each_discrepancy(monkeypat
     try:
         acct, venue, mirror = await _setup(conn, monkeypatch)
         # a clean chain: decision -> paper order -> paper fill -> live order -> live fill
-        po = await _paper_order(conn, acct, qty=2702)
-        did = await _decision(conn, acct, po["slug"])
-        await conn.execute("UPDATE paper_orders SET decision_id = $2 WHERE order_id = $1",
-                           po["order_id"], did)
+        grp = "paper_group_%s" % uuid.uuid4().hex[:8]
+        did = await _decision(conn, acct, "mlb-test-%s" % grp[-4:])
+        po = await _paper_order(conn, acct, qty=2702, group=grp, decision_id=did)
         await _paper_fill(conn, acct, po, qty=2702)
         venue.behaviour = [{"fill": 3}]
         await mirror.tick(conn)
@@ -963,7 +984,7 @@ async def test_audrey_matches_a_clean_chain_and_names_each_discrepancy(monkeypat
                                  orphan["group_id"])
         codes = [d["code"] for d in (json.loads(r2["discrepancies"])
                                      if isinstance(r2["discrepancies"], str) else r2["discrepancies"])]
-        assert r2["status"] == "DISCREPANCY" and "LIVE_ORDER_WITHOUT_PAPER_DECISION" in codes
+        assert r2["status"] == "DISCREPANCY" and "ACTUAL_ORDER_WITHOUT_DECISION" in codes
         # recorded fills that disagree with the venue's cumulative quantity are named
         await conn.execute("DELETE FROM execmirror_fills WHERE group_id = $1", po["group_id"])
         mirror._last_management = 0.0
@@ -1002,11 +1023,19 @@ async def test_audrey_records_an_excluded_only_group_as_not_mirrored_never_match
             "SELECT count(*) FROM execmirror_events WHERE kind = 'AUDREY_RECONCILIATION_MATCHED'"
             " AND detail->>'group_id' = $1", po["group_id"])
         assert ev == 0
-        # a live fill against the excluded row: never NOT_MIRRORED, never MATCHED
+        # an actual order and fill appearing in this paper-only group (nothing
+        # was allowed to send one): never NOT_MIRRORED, never MATCHED
+        await conn.execute(
+            """INSERT INTO execmirror_orders (mirror_id, group_id, role, strategy,
+                   us_market_slug, intent, order_type, tif, wire_price, live_qty,
+                   state, venue_order_id, cum_qty)
+               VALUES ($1,$2,'ENTRY','PINNACLE_EXPLORATION_PAPER',$3,
+                       'ORDER_INTENT_BUY_LONG','MARKETABLE','IOC',0.55,0,'FILLED','leak',1)""",
+            "leak-" + po["order_id"], po["group_id"], po["slug"])
         await conn.execute(
             """INSERT INTO execmirror_fills (fill_key, mirror_id, venue_order_id, group_id,
                    us_market_slug, intent, qty, price) VALUES ($1,$2,'leak',$3,$4,$5,1,0.55)""",
-            "leak-%s" % po["order_id"], r["mirror_id"], po["group_id"], po["slug"],
+            "leak-%s" % po["order_id"], "leak-" + po["order_id"], po["group_id"], po["slug"],
             "ORDER_INTENT_BUY_LONG")
         mirror._last_management = 0.0
         await mirror.tick(conn)

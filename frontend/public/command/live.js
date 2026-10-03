@@ -456,8 +456,68 @@
       (reasons ? '<ul class="sl-reasons">' + reasons + '</ul>' : '') + '</div>';
   }
 
+  /* ── ONE DECISION -> PAPER + ACTUAL (siblings, never parent and child) ── */
+  var LEGS = [['receipt_to_decision_ms', 'PinnAPI receipt → decision'],
+              ['decision_to_submit_ms', 'Decision → Polymarket submit'],
+              ['submit_to_ack_ms', 'Submit → venue ack'],
+              ['decision_to_first_fill_ms', 'Decision → first actual fill']];
+  function latencyStrip(st) {
+    st = st || {};
+    return '<div class="sl-lat">' + LEGS.map(function (l) {
+      var s = st[l[0]] || {};
+      return '<div class="sl-latcell"><span class="k">' + esc(l[1]) + '</span>' +
+        '<span class="v">p50 ' + ms(s.p50) + ' · p95 ' + ms(s.p95) + ' · p99 ' + ms(s.p99) +
+        '</span><span class="sl-why">n = ' + esc(String(s.n || 0)) + '</span></div>';
+    }).join('') + '</div>';
+  }
+  function actualTone(s) {
+    return s === 'SUBMITTED' ? 'good' : s === 'REFUSED' || s === 'REJECTED' ? 'bad'
+      : s === 'PAPER_ONLY' ? 'grey' : 'warn';
+  }
+  function decisionCard(r) {
+    var d = r.decision || {}, p = r.simulated || {}, a = r.actual || {}, l = r.latency_ms || {};
+    return '<article class="sl-dec">' +
+      '<header class="sl-dechead"><b>DECISION</b> <span class="mono">' + txt(d.decision_id) +
+      '</span> ' + pill(d.policy_version || 'unknown policy', 'blue') +
+      '<div class="sl-decfacts">' + fact('Market', txt(d.market)) +
+      fact('PinnAPI probability', pct(d.probability)) +
+      fact('Authority', txt(d.probability_authority)) + fact('Gross edge', pp(d.gross_edge_pp)) +
+      fact('Net EV after fees', usd(d.net_expected_profit_usd)) +
+      fact('Receipt → decision', ms(l.receipt_to_decision_ms)) +
+      fact('Decision → Polymarket submit', ms(l.decision_to_submit_ms)) + '</div></header>' +
+      '<div class="sl-decbranches">' +
+      '<div class="sl-branch"><h4>' + pill('SIMULATED', 'grey') + ' Paper</h4>' +
+      fact('Paper quantity', qty(p.target_qty)) + fact('Paper order', txt(p.paper_order_id)) +
+      fact('State', txt(p.state)) + fact('Filled', qty(p.filled_qty)) +
+      fact('Avg price', px(p.avg_fill_price)) + fact('Fees', usd(p.fees_usd)) +
+      fact('P&L', NA + why((r.pnl || {}).why)) + why(p.why_unavailable) + '</div>' +
+      '<div class="sl-branch"><h4>' + pill('ACTUAL', 'good') + ' Polymarket</h4>' +
+      fact('1:1,000 target', qty(a.target_raw_qty)) + fact('Rounded quantity', txt(a.rounded_qty)) +
+      fact('Lane', pill(a.state || 'unknown', actualTone(a.state)) +
+           (a.refusal ? ' ' + why(a.refusal) : '')) +
+      fact('Submitted', when(a.submitted_at)) + fact('Venue order ID', txt(a.venue_order_id)) +
+      fact('Acknowledged', when(a.acknowledged_at)) + fact('Filled', qty(a.filled_qty)) +
+      fact('Avg price', px(a.avg_fill_price)) + fact('Fees', usd(a.fees_usd)) +
+      fact('Account', txt(a.account_fingerprint_prefix)) + '</div>' +
+      '</div></article>';
+  }
+  function decisionsBlock(ds) {
+    if (!ds || ds.status !== 'OK') {
+      return '<div class="verdict"><b>One decision → paper + actual</b>' +
+        txt(ds && ds.why) + '</div>';
+    }
+    var rows = ds.rows || [];
+    return '<h2 class="sl-h2">One decision → paper + actual</h2>' +
+      '<p class="sl-why">' + esc(ds.basis || '') + '</p>' + latencyStrip(ds.latency_ms) +
+      (rows.length ? rows.map(decisionCard).join('')
+        : '<div class="verdict"><b>No qualified investment decision yet.</b>' +
+          ' Every decision appears here with its simulated and actual branches.</div>');
+  }
+
   function render(d) {
     state.data = d;
+    var decEl = document.getElementById('livedecisions');
+    if (decEl) { decEl.innerHTML = decisionsBlock(d.decisions); }
     var stateEl = document.getElementById('livestate');
     var rowsEl = document.getElementById('liverows');
     document.getElementById('livestrip').innerHTML = d.status === 'UNAVAILABLE' && !d.control
