@@ -520,6 +520,20 @@ READERS = {
     # probability, and has no execution or policy effect.
     "agents/collaboration_loop.py": (
         "EVIDENCE_REFERENCE_EXISTENCE_BY_ID_NO_SELECTION", 2),
+    # (209) COVERAGE INTEGRITY: counts ENTRY_DECISION valuations per league
+    # per day (record_purpose filtered) and joins decisions/orders/fills/
+    # intents to their valuation BY ID only to attribute the provider event's
+    # league. Reporting and Audrey findings; selects nothing, no order effect.
+    "agents/coverage_integrity.py": (
+        "REPORTING_COUNTS_FILTERS_ENTRY_DECISION_AND_BY_ID_ATTRIBUTION", 11),
+    # (209) THE QUALITY SCORECARD: Brier of settled ENTRY_DECISION rows
+    # (record_purpose filtered) for display and the improvement driver's
+    # calibration-drift deficit. No selection, no order effect.
+    "agents/quality_scorecard.py": (
+        "REPORTING_CALIBRATION_FILTERS_ENTRY_DECISION", 2),
+    # (209) THE IMPROVEMENT DRIVER: checks the table exists before reading
+    # the scorecard's filtered Brier; registers paper experiments only.
+    "agents/improvement_driver.py": ("EXISTENCE_CHECK_ONLY", 1),
 }
 
 

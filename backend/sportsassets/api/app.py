@@ -531,6 +531,13 @@ try:
     app.include_router(_command_paper_router)
 except ImportError:
     log.warning("paper: api.command_paper not loaded", exc_info=True)
+# ── COVERAGE, POSTMORTEMS, QUALITY (migration 209): read-only, COMMAND auth.
+# /api/command/coverage, /api/command/postmortems, /api/command/quality.
+try:
+    from .command_quality import router as _command_quality_router
+    app.include_router(_command_quality_router)
+except ImportError:
+    log.warning("quality: api.command_quality not loaded", exc_info=True)
 # ── INSTITUTIONAL REPORTS ON THE PAPER ACCOUNT: /api/command/paper/reports/*
 # Read-only, COMMAND auth (same dependency as the paper experiment read).
 try:

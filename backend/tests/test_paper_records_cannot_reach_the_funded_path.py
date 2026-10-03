@@ -114,7 +114,15 @@ def test_no_funded_module_imports_the_paper_modules():
                # read-only paper operations/brief readers; the module writes
                # only its own schedule row and agent_slack_delivery, and
                # nothing in Slack can place, change or approve an order
-               "slack_updates.py"}
+               "slack_updates.py",
+               # (209) Audrey's coverage integrity, postmortems and the
+               # improvement driver: they read the paper ledger, write their
+               # own migration-209 tables, Audrey findings and the
+               # collaboration loop's PAPER_ONLY stages; none is a funded
+               # module and none has an order, limit or policy effect
+               "agents/coverage_integrity.py",
+               "agents/postmortems.py",
+               "agents/improvement_driver.py"}
     assert set(offenders) <= allowed, sorted(set(offenders) - allowed)
     # ...and neither capability module reaches a funded or execution module,
     # directly or through the rest of the capability package

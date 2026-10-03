@@ -588,3 +588,13 @@ tests/test_workers_hold_no_venue_write.py
 # The authorized workers release actions: branch set (autoDeploy off) and
 # exact-SHA deploy that refuses while autoDeploy is on.
 tests/test_render_ops_workers_release.py
+# Workstream Q (migration 209): coverage integrity with the NCAAF
+# regression, automatic postmortems, the quality scorecard and its forward
+# sample rule, the improvement driver's stop at a PAPER_ONLY experiment, the
+# read routes and the institutional page.
+tests/test_coverage_integrity_funnel.py
+tests/test_position_postmortems.py
+tests/test_quality_scorecard.py
+tests/test_improvement_driver.py
+tests/test_command_quality_routes.py
+tests/test_institutional_page.py
