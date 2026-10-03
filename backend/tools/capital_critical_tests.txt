@@ -541,3 +541,11 @@ tests/test_agent_intelligence_reports.py
 # FRESH / STALE_ENTRY_TIME / UNAVAILABLE evidence; stale EV never shown as
 # current; no sale or liquidation on stale or missing probability.
 tests/test_xavier_review_probability_freshness.py
+# Xavier small-live management policy artifact (migration 201): hashed,
+# READY_FOR_OWNER_APPROVAL, never APPROVED without an owner approval record,
+# never activated; the agents index says CODE_DEFAULT is not approved.
+tests/test_xavier_small_live_policy_artifact.py
+# The agents' collaboration loop (migration 203): no self-challenge or
+# self-evaluation, no skipped stage, no ungrounded advance, paper-only
+# pre-registered experiments, and no policy activation or limit change.
+tests/test_agent_collaboration_loop.py
