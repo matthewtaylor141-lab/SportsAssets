@@ -436,10 +436,28 @@ async def paper_open_qty(conn, group_id) -> Decimal:
     return Decimal(str(r["b"])) - Decimal(str(r["s"]))
 
 
+#: THE ACTUAL POSITION'S PROBABILITY EVIDENCE WHEN NONE COULD BE READ. The
+#: reader (paper_xavier.live_position_evidence) is handed in by the process
+#: that starts the lane -- this module imports no paper module -- and a
+#: missing reader or a failed read records PROBABILITY_UNAVAILABLE: null,
+#: never 0, and never a reason to sell.
+UNAVAILABLE_PROBABILITY = {
+    "evidence_state": "PROBABILITY_UNAVAILABLE", "probability": None,
+    "probability_source": None, "probability_source_at": None,
+    "probability_received_at": None, "probability_age_s": None,
+    "probability_limit_s": MAX_INTENT_AGE_S,
+    "probability_limitation": (
+        "no probability could be read for this actual position; none is "
+        "invented and its absence alone never liquidates the position; the "
+        "action follows the paper decision"),
+    "current_hold_value_usd": None, "entry_time_hold_value_usd": None}
+
+
 class Mirror:
     def __init__(self, venue_factory=Venue, *, now=time.time,
-                 paper_account: str = PAPER_ACCOUNT):
+                 paper_account: str = PAPER_ACCOUNT, probability_reader=None):
         self.paper_account = paper_account
+        self._probability_reader = probability_reader
         self._venue_factory = venue_factory
         self._venue = None
         self._now = now
@@ -954,6 +972,18 @@ class Mirror:
             n += 1
         return n
 
+    async def _live_probability(self, conn, h: dict, held) -> dict:
+        """The evidence state of the actual position's probability. Never
+        raises; never sells."""
+        if self._probability_reader is None:
+            return dict(UNAVAILABLE_PROBABILITY,
+                        why="NO_PROBABILITY_READER_IN_THIS_PROCESS")
+        try:
+            return await self._probability_reader(conn, h, at=self._now(), qty=held)
+        except Exception as exc:                              # noqa: BLE001
+            return dict(UNAVAILABLE_PROBABILITY, why="PROBABILITY_READ_FAILED",
+                        error=type(exc).__name__)
+
     async def xavier_live_reviews(self, conn) -> int:
         """Xavier's review of each OPEN actual position with a FRESH venue
         quote. The actual position is managed by the same management
@@ -994,6 +1024,12 @@ class Mirror:
                     collateral_per_contract(str(h.get("opened_intent") or ""),
                                             h["avg_entry_px"]) * Decimal(inv["held"]))
             unreal = None if (mark is None or cost is None) else mark - cost - Decimal(str(h["fees_usd"]))
+            # THE PROBABILITY'S FRESHNESS FOR THE ACTUAL POSITION: a fresh
+            # PinnAPI probability is attempted for the held contract on the
+            # same reader as the paper review; its evidence state is
+            # recorded, never used to sell (the action follows the paper
+            # decision; an unavailable probability liquidates nothing).
+            prob = await self._live_probability(conn, h, inv["held"])
             pr = await conn.fetchrow(
                 """SELECT review_id, recommendation FROM paper_xavier_reviews
                     WHERE group_id = $1 ORDER BY reviewed_at DESC LIMIT 1""", h["group_id"])
@@ -1020,7 +1056,9 @@ class Mirror:
                 None if pr is None else pr["recommendation"], action,
                 _j({"paper_open_qty": str(paper_open), "position": "ACTUAL",
                     "venue": VENUE, "mark_basis": "exit side of the fresh venue BBO",
-                    "resting_protection_is_not_filled_protection": True}))
+                    "resting_protection_is_not_filled_protection": True,
+                    "evidence_state": prob["evidence_state"],
+                    "probability_evidence": prob}))
             n += 1
         return n
 
@@ -1155,10 +1193,11 @@ class Mirror:
         return out
 
 
-async def run(get_pool) -> None:
+async def run(get_pool, *, probability_reader=None) -> None:
     """The API's background lane. One runner across processes (advisory
-    lock); disabled until the control row is enabled."""
-    mirror = Mirror()
+    lock); disabled until the control row is enabled. `probability_reader`
+    is the actual position's probability-evidence reader (record only)."""
+    mirror = Mirror(probability_reader=probability_reader)
     while True:
         try:
             pool = await get_pool()

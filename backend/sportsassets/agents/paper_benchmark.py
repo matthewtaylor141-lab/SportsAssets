@@ -1761,12 +1761,14 @@ async def xavier_measure(conn, ctx: dict, *, pos: dict,
     contract = None
     if d is not None and d["valuation_id"] is not None:
         contract = await conn.fetchrow(
-            "SELECT payout_event, payout_is_complement FROM "
-            " external_valuations WHERE id=$1", int(d["valuation_id"]))
+            "SELECT payout_event, payout_is_complement, observed_at, "
+            " received_at FROM external_valuations WHERE id=$1",
+            int(d["valuation_id"]))
     stale_out = None
     if contract is not None:
         v = await conn.fetchrow(
-            "SELECT id, probability, observed_at FROM external_valuations "
+            "SELECT id, probability, observed_at, received_at "
+            "  FROM external_valuations "
             " WHERE us_market_slug=$1 AND buy_intent=$2 "
             "   AND probability IS NOT NULL AND payout_event=$3 "
             "   AND payout_is_complement=$4 "
@@ -1787,15 +1789,27 @@ async def xavier_measure(conn, ctx: dict, *, pos: dict,
                                    else "PINNACLE_ONLY_LATEST"),
                            p_pinnacle=float(v["probability"]),
                            pinnacle_at=obs, pinnacle_age_s=age,
+                           pinnacle_received_at=(
+                               None if v.get("received_at") is None
+                               else L._epoch(v["received_at"])),
                            pinnacle_limit_s=max_age, valuation_id=v["id"],
                            stale=not fresh)
             if fresh:
                 return reading
             stale_out = reading
     if stale_out is None and d is not None and d["p_pinnacle"] is not None:
+        # the entry reading's OWN stamps (its valuation row), when known:
+        # the age of the probability, never the age of the decision
+        e_obs, e_rcv = ((None, None) if contract is None else (
+            contract.get("observed_at"), contract.get("received_at")))
         stale_out = dict(base, p=float(d["p_pinnacle"]),
                          source="ENTRY_TIME_MEASURE",
                          at=L._epoch(d["decided_at"]), stale=True,
+                         entry_pinnacle_at=(None if e_obs is None
+                                            else L._epoch(e_obs)),
+                         entry_pinnacle_received_at=(
+                             None if e_rcv is None else L._epoch(e_rcv)),
+                         pinnacle_limit_s=max_age,
                          why=("no Pinnacle reading for this contract within "
                               "the lookback; the entry decision's p_pinnacle "
                               "is used and labelled stale"))
@@ -1827,6 +1841,9 @@ async def xavier_measure(conn, ctx: dict, *, pos: dict,
                 p_pinnacle=float(cur["p"]),
                 pinnacle_at=prov["source_change_ms"] / 1000.0,
                 pinnacle_age_s=prov.get("quote_age_s"),
+                pinnacle_received_at=(
+                    None if prov.get("received_ms") is None
+                    else prov["received_ms"] / 1000.0),
                 pinnacle_limit_s=max_age, stale=False,
                 feed={"epoch": prov.get("epoch"),
                       "quote_age_s": prov.get("quote_age_s"),

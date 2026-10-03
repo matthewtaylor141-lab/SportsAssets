@@ -523,3 +523,7 @@ tests/test_agent_role_briefs.py
 # connector-health reads; cross-venue comparator refuses without a verified
 # snapshot; tools stay allowlisted and read-only.
 tests/test_agent_intelligence_reports.py
+# Xavier probability freshness: every paper and actual-position review records
+# FRESH / STALE_ENTRY_TIME / UNAVAILABLE evidence; stale EV never shown as
+# current; no sale or liquidation on stale or missing probability.
+tests/test_xavier_review_probability_freshness.py

@@ -442,7 +442,10 @@ async def lifespan(_: FastAPI):
     # 1:1,000 execution mirror: its own durable control (off by default) and
     # its own credential; idle until the control row is enabled.
     from .. import execmirror as _EXM
-    execmirror_task = asyncio.create_task(_EXM.run(_cap_pool))
+    # the actual positions' probability freshness (record only, never sells)
+    from ..agents import paper_xavier as _PX
+    execmirror_task = asyncio.create_task(_EXM.run(
+        _cap_pool, probability_reader=_PX.live_position_evidence))
     # Evidence for the post-boot health-check misses: records every thread's
     # stack when the loop is blocked >= 2 s; changes no behaviour.
     from .. import loop_watchdog as _WATCHDOG
