@@ -665,7 +665,7 @@ tests/test_intel_sizing_allocator.py
 # stale-only world stays STALE / UNAVAILABLE with no EXIT / REDUCE /
 # REALLOCATE.
 tests/test_xavier_fresh_probability.py
-# Karen part two (claude/cand22-karen2, migration 207a): her persona in the
+# Karen part two (claude/cand22-karen2, migration 212, first numbered 207a): her persona in the
 # versioned persona chat (grounded only in her records), the automatic
 # rule-based peer response with an independent evaluator (Audrey; Xavier
 # for Audrey; never Karen or the target, also in the database), the Chief

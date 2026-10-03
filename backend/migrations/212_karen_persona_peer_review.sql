@@ -1,10 +1,12 @@
 -- ══════════════════════════════════════════════════════════════════════
--- 207a · KAREN, PART TWO: HER PERSONA, THE CHALLENGE CATEGORY, THE CHIEF
+-- 212 · KAREN, PART TWO: HER PERSONA, THE CHALLENGE CATEGORY, THE CHIEF
 --        ALLOCATOR AS A TARGET, AND THE INDEPENDENT EVALUATION'S EVIDENCE
 -- ══════════════════════════════════════════════════════════════════════
 --
--- Numbered 207a so it stays inside Karen's reserved migration number and
--- sorts directly after 207 (it depends on 207's tables) and before 208+.
+-- Numbered 212 (first committed as 207a; 211 is reserved for NCAAF). It
+-- depends only on 207's tables. A database that already applied the file
+-- under its old name re-applies it here harmlessly: every statement is
+-- idempotent, and the old-named guard trigger and function are replaced.
 --
 -- 1. PERSONA. agent_persona_versions and agent_chat_conversations (migration
 --    180) admit KAREN, so her persona is versioned and her conversations are
@@ -91,7 +93,11 @@ ALTER TABLE karen_challenges
 
 -- The category and the evaluation's evidence are fixed: the category at
 -- creation, the evidence with the outcome. (207's own guard is unchanged.)
-CREATE OR REPLACE FUNCTION karen_challenges_207a_guard() RETURNS trigger
+-- the guard first shipped under its 207a name: replaced, never doubled
+DROP TRIGGER IF EXISTS karen_challenges_207a_guard_trg ON karen_challenges;
+DROP FUNCTION IF EXISTS karen_challenges_207a_guard();
+
+CREATE OR REPLACE FUNCTION karen_challenges_212_guard() RETURNS trigger
 AS $$
 BEGIN
     IF TG_OP = 'INSERT' THEN
@@ -115,7 +121,7 @@ BEGIN
     RETURN NEW;
 END $$ LANGUAGE plpgsql;
 
-DROP TRIGGER IF EXISTS karen_challenges_207a_guard_trg ON karen_challenges;
-CREATE TRIGGER karen_challenges_207a_guard_trg
+DROP TRIGGER IF EXISTS karen_challenges_212_guard_trg ON karen_challenges;
+CREATE TRIGGER karen_challenges_212_guard_trg
     BEFORE INSERT OR UPDATE ON karen_challenges
-    FOR EACH ROW EXECUTE FUNCTION karen_challenges_207a_guard();
+    FOR EACH ROW EXECUTE FUNCTION karen_challenges_212_guard();

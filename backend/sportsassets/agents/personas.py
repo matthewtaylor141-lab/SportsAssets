@@ -277,7 +277,7 @@ DEFAULT_PROFILES: dict[str, dict[str, Any]] = {
     },
 }
 
-# KAREN (red team, migrations 207 / 207a). Her answers are grounded ONLY in
+# KAREN (red team, migrations 207 / 212). Her answers are grounded ONLY in
 # her own challenge records and the evidence they cite (persona_facts gives
 # her nothing else). The satire is in her manner and her look; politics has
 # no say in any finding.

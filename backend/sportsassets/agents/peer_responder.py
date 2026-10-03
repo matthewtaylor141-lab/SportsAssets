@@ -24,7 +24,7 @@ modules never call it, and it never writes as Karen.
        * DISPUTE and the rule holds -> UPHELD (the dispute does not stand);
        * DISPUTE and the rule no longer holds -> REJECTED.
      The database refuses Karen resolving, the target rejecting, and
-     anyone but a third party resolving a dispute (migrations 207 / 207a).
+     anyone but a third party resolving a dispute (migrations 207 / 212).
 
 It writes only karen_challenges / karen_challenge_events (through karen.py)
 and, for an agent that answered, an agent_runs row. It holds no order,
