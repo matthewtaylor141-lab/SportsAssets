@@ -457,10 +457,11 @@
   }
 
   /* ── ONE DECISION -> PAPER + ACTUAL (siblings, never parent and child) ── */
-  var LEGS = [['receipt_to_decision_ms', 'PinnAPI receipt → decision'],
-              ['decision_to_submit_ms', 'Decision → Polymarket submit'],
+  var LEGS = [['receipt_to_decision_ms', 'PinnAPI receipt → Derek decision'],
+              ['decision_to_intent_ms', 'Decision → intent'],
+              ['intent_to_submit_ms', 'Intent → actual submit'],
               ['submit_to_ack_ms', 'Submit → venue ack'],
-              ['decision_to_first_fill_ms', 'Decision → first actual fill']];
+              ['ack_to_first_fill_ms', 'Ack → first actual fill']];
   function latencyStrip(st) {
     st = st || {};
     return '<div class="sl-lat">' + LEGS.map(function (l) {
@@ -474,32 +475,91 @@
     return s === 'SUBMITTED' ? 'good' : s === 'REFUSED' || s === 'REJECTED' ? 'bad'
       : s === 'PAPER_ONLY' ? 'grey' : 'warn';
   }
+  function admTone(s) {
+    return s === 'LIVE_ADMISSIBLE' ? 'good' : s === 'NOT_ADMISSIBLE' ? 'bad' : 'grey';
+  }
+  function admission(x) {
+    x = x || {};
+    var extra = has(x.verdict) ? ' ' + why('verdict ' + x.verdict + (has(x.rule) ? ' · rule ' + x.rule : '')) : '';
+    if (has(x.compatibility) || x.compatibility === null) {
+      extra = ' ' + why('compatibility ' + (x.compatibility || 'unknown') +
+        (has(x.research_disclosure) ? ' · ' + x.research_disclosure + ' (paper research only)' : ''));
+    }
+    return pill(x.status || 'UNAVAILABLE', admTone(x.status)) + extra + why(x.why);
+  }
+  function freshness(d) {
+    if (d.probability_fresh === null || d.probability_fresh === undefined) { return NA; }
+    return pill(d.probability_fresh ? 'FRESH' : 'STALE', d.probability_fresh ? 'good' : 'warn') +
+      ' ' + why('age ' + (num(d.probability_age_s) === null ? 'unavailable'
+        : num(d.probability_age_s).toFixed(1) + ' s') + ' · limit ' +
+        (num(d.probability_age_limit_s) === null ? 'unavailable'
+          : num(d.probability_age_limit_s).toFixed(0) + ' s'));
+  }
   function decisionCard(r) {
     var d = r.decision || {}, p = r.simulated || {}, a = r.actual || {}, l = r.latency_ms || {};
+    var pl = r.pnl || {}, m = r.management || {}, au = r.audit || {}, ad = a.admission || {};
+    var sp = m.standing_protection || {}, fp = m.filled_protection || {};
     return '<article class="sl-dec">' +
       '<header class="sl-dechead"><b>DECISION</b> <span class="mono">' + txt(d.decision_id) +
       '</span> ' + pill(d.policy_version || 'unknown policy', 'blue') +
       '<div class="sl-decfacts">' + fact('Market', txt(d.market)) +
+      fact('Strategy', txt(d.strategy)) +
       fact('PinnAPI probability', pct(d.probability)) +
-      fact('Authority', txt(d.probability_authority)) + fact('Gross edge', pp(d.gross_edge_pp)) +
+      fact('Evidence', txt(d.probability_evidence)) +
+      fact('Evidence freshness', freshness(d)) +
+      fact('Authority', txt(d.probability_authority)) + fact('Expected edge', pp(d.gross_edge_pp)) +
       fact('Net EV after fees', usd(d.net_expected_profit_usd)) +
+      fact('Settlement admission', admission(d.settlement_admission)) +
+      fact('Book-currency admission', admission(d.book_currency_admission)) +
       fact('Receipt → decision', ms(l.receipt_to_decision_ms)) +
-      fact('Decision → Polymarket submit', ms(l.decision_to_submit_ms)) + '</div></header>' +
+      fact('Decision → intent', ms(l.decision_to_intent_ms)) +
+      fact('Intent → actual submit', ms(l.intent_to_submit_ms)) + '</div></header>' +
       '<div class="sl-decbranches">' +
       '<div class="sl-branch"><h4>' + pill('SIMULATED', 'grey') + ' Paper</h4>' +
       fact('Paper quantity', qty(p.target_qty)) + fact('Paper order', txt(p.paper_order_id)) +
       fact('State', txt(p.state)) + fact('Filled', qty(p.filled_qty)) +
       fact('Avg price', px(p.avg_fill_price)) + fact('Fees', usd(p.fees_usd)) +
-      fact('P&L', NA + why((r.pnl || {}).why)) + why(p.why_unavailable) + '</div>' +
+      fact('P&L (simulated)', num(pl.simulated_realized_usd) === null
+        ? NA + why(pl.simulated_why_unavailable) : usd(pl.simulated_realized_usd)) +
+      why(p.why_unavailable) + '</div>' +
       '<div class="sl-branch"><h4>' + pill('ACTUAL', 'good') + ' Polymarket</h4>' +
       fact('1:1,000 target', qty(a.target_raw_qty)) + fact('Rounded quantity', txt(a.rounded_qty)) +
+      fact('Admission', pill(ad.status || 'UNAVAILABLE', admTone(ad.status)) +
+           why(ad.why_unavailable)) +
       fact('Lane', pill(a.state || 'unknown', actualTone(a.state)) +
            (a.refusal ? ' ' + why(a.refusal) : '')) +
       fact('Submitted', when(a.submitted_at)) + fact('Venue order ID', txt(a.venue_order_id)) +
       fact('Acknowledged', when(a.acknowledged_at)) + fact('Filled', qty(a.filled_qty)) +
       fact('Avg price', px(a.avg_fill_price)) + fact('Fees', usd(a.fees_usd)) +
-      fact('Account', txt(a.account_fingerprint_prefix)) + '</div>' +
-      '</div></article>';
+      fact('P&L (actual, realized)', num(pl.actual_realized_usd) === null
+        ? NA + why(pl.actual_why_unavailable) : usd(pl.actual_realized_usd)) +
+      fact('Unrealized (actual)', usd(pl.actual_unrealized_usd)) +
+      fact('Submit → ack', ms(l.submit_to_ack_ms)) +
+      fact('Ack → first fill', ms(l.ack_to_first_fill_ms)) +
+      fact('Retail account', txt(a.account_fingerprint_prefix)) + '</div>' +
+      '</div>' +
+      '<details class="sl-more"><summary>Management — Xavier · Audit — Audrey</summary>' +
+      '<div class="facts">' +
+      fact('Xavier recommendation', txt(m.xavier_recommendation)) +
+      fact('Xavier actual action', txt(m.xavier_actual_action)) +
+      fact('Probability freshness', has(m.probability_evidence_state)
+        ? pill(m.probability_evidence_state, evidenceTone(m.probability_evidence_state)) +
+          why(m.probability_limitation) : NA) +
+      fact('Alternatives', has(m.alternatives) ? '<pre class="mono">' + json(m.alternatives) + '</pre>' : NA) +
+      fact('Standing protection (resting)', 'paper ' + qty(sp.paper_resting_qty) +
+           ' · actual ' + qty(sp.actual_resting_qty)) +
+      fact('Filled protection', 'paper ' + qty(fp.paper_filled_qty) +
+           ' · actual ' + qty(fp.actual_filled_qty)) +
+      fact('Next review', when(m.next_review_by)) +
+      fact('Audrey reconciliation', has(au.audrey_status)
+        ? pill(au.audrey_status, recTone(au.audrey_status)) + why(au.meaning)
+        : NA + why(au.why_unavailable)) +
+      fact('Discrepancies', has(au.discrepancies) && au.discrepancies.length
+        ? '<pre class="mono">' + json(au.discrepancies) + '</pre>'
+        : has(au.audrey_status) ? esc('none') : NA) +
+      fact('Paper vs actual price', signedPx(au.paper_vs_actual_price_diff)) +
+      '</div>' + why(m.why_unavailable) + '<p class="sl-why">' + esc(m.protection_rule || '') +
+      '</p></details></article>';
   }
   function decisionsBlock(ds) {
     if (!ds || ds.status !== 'OK') {
