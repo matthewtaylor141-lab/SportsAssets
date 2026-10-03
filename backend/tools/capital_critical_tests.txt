@@ -496,3 +496,14 @@ tests/test_pinnapi_reactive.py
 # non-owner-account known gap is isolated in test_pinnapi_reactive_known_gaps.py,
 # strict xfail, deliberately not on this list.)
 tests/test_pinnapi_reactive_integration.py
+# Kalshi venue adapter (credential-free, fail-closed): RSA-PSS signing on a
+# throwaway key, no request sent without a credential, the submission gate
+# (env switch + durable control + same-key read-only reconciliation), V2 order
+# translation / ticks / minimums / fees / state machine / ambiguous-submit
+# reconciliation, structured-evidence contract mapping and settlement payoff
+# vectors, net-EV venue selection, paper/live linkage views, the import guard
+# keeping the submit path unwired, and migration 196 with its rollback.
+tests/test_kalshi_venue.py
+tests/test_kalshi_mapping_and_selection.py
+tests/test_kalshi_isolation.py
+tests/test_kalshi_smalllive_migration.py
