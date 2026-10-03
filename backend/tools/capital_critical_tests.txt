@@ -603,3 +603,13 @@ tests/test_xavier_thesis_reallocate_value_add.py
 # through the real cycle -- selection, fixture confirmation, venue-native
 # identity (school + nickname), valuation, Derek -- never a silent drop.
 tests/test_ncaaf_reaches_a_recorded_decision.py
+# Institutional stream runtime evidence and P5 at runtime (claude/cand22-stream):
+# the workers record the gRPC stream's connection epochs, complete books,
+# gaps, receipt age / skew, counts, state and depth per symbol per minute
+# (migration 210); the same-book probe compares the resident stream book with
+# the retail public book read-only within 1 s; GET /api/command/p5/evidence
+# evaluates every P5 predicate in the deciding process and names the first
+# blocking external predicate exactly.
+tests/test_institutional_stream_evidence.py
+tests/test_institutional_same_book.py
+tests/test_p5_runtime_evidence.py

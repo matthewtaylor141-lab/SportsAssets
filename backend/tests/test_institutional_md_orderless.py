@@ -267,3 +267,125 @@ def test_the_identity_mapper_sends_nothing_and_reads_no_book():
               if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)}
     assert not called & {"current", "read", "request", "send", "post", "get_"
                          "book", "put", "subscribe", "want"}
+
+
+# ── §6 the evidence recorder, the same-book probe, the P5 evaluation ────
+#
+# cand22 added three code paths around the stream. None can reach an order:
+# the recorder imports only the standard library; the probe calls ONE thing
+# on a retail client (`markets.book`), on a keyless client whose transport
+# refuses every method but GET; the P5 evaluation reads in-memory state and
+# evidence tables and sends nothing anywhere.
+
+from sportsassets import institutional_same_book as SBK  # noqa: E402
+from sportsassets import institutional_stream_evidence as SEV  # noqa: E402
+from sportsassets import p5_runtime as P5R  # noqa: E402
+
+_VENUE_MODULES = {"pmus", "pmx", "live_executor", "execution_intent",
+                  "execmirror", "execmirror_probe", "kalshi_orders",
+                  "kalshi_venue", "calibration_execute", "execution_gate",
+                  "bettor_live_executor"}
+
+
+def _imports_of(mod):
+    tree = ast.parse(pathlib.Path(mod.__file__).read_text())
+    names = set()
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Import):
+            names |= {a.name.split(".")[-1] for a in n.names}
+        elif isinstance(n, ast.ImportFrom):
+            names |= {a.name for a in n.names}
+            if n.module:
+                names.add(n.module.split(".")[-1])
+    return tree, names
+
+
+def test_the_evidence_recorder_imports_only_the_standard_library():
+    _tree, names = _imports_of(SEV)
+    assert names <= {"annotations", "json", "os", "socket", "threading",
+                     "time", "uuid", "datetime", "timezone", "Decimal",
+                     "InvalidOperation", "__future__", "decimal"}, names
+
+
+def test_the_same_book_probe_reads_one_book_and_nothing_else():
+    tree, names = _imports_of(SBK)
+    assert not names & _VENUE_MODULES, names & _VENUE_MODULES
+    # every attribute CALL made on anything named like a client
+    calls = set()
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute):
+            calls.add(n.func.attr)
+    assert "book" in calls
+    # ("replace" is not listed: the module calls str.replace on a timestamp)
+    forbidden = {"create", "cancel", "cancel_all", "modify",
+                 "close_position", "preview", "post", "delete", "put",
+                 "patch", "submit", "submit_fok", "place", "orders"}
+    assert not calls & forbidden, calls & forbidden
+    attrs = {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
+    assert not attrs & {"orders", "portfolio", "account"}, attrs
+    src = pathlib.Path(SBK.__file__).read_text()
+    assert re.findall(r"\.markets\.(\w+)\(", src) == ["book"]
+    assert SBK.RETAIL_BOOK_PATH == "/v1/markets/%s/book"
+    # the keyless constructor: no key_id / secret_key is ever passed
+    assert "key_id=" not in src and "secret_key=" not in src
+
+
+def test_the_probe_transport_refuses_every_write_method():
+    import httpx
+    t = SBK.ReadOnlyTransport(httpx.MockTransport(
+        lambda r: httpx.Response(200)))
+    for m in ("POST", "DELETE", "PUT", "PATCH"):
+        with pytest.raises(SBK.WriteRefused):
+            t.handle_request(httpx.Request(m, "https://gateway.polymarket.us/"
+                                              "v1/orders"))
+    assert t.handle_request(httpx.Request(
+        "GET", "https://gateway.polymarket.us/v1/markets/x/book")).status_code \
+        == 200
+
+
+def test_the_p5_evaluation_sends_nothing_and_starts_nothing():
+    tree, names = _imports_of(P5R)
+    assert not names & (_VENUE_MODULES - {"execution_intent"}), names
+    # execution_intent is imported ONLY to read ActualLane's source (C13)
+    src = pathlib.Path(P5R.__file__).read_text()
+    assert src.count("import execution_intent") == 1
+    owner = _enclosing_functions(tree)
+    sites = [owner.get(id(n)) for n in ast.walk(tree)
+             if isinstance(n, ast.ImportFrom)
+             and any(a.name == "execution_intent" for a in n.names)]
+    assert sites == ["_c13_enforced"]
+    used_on_stream = {n.attr for n in ast.walk(tree)
+                      if isinstance(n, ast.Attribute)
+                      and isinstance(n.value, ast.Name) and n.value.id == "IS"}
+    assert used_on_stream <= {"digest", "enabled", "S_NOT_STARTED", "S_IDLE",
+                              "S_CREDENTIAL"}, used_on_stream
+    called = set()
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Call):
+            f = n.func
+            called.add(f.attr if isinstance(f, ast.Attribute)
+                       else getattr(f, "id", None))
+    assert not called & {"start_default", "want", "subscribe", "read",
+                         "Institutional", "token", "set_instrument",
+                         "on_update", "run_once", "start"}, called
+    for c in ast.walk(tree):
+        if isinstance(c, ast.Constant) and isinstance(c.value, str):
+            assert not re.search(r"INSERT\s+INTO|DELETE\s+FROM|"
+                                 r"UPDATE\s+\w+\s+SET|TRUNCATE|DROP\s",
+                                 c.value, re.I), c.value[:80]
+
+
+def test_the_stream_listener_is_called_with_plain_data_only():
+    seen = []
+    b = IS.ResidentBooks()
+    b.listener = lambda e, d: seen.append((e, d))
+    b.set_instrument("s", {"priceScale": "1000", "fractionalQtyScale": "100"})
+    b.want(["s"])
+    b.on_connected("grpc-x")
+    b.on_update({"symbol": "s", "bids": [(1, 1)], "offers": [],
+                 "transact_time": None})
+    b.on_disconnected("x")
+    assert [e for e, _ in seen] == ["connected", "update", "disconnected"]
+    for _e, d in seen:
+        for v in d.values():
+            assert not callable(v)

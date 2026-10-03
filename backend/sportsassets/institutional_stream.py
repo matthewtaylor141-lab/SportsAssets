@@ -199,6 +199,20 @@ class ResidentBooks:
         self._markets: dict = {}
         self._instruments: dict = {}
         self._errors: list = []
+        #: Optional evidence listener (institutional_stream_evidence): called
+        #: as listener(event, data) INSIDE this lock, so it must be cheap and
+        #: must never call back into these books. It records; it decides
+        #: nothing, and a listener that raises is ignored.
+        self.listener = None
+
+    def _emit(self, event: str, **data) -> None:
+        fn = self.listener
+        if fn is None:
+            return
+        try:
+            fn(event, data)
+        except Exception:                                     # noqa: BLE001
+            pass
 
     # ── configuration the caller supplies ─────────────────────────────
 
@@ -256,6 +270,8 @@ class ResidentBooks:
                 m["hw"] = None          # a venue clock is per connection
                 m["acked_seq"] = None
             self.state, self.state_why = S_CONNECTED, "stream open"
+            self._emit("connected", seq=self._conn_seq, conn_id=self._conn_id,
+                       at=now)
             return self._conn_seq
 
     def silence_s(self) -> float | None:
@@ -267,11 +283,14 @@ class ResidentBooks:
         with self._lock:
             self._last_life_at = self._clock()
             self._messages += 1
+            self._emit("heartbeat", at=self._last_life_at)
 
     def on_ack(self, added=(), removed=(), active=()) -> None:
         with self._lock:
             self._last_life_at = self._clock()
             self._messages += 1
+            self._emit("ack", at=self._last_life_at,
+                       added=len(added or ()))
             for s in added or ():
                 m = self._markets.get(s)
                 if m is not None:
@@ -287,6 +306,8 @@ class ResidentBooks:
                                  "message": str(message or "")[:200],
                                  "symbols": len(symbols or ())})
             del self._errors[:-20]
+            self._emit("subscription_error", at=now, code=code,
+                       symbols=[str(x) for x in (symbols or ())][:20])
             if code in _BENIGN_SUBSCRIPTION_ERRORS:
                 return
             for s in symbols or ():
@@ -308,6 +329,8 @@ class ResidentBooks:
             m = self._markets.get(sym)
             if m is None or not self._connected:
                 self._stray += 1
+                self._emit("update", symbol=sym, seq=self._conn_seq,
+                           at=now, venue_ts=ts, accepted=False, stray=True)
                 return
             hw = m.get("hw")
             if ts is not None and hw is not None and ts < hw:
@@ -315,6 +338,9 @@ class ResidentBooks:
                             "seq": self._conn_seq, "high_water": _iso(hw),
                             "received_venue_ts": _iso(ts)}
                 m["regressions"] += 1
+                self._emit("update", symbol=sym, seq=self._conn_seq,
+                           at=now, venue_ts=ts, accepted=False,
+                           regression=True, high_water=hw)
                 return
             if ts is not None:
                 m["hw"] = ts if hw is None else max(hw, ts)
@@ -337,35 +363,51 @@ class ResidentBooks:
                         or (gap["reason"] == R_GAP_CLOCK and ts is not None)):
                 m["gap"] = None
                 m["resnapshots"] += 1
+            self._emit("update", symbol=sym, seq=self._conn_seq, at=now,
+                       venue_ts=ts, accepted=True,
+                       closed_gap=(gap or {}).get("reason")
+                       if gap and m.get("gap") is None else None,
+                       levels=(len(m["bids"]), len(m["offers"])),
+                       state=m.get("stream_state"))
 
     def on_disconnected(self, why: str = "") -> None:
         now = self._clock()
         with self._lock:
             self._connected = False
-            for m in self._markets.values():
+            gapped = []
+            for s, m in self._markets.items():
                 if m.get("book_seq") is not None or m.get("gap"):
                     m["gap"] = {"reason": R_GAP_CONNECTION, "at": now,
                                 "seq": self._conn_seq}
+                    gapped.append(s)
             self.state, self.state_why = S_RECONNECTING, \
                 "stream ended: %s" % str(why)[:160]
+            self._emit("disconnected", seq=self._conn_seq, at=now,
+                       why=str(why)[:160], gapped=gapped)
 
     def on_refused(self, code: str) -> None:
         now = self._clock()
         with self._lock:
             self._connected = False
             self._refusal = {"code": str(code), "at": now}
-            for m in self._markets.values():
+            gapped = []
+            for s, m in self._markets.items():
                 if m.get("book_seq") is not None:
                     m["gap"] = {"reason": R_GAP_CONNECTION, "at": now,
                                 "seq": self._conn_seq}
+                    gapped.append(s)
             self.state, self.state_why = S_REFUSED, \
                 "venue refused the stream: %s" % code
+            self._emit("refused", seq=self._conn_seq, at=now, code=str(code),
+                       gapped=gapped)
 
     def on_gave_up(self, failures: int) -> None:
         with self._lock:
             self._connected = False
             self.state, self.state_why = S_GAVE_UP, \
                 "%d consecutive attempts delivered nothing" % failures
+            self._emit("gave_up", seq=self._conn_seq, at=self._clock(),
+                       failures=int(failures))
 
     # ── the read the decision path makes ──────────────────────────────
 
@@ -487,6 +529,22 @@ class ResidentBooks:
                          "best_bid": bids[0]["price"] if bids else None,
                          "best_offer": offers[0]["price"] if offers else None},
                 "evidence": evidence}
+
+    def held_levels(self, symbol, n: int = 5) -> dict:
+        """READ-ONLY: the top-n levels HELD for a symbol (current or not),
+        with the scales and the epoch they arrived on. For evidence only --
+        the decision path reads `current()`, never this."""
+        sym = str(symbol or "")
+        with self._lock:
+            m = self._markets.get(sym) or {}
+            inst = self._instruments.get(sym) or {}
+            return {"symbol": sym, "book_seq": m.get("book_seq"),
+                    "conn_seq": self._conn_seq,
+                    "price_scale": inst.get("price_scale"),
+                    "qty_scale": inst.get("qty_scale"),
+                    "bids": list(m.get("bids") or ())[:max(0, int(n))],
+                    "offers": list(m.get("offers") or ())[:max(0, int(n))],
+                    "updates": m.get("updates", 0)}
 
     def digest(self, *, now=None) -> dict:
         at = float(now if now is not None else self._clock())

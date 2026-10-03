@@ -2557,6 +2557,26 @@ async def command_execmirror(response: Response) -> dict:
         return await V.view(c)
 
 
+@app.get("/api/command/p5/evidence", dependencies=[Depends(require_command)])
+async def command_p5_evidence(
+        response: Response,
+        symbol: str | None = Query(None, min_length=3, max_length=200,
+                                   pattern="^[a-z0-9][a-z0-9.\\-]+$")) -> dict:
+    """P5_LIVE_STREAM_BOOK_V1 AT RUNTIME (`sportsassets.p5_runtime`): every
+    predicate C1..C13, the owner approval (A1) and the same-book premise
+    (S1), each PROVEN / NOT_PROVEN with its evidence -- evaluated in THIS
+    (deciding) process against its own state and the stream runtime evidence
+    the workers record (migration 210). Overall LIVE_ADMISSIBLE only when
+    every predicate is PROVEN; otherwise BLOCKED with the first blocking
+    predicate, the first blocking EXTERNAL predicate (exact action) and every
+    INTERNAL blocker. Read-only: no venue call, no write, env NAMES only."""
+    from .. import p5_runtime as P5R
+    response.headers["Cache-Control"] = "no-store"
+    pool = await get_pool()
+    async with pool.acquire() as c:
+        return await P5R.evaluate(c, symbol=symbol)
+
+
 @app.get("/api/command/small-live", dependencies=[Depends(require_command)])
 async def command_small_live(
         response: Response,
