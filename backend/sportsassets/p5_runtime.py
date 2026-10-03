@@ -98,6 +98,7 @@ I_NOT_STARTED = "NO_CODE_PATH_STARTS_THE_STREAM_IN_THE_DECIDING_PROCESS"
 I_NO_MAPPER = "IDENTITY_MAPPER_NOT_INSTALLED_IN_DECIDING_PROCESS"
 I_NO_HOOK = "LIVE_BOOK_EVIDENCE_HOOK_NOT_INSTALLED_IN_DECIDING_PROCESS"
 I_REST_PRICED = "DECISION_PRICED_FROM_REST_PAPER_BOOK_NOT_THE_STREAM_BOOK"
+R_NO_STREAM_BOOK = "NO_CURRENT_STREAM_BOOK_TO_PRICE_FROM"
 I_C13_ABSENT = "ACTUAL_LANE_DOES_NOT_ENFORCE_VERDICT_AGE_AT_SUBMIT"
 R_INCONCLUSIVE = "SAME_BOOK_EVIDENCE_INCONCLUSIVE"
 
@@ -106,18 +107,15 @@ R_INCONCLUSIVE = "SAME_BOOK_EVIDENCE_INCONCLUSIVE"
 # THIS PROCESS
 # ═════════════════════════════════════════════════════════════════════
 
-def _decision_price_source() -> str | None:
-    """The price source the decision path here hands P5 for C12, read from
-    the decision path's own code (live_book_evidence.evaluate_for)."""
-    try:
-        src = inspect.getsource(LBE.evaluate_for)
-    except (OSError, TypeError):
-        return None
-    if '"source": "REST_PAPER_BOOK"' in src:
-        return "REST_PAPER_BOOK"
-    if '"source": "STREAM"' in src:
-        return "STREAM"
-    return None
+STREAM_WHEN_CURRENT = "INSTITUTIONAL_STREAM_WHEN_CURRENT"
+
+
+def _decision_price_source() -> str:
+    """The ACTUAL lane's price source in this process's decision path:
+    the stream observation when current (decision_hooks.LIVE_BOOK_STREAM is
+    installed by execution_intent.start), else the REST paper book."""
+    return (STREAM_WHEN_CURRENT if DH.LIVE_BOOK_STREAM is not None
+            else "REST_PAPER_BOOK")
 
 
 def _c13_enforced() -> bool:
@@ -421,11 +419,9 @@ def c2_checks(ps: dict) -> list:
              IS.S_NOT_STARTED,),
          "kind": K_INTERNAL, "reason": I_NOT_STARTED,
          "stream_start": start,
-         "action": ("code: the API lifespan never calls "
-                    "institutional_stream.start_default(), and the API has no "
-                    "refdata path to give the stream instrument scales "
-                    "(set_instrument); both are needed in the deciding "
-                    "process")},
+         "action": ("the API lifespan did not run institutional_api_stream."
+                    "start() in this process (it arms institutional_stream."
+                    "start_default and the refdata path)")},
         {"check": "VENUE_ACCEPTS_THE_STREAM_CREDENTIAL",
          "ok": st not in ("REFUSED_BY_VENUE",
                           "CREDENTIAL_REFUSED_BY_IDENTITY_GUARD"),
@@ -469,6 +465,12 @@ def evaluate_predicates(*, ps: dict, decision: dict, stream: dict,
                               "backed mapper as live_book_evidence."
                               "IDENTITY_MAPPER in the deciding process"),
                       deciding_process=c1, runtime_evidence=c1_rt))
+    elif ps.get("stream_state") not in LBC._STREAM_RUNNING:
+        # the mapper answers over refdata held only while the stream runs
+        out.append(_p("C1_IDENTITY_EXACT", NOT_PROVEN, kind=K_DEPENDENT,
+                      reason=c1.get("reason"),
+                      depends_on="C2_STREAM_RUNNING", deciding_process=c1,
+                      runtime_evidence=c1_rt))
     else:
         out.append(_p("C1_IDENTITY_EXACT", NOT_PROVEN, kind=K_RUNTIME,
                       reason=c1.get("reason"), deciding_process=c1,
@@ -538,18 +540,24 @@ def evaluate_predicates(*, ps: dict, decision: dict, stream: dict,
     if c12.get("passed"):
         out.append(_p("C12_PRICED_FROM_THIS_BOOK", PROVEN,
                       deciding_process=c12))
-    elif src != "STREAM":
+    elif src != STREAM_WHEN_CURRENT:
         out.append(_p("C12_PRICED_FROM_THIS_BOOK", NOT_PROVEN,
                       kind=K_INTERNAL, reason=I_REST_PRICED,
-                      action=("code: the decision path (live_book_evidence."
-                              "evaluate_for) prices from %s; the executable "
-                              "price and depth must come from the evaluated "
-                              "stream observation" % src),
+                      action=("execution_intent.start has not installed "
+                              "decision_hooks.LIVE_BOOK_STREAM in this "
+                              "process, so the actual lane prices from %s"
+                              % src),
+                      deciding_process=dict(c12, price_source=src)))
+    elif not (c1_ok and c2_ok):
+        out.append(_p("C12_PRICED_FROM_THIS_BOOK", NOT_PROVEN,
+                      kind=K_DEPENDENT, reason=R_NO_STREAM_BOOK,
+                      depends_on=("C1_IDENTITY_EXACT" if not c1_ok
+                                  else "C2_STREAM_RUNNING"),
                       deciding_process=dict(c12, price_source=src)))
     else:
         out.append(_p("C12_PRICED_FROM_THIS_BOOK", NOT_PROVEN,
                       kind=K_RUNTIME, reason=c12.get("reason"),
-                      deciding_process=c12))
+                      deciding_process=dict(c12, price_source=src)))
 
     # C13 -- the actual lane's verdict-age bound at submit
     if ps.get("c13_enforced_by_actual_lane"):
@@ -648,8 +656,12 @@ async def gather(conn, *, now: float | None = None, env=None,
                   sorted(stream.get("symbols") or {}))
     # THE DECISION PATH'S OWN P5 EVALUATION IN THIS PROCESS: its installed
     # identity mapper, its stream reader, its price source.
-    decisions = {s: LBE.evaluate_for({}, {"us_market_slug": s, "side": "yes"},
-                                     obs=None, now=at) for s in candidates}
+    priced = DH.LIVE_BOOK_STREAM is not None
+    decisions = {}
+    for s in candidates:
+        cand = {"us_market_slug": s, "side": "ORDER_INTENT_BUY_LONG"}
+        decisions[s] = (LBE.evaluate_decision({}, cand, now=at) if priced
+                        else LBE.evaluate_for({}, cand, obs=None, now=at))
     return {"at": at, "ps": ps, "stream": stream, "same_book": same_book,
             "artifact": artifact, "decisions": decisions}
 

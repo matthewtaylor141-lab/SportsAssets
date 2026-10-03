@@ -1227,7 +1227,7 @@ async def record_attempt(conn, ctx: dict, *, valuation_id, strategy: str,
 # THE DECISION
 # ═════════════════════════════════════════════════════════════════════
 
-def live_book_evidence(ctx: dict, cand: dict, *, obs, now: float):
+def live_book_evidence(ctx: dict, cand: dict, *, obs, now: float, **kw):
     """THE LIVE BOOK-CURRENCY EVIDENCE for this decision's contract, from the
     executing process's installed `decision_hooks.LIVE_BOOK_EVIDENCE`
     (live_book_evidence.for_decision), or None when none is installed.
@@ -1236,12 +1236,163 @@ def live_book_evidence(ctx: dict, cand: dict, *, obs, now: float):
     if fn is None:
         return None
     try:
-        got = fn(ctx, cand, obs=obs, now=now)
+        got = (fn(ctx, cand, obs=obs, now=now) if not kw
+               else fn(ctx, cand, obs=obs, now=now, **kw))
         return got if isinstance(got, dict) else None
     except Exception as exc:                                    # noqa: BLE001
         return {"verdict": "NOT_ESTABLISHED", "rule": "P5_LIVE_STREAM_BOOK_V1",
                 "reason": "LIVE_BOOK_EVIDENCE_FAILED:%s" % type(exc).__name__,
                 "stream_read": False}
+
+
+STREAM_BOOK_SOURCE = "INSTITUTIONAL_STREAM"
+
+
+def stream_observation(ctx: dict, cand: dict, *, now: float) -> dict | None:
+    """THE DECISION'S ONE RESIDENT STREAM OBSERVATION, from the executing
+    process's installed `decision_hooks.LIVE_BOOK_STREAM`
+    (live_book_evidence.observe), or None when none is installed. Never
+    raises; reads no REST, sends nothing."""
+    fn = DH.LIVE_BOOK_STREAM
+    if fn is None:
+        return None
+    try:
+        got = fn(ctx, cand, now=now)
+        return got if isinstance(got, dict) else None
+    except Exception:                                           # noqa: BLE001
+        return None
+
+
+def _exact_identity(so) -> bool:
+    ident = (so or {}).get("identity")
+    return (isinstance(ident, dict)
+            and str(ident.get("status") or "").upper() == "EXACT"
+            and bool(ident.get("symbol")))
+
+
+def actual_pricing(*, observation: dict, p, side, at: float, fee_fn,
+                   ent: dict, cfg: dict, cg: bool, bctx: dict, cand: dict,
+                   row: dict, min_edge: float, now: float) -> dict:
+    """THE ACTUAL LANE'S PRICE FROM ONE STREAM OBSERVATION (P5 C12).
+
+    The paper lane's OWN rules -- `level_edges`, `size_within_edge`,
+    `SIM.walk`, `economics` / `conditional_economics`, the same min edge,
+    target, per-order cap, fee function and BOOK_MAX_AGE_S -- applied to the
+    resident stream book instead of the REST paper book. Nothing is mixed:
+    levels, IOC limit, depth, fees and EV all come from `observation`.
+    Paper liquidity consumption is a simulation artifact of the REST
+    observation and is not applied (nothing has consumed the stream book).
+    Paper simulation is not touched. Pure."""
+    md = observation.get("market_data")
+    lv = SIM.levels_for(md, direction="BUY", holding_side=side)
+    levels = lv["levels"]
+    age = round(max(0.0, float(now) - float(observation["observed_at"])), 3)
+    refusals: list = []
+    sized: dict = {"qty": 0, "limit": None, "wire": None}
+    econ = None
+    edges: list = []
+    if not levels:
+        refusals.append(R_NO_BOOK)
+    elif age > BOOK_MAX_AGE_S:
+        refusals.append(R_BOOK_NOT_CURRENT)
+    else:
+        edges = level_edges(levels, p, min_edge=min_edge)
+        sized = size_within_edge(
+            levels, p=p, consumed={},
+            target_usd=float(ent["target_order_usd"]),
+            cap_usd=cfg["risk"].get("per_order_cap_usd"),
+            fee_per_contract_max=float(L.max_fee_for(
+                1, 0.5, at=at, fee_fn=fee_fn)), min_edge=min_edge,
+            net_fee_fn=((lambda px: fee_per_contract(fee_fn, px, at))
+                        if cg else None))
+        if not edges[0]["clears_min_edge"]:
+            refusals.append(R_EDGE)
+        elif (sized.get("why")
+              == "FEES_CONSUME_THE_EDGE_AT_EVERY_CLEARING_LEVEL"):
+            refusals.append(R_FEES_CONSUME_EDGE)
+        elif sized["qty"] < 1:
+            refusals.append(R_NO_QTY)
+        else:
+            walk = SIM.walk(levels, consumed={}, limit=sized["limit"],
+                            qty=sized["qty"], direction="BUY",
+                            allow_partial=True)
+            if cg:
+                states = {"applied": False,
+                          "why": ("not used: this policy's EV is "
+                                  "conditional on ordinary completion")}
+                base_e = conditional_economics(
+                    p=p, takes=walk["takes"], fee_fn=fee_fn, at=at)
+                base_e["exceptional_settlement"] = exceptional_scenarios(
+                    cand=cand, row=row, qty=base_e["qty"],
+                    vwap=base_e["vwap"])
+            else:
+                states = DP.settlement_states(bctx["void"],
+                                              void_refunds_price=True)
+                base_e = economics(p=p, takes=walk["takes"], fee_fn=fee_fn,
+                                   at=at, void_states=states)
+            econ = dict(base_e, settlement_states=states,
+                        walk=[{"price": t["price"], "wire": t["wire"],
+                               "take": t["take"],
+                               "edge_pp": round(DP.gross_edge(
+                                   p, t["price"]) * 100.0, 9)}
+                              for t in walk["takes"]])
+            if not econ["fees_ok"]:
+                refusals.append(R_FEES)
+            elif not econ["net_ev_positive"]:
+                refusals.append(R_NET)
+    order = not refusals
+    # A refused pricing never carries an executable price into the facts.
+    facts_sized = sized if order else dict(sized, wire=None, limit=None)
+    return {"source": STREAM_BOOK_SOURCE, "order": order,
+            "refusals": refusals, "sized": sized, "facts_sized": facts_sized,
+            "econ": econ, "book_age": age, "levels": levels,
+            "best_edge_pp": edges[0]["edge_pp"] if edges else None,
+            "observation": {k: observation.get(k) for k in (
+                "obs_id", "observed_at", "observed_at_is", "age_s",
+                "connection_epoch", "connection_id", "venue_ts", "symbol",
+                "market_state", "price_scale", "qty_scale")},
+            "priced_from": {"source": "STREAM",
+                            "connection_epoch":
+                                observation.get("connection_epoch"),
+                            "received_at": observation.get("observed_at"),
+                            "obs_id": observation.get("obs_id")}}
+
+
+def actual_payload(payload: dict, ap: dict, *, sized: dict, obs) -> dict:
+    """The intent payload with the ACTUAL lane's price taken from the stream
+    observation `ap` priced (qty, IOC limit, wire, receipt instant, EV and
+    edge) -- all one observation. When the stream pricing refused, the
+    intent keeps the paper decision's values in its NOT NULL columns only,
+    and its admission facts (stream-priced, without an executable price)
+    refuse it before any lane sees it. The paper REST pricing is recorded
+    beside, never used by the actual lane. Pure."""
+    out = dict(payload)
+    ev = dict(out.get("evidence") or {})
+    tl = dict(out.get("timeline") or {})
+    o = ap["observation"]
+    ev["actual_price_source"] = (STREAM_BOOK_SOURCE if ap["order"]
+                                 else STREAM_BOOK_SOURCE + "_NO_ORDER")
+    ev["stream_observation"] = o
+    ev["paper_rest_pricing"] = {
+        "qty": sized.get("qty"), "limit": sized.get("limit"),
+        "wire": sized.get("wire"),
+        "book_obs_id": None if obs is None else obs.get("obs_id")}
+    if not ap["order"]:
+        ev["actual_pricing_refusals"] = list(ap["refusals"])
+        out["evidence"] = ev
+        return out
+    st = ap["sized"]
+    out.update(paper_target_qty=st["qty"], limit_price=st["limit"],
+               wire_price=st["wire"], book_obs_id=None,
+               book_observed_at=float(o["observed_at"]))
+    ev.update(gross_edge_pp=ap["best_edge_pp"],
+              net_expected_profit_usd=(ap["econ"] or {}).get(
+                  "expected_net_profit_usd"),
+              book_age_at_decision_s=ap["book_age"])
+    tl["book_observed"] = {"utc_s": o["observed_at"],
+                           "source": STREAM_BOOK_SOURCE}
+    out["evidence"], out["timeline"] = ev, tl
+    return out
 
 
 def admission_facts(*, cand: dict, pin: dict, match: dict, p, obs, md,
@@ -1678,7 +1829,47 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
         rec["actual_lane"] = "NO_EXECUTION_HOOK_IN_THIS_PROCESS"
     else:
         try:
-            got_i = await hook(conn, {
+            # THE ACTUAL LANE'S PRICE SOURCE (P5 C12). With a CURRENT resident
+            # stream book for the exactly mapped contract, the actual lane's
+            # facts (book, IOC limit, depth, fees, EV) are priced from THAT one
+            # observation by the paper lane's own rules, and P5 is evaluated
+            # on the same read; otherwise the REST paper book stands, exactly
+            # as before. The paper order below is never affected.
+            now_lb = float(clock())
+            so = stream_observation(ctx, cand, now=now_lb)
+            ap = None
+            if so is not None and _exact_identity(so) and \
+                    so.get("observation") is not None:
+                o = so["observation"]
+                ap = actual_pricing(
+                    observation=o, p=p, side=side, at=at, fee_fn=fee_fn,
+                    ent=ent, cfg=cfg, cg=cg, bctx=bctx, cand=cand, row=row,
+                    min_edge=min_edge, now=now_lb)
+                facts = admission_facts(
+                    cand=cand, pin=pin, match=match, p=p,
+                    obs={"obs_id": o["obs_id"],
+                         "observed_at": o["observed_at"]},
+                    md=o["market_data"], sized=ap["facts_sized"],
+                    econ=ap["econ"], book_age=ap["book_age"],
+                    book_source=STREAM_BOOK_SOURCE,
+                    live_book=live_book_evidence(
+                        ctx, cand, obs=None, now=now_lb,
+                        priced_from=ap["priced_from"], observed=so))
+            elif so is not None and _exact_identity(so):
+                facts = admission_facts(
+                    cand=cand, pin=pin, match=match, p=p, obs=obs,
+                    md=md, sized=sized, econ=econ, book_age=book_age,
+                    book_source=ctx.get("last_book_source"),
+                    live_book=live_book_evidence(
+                        ctx, cand, obs=obs, now=now_lb, observed=so))
+            else:
+                facts = admission_facts(
+                    cand=cand, pin=pin, match=match, p=p, obs=obs,
+                    md=md, sized=sized, econ=econ, book_age=book_age,
+                    book_source=ctx.get("last_book_source"),
+                    live_book=live_book_evidence(
+                        ctx, cand, obs=obs, now=float(clock())))
+            payload = {
                 "decision_id": did, "valuation_id": cand["valuation_id"],
                 "strategy": STRATEGY, "policy_version": VERSION,
                 "slug": cand["us_market_slug"], "order_intent": cand.get("side"),
@@ -1702,12 +1893,7 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
                     # THE DECISION-TIME FACTS THE ACTUAL LANE'S ADMISSION
                     # READS (facts only; this module decides nothing about
                     # execution).
-                    "admission_facts": admission_facts(
-                        cand=cand, pin=pin, match=match, p=p, obs=obs,
-                        md=md, sized=sized, econ=econ, book_age=book_age,
-                        book_source=ctx.get("last_book_source"),
-                        live_book=live_book_evidence(
-                            ctx, cand, obs=obs, now=float(clock())))},
+                    "admission_facts": facts},
                 "timeline": {
                     "pinnapi_provider_ts": {"utc_s": (cand.get("pinnacle") or {}).get("observed_at")},
                     "pinnapi_receipt": {"utc_s": (cand.get("pinnacle") or {}).get("received_at")},
@@ -1715,7 +1901,10 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
                     "decision_complete": {"utc_s": at, "utc_ns": time.time_ns(),
                                           "mono_ns": time.perf_counter_ns()},
                     "book_observed": {"utc_s": None if obs is None
-                                      else obs["observed_at"]}}}) or {}
+                                      else obs["observed_at"]}}}
+            if ap is not None:
+                payload = actual_payload(payload, ap, sized=sized, obs=obs)
+            got_i = await hook(conn, payload) or {}
             rec["execution_intent_id"] = got_i.get("intent_id")
             rec["actual_lane"] = got_i.get("actual_lane")
         except Exception as exc:                                # noqa: BLE001

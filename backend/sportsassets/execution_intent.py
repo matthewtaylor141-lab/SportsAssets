@@ -480,6 +480,9 @@ def start(get_pool, mirror) -> "ActualLane":
     # (P5_LIVE_STREAM_BOOK_V1; NOT_ESTABLISHED until an identity mapper is
     # installed in live_book_evidence.IDENTITY_MAPPER)
     decision_hooks.LIVE_BOOK_EVIDENCE = LBE.for_decision
+    # the decision's one resident stream observation: the actual lane's
+    # facts are priced from it when it is current (P5 C12)
+    decision_hooks.LIVE_BOOK_STREAM = LBE.observe
     return LANE
 
 
@@ -488,3 +491,4 @@ def stop() -> None:
     LANE = None
     decision_hooks.DECISION_HOOK = None
     decision_hooks.LIVE_BOOK_EVIDENCE = None
+    decision_hooks.LIVE_BOOK_STREAM = None

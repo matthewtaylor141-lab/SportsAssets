@@ -18,7 +18,15 @@ The live book-currency evidence (P5_LIVE_STREAM_BOOK_V1) for the decision's
 contract, installed beside DECISION_HOOK by `execution_intent.start` as
 `live_book_evidence.for_decision`. The decision modules record what it
 returns in the intent's admission facts and decide nothing from it.
+
+    LIVE_BOOK_STREAM(ctx, cand, now=...) -> dict   (sync)
+
+The decision's ONE identity answer and ONE resident institutional stream
+read (`live_book_evidence.observe`), installed beside it. When it carries a
+current `observation`, the decision modules price the ACTUAL lane's
+admission facts from it (P5 C12); otherwise nothing changes.
 """
 
 DECISION_HOOK = None
 LIVE_BOOK_EVIDENCE = None
+LIVE_BOOK_STREAM = None

@@ -450,9 +450,34 @@ async def lifespan(_: FastAPI):
     # stack when the loop is blocked >= 2 s; changes no behaviour.
     from .. import loop_watchdog as _WATCHDOG
     watchdog_tasks = _WATCHDOG.start(_cap_pool)
+    # P5 IN THE DECIDING PROCESS (C1 + C2). The exact identity mapper is
+    # installed always; it answers EXACT only over refdata this process holds,
+    # which exists only while the stream runs here. The read-only institutional
+    # stream starts ONLY when INSTITUTIONAL_MD_STREAM=on AND the PMX_*
+    # credential passes the market-data identity guard in THIS process
+    # (institutional_stream.start_default: otherwise DISABLED_BY_CONFIGURATION
+    # or CREDENTIAL_REFUSED_BY_IDENTITY_GUARD, exactly as in the workers; no
+    # thread, no task, no venue call). Never raises.
+    from .. import institutional_api_stream as _IAS
+    from .. import live_book_evidence as _LBE
+    _LBE.IDENTITY_MAPPER = _IAS.identity_mapper
+    try:
+        _ias = await _IAS.start(_cap_pool)
+        logging.getLogger(__name__).info(
+            "institutional stream in the API: %s (%s)", _ias.get("state"),
+            _ias.get("why"))
+    except Exception:  # noqa: BLE001
+        logging.getLogger(__name__).exception(
+            "institutional stream start in the API raised")
     try:
         yield
     finally:
+        # the read-only stream and its refdata task end first (no-op when
+        # it never started)
+        try:
+            await _IAS.stop()
+        except Exception:  # noqa: BLE001
+            pass
         tasks = [t for t in (desk_task, rn1x_task, rn1x_learn_task,
                              ext_task, rn1x_model_task, trim_task,
                              poller_task, capability_task, slack_task,

@@ -20,6 +20,7 @@ is not a capability; these tests prove the capability is absent:
 from __future__ import annotations
 
 import ast
+import inspect
 import pathlib
 import re
 
@@ -389,3 +390,83 @@ def test_the_stream_listener_is_called_with_plain_data_only():
     for _e, d in seen:
         for v in d.values():
             assert not callable(v)
+
+
+# ── §7 the API start path (P5 C1 + C2) and the stream-priced decision (C12)
+#
+# The API process now arms the SAME read-only stream (start_default), reads
+# instrument refdata with the workers' allow-listed `instruments` read, and
+# prices the actual lane's FACTS from the stream book. None of it can reach
+# an order: the order path stays the actual lane's existing, gated one.
+
+from sportsassets import institutional_api_stream as IAS  # noqa: E402
+from sportsassets import live_book_evidence as LBEV  # noqa: E402
+
+
+def _attrs_on(tree, name):
+    return {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)
+            and isinstance(n.value, ast.Name) and n.value.id == name}
+
+
+def _called(tree):
+    out = set()
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Call):
+            f = n.func
+            out.add(f.attr if isinstance(f, ast.Attribute)
+                    else getattr(f, "id", None))
+    return out
+
+
+_ORDER_CALLS = {"place", "submit", "submit_fok", "post_order", "cancel_order",
+                "cancel_all", "close_position", "create_order", "insert",
+                "preview", "execute_copy", "maybe_execute", "post", "delete"}
+
+
+def test_the_api_stream_module_reaches_no_order_path():
+    tree, names = _imports_of(IAS)
+    assert not names & _VENUE_MODULES, names & _VENUE_MODULES
+    assert not _called(tree) & _ORDER_CALLS, _called(tree) & _ORDER_CALLS
+    # the stream: the workers' own start path, instruments and subscribe
+    assert _attrs_on(tree, "IS") <= {
+        "start_default", "set_instrument", "want", "BOOKS", "RUNNING",
+        "S_STOPPED", "_TRANSPORT"}, _attrs_on(tree, "IS")
+    # PMX is reached for the client object only (its token and its
+    # allow-listed reads); the refdata read is the WORKERS' function
+    assert _attrs_on(tree, "pmx") == {"Institutional"}
+    assert _attrs_on(tree, "W") == {"bootstrap_instrument", "MAX_INSTRUMENTS"}
+    src = pathlib.Path(IAS.__file__).read_text()
+    assert ".read(" not in src and "secure_channel" not in src
+
+
+def test_the_refdata_read_the_api_reuses_is_the_instruments_read():
+    from sportsassets.workers import institutional_md as W
+    tree = ast.parse(inspect.getsource(W.bootstrap_instrument))
+    reads = [n for n in ast.walk(tree) if isinstance(n, ast.Call)
+             and isinstance(n.func, ast.Attribute) and n.func.attr == "read"]
+    assert len(reads) == 1
+    assert isinstance(reads[0].args[0], ast.Constant)
+    assert reads[0].args[0].value == "instruments"
+    assert "instruments" in pmx.READ_ONLY_PATHS
+
+
+def test_the_api_lifespan_reaches_the_stream_only_through_start_and_stop():
+    from sportsassets.api import app as app_mod
+    tree = ast.parse(inspect.getsource(app_mod.lifespan.__wrapped__
+                                       if hasattr(app_mod.lifespan,
+                                                  "__wrapped__")
+                                       else app_mod.lifespan))
+    assert _attrs_on(tree, "_IAS") == {"start", "stop", "identity_mapper"}
+    assert _attrs_on(tree, "_LBE") == {"IDENTITY_MAPPER"}
+
+
+def test_the_decision_paths_stream_observation_sends_nothing():
+    tree, names = _imports_of(LBEV)
+    assert not names & _VENUE_MODULES, names & _VENUE_MODULES
+    assert not _called(tree) & _ORDER_CALLS
+    assert _attrs_on(tree, "IS") <= {"want", "BOOKS", "RUNNING", "current"}
+    from sportsassets.agents import paper_benchmark as PBM
+    for fn in (PBM.actual_pricing, PBM.actual_payload,
+               PBM.stream_observation):
+        t = ast.parse(inspect.getsource(fn))
+        assert not _called(t) & _ORDER_CALLS, fn.__name__

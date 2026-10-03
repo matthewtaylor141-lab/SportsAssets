@@ -35,7 +35,6 @@ import asyncpg
 import grpc
 import pytest
 
-from sportsassets import institutional_contract_map as ICM
 from sportsassets import institutional_same_book as SB
 from sportsassets import institutional_stream as IS
 from sportsassets import institutional_stream_evidence as SE
@@ -63,10 +62,13 @@ ON_ENV = dict(PMX_ENV, INSTITUTIONAL_MD_STREAM="on")
 
 @pytest.fixture(autouse=True)
 def _reset(monkeypatch):
+    from sportsassets import institutional_api_stream as IAS
     IS.reset()
+    IAS.reset()
     monkeypatch.setattr(LBE, "IDENTITY_MAPPER", None)
     yield
     IS.reset()
+    IAS.reset()
 
 
 def by_id(res):
@@ -138,6 +140,42 @@ def test_todays_api_is_blocked_first_externally_by_pmx_absent():
     assert res["owner_approved"] is False
 
 
+async def test_after_c1_c2_c12_the_api_has_only_external_blockers(
+        monkeypatch):
+    """The API as this commit runs it with today's env (no PMX_*, flag
+    off): the lifespan has installed the mapper and called start(), the
+    actual lane has installed the stream-pricing hook. No INTERNAL blocker
+    is left; the remaining ones are external and named exactly."""
+    from sportsassets import decision_hooks as DH
+    from sportsassets import institutional_api_stream as IAS
+    out = await IAS.start(None, env={})
+    assert out["state"] == IS.S_DISABLED
+    monkeypatch.setattr(LBE, "IDENTITY_MAPPER", IAS.identity_mapper)
+    monkeypatch.setattr(DH, "LIVE_BOOK_STREAM", LBE.observe)
+    at = time.time()
+    f = facts(env={}, at=at, decisions={SLUG: LBE.evaluate_decision(
+        {}, {"us_market_slug": SLUG, "side": "ORDER_INTENT_BUY_LONG"},
+        now=at)})
+    res = P5R.assemble(f)
+    p = by_id(res)
+    assert res["verdict"] == P5R.BLOCKED
+    assert res["internal_blockers"] == []
+    assert res["first_blocking"]["predicate"] == "C1_IDENTITY_EXACT"
+    assert res["first_blocking"]["blocker"] == P5R.K_DEPENDENT
+    assert res["first_blocking"]["depends_on"] == "C2_STREAM_RUNNING"
+    ext = res["first_blocking_external"]
+    assert (ext["predicate"], ext["reason"]) == ("C2_STREAM_RUNNING",
+                                                 P5R.X_PMX_ABSENT)
+    reasons = [b["reason"] for b in res["external_blockers"]]
+    assert reasons[0] == P5R.X_PMX_ABSENT
+    assert P5R.X_FLAG_OFF in reasons
+    assert P5R.X_NOT_APPROVED in reasons and P5R.X_NO_SAMPLES in reasons
+    assert p["C12_PRICED_FROM_THIS_BOOK"]["blocker"] == P5R.K_DEPENDENT
+    assert res["deciding_process"]["decision_price_source"] == \
+        P5R.STREAM_WHEN_CURRENT
+    assert res["deciding_process"]["identity_mapper_installed"] is True
+
+
 def test_the_process_state_is_names_only():
     ps = P5R.process_state(dict(PMX_ENV, PMX_PRIVATE_KEY_B64="SECRET-VALUE"))
     assert "SECRET-VALUE" not in repr(ps)
@@ -180,26 +218,11 @@ def test_c2_selects_the_next_exact_predicate_in_order(monkeypatch):
 # ── §3 LIVE_ADMISSIBLE end to end, then each fact alone ─────────────────
 
 def exact_mapper(slug, side):
-    m = ICM.map_retail_to_institutional(slug, side or "yes", AEC)
-    return ({"status": "EXACT", "symbol": m["institutional_symbol"]}
-            if m["ok"] else {"status": "NOT_ESTABLISHED"})
-
-
-def stream_priced(ctx, cand, *, obs, now):
-    """A decision path that prices from the evaluated stream observation
-    (the C12 shape the rule requires)."""
-    slug = cand.get("us_market_slug")
-    ident = LBE.IDENTITY_MAPPER(slug, "yes") if LBE.IDENTITY_MAPPER else None
-    if not ident or ident.get("status") != "EXACT":
-        return LBC.not_evaluated(reason=LBC.R_IDENTITY_UNMAPPED,
-                                 us_market_slug=slug, now=now)
-    read = IS.current(ident["symbol"], now=now)
-    ev = read.get("evidence") or {}
-    pf = {"source": "STREAM",
-          "connection_epoch": (ev.get("connection") or {}).get("seq"),
-          "received_at": (ev.get("snapshot") or {}).get("received_at")}
-    return LBC.evaluate(stream_read=read, identity=ident, now=now,
-                        us_market_slug=slug, priced_from=pf)
+    """The API's own mapper (institutional_api_stream.identity_mapper) over
+    the refdata record the API process holds for SLUG."""
+    from sportsassets import institutional_api_stream as IAS
+    IAS.REFDATA[SLUG] = {"record": AEC, "at": time.time()}
+    return IAS.identity_mapper(slug, side)
 
 
 class _Pool:
@@ -240,9 +263,12 @@ APPROVE = ("UPDATE live_rule_artifacts SET status='APPROVED', "
 @pg
 async def test_live_admissible_end_to_end_then_each_fact_alone(venue,
                                                               monkeypatch):
+    # the deciding process as the API runs it: the exact mapper and the
+    # decision path's stream pricing hook (execution_intent.start installs
+    # decision_hooks.LIVE_BOOK_STREAM = live_book_evidence.observe)
+    from sportsassets import decision_hooks as DH
     monkeypatch.setattr(LBE, "IDENTITY_MAPPER", exact_mapper)
-    monkeypatch.setattr(LBE, "evaluate_for", stream_priced)
-    monkeypatch.setattr(P5R, "_decision_price_source", lambda: "STREAM")
+    monkeypatch.setattr(DH, "LIVE_BOOK_STREAM", LBE.observe)
     rec, gate = start_stream_here(venue, [
         ack((SLUG,)), lambda: book(symbol=SLUG, bids=((450, 1000),),
                                    offers=((470, 500),))])
@@ -277,6 +303,10 @@ async def test_live_admissible_end_to_end_then_each_fact_alone(venue,
         assert res["owner_approved"] is True and res["subject_symbol"] == SLUG
         assert res["runtime_evidence"]["stream"]["status"] == "LIVE"
         assert res["runtime_evidence"]["same_book"]["status"] == "SUPPORTED"
+        assert res["deciding_process"]["decision_price_source"] == \
+            P5R.STREAM_WHEN_CURRENT
+        assert p["C12_PRICED_FROM_THIS_BOOK"]["deciding_process"][
+            "priced_from"] == "STREAM"
         w = res["runtime_evidence"]["stream"]["symbols"][SLUG]["worker_p5"]
         assert w["stream_book_verdict"] == LBC.ESTABLISHED
         assert p["C3_CONNECTION_EPOCH_ALIVE"]["runtime_evidence"][
@@ -303,8 +333,9 @@ async def test_live_admissible_end_to_end_then_each_fact_alone(venue,
         # C8 alone: the same book evaluated 5 s later is STALE (RUNTIME)
         later = f["at"] + 5.0
         f2 = dict(copy.deepcopy(f), at=later, decisions={
-            SLUG: stream_priced({}, {"us_market_slug": SLUG}, obs=None,
-                                now=later)})
+            SLUG: LBE.evaluate_decision({}, {"us_market_slug": SLUG,
+                                          "side": "ORDER_INTENT_BUY_LONG"},
+                                     now=later)})
         r = blocked(f2)
         assert r["first_blocking"]["predicate"] == "C8_RECEIPT_AGE"
         assert r["first_blocking"]["blocker"] == P5R.K_RUNTIME
@@ -333,19 +364,23 @@ async def test_live_admissible_end_to_end_then_each_fact_alone(venue,
                             "transact_time": time.time()})
         now = time.time()
         f2 = dict(copy.deepcopy(f), at=now, decisions={
-            SLUG: stream_priced({}, {"us_market_slug": SLUG}, obs=None,
-                                now=now)})
+            SLUG: LBE.evaluate_decision({}, {"us_market_slug": SLUG,
+                                             "side": "ORDER_INTENT_BUY_LONG"},
+                                        now=now)})
         r = blocked(f2)
         bad = {x["predicate"] for x in r["predicates"]
                if x["status"] != P5R.PROVEN}
-        assert bad == {"C10_MARKET_OPEN", "C11_STREAM_BOOK_CURRENT"}
+        # a refused stream book is never priced from: C12 fails with them
+        assert bad == {"C10_MARKET_OPEN", "C11_STREAM_BOOK_CURRENT",
+                       "C12_PRICED_FROM_THIS_BOOK"}
         assert by_id(r)["C10_MARKET_OPEN"]["reason"] == LBC.R_NOT_OPEN
         # C3/C4 alone: the connection ends -> GAP
         IS.BOOKS.on_disconnected("test")
         now = time.time()
         f2 = dict(copy.deepcopy(f), at=now, decisions={
-            SLUG: stream_priced({}, {"us_market_slug": SLUG}, obs=None,
-                                now=now)})
+            SLUG: LBE.evaluate_decision({}, {"us_market_slug": SLUG,
+                                             "side": "ORDER_INTENT_BUY_LONG"},
+                                        now=now)})
         r = blocked(f2)
         assert by_id(r)["C3_CONNECTION_EPOCH_ALIVE"]["reason"] == \
             LBC.R_EPOCH_LOST
