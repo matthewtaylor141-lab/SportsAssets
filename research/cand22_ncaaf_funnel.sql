@@ -101,14 +101,10 @@ SELECT strategy, verdict, refusal, count(*) AS n,
  WHERE split_part(us_market_slug, '-', 2) = 'cfb' AND decided_at >= w.t0
  GROUP BY 1, 2, 3 ORDER BY 4 DESC LIMIT 20;
 
-\echo '== F4 · coverage_integrity (migration 209) and the coverage census, same league identity =='
-SELECT tz, day, league, provider_events, normalized_events, venue_discovered,
-       mapped_events, settlement_supported, evaluated_events, decided_events,
-       entered_events, refused_events, ordered_events, filled_events,
-       venue_catalogue_events, computed_at
-  FROM coverage_funnel_snapshots
- WHERE league = 'americanfootball_ncaaf'
- ORDER BY day DESC, computed_at DESC LIMIT 3;
+\echo '== F4 · the coverage census (same league identity: by_league NCAAF; mandate requested keys) =='
+-- coverage_integrity's coverage_funnel_snapshots (migration 209) is read by
+-- cand22_ncaaf_coverage_integrity.sql once that migration is in production;
+-- referencing an absent table here would abort this file (ON_ERROR_STOP).
 SELECT at, categories->'by_league'->'NCAAF' AS ncaaf_census,
        categories->'mandate'->'requested_keys' AS mandate_requested
   FROM derek_coverage_census ORDER BY at DESC LIMIT 1;
