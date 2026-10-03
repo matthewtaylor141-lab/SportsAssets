@@ -43,6 +43,8 @@ import time
 from datetime import datetime, timezone
 
 from .. import institutional_book as ib
+from .. import institutional_stream as istream
+from .. import market_data_identity as mdi
 from .. import pmx_institutional as pmx
 from .. import shadow_experimental_store as xstore
 from .. import shadow_identity_resolver as resolver
@@ -227,7 +229,11 @@ async def run() -> None:
             "orderSubmissionImplementation":
                 pmx.ORDER_SUBMISSION_IMPLEMENTATION,
             "freshnessLimitS": ib.FRESHNESS_LIMIT_S,
-            "presence": seen}
+            "presence": seen,
+            # WHICH IDENTITY THIS PROCESS WOULD READ MARKET DATA WITH: type,
+            # presence, identifier fingerprints and distinctness from the
+            # retail execution and funded keys. Never a value.
+            "marketDataIdentity": mdi.inventory()}
     log.info("institutional_md: %s", boot)
 
     if seen["verdict"]:
@@ -250,6 +256,13 @@ async def run() -> None:
              verdict.get("READ_L2_PERMISSION"))
     await heartbeat(SERVICE, str(verdict.get("AUTH_STATUS")), boot)
 
+    # THE STREAMING PATH, off unless INSTITUTIONAL_MD_STREAM=on, refused by
+    # the identity guard for an execution key, and TRANSPORT_UNAVAILABLE until
+    # grpcio and the venue's compiled protos are in the image. Never raises.
+    stream_start = istream.start_default()
+    log.info("institutional_md: stream %s (%s)", stream_start.get("state"),
+             stream_start.get("why"))
+
     last_evidence = 0.0
     # 0.0 rather than time.monotonic(): the FIRST pass through the loop
     # must bind, not wait a minute to start. Until a market is bound its
@@ -270,6 +283,12 @@ async def run() -> None:
         if not symbols:
             stats["status"] = "no_focus_set"
         else:
+            # The stream holds the same focus set, priced by the same refdata.
+            for sym in symbols[:MAX_INSTRUMENTS]:
+                inst = store.instrument(sym)
+                if inst and inst.get("record") is not None:
+                    istream.set_instrument(sym, inst["record"])
+            istream.want(symbols[:MAX_INSTRUMENTS])
             try:
                 stats.update(await asyncio.to_thread(
                     sweep_once, client, store, symbols))
@@ -317,6 +336,7 @@ async def run() -> None:
         stats["marketDataMechanism"] = pmx.MARKET_DATA_MECHANISM
         stats["orderSubmissionImplementation"] = \
             pmx.ORDER_SUBMISSION_IMPLEMENTATION
+        stats["stream"] = istream.digest()
 
         # THE HEARTBEAT IS NOT ON THE HOT PATH, so it is throttled:
         # §7 keeps reporting out of the decision path, and a beat every
