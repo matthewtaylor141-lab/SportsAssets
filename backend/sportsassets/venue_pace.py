@@ -53,9 +53,12 @@ tick (mirror_live.tick_once and fast_tick_once), and which
 asyncio.to_thread copies into every worker thread the tick starts, so
 the tick's claims made through functions the shadow also owns (its
 paced quote read, its positions walk, the resolver's reads) take the
-mirror's lane without a keyword on every shared callee. The ONLY
-priority claimant is the live mirror's tick; the shadow's and
-price_path's loops and pmus's default stay normal. THE GAP DOES NOT
+mirror's lane without a keyword on every shared callee. The priority
+claimants are the money paths only: the protected workers' live mirror
+tick (its process) and, in the API process (2026-10-03), the WS-triggered
+single-event evaluation (pinnapi_reactive.evaluate) and the small-live
+execution mirror's tick (execmirror.run); the shadow's, price_path's and
+the periodic collector's reads and pmus's default stay normal. THE GAP DOES NOT
 MOVE and the venue's rate is not raised: whoever claims next computes
 its wait from the LAST claim's record and sleeps it out holding the
 gate (`_busy`), so between ANY two requests through here, in any mix

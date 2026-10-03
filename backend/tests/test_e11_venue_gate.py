@@ -448,7 +448,17 @@ def _priority_sites():
 def test_e11_the_only_priority_claimant_is_the_mirrors_tick_by_ast_and_the_shadows_sites_say_no_lane():
     keyword, entries = _priority_sites()
     assert keyword == set(), "no site in the package passes the keyword: the lane is the tick's context"
-    assert entries == {("workers/mirror_live.py", "tick_once"), ("workers/mirror_live.py", "fast_tick_once")}
+    # 2026-10-03 (owner: decision-time reads must not queue behind bulk
+    # collection; fix the 429/read scheduling, never weaken freshness): two
+    # more money-path claimants, each in the API process, whose own pacer the
+    # protected workers' mirror does not share -- the WS-triggered single-event
+    # evaluation and the small-live execution mirror's tick.
+    assert entries == {("workers/mirror_live.py", "tick_once"), ("workers/mirror_live.py", "fast_tick_once"),
+                       ("pinnapi_reactive.py", "evaluate"), ("execmirror.py", "run")}
+    react = (PKG / "pinnapi_reactive.py").read_text()
+    assert react.index("with venue_pace.priority_claims():") < react.index("return await cycle(conn, stream_seed=seed)")
+    em = (PKG / "execmirror.py").read_text()
+    assert em.index("with venue_pace.priority_claims():") < em.index("await mirror.tick(conn)")
     once, fast = inspect.getsource(ml.tick_once), inspect.getsource(ml.fast_tick_once)
     assert once.index("with venue_pace.priority_claims():") < once.index("await _tick(t, woken)") < once.index("finally:")
     assert fast.index("with venue_pace.priority_claims():") < fast.index("await _fast_tick(t, taken)")

@@ -278,7 +278,8 @@ async def _setup(conn, monkeypatch, *, cap=25, ago_s=5):
 async def _paper_order(conn, acct, *, role="ENTRY", direction="BUY",
                        intent="ORDER_INTENT_BUY_LONG", qty=2000, wire=0.55,
                        tif="IOC", otype="MARKETABLE", group=None, state="PENDING_SIMULATION",
-                       decided_offset_s=0.0, strategy=None):
+                       decided_offset_s=0.0, strategy="PINNACLE_COMPLETED_GAME_PAPER",
+                       policy_version="PINNACLE_COMPLETED_GAME_PAPER_V2"):
     oid = "paper_%s" % uuid.uuid4().hex[:12]
     group = group or "paper_group_%s" % uuid.uuid4().hex[:8]
     now = dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=decided_offset_s)
@@ -291,6 +292,8 @@ async def _paper_order(conn, acct, *, role="ENTRY", direction="BUY",
                 expires_at=now + dt.timedelta(minutes=30), simulator_version="TEST")
     if strategy:
         cols["strategy"] = strategy
+    if policy_version:
+        cols["label"] = json.dumps({"policy_version": policy_version})
     names = ", ".join(cols)
     ph = ", ".join("$%d" % (i + 1) for i in range(len(cols)))
     await conn.execute("INSERT INTO paper_orders (%s) VALUES (%s)" % (names, ph),
@@ -629,7 +632,7 @@ async def test_the_management_view_shows_paper_beside_live(monkeypatch):
     conn = await _conn()
     try:
         acct, venue, mirror = await _setup(conn, monkeypatch)
-        po = await _paper_order(conn, acct, qty=2702, strategy="PINNACLE_EXPLORATION_PAPER")
+        po = await _paper_order(conn, acct, qty=2702)
         venue.behaviour = [{"fill": 3}]
         await mirror.tick(conn)
         await _paper_fill(conn, acct, po, qty=2702)
@@ -637,12 +640,151 @@ async def test_the_management_view_shows_paper_beside_live(monkeypatch):
         o = next(x for x in v["orders"] if x["paper_order_id"] == po["order_id"])
         assert o["expected_scaled_qty"] == 2.702 and o["live"]["qty"] == 3
         assert o["live"]["venue_order_id"] == "v1" and o["live"]["filled_qty"] == 3
-        assert o["strategy"]["kind"] == "TRAINING" and o["strategy"]["disclosure"]
         assert v["coverage"]["mirrored"] == 1
         assert v["title"] == "Live execution mirror · 1:1000"
         mk = next(m for m in v["pnl"]["markets"] if m["market"] == po["slug"])
         assert mk["live"]["entry_target_qty"] == 3
         e = mk["comparison"]["explained"]
         assert abs(sum(e.values()) - mk["comparison"]["difference"]) < 1e-5
+    finally:
+        await conn.close()
+
+
+# ═════════════════════════════════════════════════════════════════════
+# LIVE ELIGIBILITY -- investment policy only, fail closed (owner, 2026-10-03)
+# ═════════════════════════════════════════════════════════════════════
+
+def test_only_the_allowlisted_investment_policy_version_is_live_eligible():
+    ok, ev = M.live_eligibility({"strategy": "PINNACLE_COMPLETED_GAME_PAPER",
+                                 "decision_policy_version": "PINNACLE_COMPLETED_GAME_PAPER_V2",
+                                 "role": "ENTRY"})
+    assert ok and ev["class"] == "INVESTMENT_POLICY"
+    for strategy, cls in (("PINNACLE_EXPLORATION_PAPER", "EXPLORATION_RESEARCH_COST_PAPER_ONLY"),
+                          ("PINNACLE_ONLY_PAPER_BENCHMARK", "BENCHMARK_RESEARCH_ONLY"),
+                          ("PINNACLE_COMPLETED_GAME_MAKER_PAPER", "EXPERIMENT_NOT_PROMOTED"),
+                          ("DEREK_ENTRY_POLICY_V2", "UNKNOWN_STRATEGY"),
+                          ("SOMETHING_NEW", "UNKNOWN_STRATEGY"),
+                          (None, "UNKNOWN_STRATEGY")):
+        ok, ev = M.live_eligibility({"strategy": strategy, "role": "ENTRY",
+                                     "decision_policy_version": "ANY"})
+        assert not ok and ev["class"] == cls, (strategy, ev)
+    # an un-promoted version of the investment policy is not eligible
+    for version in ("PINNACLE_COMPLETED_GAME_PAPER_V3", None, ""):
+        ok, ev = M.live_eligibility({"strategy": "PINNACLE_COMPLETED_GAME_PAPER",
+                                     "decision_policy_version": version, "role": "ENTRY"})
+        assert not ok and ev["class"] == "POLICY_VERSION_NOT_PROMOTED"
+    # exploration exits are never eligible either
+    ok, _ = M.live_eligibility({"strategy": "PINNACLE_EXPLORATION_PAPER", "role": "EXIT"})
+    assert not ok
+
+
+@pg
+@pytest.mark.asyncio
+async def test_an_exploration_paper_order_and_fill_never_reach_the_live_adapter(monkeypatch):
+    conn = await _conn()
+    try:
+        acct, venue, mirror = await _setup(conn, monkeypatch)
+        po = await _paper_order(conn, acct, qty=2702,
+                                strategy="PINNACLE_EXPLORATION_PAPER",
+                                policy_version="PINNACLE_EXPLORATION_PAPER_V3")
+        await _paper_fill(conn, acct, po, qty=2702)
+        ex = await _paper_order(conn, acct, role="EXIT", direction="SELL",
+                                intent="ORDER_INTENT_SELL_LONG", qty=2702,
+                                group=po["group_id"],
+                                strategy="PINNACLE_EXPLORATION_PAPER",
+                                policy_version="PINNACLE_EXPLORATION_PAPER_V3")
+        for _ in range(3):
+            await mirror.tick(conn)
+        assert venue.placed == []                      # nothing ever sent
+        for oid in (po["order_id"], ex["order_id"]):
+            r = await _row(conn, oid)
+            assert r["state"] == "EXCLUDED", r
+            assert r["exclusion"] == M.STRATEGY_NOT_LIVE_ELIGIBLE
+            assert r["live_qty"] == 0
+            d = json.loads(r["detail"]) if isinstance(r["detail"], str) else r["detail"]
+            assert d["live_eligibility"]["class"] == "EXPLORATION_RESEARCH_COST_PAPER_ONLY"
+    finally:
+        await conn.close()
+
+
+@pg
+@pytest.mark.asyncio
+async def test_unknown_strategy_and_unpromoted_version_fail_closed(monkeypatch):
+    conn = await _conn()
+    try:
+        acct, venue, mirror = await _setup(conn, monkeypatch)
+        # (an unknown strategy name cannot even be written: the paper_orders
+        # strategy CHECK refuses it; the pure test covers the unknown branch)
+        unknown = await _paper_order(conn, acct, qty=2702,
+                                     strategy="PINNACLE_ONLY_PAPER_BENCHMARK",
+                                     policy_version="PINNACLE_ONLY_PAPER_BENCHMARK_V1")
+        v3 = await _paper_order(conn, acct, qty=2702,
+                                policy_version="PINNACLE_COMPLETED_GAME_PAPER_V3")
+        none = await _paper_order(conn, acct, qty=2702, policy_version=None)
+        await mirror.tick(conn)
+        assert venue.placed == []
+        for oid in (unknown["order_id"], v3["order_id"], none["order_id"]):
+            r = await _row(conn, oid)
+            assert r["state"] == "EXCLUDED" and r["exclusion"] == M.STRATEGY_NOT_LIVE_ELIGIBLE
+    finally:
+        await conn.close()
+
+
+# ═════════════════════════════════════════════════════════════════════
+# PRE-SUBMIT REVALIDATION -- a stale intent is excluded, never re-decided
+# ═════════════════════════════════════════════════════════════════════
+
+def test_the_intent_age_bound_is_the_collectors_pinnacle_freshness_rule():
+    from sportsassets.workers import ext_pinnacle_loop as LOOP
+    assert M.MAX_INTENT_AGE_S == LOOP.PINNACLE_MAX_AGE_S == 30.0
+
+
+@pg
+@pytest.mark.asyncio
+async def test_an_intent_older_than_the_freshness_rule_is_excluded_not_sent(monkeypatch):
+    conn = await _conn()
+    try:
+        acct, venue, mirror = await _setup(conn, monkeypatch, ago_s=600)
+        po = await _paper_order(conn, acct, qty=2702, decided_offset_s=-45.0)
+        await mirror.tick(conn)
+        assert venue.placed == []
+        r = await _row(conn, po["order_id"])
+        assert r["state"] == "EXCLUDED" and r["exclusion"] == M.INTENT_STALE
+        d = json.loads(r["detail"]) if isinstance(r["detail"], str) else r["detail"]
+        rv = d["revalidation"]
+        assert rv["refused"] == M.INTENT_STALE and rv["intent_age_s"] > 30.0
+        assert rv["max_intent_age_s"] == 30.0
+    finally:
+        await conn.close()
+
+
+@pg
+@pytest.mark.asyncio
+async def test_a_paper_order_that_ended_before_submission_is_excluded(monkeypatch):
+    conn = await _conn()
+    try:
+        acct, venue, mirror = await _setup(conn, monkeypatch)
+        po = await _paper_order(conn, acct, qty=2702, state="CANCELED")
+        await mirror.tick(conn)
+        assert venue.placed == []
+        r = await _row(conn, po["order_id"])
+        assert r["state"] == "EXCLUDED" and r["exclusion"] == M.PAPER_ORDER_ENDED
+    finally:
+        await conn.close()
+
+
+@pg
+@pytest.mark.asyncio
+async def test_a_fresh_qualified_intent_is_still_sent_once(monkeypatch):
+    conn = await _conn()
+    try:
+        acct, venue, mirror = await _setup(conn, monkeypatch)
+        po = await _paper_order(conn, acct, qty=2702, decided_offset_s=-2.0)
+        venue.behaviour = [{"fill": 3}]
+        await mirror.tick(conn)
+        assert len(venue.placed) == 1
+        r = await _row(conn, po["order_id"])
+        assert r["state"] in ("FILLED", "OPEN", "PARTIALLY_FILLED", "CANCELLED")
+        assert r["exclusion"] is None
     finally:
         await conn.close()

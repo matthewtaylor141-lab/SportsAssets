@@ -45,6 +45,7 @@ from decimal import ROUND_HALF_EVEN, Decimal
 from typing import Any
 
 from . import execmirror_probe as EP
+from . import venue_pace
 
 log = logging.getLogger(__name__)
 
@@ -82,6 +83,58 @@ ABOVE_ORDER_CAP = "ABOVE_ORDER_CAP"
 INTENT_MISMATCH = "INTENT_MISMATCH"
 UNSUPPORTED_ORDER = "UNSUPPORTED_ORDER"
 INVENTORY_COMMITTED = "INVENTORY_COMMITTED"
+STRATEGY_NOT_LIVE_ELIGIBLE = "STRATEGY_NOT_LIVE_ELIGIBLE"
+INTENT_STALE = "INTENT_STALE"
+PAPER_ORDER_ENDED = "PAPER_ORDER_ENDED_BEFORE_SUBMIT"
+
+# PRE-SUBMIT REVALIDATION. A live order copies ONE paper decision; it is never
+# re-interpreted with newer economics. The paper decision's probability is
+# admissible only inside the collector's Pinnacle freshness rule
+# (ext_pinnacle_loop.PINNACLE_MAX_AGE_S, 30 s; pinned equal by a test), so an
+# intent older than that at submission is EXCLUDED as INTENT_STALE, as is one
+# whose paper order has already ended or expired. Nothing is recomputed here.
+MAX_INTENT_AGE_S = 30.0
+
+# LIVE ELIGIBILITY: an explicit allowlist of strategy -> exact policy version.
+# Small-live execution copies ECONOMICALLY QUALIFIED investment-policy
+# decisions only (owner, 2026-10-03). The completed-game policy's ENTER
+# requires the gross edge to clear its threshold AND modelled net profit
+# after fees > 0 on a current observed book (paper_benchmark.decide_one).
+# Everything else is PAPER ONLY and fails closed: exploration (selection
+# relaxes the edge and after-fee requirements by design -- a research
+# cost), training, calibration-only, the strict benchmark, the maker
+# experiment, Derek's own lane until promoted, and any unknown strategy or
+# version. A new version is NOT eligible until it is added here through the
+# approved policy process.
+LIVE_ELIGIBLE = {
+    "PINNACLE_COMPLETED_GAME_PAPER": ("PINNACLE_COMPLETED_GAME_PAPER_V2",),
+}
+PAPER_ONLY_CLASS = {
+    "PINNACLE_EXPLORATION_PAPER": "EXPLORATION_RESEARCH_COST_PAPER_ONLY",
+    "PINNACLE_ONLY_PAPER_BENCHMARK": "BENCHMARK_RESEARCH_ONLY",
+    "PINNACLE_COMPLETED_GAME_MAKER_PAPER": "EXPERIMENT_NOT_PROMOTED",
+}
+
+
+def live_eligibility(order: dict) -> tuple[bool, dict]:
+    """(eligible, evidence). Fail closed: an order is live-eligible only when
+    its strategy is allowlisted and, for a BUY (new exposure), the deciding
+    policy version is one of that strategy's allowlisted versions. A SELL of
+    an allowlisted strategy's group is eligible (it can only ever reduce live
+    inventory that an eligible entry created; plan_sell enforces that)."""
+    strategy = order.get("strategy") or order.get("decision_strategy")
+    version = order.get("decision_policy_version")
+    ev = {"strategy": strategy, "policy_version": version,
+          "role": order.get("role"),
+          "allowlist": {k: list(v) for k, v in LIVE_ELIGIBLE.items()}}
+    if strategy not in LIVE_ELIGIBLE:
+        ev["class"] = PAPER_ONLY_CLASS.get(str(strategy), "UNKNOWN_STRATEGY")
+        return False, ev
+    if order.get("role") in BUY_ROLES and version not in LIVE_ELIGIBLE[strategy]:
+        ev["class"] = "POLICY_VERSION_NOT_PROMOTED"
+        return False, ev
+    ev["class"] = "INVESTMENT_POLICY"
+    return True, ev
 
 
 # ─────────────────────────── pure rules ───────────────────────────
@@ -445,7 +498,9 @@ class Mirror:
     # --- planning ----------------------------------------------------------
     async def plan_new(self, conn, ctl) -> int:
         rows = await conn.fetch(
-            """SELECT o.*, d.strategy AS decision_strategy
+            """SELECT o.*, d.strategy AS decision_strategy,
+                      coalesce(d.policy_version, o.label->>'policy_version')
+                        AS decision_policy_version
                  FROM paper_orders o LEFT JOIN paper_decisions d USING (decision_id)
                 WHERE o.account_id = $1 AND o.decided_at >= $2
                   AND NOT EXISTS (SELECT 1 FROM execmirror_orders m
@@ -455,7 +510,11 @@ class Mirror:
         n = 0
         for o in rows:
             o = dict(o)
-            if o["role"] in BUY_ROLES:
+            eligible, why = live_eligibility(o)
+            if not eligible:
+                plan = Plan("EXCLUDED", exclusion=STRATEGY_NOT_LIVE_ELIGIBLE,
+                            detail={"live_eligibility": why})
+            elif o["role"] in BUY_ROLES:
                 plan = plan_buy(o, scale=ctl["scale"], buying_power=self._buying_power,
                                 max_order_usd=ctl["max_order_usd"])
             elif o["role"] in SELL_ROLES:
@@ -505,6 +564,10 @@ class Mirror:
         for r in rows:
             params = (json.loads(r["detail"]) if isinstance(r["detail"], str)
                       else r["detail"]).get("params") or {}
+            stale = await self._revalidate(conn, r)
+            if stale is not None:
+                n += 1
+                continue
             claimed = await conn.fetchval(
                 """UPDATE execmirror_orders SET state = 'SUBMITTING', attempts = attempts + 1,
                      submit_started_at = now(), updated_at = now()
@@ -547,6 +610,38 @@ class Mirror:
                                                avg_px=None, fees_usd=0))
             n += 1
         return n
+
+    async def _revalidate(self, conn, r) -> str | None:
+        """Exclude a PLANNED order whose intent is no longer the decision it
+        copies. Returns the exclusion code, or None when it may be sent."""
+        now = self._now()
+        why, ev = None, {"checked_at": now, "max_intent_age_s": MAX_INTENT_AGE_S}
+        if r["paper_order_id"]:
+            p = await conn.fetchrow(
+                "SELECT state, expires_at FROM paper_orders WHERE order_id = $1",
+                r["paper_order_id"])
+            ev["paper_state"] = None if p is None else p["state"]
+            if p is None or p["state"] in PAPER_DEAD:
+                why = PAPER_ORDER_ENDED
+            elif p["expires_at"] is not None and p["expires_at"].timestamp() <= now:
+                why, ev["paper_expired_at"] = INTENT_STALE, p["expires_at"].timestamp()
+        if why is None and r["role"] in BUY_ROLES:
+            decided = r["paper_decided_at"]
+            age = None if decided is None else now - decided.timestamp()
+            ev["intent_age_s"] = None if age is None else round(age, 3)
+            if age is None or age > MAX_INTENT_AGE_S or age < -1.0:
+                why = INTENT_STALE
+        if why is None:
+            return None
+        done = await conn.fetchval(
+            """UPDATE execmirror_orders SET state = 'EXCLUDED', exclusion = $2,
+                 detail = detail || $3::jsonb, updated_at = now()
+               WHERE mirror_id = $1 AND state = 'PLANNED' RETURNING mirror_id""",
+            r["mirror_id"], why, _j({"revalidation": dict(ev, refused=why)}))
+        if done:
+            await _event(conn, "EXCLUDED", mirror_id=r["mirror_id"],
+                         paper_order_id=r["paper_order_id"], exclusion=why)
+        return why
 
     # --- cancellation --------------------------------------------------------
     async def propagate_cancels(self, conn) -> int:
@@ -818,7 +913,10 @@ async def run(get_pool) -> None:
                 try:
                     while True:
                         try:
-                            await mirror.tick(conn)
+                            # the small-live money path: priority lane of the
+                            # venue gate in this process (venue_pace E11)
+                            with venue_pace.priority_claims():
+                                await mirror.tick(conn)
                         except asyncio.CancelledError:
                             raise
                         except Exception:                     # noqa: BLE001

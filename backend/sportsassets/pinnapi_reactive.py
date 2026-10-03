@@ -151,8 +151,15 @@ def start(pool, *, cycle):
         return None
 
     async def evaluate(seed):
+        # DECISION-TIME READS TAKE THE PRIORITY LANE of this process's venue
+        # gate (venue_pace E11): a WS-triggered evaluation is one event, one
+        # at a time, under a 12 s deadline, and its book reads must not queue
+        # behind the periodic collector's bulk reads. The gap and the 429
+        # circuit are unchanged; starvation is bounded by PACE_PRIORITY_BURST.
+        from . import venue_pace
         async with pool.acquire() as conn:
-            return await cycle(conn, stream_seed=seed)
+            with venue_pace.priority_claims():
+                return await cycle(conn, stream_seed=seed)
 
     # WHICH PROCESS WROTE THE ATTEMPT: the deployed build and this feed
     # owner's runtime, so a readback proves the writer -- not merely the web

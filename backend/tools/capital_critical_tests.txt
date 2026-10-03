@@ -496,3 +496,9 @@ tests/test_pinnapi_reactive.py
 # non-owner-account known gap is isolated in test_pinnapi_reactive_known_gaps.py,
 # strict xfail, deliberately not on this list.)
 tests/test_pinnapi_reactive_integration.py
+# Execution mirror (Polymarket US small-live): scaling, venue-record fills,
+# ambiguous-submit reconciliation, emergency stop, account fingerprint, and
+# LIVE ELIGIBILITY -- investment-policy allowlist, exploration/benchmark/
+# unknown/un-promoted versions never reach the live adapter.
+tests/test_execmirror.py
+tests/test_execmirror_probe.py
