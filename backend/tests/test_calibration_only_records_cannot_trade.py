@@ -393,6 +393,14 @@ READERS = {
     "workers/ext_pinnacle_loop.py": ("WRITER_AND_OUTCOME_JOIN_READS_ALL", 8),
     # SHOULD read calibration-only rows
     "bettor_source_calibration.py": ("CALIBRATION_MEASUREMENT_READS_ALL", 3),
+    # (208) the SHADOW intelligence layer: the calibration engine scores
+    # every recorded probability (both purposes, like the measurement
+    # above); regime reads refusal mix, quote age and probability moves for
+    # reporting; reads.py joins a decision's valuation by id. None selects a
+    # candidate, sizes or places anything (tests/test_intel_is_shadow_only).
+    "intel/calibration.py": ("SHADOW_CALIBRATION_ENGINE_READS_ALL", 2),
+    "intel/regime.py": ("SHADOW_REGIME_REPORTING_READS_ALL", 2),
+    "intel/reads.py": ("BY_ID_FROM_A_DECISION_SHADOW_ONLY", 1),
     # select candidates or a decision's probability -> filter the purpose
     # (asserted constant by constant above)
     "bettor_hold_value.py": ("FILTERS_ENTRY_DECISION", 4),

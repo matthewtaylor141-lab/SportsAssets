@@ -483,6 +483,21 @@ async def lifespan(_: FastAPI):
     except Exception:  # noqa: BLE001
         logging.getLogger(__name__).exception(
             "institutional stream start in the API raised")
+    # ── THE SHADOW INTELLIGENCE RUNNER (migration 208) ───────────────
+    # Allocator, calibration, attribution, sizing, risk (with Audrey's
+    # independent recompute) and regime, every CYCLE_S. SHADOW: it writes
+    # only its own intel_* tables (and an Audrey finding on a recompute
+    # disagreement); no venue, order, sizing, limit or probability
+    # authority. Failure-isolated and bounded; INTEL_SHADOW=off is a kill
+    # switch. Without migration 208 it idles.
+    intel_task = None
+    try:
+        from ..intel import runner as _INTEL
+        if _INTEL.enabled():
+            intel_task = asyncio.create_task(_INTEL.run(_cap_pool))
+            log.info("intel shadow runner armed (advisory lock per cycle)")
+    except Exception:  # noqa: BLE001 -- the API must serve regardless
+        log.exception("intel shadow runner failed to arm")
     try:
         yield
     finally:
@@ -495,7 +510,7 @@ async def lifespan(_: FastAPI):
         tasks = [t for t in (desk_task, rn1x_task, rn1x_learn_task,
                              ext_task, rn1x_model_task, trim_task,
                              poller_task, capability_task, slack_task,
-                             karen_task, execmirror_task,
+                             karen_task, execmirror_task, intel_task,
                              *watchdog_tasks)
                  if t is not None]
         for task in tasks:
@@ -598,6 +613,13 @@ try:
     app.include_router(_paper_learning_router)
 except ImportError:
     log.warning("paper: api.paper_learning_routes not loaded", exc_info=True)
+# ── THE SHADOW INTELLIGENCE READS (migration 208): /api/command/intel/*
+# GET only, COMMAND auth. SHADOW: no route here writes or has authority.
+try:
+    from .command_intel import router as _command_intel_router
+    app.include_router(_command_intel_router)
+except ImportError:
+    log.warning("intel: api.command_intel not loaded", exc_info=True)
 from .agent_capabilities import router as _capabilities_router
 app.include_router(_capabilities_router)
 from .slack_agents import router as _slack_agents_router

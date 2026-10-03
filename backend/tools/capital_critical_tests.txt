@@ -645,3 +645,13 @@ tests/test_karen_management_url.py
 # and C12 refuses; stale / crossed / gap / other-symbol books never place.
 tests/test_p5_api_stream.py
 tests/test_p5_c12_stream_priced_actual.py
+# The SHADOW investment-intelligence layer (migration 208): it can reach no
+# venue, order or limit, writes only intel_* tables (Audrey: a finding), and
+# its calibration, attribution, risk (with Audrey's independent recompute),
+# regime, sizing and allocation arithmetic is pinned.
+tests/test_intel_is_shadow_only.py
+tests/test_intel_calibration.py
+tests/test_intel_attribution.py
+tests/test_intel_risk.py
+tests/test_intel_regime.py
+tests/test_intel_sizing_allocator.py
