@@ -1,0 +1,46 @@
+test_cannot_sell_other_venue_holding (test_agent_intelligence_reports.CrossVenue.test_cannot_sell_other_venue_holding) ... ok
+test_cheaper_executable_venue_wins (test_agent_intelligence_reports.CrossVenue.test_cheaper_executable_venue_wins) ... ok
+test_fees_can_reverse_headline_price (test_agent_intelligence_reports.CrossVenue.test_fees_can_reverse_headline_price) ... ok
+test_future_or_stale_quote_refused (test_agent_intelligence_reports.CrossVenue.test_future_or_stale_quote_refused) ... ok
+test_hold_beats_negative_ev_purchase (test_agent_intelligence_reports.CrossVenue.test_hold_beats_negative_ev_purchase) ... ok
+test_insufficient_cash_not_executable (test_agent_intelligence_reports.CrossVenue.test_insufficient_cash_not_executable) ... ok
+test_invalid_probability_no_ranking (test_agent_intelligence_reports.CrossVenue.test_invalid_probability_no_ranking) ... ok
+test_missing_rules_not_invented (test_agent_intelligence_reports.CrossVenue.test_missing_rules_not_invented) ... ok
+test_missing_snapshot_returns_explicit_blocker (test_agent_intelligence_reports.CrossVenue.test_missing_snapshot_returns_explicit_blocker) ... ok
+test_partial_fill_visible_and_zero_fill_in_risk (test_agent_intelligence_reports.CrossVenue.test_partial_fill_visible_and_zero_fill_in_risk) ... ok
+test_scope_does_not_leak_another_account (test_agent_intelligence_reports.CrossVenue.test_scope_does_not_leak_another_account) ... ok
+test_settlement_mismatch_refused (test_agent_intelligence_reports.CrossVenue.test_settlement_mismatch_refused) ... ok
+test_valid_sell_and_hedge_preserve_payoffs (test_agent_intelligence_reports.CrossVenue.test_valid_sell_and_hedge_preserve_payoffs) ... ok
+test_venue_size_rounding_and_minimum (test_agent_intelligence_reports.CrossVenue.test_venue_size_rounding_and_minimum) ... ok
+test_zero_unknown_forecast_not_assumed (test_agent_intelligence_reports.CrossVenue.test_zero_unknown_forecast_not_assumed) ... ok
+test_actual_tool_dispatch_account_and_readonly_transaction (test_agent_intelligence_reports.Reports.test_actual_tool_dispatch_account_and_readonly_transaction) ... ok
+test_calibration_refusal_may_still_reach_derek (test_agent_intelligence_reports.Reports.test_calibration_refusal_may_still_reach_derek) ... ok
+test_extreme_probability_and_nan (test_agent_intelligence_reports.Reports.test_extreme_probability_and_nan) ... ok
+test_forecast_scores_known_values (test_agent_intelligence_reports.Reports.test_forecast_scores_known_values) ... ok
+test_health_counters_allowlisted_no_secret_leak (test_agent_intelligence_reports.Reports.test_health_counters_allowlisted_no_secret_leak) ... ok
+test_health_stale_is_not_authority_or_zero (test_agent_intelligence_reports.Reports.test_health_stale_is_not_authority_or_zero) ... ok
+test_mapping_change_does_not_double_count_event (test_agent_intelligence_reports.Reports.test_mapping_change_does_not_double_count_event) ... ok
+test_repeated_predictions_use_earliest_in_sample (test_agent_intelligence_reports.Reports.test_repeated_predictions_use_earliest_in_sample) ... ok
+test_repeats_count_once_latest_recovery_not_lost (test_agent_intelligence_reports.Reports.test_repeats_count_once_latest_recovery_not_lost) ... ok
+test_unknown_identity_and_sample_not_zero_coverage (test_agent_intelligence_reports.Reports.test_unknown_identity_and_sample_not_zero_coverage) ... ok
+test_unresolved_future_and_backdated_outcomes_not_scored (test_agent_intelligence_reports.Reports.test_unresolved_future_and_backdated_outcomes_not_scored) ... ok
+test_versions_purposes_and_sports_separate (test_agent_intelligence_reports.Reports.test_versions_purposes_and_sports_separate) ... ok
+
+----------------------------------------------------------------------
+Ran 27 tests in 0.003s
+
+OK
+test_audrey_keeps_findings_as_findings (test_agent_role_briefs.Briefs.test_audrey_keeps_findings_as_findings) ... ok
+test_derek_counts_distinct_contracts_and_separates_versions (test_agent_role_briefs.Briefs.test_derek_counts_distinct_contracts_and_separates_versions) ... ok
+test_latest_xavier_review_per_group_unknown_is_not_fresh (test_agent_role_briefs.Briefs.test_latest_xavier_review_per_group_unknown_is_not_fresh) ... ok
+test_sampling_is_explicit_and_empty_is_not_success (test_agent_role_briefs.Briefs.test_sampling_is_explicit_and_empty_is_not_success) ... ok
+test_tools_are_account_scoped_and_queries_are_bounded (test_agent_role_briefs.Briefs.test_tools_are_account_scoped_and_queries_are_bounded) ... ok
+test_untrusted_record_text_never_becomes_a_tool_instruction (test_agent_role_briefs.Briefs.test_untrusted_record_text_never_becomes_a_tool_instruction) ... ok
+test_actual_tool_uses_readonly_snapshot_and_account_binding (test_agent_role_briefs.Dispatch.test_actual_tool_uses_readonly_snapshot_and_account_binding) ... ok
+test_generic_research_gets_role_brief_and_feed_within_four_facts (test_agent_role_briefs.Dispatch.test_generic_research_gets_role_brief_and_feed_within_four_facts) ... ok
+test_specific_position_and_decision_keep_priority (test_agent_role_briefs.Dispatch.test_specific_position_and_decision_keep_priority) ... ok
+
+----------------------------------------------------------------------
+Ran 9 tests in 0.004s
+
+OK

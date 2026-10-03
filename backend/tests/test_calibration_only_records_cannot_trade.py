@@ -387,6 +387,7 @@ def test_the_calibration_measurement_and_the_join_read_every_purpose():
 #: changes its count and fails it too, so a reader added later has to be
 #: looked at -- "grep every reader" as a standing check, not a one-off.
 READERS = {
+    "agents/intelligence_reports.py": ("BOUNDED_RESEARCH_AND_PROVIDER_CONTRIBUTION_REPORTS_BOTH_PURPOSES_NO_EXECUTION", 2),
     # writes, or joins outcomes onto, the table; census reads are reporting
     "bettor_external_shadow.py": ("WRITER_AND_REPORTING_CENSUS", 9),
     "workers/ext_pinnacle_loop.py": ("WRITER_AND_OUTCOME_JOIN_READS_ALL", 8),

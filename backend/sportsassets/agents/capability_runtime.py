@@ -40,6 +40,7 @@ async def evidence(pool,task,now):
     if ctx.get('recommendation_id'):requests.append(('recommendation',ctx['recommendation_id']))
     # General modeling/coverage investigations need actual feed evidence.
     # Keep the existing source-context priority and four-fact chat limit.
+    if len(requests)<4:requests.append(('role_brief',None))
     if len(requests)<4:requests.append(('feed_coverage',None))
     records=[]
     async with asyncio.timeout(10):
@@ -52,7 +53,8 @@ async def evidence(pool,task,now):
 
 
 def question(task):
-    return ('Give a full analysis of this assigned research task: '+task['title']+
+    from .role_brief import FOCUS
+    return (FOCUS[task['assignee']]+' '+'Give a full analysis of this assigned research task: '+task['title']+
             ' Use the supplied recorded investigation and peer reviews. Cite source IDs. '
             'Separate observation, peer opinion, hypothesis and missing evidence. '
             'State one next action, its owner and a measurable outcome. Do not claim '

@@ -38,5 +38,5 @@ async def test_general_research_collects_feed_evidence(monkeypatch):
     async def save(conn,t,records,now):saved.extend(records);return True
     monkeypatch.setattr(T.Toolkit,'read',read);monkeypatch.setattr(W,'save_investigation',save)
     await R.evidence(Pool(c),task(),100)
-    assert reads==['account','lessons','feed_coverage']
-    assert len(saved)==3
+    assert reads==['account','lessons','role_brief','feed_coverage']
+    assert len(saved)==4
