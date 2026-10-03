@@ -1,0 +1,1 @@
+{"body":{"challenges":{"data":[],"evidence":[],"status":"EMPTY","why":"NO_CHALLENGE_MATCHES"},"production_effect":"NONE","read_at":1791070246.996459,"read_only":true,"states":["OPEN","RESPONDED","UPHELD","REJECTED","WITHDRAWN"]},"http":200,"route":"/api/command/karen/challenges?limit=50"}

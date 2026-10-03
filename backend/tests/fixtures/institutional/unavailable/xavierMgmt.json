@@ -1,0 +1,1 @@
+{"body":{"detail":{"detail":"RuntimeError","reason":"NO_DATABASE_POOL"}},"http":503,"route":"/api/command/xavier/management"}

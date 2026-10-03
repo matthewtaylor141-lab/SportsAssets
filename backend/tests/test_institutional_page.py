@@ -1,8 +1,10 @@
 """THE INSTITUTIONAL PAGE (frontend/public/command/institutional.html/.js):
 it follows the live.html pattern (config/unlock/core/desk.css), reads every
 institutional read model through BTCore.endpoint, renders a missing read as
-"unavailable" rather than zero, carries all fourteen sections and the five
-questions, and is linked from live.html."""
+"UNAVAILABLE — <why>" rather than zero, carries all fifteen sections
+(including INSTITUTIONAL STREAM / P5) and the five questions, and is linked
+from live.html. The rendering against the real route payloads is pinned in
+test_institutional_page_renders_real_payloads.py."""
 from __future__ import annotations
 
 import pathlib
@@ -19,9 +21,12 @@ JS = (BUNDLE / "institutional.js").read_text()
 
 SECTIONS = ("PAPER", "ACTUAL", "PORTFOLIO", "DEREK", "XAVIER", "AUDREY",
             "KAREN", "ALLOCATOR", "RISK", "CALIBRATION", "EXECUTION",
-            "COVERAGE", "QUALITY", "AGENT COLLABORATION")
+            "COVERAGE", "QUALITY", "AGENT COLLABORATION",
+            "INSTITUTIONAL STREAM / P5")
 READS = ("/api/command/small-live", "/api/command/agents",
          "/api/command/xavier/management", "/api/command/karen",
+         "/api/command/karen/challenges", "/api/command/intel",
+         "/api/command/p5/evidence",
          "/api/command/intel/allocator", "/api/command/intel/calibration",
          "/api/command/intel/attribution", "/api/command/intel/sizing",
          "/api/command/intel/risk", "/api/command/intel/regime",
@@ -53,8 +58,8 @@ def test_reads_go_through_the_guard_and_nothing_writes():
     assert "credentials: 'same-origin'" in JS
     assert not re.search(r"method:\s*'(POST|PUT|PATCH|DELETE)'", JS)
     assert "localStorage" not in JS and "sessionStorage" not in JS
-    # a missing read is "unavailable", never zero
-    assert "unavailable</span>" in JS
+    # a missing read is "UNAVAILABLE — <why>", never zero
+    assert "UNAVAILABLE — " in JS
     assert "HTTP 404" in JS
 
 
