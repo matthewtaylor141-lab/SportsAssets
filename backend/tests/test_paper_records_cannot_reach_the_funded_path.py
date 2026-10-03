@@ -122,7 +122,14 @@ def test_no_funded_module_imports_the_paper_modules():
                # module and none has an order, limit or policy effect
                "agents/coverage_integrity.py",
                "agents/postmortems.py",
-               "agents/improvement_driver.py"}
+               "agents/improvement_driver.py",
+               # (206) Xavier's management assessments: reads the paper
+               # ledger/simulator's exit walk to value HOLD/EXIT/REDUCE and
+               # REALLOCATE, and writes ONLY its own migration-206 tables
+               # (theses, assessments, value-add). It holds no order, submit
+               # or cancel call; the actual lane hands its review hook in
+               # from app.py, so execmirror imports no paper module
+               "agents/xavier_management.py"}
     assert set(offenders) <= allowed, sorted(set(offenders) - allowed)
     # ...and neither capability module reaches a funded or execution module,
     # directly or through the rest of the capability package
