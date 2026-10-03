@@ -588,3 +588,7 @@ tests/test_workers_hold_no_venue_write.py
 # The authorized workers release actions: branch set (autoDeploy off) and
 # exact-SHA deploy that refuses while autoDeploy is on.
 tests/test_render_ops_workers_release.py
+# cand22: NCAAF (venue cfb board) reaches a recorded, named paper decision
+# through the real cycle -- selection, fixture confirmation, venue-native
+# identity (school + nickname), valuation, Derek -- never a silent drop.
+tests/test_ncaaf_reaches_a_recorded_decision.py

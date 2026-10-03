@@ -424,7 +424,10 @@ def test_a_segment_slug_refuses_by_the_period_rule():
 def test_only_the_familys_exact_winner_types_are_read():
     assert V.FAMILY_WINNER_TYPES == {
         "soccer": ("soccer_team_full_time_winner",),
-        "baseball": ("baseball_team_full_game_winner",)}
+        "baseball": ("baseball_team_full_game_winner",),
+        # cand22: the college-football full-game winner (segment winners
+        # such as football_team_first_half_winner stay absent)
+        "football": ("football_team_full_game_winner",)}
     half = [dict(r, sports_type="soccer_team_first_half_winner")
             for r in ROWS]
     assert _match(WAL, rows=half)["refusal"] == V.R_NO_EVENT

@@ -613,8 +613,14 @@ VENUE_BOARD_SNAPSHOT_MEASURED = (
 #: The venue's REAL soccer board, by its own league token, newest first. The
 #: simulated exclusion is `bettor_venue_realism`'s, applied in SQL so a
 #: competition of 168 eBattles events cannot outrank a real one.
-def _board_sql() -> str:
+def _board_sql(family_prefix: str = "soccer", title_limit: int = 12) -> str:
     """The board query, with its exclusions GENERATED from the classifier.
+
+    `family_prefix` is the venue `sports_type` family the board ranks
+    (`soccer`, or `football` for the college-football board below), and
+    `title_limit` bounds the fixture titles carried per token for the mapping
+    confirmation. Both are fixed identifiers in source, asserted before
+    interpolation.
 
     THE INCONSISTENCY THIS REMOVES. This query was hand-written to exclude
     `%ebattles%` and `%esoccer%` while claiming to share
@@ -629,6 +635,8 @@ def _board_sql() -> str:
     changes this query with it. The markers are fixed identifiers in source, not
     input, and are asserted to be plain lowercase words before interpolation.
     """
+    assert family_prefix.isalpha() and family_prefix.islower(), family_prefix
+    assert isinstance(title_limit, int) and 0 < title_limit <= 200, title_limit
     for m in vreal.SIMULATED_MARKERS:
         assert m.replace("-", "").isalpha() and m.islower(), m
     for pfx in vreal.SIMULATED_SPORTS_TYPE_PREFIXES:
@@ -646,7 +654,7 @@ def _board_sql() -> str:
     return ("""
     SELECT split_part(market_slug, '-', 2)  AS token,
            count(DISTINCT event_slug)        AS events,
-           (array_agg(DISTINCT left(event_title, 80)))[1:12] AS titles,
+           (array_agg(DISTINCT left(event_title, 80)))[1:%(n)d] AS titles,
            -- THE FIXTURE DATES, PER TITLE. Codex: the scheduled caller never
            -- supplied `venue_event_days`, so the date comparison in
            -- `confirm_mapping_by_fixtures` was exercised only by tests. Two
@@ -654,11 +662,11 @@ def _board_sql() -> str:
            -- a fixture from its return leg, so the venue's own game_start
            -- travels with each title.
            (array_agg(DISTINCT left(event_title, 80) || '\u0001'
-                      || coalesce(to_char(game_start, 'YYYY-MM-DD'), '')))[1:12]
+                      || coalesce(to_char(game_start, 'YYYY-MM-DD'), '')))[1:%(n)d]
              AS title_days
       FROM us_premap
-     WHERE sports_type LIKE 'soccer%'
-       """ + types + """
+     WHERE sports_type LIKE '%(fam)s%%'
+       """ % {"n": title_limit, "fam": family_prefix} + types + """
        """ + prose + """
        AND game_start > now() - interval '6 hours'
      GROUP BY 1
@@ -740,8 +748,15 @@ async def venue_soccer_competitions(conn, *, now: float | None = None) -> dict:
     return out
 
 
-def candidates_from_board(board, titles=None, title_days=None) -> list:
+def candidates_from_board(board, titles=None, title_days=None, *,
+                          family="soccer", token_map=None) -> list:
     """Venue board -> provider-key candidates, in the board's own order.
+
+    `family` / `token_map` default to the soccer board and
+    VENUE_TOKEN_TO_PROVIDER_KEY; the football board passes `"football"` and
+    VENUE_FOOTBALL_TOKEN_TO_PROVIDER_KEY, so a token is only ever looked up in
+    its own family's map (`cfb` is not a soccer token and `unl` is not a
+    football one).
 
     `titles` is the venue's own fixture titles per token. They travel WITH the
     candidate because the mapping is confirmed against fixtures, and a candidate
@@ -760,10 +775,11 @@ def candidates_from_board(board, titles=None, title_days=None) -> list:
             # the runtime fixture check would spend a metered fetch to learn
             # what reading the fixtures already established.
             continue
-        key = VENUE_TOKEN_TO_PROVIDER_KEY.get(token)
+        key = (VENUE_TOKEN_TO_PROVIDER_KEY if token_map is None
+               else token_map).get(token)
         if not key:
             continue
-        got.append({"key": key, "family": "soccer", "our_token": token,
+        got.append({"key": key, "family": family, "our_token": token,
                     "venue_events": int(events),
                     "venue_titles": list(by_token.get(token) or ()),
                     "venue_title_days": dict(days_by_token.get(token) or {})})
@@ -779,6 +795,104 @@ SPORTS_CANDIDATES = tuple(
 
 #: The old name, kept so an import of it cannot silently resolve to nothing.
 VENUE_SOCCER_BOARD_MEASURED_2026_09_28 = VENUE_BOARD_SNAPSHOT_MEASURED
+
+#: ── COLLEGE FOOTBALL: THE VENUE'S `cfb` BOARD AND THE PROVIDER KEY FOR IT ──
+#:
+#: THE LOSS THIS CLOSES (cand22, production 2026-10-03, a college-football
+#: Saturday; research-sql cand22_ncaaf_stages / cand22_ncaaf_names). The venue
+#: listed 107 `cfb` events with a `football_team_full_game_winner` contract on
+#: the America/New_York day (Alabama vs. Mississippi State
+#: `aec-cfb-ala-mspst-2026-10-03`, Michigan vs. Minnesota, Notre Dame vs. North
+#: Carolina ...), and the scheduled cycle requested `baseball_mlb`,
+#: `soccer_uefa_nations_league` and `soccer_brazil_serie_b` -- one metered
+#: slot of the four unused. No `cfb` event reached a provider fetch, an
+#: identity, a valuation or a paper decision, and nothing named why: the
+#: competition set was derived from the SOCCER board alone, so the football
+#: board was never read and no refusal existed to record. That is a silent
+#: disappearance, not a refusal.
+#:
+#: The fix reads the venue's FOOTBALL board the same way (the same generated
+#: SQL, `sports_type LIKE 'football%'`, the same simulated-family exclusions)
+#: and maps its token through this table. The candidate then goes through
+#: EXACTLY the soccer path: confirmed against the provider's unmetered
+#: catalogue, capped by MAX_METERED_SPORTS_PER_CYCLE (unchanged), fixture-
+#: confirmed against the venue's own titles before any identity is resolved.
+#: `nfl` is deliberately absent: it is a different competition, and this
+#: change is about the college board the owner asked for.
+VENUE_FOOTBALL_TOKEN_TO_PROVIDER_KEY = {
+    # Alabama vs. Mississippi State, Michigan vs. Minnesota, Notre Dame vs.
+    # North Carolina, Ohio State vs. Iowa (venue `cfb`, 2026-10-03)
+    "cfb": "americanfootball_ncaaf",
+}
+
+#: More titles than soccer's 12: one Saturday's `cfb` slate is ~100 events,
+#: listed alphabetically, and the confirmation needs a title the provider
+#: still lists (finished games drop out of the provider's feed).
+VENUE_FOOTBALL_TITLES_CARRIED = 120
+VENUE_FOOTBALL_BOARD_SQL = _board_sql("football",
+                                      VENUE_FOOTBALL_TITLES_CARRIED)
+
+
+async def venue_football_competitions(conn) -> dict:
+    """The venue's FOOTBALL board, by its own league token. Never raises.
+
+    Same shape as `venue_soccer_competitions`. There is NO snapshot fallback:
+    a failed read returns an empty board with the error named, and the cycle
+    requests no football competition -- an unread board is never a licence to
+    spend a metered credit.
+    """
+    out: dict = {"read": False, "board": [], "titles": {}, "title_days": {},
+                 "source": "us_premap", "family": "football",
+                 "evidence": "LIVE_READ"}
+    try:
+        rows = await conn.fetch(VENUE_FOOTBALL_BOARD_SQL)
+    except Exception as exc:                                   # noqa: BLE001
+        out.update(evidence="READ_FAILED", error=type(exc).__name__,
+                   why=("the venue football board could not be read (%s); no "
+                        "football competition is requested this cycle"
+                        % type(exc).__name__))
+        return out
+    try:
+        out["board"] = [(str(r["token"]), int(r["events"])) for r in rows]
+        out["titles"] = {str(r["token"]): [str(t) for t in (r["titles"] or [])]
+                         for r in rows}
+        days: dict = {}
+        for r in rows:
+            per: dict = {}
+            for pair in (r["title_days"] or []):
+                title, _, day = str(pair).partition("\u0001")
+                if title and day:
+                    per[title] = day
+            days[str(r["token"])] = per
+        out["title_days"] = days
+    except Exception as exc:                                   # noqa: BLE001
+        out.update(board=[], titles={}, title_days={},
+                   evidence="READ_UNPARSEABLE", error=type(exc).__name__)
+        return out
+    out["read"] = True
+    return out
+
+
+def football_candidates(board: dict) -> list:
+    """The football board's provider-key candidates (pure)."""
+    b = dict(board or {})
+    return candidates_from_board(b.get("board"), b.get("titles"),
+                                 b.get("title_days"), family="football",
+                                 token_map=VENUE_FOOTBALL_TOKEN_TO_PROVIDER_KEY)
+
+
+def merge_candidates(*lists) -> list:
+    """One candidate list ordered by MEASURED VENUE COVERAGE (events,
+    descending), stable within ties -- the order `select_sports` spends its
+    unchanged metered budget in. A key appearing twice keeps its first."""
+    seen, got = set(), []
+    for c in sorted((c for lst in lists for c in (lst or ())),
+                    key=lambda c: -int(c.get("venue_events") or 0)):
+        if c["key"] in seen:
+            continue
+        seen.add(c["key"])
+        got.append(c)
+    return got
 
 R_PROVIDER_DOES_NOT_LIST = "PROVIDER_DOES_NOT_LIST_THIS_COMPETITION"
 R_PROVIDER_LISTS_IT_INACTIVE = "PROVIDER_LISTS_THIS_COMPETITION_AS_INACTIVE"
@@ -846,6 +960,10 @@ def provider_keys_for_family(family: str) -> list:
         # today: a position held over a competition's off-day still needs its
         # probability source.
         for key in VENUE_TOKEN_TO_PROVIDER_KEY.values():
+            if key not in keys:
+                keys.append(key)
+    if fam == "football":
+        for key in VENUE_FOOTBALL_TOKEN_TO_PROVIDER_KEY.values():
             if key not in keys:
                 keys.append(key)
     for cand in SPORTS_CANDIDATES:
@@ -1313,9 +1431,13 @@ VENUE_LEAGUE_TOKENS_CONFIRMED = {"baseball_mlb": ("mlb",)}
 
 
 def venue_league_tokens(sport_key) -> tuple:
-    """The venue league token(s) for a provider key; () when none is named."""
+    """The venue league token(s) for a provider key; () when none is named.
+    `americanfootball_ncaaf` -> ('cfb',) through the football token map, so a
+    college price never lands on an `nfl` fixture."""
     got = set(VENUE_LEAGUE_TOKENS_CONFIRMED.get(str(sport_key), ()))
     got |= {t for t, k in VENUE_TOKEN_TO_PROVIDER_KEY.items()
+            if k == str(sport_key)}
+    got |= {t for t, k in VENUE_FOOTBALL_TOKEN_TO_PROVIDER_KEY.items()
             if k == str(sport_key)}
     return tuple(sorted(got))
 
@@ -7277,12 +7399,25 @@ async def cycle(conn, *, stream_seed=None) -> dict:
         # `confirm_mapping_by_fixtures` with `venue_title_days == {}` and the date
         # comparison never ran on the scheduled path -- only in a test that called
         # the helper directly.
+        # THE FOOTBALL BOARD BESIDE THE SOCCER ONE (cand22): without it the
+        # venue's `cfb` events were never a candidate and disappeared with no
+        # refusal. Merged by venue coverage; the budget is unchanged.
+        _fboard = await venue_football_competitions(conn)
         sports_selection = select_sports(
-            _cat, candidates=candidates_from_board(_board["board"],
-                                                   _board.get("titles"),
-                                                   _board.get("title_days")))
+            _cat, candidates=merge_candidates(
+                candidates_from_board(_board["board"],
+                                      _board.get("titles"),
+                                      _board.get("title_days")),
+                football_candidates(_fboard)))
         sports_selection["venue_board"] = _board
-        sports_for_cycle = tuple(sports_selection["sports"])
+        sports_selection["venue_football_board"] = _fboard
+        # FOOTBALL IS ITERATED LAST. Its budget slot is earned by coverage
+        # above, but the sports this lane already valued keep their place in
+        # the loop -- and with it their share of the per-cycle bounds
+        # (MAX_PER_CYCLE, MAX_CALIBRATION_ONLY_PER_CYCLE) and the paced venue
+        # reads -- exactly as before this change. Stable: no other order moves.
+        sports_for_cycle = tuple(sorted(sports_selection["sports"],
+                                        key=lambda kf: kf[1] == "football"))
         labels = sorted({lbl for _, fam in sports_for_cycle
                          for lbl in VENUE_SPORT_LABELS.get(fam, ())})
         markets = [dict(r) for r in await conn.fetch(MARKETS_SQL, labels, MARKET_STALE_AFTER_S)]
@@ -9640,6 +9775,7 @@ def _selection_digest(out: dict) -> dict:
     """
     sel = dict(out.get("sports_selection") or {})
     board = dict(sel.get("venue_board") or {})
+    fboard = dict(sel.get("venue_football_board") or {})
     return {
         "requested": [k for k, _ in (sel.get("sports") or [])],
         "metered_budget": sel.get("budget"),
@@ -9664,6 +9800,10 @@ def _selection_digest(out: dict) -> dict:
                         "evidence_age_s": board.get("evidence_age_s"),
                         "refusal": board.get("refusal"),
                         "tokens": [t for t, _ in (board.get("board") or [])][:20]},
+        "venue_football_board": {
+            "read": fboard.get("read"), "evidence": fboard.get("evidence"),
+            "error": fboard.get("error"),
+            "tokens": [list(x) for x in (fboard.get("board") or [])][:10]},
     }
 
 

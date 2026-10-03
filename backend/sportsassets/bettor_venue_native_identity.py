@@ -133,7 +133,44 @@ SHORT = "ORDER_INTENT_BUY_SHORT"
 FAMILY_WINNER_TYPES = {
     "soccer": ("soccer_team_full_time_winner",),
     "baseball": ("baseball_team_full_game_winner",),
+    # cand22: the venue's college-football full-game winner, measured on the
+    # 2026-10-03 board (107 `cfb` events; 106 carry exactly one LONG and one
+    # SHORT row on one `aec-cfb-...` contract, the baseball shape). Its scope
+    # token is `full_game`; segment winners (`_first_half_winner`,
+    # `_first_quarter_winner` ...) are different values and stay absent.
+    "football": ("football_team_full_game_winner",),
 }
+
+#: ── FOOTBALL PARTICIPANTS CARRY THE VENUE'S OWN NICKNAME ───────────────
+#:
+#: THE COLLISION THIS PREVENTS, on the measured board. The venue's college
+#: `team_name` is the SCHOOL ("ohio", "ohio state", "michigan", "michigan
+#: state", "miami  fl", "miami  oh") and `side_norm` on the same row is the
+#: NICKNAME ("bobcats", "buckeyes", "wolverines", "spartans", "hurricanes",
+#: "redhawks"). Containment on the school alone reads the provider's "Ohio
+#: State Buckeyes" as the venue's "ohio" -- and on 2026-10-03 Ohio vs. Kent
+#: State and Ohio State vs. Iowa both started at 15:30 ET, as did Michigan
+#: (12:00) and Michigan State (12:30) inside one window. "State" is generic
+#: everywhere else in this module and is the whole difference here.
+#:
+#: So a football participant is the venue's school AND nickname together
+#: ("ohio bobcats", "ohio state buckeyes", "miami fl hurricanes") -- the same
+#: rendering the provider uses ("Ohio Bobcats", "Miami Hurricanes"), compared
+#: by the unchanged `same_team`. No alias is added: a school the two sources
+#: spell differently ("UL Monroe" / "louisiana monroe") still refuses by name.
+NICKNAME_QUALIFIED_FAMILIES = frozenset(("football",))
+
+
+def participant_name(row, family) -> str:
+    """The venue participant a row names: `team_name`, plus `side_norm` (the
+    nickname) for NICKNAME_QUALIFIED_FAMILIES. Pure."""
+    r = _row(row)
+    team = " ".join(str(r.get("team_name") or "").split())
+    if family in NICKNAME_QUALIFIED_FAMILIES and team:
+        nick = " ".join(str(r.get("side_norm") or "").split())
+        if nick and nick not in ("yes", "no"):
+            return "%s %s" % (team, nick)
+    return str(r.get("team_name") or "")
 
 #: ── THE START-TIME TOLERANCE, AND WHY IT IS 90 MINUTES ────────────────
 #:
@@ -404,7 +441,7 @@ def _events_in_window(rows, *, family, commence_epoch, league_tokens=None):
         if leagues is not None and league_token(ev) not in leagues:
             set_aside["other_competition"].append(ev)
             continue
-        names = sorted({str(r.get("team_name")) for r in rs
+        names = sorted({participant_name(r, family) for r in rs
                         if str(r.get("team_name") or "").strip()})
         if len(names) != 2:
             set_aside["not_two_participants"].append(ev)
@@ -553,7 +590,7 @@ def match_event(*, home, away, commence_epoch, family, rows,
                            or vreal.R_REALISM_NOT_ESTABLISHED,
                            "%s: %s" % (r.get("market_slug"), verdict.get("why")))
     # ── THE CONTRACT THAT PAYS ON HOME ───────────────────────────────
-    mine = [r for r in ev["rows"] if str(r.get("team_name") or "") == home_p]
+    mine = [r for r in ev["rows"] if participant_name(r, family) == home_p]
     if family == "soccer":
         # The per-side contract on home, bought LONG. Its SHORT row pays on
         # NOT(home) -- the draw AND the away win -- and is never this
@@ -578,13 +615,14 @@ def match_event(*, home, away, commence_epoch, family, rows,
                ", ".join(sorted({str(r.get('market_slug')) for r in picked})))))
     row = picked[0]
     slug = str(row.get("market_slug") or "")
-    if family == "baseball":
+    if family != "soccer":
         # THE SIDE SEMANTICS, SHOWN RATHER THAN ASSUMED: exactly two rows on
-        # this contract, one LONG and one SHORT, one per participant.
+        # this contract, one LONG and one SHORT, one per participant. Every
+        # two-way family (baseball, football) -- soccer alone is per-side.
         sides = [r for r in ev["rows"]
                  if str(r.get("market_slug") or "") == slug]
         pairs = sorted((str(r.get("intent") or ""),
-                        str(r.get("team_name") or "")) for r in sides)
+                        participant_name(r, family)) for r in sides)
         if (len(sides) != 2
                 or [p[0] for p in pairs] != sorted([LONG, SHORT])
                 or {p[1] for p in pairs} != set(ev["participants"])):
