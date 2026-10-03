@@ -568,3 +568,15 @@ tests/test_institutional_stream.py
 # still refuses ADMISSION_BOOK_CURRENCY_NOT_LIVE_ADMISSIBLE, Venue.place zero.
 tests/test_live_book_currency.py
 tests/test_live_rule_artifacts.py
+# Institutional market data, runnable and orderless (claude/cand21-mdstream):
+# the vendored polymarket.v1 market-data proto matches the venue's official
+# bundle field for field and the committed stubs are protoc's output; the
+# transport against an in-process gRPC server (books, disconnect, backwards
+# clock, auth failure, bounded reconnect) fails closed until a complete book;
+# only MarketDataSubscriptionAPI exists and the client sends only subscribe
+# (non-empty) and keepalive; a retail slug maps to an institutional symbol
+# only on exact instrument, outcome side and price scale.
+tests/test_institutional_md_proto_vendor.py
+tests/test_institutional_md_grpc_transport.py
+tests/test_institutional_md_orderless.py
+tests/test_institutional_contract_map.py

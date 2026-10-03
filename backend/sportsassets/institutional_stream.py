@@ -34,11 +34,22 @@ WHAT IT DOES NOT DOCUMENT, and how that is handled rather than guessed:
     update is a full replacement, the next update IS the authoritative
     resnapshot; no merge is ever attempted. `venue_sequence` is reported as
     NOT_PROVIDED_BY_VENUE, never as a number we made up.
-  * The generated Python modules come from the venue's proto bundle (a Google
-    Drive download linked from /streaming-endpoints/proto-reference); neither
-    it nor `grpcio` is in this image today. The transport imports them lazily
-    and, when absent, the stream reports TRANSPORT_UNAVAILABLE and every
-    `current()` refuses -- it fails closed, it does not fall back.
+  * The generated Python modules are `sportsassets.vendor.pmx_proto`,
+    compiled from the venue's OFFICIAL proto bundle (the Google Drive zip
+    linked from /streaming-endpoints/proto-reference, fetched 2026-10-03, zip
+    sha256 52236f65...; provenance in that package's README). Only the
+    market-data service is vendored. `grpcio` and `protobuf` are pinned in
+    requirements.lock. The transport still imports them lazily and, when
+    absent, reports TRANSPORT_UNAVAILABLE and every `current()` refuses -- it
+    fails closed, it does not fall back.
+
+WHAT THE CLIENT SENDS, AND NOTHING ELSE. Every client-to-server message is
+built by `_subscribe_request` or `_keepalive_request` and passes
+`_outbound()`, which refuses any command other than `subscribe` (with a
+non-empty, explicit symbol list) and `keepalive`. There is no unsubscribe,
+and no other RPC is reachable: the vendored package defines exactly one
+service, `polymarket.v1.MarketDataSubscriptionAPI`, and this module calls one
+method on it, `BiDirectionalStreamMarketData`.
 
 THE DECISION PATH READS ONE FUNCTION: `current(symbol)`. It returns the book
 WITH its currency evidence (connection identity, market identity, snapshot
@@ -86,6 +97,23 @@ MAX_SNAPSHOT_AGE_S = sc.MAX_SNAPSHOT_AGE_S
 #: reconnected. Updates are documented to arrive "at regular intervals (even if
 #: no changes)"; their interval is not documented, so this is generous.
 WATCHDOG_S = 4 * MAX_SILENCE_S
+
+#: HTTP/2 keepalive pings on the channel. Conservative: a gRPC server's
+#: default minimum ping interval is 5 min, and a client that pings faster is
+#: sent GOAWAY (too_many_pings). The documented application-level keepalive
+#: (KeepAliveCommand, KEEPALIVE_S) is what keeps the ALB idle timer at bay;
+#: this only detects a dead TCP path sooner than the OS would.
+CHANNEL_OPTIONS = (
+    ("grpc.keepalive_time_ms", 300_000),
+    ("grpc.keepalive_timeout_ms", 20_000),
+    ("grpc.keepalive_permit_without_calls", 0),
+    ("grpc.http2.max_pings_without_data", 0),
+    # One book of DEPTH levels is small; this bounds a pathological message.
+    ("grpc.max_receive_message_length", 4 * 1024 * 1024),
+)
+
+#: The ONLY commands this client ever puts on the wire.
+OUTBOUND_COMMANDS = ("subscribe", "keepalive")
 
 RECONNECT_BACKOFF_S = (1.0, 2.0, 5.0, 10.0, 30.0, 60.0)
 MAX_CONSECUTIVE_FAILURES = 8
@@ -522,29 +550,55 @@ def decode_update(u, refdata_pb2=None) -> dict:
 # ── the gRPC transport ────────────────────────────────────────────────
 
 def load_generated():
-    """(grpc, pb2, pb2_grpc, refdata_pb2) or raise ImportError naming what is
-    missing. The modules are the venue's proto bundle compiled with
-    grpc_tools.protoc, imported under the documented package `polymarket.v1`."""
+    """(grpc, pb2, pb2_grpc, enums) or raise ImportError naming what is
+    missing. pb2/pb2_grpc are the VENDORED market-data stubs
+    (sportsassets.vendor.pmx_proto, package `polymarket.v1`); the
+    InstrumentState enum lives in the same pb2, so it is also the fourth
+    element (the slot the venue's own sample fills with refdata_pb2)."""
     import grpc
-    from polymarket.v1 import marketdatasubscription_pb2 as pb2
-    from polymarket.v1 import marketdatasubscription_pb2_grpc as pb2_grpc
-    try:
-        from polymarket.v1 import refdata_pb2
-    except ImportError:
-        refdata_pb2 = None
-    return grpc, pb2, pb2_grpc, refdata_pb2
+    from .vendor.pmx_proto import marketdatasubscription_pb2 as pb2
+    from .vendor.pmx_proto import marketdatasubscription_pb2_grpc as pb2_grpc
+    return grpc, pb2, pb2_grpc, pb2
 
 
 def transport_available() -> tuple:
     try:
         load_generated()
         return True, None
-    except ImportError as exc:
-        return False, ("%s -- grpcio and the venue's compiled proto bundle "
-                       "(polymarket.v1) must be in the image" % exc)
+    except Exception as exc:                                  # noqa: BLE001
+        # ImportError when grpcio/protobuf are absent; RuntimeError /
+        # VersionError when the installed runtime is older than the stubs.
+        return False, ("%s: %s -- grpcio and protobuf (requirements.lock) "
+                       "and the vendored polymarket.v1 market-data stubs "
+                       "must import" % (type(exc).__name__, exc))
+
+
+class OutboundRefused(RuntimeError):
+    """A client-to-server message this lane does not send."""
+
+
+def _outbound(req):
+    """THE ONE GATE every client-to-server message passes. Refuses any
+    command but `subscribe` (explicit, non-empty symbols) and `keepalive`.
+    Real protobuf messages are checked by their oneof; a test double without
+    WhichOneof is passed through (the builders below are the only callers)."""
+    which = getattr(req, "WhichOneof", None)
+    if which is None:
+        return req
+    cmd = which("command")
+    if cmd not in OUTBOUND_COMMANDS:
+        raise OutboundRefused("refused: %r is not a command this lane sends"
+                              % cmd)
+    if cmd == "subscribe" and not [s for s in req.subscribe.symbols if s]:
+        raise OutboundRefused("refused: an empty subscribe is ALL "
+                              "instruments to the venue")
+    return req
 
 
 _REFUSAL_CODES = ("UNAUTHENTICATED", "PERMISSION_DENIED")
+#: Documented (/streaming-endpoints/error-handling): UNAUTHENTICATED ->
+#: "Refresh token and retry". One fresh-token retry, then a refusal.
+_REAUTH_CODE = "UNAUTHENTICATED"
 
 
 def _status_name(exc) -> str | None:
@@ -562,19 +616,25 @@ class GrpcBidiTransport:
 
     def __init__(self, books: ResidentBooks, token_fn, *, target=GRPC_TARGET,
                  depth=DEPTH, modules=None, clock=time.time,
-                 sleep=None):
+                 sleep=None, channel_factory=None, invalidate_token=None):
         self.books = books
         self._token_fn = token_fn
+        # Drops a cached bearer token so the next token_fn() mints a fresh
+        # one. Called once on UNAUTHENTICATED, per the venue's own guidance.
+        self._invalidate = invalidate_token
         self.target = target
         self.depth = int(depth)
         self._mods = modules
         self._clock = clock
+        # Tests hand in an insecure in-process channel; production is TLS.
+        self._channel_factory = channel_factory
         self._q: queue.Queue = queue.Queue()
         self._stop = threading.Event()
         # Interruptible by stop() unless a test injects its own sleep.
         self._sleep = sleep or self._stop.wait
         self._subscribed: set = set()
         self._connected = False
+        self._reauth_used = False
         self.consecutive_failures = 0
         self.attempts = 0
         self._thread = None
@@ -584,43 +644,70 @@ class GrpcBidiTransport:
             self._mods = load_generated()
         return self._mods
 
-    # requests ---------------------------------------------------------
+    # requests: the ONLY two builders ----------------------------------
+
+    def _subscribe_request(self, symbols, *, first: bool = False):
+        """A SubscribeCommand for an explicit, non-empty symbol list. The
+        first request of a connection also carries the options the venue
+        reads from it (depth; aggregated book; continuous, not snapshot-only;
+        slow_consumer_skip_to_head left false, so a slow consumer is
+        DISCONNECTED -- a gap we see -- rather than silently skipped)."""
+        syms = [str(s) for s in symbols or () if str(s or "").strip()]
+        if not syms:
+            raise OutboundRefused("refused: an empty subscribe is ALL "
+                                  "instruments to the venue")
+        _g, pb2, _pg, _r = self.mods()
+        kw = {"subscribe": pb2.SubscribeCommand(symbols=syms)}
+        if first:
+            kw["depth"] = self.depth
+        return _outbound(pb2.BiDirectionalStreamMarketDataRequest(**kw))
+
+    def _keepalive_request(self):
+        _g, pb2, _pg, _r = self.mods()
+        return _outbound(pb2.BiDirectionalStreamMarketDataRequest(
+            keepalive=pb2.KeepAliveCommand()))
 
     def subscribe(self, symbols) -> None:
         """Queue a subscribe for symbols not already on the stream."""
         new = [s for s in symbols or () if s and s not in self._subscribed]
         if not new:
             return
-        _g, pb2, _pg, _r = self.mods()
-        self._q.put(pb2.BiDirectionalStreamMarketDataRequest(
-            subscribe=pb2.SubscribeCommand(symbols=list(new))))
+        self._q.put(self._subscribe_request(new))
         self._subscribed.update(new)
 
-    def _requests(self, first):
+    def _requests(self, first, done=None):
         """The client-to-server half: the first request carries the options;
-        a KeepAliveCommand goes out after KEEPALIVE_S without traffic."""
-        _g, pb2, _pg, _r = self.mods()
+        a KeepAliveCommand goes out after KEEPALIVE_S without traffic. Ends
+        with its connection (`done`), so a dead call's request thread does
+        not linger until the next keepalive."""
         last = self._clock()
-        yield first
-        while not self._stop.is_set():
+        q = self._q
+        yield _outbound(first)
+        while not self._stop.is_set() and not (done and done.is_set()):
             try:
-                req = self._q.get(timeout=0.5)
+                req = q.get(timeout=0.5)
             except queue.Empty:
                 if self._clock() - last >= KEEPALIVE_S:
                     last = self._clock()
-                    yield pb2.BiDirectionalStreamMarketDataRequest(
-                        keepalive=pb2.KeepAliveCommand())
+                    yield self._keepalive_request()
                 continue
             if req is None:
                 return
             last = self._clock()
-            yield req
+            yield _outbound(req)
+
+    def _channel(self, grpc):
+        if self._channel_factory is not None:
+            return self._channel_factory(self.target)
+        return grpc.secure_channel(self.target, grpc.ssl_channel_credentials(),
+                                   options=list(CHANNEL_OPTIONS))
 
     # one connection ---------------------------------------------------
 
     def run_once(self) -> str:
         """Open, consume until the stream ends. Returns 'ended', 'refused',
-        'idle' or 'error'. Delivering anything resets the failure count."""
+        'reauth' (UNAUTHENTICATED once: token dropped, retry soon), 'idle' or
+        'error'. Delivering anything resets the failure count."""
         grpc, pb2, pb2_grpc, refdata = self.mods()
         # Fresh request queue BEFORE the wanted set is read: a symbol asked for
         # in between lands in this queue (a duplicate subscribe is answered
@@ -632,24 +719,27 @@ class GrpcBidiTransport:
             # NEVER an empty subscribe: the venue reads it as ALL instruments.
             self.books.set_state(S_IDLE, "no symbols requested")
             return "idle"
-        token = self._token_fn()
+        try:
+            token = self._token_fn()
+        except Exception:                                     # noqa: BLE001
+            # A key that does not decode, or the token endpoint unreachable:
+            # either way no bearer token, and nothing is opened.
+            token = None
         if not token:
             self.books.on_refused("TOKEN_NOT_ISSUED")
             return "refused"
         self.attempts += 1
         self.books.set_state(S_CONNECTING, "attempt %d" % self.attempts)
         self._subscribed.update(symbols)
-        first = pb2.BiDirectionalStreamMarketDataRequest(
-            subscribe=pb2.SubscribeCommand(symbols=list(symbols)),
-            depth=self.depth)
-        channel = grpc.secure_channel(self.target,
-                                      grpc.ssl_channel_credentials())
+        first = self._subscribe_request(symbols, first=True)
+        channel = self._channel(grpc)
         delivered = 0
         watchdog = None
+        conn_done = threading.Event()
         try:
             stub = pb2_grpc.MarketDataSubscriptionAPIStub(channel)
             responses = stub.BiDirectionalStreamMarketData(
-                self._requests(first),
+                self._requests(first, conn_done),
                 metadata=[("authorization", "Bearer %s" % token)])
             self.books.on_connected("grpc-%s" % uuid.uuid4().hex[:12])
             watchdog = self._watchdog(responses)
@@ -657,6 +747,7 @@ class GrpcBidiTransport:
                 delivered += 1
                 if delivered == 1:
                     self.consecutive_failures = 0
+                    self._reauth_used = False
                 self._dispatch(resp, refdata)
                 if self._stop.is_set():
                     break
@@ -664,6 +755,18 @@ class GrpcBidiTransport:
             return "ended" if delivered else "error"
         except Exception as exc:                              # noqa: BLE001
             code = _status_name(exc)
+            if code == _REAUTH_CODE and not self._reauth_used \
+                    and self._invalidate is not None:
+                # Documented: refresh the token and retry -- ONCE. The books
+                # are refused now (fail closed) and stay refused until a
+                # full update arrives on the next connection.
+                self._reauth_used = True
+                try:
+                    self._invalidate()
+                except Exception:                             # noqa: BLE001
+                    pass
+                self.books.on_refused(code)
+                return "reauth"
             if code in _REFUSAL_CODES:
                 self.books.on_refused(code)
                 return "refused"
@@ -671,6 +774,7 @@ class GrpcBidiTransport:
                                                   code or ""))
             return "error" if not delivered else "ended"
         finally:
+            conn_done.set()
             if watchdog is not None:
                 watchdog.set()
             try:
@@ -720,8 +824,12 @@ class GrpcBidiTransport:
             if got == "idle":
                 self._sleep(1.0)
                 continue
+            if got == "reauth":
+                self._sleep(RECONNECT_BACKOFF_S[0])
+                continue
             if got == "refused":
                 self._sleep(RESTART_AFTER_REFUSAL_S)
+                self._reauth_used = False     # the next try may refresh again
                 continue
             self.consecutive_failures += 1 if got == "error" else 0
             if self.consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
@@ -783,11 +891,20 @@ def start_default(*, env=None, transport_factory=None, token_fn=None,
             _START.update(state=S_TRANSPORT_UNAVAILABLE, why=why)
             BOOKS.set_state(S_TRANSPORT_UNAVAILABLE, why)
             return dict(_START, started=False)
+        invalidate = None
         if token_fn is None:
+            # The existing PMX token path (Auth0 private-key JWT ->
+            # client_credentials bearer; the market-data stream needs only
+            # read:marketdata). This client is used for its TOKEN ONLY: the
+            # stream never calls its REST reads, and pmx_institutional has
+            # no order path to call in any case.
             from . import pmx_institutional as pmx
-            token_fn = pmx.Institutional(env=env).token
-        factory = transport_factory or GrpcBidiTransport
-        t = factory(BOOKS, token_fn)
+            client = pmx.Institutional(env=env)
+            token_fn, invalidate = client.token, client.invalidate_token
+        if transport_factory is None:
+            t = GrpcBidiTransport(BOOKS, token_fn, invalidate_token=invalidate)
+        else:
+            t = transport_factory(BOOKS, token_fn)
         with _LOCK:
             _TRANSPORT = t
         BOOKS.set_state(S_IDLE, "started; waiting for symbols")

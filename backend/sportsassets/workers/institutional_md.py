@@ -257,8 +257,9 @@ async def run() -> None:
     await heartbeat(SERVICE, str(verdict.get("AUTH_STATUS")), boot)
 
     # THE STREAMING PATH, off unless INSTITUTIONAL_MD_STREAM=on, refused by
-    # the identity guard for an execution key, and TRANSPORT_UNAVAILABLE until
-    # grpcio and the venue's compiled protos are in the image. Never raises.
+    # the identity guard for an execution key. grpcio/protobuf are locked and
+    # the market-data stubs are vendored (sportsassets/vendor/pmx_proto);
+    # TRANSPORT_UNAVAILABLE only if they fail to import. Never raises.
     stream_start = istream.start_default()
     log.info("institutional_md: stream %s (%s)", stream_start.get("state"),
              stream_start.get("why"))
