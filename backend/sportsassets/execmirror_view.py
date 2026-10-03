@@ -11,6 +11,7 @@ live figures from venue-confirmed fills and the venue's account snapshot.
 """
 from __future__ import annotations
 
+import datetime as dt
 import json
 from decimal import Decimal
 
@@ -410,7 +411,8 @@ def venues(ctl: dict, snap) -> list:
 
 def _decision_section(r: dict) -> dict:
     keys = ("decision_id", "decided_at", "strategy", "policy_version", "verdict",
-            "refusal", "p_pinnacle", "executable_price", "executable_price_source",
+            "refusal", "p_pinnacle", "p_blended", "p_internal", "executable_price",
+            "executable_price_source",
             "limit_price", "proposed_qty", "gross_edge_pp", "edge_at_executable_pp",
             "expected_fees_usd", "net_ev_usd", "net_ev_per_contract_usd",
             "net_ev_source", "valuation_id", "provider", "market_label")
@@ -466,6 +468,10 @@ def _decision_section(r: dict) -> dict:
             "policy_version": r.get("d_policy_version"),
             "verdict": r.get("d_verdict"), "refusal": r.get("d_refusal"),
             "p_pinnacle": _f(r.get("d_p_pinnacle"), 9),
+            # the probability the paper decision acted on (research model +
+            # Pinnacle blend) and the research model's own, as recorded
+            "p_blended": _f(r.get("d_p_blended"), 9),
+            "p_internal": _f(r.get("d_p_internal"), 9),
             "executable_price": _f(px), "executable_price_source": px_src,
             "limit_price": _f(r.get("d_limit")), "proposed_qty": _f(qty),
             "gross_edge_pp": _f(pd.get("gross_edge_pp")),
@@ -516,7 +522,36 @@ def _paper_section(r: dict, gp: dict) -> dict:
             "group_pnl_why_unavailable": pnl_why}
 
 
-def _actual_section(r: dict, scale) -> dict:
+def _actual_pnl(gl) -> dict:
+    """ACTUAL group P&L from venue records only -- never paper, never summed
+    with paper. REALIZED when every live contract bought has been sold back
+    (cash flow of the venue fills, fees included); otherwise the latest
+    Xavier review's mark of the open ACTUAL position (UNREALIZED, as of that
+    review); otherwise null with the reason."""
+    if not gl or not gl.get("live_bought"):
+        return {"group_pnl_usd": None, "group_pnl_kind": None,
+                "group_pnl_as_of": None, "group_pnl_source": None,
+                "group_pnl_why_unavailable": (
+                    "no venue-confirmed fill in this group: there is no ACTUAL "
+                    "position, so no ACTUAL P&L")}
+    if gl["live_held"] == 0:
+        return {"group_pnl_usd": _f(gl["live_cash"]), "group_pnl_kind": "REALIZED",
+                "group_pnl_as_of": _iso(gl.get("last_fill_at")),
+                "group_pnl_source": "execmirror_fills (venue fills: proceeds - cost - fees)",
+                "group_pnl_why_unavailable": None}
+    if gl.get("unrealized_usd") is not None:
+        return {"group_pnl_usd": _f(gl["unrealized_usd"]), "group_pnl_kind": "UNREALIZED_MARK",
+                "group_pnl_as_of": _iso(gl.get("review_at")),
+                "group_pnl_source": "smalllive_reviews.unrealized_usd (exit side of a fresh venue BBO)",
+                "group_pnl_why_unavailable": None}
+    return {"group_pnl_usd": None, "group_pnl_kind": None, "group_pnl_as_of": None,
+            "group_pnl_source": None,
+            "group_pnl_why_unavailable": (
+                "ACTUAL position still open and no Xavier review has marked it "
+                "with a fresh venue quote: unrealized P&L unavailable")}
+
+
+def _actual_section(r: dict, scale, ctl: dict | None = None, gl: dict | None = None) -> dict:
     det = _js(r.get("detail"))
     det = det if isinstance(det, dict) else {}
     params = det.get("params") if isinstance(det.get("params"), dict) else {}
@@ -549,8 +584,17 @@ def _actual_section(r: dict, scale) -> dict:
         why = "planned, not yet submitted"
     elif sent and not read:
         why = "sent; the venue order record has not been read yet"
-    return {"label": "ACTUAL", "venue": LIVE_VENUE,
+    fp = (ctl or {}).get("account_fingerprint")
+    out = {"label": "ACTUAL", "venue": LIVE_VENUE,
             "account": "execution mirror account (Polymarket US)",
+            # a prefix identifies the retail account without publishing it
+            "account_fingerprint_prefix": (str(fp)[:8] if fp else None),
+            # the mirror's own live intent, derived from the paper order
+            "mirror_intent": {"mirror_id": r["mirror_id"], "role": r["role"],
+                              "intent": r["intent"], "order_type": r.get("order_type"),
+                              "tif": r.get("tif"), "post_only": r.get("post_only"),
+                              "created_at": _iso(r.get("created_at")),
+                              "source": "execmirror_orders"},
             "scale": _f(scale),
             "scaled_qty": _f(r.get("scaled_qty")),
             "intended_qty": live_qty,
@@ -582,12 +626,23 @@ def _actual_section(r: dict, scale) -> dict:
             "error": (_js(r.get("error")) or None),
             "why_no_fill_figures": why,
             "fill_source": ("VENUE_ORDER_RECORD" if read else None)}
+    out.update(_actual_pnl(gl))
+    return out
 
 
 def _difference(r: dict, paper: dict, actual: dict, scale) -> dict:
     scale = _d(scale)
     excluded_qty = _f(r.get("scaled_qty")) if actual["excluded"] else None
+    decided = r.get("d_decided_at") or r.get("paper_decided_at") or r.get("p_decided_at")
     out = {"rounded_qty": actual["rounding_delta"],
+           # ROUNDING: the paper quantity / scale, the whole-contract live
+           # quantity the mirror intended, and the difference between them
+           "scaled_qty": actual["scaled_qty"],
+           "intended_live_qty": (None if actual["excluded"] else actual["intended_qty"]),
+           # LATENCY from recorded instants only; null where an end is absent
+           "decision_to_submit_ms": _ms_between(decided, r.get("submit_started_at")),
+           "submit_to_ack_ms": _ms_between(r.get("submit_started_at"), r.get("accepted_at")),
+           "submit_latency_ms_recorded": actual["submit_latency_ms"],
            "excluded_scaled_qty": excluded_qty,
            "submitted_minus_paper_wire_price": None,
            "live_minus_paper_fill_wire_price": None,
@@ -648,18 +703,66 @@ async def _management(conn, rows: list) -> dict:
         r.get("group_id"), r.get("mirror_id")) if s})
     out = {"handoffs": {}, "reviews": {}, "findings": {}, "live_handoffs": {},
            "live_reviews": {}, "reconciliations": {}, "smalllive_schema": False,
-           "groups_pnl": {}}
+           "groups_pnl": {}, "paper_protection": {}, "live_protection": {},
+           "groups_live": {}}
     if groups:
         for h in await conn.fetch(
                 """SELECT handoff_id, group_id, owner, confirmed_qty, outstanding_qty,
                           first_fill_at FROM paper_handoffs WHERE group_id = ANY($1)""", groups):
             out["handoffs"][h["group_id"]] = dict(h)
         for v in await conn.fetch(
-                """SELECT DISTINCT ON (group_id) group_id, review_id, reviewed_at,
-                          trigger, recommendation, refusal
-                     FROM paper_xavier_reviews WHERE group_id = ANY($1)
-                    ORDER BY group_id, reviewed_at DESC, review_id DESC""", groups):
+                """SELECT DISTINCT ON (r.group_id) r.group_id, r.review_id, r.reviewed_at,
+                          r.trigger, r.recommendation, r.refusal, r.measure,
+                          r.exceptional, r.selection, r.exposure,
+                          s.config -> 'cadence' ->> 'xavier_backstop_s' AS backstop_s
+                     FROM paper_xavier_reviews r
+                     LEFT JOIN paper_sessions s ON s.session_id = r.session_id
+                    WHERE r.group_id = ANY($1)
+                    ORDER BY r.group_id, r.reviewed_at DESC, r.review_id DESC""", groups):
             out["reviews"][v["group_id"]] = dict(v)
+        # PROTECTION, read from the orders and fills themselves: a resting
+        # protective order is NOT filled protection, so the two are separate.
+        for g in await conn.fetch(
+                """SELECT g AS group_id,
+                          (SELECT coalesce(sum(o.qty - o.filled_qty), 0) FROM paper_orders o
+                            WHERE o.group_id = g AND o.role = 'STANDING_PROTECTION'
+                              AND o.state IN ('PENDING_SIMULATION','RESTING','PARTIALLY_FILLED'))
+                            AS resting,
+                          (SELECT count(*) FROM paper_orders o
+                            WHERE o.group_id = g AND o.role = 'STANDING_PROTECTION'
+                              AND o.state IN ('PENDING_SIMULATION','RESTING','PARTIALLY_FILLED'))
+                            AS resting_orders,
+                          (SELECT coalesce(sum(f.qty), 0) FROM paper_fills f
+                            WHERE f.group_id = g AND f.role = 'STANDING_PROTECTION') AS filled
+                     FROM unnest($1::text[]) AS g""", groups):
+            out["paper_protection"][g["group_id"]] = dict(g)
+        for g in await conn.fetch(
+                """SELECT g AS group_id,
+                          (SELECT coalesce(sum(m.live_qty - m.cum_qty), 0) FROM execmirror_orders m
+                            WHERE m.group_id = g AND m.role = 'STANDING_PROTECTION'
+                              AND m.state IN ('OPEN','PARTIALLY_FILLED')) AS resting,
+                          (SELECT count(*) FROM execmirror_orders m
+                            WHERE m.group_id = g AND m.role = 'STANDING_PROTECTION'
+                              AND m.state IN ('OPEN','PARTIALLY_FILLED')) AS resting_orders,
+                          (SELECT coalesce(sum(m.live_qty), 0) FROM execmirror_orders m
+                            WHERE m.group_id = g AND m.role = 'STANDING_PROTECTION'
+                              AND m.state IN ('PLANNED','SUBMITTING','UNKNOWN')) AS pending,
+                          (SELECT coalesce(sum(m.cum_qty), 0) FROM execmirror_orders m
+                            WHERE m.group_id = g AND m.role = 'STANDING_PROTECTION') AS filled
+                     FROM unnest($1::text[]) AS g""", groups):
+            out["live_protection"][g["group_id"]] = dict(g)
+        # ACTUAL inventory and cash, from venue fills only
+        fills_by_group: dict = {}
+        for f in await conn.fetch(
+                """SELECT group_id, intent, qty, price, fee_usd, observed_at
+                     FROM execmirror_fills WHERE group_id = ANY($1)""", groups):
+            fills_by_group.setdefault(f["group_id"], []).append(dict(f))
+        for g, fl in fills_by_group.items():
+            bought = sum(_d(f["qty"]) for f in fl if _is_buy(f["intent"]))
+            sold = sum(_d(f["qty"]) for f in fl if not _is_buy(f["intent"]))
+            out["groups_live"][g] = {"live_bought": bought, "live_held": bought - sold,
+                                     "live_cash": live_cash_flow(fl),
+                                     "last_fill_at": max(f["observed_at"] for f in fl)}
         for g in await conn.fetch(
                 """SELECT g AS group_id,
                           (SELECT count(*) FROM paper_settlements s WHERE s.group_id = g) AS settled,
@@ -673,7 +776,9 @@ async def _management(conn, rows: list) -> dict:
                      FROM unnest($1::text[]) AS g""", groups):
             realized = bool(g["fills"]) and (bool(g["settled"]) or _d(g["open_qty"]) == 0) \
                 and g["cash"] is not None
-            out["groups_pnl"][g["group_id"]] = {"realized": realized, "cash": g["cash"]}
+            out["groups_pnl"][g["group_id"]] = {"realized": realized, "cash": g["cash"],
+                                                "fills": g["fills"], "open_qty": g["open_qty"],
+                                                "settled": bool(g["settled"])}
         if await conn.fetchval(
                 "SELECT to_regclass('smalllive_handoffs') IS NOT NULL"
                 " AND to_regclass('smalllive_reviews') IS NOT NULL"):
@@ -689,13 +794,20 @@ async def _management(conn, rows: list) -> dict:
                 for v in await conn.fetch(
                         """SELECT DISTINCT ON (handoff_id) handoff_id, review_id, reviewed_at,
                                   action, live_held, mark_value_usd, unrealized_usd,
-                                  paper_recommendation
+                                  paper_recommendation, paper_review_id,
+                                  resting_protection_qty, filled_protection_qty,
+                                  committed_exit_qty, detail, quote
                              FROM smalllive_reviews WHERE handoff_id = ANY($1)
                             ORDER BY handoff_id, reviewed_at DESC, review_id DESC""", hids):
                     out["live_reviews"][v["handoff_id"]] = dict(v)
+            for g, lh in out["live_handoffs"].items():
+                lv = out["live_reviews"].get(lh["handoff_id"])
+                if g in out["groups_live"] and lv is not None:
+                    out["groups_live"][g]["unrealized_usd"] = lv["unrealized_usd"]
+                    out["groups_live"][g]["review_at"] = lv["reviewed_at"]
         if await conn.fetchval("SELECT to_regclass('smalllive_reconciliations') IS NOT NULL"):
             for c in await conn.fetch(
-                    """SELECT group_id, status, discrepancies, reconciled_at
+                    """SELECT group_id, status, discrepancies, reconciled_at, changed_at, chain
                          FROM smalllive_reconciliations WHERE group_id = ANY($1)""", groups):
                 out["reconciliations"][c["group_id"]] = dict(c)
     if subjects:
@@ -709,7 +821,239 @@ async def _management(conn, rows: list) -> dict:
     return out
 
 
-def _management_section(r: dict, mg: dict) -> dict:
+PROBABILITY_EVIDENCE_STATES = ("FRESH_CURRENT_PROBABILITY",
+                               "STALE_ENTRY_TIME_PROBABILITY",
+                               "PROBABILITY_UNAVAILABLE")
+# Read defensively: the evidence-state field is a recent addition to Xavier's
+# review record; whichever of these keys a review carries is shown with the
+# exact place it was read from. Absent -> null ("unavailable"), never guessed
+# from other fields.
+PROBABILITY_EVIDENCE_KEYS = ("probability_evidence_state", "evidence_state",
+                             "probability_evidence", "probability_state",
+                             "probability_freshness")
+RECONCILIATION_MEANING = {
+    "MATCHED": "the paper and actual chains agree",
+    "DISCREPANCY": "Audrey found a difference between the paper and actual chains (listed)",
+    "PENDING": "a live order in the group is still working: not yet final",
+    "NOT_MIRRORED": ("paper only: every mirror row was excluded before submission, "
+                     "nothing was sent to the venue and no actual leg exists by design"),
+}
+PROTECTION_RULE = ("a resting protective order is NOT filled protection: the standing "
+                   "(resting) quantity and the filled protection quantity are shown "
+                   "separately and never added together")
+
+
+def _evidence_state(docs) -> tuple:
+    """(value, source) of the first probability evidence-state field found in
+    the given (name, json) documents, else (None, None)."""
+    for name, doc in docs:
+        doc = _js(doc)
+        if not isinstance(doc, dict):
+            continue
+        for k in PROBABILITY_EVIDENCE_KEYS:
+            v = doc.get(k)
+            if isinstance(v, dict):
+                v, k = v.get("state"), k + ".state"
+            if isinstance(v, str) and v:
+                return v, "%s.%s" % (name, k)
+    return None, None
+
+
+def _probability_freshness(v, lv) -> dict:
+    docs = []
+    if v:
+        docs += [("paper_xavier_reviews.measure", v.get("measure")),
+                 ("paper_xavier_reviews.exceptional", v.get("exceptional")),
+                 ("paper_xavier_reviews.selection", v.get("selection"))]
+    if lv:
+        docs += [("smalllive_reviews.detail", lv.get("detail"))]
+    state, src = _evidence_state(docs)
+    m = _js(v.get("measure")) if v else {}
+    m = m if isinstance(m, dict) else {}
+    why = None
+    if state is None:
+        why = ("no Xavier review of this group yet" if not (v or lv) else
+               "the latest Xavier review records no probability evidence-state field")
+    return {"evidence_state": state, "evidence_state_source": src,
+            "evidence_state_recognised": (state in PROBABILITY_EVIDENCE_STATES
+                                          if state else None),
+            "review_id": (v or {}).get("review_id") or (lv or {}).get("review_id"),
+            "reviewed_at": _iso((v or {}).get("reviewed_at") or (lv or {}).get("reviewed_at")),
+            # the review's own measure, as recorded (supporting detail only)
+            "measure_source": m.get("source"),
+            "measure_stale": m.get("stale") if isinstance(m.get("stale"), bool) else None,
+            "measure_p": _f(m.get("p"), 9) if isinstance(m.get("p"), (int, float)) else None,
+            "measure_why": m.get("why"),
+            "why_unavailable": why}
+
+
+def _protection(g, mg) -> dict:
+    gp = mg["groups_pnl"].get(g) or {}
+    pp = mg["paper_protection"].get(g)
+    gl = mg["groups_live"].get(g) or {}
+    lp = mg["live_protection"].get(g)
+    if pp is not None and gp.get("fills"):
+        open_q = _d(gp.get("open_qty"))
+        paper = {"label": "PAPER POSITION (SIMULATED)", "open_qty": _f(open_q),
+                 "standing_resting_qty": _f(pp["resting"]),
+                 "standing_resting_orders": pp["resting_orders"],
+                 "filled_protection_qty": _f(pp["filled"]),
+                 "unprotected_qty": _f(open_q - _d(pp["resting"])) if open_q > 0 else _f(0),
+                 "source": ("paper_orders (role STANDING_PROTECTION, still resting) / "
+                            "paper_fills (role STANDING_PROTECTION)"),
+                 "why_unavailable": None}
+    else:
+        paper = {"label": "PAPER POSITION (SIMULATED)", "open_qty": None,
+                 "standing_resting_qty": None, "standing_resting_orders": None,
+                 "filled_protection_qty": None, "unprotected_qty": None, "source": None,
+                 "why_unavailable": ("no simulated fill in this group: there is no paper "
+                                     "position to protect")}
+    if lp is not None and gl.get("live_bought"):
+        held = _d(gl["live_held"])
+        actual = {"label": "ACTUAL POSITION", "held_qty": _f(held),
+                  "standing_resting_qty": _f(lp["resting"]),
+                  "standing_resting_orders": lp["resting_orders"],
+                  "pending_submission_qty": _f(lp["pending"]),
+                  "filled_protection_qty": _f(lp["filled"]),
+                  "unprotected_qty": _f(held - _d(lp["resting"])) if held > 0 else _f(0),
+                  "source": ("execmirror_orders (role STANDING_PROTECTION: resting = "
+                             "OPEN / PARTIALLY_FILLED remainder; filled = venue cum qty)"),
+                  "why_unavailable": None}
+    else:
+        actual = {"label": "ACTUAL POSITION", "held_qty": None,
+                  "standing_resting_qty": None, "standing_resting_orders": None,
+                  "pending_submission_qty": None, "filled_protection_qty": None,
+                  "unprotected_qty": None, "source": None,
+                  "why_unavailable": ("no venue-confirmed fill in this group: there is no "
+                                      "ACTUAL position to protect")}
+    return {"paper": paper, "actual": actual, "rule": PROTECTION_RULE}
+
+
+def _next_review(g, h, v, lh, lv, mg, now) -> dict:
+    gp = mg["groups_pnl"].get(g) or {}
+    paper = {"due_by": None, "basis": None, "overdue_at_read": None, "why_unavailable": None}
+    if not h:
+        paper["why_unavailable"] = "no paper position under Xavier (no handoff): no review is scheduled"
+    elif gp.get("realized"):
+        paper["why_unavailable"] = "the paper position is closed or settled: no further review"
+    elif not v:
+        paper["why_unavailable"] = "no Xavier review of the paper position recorded yet"
+    elif v.get("backstop_s") in (None, ""):
+        paper["why_unavailable"] = ("the paper session's configuration records no "
+                                    "cadence.xavier_backstop_s, so no due time can be derived")
+    else:
+        sec = float(v["backstop_s"])
+        due = v["reviewed_at"] + dt.timedelta(seconds=sec)
+        paper.update({"due_by": _iso(due), "overdue_at_read": now > due,
+                      "basis": ("latest paper review at %s + the scheduled backstop of %g s "
+                                "(paper_sessions.config.cadence.xavier_backstop_s); sooner on "
+                                "a new fill or market event" % (_iso(v["reviewed_at"]), sec))})
+    actual = {"due_by": None, "basis": None, "overdue_at_read": None, "why_unavailable": None}
+    if not lh:
+        actual["why_unavailable"] = "no ACTUAL position under Xavier (no live handoff): no review is scheduled"
+    elif lh.get("state") != "OPEN":
+        actual["why_unavailable"] = "the ACTUAL position is closed: no further review"
+    elif not lv:
+        actual["why_unavailable"] = ("live handoff recorded; no review of the ACTUAL position "
+                                     "yet (first one on the next management pass)")
+    else:
+        from .execmirror import MANAGEMENT_EVERY_S
+        due = lv["reviewed_at"] + dt.timedelta(seconds=MANAGEMENT_EVERY_S)
+        actual.update({"due_by": _iso(due), "overdue_at_read": now > due,
+                       "basis": ("latest ACTUAL review at %s + the mirror's management pass "
+                                 "every %g s (execmirror.MANAGEMENT_EVERY_S), while the mirror "
+                                 "service runs" % (_iso(lv["reviewed_at"]), MANAGEMENT_EVERY_S))})
+    return {"paper": paper, "actual": actual}
+
+
+def _link(key, label, state, ref=None, why=None) -> dict:
+    return {"link": key, "label": label, "state": state, "ref": ref, "why": why}
+
+
+def _chain(r: dict, paper: dict, actual: dict, mg: dict) -> dict:
+    """Paper / live chain completeness for one row: each link PRESENT,
+    ABSENT (expected but not on record) or NOT_APPLICABLE (with why)."""
+    g = r.get("group_id")
+    P, A, N = "PRESENT", "ABSENT", "NOT_APPLICABLE"
+    links = []
+    has_po = r.get("p_order_id") is not None
+    if r.get("d_id"):
+        links.append(_link("decision", "Paper decision", P, r["d_id"]))
+    elif not has_po:
+        links.append(_link("decision", "Paper decision", N, None,
+                           "mirror-generated %s order: it copies no paper decision" % r["role"]))
+    elif r["role"] not in ("ENTRY", "HEDGE") and not r.get("p_decision_id"):
+        links.append(_link("decision", "Paper decision", N, None,
+                           "a %s order follows Xavier's management of the position, not "
+                           "an entry decision" % r["role"]))
+    else:
+        links.append(_link("decision", "Paper decision", A, r.get("p_decision_id"),
+                           "the paper order names no decision found in paper_decisions"))
+    links.append(_link("paper_order", "Paper order", P, r["p_order_id"]) if has_po else
+                 _link("paper_order", "Paper order", N, None,
+                       "mirror-generated %s order: no paper order behind it" % r["role"]))
+    if not has_po:
+        links.append(_link("paper_fill", "Paper fill (simulated)", N, None, "no paper order"))
+    elif paper.get("simulated_fill_count"):
+        links.append(_link("paper_fill", "Paper fill (simulated)", P,
+                           "%d fill(s)" % paper["simulated_fill_count"]))
+    else:
+        links.append(_link("paper_fill", "Paper fill (simulated)", A, None,
+                           "no simulated fill (paper order %s)" % (r.get("p_state") or "state unknown")))
+    links.append(_link("mirror_intent", "Mirror intent", P, r["mirror_id"]))
+    if actual["venue_order_id"]:
+        links.append(_link("venue_order", "Venue order", P, actual["venue_order_id"]))
+    elif actual["excluded"]:
+        links.append(_link("venue_order", "Venue order", N, None,
+                           "not sent: excluded (%s)" % r.get("exclusion")))
+    else:
+        links.append(_link("venue_order", "Venue order", A, None,
+                           "no venue order id on record (state %s)" % r["state"]))
+    if not actual["venue_order_id"]:
+        links.append(_link("venue_fill", "Venue fill", N, None, "no venue order"))
+    elif r.get("lf_n"):
+        links.append(_link("venue_fill", "Venue fill", P, "%d fill(s)" % r["lf_n"]))
+    else:
+        links.append(_link("venue_fill", "Venue fill", A, None,
+                           actual.get("why_no_fill_figures") or "no venue fill recorded"))
+    h = mg["handoffs"].get(g) if g else None
+    gp = mg["groups_pnl"].get(g) or {}
+    if h:
+        links.append(_link("xavier_paper_handoff", "Xavier handoff · paper", P, h["handoff_id"]))
+    elif gp.get("fills"):
+        links.append(_link("xavier_paper_handoff", "Xavier handoff · paper", A, None,
+                           "the group has simulated fills but no Xavier handoff"))
+    else:
+        links.append(_link("xavier_paper_handoff", "Xavier handoff · paper", N, None,
+                           "no simulated fill in the group"))
+    lh = mg["live_handoffs"].get(g) if g else None
+    gl = mg["groups_live"].get(g) or {}
+    if lh:
+        links.append(_link("xavier_actual_handoff", "Xavier handoff · actual", P, lh["handoff_id"]))
+    elif gl.get("live_bought"):
+        links.append(_link("xavier_actual_handoff", "Xavier handoff · actual", A, None,
+                           "the group has venue fills but no Xavier handoff of the ACTUAL position"))
+    else:
+        links.append(_link("xavier_actual_handoff", "Xavier handoff · actual", N, None,
+                           "no venue-confirmed buy fill in the group"))
+    rec = mg["reconciliations"].get(g) if g else None
+    if rec:
+        links.append(_link("reconciliation", "Audrey reconciliation", P, rec["status"]))
+    elif not g:
+        links.append(_link("reconciliation", "Audrey reconciliation", N, None, "no paper group"))
+    else:
+        links.append(_link("reconciliation", "Audrey reconciliation", A, None,
+                           "no Audrey reconciliation of this group on record"))
+    absent = [x["link"] for x in links if x["state"] == A]
+    return {"links": links, "complete": not absent, "absent": absent,
+            "present_count": sum(1 for x in links if x["state"] == P),
+            "not_applicable_count": sum(1 for x in links if x["state"] == N),
+            "basis": ("decision -> paper order -> paper fill -> mirror intent -> venue "
+                      "order -> venue fill -> Xavier handoff -> Audrey reconciliation; "
+                      "NOT_APPLICABLE links are absent by design, with the reason")}
+
+
+def _management_section(r: dict, mg: dict, now=None) -> dict:
     g = r.get("group_id")
     h = mg["handoffs"].get(g)
     v = mg["reviews"].get(g)
@@ -748,13 +1092,30 @@ def _management_section(r: dict, mg: dict) -> dict:
         xa = {"label": "ACTUAL POSITION", "present": False, "handoff_id": None,
               "latest_review_id": None, "latest_action": None,
               "why_unavailable": UNAVAILABLE_ACTUAL_XAVIER}
+    if lh:
+        xa["paper_recommendation_followed"] = lv["paper_recommendation"] if lv else None
+    now = now or dt.datetime.now(dt.timezone.utc)
+    chain_link = None
+    if rec:
+        ch = _js(rec.get("chain"))
+        for ln in (ch.get("links") or []) if isinstance(ch, dict) else []:
+            if isinstance(ln, dict) and ln.get("mirror_id") == r.get("mirror_id"):
+                chain_link = ln
+                break
     return {"xavier_paper": xp, "xavier_actual": xa,
+            "probability_freshness": _probability_freshness(v, lv),
+            "protection": _protection(g, mg),
+            "next_review": _next_review(g, h, v, lh, lv, mg, now),
             "audrey_findings": findings,
             "audrey_findings_why_empty": (None if findings else
                                           "no Audrey finding names this decision, order or group"),
             "audrey_reconciliation": ({"status": rec["status"],
+                                       "meaning": RECONCILIATION_MEANING.get(rec["status"]),
+                                       "paper_only": rec["status"] == "NOT_MIRRORED",
                                        "reconciled_at": _iso(rec["reconciled_at"]),
-                                       "discrepancies": _js(rec["discrepancies"]) or []}
+                                       "status_changed_at": _iso(rec.get("changed_at")),
+                                       "discrepancies": _js(rec["discrepancies"]) or [],
+                                       "audrey_chain_link": chain_link}
                                       if rec else None),
             "audrey_reconciliation_why_unavailable": (
                 None if rec else "no Audrey reconciliation of the actual chain for this group")}
@@ -869,6 +1230,7 @@ async def small_live(conn, *, view: str | None = None, status: str | None = None
                       d.strategy AS d_strategy, d.policy_version AS d_policy_version,
                       d.verdict AS d_verdict, d.refusal AS d_refusal,
                       d.p_pinnacle AS d_p_pinnacle, d.limit_price AS d_limit,
+                      d.p_blended AS d_p_blended, d.p_internal AS d_p_internal,
                       d.proposed_qty AS d_qty, d.economics AS d_economics,
                       d.policy_decision AS d_policy_decision,
                       d.valuation_id AS d_valuation_id, d.pinnacle AS d_pinnacle,
@@ -892,10 +1254,11 @@ async def small_live(conn, *, view: str | None = None, status: str | None = None
                                 ("WHERE " + " AND ".join(where)) if where else "",
                                 len(args)), *args)]
     mg = await _management(conn, rows)
+    now = dt.datetime.now(dt.timezone.utc)
     out_rows = []
     for r in rows:
         paper = _paper_section(r, mg["groups_pnl"].get(r.get("group_id")))
-        actual = _actual_section(r, scale)
+        actual = _actual_section(r, scale, ctl, mg["groups_live"].get(r.get("group_id")))
         lab = _js(r.get("p_label")) if r.get("p_order_id") else _js(
             (_js(r.get("detail")) or {}).get("label"))
         out_rows.append({
@@ -910,7 +1273,8 @@ async def small_live(conn, *, view: str | None = None, status: str | None = None
             "decision": _decision_section(r),
             "paper": paper, "actual": actual,
             "difference": _difference(r, paper, actual, scale),
-            "management": _management_section(r, mg)})
+            "management": _management_section(r, mg, now),
+            "chain": _chain(r, paper, actual, mg)})
     counts = await _counts(conn)
     return {
         "title": "Small Live · Paper vs Actual",

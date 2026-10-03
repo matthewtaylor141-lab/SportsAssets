@@ -86,6 +86,28 @@
     return s === 'filled' ? 'good' : s === 'refused' ? 'bad'
       : s === 'open' ? 'blue' : 'grey';
   }
+  function why(t) { return has(t) ? '<span class="sl-why">' + esc(t) + '</span>' : ''; }
+  /* Audrey: NOT_MIRRORED is paper only (nothing sent) -- neutral grey. */
+  function recTone(s) {
+    return s === 'MATCHED' ? 'good' : s === 'DISCREPANCY' ? 'bad'
+      : s === 'NOT_MIRRORED' ? 'grey' : 'warn';
+  }
+  function evidenceTone(s) {
+    return s === 'FRESH_CURRENT_PROBABILITY' ? 'good'
+      : s === 'STALE_ENTRY_TIME_PROBABILITY' ? 'warn'
+      : s === 'PROBABILITY_UNAVAILABLE' ? 'bad' : 'grey';
+  }
+  function linkTone(s) {
+    return s === 'PRESENT' ? 'good' : s === 'ABSENT' ? 'bad' : 'grey';
+  }
+  function linkWord(s) {
+    return s === 'NOT_APPLICABLE' ? 'N/A' : s;
+  }
+  function due(n) {
+    n = n || {};
+    if (!has(n.due_by)) { return NA + why(n.why_unavailable); }
+    return when(n.due_by) + (n.overdue_at_read ? ' ' + pill('OVERDUE', 'bad') : '') + why(n.basis);
+  }
 
   /* ── header strip: mirror control, account snapshot, venues ─────────── */
   function strip(d) {
@@ -158,13 +180,15 @@
   /* ── one trade ──────────────────────────────────────────────────────── */
   function decision(d) {
     var src = d.present ? '' : '<p class="muted">' + txt(d.why) + '</p>';
-    return '<div class="sl-decision"><h3 class="h3">Decision</h3>' + src +
+    return '<div class="sl-decision"><h3 class="h3">Decision — PAPER ' + pill('SIMULATED', 'blue') + '</h3>' + src +
       '<div class="facts three">' +
       fact('Decided at', when(d.decided_at)) +
       fact('Decision', has(d.decision_id) ? '<span class="mono">' + esc(d.decision_id) + '</span>' : NA) +
       fact('Strategy / policy', txt(d.strategy) + ' · ' + txt(d.policy_version)) +
       fact('Verdict', has(d.verdict) ? pill(d.verdict, d.verdict === 'ENTER' ? 'good' : 'warn') : NA) +
+      fact('Decision probability (blended)', pct(d.p_blended)) +
       fact('Pinnacle probability', pct(d.p_pinnacle)) +
+      fact('Research model probability', pct(d.p_internal)) +
       fact('Executable venue price', px(d.executable_price)) +
       fact('Limit', px(d.limit_price)) +
       fact('Gross edge', pp(d.gross_edge_pp)) +
@@ -206,9 +230,23 @@
         (a.exclusion_detail && a.exclusion_detail.why ? esc(a.exclusion_detail.why) : '') +
         (num(a.would_have_cost_usd) !== null ? ' Would have cost ' + usd(a.would_have_cost_usd) + '.' : '') +
         '</div>' : '';
-    var why = a.why_no_fill_figures && !a.excluded
+    var nofill = a.why_no_fill_figures && !a.excluded
       ? '<p class="muted">' + esc(a.why_no_fill_figures) + '</p>' : '';
-    return '<div class="sl-col sl-actual">' + head + excl + why + '<div class="facts">' +
+    var mi = a.mirror_intent || {};
+    var pnl = num(a.group_pnl_usd) === null
+      ? NA + (a.group_pnl_why_unavailable
+        ? '<span class="sl-why">' + esc(a.group_pnl_why_unavailable) + '</span>' : '')
+      : usd(a.group_pnl_usd, 4) + ' ' + pill(a.group_pnl_kind === 'REALIZED' ? 'REALIZED'
+        : 'UNREALIZED · MARK', a.group_pnl_kind === 'REALIZED' ? 'good' : 'grey') +
+        (has(a.group_pnl_as_of) ? '<span class="sl-why">as of ' +
+          esc(String(a.group_pnl_as_of).replace('T', ' ').replace(/\.\d+/, '')) + '</span>' : '');
+    return '<div class="sl-col sl-actual">' + head + excl + nofill + '<div class="facts">' +
+      fact('Retail account', has(a.account_fingerprint_prefix)
+        ? '<span class="mono">' + esc(a.account_fingerprint_prefix) + '…</span>' : NA) +
+      fact('Mirror intent', has(mi.mirror_id)
+        ? '<span class="mono">' + esc(mi.mirror_id) + '</span>' +
+          '<span class="sl-why">' + esc([mi.role, mi.intent, mi.order_type, mi.tif].filter(has).join(' · ')) + '</span>'
+        : NA) +
       fact('Status', has(a.status) ? pill(a.status, statusTone(a.status)) + ' ' + txt(a.state) : NA) +
       fact('Scaled qty → intended', qty(a.scaled_qty) + ' → ' + txt(a.intended_qty)) +
       fact('Rounding delta', signedQty(a.rounding_delta)) +
@@ -222,11 +260,12 @@
       fact('Fees', usd(a.fees_usd, 4)) +
       fact('Submit latency', ms(a.submit_latency_ms)) +
       fact('Decision → venue ack', ms(a.decision_to_accept_ms)) +
+      fact('Actual P&L (group)', pnl) +
       '</div></div>';
   }
 
   function difference(x) {
-    return '<details class="sl-more" open><summary>Difference (actual vs paper)</summary>' +
+    return '<details class="sl-more" open><summary>Paper vs actual — difference</summary>' +
       (x.why ? '<p class="muted">' + esc(x.why) + '</p>' : '') +
       '<div class="facts three">' +
       fact('Submitted − paper wire price', signedPx(x.submitted_minus_paper_wire_price)) +
@@ -235,25 +274,117 @@
       fact('Slippage vs submitted (adverse)', signedPx(x.slippage_vs_submitted_adverse_per_contract)) +
       fact('Expected live qty (paper fill ÷ scale)', qty(x.expected_live_qty_from_paper_fill)) +
       fact('Live − expected qty', signedQty(x.live_minus_expected_qty)) +
-      fact('Rounded qty', signedQty(x.rounded_qty)) +
+      fact('Rounding: scaled → live qty', qty(x.scaled_qty) + ' → ' + qty(x.intended_live_qty)) +
+      fact('Rounded qty (rounding delta)', signedQty(x.rounded_qty)) +
       fact('Excluded qty (scaled)', qty(x.excluded_scaled_qty)) +
       fact('Live fees − paper fees ÷ scale', signedUsd(x.live_fees_minus_scaled_paper_fees_usd)) +
       fact('Fee per contract, live − paper', signedUsd(x.fee_per_contract_live_minus_paper_usd)) +
+      fact('Latency: decision → submit', ms(x.decision_to_submit_ms)) +
+      fact('Latency: submit → venue ack', ms(x.submit_to_ack_ms) +
+        (num(x.submit_latency_ms_recorded) !== null
+          ? '<span class="sl-why">recorded submit latency ' + esc(x.submit_latency_ms_recorded) + ' ms</span>' : '')) +
       fact('Paper first fill → live ack', ms(x.paper_first_fill_to_live_ack_ms)) +
       fact('Paper first fill → live first fill', ms(x.paper_first_fill_to_live_first_fill_ms)) +
       '</div><p class="sl-why">' + txt(x.basis) + '</p></details>';
+  }
+
+  function protectionCol(side, p) {
+    p = p || {};
+    var paper = side === 'paper';
+    var head = '<div class="sl-colhead"><span>' + (paper ? 'PAPER POSITION' : 'ACTUAL POSITION') +
+      '</span>' + pill(paper ? 'SIMULATED' : 'ACTUAL', paper ? 'blue' : 'good') + '</div>';
+    if (p.why_unavailable) {
+      return '<div class="sl-col ' + (paper ? 'sl-paper' : 'sl-actual') + '">' + head +
+        '<p class="muted">Protection unavailable — ' + esc(p.why_unavailable) + '</p></div>';
+    }
+    return '<div class="sl-col ' + (paper ? 'sl-paper' : 'sl-actual') + '">' + head + '<div class="facts">' +
+      fact(paper ? 'Open qty' : 'Held qty', qty(paper ? p.open_qty : p.held_qty)) +
+      fact('Standing protection (resting, not filled)', qty(p.standing_resting_qty) +
+        (num(p.standing_resting_orders) !== null ? '<span class="sl-why">' +
+          esc(p.standing_resting_orders) + ' resting order(s)</span>' : '')) +
+      fact('Filled protection', qty(p.filled_protection_qty)) +
+      fact('Unprotected qty', qty(p.unprotected_qty)) +
+      (paper ? '' : fact('Protection awaiting submission', qty(p.pending_submission_qty))) +
+      '</div></div>';
+  }
+
+  function chain(c) {
+    var links = (c && c.links) || [];
+    if (!links.length) { return '<p class="muted">' + NA + '</p>'; }
+    return '<ol class="sl-chain">' + links.map(function (l) {
+      return '<li>' + pill(linkWord(l.state), linkTone(l.state)) + ' <b>' + esc(l.label) + '</b>' +
+        (has(l.ref) ? ' <span class="mono muted">' + esc(l.ref) + '</span>' : '') +
+        why(l.why) + '</li>';
+    }).join('') + '</ol>' + why(c.basis);
+  }
+
+  function discrepancies(rec) {
+    var ds = (rec && rec.discrepancies) || [];
+    if (!rec) { return ''; }
+    if (!ds.length) { return '<p class="muted">No discrepancy recorded by Audrey for this group.</p>'; }
+    return '<ul class="sl-findings">' + ds.map(function (d) {
+      var rest = {};
+      Object.keys(d || {}).forEach(function (k) { if (k !== 'code') { rest[k] = d[k]; } });
+      return '<li>' + pill(d.code || 'DISCREPANCY', 'bad') +
+        (Object.keys(rest).length ? ' <span class="mono muted">' + esc(JSON.stringify(rest)) + '</span>' : '') +
+        '</li>';
+    }).join('') + '</ul>';
+  }
+
+  /* the operating summary: what management checks first on every row */
+  function ops(r) {
+    var m = r.management || {};
+    var xp = m.xavier_paper || {};
+    var xa = m.xavier_actual || {};
+    var pf = m.probability_freshness || {};
+    var pr = m.protection || {};
+    var nr = m.next_review || {};
+    var rec = m.audrey_reconciliation;
+    var c = r.chain || {};
+    var total = (c.links || []).length;
+    function prot(p) {
+      p = p || {};
+      if (p.why_unavailable) { return NA; }
+      return 'standing ' + qty(p.standing_resting_qty) + ' · filled ' + qty(p.filled_protection_qty);
+    }
+    return '<div class="sl-ops facts three">' +
+      fact('Xavier recommendation', '<span class="sl-tag">paper</span> ' + txt(xp.latest_recommendation) +
+        '<br><span class="sl-tag">actual</span> ' + (xa.present ? txt(xa.latest_action) : NA)) +
+      fact('Probability freshness', has(pf.evidence_state)
+        ? pill(pf.evidence_state, evidenceTone(pf.evidence_state))
+        : NA + why(pf.why_unavailable)) +
+      fact('Protection', '<span class="sl-tag">paper</span> ' + prot(pr.paper) +
+        '<br><span class="sl-tag">actual</span> ' + prot(pr.actual)) +
+      fact('Next review', '<span class="sl-tag">paper</span> ' + (has((nr.paper || {}).due_by)
+        ? when(nr.paper.due_by) + (nr.paper.overdue_at_read ? ' ' + pill('OVERDUE', 'bad') : '') : NA) +
+        '<br><span class="sl-tag">actual</span> ' + (has((nr.actual || {}).due_by)
+        ? when(nr.actual.due_by) + (nr.actual.overdue_at_read ? ' ' + pill('OVERDUE', 'bad') : '') : NA)) +
+      fact('Audrey reconciliation', rec ? pill(rec.status, recTone(rec.status)) +
+        (rec.discrepancies && rec.discrepancies.length
+          ? ' <span class="bad">' + esc(rec.discrepancies.length) + ' discrepanc' +
+            (rec.discrepancies.length === 1 ? 'y' : 'ies') + '</span>' : '')
+        : NA) +
+      fact('Paper / live chain', total
+        ? pill(c.complete ? 'COMPLETE' : 'INCOMPLETE', c.complete ? 'good' : 'warn') + ' ' +
+          esc((c.present_count || 0) + ' present · ' + (c.absent || []).length + ' absent · ' +
+            (c.not_applicable_count || 0) + ' n/a')
+        : NA) +
+      '</div>';
   }
 
   function management(m) {
     var xp = m.xavier_paper || {};
     var xa = m.xavier_actual || {};
     var rec = m.audrey_reconciliation;
+    var pf = m.probability_freshness || {};
+    var pr = m.protection || {};
+    var nr = m.next_review || {};
     var f = (m.audrey_findings || []).map(function (a) {
       return '<li>' + pill(a.severity, a.severity === 'CRITICAL' ? 'bad'
         : a.severity === 'WARNING' ? 'warn' : 'grey') + ' ' + esc(a.kind) +
         ' <span class="muted mono">' + esc(a.finding_id) + '</span></li>';
     }).join('');
-    return '<details class="sl-more"><summary>Management — Xavier &amp; Audrey</summary>' +
+    return '<details class="sl-more" open><summary>Management — Xavier &amp; Audrey</summary>' +
       '<div class="facts three">' +
       fact('Xavier · paper handoff', has(xp.handoff_id) ? '<span class="mono">' + esc(xp.handoff_id) + '</span>'
         : NA + (xp.why_unavailable ? '<span class="sl-why">' + esc(xp.why_unavailable) + '</span>' : '')) +
@@ -263,11 +394,27 @@
         ? '<span class="mono">' + esc(xa.handoff_id) + '</span> · ' + txt(xa.state) +
           ' · action ' + txt(xa.latest_action) + ' · unrealized ' + usd(xa.unrealized_usd)
         : NA + '<span class="sl-why">' + txt(xa.why_unavailable) + '</span>') +
+      fact('Xavier · paper recommendation the actual follows', txt(xa.paper_recommendation_followed)) +
+      fact('Probability evidence state', has(pf.evidence_state)
+        ? pill(pf.evidence_state, evidenceTone(pf.evidence_state)) + why('read from ' + pf.evidence_state_source)
+        : NA + why(pf.why_unavailable)) +
+      fact('Review measure (as recorded)', has(pf.measure_source)
+        ? esc(pf.measure_source) + (pf.measure_stale === true ? ' ' + pill('STALE', 'warn')
+          : pf.measure_stale === false ? ' ' + pill('CURRENT', 'good') : '') +
+          ' · p ' + pct(pf.measure_p) + why(pf.measure_why)
+        : NA) +
+      fact('Next review · paper', due(nr.paper)) +
+      fact('Next review · actual', due(nr.actual)) +
       fact('Audrey · chain reconciliation', rec
-        ? pill(rec.status, rec.status === 'MATCHED' ? 'good' : rec.status === 'DISCREPANCY' ? 'bad'
-          : rec.status === 'NOT_MIRRORED' ? 'grey' : 'warn')
+        ? pill(rec.status, recTone(rec.status)) + why(rec.meaning) +
+          (has(rec.reconciled_at) ? '<span class="sl-why">reconciled ' + esc(String(rec.reconciled_at).replace('T', ' ').replace(/\.\d+/, '')) + '</span>' : '')
         : NA + '<span class="sl-why">' + txt(m.audrey_reconciliation_why_unavailable) + '</span>') +
       '</div>' +
+      '<h3 class="h3">Protection — standing (resting) is not filled</h3>' +
+      '<div class="sl-cols">' + protectionCol('paper', pr.paper) + protectionCol('actual', pr.actual) + '</div>' +
+      why(pr.rule) +
+      '<h3 class="h3">Audrey discrepancies</h3>' +
+      (rec ? discrepancies(rec) : '<p class="muted">' + NA + why(m.audrey_reconciliation_why_unavailable) + '</p>') +
       '<h3 class="h3">Audrey findings for this decision</h3>' +
       (f ? '<ul class="sl-findings">' + f + '</ul>'
         : '<p class="muted">' + txt(m.audrey_findings_why_empty) + '</p>') +
@@ -283,9 +430,11 @@
       (title ? '<span class="sub">' + esc(title) + '</span>' : '') +
       pill(r.role, 'grey') + pill(s.kind || 'UNKNOWN', s.kind === 'TRAINING' ? 'warn' : 'blue') +
       '<span class="sub">' + esc(r.intent) + ' · ' + when(r.created_at) + '</span></h2>' +
-      '<div class="card-body">' + decision(r.decision || {}) +
+      '<div class="card-body">' + ops(r) + decision(r.decision || {}) +
       '<div class="sl-cols">' + paperCol(r.paper || {}) + actualCol(r.actual || {}) + '</div>' +
       difference(r.difference || {}) + management(r.management || {}) +
+      '<details class="sl-more"><summary>Audit — paper / live chain completeness</summary>' +
+      chain(r.chain) + '</details>' +
       '<details class="audit"><summary>Audit — the full row as read</summary><pre>' +
       json(r) + '</pre></details></div></article>';
   }
@@ -405,5 +554,5 @@
     document.addEventListener('DOMContentLoaded', start);
   } else { start(); }
 
-  window.BettorSmallLive = {load: load, render: render, VERSION: '1.0.0'};
+  window.BettorSmallLive = {load: load, render: render, VERSION: '1.1.0'};
 }());
