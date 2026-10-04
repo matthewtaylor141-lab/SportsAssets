@@ -1,0 +1,72 @@
+{
+ "about": "Evidence for gate f31 (candidate 25, fd6cc5b), read 2026-10-04 from GitHub Actions logs through the GitHub API. Every slot quotes its source; anything not read is absent and the receipt shows it PENDING.",
+ "api_deploy": {
+  "status": "LIVE",
+  "sha": "fd6cc5b",
+  "requested_sha": "fd6cc5b1390dc181bb34a8e441f3ef4fd2ac29ad",
+  "deploy_id": "dep-db10ce8u01pc73c8gv5g",
+  "at": "2026-10-04T07:55:58Z",
+  "note": "Requested by full commit id (render-ops deploy-api-commit, run 2025). LIVE read back from Render's deploy list (render-ops deploys, run 2027), which prints a 7-character commit, so the match is a PREFIX match, not an exact one.",
+  "source": {
+   "kind": "github_actions_log",
+   "url": "https://github.com/matthewtaylor141-lab/SportsAssets/actions/runs/37187402937/job/111392177688",
+   "also": "https://github.com/matthewtaylor141-lab/SportsAssets/actions/runs/37187208072/job/111391584976",
+   "lines": [
+    "2026-10-04T07:58:22.3314143Z 2026-10-04T07:54:33.797536Z -> 2026-10-04T07:55:58.240867Z  live  fd6cc5b  api  | Floor desk-state test: the scenario's clock sits 2 h past wall time so rows othe",
+    "2026-10-04T07:54:33.4003938Z deploy commit fd6cc5b1390dc181bb34a8e441f3ef4fd2ac29ad -> sportsassets-api (srv-d9gcv6urnols73ce6er0), web service, by commit id",
+    "2026-10-04T07:54:34.0501688Z deploy dep-db10ce8u01pc73c8gv5g status=build_in_progress commit=fd6cc5b"
+   ]
+  }
+ },
+ "worker_deploy": {
+  "status": "REQUESTED",
+  "sha": "fd6cc5b1390dc181bb34a8e441f3ef4fd2ac29ad",
+  "deploy_id": "dep-db10ce9srm7s739fnv10",
+  "at": "2026-10-04T07:54:34Z",
+  "note": "Render accepted the worker deploy (HTTP 201, build_in_progress). No later read of the worker deploy list or of the workers_boot row for this SHA was found, so LIVE is NOT established here.",
+  "source": {
+   "kind": "github_actions_log",
+   "url": "https://github.com/matthewtaylor141-lab/SportsAssets/actions/runs/37187209423/job/111391588982",
+   "lines": [
+    "2026-10-04T07:54:33.3243361Z action=workers-commit-deploy service=sportsassets-workers arg='fd6cc5b1390dc181bb34a8e441f3ef4fd2ac29ad' at 2026-10-04T07:54:32Z",
+    "2026-10-04T07:54:34.0401192Z deploy fd6cc5b1390dc181bb34a8e441f3ef4fd2ac29ad -> sportsassets-workers: HTTP 201",
+    "2026-10-04T07:54:34.0428919Z deploy dep-db10ce9srm7s739fnv10 status=build_in_progress commit=fd6cc5b1390dc181bb34a8e441f3ef4fd2ac29ad"
+   ]
+  }
+ },
+ "github_ci": [
+  {
+   "workflow": "commit-guard",
+   "run_id": 37187208157,
+   "url": "https://github.com/matthewtaylor141-lab/SportsAssets/actions/runs/37187208157",
+   "event": "push to claude/release-api",
+   "conclusion": "failure",
+   "summary": "Step 1 failed: 22 commits in 177d05e..fd6cc5b carry neither [skip render] nor [deploy-approved]. Its later steps (workflow size/structure, actionlint) did not run because step 1 exited 1.",
+   "failing_ids_readable": true,
+   "comparable_to_gate": false,
+   "why_not_comparable": "commit-guard checks commit messages and workflow files, not the test suite."
+  },
+  {
+   "workflow": "backend-tests",
+   "run_id": 37187208246,
+   "url": "https://github.com/matthewtaylor141-lab/SportsAssets/actions/runs/37187208246",
+   "event": "push to claude/release-api",
+   "conclusion": "failure",
+   "summary": "92 failed, 16413 passed, 1502 skipped, 3 xfailed in 1199.33s (Python 3.11.16, no database).",
+   "visible_failure": "scripts/check_workflows.py: render-ops.yml 510399 bytes, only 1601 bytes of headroom (tests/test_workflow_size_guard.py) -- the one failure the 30-line tail shows",
+   "failing_ids_readable": false,
+   "why_unreadable": "backend-tests.yml pipes pytest through `tail -30`, so the per-test FAILED lines never reach the log; no junit artifact is uploaded.",
+   "comparable_to_gate": false,
+   "why_not_comparable": "Different environment: Python 3.11 vs the gate's 3.12.3, no Postgres (1502 skipped vs the gate's 48), so the DB tests the gate runs are skipped and import-time differences surface as failures. 92 CI failures vs 70 gate failures cannot be matched without node ids."
+  },
+  {
+   "workflow": "engine-diagnostic",
+   "run_id": 37187208156,
+   "url": "https://github.com/matthewtaylor141-lab/SportsAssets/actions/runs/37187208156",
+   "event": "push to claude/release-api",
+   "conclusion": "success",
+   "summary": "Live-engine probe and censuses; not a test suite and not parsed here as a production readback (its probe started 07:54:37, before the API deploy went live at 07:55:58).",
+   "comparable_to_gate": false
+  }
+ ]
+}
