@@ -361,6 +361,96 @@ def test_close_position_sends_one_close_and_names_a_429(monkeypatch,
     assert wire.count("POST", "/v1/order/close-position") == 1, wire.seen
 
 
+# ═══════════════ 4b · A 429 ON ANY ORDER REQUEST TRIPS THE CIRCUIT ══════
+#
+# R30A REVIEW (MAJOR): section 21 asks that a 429 be raised by name AND trip
+# the circuit. The first pass proved and fixed that for execmirror.Venue only.
+# pmus.submit_fok -- every funded / copy / desk order -- raised a create's
+# 429 by name and left venue_pace untripped (PENALTY_LEFT 0.0 after the 429),
+# close_position folded it into `close_failed` the same way, and the funded
+# lane's send boundary (bettor_funded_execution boundary 3b) records any
+# raised send as a lost acknowledgement without touching the circuit. Only
+# the copy worker (workers/mirror_live._rate_limited) tripped it, at its own
+# layer. The adapter now trips the shared circuit itself on a NAMED 429 (the
+# SDK's RateLimitError or an int status 429 -- never '429' inside a text),
+# for every caller, before the answer goes back exactly as before: raised by
+# name, or (post_only / close) returned as the named refusal. One request,
+# never a second.
+
+RATE_LIMITED = (429, {"message": "Too Many Requests"})
+
+
+@pytest.mark.parametrize("where", ["preview", "create"])
+@pytest.mark.parametrize("post_only", [False, True], ids=["ioc", "post_only"])
+def test_a_429_on_submit_fok_trips_the_shared_circuit(where, post_only,
+                                                      monkeypatch,
+                                                      _clean_venue_state):
+    script = [RATE_LIMITED] if where == "preview" else [PREVIEW, RATE_LIMITED]
+    wire = Wire(script)
+    _install_pmus(monkeypatch, wire)
+    assert VP.penalty_left() == 0.0
+    kw = (dict(post_only=True, tif="TIME_IN_FORCE_GOOD_TILL_DATE",
+               good_till="2026-10-04T23:00:00Z") if post_only else
+          dict(tif="TIME_IN_FORCE_IMMEDIATE_OR_CANCEL"))
+    if post_only and where == "create":
+        out = pmus.submit_fok(SLUG, 0.55, 3, intent="ORDER_INTENT_BUY_LONG", **kw)
+        assert out["status"] == "post_only_rejected"
+        assert out["raw"]["status_code"] == 429
+    else:
+        with pytest.raises(SE.RateLimitError):
+            pmus.submit_fok(SLUG, 0.55, 3, intent="ORDER_INTENT_BUY_LONG", **kw)
+    assert VP.penalty_left() > 0, (
+        "a 429 on submit_fok's %s left the shared circuit untouched" % where)
+    assert wire.count("POST", "/v1/orders") == (1 if where == "create" else 0)
+    assert len(wire.seen) == len(script), wire.seen
+
+
+def test_a_429_on_close_position_trips_the_shared_circuit(monkeypatch,
+                                                          _clean_venue_state):
+    wire = Wire([RATE_LIMITED, (200, {"id": "x"})])
+    _install_pmus(monkeypatch, wire)
+    out = pmus.close_position(SLUG, slippage_bips=300)
+    assert out["status"] == "close_failed" and out["raw"]["status_code"] == 429
+    assert VP.penalty_left() > 0
+    assert wire.count("POST", "/v1/order/close-position") == 1
+
+
+@pytest.mark.parametrize("answer,raised", AMBIGUOUS[1:],
+                         ids=["503", "read-timeout", "dropped"])
+def test_an_order_failure_that_is_not_a_429_does_not_trip_the_circuit(
+        answer, raised, monkeypatch, _clean_venue_state):
+    wire = Wire([PREVIEW, answer])
+    _install_pmus(monkeypatch, wire)
+    with pytest.raises(raised):
+        pmus.submit_fok(SLUG, 0.55, 3, intent="ORDER_INTENT_BUY_LONG",
+                        tif="TIME_IN_FORCE_IMMEDIATE_OR_CANCEL")
+    assert VP.penalty_left() == 0.0
+    # a 400 whose text carries '429' is a refusal, not a rate limit
+    wire = Wire([PREVIEW, (400, {"message": "429 contracts exceeds the maximum"})])
+    _install_pmus(monkeypatch, wire)
+    with pytest.raises(SE.APIStatusError):
+        pmus.submit_fok(SLUG, 0.55, 3, intent="ORDER_INTENT_BUY_LONG",
+                        tif="TIME_IN_FORCE_IMMEDIATE_OR_CANCEL")
+    assert VP.penalty_left() == 0.0
+
+
+def test_the_funded_lane_sends_through_the_adapter_that_trips_the_circuit():
+    """The funded lane's acquisitions and exits reach the venue only through
+    pmus.submit_fok / pmus.close_position (so a create's 429 trips the shared
+    circuit at the adapter); its send boundary keeps the conservative record
+    of a raised send (UNRESOLVED / AMBIGUOUS, never resent) unchanged."""
+    for mod in ("bettor_funded_execution.py", "bettor_funded_management.py"):
+        src = (PKG / mod).read_text()
+        tree = ast.parse(src)
+        direct = [n.lineno for n in ast.walk(tree)
+                  if isinstance(n, ast.Attribute)
+                  and n.attr in ("create", "close_position")
+                  and isinstance(n.value, ast.Attribute)
+                  and n.value.attr == "orders"]
+        assert direct == [], (mod, direct)
+        assert "submit_fok" in src or "close_position" in src, mod
+
+
 # ═══════════════ 5 · NO LOOP AROUND A CREATE; NO RETRIES SWITCHED ON ════
 
 def _func(tree, qualname: str):
@@ -421,6 +511,57 @@ def test_kalshi_submit_is_one_send_with_no_loop():
     assert total == 1 and looped == 0
 
 
+ORDER_ENDPOINTS = ("create", "cancel", "cancel_all", "close_position")
+
+
+def sends_orders(tree) -> bool:
+    """Does this module reach an order endpoint -- `<x>.orders.create` (and
+    cancel, cancel_all, close_position) -- CALLED or HANDED ON as a
+    reference? The first pass matched the substring '.orders.create(' with
+    its parenthesis, and once execmirror passed `self._c.orders.create` to
+    its paced `_call` the scan stopped classifying execmirror.py as an order
+    module at all (a review mutation that removed its client_kwargs() still
+    passed the scan). Attribute chains, by AST, see both forms."""
+    return any(isinstance(n, ast.Attribute) and n.attr in ORDER_ENDPOINTS
+               and isinstance(n.value, ast.Attribute) and n.value.attr == "orders"
+               for n in ast.walk(tree))
+
+
+def test_the_order_module_scan_classifies_the_known_order_senders():
+    for mod in ("execmirror.py", "pmus.py"):
+        assert sends_orders(ast.parse((PKG / mod).read_text())), mod
+    # and the reference form the first scan missed
+    assert sends_orders(ast.parse("self._call(self._c.orders.create, p)"))
+    assert not sends_orders(ast.parse("client.markets.bbo(slug)"))
+
+
+def test_the_scan_catches_a_credentialed_order_client_built_without_our_kwargs(
+        monkeypatch):
+    """Mutation check: execmirror.Venue's client built WITHOUT
+    venue_sdk.client_kwargs() must be reported."""
+    src = (PKG / "execmirror.py").read_text()
+    assert "**venue_sdk.client_kwargs()" in src
+    mutated = src.replace("**venue_sdk.client_kwargs()", "")
+    assert _credentialed_order_clients_without_kwargs(ast.parse(mutated)), \
+        "the scan did not see execmirror.Venue built with the SDK's retries"
+    assert not _credentialed_order_clients_without_kwargs(ast.parse(src))
+
+
+def _credentialed_order_clients_without_kwargs(tree) -> list:
+    if not sends_orders(tree):
+        return []
+    out = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and getattr(
+                node.func, "id", getattr(node.func, "attr", None)) == "PolymarketUS":
+            credentialed = any(kw.arg in ("key_id", "secret_key")
+                               for kw in node.keywords)
+            if credentialed and not any(kw.arg is None or kw.arg == "max_retries"
+                                        for kw in node.keywords):
+                out.append(node.lineno)
+    return out
+
+
 def test_no_module_builds_the_venue_sdk_with_its_retries_switched_on():
     """A `PolymarketUS(...)` built with a literal max_retries other than 0
     is a hidden retry loop; a CREDENTIALED client in a module that can
@@ -434,8 +575,7 @@ def test_no_module_builds_the_venue_sdk_with_its_retries_switched_on():
         if "PolymarketUS(" not in src or path.name == "venue_sdk.py":
             continue
         tree = ast.parse(src)
-        sends = any(s in src for s in (".orders.create(", ".orders.cancel(",
-                                       ".orders.close_position("))
+        sends = sends_orders(tree)
         for node in ast.walk(tree):
             if not (isinstance(node, ast.Call) and getattr(
                     node.func, "id", getattr(node.func, "attr", None))

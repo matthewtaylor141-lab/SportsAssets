@@ -1036,6 +1036,46 @@ def _arm_cooldown_from(diag: dict) -> dict:
     return out
 
 
+def _named_429(exc: BaseException) -> bool:
+    """A venue 429 BY NAME: the SDK's RateLimitError, or an int status_code
+    429 (a bool is not a status). Never '429' inside a message: '429
+    contracts exceeds the maximum order size' is a 400."""
+    code = getattr(exc, "status_code", None)
+    return type(exc).__name__ == "RateLimitError" or (
+        isinstance(code, int) and not isinstance(code, bool) and code == 429)
+
+
+def _trip_circuit_on_429(exc: BaseException, endpoint: str) -> bool:
+    """AN ORDER REQUEST'S 429 TRIPS THE SHARED CIRCUIT, at the adapter.
+
+    THE GAP THIS CLOSES (R30A chaos review, reproduced: PREVIEW then a 429
+    on the create, `venue_pace.penalty_left()` 0.0 afterwards). Section 21
+    requires a 429 to be raised by name AND to trip the circuit. Every funded
+    / copy / desk order reaches the venue through submit_fok or
+    close_position, and both answered a 429 by name -- raised, or as the
+    named refusal -- but neither tripped venue_pace: only the copy worker
+    did, at its own layer (workers/mirror_live._rate_limited), so a funded
+    acquisition or exit that met a 429 left every lane in the process on the
+    ordinary gap, into a venue that had just said slow down (the funded
+    lane's send boundary records the raise as a lost acknowledgement and
+    never touches the circuit). Now the adapter trips it here for every
+    caller -- `venue_pace.penalize()`, the same shared circuit execmirror and
+    the copy worker trip (idempotent across a burst, so a caller that also
+    trips it changes nothing) -- and then the answer goes back exactly as
+    before. Nothing is retried; no request is added. Never raises."""
+    if not _named_429(exc):
+        return False
+    try:
+        from . import venue_pace as _vp
+        _vp.penalize()
+        log.warning("pmus: 429 on %s; the shared venue circuit is tripped "
+                    "(gap x%s for %ss)", endpoint, _vp.PENALTY_MULT,
+                    _vp.PENALTY_S)
+        return True
+    except Exception:                                          # noqa: BLE001
+        return False
+
+
 def paced_read(call, *, endpoint: str, max_dispatches: int = None):
     """Run an IDEMPOTENT venue read with our bounded retry. Re-raises on failure.
 
@@ -3326,9 +3366,13 @@ def submit_fok(us_market_slug: str, limit_price: float, quantity: int,
     # so absent from raw) on every long path.
     short_facts: dict = {}
     if not sell:
-        preview = client.orders.preview(
-            {"request": {k: v for k, v in params.items()
-                         if k != "synchronousExecution"}})
+        try:
+            preview = client.orders.preview(
+                {"request": {k: v for k, v in params.items()
+                             if k != "synchronousExecution"}})
+        except Exception as exc:  # noqa: BLE001 — named 429 trips the circuit; re-raised unchanged
+            _trip_circuit_on_429(exc, "orders.preview")
+            raise
         prev_order = (preview or {}).get("order") or {}
         if params["intent"] == "ORDER_INTENT_BUY_SHORT":
             # THE SHORT'S GUARD CHECKS WHAT THE PREVIEW CAN TELL US
@@ -3385,12 +3429,17 @@ def submit_fok(us_market_slug: str, limit_price: float, quantity: int,
         try:
             resp = client.orders.create(params)
         except Exception as exc:  # noqa: BLE001 — a 4xx is a refusal, the rest re-raise
+            _trip_circuit_on_429(exc, "orders.create")
             refusal = _post_only_refusal(exc, prev_order)
             if refusal is None:
                 raise
             return _with_short_facts(refusal, short_facts)
     else:
-        resp = client.orders.create(params)
+        try:
+            resp = client.orders.create(params)
+        except Exception as exc:  # noqa: BLE001 — named 429 trips the circuit; re-raised unchanged
+            _trip_circuit_on_429(exc, "orders.create")
+            raise
     order_id = (resp or {}).get("id")
     executions = (resp or {}).get("executions") or []
     filled, notional = 0.0, 0.0
@@ -3492,6 +3541,7 @@ def close_position(us_slug: str, *, slippage_bips: int) -> dict:
             "synchronousExecution": True,
         })
     except Exception as exc:  # noqa: BLE001 — a refusal, not a crash
+        _trip_circuit_on_429(exc, "orders.close_position")
         # the text is the only record of WHY the venue refused the close
         # (three short closes failed on 2026-09-06/07 with no cause on
         # file: mirror books 75, 79, 109); logged here, kept on the row
