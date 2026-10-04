@@ -758,7 +758,10 @@ STAGES = (
         # NO PROVIDER PRICE AT ALL: the book does not quote this event yet.
         # No catalogue or alias can repair it, which is why it is a
         # probability-stage refusal and never an identity one (map4 D9).
-        "NO_PINNACLE_ON_EVENT")),
+        "NO_PINNACLE_ON_EVENT",
+        # R30A: a draw-priced football line is the regulation market, never
+        # de-vigged as the two-way game line (bettor_pinnacle_devig).
+        "FOOTBALL_LINE_PRICES_A_DRAW_NOT_THE_TWO_WAY_GAME_LINE")),
     ("2_FRESHNESS", (
         "QUOTE_STALE",
         "VENUE_BOOK_STALE",

@@ -38,10 +38,16 @@ START_TOLERANCE_S = 90 * 60.0
 IN_PLAY_WINDOW_S = 5 * 3600.0
 MAX_CONTRACTS = 20000
 
+#: ("football", 5) PRECEDES ("americanfootball", 5) ON PURPOSE (R30A).
+#: `sport_family_of` returns the FIRST name for an id, and that name is the
+#: key `bettor_pinnacle_devig.SUPPORTED` is read with: "americanfootball"
+#: first made every held NFL read refuse MARKET_NOT_IN_SUPPORTED_SET. The
+#: order changes nothing for `sport_id_of` (no venue sports_type starting
+#: "americanfootball" also starts "football", or the reverse).
 SPORT_IDS = (("baseball", 6), ("soccer", 1), ("basketball", 3),
-             ("hockey", 4), ("icehockey", 4), ("americanfootball", 5),
-             ("football", 5), ("tennis", 2), ("mma", 8), ("boxing", 9),
-             ("esports", 11), ("golf", 12), ("rugby", 7))
+             ("hockey", 4), ("icehockey", 4), ("football", 5),
+             ("americanfootball", 5), ("tennis", 2), ("mma", 8),
+             ("boxing", 9), ("esports", 11), ("golf", 12), ("rugby", 7))
 
 S_FEED_NOT_SYNCED = "FEED_NOT_SYNCED"
 S_OUT_OF_SCOPE = "OUT_OF_FEED_SCOPE_SPORT"

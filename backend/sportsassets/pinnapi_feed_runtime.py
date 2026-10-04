@@ -354,7 +354,12 @@ HELD_LOOKUP_TIMEOUT_S = 2.0
 HELD_ON_DEMAND_BUDGET_S = 1.0
 R_ON_DEMAND_TIMEOUT = "HELD_ON_DEMAND_READ_OVER_BUDGET"
 HELD_FULL_GAME_TYPES = frozenset((
-    "baseball_team_full_game_winner", "soccer_team_full_time_winner"))
+    "baseball_team_full_game_winner", "soccer_team_full_time_winner",
+    # R30A: the venue's own NFL money-line type (its listing's
+    # sportsMarketType, tests/fixtures/pmus_nfl_listing_2026_10_04.json). A
+    # held NFL position's measure is the period-0 two-way line, converted for
+    # the venue's tie payout by the policy that reads it (paper_benchmark).
+    "football_team_full_game_winner"))
 
 #: the census's own columns, for the ONE held contract
 HELD_CATALOGUE_SQL = """SELECT identifier, side_norm, event_slug, event_title,
@@ -435,9 +440,15 @@ def held_quote(row: dict, *, event_rows=None, payout_event,
     prov = got["provenance"]
     period = "FULL_GAME"
     val = devig.valuation(
+        # THE VENUE LEAGUE TRAVELS WITH THE CONTRACT (R30A). Football is
+        # admitted to the de-vig for the NFL only (SUPPORTED_BY_LEAGUE), and
+        # the catalogue row is the venue's own record of which league the
+        # held contract is: its team league and its venue-native slug, which
+        # the de-vig requires to agree. Baseball and soccer never read it.
         contract={"sport_family": C.sport_family_of(sid), "market": "h2h",
                   "selection": des, "event_key": eid, "period": period,
-                  "line": None},
+                  "line": None, "league": row.get("team_league"),
+                  "us_market_slug": row.get("identifier")},
         quote={"book": devig.BOOK, "outcomes": q.decimal_prices(),
                "observed_at": prov["source_change_ms"] / 1000.0,
                "received_at": prov["received_ms"] / 1000.0,

@@ -178,6 +178,84 @@ SUPPORTED: dict = {
     ("baseball", "h2h"): 2,    # no draw in MLB
 }
 
+#: MARKETS ADMITTED FOR ONE LEAGUE ONLY: (sport, market, venue league token)
+#: -> the number of outcomes a complete set has. Consulted only when
+#: (sport, market) is not in SUPPORTED, so every market above is untouched.
+#:
+#: AMERICAN FOOTBALL, R30A -- ADMITTED BY MEASUREMENT, FOR THE NFL ONLY, AND
+#: WITH ITS MEANING STATED. Measured: research-sql run 37226814972 (job
+#: 111508049692, research/r30a_nfl_measured_outcome_set.sql, read
+#: 2026-10-04T19:03:54Z) read the book's priced set that cand22 kept on every
+#: refused NFL row: 15 of 15 NFL money lines priced EXACTLY two outcomes, the
+#: two teams, zero carrying a Draw, all from Pinnacle, overround
+#: 0.0279..0.0383. The complete set is two.
+#:
+#: WHY THE LEAGUE AND NOT THE SPORT. The measurement read NFL rows; it says
+#: nothing about college football, whose venue terms, tie rule (college
+#: overtime has no tie) and book coverage were never measured by this
+#: stream. NCAAF therefore stays exactly where it was --
+#: MARKET_NOT_IN_SUPPORTED_SET with its priced set recorded -- and the
+#: football key is deliberately NOT added to SUPPORTED, which every
+#: league of the family would inherit.
+#:
+#: WHAT THE NUMBER IS. The book offers no draw price, so by its General
+#: Rules a tie VOIDS the bet ("If a draw is not offered and a draw happens,
+#: then bets on both teams will be voided."): the de-vigged two-way
+#: probability is P(win | no tie). It is NOT the value of the venue's NFL
+#: contract, which pays $0.50 on a tie. That conversion is
+#: `bettor_nfl_settlement.convert`, applied by the policy before any edge;
+#: this source only states the conditioning (CONDITIONAL_ON below) and
+#: refuses a draw-priced football line by name.
+SUPPORTED_BY_LEAGUE: dict = {
+    ("football", "h2h", "nfl"): 2,
+}
+
+
+def league_of_contract(contract) -> str | None:
+    """The contract's VENUE league token, or None when it is not
+    established. Read from the contract's explicit `league` and from its
+    venue-native slug (`aec-<league>-...`); when both are present they must
+    agree, and a disagreement is None -- never one of the two picked. Pure."""
+    c = contract if isinstance(contract, dict) else {}
+    seen = set()
+    lg = str(c.get("league") or "").strip().lower()
+    if lg:
+        seen.add(lg)
+    parts = str(c.get("us_market_slug") or "").strip().lower().split("-")
+    if len(parts) > 2 and parts[0] == "aec" and parts[1]:
+        seen.add(parts[1])
+    return seen.pop() if len(seen) == 1 else None
+
+
+def expected_outcomes(sport, market, *, league=None) -> int | None:
+    """The complete-set count for (sport, market), from SUPPORTED, else from
+    SUPPORTED_BY_LEAGUE for the named league; None = not supported."""
+    n = SUPPORTED.get((sport, market))
+    if n is None and league:
+        n = SUPPORTED_BY_LEAGUE.get((sport, market, str(league).lower()))
+    return n
+
+
+#: WHAT A SUPPORTED MARKET'S DE-VIGGED PROBABILITY IS CONDITIONAL ON, beyond
+#: the bet having action. Only markets whose book rule removes an ordinary
+#: outcome from the sample are listed.
+CONDITIONAL_ON = {
+    ("football", "h2h"): {
+        "condition": "NO_TIE",
+        "book_rule": ("If a “Draw” price is offered in a Money Line "
+                      "market, and the draw happens, then bets on each team "
+                      "lose. If a draw is not offered and a draw happens, "
+                      "then bets on both teams will be voided."),
+        "source_url": "https://www.pinnacle.com/en/future/betting-rules",
+        "retrieved_at": "2026-10-04T18:50:51Z",
+        "page_sha256": ("63d6432114be131dfbab98baf91f8777a98549221a59c288fa7"
+                        "6916c3d8303fd"),
+        "consequence": ("the two-way price is P(win | the game does not end "
+                        "tied); a contract that pays on a tie must convert it "
+                        "(bettor_nfl_settlement.convert) before comparing it "
+                        "with a price")},
+}
+
 #: Sports in which Pinnacle was ABSENT FROM THE RESPONSES WE HAVE SEEN.
 #:
 #: THIS IS AN OBSERVATION WITH A TIMESTAMP, NOT A PROPERTY OF THE BOOK.
@@ -232,6 +310,10 @@ R_LINE_MISMATCH = "LINE_DOES_NOT_MATCH"
 R_PERIOD_MISMATCH = "PERIOD_DOES_NOT_MATCH"
 R_SETTLEMENT_MISMATCH = "SETTLEMENT_RULE_DOES_NOT_MATCH"
 R_UNKNOWN_METHOD = "DEVIG_METHOD_NOT_DECLARED"
+#: A FOOTBALL line that prices a Draw is the regulation (three-way) market,
+#: a different event from the two-way game line that includes overtime. It
+#: is never de-vigged as the game line, and its draw is never dropped.
+R_DRAW_PRICED_LINE = "FOOTBALL_LINE_PRICES_A_DRAW_NOT_THE_TWO_WAY_GAME_LINE"
 
 def _epoch(value):
     """Seconds since the epoch, from a number or an ISO-8601 string.
@@ -270,7 +352,7 @@ REFUSALS = (R_UNSUPPORTED_MARKET, R_PINNACLE_ABSENT, R_BOOK_MISSING,
             R_INCOMPLETE_OUTCOMES, R_STALE, R_NO_TIMESTAMP, R_BAD_ODDS,
             R_AMBIGUOUS_MAPPING, R_NO_MAPPING, R_SELECTION_UNMATCHED,
             R_LINE_MISMATCH, R_PERIOD_MISMATCH, R_SETTLEMENT_MISMATCH,
-            R_UNKNOWN_METHOD)
+            R_UNKNOWN_METHOD, R_DRAW_PRICED_LINE)
 
 
 # ── the de-vig, in the standard library ─────────────────────────────
@@ -438,8 +520,25 @@ def valuation(*, contract: dict, quote: dict, now: float,
         return out
 
     expected = SUPPORTED.get((sport, market))
+    league = None
+    if expected is None:
+        # A LEAGUE-SCOPED ADMISSION (R30A, NFL) is consulted only after the
+        # family-wide set, so no market in SUPPORTED changes path.
+        league = league_of_contract(contract)
+        expected = expected_outcomes(sport, market, league=league)
+        if expected is not None:
+            out["league"] = league
+            out["admitted_for_league"] = "%s/%s@%s" % (sport, market, league)
     if expected is None:
         refusals.append(R_UNSUPPORTED_MARKET)
+        scoped = sorted("%s/%s@%s" % k for k in SUPPORTED_BY_LEAGUE
+                        if k[0] == sport and k[1] == market)
+        if scoped:
+            # SAID, so a reader of an NCAAF (or league-less) refusal sees
+            # that the family is admitted elsewhere and for which league,
+            # rather than reading the refusal as "football is unsupported".
+            out["supported_for_league_only"] = scoped
+            out["league"] = league
         if sport in PINNACLE_ABSENT:
             # A DIFFERENT FACT with a different remedy: we have seen this
             # sport's responses carry no Pinnacle at all, so the remedy is
@@ -493,6 +592,16 @@ def valuation(*, contract: dict, quote: dict, now: float,
 
     outcomes = dict(quote.get("outcomes") or {})
     out["outcomes_priced"] = len(outcomes)
+    if sport == "football" and any(
+            _norm(n) in ("draw", "tie", "x") for n in outcomes):
+        # NAMED BEFORE THE COUNT CHECK, because "3 of 2 outcomes priced"
+        # would hide what the third outcome is: a regulation market.
+        refusals.append(R_DRAW_PRICED_LINE)
+        out["why"] = ("the football line prices a Draw (%s): that is the "
+                      "regulation three-way market, not the two-way game line "
+                      "including overtime the venue contract settles on"
+                      % sorted(outcomes))
+        return out
     if len(outcomes) != expected:
         refusals.append(R_INCOMPLETE_OUTCOMES)
         out["why"] = ("%d of %d outcomes priced. A de-vig normalises over "
@@ -565,6 +674,12 @@ def valuation(*, contract: dict, quote: dict, now: float,
     out["probability"] = out["devigged"][m["outcome"]]
     out["why"] = ("%s de-vig over %d priced outcomes from %s, %.1f s old"
                   % (method, expected, BOOK, age))
+    cond = CONDITIONAL_ON.get((sport, market))
+    if cond is not None:
+        # THE CONDITIONING TRAVELS WITH THE NUMBER, so no consumer can read a
+        # P(win | no tie) as the value of a contract that pays on a tie.
+        out["conditional_on"] = dict(cond)
+        out["why"] += "; conditional on %s" % cond["condition"]
     return out
 
 
