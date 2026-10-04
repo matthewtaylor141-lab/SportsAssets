@@ -695,6 +695,16 @@ jobs:
               if [ -n "$SLUGS" ]; then J=$(printf '%s' "$SLUGS" | jq -Rc 'split(",")'); else J='["atc-brb-ber-crb-2026-10-02-ber","aec-mlb-sd-mil-2026-10-03"]'; fi
               c=$(post /api/admin/execmirror/probe "{\"action\":\"markets\",\"slugs\":$J}"); show markets $c 160
               c=$(get /api/command/execmirror); echo "== view · HTTP $c =="; jq '{title, control, coverage, pnl: (.pnl|{paper_total,expected_live_total,live_total,difference,tracking_ratio}), account: (.account|{at,balances,open_orders,reconciliation}), orders: [.orders[:12][]|{paper_order_id,role,market,expected_scaled_qty,live:(.live|{qty,state,exclusion,venue_order_id,filled_qty,avg_px,fees_usd,submit_latency_ms})}], events: .events[:12]}' /tmp/r.json 2>/dev/null | head -220;;
+            execmirror-cand22)
+              # READ-ONLY candidate-22 production readback: retail account, P5, Xavier, Karen, intel, coverage, quality, pages
+              c=$(post /api/admin/execmirror/probe '{"action":"keys"}'); show keys $c 40
+              c=$(post /api/admin/execmirror/probe '{"action":"account"}'); show account $c 120
+              c=$(get /api/command/p5/evidence); echo "== p5 · HTTP $c =="; jq -c '{verdict, first_blocking, first_blocking_external, owner_approved, artifact, deciding_process, preds: [.predicates[]? | {p:(.predicate // .id), s:.status, r:(.reason // "" | tostring | .[0:160])}], runtime_evidence}' /tmp/r.json 2>/dev/null | head -c 9000; echo
+              c=$(get "/api/command/xavier/management?limit=40"); echo "== xavier · HTTP $c =="; jq -c '{policy, summary, positions: [.positions[]? | {kind:.position_kind, g:.group_id, m:.us_market_slug, r:(.latest_review|{trigger,assessed_at,review_latency_s,within_bound}), ev:(.evidence|{state:.evidence_state, age:.probability_age_s, src:.probability_source}), rec:.recommendation, thesis:(.thesis.thesis_state // .thesis)}]}' /tmp/r.json 2>/dev/null | head -c 9000; echo
+              c=$(get /api/command/karen); echo "== karen · HTTP $c =="; jq -c '{profile: (.profile // .identity), metrics, n: ((.challenges // .current_challenges // []) | length), first: ((.challenges // .current_challenges // [])[:3])}' /tmp/r.json 2>/dev/null | head -c 5000; echo
+              for q in intel coverage quality "postmortems?limit=3"; do c=$(get "/api/command/$q"); echo "== $q · HTTP $c =="; jq -c . /tmp/r.json 2>/dev/null | head -c 3500; echo; done
+              c=$(get /api/command/agents); echo "== agents · HTTP $c =="; jq -c '[.agents[]? | {agent_id, state, policy_version, management_policy_label, last_heartbeat_at, code_version}]' /tmp/r.json 2>/dev/null | head -c 3000; echo
+              for pg in /karen /institutional.html /institutional.js /live.html; do echo "page $pg HTTP $(curl -s -o /tmp/pg -w '%{http_code}' --max-time 25 https://command.bettortoken.com$pg) $(wc -c < /tmp/pg) bytes"; done;;
             execmirror-enable)
               c=$(post /api/admin/execmirror/control "{\"action\":\"enable\",\"actor\":\"$ACTOR\"}"); show enable $c;;
             execmirror-stop)
