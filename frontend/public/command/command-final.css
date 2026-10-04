@@ -4,15 +4,17 @@
  --cf-bg:#020711;--cf-panel:#061223;--cf-panel2:#09192d;--cf-line:rgba(154,187,220,.14);
  --cf-line2:rgba(154,187,220,.24);--cf-ink:#f2f7fc;--cf-muted:#8ca0b6;
  --cf-blue:#6698ff;--cf-cyan:#69d8ff;--cf-green:#57e1ad;--cf-gold:#efca79;--cf-red:#ff8197;
+ /* legibility floor: operational metadata never below 10.5px, body 12px+ */
+ --cf-meta:10.5px;--cf-body:12px
 }
 
 /* Global legibility: critical operational content is no longer 7–9px. */
 body{font-feature-settings:"tnum" 1,"ss01" 1}
 .bt-hq2,.meeting-home,.hq4-company-page,.meeting-real-floor,.command-final-agent{letter-spacing:0}
 .mtg-kicker,.bt-kicker,.clean-kicker,.wsx-eyebrow,.hq6-now .eyebrow,.hq4-summary span,
-.cf-eyebrow{font-size:10px!important;line-height:1.15!important;letter-spacing:.12em!important}
+.cf-eyebrow{font-size:var(--cf-meta)!important;line-height:1.15!important;letter-spacing:.12em!important}
 .mtg-metric span,.mtg-live-stat span,.hq6-now-cell span,.wsx-src,.wsx-kpi small,.hq4-agent-state,
-.hq4-agent-open,.bt-equity2-pulse{font-size:10.5px!important}
+.hq4-agent-open,.bt-equity2-pulse{font-size:var(--cf-meta)!important}
 .hq4-agent-task,.mtg-agent .task,.wsx-empty,.wsx-detail,.hq6-now>p{font-size:12px!important;line-height:1.45!important}
 .mtg-btn,.hq4-tool,.hq4-company-link{font-size:12px!important}
 
@@ -24,16 +26,19 @@ body{font-feature-settings:"tnum" 1,"ss01" 1}
 .command-final-home .mtg-head{padding:10px 0 3px}
 .command-final-home .mtg-head h1{font-size:clamp(43px,5vw,76px)!important;line-height:.94!important;max-width:800px}
 .command-final-home .mtg-head p{font-size:14px!important;line-height:1.55!important;max-width:720px}
+/* the strip sits directly under the head (flex order 1, after it in the DOM);
+   the package's order:1.5 is not a valid <integer> and was dropped by the
+   browser, which put the strip above the head */
 .cf-command-strip{
- order:1.5;display:grid;grid-template-columns:1.1fr .8fr .8fr .9fr 1.35fr;gap:1px;margin:18px 0 2px;
+ order:1;display:grid;grid-template-columns:1.1fr .8fr .8fr .9fr 1.35fr;gap:1px;margin:18px 0 2px;
  border:1px solid var(--cf-line);border-radius:18px;overflow:hidden;background:var(--cf-line);
  box-shadow:0 28px 70px rgba(0,0,0,.26)
 }
 .cf-strip-cell{padding:13px 15px;min-width:0;background:linear-gradient(180deg,rgba(8,23,43,.97),rgba(5,14,27,.97))}
-.cf-strip-cell span{display:block;color:#6f849b;font:700 9.5px ui-monospace,monospace;text-transform:uppercase;letter-spacing:.1em}
-.cf-strip-cell b{display:block;margin-top:7px;color:#e9f2fb;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.cf-strip-cell span{display:block;color:#7d93aa;font:700 var(--cf-meta) ui-monospace,monospace;text-transform:uppercase;letter-spacing:.1em}
+.cf-strip-cell b{display:block;margin-top:7px;color:#e9f2fb;font-size:15px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .cf-strip-cell b.good{color:var(--cf-green)}.cf-strip-cell b.warn{color:var(--cf-gold)}
-.cf-strip-cell small{display:block;margin-top:4px;color:#667b92;font-size:10.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.cf-strip-cell small{display:block;margin-top:4px;color:#7489a0;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .command-final-home .mtg-capital{grid-template-columns:minmax(0,1.48fr) minmax(320px,.52fr)!important;gap:12px!important}
 .command-final-home .mtg-paper,.command-final-home .mtg-live{
  border-radius:24px!important;border-color:var(--cf-line2)!important;
@@ -41,19 +46,36 @@ body{font-feature-settings:"tnum" 1,"ss01" 1}
  box-shadow:0 32px 90px rgba(0,0,0,.35)!important
 }
 .command-final-home .mtg-equity{font-size:clamp(42px,4.8vw,72px)!important;letter-spacing:-.055em!important}
+.command-final-home .mtg-change{font-size:13px!important}
+.command-final-home .mtg-status{font-size:var(--cf-meta)!important}
+.command-final-home .mtg-metric b{font-size:13px!important}
+.command-final-home .mtg-live-state b{font-size:12px!important}
+.command-final-home .mtg-live-state p{font-size:12px!important}
+.command-final-home .mtg-live-stat b{font-size:12px!important}
 .cf-chart-head{display:grid;grid-template-columns:1.3fr 1fr 1fr .8fr;gap:7px;margin:15px 0 8px}
-.cf-chart-head>div{padding:9px 11px;border:1px solid rgba(151,180,214,.1);border-radius:11px;background:rgba(3,11,22,.62)}
-.cf-chart-head span{display:block;color:#667b92;font:700 8.5px ui-monospace,monospace;letter-spacing:.08em;text-transform:uppercase}
-.cf-chart-head b{display:block;margin-top:5px;color:#dfe9f4;font-size:11px}
-.cf-chart-head b.live{color:var(--cf-green)}.cf-chart-head b.warn{color:var(--cf-gold)}.cf-chart-head b.dim{color:#75869a}
+.cf-chart-head>div{padding:9px 11px;border:1px solid rgba(151,180,214,.1);border-radius:11px;background:rgba(3,11,22,.62);min-width:0}
+.cf-chart-head span{display:block;color:#7489a0;font:700 var(--cf-meta) ui-monospace,monospace;letter-spacing:.08em;text-transform:uppercase;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.cf-chart-head b{display:block;margin-top:5px;color:#dfe9f4;font-size:13px}
+.cf-chart-head b.live{color:var(--cf-green)}.cf-chart-head b.warn{color:var(--cf-gold)}.cf-chart-head b.dim{color:#8a9bb0}
 .command-final-home .mtg-chart.cf-live-chart{height:280px!important;border-radius:16px!important;background:
  linear-gradient(180deg,rgba(3,11,24,.88),rgba(2,8,17,.96))!important;border:1px solid rgba(129,164,208,.12)!important;overflow:hidden}
 .command-final-home .mtg-chart canvas{width:100%!important;height:100%!important}
-.command-final-home .mtg-last{font-size:10.5px!important;background:rgba(3,12,24,.8);padding:6px 9px;border:1px solid rgba(151,180,214,.12);border-radius:999px}
+/* the state label sits under the line (the canvas keeps the value top-right) */
+.command-final-home .mtg-last{top:auto!important;right:auto!important;left:12px;bottom:10px;max-width:calc(100% - 24px);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+ font-size:var(--cf-meta)!important;background:rgba(3,12,24,.8);padding:6px 9px;border:1px solid rgba(151,180,214,.12);border-radius:999px;color:#bfeedd}
+.command-final-home .mtg-last.frozen{color:#ffe1a0;background:rgba(40,30,8,.82);border-color:rgba(239,202,121,.24)}
+/* truthful live endpoint: shown only while the newest recorded mark is current */
+.cf-live-dot{position:absolute;z-index:2;width:12px;height:12px;margin:-6px 0 0 -6px;border-radius:50%;pointer-events:none;
+ background:transparent;box-shadow:0 0 0 2px rgba(87,225,173,.55)}
+.cf-live-dot[hidden]{display:none}
 .command-final-home .hq4-agent-grid{gap:10px!important}
-.cf-person-card{min-height:210px!important;border-radius:19px!important}
+.cf-person-card{min-height:226px!important;border-radius:19px!important}
 .cf-person-card::before{height:92px!important;opacity:.98!important;filter:saturate(.96) contrast(1.04)!important}
 .cf-person-card .hq4-agent-title b,.cf-person-card>b{font-size:14px!important}
+.cf-person-card .hq4-agent-title span,.cf-person-card .role{font-size:var(--cf-meta)!important}
+.cf-person-card .hq4-agent-task,.cf-person-card .task{height:auto!important;max-height:52px!important;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical}
+.cf-person-card .hq4-agent-state,.cf-person-card .state{font-size:var(--cf-meta)!important;line-height:1.25!important}
+.cf-person-card .open,.cf-person-card .hq4-agent-open{font-size:var(--cf-meta)!important}
 .cf-person-card:hover{transform:translateY(-5px) scale(1.01)!important;box-shadow:0 24px 60px rgba(0,0,0,.34)!important}
 
 /* FLOOR: cinematic but still an operating surface. */
@@ -64,21 +86,31 @@ body{font-feature-settings:"tnum" 1,"ss01" 1}
  mix-blend-mode:normal
 }
 .command-final-floor .fl-canvas{filter:saturate(1.06) contrast(1.025)}
+/* below the fixed HQ5 floor bar (top 76px + 41px; the stage starts at 64px) */
 .cf-floor-hud{
- position:absolute;left:50%;top:14px;transform:translateX(-50%);z-index:6;display:flex;gap:1px;
+ position:absolute;left:50%;top:61px;transform:translateX(-50%);z-index:6;display:flex;gap:1px;max-width:calc(100% - 32px);
  border:1px solid rgba(158,192,226,.14);border-radius:14px;overflow:hidden;background:rgba(3,10,20,.72);
  box-shadow:0 14px 44px rgba(0,0,0,.26);backdrop-filter:blur(16px)
 }
 .cf-floor-hud>div{padding:8px 12px;background:rgba(7,20,37,.74);min-width:92px}
-.cf-floor-hud span{display:block;color:#687d93;font:700 8px ui-monospace,monospace;letter-spacing:.08em;text-transform:uppercase}
-.cf-floor-hud b{display:block;color:#e8f1fa;font-size:12px;margin-top:4px}
+.cf-floor-hud span{display:block;color:#7d92a8;font:700 var(--cf-meta) ui-monospace,monospace;letter-spacing:.06em;text-transform:uppercase;white-space:nowrap}
+.cf-floor-hud b{display:block;color:#e8f1fa;font-size:13px;margin-top:4px}
 .cf-floor-hud .cf-hud-truth{display:flex;align-items:center;gap:6px;min-width:auto}
 .cf-hud-truth i{width:7px;height:7px;border-radius:50%;background:var(--cf-green);box-shadow:0 0 11px rgba(87,225,173,.7)}
+body.command-final-floor.focused .cf-floor-hud{opacity:.3}
 .command-final-floor .fl-panel{width:min(430px,38vw)!important;border-radius:20px!important;background:rgba(5,16,30,.94)!important}
 .command-final-floor .fl-agent{min-height:52px!important}
-.command-final-floor .fl-agent b{font-size:11.5px!important}
-.command-final-floor .fl-agent small{font-size:9.5px!important}
+.command-final-floor .fl-agent b{font-size:12px!important}
+.command-final-floor .fl-agent small{font-size:var(--cf-meta)!important}
+/* the compact HQ5 dock keeps its shape; its state chip is the one line of
+   real work per person, so it is readable (it was 7.5px) */
+body.meeting-real-floor.command-final-floor .fl-agent-txt>b{font-size:12px!important}
+body.meeting-real-floor.command-final-floor .fl-agent-st .fl-chip{font-size:var(--cf-meta)!important;letter-spacing:.02em!important;line-height:1.15!important;white-space:normal!important;text-align:left}
 .command-final-floor .wall-screen{border-radius:12px!important}
+.command-final-floor .ws-tag{font-size:var(--cf-meta)!important}
+body.meeting-real-floor.command-final-floor .fl-hint{font-size:11px!important}
+.command-final-floor .hq5-floorbar .label,.command-final-floor .hq5-view,.command-final-floor .hq5-floor-summary{font-size:var(--cf-meta)!important}
+.command-final-floor .hq5-view kbd{font-size:var(--cf-meta)!important}
 
 /* AGENT PAGES: mission-first, person + work. */
 .command-final-agent{background:
@@ -89,39 +121,95 @@ body{font-feature-settings:"tnum" 1,"ss01" 1}
 .command-final-agent .bt-agent2-face.bt-portrait{height:350px!important;border-radius:17px!important}
 .command-final-agent .bt-agent2-id h1{font-size:50px!important}
 .cf-agent-mission{
- margin-bottom:11px;padding:17px;border:1px solid var(--cf-line2);border-radius:18px;
- background:linear-gradient(135deg,rgba(10,29,53,.96),rgba(5,15,29,.98));box-shadow:0 22px 60px rgba(0,0,0,.24)
+ --cf-a:var(--cf-blue);
+ margin-bottom:11px;padding:17px;border:1px solid var(--cf-line2);border-left:3px solid color-mix(in srgb,var(--cf-a) 70%,transparent);border-radius:18px;
+ background:radial-gradient(520px 160px at 0 0,color-mix(in srgb,var(--cf-a) 9%,transparent),transparent 70%),linear-gradient(135deg,rgba(10,29,53,.96),rgba(5,15,29,.98));box-shadow:0 22px 60px rgba(0,0,0,.24)
 }
+.cf-agent-mission .cf-eyebrow{color:color-mix(in srgb,var(--cf-a) 75%,#8ca0b6)}
 .cf-agent-mission header{display:flex;align-items:flex-start;justify-content:space-between;gap:18px}
 .cf-agent-mission h2{margin:6px 0 4px;color:#eef5fc;font-size:22px;letter-spacing:-.025em}
-.cf-agent-mission header p{margin:0;color:#869ab0;font-size:12.5px;line-height:1.45}
-.cf-work-chip{padding:7px 10px;border:1px solid rgba(151,180,214,.15);border-radius:999px;color:#91a7bd;font:700 9.5px ui-monospace,monospace;text-transform:uppercase;white-space:nowrap}
+.cf-agent-mission header p{margin:0;color:#93a6bb;font-size:13px;line-height:1.45}
+.cf-work-chip{padding:7px 10px;border:1px solid rgba(151,180,214,.15);border-radius:999px;color:#91a7bd;font:700 11px ui-monospace,monospace;text-transform:uppercase;white-space:nowrap}
 .cf-work-chip[data-tone=green]{color:var(--cf-green);border-color:rgba(87,225,173,.25);background:rgba(87,225,173,.06)}
 .cf-work-chip[data-tone=gold]{color:var(--cf-gold);border-color:rgba(239,202,121,.25);background:rgba(239,202,121,.06)}
 .cf-work-chip[data-tone=red]{color:var(--cf-red);border-color:rgba(255,129,151,.25);background:rgba(255,129,151,.06)}
-.cf-work-chip[data-tone=dim]{color:#74859a}
-.cf-mission-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:7px;margin-top:14px}
+.cf-work-chip[data-tone=dim]{color:#8a9bb0}
+.cf-mission-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:7px;margin-top:14px}
 .cf-mission-grid>div{padding:11px;border:1px solid rgba(151,180,214,.1);border-radius:12px;background:rgba(3,12,24,.58);min-width:0}
-.cf-mission-grid span{display:block;color:#667b92;font:700 8.5px ui-monospace,monospace;text-transform:uppercase}
-.cf-mission-grid b{display:block;margin-top:6px;color:#dfe9f3;font-size:11.5px;line-height:1.3;overflow:hidden;text-overflow:ellipsis}
-.cf-mission-grid small{display:block;margin-top:4px;color:#667b92;font-size:9.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.cf-mission-grid span{display:block;color:#7489a0;font:700 var(--cf-meta) ui-monospace,monospace;text-transform:uppercase;letter-spacing:.04em}
+.cf-mission-grid b{display:block;margin-top:6px;color:#dfe9f3;font-size:13px;line-height:1.3;overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
+.cf-mission-grid small{display:block;margin-top:4px;color:#7d91a7;font-size:11px;line-height:1.35;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
+.cf-mission-grid b[data-tone=red]{color:var(--cf-red)}.cf-mission-grid b[data-tone=gold]{color:var(--cf-gold)}.cf-mission-grid b[data-tone=green]{color:var(--cf-green)}.cf-mission-grid b[data-tone=dim]{color:#8a9bb0}
+.cf-mission-grid .cf-am-role-cell{grid-column:span 2;border-color:color-mix(in srgb,var(--cf-a) 26%,rgba(151,180,214,.1))}
+.cf-mission-grid .cf-am-role-cell b[data-unavailable]{color:#8a9bb0}
 .command-final-agent .wsx-card{padding:18px 19px!important}
 .command-final-agent .wsx-card h2{font-size:15px!important}.command-final-agent .wsx-card h3{font-size:13px!important}
-.command-final-agent .wsx-card p,.command-final-agent .wsx-card li,.command-final-agent .wsx-t{font-size:11.5px!important}
+.command-final-agent .wsx-card p,.command-final-agent .wsx-card li,.command-final-agent .wsx-t{font-size:12px!important}
 .command-final-agent .wsx-kpi strong{font-size:18px!important}
-.command-final-agent .wsx-t th{font-size:10px!important}.command-final-agent .wsx-t td{font-size:11px!important;line-height:1.35!important}
+.command-final-agent .wsx-t th{font-size:var(--cf-meta)!important}.command-final-agent .wsx-t td{font-size:11.5px!important;line-height:1.35!important}
 
 /* Company page */
 .hq4-company-page .hq4-page{max-width:1740px!important}
 .hq4-company-page .hq4-section{border-color:var(--cf-line)!important}
-.hq4-company-page .hq4-agent-card{min-height:220px!important}
+.hq4-company-page .hq4-agent-card{min-height:236px!important}
 .hq4-company-page .hq4-agent-face{width:48px!important;height:54px!important}
+
+/* LEGIBILITY FLOOR across the earlier layers (measured: every visible text
+   node on the 14 pages at 1440 and 390; see the release smoke). Labels and
+   operational metadata go to 10.5px, reading text to 12px, keeping the
+   dense monospace look; nothing here changes what a value says. */
+/* shell: rail / bottom navigation, page bar, system badge */
+.bt-hq2 .bt-hq2-nav a span:last-child{font-size:var(--cf-meta)!important;letter-spacing:.02em!important}
+.bt-hq2 .bt-hq2-nav a{padding-left:2px!important;padding-right:2px!important}
+.bt-hq2 .hq5-pulse-btn,.bt-hq2 .hq5-pulse-btn span,.bt-hq2 .bt-hq2-live span,.bt-hq2 .bt-hq2-shell-foot span{font-size:var(--cf-meta)!important}
+.bt-brand-plate .bt-brand-ctx{font-size:var(--cf-meta)!important}
+.hq5-pulse-agent small,.hq5-pulse-agent em{font-size:var(--cf-meta)!important}
+/* homepage brief (hq6) and meeting home */
+.hq6-brief-card .k,.hq6-brief-card small{font-size:var(--cf-meta)!important}
+.hq6-brief-card h3{font-size:14px!important}
+.hq6-brief-card p{font-size:12px!important}
+.mtg-attention p,#mtg-attn-sub{font-size:12px!important}
+.mtg-deep>summary{font-size:12px!important}
+.mtg-workspaces a{font-size:12px!important}.mtg-workspaces a span{font-size:var(--cf-meta)!important}
+.hq4-company-tools .hq4-tool span{font-size:11px!important}
+.hq4-company-tools .hq4-tool b{font-size:12px!important}
+.hq4-company-tools .hq4-tool{flex-direction:column!important;align-items:flex-start!important;justify-content:center!important}
+.hq4-team-note{font-size:12px!important}
+.hq4-section-head p,.hq4-company-head p{font-size:12px!important}
+#paper-strip .ps-tag{font-size:var(--cf-meta)!important}
+/* company page */
+.hq4-event time{font-size:var(--cf-meta)!important}.hq4-event b{font-size:12px!important}.hq4-event p{font-size:12px!important}
+.hq4-human-card span,.hq4-human-card .status{font-size:var(--cf-meta)!important}
+.hq4-unavailable p{font-size:12px!important}
+/* equity wall (profitability + the homepage ledger) */
+.btew .ew-eyebrow,.btew .ew-badge,.btew .ew-pill,.btew .ew-day small,.btew .ew-chip small,.btew .ew-ylab,.btew .ew-xlab,.btew .ew-chip i{font-size:var(--cf-meta)!important}
+.bt-hq3-last small,.btew .ew-sv b{font-size:var(--cf-meta)!important}
+.bt-hq3-last b{font-size:12px!important}
+/* agent pages: hero, NOW panel, portrait, workspace */
+.bt-agent2-stat span,.bt-agent2-panel .k,.bt-agent2-memory .unreleased{font-size:var(--cf-meta)!important}
+.bt-agent2-state{font-size:11px!important}
+.bt-agent2-actions button,.bt-agent2-actions a{font-size:11.5px!important}
+.bt-portrait-tag,.bt-portrait-credit{font-size:var(--cf-meta)!important}
+.hq6-now-code,.hq6-machine-state{font-size:var(--cf-meta)!important}
+.hq6-now-cell b{font-size:12px!important}
+.hq6-now-collab{font-size:11.5px!important}
+.hq6-agent-more summary{font-size:12px!important}
+.wsx-chip,.wsx-peers .wsx-chip,.wsx-tag,.wsx-verdict,.wsx-ev{font-size:var(--cf-meta)!important}
+nav a .role{font-size:var(--cf-meta)!important}
+/* acceptance, profitability, improvements, position rooms */
+.ac-art .k,.ac-ladder .k,.ac-nums .k,.bstage,summary .g{font-size:var(--cf-meta)!important}
+.pc-bk .k,.pc-st{font-size:var(--cf-meta)!important}
+.im-eyebrow,.im-brand-sub,.im-kpi span{font-size:var(--cf-meta)!important}
+.im-kpi.na b{font-size:12px!important}
+.pr-meta .pill,.pr-hero .label{font-size:var(--cf-meta)!important}
 
 /* Microinteractions only on truthful elements. */
 @media(prefers-reduced-motion:no-preference){
  .cf-hud-truth i{animation:cfPulse 2.2s ease-in-out infinite}
  .cf-work-chip[data-tone=green]::before{content:"";display:inline-block;width:5px;height:5px;border-radius:50%;background:currentColor;margin-right:6px;box-shadow:0 0 8px currentColor}
+ .cf-live-dot{animation:cfLive 1.8s ease-out infinite}
  @keyframes cfPulse{0%,100%{opacity:.55;transform:scale(.9)}50%{opacity:1;transform:scale(1.12)}}
+ @keyframes cfLive{0%{box-shadow:0 0 0 0 rgba(87,225,173,.55)}100%{box-shadow:0 0 0 14px rgba(87,225,173,0)}}
 }
 
 /* Mobile is a deliberate operating mode, not compressed desktop. */
@@ -130,16 +218,40 @@ body{font-feature-settings:"tnum" 1,"ss01" 1}
  .command-final-home .mtg-capital{grid-template-columns:1fr!important}
  .command-final-home .mtg-chart.cf-live-chart{height:230px!important}
  .cf-chart-head{grid-template-columns:1fr 1fr}
- .cf-floor-hud{left:8px;right:8px;transform:none;overflow-x:auto;justify-content:flex-start}
+ .cf-floor-hud{left:8px;right:8px;transform:none;overflow-x:auto;justify-content:flex-start;scrollbar-width:none}
+ .cf-floor-hud::-webkit-scrollbar{display:none}
  .cf-floor-hud>div{flex:0 0 auto}
  .command-final-agent .hq6-agent-layout{display:block!important}
+ /* stacked: the person column flows above the work (a sticky or offset
+    column would slide over the mission panel) */
+ .command-final-agent .hq6-agent-person{position:relative!important;top:auto!important;max-height:none!important;overflow:visible!important}
+ .command-final-agent .hq6-agent-work{margin-top:10px}
  .cf-mission-grid{grid-template-columns:1fr 1fr}
 }
+@media(max-width:780px){
+ /* five destinations, five columns (the bar was still a six-column grid) */
+ .bt-hq2 .bt-hq2-nav{grid-template-columns:repeat(5,minmax(0,1fr))!important}
+ .bt-hq2 .bt-hq2-nav a span:last-child{letter-spacing:0!important;white-space:nowrap}
+ /* dock cards wide enough for the longest work state on two lines */
+ body.meeting-real-floor.command-final-floor .fl-agent{flex:0 0 152px!important}
+ body.meeting-real-floor.command-final-floor .fl-agent-st .fl-chip{letter-spacing:0!important;overflow-wrap:anywhere}
+ /* the floor HUD scrolls compactly under the floor bar (top 66px + 41px; stage at 58px) */
+ .cf-floor-hud{top:55px}
+ .cf-floor-hud>div{padding:6px 10px;min-width:0}
+ .cf-floor-hud b{font-size:12px;margin-top:2px}
+}
 @media(max-width:520px){
- .cf-command-strip{grid-template-columns:1fr}
- .cf-strip-cell:last-child{grid-column:auto}
+ .cf-command-strip{grid-template-columns:1fr 1fr}
+ .cf-strip-cell{padding:11px 12px}
+ .cf-strip-cell:last-child{grid-column:1/-1}
+ .cf-strip-cell b{font-size:14px}
  .cf-chart-head{grid-template-columns:1fr 1fr}
+ .cf-chart-head span{white-space:normal}
  .cf-mission-grid{grid-template-columns:1fr}
- .cf-agent-mission header{display:block}.cf-work-chip{display:inline-block;margin-top:10px}
+ .cf-mission-grid .cf-am-role-cell{grid-column:auto}
+ .cf-agent-mission{padding:14px}
+ .cf-agent-mission h2{font-size:20px}
+ .cf-agent-mission header{display:block}.cf-work-chip{display:inline-block;margin-top:10px;white-space:normal}
  .command-final-home .mtg-head h1{font-size:42px!important}
+ .command-final-home .mtg-metric{min-width:0!important;flex:1 1 calc(50% - 8px)}
 }
