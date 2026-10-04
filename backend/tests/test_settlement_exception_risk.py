@@ -121,6 +121,27 @@ def test_a_tie_applies_only_where_the_rules_of_the_game_allow_it():
     assert t("baseball", "mlb", "spreads")["status"] == "UNKNOWN"
 
 
+def test_the_baseball_structural_zero_is_league_scoped():
+    """KBO and NPB regular-season games end level at the league's
+    extra-inning cap, and the venue lists both on the MLB winner type: a
+    structural zero inherited from the family default would be a zero no
+    rule supports. MLB alone is declared unable to end level; any other
+    baseball league is UNKNOWN (the prior)."""
+    t = SER.tie_applicability
+    assert t("baseball", "mlb", "h2h")["status"] == SER.S_STRUCTURAL
+    for lg in ("kbo", "npb"):
+        got = t("baseball", lg, "h2h")
+        assert got["status"] == "APPLICABLE", (lg, got)
+        assert got["status"] != SER.S_STRUCTURAL
+    assert t("baseball", "cpbl", "h2h")["status"] == "UNKNOWN"
+    # and through the table: a KBO cell with no settled record is never zero
+    tb = SER.build_table([_mkt("aec-kbo-lg-ss-2026-10-01", "baseball", "fx-k",
+                               bases=["VENUE_SETTLEMENT_PRICE"])])
+    kbo = next(c for c in tb["cells"] if c["cell"] == "baseball/kbo/h2h")
+    assert kbo["events"][SER.E_TIE]["status"] == SER.S_PRIOR
+    assert kbo["events"][SER.E_TIE]["upper_95"] >= SER.PRIOR_FLOOR_UPPER
+
+
 # ═════════════════════════════════════════════════════════════════════
 # 3 · THE TABLE: MEASURED, POOLED, CITED, PRIOR -- NEVER A ZERO FOR UNKNOWN
 # ═════════════════════════════════════════════════════════════════════
@@ -166,8 +187,12 @@ def test_the_table_on_the_production_census():
     assert void["status"] == SER.S_MEASURED and void["k"] == 0
     assert void["upper_95"] > 0.05
     # a baseball tie is impossible by the rules of the game, and says so
-    assert mlb["events"][SER.E_TIE]["status"] == SER.S_STRUCTURAL
-    assert "extra" not in mlb["events"][SER.E_TIE]["why"] or True
+    tie = mlb["events"][SER.E_TIE]
+    assert tie["status"] == SER.S_STRUCTURAL
+    # a structural zero names the rule of the game it rests on
+    assert "LEAGUE_TIE_REACHABLE[(baseball, mlb)]" in tie["why"], tie["why"]
+    assert "structural zero, not an unmeasured one" in tie["why"]
+    assert (tie["rate"], tie["upper_95"]) == (0.0, 0.0)
     # soccer: 15 fixtures in unl, 28 in the family -- below 40 everywhere,
     # no cited rate: the conservative prior, never zero
     unl = cells["soccer/unl/h2h"]
@@ -240,6 +265,74 @@ def test_a_small_cell_falls_back_and_keeps_its_own_evidence():
     # exact bound is carried: small-sample evidence is never discarded
     assert v["raised_by_internal_observation"] is True
     assert v["upper_95"] == pytest.approx(SER.interval(2, 3)["upper_95"])
+
+
+def test_a_pool_never_counts_cells_where_the_event_cannot_happen():
+    """College football cannot end level. 2,000 settled cfb fixtures must
+    not dilute the NFL tie rate: the family pool counts ties only over cells
+    where a tie can happen, so the cited NFL base rate stands."""
+    rows = [_mkt("aec-cfb-c%d-d%d-2026-10-03" % (i, i), "football",
+                 "fx-cfb-%d" % i, bases=["VENUE_SETTLEMENT_PRICE"])
+            for i in range(2000)]
+    rows += [_mkt("aec-nfl-n%d-m%d-2026-10-04" % (i, i), "football",
+                  "fx-nfl-%d" % i, bases=["VENUE_SETTLEMENT_PRICE"])
+             for i in range(10)]
+    t = SER.build_table(rows)
+    nfl = next(c for c in t["cells"] if c["cell"] == "football/nfl/h2h")
+    tie = nfl["events"][SER.E_TIE]
+    assert tie["status"] == SER.S_EXTERNAL, tie
+    assert (tie["k"], tie["n"]) == (4, 1360)
+    assert tie["upper_95"] == pytest.approx(SER.interval(4, 1360)["upper_95"])
+    # the family pool's tie denominator is the NFL's 10 fixtures only
+    fam = t["pooled"]["football/*/*"]
+    assert fam["settled_fixtures"] == 2010
+    assert fam["events"][SER.E_TIE]["n"] == 10
+    # price / void CAN happen in cfb: there the 2,010 fixtures are pooled
+    assert fam["events"][SER.E_PRICE]["n"] == 2010
+    assert nfl["events"][SER.E_PRICE]["status"] == SER.S_POOLED_FAMILY
+    # the decision carries the cited rate, not a diluted pool
+    got = SER.decision_cost(t, sport_family="football", league="nfl",
+                            market="h2h", holding_side="LONG", p=0.7,
+                            price=0.65, qty=100)
+    assert got["events"][SER.E_TIE]["rate_status"] == SER.S_EXTERNAL
+    assert got["events"][SER.E_TIE]["rate_upper_95"] == pytest.approx(
+        SER.interval(4, 1360)["upper_95"])
+    # a decision on a cfb market built at decision time is still structural
+    cfb = SER.decision_cost(t, sport_family="football", league="cfb",
+                            market="h2h", holding_side="LONG", p=0.7,
+                            price=0.65, qty=100)
+    assert cfb["events"][SER.E_TIE]["rate_status"] == SER.S_STRUCTURAL
+
+
+def test_the_prior_is_never_below_a_raised_small_sample_bound():
+    """The module's invariant: an unmeasured cell is never cheaper than an
+    upper bound the table holds for the same event -- including a small
+    cell's bound raised to its own observation (the raise used to run AFTER
+    the prior was computed)."""
+    rows = [_mkt("aec-mlb-x%d-y%d-2026-09-20" % (i, i), "baseball",
+                 "fx-a%d" % i, bases=["VENUE_SETTLEMENT_PRICE"])
+            for i in range(45)]
+    rows += [_mkt("aec-kbo-x%d-y%d-2026-09-20" % (i, i), "baseball",
+                  "fx-k%d" % i, bases=(["CONFIRMED_VOID"] if i < 2
+                                       else ["VENUE_SETTLEMENT_PRICE"]))
+             for i in range(3)]
+    rows += [_mkt("atc-unl-a%d-b%d-2026-10-01" % (i, i), "soccer",
+                  "fx-u%d" % i, bases=["VENUE_REPORTED_OUTCOME"])
+             for i in range(5)]
+    t = SER.build_table(rows)
+    cells = {c["cell"]: c for c in t["cells"]}
+    kv = cells["baseball/kbo/h2h"]["events"][SER.E_VOID]
+    assert kv["raised_by_internal_observation"] is True
+    uv = cells["soccer/unl/h2h"]["events"][SER.E_VOID]
+    assert uv["status"] == SER.S_PRIOR
+    assert uv["upper_95"] >= kv["upper_95"], (uv["upper_95"], kv["upper_95"])
+    assert t["prior_upper_95"][SER.E_VOID] >= kv["upper_95"]
+    for c in t["cells"]:
+        for e in SER.EVENTS:
+            est = c["events"][e]
+            if est["status"] in SER.EVIDENCED:
+                assert t["prior_upper_95"][e] >= est["upper_95"], (c["cell"],
+                                                                   e)
 
 
 def test_an_external_rate_enters_only_cited_with_its_count_and_denominator():
@@ -488,7 +581,13 @@ async def test_the_real_join_and_the_real_ledger_feed_the_table(monkeypatch):
         assert (void["k"], void["n"]) == (2, 44)
         assert void["upper_95"] == pytest.approx(
             SER.interval(2, 44)["upper_95"])
-        assert cell["events"][SER.E_TIE]["status"] == SER.S_STRUCTURAL
+        # the synthetic league token is not a declared baseball league, so
+        # whether its games can end level is UNKNOWN: it is counted (0 ties
+        # of 44) with the applicability named -- never a structural zero
+        # inherited from the family (review, R30C: KBO / NPB can end level)
+        tie = cell["events"][SER.E_TIE]
+        assert tie["status"] == SER.S_MEASURED and tie["k"] == 0, tie
+        assert tie["applicability_unknown"]
         # the recorded venue-vs-book comparison of the same rows: the venue's
         # last-fair-market-price rule against the book's stake return
         div = cell["rule_divergence"]
@@ -615,18 +714,17 @@ async def test_the_cost_rides_on_the_intent_and_gates_nothing(
         # the table is readable here, so the component is computed (an
         # UNAVAILABLE would carry its reason; it is not expected on this DB)
         assert c["status"] in (SER.D_MEASURED, SER.D_PRIOR), c
-        if True:
-            assert c["gates_the_decision"] is False
-            assert c["authority"] == SER.AUTHORITY
-            # stored in the intent's canonical decimal form (the sha's
-            # normal form), so read back as numbers
-            assert float(c["expected_exception_cost_usd_conservative"]) > 0
-            assert float(c["qty"]) == pytest.approx(float(it["target_qty"]))
-            # the decision's own venue text: the recorded MLB prose settles a
-            # postponement at the last fair market price
-            from sportsassets import bettor_settlement_terms as ST
-            assert c["events"][SER.E_PRICE]["venue_rule"] == \
-                ST.PAY_LAST_FAIR_MARKET_PRICE
+        assert c["gates_the_decision"] is False
+        assert c["authority"] == SER.AUTHORITY
+        # stored in the intent's canonical decimal form (the sha's normal
+        # form), so read back as numbers
+        assert float(c["expected_exception_cost_usd_conservative"]) > 0
+        assert float(c["qty"]) == pytest.approx(float(it["target_qty"]))
+        # the decision's own venue text: the recorded MLB prose settles a
+        # postponement at the last fair market price
+        from sportsassets import bettor_settlement_terms as ST
+        assert c["events"][SER.E_PRICE]["venue_rule"] == \
+            ST.PAY_LAST_FAIR_MARKET_PRICE
         # it is not one of the parity ledger's evidence ids
         assert "settlement_exception_risk" not in LP.evidence_ids(dict(it))
         qty_measured = float(o["qty"])

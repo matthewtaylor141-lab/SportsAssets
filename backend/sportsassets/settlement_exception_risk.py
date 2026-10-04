@@ -44,14 +44,18 @@ with fewer than MIN_FIXTURES settled fixtures falls back, in order, to the
 league pooled across market types, the family pooled, a CITED external base
 rate (source, quote, count AND denominator, page hash), and finally an
 UNMEASURED cell carrying a CONSERVATIVE PRIOR. UNKNOWN IS NEVER ZERO: the only
-zero this module writes is a STRUCTURAL one (a baseball game graded with
-extra innings cannot end level), and it says which rule makes it so.
+zero this module writes is a STRUCTURAL one (an MLB game, played to a result
+in extra innings, cannot end level), and it says which rule makes it so. A
+pooled level counts an event only over cells where the event can happen
+(APPLICABLE or UNKNOWN): a cell where it is structurally impossible never
+dilutes another league's rate.
 
 EVERY ESTIMATE CARRIES AN UPPER BOUND: the larger of the Wilson score and the
 exact Clopper-Pearson 95% bounds on k of n. The prior's upper bound is the
 Clopper-Pearson bound of zero events in MIN_FIXTURES fixtures, or the largest
-upper bound held for that state anywhere in the table, whichever is larger --
-an unmeasured cell is never cheaper than a measured one.
+upper bound held for that state anywhere in the table (a small cell's bound
+raised to its own observation included), whichever is larger -- an
+unmeasured cell is never cheaper than a measured one.
 
 THE COST PER DECISION (`decision_cost`). Against the completed-game
 assumption (the held side pays $1 with probability p, else $0), an
@@ -380,7 +384,26 @@ def _external_for(family, league, market, event) -> dict | None:
 #: cannot end level; the family default (football, OT_INCLUDED) can, through
 #: the NFL's regular-season overtime. A rule of the game, like
 #: bettor_venue_settlement.TIE_REACHABLE, which owns the family defaults.
-LEAGUE_TIE_REACHABLE = {("football", "cfb"): False}
+#:
+#: BASEBALL IS DECLARED PER LEAGUE (review, R30C). The family default
+#: (baseball, OT_INCLUDED) -> cannot end level is true of MLB, whose games are
+#: played to a result in extra innings (the venue's own MLB text: "Extra
+#: innings are included if played"). It is NOT true of every league the
+#: venue lists on the same winner type: KBO and NPB regular-season games end
+#: level when the league's extra-inning cap is reached, and the venue lists
+#: both (workers/ext_pinnacle_loop: "16 NPB and KBO events, on the SAME
+#: winner type"). Applying the family default to them wrote a STRUCTURAL zero
+#: that no rule supports. So MLB is declared unable to end level, KBO and NPB
+#: able to, and any other baseball league is UNKNOWN (the prior), never a
+#: structural zero by inheritance.
+LEAGUE_TIE_REACHABLE = {("football", "cfb"): False,
+                        ("baseball", "mlb"): False,
+                        ("baseball", "kbo"): True,
+                        ("baseball", "npb"): True}
+#: Families whose structural tie answer is declared PER LEAGUE: a league of
+#: these families missing from LEAGUE_TIE_REACHABLE is UNKNOWN, not the
+#: family default.
+LEAGUE_SCOPED_TIE_FAMILIES = frozenset({"baseball"})
 #: The overtime treatment the venue's and the book's money lines share, per
 #: family, where both are captured (bettor_venue_settlement.BOOK_SETTLEMENT
 #: and the venue grading templates of paper_benchmark).
@@ -409,6 +432,13 @@ def tie_applicability(family, league, market) -> dict:
     if (fam, lg) in LEAGUE_TIE_REACHABLE:
         reach = LEAGUE_TIE_REACHABLE[(fam, lg)]
         basis = "LEAGUE_TIE_REACHABLE[(%s, %s)]" % (fam, lg)
+    elif fam in LEAGUE_SCOPED_TIE_FAMILIES:
+        return {"status": "UNKNOWN",
+                "basis": "LEAGUE_SCOPED_TIE_FAMILIES",
+                "why": ("whether a %s/%s game can end level is declared per "
+                        "league (extra-inning caps differ: KBO and NPB end "
+                        "level, MLB does not) and %r is not declared"
+                        % (fam, lg or "?", lg or "?"))}
     else:
         ot = FAMILY_GRADED_OVERTIME.get(fam)
         got = V.tie_is_reachable(sport_family=fam, overtime=ot)
@@ -531,16 +561,32 @@ def build_table(markets: list, divergence: list | None = None, *,
             excluded["NOT_TERMINAL"] = excluded.get("NOT_TERMINAL", 0) + 1
             continue
         fx = str(m.get("fixture") or m.get("slug"))
+        # A POOL COUNTS AN EVENT ONLY WHERE THE EVENT CAN HAPPEN (review,
+        # R30C). Pooling every fixture of a family into every event's
+        # denominator let college-football fixtures -- which cannot end level
+        # -- dilute the NFL tie rate: 45 cfb fixtures turned the cited NFL
+        # base rate (4 of 1,360) into "0 of 46, MEASURED", and 2,000 drove
+        # the bound below the NFL's own point rate. A fixture enters an
+        # event's denominator only from a market whose cell is APPLICABLE or
+        # UNKNOWN for that event; STRUCTURAL and NOT_APPLICABLE cells are out
+        # of numerator and denominator alike.
+        can = {e for e in EVENTS
+               if event_applicability(e, fam, lg, mkt)["status"]
+               not in (S_STRUCTURAL, S_NOT_APPLICABLE)}
         for key in ((fam, lg, mkt), (fam, lg, "*"), (fam, "*", "*")):
             c = counts.setdefault(key, {"fixtures": set(), "conflict": set(),
                                         "events": {e: set() for e in EVENTS},
+                                        "denominators": {e: set()
+                                                         for e in EVENTS},
                                         "markets": 0})
             c["markets"] += 1
             if cls == C_CONFLICT:
                 c["conflict"].add(fx)
                 continue
             c["fixtures"].add(fx)
-            if cls in CLASS_OF_EVENT:
+            for e in can:
+                c["denominators"][e].add(fx)
+            if cls in CLASS_OF_EVENT and cls in can:
                 c["events"][cls].add(fx)
         if cls == C_CONFLICT:
             excluded[C_CONFLICT] = excluded.get(C_CONFLICT, 0) + 1
@@ -549,12 +595,13 @@ def build_table(markets: list, divergence: list | None = None, *,
         c["fixtures"] -= c["conflict"]
         for e in EVENTS:
             c["events"][e] -= c["conflict"]
+            c["denominators"][e] -= c["conflict"]
 
     def obs(key, e):
         c = counts.get(key)
         if not c:
             return interval(0, 0)
-        return interval(len(c["events"][e]), len(c["fixtures"]))
+        return interval(len(c["events"][e]), len(c["denominators"][e]))
 
     div = rule_divergence(divergence or [])
     cells = []
@@ -620,8 +667,27 @@ def build_table(markets: list, divergence: list | None = None, *,
                    "cell in the window"}
         cells.append(row)
         first[row["cell"]] = row
-    # THE PRIOR, ONCE EVERY EVIDENCED ESTIMATE IS KNOWN: never cheaper than
-    # the floor or than any evidenced cell's upper bound for the same event.
+    # SMALL-SAMPLE EVIDENCE IS NOT DISCARDED BY A FALLBACK: a cell whose own
+    # observed rate exceeds the bound it fell back to carries its own exact
+    # upper bound instead. Applied to the EVIDENCED fallbacks FIRST (review,
+    # R30C): the prior was computed before this raise, so an unmeasured cell
+    # could carry a bound below one the table held elsewhere -- contrary to
+    # the invariant this module states.
+    def raise_to_own(est):
+        io = est.get("internal_observation") or {}
+        if (est["status"] not in (S_MEASURED, S_STRUCTURAL, S_NOT_APPLICABLE)
+                and io.get("rate") is not None
+                and est.get("upper_95") is not None
+                and io["rate"] > est["upper_95"]):
+            est["upper_95"] = io["upper_95"]
+            est["raised_by_internal_observation"] = True
+    for c in cells:
+        for e in EVENTS:
+            if c["events"][e]["status"] in EVIDENCED:
+                raise_to_own(c["events"][e])
+    # THE PRIOR, ONCE EVERY EVIDENCED ESTIMATE IS FINAL (raised bounds
+    # included): never cheaper than the floor or than any evidenced cell's
+    # upper bound for the same event.
     prior_upper = {}
     for e in EVENTS:
         ups = [c["events"][e]["upper_95"] for c in cells
@@ -636,26 +702,21 @@ def build_table(markets: list, divergence: list | None = None, *,
                 est["prior_basis"] = (
                     "max(Clopper-Pearson 95%% upper bound of 0 events in %d "
                     "fixtures = %.4f, the largest evidenced upper bound for "
-                    "this event in the table)" % (MIN_FIXTURES,
-                                                  PRIOR_FLOOR_UPPER))
-            # SMALL-SAMPLE EVIDENCE IS NOT DISCARDED BY A FALLBACK: a cell
-            # whose own observed rate exceeds the bound it fell back to
-            # carries its own exact upper bound instead.
-            io = est.get("internal_observation") or {}
-            if (est["status"] not in (S_MEASURED, S_STRUCTURAL,
-                                      S_NOT_APPLICABLE)
-                    and io.get("rate") is not None
-                    and est.get("upper_95") is not None
-                    and io["rate"] > est["upper_95"]):
-                est["upper_95"] = io["upper_95"]
-                est["raised_by_internal_observation"] = True
+                    "this event in the table, small-sample raises included)"
+                    % (MIN_FIXTURES, PRIOR_FLOOR_UPPER))
+                raise_to_own(est)
     out = {"version": VERSION, "as_of": as_of, "min_fixtures": MIN_FIXTURES,
            "prior_floor_upper_95": PRIOR_FLOOR_UPPER,
            "prior_upper_95": prior_upper, "cells": cells,
            "pooled": {_cell_key(*k): {
                "settled_fixtures": len(v["fixtures"]),
                "events": {e: interval(len(v["events"][e]),
-                                      len(v["fixtures"])) for e in EVENTS}}
+                                      len(v["denominators"][e]))
+                          for e in EVENTS},
+               "pooled_over": ("per event, only fixtures of cells where the "
+                               "event is APPLICABLE or UNKNOWN (a structural "
+                               "or not-applicable cell is in neither the "
+                               "numerator nor the denominator)")}
                for k, v in sorted(counts.items()) if "*" in k},
            "excluded": excluded,
            "external_base_rates": [

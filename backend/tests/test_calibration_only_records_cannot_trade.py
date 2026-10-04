@@ -655,8 +655,15 @@ READERS = {
     # the PAPER book already holds, works or decided (by its slug), and the
     # settled LONG outcomes of both purposes for the measured same-day
     # dependence. Display / shadow only: no selection, no cap change.
+    # Re-pinned 3 -> 6 (R30C review): the latest valuation's event_key is
+    # read as a fallback fixture identity for a node with no catalogue row,
+    # and a cap-refused DECISION (already recorded in paper_decisions) is
+    # shown only while its market has no outcome_known row -- an exclusion,
+    # not a selection: the candidates are recorded decisions, never
+    # valuations, and nothing is sized for an order or placed. The other new
+    # mentions are the module's own docstring / source labels.
     "correlation_graph.py": (
-        "HELD_BOOK_PROBABILITY_AND_SETTLED_OUTCOMES_DISPLAY_ONLY", 3),
+        "HELD_BOOK_PROBABILITY_AND_SETTLED_OUTCOMES_DISPLAY_ONLY", 6),
     # (R30C) THE SETTLEMENT-EXCEPTION COMPONENT of a canonical decision reads
     # the venue rules text of the decision's OWN valuation row, BY ID: the
     # decision was already taken on that row; nothing is selected.

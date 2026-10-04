@@ -11,9 +11,12 @@ evidence-backed correlation graph. SHADOW INFORMATION ONLY.
         ?limit=<n>   recent canonical decisions shown (default 25)
     GET /api/command/correlation-graph
         the PAPER book's open positions, working orders and candidate
-        opportunities as a graph of shared settlement dependence, with the
-        WORST-CASE (the caps' treatment) and EVIDENCED-CASE portfolio
-        exposure side by side
+        opportunities (ENTERs not yet ordered, and the opportunities the
+        correlation / concentration caps REFUSED, each with Allie's current
+        treatment beside its shadow marginal) as a graph of shared
+        settlement dependence, with the WORST-CASE (the caps' treatment) and
+        EVIDENCED-CASE portfolio exposure side by side; the read runs in the
+        read-only transaction, the CPU work after it in a worker thread
 
 GET only, COMMAND read auth (agents_core.require_read). Each read runs in a
 READ ONLY transaction under a statement timeout; nothing here writes, sends
@@ -22,6 +25,7 @@ rule. A failed read is HTTP 503 with a named reason -- never a page of zeros.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 
@@ -105,17 +109,28 @@ async def settlement_exception_risk(
                             limit=limit)
 
 
-async def _graph_payload(conn) -> dict:
+async def _graph_inputs(conn) -> dict:
     from .. import correlation_graph as CG
-    return await CG.load(conn, now=time.time())
+    return await CG.read(conn, now=time.time())
 
 
 @router.get("/api/command/correlation-graph",
             dependencies=[Depends(require_read)])
 async def correlation_graph(response: Response) -> dict:
+    """The READ runs inside the read-only transaction; the graph's CPU work
+    (pairwise edges, the Monte Carlo portfolios) runs AFTER it, in a worker
+    thread, so it neither holds the connection nor blocks the event loop --
+    the statement timeout bounds SQL only, never Python (review, R30C)."""
+    from .. import correlation_graph as CG
     response.headers["Cache-Control"] = "no-store"
-    got = await _read_only(_graph_payload,
-                           reason="CORRELATION_GRAPH_READ_FAILED")
+    inputs = await _read_only(_graph_inputs,
+                              reason="CORRELATION_GRAPH_READ_FAILED")
+    try:
+        got = await asyncio.to_thread(CG.compute, inputs)
+    except Exception as exc:                                    # noqa: BLE001
+        raise HTTPException(status_code=503, detail={
+            "reason": "CORRELATION_GRAPH_COMPUTE_FAILED",
+            "detail": "%s: %s" % (type(exc).__name__, str(exc)[:200])})
     if not got.get("ok"):
         raise HTTPException(status_code=503, detail={
             "reason": got.get("refusal") or "CORRELATION_GRAPH_UNAVAILABLE"})
