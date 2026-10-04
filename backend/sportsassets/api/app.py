@@ -775,6 +775,16 @@ try:
 except ImportError:
     log.warning("validation: api.command_validation not loaded",
                 exc_info=True)
+# ── LAB-A EDGE DECAY & LATENCY ECONOMICS: /api/command/lab/edge-decay. GET
+# only, COMMAND auth, READ ONLY transaction with a statement timeout; SHADOW
+# research, every historical row through the lab's point-in-time accessor.
+# No route here writes; no decision path imports the lab.
+try:
+    from .command_lab_edge_decay import router as _command_lab_edge_decay_router
+    app.include_router(_command_lab_edge_decay_router)
+except ImportError:
+    log.warning("lab edge decay: api.command_lab_edge_decay not loaded",
+                exc_info=True)
 # ── THE POSITION ROOMS: /api/command/positions/rooms, /room/{group_key}.
 # GET only, COMMAND auth, READ ONLY transaction; one correlated economic
 # position per screen (paper and actual, actual per venue, never summed).

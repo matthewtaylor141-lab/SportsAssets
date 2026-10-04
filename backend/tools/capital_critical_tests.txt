@@ -827,3 +827,8 @@ tests/test_command_release_authority.py
 # append-only tables; bundles differ per agent and never widen the
 # registry (Karen / Scout / Eddie boundaries); no voice is borrowed.
 tests/test_agent_identity_api_authority.py
+# (242) LAB-A EDGE DECAY (SHADOW RESEARCH): no lab module imports an order,
+# venue, execution, live or funded module (statically and at runtime), no
+# decision path imports the lab, the app registers only the GET-only router,
+# and the offline fast-lane harness writes only its one SHADOW snapshot.
+tests/test_lab_edge_decay_import_guard.py
