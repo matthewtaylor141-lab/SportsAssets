@@ -748,7 +748,7 @@
     html += '<h3 class="h3">Agent tasks</h3>' + (a ? section(a.tasks, function (rows) {
       return table([
         ['Kind', function (t) { return txt(t.kind); }], ['From', function (t) { return txt(t.created_by); }],
-        ['To', function (t) { return txt(t.assignee); }], ['Outcome', function (t) { return has(t.outcome) ? txt(t.outcome) : '<span class="muted">open (no outcome yet)</span>'; }],
+        ['To', function (t) { return txt(t.assignee); }], ['Outcome', function (t) { if (!has(t.outcome)) return '<span class="muted">open (no outcome yet)</span>'; var o = t.outcome; if (o && typeof o === 'object') { var k = o.verdict || o.status || o.state || o.outcome || o.result; return esc(clip(k ? String(k) + (o.why || o.reason ? ' — ' + String(o.why || o.reason) : '') : JSON.stringify(o), 160)); } return txt(o); }],
         ['Created', function (t) { return when(t.created_at); }]
       ], rows, 8);
     }, 'tasks') : NA(failWhy('agents')));
