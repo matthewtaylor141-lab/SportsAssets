@@ -1714,3 +1714,93 @@ on the tracked branch. The deployed id is read back from the workers'
 own boot row: `sql mirror-preflight` prints workers_boot, whose
 commit_sha (cand21) is the full id the process booted with, beside
 venue_writes and the loops it did not start.
+
+## [R95]
+
+obs-stop. "Waking later and refusing does not substitute for
+measuring stop latency during active work" -- so the stop is
+issued on an OBSERVED condition rather than on a guess about
+timing.
+
+THE TRIGGER IS THE SOCKET, NOT THE HTTP COUNTERS:
+  journal_rows_last_60s > 0  and  journal_age_s < 60
+Requiring the budget counters to be RISING as well would
+make the stop test impossible once the acquisition
+allowance is spent -- which it is, within the first few
+minutes of a 40-market probe -- and would tempt an operator
+into spending requests purely to manufacture a window.
+
+WHAT A FRESH ROW DOES AND DOES NOT ESTABLISH. It shows that
+a frame was received, parsed and decided RECENTLY. It does
+NOT show the socket is open at the instant of reading: the
+connection could have dropped in between, and the worker
+would reconnect (a new epoch) or sit disconnected while the
+last rows still look fresh. So the row's OWN IDENTITY is
+reported beside it -- newest_boot_id and newest_stream_epoch
+-- and the operator must confirm they match the RUNNING
+process and the ARMED probe before issuing the stop.
+Whether the connection was in fact open is settled
+RETROSPECTIVELY by obs-stop-receipt, which carries the
+epoch, the frame count and the close verdict from the
+process that did the closing.
+
+The counters are still reported, for the SEPARATE question
+of whether acquisition happened to be active at stop time.
+If it was, assert them unchanged at T+58 s; if it was not,
+record acquisition cessation as NOT EXERCISED THIS RUN
+rather than as a pass.
+
+NOTE ON COLUMNS, read from the deployed DDL rather than
+assumed: bettor_live_journal.decided_at is TEXT (the
+worker's own ISO stamp) and cannot be subtracted from now();
+written_at is the TIMESTAMPTZ the database set, and is the
+right clock for "is it writing right now". The JSONB column
+is `record`, not `payload`.
+
+## [R96]
+
+obs-arm, and both matter.
+
+1. It declares the EIGHT-REQUEST allowance as three
+   sub-caps summing to eight, so the numbers approved
+   are the numbers `reserve()` enforces.
+2. IT ZEROES THE GENERAL ACQUISITION CAPS. This is the
+   structural half of the rollback guard. Removing
+   BETTOR_INCENTIVE_MANIFEST returns main() to the
+   general loop, and if the observation control were
+   still true that loop would begin DISCOVERY -- six
+   listing pages and up to 1,680 BBO reads. With
+   max_distinct = 0 the budget reads BUDGET_EXHAUSTED
+   before a client is ever constructed, so the general
+   loop polls at one database read and issues NOTHING.
+   Configuration removal is still not a stop; this is
+   what makes a mistaken one harmless.
+
+The deadline is 26 hours: long enough for a 25-hour ET
+date plus arming slack, and still a deadline.
+
+## [R97]
+
+ELIDED AND THE REST LOSSLESSLY PACKED.
+
+Every figure the command centre displays is computed
+from (boot_id, at, kind, epoch, slug) and, for a
+ladder, from how many levels it carried and whether it
+was that market's INITIAL_LADDER for the epoch. All of
+that comes back. THE BIDS AND OFFERS DO NOT: no
+displayed number is computed from a price, and pulling
+thousands of order books through a workflow log would
+be neither practical nor evidence of anything more.
+
+Four statements. A header naming the boot and slug
+dictionaries, the time base and the totals; then the
+non-ladder records with their payloads WHOLE, since
+there are a handful of them and they carry the gaps,
+the epochs and the close reasons; then the ladders as
+one array of fixed-shape tuples, which is what keeps a
+day of frames to a readable size; and last the control,
+allowance and run rows, so the whole reading is ONE
+instant rather than three reads stitched together.
+
+arg = obs-incentive-rows[:OFFSET:LIMIT] (ladders only).
+SELECT only.

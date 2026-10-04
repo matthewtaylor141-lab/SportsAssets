@@ -298,45 +298,7 @@ jobs:
                 # latency is a subtraction rather than an inference.
                 obs-stop-receipt) SQL="SELECT coalesce((SELECT jsonb_pretty(value) FROM ingestion_state WHERE key = 'bettor_live_stop_receipt'), 'ROW ABSENT -- no run has ended under this build') AS bettor_live_stop_receipt;"; TO=30000 ;;
                 # [R15] READ-ONLY LIVENESS, for deciding WHEN to issue
-                # obs-stop. "Waking later and refusing does not substitute for
-                # measuring stop latency during active work" -- so the stop is
-                # issued on an OBSERVED condition rather than on a guess about
-                # timing.
-                #
-                # THE TRIGGER IS THE SOCKET, NOT THE HTTP COUNTERS:
-                #   journal_rows_last_60s > 0  and  journal_age_s < 60
-                # Requiring the budget counters to be RISING as well would
-                # make the stop test impossible once the acquisition
-                # allowance is spent -- which it is, within the first few
-                # minutes of a 40-market probe -- and would tempt an operator
-                # into spending requests purely to manufacture a window.
-                #
-                # WHAT A FRESH ROW DOES AND DOES NOT ESTABLISH. It shows that
-                # a frame was received, parsed and decided RECENTLY. It does
-                # NOT show the socket is open at the instant of reading: the
-                # connection could have dropped in between, and the worker
-                # would reconnect (a new epoch) or sit disconnected while the
-                # last rows still look fresh. So the row's OWN IDENTITY is
-                # reported beside it -- newest_boot_id and newest_stream_epoch
-                # -- and the operator must confirm they match the RUNNING
-                # process and the ARMED probe before issuing the stop.
-                # Whether the connection was in fact open is settled
-                # RETROSPECTIVELY by obs-stop-receipt, which carries the
-                # epoch, the frame count and the close verdict from the
-                # process that did the closing.
-                #
-                # The counters are still reported, for the SEPARATE question
-                # of whether acquisition happened to be active at stop time.
-                # If it was, assert them unchanged at T+58 s; if it was not,
-                # record acquisition cessation as NOT EXERCISED THIS RUN
-                # rather than as a pass.
-                #
-                # NOTE ON COLUMNS, read from the deployed DDL rather than
-                # assumed: bettor_live_journal.decided_at is TEXT (the
-                # worker's own ISO stamp) and cannot be subtracted from now();
-                # written_at is the TIMESTAMPTZ the database set, and is the
-                # right clock for "is it writing right now". The JSONB column
-                # is `record`, not `payload`.
+                # [R95] see .github/workflows/RENDER_OPS_NOTES.md
                 obs-live) SQL="SELECT 'journal_rows' AS what, count(*)::text AS v FROM bettor_live_journal UNION ALL SELECT 'journal_newest_written_at', coalesce(max(written_at)::text,'none') FROM bettor_live_journal UNION ALL SELECT 'journal_age_s', coalesce(round(extract(epoch FROM now() - max(written_at))::numeric, 1)::text, 'none') FROM bettor_live_journal UNION ALL SELECT 'journal_rows_last_60s', count(*)::text FROM bettor_live_journal WHERE written_at > now() - interval '60 seconds' UNION ALL SELECT 'observation_only_rows', count(*)::text FROM bettor_live_journal WHERE record->>'observation_basis' = 'OBSERVATION_ONLY' UNION ALL SELECT 'strategy_admitted_rows', count(*)::text FROM bettor_live_journal WHERE record->>'observation_basis' = 'STRATEGY_ADMITTED' UNION ALL SELECT 'distinct_markets_seen', count(DISTINCT market_id)::text FROM bettor_live_journal UNION ALL SELECT 'newest_boot_id', coalesce((SELECT boot_id FROM bettor_live_journal ORDER BY written_at DESC, id DESC LIMIT 1), 'none') UNION ALL SELECT 'newest_stream_epoch', coalesce((SELECT record->>'stream_epoch' FROM bettor_live_journal ORDER BY written_at DESC, id DESC LIMIT 1), 'none') UNION ALL SELECT 'armed_probe_id', coalesce((SELECT value->>'probe_id' FROM ingestion_state WHERE key = 'bettor_live_probe_state'), 'none') UNION ALL SELECT 'bbo_attempts_reserved', coalesce((SELECT value->>'bbo_attempts_reserved' FROM ingestion_state WHERE key = 'bettor_live_probe_state'), 'none') UNION ALL SELECT 'listing_attempts_reserved', coalesce((SELECT value->>'listing_attempts_reserved' FROM ingestion_state WHERE key = 'bettor_live_probe_state'), 'none') UNION ALL SELECT 'distinct_reserved', coalesce((SELECT value->>'distinct_reserved' FROM ingestion_state WHERE key = 'bettor_live_probe_state'), 'none') UNION ALL SELECT 'observation_control', coalesce((SELECT value::text FROM ingestion_state WHERE key = 'bettor_live_observation'), 'ROW ABSENT -- NOT OBSERVING');"; TO=30000 ;;
                 # [R14] READ-ONLY schema metadata. On 2026-09-22 a reservation
                 # UPDATE named ingestion_state.updated_at, a column that does
@@ -349,25 +311,7 @@ jobs:
                 obs-schema) SQL="SELECT ordinal_position AS pos, column_name, data_type, is_nullable, coalesce(column_default,'-') AS dflt FROM information_schema.columns WHERE table_schema='public' AND table_name='ingestion_state' ORDER BY ordinal_position; SELECT count(*) AS applied, min(version) AS first, max(version) AS last FROM schema_migrations;"; TO=30000 ;;
                 obs-arm)   need_confirm; SQL="INSERT INTO ingestion_state (key, value) VALUES ('bettor_live_probe_state', jsonb_build_object('probe_id', gen_random_uuid()::text, 'started_at', to_char(now() AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS+00:00'), 'deadline_at', to_char((now() + interval '30 minutes') AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS+00:00'), 'max_distinct', 40, 'max_bbo_attempts', 160, 'max_listing_attempts', 18, 'distinct_reserved', 0, 'bbo_attempts_reserved', 0, 'listing_attempts_reserved', 0, 'slugs', '[]'::jsonb)) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value; SELECT jsonb_pretty(value) FROM ingestion_state WHERE key = 'bettor_live_probe_state';"; TO=30000 ;;
                 # [R77] INCENTIVE OBSERVATION ARM. Two differences from
-                # obs-arm, and both matter.
-                #
-                # 1. It declares the EIGHT-REQUEST allowance as three
-                #    sub-caps summing to eight, so the numbers approved
-                #    are the numbers `reserve()` enforces.
-                # 2. IT ZEROES THE GENERAL ACQUISITION CAPS. This is the
-                #    structural half of the rollback guard. Removing
-                #    BETTOR_INCENTIVE_MANIFEST returns main() to the
-                #    general loop, and if the observation control were
-                #    still true that loop would begin DISCOVERY -- six
-                #    listing pages and up to 1,680 BBO reads. With
-                #    max_distinct = 0 the budget reads BUDGET_EXHAUSTED
-                #    before a client is ever constructed, so the general
-                #    loop polls at one database read and issues NOTHING.
-                #    Configuration removal is still not a stop; this is
-                #    what makes a mistaken one harmless.
-                #
-                # The deadline is 26 hours: long enough for a 25-hour ET
-                # date plus arming slack, and still a deadline.
+                # [R96] see .github/workflows/RENDER_OPS_NOTES.md
                 obs-arm-incentive) need_confirm; SQL="INSERT INTO ingestion_state (key, value) VALUES ('bettor_live_probe_state', jsonb_build_object('probe_id', gen_random_uuid()::text, 'started_at', to_char(now() AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS+00:00'), 'deadline_at', to_char((now() + interval '26 hours') AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS+00:00'), 'max_distinct', 0, 'max_bbo_attempts', 0, 'max_listing_attempts', 0, 'distinct_reserved', 0, 'bbo_attempts_reserved', 0, 'listing_attempts_reserved', 0, 'max_incentive_manifest', 4, 'max_incentive_recheck', 2, 'max_incentive_retry', 2, 'incentive_manifest_reserved', 0, 'incentive_recheck_reserved', 0, 'incentive_retry_reserved', 0, 'max_socket_connect', 20, 'max_socket_subscribe', 40, 'socket_connect_reserved', 0, 'socket_subscribe_reserved', 0, 'slugs', '[]'::jsonb)) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value; SELECT jsonb_pretty(value) FROM ingestion_state WHERE key = 'bettor_live_probe_state';"; TO=30000 ;;
                 # [R78] The incentive allowance, read-only: what the row
                 # says was RESERVED, which is the authoritative count.
@@ -390,29 +334,7 @@ jobs:
                 # day. SELECT only.
                 obs-incentive-markets) SQL="SELECT slug, count(*) AS frames, count(*) FILTER (WHERE jsonb_array_length(COALESCE(payload->'bids','[]'::jsonb)) > 0 OR jsonb_array_length(COALESCE(payload->'offers','[]'::jsonb)) > 0) AS with_depth, max(jsonb_array_length(COALESCE(payload->'bids','[]'::jsonb))) AS max_bid_levels, max(jsonb_array_length(COALESCE(payload->'offers','[]'::jsonb))) AS max_ask_levels, min(to_timestamp(at))::timestamptz(0) AS first, max(to_timestamp(at))::timestamptz(0) AS last FROM bettor_incentive_journal WHERE kind = 'LADDER' GROUP BY slug ORDER BY slug; SELECT count(DISTINCT slug) AS markets_receiving, count(DISTINCT slug) FILTER (WHERE jsonb_array_length(COALESCE(payload->'bids','[]'::jsonb)) > 0 OR jsonb_array_length(COALESCE(payload->'offers','[]'::jsonb)) > 0) AS markets_with_depth, count(*) AS frames_total, count(*) FILTER (WHERE at >= 1790136000 AND at < 1790222400) AS frames_in_window, count(*) FILTER (WHERE at < 1790136000) AS frames_before_window FROM bettor_incentive_journal WHERE kind = 'LADDER';"; TO=30000 ;;
                 # [R80] THE ACTUAL ROWS, READ-ONLY, WITH THE BOOK BODIES
-                # ELIDED AND THE REST LOSSLESSLY PACKED.
-                #
-                # Every figure the command centre displays is computed
-                # from (boot_id, at, kind, epoch, slug) and, for a
-                # ladder, from how many levels it carried and whether it
-                # was that market's INITIAL_LADDER for the epoch. All of
-                # that comes back. THE BIDS AND OFFERS DO NOT: no
-                # displayed number is computed from a price, and pulling
-                # thousands of order books through a workflow log would
-                # be neither practical nor evidence of anything more.
-                #
-                # Four statements. A header naming the boot and slug
-                # dictionaries, the time base and the totals; then the
-                # non-ladder records with their payloads WHOLE, since
-                # there are a handful of them and they carry the gaps,
-                # the epochs and the close reasons; then the ladders as
-                # one array of fixed-shape tuples, which is what keeps a
-                # day of frames to a readable size; and last the control,
-                # allowance and run rows, so the whole reading is ONE
-                # instant rather than three reads stitched together.
-                #
-                # arg = obs-incentive-rows[:OFFSET:LIMIT] (ladders only).
-                # SELECT only.
+                # [R97] see .github/workflows/RENDER_OPS_NOTES.md
                 obs-incentive-rows|obs-incentive-rows:*)
                   # `arg` already names the statement, so the page is
                   # appended to it. RANGE reaches SQL, so it is checked
