@@ -54,6 +54,14 @@ for (const [label, vw, vh] of [["desktop", 1440, 900], ["phone", 390, 844]].filt
                hq5: { pulse: !!document.getElementById("hq5-pulse"), tapeHidden: !document.querySelector(".bt-hq2-market-tape") || getComputedStyle(document.querySelector(".bt-hq2-market-tape")).display === "none",
                       floorbar: document.querySelectorAll("#hq5-floorbar .hq5-view").length, palette: !!document.querySelector(".hq5-palette-backdrop"),
                       dockPortraits: [...document.querySelectorAll(".fl-agent .fl-mono")].filter((e) => /portraits\//.test(getComputedStyle(e).backgroundImage)).length },
+               hq6: { rail: document.querySelectorAll(".bt-hq2-nav a").length,
+                      brief: [...document.querySelectorAll("#hq6-brief .hq6-brief-card")].map((c) => (c.innerText || "").replace(/\s+/g, " ").trim().slice(0, 90)),
+                      agentLayout: !!document.querySelector(".hq6-agent-layout"),
+                      agentCanvas: [...document.querySelectorAll(".hq6-agent-layout canvas")].some((c) => c.getBoundingClientRect().width > 40),
+                      tab: ((document.querySelector('#ws-tabs [aria-selected="true"]') || {}).textContent || "").trim() || null,
+                      identityOpen: document.querySelector(".hq6-agent-more") ? document.querySelector(".hq6-agent-more").open : null,
+                      now: ((document.getElementById("hq6-now-title") || {}).textContent || "") + " / " + ((document.getElementById("hq6-now-code") || {}).textContent || ""),
+                      watch: document.querySelector(".hq6-watch") ? (document.querySelector(".hq6-watch").getAttribute("aria-pressed") || document.querySelector(".hq6-watch").className) : null },
                brand: { icon: [...document.querySelectorAll('link[rel~="icon"]')].map((l) => l.getAttribute("href")).join(" "),
                         rail: (getComputedStyle(document.querySelector(".bt-hq2-logo") || document.body).backgroundImage.match(/brand\/[a-z0-9-]+\.png/) || [null])[0],
                         topbar: (getComputedStyle(document.querySelector(".bt-hq2-brandword") || document.body, "::before").backgroundImage.match(/brand\/[a-z0-9-]+\.png/) || [null])[0],
@@ -92,7 +100,10 @@ if (!process.env.ONLY || process.env.ONLY === "desktop") {
     "/api/command/profitability/lost-opportunities", "/api/command/profitability/opportunity-scores",
     "/api/command/profitability/forecast-horizons", "/api/command/improvements",
     "/api/command/agents/derek", "/api/command/agents/karen", "/api/command/agents/xavier",
-    "/api/command/agents/audrey", "/api/command/agents/eddie", "/api/command/agents/scout"].join(",")).split(",");
+    "/api/command/agents/audrey", "/api/command/agents/eddie", "/api/command/agents/scout",
+    "/api/command/agents/derek/identity", "/api/command/agents/xavier/identity", "/api/command/agents/audrey/identity",
+    "/api/command/agents/karen/identity", "/api/command/agents/allocator/identity", "/api/command/agents/eddie/identity",
+    "/api/command/agents/scout/identity"].join(",")).split(",");
   report.probes = {};
   for (const u of probes) {
     report.probes[u] = await page.evaluate(async (u) => {
@@ -128,7 +139,7 @@ await browser.close();
 fs.writeFileSync(`${OUT}/hq_report.json`, JSON.stringify(report, null, 1));
 for (const r of report.runs) {
   if (r.overflowers && r.overflowers.length) console.log("   overflow: " + JSON.stringify(r.overflowers));
-  console.log(`== ${r.label} ${r.path} HTTP ${r.status} ${r.ms}ms title="${r.title}" build=${r.build} overflowX=${r.overflowX} (${r.scrollWidth}/${r.clientWidth}) errors=${r.errors.length} canvases=${JSON.stringify(r.canvases)} iframes=${JSON.stringify(r.iframes)}${r.employeeLinks && r.employeeLinks.length ? " employees=" + r.employeeLinks.join(",") : ""}${r.humanDirectory ? " [" + r.humanDirectory + "]" : ""}${r.homeOrder ? " order=" + r.homeOrder : ""}${r.brand ? " brand=" + JSON.stringify(r.brand) : ""}${r.hq5 ? " hq5=" + JSON.stringify(r.hq5) : ""}${r.characters ? " characters=" + r.characters : ""}`);
+  console.log(`== ${r.label} ${r.path} HTTP ${r.status} ${r.ms}ms title="${r.title}" build=${r.build} overflowX=${r.overflowX} (${r.scrollWidth}/${r.clientWidth}) errors=${r.errors.length} canvases=${JSON.stringify(r.canvases)} iframes=${JSON.stringify(r.iframes)}${r.employeeLinks && r.employeeLinks.length ? " employees=" + r.employeeLinks.join(",") : ""}${r.humanDirectory ? " [" + r.humanDirectory + "]" : ""}${r.homeOrder ? " order=" + r.homeOrder : ""}${r.brand ? " brand=" + JSON.stringify(r.brand) : ""}${r.hq5 ? " hq5=" + JSON.stringify(r.hq5) : ""}${r.hq6 ? " hq6=" + JSON.stringify(r.hq6) : ""}${r.characters ? " characters=" + r.characters : ""}`);
   for (const e of r.errors.slice(0, 6)) console.log("   err: " + e);
   console.log("   apis: " + r.apis.join(" | ").slice(0, 1800));
   for (const s of (r.sections || [])) console.log(`   [${s.h}] unavailable=${s.unavailable} nan=${s.nan} chars=${s.chars} :: ${s.sample}`);
