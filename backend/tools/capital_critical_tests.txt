@@ -851,3 +851,15 @@ tests/test_chaos_the_venue_state_machine_recovers.py
 # error_type RateLimitError); no order adapter loops around its send; no
 # module builds the SDK with retries on; Kalshi's session has no retry adapter.
 tests/test_order_posts_are_sent_once_and_429s_are_named.py
+# R30A CHAOS: a provider that goes silent and a settlement that arrives late.
+# The real PinnAPI owner loses its socket (authority revoked, quotes
+# unreadable); the feed runtime's real heartbeat writer publishes it and the
+# agents' work-state reader blocks Xavier on market data (never IDLE, never
+# REVIEWING on a dead feed); the completed-game policy refuses to ENTER on the
+# silent provider's last price (PROBABILITY_EVIDENCE_STALE, no order, no
+# intent) and enters once a fresh reading lands; a stale review waits and
+# enqueues reacquisition with no sale. A delayed settlement: the real writer
+# (join_outcomes over read_resolution over the real SDK client) records the
+# attempt and no outcome, the real reader books nothing and the position
+# stays open and owned; on arrival it is booked once through the ledger.
+tests/test_chaos_provider_disconnect_and_delayed_settlement.py
