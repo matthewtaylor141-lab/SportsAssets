@@ -569,6 +569,21 @@ async def lifespan(_: FastAPI):
             log.info("twin research runner armed (advisory lock per cycle)")
     except Exception:  # noqa: BLE001 -- the API must serve regardless
         log.exception("twin research runner failed to arm")
+    # ── THE IMPROVEMENT PIPELINE RUNNER (migration 221) ──────────────
+    # Seeds improvement items from real signals (upheld Karen challenges,
+    # Audrey findings, coverage incidents, Eddie SKIP_EXECUTION, false
+    # refusals, tournament verdicts) and mirrors the stages the agents have
+    # already recorded. Writes only its own improve_* tables; never a human
+    # or engineering step; no push, merge, deploy, order or capital path.
+    # Bounded, failure-isolated; IMPROVEMENT_PIPELINE_ENABLED=0 is the kill
+    # switch. Without migration 221 it idles.
+    improve_task = None
+    try:
+        from ..agents import improvement_pipeline as _IMPROVE
+        if _IMPROVE.enabled():
+            improve_task = asyncio.create_task(_IMPROVE.run(_cap_pool))
+    except Exception:  # noqa: BLE001 -- the API must serve regardless
+        log.exception("improvement pipeline runner failed to arm")
     try:
         yield
     finally:
@@ -583,6 +598,7 @@ async def lifespan(_: FastAPI):
                              poller_task, capability_task, slack_task,
                              karen_task, peer_task, execmirror_task,
                              eddie_task, scout_task, intel_task, pos_task, poslearn_task, twin_task,
+                             improve_task,
                              *watchdog_tasks)
                  if t is not None]
         for task in tasks:
@@ -751,6 +767,16 @@ try:
     app.include_router(_command_floor_router)
 except ImportError:
     log.warning("floor: api.command_floor not loaded", exc_info=True)
+# ── THE IMPROVEMENT PIPELINE BOARD (migration 221): /api/command/
+# improvements (+ /{id}). GET only, COMMAND auth, one READ ONLY transaction
+# with a statement timeout. SHADOW: the board records the path; nothing here
+# approves, merges, deploys or activates.
+try:
+    from .command_improvements import router as _command_improvements_router
+    app.include_router(_command_improvements_router)
+except ImportError:
+    log.warning("improvements: api.command_improvements not loaded",
+                exc_info=True)
 from .agent_capabilities import router as _capabilities_router
 app.include_router(_capabilities_router)
 from .slack_agents import router as _slack_agents_router

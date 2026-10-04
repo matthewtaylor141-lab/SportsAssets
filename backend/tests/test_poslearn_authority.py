@@ -200,14 +200,28 @@ def test_nothing_outside_the_layer_reads_or_imports_it():
     tables = set(re.findall(r"CREATE TABLE IF NOT EXISTS (poslearn_\w+)",
                             P.UP))
     assert len(tables) == 12
+    # READ-ONLY RESEARCH CONSUMERS (migration 221, claude/pos-improve): the
+    # improvement pipeline SELECTs poslearn_promotion_steps /
+    # poslearn_registrations to seed a TOURNAMENT_VERDICT improvement item
+    # (a challenger met its predeclared criteria) and links the records on
+    # its board. It writes only its own improve_* tables and holds no
+    # production, probability, threshold, sizing or capital path
+    # (tests/test_improvement_pipeline_authority.py pins both), so nothing in
+    # PRODUCTION reads a poslearn table through it.
+    research_readers = {PKG / "agents" / "improvement_pipeline.py",
+                        PKG / "agents" / "improvement_stages.py"}
     for p in PKG.rglob("*.py"):
-        if p.parent == PKG / "poslearn" or p == API:
+        if p.parent == PKG / "poslearn" or p == API or p in research_readers:
             continue
         text = p.read_text(errors="ignore")
         for t in tables:
             assert t not in text, (p, t)
         if "poslearn" in text:
             assert p == PKG / "api" / "app.py", p
+    for p in research_readers:
+        text = p.read_text()
+        assert not re.search(r"(INSERT\s+INTO|UPDATE|DELETE\s+FROM)\s+"
+                             r"poslearn_", text, re.I), p
     app = (PKG / "api" / "app.py").read_text()
     assert "from ..poslearn import runner as _POSLEARN" in app
 
