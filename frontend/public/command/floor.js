@@ -49,7 +49,7 @@ function roster() {
   $('#roster').innerHTML = B.SEATS.map((s) => {
     const a = agentOf(s.slug);
     return '<button type="button" class="fl-agent' + (state.selected === s.slug ? ' on' : '') + '" data-slug="' + s.slug + '" style="--a:' + s.accent + '" aria-pressed="' + (state.selected === s.slug) + '">' +
-      '<span class="fl-mono" aria-hidden="true">' + esc(s.initial) + '</span><span class="fl-agent-txt"><b>' + esc(s.name) + '</b><small>' + esc(s.short) + '</small>' +
+      '<span class="fl-mono" data-agent="' + esc(s.slug) + '" aria-hidden="true">' + esc(s.initial) + '</span><span class="fl-agent-txt"><b>' + esc(s.name) + '</b><small>' + esc(s.short) + '</small>' +
       '<span class="fl-agent-st">' + (a ? chip(a, true) : '<span class="fl-chip" style="--c:#4a5566"><i></i>' + (state.read ? 'No data' : '…') + '</span>') + '<small title="Heartbeat age">♥ ' + esc(hb(a)) + '</small></span></span></button>';
   }).join('');
 }
@@ -74,7 +74,7 @@ function panel(slug) {
   const now = Date.now() / 1000;
   const edges = state.floor ? (state.floor.edges || []).filter((e) => a && (e.from === a.agent || e.to === a.agent)) : [];
   const href = a && a.workspace || '/' + slug;
-  el.innerHTML = '<header class="fl-p-head" style="--a:' + s.accent + '"><span class="fl-mono big" aria-hidden="true">' + esc(s.initial) + '</span><div><span class="fl-eyebrow">' + esc(s.short) + '</span><h2>' + esc(s.name) + '</h2><p>' + esc(a ? a.title : s.role) + '</p></div>' +
+  el.innerHTML = '<header class="fl-p-head" style="--a:' + s.accent + '"><span class="fl-mono big" data-agent="' + esc(s.slug) + '" aria-hidden="true">' + esc(s.initial) + '</span><div><span class="fl-eyebrow">' + esc(s.short) + '</span><h2>' + esc(s.name) + '</h2><p>' + esc(a ? a.title : s.role) + '</p></div>' +
     '<button type="button" class="fl-x" data-close aria-label="Close the agent summary">×</button></header>' +
     (!a ? '<p class="fl-p-empty">' + esc(state.read ? (state.read.why || 'No state recorded for this agent in the latest read.') : 'Waiting for the first floor read…') + '</p>' :
     '<section class="fl-p-now">' + chip(a) + '<p>' + esc(a.state_detail || '') + '</p><small>' + (a.state_since ? 'since ' + esc(B.ago(a.state_since, now)) + ' · ' : '') +
