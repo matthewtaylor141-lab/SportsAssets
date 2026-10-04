@@ -507,6 +507,20 @@ async def lifespan(_: FastAPI):
             log.info("intel shadow runner armed (advisory lock per cycle)")
     except Exception:  # noqa: BLE001 -- the API must serve regardless
         log.exception("intel shadow runner failed to arm")
+    # ── THE LEARNING RUNNER (migration 218): model and agent tournaments,
+    # edge confidence, avoidance, randomized SHADOW experiments. SHADOW /
+    # RESEARCH: writes only its own migration-218 tables; no probability,
+    # threshold, sizing, allowlist, order or capital authority. Bounded,
+    # failure-isolated, one runner per advisory lock; POS_LEARN=off is the
+    # kill switch. Without migration 218 it idles.
+    poslearn_task = None
+    try:
+        from ..poslearn import runner as _POSLEARN
+        if _POSLEARN.enabled():
+            poslearn_task = asyncio.create_task(_POSLEARN.run(_cap_pool))
+            log.info("pos learn runner armed (advisory lock per cycle)")
+    except Exception:  # noqa: BLE001 -- the API must serve regardless
+        log.exception("pos learn runner failed to arm")
     try:
         yield
     finally:
@@ -520,7 +534,7 @@ async def lifespan(_: FastAPI):
                              ext_task, rn1x_model_task, trim_task,
                              poller_task, capability_task, slack_task,
                              karen_task, peer_task, execmirror_task,
-                             intel_task,
+                             intel_task, poslearn_task,
                              *watchdog_tasks)
                  if t is not None]
         for task in tasks:
@@ -630,6 +644,15 @@ try:
     app.include_router(_command_intel_router)
 except ImportError:
     log.warning("intel: api.command_intel not loaded", exc_info=True)
+# ── THE LEARNING-LAYER READS (migration 218): /api/command/tournament/*,
+# /api/command/profitability/{edge-confidence,avoidance},
+# /api/command/experiments. GET only, COMMAND auth, SHADOW / RESEARCH.
+try:
+    from .command_learning_os import router as _command_learning_os_router
+    app.include_router(_command_learning_os_router)
+except ImportError:
+    log.warning("poslearn: api.command_learning_os not loaded",
+                exc_info=True)
 from .agent_capabilities import router as _capabilities_router
 app.include_router(_capabilities_router)
 from .slack_agents import router as _slack_agents_router

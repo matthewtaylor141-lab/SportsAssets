@@ -677,3 +677,16 @@ tests/test_karen_persona_and_peer_response.py
 # a census that files a requested league honestly, college names that map
 # exactly or refuse by name, captured football settlement terms.
 tests/test_ncaaf_identity_settlement_and_coverage.py
+# The profitability operating system, part 3 (claude/pos-learn, migration
+# 218): the model tournament (M0 raw PinnAPI champion vs calibrated,
+# microstructure, Scout / cross-market placeholders and sport-specific
+# challengers), the agent tournament (DEREK / XAVIER / ALLOCATOR / EDDIE
+# variants on one shared opportunity set), the edge-confidence and avoidance
+# meta-models, the seeded randomized SHADOW experiment platform. SHADOW /
+# RESEARCH: no probability, threshold, sizing, allowlist, order or capital
+# authority; registrations, forecasts, assignments and the promotion ladder
+# are DB-guarded; the human approval record is written by no code path.
+tests/test_poslearn_authority.py
+tests/test_poslearn_tournaments.py
+tests/test_poslearn_models_and_meta.py
+tests/test_poslearn_overfitting_defences.py

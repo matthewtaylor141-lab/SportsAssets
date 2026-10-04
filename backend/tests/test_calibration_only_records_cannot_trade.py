@@ -550,6 +550,17 @@ READERS = {
     # (209) THE IMPROVEMENT DRIVER: checks the table exists before reading
     # the scorecard's filtered Brier; registers paper experiments only.
     "agents/improvement_driver.py": ("EXISTENCE_CHECK_ONLY", 1),
+    # (218) THE LEARNING LAYER'S ONE READER: it reads BOTH purposes
+    # deliberately -- every forward PinnAPI probability is an opportunity the
+    # model / agent tournaments and meta-models score, captured BEFORE its
+    # outcome; the joined outcome by id; quotes before t for as-of features.
+    # SHADOW / RESEARCH: it selects no candidate for any execution path,
+    # sizes nothing and places nothing, and writes only poslearn_* tables
+    # (tests/test_poslearn_authority.py). A CALIBRATION_ONLY row's displayed
+    # price is used for research economics only, labelled
+    # DISPLAYED_NOT_EXECUTABLE.
+    "poslearn/reads.py": (
+        "SHADOW_RESEARCH_SCORES_BOTH_PURPOSES_NEVER_SELECTS_A_CANDIDATE", 4),
 }
 
 
