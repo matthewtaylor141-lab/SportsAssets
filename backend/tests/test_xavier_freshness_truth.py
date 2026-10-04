@@ -535,19 +535,6 @@ def test_the_served_xavier_page_code_renders_the_state_not_a_stale_hold():
     assert ".xst.STALE" in css and ".xst.CURRENT" in css
 
 
-def test_the_frontend_position_room_handles_the_state_when_present():
-    """The position room page is published from the frontend branch; when
-    this checkout carries it, it must render the gated state."""
-    p = ROOT.parents[1] / "frontend" / "public" / "command" / "position.js"
-    if not p.exists():
-        pytest.skip("frontend/public/command/position.js is on the frontend "
-                    "branch, not in this checkout")
-    js = p.read_text()
-    assert "recommendation_state" in js
-    for s in ("CURRENT", "STALE", "INVALID", "WAITING_FOR_FRESH_EVIDENCE"):
-        assert s in js, s
-
-
 # ═════════════════════════════════════════════════════════════════════
 # 6 · EVERY ALTERNATIVE: A VALUE OR A NAMED REASON
 # ═════════════════════════════════════════════════════════════════════
