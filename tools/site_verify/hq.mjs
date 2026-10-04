@@ -11,7 +11,7 @@ fs.mkdirSync(OUT, { recursive: true });
 const report = { at: new Date().toISOString(), host: HOST, runs: [] };
 const browser = await chromium.launch();
 for (const [label, vw, vh] of [["desktop", 1440, 900], ["phone", 390, 844]].filter(([l]) => !process.env.ONLY || process.env.ONLY === l)) {
-  for (const path of (process.env.PAGES || "/,/floor,/positions,/xavier,/allocator,/eddie,/scout,/profitability,/acceptance,/improvements").split(",")) {
+  for (const path of (process.env.PAGES || "/,/floor,/positions,/derek,/karen,/scout,/eddie,/allocator,/audrey,/xavier,/profitability,/acceptance,/improvements").split(",")) {
     const ctx = await browser.newContext({ viewport: { width: vw, height: vh } });
     if (TOKEN) await ctx.route(HOST + "/api/command/**", (r) =>
       r.continue({ headers: { ...r.request().headers(), "x-admin-token": TOKEN } }));
@@ -54,8 +54,62 @@ for (const [label, vw, vh] of [["desktop", 1440, 900], ["phone", 390, 844]].filt
     await ctx.close();
   }
 }
+// R28 production readback: authenticated GETs of the release, equity, floor,
+// Xavier, positions and Profitability OS endpoints (bodies trimmed), plus up to
+// three REAL position rooms discovered from the live rooms list. Read only.
+if (!process.env.ONLY || process.env.ONLY === "desktop") {
+  const ctx = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+  if (TOKEN) await ctx.route(HOST + "/api/command/**", (r) =>
+    r.continue({ headers: { ...r.request().headers(), "x-admin-token": TOKEN } }));
+  const page = await ctx.newPage();
+  await page.goto(HOST + "/", { waitUntil: "load", timeout: 60000 }).catch(() => {});
+  const probes = (process.env.HQ_PROBES || [
+    "/api/command/release", "/api/command/equity/live", "/api/command/floor",
+    "/api/command/paper/xavier", "/api/command/positions/rooms?book=PAPER",
+    "/api/command/positions/rooms?book=ACTUAL", "/api/command/coverage",
+    "/api/command/profitability", "/api/command/profitability/north-star",
+    "/api/command/profitability/capital", "/api/command/profitability/capacity",
+    "/api/command/profitability/forecast", "/api/command/profitability/sleeves",
+    "/api/command/eddie", "/api/command/eddie/estimates", "/api/command/scout",
+    "/api/command/tournament/models", "/api/command/tournament/agents",
+    "/api/command/profitability/edge-confidence", "/api/command/experiments",
+    "/api/command/twin", "/api/command/profitability/scorecards",
+    "/api/command/profitability/evidence-ladder",
+    "/api/command/profitability/lost-opportunities", "/api/command/profitability/opportunity-scores",
+    "/api/command/profitability/forecast-horizons", "/api/command/improvements",
+    "/api/command/agents/derek", "/api/command/agents/karen", "/api/command/agents/xavier",
+    "/api/command/agents/audrey", "/api/command/agents/eddie", "/api/command/agents/scout"].join(",")).split(",");
+  report.probes = {};
+  for (const u of probes) {
+    report.probes[u] = await page.evaluate(async (u) => {
+      try { const r = await fetch(u, { credentials: "same-origin" }); const t = await r.text();
+            return { status: r.status, bytes: t.length, body: t.slice(0, 60000) }; }
+      catch (e) { return { error: String(e).slice(0, 200) }; }
+    }, u);
+  }
+  let keys = [];
+  try { keys = (JSON.parse(report.probes["/api/command/positions/rooms?book=PAPER"].body).rooms || []).map((r) => r.group_key).filter(Boolean).slice(0, 3); } catch (e) {}
+  report.rooms = [];
+  for (const k of keys) {
+    const detail = await page.evaluate(async (k) => {
+      const r = await fetch("/api/command/positions/room/" + encodeURIComponent(k)); const t = await r.text();
+      return { status: r.status, body: t.slice(0, 80000) };
+    }, k);
+    const pg = await ctx.newPage(); const errors = [];
+    pg.on("console", (m) => { if (m.type() === "error") errors.push(m.text().slice(0, 200)); });
+    const st = (await pg.goto(HOST + "/position?g=" + encodeURIComponent(k), { waitUntil: "load", timeout: 60000 }).catch(() => null))?.status();
+    await pg.waitForTimeout(8000);
+    const text = (await pg.evaluate(() => document.body.innerText).catch(() => "")).slice(0, 6000);
+    await pg.screenshot({ path: `${OUT}/room_${keys.indexOf(k)}.png`, fullPage: true }).catch(() => {});
+    report.rooms.push({ key: k, api: detail, page_status: st, errors, text });
+    await pg.close();
+  }
+  await ctx.close();
+}
 await browser.close();
 fs.writeFileSync(`${OUT}/hq_report.json`, JSON.stringify(report, null, 1));
+for (const [u, p] of Object.entries(report.probes || {})) console.log(`probe ${p.status || "ERR"} ${p.bytes || 0}B ${u}`);
+for (const r of (report.rooms || [])) console.log(`room ${r.key} api=${r.api && r.api.status} page=${r.page_status} errors=${r.errors.length}`);
 for (const r of report.runs) {
   if (r.overflowers && r.overflowers.length) console.log("   overflow: " + JSON.stringify(r.overflowers));
   console.log(`== ${r.label} ${r.path} HTTP ${r.status} ${r.ms}ms title="${r.title}" overflowX=${r.overflowX} (${r.scrollWidth}/${r.clientWidth}) errors=${r.errors.length} SHADOW=${r.shadowLabels}${r.characters ? " characters=" + r.characters : ""}`);
