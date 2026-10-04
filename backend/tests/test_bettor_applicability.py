@@ -62,10 +62,21 @@ def test_flat_applicable_and_not_applicable_sets():
     assert set(s["APPLICABLE"]) == {
         "MAKE_YES", "MAKE_NO", "MAKE_BOTH", "TAKE_YES", "TAKE_NO",
         "NO_TRADE"}
+    # FORM_INDIRECT_HEDGE JOINED THE CATALOGUE ON 2026-09-27 (fe69419,
+    # "COMPLETE THE AUTONOMOUS TRADING SYSTEM" §5: the eighth eligible
+    # action, so an indirect hedge can appear in an audit as
+    # considered-and-rejected). This pin was written on 2026-09-20
+    # (e8ab303), before it existed, and has failed since (CI 37223385978).
+    # The fact that changed is the size of `bettor_ev_actions.ACTIONS`; the
+    # property is unchanged -- FLAT holds no leg, so an action that hedges a
+    # held leg (direct or on another condition) cannot exist there and is
+    # NOT_APPLICABLE, never priced. The set is still pinned exactly, so a
+    # further addition must be classified here by hand.
     assert set(s["NOT_APPLICABLE_CURRENT_STATE"]) == {
         "POST_COMPLEMENT", "TAKE_COMPLEMENT", "COMPLETE_PAIR", "MERGE",
-        "HOLD", "DIRECT_EXIT", "HEDGE", "HOLD_TO_SETTLEMENT",
-        "WAIT_REQUOTE"}
+        "HOLD", "DIRECT_EXIT", "HEDGE", "FORM_INDIRECT_HEDGE",
+        "HOLD_TO_SETTLEMENT", "WAIT_REQUOTE"}
+    assert not s["APPLICABILITY_NOT_IDENTIFIED"]
 
 
 @pytest.mark.parametrize("action", [

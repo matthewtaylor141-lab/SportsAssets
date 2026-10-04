@@ -681,7 +681,10 @@ def test_e25_the_census_place_the_emit_sites_and_no_knob_no_migration_no_decisio
     # no switch, no migration, no decision word (059 as section 47 left it), no new skip key
     assert '"MIRROR_EXIT_CONFIRM' not in inspect.getsource(ml), "the worker reads the rails through rules, never the environment"
     assert "os.environ" not in inspect.getsource(ml._tick_book)
-    assert sorted(x.name for x in (ROOT / "backend" / "migrations").glob("*.sql"))[-1].startswith("064_")  # re-pinned 2026-09-12 (run 83.3): run 83.3's 064 is the newest; this lane still adds none
+    # R30A ci (2026-10-04): this was `files[-1] == 064`, the GLOBALLY newest file -- red since
+    # 065 landed. The lane's property, re-expressed in tests/migration_epochs.py:
+    from tests import migration_epochs as MIG
+    MIG.assert_lane_added_no_migration(*NEW_NAMES)
     assert "exit_confirm" not in (ROOT / "backend" / "migrations" / "059_mirror_orders_send_record.sql").read_text()
     assert "exit_ref" not in ml._SKIP_CARRIED and "exit_confirm" not in ml._SKIP_CARRIED
 

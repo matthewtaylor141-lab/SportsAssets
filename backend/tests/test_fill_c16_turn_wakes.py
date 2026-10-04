@@ -586,7 +586,10 @@ def test_c16_the_census_place_the_emit_site_no_rail_no_decision_word_no_migratio
     assert "turn_woke" not in inspect.getsource(rules.order_decision) and "woke" not in inspect.getsource(rules)
     mig = ROOT / "backend" / "migrations"
     assert "turn_woke" not in (mig / "059_mirror_orders_send_record.sql").read_text()
-    assert sorted(p.name for p in mig.glob("*.sql"))[-1] == "064_run833_stream_channels.sql"  # re-pinned 2026-09-12 (run 83.3): run 83.3's 064 is the newest; this lane still adds none
+    # R30A ci (2026-10-04): this was `files[-1] == 064`, the GLOBALLY newest file -- red since
+    # 065 landed. The lane's property, re-expressed in tests/migration_epochs.py:
+    from tests import migration_epochs as MIG
+    MIG.assert_lane_added_no_migration(NEW_NAME, "turn_woke")
     # the render-ops presets are untouched by this lane: lane 0b's closed-while-he-traded already prints the turn
     yml = (_render_ops_file()).read_text()
     assert "turn_woke" not in yml and "b.last_plan->'turn'" in yml

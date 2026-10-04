@@ -546,7 +546,10 @@ def test_e18_059_exists_sorts_last_and_is_three_nullable_add_column_if_not_exist
     # T2 (FILL lane 4, 2026-09-08) added 060 after this one, FILL lane 9 (2026-09-09) 061 after that:
     # 059 sorts after 058, 060 after 059, 061 last
     assert files[i + 1] == "059_mirror_orders_send_record.sql" and files[i + 2] == "060_mirror_fill_answers.sql"
-    assert files[-1] == "064_run833_stream_channels.sql"  # re-pinned 2026-09-12 (run 83.3): run 83.3's 064 is the newest; this lane still adds none
+    # R30A ci (2026-10-04): this was `files[-1] == 064`, the GLOBALLY newest file -- red since
+    # 065 landed. The lane's property, re-expressed in tests/migration_epochs.py:
+    from tests import migration_epochs as MIG
+    MIG.assert_later_lanes_append_after("059_mirror_orders_send_record.sql", files)
     assert sum(f.startswith("059_") for f in files) == 1
     sql = SQL_059.read_text()
     assert sql.splitlines()[0].startswith("-- 059: MIRROR ORDERS SEND RECORD (E18, 2026-09-08")

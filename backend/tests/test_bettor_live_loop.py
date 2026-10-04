@@ -2519,10 +2519,59 @@ class TestTheSDKAddsNoHiddenRequests:
     following, that equality breaks and the listing budget silently
     undercounts again -- so it is checked against the INSTALLED
     package rather than remembered from a reading of it.
+
+    RE-EXPRESSED AT R30A (2026-10-04), THE PROPERTY UNCHANGED. Two of these
+    were written on 2026-09-22 (0437b55) against polymarket-us 0.1.2, whose
+    client had no retry logic at all, and they pinned that by reading the
+    SDK's SOURCE: "retries" absent from `PolymarketUS.__init__`, "sleep"
+    absent from `_request`. On 2026-09-28 (5a0b571) the SDK was pinned to
+    1.0.2 -- the version the deployed image had already resolved -- whose
+    constructor takes `max_retries=2` and whose `_request` retries
+    408/409/429/5xx on GET with `time.sleep` between attempts. The source
+    pins have failed on every run since (CI 37223385978), and they would
+    keep failing however correct production is, because what they read is
+    the SDK's default, not the client this system builds.
+
+    The fact that legitimately changed is the SDK's default. The property
+    the listing budget needs -- one wrapper call is one HTTP request, and a
+    429 is raised rather than retried -- now holds because `pmus._get_client`
+    constructs the client with `venue_sdk.client_kwargs()` (max_retries=0).
+    So it is asserted on THAT client, by behaviour: a counting transport
+    answers 429 / 503 and the number of requests the SDK dispatched is read
+    off it. A control run with the SDK's own defaults makes three requests
+    for the same call, so the instrument is shown to see a retry; if
+    `client_kwargs()` ever stops turning retries off, these fail.
     """
 
     def _sdk(self):
         return pytest.importorskip("polymarket_us")
+
+    @staticmethod
+    def _counted(client, status, sleeps, monkeypatch):
+        """Swap the client's httpx.Client for one whose transport answers
+        `status` to every request and counts them. Returns the list the
+        requests are appended to. The SDK's `time.sleep` is recorded and
+        not slept, so a regression is seen without spending seconds."""
+        import httpx
+        from polymarket_us import client as sdk_client
+        seen = []
+
+        def handler(request):
+            seen.append((request.method, request.url.path))
+            return httpx.Response(status, json={"message": "limited"},
+                                  request=request)
+        client._http = httpx.Client(transport=httpx.MockTransport(handler))
+        monkeypatch.setattr(sdk_client.time, "sleep",
+                            lambda s: sleeps.append(s))
+        return seen
+
+    def _our_client(self, monkeypatch):
+        """The client production builds: `pmus._get_client()` itself, from
+        a cleared singleton (no credentials in a test process, so the
+        public-endpoint branch -- the one the listing uses)."""
+        from sportsassets import pmus
+        monkeypatch.setattr(pmus, "_client", None)
+        return pmus._get_client()
 
     def test_markets_list_has_no_internal_pagination(self):
         sdk = self._sdk()
@@ -2530,24 +2579,53 @@ class TestTheSDKAddsNoHiddenRequests:
         assert "while" not in src and "for " not in src
         assert src.count("self._client.get") == 1
 
-    def test_the_http_client_adds_no_retry_transport(self):
+    def test_the_http_client_adds_no_retry_transport(self, monkeypatch):
         sdk = self._sdk()
-        src = inspect.getsource(sdk.client.PolymarketUS.__init__)
-        assert "httpx.Client(" in src
-        # httpx defaults to retries=0 and follow_redirects=False; what
-        # matters is that the SDK does not override either.
-        assert "retries" not in src and "transport" not in src
+        from sportsassets import pmus, venue_sdk
+        # what production asks for, and that the installed build took it
+        assert venue_sdk.client_kwargs() == {"max_retries": 0}
+        assert venue_sdk.report()["sdk_retries_disabled"] is True
+        assert "_vsdk.client_kwargs()" in inspect.getsource(pmus._get_client)
+        # the SDK still builds a plain httpx.Client with no transport of
+        # its own (ours is installed at the transport by pmus)
+        init = inspect.getsource(sdk.client.PolymarketUS.__init__)
+        assert "httpx.Client(timeout=timeout)" in init
+        assert "transport" not in init
+        # BEHAVIOUR: a retryable 503 on our client is ONE request
+        sleeps = []
+        c = self._our_client(monkeypatch)
+        assert c.max_retries == 0
+        seen = self._counted(c, 503, sleeps, monkeypatch)
+        with pytest.raises(sdk.APIStatusError):
+            c.markets.list({"active": True, "limit": 1})
+        assert len(seen) == 1 and seen[0][0] == "GET", seen
+        assert sleeps == []
+        # CONTROL: the SDK's own default would have made three
+        ctl_sleeps = []
+        ctl = sdk.PolymarketUS()
+        ctl_seen = self._counted(ctl, 503, ctl_sleeps, monkeypatch)
+        with pytest.raises(sdk.APIStatusError):
+            ctl.markets.list({"active": True, "limit": 1})
+        assert len(ctl_seen) == 1 + ctl.max_retries == 3, ctl_seen
+        assert len(ctl_sleeps) == 2
 
     def test_the_client_follows_no_redirects(self):
         sdk = self._sdk()
         src = inspect.getsource(sdk.client)
         assert "follow_redirects" not in src
 
-    def test_a_429_is_raised_not_retried(self):
+    def test_a_429_is_raised_not_retried(self, monkeypatch):
         sdk = self._sdk()
         src = inspect.getsource(sdk.client.PolymarketUS._request)
-        assert "sleep" not in src
         assert "_handle_error_response" in src
+        sleeps = []
+        c = self._our_client(monkeypatch)
+        seen = self._counted(c, 429, sleeps, monkeypatch)
+        with pytest.raises(sdk.RateLimitError):
+            c.markets.list({"active": True, "limit": 1})
+        # raised on the FIRST response: one request, no sleep in the SDK
+        assert len(seen) == 1, seen
+        assert sleeps == []
 
 
 class TestTheShutdownIsMeasuredNotInferred:

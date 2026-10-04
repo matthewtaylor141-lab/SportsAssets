@@ -265,6 +265,18 @@ async def _replay_ledger(pool, whale_id: int) -> dict[str, _Agg]:
                     break
                 _fold(by_asset, rows)
                 del rows
+                # THE YIELD BETWEEN CHUNKS IS EXPLICIT (R30A ci, 2026-10-04).
+                # It used to come from asyncio.wait_for, which on Python 3.11
+                # ran the fetch in a task of its own and so always gave the
+                # loop a turn. 3.12 (the image's interpreter) reimplemented
+                # wait_for on asyncio.timeout and awaits the fetch in place:
+                # a chunk that completes without suspending -- buffered rows,
+                # a fast local server -- no longer yields, and the fold is
+                # back to holding the loop for the whole read, the 4.8 s
+                # unanswered-health-check stretch this streaming replaced.
+                # test_the_loop_yields_between_chunks failed on 3.12.3
+                # (release gate f40) for exactly this reason.
+                await asyncio.sleep(0)
     return by_asset
 
 

@@ -589,7 +589,10 @@ def test_e28_the_fast_ticks_own_re_read_the_act_the_takes_and_the_exit_path_are_
     assert hashlib.sha256(excised.encode()).hexdigest()[:16] == RULES_SHA_6C0830D
     # no migration (061 the newest), no decision word
     mig = sorted(p.name for p in (ROOT / "backend" / "migrations").glob("*.sql"))
-    assert mig[-1].startswith("064_")  # re-pinned 2026-09-12 (run 83.3): run 83.3's 064 is the newest; this lane still adds none
+    # R30A ci (2026-10-04): this was `files[-1] == 064`, the GLOBALLY newest file -- red since
+    # 065 landed. The lane's property, re-expressed in tests/migration_epochs.py:
+    from tests import migration_epochs as MIG
+    MIG.assert_lane_added_no_migration(*NEW_NAMES)
     assert "decision" not in inspect.getsource(ml._walk_reread) and "decision" not in inspect.getsource(ml._ledger_reread)
 
 

@@ -56,6 +56,7 @@ from tests.test_l1_rearm_window import H24, TRIPPED, _loss_reads, _rearm, _reduc
 from tests.test_l2_sleeve_window import REARM_DT, REARM_TS, SQL_24H, _recorder
 from tests.test_mirror_live_worker import GTC_TIF, IOC_TIF, NOW, SLUG, _armed  # noqa: F401 — the fixture
 from tests.test_mirror_live_worker import _census, _places, _pool, _tick, _Venue
+from tests.test_mirror_live_worker import anchor_reads_to_fixture_now
 from tests.workflow_source import render_ops_file as _render_ops_file
 
 RENDER_OPS = _render_ops_file()
@@ -64,6 +65,21 @@ RENDER_OPS = _render_ops_file()
 @pytest.fixture(autouse=True)
 def _threshold(monkeypatch):
     monkeypatch.setattr(le, "PMUS_LOSS_BREAKER_USD", 5000.0)
+
+
+@pytest.fixture(autouse=True)
+def _reads_run_from_the_fixture_now(monkeypatch):
+    """THE WORLD'S CLOCK, NOT THE SUITE'S (R30A ci, 2026-10-04).
+
+    These ticks run at test_mirror_live_worker's NOW, stamped once at
+    import, but the real per-market and snapshot reads age themselves on
+    the wall clock. Four of these tests (the re-arm / sleeve placements)
+    therefore failed whenever the file ran more than SNAP_MAX_AGE_S (300 s)
+    after collection -- release gate f40 on 3.12.3, and reproduced here by
+    delaying a run 320 s after collection: 4 failed, 0 changed in the code.
+    The read clocks are anchored to NOW exactly as test_mirror_live_worker
+    (862a25c) and test_fill_x1_exit_band anchor theirs."""
+    anchor_reads_to_fixture_now(monkeypatch)
 
 
 def _sleeve_reads(p):

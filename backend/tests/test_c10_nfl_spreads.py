@@ -992,7 +992,11 @@ class TestTheSeams:
         import pathlib
         from sportsassets.scripts import migrate
         files = [f.name for f in sorted(pathlib.Path(migrate.MIGRATIONS_DIR).glob("*.sql"))]
-        assert files[-1].startswith("064_"), files[-1]  # re-pinned 2026-09-12 (run 83.3): run 83.3's 064 is the newest; this lane still adds none
+        # R30A ci (2026-10-04): this was `files[-1].startswith('064_')`, the GLOBALLY newest file --
+        # red since 065 landed. The lane's property, re-expressed in tests/migration_epochs.py:
+        from tests import migration_epochs as MIG
+        MIG.assert_lane_added_no_migration("premap_spread_team", "_c10_")
+        assert files == MIG.migration_files()
         # the docs section, in the house header form, and its words
         doc = (pathlib.Path(__file__).resolve().parents[2] / "docs" / "mirror-coverage.md").read_text()
         assert re.search(r"^## \d+\. C10 -- .* \(2026-09-10, coverage lane C10\)", doc, re.M), "the C10 section header"

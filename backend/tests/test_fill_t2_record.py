@@ -82,7 +82,10 @@ def test_t2_060_exists_sorts_last_and_is_one_create_table_if_not_exists_with_the
     # FILL lane 9 (2026-09-09) added 061 after this one: 060 sorts after 059, 061 last
     assert files[i + 1] == "060_mirror_fill_answers.sql" and sum(f.startswith("060_") for f in files) == 1
     assert files[i + 2] == "061_fill_answers_cause_orders_fast.sql"
-    assert files[-1] == "064_run833_stream_channels.sql"  # re-pinned 2026-09-12 (run 83.3): run 83.3's 064 is the newest; this lane still adds none
+    # R30A ci (2026-10-04): this was `files[-1] == 064`, the GLOBALLY newest file -- red since
+    # 065 landed. The lane's property, re-expressed in tests/migration_epochs.py:
+    from tests import migration_epochs as MIG
+    MIG.assert_later_lanes_append_after("060_mirror_fill_answers.sql", files)
     sql = SQL_060.read_text()
     assert sql.splitlines()[0].startswith("-- 060: MIRROR FILL ANSWERS (T2, 2026-09-08; FILL program lane 4")
     body = "\n".join(ln.split("--", 1)[0] for ln in sql.splitlines())

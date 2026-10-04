@@ -9387,6 +9387,40 @@ def test_r2_every_request_claims_its_own_gap_so_contending_buys_and_readers_are_
     assert "pace(ms.READ_PACING_S)" in inspect.getsource(ml._paced) and "slots" not in inspect.signature(ml._paced).parameters
 
 
+# THE REAL ADAPTER MEETS THE REAL EXECUTION GATE (R30A ci, 2026-10-04).
+#
+# The eight tests marked with this fixture drive `pmus.submit_fok` /
+# `pmus.close_position` -- the REAL adapter, on the fake client
+# tests.test_pmus_post_only installs. They were written on 2026-09-19
+# (14e65d2). On 2026-09-21 (ce92ccf) the execution gate was put INSIDE
+# submit_fok as the single authorization boundary, and in a bare test process
+# that gate is unbound, so from then on every one of them raised
+#
+#     execution_gate.Denied: authorization_unavailable: execution gate is not
+#     bound to a loop and pool
+#
+# before the adapter's 429 handling could be reached. The worker read that
+# raise as a lost response and searched the book, so the census showed no
+# `rate_limited` and the tests failed -- measuring an unbound gate, never the
+# 429 semantics they pin (CI run 37223385978: all eight, every run since).
+# tests/gate_harness.py (21eeed4, 2026-09-27) fixed exactly this for
+# test_pmus_post_only and named "1 in tests/test_mirror_live_worker.py"; the
+# other seven route through the real adapter via `_RealAdapterVenue` and were
+# never given it.
+#
+# THE GATE IS SATISFIED, NOT SKIPPED: `authorized_gate` binds a real loop on a
+# background thread with a pool double, and `read_state` / `_decide` run
+# unmodified, so the kill switch, copy halt, overspend halt and loss stop are
+# all consulted on every submission these tests make.
+# test_the_gate_harness_does_not_weaken_the_gate.py proves it still denies.
+@pytest.fixture
+def _satisfied_gate(monkeypatch):
+    from tests.gate_harness import authorized_gate
+    with authorized_gate(monkeypatch) as pool:
+        yield pool
+
+
+@pytest.mark.usefixtures("_satisfied_gate")
 def test_r2_the_adapter_claims_its_own_gap_between_the_preview_and_the_create(monkeypatch):
     """LOW-a (round 2) as round 3 rebuilt it. pmus.submit_fok(paced_pair=True)
     -- what _guarded passes for every submit_fok -- claims a gap on the
@@ -9997,6 +10031,7 @@ def _refused_row(p, b):
     return [o for o in p.orders.values() if o["book_id"] == b["id"]][0]
 
 
+@pytest.mark.usefixtures("_satisfied_gate")
 def test_r4_a_429_on_the_preview_is_a_refusal_named_and_tripping_the_circuit_never_a_lost_response(monkeypatch):
     """HIGH-1. The FIRST of a BUY's two requests raises the SDK's
     RateLimitError (submit_fok wraps only the create). On v4 it crossed
@@ -10043,6 +10078,7 @@ def test_r4_a_429_on_the_preview_is_a_refusal_named_and_tripping_the_circuit_nev
     assert b["state"] == "live" and b.get("open_order_id") is not None
 
 
+@pytest.mark.usefixtures("_satisfied_gate")
 def test_r4_a_429_on_an_ioc_takes_create_is_a_refusal_not_a_lost_response(monkeypatch):
     """HIGH-1. A take was sent with post_only False, so submit_fok's create
     ran OUTSIDE the 4xx refusal wrapper: the SDK's RateLimitError raised
@@ -10125,6 +10161,7 @@ def test_r4_any_placement_raise_the_rate_limit_match_names_is_the_refusal_and_an
     assert "is_rate_limit" not in inspect.getsource(ml._lost_response)
 
 
+@pytest.mark.usefixtures("_satisfied_gate")
 def test_r4_the_placement_sites_read_the_refusal_raw_by_its_named_fields_never_a_substring(monkeypatch):
     """MEDIUM-2. v4 read `"429" in raw.error` on a post_only_rejected and
     `"429" in json.dumps(raw)` on any refusal without an id. A
@@ -10425,6 +10462,7 @@ def _sole_close_world():
     return p, b, v
 
 
+@pytest.mark.usefixtures("_satisfied_gate")
 def test_c2_FINDING_a_429_on_the_sole_holders_flatten_rest_is_named_trips_the_circuit_and_freezes_nothing(monkeypatch):
     """Attack (2b), RE-PINNED AT E31 (FILL lane 31, 2026-09-10) AT THE SITE
     THAT REPLACED IT. The finding was about the slippage leg:
@@ -10453,6 +10491,7 @@ def test_c2_FINDING_a_429_on_the_sole_holders_flatten_rest_is_named_trips_the_ci
     assert b["state"] != "frozen", (b["state"], b.get("frozen_reason"))
 
 
+@pytest.mark.usefixtures("_satisfied_gate")
 def test_r5_the_sole_flatten_rests_429_row_is_refused_by_name_and_the_next_tick_rests_the_flatten_again(monkeypatch):
     """The whole of the c2 road, RE-PINNED AT E31 at the rest's create.
 
@@ -10542,6 +10581,7 @@ def _coheld_ioc_world(monkeypatch):
     return p, b, v
 
 
+@pytest.mark.usefixtures("_satisfied_gate")
 def test_c3_FINDING_a_429_on_the_coheld_flatten_rest_is_named_trips_the_circuit_and_freezes_nothing(monkeypatch):
     """Attack (2c), RE-PINNED AT E31 AT THE SITE THAT REPLACED IT. The
     finding was that the flatten's co-held IOC went out through
@@ -10567,6 +10607,7 @@ def test_c3_FINDING_a_429_on_the_coheld_flatten_rest_is_named_trips_the_circuit_
     assert b["state"] != "frozen", (b["state"], b.get("frozen_reason"))
 
 
+@pytest.mark.usefixtures("_satisfied_gate")
 def test_r5_the_coheld_flatten_rests_429_row_is_refused_by_name_with_no_search_and_a_socket_reset_is_still_lost(monkeypatch):
     """The c3 road in full, and its boundary, RE-PINNED AT E31 at the
     rest's create: the row `rejected` with the raise's words, no

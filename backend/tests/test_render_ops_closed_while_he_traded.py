@@ -31,6 +31,12 @@ from tests.workflow_source import render_ops_file as _render_ops_file
 
 YML = _render_ops_file()
 
+# R30A ci (2026-10-04): the tests marked below slice the preset by the comment
+# headers that 4c20f8c (2026-09-21) moved verbatim into RENDER_OPS_NOTES.md,
+# leaving an anchor line; they read the workflow with those notes put back
+# (tests/workflow_source.render_ops_documented_text). The SQL is unchanged.
+from tests.workflow_source import render_ops_documented_text as _ro_documented
+
 
 def _preset(text: str, name: str) -> tuple[str, int]:
     m = re.search(r'^ {16}' + re.escape(name) + r'\) SQL="(.*?)"; TO=(\d+)', text, re.M | re.S)
@@ -45,7 +51,7 @@ def _statements(sql: str) -> list[str]:
 
 
 def test_closed_while_he_traded_is_three_read_only_statements_on_one_chain_limited():
-    text = YML.read_text()
+    text = _ro_documented()  # the notes put back (R30A ci)
     # FILL lane 4 placed fill-answers (its own comment block) between this preset and the hourly
     block = text[text.index("closed-while-he-traded) SQL="):text.index("# THE PER-FILL RECORD'S HEALTH LINE")]
     assert "need_confirm" not in block and "$ARG" not in block and "HEAD=" not in block
@@ -113,7 +119,7 @@ def test_closed_while_he_traded_collapses_his_rows_chain_first_and_measures_the_
 
 
 def test_closed_while_he_traded_sits_after_exits_band_before_hourly_and_stays_out_of_it():
-    text = YML.read_text()
+    text = _ro_documented()  # the notes put back (R30A ci)
     line = next(ln for ln in text.splitlines() if ln.lstrip().startswith('*) echo "sql: arg must be one of'))
     names = line.split("one of ", 1)[1].split(" (got", 1)[0].split("|")
     labels = re.findall(r"^ {16}([a-z0-9-]+)\) ", text[text.index('case "$ARG" in'):text.index(line)], re.M)

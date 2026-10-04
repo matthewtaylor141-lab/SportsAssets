@@ -94,7 +94,10 @@ def test_c9_061_exists_sorts_last_after_060_and_is_four_nullable_add_column_if_n
     files = [x.name for x in sorted(MIG_DIR.glob("*.sql"))]
     i = files.index("060_mirror_fill_answers.sql")
     assert files[i + 1] == "061_fill_answers_cause_orders_fast.sql"
-    assert files[-1] == "064_run833_stream_channels.sql"  # re-pinned 2026-09-12 (run 83.3): run 83.3's 064 is the newest; this lane still adds none
+    # R30A ci (2026-10-04): this was `files[-1] == 064`, the GLOBALLY newest file -- red since
+    # 065 landed. The lane's property, re-expressed in tests/migration_epochs.py:
+    from tests import migration_epochs as MIG
+    MIG.assert_later_lanes_append_after("061_fill_answers_cause_orders_fast.sql", files)
     assert sum(f.startswith("061_") for f in files) == 1
     sql = SQL_061.read_text()
     assert sql.splitlines()[0].startswith("-- 061: THE RECORD'S COLUMNS (2026-09-09; FILL program lane 9")
@@ -624,7 +627,10 @@ def test_c9_the_presets_read_the_columns_guarded_and_the_hourly_is_still_nine():
     # the case labels: nothing added, hourly last, the fill-answers label still before it
     line = next(ln for ln in text.splitlines() if ln.lstrip().startswith('*) echo "sql: arg must be one of'))
     names = line.split("one of ", 1)[1].split(" (got", 1)[0].split("|")
-    assert names[-1] == "hourly" and names[-2] == "fill-answers" and "latency-census" in names
+    # R30A ci (2026-10-04): `names[-2] == "fill-answers"` held until E38's measurement presets (sleeve-48h,
+    # sleeve-vs-him-48h, rests-and-fees, round-trips) and data-audit landed between them (the E38 note in
+    # test_render_ops_exits_band.py); fill-answers still sits before hourly, which is the order pinned
+    assert names[-1] == "hourly" and names.index("fill-answers") < names.index("hourly") and "latency-census" in names
 
 
 # ------------------------------------------------ (9) the scratch database

@@ -311,14 +311,22 @@ def test_the_history_is_bounded_by_time_not_by_a_message_count():
     (see test_run834_retention_and_races.py).
     """
     base = clock.now()
+    # THE HORIZON SITS BETWEEN TWO STATES, NOT ON ONE (R30A ci, 2026-10-04).
+    # It was 0.05 s, exactly on the state at +40 ms: the cutoff is
+    # (base + 0.09) - 0.05 and the key is base + 0.04, which are equal in
+    # decimal and differ by one ulp in binary depending on the value of
+    # time.monotonic() at `base`. bisect_left kept or dropped that state
+    # accordingly -- CI run 37223385978 kept five (keys 764.040783148 vs
+    # 764.0507831479999) where this host keeps six. 55 ms keeps the same six
+    # states with a 5 ms margin either side, whatever the clock reads.
     hist = streamstate.TokenStateHistory(
         channel=StreamChannel.PMUS_FAST_STREAM_PATH, token_id="m",
-        retain_horizon_s=0.05)
+        retain_horizon_s=0.055)
     for i in range(10):
         hist.append(streamstate.StreamState(
             channel=hist.channel, token_id="m", receive=_at(base, i * 0.01),
             feed_session_id="s", best_bid=float(i)))
-    # 10 states 10 ms apart under a 50 ms horizon: the oldest are gone by AGE.
+    # 10 states 10 ms apart under a 55 ms horizon: the oldest are gone by AGE.
     assert len(hist) == 6, len(hist)
     assert hist.latest.best_bid == 9.0
     assert hist.pruned == 4

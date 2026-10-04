@@ -620,14 +620,20 @@ def test_e29_the_release_preset_one_statement_beside_mirror_register_and_the_rea
     assert names == labels and names[-1] == "hourly" and len(names) == len(set(names))
     assert names.index("mirror-hand-release") == names.index("mirror-register") - 1, "beside mirror-register (before it)"
     # every other preset byte for byte: the file with this lane's case block and its help token removed is the landing tip's (cdf0742)
-    blk_lo = text.index("                # THE HAND'S RELEASE (E29")
-    blk_hi = text.index('"; TO=30000 ;;\n', text.index("mirror-hand-release) need_confirm")) + len('"; TO=30000 ;;\n')
-    assert case in text[blk_lo:blk_hi]
-    tip = (text[:blk_lo] + text[blk_hi:]).replace("|mirror-hand-release|", "|")
-    assert _sha_text(tip) == RENDER_OPS_ON_TIP, "a read-only preset moved"
+    # R30A ci (2026-10-04). The lane's block opens with its comment, which 4c20f8c (2026-09-21) moved
+    # verbatim into RENDER_OPS_NOTES.md behind an anchor: the block is read from the documented text.
+    # The two whole-file hashes (RENDER_OPS_ON_TIP over "the file minus this block", e27.RENDER_OPS_SHA over
+    # the file) moved with every later lane's preset, action and flag and have been red since 2026-09-19;
+    # "every other read-only preset byte for byte" is now the hash of exactly the E-series presets.
+    from tests import workflow_source as _ws
+    doc = _ws.render_ops_documented_text()
+    blk_lo = doc.index("                # THE HAND'S RELEASE (E29")
+    blk_hi = doc.index('"; TO=30000 ;;\n', doc.index("mirror-hand-release) need_confirm")) + len('"; TO=30000 ;;\n')
+    assert case in doc[blk_lo:blk_hi]
     from tests import test_e27_take_tolerance as e27
-    assert hashlib.sha256(YML.read_bytes()).hexdigest()[:16] == e27.RENDER_OPS_SHA
-    assert text.count("last_plan->'hand'") == 3, "E24's presets untouched"
+    assert _ws.e_series_presets_sha() == e27.E_SERIES_PRESETS_SHA, "a read-only preset moved"
+    # the third occurrence is in E24's preset comment, which now lives in RENDER_OPS_NOTES.md (4c20f8c)
+    assert doc.count("last_plan->'hand'") == 3 and text.count("last_plan->'hand'") == 2, "E24's presets untouched"
 
 
 def test_e29_the_release_statement_runs_on_a_real_postgres_and_removes_both_records():
@@ -724,7 +730,10 @@ def test_e29_the_census_place_the_emit_sites_the_rails_and_no_migration():
     rsrc = inspect.getsource(rules)
     assert rsrc.count("capped_env(") == 26 and rsrc.count("min_wait_env(") == 8 and rsrc.count("env_switch(") == 8
     assert "HAND_EXIT_MEMO_MAX" not in rsrc and ml.HAND_EXIT_MEMO_MAX == 500
-    assert sorted(x.name for x in (ROOT / "backend" / "migrations").glob("*.sql"))[-1].startswith("064_")  # re-pinned 2026-09-12 (run 83.3): run 83.3's 064 is the newest; this lane still adds none
+    # R30A ci (2026-10-04): this was `files[-1] == 064`, the GLOBALLY newest file -- red since
+    # 065 landed. The lane's property, re-expressed in tests/migration_epochs.py:
+    from tests import migration_epochs as MIG
+    MIG.assert_lane_added_no_migration(*NEW_NAMES)
     assert "hand" not in (ROOT / "backend" / "migrations" / "059_mirror_orders_send_record.sql").read_text()
     assert "hand_held" not in inspect.getsource(rules.order_decision)
 

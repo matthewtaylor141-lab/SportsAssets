@@ -42,6 +42,12 @@ from tests.test_render_ops_fills_missed import World, _f
 from tests.workflow_source import render_ops_file as _render_ops_file
 
 YML = _render_ops_file()
+
+# R30A ci (2026-10-04): the tests marked below slice the preset by the comment
+# headers that 4c20f8c (2026-09-21) moved verbatim into RENDER_OPS_NOTES.md,
+# leaving an anchor line; they read the workflow with those notes put back
+# (tests/workflow_source.render_ops_documented_text). The SQL is unchanged.
+from tests.workflow_source import render_ops_documented_text as _ro_documented
 FA = ("WITH fa AS (SELECT x.fill_id, x.name, x.order_id, x.book_id FROM xmltable('/table/row' PASSING (CASE WHEN"
       " to_regclass('mirror_fill_answers') IS NULL THEN '<table/>'::xml ELSE query_to_xml('SELECT fill_id, name,"
       " order_id, book_id FROM mirror_fill_answers WHERE whale = ''rn1'' AND fill_ts >= extract(epoch FROM now() -"
@@ -70,7 +76,7 @@ def _stmts(sql: str) -> list[str]:
 # ------------------------------------------------------------------ the text
 
 def test_fill_answers_is_two_read_only_statements_on_its_own_timeout_named_for_the_db_service():
-    text = YML.read_text()
+    text = _ro_documented()  # the notes put back (R30A ci)
     block = text[text.index("# THE PER-FILL RECORD'S HEALTH LINE"):text.index("# THE HOURLY, IN ONE RUN")]
     assert "need_confirm" not in block and "$ARG" not in block and "HEAD=" not in block
     for bad in ("INSERT", "UPDATE", "DELETE", "DROP", "TRUNCATE", "ALTER"):
@@ -146,7 +152,7 @@ def test_fill_answers_sits_after_closed_while_he_traded_before_hourly_and_stays_
 
 
 def test_fills_missed_reads_the_record_first_through_a_guarded_cte_on_every_chain_statement():
-    text = YML.read_text()
+    text = _ro_documented()  # the notes put back (R30A ci)
     sql, to = _preset(text, "fills-missed")
     assert to == 120000
     st = _stmts(sql)
