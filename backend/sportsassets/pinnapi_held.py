@@ -111,17 +111,21 @@ class HeldWatch:
         from . import pinnapi_feed as F
         if quote.key != F.FULL_GAME_MONEYLINE_KEY:
             return
-        slugs = self.targets.get(quote.event_id)
-        if not slugs or quote.source_change_ms is None:
+        # a live-phase child's change is its FIXTURE's change (R30A RC3):
+        # the targets are fixture ids (held_event_id, census identity)
+        fid = getattr(quote, "fixture_id", None) or quote.event_id
+        slugs = self.targets.get(fid)
+        change = getattr(quote, "change_ms", quote.source_change_ms)
+        if not slugs or change is None:
             return
-        at = float(quote.source_change_ms) / 1000.0
+        at = float(change) / 1000.0
         for s in slugs:
             if at > self.changes.get(s, 0.0):
                 self.changes[s] = at
         self.counts["HELD_CHANGES"] += 1
         for fn in list(self.listeners):
             try:
-                fn(quote.event_id, sorted(slugs))
+                fn(fid, sorted(slugs))
             except Exception:                                   # noqa: BLE001
                 self.counts["HELD_LISTENER_ERRORS"] += 1
 

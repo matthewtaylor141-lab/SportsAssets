@@ -12,54 +12,62 @@ subscribed (stream, sport) has arrived on that epoch). Quotes from an older
 epoch are never served again.
 
 TIME. The clocks are kept apart and never substituted for one another:
-  source_change_ms  the provider frame stamp (`ts`) of the frame in which THIS
-                    market's price last CHANGED. A snapshot, a re-sent
-                    unchanged price, a heartbeat or a reconnect never sets it.
-                    A market first seen in a snapshot has NO change time
-                    (None) until a delta changes it.
-  first_observed_ms OUR wall clock when this exact price was first observed on
-                    this epoch (the frame that changed it, or first sight) --
-                    the local observation time the owner asked for where the
-                    provider gives no change stamp ("construct a defensible
-                    local observation timestamp when the value changes and
-                    clearly distinguish source-time from observation-time").
-  confirmed_ms      the provider stamp of the LATEST frame that asserted this
-                    same price is current: a live record carrying it, an
-                    authoritative prematch_markets list carrying it, a
-                    prematch_matchups frame whose matchup version equals the
-                    version the held markets were delivered at, or a snapshot
-                    RE-confirming a price this epoch already held (our receipt
-                    time when the frame has no stamp, named as such). The
-                    subscribe snapshot alone is NOT a confirmation: it is the
-                    provider's stored mirror, not a fresh Pinnacle statement.
+  source_change_ms  SOURCE TIME. The provider frame stamp (`ts`) of the frame
+                    in which THIS market's price (or line) last CHANGED. A
+                    snapshot, a re-sent unchanged price, a heartbeat or a
+                    reconnect never sets it. A market first seen in a
+                    snapshot has NO change time (None) until a frame changes
+                    it.
+  observed_change_ms  OBSERVATION TIME. OUR wall clock when we received the
+                    frame in which we OBSERVED that change -- set on every
+                    observed change, beside the source time, never instead of
+                    it. It is the owner's "defensible local observation
+                    timestamp when the value changes" (P0 incident,
+                    2026-10-04), and it is the change instant ONLY when the
+                    changing frame carried no provider stamp: then
+                    `change_clock` says LOCAL_OBSERVATION_OF_THE_CHANGE and
+                    the age is measured from our receipt of that frame (the
+                    change happened at or before it, so nothing earlier is
+                    assumed and nothing is guessed). With a provider stamp
+                    the change instant is the stamp (PROVIDER_FRAME_TS).
+  first_observed_ms OUR wall clock when this exact price was first held on
+                    this epoch (the frame that changed it, or first sight).
+                    Provenance only.
+  confirmed_ms      MEASURED, NEVER A DECISION INPUT. The provider stamp of
+                    the latest frame that asserted this same price is still
+                    current: a live record carrying it, an authoritative
+                    prematch_markets list carrying it, a prematch_matchups
+                    frame whose matchup version equals the version the
+                    markets were delivered at, or a snapshot RE-confirming a
+                    price this epoch already held (our receipt time when the
+                    frame has no stamp, named as such). The subscribe snapshot
+                    alone is not a confirmation.
   confirmed_received_ms  our wall clock when that confirming frame arrived.
   frame_ts_ms       the provider stamp of the latest frame that carried the
                     market (snapshot or delta) -- provenance only.
   received_ms       our wall clock when that frame arrived -- provenance only.
   evaluated_ms      supplied by the consumer at read time.
 
-WHICH CLOCK THE 30 s RULE MEASURES (R30A incident RC4). The threshold is
-the caller's (30 s) and never changes here. What it is measured FROM is the
-cache's `freshness_basis`:
-  LAST_PRICE_CHANGE      (the default, unchanged since C1) age =
-                         evaluated_ms - source_change_ms; no observed change
-                         => FEED_QUOTE_AGE_UNKNOWN_NO_OBSERVED_CHANGE.
-  CONFIRMED_OBSERVATION  age = evaluated_ms - confirmed_ms: how long ago the
-                         provider last asserted that THIS price is current. A
-                         market never confirmed on this epoch (seen only in the
-                         subscribe snapshot) still has an unknown age and is
-                         still refused FEED_QUOTE_AGE_UNKNOWN_NO_OBSERVED_CHANGE.
-                         Measured 2026-10-04 20:31Z: 30,768 of 31,849 cached
-                         markets (96.6%) were age-unknown under the change
-                         basis, although prematch_markets re-delivers every
-                         market of a matchup each time its version moves.
-The incident diagnosis named the choice an owner decision ("the threshold
-stays 30 s; only the input changes, so it needs explicit approval and must
-not ship silently"), so it is NOT a code default: it is the control row
-'pinnapi_feed_freshness_basis' (migration 260), re-read by the runtime on
-a bounded interval, named on every read's provenance and in the census
-(markets fresh now under EACH basis), and reverted by writing
-"LAST_PRICE_CHANGE" -- no deploy.
+THE 30 s RULE IS UNCHANGED (owner decision 2026-10-04: "Do NOT change ...
+freshness requirements"). The caller's limit (30 s) is measured from the
+last observed CHANGE, exactly as since C1: age = evaluated_ms - change
+instant; no observed change => FEED_QUOTE_AGE_UNKNOWN_NO_OBSERVED_CHANGE,
+never a guessed age. What the incident repair adds is only (a) the change
+instant for a changing frame that carried no provider stamp (our observation
+of the change, labelled), (b) a key that OPENS between two authoritative
+prematch lists on one epoch is an observed change at the second list's stamp
+(it was not in the first), and (c) every clock on every read's provenance,
+so source time and observation time are never confused downstream.
+
+The confirmation clock is CARRIED AND COUNTED ONLY. Measured 2026-10-04
+20:31Z: 30,768 of 31,849 cached markets (96.6%) were age-unknown under the
+change basis, though prematch_markets re-delivers every market of a matchup
+each time its version moves. Measuring the 30 s rule from the confirmation
+instead would change WHAT the freshness requirement measures -- an owner
+decision the incident diagnosis said "must not ship silently" -- so it is
+not a switch here: the census reports how many markets WOULD read fresh if
+it were (`fresh_now_if_measured_from_confirmation`, labelled a
+counterfactual), for the owner to decide on.
 
 BOUNDS. The cache holds at most MAX_EVENTS events and MAX_MARKETS markets;
 events the provider deletes or closes are dropped at once; the oldest-touched
@@ -114,12 +122,14 @@ R_FUTURE = "FEED_QUOTE_CHANGE_TIME_IN_THE_FUTURE"
 R_STALE = "FEED_QUOTE_OLDER_THAN_LIMIT"
 R_CLOSED = "FEED_MARKET_CLOSED"
 
-# ── WHICH CLOCK THE 30 s RULE MEASURES (see TIME above) ──────────────
-BASIS_LAST_CHANGE = "LAST_PRICE_CHANGE"
-BASIS_CONFIRMED = "CONFIRMED_OBSERVATION"
-FRESHNESS_BASES = (BASIS_LAST_CHANGE, BASIS_CONFIRMED)
-#: the strict, pre-R30A input; CONFIRMED_OBSERVATION only by control row
-DEFAULT_FRESHNESS_BASIS = BASIS_LAST_CHANGE
+# ── WHICH INSTANT A CHANGE IS DATED BY (see TIME above) ──────────────
+#: the changing frame's own provider stamp (the rule since C1)
+CHANGE_CLOCK_PROVIDER = "PROVIDER_FRAME_TS"
+#: the changing frame carried no provider stamp: OUR receipt of the frame in
+#: which the change was observed (observation time, never source time)
+CHANGE_CLOCK_LOCAL = "LOCAL_OBSERVATION_OF_THE_CHANGE"
+#: the only basis the 30 s rule is measured on (named on every provenance)
+FRESHNESS_BASIS = "LAST_OBSERVED_PRICE_CHANGE"
 #: the limit the census counts "fresh now" against (the collector's own
 #: PINNACLE_MAX_AGE_S; a census figure only, never a decision input)
 CENSUS_FRESH_S = 30.0
@@ -145,6 +155,17 @@ R_CHILD_UNITS = "CHILD_UNITS_NOT_REGULAR"
 R_CHILD_PARTICIPANTS = "CHILD_PARTICIPANTS_DIFFER_FROM_PARENT"
 R_CHILD_DERIVED_SUFFIX = "CHILD_PARTICIPANT_HAS_A_DERIVED_UNITS_SUFFIX"
 R_LIVE_PHASE_AMBIGUOUS = "MORE_THAN_ONE_LIVE_PHASE_CHILD"
+#: a live child whose prematch parent is not (or no longer) held: PinnAPI's
+#: documentation says a live "del" is "event removed by Pinnacle (kicked off,
+#: settled, voided)", so the prematch parent can leave the cache at kick-off
+#: while its live child stays. Such a record is its OWN fixture when it is
+#: the game itself by every test that does not need the parent.
+LIVE_GAME_PARENT_NOT_HELD = "LIVE_GAME_WHOSE_PARENT_IS_NOT_HELD"
+R_NO_TWO_PARTICIPANTS = "RECORD_DOES_NOT_NAME_TWO_PARTICIPANTS"
+#: how a fixture record of `fixture_view` came to price its fixture
+B_PREMATCH = "PREMATCH_MATCHUP"
+B_LIVE_CHILD = "PARENT_WITH_ITS_LIVE_PHASE_CHILD"
+B_ORPHAN_LIVE = "LIVE_CHILD_PARENT_NOT_HELD"
 #: '(Games)' is a real tennis child (REST probe run 37232918224: "Holger Rune
 #: (Games) v Kyrian Jacquet (Games)", parent 1637453397); '(Corners)' the
 #: soccer one. A trailing parenthetical of a derived count is never the game.
@@ -175,6 +196,8 @@ class Quote:
     alternate: Optional[bool] = None
     market_version: Optional[float] = None
     # R30A RC4: the observation clocks (see TIME in the module docstring)
+    observed_change_ms: Optional[float] = None
+    change_clock: Optional[str] = None
     first_observed_ms: Optional[float] = None
     confirmed_ms: Optional[float] = None
     confirmed_received_ms: Optional[float] = None
@@ -188,9 +211,25 @@ class Quote:
     #: line is kept per designation ({'home': -3.5, 'away': 3.5},
     #: {'over': 47.5, 'under': 47.5}); empty on a moneyline.
     points: dict = field(default_factory=dict)
+    #: THE FIXTURE this record prices (R30A RC3): the prematch parent's id
+    #: when this record is the parent's live-phase child, else its own id.
+    #: Set at change notification so held watches and the reactive
+    #: scheduler, keyed on fixtures, see a live child's changes.
+    fixture_id: Any = None
 
     def decimal_prices(self) -> dict:
         return {d: american_to_decimal(p) for d, p in self.prices.items()}
+
+    @property
+    def change_ms(self) -> Optional[float]:
+        """The instant of the last observed change the 30 s rule is
+        measured from: the provider stamp; else, only when the changing
+        frame had no stamp, our observation of it; else None (unknown)."""
+        if self.source_change_ms is not None:
+            return self.source_change_ms
+        if self.change_clock == CHANGE_CLOCK_LOCAL:
+            return self.observed_change_ms
+        return None
 
     def confirm(self, *, frame_ts, rx, kind) -> None:
         """A frame asserted THIS price is current. Monotone: an older frame
@@ -355,6 +394,23 @@ def _moved(prev: "Quote", f: dict) -> bool:
             or dict(prev.points or {}) != dict(f.get("points") or {}))
 
 
+def _observed_change(frame_ts, rx) -> tuple:
+    """(source_change_ms, observed_change_ms, change_clock) for a change
+    observed in a frame stamped `frame_ts` (None when the provider sent no
+    stamp) and received by us at `rx`. The source time is NEVER filled from
+    our clock: without a stamp it stays None and the change is dated by our
+    observation of it, labelled as such."""
+    if frame_ts is not None:
+        return frame_ts, rx, CHANGE_CLOCK_PROVIDER
+    return None, rx, CHANGE_CLOCK_LOCAL
+
+
+def _carried_change(prev) -> tuple:
+    """An unchanged price keeps the clocks of the change that set it."""
+    return (prev.source_change_ms, prev.observed_change_ms,
+            prev.change_clock)
+
+
 def closed_periods(rec: dict) -> set:
     """Periods the record marks anything but open (closed / settled): every
     market of such a period is closed, listed or not."""
@@ -438,6 +494,83 @@ def live_phase_of(events, parent_id, children=None) -> tuple:
     return (live[0], None) if live else (None, None)
 
 
+def classify_orphan(child: dict) -> str:
+    """LIVE_GAME_PARENT_NOT_HELD when a child record whose parent is not
+    held is the live game itself by every test `classify_child` makes that
+    does not need the parent (live, no special market, units 'Regular', two
+    participants without a derived-units suffix); else the named reason."""
+    if child.get("isLive") is not True:
+        return R_CHILD_NOT_LIVE
+    if child.get("special") not in (None, ""):
+        return R_CHILD_SPECIAL
+    if child.get("units") != "Regular":
+        return R_CHILD_UNITS
+    cp = participants(child)
+    if any(_derived_suffix(n) for n in cp.values()):
+        return R_CHILD_DERIVED_SUFFIX
+    if len(cp) != 2 or cp.get("home") == cp.get("away"):
+        return R_CHILD_PARTICIPANTS
+    return LIVE_GAME_PARENT_NOT_HELD
+
+
+def fixture_view(events) -> tuple:
+    """([fixture record], Counter of records that price no fixture, by
+    named reason) -- THE one reading of which cached record prices which
+    fixture, shared by the census, the primary h2h selector and the
+    PinnAPI-native discovery (R30A RC3).
+
+    A fixture record is {"id": the fixture's identity (the prematch
+    parent's id, or a parentless live child's own), "quote_id": the record
+    whose markets price it NOW (its one live-phase child while in play, else
+    itself), "sport_id", "home", "away", "startTime", "live", "basis",
+    "parent_id", "league"}. Before this, every record with a parentId was
+    skipped, so no in-play price was ever matched (2026-10-01 ws_sample:
+    live 1637543257 -> parent 1637360364)."""
+    kids = children_by_parent(events)
+    out, skipped = [], collections.Counter()
+    for eid, ev in events.items():
+        if not isinstance(ev, dict):
+            continue
+        pid = ev.get("parentId")
+        if pid:
+            parent = events.get(pid)
+            if parent is not None:
+                # priced (or not) through its parent below; counted here
+                why = classify_child(ev, parent)
+                if why != CHILD_LIVE_PHASE:
+                    skipped[why] += 1
+                continue
+            why = classify_orphan(ev)
+            if why != LIVE_GAME_PARENT_NOT_HELD:
+                skipped["%s|PARENT_NOT_HELD" % why] += 1
+                continue
+            p = participants(ev)
+            out.append({"id": eid, "quote_id": eid,
+                        "sport_id": ev.get("sport_id"),
+                        "home": p["home"], "away": p["away"],
+                        "startTime": ev.get("startTime"), "live": True,
+                        "basis": B_ORPHAN_LIVE, "parent_id": pid,
+                        "league": ev.get("league")})
+            continue
+        p = participants(ev)
+        if not p.get("home") or not p.get("away"):
+            skipped[R_NO_TWO_PARTICIPANTS] += 1
+            continue
+        child, why = live_phase_of(events, eid, kids)
+        if why:
+            skipped[why] += 1
+            continue
+        out.append({"id": eid, "quote_id": child if child is not None
+                    else eid, "sport_id": ev.get("sport_id"),
+                    "home": p["home"], "away": p["away"],
+                    "startTime": ev.get("startTime"),
+                    "live": child is not None or ev.get("isLive") is True,
+                    "basis": B_LIVE_CHILD if child is not None
+                    else B_PREMATCH, "parent_id": None,
+                    "league": ev.get("league")})
+    return out, skipped
+
+
 def canonical_id(events, event_id):
     """The FIXTURE identity of a record: its parent's id when it is the
     live phase of a held parent (prematch -> live continuity), else its
@@ -453,13 +586,10 @@ class FeedCache:
     def __init__(self, *, authority: Optional[FeedAuthority] = None,
                  extract: Callable = extract_markets,
                  max_events: int = MAX_EVENTS,
-                 max_markets: int = MAX_MARKETS,
-                 freshness_basis: str = DEFAULT_FRESHNESS_BASIS):
+                 max_markets: int = MAX_MARKETS):
         self.authority = authority or FeedAuthority()
         self.extract = extract
         self.max_events, self.max_markets = max_events, max_markets
-        self.freshness_basis = DEFAULT_FRESHNESS_BASIS
-        self.set_freshness_basis(freshness_basis)
         # frames received per (PinnAPI sport id, frame type): the measured
         # per-sport rate the R30A scope widening is judged on (bounded:
         # at most 12 sports x the handful of frame types)
@@ -488,13 +618,6 @@ class FeedCache:
     def lost(self, reason: str) -> None:
         self.authority.revoke(reason)
 
-    def set_freshness_basis(self, basis) -> bool:
-        """Only the two named bases; anything else leaves it unchanged."""
-        if basis in FRESHNESS_BASES:
-            self.freshness_basis = basis
-            return True
-        return False
-
     # ── in-play identity (pure reads of the event metadata) ─────────
     def live_phase(self, fixture_id) -> tuple:
         """(live child id | None, reason | None) for a parent fixture."""
@@ -522,8 +645,9 @@ class FeedCache:
         if self.on_change is not None:
             for key in self._touched:
                 quote = self.quotes.get(key)
-                if quote is not None and quote.source_change_ms is not None:
+                if quote is not None and quote.change_ms is not None:
                     try:
+                        quote.fixture_id = self.canonical_id(quote.event_id)
                         self.on_change(quote)
                     except Exception:
                         self.counts["change_notification_errors"] += 1
@@ -696,19 +820,22 @@ class FeedCache:
                 continue
             prev = old.get((eid, key))
             changed = prev is None or _moved(prev, f)
-            if as_change and changed and prev is not None:
-                change = frame_ts
-            elif as_change and prev is None:
-                # first sight: age unknown -- unless this event's previous
-                # authoritative list on this epoch did not carry the key
-                change = frame_ts if new_key_is_change else None
-                if new_key_is_change:
-                    self.counts["new_key_observed_as_change"] += 1
-            else:
-                change = prev.source_change_ms if (
-                    prev and not changed) else None
             same = prev is not None and not changed
-            q = self._put(eid, key, f, stream, sport, epoch, change,
+            if as_change and changed and prev is not None:
+                clocks = _observed_change(frame_ts, rx)
+            elif as_change and prev is None and new_key_is_change:
+                # this event's previous authoritative list on this epoch did
+                # not carry the key: it opened between the two lists
+                clocks = _observed_change(frame_ts, rx)
+                self.counts["new_key_observed_as_change"] += 1
+            elif same:
+                clocks = _carried_change(prev)
+            else:
+                # first sight (a snapshot, or the first authoritative list
+                # after a reconnect), or a snapshot that differs from what
+                # we held: no change was observed, so the age is unknown
+                clocks = (None, None, None)
+            q = self._put(eid, key, f, stream, sport, epoch, clocks,
                           frame_ts, rx,
                           first_observed=(prev.first_observed_ms if same
                                           else rx))
@@ -741,11 +868,12 @@ class FeedCache:
                 continue
             prev = self.quotes.get(k)
             changed = prev is None or _moved(prev, f)
-            change = frame_ts if changed else prev.source_change_ms
+            clocks = (_observed_change(frame_ts, rx) if changed
+                      else _carried_change(prev))
             if changed:
                 self.counts["price_changes"] += 1
                 self.last_change_received_ms = rx
-            q = self._put(eid, key, f, stream, sport, epoch, change, frame_ts,
+            q = self._put(eid, key, f, stream, sport, epoch, clocks, frame_ts,
                           rx, first_observed=(rx if changed
                                               else prev.first_observed_ms))
             if not changed:
@@ -764,13 +892,18 @@ class FeedCache:
         q.confirmed_by, q.confirmed_clock = (prev.confirmed_by,
                                              prev.confirmed_clock)
 
-    def _put(self, eid, key, f, stream, sport, epoch, change, frame_ts, rx,
+    def _put(self, eid, key, f, stream, sport, epoch, clocks, frame_ts, rx,
              first_observed=None):
+        """`clocks` = (source_change_ms, observed_change_ms, change_clock)."""
         self._touched.add((eid, key))
+        change, observed, clock = clocks
+        if change is None and clock == CHANGE_CLOCK_LOCAL:
+            self.counts["change_dated_by_local_observation"] += 1
         q = self.quotes[(eid, key)] = Quote(
             key=key, event_id=eid, sport_id=sport, stream=stream,
             period=f["period"], market_type=f["market_type"],
             side=f["side"], line=f["line"], prices=dict(f["prices"]),
+            observed_change_ms=observed, change_clock=clock,
             epoch=epoch, source_change_ms=change, frame_ts_ms=frame_ts,
             received_ms=rx, open=True, alternate=f["alternate"],
             market_version=f.get("market_version"),
@@ -809,41 +942,28 @@ class FeedCache:
             return {"ok": False, "reason": R_OLD_EPOCH}
         if not q.open:
             return {"ok": False, "reason": R_CLOSED}
-        basis = self.freshness_basis
-        at = (q.confirmed_ms if basis == BASIS_CONFIRMED
-              else q.source_change_ms)
-        # THE RECEIPT PAIRED WITH THE GOVERNING CLOCK: under the change
-        # basis it is the latest frame that carried the market (unchanged
-        # since C1); under the confirmation basis it is our receipt of the
-        # confirming frame, so provider lag = receipt - basis stays one
-        # frame's latency.
-        paired_rx = (q.confirmed_received_ms if basis == BASIS_CONFIRMED
-                     else q.received_ms)
+        at = q.change_ms
         prov = {"source_change_ms": q.source_change_ms,
                 "frame_ts_ms": q.frame_ts_ms, "received_ms": q.received_ms,
                 "evaluated_ms": ev_ms, "epoch": q.epoch,
                 "parser": PARSER_VERSION,
-                # R30A RC4: every clock, apart, and which one governed
+                # R30A RC4: every clock, apart, and which one dated the
+                # change the 30 s rule is measured from
+                "freshness_basis": FRESHNESS_BASIS,
+                "change_ms": at, "change_clock": q.change_clock,
+                "observed_change_ms": q.observed_change_ms,
                 "first_observed_ms": q.first_observed_ms,
-                "observed_change_ms": (q.first_observed_ms
-                                       if q.source_change_ms is not None
-                                       else None),
                 "confirmed_ms": q.confirmed_ms,
                 "confirmed_received_ms": q.confirmed_received_ms,
                 "confirmed_by": q.confirmed_by,
                 "confirmed_clock": q.confirmed_clock,
-                "freshness_basis": basis, "age_basis_ms": at,
-                "age_basis_received_ms": paired_rx,
-                "age_since_change_s": (
-                    None if q.source_change_ms is None
-                    else round((ev_ms - q.source_change_ms) / 1000.0, 3)),
                 "age_since_confirmation_s": (
                     None if q.confirmed_ms is None
-                    else round((ev_ms - q.confirmed_ms) / 1000.0, 3))}
+                    else round((ev_ms - q.confirmed_ms) / 1000.0, 3)),
+                "confirmation_is_a_decision_input": False}
         if at is None:
-            # LAST_PRICE_CHANGE: no observed change. CONFIRMED_OBSERVATION:
-            # no frame on this epoch has asserted this price is current
-            # (seen only in the subscribe snapshot) -- genuinely unknown.
+            # no change observed on this epoch (first seen in the subscribe
+            # snapshot, or after a reconnect): the age is genuinely unknown
             return {"ok": False, "reason": R_NO_CHANGE_TIME, "quote": q,
                     "provenance": prov}
         age = (ev_ms - at) / 1000.0
@@ -859,26 +979,29 @@ class FeedCache:
 
     # ── census / health (bounded, for the heartbeat) ────────────────
     def census(self, *, now_ms: Optional[float] = None) -> dict:
-        """Bounded heartbeat view. `fresh_now_by_basis` counts the markets
-        that would read fresh NOW (CENSUS_FRESH_S) under EACH basis, so the
-        effect of the freshness-basis control is measured, not asserted."""
+        """Bounded heartbeat view. `fresh_now` counts the markets that read
+        fresh NOW (CENSUS_FRESH_S) under the unchanged change rule;
+        `fresh_now_if_measured_from_confirmation` is the COUNTERFACTUAL
+        count under the confirmation clock -- measured for the owner's
+        decision, never a decision input."""
         now = _now_ms() if now_ms is None else now_ms
         by = collections.Counter()
         by_sport = collections.Counter()
-        unknown_age = unconfirmed = 0
+        unknown_age = unconfirmed = local_dated = 0
         fresh = collections.Counter()
         lim = CENSUS_FRESH_S * 1000.0
         for q in self.quotes.values():
             by["%s|%s|%s" % (q.sport_id, q.market_type, q.stream)] += 1
             by_sport[str(q.sport_id)] += 1
-            unknown_age += q.source_change_ms is None
+            cm = q.change_ms
+            unknown_age += cm is None
             unconfirmed += q.confirmed_ms is None
-            if q.source_change_ms is not None and \
-                    0 <= now - q.source_change_ms <= lim:
-                fresh[BASIS_LAST_CHANGE] += 1
+            local_dated += (q.source_change_ms is None and cm is not None)
+            if cm is not None and 0 <= now - cm <= lim:
+                fresh["change"] += 1
             if q.confirmed_ms is not None and \
                     0 <= now - q.confirmed_ms <= lim:
-                fresh[BASIS_CONFIRMED] += 1
+                fresh["confirmation"] += 1
         events_by_sport = collections.Counter(
             str(ev.get("sport_id")) for ev in self.events.values())
         kids = children_by_parent(self.events)
@@ -892,10 +1015,13 @@ class FeedCache:
                 "events": len(self.events), "markets": len(self.quotes),
                 "markets_age_unknown": unknown_age,
                 # R30A RC4: the three clocks, counted
-                "freshness_basis": self.freshness_basis,
+                "freshness_basis": FRESHNESS_BASIS,
+                "markets_change_dated_by_local_observation": local_dated,
                 "markets_unconfirmed": unconfirmed,
-                "fresh_now_by_basis": {b: fresh.get(b, 0)
-                                       for b in FRESHNESS_BASES},
+                "fresh_now": fresh.get("change", 0),
+                "fresh_now_if_measured_from_confirmation": {
+                    "markets": fresh.get("confirmation", 0),
+                    "status": "COUNTERFACTUAL_NOT_A_DECISION_INPUT"},
                 "fresh_now_limit_s": CENSUS_FRESH_S,
                 "confirmations": dict(self.confirmations),
                 # R30A RC1: per-sport receive counters and holdings

@@ -27,6 +27,33 @@ ACTIVE = None
 HELD_SEED_TTL_S = 6 * 3600
 
 
+def version_of(q) -> tuple:
+    """A quote's evaluation version: (epoch, change instant, prices). The
+    change instant is the one the 30 s rule measures from (the provider
+    stamp, or our labelled observation of an unstamped change -- R30A RC4),
+    so a change the cache dates either way is a new version."""
+    return (q.epoch, getattr(q, "change_ms", q.source_change_ms),
+            tuple(sorted(q.prices.items())))
+
+
+def fixture_of(cache, quote):
+    """The fixture a changed quote prices (R30A RC3): a live-phase child's
+    change is its prematch parent's, which is what seeds are keyed on."""
+    fid = getattr(quote, "fixture_id", None)
+    if fid is not None:
+        return fid
+    canon = getattr(cache, "canonical_id", None)
+    return canon(quote.event_id) if callable(canon) else quote.event_id
+
+
+def _quote_record(cache, eid):
+    """(the record that prices fixture `eid` now, None) or (None, reason)."""
+    fq = getattr(cache, "fixture_quote_id", None)
+    if not callable(fq):
+        return eid, None
+    return fq(eid)
+
+
 class Scheduler:
     """One worker, one deadline. HELD EVENTS FIRST: a held event's change is
     queued on `held_pending`, served before any discovery change, never
@@ -87,7 +114,7 @@ class Scheduler:
     def changed(self, quote):
         if self.closed or quote.key != F.FULL_GAME_MONEYLINE_KEY:
             return
-        eid = quote.event_id
+        eid = fixture_of(self.cache, quote)
         held = self._is_held(eid)
         seed = self.seeds.get(eid)
         if seed is None:
@@ -97,10 +124,14 @@ class Scheduler:
         if not self._seed_live(eid, seed):
             self.counts['DISCOVERY_EXPIRED'] += 1
             return
-        if not self.cache.read(eid, quote.key, evaluated_ms=self.clock()*1000).get('ok'):
+        got = self.cache.read(quote.event_id, quote.key,
+                              evaluated_ms=self.clock()*1000)
+        if not got.get('ok'):
             self.counts['UNUSABLE_CHANGE'] += 1
+            # WHICH refusal, not only that there was one (incident RC7)
+            self.counts['UNUSABLE_CHANGE:%s' % got.get('reason')] += 1
             return
-        version = (quote.epoch, quote.source_change_ms, tuple(sorted(quote.prices.items())))
+        version = version_of(quote)
         if self.seen.get(eid) == version:
             self.counts['UNCHANGED'] += 1
             return
@@ -147,13 +178,15 @@ class Scheduler:
             return 'DISCOVERY_EXPIRED'
         if eid in self.held_pending:
             return 'ALREADY_QUEUED'
-        got = self.cache.read(eid, F.FULL_GAME_MONEYLINE_KEY,
-                              evaluated_ms=self.clock()*1000)
+        qid, why = _quote_record(self.cache, eid)
+        got = (self.cache.read(qid, F.FULL_GAME_MONEYLINE_KEY,
+                               evaluated_ms=self.clock()*1000)
+               if why is None else {'ok': False, 'reason': why})
         q = got.get('quote')
         if not got.get('ok') or q is None:
             self.counts['HELD_REQUEST_UNUSABLE'] += 1
             return str(got.get('reason') or 'UNUSABLE_QUOTE')
-        version = (q.epoch, q.source_change_ms, tuple(sorted(q.prices.items())))
+        version = version_of(q)
         if self.seen.get(eid) == version:
             self.counts['HELD_REQUEST_ALREADY_EVALUATED'] += 1
             return 'ALREADY_EVALUATED_THIS_VERSION'
@@ -189,11 +222,12 @@ class Scheduler:
                            evaluation_started_at=self.clock(), state='STARTED',
                            counters=dict(self.counts))
             seed = self.seeds.get(eid)
-            got = self.cache.read(eid, F.FULL_GAME_MONEYLINE_KEY,
-                                  evaluated_ms=self.clock()*1000)
+            qid, why = _quote_record(self.cache, eid)
+            got = (self.cache.read(qid, F.FULL_GAME_MONEYLINE_KEY,
+                                   evaluated_ms=self.clock()*1000)
+                   if why is None else {'ok': False, 'reason': why})
             q = got.get('quote')
-            version = None if q is None else (q.epoch, q.source_change_ms,
-                                              tuple(sorted(q.prices.items())))
+            version = None if q is None else version_of(q)
             if (not got.get('ok') or version != tick['version'] or seed is None or
                     not self._seed_live(eid, seed)):
                 attempt.update(state='REFUSED', reason=got.get('reason') or 'SUPERSEDED_OR_EXPIRED')

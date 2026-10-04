@@ -8095,7 +8095,11 @@ async def cycle(conn, *, stream_seed=None) -> dict:
                 continue
             if stream_seed is not None:
                 source = quote["reference_input"]
-                version = (source["epoch"], source["source_change_ms"],
+                # the change instant the cache dated the quote by (R30A
+                # RC4: equal to source_change_ms unless the changing frame
+                # carried no provider stamp), as pinnapi_reactive.version_of
+                version = (source["epoch"],
+                           source.get("change_ms", source["source_change_ms"]),
                            tuple(sorted(source["raw_odds"].items())))
                 if version != stream_seed["trigger"]["version"]:
                     tally["WS_TRIGGER_SUPERSEDED"] = 1

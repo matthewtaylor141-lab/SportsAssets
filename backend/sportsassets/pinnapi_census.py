@@ -291,20 +291,22 @@ def _iso_epoch(v) -> Optional[float]:
 
 
 def feed_event_view(cache) -> dict:
-    """{sport_id: [{id, home, away, start, live}]} from the feed's events
-    (parent matchups only: child records carry periods/props)."""
+    """{sport_id: [{id, quote_id, home, away, start, live, basis}]} -- one
+    entry per FIXTURE, from `pinnapi_feed.fixture_view` (R30A RC3). `id` is
+    the fixture's identity (the prematch parent), `quote_id` the record whose
+    markets price it now (its live-phase child while in play). Before this,
+    every child record was skipped, so an in-play fixture matched only its
+    stale prematch parent; prop and derived-count children (specials,
+    '(Games)', '(Corners)') still price no fixture."""
     from . import pinnapi_feed as F
     out = collections.defaultdict(list)
-    for eid, ev in cache.events.items():
-        if ev.get("parentId"):
-            continue
-        p = F.participants(ev)
-        if not p.get("home") or not p.get("away"):
-            continue
-        out[ev.get("sport_id")].append({
-            "id": eid, "home": p["home"], "away": p["away"],
-            "start": _iso_epoch(ev.get("startTime")),
-            "live": bool(ev.get("isLive"))})
+    view, _skipped = F.fixture_view(cache.events)
+    for fx in view:
+        out[fx.get("sport_id")].append({
+            "id": fx["id"], "quote_id": fx["quote_id"],
+            "home": fx["home"], "away": fx["away"],
+            "start": _iso_epoch(fx.get("startTime")),
+            "live": bool(fx.get("live")), "basis": fx.get("basis")})
     return dict(out)
 
 
