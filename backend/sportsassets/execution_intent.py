@@ -501,6 +501,10 @@ def start(get_pool, mirror) -> "ActualLane":
     # the decision's one resident stream observation: the actual lane's
     # facts are priced from it when it is current (P5 C12)
     decision_hooks.LIVE_BOOK_STREAM = LBE.observe
+    # R30 LIVE PARITY: the canonical decision / management intents and the
+    # two execution adapters (SMALL LIVE is SHADOW) with their parity ledger
+    from . import live_parity
+    live_parity.install()
     return LANE
 
 
@@ -510,3 +514,5 @@ def stop() -> None:
     decision_hooks.DECISION_HOOK = None
     decision_hooks.LIVE_BOOK_EVIDENCE = None
     decision_hooks.LIVE_BOOK_STREAM = None
+    from . import live_parity
+    live_parity.uninstall()

@@ -308,6 +308,23 @@ def match_unknown(row: dict, open_orders: list) -> dict | None:
 
 # ─────────────────────────── venue adapter ───────────────────────────
 
+class LegacyOriginationRetired(RuntimeError):
+    """A new venue order was attempted outside the canonical SMALL LIVE
+    adapter (R30). Nothing was sent."""
+    status_code = 409
+
+
+def _canonical_live_authorized(token) -> bool:
+    """R30: True only for an authorization issued by the canonical SMALL LIVE
+    adapter in LIVE mode. This release has no LIVE mode (live_parity.
+    SMALL_LIVE_MODE is SHADOW and migration 225 CHECKs it), so nothing can
+    issue one: activation needs a new release, a new migration and the
+    owner's explicit approval."""
+    from . import live_parity as LPAR
+    return (token is not None and LPAR.SMALL_LIVE_MODE != LPAR.MODE_SHADOW
+            and getattr(token, "issued_by", None) == LPAR.LIVE_ADAPTER_VERSION)
+
+
 class Venue:
     """The mirror account's client. Built ONLY from the execution-mirror
     credential; paced; every call is synchronous (run in a thread)."""
@@ -329,7 +346,18 @@ class Venue:
             time.sleep(wait)
         self._last = time.monotonic()
 
-    def place(self, params: dict) -> dict:
+    def place(self, params: dict, *, canonical_live_authorization=None) -> dict:
+        """R30 LIVE PARITY: NEW REAL-MONEY EXPOSURE IS ORIGINATED ONLY BY THE
+        CANONICAL SMALL LIVE ADAPTER (live_parity), never by a lane that
+        re-decides or copies a paper order. That adapter is SHADOW in this
+        release (the database admits no other mode), so no caller can present
+        an authorization and every new order is refused here, at the last
+        line before the venue. Cancels and protective closes (risk-reducing)
+        are unaffected."""
+        if not _canonical_live_authorized(canonical_live_authorization):
+            raise LegacyOriginationRetired(
+                "LEGACY_LIVE_ORIGINATION_RETIRED_R30: new venue orders come "
+                "only from the canonical SMALL LIVE adapter, which is SHADOW")
         self._pace()
         return self._c.orders.create(dict(params, synchronousExecution=True))
 
@@ -397,6 +425,8 @@ class Venue:
 def _classify(exc: Exception) -> str:
     """'REJECTED' when the venue answered and refused (nothing placed);
     'UNKNOWN' when we cannot know whether an order exists."""
+    if isinstance(exc, LegacyOriginationRetired):
+        return "REJECTED"           # refused before the venue: nothing exists
     status = getattr(exc, "status_code", None)
     if status in (400, 401, 403, 404, 422):
         return "REJECTED"

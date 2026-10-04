@@ -74,6 +74,23 @@ BEGIN
         END LOOP;
     END IF;
 END $$;
+-- and wherever ANY later migration attached the same guard (R30's 225 adds
+-- its order-path tables): every trigger bound to the guard function, found
+-- in the catalogue rather than in a list that a re-run of this migration's
+-- UP could shorten
+DO $$
+DECLARE
+    r record;
+BEGIN
+    IF to_regprocedure('pos_agents_refuse_authority()') IS NOT NULL THEN
+        FOR r IN SELECT t.tgname, c.relname FROM pg_trigger t
+                   JOIN pg_class c ON c.oid = t.tgrelid
+                  WHERE t.tgfoid = 'pos_agents_refuse_authority()'::regprocedure
+                    AND NOT t.tgisinternal LOOP
+            EXECUTE format('DROP TRIGGER IF EXISTS %I ON %I', r.tgname, r.relname);
+        END LOOP;
+    END IF;
+END $$;
 DROP TRIGGER IF EXISTS pos_task_events_no_authority_trg ON agent_task_events;
 
 DROP VIEW IF EXISTS pos_iface_scout_feature_effects;

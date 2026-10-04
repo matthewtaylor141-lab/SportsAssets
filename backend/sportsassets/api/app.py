@@ -758,6 +758,13 @@ try:
     app.include_router(_command_sleeves_router)
 except ImportError:
     log.warning("sleeves: api.command_sleeves not loaded", exc_info=True)
+# ── R30 LIVE PARITY: /api/command/live-parity (+ /intent/{id}) and the
+# named-human halt clear. SMALL LIVE is SHADOW; nothing here sends an order.
+try:
+    from .command_live_parity import router as _command_live_parity_router
+    app.include_router(_command_live_parity_router)
+except ImportError:
+    log.warning("live parity: api.command_live_parity not loaded", exc_info=True)
 # ── THE POSITION ROOMS: /api/command/positions/rooms, /room/{group_key}.
 # GET only, COMMAND auth, READ ONLY transaction; one correlated economic
 # position per screen (paper and actual, actual per venue, never summed).

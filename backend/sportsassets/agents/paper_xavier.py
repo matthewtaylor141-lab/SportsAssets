@@ -77,6 +77,8 @@ from typing import Any
 
 from .. import bettor_paper_ledger as L
 from .. import bettor_paper_simulator as SIM
+from .. import canonical_intent as CI
+from .. import decision_hooks as DH
 from .. import xavier_freshness as XF
 from . import derek_policy as DP
 
@@ -647,31 +649,77 @@ async def review_group(conn, ctx: dict, group_id: str, *,
         prot = protective_price(qty=pos["open_qty"],
                                 cost_basis=pos["cost_basis_usd"],
                                 fee_fn=fee_fn, at=at)
-        if chosen in (A_EXIT, A_REDUCE):
-            if standing:
-                # THE EXIT WAITS FOR THE PROTECTION TO BE TERMINAL: its
-                # inventory is committed to the resting sale.
-                for s in standing:
-                    if s["state"] != "CANCEL_PENDING":
-                        await SIM.request_cancel(
-                            conn, s["order_id"], now=at,
-                            reason="EXIT_WAITS_FOR_STANDING_TERMINAL")
-                action = {"taken": "CANCEL_STANDING_BEFORE_EXIT",
-                          "orders": [s["order_id"] for s in standing]}
-            else:
-                cand = sel.get("selected_candidate") or {}
-                w = cand.get("walk") or {}
-                action = await _submit_sale(
-                    conn, ctx, pos=pos, role=chosen, qty=cand.get("qty"),
-                    limit=w.get("worst_price"), wire=w.get("worst_wire"),
-                    review_key="%s:%s:%s" % (group_id, pos["position_key"],
-                                             at))
-        elif (chosen == A_HOLD or (chosen is None and (
-                not fresh or measure.get("stale")
-                or measure.get("p") is None))) and prot.get("ok"):
+        rid = "paperrev:" + _h(group_id, pos["position_key"], at, trigger)
+        # ── R30 · THE ONE CANONICAL MANAGEMENT INTENT ───────────────────
+        # Xavier's review decides ONE action (live_parity.management_action);
+        # it is recorded immutably and BOTH adapters consume it: the paper
+        # book below and the SMALL LIVE adapter (SHADOW) after it.
+        decided = CI.management_action(
+            chosen=chosen, fresh=fresh, stale=bool(measure.get("stale")),
+            p_missing=measure.get("p") is None,
+            protection_ok=bool(prot.get("ok")), standing_live=bool(standing),
+            candidate=sel.get("selected_candidate"), protective=prot,
+            open_qty=pos["open_qty"])
+        mintent = None
+        try:
+            mintent = CI.build_management_intent(
+                review_id=rid, group_id=group_id,
+                position_key=pos["position_key"],
+                strategy=pos.get("strategy") or await _strategy(conn, group_id),
+                valuation=XF.valuation_block(
+                    measure, assessed_at=at,
+                    limit_s=float(ctx["config"]["entry"]["pinnacle_max_age_s"])),
+                evidence_state=measure["evidence_state"],
+                recommendation=XF.recorded_recommendation(
+                    evidence_state=measure["evidence_state"], selected=chosen),
+                mechanical_selection=chosen, decided=decided,
+                us_market_slug=pos["us_market_slug"],
+                holding_side=pos["holding_side"], alternatives=alts,
+                reason={"selection_reason": sel.get("selection_reason"),
+                        "refusal": sel.get("refusal"),
+                        "margin_over_runner_up": sel.get(
+                            "margin_over_runner_up"),
+                        "exceptional": list(exceptional)},
+                created_at=at)
+            rec_hook = DH.CANONICAL_MANAGEMENT_RECORD
+            if rec_hook is None or not await rec_hook(conn, mintent):
+                mintent = None
+        except Exception:                                       # noqa: BLE001
+            mintent = None
+        act = decided["action"]
+        tl = decided.get("target_limit") or {}
+        if act == CI.ACT_CANCEL_FIRST:
+            # THE EXIT WAITS FOR THE PROTECTION TO BE TERMINAL: its
+            # inventory is committed to the resting sale.
+            for s in standing:
+                if s["state"] != "CANCEL_PENDING":
+                    await SIM.request_cancel(
+                        conn, s["order_id"], now=at,
+                        reason="EXIT_WAITS_FOR_STANDING_TERMINAL")
+            action = {"taken": "CANCEL_STANDING_BEFORE_EXIT",
+                      "orders": [s["order_id"] for s in standing]}
+        elif act in (CI.ACT_EXIT, CI.ACT_REDUCE):
+            action = await _submit_sale(
+                conn, ctx, pos=pos, role=chosen, qty=decided["target_qty"],
+                limit=tl.get("limit_price"), wire=tl.get("wire_price"),
+                review_key="%s:%s:%s" % (group_id, pos["position_key"], at))
+        elif act == CI.ACT_PROTECT:
             action = await _maintain_standing(
                 conn, ctx, pos=pos, standing=[dict(s) for s in standing],
                 prot=prot, md=md, at=at, SPO=SPO)
+        elif chosen in (A_EXIT, A_REDUCE):
+            action = {"taken": "NONE", "why": tl.get("why")
+                      or "NO_WALKABLE_SALE"}
+        if mintent is not None:
+            action["canonical_intent_id"] = mintent["intent_id"]
+            ad = DH.CANONICAL_MANAGEMENT_ADAPTERS
+            if ad is not None:
+                try:
+                    action["live_parity"] = await ad(
+                        conn, mintent, taken=dict(action),
+                        open_qty=pos["open_qty"])
+                except Exception as exc:                        # noqa: BLE001
+                    action["live_parity"] = {"error": type(exc).__name__}
         confirmed = await conn.fetchval(
             "SELECT coalesce(sum(qty), 0) FROM paper_fills WHERE group_id=$1"
             "   AND role='STANDING_PROTECTION'", group_id)
@@ -680,7 +728,6 @@ async def review_group(conn, ctx: dict, group_id: str, *,
                           for s in live)
         exposure = exposure_view(pos, resting_qty=resting_qty,
                                  filled_protection_qty=float(confirmed))
-        rid = "paperrev:" + _h(group_id, pos["position_key"], at, trigger)
         # WHAT THE REVIEW RECOMMENDS (owner P0): the selection only on FRESH
         # evidence. On stale / absent evidence the selector's HOLD is merely
         # what was left after the sales were blocked, so the recorded
@@ -811,7 +858,10 @@ async def _submit_sale(conn, ctx, *, pos, role, qty, limit, wire,
                                fee_fn=ctx.get("fee_fn"), now=at)
     return {"taken": "SUBMIT_%s" % role, "ok": got.get("ok"),
             "refusal": got.get("refusal"),
-            "order_id": (got.get("order") or {}).get("order_id")}
+            "order_id": (got.get("order") or {}).get("order_id"),
+            "requested": {k: o.get(k) for k in (
+                "qty", "limit_price", "wire_price", "time_in_force",
+                "order_type", "intent")}}
 
 
 async def _maintain_standing(conn, ctx, *, pos, standing, prot, md, at,

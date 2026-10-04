@@ -1909,6 +1909,19 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
             rec["actual_lane"] = got_i.get("actual_lane")
         except Exception as exc:                                # noqa: BLE001
             rec["actual_lane"] = "EXECUTION_HOOK_FAILED:%s" % type(exc).__name__
+    # ── R30 · THE ONE CANONICAL DECISION INTENT ─────────────────────────
+    # Built once, immutable, sha-stamped (live_parity). The PAPER adapter
+    # below reads side, quantity, prices and order form FROM IT; the SMALL
+    # LIVE adapter (SHADOW) constructs its venue order from the SAME object.
+    # A failure to build it never stops the paper sibling -- but then no
+    # live proposal exists either (live never acts without an intent).
+    canonical = await canonical_intent(
+        conn, did=did, strategy=STRATEGY, version=VERSION, cand=cand,
+        side=side, sized=sized, ent=ent, obs=obs, md=md, econ=econ, p=p,
+        best_edge=best_edge, verdict=verdict, refusals=refusals,
+        policy_decision=policy_decision, at=at, label=label,
+        book_age=book_age, cfg=cfg, params=params, pin=pin)
+    rec["canonical_intent_id"] = (canonical or {}).get("intent_id")
     # ── THE PAPER SIBLING ──────────────────────────────────────────────
     delay = float(sim_cfg["decision_to_execution_delay_s"])
     order = {"idempotency_key": "%s:ENTRY" % did,
@@ -1928,9 +1941,19 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
              "expires_at": at + float(sim_cfg["marketable_ttl_s"]),
              "simulator_version": cfg["simulator_version"],
              "strategy": STRATEGY}
+    if canonical is not None:
+        # THE PAPER ADAPTER CONSUMES THE INTENT: every order-defining field
+        # comes from the canonical object, not from local variables.
+        order.update({k: canonical[f] for k, f in CANONICAL_ORDER_FIELDS.items()})
     got = await L.submit_order(conn, order, caps=cfg["risk"],
                                fee_fn=fee_fn, now=at, exclusive_fixture=True)
     rec["order"] = {k: got.get(k) for k in ("ok", "refusal", "duplicate")}
+    if canonical is not None and DH.CANONICAL_ENTRY_ADAPTERS is not None:
+        try:
+            rec["live_parity"] = await DH.CANONICAL_ENTRY_ADAPTERS(
+                conn, canonical, paper_order=order, paper_result=got)
+        except Exception as exc:                                # noqa: BLE001
+            rec["live_parity"] = {"error": type(exc).__name__}
     if got.get("ok"):
         rec["order_id"] = got["order"]["order_id"]
         rec["eligible_at"] = at + delay
@@ -1944,6 +1967,32 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
                                   **{k: v for k, v in got.items()
                                      if k not in ("ok",)}})
     return rec
+
+
+#: R30: WHAT THE PAPER ADAPTER READS FROM THE CANONICAL INTENT (order field
+#: <- intent field). Pinned equal to canonical_intent.paper_entry_fields by a
+#: test; stated here so this module imports no execution module.
+CANONICAL_ORDER_FIELDS = {
+    "holding_side": "holding_side", "intent": "order_intent",
+    "us_market_slug": "us_market_slug", "order_type": "order_type",
+    "time_in_force": "time_in_force", "qty": "target_qty",
+    "limit_price": "limit_price", "wire_price": "wire_price",
+    "decision_id": "decision_id", "strategy": "strategy"}
+
+
+async def canonical_intent(conn, **inputs) -> dict | None:
+    """R30: the ONE canonical decision intent of an ENTER, built and recorded
+    by the executing process's hook (decision_hooks.CANONICAL_DECISION,
+    installed by live_parity.install). None when no hook runs here or it
+    could not be built -- the paper sibling then proceeds as before and no
+    live proposal exists."""
+    hook = DH.CANONICAL_DECISION
+    if hook is None:
+        return None
+    try:
+        return await hook(conn, **inputs)
+    except Exception:                                          # noqa: BLE001
+        return None
 
 
 # ═════════════════════════════════════════════════════════════════════
