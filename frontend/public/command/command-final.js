@@ -7,13 +7,23 @@ if(window.__BTCommandFinal)return; window.__BTCommandFinal=true;
 
 var PATH=(location.pathname||'/').replace(/\/+$/,'')||'/';
 var AGENT_PATH=/^\/(derek|karen|scout|eddie|allocator|audrey|xavier)$/;
+var EQ_LIVE='/api/command/equity/live', EQ_CURVE='/api/command/equity/curve?book=PAPER&window=1d';
 var floorTimer=null, equitySamples=[], lastFloor=null, lastEquity=null;
+var eqOffset=0;            // server clock minus browser clock, from the latest equity read
+var chartView=null;        // the x-domain frozen while marks are not current
+var ownCurve=null;         // PAPER 1d curve read here only when the equity wall holds none
 
 function esc(x){return String(x==null?'':x).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];});}
-function money(n,d){if(typeof n!=='number'||!isFinite(n))return'—';return new Intl.NumberFormat('en-US',{style:'currency',currency:'USD',minimumFractionDigits:d==null?2:d,maximumFractionDigits:d==null?2:d}).format(n);}
-function signed(n){return typeof n==='number'&&isFinite(n)?(n>0?'+':n<0?'−':'')+money(Math.abs(n),2):'—';}
+function fin(n){return typeof n==='number'&&isFinite(n);}
+function money(n,d){if(!fin(n))return'—';return new Intl.NumberFormat('en-US',{style:'currency',currency:'USD',minimumFractionDigits:d==null?2:d,maximumFractionDigits:d==null?2:d}).format(n);}
+function signed(n){return fin(n)?(n>0?'+':n<0?'−':'')+money(Math.abs(n),2):'—';}
+/* the homepage capital surface keeps meeting-release.js's exact formatting:
+   a figure the read does not carry is UNAVAILABLE, never a zero */
+function mMoney(n,d){return fin(n)?new Intl.NumberFormat('en-US',{style:'currency',currency:'USD',minimumFractionDigits:d||0,maximumFractionDigits:d||0}).format(n):'UNAVAILABLE';}
+function mSigned(n){return fin(n)?(n>0?'+':n<0?'−':'')+mMoney(Math.abs(n),2):'UNAVAILABLE';}
 function epoch(v){if(v==null)return null;if(typeof v==='number')return v;var n=Date.parse(v);return isNaN(n)?null:n/1000;}
-function age(t){if(!t)return'never';var s=Math.max(0,Date.now()/1000-t);return s<60?Math.floor(s)+'s':s<3600?Math.floor(s/60)+'m':s<86400?(s/3600).toFixed(1)+'h':(s/86400).toFixed(1)+'d';}
+function ageS(s){if(!fin(s))return'—';s=Math.max(0,s);return s<90?Math.floor(s)+'s':s<5400?Math.floor(s/60)+'m':s<172800?(s/3600).toFixed(1)+'h':(s/86400).toFixed(1)+'d';}
+function age(t){if(!t)return'never';return ageS(Date.now()/1000-t);}
 function workState(a){return String(a&&a.work_state||a&&a.state||'UNKNOWN');}
 function workDetail(a){return a&&a.work_detail||a&&a.state_detail||'No recorded work detail.';}
 function workTone(s){
@@ -36,9 +46,110 @@ function human(s){
  };
  return map[s]||String(s||'UNKNOWN').replace(/_/g,' ').toLowerCase().replace(/^./,function(c){return c.toUpperCase()});
 }
+function seatOf(code){return window.BTFloor&&BTFloor.BY_AGENT&&BTFloor.BY_AGENT[code]||null;}
+function nameOf(code,as){
+ if(code==='CHIEF_ALLOCATOR')return'Allie';
+ var s=seatOf(code);if(s)return s.name;
+ var a=(as||[]).find(function(x){return x.agent===code;});
+ return a&&(a.display_name||a.name)||String(code||'');
+}
 function fetchJSON(url){
  return fetch(url,{credentials:'same-origin',cache:'no-store',headers:{Accept:'application/json'}})
   .then(function(r){if(!r.ok)throw new Error('HTTP '+r.status);return r.json();});
+}
+function setText(n,txt,cls){
+ if(typeof n==='string')n=document.getElementById(n);if(!n)return null;
+ txt=String(txt);if(n.textContent!==txt)n.textContent=txt;
+ if(cls!=null&&n.className!==cls)n.className=cls;
+ return n;
+}
+
+/* ── ONE WRITER PER FIGURE ───────────────────────────────────────────
+   meeting-release.js / hq6-complete.js write some homepage figures ONCE
+   from their own load-time reads. Once this layer has a newer read it owns
+   those nodes: a later write by an older reader is put back at once (in the
+   same microtask, before paint), so no stale value or style flip is shown. */
+var owned={},ownObs=null,onForeign={},expectCanvas=0;
+function own(id,text,cls){
+ owned[id]={text:String(text),cls:cls==null?null:cls};
+ var n=setText(id,text,cls);if(!n)return null;
+ if(n.__cfWatched)return n;n.__cfWatched=true;
+ ensureObs().observe(n,{childList:true,characterData:true,subtree:true,attributes:true,attributeFilter:['class']});
+ return n;
+}
+function ensureObs(){
+ if(!ownObs)ownObs=new MutationObserver(function(recs){
+  var hit={};
+  recs.forEach(function(r){
+   var t=r.target.nodeType===1?r.target:r.target.parentElement;
+   if(t&&t.id==='mtg-chart'&&r.type==='attributes'){if(expectCanvas>0)expectCanvas--;else hit['mtg-chart']=1;return;}
+   while(t&&!(t.id&&owned[t.id]))t=t.parentElement;
+   if(t)hit[t.id]=1;
+  });
+  Object.keys(hit).forEach(function(id){
+   if(id==='mtg-chart'){if(onForeign[id])onForeign[id]();return;}
+   var o=owned[id],el=document.getElementById(id);if(!o||!el)return;
+   if(el.textContent!==o.text||(o.cls!=null&&el.className!==o.cls)){setText(el,o.text,o.cls);if(onForeign[id])onForeign[id]();}
+  });
+ });
+ return ownObs;
+}
+
+/* ── EQUITY SOURCE ───────────────────────────────────────────────────
+   Pages that load equity-wall.js share its one poll loop. Elsewhere (floor,
+   agent pages, company…) the attach is bounded and falls back to a direct
+   read-only GET of /api/command/equity/live every ~10 s, paused while the
+   tab is hidden. Started only by a consumer (home, floor HUD). */
+var eqSubs=[],eqStarted=false;
+function emitEquity(st){
+ lastEquity=st;
+ if(st&&fin(st.serverNow))eqOffset=st.serverNow-Date.now()/1000;
+ eqSubs.slice().forEach(function(cb){try{cb(st);}catch(e){/* one view never breaks another */}});
+}
+function onEquity(cb){
+ eqSubs.push(cb);
+ if(lastEquity){try{cb(lastEquity);}catch(e){/* ignore */}}
+ if(eqStarted)return;eqStarted=true;
+ var tries=0;
+ (function attach(){
+  if(window.BTEquityWall&&typeof window.BTEquityWall.subscribe==='function'){window.BTEquityWall.subscribe(emitEquity);return;}
+  if(++tries<=12){setTimeout(attach,250);return;}
+  directEquity();
+ })();
+}
+function directEquity(){
+ var etag=null,live=null,status='IDLE',offset=0,busy=false,timer=null,handed=false;
+ function emit(){emitEquity({status:status,live:live,serverNow:Date.now()/1000+offset,curves:{},source:'direct'});}
+ function tick(){
+  if(handed)return;
+  // a page may load equity-wall.js later (the floor does, after its 3D
+  // scene): hand over to that one shared loop instead of polling twice
+  if(window.BTEquityWall&&typeof window.BTEquityWall.subscribe==='function'){handed=true;clearInterval(timer);window.BTEquityWall.subscribe(emitEquity);return;}
+  if(document.hidden||busy)return;busy=true;
+  var h={Accept:'application/json'};if(etag)h['If-None-Match']=etag;
+  var sent=Date.now();
+  fetch(EQ_LIVE,{method:'GET',credentials:'same-origin',cache:'no-store',headers:h}).then(function(r){
+   if(r.status===304){status=live?'OK':status;return null;}
+   if(r.status===401||r.status===403){status='SIGNED_OUT';live=null;etag=null;return null;}
+   if(!r.ok){status='ERROR';return null;}
+   return r.json().then(function(j){
+    if(!j||j.schema!=='bt.equity.v1'){status='ERROR';return;}
+    var mid=(sent+Date.now())/2000;
+    live=j;etag=r.headers.get('ETag')||j.etag||null;status='OK';offset=(fin(j.computed_at)?j.computed_at:mid)-mid;
+   });
+  }).catch(function(){status='ERROR';}).then(function(){busy=false;emit();});
+ }
+ tick();timer=setInterval(tick,10000);
+ document.addEventListener('visibilitychange',function(){if(!document.hidden)tick();});
+}
+/* mark freshness from the RECORDED newest mark time (ages derived on the
+   page, as the equity wall does); never from a client guess */
+function markInfo(st,p){
+ var m=p&&p.marks_as_of||{},lim=fin(m.stale_mark_after_s)?m.stale_mark_after_s:fin(p&&p.stale_after_s)?p.stale_after_s:300;
+ var at=epoch(m.newest_at),now=Date.now()/1000+eqOffset;
+ var a=at!=null?Math.max(0,now-at):fin(m.newest_age_s)?m.newest_age_s:null;
+ var feedOk=!st||!st.status||st.status==='OK';
+ return {age:a,limit:lim,newestAt:at,feedOk:feedOk,fresh:!!p&&feedOk&&p.status==='OK'&&a!=null&&a<=lim};
 }
 
 /* ───────────────── HOME · real-time company operating surface ───────── */
@@ -51,7 +162,7 @@ function installHome(){
   if(document.getElementById('cf-command-strip'))return;
   document.body.classList.add('command-final-home');
 
-  var wrap=home.querySelector('.mtg-wrap'),head=home.querySelector('.mtg-head');
+  var head=home.querySelector('.mtg-head');
   var strip=document.createElement('section'); strip.id='cf-command-strip'; strip.className='cf-command-strip';
   strip.innerHTML=
    '<div class="cf-strip-cell"><span>Company</span><b id="cf-company-state">READING</b><small id="cf-company-sub">current agent work states</small></div>'+
@@ -72,6 +183,7 @@ function installHome(){
     chart.insertAdjacentElement('beforebegin',hdr);
     var can=chart.querySelector('#mtg-chart');
     if(can){can.setAttribute('aria-label','Live PAPER mark-to-market equity from current recorded position marks');}
+    var dot=document.createElement('i');dot.className='cf-live-dot';dot.id='cf-live-dot';dot.hidden=true;dot.setAttribute('aria-hidden','true');chart.appendChild(dot);
    }
   }
 
@@ -94,10 +206,9 @@ function renderHomeFloor(f){
  var edges=(f&&f.edges||[]).slice().sort(function(x,y){return(y.at||0)-(x.at||0);});
  var e=edges[0],hn=document.getElementById('cf-handoff'),hs=document.getElementById('cf-handoff-sub');
  if(e&&hn){
-  var from=as.find(function(x){return x.agent===e.from}),to=as.find(function(x){return x.agent===e.to});
-  hn.textContent=(from&&from.slug==='allocator'?'Allie':from&&from.display_name||from&&from.name||e.from)+' → '+(to&&to.slug==='allocator'?'Allie':to&&to.display_name||to&&to.name||e.to);
+  hn.textContent=nameOf(e.from,as)+' → '+nameOf(e.to,as);
   hs.textContent=String(e.kind||'collaboration').replace(/_/g,' ').toLowerCase()+' · '+age(e.at)+' ago';
- }
+ }else if(hn){hn.textContent='None in window';if(hs)hs.textContent='no durable collaboration recorded';}
  // Upgrade any legacy cards immediately with work_state/work_detail.
  as.forEach(function(x){
   var card=document.querySelector('.hq4-agent-card.'+x.slug+',.mtg-agent[href="/'+x.slug+'"]');
@@ -111,28 +222,74 @@ function pollFloorHome(){
  function tick(){fetchJSON('/api/command/floor').then(renderHomeFloor).catch(function(){});}
  tick();floorTimer=setInterval(function(){if(!document.hidden)tick();},10000);
 }
-function subscribeEquityHome(){
- function attach(){
-  if(!window.BTEquityWall){setTimeout(attach,250);return;}
-  window.BTEquityWall.subscribe(function(st){
-   lastEquity=st;var p=st&&st.live&&st.live.paper;if(!p)return;
-   var open=document.getElementById('cf-openpos');if(open)open.textContent=p.open_positions&&p.open_positions.count!=null?p.open_positions.count:'—';
-   var m=p.marks_as_of||{},fresh=typeof m.newest_age_s==='number'&&m.newest_age_s<=(m.stale_mark_after_s||300)&&p.status==='OK';
-   var ms=document.getElementById('cf-mark-state');if(ms){ms.textContent=fresh?'LIVE MARKS':p.status==='STALE'?'STALE MARKS':'MARKS NOT CURRENT';ms.className=fresh?'live':p.status==='STALE'?'warn':'dim';}
-   var ma=document.getElementById('cf-mark-age');if(ma)ma.textContent=typeof m.newest_age_s==='number'?Math.floor(m.newest_age_s)+'s':'—';
-   var mk=document.getElementById('cf-marked');if(mk)mk.textContent=p.open_positions&&p.open_positions.marked!=null?p.open_positions.marked:'—';
-   var un=document.getElementById('cf-unmarked');if(un)un.textContent=p.open_positions&&p.open_positions.unmarked!=null?p.open_positions.unmarked:'—';
-   recordEquitySample(p,st.serverNow||Date.now()/1000);
-   drawLiveEquity(st);
-  });
+function renderCapital(st){
+ var live=st&&st.live,p=live&&live.paper;
+ if(!p){
+  if(st&&(st.status==='SIGNED_OUT'||st.status==='ERROR')){
+   own('mtg-equity','UNAVAILABLE');
+   setText('cf-mark-state',st.status==='SIGNED_OUT'?'SIGN-IN REQUIRED':'UNAVAILABLE','dim');
+   ['cf-mark-age','cf-marked','cf-unmarked','cf-openpos'].forEach(function(id){setText(id,'UNAVAILABLE');});
+  }
+  return;
  }
- attach();
+ own('mtg-equity',mMoney(p.equity_usd,2));
+ own('mtg-realized',mSigned(p.realized_pnl_usd));
+ own('mtg-unrealized',mSigned(p.unrealized_pnl_usd));
+ own('mtg-exposure',mMoney(p.exposure&&p.exposure.marked_value_usd,2));
+ var op=p.open_positions||{};
+ own('mtg-positions',op.count!=null?op.count:'UNAVAILABLE');
+ var ch=p.day_change||{};
+ own('mtg-change',fin(ch.usd)?mSigned(ch.usd)+(fin(ch.pct)?' · '+ch.pct.toFixed(3)+'%':''):'NO CHANGE BASIS','mtg-change '+(ch.usd>0?'up':ch.usd<0?'down':''));
+ own('mtg-p-status',p.status||'UNAVAILABLE','mtg-status '+(/OK|LIVE|RUNNING/.test(p.status||'')?'good':'warn'));
+ var s=live.small_live_bettor||live.small_live;
+ if(s){
+  var state=s.status||'UNAVAILABLE',cap=s.capital&&s.capital.usd,ord=s.orders&&s.orders.submitted,fil=s.fills&&s.fills.count;
+  own('mtg-l-status',state);own('mtg-l-state',state);
+  own('mtg-l-reason',s.why||s.reason||'BETTOR-originated execution remains separately controlled.');
+  own('mtg-l-cap',fin(cap)?mMoney(cap,2):'NONE ASSIGNED');own('mtg-l-orders',fin(ord)?ord:'UNAVAILABLE');own('mtg-l-fills',fin(fil)?fil:'UNAVAILABLE');
+  own('mtg-l-venue',s.path_configured===false?'NO LANE':(s.venue_state||'UNAVAILABLE'));
+ }
+ setText('cf-openpos',op.count!=null?op.count:'UNAVAILABLE');
+ var mi=markInfo(st,p);
+ setText('cf-mark-state',p.status==='UNAVAILABLE'?'UNAVAILABLE':!mi.feedOk?'FEED INTERRUPTED':mi.fresh?'LIVE MARKS':p.status==='STALE'?'STALE MARKS':'MARKS NOT CURRENT',
+  mi.fresh?'live':p.status==='STALE'||!mi.feedOk?'warn':'dim');
+ setText('cf-mark-age',p.status==='UNAVAILABLE'?'UNAVAILABLE':mi.age!=null?ageS(mi.age)+' ago':'—');
+ setText('cf-marked',op.marked!=null?op.marked:'UNAVAILABLE');
+ setText('cf-unmarked',op.unmarked!=null?op.unmarked:'UNAVAILABLE');
+ return mi;
 }
-function recordEquitySample(p,now){
- if(typeof p.equity_usd!=='number'||!isFinite(p.equity_usd))return;
- var m=p.marks_as_of||{},t=epoch(m.newest_at)||epoch(p.source_at)||now;
- var fresh=p.status==='OK'&&typeof m.newest_age_s==='number'&&m.newest_age_s<=(m.stale_mark_after_s||300);
- if(!fresh)return;
+var homeFresh=null;
+function subscribeEquityHome(){
+ onForeign['mtg-last']=onForeign['mtg-chart']=function(){if(lastEquity)drawLiveEquity(lastEquity);};
+ // meeting-release.js draws #mtg-chart once from its own curve read; a draw
+ // that is not ours (its canvas resize) is answered with an immediate redraw
+ var can=document.getElementById('mtg-chart');
+ if(can)ensureObs().observe(can,{attributes:true,attributeFilter:['width','height']});
+ onEquity(function(st){
+  var mi=renderCapital(st);var p=st&&st.live&&st.live.paper;
+  if(p&&mi){recordEquitySample(p,mi);homeFresh=mi.fresh;}
+  ensureCurve(st);
+  drawLiveEquity(st);
+ });
+ // the mark AGE is derived from the recorded timestamp every second (no value moves);
+ // when it crosses the stale bound the chart freezes at once
+ setInterval(function(){
+  var st=lastEquity,p=st&&st.live&&st.live.paper;if(!p||p.status==='UNAVAILABLE')return;
+  var mi=markInfo(st,p);setText('cf-mark-age',mi.age!=null?ageS(mi.age)+' ago':'—');
+  if(homeFresh!==null&&mi.fresh!==homeFresh){homeFresh=mi.fresh;renderCapital(st);drawLiveEquity(st);}
+ },1000);
+}
+function ensureCurve(st){
+ var c=st&&st.curves&&st.curves['PAPER||1d'];
+ if(c&&(c.data||c.inflight))return;
+ if(ownCurve&&(ownCurve.inflight||Date.now()-ownCurve.at<10000))return;
+ ownCurve=ownCurve||{at:0,data:null};ownCurve.inflight=true;
+ fetchJSON(EQ_CURVE).then(function(j){ownCurve.data=j;}).catch(function(){/* the line still draws from live samples */})
+  .then(function(){ownCurve.inflight=false;ownCurve.at=Date.now();if(lastEquity)drawLiveEquity(lastEquity);});
+}
+function recordEquitySample(p,mi){
+ if(!fin(p.equity_usd)||!mi.fresh)return;
+ var t=mi.newestAt||epoch(p.source_at);if(t==null)return;
  var last=equitySamples[equitySamples.length-1];
  if(!last||t>last.t+0.001||p.equity_usd!==last.v){
   equitySamples.push({t:t,v:p.equity_usd});
@@ -141,46 +298,80 @@ function recordEquitySample(p,now){
 }
 function curvePoints(st){
  var out=[],curves=st&&st.curves||{},c=curves['PAPER||1d'];
- var pts=c&&c.data&&c.data.points||[];
- pts.forEach(function(p){if(typeof p.t==='number'&&typeof p.v==='number')out.push({t:p.t,v:p.v});});
- equitySamples.forEach(function(p){if(!out.length||p.t>out[out.length-1].t||p.v!==out[out.length-1].v)out.push(p);});
- return out.sort(function(a,b){return a.t-b.t;});
+ var data=c&&c.data||ownCurve&&ownCurve.data;
+ var pts=data&&data.points||[];
+ pts.forEach(function(p){if(fin(p.t)&&fin(p.v))out.push({t:p.t,v:p.v});});
+ out.sort(function(a,b){return a.t-b.t;});
+ equitySamples.forEach(function(p){if(!out.length||p.t>out[out.length-1].t)out.push(p);});
+ return out;
 }
 function drawLiveEquity(st){
  var can=document.getElementById('mtg-chart'); if(!can)return;
- var p=st&&st.live&&st.live.paper,pts=curvePoints(st); if(!p||typeof p.equity_usd!=='number')return;
- var m=p.marks_as_of||{},fresh=p.status==='OK'&&typeof m.newest_age_s==='number'&&m.newest_age_s<=(m.stale_mark_after_s||300);
- var now=st.serverNow||Date.now()/1000;
- if(fresh)pts.push({t:now,v:p.equity_usd,endpoint:true});
- if(!pts.length)pts=[{t:now,v:p.equity_usd,endpoint:true}];
+ var p=st&&st.live&&st.live.paper; if(!p)return;
+ var dot=document.getElementById('cf-live-dot');
+ if(!fin(p.equity_usd)){
+  // UNAVAILABLE: no line at all rather than an old one that looks current
+  expectCanvas+=2;can.width=can.width;can.height=can.height;
+  if(dot)dot.hidden=true;can.removeAttribute('data-endpoint');chartView=null;
+  own('mtg-last','UNAVAILABLE · '+(p.why||p.status||'no equity in this read'),'mtg-last frozen');
+  return;
+ }
+ var mi=markInfo(st,p),fresh=mi.fresh,now=Date.now()/1000+eqOffset;
+ var pts=curvePoints(st);
+ if(!fresh){
+  // FROZEN: the server's current value placed at its last genuine change,
+  // never extended to now (same rule as the equity wall's chart model)
+  var last=pts[pts.length-1],chg=epoch(p.last_change_at)||epoch(p.source_at)||(last?last.t:now);
+  if(!last||last.v!==p.equity_usd)pts.push({t:Math.min(now,Math.max(chg,last?last.t:chg)),v:p.equity_usd});
+ }
+ if(!pts.length)pts=[{t:now,v:p.equity_usd}];
  var rect=can.getBoundingClientRect();if(rect.width<10||rect.height<10)return;
- var dpr=Math.min(devicePixelRatio||1,2);can.width=Math.round(rect.width*dpr);can.height=Math.round(rect.height*dpr);
+ var t1,t0;
+ if(fresh){chartView=null;t1=now;}
+ else{
+  // the x-domain freezes when marks stop being current, so the frozen
+  // endpoint keeps its exact position on every later poll
+  var lastT=pts[pts.length-1].t;
+  if(!chartView)chartView={t1:Math.max(lastT,Math.min(now,(mi.newestAt||lastT)+mi.limit))};
+  if(lastT>chartView.t1)chartView.t1=lastT;
+  t1=chartView.t1;
+ }
+ t0=Math.max(pts[0].t,t1-86400);if(t1<=t0)t0=t1-60;
+ var dpr=Math.min(devicePixelRatio||1,2),cw=Math.round(rect.width*dpr),chh=Math.round(rect.height*dpr);
+ expectCanvas+=2;can.width=cw;can.height=chh;
  var x=can.getContext('2d');x.setTransform(dpr,0,0,dpr,0,0);x.clearRect(0,0,rect.width,rect.height);
- var W=rect.width,H=rect.height,padL=16,padR=18,padT=18,padB=24;
- var vals=pts.map(function(q){return q.v}),lo=Math.min.apply(null,vals),hi=Math.max.apply(null,vals),span=Math.max(1,hi-lo),vp=Math.max(2,span*.18);lo-=vp;hi+=vp;
- var t1=now,t0=Math.max(pts[0].t,t1-86400);if(t1<=t0)t0=t1-60;
+ var W=rect.width,H=rect.height,padL=16,padR=18,padT=26,padB=44;
+ var vis=pts.filter(function(q){return q.t>=t0;}),prior=pts.filter(function(q){return q.t<t0;}).pop();
+ if(prior)vis.unshift({t:t0,v:prior.v});
+ if(!vis.length)vis=[pts[pts.length-1]];
+ var vals=vis.map(function(q){return q.v}),lo=Math.min.apply(null,vals),hi=Math.max.apply(null,vals),span=Math.max(1,hi-lo),vp=Math.max(2,span*.18);lo-=vp;hi+=vp;
  function X(t){return padL+(Math.max(t0,Math.min(t1,t))-t0)/(t1-t0)*(W-padL-padR);}
  function Y(v){return padT+(hi-v)/(hi-lo)*(H-padT-padB);}
  // premium grid
  x.strokeStyle='rgba(137,163,196,.095)';x.lineWidth=1;
  for(var i=0;i<5;i++){var yy=padT+i*(H-padT-padB)/4;x.beginPath();x.moveTo(padL,yy);x.lineTo(W-padR,yy);x.stroke();}
  var base=500000;if(base>=lo&&base<=hi){x.strokeStyle='rgba(239,202,121,.22)';x.setLineDash([5,5]);x.beginPath();x.moveTo(padL,Y(base));x.lineTo(W-padR,Y(base));x.stroke();x.setLineDash([]);}
- // area under exact sample-and-hold line
- var grad=x.createLinearGradient(0,padT,0,H-padB);grad.addColorStop(0,'rgba(77,125,255,.28)');grad.addColorStop(1,'rgba(77,125,255,0)');
- x.beginPath();x.moveTo(X(pts[0].t),H-padB);x.lineTo(X(pts[0].t),Y(pts[0].v));
- for(i=1;i<pts.length;i++){x.lineTo(X(pts[i].t),Y(pts[i-1].v));x.lineTo(X(pts[i].t),Y(pts[i].v));}
- if(fresh)x.lineTo(X(now),Y(p.equity_usd));
- x.lineTo(X(fresh?now:pts[pts.length-1].t),H-padB);x.closePath();x.fillStyle=grad;x.fill();
+ var endT=fresh?now:vis[vis.length-1].t,endV=fresh?p.equity_usd:vis[vis.length-1].v;
+ // area under the exact sample-and-hold line
+ var grad=x.createLinearGradient(0,padT,0,H-padB);grad.addColorStop(0,fresh?'rgba(77,125,255,.28)':'rgba(120,135,155,.20)');grad.addColorStop(1,'rgba(77,125,255,0)');
+ x.beginPath();x.moveTo(X(vis[0].t),H-padB);x.lineTo(X(vis[0].t),Y(vis[0].v));
+ for(i=1;i<vis.length;i++){x.lineTo(X(vis[i].t),Y(vis[i-1].v));x.lineTo(X(vis[i].t),Y(vis[i].v));}
+ if(fresh){x.lineTo(X(now),Y(vis[vis.length-1].v));x.lineTo(X(now),Y(p.equity_usd));}
+ x.lineTo(X(endT),H-padB);x.closePath();x.fillStyle=grad;x.fill();
  // glow line
- x.save();x.strokeStyle=fresh?'#71a7ff':'#7b8798';x.lineWidth=2.5;x.lineJoin='round';x.shadowColor=fresh?'rgba(79,130,255,.7)':'transparent';x.shadowBlur=fresh?15:0;x.beginPath();x.moveTo(X(pts[0].t),Y(pts[0].v));
- for(i=1;i<pts.length;i++){x.lineTo(X(pts[i].t),Y(pts[i-1].v));x.lineTo(X(pts[i].t),Y(pts[i].v));}
- if(fresh)x.lineTo(X(now),Y(p.equity_usd));x.stroke();x.restore();
- // endpoint
- var ex=X(fresh?now:pts[pts.length-1].t),ey=Y(fresh?p.equity_usd:pts[pts.length-1].v);
+ x.save();x.strokeStyle=fresh?'#71a7ff':'#7b8798';x.lineWidth=2.5;x.lineJoin='round';x.shadowColor=fresh?'rgba(79,130,255,.7)':'transparent';x.shadowBlur=fresh?15:0;x.beginPath();x.moveTo(X(vis[0].t),Y(vis[0].v));
+ for(i=1;i<vis.length;i++){x.lineTo(X(vis[i].t),Y(vis[i-1].v));x.lineTo(X(vis[i].t),Y(vis[i].v));}
+ if(fresh){x.lineTo(X(now),Y(vis[vis.length-1].v));x.lineTo(X(now),Y(p.equity_usd));}
+ x.stroke();x.restore();
+ // endpoint: at NOW only while the newest recorded mark is current
+ var ex=X(endT),ey=Y(endV);
  x.fillStyle=fresh?'rgba(87,225,173,.18)':'rgba(150,160,174,.14)';x.beginPath();x.arc(ex,ey,10,0,Math.PI*2);x.fill();
  x.fillStyle=fresh?'#57e1ad':'#8794a6';x.beginPath();x.arc(ex,ey,4,0,Math.PI*2);x.fill();
- x.font='600 11px ui-monospace,monospace';x.fillStyle='#9fb2c6';x.textAlign='right';x.fillText(money(p.equity_usd,2),W-padR,14);x.textAlign='left';
- var lab=document.getElementById('mtg-last');if(lab)lab.textContent=(fresh?'LIVE · current recorded mark':'FROZEN · '+(p.status||'not current'))+' · '+money(p.equity_usd,2);
+ x.font='600 11px ui-monospace,monospace';x.fillStyle='#9fb2c6';x.textAlign='right';x.fillText(money(p.equity_usd,2),W-padR,16);x.textAlign='left';
+ if(dot){dot.hidden=!fresh;if(fresh){dot.style.left=ex.toFixed(1)+'px';dot.style.top=ey.toFixed(1)+'px';}}
+ can.setAttribute('data-endpoint',JSON.stringify({x:Math.round(ex*10)/10,y:Math.round(ey*10)/10,t:Math.round(endT),v:endV,live:fresh}));
+ var why=!mi.feedOk?'FEED INTERRUPTED':p.status==='STALE'?'STALE MARKS':p.status==='OK'?'MARKS NOT CURRENT':(p.status||'NOT CURRENT');
+ own('mtg-last',(fresh?'LIVE · current recorded mark':'FROZEN · '+why)+' · '+money(p.equity_usd,2),'mtg-last'+(fresh?'':' frozen'));
 }
 
 /* ───────────────── FLOOR · truthful gamification + work states ─────── */
@@ -195,17 +386,21 @@ function installFloor(){
   hud.innerHTML='<div><span>DESKS ACTIVE</span><b id="cf-f-active">—</b></div><div><span>BLOCKED</span><b id="cf-f-blocked">—</b></div><div><span>HANDOFFS</span><b id="cf-f-handoffs">—</b></div><div><span>OPEN PAPER POSITIONS</span><b id="cf-f-pos">—</b></div><div class="cf-hud-truth"><i></i><span>REAL EVENTS ONLY</span></div>';
   stage.appendChild(hud);
   setInterval(updateFloorHud,1200);updateFloorHud();
+  onEquity(updateFloorHud);
  }
  go();
 }
 function updateFloorHud(){
- var st=window.__floor,f=st&&st.floor;if(!f)return;
- var as=f.agents||[],active=as.filter(function(a){return /WORK|REVIEW|CHALLENG/.test(workState(a));}).length;
- var blocked=as.filter(function(a){return /BLOCKED|WAITING/.test(workState(a));}).length;
- var hand=as.filter(function(a){return /HANDOFF/.test(workState(a));}).length;
- var ids=[['cf-f-active',active+' / '+as.length],['cf-f-blocked',blocked],['cf-f-handoffs',hand]];
- ids.forEach(function(x){var n=document.getElementById(x[0]);if(n)n.textContent=x[1];});
- if(lastEquity&&lastEquity.live&&lastEquity.live.paper){var p=document.getElementById('cf-f-pos');if(p)p.textContent=lastEquity.live.paper.open_positions&&lastEquity.live.paper.open_positions.count!=null?lastEquity.live.paper.open_positions.count:'—';}
+ var st=window.__floor,f=st&&st.floor;
+ if(f){
+  var as=f.agents||[],active=as.filter(function(a){return /WORK|REVIEW|CHALLENG/.test(workState(a));}).length;
+  var blocked=as.filter(function(a){return /BLOCKED|WAITING/.test(workState(a));}).length;
+  var hand=as.filter(function(a){return /HANDOFF/.test(workState(a));}).length;
+  [['cf-f-active',active+' / '+as.length],['cf-f-blocked',blocked],['cf-f-handoffs',hand]].forEach(function(x){setText(x[0],x[1]);});
+ }
+ var e=lastEquity;if(!e)return;
+ var p=e.live&&e.live.paper,op=p&&p.open_positions;
+ setText('cf-f-pos',p&&op&&op.count!=null?op.count:e.status==='SIGNED_OUT'?'SIGN IN':(p||e.status==='ERROR'||e.status==='OK')?'UNAVAILABLE':'—');
 }
 
 /* ───────────────── AGENT PAGES · mission-first management UX ───────── */
@@ -250,11 +445,5 @@ function normalizeVisibleAgentCards(){
 }
 setInterval(normalizeVisibleAgentCards,3000);
 
-/* Equity subscription on non-home pages powers floor HUD and global truth. */
-function globalEquity(){
- function attach(){if(!window.BTEquityWall){setTimeout(attach,300);return;}window.BTEquityWall.subscribe(function(st){lastEquity=st;});}
- attach();
-}
-
-installHome();installFloor();installAgent();globalEquity();normalizeVisibleAgentCards();
+installHome();installFloor();installAgent();normalizeVisibleAgentCards();
 })();
