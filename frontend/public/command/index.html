@@ -13,6 +13,7 @@
   <link rel="stylesheet" href="management-v6.css">
   <link rel="stylesheet" href="experiment.css">
   <link rel="stylesheet" href="equity-wall.css">
+  <link rel="stylesheet" href="floor-entry.css">
 </head>
 <body>
   <a class="skip-link" href="#pagebody">Skip to dashboard</a>
@@ -51,6 +52,9 @@
   <script src="experiment.js"></script>
   <script src="office.js"></script>
   <script src="management-v6.js"></script>
+  <!-- THE TRADING FLOOR'S FRONT DOOR (floor.html): additive, wraps
+       BTOffice.render after management-v6.js. -->
+  <script src="floor-entry.js"></script>
   <script src="paper.js"></script>
   <!-- THE LIVE EQUITY WALL: $500,000 PAPER EXPERIMENT and SMALL LIVE CAPITAL
        (per venue), never summed. Its own read (GET /api/command/equity/*),

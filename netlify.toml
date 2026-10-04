@@ -131,6 +131,24 @@
   status = 200
   force = true
 # ── end EDDIE AND SCOUT ───────────────────────────────────────────────
+# ── THE TRADING FLOOR (/floor) AND THE CHIEF ALLOCATOR'S WORKSPACE ─────
+# /floor is BETTOR headquarters: the 3D trading floor (command/floor.html),
+# a static page that reads GET /api/command/floor through the same-origin
+# /api/command/* proxy above (session cookie, read only). /allocator is the
+# Chief Allocator's workspace in the same agent shell as /derek ... /karen.
+# REWRITES (status 200) so the address bar keeps the management URL; ORDER:
+# below the /api/command/* proxy and ABOVE the command-host catch-all.
+[[redirects]]
+  from = "https://command.bettortoken.com/floor"
+  to = "/command/floor.html"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "https://command.bettortoken.com/allocator"
+  to = "/command/agent.html"
+  status = 200
+  force = true
 
 [[redirects]]
   from = "https://command.bettortoken.com/*"
