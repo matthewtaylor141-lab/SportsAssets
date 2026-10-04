@@ -229,8 +229,8 @@ nav a .role{font-size:var(--cf-meta)!important}
  .cf-mission-grid{grid-template-columns:1fr 1fr}
 }
 @media(max-width:780px){
- /* five destinations, five columns (the bar was still a six-column grid) */
- .bt-hq2 .bt-hq2-nav{grid-template-columns:repeat(5,minmax(0,1fr))!important}
+ /* six destinations (Command Ops R1 puts Operations first), six columns */
+ .bt-hq2 .bt-hq2-nav{grid-template-columns:repeat(6,minmax(0,1fr))!important}
  .bt-hq2 .bt-hq2-nav a span:last-child{letter-spacing:0!important;white-space:nowrap}
  /* dock cards wide enough for the longest work state on two lines */
  body.meeting-real-floor.command-final-floor .fl-agent{flex:0 0 152px!important}

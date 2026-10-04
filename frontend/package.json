@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite --host",
-    "build": "tsc -b && vite build",
+    "build": "tsc -b && vite build && node scripts/write-build-info.mjs dist",
+    "build-info": "node scripts/write-build-info.mjs dist",
     "preview": "vite preview"
   },
   "dependencies": {

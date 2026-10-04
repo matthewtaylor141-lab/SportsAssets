@@ -593,4 +593,8 @@ function normalizeVisibleAgentCards(){
 setInterval(normalizeVisibleAgentCards,3000);
 
 installHome();installFloor();installAgent();normalizeVisibleAgentCards();
+/* Command Ops R1: the executive header and the operations desk subscribe to
+   this ONE equity loop (BTEquityWall where loaded, else the bounded direct
+   read) instead of polling /api/command/equity/live a second time. */
+window.BTCommandFinal={onEquity:onEquity};
 })();

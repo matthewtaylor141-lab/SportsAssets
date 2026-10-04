@@ -3,6 +3,7 @@
 if(window.__BTHQ5)return;window.__BTHQ5=true;
 
 var ROUTES=[
+ {name:'Operations Desk',sub:'Live funnel · coverage · opportunities · orders & fills · incidents',href:'/ops',ico:'▤',keys:'G O'},
  {name:'Command Home',sub:'Executive overview',href:'/',ico:'⌂',keys:'G H'},
  {name:'Company',sub:'Digital + human team workspace',href:'/company',ico:'◇',keys:'G C'},
  {name:'Trading Floor',sub:'Live 3D headquarters',href:'/floor',ico:'◈',keys:'G F'},

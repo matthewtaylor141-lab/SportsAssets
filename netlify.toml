@@ -196,6 +196,23 @@
   force = true
 # ── end COMPANY WORKSPACE ──
 
+# ── OPERATIONS DESK (/ops, Command Ops Release 1) ─────────────────────
+# The dense operations page (command/ops.html): live funnel, sport coverage
+# matrix, live opportunities, PAPER orders & fills, agent desk, software vs
+# economic refusals, PinnAPI health, capital / exposure and incidents. A
+# static page that reads GET /api/command/{coverage,release,overview,floor,
+# equity/live,paper/derek,paper/xavier,paper/stream,positions/rooms,
+# profitability/lost-opportunities} through the same-origin /api/command/*
+# proxy above (session cookie, read only); it has no control that writes.
+# REWRITE (status 200) so the address bar keeps /ops; ORDER: below the
+# /api/command/* proxy and ABOVE the command-host catch-all.
+[[redirects]]
+  from = "https://command.bettortoken.com/ops"
+  to = "/command/ops.html"
+  status = 200
+  force = true
+# ── end OPERATIONS DESK ──
+
 [[redirects]]
   from = "https://command.bettortoken.com/*"
   to = "/command/:splat"
@@ -218,5 +235,18 @@
 # The service worker must never be cached stale.
 [[headers]]
   for = "/sw.js"
+  [headers.values]
+    Cache-Control = "no-cache"
+
+# The frontend's own build record (frontend/scripts/write-build-info.mjs):
+# the Command header reads it to show FRONTEND <sha>, so it must never be a
+# stale copy. /build.json is the command host's path to the same file.
+[[headers]]
+  for = "/command/build.json"
+  [headers.values]
+    Cache-Control = "no-cache"
+
+[[headers]]
+  for = "/build.json"
   [headers.values]
     Cache-Control = "no-cache"

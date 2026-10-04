@@ -2,19 +2,21 @@
   'use strict';
   if(window.__BTHQ2Shell){return;} window.__BTHQ2Shell=true;
   var path=(location.pathname||'/').replace(/\/+$/,'')||'/';
-  var page = path==='/floor'?'floor':path.indexOf('/position')===0?'positions':
+  var page = path==='/ops'?'ops':path==='/floor'?'floor':path.indexOf('/position')===0?'positions':
     path==='/profitability'?'profitability':path==='/acceptance'?'acceptance':path==='/company'?'company':
     /\/(derek|xavier|audrey|karen|allocator|eddie|scout)$/.test(path)?'agents':'home';
-  var names={home:'Command',floor:'Trading Floor',positions:'Position Rooms',profitability:'Profitability OS',agents:'AI Team',company:'Company',acceptance:'Acceptance'};
+  var names={ops:'Operations Desk',home:'Command',floor:'Trading Floor',positions:'Position Rooms',profitability:'Profitability OS',agents:'AI Team',company:'Company',acceptance:'Acceptance'};
+  /* Command Ops R1: Operations is the first destination. [page, href, icon,
+     label, short label shown on a phone's six-column bar] */
   var links=[
-    ['home','/','⌂','HQ'],['floor','/floor','◈','Floor'],['positions','/positions','◎','Positions'],
-    ['profitability','/profitability','↗','Economics'],['company','/company','◇','Company']
+    ['ops','/ops','▤','Operations','Ops'],['home','/','⌂','HQ'],['floor','/floor','◈','Floor'],['positions','/positions','◎','Positions','Rooms'],
+    ['profitability','/profitability','↗','Economics','Econ'],['company','/company','◇','Company']
   ];
   document.body.classList.add('bt-hq2');
   var shell=document.createElement('aside'); shell.className='bt-hq2-shell';
   shell.innerHTML='<a class="bt-hq2-logo" href="/" aria-label="BettorToken Command home"></a>'+
     '<nav class="bt-hq2-nav" aria-label="Command Center">'+links.map(function(x){
-      return '<a href="'+x[1]+'" class="'+(page===x[0]?'active':'')+'"><span class="bt-hq2-ico">'+x[2]+'</span><span>'+x[3]+'</span></a>';
+      return '<a href="'+x[1]+'" class="'+(page===x[0]?'active':'')+'"><span class="bt-hq2-ico">'+x[2]+'</span><span'+(x[4]?' data-short="'+x[4]+'"':'')+'>'+x[3]+'</span></a>';
     }).join('')+'</nav><div class="bt-hq2-shell-foot"><div class="bt-hq2-system" id="bt-hq2-system" data-state="unknown"><i></i><span>READ</span></div></div>';
   document.body.appendChild(shell);
   var bar=document.createElement('header'); bar.className='bt-hq2-pagebar';

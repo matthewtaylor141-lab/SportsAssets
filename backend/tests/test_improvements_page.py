@@ -116,6 +116,8 @@ def test_the_route_and_the_relative_references():
     # (brand/install_brand.py) and the HQ5/HQ6 workspace layers (command
     # palette, Company Pulse, five-item navigation) and the Command Final
     # convergence layer (install_command_final.py: command-final.css after
-    # the brand sheet, command-final.js last); every reference relative
-    assert refs == ['improvements.css', 'hq5-workspace.css', 'hq6-complete.css', 'brand/brand.css', 'command-final.css', 'improvements.js', 'hq5-workspace.js', 'hq6-complete.js', 'command-final.js']
+    # the brand sheet, command-final.js) and the Command Ops global layer
+    # (the executive header: command-ops.css / command-ops.js after Command
+    # Final); every reference relative
+    assert refs == ['improvements.css', 'hq5-workspace.css', 'hq6-complete.css', 'brand/brand.css', 'command-final.css', 'command-ops.css', 'improvements.js', 'hq5-workspace.js', 'hq6-complete.js', 'command-final.js', 'command-ops.js']
     assert 'name="viewport"' in HTML and 'name="robots"' in HTML

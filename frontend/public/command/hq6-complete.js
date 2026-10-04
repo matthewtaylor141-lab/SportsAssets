@@ -28,13 +28,14 @@ function humanState(slug,state,detail){
 }
 function edgeLabel(kind){return String(kind||'collaboration').replace(/_/g,' ').toLowerCase().replace(/^./,c=>c.toUpperCase());}
 
-/* Five-item primary navigation. Governance remains in Company + Cmd/K palette. */
+/* Six-item primary navigation (Command Ops R1: Operations first). Governance
+   remains in Company + Cmd/K palette. [href, icon, label, phone short label] */
 function simplifyNav(){
   var nav=document.querySelector('.bt-hq2-nav');if(!nav||nav.dataset.hq6)return;nav.dataset.hq6='1';
-  var wanted=[['/','⌂','HQ'],['/floor','◈','Floor'],['/positions','◎','Positions'],['/profitability','↗','Economics'],['/company','◇','Company']];
+  var wanted=[['/ops','▤','Operations','Ops'],['/','⌂','HQ'],['/floor','◈','Floor'],['/positions','◎','Positions','Rooms'],['/profitability','↗','Economics','Econ'],['/company','◇','Company']];
   var p=PATH;nav.innerHTML=wanted.map(function(x){
     var active=x[0]==='/'?p==='/':x[0]==='/company'?(p==='/company'||p==='/acceptance'||p==='/improvements'||AGENTS.some(a=>p==='/'+a)):p.indexOf(x[0])===0;
-    return '<a href="'+x[0]+'" class="'+(active?'active':'')+'"><span class="bt-hq2-ico">'+x[1]+'</span><span>'+x[2]+'</span></a>';
+    return '<a href="'+x[0]+'" class="'+(active?'active':'')+'"><span class="bt-hq2-ico">'+x[1]+'</span><span'+(x[3]?' data-short="'+x[3]+'"':'')+'>'+x[2]+'</span></a>';
   }).join('');
   var title=document.querySelector('.bt-hq2-page-title');
   if(title&&AGENTS.some(a=>p==='/'+a))title.textContent='Company · '+(p==='/allocator'?'Allie':p.slice(1).replace(/^./,c=>c.toUpperCase()));

@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#030914">
+<meta name="robots" content="noindex,nofollow">
+<meta name="description" content="BETTOR operations desk: the live coverage-to-fill funnel, sport coverage, live opportunities, PAPER orders and fills, the agent desk, software versus economic refusals, PinnAPI health, capital and incidents. Read-only; every value from a production endpoint or DATA NOT AVAILABLE.">
+<title>Operations Desk · BETTOR</title>
+<link rel="stylesheet" href="hq2-brand.css" data-hq2="brand">
+<link rel="stylesheet" href="hq5-workspace.css" data-hq5="css">
+<link rel="stylesheet" href="hq6-complete.css" data-hq6="css">
+<!-- bt-brand: the one BettorToken brand source (brand/install_brand.py) -->
+<link rel="icon" href="brand/favicon.ico" sizes="any" data-brand="icon">
+<link rel="icon" type="image/png" sizes="32x32" href="brand/bettortoken-app-icon-32.png" data-brand="icon32">
+<link rel="apple-touch-icon" href="brand/bettortoken-app-icon-180.png" data-brand="touch">
+<link rel="stylesheet" href="brand/brand.css" data-brand="css">
+<link rel="stylesheet" href="command-final.css" data-command-final="css">
+<link rel="stylesheet" href="command-ops.css" data-command-ops="css">
+<link rel="stylesheet" href="ops-desk.css" data-ops-desk="css">
+</head>
+<body class="ops-desk-page">
+<a class="skip-link" href="#ops-main">Skip to the operations desk</a>
+<main id="ops-main" class="od-main" aria-label="Operations desk">
+  <div class="od-title">
+    <div>
+      <h1>Operations Desk</h1>
+      <p>Coverage → evaluation → ENTER → PAPER orders → PAPER fills, from production reads only. SMALL LIVE stays SHADOW; no control on this page writes.</p>
+    </div>
+    <nav class="od-jump" aria-label="Desk sections">
+      <a href="#funnel">Funnel</a><a href="#coverage">Coverage</a><a href="#opportunities">Opportunities</a><a href="#blotter">Orders &amp; fills</a><a href="#agents">Agents</a><a href="#refusals">Refusals</a><a href="#pinnapi">PinnAPI</a><a href="#capital">Capital</a><a href="#incidents">Incidents</a>
+    </nav>
+  </div>
+  <section id="funnel" class="od-panel od-span" data-panel="funnel" aria-label="Live funnel"></section>
+  <section id="coverage" class="od-panel od-span" data-panel="coverage" aria-label="Sport coverage matrix"></section>
+  <section id="opportunities" class="od-panel od-span" data-panel="opportunities" aria-label="Live opportunity table"></section>
+  <div class="od-grid2">
+    <section id="blotter" class="od-panel" data-panel="blotter" aria-label="PAPER orders and fills blotter"></section>
+    <section id="agents" class="od-panel" data-panel="agents" aria-label="Agent desk"></section>
+  </div>
+  <section id="refusals" class="od-panel od-span" data-panel="refusals" aria-label="Lost opportunities and refusals"></section>
+  <div class="od-grid3">
+    <section id="pinnapi" class="od-panel" data-panel="pinnapi" aria-label="PinnAPI health"></section>
+    <section id="capital" class="od-panel" data-panel="capital" aria-label="Capital and exposure"></section>
+    <section id="incidents" class="od-panel" data-panel="incidents" aria-label="Incident and system status"></section>
+  </div>
+  <footer class="od-foot">
+    Every figure names its production source and age. A value the API does not serve reads DATA NOT AVAILABLE with the reason, never zero and never interpolated. PAPER is simulated execution on a fictional account; SMALL LIVE is SHADOW; the legacy mirror is shown, never summed. Reads are GET only, one in flight per endpoint, paused while this tab is hidden.
+  </footer>
+</main>
+<script src="hq2-shell.js" data-hq2="shell"></script>
+<script src="ops-taxonomy.js" data-ops="taxonomy"></script>
+<script src="hq5-workspace.js" data-hq5="js"></script>
+<script src="hq6-complete.js" data-hq6="js"></script>
+<script src="command-final.js" data-command-final="js"></script>
+<script src="command-ops.js" data-command-ops="js"></script>
+<script src="ops-desk.js" data-ops-desk="js"></script>
+</body>
+</html>
