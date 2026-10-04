@@ -827,3 +827,9 @@ tests/test_command_release_authority.py
 # append-only tables; bundles differ per agent and never widen the
 # registry (Karen / Scout / Eddie boundaries); no voice is borrowed.
 tests/test_agent_identity_api_authority.py
+# (251) P0 INCIDENT inc-edge: the OTHER side of each binary venue contract is
+# valued from the same de-vig as 1 - p (complete outcome set), sealed
+# CALIBRATION_ONLY (never admissible, no executable price), kept by the
+# side-aware uniqueness key, decided by the real paper pass under the
+# unchanged 0.5 pp / fee rules, and measured by Xavier on 1 - p.
+tests/test_the_other_side_of_the_contract_is_valued.py

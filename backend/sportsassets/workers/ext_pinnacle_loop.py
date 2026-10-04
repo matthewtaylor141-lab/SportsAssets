@@ -46,6 +46,7 @@ import os
 import re
 import time
 
+from .. import bettor_complement_valuation as CV
 from .. import bettor_entry_execution as entryx
 from .. import bettor_entry_inventory as inv
 from .. import bettor_research_shadow as rsh
@@ -2856,6 +2857,67 @@ def _displayed_market_state(basis: dict) -> dict:
                           "ESTABLISHED__NOT_USABLE_FOR_ORDERS")}
 
 
+def complement_record(rec: dict, *, contract: dict, ev_quote: dict,
+                      quote: dict, vq: dict, fee_fn, now: float,
+                      outcome_books, extra, reference_check,
+                      decision_lag_s, state_gates_for=None) -> tuple:
+    """THE OTHER SIDE OF THE CONTRACT `rec` VALUED, as (record, None), or
+    (None, the named reason none is written).
+
+    `rec` is the HOME calibration-only record exactly as the cycle built
+    and persisted it. The complement is the SAME `ext.evaluate` on the SAME
+    quote dict (`ev_quote`), contract identity and decision instant, with
+    the other intent and `payout_is_complement=True` -- the lane's one
+    inversion, so its probability is 1 - p(selection) over the complete
+    outcome set and its payout event NOT(selection). Its displayed price is
+    the other side of the SAME refused read
+    (`displayed_not_for_orders_other_side`), and it is sealed
+    CALIBRATION_ONLY: never admissible, no executable price, no size. The
+    settlement comparison and the venue rules text are the contract's own
+    (one contract, two sides) and are carried over; the PinnAPI provenance
+    is re-stamped by `pinnapi_primary.stamp_record`, which removes the
+    probability when the decision-instant check failed, exactly as on the
+    home record. Pure apart from `ext.evaluate` (no I/O)."""
+    other = (vq or {}).get("displayed_not_for_orders_other_side")
+    ok, why = CV.applies(rec, contract, other)
+    if not ok:
+        return None, why
+    home_ev = dict(rec.get("calibration_only_evidence") or {})
+    evidence = CV.complement_evidence(home_ev, other, decision_instant=now,
+                                      decision_lag_s=decision_lag_s)
+    out = ext.evaluate(
+        contract=CV.complement_contract(contract), quote=dict(ev_quote),
+        market_state=_displayed_market_state(
+            {"displayed": evidence["displayed_quote"]}),
+        execution_plan=None,
+        execution_estimate={"p_fill": None, "basis": "P_FILL_NOT_IDENTIFIED",
+                            "crossing": True},
+        size=None,
+        risk={"permitted": False, "reason": "NO_EXECUTION_PLAN_WAS_BUILT"},
+        fee_fn=fee_fn, now=now, outcome_books=outcome_books, armed=True,
+        payout_is_complement=True, extra_refusals=list(extra or []),
+        record_purpose=ext.PURPOSE_CALIBRATION_ONLY,
+        calibration_only_evidence=evidence)
+    cev = out["calibration_only_evidence"]
+    if state_gates_for is not None:
+        cev["state_gates"] = state_gates_for(out.get("probability"))
+    for k in ("freshness", "rails"):
+        if k in home_ev:
+            cev[k] = home_ev[k]
+    out["venue_quote"] = vq
+    out["mapping"] = rec.get("mapping")
+    out["settlement"] = rec.get("settlement")
+    scmp = dict(rec.get("settlement_comparison") or {})
+    scmp.pop("reference_input", None)
+    scmp["complement_of_the_priced_side"] = {
+        "basis": CV.BASIS, "version": CV.VERSION,
+        "home_buy_intent": contract.get("buy_intent")}
+    out["settlement_comparison"] = scmp
+    from .. import pinnapi_primary as primary
+    primary.stamp_record(out, quote, reference_check)
+    return out, None
+
+
 async def venue_quote(conn, *, us_slug, intent, now=None, size=None,
                       subscription=None, revalidation=None):
     """Contemporaneous ACQUISITION ladder for one venue contract.
@@ -3131,6 +3193,17 @@ async def venue_quote(conn, *, us_slug, intent, now=None, size=None,
         "displayed_not_for_orders": _displayed_not_for_orders(
             book, intent=intent, slug=slug, read_at=read_at,
             currency=currency, venue_ts=vt, venue_clock_basis=age_basis),
+        # AND WHAT THE SAME BOOK DISPLAYED ON THE OTHER SIDE, for the
+        # complement record (`bettor_complement_valuation`): the other side
+        # of this binary contract is valued from this one read -- a pure
+        # parse of the payload already in hand, no second request, under
+        # the same no-order key and flag.
+        "displayed_not_for_orders_other_side": (
+            _displayed_not_for_orders(
+                book, intent=CV.other_intent(intent), slug=slug,
+                read_at=read_at, currency=currency, venue_ts=vt,
+                venue_clock_basis=age_basis)
+            if CV.other_intent(intent) else None),
         "venue_ts": vt, "read_at": read_at, "slug": slug, "intent": intent,
         "http_observation": book.get("http_observation")}
     # THE CONTRADICTED CASE FIRST: it is the one backed by evidence.
@@ -7582,7 +7655,15 @@ async def cycle(conn, *, stream_seed=None) -> dict:
     # belongs to stays REFUSED under its venue-read code.
     cal_only: dict = {"attempted": 0, "recorded": 0, "already_recorded": 0,
                       "not_recorded_cycle_bound": 0, "persist_errors": {},
-                      "refusals": {}, "rows": []}
+                      "refusals": {}, "rows": [],
+                      # THE OTHER SIDE OF EACH RECORDED CONTRACT
+                      # (`bettor_complement_valuation`), counted apart from
+                      # the home records above so `recorded` keeps meaning
+                      # one record per refused read.
+                      "complement_recorded": 0,
+                      "complement_already_recorded": 0,
+                      "complement_not_recorded": {},
+                      "complement_persist_errors": {}}
 
     for sport_key, family in sports_for_cycle:
         _close_event()
@@ -8422,9 +8503,11 @@ async def cycle(conn, *, stream_seed=None) -> dict:
                 "settlement_rule": srule["book_rule"],
                 "event_key": quote["event_id"],
             }
-            rec = ext.evaluate(
-                contract=contract,
-                quote={# THE BOOK IS DECLARED, and the source checks it.
+            # THE QUOTE THE VALUATION READS, named once: the complement of
+            # this record (`bettor_complement_valuation`) is valued from the
+            # SAME dict, so the two can never price different inputs.
+            ev_quote = {
+                       # THE BOOK IS DECLARED, and the source checks it.
                        # Omitting it made the valuation refuse every event
                        # with PINNACLE_NOT_IN_THIS_PAYLOAD -- correctly,
                        # since an undeclared book is exactly the silent
@@ -8446,7 +8529,10 @@ async def cycle(conn, *, stream_seed=None) -> dict:
                        "period": ident["period"],
                        "period_basis": "THE_FEED_H2H_MARKET_IS_FULL_MATCH",
                        "line": None,
-                       "settlement_rule": srule["book_rule"]},
+                       "settlement_rule": srule["book_rule"]}
+            rec = ext.evaluate(
+                contract=contract,
+                quote=ev_quote,
                 # THE ACQUISITION PRICE, NOT THE API PRICE. For a LONG
                 # these are the same number; for a SHORT the API price is
                 # YES-denominated and the cost is its complement, and
@@ -8712,6 +8798,52 @@ async def cycle(conn, *, stream_seed=None) -> dict:
                 if stream_seed is not None:
                     stream_seed["valuation_ids"].append(cal_id)
                 await _paper_valuation(conn, cal_id)
+                # ── THE OTHER SIDE OF THE SAME CONTRACT (P0 incident) ──────
+                #
+                # The lane prices the provider's HOME team only, so the other
+                # side of this binary contract -- the away team on an MLB
+                # money line, NO on a soccer per-side contract -- was never
+                # valued, and its paper strategies could never buy it. It is
+                # valued here from the SAME de-vig, quote, identity, read and
+                # decision instant, as 1 - p (complete outcome set), sealed
+                # CALIBRATION_ONLY exactly like this record, and decided by
+                # the paper strategies like any other row. Never raises into
+                # the cycle; every outcome is counted by name.
+                comp, comp_why = complement_record(
+                    rec, contract=contract, ev_quote=ev_quote, quote=quote,
+                    vq=vq, fee_fn=fee_fn, now=now,
+                    outcome_books=quote["depth"].get(str(quote["home"])),
+                    extra=extra, reference_check=reference_check,
+                    decision_lag_s=decision_lag_s,
+                    state_gates_for=(lambda p: entryx.state_from_evidence(
+                        freshness=_cfr,
+                        settlement=_settlement_compatibility(srule),
+                        probability=p, calibration=calibration)))
+                if comp is None:
+                    cal_only["complement_not_recorded"][comp_why] = \
+                        cal_only["complement_not_recorded"].get(
+                            comp_why, 0) + 1
+                    _vq_entry["complement_record"] = comp_why
+                    continue
+                try:
+                    comp_id = await ext.persist(conn, comp)
+                except Exception as exc:                       # noqa: BLE001
+                    name = "COMPLEMENT_PERSIST:" + type(exc).__name__
+                    cal_only["complement_persist_errors"][name] = \
+                        cal_only["complement_persist_errors"].get(
+                            name, 0) + 1
+                    _vq_entry["complement_record"] = name
+                    continue
+                if comp_id is None:
+                    cal_only["complement_already_recorded"] += 1
+                    _vq_entry["complement_record"] = "ALREADY_RECORDED"
+                    continue
+                cal_only["complement_recorded"] += 1
+                _vq_entry["complement_record"] = "RECORDED"
+                _vq_entry["complement_valuation_id"] = comp_id
+                if stream_seed is not None:
+                    stream_seed["valuation_ids"].append(comp_id)
+                await _paper_valuation(conn, comp_id)
                 continue
             try:
                 row_id = await ext.persist(conn, rec)

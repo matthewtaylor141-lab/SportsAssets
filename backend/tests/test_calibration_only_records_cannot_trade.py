@@ -1055,7 +1055,11 @@ async def test_the_scheduled_path_records_a_calibration_row_and_nothing_trades(
             "estimated_edge_per_contract, proposed_size, execution_estimate, "
             "risk_verdict, exposure_observed, calibration_only_evidence, "
             "us_market_slug, event_key, settlement_comparison "
-            "FROM external_valuations WHERE condition_id=$1", F.CONDITION)
+            # THE PRICED SIDE'S ROW. Since migration 251 the same read also
+            # records the OTHER side of the contract (asserted below), so
+            # the row this block describes is named, not left to row order.
+            "FROM external_valuations WHERE condition_id=$1 "
+            "AND NOT payout_is_complement", F.CONDITION)
         assert row["record_purpose"] == vp.CALIBRATION_ONLY
         assert row["admissible"] is False and row["decision"] == "NO_TRADE"
         refusals = list(row["refusals"])
@@ -1105,12 +1109,53 @@ async def test_the_scheduled_path_records_a_calibration_row_and_nothing_trades(
                 "UPDATE external_valuations SET admissible=true, "
                 "decision='BUY' WHERE id=$1", row["id"])
 
-        # ── EACH CONSUMER, HANDED THE CYCLE'S OWN RECORD, REFUSES ─────
+        # ── THE OTHER SIDE OF THE SAME CONTRACT: RECORDED, AND SEALED ─
+        # (P0 incident, inc-edge). The same refused read also values the
+        # complement -- the SHORT side of this contract, paying on
+        # NOT(home) -- from the same de-vig as 1 - p. It is CALIBRATION_ONLY
+        # like the priced side, and every consumer below refuses it too.
+        assert out["calibration_only"]["recorded"] == 1
+        assert out["calibration_only"]["complement_recorded"] == 1
+        comp_row = await conn.fetchrow(
+            "SELECT id, record_purpose, admissible, decision, refusals, "
+            "probability, executable_price, proposed_size, buy_intent, "
+            "payout_event, payout_is_complement, contract_selection, "
+            "calibration_only_evidence FROM external_valuations "
+            "WHERE condition_id=$1 AND payout_is_complement", F.CONDITION)
+        assert comp_row["record_purpose"] == vp.CALIBRATION_ONLY
+        assert comp_row["admissible"] is False
+        assert comp_row["decision"] == "NO_TRADE"
+        assert comp_row["executable_price"] is None
+        assert comp_row["proposed_size"] is None
+        assert list(comp_row["refusals"])[0] == \
+            loop.R_BOOK_CURRENCY_NOT_ESTABLISHED
+        assert comp_row["buy_intent"] == "ORDER_INTENT_BUY_SHORT"
+        assert comp_row["contract_selection"] == F.HOME
+        assert comp_row["payout_event"] == "NOT(%s)" % F.HOME
+        assert comp_row["probability"] == pytest.approx(
+            1.0 - row["probability"], abs=1e-12)
+        cev = json.loads(comp_row["calibration_only_evidence"])
+        assert cev["usable_for_orders"] is False
+        assert cev["displayed_quote"]["usable_for_orders"] is False
+        # the side the complement consumes: the bids, at 1 - bid
+        assert cev["displayed_quote"]["acquisition_price"] == \
+            pytest.approx(1.0 - F.BIDS[0][0])
+        with pytest.raises(asyncpg.PostgresError):
+            await conn.execute(
+                "UPDATE external_valuations SET admissible=true, "
+                "decision='BUY' WHERE id=$1", comp_row["id"])
+
+        # ── EACH CONSUMER, HANDED THE CYCLE'S OWN RECORDS, REFUSES ────
         rec, = [r for r in seen
                 if (r.get("contract") or {}).get("condition_id")
-                == F.CONDITION]
+                == F.CONDITION and not r.get("payout_is_complement")]
+        comp, = [r for r in seen
+                 if (r.get("contract") or {}).get("condition_id")
+                 == F.CONDITION and r.get("payout_is_complement")]
         assert rec["record_purpose"] == vp.CALIBRATION_ONLY
-        for candidate in (rec, dict(rec, admissible=True, decision="BUY")):
+        assert comp["record_purpose"] == vp.CALIBRATION_ONLY
+        for candidate in (rec, dict(rec, admissible=True, decision="BUY"),
+                          comp, dict(comp, admissible=True, decision="BUY")):
             b = await loop.bind_payout_outcome(
                 conn, condition_id=F.CONDITION, payout_event=F.HOME,
                 intent="ORDER_INTENT_BUY_LONG",
