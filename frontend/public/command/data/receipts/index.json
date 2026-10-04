@@ -23,6 +23,18 @@
    "sha": "8e627493cd40e7b63f0b57af23a84019c02b044b",
    "state": "VOID",
    "supersedes": null
+  },
+  {
+   "acceptance": "REJECTED",
+   "candidate": "cand27",
+   "file": "f33b__c23b3baca2dd.json",
+   "gate_id": "f33b",
+   "generated_at": "2026-10-04T11:57:15+00:00",
+   "hash_verified": true,
+   "receipt_sha256": "c23b3baca2dd33628e3cf0ee17a002cc57a72a119e74282ca68d2d5c112a46e9",
+   "sha": "8e627493cd40e7b63f0b57af23a84019c02b044b",
+   "state": "REJECTED",
+   "supersedes": null
   }
  ],
  "schema": "BETTOR_RELEASE_RECEIPT_V1_INDEX"

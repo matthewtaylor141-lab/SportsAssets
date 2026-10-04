@@ -169,6 +169,8 @@
   .ac-matrix td[data-k] { display: flex; flex-direction: column; gap: 3px; }
   .ac-matrix td[data-k]::before { content: attr(data-k); font-size: 9.5px; letter-spacing: .1em; text-transform: uppercase; color: var(--ac-ink-3); }
   .ac-matrix td.rc, .ac-matrix td.blk { grid-column: 1 / -1; min-width: 0; }
+  .ac-matrix td.blk { display: block; }
+  .ac-matrix td.blk::before { display: block; margin-bottom: 3px; }
   .ac-chip { padding: 3px 7px 3px 6px; font-size: 10.5px; }
   .ac-art { grid-template-columns: minmax(0, 1fr); }
 }
