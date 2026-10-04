@@ -112,3 +112,51 @@ def test_the_paper_pass_step_runs_before_the_memory_step():
     assert "agent_work_queues" in names
     assert names[-1] == "agent_memory"
     assert names.index("agent_work_queues") < names.index("agent_memory")
+
+
+# ═════════════════════════════════════════════════════════════════════
+# §3 THE ROOT-CAUSE CLUSTERS AND THEIR READ API
+# ═════════════════════════════════════════════════════════════════════
+
+RCC = ROOT / "agents" / "improvement_clusters.py"
+RCC_API = ROOT / "api" / "command_improvement_clusters.py"
+
+
+def test_the_cluster_runner_writes_only_its_own_tables():
+    assert _writes(RCC) == {"improvement_clusters",
+                            "improvement_cluster_events"}, _writes(RCC)
+    for s in _sql(RCC):
+        assert not re.search(r"\bUPDATE\s+[a-z_]+\s+SET|\bDELETE\s+FROM|"
+                             r"TRUNCATE|ALTER\s|DROP\s", s, re.I), s[:120]
+    # the runner's own rows are OPENED / EFFECT_MEASURED; the human steps
+    # are separate functions it never calls
+    src = RCC.read_text()
+    runner = src[src.index("async def refresh("):
+                 src.index("# THE HUMAN STEPS")]
+    for human in ("link_fix(", "assign_owner(", "close(", "reopen(",
+                  "'FIX_LINKED'", "'CLOSED'", "'OWNER_ASSIGNED'"):
+        assert human not in runner, human
+
+
+def test_the_cluster_modules_import_no_order_execution_or_paper_module():
+    for path, pkg, allowed in (
+            (RCC, "sportsassets.agents",
+             ("sportsassets.agents.karen_runner",)),
+            (RCC_API, "sportsassets.api",
+             ("sportsassets.api.agents_core",
+              "sportsassets.agents.improvement_clusters"))):
+        for imp in _imports(path, pkg):
+            if imp.startswith("sportsassets"):
+                assert any(imp == a or imp.startswith(a + ".")
+                           for a in allowed), (path.name, imp)
+            leaf = imp.rsplit(".", 1)[-1].lower()
+            assert not any(f in leaf for f in FORBIDDEN), (path.name, imp)
+        for word in ORDER_CALLS:
+            assert word not in path.read_text(), (path.name, word)
+
+
+def test_the_cluster_read_api_writes_nothing():
+    for s in _sql(RCC_API):
+        assert not re.search(r"\b(INSERT\s+INTO|UPDATE\s+[a-z_]+\s+SET|"
+                             r"DELETE\s+FROM)", s, re.I), s[:120]
+    assert "transaction(readonly=" in RCC_API.read_text()

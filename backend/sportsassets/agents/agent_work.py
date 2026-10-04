@@ -65,9 +65,11 @@ work writes):
   AUDREY           AUDIT_RECONCILIATION  a small-live reconciliation in
                    DISCREPANCY. COMPLETED when it reconciles.
                    ROOT_CAUSE_TRIAGE  an open root-cause cluster
-                   (agents/improvement_clusters.py) with no effective fix.
-                   COMPLETED when its linked fix is measured effective or it
-                   is closed by a person.
+                   (agents/improvement_clusters.py, refreshed on the same
+                   paper pass) with no effective fix: BLOCKED on the
+                   engineering fix, WAITING on post-fix evidence once one is
+                   linked; COMPLETED when the fix is measured effective or a
+                   person closes the cluster.
 
 An item stays open past its SLA (OVERDUE, visible) until its hard horizon
 (expires_at); then it is FAILED (EXPIRED_UNRESOLVED) and, while its subject
@@ -215,12 +217,12 @@ RUNNER_KINDS = {
     # (tests/test_intel_is_shadow_only.py); her queue is synced on the paper
     # pass that records the ENTER decisions she reviews, and her runs'
     # outcomes (intel_runs) complete or block each item
-    "paper_pass": (K_CANDIDATE, K_RECONCILIATION, K_ALLOCATION),
+    "paper_pass": (K_CANDIDATE, K_RECONCILIATION, K_ALLOCATION,
+                   K_ROOT_CAUSE),
     "karen_runner": (K_INVESTIGATION,),
     "peer_responder": (K_RESPONSE, K_EVALUATION),
     "eddie_runner": (K_ESTIMATE, K_CALIBRATION),
     "scout_runner": (K_RESEARCH,),
-    "improvement_pipeline": (K_ROOT_CAUSE,),
 }
 MAX_ENQUEUE_PER_KIND = 50
 MAX_ATTEMPTS_PER_KIND = 100

@@ -285,6 +285,12 @@ def default_steps() -> list:
         # blocker, evidence needed and collaborator, and closed by the
         # records that resolve them. Writes only agent_work_* records.
         from . import agent_work as AWQ
+        # ROOT-CAUSE CLUSTERS (owner R30 section 20): repeated Karen /
+        # Audrey findings opened as ONE engineering item each, and a linked
+        # fix's measured effect -- before the queue step, which enqueues
+        # Audrey's triage of every open cluster
+        from . import improvement_clusters as RCC
+        steps.append(("root_cause_clusters", RCC.step))
         steps.append(("agent_work_queues", AWQ.step))
     except ImportError:
         pass

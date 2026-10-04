@@ -7,7 +7,10 @@ WHAT IT DOES, every INTERVAL_S in the API process (api/app.py lifespan):
        KAREN_UPHELD_CHALLENGE  karen_challenges state UPHELD (owner: the
                                challenged agent); a challenge of a loop
                                finding is not a second item -- it is that
-                               finding's PEER_CHALLENGE, mirrored below
+                               finding's PEER_CHALLENGE, mirrored below; a
+                               challenge whose class has a root-cause
+                               cluster (migration 234) is not an item: the
+                               cluster is
        AUDREY_FINDING          paper_audrey_findings WARNING / CRITICAL,
                                one item per finding kind; a finding that a
                                coverage alert already routes is left to the
@@ -196,10 +199,21 @@ def _cand(source_kind, source_key, source_ref, title, statement, owner,
 async def seed_karen(conn, *, now: float) -> list:
     if not await _regclass(conn, "karen_challenges"):
         return []
+    # ONE ITEM PER ROOT CAUSE, NOT PER CHALLENGE (owner R30 section 20,
+    # migration 234): an upheld challenge of a class that has a root-cause
+    # cluster (Karen detector x target agent) is a member of that cluster,
+    # which is the engineering item -- production seeded 232 items from 684
+    # repeated HOLD_ON_STALE_PROBABILITY challenges of 7 groups
+    clustered = "TRUE"
+    if await _regclass(conn, "improvement_clusters"):
+        clustered = ("NOT EXISTS (SELECT 1 FROM improvement_clusters c "
+                     " WHERE c.source = 'KAREN' "
+                     "   AND c.finding_class = karen_challenges.detector "
+                     "   AND c.target_agent = karen_challenges.target_agent)")
     rows = await conn.fetch(
         "SELECT * FROM karen_challenges WHERE state = 'UPHELD' "
         "   AND finding_id IS NULL "
-        "   AND resolved_at >= to_timestamp($1) "
+        "   AND resolved_at >= to_timestamp($1) AND " + clustered +
         " ORDER BY resolved_at DESC, challenge_id LIMIT $2",
         now - LOOKBACK_S, SOURCE_LIMIT)
     out = []

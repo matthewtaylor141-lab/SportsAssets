@@ -84,8 +84,61 @@ async def decision(conn, acct, *, at, slug=None, side="LONG",
     return did
 
 
+SIM_VERSION = "PAPER_SIM_V1"
+
+
+async def position(conn, acct, *, strategy=EXPLORATION, slug=None, qty=100,
+                   price=0.40, at, decision_id=None, outcome=None,
+                   payout=None, settle_at=None, fee=0.0) -> dict:
+    """A filled paper ENTRY (order + fill, the ledger's own tables; the 223
+    trigger classifies its sleeve from the strategy) and, optionally, its
+    settlement. {"group_id", "slug", "position_key"}."""
+    slug = slug or "aec-test-%s" % uuid.uuid4().hex[:8]
+    gid = "paper_group_ops_%s" % uuid.uuid4().hex[:10]
+    oid = "paperord:ops%s" % uuid.uuid4().hex[:10]
+    await conn.execute(
+        "INSERT INTO paper_orders (order_id, idempotency_key, account_id, "
+        " session_id, group_id, role, direction, holding_side, intent, "
+        " us_market_slug, fixture, label, order_type, time_in_force, "
+        " allow_partial, qty, limit_price, wire_price, filled_qty, state, "
+        " decided_at, eligible_at, expires_at, simulator_version, strategy, "
+        " terminal_at, decision_id) VALUES ($1,$1,$2,$3,$4,'ENTRY','BUY',"
+        " 'LONG','ORDER_INTENT_BUY_LONG',$5,$6,'{}'::jsonb,'MARKETABLE',"
+        " 'IOC',true,$7,$8,$8,$7,'FILLED',to_timestamp($9),to_timestamp($9),"
+        " to_timestamp($9 + 90),$10,$11,to_timestamp($9 + 2),$12)",
+        oid, acct["account_id"], acct["session_id"], gid, slug,
+        "fx-" + slug, qty, price, float(at), SIM_VERSION, strategy,
+        decision_id)
+    fid = "paperfill:ops%s" % uuid.uuid4().hex[:10]
+    await conn.execute(
+        "INSERT INTO paper_fills (fill_id, idempotency_key, order_id, "
+        " account_id, session_id, group_id, role, direction, holding_side, "
+        " us_market_slug, fixture, label, qty, price, wire_price, fee_usd, "
+        " gross_usd, filled_at, basis, simulator_version, strategy) VALUES "
+        " ($1,$1,$2,$3,$4,$5,'ENTRY','BUY','LONG',$6,$7,'{}'::jsonb,$8,$9,"
+        " $9,$10,$11,to_timestamp($12),'DEPTH_WALK_WITHIN_LIMIT',$13,$14)",
+        fid, oid, acct["account_id"], acct["session_id"], gid, slug,
+        "fx-" + slug, qty, price, fee, round(qty * price, 6), float(at) + 2,
+        SIM_VERSION, strategy)
+    pk = "paperpos:%s:%s:%s:LONG" % (acct["account_id"], gid, slug)
+    if outcome is not None:
+        await conn.execute(
+            "INSERT INTO paper_settlements (settlement_id, account_id, "
+            " position_key, settlement_event_key, version, group_id, "
+            " us_market_slug, holding_side, qty, outcome, "
+            " payout_per_contract, payout_usd, evidence, evidence_source, "
+            " settled_at) VALUES ($1,$2,$3,'test',1,$4,$5,'LONG',$6,$7,$8,"
+            " $9,'{}'::jsonb,'TEST_EVIDENCE',to_timestamp($10))",
+            "papersettle:ops%s" % uuid.uuid4().hex[:10], acct["account_id"],
+            pk, gid, slug, qty, outcome, payout, round(qty * payout, 6),
+            float(settle_at if settle_at is not None else at + 3600))
+    return {"group_id": gid, "slug": slug, "position_key": pk,
+            "order_id": oid}
+
+
 async def stale_hold_review(conn, acct, *, group_id, at,
-                            strategy=EXPLORATION, stale=True) -> str:
+                            strategy=EXPLORATION, stale=True,
+                            recommendation="HOLD") -> str:
     """A Xavier HOLD review in production's pre-R30 shape (stale = true,
     no probability_age_s), as the HOLD_ON_STALE_PROBABILITY detector reads
     it."""
@@ -101,10 +154,10 @@ async def stale_hold_review(conn, acct, *, group_id, at,
         "INSERT INTO paper_xavier_reviews (review_id, session_id, "
         " account_id, group_id, reviewed_at, trigger, recommendation, "
         " measure, alternatives, selection, exposure, strategy) VALUES "
-        " ($1,$2,$3,$4,to_timestamp($5),'SCHEDULED_BACKSTOP','HOLD',"
+        " ($1,$2,$3,$4,to_timestamp($5),'SCHEDULED_BACKSTOP',$8,"
         " $6::jsonb,'{}'::jsonb,'{}'::jsonb,'{}'::jsonb,$7)",
         rid, acct["session_id"], acct["account_id"], group_id, float(at),
-        json.dumps(measure), strategy)
+        json.dumps(measure), strategy, recommendation)
     return rid
 
 
@@ -137,3 +190,19 @@ async def attempts(conn, request_id) -> list:
         "       extract(epoch FROM next_attempt_at)::float8 AS nxt, detail "
         "  FROM agent_work_request_events WHERE request_id = $1 "
         "   AND state = 'ATTEMPTED' ORDER BY event_id", request_id)]
+
+
+async def audrey_finding(conn, acct, *, kind, at, severity="WARNING",
+                         subject=None, strategy=None) -> str:
+    """A paper_audrey_findings row in the operational audit's shape."""
+    fid = "paperaud:%s" % uuid.uuid4().hex[:24]
+    detail = {"statement": "TEST_FIXTURE"}
+    if strategy:
+        detail["strategy"] = strategy
+    await conn.execute(
+        "INSERT INTO paper_audrey_findings (finding_id, session_id, "
+        " account_id, found_at, kind, severity, subject, detail) VALUES "
+        " ($1,$2,$3,to_timestamp($4),$5,$6,$7,$8::jsonb)",
+        fid, acct["session_id"], acct["account_id"], float(at), kind,
+        severity, subject, json.dumps(detail))
+    return fid
