@@ -214,7 +214,9 @@ function renderMap() {
     '<radialGradient id="mapglow" cx="50%" cy="20%" r="70%"><stop offset="0" stop-color="#16324a" stop-opacity=".55"/><stop offset="1" stop-color="#05090e" stop-opacity="0"/></radialGradient></defs>' +
     '<rect width="' + W + '" height="' + H + '" fill="url(#mapglow)"/>' +
     '<rect x="270" y="18" width="460" height="34" rx="6" fill="#0e1b28" stroke="#3d6f93"/><text x="500" y="40" text-anchor="middle" class="m-wall">CENTRAL WALL · equity · feed · health</text>' +
-    '<circle cx="' + cx + '" cy="' + (cy + 120) + '" r="92" fill="none" stroke="#24435c" stroke-dasharray="2 6"/><text x="' + cx + '" y="' + (cy + 126) + '" text-anchor="middle" class="m-logo">BETTOR</text>';
+    '<circle cx="' + cx + '" cy="' + (cy + 120) + '" r="92" fill="none" stroke="#24435c" stroke-dasharray="2 6"/><image href="brand/bettortoken-mark-white.png" x="' + (cx - 38) + '" y="' + (cy + 82) + '" width="76" height="76" opacity=".22"/>' +
+    // each desk's person is drawn from their own portrait (claude/ui-avatars), clipped to the seat circle
+    '<defs><clipPath id="m-face" clipPathUnits="userSpaceOnUse"><circle cx="0" cy="16" r="14"/></clipPath></defs>';
   for (const e of edges) {
     const a = pos[e.from], b = pos[e.to], s = B.BY_AGENT[e.from];
     const mx = (a.x + b.x) / 2 + (cx - (a.x + b.x) / 2) * 0.35, my = (a.y + b.y) / 2 + (cy + 120 - (a.y + b.y) / 2) * 0.55;
@@ -227,7 +229,7 @@ function renderMap() {
       '<circle r="46" fill="' + m.color + '" fill-opacity=".08" stroke="' + m.color + '" stroke-width="2"' + (a && a.state === 'NOT_DEPLOYED' ? ' stroke-dasharray="4 5"' : '') + '/>' +
       (!REDUCED && m.motion === 'work' ? '<circle r="46" class="m-pulse" stroke="' + m.color + '"/>' : '') +
       '<rect x="-36" y="-14" width="72" height="12" rx="3" fill="#162230" stroke="' + s.accent + '" stroke-opacity=".7"/>' +
-      '<circle cy="16" r="15" fill="#0d1620" stroke="' + s.accent + '" stroke-width="2"/><text y="21" text-anchor="middle" class="m-ini" fill="' + s.accent + '">' + esc(s.initial) + '</text>' +
+      '<circle cy="16" r="15" fill="#0d1620" stroke="' + s.accent + '" stroke-width="2"/><image href="team-demo/assets/models/portraits/' + s.slug + '.jpg" x="-14" y="2" width="28" height="28" clip-path="url(#m-face)" preserveAspectRatio="xMidYMin slice"/>' +
       '<text y="-58" text-anchor="middle" class="m-name">' + esc(s.name) + '</text>' +
       '<text y="64" text-anchor="middle" class="m-state" fill="' + m.color + '">' + esc(m.label.toUpperCase()) + '</text>' +
       '<text y="80" text-anchor="middle" class="m-hb">♥ ' + esc(hb(a)) + '</text></g>';

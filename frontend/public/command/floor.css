@@ -208,3 +208,5 @@ button{font:inherit;color:inherit;cursor:pointer}
 .fl-mono[data-agent="allocator"]{background-image:url("team-demo/assets/models/portraits/allocator.jpg")!important}
 .fl-mono[data-agent="audrey"]{background-image:url("team-demo/assets/models/portraits/audrey.jpg")!important}
 .fl-mono[data-agent="xavier"]{background-image:url("team-demo/assets/models/portraits/xavier.jpg")!important}
+/* HQ5's compact dock sizes .fl-mono with a higher-specificity rule; keep the portrait (no letter) inside it */
+body.meeting-real-floor .fl-agent .fl-mono[data-agent],body .fl-p-head .fl-mono[data-agent]{font-size:0!important;color:transparent!important}
