@@ -20,7 +20,7 @@ WHAT IT REPORTS, EACH WITH ITS SOURCE:
              when one side is shorter, MISALIGNED when they differ, UNKNOWN
              when either is missing.
   schema     max(version) of schema_migrations, and every migration numbered
-             216..225 that exists in THIS build or in the database, with its
+             216..226 that exists in THIS build or in the database, with its
              applied_at (or NOT_APPLIED).
   receipts   the release receipts committed under sportsassets/
              release_receipts (written by tools/release_receipt.py), each
