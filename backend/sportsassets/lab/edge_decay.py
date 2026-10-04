@@ -24,15 +24,24 @@ accessor `sportsassets.lab.pit` at the instant it is used):
   DETECTION t0  the earliest instant BETTOR held BOTH the qualified
       probability and the executable book of the decision: the latest of the
       decision clock (paper_decisions.decided_at) and its own book's known
-      instant (paper_book_observations observed_at / recorded_at). The
-      strategy reads the book AFTER its clock starts, so the book instant is
-      usually the later one.
+      instant (paper_book_observations observed_at / recorded_at). Measured
+      on production (research-sql run 37231482741, 564 qualified rows): the
+      decision's book was OBSERVED a median 0.15 s BEFORE the decision clock
+      (range -4.35 .. +6.42 s) and RECORDED a median 0.22 s after it was
+      observed (561 of 564 recorded later), so t0 is usually the book's
+      recorded instant, a fraction of a second after the decision clock.
 
   EXECUTABLE ECONOMICS AT AN INSTANT tau  from the latest recorded book of the
       same market known at tau, and the latest Pinnacle probability of the
-      same contract orientation known at tau, which must be FRESH under the
-      lane's own rule at tau (tau - provider stamp <= the decision's recorded
-      limit_s, 30 s; never loosened). Two measures:
+      same contract orientation known at tau that the LANE ITSELF QUALIFIED
+      (the completed-game match's `probability_qualified_by_the_lane` and
+      identity checks: no probability-stage or identity-stage lane refusal on
+      the valuation row, with the policy's own not-applied rule for a
+      PinnAPI sole-authority read -- `lane_probability_check`), which must be
+      FRESH under the lane's own rule at tau (tau - provider stamp <= the
+      decision's recorded limit_s, 30 s; never loosened). A later valuation
+      whose lane refusals were not recorded in the evidence is NOT used
+      (fail closed, counted). Two measures:
         TOP_NET_EDGE     per contract at the best level: p - price - fee per
                          contract (the deployed fee schedule), probability
                          points. Every qualified opportunity.
@@ -60,31 +69,48 @@ accessor `sportsassets.lab.pit` at the instant it is used):
       from EVERY recorded book known in (t0, t0 + 600 s] -- a sample's instant
       is the book's KNOWN instant (its latest recorded stamp), so a row
       recorded after it was observed counts only from then: 75% retention, half-life
-      and time to zero executable edge. A crossing is the FIRST recorded
+      and time to zero executable edge. The DETECTION sample is always the
+      first sample (t = 0); a later book is never placed at t = 0 (its offset
+      keeps microsecond precision, at least 1 us), so it can never replace
+      the detection edge. A crossing is the FIRST recorded
       observation at or below the target -- an UPPER bound; the previous
       observation is the LOWER bound. No crossing by the last observation is
       RIGHT_CENSORED at it; no observation after t0 is UNOBSERVED.
 
   LATENCY CHAIN  provider stamp -> our receipt -> valuation -> Derek's
-      decision -> Karen -> Allie -> Eddie -> canonical intent -> adapter.
-      Historically Karen / Allie / Eddie were not pre-trade (they reviewed
-      decisions after the fact; migration 225 is not deployed), so those
-      stages are UNAVAILABLE with that reason. FORWARD, the reader consumes
-      the canonical intent's stage stamps (`latency_stages`, the intent
-      stream's column) and the PAPER adapter record's stamps whenever they
-      are present (STAGE_KEYS below); a stage nobody stamps stays
+      decision start -> Derek's decision complete -> Karen -> Allie -> Eddie
+      -> canonical intent -> adapter (plus the decision book's receipt,
+      `book_observed`, an auxiliary stamp: on production it usually precedes
+      the decision clock). Historically Karen / Allie / Eddie were not
+      pre-trade (they reviewed decisions after the fact; migration 225 is not
+      deployed), so those stages are UNAVAILABLE with that reason. FORWARD,
+      the reader consumes the canonical intent's stage stamps (`latency_
+      stages`, the intent stream's column: pinnacle_observed_at, ingest_at,
+      probability_qualified_at, book_observed_at, decision_start_at) and the
+      PAPER adapter record's `refs.stages` (intent_recorded_at,
+      paper_submit_at) whenever they are present (STAGE_KEYS below); a stage
+      nobody stamps (Karen / Allie / Eddie completion today) stays
       UNAVAILABLE with its reason.
 
   EV LOST DURING BETTOR PROCESSING  (ENTER) the decided order's EV at
-      detection minus its EV at the execution instant -- the first recorded
-      book at or after the order's eligible instant (decided_at + the
-      simulator's delay), as the paper simulator itself executes -- with the
-      probability fresh then, in dollars at the decided quantity (when the
-      simulator filled, the book it filled on). An order the simulator
-      expired because its first book after eligibility was UNREADABLE, or
-      with no readable book in its window, has NO execution evidence: its
-      loss is UNAVAILABLE and counted by reason (it expired unfilled on the
-      paper ledger -- a fact of the paper pipeline, not a market measurement).
+      detection minus its EV at the ORDER HANDOFF (the adapter stamp, else
+      Derek's decision-complete stamp), on the latest readable book recorded
+      INSIDE (t0, handoff] with the probability fresh then, in dollars at the
+      decided quantity. No book recorded inside that window (the usual case:
+      the window is a fraction of a second) is UNAVAILABLE
+      (NO_BOOK_RECORDED_INSIDE_THE_PROCESSING_WINDOW) -- never a zero.
+
+  DETECTION -> SIMULATED EXECUTION  (ENTER, a DIFFERENT window, labelled as
+      such) the decided order's EV at detection minus its EV on the paper
+      simulator's execution book -- the first recorded book at or after the
+      order's recorded eligible instant (the simulator's configured venue
+      delay) -- with the probability fresh then (when the simulator filled,
+      the book it filled on). It spans the configured delay AND the paper
+      path's book-read cadence, so it is NOT BETTOR processing. An ENTER with
+      no paper order, an order the simulator expired because its first book
+      after eligibility was UNREADABLE, an order with no readable book in its
+      window, or an execution book observed before detection has NO
+      execution evidence: UNAVAILABLE and counted by reason.
 
 Nothing here decides, sizes, gates or sends anything. It imports nothing from
 any order, venue, execution or funded module, and no decision path imports it
@@ -121,12 +147,33 @@ MAX_HORIZON_S = HORIZONS_S[-1]
 #: workers.ext_pinnacle_loop.PINNACLE_MAX_AGE_S); a decision's own recorded
 #: limit_s is used when present and never a LARGER one
 PROBABILITY_LIMIT_S = 30.0
-#: the paper simulator's decision -> execution delay when an order record
-#: carries no eligible instant (bettor_paper_session default)
+#: the paper simulator's configured decision -> execution delay and
+#: marketable time to live (bettor_paper_session defaults; pinned equal by a
+#: test). REFERENCE VALUES ONLY: they are reported as the configuration and
+#: NEVER substituted for an order's missing recorded eligible / expiry
+#: instant (an ENTER without a paper order, or an order without its window,
+#: is UNAVAILABLE with its reason -- never a synthesized window).
 SIM_DELAY_S = 2.0
-#: the paper simulator's marketable order time to live from the decision
-#: (bettor_paper_session default) when an order record carries no expiry
 SIM_TTL_S = 90.0
+#: THE LANE'S OWN PROBABILITY QUALIFICATION of a valuation row, as the
+#: completed-game match applies it (paper_benchmark.completed_game_match:
+#: `probability_qualified_by_the_lane` passes only with no probability-stage
+#: lane refusal on the row, and C_IDENTITY only with no identity-stage lane
+#: refusal; the policy does not apply OUTCOME_DEPTH_BELOW_FLOOR to a PinnAPI
+#: sole-authority read). The stage of a code is read from the lane's own
+#: classifier (bettor_external_shadow.STAGE_OF, a pure module the decision
+#: code itself uses through derek_policy._lane_stage); the two policy
+#: constants below are pinned equal to paper_benchmark's by a test, so the
+#: lab never imports the paper path.
+LANE_BLOCKING_STAGES = ("1_PROBABILITY", "3_IDENTITY")
+THIN_OUTCOME = "OUTCOME_DEPTH_BELOW_FLOOR"
+PINNAPI_PROVIDER = "pinnapi.com/raw-websocket"
+#: the collector's quote-context vocabulary (bettor_settlement_terms
+#: CTX_PRE_GAME / CTX_LIVE; pinned equal by a test), mapped BY EQUALITY. A
+#: scheduled start (us_premap.game_start) never establishes the context --
+#: the settlement-terms module refuses that inference by name -- so a row
+#: without a recorded context is phase UNAVAILABLE, never guessed.
+QUOTE_CONTEXT_PHASE = {"PRE_GAME": "PREGAME", "IN_PLAY": "LIVE"}
 FEE_BLOCK = 10000
 #: the paper simulator's terminal reasons that mean the order never met an
 #: execution book (bettor_paper_simulator R_BOOK_UNREADABLE /
@@ -149,12 +196,25 @@ VENUE_AT_P0 = "VENUE_BOOK_AT_DETECTION_P"
 #: for (first present wins) in the canonical intent's `latency_stages` / the
 #: PAPER adapter record's `refs.stages`.
 STAGES = ("provider_observed", "bettor_receipt", "valuation_complete",
-          "derek_complete", "karen_complete", "allie_complete",
-          "eddie_complete", "canonical_intent_complete", "adapter_receipt")
+          "decision_start", "derek_complete", "karen_complete",
+          "allie_complete", "eddie_complete", "canonical_intent_complete",
+          "adapter_receipt")
+#: the decision book's receipt: recorded, but NOT in the owner's sequence --
+#: on production it usually precedes the decision clock (median -0.15 s)
+AUX_STAGES = ("book_observed",)
+#: the stamp keys, first present wins. The intent stream's
+#: canonical_decision_intents.latency_stages carries pinnacle_observed_at,
+#: ingest_at, probability_qualified_at, book_observed_at and
+#: decision_start_at (plus a `basis` dict); the PAPER adapter record's
+#: refs.stages carries intent_recorded_at and paper_submit_at (or
+#: paper_submit_why). The *_complete_at keys are the per-component
+#: completion stamps no writer produces yet -- consumed the moment one does.
 STAGE_KEYS = {
     "provider_observed": ("pinnacle_observed_at",),
     "bettor_receipt": ("ingest_at", "pinnacle_received_at"),
     "valuation_complete": ("probability_qualified_at", "valuation_complete_at"),
+    "decision_start": ("decision_start_at",),
+    "book_observed": ("book_observed_at",),
     "derek_complete": ("derek_complete_at", "decision_complete_at"),
     "karen_complete": ("karen_complete_at",),
     "allie_complete": ("allie_complete_at",),
@@ -162,6 +222,12 @@ STAGE_KEYS = {
     "canonical_intent_complete": ("intent_built_at", "intent_recorded_at"),
     "adapter_receipt": ("adapter_receipt_at", "paper_submit_at"),
 }
+#: the stamps the canonical intent stream records today; a stage outside it
+#: is a per-component completion stamp the intent stream does not write
+INTENT_STREAM_STAMPS = ("pinnacle_observed_at", "ingest_at",
+                        "probability_qualified_at", "book_observed_at",
+                        "decision_start_at", "intent_recorded_at",
+                        "paper_submit_at")
 NOT_PRE_TRADE = ("NOT_PRE_TRADE_HISTORICALLY: Karen, Allie and Eddie reviewed "
                  "decisions after the fact; no canonical intent (migration "
                  "225) carried a pre-trade stage stamp")
@@ -351,12 +417,52 @@ def order_ev(levels: list, *, p, limit, qty, at, fee_fn=None) -> dict:
 
 # ─────────────────────────── the probability at an instant ─────────────
 
+def lane_probability_check(v: dict) -> dict:
+    """IS THIS VALUATION'S PROBABILITY ONE THE STRATEGY WOULD ACCEPT? (pure)
+    The completed-game match passes `probability_qualified_by_the_lane` only
+    when the row carries no probability-stage lane refusal, and its identity
+    check only when it carries no identity-stage lane refusal; the policy
+    does not apply OUTCOME_DEPTH_BELOW_FLOOR to a PinnAPI sole-authority read
+    (provider PinnAPI with a recorded outcome count >= 1). A row whose lane
+    refusals were not recorded in the evidence is NOT qualified (None):
+    fail closed, never assumed clean."""
+    if v.get("lane_qualified_basis") == "THE_DECISION_ITSELF":
+        return {"qualified": True, "basis": "THE_DECISION_ITSELF"}
+    if not v.get("refusals_recorded"):
+        return {"qualified": None,
+                "why": "LANE_REFUSALS_NOT_RECORDED_IN_THE_EVIDENCE"}
+    from .. import bettor_external_shadow as EXT
+    try:
+        books = int(v.get("outcome_books")) \
+            if v.get("outcome_books") is not None else None
+    except (TypeError, ValueError):
+        books = None
+    sole = v.get("provider") == PINNAPI_PROVIDER and books is not None \
+        and books >= 1
+    blocking = []
+    for code in v.get("refusals") or []:
+        base = str(code).split(":")[0]
+        if EXT.STAGE_OF.get(base) not in LANE_BLOCKING_STAGES:
+            continue
+        if sole and base == THIN_OUTCOME:
+            continue                      # the policy's own not-applied rule
+        blocking.append(str(code))
+    if blocking:
+        return {"qualified": False, "why": "LANE_REFUSED_THE_PROBABILITY",
+                "refusals": blocking}
+    return {"qualified": True, "basis": "NO_BLOCKING_LANE_REFUSAL_ON_THE_ROW",
+            "pinnapi_sole_authority": sole}
+
+
 def detection_valuation(d: dict, v0: dict | None) -> dict:
     """The decision's own probability as a valuation-shaped row (the PIT
-    accessor's external_valuations stamps)."""
+    accessor's external_valuations stamps). It is lane-qualified by the
+    decision itself: a qualified opportunity's refusals are all economic,
+    so its probability check passed."""
     pin = d.get("pinnacle") or {}
     v0 = v0 or {}
     return {"valuation_id": v0.get("id") or d.get("valuation_id"),
+            "lane_qualified_basis": "THE_DECISION_ITSELF",
             "p": _f(d.get("p_pinnacle")),
             "observed_at": _f(pin.get("at")) if pin.get("at") is not None
             else _f(v0.get("observed_at")),
@@ -369,27 +475,42 @@ def detection_valuation(d: dict, v0: dict | None) -> dict:
 
 
 def probability_at(cands: list, tau: float, limit_s: float) -> dict:
-    """THE PROBABILITY KNOWN AT tau: of the valuations visible at tau (PIT),
-    the one with the newest provider stamp; FRESH when 0 <= tau - stamp <=
-    limit_s (the lane's rule), else STALE."""
+    """THE PROBABILITY KNOWN AT tau: of the valuations visible at tau (PIT)
+    that the LANE QUALIFIED (lane_probability_check), the one with the
+    newest provider stamp; FRESH when 0 <= tau - stamp <= limit_s (the
+    lane's rule), else STALE. Visible rows the lane refused, or whose lane
+    refusals were not recorded, are never used and are counted."""
     vis = PIT.visible("external_valuations", cands, tau)
     vis = [v for v in vis if v.get("p") is not None
            and v.get("observed_at") is not None]
-    if not vis:
+    excluded: dict = {}
+    ok = []
+    for v in vis:
+        chk = lane_probability_check(v)
+        if chk.get("qualified"):
+            ok.append(v)
+        else:
+            k = chk.get("why") or "NOT_QUALIFIED"
+            excluded[k] = excluded.get(k, 0) + 1
+    if not ok:
         return {"status": ABSENT, "p": None,
-                "why": "NO_VALUATION_KNOWN_AT_THE_INSTANT"}
-    v = max(vis, key=lambda x: (float(x["observed_at"]),
-                                float(x.get("decided_at") or 0)))
+                "why": ("NO_LANE_QUALIFIED_VALUATION_KNOWN_AT_THE_INSTANT"
+                        if excluded else "NO_VALUATION_KNOWN_AT_THE_INSTANT"),
+                "excluded_valuations": excluded}
+    v = max(ok, key=lambda x: (float(x["observed_at"]),
+                               float(x.get("decided_at") or 0)))
     age = float(tau) - float(v["observed_at"])
     if age < -PIT.EPS_S:
         return {"status": STALE, "p": None, "age_s": _r(age, 3),
                 "why": "PROVIDER_STAMP_AFTER_THE_INSTANT",
-                "valuation_id": v.get("valuation_id")}
+                "valuation_id": v.get("valuation_id"),
+                "excluded_valuations": excluded}
     fresh = age <= float(limit_s) + 1e-9
     return {"status": FRESH if fresh else STALE,
             "p": float(v["p"]) if fresh else None,
             "p_recorded": float(v["p"]), "age_s": _r(age, 3),
-            "limit_s": float(limit_s), "valuation_id": v.get("valuation_id")}
+            "limit_s": float(limit_s), "valuation_id": v.get("valuation_id"),
+            "excluded_valuations": excluded}
 
 
 # ─────────────────────────── one opportunity ───────────────────────────
@@ -406,10 +527,18 @@ def _book_row(b) -> dict | None:
 
 
 def _val_row(v) -> dict:
+    """A later valuation as a dict. Extraction rows are [id, observed_at,
+    received_at, decided_at, p] (V1: no lane refusals recorded) or the same
+    followed by [refusals, provider, outcome_books] (V2)."""
     if isinstance(v, (list, tuple)):
-        return {"valuation_id": v[0], "observed_at": _f(v[1]),
-                "received_at": _f(v[2]), "decided_at": _f(v[3]),
-                "p": _f(v[4])}
+        out = {"valuation_id": v[0], "observed_at": _f(v[1]),
+               "received_at": _f(v[2]), "decided_at": _f(v[3]),
+               "p": _f(v[4])}
+        if len(v) >= 8:
+            out.update(refusals=[str(x) for x in (v[5] or [])],
+                       refusals_recorded=True, provider=v[6],
+                       outcome_books=v[7])
+        return out
     v = dict(v)
     v.setdefault("valuation_id", v.get("id"))
     if "p" not in v:
@@ -426,19 +555,37 @@ def limit_of(d: dict) -> float:
     return min(rec, PROBABILITY_LIMIT_S)
 
 
+#: a post-detection sample is never placed at t = 0 (it would compete with
+#: the detection sample); its offset keeps microsecond precision
+MIN_SAMPLE_OFFSET_S = 1e-6
+
+
+def _offset(off: float) -> float:
+    return max(round(float(off), 6), MIN_SAMPLE_OFFSET_S)
+
+
 def decay(samples: list) -> dict:
-    """75% retention, half-life and time to zero on [(t, edge)] (t=0 first),
-    through the vendored reference functions, with bounds and censoring."""
-    s = sorted((float(t), float(e)) for t, e in samples if e is not None)
-    if not s or s[0][0] != 0.0:
+    """75% retention, half-life and time to zero on [(t, edge)], through the
+    vendored reference functions, with bounds and censoring. THE DETECTION
+    SAMPLE IS THE FIRST t = 0 SAMPLE GIVEN and is never replaced: the later
+    samples are ordered by time only (never by edge), and any further t = 0
+    sample is dropped and counted rather than allowed to become the initial
+    edge."""
+    pts = [(float(t), float(e)) for t, e in samples if e is not None]
+    det = next((p for p in pts if p[0] == 0.0), None)
+    if det is None:
         return {"status": UNAVAILABLE, "why": "NO_INITIAL_EDGE"}
-    e0 = s[0][1]
+    dropped = sum(1 for p in pts if p[0] == 0.0) - 1
+    later = sorted((p for p in pts if p[0] > 0.0), key=lambda p: p[0])
+    s = [det] + later
+    e0 = det[1]
     if e0 <= 0:
         return {"status": UNAVAILABLE, "why": "INITIAL_EDGE_NOT_POSITIVE",
                 "initial_edge": e0}
     if len(s) == 1:
         return {"status": "UNOBSERVED_AFTER_DETECTION", "initial_edge": e0,
-                "t75": None, "half_life": None, "time_to_zero": None}
+                "t75": None, "half_life": None, "time_to_zero": None,
+                "dropped_zero_offset_samples": dropped}
     last = s[-1][0]
 
     def bound(t):
@@ -448,6 +595,7 @@ def decay(samples: list) -> dict:
         return {"status": "CROSSED", "upper_s": t, "lower_s": prev}
     return {"status": MEASURED, "initial_edge": e0, "samples": len(s),
             "last_observed_s": last,
+            "dropped_zero_offset_samples": dropped,
             "t75": bound(REF.first_crossing(s, 0.75)),
             "half_life": bound(REF.edge_half_life(s)),
             "time_to_zero": bound(REF.time_to_zero(s)),

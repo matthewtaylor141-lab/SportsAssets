@@ -7,6 +7,7 @@ none). Deterministic: every resample uses a seeded generator.
   kaplan_meier       survival of a duration with right censoring
   km_quantile        the time by which a fraction q of units had crossed
   bonferroni_level   the per-interval level for k simultaneous intervals
+  fisher_exact       two-sided exact test of a 2x2 table (hypergeometric)
 """
 from __future__ import annotations
 
@@ -100,6 +101,34 @@ def km_quantile(units, q: float):
         if s <= 1.0 - float(q) + 1e-12:
             return t
     return None
+
+
+def fisher_exact(a: int, b: int, c: int, d: int) -> dict:
+    """TWO-SIDED FISHER EXACT TEST of the 2x2 table [[a, b], [c, d]] (rows =
+    arms, columns = event / no event): the probability, under independence
+    with every margin fixed, of a table at most as likely as the observed
+    one (the conventional two-sided definition; a relative tolerance keeps
+    ties of equal probability on both sides). Exact, no approximation."""
+    a, b, c, d = (int(x) for x in (a, b, c, d))
+    if min(a, b, c, d) < 0:
+        return {"status": "UNAVAILABLE", "why": "NEGATIVE_CELL"}
+    r1, r2, c1 = a + b, c + d, a + c
+    n = r1 + r2
+    if r1 == 0 or r2 == 0 or c1 == 0 or c1 == n:
+        return {"status": "UNAVAILABLE", "why": "A_MARGIN_IS_ZERO",
+                "table": [[a, b], [c, d]]}
+    denom = math.comb(n, c1)
+
+    def pr(x):
+        return math.comb(r1, x) * math.comb(r2, c1 - x) / denom
+    lo, hi = max(0, c1 - r2), min(r1, c1)
+    p_obs = pr(a)
+    p = sum(pr(x) for x in range(lo, hi + 1)
+            if pr(x) <= p_obs * (1.0 + 1e-7))
+    return {"status": "MEASURED", "p_two_sided": round(min(1.0, p), 6),
+            "table": [[a, b], [c, d]],
+            "method": "Fisher exact, two-sided (sum of tables no more likely "
+                      "than the observed one)"}
 
 
 def km_quartiles(units) -> dict:
