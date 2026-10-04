@@ -307,9 +307,30 @@ class Env:
     pass
 
 
-async def _env(monkeypatch) -> Env:
+async def _env(monkeypatch, *, canonical_authorization_assumed=True) -> Env:
+    """THE STATE MACHINE BELOW THE ONE-ORIGIN GATE (integration of the R30A
+    intent and chaos streams). Since the intent stream made the canonical
+    intent the ONE origin of live exposure, ActualLane._run asks
+    live_parity.authorize_live_exposure before its claim, and that refuses in
+    SHADOW (no LiveAuthorization can be issued) -- so on the merged release
+    candidate every scenario here was REFUSED before the claim and the
+    recovery machinery this file proves was never reached (29 failures).
+    The faults below are injected AFTER that decision (the claim, the send,
+    the reconciliation), so the honest unit is the machine under the
+    authorization stated as an assumption -- the same test-only mechanism the
+    intent stream's own lane-mechanics tests use
+    (tests/admission_fixture.assume_canonical_live_authorization, as in
+    tests/test_execmirror and tests/test_execution_intent_fanout). Nothing in
+    production changes: SMALL LIVE stays SHADOW, live_parity issues no
+    authorization, and execmirror.Venue.place (which ChaosVenue stands in
+    for) still refuses every new order without one. The refusal on the real
+    path is proven in this file
+    (test_without_the_canonical_authorization_the_lane_claims_and_sends_
+    nothing) and in tests/test_live_parity_convergence.py."""
     import asyncpg
     AF.approve_test_rule(monkeypatch)
+    if canonical_authorization_assumed:
+        AF.assume_canonical_live_authorization(monkeypatch)
     monkeypatch.setenv(EP.KEY_ID_ENV, KID)
     monkeypatch.setenv(EP.SECRET_ENV, SEC)
     e = Env()
@@ -435,6 +456,37 @@ async def _runner_pass(mirror, conn) -> None:
     await mirror.recover(conn)
     await mirror.poll(conn)
     await mirror.live_handoffs(conn)
+
+
+# ─────────────────────────── the one-origin gate ────────────────────────
+
+@pg
+async def test_without_the_canonical_authorization_the_lane_claims_and_sends_nothing(
+        monkeypatch):
+    """BOTH OWNER REQUIREMENTS HOLD TOGETHER. With the canonical SMALL LIVE
+    authorization NOT assumed -- the production state: SHADOW issues none --
+    the very lane every scenario below drives refuses before its claim: no
+    execmirror_orders row, nothing handed to the venue, no recovery work
+    created, and a later runner pass sends nothing either. The recovery
+    proofs that follow therefore exercise the machine BELOW the gate; they
+    never open a path around it."""
+    e = await _env(monkeypatch, canonical_authorization_assumed=False)
+    try:
+        it = await _intent(e, qty=3000)
+        e.venue.script = [{"fill": 3}]
+        got = await e.lane._run(e.conn, it["intent_id"])
+        assert got["state"] == EI.A_REFUSED, got
+        assert await _row(e, it["intent_id"]) is None
+        assert e.venue.placed == []
+        ir = await _intent_row(e, it["intent_id"])
+        assert ir["actual_state"] == EI.A_REFUSED and ir["actual_refusal"], ir
+        await _runner_pass(e.mirror, e.conn)
+        await e.mirror.tick(e.conn)
+        assert e.venue.placed == []
+        assert await e.conn.fetchval(
+            "SELECT count(*) FROM execmirror_orders") == 0
+    finally:
+        await _close(e)
 
 
 # ─────────────────────────── ambiguous submission ───────────────────────

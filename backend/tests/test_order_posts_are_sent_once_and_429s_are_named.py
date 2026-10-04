@@ -56,6 +56,11 @@ from sportsassets import venue_pace as VP
 from sportsassets import venue_request_gate as GRT
 from sportsassets import venue_sdk
 
+try:    # pytest collects tests/ as a package; unittest discovery does not
+    from tests import admission_fixture as AF
+except ImportError:                                           # pragma: no cover
+    import admission_fixture as AF
+
 sdk = pytest.importorskip("polymarket_us")
 from polymarket_us import errors as SE  # noqa: E402
 
@@ -310,7 +315,29 @@ def test_the_execution_mirror_never_reaches_the_wire_with_a_new_order(monkeypatc
 
 # ═══════════════ 4 · pmus.submit_fok: ONE CREATE PER CALL ═══════════════
 
-def _install_pmus(monkeypatch, wire: Wire):
+def _install_pmus(monkeypatch, wire: Wire, *,
+                  canonical_authorization_assumed: bool = True):
+    """The installed SDK over the counting wire, behind the adapter's real
+    request gate.
+
+    THE ONE-ORIGIN GATE (integration of the R30A intent and chaos streams).
+    Since the intent stream, pmus.submit_fok refuses every BUY without the
+    canonical SMALL LIVE adapter's LiveAuthorization (require_canonical_
+    origination, before the client is built), which SHADOW never issues --
+    so on the merged release candidate every BUY below was refused before
+    the wire and the send-once / 429 properties were never reached (12
+    failures). Those properties are about the ONE create the adapter sends
+    once it is authorized, so the authorization is stated as an assumption
+    with the intent stream's own test-only helper
+    (tests/admission_fixture.assume_canonical_venue_authorization, as in
+    tests/test_pmus and tests/test_pmus_post_only); the execution gate, the
+    preview guard, the request gate and the transport all still run. The
+    refusal itself is proven on this same wire below
+    (test_without_the_canonical_authorization_a_buy_never_reaches_the_wire)
+    and in tests/test_live_parity_convergence.py §7. A SELL / close is not
+    gated and needs no assumption."""
+    if canonical_authorization_assumed:
+        AF.assume_canonical_venue_authorization(monkeypatch)
     client = _mock(_sdk_client(**venue_sdk.client_kwargs()), wire)
     got = pmus._install_request_gate(client)
     assert got["installed"] is True, got
@@ -319,6 +346,27 @@ def _install_pmus(monkeypatch, wire: Wire):
 
 
 PREVIEW = (200, {"order": {"price": {"value": "0.55"}, "quantity": 3}})
+
+
+@pytest.mark.parametrize("post_only", [False, True], ids=["ioc", "post_only"])
+def test_without_the_canonical_authorization_a_buy_never_reaches_the_wire(
+        post_only, monkeypatch, _clean_venue_state):
+    """BOTH OWNER REQUIREMENTS HOLD TOGETHER: with no canonical authorization
+    (production: SHADOW issues none) a BUY through the real adapter is
+    refused by name before ANY request -- no preview, no create -- and the
+    shared 429 circuit is untouched. The send-once proofs above and below
+    therefore measure the adapter BEHIND the gate, never a path around it."""
+    from sportsassets import execution_gate as EG
+    wire = Wire(default=(200, {"id": "should-never-exist"}))
+    _install_pmus(monkeypatch, wire, canonical_authorization_assumed=False)
+    kw = (dict(post_only=True, tif="TIME_IN_FORCE_GOOD_TILL_DATE",
+               good_till="2026-10-04T23:00:00Z") if post_only else
+          dict(tif="TIME_IN_FORCE_IMMEDIATE_OR_CANCEL"))
+    with pytest.raises(EG.Denied) as exc:
+        pmus.submit_fok(SLUG, 0.55, 3, intent="ORDER_INTENT_BUY_LONG", **kw)
+    assert exc.value.reason == pmus.R_CANONICAL_ORIGINATION
+    assert wire.seen == []
+    assert VP.penalty_left() == 0.0
 
 
 @pytest.mark.parametrize("answer,raised", AMBIGUOUS,
