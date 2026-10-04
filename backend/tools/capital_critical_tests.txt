@@ -677,3 +677,19 @@ tests/test_karen_persona_and_peer_response.py
 # a census that files a requested league honestly, college names that map
 # exactly or refuse by name, captured football settlement terms.
 tests/test_ncaaf_identity_settlement_and_coverage.py
+# cand24 P5 focus universe (migration 213): the institutional stream, its
+# evidence recorder and the same-book probe hold a prioritized universe
+# (actual positions > live / imminent intents > paper investment positions >
+# V3 candidates > the mapped investment universe > exploration, diagnostic
+# only > discovery), bounded by the stream limits; every member is EXACT by
+# institutional_contract_map or UNAVAILABLE with the reason and never
+# compared; exploration is never live-eligible; every probe observation
+# persists its agreement fields; S1 counts only comparable, exactly mapped
+# samples (the rule's 30 / 95 % untouched); the endpoint's focus_universe /
+# same_book_samples / c12_proofs, null with a reason when unmeasured.
+tests/test_p5_focus_universe.py
+# cand24 P5 C12 decision-time proof: a stream-priced decision writes ONE
+# proof tying decision, intent, symbol, epoch, book instant, age and
+# executable price; stale, crossed, gapped, other-symbol, mapped-to-another
+# and no-edge stream books write a REFUSED proof with Venue.place ZERO times.
+tests/test_p5_c12_decision_proof.py

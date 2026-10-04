@@ -35,6 +35,14 @@ deeper levels or touch sizes differ); DISAGREE (a best price differs);
 NOT_COMPARABLE (with the reason). Persisted to `institutional_same_book_probe`
 (migration 210), whose orders_placed is CHECKed to zero.
 
+AGREEMENT EVIDENCE (migration 213). Every sample also carries, for its
+row: the institutional symbol (only when the mapping is EXACT), the side, the
+BETTOR event, institutional and retail best bid / ask as compared, the stream
+epoch, the gap state, both receipt ages at the comparison instant, the
+comparison timestamp, the agreement result (null when not comparable) and the
+incomparable reason -- and, when the worker probes its focus universe
+(institutional_focus_universe), the member's tier and why.
+
 NO ORDER PATH. This module calls one thing on the retail client --
 `markets.book` -- on a client built with no key, through a transport that
 refuses non-GET. It imports no order module. A test pins all of that.
@@ -217,10 +225,72 @@ _RANK = {V_AGREE: 0, V_TOUCH: 1, V_DISAGREE: 2, V_NC: 3}
 
 def sample(symbol: str, *, record, retail_row=None, books_current,
            retail_read, clock=time.time, top_n: int = TOP_N,
-           max_window_s: float = MAX_WINDOW_S) -> dict:
+           max_window_s: float = MAX_WINDOW_S, focus=None) -> dict:
     """ONE probe sample (see module doc). `books_current(symbol, now=)` is
     the stream's resident read; `retail_read(slug)` returns
-    {"ok", "marketData", "error"}. Never raises."""
+    {"ok", "marketData", "error"}. `focus` (the focus-universe member, when
+    the worker probes its universe) stamps the member's tier and why. Never
+    raises. Every answer carries the agreement evidence (`agreement_fields`).
+    """
+    row = _sample(symbol, record=record, retail_row=retail_row,
+                  books_current=books_current, retail_read=retail_read,
+                  clock=clock, top_n=top_n, max_window_s=max_window_s)
+    return agreement_fields(row, focus=focus, retail_row=retail_row)
+
+
+def _top(book, side):
+    lv = ((book or {}).get(side) or [])
+    return _dec(lv[0].get("price")) if lv else None
+
+
+def _age(later, earlier):
+    if not (isinstance(later, datetime) and isinstance(earlier, datetime)):
+        return None
+    return round((later - earlier).total_seconds(), 4)
+
+
+def agreement_fields(row: dict, *, focus=None, retail_row=None) -> dict:
+    """Pure: the per-observation agreement evidence (migration 213) from one
+    sample -- institutional symbol (only when the mapping is EXACT), side,
+    event, institutional and retail best bid / ask (as compared, exact),
+    stream epoch (connection_epoch), gap state, both receipt ages at the
+    comparison instant, the comparison timestamp, the agreement result
+    (None when not comparable) and the incomparable reason."""
+    r = dict(row)
+    ident = r.get("identity") or {}
+    exact = bool(r.get("identity_ok")) and \
+        ident.get("institutional_symbol") == r.get("symbol")
+    f = focus if isinstance(focus, dict) else {}
+    fi = f.get("identity") if isinstance(f.get("identity"), dict) else {}
+    compared = r.get("compared_at") or r.get("probed_at")
+    v = r.get("verdict")
+    r.update(
+        institutional_symbol=ident.get("institutional_symbol") if exact
+        else None,
+        identity_exact=exact,
+        outcome_side="YES",
+        bettor_event=f.get("bettor_event") or fi.get("bettor_event"),
+        retail_event_slug=(fi.get("retail_event_slug")
+                           or (retail_row or {}).get("event_slug")),
+        inst_best_bid=_top(r.get("stream_book"), "bids"),
+        inst_best_ask=_top(r.get("stream_book"), "offers"),
+        retail_best_bid=_top(r.get("retail_book"), "bids"),
+        retail_best_ask=_top(r.get("retail_book"), "offers"),
+        inst_receipt_age_s=_age(compared, r.get("stream_received_at")),
+        retail_receipt_age_s=_age(compared, r.get("retail_response_at")),
+        compared_at=compared,
+        agreed=(None if v == V_NC else v in (V_AGREE, V_TOUCH)),
+        incomparable_reason=(r.get("verdict_reason") or "UNSTATED")
+        if v == V_NC else None,
+        focus_tier=f.get("tier"), focus_tier_rank=f.get("tier_rank"),
+        focus_why=(str(f.get("why"))[:500] if f.get("why") else None),
+        focus_universe_id=f.get("universe_id"))
+    return r
+
+
+def _sample(symbol: str, *, record, retail_row=None, books_current,
+            retail_read, clock=time.time, top_n: int = TOP_N,
+            max_window_s: float = MAX_WINDOW_S) -> dict:
     slug = str(symbol or "")
     base = {"version": VERSION, "symbol": slug, "retail_slug": slug,
             "top_n": top_n, "max_window_s": max_window_s, "orders_placed": 0}
@@ -258,6 +328,9 @@ def sample(symbol: str, *, record, retail_row=None, books_current,
         stream_ok=bool((s1 or {}).get("ok") and (s2 or {}).get("ok")),
         stream_refusal=(s2 or {}).get("refusal") or (s1 or {}).get("refusal"),
         connection_epoch=conn.get("seq"), connection_id=conn.get("id"),
+        compared_at=_ts(t1),
+        gap_state=((ev2.get("gap") or {}).get("reason")
+                   if ev2.get("gap") else ("NO_GAP" if ev2 else None)),
         stream_received_at=_ts(snap.get("received_at")),
         stream_venue_ts=snap.get("venue_ts"),
         retail_ok=bool(r.get("ok")) and rb is not None,
@@ -392,9 +465,9 @@ def retail_book_read(slug: str, *, client=None) -> dict:
     return {"ok": True, "marketData": md, "error": None}
 
 
-# ── persistence (migration 210) ───────────────────────────────────────
+# ── persistence (migration 210, + 213's agreement fields) ─────────────
 
-COLUMNS = (
+COLUMNS_210 = (
     "probed_at", "process_id", "service", "version", "symbol", "retail_slug",
     "identity_ok", "identity_refusal", "identity", "stream_ok",
     "stream_refusal", "connection_epoch", "connection_id",
@@ -404,11 +477,26 @@ COLUMNS = (
     "verdict", "verdict_reason", "top_n", "best_bid_equal",
     "best_offer_equal", "touch_qty_equal", "levels_equal", "stream_book",
     "retail_book", "diff")
+#: Migration 213: every observation's agreement evidence and focus tier.
+COLUMNS_213 = (
+    "institutional_symbol", "identity_exact", "outcome_side", "bettor_event",
+    "retail_event_slug", "inst_best_bid", "inst_best_ask", "retail_best_bid",
+    "retail_best_ask", "gap_state", "inst_receipt_age_s",
+    "retail_receipt_age_s", "compared_at", "agreed", "incomparable_reason",
+    "focus_tier", "focus_tier_rank", "focus_why", "focus_universe_id")
+COLUMNS = COLUMNS_210 + COLUMNS_213
 JSON_COLUMNS = ("identity", "stream_book", "retail_book", "diff")
-INSERT_SQL = "INSERT INTO %s (%s) VALUES (%s)" % (
-    TABLE, ", ".join(COLUMNS),
-    ", ".join("$%d%s" % (i + 1, "::jsonb" if c in JSON_COLUMNS else "")
-              for i, c in enumerate(COLUMNS)))
+
+
+def _insert_sql(cols) -> str:
+    return "INSERT INTO %s (%s) VALUES (%s)" % (
+        TABLE, ", ".join(cols),
+        ", ".join("$%d%s" % (i + 1, "::jsonb" if c in JSON_COLUMNS else "")
+                  for i, c in enumerate(cols)))
+
+
+INSERT_SQL = _insert_sql(COLUMNS)
+INSERT_SQL_210 = _insert_sql(COLUMNS_210)
 
 
 def _param(c, v):
@@ -424,14 +512,42 @@ def _param(c, v):
     return v
 
 
+def _missing_column(exc) -> bool:
+    return type(exc).__name__ == "UndefinedColumnError"
+
+
+HAS_213_SQL = ("SELECT 1 FROM information_schema.columns WHERE "
+               "table_name = $1 AND column_name = 'focus_universe_id'")
+
+
+async def _columns(pool) -> tuple:
+    """213's columns when the table has them, else 210's (never raises)."""
+    try:
+        return COLUMNS if await pool.fetch(HAS_213_SQL, TABLE) else \
+            COLUMNS_210
+    except Exception:                                         # noqa: BLE001
+        return COLUMNS
+
+
 async def persist(pool, rows, *, process_id: str, service: str) -> int:
+    """One row per sample. With migration 213 absent the 210 columns are
+    written instead (checked first; an undefined column also falls back), so
+    the evidence is never lost to a schema lag. Never raises."""
     n = 0
+    cols = await _columns(pool) if rows else COLUMNS
     for r in rows or ():
         r = dict(r, process_id=process_id, service=service)
+        sql = INSERT_SQL if cols is COLUMNS else INSERT_SQL_210
         try:
-            await pool.execute(INSERT_SQL,
-                               *[_param(c, r.get(c)) for c in COLUMNS])
+            await pool.execute(sql, *[_param(c, r.get(c)) for c in cols])
             n += 1
-        except Exception:                                     # noqa: BLE001
-            continue
+        except Exception as exc:                              # noqa: BLE001
+            if cols is not COLUMNS or not _missing_column(exc):
+                continue
+            try:
+                await pool.execute(INSERT_SQL_210, *[
+                    _param(c, r.get(c)) for c in COLUMNS_210])
+                n += 1
+            except Exception:                                 # noqa: BLE001
+                continue
     return n

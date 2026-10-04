@@ -44,13 +44,16 @@ import threading
 import time
 
 from . import institutional_contract_map as ICM
+from . import institutional_focus_universe as FU
 from . import institutional_stream as IS
 
 log = logging.getLogger(__name__)
 
 VERSION = "INSTITUTIONAL_API_STREAM_V1"
-#: Symbols this process will bootstrap and subscribe (focus set + asked).
+#: Symbols this process will bootstrap and subscribe (focus universe +
+#: asked); the focus universe's own bound (FU.MAX_MEMBERS) equals it.
 MAX_SYMBOLS = 32
+SERVICE = "sportsassets-api"
 #: The workers' cadences, reused.
 LOOP_S = 2.0
 FOCUS_EVERY_S = 60.0
@@ -73,6 +76,8 @@ _REQUESTED: dict = {}
 _ATTEMPT: dict = {}
 _STATE: dict = {"task": None, "start": None, "last_error": None,
                 "refdata_reads": 0, "refdata_failures": 0}
+#: The last focus universe computed here (members without identity).
+_UNIVERSE: dict = {}
 
 
 def running() -> bool:
@@ -132,7 +137,8 @@ def describe() -> dict:
             "requested": asked[:MAX_SYMBOLS],
             "refdata_reads": _STATE.get("refdata_reads"),
             "refdata_failures": _STATE.get("refdata_failures"),
-            "last_error": _STATE.get("last_error")}
+            "last_error": _STATE.get("last_error"),
+            "focus_universe": FU.summary(universe_snapshot())}
 
 
 # ── lifecycle (API lifespan) ──────────────────────────────────────────
@@ -189,6 +195,7 @@ def reset() -> None:
         REFDATA.clear()
         _REQUESTED.clear()
         _ATTEMPT.clear()
+        _UNIVERSE.clear()
     _STATE.update(task=None, start=None, last_error=None, refdata_reads=0,
                   refdata_failures=0)
 
@@ -201,11 +208,71 @@ async def _focus_symbols(get_pool, focus) -> list:
         return [str(s) for s in got or ()]
     if get_pool is None:
         return []
+    # THE FOCUS UNIVERSE (institutional_focus_universe): actual positions,
+    # live / imminent execution intents, paper investment positions, V3
+    # candidates, the mapped investment universe, exploration (diagnostic
+    # only), then the experimental lane's focus set -- bounded by
+    # FU.MAX_MEMBERS (= MAX_SYMBOLS here). Only EXACT members are subscribed
+    # (refresh_once wants only symbols whose refdata maps exactly).
     from . import shadow_experimental_store as xstore
     from .workers import institutional_md as W
     pool = await get_pool()
-    return [r["symbol"] for r in await xstore.focus_set(
-        pool, size=W.MAX_INSTRUMENTS)]
+    try:
+        discovery = [r["symbol"] for r in await xstore.focus_set(
+            pool, size=W.MAX_INSTRUMENTS)]
+    except Exception:                                         # noqa: BLE001
+        discovery = []
+    u = await FU.compute(pool, discovery=discovery, limit=MAX_SYMBOLS)
+    with _LOCK:
+        _UNIVERSE.clear()
+        _UNIVERSE.update(u)
+    return [m["retail_slug"] for m in u["members"]]
+
+
+def _exact_here(symbol) -> bool:
+    """The refdata this process holds maps the slug EXACTLY (YES / long)."""
+    with _LOCK:
+        rec = (REFDATA.get(symbol) or {}).get("record")
+    if rec is None:
+        return False
+    try:
+        m = ICM.map_retail_to_institutional(symbol, "yes", rec)
+    except Exception:                                         # noqa: BLE001
+        return False
+    return bool(m.get("ok")) and m.get("institutional_symbol") == symbol
+
+
+def universe_snapshot() -> dict:
+    """The last focus universe with each member's identity as THIS process
+    holds it (EXACT on its refdata, or UNAVAILABLE with the reason)."""
+    with _LOCK:
+        u = {k: (list(v) if isinstance(v, list) else v)
+             for k, v in _UNIVERSE.items()}
+        held = {s: (REFDATA.get(s) or {}).get("record") for s in REFDATA}
+        tried = set(_ATTEMPT)
+    if not u.get("members"):
+        return {}
+    u["members"] = [dict(m) for m in u["members"]]
+    return FU.attach(u, record_for=held.get,
+                     attempted=lambda s: s in tried or s in held)
+
+
+async def persist_universe(get_pool, *, process_id=None) -> int:
+    """This process's focus-universe snapshot -> institutional_focus_universe
+    (migration 213). Evidence only; never raises."""
+    if get_pool is None:
+        return 0
+    try:
+        u = universe_snapshot()
+        if not u:
+            return 0
+        pool = await get_pool()
+        return await FU.persist(
+            pool, u, process_id=process_id or "%s:%s" % (
+                VERSION, os.getpid()), service=SERVICE,
+            wanted=IS.BOOKS.wanted())
+    except Exception:                                         # noqa: BLE001
+        return 0
 
 
 def _bootstrap_one(client, symbol, bootstrap):
@@ -275,7 +342,10 @@ async def refresh_once(get_pool=None, *, client=None, focus=None,
         IS.set_instrument(s, rec)
         boot += 1
     with _LOCK:
-        priced = [s for s in wanted if s in REFDATA]
+        held = [s for s in wanted if s in REFDATA]
+    # SUBSCRIBE ONLY WHAT MAPS EXACTLY: an UNAVAILABLE member (no record,
+    # not listed, any mapping refusal) is never subscribed or priced.
+    priced = [s for s in held if _exact_here(s)]
     IS.want(priced)
     return {"wanted": len(wanted), "bootstrapped": boot,
             "subscribed": len(priced)}
@@ -293,6 +363,7 @@ async def _run(get_pool, *, client, focus, bootstrap) -> None:
                     _STATE["last_error"] = "focus: %s" % type(exc).__name__
                 await refresh_once(client=client, bootstrap=bootstrap,
                                    symbols=focus_cache)
+                await persist_universe(get_pool)
             elif pending():
                 await refresh_once(client=client, bootstrap=bootstrap,
                                    symbols=focus_cache)

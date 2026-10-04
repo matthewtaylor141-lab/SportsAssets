@@ -37,7 +37,14 @@ PROVEN only when those three are; and the same-book premise the rule hands
 to the identity mapping (NE7 -> LB6) is its own gate S1, PROVEN only on
 recorded agreement.
 
-READ-ONLY. It reads two evidence tables and `live_rule_artifacts`, the
+ADDED BESIDE THE PREDICATES (migration 213; no predicate reads them):
+`focus_universe` (the stream's prioritized universe: count, per-tier counts,
+members with tier, identity or UNAVAILABLE reason), `same_book_samples` (the
+S1 sample count, agreement %, contracts comparable now, the incomparable-
+reason histogram) and `c12_proofs` (decision-time C12 proof records).
+Unmeasured is null with a reason, never 0.
+
+READ-ONLY. It reads the evidence tables and `live_rule_artifacts`, the
 process environment by NAME ONLY (never a value), and in-memory state. It
 writes nothing, sends nothing to any venue, and never returns a secret.
 """
@@ -50,6 +57,7 @@ import socket
 import time
 
 from . import decision_hooks as DH
+from . import institutional_focus_universe as FU
 from . import institutional_stream as IS
 from . import institutional_stream_evidence as SE
 from . import live_book_currency as LBC
@@ -211,14 +219,25 @@ STREAM_AGG_SQL = """
      WHERE recorded_at > now() - make_interval(secs => $1)
      GROUP BY symbol ORDER BY symbol
 """
+#: S1 COUNTS ONLY COMPARABLE SAMPLES OF AN EXACT IDENTITY. A sample is
+#: comparable only when the institutional_contract_map mapping was exact
+#: (identity ok, institutional symbol = retail slug = the probed symbol); a
+#: row carrying a comparable verdict without that is counted NOT_COMPARABLE
+#: (the probe never writes one -- this makes the count not depend on it).
+EXACT_SAMPLE_SQL = (
+    "coalesce(identity_ok IS TRUE AND identity->>'institutional_symbol' = "
+    "symbol AND retail_slug = symbol, false)")
+NC_NOT_EXACT = "COMPARABLE_VERDICT_WITHOUT_EXACT_IDENTITY"
 PROBE_AGG_SQL = """
-    SELECT symbol, verdict,
+    SELECT symbol,
+           CASE WHEN verdict <> 'NOT_COMPARABLE' AND NOT %s
+                THEN 'NOT_COMPARABLE' ELSE verdict END       AS verdict,
            count(*)                                          AS n,
            count(*) FILTER (WHERE NOT stream_changed_in_window) AS n_stable
       FROM institutional_same_book_probe
      WHERE probed_at > now() - make_interval(secs => $1)
-     GROUP BY symbol, verdict ORDER BY symbol, verdict
-"""
+     GROUP BY 1, 2 ORDER BY 1, 2
+""" % EXACT_SAMPLE_SQL
 PROBE_LATEST_SQL = """
     SELECT DISTINCT ON (symbol) symbol, probed_at, verdict, verdict_reason,
            identity_ok, identity_refusal, window_s, matched_stream_read,
@@ -347,6 +366,229 @@ async def same_book_evidence(conn, *,
                                       same_book_status(c), strict=True),
                                   latest=latest.get(s))
                           for s, c in by.items()}}
+
+
+# ═════════════════════════════════════════════════════════════════════
+# MIGRATION 213: THE FOCUS UNIVERSE, THE SAMPLE SUMMARY, THE C12 PROOFS
+# ═════════════════════════════════════════════════════════════════════
+#
+# Added beside the predicates; they change none of them. UNMEASURED IS NULL
+# WITH A REASON, NEVER 0: a table that does not exist, or a snapshot that was
+# never recorded, is `null` + `why`; a percentage with no denominator is
+# `null` + `why`. A count of rows in a table that exists is a measurement.
+
+#: The focus universe snapshot must be this recent to be reported as current.
+FOCUS_LIVE_S = 900.0
+#: A contract is "currently comparable" with a comparable sample this recent.
+CURRENT_COMPARABLE_S = 900.0
+C12_PROOF_LIMIT = 20
+
+FOCUS_LATEST_SQL = """
+    SELECT DISTINCT ON (service) service, process_id, universe_id,
+           computed_at, bound
+      FROM institutional_focus_universe
+     WHERE computed_at > now() - make_interval(secs => $1)
+     ORDER BY service, computed_at DESC
+"""
+FOCUS_MEMBERS_SQL = """
+    SELECT rank, tier, tier_rank, why, reasons, retail_slug, outcome_side,
+           bettor_event, strategy, diagnostic_only, identity_status,
+           unavailable_reason, institutional_symbol, market_type, period,
+           retail_event_slug, institutional_event_id, settlement,
+           stream_wanted, grants_live_eligibility
+      FROM institutional_focus_universe
+     WHERE universe_id = $1 ORDER BY rank
+"""
+
+
+def _per_tier(rows) -> dict:
+    out = {t: 0 for t in FU.TIERS}
+    for r in rows:
+        out[r["tier"]] = out.get(r["tier"], 0) + 1
+    return out
+
+
+async def focus_universe_evidence(conn, *,
+                                  window_s: float = FOCUS_LIVE_S) -> dict:
+    base = {"version": FU.VERSION, "bound": FU.MAX_MEMBERS,
+            "tiers": list(FU.TIERS)}
+    if not await _has(conn, "institutional_focus_universe"):
+        return dict(base, status="UNMEASURED", count=None, per_tier=None,
+                    members=None, why="migration 213 not applied")
+    latest = [dict(r) for r in await conn.fetch(FOCUS_LATEST_SQL,
+                                                float(window_s))]
+    if not latest:
+        return dict(base, status="UNMEASURED", count=None, per_tier=None,
+                    members=None,
+                    why=("NO_FOCUS_UNIVERSE_SNAPSHOT_RECORDED_IN_THE_LAST_"
+                         "%d_S (written only by a process whose stream is "
+                         "enabled)" % int(window_s)))
+    by_service = {}
+    newest = max(latest, key=lambda r: r["computed_at"])
+    members = []
+    for snap in latest:
+        rows = [dict(r) for r in await conn.fetch(FOCUS_MEMBERS_SQL,
+                                                  snap["universe_id"])]
+        by_service[snap["service"]] = {
+            "process_id": snap["process_id"],
+            "universe_id": snap["universe_id"],
+            "computed_at": _iso(snap["computed_at"]),
+            "count": len(rows), "per_tier": _per_tier(rows),
+            "exact": sum(1 for r in rows if r["identity_status"] == FU.EXACT)}
+        if snap is newest:
+            members = rows
+    reasons: dict = {}
+    for r in members:
+        if r["unavailable_reason"]:
+            reasons[r["unavailable_reason"]] = reasons.get(
+                r["unavailable_reason"], 0) + 1
+    return dict(
+        base, status="MEASURED", why=None, service=newest["service"],
+        process_id=newest["process_id"], universe_id=newest["universe_id"],
+        computed_at=_iso(newest["computed_at"]), count=len(members),
+        per_tier=_per_tier(members),
+        exact=sum(1 for r in members if r["identity_status"] == FU.EXACT),
+        unavailable=sum(1 for r in members
+                        if r["identity_status"] == FU.UNAVAILABLE),
+        unavailable_reasons=reasons,
+        members=[{k: (_j(v) if k in ("reasons", "settlement") else v)
+                  for k, v in r.items()} for r in members],
+        by_service=by_service)
+
+
+async def _probe_has_213(conn) -> bool:
+    return bool(await conn.fetchval(
+        "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE "
+        "table_name = 'institutional_same_book_probe' AND "
+        "column_name = 'focus_tier')"))
+
+
+SAMPLES_SQL = """
+    WITH p AS (
+        SELECT verdict,
+               verdict <> 'NOT_COMPARABLE' AND {exact} AS comparable,
+               verdict <> 'NOT_COMPARABLE' AND NOT {exact} AS not_exact
+          FROM institutional_same_book_probe
+         WHERE probed_at > now() - make_interval(secs => $1))
+    SELECT count(*)                                       AS samples,
+           count(*) FILTER (WHERE comparable)             AS comparable,
+           count(*) FILTER (WHERE comparable AND verdict IN
+                            ('AGREE_TOP_N', 'AGREE_TOUCH_ONLY')) AS agree,
+           count(*) FILTER (WHERE not_exact)              AS not_exact
+      FROM p
+"""
+NC_HIST_SQL = """
+    SELECT CASE WHEN verdict = 'NOT_COMPARABLE'
+                THEN coalesce(verdict_reason, 'UNSTATED')
+                ELSE '{not_exact}' END AS reason, count(*) AS n
+      FROM institutional_same_book_probe
+     WHERE probed_at > now() - make_interval(secs => $1)
+       AND (verdict = 'NOT_COMPARABLE' OR NOT {exact})
+     GROUP BY 1 ORDER BY 2 DESC, 1
+"""
+CURRENT_COMPARABLE_SQL = """
+    SELECT DISTINCT ON (symbol) symbol, verdict, verdict_reason, probed_at,
+           {tier} AS focus_tier
+      FROM institutional_same_book_probe
+     WHERE probed_at > now() - make_interval(secs => $1)
+       AND verdict <> 'NOT_COMPARABLE' AND {exact}
+     ORDER BY symbol, probed_at DESC
+"""
+BY_TIER_SQL = """
+    SELECT coalesce(focus_tier, 'NOT_RECORDED') AS tier, count(*) AS samples,
+           count(*) FILTER (WHERE verdict <> 'NOT_COMPARABLE' AND {exact})
+               AS comparable
+      FROM institutional_same_book_probe
+     WHERE probed_at > now() - make_interval(secs => $1)
+     GROUP BY 1 ORDER BY 1
+"""
+
+
+async def same_book_samples(conn, *, window_s: float = SAME_BOOK_WINDOW_S,
+                            current_s: float = CURRENT_COMPARABLE_S) -> dict:
+    """The S1 sample summary: how many samples, how many count (comparable
+    AND exactly mapped), the agreement %, the contracts comparable now, and
+    why the rest were not comparable. The rule's thresholds, shown."""
+    base = {"window_s": window_s,
+            "required": {"min_comparable": SAME_BOOK_MIN_COMPARABLE,
+                         "min_agree_pct": SAME_BOOK_MIN_AGREE_RATE * 100.0},
+            "counts_only": ("comparable samples of an EXACT identity "
+                            "(institutional_contract_map; symbol = slug)")}
+    if not await _has(conn, "institutional_same_book_probe"):
+        return dict(base, status="UNMEASURED", sample_count=None,
+                    comparable_count=None, agreement_pct=None,
+                    agreement_pct_why="migration 210 not applied",
+                    current_comparable_contracts=None,
+                    incomparable_reasons=None, by_tier=None,
+                    why="migration 210 not applied")
+    has213 = await _probe_has_213(conn)
+    fmt = {"exact": EXACT_SAMPLE_SQL, "not_exact": NC_NOT_EXACT,
+           "tier": "focus_tier" if has213 else "NULL::text"}
+    t = dict(await conn.fetchrow(SAMPLES_SQL.format(**fmt), float(window_s)))
+    hist = {r["reason"]: r["n"] for r in await conn.fetch(
+        NC_HIST_SQL.format(**fmt), float(window_s))}
+    cur = [{"symbol": r["symbol"], "verdict": r["verdict"],
+            "verdict_reason": r["verdict_reason"],
+            "probed_at": _iso(r["probed_at"]), "focus_tier": r["focus_tier"]}
+           for r in await conn.fetch(CURRENT_COMPARABLE_SQL.format(**fmt),
+                                     float(current_s))]
+    by_tier = ({r["tier"]: {"samples": r["samples"],
+                            "comparable": r["comparable"]}
+                for r in await conn.fetch(BY_TIER_SQL.format(**fmt),
+                                          float(window_s))}
+               if has213 else None)
+    comparable = t["comparable"]
+    pct = None if not comparable else round(100.0 * t["agree"] / comparable,
+                                            2)
+    return dict(
+        base, status="MEASURED", why=None, sample_count=t["samples"],
+        comparable_count=comparable, agree_count=t["agree"],
+        comparable_verdicts_without_exact_identity=t["not_exact"],
+        agreement_pct=pct,
+        agreement_pct_why=(None if comparable else
+                           "NO_COMPARABLE_EXACTLY_MAPPED_SAMPLES_IN_WINDOW"),
+        current_comparable_window_s=current_s,
+        current_comparable_contracts=cur, incomparable_reasons=hist,
+        by_tier=by_tier,
+        by_tier_why=(None if has213 else "migration 213 not applied"))
+
+
+C12_COUNTS_SQL = """
+    SELECT proof_status, count(*) AS n FROM p5_c12_decision_proof
+     GROUP BY 1 ORDER BY 1
+"""
+C12_LATEST_SQL = """
+    SELECT recorded_at, decision_id, execution_intent_id, strategy,
+           policy_version, us_market_slug, order_intent, proof_status,
+           refusal, price_source, stream_symbol, connection_epoch,
+           connection_id, obs_id, book_received_at, book_venue_ts,
+           book_age_s, decision_executable_price, limit_price, p5_verdict,
+           failed_components, c12_passed, live_eligible, actual_state,
+           actual_refusal
+      FROM p5_c12_decision_proof ORDER BY recorded_at DESC, id DESC
+     LIMIT $1
+"""
+
+
+async def c12_proofs(conn, *, limit: int = C12_PROOF_LIMIT) -> dict:
+    if not await _has(conn, "p5_c12_decision_proof"):
+        return {"status": "UNMEASURED", "count": None, "by_status": None,
+                "records": None, "why": "migration 213 not applied"}
+    by = {r["proof_status"]: r["n"] for r in await conn.fetch(C12_COUNTS_SQL)}
+    recs = []
+    for r in await conn.fetch(C12_LATEST_SQL, int(limit)):
+        d = dict(r)
+        for k in ("recorded_at", "book_received_at", "book_venue_ts"):
+            d[k] = _iso(d[k])
+        for k in ("decision_executable_price", "limit_price"):
+            d[k] = None if d[k] is None else str(d[k])
+        d["failed_components"] = _j(d["failed_components"])
+        recs.append(d)
+    return {"status": "MEASURED", "why": None, "count": sum(by.values()),
+            "by_status": by, "records": recs,
+            "note": ("one record per execution intent whose decision the "
+                     "resident stream book priced or refused "
+                     "(execution_intent.on_decision -> p5_c12_proof)")}
 
 
 async def artifact_state(conn) -> dict:
@@ -663,7 +905,10 @@ async def gather(conn, *, now: float | None = None, env=None,
         decisions[s] = (LBE.evaluate_decision({}, cand, now=at) if priced
                         else LBE.evaluate_for({}, cand, obs=None, now=at))
     return {"at": at, "ps": ps, "stream": stream, "same_book": same_book,
-            "artifact": artifact, "decisions": decisions}
+            "artifact": artifact, "decisions": decisions,
+            "focus_universe": await focus_universe_evidence(conn),
+            "same_book_samples": await same_book_samples(conn),
+            "c12_proofs": await c12_proofs(conn)}
 
 
 def assemble(facts: dict) -> dict:
@@ -700,7 +945,17 @@ def assemble(facts: dict) -> dict:
                             for s, d in decisions.items()},
                 predicates=preds,
                 runtime_evidence={"stream": stream, "same_book": same_book},
-                predicate_order=list(ORDER))
+                predicate_order=list(ORDER),
+                # migration 213 (added beside; no predicate reads them)
+                focus_universe=facts.get("focus_universe") or {
+                    "status": "UNMEASURED", "count": None, "per_tier": None,
+                    "members": None, "why": "not gathered"},
+                same_book_samples=facts.get("same_book_samples") or {
+                    "status": "UNMEASURED", "sample_count": None,
+                    "agreement_pct": None, "why": "not gathered"},
+                c12_proofs=facts.get("c12_proofs") or {
+                    "status": "UNMEASURED", "count": None, "records": None,
+                    "why": "not gathered"})
 
 
 async def evaluate(conn, *, now: float | None = None, env=None,
