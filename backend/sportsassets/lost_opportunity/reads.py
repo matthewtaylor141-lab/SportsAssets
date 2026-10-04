@@ -237,12 +237,7 @@ async def score_candidates(conn, *, now, version, hours=SCORE_LOOKBACK_H,
         "       c.capacity_ceiling_usd, "
         "       extract(epoch FROM c.decided_at)::float8 AS decided_at, "
         "       d.verdict, d.label->>'competition' AS league, "
-        "       d.valuation_id, "
-        "       (SELECT extract(epoch FROM g.game_start)::float8 "
-        "          FROM us_premap g WHERE g.market_slug = c.us_market_slug "
-        "           AND g.game_start IS NOT NULL "
-        "         ORDER BY g.updated_at DESC NULLS LAST LIMIT 1) "
-        "       AS event_start_at "
+        "       d.valuation_id "
         "  FROM pos_capacity_latest c "
         "  LEFT JOIN paper_decisions d ON d.decision_id = c.candidate_id "
         " WHERE c.decided_at >= to_timestamp($1) "
@@ -252,7 +247,29 @@ async def score_candidates(conn, *, now, version, hours=SCORE_LOOKBACK_H,
         "                      AND s.version = $2) "
         " ORDER BY c.decided_at DESC LIMIT $3",
         float(now) - hours * 3600.0, version, int(limit))
-    return [dict(r) for r in rows]
+    out = [dict(r) for r in rows]
+    starts = await event_starts(conn, [r["us_market_slug"] for r in out])
+    for r in out:
+        r["event_start_at"] = starts.get(r["us_market_slug"])
+    return out
+
+
+async def event_starts(conn, slugs) -> dict:
+    """{market slug: event start epoch} from us_premap, the latest mapped
+    game_start per slug, in ONE read. us_premap has no market_slug index,
+    so the per-row correlated subquery this replaces scanned the whole
+    table once per candidate (1,500 x 108k rows: 80 s in production,
+    past the component's statement timeout, so SCORES never wrote)."""
+    keys = sorted({s for s in slugs if s})
+    if not keys:
+        return {}
+    rows = await conn.fetch(
+        "SELECT DISTINCT ON (market_slug) market_slug, "
+        "       extract(epoch FROM game_start)::float8 AS t "
+        "  FROM us_premap "
+        " WHERE market_slug = ANY($1::text[]) AND game_start IS NOT NULL "
+        " ORDER BY market_slug, updated_at DESC NULLS LAST", keys)
+    return {r["market_slug"]: C.num(r["t"]) for r in rows}
 
 
 async def snapshots_since(conn, *, since) -> dict:

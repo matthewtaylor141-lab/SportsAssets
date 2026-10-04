@@ -446,6 +446,54 @@ async def test_scores_are_written_as_of_the_decision():
 
 
 @pg
+async def test_score_candidates_read_event_starts_in_one_batched_query():
+    """Production R28b: SCORES failed every cycle on its statement timeout.
+    The candidate read looked up each candidate's event start with a
+    correlated us_premap subquery; us_premap has no market_slug index, so
+    that was a full-table scan per candidate (1,500 x 108k rows, 80 s).
+    The start is now read once per cycle, and it is still the latest mapped
+    game_start of the slug (a NULL game_start never wins)."""
+    from sportsassets.lost_opportunity import reads as R
+    now = time.time()
+    async with _txn() as conn:
+        acct = await X.account(conn, now=now)
+        d = await X.decision(conn, acct, at=now - 600, refusals=[CL.R_BELOW],
+                             pd=X.pd_fig(-0.1))
+        ins = ("INSERT INTO us_premap (identifier, market_slug, side_norm, "
+               " game_start, updated_at) VALUES ($1,$2,'HOME',"
+               " to_timestamp($3),to_timestamp($4))")
+        await conn.execute(ins, F.uid("pm-"), d["slug"], now + HOUR, now - 60)
+        await conn.execute(ins, F.uid("pm-"), d["slug"], now + 3 * HOUR, now)
+        await conn.execute(
+            "INSERT INTO us_premap (identifier, market_slug, side_norm, "
+            " game_start, updated_at) VALUES ($1,$2,'AWAY',NULL,"
+            " to_timestamp($3))", F.uid("pm-"), d["slug"], now + 30)
+        await conn.execute(
+            "INSERT INTO pos_capacity (capacity_id, candidate_id, run_id, "
+            " computed_at, decided_at, us_market_slug, holding_side, status, "
+            " executable_opportunity_dollars, executable_capacity_usd, "
+            " capacity_ceiling_usd, content_sha256, version) VALUES ($1,$2,"
+            " 'r',to_timestamp($3),to_timestamp($4),$5,'LONG','MEASURED',5.0,"
+            " 200.0,400.0,'s','v')", F.uid("cap"), d["decision_id"], now,
+            now - 600, d["slug"])
+        seen = []
+
+        class Counting:                 # asyncpg's Connection has slots
+            async def fetch(self, sql, *a, **k):
+                seen.append(sql)
+                return await conn.fetch(sql, *a, **k)
+        cands = await R.score_candidates(Counting(), now=now,
+                                         version=SC.VERSION)
+        mine = [c for c in cands if c["candidate_id"] == d["decision_id"]]
+        assert len(mine) == 1
+        assert mine[0]["event_start_at"] == pytest.approx(now + 3 * HOUR)
+        premap_reads = [s for s in seen if "us_premap" in s]
+        assert len(premap_reads) == 1, premap_reads
+        assert "pos_capacity_latest" not in premap_reads[0]
+        assert await R.event_starts(conn, []) == {}
+
+
+@pg
 async def test_the_cycle_runs_the_component_and_its_failure_is_isolated(
         monkeypatch):
     from sportsassets.lost_opportunity import reads as LRD
