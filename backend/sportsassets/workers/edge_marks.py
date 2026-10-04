@@ -369,9 +369,16 @@ async def main() -> None:
     pool = await get_pool()
     log.info("edge_marks up: whales=%s window=%sd every=%ss min_age=%ss",
              WHALES, WINDOW_DAYS, EVERY_S, MIN_AGE_S)
+    from .. import loop_health as _LH
     while True:
         try:
             await run_once(pool)
-        except Exception:  # noqa: BLE001 — a measurement worker never dies
+            # LOOP HEALTH (R30A review): the pass's own SUCCESS / ERROR, so
+            # the 3 x cadence rule can judge it. Never raises.
+            await _LH.record(pool, "edge_marks", process="workers",
+                             phase=_LH.SUCCESS)
+        except Exception as exc:  # noqa: BLE001 — a measurement worker never dies
             log.exception("edge_marks pass failed")
+            await _LH.record(pool, "edge_marks", process="workers",
+                             phase=_LH.ERROR, error=exc)
         await asyncio.sleep(EVERY_S)

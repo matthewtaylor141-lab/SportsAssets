@@ -871,3 +871,35 @@ tests/test_confidence_ladder.py
 # UNAVAILABLE with its reason; proven over decisions the real completed-game
 # paper pass recorded; GET-only, READ ONLY, no write.
 tests/test_opportunity_funnel.py
+# R30A RUNTIME: the API pool starvation root cause. Six single-writer loops
+# held six of the API pool's ten slots in production (research-sql run
+# 37226381750); each now holds its lock on a session of its own
+# (db.lease_session), ext_pinnacle and the execution mirror re-prove the lock
+# before every pass (db.advisory_held) and contend again on a dead session,
+# and the reactive scheduler takes ONE connection per job (no orphaned
+# STARTED attempt, a job without a connection refused before it starts).
+tests/test_r30a_pool_starvation_root_cause.py
+# R30A RUNTIME DEFECTS: the research tick names its failing step (and
+# records it in loop health); every INSERT of a heartbeat-shaped
+# ingestion_state key serialises with a default and never slices serialised
+# JSON; service_heartbeats has one writer (db.py); the gamma paginator stops
+# at the offset the API serves (the recurring 422) and names a truncation.
+tests/test_r30a_runtime_defects.py
+# R30A EVENT-LOOP STALLS: the API loop was held 2-4 s at a time in the
+# minutes of every timeout class (the loop watchdog, render-ops run
+# 37231102537). The feed cache finds an event's quotes through a per-event
+# index (replayed frame by frame against the scanning implementation), the
+# held refresh builds one feed view per pass, the census matches off-loop.
+tests/test_r30a_loop_stalls.py
+# R30A WORKER RELIABILITY: every recurring loop inventoried with its lease;
+# every capital-critical loop holds a lock or is a child fenced by the
+# writer's backend pid (a fenced-out servicing pass / reactive job does
+# nothing); UNHEALTHY when no success within 3 x cadence or a critical armed
+# loop's lock is held by no backend; migration 229; GET /api/command/
+# loop-health is GET-only, command-authenticated and READ ONLY.
+tests/test_r30a_loop_health.py
+# R30A SLOs: GET /api/command/slo -- eight SLOs, each target / measured /
+# window / OK | BREACH | UNAVAILABLE(reason), on production-shaped rows; no
+# cutover / no table / no SHA is UNAVAILABLE, never a manufactured zero;
+# targets pinned to the system's own bounds.
+tests/test_r30a_runtime_slo.py

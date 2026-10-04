@@ -22,6 +22,7 @@ import time
 from collections.abc import Awaitable, Callable
 
 from .. import procmem
+from .. import loop_health as _LH
 from ..db import heartbeat
 from . import (analytics, bettor_live_loop, bettor_state,
                chain_listener, copy_sweep, dispatcher, edge_marks,
@@ -499,10 +500,17 @@ async def supervise(name: str, factory: Callable[[], Awaitable[None]], *,
     while True:
         try:
             log.info("starting loop: %s", name)
+            # LOOP HEALTH (R30A): each (re)start and each crash is recorded
+            # in runtime_loop_health -- fire-and-forget through the pool this
+            # process already has (none yet: nothing, never a wait). The
+            # loops' own heartbeats remain their success record.
+            _LH.spawn_record(name, process="workers", phase=_LH.START)
             await factory()
             log.warning("loop %s exited cleanly; restarting in %ss", name, RESTART_DELAY_SECONDS)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
             log.exception("loop %s crashed; restarting in %ss", name, RESTART_DELAY_SECONDS)
+            _LH.spawn_record(name, process="workers", phase=_LH.ERROR,
+                             error=exc)
         await asyncio.sleep(RESTART_DELAY_SECONDS)
 
 

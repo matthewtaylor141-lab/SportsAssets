@@ -70,6 +70,15 @@ class FakeConn:
     async def fetchval(self, sql, *args):
         if "pg_try_advisory_lock" in sql:
             return self._lock_answers.pop(0) if self._lock_answers else True
+        if "pg_locks" in sql:
+            # R30A FENCING: run() re-proves on its lock session, before every
+            # pass, that this backend still holds the key (db.advisory_held),
+            # and each servicing pass re-proves it for the writer's backend
+            # pid (db.advisory_held_by). A granted lock is still held here.
+            return True
+        if "pg_backend_pid" in sql:
+            # the writer's fencing token (a real backend always has one)
+            return 4242
         return None
 
     def rows_for(self, key):
@@ -463,14 +472,23 @@ def test_only_run_starts_the_task_and_only_after_the_writer_lock():
     cooldown resume, and cancelled with it; nothing else creates it."""
     import inspect
 
-    src = inspect.getsource(L.run)
+    # PINNED FACT, UPDATED (R30A review): the hold moved from run() into
+    # `_hold_once`, the one contention attempt run() repeats inside a try
+    # (a failed re-contention can no longer end the unsupervised task); the
+    # order pinned here -- lock, cooldown resume, task, cycle -- is the
+    # hold's, unchanged.
+    src = inspect.getsource(L._hold_once)
+    assert "_hold_once(get_pool)" in inspect.getsource(L.run)
     i_lock = src.index("pg_try_advisory_lock")
     i_resume = src.index("load_and_resume")
     i_task = src.index("_servicing_loop(pool")
     assert i_lock < i_resume < i_task < src.index("cycle(conn)")
     assert "servicing.cancel()" in src
     whole = inspect.getsource(L)
-    assert whole.count("create_task(\n            _servicing_loop(") == 1
+    # one creation site; matched on the call, not on its indentation (R30A
+    # wrapped run() in the re-contention loop, which indents it one level)
+    import re
+    assert len(re.findall(r"create_task\(\s*_servicing_loop\(", whole)) == 1
     assert whole.count("_servicing_loop(pool, interval_s=") == 1
 
 

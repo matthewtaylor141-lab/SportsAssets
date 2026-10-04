@@ -162,8 +162,17 @@ async def refresh(conn, *, watch: HeldWatch | None = None) -> dict:
         async with asyncio.timeout(HELD_REFRESH_TIMEOUT_S):
             slugs = await held_slugs(conn)
             resolved = {}
+            # ONE feed event view per pass, not one per held slug (R30A: the
+            # per-slug rebuild held the event loop 2.0 s -- see
+            # pinnapi_feed_runtime.held_event_id). A view a few hundred ms
+            # old matches the same events; the next pass re-reads.
+            view = None
+            o = FR._STATE.get("owner")
+            if slugs and o is not None and o.cache.authority.synced:
+                from . import pinnapi_census as C
+                view = C.feed_event_view(o.cache)
             for s in slugs:
-                resolved[s] = await FR.held_event_id(conn, s)
+                resolved[s] = await FR.held_event_id(conn, s, view=view)
     except Exception as exc:                                    # noqa: BLE001
         w.counts["REFRESH_FAILED"] += 1
         return {"ok": False, "why": type(exc).__name__}
@@ -173,14 +182,20 @@ async def refresh(conn, *, watch: HeldWatch | None = None) -> dict:
 
 async def refresh_loop(pool, *, watch: HeldWatch | None = None,
                        every_s: float = HELD_REFRESH_S) -> None:
+    from . import loop_health as LH
     while True:
         try:
             async with pool.acquire() as c:
                 await refresh(c, watch=watch)
+                # health at most every 30 s (loop_health record_every_s)
+                await LH.record(c, "pinnapi_held.refresh", process="api",
+                                phase=LH.SUCCESS)
         except asyncio.CancelledError:
             raise
-        except Exception:                                       # noqa: BLE001
+        except Exception as exc:                                # noqa: BLE001
             log.warning("held targets refresh failed", exc_info=True)
+            await LH.record(pool, "pinnapi_held.refresh", process="api",
+                            phase=LH.ERROR, error=exc)
         await asyncio.sleep(every_s)
 
 

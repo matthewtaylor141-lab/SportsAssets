@@ -853,6 +853,24 @@ try:
     app.include_router(_command_release_router)
 except ImportError:
     log.warning("release: api.command_release not loaded", exc_info=True)
+# ── RUNTIME LOOP HEALTH (R30A, migration 229): /api/command/loop-health.
+# GET only, COMMAND auth, one READ ONLY transaction with a statement timeout:
+# every recurring loop, its single-writer lease (pg_locks holders), last
+# start / success / error and HEALTHY / UNHEALTHY (no success in 3 x cadence).
+try:
+    from .command_loop_health import router as _command_loop_health_router
+    app.include_router(_command_loop_health_router)
+except ImportError:
+    log.warning("loop health: api.command_loop_health not loaded",
+                exc_info=True)
+# ── RUNTIME SLOs (R30A): /api/command/slo. GET only, COMMAND auth, one READ
+# ONLY transaction with a statement timeout: eight SLOs, each target /
+# measured / window / OK | BREACH | UNAVAILABLE(reason). No write path.
+try:
+    from .command_slo import router as _command_slo_router
+    app.include_router(_command_slo_router)
+except ImportError:
+    log.warning("slo: api.command_slo not loaded", exc_info=True)
 from .agent_capabilities import router as _capabilities_router
 app.include_router(_capabilities_router)
 from .slack_agents import router as _slack_agents_router

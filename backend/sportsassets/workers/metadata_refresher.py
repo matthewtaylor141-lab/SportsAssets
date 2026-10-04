@@ -49,6 +49,9 @@ async def main() -> None:
     position snapshots (which come from a different API), and vice versa."""
     cfg = settings()
     client = gamma.GammaClient()
+    # the truncation WARNING once per process per kind; every cycle still
+    # carries it in the heartbeat and in the INFO cycle line
+    _truncation_noted: set = set()
     while True:
         detail: dict = {}
         errors: dict = {}
@@ -66,6 +69,16 @@ async def main() -> None:
                     await gamma.upsert_market(meta)
                     kept += 1
             detail["active_sports_markets"] = kept
+            # how the open-market paging ended: a catalogue cut at the
+            # API's offset ceiling is TRUNCATED, by name, on every
+            # heartbeat (gamma.GAMMA_MAX_OFFSET), not a 422 every cycle
+            detail["gamma_paging"] = dict(client.last_paging)
+            stopped = client.last_paging.get("stopped")
+            if (client.last_paging.get("truncated")
+                    and stopped not in _truncation_noted):
+                _truncation_noted.add(stopped)
+                log.warning("gamma open-market catalogue TRUNCATED: %s",
+                            client.last_paging)
         except Exception as exc:  # noqa: BLE001
             log.warning("gamma markets refresh failed: %s", exc)
             errors["markets"] = str(exc)[:180]

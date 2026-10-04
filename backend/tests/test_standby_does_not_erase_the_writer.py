@@ -100,7 +100,13 @@ def test_the_standby_branch_passes_the_standby_key():
     branch simply did not say which row. Asserting on the helper alone
     would have passed throughout the failure.
     """
-    src = _code_only(inspect.getsource(EXT.run))
+    # PINNED FACT, UPDATED (R30A runtime review): the external loop's body --
+    # the lease, the standby branch and the writer's hold -- moved out of
+    # `run` into `_hold_once`, so that `run` can always contend again after
+    # a failed lease (it used to exit for good on a contention exception).
+    # The standby call is unchanged; it is read where it now lives.
+    src = _code_only(inspect.getsource(EXT.run)
+                     + inspect.getsource(EXT._hold_once))
     assert "key=STANDBY_KEY" in src, (
         "the external standby branch must name the standby key")
     src = _code_only(inspect.getsource(ML.run))
