@@ -768,7 +768,25 @@ async def step_after_delay(conn, ctx: dict) -> dict:
     """THE DELAY, HONOURED: wait (within the pass budget) until the new
     entries become eligible, observe their books again, and simulate. An
     entry whose eligible book is not observed this pass stays pending for
-    the next one, or expires with no fill."""
+    the next one, or expires with no fill.
+
+    R30A INCIDENT REPAIR. Two ways this step manufactured an unusable or a
+    harmful observation are closed:
+      * the read is made with `not_before` = the entry's eligible instant,
+        so the 6 s shared-read cache can no longer answer it with the
+        decision's own PRE-eligible receipt (recorded outside the order's
+        window, the read was wasted -- 22 of the 60 filled entries in 7 d,
+        research-sql run 37233864395, E2);
+      * the step no longer reads when the pass has no time left to finish a
+        read after the wait: it used to sleep to the eligible instant and
+        then read with nothing left on the pass deadline, recording an
+        ERRORED observation (PAPER_BOOK_READ_DEADLINE_EXCEEDED /
+        VENUE_COOLDOWN_EXCEEDS_THE_DECISION_DEADLINE) INSIDE the order's
+        window -- 99 such reads in 7 d (E3), the commonest first observation
+        of the 100 entry orders that then expired unread. Such an entry now
+        stays pending for the entry-fill read (`paper_runtime.
+        schedule_entry_fill`) or the next pass's books step, within its
+        unchanged TTL."""
     pend = list(ctx.get("pending_entries") or [])
     known = {p["order_id"] for p in pend}
     # ...and every open marketable order still waiting for a book observed
@@ -778,7 +796,8 @@ async def step_after_delay(conn, ctx: dict) -> dict:
             " WHERE o.account_id=$1 AND o.order_type='MARKETABLE' "
             "   AND o.state='PENDING_SIMULATION' AND NOT EXISTS (SELECT 1 "
             "   FROM paper_book_observations b WHERE b.us_market_slug = "
-            "   o.us_market_slug AND b.observed_at >= o.eligible_at)",
+            "   o.us_market_slug AND b.observed_at >= o.eligible_at "
+            "   AND b.error IS NULL)",
             ctx["account_id"]):
         if r["order_id"] not in known:
             pend.append({"order_id": r["order_id"],
@@ -786,24 +805,42 @@ async def step_after_delay(conn, ctx: dict) -> dict:
     if not pend:
         return {"pending": 0}
     clock = ctx.get("clock") or (lambda: float(ctx["now"]))
-    wait = max(float(p["eligible_at"]) for p in pend) - float(clock())
+    now0 = float(clock())
+    elig = {p["order_id"]: float(p["eligible_at"]) for p in pend}
+    wait = max(elig.values()) - now0
     left = ctx["deadline"] - time.monotonic()
     sleep = ctx.get("sleep") or asyncio.sleep
-    if wait > 0 and wait < left:
+    room = left - BOOK_READ_RESERVE_S - AFTER_DELAY_MIN_READ_S
+    waited = 0.0
+    if 0 < wait < room:
         await sleep(wait)
-    slugs = sorted({r["us_market_slug"] for r in await conn.fetch(
-        "SELECT us_market_slug FROM paper_orders WHERE order_id = ANY($1)",
-        [p["order_id"] for p in pend])})
-    from .paper_runtime import read_books
-    got = await read_books(conn, ctx, slugs, basis="ENTRY_AFTER_DELAY")
+        waited = wait
     # In production the clock has advanced by the wait already; with a
-    # fixed test clock the wait is added explicitly. Either way a fill needs
-    # a book observed at or after the order's eligible instant.
-    base = float(clock())
-    if ctx.get("clock") is not time.time:
-        base += max(wait, 0.0)
-    sim_now = max([base] + [float(o["observed_at"])
-                            for o in got["obs"].values()])
+    # fixed test clock the wait is added explicitly.
+    eff_now = max(float(clock()), now0 + waited)
+    slug_of = {r["order_id"]: r["us_market_slug"] for r in await conn.fetch(
+        "SELECT order_id, us_market_slug FROM paper_orders "
+        " WHERE order_id = ANY($1)", [p["order_id"] for p in pend])}
+    not_before: dict = {}
+    for oid, e in elig.items():
+        slug = slug_of.get(oid)
+        if slug is not None and e <= eff_now + 1e-6:
+            not_before[slug] = max(e, not_before.get(slug, 0.0))
+    deferred = sum(1 for oid, e in elig.items() if e > eff_now + 1e-6)
+    no_time = (ctx["deadline"] - time.monotonic()) <= (
+        BOOK_READ_RESERVE_S + AFTER_DELAY_MIN_READ_S)
+    got = {"read": 0, "obs": {}}
+    if not_before and not no_time:
+        from .paper_runtime import read_books
+        got = await read_books(conn, ctx, sorted(not_before),
+                               basis="ENTRY_AFTER_DELAY",
+                               not_before=not_before)
+    elif not_before:
+        deferred += len(not_before)
+    # A fill needs a READABLE book observed at or after the order's
+    # eligible instant (the simulator's rule).
+    sim_now = max([eff_now] + [float(o["observed_at"])
+                               for o in got["obs"].values()])
     res = []
     for p in pend:
         r = await SIM.simulate_order(conn, p["order_id"], now=sim_now,
@@ -814,7 +851,8 @@ async def step_after_delay(conn, ctx: dict) -> dict:
                             if x.get("ok") and not x.get("duplicate"))
         res.append({k: r.get(k) for k in ("order_id", "state", "filled_qty",
                                           "refusal", "pending")})
-    return {"pending": len(pend), "books": got["read"], "results": res}
+    return {"pending": len(pend), "books": got["read"], "results": res,
+            "deferred_past_the_pass_deadline": deferred}
 
 
 
@@ -829,14 +867,28 @@ async def step_after_delay(conn, ctx: dict) -> dict:
 # refusal, which it raises rather than queue past the deadline).
 
 BOOK_READ_RESERVE_S = 1.5
+#: R30A: the least time a book read is given; step_after_delay does not
+#: start one with less left on the pass deadline (it would only record an
+#: errored observation inside the order's window).
+AFTER_DELAY_MIN_READ_S = 1.0
 R_BOOK_DEADLINE = "BOOK_READ_DID_NOT_FINISH_INSIDE_THE_DECISION_DEADLINE"
 
 
-async def read_book_within_deadline(ctx: dict, slug: str) -> dict:
+async def read_book_within_deadline(ctx: dict, slug: str, *,
+                                    not_before_epoch=None) -> dict:
+    """`not_before_epoch` (R30A): the read must be RECEIVED at or after this
+    instant (a pending entry's eligible instant) -- the shared-read cache may
+    not answer with an older receipt. Passed only when given, so every
+    existing caller and test stand-in is called exactly as before."""
     md = ctx["market_data"]
     dl = ctx.get("deadline")
+    nb = ({} if not_before_epoch is None
+          else {"not_before_epoch": float(not_before_epoch)})
     if dl is None:
-        return await md.read_book(slug)
+        try:
+            return await md.read_book(slug, **nb)
+        except TypeError:
+            return await md.read_book(slug)
     remaining = float(dl) - time.monotonic() - BOOK_READ_RESERVE_S
     if remaining <= 0.0:
         return {"marketData": None, "error": G.R_BOOK_READ_DEADLINE,
@@ -844,7 +896,7 @@ async def read_book_within_deadline(ctx: dict, slug: str) -> dict:
                 "why": "no time left inside the decision deadline"}
     try:
         return await md.read_book(slug, deadline_epoch_s=time.time()
-                                  + remaining, timeout_s=remaining)
+                                  + remaining, timeout_s=remaining, **nb)
     except TypeError:
         # a market-data client without deadline support (a test stand-in)
         return await md.read_book(slug)

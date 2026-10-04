@@ -80,7 +80,15 @@ R_TOUCH_ONLY = "TOUCH_IS_NOT_A_FILL"
 R_NO_CROSS = "NO_LIQUIDITY_CROSSED_THE_LIMIT"
 R_QUEUE_AHEAD = "CROSSING_LIQUIDITY_WENT_TO_THE_QUEUE_AHEAD"
 R_GTD_EXPIRED = "GOOD_TILL_DATE_EXPIRED"
+#: HISTORICAL (records written before R30A): a marketable order released on
+#: the FIRST observation in its window because that observation was an
+#: errored read. No longer written by `_marketable` -- see
+#: R_NO_READABLE_BOOK_IN_WINDOW. A resting order still names it per book.
 R_BOOK_UNREADABLE = "THE_OBSERVED_BOOK_WAS_UNREADABLE"
+#: R30A: the marketable order's window closed with ONLY errored reads in it
+#: (or none at all after an errored one): no book was ever observed, so there
+#: is no fill evidence. The detail carries how many unreadable reads were seen.
+R_NO_READABLE_BOOK_IN_WINDOW = "NO_READABLE_BOOK_OBSERVED_BEFORE_THE_ORDER_EXPIRED"
 
 
 def intent_of(direction: str, holding_side: str) -> str:
@@ -397,30 +405,62 @@ async def _apply_takes(conn, o, *, takes, obs, basis, now, fee_fn,
 
 
 async def _marketable(conn, o, *, now: float, fee_fn) -> dict:
+    """THE MARKETABLE RULE: the FIRST READABLE book observed at or after
+    decision + delay, within the order's TTL.
+
+    R30A INCIDENT REPAIR (the ENTER -> FILL collapse). This used to take the
+    first observation of ANY kind in [eligible_at, expires_at] and, when that
+    observation was an errored read, release the order at once as
+    THE_OBSERVED_BOOK_WAS_UNREADABLE. Those errored "observations" are almost
+    all OUR OWN refusals to read -- the venue request gate declining to wait
+    out a cooldown past the paper pass's remaining deadline
+    (VENUE_COOLDOWN_EXCEEDS_THE_DECISION_DEADLINE), the pass's own deadline
+    already spent (PAPER_BOOK_READ_DEADLINE_EXCEEDED), a 429 -- recorded with
+    our receipt instant, so they landed inside the window and killed the
+    order before any book was ever seen. Production, 7 days to 2026-10-04
+    20:54Z (research-sql run 37233864395, E1-E3): 100 of the 168 paper entry
+    orders (28 of 45 completed-game, 72 of 123 exploration) expired this way;
+    94 of them had nothing but errored reads in their window.
+
+    An errored read is evidence of nothing: no book was observed, so it can
+    neither fill nor refuse a fill -- the SAME rule the resting path already
+    applies (`_resting` skips an unreadable book) and the frozen config's own
+    wording ("the FIRST book observed at or after decision time + delay; no
+    such book before the TTL -> EXPIRED"). So errored reads are skipped; the
+    order fills on the first READABLE book in its window (chronologically
+    first, never chosen), or expires at its TTL with
+    NO_READABLE_BOOK_OBSERVED_BEFORE_THE_ORDER_EXPIRED and the count of
+    unreadable reads it saw. Nothing else changes: the delay, the TTL, the
+    limit, the depth walk, the consumption ledger and the fees are the
+    session's frozen ones."""
     oid = o["order_id"]
     obs = await conn.fetchrow(
         "SELECT * FROM paper_book_observations WHERE us_market_slug=$1 "
-        "   AND observed_at >= $2 AND observed_at <= $3 "
-        " ORDER BY observed_at LIMIT 1", o["us_market_slug"],
+        "   AND observed_at >= $2 AND observed_at <= $3 AND error IS NULL "
+        " ORDER BY observed_at, obs_id LIMIT 1", o["us_market_slug"],
         o["eligible_at"], o["expires_at"])
+    if obs is not None and _md(obs) is None:
+        obs = None
     if obs is None:
+        unreadable = int(await conn.fetchval(
+            "SELECT count(*) FROM paper_book_observations "
+            " WHERE us_market_slug=$1 AND observed_at >= $2 "
+            "   AND observed_at <= $3 AND error IS NOT NULL",
+            o["us_market_slug"], o["eligible_at"], o["expires_at"]) or 0)
         if float(now) >= L._epoch(o["expires_at"]):
+            reason = (R_NO_READABLE_BOOK_IN_WINDOW if unreadable
+                      else R_NO_BOOK_IN_WINDOW)
             rel = await L.release_remainder_locked(
-                conn, order_id=oid, reason=R_NO_BOOK_IN_WINDOW, at=now,
-                state="EXPIRED")
+                conn, order_id=oid, reason=reason, at=now,
+                state="EXPIRED",
+                detail={"unreadable_reads_in_window": unreadable})
             return {"order_id": oid, "state": "EXPIRED",
-                    "refusal": R_NO_BOOK_IN_WINDOW, "released": rel}
+                    "refusal": reason, "released": rel,
+                    "unreadable_reads_in_window": unreadable}
         return {"order_id": oid, "state": o["state"], "pending": True,
-                "refusal": R_NO_BOOK_YET}
+                "refusal": R_NO_BOOK_YET,
+                "unreadable_reads_in_window": unreadable}
     md = _md(obs)
-    if md is None:
-        # AN UNREADABLE BOOK IS EVIDENCE OF NOTHING: the order is released
-        # rather than filled or re-tried on a later, different book.
-        rel = await L.release_remainder_locked(
-            conn, order_id=oid, reason=R_BOOK_UNREADABLE, at=now,
-            state="EXPIRED", detail={"book_obs_id": obs["obs_id"]})
-        return {"order_id": oid, "state": "EXPIRED",
-                "refusal": R_BOOK_UNREADABLE, "released": rel}
     lv = levels_for(md, direction=o["direction"],
                     holding_side=o["holding_side"])
     consumed = await _consumed(conn, o["us_market_slug"], lv["side"],
