@@ -393,3 +393,18 @@ def test_the_execution_mirror_declares_its_controls():
             if "close_position" in body or ".close," in body:
                 owners.append(fn.name)
     assert sorted(set(owners)) == ["close", "emergency_stop"], owners
+
+
+def test_the_p5_focus_universe_and_c12_proof_paths_are_not_order_routes():
+    """cand24 added the stream's focus universe, its worker path and the C12
+    decision-time proof. None is an order route: no submitting or cancelling
+    call, no stored reference to one, no `.place(`."""
+    new = {"sportsassets/institutional_focus_universe.py",
+           "sportsassets/p5_c12_proof.py",
+           "sportsassets/institutional_same_book.py",
+           "sportsassets/institutional_api_stream.py",
+           "sportsassets/workers/institutional_md.py",
+           "sportsassets/p5_runtime.py"}
+    sites = _call_sites(SUBMITTING + CANCELLING + ("place",))
+    assert not [s for s in sites if s[0] in new], [
+        s for s in sites if s[0] in new]

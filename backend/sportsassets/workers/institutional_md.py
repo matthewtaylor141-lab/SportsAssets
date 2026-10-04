@@ -44,6 +44,7 @@ from datetime import datetime, timezone
 
 from .. import institutional_book as ib
 from .. import institutional_contract_map as icm
+from .. import institutional_focus_universe as fu
 from .. import institutional_same_book as samebook
 from .. import institutional_stream as istream
 from .. import institutional_stream_evidence as sevid
@@ -91,6 +92,22 @@ IDENTITY_EVERY_S = 60.0
 # Kill the probe alone with INSTITUTIONAL_SAME_BOOK_PROBE=off.
 STREAM_EVIDENCE_EVERY_S = 60.0
 SAME_BOOK_EVERY_S = 60.0
+
+# THE FOCUS UNIVERSE (institutional_focus_universe), only while the stream is
+# enabled here: what BETTOR holds and evaluates, in priority order, bounded by
+# fu.MAX_MEMBERS (= the API stream's MAX_SYMBOLS, inside the stream's own
+# MAX_SYMBOLS). It is what the STREAM subscribes (EXACT members only), what
+# the evidence RECORDER covers and what the same-book PROBE samples. The REST
+# sweep above stays on the experimental lane's own focus set (MAX_INSTRUMENTS)
+# -- that lane reads those books -- and the focus set is the universe's last
+# tier. Each member's refdata is read ONCE through the same allow-listed
+# `instruments` read (bootstrap_instrument), at most
+# UNIVERSE_BOOTSTRAPS_PER_SWEEP per sweep; an unlisted slug is re-asked no
+# sooner than UNIVERSE_RETRY_UNLISTED_S. Recomputed every FOCUS_UNIVERSE_EVERY_S.
+FOCUS_UNIVERSE_EVERY_S = 60.0
+UNIVERSE_BOOTSTRAPS_PER_SWEEP = 2
+UNIVERSE_RETRY_UNLISTED_S = 300.0
+UNIVERSE_REFDATA_REFRESH_S = float(REFDATA_REFRESH_S)
 
 
 def _off(name: str, default: str = "on") -> bool:
@@ -252,10 +269,16 @@ async def record_stream_evidence(pool, recorder, store, books=None) -> dict:
 
 
 async def probe_same_book(pool, store, symbols, *, process_id,
-                          current=None, retail_read=None) -> dict:
+                          current=None, retail_read=None, focus=None,
+                          limit=None) -> dict:
     """One same-book sample per symbol (read-only) ->
-    institutional_same_book_probe. The blocking reads run off the loop."""
-    syms = list(symbols or ())[:MAX_INSTRUMENTS]
+    institutional_same_book_probe. The blocking reads run off the loop.
+    `focus` ({slug: focus-universe member}) stamps each row's tier and why;
+    with a focus universe the bound is its own (fu.MAX_MEMBERS)."""
+    bound = limit if limit is not None else (
+        fu.MAX_MEMBERS if focus is not None else MAX_INSTRUMENTS)
+    syms = list(symbols or ())[:bound]
+    focus = focus or {}
     try:
         retail = await xstore.retail_rows(pool, syms) if syms else {}
     except Exception:                                          # noqa: BLE001
@@ -267,7 +290,7 @@ async def probe_same_book(pool, store, symbols, *, process_id,
         return [samebook.sample(
             s, record=(store.instrument(s) or {}).get("record"),
             retail_row=retail.get((s, "yes")), books_current=cur,
-            retail_read=read) for s in syms]
+            retail_read=read, focus=focus.get(s)) for s in syms]
     rows = await asyncio.to_thread(run_all)
     by: dict = {}
     for r in rows:
@@ -275,6 +298,77 @@ async def probe_same_book(pool, store, symbols, *, process_id,
     written = await samebook.persist(pool, rows, process_id=process_id,
                                      service=SERVICE)
     return {"samples": len(rows), "written": written, "by": by}
+
+
+def bootstrap_universe(client, store, slugs, attempts, *, now=None,
+                       limit=UNIVERSE_BOOTSTRAPS_PER_SWEEP) -> dict:
+    """Refdata for focus-universe members not yet held: at most `limit` per
+    call (paced), each through `bootstrap_instrument` (the allow-listed
+    `instruments` read). `attempts` {slug: epoch} bounds re-asks: a held
+    record is refreshed after UNIVERSE_REFDATA_REFRESH_S, an unlisted slug
+    re-asked after UNIVERSE_RETRY_UNLISTED_S. Runs OFF the event loop."""
+    from ..venue_pace import pace
+
+    at = float(now if now is not None else time.time())
+    out = {"read": 0, "listed": 0, "notListed": 0}
+    for s in slugs or ():
+        if out["read"] >= limit:
+            break
+        if not fu._SLUG.match(str(s or "")):
+            continue
+        inst = store.instrument(s)
+        tried = attempts.get(s)
+        if inst is not None and inst.get("record") is not None:
+            if tried is None:
+                attempts[s] = at      # already held (the sweep read it)
+                continue
+            if at - tried < UNIVERSE_REFDATA_REFRESH_S:
+                continue
+        elif tried is not None and at - tried < UNIVERSE_RETRY_UNLISTED_S:
+            continue
+        attempts[s] = at
+        pace(READ_PACING_S)
+        boot = bootstrap_instrument(client, s)
+        out["read"] += 1
+        if boot["record"] is None and inst is not None and \
+                inst.get("record") is not None:
+            continue                  # a failed refresh keeps the held record
+        store.put_instrument(s, boot["record"], price_scale=boot["priceScale"],
+                             qty_scale=boot["qtyScale"])
+        out["listed" if boot["record"] is not None else "notListed"] += 1
+    return out
+
+
+async def compute_universe(pool, store, discovery, attempts) -> dict:
+    """The focus universe (read-only) with every member's exact identity or
+    UNAVAILABLE reason attached from the refdata this process holds."""
+    u = await fu.compute(pool, discovery=list(discovery or ()))
+    return await identify_universe(pool, store, u, attempts)
+
+
+async def identify_universe(pool, store, universe, attempts) -> dict:
+    slugs = [m["retail_slug"] for m in universe.get("members") or ()]
+    try:
+        retail = await xstore.retail_rows(pool, slugs) if slugs else {}
+    except Exception:                                          # noqa: BLE001
+        retail = {}
+    return fu.attach(
+        universe, record_for=lambda s: (store.instrument(s) or {}).get(
+            "record"), retail=retail,
+        attempted=lambda s: s in attempts or store.instrument(s) is not None)
+
+
+def subscribe_universe(store, universe) -> list:
+    """EXACT members only: their own refdata scales, then subscribe. An
+    UNAVAILABLE member is never subscribed, compared or priced."""
+    exact = fu.exact_symbols(universe)
+    for s in exact:
+        inst = store.instrument(s)
+        if inst and inst.get("record") is not None:
+            istream.set_instrument(s, inst["record"])
+    if exact:
+        istream.want(exact)
+    return exact
 
 
 async def run() -> None:
@@ -337,6 +431,9 @@ async def run() -> None:
     last_identity = 0.0
     last_stream_evidence = time.monotonic()
     last_same_book = time.monotonic()
+    last_universe = 0.0
+    universe: dict = {}
+    u_attempts: dict = {}
     beats = 0
     while True:
         started = time.monotonic()
@@ -392,6 +489,32 @@ async def run() -> None:
                     log.warning("institutional_md: identity resolve failed",
                                 exc_info=True)
 
+        # THE FOCUS UNIVERSE (stream enabled only): recomputed each minute,
+        # refdata bootstrapped a few per sweep, identities re-attached, EXACT
+        # members subscribed. Never on the decision path; never an order.
+        if recorder is not None:
+            try:
+                if time.monotonic() - last_universe >= FOCUS_UNIVERSE_EVERY_S:
+                    last_universe = time.monotonic()
+                    universe = await compute_universe(pool, store, symbols,
+                                                      u_attempts)
+                    stats["focusUniverse"] = fu.summary(universe)
+                    stats["focusUniverseWritten"] = await fu.persist(
+                        pool, universe, process_id=recorder.process_id,
+                        service=SERVICE, wanted=istream.BOOKS.wanted())
+                slugs = [m["retail_slug"]
+                         for m in universe.get("members") or ()]
+                boot = await asyncio.to_thread(
+                    bootstrap_universe, client, store, slugs, u_attempts)
+                if boot["read"]:
+                    universe = await identify_universe(pool, store, universe,
+                                                       u_attempts)
+                stats["universeBootstrap"] = boot
+                stats["universeSubscribed"] = len(
+                    subscribe_universe(store, universe))
+            except Exception as exc:                           # noqa: BLE001
+                stats["focusUniverseError"] = type(exc).__name__
+
         # THE STREAM'S EVIDENCE: recorded whether or not a focus set exists
         # (the process row says what the stream is doing); probed only for
         # symbols the stream holds. Never on the decision path.
@@ -404,13 +527,24 @@ async def run() -> None:
                     pool, recorder, store)
             except Exception as exc:                           # noqa: BLE001
                 stats["streamEvidenceError"] = type(exc).__name__
-        if recorder is not None and symbols and \
+        # THE PROBE SAMPLES THE FOCUS UNIVERSE (every member, in priority
+        # order; an UNAVAILABLE member is recorded NOT_COMPARABLE with its
+        # identity refusal and reads nothing), or -- before the first
+        # universe exists -- the focus set as before.
+        probe_members = universe.get("members") or []
+        probe_syms = ([m["retail_slug"] for m in probe_members]
+                      if probe_members else symbols)
+        if recorder is not None and probe_syms and \
                 not _off("INSTITUTIONAL_SAME_BOOK_PROBE") and \
                 time.monotonic() - last_same_book >= SAME_BOOK_EVERY_S:
             last_same_book = time.monotonic()
+            focus = ({m["retail_slug"]: dict(
+                m, universe_id=universe.get("universe_id"))
+                for m in probe_members} if probe_members else None)
             try:
                 stats["sameBook"] = await probe_same_book(
-                    pool, store, symbols, process_id=recorder.process_id)
+                    pool, store, probe_syms, process_id=recorder.process_id,
+                    focus=focus)
             except Exception as exc:                           # noqa: BLE001
                 stats["sameBookError"] = type(exc).__name__
 

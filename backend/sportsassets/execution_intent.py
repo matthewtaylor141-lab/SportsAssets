@@ -57,6 +57,7 @@ from . import execmirror_probe as EP
 from . import live_book_currency as LBC
 from . import live_book_evidence as LBE
 from . import live_rule_artifacts as LRA
+from . import p5_c12_proof as C12P
 from . import venue_pace
 
 log = logging.getLogger(__name__)
@@ -458,6 +459,7 @@ async def on_decision(conn, payload: dict) -> dict:
     Returns at once; the caller writes the paper order next."""
     intent = await create(conn, **payload)
     if not intent["live_eligible"]:
+        await _c12_proof(conn, intent, payload)
         return {"intent_id": intent["intent_id"],
                 "actual_lane": intent["actual_state"],
                 "actual_refusal": intent["actual_refusal"]}
@@ -466,8 +468,24 @@ async def on_decision(conn, payload: dict) -> dict:
     dispatched = (not conn.is_in_transaction()) and dispatch(intent)
     if not dispatched:
         await mark_no_lane(conn, intent["intent_id"])
+    # the proof is written AFTER the dispatch, so it adds nothing to the
+    # actual lane's path; it records the decision-time facts only
+    await _c12_proof(conn, intent, payload)
     return {"intent_id": intent["intent_id"],
             "actual_lane": A_DISPATCHED if dispatched else A_NO_LANE}
+
+
+async def _c12_proof(conn, intent: dict, payload: dict) -> None:
+    """P5 C12 decision-time proof (p5_c12_proof): one record per NEW intent
+    whose decision a resident stream book was evaluated for. Evidence only:
+    it runs after the intent is written and its eligibility fixed, in a
+    savepoint, and never raises into the decision or either lane."""
+    if not intent.get("created"):
+        return
+    try:
+        await C12P.record(conn, intent, payload)
+    except Exception:                                         # noqa: BLE001
+        log.debug("c12 proof not recorded", exc_info=True)
 
 
 def start(get_pool, mirror) -> "ActualLane":

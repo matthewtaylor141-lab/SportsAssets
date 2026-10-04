@@ -470,3 +470,77 @@ def test_the_decision_paths_stream_observation_sends_nothing():
                PBM.stream_observation):
         t = ast.parse(inspect.getsource(fn))
         assert not _called(t) & _ORDER_CALLS, fn.__name__
+
+
+# ── §8 cand24: the focus universe and the C12 decision proof ────────────
+#
+# The focus universe chooses what the read-only stream subscribes and the
+# probe samples; it reads tables and the refdata the process already holds.
+# The C12 proof writes one evidence row after an intent exists. Neither can
+# reach an order, a venue write or an execution module.
+
+from sportsassets import institutional_focus_universe as FUV  # noqa: E402
+from sportsassets import p5_c12_proof as C12PR  # noqa: E402
+
+
+def test_the_focus_universe_module_reaches_no_venue_and_no_order():
+    tree, names = _imports_of(FUV)
+    assert names <= {"annotations", "__future__", "hashlib", "json", "re",
+                     "time", "datetime", "timezone",
+                     "institutional_contract_map", "shadow_contract_family",
+                     "ICM", "CF"}, names
+    assert not names & _VENUE_MODULES
+    called = _called(tree)
+    assert not called & _ORDER_CALLS, called & _ORDER_CALLS
+    assert not called & {"read", "request", "send", "subscribe", "want",
+                         "current", "start_default", "set_instrument"}, called
+    src = pathlib.Path(FUV.__file__).read_text()
+    # its only write is its own evidence table; every reader is a SELECT
+    writes = re.findall(r"INSERT\s+INTO\s+(\w+)|UPDATE\s+(\w+)\s+SET|"
+                        r"DELETE\s+FROM\s+(\w+)", src, re.I)
+    assert [w for t in writes for w in t if w] == [
+        "institutional_focus_universe"]
+    # the ICM call is the exact mapper and nothing else
+    assert set(re.findall(r"ICM\.(\w+)\(", src)) == {
+        "map_retail_to_institutional"}
+
+
+def test_the_c12_proof_module_reaches_no_venue_and_no_order():
+    tree, names = _imports_of(C12PR)
+    assert not names & _VENUE_MODULES, names & _VENUE_MODULES
+    assert names <= {"annotations", "__future__", "json", "datetime",
+                     "timezone", "Decimal", "InvalidOperation", "decimal",
+                     "live_book_currency", "LBC"}, names
+    assert not _called(tree) & _ORDER_CALLS
+    src = pathlib.Path(C12PR.__file__).read_text()
+    writes = re.findall(r"INSERT\s+INTO\s+%s|UPDATE\s+\w+\s+SET|"
+                        r"DELETE\s+FROM", src, re.I)
+    assert writes == ["INSERT INTO %s"]
+    assert C12PR.TABLE == "p5_c12_decision_proof"
+
+
+def test_the_workers_universe_path_reads_refdata_only_and_subscribes():
+    from sportsassets.workers import institutional_md as W
+    for fn, allowed in ((W.bootstrap_universe, {"bootstrap_instrument"}),
+                        (W.subscribe_universe, {"set_instrument", "want"})):
+        t = ast.parse(inspect.getsource(fn))
+        assert not _called(t) & _ORDER_CALLS, fn.__name__
+        venue_calls = {n.func.attr for n in ast.walk(t)
+                       if isinstance(n, ast.Call)
+                       and isinstance(n.func, ast.Attribute)
+                       and isinstance(n.func.value, ast.Name)
+                       and n.func.value.id in ("client", "istream", "pmx")}
+        assert venue_calls <= allowed, (fn.__name__, venue_calls)
+    t = ast.parse(inspect.getsource(W.bootstrap_universe))
+    direct = {n.func.id for n in ast.walk(t) if isinstance(n, ast.Call)
+              and isinstance(n.func, ast.Name)}
+    assert "bootstrap_instrument" in direct
+    assert not any(isinstance(n, ast.Attribute) and n.attr == "read"
+                   for n in ast.walk(t))
+
+
+def test_the_api_stream_reaches_the_universe_for_reads_only():
+    tree, _names = _imports_of(IAS)
+    assert _attrs_on(tree, "FU") <= {"compute", "attach", "persist",
+                                     "summary", "MAX_MEMBERS"}, \
+        _attrs_on(tree, "FU")

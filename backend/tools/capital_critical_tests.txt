@@ -692,3 +692,37 @@ tests/test_profitability_economics.py
 tests/test_profitability_capacity.py
 tests/test_profitability_metrics_forecast.py
 tests/test_profitability_warehouse_cycle.py
+# cand24 P5 focus universe (migration 213): the institutional stream, its
+# evidence recorder and the same-book probe hold a prioritized universe
+# (actual positions > live / imminent intents > paper investment positions >
+# V3 candidates > the mapped investment universe > exploration, diagnostic
+# only > discovery), bounded by the stream limits; every member is EXACT by
+# institutional_contract_map or UNAVAILABLE with the reason and never
+# compared; exploration is never live-eligible; every probe observation
+# persists its agreement fields; S1 counts only comparable, exactly mapped
+# samples (the rule's 30 / 95 % untouched); the endpoint's focus_universe /
+# same_book_samples / c12_proofs, null with a reason when unmeasured.
+tests/test_p5_focus_universe.py
+# cand24 P5 C12 decision-time proof: a stream-priced decision writes ONE
+# proof tying decision, intent, symbol, epoch, book instant, age and
+# executable price; stale, crossed, gapped, other-symbol, mapped-to-another
+# and no-edge stream books write a REFUSED proof with Venue.place ZERO times.
+tests/test_p5_c12_decision_proof.py
+# cand24 Xavier freshness, measured without conflating two things: freshness
+# quality is MARKET_EVENT reviews on a fresh probability; scheduled reviews
+# of unchanged provider quotes are counted as correctly stale (informational)
+# and excluded; market change -> review SLA with median / p90; open positions
+# monitored inside their due bound; discretion only on fresh evidence.
+# Measurement only: the scorecard writes nothing and relabels nothing.
+tests/test_xavier_freshness_scorecard.py
+# cand24 P0: the NFL is visible -- `nfl` -> americanfootball_nfl through the
+# one league identity, ranked by venue coverage inside the unchanged 4-key
+# budget, city/region + nickname identity (LA/NY never cross-map), settlement
+# claimed only where both documents agree, and the real cycle on the 14-game
+# 2026-10-04 slate ending every game in a recorded, named outcome.
+tests/test_nfl_slate_reaches_a_recorded_outcome.py
+# cand24 B: one status per league (HEALTHY / REFUSING_BY_POLICY /
+# EXPLICITLY_UNSUPPORTED / COVERAGE_INCIDENT / UNAVAILABLE), an Audrey alert
+# for every coverage incident (NULL is not absence), the per-game NFL
+# reconciliation on GET /api/command/coverage.
+tests/test_league_coverage_status.py

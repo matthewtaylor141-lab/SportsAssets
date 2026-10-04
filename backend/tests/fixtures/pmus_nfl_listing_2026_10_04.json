@@ -1,0 +1,125 @@
+{
+ "_what": "THE VENUE'S OWN nfl MONEY-LINE LISTINGS, as served by the public gateway, for cand24 settlement compatibility and home/away orientation.",
+ "_source": "GET https://gateway.polymarket.us/v1/markets?slug=aec-nfl-ind-was-2026-10-04&slug=aec-nfl-lar-phi-2026-10-04&slug=aec-nfl-nyj-chi-2026-10-04",
+ "_captured_at": "2026-10-04T04:29:04Z",
+ "_reader": "github-actions runner (fetch-docs)",
+ "_evidence": {
+  "workflow": "fetch-docs",
+  "run_id": 37177121911,
+  "job_id": 111361963055,
+  "response_bytes": 14251,
+  "response_sha256": "1a9d1c2fc79414dc61c3b676ad2d9d550cc5b6b209ac761e00f1f79269e1ebaa"
+ },
+ "_subset": "the fields this repository reads (description, types, sides with team name/abbreviation/alias/ordering); icons/colours/prices omitted",
+ "_orientation": "the venue's LONG side is the team with ordering 'away'; its event title is 'AWAY vs. HOME' (IND Colts at WAS Commanders in London)",
+ "markets": [
+  {
+   "slug": "aec-nfl-ind-was-2026-10-04",
+   "question": "Who will win in the upcoming football event Indianapolis Colts vs Washington Commanders scheduled for October 4, 2026 at 1:30 PM UTC?",
+   "description": "This market will settle to the winner of the Indianapolis Colts vs Washington Commanders NFL game scheduled for Oct 4, 2026. Overtime is included if played. If the game ends in a tie, the market will settle to $0.50. If the game is delayed, postponed, or suspended and not rescheduled to a date within two weeks of the originally scheduled date, the market will settle to the last fair market price. Outcome sourced from NFL.",
+   "marketType": "moneyline",
+   "sportsMarketType": "football_team_full_game_winner",
+   "sportsMarketTypeV2": "SPORTS_MARKET_TYPE_MONEYLINE",
+   "gameStartTime": "2026-10-04T13:30:00Z",
+   "orderPriceMinTickSize": 0.0025,
+   "marketSides": [
+    {
+     "identifier": "aec-nfl-ind-was-2026-10-04",
+     "description": "Colts",
+     "long": true,
+     "team": {
+      "name": "Indianapolis Colts",
+      "abbreviation": "ind",
+      "league": "nfl",
+      "alias": "Colts",
+      "ordering": "away"
+     }
+    },
+    {
+     "identifier": "aec-nfl-ind-was-2026-10-04",
+     "description": "Commanders",
+     "long": false,
+     "team": {
+      "name": "Washington Commanders",
+      "abbreviation": "was",
+      "league": "nfl",
+      "alias": "Commanders",
+      "ordering": "home"
+     }
+    }
+   ]
+  },
+  {
+   "slug": "aec-nfl-nyj-chi-2026-10-04",
+   "question": "Who will win in the upcoming football event New York Jets vs Chicago Bears scheduled for October 4, 2026 at 5:00 PM UTC?",
+   "description": "This market will settle to the winner of the New York Jets vs Chicago Bears NFL game scheduled for Oct 4, 2026. Overtime is included if played. If the game ends in a tie, the market will settle to $0.50. If the game is delayed, postponed, or suspended and not rescheduled to a date within two weeks of the originally scheduled date, the market will settle to the last fair market price. Outcome sourced from NFL.",
+   "marketType": "moneyline",
+   "sportsMarketType": "football_team_full_game_winner",
+   "sportsMarketTypeV2": "SPORTS_MARKET_TYPE_MONEYLINE",
+   "gameStartTime": "2026-10-04T17:00:00Z",
+   "orderPriceMinTickSize": 0.0025,
+   "marketSides": [
+    {
+     "identifier": "aec-nfl-nyj-chi-2026-10-04",
+     "description": "Jets",
+     "long": true,
+     "team": {
+      "name": "New York Jets",
+      "abbreviation": "nyj",
+      "league": "nfl",
+      "alias": "Jets",
+      "ordering": "away"
+     }
+    },
+    {
+     "identifier": "aec-nfl-nyj-chi-2026-10-04",
+     "description": "Bears",
+     "long": false,
+     "team": {
+      "name": "Chicago Bears",
+      "abbreviation": "chi",
+      "league": "nfl",
+      "alias": "Bears",
+      "ordering": "home"
+     }
+    }
+   ]
+  },
+  {
+   "slug": "aec-nfl-lar-phi-2026-10-04",
+   "question": "Who will win in the upcoming football event Los Angeles Rams vs Philadelphia Eagles scheduled for October 4, 2026 at 5:00 PM UTC?",
+   "description": "This market will settle to the winner of the Los Angeles Rams vs Philadelphia Eagles NFL game scheduled for Oct 4, 2026. Overtime is included if played. If the game ends in a tie, the market will settle to $0.50. If the game is delayed, postponed, or suspended and not rescheduled to a date within two weeks of the originally scheduled date, the market will settle to the last fair market price. Outcome sourced from NFL.",
+   "marketType": "moneyline",
+   "sportsMarketType": "football_team_full_game_winner",
+   "sportsMarketTypeV2": "SPORTS_MARKET_TYPE_MONEYLINE",
+   "gameStartTime": "2026-10-04T17:00:00Z",
+   "orderPriceMinTickSize": 0.0025,
+   "marketSides": [
+    {
+     "identifier": "aec-nfl-lar-phi-2026-10-04",
+     "description": "Rams",
+     "long": true,
+     "team": {
+      "name": "Los Angeles Rams",
+      "abbreviation": "lar",
+      "league": "nfl",
+      "alias": "Rams",
+      "ordering": "away"
+     }
+    },
+    {
+     "identifier": "aec-nfl-lar-phi-2026-10-04",
+     "description": "Eagles",
+     "long": false,
+     "team": {
+      "name": "Philadelphia Eagles",
+      "abbreviation": "phi",
+      "league": "nfl",
+      "alias": "Eagles",
+      "ordering": "home"
+     }
+    }
+   ]
+  }
+ ]
+}

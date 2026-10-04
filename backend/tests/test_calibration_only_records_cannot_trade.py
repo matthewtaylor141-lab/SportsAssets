@@ -540,8 +540,14 @@ READERS = {
     # per day (record_purpose filtered) and joins decisions/orders/fills/
     # intents to their valuation BY ID only to attribute the provider event's
     # league. Reporting and Audrey findings; selects nothing, no order effect.
+    # (cand24) +2: the per-game league reconciliation (reconcile_league) reads
+    # the LATEST valuation of each venue-listed contract of one league-day,
+    # EVERY purpose, to DISPLAY whether one exists and its probability /
+    # named refusals. A fixed list of the venue's own contracts, display only:
+    # it selects no candidate and reaches no order path.
     "agents/coverage_integrity.py": (
-        "REPORTING_COUNTS_FILTERS_ENTRY_DECISION_AND_BY_ID_ATTRIBUTION", 11),
+        "REPORTING_COUNTS_FILTERS_ENTRY_DECISION_AND_BY_ID_ATTRIBUTION_"
+        "AND_PER_GAME_DISPLAY_RECONCILIATION", 13),
     # (209) THE QUALITY SCORECARD: Brier of settled ENTRY_DECISION rows
     # (record_purpose filtered) for display and the improvement driver's
     # calibration-drift deficit. No selection, no order effect.

@@ -106,8 +106,8 @@
   function label(k) { return String(k).replace(/_/g, ' '); }
   function tone(s) {
     s = String(s || '').toUpperCase();
-    if (/(UNAVAILABLE|ERROR|CRITICAL|MISALIGNED|REFUTED|NOT_SUPPORTED|DETERIORATING|STOPPED|BLOCKED|NOT_PROVEN|NO_TRADE|FAILED|REJECTED|HIGH)/.test(s)) { return 'bad'; }
-    if (/^(OK|MEASURED|ALIGNED|MATCHED|SUSTAINED|SUPPORTED|ENABLED|IMPROVING|COMPLETE|PROVEN|UPHELD|NORMAL|AVAILABLE|FILLED)/.test(s)) { return 'good'; }
+    if (/(UNAVAILABLE|ERROR|CRITICAL|MISALIGNED|REFUTED|NOT_SUPPORTED|DETERIORATING|STOPPED|BLOCKED|NOT_PROVEN|NO_TRADE|FAILED|REJECTED|HIGH|INCIDENT)/.test(s)) { return 'bad'; }
+    if (/^(OK|MEASURED|ALIGNED|MATCHED|SUSTAINED|SUPPORTED|ENABLED|IMPROVING|COMPLETE|PROVEN|UPHELD|NORMAL|AVAILABLE|FILLED|HEALTHY|EXACT)/.test(s)) { return 'good'; }
     if (/(INSUFFICIENT|UNPROVEN|WARNING|EMPTY|STALE|PENDING|REDUCE|OPEN|RESPONDED|MEDIUM|UNTESTED|ABSENT|READY_FOR)/.test(s)) { return 'warn'; }
     return 'grey';
   }
@@ -692,8 +692,66 @@
         ['Reason', function (p) { return has(p.reason) ? esc(clip(p.reason, 60)) : '—'; }],
         ['Runtime evidence', evidenceOf]
       ], d.predicates, 20);
-      return html;
+      return html + focusUniverse(obj(d.focus_universe), obj(d.same_book_samples), obj(d.c12_proofs));
     });
+  }
+  /* the stream's focus universe (what BETTOR holds and evaluates), the same-book
+     samples S1 counts and the C12 decision-time proofs -- UNMEASURED stays so */
+  function kv(o, n) {
+    var k = Object.keys(o);
+    return k.length ? esc(clip(k.map(function (x) { return x + ' ' + o[x]; }).join(' · '), n || 160)) : 'none';
+  }
+  function focusUniverse(fu, sb, c12) {
+    var req = obj(sb.required);
+    var html = '<h3 class="h3">P5 focus universe</h3>';
+    if (fu.status !== 'MEASURED') {
+      html += '<p class="muted">' + statusPill(fu.status || 'UNAVAILABLE') + ' ' + esc(fu.why || 'not reported') + '</p>';
+    } else {
+      html += facts([
+        ['Focus universe', n0(fu.count, 'not reported') + ' <span class="iv-why">bound ' + esc(n0Text(fu.bound)) + ' · computed </span>' + when(fu.computed_at)],
+        ['Exact identity', n0(fu.exact, 'not reported') + ' <span class="iv-why">UNAVAILABLE ' + esc(n0Text(fu.unavailable)) + '</span>'],
+        ['Per tier', kv(obj(fu.per_tier))],
+        ['Unavailable reasons', kv(obj(fu.unavailable_reasons))]
+      ], 'two');
+      html += table([
+        ['#', function (m) { return esc(m.rank); }, true],
+        ['Tier', function (m) { return '<span class="mono">' + esc(m.tier) + '</span>'; }],
+        ['Retail contract', function (m) { return esc(clip(m.retail_slug || '—', 44)) + (has(m.outcome_side) ? ' <span class="iv-why">' + esc(m.outcome_side) + '</span>' : ''); }],
+        ['Institutional symbol', function (m) { return has(m.institutional_symbol) ? '<span class="mono">' + esc(m.institutional_symbol) + '</span>' : NA(m.unavailable_reason || 'unmapped'); }],
+        ['Identity', function (m) { return statusPill(m.identity_status); }],
+        ['Live-eligible', function (m) { return m.grants_live_eligibility ? pill('yes', 'warn') : 'no'; }]
+      ], arr(fu.members), 32);
+    }
+    html += '<h3 class="h3">Same-book samples (S1)</h3>';
+    if (sb.status !== 'MEASURED') {
+      html += '<p class="muted">' + statusPill(sb.status || 'UNAVAILABLE') + ' ' + esc(sb.why || 'not reported') + '</p>';
+    } else {
+      html += facts([
+        ['Comparable samples', n0(sb.comparable_count, 'not reported') + ' <span class="iv-why">of ' + esc(n0Text(req.min_comparable)) + ' needed · ' + esc(n0Text(sb.sample_count)) + ' probed</span>'],
+        ['Agreement', num(sb.agreement_pct) !== null ? esc(sb.agreement_pct.toFixed(1) + '%') : NA(sb.agreement_pct_why || 'no comparable sample')],
+        ['Required agreement', num(req.min_agree_pct) !== null ? esc('≥ ' + req.min_agree_pct.toFixed(0) + '%') : '—'],
+        ['Incomparable reasons', kv(obj(sb.incomparable_reasons), 200)]
+      ], 'two');
+      html += table([
+        ['Symbol', function (c) { return '<span class="mono">' + esc(c.symbol) + '</span>'; }],
+        ['Verdict', function (c) { return statusPill(c.verdict); }],
+        ['Tier', function (c) { return esc(c.focus_tier || '—'); }],
+        ['Probed', function (c) { return when(c.probed_at); }]
+      ], arr(sb.current_comparable_contracts), 12);
+    }
+    html += '<h3 class="h3">C12 decision-time proofs</h3>';
+    if (c12.status !== 'MEASURED') {
+      return html + '<p class="muted">' + statusPill(c12.status || 'UNAVAILABLE') + ' ' + esc(c12.why || 'not reported') + '</p>';
+    }
+    return html + '<p class="iv-src">' + esc(n0Text(c12.count) + ' proof(s) · ') + kv(obj(c12.by_status)) + '</p>' + table([
+      ['Recorded', function (r) { return when(r.recorded_at); }],
+      ['Intent', function (r) { return '<span class="mono">' + esc(clip(r.execution_intent_id || '—', 18)) + '</span>'; }],
+      ['Symbol', function (r) { return has(r.stream_symbol) ? '<span class="mono">' + esc(r.stream_symbol) + '</span>' : '—'; }],
+      ['Epoch', function (r) { return esc(n0Text(r.connection_epoch)); }, true],
+      ['Book age s', function (r) { return num(r.book_age_s) !== null ? esc(r.book_age_s.toFixed(2)) : '—'; }, true],
+      ['Price', function (r) { return num(r.decision_executable_price) !== null ? esc(r.decision_executable_price) : '—'; }, true],
+      ['Proof', function (r) { return statusPill(r.proof_status) + (has(r.refusal) ? ' <span class="iv-why">' + esc(clip(r.refusal, 40)) + '</span>' : ''); }]
+    ], arr(c12.records), 10);
   }
 
   /* ── COVERAGE: the funnel ──────────────────────────────────────── */
@@ -712,6 +770,7 @@
           return '<li>' + statusPill(a.severity) + ' ' + esc(a.league_name || a.league) + ' · ' + esc(a.kind) + ' at ' +
             esc(a.stage_to) + ' · ' + esc(a.day) + (a.audrey_finding_id ? ' · Audrey finding <span class="mono">' + esc(a.audrey_finding_id) + '</span>' : ' · ' + esc(a.audrey_refusal || '')) + '</li>';
         }).join('') + '</ul></div>' : '<p class="muted">No collapse alert in the window.</p>';
+      html += nflReconciliation(obj(d.nfl_reconciliation)) + leagueHealth(obj(d.league_status));
       if (!days.length) { return html + '<p class="muted">' + esc(d.why || 'No funnel rows.') + '</p>'; }
       var day = days[0];
       var rows = arr(day.leagues).filter(isObj);
@@ -725,6 +784,53 @@
                   ['Actual filled', function (r) { return n0(r.actual_filled, 'not reported'); }, true]]);
       return html + '<h3 class="h3">' + esc(day.day) + '</h3>' + table(cols, rows, 20);
     });
+  }
+  /* every expected NFL game, stage by stage, to ENTER/REFUSE or a named stop */
+  function stageCell(v) {
+    if (v === null || v === undefined || v === false) { return '—'; }
+    if (v === true) { return pill('yes', 'good'); }
+    if (isObj(v)) {
+      var s = v.verdict || v.status || v.state || v.outcome;
+      var why = v.refusal || v.reason || v.why;
+      return (has(s) ? statusPill(s) : pill('yes', 'good')) + (has(why) ? ' <span class="iv-why">' + esc(clip(why, 40)) + '</span>' : '');
+    }
+    return esc(clip(v, 40));
+  }
+  function nflReconciliation(r) {
+    var html = '<h3 class="h3">NFL slate</h3>';
+    if (r.status !== 'OK') {
+      return html + '<p class="muted">' + statusPill(r.status || 'UNAVAILABLE') + ' ' + esc(r.why || 'not reported') + '</p>';
+    }
+    var reached = obj(r.reached), stages = arr(r.stages);
+    html += '<p class="iv-src">' + esc((r.league_name || 'NFL') + ' · ' + r.day + ' (' + r.tz + ') · expected ' + n0Text(r.expected) + ' · missing ' + arr(r.missing).length) + '</p>';
+    html += facts(stages.map(function (s) { return [label(s.toLowerCase()), n0(reached[s], 'not reported')]; }), 'three');
+    return html + table([
+      ['Game', function (g) { return esc(clip(g.title || g.market_slug, 40)); }],
+      ['Kickoff ET', function (g) { return esc(g.kickoff_local || '—'); }]
+    ].concat(stages.filter(function (s) { return s !== 'EXPECTED' && s !== 'VENUE_CONTRACT'; }).map(function (s) {
+      return [label(s.toLowerCase()), function (g) { return stageCell(obj(g.stages)[s]); }];
+    })).concat([['Stopped at', function (g) { return has(g.stopped_at) ? '<span class="mono">' + esc(g.stopped_at) + '</span> <span class="iv-why">' + esc(clip(g.reason || '', 50)) + '</span>' : '—'; }]]),
+      arr(r.games), 20);
+  }
+  /* one health status per league: HEALTHY / REFUSING_BY_POLICY / EXPLICITLY_UNSUPPORTED / COVERAGE_INCIDENT / UNAVAILABLE */
+  function leagueHealth(t) {
+    var html = '<h3 class="h3">All-sports health</h3>';
+    if (!Array.isArray(t.statuses)) {
+      return html + '<p class="muted">' + statusPill(t.status || 'UNAVAILABLE') + ' ' + esc(t.why || 'not reported') + '</p>';
+    }
+    html += '<p class="iv-src">' + kv(obj(t.summary), 240) + '</p>';
+    var C = function (k) { return function (r) { return n0(obj(r.counts)[k], 'not measured'); }; };
+    return html + table([
+      ['League', function (r) { return esc(r.league_name || r.league); }],
+      ['Status', function (r) { return statusPill(r.status) + (has(r.stage) ? ' <span class="iv-why">at ' + esc(r.stage) + '</span>' : ''); }],
+      ['Provider', C('provider_events'), true],
+      ['Venue', C('venue_discovered'), true],
+      ['Mapped', C('mapped_events'), true],
+      ['Evaluated', C('evaluated_events'), true],
+      ['Entered', C('entered_events'), true],
+      ['Refused', C('refused_events'), true],
+      ['Reason', function (r) { return esc(clip(r.reason || '—', 70)); }]
+    ], t.statuses, 60);
   }
 
   /* ── AGENT COLLABORATION ───────────────────────────────────────── */

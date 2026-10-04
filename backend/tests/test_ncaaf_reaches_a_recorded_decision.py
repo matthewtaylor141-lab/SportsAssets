@@ -235,11 +235,13 @@ def test_the_football_board_makes_ncaaf_a_candidate_within_the_budget():
                         "nfl": ["ARI Cardinals vs. NY Giants"]},
              "title_days": {"cfb": {"Ohio State vs. Iowa": "2026-10-03"}}}
     fb = loop.football_candidates(board)
+    # cand24: nfl is a candidate too, under its OWN key
     assert [(c["key"], c["family"], c["our_token"]) for c in fb] == \
-        [(NCAAF, "football", "cfb")], "nfl is not mapped; cfb is"
+        [(NCAAF, "football", "cfb"),
+         ("americanfootball_nfl", "football", "nfl")]
     soccer = loop.candidates_from_board([("unl", 39), ("brb", 6)])
     merged = loop.merge_candidates(soccer, fb)
-    assert [c["our_token"] for c in merged] == ["cfb", "unl", "brb"]
+    assert [c["our_token"] for c in merged] == ["cfb", "unl", "nfl", "brb"]
     cat = {"ok": True, "sports": [{"key": k, "active": True} for k in (
         "baseball_mlb", NCAAF, "soccer_uefa_nations_league",
         "soccer_brazil_serie_b")]}
@@ -247,6 +249,12 @@ def test_the_football_board_makes_ncaaf_a_candidate_within_the_budget():
     assert sel["sports"] == [("baseball_mlb", "baseball"), (NCAAF, "football"),
                              ("soccer_uefa_nations_league", "soccer"),
                              ("soccer_brazil_serie_b", "soccer")]
+    # a key the provider's catalogue does not list is refused by name and
+    # consumes no budget slot
+    assert {"key": "americanfootball_nfl", "our_token": "nfl",
+            "refusal": loop.R_PROVIDER_DOES_NOT_LIST} in [
+        {k: r[k] for k in ("key", "our_token", "refusal")}
+        for r in sel["rejected"]]
     assert sel["budget"] == loop.MAX_METERED_SPORTS_PER_CYCLE == 4
     # THE PRODUCTION STATE BEFORE THE FIX: the soccer board alone never
     # produced the key, and nothing recorded its absence.

@@ -1,0 +1,542 @@
+{
+ "slate": "NFL, Sunday 2026-10-04 (America/New_York day)",
+ "source": "production us_premap, research-sql cand24_nfl_discover.sql (run 37176989663, job 111361573239, read 2026-10-04T04:26:28Z): split_part(market_slug,'-',2)='nfl', sports_type football_team_full_game_winner; home/away from the venue's own side ordering (gateway listing, fetch-docs run 37177121911: the LONG side is ordering 'away', title is 'AWAY vs. HOME')",
+ "count": 14,
+ "count_note": "14 on the America/New_York day = the owner's 14. On the UTC day 2026-10-04 there are 13: DET Lions at CAR Panthers kicks 2026-10-05T00:20Z (20:20 ET on 10-04; slug dated 10-04). Also listed but NOT in this slate: ATL Falcons at NO Saints, aec-nfl-atl-no-2026-10-05, Monday 2026-10-05 20:15 ET (00:15Z 10-06).",
+ "excluded": [
+  {
+   "market_slug": "aec-nfl-atl-no-2026-10-05",
+   "kickoff_utc": "2026-10-06T00:15:00Z",
+   "why": "Monday Night Football, ET day 2026-10-05"
+  }
+ ],
+ "orientation_evidence": {
+  "verified_by_gateway": [
+   "aec-nfl-ind-was-2026-10-04",
+   "aec-nfl-lar-phi-2026-10-04",
+   "aec-nfl-nyj-chi-2026-10-04"
+  ],
+  "others": "same LONG-is-first-in-title shape on every us_premap row"
+ },
+ "provider_ids_present": 0,
+ "games": [
+  {
+   "event_slug": "nfl-ind-was-2026-10-04",
+   "market_slug": "aec-nfl-ind-was-2026-10-04",
+   "venue_title": "IND Colts vs. WAS Commanders",
+   "home": "Washington Commanders",
+   "away": "Indianapolis Colts",
+   "home_venue": {
+    "team_name": "washington commanders",
+    "side_norm": "commanders",
+    "team_abbr": "was",
+    "intent": "ORDER_INTENT_BUY_SHORT"
+   },
+   "away_venue": {
+    "team_name": "indianapolis colts",
+    "side_norm": "colts",
+    "team_abbr": "ind",
+    "intent": "ORDER_INTENT_BUY_LONG"
+   },
+   "venue_slugs": {
+    "contract": "aec-nfl-ind-was-2026-10-04",
+    "home_side": {
+     "slug": "aec-nfl-ind-was-2026-10-04",
+     "intent": "ORDER_INTENT_BUY_SHORT"
+    },
+    "away_side": {
+     "slug": "aec-nfl-ind-was-2026-10-04",
+     "intent": "ORDER_INTENT_BUY_LONG"
+    }
+   },
+   "line": "30",
+   "kickoff_utc": "2026-10-04T13:30:00Z",
+   "kickoff_et": "2026-10-04T09:30:00-0400",
+   "et_day": "2026-10-04",
+   "utc_day": "2026-10-04",
+   "provider_event_id": null,
+   "provider_event_id_why": "no americanfootball_nfl event exists in ext_candidate_outcomes (the collector never requested the key: 'nfl' was unmapped) and the PinnAPI feed scope is sport_ids [6, 1] (baseball, soccer) -- football is not streamed"
+  },
+  {
+   "event_slug": "nfl-ari-nyg-2026-10-04",
+   "market_slug": "aec-nfl-ari-nyg-2026-10-04",
+   "venue_title": "ARI Cardinals vs. NY Giants",
+   "home": "New York Giants",
+   "away": "Arizona Cardinals",
+   "home_venue": {
+    "team_name": "new york giants",
+    "side_norm": "giants",
+    "team_abbr": "nyg",
+    "intent": "ORDER_INTENT_BUY_SHORT"
+   },
+   "away_venue": {
+    "team_name": "arizona cardinals",
+    "side_norm": "cardinals",
+    "team_abbr": "ari",
+    "intent": "ORDER_INTENT_BUY_LONG"
+   },
+   "venue_slugs": {
+    "contract": "aec-nfl-ari-nyg-2026-10-04",
+    "home_side": {
+     "slug": "aec-nfl-ari-nyg-2026-10-04",
+     "intent": "ORDER_INTENT_BUY_SHORT"
+    },
+    "away_side": {
+     "slug": "aec-nfl-ari-nyg-2026-10-04",
+     "intent": "ORDER_INTENT_BUY_LONG"
+    }
+   },
+   "line": "00",
+   "kickoff_utc": "2026-10-04T17:00:00Z",
+   "kickoff_et": "2026-10-04T13:00:00-0400",
+   "et_day": "2026-10-04",
+   "utc_day": "2026-10-04",
+   "provider_event_id": null,
+   "provider_event_id_why": "no americanfootball_nfl event exists in ext_candidate_outcomes (the collector never requested the key: 'nfl' was unmapped) and the PinnAPI feed scope is sport_ids [6, 1] (baseball, soccer) -- football is not streamed"
+  },
+  {
+   "event_slug": "nfl-dal-hou-2026-10-04",
+   "market_slug": "aec-nfl-dal-hou-2026-10-04",
+   "venue_title": "DAL Cowboys vs. HOU Texans",
+   "home": "Houston Texans",
+   "away": "Dallas Cowboys",
+   "home_venue": {
+    "team_name": "houston texans",
+    "side_norm": "texans",
+    "team_abbr": "hou",
+    "intent": "ORDER_INTENT_BUY_SHORT"
+   },
+   "away_venue": {
+    "team_name": "dallas cowboys",
+    "side_norm": "cowboys",
+    "team_abbr": "dal",
+    "intent": "ORDER_INTENT_BUY_LONG"
+   },
+   "venue_slugs": {
+    "contract": "aec-nfl-dal-hou-2026-10-04",
+    "home_side": {
+     "slug": "aec-nfl-dal-hou-2026-10-04",
+     "intent": "ORDER_INTENT_BUY_SHORT"
+    },
+    "away_side": {
+     "slug": "aec-nfl-dal-hou-2026-10-04",
+     "intent": "ORDER_INTENT_BUY_LONG"
+    }
+   },
+   "line": "00",
+   "kickoff_utc": "2026-10-04T17:00:00Z",
+   "kickoff_et": "2026-10-04T13:00:00-0400",
+   "et_day": "2026-10-04",
+   "utc_day": "2026-10-04",
+   "provider_event_id": null,
+   "provider_event_id_why": "no americanfootball_nfl event exists in ext_candidate_outcomes (the collector never requested the key: 'nfl' was unmapped) and the PinnAPI feed scope is sport_ids [6, 1] (baseball, soccer) -- football is not streamed"
+  },
+  {
+   "event_slug": "nfl-gb-tb-2026-10-04",
+   "market_slug": "aec-nfl-gb-tb-2026-10-04",
+   "venue_title": "GB Packers vs. TB Buccaneers",
+   "home": "Tampa Bay Buccaneers",
+   "away": "Green Bay Packers",
+   "home_venue": {
+    "team_name": "tampa bay buccaneers",
+    "side_norm": "buccaneers",
+    "team_abbr": "tb",
+    "intent": "ORDER_INTENT_BUY_SHORT"
+   },
+   "away_venue": {
+    "team_name": "green bay packers",
+    "side_norm": "packers",
+    "team_abbr": "gb",
+    "intent": "ORDER_INTENT_BUY_LONG"
+   },
+   "venue_slugs": {
+    "contract": "aec-nfl-gb-tb-2026-10-04",
+    "home_side": {
+     "slug": "aec-nfl-gb-tb-2026-10-04",
+     "intent": "ORDER_INTENT_BUY_SHORT"
+    },
+    "away_side": {
+     "slug": "aec-nfl-gb-tb-2026-10-04",
+     "intent": "ORDER_INTENT_BUY_LONG"
+    }
+   },
+   "line": "00",
+   "kickoff_utc": "2026-10-04T17:00:00Z",
+   "kickoff_et": "2026-10-04T13:00:00-0400",
+   "et_day": "2026-10-04",
+   "utc_day": "2026-10-04",
+   "provider_event_id": null,
+   "provider_event_id_why": "no americanfootball_nfl event exists in ext_candidate_outcomes (the collector never requested the key: 'nfl' was unmapped) and the PinnAPI feed scope is sport_ids [6, 1] (baseball, soccer) -- football is not streamed"
+  },
+  {
+   "event_slug": "nfl-jax-cin-2026-10-04",
+   "market_slug": "aec-nfl-jax-cin-2026-10-04",
+   "venue_title": "JAC Jaguars vs. CIN Bengals",
+   "home": "Cincinnati Bengals",
+   "away": "Jacksonville Jaguars",
+   "home_venue": {
+    "team_name": "cincinnati bengals",
+    "side_norm": "bengals",
+    "team_abbr": "cin",
+    "intent": "ORDER_INTENT_BUY_SHORT"
+   },
+   "away_venue": {
+    "team_name": "jacksonville jaguars",
+    "side_norm": "jaguars",
+    "team_abbr": "jax",
+    "intent": "ORDER_INTENT_BUY_LONG"
+   },
+   "venue_slugs": {
+    "contract": "aec-nfl-jax-cin-2026-10-04",
+    "home_side": {
+     "slug": "aec-nfl-jax-cin-2026-10-04",
+     "intent": "ORDER_INTENT_BUY_SHORT"
+    },
+    "away_side": {
+     "slug": "aec-nfl-jax-cin-2026-10-04",
+     "intent": "ORDER_INTENT_BUY_LONG"
+    }
+   },
+   "line": "00",
+   "kickoff_utc": "2026-10-04T17:00:00Z",
+   "kickoff_et": "2026-10-04T13:00:00-0400",
+   "et_day": "2026-10-04",
+   "utc_day": "2026-10-04",
+   "provider_event_id": null,
+   "provider_event_id_why": "no americanfootball_nfl event exists in ext_candidate_outcomes (the collector never requested the key: 'nfl' was unmapped) and the PinnAPI feed scope is sport_ids [6, 1] (baseball, soccer) -- football is not streamed"
+  },
+  {
+   "event_slug": "nfl-lar-phi-2026-10-04",
+   "market_slug": "aec-nfl-lar-phi-2026-10-04",
+   "venue_title": "LA Rams vs. PHI Eagles",
+   "home": "Philadelphia Eagles",
+   "away": "Los Angeles Rams",
+   "home_venue": {
+    "team_name": "philadelphia eagles",
+    "side_norm": "eagles",
+    "team_abbr": "phi",
+    "intent": "ORDER_INTENT_BUY_SHORT"
+   },
+   "away_venue": {
+    "team_name": "los angeles rams",
+    "side_norm": "rams",
+    "team_abbr": "lar",
+    "intent": "ORDER_INTENT_BUY_LONG"
+   },
+   "venue_slugs": {
+    "contract": "aec-nfl-lar-phi-2026-10-04",
+    "home_side": {
+     "slug": "aec-nfl-lar-phi-2026-10-04",
+     "intent": "ORDER_INTENT_BUY_SHORT"
+    },
+    "away_side": {
+     "slug": "aec-nfl-lar-phi-2026-10-04",
+     "intent": "ORDER_INTENT_BUY_LONG"
+    }
+   },
+   "line": "00",
+   "kickoff_utc": "2026-10-04T17:00:00Z",
+   "kickoff_et": "2026-10-04T13:00:00-0400",
+   "et_day": "2026-10-04",
+   "utc_day": "2026-10-04",
+   "provider_event_id": null,
+   "provider_event_id_why": "no americanfootball_nfl event exists in ext_candidate_outcomes (the collector never requested the key: 'nfl' was unmapped) and the PinnAPI feed scope is sport_ids [6, 1] (baseball, soccer) -- football is not streamed"
+  },
+  {
+   "event_slug": "nfl-ne-buf-2026-10-04",
+   "market_slug": "aec-nfl-ne-buf-2026-10-04",
+   "venue_title": "NE Patriots vs. BUF Bills",
+   "home": "Buffalo Bills",
+   "away": "New England Patriots",
+   "home_venue": {
+    "team_name": "buffalo bills",
+    "side_norm": "bills",
+    "team_abbr": "buf",
+    "intent": "ORDER_INTENT_BUY_SHORT"
+   },
+   "away_venue": {
+    "team_name": "new england patriots",
+    "side_norm": "patriots",
+    "team_abbr": "ne",
+    "intent": "ORDER_INTENT_BUY_LONG"
+   },
+   "venue_slugs": {
+    "contract": "aec-nfl-ne-buf-2026-10-04",
+    "home_side": {
+     "slug": "aec-nfl-ne-buf-2026-10-04",
+     "intent": "ORDER_INTENT_BUY_SHORT"
+    },
+    "away_side": {
+     "slug": "aec-nfl-ne-buf-2026-10-04",
+     "intent": "ORDER_INTENT_BUY_LONG"
+    }
+   },
+   "line": "00",
+   "kickoff_utc": "2026-10-04T17:00:00Z",
+   "kickoff_et": "2026-10-04T13:00:00-0400",
+   "et_day": "2026-10-04",
+   "utc_day": "2026-10-04",
+   "provider_event_id": null,
+   "provider_event_id_why": "no americanfootball_nfl event exists in ext_candidate_outcomes (the collector never requested the key: 'nfl' was unmapped) and the PinnAPI feed scope is sport_ids [6, 1] (baseball, soccer) -- football is not streamed"
+  },
+  {
+   "event_slug": "nfl-nyj-chi-2026-10-04",
+   "market_slug": "aec-nfl-nyj-chi-2026-10-04",
+   "venue_title": "NY Jets vs. CHI Bears",
+   "home": "Chicago Bears",
+   "away": "New York Jets",
+   "home_venue": {
+    "team_name": "chicago bears",
+    "side_norm": "bears",
+    "team_abbr": "chi",
+    "intent": "ORDER_INTENT_BUY_SHORT"
+   },
+   "away_venue": {
+    "team_name": "new york jets",
+    "side_norm": "jets",
+    "team_abbr": "nyj",
+    "intent": "ORDER_INTENT_BUY_LONG"
+   },
+   "venue_slugs": {
+    "contract": "aec-nfl-nyj-chi-2026-10-04",
+    "home_side": {
+     "slug": "aec-nfl-nyj-chi-2026-10-04",
+     "intent": "ORDER_INTENT_BUY_SHORT"
+    },
+    "away_side": {
+     "slug": "aec-nfl-nyj-chi-2026-10-04",
+     "intent": "ORDER_INTENT_BUY_LONG"
+    }
+   },
+   "line": "00",
+   "kickoff_utc": "2026-10-04T17:00:00Z",
+   "kickoff_et": "2026-10-04T13:00:00-0400",
+   "et_day": "2026-10-04",
+   "utc_day": "2026-10-04",
+   "provider_event_id": null,
+   "provider_event_id_why": "no americanfootball_nfl event exists in ext_candidate_outcomes (the collector never requested the key: 'nfl' was unmapped) and the PinnAPI feed scope is sport_ids [6, 1] (baseball, soccer) -- football is not streamed"
+  },
+  {
+   "event_slug": "nfl-ten-bal-2026-10-04",
+   "market_slug": "aec-nfl-ten-bal-2026-10-04",
+   "venue_title": "TEN Titans vs. BAL Ravens",
+   "home": "Baltimore Ravens",
+   "away": "Tennessee Titans",
+   "home_venue": {
+    "team_name": "baltimore ravens",
+    "side_norm": "ravens",
+    "team_abbr": "bal",
+    "intent": "ORDER_INTENT_BUY_SHORT"
+   },
+   "away_venue": {
+    "team_name": "tennessee titans",
+    "side_norm": "titans",
+    "team_abbr": "ten",
+    "intent": "ORDER_INTENT_BUY_LONG"
+   },
+   "venue_slugs": {
+    "contract": "aec-nfl-ten-bal-2026-10-04",
+    "home_side": {
+     "slug": "aec-nfl-ten-bal-2026-10-04",
+     "intent": "ORDER_INTENT_BUY_SHORT"
+    },
+    "away_side": {
+     "slug": "aec-nfl-ten-bal-2026-10-04",
+     "intent": "ORDER_INTENT_BUY_LONG"
+    }
+   },
+   "line": "00",
+   "kickoff_utc": "2026-10-04T17:00:00Z",
+   "kickoff_et": "2026-10-04T13:00:00-0400",
+   "et_day": "2026-10-04",
+   "utc_day": "2026-10-04",
+   "provider_event_id": null,
+   "provider_event_id_why": "no americanfootball_nfl event exists in ext_candidate_outcomes (the collector never requested the key: 'nfl' was unmapped) and the PinnAPI feed scope is sport_ids [6, 1] (baseball, soccer) -- football is not streamed"
+  },
+  {
+   "event_slug": "nfl-mia-min-2026-10-04",
+   "market_slug": "aec-nfl-mia-min-2026-10-04",
+   "venue_title": "MIA Dolphins vs. MIN Vikings",
+   "home": "Minnesota Vikings",
+   "away": "Miami Dolphins",
+   "home_venue": {
+    "team_name": "minnesota vikings",
+    "side_norm": "vikings",
+    "team_abbr": "min",
+    "intent": "ORDER_INTENT_BUY_SHORT"
+   },
+   "away_venue": {
+    "team_name": "miami dolphins",
+    "side_norm": "dolphins",
+    "team_abbr": "mia",
+    "intent": "ORDER_INTENT_BUY_LONG"
+   },
+   "venue_slugs": {
+    "contract": "aec-nfl-mia-min-2026-10-04",
+    "home_side": {
+     "slug": "aec-nfl-mia-min-2026-10-04",
+     "intent": "ORDER_INTENT_BUY_SHORT"
+    },
+    "away_side": {
+     "slug": "aec-nfl-mia-min-2026-10-04",
+     "intent": "ORDER_INTENT_BUY_LONG"
+    }
+   },
+   "line": "05",
+   "kickoff_utc": "2026-10-04T20:05:00Z",
+   "kickoff_et": "2026-10-04T16:05:00-0400",
+   "et_day": "2026-10-04",
+   "utc_day": "2026-10-04",
+   "provider_event_id": null,
+   "provider_event_id_why": "no americanfootball_nfl event exists in ext_candidate_outcomes (the collector never requested the key: 'nfl' was unmapped) and the PinnAPI feed scope is sport_ids [6, 1] (baseball, soccer) -- football is not streamed"
+  },
+  {
+   "event_slug": "nfl-den-sf-2026-10-04",
+   "market_slug": "aec-nfl-den-sf-2026-10-04",
+   "venue_title": "DEN Broncos vs. SF 49ers",
+   "home": "San Francisco 49ers",
+   "away": "Denver Broncos",
+   "home_venue": {
+    "team_name": "san francisco 49ers",
+    "side_norm": "49ers",
+    "team_abbr": "sf",
+    "intent": "ORDER_INTENT_BUY_SHORT"
+   },
+   "away_venue": {
+    "team_name": "denver broncos",
+    "side_norm": "broncos",
+    "team_abbr": "den",
+    "intent": "ORDER_INTENT_BUY_LONG"
+   },
+   "venue_slugs": {
+    "contract": "aec-nfl-den-sf-2026-10-04",
+    "home_side": {
+     "slug": "aec-nfl-den-sf-2026-10-04",
+     "intent": "ORDER_INTENT_BUY_SHORT"
+    },
+    "away_side": {
+     "slug": "aec-nfl-den-sf-2026-10-04",
+     "intent": "ORDER_INTENT_BUY_LONG"
+    }
+   },
+   "line": "25",
+   "kickoff_utc": "2026-10-04T20:25:00Z",
+   "kickoff_et": "2026-10-04T16:25:00-0400",
+   "et_day": "2026-10-04",
+   "utc_day": "2026-10-04",
+   "provider_event_id": null,
+   "provider_event_id_why": "no americanfootball_nfl event exists in ext_candidate_outcomes (the collector never requested the key: 'nfl' was unmapped) and the PinnAPI feed scope is sport_ids [6, 1] (baseball, soccer) -- football is not streamed"
+  },
+  {
+   "event_slug": "nfl-kc-lv-2026-10-04",
+   "market_slug": "aec-nfl-kc-lv-2026-10-04",
+   "venue_title": "KC Chiefs vs. LV Raiders",
+   "home": "Las Vegas Raiders",
+   "away": "Kansas City Chiefs",
+   "home_venue": {
+    "team_name": "las vegas raiders",
+    "side_norm": "raiders",
+    "team_abbr": "lv",
+    "intent": "ORDER_INTENT_BUY_SHORT"
+   },
+   "away_venue": {
+    "team_name": "kansas city chiefs",
+    "side_norm": "chiefs",
+    "team_abbr": "kc",
+    "intent": "ORDER_INTENT_BUY_LONG"
+   },
+   "venue_slugs": {
+    "contract": "aec-nfl-kc-lv-2026-10-04",
+    "home_side": {
+     "slug": "aec-nfl-kc-lv-2026-10-04",
+     "intent": "ORDER_INTENT_BUY_SHORT"
+    },
+    "away_side": {
+     "slug": "aec-nfl-kc-lv-2026-10-04",
+     "intent": "ORDER_INTENT_BUY_LONG"
+    }
+   },
+   "line": "25",
+   "kickoff_utc": "2026-10-04T20:25:00Z",
+   "kickoff_et": "2026-10-04T16:25:00-0400",
+   "et_day": "2026-10-04",
+   "utc_day": "2026-10-04",
+   "provider_event_id": null,
+   "provider_event_id_why": "no americanfootball_nfl event exists in ext_candidate_outcomes (the collector never requested the key: 'nfl' was unmapped) and the PinnAPI feed scope is sport_ids [6, 1] (baseball, soccer) -- football is not streamed"
+  },
+  {
+   "event_slug": "nfl-lac-sea-2026-10-04",
+   "market_slug": "aec-nfl-lac-sea-2026-10-04",
+   "venue_title": "LA Chargers vs. SEA Seahawks",
+   "home": "Seattle Seahawks",
+   "away": "Los Angeles Chargers",
+   "home_venue": {
+    "team_name": "seattle seahawks",
+    "side_norm": "seahawks",
+    "team_abbr": "sea",
+    "intent": "ORDER_INTENT_BUY_SHORT"
+   },
+   "away_venue": {
+    "team_name": "los angeles chargers",
+    "side_norm": "chargers",
+    "team_abbr": "lac",
+    "intent": "ORDER_INTENT_BUY_LONG"
+   },
+   "venue_slugs": {
+    "contract": "aec-nfl-lac-sea-2026-10-04",
+    "home_side": {
+     "slug": "aec-nfl-lac-sea-2026-10-04",
+     "intent": "ORDER_INTENT_BUY_SHORT"
+    },
+    "away_side": {
+     "slug": "aec-nfl-lac-sea-2026-10-04",
+     "intent": "ORDER_INTENT_BUY_LONG"
+    }
+   },
+   "line": "25",
+   "kickoff_utc": "2026-10-04T20:25:00Z",
+   "kickoff_et": "2026-10-04T16:25:00-0400",
+   "et_day": "2026-10-04",
+   "utc_day": "2026-10-04",
+   "provider_event_id": null,
+   "provider_event_id_why": "no americanfootball_nfl event exists in ext_candidate_outcomes (the collector never requested the key: 'nfl' was unmapped) and the PinnAPI feed scope is sport_ids [6, 1] (baseball, soccer) -- football is not streamed"
+  },
+  {
+   "event_slug": "nfl-det-car-2026-10-04",
+   "market_slug": "aec-nfl-det-car-2026-10-04",
+   "venue_title": "DET Lions vs. CAR Panthers",
+   "home": "Carolina Panthers",
+   "away": "Detroit Lions",
+   "home_venue": {
+    "team_name": "carolina panthers",
+    "side_norm": "panthers",
+    "team_abbr": "car",
+    "intent": "ORDER_INTENT_BUY_SHORT"
+   },
+   "away_venue": {
+    "team_name": "detroit lions",
+    "side_norm": "lions",
+    "team_abbr": "det",
+    "intent": "ORDER_INTENT_BUY_LONG"
+   },
+   "venue_slugs": {
+    "contract": "aec-nfl-det-car-2026-10-04",
+    "home_side": {
+     "slug": "aec-nfl-det-car-2026-10-04",
+     "intent": "ORDER_INTENT_BUY_SHORT"
+    },
+    "away_side": {
+     "slug": "aec-nfl-det-car-2026-10-04",
+     "intent": "ORDER_INTENT_BUY_LONG"
+    }
+   },
+   "line": "20",
+   "kickoff_utc": "2026-10-05T00:20:00Z",
+   "kickoff_et": "2026-10-04T20:20:00-0400",
+   "et_day": "2026-10-04",
+   "utc_day": "2026-10-05",
+   "provider_event_id": null,
+   "provider_event_id_why": "no americanfootball_nfl event exists in ext_candidate_outcomes (the collector never requested the key: 'nfl' was unmapped) and the PinnAPI feed scope is sport_ids [6, 1] (baseball, soccer) -- football is not streamed"
+  }
+ ]
+}
