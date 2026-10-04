@@ -556,6 +556,12 @@ async def test_a_copied_paper_order_never_reaches_the_production_client(
                  max_order_usd = $5 WHERE id = 1""",
             before["enabled"], before["stopped"], before["cutover_at"],
             before["account_fingerprint"], before["max_order_usd"])
+        # the FakeVenue rows this test made (TE._setup truncates at setup
+        # only): left behind, a FILLED FakeVenue entry reads as ACTUAL
+        # capital in later files of a shared test database
+        # (tests/test_profitability_warehouse_cycle.py)
+        await conn.execute("TRUNCATE execmirror_fills, execmirror_events, "
+                           "execmirror_snapshots, execmirror_orders")
         await conn.close()
 
 
@@ -834,12 +840,21 @@ def test_the_polymarket_us_adapter_refuses_every_buy_without_the_canonical_autho
            "direct": LP.LiveAuthorization(intent_id=it["intent_id"],
                                           content_sha=it["content_sha"],
                                           issued_at=1.0)}[token_kind]
+    from sportsassets import live_authorization as LA
     for intent in ("ORDER_INTENT_BUY_LONG", "ORDER_INTENT_BUY_SHORT", None):
-        with pytest.raises(EG.Denied) as e:
-            pmus.submit_fok("aec-nfl-x", 0.55, 2, intent=intent,
-                            canonical_live_authorization=tok)
+        # presented for the call (how the canonical caller hands it over) ...
+        with LA.presenting(tok), pytest.raises(EG.Denied) as e:
+            pmus.submit_fok("aec-nfl-x", 0.55, 2, intent=intent)
         assert e.value.reason == pmus.R_CANONICAL_ORIGINATION
+        # ... or by a lane that presents nothing at all
+        with pytest.raises(EG.Denied):
+            pmus.submit_fok("aec-nfl-x", 0.55, 2, intent=intent)
     assert client.built == 0 and client.orders.created == []
+    assert LA.presented() is None                  # nothing leaks out
+    # the signature stays the drop-in contract pmx shares (no new argument)
+    import inspect as _i
+    assert "canonical_live_authorization" not in _i.signature(
+        pmus.submit_fok).parameters
 
 
 def test_a_sell_still_reaches_the_polymarket_us_adapter(monkeypatch):
@@ -862,10 +877,10 @@ def test_the_clob_adapter_refuses_every_buy_without_the_canonical_authorization(
     monkeypatch.setattr(LE._gate, "authorize", lambda *a, **k: None)
     client = _NoClient()
     monkeypatch.setattr(LE, "_get_client", client)
+    from sportsassets import live_authorization as LA
     for tok in (None, _Forged()):
-        with pytest.raises(EG.Denied) as e:
-            LE._submit_fok("token-1", 0.55, 2.0,
-                           canonical_live_authorization=tok)
+        with LA.presenting(tok), pytest.raises(EG.Denied) as e:
+            LE._submit_fok("token-1", 0.55, 2.0)
         assert e.value.reason == "canonical_origination_required"
     assert client.built == 0
 
@@ -875,14 +890,40 @@ def test_outside_shadow_only_the_issued_token_passes_the_adapter(monkeypatch):
     boundary would admit in a future LIVE release -- the token the canonical
     adapter issued, and nothing else."""
     from sportsassets import execution_gate as EG
+    from sportsassets import live_authorization as LA
     from sportsassets import pmus
     monkeypatch.setattr(LP, "SMALL_LIVE_MODE", "LIVE_NOT_IN_THIS_RELEASE")
+    monkeypatch.setattr(LA, "SMALL_LIVE_MODE", "LIVE_NOT_IN_THIS_RELEASE")
     it = _intent()
     tok = LP.issue_live_authorization(
         it, governance=LP.governance_verdict(it, _all_approved(it)), now=1.0)
-    pmus.require_canonical_origination("aec-nfl-x", tok)       # no raise
-    with pytest.raises(EG.Denied):
-        pmus.require_canonical_origination("aec-nfl-x", _Forged())
+    with LA.presenting(tok):
+        pmus.require_canonical_origination("aec-nfl-x")         # no raise
+    with LA.presenting(_Forged()), pytest.raises(EG.Denied):
+        pmus.require_canonical_origination("aec-nfl-x")
+    direct = LA.LiveAuthorization(intent_id="x", content_sha="y", issued_at=1)
+    assert LA.authorized(direct) is True       # outside SHADOW, issuer named
+    # in THIS release's mode nothing is authorized, whatever is presented
+    assert LA.authorized(tok, mode=LA.SHADOW) is False
+
+
+def test_the_authorization_module_is_pure_and_agrees_with_live_parity():
+    """The adapters read live_authorization, never live_parity: importing
+    live_parity from pmus would make the execution stack reachable from the
+    workers' loops (tests/test_workers_hold_no_venue_write.py)."""
+    from sportsassets import live_authorization as LA
+    assert LA.SMALL_LIVE_MODE == LP.SMALL_LIVE_MODE == LP.MODE_SHADOW \
+        == "SHADOW"
+    assert LA.ISSUER == LP.LIVE_ADAPTER_VERSION
+    assert LP.LiveAuthorization is LA.LiveAuthorization
+    tree = ast.parse(pathlib.Path(LA.__file__).read_text())
+    mods = {n.module for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)}
+    mods |= {a.name for n in ast.walk(tree) if isinstance(n, ast.Import)
+             for a in n.names}
+    assert mods <= {"__future__", "contextlib", "contextvars"}, mods
+    for f in ("pmus.py", "live_executor.py"):
+        src = (ROOT / f).read_text()
+        assert "import live_parity" not in src, f
 
 
 def test_a_refused_buy_is_pre_send_for_the_lanes_that_read_the_gate():

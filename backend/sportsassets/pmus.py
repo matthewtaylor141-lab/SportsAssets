@@ -3170,17 +3170,19 @@ R_CANONICAL_ORIGINATION = "canonical_origination_required"
 
 
 def _canonical_origination_authorized(token) -> bool:
-    """True only for a live_parity.LiveAuthorization the canonical SMALL LIVE
-    adapter issued in LIVE mode -- which this (SHADOW) release cannot issue.
+    """True only for a LiveAuthorization the canonical SMALL LIVE adapter
+    issued in LIVE mode -- which this (SHADOW) release cannot issue. Reads
+    the PURE live_authorization module only (importing live_parity here
+    would make the execution stack reachable from the workers' loops).
     Fail closed: anything that cannot be checked is not authorized."""
     try:
-        from . import live_parity as _LP
-        return bool(_LP.canonical_live_authorized(token))
+        from . import live_authorization as _LA
+        return bool(_LA.authorized(token))
     except Exception:                                         # noqa: BLE001
         return False
 
 
-def require_canonical_origination(us_market_slug: str, token) -> None:
+def require_canonical_origination(us_market_slug: str, token=None) -> None:
     """NEW EXPOSURE (a BUY) ONLY FROM A CANONICAL INTENT -- AT THE ADAPTER.
 
     R30A review: live_executor's copy, manual-desk and GTC lanes, the mirror
@@ -3191,11 +3193,19 @@ def require_canonical_origination(us_market_slug: str, token) -> None:
     sits HERE, inside the adapter every polymarket-us order passes, exactly
     as execmirror.Venue.place carries it for the mirror account: a BUY needs
     the LiveAuthorization only live_parity.issue_live_authorization builds,
-    and only outside SHADOW (migration 225 admits no other mode). Denial
-    RAISES execution_gate.Denied -- the exception every caller already
-    handles as "refused before anything was sent" (the paused kill switch
-    raises the same one), so no lane reads it as a lost response. A SELL
-    (exit, reduce, protection) only reduces exposure and is not gated."""
+    and only outside SHADOW (migration 225 admits no other mode). The token
+    is the one the canonical caller PRESENTED for this call
+    (live_authorization.presenting; `token` overrides it). Denial RAISES
+    execution_gate.Denied -- the exception every caller already handles as
+    "refused before anything was sent" (the paused kill switch raises the
+    same one), so no lane reads it as a lost response. A SELL (exit,
+    reduce, protection) only reduces exposure and is not gated."""
+    if token is None:
+        try:
+            from . import live_authorization as _LA
+            token = _LA.presented()
+        except Exception:                                     # noqa: BLE001
+            token = None
     if not _canonical_origination_authorized(token):
         raise _gate.Denied(
             R_CANONICAL_ORIGINATION,
@@ -3210,8 +3220,7 @@ def submit_fok(us_market_slug: str, limit_price: float, quantity: int,
                intent: str | None = None,
                post_only: bool = False,
                good_till: str | None = None,
-               paced_pair: bool = False,
-               canonical_live_authorization=None) -> dict:
+               paced_pair: bool = False) -> dict:
     """Preview then place a limit order. Returns the same normalized
     shape the global executor uses:
     {ok, order_id, status, fill_price, filled_shares, raw}.
@@ -3267,8 +3276,7 @@ def submit_fok(us_market_slug: str, limit_price: float, quantity: int,
     # R30A: a BUY (new exposure) only from a canonical intent, before the
     # client is built or anything is read from the venue
     if not sell:
-        require_canonical_origination(us_market_slug,
-                                      canonical_live_authorization)
+        require_canonical_origination(us_market_slug)
     client = _get_client()
     # THE SIDE SELECTOR (venue ground truth 2026-08-24): on market
     # families whose two sides share one identifier — every aec- match

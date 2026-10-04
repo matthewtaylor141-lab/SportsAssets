@@ -842,6 +842,13 @@ async def test_the_endpoint_over_a_seeded_multi_sleeve_book(monkeypatch):
                 " RETURNING install_id")
             await conn.execute("ALTER TABLE live_parity_cutover DISABLE "
                                "TRIGGER live_parity_cutover_stamp_trg")
+            # R30A review: the endpoint now checks the SERVING build's
+            # decision-logic hash against the effective cutover's (a build
+            # whose logic no cutover names establishes no verdict), so the
+            # seeded cutover names THIS build's hash -- it used to be an
+            # arbitrary 'b'*64, which nothing compared. The mismatch case
+            # is asserted below.
+            from sportsassets import decision_logic as DL
             await conn.execute(
                 "INSERT INTO live_parity_cutover (recorded_at, release_sha, "
                 " api_sha, workers_sha, migrations, decision_logic_hash, "
@@ -849,9 +856,9 @@ async def test_the_endpoint_over_a_seeded_multi_sleeve_book(monkeypatch):
                 " small_live_mode, small_live_halted, capital_activated, "
                 " evidence, recorded_by) VALUES (to_timestamp($1), "
                 " repeat('a', 40), repeat('a', 40), repeat('a', 40), "
-                " ARRAY['225','226'], repeat('b', 64), '{}'::jsonb, $2, "
+                " ARRAY['225','226'], $3, '{}'::jsonb, $2, "
                 " 'SHADOW', false, false, '{}', 'release engineer')",
-                float(since), iid)
+                float(since), iid, DL.decision_logic_hash()["hash"])
             await conn.execute("ALTER TABLE live_parity_cutover ENABLE "
                                "TRIGGER live_parity_cutover_stamp_trg")
 
@@ -916,6 +923,22 @@ async def test_the_endpoint_over_a_seeded_multi_sleeve_book(monkeypatch):
         assert v["evidence"]["resolved_positions"] == 2
         assert v["verdict"] == V.POSITIVE_BUT_INSUFFICIENT
         assert v["verdict"] != V.SUPPORTED
+        assert d["build_logic"]["matches"] is True
+        # R30A review: a serving build whose decision logic no cutover names
+        # establishes no verdict (the forward window would span two logics)
+        from sportsassets import decision_logic as DL2
+        real = DL2.decision_logic_hash()
+        monkeypatch.setattr(DL2, "decision_logic_hash",
+                            lambda root=None: dict(real, hash="e" * 64))
+        CV._CACHE.clear()
+        moved = (await CV.profitability_validation(since=since))["data"]
+        assert moved["profitability_verdict"]["verdict"] == V.NOT_ESTABLISHED
+        assert moved["profitability_verdict"]["why"] == \
+            "CURRENT_BUILD_LOGIC_HAS_NO_CUTOVER"
+        assert moved["profitability_verdict"][
+            "verdict_before_the_logic_check"] == V.POSITIVE_BUT_INSUFFICIENT
+        monkeypatch.setattr(DL2, "decision_logic_hash", lambda root=None: real)
+        CV._CACHE.clear()
         # read only: nothing was written by the read
         assert await conn.fetchval(
             "SELECT count(*) FROM paper_fills WHERE account_id = $1",

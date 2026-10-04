@@ -112,8 +112,13 @@ RULES_UNTOUCHED = {
 # edit nobody meant to make, and it did its job -- this edit was meant,
 # so the hash moves and the reason is recorded here rather than the
 # guard being loosened.
+# submit_fok re-pinned by R30A (audit P0 #2, review finding 5): the adapter
+# now refuses a BUY without the canonical SMALL LIVE authorization -- two
+# lines after execution_gate.authorize, before the client is built
+# (pmus.require_canonical_origination). E31's subject, the maker-rest params
+# and the post-only refusal shapes, is untouched; was "ead830681a5536e5".
 PMUS_UNTOUCHED = {"_post_only_refusal": "7becc8060b5ec9de", "_post_only_cross": "41341b4b46075c53",
-                  "submit_fok": "ead830681a5536e5", "bbo_read": "5f8dd44f222a7c02",
+                  "submit_fok": "b3d61d22a9ba70e3", "bbo_read": "5f8dd44f222a7c02",
                   "_amount": "4ae6f1c4e71054d4", "close_position": "a2032fad56ae9d71"}
 
 

@@ -137,6 +137,8 @@ paper_entry_fields = SLV.paper_entry_fields
 log = logging.getLogger(__name__)
 
 PAPER_ADAPTER_VERSION = "PAPER_ADAPTER_V2"
+#: the canonical SMALL LIVE adapter -- the issuer named on a LiveAuthorization
+#: (live_authorization.ISSUER; a test pins them equal)
 LIVE_ADAPTER_VERSION = "SMALL_LIVE_ADAPTER_V2"
 PARITY_VERSION = "LIVE_PARITY_V2"
 READINESS_VERSION = "LIVE_READINESS_GATE_V2"
@@ -2076,17 +2078,9 @@ R_CANONICAL_MISMATCH = "ORDER_DIFFERS_FROM_ITS_CANONICAL_INTENT"
 R_NO_LIVE_AUTHORIZATION = "CANONICAL_LIVE_AUTHORIZATION_ABSENT_SMALL_LIVE_IS_SHADOW"
 
 
-class LiveAuthorization:
-    """An authorization to originate one live order from one canonical
-    intent. Only issue_live_authorization constructs one, and only outside
-    SHADOW -- which this release has no way to be."""
-    __slots__ = ("issued_by", "intent_id", "content_sha", "issued_at")
-
-    def __init__(self, *, intent_id: str, content_sha: str, issued_at: float):
-        self.issued_by = LIVE_ADAPTER_VERSION
-        self.intent_id = intent_id
-        self.content_sha = content_sha
-        self.issued_at = issued_at
+#: the authorization object itself lives in the PURE module live_authorization
+#: (the venue adapters, reachable from the workers, import only that)
+from .live_authorization import LiveAuthorization  # noqa: E402,F401
 
 
 def issue_live_authorization(intent: dict, *, governance: dict,
@@ -2106,9 +2100,8 @@ def issue_live_authorization(intent: dict, *, governance: dict,
 def canonical_live_authorized(token) -> bool:
     """True only for an authorization the canonical SMALL LIVE adapter
     issued in LIVE mode. Always False in this (SHADOW) release."""
-    return (token is not None and SMALL_LIVE_MODE != MODE_SHADOW
-            and isinstance(token, LiveAuthorization)
-            and getattr(token, "issued_by", None) == LIVE_ADAPTER_VERSION)
+    from . import live_authorization as LA
+    return LA.authorized(token, mode=SMALL_LIVE_MODE)
 
 
 #: the order fields a live order must share with its canonical intent

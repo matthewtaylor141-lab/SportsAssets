@@ -46,6 +46,7 @@ DECISION_LOGIC_FILES = (
     # and the live gates
     "decision_logic.py", "canonical_intent.py", "canonical_components.py", "allie_capital.py",
     "live_parity.py", "live_approvals.py", "live_rule_artifacts.py",
+    "live_authorization.py",
     "decision_hooks.py", "execmirror.py", "execution_intent.py",
     "actual_admission.py", "live_book_currency.py",
     # ENTER, sizing, the paper account's rails and the simulator

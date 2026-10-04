@@ -1281,8 +1281,9 @@ async def submit_for_decision(conn, rec: dict, *, account_id: str,
                              "canonical decision intent with the canonical "
                              "SMALL LIVE adapter's authorization; refused "
                              "before anything was written or sent"))
-        # the authorization travels to the adapter, whose own boundary
-        # (pmus.require_canonical_origination) refuses a BUY without it
+        # the authorization is presented to the adapter, whose own
+        # boundary (pmus.require_canonical_origination) refuses a BUY
+        # without it
         canon_token = canon.get("token")
     try:
         mod = _adapter(adapter)
@@ -1434,14 +1435,17 @@ async def submit_for_decision(conn, rec: dict, *, account_id: str,
     try:
         # A STANDING order names its venue-enforced expiry; every other
         # order sends exactly the arguments it always did.
-        answer = mod.submit_fok(
-            plan["us_market_slug"], plan["limit_price"], plan["quantity"],
-            plan["sell"], tif=plan["tif"], intent=plan["intent"],
-            post_only=plan["post_only"],
-            **({"good_till": plan["good_till"]} if plan.get("good_till")
-               else {}),
-            **({"canonical_live_authorization": canon_token}
-               if canon_token is not None else {}))
+        # the canonical authorization (None for a SELL, and in SHADOW) is
+        # PRESENTED to the adapter for this one call: pmus.submit_fok's own
+        # boundary refuses a BUY without it (live_authorization.presenting)
+        from . import live_authorization as _LA
+        with _LA.presenting(canon_token):
+            answer = mod.submit_fok(
+                plan["us_market_slug"], plan["limit_price"], plan["quantity"],
+                plan["sell"], tif=plan["tif"], intent=plan["intent"],
+                post_only=plan["post_only"],
+                **({"good_till": plan["good_till"]} if plan.get("good_till")
+                   else {}))
     except Exception as exc:                               # noqa: BLE001
         # DID THE REQUEST ACTUALLY LEAVE? The two answers need opposite
         # handling, and getting this wrong in either direction is a real cost:
