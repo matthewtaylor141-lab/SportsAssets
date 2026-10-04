@@ -51,6 +51,7 @@ from typing import Any
 
 from .. import bettor_paper_ledger as L
 from .. import bettor_paper_simulator as SIM
+from .. import execution_evidence as EE
 from . import pos_authority as PA
 from . import pos_evidence as _PE  # noqa: F401  (registers evidence kinds)
 from . import registry as R
@@ -405,6 +406,9 @@ def estimate(candidate: dict, book_row: dict | None, history: dict, *,
     if book_row and book_row.get("obs_id") is not None:
         refs.append({"kind": "paper_book_observations",
                      "id": str(book_row["obs_id"])})
+    # WHAT THIS ESTIMATE WAS FITTED ON (R30C): persisted inside `inputs`
+    # (jsonb, no schema change) and carried on the canonical intent.
+    evidence = execution_evidence(history, style)
     return {
         "estimate_id": estimate_id_for(candidate["decision_id"]),
         "decision_id": str(candidate["decision_id"]),
@@ -451,7 +455,9 @@ def estimate(candidate: dict, book_row: dict | None, history: dict, *,
             "planned_qty": _r(qty if style == MAKER else q_exec, 4),
             "history": {k: history.get(k) for k in (
                 "fill_rate", "time_to_fill", "adverse_selection",
-                "latency")}},
+                "latency", "evidence_class")},
+            "execution_evidence": evidence},
+        "execution_evidence": evidence,
         "evidence_refs": refs, "authority": AUTHORITY,
         "production_effect": "NONE"}
 
@@ -576,9 +582,13 @@ def summarise_history(orders: list, fills: list, markouts: list) -> dict:
         mk = [float(r["markout_pp"]) for r in markouts
               if _style_of(r.get("order_type")) == style
               and _num(r.get("markout_pp")) is not None]
+        # the spread of the markouts travels with their mean, so a LIVE
+        # reader can put an interval on it (R30C execution evidence)
         out["adverse_selection"][style] = (
             {"value": round(max(0.0, statistics.fmean(mk)), 6),
              "raw_mean_pp": round(statistics.fmean(mk), 6), "n": len(mk),
+             "sd_pp": (round(statistics.stdev(mk), 6) if len(mk) > 1
+                       else None),
              "why": None,
              "basis": "max(0, mean(mid at fill - mid %d..%d s later))"
                       % (MARKOUT_FROM_S, MARKOUT_TO_S)}
@@ -596,7 +606,66 @@ def summarise_history(orders: list, fills: list, markouts: list) -> dict:
                               % (MIN_HISTORY, len(lat))})
     out["queue"] = {"n": sum(1 for r in orders
                              if _num(r.get("queue_ahead_qty")) is not None)}
+    # EVERY RATE ABOVE IS FITTED ON THE PAPER SIMULATOR'S ORDERS AND FILLS
+    # (paper_orders / paper_fills, event_source CHECKed SIMULATOR). Said on
+    # the history itself, so no estimate built from it travels without the
+    # label (execution_evidence; owner audit 2026-10-04).
+    out["evidence_class"] = EE.PAPER_SIMULATION
     return out
+
+
+#: WHAT EACH OF EDDIE'S EXECUTION INPUTS IS FITTED ON (R30C). The fill rate,
+#: time to fill and markouts come from the paper simulator's own orders and
+#: fills; spread and slippage are a walk of the decision's DISPLAYED book
+#: and were fitted on no fill; cancel / replace and recovery are not
+#: estimated at all. No ACTUAL (canonical venue) fill exists while SMALL
+#: LIVE is SHADOW.
+EXECUTION_EVIDENCE_CLASS = EE.PAPER_SIMULATION
+FITTED_ON = {
+    "fill_probability": EE.PAPER_SIMULATION,
+    "time_to_fill": EE.PAPER_SIMULATION,
+    "adverse_selection": EE.PAPER_SIMULATION,
+    "spread_cost": EE.NO_FILL_EVIDENCE,
+    "slippage": EE.NO_FILL_EVIDENCE,
+    "max_executable_qty": EE.NO_FILL_EVIDENCE,
+    "cancel_replace": EE.UNMEASURED,
+    "recovery": EE.UNMEASURED,
+}
+
+
+def execution_evidence(history: dict, style: str) -> dict:
+    """THE PROVENANCE AN ESTIMATE CARRIES: what each input was fitted on, the
+    fitted fill rate and markout of the chosen style with their class
+    interval AND their LIVE (widened) interval, and why ACTUAL is
+    unmeasured. Pure. A LIVE reader of the canonical intent sees, beside
+    `expected_fill_probability`, that it is the paper simulator's rate and
+    how much wider it must be read for live use."""
+    cls = (history or {}).get("evidence_class") or EE.PAPER_SIMULATION
+    key = MAKER if style == MAKER else TAKER
+    fr = ((history or {}).get("fill_rate") or {}).get(key) or {}
+    adv = ((history or {}).get("adverse_selection") or {}).get(key) or {}
+    ttf = ((history or {}).get("time_to_fill") or {}).get(key) or {}
+    fill = EE.proportion_view(fr.get("value"), fr.get("numerator"),
+                              fr.get("denominator"), cls)
+    if fr.get("value") is None:
+        fill.update(value=None, why=fr.get("why") or "NO_FILL_HISTORY")
+    mark = EE.mean_view(adv.get("raw_mean_pp"), adv.get("sd_pp"),
+                        adv.get("n"), cls)
+    if adv.get("value") is None:
+        mark.update(value=None, why=adv.get("why") or "NO_MARKOUT_HISTORY")
+    return EE.provenance(
+        cls, basis=("Eddie's recorded history: paper_orders terminal fill "
+                    "rates, paper_fills times to fill and %d-%d s markouts "
+                    "against paper_book_observations (last %d days)"
+                    % (MARKOUT_FROM_S, MARKOUT_TO_S,
+                       HISTORY_LOOKBACK_S // 86400)),
+        n=fr.get("denominator"),
+        extra={"style": key, "fitted_on_by_input": dict(FITTED_ON),
+               "fill_probability": fill,
+               "adverse_selection_pp": mark,
+               "time_to_fill_s": {"value": ttf.get("value"),
+                                  "n": ttf.get("n"), "fitted_on": cls,
+                                  "why": ttf.get("why")}})
 
 
 def _mid_of(bids, offers, side) -> float | None:

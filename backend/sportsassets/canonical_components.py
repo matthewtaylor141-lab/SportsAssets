@@ -22,6 +22,15 @@ never a manufactured value. Components are evidence on the intent; none of
 them changes the paper decision, its order or the live proposal (both
 adapters read the same intent, so they see the same components).
 
+R30C · EXECUTION EVIDENCE. Every execution figure a component carries says
+which class it was fitted on (execution_evidence): Eddie's fill probability,
+markout and time to fill are the paper simulator's (PAPER_SIMULATION), with
+their class interval and a WIDER live interval; the Opportunity Score's
+P(fill) and Allie's executable net say the same; ACTUAL is UNMEASURED with
+its reason while SMALL LIVE is SHADOW. Simulated fills are never presented
+as live execution quality.
+
+
 Bounded: every read runs in its own savepoint under a short timeout, and the
 slow-moving inputs (Eddie's fill history, settlement lags, the capital
 snapshot, Allie's latest run) are cached for CACHE_S.
@@ -32,6 +41,8 @@ import asyncio
 import logging
 import time
 from typing import Any
+
+from . import execution_evidence as EE
 
 log = logging.getLogger(__name__)
 
@@ -106,11 +117,22 @@ def eddie_component(est: dict | None, why: str | None = None) -> dict:
             "execution_style": est.get("execution_style"),
             "max_executable_qty": est.get("max_executable_qty"),
             "unmeasured": est.get("unmeasured") or {},
+            # R30C: what the fill probability, markout and time to fill were
+            # fitted on (PAPER_SIMULATION today), their LIVE (widened)
+            # intervals, and why ACTUAL is unmeasured -- so the LIVE adapter
+            # reading this intent can never take a paper fill rate for the
+            # venue's (execution_evidence)
+            "execution_evidence": est.get("execution_evidence") or {
+                "fitted_on": "UNMEASURED",
+                "why": "THE_ESTIMATE_CARRIES_NO_EXECUTION_EVIDENCE"},
             "authority": "SHADOW_ONLY_CARRIED_AS_EVIDENCE"}
 
 
-async def eddie_at_decision(conn, *, decision: dict, book_row: dict | None,
-                            now: float) -> dict:
+async def eddie_estimate_at_decision(conn, *, decision: dict,
+                                     book_row: dict | None,
+                                     now: float) -> dict:
+    """Eddie's RAW estimate at the decision instant (agents/eddie.estimate on
+    his cached recorded history), or {status: UNAVAILABLE, why}."""
     from .agents import eddie as E
 
     async def hist():
@@ -119,7 +141,13 @@ async def eddie_at_decision(conn, *, decision: dict, book_row: dict | None,
     async def go():
         h = await _cached("eddie_history", now, hist)
         return E.estimate(decision, book_row, h, now=now)
-    est = await _bounded(conn, go)
+    return await _bounded(conn, go)
+
+
+async def eddie_at_decision(conn, *, decision: dict, book_row: dict | None,
+                            now: float) -> dict:
+    est = await eddie_estimate_at_decision(conn, decision=decision,
+                                           book_row=book_row, now=now)
     if est.get("status") == "UNAVAILABLE":
         return eddie_component(None, est["why"])
     return eddie_component(est)
@@ -158,6 +186,14 @@ async def opportunity_at_decision(conn, *, decision: dict, eddie: dict,
                 "expected_net_executable_ev_usd": got.get(
                     "expected_net_executable_ev_usd"),
                 "fill_probability": got.get("fill_probability"),
+                # R30C: the P(fill) in the score is Eddie's, fitted on the
+                # paper simulator -- said here, beside the number
+                "fill_probability_evidence": (
+                    (eddie.get("execution_evidence") or {}).get("fitted_on")
+                    if fp is not None else None),
+                "fill_probability_live_use": (
+                    (eddie.get("execution_evidence") or {}).get("live_use")
+                    if fp is not None else None),
                 "capacity_factor": got.get("capacity_factor"),
                 "capital_hours": got.get("capital_hours"),
                 "unmeasured": got.get("unmeasured") or {},
@@ -244,7 +280,7 @@ async def allie_at_decision(conn, *, decision: dict, eddie: dict,
         em = await conn.fetchrow(
             "SELECT scale, max_order_usd FROM execmirror_control LIMIT 1")
         e = eddie if eddie.get("status") == "MEASURED" else {}
-        return AC.allocate(
+        out = AC.allocate(
             eddie_ev_usd=e.get("expected_executable_ev_usd"),
             modelled_net_usd=decision.get("executable_opportunity_dollars"),
             capital_required_usd=decision.get("capital_required_usd"),
@@ -262,6 +298,22 @@ async def allie_at_decision(conn, *, decision: dict, eddie: dict,
             live_rail_usd=None if em is None else float(em["max_order_usd"]),
             live_scale=None if em is None else float(em["scale"]),
             order_cost_usd=decision.get("capital_required_usd"))
+        # R30C: Allie's executable net is Eddie's EV (its fill probability
+        # fitted on the paper simulator) and her capacity ceiling is a walk
+        # of the displayed book -- neither is live execution evidence
+        # (the decision's modelled net, her labelled fallback, is a walk of
+        # the displayed book too)
+        ev_cls = (e.get("execution_evidence") or {}).get("fitted_on")
+        net_cls = (ev_cls if str(out.get("net_basis") or "").startswith(
+            "EDDIE") else EE.NO_FILL_EVIDENCE if out.get("net_basis")
+            else None)
+        out["execution_evidence"] = {
+            "executable_net_fitted_on": net_cls,
+            "capacity_fitted_on": (
+                EE.NO_FILL_EVIDENCE if out.get("capacity_basis") else None),
+            "live_use": EE.LIVE_USE.get(net_cls) if net_cls else None,
+            "actual": {"status": EE.UNMEASURED, "why": EE.R_NO_ACTUAL}}
+        return out
     return await _bounded(conn, go)
 
 
@@ -282,8 +334,10 @@ async def at_decision(conn, *, decision: dict, book_row: dict | None,
         if st.get("t") is not None:
             decision = dict(decision, event_start_at=st["t"],
                             event_start_basis="us_premap.game_start")
-    eddie = await eddie_at_decision(conn, decision=decision,
-                                    book_row=book_row, now=at)
+    est = await eddie_estimate_at_decision(conn, decision=decision,
+                                           book_row=book_row, now=at)
+    eddie = (eddie_component(None, est["why"])
+             if est.get("status") == "UNAVAILABLE" else eddie_component(est))
     opp = await opportunity_at_decision(conn, decision=decision, eddie=eddie,
                                         now=at)
     karen = await karen_at_decision(conn, slug=decision.get("us_market_slug"),

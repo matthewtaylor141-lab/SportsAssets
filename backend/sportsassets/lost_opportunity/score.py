@@ -59,6 +59,17 @@ def _comp(value, *, unit=None, status=None, why=None, basis=None,
 EDDIE = "EDDIE_EXECUTION_ESTIMATE"
 CAPACITY_SNAPSHOT = "POS_CAPACITY_SNAPSHOT_FILL_SHARE"
 
+#: R30C · WHAT P(fill) IS FITTED ON. Both sources -- Eddie's estimate and the
+#: CAPACITY snapshot's fill share -- are rates of the PAPER SIMULATOR's own
+#: orders: never live execution evidence. Stated as the literal so this
+#: research package imports nothing outside itself and the profitability
+#: layer; pinned equal to execution_evidence.PAPER_SIMULATION (and the
+#: live-use label to execution_evidence.LIVE_USE) by
+#: tests/test_execution_calibration.py.
+EXECUTION_EVIDENCE_CLASS = "PAPER_SIMULATION"
+EXECUTION_EVIDENCE_LIVE_USE = (
+    "DERIVED_FROM_PAPER_SIMULATION_NOT_PROOF_OF_LIVE_EXECUTION")
+
 
 def eddie_view(est, why=None) -> dict:
     """Eddie's (SHADOW_ONLY) estimate of this decision as shown beside the
@@ -128,6 +139,11 @@ def components(out: dict, ctx: dict) -> dict:
             why=um.get("fill_probability"),
             basis=out.get("fill_probability_basis")),
             source=out.get("fill_probability_source"),
+            # R30C: the class the P(fill) was fitted on, beside the number
+            evidence_class=(EXECUTION_EVIDENCE_CLASS
+                            if out.get("fill_probability_source") else None),
+            live_use=(EXECUTION_EVIDENCE_LIVE_USE
+                      if out.get("fill_probability_source") else None),
             eddie=eddie_view(ctx.get("eddie"), ctx.get("eddie_why"))),
         "LIQUIDITY_CAPACITY": _comp(
             out.get("capacity_factor"), unit="fraction", in_score=True,

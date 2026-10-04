@@ -32,6 +32,14 @@ from .db import get_pool
 
 SESSION_ID = "MICRO-EXEC-CAL-1"
 
+#: R30C · EXECUTION EVIDENCE CLASS. The lifecycles this ledger keeps are REAL
+#: venue orders of the micro-execution calibration lane -- ACTUAL evidence
+#: of that lane, which is not the canonical SMALL LIVE path. No LIVE
+#: execution estimate is fitted on them in this release (the route that
+#: would send one is wired to nothing). Pinned equal to
+#: execution_evidence.ACTUAL by tests/test_execution_calibration.py.
+EXECUTION_EVIDENCE_CLASS = "ACTUAL"
+
 # THE RETAIL PRODUCTION LANE, which is what every session written before
 # migration 067 was. The defaults in that migration say the same thing.
 # The name the ticket builder already writes (`calibration_evidence`), and

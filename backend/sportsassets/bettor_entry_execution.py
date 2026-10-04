@@ -136,6 +136,24 @@ MARKETABLE_BASIS = "MARKETABLE_COVERAGE_OF_OBSERVED_ARRIVAL_LADDER"
 #: The other engine, named so a reader can see it was not used.
 RESTING_BASIS_NOT_USED = "PRINT_THROUGH_WITH_QUEUE_SHARE_V1"
 
+#: R30C · WHAT THIS ESTIMATE IS FITTED ON: no fill at all. It is a walk of the
+#: DISPLAYED arrival ladder -- not PAPER_SIMULATION, not LIVE_SHADOW and not
+#: ACTUAL (execution_evidence). Displayed depth is not guaranteed depth, so
+#: coverage 1.0 here is never proof of live execution quality. The literal
+#: is pinned equal to execution_evidence.NO_FILL_EVIDENCE by
+#: tests/test_execution_calibration.py (this module imports no new module).
+EXECUTION_EVIDENCE_CLASS = "NO_FILL_EVIDENCE_DISPLAYED_BOOK_ONLY"
+EXECUTION_EVIDENCE = {
+    "fitted_on": EXECUTION_EVIDENCE_CLASS,
+    "live_use": ("DISPLAYED_BOOK_ONLY_NOT_FITTED_ON_ANY_FILL_NOT_PROOF_OF_"
+                 "LIVE_EXECUTION"),
+    "is_proof_of_live_execution": False,
+    "actual": {"status": "UNMEASURED",
+               "why": ("no real venue fill is linked to this lane; its "
+                       "coverage is an observation of the displayed "
+                       "ladder")},
+}
+
 WHY_NOT_A_FORECAST = (
     "this is the fraction of the intended quantity that the arrival "
     "ladder actually showed at or inside the break-even limit. It is an "
@@ -326,6 +344,7 @@ def estimate(*, ladder, fair_value, fee_fn, observation_age_s=None,
         "observation_age_s": (None if observation_age_s is None
                               else round(float(observation_age_s), 3)),
         "latency_gap_is_reported_not_adjusted": True,
+        "execution_evidence": dict(EXECUTION_EVIDENCE),
         "refusals": [],
     }
     if fee_fn is None:
