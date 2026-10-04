@@ -272,6 +272,23 @@ code { font: 11px var(--mono); color: #9fb3cf; }
 .pr-xav-hero.exit, .pr-xav-hero.reduce { background: linear-gradient(135deg, #2b1820, #1a1015); border-color: #5c2a38; color: #ffb1bf; }
 .pr-xav-hero.hedge { background: linear-gradient(135deg, #1d1838, #120f22); border-color: #40365b; color: #cfc4ff; }
 .pr-xav-hero.wait { background: #1d1810; border-color: #4a3c25; border-style: dashed; color: #f3d9a6; }
+/* a stored recommendation that is no longer current (owner P0): never styled as an action */
+.pr-xav-hero.stale { background: repeating-linear-gradient(135deg, #22151a 0 10px, #1b1115 10px 20px); border-color: #6b2f3d; border-style: dashed; color: #ffb7c3; }
+.pr-xav-hero .label .pill { margin-left: 6px; vertical-align: 1px; }
+.pr-xav-hero .pr-recorded { color: #ffd0d8; font: 600 11px var(--mono); }
+.pr-xav-hero .pr-held { color: var(--muted); }
+.pr-xav-val { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin-bottom: 10px; }
+.pr-xav-val > div { display: flex; flex-direction: column; gap: 3px; padding: 8px 10px; border-radius: 8px; background: #0c131d; border: 1px solid #182233; min-width: 0; }
+.pr-xav-val b { font-size: 13px; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.pr-xav-val small { font-size: 10.5px; overflow-wrap: anywhere; }
+.pr-alt-why.pr-miss { color: #f3d9a6; }
+.pr-xav-ev .pill, .pr-xav-hero .pill { white-space: normal; overflow-wrap: anywhere; max-width: 100%; }
+.pr-why-lead.pr-why-none { border-left-color: #8a6a35; }
+/* the recommendation expired while the page was open: nothing reads as current */
+.pr-xav-expired .pr-alt.lead .pr-alt-name::after { content: " · NOT CURRENT"; color: var(--amber); }
+.pr-xav-expired .pr-alt.lead .pr-alt-bar i { background: repeating-linear-gradient(135deg, #3a4558 0 4px, #232c3a 4px 8px); }
+.pr-xav-expired .pr-xav-ev, .pr-xav-expired .pr-why-lead { opacity: .55; }
+@media (max-width: 760px) { .pr-xav-val { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 .pr-xav-sub { font-size: 11px; color: var(--muted); }
 .pr-xav-ev { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-bottom: 10px; }
 .pr-xav-ev > div { display: flex; flex-direction: column; gap: 3px; padding: 10px; border-radius: 8px; background: #0c131d; border: 1px solid #182233; font-size: 16px; min-width: 0; }
