@@ -344,7 +344,7 @@ export const LIGHTING = {
   cinematic_cool: {key: [0xeaf0ff, 2.2, [-1.5, 2.5, 2.2]], fill: [0xffe0cc, 0.5, [1.8, 1.4, 1.8]], rim: [0x9fe8f0, 1.8, [1.3, 2.2, -2.0]], env: 0.55, exposure: 1.0},
   cinematic_violet: {key: [0xffe8dc, 2.3, [-1.4, 2.3, 2.3]], fill: [0xd8ccff, 0.8, [1.7, 1.5, 1.9]], rim: [0xc8b4ff, 1.9, [1.2, 2.3, -2.0]], env: 0.6, exposure: 1.05},
 };
-export const FRAMING = {face: 0.34, chest: 0.72, waist: 1.05};
+export const FRAMING = {face: 0.34, bust: 0.52, chest: 0.72, waist: 1.05};
 
 /** A soft studio environment built in-scene (no HDR file). */
 function studioEnvironment(renderer) {
@@ -473,7 +473,7 @@ export function layoutStage(stage, region) {
   return Object.assign(pick, {W, H, Hc, statusTop});
 }
 
-const REGION = {face: 0.36, chest: 0.66, waist: 0.98};
+const REGION = {face: 0.36, bust: 0.56, chest: 0.66, waist: 0.98};
 
 export async function mountAvatar(stage, cfg, opts = {}) {
   const [{GLTFLoader}, {MeshoptDecoder}] = await Promise.all([import('./GLTFLoader.js'), import('./meshopt_decoder.module.js')]);
@@ -529,11 +529,12 @@ export async function mountAvatar(stage, cfg, opts = {}) {
   const headPos = bones.head ? bones.head.getWorldPosition(new THREE.Vector3()) : new THREE.Vector3(box.getCenter(new THREE.Vector3()).x, box.max.y - size.y * 0.08, 0);
   const sh = bones.leftUpperArm && bones.rightUpperArm ? bones.leftUpperArm.getWorldPosition(new THREE.Vector3()).distanceTo(bones.rightUpperArm.getWorldPosition(new THREE.Vector3())) : 0.36 * unit;
   const framing = cfg.framing in REGION ? cfg.framing : 'chest';
-  const region = {h: REGION[framing] * unit, w: framing === 'face' ? 0.32 * unit : sh + 0.2 * unit, head: 0.26 * unit};
+  const region = {h: REGION[framing] * unit, w: framing === 'face' ? 0.32 * unit : framing === 'bust' ? sh + 0.06 * unit : sh + 0.2 * unit, head: 0.26 * unit};
   const top = box.max.y + 0.012 * unit;
   const camera = new THREE.PerspectiveCamera(20, 1, 0.01, 100);
   const half = Math.tan(THREE.MathUtils.degToRad(10));
-  if (stage.clientWidth < 560 && stage.clientHeight < 500) stage.style.minHeight = '520px';   // room for the face between the name and the status line
+  // (opts.compact: a fixed-size portrait stage, e.g. the agent-page hero, keeps its own height)
+  if (!opts.compact && stage.clientWidth < 560 && stage.clientHeight < 500) stage.style.minHeight = '520px';   // room for the face between the name and the status line
   let lay = null;
   const resize = () => {
     lay = layoutStage(stage, region);
@@ -570,17 +571,46 @@ export async function mountAvatar(stage, cfg, opts = {}) {
     if (moving && !reduced && !paused && !document.hidden) raf = requestAnimationFrame(tick);
   };
   const go = () => { if (!raf && !reduced && !paused && !document.hidden) { last = 0; raf = requestAnimationFrame(tick); } };
-  window.addEventListener('cc:mode', (e) => { ctl.setMode(e.detail && e.detail.mode); if (reduced) { ctl.update(1 / 60); renderer.render(scene, camera); } else go(); });
-  window.addEventListener('cc:speak', (e) => { ctl.setSpeaking(e.detail && e.detail.on); go(); });
+  const onMode = (e) => { ctl.setMode(e.detail && e.detail.mode); if (reduced) { ctl.update(1 / 60); renderer.render(scene, camera); } else go(); };
+  const onSpeak = (e) => { ctl.setSpeaking(e.detail && e.detail.on); go(); };
+  const onSpeech = (e) => { ctl.setSpeech(e.detail); go(); };
+  const onPause = (e) => { paused = !!(e.detail && e.detail.paused); if (!paused) go(); };
+  window.addEventListener('cc:mode', onMode);
+  window.addEventListener('cc:speak', onSpeak);
   // THE AUDIO HOOK: {amplitude, bands} or {viseme, weight} per frame from a
   // TTS or audio pipeline; attachAudio() derives both from a media element,
   // and autoAudio() attaches it to whatever audio the page plays
-  window.addEventListener('cc:speech', (e) => { ctl.setSpeech(e.detail); go(); });
+  window.addEventListener('cc:speech', onSpeech);
   autoAudio();
-  window.addEventListener('cc:pause', (e) => { paused = !!(e.detail && e.detail.paused); if (!paused) go(); });
+  window.addEventListener('cc:pause', onPause);
   document.addEventListener('visibilitychange', go);
   // the labels change size as records arrive: frame again whenever they do
-  if (window.ResizeObserver) { const ro = new ResizeObserver(() => { resize(); renderer.render(scene, camera); }); ro.observe(stage); stage.querySelectorAll('.cc-ov, .cc-st, .cc-ctl').forEach((el) => ro.observe(el)); }
+  let ro = null;
+  if (window.ResizeObserver) { ro = new ResizeObserver(() => { resize(); renderer.render(scene, camera); }); ro.observe(stage); stage.querySelectorAll('.cc-ov, .cc-st, .cc-ctl').forEach((el) => ro.observe(el)); }
+  // DISPOSE: stop the loop, drop every listener and free the GPU (geometry,
+  // materials, textures, the environment map and the context itself)
+  let disposed = false;
+  const dispose = () => {
+    if (disposed) return; disposed = true; paused = true;
+    if (raf) cancelAnimationFrame(raf); raf = 0;
+    window.removeEventListener('cc:mode', onMode); window.removeEventListener('cc:speak', onSpeak);
+    window.removeEventListener('cc:speech', onSpeech); window.removeEventListener('cc:pause', onPause);
+    document.removeEventListener('visibilitychange', go);
+    if (ro) ro.disconnect();
+    scene.traverse((o) => {
+      if (o.geometry) o.geometry.dispose();
+      for (const m of o.material ? [].concat(o.material) : []) {
+        for (const v of Object.values(m)) if (v && v.isTexture) v.dispose();
+        m.dispose();
+      }
+    });
+    if (scene.environment) scene.environment.dispose();
+    renderer.dispose(); renderer.forceContextLoss();
+    stage.classList.remove('cc-3d-on', 'cc-real-model'); stage.setAttribute('data-cc-3d', 'disposed');
+    if (window.__ccAvatar && window.__ccAvatar.dispose === dispose) window.__ccAvatar = null;
+  };
+  // per-stage pause (an off-screen portrait stops drawing); cc:pause still pauses every stage
+  const setPaused = (p) => { paused = !!p; if (!paused) go(); };
   ctl.update(1 / 60); renderer.render(scene, camera);
   stage.classList.add('cc-3d-on', 'cc-real-model');
   const tag = stage.querySelector('[data-placeholder]');
@@ -593,7 +623,8 @@ export async function mountAvatar(stage, cfg, opts = {}) {
   stage.setAttribute('data-cc-3d', reduced ? 'static' : 'on');
   stage.setAttribute('data-cc-model', cfg.model);
   window.__ccAvatar = {controller: ctl, bones: source, missing, blendshapes: bs.names, blendshapesMissing: bs.missing.length,
-    visemes: Object.keys(vis), joints: Object.keys(joints), layout: () => lay, camera, root, renderer, scene, render: () => renderer.render(scene, camera)};
+    visemes: Object.keys(vis), joints: Object.keys(joints), layout: () => lay, camera, root, renderer, scene, render: () => renderer.render(scene, camera),
+    dispose, setPaused};
   go();
   return window.__ccAvatar;
 }
