@@ -196,11 +196,13 @@ def test_the_frontend_reports_its_own_build(tmp_path):
     if not node:
         pytest.skip("node is not installed")
     script = FRONT / "scripts" / "write-build-info.mjs"
-    env = {"PATH": "/usr/bin:/bin", "COMMIT_REF": "a" * 40, "BRANCH": "claude/session-njaewf", "CONTEXT": "production"}
+    env = {"PATH": "/usr/bin:/bin", "COMMIT_REF": "a" * 40, "BRANCH": "claude/session-njaewf", "CONTEXT": "production",
+           "DEPLOY_ID": "0123456789abcdef01234567", "BUILD_ID": "fedcba9876543210fedcba98", "SITE_NAME": "polymarkettracker1"}
     subprocess.run([node, str(script), str(tmp_path / "netlify")], env=env, check=True, capture_output=True, timeout=30)
     rec = json.loads((tmp_path / "netlify" / "command" / "build.json").read_text())
     assert rec["schema"] == "bt.frontend.build.v1" and rec["sha"] == "a" * 40
     assert rec["source"] == "NETLIFY" and rec["context"] == "production"
+    assert rec["deploy_id"] == "0123456789abcdef01234567" and rec["site"] == "polymarkettracker1"
     env = {"PATH": "/usr/bin:/bin", "COMMIT_REF": "not-a-sha"}
     subprocess.run([node, str(script), str(tmp_path / "bad")], env=env, check=True, capture_output=True, timeout=30)
     rec = json.loads((tmp_path / "bad" / "command" / "build.json").read_text())
@@ -209,7 +211,7 @@ def test_the_frontend_reports_its_own_build(tmp_path):
     subprocess.run([node, str(script), str(tmp_path / "local")], env=env, check=True, capture_output=True,
                    timeout=30, cwd=str(ROOT))
     rec = json.loads((tmp_path / "local" / "command" / "build.json").read_text())
-    assert rec["source"] == "LOCAL" and rec["context"] == "LOCAL"
+    assert rec["source"] == "LOCAL" and rec["context"] == "LOCAL" and rec["deploy_id"] is None
 
 
 def test_small_live_stays_shadow_in_every_label():

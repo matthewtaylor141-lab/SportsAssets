@@ -486,7 +486,7 @@
 
     // FRONTEND: the build record only
     if (B) {
-      if (B.status === 'OK') { cell('fe', B.source === 'LOCAL' ? 'warn' : 'dim', short(B.sha) + (B.source === 'LOCAL' ? ' · LOCAL' : ''), 'frontend build ' + B.sha + '\nbranch ' + (B.branch || '—') + ' · context ' + (B.context || '—') + '\nbuilt ' + (B.built_at || '—') + ' · source ' + (B.source || '—')); }
+      if (B.status === 'OK') { cell('fe', B.source === 'LOCAL' ? 'warn' : 'dim', short(B.sha) + (B.source === 'LOCAL' ? ' · LOCAL' : ''), 'frontend build ' + B.sha + '\nbranch ' + (B.branch || '—') + ' · context ' + (B.context || '—') + (B.deploy_id ? '\nnetlify deploy ' + B.deploy_id + (B.site ? ' · site ' + B.site : '') : '') + '\nbuilt ' + (B.built_at || '—') + ' · source ' + (B.source || '—')); }
       else { cell('fe', 'warn', 'UNAVAILABLE', B.why || 'no build record'); }
     }
 

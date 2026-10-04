@@ -8,6 +8,9 @@
  *   COMMIT_REF  the commit being built      -> sha
  *   BRANCH      the branch being built      -> branch
  *   CONTEXT     production | deploy-preview | branch-deploy | dev -> context
+ *   DEPLOY_ID   the Netlify deploy this build belongs to   -> deploy_id
+ *   BUILD_ID    the Netlify build                          -> build_id
+ *   SITE_NAME   the Netlify site                           -> site
  *
  * Outside Netlify (no COMMIT_REF) it falls back to `git rev-parse HEAD` and
  * labels the build LOCAL, so a local build can never pass for a deployed one.
@@ -40,6 +43,9 @@ export function buildInfo(env = process.env, now = new Date()) {
       sha_why: HEX.test(ref) ? null : 'COMMIT_REF is not a hex commit',
       branch: env.BRANCH || env.HEAD || null,
       context: env.CONTEXT || null,
+      deploy_id: env.DEPLOY_ID || null,
+      build_id: env.BUILD_ID || null,
+      site: env.SITE_NAME || null,
       source: 'NETLIFY',
       built_at: now.toISOString(),
     }
@@ -52,6 +58,9 @@ export function buildInfo(env = process.env, now = new Date()) {
     sha_why: HEX.test(sha) ? null : 'no COMMIT_REF and git rev-parse HEAD failed',
     branch: branch || null,
     context: 'LOCAL',
+    deploy_id: null,
+    build_id: null,
+    site: null,
     source: 'LOCAL',
     built_at: now.toISOString(),
   }
