@@ -12,6 +12,18 @@ owns open positions ... No fake 'working' state").
   §4 no fake WORKING: an output outside the window, a run that finished, a
      run older than the window or a future stamp is not work;
   §5 the constants mirror the modules they are read from.
+  §6 THE DURABLE QUEUE (migration 234, owner R30 program section 17): an
+     agent that owns an open item is never IDLE; WAITING_FOR_FRESH_EVIDENCE
+     is derived only from an ENQUEUED REACQUISITION; a waiting signal with
+     none is HANDOFF_PENDING (REACQUISITION_NOT_ENQUEUED); untouched items
+     are hand-offs, attempted ones busy, market-blocked ones BLOCKED; past
+     its SLA an item is overdue.
+
+WHY SOME §2 / §3 PINS CHANGED (R30B): before migration 234 a heartbeat
+WAITING_FOR_EVIDENCE, Scout's features under test or Xavier's non-current
+positions were enough to derive WAITING. The owner's section 17 rule is
+"WAITING must have an enqueued reacquisition": those cases now assert WAITING
+WITH a reacquisition item in the queue, and HANDOFF_PENDING without one.
 """
 from __future__ import annotations
 
@@ -52,6 +64,40 @@ def _pos(gid, *, review="CURRENT", book_age=10.0, book_error=None,
     return {"position_kind": kind, "group_id": gid, "slug": "s-%s" % gid,
             "first_fill_at": NOW - 600, "current_review": cr, "book": book,
             "requests": requests or {}}
+
+
+def _q(kind="EXECUTION_ESTIMATE", *, owner="EDDIE", outcome=None,
+       last_at=None, blocker=None, due=NOW + 600, nxt=None, rid=None):
+    """A raw open queue item, in agent_work_state.OPEN_ITEMS_SQL's shape."""
+    return {"request_id": rid or "awr:%s:%s" % (kind, owner),
+            "agent_id": owner, "kind": kind, "position_kind": "DECISION",
+            "group_id": "subject-1", "reason": "TEST", "blocker": blocker,
+            "evidence_needed": [kind], "enqueued_at": NOW - 900,
+            "expires_at": NOW + 3600, "due_at": due,
+            "requested_next_at": NOW - 900,
+            "last_state": "ATTEMPTED" if outcome else None,
+            "last_attempt_at": last_at, "last_outcome": outcome,
+            "last_blocker": blocker if outcome else None,
+            "last_next_attempt_at": nxt if nxt is not None else (
+                NOW + 300 if outcome else None),
+            "attempts": 1 if outcome else 0}
+
+
+#: an enqueued reacquisition per agent (an acquisition kind, or an item
+#: whose latest attempt is waiting with its next attempt scheduled)
+REACQ = {
+    "DEREK": _q("CANDIDATE_FRESH_EVIDENCE", owner="DEREK"),
+    "SCOUT": _q("RESEARCH_QUESTION", owner="SCOUT"),
+    "EDDIE": _q("OUTCOME_CALIBRATION", owner="EDDIE",
+                outcome="WAITING_FOR_FRESH_EVIDENCE", last_at=NOW - 30),
+    "KAREN": _q("CHALLENGE_INVESTIGATION", owner="KAREN",
+                outcome="WAITING_FOR_FRESH_EVIDENCE", last_at=NOW - 30),
+    "AUDREY": _q("ROOT_CAUSE_TRIAGE", owner="AUDREY",
+                 outcome="WAITING_FOR_FRESH_EVIDENCE", last_at=NOW - 30),
+    "CHIEF_ALLOCATOR": _q("ALLOCATION_REVIEW", owner="CHIEF_ALLOCATOR",
+                          outcome="WAITING_FOR_FRESH_EVIDENCE",
+                          last_at=NOW - 30),
+}
 
 
 def _x(positions, *, open_n=None, market=MARKET_OK, status=None, **kw):
@@ -122,13 +168,25 @@ def test_the_scheduler_said_idle_but_he_owns_positions():
     FUNDED inventory) while 59 paper groups were his and 27 waited for fresh
     evidence. The work state follows the positions, not that row."""
     status = _status("IDLE", activity="SCHEDULER_RAN_NO_OWNED_INVENTORY")
-    pos = [_pos("w%d" % i, review=XF.S_WAITING) for i in range(27)] + \
+    # 20 of the 27 have their reacquisition enqueued (226), 7 do not
+    pos = [_pos("w%d" % i, review=XF.S_WAITING, requests=(
+        {"PROBABILITY": {"request_id": "r%d" % i}} if i < 20 else None))
+        for i in range(27)] + \
         [_pos("c%d" % i, review=XF.S_CURRENT) for i in range(32)]
     s = _st("XAVIER", _x(pos, status=status))
     assert s["state"] == W.WAITING
     assert s["counts"]["open_positions"] == 59
     assert s["counts"]["WAITING_FOR_FRESH_EVIDENCE"] == 27
+    assert "7 positions with none open" in s["detail"]
+    # NOT ONE reacquisition enqueued (R30B, section 17): the production
+    # defect's own shape -- 27 waiting, nothing asked for -- is never passive
+    # WAITING: the work was not picked up
+    pos = [_pos("w%d" % i, review=XF.S_WAITING) for i in range(27)] + \
+        [_pos("c%d" % i, review=XF.S_CURRENT) for i in range(32)]
+    s = _st("XAVIER", _x(pos, status=status))
+    assert s["state"] == W.HANDOFF
     assert "27 positions with none open" in s["detail"]
+    assert s["basis"][-1]["kind"] == W.K_NOT_ENQUEUED
 
 
 @pytest.mark.parametrize("market", [
@@ -173,7 +231,10 @@ def test_the_guard_turns_any_idle_away_for_an_owner(monkeypatch):
     monkeypatch.setattr(W, "_xavier", lambda f, now: W._out(
         W.IDLE, "broken", [], counts={}))
     s = W.derive("XAVIER", _x([_pos("a")]), now=NOW)
-    assert s["state"] == W.WAITING and s["guard"] == "XAVIER_NEVER_IDLE"
+    # (R30B) the guard cannot fabricate a reacquisition, so it no longer
+    # answers WAITING: owned work with no classifiable state is work not
+    # picked up
+    assert s["state"] == W.HANDOFF and s["guard"] == "XAVIER_NEVER_IDLE"
 
 
 def test_position_classes():
@@ -242,8 +303,10 @@ CASES = {
           "handoffs": _h("KAREN_CHALLENGE_TO_ANSWER")}, W.HANDOFF),
         ({"market": MARKET_OK, "handoffs": _h("AGENT_TASK_OPEN")},
          W.HANDOFF),
+        ({"market": MARKET_OK, "status": _status("WAITING_FOR_PROVIDER"),
+          "queue": [REACQ["DEREK"]]}, W.WAITING),
         ({"market": MARKET_OK,
-          "status": _status("WAITING_FOR_PROVIDER")}, W.WAITING),
+          "status": _status("WAITING_FOR_PROVIDER")}, W.HANDOFF),
         ({"market": MARKET_OK, "outputs": OUT}, W.WORKING),
         ({"market": MARKET_OK}, W.IDLE)],
     "EDDIE": [
@@ -255,13 +318,17 @@ CASES = {
         ({"market": VENUE_DOWN}, W.IDLE),         # nothing needs the books
         ({"market": FEED_DOWN,                    # he reads books, not feed
           "handoffs": _h("ENTER_DECISION_WITHOUT_ESTIMATE")}, W.HANDOFF),
-        ({"status": _status("WAITING_FOR_EVIDENCE")}, W.WAITING),
+        ({"status": _status("WAITING_FOR_EVIDENCE"),
+          "queue": [REACQ["EDDIE"]]}, W.WAITING),
+        ({"status": _status("WAITING_FOR_EVIDENCE")}, W.HANDOFF),
         ({"outputs": OUT}, W.WORKING),
         ({}, W.IDLE)],
     "KAREN": [
         ({"status": RUN}, W.REVIEWING),
         ({"handoffs": _h("AGENT_TASK_OPEN")}, W.HANDOFF),
-        ({"status": _status("WAITING_FOR_EVIDENCE")}, W.WAITING),
+        ({"status": _status("WAITING_FOR_EVIDENCE"),
+          "queue": [REACQ["KAREN"]]}, W.WAITING),
+        ({"status": _status("WAITING_FOR_EVIDENCE")}, W.HANDOFF),
         ({"outputs": OUT}, W.REVIEWING),
         ({"market": FEED_DOWN}, W.IDLE),
         ({}, W.IDLE)],
@@ -270,15 +337,21 @@ CASES = {
         ({"handoffs": _h("CHALLENGE_ANSWER_TO_EVALUATE:DEREK")}, W.HANDOFF),
         ({"handoffs": _h("KAREN_CHALLENGE_TO_ANSWER")}, W.HANDOFF),
         ({"status": _status("WAITING_FOR_EVIDENCE",
-                            activity="NO_FINAL_REPORT_DAY")}, W.WAITING),
+                            activity="NO_FINAL_REPORT_DAY"),
+          "queue": [REACQ["AUDREY"]]}, W.WAITING),
+        ({"status": _status("WAITING_FOR_EVIDENCE",
+                            activity="NO_FINAL_REPORT_DAY")}, W.HANDOFF),
         ({"outputs": OUT, "market": VENUE_DOWN}, W.REVIEWING),
         ({"market": VENUE_DOWN}, W.IDLE)],
     "SCOUT": [
         ({"status": RUN}, W.WORKING),
         ({"handoffs": _h("AGENT_TASK_OPEN")}, W.HANDOFF),
         ({"waiting": [{"kind": "FEATURE_UNDER_TEST_AWAITING_SAMPLES",
-                       "table": "scout_features", "count": 3}]}, W.WAITING),
-        ({"status": _status("WAITING_FOR_EVIDENCE")}, W.WAITING),
+                       "table": "scout_features", "count": 3}],
+          "queue": [REACQ["SCOUT"]]}, W.WAITING),
+        ({"waiting": [{"kind": "FEATURE_UNDER_TEST_AWAITING_SAMPLES",
+                       "table": "scout_features", "count": 3}]}, W.HANDOFF),
+        ({"status": _status("WAITING_FOR_EVIDENCE")}, W.HANDOFF),
         ({"outputs": OUT}, W.WORKING),
         ({"market": FEED_DOWN}, W.IDLE)],
     "CHIEF_ALLOCATOR": [
@@ -288,7 +361,9 @@ CASES = {
           "handoffs": _h("ENTER_DECISION_AFTER_LAST_ALLOCATION_RUN")},
          W.HANDOFF),
         ({"handoffs": _h("KAREN_CHALLENGE_TO_ANSWER")}, W.HANDOFF),
-        ({"status": _status("WAITING_FOR_PROVIDER")}, W.WAITING),
+        ({"status": _status("WAITING_FOR_PROVIDER"),
+          "queue": [REACQ["CHIEF_ALLOCATOR"]]}, W.WAITING),
+        ({"status": _status("WAITING_FOR_PROVIDER")}, W.HANDOFF),
         ({"run": {"in_progress": False}, "outputs": OUT}, W.WORKING),
         ({"run": {"in_progress": False}, "market": VENUE_DOWN}, W.IDLE)],
 }
@@ -369,3 +444,149 @@ def test_the_constants_mirror_their_sources():
     assert W.RUN_WINDOW_FLOOR_S == FL.RUN_WINDOW_FLOOR_S
     assert W.STALE_FLOOR_S == FL.STALE_FLOOR_S
     assert set(W.AGENTS) == {s["agent"] for s in FL.SEATS}
+
+
+# ═════════════════════════════════════════════════════════════════════
+# §6 THE DURABLE QUEUE (migration 234)
+# ═════════════════════════════════════════════════════════════════════
+
+ITEM_SHAPES = {
+    "untouched": dict(),
+    "attempted_now": dict(outcome="PROGRESSED", last_at=NOW - 30),
+    "attempted_long_ago": dict(outcome="PROGRESSED", last_at=NOW - 99999),
+    "blocked_market": dict(outcome="BLOCKED", last_at=NOW - 30,
+                           blocker="VENUE_BOOK_READ_FAILED"),
+    "blocked_other": dict(outcome="BLOCKED", last_at=NOW - 30,
+                          blocker="OPEN_CHALLENGE_CAP_REACHED"),
+    "waiting_scheduled": dict(outcome="WAITING_FOR_FRESH_EVIDENCE",
+                              last_at=NOW - 30),
+    "overdue": dict(due=NOW - 7200),
+}
+
+
+@pytest.mark.parametrize("agent", W.AGENTS)
+def test_an_agent_that_owns_open_work_is_never_idle(agent):
+    """Every combination of item shapes, statuses and market health: an
+    owner of an open item is never IDLE_NO_OPEN_WORK, WAITING always rests
+    on an enqueued reacquisition, and no derivation needed the guard."""
+    statuses = [None, _status("IDLE"), _status("WAITING_FOR_EVIDENCE"),
+                _status("EVALUATING", started=NOW - 5000)]
+    markets = [MARKET_OK, FEED_DOWN, VENUE_DOWN]
+    shapes = list(ITEM_SHAPES)
+    for n in (1, 2):
+        for combo in itertools.product(shapes, repeat=n):
+            items = [_q(owner=agent, rid="r%d" % i, **ITEM_SHAPES[k])
+                     for i, k in enumerate(combo)]
+            for st in statuses:
+                for mk in markets:
+                    f = {"queue": items, "status": st, "market": mk}
+                    if agent == "XAVIER":
+                        f.update(open_positions=0, positions=[])
+                    s = W.derive(agent, f, now=NOW)
+                    assert s["state"] != W.IDLE, (agent, combo, s)
+                    assert W.invariant_holds(agent, f, s["state"])
+                    assert s.get("guard") is None, (agent, combo, s)
+                    if s["state"] == W.WAITING:
+                        assert any(W.is_reacquisition(W.queue_item(i, NOW))
+                                   for i in items)
+                    assert s["queue"]["open"] == n
+
+
+def test_queue_items_drive_each_state():
+    # never picked up -> HANDOFF_PENDING, naming the items
+    s = _st("KAREN", {"queue": [_q("CHALLENGE_INVESTIGATION",
+                                   owner="KAREN")]})
+    assert s["state"] == W.HANDOFF
+    assert s["basis"][-1]["kind"] == W.K_QUEUE_UNTOUCHED
+    # attempted inside the window -> the busy state, blockers named
+    s = _st("KAREN", {"queue": [_q("CHALLENGE_INVESTIGATION", owner="KAREN",
+                                   **ITEM_SHAPES["blocked_other"])]})
+    assert s["state"] == W.REVIEWING
+    assert "OPEN_CHALLENGE_CAP_REACHED" in s["detail"]
+    s = _st("EDDIE", {"queue": [_q(**ITEM_SHAPES["attempted_now"])],
+                      "market": MARKET_OK})
+    assert s["state"] == W.WORKING
+    # attempted long ago -> owed again, a hand-off
+    s = _st("EDDIE", {"queue": [_q(**ITEM_SHAPES["attempted_long_ago"])],
+                      "market": MARKET_OK})
+    assert s["state"] == W.HANDOFF
+    # a market-data blocker blocks only a market-data agent
+    s = _st("EDDIE", {"queue": [_q(**ITEM_SHAPES["blocked_market"])],
+                      "market": MARKET_OK})
+    assert s["state"] == W.BLOCKED
+    assert s["basis"][0]["kind"] == "QUEUE_ITEM_BLOCKED_ON_MARKET_DATA"
+    s = _st("AUDREY", {"queue": [_q("AUDIT_RECONCILIATION", owner="AUDREY",
+                                    **ITEM_SHAPES["blocked_market"])]})
+    assert s["state"] == W.REVIEWING
+    # Eddie with open estimate work reads the books: venue down -> BLOCKED
+    s = _st("EDDIE", {"queue": [_q()], "market": VENUE_DOWN})
+    assert s["state"] == W.BLOCKED
+    # an enqueued reacquisition -> WAITING, overdue counted
+    s = _st("DEREK", {"queue": [_q("CANDIDATE_FRESH_EVIDENCE",
+                                   owner="DEREK", due=NOW - 60)],
+                      "market": MARKET_OK})
+    assert s["state"] == W.WAITING
+    assert s["queue"]["overdue"] == 1 and "1 overdue" in s["detail"]
+    # Xavier with every position current and an untouched challenge answer
+    s = _st("XAVIER", _x([_pos("a")], queue=[_q(
+        "CHALLENGE_RESPONSE", owner="XAVIER")]))
+    assert s["state"] == W.HANDOFF
+    # Xavier with no position and only an attempted item -> REVIEWING
+    s = _st("XAVIER", _x([], queue=[_q(
+        "CHALLENGE_EVALUATION", owner="XAVIER",
+        **ITEM_SHAPES["attempted_now"])]))
+    assert s["state"] == W.REVIEWING
+
+
+def test_waiting_requires_an_enqueued_reacquisition():
+    # the invariant itself
+    assert not W.invariant_holds("DEREK", {"queue": []}, W.WAITING)
+    assert W.invariant_holds("DEREK", {"queue": [REACQ["DEREK"]]}, W.WAITING)
+    assert not W.invariant_holds("EDDIE", {"queue": [_q()]}, W.WAITING)
+    assert not W.invariant_holds("EDDIE", {"queue": [_q()]}, W.IDLE)
+    assert W.invariant_holds("XAVIER", _x([_pos("a", review=XF.S_WAITING,
+        requests={"PROBABILITY": {"request_id": "r"}})]), W.WAITING)
+    assert not W.invariant_holds("XAVIER", _x([_pos(
+        "a", review=XF.S_WAITING)]), W.WAITING)
+    # a guard never answers WAITING without one
+    import sportsassets.agent_work_state as M
+    real = M._generic
+    try:
+        M._generic = lambda a, f, now: M._out(M.WAITING, "broken", [])
+        s = W.derive("KAREN", {}, now=NOW)
+        assert s["state"] == W.HANDOFF
+        assert s["guard"] == "WAITING_REQUIRES_ENQUEUED_REACQUISITION"
+        M._generic = lambda a, f, now: M._out(M.IDLE, "broken", [])
+        s = W.derive("KAREN", {"queue": [_q(owner="KAREN")]}, now=NOW)
+        assert s["guard"] == "OWNER_OF_OPEN_WORK_NEVER_IDLE"
+    finally:
+        M._generic = real
+
+
+def test_the_queue_item_view():
+    i = W.queue_item(_q(outcome="BLOCKED", last_at=NOW - 30,
+                        blocker="DB_REFUSED", due=NOW - 100), NOW)
+    assert i["blocker"] == "DB_REFUSED" and i["outcome"] == "BLOCKED"
+    assert i["overdue"] and i["overdue_s"] == 100.0
+    assert i["next_attempt_at"] == NOW + 300
+    assert i["owner"] == "EDDIE" and i["evidence_needed"] == [
+        "EXECUTION_ESTIMATE"]
+    j = W.queue_item(_q(), NOW)
+    assert j["next_attempt_at"] == NOW - 900 and not j["overdue"]
+    assert j["last_attempt_at"] is None and j["outcome"] is None
+    # a 226 dispatch carries no scheduled next attempt of its own
+    k = W.queue_item(dict(_q(), last_state="DISPATCHED",
+                          last_attempt_at=NOW - 10), NOW)
+    assert k["outcome"] == "DISPATCHED" and k["next_attempt_at"] is None
+    assert W.market_blocker("VENUE_BOOK_READ_FAILED")
+    assert not W.market_blocker("OPEN_CHALLENGE_CAP_REACHED")
+    assert not W.market_blocker(None)
+
+
+def test_the_queue_constants_mirror_the_queue_modules():
+    from sportsassets.agents import agent_work as AW
+    from sportsassets.agents import work_queue as WQ
+    assert set(W.ACQUISITION_KINDS) == set(AW.ACQUISITION_KINDS)
+    assert set(WQ.EVIDENCE_KINDS) | {WQ.K_REASSESS} <= set(
+        W.ACQUISITION_KINDS)
+    assert W.O_WAITING == AW.O_WAITING and W.O_BLOCKED == AW.O_BLOCKED

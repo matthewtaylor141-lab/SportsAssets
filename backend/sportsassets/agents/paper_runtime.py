@@ -278,6 +278,17 @@ def default_steps() -> list:
     except ImportError:
         pass
     try:
+        # THE AGENTS' DURABLE WORK QUEUES (owner R30 section 17, migration
+        # 234): on the main account's pass, at most every minute, Derek's
+        # candidates awaiting fresh evidence, Allie's allocation reviews and
+        # Audrey's open reconciliations are enqueued with their owner, SLA,
+        # blocker, evidence needed and collaborator, and closed by the
+        # records that resolve them. Writes only agent_work_* records.
+        from . import agent_work as AWQ
+        steps.append(("agent_work_queues", AWQ.step))
+    except ImportError:
+        pass
+    try:
         # THE AGENTS' OWN MEMORY (migration 224): at most every 10 minutes,
         # each agent learns from durable outcomes (settlements, reviews,
         # challenge outcomes, execution outcomes, tournament verdicts) into
