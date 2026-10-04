@@ -575,7 +575,7 @@ jobs:
     # horizontal overflow; screenshots go to claude/site-verify-evidence.
     if: ${{ inputs.verify == 'hq' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 32
     permissions:
       contents: write
     steps:
@@ -584,7 +584,7 @@ jobs:
         with:
           node-version: "20"
       - name: Render BETTOR HQ pages signed in
-        timeout-minutes: 14
+        timeout-minutes: 26
         shell: bash
         env:
           ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
