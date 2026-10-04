@@ -39,9 +39,11 @@ function simplifyNav(){
 simplifyNav();
 
 /* Homepage management brief: only durable floor facts. */
+var briefTries=0;
 function installBrief(){
   if(PATH!=='/'||document.getElementById('hq6-brief'))return;
-  var team=document.querySelector('.mtg-team'),capital=document.querySelector('.mtg-capital');if(!team||!capital)return;
+  /* integration: the executive home is built on DOMContentLoaded (and after its own reads), so wait for it (bounded) instead of giving up 50 ms after load */
+  var team=document.querySelector('.mtg-team'),capital=document.querySelector('.mtg-capital');if(!team||!capital){if(++briefTries<80)setTimeout(installBrief,125);return;}
   var sec=document.createElement('section');sec.id='hq6-brief';sec.className='hq6-brief';
   sec.innerHTML='<article class="hq6-brief-card attn"><div class="k">Needs attention</div><h3 id="hq6-attn">Reading current evidence</h3><p id="hq6-attn-p">No issue is inferred until the floor read arrives.</p><small id="hq6-attn-t"></small></article>'+
     '<article class="hq6-brief-card"><div class="k">Latest collaboration</div><h3 id="hq6-collab">Reading hand-offs</h3><p id="hq6-collab-p">Only durable collaboration events appear here.</p><small id="hq6-collab-t"></small></article>'+

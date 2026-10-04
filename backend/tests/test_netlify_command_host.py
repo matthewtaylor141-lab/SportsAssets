@@ -51,14 +51,27 @@ def _index_of(predicate):
 class TestTheHostServesCommand:
 
     def test_the_host_rule_exists_and_rewrites_to_command(self):
-        rule = _redirects()[_index_of(lambda r: HOST in r["from"])]
-        assert rule["from"] == "https://%s/*" % HOST
+        catch_all = _index_of(lambda r: r["from"] == "https://%s/*" % HOST)
+        assert catch_all is not None, "the command host has no catch-all rule"
+        rule = _redirects()[catch_all]
         assert rule["to"] == "/command/:splat"
         # 200 is a REWRITE: the browser keeps the command hostname rather
         # than being bounced to /command/ on another one.
         assert rule["status"] == 200
         # force, because /index.html would otherwise win for /
         assert rule["force"] is True
+
+    def test_named_pages_on_the_host_stay_inside_command(self):
+        """/derek, /floor, /allocator and the rest are host-scoped page
+        routes. Each must rewrite into /command/ and sit ABOVE the
+        catch-all, or the catch-all would take them first."""
+        catch_all = _index_of(lambda r: r["from"] == "https://%s/*" % HOST)
+        for i, rule in enumerate(_redirects()):
+            if HOST not in rule["from"] or i == catch_all:
+                continue
+            assert rule["to"].startswith("/command/"), rule
+            assert rule["status"] == 200 and rule.get("force") is True, rule
+            assert i < catch_all, "%s sits below the catch-all" % rule["from"]
 
     def test_it_is_scoped_by_host_not_by_path(self):
         """A path-only `from` would apply to www too and take the whole
