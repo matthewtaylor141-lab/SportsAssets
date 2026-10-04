@@ -1,23 +1,22 @@
 {
- "at": "2026-10-04T08:01:42.019Z",
+ "at": "2026-10-04T08:07:32.410Z",
  "host": "https://command.bettortoken.com",
  "runs": [
   {
    "label": "desktop",
    "path": "/",
    "status": 200,
-   "ms": 13861,
+   "ms": 14027,
    "errors": [],
    "apis": [
-    "200 /api/command/equity/curve?book=ACTUAL&venue=polymarket_us&window=1d",
     "200 /api/command/equity/live",
     "200 /api/command/paper/overview",
     "200 /api/command/equity/curve?book=PAPER&window=1d",
-    "200 /api/command/equity/curve?book=ACTUAL&venue=kalshi&window=1d",
     "200 /api/command/floor",
     "200 /api/command/paper/experiment",
-    "304 /api/command/equity/live",
-    "200 /api/command/snapshot"
+    "200 /api/command/equity/curve?book=ACTUAL&venue=kalshi&window=1d",
+    "200 /api/command/equity/curve?book=ACTUAL&venue=polymarket_us&window=1d",
+    "304 /api/command/equity/live"
    ],
    "title": "BettorToken | Management Office",
    "sections": [
@@ -25,14 +24,14 @@
      "h": "$500,000 PAPER EXPERIMENT",
      "unavailable": 2,
      "nan": 0,
-     "chars": 2072,
-     "sample": "FICTIONAL MONEY · SIMULATED EXECUTION $500,000 PAPER EXPERIMENT PAPER Account equity RUNNING LIVE · 3s $ 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7"
+     "chars": 2073,
+     "sample": "FICTIONAL MONEY · SIMULATED EXECUTION $500,000 PAPER EXPERIMENT PAPER Account equity RUNNING LIVE · 41s $ 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 "
     },
     {
      "h": "Your team. Your capital.\nOne clear picture.",
      "unavailable": 0,
      "nan": 0,
-     "chars": 13486,
+     "chars": 13711,
      "sample": "BETTORTOKEN / MANAGEMENT OFFICE Your team. Your capital. One clear picture. A shared workspace for decisions, conversations and accountability. Meet your AI tea"
     },
     {
@@ -46,7 +45,7 @@
      "h": "What the team is doing with the paper account.",
      "unavailable": 0,
      "nan": 0,
-     "chars": 11207,
+     "chars": 11432,
      "sample": "THE EXPERIMENT What the team is doing with the paper account. Every figure is a stored record · simulated execution · live market data CONNECTED · database read"
     },
     {
@@ -71,13 +70,6 @@
      "sample": ""
     },
     {
-     "h": "?",
-     "unavailable": 0,
-     "nan": 0,
-     "chars": 0,
-     "sample": ""
-    },
-    {
      "h": "",
      "unavailable": 0,
      "nan": 0,
@@ -123,14 +115,26 @@
    "overflowX": false,
    "scrollWidth": 1440,
    "clientWidth": 1440,
+   "overflowers": [
+    {
+     "r": 1579,
+     "w": 943,
+     "sel": "div.hero-meridian"
+    },
+    {
+     "r": 1513,
+     "w": 795,
+     "sel": "span.fe-glow"
+    }
+   ],
    "shadowLabels": 0,
-   "liveWord": 5
+   "liveWord": 4
   },
   {
    "label": "desktop",
    "path": "/floor",
    "status": 200,
-   "ms": 22277,
+   "ms": 33692,
    "errors": [],
    "apis": [
     "200 /api/command/coverage",
@@ -139,23 +143,24 @@
     "200 /api/command/equity/curve?book=PAPER&window=1d",
     "200 /api/command/equity/live",
     "200 /api/command/equity/curve?book=ACTUAL&venue=kalshi&window=1d",
-    "200 /api/command/equity/curve?book=ACTUAL&venue=polymarket_us&window=1d"
+    "200 /api/command/equity/curve?book=ACTUAL&venue=polymarket_us&window=1d",
+    "304 /api/command/equity/live"
    ],
    "title": "BETTOR · Trading Floor",
    "sections": [
     {
-     "h": "Allocator ranking\nshadow sleeve · 4m 19s ago",
+     "h": "Allocator ranking\nshadow sleeve · 10m 11s ago",
      "unavailable": 2,
      "nan": 0,
-     "chars": 3037,
-     "sample": "MARKET · OPPORTUNITY FEED PAPER · SHADOW Allocator ranking shadow sleeve · 4m 19s ago 1 atc-unl-ned-srb-2026-10-04-ned open position · NON_POSITIVE_RISK_ADJUSTE"
+     "chars": 3006,
+     "sample": "MARKET · OPPORTUNITY FEED PAPER · SHADOW Allocator ranking shadow sleeve · 10m 11s ago 1 atc-unl-ned-srb-2026-10-04-ned open position · NON_POSITIVE_RISK_ADJUST"
     },
     {
      "h": "$500,000 PAPER EXPERIMENT",
      "unavailable": 2,
      "nan": 0,
      "chars": 1437,
-     "sample": "FICTIONAL MONEY · SIMULATED EXECUTION $500,000 PAPER EXPERIMENT PAPER Account equity RUNNING LIVE · 15s $ 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 "
+     "sample": "FICTIONAL MONEY · SIMULATED EXECUTION $500,000 PAPER EXPERIMENT PAPER Account equity RUNNING LIVE · 56s $ 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 "
     },
     {
      "h": "fl-wallflow",
@@ -168,6 +173,7 @@
    "overflowX": false,
    "scrollWidth": 1440,
    "clientWidth": 1440,
+   "overflowers": [],
    "shadowLabels": 1,
    "liveWord": 5
   },
@@ -175,36 +181,36 @@
    "label": "desktop",
    "path": "/positions",
    "status": 200,
-   "ms": 12716,
+   "ms": 12803,
    "errors": [],
    "apis": [
     "200 /api/command/positions/rooms?book=PAPER",
+    "200 /api/command/agents/static/venue-team-34898.png",
     "200 /api/command/agents/static/venue-team-16901.png",
-    "200 /api/command/agents/static/mlb-logo-147.svg",
+    "200 /api/command/agents/static/mlb-logo-114.svg",
     "200 /api/command/agents/static/venue-team-16909.png",
-    "200 /api/command/agents/static/mlb-logo-144.svg",
-    "200 /api/command/agents/static/venue-team-16908.png",
-    "200 /api/command/agents/static/venue-team-16914.png",
-    "200 /api/command/agents/static/venue-team-34906.png",
-    "200 /api/command/agents/static/venue-team-16889.png",
-    "200 /api/command/agents/static/venue-team-34880.png",
-    "200 /api/command/agents/static/mlb-logo-139.svg",
+    "200 /api/command/agents/static/venue-team-34901.png",
+    "200 /api/command/agents/static/mlb-logo-119.svg",
+    "200 /api/command/agents/static/venue-team-34885.png",
     "200 /api/command/agents/static/venue-team-34913.png",
     "200 /api/command/agents/static/venue-team-34907.png",
-    "200 /api/command/agents/static/venue-team-34929.png",
-    "200 /api/command/agents/static/venue-team-34898.png",
-    "200 /api/command/agents/static/venue-team-16897.png",
-    "200 /api/command/agents/static/venue-team-34911.png",
-    "200 /api/command/agents/static/venue-team-16907.png",
-    "200 /api/command/agents/static/mlb-logo-119.svg",
-    "200 /api/command/agents/static/mlb-logo-145.svg",
-    "200 /api/command/agents/static/mlb-logo-114.svg",
-    "200 /api/command/agents/static/venue-team-34879.png",
-    "200 /api/command/agents/static/venue-team-34901.png",
-    "200 /api/command/agents/static/venue-team-16916.png",
+    "200 /api/command/agents/static/venue-team-34906.png",
     "200 /api/command/agents/static/venue-team-16896.png",
-    "200 /api/command/agents/static/venue-team-34885.png",
-    "200 /api/command/agents/static/venue-team-34900.png"
+    "200 /api/command/agents/static/mlb-logo-144.svg",
+    "200 /api/command/agents/static/venue-team-34879.png",
+    "200 /api/command/agents/static/mlb-logo-147.svg",
+    "200 /api/command/agents/static/venue-team-16916.png",
+    "200 /api/command/agents/static/venue-team-16907.png",
+    "200 /api/command/agents/static/venue-team-34929.png",
+    "200 /api/command/agents/static/mlb-logo-139.svg",
+    "200 /api/command/agents/static/venue-team-34900.png",
+    "200 /api/command/agents/static/venue-team-34880.png",
+    "200 /api/command/agents/static/mlb-logo-145.svg",
+    "200 /api/command/agents/static/venue-team-34911.png",
+    "200 /api/command/agents/static/venue-team-16914.png",
+    "200 /api/command/agents/static/venue-team-16908.png",
+    "200 /api/command/agents/static/venue-team-16889.png",
+    "200 /api/command/agents/static/venue-team-16897.png"
    ],
    "title": "Position Rooms | BettorToken Command",
    "sections": [
@@ -219,13 +225,14 @@
      "h": "Paper book",
      "unavailable": 10,
      "nan": 0,
-     "chars": 6868,
+     "chars": 6926,
      "sample": "Paper book FICTIONAL USD - SIMULATED EXECUTION 21 active rooms Cr Brasil vs AC Goianiense GAME STATE UNAVAILABLE EVENT IDENTITY · 1 LEG YES Cr Brasil WORST OUTC"
     }
    ],
    "overflowX": false,
    "scrollWidth": 1440,
    "clientWidth": 1440,
+   "overflowers": [],
    "shadowLabels": 0,
    "liveWord": 0
   },
@@ -233,12 +240,12 @@
    "label": "desktop",
    "path": "/xavier",
    "status": 200,
-   "ms": 13132,
+   "ms": 13401,
    "errors": [],
    "apis": [
-    "200 /api/command/profitability/scorecards?agent=XAVIER",
     "200 /api/command/profitability/north-star",
     "200 /api/command/tournament/agents",
+    "200 /api/command/profitability/scorecards?agent=XAVIER",
     "200 /api/command/floor/xavier"
    ],
    "title": "BettorToken · Xavier",
@@ -254,15 +261,15 @@
      "h": "Work queue",
      "unavailable": 0,
      "nan": 0,
-     "chars": 1877,
-     "sample": "Work queue agent_tasks · karen_challenges Answer Karen: Review paperrev:d45db5036e3e8aa268cc05be of group paperexpgrp:e16e6c216e47705741e6a91e recommended HOLD "
+     "chars": 1102,
+     "sample": "Work queue agent_tasks · karen_challenges Paper audit: UNMARKED_OPEN_POSITION OPEN · from AUDREY · 8h 49m ago agent_tasks paper-task:1df45b491647de6baba48192 ↗ "
     },
     {
      "h": "Recent decisions & outputs",
      "unavailable": 0,
      "nan": 0,
-     "chars": 4195,
-     "sample": "Recent decisions & outputs xavier_management_assessments HOLD HOLD · PAPER paperexpgrp:214435a61518843f85209df3 · STALE_ENTRY_TIME_PROBABILITY · NO_ENTRY_THESIS"
+     "chars": 4211,
+     "sample": "Recent decisions & outputs xavier_management_assessments HOLD HOLD · PAPER paperexpgrp:cc8d6f6e728a42a6c94d9605 · STALE_ENTRY_TIME_PROBABILITY · NO_ENTRY_THESIS"
     },
     {
      "h": "Mandate & authority boundary",
@@ -275,15 +282,15 @@
      "h": "Challenges",
      "unavailable": 0,
      "nan": 0,
-     "chars": 6029,
-     "sample": "Challenges karen_challenges Received from Karen 20 OPEN Review paperrev:d45db5036e3e8aa268cc05be of group paperexpgrp:e16e6c216e47705741e6a91e recommended HOLD "
+     "chars": 6123,
+     "sample": "Challenges karen_challenges Received from Karen 20 UPHELD Review paperrev:2096bfdc6302487c746e0a4f of group paperexpgrp:611af30938d3f7395eaec8e7 recommended HOL"
     },
     {
      "h": "Collaboration timeline · 24 h",
      "unavailable": 0,
      "nan": 0,
-     "chars": 1943,
-     "sample": "Collaboration timeline · 24 h challenges · loop stages · hand-offs · reviews Audrey → Xavier · Candidate review step ×20 Xavier Management Plan (NOT_APPLICABLE)"
+     "chars": 1947,
+     "sample": "Collaboration timeline · 24 h challenges · loop stages · hand-offs · reviews Xavier → Karen · Challenge answered ×289 Concede her challenge 2026-10-04 08:07:22 "
     },
     {
      "h": "Scorecard",
@@ -296,6 +303,18 @@
    "overflowX": false,
    "scrollWidth": 1440,
    "clientWidth": 1440,
+   "overflowers": [
+    {
+     "r": 1633,
+     "w": 184,
+     "sel": "span.tag"
+    },
+    {
+     "r": 1446,
+     "w": 158,
+     "sel": "a"
+    }
+   ],
    "shadowLabels": 2,
    "liveWord": 0
   },
@@ -303,16 +322,16 @@
    "label": "desktop",
    "path": "/allocator",
    "status": 200,
-   "ms": 12754,
+   "ms": 12973,
    "errors": [],
    "apis": [
-    "200 /api/command/profitability/capital",
-    "200 /api/command/intel/allocator",
-    "200 /api/command/profitability/north-star",
-    "200 /api/command/profitability/scorecards?agent=ALLOCATOR",
-    "200 /api/command/floor/allocator",
     "200 /api/command/tournament/agents",
-    "200 /api/command/profitability/capacity"
+    "200 /api/command/profitability/capital",
+    "200 /api/command/profitability/capacity",
+    "200 /api/command/intel/allocator",
+    "200 /api/command/profitability/scorecards?agent=ALLOCATOR",
+    "200 /api/command/profitability/north-star",
+    "200 /api/command/floor/allocator"
    ],
    "title": "BettorToken · Chief Allocator",
    "sections": [
@@ -320,8 +339,8 @@
      "h": "?",
      "unavailable": 0,
      "nan": 0,
-     "chars": 161,
-     "sample": "Candidates ranked 25 intel_allocations · 4m 12s ago Funded (shadow) 0 intel_allocations · 4m 12s ago Shadow sleeve allocated $0.00 intel_allocations · 4m 12s ag"
+     "chars": 149,
+     "sample": "Candidates ranked 24 intel_allocations · 8s ago Funded (shadow) 0 intel_allocations · 8s ago Shadow sleeve allocated $0.00 intel_allocations · 8s ago"
     },
     {
      "h": "Work queue",
@@ -334,8 +353,8 @@
      "h": "Recent decisions & outputs",
      "unavailable": 0,
      "nan": 0,
-     "chars": 2579,
-     "sample": "Recent decisions & outputs intel_runs OK OK · 25 candidates · $0.00 SHADOW allocated 2026-10-04 07:58:33 UTC · 4m 12s ago intel_runs intelrun:6386fd7141c541879c"
+     "chars": 2578,
+     "sample": "Recent decisions & outputs intel_runs OK OK · 24 candidates · $0.00 SHADOW allocated 2026-10-04 08:08:41 UTC · 8s ago intel_runs intelrun:dc815a4ee20344059a09 ↗"
     },
     {
      "h": "Mandate & authority boundary",
@@ -355,43 +374,55 @@
      "h": "Portfolio ranking & capital",
      "unavailable": 0,
      "nan": 0,
-     "chars": 3979,
-     "sample": "Portfolio ranking & capital SHADOW · NEVER SUMMED ACROSS BOOKS Sleeve budget (SHADOW) $972.50 intel_snapshots · 4m 56s ago Allocated (SHADOW) $0.00 of $1,000.00"
+     "chars": 3816,
+     "sample": "Portfolio ranking & capital SHADOW · NEVER SUMMED ACROSS BOOKS Sleeve budget (SHADOW) $972.50 intel_snapshots · 15s ago Allocated (SHADOW) $0.00 of $1,000.00 no"
     },
     {
      "h": "Collaboration timeline · 24 h",
      "unavailable": 0,
      "nan": 0,
-     "chars": 668,
-     "sample": "Collaboration timeline · 24 h challenges · loop stages · hand-offs · reviews Eddie → Chief Allocator · Candidate review step ×20 Allocator Ranking (NO_RECORD) 2"
+     "chars": 674,
+     "sample": "Collaboration timeline · 24 h challenges · loop stages · hand-offs · reviews Eddie → Chief Allocator · Candidate review step ×30 Allocator Ranking (NO_RECORD) 2"
     },
     {
      "h": "Scorecard",
      "unavailable": 35,
      "nan": 0,
-     "chars": 2720,
+     "chars": 2716,
      "sample": "Scorecard RESEARCH · NO AUTHORITY Economic contribution pos-twin scorecards Metric Book Value n CI Status concentration_reduction_actual_basis COUNTERFACTUAL UN"
     }
    ],
    "overflowX": false,
    "scrollWidth": 1440,
    "clientWidth": 1440,
-   "shadowLabels": 40,
+   "overflowers": [
+    {
+     "r": 1633,
+     "w": 184,
+     "sel": "span.tag"
+    },
+    {
+     "r": 1446,
+     "w": 158,
+     "sel": "a"
+    }
+   ],
+   "shadowLabels": 41,
    "liveWord": 0
   },
   {
    "label": "desktop",
    "path": "/eddie",
    "status": 200,
-   "ms": 17481,
+   "ms": 22372,
    "errors": [],
    "apis": [
-    "200 /api/command/floor/eddie",
     "200 /api/command/agents/eddie/page",
-    "200 /api/command/agents/eddie/persona/latest-conversation?absent=empty",
     "200 /api/command/agents/static/cc_characters.js",
-    "200 /api/command/eddie",
+    "200 /api/command/agents/eddie/persona/latest-conversation?absent=empty",
     "200 /api/command/agents/static/three.module.min.js",
+    "200 /api/command/eddie",
+    "200 /api/command/floor/eddie",
     "200 /api/command/agents/static/three.core.min.js"
    ],
    "title": "BettorToken · Eddie",
@@ -399,6 +430,18 @@
    "overflowX": false,
    "scrollWidth": 1440,
    "clientWidth": 1440,
+   "overflowers": [
+    {
+     "r": 1633,
+     "w": 184,
+     "sel": "span.tag"
+    },
+    {
+     "r": 1446,
+     "w": 158,
+     "sel": "a"
+    }
+   ],
    "shadowLabels": 0,
    "liveWord": 0
   },
@@ -406,15 +449,15 @@
    "label": "desktop",
    "path": "/scout",
    "status": 200,
-   "ms": 17287,
+   "ms": 21568,
    "errors": [],
    "apis": [
     "200 /api/command/agents/scout/page",
+    "200 /api/command/agents/static/cc_characters.js",
     "200 /api/command/floor/scout",
     "200 /api/command/agents/scout/persona/latest-conversation?absent=empty",
-    "200 /api/command/scout",
-    "200 /api/command/agents/static/cc_characters.js",
     "200 /api/command/agents/static/three.module.min.js",
+    "200 /api/command/scout",
     "200 /api/command/agents/static/three.core.min.js"
    ],
    "title": "BettorToken · Scout",
@@ -422,6 +465,18 @@
    "overflowX": false,
    "scrollWidth": 1440,
    "clientWidth": 1440,
+   "overflowers": [
+    {
+     "r": 1633,
+     "w": 184,
+     "sel": "span.tag"
+    },
+    {
+     "r": 1446,
+     "w": 158,
+     "sel": "a"
+    }
+   ],
    "shadowLabels": 0,
    "liveWord": 0
   },
@@ -429,17 +484,17 @@
    "label": "phone",
    "path": "/",
    "status": 200,
-   "ms": 12891,
+   "ms": 13257,
    "errors": [],
    "apis": [
+    "200 /api/command/floor",
     "200 /api/command/equity/live",
     "200 /api/command/equity/curve?book=PAPER&window=1d",
-    "200 /api/command/floor",
+    "200 /api/command/paper/experiment",
     "200 /api/command/paper/overview",
     "200 /api/command/equity/curve?book=ACTUAL&venue=polymarket_us&window=1d",
     "200 /api/command/equity/curve?book=ACTUAL&venue=kalshi&window=1d",
     "200 /api/command/snapshot",
-    "200 /api/command/paper/experiment",
     "304 /api/command/equity/live"
    ],
    "title": "BettorToken | Management Office",
@@ -449,13 +504,13 @@
      "unavailable": 2,
      "nan": 0,
      "chars": 2073,
-     "sample": "FICTIONAL MONEY · SIMULATED EXECUTION $500,000 PAPER EXPERIMENT PAPER Account equity RUNNING LIVE · 55s $ 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 "
+     "sample": "FICTIONAL MONEY · SIMULATED EXECUTION $500,000 PAPER EXPERIMENT PAPER Account equity RUNNING LIVE · 60s $ 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 "
     },
     {
      "h": "Your team. Your capital.\nOne clear picture.",
      "unavailable": 0,
      "nan": 0,
-     "chars": 13615,
+     "chars": 13724,
      "sample": "BETTORTOKEN / MANAGEMENT OFFICE Your team. Your capital. One clear picture. A shared workspace for decisions, conversations and accountability. Meet your AI tea"
     },
     {
@@ -469,7 +524,7 @@
      "h": "What the team is doing with the paper account.",
      "unavailable": 0,
      "nan": 0,
-     "chars": 11336,
+     "chars": 11433,
      "sample": "THE EXPERIMENT What the team is doing with the paper account. Every figure is a stored record · simulated execution · live market data CONNECTED · database read"
     },
     {
@@ -546,6 +601,68 @@
    "overflowX": true,
    "scrollWidth": 427,
    "clientWidth": 390,
+   "overflowers": [
+    {
+     "r": 1709,
+     "w": 410,
+     "sel": "button.signal-chip"
+    },
+    {
+     "r": 1698,
+     "w": 23,
+     "sel": "span.signal-ev"
+    },
+    {
+     "r": 1698,
+     "w": 13,
+     "sel": "small"
+    },
+    {
+     "r": 1666,
+     "w": 29,
+     "sel": "span.signal-state"
+    },
+    {
+     "r": 1630,
+     "w": 309,
+     "sel": "span"
+    },
+    {
+     "r": 1313,
+     "w": 4,
+     "sel": "span.signal-dot"
+    },
+    {
+     "r": 1299,
+     "w": 243,
+     "sel": "button.signal-chip"
+    },
+    {
+     "r": 1288,
+     "w": 23,
+     "sel": "span.signal-ev"
+    },
+    {
+     "r": 1288,
+     "w": 13,
+     "sel": "small"
+    },
+    {
+     "r": 1257,
+     "w": 29,
+     "sel": "span.signal-state"
+    },
+    {
+     "r": 1220,
+     "w": 142,
+     "sel": "span"
+    },
+    {
+     "r": 1070,
+     "w": 4,
+     "sel": "span.signal-dot"
+    }
+   ],
    "shadowLabels": 0,
    "liveWord": 5
   },
@@ -553,17 +670,16 @@
    "label": "phone",
    "path": "/floor",
    "status": 200,
-   "ms": 14656,
+   "ms": 17236,
    "errors": [],
    "apis": [
-    "200 /api/command/p5/evidence",
     "200 /api/command/floor",
     "200 /api/command/coverage",
-    "200 /api/command/equity/curve?book=ACTUAL&venue=kalshi&window=1d",
-    "200 /api/command/equity/live",
+    "200 /api/command/p5/evidence",
     "200 /api/command/equity/curve?book=PAPER&window=1d",
-    "200 /api/command/equity/curve?book=ACTUAL&venue=polymarket_us&window=1d",
-    "304 /api/command/equity/live"
+    "200 /api/command/equity/live",
+    "200 /api/command/equity/curve?book=ACTUAL&venue=kalshi&window=1d",
+    "200 /api/command/equity/curve?book=ACTUAL&venue=polymarket_us&window=1d"
    ],
    "title": "BETTOR · Trading Floor",
    "sections": [
@@ -575,23 +691,24 @@
      "sample": "Drag to look around · click a desk to focus · click it again to open the workspace"
     },
     {
-     "h": "Allocator ranking\nshadow sleeve · 6m 8s ago",
+     "h": "Allocator ranking\nshadow sleeve · 1m 35s ago",
      "unavailable": 2,
      "nan": 0,
-     "chars": 2880,
-     "sample": "MARKET · OPPORTUNITY FEED PAPER · SHADOW Allocator ranking shadow sleeve · 6m 8s ago 1 atc-unl-ned-srb-2026-10-04-ned open position · NON_POSITIVE_RISK_ADJUSTED"
+     "chars": 2873,
+     "sample": "MARKET · OPPORTUNITY FEED PAPER · SHADOW Allocator ranking shadow sleeve · 1m 35s ago 1 atc-unl-mlt-and-2026-10-04-mlt open position · NON_POSITIVE_RISK_ADJUSTE"
     },
     {
      "h": "$500,000 PAPER EXPERIMENT",
      "unavailable": 2,
      "nan": 0,
-     "chars": 1437,
-     "sample": "FICTIONAL MONEY · SIMULATED EXECUTION $500,000 PAPER EXPERIMENT PAPER Account equity RUNNING LIVE · 68s $ 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 "
+     "chars": 1436,
+     "sample": "FICTIONAL MONEY · SIMULATED EXECUTION $500,000 PAPER EXPERIMENT PAPER Account equity RUNNING LIVE · 7s $ 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7"
     }
    ],
    "overflowX": false,
    "scrollWidth": 390,
    "clientWidth": 390,
+   "overflowers": [],
    "shadowLabels": 1,
    "liveWord": 5
   },
@@ -599,22 +716,22 @@
    "label": "phone",
    "path": "/positions",
    "status": 200,
-   "ms": 12445,
+   "ms": 12636,
    "errors": [],
    "apis": [
     "200 /api/command/positions/rooms?book=PAPER",
-    "200 /api/command/agents/static/venue-team-16914.png",
     "200 /api/command/agents/static/venue-team-16908.png",
-    "200 /api/command/agents/static/venue-team-16909.png",
-    "200 /api/command/agents/static/mlb-logo-139.svg",
-    "200 /api/command/agents/static/venue-team-34907.png",
-    "200 /api/command/agents/static/mlb-logo-147.svg",
-    "200 /api/command/agents/static/venue-team-34913.png",
-    "200 /api/command/agents/static/venue-team-34906.png",
-    "200 /api/command/agents/static/venue-team-34901.png",
     "200 /api/command/agents/static/venue-team-34885.png",
+    "200 /api/command/agents/static/venue-team-34929.png",
     "200 /api/command/agents/static/venue-team-16901.png",
-    "200 /api/command/agents/static/venue-team-34929.png"
+    "200 /api/command/agents/static/mlb-logo-147.svg",
+    "200 /api/command/agents/static/venue-team-34906.png",
+    "200 /api/command/agents/static/venue-team-34913.png",
+    "200 /api/command/agents/static/mlb-logo-139.svg",
+    "200 /api/command/agents/static/venue-team-34901.png",
+    "200 /api/command/agents/static/venue-team-34907.png",
+    "200 /api/command/agents/static/venue-team-16909.png",
+    "200 /api/command/agents/static/venue-team-16914.png"
    ],
    "title": "Position Rooms | BettorToken Command",
    "sections": [
@@ -629,13 +746,14 @@
      "h": "Paper book",
      "unavailable": 10,
      "nan": 0,
-     "chars": 6928,
+     "chars": 6927,
      "sample": "Paper book FICTIONAL USD - SIMULATED EXECUTION 21 active rooms Cr Brasil vs AC Goianiense GAME STATE UNAVAILABLE EVENT IDENTITY · 1 LEG YES Cr Brasil WORST OUTC"
     }
    ],
    "overflowX": false,
    "scrollWidth": 390,
    "clientWidth": 390,
+   "overflowers": [],
    "shadowLabels": 0,
    "liveWord": 0
   },
@@ -643,85 +761,130 @@
    "label": "phone",
    "path": "/xavier",
    "status": 200,
-   "ms": 13007,
+   "ms": 12463,
    "errors": [],
-   "apis": [
-    "200 /api/command/profitability/scorecards?agent=XAVIER",
-    "200 /api/command/profitability/north-star",
-    "200 /api/command/tournament/agents",
-    "200 /api/command/floor/xavier"
-   ],
+   "apis": [],
    "title": "BettorToken · Xavier",
    "sections": [
-    {
-     "h": "?",
-     "unavailable": 0,
-     "nan": 0,
-     "chars": 235,
-     "sample": "Managed positions · PAPER 23 paper_handoffs+paper_fills · 0s ago Managed positions · ACTUAL 0 smalllive_handoffs · 0s ago Latest recommendation HOLD · PAPER · p"
-    },
     {
      "h": "Work queue",
      "unavailable": 0,
      "nan": 0,
-     "chars": 1071,
-     "sample": "Work queue Paper audit: UNMARKED_OPEN_POSITION OPEN · from AUDREY · 8h 45m ago agent_tasks paper-task:1df45b491647de6baba48192 ↗ Paper audit: UNMARKED_OPEN_POSI"
+     "chars": 32,
+     "sample": "Work queue Waiting for the read."
     },
     {
      "h": "Recent decisions & outputs",
      "unavailable": 0,
      "nan": 0,
-     "chars": 4170,
-     "sample": "Recent decisions & outputs HOLD HOLD · PAPER paperexpgrp:214435a61518843f85209df3 · STALE_ENTRY_TIME_PROBABILITY · NO_ENTRY_THESIS 2026-10-04 08:04:04 UTC · 10s"
+     "chars": 48,
+     "sample": "Recent decisions & outputs Waiting for the read."
     },
     {
      "h": "Mandate & authority boundary",
      "unavailable": 0,
      "nan": 0,
-     "chars": 396,
-     "sample": "Mandate & authority boundary Authority: Management Dispatch Through Claim Path May Manage every position with confirmed filled quantity Persist each management "
+     "chars": 56,
+     "sample": "Mandate & authority boundary Waiting for the floor read."
     },
     {
      "h": "Challenges",
      "unavailable": 0,
      "nan": 0,
-     "chars": 6111,
-     "sample": "Challenges Received from Karen 20 UPHELD Review paperrev:742fcbe2b7695be7fc60f4b6 of group paperexpgrp:edca4bb7455003b64c16fc95 recommended HOLD on a stale prob"
+     "chars": 32,
+     "sample": "Challenges Waiting for the read."
     },
     {
      "h": "Collaboration timeline · 24 h",
      "unavailable": 0,
      "nan": 0,
-     "chars": 1895,
-     "sample": "Collaboration timeline · 24 h Xavier → Karen · Challenge answered ×286 Concede her challenge 2026-10-04 08:03:19 UTC · 54s ago · karen_challenges kch:2a9cbc14d3"
+     "chars": 51,
+     "sample": "Collaboration timeline · 24 h Waiting for the read."
     },
     {
      "h": "Scorecard",
-     "unavailable": 27,
+     "unavailable": 0,
      "nan": 0,
-     "chars": 2170,
-     "sample": "Scorecard Economic contribution pos-twin scorecards Metric Book Value n CI Status capital_hours_released ACTUAL UNAVAILABLE 0 — UNAVAILABLE · NO_FULL_EXIT_BEFOR"
+     "chars": 350,
+     "sample": "Scorecard Economic contribution pos-twin scorecards Reading the agent scorecards (/api/command/profitability/scorecards)… Tournament pos-learn agent tournaments"
     }
    ],
-   "overflowX": true,
-   "scrollWidth": 1157,
+   "overflowX": false,
+   "scrollWidth": 390,
    "clientWidth": 390,
-   "shadowLabels": 2,
+   "overflowers": [
+    {
+     "r": 736,
+     "w": 70,
+     "sel": "a"
+    },
+    {
+     "r": 730,
+     "w": 58,
+     "sel": "span.role"
+    },
+    {
+     "r": 663,
+     "w": 61,
+     "sel": "a"
+    },
+    {
+     "r": 657,
+     "w": 49,
+     "sel": "span.role"
+    },
+    {
+     "r": 600,
+     "w": 67,
+     "sel": "a"
+    },
+    {
+     "r": 594,
+     "w": 55,
+     "sel": "span.role"
+    },
+    {
+     "r": 531,
+     "w": 61,
+     "sel": "a"
+    },
+    {
+     "r": 525,
+     "w": 49,
+     "sel": "span.role"
+    },
+    {
+     "r": 468,
+     "w": 75,
+     "sel": "a"
+    },
+    {
+     "r": 462,
+     "w": 63,
+     "sel": "span.role"
+    },
+    {
+     "r": 392,
+     "w": 85,
+     "sel": "a"
+    }
+   ],
+   "shadowLabels": 0,
    "liveWord": 0
   },
   {
    "label": "phone",
    "path": "/allocator",
    "status": 200,
-   "ms": 12675,
+   "ms": 12994,
    "errors": [],
    "apis": [
-    "200 /api/command/profitability/north-star",
-    "200 /api/command/profitability/capacity",
-    "200 /api/command/profitability/scorecards?agent=ALLOCATOR",
-    "200 /api/command/tournament/agents",
     "200 /api/command/intel/allocator",
+    "200 /api/command/profitability/north-star",
     "200 /api/command/profitability/capital",
+    "200 /api/command/profitability/scorecards?agent=ALLOCATOR",
+    "200 /api/command/profitability/capacity",
+    "200 /api/command/tournament/agents",
     "200 /api/command/floor/allocator"
    ],
    "title": "BettorToken · Chief Allocator",
@@ -730,8 +893,8 @@
      "h": "?",
      "unavailable": 0,
      "nan": 0,
-     "chars": 149,
-     "sample": "Candidates ranked 25 intel_allocations · 6m ago Funded (shadow) 0 intel_allocations · 6m ago Shadow sleeve allocated $0.00 intel_allocations · 6m ago"
+     "chars": 161,
+     "sample": "Candidates ranked 24 intel_allocations · 2m 12s ago Funded (shadow) 0 intel_allocations · 2m 12s ago Shadow sleeve allocated $0.00 intel_allocations · 2m 12s ag"
     },
     {
      "h": "Work queue",
@@ -744,8 +907,8 @@
      "h": "Recent decisions & outputs",
      "unavailable": 0,
      "nan": 0,
-     "chars": 2568,
-     "sample": "Recent decisions & outputs OK OK · 25 candidates · $0.00 SHADOW allocated 2026-10-04 07:58:33 UTC · 5m 59s ago intel_runs intelrun:6386fd7141c541879cb6 ↗ OK OK "
+     "chars": 2569,
+     "sample": "Recent decisions & outputs OK OK · 24 candidates · $0.00 SHADOW allocated 2026-10-04 08:08:41 UTC · 2m 12s ago intel_runs intelrun:dc815a4ee20344059a09 ↗ OK OK "
     },
     {
      "h": "Mandate & authority boundary",
@@ -765,15 +928,15 @@
      "h": "Portfolio ranking & capital",
      "unavailable": 0,
      "nan": 0,
-     "chars": 3944,
-     "sample": "Portfolio ranking & capital Sleeve budget (SHADOW) $972.50 intel_snapshots · 6m 44s ago Allocated (SHADOW) $0.00 of $1,000.00 notional sleeve Unallocated $972.5"
+     "chars": 3792,
+     "sample": "Portfolio ranking & capital Sleeve budget (SHADOW) $972.50 intel_snapshots · 2m 19s ago Allocated (SHADOW) $0.00 of $1,000.00 notional sleeve Unallocated $972.5"
     },
     {
      "h": "Collaboration timeline · 24 h",
      "unavailable": 0,
      "nan": 0,
      "chars": 627,
-     "sample": "Collaboration timeline · 24 h Eddie → Chief Allocator · Candidate review step ×20 Allocator Ranking (NO_RECORD) 2026-10-04 08:02:05 UTC · 2m 27s ago · pos_candi"
+     "sample": "Collaboration timeline · 24 h Eddie → Chief Allocator · Candidate review step ×30 Allocator Ranking (NO_RECORD) 2026-10-04 08:07:07 UTC · 3m 45s ago · pos_candi"
     },
     {
      "h": "Scorecard",
@@ -786,29 +949,148 @@
    "overflowX": true,
    "scrollWidth": 1116,
    "clientWidth": 390,
-   "shadowLabels": 38,
+   "overflowers": [
+    {
+     "r": 1116,
+     "w": 1083,
+     "sel": "table.wsx-t"
+    },
+    {
+     "r": 1116,
+     "w": 1083,
+     "sel": "thead"
+    },
+    {
+     "r": 1116,
+     "w": 1083,
+     "sel": "tr"
+    },
+    {
+     "r": 1116,
+     "w": 530,
+     "sel": "th"
+    },
+    {
+     "r": 1116,
+     "w": 1083,
+     "sel": "tbody"
+    },
+    {
+     "r": 1116,
+     "w": 1083,
+     "sel": "tr"
+    },
+    {
+     "r": 1116,
+     "w": 530,
+     "sel": "td"
+    },
+    {
+     "r": 1116,
+     "w": 1083,
+     "sel": "tr"
+    },
+    {
+     "r": 1116,
+     "w": 530,
+     "sel": "td"
+    },
+    {
+     "r": 1116,
+     "w": 1083,
+     "sel": "tr"
+    },
+    {
+     "r": 1116,
+     "w": 530,
+     "sel": "td"
+    },
+    {
+     "r": 1116,
+     "w": 1083,
+     "sel": "tr"
+    }
+   ],
+   "shadowLabels": 39,
    "liveWord": 0
   },
   {
    "label": "phone",
    "path": "/eddie",
    "status": 200,
-   "ms": 15006,
+   "ms": 17532,
    "errors": [],
    "apis": [
     "200 /api/command/agents/eddie/page",
-    "200 /api/command/agents/eddie/persona/latest-conversation?absent=empty",
     "200 /api/command/agents/static/cc_characters.js",
     "200 /api/command/agents/static/three.module.min.js",
-    "200 /api/command/floor/eddie",
+    "200 /api/command/agents/static/three.core.min.js",
     "200 /api/command/eddie",
-    "200 /api/command/agents/static/three.core.min.js"
+    "200 /api/command/agents/eddie/persona/latest-conversation?absent=empty",
+    "200 /api/command/floor/eddie"
    ],
    "title": "BettorToken · Eddie",
    "sections": [],
    "overflowX": false,
    "scrollWidth": 390,
    "clientWidth": 390,
+   "overflowers": [
+    {
+     "r": 736,
+     "w": 70,
+     "sel": "a"
+    },
+    {
+     "r": 730,
+     "w": 58,
+     "sel": "span.role"
+    },
+    {
+     "r": 663,
+     "w": 61,
+     "sel": "a"
+    },
+    {
+     "r": 657,
+     "w": 49,
+     "sel": "span.role"
+    },
+    {
+     "r": 600,
+     "w": 67,
+     "sel": "a"
+    },
+    {
+     "r": 594,
+     "w": 55,
+     "sel": "span.role"
+    },
+    {
+     "r": 531,
+     "w": 61,
+     "sel": "a"
+    },
+    {
+     "r": 525,
+     "w": 49,
+     "sel": "span.role"
+    },
+    {
+     "r": 468,
+     "w": 75,
+     "sel": "a"
+    },
+    {
+     "r": 462,
+     "w": 63,
+     "sel": "span.role"
+    },
+    {
+     "r": 392,
+     "w": 85,
+     "sel": "a"
+    }
+   ],
    "shadowLabels": 0,
    "liveWord": 0
   },
@@ -816,22 +1098,79 @@
    "label": "phone",
    "path": "/scout",
    "status": 200,
-   "ms": 14988,
+   "ms": 17596,
    "errors": [],
    "apis": [
     "200 /api/command/agents/scout/page",
-    "200 /api/command/agents/scout/persona/latest-conversation?absent=empty",
-    "200 /api/command/scout",
     "200 /api/command/agents/static/cc_characters.js",
-    "200 /api/command/floor/scout",
     "200 /api/command/agents/static/three.module.min.js",
-    "200 /api/command/agents/static/three.core.min.js"
+    "200 /api/command/agents/static/three.core.min.js",
+    "200 /api/command/scout",
+    "200 /api/command/agents/scout/persona/latest-conversation?absent=empty",
+    "200 /api/command/floor/scout"
    ],
    "title": "BettorToken · Scout",
    "sections": [],
    "overflowX": false,
    "scrollWidth": 390,
    "clientWidth": 390,
+   "overflowers": [
+    {
+     "r": 736,
+     "w": 70,
+     "sel": "a"
+    },
+    {
+     "r": 730,
+     "w": 58,
+     "sel": "span.role"
+    },
+    {
+     "r": 663,
+     "w": 61,
+     "sel": "a"
+    },
+    {
+     "r": 657,
+     "w": 49,
+     "sel": "span.role"
+    },
+    {
+     "r": 600,
+     "w": 67,
+     "sel": "a"
+    },
+    {
+     "r": 594,
+     "w": 55,
+     "sel": "span.role"
+    },
+    {
+     "r": 531,
+     "w": 61,
+     "sel": "a"
+    },
+    {
+     "r": 525,
+     "w": 49,
+     "sel": "span.role"
+    },
+    {
+     "r": 468,
+     "w": 75,
+     "sel": "a"
+    },
+    {
+     "r": 462,
+     "w": 63,
+     "sel": "span.role"
+    },
+    {
+     "r": 392,
+     "w": 85,
+     "sel": "a"
+    }
+   ],
    "shadowLabels": 0,
    "liveWord": 0
   }
