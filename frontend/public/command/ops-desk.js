@@ -173,13 +173,17 @@
   function stratTitle(s) { return (STRAT[s] && STRAT[s].t) || s || 'no strategy recorded'; }
   function sportOfRow(r) {
     var lab = r && r.label || {};
-    return O.sportOf(r && (r.us_market_slug || r.market) || '', lab.sport_family);
+    // the recorded competition names the league directly ("MLB"); the slug is the fallback
+    var s = lab.competition ? O.sportOf(lab.competition, lab.sport_family) : 'Other';
+    return s !== 'Other' ? s : O.sportOf(r && (r.us_market_slug || r.market) || '', lab.sport_family);
   }
   function leagueOfRow(r) {
     var lab = r && r.label || {};
     if (lab.competition) { return String(lab.competition); }
-    var slug = String(r && (r.us_market_slug || r.market) || '');
-    return slug ? slug.split('-')[0].toUpperCase() : '—';
+    var toks = String(r && (r.us_market_slug || r.market) || '').split('-');
+    if (!toks[0]) { return '—'; }
+    // skip the venue's event-class prefix ("aec-mlb-…" → MLB)
+    return (toks.length > 2 && O.sportOf(toks[0]) === 'Other' && O.sportOf(toks[1]) !== 'Other' ? toks[1] : toks[0]).toUpperCase();
   }
   function marketOf(lab) {
     lab = lab || {};

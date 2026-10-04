@@ -189,6 +189,26 @@ def test_an_unknown_code_is_unclassified():
     assert json.loads(out.stdout) == ["UNCLASSIFIED", "ECONOMIC", "SOFTWARE", "UNCLASSIFIED", "2_FRESHNESS"]
 
 
+def test_venue_slugs_with_an_event_class_prefix_bucket_to_their_league():
+    # production rows carry slugs like "aec-mlb-atl-lad-2026-10-04"; the first
+    # token is the venue's event class, not the league (they all read "Other")
+    assert "TOKEN_SPORT[toks[1]]" in OPS_JS
+    assert "lab.competition ? O.sportOf(lab.competition" in DESK_JS
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is not installed")
+    out = subprocess.run([node, "-e", (
+        "const vm=require('vm'),fs=require('fs');const c={location:{pathname:'/ops',hostname:'localhost'},"
+        "document:{addEventListener(){},querySelector(){return null},readyState:'loading'},"
+        "addEventListener(){},setTimeout(){},clearTimeout(){},setInterval(){},clearInterval(){}};c.window=c;c.globalThis=c;"
+        "vm.runInNewContext(fs.readFileSync(%r,'utf8'),c);const s=c.BTOps.sportOf;"
+        "console.log(JSON.stringify([s('aec-mlb-atl-lad-2026-10-04'),s('aec-nfl-kc-buf-2026-10-04'),s('aec-cfb-ala-uga-2026-10-04'),"
+        "s('MLB'),s('College Football'),s('americanfootball_ncaaf'),s('nba-lal-bos-2026-10-04'),s('aec-xyz-foo-bar'),"
+        "s('soccer_epl'),s('aec-xyz-foo','soccer')]))"
+    ) % str(COMMAND / "command-ops.js")], capture_output=True, text=True, timeout=30, check=True)
+    assert json.loads(out.stdout) == ["MLB", "NFL", "NCAAF", "MLB", "NCAAF", "NCAAF", "NBA", "Other", "Soccer", "Soccer"]
+
+
 def test_the_frontend_reports_its_own_build(tmp_path):
     pkg = json.loads((FRONT / "package.json").read_text())
     assert pkg["scripts"]["build"].endswith("&& node scripts/write-build-info.mjs dist")

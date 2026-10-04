@@ -215,17 +215,22 @@
                    basketball_ncaab: 'NCAAB', icehockey_nhl: 'NHL', baseball_mlb: 'MLB'};
   var TOKEN_SPORT = {nfl: 'NFL', cfb: 'NCAAF', ncaaf: 'NCAAF', nba: 'NBA', cbb: 'NCAAB', ncaab: 'NCAAB',
                      nhl: 'NHL', mlb: 'MLB', atp: 'Tennis', wta: 'Tennis', tennis: 'Tennis'};
+  var NAME_SPORT = {'college football': 'NCAAF', 'college basketball': 'NCAAB', soccer: 'Soccer'};
   var SPORT_RULE = 'Bucket rule: provider competition key (americanfootball_nfl → NFL, _ncaaf → NCAAF, basketball_nba → NBA, ' +
     '_ncaab → NCAAB, icehockey_nhl → NHL, baseball_mlb → MLB, soccer_* → Soccer, tennis_* → Tennis), else the venue league ' +
-    'token (nfl, cfb/ncaaf, nba, cbb/ncaab, nhl, mlb, atp/wta), else the recorded sport family (soccer → Soccer, tennis → Tennis); ' +
+    'token (nfl, cfb/ncaaf, nba, cbb/ncaab, nhl, mlb, atp/wta; first or second slug token, after an event-class prefix such as aec-), else the recorded sport family (soccer → Soccer, tennis → Tennis); ' +
     'anything else is Other, named by its own key.';
   function sportOf(key, family) {
     var k = String(key || '').toLowerCase().replace(/^venue:/, '');
     if (KEY_SPORT[k]) { return KEY_SPORT[k]; }
     if (k.indexOf('soccer_') === 0) { return 'Soccer'; }
     if (k.indexOf('tennis_') === 0) { return 'Tennis'; }
-    var tok = k.split(/[-_:]/)[0];
-    if (TOKEN_SPORT[tok]) { return TOKEN_SPORT[tok]; }
+    if (NAME_SPORT[k]) { return NAME_SPORT[k]; }
+    // venue slugs carry an event-class prefix before the league ("aec-mlb-atl-lad-2026-10-04"),
+    // so the league token is the first or the second one
+    var toks = k.split(/[-_:]/);
+    if (TOKEN_SPORT[toks[0]]) { return TOKEN_SPORT[toks[0]]; }
+    if (toks.length > 2 && TOKEN_SPORT[toks[1]]) { return TOKEN_SPORT[toks[1]]; }
     var f = String(family || '').toLowerCase();
     if (f.indexOf('soccer') === 0) { return 'Soccer'; }
     if (f.indexOf('tennis') === 0) { return 'Tennis'; }
