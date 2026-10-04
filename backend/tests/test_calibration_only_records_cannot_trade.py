@@ -641,6 +641,18 @@ READERS = {
     # descriptive name list with no SQL behind it: selects nothing, reads no
     # row, sizes and places nothing
     "agents/agent_context.py": ("CONTEXT_SOURCE_NAME_LIST_PROSE_ONLY", 2),
+    # (244) THE LAB-F DRIFT SENTINEL (SHADOW_RESEARCH_ONLY): its readers LEFT
+    # JOIN the valuation row a paper decision already links to, BY ID ONLY,
+    # for one column -- sport_family, naming the league of a decision whose
+    # label carries no competition (UNATTRIBUTED:<family>) -- both purposes,
+    # because the decision was taken on that row whatever its purpose; the
+    # module docstring names the table once. The sentinel names the column
+    # once in a metric's source prose. Neither selects a candidate, sizes or
+    # places anything; the lab writes only lab_drift_* tables
+    # (tests/test_lab_is_shadow_only.py).
+    "lab/drift_reads.py": (
+        "BY_ID_OF_A_DECISIONS_VALUATION_SPORT_FAMILY_RESEARCH_ONLY", 5),
+    "lab/drift_sentinel.py": ("PROSE_ONLY", 1),
 }
 
 
