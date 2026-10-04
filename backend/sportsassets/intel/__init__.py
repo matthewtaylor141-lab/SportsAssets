@@ -11,6 +11,12 @@ threshold, and never modifies a production probability.
                    a frozen forward out-of-sample overlay protocol
   attribution   E  model edge vs executable edge vs fees vs slippage vs
                    management vs settlement, per position, reconciled to cash
+  attribution_v2  Alpha Attribution V2 on top of E: selection (WHAT) /
+                   allocation (HOW MUCH) / execution (HOW WELL) / management
+                   (HOW HANDLED) / settlement / probability with an exact
+                   identity, the allocation comparators under identical rails
+                   and the capital-efficiency identity (used by the
+                   historical replay, sportsassets/replay)
   risk          J  exposure by game / team / conference / sport / market
                    family / live state / settlement class / venue, clusters,
                    liquidity-at-risk, daily loss, drawdown; PAPER and ACTUAL
