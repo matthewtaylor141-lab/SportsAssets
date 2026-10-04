@@ -755,3 +755,7 @@ tests/test_poslearn_overfitting_defences.py
 tests/test_twin_authority.py
 tests/test_twin_replay.py
 tests/test_twin_profitability.py
+# Equity wall: /api/command/equity/* are GET-only behind the COMMAND session,
+# import no order/venue/execution/funded module, hold no SQL write, and run
+# every read in a READ ONLY transaction under a statement timeout.
+tests/test_equity_wall_authority.py

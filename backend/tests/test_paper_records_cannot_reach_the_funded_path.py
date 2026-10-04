@@ -141,6 +141,12 @@ def test_no_funded_module_imports_the_paper_modules():
                # as EDDIE (the database refuses him on every order table),
                # and holds no submit, cancel or reserve call
                "agents/eddie.py"}
+               # the live equity wall (/api/command/equity/*): GET-only, reads
+               # bettor_paper_ledger.balances inside a READ ONLY transaction
+               # beside the actual books (never summed); it writes nothing and
+               # imports no order, venue, execution or funded module
+               # (tests/test_equity_wall_authority.py)
+               "api/command_equity.py"}
     assert set(offenders) <= allowed, sorted(set(offenders) - allowed)
     # ...and neither capability module reaches a funded or execution module,
     # directly or through the rest of the capability package
