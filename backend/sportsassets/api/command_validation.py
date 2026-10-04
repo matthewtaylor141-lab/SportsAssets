@@ -1,9 +1,9 @@
 """PROFITABILITY VALIDATION: GET /api/command/profitability/validation
 (GET only, COMMAND auth via agents_core.require_read). READ ONLY.
 
-    ?since=<epoch>   the forward cutover (default: the R30 cutover,
-                     profitability.validation.cutover_epoch -- overridable by
-                     BETTOR_R30_CUTOVER_EPOCH)
+    ?since=<epoch>   a later forward start (never before the R30 production
+                     cutover recorded in live_parity_cutover; with no
+                     cutover there is no forward window)
 
 ANSWERS (the profitability envelope):
     {label: RESEARCH, authority: SHADOW_NO_AUTHORITY, status, why,
@@ -114,6 +114,8 @@ def position_rows(allp: list, open_views: list, classes: dict) -> list:
             "group_id": p.get("group_id"),
             "sleeve": c.get("sleeve") or "UNCLASSIFIED",
             "strategy": c.get("strategy") or p.get("strategy"),
+            "fixture": p.get("fixture"),
+            "us_market_slug": p.get("us_market_slug"),
             "first_fill_at": _f(p.get("first_fill_at")),
             "released_at": (max(ends) if ends and open_qty <= 1e-9
                             else None),
@@ -238,6 +240,16 @@ async def gather(conn, account_id: str, *, now: float) -> tuple:
     return data, sources
 
 
+async def production_cutover_epoch(conn) -> float | None:
+    """The recorded R30 production cutover (epoch seconds), or None."""
+    if not await conn.fetchval(
+            "SELECT to_regclass('live_parity_cutover') IS NOT NULL"):
+        return None
+    return await conn.fetchval(
+        "SELECT extract(epoch FROM cutover_at)::float8 FROM "
+        " live_parity_cutover WHERE id = 1")
+
+
 async def _read(conn, *, since, since_source: str, now: float) -> dict:
     import asyncio
 
@@ -250,11 +262,11 @@ async def _read(conn, *, since, since_source: str, now: float) -> dict:
         await conn.execute("SET LOCAL statement_timeout = %d"
                            % STATEMENT_TIMEOUT_MS)
         data, sources = await gather(conn, L.ACCOUNT_ID, now=now)
+        cutover = await production_cutover_epoch(conn)
     finally:
         await tr.rollback()
     if data is None:
         return {"status": "UNAVAILABLE", "why": sources, "data": None}
-    cutover, _src = V.cutover_epoch()
     out = await asyncio.to_thread(
         V.compute, data, now=now, since=since, cutover=cutover,
         since_source=since_source, sources=sources)
@@ -267,19 +279,16 @@ async def profitability_validation(
     from ..profitability import common as C
     from ..profitability import validation as V
     now = time.time()
-    if since is None:
-        since, src = V.cutover_epoch()
-    else:
-        src = "QUERY"
-    key = (round(float(since), 3), src)
+    src = "QUERY" if since is not None else "PRODUCTION_CUTOVER"
+    key = (None if since is None else round(float(since), 3), src)
     hit = _CACHE.get(key)
     if hit and now - hit[0] < CACHE_S:
         return hit[1]
     try:
         pool = await _pool()
         async with pool.acquire() as conn:
-            got = await _read(conn, since=float(since), since_source=src,
-                              now=now)
+            got = await _read(conn, since=None if since is None
+                              else float(since), since_source=src, now=now)
     except Exception as exc:                                    # noqa: BLE001
         return C.envelope("UNAVAILABLE", "%s: %s" % (type(exc).__name__,
                                                      str(exc)[:160]),

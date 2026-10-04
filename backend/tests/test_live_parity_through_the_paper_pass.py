@@ -139,6 +139,20 @@ async def test_one_intent_two_adapters_parity_through_the_real_pass(
             if c.get("status") == "UNAVAILABLE" or c.get("state") == "UNAVAILABLE":
                 assert c.get("why"), (comp, c)        # a reason, never a zero
         assert H.j(it["derek"])["verdict"] == "ENTER"
+        allie = H.j(it["allie"])
+        assert allie["version"] == "ALLIE_CAPITAL_EFFICIENCY_V1", allie
+        for f in ("expected_executable_net_profit_usd",
+                  "expected_capital_required_usd",
+                  "expected_hours_to_capital_release",
+                  "expected_capital_hours", "expected_profit_per_capital_hour",
+                  "profit_per_1000_per_hour", "capacity_ceiling_usd",
+                  "correlation_concentration", "opportunity_cost",
+                  "allie_proposed_allocation_usd", "hard_risk_rail_cap_usd",
+                  "final_allocatable_usd", "confidence", "evidence",
+                  "binding_constraint"):
+            assert f in allie, f
+        # stored in canonical decimal form (the sha's normal form)
+        assert float(allie["expected_capital_required_usd"]) > 0
         ev = H.j(it["evidence"])
         assert ev["valuation_id"] == v["valuation_id"]
         assert ev["book_obs_id"] == d["book_obs_id"]

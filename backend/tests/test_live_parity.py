@@ -24,6 +24,7 @@ UP = (MIG / "225_live_parity.sql").read_text()
 DOWN = (MIG / "rollback" / "225_live_parity.down.sql").read_text()
 
 CG = "PINNACLE_COMPLETED_GAME_PAPER"
+SHA = "a" * 40
 CG3 = "PINNACLE_COMPLETED_GAME_PAPER_V3"
 
 
@@ -437,6 +438,18 @@ async def test_both_adapters_parity_and_the_halt_end_to_end():
             """INSERT INTO execmirror_snapshots (at, balances, positions,
                  open_orders) VALUES (now(), $1::jsonb, '[]', 0)""",
             json.dumps([{"currency": "USD", "buyingPower": 100}]))
+        # a recorded production cutover just before these intents
+        iid = await conn.fetchval(
+            "INSERT INTO live_parity_hook_installs (process, commit_sha, hooks)"
+            " VALUES ('api', $1, $2) RETURNING install_id", SHA,
+            list(LP.HOOK_NAMES))
+        await conn.execute(
+            "INSERT INTO live_parity_cutover (cutover_at, release_sha, api_sha,"
+            " workers_sha, migrations, hook_install_id, small_live_mode,"
+            " small_live_halted, capital_activated, evidence, recorded_by)"
+            " VALUES (now() - interval '1 minute', $1, $1, $1,"
+            " ARRAY['225','226'], $2, 'SHADOW', false, false, '{}', 'test')",
+            SHA, iid)
         it = _intent()
         assert await LP.record_decision_intent(conn, it)
         order = _paper_order(it)
@@ -475,11 +488,239 @@ async def test_both_adapters_parity_and_the_halt_end_to_end():
         await _expect(conn, asyncpg.CheckViolationError,
                       "INSERT INTO small_live_control_events (action, actor) "
                       "VALUES ('CLEAR_HALT', 'Xavier')")
-        ctl = await LP.clear_halt(conn, actor="Matt (owner)", reason="fixed")
-        assert not ctl["halted"]
         rep = await LP.readiness_report(conn, since=0)
         assert rep["logic_divergences"] == 1
+        assert "SMALL_LIVE_HALTED_BY_LOGIC_DIVERGENCE" in rep["blockers"]
+        assert rep["recommendation"] == LP.NOT_READY
+        ctl = await LP.clear_halt(conn, actor="Matt (owner)", reason="fixed")
+        assert not ctl["halted"]
+        # a cleared halt restarts the consecutive sample (the divergence stays
+        # in the ledger, before the new window)
+        rep = await LP.readiness_report(conn, since=0)
+        assert rep["logic_divergences"] == 0 and rep["candidate_count"] == 0
         assert rep["recommendation"] == LP.NOT_READY
     finally:
         await tx.rollback()
         await conn.close()
+
+
+# ── Allie: the capital-efficiency methodology DETERMINES the allocation ──
+
+from sportsassets import allie_capital as AC                     # noqa: E402
+
+ALLIE_FIELDS = (
+    "expected_executable_net_profit_usd", "expected_capital_required_usd",
+    "expected_hours_to_capital_release", "expected_capital_hours",
+    "expected_profit_per_capital_hour", "profit_per_1000_per_hour",
+    "capacity_ceiling_usd", "correlation_concentration", "opportunity_cost",
+    "allie_proposed_allocation_usd", "hard_risk_rail_cap_usd",
+    "final_allocatable_usd", "confidence", "evidence", "binding_constraint")
+
+
+def _alloc(**over):
+    kw = dict(eddie_ev_usd=60.0, modelled_net_usd=70.0,
+              capital_required_usd=1000.0, event_start_at=1000.0 + 2 * 3600,
+              decided_at=1000.0, median_lag_s=3600.0, lag_n=40,
+              eddie_max_qty=5000, limit_price=0.5, displayed_depth_qty=8000,
+              fixture_open_groups=0, fixture_open_usd=0.0,
+              book_open_usd=10_000.0, idle_capital_usd=400.0,
+              recent_adjusted_ppch=[0.001 * i for i in range(1, 21)],
+              paper_rail_usd=5000.0, live_rail_usd=25.0, live_scale=1000.0,
+              order_cost_usd=1000.0)
+    kw.update(over)
+    return AC.allocate(**kw)
+
+
+def test_allie_carries_every_capital_efficiency_field():
+    a = _alloc()
+    for f in ALLIE_FIELDS:
+        assert f in a, f
+    assert a["status"] == "MEASURED" and a["version"] == AC.VERSION
+    assert a["expected_executable_net_profit_usd"] == 60.0
+    assert a["net_basis"].startswith("EDDIE")
+    assert a["expected_capital_required_usd"] == 1000.0
+    assert a["expected_hours_to_capital_release"] == 3.0     # 2 h + 1 h lag
+    assert a["expected_capital_hours"] == 3000.0
+    assert a["expected_profit_per_capital_hour"] == pytest.approx(0.02)
+    assert a["profit_per_1000_per_hour"] == pytest.approx(20.0)
+    assert a["capacity_ceiling_usd"] == 2500.0               # 5000 x 0.50
+    # capital is scarce (idle 400 < 1,000): the hurdle is the 75th pct of
+    # recent candidates (0.01525) and 0.02 beats it
+    oc = a["opportunity_cost"]
+    assert oc["basis"].startswith("CAPITAL_SCARCE")
+    assert oc["per_capital_hour"] == pytest.approx(0.01525)
+    assert oc["candidate_beats_it"] is True
+    assert a["allie_proposed_allocation_usd"] == 400.0       # idle capital
+    assert a["binding_constraint"] == "IDLE_CAPITAL"
+    assert a["final_allocatable_usd"] == 400.0
+    assert a["live_rail"]["paper_equivalent_usd"] == 25000.0
+    assert a["order_vs_allocation"]["verdict"] == "ORDER_EXCEEDS_ALLOCATION"
+    assert a["confidence"] == AC.HIGH
+    assert a["authority"] == "SHADOW_PENDING_OWNER_APPROVAL"
+
+
+def test_profit_per_capital_hour_against_opportunity_cost_decides_funding():
+    funded = _alloc(eddie_ev_usd=60.0)                         # 0.020 / ch
+    starved = _alloc(eddie_ev_usd=30.0)                        # 0.010 / ch
+    assert funded["allie_proposed_allocation_usd"] > 0
+    assert starved["allie_proposed_allocation_usd"] == 0.0
+    assert starved["binding_constraint"] == \
+        "PROFIT_PER_CAPITAL_HOUR_NOT_ABOVE_OPPORTUNITY_COST"
+    # same net, but the capital is locked 4x longer: capital-hours rise,
+    # profit per capital-hour falls below the hurdle -> NOT funded
+    slow = _alloc(event_start_at=1000.0 + 11 * 3600)           # 12 h hold
+    assert slow["expected_capital_hours"] == 12000.0
+    assert slow["allie_proposed_allocation_usd"] == 0.0
+    # more capital for the same net: also below the hurdle
+    heavy = _alloc(capital_required_usd=4000.0)
+    assert heavy["allie_proposed_allocation_usd"] == 0.0
+
+
+def test_idle_capital_makes_the_opportunity_cost_idle_cash():
+    a = _alloc(idle_capital_usd=100_000.0, eddie_ev_usd=10.0)
+    assert a["opportunity_cost"]["per_capital_hour"] == 0.0
+    assert a["opportunity_cost"]["basis"].startswith("IDLE_CAPITAL")
+    assert a["allie_proposed_allocation_usd"] == 1000.0       # capital req.
+    assert a["binding_constraint"] == "CAPITAL_REQUIRED"
+
+
+def test_capacity_concentration_and_the_rail_bind_the_amount():
+    rich = dict(idle_capital_usd=100_000.0)
+    cap = _alloc(eddie_max_qty=600, **rich)                     # $300 depth
+    assert cap["binding_constraint"] == "CAPACITY_CEILING"
+    assert cap["allie_proposed_allocation_usd"] == 300.0
+    fx = _alloc(fixture_open_usd=AC.FIXTURE_CAP_USD - 200, **rich)
+    assert fx["binding_constraint"] == "FIXTURE_HEADROOM"
+    assert fx["allie_proposed_allocation_usd"] == 200.0
+    rail = _alloc(paper_rail_usd=250.0, **rich)
+    assert rail["allie_proposed_allocation_usd"] == 1000.0
+    assert rail["final_allocatable_usd"] == 250.0
+    assert rail["final_binding"] == "HARD_RISK_RAIL"
+    # correlation: open groups on the fixture haircut the efficiency until
+    # it no longer beats a scarce-capital hurdle
+    corr = _alloc(fixture_open_groups=2)
+    assert corr["correlation_concentration"]["haircut"] == 0.5
+    assert corr["correlation_concentration"][
+        "adjusted_profit_per_capital_hour"] == pytest.approx(0.01)
+    assert corr["allie_proposed_allocation_usd"] == 0.0
+
+
+def test_unmeasured_efficiency_allocates_nothing_and_says_why():
+    a = _alloc(lag_n=2)
+    assert a["status"] == "UNAVAILABLE"
+    assert a["allie_proposed_allocation_usd"] == 0.0
+    assert a["binding_constraint"].startswith("UNMEASURED_CAPITAL_EFFICIENCY")
+    assert "expected_hours_to_capital_release" in a["unmeasured"]
+    assert a["confidence"] == AC.UNMEASURED
+    b = _alloc(eddie_ev_usd=None)
+    assert b["net_basis"].startswith("DECISION_MODELLED_NET")
+    assert b["confidence"] != AC.HIGH
+    c = _alloc(eddie_ev_usd=-5.0)
+    assert c["binding_constraint"] == "NON_POSITIVE_EXPECTED_EXECUTABLE_NET"
+
+
+# ── the production cutover: recorded once, only when every condition holds ──
+
+
+async def _cutover_world(conn, *, sha=SHA, workers=SHA, migrations=True,
+                         hooks=True, halted=False, stopped=True):
+    await conn.execute("UPDATE small_live_control SET halted = false, "
+                       "cleared_by = 'test human' WHERE id = 1")
+    if halted:
+        await conn.execute(
+            "UPDATE small_live_control SET halted = true, halted_at = now(), "
+            "halt_reason = 'LOGIC_DIVERGENCE' WHERE id = 1")
+    await conn.execute(
+        "INSERT INTO ingestion_state (key, value) VALUES ('workers_boot', $1::jsonb) "
+        "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+        json.dumps({"commit_sha": workers}))
+    if migrations:
+        for v in ("226_agent_work_queue.sql",):
+            await conn.execute(
+                "INSERT INTO schema_migrations (version) VALUES ($1) "
+                "ON CONFLICT DO NOTHING", v)
+    if hooks:
+        await conn.execute(
+            "INSERT INTO live_parity_hook_installs (process, commit_sha, hooks)"
+            " VALUES ('api', $1, $2)", sha, list(LP.HOOK_NAMES))
+    if await conn.fetchval("SELECT count(*) FROM execmirror_control") == 0:
+        await conn.execute("INSERT INTO execmirror_control DEFAULT VALUES")
+    await conn.execute("UPDATE execmirror_control SET stopped = $1", stopped)
+
+
+@pg
+@pytest.mark.asyncio
+async def test_the_cutover_is_refused_until_every_condition_holds():
+    conn = await asyncpg.connect(H.DSN)
+    tx = conn.transaction()
+    await tx.start()
+    try:
+        await conn.execute(UP)
+        if await conn.fetchval("SELECT to_regclass('agent_work_requests')") is None:
+            await conn.execute("CREATE TABLE agent_work_requests (x int)")
+        await conn.execute("UPDATE execmirror_control SET enabled = true")
+        cases = [
+            ({"workers": "b" * 40}, "WORKERS_RUN_THE_RELEASE_SHA"),
+            ({"hooks": False}, "HOOKS_INSTALLED_ON_THE_RELEASE_SHA"),
+            ({"halted": True}, "SMALL_LIVE_NOT_HALTED"),
+            ({"stopped": False}, "NO_CAPITAL_ACTIVATED")]
+        for kw, failing in cases:
+            sp = conn.transaction()
+            await sp.start()
+            await _cutover_world(conn, **kw)
+            got = await LP.record_cutover(conn, release_sha=SHA,
+                                          recorded_by="release engineer",
+                                          api_sha=SHA,
+                                          hooks_here=list(LP.HOOK_NAMES))
+            assert got["recorded"] is False and failing in got["refused"], got
+            assert await LP.production_cutover(conn) is None
+            await sp.rollback()
+        sp = conn.transaction()
+        await sp.start()
+        await _cutover_world(conn)
+        wrong_api = await LP.record_cutover(conn, release_sha=SHA,
+                                            recorded_by="release engineer",
+                                            api_sha="c" * 40,
+                                            hooks_here=list(LP.HOOK_NAMES))
+        assert "API_RUNS_THE_RELEASE_SHA" in wrong_api["refused"]
+        no_hooks_here = await LP.record_cutover(conn, release_sha=SHA,
+                                                recorded_by="release engineer",
+                                                api_sha=SHA, hooks_here=[])
+        assert "HOOKS_INSTALLED_IN_THIS_PROCESS" in no_hooks_here["refused"]
+        ok = await LP.record_cutover(conn, release_sha=SHA,
+                                     recorded_by="release engineer",
+                                     api_sha=SHA,
+                                     hooks_here=list(LP.HOOK_NAMES))
+        assert ok["recorded"] is True, ok
+        cut = ok["cutover"]
+        assert cut["release_sha"] == cut["api_sha"] == cut["workers_sha"] == SHA
+        assert cut["small_live_mode"] == "SHADOW"
+        assert cut["capital_activated"] is False
+        assert set(["225", "226"]) <= set(cut["migrations"])
+        again = await LP.record_cutover(conn, release_sha=SHA,
+                                        recorded_by="someone else",
+                                        api_sha=SHA,
+                                        hooks_here=list(LP.HOOK_NAMES))
+        assert again["recorded"] is False and again["already"] is True
+        assert again["cutover"]["cutover_at"] == cut["cutover_at"]
+        await _expect(conn, asyncpg.exceptions.RestrictViolationError,
+                      "UPDATE live_parity_cutover SET recorded_by = 'x'")
+        # the parity gate starts AT the cutover: earlier rows never count
+        rep = await LP.readiness_report(conn, since=0)
+        assert rep["since"] >= cut["cutover_at"].timestamp() - 1e-6
+        await sp.rollback()
+        # no cutover -> no forward sample at all
+        rep = await LP.readiness_report(conn)
+        assert "NO_PRODUCTION_CUTOVER_RECORDED" in rep["blockers"]
+        assert rep["recommendation"] == LP.NOT_READY
+    finally:
+        await tx.rollback()
+        await conn.close()
+
+
+def test_the_sleeve_map_is_the_paper_sleeve_classifiers():
+    from sportsassets import bettor_paper_sleeves as BPS
+    from sportsassets import canonical_intent as CI
+    assert CI.STRATEGY_SLEEVE == BPS.STRATEGY_SLEEVE
+    assert (CI.INVESTMENT, CI.TRAINING, CI.BENCHMARK, CI.UNCLASSIFIED) == (
+        BPS.INVESTMENT, BPS.TRAINING, BPS.BENCHMARK, BPS.UNCLASSIFIED)

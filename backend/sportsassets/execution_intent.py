@@ -504,7 +504,7 @@ def start(get_pool, mirror) -> "ActualLane":
     # R30 LIVE PARITY: the canonical decision / management intents and the
     # two execution adapters (SMALL LIVE is SHADOW) with their parity ledger
     from . import live_parity
-    live_parity.install()
+    live_parity.install(get_pool, process="api")
     return LANE
 
 

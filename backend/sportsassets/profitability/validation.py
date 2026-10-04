@@ -96,11 +96,13 @@ SLEEVES = (INVESTMENT, TRAINING, BENCHMARK, UNCLASSIFIED)
 ALL_TIME, FORWARD = "ALL_TIME", "FORWARD"
 WINDOWS = (ALL_TIME, FORWARD)
 
-#: THE R30 CUTOVER: 2026-10-05T00:00:00Z, the first full UTC day after the
-#: R30 live-parity release. Forward evidence is positions ENTERED at or after
-#: it. Overridable by BETTOR_R30_CUTOVER_EPOCH or the read's ?since=.
-R30_CUTOVER_EPOCH = 1_791_158_400.0
-CUTOVER_ENV = "BETTOR_R30_CUTOVER_EPOCH"
+#: THE R30 CUTOVER is NOT a constant: it is the production cutover recorded
+#: ONCE by live_parity.record_cutover (live_parity_cutover.cutover_at) after
+#: the release SHA is accepted, API and workers run it, migrations 225/226 are
+#: applied, the canonical hooks are installed, the readback passes, no capital
+#: is active and SMALL LIVE is SHADOW. Until it exists there is NO forward
+#: window and the verdict is NOT_ESTABLISHED (NO_PRODUCTION_CUTOVER_RECORDED).
+R_NO_CUTOVER = "NO_PRODUCTION_CUTOVER_RECORDED"
 
 METRICS = ("REALIZED_NET_USD", "RESOLVED_NET_PER_POSITION_USD",
            "UNREALIZED_USD", "FEES_USD", "SLIPPAGE_USD", "MAX_DRAWDOWN_USD",
@@ -148,6 +150,10 @@ POSITIVE_BUT_INSUFFICIENT = "POSITIVE_BUT_INSUFFICIENT_SAMPLE"
 SUPPORTED = "SUPPORTED_BY_FORWARD_EVIDENCE"
 VERDICTS = (NOT_ESTABLISHED, NEGATIVE, POSITIVE_BUT_INSUFFICIENT, SUPPORTED)
 VERDICT_MIN_RESOLVED = 30
+#: INDEPENDENT resolved outcomes: positions on the same event (fixture, else
+#: market) share one outcome and are ONE observation for the bounds, the
+#: drawdown and this minimum. 30 parity observations are NOT profit evidence.
+VERDICT_MIN_INDEPENDENT_EVENTS = 30
 VERDICT_CONFIDENCE = 0.95                    # one-sided
 #: the fictional paper account's starting cash (the sleeves share it; no
 #: sleeve has its own allocation, migration 182 / 223)
@@ -168,16 +174,19 @@ VERDICT_RULE = {
     "checks": {
         "MIN_RESOLVED": ">= %d resolved forward positions"
                         % VERDICT_MIN_RESOLVED,
+        "MIN_INDEPENDENT_EVENTS":
+            ">= %d INDEPENDENT resolved events (positions on one fixture, "
+            "else one market, are one outcome)" % VERDICT_MIN_INDEPENDENT_EVENTS,
         "REALIZED_NET_AFTER_FEES_POSITIVE":
             "sum of resolved realized net > 0 (ledger P&L, fees included)",
         "T_LOWER_BOUND_POSITIVE":
-            "one-sided %d%% t lower bound of mean per-position net > 0"
+            "one-sided %d%% t lower bound of mean per-EVENT net > 0"
             % int(VERDICT_CONFIDENCE * 100),
         "BOOTSTRAP_LOWER_BOUND_POSITIVE":
-            "bootstrap %d%% lower percentile of mean per-position net > 0"
+            "bootstrap %d%% lower percentile of mean per-EVENT net > 0"
             % int(round((1 - VERDICT_CONFIDENCE) * 100)),
         "DRAWDOWN_WITHIN_BOUND":
-            "max realized drawdown <= %.0f USD (%.0f%% of the $%.0f paper "
+            "max realized drawdown of per-event net, by release, <= %.0f USD (%.0f%% of the $%.0f paper "
             "account)" % (DRAWDOWN_BOUND_USD, DRAWDOWN_BOUND_FRAC * 100,
                           PAPER_STARTING_CASH_USD),
         "NET_INCLUDING_MARKED_OPEN_POSITIVE":
@@ -195,17 +204,13 @@ R_NO_RESOLVED = "NO_RESOLVED_POSITION_IN_THE_WINDOW"
 R_SOURCE = "SOURCE_NOT_AVAILABLE"
 
 
-def cutover_epoch(env=None) -> tuple:
-    """(epoch, source): the env override when it parses, else the R30
-    constant."""
-    env = os.environ if env is None else env
-    raw = env.get(CUTOVER_ENV)
-    if raw not in (None, ""):
-        try:
-            return float(raw), "ENV_%s" % CUTOVER_ENV
-        except (TypeError, ValueError):
-            pass
-    return R30_CUTOVER_EPOCH, "DEFAULT_R30_CUTOVER"
+def forward_since(since, cutover):
+    """The FORWARD window's start: never before the production cutover; with
+    no cutover recorded there is no forward window (None)."""
+    if cutover is None:
+        return None
+    return max(float(since), float(cutover)) if since is not None \
+        else float(cutover)
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -814,6 +819,13 @@ def management_metric(vadd: list, groups: set, *, window: dict,
 # THE VERDICT (INVESTMENT, FORWARD)
 # ═════════════════════════════════════════════════════════════════════
 
+def event_key(p: dict) -> str:
+    """The independent-outcome key of a position: its fixture, else its
+    market, else its group (never pooled with another group by guess)."""
+    return str(p.get("fixture") or p.get("us_market_slug")
+               or "group:%s" % p.get("group_id"))
+
+
 def verdict_rule(pos: list, *, since, cutover: float, seed: int = 0) -> dict:
     """THE PRE-DECLARED RULE over the INVESTMENT sleeve's FORWARD positions.
     `pos` must be exactly those positions (the caller scopes them)."""
@@ -823,18 +835,30 @@ def verdict_rule(pos: list, *, since, cutover: float, seed: int = 0) -> dict:
         resolved, key=lambda p: _num(p.get("released_at")) or 0.0)]
     n = len(xs)
     net = sum(xs)
+    # INDEPENDENT OUTCOMES: one observation per event, ordered by the event's
+    # last release (its outcome is known only then)
+    ev: dict = {}
+    for p in resolved:
+        k = event_key(p)
+        e = ev.setdefault(k, {"net": 0.0, "released": 0.0})
+        e["net"] += _num(p["realized_pnl_usd"])
+        e["released"] = max(e["released"], _num(p.get("released_at")) or 0.0)
+    es = [e["net"] for e in sorted(ev.values(), key=lambda e: e["released"])]
+    n_ev = len(es)
     open_ = [p for p in pos if not _resolved(p)]
     open_realized = sum(_num(p.get("realized_pnl_usd")) or 0.0
                         for p in open_)
     marked_unreal = sum(_num(p.get("unrealized_pnl_usd")) or 0.0
                         for p in open_ if p.get("marked"))
-    lb = mean_lower_bounds(xs, seed=seed) if n else {
+    lb = mean_lower_bounds(es, seed=seed) if n_ev else {
         "t_lower_95": None, "bootstrap_lower_95": None, "mean": None,
         "why": R_NO_RESOLVED}
-    dd = C.max_drawdown(xs) if xs else None
-    forward_only = since is not None and since >= cutover
+    dd = C.max_drawdown(es) if es else None
+    forward_only = (since is not None and cutover is not None
+                    and since >= cutover)
     checks = {
         "MIN_RESOLVED": n >= VERDICT_MIN_RESOLVED,
+        "MIN_INDEPENDENT_EVENTS": n_ev >= VERDICT_MIN_INDEPENDENT_EVENTS,
         "REALIZED_NET_AFTER_FEES_POSITIVE": n > 0 and net > 0,
         "T_LOWER_BOUND_POSITIVE": (lb.get("t_lower_95") is not None
                                    and lb["t_lower_95"] > 0),
@@ -864,13 +888,16 @@ def verdict_rule(pos: list, *, since, cutover: float, seed: int = 0) -> dict:
         "since": since, "cutover": cutover, "checks": checks,
         "failed_checks": failed, "rule": VERDICT_RULE,
         "evidence": {
-            "resolved_positions": n, "open_positions": len(open_),
+            "resolved_positions": n, "independent_resolved_events": n_ev,
+            "min_independent_events": VERDICT_MIN_INDEPENDENT_EVENTS,
+            "bounds_basis": "per-EVENT realized net (independent outcomes)",
+            "open_positions": len(open_),
             "resolved_net_usd": C.rnd(net) if n else None,
             "realized_on_open_positions_usd": C.rnd(open_realized),
             "marked_unrealized_usd": C.rnd(marked_unreal),
             "unmarked_open_positions": sum(
                 1 for p in open_ if not p.get("marked")),
-            "mean_net_per_position_usd": lb.get("mean"),
+            "mean_net_per_event_usd": lb.get("mean"),
             "t_lower_95": lb.get("t_lower_95"),
             "bootstrap_lower_95": lb.get("bootstrap_lower_95"),
             "max_drawdown_usd": C.rnd(dd),
@@ -941,6 +968,11 @@ def compute(data: dict, *, now: float, since, cutover: float,
     keys); `sources`: {name: reason the source is unavailable} for the
     sources that cannot be read. Pure."""
     sources = sources or {}
+    fsince = forward_since(since, cutover)
+    no_cutover = fsince is None
+    # no production cutover -> an EMPTY forward window (a start after now),
+    # never "everything"
+    since = (float(now) + 1.0) if no_cutover else fsince
     sleeves = {}
     for s in SLEEVES:
         sleeves[s] = {
@@ -956,6 +988,10 @@ def compute(data: dict, *, now: float, since, cutover: float,
         (p.get("position_key") or "", _num(p.get("realized_pnl_usd")))
         for p in inv_pos)])
     verdict = verdict_rule(inv_pos, since=since, cutover=cutover, seed=seed)
+    if no_cutover:
+        verdict = dict(verdict, verdict=NOT_ESTABLISHED, why=R_NO_CUTOVER,
+                       claim=("NO profitability claim: no production cutover "
+                              "is recorded, so no forward evidence exists"))
     book = {k: false_refusal_metric(
         data.get("refusals") or [],
         window={"kind": k, "start": since if k == FORWARD else None,
@@ -963,8 +999,12 @@ def compute(data: dict, *, now: float, since, cutover: float,
         sleeve=None, since=since if k == FORWARD else None,
         source_why=sources.get("refusals")) for k in WINDOWS}
     return {
-        "version": VERSION, "computed_at": now, "since": since,
+        "version": VERSION, "computed_at": now,
+        "since": None if no_cutover else since,
         "since_source": since_source, "cutover": cutover,
+        "cutover_basis": ("live_parity_cutover.cutover_at (recorded once, "
+                          "after every production condition was verified)"
+                          if not no_cutover else R_NO_CUTOVER),
         "forward_rule": ("FORWARD = positions whose group first filled at or "
                          "after `since`; refusals decided at or after it"),
         "sleeves": sleeves,

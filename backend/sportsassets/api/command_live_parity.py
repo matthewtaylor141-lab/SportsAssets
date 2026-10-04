@@ -58,13 +58,12 @@ async def _profitability(conn) -> dict | None:
     profitability validation), since the R30 cutover."""
     import time
     try:
-        from ..profitability import validation as PV
         from . import command_validation as CV
     except ImportError:
         return None
     try:
-        cut, src = PV.cutover_epoch()
-        rep = await CV._read(conn, since=cut, since_source=src,
+        rep = await CV._read(conn, since=None,
+                             since_source="PRODUCTION_CUTOVER",
                              now=time.time())
         v = (rep.get("data") or {}).get("profitability_verdict")
         if isinstance(v, dict):

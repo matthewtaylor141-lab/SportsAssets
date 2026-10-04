@@ -10,8 +10,9 @@ built by one piece of code:
   management_action         the ONE action Xavier's review decides
   paper_entry_fields        what the PAPER adapter reads from the intent
 
-This module imports only the sleeve classifier (pure). It must never import
-an order, venue, execution or funded module.
+This module imports nothing from the paper, order, venue, execution or
+funded modules. The strategy -> sleeve map below is pinned equal to
+bettor_paper_sleeves.STRATEGY_SLEEVE by a test.
 """
 from __future__ import annotations
 
@@ -19,11 +20,21 @@ import hashlib
 import json
 from decimal import Decimal
 
-from . import bettor_paper_sleeves as SLV
 
 INTENT_VERSION = "CANONICAL_DECISION_INTENT_V1"
 MGMT_INTENT_VERSION = "CANONICAL_MANAGEMENT_INTENT_V1"
 VENUE = "POLYMARKET"
+
+INVESTMENT, TRAINING, BENCHMARK, UNCLASSIFIED = (
+    "INVESTMENT", "TRAINING", "BENCHMARK", "UNCLASSIFIED")
+#: pinned equal to bettor_paper_sleeves.STRATEGY_SLEEVE by a test
+STRATEGY_SLEEVE = {
+    "PINNACLE_COMPLETED_GAME_PAPER": INVESTMENT,
+    "DEREK_ENTRY_POLICY_V2": INVESTMENT,
+    "PINNACLE_EXPLORATION_PAPER": TRAINING,
+    "PINNACLE_ONLY_PAPER_BENCHMARK": BENCHMARK,
+    "PINNACLE_COMPLETED_GAME_MAKER_PAPER": BENCHMARK,
+}
 
 # management actions (migration 225)
 ACT_EXIT = "SELL_EXIT"
@@ -84,7 +95,7 @@ def _dec(v) -> Decimal | None:
 
 
 def sleeve_of(strategy) -> str:
-    return SLV.STRATEGY_SLEEVE.get(str(strategy), SLV.UNCLASSIFIED)
+    return STRATEGY_SLEEVE.get(str(strategy), UNCLASSIFIED)
 
 
 def unavailable(why: str, **extra) -> dict:

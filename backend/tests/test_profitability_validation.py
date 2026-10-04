@@ -588,13 +588,44 @@ def test_the_report_shape_every_sleeve_window_and_metric():
     assert json.dumps(out)                                 # serialisable
 
 
-def test_the_cutover_default_and_its_override():
-    assert V.cutover_epoch({}) == (V.R30_CUTOVER_EPOCH,
-                                   "DEFAULT_R30_CUTOVER")
-    assert V.cutover_epoch({V.CUTOVER_ENV: "123.5"}) == (
-        123.5, "ENV_" + V.CUTOVER_ENV)
-    assert V.cutover_epoch({V.CUTOVER_ENV: "junk"})[1] == \
-        "DEFAULT_R30_CUTOVER"
+def test_there_is_no_fixed_cutover_only_the_recorded_production_one():
+    """Owner R30: the forward window starts at the PRODUCTION cutover
+    recorded after every release condition is verified -- never a constant."""
+    assert not hasattr(V, "R30_CUTOVER_EPOCH")
+    assert not hasattr(V, "cutover_epoch")
+    assert V.forward_since(None, None) is None
+    assert V.forward_since(SINCE - 100, SINCE) == SINCE      # never before it
+    assert V.forward_since(SINCE + 100, SINCE) == SINCE + 100
+    data = {"positions": _resolved(_supported_sample()), "econ": [],
+            "attribution": [], "scores": [], "refusals": [],
+            "exec_outcomes": [], "value_add": []}
+    out = V.compute(data, now=NOW, since=None, cutover=None)
+    v = out["profitability_verdict"]
+    assert v["verdict"] == V.NOT_ESTABLISHED and v["why"] == V.R_NO_CUTOVER
+    assert out["since"] is None
+    fw = out["sleeves"]["INVESTMENT"]["windows"]["FORWARD"]
+    assert fw["positions"] == 0                   # empty, never "everything"
+    assert json.dumps(out)
+    ok = V.compute(data, now=NOW, since=None, cutover=SINCE)
+    assert ok["profitability_verdict"]["verdict"] == V.SUPPORTED
+    assert ok["since"] == SINCE
+
+
+def test_independent_outcomes_are_events_not_positions():
+    """40 winning positions on 3 fixtures are 3 independent outcomes: the
+    rule is not satisfied by position count."""
+    pos = _resolved(_supported_sample())
+    for i, p in enumerate(pos):
+        p["fixture"] = "fx-%d" % (i % 3)
+    v = V.verdict_rule(pos, since=SINCE, cutover=SINCE)
+    assert v["evidence"]["independent_resolved_events"] == 3
+    assert v["checks"]["MIN_INDEPENDENT_EVENTS"] is False
+    assert v["verdict"] == V.POSITIVE_BUT_INSUFFICIENT
+    assert "MIN_INDEPENDENT_EVENTS" in v["failed_checks"]
+    for i, p in enumerate(pos):
+        p["fixture"] = "fx-%d" % i
+    assert V.verdict_rule(pos, since=SINCE, cutover=SINCE)[
+        "verdict"] == V.SUPPORTED
 
 
 # ── §4 authority ─────────────────────────────────────────────────────
@@ -795,6 +826,24 @@ async def test_the_endpoint_over_a_seeded_multi_sleeve_book(monkeypatch):
             " run_id, computed_at, slippage_usd, slippage_pc) VALUES "
             " ('PAPER',$1,$2,'r',now(),0.75,0.0075)", "val-" + g1, g1)
         monkeypatch.setattr(L, "ACCOUNT_ID", acct)
+        # THE PRODUCTION CUTOVER (recorded once in production by
+        # live_parity.record_cutover); here, inside the rolled-back test
+        # transaction, at `since`
+        if await conn.fetchval(
+                "SELECT to_regclass('live_parity_cutover') IS NOT NULL") and \
+                not await conn.fetchval("SELECT count(*) FROM live_parity_cutover"):
+            iid = await conn.fetchval(
+                "INSERT INTO live_parity_hook_installs (process, commit_sha, "
+                " hooks) VALUES ('test', repeat('a', 40), ARRAY['X']) "
+                " RETURNING install_id")
+            await conn.execute(
+                "INSERT INTO live_parity_cutover (cutover_at, release_sha, "
+                " api_sha, workers_sha, migrations, hook_install_id, "
+                " small_live_mode, small_live_halted, capital_activated, "
+                " evidence, recorded_by) VALUES (to_timestamp($1), "
+                " repeat('a', 40), repeat('a', 40), repeat('a', 40), "
+                " ARRAY['225','226'], $2, 'SHADOW', false, false, '{}', "
+                " 'test')", float(since), iid)
 
         async def pool():
             return _Pool(conn)
@@ -814,7 +863,9 @@ async def test_the_endpoint_over_a_seeded_multi_sleeve_book(monkeypatch):
         assert got["authority"] == "SHADOW_NO_AUTHORITY"
         assert got["status"] == "OK", got["why"]
         d = got["data"]
-        assert d["since"] == since and d["since_source"] == "QUERY"
+        # (the cutover is stored at microsecond precision; since is clamped to it)
+        assert d["since"] == pytest.approx(since, abs=1e-3)
+        assert d["since_source"] == "QUERY"
         fw = d["sleeves"]["INVESTMENT"]["windows"]["FORWARD"]["metrics"]
         at = d["sleeves"]["INVESTMENT"]["windows"]["ALL_TIME"]["metrics"]
         # win: 100 * 1.0 - (50 + 1 fee) = 49; loss: -20
@@ -859,12 +910,13 @@ async def test_the_endpoint_over_a_seeded_multi_sleeve_book(monkeypatch):
         assert await conn.fetchval(
             "SELECT count(*) FROM paper_fills WHERE account_id = $1",
             acct) == counts
-        # the default since is the configured cutover
+        # the default since is the RECORDED production cutover
         CV._CACHE.clear()
         dflt = await CV.profitability_validation(since=None)
-        assert dflt["data"]["since"] == V.cutover_epoch()[0]
-        assert dflt["data"]["since_source"] in (
-            "DEFAULT_R30_CUTOVER", "ENV_" + V.CUTOVER_ENV)
+        cut = await CV.production_cutover_epoch(conn)
+        assert cut is not None
+        assert dflt["data"]["since"] == pytest.approx(cut)
+        assert dflt["data"]["since_source"] == "PRODUCTION_CUTOVER"
     finally:
         await tr.rollback()
         await conn.close()

@@ -70,15 +70,18 @@ import time
 from decimal import Decimal, ROUND_HALF_EVEN
 from typing import Any
 
-from . import bettor_paper_sleeves as SLV
 from . import execmirror as M
+from . import canonical_intent as SLV  # the sleeve constants
 from .canonical_intent import (  # noqa: F401  (re-exported)
     ACT_CANCEL_FIRST, ACT_EXIT, ACT_NONE, ACT_PROTECT, ACT_REDUCE,
     INTENT_VERSION, MGMT_INTENT_VERSION, VENUE, _INTENT_FIELDS, _MGMT_FIELDS,
     _dec, _norm, build_decision_intent, build_management_intent,
     canonical_json, content_sha, decision_intent_id, management_action,
-    management_intent_id, paper_entry_fields, sleeve_of, unavailable,
+    management_intent_id, sleeve_of, unavailable,
     verify_intent)
+
+#: what the PAPER adapter reads from the intent (canonical_intent)
+paper_entry_fields = SLV.paper_entry_fields
 
 log = logging.getLogger(__name__)
 
@@ -471,11 +474,16 @@ def readiness(rows: list, *, halted: bool, profitability: dict | None = None,
         "logic_divergences": div,
         "excluded_from_activation_evidence": {
             "non_investment_rows": len(rows) - len(inv)},
-        "rule": ("READY_FOR_TINY_PILOT only when: SMALL LIVE is not halted; "
-                 ">= %d consecutive INVESTMENT decision intents and >= %d "
-                 "INVESTMENT management intents compared; zero "
-                 "LOGIC_DIVERGENCE; and the INVESTMENT sleeve's forward "
-                 "profitability verdict is SUPPORTED_BY_FORWARD_EVIDENCE"
+        "rule": ("READY_FOR_TINY_PILOT only when: a production cutover is "
+                 "recorded; SMALL LIVE is not halted; >= %d consecutive "
+                 "INVESTMENT decision intents and >= %d INVESTMENT "
+                 "management intents compared since it (a MINIMUM PARITY "
+                 "SAMPLE ONLY, not profit evidence); zero LOGIC_DIVERGENCE; "
+                 "and, separately, the INVESTMENT sleeve's forward "
+                 "profitability verdict is SUPPORTED_BY_FORWARD_EVIDENCE "
+                 "(positive forward net, positive t and bootstrap lower "
+                 "bounds on per-event net, bounded drawdown, >= 30 "
+                 "independent resolved events)"
                  % (min_decisions, min_management)),
     }
     blockers = []
@@ -770,7 +778,8 @@ async def clear_halt(conn, *, actor: str, reason: str) -> dict:
     async with conn.transaction():
         await conn.execute(
             """UPDATE small_live_control SET halted = false, cleared_by = $1,
-                 cleared_at = now() WHERE id = 1 AND halted""", actor)
+                 cleared_at = clock_timestamp() WHERE id = 1 AND halted""",
+            actor)
         await conn.execute(
             """INSERT INTO small_live_control_events (action, actor, reason)
                VALUES ('CLEAR_HALT', $1, $2)""", actor, reason)
@@ -782,8 +791,26 @@ async def readiness_report(conn, *, since: float | None = None,
     """The gate over the ledger since `since` (default: the last cleared halt,
     else everything)."""
     ctl = await control(conn)
-    if since is None and ctl.get("cleared_at") is not None:
+    cut = await production_cutover(conn)
+    cut_at = None if cut is None else cut["cutover_at"].timestamp()
+    if since is None:
+        since = cut_at
+    if since is not None and cut_at is not None and since < cut_at:
+        since = cut_at                       # never before the cutover
+    if ctl.get("cleared_at") is not None and (
+            since is None or ctl["cleared_at"].timestamp() > since):
         since = ctl["cleared_at"].timestamp()
+    if cut is None:
+        # no production cutover: there is no forward sample yet
+        out = readiness([], halted=bool(ctl.get("halted")),
+                        profitability=profitability)
+        out["blockers"].insert(0, "NO_PRODUCTION_CUTOVER_RECORDED")
+        out["recommendation"] = NOT_READY
+        out["since"] = None
+        out["cutover"] = None
+        out["control"] = {k: (v.isoformat() if hasattr(v, "isoformat") else v)
+                          for k, v in ctl.items()}
+        return out
     rows = await conn.fetch(
         """SELECT intent_kind, sleeve, parity_state, divergence_fields,
                   comparison, created_at FROM live_parity_ledger
@@ -798,6 +825,15 @@ async def readiness_report(conn, *, since: float | None = None,
     out = readiness(recs, halted=bool(ctl.get("halted")),
                     profitability=profitability)
     out["since"] = since
+    out["cutover"] = {k: (v.isoformat() if hasattr(v, "isoformat") else v)
+                      for k, v in cut.items() if k != "evidence"}
+    first = next((r for r in recs if r.get("sleeve") == SLV.INVESTMENT
+                  and r.get("intent_kind") == "DECISION"), None)
+    out["observation_1"] = (None if first is None
+                            else first["created_at"].isoformat())
+    out["observation_rule"] = ("observation #1 is the first INVESTMENT "
+                               "decision intent compared after the "
+                               "production cutover")
     out["control"] = {k: (v.isoformat() if hasattr(v, "isoformat") else v)
                       for k, v in ctl.items()}
     return out
@@ -832,6 +868,11 @@ async def canonical_decision(conn, *, did, strategy, version, cand, side, sized,
             "economics": {"acquisition": e},
             "executable_opportunity_dollars": e.get("expected_net_profit_usd"),
             "executable_capacity_usd": cost,
+            "capital_required_usd": (None if cost is None else
+                                     float(cost) + float(e.get("fees_usd") or 0)),
+            "depth_within_limit": sized.get("depth_within_limit"),
+            "per_order_cap_usd": (cfg.get("risk") or {}).get(
+                "per_order_cap_usd"),
             "event_start_at": cand.get("event_start_at")
             or cand.get("game_start"),
             "status": "MEASURED"}
@@ -895,14 +936,160 @@ async def canonical_decision(conn, *, did, strategy, version, cand, side, sized,
         return None
 
 
-def install() -> None:
+HOOK_NAMES = ("CANONICAL_DECISION", "CANONICAL_ENTRY_ADAPTERS",
+              "CANONICAL_MANAGEMENT_RECORD", "CANONICAL_MANAGEMENT_ADAPTERS")
+_INSTALL_TASKS: set = set()
+
+
+def install(get_pool=None, *, process: str = "api") -> None:
     """Install the canonical hooks in this (executing) process
-    (execution_intent.start calls it)."""
+    (execution_intent.start calls it) and record the install durably with
+    this process's commit, so the production cutover can prove it."""
     from . import decision_hooks as DH
     DH.CANONICAL_DECISION = canonical_decision
     DH.CANONICAL_ENTRY_ADAPTERS = entry_adapters
     DH.CANONICAL_MANAGEMENT_RECORD = record_management_intent
     DH.CANONICAL_MANAGEMENT_ADAPTERS = management_adapters
+    if get_pool is not None:
+        try:
+            t = asyncio.get_running_loop().create_task(
+                _record_install(get_pool, process))
+            _INSTALL_TASKS.add(t)
+            t.add_done_callback(_INSTALL_TASKS.discard)
+        except RuntimeError:
+            pass                            # no loop (tests): nothing to record
+
+
+def installed_hooks() -> list:
+    from . import decision_hooks as DH
+    return [n for n in HOOK_NAMES if getattr(DH, n, None) is not None]
+
+
+async def _record_install(get_pool, process: str) -> None:
+    import os
+    try:
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """INSERT INTO live_parity_hook_installs (process, commit_sha,
+                     hooks) VALUES ($1, $2, $3)""",
+                process, os.environ.get("RENDER_GIT_COMMIT"),
+                installed_hooks())
+    except Exception:                                         # noqa: BLE001
+        log.warning("live parity hook install not recorded", exc_info=True)
+
+
+# ─────────────────────────── the production cutover ────────────────────
+
+CUTOVER_MIGRATIONS = ("225", "226")
+
+
+async def production_cutover(conn) -> dict | None:
+    """The recorded R30 production cutover, or None."""
+    try:
+        r = await conn.fetchrow("SELECT * FROM live_parity_cutover WHERE id = 1")
+    except Exception:                                         # noqa: BLE001
+        return None
+    return None if r is None else dict(r)
+
+
+async def cutover_checks(conn, *, release_sha: str, api_sha: str | None,
+                         hooks_here: list) -> dict:
+    """EVERY CUTOVER CONDITION, read from production now (pure reads). Each
+    check is {passed, value}; the cutover is recorded only if all pass."""
+    checks: dict = {}
+
+    def put(name, passed, value=None):
+        checks[name] = {"passed": bool(passed), "value": value}
+
+    full = bool(release_sha) and len(release_sha) == 40 and all(
+        c in "0123456789abcdef" for c in release_sha)
+    put("RELEASE_SHA_IS_A_FULL_SHA", full, release_sha)
+    put("API_RUNS_THE_RELEASE_SHA", api_sha == release_sha, api_sha)
+    wb = await conn.fetchval(
+        "SELECT value FROM ingestion_state WHERE key = 'workers_boot'")
+    wb = json.loads(wb) if isinstance(wb, str) else (wb or {})
+    wsha = (wb or {}).get("commit_sha")
+    put("WORKERS_RUN_THE_RELEASE_SHA", wsha == release_sha, wsha)
+    applied = {str(r["version"])[:3] for r in await conn.fetch(
+        "SELECT version FROM schema_migrations")}
+    put("MIGRATIONS_225_226_APPLIED",
+        all(m in applied for m in CUTOVER_MIGRATIONS),
+        sorted(m for m in applied if m >= "225"))
+    inst = await conn.fetchrow(
+        """SELECT install_id, hooks, installed_at FROM live_parity_hook_installs
+            WHERE commit_sha = $1 ORDER BY installed_at DESC LIMIT 1""",
+        release_sha)
+    put("HOOKS_INSTALLED_ON_THE_RELEASE_SHA",
+        inst is not None and set(HOOK_NAMES) <= set(inst["hooks"] or []),
+        None if inst is None else {"install_id": inst["install_id"],
+                                   "hooks": list(inst["hooks"])})
+    put("HOOKS_INSTALLED_IN_THIS_PROCESS",
+        set(HOOK_NAMES) <= set(hooks_here), list(hooks_here))
+    ctl = await control(conn)
+    put("SMALL_LIVE_IS_SHADOW", ctl.get("mode") == MODE_SHADOW
+        and SMALL_LIVE_MODE == MODE_SHADOW, ctl.get("mode"))
+    put("SMALL_LIVE_NOT_HALTED", not ctl.get("halted"), ctl.get("halted"))
+    em = await conn.fetchrow(
+        "SELECT enabled, stopped FROM execmirror_control LIMIT 1")
+    sent = await conn.fetchval(
+        "SELECT count(*) FROM execmirror_orders WHERE venue_order_id IS NOT NULL")
+    live_ev = await conn.fetchval("SELECT count(*) FROM small_live_order_events")
+    put("NO_CAPITAL_ACTIVATED",
+        (em is None or not em["enabled"] or em["stopped"]) and sent == 0
+        and live_ev == 0,
+        {"execmirror_enabled": None if em is None else em["enabled"],
+         "execmirror_stopped": None if em is None else em["stopped"],
+         "venue_orders_ever": sent, "small_live_venue_events": live_ev})
+    # THE READBACK: every R30 object present and readable
+    objs = ["canonical_decision_intents", "canonical_management_intents",
+            "canonical_intent_executions", "live_parity_ledger",
+            "small_live_control", "small_live_order_events",
+            "live_parity_hook_installs", "agent_work_requests"]
+    present = {o: bool(await conn.fetchval(
+        "SELECT to_regclass($1) IS NOT NULL", o)) for o in objs}
+    div = await conn.fetchval(
+        "SELECT count(*) FROM live_parity_ledger "
+        " WHERE parity_state = 'LOGIC_DIVERGENCE'")
+    put("READBACK_OBJECTS_PRESENT", all(present.values()), present)
+    put("READBACK_NO_LOGIC_DIVERGENCE", div == 0, div)
+    return {"checks": checks,
+            "passed": all(c["passed"] for c in checks.values()),
+            "install_id": None if inst is None else inst["install_id"],
+            "workers_sha": wsha,
+            "migrations": sorted(m for m in applied if m >= "225")}
+
+
+async def record_cutover(conn, *, release_sha: str, recorded_by: str,
+                         api_sha: str | None = None,
+                         hooks_here: list | None = None) -> dict:
+    """RECORD THE R30 PRODUCTION CUTOVER ONCE, only if every condition holds
+    now. Returns {recorded, cutover, checks}. An existing cutover is returned
+    unchanged (the table is append-only and singular)."""
+    import os
+    existing = await production_cutover(conn)
+    if existing is not None:
+        return {"recorded": False, "already": True, "cutover": existing}
+    api = api_sha if api_sha is not None else os.environ.get("RENDER_GIT_COMMIT")
+    hooks = installed_hooks() if hooks_here is None else hooks_here
+    got = await cutover_checks(conn, release_sha=release_sha, api_sha=api,
+                               hooks_here=hooks)
+    if not got["passed"]:
+        return {"recorded": False, "refused": [
+            k for k, c in got["checks"].items() if not c["passed"]],
+            "checks": got["checks"]}
+    async with conn.transaction():
+        await conn.execute(
+            """INSERT INTO live_parity_cutover (cutover_at, release_sha,
+                 api_sha, workers_sha, migrations, hook_install_id,
+                 small_live_mode, small_live_halted, capital_activated,
+                 evidence, recorded_by)
+               VALUES (now(), $1, $2, $3, $4, $5, 'SHADOW', false, false,
+                       $6::jsonb, $7) ON CONFLICT (id) DO NOTHING""",
+            release_sha, api, got["workers_sha"], got["migrations"],
+            got["install_id"], _j(got["checks"]), recorded_by)
+    return {"recorded": True, "cutover": await production_cutover(conn),
+            "checks": got["checks"]}
 
 
 def uninstall() -> None:

@@ -290,6 +290,47 @@ DROP TRIGGER IF EXISTS small_live_control_truncate_trg ON small_live_control;
 CREATE TRIGGER small_live_control_truncate_trg BEFORE TRUNCATE
     ON small_live_control FOR EACH STATEMENT EXECUTE FUNCTION small_live_control_guard();
 
+-- ── 6b · hook installs and THE PRODUCTION CUTOVER ──────────────────────
+-- Each executing process records, at boot, the canonical hooks it installed
+-- and the commit it runs. The R30 CUTOVER is recorded ONCE, by
+-- live_parity.record_cutover, only after it has verified in production: the
+-- release SHA = the API's own commit = the workers' boot commit; migrations
+-- 225 and 226 applied; the canonical decision + management hooks installed
+-- by a process on that commit; SMALL LIVE SHADOW and not halted; no capital
+-- activated; the readback checks passing. The forward-profitability window
+-- and the parity sample start at cutover_at -- never at a fixed date.
+CREATE TABLE IF NOT EXISTS live_parity_hook_installs (
+    install_id    bigserial PRIMARY KEY,
+    process       text NOT NULL,
+    commit_sha    text,
+    hooks         text[] NOT NULL,
+    installed_at  timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT lphi_hooks_ck CHECK (cardinality(hooks) > 0)
+);
+CREATE INDEX IF NOT EXISTS lphi_commit_idx ON live_parity_hook_installs (commit_sha, installed_at DESC);
+
+CREATE TABLE IF NOT EXISTS live_parity_cutover (
+    id                 smallint PRIMARY KEY DEFAULT 1,
+    cutover_at         timestamptz NOT NULL,
+    release_sha        text NOT NULL,
+    api_sha            text NOT NULL,
+    workers_sha        text NOT NULL,
+    migrations         text[] NOT NULL,
+    hook_install_id    bigint NOT NULL REFERENCES live_parity_hook_installs (install_id),
+    small_live_mode    text NOT NULL,
+    small_live_halted  boolean NOT NULL,
+    capital_activated  boolean NOT NULL,
+    evidence           jsonb NOT NULL,
+    recorded_by        text NOT NULL,
+    recorded_at        timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT lpc_singleton_ck CHECK (id = 1),
+    CONSTRAINT lpc_sha_ck CHECK (release_sha ~ '^[0-9a-f]{40}$'),
+    CONSTRAINT lpc_same_sha_ck CHECK (api_sha = release_sha AND workers_sha = release_sha),
+    CONSTRAINT lpc_migrations_ck CHECK (migrations @> ARRAY['225', '226']),
+    CONSTRAINT lpc_shadow_ck CHECK (small_live_mode = 'SHADOW' AND NOT small_live_halted),
+    CONSTRAINT lpc_no_capital_ck CHECK (NOT capital_activated)
+);
+
 -- ── 7 · append-only triggers ────────────────────────────────────────────
 DO $$
 DECLARE
@@ -300,7 +341,9 @@ BEGIN
                              'canonical_intent_executions',
                              'small_live_order_events',
                              'live_parity_ledger',
-                             'small_live_control_events'] LOOP
+                             'small_live_control_events',
+                             'live_parity_hook_installs',
+                             'live_parity_cutover'] LOOP
         EXECUTE format('DROP TRIGGER IF EXISTS %I ON %I', t || '_append_only_trg', t);
         EXECUTE format('CREATE TRIGGER %I BEFORE UPDATE OR DELETE ON %I '
                        'FOR EACH ROW EXECUTE FUNCTION live_parity_append_only()',

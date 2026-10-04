@@ -104,6 +104,7 @@ def eddie_component(est: dict | None, why: str | None = None) -> dict:
                 "expected_net_executable_edge_pp"),
             "expected_fill_probability": est.get("expected_fill_probability"),
             "execution_style": est.get("execution_style"),
+            "max_executable_qty": est.get("max_executable_qty"),
             "unmeasured": est.get("unmeasured") or {},
             "authority": "SHADOW_ONLY_CARRIED_AS_EVIDENCE"}
 
@@ -193,76 +194,74 @@ async def karen_at_decision(conn, *, slug: str, strategy: str,
     return got
 
 
-async def allie_at_decision(conn, *, decision: dict, cost_usd, p,
-                            wire, now: float) -> dict:
-    """Allie's rule on THIS candidate against the open book of her latest
-    allocator run (same game/team counts, drawdown and regime factors)."""
-    from .intel import allocator as A
-    from .intel import common as C
+async def allie_at_decision(conn, *, decision: dict, eddie: dict,
+                            now: float) -> dict:
+    """ALLIE'S CAPITAL-EFFICIENCY ALLOCATION (allie_capital.allocate) from the
+    decision's own inputs, Eddie's executable EV and depth, the recorded
+    settlement lags, the paper book's open exposure on the fixture, idle
+    capital, recent INVESTMENT candidates (the hurdle) and the rails."""
+    from . import allie_capital as AC
+    from .lost_opportunity import reads as R
+    from .profitability import economics as EC
 
-    async def latest():
-        r = await conn.fetchrow(
-            """SELECT run_id, max(computed_at) AS at FROM intel_allocations
-                GROUP BY run_id ORDER BY max(computed_at) DESC LIMIT 1""")
-        if r is None:
-            return None
+    async def lags():
+        return await R.lag_samples(conn, now=now)
+
+    async def capital():
+        snaps = await R.snapshots_since(conn, since=now)
+        return R.as_of(snaps["CAPITAL"], now)
+
+    async def hurdle():
         rows = await conn.fetch(
-            """SELECT candidate_kind, us_market_slug, score, inputs
-                 FROM intel_allocations WHERE run_id = $1""", r["run_id"])
-        return {"run_id": r["run_id"], "at": r["at"].timestamp(),
-                "rows": [dict(x) for x in rows]}
+            """SELECT (allie->'correlation_concentration'->>
+                       'adjusted_profit_per_capital_hour')::float8 AS a
+                 FROM canonical_decision_intents
+                WHERE sleeve = 'INVESTMENT' AND allie->>'status' = 'MEASURED'
+                  AND created_at > to_timestamp($1) - interval '7 days'
+                ORDER BY created_at DESC LIMIT 50""", float(now))
+        return [r["a"] for r in rows if r["a"] is not None]
 
     async def go():
-        run = await _cached("allie_latest", now, latest)
-        pf, wf = C.num(p), C.num(wire)
-        cost = C.num(cost_usd)
-        if pf is None or wf is None or wf <= 0:
-            return _un("NO_PROBABILITY_OR_PRICE_AT_DECISION")
-        u = 0.10
-        ev = (pf - u - wf) / wf
-        cap = None if cost is None else min(
-            cost * A.SLEEVE_SCALE, A.PER_POSITION_CAP * C.SLEEVE_NOTIONAL_USD)
-        cand = {"candidate_id": "decision:%s" % decision["decision_id"],
-                "candidate_kind": "NEW_DECISION",
-                "decision_id": decision["decision_id"], "group_id": None,
-                "us_market_slug": decision.get("us_market_slug"),
-                "game": str(decision.get("fixture")
-                            or decision.get("us_market_slug")),
-                "sport": decision.get("sport") or "UNKNOWN",
-                "team": "UNKNOWN", "ev": C.rnd(ev), "ev_why": None,
-                "capacity_usd": C.rnd(cap),
-                "calibration_uncertainty": u, "liquidity_cap_usd": None,
-                "unmeasured": {"calibration_uncertainty":
-                               "NO_CALIBRATION_AT_DECISION_DEFAULT_0.10"}}
-        inputs = {}
-        open_scores = []
-        if run is not None:
-            for r in run["rows"]:
-                if r["candidate_kind"] == "OPEN_POSITION" and \
-                        r["score"] is not None:
-                    open_scores.append(float(r["score"]))
-            inputs = C.jload(run["rows"][0]["inputs"]) if run["rows"] else {}
-        ddf = C.num((inputs or {}).get("drawdown_factor"))
-        rf = C.num((inputs or {}).get("regime_factor"))
-        res = A.allocate([cand], game_open={}, actual_game_exposure={},
-                         drawdown_factor=1.0 if ddf is None else ddf,
-                         regime_factor=1.0 if rf is None else rf)
-        c = res["ranked"][0]
-        best_open = max(open_scores) if open_scores else None
-        return {"status": "MEASURED", "version": A.VERSION,
-                "shadow_usd": c.get("shadow_usd"),
-                "shadow_weight": c.get("shadow_weight"),
-                "score": c.get("score"),
-                "binding_constraint": c.get("binding_constraint"),
-                "reasons": c.get("reasons"),
-                "best_open_position_score_latest_run": best_open,
-                "latest_run_id": None if run is None else run["run_id"],
-                "factors": {"drawdown": ddf, "regime": rf,
-                            "defaulted": [k for k, v in (("drawdown", ddf),
-                                                         ("regime", rf))
-                                          if v is None]},
-                "authority": "SHADOW_WEIGHTS_ONLY_CARRIED_AS_EVIDENCE",
-                "basis": "INTEL_ALLOCATOR_V1 applied at the decision instant"}
+        lg = await _cached("lol_lags", now, lags)
+        lag, lag_n = EC.settlement_lag(lg or [], as_of=now)
+        cap_snap = await _cached("lol_capital", now, capital)
+        hs = await _cached("allie_hurdle", now, hurdle)
+        fx = decision.get("fixture")
+        fixture = await conn.fetchrow(
+            """SELECT count(DISTINCT o.group_id) AS n,
+                      coalesce(sum(o.filled_qty * o.limit_price), 0) AS usd
+                 FROM paper_orders o
+                WHERE o.role = 'ENTRY' AND o.fixture = $1 AND o.filled_qty > 0
+                  AND NOT EXISTS (SELECT 1 FROM paper_settlements s
+                                   WHERE s.group_id = o.group_id)""",
+            fx) if fx else None
+        book = await conn.fetchval(
+            """SELECT coalesce(sum(o.filled_qty * o.limit_price), 0)
+                 FROM paper_orders o
+                WHERE o.role = 'ENTRY' AND o.filled_qty > 0
+                  AND NOT EXISTS (SELECT 1 FROM paper_settlements s
+                                   WHERE s.group_id = o.group_id)""")
+        em = await conn.fetchrow(
+            "SELECT scale, max_order_usd FROM execmirror_control LIMIT 1")
+        e = eddie if eddie.get("status") == "MEASURED" else {}
+        return AC.allocate(
+            eddie_ev_usd=e.get("expected_executable_ev_usd"),
+            modelled_net_usd=decision.get("executable_opportunity_dollars"),
+            capital_required_usd=decision.get("capital_required_usd"),
+            event_start_at=decision.get("event_start_at"),
+            decided_at=decision.get("decided_at"), median_lag_s=lag,
+            lag_n=lag_n, eddie_max_qty=e.get("max_executable_qty"),
+            limit_price=decision.get("limit_price"),
+            displayed_depth_qty=decision.get("depth_within_limit"),
+            fixture_open_groups=0 if fixture is None else fixture["n"],
+            fixture_open_usd=0 if fixture is None else float(fixture["usd"]),
+            book_open_usd=float(book or 0),
+            idle_capital_usd=None if cap_snap is None else cap_snap[1],
+            recent_adjusted_ppch=hs,
+            paper_rail_usd=decision.get("per_order_cap_usd"),
+            live_rail_usd=None if em is None else float(em["max_order_usd"]),
+            live_scale=None if em is None else float(em["scale"]),
+            order_cost_usd=decision.get("capital_required_usd"))
     return await _bounded(conn, go)
 
 
@@ -271,13 +270,25 @@ async def at_decision(conn, *, decision: dict, book_row: dict | None,
     """All four computed components for one decision (derek is built by the
     caller from its own record). Never raises."""
     at = float(now if now is not None else time.time())
+    if decision.get("event_start_at") is None and decision.get("us_market_slug"):
+        # the event start the opportunity score and Allie's time to capital
+        # release use: the pre-map's latest mapped game start for the market
+        from .lost_opportunity import reads as R
+
+        async def start():
+            got = await R.event_starts(conn, [decision["us_market_slug"]])
+            return {"t": got.get(decision["us_market_slug"])}
+        st = await _bounded(conn, start)
+        if st.get("t") is not None:
+            decision = dict(decision, event_start_at=st["t"],
+                            event_start_basis="us_premap.game_start")
     eddie = await eddie_at_decision(conn, decision=decision,
                                     book_row=book_row, now=at)
     opp = await opportunity_at_decision(conn, decision=decision, eddie=eddie,
                                         now=at)
     karen = await karen_at_decision(conn, slug=decision.get("us_market_slug"),
                                     strategy=decision.get("strategy"), now=at)
-    allie = await allie_at_decision(conn, decision=decision,
-                                    cost_usd=cost_usd, p=p, wire=wire, now=at)
+    allie = await allie_at_decision(conn, decision=decision, eddie=eddie,
+                                    now=at)
     return {"eddie": eddie, "opportunity_score": opp, "karen": karen,
             "allie": allie, "version": VERSION}
