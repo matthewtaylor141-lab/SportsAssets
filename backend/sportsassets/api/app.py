@@ -777,6 +777,15 @@ try:
 except ImportError:
     log.warning("improvements: api.command_improvements not loaded",
                 exc_info=True)
+# ── THE LOST OPPORTUNITY READS (migration 220): /api/command/profitability/
+# lost-opportunities and /opportunity-scores. GET only, COMMAND auth, READ
+# ONLY transactions. RESEARCH: no route here writes or has authority.
+try:
+    from .command_lost_opportunity import router as _command_lol_router
+    app.include_router(_command_lol_router)
+except ImportError:
+    log.warning("lost opportunity: api.command_lost_opportunity not loaded",
+                exc_info=True)
 from .agent_capabilities import router as _capabilities_router
 app.include_router(_capabilities_router)
 from .slack_agents import router as _slack_agents_router

@@ -776,3 +776,17 @@ tests/test_command_floor_authority.py
 # (+ /{id}) is GET only, session-authenticated and READ ONLY.
 tests/test_improvement_pipeline_authority.py
 tests/test_improvement_pipeline_db.py
+# The Lost Opportunity Ledger, the Opportunity Score and the horizon
+# forecasts (claude/pos-lol, migration 220): RESEARCH / SHADOW, no venue,
+# order, sizing, limit, threshold or capital authority. The package imports
+# no venue / order / paper / funded module (transitive closure), writes only
+# its own append-only lol_* tables (INSERT only; the database refuses UPDATE
+# / DELETE / TRUNCATE), a run leaves every order, fill, ledger, decision,
+# funded and pos_* table unchanged, a hindsight winner is never a
+# FALSE_REFUSAL (the classifier never reads the settlement), a FALSE_REFUSAL
+# needs a positive decision-time executable net EV AND a named defect (DB
+# CHECK), the hypothetical P&L is labelled HYPOTHETICAL, and the
+# /api/command/profitability/{lost-opportunities,opportunity-scores,
+# forecast-horizons} routes are GET-only, READ ONLY, behind a command session.
+tests/test_lost_opportunity_is_research_only.py
+tests/test_lost_opportunity_ledger.py

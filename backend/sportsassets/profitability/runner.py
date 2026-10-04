@@ -314,6 +314,19 @@ async def run_cycle(conn, *, now=None, account_id=C.PAPER_ACCOUNT,
     else:
         fc, status["FORECAST"] = None, "SKIPPED"
 
+    # ── LOST OPPORTUNITY LEDGER + OPPORTUNITY SCORES (migration 220) ──
+    # Its own savepoints, timeouts and run log (lol_runs); a failure there
+    # never changes a component status above. POS_LOL=off is its switch.
+    lol = None
+    try:
+        from ..lost_opportunity import runner as _LOL
+        lol = await _LOL.run_component(
+            conn, now=now, pos_run_id=run_id,
+            econs=loaded.get("econ") if eco is not None else None,
+            capacity_agg=cap_agg, lookback_days=lookback_days)
+    except Exception:                                          # noqa: BLE001
+        log.warning("lost opportunity component failed", exc_info=True)
+
     try:
         async with conn.transaction():
             await ST.record_component(
@@ -330,7 +343,8 @@ async def run_cycle(conn, *, now=None, account_id=C.PAPER_ACCOUNT,
             "label": C.LABEL, "authority": C.AUTHORITY,
             "results": {"capacity": (cap or {}).get("assessed"),
                         "economics": eco, "warehouse": wh,
-                        "north_star": ns, "forecast": fc}}
+                        "north_star": ns, "forecast": fc},
+            "lost_opportunity": lol}
 
 
 async def _one(pool) -> dict:
