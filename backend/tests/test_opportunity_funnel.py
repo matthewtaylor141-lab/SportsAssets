@@ -13,6 +13,9 @@ THE PROOFS.
      refused one market 200 times ranks BELOW one that refused 20 markets
      once; the old row ranking is reported beside it; the binding blocker is
      the latest evaluation's; an opportunity entered later binds nothing.
+     ATTRIBUTION IS PER (OPPORTUNITY, STRATEGY): one strategy's 50 refusals
+     are not overwritten by another strategy's single later refusal, and one
+     strategy's ENTER never hides another's refusal (R30A review).
   §3 EXECUTABLE EV AT THE STRATEGY'S OWN FRESHNESS. Measured on the
      decision's own book at its recorded age, else the latest observation at
      or before the decision within the strategy's executable bound; a stale
@@ -20,7 +23,10 @@ THE PROOFS.
      fee schedule is UNAVAILABLE with its reason -- never a zero, never an
      older observation. Missed EV is each opportunity's BEST evaluation, not
      the sum of its re-evaluations; a near miss is a never-entered
-     opportunity with positive executable EV.
+     opportunity with positive executable EV. A probability the LANE did not
+     qualify is NOT_QUALIFIED, never "not fresh"; an evaluation the pricing
+     bound left unpriced is NOT_EVALUATED (still counted as probability-
+     fresh), and an EV over a partial set is flagged PARTIAL.
   §4 SCOPE AND AUTHORITY. Every funnel names book, sleeve, strategy,
      policy_version(s), confidence scope (INVESTMENT production, the rest
      research); the route is GET only, 401 without a session, READ ONLY, and
@@ -33,7 +39,10 @@ THE PROOFS.
      an unreadable-book refusal with a fresh probability and a readable book
      recorded 3 s earlier (a near miss), the same refusal on a market whose
      only readable book is older than the entry bound (UNAVAILABLE), and an
-     ENTER.
+     ENTER. The SAME pass's Derek (the second INVESTMENT strategy) refuses
+     every one of those markets: the default INVESTMENT funnel attributes
+     per strategy -- Derek's refusal binds all seven, CG's ENTER does not
+     hide it, and Derek's later rows do not overwrite CG's blockers.
 ALL DATA HERE IS SYNTHETIC TEST DATA.
 """
 from __future__ import annotations
@@ -61,6 +70,7 @@ PKG = ROOT / "sportsassets"
 NOW = 1_800_000_000.0
 CG = "PINNACLE_COMPLETED_GAME_PAPER"
 EXPLORE = "PINNACLE_EXPLORATION_PAPER"
+DEREK = "DEREK_ENTRY_POLICY_V2"
 FEE = 0.01                                     # per contract, flat (pure)
 
 
@@ -71,8 +81,8 @@ def _fee(px):
 def _dec(i, *, slug, refusal="BELOW_MIN_GROSS_EDGE", at=None, p=0.60,
          pin_ok=True, pin_age=5.0, book_obs_id=None, book_age=None,
          strategy=CG, line=None, scope="FULL_GAME", fixture="fx",
-         side="LONG", pv="CG_V3"):
-    return {"decision_id": "paperdec:%s:%s" % (slug, i),
+         side="LONG", pv="CG_V3", pin_refusal=None, qualification=None):
+    return {"decision_id": "paperdec:%s:%s:%s" % (strategy, slug, i),
             "strategy": strategy, "policy_version": pv,
             "verdict": "ENTER" if refusal is None else "REFUSE",
             "refusal": refusal, "refusals": [refusal] if refusal else [],
@@ -81,8 +91,11 @@ def _dec(i, *, slug, refusal="BELOW_MIN_GROSS_EDGE", at=None, p=0.60,
             "p_blended": None, "p_pinnacle": p, "p_internal": None,
             "pinnacle": {"qualified": pin_ok, "age_s": pin_age,
                          "limit_s": 30.0,
-                         "refusal": None if pin_ok else
-                         "PROBABILITY_EVIDENCE_STALE"},
+                         "qualification": qualification or (
+                             "FRESH" if pin_ok else "STALE"),
+                         "refusal": pin_refusal or (
+                             None if pin_ok else
+                             "PROBABILITY_EVIDENCE_STALE")},
             "book_obs_id": book_obs_id, "decision_book_age_s": book_age,
             "decided_at": NOW + i if at is None else at}
 
@@ -162,6 +175,74 @@ def test_the_binding_blocker_is_the_latest_evaluation():
     st = {s["stage"]: s["unique_opportunities"] for s in out["stages"]}
     assert st["EVALUATED"] == 2 and st["ENTERED"] == 1
     assert [s["stage"] for s in out["stages"]] == list(FN.STAGES)
+
+
+def test_two_strategies_are_attributed_per_strategy():
+    """THE REVIEW'S COUNTER-EXAMPLE: 50 CG BELOW_MIN_GROSS_EDGE refusals on
+    one market, then ONE Derek SETTLEMENT_NOT_SUPPORTED refusal. V1 bound
+    the market to Derek's refusal alone (last writer) and gave the gross
+    edge ZERO unique opportunities."""
+    rows = [_dec(i, slug="m") for i in range(50)]
+    rows.append(_dec(60, slug="m", refusal="SETTLEMENT_NOT_SUPPORTED",
+                     strategy=DEREK, pv="DEREK_V2"))
+    out = FN.compute(rows, sleeve="INVESTMENT", strategy=None)
+    by = {b["blocker"]: b for b in out["blockers"]}
+    assert by["BELOW_MIN_GROSS_EDGE"]["unique_opportunities"] == 1
+    assert by["BELOW_MIN_GROSS_EDGE"]["bound_by_strategy"] == {CG: 1}
+    assert by["SETTLEMENT_NOT_SUPPORTED"]["unique_opportunities"] == 1
+    assert by["SETTLEMENT_NOT_SUPPORTED"]["bound_by_strategy"] == {DEREK: 1}
+    t = out["totals"]
+    assert t["unique_opportunities"] == 1 and t["strategy_opportunities"] == 2
+    assert t["evaluations"] == 51 and t["re_evaluations"] == 50
+    top = out["most_reevaluated"][0]
+    assert top["binding_blockers"] == {CG: "BELOW_MIN_GROSS_EDGE",
+                                       DEREK: "SETTLEMENT_NOT_SUPPORTED"}
+    # the interleaving does not matter: Derek first, then CG
+    rows2 = [dict(r, decided_at=NOW + 100 + i) for i, r in enumerate(rows)]
+    rows2[-1]["decided_at"] = NOW
+    out2 = FN.compute(rows2, sleeve="INVESTMENT", strategy=None)
+    assert [(b["blocker"], b["unique_opportunities"])
+            for b in out2["blockers"]] == [
+        (b["blocker"], b["unique_opportunities"]) for b in out["blockers"]]
+    # one strategy's ENTER never hides the other's refusal
+    rows3 = [_dec(i, slug="m") for i in range(50)]
+    rows3.append(_dec(60, slug="m", refusal=None, strategy=DEREK, pv="D2"))
+    out3 = FN.compute(rows3, sleeve="INVESTMENT", strategy=None)
+    b = {x["blocker"]: x for x in out3["blockers"]}["BELOW_MIN_GROSS_EDGE"]
+    assert b["unique_opportunities"] == 1
+    assert b["entered_by_another_strategy"] == 1
+    assert out3["totals"]["entered_unique"] == 1
+    assert out3["totals"]["refused_unique"] == 0
+    # two strategies bound by the SAME blocker: one opportunity, two units
+    rows4 = [_dec(0, slug="m"), _dec(1, slug="m", strategy=DEREK, pv="D2")]
+    b = FN.compute(rows4, sleeve="INVESTMENT", strategy=None)["blockers"][0]
+    assert b["unique_opportunities"] == 1 and b["strategy_opportunities"] == 2
+    assert b["strategies"] == sorted([CG, DEREK])
+    assert b["policy_versions"] == ["CG_V3", "D2"]
+
+
+def test_every_blocker_row_carries_its_scope():
+    rows = [_dec(0, slug="m"), _dec(1, slug="n", strategy=DEREK, pv="D2",
+                                    refusal="SETTLEMENT_NOT_SUPPORTED")]
+    out = FN.compute(rows, sleeve="INVESTMENT", strategy=None)
+    for b in out["blockers"]:
+        for k in ("book", "sleeve", "strategies", "policy_versions",
+                  "confidence_scope"):
+            assert k in b, (b["blocker"], k)
+        assert (b["book"], b["sleeve"]) == ("PAPER", "INVESTMENT")
+        assert b["confidence_scope"] == C.PRODUCTION
+    assert out["strategies"] == sorted([CG, DEREK])
+
+
+def test_the_one_ranking_other_reports_reuse():
+    rows = [_dec(i, slug="hot", refusal="PROBABILITY_EVIDENCE_STALE",
+                 pin_ok=False) for i in range(30)]
+    rows += [_dec(100 + i, slug="m%d" % i) for i in range(3)]
+    got = FN.blocker_ranking(rows, sleeve="INVESTMENT")
+    assert [(g["blocker"], g["unique_opportunities"], g["evaluations"])
+            for g in got] == [("BELOW_MIN_GROSS_EDGE", 3, 3),
+                              ("PROBABILITY_EVIDENCE_STALE", 1, 30)]
+    assert got[1]["re_evaluations"] == 29
 
 
 # ── §3 executable EV at the strategy's own freshness ─────────────────
@@ -273,12 +354,100 @@ def test_an_unpriced_blocker_is_unavailable_with_its_reasons():
     assert st["PROBABILITY_FRESH"] == 0
 
 
+def test_a_lane_or_provenance_failure_is_not_staleness():
+    good = _book(7, NOW - 2.0)
+    # a FRESH reading the lane refused (football outside the de-vig set):
+    # NOT_QUALIFIED, never priced, never called stale
+    lane = _dec(0, slug="m", refusal="PINNACLE_PROBABILITY_NOT_QUALIFIED_BY_"
+                "THE_LANE", book_obs_id=7, book_age=2.0)
+    pf = FN.probability_fresh(lane)
+    assert (pf["cls"], pf["qualified"], pf["fresh"]) == (
+        FN.P_UNQUALIFIED, False, False)
+    assert pf["why"].startswith(FN.R_PROBABILITY_NOT_QUALIFIED)
+    ev = FN.evaluate(lane, book=good, fee_fn=_fee)
+    assert ev["status"] == C.UNAVAILABLE
+    assert ev["why"].startswith(FN.R_PROBABILITY_NOT_QUALIFIED)
+    # no reading at all / provenance refused: NOT_QUALIFIED
+    absent = _dec(0, slug="m", pin_ok=False, qualification="ABSENT",
+                  pin_refusal="NO_QUALIFIED_PINNACLE_PROBABILITY")
+    assert FN.probability_fresh(absent)["cls"] == FN.P_UNQUALIFIED
+    refused = _dec(0, slug="m", pin_ok=False, qualification="REFUSED",
+                   pin_refusal="PINNAPI_PRIMARY_PROVENANCE_MISSING")
+    assert FN.probability_fresh(refused)["cls"] == FN.P_UNQUALIFIED
+    # older than its own limit: NOT_FRESH (qualified, but stale)
+    old = _dec(0, slug="m", pin_ok=False, pin_age=45.0)
+    pf = FN.probability_fresh(old)
+    assert (pf["cls"], pf["qualified"]) == (FN.P_STALE, True)
+    assert pf["why"].startswith(FN.R_PROBABILITY_NOT_FRESH)
+    # a stamp after the decision: freshness UNKNOWN, not a lane failure
+    clk = _dec(0, slug="m", pin_ok=False, pin_age=-2.0,
+               qualification="CLOCKS_DISAGREE",
+               pin_refusal="PROBABILITY_EVIDENCE_FRESHNESS_UNKNOWN")
+    pf = FN.probability_fresh(clk)
+    assert pf["cls"] == FN.P_STALE
+    assert pf["why"].startswith(FN.R_PROBABILITY_FRESHNESS_UNKNOWN)
+    # the stages tell them apart
+    out = FN.compute([dict(lane, ev=None), dict(old, us_market_slug="o",
+                                                 ev=None),
+                      dict(_dec(5, slug="f"), ev=None)],
+                     sleeve="INVESTMENT", strategy=None)
+    st = {x["stage"]: x["unique_opportunities"] for x in out["stages"]}
+    assert st["EVALUATED"] == 3 and st["PROBABILITY_QUALIFIED"] == 2
+    assert st["PROBABILITY_FRESH"] == 1
+
+
+def test_the_copied_refusal_codes_match_their_sources():
+    from sportsassets.agents import derek_policy as DP
+    from sportsassets.agents import paper_benchmark as PB
+    assert FN.LANE_UNQUALIFIED_REFUSALS == (DP.R_NO_PINNACLE,
+                                           PB.R_PROBABILITY_UNQUALIFIED)
+    assert FN.STALE_REFUSAL == DP.R_STALE
+    assert FN.FRESHNESS_UNKNOWN_REFUSAL == DP.R_FRESHNESS_UNKNOWN
+
+
+def test_an_unpriced_fresh_evaluation_is_not_evaluated_never_not_fresh():
+    d = _dec(0, slug="m", refusal="SETTLEMENT_NOT_SUPPORTED")
+    d["ev"] = FN.not_evaluated(d)
+    assert d["ev"]["why"] == FN.R_NOT_EVALUATED
+    out = FN.compute([d], sleeve="INVESTMENT", strategy=None)
+    b = out["blockers"][0]
+    assert b["missed_ev_unavailable_why"] == {"EV_NOT_EVALUATED": 1}
+    assert b["evaluations_not_priced"] == 1
+    st = {x["stage"]: x for x in out["stages"]}
+    # it HAD a fresh probability: counted, whether or not it was priced
+    assert st["PROBABILITY_FRESH"]["unique_opportunities"] == 1
+    assert st["EXECUTABLE_FRESH_BOOK"]["not_priced_unknown"] == 1
+    assert out["totals"]["evaluations_not_priced"] == 1
+    # a PARTIAL set: one priced evaluation and one left unpriced -- the EV
+    # is reported as the best of the priced ones, flagged PARTIAL
+    a = _dec(1, slug="m", refusal="SETTLEMENT_NOT_SUPPORTED",
+             book_obs_id=7, book_age=2.0)
+    a["ev"] = FN.evaluate(a, book=_book(7, a["decided_at"] - 2.0),
+                          fee_fn=_fee)
+    out = FN.compute([d, a], sleeve="INVESTMENT", strategy=None)
+    b = out["blockers"][0]
+    assert b["missed_executable_ev_usd"] == pytest.approx(9.0)
+    assert b["missed_ev_partial"] == 1
+    assert b["missed_executable_ev_why"].startswith("PARTIAL")
+    top = out["most_reevaluated"][0]
+    assert top["ev_complete"] is False
+    assert top["ev_evaluations_not_priced"] == 1
+    assert out["totals"]["missed_executable_ev_partial"] == 1
+
+
 def test_the_ev_bound_prices_the_latest_fresh_evaluations():
     rows = [_dec(i, slug="m") for i in range(12)]
     rows += [_dec(100 + i, slug="s", pin_ok=False) for i in range(3)]
     got = API.choose_for_ev(rows, per_key=5, cap=100)
-    assert got == {"paperdec:m:%d" % i for i in range(7, 12)}
+    assert got == {"paperdec:%s:m:%d" % (CG, i) for i in range(7, 12)}
     assert len(API.choose_for_ev(rows, per_key=5, cap=3)) == 3
+    # under a tight cap every (opportunity, strategy) unit gets its LATEST
+    # fresh evaluation priced before any unit gets a second
+    many = [_dec(i, slug="u%d" % (i % 4)) for i in range(40)]
+    many += [_dec(i, slug="u0", strategy=DEREK, pv="D2") for i in range(3)]
+    got = API.choose_for_ev(many, per_key=5, cap=5)
+    assert got == {"paperdec:%s:u%d:%d" % (CG, k, 36 + k) for k in range(4)} \
+        | {"paperdec:%s:u0:2" % DEREK}
 
 
 # ── §4 scope and authority ───────────────────────────────────────────
@@ -531,6 +700,76 @@ async def test_the_funnel_over_decisions_the_real_writer_recorded(
         st = {x["stage"]: x["unique_opportunities"] for x in f["stages"]}
         assert st["EVALUATED"] == 7 and st["ENTERED"] == 1
         assert st["POSITIVE_EXECUTABLE_EV"] == 2       # near + enter
+
+        # ── THE DEFAULT INVESTMENT FUNNEL: CG AND DEREK, PER STRATEGY ──
+        # the same pass's Derek (the second INVESTMENT strategy, its own
+        # real writer) refused every one of those seven markets
+        derek = {r["us_market_slug"]: (r["n"], r["why"]) for r in
+                 await conn.fetch(
+                     "SELECT us_market_slug, count(*) AS n, "
+                     "       min(coalesce(refusal, 'ENTER')) AS why "
+                     "  FROM paper_decisions WHERE session_id = $1 "
+                     "   AND strategy = $2 GROUP BY 1",
+                     acct["session_id"], DEREK)}
+        assert set(derek) == set(slugs.values()), derek
+        d_why = {w for _n, w in derek.values()}
+        assert len(d_why) == 1 and "ENTER" not in d_why
+        d_why = d_why.pop()
+        n_derek = sum(n for n, _w in derek.values())
+        API._CACHE.clear()
+        allg = await API.opportunity_funnel(sleeve="INVESTMENT", strategy=None,
+                                            hours=1.0)
+        assert allg["status"] == "OK", allg["why"]
+        ov = allg["data"]["overall"]
+        assert ov["strategies"] == sorted([CG, DEREK])
+        t = ov["totals"]
+        assert t["unique_opportunities"] == 7
+        assert t["strategy_opportunities"] == 14
+        assert t["evaluations"] == 13 + n_derek
+        assert t["entered_unique"] == 1
+        ob = {b["blocker"]: b for b in ov["blockers"]}
+        # Derek's refusal binds all seven -- CG's ENTER does not hide it
+        assert ob[d_why]["unique_opportunities"] == 7
+        assert ob[d_why]["bound_by_strategy"] == {DEREK: 7}
+        assert ob[d_why]["entered_by_another_strategy"] == 1
+        # ...and Derek's later rows do not overwrite CG's own blockers
+        for code, n in ((PB.R_FEES_CONSUME_EDGE, 2), (settle, 2),
+                        (stale, 1), (PB.R_EDGE, 1)):
+            assert ob[code]["unique_opportunities"] == n, code
+            assert ob[code]["bound_by_strategy"] == {CG: n}, code
+            assert ob[code]["strategies"] == [CG]
+        # the per-strategy views are the strategy funnels exactly
+        per = allg["data"]["by_strategy"]
+        assert set(per) == {CG, DEREK}
+        assert per[CG]["totals"] == f["totals"]
+        assert per[DEREK]["totals"]["unique_opportunities"] == 7
+        assert per[DEREK]["blockers"][0]["blocker"] == d_why
+        # ── THE OTHER OWNER-FACING RANKINGS USE THE SAME COUNT ─────────
+        # Slack's "leading refusal" (management is asked to decide on it):
+        # INVESTMENT sleeve, unique opportunities, rows beside it
+        from sportsassets import slack_updates as U
+        from sportsassets.agents import paper_ops_audit as POA
+        monkeypatch.setattr(U, "ACCOUNT", acct["account_id"])
+        act = await U.activity(conn, now - 3600.0, now + 60.0)
+        assert act["refusals"][0] == (d_why, 7)
+        top3 = {r for r, _n in act["refusals"]}
+        assert top3 == {d_why, PB.R_FEES_CONSUME_EDGE, settle}
+        # (the rows would have ranked the stale probability second)
+        assert stale not in top3
+        assert act["refusal_evaluations"][d_why] == n_derek
+        # Audrey's operational funnel: per strategy, reasons by unique
+        # opportunity, the rows as reason_evaluations
+        fun = await POA.funnel(conn, acct["account_id"], since=now - 3600.0)
+        cg = fun[CG]
+        assert cg["decisions"] == 13 and cg["unique_opportunities"] == 7
+        assert cg["re_evaluations"] == 6 and cg["sleeve"] == "INVESTMENT"
+        assert cg["reasons"] == {PB.R_FEES_CONSUME_EDGE: 2, settle: 2,
+                                 stale: 1, PB.R_EDGE: 1, "ENTER": 1}
+        assert cg["reason_evaluations"][stale] == 4
+        assert cg["reason_evaluations"][PB.R_EDGE] == 3
+        assert list(cg["reasons"])[:2] == sorted([PB.R_FEES_CONSUME_EDGE,
+                                                  settle])
+        assert fun[DEREK]["reasons"] == {d_why: 7}
         # the TRAINING funnel holds none of it
         API._CACHE.clear()
         tr = await API.opportunity_funnel(sleeve="TRAINING", strategy=None,

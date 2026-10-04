@@ -131,17 +131,65 @@ def _hour(at: float) -> str:
 # THE MEASUREMENTS (read-only)
 # ═════════════════════════════════════════════════════════════════════
 
+#: the most decision rows one audit reads for the unique-opportunity funnel
+FUNNEL_ROWS_MAX = 50000
+
+
 async def funnel(conn, account_id: str, *, since: float) -> dict:
-    rows = await conn.fetch(
-        "SELECT strategy, coalesce(refusal, 'ENTER') AS reason, count(*) AS n "
+    """Per strategy: its decisions, and its refusal reasons ranked by UNIQUE
+    OPPORTUNITY (R30A, owner audit 2026-10-04).
+
+    THE DEFECT. `reasons` was count(*) per refusal -- decision ROWS -- and
+    every policy re-evaluates the same live market on each valuation, so a
+    reason that refused three markets ninety times each outranked one that
+    refused thirty markets once (production: 22 rows per contract on
+    average, up to 91). `reasons` is now the number of unique opportunities
+    (fixture / market / side / line / period) each reason BINDS for that
+    strategy (profitability.opportunity_funnel, the one definition); the
+    rows are kept beside it as `reason_evaluations`, with `ENTER` counted
+    the same way. The sleeve of each strategy is named (migration 223's
+    map; outside it UNCLASSIFIED)."""
+    from ..profitability import common as PC
+    from ..profitability import opportunity_funnel as FN
+    rows = [dict(r) for r in await conn.fetch(
+        "SELECT decision_id, strategy, verdict, refusal, refusals, "
+        "       us_market_slug, holding_side, fixture, "
+        "       label->>'line' AS line, label->>'period' AS scope, "
+        "       extract(epoch FROM decided_at)::float8 AS decided_at "
         "  FROM paper_decisions WHERE account_id=$1 "
-        "   AND decided_at > to_timestamp($2) GROUP BY 1, 2 ORDER BY 3 DESC",
-        account_id, since)
+        "   AND decided_at > to_timestamp($2) "
+        " ORDER BY decided_at DESC LIMIT $3",
+        account_id, since, FUNNEL_ROWS_MAX)]
     out: dict[str, Any] = {}
-    for r in rows:
-        s = out.setdefault(r["strategy"], {"decisions": 0, "reasons": {}})
-        s["decisions"] += int(r["n"])
-        s["reasons"][r["reason"]] = int(r["n"])
+    for strat in sorted({r["strategy"] for r in rows}):
+        mine = [r for r in rows if r["strategy"] == strat]
+        sleeve = PC.strategy_sleeve(strat)
+        f = FN.compute([dict(r, ev=None) for r in mine], sleeve=sleeve,
+                       strategy=strat, top_n=0)
+        reasons = {e["blocker"]: e["unique_opportunities"]
+                   for e in f["blockers"] if e["unique_opportunities"]}
+        if f["totals"]["entered_unique"]:
+            reasons["ENTER"] = f["totals"]["entered_unique"]
+        evals: dict = {}
+        for r in mine:
+            b = FN.blocker_of(r)
+            k = "ENTER" if b == FN.ENTERED else b
+            evals[k] = evals.get(k, 0) + 1
+        out[strat] = {
+            "decisions": len(mine), "sleeve": sleeve,
+            "unique_opportunities": f["totals"]["unique_opportunities"],
+            "re_evaluations": f["totals"]["re_evaluations"],
+            "unkeyed_decisions": f["totals"]["unkeyed_evaluations"],
+            "reasons": dict(sorted(reasons.items(),
+                                   key=lambda kv: (-kv[1], kv[0]))),
+            "reason_evaluations": dict(sorted(
+                evals.items(), key=lambda kv: (-kv[1], kv[0]))),
+            "reasons_basis": ("unique opportunities each reason binds "
+                              "(fixture / market / side / line / period); "
+                              "rows are reason_evaluations")}
+    if len(rows) >= FUNNEL_ROWS_MAX:
+        for v in out.values():
+            v["truncated_to_newest_rows"] = FUNNEL_ROWS_MAX
     return out
 
 

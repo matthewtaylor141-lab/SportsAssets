@@ -644,6 +644,59 @@ async def test_the_reads_serve_research_envelopes(monkeypatch):
             "FALSE_REFUSAL"}
 
 
+@pg
+async def test_refusal_reasons_rank_by_unique_opportunity_not_rows(
+        monkeypatch):
+    """(R30A, owner audit 2026-10-04) The ledger holds one row per DECISION;
+    a market re-evaluated six times for one reason is ONE opportunity. The
+    summary ranks the reasons by unique opportunities (the funnel's key),
+    keeps the rows beside it as evaluations, and splits by sleeve."""
+    from sportsassets.api import command_lost_opportunity as API
+
+    now = time.time()
+    async with _txn() as conn:
+        async def pool():
+            return _Pool(conn)
+        monkeypatch.setattr(API, "_pool", pool)
+        acct = await X.account(conn, now=now)
+        t = now - 3 * DAY
+        hot = F.uid("lol-hot-")
+        for i in range(6):                      # ONE market, six rows
+            await X.decision(conn, acct, at=t + i, refusals=[CL.R_STALE],
+                             slug=hot, pd=X.pd_fig(0.8), book=X.book_rec())
+        await X.settle(conn, slug=hot, outcome="LOST", at=t + 6 * HOUR,
+                       now=now)
+        for i in range(3):                      # three markets, once each
+            d = await X.decision(conn, acct, at=t + 10 + i,
+                                 refusals=[CL.R_BELOW], pd=X.pd_fig(-0.1),
+                                 book=X.book_rec())
+            await X.settle(conn, slug=d["slug"], outcome="WON",
+                           at=t + 6 * HOUR, now=now)
+        got = await LR.run_component(conn, now=now)
+        assert got["components"]["LEDGER"] == "OK", got
+        out = await API.lost_opportunities(classification="", league="",
+                                           classifier_version=CL.VERSION,
+                                           limit=200)
+        assert out["status"] == "OK", out["why"]
+        summ = out["data"]["summary"]
+        by = {e["refusal"]: e for e in summ["by_refusal_reason"]}
+        assert by[CL.R_STALE]["n"] == 6 and by[CL.R_BELOW]["n"] == 3
+        assert by[CL.R_STALE]["unique_opportunities"] == 1
+        assert by[CL.R_STALE]["re_evaluations"] == 5
+        assert by[CL.R_BELOW]["unique_opportunities"] == 3
+        assert by[CL.R_BELOW]["re_evaluations"] == 0
+        # the row count ranked the stale reason first; unique opportunities
+        # rank the reason that cost three markets first
+        order = [e["refusal"] for e in summ["by_refusal_reason"]
+                 if e["refusal"] in (CL.R_STALE, CL.R_BELOW)]
+        assert order == [CL.R_BELOW, CL.R_STALE]
+        # Derek is an INVESTMENT strategy (migration 223's map)
+        assert by[CL.R_BELOW]["unique_opportunities_by_sleeve"] == {
+            "INVESTMENT": 3, "TRAINING": 0, "BENCHMARK": 0,
+            "UNCLASSIFIED": 0}
+        assert "unique opportunities" in summ["by_refusal_reason_basis"]
+
+
 async def test_a_failed_read_is_unavailable_not_zeros(monkeypatch):
     from sportsassets.api import command_lost_opportunity as API
 

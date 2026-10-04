@@ -14,26 +14,40 @@ THE PROOFS.
      level); levels 4-6 are NOT_REACHED while SMALL LIVE is SHADOW, whatever
      the paper and parity evidence says; the legacy execution mirror's
      venue orders are reported beside, never counted.
-  §2 LEVEL 2 HAS NO INVENTED SAMPLE COUNT. The power requirement is derived
-     from the OBSERVED per-event mean and variance (n_power = ceil(((z_a +
-     z_p) * sd / mean)^2)); a strong small sample meets level 2 below
-     validation's fixed 30 (reported, not the gate); a weak sample of 40
-     does not; fewer than two events or a zero variance is UNAVAILABLE --
-     never a pass; no cutover -> no forward window -> NOT_MET.
+  §2 LEVEL 2 HAS NO INVENTED SAMPLE COUNT, AND NO MANUFACTURED PASS. The
+     per-event sd is floored at the payoffs' zero-edge sd (a binary
+     contract's win-or-lose outcome; an all-winning small sample's observed
+     variance is only stake noise), the floored t bound must clear zero,
+     and the power requirement is derived from the observed mean and that
+     floored sd. TWO winning events -- which passed V1 -- do not meet level
+     2; no all-winning record at price c meets it while c^n (its zero-edge
+     chance) exceeds 5%; a strong small sample with real outcome variance
+     meets level 2 below validation's fixed 30 (reported, not the gate); a
+     weak sample of 40 does not; fewer than two events, or a position with
+     no recorded payoff range, is UNAVAILABLE -- never a pass; no cutover ->
+     no forward window -> NOT_MET.
   §3 SLEEVES. A TRAINING (or BENCHMARK, or UNCLASSIFIED) win or loss cannot
      raise or lower any INVESTMENT level or move its evidence; a TRAINING
      strategy stays at level 0 with SLEEVE_IS_TRAINING; every scope names
      book, sleeve, strategy, policy_version(s) and its confidence scope.
   §4 LEVEL 3 is live_parity's parity gate: the owner's minimum PARITY sample
-     (30 decision / 30 management INVESTMENT intents), zero LOGIC_DIVERGENCE;
-     its profitability blocker belongs to level 2.
+     (30 decision / 30 management INVESTMENT intents), zero LOGIC_DIVERGENCE.
+     live_parity.readiness's tiny-live verdict (parity gate AND the
+     validation verdict SUPPORTED) is carried into level 4's blockers, its
+     copy pinned to live_parity.readiness's own output: while validation
+     says POSITIVE_BUT_INSUFFICIENT_SAMPLE no scope reports "only live
+     capital" as the blocker of tiny live.
   §5 AUTHORITY. The route is GET only, 401 without a command session; the
      pure module does no I/O; neither module holds a SQL write.
   §6 THE DATABASE. Over positions written by the REAL paper ledger (submit
      -> simulate -> settle; the migration-223 entry trigger classifies them)
      the endpoint answers inside one READ ONLY transaction: the INVESTMENT
      ladder from the INVESTMENT positions, and a large TRAINING win and loss
-     change no INVESTMENT level, evidence or blocker.
+     change no INVESTMENT level, evidence or blocker. The parity assertions
+     are HERMETIC: they compare with live_parity.readiness_report read in the
+     same transaction, so committed parity rows of other tests (the
+     paper-pass parity proof runs earlier on the critical list) cannot fail
+     them.
 ALL DATA HERE IS SYNTHETIC TEST DATA.
 """
 from __future__ import annotations
@@ -83,7 +97,9 @@ SHADOW = {"small_live_mode": "SHADOW", "small_live_halted": False,
 
 
 def _pos(i, net, *, strategy=CG, sleeve="INVESTMENT", at=None, fixture=None,
-         open_qty=0.0, pv="CG_V2"):
+         open_qty=0.0, pv="CG_V2", qty=100.0, cost=50.0):
+    """One validation position row. `qty` contracts bought for `cost`
+    (fees included) is its payoff range: it settles in [-cost, qty - cost]."""
     at = CUT + (i + 1) * HOUR if at is None else at
     return {"position_key": "paperpos:t:g%s:%s:m:LONG" % (strategy, i),
             "group_id": "g-%s-%s" % (strategy, i), "sleeve": sleeve,
@@ -94,11 +110,19 @@ def _pos(i, net, *, strategy=CG, sleeve="INVESTMENT", at=None, fixture=None,
             "first_fill_at": at, "released_at": at + HOUR,
             "open_qty": open_qty, "realized_pnl_usd": net,
             "unrealized_pnl_usd": None, "marked": False,
-            "acquisition_cost_usd": 50.0, "gross_traded_usd": 50.0}
+            "bought_qty": qty, "sale_fees_usd": 0.0,
+            "acquisition_cost_usd": cost, "gross_traded_usd": cost}
 
 
-def _parity(n_dec, n_mgt, *, divergences=0, sleeve="INVESTMENT",
-            strategy=CG):
+def _bin(i, won, price, qty, **kw):
+    """A binary position held to settlement: bought `qty` at `price`, it
+    nets qty * (1 - price) when it wins and -qty * price when it loses."""
+    cost = qty * price
+    return _pos(i, (qty - cost) if won else -cost, qty=qty, cost=cost, **kw)
+
+
+def _parity_rows(n_dec, n_mgt, *, divergences=0, sleeve="INVESTMENT",
+                 strategy=CG):
     rows = []
     for i in range(n_dec):
         rows.append({"intent_kind": "DECISION", "sleeve": sleeve,
@@ -109,12 +133,22 @@ def _parity(n_dec, n_mgt, *, divergences=0, sleeve="INVESTMENT",
         rows.append({"intent_kind": "MANAGEMENT", "sleeve": sleeve,
                      "strategy": strategy, "comparison": {},
                      "parity_state": LP.MATCHED})
-    return LP.readiness(rows, halted=False)
+    return rows
 
 
-# a strong small sample: 8 independent winning events of varying size
-STRONG = [_pos(i, x) for i, x in enumerate(
-    (10.0, 12.0, 9.0, 11.0, 10.0, 13.0, 8.0, 11.0))]
+def _parity(n_dec, n_mgt, **kw):
+    return LP.readiness(_parity_rows(n_dec, n_mgt, **kw), halted=False)
+
+
+# A STRONG SMALL SAMPLE WITH REAL OUTCOME VARIANCE: ten independent events,
+# each 250 contracts bought at 0.20 ($50) -- +$200 on a win, -$50 on a loss
+# -- seven wins and three losses. At zero edge (a fair 0.20) seven or more
+# wins in ten has probability ~0.0009, so the evidence genuinely supports
+# the claim; it is still below validation's fixed 30.
+STRONG = [_bin(i, i not in (2, 5, 8), 0.20, 250.0) for i in range(10)]
+# ...and a sample that ALSO meets validation's fixed minimums: 45 events at
+# 0.20, 18 wins (validation's verdict SUPPORTED_BY_FORWARD_EVIDENCE)
+SUPPORTED = [_bin(i, i % 5 in (0, 2), 0.20, 250.0) for i in range(45)]
 
 
 def _ladder(positions, *, parity=None, strategies=(CG,), cutover=CUT,
@@ -145,14 +179,19 @@ def test_the_levels_are_the_owner_audits_in_order():
 
 
 def test_full_paper_and_parity_evidence_stops_at_three_without_live_capital():
-    out = _ladder(STRONG)
+    out = _ladder(SUPPORTED)
     ov = out["overall"]
+    by = {lv["level"]: lv for lv in ov["levels"]}
+    assert by[2]["evidence"]["validation_verdict"] == V.SUPPORTED
     assert ov["level"] == 3 and ov["level_name"] == "LIVE_SHADOW_PARITY"
     assert ov["next_level"] == 4
+    # validation SUPPORTED + the parity gate: live_parity's tiny-live
+    # readiness is READY, so live capital is the ONLY blocker left
+    assert by[4]["evidence"]["tiny_live_readiness"]["recommendation"] == \
+        CL.READY_FOR_TINY_PILOT
     assert ov["blockers_for_next_level"] and all(
         b.startswith(CL.R_NO_LIVE_CAPITAL)
         for b in ov["blockers_for_next_level"])
-    by = {lv["level"]: lv for lv in ov["levels"]}
     for lv in (4, 5, 6):
         assert by[lv]["status"] == CL.NOT_REACHED and not by[lv]["met"]
         assert by[lv]["blockers"]
@@ -162,6 +201,41 @@ def test_full_paper_and_parity_evidence_stops_at_three_without_live_capital():
     assert by[4]["evidence"]["execmirror_role"].startswith(
         "REPORTED, NOT COUNTED")
     assert out["strategies"][CG]["level"] == 3
+
+
+def test_tiny_live_is_never_reported_as_blocked_only_by_capital_while_readiness_says_not_ready():
+    # STRONG meets level 2 (variance-derived) below validation's fixed 30:
+    # validation says POSITIVE_BUT_INSUFFICIENT_SAMPLE, so live_parity's
+    # readiness for tiny live is NOT_READY -- and level 4 SAYS so
+    ov = _ladder(STRONG)["overall"]
+    by = {lv["level"]: lv for lv in ov["levels"]}
+    assert by[2]["status"] == CL.MET
+    assert by[2]["evidence"]["validation_verdict"] == V.POSITIVE_BUT_INSUFFICIENT
+    agree = by[2]["evidence"]["validation_agreement"]
+    assert agree["agrees"] is False and "MIN_INDEPENDENT_EVENTS" in agree["why"]
+    assert ov["level"] == 3
+    nxt = ov["blockers_for_next_level"]
+    assert nxt[0].startswith(CL.R_NO_LIVE_CAPITAL)
+    assert "%s: PROFITABILITY:%s" % (CL.R_TINY_LIVE,
+                                     V.POSITIVE_BUT_INSUFFICIENT) in nxt
+    rd = by[4]["evidence"]["tiny_live_readiness"]
+    assert rd["recommendation"] == CL.NOT_READY
+    # THE COPY IS live_parity.readiness's OWN RULE: for the same parity rows
+    # and the same verdict, the same blockers
+    rows = _parity_rows(30, 30)
+    for verdict in (V.POSITIVE_BUT_INSUFFICIENT, V.SUPPORTED, V.NEGATIVE,
+                    V.NOT_ESTABLISHED, None):
+        mine = CL.tiny_live_readiness(LP.readiness(rows, halted=False),
+                                      verdict)
+        theirs = LP.readiness(rows, halted=False, profitability={
+            "profitability_verdict": verdict})
+        assert mine["blockers"] == theirs["blockers"], verdict
+        assert mine["recommendation"] == theirs["recommendation"], verdict
+    short = _parity_rows(3, 1, divergences=1)
+    mine = CL.tiny_live_readiness(LP.readiness(short, halted=True), V.SUPPORTED)
+    theirs = LP.readiness(short, halted=True, profitability={
+        "profitability_verdict": V.SUPPORTED})
+    assert mine["blockers"] == theirs["blockers"]
 
 
 def test_a_level_is_never_skipped():
@@ -191,38 +265,109 @@ def test_a_window_length_is_not_a_record():
     assert "NO_INVESTMENT_PAPER_POSITION" in s["blockers_for_next_level"]
 
 
-# ── §2 level 2: power from the observed variance ─────────────────────
+# ── §2 level 2: a floored variance, power from the evidence ──────────
 
-def test_power_is_derived_from_the_observed_variance():
-    xs = [10.0, 12.0, 9.0, 11.0, 10.0, 13.0, 8.0, 11.0]
-    pw = CL.power(xs)
+def test_two_winning_events_do_not_reach_level_two():
+    """THE REVIEW'S COUNTER-EXAMPLE: +10 and +11 on two independent events
+    had an observed sd of 0.7 and met V1's level 2 (then level 3, with
+    only NO_LIVE_CAPITAL in front of tiny live)."""
+    two = [_bin(0, True, 0.5, 20.0), _bin(1, True, 0.5, 22.0)]
+    assert [p["realized_pnl_usd"] for p in two] == [10.0, 11.0]
+    lv2 = CL.level_two(two, cutover=CUT, now=NOW)
+    pw = lv2["evidence"]["power"]
+    assert lv2["status"] == CL.NOT_MET
+    assert pw["sd_observed"] == pytest.approx(math.sqrt(0.5))
+    # the zero-edge sd of a $0.50 binary on 20-22 contracts is ~10.5
+    assert pw["sd_basis"] == "PAYOFF_FLOOR" and pw["sd_eff"] > 10.0
+    assert any(CL.R_FLOORED_T in b for b in lv2["blockers"])
+    assert lv2["evidence"]["validation_verdict"] == V.POSITIVE_BUT_INSUFFICIENT
+    assert lv2["evidence"]["validation_agreement"]["agrees"] is True
+    ov = _ladder(two)["overall"]
+    assert ov["level"] == 1 and ov["next_level"] == 2
+
+
+@pytest.mark.parametrize("price", (0.3, 0.5, 0.7, 0.83, 0.9))
+def test_no_all_winning_record_passes_while_luck_explains_it(price):
+    """An all-winning record of n events at a fair price c happens with
+    probability c^n at ZERO edge. Level 2 is never MET while that chance
+    exceeds the 5% the bound claims -- whatever the stake sizes."""
+    for n in range(2, 61):
+        wins = [_bin(i, True, price, 100.0 + 7.0 * (i % 3)) for i in range(n)]
+        lv2 = CL.level_two(wins, cutover=CUT, now=NOW)
+        if price ** n > 0.05:
+            assert lv2["status"] == CL.NOT_MET, (price, n)
+    # the 8-win record at ~0.83 the V1 pins used (22% at zero edge)
+    eight = [_bin(i, True, 0.83, 60.0) for i in range(8)]
+    assert CL.level_two(eight, cutover=CUT, now=NOW)["status"] == CL.NOT_MET
+
+
+def test_power_is_derived_from_the_observed_and_payoff_variance():
+    xs = [p["realized_pnl_usd"] for p in STRONG]
+    floors = [CL.payoff_sd(p) for p in STRONG]
+    # the zero-edge sd of 250 contracts at 0.20: sqrt(200 * 50) = 100
+    assert floors == [pytest.approx(100.0)] * 10
+    pw = CL.power(xs, floors)
     m = sum(xs) / len(xs)
-    sd = math.sqrt(sum((x - m) ** 2 for x in xs) / (len(xs) - 1))
+    sd_obs = math.sqrt(sum((x - m) ** 2 for x in xs) / (len(xs) - 1))
+    sd = max(sd_obs, 100.0)
     need = max(2, math.ceil(((CL.Z_ALPHA + CL.Z_POWER) * sd / m) ** 2))
-    assert pw["n_power"] == need and pw["status"] == CL.MET
-    assert pw["mean"] == pytest.approx(m) and pw["sd"] == pytest.approx(sd)
-    # the observed-CI sample: the smallest n whose t lower bound clears 0
+    assert pw["n_power"] == need and pw["status"] == CL.MET, pw
+    assert pw["mean"] == pytest.approx(m)
+    assert pw["sd_observed"] == pytest.approx(sd_obs)
+    assert pw["sd_eff"] == pytest.approx(sd)
+    assert pw["t_lower_95_floored"] == pytest.approx(
+        m - V.t_crit_95(9) * sd / math.sqrt(10))
+    # the CI sample: the smallest n whose floored t lower bound clears 0
     k = pw["n_ci"]
     assert m - V.t_crit_95(k - 1) * sd / math.sqrt(k) > 0
     assert k == 2 or m - V.t_crit_95(k - 2) * sd / math.sqrt(k - 1) <= 0
+    # the floor binds when the observed variance understates the payoffs
+    pw = CL.power([10.0, 11.0, 10.5], [10.0, 10.0, 10.0])
+    assert pw["sd_basis"] == "PAYOFF_FLOOR" and pw["sd_eff"] == 10.0
     # a weak edge needs far more events than it has
     weak = [1.0 + (10.0 if i % 2 else -10.0) for i in range(40)]
-    pw = CL.power(weak)
+    pw = CL.power(weak, [10.0] * 40)
     assert pw["status"] == CL.NOT_MET
     assert pw["n_power"] > 40 and pw["shortfall"] == pw["n_power"] - 40
     assert "BELOW_THE_%d" % pw["n_power"] in pw["why"]
-    # never a pass without an estimate
-    assert CL.power([])["status"] == CL.UNAVAILABLE
-    assert CL.power([5.0])["status"] == CL.UNAVAILABLE
-    assert CL.power([5.0, 5.0, 5.0])["status"] == CL.UNAVAILABLE
-    assert "ZERO_OBSERVED_VARIANCE" in CL.power([5.0, 5.0])["why"]
-    assert CL.power([-1.0, -3.0])["status"] == CL.NOT_MET
+    # never a pass without an estimate, or without the payoff floor
+    assert CL.power([], [])["status"] == CL.UNAVAILABLE
+    assert CL.power([5.0], [3.0])["status"] == CL.UNAVAILABLE
+    assert CL.power([5.0, 6.0], None)["status"] == CL.UNAVAILABLE
+    assert CL.R_NO_PAYOFF_RANGE in CL.power([5.0, 6.0], [1.0, None])["why"]
+    assert CL.power([-1.0, -3.0], [1.0, 1.0])["status"] == CL.NOT_MET
+
+
+def test_payoff_sd_is_the_zero_edge_bound_of_the_recorded_range():
+    # a held binary at a fair price c: q * sqrt(c * (1 - c))
+    for c in (0.1, 0.5, 0.83):
+        p = _bin(0, True, c, 100.0)
+        assert CL.payoff_sd(p) == pytest.approx(100.0 * math.sqrt(c * (1 - c)))
+    # sale fees widen the losing end
+    p = dict(_bin(0, True, 0.5, 100.0), sale_fees_usd=2.0)
+    assert CL.payoff_sd(p) == pytest.approx(math.sqrt(50.0 * 52.0))
+    # paid more than the most it can return: Popoviciu's (hi - lo) / 2
+    p = _pos(0, -1.0, qty=10.0, cost=11.0)
+    assert CL.payoff_sd(p) == pytest.approx((-1.0 + 11.0) / 2.0)
+    # no recorded range: None (level 2 UNAVAILABLE, never a pass)
+    assert CL.payoff_sd(dict(STRONG[0], bought_qty=None)) is None
+    assert CL.payoff_sd(dict(STRONG[0], acquisition_cost_usd=None)) is None
+    lv2 = CL.level_two([dict(p, bought_qty=None) for p in STRONG],
+                       cutover=CUT, now=NOW)
+    assert lv2["status"] == CL.NOT_MET
+    assert any(CL.R_NO_PAYOFF_RANGE in b for b in lv2["blockers"])
+    # one event's positions are summed sd by sd (any dependence)
+    a = _bin(0, True, 0.5, 100.0, fixture="fx-one")
+    b = dict(_bin(1, False, 0.2, 50.0, fixture="fx-one"))
+    ev = CL._events([a, b])
+    assert len(ev) == 1 and ev[0]["payoff_sd"] == pytest.approx(
+        CL.payoff_sd(a) + CL.payoff_sd(b))
 
 
 def test_level_two_has_no_fixed_sample_count():
     lv2 = CL.level_two(STRONG, cutover=CUT, now=NOW)
     ev = lv2["evidence"]
-    # MET on 8 independent events: validation's fixed 30/30 fail, and are
+    # MET on 10 independent events: validation's fixed 30/30 fail, and are
     # reported beside the ladder's result as NOT its gate
     assert lv2["status"] == CL.MET, lv2["blockers"]
     assert ev["validation_fixed_minimums"]["MIN_RESOLVED"]["passed"] is False
@@ -230,14 +375,25 @@ def test_level_two_has_no_fixed_sample_count():
         "passed"] is False
     assert ev["validation_verdict"] == V.POSITIVE_BUT_INSUFFICIENT
     assert "PARITY" in ev["fixed_minimums_role"]
-    assert ev["power"]["independent_events"] == 8
+    assert ev["power"]["independent_events"] == 10
     assert all(ev["statistical_checks"].values())
     # forty WEAK events: no fixed count makes it pass
-    weak = [_pos(i, 1.0 + (10.0 if i % 2 else -10.0)) for i in range(40)]
+    weak = [_bin(i, i % 2 == 0, 0.5, 20.0) for i in range(40)]
+    weak.append(_bin(40, True, 0.5, 20.0))
     lv2 = CL.level_two(weak, cutover=CUT, now=NOW)
     assert lv2["status"] == CL.NOT_MET
     assert "T_LOWER_BOUND_POSITIVE" in lv2["blockers"]
     assert any(b.startswith("POWER:") for b in lv2["blockers"])
+
+
+def test_the_overall_verdict_is_the_validation_endpoints_exactly():
+    data = {"positions": STRONG + SUPPORTED[:5]}
+    rep = V.compute(data, now=NOW, since=None, cutover=CUT)
+    lv2 = CL.level_two(data["positions"], cutover=CUT, now=NOW)
+    assert lv2["evidence"]["validation_evidence"] == \
+        rep["profitability_verdict"]["evidence"]
+    assert lv2["evidence"]["validation_verdict"] == \
+        rep["profitability_verdict"]["verdict"]
 
 
 def test_level_two_counts_events_not_positions():
@@ -256,8 +412,9 @@ def test_no_cutover_means_no_forward_window():
     assert by[2]["blockers"] == [V.R_NO_CUTOVER]
     assert ov["level"] == 1
     # pre-cutover evidence is never forward evidence
-    old = [_pos(i, x, at=CUT - DAY + i * HOUR) for i, x in enumerate(
-        (10.0, 12.0, 9.0, 11.0, 10.0, 13.0, 8.0, 11.0))]
+    old = [dict(p, first_fill_at=CUT - DAY + i * HOUR,
+                released_at=CUT - DAY + (i + 1) * HOUR)
+           for i, p in enumerate(STRONG)]
     lv2 = CL.level_two(old, cutover=CUT, now=NOW)
     assert lv2["status"] == CL.NOT_MET
     assert lv2["evidence"]["forward_positions"] == 0
@@ -357,10 +514,13 @@ def test_level_three_is_the_parity_gate():
         STRONG, parity=_parity(40, 40, sleeve="TRAINING"))["overall"][
         "levels"]}
     assert by[3]["status"] == CL.NOT_MET
-    # the gate's own profitability blocker is level 2's, not level 3's
+    # the gate's own profitability blocker is not a parity fact: level 3 is
+    # the parity gate, and the blocker is carried to level 4 (tiny live)
     rep = _parity(30, 30)
     assert any(b.startswith("PROFITABILITY") for b in rep["blockers"])
     assert CL.level_three(rep)["status"] == CL.MET
+    lv4 = CL.live_levels(SHADOW, CL.tiny_live_readiness(rep, None))[0]
+    assert "%s: PROFITABILITY:NOT_EVALUATED" % CL.R_TINY_LIVE in lv4["blockers"]
     # an unread parity ledger is UNAVAILABLE with its reason
     lv3 = CL.level_three(None, why_unavailable="MIGRATION_225_NOT_APPLIED")
     assert lv3["status"] == CL.UNAVAILABLE
@@ -536,12 +696,30 @@ async def test_the_endpoint_over_the_real_ledger(monkeypatch):
         assert by[2]["status"] == CL.NOT_MET
         assert any(b.startswith("POWER:") for b in by[2]["blockers"])
         assert ov["level"] == 1 and ov["next_level"] == 2
-        # no parity row since the cutover: level 3's sample shortfall
-        assert any(b.startswith("DECISION_SAMPLE:0_OF_")
-                   for b in by[3]["blockers"])
+        # every resolved position carried its payoff range from the ledger
+        assert all(e["payoff_sd_usd"] and e["payoff_sd_usd"] > 0
+                   for e in by[2]["evidence"]["events"])
+        # LEVEL 3 IS live_parity's PARITY GATE, read HERMETICALLY: the
+        # expectation is readiness_report over the SAME transaction (parity
+        # rows other tests committed after this cutover are in both), not a
+        # fixed count of zero
+        gate = await LP.readiness_report(conn)
+        assert by[3]["blockers"] == [b for b in gate["blockers"]
+                                     if not b.startswith("PROFITABILITY")]
+        n_dec = gate["candidate_count"]
+        if n_dec < LP.MIN_DECISION_SAMPLE:
+            assert "DECISION_SAMPLE:%d_OF_%d" % (
+                n_dec, LP.MIN_DECISION_SAMPLE) in by[3]["blockers"]
+            assert by[3]["status"] == CL.NOT_MET
         for lv in (4, 5, 6):
             assert by[lv]["status"] == CL.NOT_REACHED
         assert by[4]["evidence"]["small_live_mode"] == "SHADOW"
+        # validation's verdict on six events is POSITIVE_BUT_INSUFFICIENT:
+        # live_parity's tiny-live readiness is NOT_READY, and level 4 says so
+        assert by[2]["evidence"]["validation_verdict"] == \
+            V.POSITIVE_BUT_INSUFFICIENT
+        assert "%s: PROFITABILITY:%s" % (
+            CL.R_TINY_LIVE, V.POSITIVE_BUT_INSUFFICIENT) in by[4]["blockers"]
         cg = d["strategies"][CG]
         assert cg["level"] == 1
         # these entries carry no decision, so migration 223 recorded no

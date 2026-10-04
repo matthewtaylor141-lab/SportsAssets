@@ -215,6 +215,63 @@ async def lost_opportunities(
                  "n": 0}, **{c: 0 for c in CLASSES}))
             e[r["classification"]] += r["n"]
             e["n"] += r["n"]
+        # UNIQUE OPPORTUNITIES PER REFUSAL (R30A, owner audit 2026-10-04).
+        # The ledger holds ONE ROW PER DECISION, and every policy
+        # re-evaluates the same live market on each valuation: ranking the
+        # reasons by row count ranked how often a market was LOOKED AT
+        # (production: 22 decision rows per contract on average, up to 91).
+        # The reasons are now ranked by the unique opportunities they
+        # refused -- the funnel's key (fixture / market / side / line /
+        # period; the fixture, line and period from the decision the row
+        # classifies) -- with the rows kept beside it as evaluations, and the
+        # unique count split by the refusing strategy's sleeve (migration
+        # 223's map; a strategy outside it, or none, is UNCLASSIFIED). A row
+        # with no market or side cannot be deduplicated and counts as its own
+        # opportunity (`unkeyed`).
+        from ..profitability import common as PC
+        sl = {k: sorted(s_ for s_, v_ in PC.STRATEGY_SLEEVE.items()
+                        if v_ == k)
+              for k in (PC.INVESTMENT, PC.TRAINING, PC.BENCHMARK)}
+        for r in await conn.fetch(
+                "SELECT refusal, count(*) AS n, "
+                "       count(DISTINCT k) AS uniq, "
+                "       count(*) FILTER (WHERE k IS NULL) AS unkeyed, "
+                "       count(DISTINCT k) FILTER (WHERE strategy = "
+                "         ANY($2::text[])) AS inv, "
+                "       count(DISTINCT k) FILTER (WHERE strategy = "
+                "         ANY($3::text[])) AS tr, "
+                "       count(DISTINCT k) FILTER (WHERE strategy = "
+                "         ANY($4::text[])) AS bench, "
+                "       count(DISTINCT k) FILTER (WHERE strategy IS NULL OR "
+                "         NOT strategy = ANY($5::text[])) AS unc "
+                "  FROM (SELECT x.refusal, x.strategy, "
+                "               CASE WHEN x.us_market_slug IS NOT NULL "
+                "                     AND x.holding_side IS NOT NULL "
+                "                    THEN concat_ws('|', "
+                "                         coalesce(d.fixture, ''), "
+                "                         x.us_market_slug, "
+                "                         upper(x.holding_side), "
+                "                         coalesce(d.label->>'line', ''), "
+                "                         coalesce(d.label->>'period', '')) "
+                "               END AS k "
+                "          FROM lol_ledger x "
+                "          LEFT JOIN paper_decisions d "
+                "            ON d.decision_id = x.decision_ref "
+                "         WHERE x.classifier_version = $1) AS keyed "
+                " GROUP BY refusal", v, sl[PC.INVESTMENT], sl[PC.TRAINING],
+                sl[PC.BENCHMARK], sorted(PC.STRATEGY_SLEEVE)):
+            e = by_reason.get(r["refusal"] or "(none)")
+            if e is None:
+                continue
+            uniq = int(r["uniq"]) + int(r["unkeyed"])
+            e["unique_opportunities"] = uniq
+            e["evaluations"] = int(r["n"])
+            e["re_evaluations"] = int(r["n"]) - uniq
+            e["unkeyed"] = int(r["unkeyed"])
+            e["unique_opportunities_by_sleeve"] = {
+                PC.INVESTMENT: int(r["inv"]), PC.TRAINING: int(r["tr"]),
+                PC.BENCHMARK: int(r["bench"]),
+                PC.UNCLASSIFIED: int(r["unc"])}
         by_attr = {}
         for r in await conn.fetch(
                 "SELECT attribution, classification, count(*) AS n, "
@@ -300,9 +357,17 @@ async def lost_opportunities(
                 "total": total, "by_class": by_class,
                 "by_league": sorted(by_league.values(),
                                     key=lambda e: (-e["n"], e["league"])),
+                # ranked by UNIQUE OPPORTUNITIES; `n` (rows) is kept as
+                # the evaluations beside it
                 "by_refusal_reason": sorted(
                     by_reason.values(),
-                    key=lambda e: (-e["n"], e["refusal"])),
+                    key=lambda e: (-e.get("unique_opportunities", e["n"]),
+                                   -e["n"], e["refusal"])),
+                "by_refusal_reason_basis": (
+                    "unique opportunities (fixture / market / side / line / "
+                    "period) per refusal; `n` / `evaluations` are rows, "
+                    "`re_evaluations` the rows beyond the first per "
+                    "opportunity; split by the refusing strategy's sleeve"),
                 "by_attribution": sorted(
                     by_attr.values(),
                     key=lambda e: (-e["n"], e["attribution"])),

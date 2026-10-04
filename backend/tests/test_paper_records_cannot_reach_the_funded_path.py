@@ -162,13 +162,19 @@ def test_no_funded_module_imports_the_paper_modules():
                # (tests/test_profitability_validation.py)
                "api/command_validation.py",
                # (R30A) the confidence ladder (/api/command/confidence-
-               # ladder): GET-only; reads the paper positions through
-               # command_validation.gather (bettor_paper_ledger.ACCOUNT_ID,
-               # positions / balances, the sleeves), counts paper_decisions
-               # per strategy and reads the parity ledger and the SMALL LIVE
+               # ladder): GET-only; it imports bettor_paper_ledger (for
+               # ACCOUNT_ID, and command_validation.gather's positions /
+               # balances / sleeves reads), counts paper_decisions per
+               # strategy, and reads the parity ledger and the SMALL LIVE
                # control, all inside one READ ONLY transaction. It writes
-               # nothing and imports no order, venue, execution or funded
-               # module (tests/test_confidence_ladder.py)
+               # nothing. NOTE (R30A review): it also imports live_parity --
+               # whose module top imports execmirror (the legacy mirror that
+               # holds Venue.place) -- and calls ONLY its read functions
+               # readiness_report / readiness: no venue, order, submit or
+               # control call is made, and execmirror.Venue.place refuses
+               # without a canonical LIVE authorization in any case. No
+               # funded module is imported (tests/test_confidence_ladder.py
+               # pins the route's imports and SQL)
                "api/command_confidence_ladder.py",
                # (226, owner R30) Xavier's fresh-evidence work queue: reads
                # the paper ledger's open positions (to close the requests of

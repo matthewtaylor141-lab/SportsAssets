@@ -7,9 +7,11 @@
 
 Blockers ranked by UNIQUE OPPORTUNITIES -- key (fixture, us_market_slug,
 holding_side, label.line, label.period) -- with every repeated decision row
-counted as a re-evaluation, never as another opportunity; near misses and
-missed executable EV at the strategy's own executable book freshness
-(profitability/opportunity_funnel.py has the rule).
+counted as a re-evaluation, never as another opportunity, and attributed
+per (opportunity, strategy): one strategy's ENTER never hides another's
+refusal, and the binding blocker is never "whichever strategy evaluated
+last"; near misses and missed executable EV at the strategy's own executable
+book freshness (profitability/opportunity_funnel.py has the rule).
 
 READS (SELECT only, one READ ONLY transaction under a statement timeout):
   * paper_decisions of the paper account in the window, for the sleeve's
@@ -17,8 +19,13 @@ READS (SELECT only, one READ ONLY transaction under a statement timeout):
   * paper_book_observations: each evaluated decision's own readable book,
     else the latest error-free observation of its market at or before the
     decision no older than the strategy's executable bound -- never older;
-    at most EV_PER_OPPORTUNITY evaluations per opportunity and
-    MAX_EV_EVALUATIONS in all are priced (the rest say NOT_EVALUATED).
+    at most EV_PER_OPPORTUNITY evaluations per (opportunity, strategy) and
+    MAX_EV_EVALUATIONS in all are priced -- first the LATEST fresh-
+    probability evaluation of every unit, then the rest up to the per-unit
+    bound. Every fresh-probability evaluation left unpriced carries the
+    explicit NOT_EVALUATED marker (opportunity_funnel.not_evaluated): it
+    still counts toward the probability stages, and an EV computed on a
+    partial set is flagged PARTIAL, never reported as the plain best.
 
 The sleeve of a decision is its strategy's (migration 223's classifier map;
 a strategy outside it is UNCLASSIFIED, never INVESTMENT). INVESTMENT is the
@@ -54,6 +61,7 @@ DECISIONS_SQL = (
     "       d.pinnacle->>'age_s' AS pin_age_s, "
     "       d.pinnacle->>'limit_s' AS pin_limit_s, "
     "       d.pinnacle->>'refusal' AS pin_refusal, "
+    "       d.pinnacle->>'qualification' AS pin_qualification, "
     "       CASE WHEN jsonb_typeof(d.book->'age_at_decision_s') = 'number' "
     "            THEN (d.book->>'age_at_decision_s')::float8 END "
     "            AS decision_book_age_s, "
@@ -79,30 +87,34 @@ def _row(r) -> dict:
     d["pinnacle"] = {"qualified": d.pop("pin_qualified") == "true",
                      "age_s": _f(d.pop("pin_age_s")),
                      "limit_s": _f(d.pop("pin_limit_s")),
-                     "refusal": d.pop("pin_refusal")}
+                     "refusal": d.pop("pin_refusal"),
+                     "qualification": d.pop("pin_qualification")}
     d["refusals"] = list(d.get("refusals") or [])
     return d
 
 
 def choose_for_ev(rows: list, *, per_key: int = EV_PER_OPPORTUNITY,
                   cap: int = MAX_EV_EVALUATIONS) -> set:
-    """The decision ids whose executable EV is priced: per opportunity, its
-    `per_key` LATEST evaluations with a fresh probability; at most `cap` in
-    all, newest opportunities first. Pure."""
+    """The decision ids whose executable EV is priced, per (opportunity,
+    strategy) unit: FIRST the latest fresh-probability evaluation of every
+    unit (newest units first), THEN the unit's next latest up to `per_key`;
+    at most `cap` in all. Pure."""
     from ..profitability import opportunity_funnel as FN
     by: dict = {}
     for r in sorted(rows, key=lambda r: -(r.get("decided_at") or 0.0)):
         k = FN.opportunity_key(r)
         if k is None or not FN.probability_fresh(r)["fresh"]:
             continue
-        lst = by.setdefault(k, [])
+        lst = by.setdefault((k, r.get("strategy")), [])
         if len(lst) < per_key:
             lst.append(r["decision_id"])
     out: set = set()
-    for lst in by.values():
-        if len(out) >= cap:
-            break
-        out.update(lst[:max(0, cap - len(out))])
+    for depth in range(per_key):
+        for lst in by.values():
+            if len(out) >= cap:
+                return out
+            if depth < len(lst):
+                out.add(lst[depth])
     return out
 
 
@@ -209,10 +221,12 @@ async def _read(conn, *, sleeve: str, strategy, hours: float,
             r["ev"] = FN.evaluate(r, book=books.get(r["decision_id"]),
                                   fee_fn=fee_for(r.get("decided_at")))
         elif not FN.probability_fresh(r)["fresh"]:
-            # a stale or absent probability is never priced: its reason
+            # a stale, unqualified or absent probability is never priced:
+            # its reason
             r["ev"] = FN.evaluate(r, book=None, fee_fn=None)
         else:
-            r["ev"] = None                         # NOT_EVALUATED (bound)
+            # a FRESH probability the bound left unpriced: said so
+            r["ev"] = FN.not_evaluated(r)
     overall = FN.compute(rows, sleeve=sleeve, strategy=strategy)
     per = {}
     for s in sorted({r["strategy"] for r in rows if r.get("strategy")}):
@@ -229,21 +243,29 @@ async def _read(conn, *, sleeve: str, strategy, hours: float,
         "strategies_in_scope": names if not negate else
         "every strategy outside the classifier's map",
         "overall": overall, "by_strategy": per,
-        "ev_bound": {"per_opportunity": EV_PER_OPPORTUNITY,
+        "ev_bound": {"per_opportunity_strategy": EV_PER_OPPORTUNITY,
                      "max_evaluations": MAX_EV_EVALUATIONS,
                      "priced": len(chosen),
-                     "rule": ("the latest evaluations with a fresh "
-                              "probability are priced; the rest of an "
-                              "opportunity's re-evaluations are counted, not "
-                              "priced")},
+                     "fresh_probability_not_priced": sum(
+                         1 for r in rows if (r.get("ev") or {}).get(
+                             "not_evaluated")),
+                     "rule": ("the latest fresh-probability evaluation of "
+                              "every (opportunity, strategy) unit is priced "
+                              "first, then up to the per-unit bound; the "
+                              "rest are NOT_EVALUATED (counted, never "
+                              "priced, never a zero) and an EV over a "
+                              "partial set is flagged PARTIAL")},
         "freshness_rule": ("executable EV only on the decision's own book at "
                            "its recorded age, or the latest observation at "
                            "or before the decision no older than the "
                            "strategy's executable bound (profitability."
                            "capacity.EXECUTABLE_BOOK_MAX_AGE_BY_STRATEGY = "
                            "the entry rule's own bound), with a Pinnacle "
-                           "probability qualified under its 30 s rule at the "
-                           "decision")}}
+                           "probability qualified (lane and provenance) and "
+                           "within its 30 s rule at the decision"),
+        "attribution": ("per (opportunity, strategy); `overall` counts an "
+                        "opportunity once per blocker that binds any of its "
+                        "strategies")}}
 
 
 @router.get(PATH, dependencies=[Depends(require_read)])

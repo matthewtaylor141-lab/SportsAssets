@@ -130,6 +130,10 @@ def position_rows(allp: list, open_views: list, classes: dict) -> list:
                                    if marked else None),
             "marked": marked,
             "cost_basis_usd": _f(p.get("cost_basis_usd")),
+            # (R30A) the contracts bought: with the acquisition cost it is
+            # the position's payoff range, which floors the confidence
+            # ladder's per-event variance (confidence_ladder.payoff_sd)
+            "bought_qty": _f(p.get("bought_qty")),
             "buy_fees_usd": bf, "sale_fees_usd": sf,
             "acquisition_cost_usd": acq, "gross_traded_usd": gross})
     return out

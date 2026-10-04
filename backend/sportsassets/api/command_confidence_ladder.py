@@ -17,7 +17,13 @@ READS (SELECT only, one READ ONLY transaction under a statement timeout):
     live_parity.readiness over each strategy's rows of the same forward
     window;
   * the SMALL LIVE control and the live venue records (levels 4-6 are
-    NOT_REACHED while SMALL LIVE is SHADOW).
+    NOT_REACHED while SMALL LIVE is SHADOW; level 4 also lists
+    live_parity's tiny-live readiness blockers, with the scope's own
+    validation verdict in place of readiness_report's NOT_EVALUATED).
+
+IMPORTS: live_parity is imported only for its READ functions
+(readiness_report, readiness); its module top imports execmirror, and no
+venue, order, submit or control function of either is called here.
 
 ANSWERS (the profitability envelope): data = {version, levels_spec,
 cutover, overall, strategies: {STRATEGY: {...}}, power_rule}; every scope
