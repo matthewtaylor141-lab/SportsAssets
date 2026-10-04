@@ -51,6 +51,7 @@ import pytest
 from sportsassets.analytics import mirror_live_rules as rules
 from sportsassets.workers import mirror_live as ml
 from tests import test_e30_post_only_body as e30
+from tests.workflow_source import render_ops_file as _render_ops_file
 from tests.test_mirror_live_worker import (  # noqa: F401 -- the autouse rails ride along
     # `_armed` IS the autouse fixture (review MEDIUM-4): an autouse fixture
     # applies to the module it is defined in, so without the NAME in this
@@ -62,7 +63,7 @@ from tests.test_mirror_live_worker import (  # noqa: F401 -- the autouse rails r
 )
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-YML = ROOT / ".github" / "workflows" / "render-ops.yml"
+YML = _render_ops_file()
 NEW_NAMES = ("maker_rest_at_touch", "maker_rest_repriced", "maker_cross_repriced", "maker_cross_held",
              "maker_no_cent", "maker_fill_at_create", "post_only_block", "ioc_refused",
              "rest_reread_capped", "rest_quote_unread")

@@ -74,9 +74,10 @@ from tests.test_mirror_live_worker import (  # noqa: F401 -- the autouse rails
     BUY, CID, GTC_TIF, M, N, NOW, SELL, SHORT, SLUG, _NoClose, _armed, _census, _his, _mkt, _places,
     _ratio_fills, _short_book, _shorts_on, _tick,
 )
+from tests.workflow_source import render_ops_file as _render_ops_file
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-YML = ROOT / ".github" / "workflows" / "render-ops.yml"
+YML = _render_ops_file()
 NEW_NAMES = ("hand_explained", "hand_adopted", "hand_unread", "hand_ambiguous")
 OPENED = NOW - 600                              # _Pool._book_dict's opened_ts
 HAND_SINCE = OPENED - le._ORPHAN_SKEW_S         # the hand read's window opens at the book's open - the skew

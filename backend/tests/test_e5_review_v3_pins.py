@@ -42,9 +42,10 @@ from tests.test_mirror_live_worker import (  # noqa: F401 -- the autouse rails
     _cancels, _census, _fill, _gone, _his, _kinds, _mkt, _places, _ratio_fills, _short_book,
     _shorts_on, _tick,
 )
+from tests.workflow_source import render_ops_file as _render_ops_file
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
-YML = REPO / ".github" / "workflows" / "render-ops.yml"
+YML = _render_ops_file()
 SELL_SHORT = "ORDER_INTENT_SELL_SHORT"
 
 XFAIL_V3_1 = "E5 v3 review V3-1 (MEDIUM): the M1 bound counts a lost SELL row's quantity"

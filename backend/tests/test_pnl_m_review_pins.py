@@ -51,8 +51,9 @@ import pytest
 
 from sportsassets.scripts import migrate
 from sportsassets.workers import mirror_live as ml
+from tests.workflow_source import render_ops_file as _render_ops_file
 
-YML = pathlib.Path(__file__).resolve().parents[2] / ".github" / "workflows" / "render-ops.yml"
+YML = _render_ops_file()
 MIG_DIR = pathlib.Path(migrate.MIGRATIONS_DIR)
 DSN_BASE = os.environ.get(
     "MIRROR_SQL_PIN_DSN",

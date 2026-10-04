@@ -1,0 +1,25 @@
+{
+ "about": "Evidence for gate f33 (candidate 27, 8e62749), read 2026-10-04 from GitHub Actions through the GitHub API. f33 itself is void (disk full at 11:16Z); this file records only what GitHub CI said about the same SHA.",
+ "github_ci": [
+  {
+   "workflow": "commit-guard",
+   "run_id": 37197205614,
+   "url": "https://github.com/matthewtaylor141-lab/SportsAssets/actions/runs/37197205614",
+   "event": "push to claude/cand27",
+   "conclusion": "failure",
+   "summary": "Candidate commits carry neither [skip render] nor [deploy-approved] (same rule that failed on fd6cc5b).",
+   "comparable_to_gate": false
+  },
+  {
+   "workflow": "backend-tests",
+   "run_id": 37197205667,
+   "url": "https://github.com/matthewtaylor141-lab/SportsAssets/actions/runs/37197205667",
+   "event": "push to claude/cand27",
+   "conclusion": "failure",
+   "summary": "92 failed, 16448 passed, 1537 skipped, 3 xfailed in 1204.86s (Python 3.11.16, no database). Visible: render-ops.yml headroom 1601 bytes.",
+   "failing_ids_readable": false,
+   "why_unreadable": "backend-tests.yml pipes pytest through `tail -30`.",
+   "comparable_to_gate": false
+  }
+ ]
+}

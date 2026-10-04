@@ -74,8 +74,9 @@ from tests.test_mirror_live_worker import (  # noqa: F401 -- the autouse rails
     CID, GAME_KEY, M, N, NOW, SLUG, _Http, _Venue, _armed, _census, _fill, _kinds, _mkt, _places,
     _pool, _reduce_world, _run, _tick,
 )
+from tests.workflow_source import render_ops_file as _render_ops_file
 
-YML = pathlib.Path(__file__).resolve().parents[2] / ".github" / "workflows" / "render-ops.yml"
+YML = _render_ops_file()
 FAST_KEYS = ("fast", "n", "markets", "placed", "skipped", "failed", "calls")
 HALTED = "MARKET_STATE_HALTED"
 

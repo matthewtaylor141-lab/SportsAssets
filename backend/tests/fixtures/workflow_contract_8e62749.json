@@ -1,0 +1,805 @@
+{
+ "recorded_from_commit": "8e627493cd40e7b63f0b57af23a84019c02b044b",
+ "workflows": {
+  "command-verify.yml": {
+   "bytes": 433890,
+   "contract": {
+    "concurrency": {
+     "cancel-in-progress": false,
+     "group": "pmus-public-read-global"
+    },
+    "env": null,
+    "jobs": {
+     "book-protocol": {
+      "if": "${{ inputs.book_protocol != '' }}",
+      "runs-on": "ubuntu-latest",
+      "steps": [
+       {
+        "has_run": false,
+        "uses": "actions/checkout@v4"
+       },
+       {
+        "env": {
+         "SLUGS": "${{ inputs.book_protocol_slugs }}"
+        },
+        "has_run": true,
+        "name": "Read the documented protocol and the live book endpoint"
+       }
+      ]
+     },
+     "capture-terms": {
+      "if": "inputs.capture_terms == 'on'",
+      "runs-on": "ubuntu-latest",
+      "steps": [
+       {
+        "env": {
+         "EXTRA": "${{ inputs.terms_url }}"
+        },
+        "has_run": true,
+        "name": "Retrieve and print the published terms"
+       },
+       {
+        "env": {
+         "DATE": "${{ inputs.fixture_date }}"
+        },
+        "has_run": true,
+        "if": "always()",
+        "name": "Authoritative fixture metadata — the served shape"
+       }
+      ]
+     },
+     "credential-capability": {
+      "if": "${{ inputs.credential_capability != '' }}",
+      "runs-on": "ubuntu-latest",
+      "steps": [
+       {
+        "has_run": false,
+        "uses": "actions/checkout@v4"
+       },
+       {
+        "has_run": true,
+        "name": "Read the published authentication and key-provisioning pages"
+       }
+      ]
+     },
+     "cycle-readback": {
+      "runs-on": "ubuntu-latest",
+      "steps": [
+       {
+        "has_run": false,
+        "uses": "actions/checkout@v4"
+       },
+       {
+        "has_run": false,
+        "uses": "actions/setup-python@v5",
+        "with": {
+         "python-version": "3.11"
+        }
+       },
+       {
+        "env": {
+         "ADMIN_TOKEN": "${{ secrets.ADMIN_TOKEN }}",
+         "API_URL": "${{ inputs.api }}"
+        },
+        "has_run": true,
+        "name": "The scheduled cycle, read back from /api/command/rn1x/statuses"
+       }
+      ],
+      "timeout-minutes": 10
+     },
+     "entry-run": {
+      "if": "inputs.entry_run == 'DO'",
+      "runs-on": "ubuntu-latest",
+      "steps": [
+       {
+        "env": {
+         "ADMIN_TOKEN": "${{ secrets.ADMIN_TOKEN }}",
+         "API": "${{ github.event.inputs.api }}"
+        },
+        "has_run": true,
+        "if": "${{ !cancelled() && github.event.inputs.entry_run == 'DO' }}",
+        "name": "Autonomous entry — arm the UNFUNDED research lane"
+       },
+       {
+        "env": {
+         "ADMIN_TOKEN": "${{ secrets.ADMIN_TOKEN }}",
+         "API": "${{ github.event.inputs.api }}"
+        },
+        "has_run": true,
+        "if": "${{ !cancelled() && github.event.inputs.entry_run == 'DO' }}",
+        "name": "Autonomous entry — run the scheduled lane and print every input"
+       },
+       {
+        "env": {
+         "ADMIN_TOKEN": "${{ secrets.ADMIN_TOKEN }}",
+         "API": "${{ github.event.inputs.api }}"
+        },
+        "has_run": true,
+        "if": "${{ !cancelled() && github.event.inputs.entry_run == 'DO' }}",
+        "name": "Autonomous entry — repair the legacy identity"
+       },
+       {
+        "env": {
+         "ADMIN_TOKEN": "${{ secrets.ADMIN_TOKEN }}",
+         "API": "${{ github.event.inputs.api }}"
+        },
+        "has_run": true,
+        "if": "${{ !cancelled() && github.event.inputs.entry_run == 'DO' }}",
+        "name": "Autonomous entry — what the venue actually returned"
+       },
+       {
+        "env": {
+         "ADMIN_TOKEN": "${{ secrets.ADMIN_TOKEN }}",
+         "API": "${{ github.event.inputs.api }}"
+        },
+        "has_run": true,
+        "if": "${{ !cancelled() && github.event.inputs.entry_run == 'DO' }}",
+        "name": "Autonomous entry — the P&L, per lane and per provenance"
+       },
+       {
+        "has_run": true,
+        "if": "${{ !cancelled() && github.event.inputs.entry_run == 'DO' }}",
+        "name": "Autonomous entry — the operating result, in one block"
+       },
+       {
+        "env": {
+         "ADMIN_TOKEN": "${{ secrets.ADMIN_TOKEN }}",
+         "API": "${{ github.event.inputs.api }}"
+        },
+        "has_run": true,
+        "if": "${{ !cancelled() && github.event.inputs.entry_run == 'DO' }}",
+        "name": "Repairs — sizing, candidate audit, soccer mapping, catalogue"
+       },
+       {
+        "env": {
+         "ADMIN_TOKEN": "${{ secrets.ADMIN_TOKEN }}",
+         "API": "${{ github.event.inputs.api }}"
+        },
+        "has_run": true,
+        "if": "${{ !cancelled() && github.event.inputs.entry_run == 'DO' }}",
+        "name": "Acceptance — capability, then current market, then scope"
+       },
+       {
+        "env": {
+         "ADMIN_TOKEN": "${{ secrets.ADMIN_TOKEN }}",
+         "API": "${{ github.event.inputs.api }}"
+        },
+        "has_run": true,
+        "if": "${{ !cancelled() && github.event.inputs.entry_run == 'DO' }}",
+        "name": "Operating desk — the demonstration, the books apart, the controls"
+       },
+       {
+        "env": {
+         "ADMIN_TOKEN": "${{ secrets.ADMIN_TOKEN }}",
+         "API": "${{ github.event.inputs.api }}"
+        },
+        "has_run": true,
+        "if": "${{ !cancelled() && github.event.inputs.entry_run == 'DO' }}",
+        "name": "Operating desk — the COMMAND session on this hostname"
+       },
+       {
+        "env": {
+         "ADMIN_TOKEN": "${{ secrets.ADMIN_TOKEN }}",
+         "API": "${{ github.event.inputs.api }}"
+        },
+        "has_run": true,
+        "if": "${{ !cancelled() && github.event.inputs.entry_run == 'DO' }}",
+        "name": "Capacity probe — the isolation audit, against production"
+       },
+       {
+        "has_run": false,
+        "if": "always()",
+        "name": "Entry-run raw evidence",
+        "uses": "actions/upload-artifact@v4",
+        "with": {
+         "if-no-files-found": "warn",
+         "name": "entry-run-evidence",
+         "path": "/tmp/rep0.json\n/tmp/rep.json\n/tmp/vp.json\n/tmp/st.json\n/tmp/cal.json\n/tmp/cx.json\n/tmp/arm.json\n/tmp/ee.json\n/tmp/pnl.json\n/tmp/demo.json\n/tmp/desk.json\n/tmp/ee2.json\n/tmp/ctl0.json\n/tmp/sess.json\n/tmp/act.json\n/tmp/prodaudit.json\n",
+         "retention-days": 14
+        }
+       }
+      ]
+     },
+     "fee-docs": {
+      "if": "${{ inputs.fee_docs != '' }}",
+      "runs-on": "ubuntu-latest",
+      "steps": [
+       {
+        "has_run": false,
+        "uses": "actions/checkout@v4"
+       },
+       {
+        "has_run": true,
+        "name": "Retrieve the published fee policy, verbatim"
+       }
+      ]
+     },
+     "funded-pg18": {
+      "if": "${{ inputs.pg18_migrations != '' }}",
+      "runs-on": "ubuntu-latest",
+      "services": {
+       "postgres": {
+        "env": {
+         "POSTGRES_DB": "funded_pg18",
+         "POSTGRES_PASSWORD": "postgres",
+         "POSTGRES_USER": "postgres"
+        },
+        "image": "postgres:18",
+        "options": "--health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 10",
+        "ports": [
+         "5432:5432"
+        ]
+       }
+      },
+      "steps": [
+       {
+        "has_run": false,
+        "uses": "actions/checkout@v4",
+        "with": {
+         "fetch-depth": 0
+        }
+       },
+       {
+        "has_run": false,
+        "uses": "actions/setup-python@v5",
+        "with": {
+         "cache": "pip",
+         "python-version": "3.11"
+        }
+       },
+       {
+        "has_run": true,
+        "name": "Install"
+       },
+       {
+        "env": {
+         "PGPASSWORD": "postgres"
+        },
+        "has_run": true,
+        "name": "The server this is actually being tested on"
+       },
+       {
+        "env": {
+         "DATABASE_URL": "postgresql://postgres:postgres@127.0.0.1:5432/funded_pg18"
+        },
+        "has_run": true,
+        "name": "Run the migration runner; NOT every file applies, and which are named"
+       },
+       {
+        "env": {
+         "PGPASSWORD": "postgres"
+        },
+        "has_run": true,
+        "name": "The funded schema is actually there, on 18"
+       },
+       {
+        "env": {
+         "ADMIN_TOKEN": "t",
+         "DATABASE_URL": "postgresql://postgres:postgres@127.0.0.1:5432/funded_pg18",
+         "RN1X_CAPACITY_SLOT_MUST_BE_FREE": "1",
+         "RN1X_TEST_DSN": "postgresql://postgres:postgres@127.0.0.1:5432/funded_pg18"
+        },
+        "has_run": true,
+        "name": "The funded suite, against PostgreSQL 18"
+       },
+       {
+        "env": {
+         "ADMIN_TOKEN": "t",
+         "DATABASE_URL": "postgresql://postgres:postgres@127.0.0.1:5432/funded_pg18",
+         "RN1X_CAPACITY_SLOT_MUST_BE_FREE": "1",
+         "RN1X_TEST_DSN": "postgresql://postgres:postgres@127.0.0.1:5432/funded_pg18"
+        },
+        "has_run": true,
+        "name": "The risk tests RAN rather than skipped"
+       },
+       {
+        "has_run": true,
+        "name": "The venue SDK CI installs is the pinned one"
+       },
+       {
+        "has_run": true,
+        "name": "Rate control end to end, and it RAN"
+       }
+      ],
+      "timeout-minutes": 20
+     },
+     "funded-readback": {
+      "if": "${{ inputs.funded_readback != '' }}",
+      "runs-on": "ubuntu-latest",
+      "steps": [
+       {
+        "has_run": false,
+        "uses": "actions/checkout@v4"
+       },
+       {
+        "env": {
+         "API": "${{ inputs.api }}",
+         "EXPECT": "${{ inputs.expect_commit }}"
+        },
+        "has_run": true,
+        "id": "build",
+        "name": "S1 · The serving build"
+       },
+       {
+        "env": {
+         "ADMIN_TOKEN": "${{ secrets.ADMIN_TOKEN }}",
+         "API": "${{ inputs.api }}"
+        },
+        "has_run": true,
+        "name": "S2 · Every submission switch, as the serving process reports it"
+       },
+       {
+        "env": {
+         "ADMIN_TOKEN": "${{ secrets.ADMIN_TOKEN }}",
+         "API": "${{ inputs.api }}"
+        },
+        "has_run": true,
+        "name": "S3 · The funded command-centre section, in full"
+       },
+       {
+        "env": {
+         "ADMIN_TOKEN": "${{ secrets.ADMIN_TOKEN }}",
+         "API": "${{ inputs.api }}"
+        },
+        "has_run": true,
+        "name": "S4 · The last completed scheduled cycle, and what actually blocked it"
+       },
+       {
+        "has_run": true,
+        "name": "S5 · The demonstration books are labelled, and are not summed"
+       },
+       {
+        "env": {
+         "API": "${{ inputs.api }}",
+         "RENDER_KEY": "${{ secrets.RENDER_API_KEY }}",
+         "SERVICE": "${{ inputs.operator_service }}"
+        },
+        "has_run": true,
+        "name": "S6 · Operator sign-in and an authenticated desk read"
+       }
+      ]
+     },
+     "operator-access": {
+      "if": "${{ inputs.operator_action != '' }}",
+      "runs-on": "ubuntu-latest",
+      "steps": [
+       {
+        "env": {
+         "ACTION": "${{ inputs.operator_action }}",
+         "ADMIN_TOKEN": "${{ secrets.ADMIN_TOKEN }}",
+         "API": "${{ inputs.api }}",
+         "CONFIRM": "${{ inputs.operator_confirm }}",
+         "OPERATOR_COMMIT": "${{ inputs.operator_commit }}",
+         "RENDER_KEY": "${{ secrets.RENDER_API_KEY }}",
+         "SERVICE": "${{ inputs.operator_service }}"
+        },
+        "has_run": true,
+        "name": "Operator access",
+        "shell": "bash"
+       },
+       {
+        "has_run": false,
+        "if": "${{ inputs.operator_action == 'rotate' && inputs.operator_confirm == 'DO' }}",
+        "name": "Deliver the credential",
+        "uses": "actions/upload-artifact@v4",
+        "with": {
+         "if-no-files-found": "warn",
+         "name": "operator-credential",
+         "path": "/tmp/operator-password.txt",
+         "retention-days": 1
+        }
+       }
+      ]
+     },
+     "venue-clock": {
+      "if": "${{ inputs.clock_probe != '' }}",
+      "runs-on": "ubuntu-latest",
+      "steps": [
+       {
+        "env": {
+         "ADMIN_TOKEN": "${{ secrets.ADMIN_TOKEN }}",
+         "API": "${{ inputs.api }}",
+         "GAP": "${{ inputs.clock_probe_gap_s }}",
+         "SLUGS": "${{ inputs.clock_probe }}"
+        },
+        "has_run": true,
+        "name": "Read each contract twice and print the deltas"
+       }
+      ]
+     },
+     "verify": {
+      "if": "${{ inputs.funded_readback == '' }}",
+      "runs-on": "ubuntu-latest",
+      "steps": [
+       {
+        "has_run": true,
+        "name": "Settle"
+       },
+       {
+        "has_run": true,
+        "id": "reach",
+        "name": "Reachability and build identity"
+       },
+       {
+        "has_run": true,
+        "name": "The SHADOW environment is actually published"
+       },
+       {
+        "has_run": true,
+        "name": "Every expected tab is published (RELEASE ACCEPTANCE)"
+       },
+       {
+        "has_run": true,
+        "name": "Tab inventory"
+       },
+       {
+        "has_run": true,
+        "name": "Existing COMMAND navigation is intact"
+       },
+       {
+        "has_run": true,
+        "name": "No credential reaches the browser"
+       },
+       {
+        "has_run": true,
+        "name": "No order action exists in the browser"
+       },
+       {
+        "has_run": true,
+        "name": "The shadow API is behind the COMMAND session"
+       },
+       {
+        "env": {
+         "ADMIN_TOKEN": "${{ secrets.ADMIN_TOKEN }}",
+         "API": "${{ github.event.inputs.api }}"
+        },
+        "has_run": true,
+        "name": "Service health under ordinary command load"
+       },
+       {
+        "has_run": true,
+        "name": "The proxy does not serve HTML for an API path"
+       },
+       {
+        "has_run": true,
+        "name": "The previously failing portfolio read, and version skew"
+       },
+       {
+        "has_run": true,
+        "name": "Freshness — the bundle and the API agree on what exists"
+       },
+       {
+        "has_run": true,
+        "name": "RN1X — the shadow surface is published, and it is guarded"
+       },
+       {
+        "env": {
+         "ADMIN_TOKEN": "${{ secrets.ADMIN_TOKEN }}"
+        },
+        "has_run": true,
+        "name": "RN1X — the AUTHENTICATED read, against the persisted records"
+       },
+       {
+        "env": {
+         "ADMIN_TOKEN": "${{ secrets.ADMIN_TOKEN }}"
+        },
+        "has_run": true,
+        "if": "${{ !cancelled() }}",
+        "name": "RN1X — the two arms, and what each one actually decided"
+       },
+       {
+        "env": {
+         "ADMIN_TOKEN": "${{ secrets.ADMIN_TOKEN }}"
+        },
+        "has_run": true,
+        "if": "${{ !cancelled() }}",
+        "name": "RN1X — the ACCEPTANCE position, managed by the production lifecycle"
+       },
+       {
+        "env": {
+         "ADMIN_TOKEN": "${{ secrets.ADMIN_TOKEN }}",
+         "API_URL": "${{ inputs.api }}"
+        },
+        "has_run": true,
+        "if": "${{ !cancelled() }}",
+        "name": "RN1X — choose the management subject, and drive the loop"
+       },
+       {
+        "env": {
+         "ADMIN_TOKEN": "${{ secrets.ADMIN_TOKEN }}",
+         "API_URL": "${{ inputs.api }}"
+        },
+        "has_run": true,
+        "if": "${{ !cancelled() }}",
+        "name": "RN1X — the SAME position across successive cycles"
+       },
+       {
+        "has_run": true,
+        "name": "Mobile viewport is declared"
+       },
+       {
+        "env": {
+         "ADMIN_TOKEN": "${{ secrets.ADMIN_TOKEN }}",
+         "API": "${{ github.event.inputs.api }}",
+         "WANT": "${{ github.event.inputs.arm_external }}"
+        },
+        "has_run": true,
+        "if": "${{ !cancelled() && github.event.inputs.arm_external != '' }}",
+        "name": "External valuation — arm, cycle, and read production back"
+       },
+       {
+        "env": {
+         "ADMIN_TOKEN": "${{ secrets.ADMIN_TOKEN }}",
+         "API_URL": "${{ inputs.api }}"
+        },
+        "has_run": true,
+        "if": "always()",
+        "name": "RN1X — the ACCEPTANCE position, read by id and by its own policy"
+       },
+       {
+        "has_run": false,
+        "if": "always()",
+        "name": "Step 19 evidence artifact",
+        "uses": "actions/upload-artifact@v4",
+        "with": {
+         "if-no-files-found": "warn",
+         "name": "step19-evidence",
+         "path": "/tmp/s19.txt",
+         "retention-days": 14
+        }
+       },
+       {
+        "env": {
+         "ADMIN_TOKEN": "${{ secrets.ADMIN_TOKEN }}",
+         "COND": "${{ inputs.acceptance_condition }}",
+         "FDATE": "${{ inputs.fixture_date }}"
+        },
+        "has_run": true,
+        "if": "always()",
+        "name": "RN1X — acquire fixture scope evidence, then two evidenced cycles"
+       },
+       {
+        "env": {
+         "ADMIN_TOKEN": "${{ secrets.ADMIN_TOKEN }}",
+         "API_URL": "${{ inputs.api }}"
+        },
+        "has_run": true,
+        "if": "always()",
+        "name": "The management record, in one block"
+       }
+      ]
+     }
+    },
+    "name": "command-verify",
+    "on": {
+     "workflow_dispatch": {
+      "inputs": {
+       "acceptance_condition": {
+        "default": "",
+        "description": "condition_id of the acceptance fixture to acquire scope for",
+        "required": false
+       },
+       "api": {
+        "default": "https://sportsassets-api.onrender.com",
+        "description": "API origin behind the proxy",
+        "required": false
+       },
+       "arm_external": {
+        "default": "",
+        "description": "POST the external-valuation shadow's control row (on|off), then read the odds probe, the refusal census, the clock audit and one valuation trace. Blank does nothing. Shadow only: the experiment it gates submits no orders.",
+        "required": false
+       },
+       "base": {
+        "default": "",
+        "description": "Path prefix the COMMAND assets sit under on this host. EMPTY for command.bettortoken.com, where the netlify host rule already rewrites the whole site into /command/ -- asking there for /command/shadow.js asks for /command/command/shadow.js and correctly 404s. Use /command for www.bettortoken.com.",
+        "required": false
+       },
+       "book_protocol": {
+        "default": "",
+        "description": "on|blank. `on` reads the venue's DOCUMENTED public endpoints directly from the runner -- the Markets WebSocket documentation page and GET https://gateway.polymarket.us/v1/markets/{slug}/book -- and prints the raw response headers, the payload's own field names, and a conditional revalidation exchange. It needs NO deployment: these are public reads, and waiting for a backend release to inspect public response headers was a dependency I invented. Production integration still needs its own gated deploy; this only settles what the protocol provides. Read-only, no credential, no account.",
+        "required": false
+       },
+       "book_protocol_slugs": {
+        "default": "",
+        "description": "Comma-separated venue market slugs for the book read. Blank lists markets from the public catalogue first and takes the first few.",
+        "required": false
+       },
+       "capture_terms": {
+        "default": "",
+        "description": "on|blank. `on` runs the SEPARATE capture-terms job, which retrieves the bookmaker's published settlement-rules pages and prints the applicable sections VERBATIM. Read-only: no credential, no service, no database. It is a separate JOB so its log can be read on its own rather than competing with the acceptance step for a readable window.",
+        "required": false
+       },
+       "clock_probe": {
+        "default": "",
+        "description": "Comma-separated venue slugs (max 6). Runs the SEPARATE venue-clock job: it reads each contract TWICE through the admin probe and prints whether `marketData.transactTime` advanced with our request, stood still, and whether the book content changed. It exists to ESTABLISH what that stamp means, because the lane's dominant refusal (VENUE_QUOTE_STALE) is computed from it and the semantics are recorded as unestablished. Read-only: it places no order and writes nothing.",
+        "required": false
+       },
+       "clock_probe_gap_s": {
+        "default": "12",
+        "description": "seconds between the two reads of each contract (1-60)",
+        "required": false
+       },
+       "credential_capability": {
+        "default": "",
+        "description": "on|blank. `on` reads the venue's PUBLISHED AUTHENTICATION AND API-KEY documentation and reports, verbatim, what provisioning choices and permission scopes it actually describes. This exists because I asserted that a READ-ONLY key option exists and cited the retail authentication page as the support. That page describes API-key authentication; it does NOT thereby establish that a read-only scope is offered, and those are different claims. So the question is settled by reading the pages and printing what they say -- including \"this page does not answer it\". Read-only, NO CREDENTIAL IS SENT, no account is touched, and order authority is NEVER tested by sending an order.",
+        "required": false
+       },
+       "entry_run": {
+        "default": "",
+        "description": "Set to DO to run the AUTONOMOUS ENTRY lane against current production markets and print every input behind each candidate. It creates no order at any venue.",
+        "required": false
+       },
+       "expect_commit": {
+        "default": "",
+        "description": "funded_readback only: the 7-or-40-hex SHA this readback expects the API to be SERVING. Blank prints the serving commit without judging it; a value fails the job on any other build, so a readback cannot be attributed to a deploy that did not land.",
+        "required": false
+       },
+       "fee_docs": {
+        "default": "",
+        "description": "on|blank. `on` retrieves the venue's OFFICIAL published fee documentation and prints the rounding rule, the cumulative taker-fill treatment, the effective date and the execution-report units VERBATIM. This runner has egress the build container does not: docs.polymarket.us returns CONNECT 403 through the agent proxy, which is why the rounding question could not be settled in source and why tie vectors alone were recorded instead of a policy. Read-only, and it touches no account.",
+        "required": false
+       },
+       "fixture_date": {
+        "default": "",
+        "description": "YYYY-MM-DD for the fixture-metadata shape probe",
+        "required": false
+       },
+       "funded_readback": {
+        "default": "",
+        "description": "on|blank. `on` runs the SEPARATE funded-readback job, which reads the SERVING build back and prints, from the running process: every submission switch and its value, the funded command-centre section in full, the last COMPLETED scheduled cycle with its actual blockers, and the separately labelled demonstration books. Every call is a GET behind the command role. It arms nothing, writes nothing and submits nothing.",
+        "required": false
+       },
+       "host": {
+        "default": "command.bettortoken.com",
+        "description": "COMMAND host to verify",
+        "required": false
+       },
+       "operator_action": {
+        "default": "",
+        "description": "OPERATOR CONTROL ACCESS: status (read-only) | rotate (needs operator_confirm=DO). Blank skips the job.",
+        "required": false
+       },
+       "operator_commit": {
+        "default": "",
+        "description": "operator_action=rotate: the 40-hex SHA to deploy after writing the env var. REQUIRED, because an env change makes Render auto-deploy the service's TRACKED branch -- which is the protected default branch, not the reviewed build.",
+        "required": false
+       },
+       "operator_confirm": {
+        "default": "",
+        "description": "Type DO to allow operator_action=rotate to write the service environment",
+        "required": false
+       },
+       "operator_service": {
+        "default": "sportsassets-api",
+        "description": "Render service holding the API (operator_action only)",
+        "required": false
+       },
+       "pg18_migrations": {
+        "default": "",
+        "description": "on|blank. `on` runs the SEPARATE funded-pg18 job: it applies the repository's migrations to a PostgreSQL 18 service container with the SAME runner production uses, asserts the funded migrations applied, and runs the funded test suite against that database. It exists because the release gate's database is PostgreSQL 16 and production is 18, which is exactly how migration 126 passed a green gate and rolled back in production. No secrets, no network, nothing deployed.",
+        "required": false
+       },
+       "seed_acceptance": {
+        "default": "",
+        "description": "on|blank. `on` POSTs the acceptance-position route, which writes ONE rn1x_positions row on a covered market -- separately labelled, shadow only, provenance ACCEPTANCE_SYNTHETIC_MODELLED_ENTRY -- so the position manager can be demonstrated on inventory whose inputs exist. It submits NO order and moves no capital.",
+        "required": false
+       },
+       "terms_url": {
+        "default": "",
+        "description": "an additional rules URL to retrieve verbatim",
+        "required": false
+       },
+       "wait_s": {
+        "default": "0",
+        "description": "Seconds to wait for the deploy to settle before probing",
+        "required": false
+       }
+      }
+     }
+    },
+    "permissions": null
+   },
+   "sha256": "8ef99795c1109dbe0cab0b1a21b3815d147de457cf33218e387de4bf8a6c8224"
+  },
+  "render-ops.yml": {
+   "bytes": 510399,
+   "confirm_do_actions": [
+    "resume",
+    "suspend",
+    "restart",
+    "deploy",
+    "deploy-api-commit",
+    "api-branch-set",
+    "workers-branch-set",
+    "workers-commit-deploy",
+    "env-set",
+    "env-del",
+    "rootdir-sync"
+   ],
+   "contract": {
+    "concurrency": null,
+    "env": null,
+    "jobs": {
+     "ops": {
+      "runs-on": "ubuntu-latest",
+      "steps": [
+       {
+        "env": {
+         "ACTION": "${{ inputs.action }}",
+         "CONFIRM": "${{ inputs.confirm }}",
+         "KEY_SECRET": "${{ secrets.RENDER_API_KEY }}",
+         "SERVICE": "${{ inputs.service }}"
+        },
+        "has_run": true,
+        "name": "Run",
+        "shell": "bash"
+       }
+      ]
+     }
+    },
+    "name": "render-ops",
+    "on": {
+     "workflow_dispatch": {
+      "inputs": {
+       "action": {
+        "description": "What to do",
+        "options": [
+         "services",
+         "events",
+         "deploys",
+         "logs",
+         "db",
+         "resume",
+         "suspend",
+         "restart",
+         "deploy",
+         "deploy-api-commit",
+         "api-branch-get",
+         "api-branch-set",
+         "workers-branch-set",
+         "workers-commit-deploy",
+         "metrics",
+         "sql",
+         "env-keys",
+         "env-get",
+         "env-set",
+         "env-del",
+         "rootdir-get",
+         "rootdir-sync"
+        ],
+        "required": true,
+        "type": "choice"
+       },
+       "arg": {
+        "default": "",
+        "description": "logs: minutes back (default 30) or a text filter; sql: which statement",
+        "required": false
+       },
+       "confirm": {
+        "default": "",
+        "description": "Type DO to allow a state-changing action",
+        "required": false
+       },
+       "render_key": {
+        "default": "",
+        "description": "Render API key (only if the RENDER_API_KEY secret is not set)",
+        "required": false
+       },
+       "service": {
+        "default": "sportsassets-api",
+        "description": "Service or database name (sportsassets-api, sportsassets-workers, edge-shadow, sportsassets-db)",
+        "required": false
+       }
+      }
+     }
+    },
+    "permissions": null
+   },
+   "need_confirm_calls": 35,
+   "need_confirm_definition": [
+    "need_confirm() { if [ \"$CONFIRM\" != \"DO\" ]; then echo \"refused: $ACTION needs confirm=DO (got '$CONFIRM')\"; exit 1; fi; }"
+   ],
+   "sha256": "45ea5eefe23aa43e392e102e4f53418f1da359e608dec58a70b9df9d39fcc57f"
+  }
+ }
+}

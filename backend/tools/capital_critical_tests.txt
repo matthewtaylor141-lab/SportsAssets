@@ -814,3 +814,9 @@ tests/test_resting_is_not_protection.py
 # yields a current HOLD; read-time validity; expiry requeues; resting is not
 # protection in the review exposure record.
 tests/test_xavier_freshness_truth.py
+# c28 RELEASE TRUTH: GET /api/command/release (api/command_release.py) is
+# GET-only, behind a command session, one READ ONLY transaction with a
+# statement timeout, imports no order/venue/paper/funded module, never
+# guesses a SHA (missing => UNAVAILABLE, 7 chars => PREFIX_7) and shows a
+# receipt whose sha256 does not verify as TAMPERED.
+tests/test_command_release_authority.py

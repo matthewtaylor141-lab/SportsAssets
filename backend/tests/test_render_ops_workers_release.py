@@ -18,8 +18,13 @@ import subprocess
 
 import pytest
 
+from tests.workflow_source import render_ops_path
+
 _ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-WF = os.path.join(_ROOT, ".github", "workflows", "render-ops.yml")
+REAL_WF = os.path.join(_ROOT, ".github", "workflows", "render-ops.yml")
+# The arms live in .github/render-ops/ops.sh (moved for size headroom); this
+# is the effective source -- the wrapper with that script re-inlined.
+WF = render_ops_path()
 NOTES = os.path.join(_ROOT, ".github", "workflows", "RENDER_OPS_NOTES.md")
 SHA = "17156263358f8e32c97240be2858ca1b8ef8508b"
 
@@ -76,7 +81,7 @@ def test_both_arms_are_choices_need_confirm_and_parse(name):
                        text=True, capture_output=True)
     assert r.returncode == 0, r.stderr
     assert "$SERVICE" not in body, "the service must be a literal, never the input"
-    assert os.path.getsize(WF) < 512_000
+    assert os.path.getsize(REAL_WF) < 512_000
 
 
 @pytest.mark.parametrize("name,arg", [("workers-branch-set", "claude/release-api"),

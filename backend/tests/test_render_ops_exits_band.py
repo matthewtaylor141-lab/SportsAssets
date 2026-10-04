@@ -33,8 +33,9 @@ import pytest
 
 from tests import test_render_ops_hourly as hourly
 from tests.test_render_ops_fills_missed import World, _f
+from tests.workflow_source import render_ops_file as _render_ops_file
 
-YML = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "render-ops.yml"
+YML = _render_ops_file()
 CAUSES = "('replace_cent', 'replace_qty', 'replace_side', 'ttl', 'replace_unread')"
 # FILL lane 8: replaced_n on the exit_rest / cover row = the bucket's replaced count, on both sides of the split
 REPLACED_N = ("sum(count(*) FILTER (WHERE replaced)) OVER (PARTITION BY regexp_replace(decision, '_replaced$', ''), bucket)"

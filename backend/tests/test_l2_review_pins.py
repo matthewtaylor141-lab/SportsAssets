@@ -56,8 +56,9 @@ from tests.test_l1_rearm_window import H24, TRIPPED, _loss_reads, _rearm, _reduc
 from tests.test_l2_sleeve_window import REARM_DT, REARM_TS, SQL_24H, _recorder
 from tests.test_mirror_live_worker import GTC_TIF, IOC_TIF, NOW, SLUG, _armed  # noqa: F401 — the fixture
 from tests.test_mirror_live_worker import _census, _places, _pool, _tick, _Venue
+from tests.workflow_source import render_ops_file as _render_ops_file
 
-RENDER_OPS = pathlib.Path(__file__).resolve().parents[2] / ".github" / "workflows" / "render-ops.yml"
+RENDER_OPS = _render_ops_file()
 
 
 @pytest.fixture(autouse=True)
