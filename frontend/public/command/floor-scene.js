@@ -13,11 +13,11 @@
  * prefers-reduced-motion: no idle motion, no walks, no moving trails; the
  * scene renders only when the data or the camera changes.
  *
- * Characters: the licensed Microsoft Rocketbox models already in the repo
- * (team-demo/assets/models, MIT). Derek, Xavier and Audrey use their own
- * models; Karen, the Chief Allocator, Eddie and Scout REUSE those models with
- * recoloured suits and desk props, credited as reused (see CREDITS). Nothing
- * is downloaded from anywhere else. */
+ * Characters: the licensed Microsoft Rocketbox models in the repo
+ * (team-demo/assets/models, MIT). EVERY agent wears its OWN model -- seven
+ * distinct people; no seat reuses or recolours another agent's body (see
+ * CAST and CREDITS). Eddie's headset is a desk prop. Nothing is downloaded
+ * from anywhere else. */
 import * as THREE from './team-demo/assets/three.module.min.js';
 import {clone as cloneSkinned} from './team-demo/assets/SkeletonUtils.js';
 import {AvatarController, resolveBones, resolveBlendshapes, resolveVisemes,
@@ -28,20 +28,21 @@ export const CREDITS = {
   derek: 'Rocketbox Business_Male_03 (MIT, © 2020 Microsoft)',
   xavier: 'Rocketbox Business_Male_05 (MIT, © 2020 Microsoft)',
   audrey: 'Rocketbox Business_Female_04 (MIT, © 2020 Microsoft)',
-  karen: 'Rocketbox Business_Female_04, reused with a recoloured suit (MIT, © 2020 Microsoft)',
-  allocator: 'Rocketbox Business_Male_03, reused with a recoloured suit (MIT, © 2020 Microsoft)',
-  eddie: 'Rocketbox Business_Male_05, reused with a recoloured suit and headset (MIT, © 2020 Microsoft)',
-  scout: 'Rocketbox Business_Male_03, reused with a recoloured suit (MIT, © 2020 Microsoft)'
+  karen: 'Rocketbox Business_Female_02 (MIT, © 2020 Microsoft)',
+  allocator: 'Rocketbox Business_Female_03 (MIT, © 2020 Microsoft)',
+  eddie: 'Rocketbox Business_Male_04, with a headset prop (MIT, © 2020 Microsoft)',
+  scout: 'Rocketbox Business_Male_06 (MIT, © 2020 Microsoft)'
 };
-// which licensed model each seat wears, and the suit recolour (linear RGB)
-const CAST = {
+// which licensed model each seat wears: its own, never a recoloured copy of
+// another agent's (the tint shader below only dims / desaturates by state)
+export const CAST = {
   derek: {model: 'derek', tint: null},
   xavier: {model: 'xavier', tint: null},
   audrey: {model: 'audrey', tint: null},
-  karen: {model: 'audrey', tint: [0.42, 0.05, 0.07], amt: 0.9},
-  allocator: {model: 'derek', tint: [0.36, 0.27, 0.10], amt: 0.85},
-  eddie: {model: 'xavier', tint: [0.04, 0.22, 0.22], amt: 0.85, headset: true},
-  scout: {model: 'derek', tint: [0.20, 0.25, 0.10], amt: 0.85}
+  karen: {model: 'karen', tint: null},
+  allocator: {model: 'allie', tint: null},
+  eddie: {model: 'eddie', tint: null, headset: true},
+  scout: {model: 'scout', tint: null}
 };
 const WALK_WINDOW_S = 600;          // an edge newer than this may walk once
 const ARC_R = 7.0, ARC_Z = 2.4, ARC_SPAN = 150 * Math.PI / 180;

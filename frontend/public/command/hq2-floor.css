@@ -69,9 +69,9 @@ body.bt-hq2.fl{overflow-x:hidden}
 .hq2-pod::after{content:"";position:absolute;left:18px;right:18px;bottom:-9px;height:1px;background:var(--a);box-shadow:0 0 16px var(--a);opacity:.6}
 .hq2-pod .presence{display:flex;align-items:center;gap:10px}
 .hq2-pod .portrait{
-  width:38px;height:44px;border-radius:15px 15px 12px 12px;position:relative;flex:none;
-  background:radial-gradient(circle at 50% 28%,#dce7f5 0 12%,transparent 13%),linear-gradient(180deg,transparent 0 36%,color-mix(in srgb,var(--a) 46%,#0b1526) 37% 100%);
-  border:1px solid color-mix(in srgb,var(--a) 25%,transparent);filter:saturate(.8)
+  width:40px;height:48px;border-radius:14px;position:relative;flex:none;
+  background:#0b1526;
+  border:1px solid color-mix(in srgb,var(--a) 25%,transparent)
 }
 .hq2-pod .portrait::after{content:"";position:absolute;inset:-5px;border-radius:16px;border:1px solid color-mix(in srgb,var(--a) 25%,transparent);opacity:.55}
 .hq2-pod[data-active="1"] .portrait::after{animation:hq2Presence 1.8s ease-in-out infinite}
@@ -98,6 +98,7 @@ body.bt-hq2.fl{overflow-x:hidden}
 }
 .hq2-floor-drawer.open{transform:translateX(0)}
 .hq2-d-head{display:flex;align-items:flex-start;gap:12px}
+.hq2-d-head .portrait{width:64px;height:76px;border-radius:16px;flex:none;border:1px solid var(--bt-line)}
 .hq2-d-head h2{margin:2px 0;font:400 34px/1 var(--bt-serif);letter-spacing:-.04em}
 .hq2-d-head p{margin:6px 0;color:#7e92aa;font-size:11px}
 .hq2-d-x{margin-left:auto;background:none;border:1px solid var(--bt-line);border-radius:10px;color:#9dacbd;width:34px;height:34px;cursor:pointer}

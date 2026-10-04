@@ -126,7 +126,7 @@ function feedHtml() {
   const opp = f.opportunities || [], feed = f.feed || [];
   const sec = (f.sections || {})['opportunities.intel_allocations'] || {};
   return '<header><span class="ws-eyebrow">Market · opportunity feed</span><span class="ws-tag">PAPER · SHADOW</span></header>' +
-    '<h3>Allocator ranking <small>shadow sleeve · ' + (opp[0] ? esc(B.ago(opp[0].at, now)) : esc(sec.why || 'no run')) + '</small></h3>' +
+    '<h3>Allie · allocator ranking <small>shadow sleeve · ' + (opp[0] ? esc(B.ago(opp[0].at, now)) : esc(sec.why || 'no run')) + '</small></h3>' +
     (opp.length ? '<ol class="ws-rows">' + opp.slice(0, 4).map((o) => '<li><span class="ws-rank">' + esc(o.rank) + '</span><span class="ws-mkt">' + esc(o.market || o.candidate_id || o.id) + '<small>' + esc(o.candidate_kind === 'OPEN_POSITION' ? 'open position' : 'new decision') + (o.binding_constraint ? ' · ' + esc(o.binding_constraint) : '') + '</small></span><span class="ws-num">' + (o.shadow_usd != null ? '$' + Number(o.shadow_usd).toFixed(2) : '—') + '<small>' + (o.score != null ? 'score ' + Number(o.score).toFixed(4) : 'no score') + '</small></span></li>').join('') + '</ol>' : '<p class="ws-empty">No shadow ranking recorded' + (sec.why ? ' (' + esc(sec.why) + ')' : '') + '.</p>') +
     '<h3>Derek’s latest decisions <small>paper_decisions</small></h3>' +
     (feed.length ? '<ol class="ws-rows">' + feed.slice(0, 5).map((d) => '<li><span class="ws-verdict ' + (d.verdict === 'ENTER' ? 'enter' : 'refuse') + '">' + esc(d.verdict) + '</span><span class="ws-mkt">' + esc(d.market || d.fixture || d.id) + '<small>' + esc(d.side || '') + (d.refusal ? ' · ' + esc(d.refusal) : '') + '</small></span><span class="ws-num">' + (d.limit_price != null ? '$' + Number(d.limit_price).toFixed(2) : '') + '<small>' + esc(B.ago(d.at, now)) + '</small></span></li>').join('') + '</ol>' : '<p class="ws-empty">No paper decision recorded.</p>');
@@ -146,7 +146,7 @@ function healthHtml() {
       (fb ? '<small class="ws-src">First blocker: <b>' + esc(fb.predicate) + '</b> — ' + esc(String(fb.reason || '').slice(0, 120)) + '</small>' : '') + '<small class="ws-src">/api/command/p5/evidence · read ' + esc(B.ago(p5.at, now)) + '</small>';
   }
   return '<header><span class="ws-eyebrow">System health</span><span class="ws-tag">LIVE READS</span></header>' +
-    '<div class="ws-hb">' + B.SEATS.map((s) => { const a = agentOf(s.slug), m = B.STATES[B.stateOf(a)]; return '<span style="--c:' + m.color + '"><i></i>' + esc(s.name.replace('Chief ', '')) + '<small>' + esc(a ? (a.state === 'NOT_DEPLOYED' ? 'not deployed' : a.heartbeat && a.heartbeat.at != null ? B.age(now - a.heartbeat.at).trim() : 'no beat') : '—') + '</small></span>'; }).join('') + '</div>' +
+    '<div class="ws-hb">' + B.SEATS.map((s) => { const a = agentOf(s.slug), m = B.STATES[B.stateOf(a)]; return '<span style="--c:' + m.color + '"><i></i>' + esc(s.name) + '<small>' + esc(a ? (a.state === 'NOT_DEPLOYED' ? 'not deployed' : a.heartbeat && a.heartbeat.at != null ? B.age(now - a.heartbeat.at).trim() : 'no beat') : '—') + '</small></span>'; }).join('') + '</div>' +
     '<h3>Coverage</h3>' + covHtml + '<h3>Live admission</h3>' + p5Html;
 }
 function equityPlaceholder() {
