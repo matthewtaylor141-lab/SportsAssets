@@ -1,7 +1,7 @@
 {
   "version": "CC_CHARACTER_ASSETS_V2",
   "_format": {
-    "what": "One entry per agent. model null = the procedural placeholder is shown, tagged PLACEHOLDER CHARACTER. A licensed model is used only when every required field is present and both files exist in this directory.",
+    "what": "One entry per agent, keyed by the agent's page slug (allocator = Allie, the Chief Allocator). A licensed model is used only when every required field is present and both files exist in this directory; without one the agent page shows a name card labelled 3D PORTRAIT PENDING. Every agent has its own model: no entry may point at another agent's model file.",
     "required": {
       "model": "file name of a glTF 2.0 binary (.glb) in this directory: one skinned humanoid (Mixamo or VRM/humanoid bone names, or map them in 'bones'), ARKit 52 face blendshapes (or map them in 'blendshapes'); Meshopt compression allowed; textures PNG/JPEG/WebP inside the .glb (KTX2 is not supported in this build)",
       "license_file": "file name, in this directory, of the licence text shipped with the model",
@@ -118,6 +118,135 @@
       "casting": "adult woman in a fitted pinstripe trouser suit with a pendant necklace and long brunette hair: polished, confident, professional (non-explicit)",
       "known_gaps": [
         "professional rather than glamorous: Rocketbox has no evening or fashion wardrobe; the glamour comes from lighting and framing, not styling",
+        "Rocketbox is a real-time asset (about 10k triangles, 2K head texture): credible at chest framing on a phone, not photoreal in a close-up"
+      ]
+    },
+    "karen": {
+      "model": "karen.glb",
+      "license_file": "ROCKETBOX_LICENSE.md",
+      "license_spdx": "MIT",
+      "licensed_from": "Microsoft Rocketbox (github.com/microsoft/Microsoft-Rocketbox), Assets/Avatars/Professions/Business_Female_02, Copyright (c) 2020 Microsoft",
+      "test_asset": false,
+      "credit": "Character model: Microsoft Rocketbox Business_Female_02 (MIT, © 2020 Microsoft)",
+      "framing": "chest",
+      "lighting": "cinematic_crimson",
+      "source": {
+        "repository": "https://github.com/microsoft/Microsoft-Rocketbox",
+        "revision": "master",
+        "preview": "https://github.com/microsoft/Microsoft-Rocketbox/blob/master/Assets/Avatars/Professions/Business_Female_02/Business_Female_02.png",
+        "files": [
+          "Assets/Avatars/Professions/Business_Female_02/Export/Business_Female_02_facial.fbx",
+          "Assets/Avatars/Professions/Business_Female_02/Textures/f015_head_color.tga",
+          "Assets/Avatars/Professions/Business_Female_02/Textures/f015_head_normal.tga",
+          "Assets/Avatars/Professions/Business_Female_02/Textures/f015_head_specular.tga",
+          "Assets/Avatars/Professions/Business_Female_02/Textures/f015_body_color.tga",
+          "Assets/Avatars/Professions/Business_Female_02/Textures/f015_body_normal.tga",
+          "Assets/Avatars/Professions/Business_Female_02/Textures/f015_body_specular.tga",
+          "Assets/Avatars/Professions/Business_Female_02/Textures/f015_opacity_color.tga",
+          "Assets/Avatars/Professions/Business_Female_02/Textures/f015_glasses_opacity_color.tga"
+        ],
+        "converted_by": "FBX2glTF 0.9.7 + gltf-transform (tools/rocketbox_to_glb.mjs, tools/rocketbox_textures.py): head colour 2K JPEG, body colour and every normal/roughness map 1K JPEG, hair-card/lash opacity map 1K RGBA PNG, specular mapped to roughness; the 175 FBX morph targets order-verified against the FBX, then pruned to the 67 the pipeline drives (15 visemes AA_VI_*, ARKit 52 AK_*); Meshopt-compressed; glasses: their own RGBA map, alpha-blended",
+        "sha256": "57eacb9c49876374aca7712f7d409ee70be29246c99f4ed754bf44d66525e650"
+      },
+      "casting": "adult woman with a blonde bob and rectangular glasses in a burgundy jacket over a grey roll-neck: sharp, exacting, contrarian; the red team's own look, not a recoloured colleague",
+      "known_gaps": [
+        "glasses are a separate alpha material (f015_glasses_opacity_color, blended); lenses are near-clear, no refraction",
+        "hair-card opacity map palette-quantised (256 colours) and head colour at JPEG q82 to keep the file in the 1.3-2.3 MB range",
+        "Rocketbox is a real-time asset (about 10k triangles, 2K head texture): credible at chest framing on a phone, not photoreal in a close-up"
+      ]
+    },
+    "allocator": {
+      "model": "allie.glb",
+      "license_file": "ROCKETBOX_LICENSE.md",
+      "license_spdx": "MIT",
+      "licensed_from": "Microsoft Rocketbox (github.com/microsoft/Microsoft-Rocketbox), Assets/Avatars/Professions/Business_Female_03, Copyright (c) 2020 Microsoft",
+      "test_asset": false,
+      "credit": "Character model: Microsoft Rocketbox Business_Female_03 (MIT, © 2020 Microsoft)",
+      "framing": "chest",
+      "lighting": "cinematic_gold",
+      "source": {
+        "repository": "https://github.com/microsoft/Microsoft-Rocketbox",
+        "revision": "master",
+        "preview": "https://github.com/microsoft/Microsoft-Rocketbox/blob/master/Assets/Avatars/Professions/Business_Female_03/Business_Female_03.png",
+        "files": [
+          "Assets/Avatars/Professions/Business_Female_03/Export/Business_Female_03_facial.fbx",
+          "Assets/Avatars/Professions/Business_Female_03/Textures/f016_head_color.tga",
+          "Assets/Avatars/Professions/Business_Female_03/Textures/f016_head_normal.tga",
+          "Assets/Avatars/Professions/Business_Female_03/Textures/f016_head_specular.tga",
+          "Assets/Avatars/Professions/Business_Female_03/Textures/f016_body_color.tga",
+          "Assets/Avatars/Professions/Business_Female_03/Textures/f016_body_normal.tga",
+          "Assets/Avatars/Professions/Business_Female_03/Textures/f016_body_specular.tga",
+          "Assets/Avatars/Professions/Business_Female_03/Textures/f016_opacity_color.tga"
+        ],
+        "converted_by": "FBX2glTF 0.9.7 + gltf-transform (tools/rocketbox_to_glb.mjs, tools/rocketbox_textures.py): head colour 2K JPEG, body colour and every normal/roughness map 1K JPEG, hair-card/lash opacity map 1K RGBA PNG, specular mapped to roughness; the 175 FBX morph targets order-verified against the FBX, then pruned to the 67 the pipeline drives (15 visemes AA_VI_*, ARKit 52 AK_*); Meshopt-compressed",
+        "sha256": "8412ce882198e4650a1f8d2d5b880d4f6f577876d6335a92f86f530c96ea557c"
+      },
+      "casting": "Allie, the Chief Allocator: a composed, senior woman with dark shoulder-length hair in a taupe skirt suit and brown blouse",
+      "known_gaps": [
+        "Rocketbox is a real-time asset (about 10k triangles, 2K head texture): credible at chest framing on a phone, not photoreal in a close-up",
+        "no authored animation clips: idle, gestures and speech are procedural (cc_avatar.js)"
+      ]
+    },
+    "eddie": {
+      "model": "eddie.glb",
+      "license_file": "ROCKETBOX_LICENSE.md",
+      "license_spdx": "MIT",
+      "licensed_from": "Microsoft Rocketbox (github.com/microsoft/Microsoft-Rocketbox), Assets/Avatars/Professions/Business_Male_04, Copyright (c) 2020 Microsoft",
+      "test_asset": false,
+      "credit": "Character model: Microsoft Rocketbox Business_Male_04 (MIT, © 2020 Microsoft)",
+      "framing": "chest",
+      "lighting": "cinematic_teal",
+      "source": {
+        "repository": "https://github.com/microsoft/Microsoft-Rocketbox",
+        "revision": "master",
+        "preview": "https://github.com/microsoft/Microsoft-Rocketbox/blob/master/Assets/Avatars/Professions/Business_Male_04/Business_Male_04.png",
+        "files": [
+          "Assets/Avatars/Professions/Business_Male_04/Export/Business_Male_04_facial.fbx",
+          "Assets/Avatars/Professions/Business_Male_04/Textures/m015_head_color.tga",
+          "Assets/Avatars/Professions/Business_Male_04/Textures/m015_head_normal.tga",
+          "Assets/Avatars/Professions/Business_Male_04/Textures/m015_head_specular.tga",
+          "Assets/Avatars/Professions/Business_Male_04/Textures/m015_body_color.tga",
+          "Assets/Avatars/Professions/Business_Male_04/Textures/m015_body_normal.tga",
+          "Assets/Avatars/Professions/Business_Male_04/Textures/m015_body_specular.tga"
+        ],
+        "converted_by": "FBX2glTF 0.9.7 + gltf-transform (tools/rocketbox_to_glb.mjs, tools/rocketbox_textures.py): head colour 2K JPEG, body colour and every normal/roughness map 1K JPEG, hair-card/lash opacity map 1K RGBA PNG, specular mapped to roughness; the 175 FBX morph targets order-verified against the FBX, then pruned to the 67 the pipeline drives (15 visemes AA_VI_*, ARKit 52 AK_*); Meshopt-compressed",
+        "sha256": "959efeb99f056ca48a37cc9695b7e1c8f8e5fc78f49aa4d7f983aa80bba03187"
+      },
+      "casting": "adult man, shaved head, grey shirt sleeves and dark waistcoat, no jacket: the practical, fast execution trader",
+      "known_gaps": [
+        "Rocketbox ships no headset for this avatar; the trading floor adds its headset as a desk prop, not part of the licensed model",
+        "short hair is painted on the head mesh (no hair cards are supplied for this avatar)",
+        "Rocketbox is a real-time asset (about 10k triangles, 2K head texture): credible at chest framing on a phone, not photoreal in a close-up"
+      ]
+    },
+    "scout": {
+      "model": "scout.glb",
+      "license_file": "ROCKETBOX_LICENSE.md",
+      "license_spdx": "MIT",
+      "licensed_from": "Microsoft Rocketbox (github.com/microsoft/Microsoft-Rocketbox), Assets/Avatars/Professions/Business_Male_06, Copyright (c) 2020 Microsoft",
+      "test_asset": false,
+      "credit": "Character model: Microsoft Rocketbox Business_Male_06 (MIT, © 2020 Microsoft)",
+      "framing": "chest",
+      "lighting": "cinematic_amber",
+      "source": {
+        "repository": "https://github.com/microsoft/Microsoft-Rocketbox",
+        "revision": "master",
+        "preview": "https://github.com/microsoft/Microsoft-Rocketbox/blob/master/Assets/Avatars/Professions/Business_Male_06/Business_Male_06.png",
+        "files": [
+          "Assets/Avatars/Professions/Business_Male_06/Export/Business_Male_06_facial.fbx",
+          "Assets/Avatars/Professions/Business_Male_06/Textures/m025_head_color.tga",
+          "Assets/Avatars/Professions/Business_Male_06/Textures/m025_head_normal.tga",
+          "Assets/Avatars/Professions/Business_Male_06/Textures/m025_head_specular.tga",
+          "Assets/Avatars/Professions/Business_Male_06/Textures/m025_body_color.tga",
+          "Assets/Avatars/Professions/Business_Male_06/Textures/m025_body_normal.tga",
+          "Assets/Avatars/Professions/Business_Male_06/Textures/m025_body_specular.tga"
+        ],
+        "converted_by": "FBX2glTF 0.9.7 + gltf-transform (tools/rocketbox_to_glb.mjs, tools/rocketbox_textures.py): head colour 2K JPEG, body colour and every normal/roughness map 1K JPEG, hair-card/lash opacity map 1K RGBA PNG, specular mapped to roughness; the 175 FBX morph targets order-verified against the FBX, then pruned to the 67 the pipeline drives (15 visemes AA_VI_*, ARKit 52 AK_*); Meshopt-compressed",
+        "sha256": "07cc99f2c6a9697dce4bfc539c4b5aae38142f0d1f3bf5ecef3e1f1eb9b18854"
+      },
+      "casting": "younger man with short dark hair in an open-collar white shirt, no tie: the curious market-intelligence researcher",
+      "known_gaps": [
+        "short hair is painted on the head mesh (no hair cards are supplied for this avatar)",
         "Rocketbox is a real-time asset (about 10k triangles, 2K head texture): credible at chest framing on a phone, not photoreal in a close-up"
       ]
     }

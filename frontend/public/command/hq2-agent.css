@@ -8,13 +8,34 @@
   box-shadow:var(--bt-shadow);overflow:hidden;color:var(--bt-ink)
 }
 .bt-agent2::after{content:"";position:absolute;right:-55px;top:-115px;width:280px;height:280px;border:1px solid color-mix(in srgb,var(--a) 20%,transparent);border-radius:50%;box-shadow:0 0 0 34px color-mix(in srgb,var(--a) 3%,transparent),0 0 0 68px color-mix(in srgb,var(--a) 2%,transparent)}
-.bt-agent2-grid{position:relative;z-index:2;display:grid;grid-template-columns:1.2fr .9fr .9fr;gap:14px;align-items:stretch}
-.bt-agent2-id{display:flex;gap:16px;align-items:center}
-.bt-agent2-face{width:78px;height:92px;border-radius:28px 28px 22px 22px;flex:none;position:relative;background:
-  radial-gradient(circle at 50% 27%,#f0f4fb 0 11%,transparent 12%),
-  linear-gradient(180deg,transparent 0 35%,color-mix(in srgb,var(--a) 35%,#0a1628) 36% 100%);
-  border:1px solid color-mix(in srgb,var(--a) 30%,transparent);box-shadow:0 18px 28px rgba(0,0,0,.24)
-}
+.bt-agent2-grid{position:relative;z-index:2;display:grid;grid-template-columns:minmax(0,1.35fr) minmax(0,.85fr) minmax(0,.85fr);gap:14px;align-items:stretch}
+.bt-agent2-id{display:flex;gap:20px;align-items:center;min-width:0}
+.bt-agent2-id>div:last-child{min-width:0}
+/* THE PORTRAIT: the agent's licensed 3D character, live (hq2-portrait.js).
+   A stage with a transparent canvas over a lit backdrop; without a licensed
+   model it is a name card labelled 3D PORTRAIT PENDING, never a figure. */
+.bt-agent2-face.bt-portrait{width:252px;height:316px;border-radius:22px;flex:none;position:relative;overflow:hidden;isolation:isolate;
+  background:
+    radial-gradient(120% 70% at 50% 18%,color-mix(in srgb,var(--a) 26%,#1a2a44) 0,transparent 62%),
+    radial-gradient(90% 60% at 50% 110%,color-mix(in srgb,var(--a) 18%,transparent),transparent 70%),
+    linear-gradient(180deg,#0f1d33,#060e1c);
+  border:1px solid color-mix(in srgb,var(--a) 34%,transparent);
+  box-shadow:0 22px 40px rgba(0,0,0,.36),inset 0 1px 0 rgba(255,255,255,.05)}
+.bt-portrait::before{content:"";position:absolute;inset:auto 12% 6% 12%;height:32%;border-radius:50%;z-index:-1;
+  background:radial-gradient(closest-side,color-mix(in srgb,var(--a) 22%,transparent),transparent);filter:blur(6px)}
+.bt-portrait canvas{position:absolute;left:0;top:0;width:100%;height:100%;display:block}
+.bt-portrait canvas[hidden]{display:none}
+.bt-portrait-card{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;opacity:0;transition:opacity .3s}
+.bt-portrait-card b{width:84px;height:84px;border-radius:50%;display:grid;place-items:center;font:400 44px/1 var(--bt-serif);color:var(--bt-ink);
+  background:color-mix(in srgb,var(--a) 18%,#0b1830);border:1px solid color-mix(in srgb,var(--a) 45%,transparent)}
+.bt-portrait-card span{font:600 13px/1.2 var(--bt-sans);color:#c9d6e5}
+.bt-portrait.is-card .bt-portrait-card{opacity:1}
+.bt-portrait.is-loading .bt-portrait-card{opacity:.35}
+.bt-portrait-tag{position:absolute;left:10px;right:10px;bottom:10px;text-align:center;font:700 8.5px/1.2 var(--bt-mono);letter-spacing:.12em;color:var(--bt-gold)}
+.bt-portrait.is-live .bt-portrait-tag{display:none}
+.bt-portrait-credit{position:absolute;left:10px;right:10px;bottom:8px;text-align:center;font:500 8px/1.2 var(--bt-mono);color:rgba(170,190,214,.55);letter-spacing:.02em;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:none}
+.bt-portrait.is-live .bt-portrait-credit{display:block}
 .bt-agent2-id h1{margin:3px 0 2px;font:400 clamp(34px,4vw,54px)/.95 var(--bt-serif);letter-spacing:-.05em}
 .bt-agent2-id p{margin:6px 0;color:#8498af;font-size:12px}
 .bt-agent2-state{display:flex;align-items:center;gap:7px;margin-top:10px;color:var(--a);font:700 9px/1 var(--bt-mono);letter-spacing:.08em;text-transform:uppercase}
@@ -40,7 +61,17 @@
 @media(max-width:900px){.bt-agent2-grid{grid-template-columns:1fr 1fr}.bt-agent2-id{grid-column:1/-1}}
 @media(max-width:780px){
   .bt-agent2{margin:0 10px 12px;padding:18px 14px}.bt-agent2-grid{grid-template-columns:1fr}.bt-agent2-id{grid-column:auto}
-  .bt-agent2-face{width:58px;height:70px}.bt-hq2 .ws-tabs{padding-left:10px!important;padding-top:96px!important}
+  .bt-agent2-id{flex-direction:column;align-items:stretch;gap:14px}
+  .bt-agent2-face.bt-portrait{width:100%;height:clamp(280px,82vw,360px)}.bt-hq2 .ws-tabs{padding-left:10px!important;padding-top:96px!important}
+}
+/* (the desktop rail margin is the C28 integration rule below) on a page
+   without tabs (eddie, scout) the hero also clears the bar; the content
+   after the hero needs no second bar offset */
+.bt-hq2 .ws-tabs[hidden]+.bt-agent2{margin-top:112px}
+.bt-hq2 .bt-agent2-memory~#ws-root,.bt-hq2 .bt-agent2-memory~#page{padding-top:18px!important}
+@media(max-width:780px){
+  .bt-hq2 .bt-agent2,.bt-hq2 .bt-agent2-memory{margin-left:10px}
+  .bt-hq2 .ws-tabs[hidden]+.bt-agent2{margin-top:100px}
 }
 
 /* integration (C28): the hero and memory strip are inserted outside the shell's offset wrappers, so on desktop they slid under the 92px rail */

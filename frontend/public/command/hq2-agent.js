@@ -14,7 +14,7 @@
     scout:["Find structure. Do not fall in love with it.","Curious and experimental. He hunts patterns and alternate data, but a research hypothesis never promotes itself."]
   };
   var quote=P[slug]||["Independent agent.",""]; var hero=document.createElement('section');hero.className='bt-agent2';hero.dataset.agent=slug;hero.style.setProperty('--a',s.accent);
-  hero.innerHTML='<div class="bt-agent2-grid"><div class="bt-agent2-id"><span class="bt-agent2-face" aria-hidden="true"></span><div><div class="bt-kicker">BETTOR AI · '+s.short+'</div><h1>'+s.name+'</h1><p>'+s.role+'</p><div class="bt-agent2-state" id="bt-agent2-state"><i></i><span>READING LIVE STATE</span></div></div></div>'+
+  hero.innerHTML='<div class="bt-agent2-grid"><div class="bt-agent2-id"><div class="bt-agent2-face bt-portrait is-loading" data-slug="'+s.slug+'" data-portrait="loading"><canvas role="img" aria-label="'+s.name+', 3D portrait"></canvas><div class="bt-portrait-card" aria-hidden="true"><b>'+s.initial+'</b><span>'+s.name+'</span></div><div class="bt-portrait-tag">LOADING 3D PORTRAIT</div><small class="bt-portrait-credit"></small></div><div><div class="bt-kicker">BETTOR AI · '+s.short+'</div><h1>'+s.name+'</h1><p>'+s.role+'</p><div class="bt-agent2-state" id="bt-agent2-state"><i></i><span>READING LIVE STATE</span></div></div></div>'+
     '<div class="bt-agent2-panel"><div class="k">Personality</div><div class="quote">'+quote[0]+'</div><p>'+quote[1]+'</p></div>'+
     '<div class="bt-agent2-panel"><div class="k">Living identity</div><div class="bt-agent2-stats"><div class="bt-agent2-stat"><span>Memory</span><b id="bt-agent2-mem">NOT RELEASED</b></div><div class="bt-agent2-stat"><span>Experience</span><b id="bt-agent2-exp">NOT RELEASED</b></div><div class="bt-agent2-stat"><span>Voice</span><b id="bt-agent2-voice">DESK VOICE</b></div><div class="bt-agent2-stat"><span>Heartbeat</span><b id="bt-agent2-hb">READING</b></div></div><div class="bt-agent2-actions"><button class="primary" id="bt-agent2-talk">Talk to '+s.name+'</button><a href="/floor">Back to floor</a></div></div></div>';
   var anchor=document.getElementById('ws-tabs')||document.getElementById('ws-root')||document.body.firstChild;
@@ -23,6 +23,10 @@
   hero.insertAdjacentElement('afterend',memory);
   function update(a){
     var m=B.STATES[B.stateOf(a)],st=document.getElementById('bt-agent2-state');if(st){st.style.color=m.color;st.querySelector('span').textContent=m.label+(a&&a.state_detail?' · '+a.state_detail:'');}
+    // the portrait's pose follows the same recorded state (the floor's mapping):
+    // stale / not deployed / unknown settle and stay still, never animated
+    var st0=B.stateOf(a),mode=st0==='STALE'||st0==='NOT_DEPLOYED'||st0==='UNKNOWN'?'unavailable':st0==='WAITING'?'waiting':m.motion==='review'||m.motion==='work'?'reviewing':'monitoring';
+    if(document.body.getAttribute('data-cc-mode')!==mode){document.body.setAttribute('data-cc-mode',mode);window.dispatchEvent(new CustomEvent('cc:mode',{detail:{mode:mode}}));}
     var hb=document.getElementById('bt-agent2-hb');if(hb)hb.textContent=a&&a.heartbeat&&a.heartbeat.at?B.ago(a.heartbeat.at):'UNAVAILABLE';
   }
   B.poller('/api/command/floor/'+slug,15000,function(r){
