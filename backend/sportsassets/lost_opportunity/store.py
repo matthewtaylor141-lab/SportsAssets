@@ -171,7 +171,9 @@ HORIZON_COLS = (
     "deployable_capital_usd", "expected_capital_hours", "expected_pnl_usd",
     "p10_pnl_usd", "p50_pnl_usd", "p90_pnl_usd", "prob_positive",
     "expected_max_drawdown_usd", "capacity_utilization",
-    "expected_capacity_usd", "quantiles", "status", "why", "validation",
+    "expected_capacity_usd", "trailing_30d_committed_usd",
+    "trailing_30d_capital_turnover", "quantiles", "status", "why",
+    "validation",
     "unmeasured", "basis", "inputs_sha256", "version")
 _HTS = ("issued_at", "horizon_start", "horizon_end")
 _HJ = ("quantiles", "validation", "unmeasured", "basis")

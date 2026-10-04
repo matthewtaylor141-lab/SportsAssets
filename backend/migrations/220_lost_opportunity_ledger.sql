@@ -251,6 +251,10 @@ CREATE TABLE IF NOT EXISTS lol_horizon_forecasts (
     expected_max_drawdown_usd double precision,
     capacity_utilization double precision,
     expected_capacity_usd double precision,
+    -- MEASURED, not forecast: the trailing 30 days' capital committed and
+    -- its turnover (committed / average locked capital over those days)
+    trailing_30d_committed_usd double precision,
+    trailing_30d_capital_turnover double precision,
     quantiles           jsonb,
     status              text        NOT NULL,
     why                 text,

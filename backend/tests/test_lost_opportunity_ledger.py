@@ -228,6 +228,12 @@ def test_horizon_forecasts_fail_closed_and_are_unproven_and_rounded():
         assert fc["deployable_capital_usd"] == 400123.0
         out[key] = fc
     assert out["7D"]["expected_opportunities"] == 70.0
+    # trailing turnover is measured: 29 fills of $50 inside the 30 days
+    # (the 30th filled an hour before it); locked capital-hours 29 x 2h x
+    # $50 + the 1h of the 30th inside the window, over 720 h
+    assert out["30D"]["trailing_30d_committed_usd"] == 1450.0
+    assert out["30D"]["trailing_30d_capital_turnover"] == pytest.approx(
+        1450.0 / ((29 * 2 * 50.0 + 50.0) / 720.0), abs=0.01)
     assert out["30D"]["expected_qualified_opportunities"] == 60.0
     act = HZ.build(econs, book="ACTUAL", horizon="24H", days=1, now=now,
                    lookback_days=90, opportunity=opp)

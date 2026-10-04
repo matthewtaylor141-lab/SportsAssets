@@ -131,6 +131,8 @@ def build(econs: list, *, book: str, horizon: str, days: int, now: float,
                      default=None)
     if first_open is None:
         why = "NO_POSITION_IN_THE_LOOKBACK"
+        out.put("trailing_30d_committed_usd", None, why)
+        out.put("trailing_30d_capital_turnover", None, why)
         out.put("expected_turnover_usd", None, why)
         out.put("expected_capital_hours", None, why)
         out.put("capacity_utilization", None, why)
@@ -159,6 +161,28 @@ def build(econs: list, *, book: str, horizon: str, days: int, now: float,
         else:
             out.put("capacity_utilization",
                     round(exp_ch / (acct * days * 24.0), 4))
+        # the trailing 30 days, measured (not a forecast)
+        lo30 = now - 30 * DAY
+        ch30 = 0.0
+        for e in rows:
+            segs = list(e.get("segments") or [])
+            if e.get("state") == "OPEN" and (e.get("open_cost_basis_usd")
+                                             or 0) \
+                    and e.get("last_event_at") is not None:
+                segs.append((e["last_event_at"], now,
+                             e["open_cost_basis_usd"]))
+            ch30 += sum(max(0.0, min(t1, now) - max(t0, lo30)) / 3600.0 * c
+                        for t0, t1, c in segs)
+        com30 = sum(e.get("capital_committed_usd") or 0.0 for e in rows
+                    if (e.get("first_fill_at") or 0) >= lo30)
+        out.put("trailing_30d_committed_usd", usd(com30))
+        avg_locked = ch30 / (30 * 24.0)
+        out.put("trailing_30d_capital_turnover",
+                round(com30 / avg_locked, 2) if avg_locked > 0 else None,
+                "NO_CAPITAL_LOCKED_IN_THE_TRAILING_30_DAYS")
+        basis["turnover"] = ("trailing 30 days: capital committed by "
+                             "positions first filled / average locked capital "
+                             "(capital-hours / 720 h); measured, not forecast")
         basis["capital"] = ("history %.1f days: capital-hours (open accrued "
                             "to now) and capital committed, per day x %d"
                             % (hist_d, days))
