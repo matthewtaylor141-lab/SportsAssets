@@ -807,7 +807,7 @@
       function section(cls, title, desc) {
         var rows = Object.keys(codes).map(function (k) { return codes[k]; }).filter(function (x) { return x.c.cls === cls; }).sort(function (a, b) { return b.n - a.n; });
         var n = rows.reduce(function (a, x) { return a + x.n; }, 0);
-        var h = '<div class="od-rsec od-rsec-' + cls.toLowerCase() + '"><div class="od-rsec-h"><b>' + title + '</b><span>' + F.int(n) + ' decisions · ' + (total ? pct(n / total, 1) : '—') + ' of refused</span><small>' + desc + '</small></div>';
+        var h = '<div class="od-rsec od-rsec-' + cls.toLowerCase() + '" data-class="' + cls + '"><div class="od-rsec-h" data-count="' + n + '"><b>' + title + '</b><span>' + F.int(n) + ' decisions · ' + (total ? pct(n / total, 1) : '—') + ' of refused</span><small>' + desc + '</small></div>';
         if (!rows.length) { return h + '<div class="od-soft od-block">none in the last 24 h</div></div>'; }
         return h + '<div class="od-scroll"><table class="od-t od-t-tight"><thead><tr><th>Code</th><th>Stage</th><th class="od-num" title="decisions · share of all refused decisions">Decisions</th><th title="distinct markets and sports among the latest ' + opp.length + ' decisions">Seen in*</th><th>Strategies</th><th title="settled hindsight from the lost-opportunity ledger (RESEARCH): good / false / unknowable refusals">Hindsight</th></tr></thead><tbody>' +
           rows.map(function (x) {
@@ -822,7 +822,7 @@
         '</div>' + section('UNCLASSIFIED', 'UNCLASSIFIED', 'not in the R29 refusal table: shown on its own, never assumed economic') + collectionLosses() + trend(L);
     }
     frame('refusals', {
-      title: 'Lost opportunities · refusals', kicker: 'last 24 h PAPER decisions · software and economic kept apart',
+      title: 'Lost opportunities · refusals', kicker: 'last 24 h PAPER decisions · the two loss classes kept apart',
       state: S, src: 'paper/derek refusal_summary_24h · lost-opportunities every 120 s', body: body,
       foot: 'Counts are decisions (one per evaluated market side per cycle), from the full 24 h summary. *Markets / sports: among the latest ' + oppLimit + ' decisions only. Trend per code: ' + DNA + ' (one 24 h window in R29); the 30-day hindsight trend is the lost-opportunity ledger. Classification: ops-taxonomy.js (R29 ' + esc(TX.sourceSha) + ').'
     });

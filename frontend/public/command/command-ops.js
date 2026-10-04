@@ -379,6 +379,7 @@
     hdr.id = 'ops-hdr';
     hdr.className = 'ops-hdr';
     hdr.setAttribute('role', 'status');
+    hdr.setAttribute('data-exec-header', 'COMMAND_OPS_R1');
     hdr.setAttribute('aria-label', 'Executive command header: production system state');
     hdr.innerHTML = CELLS.map(function (c) {
       var tag = c[0] === 'inc' ? 'a href="/ops#incidents"' : 'div';
@@ -475,10 +476,10 @@
       var as = a.short || short(a.sha) || 'UNAVAILABLE', ws = wk.short || short(wk.sha) || 'UNAVAILABLE';
       var t2 = 'API ' + (a.sha || a.why || '—') + '\nWORKERS ' + (wk.sha || wk.why || '—') + '\nalignment ' + (al.verdict || '—') + (al.matched_how ? ' (' + al.matched_how + ')' : '') + (al.why ? ' · ' + al.why : '');
       if (al.verdict === 'MISALIGNED') {
-        cell('sha', 'bad', 'MISMATCH · API ' + as + ' ≠ WRK ' + ws, t2, 'mismatch');
+        cell('sha', 'bad', 'MISMATCH · API ' + as + ' ≠ WORKERS ' + ws, t2, 'mismatch');
         document.body.classList.add('ops-sha-mismatch');
       } else {
-        cell('sha', al.verdict === 'ALIGNED' ? 'good' : 'warn', 'API ' + as + ' · WRK ' + ws + (al.verdict === 'ALIGNED' ? ' ✓' : ' · UNVERIFIED'), t2, '');
+        cell('sha', al.verdict === 'ALIGNED' ? 'good' : 'warn', 'API ' + as + ' · WORKERS ' + ws + (al.verdict === 'ALIGNED' ? ' ✓' : ' · UNVERIFIED'), t2, '');
         document.body.classList.remove('ops-sha-mismatch');
       }
     } else { cell('sha', rel && !rel.ok ? 'warn' : 'dim', rel && !rel.ok ? 'UNAVAILABLE' : 'READING', rel && rel.why || 'GET /api/command/release'); }
