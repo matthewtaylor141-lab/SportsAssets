@@ -1,5 +1,7 @@
-"""HORIZON FORECASTS: THE NEXT 24 HOURS, 7 DAYS AND 30 DAYS, PER BOOK.
-Pure; no I/O. RESEARCH. UNPROVEN BY CONSTRUCTION.
+"""HORIZON FORECASTS: THE NEXT 24 HOURS, 7 DAYS AND 30 DAYS, PER BOOK AND
+SLEEVE (migration 227: the INVESTMENT sleeve's horizons are the production-
+confidence ones; TRAINING / BENCHMARK / UNCLASSIFIED are forecast
+separately, never pooled). Pure; no I/O. RESEARCH. UNPROVEN BY CONSTRUCTION.
 
 Extends pos-econ's monthly revenue engine (profitability/forecast.py) to the
 three horizons management reads, with the same method and the same
@@ -69,9 +71,14 @@ def cnt(v):
 
 def build(econs: list, *, book: str, horizon: str, days: int, now: float,
           lookback_days: float, opportunity=None, capital=None,
-          capacity_daily=None, fill_probability=None, scores=()) -> dict:
-    """ONE book's ONE horizon forecast record."""
-    rows = [e for e in econs if e.get("book") == book]
+          capacity_daily=None, fill_probability=None, scores=(),
+          sleeve=None, strategy=None, capacity_why=None) -> dict:
+    """ONE book's ONE horizon forecast record for ONE scope (migration
+    227): `sleeve` INVESTMENT is the production-confidence horizon; every
+    other sleeve is forecast separately (research); None pools every sleeve
+    (research only). `scores` must be this scope's own scored history."""
+    rows = [e for e in econs
+            if C.in_scope(e, book=book, sleeve=sleeve, strategy=strategy)]
     lb = now - lookback_days * DAY
     closed = [e for e in rows if e.get("state") == "CLOSED"
               and e.get("net_profit_usd") is not None
@@ -84,6 +91,8 @@ def build(econs: list, *, book: str, horizon: str, days: int, now: float,
                 horizon_end=now + days * DAY, method=METHOD,
                 sample_days=len(vals), sample_positions=len(closed),
                 validation=val, version=VERSION, label=C.LABEL)
+    out.update(C.scope_fields(rows, book=book, sleeve=sleeve,
+                              strategy=strategy or C.ALL_STRATEGIES))
     basis = {}
     opp = opportunity or {}
     inputs = {"book": book, "horizon": horizon,
@@ -91,6 +100,8 @@ def build(econs: list, *, book: str, horizon: str, days: int, now: float,
               "opportunity": opp, "capital": capital,
               "capacity_daily": capacity_daily,
               "fill_probability": fill_probability}
+    if sleeve is not None:
+        inputs.update(sleeve=sleeve, strategy=strategy or C.ALL_STRATEGIES)
     out["inputs_sha256"] = C.sha(inputs)
 
     # ── opportunity lines (PAPER decisions only) ──────────────────────
@@ -118,7 +129,7 @@ def build(econs: list, *, book: str, horizon: str, days: int, now: float,
     basis["deployable_capital"] = "idle capital now (latest CAPITAL snapshot)"
     if capacity_daily is None:
         out.put("expected_capacity_usd", None,
-                "NO_MEASURED_DAILY_EXECUTABLE_OPPORTUNITY")
+                capacity_why or "NO_MEASURED_DAILY_EXECUTABLE_OPPORTUNITY")
     else:
         fp = fill_probability if fill_probability is not None else 1.0
         out.put("expected_capacity_usd", usd(capacity_daily * fp * days))

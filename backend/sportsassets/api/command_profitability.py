@@ -9,9 +9,19 @@ EMPTY names why (no run yet, migration 216 absent, unknown position);
 UNAVAILABLE names the failed read. A failed read is never shown as zeros.
 PAPER, ACTUAL and COUNTERFACTUAL are separate keys, never summed.
 
+PRODUCTION CONFIDENCE IS INVESTMENT-ONLY (migration 227). `data.PAPER` /
+`data.ACTUAL` of north-star and forecast are the INVESTMENT sleeve's rows;
+every sleeve is in `by_sleeve` (TRAINING / BENCHMARK / UNCLASSIFIED labelled
+research), every strategy in `by_strategy`; rows written before 227 pooled
+every strategy and are shown under `legacy_book_wide`, never as INVESTMENT.
+Every row carries book, sleeve, strategy and policy_versions. The capacity
+snapshot's top level is the PRODUCTION capacity (INVESTMENT, executable
+freshness); its `research` key is the 300 s, every-strategy aggregate.
+
 ROUTES (the logic is sportsassets/profitability/*; these read pos_* only):
   GET /api/command/profitability                    latest run per component
   GET /api/command/profitability/north-star         the five metrics per book
+                                                    and sleeve
   GET /api/command/profitability/capital            portfolio capital per book
                                                     + positions (?book=&limit=)
   GET /api/command/profitability/capacity           aggregate + candidates
@@ -119,42 +129,80 @@ async def profitability_index() -> dict:
     return await _read(fn)
 
 
+SLEEVES = ("INVESTMENT", "TRAINING", "BENCHMARK", "UNCLASSIFIED")
+SCOPE_RULE = ("data.{PAPER,ACTUAL} is PRODUCTION CONFIDENCE: the INVESTMENT "
+              "sleeve only (migration 227). TRAINING, BENCHMARK and "
+              "UNCLASSIFIED are in by_sleeve, labelled research, and are "
+              "never pooled into it; by_strategy splits every sleeve by "
+              "strategy. Pre-227 rows pooled every strategy and are listed "
+              "under legacy_book_wide, never as INVESTMENT.")
+
+
+def _metric_row(r, now) -> dict:
+    d = _row(r)
+    det = d.pop("detail") or {}
+    d["trend"] = det.get("trend")
+    d["unit"] = det.get("unit")
+    d["ci_level"] = det.get("ci_level")
+    d["ci_why"] = det.get("ci_why")
+    d["period"] = det.get("period")
+    d["metric_detail"] = det.get("detail")
+    d["policy_version"] = det.get("policy_version")
+    d["policy_version_why"] = det.get("policy_version_why")
+    d["sleeve_role"] = det.get("sleeve_role")
+    if d.get("sleeve") is None:
+        d["scope"] = "BOOK_WIDE_PRE_227"
+        d["confidence_scope"] = "RESEARCH_NOT_PRODUCTION_CONFIDENCE"
+    d["freshness"] = {
+        "data_as_of": d["data_as_of"],
+        "data_age_s": (None if d["data_as_of"] is None
+                       else round(now - d["data_as_of"], 1)),
+        "observation_written_at": d["computed_at"],
+        "why": None if d["data_as_of"] is not None
+        else "NO_SOURCE_EVENT_FOR_THIS_SCOPE"}
+    return d
+
+
 @router.get(BASE + "/north-star", dependencies=[Depends(require_read)])
 async def profitability_north_star() -> dict:
     async def fn(conn):
         rows = await conn.fetch(
-            "SELECT DISTINCT ON (book, metric) book, metric, value, sample_n,"
+            "SELECT DISTINCT ON (book, sleeve, strategy, metric) book, "
+            "       sleeve, strategy, policy_versions, classifier_version, "
+            "       confidence_scope, metric, value, sample_n,"
             "       ci_low, ci_high, status, why, detail, run_id, "
             "       extract(epoch FROM period_start)::float8 AS period_start,"
             "       extract(epoch FROM period_end)::float8 AS period_end, "
             "       extract(epoch FROM data_as_of)::float8 AS data_as_of, "
             "       extract(epoch FROM computed_at)::float8 AS computed_at "
             "  FROM pos_metric_observations "
-            " ORDER BY book, metric, computed_at DESC")
+            " ORDER BY book, sleeve, strategy, metric, computed_at DESC")
         if not rows:
             return _env("EMPTY", "NO_RUN_YET", data=None)
         now = time.time()
         data = {"PAPER": {}, "ACTUAL": {}}
+        by_sleeve = {b: {s: {} for s in SLEEVES} for b in data}
+        by_strategy = {b: {} for b in data}
+        legacy = {b: {} for b in data}
         for r in rows:
-            d = _row(r)
-            det = d.pop("detail") or {}
-            d["trend"] = det.get("trend")
-            d["unit"] = det.get("unit")
-            d["ci_level"] = det.get("ci_level")
-            d["ci_why"] = det.get("ci_why")
-            d["period"] = det.get("period")
-            d["metric_detail"] = det.get("detail")
-            d["freshness"] = {
-                "data_as_of": d["data_as_of"],
-                "data_age_s": (None if d["data_as_of"] is None
-                               else round(now - d["data_as_of"], 1)),
-                "observation_written_at": d["computed_at"],
-                "why": None if d["data_as_of"] is not None
-                else "NO_SOURCE_EVENT_FOR_THIS_BOOK"}
-            data[r["book"]][r["metric"]] = d
+            d = _metric_row(r, now)
+            b, s, st = r["book"], r["sleeve"], r["strategy"]
+            if s is None:
+                legacy[b][r["metric"]] = d
+            elif st in (None, "ALL"):
+                by_sleeve[b][s][r["metric"]] = d
+                if s == "INVESTMENT":
+                    data[b][r["metric"]] = d
+            else:
+                by_strategy[b].setdefault(st, {})[r["metric"]] = d
         last = await _last_ok(conn, "NORTH_STAR")
         return _env("OK", None, computed_at=last, data=data,
-                    summed_across_books=False,
+                    by_sleeve=by_sleeve, by_strategy=by_strategy,
+                    legacy_book_wide=legacy,
+                    production_confidence_scope={
+                        "sleeve": "INVESTMENT", "strategy": "ALL",
+                        "rule": SCOPE_RULE},
+                    summed_across_books=False, summed_across_sleeves=False,
                     last_confirmed_run_at=last)
     return await _read(fn)
 
@@ -248,21 +296,39 @@ async def profitability_forecast(
         history: int = Query(default=30, ge=0, le=500)) -> dict:
     async def fn(conn):
         latest = {}
+        by_sleeve = {}
+        legacy = {}
         for b in ("PAPER", "ACTUAL"):
+            by_sleeve[b] = {}
+            for s in SLEEVES:
+                r = await conn.fetchrow(
+                    "SELECT * FROM pos_forecasts WHERE book = $1 "
+                    "   AND sleeve = $2 AND strategy = 'ALL' "
+                    " ORDER BY issued_at DESC LIMIT 1", b, s)
+                by_sleeve[b][s] = None if r is None else _row(r)
+            # THE PRODUCTION-CONFIDENCE FORECAST: the INVESTMENT sleeve's
+            latest[b] = by_sleeve[b]["INVESTMENT"]
             r = await conn.fetchrow(
                 "SELECT * FROM pos_forecasts WHERE book = $1 "
-                " ORDER BY issued_at DESC LIMIT 1", b)
-            latest[b] = None if r is None else _row(r)
+                "   AND sleeve IS NULL ORDER BY issued_at DESC LIMIT 1", b)
+            legacy[b] = None if r is None else dict(
+                _row(r), scope="BOOK_WIDE_PRE_227",
+                confidence_scope="RESEARCH_NOT_PRODUCTION_CONFIDENCE")
         scores = [_row(r) for r in await conn.fetch(
             "SELECT * FROM pos_forecast_scores ORDER BY scored_at DESC "
             " LIMIT $1", int(history))] if history else []
-        if not any(latest.values()):
+        if not any(v for bs in by_sleeve.values() for v in bs.values()):
             return _env("EMPTY", "NO_FORECAST_ISSUED_YET", data=None,
-                        scores=scores)
-        comp = max((v["issued_at"] for v in latest.values() if v),
-                   default=None)
-        return _env("OK", None, computed_at=comp, data=latest, scores=scores,
-                    summed_across_books=False,
+                        scores=scores, legacy_book_wide=legacy)
+        comp = max((v["issued_at"] for bs in by_sleeve.values()
+                    for v in bs.values() if v), default=None)
+        return _env("OK", None, computed_at=comp, data=latest,
+                    by_sleeve=by_sleeve, legacy_book_wide=legacy,
+                    scores=scores,
+                    production_confidence_scope={
+                        "sleeve": "INVESTMENT", "strategy": "ALL",
+                        "rule": SCOPE_RULE},
+                    summed_across_books=False, summed_across_sleeves=False,
                     forecast_label=("UNPROVEN until the forecasts' own forward "
                                     "calibration validates them"))
     return await _read(fn)

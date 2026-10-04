@@ -21,6 +21,7 @@ from contextlib import asynccontextmanager
 import asyncpg
 import pytest
 
+from sportsassets.profitability import reads as R
 from sportsassets.profitability import runner as RUN
 
 try:
@@ -168,16 +169,44 @@ async def test_capacity_metrics_forecast_and_snapshots_are_persisted():
         assert nb["status"] == "UNAVAILABLE"
         assert nb["why"] == "NO_RECORDED_BOOK_OBSERVATION"
         assert nb["executable_capacity_usd"] is None
-        ms = {r["metric"]: r for r in await conn.fetch(
-            "SELECT * FROM pos_metric_observations WHERE run_id=$1", rid)}
-        assert len(ms) == 5
-        assert ms["REALIZED_NET_EDGE"]["status"] == "INSUFFICIENT_SAMPLE"
-        assert ms["REALIZED_NET_EDGE"]["value"] == pytest.approx(
+        # (R30A, migration 227) the metrics are per book AND sleeve: the
+        # fixture's positions are PINNACLE_ONLY_PAPER_BENCHMARK, which
+        # migration 223 classifies BENCHMARK -- so the figures this test has
+        # always pinned (47.5 / 74.5 over 2 positions) are the BENCHMARK
+        # sleeve's, labelled research, and the PRODUCTION-CONFIDENCE
+        # (INVESTMENT) metric is UNAVAILABLE: a benchmark win never reads as
+        # investment evidence.
+        rows = await conn.fetch(
+            "SELECT * FROM pos_metric_observations WHERE run_id=$1", rid)
+        assert all(r["sleeve"] in ("INVESTMENT", "TRAINING", "BENCHMARK",
+                                   "UNCLASSIFIED") for r in rows)
+        bm = {r["metric"]: r for r in rows if r["book"] == "PAPER"
+              and r["sleeve"] == "BENCHMARK" and r["strategy"] == "ALL"}
+        assert len(bm) == 5
+        assert bm["REALIZED_NET_EDGE"]["status"] == "INSUFFICIENT_SAMPLE"
+        assert bm["REALIZED_NET_EDGE"]["value"] == pytest.approx(
             47.5 / 74.5, rel=1e-6)
-        assert ms["REALIZED_NET_EDGE"]["sample_n"] == 2
-        fc = await conn.fetchrow(
-            "SELECT * FROM pos_forecasts WHERE run_id=$1", rid)
-        assert fc["book"] == "PAPER" and fc["status"] == "UNAVAILABLE"
+        assert bm["REALIZED_NET_EDGE"]["sample_n"] == 2
+        assert bm["REALIZED_NET_EDGE"]["confidence_scope"] == \
+            "RESEARCH_NOT_PRODUCTION_CONFIDENCE"
+        inv = {r["metric"]: r for r in rows if r["book"] == "PAPER"
+               and r["sleeve"] == "INVESTMENT" and r["strategy"] == "ALL"}
+        assert len(inv) == 5
+        assert inv["REALIZED_NET_EDGE"]["status"] == "UNAVAILABLE"
+        assert inv["REALIZED_NET_EDGE"]["value"] is None
+        assert inv["REALIZED_NET_EDGE"]["confidence_scope"] == \
+            "PRODUCTION_CONFIDENCE"
+        per_strategy = [r for r in rows if r["strategy"]
+                        == "PINNACLE_ONLY_PAPER_BENCHMARK"]
+        assert per_strategy and all(r["sleeve"] == "BENCHMARK"
+                                    for r in per_strategy)
+        fcs = {(r["book"], r["sleeve"]): r for r in await conn.fetch(
+            "SELECT * FROM pos_forecasts WHERE run_id=$1", rid)}
+        assert set(fcs) == {("PAPER", s) for s in (
+            "INVESTMENT", "TRAINING", "BENCHMARK", "UNCLASSIFIED")}
+        fc = fcs[("PAPER", "INVESTMENT")]
+        assert fc["status"] == "UNAVAILABLE"
+        assert fc["confidence_scope"] == "PRODUCTION_CONFIDENCE"
         assert fc["expected_pnl_usd"] is None and fc["why"]
         snaps = {(r["component"], r["book"]) for r in await conn.fetch(
             "SELECT component, book FROM pos_snapshots WHERE run_id=$1",
@@ -291,19 +320,29 @@ async def test_an_ended_forecast_is_scored_against_what_happened():
         await _cycle(conn, s)
         now = s["now"]
         q = {str(round(0.05 * i, 2)): -50.0 + 5.0 * i for i in range(1, 20)}
-        await conn.execute(
-            "INSERT INTO pos_forecasts (forecast_id, book, run_id, "
-            " issued_at, issued_day, horizon_start, horizon_end, "
-            " horizon_days, method, status, why, expected_pnl_usd, "
-            " p10_pnl_usd, p50_pnl_usd, p90_pnl_usd, prob_positive, "
-            " quantiles, inputs_sha256, version) VALUES ('posfc:old',"
-            " 'PAPER','r',to_timestamp($1),"
-            " (to_timestamp($1) AT TIME ZONE 'UTC')::date,to_timestamp($1),"
-            " to_timestamp($2),30,'m','UNPROVEN','x',0,-40,0,40,0.5,"
-            " $3::jsonb,'s','v')", now - 31 * DAY, now - DAY,
-            json.dumps(q))
+        # (R30A, migration 227) a forecast names its scope and is scored
+        # against ITS OWN sleeve: the fixture's positions are BENCHMARK, so
+        # the BENCHMARK forecast realizes the +47.5 this test has always
+        # pinned, and an INVESTMENT forecast over the same horizon realizes
+        # nothing -- a benchmark win never scores an investment forecast.
+        ins = ("INSERT INTO pos_forecasts (forecast_id, book, run_id, "
+               " issued_at, issued_day, horizon_start, horizon_end, "
+               " horizon_days, method, status, why, expected_pnl_usd, "
+               " p10_pnl_usd, p50_pnl_usd, p90_pnl_usd, prob_positive, "
+               " quantiles, inputs_sha256, version, sleeve, strategy, "
+               " policy_versions, confidence_scope) VALUES ($4,"
+               " 'PAPER','r',to_timestamp($1),"
+               " (to_timestamp($1) AT TIME ZONE 'UTC')::date,to_timestamp($1),"
+               " to_timestamp($2),30,'m','UNPROVEN','x',0,-40,0,40,0.5,"
+               " $3::jsonb,'s','v',$5,'ALL','{}',$6)")
+        await conn.execute(ins, now - 31 * DAY, now - DAY, json.dumps(q),
+                           "posfc:old", "BENCHMARK",
+                           "RESEARCH_NOT_PRODUCTION_CONFIDENCE")
+        await conn.execute(ins, now - 31 * DAY, now - DAY, json.dumps(q),
+                           "posfc:old-inv", "INVESTMENT",
+                           "PRODUCTION_CONFIDENCE")
         got = await _cycle(conn, s, now=now + 60)
-        assert got["results"]["forecast"]["scored"] == 1
+        assert got["results"]["forecast"]["scored"] == 2
         sc = await conn.fetchrow(
             "SELECT * FROM pos_forecast_scores WHERE forecast_id='posfc:old'")
         # released inside [now-31d, now-1d): the settled (+46) and sold (+1.5)
@@ -312,6 +351,18 @@ async def test_an_ended_forecast_is_scored_against_what_happened():
         assert sc["inside_p10_p90"] is False and sc["realized_positive"]
         assert sc["brier_positive"] == pytest.approx(0.25)
         assert sc["label"] == "RESEARCH"
+        assert sc["sleeve"] == "BENCHMARK" and sc["strategy"] == "ALL"
+        inv = await conn.fetchrow(
+            "SELECT * FROM pos_forecast_scores "
+            " WHERE forecast_id='posfc:old-inv'")
+        assert inv["sleeve"] == "INVESTMENT"
+        assert inv["realized_pnl_usd"] == 0.0
+        assert inv["realized_positions"] == 0
+        assert inv["confidence_scope"] == "PRODUCTION_CONFIDENCE"
+        # the whole book (a pre-227 book-wide forecast's scope) still sees it
+        whole = await R.realized_between(conn, book="PAPER", start=now - 31
+                                         * DAY, end=now - DAY)
+        assert whole == (pytest.approx(47.5), 2)
         again = await _cycle(conn, s, now=now + 120)
         assert again["results"]["forecast"]["scored"] == 0
 
@@ -351,10 +402,27 @@ async def test_the_reads_serve_research_envelopes(monkeypatch):
         assert m["trend"]["direction"] == "UNAVAILABLE"
         assert ns["data"]["ACTUAL"] == {}
         assert ns["summed_across_books"] is False
+        # (R30A, migration 227) data.PAPER is the INVESTMENT sleeve --
+        # production confidence. The fixture's positions are BENCHMARK: they
+        # are served separately in by_sleeve, labelled research, and never
+        # reach the production row.
+        assert m["sleeve"] == "INVESTMENT" and m["strategy"] == "ALL"
+        assert m["confidence_scope"] == "PRODUCTION_CONFIDENCE"
+        assert m["value"] is None and m["status"] == "UNAVAILABLE"
+        bm = ns["by_sleeve"]["PAPER"]["BENCHMARK"]["MAX_DRAWDOWN"]
+        assert bm["value"] is not None and bm["sample_n"] == 2
+        assert bm["confidence_scope"] == "RESEARCH_NOT_PRODUCTION_CONFIDENCE"
+        assert "PINNACLE_ONLY_PAPER_BENCHMARK" in ns["by_strategy"]["PAPER"]
+        assert ns["summed_across_sleeves"] is False
         cap = await CP.profitability_capital(book="", limit=50)
         assert cap["status"] == "OK"
         assert cap["data"]["ACTUAL"] is None
         assert cap["data"]["COUNTERFACTUAL"]["book"] == "COUNTERFACTUAL"
+        pc = cap["data"]["PAPER"]
+        assert pc["production_confidence"]["sleeve"] == "INVESTMENT"
+        assert pc["production_confidence"]["realized_net_profit_usd"] is None
+        assert pc["by_sleeve"]["BENCHMARK"]["realized_net_profit_usd"] == \
+            pytest.approx(47.5)
         op = [p for p in cap["positions"] if p["state"] == "OPEN"][0]
         assert op["capital_hours_to_date"] >= op["capital_hours"]
         assert "REALIZED_PROFIT_PER_CAPITAL_HOUR" in op

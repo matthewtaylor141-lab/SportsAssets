@@ -313,11 +313,20 @@ async def run_cycle(conn, *, now=None, account_id=C.PAPER_ACCOUNT,
         paper = streams.get("PAPER")
         pp = paper.positions if paper else []
         closed = await _closed_rows(conn, pp, actual_positions)
-        out = LD.compute(history=LD.historical(pp), paper_closed=closed[
-            "PAPER"], actual_closed=closed["ACTUAL"],
-            actual_positions=actual_positions,
-            regimes=ctx.get("regimes") or [], now=now)
+        # PRODUCTION CONFIDENCE IS INVESTMENT-ONLY (R30A, owner audit P0 #5):
+        # every level and the confidence statement are computed over the
+        # INVESTMENT sleeve's positions only. A TRAINING / BENCHMARK /
+        # UNCLASSIFIED position is counted beside it and never enters it.
+        sl = await _group_sleeves(conn, [p.get("group_id") for p in
+                                         pp + actual_positions])
+        li = ladder_inputs(pp, closed, actual_positions, sl)
+        out = LD.compute(history=LD.historical(li["paper_positions"]),
+                         paper_closed=li["paper_closed"],
+                         actual_closed=li["actual_closed"],
+                         actual_positions=li["actual_positions"],
+                         regimes=ctx.get("regimes") or [], now=now)
         out["closed_rows_source"] = closed["source"]
+        out["sleeve_scope"] = li["scope"]
         out.update(criteria_spec_id=cs["spec_id"],
                    criteria_sha256=cs["spec_sha256"],
                    confidence_spec_id=cf["spec_id"])
@@ -413,17 +422,24 @@ async def _closed_rows(conn, paper_positions, actual_positions) -> dict:
     cost / sport / probability; else the twin's own closed positions."""
     by = {p["group_id"]: p for p in paper_positions + actual_positions}
     if not await R.regclass(conn, "position_postmortems"):
-        return {"PAPER": LD.closed_rows(paper_positions),
-                "ACTUAL": LD.closed_rows(actual_positions),
-                "source": "TWIN_POSITIONS_MIGRATION_209_ABSENT"}
+        sl = await _group_sleeves(conn, list(by))
+        out = {"PAPER": LD.closed_rows(paper_positions),
+               "ACTUAL": LD.closed_rows(actual_positions),
+               "source": "TWIN_POSITIONS_MIGRATION_209_ABSENT"}
+        for b in ("PAPER", "ACTUAL"):
+            for d in out[b]:
+                d["group_id"] = d.get("key")
+                d["sleeve"] = sl.get(d["group_id"], "UNCLASSIFIED")
+        return out
     out = {"PAPER": [], "ACTUAL": [], "source": "POSITION_POSTMORTEMS"}
     rows = await conn.fetch(
         "SELECT book, position_key, group_id, us_market_slug, fixture, "
-        "       realized_pnl_usd::float8 AS realized_pnl_usd, "
+        "       strategy, realized_pnl_usd::float8 AS realized_pnl_usd, "
         "       extract(epoch FROM opened_at)::float8 AS opened_at, "
         "       extract(epoch FROM closed_at)::float8 AS closed_at "
         "  FROM position_postmortems ORDER BY closed_at LIMIT %d"
         % R.MAX_ROWS)
+    sl = await _group_sleeves(conn, [r["group_id"] for r in rows])
     for r in rows:
         d = dict(r)
         d["key"] = d.pop("position_key")
@@ -431,8 +447,80 @@ async def _closed_rows(conn, paper_positions, actual_positions) -> dict:
         d.update(cost_usd=p.get("cost_usd"), sport=p.get("sport") or
                  "unknown", decided_at=p.get("decided_at"), p=p.get("p"),
                  payoff=p.get("payoff"), slippage_pc=p.get("slippage_pc"))
+        # the group's durable sleeve (migration 223); an ACTUAL position
+        # whose paper group has none takes the classifier's sleeve of the
+        # strategy it recorded; anything else is UNCLASSIFIED
+        d["sleeve"] = sl.get(d["group_id"]) or (
+            STRATEGY_SLEEVE.get(str(d.get("strategy")), "UNCLASSIFIED")
+            if d["book"] == "ACTUAL" else "UNCLASSIFIED")
         out[d["book"]].append(d)
     return out
+
+
+def ladder_inputs(paper_positions, closed, actual_positions,
+                  sleeves: dict) -> dict:
+    """THE LADDER'S INPUTS, INVESTMENT SLEEVE ONLY (R30A, owner audit P0
+    #5). The evidence ladder and its confidence statement are production
+    confidence: a TRAINING (exploration), BENCHMARK or UNCLASSIFIED
+    position -- won or lost -- never enters a level; it is counted beside
+    it. A row's sleeve is its own stamp (`_closed_rows`) or its group's
+    durable classification; neither -> UNCLASSIFIED, never INVESTMENT.
+    Pure."""
+    def sleeve(r):
+        s = r.get("sleeve") or sleeves.get(r.get("group_id"))
+        return s if s in ("INVESTMENT", "TRAINING", "BENCHMARK",
+                          "UNCLASSIFIED") else "UNCLASSIFIED"
+
+    def inv(rows):
+        return [r for r in rows if sleeve(r) == "INVESTMENT"]
+
+    def counts(rows):
+        c: dict = {}
+        for r in rows:
+            c[sleeve(r)] = c.get(sleeve(r), 0) + 1
+        return c
+    return {
+        "paper_positions": inv(paper_positions),
+        "paper_closed": inv(closed["PAPER"]),
+        "actual_closed": inv(closed["ACTUAL"]),
+        "actual_positions": inv(actual_positions),
+        "scope": {
+            "sleeve": "INVESTMENT",
+            "confidence_scope": "PRODUCTION_CONFIDENCE",
+            "rule": ("every ladder level and the confidence statement count "
+                     "INVESTMENT-sleeve positions only (migration 223's "
+                     "durable classification; UNCLASSIFIED is never "
+                     "INVESTMENT); the other sleeves are counted here and "
+                     "never pooled in"),
+            "by_sleeve": {"paper_closed": counts(closed["PAPER"]),
+                          "actual_closed": counts(closed["ACTUAL"]),
+                          "recorded_paper_positions": counts(
+                              paper_positions)}}}
+
+
+#: migration 223's strategy -> sleeve map, for an ACTUAL position whose
+#: paper group has no durable classification (pinned equal to
+#: bettor_paper_sleeves.STRATEGY_SLEEVE by tests/test_investment_only_
+#: confidence.py; the twin may not import a paper module)
+STRATEGY_SLEEVE = {
+    "PINNACLE_COMPLETED_GAME_PAPER": "INVESTMENT",
+    "DEREK_ENTRY_POLICY_V2": "INVESTMENT",
+    "PINNACLE_EXPLORATION_PAPER": "TRAINING",
+    "PINNACLE_ONLY_PAPER_BENCHMARK": "BENCHMARK",
+    "PINNACLE_COMPLETED_GAME_MAKER_PAPER": "BENCHMARK",
+}
+
+
+async def _group_sleeves(conn, gids) -> dict:
+    """{group_id: sleeve} from the durable classifications (SELECT only);
+    {} without migration 223 (every position then reads UNCLASSIFIED --
+    never INVESTMENT)."""
+    gids = sorted({g for g in gids if g})
+    if not gids or not await R.regclass(conn, "paper_sleeve_current_v"):
+        return {}
+    return {r["group_id"]: r["sleeve"] for r in await conn.fetch(
+        "SELECT group_id, sleeve FROM paper_sleeve_current_v "
+        " WHERE group_id = ANY($1::text[])", gids)}
 
 
 async def _one(pool) -> dict:

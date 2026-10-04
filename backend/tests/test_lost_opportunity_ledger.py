@@ -405,6 +405,27 @@ async def test_the_database_refuses_an_unnamed_false_refusal():
             await sp.rollback()
 
 
+async def _capacity_row(conn, d, *, now, book_age_s=2.0, strategy=None):
+    """A MEASURED capacity assessment as the capacity model writes it: on a
+    RECORDED book observation of the market `book_age_s` before the
+    decision. (R30A: the Opportunity Score V2 counts an assessment only on a
+    book within the strategy's executable freshness standard; the V1-era
+    rows here carried no book at all, a shape the capacity model never
+    writes for a MEASURED row.)"""
+    obs = await F.book(conn, d["slug"], d["at"] - book_age_s,
+                       offers=((0.50, 400),), bids=((0.48, 400),))
+    await conn.execute(
+        "INSERT INTO pos_capacity (capacity_id, candidate_id, run_id, "
+        " computed_at, decided_at, us_market_slug, holding_side, strategy, "
+        " status, book_obs_id, book_age_s, executable_opportunity_dollars, "
+        " executable_capacity_usd, capacity_ceiling_usd, content_sha256, "
+        " version) VALUES ($1,$2,'r',to_timestamp($3),to_timestamp($4),$5,"
+        " 'LONG',$6,'MEASURED',$7,$8,5.0,200.0,400.0,'s','v')",
+        F.uid("cap"), d["decision_id"], now, d["at"], d["slug"],
+        strategy or X.DEREK, int(obs), float(book_age_s))
+    return obs
+
+
 @pg
 async def test_scores_are_written_as_of_the_decision():
     now = time.time()
@@ -422,14 +443,7 @@ async def test_scores_are_written_as_of_the_decision():
         await conn.execute(snap, F.uid("s"), "CAPACITY", "NONE", now - 3600,
                            '{"rates": {"fill_probability": {"value": 0.8, '
                            '"n": 40, "basis": "TEST"}}}')
-        await conn.execute(
-            "INSERT INTO pos_capacity (capacity_id, candidate_id, run_id, "
-            " computed_at, decided_at, us_market_slug, holding_side, status, "
-            " executable_opportunity_dollars, executable_capacity_usd, "
-            " capacity_ceiling_usd, content_sha256, version) VALUES ($1,$2,"
-            " 'r',to_timestamp($3),to_timestamp($4),$5,'LONG','MEASURED',5.0,"
-            " 200.0,400.0,'s','v')", F.uid("cap"), d["decision_id"], now,
-            now - 600, d["slug"])
+        await _capacity_row(conn, d, now=now)
         got = await LR.run_component(conn, now=now)
         assert got["components"]["SCORES"] == "OK", got
         r = await conn.fetchrow(
@@ -441,8 +455,44 @@ async def test_scores_are_written_as_of_the_decision():
         comps = P.j(r["components"])
         assert comps["EXECUTION_CONFIDENCE"]["value"] == 0.8
         assert comps["EDGE_CONFIDENCE"]["value"] is None
+        assert P.j(r["detail"])["executable_freshness"]["fresh"] is True
         again = await LR.run_component(conn, now=now + 60)
         assert again["scores"]["written"] == 0
+
+
+@pg
+async def test_a_capacity_book_older_than_the_entry_rule_is_not_executable_ev():
+    """R30A (owner audit, capacity freshness): the V1 score priced capacity
+    assessed on books up to 300 s from the decision. A book older than the
+    strategy's executable freshness standard (the entry decision's own
+    book-age bound) is not executable EV: UNAVAILABLE with the reason,
+    never a number."""
+    from sportsassets.profitability import capacity as CPM
+    now = time.time()
+    async with _txn() as conn:
+        acct = await X.account(conn, now=now)
+        await P.lag_history(conn, acct, now=now)
+        d = await X.decision(conn, acct, at=now - 600, refusals=[CL.R_BELOW],
+                             pd=X.pd_fig(-0.1))
+        await P.premap(conn, d["slug"], now + 2 * HOUR)
+        await conn.execute(
+            "INSERT INTO pos_snapshots (snapshot_id, run_id, component, "
+            " book, computed_at, payload, data_sha256, version) VALUES "
+            " ($1,'r','CAPITAL','PAPER',to_timestamp($2),$3::jsonb,'s','v')",
+            F.uid("s"), now - 3600,
+            '{"idle_capital_usd": 1000.0, "unmeasured": {}}')
+        await _capacity_row(conn, d, now=now,
+                            book_age_s=CPM.EXECUTABLE_BOOK_MAX_AGE_S + 110.0)
+        got = await LR.run_component(conn, now=now)
+        assert got["components"]["SCORES"] == "OK", got
+        r = await conn.fetchrow(
+            "SELECT * FROM lol_opportunity_scores_latest "
+            " WHERE candidate_id = $1", d["decision_id"])
+        assert r["status"] == "UNAVAILABLE"
+        assert r["opportunity_score"] is None
+        assert r["expected_net_executable_ev_usd"] is None
+        assert CPM.R_NOT_EXECUTABLE_FRESH in r["why"]
+        assert r["version"] == SC.VERSION == "LOL_OPPORTUNITY_SCORE_V2"
 
 
 @pg
@@ -647,12 +697,33 @@ def test_a_hindsight_winner_is_never_false_for_any_refusal_code():
         assert won["classification"] == lost["classification"], code
 
 
+# (R30A) Eddie's estimate carries the age of the book HE priced
+# (eddie_execution_estimates.book_age_s); the Opportunity Score V2 uses it
+# only within the strategy's executable freshness standard.
 EDDIE = {"estimate_id": "eddie:1", "estimator_version": "EDDIE_V1",
          "estimated_at": 1.0, "expected_fill_probability": 0.6,
          "expected_net_executable_edge_pp": -0.4,
          "expected_executable_ev_usd": -0.01, "recommendation":
          "SKIP_EXECUTION", "recommendation_reason": "NET_EDGE_NOT_POSITIVE",
-         "book_obs_id": 7}
+         "book_obs_id": 7, "book_age_s": 2.0}
+
+
+def test_eddie_on_a_book_older_than_the_entry_rule_is_not_the_fill_estimate():
+    """R30A: Eddie's estimator accepts books up to 120 s; the score's P(fill)
+    may not. A stale (or age-unknown) Eddie book falls back to the CAPACITY
+    snapshot's production rate, and the basis says why."""
+    from sportsassets.profitability import capacity as CPM
+    stale = dict(EDDIE, book_age_s=CPM.EXECUTABLE_BOOK_MAX_AGE_S + 50.0)
+    fp, basis, src = SC.execution_input(stale, 0.8, "snapshot",
+                                        strategy=X.DEREK)
+    assert (fp, src) == (0.8, SC.CAPACITY_SNAPSHOT)
+    assert "OLDER_THAN_THE_STRATEGY_EXECUTABLE_FRESHNESS" in basis
+    unknown = dict(EDDIE, book_age_s=None)
+    fp, basis, src = SC.execution_input(unknown, 0.8, "snapshot")
+    assert (fp, src) == (0.8, SC.CAPACITY_SNAPSHOT)
+    assert "EDDIE_BOOK_AGE_UNKNOWN" in basis
+    fp, basis, src = SC.execution_input(stale, None, "NO_SNAPSHOT")
+    assert fp is None and src is None
 
 
 def test_execution_confidence_comes_from_eddie_when_he_measured_it():
@@ -708,14 +779,7 @@ async def test_scores_read_eddies_estimate_and_the_expand_view_shows_it(
         await conn.execute(snap, F.uid("s"), "CAPACITY", "NONE", now - 3600,
                            '{"rates": {"fill_probability": {"value": 0.8, '
                            '"n": 40, "basis": "TEST"}}}')
-        await conn.execute(
-            "INSERT INTO pos_capacity (capacity_id, candidate_id, run_id, "
-            " computed_at, decided_at, us_market_slug, holding_side, status, "
-            " executable_opportunity_dollars, executable_capacity_usd, "
-            " capacity_ceiling_usd, content_sha256, version) VALUES ($1,$2,"
-            " 'r',to_timestamp($3),to_timestamp($4),$5,'LONG','MEASURED',5.0,"
-            " 200.0,400.0,'s','v')", F.uid("cap"), d["decision_id"], now,
-            now - 600, d["slug"])
+        await _capacity_row(conn, d, now=now)
         eid = F.uid("eddie")
         await conn.execute(
             "INSERT INTO eddie_execution_estimates (estimate_id, decision_id,"
@@ -723,9 +787,10 @@ async def test_scores_read_eddies_estimate_and_the_expand_view_shows_it(
             " holding_side, expected_fill_probability, "
             " expected_net_executable_edge_pp, expected_executable_ev_usd, "
             " recommendation, recommendation_reason, unmeasured, "
-            " evidence_refs) VALUES ($1,$2,'EDDIE_TEST',to_timestamp($3),"
-            " to_timestamp($4),$5,'LONG',0.55,-0.3,-0.02,'SKIP_EXECUTION',"
-            " 'NET_EDGE_NOT_POSITIVE',$6::jsonb,$7::jsonb)", eid,
+            " evidence_refs, book_age_s) VALUES ($1,$2,'EDDIE_TEST',"
+            " to_timestamp($3),to_timestamp($4),$5,'LONG',0.55,-0.3,-0.02,"
+            " 'SKIP_EXECUTION','NET_EDGE_NOT_POSITIVE',$6::jsonb,$7::jsonb,"
+            " 2.0)", eid,
             d["decision_id"], now - 300, now - 600, d["slug"],
             '{"theoretical_edge": "t", "fees": "t", "spread_cost": "t", '
             '"slippage": "t", "adverse_selection": "t", "time_to_fill": "t",'

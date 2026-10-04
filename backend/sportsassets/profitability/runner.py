@@ -23,6 +23,15 @@ instance that does not get it skips the cycle.
 ORDER: CAPACITY -> ECONOMICS -> WAREHOUSE -> CAPITAL -> NORTH_STAR ->
 FORECAST (the warehouse references capacity rows; capital, metrics and the
 forecast read the economics; the forecast reads the capacity aggregate).
+
+PRODUCTION CONFIDENCE IS INVESTMENT-ONLY (migration 227). Every position
+carries its group's durable sleeve (reads.attach_sleeve); NORTH_STAR writes
+one row per (book, sleeve, strategy, metric), FORECAST one forecast per
+(book, sleeve) -- each over its own rows, scored against its own sleeve.
+The CAPACITY snapshot's top level is the PRODUCTION capacity (INVESTMENT
+strategies, books within the executable freshness standard, INVESTMENT-only
+rates); the research aggregate rides beside it under `research`. CAPITAL
+keeps the shared-cash accounting lines and reports profit per sleeve.
 """
 from __future__ import annotations
 
@@ -115,6 +124,13 @@ async def run_cycle(conn, *, now=None, account_id=C.PAPER_ACCOUNT,
     status: dict = {}
 
     # ── CAPACITY ──────────────────────────────────────────────────────
+    # Two aggregates, never pooled (owner audit 2026-10-04): the
+    # PRODUCTION-CONFIDENCE capacity (top level of the snapshot, read by the
+    # forecast's ceiling and the Opportunity Score's fill rate) counts only
+    # INVESTMENT candidates whose book meets the strategy's executable
+    # freshness standard, with INVESTMENT-only rates; the RESEARCH capacity
+    # (every strategy, books up to CP.MAX_BOOK_AGE_S) is kept beside it,
+    # labelled research.
     async def capacity():
         cands = await R.capacity_candidates(conn, now=now,
                                             account_id=account_id)
@@ -127,10 +143,36 @@ async def run_cycle(conn, *, now=None, account_id=C.PAPER_ACCOUNT,
         await ST.save_capacity(conn, run_id=run_id, now=now, rows=rows,
                                fee_basis=FEE_BASIS)
         rates = await R.capacity_rates(conn, now=now, account_id=account_id)
+        prod_rates = await R.capacity_rates(
+            conn, now=now, account_id=account_id,
+            strategies=C.INVESTMENT_STRATEGIES)
         recent = await R.capacity_recent(conn, now=now)
-        agg = CP.aggregate(recent, rates=rates)
+        research = CP.aggregate(recent, rates=rates, scope={
+            "confidence_scope": C.RESEARCH_SCOPE, "sleeve": None,
+            "strategies": "EVERY_PAPER_STRATEGY",
+            "book_freshness": "RESEARCH_BOUND_%ds" % int(CP.MAX_BOOK_AGE_S),
+            "why_research": ("accepts book observations up to %ds from the "
+                             "decision -- older than any entry rule allows "
+                             "-- and pools every sleeve" % int(
+                                 CP.MAX_BOOK_AGE_S))})
+        prod_rows = [CP.executable_view(r) for r in recent
+                     if C.strategy_sleeve(r.get("strategy")) == C.INVESTMENT]
+        agg = CP.aggregate(prod_rows, rates=prod_rates, scope={
+            "confidence_scope": C.PRODUCTION, "sleeve": C.INVESTMENT,
+            "book": "PAPER", "strategies": list(C.INVESTMENT_STRATEGIES),
+            "book_freshness": {
+                "rule": "THE_STRATEGY_EXECUTABLE_FRESHNESS_STANDARD",
+                "bounds_s": {s: CP.executable_bound(s)
+                             for s in C.INVESTMENT_STRATEGIES},
+                "basis": "the same book-age bound the entry decision applies "
+                         "(paper_benchmark.BOOK_MAX_AGE_S); a decision's own "
+                         "book by the age it recorded, any other book only "
+                         "at or before the decision"}})
         agg["computed_at"] = now
         agg["lookback_hours"] = R.CAPACITY_LOOKBACK_H
+        research["computed_at"] = now
+        research["lookback_hours"] = R.CAPACITY_LOOKBACK_H
+        agg["research"] = research
         await ST.save_snapshot(conn, run_id=run_id, component="CAPACITY",
                                book="NONE", payload=agg, now=now,
                                version=CP.VERSION)
@@ -227,6 +269,17 @@ async def run_cycle(conn, *, now=None, account_id=C.PAPER_ACCOUNT,
                 open_reservations_usd=k.get("open_reservations_usd"),
                 reservations_why=k.get("reservations_why"),
                 lag_samples=loaded["lag"])
+            # the book's capital lines are ACCOUNTING (one shared cash
+            # ledger, every sleeve); its PROFIT lines are reported per
+            # sleeve beside them, and the production-confidence profit is
+            # the INVESTMENT sleeve's alone
+            rep["confidence_scope"] = ("ACCOUNTING_ALL_SLEEVES_NOT_"
+                                       "PRODUCTION_CONFIDENCE")
+            rep["by_sleeve"] = {
+                s: EC.sleeve_profit(loaded["econ"], book=book, sleeve=s,
+                                    now=now, lag_samples=loaded["lag"])
+                for s in C.SLEEVES}
+            rep["production_confidence"] = rep["by_sleeve"][C.INVESTMENT]
             rep["computed_at"] = now
             await ST.save_snapshot(conn, run_id=run_id, component="CAPITAL",
                                    book=book, payload=rep, now=now,
@@ -249,6 +302,9 @@ async def run_cycle(conn, *, now=None, account_id=C.PAPER_ACCOUNT,
         status["CAPITAL"] = "SKIPPED"
 
     # ── NORTH STAR ────────────────────────────────────────────────────
+    # Per book AND per scope (migration 227): every sleeve's aggregate and
+    # every strategy present, each computed over ITS OWN rows only. The
+    # INVESTMENT rows are production confidence; nothing pools sleeves.
     async def north_star():
         prev = await R.previous_metrics(conn, now=now,
                                         min_age_h=MT.TREND_MIN_AGE_H)
@@ -258,13 +314,15 @@ async def run_cycle(conn, *, now=None, account_id=C.PAPER_ACCOUNT,
         def compute():
             ms = []
             for b in books:
-                ms += MT.compute(loaded["econ"], book=b, now=now,
-                                 lookback_days=lookback_days)
+                for sleeve, strategy in C.scopes(loaded["econ"], book=b):
+                    ms += MT.compute(loaded["econ"], book=b, now=now,
+                                     lookback_days=lookback_days,
+                                     sleeve=sleeve, strategy=strategy)
             return ms
 
         ms = await asyncio.to_thread(compute)
         for m in ms:
-            m["trend"] = MT.trend(m, prev.get((m["book"], m["metric"])))
+            m["trend"] = MT.trend(m, prev.get(ST.metric_key(m)))
         n = await ST.save_metrics(conn, run_id=run_id, now=now, metrics=ms,
                                   latest_shas=shas, version=MT.VERSION)
         return {"metrics": len(ms), "written": n}
@@ -276,17 +334,26 @@ async def run_cycle(conn, *, now=None, account_id=C.PAPER_ACCOUNT,
         ns, status["NORTH_STAR"] = None, "SKIPPED"
 
     # ── FORECAST: score what has ended, then issue today's ────────────
+    # One forecast per book AND sleeve (migration 227), each validated by
+    # its own scored history and scored against its own sleeve. The
+    # capacity ceiling is the PRODUCTION (INVESTMENT, executable-freshness)
+    # capacity, so only the INVESTMENT forecast carries it.
     async def forecast():
         scored = 0
         for f in await R.unscored_forecasts(conn, now=now):
-            real, n = await R.realized_between(conn, book=f["book"],
-                                               start=f["hs"], end=f["he"])
+            real, n = await R.realized_between(
+                conn, book=f["book"], start=f["hs"], end=f["he"],
+                sleeve=f.get("sleeve"), strategy=f.get("strategy"))
             sc = FC.score(f, realized_pnl=real, realized_positions=n,
                           now=now)
             sc["detail"] = {"horizon_start": f["hs"], "horizon_end": f["he"],
-                            "realized_basis": "pos_economics_latest net "
-                                              "profit of positions released "
-                                              "inside the horizon"}
+                            "realized_basis": (
+                                "pos_economics_latest net profit of positions "
+                                "released inside the horizon" + (
+                                    "" if f.get("sleeve") is None else
+                                    " whose group's durable sleeve is %s"
+                                    % f["sleeve"])),
+                            "scope": f.get("sleeve") or C.BOOK_WIDE_PRE_227}
             await ST.save_score(conn, sc)
             scored += 1
         issued = {}
@@ -294,18 +361,29 @@ async def run_cycle(conn, *, now=None, account_id=C.PAPER_ACCOUNT,
         fp = ((cap_agg.get("rates") or {}).get("fill_probability")
               or {}).get("value")
         for book in [b for b in C.BOOKS if include_actual or b == "PAPER"]:
-            scores = await R.forecast_scores(conn, book)
+            for sleeve in C.SLEEVES:
+                scores = await R.forecast_scores(conn, book, sleeve,
+                                                 C.ALL_STRATEGIES)
+                prod = sleeve == C.INVESTMENT and book == "PAPER"
 
-            def compute(book=book, scores=scores):
-                return FC.build(loaded["econ"], book=book, now=now,
-                                lookback_days=lookback_days,
-                                capacity_daily=daily, fill_probability=fp,
-                                scores=scores)
+                def compute(book=book, sleeve=sleeve, scores=scores,
+                            prod=prod):
+                    return FC.build(
+                        loaded["econ"], book=book, now=now,
+                        lookback_days=lookback_days,
+                        capacity_daily=daily if prod else None,
+                        fill_probability=fp if prod else None,
+                        scores=scores, sleeve=sleeve,
+                        strategy=C.ALL_STRATEGIES,
+                        capacity_why=None if prod else (
+                            "CAPACITY_IS_MEASURED_FOR_THE_PAPER_INVESTMENT_"
+                            "SLEEVE_ONLY"))
 
-            fc = await asyncio.to_thread(compute)
-            issued[book] = {"status": fc["status"],
-                            "forecast_id": await ST.save_forecast(
-                                conn, run_id=run_id, fc=fc)}
+                fc = await asyncio.to_thread(compute)
+                issued["%s:%s" % (book, sleeve)] = {
+                    "status": fc["status"],
+                    "forecast_id": await ST.save_forecast(
+                        conn, run_id=run_id, fc=fc)}
         return {"scored": scored, "issued": issued}
 
     if eco is not None:
