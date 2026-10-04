@@ -57,8 +57,12 @@ except ImportError:
 def _admissible_world(e, monkeypatch):
     """The venue state an actual order requires, made explicit for the fake
     venue: an OPEN market and a book whose currency is ESTABLISHED under an
-    approved live rule (a test-only rule; production approves none)."""
+    approved live rule (a test-only rule; production approves none).
+    R30A: and the canonical SMALL LIVE authorization the ACTUAL lane needs
+    before its claim, stated as an assumption (never issued in SHADOW; the
+    refusal is proven in tests/test_live_parity_convergence.py)."""
     AF.approve_test_rule(monkeypatch)
+    AF.assume_canonical_live_authorization(monkeypatch)
     monkeypatch.setattr(PB, "BOOK_CURRENCY", {
         "verdict": "ESTABLISHED", "rule": AF.TEST_RULE,
         "subscription_state": "RUNNING",
@@ -338,6 +342,7 @@ async def _lane_env(monkeypatch):
     import asyncpg
     conn = await asyncpg.connect(RI.H.DSN)
     AF.approve_test_rule(monkeypatch)
+    AF.assume_canonical_live_authorization(monkeypatch)    # R30A, as above
     monkeypatch.setenv(EP.KEY_ID_ENV, KID)
     monkeypatch.setenv(EP.SECRET_ENV, SEC)
     before = dict(await conn.fetchrow("SELECT * FROM execmirror_control WHERE id = 1"))

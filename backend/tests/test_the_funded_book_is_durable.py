@@ -191,6 +191,9 @@ async def test_the_connector_enabled_with_submission_off_calls_nothing(
         await _seed(conn)
         pmus, sent = _transport(monkeypatch)
         monkeypatch.setattr(FX, "FUNDED_SUBMISSION_ENABLED", True)
+        # R30A: the canonical-origination boundary, stated as satisfied
+        from tests.admission_fixture import assume_canonical_funded_origination
+        assume_canonical_funded_origination(monkeypatch)
         assert EX.REAL_ORDER_SUBMISSION_ENABLED is False
 
         got = await FX.submit_for_decision(conn, _decision(),
@@ -304,6 +307,9 @@ async def test_a_short_at_a_longshot_price_is_admitted_on_the_right_number(
         await _seed(conn)
         pmus, sent = _transport(monkeypatch)
         monkeypatch.setattr(FX, "FUNDED_SUBMISSION_ENABLED", True)
+        # R30A: the canonical-origination boundary, stated as satisfied
+        from tests.admission_fixture import assume_canonical_funded_origination
+        assume_canonical_funded_origination(monkeypatch)
         monkeypatch.setattr(EX, "REAL_ORDER_SUBMISSION_ENABLED", True)
         short = _decision(order_intent="ORDER_INTENT_BUY_SHORT",
                           execution_plan={"execution": {
@@ -337,6 +343,9 @@ async def test_every_effective_rail_is_checked_at_submission(monkeypatch):
         await _seed(conn)
         pmus, sent = _transport(monkeypatch)
         monkeypatch.setattr(FX, "FUNDED_SUBMISSION_ENABLED", True)
+        # R30A: the canonical-origination boundary, stated as satisfied
+        from tests.admission_fixture import assume_canonical_funded_origination
+        assume_canonical_funded_origination(monkeypatch)
         got = await FX.submit_for_decision(conn, _decision(),
                                            account_id=ACCT, venue=VENUE, venue_positions=EMPTY_VENUE)
         checked = {r["rail"] for r in got["rails"]["rails"]}
@@ -379,6 +388,9 @@ async def test_pending_exposure_counts_and_the_event_key_is_carried(
 
         pmus, sent = _transport(monkeypatch)
         monkeypatch.setattr(FX, "FUNDED_SUBMISSION_ENABLED", True)
+        # R30A: the canonical-origination boundary, stated as satisfied
+        from tests.admission_fixture import assume_canonical_funded_origination
+        assume_canonical_funded_origination(monkeypatch)
         got = await FX.submit_for_decision(conn, _decision(),
                                            account_id=ACCT, venue=VENUE, venue_positions=EMPTY_VENUE)
         # $9 pending + $9.30 new = $18.30 against the $10 EVENT rail
@@ -414,6 +426,9 @@ async def test_two_concurrent_submissions_cannot_both_reach_the_venue(
         await _seed(conn)
         pmus, sent = _transport(monkeypatch)
         monkeypatch.setattr(FX, "FUNDED_SUBMISSION_ENABLED", True)
+        # R30A: the canonical-origination boundary, stated as satisfied
+        from tests.admission_fixture import assume_canonical_funded_origination
+        assume_canonical_funded_origination(monkeypatch)
         monkeypatch.setattr(EX, "REAL_ORDER_SUBMISSION_ENABLED", True)
 
         a, b = await asyncio.gather(
@@ -457,6 +472,9 @@ async def test_a_lost_acknowledgement_leaves_an_unresolved_intent_never_a_resend
         pmus, sent = _transport(
             monkeypatch, raise_on_create=TimeoutError("read timed out"))
         monkeypatch.setattr(FX, "FUNDED_SUBMISSION_ENABLED", True)
+        # R30A: the canonical-origination boundary, stated as satisfied
+        from tests.admission_fixture import assume_canonical_funded_origination
+        assume_canonical_funded_origination(monkeypatch)
         monkeypatch.setattr(EX, "REAL_ORDER_SUBMISSION_ENABLED", True)
 
         got = await FX.submit_for_decision(conn, _decision(),

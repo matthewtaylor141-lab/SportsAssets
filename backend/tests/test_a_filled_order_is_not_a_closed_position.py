@@ -414,6 +414,9 @@ async def test_a_completed_purchase_still_counts_against_every_rail(
         await _seed(conn)
         pmus, sent = _transport(monkeypatch)
         monkeypatch.setattr(FX, "FUNDED_SUBMISSION_ENABLED", True)
+        # R30A: the canonical-origination boundary, stated as satisfied
+        from tests.admission_fixture import assume_canonical_funded_origination
+        assume_canonical_funded_origination(monkeypatch)
         monkeypatch.setattr(EX, "REAL_ORDER_SUBMISSION_ENABLED", True)
 
         first = await FX.submit_for_decision(conn, _decision(),
@@ -926,6 +929,9 @@ async def test_entry_partial_exit_restart_final_close_and_the_stop(
         await _seed(conn)
         pmus, sent = _transport(monkeypatch)
         monkeypatch.setattr(FX, "FUNDED_SUBMISSION_ENABLED", True)
+        # R30A: the canonical-origination boundary, stated as satisfied
+        from tests.admission_fixture import assume_canonical_funded_origination
+        assume_canonical_funded_origination(monkeypatch)
         monkeypatch.setattr(EX, "REAL_ORDER_SUBMISSION_ENABLED", True)
         entry = await FX.submit_for_decision(conn, _decision(),
                                             account_id=ACCT, venue=VENUE, venue_positions=EMPTY_VENUE)

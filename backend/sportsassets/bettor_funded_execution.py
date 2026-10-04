@@ -131,6 +131,35 @@ R_COUNTED_DEPTH_UNREACHABLE = "THE_LIMIT_DOES_NOT_REACH_THE_DEPTH_IT_WAS_SIZED_O
 LONG = "ORDER_INTENT_BUY_LONG"
 
 
+async def canonical_origination(conn, *, rec: dict | None, plan: dict) -> dict:
+    """MAY THIS FUNDED ACQUISITION BE ORIGINATED? (R30A convergence). The
+    record must name a canonical decision intent ({intent_id, content_sha}
+    under `canonical_intent`); live_parity.authorize_live_exposure then
+    verifies it, matches the contract and side, checks its validity window,
+    the LIVE policy and the live gates, and asks the canonical SMALL LIVE
+    adapter for its authorization (never issued in SHADOW). Never raises:
+    any failure refuses. {ok, refusal, detail, token}."""
+    try:
+        from . import live_parity as LP
+    except Exception as exc:                                  # noqa: BLE001
+        return {"ok": False, "refusal": "CANONICAL_AUTHORITY_UNAVAILABLE",
+                "detail": {"error": type(exc).__name__}, "token": None}
+    ref = (rec or {}).get("canonical_intent") or {}
+    if not isinstance(ref, dict) or not ref.get("intent_id"):
+        return {"ok": False, "refusal": LP.R_NO_CANONICAL,
+                "detail": {"why": ("the funded record names no canonical "
+                                   "decision intent")}, "token": None}
+    try:
+        return await LP.authorize_live_exposure(
+            conn, canonical_intent_id=ref["intent_id"], named=ref,
+            order={"us_market_slug": plan.get("us_market_slug"),
+                   "order_intent": plan.get("intent")},
+            now=time.time())
+    except Exception as exc:                                  # noqa: BLE001
+        return {"ok": False, "refusal": "CANONICAL_AUTHORITY_UNAVAILABLE",
+                "detail": {"error": type(exc).__name__}, "token": None}
+
+
 def _adapter(mod=None):
     """The existing venue module, or an injected stand-in for a test.
 
@@ -1187,6 +1216,34 @@ async def submit_for_decision(conn, rec: dict, *, account_id: str,
                          "the adapter was NOT called. Turning this on is a "
                          "code change, and three further boundaries remain "
                          "after it"))
+    # ── R30A CONVERGENCE: NO ACQUISITION OUTSIDE A CANONICAL INTENT ──────
+    #
+    # The funded stack is the third generation of live execution (beside the
+    # retired execmirror copy and the execution-intent ACTUAL sibling). It
+    # may not originate NEW exposure on its own decision: a BUY reaches the
+    # adapter only for a canonical decision intent the record names, that
+    # verifies, matches this order's contract and side, is unexpired, passes
+    # the LIVE policy (fail closed: a missing / unreadable / sha-mismatched /
+    # unapproved policy refuses) and the live gates, and carries the
+    # canonical SMALL LIVE adapter's authorization -- which SHADOW never
+    # issues. So even with FUNDED_SUBMISSION_ENABLED flipped, a funded
+    # acquisition cannot be sent from this build. THE FUNDED STACK'S OWN
+    # POLICY READS (derek_policy.policy_params, xavier_policy.load, each
+    # falling back to a labelled CODE_DEFAULT) therefore authorize no new
+    # exposure by themselves. A SELL (exit, reduce, protection) only reduces
+    # exposure and is untouched. Checked before anything is written or
+    # sent, so a refusal leaves no row and the leg's claim can be released.
+    if not plan.get("sell"):
+        canon = await canonical_origination(conn, rec=rec, plan=plan)
+        out["canonical_origination"] = {
+            k: canon.get(k) for k in ("ok", "refusal", "detail")}
+        if not canon.get("ok"):
+            return dict(out, ok=False, refusal=canon["refusal"],
+                        nothing_was_written=True, exposure="NONE",
+                        why=("a funded acquisition is originated only by a "
+                             "canonical decision intent with the canonical "
+                             "SMALL LIVE adapter's authorization; refused "
+                             "before anything was written or sent"))
     try:
         mod = _adapter(adapter)
     except Exception as exc:                               # noqa: BLE001
@@ -1518,6 +1575,9 @@ def describe() -> dict:
                   "bettor_entry_execution.effective_limits (MIN, never raises)",
                   "bettor_entry_execution.authorize_submission",
                   "%s.FUNDED_SUBMISSION_ENABLED" % __name__,
+                  "%s.canonical_origination (a BUY: the canonical intent "
+                  "and the SMALL LIVE adapter's authorization; never "
+                  "issued in SHADOW)" % __name__,
                   "pmus.submit_fok -> execution_gate -> preview -> create"],
         "allowed_venue_classes": list(ALLOWED_VENUE_CLASSES),
         "adapter": ADAPTER_MODULE,

@@ -135,6 +135,9 @@ def venue(monkeypatch, *, bids=None, **kw):
     monkeypatch.setattr(pmus._gate, "authorize", lambda *a, **k: {"ok": True})
     monkeypatch.setattr(EX, "REAL_ORDER_SUBMISSION_ENABLED", True)
     monkeypatch.setattr(FX, "FUNDED_SUBMISSION_ENABLED", True)
+    # R30A: the canonical-origination boundary, stated as satisfied
+    from tests.admission_fixture import assume_canonical_funded_origination
+    assume_canonical_funded_origination(monkeypatch)
     monkeypatch.setattr(FM, "FUNDED_EXIT_SUBMISSION_ENABLED", True)
     return sent, client
 

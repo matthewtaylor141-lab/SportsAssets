@@ -467,6 +467,9 @@ def substitute(monkeypatch, venue: Venue, *, schedule_state="Pre-Game",
     # ── (4) THE THREE SWITCHES ────────────────────────────────────────
     monkeypatch.setattr(EX, "REAL_ORDER_SUBMISSION_ENABLED", True)
     monkeypatch.setattr(FX, "FUNDED_SUBMISSION_ENABLED", True)
+    # R30A: the canonical-origination boundary, stated as satisfied
+    from tests.admission_fixture import assume_canonical_funded_origination
+    assume_canonical_funded_origination(monkeypatch)
     from sportsassets import bettor_funded_management as FM
     monkeypatch.setattr(FM, "FUNDED_EXIT_SUBMISSION_ENABLED", True)
     # ── (5) DEREK'S ENTRY POLICY (1002): A STATED ASSUMPTION ─────────
