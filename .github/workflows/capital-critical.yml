@@ -161,6 +161,12 @@ jobs:
             -o junit_family=xunit1 \
             --junitxml="$RUNNER_TEMP/capital-critical-junit.xml" \
             > "$RUNNER_TEMP/capital-critical-console.txt" 2>&1 || rc=$?
+          # the tracebacks themselves, bounded: the artifact cannot be
+          # fetched through every client, and run 37230040128's 815
+          # RecursionErrors named no frame until the cause was found by hand
+          echo "== errors and failures (tracebacks, first 3000 lines) =="
+          awk '/^=+ (ERRORS|FAILURES) =+$/{p=1} /^=+ short test summary info =+$/{p=0} p' \
+            "$RUNNER_TEMP/capital-critical-console.txt" | head -3000
           tail -40 "$RUNNER_TEMP/capital-critical-console.txt"
           echo "== failing node ids =="
           grep -E '^(FAILED|ERROR) ' "$RUNNER_TEMP/capital-critical-console.txt" || echo "(none)"
