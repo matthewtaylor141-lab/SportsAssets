@@ -7,7 +7,7 @@
   'use strict';
   if (!window.BTOffice || !BTOffice.render) return;
   var SEATS = [['derek', 'Derek'], ['karen', 'Karen'], ['scout', 'Scout'], ['eddie', 'Eddie'],
-               ['allocator', 'Allocator'], ['audrey', 'Audrey'], ['xavier', 'Xavier']];
+               ['allocator', 'Allie'], ['audrey', 'Audrey'], ['xavier', 'Xavier']];
   var COLORS = {WORKING_ON: '#50d8ac', REVIEWING: '#6fb6ff', CHALLENGING: '#ff8395', WAITING: '#e9be74',
                 IDLE: '#93a3b8', STALE: '#5d6878', NOT_DEPLOYED: '#3d4859'};
   var LABELS = {WORKING_ON: 'working', REVIEWING: 'reviewing', CHALLENGING: 'challenging', WAITING: 'waiting',

@@ -8,7 +8,7 @@
     karen:["SKEPTICAL · SOURCE OBSESSED","Adversarial by design. Finds the unsupported sentence, asks what is missing and refuses decorative certainty."],
     scout:["CURIOUS · PATTERN HUNTER","Research-first and exploratory. Looks for structure without promoting his own hypotheses."],
     eddie:["FAST · EXECUTION OBSESSED","Thinks in spread, depth, fees, queue, slippage and latency. Recommendation is not an order."],
-    allocator:["CONSERVATIVE · PORTFOLIO FIRST","Sees the whole book: capacity, correlation, concentration, capital-hours and opportunity cost."],
+    allocator:["ALLIE · PORTFOLIO FIRST","Sees the whole book: capacity, correlation, concentration, capital-hours and opportunity cost."],
     audrey:["LITERAL · LEDGER FIRST","Reconciles the record. Contradictions survive until proven resolved; missing evidence never becomes zero."],
     xavier:["CALM · LOSS AWARE","Manages what we already own. Freshness, downside and alternatives come before narrative confidence."]
   };

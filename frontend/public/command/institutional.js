@@ -53,7 +53,7 @@
     {id: 'xavier', title: 'XAVIER', sub: 'management against holding', reads: ['xavierMgmt'], render: renderXavier},
     {id: 'audrey', title: 'AUDREY', sub: 'postmortems of every closed position · independent risk recompute', reads: ['postmortems', 'risk'], render: renderAudrey},
     {id: 'karen', title: 'KAREN', sub: 'red-team challenges · no authority', reads: ['karen', 'karenChallenges'], render: renderKaren, wide: true},
-    {id: 'allocator', title: 'ALLOCATOR', sub: 'capital allocation of the sleeve (recommendation only)', reads: ['allocator', 'intel'], render: renderAllocator, shadow: true},
+    {id: 'allocator', title: 'ALLIE · CHIEF ALLOCATOR', sub: 'capital allocation of the sleeve (recommendation only)', reads: ['allocator', 'intel'], render: renderAllocator, shadow: true},
     {id: 'risk', title: 'RISK', sub: 'what can go wrong · exposure and regime', reads: ['risk', 'regime'], render: renderRisk, shadow: true},
     {id: 'calibration', title: 'CALIBRATION', sub: 'is the probability any good', reads: ['calibration', 'quality'], render: renderCalibration, shadow: true},
     {id: 'execution', title: 'EXECUTION', sub: 'fill rate, slippage, admission, latency', reads: ['quality', 'smallLive'], render: renderExecution},

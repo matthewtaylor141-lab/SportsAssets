@@ -42,3 +42,6 @@
   .bt-agent2{margin:0 10px 12px;padding:18px 14px}.bt-agent2-grid{grid-template-columns:1fr}.bt-agent2-id{grid-column:auto}
   .bt-agent2-face{width:58px;height:70px}.bt-hq2 .ws-tabs{padding-left:10px!important;padding-top:96px!important}
 }
+
+/* integration (C28): the hero and memory strip are inserted outside the shell's offset wrappers, so on desktop they slid under the 92px rail */
+@media(min-width:781px){.bt-hq2 .bt-agent2,.bt-hq2 .bt-agent2-memory{margin-left:108px!important}}

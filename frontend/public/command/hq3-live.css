@@ -1,0 +1,122 @@
+/* BETTOR COMMAND · HQ3 LIVE
+   Final cinematic polish on top of HQ2.
+   No financial controls. No invented activity. */
+
+:root{
+  --hq3-blue:#4169ff;
+  --hq3-electric:#68d9ff;
+  --hq3-green:#57e1ad;
+  --hq3-gold:#efca79;
+  --hq3-rose:#ff8197;
+}
+
+/* Homepage becomes an operating brief before the deep dashboard. */
+#bt-hq3-home{
+  margin-left:92px;padding:122px 24px 22px;position:relative;z-index:2;
+  background:
+    radial-gradient(800px 340px at 82% 4%,rgba(65,105,255,.18),transparent 62%),
+    linear-gradient(180deg,rgba(3,9,20,.15),rgba(3,9,20,0));
+}
+.hq3-home-wrap{max-width:1500px;margin:auto}
+.hq3-home-top{display:grid;grid-template-columns:minmax(0,1.4fr) minmax(300px,.7fr);gap:16px}
+.hq3-home-hero{
+  min-height:310px;padding:34px;border:1px solid var(--bt-line);border-radius:30px;position:relative;overflow:hidden;
+  background:
+    radial-gradient(520px 300px at 78% 10%,rgba(87,216,255,.10),transparent 64%),
+    radial-gradient(430px 260px at 20% 100%,rgba(65,105,255,.17),transparent 70%),
+    linear-gradient(135deg,#081830,#040d1c 65%,#071229);
+  box-shadow:0 34px 95px rgba(0,0,0,.34)
+}
+.hq3-home-hero::after{
+  content:"";position:absolute;right:-100px;bottom:-190px;width:480px;height:480px;border-radius:50%;
+  border:1px solid rgba(101,140,255,.20);box-shadow:0 0 0 48px rgba(65,105,255,.025),0 0 0 96px rgba(65,105,255,.018)
+}
+.hq3-home-hero h1{margin:12px 0 14px;max-width:760px;font:400 clamp(42px,5vw,76px)/.92 var(--bt-serif);letter-spacing:-.055em}
+.hq3-home-hero p{max-width:720px;color:#92a5ba;font-size:14px;line-height:1.6}
+.hq3-home-pulse{display:flex;gap:8px;align-items:center;margin-top:26px;flex-wrap:wrap}
+.hq3-chip{display:inline-flex;align-items:center;gap:7px;padding:8px 10px;border:1px solid var(--bt-line);border-radius:999px;background:rgba(4,14,28,.72);font:700 9px/1 var(--bt-mono);letter-spacing:.05em;color:#91a4b9;text-transform:uppercase}
+.hq3-chip i{width:6px;height:6px;border-radius:50%;background:#66768a}
+.hq3-chip.good{color:var(--hq3-green);border-color:rgba(87,225,173,.23)}.hq3-chip.good i{background:currentColor;box-shadow:0 0 12px currentColor}
+.hq3-chip.warn{color:var(--hq3-gold)}
+.hq3-home-side{display:grid;gap:10px}
+.hq3-capital-card,.hq3-company-card{padding:22px;border:1px solid var(--bt-line);border-radius:24px;background:linear-gradient(180deg,rgba(9,24,46,.94),rgba(4,13,26,.94));box-shadow:0 26px 60px rgba(0,0,0,.26)}
+.hq3-capital-card .value{margin:10px 0 4px;font:600 clamp(30px,4vw,47px)/1 var(--bt-mono);letter-spacing:-.045em}
+.hq3-capital-card .sub,.hq3-company-card .sub{color:#7890a9;font-size:10.5px}
+.hq3-company-agents{display:grid;grid-template-columns:repeat(2,1fr);gap:7px;margin-top:12px}
+.hq3-agent-mini{padding:9px 10px;border:1px solid rgba(139,168,208,.12);border-radius:11px;background:#061426}
+.hq3-agent-mini b{font-size:11px}.hq3-agent-mini span{display:block;margin-top:3px;font:650 8px/1 var(--bt-mono);color:#70869e;text-transform:uppercase}
+.hq3-agent-mini.live span{color:var(--hq3-green)}
+.hq3-agent-mini.challenge span{color:var(--hq3-rose)}
+.hq3-agent-mini.wait span{color:var(--hq3-gold)}
+.hq3-cta{display:flex;gap:9px;margin-top:25px;position:relative;z-index:2}
+.hq3-cta a{text-decoration:none;padding:12px 15px;border-radius:12px;font-weight:650;font-size:11px;border:1px solid var(--bt-line);background:#08172b}
+.hq3-cta a.primary{background:var(--hq3-blue);border-color:transparent;color:white;box-shadow:0 12px 30px rgba(65,105,255,.22)}
+
+/* Floor: stronger cinematic composition. */
+body.bt-hq2.fl #bt-hq2-floor{background:
+  radial-gradient(1000px 620px at 50% 31%,rgba(65,105,255,.16),transparent 54%),
+  radial-gradient(600px 500px at 88% 58%,rgba(87,216,255,.055),transparent 66%),
+  radial-gradient(600px 450px at 9% 65%,rgba(87,225,173,.045),transparent 64%),
+  #020711!important}
+body.bt-hq2.fl .hq2-world{
+  border-color:rgba(138,174,224,.20)!important;
+  box-shadow:0 48px 140px rgba(0,0,0,.58),inset 0 1px rgba(255,255,255,.035),0 0 80px rgba(65,105,255,.06)!important
+}
+body.bt-hq2.fl .hq2-floor-title h1{max-width:920px}
+.hq3-floor-wordmark{
+  position:absolute;z-index:2;left:50%;top:44%;transform:translate(-50%,-50%);
+  color:rgba(215,229,255,.032);font:850 clamp(70px,11vw,170px)/1 var(--bt-sans);letter-spacing:-.07em;white-space:nowrap;pointer-events:none
+}
+.hq3-floor-wordmark small{display:block;text-align:center;font:700 11px/1 var(--bt-mono);letter-spacing:.52em;color:rgba(215,229,255,.055);margin-top:10px}
+.hq3-world-status{
+  position:absolute;left:22px;top:44px;z-index:8;display:flex;gap:7px;flex-wrap:wrap;pointer-events:none
+}
+.hq3-world-status span{padding:6px 8px;border-radius:999px;border:1px solid rgba(150,182,222,.14);background:rgba(3,11,24,.68);backdrop-filter:blur(8px);font:650 8px/1 var(--bt-mono);letter-spacing:.06em;color:#70849a;text-transform:uppercase}
+.hq3-world-status .live{color:var(--hq3-green)}
+.hq3-allie-mark{color:#ffb9df!important;border-color:rgba(255,185,223,.26)!important}
+.hq3-allie-mark::after{content:" · ALLIE";font-weight:800}
+
+/* The old static pod fallback remains excellent on phone, but make Allie distinct. */
+.hq2-pod[data-slug="allocator"]{--a:#ff9bcf!important}
+.hq2-pod[data-slug="allocator"] .portrait{
+  background:
+    radial-gradient(circle at 50% 25%,#eef3fb 0 11%,transparent 12%),
+    radial-gradient(ellipse at 50% 34%,rgba(255,155,207,.48) 0 31%,transparent 32%),
+    linear-gradient(180deg,transparent 0 36%,#311c3c 37% 100%)!important
+}
+
+/* Equity: the latest *real* point owns the screen like the reference video. */
+.bt-hq3-last{
+  position:absolute;z-index:8;transform:translate(10px,-50%);pointer-events:none;
+  padding:8px 10px;border-radius:9px;background:#087f4d;color:white;box-shadow:0 10px 28px rgba(0,0,0,.28),0 0 0 1px rgba(255,255,255,.08);
+  font:700 10px/1 var(--bt-mono);white-space:nowrap
+}
+.bt-hq3-last::before{content:"";position:absolute;left:-5px;top:50%;width:10px;height:10px;background:#087f4d;transform:translateY(-50%) rotate(45deg)}
+.bt-hq3-last b{font-size:12px;letter-spacing:-.03em}.bt-hq3-last small{display:block;margin-top:4px;font-size:8px;color:#baf5d6}
+.bt-hq3-last.frozen{background:#66542d;color:#ffe9b2}.bt-hq3-last.frozen::before{background:#66542d}.bt-hq3-last.frozen small{color:#ecd79e}
+.bt-hq2 .ew-end.live{width:11px!important;height:11px!important}
+.bt-hq2 .ew-line{stroke-width:2.6!important}
+.bt-hq2 .ew-area{opacity:.5!important}
+.bt-hq2 .ew-card:hover .ew-line{filter:drop-shadow(0 0 11px rgba(91,120,255,.58))}
+
+/* Agent office hero polish. */
+.bt-agent2[data-agent="allocator"]{--a:#ff9bcf!important}
+.bt-agent2[data-agent="allocator"] .bt-agent2-face{
+  background:
+    radial-gradient(circle at 50% 25%,#edf2f8 0 11%,transparent 12%),
+    radial-gradient(ellipse at 50% 37%,rgba(255,155,207,.50) 0 32%,transparent 33%),
+    linear-gradient(180deg,transparent 0 35%,#321d3c 36% 100%)!important
+}
+
+/* Full-site flow: make the old content feel like deeper layers, not another app. */
+body.bt-hq2 #app{position:relative;z-index:1}
+body.bt-hq2 .card,body.bt-hq2 .panel,body.bt-hq2 [class*="card"]{scroll-margin-top:110px}
+
+@media(max-width:780px){
+  #bt-hq3-home{margin-left:0;padding:108px 10px 14px}
+  .hq3-home-top{grid-template-columns:1fr}.hq3-home-hero{min-height:0;padding:24px 18px;border-radius:22px}
+  .hq3-home-hero h1{font-size:46px}.hq3-home-side{grid-template-columns:1fr 1fr}.hq3-capital-card,.hq3-company-card{padding:16px;border-radius:18px}
+  .hq3-company-agents{grid-template-columns:1fr}.hq3-world-status{display:none}.hq3-floor-wordmark{display:none}
+}
+@media(max-width:520px){.hq3-home-side{grid-template-columns:1fr}.bt-hq3-last{font-size:8px;padding:6px 8px}.bt-hq3-last b{font-size:10px}}
+@media(prefers-reduced-motion:reduce){.bt-hq3-last{transition:none!important}}

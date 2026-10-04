@@ -41,6 +41,7 @@
 </style>
 <link rel="stylesheet" href="hq2-brand.css" data-hq2="brand">
 <link rel="stylesheet" href="hq2-agent.css" data-hq2="agent-css">
+<link rel="stylesheet" href="hq3-live.css" data-hq3="css">
 </head>
 <body>
 <nav aria-label="AI agents">
@@ -50,7 +51,7 @@
   <a href="/xavier" data-agent="xavier">Xavier<span class="sep"> · </span><span class="role">Portfolio Mgmt</span></a>
   <a href="/audrey" data-agent="audrey">Audrey<span class="sep"> · </span><span class="role">Audit &amp; Intel</span></a>
   <a href="/karen" data-agent="karen">Karen<span class="sep"> · </span><span class="role">Red Team</span></a>
-  <a href="/allocator" data-agent="allocator">Allocator<span class="sep"> · </span><span class="role">Capital</span></a>
+  <a href="/allocator" data-agent="allocator">Allie<span class="sep"> · </span><span class="role">Chief Allocator</span></a>
   <a href="/eddie" data-agent="eddie">Eddie<span class="sep"> · </span><span class="role">Execution</span></a>
   <a href="/scout" data-agent="scout">Scout<span class="sep"> · </span><span class="role">Intelligence</span></a>
   <span class="tag">AI agents · paper experiment</span>
@@ -82,7 +83,7 @@
   document.querySelectorAll("nav a[data-agent]").forEach(function (a) {
     if (a.getAttribute("data-agent") === name) { a.setAttribute("aria-current", "page"); }
   });
-  var label = name === "allocator" ? "Chief Allocator" : name.charAt(0).toUpperCase() + name.slice(1);
+  var label = name === "allocator" ? "Allie" : name.charAt(0).toUpperCase() + name.slice(1);
   document.title = "BettorToken · " + label;
   var url = "/api/command/agents/" + name + "/page";
   var frame = document.getElementById("page");
@@ -142,5 +143,6 @@
 </script>
 <script src="hq2-shell.js" data-hq2="shell"></script>
 <script src="hq2-agent.js" data-hq2="agent-js"></script>
+<script src="hq3-live.js" data-hq3="js"></script>
 </body>
 </html>
