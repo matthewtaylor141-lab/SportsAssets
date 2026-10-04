@@ -664,12 +664,26 @@ def test_only_the_two_lanes_ask_for_live_exposure():
 
 
 def test_the_one_client_create_in_execmirror_is_inside_venue_place():
-    src = (ROOT / "execmirror.py").read_text()
-    assert src.count("orders.create(") == 1
+    # PINNED BY AST, NOT BY THE TEXT "orders.create(" (integration of the
+    # R30A intent and chaos streams). The chaos stream routes every venue
+    # request of this client through Venue._call (paced, never retried, a
+    # 429 tripping the shared circuit), so place() now HANDS
+    # `self._c.orders.create` to _call instead of calling it with a
+    # parenthesis. The text pin then counted 0 and failed although the fact
+    # it guards -- the client's one order create sits inside Venue.place,
+    # after the canonical check -- still holds. A text pin was also the
+    # weaker one: a wrapper elsewhere taking `orders.create` by reference
+    # would have escaped it. Every REFERENCE (called or handed on) is
+    # counted now.
+    refs = [(encl, n.lineno) for n, encl in _order_create_refs(
+        ast.parse((ROOT / "execmirror.py").read_text()))]
+    assert [e for e, _ in refs] == ["Venue.place"], refs
     place = inspect.getsource(M.Venue.place)
-    assert "orders.create(" in place
+    assert "self._c.orders.create" in place
     assert place.index("_canonical_live_authorized") < place.index(
-        "orders.create(")
+        "self._c.orders.create")
+    # and the wrapper itself creates nothing: it calls what it is handed
+    assert "orders" not in inspect.getsource(M.Venue._call)
 
 
 def test_the_actual_lane_hands_the_venue_only_the_canonical_token():
@@ -693,7 +707,9 @@ def test_the_actual_lane_hands_the_venue_only_the_canonical_token():
 # lane written tomorrow is covered the moment it calls one.
 
 def _enclosing(tree):
-    """{id(call node): 'Class.func' | 'func'} for every Call in `tree`."""
+    """{id(node): 'Class.func' | 'func'} for every node in `tree` that is not
+    itself a def / class (calls, and the attribute / name references inside
+    them)."""
     out = {}
 
     def walk(node, stack):
@@ -702,35 +718,65 @@ def _enclosing(tree):
                                ast.ClassDef)):
                 walk(ch, stack + [ch.name])
             else:
-                if isinstance(ch, ast.Call):
-                    out[id(ch)] = ".".join(stack)
+                out[id(ch)] = ".".join(stack)
                 walk(ch, stack)
     walk(tree, [])
     return out
 
 
+def _order_create_refs(tree) -> list:
+    """[(node, enclosing function)] of every `<x>.orders.create` REFERENCE
+    in `tree` -- called directly, or handed on to a wrapper such as
+    execmirror.Venue._call."""
+    encl = _enclosing(tree)
+    return [(n, encl.get(id(n), "")) for n in ast.walk(tree)
+            if isinstance(n, ast.Attribute) and n.attr == "create"
+            and isinstance(n.value, ast.Attribute) and n.value.attr == "orders"]
+
+
 def _order_creating_calls() -> set:
-    """(file, enclosing function) of every call that creates a venue order:
-    `<x>.orders.create(...)` (polymarket-us SDK), `post_order(...)` /
-    `create_order(...)` (polymarket-CLOB), and a POST to Kalshi's order
-    endpoint."""
+    """(file, enclosing function) of every reference that creates a venue
+    order: `<x>.orders.create` (polymarket-us SDK) and `post_order` /
+    `create_order` (polymarket-CLOB), CALLED OR HANDED ON BY REFERENCE, and a
+    POST to Kalshi's order endpoint.
+
+    BY REFERENCE, NOT ONLY BY CALL (integration of the R30A intent and chaos
+    streams). The first scan matched only Call nodes whose func was the
+    create. Once the chaos stream routed execmirror.Venue's requests through
+    its paced `_call` -- place() now passes `self._c.orders.create` to it --
+    the scan stopped seeing execmirror's one create at all and this census
+    failed although that create still sits in Venue.place after the
+    canonical check. Missing a create because it is passed rather than
+    called is exactly the gap a census must not have (a wrapper written
+    tomorrow would hide one the same way), so every Attribute / Name
+    reference is matched now; the set of primitives it finds is unchanged
+    (tests/test_order_posts_are_sent_once_and_429s_are_named.sends_orders
+    reached the same conclusion for its own scan)."""
     found = set()
     for f in ROOT.rglob("*.py"):
         src = f.read_text()
         tree = ast.parse(src)
         encl = _enclosing(tree)
         for node in ast.walk(tree):
+            hit = False
+            if isinstance(node, ast.Attribute) and node.attr == "create" and \
+                    isinstance(node.value, ast.Attribute) and \
+                    node.value.attr == "orders":
+                hit = True
+            elif isinstance(node, ast.Attribute) and node.attr in (
+                    "post_order", "create_order"):
+                hit = True
+            elif isinstance(node, ast.Name) and node.id in (
+                    "post_order", "create_order"):
+                hit = True
+            if hit:
+                found.add((str(f.relative_to(ROOT)), encl.get(id(node), "")))
+                continue
             if not isinstance(node, ast.Call):
                 continue
             fn = node.func
             name = getattr(fn, "attr", None) or getattr(fn, "id", None)
-            hit = False
-            if name == "create" and isinstance(fn, ast.Attribute) and \
-                    getattr(fn.value, "attr", None) == "orders":
-                hit = True
-            elif name in ("post_order", "create_order"):
-                hit = True
-            elif name == "_send" and len(node.args) >= 2 and all(
+            if name == "_send" and len(node.args) >= 2 and all(
                     isinstance(a, ast.Constant) for a in node.args[:2]) and \
                     node.args[0].value == "POST" and \
                     "orders" in str(node.args[1].value):
@@ -758,9 +804,11 @@ def test_every_order_creating_call_sits_in_a_gated_venue_primitive():
     clob = inspect.getsource(LE._submit_fok)
     assert clob.index("require_canonical_origination(") < clob.index(
         "create_order(") < clob.index("post_order(")
+    # Venue.place hands the create to its paced _call (chaos stream): the
+    # create is the reference `self._c.orders.create`, after the check
     place = inspect.getsource(M.Venue.place)
     assert place.index("_canonical_live_authorized") < place.index(
-        "orders.create(")
+        "self._c.orders.create")
 
 
 def test_the_kalshi_primitive_is_reachable_from_nowhere():
