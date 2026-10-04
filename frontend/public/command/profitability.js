@@ -53,7 +53,19 @@
     floor: {path: '/api/command/floor', q: '', owner: 'FLOOR'},
     p5: {path: '/api/command/p5/evidence', q: '', owner: 'P5'}
   };
-  var COMPACT_READS = ['ns', 'capital', 'capacity', 'lol', 'scores', 'horizons', 'ladder', 'kills'];
+  // THE PAPER SLEEVE (migration 223): the cockpit DEFAULTS to the INVESTMENT
+  // sleeve. PAPER figures that answer "are we making money" come from
+  // /profitability/sleeves for the selected sleeve; training losses are
+  // research cost, training wins are not production alpha. COMBINED is the
+  // whole paper book (every sleeve), labelled so.
+  var SLEEVES = [['INVESTMENT', 'Investment / production-candidate'], ['TRAINING', 'Training / exploration'], ['BENCHMARK', 'Benchmark / control'],
+                 ['UNCLASSIFIED', 'Unclassified'], ['COMBINED', 'Combined accounting']];
+  var SLEEVE_KEY = 'btpc.sleeve.v1';
+  function savedSleeve() {
+    try { var v = localStorage.getItem(SLEEVE_KEY); return SLEEVES.some(function (s) { return s[0] === v; }) ? v : 'INVESTMENT'; } catch (e) { return 'INVESTMENT'; }
+  }
+  READS.sleeves = {path: '/api/command/profitability/sleeves', q: '?sleeve=INVESTMENT', owner: 'POS-SLEEVES'};
+  var COMPACT_READS = ['sleeves', 'ns', 'capital', 'capacity', 'lol', 'scores', 'horizons', 'ladder', 'kills'];
   var BOOKS = ['PAPER', 'ACTUAL'];
   var METRICS = [
     ['REALIZED_NET_EDGE', 'Realized net edge', 'ratio'],
@@ -113,7 +125,13 @@
   function human(code) { return String(code || '').replace(/_/g, ' ').toLowerCase().replace(/^./, function (c) { return c.toUpperCase(); }); }
 
   // ── reads ───────────────────────────────────────────────────────────
-  var state = {results: {}, readAt: null, first: true};
+  var state = {results: {}, readAt: null, first: true, sleeve: savedSleeve()};
+  READS.sleeves.q = '?sleeve=' + state.sleeve;
+  function sleeveMode() { return state.sleeve !== 'COMBINED'; }
+  function sleeveName(s) { var f = SLEEVES.filter(function (x) { return x[0] === s; })[0]; return f ? f[1] : s; }
+  /* the PAPER column's label: the selected sleeve, or every sleeve */
+  function bookLabel(b) { return b === 'PAPER' ? 'PAPER · ' + (sleeveMode() ? state.sleeve : 'ALL SLEEVES') : b; }
+  function combinedLabel(b) { return b === 'PAPER' ? 'PAPER · ALL SLEEVES' : b; }
 
   function endpointOf(r) {
     if (C && typeof C.endpoint === 'function') return C.endpoint(r.path) + r.q;
@@ -201,7 +219,7 @@
       return '<div' + tip + '><span class="k">' + esc(it[0]) + '</span><span class="v">' + esc(v) + '</span>' + (it[2] ? '<span class="s">' + esc(it[2]) + '</span>' : '') + '</div>';
     }).join('') + '</div>';
   }
-  function bookHead(b) { return '<h3><span class="pc-sw ' + b.toLowerCase() + '"></span>' + b + '</h3>'; }
+  function bookHead(b) { return '<h3><span class="pc-sw ' + b.toLowerCase() + '"></span>' + esc(combinedLabel(b)) + '</h3>'; }
   function um(obj, key) { return obj && obj.unmeasured && obj.unmeasured[key]; }
 
   // ── SVG helpers (drawn to scale; ticks on clean values) ─────────────
@@ -261,14 +279,34 @@
   // SECTIONS
   // ═══════════════════════════════════════════════════════════════════
 
-  function nsMetric(b, m) {
+  /* PAPER metrics/capital follow the SELECTED SLEEVE (recomputed on that
+     sleeve's own positions); ACTUAL and COMBINED read the book-level runs.
+     A failed sleeve read is UNAVAILABLE -- never the combined book. */
+  function sleeveData() {
+    var e = env('sleeves');
+    return e.state === 'OK' ? (e.body.data || {}) : null;
+  }
+  function nsMetricBook(b, m) {
     var e = env('ns');
     if (e.state !== 'OK') return null;
     return ((e.body.data || {})[b] || {})[m] || null;
   }
-  function capSnap(b) {
+  function nsMetric(b, m) {
+    if (b === 'PAPER' && sleeveMode()) { var d = sleeveData(); return d && d.north_star ? d.north_star[m] || null : null; }
+    return nsMetricBook(b, m);
+  }
+  function capSnapBook(b) {
     var e = env('capital');
     return e.state === 'OK' ? (e.body.data || {})[b] || null : null;
+  }
+  function capSnap(b) {
+    if (b === 'PAPER' && sleeveMode()) { var d = sleeveData(); return d ? d.capital || null : null; }
+    return capSnapBook(b);
+  }
+  /* why a PAPER / ACTUAL figure is missing, from the read it comes from */
+  function whyFor(b, key) {
+    if (b === 'PAPER' && sleeveMode()) { var e = env('sleeves'); return e.state === 'OK' ? (e.body.data.north_star_why || 'no ' + state.sleeve + ' observation') : 'sleeve read ' + e.state + ': ' + e.why; }
+    return env(key).why;
   }
   function horizon(b, h) {
     var e = env('horizons');
@@ -285,12 +323,12 @@
       var m = nsMetric(b, 'REALIZED_NET_EDGE');
       var c = capSnap(b);
       var net = c && c.realized_net_profit_usd;
-      var line = b + ': ';
-      if (!m) line += 'north-star read ' + env('ns').state.toLowerCase();
+      var line = bookLabel(b) + ': ';
+      if (!m) line += (b === 'PAPER' && sleeveMode() ? 'sleeve read: ' + whyFor(b, 'ns') : 'north-star read ' + env('ns').state.toLowerCase());
       else if (m.status === 'MEASURED') {
         line += 'realized net ' + (fin(net) ? susd(net) : 'UNAVAILABLE') + ' (30d, n=' + m.sample_n + '); net edge ' + fmtMetric(m.value, 'ratio') +
           (fin(m.ci_low) ? ', 90% CI ' + fmtMetric(m.ci_low, 'ratio') + ' to ' + fmtMetric(m.ci_high, 'ratio') : '');
-        if (fin(m.ci_low) && m.ci_low > 0) head = b + ': positive, CI above zero';
+        if (fin(m.ci_low) && m.ci_low > 0) head = bookLabel(b) + ': positive, CI above zero';
         else if (head === 'Not established') head = 'Not proven: the CI spans zero';
       } else line += human(m.status) + ' — ' + (m.why || ('n=' + m.sample_n));
       money.push(line);
@@ -299,7 +337,7 @@
     // 2 Why?
     var why = [];
     var cal = nsMetric('PAPER', 'EDGE_CALIBRATION');
-    if (cal && fin(cal.value)) why.push('PAPER realized ' + cal.value.toFixed(2) + '× of predicted net profit (n=' + cal.sample_n + ', ' + human(cal.status) + ').');
+    if (cal && fin(cal.value)) why.push(bookLabel('PAPER') + ' realized ' + cal.value.toFixed(2) + '× of predicted net profit (n=' + cal.sample_n + ', ' + human(cal.status) + ').');
     else why.push('Edge calibration: ' + (cal ? (cal.why || human(cal.status)) : env('ns').why || 'UNAVAILABLE'));
     var lol = env('lol');
     if (lol.state === 'OK') {
@@ -330,7 +368,7 @@
     } else dep.push('Capacity: ' + cap.why);
     BOOKS.forEach(function (b) {
       var c = capSnap(b);
-      dep.push(b + ' idle capital ' + (c && fin(c.idle_capital_usd) ? usd(c.idle_capital_usd) : 'UNAVAILABLE' + (c ? ' (' + (um(c, 'idle_capital_usd') || '') + ')' : '')));
+      dep.push(bookLabel(b) + ' idle capital ' + (c && fin(c.idle_capital_usd) ? usd(c.idle_capital_usd) : 'UNAVAILABLE' + (c ? ' (' + (um(c, 'idle_capital_usd') || '') + ')' : '')));
     });
     dep.push('The $25 cap, the 1:1,000 scale and every gate are unchanged by this page.');
     qs.push(['How much capital can be deployed?', depHead, dep]);
@@ -343,9 +381,50 @@
     }).join('') + '</section>';
   }
 
+  // ── the sleeve selector + every sleeve's ledger economics ──────────
+  function sm(v) { return susd(v, 2) || 'UNAVAILABLE'; }
+  function sleevePanel(compact) {
+    var e = env('sleeves');
+    var bar = '<div class="pc-sleevebar" role="group" aria-label="Paper sleeve shown in the PAPER figures">' +
+      '<span class="pc-sleeve-lbl">PAPER economics shown for</span>' + SLEEVES.map(function (s) {
+        return '<button type="button" class="pc-sleeve-btn s-' + s[0].toLowerCase() + '" data-sleeve="' + s[0] + '" aria-pressed="' + (state.sleeve === s[0]) + '">' + esc(s[1]) + '</button>';
+      }).join('') + '</div>';
+    var body;
+    if (e.state !== 'OK') {
+      body = na((e.state === 'NOT_DEPLOYED' ? 'the sleeve read is not deployed: ' : '') + e.why, e.state === 'NOT_DEPLOYED' ? 'NOT DEPLOYED' : e.state) +
+        (sleeveMode() ? '<p class="pc-note">Without the sleeve read the PAPER figures below show UNAVAILABLE rather than the combined book.</p>' : '');
+    } else {
+      var d = e.body.data || {}, all = d.sleeves || {}, acc = d.accounting || {};
+      var order = ['INVESTMENT', 'TRAINING', 'BENCHMARK', 'UNCLASSIFIED'];
+      var rows = order.filter(function (k) { return all[k]; }).map(function (k) {
+        var s = all[k], ex = s.exposure || {}, mk = s.marks || {};
+        var g = mk.last_genuine_mark_update_at ? age(mk.last_genuine_mark_update_at) : 'none in 6 h';
+        var tag = s.realized_label ? '<span class="pc-sltag">' + esc(s.realized_label) + '</span>' : '';
+        var sel = state.sleeve === k || state.sleeve === 'COMBINED';
+        var c = s.equity_contribution_usd;
+        return '<tr class="' + (sel ? 'sel ' : '') + 's-' + k.toLowerCase() + '"' + tipAttr(s.title + ' · ' + (s.purpose || '') + '\n' + (s.unrealized_basis || '') + '\nsource ' + (d.live_source || '')) + '>' +
+          '<td><span class="pc-slname">' + esc(sleeveName(k)) + '</span></td>' +
+          '<td class="num ' + (c > 0 ? 'pos' : c < 0 ? 'neg' : '') + '">' + esc(sm(c)) + '</td>' +
+          '<td class="num">' + esc(sm(s.realized_pnl_usd)) + tag + '</td>' +
+          '<td class="num">' + esc(sm(s.unrealized_pnl_usd)) + (ex.unmarked_positions ? ' <span class="pc-sltag">' + ex.unmarked_positions + ' unmarked</span>' : '') + '</td>' +
+          '<td class="num">' + esc(usd(ex.cost_basis_usd, 2) || 'UNAVAILABLE') + '</td>' +
+          '<td class="num">' + esc((s.positions_open || 0) + ' / ' + (s.positions_closed || 0)) + '</td>' +
+          '<td>' + esc(human(mk.state || '')) + '<span class="pc-slsub">' + esc(g) + '</span></td></tr>';
+      }).join('');
+      var cs = acc.sleeve_contributions_usd;
+      var recon = '<p class="pc-note pc-acc"><b>' + esc(acc.title || 'COMBINED ACCOUNTING TOTAL') + '</b>: ' + esc(usd(acc.starting_cash_usd, 2) || 'UNAVAILABLE') + ' starting cash ' +
+        esc(fin(cs) ? (cs >= 0 ? '+ ' : '− ') + usd(Math.abs(cs), 2) : 'UNAVAILABLE') + ' from the sleeves = ' + esc(usd(acc.accounted_equity_usd, 2) || 'UNAVAILABLE') +
+        (acc.reconciled ? ' · reconciles to the account equity' : ' · DIFFERS from the account equity by ' + esc(usd(acc.difference_usd, 2) || 'an unknown amount')) + '.</p>';
+      body = (compact ? '' : '<div class="tablewrap pc-scroll"><table class="pc-sleeves"><thead><tr><th>Sleeve</th><th>Equity contribution</th><th>Realized</th><th>Unrealized</th><th>Exposure · cost</th><th>Open / closed</th><th>Marks · last genuine change</th></tr></thead><tbody>' + rows + '</tbody></table></div>') +
+        recon + '<p class="pc-note">' + esc((d.equity_method || {}).text || '') + ' Training losses are research cost; training wins are not production alpha. ' +
+        (sleeveMode() ? 'The answers, hero tiles and north-star PAPER column show the ' + sleeveName(state.sleeve).toUpperCase() + ' sleeve, recomputed on its own positions; capital, drawdown, forecast and capacity cards are book-level (all sleeves) and say so.' : 'COMBINED shows the whole paper book: every sleeve, including training research cost.') + '</p>';
+    }
+    return card('sleeves', 'Paper sleeves', 'economic purpose · ' + (sleeveMode() ? sleeveName(state.sleeve) + ' selected' : 'all sleeves'), e.state === 'OK' ? e : null, bar + body, {wide: true});
+  }
+
   // ── hero tiles ──────────────────────────────────────────────────────
-  function bk(b, valText, why, tip, small, pill) {
-    return '<div class="pc-bk"' + (tip ? tipAttr(tip) : '') + '><span class="k"><span class="pc-sw ' + b.toLowerCase() + '"></span>' + b + (pill ? ' ' + pill : '') + '</span>' +
+  function bk(b, valText, why, tip, small, pill, label) {
+    return '<div class="pc-bk"' + (tip ? tipAttr(tip) : '') + '><span class="k"><span class="pc-sw ' + b.toLowerCase() + '"></span>' + esc(label || b) + (pill ? ' ' + pill : '') + '</span>' +
       (valText != null ? '<span class="v' + (small ? ' sm' : '') + '">' + esc(valText) + '</span>' + (why ? '<span class="why">' + esc(why) + '</span>' : '')
                        : '<span class="na">UNAVAILABLE</span><span class="why">' + esc(why || '') + '</span>') + '</div>';
   }
@@ -357,14 +436,16 @@
     var e = env('ns');
     var inner = BOOKS.map(function (b) {
       var m = nsMetric(b, metric);
-      if (!m) return bk(b, null, e.why);
-      var tip = label + ' · ' + b + '\nstatus ' + m.status + ' · n=' + m.sample_n +
+      var L = bookLabel(b);
+      var srcPath = b === 'PAPER' && sleeveMode() ? '/api/command/profitability/sleeves?sleeve=' + state.sleeve + ' (recomputed on this sleeve\'s positions)' : '/api/command/profitability/north-star';
+      if (!m) return bk(b, null, whyFor(b, 'ns'), null, false, null, L);
+      var tip = label + ' · ' + L + '\nstatus ' + m.status + ' · n=' + m.sample_n +
         (fin(m.ci_low) ? '\n90% CI ' + fmtMetric(m.ci_low, kind) + ' to ' + fmtMetric(m.ci_high, kind) : '') +
-        '\nsource GET /api/command/profitability/north-star\ncomputed ' + ts(m.computed_at) + '; data as of ' + ts(m.data_as_of);
+        '\nsource GET ' + srcPath + '\ncomputed ' + ts(m.computed_at) + '; data as of ' + ts(m.data_as_of);
       var pill = stPill(m.status || 'UNAVAILABLE');
-      if (!fin(m.value)) return bk(b, null, m.why || m.status, tip, false, pill);
+      if (!fin(m.value)) return bk(b, null, m.why || m.status, tip, false, pill, L);
       return bk(b, fmtHero(m.value, kind), (kind === 'pch' ? 'per $·h · ' : '') + 'n=' + m.sample_n +
-        (fin(m.ci_low) ? ' · 90% CI ' + fmtMetric(m.ci_low, kind) + ' to ' + fmtMetric(m.ci_high, kind) : ' · CI n/a'), tip, false, pill);
+        (fin(m.ci_low) ? ' · 90% CI ' + fmtMetric(m.ci_low, kind) + ' to ' + fmtMetric(m.ci_high, kind) : ' · CI n/a'), tip, false, pill, L);
     }).join('');
     return tile(label, inner, e.state === 'OK' ? 'north-star · ' + esc(age(e.computed_at) || '') : esc(e.state));
   }
@@ -374,10 +455,12 @@
     var ec = env('capital');
     t.push(tile('Net P&L · realized, 30-day window', BOOKS.map(function (b) {
       var c = capSnap(b);
-      if (!c) return bk(b, null, ec.state === 'OK' ? 'no CAPITAL snapshot for ' + b : ec.why);
+      var L = bookLabel(b), sl = b === 'PAPER' && sleeveMode();
+      if (!c) return bk(b, null, sl ? whyFor(b, 'capital') : ec.state === 'OK' ? 'no CAPITAL snapshot for ' + b : ec.why, null, false, null, L);
       var v = c.realized_net_profit_usd;
-      return bk(b, fin(v) ? susd(v) : null, fin(v) ? 'n=' + (c.realized_sample || 0) + ' closed · ' + (age(c.computed_at) || '') : um(c, 'realized_net_profit_usd'),
-        'Realized net P&L · ' + b + ' · positions released in the ' + (c.window_days || 30) + '-day window\nsource GET /api/command/profitability/capital\ncomputed ' + ts(c.computed_at), false, stPill(fin(v) ? 'MEASURED' : 'UNAVAILABLE'));
+      var lossNote = sl && state.sleeve === 'TRAINING' && fin(v) ? (v < 0 ? ' · RESEARCH COST' : v > 0 ? ' · not production alpha' : '') : '';
+      return bk(b, fin(v) ? susd(v) : null, fin(v) ? 'n=' + (c.realized_sample || 0) + ' closed · ' + (age(c.computed_at) || '') + lossNote : um(c, 'realized_net_profit_usd'),
+        'Realized net P&L · ' + L + ' · positions released in the ' + (c.window_days || 30) + '-day window\nsource GET ' + (sl ? '/api/command/profitability/sleeves?sleeve=' + state.sleeve : '/api/command/profitability/capital') + '\ncomputed ' + ts(c.computed_at), false, stPill(fin(v) ? 'MEASURED' : 'UNAVAILABLE'), L);
     }).join(''), 'capital · never summed across books'));
     t.push(metricTile('Realized net edge', 'REALIZED_NET_EDGE', 'ratio'));
     t.push(metricTile('Profit per capital-hour', 'PROFIT_PER_CAPITAL_HOUR', 'pch'));
@@ -385,10 +468,10 @@
     var eh = env('horizons');
     t.push(tile('Capital turnover · trailing 30 days', BOOKS.map(function (b) {
       var h = horizon(b, '30D');
-      if (!h) return bk(b, null, eh.state === 'OK' ? 'no horizon row for ' + b : eh.why);
+      if (!h) return bk(b, null, eh.state === 'OK' ? 'no horizon row for ' + b : eh.why, null, false, null, combinedLabel(b));
       var v = h.trailing_30d_capital_turnover;
       return bk(b, fin(v) ? numf(v, 1) + '×' : null, fin(v) ? usd(h.trailing_30d_committed_usd, 0) + ' committed' : um(h, 'trailing_30d_capital_turnover'),
-        'Capital turnover · ' + b + '\ncommitted ÷ average locked capital, trailing 30 days (measured, not forecast)\nsource GET /api/command/profitability/forecast-horizons\nissued ' + ts(h.issued_at));
+        'Capital turnover · ' + combinedLabel(b) + ' (book-level: not split by sleeve)\ncommitted ÷ average locked capital, trailing 30 days (measured, not forecast)\nsource GET /api/command/profitability/forecast-horizons\nissued ' + ts(h.issued_at), false, null, combinedLabel(b));
     }).join(''), 'committed ÷ average locked capital'));
     t.push(metricTile('Max drawdown · 30d', 'MAX_DRAWDOWN', 'usd'));
     t.push(metricTile('P(positive rolling 30 days)', 'PROB_POSITIVE_ROLLING_30D_PNL', 'prob'));
@@ -420,8 +503,8 @@
     var body = guard(e, function (b) {
       var rows = METRICS.map(function (mm) {
         var cells = BOOKS.map(function (bk_) {
-          var m = ((b.data || {})[bk_] || {})[mm[0]];
-          if (!m) return '<td>' + na('no observation for ' + bk_) + '</td>';
+          var m = nsMetric(bk_, mm[0]);
+          if (!m) return '<td>' + na(bk_ === 'PAPER' && sleeveMode() ? whyFor(bk_, 'ns') : 'no observation for ' + bk_) + '</td>';
           var tip = mm[1] + ' · ' + bk_ + '\n' + (fin(m.value) ? 'value ' + fmtMetric(m.value, mm[2]) : 'no value') +
             (fin(m.ci_low) ? '\n' + Math.round((m.ci_level || 0.9) * 100) + '% CI ' + fmtMetric(m.ci_low, mm[2]) + ' to ' + fmtMetric(m.ci_high, mm[2]) : (m.ci_why ? '\nno CI: ' + m.ci_why : '')) +
             '\nn=' + m.sample_n + ' · period ' + ts(m.period_start) + ' → ' + ts(m.period_end) +
@@ -437,7 +520,7 @@
         var unit = ((((b.data || {}).PAPER || {})[mm[0]]) || {}).unit || '';
         return '<tr><td><span class="mname">' + esc(mm[1]) + '</span><span class="munit">' + esc(unit) + '</span></td>' + cells + '</tr>';
       }).join('');
-      return '<div class="tablewrap pc-scroll"><table class="pc-ns"><thead><tr><th>Metric</th><th><span class="pc-sw paper"></span> PAPER</th><th><span class="pc-sw actual"></span> ACTUAL</th></tr></thead><tbody>' + rows + '</tbody></table></div>' +
+      return '<div class="tablewrap pc-scroll"><table class="pc-ns"><thead><tr><th>Metric</th><th><span class="pc-sw paper"></span> ' + esc(bookLabel('PAPER')) + '</th><th><span class="pc-sw actual"></span> ACTUAL</th></tr></thead><tbody>' + rows + '</tbody></table></div>' +
         '<p class="pc-note">The bar is the 90% interval with the point estimate; the vertical tick is zero (or 1.0× for calibration). MEASURED needs ≥ 30 closed positions per book (and 30 days for the rolling probability). PAPER and ACTUAL are separate rows of the same table, never added.</p>';
     });
     return card('ns', 'The five north-star metrics', 'per book · sample · 90% CI · status · trend · freshness', e, body, {wide: true});
@@ -566,7 +649,7 @@
     var body = guard(e, function (b) {
       var pos = b.positions || [];
       var out = BOOKS.map(function (bk_) {
-        var m = nsMetric(bk_, 'MAX_DRAWDOWN');
+        var m = nsMetricBook(bk_, 'MAX_DRAWDOWN');
         var closed = pos.filter(function (p) { return p.book === bk_ && p.state === 'CLOSED' && fin(p.net_profit_usd) && fin(p.released_at); })
           .sort(function (a, c) { return a.released_at - c.released_at; });
         var head = '<div class="pc-note" style="margin:0 0 4px">' + (m ? 'Server MAX_DRAWDOWN ' + (fin(m.value) ? usd(m.value) : 'UNAVAILABLE (' + (m.why || m.status) + ')') : 'north-star ' + env('ns').state) + '</div>';
@@ -1038,7 +1121,7 @@
   function sec(title) { return '<h2 class="pc-sec-h">' + esc(title) + '</h2>'; }
 
   function renderFull(el) {
-    el.innerHTML = answers() + heroTiles() +
+    el.innerHTML = '<div class="pc-grid">' + sleevePanel(false) + '</div>' + answers() + heroTiles() +
       sec('North star') + '<div class="pc-grid">' + northStar() + '</div>' +
       sec('Today') + '<div class="pc-grid">' + todaysOpportunity() + blockersCard() + todaysAttribution() + capacity() + topOpportunities(12) + '</div>' +
       sec('Capital') + '<div class="pc-grid">' + capital() + drawdown() + '</div>' +
@@ -1049,12 +1132,13 @@
   }
   function renderCompact(el) {
     el.classList.add('pc-compact');
-    el.innerHTML = answers() + heroTiles() + '<div class="pc-grid">' + todaysOpportunity() + blockersCard() + topOpportunities(3) + lostOpportunities(true) + '</div>' +
+    el.innerHTML = '<div class="pc-grid">' + sleevePanel(true) + '</div>' + answers() + heroTiles() + '<div class="pc-grid">' + todaysOpportunity() + blockersCard() + topOpportunities(3) + lostOpportunities(true) + '</div>' +
       '<a class="pc-compact-link" href="profitability.html">Open the full profitability cockpit →</a>';
   }
 
   // ── tooltip (one floating element; hover and keyboard focus) ────────
   var tipEl = null;
+  var redraw = null;
   function tipShow(target, x, y) {
     var t = target.getAttribute('data-tip');
     if (!t) return;
@@ -1081,6 +1165,18 @@
     });
     el.addEventListener('focusout', tipHide);
     el.addEventListener('click', function (ev) {
+      var sb = ev.target.closest && ev.target.closest('[data-sleeve]');
+      if (sb) {
+        var v = sb.getAttribute('data-sleeve');
+        if (v === state.sleeve) return;
+        state.sleeve = v;
+        try { localStorage.setItem(SLEEVE_KEY, v); } catch (e) { /* per-viewer convenience only */ }
+        READS.sleeves.q = '?sleeve=' + v;
+        delete state.results.sleeves;
+        if (redraw) redraw();
+        read('sleeves').then(function () { if (redraw) redraw(); });
+        return;
+      }
       var b = ev.target.closest && ev.target.closest('[data-capsel]');
       if (b) { capSel = +b.getAttribute('data-capsel'); var c = el.querySelector('#pc-capacity'); if (c) c.outerHTML = capacity(); }
     });
@@ -1102,6 +1198,7 @@
     var keys = compact ? COMPACT_READS : Object.keys(READS);
     el.innerHTML = '<div class="deskstate" role="status" aria-live="polite">Reading the profitability read models…</div>';
     wireTips(el);
+    redraw = function () { if (compact) renderCompact(el); else renderFull(el); };
     function cycle() {
       return Promise.all(keys.map(read)).then(function () {
         state.readAt = Date.now() / 1000;

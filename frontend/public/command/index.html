@@ -17,14 +17,15 @@
 </head>
 <body>
   <a class="skip-link" href="#pagebody">Skip to dashboard</a>
-  <!-- SMALL LIVE · PAPER vs ACTUAL: a plain anchor, so the live execution
+  <!-- LEGACY MIRROR VALIDATION · PAPER vs ACTUAL (the old 1:1,000 execution
+       mirror, not the target Small Live system): a plain anchor, so the live execution
        view stays reachable even if app.js fails. -->
   <a class="live-jump" href="live.html"
      style="position:fixed;right:14px;bottom:14px;z-index:40;
             padding:9px 14px;border-radius:999px;
             border:1px solid #1d4437;background:#102b22;color:#3ddc97;
             font:600 13px/1 ui-sans-serif,system-ui,sans-serif;
-            text-decoration:none">Small live · paper vs actual →</a>
+            text-decoration:none">Legacy mirror validation · paper vs actual →</a>
   <div id="app"><div class="boot"><div class="boot-mark">B</div><p>Opening Command…</p></div></div>
   <div id="overlay-root"></div>
   <div id="toast" role="status" aria-live="polite"></div>
@@ -56,7 +57,8 @@
        BTOffice.render after management-v6.js. -->
   <script src="floor-entry.js"></script>
   <script src="paper.js"></script>
-  <!-- THE LIVE EQUITY WALL: $500,000 PAPER EXPERIMENT and SMALL LIVE CAPITAL
+  <!-- THE LIVE EQUITY WALL: $500,000 PAPER EXPERIMENT (by sleeve), SMALL LIVE — BETTOR ORIGINATED
+       and the LEGACY MIRROR VALIDATION accounts
        (per venue), never summed. Its own read (GET /api/command/equity/*),
        one shared poll loop; it places itself above the paper slot and
        exposes window.BTEquityWall for the trading floor. AFTER paper.js

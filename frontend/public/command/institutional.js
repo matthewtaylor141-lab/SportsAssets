@@ -244,7 +244,7 @@
       ['Paper equity (SHADOW risk read)', eq ? usd(eq.current_equity_usd, unm(eq, 'current_equity_usd')) : NA(rk.why)],
       ['Gross exposure (SHADOW)', rk.rep ? usd(rk.rep.gross_exposure_usd, unm(rk.rep, 'gross_exposure_usd')) : NA(rk.why)],
       ['Realized P&L, closed (Audrey)', pm.s ? usd(pm.s.realized_pnl_usd) + ' <span class="iv-why">n=' + esc(pm.s.positions) + '</span>' : NA(pm.why)],
-      ['Small-live paper orders', sl ? esc('open ' + obj(obj(sl.counts).paper_status).open + ' · filled ' + obj(obj(sl.counts).paper_status).filled) : NA(failWhy('smallLive'))]
+      ['Legacy mirror · paper orders', sl ? esc('open ' + obj(obj(sl.counts).paper_status).open + ' · filled ' + obj(obj(sl.counts).paper_status).filled) : NA(failWhy('smallLive'))]
     ]);
     html += '<h3 class="h3">Open paper positions (Xavier read)</h3>' + (open ? positionsTable(open, 'PAPER') : NA(failWhy('xavierMgmt')));
     return html;

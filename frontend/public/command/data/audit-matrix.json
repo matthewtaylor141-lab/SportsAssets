@@ -150,7 +150,7 @@
    "blocker": "Evidence ladder at level 0; kill switches are RECOMMEND_PAUSE records only"
   },
   {
-   "capability": "Live equity wall (PAPER and SMALL LIVE per venue, never summed)",
+   "capability": "Live equity wall (PAPER by sleeve; SMALL LIVE — BETTOR ORIGINATED status; LEGACY MIRROR VALIDATION per venue; never summed)",
    "owner": "POS-EQUITY / UI-EQUITY",
    "branch": "claude/pos-equity · claude/ui-equity",
    "sha": "9108c6b · 63b87fc",

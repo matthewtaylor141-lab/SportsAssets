@@ -3,9 +3,13 @@
  * Two separate live accounts, read from GET /api/command/equity/live and
  * /api/command/equity/curve (same-origin, HttpOnly session cookie, GET only):
  *   $500,000 PAPER EXPERIMENT   fictional money, simulated execution
- *   SMALL LIVE CAPITAL          real money at 1:1,000, PER VENUE
- *                               (Polymarket US / Kalshi), never combined
- * The two are never added together anywhere in this file.
+ *   LEGACY MIRROR VALIDATION    the old 1:1,000 execution mirror (real money,
+ *                               PER VENUE), state from its control row
+ *   SMALL LIVE — BETTOR ORIGINATED  the target system, its own status
+ *   (the paper card is split by economic SLEEVE: INVESTMENT / TRAINING /
+ *    BENCHMARK / UNCLASSIFIED, P&L-only on the shared cash ledger)
+ * Venues (Polymarket US / Kalshi) are never combined; paper and real money
+ * are never added together anywhere in this file.
  *
  * NOTHING HERE MOVES ON ITS OWN. A figure changes only when the server's
  * payload changes (its ETag/seq): the odometer rolls and the card flashes
@@ -247,11 +251,17 @@
     if (fin(eq) && (ok || stale)) {
       var last = series.length ? series[series.length - 1] : null;
       var changeAt = ts(acct.last_change_at) || ts(acct.source_at);
-      if (ok) {
+      if (ok && !acct.no_new_mark) {
         // the live value, placed at its last genuine change, held to now
         var at = Math.max(last ? last.t : (since || now), changeAt || 0);
         if (!last || last.v !== eq) { series.push({t: Math.min(at, now), v: eq, cause: 'LIVE'}); }
         end = {t: now, v: eq, live: true};
+      } else if (ok) {
+        // NO NEW MARK: the books were re-read but no mark PRICE moved, so the
+        // line FREEZES at the last genuine change -- it never ticks to now
+        var nt = Math.min(ts(acct.last_change_at) || (last ? last.t : now), now);
+        if (!last || last.v !== eq) { series.push({t: Math.max(nt, last ? last.t : nt), v: eq, cause: 'LAST_GENUINE'}); }
+        end = {t: series.length ? series[series.length - 1].t : nt, v: eq, live: false, tag: 'NO NEW MARK'};
       } else {
         // STALE: FROZEN at the last genuine input; the line does not reach now
         var st = Math.min(changeAt || (last ? last.t : now), now);
@@ -313,7 +323,8 @@
       var px = X(m.end.t) / W * 100, py = Y(m.end.v) / Hh * 100;
       endHTML = '<span class="ew-end ' + (m.end.live ? 'live' : 'frozen') + '" style="left:' + px + '%;top:' + py + '%"' +
         ' title="' + esc((m.end.live ? 'Live value ' : 'Frozen at last genuine input ') + money(m.end.v)) + '"></span>' +
-        (m.end.live ? '' : '<span class="ew-frozen-tag' + (px > 55 ? ' left' : '') + '" style="left:' + px + '%;top:' + py + '%">FROZEN · STALE</span>');
+        (m.end.live ? '' : '<span class="ew-frozen-tag' + (px > 55 ? ' left' : '') + '" style="left:' + px + '%;top:' + py + '%">' +
+          (m.end.tag === 'NO NEW MARK' ? 'STALE · NO NEW MARK since ' + esc(clock(m.end.t, false)) : 'FROZEN · STALE') + '</span>');
     }
     box.innerHTML = '<div class="ew-plot" role="img" aria-label="' + esc('Equity, ' + win + ': from ' + money(vals[0]) + ' to ' + money(vals[vals.length - 1]) + ', ' + vals.length + ' recorded changes') + '">' +
       '<svg viewBox="0 0 ' + W + ' ' + Hh + '" preserveAspectRatio="none" aria-hidden="true">' +
@@ -338,6 +349,7 @@
         esc(hit.cause === 'LEDGER' ? 'ledger moved (fill / settlement)' : hit.cause === 'MARK' ? 'marks moved' :
           hit.cause === 'ACCOUNT' ? 'venue account read changed' : hit.cause === 'GAP' ? 'incomplete marks: no stated equity' :
             hit.cause === 'LIVE' ? 'live value' : hit.cause === 'FROZEN' || hit.cause === 'LAST_READ' ? 'last genuine input (STALE)' :
+              hit.cause === 'LAST_GENUINE' ? 'last genuine change (no new mark since)' :
               hit.cause === 'WINDOW_OPEN' ? 'value at window open' : 'first record') + '</span>';
     }
     plot.addEventListener('mousemove', at);
@@ -411,14 +423,17 @@
       '<div><dt>Open positions</dt><dd>' + (fin(op.count) ? op.count : '—') + '<small>' + (fin(op.count) ? (op.marked || 0) + ' marked · ' + (op.unmarked || 0) + ' unmarked' + (op.stale_marks ? ' · ' + op.stale_marks + ' stale' : '') : '') + '</small></dd></div>' +
       (acct.book === 'ACTUAL' ? '<div title="' + esc(acct.resting_orders_note || '') + '"><dt>Resting orders</dt><dd>' + (fin(acct.resting_orders) ? acct.resting_orders : '—') + '<small>not fills</small></dd></div>' :
         '<div><dt>Reserved</dt><dd>' + esc(money(acct.reserved_usd)) + '<small>part of cash</small></dd></div>') +
-      '<div title="' + esc((ma.method || '') + (ma.oldest_at ? ' · oldest mark ' + ma.oldest_at : '')) + '"><dt>Last mark</dt><dd>' + esc(ma.newest_at ? clock(ts(ma.newest_at), false) : '—') + '<small>' +
+      (acct.book === 'PAPER' ? '<div title="' + esc((acct.no_new_mark_rule || '') + ' · a book re-read at the same price is not a mark update') + '"><dt>Last genuine mark</dt><dd>' +
+        esc(acct.last_genuine_mark_update_at ? clock(ts(acct.last_genuine_mark_update_at), false) : 'none in 6h') + '<small>' +
+        esc(acct.no_new_mark ? 'NO NEW MARK · chart frozen' : 'a mark price moved') + '</small></dd></div>' : '') +
+      '<div title="' + esc((ma.method || '') + (ma.oldest_at ? ' · oldest mark ' + ma.oldest_at : '')) + '"><dt>' + (acct.book === 'PAPER' ? 'Last book read' : 'Last mark') + '</dt><dd>' + esc(ma.newest_at ? clock(ts(ma.newest_at), false) : '—') + '<small>' +
         esc(ma.newest_at ? dayOf(ts(ma.newest_at)) + (ma.oldest_at && ma.oldest_at !== ma.newest_at ? ' · oldest ' + clock(ts(ma.oldest_at), false) : '') : '') +
         ' · ' + esc(acct.book === 'ACTUAL' ? 'venue cashValue at the account read' : 'top-of-book exit price') + '</small></dd></div>' +
       '</dl>';
     var toggles = '<div class="ew-win" role="group" aria-label="Chart window">' + WINDOWS.map(function (w) {
       return '<button type="button" data-ew-win="' + w + '" aria-pressed="' + (w === view.win) + '">' + w.toUpperCase() + '</button>';
     }).join('') + '</div>';
-    return head + banner + big + note + chips +
+    return head + banner + big + note + chips + (acct.book === 'PAPER' ? '<div data-ew="sleeves-in"></div>' : '') +
       '<div class="ew-chart-wrap">' + toggles + '<div class="ew-chart" data-ew="chart"></div></div>' + bars + stats +
       '<div class="ew-foot"><span title="' + esc(acct.source || '') + '">' + esc((acct.source || '').split(' (')[0]) + '</span><span>as of <b data-ew="asof">' + esc(asOf(acct)) + '</b></span></div>';
   }
@@ -429,10 +444,96 @@
   function saveWin(k, w) { try { var o = JSON.parse(localStorage.getItem(STORE_KEY) || '{}'); o[k] = w; localStorage.setItem(STORE_KEY, JSON.stringify(o)); } catch (e) { /* per-viewer convenience only */ } }
 
   var VIEWS = [
-    {key: 'paper', book: 'PAPER', venue: null, title: 'Account equity'},
-    {key: 'polymarket_us', book: 'ACTUAL', venue: 'polymarket_us', title: 'Polymarket US · execution mirror'},
-    {key: 'kalshi', book: 'ACTUAL', venue: 'kalshi', title: 'Kalshi'}
+    {key: 'paper', book: 'PAPER', venue: null, title: 'PAPER TOTAL EQUITY'},
+    {key: 'polymarket_us', book: 'ACTUAL', venue: 'polymarket_us', title: 'Polymarket US · legacy mirror account'},
+    {key: 'kalshi', book: 'ACTUAL', venue: 'kalshi', title: 'Kalshi · legacy mirror lane'}
   ];
+
+  // ── the paper SLEEVES (migration 223): what each economic purpose made ─
+  // A sleeve's equity is its CONTRIBUTION (P&L-only: one shared cash
+  // ledger, no per-sleeve funding) -- said on the card, never hidden.
+  var SLEEVE_ORDER = ['INVESTMENT', 'TRAINING', 'BENCHMARK', 'UNCLASSIFIED'];
+  var SLEEVE_NAME = {INVESTMENT: 'INVESTMENT · PRODUCTION-CANDIDATE', TRAINING: 'TRAINING / EXPLORATION', BENCHMARK: 'BENCHMARK / CONTROL', UNCLASSIFIED: 'UNCLASSIFIED'};
+  var MARK_TEXT = {FRESH: 'MARKS MOVING', NO_NEW_MARK: 'NO NEW MARK', STALE: 'STALE MARKS', UNMARKED: 'UNMARKED', NO_OPEN_POSITIONS: 'NO OPEN POSITION'};
+  function sleeveTile(s, compact) {
+    var mk = s.marks || {}, ex = s.exposure || {};
+    var lastG = ts(mk.last_genuine_mark_update_at);
+    var genuine = lastG ? clock(lastG, true) : (mk.unchanged_since_at_least ? 'none since ' + clock(mk.unchanged_since_at_least, true) : 'none recorded');
+    var realizedTag = s.realized_label ? ' <em class="ew-sl-tag">' + esc(s.realized_label) + '</em>' : '';
+    var tip = s.title + ' · ' + (s.purpose || '') + '\nEquity contribution = realized P&L + unrealized P&L of marked open positions (P&L-only; one shared cash ledger)' +
+      '\nsource: paper_sleeve_classifications (migration 223) + paper ledger + observed books';
+    var head = '<div class="ew-sl-head"><span class="ew-sl-name">' + esc(SLEEVE_NAME[s.sleeve] || s.sleeve) + '</span>' +
+      '<span class="ew-sl-mark m-' + esc(String(mk.state || '').toLowerCase()) + '" title="' + esc(mk.genuine_rule || '') + '">' + esc(MARK_TEXT[mk.state] || mk.state || '—') + '</span></div>';
+    var big = '<div class="ew-sl-eq ' + dir(s.equity_contribution_usd) + '" title="' + esc(tip) + '"><small>' + (s.sleeve === 'TRAINING' ? 'equity contribution · research' : 'equity contribution') + '</small><b>' + esc(signed(s.equity_contribution_usd)) + '</b></div>';
+    var rows = '<dl class="ew-sl-kv">' +
+      '<div><dt>Realized</dt><dd class="' + dir(s.realized_pnl_usd) + '">' + esc(signed(s.realized_pnl_usd)) + realizedTag + '</dd></div>' +
+      '<div title="' + esc(s.unrealized_basis || '') + '"><dt>Unrealized</dt><dd class="' + dir(s.unrealized_pnl_usd) + '">' + esc(signed(s.unrealized_pnl_usd)) + (ex.unmarked_positions ? ' <em class="ew-sl-tag">' + ex.unmarked_positions + ' unmarked</em>' : '') + '</dd></div>' +
+      '<div><dt>Exposure · cost</dt><dd>' + esc(money(ex.cost_basis_usd)) + '</dd></div>' +
+      '<div><dt>Positions</dt><dd>' + esc(String(s.positions_open || 0)) + ' open · ' + esc(String(s.positions_closed || 0)) + ' closed</dd></div>' +
+      '<div title="' + esc('Newest book re-read ' + (mk.newest_observed_at ? clock(mk.newest_observed_at, true) : '—') + (mk.stale_marks ? ' · ' + mk.stale_marks + ' stale' : '')) + '"><dt>Mark freshness</dt><dd>' + esc(mk.newest_age_s != null ? 'read ' + ageText(mk.newest_age_s) + ' ago' : '—') + '</dd></div>' +
+      '<div><dt>Last genuine mark</dt><dd>' + esc(genuine) + '</dd></div>' +
+      '</dl>';
+    return '<div class="ew-sl s-' + esc(s.sleeve.toLowerCase()) + (compact ? ' compact' : '') + '">' + head + big + (compact ? '' : rows) + '</div>';
+  }
+  function sleevesHTML(paper, compact) {
+    var sb = paper && paper.sleeves;
+    if (!sb) { return ''; }
+    if (sb.status !== 'OK') {
+      return '<div class="ew-sleeves"><div class="ew-unavail"><b>SLEEVES UNAVAILABLE</b><p>' + esc(sb.why || 'not read') + '</p><small>The paper total above is unaffected; no sleeve figure is shown without its read.</small></div></div>';
+    }
+    var s = sb.sleeves || {};
+    var shown = SLEEVE_ORDER.filter(function (k) {
+      if (!s[k]) { return false; }
+      if (k === 'INVESTMENT' || k === 'TRAINING') { return true; }
+      return (s[k].positions_open || 0) + (s[k].positions_closed || 0) > 0;
+    });
+    var acc = sb.accounting || {};
+    var un = s.UNCLASSIFIED || {};
+    var unN = (un.positions_open || 0) + (un.positions_closed || 0);
+    var recon = '<p class="ew-acc" title="' + esc(acc.rule || '') + '"><b>' + esc(acc.title || 'COMBINED ACCOUNTING TOTAL') + '</b> ' +
+      esc(money(acc.starting_cash_usd)) + ' start ' + esc(signed(acc.sleeve_contributions_usd).replace(/^([+−])/, '$1 ')) + ' sleeves = <b>' + esc(money(acc.accounted_equity_usd)) + '</b> · ' +
+      (acc.reconciled ? '<span class="ok">reconciles to account equity</span>' : '<span class="bad">DIFFERS from account equity by ' + esc(money(acc.difference_usd)) + '</span>') +
+      ' · ' + esc(unN ? unN + ' UNCLASSIFIED position' + (unN > 1 ? 's' : '') + ' (never counted as investment)' : '0 unclassified') + '</p>';
+    var method = compact ? '' : '<p class="ew-note">Sleeve equity is P&amp;L-only: one $500,000 cash ledger, no per-sleeve funding, so each sleeve shows its contribution (realized + marked unrealized). Training losses are research cost; training wins are not production alpha.</p>';
+    return '<div class="ew-sleeves" aria-label="Paper sleeves">' + '<div class="ew-sl-grid">' + shown.map(function (k) { return sleeveTile(s[k], compact); }).join('') + '</div>' + recon + method + '</div>';
+  }
+
+  // ── SMALL LIVE — BETTOR ORIGINATED: the target system, its own status ─
+  var SL_STATUS_CLS = {ACTIVE: 'ok', DEGRADED: 'warn', STOPPED: 'bad', READY_NOT_ACTIVATED: 'info', SHADOW: 'info', NOT_CONFIGURED: 'muted'};
+  function usdOrWhy(o) {
+    return o && fin(o.usd) ? esc(money(o.usd)) : '<span class="ew-una" title="' + esc((o && o.why) || 'not recorded') + '">UNAVAILABLE</span>';
+  }
+  function smallLiveHTML(sl, compact) {
+    if (!sl) { return '<div class="ew-unavail pending"><b>READING</b><p>Reading the SMALL LIVE — BETTOR ORIGINATED status…</p></div>'; }
+    if (!sl.status) { return '<div class="ew-unavail"><b>UNAVAILABLE</b><p>' + esc(sl.why || 'not read') + '</p></div>'; }
+    var v = sl.venues || {}, o = sl.orders || {}, f = sl.fills || {}, hb = sl.heartbeat || {};
+    var pill = '<span class="ew-sl-status st-' + esc(SL_STATUS_CLS[sl.status] || 'muted') + '" title="' + esc('derived from stored evidence · ' + (sl.source || '')) + '">' + esc(sl.status.replace(/_/g, ' ')) + '</span>';
+    function venue(name, x) {
+      x = x || {};
+      return '<div class="ew-sv"><span>' + esc(name) + '</span><b class="v-' + esc(String(x.state || '').toLowerCase()) + '" title="' + esc(x.why || '') + '">' + esc(String(x.state || 'UNKNOWN').replace(/_/g, ' ')) + '</b></div>';
+    }
+    var grid = '<dl class="ew-sl-kv live">' +
+      '<div><dt>Capital</dt><dd>' + usdOrWhy(sl.capital) + '</dd></div>' +
+      '<div><dt>Equity</dt><dd>' + usdOrWhy(sl.equity) + '</dd></div>' +
+      '<div><dt>Realized</dt><dd>' + usdOrWhy(sl.realized_pnl) + '</dd></div>' +
+      '<div><dt>Unrealized</dt><dd>' + usdOrWhy(sl.unrealized_pnl) + '</dd></div>' +
+      '<div title="' + esc(o.basis || '') + '"><dt>Orders · venue-acked</dt><dd>' + esc(String(fin(o.submitted) ? o.submitted : '—')) + ' · ' + esc(String(fin(o.venue_acknowledged) ? o.venue_acknowledged : '—')) + '</dd></div>' +
+      '<div title="' + esc(f.basis || '') + '"><dt>Fills</dt><dd>' + esc(String(fin(f.count) ? f.count : '—')) + '</dd></div>' +
+      '<div title="' + esc(hb.why || '') + '"><dt>Heartbeat</dt><dd>' + esc(hb.at ? clock(ts(hb.at), true) : String(hb.state || '—').replace(/_/g, ' ')) + '</dd></div>' +
+      '</dl>';
+    return '<div class="ew-small-live">' +
+      '<div class="ew-sl-statusrow">' + pill + '<span class="ew-sl-why">' + esc(sl.why || '') + '</span></div>' +
+      (compact ? '' : grid) +
+      '<div class="ew-sv-row">' + venue('Polymarket US', v.polymarket_us) + venue('Kalshi', v.kalshi) + '</div>' +
+      (compact ? '' : '<p class="ew-note">Counts only orders from BETTOR\'s own chain (' + esc(sl.chain_required || 'Derek → allocation → Eddie → venue order + ack') + '). RN1, mirror and copy orders never count.</p>') +
+      '</div>';
+  }
+  function legacyTitle(live) {
+    var sl = live && live.small_live_bettor;
+    var lm = sl && sl.legacy_mirror;
+    var pm = live && live.actual && live.actual.venues && live.actual.venues.polymarket_us;
+    return (lm && lm.label) || (pm && pm.lane && pm.lane.legacy_label) || 'LEGACY MIRROR VALIDATION';
+  }
 
   function mount(el, opts) {
     if (!el) { throw new Error('BTEquityWall.mount needs an element'); }
@@ -441,14 +542,18 @@
     var views = VIEWS.map(function (v) { return Object.assign({}, v, {win: compact ? '1d' : savedWin(v.key)}); });
     var prev = {}, sig = {}, flashT = {};
     el.classList.add('btew-host');
-    el.innerHTML = '<section class="btew' + (compact ? ' compact' : '') + '" aria-label="Live equity: paper experiment and small live capital, shown separately">' +
+    el.innerHTML = '<section class="btew' + (compact ? ' compact' : '') + '" aria-label="Live equity: paper by sleeve, SMALL LIVE (BETTOR originated) and the legacy mirror, shown separately">' +
       '<div class="btew-grid">' +
-      '<article class="ew-card paper" data-ew-card="paper"><header class="ew-card-head"><div><span class="ew-eyebrow">Fictional money · simulated execution</span>' +
-      '<h2>$500,000 PAPER EXPERIMENT</h2></div><span class="ew-badge paper">PAPER</span></header><div class="ew-body" data-ew-acct="paper"></div></article>' +
-      '<article class="ew-card live" data-ew-card="live"><header class="ew-card-head"><div><span class="ew-eyebrow">Real money · 1:1,000 · each venue on its own</span>' +
-      '<h2>SMALL LIVE CAPITAL</h2></div><span class="ew-badge live">LIVE $</span></header>' +
+      '<article class="ew-card paper" data-ew-card="paper"><header class="ew-card-head"><div><span class="ew-eyebrow">Fictional money · simulated execution · by economic sleeve</span>' +
+      '<h2>$500,000 PAPER EXPERIMENT</h2></div><span class="ew-badge paper">PAPER</span></header><div class="ew-body" data-ew-acct="paper"></div>' +
+      '<div data-ew="sleeves"></div></article>' +
+      '<article class="ew-card live" data-ew-card="live"><header class="ew-card-head"><div><span class="ew-eyebrow">Real money · the target system · BETTOR\'s own decision chain</span>' +
+      '<h2>SMALL LIVE — BETTOR ORIGINATED</h2></div><span class="ew-badge live">LIVE $</span></header>' +
+      '<div data-ew="small-live"></div>' +
+      '<section class="ew-legacy" aria-label="Legacy mirror validation"><div class="ew-legacy-head"><span class="ew-eyebrow">Real money · 1:1,000 copies of paper orders · not the target system</span>' +
+      '<h3 data-ew="legacy-title">LEGACY MIRROR VALIDATION</h3></div>' +
       '<p class="ew-sep-note">Venues are separate sub-accounts and are never added together. Paper is never added to live.</p>' +
-      '<div class="ew-venue" data-ew-acct="polymarket_us"></div><div class="ew-venue" data-ew-acct="kalshi"></div></article>' +
+      '<div class="ew-venue" data-ew-acct="polymarket_us"></div><div class="ew-venue" data-ew-acct="kalshi"></div></section></article>' +
       '</div><div class="btew-feed" data-ew="feed" role="status" aria-live="polite"></div></section>';
     var root = el.firstChild;
 
@@ -485,6 +590,8 @@
           if (box) { box.innerHTML = '<div class="ew-unavail pending" role="status"><b>' + (st.status === 'SIGNED_OUT' ? 'SIGN IN' : st.status === 'ERROR' ? 'UNAVAILABLE' : 'READING') + '</b><p>' + msg + '</p></div>'; }
           sig[v.key] = null;
         });
+        ['sleeves', 'small-live'].forEach(function (k) { var b = root.querySelector('[data-ew="' + k + '"]'); if (b) { b.innerHTML = ''; } });
+        sig.__sleeves = sig.__small = null;
         feed.innerHTML = '';
         return;
       }
@@ -496,7 +603,7 @@
         var s = JSON.stringify([a && a.status, a && a.why, a && a.equity_usd, a && a.day_change, a && a.realized_pnl_usd,
           a && a.unrealized_pnl_usd, a && a.session_change, a && a.open_positions && [a.open_positions.count, a.open_positions.unmarked, a.open_positions.stale_marks],
           a && a.cash_usd, a && a.available_usd, a && a.exposure, a && a.source_at, a && a.marks_as_of && a.marks_as_of.newest_at,
-          a && a.lane && a.lane.state, v.win, curve && curve.at, curve && curve.err]);
+          a && a.lane && a.lane.state, a && a.no_new_mark, a && a.last_genuine_mark_update_at, v.win, curve && curve.at, curve && curve.err]);
         if (sig[v.key] !== s || structural) {
           var oldEq = prev[v.key];
           box.className = box.className.replace(/\bs-(ok|stale|unavailable)\b/g, '').trim() + ' s-' + (a ? a.status : 'UNAVAILABLE').toLowerCase();
@@ -526,6 +633,19 @@
           sig[v.key] = s;
         }
       });
+      // the paper sleeves, SMALL LIVE — BETTOR ORIGINATED and the legacy
+      // mirror's title: redrawn only when their own content changes
+      var paper = st.live && st.live.paper;
+      var sleeveBox = root.querySelector('[data-ew="sleeves-in"]') || root.querySelector('[data-ew="sleeves"]');
+      if (sleeveBox && !sleeveBox.firstChild) { sig.__sleeves = null; }
+      var ss = JSON.stringify(paper && paper.sleeves && [paper.sleeves.status, paper.sleeves.why, paper.sleeves.sleeves, paper.sleeves.accounting]);
+      if (sleeveBox && (sig.__sleeves !== ss || structural)) { sleeveBox.innerHTML = sleevesHTML(paper, compact); sig.__sleeves = ss; }
+      var slBox = root.querySelector('[data-ew="small-live"]');
+      var slv = st.live && st.live.small_live_bettor;
+      var sls = JSON.stringify(slv ? [slv.status, slv.why, slv.capital, slv.equity, slv.orders, slv.fills, slv.heartbeat, slv.venues] : null);
+      if (slBox && (sig.__small !== sls || structural)) { slBox.innerHTML = smallLiveHTML(slv, compact); sig.__small = sls; }
+      var lt = root.querySelector('[data-ew="legacy-title"]');
+      if (lt) { lt.textContent = legacyTitle(st.live); }
       root.classList.toggle('feed-down', st.status === 'ERROR');
       feed.innerHTML = st.status === 'ERROR' ? '<b>FEED INTERRUPTED</b> · showing the last good read from ' + esc(ageText((Date.now() - st.okAt) / 1000)) + ' ago · ' + esc(st.error || '') : '';
       ages();
@@ -570,7 +690,7 @@
     ctx.fillStyle = accent; ctx.fillRect(0, 0, W, Math.max(4, H * 0.012));
     var u = H / 100;
     ctx.fillStyle = '#9fb0c6'; ctx.font = '600 ' + (4.2 * u) + 'px Inter,system-ui,sans-serif';
-    ctx.fillText(isPaper ? '$500,000 PAPER EXPERIMENT · SIMULATED' : 'SMALL LIVE CAPITAL · ' + (key === 'kalshi' ? 'KALSHI' : 'POLYMARKET US') + ' · REAL MONEY', 4 * u, 10 * u);
+    ctx.fillText(isPaper ? '$500,000 PAPER EXPERIMENT · SIMULATED' : 'LEGACY MIRROR · ' + (key === 'kalshi' ? 'KALSHI' : 'POLYMARKET US') + ' · ' + (legacyTitle(S.live).split(' — ')[1] || 'STATE UNKNOWN') + ' · REAL MONEY', 4 * u, 10 * u);
     var st = !accts ? (S.status === 'SIGNED_OUT' ? 'SIGN IN' : S.status === 'ERROR' ? 'UNAVAILABLE' : 'READING') : a ? a.status : 'UNAVAILABLE';
     var stColor = st === 'OK' ? '#50d8ac' : st === 'STALE' ? '#e9be74' : '#ff8395';
     ctx.fillStyle = stColor; ctx.font = '700 ' + (4 * u) + 'px ui-monospace,monospace';

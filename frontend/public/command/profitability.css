@@ -256,3 +256,26 @@
 .pc-p5.ok { border-color: #1d4437; background: var(--pc-good-bg); }
 .pc-p5 b { letter-spacing: .05em; }
 .pc-p5 .pc-note { margin: 6px 0 0; }
+
+/* ── the paper SLEEVE selector + sleeve economics (migration 223) ───── */
+.pc-sleevebar { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 0 0 12px; }
+.pc-sleeve-lbl { font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase; color: var(--dk-ink-3); margin-right: 4px; }
+.pc-sleeve-btn { font-family: inherit; font-size: 12px; font-weight: 600; line-height: 1; color: var(--dk-ink-2); background: #121a25; border: 1px solid var(--dk-line); border-radius: 999px; padding: 8px 12px; cursor: pointer; min-height: 34px; }
+.pc-sleeve-btn:hover { border-color: #3a4a60; color: var(--dk-ink); }
+.pc-sleeve-btn:focus-visible { outline: 2px solid #8fc4ff; outline-offset: 2px; }
+.pc-sleeve-btn[aria-pressed="true"] { color: #fff; background: #17375e; border-color: #3987e5; }
+.pc-sleeve-btn.s-training[aria-pressed="true"] { background: #2a2347; border-color: #8a75e0; }
+.pc-sleeve-btn.s-unclassified[aria-pressed="true"] { background: var(--pc-warn-bg); border-color: #8a6a2a; }
+.pc-sleeves { width: 100%; border-collapse: collapse; font-size: 12.5px; min-width: 720px; }
+.pc-sleeves th { text-align: left; font-weight: 500; font-size: 10.5px; letter-spacing: .06em; text-transform: uppercase; color: var(--dk-ink-3); padding: 6px 8px; border-bottom: 1px solid var(--dk-line); white-space: nowrap; }
+.pc-sleeves td { padding: 8px; border-bottom: 1px solid var(--dk-line-soft); vertical-align: middle; }
+.pc-sleeves td.num { font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
+.pc-sleeves td.pos { color: var(--dk-good); }
+.pc-sleeves td.neg { color: var(--dk-bad); }
+.pc-sleeves tr:not(.sel) td { color: var(--dk-ink-3); }
+.pc-sleeves tr.sel td:first-child { box-shadow: inset 3px 0 0 #3987e5; }
+.pc-sleeves tr.sel.s-training td:first-child { box-shadow: inset 3px 0 0 #8a75e0; }
+.pc-slname { font-weight: 600; }
+.pc-slsub { display: block; font-size: 11px; color: var(--dk-ink-3); }
+.pc-sltag { display: inline-block; margin-left: 6px; font-size: 9.5px; letter-spacing: .05em; text-transform: uppercase; padding: 1px 5px; border-radius: 3px; color: #d9c8ff; background: #2a2347; border: 1px solid #463b78; white-space: nowrap; }
+.pc-acc b { letter-spacing: .04em; }

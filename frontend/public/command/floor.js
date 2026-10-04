@@ -151,7 +151,7 @@ function healthHtml() {
 }
 function equityPlaceholder() {
   return '<header><span class="ws-eyebrow">Central wall · equity</span><span class="ws-tag">' + (state.equity === 'loading' ? 'LOADING' : 'INTEGRATING') + '</span></header>' +
-    '<div class="ws-eq-ph"><div><b>$500,000 PAPER EXPERIMENT</b><span>Equity ticker slot</span></div><div><b>SMALL LIVE CAPITAL</b><span>Polymarket US · Kalshi — each venue on its own</span></div></div>' +
+    '<div class="ws-eq-ph"><div><b>$500,000 PAPER EXPERIMENT</b><span>Equity ticker slot</span></div><div><b>SMALL LIVE — BETTOR ORIGINATED</b><span>its own status · the legacy mirror (Polymarket US · Kalshi) below, each venue on its own</span></div></div>' +
     '<p class="ws-empty">' + (state.equity === 'loading' ? 'Loading the equity wall component…' : 'The live equity wall component is being integrated on this floor. No figure is shown until it is: this slot never displays a number of its own.') + '</p>';
 }
 function drawWall() {

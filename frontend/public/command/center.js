@@ -783,9 +783,9 @@
           + (state.view === t[0] ? ' cc-on' : '') + '">' + t[1]
           + '</button>';
       }).join('')
-      /* Small Live · Paper vs Actual is its own static page (live.html),
+      /* Legacy Mirror Validation · Paper vs Actual is its own static page (live.html),
        * not a view of this evidence read, so it is a plain link. */
-      + '<a class="cc-tab" href="live.html">Small live</a>'
+      + '<a class="cc-tab" href="live.html">Legacy mirror</a>'
       + '</nav></header>';
   }
 

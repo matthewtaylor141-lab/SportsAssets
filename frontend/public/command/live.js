@@ -1,4 +1,6 @@
-/* BETTOR EV ENGINE · SMALL LIVE — PAPER vs ACTUAL, rendered.
+/* BETTOR EV ENGINE · LEGACY MIRROR VALIDATION — PAPER vs ACTUAL, rendered.
+ * (The old 1:1,000 execution mirror: live orders COPIED from paper orders.
+ * It is NOT the target SMALL LIVE — BETTOR ORIGINATED system.)
  *
  * ONE SOURCE: an authenticated same-origin GET of /api/command/small-live
  * (execmirror_view.small_live). The path passes BTCore.endpoint(); the only
@@ -629,7 +631,7 @@
 
   function fail(msg) {
     var el = document.getElementById('livestate');
-    el.innerHTML = '<div class="verdict"><b>The small-live view could not be read</b>' +
+    el.innerHTML = '<div class="verdict"><b>The legacy mirror view could not be read</b>' +
       esc(msg) + '<br>An unread view shows no numbers rather than zeros.</div>';
     document.getElementById('liverows').innerHTML = '';
   }
