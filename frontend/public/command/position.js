@@ -15,9 +15,14 @@
  * as STALE with its age. The only arithmetic is presentation (a countdown
  * from a real timestamp, the scale of a price track). PAPER and ACTUAL are
  * never shown summed, and ACTUAL venues are separate sections. A RESTING
- * order is drawn hollow and labelled -- it is not a fill, and resting
- * protection is not protection until it fills. The live pulse appears only
- * when the server says the game state is genuinely live and fresh.
+ * order is drawn hollow and labelled -- it is not a fill, and a resting
+ * order is NOT protection until it fills. ONLY FILLED QUANTITY IS
+ * PROTECTION: the protection strip shows position qty, unprotected qty,
+ * standing order qty, filled protection qty, the CONDITIONAL floor (IF
+ * FILLED -- never the realized floor), the realized floor, the current
+ * executable exit and the current worst-case exposure, every one the
+ * server's (order_state_truth.protection_summary). The live pulse appears
+ * only when the server says the game state is genuinely live and fresh.
  */
 (function () {
   'use strict';
@@ -66,6 +71,10 @@
     var c = Math.round(n * 1000) / 10;
     return (c % 1 === 0 ? c.toFixed(0) : c.toFixed(1)) + '¢';
   }
+  function dollars(v) {
+    var n = num(v);
+    return n === null ? '—' : (n < 0 ? '−$' : '$') + Math.abs(n).toFixed(2);
+  }
   function qty(v) {
     var n = num(v);
     return n === null ? na() : '<span class="money">' + n.toLocaleString('en-US', {maximumFractionDigits: 2}) + '</span>';
@@ -98,6 +107,10 @@
   function human(code) {
     return String(code || '').replace(/_/g, ' ').toLowerCase();
   }
+  // an order's ROLE is its purpose, never its effect: a protective order is
+  // protection only for what it has FILLED
+  var ROLE = {STANDING_PROTECTION: 'protective sale order', HEDGE: 'hedge order'};
+  function roleLabel(r) { return ROLE[r] || human(r); }
   function prov(src, at) {
     return esc((src || 'source not stated') + (at ? ' · ' + when(at) : ''));
   }
@@ -115,20 +128,23 @@
   var STATE = {
     PROPOSED: {t: 'PROPOSED', d: 'decided, not at the venue'},
     SUBMITTED: {t: 'SUBMITTED', d: 'sent, not yet acknowledged'},
-    UNKNOWN: {t: 'UNKNOWN', d: 'submission outcome unknown'},
-    RESTING: {t: 'RESTING', d: 'on the book, nothing filled'},
-    PARTIAL: {t: 'PARTIAL', d: 'part filled, remainder rests'},
+    UNKNOWN: {t: 'UNKNOWN', d: 'state unknown: never treated as filled'},
+    RESTING: {t: 'RESTING', d: 'on the book, nothing filled: NOT protection until it fills'},
+    PARTIAL: {t: 'PARTIAL', d: 'part filled: only the filled part counts, the remainder rests'},
     FILLED: {t: 'FILLED', d: 'completely filled'},
-    CANCEL_PENDING: {t: 'CANCEL PENDING', d: 'can still fill until confirmed'},
+    CANCEL_PENDING: {t: 'CANCEL PENDING', d: 'cancel requested, not confirmed: it MAY STILL FILL; its unfilled remainder is NOT protection, only a part already filled counts'},
     CANCELLED: {t: 'CANCELLED', d: 'unfilled remainder gone'},
     EXPIRED: {t: 'EXPIRED', d: 'expired'},
     REJECTED: {t: 'REJECTED', d: 'refused'},
     EXCLUDED: {t: 'EXCLUDED', d: 'never sent'}
   };
-  function stateBadge(st, raw) {
+  // the owner's NINE canonical states + the explicit UNKNOWN (order_state_truth)
+  var CANON = ['PROPOSED', 'SUBMITTED', 'RESTING', 'PARTIAL', 'FILLED', 'CANCEL_PENDING', 'CANCELLED', 'REJECTED', 'EXPIRED', 'UNKNOWN'];
+  var STANDING = ['RESTING', 'PARTIAL', 'CANCEL_PENDING'];
+  function stateBadge(st, raw, sub) {
     var k = STATE[st] ? st : 'UNKNOWN';
-    return '<span class="pr-st st-' + k + '" title="' + esc((STATE[k] || {}).d + (raw ? ' · recorded state ' + raw : '')) + '">' +
-      '<i class="pr-glyph" aria-hidden="true"></i>' + esc((STATE[st] || {t: st}).t) + '</span>';
+    return '<span class="pr-st st-' + k + '" title="' + esc((STATE[k] || {}).d + (sub ? ' · ' + human(sub) : '') + (raw ? ' · recorded state ' + raw : '')) + '">' +
+      '<i class="pr-glyph" aria-hidden="true"></i>' + esc((STATE[k] || {t: st}).t) + '</span>';
   }
 
   // ── transport ──────────────────────────────────────────────────────
@@ -255,8 +271,10 @@
     var venues = d.venues || {};
     Object.keys(venues).forEach(function (vn) {
       var v = venues[vn];
-      html += '<section class="pr-venue"><header class="pr-venue-head"><h2>' + esc(d.book === 'PAPER' ? 'Paper book' : 'Actual · ' + vn) +
+      var cn = v.connection || null;
+      html += '<section class="pr-venue"><header class="pr-venue-head"><h2>' + esc(d.book === 'PAPER' ? 'Paper book' : 'Actual · ' + (cn ? cn.label : vn)) +
         '</h2>' + chip(esc(v.money_label || ''), d.book === 'PAPER' ? 'blue' : 'green') +
+        (cn ? chip(esc(cn.display), cn.connected ? 'green' : 'amber', (cn.why ? cn.why + ' · ' : '') + (cn.source || '')) : '') +
         '<span class="muted pr-count">' + esc(v.count || 0) + ' active room' + ((v.count || 0) === 1 ? '' : 's') + '</span></header>';
       if (!v.available) {
         html += '<div class="pr-empty">' + na(v.why) + ' <span class="muted">' + esc(human(v.why)) + '</span></div>';
@@ -289,6 +307,7 @@
         '<div><span class="label">Unrealized</span>' + sUsd(r.unrealized_pnl_usd, r.unrealized_reason) + '</div>' +
         '<div><span class="label">Capital at risk</span>' + usd(r.capital_at_risk_usd, r.net_exposure_reason) + '</div>' +
       '</div>' +
+      cardProtection(r.protection) +
       '<div class="pr-card-orders">' + (st || '<span class="muted">no live order</span>') + '</div>' +
       '<div class="pr-card-foot">' +
         (x ? '<span class="pr-x"><b>Xavier</b> ' + esc(x.recommendation || 'none recorded') + ' · ' + esc(human(x.evidence_state)) +
@@ -298,6 +317,14 @@
               : ((r.freshness || {}).stale_marks || []).length ? 'STALE' : 'FRESH',
               (r.freshness || {}).youngest_book_age_s, 'youngest observed book') +
       '</div></a>';
+  }
+  function cardProtection(p) {
+    if (!p) { return ''; }
+    return '<div class="pr-card-prot" title="' + esc(p.rule || '') + '">' +
+      '<span><span class="label">Unprotected</span><b class="money">' + esc(qtyTxt(p.unprotected_qty)) + '</b><small class="muted">of ' + esc(qtyTxt(p.position_qty)) + '</small></span>' +
+      '<span><span class="label">Filled protection</span><b class="money">' + esc(qtyTxt(p.filled_protection_qty)) + '</b></span>' +
+      '<span class="pr-card-standing"><span class="label">Standing orders</span><b class="money">' + esc(qtyTxt(p.standing_order_qty)) + '</b><small>NOT protection until filled</small></span>' +
+      '</div>';
   }
   function outcomeName(r, o) {
     return (r.outcome_labels || {})[o] || human(o);
@@ -309,7 +336,7 @@
   function renderRoom(r) {
     var labels = r.outcome_labels || {};
     var olab = function (o) { return labels[o] || human(o); };
-    return header(r) + scoreboard(r.game_state || {}, r) + economic(r, olab) +
+    return header(r) + scoreboard(r.game_state || {}, r) + protectionStrip(r, olab) + economic(r, olab) +
       '<div class="pr-grid">' +
         '<div class="pr-col-main">' + ladder(r, olab) + scenarios(r, olab) + '</div>' +
         '<aside class="pr-col-side">' + xavierPanels(r, olab) + eddie(r.eddie || {}) + audreyKaren(r) + '</aside>' +
@@ -326,6 +353,7 @@
         chip(esc((r.economic || {}).money_label || ''), '') +
         (grouped ? chip('ONE CORRELATED POSITION', 'blue', 'venue event ' + ((r.identity || {}).event_slug || '') + ' · ' + ((r.identity || {}).settlement_class || ''))
                  : chip('UNGROUPED · ' + esc(human(r.ungrouped_reason)), 'amber', r.ungrouped_reason)) +
+        (r.connection ? chip(esc(r.connection.display), r.connection.connected ? 'green' : 'amber', r.connection.source || '') : '') +
         '<code class="pr-key" title="room key">' + esc(r.group_key) + '</code>' +
       '</div></div></section>';
   }
@@ -361,6 +389,40 @@
       '</div></section>';
   }
 
+  // ── THE PROTECTION STRIP: only FILLED quantity is protection ───────
+  function protectionStrip(r, olab) {
+    var p = r.protection;
+    if (!p) { return ''; }
+    var ex = p.current_executable_exit || {};
+    var wc = p.current_worst_case || {};
+    var k = function (cls, lbl, val, sub, title) {
+      return '<div class="pr-pk ' + cls + '" title="' + esc(title || '') + '"><span class="label">' + lbl + '</span><div class="pr-pk-v">' + val + '</div>' +
+        (sub ? '<small>' + sub + '</small>' : '') + '</div>';
+    };
+    var condWhy = p.conditional_floor_reason ? human(p.conditional_floor_reason) : '';
+    var orders = (p.orders || []).filter(function (o) { return o.standing_qty > 0 || o.pending_qty > 0 || o.filled_qty > 0; });
+    var lines = orders.map(function (o) {
+      return '<li>' + stateBadge(o.state, null, o.sub_state) + '<code class="pr-pline">' + esc(o.line) + '</code><span class="muted">' + esc(roleLabel(o.role)) + '</span></li>';
+    }).join('');
+    return '<section class="pr-protect" aria-label="Protection">' +
+      '<header class="pr-ph"><h2>Protection</h2><span class="muted">only FILLED quantity is protection · a resting order is not protection until it fills</span></header>' +
+      '<p class="pr-pline-main" title="' + esc(p.rule || '') + '"><code>' + esc(p.line || '') + '</code></p>' +
+      '<div class="pr-pgrid">' +
+        k('', 'Position qty', '<b class="money">' + esc(qtyTxt(p.position_qty)) + '</b>', 'held now + sold by filled protection', p.position_basis) +
+        k('is-bad', 'Unprotected qty', '<b class="money">' + esc(qtyTxt(p.unprotected_qty)) + '</b>', 'position − filled protection', p.position_basis) +
+        k('is-standing', 'Standing order qty', '<b class="money">' + esc(qtyTxt(p.standing_order_qty)) + '</b>', 'RESTING / PARTIAL / CANCEL PENDING remainder · NOT protection' + (num(p.pending_order_qty) ? ' · +' + esc(qtyTxt(p.pending_order_qty)) + ' not yet on the book' : ''), p.rule) +
+        k('is-good', 'Filled protection qty', '<b class="money">' + esc(qtyTxt(p.filled_protection_qty)) + '</b>', 'filled protective sales + filled hedges', p.rule) +
+        k('is-cond', 'Conditional floor · IF FILLED', usd(p.conditional_floor_if_filled_usd, condWhy || 'nothing standing'),
+          num(p.conditional_floor_if_filled_usd) === null ? esc(condWhy || 'nothing standing') : 'CONDITIONAL · nothing of it is realized', p.conditional_floor_basis) +
+        k('', 'Realized floor', sUsd(p.realized_floor_usd, r.economic && r.economic.net_exposure_reason), 'filled holdings only · realized protection ' + (num(p.realized_protection_usd) !== null ? dollars(p.realized_protection_usd) : '—'), p.realized_floor_basis) +
+        k('', 'Executable exit now', usd(ex.proceeds_at_top_level_usd, ex.reason),
+          ex.available ? (ex.covers_whole_position ? 'top of book covers it' : '<span class="amber">top level does not cover it all</span>') + (ex.stale ? ' · <span class="amber">STALE book</span>' : '') : esc(human(ex.reason)), ex.basis) +
+        k('is-bad', 'Worst-case exposure now', usd(p.current_worst_case_exposure_usd, r.economic && r.economic.net_exposure_reason),
+          wc.worst_outcome ? 'if ' + esc(olab(wc.worst_outcome.outcome)) : '', wc.basis) +
+      '</div>' +
+      (lines ? '<ul class="pr-plines">' + lines + '</ul>' : '') + '</section>';
+  }
+
   // ── THE ECONOMIC STRIP ─────────────────────────────────────────────
   function economic(r, olab) {
     var e = r.economic || {};
@@ -389,7 +451,7 @@
       k('Unrealized P&L', sUsd(e.unrealized_pnl_usd, e.unrealized_reason), e.stale_marks && e.stale_marks.length ? '<span class="amber">STALE mark</span>' : 'open × mark − basis', 'gross of exit fees') +
       k('Realized P&L', sUsd(e.realized_pnl_usd), 'fees ' + (num(e.fees_usd) !== null ? '$' + e.fees_usd.toFixed(2) : '—') + (e.fees_known === false ? ' (incomplete)' : ''), 'sales and settlements, average cost incl. fees') +
       k('Capital at risk', usd(e.capital_at_risk_usd, e.net_exposure_reason), 'largest loss from here', e.capital_at_risk_basis) +
-      k('Locked P&L', sUsd(e.locked_pnl_usd, e.net_exposure_reason), 'every outcome pays at least', 'min over played outcomes of total P&L') +
+      k('Locked P&L', sUsd(e.locked_pnl_usd, e.net_exposure_reason), 'filled holdings only', 'min over played outcomes of total P&L of the FILLED holdings; standing orders excluded') +
       k('Expected P&L', sUsd(e.expected_pnl_usd, e.expected_reason), e.expected_pnl_usd === null || e.expected_pnl_usd === undefined ? esc(human(e.expected_reason)) : (((r.scenarios || {}).probabilities || {}).stale ? '<span class="amber">on a STALE recorded probability</span>' : 'on Xavier’s recorded probability'), ((r.scenarios || {}).probabilities || {}).source || e.expected_reason) +
       lean + '</section>';
   }
@@ -406,7 +468,7 @@
     (r.legs || []).forEach(function (lg) { slot(lg.instrument.slug, lg.holding_side, lg.instrument.label).legs.push(lg); });
     (r.orders || []).forEach(function (o) { slot(o.instrument.slug, o.holding_side, o.instrument.label).orders.push(o); });
     var html = '<section class="pr-panel"><header class="pr-ph"><h2>Legs &amp; orders</h2><span class="muted">entry → holding → correlated legs → proposed / standing / partial / filled</span></header>' +
-      '<div class="pr-legend">' + ['PROPOSED', 'RESTING', 'PARTIAL', 'FILLED', 'CANCEL_PENDING', 'CANCELLED'].map(function (s) { return stateBadge(s); }).join('') + '</div>';
+      '<div class="pr-legend">' + CANON.map(function (s) { return stateBadge(s); }).join('') + '</div>';
     order.forEach(function (k) { html += instrument(byInst[k], r, olab); });
     return html + '</section>';
   }
@@ -484,10 +546,10 @@
     var q = num(o.qty) || 0, f = num(o.filled_qty) || 0;
     var p = q > 0 ? Math.min(100, f / q * 100) : 0;
     var dist = o.distance || null;
-    var standing = ['RESTING', 'PARTIAL', 'CANCEL_PENDING'].indexOf(o.state) >= 0;
-    var head = '<div class="pr-ord-line">' + stateBadge(o.state, o.raw_state) +
+    var standing = STANDING.indexOf(o.state) >= 0;
+    var head = '<div class="pr-ord-line">' + stateBadge(o.state, o.raw_state, o.sub_state) +
       '<b class="pr-ord-what">' + esc((o.role === 'STANDING_PROTECTION' ? 'STANDING ' : '') + o.direction) + ' ' + centsTxt(o.limit) + '</b>' +
-      '<span class="muted">' + esc(human(o.role)) + '</span>' +
+      '<span class="muted">' + esc(roleLabel(o.role)) + '</span>' +
       (o.note ? '<span class="pr-note">' + esc(o.note) + '</span>' : '') + '</div>';
     // the canonical strip: STANDING SELL 70¢ · BID · ASK · DISTANCE · STATUS · FILLED x / N
     var strip = '<div class="pr-canon">' +
@@ -495,8 +557,9 @@
       '<span><span class="label">Ask</span>' + cents((o.current || {}).ask, (o.current || {}).reason) + '</span>' +
       '<span><span class="label">Distance</span>' + (dist ? (num(dist.distance) !== null ? '<b class="money">' + centsTxt(Math.abs(dist.distance)) + '</b><small class="muted">' + esc(dist.needs === 'AT_OR_THROUGH_NOW' ? 'at or through now' : dist.needs) + '</small>' : na(dist.reason)) : '<span class="muted">—</span>') + '</span>' +
       '<span><span class="label">Status</span>' + esc((STATE[o.state] || {t: o.state}).t) + '</span>' +
-      '<span class="pr-fillcell"><span class="label">Filled</span><b class="money">' + esc(qtyTxt(f)) + ' / ' + esc(qtyTxt(q)) + '</b>' +
+      '<span class="pr-fillcell"><span class="label">' + (o.protective ? 'Filled · protection' : 'Filled') + '</span><b class="money">' + esc(qtyTxt(f)) + ' / ' + esc(qtyTxt(q)) + '</b>' +
         '<span class="pr-prog st-' + esc(o.state) + '"><i style="width:' + p.toFixed(1) + '%"></i></span></span>' +
+      (standing ? '<span class="pr-standcell"><span class="label">' + (o.protective ? 'Standing · NOT protection' : 'Standing') + '</span><b class="money">' + esc(qtyTxt(o.standing_qty !== undefined ? o.standing_qty : o.remaining_qty)) + '</b></span>' : '') +
       (num(o.avg_fill_price) !== null ? '<span><span class="label">Avg fill</span>' + cents(o.avg_fill_price) + '</span>' : '') +
       (num(o.fees_usd) !== null ? '<span><span class="label">Fees</span>' + usd(o.fees_usd) + '</span>' : '') +
       (num(o.pnl_usd) !== null ? '<span title="' + esc(o.pnl_basis || '') + '"><span class="label">P&amp;L</span>' + sUsd(o.pnl_usd) + '</span>' : '') +
@@ -516,7 +579,7 @@
     var rows = (f.scenario_after || []).map(function (s) {
       return '<span class="pr-iff-o"><span class="muted">' + esc(olab(s.outcome)) + '</span> ' + sUsd(s.pnl_total_usd) + '</span>';
     }).join('');
-    return '<div class="pr-iff"><header><span class="label">If this ' + (o.state === 'PROPOSED' ? 'is placed and ' : '') + 'fills · ' + esc(qtyTxt(f.remaining_qty)) + ' @ ' + centsTxt(f.at_price) + '</span>' +
+    return '<div class="pr-iff"><header><span class="label">IF FILLED · conditional · ' + (o.state === 'PROPOSED' ? 'if placed and filled · ' : '') + esc(qtyTxt(f.remaining_qty)) + ' @ ' + centsTxt(f.at_price) + '</span>' +
       '<small class="muted" title="' + esc(f.fees) + '">gross of the hypothetical fill’s fees</small></header>' +
       '<div class="pr-iff-grid">' +
         '<div><span class="label">Realized on the fill</span>' + sUsd(f.realized_on_fill_usd) + '</div>' +
@@ -534,8 +597,8 @@
     if (!sc.available) {
       return '<section class="pr-panel"><header class="pr-ph"><h2>Settlement scenarios</h2></header>' + na(sc.reason) + ' <span class="muted">' + esc(human(sc.reason)) + '</span></section>';
     }
-    var cols = [['Filled holdings now', sc.current], ['+ every standing order filled', sc.with_standing_filled]];
-    if (sc.with_standing_and_proposed_filled) { cols.push(['+ proposed too', sc.with_standing_and_proposed_filled]); }
+    var cols = [['Filled holdings now · realized basis', sc.current], ['IF FILLED · every standing order (conditional)', sc.with_standing_filled]];
+    if (sc.with_standing_and_proposed_filled) { cols.push(['IF FILLED · + proposed (conditional)', sc.with_standing_and_proposed_filled]); }
     var outs = (sc.current.rows || []).map(function (x) { return x.outcome; });
     var max = 1;
     cols.forEach(function (c) { (c[1].rows || []).forEach(function (x) { max = Math.max(max, Math.abs(x.pnl_total_usd || 0)); }); });
@@ -549,8 +612,8 @@
           '<small class="muted">payout ' + usd(x.payout_usd) + '</small></div></td>';
       }).join('') + '</tr>';
     }).join('');
-    var foot = '<tr class="pr-sc-foot"><th scope="row">Locked · at risk</th>' + cols.map(function (c) {
-      return '<td>' + sUsd(c[1].locked_pnl_usd) + ' · ' + usd(c[1].capital_at_risk_usd) + '</td>';
+    var foot = '<tr class="pr-sc-foot"><th scope="row">Floor · at risk</th>' + cols.map(function (c, i) {
+      return '<td>' + sUsd(c[1].locked_pnl_usd) + ' · ' + usd(c[1].capital_at_risk_usd) + (i > 0 ? ' <small class="pr-if">IF FILLED</small>' : ' <small class="muted">realized</small>') + '</td>';
     }).join('') + '</tr>';
     return '<section class="pr-panel"><header class="pr-ph"><h2>Settlement scenarios</h2><span class="muted">total P&amp;L per outcome, from the recorded quantities and prices</span></header>' +
       '<div class="pr-sc-wrap"><table class="pr-sc">' + head + body + foot + '</table></div>' +
@@ -628,9 +691,13 @@
   }
   function protection(p) {
     if (!p) { return ''; }
-    return '<div class="pr-sub pr-prot"><span class="label">Protection</span><div class="pr-prot-row">' +
+    var standing = p.standing_order_qty !== undefined ? p.standing_order_qty : p.unfilled_resting_protection_qty;
+    return '<div class="pr-sub pr-prot"><span class="label">Protection · this group</span><div class="pr-prot-row">' +
       '<span class="pr-prot-f"><b class="money">' + esc(qtyTxt(p.filled_protection_qty)) + '</b><small>FILLED protection</small></span>' +
-      '<span class="pr-prot-u"><b class="money">' + esc(qtyTxt(p.unfilled_resting_protection_qty)) + '</b><small>UNFILLED · resting, not protection until filled</small></span></div></div>';
+      '<span class="pr-prot-u"><b class="money">' + esc(qtyTxt(standing)) + '</b><small>UNFILLED · resting, not protection until filled</small></span>' +
+      (p.unprotected_qty !== undefined ? '<span class="pr-prot-x"><b class="money">' + esc(qtyTxt(p.unprotected_qty)) + '</b><small>UNPROTECTED of ' + esc(qtyTxt(p.position_qty)) + '</small></span>' : '') +
+      (p.conditional_floor_label ? '<span class="pr-prot-c"><b>' + (num(p.conditional_floor_if_filled_usd) !== null ? usd(p.conditional_floor_if_filled_usd) : '—') + '</b><small>CONDITIONAL FLOOR · IF FILLED</small></span>' : '') +
+      '</div>' + (p.line ? '<code class="pr-pline">' + esc(p.line) + '</code>' : '') + '</div>';
   }
 
   function eddie(e) {
