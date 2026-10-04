@@ -55,6 +55,7 @@ import time
 
 from . import bettor_book_snapshot as BS
 from . import bettor_venue_native_identity as VNI
+from . import order_state_truth as OST
 
 VERSION = "POSITION_ROOMS_V1"
 
@@ -89,49 +90,33 @@ MAX_GROUPS = 400
 MAX_ORDERS = 4000
 STATEMENT_TIMEOUT_MS = 8000
 
-# ── CANONICAL ORDER STATES, mapped faithfully from each state machine ────
-S_PROPOSED, S_SUBMITTED, S_UNKNOWN = "PROPOSED", "SUBMITTED", "UNKNOWN"
-S_RESTING, S_PARTIAL, S_FILLED = "RESTING", "PARTIAL", "FILLED"
-S_CANCEL_PENDING, S_CANCELLED = "CANCEL_PENDING", "CANCELLED"
-S_EXPIRED, S_REJECTED, S_EXCLUDED = "EXPIRED", "REJECTED", "EXCLUDED"
-LIVE_STATES = (S_PROPOSED, S_SUBMITTED, S_UNKNOWN, S_RESTING, S_PARTIAL,
-               S_CANCEL_PENDING)
-#: An order that can still fill without a new decision (CANCEL_PENDING can:
-#: both state machines allow CANCEL_REQUESTED -> FILLED).
-STANDING_STATES = (S_RESTING, S_PARTIAL, S_CANCEL_PENDING)
+# ── CANONICAL ORDER STATES: the ONE shared mapping (order_state_truth) ──
+# Every raw paper / mirror / Kalshi state is mapped by
+# order_state_truth.order_state -- the single source of truth -- to one of
+# the eight canonical states (or the explicit UNKNOWN). A cancel requested
+# but not confirmed can still fill: RESTING / PARTIAL with sub_state
+# CANCEL_PENDING. A mirror row excluded before submission: REJECTED with
+# sub_state EXCLUDED_BEFORE_SUBMISSION.
+S_PROPOSED, S_SUBMITTED, S_UNKNOWN = OST.PROPOSED, OST.SUBMITTED, OST.UNKNOWN
+S_RESTING, S_PARTIAL, S_FILLED = OST.RESTING, OST.PARTIAL, OST.FILLED
+S_CANCELLED, S_EXPIRED, S_REJECTED = (OST.CANCELLED, OST.EXPIRED,
+                                      OST.REJECTED)
+LIVE_STATES = OST.LIVE_STATES
+#: An order that can still fill without a new decision.
+STANDING_STATES = OST.STANDING_STATES
 
-PAPER_STATE_MAP = {
-    "PENDING_SIMULATION": S_SUBMITTED, "RESTING": S_RESTING,
-    "PARTIALLY_FILLED": S_PARTIAL, "FILLED": S_FILLED,
-    "EXPIRED": S_EXPIRED, "CANCEL_PENDING": S_CANCEL_PENDING,
-    "CANCELED": S_CANCELLED, "REJECTED": S_REJECTED}
+PAPER_STATE_MAP = {r: st for r, (st, _s) in
+                   OST.RAW_MAPS[OST.SRC_PAPER].items()}
 #: execmirror_orders and kalshi_live_intents share one state machine
 #: (migrations 192 / 196, kalshi_orders.TRANSITIONS).
-MIRROR_STATE_MAP = {
-    "PLANNED": S_PROPOSED, "SUBMITTING": S_SUBMITTED, "UNKNOWN": S_UNKNOWN,
-    "OPEN": S_RESTING, "PARTIALLY_FILLED": S_PARTIAL, "FILLED": S_FILLED,
-    "CANCEL_REQUESTED": S_CANCEL_PENDING, "CANCELLED": S_CANCELLED,
-    "EXPIRED": S_EXPIRED, "REJECTED": S_REJECTED, "EXCLUDED": S_EXCLUDED}
+MIRROR_STATE_MAP = {r: st for r, (st, _s) in
+                    OST.RAW_MAPS[OST.SRC_MIRROR].items()}
 PAPER_OPEN_RAW = ("PENDING_SIMULATION", "RESTING", "PARTIALLY_FILLED",
                   "CANCEL_PENDING")
 MIRROR_OPEN_RAW = ("PLANNED", "SUBMITTING", "UNKNOWN", "OPEN",
                    "PARTIALLY_FILLED", "CANCEL_REQUESTED")
 
-STATE_MEANING = {
-    S_PROPOSED: "decided or planned, NOT yet at the venue / simulator",
-    S_SUBMITTED: "sent, not yet acknowledged as resting or filled",
-    S_UNKNOWN: "submission outcome unknown; reconciliation pending",
-    S_RESTING: ("resting on the book, NOTHING filled. A resting order is "
-                "not a fill; resting protection is not protection until it "
-                "fills"),
-    S_PARTIAL: "part filled; the remainder still rests",
-    S_FILLED: "completely filled",
-    S_CANCEL_PENDING: "cancel requested; it can still fill until confirmed",
-    S_CANCELLED: "cancelled; the unfilled remainder is gone",
-    S_EXPIRED: "expired unfilled (or with its remainder unfilled)",
-    S_REJECTED: "refused by the venue / simulator",
-    S_EXCLUDED: "never sent: excluded by the mirror's own rule",
-}
+STATE_MEANING = dict(OST.MEANING)
 
 # ── NAMED REASONS ─────────────────────────────────────────────────────
 R_NO_PREMAP = "NO_VENUE_CATALOGUE_ROW_FOR_THIS_MARKET"
@@ -256,9 +241,11 @@ def parse_group_key(key: str) -> dict | None:
             "ident": parts[2]}
 
 
-def canonical_state(raw_state, *, table: str) -> str:
-    m = PAPER_STATE_MAP if table == "paper_orders" else MIRROR_STATE_MAP
-    return m.get(str(raw_state or ""), "UNMAPPED:%s" % (raw_state,))
+def canonical_state(raw_state, *, table: str, filled_qty=None) -> str:
+    """order_state_truth.canonical_order_state: an unmapped raw state is the
+    explicit UNKNOWN, never FILLED."""
+    return OST.canonical_order_state(raw_state, source=table,
+                                     filled_qty=filled_qty)
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -696,6 +683,132 @@ def _net(tbl: dict) -> dict:
             "remaining_cost_basis_usd": tbl["remaining_cost_basis_usd"]}
 
 
+def executable_exit(legs: list) -> dict:
+    """WHAT CLOSING THE HELD CONTRACTS WOULD RECEIVE NOW at the best
+    displayed exit level of each open leg (no depth beyond the top level is
+    assumed: a quantity above the top level's size is named, not priced)."""
+    open_legs = [lg for lg in legs if lg.get("open")]
+    rows, total, complete, unavailable = [], 0.0, True, []
+    for lg in open_legs:
+        c = lg.get("current") or {}
+        held = float(lg["holding"]["open_qty"] or 0)
+        bid, bq = c.get("bid"), c.get("bid_qty")
+        if bid is None:
+            unavailable.append(lg["leg_key"])
+            rows.append({"leg_key": lg["leg_key"], "held_qty": _f(held),
+                         "price": None, "reason": c.get("reason") or R_NO_BOOK,
+                         "freshness": c.get("freshness")})
+            continue
+        q = held if bq is None else min(held, float(bq))
+        complete = complete and bq is not None and held <= float(bq) + 1e-9
+        total += q * float(bid)
+        rows.append({"leg_key": lg["leg_key"], "held_qty": _f(held),
+                     "price": _f(bid), "qty_at_top_level": _f(q),
+                     "beyond_top_level_qty": _f(max(0.0, held - q)),
+                     "proceeds_at_top_level_usd": _f(q * float(bid)),
+                     "freshness": c.get("freshness"), "age_s": c.get("age_s"),
+                     "source": c.get("source"),
+                     "observed_at": c.get("observed_at")})
+    ok = bool(open_legs) and not unavailable
+    return {"available": ok,
+            "proceeds_at_top_level_usd": _f(total) if ok else None,
+            "reason": (None if ok else "NOTHING_HELD" if not open_legs
+                       else "A_HELD_LEG_HAS_NO_EXIT_PRICE"),
+            "covers_whole_position": complete if ok else None,
+            "stale": any(r.get("freshness") == "STALE" for r in rows),
+            "legs": rows,
+            "basis": ("held qty x best displayed exit price (top level only, "
+                      "gross of exit fees); quantity beyond the top level's "
+                      "size is shown as beyond_top_level_qty, not priced")}
+
+
+def room_protection(legs: list, orders: list, outcomes: list | None
+                    ) -> dict:
+    """THE ROOM'S PROTECTION LEDGER: position quantity, unprotected
+    quantity, standing order quantity, filled protection quantity, the
+    CONDITIONAL floor IF_FILLED, the realized floor, the current executable
+    exit and the current worst-case exposure. Only FILLED quantity is
+    protection (order_state_truth.protection_summary). Pure."""
+    primary = [lg for lg in legs if not lg.get("is_hedge_leg")]
+    held = sum(float(lg["holding"]["open_qty"] or 0) for lg in primary)
+    prot = [o for o in orders if OST.is_protective(o)]
+    cond = realized_floor = worst = car = None
+    cond_applied, cond_skipped = [], []
+    floor_reason = None
+    if outcomes:
+        now_tbl = payout_table(_book_state(legs), outcomes)
+        realized_floor = now_tbl["locked_pnl_usd"]
+        worst, car = now_tbl["worst"], now_tbl["capital_at_risk_usd"]
+        st = _book_state(legs)
+        for o in prot:
+            if o["state"] not in STANDING_STATES:
+                continue
+            if o.get("limit") is None or not o.get("pays_on"):
+                cond_skipped.append(o["order_ref"])
+                continue
+            q = remaining_qty(o)
+            if q > 0:
+                _apply_fill(st, leg_key=o["leg_key"], pays_on=o["pays_on"],
+                            direction=o["direction"], qty=q,
+                            price=float(o["limit"]))
+                cond_applied.append(o["order_ref"])
+        if cond_applied and not cond_skipped:
+            cond = payout_table(st, outcomes)["locked_pnl_usd"]
+        elif cond_skipped:
+            floor_reason = "A_STANDING_PROTECTIVE_ORDER_HAS_NO_LIMIT_OR_OUTCOME"
+    else:
+        floor_reason = R_NO_OUTCOMES
+    # REALIZED PROTECTION: what the filled protective SALES realised
+    # (average cost incl. fees); hedge fills realise nothing -- they are
+    # in the realized floor as held contracts.
+    sell_refs = {o["order_ref"] for o in prot
+                 if str(o.get("direction")) == "SELL"}
+    realized_prot, fees_known = 0.0, True
+    for lg in legs:
+        avg = lg["holding"].get("avg_cost_incl_fees")
+        for f in lg.get("fills") or []:
+            if f.get("order_ref") not in sell_refs or f["direction"] != "SELL":
+                continue
+            if f.get("fee_usd") is None:
+                fees_known = False
+            realized_prot += float(f["qty"]) * (float(f["price"]) - float(
+                avg or 0)) - float(f.get("fee_usd") or 0)
+    ps = OST.protection_summary(
+        held_qty=held, orders=prot,
+        conditional_floor_if_filled_usd=cond,
+        realized_protection_usd=round(realized_prot, 6),
+        realized_floor_usd=realized_floor)
+    if ps["conditional_floor_if_filled_usd"] is None and \
+            ps["standing_order_qty"] > 0:
+        ps["conditional_floor_reason"] = floor_reason or "UNAVAILABLE"
+    ex = executable_exit(legs)
+    return dict(
+        ps,
+        hedge_legs=[lg["leg_key"] for lg in legs if lg.get("is_hedge_leg")],
+        protected_legs=[lg["leg_key"] for lg in primary],
+        conditional_floor_basis=(
+            "IF_FILLED: the minimum total P&L over the played outcomes if "
+            "every STANDING protective order's unfilled remainder fills at "
+            "its own limit (gross of the hypothetical fill's fees). "
+            "CONDITIONAL -- nothing of it is realized"),
+        conditional_floor_orders=cond_applied,
+        realized_floor_basis=("the minimum total P&L over the played "
+                              "outcomes of the FILLED holdings only (standing "
+                              "orders excluded)"),
+        realized_protection_basis=(
+            "filled protective SALES: qty x (fill price - average cost incl. "
+            "fees) - sale fees; hedge fills are held contracts, counted in "
+            "the realized floor"),
+        realized_protection_fees_known=fees_known,
+        current_executable_exit=ex,
+        current_worst_case={"worst_outcome": worst,
+                            "capital_at_risk_usd": car,
+                            "basis": ("FILLED holdings only: -min(payout - "
+                                      "remaining cost basis) over the played "
+                                      "outcomes")},
+        current_worst_case_exposure_usd=car)
+
+
 def scenarios(legs: list, orders: list, outcomes: list | None,
               probs: dict | None = None) -> dict:
     """(a) current filled holdings; (b) plus every standing order filled at
@@ -722,6 +835,13 @@ def scenarios(legs: list, orders: list, outcomes: list | None,
     b = payout_table(st, outcomes, probs)
     res = {"available": True, "outcomes": outcomes,
            "current": a, "with_standing_filled": b,
+           "current_label": "FILLED HOLDINGS ONLY (realized basis)",
+           "with_standing_filled_label": (
+               "IF_FILLED: CONDITIONAL on every standing order filling at "
+               "its limit -- nothing of it is realized"),
+           "conditional": {"with_standing_filled": OST.IF_FILLED,
+                           "with_standing_and_proposed_filled":
+                               OST.IF_FILLED},
            "standing_orders_applied": applied, "skipped": skipped,
            "probabilities": probs,
            "fees": ("filled legs carry their recorded fees; hypothetical "
@@ -796,7 +916,8 @@ def xavier_panel(*, group_id: str, kind: str, assessment: dict | None,
     """XAVIER AS DECISION MAKER, from the persisted rows only."""
     base = {"group_id": group_id, "position_kind": kind,
             "source": "xavier_management_assessments (migration 206)",
-            "protection": protection_view(group_orders or []),
+            "protection": protection_view(group_orders or [],
+                                          group_legs or []),
             "position": position_mark_view(group_legs or [], venue)}
     if not schema_present:
         return dict(base, status="UNAVAILABLE", why=R_206)
@@ -826,17 +947,22 @@ def xavier_panel(*, group_id: str, kind: str, assessment: dict | None,
                      "ev_basis": x.get("ev_basis")})
     # PROTECTION is the standing order (if any): it is an order, not a
     # valued alternative, and it is not protection until it fills.
-    prot = [o for o in standing_orders if o.get("role") ==
-            "STANDING_PROTECTION"]
+    prot = [o for o in standing_orders if OST.is_protective(o)]
+    pv = base["protection"]
     rows.append({"rank": None, "action": "PROTECTION",
+                 "recorded_action": None,
                  "value_usd": None, "rankable": False,
                  "blocker": None if prot else "NO_STANDING_PROTECTION_ORDER",
                  "state": ", ".join(sorted({o["state"] for o in prot}))
                  or None,
                  "orders": [o["order_ref"] for o in prot],
-                 "note": ("RESTING - NOT PROTECTION UNTIL FILLED"
-                          if any(o["state"] in (S_RESTING, S_SUBMITTED)
-                                 for o in prot) else None)})
+                 "filled_protection_qty": pv.get("filled_protection_qty"),
+                 "standing_order_qty": pv.get("standing_order_qty"),
+                 "note": (("STANDING %s - NOT PROTECTION UNTIL FILLED; "
+                           "FILLED PROTECTION %s" % (
+                               OST.fmt_qty(pv.get("standing_order_qty")),
+                               OST.fmt_qty(pv.get("filled_protection_qty"))))
+                          if prot else None)})
     rankable = [r for r in rows if r["rankable"] and r["value_usd"]
                 is not None]
     why = None
@@ -966,19 +1092,20 @@ def xavier_panel(*, group_id: str, kind: str, assessment: dict | None,
         latest_review=review_view)
 
 
-def protection_view(group_orders: list) -> dict:
-    """FILLED protection vs UNFILLED (resting) protection, never merged."""
-    prot = [o for o in group_orders if o.get("role") == "STANDING_PROTECTION"]
-    filled = sum(float(o.get("filled_qty") or 0) for o in prot)
-    unfilled = sum(remaining_qty(o) for o in prot
-                   if o["state"] in STANDING_STATES + (S_SUBMITTED,))
-    return {"filled_protection_qty": _f(filled),
-            "unfilled_resting_protection_qty": _f(unfilled),
-            "orders": [{"order_ref": o["order_ref"], "state": o["state"],
-                        "limit": o.get("limit"), "qty": o.get("qty"),
-                        "filled_qty": o.get("filled_qty")} for o in prot],
-            "rule": ("resting protection is NOT protection until it fills; "
-                     "only the filled quantity has been sold")}
+def protection_view(group_orders: list, group_legs: list | None = None
+                    ) -> dict:
+    """FILLED protection vs STANDING (resting / partial remainder) orders,
+    never merged: order_state_truth.protection_summary on the group's
+    orders, with the held quantity of its protected (non-hedge) legs."""
+    held = None
+    if group_legs is not None:
+        held = sum(float(lg["holding"]["open_qty"] or 0)
+                   for lg in group_legs if not lg.get("is_hedge_leg"))
+    ps = OST.protection_summary(held_qty=held, orders=group_orders)
+    return dict(ps,
+                # the earlier field names, kept for readers of this payload
+                unfilled_resting_protection_qty=ps["standing_order_qty"],
+                rule=OST.RULE)
 
 
 def position_mark_view(group_legs: list, venue: str) -> dict:
@@ -1191,6 +1318,37 @@ def contract_of(slug, side, ident: dict, *, venue: str, ticker=None) -> dict:
             "basis": ident.get("basis")}
 
 
+def _protective_note(o: dict) -> str | None:
+    """A protective order's standing remainder is never called protection."""
+    if not OST.is_protective(o):
+        return None
+    st = o["state"]
+    f = float(o.get("counts_as_filled_qty") or 0)
+    rem = float(o.get("standing_qty") or 0) + float(o.get("pending_qty")
+                                                   or 0)
+    if st in (S_RESTING, S_SUBMITTED, S_PROPOSED, S_UNKNOWN):
+        return "%s - NOT PROTECTION UNTIL FILLED" % st
+    if st == S_PARTIAL:
+        return ("PARTIAL - ONLY THE FILLED %s COUNTS AS PROTECTION; %s STILL "
+                "RESTING, NOT PROTECTION" % (OST.fmt_qty(f),
+                                             OST.fmt_qty(rem)))
+    if st in (S_CANCELLED, S_EXPIRED, S_REJECTED) and f <= 0:
+        return "%s UNFILLED - CONTRIBUTES NO PROTECTION" % st
+    return None
+
+
+def normalize_order(o: dict) -> dict:
+    """THE ONE MAPPING, applied to every order a room shows: the canonical
+    state, sub-state and the quantities that count, from the record's raw
+    state and its own source table (order_state_truth.order_state). Pure."""
+    t = OST.order_state(o.get("raw_state"), source=o.get("source"),
+                        qty=o.get("qty"), filled_qty=o.get("filled_qty"))
+    return dict(o, state=t["state"], sub_state=t["sub_state"],
+                counts_as_filled_qty=t["filled_qty"],
+                standing_qty=t["standing_qty"],
+                pending_qty=t["pending_qty"])
+
+
 def _order_view(o: dict, *, ident: dict, room_kind: str, tob: dict,
                 now: float, account_id=None) -> dict:
     side = o["holding_side"]
@@ -1226,7 +1384,12 @@ def _order_view(o: dict, *, ident: dict, room_kind: str, tob: dict,
         "avg_fill_price": _f(o.get("avg_fill")),
         "fees_usd": _f(o.get("fees_usd")),
         "state": o["state"], "raw_state": o.get("raw_state"),
+        "sub_state": o.get("sub_state"),
         "state_meaning": STATE_MEANING.get(o["state"]),
+        # ONLY the filled quantity counts (order_state_truth.order_state)
+        "counts_as_filled_qty": o.get("counts_as_filled_qty"),
+        "standing_qty": o.get("standing_qty"),
+        "protective": OST.is_protective(o),
         "order_type": o.get("order_type"), "tif": o.get("tif"),
         "current": {k: tob.get(k) for k in ("bid", "ask", "mark",
                                             "observed_at", "age_s",
@@ -1245,10 +1408,7 @@ def _order_view(o: dict, *, ident: dict, room_kind: str, tob: dict,
         "strategy": o.get("strategy"),
         "freshness": freshness(o.get("updated_at") or o.get("created_at"),
                                now, 1e18),
-        "note": ("RESTING - NOT PROTECTION UNTIL FILLED"
-                 if o.get("role") == "STANDING_PROTECTION"
-                 and o["state"] in (S_RESTING, S_SUBMITTED, S_PROPOSED)
-                 else None),
+        "note": _protective_note(o),
         "live_scale": o.get("live_scale")}
 
 
@@ -1314,6 +1474,7 @@ def build_rooms(raw: dict) -> list:
         rm["groups"].add(g)
         rm["slugs"].add(slug)
     for o in raw.get("orders") or []:
+        o = normalize_order(o)
         key, kind = room_of(o["slug"], o["holding_side"])
         rm = room(key, kind, o["slug"], o["holding_side"])
         rm["orders"].append(o)
@@ -1348,6 +1509,7 @@ def _finish_room(rm: dict, raw: dict, ident_of, now: float) -> dict:
         mo = market_outcomes(next(iter(rm["slugs"])))
         outcomes, labels = mo["outcomes"], mo["outcome_labels"]
     labels[VOID] = "Void (venue-declared)"
+    role_by_ref = {o["order_ref"]: o.get("role") for o in rm["orders"]}
     # LEGS
     legs = []
     for lg in sorted(rm["legs"], key=lambda x: x["holding"].get(
@@ -1395,7 +1557,16 @@ def _finish_room(rm: dict, raw: dict, ident_of, now: float) -> dict:
                        "price": _f(f["price"]), "fee_usd": _f(f.get(
                            "fee_usd")), "at": iso(f.get("at")),
                        "source": f.get("source")} for f in lg["fills"]],
-            "role_of_first_fill": None})
+            "role_of_first_fill": next(
+                (role_by_ref.get(f.get("order_ref")) for f in lg["fills"]
+                 if f["direction"] == "BUY"), None),
+            # A HEDGE LEG: every contract of it was bought by a HEDGE order.
+            # It is filled protection of the room's other legs, not a
+            # position that itself needs protecting.
+            "is_hedge_leg": bool([f for f in lg["fills"]
+                                  if f["direction"] == "BUY"]) and all(
+                role_by_ref.get(f.get("order_ref")) == "HEDGE"
+                for f in lg["fills"] if f["direction"] == "BUY")})
     # ORDERS
     orders = []
     for o in sorted(rm["orders"], key=lambda x: _epoch(
@@ -1432,6 +1603,15 @@ def _finish_room(rm: dict, raw: dict, ident_of, now: float) -> dict:
     sc = scenarios(legs, orders, outcomes, probs)
     if sc.get("available"):
         sc["outcome_labels"] = labels
+    protection = room_protection(legs, orders, outcomes)
+    # each group's own ledger, priced on the room's outcomes (Xavier panel)
+    for x in xpanels:
+        g = x["group_id"]
+        gp = room_protection([lg for lg in legs if lg["group_id"] == g],
+                             [o for o in orders if o.get("group_id") == g],
+                             outcomes)
+        x["protection"] = dict(
+            gp, unfilled_resting_protection_qty=gp["standing_order_qty"])
     open_legs = [lg for lg in legs if lg["open"]]
     marks_ok = all(lg["unrealized_pnl_usd"] is not None for lg in open_legs)
     unreal = (round(sum(lg["unrealized_pnl_usd"] for lg in open_legs), 6)
@@ -1493,16 +1673,16 @@ def _finish_room(rm: dict, raw: dict, ident_of, now: float) -> dict:
             | {"%s %s" % (o["instrument"]["slug"], o["holding_side"])
                for o in orders}),
         "proposed": by_state.get(S_PROPOSED, []),
-        "submitted": by_state.get(S_SUBMITTED, []) + by_state.get(
-            S_UNKNOWN, []),
+        "submitted": by_state.get(S_SUBMITTED, []),
+        "unknown": by_state.get(S_UNKNOWN, []),
         "standing": by_state.get(S_RESTING, []),
         "partially_filled": by_state.get(S_PARTIAL, []),
-        "cancel_pending": by_state.get(S_CANCEL_PENDING, []),
+        "cancel_pending": [o["order_ref"] for o in orders
+                           if o.get("sub_state") == OST.SUB_CANCEL_PENDING],
         "filled": by_state.get(S_FILLED, []),
         "terminal_unfilled": (by_state.get(S_CANCELLED, [])
                               + by_state.get(S_EXPIRED, [])
-                              + by_state.get(S_REJECTED, [])
-                              + by_state.get(S_EXCLUDED, []))}
+                              + by_state.get(S_REJECTED, []))}
     active = bool(open_legs) or any(o["state"] in LIVE_STATES
                                     for o in orders)
     dec_ids = {o.get("decision_id") for o in orders if o.get("decision_id")}
@@ -1562,6 +1742,7 @@ def _finish_room(rm: dict, raw: dict, ident_of, now: float) -> dict:
         "active": active, "groups": groups,
         "legs": legs, "orders": orders, "chain": chain,
         "standing_orders": [o["order_ref"] for o in standing],
+        "protection": protection,
         "economic": economic, "scenarios": sc,
         "xavier": xpanels, "karen": karen_view(k_rows),
         "audrey": audrey_view(a_find, a_rec, a_pm),
@@ -1624,6 +1805,16 @@ def summarize(room: dict) -> dict:
         "realized_pnl_usd": eco["realized_pnl_usd"],
         "capital_at_risk_usd": eco["capital_at_risk_usd"],
         "money_label": eco["money_label"],
+        "protection": {k: (room.get("protection") or {}).get(k) for k in (
+            "position_qty", "unprotected_qty", "standing_order_qty",
+            "pending_order_qty", "filled_protection_qty",
+            "conditional_floor_if_filled_usd", "conditional_floor_label",
+            "conditional_floor_reason", "realized_floor_usd",
+            "realized_protection_usd", "current_worst_case_exposure_usd",
+            "line", "rule")},
+        "executable_exit_usd": ((room.get("protection") or {}).get(
+            "current_executable_exit") or {}).get(
+                "proceeds_at_top_level_usd"),
         "xavier": None if x is None else {
             "recommendation": x.get("recommendation"),
             "evidence_state": (x.get("evidence") or {}).get("state"),
@@ -2164,6 +2355,49 @@ async def load(conn, *, book: str, venue: str, now: float | None = None,
 
 BOOK_VENUES = {B_PAPER: (V_PM,), B_ACTUAL: (V_PM, V_KALSHI)}
 
+VENUE_LABEL = {V_PM: "POLYMARKET US", V_KALSHI: "KALSHI"}
+#: Each ACTUAL venue's own control row: connected = it holds the venue's
+#: account / key fingerprint (the same test as api/command_equity.lane_of).
+#: Never inferred from the other venue.
+VENUE_CONTROL = {V_PM: ("execmirror_control", "account_fingerprint"),
+                 V_KALSHI: ("kalshi_smalllive_control", "key_fingerprint")}
+
+
+def venue_connection(venue: str, *, table_present: bool,
+                     row: dict | None) -> dict:
+    """ONE venue's connection, from ITS OWN control row only. Pure."""
+    label = VENUE_LABEL[venue]
+    table = VENUE_CONTROL[venue][0]
+    if not table_present:
+        st, why = "NOT_CONNECTED", "%s_ABSENT" % table.upper()
+    elif row is None:
+        st, why = "NOT_CONNECTED", "%s_ROW_MISSING" % table.upper()
+    elif not row.get("keyed"):
+        st, why = "NOT_CONNECTED", ("%s holds no %s" % (
+            table, VENUE_CONTROL[venue][1]))
+    else:
+        st = ("STOPPED" if row.get("stopped") else
+              "ENABLED" if row.get("enabled") else "CONNECTED_DISABLED")
+        why = None
+    return {"venue": venue, "label": label,
+            "connected": st != "NOT_CONNECTED",
+            "status": st, "why": why,
+            "display": "%s \u2014 %s" % (label, st),
+            "source": "%s (this venue's own control row; never inferred "
+                      "from the other venue)" % table}
+
+
+async def _venue_connection(conn, venue: str) -> dict:
+    table, col = VENUE_CONTROL[venue]
+    present = await _exists(conn, table)
+    row = None
+    if present:
+        r = await conn.fetchrow(
+            "SELECT (%s IS NOT NULL) AS keyed, enabled, stopped FROM %s "
+            " WHERE id = 1" % (col, table))
+        row = None if r is None else dict(r)
+    return venue_connection(venue, table_present=present, row=row)
+
 
 async def rooms_payload(conn, *, book: str, now: float | None = None,
                         include_inactive: bool = False) -> dict:
@@ -2175,13 +2409,21 @@ async def rooms_payload(conn, *, book: str, now: float | None = None,
         rooms = build_rooms(raw)
         items = [summarize(r) for r in rooms
                  if r["active"] or include_inactive]
+        conn_state = (await _venue_connection(conn, venue)
+                      if book == B_ACTUAL else None)
         venues[venue] = {
+            "connection": conn_state,
+            "display": (conn_state or {}).get("display") or (
+                "PAPER \u00b7 %s (simulated)" % VENUE_LABEL[venue]),
             "available": raw.get("available", True),
             "why": raw.get("why"),
             "rooms": items, "count": len(items),
             "empty_reason": (None if items else (
-                raw.get("why") or "NO_ACTIVE_POSITION_OR_LIVE_ORDER_IN_THIS_"
-                "BOOK_AND_VENUE")),
+                raw.get("why") or (
+                    "%s_NOT_CONNECTED" % venue if conn_state is not None
+                    and not conn_state["connected"] else
+                    "NO_ACTIVE_POSITION_OR_LIVE_ORDER_IN_THIS_"
+                    "BOOK_AND_VENUE"))),
             "money_label": ("FICTIONAL USD - SIMULATED EXECUTION"
                             if book == B_PAPER else
                             "REAL USD - %s ACCOUNT" % venue)}
@@ -2209,7 +2451,9 @@ async def room_payload(conn, *, key: str,
     raw = await load(conn, book=p["book"], venue=p["venue"], now=at)
     for r in build_rooms(raw):
         if r["group_key"] == key:
-            return dict(r, as_of=iso(at))
+            return dict(r, as_of=iso(at), connection=(
+                await _venue_connection(conn, p["venue"])
+                if p["book"] == B_ACTUAL else None))
     return None
 
 
@@ -2217,6 +2461,7 @@ def describe() -> dict:
     return {"version": VERSION, "states": STATE_MEANING,
             "paper_state_map": PAPER_STATE_MAP,
             "mirror_state_map": MIRROR_STATE_MAP,
+            "order_state_truth": OST.describe(),
             "mark_method": MARK_METHOD,
             "game_state_max_age_s": GAME_STATE_MAX_AGE_S,
             "score": R_NO_SCORE}

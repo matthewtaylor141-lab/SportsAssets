@@ -412,8 +412,28 @@ async def _xavier(rd: _Reads, now: float) -> dict:
         return {"open": int(r["open"]), "handed": int(r["handed"])}
 
     async def actual(conn):
-        return {"open": int(await conn.fetchval(
-            "SELECT count(*) FROM smalllive_handoffs WHERE state='OPEN'"))}
+        # VENUE BY VENUE, never one count across Polymarket US and Kalshi;
+        # each venue's connection from ITS OWN control row only.
+        by = {r["venue"]: int(r["n"]) for r in await conn.fetch(
+            "SELECT venue, count(*) AS n FROM smalllive_handoffs "
+            " WHERE state='OPEN' GROUP BY venue")}
+        conn_of = {}
+        for venue, table, col in (
+                ("POLYMARKET", "execmirror_control", "account_fingerprint"),
+                ("KALSHI", "kalshi_smalllive_control", "key_fingerprint")):
+            if await conn.fetchval("SELECT to_regclass($1) IS NOT NULL",
+                                   table):
+                conn_of[venue] = bool(await conn.fetchval(
+                    "SELECT %s IS NOT NULL FROM %s WHERE id = 1"
+                    % (col, table)))
+            else:
+                conn_of[venue] = False
+        return {"by_venue": {v: by.get(v, 0) for v in ("POLYMARKET",
+                                                        "KALSHI")},
+                "connected": conn_of,
+                "unknown_venue_open": sum(n for v, n in by.items()
+                                          if v not in ("POLYMARKET",
+                                                       "KALSHI"))}
 
     async def assessments(conn):
         agg = await conn.fetchrow(
@@ -737,6 +757,17 @@ def _money(v) -> str | None:
     return None if v is None else "${:,.2f}".format(float(v))
 
 
+def _venue_open(ac: dict | None, venue: str):
+    """One ACTUAL venue's open managed positions, or None (with the reason
+    at the call site) when that venue is not connected and holds none."""
+    if not ac:
+        return None
+    n = (ac.get("by_venue") or {}).get(venue, 0)
+    if not (ac.get("connected") or {}).get(venue) and not n:
+        return None
+    return n
+
+
 def _m(label, value, source, as_of=None, why=None) -> dict:
     """A monitor metric: a real value, or None with the reason."""
     return {"label": label, "value": value, "source": source,
@@ -865,9 +896,15 @@ async def build_floor(conn, *, now: float | None = None,
                 _m("Managed positions · PAPER", (p or {}).get("open"),
                    "paper_handoffs+paper_fills", now,
                    rd.sections.get("xavier_paper_positions", {}).get("why")),
-                _m("Managed positions · ACTUAL", (ac or {}).get("open"),
-                   "smalllive_handoffs", now,
-                   rd.sections.get("xavier_actual_positions", {}).get("why")),
+                # ACTUAL, venue by venue: never one figure across venues,
+                # never one venue inferred from the other
+                *[_m("Managed positions · ACTUAL · " + lbl,
+                     _venue_open(ac, venue), "smalllive_handoffs (venue=%s)"
+                     % venue, now,
+                     rd.sections.get("xavier_actual_positions", {}).get("why")
+                     or "%s — NOT_CONNECTED" % lbl)
+                  for venue, lbl in (("POLYMARKET", "POLYMARKET US"),
+                                     ("KALSHI", "KALSHI"))],
                 _m("Latest recommendation",
                    (last_output or {}).get("summary"),
                    (last_output or {}).get("kind") or

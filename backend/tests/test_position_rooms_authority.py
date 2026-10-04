@@ -90,7 +90,10 @@ def test_the_import_graph_reaches_no_order_or_paper_writer_module():
         "position_rooms.py", "bettor_book_snapshot.py",
         "bettor_venue_native_identity.py", "bettor_venue_mapping.py",
         "bettor_venue_realism.py", "bettor_sport_mapping.py",
-        "market_labels.py", "team_logos.py"}, sorted(reached)
+        "market_labels.py", "team_logos.py",
+        # the shared PURE order-state mapping (no imports, no I/O):
+        # tests/test_resting_is_not_protection.py pins it import-free
+        "order_state_truth.py"}, sorted(reached)
 
 
 def test_the_route_module_imports_only_auth_db_and_the_read_model():

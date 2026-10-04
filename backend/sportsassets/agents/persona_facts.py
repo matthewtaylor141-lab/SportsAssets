@@ -45,6 +45,8 @@ import re
 import time
 from typing import Any
 
+from .. import order_state_truth as OST
+
 DEMO_LABEL = "DEMONSTRATION"
 DEMO_POSITION_ID = "DEMONSTRATION-NYY-ML"
 PAPER_NOT_IN_BUILD = "paper ledger not in this build"
@@ -197,7 +199,10 @@ def demonstration_facts() -> Facts:
           "total cost $1,800 = $1,000 + $800")
     for state, net in DEMO["floors"]:
         f.add(DEMO_LABEL, p, "floor:" + state, net,
-              "%s: $%s before fees" % (state, format(int(net), ",")))
+              "%s: $%s before fees (DEMONSTRATION: the hedge is assumed "
+              "FILLED here; on a real position a resting hedge is NOT "
+              "protection and this floor would be CONDITIONAL IF_FILLED)"
+              % (state, format(int(net), ",")))
     f.add(DEMO_LABEL, h, "unhedged_worst_case_usd",
           DEMO["unhedged_loss_usd"],
           "unhedged, a Red Sox win loses the $1,000 stake")
@@ -321,10 +326,13 @@ async def _positions(conn, f: Facts, *, likes, context_ids,
         ids.append(iid)
         f.add("bettor_funded_intents", iid, "position",
               "%s %s" % (d["us_market_slug"], d["order_intent"]),
-              "funded position %s on %s (%s), state %s" % (
-                  iid, d["us_market_slug"],
-                  "long" if d["order_intent"].endswith("LONG") else "short",
-                  d["state"]))
+              "funded position %s on %s (%s), state %s (canonical %s: %s)"
+              % (iid, d["us_market_slug"],
+                 "long" if d["order_intent"].endswith("LONG") else "short",
+                 d["state"], OST.canonical_order_state(
+                     d["state"], source=OST.SRC_FUNDED),
+                 OST.MEANING[OST.canonical_order_state(
+                     d["state"], source=OST.SRC_FUNDED)]))
         f.add("bettor_funded_intents", iid, "quantity", d["quantity"],
               "ordered %s contracts at limit %s" % (d["quantity"],
                                                     d["limit_price"]))
@@ -535,7 +543,9 @@ async def _paper_live(conn, f: Facts, *, now: float | None) -> dict:
               mg.get("open_management_orders"),
               "what Xavier manages on paper: %s open paper position(s), %s "
               "open paper management order(s) (standing protection, hedge, "
-              "exit, reduce), %s open paper entry order(s), %s handoff(s) "
+              "exit, reduce -- open ORDERS, not fills: a resting protective "
+              "order is NOT protection until it fills), %s open paper entry "
+              "order(s), %s handoff(s) "
               "from Derek%s" % (
                   mg.get("open_positions"), mg.get("open_management_orders"),
                   mg.get("open_entry_orders"),
@@ -726,30 +736,54 @@ async def _standing(conn, f: Facts, *, intents, xids, limit=2) -> None:
     if not await _regclass(conn, "bettor_standing_order_plans"):
         f.check("bettor_standing_order_plans", "TABLE_ABSENT")
         return
+    funded = await _regclass(conn, "bettor_funded_intents") and \
+        await _regclass(conn, "bettor_funded_fills")
     rows = await conn.fetch(
-        "SELECT plan_id, venue_slug, quantity, cost_price, floor_class, "
-        " floor, created_at FROM bettor_standing_order_plans WHERE "
-        " primary_intent_id = ANY($1::text[]) OR xavier_decision_id = "
-        " ANY($2::text[]) ORDER BY created_at DESC LIMIT $3",
+        "SELECT p.plan_id, p.venue_slug, p.quantity, p.cost_price, "
+        " p.floor_class, p.floor, p.created_at, p.hedge_intent_id, %s "
+        " FROM bettor_standing_order_plans p %s WHERE "
+        " p.primary_intent_id = ANY($1::text[]) OR p.xavier_decision_id = "
+        " ANY($2::text[]) ORDER BY p.created_at DESC LIMIT $3" % (
+            ("i.state AS hedge_state, i.quantity AS hedge_qty, "
+             "(SELECT sum(fl.qty) FROM bettor_funded_fills fl "
+             "  WHERE fl.intent_id = p.hedge_intent_id "
+             "    AND fl.direction = 'ENTRY') AS hedge_filled"
+             if funded else "NULL AS hedge_state, NULL AS hedge_qty, "
+             "NULL AS hedge_filled"),
+            ("LEFT JOIN bettor_funded_intents i "
+             "  ON i.intent_id = p.hedge_intent_id" if funded else "")),
         intents or [], xids or [], int(limit))
     f.check("bettor_standing_order_plans", "MATCHED" if rows else "NO_MATCH",
             len(rows))
     for r in rows:
         d = _jsonable(dict(r))
         pid = d["plan_id"]
+        # THE PLAN IS NOT PROTECTION: only the hedge order's FILLED quantity
+        # is (order_state_truth). Its state and filled quantity are stated.
+        t = OST.order_state(d.get("hedge_state"), source=OST.SRC_FUNDED,
+                            qty=d.get("hedge_qty"),
+                            filled_qty=d.get("hedge_filled"))
+        state = (t["state"] if d.get("hedge_intent_id") else
+                 "%s (no order placed for the plan yet)" % OST.PROPOSED)
         f.add("bettor_standing_order_plans", pid, "plan",
               "%s x %s @ %s" % (d["venue_slug"], d["quantity"],
                                 d["cost_price"]),
               "standing protective order %s: %s contracts of %s at %s; "
-              "floor class %s" % (pid, d["quantity"], d["venue_slug"],
-                                  d["cost_price"], d["floor_class"]))
+              "floor class %s; order state %s, FILLED %s -- a resting or "
+              "planned order is NOT protection until it fills" % (
+                  pid, d["quantity"], d["venue_slug"], d["cost_price"],
+                  d["floor_class"], state,
+                  OST.fmt_qty(t["filled_qty"] if d.get("hedge_intent_id")
+                              else 0)))
         fl = _obj(d.get("floor"), {}) or {}
         for reg in (fl.get("regions") or [])[:6]:
             if reg.get("net_usd") is not None:
                 f.add("bettor_standing_order_plans", pid,
                       "floor.regions:%s" % reg.get("region"),
-                      reg["net_usd"], "payoff if %s: %s" % (
-                          reg.get("region"), _money(reg["net_usd"])))
+                      reg["net_usd"], "CONDITIONAL floor IF_FILLED -- payoff "
+                      "if %s: %s, only if the standing order fills; not a "
+                      "realized floor" % (reg.get("region"),
+                                          _money(reg["net_usd"])))
 
 
 async def _audits(conn, f: Facts, *, ids, limit=1) -> None:

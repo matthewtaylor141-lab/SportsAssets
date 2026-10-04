@@ -27,6 +27,7 @@ import time
 from typing import Any
 
 from .. import bettor_xavier_standing_orders as SPO
+from .. import order_state_truth as OST
 
 VERSION = "XAVIER_STANDING_ORDER_VIEW_V1"
 EVENTS_SHOWN = 40
@@ -84,11 +85,11 @@ async def group_view(conn, *, group_id: str, primary_intent_id: str | None
             "hedge_held_qty": gs["hedge_held_qty"],
             "legs": gs["filled_protection"],
             "is": "HEDGE CONTRACTS THE BOOK HOLDS"},
-        "resting_orders": [{k: o.get(k) for k in (
+        "resting_orders": [dict({k: o.get(k) for k in (
             "intent_id", "plan_id", "candidate_id", "venue_order_id",
             "limit_price", "quantity", "filled_qty", "fill_capable_qty",
-            "book_state", "lifecycle_state", "good_till")}
-            for o in gs["resting_orders"]],
+            "book_state", "lifecycle_state", "good_till")},
+            **_canonical(o)) for o in gs["resting_orders"]],
         "resting_orders_are": ("OBLIGATIONS THAT MAY STILL FILL, NOT "
                                "PROTECTION"),
         "fill_capable_qty": gs["fill_capable_qty"],
@@ -137,6 +138,23 @@ async def group_view(conn, *, group_id: str, primary_intent_id: str | None
         None if cov is None else cov["evidence"].get(
             "payout_table_actual_inventory"))
     return _jsonable(out)
+
+
+def _canonical(o: dict) -> dict:
+    """The resting order's canonical state from the ONE shared mapping
+    (order_state_truth): its unfilled remainder is a standing obligation,
+    never protection; only its filled quantity counts."""
+    t = OST.order_state(o.get("book_state"), source=OST.SRC_FUNDED,
+                        qty=o.get("quantity"), filled_qty=o.get("filled_qty"))
+    return {"state": t["state"], "sub_state": t["sub_state"],
+            "counts_as_filled_qty": t["filled_qty"],
+            "standing_qty": t["standing_qty"],
+            "pending_qty": t["pending_qty"],
+            "line": OST.order_line({
+                "raw_state": o.get("book_state"), "source": OST.SRC_FUNDED,
+                "direction": "BUY", "qty": o.get("quantity"),
+                "filled_qty": o.get("filled_qty"),
+                "limit": o.get("limit_price")})}
 
 
 def _count(xs) -> dict:

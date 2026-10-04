@@ -35,6 +35,8 @@ import os
 import time
 from datetime import datetime, timezone
 
+from . import order_state_truth as OST
+
 ACCOUNT = "paper_acct_main"
 STATE_KEY = "agent.slack.updates"
 CC = "https://command.bettortoken.com"
@@ -255,11 +257,17 @@ async def activity(conn, since: float, now: float) -> dict:
         """SELECT refusal, count(*) AS n FROM paper_decisions
             WHERE decided_at > to_timestamp($1) AND refusal IS NOT NULL
             GROUP BY 1 ORDER BY 2 DESC LIMIT 3""", since)
+    # ENTRY ORDERS ARE NOT FILLS: the count is split by the ONE shared state
+    # mapping (order_state_truth) -- filled, still resting / partial, ended
+    # unfilled -- so "new entries" is never read as positions taken.
     o = await conn.fetchrow(
         """SELECT count(*) FILTER (WHERE role='ENTRY') AS entries,
+                  count(*) FILTER (WHERE role='ENTRY' AND filled_qty > 0) AS entries_filled,
+                  count(*) FILTER (WHERE role='ENTRY' AND filled_qty = 0
+                                     AND state = ANY($3::text[])) AS entries_resting,
                   count(*) FILTER (WHERE role<>'ENTRY') AS other
              FROM paper_orders WHERE account_id=$1 AND decided_at > to_timestamp($2)""",
-        ACCOUNT, since)
+        ACCOUNT, since, OST.raw_states(OST.SRC_PAPER, OST.LIVE_STATES))
     last_entry = await conn.fetchval(
         "SELECT extract(epoch FROM max(decided_at)) FROM paper_orders "
         " WHERE account_id=$1 AND role='ENTRY'", ACCOUNT)
@@ -272,6 +280,8 @@ async def activity(conn, since: float, now: float) -> dict:
     return {"decisions": int(r["decisions"] or 0), "approved": int(r["approved"] or 0),
             "refusals": [(x["refusal"], int(x["n"])) for x in top],
             "entries": int(o["entries"] or 0), "other_orders": int(o["other"] or 0),
+            "entries_filled": int(o["entries_filled"] or 0),
+            "entries_resting": int(o["entries_resting"] or 0),
             "last_entry_at": float(last_entry) if last_entry else None,
             "unanswered": [dict(x) for x in unanswered]}
 
@@ -297,8 +307,11 @@ def _delta(prev: dict, s: dict) -> list:
 def progress_text(s: dict, act: dict, m: dict | None, prev: dict, *, label: str,
                   with_reconciliation: bool) -> str:
     changed = _delta(prev, s)
-    changed.append("%d decisions (%d approved), %d new entries, %d other orders"
+    changed.append("%d decisions (%d approved), %d new entry orders (%d with a fill, "
+                   "%d still resting or pending with nothing filled -- an order is not a "
+                   "fill), %d other orders"
                    % (act["decisions"], act["approved"], act["entries"],
+                      act.get("entries_filled", 0), act.get("entries_resting", 0),
                       act["other_orders"]))
     why, nxt, action = [], [], "None."
     if act["entries"] == 0 and act["refusals"]:

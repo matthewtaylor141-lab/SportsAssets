@@ -790,3 +790,10 @@ tests/test_improvement_pipeline_db.py
 # forecast-horizons} routes are GET-only, READ ONLY, behind a command session.
 tests/test_lost_opportunity_is_research_only.py
 tests/test_lost_opportunity_ledger.py
+# C28 RESTING (P0): a RESTING sell / hedge / order is NOT protection. One
+# shared pure mapping (sportsassets/order_state_truth.py) of every raw order
+# state to PROPOSED / SUBMITTED / RESTING / PARTIAL / FILLED / CANCELLED /
+# REJECTED / EXPIRED (+ explicit UNKNOWN, never FILLED); only FILLED quantity
+# counts as protection in every reader; the conditional floor is IF_FILLED and
+# never the realized floor; Kalshi NOT_CONNECTED is never inferred.
+tests/test_resting_is_not_protection.py
