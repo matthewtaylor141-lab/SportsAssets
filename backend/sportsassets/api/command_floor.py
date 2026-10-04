@@ -33,7 +33,9 @@ Karen's challenges (raised / answered / resolved), collaboration-loop stages
 recorded by one agent on another's finding (migration 203), Derek -> Xavier
 paper hand-offs, the candidate-review workflow's consecutive steps and
 Eddie's estimates of Derek's decisions (migration 217, read only when the
-tables exist). Each edge carries its evidence ids.
+tables exist) and the agents' durable hand-off / memory hand-off messages
+(agent_conversation_messages, migration 224). Each edge carries its
+evidence ids.
 
 WHAT THIS MODULE CANNOT DO, BY CONSTRUCTION. It imports no order, venue,
 execution, ledger or funded module (tests/test_command_floor_authority.py
@@ -787,7 +789,23 @@ async def _edges_raw(rd: _Reads, since: float) -> list:
                     "       estimated_at FROM eddie_execution_estimates "
                     " WHERE estimated_at >= to_timestamp($1)", since)]
 
+    async def messages(conn):
+        # (224) durable agent-to-agent hand-offs and memory hand-offs
+        return [{"from": _seat_agent(r["from_agent"]),
+                 "to": _seat_agent(r["to_agent"]),
+                 "kind": r["message_kind"], "at": r["created_at"],
+                 "evidence": _ref("agent_conversation_messages",
+                                  r["message_id"], None, r["created_at"]),
+                 "summary": str(r["summary"])[:160]}
+                for r in await conn.fetch(
+                    "SELECT message_id, from_agent, to_agent, message_kind, "
+                    "       summary, created_at "
+                    "  FROM agent_conversation_messages "
+                    " WHERE created_at >= to_timestamp($1)", since)]
+
     for name, tables, fn in (
+            ("edges.agent_conversation_messages",
+             ("agent_conversation_messages",), messages),
             ("edges.karen_challenges", ("karen_challenges",), karen),
             ("edges.collaboration_loop", ("agent_finding_stages",
                                           "agent_findings"), loop),
