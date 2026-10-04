@@ -827,3 +827,16 @@ tests/test_command_release_authority.py
 # append-only tables; bundles differ per agent and never widen the
 # registry (Karen / Scout / Eddie boundaries); no voice is borrowed.
 tests/test_agent_identity_api_authority.py
+# R30A CHAOS / RECOVERY (program section 28): the one venue state machine
+# (execution_intent.ActualLane + execmirror.Mirror) driven through its fake
+# venue with faults at the transport and the database. A timeout after send
+# stays UNKNOWN, is never re-sent, and is decided only by venue evidence --
+# the open orders, then the account's own trade log (an IOC that traded is
+# recovered and booked, never written off as REJECTED); an unreadable log or
+# an unattributable own trade keeps it UNKNOWN. Duplicate / stale order-record
+# reads never book a fill twice and never move cum backwards; a lane killed
+# mid-submit is decided after its lease with no second submission (also for
+# two racing lanes); a DB failure after the venue accepted is recovered,
+# booked and handed to Xavier; a partial fill during a working cancel is
+# counted and the cancel is not forgotten; a restart resolves every UNKNOWN.
+tests/test_chaos_the_venue_state_machine_recovers.py
