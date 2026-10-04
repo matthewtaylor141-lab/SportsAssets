@@ -11,7 +11,7 @@ function ago(t){if(!t)return'NO HEARTBEAT';var s=Math.max(0,Date.now()/1000-t);r
 function stateColor(a,def){var s=(a&&a.state)||'';return /CHALLENG/.test(s)?'#ff8197':/WORK|REVIEW/.test(s)?'#57e1ad':/WAIT/.test(s)?'#efca79':def;}
 function patchAllie(root){
  root=root||document;var w=document.createTreeWalker(root,NodeFilter.SHOW_TEXT),n,arr=[];while(n=w.nextNode())arr.push(n);
- arr.forEach(function(t){if(t.nodeValue&&t.nodeValue.trim()==='Chief Allocator')t.nodeValue='Allie';if(t.nodeValue&&t.nodeValue.trim()==='Allocator')t.nodeValue='Allie';});
+ /* integration: 'Chief Allocator' is Allie's TITLE (shown beside her name), so only the bare legacy label 'Allocator' becomes her name */arr.forEach(function(t){if(t.nodeValue&&t.nodeValue.trim()==='Allocator')t.nodeValue='Allie';});
 }
 /* real floor */
 if(location.pathname==='/floor'){document.body.classList.add('meeting-real-floor');}
@@ -31,7 +31,7 @@ function buildHome(){
  '<section class="mtg-attention"><div><div class="mtg-kicker">MANAGEMENT ATTENTION</div><h3 id="mtg-attn">Reading current blockers</h3><p id="mtg-attn-sub">No issue is inferred before the evidence arrives.</p></div><a class="mtg-btn" href="/audrey">Open Audrey →</a></section>'+
  '<details class="mtg-deep" id="mtg-deep"><summary>Open the full operating ledger and detailed diagnostics</summary></details></div>';
  if(app)app.parentNode.insertBefore(h,app);else document.body.appendChild(h);
- document.getElementById('mtg-deep').addEventListener('toggle',function(){app.style.display=this.open?'block':'none';if(this.open)app.scrollIntoView({behavior:'smooth'});});
+ /* integration: the stylesheet hides #app with !important, which beat this inline style, so the ledger never opened; toggle a body class the stylesheet honours */document.getElementById('mtg-deep').addEventListener('toggle',function(){document.body.classList.toggle('meeting-ledger-open',this.open);if(this.open&&app)app.scrollIntoView({behavior:'smooth'});});
  loadHome();
 }
 function loadHome(){

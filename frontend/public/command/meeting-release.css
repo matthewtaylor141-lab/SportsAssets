@@ -105,3 +105,9 @@ body.meeting-home #app{display:none!important}.mtg-deep{margin-top:11px}.mtg-dee
  .mtg-capital{grid-template-columns:1fr}.mtg-team-grid{display:grid;grid-auto-flow:column;grid-auto-columns:76%;grid-template-columns:none;overflow-x:auto;scroll-snap-type:x mandatory}.mtg-agent{scroll-snap-align:start}.mtg-workspaces{grid-template-columns:1fr 1fr}
  body.meeting-real-floor .fl-screen{padding-left:0!important;padding-top:89px!important}.meeting-real-floor .fl-roster{left:10px!important;right:10px!important}
 }
+
+/* integration (meeting): at phone width a long state chip on the restored floor ran 7px past the viewport; let chips wrap and shrink instead */
+@media(max-width:520px){.meeting-real-floor .fl-chip{white-space:normal;max-width:100%;min-width:0;flex-wrap:wrap}.meeting-real-floor .fl-chip~.fl-chip,.meeting-real-floor :has(>.fl-chip){flex-wrap:wrap;min-width:0;max-width:100%}}
+/* integration (meeting): this release supersedes the HQ3 home hero; one executive first impression, not two stacked heroes */
+body.meeting-home #bt-hq3-home{display:none!important}
+body.meeting-home.meeting-ledger-open #app{display:block!important}
