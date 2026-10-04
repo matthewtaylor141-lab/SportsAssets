@@ -693,3 +693,10 @@ tests/test_p5_focus_universe.py
 # executable price; stale, crossed, gapped, other-symbol, mapped-to-another
 # and no-edge stream books write a REFUSED proof with Venue.place ZERO times.
 tests/test_p5_c12_decision_proof.py
+# cand24 Xavier freshness, measured without conflating two things: freshness
+# quality is MARKET_EVENT reviews on a fresh probability; scheduled reviews
+# of unchanged provider quotes are counted as correctly stale (informational)
+# and excluded; market change -> review SLA with median / p90; open positions
+# monitored inside their due bound; discretion only on fresh evidence.
+# Measurement only: the scorecard writes nothing and relabels nothing.
+tests/test_xavier_freshness_scorecard.py
