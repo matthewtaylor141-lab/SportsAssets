@@ -228,8 +228,13 @@ async def tick(pool, *, pacing: float = READ_PACING_BASE_S) -> dict:
     at = datetime.now(tz=timezone.utc)
     bucket = sc.bucket_of(at)
     tick_i = sc.tick_index(at)
+    # THE BUCKET TRAVELS AS ISO-8601 TEXT: these stats are the heartbeat's
+    # detail, and db.heartbeat serializes strictly (no blanket default=) --
+    # a datetime here raised "Object of type datetime is not JSON
+    # serializable" on every tick and the loop's heartbeat never landed.
     stats = {"status": "ok", "cycle": sc.cycle_of(at),
-             "bucket": bucket, "tick": tick_i, "sampled": True,
+             "bucket": bucket.astimezone(timezone.utc).isoformat(),
+             "tick": tick_i, "sampled": True,
              "universe": sc.UNIVERSE_VERSION,
              "ruleSha": sc.RULE_SHA[:16],
              "rotationSlices": sc.ROTATION_SLICES,
