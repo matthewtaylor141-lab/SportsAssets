@@ -217,9 +217,25 @@ function renderHomeFloor(f){
   if(st){st.innerHTML='<i></i>'+esc(human(workState(x)))+' · '+esc(age(x.heartbeat&&x.heartbeat.at))+' ago';st.setAttribute('data-tone',workTone(workState(x)));}
   if(dt)dt.textContent=workDetail(x);
  });
+ // Management attention: derived from recorded signals only (there is no
+ // `alerts` field on a floor agent; reading one always said "no alert").
+ var top=companyAttention(f);
+ if(top){
+  var t=top.top?nameOf(top.top.agent,as)+' · '+top.top.title:'No recorded attention item';
+  var sub=top.top?top.top.text+(top.count>1?' · +'+(top.count-1)+' more recorded item'+(top.count>2?'s':''):''):'Read: '+top.read.join(', ')+'. Nothing blocked, waiting, challenged or failing.';
+  own('mtg-attn',t);own('mtg-attn-sub',sub);
+  own('hq6-attn',top.top?nameOf(top.top.agent,as)+' needs attention':'No recorded attention item');
+  own('hq6-attn-p',top.top?top.top.title+' — '+top.top.text:'Nothing blocked, waiting, challenged or failing in the current floor read.');
+  own('hq6-attn-t',top.top?'Recorded signal · '+top.top.source:'Sources read: '+top.read.join(', '));
+  // hq6's brief is built after the homepage settles; claim it as soon as it exists
+  if(!document.getElementById('hq6-attn')&&(renderHomeFloor.retry=(renderHomeFloor.retry||0)+1)<=20)setTimeout(function(){if(lastFloor)renderHomeFloor(lastFloor);},500);
+ }
 }
 function pollFloorHome(){
- function tick(){fetchJSON('/api/command/floor').then(renderHomeFloor).catch(function(){});}
+ function tick(){fetchJSON('/api/command/floor').then(renderHomeFloor).catch(function(){
+  if(lastFloor)return; // the last good read stays, labelled by its own age
+  own('mtg-attn','FLOOR READ UNAVAILABLE');own('mtg-attn-sub','No attention state is shown without the floor record.');
+ });}
  tick();floorTimer=setInterval(function(){if(!document.hidden)tick();},10000);
 }
 function renderCapital(st){
@@ -404,37 +420,164 @@ function updateFloorHud(){
 }
 
 /* ───────────────── AGENT PAGES · mission-first management UX ───────── */
+/* Role framing is static identity (what each person is for). Every value
+   shown beside it comes from the agent's own floor/detail read. */
+var ROLE={
+ derek:{eyebrow:'ENTRY DECISIONS · DISCOVERY',out:'Latest decision',metric:'Decision record'},
+ karen:{eyebrow:'RED TEAM · EVIDENCE CHALLENGES',out:'Latest challenge',metric:'Open challenges raised'},
+ scout:{eyebrow:'MARKET INTELLIGENCE · RESEARCH',out:'Latest research output',metric:'Research output'},
+ eddie:{eyebrow:'EXECUTION QUALITY · SHADOW',out:'Latest execution estimate',metric:'Execution estimate'},
+ allocator:{eyebrow:'CAPITAL ALLOCATION · SHADOW SLEEVE',out:'Latest allocation run',metric:'Allocation'},
+ audrey:{eyebrow:'AUDIT · RECONCILIATION',out:'Latest finding',metric:'Audit findings'},
+ xavier:{eyebrow:'PORTFOLIO MANAGEMENT · OPEN POSITIONS',out:'Latest management review',metric:'Positions under management'}
+};
 function installAgent(){
- var m=PATH.match(AGENT_PATH);if(!m)return; var slug=m[1];
+ var m=PATH.match(AGENT_PATH);if(!m)return; var slug=m[1],role=ROLE[slug];
  document.body.classList.add('command-final-agent');
  var tries=0;
  function go(){
   var work=document.querySelector('.hq6-agent-work'),person=document.querySelector('.hq6-agent-person');
   if(!work||!person){if(tries++<60)setTimeout(go,150);return;}
   if(document.getElementById('cf-agent-mission'))return;
-  var mission=document.createElement('section');mission.id='cf-agent-mission';mission.className='cf-agent-mission';
-  mission.innerHTML='<header><div><span class="cf-eyebrow">CURRENT MISSION</span><h2 id="cf-am-title">Reading '+(slug==='allocator'?'Allie':slug.replace(/^./,function(c){return c.toUpperCase();}))+'’s work</h2><p id="cf-am-detail">Only recorded work is shown.</p></div><span class="cf-work-chip" id="cf-am-state">READING</span></header>'+
-   '<div class="cf-mission-grid"><div><span>Queue</span><b id="cf-am-queue">—</b><small id="cf-am-queue-sub">recorded tasks</small></div><div><span>Latest output</span><b id="cf-am-output">—</b><small id="cf-am-output-sub">recorded decision</small></div><div><span>Collaborating</span><b id="cf-am-peer">—</b><small id="cf-am-peer-sub">durable handoff</small></div><div><span>Management attention</span><b id="cf-am-attn">—</b><small>recorded alerts only</small></div></div>';
+  var mission=document.createElement('section');mission.id='cf-agent-mission';mission.className='cf-agent-mission cf-role-'+slug;
+  var seat=window.BTFloor&&BTFloor.BY_SLUG&&BTFloor.BY_SLUG[slug];if(seat)mission.style.setProperty('--cf-a',seat.accent);
+  var nm=slug==='allocator'?'Allie':slug.replace(/^./,function(c){return c.toUpperCase();});
+  mission.innerHTML='<header><div><span class="cf-eyebrow">CURRENT MISSION · '+esc(role.eyebrow)+'</span><h2 id="cf-am-title">Reading '+esc(nm)+'’s work</h2><p id="cf-am-detail">Only recorded work is shown.</p></div><span class="cf-work-chip" id="cf-am-state">READING</span></header>'+
+   '<div class="cf-mission-grid"><div><span>Queue</span><b id="cf-am-queue">—</b><small id="cf-am-queue-sub">recorded tasks</small></div><div><span>'+esc(role.out)+'</span><b id="cf-am-output">—</b><small id="cf-am-output-sub">recorded output</small></div><div><span>Collaborating</span><b id="cf-am-peer">—</b><small id="cf-am-peer-sub">durable handoff</small></div><div class="cf-am-attn-cell"><span>Management attention</span><b id="cf-am-attn">—</b><small id="cf-am-attn-sub">recorded signals only</small></div><div class="cf-am-role-cell"><span>'+esc(role.metric)+'</span><b id="cf-am-role">—</b><small id="cf-am-role-sub">from '+esc(nm)+'’s own record</small></div></div>';
   work.insertBefore(mission,work.firstChild);
-  function tick(){fetchJSON('/api/command/floor/'+slug).then(renderMission).catch(function(){});}
+  var ok=false;
+  function tick(){fetchJSON('/api/command/floor/'+slug).then(function(d){ok=true;renderMission(d,slug);}).catch(function(e){
+   if(ok)return; // the last good read stays on screen
+   setText('cf-am-state','UNAVAILABLE');setText('cf-am-title','Current work unavailable');
+   setText('cf-am-detail','The workspace read failed ('+(e&&e.message||'network')+'). No state is inferred.');
+   setText('cf-am-attn','UNAVAILABLE');setText('cf-am-attn-sub','attention sources not read');
+   setText('cf-am-role','UNAVAILABLE');setText('cf-am-role-sub','role record not read');
+  });}
   tick();setInterval(function(){if(!document.hidden)tick();},8000);
  }
  go();
 }
-function renderMission(d){
+function monitorOf(a,re){var ms=a&&a.monitor||[];for(var i=0;i<ms.length;i++){if(re.test(ms[i].label||''))return ms[i];}return null;}
+function mval(m){return m&&m.value!=null?m.value:null;}
+/* one role-specific metric per person, only from what the payload carries */
+function roleMetric(slug,d,a){
+ var outs=d&&d.outputs||[],lo=a.last_output||a.focus||null,ch=a.challenges||{},wc=a.work_counts;
+ var undeployed=a.deployed===false?'Not deployed ('+(a.deploy_why||'reason not recorded')+')':null;
+ function U(why){return {b:'UNAVAILABLE',s:why};}
+ if(undeployed)return U(undeployed);
+ if(slug==='derek'){
+  var dec=outs.filter(function(o){return o.kind==='paper_decisions';});
+  var n24=mval(monitorOf(a,/^Decisions/)),e24=mval(monitorOf(a,/^ENTER/));
+  if(!dec.length&&n24==null)return U('no paper decision in this read');
+  var refused=dec.filter(function(o){return o.verdict==='REFUSE';});
+  var why=refused[0]&&String(refused[0].summary||'').split(' · ').slice(1).join(' · ');
+  return {b:n24!=null?n24+' decisions · '+(e24!=null?e24:'?')+' ENTER (24h)':dec.length+' recent decisions listed',
+   s:(dec.length?refused.length+' of the last '+dec.length+' refused':'no decision listed')+(why?' · latest refusal: '+why:'')};
+ }
+ if(slug==='karen'){
+  var open=ch.raised_open!=null?ch.raised_open:mval(monitorOf(a,/^Open challenges/));
+  var r24=mval(monitorOf(a,/^Raised/));
+  if(open==null)return U('challenge counts not read');
+  var tg={};(d&&d.challenges&&d.challenges.given||[]).forEach(function(x){if(/^(OPEN|RESPONDED)$/.test(String(x.state||'')))tg[x.target_agent]=(tg[x.target_agent]||0)+1;});
+  var tgs=Object.keys(tg).map(function(k){return nameOf(k)+' '+tg[k];});
+  return {b:open+' open',s:(r24!=null?r24+' raised (24h)':'24h count not read')+(tgs.length?' · against '+tgs.join(', '):'')};
+ }
+ if(slug==='scout'){
+  var feat=mval(monitorOf(a,/^Features/));
+  if(feat==null&&!lo)return U('no research record in this read');
+  return {b:feat!=null?feat+' features registered':'Count not read',s:lo?'latest proposal '+age(lo.at)+' ago · research shadow only':'no feature recorded'};
+ }
+ if(slug==='eddie'){
+  var est=outs.filter(function(o){return /eddie/.test(o.kind||'');})[0]||(lo&&/eddie/.test(lo.kind||'')?lo:null);
+  var n=mval(monitorOf(a,/^Estimates/));
+  if(!est&&n==null)return U('no execution estimate in this read');
+  var keys=est?Object.keys(est).filter(function(k){return /spread|depth|slippage|executable_edge/.test(k)&&est[k]!=null;}):[];
+  return {b:n!=null?n+' estimates (24h)':'24h count not read',
+   s:keys.length?keys.map(function(k){return k.replace(/_/g,' ')+' '+est[k];}).join(' · '):'spread / depth / slippage not carried by this read'};
+ }
+ if(slug==='allocator'){
+  var run=outs.filter(function(o){return o.kind==='intel_runs';})[0]||(lo&&lo.kind==='intel_runs'?lo:null);
+  var alloc=mval(monitorOf(a,/allocated/)),funded=mval(monitorOf(a,/^Funded/)),ranked=mval(monitorOf(a,/^Candidates/));
+  if(!run&&alloc==null)return U('no allocation run in this read');
+  return {b:alloc!=null?alloc+' SHADOW allocated':'Allocation not read',s:(funded!=null?funded+' funded':'funded not read')+(ranked!=null?' of '+ranked+' ranked':'')+' · notional SHADOW sleeve'};
+ }
+ if(slug==='audrey'){
+  var f24=mval(monitorOf(a,/^Findings/)),c24=mval(monitorOf(a,/^Critical/)),cov=mval(monitorOf(a,/^Coverage/));
+  var ev=(d&&d.challenges&&d.challenges.evaluated||[]).length;
+  if(f24==null&&!lo)return U('no audit record in this read');
+  return {b:(f24!=null?f24+' findings':'Findings not read')+(c24!=null?' · '+c24+' critical':'')+' (24h)',s:(cov!=null?cov+' coverage alert'+(cov===1?'':'s')+' (24h)':'coverage alerts not read')+(d&&d.challenges?' · '+ev+' challenge'+(ev===1?'':'s')+' evaluated':'')};
+ }
+ if(slug==='xavier'){
+  if(wc&&wc.open_positions!=null){
+   var stale=(wc.WAITING_FOR_FRESH_EVIDENCE||0),blk=(wc.BLOCKED_ON_MARKET_DATA||0);
+   return {b:wc.open_positions+' open',s:(wc.CURRENT!=null?wc.CURRENT+' on current reviews':'current reviews not counted')+' · '+stale+' waiting for fresh evidence'+(blk?' · '+blk+' blocked on market data':'')+(wc.UNREVIEWED?' · '+wc.UNREVIEWED+' not yet reviewed':'')};
+  }
+  var mp=mval(monitorOf(a,/Managed positions · PAPER/));
+  if(mp==null)return U('position counts not read');
+  return {b:mp+' open (PAPER)',s:'review / stale-evidence counts arrive with work_counts'};
+ }
+ return U('no role metric for this desk');
+}
+/* MANAGEMENT ATTENTION from recorded signals only. An unread source is never
+   taken as "nothing"; with no source read at all the answer is UNAVAILABLE. */
+function attentionOf(a,d){
+ var items=[],read=[],nm=nameOf(a.agent);
+ var ws=a.work_state;
+ if(ws!=null){read.push('work state');
+  if(/BLOCKED|WAITING|HANDOFF/.test(ws))items.push({rank:/BLOCKED/.test(ws)?0:/HANDOFF/.test(ws)?1:2,tone:/BLOCKED/.test(ws)?'red':'gold',title:human(ws),text:a.work_detail||'no detail recorded',source:'work_state'});
+ }
+ var c=a.challenges||{};
+ if(c.open_against!=null||c.raised_open!=null){read.push('challenges');
+  if(c.open_against>0)items.push({rank:3,tone:'gold',title:c.open_against+' open challenge'+(c.open_against===1?'':'s')+' against '+nm,text:'awaiting an answer or an independent evaluation',source:'karen_challenges'});
+  if(c.raised_open>0)items.push({rank:5,tone:'blue',title:c.raised_open+' raised challenge'+(c.raised_open===1?'':'s')+' still open',text:'awaiting the target’s answer',source:'karen_challenges'});
+ }
+ var recv=d&&d.challenges&&Array.isArray(d.challenges.received)?d.challenges.received:null;
+ if(recv){read.push('received challenges');
+  var open=recv.filter(function(x){return /^(OPEN|RESPONDED)$/.test(String(x.state||''));});
+  if(open.length&&!(c.open_against>0))items.push({rank:3,tone:'gold',title:open.length+' received challenge'+(open.length===1?'':'s')+' unresolved',text:'latest: '+String(open[0].claim||open[0].challenge_id||'').slice(0,120),source:'karen_challenges'});
+  else if(open.length&&items.length){var it=items.filter(function(x){return x.source==='karen_challenges'&&x.rank===3;})[0];if(it)it.text='latest: '+String(open[0].claim||open[0].challenge_id||'').slice(0,120);}
+ }
+ var sr=a.status_row;
+ if(sr){read.push('run status');
+  if(sr.last_error)items.push({rank:2,tone:'red',title:'Last run error',text:String(sr.last_error).slice(0,140)+(sr.errors?' · '+sr.errors+' error'+(sr.errors===1?'':'s')+' recorded':''),source:'agent_status'});
+  else if(sr.errors>0)items.push({rank:4,tone:'gold',title:sr.errors+' run error'+(sr.errors===1?'':'s')+' recorded',text:'see the run history',source:'agent_status'});
+ }
+ var hb=a.heartbeat;
+ if(hb&&hb.age_s!=null&&hb.stale_after_s!=null){read.push('heartbeat');
+  if(hb.age_s>hb.stale_after_s)items.push({rank:4,tone:'dim',title:'Heartbeat stale',text:'last heartbeat '+ageS(hb.age_s)+' ago (stale after '+ageS(hb.stale_after_s)+')',source:'heartbeat'});
+ }
+ if(a.deployed===false){read.push('deployment');items.push({rank:6,tone:'dim',title:'Not deployed',text:a.deploy_why||'reason not recorded',source:'deployment'});}
+ items.sort(function(x,y){return x.rank-y.rank;});
+ return {items:items,read:read};
+}
+function companyAttention(f){
+ var as=f&&f.agents||[];if(!as.length)return null;
+ var all=[],read={};
+ as.forEach(function(a){var r=attentionOf(a,null);r.read.forEach(function(k){read[k]=1;});r.items.forEach(function(it){if(it.rank<=4)all.push(Object.assign({agent:a.agent},it));});});
+ all.sort(function(x,y){return x.rank-y.rank;});
+ return {top:all[0]||null,count:all.length,read:Object.keys(read)};
+}
+function renderMission(d,slug){
  var a=d&&d.agent||{},s=workState(a),chip=document.getElementById('cf-am-state');
- if(chip){chip.textContent=human(s);chip.setAttribute('data-tone',workTone(s));}
- var t=document.getElementById('cf-am-title');if(t)t.textContent=human(s);
- var det=document.getElementById('cf-am-detail');if(det)det.textContent=workDetail(a);
- var q=d&&d.queue||[],qn=document.getElementById('cf-am-queue');if(qn)qn.textContent=q.length;
- var qs=document.getElementById('cf-am-queue-sub');if(qs)qs.textContent=q[0]?(q[0].title||q[0].kind||'open work'):'no open recorded queue';
- var outs=d&&d.outputs||[],on=document.getElementById('cf-am-output'),os=document.getElementById('cf-am-output-sub');
- if(on)on.textContent=outs[0]?(outs[0].verdict||outs[0].summary||'Recorded output'):'No recent output';
- if(os)os.textContent=outs[0]?age(outs[0].at)+' ago':'—';
- var tl=d&&d.timeline||[],e=tl.slice().sort(function(x,y){return(y.at||0)-(x.at||0);})[0],pn=document.getElementById('cf-am-peer'),ps=document.getElementById('cf-am-peer-sub');
- if(e){var own=a.agent,other=e.from===own?e.to:e.from,seat=window.BTFloor&&BTFloor.BY_AGENT&&BTFloor.BY_AGENT[other];if(pn)pn.textContent=seat?seat.name:other;if(ps)ps.textContent=String(e.kind||'collaboration').replace(/_/g,' ').toLowerCase()+' · '+age(e.at)+' ago';}
- else if(pn)pn.textContent='No current handoff';
- var alerts=a.alerts||d.alerts||[],an=document.getElementById('cf-am-attn');if(an)an.textContent=alerts.length?(alerts[0].message||alerts[0].summary||alerts[0].code||'Attention required'):'None recorded';
+ if(chip){chip.textContent=human(s);chip.setAttribute('data-tone',workTone(s));chip.title=a.work_state?'work_state '+a.work_state:'legacy state '+(a.state||'UNKNOWN')+' (work_state not served)';}
+ setText('cf-am-title',human(s));
+ setText('cf-am-detail',workDetail(a));
+ var q=d&&d.queue||[];setText('cf-am-queue',q.length);
+ setText('cf-am-queue-sub',q[0]?(q[0].title||q[0].kind||'open work'):'no open recorded queue');
+ var outs=d&&d.outputs||[],o=outs[0]||a.last_output||a.focus||null;
+ setText('cf-am-output',o?(o.verdict&&o.summary&&o.summary.indexOf(o.verdict)!==0?o.verdict+' · '+o.summary:o.summary||o.verdict||'Recorded output'):'No recent output');
+ setText('cf-am-output-sub',o?(o.kind?String(o.kind).replace(/_/g,' ')+' · ':'')+age(o.at)+' ago':'nothing recorded in this read');
+ var tl=d&&d.timeline||[],e=tl.slice().sort(function(x,y){return(y.at||0)-(x.at||0);})[0];
+ if(e){var me=a.agent,other=e.from===me?e.to:e.from;setText('cf-am-peer',nameOf(other));setText('cf-am-peer-sub',String(e.kind||'collaboration').replace(/_/g,' ').toLowerCase()+' · '+(e.from===me?'to ':'from ')+nameOf(other)+' · '+age(e.at)+' ago');}
+ else{setText('cf-am-peer','No current handoff');setText('cf-am-peer-sub','no durable collaboration in the window');}
+ var at=attentionOf(a,d),an=document.getElementById('cf-am-attn');
+ if(!at.read.length){setText(an,'UNAVAILABLE');setText('cf-am-attn-sub','no attention source in this read');if(an)an.removeAttribute('data-tone');}
+ else if(!at.items.length){setText(an,'None recorded');setText('cf-am-attn-sub','read: '+at.read.join(', '));if(an)an.setAttribute('data-tone','green');}
+ else{var top=at.items[0];setText(an,top.title);setText('cf-am-attn-sub',top.text+(at.items.length>1?' · +'+(at.items.length-1)+' more':''));if(an)an.setAttribute('data-tone',top.tone);}
+ // hq6's NOW panel beside the portrait reads alerts (a field no agent has); keep its attention cell on the same truth
+ if(document.getElementById('hq6-now-attn'))own('hq6-now-attn',!at.read.length?'UNAVAILABLE':at.items.length?at.items[0].title:'None recorded');
+ var rm=roleMetric(slug,d,a);setText('cf-am-role',rm.b);setText('cf-am-role-sub',rm.s);
+ var cell=document.getElementById('cf-am-role');if(cell)cell.toggleAttribute('data-unavailable',rm.b==='UNAVAILABLE');
 }
 
 /* ───────────────── COMPANY CARDS · work-state first ────────────────── */
