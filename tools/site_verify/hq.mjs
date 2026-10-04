@@ -87,8 +87,11 @@ if (!process.env.ONLY || process.env.ONLY === "desktop") {
       catch (e) { return { error: String(e).slice(0, 200) }; }
     }, u);
   }
+  // room keys from the UNTRIMMED list (the probe body above is trimmed for the report)
   let keys = [];
-  try { keys = (JSON.parse(report.probes["/api/command/positions/rooms?book=PAPER"].body).rooms || []).map((r) => r.group_key).filter(Boolean).slice(0, 3); } catch (e) {}
+  try { keys = await page.evaluate(async () => {
+    const r = await fetch("/api/command/positions/rooms?book=PAPER"); const j = await r.json();
+    return (j.rooms || []).map((x) => x.group_key).filter(Boolean).slice(0, 3); }); } catch (e) { report.rooms_error = String(e).slice(0, 200); }
   report.rooms = [];
   for (const k of keys) {
     const detail = await page.evaluate(async (k) => {
@@ -108,8 +111,6 @@ if (!process.env.ONLY || process.env.ONLY === "desktop") {
 }
 await browser.close();
 fs.writeFileSync(`${OUT}/hq_report.json`, JSON.stringify(report, null, 1));
-for (const [u, p] of Object.entries(report.probes || {})) console.log(`probe ${p.status || "ERR"} ${p.bytes || 0}B ${u}`);
-for (const r of (report.rooms || [])) console.log(`room ${r.key} api=${r.api && r.api.status} page=${r.page_status} errors=${r.errors.length}`);
 for (const r of report.runs) {
   if (r.overflowers && r.overflowers.length) console.log("   overflow: " + JSON.stringify(r.overflowers));
   console.log(`== ${r.label} ${r.path} HTTP ${r.status} ${r.ms}ms title="${r.title}" overflowX=${r.overflowX} (${r.scrollWidth}/${r.clientWidth}) errors=${r.errors.length} SHADOW=${r.shadowLabels}${r.characters ? " characters=" + r.characters : ""}`);
@@ -117,3 +118,5 @@ for (const r of report.runs) {
   console.log("   apis: " + r.apis.join(" | ").slice(0, 1800));
   for (const s of (r.sections || [])) console.log(`   [${s.h}] unavailable=${s.unavailable} nan=${s.nan} chars=${s.chars} :: ${s.sample}`);
 }
+for (const [u, p] of Object.entries(report.probes || {})) console.log(`probe ${p.status || "ERR"} ${p.bytes || 0}B ${u}`); for (const r of (report.rooms || [])) console.log(`room ${r.key} api=${r.api && r.api.status} page=${r.page_status} errors=${r.errors.length}`);
+console.log("rooms_error " + (report.rooms_error || "none"));
