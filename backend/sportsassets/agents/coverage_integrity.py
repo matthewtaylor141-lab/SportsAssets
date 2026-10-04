@@ -41,8 +41,17 @@ per day the furthest row counts:
   venue_discovered      reach >= 4, or stopped at identity for a reason other
                         than "the venue does not list it" (VENUE_ABSENT)
   mapped                reach >= 4
-  settlement_supported  reach >= 5
-  evaluated             an ENTRY_DECISION valuation of the event that day
+  settlement_supported  reach >= 5 -- MEASURED ONLY WHEN THE LEDGER RECORDS
+                        ANY ROW PAST STAGE 4 in the window; a ledger holding
+                        collection-stage refusals only cannot say how far an
+                        event got past mapping, so the stage is NULL with
+                        R_SETTLEMENT_UNMEASURED (settlement is then decided
+                        per strategy at decision time: see decided/refused)
+  evaluated             a sealed valuation of the event that day
+                        (record_purpose ENTRY_DECISION or CALIBRATION_ONLY:
+                        while book currency is not established every
+                        valuation is sealed CALIBRATION_ONLY and the paper
+                        strategies decide on it)
 
 NEVER ZERO FOR UNMEASURED. A stage whose source table is absent or whose read
 failed is NULL, with the reason in `unavailable`; a ratio over a NULL or zero
@@ -78,6 +87,11 @@ VERSION = "COVERAGE_INTEGRITY_V1"
 TIMEZONES = ("UTC", "America/New_York")
 ALERT_TIMEZONE = "America/New_York"
 WATERMARK_KEY = "coverage_integrity_last"
+#: settlement_supported cannot be read from a ledger that records no row past
+#: stage 4 in the window (collection-stage refusals only).
+R_SETTLEMENT_UNMEASURED = ("NOT_MEASURED_BY_THE_COLLECTION_LEDGER: it records no row "
+                           "past stage 4 in this window; settlement is decided per "
+                           "strategy at decision time (see decided/refused)")
 REFRESH_EVERY_S = 900.0
 #: days re-computed each pass: today and yesterday (yesterday is finalised).
 REFRESH_DAYS = 2
@@ -234,7 +248,7 @@ EVALUATED_SQL = """
                                                  ev.id::text)) AS n
       FROM external_valuations ev
       LEFT JOIN m ON m.provider_event_id = ev.event_key
-     WHERE ev.record_purpose = 'ENTRY_DECISION'
+     WHERE ev.record_purpose IN ('ENTRY_DECISION', 'CALIBRATION_ONLY')
        AND ev.decided_at >= to_timestamp($1) AND ev.decided_at < to_timestamp($2)
      GROUP BY 1
 """ % (EVENT_LEAGUE_CTE, LEAGUE_EXPR)
@@ -371,9 +385,17 @@ async def funnel_for_day(conn, day: _dt.date, tz: str) -> dict:
         for c in prov_cols:
             unavailable_all[c] = got
     else:
+        # the ledger can measure settlement_supported only if it records
+        # rows past stage 4 at all; a refusals-only ledger reads 0 for every
+        # league, which is not a measurement (NEVER ZERO FOR UNMEASURED)
+        ss_measured = any(int(g["settlement_supported"] or 0) > 0 for g in got)
+        if got and not ss_measured:
+            unavailable_all["settlement_supported"] = R_SETTLEMENT_UNMEASURED
         for g in got:
             r = row(g["league"], g.get("family"))
             for c in prov_cols:
+                if c == "settlement_supported" and not ss_measured:
+                    continue
                 r[c] = int(g[c])
                 r["_seen"].add(c)
     sources["provider"] = "ext_candidate_outcomes"

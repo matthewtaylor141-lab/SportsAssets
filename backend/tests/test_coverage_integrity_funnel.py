@@ -107,7 +107,8 @@ def test_day_windows_are_explicit_and_dst_safe():
 # ════════════════════════════════════════════════════════════════════
 
 async def _cycle(conn, *, at, league, family, events, outcome, stage=None,
-                 refusal=None, slug=True, valued=False, tag=""):
+                 refusal=None, slug=True, valued=False, tag="",
+                 purpose="ENTRY_DECISION"):
     cid = "cyc-%s-%s-%d%s" % (league, outcome, int(at), tag)
     for i, ev in enumerate(events):
         await conn.execute(
@@ -122,11 +123,15 @@ async def _cycle(conn, *, at, league, family, events, outcome, stage=None,
                 " source_class, provider, book, devig_method, venue, "
                 " contract_selection, sport_family, market, raw_odds, "
                 " outcomes_priced, expected_outcomes, decision, admissible, "
-                " record_purpose, event_key, us_market_slug, decided_at) "
+                " record_purpose, event_key, us_market_slug, decided_at, "
+                " calibration_only_evidence) "
                 "VALUES ('TEST_COVERAGE','v','EXTERNAL_BOOKMAKER_VALUATION',"
                 " 'test','pinnacle','power','polymarket_us','home',$1,'h2h',"
-                " '{}'::jsonb,2,2,'NO_TRADE',false,'ENTRY_DECISION',$2,$3,"
-                " to_timestamp($4))", family, ev, "us-%s" % ev, at + 1)
+                " '{}'::jsonb,2,2,'NO_TRADE',false,$5,$2,$3,"
+                " to_timestamp($4), $6::jsonb)", family, ev, "us-%s" % ev,
+                at + 1, purpose,
+                None if purpose == "ENTRY_DECISION" else
+                '{"usable_for_orders": false, "basis": "TEST_COVERAGE"}')
 
 
 async def _seed(conn):
@@ -293,6 +298,46 @@ async def test_209_is_idempotent_and_its_rollback_refuses_over_alerts():
         await conn.execute(down)
         assert await conn.fetchval(
             "SELECT to_regclass('coverage_funnel_snapshots')") is None
+    finally:
+        await tx.rollback()
+        await conn.close()
+
+
+@pg
+@pytest.mark.asyncio
+async def test_a_refusals_only_ledger_leaves_settlement_unmeasured_and_raises_no_false_alert():
+    """THE PRODUCTION SHAPE (2026-10-03/04, 718b532): the collection ledger held
+    only REFUSED rows (stage NULL or 2_FRESHNESS, contract slug present), every
+    valuation was sealed CALIBRATION_ONLY, and the paper strategies decided on
+    them. settlement_supported read 0 and evaluated read 0 for every league,
+    raising ABSENT_DOWNSTREAM WARNINGs. Settlement is not measured by such a
+    ledger: it is NULL with its reason, evaluated counts the sealed valuations,
+    and no alert is raised."""
+    conn = await asyncpg.connect(H.DSN)
+    tx = conn.transaction()
+    await tx.start()
+    try:
+        mlb = ["mlbp-%d" % i for i in range(7)]
+        await _cycle(conn, at=NOW - 3600, league=MLB, family="baseball",
+                     events=mlb, outcome="REFUSED", stage=None,
+                     refusal="NO_PINNACLE_ON_EVENT", slug=True, valued=True,
+                     purpose="CALIBRATION_ONLY")
+        nc = ["ncaafp-%d" % i for i in range(5)]
+        await _cycle(conn, at=NOW - 3500, league=NCAAF,
+                     family="americanfootball", events=nc, outcome="REFUSED",
+                     stage="2_FRESHNESS",
+                     refusal="VENUE_BOOK_CURRENCY_NOT_ESTABLISHED",
+                     slug=True, valued=True, purpose="CALIBRATION_ONLY")
+        snap = await C.funnel_for_day(conn, _dt.date(2026, 9, 20),
+                                   C.ALERT_TIMEZONE)
+        for league, n in ((MLB, 7), (NCAAF, 5)):
+            r = snap["leagues"][league]
+            assert r["provider_events"] == n and r["mapped_events"] == n
+            assert r["settlement_supported"] is None
+            assert r["unavailable"]["settlement_supported"] == \
+                C.R_SETTLEMENT_UNMEASURED
+            assert r["evaluated_events"] == n
+            assert C.detect(r, []) == []
     finally:
         await tx.rollback()
         await conn.close()
