@@ -62,8 +62,12 @@ async def account(conn, tag="ops", now=NOW - 10 * 86400):
 
 async def decision(conn, acct, *, at, slug=None, side="LONG",
                    verdict="ENTER", refusals=(), strategy=EXPLORATION,
-                   p=0.6, qty=100, limit=0.40, did=None) -> str:
-    """A paper decision row with paper_benchmark's columns."""
+                   p=0.6, qty=100, limit=0.40, did=None, pinnacle=None,
+                   valuation_id=None, book_obs_id=None,
+                   economics=None) -> str:
+    """A paper decision row with paper_benchmark's columns. `pinnacle` is
+    the decision's pinnacle record ({p, age_s, limit_s, qualification} as
+    paper_benchmark writes it); p=None records no probability at all."""
     did = did or "paperdec:%s" % uuid.uuid4().hex[:24]
     refusals = list(refusals)
     await conn.execute(
@@ -72,15 +76,18 @@ async def decision(conn, acct, *, at, slug=None, side="LONG",
         " verdict, refusal, refusals, p_internal, internal_model, "
         " p_pinnacle, pinnacle, p_blended, proposed_qty, limit_price, "
         " qualification_gaps, policy_version, policy_decision, "
-        " simulator_version, strategy, economics) VALUES ($1,$2,$3,"
+        " simulator_version, strategy, economics, valuation_id, "
+        " book_obs_id) VALUES ($1,$2,$3,"
         " to_timestamp($4),$5,$6,'ORDER_INTENT_BUY_LONG','fx-1','{}'::jsonb,"
-        " $7,$8,$9,NULL,'{}'::jsonb,$10,'{}'::jsonb,$10,$11,$12,'[]'::jsonb,"
-        " 'TEST_POLICY_V1','{}'::jsonb,'TEST',$13,'{}'::jsonb)",
+        " $7,$8,$9,NULL,'{}'::jsonb,$10,$14::jsonb,$10,$11,$12,'[]'::jsonb,"
+        " 'TEST_POLICY_V1','{}'::jsonb,'TEST',$13,$15::jsonb,$16,$17)",
         did, acct["session_id"], acct["account_id"], float(at),
         slug or "aec-test-%s" % uuid.uuid4().hex[:8], side, verdict,
         None if verdict == "ENTER" else (refusals[0] if refusals
                                          else "BELOW_MIN_GROSS_EDGE"),
-        refusals, float(p), float(qty), float(limit), strategy)
+        refusals, None if p is None else float(p), float(qty), float(limit),
+        strategy, json.dumps(pinnacle or {}), json.dumps(economics or {}),
+        valuation_id, book_obs_id)
     return did
 
 
@@ -134,6 +141,38 @@ async def position(conn, acct, *, strategy=EXPLORATION, slug=None, qty=100,
             float(settle_at if settle_at is not None else at + 3600))
     return {"group_id": gid, "slug": slug, "position_key": pk,
             "order_id": oid}
+
+
+async def exit_fill(conn, acct, pos: dict, *, qty, price, at,
+                    strategy=EXPLORATION, fee=0.0) -> str:
+    """Xavier's EXIT of a position: a filled SELL order + fill on the same
+    group (the ledger's own tables, as F.position writes the ENTRY)."""
+    oid = "paperord:opsx%s" % uuid.uuid4().hex[:10]
+    await conn.execute(
+        "INSERT INTO paper_orders (order_id, idempotency_key, account_id, "
+        " session_id, group_id, role, direction, holding_side, intent, "
+        " us_market_slug, fixture, label, order_type, time_in_force, "
+        " allow_partial, qty, limit_price, wire_price, filled_qty, state, "
+        " decided_at, eligible_at, expires_at, simulator_version, strategy, "
+        " terminal_at) VALUES ($1,$1,$2,$3,$4,'EXIT','SELL','LONG',"
+        " 'ORDER_INTENT_SELL_LONG',$5,$6,'{}'::jsonb,'MARKETABLE','IOC',"
+        " true,$7,$8,$8,$7,'FILLED',to_timestamp($9),to_timestamp($9),"
+        " to_timestamp($9 + 90),$10,$11,to_timestamp($9 + 2))",
+        oid, acct["account_id"], acct["session_id"], pos["group_id"],
+        pos["slug"], "fx-" + pos["slug"], qty, price, float(at),
+        SIM_VERSION, strategy)
+    fid = "paperfill:opsx%s" % uuid.uuid4().hex[:10]
+    await conn.execute(
+        "INSERT INTO paper_fills (fill_id, idempotency_key, order_id, "
+        " account_id, session_id, group_id, role, direction, holding_side, "
+        " us_market_slug, fixture, label, qty, price, wire_price, fee_usd, "
+        " gross_usd, filled_at, basis, simulator_version, strategy) VALUES "
+        " ($1,$1,$2,$3,$4,$5,'EXIT','SELL','LONG',$6,$7,'{}'::jsonb,$8,$9,"
+        " $9,$10,$11,to_timestamp($12),'DEPTH_WALK_WITHIN_LIMIT',$13,$14)",
+        fid, oid, acct["account_id"], acct["session_id"], pos["group_id"],
+        pos["slug"], "fx-" + pos["slug"], qty, price, fee,
+        round(qty * price, 6), float(at) + 2, SIM_VERSION, strategy)
+    return fid
 
 
 async def stale_hold_review(conn, acct, *, group_id, at,

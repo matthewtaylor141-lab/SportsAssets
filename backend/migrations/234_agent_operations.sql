@@ -77,6 +77,10 @@
 --                                  session), EFFECT_MEASURED (runner, the
 --                                  measured before / after defect rate),
 --                                  CLOSED (human only), REOPENED.
+--      paper_xavier_reviews_at_idx a read-only time index for the rule
+--                                  measurements over Xavier's reviews (the
+--                                  cluster runner's before / after, the
+--                                  agent scorecards' census, section 18).
 --   §4 the 217 authority-guard registry gains the two governance tables
 --      (agent_lesson_supersessions, improvement_cluster_events): a session
 --      declared as Eddie or Scout can write neither, and neither can name
@@ -652,6 +656,17 @@ CREATE INDEX IF NOT EXISTS improvement_cluster_events_cluster_idx
     ON improvement_cluster_events (cluster_id, at, event_id);
 CREATE UNIQUE INDEX IF NOT EXISTS improvement_cluster_events_one_opened
     ON improvement_cluster_events (cluster_id) WHERE kind = 'OPENED';
+
+-- THE RULE TABLE'S TIME INDEX. The cluster runner's before / after rule
+-- measurement (improvement_clusters.rule_rate) and the scorecards' Xavier
+-- false-approval census (agent_scorecards, owner R30 section 18) read
+-- paper_xavier_reviews by reviewed_at over a window; the table's only
+-- secondary index is (group_id, reviewed_at DESC), so each such read was a
+-- sequential scan of every review ever written (production: ~16,000 a day,
+-- research-sql run 37226555657). A plain b-tree that only reads use;
+-- nothing decides from it.
+CREATE INDEX IF NOT EXISTS paper_xavier_reviews_at_idx
+    ON paper_xavier_reviews (reviewed_at);
 
 -- ORDER: OPENED first; after CLOSED only REOPENED; EFFECT_MEASURED only
 -- after a FIX_LINKED (since the last REOPENED); a session that declared

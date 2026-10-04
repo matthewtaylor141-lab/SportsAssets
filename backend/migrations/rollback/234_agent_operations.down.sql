@@ -6,8 +6,8 @@
 -- root-cause cluster or its events. Those are the record of what each agent
 -- owed, tried and learned, and are never dropped as cleanup. With none,
 -- drops cleanly: 226's tables lose only the 234 columns, constraints and
--- triggers (their 226 CHECKs restored), and the 217 registry returns to
--- 225's list.
+-- triggers (their 226 CHECKs restored), paper_xavier_reviews loses the
+-- read-only time index, and the 217 registry returns to 225's list.
 DO $$
 BEGIN
     IF (to_regclass('agent_work_requests') IS NOT NULL AND EXISTS (
@@ -28,6 +28,7 @@ BEGIN
     END IF;
 END $$;
 
+DROP INDEX IF EXISTS paper_xavier_reviews_at_idx;
 DROP TABLE IF EXISTS improvement_cluster_events;
 DROP TABLE IF EXISTS improvement_clusters;
 DROP TABLE IF EXISTS agent_lesson_supersessions;

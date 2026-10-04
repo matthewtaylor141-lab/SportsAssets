@@ -822,6 +822,16 @@ try:
 except ImportError:
     log.warning("clusters: api.command_improvement_clusters not loaded",
                 exc_info=True)
+# ── AGENT SCORECARDS (owner R30 section 18): /api/command/agent-scorecards.
+# GET only, COMMAND auth, one READ ONLY transaction with a statement
+# timeout. Decision and economic quality per agent, never activity counts;
+# no route here writes, approves or changes a threshold.
+try:
+    from .command_agent_scorecards import router as _command_scd_router
+    app.include_router(_command_scd_router)
+except ImportError:
+    log.warning("scorecards: api.command_agent_scorecards not loaded",
+                exc_info=True)
 # ── THE LOST OPPORTUNITY READS (migration 220): /api/command/profitability/
 # lost-opportunities and /opportunity-scores. GET only, COMMAND auth, READ
 # ONLY transactions. RESEARCH: no route here writes or has authority.
