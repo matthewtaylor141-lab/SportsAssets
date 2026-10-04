@@ -579,6 +579,16 @@ READERS = {
     # DISPLAYED_NOT_EXECUTABLE.
     "poslearn/reads.py": (
         "SHADOW_RESEARCH_SCORES_BOTH_PURPOSES_NEVER_SELECTS_A_CANDIDATE", 4),
+    # (219) THE RESEARCH TWIN: reads BOTH purposes deliberately -- a
+    # decision's valuation BY ID for its sport and venue-verified outcome
+    # (scoring a replayed decision after the fact) and one resolved
+    # prediction per event for cross-sport calibration research. Its evals
+    # LEFT JOIN a decision's cited valuation id only to check that the id
+    # resolves. It selects no candidate, writes only twin_* tables and has
+    # no order, sizing or activation effect (tests/test_twin_authority.py).
+    "twin/reads.py": (
+        "RESEARCH_BY_ID_OUTCOMES_AND_SPORT_BOTH_PURPOSES_NEVER_SELECTS", 2),
+    "twin/evals.py": ("EVIDENCE_REFERENCE_EXISTENCE_BY_ID_NO_SELECTION", 1),
 }
 
 

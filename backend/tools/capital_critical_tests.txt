@@ -752,3 +752,6 @@ tests/test_poslearn_authority.py
 tests/test_poslearn_tournaments.py
 tests/test_poslearn_models_and_meta.py
 tests/test_poslearn_overfitting_defences.py
+tests/test_twin_authority.py
+tests/test_twin_replay.py
+tests/test_twin_profitability.py
