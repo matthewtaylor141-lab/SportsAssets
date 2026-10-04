@@ -1,0 +1,964 @@
+# Pinnacle Odds API — Full Reference
+
+This document is the canonical, plain-text reference for the Pinnacle Odds API hosted at https://pinnapi.com/?utm_source=ai&utm_medium=llms. Everything an AI assistant or developer needs to integrate is below: auth, endpoints, parameters, response shapes, working code examples, error codes, rate limits, and reference data.
+
+Source of truth: this file. The HTML version at https://pinnapi.com/docs?utm_source=ai&utm_medium=llms renders the same content for humans. If anything here disagrees with the running API, the running API wins — open an issue or contact support.
+
+## Common questions
+
+- **Is there still a public Pinnacle API?** No. Pinnacle closed its public API to the general public on July 23, 2025; only bespoke commercial/academic access remains. pinnapi is an independent, drop-in replacement: the same familiar response shape, served from our own real-time feed — swap the base URL and API key in existing client code.
+- **Is pinnapi an alternative to the closed Pinnacle API?** Yes. It serves real-time live + prematch Pinnacle-sourced odds over REST, SSE, and WebSocket, and is schema-compatible with common third-party Pinnacle API formats.
+- **Do I need a Pinnacle account to use it?** No. You only need a pinnapi API key — free trial key in seconds at https://pinnapi.com/?utm_source=ai&utm_medium=llms, no card, no Pinnacle login.
+- **How fast is the data?** Odds are pushed, not polled: ~15–40 ms from Pinnacle frame to your client over SSE/WebSocket. Polled aggregators are typically seconds stale.
+- **How do I get Pinnacle odds in Python?** `pip install pinnapi`, then `from pinnapi import Client; api = Client("KEY"); api.markets(sport_id=1)` — real-time drop alerts via `api.stream_drops(min_drop=5)`. Official client: https://pypi.org/project/pinnapi/.
+- **How do I get Pinnacle odds in JavaScript / Node.js?** `npm install pinnapi`, then `import { Client, SPORTS } from "pinnapi"; const api = new Client("KEY"); await api.markets({ sportId: SPORTS.soccer })` — real-time alerts via `for await (const drop of api.streamDrops({ minDrop: 5 }))`. Zero dependencies, TypeScript types included: https://www.npmjs.com/package/pinnapi.
+- **How do odds-drop / steam alerts work?** Connect to the SSE stream `GET /odds-drop?key=KEY&min_drop=5` and every market whose price falls past your threshold is pushed to you the instant it happens (prematch variant: `/odds-drop-prematch`).
+- **Does it have historical odds data?** No — pinnapi is a real-time feed (live + prematch). For history, buffer the stream yourself or use `/api/drops` for recent drops.
+- **Is pinnapi affiliated with Pinnacle?** No. pinnapi is an independent service and is not affiliated with or endorsed by Pinnacle.
+
+---
+
+## Overview
+
+Real-time live and prematch sports odds, pulled directly from Pinnacle's MQTT WebSocket broker (`wss://api.arcadia.pinnacle.com/ws`) and exposed through four surfaces:
+
+1. **REST endpoints** under `/kit/v1/*` — same response shape as common third-party Pinnacle APIs, drop-in compatible. Use these for snapshots, polling, or one-off lookups.
+2. **Queryable drops buffer** at `/api/drops` — recent dropping-odds events with filters. Use this when you want a list of "what just dropped" without keeping a connection open.
+3. **Server-Sent Events streams** at `/odds-drop` (live) and `/odds-drop-prematch` — push-based, sub-second latency from a Pinnacle price move to your code seeing it. Use these for arb, EV bots, alert systems.
+4. **WebSocket passthrough** at `/ws/feed` ($99/mo add-on, REST-bearing plans only) — every raw Pinnacle MQTT frame and prematch REST snapshot forwarded byte-identical, including market open/close/settle signals. Use this when you want to rebuild Pinnacle's full state machine on your side. NOT the same as `/odds-drop` SSE.
+
+Base URL for examples below: `https://pinnapi.com/?utm_source=ai&utm_medium=llms`.
+
+Coverage: Soccer, Tennis, Basketball, Hockey, Football, Baseball, Rugby, MMA, Boxing, an "Other" bucket (Volleyball, Handball), Esports, and Golf (head-to-heads / outrights). Markets: moneyline, spreads, totals, team totals — across every period (full match, halves, quarters, sets, etc.). Note: Golf is moneyline-only — Pinnacle does not provide spreads/totals for Golf. Special markets — Player Props, Team Props, Exact Scores, futures — are available on the prematch endpoints via `include_specials=1`.
+
+---
+
+## Authentication
+
+There are **two separate auth schemes** depending on the surface you're calling.
+
+### REST API key (for /kit/v1/*, /api/drops, /health, /panel/api/*)
+
+Sign up at https://pinnapi.com/panel/api/signup with an email — you get back an API key once. That key is your only credential; there is no password.
+
+Pass the key in **one of three** ways, in priority order:
+
+1. `x-portal-apikey: YOUR_KEY` header — recommended
+2. `x-api-key: YOUR_KEY` header
+3. `?key=YOUR_KEY` query parameter — handy for browsers and curl one-liners
+
+Failure: HTTP 401 with `{"error":"missing_key"}` or `{"error":"invalid_key"}`.
+
+### SSE token (for /odds-drop, /odds-drop-prematch)
+
+Two paths accepted:
+
+1. **API key path** — same header or `?key=` as above; the user's plan must have `features.sse: true` (Drops, Edge, or Scale tier).
+2. **Legacy token path** — `?token=YOUR_SSE_TOKEN` against the `SSE_TOKENS` env on the server. Used by admin/operator clients; ordinary customers use path 1.
+
+Failure: the response is HTTP 401 or 403 **but the body is SSE-framed**, not JSON, so EventSource clients can read the reason via `onmessage`. Look for `data: {"type":"error","error":"...","message":"..."}`.
+
+Trial users CANNOT connect to SSE — upgrade to Drops ($99/mo), Edge ($149/mo), or Scale ($229/mo).
+
+---
+
+## REST Endpoints
+
+### GET /kit/v1/markets
+
+Returns every event for a sport with all markets across every period. Live by default; pass `event_type=prematch` to switch feeds. Same envelope shape for both — only the per-event `event_type` field differs.
+
+**Query parameters:**
+
+| Name | Type | Required | Description |
+|---|---|---|---|
+| `sport_id` | int | yes | Sport ID, see "Sport IDs" section below |
+| `event_type` | "live" \| "prematch" | no | Defaults to `live`. Pass `prematch` to receive prematch fixtures with the same envelope. |
+| `since` | int | no | Return only events with `last > since` (incremental polling) |
+| `is_have_odds` | 0 \| 1 | no | Legacy compat — accepted and ignored. We always return events with odds. |
+| `include_specials` | 0 \| 1 | no | Off by default. Pass `1` to also return special-market events — Player Props, Team Props, Exact Scores, futures. Each special is a separate event linked to its main match by `parent_id`, carrying `special` (market name), `special_category`, and prices under `special_markets` (keyed by period, e.g. `num_0`) instead of the standard `periods` tree. Category labels vary by sport (baseball & basketball use "Player Props"; soccer uses "Team Props"; some are blank) — match on the fields you need. Specials do not fire drop alerts. |
+
+**Example request:**
+
+```
+curl -H "x-portal-apikey: $KEY" \
+  "https://pinnapi.com/kit/v1/markets?sport_id=2&event_type=live"
+```
+
+**Example response (live, soccer trimmed):**
+
+```json
+{
+  "sport_id": 2,
+  "sport_name": "Tennis",
+  "last": 297592,
+  "last_call": 297592,
+  "events": [
+    {
+      "event_id": 1628594960,
+      "sport_id": 2,
+      "league_id": 2037,
+      "league_name": "ATP Madrid",
+      "starts": "2026-04-17T12:00:00Z",
+      "last": 1776430365,
+      "home": "Carlos Alcaraz",
+      "away": "Jannik Sinner",
+      "event_type": "live",
+      "live_status_id": 1,
+      "parent_id": 1628594613,
+      "is_have_odds": true,
+      "is_have_periods": true,
+      "periods": {
+        "num_0": {
+          "number": 0,
+          "description": "Game",
+          "money_line": { "home": 2.45, "away": 1.55 },
+          "spreads": {
+            "-1.5": { "hdp": -1.5, "home": 2.06, "away": 1.82, "max": 500 }
+          },
+          "totals": {
+            "22.5": { "points": 22.5, "over": 1.90, "under": 1.98, "max": 500 }
+          },
+          "team_total": {
+            "home": { "points": 11.5, "over": 1.86, "under": 2.00 }
+          },
+          "team_totals": {
+            "home": {
+              "10.5": { "points": 10.5, "over": 1.55, "under": 2.45, "max": 100 },
+              "11.5": { "points": 11.5, "over": 1.86, "under": 2.00, "max": 100 },
+              "12.5": { "points": 12.5, "over": 2.30, "under": 1.65, "max": 100 }
+            },
+            "away": {}
+          },
+          "meta": { "number": 0, "max_total": 500, "home_score": 5, "away_score": 4 }
+        }
+      },
+      "state": {
+        "match": { "set": 2 },
+        "home": { "serving": true, "setsWon": 1, "points": "30", "gamesBySet": [6,2,0,0,0] },
+        "away": { "serving": false, "setsWon": 0, "points": "15", "gamesBySet": [4,5,0,0,0] },
+        "home_stats": [{ "period": 0 }, { "period": 1 }],
+        "away_stats": [{ "period": 0 }, { "period": 1 }]
+      }
+    }
+  ]
+}
+```
+
+**Live game-state (`state` field):** Live events include a `state` object passed through from Pinnacle exactly as they publish it on MQTT. Field names are sport-specific and NOT renamed. `state` is `null` on prematch and absent from the `/odds-drop` SSE stream — REST only.
+
+- `state.match` — match-level state (clock, current period). Sport-dependent: Soccer = `{state, minutes}`; Basketball = `{quarter, timeRemainingInQtr}`; Tennis = `{set}`.
+- `state.home`, `state.away` — per-participant state. Common: `score`. Sport-specific extras:
+  - Soccer: `redCards`, `yellowCards`, `corners`
+  - Basketball: `scoreByQuarter` (array)
+  - Tennis: `setsWon`, `gamesBySet` (array), `points` (string: `"0"`/`"15"`/`"30"`/`"40"`/`"Adv"`), `serving` (boolean)
+- `state.home_stats`, `state.away_stats` — array indexed by period; populated only when Pinnacle has published a stat value for that period.
+
+Fields appear in the JSON only when Pinnacle has a non-default value to publish. Treat every field as optional and code defensively. The `state` field is NOT returned by `/kit/v1/prematch/*` or by the `/odds-drop` SSE stream.
+
+**Same call for prematch:**
+
+```
+curl -H "x-portal-apikey: $KEY" \
+  "https://pinnapi.com/kit/v1/markets?sport_id=1&event_type=prematch&is_have_odds=true"
+```
+
+Returns same shape, every event has `"event_type": "prematch"`.
+
+---
+
+### GET /kit/v1/details
+
+Fetch a single live event by ID.
+
+| Name | Type | Required | Description |
+|---|---|---|---|
+| `event_id` | int | yes | Event matchup ID from a previous /markets response |
+
+```
+curl -H "x-portal-apikey: $KEY" \
+  "https://pinnapi.com/kit/v1/details?event_id=1628594960"
+```
+
+Returns `{ events: [<one event in the same shape as /markets>] }`.
+
+---
+
+### GET /kit/v1/prematch/fixtures
+
+Every prematch fixture for a sport with full markets/periods. Equivalent to `/kit/v1/markets?event_type=prematch&sport_id=X`.
+
+| Name | Type | Required | Description |
+|---|---|---|---|
+| `sport_id` | int | yes | Sport ID |
+| `since` | int | no | Incremental — only changed events |
+| `include_specials` | 0 \| 1 | no | Pass `1` to also include special-market events (Player Props, Team Props, Exact Scores, futures) — separate events linked by `parent_id` with prices under `special_markets`. Same shape as on `/kit/v1/markets`. |
+
+Each event includes a `start_ts` field as a backwards-compat alias of `starts`.
+
+```
+curl -H "x-portal-apikey: $KEY" \
+  "https://pinnapi.com/kit/v1/prematch/fixtures?sport_id=1"
+```
+
+---
+
+### GET /kit/v1/prematch/markets
+
+Single prematch event by ID. Same shape as /kit/v1/details, but reads from the prematch store. Pass `include_specials=1` to also return that match's specials (its child props/futures — events whose `parent_id` equals this `event_id`).
+
+```
+curl -H "x-portal-apikey: $KEY" \
+  "https://pinnapi.com/kit/v1/prematch/markets?event_id=1629513753"
+```
+
+---
+
+### GET /kit/v1/prematch/lines
+
+Compact line view for one prematch event — only the active prices, no period structure. Lighter payload than /markets; ideal for tickers.
+
+| Name | Type | Required | Description |
+|---|---|---|---|
+| `event_id` | int | yes | Prematch event ID |
+| `market_type` | string | no | Filter to one of `money_line`, `spreads`, `totals`, `team_total` |
+
+---
+
+### GET /api/drops
+
+Pull-style queryable buffer of recent dropping-odds events. Use for batch jobs, dashboards, or polling clients that don't want a long-lived SSE connection.
+
+| Name | Type | Description |
+|---|---|---|
+| `mode` | "live" \| "prematch" | Which feed. Defaults to `live`. |
+| `sport_id` | int | Filter to a single sport. Omit for all. |
+| `min_drop_pct` | number | Minimum drop percent (default 5). Fractional allowed. |
+| `max_drop_pct` | number | Optional cap. |
+| `max_age_sec` | int | Only drops fresher than this (max ~3 hours). |
+| `markets` | csv | Subset of `moneyline,spread,total,team_total` |
+| `periods` | csv | Period numbers (`0`=match, `1`=1st half, etc.) |
+| `live` | 0 \| 1 | Live-mode only — exclude drops on events not yet started |
+| `limit` | int | Max drops to return (default 500) |
+
+```
+# Live drops, soccer only, ≥7%, last 10 min
+curl -H "x-portal-apikey: $KEY" \
+  "https://pinnapi.com/api/drops?mode=live&sport_id=1&min_drop_pct=7&max_age_sec=600"
+
+# Prematch drops, all sports, last hour
+curl -H "x-portal-apikey: $KEY" \
+  "https://pinnapi.com/api/drops?mode=prematch&min_drop_pct=2&max_age_sec=3600"
+```
+
+Response:
+
+```json
+{
+  "total": 42,
+  "drops": [
+    {
+      "event_id": 1629725918,
+      "sport_name": "Soccer",
+      "league": "Australia - NPL Victoria",
+      "home": "Bentleigh Greens",
+      "away": "St Albans Saints",
+      "market": "spread",
+      "period": 0,
+      "side": "home",
+      "points": -0.5,
+      "from": 2.37,
+      "to": 2.25,
+      "drop_pct": 5.06,
+      "nvp": 2.21,
+      "age_s": 12,
+      "is_live": false
+    }
+  ],
+  "meta": {
+    "mode": "prematch",
+    "events_in_store": 2552,
+    "tracked_outcomes": 122035
+  }
+}
+```
+
+The `nvp` field is the no-vig fair price computed via the power method (each leg's implied probability is raised to a power C such that the sum equals 1 — Newton-iterated, ~2 iterations to converge). Compare `to` vs `nvp` to estimate edge: `(to / nvp) - 1`.
+
+---
+
+### GET /health
+
+Operational status of both feeds. Useful for dashboards and uptime monitors.
+
+```json
+{
+  "status": "healthy",
+  "source": "ws",
+  "events_in_store": 1554,
+  "version": 297592,
+  "ws_messages": 595184,
+  "rest_polls": 0,
+  "uptime_s": 11938,
+  "prematch": {
+    "enabled": true,
+    "events_in_store": 2552,
+    "rest_polls": 132,
+    "source": "rest",
+    "drops": "on"
+  }
+}
+```
+
+---
+
+### GET /ping
+
+Public liveness probe. Returns `ok` in plain text. No auth required — useful for load balancers.
+
+```
+curl https://pinnapi.com/ping?utm_source=ai&utm_medium=llms
+# ok
+```
+
+---
+
+## SSE Streams
+
+### GET /odds-drop (live)
+
+Server-Sent Events stream of live odds drops as they happen. One TCP connection, push-based, ~15–40 ms from Pinnacle price move to your code seeing it (our own measurement, see https://pinnapi.com/blog/pinnacle-api-latency-benchmark).
+
+**Auth:** API key (`?key=` or header) on a plan with `features.sse: true`, OR legacy `?token=`.
+
+```
+curl -N "https://pinnapi.com/odds-drop?key=$API_KEY"
+```
+
+**First frame** is always a connection handshake:
+```
+data: {"type": "connected", "id": "uuid-of-this-subscription"}
+```
+
+**Subsequent frames** are JSON arrays of one or more drop objects:
+```
+data: [{"home": "Sunshine Coast Phoenix", "away": "Cairns Dolphins",
+        "league": "Australia - NBL1 Women", "from_price": 2.86,
+        "to_price": 2.7, "outcome": "Home", "period": 4,
+        "sect": "Moneyline", "id": 1629729400, "sport": "Basketball",
+        "interval": 25, "alerted": 1777625196, "sport_id": 3,
+        "nvp": 3.04, "starts": 1777624200,
+        "dispatched_ms": 1777625196234, "flushed_ms": 1777625196201}]
+```
+
+Drop fields:
+- `id` — Pinnacle event ID
+- `sport`, `sport_id`, `league` — event context
+- `home`, `away` — teams/players
+- `sect` — market section (`Moneyline`, `Spread`, `Total`, `TeamTotal`)
+- `outcome` — which side moved (`Home`, `Away`, `Over`, `Under`, etc.)
+- `period` — period number (0=match, 1=1st half, etc.)
+- `point` — handicap or total line if applicable
+- `from_price`, `to_price` — old and new decimal odds
+- `nvp` — no-vig fair price for the new odds
+- `interval` — seconds of price history when the drop fired
+- `alerted` — UNIX timestamp (seconds) of the drop event
+- `starts` — UNIX timestamp of the event start time
+- `dispatched_ms`, `flushed_ms` — server-side latency markers
+
+**Node.js example:**
+```js
+import EventSource from "eventsource";
+
+const es = new EventSource(
+  `https://pinnapi.com/odds-drop?key=${API_KEY}`
+);
+
+es.onmessage = (e) => {
+  const payload = JSON.parse(e.data);
+  if (payload.type === "connected") return;
+  if (payload.type === "error") {
+    console.error("SSE error:", payload.error, payload.message);
+    return;
+  }
+  for (const drop of payload) {
+    console.log(drop.sport, drop.home, "→", drop.from_price, "→", drop.to_price);
+  }
+};
+```
+
+**Python example (with sseclient-py):**
+```python
+import json
+from sseclient import SSEClient
+
+URL = f"https://pinnapi.com/odds-drop?key={API_KEY}"
+for ev in SSEClient(URL):
+    if not ev.data: continue
+    payload = json.loads(ev.data)
+    if isinstance(payload, dict) and payload.get("type") in ("connected", "error"):
+        continue
+    for drop in payload:
+        print(drop["sport"], drop["home"], "→", drop["from_price"], "→", drop["to_price"])
+```
+
+**Per-user cap:** 1 connection per paid customer per endpoint. Opening a 2nd connection from the same key on the same endpoint evicts the previous one (reconnect-friendly — EventSource auto-reconnect after a network blip works cleanly because the dying old socket is reaped before the new one registers). `/odds-drop` (live) and `/odds-drop-prematch` are counted independently, so you can run one live + one prematch in parallel under the default cap. Need more independent connections (prod + staging, multi-server fan-out, etc.)? Email info@pinnapi.com to raise your account cap — same plan, no extra cost.
+
+**Optional `min_drop` parameter** (both `/odds-drop` and `/odds-drop-prematch`): pass `?min_drop=N` to override the default 5% drop threshold for that connection. Accepts integer or decimal percent. Floor is **1%** — values below are clamped to 1. No upper cap. Per-connection — other customers are unaffected.
+
+```
+# Default — 5% drops and above (same as today)
+curl -N "https://pinnapi.com/odds-drop?key=$API_KEY"
+
+# Receive every drop ≥ 1%  (sub-5% included; ~2-3× more volume)
+curl -N "https://pinnapi.com/odds-drop?key=$API_KEY&min_drop=1"
+
+# Only big moves — ≥ 10%
+curl -N "https://pinnapi.com/odds-drop?key=$API_KEY&min_drop=10"
+```
+
+The lower threshold composes with `recheck` on prematch: `?recheck=30&min_drop=7` holds each alert 30 s, re-checks the current Pinnacle price, and only emits if the drop is still ≥ 7% (not the default 5%).
+
+---
+
+### GET /odds-drop-prematch
+
+Identical to `/odds-drop` but emits drops on the prematch feed only. Useful when you want to trade upcoming-fixture line moves and not be flooded with in-play noise.
+
+**Volume note:** prematch lines move slowly. Expect <1 drop/sec on a typical day, vs. tens per second on the live stream during prime hours. A 90-second sample may surface zero drops — that's normal.
+
+**Optional `min_drop` parameter:** same as on `/odds-drop` (above) — `?min_drop=N` overrides the default 5%. Floor 1%, no upper cap.
+
+**Optional `recheck` parameter** (prematch only): pass `?recheck=N` (seconds) to enable the opt-in stable-price filter. The server holds each drop for N seconds, re-fetches the current Pinnacle price, and only emits the alert if the drop still passes the threshold (your `min_drop` value, or default 5%) against the original `from_price`. Bounced-back prices are silently suppressed. Emitted alerts include a new `rechecked_ms` field reflecting the actual wait. Omit (or pass `0`) for the default instant feed. No upper cap — the parameter only affects your own connection.
+
+```
+# Default instant feed
+curl -N "https://pinnapi.com/odds-drop-prematch?key=$KEY"
+
+# Stable-price feed: wait 30s then re-verify before emitting
+curl -N "https://pinnapi.com/odds-drop-prematch?key=$KEY&recheck=30"
+
+# Combined: only emit if a ≥7% drop is still ≥7% after 30s
+curl -N "https://pinnapi.com/odds-drop-prematch?key=$KEY&recheck=30&min_drop=7"
+```
+
+The `recheck` parameter is **not** supported on `/odds-drop` (live drops are sub-second; recheck windows are meaningless). If passed, it's silently ignored on the live endpoint. `min_drop` is supported on both.
+
+---
+
+## WebSocket Feed (Add-on)
+
+A paid add-on that forwards **raw Pinnacle frames** to your client — not drops, not derived metrics. Live MQTT messages and prematch REST responses are delivered byte-identical to what we receive ourselves, wrapped in a thin envelope so your code can tell what it's looking at. Power-user feature: meant for customers who want to rebuild Pinnacle's full state machine on their side.
+
+**This is NOT the same as `/odds-drop` SSE.** SSE delivers our drop alerts (≥5% by default). This WS delivers every Pinnacle frame, including market opens/closes/settlements, with no filtering. Output volume is **much higher**.
+
+### Pricing
+
+- **$99/month** as an add-on on top of any **REST-bearing** plan (REST, Edge, Scale).
+- **Drops and Trial plans are not eligible** — they have no REST quota; the WS feed is a paired product.
+- Bundled with new purchases / renewals: $99 monthly, $297 quarterly, $594 semi-annual (matches your base period).
+- Mid-cycle upgrade: **prorated to your renewal date** — pay only for the days remaining on your current subscription. Quote endpoint: `GET /panel/api/addon/ws/quote`.
+
+### Auth + entitlement
+
+Use your existing API key. The server checks `ws_addon_until > now()` on the upgrade request and rejects with HTTP 403 + `{"error":"plan_lacks_ws"}` if the add-on isn't active.
+
+### Endpoint
+
+```
+wss://pinnapi.com/ws/feed?key=<API_KEY>
+```
+
+API key can also be sent in an `x-api-key` header during the HTTP upgrade. One WebSocket connection per account (separate slot from SSE — you can run both).
+
+### Wire protocol
+
+Both directions exchange JSON-encoded text frames.
+
+**Client → server:**
+
+```jsonc
+// Send this within 5s of connecting or the server closes the socket.
+// You can subscribe by SPORT (firehose) or by specific EVENT IDs (filtered),
+// or both in the same message. At least one of sport_ids / event_ids is required.
+{ "type": "subscribe",
+  "streams":   ["live", "prematch"],
+  "sport_ids": [1, 2],              // pinnapi sport IDs — firehose for that sport
+  "event_ids": [1631005165] }       // Pinnacle matchup IDs — only these events
+
+// Drop subscriptions later. Same shape — either field can be omitted.
+{ "type": "unsubscribe", "streams": ["live"],     "sport_ids": [2] }
+{ "type": "unsubscribe", "streams": ["prematch"], "event_ids": [1631005165] }
+
+// Application-level pong reply to the server's ping.
+{ "type": "pong" }
+```
+
+`streams` values: `"live"`, `"prematch"`, or both. `sport_ids` use the same integer IDs as the rest of the API (1 = Soccer, 2 = Tennis, …). `event_ids` are Pinnacle's matchup IDs (9-10 digit integers, the same `id` field that appears on every record).
+
+**Discovery pattern for event_ids**: customers don't usually know matchup IDs upfront. Standard pattern: subscribe to a sport, grep the snapshot for the events you care about (by team name, league, start time, etc.), then unsubscribe from the sport and subscribe to those specific event IDs. This narrows your bandwidth to exactly the matches you're trading.
+
+**Filter rule**: a frame is delivered to a sub if **either** its sport_id matches a sport-level subscription **or** its event_id matches an event-level subscription. So `sport_ids: [2], event_ids: [12345]` means "all of Tennis plus this one specific event in any sport".
+
+**Per-stream cap**: 200 event_ids per connection per stream (live and prematch counted independently). Subscribing past the cap returns `{type:"error", code:"event_id_cap", ...}` and the request is rejected wholesale. Auto-cleanup: when an event is removed from our store (`op: "del"`), the hub silently drops it from all subs' event_id sets — you don't need to send unsubscribe yourself.
+
+**Server → client (immediately on subscribe):**
+
+```jsonc
+// Sport-level subscribe → one snapshot per (stream, sport_id) tuple with
+// every event in our store for that sport.
+{ "type": "snapshot", "stream": "live", "sport_id": 1, "ts": 1779200000000,
+  "events": [ /* full Pinnacle records, untouched */ ] }
+
+// Event-level subscribe → one snapshot per (stream, batch of event_ids)
+// with just the records we currently have for those IDs. Missing IDs are
+// simply absent — they'll appear in the stream once Pinnacle pushes them.
+{ "type": "snapshot", "stream": "live",
+  "event_ids": [1631005165],
+  "ts": 1779200000000,
+  "events": [ /* full Pinnacle records, untouched (one per matched id) */ ] }
+```
+
+**Server → client (continuous afterwards):**
+
+```jsonc
+// Every live MQTT frame — `topic`, `op`, `rec` are EXACTLY what we received.
+{ "type": "live", "sport_id": 1,
+  "topic": "matchups/reg/sp/29/live/ld", "op": "upd",
+  "rec": { /* Pinnacle record verbatim */ }, "ts": 1779200000123 }
+
+// Every prematch REST poll response — `data` is the response array verbatim.
+{ "type": "prematch_matchups", "sport_id": 1, "arcadia_sid": 29,
+  "data": [ /* /sports/29/matchups response verbatim */ ], "ts": 1779200005000 }
+
+{ "type": "prematch_markets", "sport_id": 1, "arcadia_sid": 29,
+  "matchup_id": 1631005165,
+  "data": [ /* /matchups/.../markets/related/straight verbatim */ ], "ts": 1779200005230 }
+
+// Heartbeat every 30s. Reply with {"type":"pong"} or the server will close
+// the socket after ~75s of silence.
+{ "type": "ping", "ts": 1779200030000 }
+
+// Lifecycle / errors. Acks include whichever field you used in subscribe
+// — `sport_id` for sport-firehose subs, `event_ids` array for event-level.
+{ "type": "subscribed",   "stream": "live",     "sport_id": 1 }
+{ "type": "subscribed",   "stream": "live",     "event_ids": [1631005165] }
+{ "type": "unsubscribed", "stream": "prematch", "sport_id": 3 }
+{ "type": "unsubscribed", "stream": "prematch", "event_ids": [1631005165] }
+{ "type": "error", "code": "unauthorized" | "plan_lacks_ws" | "invalid_subscribe" | "event_id_cap" }
+```
+
+**Fidelity contract:** `events`, `rec`, and `data` are never transformed. We only add the envelope fields (`type`, `stream`, `sport_id`, `topic`, `op`, `ts`). Your code can reuse a Pinnacle parser unchanged.
+
+### Frame semantics — how to read what we forward
+
+Pinnacle pushes incremental updates over MQTT. The `op` field, the `topic`, and the inner `rec` / `data` shape determines how to merge into your local state.
+
+**Live frames — `type:"live"`:**
+
+| Field | Meaning |
+|---|---|
+| `op` | `"add"` = new event or new markets appeared. `"upd"` = incremental change (typically just changed markets — merge by composite key, don't replace the whole list). `"del"` = event removed by Pinnacle (kicked off, settled, voided) — drop your local copy. |
+| `topic` | Source MQTT topic. Format: `matchups/reg/sp/{arcadia_sid}/live/{ld|dz|both}` for live, `matchups/.../pre` for prematch. `ld` = "line drawing" (main markets: moneyline, 1X2, primary spread/total). `dz` = "draft zone" (alternative spreads and totals). `both` = combined push. `matchups/spc/...` (instead of `reg`) = "special" matchup (props, futures). |
+| `rec.id` | Pinnacle matchup ID. Stable across the event's lifetime. |
+| `rec.markets` | May be a SUBSET on `op:"upd"` — Pinnacle only sends what changed. **Merge by composite key** (`m.key` if present, otherwise `type|period|side|points`). A market with `m.status !== "open"` is a CLOSE signal: drop it from your local list, do not merge it back as if still active. |
+| `rec.periods` | Per-period status. `periods[n].status === "closed"` or `"settled"` implicitly closes ALL markets for that period — drop those locally too, even if they weren't listed in `markets`. |
+| `rec.parentId` | If present, this is a CHILD matchup (alt periods, props derived from a parent event). Its full metadata (participants, league) lives on the parent record. |
+| `rec.startTime`, `rec.status` | Event-level metadata. Tennis / Golf / Fights frequently see `startTime` updates without any market change (reschedules) — track these. |
+
+**Prematch frames — `prematch_matchups` + `prematch_markets`:**
+
+| Field | Meaning |
+|---|---|
+| `type` | `prematch_matchups` = response from `/sports/{sid}/matchups`, fired every 5s per sport. Includes both prematch and live entries — filter by `data[i].isLive === false` if you want strict prematch. `prematch_markets` = response from `/matchups/{id}/markets/related/straight`, fired only when Pinnacle bumped `matchup.version`. |
+| `data` | For `prematch_matchups`: array of full matchup records. For `prematch_markets`: array of market objects scoped to one matchup. **This is the authoritative current snapshot from Pinnacle** — any market in your local store that's NOT in this list has been closed by Pinnacle. Drop it. |
+| `matchup_id` | (prematch_markets only) The matchup this markets array belongs to. |
+| `mode` | Present only when MQTT is down and we fell back to live REST polling. Value: `"rest_fallback"`. Frame shape is otherwise identical. |
+
+**Merge recipe (pseudocode):**
+
+```js
+// Maintain a Map<matchupId, MatchupState>. For each incoming frame:
+
+if (msg.type === "snapshot") {
+  for (const ev of msg.events) state.set(ev.id, ev);
+}
+
+if (msg.type === "live") {
+  if (msg.op === "del")  { state.delete(msg.rec.id); return; }
+  const existing = state.get(msg.rec.id) ?? {};
+  const merged = { ...existing, ...msg.rec };
+  if (msg.rec.markets) {
+    const byKey = new Map((existing.markets ?? []).map(m => [marketKey(m), m]));
+    for (const m of msg.rec.markets) {
+      if (m.status && m.status !== "open") byKey.delete(marketKey(m));   // close signal
+      else byKey.set(marketKey(m), m);
+    }
+    merged.markets = [...byKey.values()];
+  }
+  // Honour period-level closes — wipe all markets for closed periods.
+  if (msg.rec.periods) {
+    const closed = new Set(msg.rec.periods.filter(p => p.status !== "open").map(p => p.period));
+    if (closed.size) merged.markets = merged.markets.filter(m => !closed.has(m.period ?? 0));
+  }
+  state.set(msg.rec.id, merged);
+}
+
+if (msg.type === "prematch_markets") {
+  // AUTHORITATIVE snapshot for one matchup — replace, don't merge.
+  const existing = state.get(msg.matchup_id) ?? {};
+  state.set(msg.matchup_id, { ...existing, markets: msg.data });
+}
+
+function marketKey(m) {
+  return m.key ?? `${m.type}|${m.period ?? 0}|${m.side ?? ""}|${m.prices?.[0]?.points ?? ""}`;
+}
+```
+
+### Example client — Node.js
+
+```js
+import WebSocket from "ws";
+
+const ws = new WebSocket("wss://pinnapi.com/ws/feed?key=" + process.env.API_KEY);
+
+ws.on("open", () => {
+  ws.send(JSON.stringify({
+    type: "subscribe",
+    streams: ["live", "prematch"],
+    sport_ids: [1, 2],          // Soccer + Tennis
+  }));
+});
+
+ws.on("message", (raw) => {
+  const msg = JSON.parse(raw);
+  if (msg.type === "ping") { ws.send(JSON.stringify({ type: "pong" })); return; }
+  if (msg.type === "snapshot")           console.log(`snapshot ${msg.stream}/${msg.sport_id}: ${msg.events.length} events`);
+  else if (msg.type === "live")          console.log(`live update event=${msg.rec.id} op=${msg.op}`);
+  else if (msg.type === "prematch_matchups") console.log(`prematch matchups sport=${msg.sport_id} count=${msg.data.length}`);
+  else if (msg.type === "prematch_markets")  console.log(`prematch markets event=${msg.matchup_id} markets=${msg.data.length}`);
+});
+```
+
+### Example client — Python
+
+```python
+import asyncio, json, os, websockets
+
+async def main():
+    url = f"wss://pinnapi.com/ws/feed?key={os.environ['API_KEY']}"
+    async with websockets.connect(url) as ws:
+        await ws.send(json.dumps({
+            "type": "subscribe",
+            "streams": ["live", "prematch"],
+            "sport_ids": [1, 2],
+        }))
+        async for raw in ws:
+            msg = json.loads(raw)
+            if msg["type"] == "ping":
+                await ws.send(json.dumps({"type": "pong"}))
+            elif msg["type"] == "snapshot":
+                print(f"snapshot {msg['stream']}/{msg['sport_id']}: {len(msg['events'])} events")
+            elif msg["type"] == "live":
+                print(f"live update event={msg['rec']['id']} op={msg['op']}")
+
+asyncio.run(main())
+```
+
+### Reconnect strategy
+
+Re-subscribe on reconnect. Server-side state is not preserved — the snapshot at the start of every connection is your sync point. Exponential backoff (1s → 2s → 4s → 30s cap) recommended. The 1-connection cap means opening a new socket will close any previous one for the same key.
+
+---
+
+## Sport IDs
+
+Stable integer mapping. Use these in `sport_id` query params throughout the API.
+
+| ID | Sport |
+|---|---|
+| 1 | Soccer |
+| 2 | Tennis |
+| 3 | Basketball |
+| 4 | Hockey |
+| 5 | Football |
+| 6 | Baseball |
+| 7 | Rugby (Union + League) |
+| 8 | MMA (UFC, Bellator, ONE, etc.) |
+| 9 | Boxing |
+| 10 | Other (Volleyball, Handball) |
+| 11 | Esports (Dota 2, CS2, League of Legends, etc.) |
+| 12 | Golf (PGA, DP World Tour, LIV — head-to-heads) |
+
+Golf (id 12) is moneyline-only: Pinnacle does not provide spreads, totals, or team totals for Golf. On a Golf event, expect `spreads`, `totals`, and `team_total` to be empty objects. Golf drops fire from the Moneyline section only.
+
+---
+
+## Market Types
+
+Returned inside each event's `periods[<num_N>]` object:
+
+| Field | Shape | Description |
+|---|---|---|
+| `money_line` | `{ home, away, draw? }` | 3-way (or 2-way) match result. Decimal odds. |
+| `spreads` | `{ "<hdp>": { hdp, home, away, max } }` | Handicap markets keyed by point spread |
+| `totals` | `{ "<points>": { points, over, under, max } }` | Over/under markets keyed by total |
+| `team_total` | `{ home: {...}, away: {...} }` | Primary per-team total line per side (one line per side, last-write-wins). Backward-compatible. Use `team_totals` for ALL alt lines. |
+| `team_totals` | `{ home: { "<points>": {points, over, under, max} }, away: {...} }` | ALL alternate team-total lines, keyed by points per side. Mirrors the `totals` shape. Use when Pinnacle exposes multiple lines (e.g. home Over 0.5 / 1.5 / 2.5). |
+| `meta` | object | Per-period metadata: scores, max stakes |
+
+---
+
+## Periods
+
+`periods` is an object keyed by `num_<N>`:
+
+- `num_0` — full match
+- `num_1` — 1st half (or 1st set in tennis)
+- `num_2` — 2nd half / 2nd set
+- `num_3` — 3rd quarter / 3rd set
+- `num_4` — 4th quarter / 4th set
+- `num_5` — extra time
+- `num_6`, `num_7`, `num_8` — sets 1, 2, 3 (alternative tennis indexing)
+
+Not all periods are present for every event. Iterate keys defensively.
+
+---
+
+## Plans & Pricing
+
+| Plan | Price | REST | SSE | Notes |
+|---|---|---|---|---|
+| Trial | $0 | 100 reqs/day | ❌ | Free, no card, no expiry. Test endpoints, can't use SSE. |
+| Drops | $99/mo | 100 reqs/day | ✅ | SSE-only product. REST limited to trial-class. |
+| REST | $99/mo | 10 req/sec | ❌ | REST only. No SSE. |
+| Edge | $149/mo | 10 req/sec | ✅ | REST + SSE bundle. Best value if you want both. |
+| Scale | $229/mo | 30 req/sec | ✅ | High-frequency arbitrage and multi-account. |
+
+Quarterly and semi-annual variants exist with 12–24% discounts. Get current SKUs and prices live at https://pinnapi.com/panel/api/plans (returns JSON).
+
+Billing — two ways to pay, chosen at checkout in the dashboard:
+
+- **Card (Stripe Checkout):** a recurring subscription on the term you pick (monthly, quarterly or semi-annual). Access starts immediately; the first charge lands after a 1-day trial, then it renews automatically at the end of each term. Change your card, see invoices or cancel any time from the Stripe-hosted billing page linked in your dashboard — cancelling stops future renewals and access simply lapses when the paid term ends.
+- **Crypto (NowPayments):** USDT-TRC20, BTC, ETH, TRX and more, as a one-off payment for a fixed term. No auto-renewal — when the plan expires you re-subscribe manually.
+
+The free trial key needs neither.
+
+---
+
+## Rate Limits
+
+Enforced per-key. When exceeded, HTTP 429 with `Retry-After` header and a JSON body:
+
+```json
+{
+  "error": "rate_limited",
+  "window": "minute",
+  "limit": 20,
+  "retry_after_ms": 41052
+}
+```
+
+Limits per plan:
+
+| Plan | Per second | Per minute | Per hour | Per day |
+|---|---|---|---|---|
+| Trial | — | 20 | 100 | 100 |
+| Drops | — | 20 | 100 | 100 |
+| REST | 10 req/sec | — | — | — |
+| Edge | 10 req/sec | — | — | — |
+| Scale | 30 req/sec | — | — | — |
+
+The day cap survives process restarts (the in-memory bucket is seeded from the `usage_daily` SQLite table on first request after a restart).
+
+---
+
+## Errors
+
+| Status | Error code | When |
+|---|---|---|
+| 401 | `missing_key` | No API key sent |
+| 401 | `invalid_key` | Key not in our DB |
+| 401 | `unauthorized` | (SSE) Neither valid token nor valid key |
+| 403 | `plan_lacks_sse` | (SSE) Authenticated but plan doesn't include SSE — upgrade to Drops, Edge, or Scale |
+| 429 | `rate_limited` | Per-key rate limit exceeded |
+| 503 | `prematch_disabled` | Prematch endpoint hit when prematch ingester is off |
+
+SSE failures are framed as `data: {"type":"error","error":"...","message":"..."}` so EventSource clients can read the reason from `onmessage` instead of getting an opaque connection failure.
+
+---
+
+## Common integration patterns
+
+### Pattern 1: Polling for new live drops every 5 seconds
+
+```js
+const KEY = process.env.PINNACLE_KEY;
+let lastSeen = 0;
+
+async function poll() {
+  const r = await fetch(
+    `https://pinnapi.com/api/drops?mode=live&min_drop_pct=5&max_age_sec=10`,
+    { headers: { "x-portal-apikey": KEY } }
+  );
+  const { drops } = await r.json();
+  for (const d of drops) {
+    if (d.alerted_ms <= lastSeen) continue;
+    lastSeen = d.alerted_ms;
+    console.log("DROP:", d.sport, d.home, "vs", d.away, d.from_price, "→", d.to_price);
+  }
+}
+setInterval(poll, 5_000);
+```
+
+### Pattern 2: SSE stream into an arbitrage finder (Node.js)
+
+```js
+import EventSource from "eventsource";
+
+const es = new EventSource(`https://pinnapi.com/odds-drop?key=${process.env.PINNACLE_KEY}`);
+
+es.onmessage = (e) => {
+  const data = JSON.parse(e.data);
+  if (!Array.isArray(data)) return; // skip handshake/error frames
+
+  for (const drop of data) {
+    // EV check: bookmaker price vs no-vig fair price
+    const ev = (drop.to_price / drop.nvp) - 1;
+    if (ev > 0.02) {  // 2%+ edge
+      console.log(`+EV ${(ev*100).toFixed(2)}%:`, drop.home, drop.outcome, "@", drop.to_price);
+      // ... place bet via your bookmaker integration
+    }
+  }
+};
+```
+
+### Pattern 3: Fetching all upcoming soccer fixtures with their full markets
+
+```js
+const r = await fetch(
+  "https://pinnapi.com/kit/v1/markets?sport_id=1&event_type=prematch",
+  { headers: { "x-portal-apikey": process.env.PINNACLE_KEY } }
+);
+const { events, last } = await r.json();
+const matchEvents = events.filter(e =>
+  e.is_have_odds && e.periods?.num_0?.money_line
+);
+console.log(`${matchEvents.length} prematch soccer events with money_line`);
+```
+
+### Pattern 4: Incremental polling with `since`
+
+The `last` field returned at the top level monotonically increases. Pass it back as `since=` to get only changed events:
+
+```js
+let lastVersion = 0;
+
+async function fetchChanges() {
+  const r = await fetch(
+    `https://pinnapi.com/kit/v1/markets?sport_id=1&since=${lastVersion}`,
+    { headers: { "x-portal-apikey": KEY } }
+  );
+  const { events, last } = await r.json();
+  lastVersion = last;
+  return events; // only events that changed since the previous call
+}
+```
+
+---
+
+## Affiliate Program
+
+Every account ships with a unique referral link visible in the dashboard. Anyone who lands on pinnapi.com with `?ref=<your-code>`, signs up, verifies email in the same session, and pays for a plan earns the referrer **30% of every payment** they make — lifetime, including renewals and upgrades. The referee pays the normal price; there is no signup discount on their side.
+
+| Topic | Detail |
+|---|---|
+| Link format | `https://pinnapi.com/?ref=<8-char-code>` |
+| Commission | 30% of every USD payment from referred users, recurring for the lifetime of the subscription |
+| Attribution | Session-based: `?ref=` must be present when the visitor lands on pinnapi.com AND they must complete signup + email verification before clearing sessionStorage |
+| Tracking | `GET /panel/api/me` returns a `referral` object containing the code, link, masked referral list, and commission stats (paying / unpaid / paid_out) |
+| Self-referral | Blocked at the verify-confirm step |
+| Payouts | Manual. We contact the referrer when unpaid balance reaches $50+. Crypto / bank / PayPal — referrer's choice |
+| Privacy | Referee emails are masked in the panel (`j***@gmail.com`); admins see unmasked |
+| Refunds | A refunded payment voids its commission. We don't claw back paid-out commissions for routine churn |
+
+The `/panel/api/me` response now includes:
+```
+"referral": {
+  "code": "aBc12XyZ",
+  "link": "https://pinnapi.com/?ref=aBc12XyZ",
+  "rate_pct": 30,
+  "stats": {
+    "total_referrals": 4,
+    "paying_referrals": 2,
+    "unpaid_commission_usd": 49.50,
+    "paid_commission_usd": 0
+  },
+  "referrals": [
+    { "id": 25, "email": "j***@gmail.com", "plan_id": "stream_30d",
+      "is_paying": true, "joined_at": 1779800000, "commission_earned_usd": 29.70 }
+  ]
+}
+```
+
+If you want to suppress the affiliate UI in your own integration (e.g. building a custom dashboard), simply ignore the `referral` block in the response — it's purely additive.
+
+---
+
+## Support
+
+- Documentation issues / feature requests: open an issue at the contact email shown on https://pinnapi.com/?utm_source=ai&utm_medium=llms
+- Technical questions / integration help: Telegram @pinnapi_support
+- API status & uptime: https://pinnapi.com/health?utm_source=ai&utm_medium=llms (requires API key) or https://pinnapi.com/ping?utm_source=ai&utm_medium=llms (public, returns `ok`)
+
+## Blog
+
+Guides, comparisons and analysis on real-time Pinnacle odds, drop detection, and API integration. Full index at https://pinnapi.com/blog (RSS: https://pinnapi.com/blog/rss.xml).
+
+- [The Best Real-Time Odds API for Detecting Pinnacle Line Movement (2026)](https://pinnapi.com/blog/best-odds-api-pinnacle-line-movement): Five requirements decide the best odds API for tracking Pinnacle line movement in 2026: push delivery, thresholds, ids, no-vig prices, and a short path.
+- [How to Get Instant Alerts When Pinnacle Odds Drop Below Your Threshold](https://pinnapi.com/blog/pinnacle-odds-drop-alerts): Open an SSE stream to pinnapi's odds-drop endpoint, set min_drop to your threshold, and Pinnacle drops reach your code in tens of milliseconds. Here's how.
+- [Where to Host Your Pinnacle Arbitrage Bot (Short Answer: Dublin)](https://pinnapi.com/blog/where-to-host-pinnacle-arbitrage-bot): Short answer: Dublin (AWS eu-west-1 or Azure North Europe). Why the region decides your bot's latency, and what hosting across an ocean costs in milliseconds.
+- [Best Pinnacle Odds API in September 2026: The Current Shortlist](https://pinnapi.com/blog/best-pinnacle-odds-api-september-2026): September 2026 shortlist of Pinnacle odds APIs by category: what changed this month, the September calendar crunch, and honest picks for each job, ours included.
+- [Which Football Leagues Does the Pinnacle Odds API Cover?](https://pinnapi.com/blog/pinnacle-football-leagues-odds-api): The Pinnacle odds API covers more than 120 football leagues, live and prematch, from the big five to MLS and Liga MX. Here's the coverage, the exact league labels, and how each major league's odds mar
+- [Ligue 1 Odds API: Where Soft Books Lag the Sharp Line Most](https://pinnapi.com/blog/ligue-1-odds-api): A real-time Ligue 1 odds API over REST, SSE, and WebSocket. Why France's mix of extreme favourites and thinner mid-table liquidity makes it the clearest place to watch soft books follow Pinnacle's lin
+- [Bundesliga Odds API: High Totals and the Saturday Kickoff Rush](https://pinnapi.com/blog/bundesliga-odds-api): A real-time Bundesliga odds API over REST, SSE, and WebSocket. Why Germany's high-scoring football and its cluster of simultaneous Saturday kickoffs make low latency matter more here than anywhere.
+- [Serie A Odds API: The League Where the Totals Market Tells the Story](https://pinnapi.com/blog/serie-a-odds-api): A real-time Serie A odds API over REST, SSE, and WebSocket. Why Italy's traditionally low-scoring, tactical football makes the totals and Unders market its defining feature, live and prematch.
+- [La Liga Odds API: Why the Handicap Market Matters More Than the Money Line](https://pinnapi.com/blog/la-liga-odds-api): A real-time La Liga odds API over REST, SSE, and WebSocket. Why a top-heavy league pushes the sharp action into Asian handicaps, what you get live and prematch, and how Clásico liquidity moves the lin
+- [MLB Odds API: Real-Time Pinnacle Baseball Lines, Run Lines, and Props](https://pinnapi.com/blog/mlb-odds-api): A real-time MLB odds API over REST, SSE, and WebSocket. Money line, run line, totals, first-5-innings and player props, why baseball lines hinge on the starting pitcher, and how to catch moves live.
+- [Premier League Odds API: Inside Football's Sharpest, Most Liquid Market](https://pinnapi.com/blog/premier-league-odds-api): A real-time Premier League odds API over REST, SSE, and WebSocket. Why the EPL line is the sharpest in football, the markets you get live and prematch, and how to catch moves as they happen.
+- [Best Pinnacle Odds API in August 2026: The Current Shortlist](https://pinnapi.com/blog/best-pinnacle-odds-api-august-2026): The best Pinnacle odds API depends on the job. Here's the August 2026 shortlist by category (brokers, aggregators, enterprise, single-book feeds), what changed recently, and where each one wins, inclu
+- [Does Pinnacle Have Player Props? What's Actually on the Board](https://pinnapi.com/blog/does-pinnacle-have-player-props): Yes, Pinnacle has player props, but far fewer than a US retail app and at lower limits. Here's what's actually offered, why the menu is short, and how the prices compare to DraftKings or FanDuel.
+- [Which Sports and Markets the Pinnacle API Covers in 2026](https://pinnapi.com/blog/pinnacle-api-sports-and-markets): A straight reference: the 12 sports the Pinnacle API covers, the exact market types you get (money line, spreads, totals, team totals), what's behind the specials flag, and what it deliberately does n
+- [How to Pull Pinnacle Player Props From the API (and the One Catch to Know First)](https://pinnapi.com/blog/pinnacle-player-props-api): Pinnacle player props are supported but hidden behind a flag. Here's how to turn them on with include_specials, the real special_markets payload shape, and the one behaviour that trips people up: spec
+- [How to Architect a Pinnacle Arbitrage Detection System in 2026](https://pinnapi.com/blog/arbitrage-detection-system-architecture): The four-layer architecture of a real-time Pinnacle-vs-soft-books arbitrage detector: push ingestion, normalization, a devigging engine, and honest limits.
+- [Pinnacle Odds API Documentation: Where It Went, and What to Read Instead](https://pinnapi.com/blog/pinnacle-odds-api-documentation): Pinnacle's API documentation went dark in the 2025 shutdown. What the old docs covered, where working documentation lives now, and the response shape.
+- [Arbitrage and +EV Detection with pinnapi: What's Built In, What You Build, and the Code](https://pinnapi.com/blog/pinnapi-arbitrage-ev-detection): Arbitrage and +EV detection on a Pinnacle feed: the no-vig and drop layers run server-side, the comparison loop you own — with Python, Node, and Go starters.
+- [pinnapi vs OddsPapi: 300 Bookmakers Wide or One Book Deep](https://pinnapi.com/blog/pinnapi-vs-oddspapi): OddsPapi is 300+ bookmakers wide with free historical odds. pinnapi is one book deep — Pinnacle, measured latency, built-in signal tooling. Sometimes a stack.
+- [pinnapi vs SharpAPI: A Detection Platform and a Reference Feed Solve Different Problems](https://pinnapi.com/blog/pinnapi-vs-sharpapi): SharpAPI surfaces arbs and +EV plays across 45+ US books; pinnapi delivers the raw Pinnacle reference line at 15–40 ms. Output or input — that's the choice.
+- [pinnapi vs OpticOdds: The Specialist vs the Enterprise Platform](https://pinnapi.com/blog/pinnapi-vs-opticodds): OpticOdds is arguably the best odds infrastructure around — if you're funded. When it's worth it, and when a $99 Pinnacle-only feed does the job.
+- [pinnapi vs The Odds API: Cheapest vs Fastest Are Different Jobs](https://pinnapi.com/blog/pinnapi-vs-the-odds-api): We make pinnapi, so read accordingly. A straight comparison with The Odds API: pricing, latency, Pinnacle fidelity — and where each is the wrong pick.
+- [pinnapi vs OddsJam: A Betting Tool and a Data Feed Aren't Rivals](https://pinnapi.com/blog/pinnapi-vs-oddsjam): OddsJam is a betting toolkit you click around; pinnapi is a raw Pinnacle feed your code consumes. How to tell which one you actually need.
+- [pinnapi vs BetsAPI: Broad Sports Data vs a Fast Pinnacle Line](https://pinnapi.com/blog/pinnapi-vs-betsapi): BetsAPI is the budget workhorse for fixtures, results, and bet365 data. pinnapi does one thing: Pinnacle prices, pushed fast. Who should pick which.
+- [Is There a Free Odds API for Pinnacle Lines? Yes — Here's What Free Actually Gets You](https://pinnapi.com/blog/free-pinnacle-odds-api): The free ways to get Pinnacle odds in 2026, what each really costs in delay and limits, and an honest line between when free is enough and when it never is.
+- [How Fast Do Bookmakers Follow Pinnacle? A Measurement You Can Run Yourself](https://pinnapi.com/blog/how-fast-do-books-follow-pinnacle): Everyone says soft books copy Pinnacle's line; almost nobody measures the lag. A reproducible way to time it — and why that lag is the whole edge.
+- [How to Get Pinnacle Odds Without a Pinnacle Account](https://pinnapi.com/blog/pinnacle-odds-without-account): Locked out by geography or the 2025 shutdown? The realistic ways to get Pinnacle's line into your code with no account at all — and the trap to skip.
+- [What Data Format Do Odds APIs Return? A Guided Tour of a Live Odds Payload](https://pinnapi.com/blog/odds-api-data-format): Fixtures, markets, prices: the shape almost every odds API returns, field by field — odds formats, IDs, versions, and the gotchas that break parsers.
+- [Why Bookmakers Limit Winners — and What Sharp Bettors Actually Do About It](https://pinnapi.com/blog/avoid-getting-limited-bookmakers): Getting limited isn't bad luck — it's the soft-book business model working. How bookmakers spot winners, what delays the tap, and the real ways out.
+- [Can You Make Money Following Pinnacle Line Moves? An Honest Assessment](https://pinnapi.com/blog/following-pinnacle-line-moves): Pinnacle moves first, soft books lag, you bet the stale price — seductive. The real mechanism, the four conditions that decide if it pays, how to test it.
+- [Value Betting Against Soft Bookmakers: How It Actually Works](https://pinnapi.com/blog/value-betting-soft-bookmakers): Value betting without the YouTube gloss: where soft-book mispricings come from, the math with a worked example, and why variance breaks most people first.
+- [What Does It Mean When Odds Drop Suddenly?](https://pinnapi.com/blog/why-odds-drop-suddenly): A sudden odds drop is the market repricing in real time. The five causes, how to tell sharp money from noise, and what it means for the price you took.
+- [Why Is Pinnacle Considered the Sharpest Bookmaker?](https://pinnapi.com/blog/why-pinnacle-is-the-sharpest-bookmaker): Not folklore — a business model. Why Pinnacle welcomes winners, why its line leads the market, why soft books copy it, and where the sharpness ends.
+- [Why Did Pinnacle Shut Down Its Public API? The Story, the Likely Reasons, and What's Left](https://pinnapi.com/blog/why-pinnacle-shut-down-its-api): In July 2025 Pinnacle closed the API a decade of betting tools was built on. What happened, why it was predictable, and the realistic paths forward.
+- [Building a Pinnacle Arbitrage Bot in Python: From Stream to Signal](https://pinnapi.com/blog/build-pinnacle-arbitrage-bot-python): Build it end to end: stream live Pinnacle drops, strip the vig, detect a real arbitrage edge, and alert — plus the execution risks that decide if it pays.
+- [How We Measure Pinnacle API Latency (and How to Reproduce It)](https://pinnapi.com/blog/pinnacle-api-latency-benchmark): The methodology behind our 15–40 ms latency figure: what we measure, how, the full distribution — and a harness you can run yourself.
+- [How the Odds Moved: Brazil 2–1 Japan, World Cup 2026](https://pinnapi.com/blog/brazil-japan-world-cup-2026-odds-movement): Brazil beat Japan 2–1 with a 96th-minute winner — after an hour behind. What the live Pinnacle market did through it all, and how to log it yourself.
+- [Streaming Pinnacle Odds over WebSocket: When You Need It Instead of SSE](https://pinnapi.com/blog/pinnacle-odds-websocket-guide): A practical comparison of WebSocket vs SSE for live Pinnacle odds: how each behaves, when the extra complexity of WebSocket is worth it, and a working client.
+- [Odds Drops as an Early Goal Signal: How to Test Whether It's Real](https://pinnapi.com/blog/world-cup-2026-arbitrage-odds-drop-goal-signal): Can a sharp odds drop front-run your video feed? The mechanism, an honest look at the edge, and how to validate it on your own logged data.
+- [Catching Live Odds Drops with SSE: A World Cup 2026 Build](https://pinnapi.com/blog/real-time-world-cup-odds-api-sse-drops): Build a live odds-drop monitor for the 2026 World Cup with Server-Sent Events: connect, filter signal from noise, and survive reconnects.
+- [Pinnacle Odds Data in 2026: An Honest Comparison of Your Options](https://pinnapi.com/blog/pinnacle-odds-api-comparison-2026): A vendor-written but deliberately balanced look at getting Pinnacle odds in 2026 — Sportradar, aggregators, and pinnapi — including where each one loses.
+- [Using the Pinnacle Odds API for Arbitrage: The Sharp Reference Line](https://pinnapi.com/blog/pinnacle-odds-api-arbitrage): Why Pinnacle's low-margin line is the right benchmark for arbitrage, the math for spotting an edge, and the architecture for catching it before it closes.
+- [Calculating No-Vig Fair Odds from Pinnacle Lines](https://pinnapi.com/blog/pinnacle-no-vig-fair-odds): How to strip the margin from Pinnacle prices for a fair-probability reference: three vig-removal methods, worked examples, code, and when each is wrong.
+- [Real-Time Soccer Odds API: Live Markets, Drops, and What to Watch](https://pinnapi.com/blog/real-time-soccer-odds-api): A focused guide to consuming live soccer odds via API: the markets that matter, why in-play soccer moves the way it does, and how to catch the moves that count.
+- [Pinnacle Odds API Tutorial: From Zero to Your First Live Board](https://pinnapi.com/blog/pinnacle-odds-api-tutorial-first-live-response): A hands-on walkthrough: get a key, prove the connection, pull a live board, parse it in Python, and handle the errors you'll actually hit.
+- [The Pinnacle API Closed. Here's How to Still Get Pinnacle Odds in 2026](https://pinnapi.com/blog/pinnacle-api-alternative-2026): Pinnacle shut its public API on 23 July 2025. This is a practical look at what actually replaced it, with the trade-offs of each path and a working migration.
+- [What Is a Steam Move? A Plain-English Guide for Bettors and Builders](https://pinnapi.com/blog/what-is-a-steam-move): What a steam move actually is, how it differs from a normal line move, why Pinnacle is central to spotting one, and how to detect steam programmatically.
