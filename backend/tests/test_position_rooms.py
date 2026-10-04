@@ -140,10 +140,10 @@ def test_actual_and_paper_are_separate_rooms_never_summed():
     # one real contract held, at 1:1000; nothing of the paper book in it
     assert [lg["holding"]["open_qty"] for lg in a["legs"]] == [1.0]
     prot = _order(a, "mirror_fx_prot")
-    # a requested-but-unconfirmed cancel can still fill: canonical RESTING,
-    # sub-state CANCEL_PENDING (order_state_truth)
-    assert prot["state"] == "RESTING"
-    assert prot["sub_state"] == "CANCEL_PENDING"
+    # a requested-but-unconfirmed cancel can still fill: its own canonical
+    # state CANCEL_PENDING (order_state_truth, the owner's 9-state list)
+    assert prot["state"] == "CANCEL_PENDING"
+    assert prot["sub_state"] is None
     assert prot["raw_state"] == "CANCEL_REQUESTED"
     assert prot["if_it_fills"]["available"] is True     # it can still fill
     assert a["xavier"][0]["protection"]["filled_protection_qty"] == 0.0

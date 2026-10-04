@@ -1,5 +1,5 @@
 """ORDER STATE TRUTH: ONE PURE MAPPING FROM EVERY RECORDED ORDER STATE TO THE
-EIGHT CANONICAL STATES, AND THE PROTECTION ARITHMETIC THAT FOLLOWS FROM IT.
+NINE CANONICAL STATES, AND THE PROTECTION ARITHMETIC THAT FOLLOWS FROM IT.
 
 Owner requirement (2026-10-04, P0): "A resting sell/hedge/order is NOT
 protection." Every surface distinguishes
@@ -9,11 +9,14 @@ protection." Every surface distinguishes
     RESTING    on the book, NOTHING filled
     PARTIAL    part filled, the remainder still rests
     FILLED     completely filled
+    CANCEL_PENDING  a cancel is requested but not confirmed: the order MAY
+               STILL FILL. Its unfilled remainder is standing (never
+               protection); any part already filled counts as filled
     CANCELLED  cancelled; any unfilled remainder is gone
     REJECTED   refused (by the venue, the simulator or our own rule)
     EXPIRED    expired; any unfilled remainder is gone
 
-and ONE more, explicit, never folded into any of the eight:
+and ONE more, explicit, never folded into any of the nine:
 
     UNKNOWN    the recorded state is not one this module knows, or the
                submission outcome is genuinely unknown. UNKNOWN is never
@@ -22,10 +25,10 @@ and ONE more, explicit, never folded into any of the eight:
 THE SINGLE SOURCE OF TRUTH. Every reader that shows an order state or a
 protection quantity maps raw states through `order_state` (or the
 convenience `canonical_order_state`) and computes protection through
-`protection_summary`. A cancel that is requested but not confirmed can still
-fill, so it maps to RESTING (or PARTIAL when part filled) with
-sub_state CANCEL_PENDING; a mirror row EXCLUDED by our own rule before it was
-ever sent maps to REJECTED with sub_state EXCLUDED_BEFORE_SUBMISSION.
+`protection_summary`. A cancel that is requested but not confirmed is its
+own state, CANCEL_PENDING (it can still fill); a mirror row EXCLUDED by our
+own rule before it was ever sent maps to REJECTED with sub_state
+EXCLUDED_BEFORE_SUBMISSION.
 
 ONLY FILLED QUANTITY IS PROTECTION. The quantity a protective order has
 FILLED (from the record's own filled quantity -- never its ordered quantity,
@@ -44,15 +47,17 @@ PROPOSED, SUBMITTED, RESTING, PARTIAL = (
     "PROPOSED", "SUBMITTED", "RESTING", "PARTIAL")
 FILLED, CANCELLED, REJECTED, EXPIRED = (
     "FILLED", "CANCELLED", "REJECTED", "EXPIRED")
+CANCEL_PENDING = "CANCEL_PENDING"
 UNKNOWN = "UNKNOWN"
 
-#: The eight canonical states, in lifecycle order.
+#: The nine canonical states, in lifecycle order (the owner's list).
 CANONICAL_STATES = (PROPOSED, SUBMITTED, RESTING, PARTIAL, FILLED,
-                    CANCELLED, REJECTED, EXPIRED)
+                    CANCEL_PENDING, CANCELLED, REJECTED, EXPIRED)
 #: Every value `order_state` can return.
 ALL_STATES = CANONICAL_STATES + (UNKNOWN,)
-#: On the book: may still fill without a new decision.
-STANDING_STATES = (RESTING, PARTIAL)
+#: On the book: may still fill without a new decision (a requested but
+#: unconfirmed cancel included).
+STANDING_STATES = (RESTING, PARTIAL, CANCEL_PENDING)
 #: Not (yet) on the book, or not known to be.
 PENDING_STATES = (PROPOSED, SUBMITTED, UNKNOWN)
 LIVE_STATES = PENDING_STATES + STANDING_STATES
@@ -62,9 +67,9 @@ TERMINAL_STATES = (FILLED, CANCELLED, REJECTED, EXPIRED)
 #: filled, RESTING has by definition filled nothing (a RESTING row carrying
 #: a fill is mapped to PARTIAL first), PROPOSED / SUBMITTED have not reached
 #: a book.
-FILL_BEARING_STATES = (PARTIAL, FILLED, CANCELLED, EXPIRED)
+FILL_BEARING_STATES = (PARTIAL, FILLED, CANCEL_PENDING, CANCELLED,
+                       EXPIRED)
 
-SUB_CANCEL_PENDING = "CANCEL_PENDING"
 SUB_EXCLUDED = "EXCLUDED_BEFORE_SUBMISSION"
 SUB_ABANDONED = "ABANDONED_BEFORE_SEND"
 SUB_OUTCOME_UNKNOWN = "SUBMISSION_OUTCOME_UNKNOWN"
@@ -80,6 +85,9 @@ MEANING = {
     PARTIAL: ("part filled; only the filled part counts, the remainder still "
               "rests"),
     FILLED: "completely filled",
+    CANCEL_PENDING: ("cancel requested, not yet confirmed: it MAY STILL FILL. "
+                     "Its unfilled remainder is NOT protection; only any part "
+                     "already filled counts"),
     CANCELLED: "cancelled; the unfilled remainder is gone",
     REJECTED: "refused by the venue, the simulator or our own rule",
     EXPIRED: "expired; the unfilled remainder is gone",
@@ -100,7 +108,7 @@ _PAPER = {
     "PARTIALLY_FILLED": (PARTIAL, None),
     "FILLED": (FILLED, None),
     "EXPIRED": (EXPIRED, None),
-    "CANCEL_PENDING": (RESTING, SUB_CANCEL_PENDING),
+    "CANCEL_PENDING": (CANCEL_PENDING, None),
     "CANCELED": (CANCELLED, None),
     "REJECTED": (REJECTED, None)}
 #: execmirror_orders and kalshi_live_intents share one state machine
@@ -112,7 +120,7 @@ _MIRROR = {
     "OPEN": (RESTING, None),
     "PARTIALLY_FILLED": (PARTIAL, None),
     "FILLED": (FILLED, None),
-    "CANCEL_REQUESTED": (RESTING, SUB_CANCEL_PENDING),
+    "CANCEL_REQUESTED": (CANCEL_PENDING, None),
     "CANCELLED": (CANCELLED, None),
     "EXPIRED": (EXPIRED, None),
     "REJECTED": (REJECTED, None),
@@ -158,8 +166,8 @@ def order_state(raw_state, *, source, qty=None, filled_qty=None) -> dict:
       sub_state        CANCEL_PENDING / EXCLUDED_BEFORE_SUBMISSION / ... or None
       filled_qty       the quantity that COUNTS as filled: the record's own
                        filled quantity in a fill-bearing state, else 0
-      standing_qty     the unfilled remainder while it rests (RESTING /
-                       PARTIAL), else 0
+      standing_qty     the unfilled remainder while it may still fill
+                       (RESTING / PARTIAL / CANCEL_PENDING), else 0
       pending_qty      the unfilled remainder of a PROPOSED / SUBMITTED /
                        UNKNOWN order, else 0
       can_still_fill   standing or pending
@@ -203,8 +211,8 @@ def canonical_order_state(raw_state, *, source, filled_qty=None) -> str:
 
 def raw_states(source, states) -> list:
     """Every raw state of `source` that can map to one of `states` (for a
-    SQL `state = ANY(...)` filter). CANCEL_PENDING maps to RESTING or
-    PARTIAL depending on its fill, so it is listed under both."""
+    SQL `state = ANY(...)` filter). A RESTING row carrying a fill reads as
+    PARTIAL, so a raw resting state is listed under both."""
     m = RAW_MAPS.get(source_key(source) or "", {})
     want = set(states)
     out = []
@@ -225,8 +233,9 @@ def raw_states(source, states) -> list:
 #: protective sale of the held side and the hedge buy of its complement.
 PROTECTIVE_ROLES = ("STANDING_PROTECTION", "HEDGE")
 IF_FILLED = "IF_FILLED"
-RULE = ("only FILLED quantity is protection: a RESTING or PARTIAL order's "
-        "unfilled remainder is a standing order (it may still fill) and is "
+RULE = ("only FILLED quantity is protection: a RESTING, PARTIAL or "
+        "CANCEL_PENDING order's unfilled remainder is a standing order (it "
+        "may still fill) and is "
         "never counted as protection; a floor that needs a standing order "
         "to fill is CONDITIONAL (IF_FILLED) and never the realized floor")
 POSITION_BASIS = ("position quantity = contracts held now on the protected "
@@ -285,8 +294,7 @@ def order_line(o: dict) -> str:
              t["pending_qty"] if t["state"] in PENDING_STATES else
              _num(o.get("qty")))
     return "%s %s: %s @ %s / FILLED: %s" % (
-        t["state"] + ("(%s)" % t["sub_state"] if t["sub_state"] ==
-                      SUB_CANCEL_PENDING else ""),
+        t["state"],
         str(o.get("direction") or "?").upper(), fmt_qty(shown),
         "UNAVAILABLE" if lim is None else "$%.2f" % lim,
         fmt_qty(t["filled_qty"]))

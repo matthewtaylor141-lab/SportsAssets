@@ -1,8 +1,9 @@
 """C28 P0: A RESTING SELL / HEDGE / ORDER IS NOT PROTECTION.
 
 Only FILLED quantity counts as realized / matched protection. Every surface
-distinguishes PROPOSED, SUBMITTED, RESTING, PARTIAL, FILLED, CANCELLED,
-REJECTED, EXPIRED (and an explicit UNKNOWN that is never FILLED), mapped by
+distinguishes PROPOSED, SUBMITTED, RESTING, PARTIAL, FILLED, CANCEL_PENDING,
+CANCELLED, REJECTED, EXPIRED (and an explicit UNKNOWN that is never FILLED),
+mapped by
 ONE shared pure function, `sportsassets.order_state_truth.order_state`.
 
 Pinned here, against the real pure readers (no database):
@@ -67,10 +68,12 @@ def _funded_states() -> set:
 # 1 · THE ONE MAPPING
 # ═════════════════════════════════════════════════════════════════════
 
-def test_the_eight_canonical_states_and_an_explicit_unknown():
+def test_the_nine_canonical_states_and_an_explicit_unknown():
     assert OST.CANONICAL_STATES == (
         "PROPOSED", "SUBMITTED", "RESTING", "PARTIAL", "FILLED",
-        "CANCELLED", "REJECTED", "EXPIRED")
+        "CANCEL_PENDING", "CANCELLED", "REJECTED", "EXPIRED")
+    assert "CANCEL_PENDING" in OST.STANDING_STATES
+    assert "CANCEL_PENDING" in OST.FILL_BEARING_STATES
     assert OST.ALL_STATES == OST.CANONICAL_STATES + ("UNKNOWN",)
     assert "UNKNOWN" not in OST.FILL_BEARING_STATES
     assert set(OST.MEANING) == set(OST.ALL_STATES)
@@ -100,13 +103,13 @@ def test_the_exact_mapping():
     assert m["paper_orders"] == {
         "PENDING_SIMULATION": "SUBMITTED", "RESTING": "RESTING",
         "PARTIALLY_FILLED": "PARTIAL", "FILLED": "FILLED",
-        "EXPIRED": "EXPIRED", "CANCEL_PENDING": "RESTING",
+        "EXPIRED": "EXPIRED", "CANCEL_PENDING": "CANCEL_PENDING",
         "CANCELED": "CANCELLED", "REJECTED": "REJECTED"}
     assert m["execmirror_orders"] == m["kalshi_live_intents"] == {
         "PLANNED": "PROPOSED", "SUBMITTING": "SUBMITTED",
         "UNKNOWN": "UNKNOWN", "OPEN": "RESTING",
         "PARTIALLY_FILLED": "PARTIAL", "FILLED": "FILLED",
-        "CANCEL_REQUESTED": "RESTING", "CANCELLED": "CANCELLED",
+        "CANCEL_REQUESTED": "CANCEL_PENDING", "CANCELLED": "CANCELLED",
         "EXPIRED": "EXPIRED", "REJECTED": "REJECTED",
         "EXCLUDED": "REJECTED"}
     assert m["bettor_funded_intents"] == {
@@ -118,8 +121,9 @@ def test_the_exact_mapping():
     # a requested cancel can still fill; it says so
     t = OST.order_state("CANCEL_REQUESTED", source="execmirror_orders",
                         qty=5, filled_qty=2)
-    assert (t["state"], t["sub_state"]) == ("PARTIAL", "CANCEL_PENDING")
+    assert (t["state"], t["sub_state"]) == ("CANCEL_PENDING", None)
     assert t["can_still_fill"] and t["standing_qty"] == 3.0
+    assert t["filled_qty"] == 2.0       # its filled part still counts
 
 
 @pytest.mark.parametrize("raw,source", [
@@ -157,6 +161,8 @@ def test_the_mapping_module_is_pure_and_import_free():
 def test_raw_state_lists_for_sql_come_from_the_mapping():
     assert OST.raw_states("execmirror_orders", OST.STANDING_STATES) == [
         "CANCEL_REQUESTED", "OPEN", "PARTIALLY_FILLED"]
+    assert OST.raw_states("paper_orders", OST.STANDING_STATES) == [
+        "CANCEL_PENDING", "PARTIALLY_FILLED", "RESTING"]
     assert OST.raw_states("paper_orders", OST.PENDING_STATES) == [
         "PENDING_SIMULATION"]
     fb = OST.raw_states("execmirror_orders", OST.FILL_BEARING_STATES)
@@ -240,6 +246,36 @@ def test_cancelled_rejected_expired_contribute_zero(raw, source):
         ps = OST.protection_summary(held_qty=1000, orders=[
             _o("x", raw, 1000, 1000, source=source)])
         assert ps["filled_protection_qty"] == 0.0
+
+
+@pytest.mark.parametrize("raw,source", [
+    ("CANCEL_PENDING", "paper_orders"),
+    ("CANCEL_REQUESTED", "execmirror_orders"),
+    ("CANCEL_REQUESTED", "kalshi_live_intents")])
+def test_cancel_pending_is_never_protection(raw, source):
+    """CANCEL_PENDING (canonical, owner's 9-state list): it may still fill,
+    so its unfilled remainder is STANDING -- never protection -- and it
+    contributes 0 realized protection; a part already filled counts."""
+    t = OST.order_state(raw, source=source, qty=2083, filled_qty=0)
+    assert t["state"] == "CANCEL_PENDING" and t["can_still_fill"]
+    ps = OST.protection_summary(held_qty=2083, orders=[
+        _o("cp", raw, 2083, 0, source=source)])
+    assert ps["filled_protection_qty"] == 0.0
+    assert ps["standing_order_qty"] == 2083.0
+    assert ps["unprotected_qty"] == 2083.0
+    assert ps["realized_protection_usd"] == 0.0
+    assert ps["orders"][0]["state"] == "CANCEL_PENDING"
+    assert ps["line"].startswith("CANCEL_PENDING SELL: 2,083 @ $0.51 / "
+                                 "FILLED: 0 / ")
+    assert ps["line"].endswith("REALIZED PROTECTION: $0.00 / UNPROTECTED "
+                               "QTY: 2,083")
+    # partly filled before the cancel was requested: only the filled part
+    ps = OST.protection_summary(held_qty=1583, orders=[
+        _o("cp", raw, 2083, 500, source=source)])
+    assert ps["orders"][0]["state"] == "CANCEL_PENDING"
+    assert ps["filled_protection_qty"] == 500.0
+    assert ps["standing_order_qty"] == 1583.0
+    assert ps["unprotected_qty"] == 1583.0
 
 
 def test_an_unknown_state_contributes_nothing_and_is_named():
@@ -536,3 +572,74 @@ def test_positions_and_xavier_js_never_label_standing_as_protection():
     bad = {str(p.name): frontend_violations(p.read_text()) for p in files}
     bad = {k: v for k, v in bad.items() if v}
     assert not bad, bad
+
+
+# ═════════════════════════════════════════════════════════════════════
+# 7 · CANCEL_PENDING THROUGH THE ROOM AND THE API ROUTE
+# ═════════════════════════════════════════════════════════════════════
+
+def test_the_room_cancel_pending_is_standing_never_protection():
+    r = _evt(_one_resting_sell_raw(state="CANCEL_PENDING"))
+    pr = r["protection"]
+    o = next(o for o in r["orders"] if o["order_ref"] == "fx_prot")
+    assert o["state"] == "CANCEL_PENDING" and o["sub_state"] is None
+    assert o["note"].startswith("CANCEL_PENDING - MAY STILL FILL")
+    assert pr["filled_protection_qty"] == 0.0
+    assert pr["standing_order_qty"] == 2083.0
+    assert pr["unprotected_qty"] == 2083.0
+    assert pr["realized_protection_usd"] == 0.0
+    # it may still fill: it is a standing order with an IF_FILLED floor
+    assert r["standing_orders"] == ["fx_prot"]
+    assert pr["conditional_floor_if_filled_usd"] == pytest.approx(32.01)
+    assert r["chain"]["cancel_pending"] == ["fx_prot"]
+    assert P.summarize(r)["orders_by_state"].get("CANCEL_PENDING") == 1
+
+
+def test_api_route_never_counts_cancel_pending_as_protection(monkeypatch):
+    """GET /api/command/positions/room/{key} and /rooms (the real routes,
+    behind the real session dependency overridden for the test): a
+    CANCEL_PENDING protective sale is shown as CANCEL_PENDING, standing,
+    and contributes 0 filled / realized protection."""
+    from fastapi.testclient import TestClient
+    from sportsassets.api import app as APP
+    from sportsassets.api import agents_core as AC
+    from sportsassets.api import command_positions as CP
+
+    raw = _one_resting_sell_raw(state="CANCEL_PENDING")
+
+    async def fake_read_only(fn, **kw):
+        if fn is P.room_payload:
+            for r in P.build_rooms(raw):
+                if r["group_key"] == kw["key"]:
+                    return dict(r, as_of=P.iso(F.NOW), connection=None)
+            return None
+        rooms = [P.summarize(r) for r in P.build_rooms(raw) if r["active"]]
+        return {"book": kw.get("book"), "venues": {"POLYMARKET": {
+            "rooms": rooms}}}
+
+    monkeypatch.setattr(CP, "_read_only", fake_read_only)
+    APP.app.dependency_overrides[AC.require_read] = lambda: None
+    try:
+        c = TestClient(APP.app)
+        key = "PAPER:EVT:" + F.EVENT
+        got = c.get("/api/command/positions/room/" + key)
+        assert got.status_code == 200, got.text
+        body = got.json()
+        o = next(o for o in body["orders"] if o["order_ref"] == "fx_prot")
+        assert o["state"] == "CANCEL_PENDING"
+        pr = body["protection"]
+        assert pr["filled_protection_qty"] == 0.0
+        assert pr["realized_protection_usd"] == 0.0
+        assert pr["standing_order_qty"] == 2083.0
+        assert pr["unprotected_qty"] == 2083.0
+        assert "CANCEL_PENDING SELL: 2,083 @ $0.51 / FILLED: 0" in pr["line"]
+        lst = c.get("/api/command/positions/rooms?book=PAPER").json()
+        row = lst["venues"]["POLYMARKET"]["rooms"][0]
+        assert row["protection"]["filled_protection_qty"] == 0.0
+        assert row["protection"]["unprotected_qty"] == 2083.0
+        assert row["orders_by_state"]["CANCEL_PENDING"] == 1
+    finally:
+        APP.app.dependency_overrides.pop(AC.require_read, None)
+    # and without a session the route is still 401
+    assert TestClient(APP.app).get(
+        "/api/command/positions/room/PAPER:EVT:" + F.EVENT).status_code == 401

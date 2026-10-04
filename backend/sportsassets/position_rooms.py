@@ -93,14 +93,15 @@ STATEMENT_TIMEOUT_MS = 8000
 # ── CANONICAL ORDER STATES: the ONE shared mapping (order_state_truth) ──
 # Every raw paper / mirror / Kalshi state is mapped by
 # order_state_truth.order_state -- the single source of truth -- to one of
-# the eight canonical states (or the explicit UNKNOWN). A cancel requested
-# but not confirmed can still fill: RESTING / PARTIAL with sub_state
-# CANCEL_PENDING. A mirror row excluded before submission: REJECTED with
-# sub_state EXCLUDED_BEFORE_SUBMISSION.
+# the nine canonical states (or the explicit UNKNOWN). A cancel requested
+# but not confirmed is CANCEL_PENDING: it can still fill. A mirror row
+# excluded before submission: REJECTED with sub_state
+# EXCLUDED_BEFORE_SUBMISSION.
 S_PROPOSED, S_SUBMITTED, S_UNKNOWN = OST.PROPOSED, OST.SUBMITTED, OST.UNKNOWN
 S_RESTING, S_PARTIAL, S_FILLED = OST.RESTING, OST.PARTIAL, OST.FILLED
 S_CANCELLED, S_EXPIRED, S_REJECTED = (OST.CANCELLED, OST.EXPIRED,
                                       OST.REJECTED)
+S_CANCEL_PENDING = OST.CANCEL_PENDING
 LIVE_STATES = OST.LIVE_STATES
 #: An order that can still fill without a new decision.
 STANDING_STATES = OST.STANDING_STATES
@@ -1332,6 +1333,11 @@ def _protective_note(o: dict) -> str | None:
         return ("PARTIAL - ONLY THE FILLED %s COUNTS AS PROTECTION; %s STILL "
                 "RESTING, NOT PROTECTION" % (OST.fmt_qty(f),
                                              OST.fmt_qty(rem)))
+    if st == S_CANCEL_PENDING:
+        return ("CANCEL_PENDING - MAY STILL FILL; ITS %s UNFILLED ARE NOT "
+                "PROTECTION%s" % (OST.fmt_qty(rem), (
+                    "; ONLY THE FILLED %s COUNTS" % OST.fmt_qty(f))
+                    if f > 0 else ""))
     if st in (S_CANCELLED, S_EXPIRED, S_REJECTED) and f <= 0:
         return "%s UNFILLED - CONTRIBUTES NO PROTECTION" % st
     return None
@@ -1677,8 +1683,7 @@ def _finish_room(rm: dict, raw: dict, ident_of, now: float) -> dict:
         "unknown": by_state.get(S_UNKNOWN, []),
         "standing": by_state.get(S_RESTING, []),
         "partially_filled": by_state.get(S_PARTIAL, []),
-        "cancel_pending": [o["order_ref"] for o in orders
-                           if o.get("sub_state") == OST.SUB_CANCEL_PENDING],
+        "cancel_pending": by_state.get(S_CANCEL_PENDING, []),
         "filled": by_state.get(S_FILLED, []),
         "terminal_unfilled": (by_state.get(S_CANCELLED, [])
                               + by_state.get(S_EXPIRED, [])
