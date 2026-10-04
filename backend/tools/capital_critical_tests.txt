@@ -863,3 +863,17 @@ tests/test_order_posts_are_sent_once_and_429s_are_named.py
 # attempt and no outcome, the real reader books nothing and the position
 # stays open and owned; on arrival it is booked once through the ledger.
 tests/test_chaos_provider_disconnect_and_delayed_settlement.py
+# R30A PRODUCTION-SHAPED CONTRACTS (program section 22): the production
+# writer persists, the production reader reads the persisted row (jsonb as
+# asyncpg returns it, Decimals, timestamptz) -- no hand-built reader input.
+# K1 paper decision -> canonical intent -> both adapters -> parity ledger ->
+# the readiness gate after a recorded cutover; K2 Xavier's review -> a
+# management intent that verifies from its row; K3 paper order / fill /
+# settlement -> ledger positions -> INVESTMENT profitability validation; K4
+# the actual lane's order record (incl. one recovered from the trade log) ->
+# Audrey's reconciliation and the management views; K5 agent_work_requests ->
+# the floor workspace queue and the identity work state; K6 PinnAPI ingest ->
+# the collector's valuation record -> the completed-game sole authority
+# (nothing once authority is revoked or past 30 s); K7 the entry-evidence
+# route returns the collector's jsonb as objects.
+tests/test_contract_writers_round_trip_to_their_readers.py
