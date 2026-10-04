@@ -840,3 +840,14 @@ tests/test_agent_identity_api_authority.py
 # booked and handed to Xavier; a partial fill during a working cancel is
 # counted and the cancel is not forgotten; a restart resolves every UNKNOWN.
 tests/test_chaos_the_venue_state_machine_recovers.py
+# R30A SDK RETRIES / 429 / AMBIGUOUS POST (program section 21), counted on
+# the wire under the installed venue SDK through an httpx.MockTransport: the
+# SDK never retries a POST even at its default; every client built from an
+# order credential (pmus, execmirror.Venue, the execmirror probe reader) has
+# the SDK's retries off, so a 429 is one dispatch and a named RateLimitError;
+# a 429 at the execution mirror trips venue_pace's shared circuit;
+# pmus.submit_fok makes exactly one create whatever the venue answers and
+# raises it by name (a post-only 429 refusal carries status_code 429 and
+# error_type RateLimitError); no order adapter loops around its send; no
+# module builds the SDK with retries on; Kalshi's session has no retry adapter.
+tests/test_order_posts_are_sent_once_and_429s_are_named.py
