@@ -508,25 +508,18 @@ async def step_maintain(conn, ctx: dict) -> dict:
         age = (None if v is None or v["observed_at"] is None
                else round(at - L._epoch(v["observed_at"]), 3))
         p_new = None if v is None else float(v["probability"])
-        if p_new is not None and contract is not None:
+        conv = (PB.held_nfl_conversion(dict(contract))
+                if p_new is not None and contract is not None else None)
+        if conv is not None:
             # R30A: the standing bid is re-checked on the SAME scale it was
             # placed on -- an NFL line's P(win | no tie) as the venue
-            # contract's value (tie pays 0.50) at the worst cited tie rate.
-            # A conversion that cannot be made leaves no probability, and
-            # check_resting then cancels on the missing reading.
-            from .. import bettor_nfl_settlement as NFL
-            if (str(contract["sport_family"] or "") == "football"
-                    and NFL.league_of_slug(contract["us_market_slug"])
-                    == "nfl"):
-                pin_like = {"p": p_new}
-                why = PB.apply_venue_conversion(pin_like, {
-                    "venue_conversion": {
-                        "sport_family": "football", "league": "nfl",
-                        "venue_rules_text": contract["venue_rules_text"],
-                        "book_outcome_names": list(
-                            (DP._j(contract["raw_odds"]) or {}).keys()),
-                        "phase": None}})
-                p_new = None if why else pin_like["p"]
+            # contract's value (tie pays 0.50) at the worst cited tie rate,
+            # for a game established as regular season. A conversion that
+            # cannot be made leaves no probability, and check_resting then
+            # cancels on the missing reading (C_UNVERIFIED).
+            pin_like = {"p": p_new}
+            why = PB.apply_venue_conversion(pin_like, conv)
+            p_new = None if why else pin_like["p"]
         chk = check_resting(
             limit=float(r["limit_price"]),
             p_new=p_new,

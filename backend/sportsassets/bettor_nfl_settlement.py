@@ -43,8 +43,12 @@ THE PAYOUTS, STATE BY STATE (per $1 contract on the side held)
                                                              suspension (>= 55 min
                                                              and not resumed in
                                                              12 h)
-  Pro Bowl / exhibition      --                              its own action rule:
-                                                             NEVER TRADED here
+  Pro Bowl / exhibition /    --                              its own action rule:
+    preseason / postseason                                   NEVER TRADED here: a
+                                                             game is traded only
+                                                             when it is ESTABLISHED
+                                                             as regular season
+                                                             (cited season window)
 
 THE TIE IS AN ORDINARY OUTCOME, NOT AN EXCEPTION. A regular-season game that
 is level after its one overtime period simply ends tied: it is a completed
@@ -141,9 +145,13 @@ def _book_cite(quote, where):
 #: The venue's own listing text, as served by its public gateway to the
 #: GitHub runner, for EVERY NFL contract read: the London game, the 1 pm
 #: slate, the Sunday-night game and the Monday-night game carry the same
-#: four rule sentences. Production agrees: research-sql run 37226814972
-#: (job 111508049692, 2026-10-04T19:03:54Z) found the same wording persisted
-#: on all 15 NFL valuation rows.
+#: four rule sentences. Production agrees, on EVERY row: research-sql run
+#: 37231923822 (job 111523310648, research/r30a_nfl_wording_and_catalogue_
+#: shape.sql, read 2026-10-04T20:23:54Z) grouped all 15 NFL valuation rows
+#: (15 contracts, every one carrying a rules text) by their wording with the
+#: game name and date masked, with no limit: ONE wording, 15 of 15 rows.
+#: (The first read, run 37226814972 M4, grouped the UNMASKED text with
+#: LIMIT 10, so it showed only 10 of the 15 rows; the claim then outran it.)
 VENUE_CAPTURES = (
     {"retrieved_at": "2026-10-04T04:29:04Z", "run_id": 37177121911,
      "job_id": 111361963055,
@@ -251,9 +259,11 @@ TIE_RATE_EVIDENCE = {
     "games_max": 272 + 3 * 16,
     "games_max_basis": ("plus 2026 Weeks 1-3 at most: 16 games a week among "
                         "the 32 clubs, 3 x 16 = 48"),
-    "postseason": ("a postseason game cannot end tied (the definition above "
-                   "is regular season only), so for a game whose phase is not "
-                   "established the interval's lower end is 0"),
+    "scope": ("REGULAR SEASON ONLY: the definition above and the count are "
+              "regular-season games, so the interval is used only for a game "
+              "ESTABLISHED as regular season (season_phase, from the cited "
+              "season window) -- never for a preseason, postseason, Pro Bowl "
+              "or any other game, about whose tie frequency it says nothing"),
 }
 
 CONFIDENCE = 0.95
@@ -334,36 +344,43 @@ R_BOOK_PRICES_DRAW = "NFL_BOOK_LINE_PRICES_A_DRAW_NOT_THE_TWO_WAY_GAME_LINE"
 R_EXHIBITION = "NFL_PRO_BOWL_OR_EXHIBITION_NEVER_TRADED"
 R_DATE_INCONSISTENT = "NFL_FIXTURE_DATE_NOT_CONSISTENT_WITH_THE_VENUE_SLUG"
 R_DATE_UNREADABLE = "NFL_FIXTURE_DATE_NOT_READABLE_FROM_THE_VENUE_SLUG"
+R_PHASE_NOT_REGULAR = "NFL_SEASON_PHASE_NOT_ESTABLISHED_AS_REGULAR_SEASON"
 
 REFUSALS = (R_TIE_RATE_NOT_HELD, R_VENUE_TEXT_ABSENT, R_VENUE_TIE_NOT_STATED,
             R_VENUE_TIE_NOT_HALF, R_BOOK_PRICES_DRAW, R_EXHIBITION,
-            R_DATE_INCONSISTENT, R_DATE_UNREADABLE)
+            R_DATE_INCONSISTENT, R_DATE_UNREADABLE, R_PHASE_NOT_REGULAR)
 
 #: WHAT THE STRICT POLICY (every condition paid identically on both sides)
 #: STILL LACKS FOR AN NFL MONEY LINE. Derek's SETTLEMENT_NOT_SUPPORTED stays,
 #: and this is its exact content: two payout differences no reading of the
 #: prose can remove, and three conditions the venue's text does not address.
+#: The payouts are keyed `book_payout` / `venue_payout` (as in
+#: SETTLEMENT_STATES), never a bare "venue": that key names a TRADING VENUE
+#: across the package, and tests/test_the_venue_identifier_reaches_the_
+#: position_model.py rightly refuses a payout sentence spelled as one.
 STRICT_POLICY_MISSING = (
     {"condition": "TIE_AFTER_OVERTIME",
-     "book": "VOID (stake returned)", "venue": "0.50 per contract",
+     "book_payout": "VOID (stake returned)",
+     "venue_payout": "0.50 per contract",
      "what_would_close_it": ("nothing in either document: the payouts "
                              "differ. Only a policy that PRICES the tie "
                              "(the completed-game policy, with the cited "
                              "tie-rate interval) can use the book's price")},
     {"condition": "POSTPONED_OR_NOT_RESCHEDULED",
-     "book": "VOID if not started within 12 h of the original time",
-     "venue": ("graded on a game rescheduled within two weeks; otherwise the "
-               "last fair market price S in [0, 1]"),
+     "book_payout": "VOID if not started within 12 h of the original time",
+     "venue_payout": ("graded on a game rescheduled within two weeks; "
+                      "otherwise the last fair market price S in [0, 1]"),
      "what_would_close_it": ("a MEASURED frequency of NFL postponement / "
                              "rescheduling beyond 12 h and of the price "
                              "branch, with E[S | branch]. Neither is held; "
                              "no feed here reports postponements")},
     {"condition": "SUSPENDED_CALLED_OR_STOPPED_EARLY",
-     "book": ("< 55 min and not completed in 12 h: VOID; >= 55 min and not "
-              "resumed in 12 h: the score at the suspension is final"),
-     "venue": ("the listing states only the not-rescheduled-in-two-weeks "
-               "price branch; it states no payout for a game suspended and "
-               "made official, or resumed"),
+     "book_payout": ("< 55 min and not completed in 12 h: VOID; >= 55 min "
+                     "and not resumed in 12 h: the score at the suspension "
+                     "is final"),
+     "venue_payout": ("the listing states only the not-rescheduled-in-two-"
+                      "weeks price branch; it states no payout for a game "
+                      "suspended and made official, or resumed"),
      "what_would_close_it": ("the venue's per-condition rule for a suspended "
                              "NFL game (its rules text does not state one), "
                              "or a measured frequency as above")},
@@ -374,30 +391,54 @@ STRICT_POLICY_MISSING = (
 # THE VENUE'S TIE PAYOUT, READ FROM ITS OWN TEXT
 # ═════════════════════════════════════════════════════════════════════
 
-_TIE_HALF = re.compile(
-    r"\bif the game ends in a tie,? the market will settle to \$?0?\.50?\b")
-_TIE_ANY = re.compile(r"\b(?:ends? in a tie|tied? (?:final|game|score)|"
-                      r"\btie\b)")
+#: THE CITED SENTENCE, EXACTLY (lower-cased, whitespace collapsed). R30A
+#: review: the first reading searched for the sentence's OPENING words
+#: anywhere, so "... settle to $0.50 for Yes and 1.00 for No." read as the
+#: cited half, and a contradicting tie clause APPENDED to the cited text
+#: ("If the game ends in a tie after overtime, all positions resolve to No.")
+#: was never seen -- the contract ENTERED through the real paper pass. Now
+#: every sentence of the text that speaks of a tie or a draw is read, and the
+#: tie is priced only when there is exactly ONE such sentence and it IS the
+#: cited one, terminated. Anything else -- a variant wording, an asymmetric
+#: payout, a second tie clause -- is a named refusal: the outcome partition
+#: is not the one the conversion prices.
+TIE_SENTENCE = Q_VENUE_TIE.lower()
+_TIE_WORD = re.compile(r"\b(?:ties?|tied|tying|draws?|drawn)\b")
+_SENTENCE_END = re.compile(r"(?<=[.!?])\s+")
+
+
+def tie_sentences(prose) -> list:
+    """Every sentence of the contract's text that speaks of a tie or a draw
+    (lower-cased, whitespace collapsed), in order. Pure."""
+    flat = " ".join(str(prose or "").split()).lower()
+    return [x for x in _SENTENCE_END.split(flat) if _TIE_WORD.search(x)]
 
 
 def venue_tie_payout(prose) -> dict:
-    """{"payout": 0.5 | None, "refusal": ...} from the contract's own text."""
+    """{"payout": 0.5 | None, "refusal": ...} from the contract's own text:
+    0.5 only when its ONE tie sentence is exactly the cited one."""
     flat = " ".join(str(prose or "").split()).lower()
     if not flat:
         return {"payout": None, "refusal": R_VENUE_TEXT_ABSENT,
                 "why": "no venue rules text is recorded for this contract"}
-    if _TIE_HALF.search(flat):
+    ties = tie_sentences(flat)
+    if not ties:
+        return {"payout": None, "refusal": R_VENUE_TIE_NOT_STATED,
+                "why": ("the contract's text states no payout for a tied game, "
+                        "so the outcome partition of an NFL game cannot be "
+                        "priced on it")}
+    last = _SENTENCE_END.split(flat)[-1]
+    exact = [t for t in ties if t == TIE_SENTENCE or (
+        t == last and t == TIE_SENTENCE[:-1])]
+    if len(ties) == 1 and len(exact) == 1:
         return {"payout": 0.5, "refusal": None, "quote": Q_VENUE_TIE,
                 "cite": _venue_cite(Q_VENUE_TIE)}
-    if _TIE_ANY.search(flat):
-        return {"payout": None, "refusal": R_VENUE_TIE_NOT_HALF,
-                "why": ("the contract's text addresses a tie but not as the "
-                        "cited $0.50 settlement; an unrecognised tie payout "
-                        "establishes nothing")}
-    return {"payout": None, "refusal": R_VENUE_TIE_NOT_STATED,
-            "why": ("the contract's text states no payout for a tied game, "
-                    "so the outcome partition of an NFL game cannot be "
-                    "priced on it")}
+    return {"payout": None, "refusal": R_VENUE_TIE_NOT_HALF,
+            "tie_sentences": ties,
+            "why": ("the contract's tie text is not exactly the cited $0.50 "
+                    "settlement (%d tie sentence(s), %d of them the cited "
+                    "one): a variant, asymmetric or additional tie clause "
+                    "establishes nothing" % (len(ties), len(exact)))}
 
 
 def _draw_named(names) -> bool:
@@ -413,17 +454,34 @@ PHASE_REGULAR = "REGULAR_SEASON"
 
 
 def interval_for(phase=None, evidence=None) -> dict:
+    """The tie-rate interval FOR A GAME ESTABLISHED AS REGULAR SEASON, or a
+    named refusal.
+
+    R30A review: this used to return, for a game whose phase was not
+    established, "the union of both cases" (the regular-season upper end
+    with a lower end of 0) -- and every caller passed phase None. A
+    preseason game or an exhibition is played under other rules (the review
+    cites the 2021 removal of preseason overtime; not captured here) and
+    lies outside what the evidence counts, yet an August game with no
+    "preseason" word in its text was ENTERED and priced on the regular-
+    season tie rate. The evidence counts
+    regular-season games only (TIE_RATE_EVIDENCE["scope"]), so it now prices
+    only a game positively ESTABLISHED as regular season (season_phase);
+    every other phase -- preseason, postseason, Pro Bowl, unknown, or a
+    caller that forgot to say -- fails closed by name."""
     iv = tie_rate_interval(evidence)
     if not iv.get("held"):
         return iv
     if str(phase or "") == PHASE_REGULAR:
         return dict(iv, phase=PHASE_REGULAR,
-                    phase_basis="the fixture is established as regular season")
-    return dict(iv, lo=0.0, phase=phase,
-                phase_basis=("the fixture's phase is not established as "
-                             "regular season; a postseason game cannot end "
-                             "tied, so the lower end is 0 (the union of both "
-                             "cases)"))
+                    phase_basis=("the fixture is established as regular "
+                                 "season (its America/New_York game day lies "
+                                 "inside the cited season window)"))
+    return {"held": False, "refusal": R_PHASE_NOT_REGULAR, "phase": phase,
+            "why": ("the fixture is not established as a regular-season game "
+                    "(phase %r); the cited tie-rate evidence counts regular-"
+                    "season games only and says nothing about any other"
+                    % (phase,))}
 
 
 def venue_value(p_book, *, tie_payout: float = 0.5, phase=None,
@@ -513,6 +571,12 @@ def convert(p_book, *, sport_family, venue_rules_text,
 ORDINARY = "ORDINARY_COMPLETION_IN_THE_CONDITIONAL_EV"
 EXCEPTIONAL = "EXCEPTIONAL_DISCLOSED_PROBABILITY_UNMEASURED"
 EXCLUDED = "EXCLUDED_NEVER_TRADED"
+#: A PAID STATE THAT IS NOT KNOWN (R30A review): a 0.50 settlement on a
+#: contract whose text states both the tie settlement and the
+#: last-fair-market-price clause, with no final score read. Neither the
+#: ordinary nor the exceptional class is claimed for it.
+AMBIGUOUS = "ORDINARY_TIE_OR_EXCEPTIONAL_PRICE_NOT_DISTINGUISHED"
+S_TIE_OR_LAST_FAIR_PRICE = "TIE_OR_LAST_FAIR_PRICE_NOT_DISTINGUISHED"
 
 SETTLEMENT_STATES = (
     {"state": "REGULATION_WIN", "class": ORDINARY,
@@ -690,6 +754,123 @@ def fixture_date(*, slug, venue_rules_text=None, kickoff_epoch=None) -> dict:
     return out
 
 
+# ═════════════════════════════════════════════════════════════════════
+# THE SEASON PHASE: ESTABLISHED FROM A CITED WINDOW, NEVER ASSUMED
+# ═════════════════════════════════════════════════════════════════════
+#
+# WHY A WINDOW AND NOT A KEYWORD (R30A review). The first pass excluded the
+# Pro Bowl / exhibitions by searching the slug and text for marker words and
+# priced every other game as regular season, so a preseason listing worded
+# like the regular-season ones (no venue preseason listing has ever been
+# captured, so its wording is unknown) would have been ENTERED. The phase is
+# now ESTABLISHED POSITIVELY: a game is regular season only when its
+# America/New_York game day (the venue slug's date, which fixture_date checks
+# against the venue text and the kickoff) lies inside a cited regular-season
+# window. Every NFL game played on a day inside that window is a regular-
+# season game; a day before it (preseason, the Hall of Fame Game) or after
+# it (the playoffs, the Pro Bowl, the Super Bowl) is not established and is
+# refused by name. The marker words stay as an EXTRA refusal only.
+#
+# THE POSTSEASON IS REFUSED, NOT PRICED. The window after the regular season
+# holds the playoffs AND exhibitions this source does not date, the venue
+# and catalogue carry no phase field, and no postseason overtime rule text
+# was captured; a playoff game therefore cannot be established as one here.
+# What would admit it: a venue or catalogue phase field, or the playoff
+# fixtures themselves, plus the captured postseason overtime rule.
+
+SEASON_WINDOWS = (
+    {"season": 2026,
+     "regular_season_first_day": "2026-09-09",
+     "regular_season_last_day": "2027-01-10",
+     "playoffs_first_day": "2027-01-16",
+     "super_bowl_day": "2027-02-14",
+     "infobox_quote": ("| regular_season = {{Start date|2026|09|09|}} – "
+                       "{{End date|2027|01|10}}"),
+     "lead_quote": ("The regular season began on September 9, 2026, with "
+                    "reigning Super Bowl champion Seattle defeating New "
+                    "England in the NFL Kickoff Game, and will end on January "
+                    "10, 2027. The playoffs will begin on January 16 and "
+                    "conclude with Super Bowl LXI at SoFi Stadium in "
+                    "Inglewood, California, on February 14."),
+     "source": "Wikipedia, '2026 NFL season', revision 1378055076, lead "
+               "section (infobox and first paragraph)",
+     "source_url": ("https://en.wikipedia.org/w/index.php?title=2026_NFL_"
+                    "season&oldid=1378055076"),
+     "retrieved_at": "2026-10-04T20:20:17Z", "run_id": 37231698293,
+     "job_id": 111522586473, "bytes": 1254,
+     "sha256": ("5cc6b1025c1fae1e7343706556d3368025aad4ec0dc8276e8983546d99"
+                "d54be6"),
+     "held_in": "tests/fixtures/nfl_season_window_2026_10_04.json"},
+)
+
+
+def season_phase(event_date) -> dict:
+    """{"phase": "REGULAR_SEASON" | None, "refusal": ..., ...} for an NFL
+    game's America/New_York day (a date or 'YYYY-MM-DD'). Pure."""
+    import datetime as _dt
+    try:
+        d = (event_date if isinstance(event_date, _dt.date)
+             else _dt.date.fromisoformat(str(event_date)))
+    except (TypeError, ValueError):
+        return {"phase": None, "refusal": R_PHASE_NOT_REGULAR,
+                "event_date": event_date,
+                "why": "the game day is not established, so neither is its "
+                       "phase"}
+    for w in SEASON_WINDOWS:
+        first = _dt.date.fromisoformat(w["regular_season_first_day"])
+        last = _dt.date.fromisoformat(w["regular_season_last_day"])
+        cite = {k: w[k] for k in ("source", "source_url", "retrieved_at",
+                                  "run_id", "job_id", "sha256",
+                                  "infobox_quote")}
+        if first <= d <= last:
+            return {"phase": PHASE_REGULAR, "refusal": None,
+                    "event_date": d.isoformat(), "season": w["season"],
+                    "window": [w["regular_season_first_day"],
+                               w["regular_season_last_day"]],
+                    "basis": ("the game day %s lies inside the cited %d "
+                              "regular season (%s .. %s)"
+                              % (d, w["season"], first, last)),
+                    "cite": cite}
+        if d < first and d.year == first.year:
+            return {"phase": None, "refusal": R_PHASE_NOT_REGULAR,
+                    "event_date": d.isoformat(), "season": w["season"],
+                    "cite": cite,
+                    "why": ("the game day %s is BEFORE the cited %d regular "
+                            "season (first day %s): a preseason or exhibition "
+                            "game, never traded" % (d, w["season"], first))}
+        if last < d <= last.replace(month=3, day=31):
+            return {"phase": None, "refusal": R_PHASE_NOT_REGULAR,
+                    "event_date": d.isoformat(), "season": w["season"],
+                    "cite": cite,
+                    "why": ("the game day %s is AFTER the cited %d regular "
+                            "season (last day %s): playoffs or an exhibition "
+                            "(Pro Bowl), which this window cannot tell apart; "
+                            "not established, never traded"
+                            % (d, w["season"], last))}
+    return {"phase": None, "refusal": R_PHASE_NOT_REGULAR,
+            "event_date": d.isoformat(),
+            "why": ("no cited season window covers the game day %s; its phase "
+                    "is not established" % d)}
+
+
+def phase_of_slug(slug) -> dict:
+    """season_phase of the venue slug's own date (the game's America/
+    New_York day). For readers that hold only the contract (Xavier's measure,
+    the maker's re-check); the entry decision also checks that date against
+    the venue text and the kickoff (fixture_date). Pure."""
+    import datetime as _dt
+    m = _SLUG_DATE.search(str(slug or ""))
+    if not m:
+        return {"phase": None, "refusal": R_PHASE_NOT_REGULAR,
+                "why": "the venue slug carries no YYYY-MM-DD date"}
+    try:
+        d = _dt.date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+    except ValueError:
+        return {"phase": None, "refusal": R_PHASE_NOT_REGULAR,
+                "why": "the venue slug's date is invalid"}
+    return season_phase(d)
+
+
 def league_of_slug(slug) -> str | None:
     """'nfl' for aec-nfl-..., the venue's league token, else None. Pure."""
     parts = str(slug or "").split("-")
@@ -703,6 +884,9 @@ def describe() -> dict:
                                   if iv.get("held") else None),
             "tie_rate_method": INTERVAL_METHOD,
             "tie_rate_source": TIE_RATE_EVIDENCE["source_url"],
+            "regular_season_windows": [
+                [w["regular_season_first_day"], w["regular_season_last_day"]]
+                for w in SEASON_WINDOWS],
             "refusals": list(REFUSALS),
             "states": [s["state"] for s in SETTLEMENT_STATES],
             "strict_policy_missing": [m["condition"]

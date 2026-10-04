@@ -20,8 +20,17 @@ collector's rows, and proves:
     and a tied game's settlement pays 0.50 per contract in the paper ledger;
   6 the London game (09:30 ET kickoff) and the Sunday-night game whose UTC
     date is Monday both map to the venue slug's America/New_York date, and a
-    slug dated by the UTC day is refused by name;
-  7 the Pro Bowl is never traded.
+    slug dated by the UTC day is refused by name (the Sunday-night game is
+    the case that DISCRIMINATES a UTC mapping: a London kickoff falls on the
+    same date in UTC, London and New York, so that test proves instead that
+    the kickoff instant is read on the ET clock and is checked at all);
+  7 the Pro Bowl is never traded, and -- R30A review -- neither is a
+    preseason game worded like the regular season, nor a playoff-window
+    game: the phase is ESTABLISHED from the cited season window;
+  8 (R30A review) a contradicting tie clause APPENDED to the venue's text is
+    refused; the maker's resting bid is re-checked on the converted scale
+    and cancelled when the conversion cannot be made; Xavier's feed reading
+    of a held NFL contract is converted the same way.
 
 SYNTHETIC: prices, books and Pinnacle odds; the venue rules text is the
 venue's own (captured listings), except where a test states it substitutes a
@@ -110,12 +119,13 @@ def _settlement(text: str, names: list) -> dict:
 
 
 async def nfl_valuation(conn, *, slug, selection, odds, text, decided_at,
-                        pin_age_s=5.0) -> dict:
+                        pin_age_s=5.0, p=None) -> dict:
     """One entry-experiment valuation of an NFL money line, shaped like the
     collector's row (CALIBRATION_ONLY, the book's priced set, the venue's
-    rules text, the strict settlement refusals by name)."""
+    rules text, the strict settlement refusals by name). `p` overrides the
+    stored probability (a newer reading for a re-check)."""
     at = float(decided_at)
-    p = _book_p(odds, selection)
+    p = _book_p(odds, selection) if p is None else float(p)
     scmp, unmet = _settlement(text, list(odds))
     vid = await conn.fetchval(
         "INSERT INTO external_valuations (experiment_id, version, "
@@ -144,18 +154,62 @@ async def nfl_valuation(conn, *, slug, selection, odds, text, decided_at,
 
 
 async def premap(conn, slug, *, title, kickoff):
-    """The venue catalogue row for the contract (us_premap), with the
-    venue's own scheduled kickoff instant."""
+    """The venue catalogue row for the contract (us_premap), shaped like
+    PRODUCTION's (tests/fixtures/pmus_nfl_catalogue_rows_2026_10_04.json):
+    the venue's own question with its UTC clock, and the line the premap
+    sweep stamps from that clock (the minutes), with the venue's own
+    scheduled kickoff instant."""
+    from datetime import datetime, timezone
+    k = datetime.fromtimestamp(float(kickoff), timezone.utc)
+    clock = k.strftime("%I:%M %p").lstrip("0")
+    question = ("Who will win in the upcoming football event %s scheduled "
+                "for %s %d, %d at %s UTC?" % (title, k.strftime("%B"), k.day,
+                                              k.year, clock))
     await conn.execute(
         "INSERT INTO us_premap (identifier, event_slug, event_title, "
         " market_slug, question, kind, side_norm, event_keys, sports_type, "
-        " game_start, team_league, updated_at) VALUES ($1,$2,$3,$1,$4,"
+        " game_start, team_league, line, updated_at) VALUES ($1,$2,$3,$1,$4,"
         " 'side','long',ARRAY[$5],'football_team_full_game_winner',"
-        " to_timestamp($6),'nfl',now()) ON CONFLICT (identifier, side_norm) "
-        " DO UPDATE SET game_start=EXCLUDED.game_start, "
-        " event_keys=EXCLUDED.event_keys, updated_at=now()",
-        slug, "nfl-" + slug.split("aec-nfl-", 1)[1], title,
-        "Who will win %s?" % title, MARK, float(kickoff))
+        " to_timestamp($6),'nfl',$7,now()) ON CONFLICT (identifier, "
+        " side_norm) DO UPDATE SET game_start=EXCLUDED.game_start, "
+        " event_keys=EXCLUDED.event_keys, question=EXCLUDED.question, "
+        " line=EXCLUDED.line, updated_at=now()",
+        slug, "nfl-" + slug.split("aec-nfl-", 1)[1], title, question, MARK,
+        float(kickoff), k.strftime("%M"))
+
+
+async def hold_the_memory_learner(conn, until: float):
+    """THE MEMORY LEARNER IS HELD FOR A PROOF THAT SETTLES AND THEN REMOVES
+    A SCRATCH ENTRY (R30A review). The paper pass runs agent_memory.step
+    whenever it is due (every RUN_EVERY_S), and it derives an append-only
+    lesson from every settled entry, citing the decision and settlement as
+    evidence. This proof deletes its scratch account's records when it ends,
+    so a lesson written mid-proof cited records that no longer existed and
+    test_agent_identity_memory failed on the dangling evidence -- whether it
+    did depended on when the learner last ran. Its watermark is set ahead of
+    the proof's clock (NOT_DUE) and restored afterwards; nothing else about
+    the learner changes. Returns the previous watermark value."""
+    from sportsassets.agents import agent_memory as AM
+    prev = await conn.fetchval("SELECT value::text FROM ingestion_state "
+                               " WHERE key=$1", AM.WATERMARK_KEY)
+    cur = json.loads(prev) if prev else {}
+    await conn.execute(
+        "INSERT INTO ingestion_state (key, value) VALUES ($1, $2::jsonb) "
+        "ON CONFLICT (key) DO UPDATE SET value = $2::jsonb",
+        AM.WATERMARK_KEY, json.dumps(dict(cur, at=float(until))))
+    return prev
+
+
+async def release_the_memory_learner(conn, prev) -> None:
+    from sportsassets.agents import agent_memory as AM
+    if prev is None:
+        await conn.execute("DELETE FROM ingestion_state WHERE key=$1",
+                           AM.WATERMARK_KEY)
+    else:
+        await conn.execute(
+            "INSERT INTO ingestion_state (key, value) VALUES ($1, $2::jsonb) "
+            "ON CONFLICT (key) DO UPDATE SET value = $2::jsonb",
+            AM.WATERMARK_KEY, prev)
 
 
 async def purge(conn, vids):
@@ -271,7 +325,7 @@ async def test_nfl_enters_with_one_intent_and_the_shadow_adapter(
 
         # THE PROBABILITY: converted, with the book's own number beside it
         pin = H.j(d["pinnacle"])
-        conv = NFL.venue_value(v["p_book"])
+        conv = NFL.venue_value(v["p_book"], phase=NFL.PHASE_REGULAR)
         assert pin["p_book_conditional_no_tie"] == pytest.approx(v["p_book"])
         assert float(d["p_pinnacle"]) == pytest.approx(conv["p"], abs=1e-12)
         assert conv["tie_rate_end_used"] == "HIGHEST"      # a favourite
@@ -352,7 +406,7 @@ async def test_nfl_below_edge_at_the_worst_tie_rate(cg_on_with_parity):
                 "Kansas City Chiefs vs Las Vegas Raiders"),
             decided_at=now - 10)
         vids.append(v["valuation_id"])
-        conv = NFL.venue_value(v["p_book"])
+        conv = NFL.venue_value(v["p_book"], phase=NFL.PHASE_REGULAR)
         price = 0.80
         min_edge = PB.CG_MIN_EDGE_PP_V2 / 100.0
         # the premise, computed rather than asserted: raw clears, converted
@@ -426,9 +480,14 @@ async def test_nfl_conflicting_venue_rules_are_refused(cg_on_with_parity):
         tie_no = LONDON_TEXT.replace(
             "If the game ends in a tie, the market will settle to $0.50.",
             "If the game ends in a tie, the market will resolve to No.")
+        # R30A review: the cited sentence KEPT, and a contradicting tie
+        # clause appended after it -- this one ENTERED before
+        appended = LONDON_TEXT + (" If the game ends in a tie after "
+                                  "overtime, all positions resolve to No.")
         cases = []
         for slug, text in (("aec-nfl-ind-was-2026-10-04", no_ot),
-                           ("aec-nfl-lar-phi-2026-10-04", tie_no)):
+                           ("aec-nfl-lar-phi-2026-10-04", tie_no),
+                           ("aec-nfl-nyj-chi-2026-10-04", appended)):
             v = await nfl_valuation(conn, slug=slug,
                                     selection="Indianapolis Colts",
                                     odds=LONDON_ODDS, text=text,
@@ -445,9 +504,15 @@ async def test_nfl_conflicting_venue_rules_are_refused(cg_on_with_parity):
         assert d2["verdict"] == "REFUSE"
         assert PB.R_GP_UNKNOWN in d2["refusals"], d2["refusals"]
         assert NFL.R_VENUE_TIE_NOT_HALF in d2["refusals"], d2["refusals"]
+        d3 = await decision(conn, acct, cases[2]["valuation_id"])
+        assert d3["verdict"] == "REFUSE"
+        assert NFL.R_VENUE_TIE_NOT_HALF in d3["refusals"], d3["refusals"]
+        tie_check = check(d3, "nfl_tie_priced_from_cited_evidence")
+        assert not tie_check["passed"]
+        assert len(tie_check["venue_tie"]["tie_sentences"]) == 2
         assert await conn.fetchval(
             "SELECT count(*) FROM paper_orders WHERE decision_id = ANY($1)",
-            [d1["decision_id"], d2["decision_id"]]) == 0
+            [d1["decision_id"], d2["decision_id"], d3["decision_id"]]) == 0
     finally:
         await purge(conn, vids)
         await PL.purge_everything(conn)
@@ -465,6 +530,7 @@ async def test_nfl_tie_arithmetic_and_a_tie_settles_at_half(
     now = time.time() + 5.0
     vids = []
     acct = None
+    held = await hold_the_memory_learner(conn, now + 10_000.0)
     try:
         acct = await _setup(conn, "nfltie", now)
         slug = "aec-nfl-ind-was-2026-10-04"
@@ -493,11 +559,13 @@ async def test_nfl_tie_arithmetic_and_a_tie_settles_at_half(
         assert econ["expected_net_profit_usd"] == pytest.approx(
             gross - float(econ["fees_usd"]), abs=1e-6)
         assert q > 0
-        # an underdog's worst case is the LOWEST rate (0 while the phase is
-        # not established as regular season): no tie credit is taken
-        dog = NFL.venue_value(1.0 - p_book)
+        # an underdog's worst case is the LOWEST evidenced rate: the least
+        # tie credit the evidence allows
+        dog = NFL.venue_value(1.0 - p_book, phase=NFL.PHASE_REGULAR)
         assert dog["tie_rate_end_used"] == "LOWEST"
-        assert dog["p"] == pytest.approx(1.0 - p_book)
+        assert dog["p"] == pytest.approx(
+            (1.0 - iv["lo"]) * (1.0 - p_book) + 0.5 * iv["lo"])
+        assert check(d, "nfl_regular_season_fixture_established")["passed"]
 
         # FILL, then the venue settles the TIED game at 0.50
         for k in (5, 70):
@@ -524,15 +592,28 @@ async def test_nfl_tie_arithmetic_and_a_tie_settles_at_half(
         assert float(s["payout_per_contract"]) == pytest.approx(0.5)
         assert float(s["payout_usd"]) == pytest.approx(0.5 * float(s["qty"]))
         ev = H.j(s["evidence"])
-        assert ev["settlement_state"] == "TIE_AFTER_OVERTIME"
+        # the venue's read is a PRICE: with the tie and the last-fair-price
+        # clauses both stated, a 0.50 is a tie OR an exceptional price
+        # settlement, and the record says so instead of claiming the tie
+        assert ev["settlement_state"] == NFL.S_TIE_OR_LAST_FAIR_PRICE
+        assert ev["state_class"] == NFL.AMBIGUOUS
         assert ev["quote"] == NFL.Q_VENUE_TIE
         b = await L.balances(conn, acct["account_id"], now=now + 201)
         assert b["ledger_consistent"] is True
+        # the learner was held for the whole proof: no lesson cites this
+        # scratch account's records
+        assert await conn.fetchval(
+            "SELECT count(*) FROM agent_memory_events WHERE "
+            " evidence_refs::text LIKE '%' || $1 || '%'",
+            d["decision_id"]) == 0
     finally:
-        await forget_settled_entry(conn, acct and acct["account_id"])
-        await purge(conn, vids)
-        await PL.purge_everything(conn)
-        await conn.close()
+        try:
+            await forget_settled_entry(conn, acct and acct["account_id"])
+            await purge(conn, vids)
+            await PL.purge_everything(conn)
+        finally:
+            await release_the_memory_learner(conn, held)
+            await conn.close()
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -564,7 +645,27 @@ async def test_the_london_game_maps_to_its_et_date(cg_on_with_parity):
         assert f["event_date"] == "2026-10-04"
         assert f["prose_date"] == "2026-10-04"
         assert f["kickoff_et"] == "2026-10-04T09:30:00-04:00"
+        # NOT A DATE DISCRIMINATOR: 13:30Z is 2026-10-04 in UTC, London and
+        # New York alike (the Sunday-night test below is the one a UTC
+        # mapping fails). What this proves is that the kickoff instant is
+        # read on the ET clock and CHECKED: the same London contract against
+        # a catalogue kickoff a day later is refused by name.
         assert f["kickoff_utc_date"] == f["kickoff_et_date"] == "2026-10-04"
+        await premap(conn, slug, title="IND Colts vs. WAS Commanders",
+                     kickoff=LONDON_KICKOFF + 86400.0)
+        PB._CONTEXT_CACHE.clear()
+        v2 = await nfl_valuation(conn, slug=slug,
+                                 selection="Washington Commanders",
+                                 odds=LONDON_ODDS, text=LONDON_TEXT,
+                                 decided_at=now + 20)
+        vids.append(v2["valuation_id"])
+        await _pass(conn, acct, t, now + 25, PL.client(t))
+        d2 = await decision(conn, acct, v2["valuation_id"])
+        assert d2["verdict"] == "REFUSE"
+        assert NFL.R_DATE_INCONSISTENT in d2["refusals"], d2["refusals"]
+        f2 = check(d2, "nfl_fixture_date_matches_the_venue_slug")[
+            "fixture_date"]
+        assert f2["kickoff_et_date"] == "2026-10-05"
     finally:
         await purge(conn, vids)
         await PL.purge_everything(conn)
@@ -640,8 +741,267 @@ async def test_the_pro_bowl_is_never_traded(cg_on_with_parity):
         d = await decision(conn, acct, v["valuation_id"])
         assert d["verdict"] == "REFUSE"
         assert NFL.R_EXHIBITION in d["refusals"], d["refusals"]
+        # ...and refused WITHOUT the marker too: its day is after the cited
+        # regular season, so its phase is not established
+        assert NFL.R_PHASE_NOT_REGULAR in d["refusals"], d["refusals"]
         assert await conn.fetchval("SELECT count(*) FROM paper_orders WHERE "
                                    " decision_id=$1", d["decision_id"]) == 0
+    finally:
+        await purge(conn, vids)
+        await PL.purge_everything(conn)
+        await conn.close()
+
+
+@pg
+async def test_a_preseason_or_playoff_window_game_is_never_traded(
+        cg_on_with_parity):
+    """R30A review: the exclusion failed OPEN -- a preseason game whose text
+    carries no 'preseason' word ENTERED, priced on the regular-season tie
+    rate (preseason has no overtime). The venue's own NFL wording around an
+    August date and a January playoff-window date, with venue catalogue rows
+    and kickoffs that agree: every other check passes, and both are refused
+    because their phase is not established. SYNTHETIC listings: no venue
+    preseason or playoff listing has been captured."""
+    conn = await H.connect()
+    now = time.time() + 5.0
+    vids = []
+    try:
+        acct = await _setup(conn, "nflphase", now)
+        t = PL.Transport(now)
+        cases = (("aec-nfl-ind-was-2026-08-15", "Aug 15, 2026",
+                  1786813200.0),                 # 2026-08-15T17:00Z
+                 ("aec-nfl-ind-was-2027-01-17", "Jan 17, 2027",
+                  1800205200.0))                 # 2027-01-17T18:00Z
+        got = []
+        for slug, day, kickoff in cases:
+            text = LONDON_TEXT.replace("Oct 4, 2026", day)
+            assert NFL.exhibition_marker(slug, text) is None
+            await premap(conn, slug, title="IND Colts vs. WAS Commanders",
+                         kickoff=kickoff)
+            v = await nfl_valuation(conn, slug=slug,
+                                    selection="Indianapolis Colts",
+                                    odds=LONDON_ODDS, text=text,
+                                    decided_at=now - 10)
+            vids.append(v["valuation_id"])
+            t.set(slug, offers=[(0.55, 2000)], bids=[(0.53, 2000)])
+            got.append(v)
+        await _pass(conn, acct, t, now, PL.client(t))
+        for v, (slug, _, _) in zip(got, cases):
+            d = await decision(conn, acct, v["valuation_id"])
+            assert d["verdict"] == "REFUSE", slug
+            assert NFL.R_PHASE_NOT_REGULAR in d["refusals"], d["refusals"]
+            assert NFL.R_EXHIBITION not in d["refusals"]
+            # the date mapping itself was fine: the PHASE is what is missing
+            assert check(d, "nfl_fixture_date_matches_the_venue_slug")[
+                "passed"]
+            ph = check(d, "nfl_regular_season_fixture_established")
+            assert not ph["passed"]
+            assert ph["season_phase"]["refusal"] == NFL.R_PHASE_NOT_REGULAR
+            # never priced on the regular-season tie rate
+            conv = H.j(d["pinnacle"]).get("venue_conversion") or {}
+            assert conv.get("tie_rate_used") is None
+            assert conv.get("refusal") == NFL.R_PHASE_NOT_REGULAR
+            assert await conn.fetchval(
+                "SELECT count(*) FROM paper_orders WHERE decision_id=$1",
+                d["decision_id"]) == 0
+    finally:
+        await purge(conn, vids)
+        await PL.purge_everything(conn)
+        await conn.close()
+
+
+# ═════════════════════════════════════════════════════════════════════
+# 8 · THE MAKER'S RESTING BID AND XAVIER'S MEASURE, ON THE CONVERTED SCALE
+# ═════════════════════════════════════════════════════════════════════
+
+@pytest.fixture
+def maker_on(monkeypatch, new_strategies_off):
+    """Only the maker-entry policy's row on (the other benchmark strategies
+    off), as the maker proofs set it."""
+    monkeypatch.setenv(PB.ENV_FLAG, "on")
+    monkeypatch.setenv(PL.S.ENV_FLAG, "on")
+    for k in (PB.CG_STRATEGY, PB.EXPLORE_STRATEGY, PB.CONTROL_KEY):
+        PL.set_policy_control(k, False)
+    PL.set_policy_control(PB.MAKER_STRATEGY, True)
+    PB._CONTEXT_CACHE.clear()
+    PD._CONTEXT_CACHE.clear()
+    yield
+    # back to the migrated launch selection: CG and exploration on, maker
+    # and strict off
+    PL.set_policy_control(PB.MAKER_STRATEGY, False)
+    PL.set_policy_control(PB.CG_STRATEGY, True)
+    PL.set_policy_control(PB.EXPLORE_STRATEGY, True)
+    PB._CONTEXT_CACHE.clear()
+
+
+async def _maker_entry(conn, tag, now, vids):
+    """An NFL maker entry resting below the ask, on the converted scale
+    (its valuation id goes on `vids` at once, so the caller purges it even
+    when an assertion here fails)."""
+    from sportsassets.agents import paper_maker as PMK
+    acct = await _setup(conn, tag, now)
+    slug = "aec-nfl-ind-was-2026-10-04"
+    await premap(conn, slug, title="IND Colts vs. WAS Commanders",
+                 kickoff=LONDON_KICKOFF)
+    v = await nfl_valuation(conn, slug=slug, selection="Indianapolis Colts",
+                            odds=LONDON_ODDS, text=LONDON_TEXT,
+                            decided_at=now - 10)
+    vids.append(v["valuation_id"])
+    t = PL.Transport(now)
+    t.set(slug, offers=[(0.66, 5000)], bids=[(0.60, 5000)])
+    client = PL.client(t)
+    p1 = await _pass(conn, acct, t, now, client, fee=None)
+    assert not p1["errors"], p1["errors"]
+    d = await decision(conn, acct, v["valuation_id"], PB.MAKER_STRATEGY)
+    assert d is not None and d["verdict"] == "ENTER", (
+        d and (d["refusal"], d["refusals"]))
+    conv = NFL.venue_value(v["p_book"], phase=NFL.PHASE_REGULAR)
+    assert float(d["p_pinnacle"]) == pytest.approx(conv["p"], abs=1e-12)
+    o = await conn.fetchrow("SELECT * FROM paper_orders WHERE "
+                            " decision_id=$1", d["decision_id"])
+    assert o["order_type"] == "RESTING" and o["state"] == "RESTING"
+    return acct, t, client, slug, v, d, o, PMK
+
+
+@pg
+async def test_the_maker_rechecks_an_nfl_bid_on_the_converted_scale(
+        maker_on):
+    """A newer reading whose RAW P(win | no tie) would keep the resting bid,
+    but whose value as the venue contract (tie pays 0.50, worst evidenced
+    tie rate) no longer clears it: the bid is cancelled, EDGE_GONE."""
+    conn = await H.connect()
+    now = time.time() + 5.0
+    vids = []
+    try:
+        acct, t, client, slug, v, d, o, PMK = await _maker_entry(
+            conn, "nflmaker1", now, vids)
+        limit = float(o["limit_price"])
+        params = await PB.cg_parameters(conn, {"now": now})
+        min_edge = max(float(params["values"]["min_gross_edge_pp"]),
+                       PB.CG_MIN_EDGE_PP_V2) / 100.0
+        fee_pc = float(PB.fee_per_contract(None, limit, now + 30))
+
+        def keeps(p):
+            return not PMK.check_resting(
+                limit=limit, p_new=p, reading_age_s=5.0, min_edge=min_edge,
+                fee_pc=lambda px: fee_pc, enabled=True)["cancel"]
+        # the newer book probability: the lowest raw value that still keeps
+        # the bid, plus a hair -- its converted value cannot keep it
+        lo, hi = limit, 1.0
+        for _ in range(80):
+            mid = 0.5 * (lo + hi)
+            lo, hi = (lo, mid) if keeps(mid) else (mid, hi)
+        p_raw = hi + 1e-6
+        p_conv = NFL.venue_value(p_raw, phase=NFL.PHASE_REGULAR)["p"]
+        assert keeps(p_raw) and not keeps(p_conv), (p_raw, p_conv, limit)
+        v2 = await nfl_valuation(conn, slug=slug,
+                                 selection="Indianapolis Colts",
+                                 odds=LONDON_ODDS, text=LONDON_TEXT,
+                                 decided_at=now + 25, p=p_raw)
+        vids.append(v2["valuation_id"])
+        p2 = await _pass(conn, acct, t, now + 30, client, fee=None)
+        assert not p2["errors"], p2["errors"]
+        mm = p2["steps"]["maker_maintain"]
+        assert mm["cancel_requested"] >= 1, mm
+        assert mm["by_condition"].get(PMK.C_EDGE_GONE, 0) >= 1, mm
+        ev = await conn.fetch("SELECT kind, detail FROM paper_order_events "
+                              " WHERE order_id=$1 ORDER BY event_id",
+                              o["order_id"])
+        cr = [H.j(e["detail"]) for e in ev if e["kind"] == "CANCEL_REQUESTED"]
+        assert cr and cr[0]["reason"] == PMK.C_EDGE_GONE
+        assert client.mutation_attempts == 0
+    finally:
+        await purge(conn, vids)
+        await PL.purge_everything(conn)
+        await conn.close()
+
+
+@pg
+async def test_the_maker_cancels_an_nfl_bid_whose_conversion_is_refused(
+        maker_on, monkeypatch):
+    """The same entry, then the evidence that established the game's phase
+    is withdrawn (the cited season windows emptied): the re-check cannot
+    convert the newer reading, holds no probability, and cancels the bid as
+    UNVERIFIED -- it never falls back to the book's unconverted number."""
+    conn = await H.connect()
+    now = time.time() + 5.0
+    vids = []
+    try:
+        acct, t, client, slug, v, d, o, PMK = await _maker_entry(
+            conn, "nflmaker2", now, vids)
+        v2 = await nfl_valuation(conn, slug=slug,
+                                 selection="Indianapolis Colts",
+                                 odds=LONDON_ODDS, text=LONDON_TEXT,
+                                 decided_at=now + 25, p=0.80)  # raw edge huge
+        vids.append(v2["valuation_id"])
+        monkeypatch.setattr(NFL, "SEASON_WINDOWS", ())
+        assert PB.held_nfl_conversion({
+            "sport_family": "football", "us_market_slug": slug,
+            "raw_odds": LONDON_ODDS, "venue_rules_text": LONDON_TEXT})[
+            "venue_conversion"]["phase"] is None
+        p2 = await _pass(conn, acct, t, now + 30, client, fee=None)
+        assert not p2["errors"], p2["errors"]
+        mm = p2["steps"]["maker_maintain"]
+        assert mm["by_condition"].get(PMK.C_UNVERIFIED, 0) >= 1, mm
+        ev = await conn.fetch("SELECT kind, detail FROM paper_order_events "
+                              " WHERE order_id=$1 ORDER BY event_id",
+                              o["order_id"])
+        cr = [H.j(e["detail"]) for e in ev if e["kind"] == "CANCEL_REQUESTED"]
+        assert cr and cr[0]["reason"] == PMK.C_UNVERIFIED
+        assert client.mutation_attempts == 0
+    finally:
+        await purge(conn, vids)
+        await PL.purge_everything(conn)
+        await conn.close()
+
+
+@pg
+async def test_xavier_converts_a_fresh_feed_reading_of_a_held_nfl_contract(
+        cg_on_with_parity):
+    """Xavier's measure of a held NFL position from the in-process PinnAPI
+    feed (the held read now answers for NFL rows): the feed's P(win | no
+    tie) is converted to the contract's value exactly as the entry was."""
+    conn = await H.connect()
+    now = time.time() + 5.0
+    vids = []
+    try:
+        acct = await _setup(conn, "nflxavier", now)
+        slug = "aec-nfl-ind-was-2026-10-04"
+        v = await nfl_valuation(conn, slug=slug, selection="Indianapolis Colts",
+                                odds=LONDON_ODDS, text=LONDON_TEXT,
+                                decided_at=now - 10)
+        vids.append(v["valuation_id"])
+        t = PL.Transport(now)
+        t.set(slug, offers=[(0.55, 2000)], bids=[(0.53, 2000)])
+        await _pass(conn, acct, t, now, PL.client(t))
+        d = await decision(conn, acct, v["valuation_id"])
+        assert d["verdict"] == "ENTER", (d["refusal"], d["refusals"])
+        o = await conn.fetchrow("SELECT * FROM paper_orders WHERE "
+                                " decision_id=$1 AND role='ENTRY'",
+                                d["decision_id"])
+        pos = {"group_id": o["group_id"], "holding_side": o["holding_side"],
+               "us_market_slug": slug}
+        at = now + 120.0          # the collector's reading is stale by now
+        p_feed = 0.70
+
+        async def feed(conn_, *, pos, at, max_age_s, payout_event,
+                       payout_is_complement):
+            return {"ok": True, "p": p_feed, "p_selection": p_feed,
+                    "sport_id": 5, "feed_event_id": 77,
+                    "designation": "away",
+                    "provenance": {"source_change_ms": (at - 2.0) * 1000.0,
+                                   "received_ms": (at - 1.9) * 1000.0,
+                                   "quote_age_s": 2.0, "stream": "prematch"},
+                    "devig": {"version": devig.VERSION},
+                    "conditional_on": {"condition": "NO_TIE"}}
+        ctx = {"now": at, "config": acct["config"]}
+        m = await PB.xavier_measure(conn, ctx, pos=pos, strategy=CG,
+                                    feed=feed)
+        assert m["source"] == PB.SOURCE_FEED_CURRENT, m
+        want = NFL.venue_value(p_feed, phase=NFL.PHASE_REGULAR)["p"]
+        assert m["p"] == pytest.approx(want, abs=1e-12)
+        assert m["p_book_conditional_no_tie"] == pytest.approx(p_feed)
+        assert m["venue_conversion"]["tie_rate_end_used"] == "HIGHEST"
     finally:
         await purge(conn, vids)
         await PL.purge_everything(conn)

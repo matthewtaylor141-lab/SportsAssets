@@ -1162,16 +1162,39 @@ def venue_price_settlement(rows: list, *, holding_side: str) -> dict:
     long_px = prices.pop()
     per = long_px if holding_side == "LONG" else round(1.0 - long_px, 9)
     if tie_price:
+        # WHICH STATE PAID 0.50 IS RECORDED ONLY AS FAR AS IT IS KNOWN (R30A
+        # review). The venue's settlement read is a PRICE, not a score. When
+        # the contract's text states BOTH the tie settlement and the
+        # last-fair-market-price clause (every captured NFL listing does), a
+        # 0.50 can be an ordinary tied game OR a postponed / suspended game
+        # whose last fair price was 0.50 -- an EXCEPTIONAL state. Writing
+        # TIE_AFTER_OVERTIME / ORDINARY there would state an unverified fact
+        # and move an exceptional settlement into the ordinary class, which
+        # undercounts the exceptional risk that is measured apart. No outcome
+        # source read here reports a final tied score, so the state is named
+        # as not distinguished. Only when the text states the tie settlement
+        # and NO other price settlement is 0.50 the tie by the contract's own
+        # terms. The payout is the venue's published price either way.
+        if stated:
+            state, cls = NFL.S_TIE_OR_LAST_FAIR_PRICE, NFL.AMBIGUOUS
+            why = ("the contract states both a $0.50 tie settlement and a "
+                   "last-fair-market-price settlement; the venue's read is a "
+                   "price only, and no final score is read here, so which "
+                   "state paid is not established")
+        else:
+            state, cls = "TIE_AFTER_OVERTIME", NFL.ORDINARY
+            why = ("the contract's only stated price settlement is the $0.50 "
+                   "tie settlement")
         return {"price": per, "venue_long_price": long_px, "evidence": ev,
-                "rule": ("the contract's stated tie settlement: a tied game "
-                         "settles to $0.50, so each side is paid 0.50 per "
-                         "contract"),
-                "settlement_state": "TIE_AFTER_OVERTIME",
-                "state_class": NFL.ORDINARY,
-                "quote": NFL.Q_VENUE_TIE,
-                "note": ("the last-fair-market-price clause, also stated, "
-                         "could print the same 0.50; the payout is the "
-                         "venue's published price either way")}
+                "rule": ("the contract's stated $0.50 settlement: each side "
+                         "is paid 0.50 per contract"),
+                "settlement_state": state, "state_class": cls,
+                "state_basis": why,
+                "would_distinguish": ("a final score from an outcome source "
+                                      "(tied after overtime -> "
+                                      "TIE_AFTER_OVERTIME, ordinary; game not "
+                                      "completed -> exceptional)"),
+                "quote": NFL.Q_VENUE_TIE}
     return {"price": per, "venue_long_price": long_px, "evidence": ev,
             "rule": "the contract's stated last-fair-market-price settlement"}
 

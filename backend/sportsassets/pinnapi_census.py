@@ -49,6 +49,10 @@ SPORT_IDS = (("baseball", 6), ("soccer", 1), ("basketball", 3),
              ("americanfootball", 5), ("tennis", 2), ("mma", 8),
              ("boxing", 9), ("esports", 11), ("golf", 12), ("rugby", 7))
 
+#: the venue's NFL money-line sports type (R30A; admitted in `family_of`
+#: for the NFL league only)
+NFL_MONEYLINE_TYPE = "football_team_full_game_winner"
+
 S_FEED_NOT_SYNCED = "FEED_NOT_SYNCED"
 S_OUT_OF_SCOPE = "OUT_OF_FEED_SCOPE_SPORT"
 S_UNMAPPED_SPORT = "UNMAPPED_SPORT"
@@ -127,8 +131,38 @@ def family_of(kind: Optional[str], line, sports_type=None, row=None) -> tuple:
     census label only; settlement/price/contract eligibility is downstream.
     """
     st = str(sports_type or '').lower()
+    if st == NFL_MONEYLINE_TYPE:
+        # R30A · THE NFL FULL-GAME MONEY LINE, FOR THE NFL ONLY. The venue's
+        # own type for its NFL winner contract (its listing's
+        # sportsMarketType, tests/fixtures/pmus_nfl_listing_2026_10_04.json).
+        # Football is admitted to the de-vig BY LEAGUE
+        # (bettor_pinnacle_devig.SUPPORTED_BY_LEAGUE), so this label is
+        # granted by the same league read the de-vig makes -- the row's
+        # structured team league and its venue-native slug, which must agree
+        # -- and never by the sports type alone: the college board could share
+        # the spelling, and its terms were never compared. Before this, every
+        # held NFL contract was MATCHED_UNSUPPORTED_FAMILY
+        # (VENUE_MARKET_TYPE_NOT_PROVED), so the held read, the held-first
+        # queue and the on-demand Xavier read refused all NFL inventory even
+        # with football subscribed.
+        #
+        # THE LINE IS PROVED, NOT IGNORED. Production's NFL catalogue rows
+        # carry a NON-blank line on every row (research-sql run 37231923822,
+        # W2: 28 rows / 14 contracts, line_blank false): the venue question
+        # ("... scheduled for October 4, 2026 at 1:30 PM UTC?") is the clock
+        # the premap sweep stamps. So the NFL type takes the SAME side-aware
+        # clock proof baseball and soccer take below -- a line the side
+        # itself states still vetoes it -- and nothing is stripped.
+        from . import bettor_pinnacle_devig as devig
+        r = row if isinstance(row, dict) else {}
+        league = devig.league_of_contract(
+            {"league": r.get("team_league"),
+             "us_market_slug": r.get("identifier")})
+        if devig.expected_outcomes("football", "h2h", league=league) is None:
+            return ('MONEYLINE', False,
+                    'FOOTBALL_MONEYLINE_ADMITTED_FOR_THE_NFL_ONLY')
     if st in ('baseball_team_full_game_winner',
-              'soccer_team_full_time_winner'):
+              'soccer_team_full_time_winner', NFL_MONEYLINE_TYPE):
         if line not in (None, '') and row is not None:
             # Reuse the existing side-aware clock proof. Never just strip
             # numeric zero: real signed/side lines veto this correction.

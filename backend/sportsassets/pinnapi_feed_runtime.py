@@ -459,7 +459,14 @@ def held_quote(row: dict, *, event_rows=None, payout_event,
                     reason=(val.get("refusals") or ["DEVIG_REFUSED"])[0],
                     why=val.get("why"), provenance=prov)
     p_sel = float(val["probability"])
-    return dict(where, ok=True,
+    extra = {}
+    if val.get("conditional_on") is not None:
+        # R30A: an NFL two-way line is P(win | no tie). The conditioning
+        # travels with the number; the reader that holds the contract
+        # (paper_benchmark.xavier_measure) converts it to the venue
+        # contract's value before comparing it with any price.
+        extra["conditional_on"] = val["conditional_on"]
+    return dict(where, ok=True, **extra,
                 p=(1.0 - p_sel) if payout_is_complement else p_sel,
                 p_selection=p_sel, payout_event=pay,
                 payout_is_complement=bool(payout_is_complement),

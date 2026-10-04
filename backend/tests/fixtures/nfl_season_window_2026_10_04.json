@@ -1,0 +1,32 @@
+{
+ "_what": "THE 2026 NFL SEASON'S PHASE WINDOWS, as retrieved -- the evidence bettor_nfl_settlement.SEASON_WINDOWS rests on. Verbatim wikitext of the lead section (infobox and first paragraph); nothing interpreted here.",
+ "source": "Wikipedia, '2026 NFL season'",
+ "revid": 1378055076,
+ "pageid": 77792316,
+ "read_by": {
+  "workflow": "fetch-docs",
+  "run_id": 37231698293,
+  "job_id": 111522586473,
+  "retrieved_at": "2026-10-04T20:20:17Z",
+  "url": "https://en.wikipedia.org/w/api.php?action=parse&page=2026_NFL_season&prop=wikitext|revid&section=0&format=json&formatversion=2",
+  "bytes": 1254,
+  "sha256": "5cc6b1025c1fae1e7343706556d3368025aad4ec0dc8276e8983546d99d54be6"
+ },
+ "infobox_lines": [
+  "| regular_season = {{Start date|2026|09|09|}} – {{End date|2027|01|10}}",
+  "| playoffs_start = {{End date|2027|01|16}}",
+  "| sb_name = LXI",
+  "| sb_date = February 14, 2027"
+ ],
+ "lead_sentences": [
+  "The '''2026 NFL season''' is the 107th season of the [[National Football League]] (NFL).",
+  "The regular season began on September 9, 2026, with reigning [[Super Bowl LX|Super Bowl]] champion [[2026 Seattle Seahawks season|Seattle]] defeating [[2026 New England Patriots season|New England]] in the [[NFL Kickoff Game]], and will end on January 10, 2027.",
+  "The playoffs will begin on January 16 and conclude with [[Super Bowl LXI]] at [[SoFi Stadium]] in [[Inglewood, California]], on February 14."
+ ],
+ "wikitext": "{{short description|American football season}}\n{{about|the American football season in the United States|the Gaelic football season in Ireland|2026 National Football League (Ireland)}}\n{{Use American English|date=October 2025}}\n{{Use mdy dates|date=August 2026}}\n{{Infobox NFL\n| year = 2026\n| NFLchampion =\n| AFCchampion =\n| NFCchampion =\n| regular_season = {{Start date|2026|09|09|}} – {{End date|2027|01|10}}\n| playoffs_start = {{End date|2027|01|16}}\n| sb_name = LXI\n| sb_date = February 14, 2027\n| sb_site = [[SoFi Stadium]], [[Inglewood, California]]\n}}\n{{NFL Team Maps 2022–present}}\nThe '''2026 NFL season''' is the 107th season of the [[National Football League]] (NFL). The regular season began on September 9, 2026, with reigning [[Super Bowl LX|Super Bowl]] champion [[2026 Seattle Seahawks season|Seattle]] defeating [[2026 New England Patriots season|New England]] in the [[NFL Kickoff Game]], and will end on January 10, 2027. The playoffs will begin on January 16 and conclude with [[Super Bowl LXI]] at [[SoFi Stadium]] in [[Inglewood, California]], on February 14.",
+ "not_established_here": [
+  "this source does not date the Pro Bowl or any other exhibition, so a date after the regular season (or before it) cannot be told apart from one; no venue or catalogue field states the phase",
+  "a rule text for postseason overtime (that a playoff game cannot end tied) was not captured",
+  "the 2027 season's windows (not published at retrieval)"
+ ]
+}

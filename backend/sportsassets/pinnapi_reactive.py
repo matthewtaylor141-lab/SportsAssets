@@ -43,14 +43,29 @@ HELD_SEED_TTL_S = 6 * 3600
 HOT_SPORT_KEYS = frozenset(("americanfootball_nfl",))
 HOT_BEFORE_KICKOFF_S = 6 * 3600
 HOT_AFTER_KICKOFF_S = 4 * 3600
+#: THE HOT TIER'S SHARE IS BOUNDED (R30A review). Strict priority let an NFL
+#: Sunday -- a dozen-plus games hot all day, each re-queued on every change
+#: -- hold every MLB and soccer discovery change behind it on the single
+#: worker, which changes other sports' behaviour. While a discovery change
+#: is waiting, at most HOT_MAX_CONSECUTIVE hot jobs run before one discovery
+#: job is served: a waiting discovery change is evaluated within
+#: HOT_MAX_CONSECUTIVE + 1 non-held jobs, and discovery keeps at least a
+#: third of the non-held throughput whenever both queues hold work. With no
+#: discovery change waiting, the hot tier runs freely (it starves nobody).
+#: The hot queue itself is bounded by the number of NFL events inside their
+#: window (one entry per event, later changes coalesce). Held events still
+#: go first, exactly as before R30A.
+HOT_MAX_CONSECUTIVE = 2
 
 
 class Scheduler:
     """One worker, one deadline. HELD EVENTS FIRST: a held event's change is
     queued on `held_pending`, served before any discovery change, never
     evicted by discovery; its seed is pinned while held. HOT NFL EVENTS
-    SECOND (R30A, `hot_pending`): an NFL game near kickoff. Discovery keeps
-    its FIFO queue, cap and eviction exactly as before."""
+    SECOND (R30A, `hot_pending`): an NFL game near kickoff, ahead of
+    discovery for at most HOT_MAX_CONSECUTIVE jobs in a row while discovery
+    waits. Discovery keeps its FIFO queue, cap and eviction exactly as
+    before."""
 
     def __init__(self, cache, evaluate, audit, *, clock=time.time,
                  queue_cap=128, seed_cap=512, seed_ttl=1800, deadline=12,
@@ -62,6 +77,7 @@ class Scheduler:
         self.seeds, self.pending, self.seen = OrderedDict(), OrderedDict(), {}
         self.held_pending = OrderedDict()
         self.hot_pending = OrderedDict()
+        self.hot_streak = 0
         self.held = held if held is not None else PH.WATCH
         self.wake = asyncio.Event()
         self.counts = Counter()
@@ -217,13 +233,21 @@ class Scheduler:
         return 'QUEUED'
 
     def next_job(self):
-        """(event id, tick) to evaluate next: held, then hot NFL, then
-        discovery."""
+        """(event id, tick) to evaluate next: held first; then hot NFL ahead
+        of discovery, but never more than HOT_MAX_CONSECUTIVE hot jobs in a
+        row while a discovery change waits; then discovery."""
         if self.held_pending:
             return self.held_pending.popitem(last=False)
         if self.hot_pending:
-            return self.hot_pending.popitem(last=False)
+            if not self.pending:
+                self.hot_streak = 0
+                return self.hot_pending.popitem(last=False)
+            if self.hot_streak < HOT_MAX_CONSECUTIVE:
+                self.hot_streak += 1
+                return self.hot_pending.popitem(last=False)
+            self.counts['HOT_YIELDED_TO_DISCOVERY'] += 1
         if self.pending:
+            self.hot_streak = 0
             return self.pending.popitem(last=False)
         return None
 

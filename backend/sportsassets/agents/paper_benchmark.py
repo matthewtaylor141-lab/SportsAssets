@@ -709,8 +709,9 @@ VENUE_GRADING_TEMPLATES = {
                     r"\bpenalt(?:y|ies)\b[^.]*\b(?:includ|count)",
                     r"\bincluding extra time\b")},
     # R30A: the venue's NFL wording, read on every NFL listing captured
-    # (bettor_nfl_settlement.VENUE_CAPTURES) and on all 15 production NFL
-    # rows (research-sql run 37226814972). EVERY listed phrase is required --
+    # (bettor_nfl_settlement.VENUE_CAPTURES) and, masked, on all 15 of 15
+    # production NFL rows (research-sql run 37231923822, W1b: one wording;
+    # no limit). EVERY listed phrase is required --
     # the winner of a named NFL game, overtime included, and the tie settled
     # at $0.50 -- and any regulation-only phrase is a mismatch.
     "football": {
@@ -815,10 +816,13 @@ def completed_game_match(cand: dict, row: dict, *,
     The exceptional settlement terms are returned as DISCLOSED research
     risks; they are never part of `established`.
 
-    NFL (R30A), three more checks, each a named refusal: the contract is not
-    a Pro Bowl / exhibition game (never traded); its date reads the same in
-    the venue slug, the venue's own text and the kickoff's America/New_York
-    day (`catalogue` supplies the kickoff instant when held); and its tie
+    NFL (R30A), four more checks, each a named refusal: its date reads the
+    same in the venue slug, the venue's own text and the kickoff's
+    America/New_York day (`catalogue` supplies the kickoff instant when
+    held); that day lies inside the cited regular-season window (the phase
+    is ESTABLISHED, never assumed: preseason, playoffs, Pro Bowl and any
+    unknown phase are refused); no Pro Bowl / exhibition marker appears (an
+    extra refusal, never the only one); and its tie
     can be priced -- the venue states the cited $0.50 and the book's line is
     the two-way game line -- which `venue_conversion` then carries to
     `apply_venue_conversion`."""
@@ -888,6 +892,18 @@ def completed_game_match(cand: dict, row: dict, *,
                                     fdate.get("basis")))
             if fdate.get("refusal") is None else fdate.get("why"),
             fixture_date=fdate)
+        # THE PHASE, ESTABLISHED (R30A review): regular season only when the
+        # game day -- the slug date just checked against the venue text and
+        # the kickoff -- lies inside the cited regular-season window. A
+        # preseason game with no marker word, a playoff game or a Pro Bowl
+        # dated outside the window is refused here by name, and the tie
+        # conversion below refuses again for any phase but REGULAR_SEASON.
+        phase = NFL.season_phase(fdate.get("event_date"))
+        put("nfl_regular_season_fixture_established",
+            phase.get("refusal") is None,
+            phase.get("refusal") or NFL.R_PHASE_NOT_REGULAR,
+            phase.get("basis") if phase.get("refusal") is None
+            else phase.get("why"), season_phase=phase)
         names = list((DP._j(row.get("raw_odds")) or {}).keys())
         vt = NFL.venue_tie_payout(prose)
         iv = NFL.tie_rate_interval()
@@ -905,7 +921,8 @@ def completed_game_match(cand: dict, row: dict, *,
                 [iv.get("lo"), iv.get("hi")] if iv.get("held") else None))
         venue_conversion = {"sport_family": fam, "league": league,
                             "venue_rules_text": prose,
-                            "book_outcome_names": names, "phase": None,
+                            "book_outcome_names": names,
+                            "phase": phase.get("phase"),
                             "fixture_date": fdate}
     exceptional = {
         "status": "DISCLOSED_RESEARCH_RISK_NOT_SETTLEMENT_COMPATIBILITY",
@@ -966,6 +983,32 @@ def apply_venue_conversion(pin: dict, match: dict) -> str | None:
     pin["p_is"] = ("VENUE_PAYOUT_EQUIVALENT_AT_THE_WORST_END_OF_THE_CITED_"
                    "TIE_RATE_INTERVAL")
     return None
+
+
+def held_nfl_conversion(contract) -> dict | None:
+    """THE CONVERSION A HELD (OR RESTING) NFL CONTRACT IS RE-MEASURED WITH,
+    in the shape `apply_venue_conversion` reads -- or None when the contract
+    is not an NFL money line (every other sport: nothing changes).
+
+    `contract` is the valuation row's own fields (sport_family,
+    us_market_slug, raw_odds, venue_rules_text). The phase is read from the
+    slug's own date against the cited regular-season window
+    (bettor_nfl_settlement.phase_of_slug), exactly as at entry; a phase that
+    is not established leaves the phase unset, and the conversion then
+    refuses by name instead of pricing a game the evidence does not cover.
+    Xavier's measure and the maker's resting-bid re-check share this one
+    reading, so the two cannot drift apart. Pure."""
+    c = contract if contract is not None else {}
+    slug = c.get("us_market_slug")
+    if (str(c.get("sport_family") or "") != "football"
+            or NFL.league_of_slug(slug) != "nfl"):
+        return None
+    phase = NFL.phase_of_slug(slug)
+    return {"venue_conversion": {
+        "sport_family": "football", "league": "nfl",
+        "venue_rules_text": c.get("venue_rules_text"),
+        "book_outcome_names": list((DP._j(c.get("raw_odds")) or {}).keys()),
+        "phase": phase.get("phase"), "season_phase": phase}}
 
 
 def exceptional_scenarios(*, cand: dict, row: dict, qty: float,
@@ -2387,16 +2430,9 @@ async def xavier_measure(conn, ctx: dict, *, pos: dict,
     # conversion the entry used (apply_venue_conversion). The entry-time
     # measure (d.p_pinnacle) is already on that scale and is never converted
     # twice.
-    nfl_conv = None
-    if (contract is not None and pol["kind"] in COMPLETED_GAME_KINDS
-            and str(contract.get("sport_family") or "") == "football"
-            and NFL.league_of_slug(contract.get("us_market_slug")) == "nfl"):
-        nfl_conv = {"venue_conversion": {
-            "sport_family": "football", "league": "nfl",
-            "venue_rules_text": contract.get("venue_rules_text"),
-            "book_outcome_names": list((DP._j(contract.get("raw_odds"))
-                                        or {}).keys()),
-            "phase": None}}
+    nfl_conv = (held_nfl_conversion(contract)
+                if contract is not None
+                and pol["kind"] in COMPLETED_GAME_KINDS else None)
 
     def _venue_scale(reading: dict) -> dict:
         if nfl_conv is None or reading.get("p") is None:

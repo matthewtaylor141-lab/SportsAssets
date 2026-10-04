@@ -239,6 +239,9 @@ REFUSAL_WORDS = {
         "the game's date does not match the venue's own date for it"),
     "NFL_FIXTURE_DATE_NOT_READABLE_FROM_THE_VENUE_SLUG": (
         "the venue slug carries no readable game date"),
+    "NFL_SEASON_PHASE_NOT_ESTABLISHED_AS_REGULAR_SEASON": (
+        "the game is not established as a regular-season game (preseason, "
+        "playoffs, Pro Bowl or an uncited season are never traded)"),
     "FOOTBALL_LINE_PRICES_A_DRAW_NOT_THE_TWO_WAY_GAME_LINE": (
         "Pinnacle's football line prices a draw (the regulation market)"),
     "VENUE_PROBABILITY_CONVERSION_REFUSED": (
