@@ -238,3 +238,13 @@ def test_small_live_stays_shadow_in_every_label():
     assert "SMALL LIVE stays SHADOW" in OPS_HTML
     assert "FUNDED SUBMISSION ENABLED" in OPS_JS            # shown red if it ever were
     assert "NON-FUNDED · NO ORDER CAN BE SENT" in OPS_JS
+
+
+def test_the_equity_treatment_object_is_rendered_as_text():
+    # production serves equity_treatment as {rule, unmarked_positions, ..., text};
+    # passing it to esc() printed "[object Object]" in the Capital panel (readback
+    # run 37242010767)
+    assert "esc(P.equity_treatment" not in DESK_JS
+    assert "treatment(P.equity_treatment)" in DESK_JS
+    body = DESK_JS.split("function treatment(tr) {")[1].split("\n      }\n")[0]
+    assert "tr.unmarked_positions" in body and "tr.text" in body

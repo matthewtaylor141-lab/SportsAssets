@@ -906,9 +906,16 @@
       var m = P.marks_as_of || {}, lim = num(m.stale_mark_after_s) || num(P.stale_after_s) || 300;
       var markAge = num(m.newest_age_s), fresh = P.status === 'OK' && markAge != null && markAge <= lim;
       var op = P.open_positions || {}, ex = P.exposure || {};
+      // equity_treatment is {rule, unmarked_positions, unmarked_carried_at_cost_usd, equity_marked_only_usd, text}
+      function treatment(tr) {
+        if (!tr || typeof tr !== 'object') { return esc(tr || ''); }
+        if (!tr.unmarked_positions) { return '<span title="' + esc(tr.text || '') + '">all open positions marked</span>'; }
+        return '<span title="' + esc(tr.text || '') + '">' + tr.unmarked_positions + ' unmarked at cost ' + esc(F.usd(num(tr.unmarked_carried_at_cost_usd), 0) || '—') +
+          ' · marked-only ' + esc(F.usd(num(tr.equity_marked_only_usd), 0) || '—') + '</span>';
+      }
       function tile(k, v, sub, t) { return '<div class="od-tile"' + (t ? ' data-tone="' + t + '"' : '') + '><span>' + k + '</span><b>' + v + '</b>' + (sub ? '<small>' + sub + '</small>' : '') + '</div>'; }
       body = '<div class="od-tiles">' +
-        tile('Equity', or(F.usd(num(P.equity_usd), 0), 'equity not served'), esc(P.equity_treatment || '')) +
+        tile('Equity', or(F.usd(num(P.equity_usd), 0), 'equity not served'), treatment(P.equity_treatment)) +
         tile('Cash', or(F.usd(num(P.cash_usd), 0), 'cash not served')) +
         tile('Available', or(F.usd(num(P.available_usd), 0), 'available not served'), 'reserved ' + (F.usd(num(P.reserved_usd), 0) || '—')) +
         tile('Deployed', or(F.usd(num(ex.cost_basis_usd), 0), 'cost basis not served'), 'cost basis of open positions') +
