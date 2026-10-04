@@ -3,6 +3,10 @@
   if(window.__BTHQ2Floor)return; window.__BTHQ2Floor=true;
   var B=window.BTFloor;
   if(!B){return;}
+  // each agent's face: a still render of their OWN licensed 3D model
+  // (team-demo/assets/models/portraits, rendered from manifest.json models)
+  var FACES={derek:1,xavier:1,audrey:1,karen:1,allocator:1,eddie:1,scout:1};
+  function face(slug){return FACES[slug]?'background:#0b1526 url(team-demo/assets/models/portraits/'+slug+'.jpg) center 18%/cover no-repeat':'';}
   var persona={
     derek:["DECISIVE · PROBABILITY FIRST","Rejects weak edges. Wants a crisp thesis, a measurable edge and a reason to act now."],
     karen:["SKEPTICAL · SOURCE OBSESSED","Adversarial by design. Finds the unsupported sentence, asks what is missing and refuses decorative certainty."],
@@ -34,7 +38,7 @@
     el.innerHTML=B.SEATS.map(function(s){
       var a=agent(s.slug), m=B.STATES[B.stateOf(a)], p=pos[s.slug]||[50,50], per=persona[s.slug]||['INDEPENDENT AGENT',''];
       return '<button class="hq2-pod" data-slug="'+s.slug+'" data-active="'+(active(a)?'1':'0')+'" style="--a:'+s.accent+';left:'+p[0]+'%;top:'+p[1]+'%">'+
-        '<div class="presence"><span class="portrait" aria-hidden="true"></span><span><span class="name">'+esc(s.name)+'</span><span class="role">'+esc(s.short)+'</span></span></div>'+
+        '<div class="presence"><span class="portrait" aria-hidden="true" style="'+face(s.slug)+'"></span><span><span class="name">'+esc(s.name)+'</span><span class="role">'+esc(s.short)+'</span></span></div>'+
         '<div class="state" style="color:'+m.color+'"><i></i>'+esc(m.label)+' · '+esc(a&&a.heartbeat&&a.heartbeat.at?B.ago(a.heartbeat.at):'NO HEARTBEAT')+'</div>'+
         '<div class="detail">'+esc(a&&a.state_detail||'No current task recorded.')+'</div><div class="persona">'+esc(per[0])+'</div></button>';
     }).join('');
@@ -53,7 +57,7 @@
     var s=seat(slug),a=agent(slug),per=persona[slug]||['INDEPENDENT AGENT',''];var d=document.getElementById('hq2-drawer');
     if(!s||!d)return; var m=B.STATES[B.stateOf(a)];
     var monitor=(a&&a.monitor||[]).slice(0,4);
-    d.innerHTML='<div class="hq2-d-head"><span class="portrait" aria-hidden="true"></span><div><div class="bt-kicker">'+esc(s.short)+'</div><h2>'+esc(s.name)+'</h2><p>'+esc(a&&a.title||s.role)+'</p></div><button class="hq2-d-x" aria-label="Close">×</button></div>'+
+    d.innerHTML='<div class="hq2-d-head"><span class="portrait" aria-hidden="true" style="'+face(slug)+'"></span><div><div class="bt-kicker">'+esc(s.short)+'</div><h2>'+esc(s.name)+'</h2><p>'+esc(a&&a.title||s.role)+'</p></div><button class="hq2-d-x" aria-label="Close">×</button></div>'+
       '<div class="hq2-d-persona"><b>'+esc(per[0])+'</b><span>'+esc(per[1])+'</span></div>'+
       '<div class="hq2-d-grid"><div class="hq2-d-stat"><span>Current state</span><b style="color:'+m.color+'">'+esc(m.label)+'</b></div>'+
       '<div class="hq2-d-stat"><span>Heartbeat</span><b>'+esc(a&&a.heartbeat&&a.heartbeat.at?B.ago(a.heartbeat.at):'UNAVAILABLE')+'</b></div>'+

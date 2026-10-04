@@ -46,7 +46,7 @@
         '<span><b>'+((counts.WORKING_ON||0)+(counts.REVIEWING||0)+(counts.CHALLENGING||0))+'</b> active desks</span>',
         '<span><b>'+edge+'</b> collaboration links</span>'
       ];
-      agents.forEach(function(a){var n=(a.name||a.agent||'').replace('CHIEF_ALLOCATOR','Allie');bits.push('<span class="'+tone(a)+'"><b>'+n+'</b> '+String(a.state||'UNKNOWN').replace(/_/g,' ')+' · '+ago(a.heartbeat&&a.heartbeat.at)+'</span>');});
+      agents.forEach(function(a){var seat=window.BTFloor&&BTFloor.BY_AGENT&&BTFloor.BY_AGENT[a.agent];var n=seat?seat.name:(a.display_name||a.name||a.agent||'').replace('CHIEF_ALLOCATOR','Allie').replace('Chief Allocator','Allie');bits.push('<span class="'+tone(a)+'"><b>'+n+'</b> '+String(a.state||'UNKNOWN').replace(/_/g,' ')+' · '+ago(a.heartbeat&&a.heartbeat.at)+'</span>');});
       rail.innerHTML=bits.concat(bits).join('');
     }
     var t=document.getElementById('bt-hq2-tape');if(t)t.classList.toggle('stale',state!=='live');

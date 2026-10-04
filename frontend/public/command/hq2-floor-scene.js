@@ -1,8 +1,13 @@
 /* BETTOR HQ2 · real Three.js operating floor.
-   No duplicated/recoloured humanoid avatars. Seven unique desks/offices are
-   represented as architectural presences until genuinely unique digital-human
-   assets exist. State motion is driven only by durable floor payloads. */
+   Seven unique desks, each staffed by that agent's OWN licensed 3D person
+   (team-demo/assets/models, manifest.json): no duplicated or recoloured
+   bodies and no abstract stand-ins. A desk whose agent has no licensed model
+   stays empty (its screen still names the agent). Pose and idle motion
+   follow the agent's recorded floor state only (stale / not deployed /
+   unknown settle and stay still). State motion is driven only by durable
+   floor payloads. */
 import * as THREE from './team-demo/assets/three.module.min.js';
+import {AvatarController, resolveBones, resolveBlendshapes, resolveVisemes, buildJoints, armsDown} from './team-demo/assets/cc_avatar.js';
 
 const world = document.querySelector('.hq2-world');
 if (world && !matchMedia('(max-width:780px)').matches) {
@@ -96,17 +101,51 @@ if (world && !matchMedia('(max-width:780px)').matches) {
     // screen
     const mat = new THREE.MeshBasicMaterial({map:labelTexture(seat.name,seat.short,'READING',seat.accent),toneMapped:false});
     const screen = new THREE.Mesh(new THREE.PlaneGeometry(1.55,.77),mat);screen.position.set(0,1.47,-.05);screen.rotation.x=-.10;group.add(screen);group.userData.screen=screen;
-    // presence: elegant light sculpture, not a fake human clone
-    const head = new THREE.Mesh(new THREE.SphereGeometry(.19,24,16),new THREE.MeshStandardMaterial({color:0xe6edf8,emissive:colorOf(seat.accent),emissiveIntensity:.15,roughness:.35,metalness:.05}));
-    head.position.set(0,1.82,.55);group.add(head);
-    const body = new THREE.Mesh(new THREE.CapsuleGeometry(.28,.72,8,16),new THREE.MeshStandardMaterial({color:0x0c1e35,emissive:colorOf(seat.accent),emissiveIntensity:.08,roughness:.4,metalness:.32}));
-    body.position.set(0,1.22,.55);group.add(body);group.userData.presence=body;
+    // the agent: their own licensed 3D person, loaded below (loadPeople);
+    // until then, and for an agent with no licensed model, the desk is empty.
+    // `body` is an invisible pick volume where the person stands.
+    const body = new THREE.Mesh(new THREE.BoxGeometry(.7,1.8,.5),new THREE.MeshBasicMaterial({transparent:true,opacity:0,depthWrite:false,colorWrite:false}));
+    body.position.set(0,.9,.62);group.add(body);const head=body;
     // point status light
     const lamp=new THREE.PointLight(colorOf(seat.accent),2.2,3.5,2);lamp.position.set(0,1.1,.15);group.add(lamp);group.userData.lamp=lamp;
     scene.add(group);deskGroups.set(seat.slug,group);pickables.push(desk,screen,body,head);
     [desk,screen,body,head].forEach(m=>m.userData.slug=seat.slug);
   }
   seatMeta.forEach(buildDesk);
+
+  // THE PEOPLE: each seat's own model from the manifest (licensed entries
+  // only: model, licence file, SPDX id, licensor, test_asset false)
+  const people = new Map();
+  const modeOf = (st) => st==='STALE'||st==='NOT_DEPLOYED'||st==='UNKNOWN'||!st ? 'unavailable' : st==='WAITING' ? 'waiting'
+    : /WORKING_ON|REVIEWING|CHALLENGING/.test(st) ? 'reviewing' : 'monitoring';
+  async function loadPeople() {
+    let man;
+    try { man = await (await fetch('./team-demo/assets/models/manifest.json', {cache:'no-cache'})).json(); } catch (e) { return; }
+    const [{GLTFLoader}, {MeshoptDecoder}] = await Promise.all([import('./team-demo/assets/GLTFLoader.js'), import('./team-demo/assets/meshopt_decoder.module.js')]);
+    const loader = new GLTFLoader(); loader.setMeshoptDecoder(MeshoptDecoder);
+    const used = new Set();
+    for (const seat of seatMeta) {
+      const e = man && man.characters && man.characters[seat.slug], g = deskGroups.get(seat.slug);
+      if (!g || !e || !e.model || !e.license_file || !e.license_spdx || !e.licensed_from || e.test_asset !== false || used.has(e.model)) continue;
+      used.add(e.model);   // one body per agent, never shared
+      try {
+        const root = (await loader.loadAsync('./team-demo/assets/models/' + e.model)).scene;
+        root.traverse((o) => { if (o.isMesh) { o.frustumCulled = false; for (const m of [].concat(o.material)) if (m && m.alphaTest > 0) m.alphaToCoverage = true; } });
+        armsDown(root, e.bones || {});
+        root.position.set(0, 0, .62); g.add(root); root.updateMatrixWorld(true);
+        const bones = resolveBones(root, e.bones || {}).bones;
+        const ctl = new AvatarController(bones, resolveBlendshapes(root, e.blendshapes || {}).shapes,
+          {mode: 'unavailable', seed: 23 + people.size * 11, visemes: resolveVisemes(root), joints: buildJoints(root, bones)});
+        const p = {root, ctl, slug: seat.slug};
+        people.set(seat.slug, p); g.userData.person = p;
+        const a = latest && (latest.agents || []).find((x) => x.slug === seat.slug);
+        ctl.setMode(modeOf(a && a.state)); ctl.update(1 / 60);
+      } catch (err) { console.warn('floor: no 3D person for ' + seat.slug, err); }
+    }
+    world.setAttribute('data-people', String(people.size));
+  }
+  // a soft front fill so faces read from the camera side
+  const face = new THREE.DirectionalLight(0xfff1e4, 1.15); face.position.set(0, 6, 14); scene.add(face);
 
   // collaboration tubes
   const links = new THREE.Group(); scene.add(links);
@@ -148,6 +187,7 @@ if (world && !matchMedia('(max-width:780px)').matches) {
       if(g.userData.screen){const old=g.userData.screen.material.map;g.userData.screen.material.map=labelTexture(seat.name,seat.short,a.state||'UNKNOWN',seat.accent);g.userData.screen.material.needsUpdate=true;old&&old.dispose();}
       g.userData.active=active;g.userData.lamp.intensity=active?4.1:(a.state==='STALE'||a.state==='NOT_DEPLOYED'?.45:1.8);
       g.userData.halo.material.opacity=active?.56:.22;
+      if(g.userData.person){g.userData.person.ctl.setMode(modeOf(a.state));if(reduced)g.userData.person.ctl.update(1/60);}
     });
   });
 
@@ -163,9 +203,10 @@ if (world && !matchMedia('(max-width:780px)').matches) {
     const cx=Math.sin(yaw)*Math.cos(pitch)*dist, cz=Math.cos(yaw)*Math.cos(pitch)*dist, cy=6.9+Math.sin(pitch)*7;
     camera.position.lerp(new THREE.Vector3(cx,cy,cz+1.0),.075);camera.lookAt(0,.85,.4);
     if(!reduced){coreRing.rotation.z+=dt*.23;holo.rotation.y+=dt*.36;holo.rotation.x+=dt*.12;
-      deskGroups.forEach(g=>{if(g.userData.active){g.userData.presence.position.y=1.22+Math.sin(now*.003+g.position.x)*.018;}});
+      people.forEach(p=>p.ctl.update(dt));
     }
     renderer.render(scene,camera);
   }
   requestAnimationFrame(loop);
+  loadPeople();
 }

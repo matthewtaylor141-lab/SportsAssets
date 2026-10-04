@@ -46,7 +46,7 @@
     KAREN: {name: 'Karen', accent: '#ff9a8f', initial: 'K'},
     EDDIE: {name: 'Eddie', accent: '#6fe0d2', initial: 'E'},
     SCOUT: {name: 'Scout', accent: '#f5b072', initial: 'S'},
-    CHIEF_ALLOCATOR: {name: 'Chief Allocator', accent: '#ecc66d', initial: 'CA'}
+    CHIEF_ALLOCATOR: {name: 'Allie', accent: '#ecc66d', initial: 'A'}
   };
   var OWNERS = ['DEREK', 'XAVIER', 'AUDREY', 'EDDIE', 'SCOUT', 'CHIEF_ALLOCATOR'];
   var SOURCE = {KAREN_UPHELD_CHALLENGE: 'Upheld Karen challenge', AUDREY_FINDING: 'Audrey finding',
