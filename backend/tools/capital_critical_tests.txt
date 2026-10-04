@@ -861,8 +861,9 @@ tests/test_chaos_the_venue_state_machine_recovers.py
 # pmus.submit_fok makes exactly one create whatever the venue answers and
 # raises it by name (a post-only 429 refusal carries status_code 429 and
 # error_type RateLimitError); a 429 on submit_fok's preview or create (IOC and
-# post-only) and on close_position trips the shared circuit at the adapter,
-# for every funded / copy / desk caller, and a non-429 failure does not; no
+# post-only) and on close_position trips the shared circuit at the adapter's
+# transport (venue_request_gate.PacedTransport), for every funded / copy /
+# desk caller, and a non-429 failure does not; no
 # order adapter loops around its send; no module builds the SDK with retries
 # on (order modules found by AST, the reference form included, with a
 # mutation check); Kalshi's session has no retry adapter.
