@@ -12,6 +12,7 @@
   <link rel="stylesheet" href="office.css">
   <link rel="stylesheet" href="management-v6.css">
   <link rel="stylesheet" href="experiment.css">
+  <link rel="stylesheet" href="equity-wall.css">
 </head>
 <body>
   <a class="skip-link" href="#pagebody">Skip to dashboard</a>
@@ -51,6 +52,12 @@
   <script src="office.js"></script>
   <script src="management-v6.js"></script>
   <script src="paper.js"></script>
+  <!-- THE LIVE EQUITY WALL: $500,000 PAPER EXPERIMENT and SMALL LIVE CAPITAL
+       (per venue), never summed. Its own read (GET /api/command/equity/*),
+       one shared poll loop; it places itself above the paper slot and
+       exposes window.BTEquityWall for the trading floor. AFTER paper.js
+       because it wraps BTPaper.mount to keep its place on re-render. -->
+  <script src="equity-wall.js"></script>
 
   <!-- A FAILED SCRIPT LOAD MUST NOT LOOK LIKE AN EMPTY PAGE.
        ==================================================================
