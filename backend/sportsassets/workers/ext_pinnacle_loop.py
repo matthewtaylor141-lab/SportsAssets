@@ -1603,6 +1603,112 @@ R_BOOK_CURRENCY_CONTRADICTED = "VENUE_BOOK_CURRENCY_CONTRADICTED_BY_CONTRACT"
 #: describe, and the candidate stops where it always did.
 CALIBRATION_ONLY_AFTER = (R_BOOK_CURRENCY_NOT_ESTABLISHED,
                           R_BOOK_CURRENCY_CONTRADICTED)
+
+#: ── A FAILED VENUE READ STILL REACHES THE AGENTS (P0 incident 2026-10-04) ──
+#:
+#: THE GAP THIS CLOSES, measured in production on 191b299. When the collector's
+#: OWN venue book read failed -- VENUE_BOOK_READ_FAILED (our request gate's
+#: cooldown refusal, the await timing out) or VENUE_BOOK_READ_RETURNED_ERROR (a
+#: 429, a timeout, a 404, any venue error) -- no valuation was written at all,
+#: not even calibration-only, so NO paper agent ever received the opportunity:
+#: 165 PinnAPI-triggered evaluations a day (19.5% of reactive completions,
+#: mostly HELD events, which starved Xavier's fresh evidence) and 48+ discovery
+#: events a day. Yet no paper strategy prices from the collector's read: each
+#: reads its OWN book at its decision (`paper_book_observations`) and refuses by
+#: name when it cannot.
+#:
+#: So after exactly these two refusals the same evaluate/persist path runs and
+#: the record is sealed CALIBRATION_ONLY, with NO displayed price (none was
+#: read: `displayed_quote.acquisition_price` NULL, `executable_price` NULL by
+#: migration 144's CHECK) and a PRECISE `venue_read_refusal`:
+#:
+#:   VENUE_GATE_COOLDOWN  our venue request gate refused to dispatch (a 429
+#:                        cooldown longer than the wait it may hold)
+#:   VENUE_RATE_LIMITED   the venue answered 429 / a rate-limit error
+#:   VENUE_TIMEOUT        no answer in time (the await or the transport)
+#:   VENUE_NOT_FOUND      the venue answered 404 / not found
+#:   VENUE_ERROR          any other failure, named in the diagnostic
+#:
+#: The event stays REFUSED under its venue-read code in the tally and the
+#: ledger, exactly as before; nothing trades on a NULL price -- the record is
+#: inadmissible three times over (`_seal_calibration_only`, migration 144's
+#: CHECKs, and every consumer that reads `record_purpose`).
+VR_GATE_COOLDOWN = "VENUE_GATE_COOLDOWN"
+VR_RATE_LIMITED = "VENUE_RATE_LIMITED"
+VR_TIMEOUT = "VENUE_TIMEOUT"
+VR_NOT_FOUND = "VENUE_NOT_FOUND"
+VR_ERROR = "VENUE_ERROR"
+VENUE_READ_REFUSALS = (VR_GATE_COOLDOWN, VR_RATE_LIMITED, VR_TIMEOUT,
+                       VR_NOT_FOUND, VR_ERROR)
+CALIBRATION_ONLY_AFTER_READ_FAILURE = (R_VENUE_READ_FAILED,
+                                       R_VENUE_READ_ERROR)
+NO_BOOK_READ = ("NO_BOOK_WAS_READ: the venue read failed, so nothing was "
+                "displayed and there is no price of any kind")
+
+
+def venue_read_refusal(vq) -> str | None:
+    """THE PRECISE REASON A COLLECTOR BOOK READ FAILED, from the failed
+    `venue_quote` itself (its diagnostic carries our gate's refusal or the
+    venue's status and error type). None unless the read failed or errored."""
+    vq = vq if isinstance(vq, dict) else {}
+    if vq.get("refusal") not in CALIBRATION_ONLY_AFTER_READ_FAILURE:
+        return None
+    from .. import venue_request_gate as grt
+    gate_codes = {v for k, v in vars(grt).items()
+                  if k.startswith("R_") and isinstance(v, str)}
+    diag = vq.get("diagnostic") if isinstance(vq.get("diagnostic"),
+                                              dict) else {}
+    err = str(vq.get("venue_error") or vq.get("exception")
+              or diag.get("error_type") or diag.get("exception")
+              or diag.get("code") or "")
+    if (vq.get("refused_by") == "OUR_REQUEST_GATE"
+            or diag.get("stage") == "REQUEST_GATE"
+            or diag.get("refusal") in gate_codes or err in gate_codes):
+        return VR_GATE_COOLDOWN
+    status = diag.get("http_status")
+    if status is None:
+        status = diag.get("status")
+    try:
+        status = None if status is None else int(status)
+    except (TypeError, ValueError):
+        status = None
+    name = err.lower().replace("_", "")
+    if diag.get("is_rate_limited") or status == 429 or "ratelimit" in name:
+        return VR_RATE_LIMITED
+    if status == 404 or "notfound" in name:
+        return VR_NOT_FOUND
+    if diag.get("is_timeout") or "timeout" in name:
+        return VR_TIMEOUT
+    return VR_ERROR
+
+
+def _read_failure_basis(vq) -> dict | None:
+    """The calibration-only basis of a FAILED read: no book, no displayed
+    price, the precise refusal and what the venue (or our gate) said. None
+    for any other refusal, so every other candidate stops where it did."""
+    code = venue_read_refusal(vq)
+    if code is None:
+        return None
+    diag = vq.get("diagnostic") if isinstance(vq.get("diagnostic"),
+                                              dict) else {}
+    return {"refusal": vq["refusal"], "venue_read_refusal": code,
+            "no_book_read": True,
+            "displayed": {"ok": False, "acquisition_price": None,
+                          "api_price": None, "side_consumed": None,
+                          "depth": None, "usable_for_orders": False,
+                          "what_this_is": NO_BOOK_READ},
+            "book_currency": {"verdict": "NOT_READ", "mechanism": None,
+                              "mechanisms_unavailable": None,
+                              "partial": None,
+                              "why": "no book was read, so no currency "
+                                     "question arises"},
+            "venue_read_why": vq.get("why"),
+            "venue_read_diagnostic": {
+                k: diag.get(k) for k in (
+                    "stage", "code", "status", "http_status", "exception",
+                    "error_type", "is_rate_limited", "is_timeout",
+                    "retry_after_s", "refusal", "request_id")
+                if diag.get(k) is not None}}
 #: The named counter the spec asks for: valuations recorded inadmissible, for
 #: calibration only. Reported beside the tally, never inside it -- the event's
 #: own outcome stays REFUSED under the currency code, so "written" cannot
@@ -2852,7 +2958,10 @@ def _displayed_market_state(basis: dict) -> dict:
             "side_consumed": d.get("side_consumed"),
             "depth": d.get("depth"),
             "readable": bool(d.get("ok")),
-            "ask_basis": ("DISPLAYED_ON_A_BOOK_WHOSE_CURRENCY_IS_NOT_"
+            # A FAILED READ DISPLAYED NOTHING: no price, and it says so.
+            "ask_basis": ("NO_BOOK_WAS_READ__NO_PRICE"
+                          if (basis or {}).get("no_book_read") else
+                          "DISPLAYED_ON_A_BOOK_WHOSE_CURRENCY_IS_NOT_"
                           "ESTABLISHED__NOT_USABLE_FOR_ORDERS")}
 
 
@@ -2952,6 +3061,8 @@ async def venue_quote(conn, *, us_slug, intent, now=None, size=None,
         return {"ok": False, "refusal": R_VENUE_READ_ERROR,
                 "why": "venue read error: %s" % book["error"],
                 "venue_error": _sanitize(book["error"], limit=80),
+                # OUR GATE NAMED AS OURS (`venue_read_refusal`).
+                "refused_by": book.get("refused_by"),
                 "diagnostic": diag}
 
     read_at = time.time()
@@ -7582,7 +7693,9 @@ async def cycle(conn, *, stream_seed=None) -> dict:
     # belongs to stays REFUSED under its venue-read code.
     cal_only: dict = {"attempted": 0, "recorded": 0, "already_recorded": 0,
                       "not_recorded_cycle_bound": 0, "persist_errors": {},
-                      "refusals": {}, "rows": []}
+                      "refusals": {}, "rows": [],
+                      # FAILED READS taken to a no-price record, by refusal
+                      "after_read_failure": {}}
 
     for sport_key, family in sports_for_cycle:
         _close_event()
@@ -8269,6 +8382,19 @@ async def cycle(conn, *, stream_seed=None) -> dict:
                 # admission block below is reachable.
                 calibration_only = _calibration_only_basis(vq)
                 if calibration_only is None:
+                    # A FAILED READ IS RECORDED TOO, with no price and its
+                    # precise refusal, so the agents still receive the
+                    # opportunity (CALIBRATION_ONLY_AFTER_READ_FAILURE).
+                    calibration_only = _read_failure_basis(vq)
+                    if calibration_only is not None:
+                        _vq_entry["venue_read_refusal"] = \
+                            calibration_only["venue_read_refusal"]
+                        cal_only["after_read_failure"][
+                            calibration_only["venue_read_refusal"]] = \
+                            cal_only["after_read_failure"].get(
+                                calibration_only["venue_read_refusal"],
+                                0) + 1
+                if calibration_only is None:
                     continue
                 if (evaluated + cal_only["attempted"]
                         >= MAX_CALIBRATION_ONLY_PER_CYCLE):
@@ -8360,9 +8486,12 @@ async def cycle(conn, *, stream_seed=None) -> dict:
             if calibration_only is not None:
                 # THE VENUE READ'S OWN REFUSAL LEADS the record's refusals: it
                 # is where this candidate stopped as an entry, and every later
-                # code is what the trace met after it.
-                extra = [calibration_only["refusal"]] + [
-                    c for c in extra if c != calibration_only["refusal"]]
+                # code is what the trace met after it. A FAILED read's precise
+                # refusal follows it (VENUE_RATE_LIMITED, ...).
+                lead = [calibration_only["refusal"]] + (
+                    [calibration_only["venue_read_refusal"]]
+                    if calibration_only.get("no_book_read") else [])
+                extra = lead + [c for c in extra if c not in lead]
 
             # Independent-book depth is re-aged too; a cached discovery
             # payload must not supply stale corroboration for a WS price.
@@ -8530,15 +8659,31 @@ async def cycle(conn, *, stream_seed=None) -> dict:
                                 if calibration_only is None
                                 else ext.PURPOSE_CALIBRATION_ONLY),
                 calibration_only_evidence=(
-                    None if calibration_only is None else {
-                        "venue_read_refusal": calibration_only["refusal"],
+                    None if calibration_only is None else dict({
+                        # THE PRECISE REFUSAL: the currency code for a read
+                        # book; VENUE_GATE_COOLDOWN / _RATE_LIMITED /
+                        # _TIMEOUT / _NOT_FOUND / _ERROR for a failed read.
+                        "venue_read_refusal": calibration_only.get(
+                            "venue_read_refusal") or calibration_only[
+                            "refusal"],
+                        # the lane's own code for where the read stopped
+                        "venue_read_lane_refusal": calibration_only["refusal"],
                         "venue_read_why": _sanitize(
                             calibration_only.get("venue_read_why") or "",
                             limit=240),
                         "book_currency": calibration_only["book_currency"],
                         "displayed_quote": calibration_only["displayed"],
                         "decision_instant_epoch_s": now,
-                        "decision_lag_s": decision_lag_s}))
+                        "decision_lag_s": decision_lag_s},
+                        **({"no_book_read": True, "displayed_price": None,
+                            "venue_read_diagnostic": calibration_only.get(
+                                "venue_read_diagnostic"),
+                            "agents_read_their_own_book": (
+                                "no paper strategy prices from this record: "
+                                "each reads its own book at its decision "
+                                "and refuses by name when it cannot")}
+                           if calibration_only.get("no_book_read")
+                           else {}))))
             if calibration_only is None:
                 evaluated += 1
                 step["evaluated"] += 1
@@ -8703,7 +8848,11 @@ async def cycle(conn, *, stream_seed=None) -> dict:
                         "us_market_slug": ident.get("us_market_slug"),
                         "event_key": quote.get("event_id"),
                         "probability": rec.get("probability"),
-                        "venue_read_refusal": calibration_only["refusal"],
+                        "venue_read_refusal": calibration_only.get(
+                            "venue_read_refusal") or calibration_only[
+                            "refusal"],
+                        "venue_read_lane_refusal": calibration_only[
+                            "refusal"],
                         "displayed_price_not_for_orders": (
                             calibration_only["displayed"]
                             .get("acquisition_price"))})

@@ -771,7 +771,19 @@ STAGES = (
         # to whichever LATER stage also refused it.
         "VENUE_BOOK_CURRENCY_NOT_ESTABLISHED",
         "VENUE_BOOK_CURRENCY_CONTRADICTED_BY_CONTRACT",
-        "OUR_OWN_PROCESSING_DELAY_EXCEEDED_BEFORE_THE_DECISION")),
+        "OUR_OWN_PROCESSING_DELAY_EXCEEDED_BEFORE_THE_DECISION",
+        # A FAILED VENUE READ now also leaves a (no-price) calibration-only
+        # record (P0 incident 2026-10-04, ext_pinnacle_loop.
+        # CALIBRATION_ONLY_AFTER_READ_FAILURE): the lane's two codes and the
+        # precise refusal beside them, all where the venue read stops a
+        # candidate -- never a later stage the trace also met.
+        "VENUE_BOOK_READ_FAILED",
+        "VENUE_BOOK_READ_RETURNED_ERROR",
+        "VENUE_GATE_COOLDOWN",
+        "VENUE_RATE_LIMITED",
+        "VENUE_TIMEOUT",
+        "VENUE_NOT_FOUND",
+        "VENUE_ERROR")),
     ("3_IDENTITY", (
         # THE GLOBAL CATALOGUE COULD NOT NAME ONE MONEYLINE ROW (map4 D9).
         "VENUE_MAPPING_AMBIGUOUS",
@@ -995,6 +1007,15 @@ EVALUABILITY_OF = {
     "VENUE_BOOK_NOT_READ": EXTERNAL_DEPENDENCY,
     "VENUE_BOOK_READ_FAILED": EXTERNAL_DEPENDENCY,
     "VENUE_BOOK_READ_RETURNED_ERROR": EXTERNAL_DEPENDENCY,
+    # THE PRECISE VENUE-READ REFUSALS (P0 incident 2026-10-04). The venue's
+    # own answers are theirs ...
+    "VENUE_RATE_LIMITED": EXTERNAL_DEPENDENCY,
+    "VENUE_TIMEOUT": EXTERNAL_DEPENDENCY,
+    "VENUE_NOT_FOUND": EXTERNAL_DEPENDENCY,
+    "VENUE_ERROR": EXTERNAL_DEPENDENCY,
+    # ... but a refusal by OUR OWN request gate is ours: no request was
+    # sent, so the remedy is our pacing, not a conversation with the venue.
+    "VENUE_GATE_COOLDOWN": COULD_NOT_EVALUATE,
     "VENUE_DOES_NOT_LIST_THIS_FIXTURE": EXTERNAL_DEPENDENCY,
     "NO_VENUE_CONTRACT_FOR_EVENT": EXTERNAL_DEPENDENCY,
     "NO_VENUE_NATIVE_CONTRACT_IN_PREMAP": EXTERNAL_DEPENDENCY,
