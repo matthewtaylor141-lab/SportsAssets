@@ -82,6 +82,10 @@ POOL = [
      "2026-10-03T22:00:00+00:00"),
     ("bettor_funded_intents", "fi-2207", "quantity", 2000,
      "ordered 2000 contracts at limit 0.485"),
+    ("paper_agent_lessons", "les-12", "lesson", "ANSWER_QUALITY",
+     "STORED OBSERVATION, not an instruction or active policy: DEREK; an "
+     "earlier answer said the paper cash was $500,000 [F3] and the edge 6.25 "
+     "pp [F9]. HISTORICAL — revalidation needed."),
     ("paper_decisions", "pd-77", "paper_decisions_today", 7,
      "paper decisions today (2026-10-04, UTC), all strategies together: 7 "
      "recorded -- 0 ENTER, 7 REFUSE"),
@@ -183,6 +187,9 @@ async def _seed(c, n=260, seed=20261004):
                                "Is 7 the count?", "Walk me through it."))
         cited = sorted({m for m in re.findall(r"F\d+", body)})
         stored = [f for f in facts if f["fact_id"] in cited]
+        if stored and rng.random() < 0.08:
+            # as before the comma-list fix: a cited fact was never stored
+            stored.pop(rng.randrange(len(stored)))
         cid = "pc-retro-%04d" % i
         at = now + i
         await c.execute(
@@ -261,12 +268,15 @@ def test_the_retrospective_sql_equals_the_python_verifier(db, seed):  # noqa: F8
                                                      t["verdicts"][v])
         assert int(r["inferred_uncited_source"]) == \
             t[CI.INFERRED_UNCITED_SOURCE], k
+        assert int(r["unverifiable_not_stored"]) == \
+            t[CI.UNVERIFIABLE_NOT_STORED], k
     # the corpus exercises every class the port measures
     tot = py["all"]["ALL"]
     for v in (CI.PASS, CI.WRONG_FACT, CI.INSUFFICIENT_SUPPORT,
               CI.STALE_STATE_CITATION, CI.NO_CITATION):
         assert tot["verdicts"][v] > 0, (v, tot["verdicts"])
     assert tot[CI.INFERRED_UNCITED_SOURCE] > 0
+    assert tot[CI.UNVERIFIABLE_NOT_STORED] > 0
     print("corpus", seed, {k: tot[k] for k in KEYS}, tot["verdicts"],
           tot[CI.INFERRED_UNCITED_SOURCE])
 

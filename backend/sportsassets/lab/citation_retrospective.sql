@@ -17,7 +17,8 @@
 --      from);
 --   2. each cited fact's verbatim quotation in the answer is kept as one
 --      unit (the whitespace after . ! ? and every line break inside it is
---      neutralised), then the answer is split into sentences;
+--      neutralised, and its own "[F" tokens are the record's text, not
+--      citations), then the answer is split into sentences;
 --   3. each sentence's citation groups; the clause before a group is bound
 --      to it, the tail after the last group to the last group, and a figure
 --      may also be supported by the group just before its own;
@@ -32,7 +33,11 @@
 --      CURRENT-marked record is called superseded), STALE_STATE_CITATION (a
 --      SUPERSEDED / HISTORICAL record cited for the current state, or the
 --      figure sits in a current record while a superseded one is cited);
---   6. INFERRED_UNCITED_SOURCE: an LLM-mode answer passed the full-list
+--   6. UNVERIFIABLE_CITED_FACT_NOT_STORED: a failing sentence citing a fact
+--      id the stored record does not hold (before the comma-list fix,
+--      "[F212, F213]" citations were never stored) cannot be judged from
+--      the record -- counted apart, out of every rate;
+--   7. INFERRED_UNCITED_SOURCE: an LLM-mode answer passed the full-list
 --      figure check when it was published, so a figure no CITED fact holds
 --      was held by an UNCITED fact -- the sentence cited the wrong or too
 --      few facts (the upper bound of the wrong-fact rate).
@@ -88,9 +93,9 @@ WITH RECURSIVE ans AS (
     SELECT m.message_id, m.k + 1,
            CASE WHEN length(f.ftext) >= 12 AND position(f.ftext IN m.body) > 0
                 THEN replace(m.body, f.ftext,
-                             replace(regexp_replace(f.ftext,
+                             replace(replace(regexp_replace(f.ftext,
                                  '([.!?])[ \t\r\n\f\v]', '\1' || chr(3), 'g'),
-                                 chr(10), chr(3)))
+                                 chr(10), chr(3)), '[F', chr(4) || 'F'))
                 ELSE m.body END
       FROM masked m JOIN fct f ON f.message_id = m.message_id AND f.k = m.k + 1
 ), mbody AS (
@@ -264,7 +269,12 @@ WITH RECURSIVE ans AS (
                         SELECT sev FROM sfail f WHERE f.message_id =
                           sm.message_id AND f.sidx = sm.sidx) z), 0) END AS sev,
            (SELECT count(*) FROM ifail f WHERE f.message_id = sm.message_id
-              AND f.sidx = sm.sidx AND f.sev = 2) AS n_insufficient
+              AND f.sidx = sm.sidx AND f.sev = 2) AS n_insufficient,
+           EXISTS (SELECT 1 FROM gid g WHERE g.message_id = sm.message_id
+                     AND g.sidx = sm.sidx
+                     AND NOT EXISTS (SELECT 1 FROM kfact kf
+                                      WHERE kf.message_id = g.message_id
+                                        AND kf.fid = g.fid)) AS unk
       FROM smat sm
 ), per_answer AS (
     SELECT a.message_id, a.agent_id, a.mode,
@@ -273,12 +283,14 @@ WITH RECURSIVE ans AS (
            count(v.sev) AS material,
            count(v.sev) FILTER (WHERE v.sev <> 1) AS cited_material,
            count(*) FILTER (WHERE v.sev = 0) AS pass,
-           count(*) FILTER (WHERE v.sev = 3) AS wrong_fact,
-           count(*) FILTER (WHERE v.sev = 2) AS insufficient,
-           count(*) FILTER (WHERE v.sev = 4) AS stale,
-           count(*) FILTER (WHERE v.sev = 5) AS entity,
+           count(*) FILTER (WHERE v.sev = 3 AND NOT v.unk) AS wrong_fact,
+           count(*) FILTER (WHERE v.sev = 2 AND NOT v.unk) AS insufficient,
+           count(*) FILTER (WHERE v.sev = 4 AND NOT v.unk) AS stale,
+           count(*) FILTER (WHERE v.sev = 5 AND NOT v.unk) AS entity,
            count(*) FILTER (WHERE v.sev = 1) AS no_citation,
-           count(*) FILTER (WHERE v.sev = 2 AND a.mode = 'LLM') AS inferred
+           count(*) FILTER (WHERE v.sev > 0 AND v.unk) AS unverifiable,
+           count(*) FILTER (WHERE v.sev = 2 AND a.mode = 'LLM'
+                              AND NOT v.unk) AS inferred
       FROM ans a LEFT JOIN sverdict v ON v.message_id = a.message_id
      GROUP BY a.message_id, a.agent_id, a.mode
 )
@@ -292,6 +304,7 @@ SELECT coalesce(agent_id, 'ALL') AS agent, coalesce(mode, 'ALL') AS mode,
        sum(wrong_fact) AS wrong_fact, sum(insufficient) AS insufficient,
        sum(stale) AS stale, sum(entity) AS entity,
        sum(no_citation) AS no_citation,
+       sum(unverifiable) AS unverifiable_not_stored,
        sum(inferred) AS inferred_uncited_source,
        count(*) FILTER (WHERE wrong_fact + stale + entity > 0)
          AS answers_with_wrong_support,
@@ -348,9 +361,9 @@ WITH RECURSIVE ans AS (
     SELECT m.message_id, m.k + 1,
            CASE WHEN length(f.ftext) >= 12 AND position(f.ftext IN m.body) > 0
                 THEN replace(m.body, f.ftext,
-                             replace(regexp_replace(f.ftext,
+                             replace(replace(regexp_replace(f.ftext,
                                  '([.!?])[ \t\r\n\f\v]', '\1' || chr(3), 'g'),
-                                 chr(10), chr(3)))
+                                 chr(10), chr(3)), '[F', chr(4) || 'F'))
                 ELSE m.body END
       FROM masked m JOIN fct f ON f.message_id = m.message_id AND f.k = m.k + 1
 ), mbody AS (
@@ -524,15 +537,21 @@ WITH RECURSIVE ans AS (
                         SELECT sev FROM sfail f WHERE f.message_id =
                           sm.message_id AND f.sidx = sm.sidx) z), 0) END AS sev,
            (SELECT count(*) FROM ifail f WHERE f.message_id = sm.message_id
-              AND f.sidx = sm.sidx AND f.sev = 2) AS n_insufficient
+              AND f.sidx = sm.sidx AND f.sev = 2) AS n_insufficient,
+           EXISTS (SELECT 1 FROM gid g WHERE g.message_id = sm.message_id
+                     AND g.sidx = sm.sidx
+                     AND NOT EXISTS (SELECT 1 FROM kfact kf
+                                      WHERE kf.message_id = g.message_id
+                                        AND kf.fid = g.fid)) AS unk
       FROM smat sm
 ), failing AS (
     SELECT v.message_id, v.sidx,
-           CASE v.sev WHEN 1 THEN 'NO_CITATION'
-                      WHEN 2 THEN 'INSUFFICIENT_SUPPORT'
-                      WHEN 3 THEN 'WRONG_FACT'
-                      WHEN 4 THEN 'STALE_STATE_CITATION'
-                      ELSE 'ENTITY_MISMATCH' END AS verdict
+           CASE WHEN v.unk THEN 'UNVERIFIABLE_CITED_FACT_NOT_STORED'
+                WHEN v.sev = 1 THEN 'NO_CITATION'
+                WHEN v.sev = 2 THEN 'INSUFFICIENT_SUPPORT'
+                WHEN v.sev = 3 THEN 'WRONG_FACT'
+                WHEN v.sev = 4 THEN 'STALE_STATE_CITATION'
+                ELSE 'ENTITY_MISMATCH' END AS verdict
       FROM sverdict v WHERE v.sev > 0
 ), ranked AS (
     SELECT f.*, a.agent_id, a.mode,

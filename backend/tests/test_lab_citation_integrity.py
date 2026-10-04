@@ -356,3 +356,40 @@ def test_decimal_helpers():
     assert CI._sig_digits(Decimal("0.59")) == 2
     assert CI._sig_digits(Decimal("1")) == 1
     assert CI._sig_digits(Decimal("97958")) == 5
+
+
+def test_a_comma_list_citation_is_stored_and_unstored_facts_are_unverifiable():
+    from sportsassets.agents import persona_chat as PC
+    facts = account_facts()
+    got = PC.cited_facts("Cash $500,000 [F143, F140]; P&L [F142].", facts)
+    assert {f["fact_id"] for f in got} == {"F143", "F140", "F142"}
+    # the retrospective never judges a sentence whose cited fact the stored
+    # record lacks (stored facts here: F142 only)
+    stored = [f for f in facts if f["fact_id"] == "F142"]
+    rep = CI.verify("Cash is $500,000 [F143, F142]. P&L $2.91 [F142].",
+                    stored)
+    t = CI.retro_tally([("DEREK", "LLM", rep)])["by_agent"]["DEREK"]["LLM"]
+    assert t[CI.UNVERIFIABLE_NOT_STORED] == 1
+    assert t["verdicts"][CI.PASS] == 1
+    assert t[CI.INFERRED_UNCITED_SOURCE] == 0
+    assert t["answers_with_wrong_support"] == 0
+
+
+def test_a_quoted_records_own_citation_tokens_are_not_citations():
+    """A stored lesson quoting an earlier answer's "[F72]" is the record's
+    text: quoting it cites the lesson, never F72 (production research run
+    37234402124)."""
+    from sportsassets.agents import persona_chat as PC
+    lesson = F("F5", "STORED OBSERVATION: an earlier answer said cash was "
+                     "$500,000 [F143] and P&L $2.91 [F142]. HISTORICAL.",
+               source="paper_agent_lessons", record_id="les-1",
+               field="lesson")
+    facts = account_facts() + [lesson]
+    text = "My lessons: %s [F5]." % lesson["text"]
+    assert CI.cited_fact_ids(text, facts) == ["F5"]
+    assert [f["fact_id"] for f in PC.cited_facts(text, facts)] == ["F5"]
+    r = CI.verify(text, facts)
+    assert r["passed"] and r["sentences"][0]["cited_ids"] == ["F5"]
+    assert r["sentences"][0]["text"] == text      # reported as written
+    # outside a quotation the same token IS a citation
+    assert CI.cited_fact_ids("Cash $500,000 [F143].", facts) == ["F143"]

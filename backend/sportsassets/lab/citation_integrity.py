@@ -464,6 +464,7 @@ class Fact:
 
 class FactIndex:
     def __init__(self, facts):
+        self.raw_facts = [f for f in facts or [] if isinstance(f, dict)]
         self.facts: dict = {}
         for f in facts or []:
             if isinstance(f, dict) and f.get("fact_id"):
@@ -486,26 +487,42 @@ def mask_quotations(text: str, facts) -> str:
     """A same-length copy of `text` in which every verbatim quotation of a
     fact's text (12+ characters, in fact order) has its internal sentence
     breaks neutralised (the whitespace after . ! ? and every line break
-    becomes \\x03), so a quoted fact stays one sentence. The SQL port does
-    the same replacement in the same order."""
+    becomes \\x03), so a quoted fact stays one sentence, and its own "[F"
+    tokens become "\\x04F": a stored lesson that quotes an earlier answer's
+    "[F72]" is the RECORD's text, never this answer's citation (production
+    retrospective, research run 37234402124). The SQL port does the same
+    replacements in the same order."""
     t = str(text or "")
     for f in facts or []:
         ft = str((f or {}).get("text") or "")
         if len(ft) < 12 or ft not in t:
             continue
         masked = re.sub(r"([.!?])[ \t\r\n\f\v]", "\\1\x03", ft).replace(
-            "\n", "\x03")
+            "\n", "\x03").replace("[F", "\x04F")
         if masked != ft:
             t = t.replace(ft, masked)
     return t
 
 
-def split_sentences(text: str, facts=(), *, partial: bool = False) -> list:
+def cited_fact_ids(text: str, facts=()) -> list:
+    """The fact ids `text` cites, in order: every [F#] / [F#, F#] citation
+    group outside a quoted fact's own text."""
+    out = []
+    for g in CITE_GROUP.finditer(mask_quotations(text, facts)):
+        for fid in _group_ids(g.group(0)):
+            if fid not in out:
+                out.append(fid)
+    return out
+
+
+def split_sentences(text: str, facts=(), *, partial: bool = False,
+                    masked: str | None = None) -> list:
     """[(start, end)] spans of the sentences of `text` (offsets into the
     original text). With `partial`, a trailing fragment with no terminal
     punctuation or citation (an interrupted stream) is left out."""
     t = str(text or "")
-    masked = mask_quotations(t, facts)
+    if masked is None:
+        masked = mask_quotations(t, facts)
     spans, start = [], 0
     for m in BOUNDARY.finditer(masked):
         spans.append((start, m.start()))
@@ -893,13 +910,18 @@ def verify(text: str, facts, *, question: str = "", skip_prefixes=(),
     idx = index or FactIndex(facts)
     qn = _question_numbers(question)
     t = str(text or "")
+    masked = mask_quotations(t, facts)
     sents = []
-    for n, (a, b) in enumerate(split_sentences(t, facts, partial=partial)):
-        s = t[a:b]
-        if _skip(s, skip_prefixes):
+    for n, (a, b) in enumerate(split_sentences(t, facts, partial=partial,
+                                               masked=masked)):
+        # checked on the masked form (a quotation's own [F tokens are not
+        # citations); reported and repaired on the original, same offsets
+        ev = masked[a:b].replace("\x03", " ")
+        if _skip(ev, skip_prefixes):
             continue
-        r = verify_sentence(s, idx, qn, profile=profile)
-        r.update({"index": n, "start": a, "end": b})
+        r = verify_sentence(ev, idx, qn, profile=profile)
+        r.update({"index": n, "start": a, "end": b, "text": t[a:b],
+                  "sha256": sha256(t[a:b]), "eval_text": ev})
         sents.append(r)
     counts = {v: 0 for v in VERDICTS}
     for r in sents:
@@ -927,10 +949,16 @@ def _supports_all(fx: Fact, items: list) -> bool:
     return True
 
 
+def _evaluable(sentence: str, idx: FactIndex) -> str:
+    return mask_quotations(sentence, idx.raw_facts).replace("\x03", " ")
+
+
 def _repair_sentence(sentence: str, res: dict, idx: FactIndex,
                      qnums: set) -> tuple:
-    """(new sentence, [{from, to, segment}]) or (None, reason)."""
-    segs = segments(sentence)
+    """(new sentence, [{from, to, segment}]) or (None, reason). Segments are
+    read on the evaluable (masked) form; the edit is applied to the original
+    at the same offsets."""
+    segs = segments(res.get("eval_text") or _evaluable(sentence, idx))
     if res["verdict"] == NO_CITATION:
         items = []
         for s in segs:
@@ -1011,7 +1039,7 @@ def repair(text: str, report: dict, facts, *, question: str = "",
             repairs.append({"index": r["index"], "repaired": False,
                             "why": how, "verdict": r["verdict"]})
             continue
-        again = verify_sentence(new, idx, qn)
+        again = verify_sentence(_evaluable(new, idx), idx, qn)
         if again["verdict"] != PASS:
             repairs.append({"index": r["index"], "repaired": False,
                             "why": "REPAIR_DID_NOT_VERIFY",
@@ -1146,14 +1174,26 @@ def summary(g: dict) -> dict:
 INFERRED_UNCITED_SOURCE = "INFERRED_UNCITED_SOURCE"
 
 
+#: a stored answer's failing sentence that cites a fact id the stored record
+#: does not hold: before the comma-list fix (persona_chat.cited_facts),
+#: "[F212, F213]" was never stored, so such a sentence cannot be judged
+#: from the record -- counted apart, out of every rate's denominator
+UNVERIFIABLE_NOT_STORED = "UNVERIFIABLE_CITED_FACT_NOT_STORED"
+
+
 def _tally_row() -> dict:
     return {"answers": 0, "answers_with_material": 0,
             "answers_with_cited_material": 0, "sentences": 0,
             "material": 0, "cited_material": 0,
             "verdicts": {v: 0 for v in VERDICTS},
-            INFERRED_UNCITED_SOURCE: 0,
+            INFERRED_UNCITED_SOURCE: 0, UNVERIFIABLE_NOT_STORED: 0,
             "answers_with_wrong_support": 0,
             "answers_with_wrong_or_inferred": 0}
+
+
+def is_unverifiable(sentence: dict) -> bool:
+    return sentence.get("verdict") not in (None, PASS) and \
+        bool(sentence.get("unknown_ids"))
 
 
 def is_inferred_uncited(sentence: dict, mode: str) -> bool:
@@ -1177,8 +1217,9 @@ def retro_tally(reports) -> dict:
                    rows.setdefault("ALL", _tally_row()),
                    total.setdefault(mode, _tally_row()), total["ALL"]]
         sents = [s for s in rep["sentences"] if s["verdict"] is not None]
-        strict = sum(1 for s in sents if s["verdict"] in WRONG_SUPPORT)
-        inferred = sum(1 for s in sents if is_inferred_uncited(s, mode))
+        judged = [s for s in sents if not is_unverifiable(s)]
+        strict = sum(1 for s in judged if s["verdict"] in WRONG_SUPPORT)
+        inferred = sum(1 for s in judged if is_inferred_uncited(s, mode))
         cited = sum(1 for s in sents if s["verdict"] != NO_CITATION)
         for t in targets:
             t["answers"] += 1
@@ -1187,8 +1228,9 @@ def retro_tally(reports) -> dict:
             t["cited_material"] += cited
             t["answers_with_material"] += 1 if sents else 0
             t["answers_with_cited_material"] += 1 if cited else 0
-            for s in sents:
+            for s in judged:
                 t["verdicts"][s["verdict"]] += 1
+            t[UNVERIFIABLE_NOT_STORED] += len(sents) - len(judged)
             t[INFERRED_UNCITED_SOURCE] += inferred
             t["answers_with_wrong_support"] += 1 if strict else 0
             t["answers_with_wrong_or_inferred"] += 1 if (

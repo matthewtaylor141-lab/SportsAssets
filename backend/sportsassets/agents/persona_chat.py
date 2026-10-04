@@ -812,7 +812,14 @@ def ungrounded_context(text: str, figures: list, *, width: int = 48,
 
 
 def cited_facts(text: str, facts: list) -> list:
-    ids = {"F%s" % m for m in _FACT_REF.findall(str(text or ""))}
+    """The facts `text` cites, read the way the citation-integrity verifier
+    reads them (lab/citation_integrity.cited_fact_ids): [F3], and also a list
+    in one bracket, [F212, F213, F200] -- production 2026-10-04 (LAB-B
+    retrospective, research run 37234015642): answers citing "[F212, F213,
+    F200, F201, F211]" were stored with NONE of those facts, because only the
+    single form was read -- and never a "[F72]" inside a quoted fact's own
+    text (a stored lesson quoting an earlier answer)."""
+    ids = set(CI.cited_fact_ids(text, facts))
     return [f for f in facts if f["fact_id"] in ids]
 
 
