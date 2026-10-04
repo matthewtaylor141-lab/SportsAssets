@@ -218,6 +218,7 @@
   }
 
   // live countdowns from real timestamps (text only; no animation)
+  var expiredSeen = false, expiryReload = false;
   function tick() {
     var els = document.querySelectorAll('[data-due]');
     for (var i = 0; i < els.length; i++) {
@@ -227,6 +228,32 @@
       els[i].textContent = d >= 0 ? 'in ' + age(d) : 'overdue by ' + age(-d);
       els[i].classList.toggle('pr-overdue', d < 0);
     }
+    // a CURRENT recommendation whose probability expires while the page is
+    // open turns STALE here, the moment it happens (a genuine state change)
+    var recs = document.querySelectorAll('[data-rec-expires]');
+    for (var r = 0; r < recs.length; r++) {
+      var te = Date.parse(recs[r].getAttribute('data-rec-expires'));
+      if (isFinite(te) && Date.now() > te) {
+        var h = recs[r];
+        h.removeAttribute('data-rec-expires');
+        h.setAttribute('data-rec-state', 'STALE');
+        h.className = 'pr-xav-hero stale';
+        var w = h.querySelector('.pr-rec-word');
+        var prev = w ? w.textContent : '';
+        if (w) { w.textContent = 'STALE'; }
+        var lab = h.querySelector('.label');
+        if (lab) { lab.innerHTML = 'No current recommendation ' + stateChip('STALE'); }
+        var note = document.createElement('small');
+        note.className = 'pr-recorded';
+        note.textContent = 'recorded ' + prev + ' · its probability expired at ' + when(new Date(te).toISOString()) + ' · awaiting re-review';
+        h.insertBefore(note, h.querySelector('.pr-xav-sub'));
+        var sec = h.closest('.pr-xav');
+        if (sec) { sec.classList.add('pr-xav-expired'); }
+        expiredSeen = true;
+      }
+    }
+    // re-read the room once so the server's re-judged state replaces it
+    if (expiredSeen && !expiryReload) { expiryReload = true; setTimeout(function () { expiryReload = false; expiredSeen = false; load(true); }, 1500); }
     var ages = document.querySelectorAll('[data-age-from]');
     for (var k = 0; k < ages.length; k++) {
       var s = since(ages[k].getAttribute('data-age-from'));
@@ -310,7 +337,7 @@
       cardProtection(r.protection) +
       '<div class="pr-card-orders">' + (st || '<span class="muted">no live order</span>') + '</div>' +
       '<div class="pr-card-foot">' +
-        (x ? '<span class="pr-x"><b>Xavier</b> ' + esc(x.recommendation || 'none recorded') + ' · ' + esc(human(x.evidence_state)) +
+        (x ? '<span class="pr-x"><b>Xavier</b> ' + esc(recState(x) === 'CURRENT' ? (x.recommendation || 'none recorded') : human(recState(x)).toUpperCase()) + ' ' + stateChip(recState(x)) + (recState(x) !== 'CURRENT' && x.recorded_recommendation ? ' <small class="muted">recorded ' + esc(x.recorded_recommendation) + '</small>' : '') + ' · ' + esc(human(x.evidence_state)) +
              ' · review <span data-due="' + esc(x.next_review_due_at || '') + '"></span></span>'
            : '<span class="pr-x muted"><b>Xavier</b> ' + esc(human(r.xavier_reason)) + '</span>') +
         fresh((r.freshness || {}).youngest_book_age_s === null || (r.freshness || {}).youngest_book_age_s === undefined ? 'UNAVAILABLE'
@@ -629,7 +656,41 @@
     return xs.slice().sort(function (a, b) { return (a.status === 'OK' ? 0 : 1) - (b.status === 'OK' ? 0 : 1); })
       .map(function (x) { return xavier(x, olab); }).join('');
   }
-  var REC_CLASS = {HOLD: 'hold', EXIT: 'exit', REDUCE: 'reduce', HEDGE: 'hedge', PROTECT: 'protect', WAITING_FOR_EVIDENCE: 'wait'};
+  var REC_CLASS = {HOLD: 'hold', EXIT: 'exit', REDUCE: 'reduce', HEDGE: 'hedge', PROTECT: 'protect', WAITING_FOR_EVIDENCE: 'wait',
+    STALE: 'stale', INVALID: 'stale', WAITING_FOR_FRESH_EVIDENCE: 'wait', MANAGEMENT_UNAVAILABLE_STALE_INPUT: 'wait', NO_RECOMMENDATION: 'wait', SUPERSEDED: 'stale'};
+  // XAVIER'S RECOMMENDATION STATE (owner P0, 2026-10-04): only CURRENT is a
+  // recommendation. The server re-judges every stored recommendation at read
+  // time (xavier_freshness.validity); this page never shows the stored word
+  // as current otherwise, and flips a CURRENT one to STALE in the browser the
+  // moment its supporting probability passes its own expiry.
+  var REC_STATES = ['CURRENT', 'STALE', 'INVALID', 'WAITING_FOR_FRESH_EVIDENCE', 'MANAGEMENT_UNAVAILABLE_STALE_INPUT', 'NO_RECOMMENDATION', 'SUPERSEDED'];
+  function epIso(v) {
+    var n = num(v);
+    if (n !== null) { return new Date(n * 1000).toISOString(); }
+    return typeof v === 'string' ? v : '';
+  }
+  function recState(x) {
+    var s = x && (x.recommendation_state || (x.freshness || {}).recommendation_state);
+    if (REC_STATES.indexOf(s) >= 0) { return s; }
+    // an older server without the state: never call its word current
+    var ev = (x && x.evidence) || {};
+    if (ev.state && ev.state !== 'FRESH_CURRENT_PROBABILITY') { return 'STALE'; }
+    return 'NO_RECOMMENDATION';
+  }
+  function stateChip(st) {
+    return chip(esc(human(st).toUpperCase()), st === 'CURRENT' ? 'green' : (st === 'STALE' || st === 'INVALID') ? 'red' : 'amber',
+      'Xavier recommendation state, judged at read time against the probability\'s own freshness limit');
+  }
+  function valuationRows(v) {
+    v = v || {};
+    var src = epIso(v.source_at), exp = epIso(v.expires_at), obs = epIso(v.observed_at);
+    return '<div class="pr-xav-val" data-valuation>' +
+      '<div><span class="label">Valuation source</span><b>' + esc(v.source || 'not recorded') + '</b><small class="muted">' + esc(human(v.source_at_basis || '')) + '</small></div>' +
+      '<div><span class="label">Source time</span><b>' + (src ? esc(when(src)) : na('NO_SOURCE_TIMESTAMP_RECORDED')) + '</b><small class="muted">' + (obs ? 'observed ' + esc(when(obs)) : 'observation time not recorded') + '</small></div>' +
+      '<div><span class="label">Age</span><b class="money"' + (src ? ' data-age-from="' + esc(src) + '"' : '') + '>' + esc(age(v.age_now_s)) + '</b><small class="muted">threshold ' + (num(v.limit_s) !== null ? esc(age(v.limit_s)) : 'not known') + ' · ' + esc(human(v.limit_basis || '')) + '</small></div>' +
+      '<div><span class="label">Expires</span><b' + (exp ? ' data-due="' + esc(exp) + '"' : '') + '>' + (exp ? '' : '—') + '</b><small class="muted">valuation ' + esc(v.valuation_id !== null && v.valuation_id !== undefined ? '#' + v.valuation_id : 'id not recorded') + (v.valuation_hash ? ' · hash ' + esc(String(v.valuation_hash).slice(0, 12)) : '') + '</small></div>' +
+      '</div>';
+  }
   function xavier(x, olab) {
     var head = '<header class="pr-ph"><h2>Xavier · decision</h2><code class="muted">' + esc(x.group_id) + '</code></header>';
     if (x.status !== 'OK') {
@@ -642,12 +703,14 @@
     var altRows = alts.map(function (a) {
       var v = num(a.value_usd);
       var w = v === null ? 0 : Math.abs(v) / vmax * 100;
-      return '<li class="pr-alt' + (a.is_recommendation ? ' lead' : '') + (a.rankable ? '' : ' blocked') + '">' +
+      var miss = a.missing_evidence || null;
+      return '<li class="pr-alt' + (a.is_recommendation ? ' lead' : '') + (a.rankable ? '' : ' blocked') + '" data-option="' + esc(a.option || a.action) + '">' +
         '<span class="pr-alt-rank">' + (a.rank ? '#' + a.rank : '—') + '</span>' +
-        '<span class="pr-alt-name">' + esc(a.action) + (a.mode ? ' <small class="muted">' + esc(a.mode) + '</small>' : '') + '</span>' +
+        '<span class="pr-alt-name">' + esc(human(a.option || a.action).toUpperCase()) + (a.mode ? ' <small class="muted">' + esc(a.mode) + '</small>' : '') + '</span>' +
         '<span class="pr-alt-bar"><i style="width:' + w.toFixed(1) + '%"></i></span>' +
-        '<span class="pr-alt-v">' + (v === null ? '<span class="muted">—</span>' : usd(v)) + '</span>' +
-        (a.blocker || a.note || a.state ? '<span class="pr-alt-why muted">' + esc(a.note || (a.state ? 'state ' + a.state : '') || human(a.blocker)) + (a.blocker && (a.note || a.state) ? ' · ' + esc(human(a.blocker)) : '') + '</span>' : '') +
+        '<span class="pr-alt-v">' + (v === null ? '<span class="muted">not valued</span>' : usd(v) + (miss ? '<small class="muted"> not current</small>' : '')) + '</span>' +
+        (miss ? '<span class="pr-alt-why pr-miss">missing evidence: ' + esc(human(miss)) + (a.blocker && a.blocker !== miss ? ' · blocker ' + esc(human(a.blocker)) : '') + '</span>'
+          : (a.blocker || a.note || a.state ? '<span class="pr-alt-why muted">' + esc(a.note || (a.state ? 'state ' + a.state : '') || human(a.blocker)) + (a.blocker && (a.note || a.state) ? ' · ' + esc(human(a.blocker)) : '') + '</span>' : '')) +
         '</li>';
     }).join('');
     var why = x.why_leader_wins || null;
@@ -666,20 +729,32 @@
         '<div class="pr-vp-row"><span class="pr-vp-v">Polymarket</span>' + (pm.status === 'UNAVAILABLE' ? na(pm.reason) : 'bid ' + cents(pm.bid, pm.reason) + ' · ask ' + cents(pm.ask, pm.reason) + ' ' + fresh(pm.freshness, pm.age_s, pm.source)) + '</div>' +
         '<div class="pr-vp-row"><span class="pr-vp-v">Kalshi</span>' + (ks.status === 'UNAVAILABLE' || num(ks.bid) === null ? na(ks.reason) + ' <small class="muted">' + esc(human(String(ks.reason || '').split(':')[0])) + '</small>' : 'bid ' + cents(ks.bid) + ' · ask ' + cents(ks.ask)) + '</div></div>';
     }).join('');
-    var rec = x.display_recommendation || x.recommendation || 'NONE';
+    var st = recState(x);
+    var fr = x.freshness || {};
+    var cur = st === 'CURRENT' ? (x.display_recommendation || x.recommendation) : null;
+    var rec = cur || st;
+    var recd = x.recorded_recommendation;
+    var held = ((x.position || {}).legs || []).reduce(function (t, p) { return t + (num(p.open_qty) || 0); }, 0);
+    var expIso = epIso((fr.valuation || {}).expires_at);
     return '<section class="pr-panel pr-xav">' + head +
-      '<div class="pr-xav-hero ' + (REC_CLASS[rec] || 'hold') + '"><span class="label">Recommendation</span><b>' + esc(human(rec).toUpperCase()) + '</b>' +
+      '<div class="pr-xav-hero ' + (cur ? (REC_CLASS[rec] || 'hold') : (REC_CLASS[st] || 'wait')) + '" data-rec-state="' + esc(st) + '"' + (cur && expIso ? ' data-rec-expires="' + esc(expIso) + '"' : '') + '>' +
+        '<span class="label">' + (cur ? 'Current recommendation' : 'No current recommendation') + ' ' + stateChip(st) + '</span>' +
+        '<b class="pr-rec-word">' + esc(human(rec).toUpperCase()) + '</b>' +
+        (!cur && recd && recd !== st ? '<small class="pr-recorded">recorded ' + esc(recd) + ' · not current</small>' : '') +
+        ((fr.reasons || []).length ? '<small>why: ' + esc(fr.reasons.map(human).join(' · ')) + '</small>' : '') +
         '<small>' + esc(x.display_basis || '') + '</small>' +
+        (held > 0 ? '<small class="pr-held">position held: ' + esc(qtyTxt(held)) + ' contracts — holding is a fact about the book, not a HOLD recommendation</small>' : '') +
         '<div class="pr-xav-sub">assessed <span data-age-from="' + esc(x.assessed_at || '') + '"></span> · trigger ' + esc(human(x.trigger)) + '</div></div>' +
+      valuationRows(fr.valuation) +
       '<div class="pr-xav-ev">' +
         '<div><span class="label">Probability</span>' + pct(ev.probability) + '<small class="muted">' + esc(ev.source || '—') + '</small></div>' +
         '<div><span class="label">Evidence</span>' + chip(esc(human(ev.state)), ev.state === 'FRESH_CURRENT_PROBABILITY' ? 'green' : 'amber') + '<small class="muted">' + esc(age(ev.age_now_s)) + ' old now</small></div>' +
-        '<div><span class="label">Current EV</span>' + usd(x.current_ev_usd) + '<small class="muted" title="' + esc(x.current_ev_basis || '') + '">HOLD value</small></div>' +
+        '<div><span class="label">Current EV</span>' + usd(x.current_ev_usd, 'NOT_CURRENT: ' + st) + '<small class="muted" title="' + esc(x.current_ev_basis || '') + '">HOLD value' + (cur ? '' : (num(x.hold_value_at_assessment_usd) !== null ? ' · $' + x.hold_value_at_assessment_usd.toFixed(2) + ' at assessment (not current)' : '')) + '</small></div>' +
         '<div><span class="label">Entry EV</span>' + usd(x.entry_ev_usd, 'no entry thesis') + '<small class="muted">at entry</small></div>' +
       '</div>' +
       (warn ? '<ul class="pr-xav-warn">' + warn + '</ul>' : '') +
       '<div class="pr-sub"><span class="label">Alternatives, ranked</span><ol class="pr-alts">' + altRows + '</ol></div>' +
-      (why ? '<div class="pr-why-lead"><span class="label">Why the leader wins</span><p>' + esc(why.text) + '</p>' + (num(why.margin_over_runner_up) !== null ? '<small class="muted">margin over runner-up $' + why.margin_over_runner_up.toFixed(2) + ' · ' + esc(why.source) + '</small>' : '<small class="muted">' + esc(why.source) + '</small>') + '</div>' : '') +
+      (why ? '<div class="pr-why-lead' + (cur ? '' : ' pr-why-none') + '"><span class="label">' + (cur ? 'Why the leader wins' : 'Why there is no current recommendation') + '</span><p>' + esc(why.text) + '</p>' + (num(why.margin_over_runner_up) !== null ? '<small class="muted">margin over runner-up $' + why.margin_over_runner_up.toFixed(2) + ' · ' + esc(why.source) + '</small>' : '<small class="muted">' + esc(why.source) + '</small>') + '</div>' : '') +
       '<div class="pr-sub pr-next"><div><span class="label">Next scheduled review</span><b data-due="' + esc(x.next_review_due_at || '') + '"></b><small class="muted">' + esc(when(x.next_review_due_at)) + '</small></div>' +
         '<div><span class="label">Next trigger</span><small>' + esc((nt.events || []).join(' · ') || 'scheduled backstop only') + '</small></div></div>' +
       (wait ? '<div class="pr-sub"><span class="label">Waiting for</span><ul class="pr-wait">' + wait + '</ul></div>' : '') +
