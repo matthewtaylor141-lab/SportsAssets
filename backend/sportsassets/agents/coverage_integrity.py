@@ -1160,6 +1160,11 @@ VENUE_TOKENS_SQL = """
 # (requested / served / budget-dropped with its reason and promised slot /
 # skipped, cycles since served) and one budget row per cycle (calls made
 # against the declared budget). Read-only here; never raises.
+#
+# THE COLLECTOR IS THE LEASE HOLDER. Only rows written under the collector's
+# single-writer lease (`writer_lease = 'HELD'`) are the collector's receipts;
+# a cycle run without the lease (a test harness, a one-off run) is counted
+# apart (`cycles_without_lease`) and never mixed into the desk's figures.
 
 COVERAGE_RECEIPTS_WINDOW_S = 86400.0
 COVERAGE_RECEIPTS_SQL = """
@@ -1194,21 +1199,27 @@ COVERAGE_RECEIPTS_SQL = """
            coalesce(sum(credits_charged), 0) AS credits
       FROM collector_coverage_receipts
      WHERE scope = 'COMPETITION'
+       AND writer_lease = 'HELD'
        AND cycle_at > to_timestamp($1) - make_interval(secs => $2)
        AND cycle_at <= to_timestamp($1)
      GROUP BY competition
 """
 COVERAGE_CYCLES_SQL = """
-    SELECT count(*) AS cycles,
-           count(*) FILTER (WHERE calls_made > calls_budget) AS over_budget,
-           max(calls_made) AS max_calls_made,
-           max(calls_budget) AS calls_budget,
-           coalesce(sum(credits_spent), 0) AS credits_spent,
-           extract(epoch FROM max(cycle_at)) AS last_cycle_at,
-           (array_agg(cycle_id ORDER BY cycle_at DESC, id DESC))[1]
-             AS last_cycle_id,
-           (array_agg(detail->>'writer_lease' ORDER BY cycle_at DESC, id DESC))[1]
-             AS writer_lease
+    SELECT count(*) FILTER (WHERE writer_lease = 'HELD') AS cycles,
+           count(*) FILTER (WHERE writer_lease = 'HELD'
+                              AND calls_made > calls_budget) AS over_budget,
+           max(calls_made) FILTER (WHERE writer_lease = 'HELD')
+             AS max_calls_made,
+           max(calls_budget) FILTER (WHERE writer_lease = 'HELD')
+             AS calls_budget,
+           coalesce(sum(credits_spent) FILTER (WHERE writer_lease = 'HELD'),
+                    0) AS credits_spent,
+           extract(epoch FROM max(cycle_at) FILTER (
+               WHERE writer_lease = 'HELD')) AS last_cycle_at,
+           (array_agg(cycle_id ORDER BY cycle_at DESC, id DESC) FILTER (
+               WHERE writer_lease = 'HELD'))[1] AS last_cycle_id,
+           count(*) FILTER (WHERE writer_lease <> 'HELD')
+             AS cycles_without_lease
       FROM collector_coverage_receipts
      WHERE scope = 'CYCLE'
        AND cycle_at > to_timestamp($1) - make_interval(secs => $2)
@@ -1220,6 +1231,7 @@ COVERAGE_LAST_CYCLE_SQL = """
            venue_events_in_horizon
       FROM collector_coverage_receipts
      WHERE scope = 'COMPETITION' AND cycle_id = $1
+       AND writer_lease = 'HELD'
      ORDER BY priority_rank NULLS LAST, competition
 """
 #: The receipts that are a BUDGET DROP (collector_coverage.BUDGET_DROPPED).
@@ -1247,7 +1259,10 @@ async def collector_receipts(conn, *, now: float,
     out: dict[str, Any] = {
         "read": False, "window_s": window_s,
         "source": "collector_coverage_receipts (migration 248)",
-        "by_competition": {}, "cycles": None, "last_cycle": None}
+        "lease": "only rows written under the collector's single-writer "
+                 "lease (writer_lease = 'HELD')",
+        "by_competition": {}, "cycles": None, "last_cycle": None,
+        "cycles_without_lease": None}
     if not await _regclass(conn, "collector_coverage_receipts"):
         out["why"] = "MIGRATION_248_NOT_APPLIED"
         return out
@@ -1280,6 +1295,10 @@ async def collector_receipts(conn, *, now: float,
             "last_cycle_at": _num_or_none(r["last_cycle_at"]),
             "last_fetched_at": _num_or_none(r["last_fetched_at"]),
             "credits": float(r["credits"] or 0.0)}
+    # cycles run WITHOUT the writer lease in the window: recorded, named,
+    # and kept out of every figure above
+    out["cycles_without_lease"] = (0 if cyc is None
+                                   else int(cyc["cycles_without_lease"] or 0))
     if cyc is not None and int(cyc["cycles"] or 0) > 0:
         out["cycles"] = {
             "cycles": int(cyc["cycles"]),
@@ -1289,7 +1308,8 @@ async def collector_receipts(conn, *, now: float,
             "credits_spent": float(cyc["credits_spent"] or 0.0),
             "last_cycle_at": _num_or_none(cyc["last_cycle_at"]),
             "last_cycle_id": cyc["last_cycle_id"],
-            "writer_lease": cyc["writer_lease"]}
+            "writer_lease": "HELD",
+            "cycles_without_lease": out["cycles_without_lease"]}
         out["last_cycle"] = [
             {"competition": r["competition"], "planned": r["planned"],
              "receipt": r["receipt"], "why": r["why"],
@@ -1452,7 +1472,8 @@ async def league_status_table(conn, *, rows: list, day: _dt.date, tz: str,
                 # rows (calls made against the declared budget, any cycle
                 # over it) and per-competition 24 h counts
                 receipts={k: (coll.get("receipts") or {}).get(k) for k in (
-                    "read", "why", "window_s", "cycles", "by_competition")}),
+                    "read", "why", "window_s", "cycles", "by_competition",
+                    "cycles_without_lease")}),
             "venue_read": None if not isinstance(venue, str) else venue}
 
 

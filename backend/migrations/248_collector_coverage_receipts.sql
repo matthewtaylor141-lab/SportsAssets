@@ -45,9 +45,19 @@
 --   scope CANDIDATE    one row per provider event the per-cycle evaluation
 --                      bound (MAX_PER_CYCLE) deferred, with its slot
 --
+-- writer_lease, on EVERY row: whether the writing connection held the
+-- collector's single-writer lease (the session advisory lock `run` takes
+-- before any cycle) -- HELD / NOT_HELD / UNREAD:<error>.
+--
 -- The rolling 24 h sum of credits_charged is the daily envelope's ledger and
 -- the latest FETCHED row per competition its last-served instant: the
--- collector reads both back each cycle, so a restart resets nothing.
+-- collector reads both back each cycle, so a restart resets nothing. ONLY
+-- THE LEASE HOLDER'S ROWS (writer_lease = 'HELD') are that memory: the
+-- schedule and the envelope belong to the one scheduled collector, and a
+-- cycle run without the lease -- a test harness on a shared database, an
+-- operator's one-off run -- must neither spend the collector's envelope nor
+-- mark a competition served. Such rows stay recorded and are counted apart
+-- on the desk.
 -- coverage_integrity reads the same rows for league_status.collector, so the
 -- operations desk shows real budget drops, not an overwritten heartbeat.
 --
@@ -60,6 +70,7 @@ CREATE TABLE IF NOT EXISTS collector_coverage_receipts (
     cycle_id            text        NOT NULL,
     cycle_at            timestamptz NOT NULL,
     writer              text,
+    writer_lease        text        NOT NULL,
     scheduler_version   text        NOT NULL,
     scope               text        NOT NULL,
     competition         text        NOT NULL,
@@ -95,6 +106,8 @@ CREATE TABLE IF NOT EXISTS collector_coverage_receipts (
 
     CONSTRAINT collector_coverage_scope_ck CHECK (scope IN
         ('CYCLE', 'COMPETITION', 'CANDIDATE')),
+    CONSTRAINT collector_coverage_writer_lease_ck CHECK (
+        writer_lease IN ('HELD', 'NOT_HELD') OR writer_lease LIKE 'UNREAD:%'),
     -- a CANDIDATE row names its provider event; no other row does
     CONSTRAINT collector_coverage_candidate_names_event_ck CHECK (
         (scope = 'CANDIDATE') = (provider_event_id IS NOT NULL)),
@@ -161,6 +174,10 @@ CREATE INDEX IF NOT EXISTS collector_coverage_cycle_at_ix
     ON collector_coverage_receipts (cycle_at);
 CREATE INDEX IF NOT EXISTS collector_coverage_competition_ix
     ON collector_coverage_receipts (competition, cycle_at);
+-- the schedule's memory and the desk read the lease holder's rows
+CREATE INDEX IF NOT EXISTS collector_coverage_lease_cycle_at_ix
+    ON collector_coverage_receipts (cycle_at)
+    WHERE writer_lease = 'HELD';
 
 -- APPEND-ONLY: a receipt is what the cycle decided and spent; it is never
 -- rewritten after the fact.

@@ -87,11 +87,25 @@ def _reset_memory():
                           waiting_known=False)
 
 
+async def _take_lease(conn):
+    """THE COLLECTOR'S SINGLE-WRITER LEASE on this connection -- the session
+    advisory lock `run` takes before any cycle -- so what this connection
+    writes is the collector's own receipts (writer_lease HELD)."""
+    assert await conn.fetchval("SELECT pg_try_advisory_lock($1)",
+                               loop.LOCK_KEY), (
+        "another session holds the collector's writer lock on the test "
+        "database")
+
+
+async def _drop_lease(conn):
+    await conn.fetchval("SELECT pg_advisory_unlock($1)", loop.LOCK_KEY)
+
+
 INSERT = ("INSERT INTO collector_coverage_receipts (cycle_id, cycle_at, "
-          "scheduler_version, scope, competition, planned, receipt, "
-          "next_slot_at, calls_budget, calls_made, credits_charged, "
-          "credits_basis) VALUES ($1, now(), 'V', $2, $3, $4, $5, $6, $7, $8, "
-          "$9, $10)")
+          "writer_lease, scheduler_version, scope, competition, planned, "
+          "receipt, next_slot_at, calls_budget, calls_made, credits_charged, "
+          "credits_basis) VALUES ($1, now(), 'HELD', 'V', $2, $3, $4, $5, $6, "
+          "$7, $8, $9, $10)")
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -139,6 +153,16 @@ async def test_migration_248_states_its_invariants_in_the_schema():
         await _expect(conn, asyncpg.UniqueViolationError, INSERT, "c1",
                       "COMPETITION", NCAAF, "SCHEDULED", "FETCH_FAILED",
                       None, None, None, 0.0, None)
+        # every row says whether its writer held the collector's lease, and
+        # says it in one of three words
+        await _expect(conn, asyncpg.NotNullViolationError,
+                      INSERT.replace("'HELD'", "NULL"), "c1", "COMPETITION",
+                      MLB, "SCHEDULED", "FETCHED", None, None, None, 3.0,
+                      cov.COST_MEASURED)
+        await _expect(conn, asyncpg.CheckViolationError,
+                      INSERT.replace("'HELD'", "'MAYBE'"), "c1",
+                      "COMPETITION", MLB, "SCHEDULED", "FETCHED", None, None,
+                      None, 3.0, cov.COST_MEASURED)
         # APPEND-ONLY
         for sql in ("UPDATE collector_coverage_receipts SET why = 'x'",
                     "DELETE FROM collector_coverage_receipts",
@@ -208,70 +232,88 @@ async def test_the_writer_persists_the_cycle_and_reads_its_memory_back():
         deferred = [r for r in plan["receipts"]
                     if r["planned"] == cov.DEFERRED_TO_SLOT]
         assert deferred, "the plan must defer something on this board"
-        got = await loop._persist_coverage_receipts(
-            conn, cycle_id="cyc-1", cycle_at=now, plan=plan,
-            candidates=[{"sport_key": NCAAF, "family": "football",
-                         "token": "cfb", "event_id": "evt-9",
-                         "queue_position": 41, "feed_covered": False,
-                         "commence_epoch": now + HOUR,
-                         "next_slot_at": now + CYCLE,
-                         "deferred_since": now, "why": "BOUND"}])
-        assert got["ok"] is True, got
-        assert got["rows"] == 1 + len(plan["receipts"]) + 1
-        assert got["writer_lease"] == "NOT_HELD"
-        cyc = await conn.fetchrow(
-            "SELECT * FROM collector_coverage_receipts WHERE scope = 'CYCLE'")
-        assert (cyc["calls_budget"], cyc["calls_made"]) == (4, 4)
-        assert cyc["credits_spent"] == 3.0 + 3 * cov.CREDITS_PER_FETCH_ESTIMATE
-        rows = {r["competition"]: r for r in await conn.fetch(
-            "SELECT * FROM collector_coverage_receipts "
-            "WHERE scope = 'COMPETITION'")}
-        assert rows[fetched[0]]["receipt"] == "FETCHED"
-        assert rows[fetched[0]]["credits_basis"] == cov.COST_MEASURED
-        assert rows[fetched[1]]["receipt"] == "FETCH_FAILED"
-        for r in deferred:
-            row = rows[r["key"]]
-            assert row["receipt"] == "DEFERRED_TO_SLOT"
-            assert row["next_slot_at"].timestamp() > now
-            assert "metered calls" in row["why"]
-        assert rows["soccer_usa_mls"]["receipt"] == \
-            "SKIPPED_NO_VENUE_EVENT_IN_HORIZON"
-        cand = await conn.fetchrow(
-            "SELECT * FROM collector_coverage_receipts "
-            "WHERE scope = 'CANDIDATE'")
-        assert cand["provider_event_id"] == "evt-9"
+        spend = 3.0 + 3 * cov.CREDITS_PER_FETCH_ESTIMATE
 
-        # THE MEMORY, READ BACK FROM THE RECEIPTS (a fresh process)
-        _reset_memory()
-        mem = await loop.coverage_memory(conn, now=time.time())
-        assert mem["source"] == "RECEIPTS"
-        # a failed fetch had its turn: it is LAST SERVED for the schedule
-        assert set(mem["last_served"]) == set(fetched)
-        assert mem["spent_24h"] == pytest.approx(
-            3.0 + 3 * cov.CREDITS_PER_FETCH_ESTIMATE)
-        assert mem["measured_cost"] == 3.0
-        never = [r["key"] for r in deferred
-                 if r.get("waiting_since") is not None]
-        assert never and set(never) <= set(mem["waiting_since"])
+        # ── A CYCLE RUN WITHOUT THE COLLECTOR'S LEASE (a harness, a one-off
+        # run): recorded, by name, and NOT the collector's memory ──────────
+        assert await loop._writer_lease(conn) == "NOT_HELD"
+        stray = await loop._persist_coverage_receipts(
+            conn, cycle_id="cyc-0", cycle_at=now - CYCLE, plan=plan)
+        assert stray["ok"] is True and stray["writer_lease"] == "NOT_HELD"
+        assert await conn.fetchval(
+            "SELECT count(*) FROM collector_coverage_receipts WHERE "
+            "cycle_id = 'cyc-0' AND writer_lease <> 'NOT_HELD'") == 0
+        mem0 = await loop.coverage_memory(conn, now=time.time())
+        assert mem0["writer_lease"] == "NOT_HELD"
+        assert mem0["last_served"] == {} and mem0["spent_24h"] == 0
+        assert mem0["measured_cost"] is None and mem0["waiting_since"] == {}
 
-        # THE LEASE: the same writer, holding the collector's advisory lock
-        assert await conn.fetchval("SELECT pg_try_advisory_lock($1)",
-                                   loop.LOCK_KEY)
+        # ── THE COLLECTOR: the same writer, holding the lease ────────────
+        await _take_lease(conn)
         try:
-            assert await loop._writer_lease(conn) == "HELD"
-            plan2 = cov.plan(_comps(now + CYCLE), now=now + CYCLE,
-                             cycle_s=CYCLE)
-            got2 = await loop._persist_coverage_receipts(
-                conn, cycle_id="cyc-2", cycle_at=now + CYCLE, plan=plan2)
-            assert got2["writer_lease"] == "HELD"
-            lease = await conn.fetchval(
-                "SELECT detail->>'writer_lease' FROM "
-                "collector_coverage_receipts WHERE scope = 'CYCLE' "
-                "AND cycle_id = 'cyc-2'")
-            assert lease == "HELD"
+            got = await loop._persist_coverage_receipts(
+                conn, cycle_id="cyc-1", cycle_at=now, plan=plan,
+                candidates=[{"sport_key": NCAAF, "family": "football",
+                             "token": "cfb", "event_id": "evt-9",
+                             "queue_position": 41, "feed_covered": False,
+                             "commence_epoch": now + HOUR,
+                             "next_slot_at": now + CYCLE,
+                             "deferred_since": now, "why": "BOUND"}])
+            assert got["ok"] is True, got
+            assert got["rows"] == 1 + len(plan["receipts"]) + 1
+            assert got["writer_lease"] == "HELD"
+            assert await conn.fetchval(
+                "SELECT count(*) FROM collector_coverage_receipts WHERE "
+                "cycle_id = 'cyc-1' AND writer_lease <> 'HELD'") == 0
+            cyc = await conn.fetchrow(
+                "SELECT * FROM collector_coverage_receipts "
+                "WHERE scope = 'CYCLE' AND cycle_id = 'cyc-1'")
+            assert (cyc["calls_budget"], cyc["calls_made"]) == (4, 4)
+            assert cyc["credits_spent"] == spend
+            rows = {r["competition"]: r for r in await conn.fetch(
+                "SELECT * FROM collector_coverage_receipts "
+                "WHERE scope = 'COMPETITION' AND cycle_id = 'cyc-1'")}
+            assert rows[fetched[0]]["receipt"] == "FETCHED"
+            assert rows[fetched[0]]["credits_basis"] == cov.COST_MEASURED
+            assert rows[fetched[1]]["receipt"] == "FETCH_FAILED"
+            for r in deferred:
+                row = rows[r["key"]]
+                assert row["receipt"] == "DEFERRED_TO_SLOT"
+                assert row["next_slot_at"].timestamp() > now
+                assert "metered calls" in row["why"]
+            assert rows["soccer_usa_mls"]["receipt"] == \
+                "SKIPPED_NO_VENUE_EVENT_IN_HORIZON"
+            cand = await conn.fetchrow(
+                "SELECT * FROM collector_coverage_receipts "
+                "WHERE scope = 'CANDIDATE'")
+            assert cand["provider_event_id"] == "evt-9"
+
+            # THE MEMORY, READ BACK FROM THE RECEIPTS (a fresh process on the
+            # lease): the collector's cycle only -- cyc-0's identical spend is
+            # not in it
+            _reset_memory()
+            mem = await loop.coverage_memory(conn, now=time.time())
+            assert mem["source"] == "RECEIPTS"
+            assert mem["writer_lease"] == "HELD"
+            # a failed fetch had its turn: it is LAST SERVED for the schedule
+            assert set(mem["last_served"]) == set(fetched)
+            assert all(abs(v - now) < 1.0
+                       for v in mem["last_served"].values())
+            assert mem["spent_24h"] == pytest.approx(spend)
+            assert mem["measured_cost"] == 3.0
+            never = [r["key"] for r in deferred
+                     if r.get("waiting_since") is not None]
+            assert never and set(never) <= set(mem["waiting_since"])
         finally:
-            await conn.fetchval("SELECT pg_advisory_unlock($1)",
-                                loop.LOCK_KEY)
+            await _drop_lease(conn)
+
+        # A READER WITHOUT THE LEASE STILL SEES THE COLLECTOR'S SPEND: it is
+        # never told the envelope is emptier than the collector made it
+        _reset_memory()
+        mem2 = await loop.coverage_memory(conn, now=time.time())
+        assert mem2["writer_lease"] == "NOT_HELD"
+        assert mem2["spent_24h"] == pytest.approx(spend)
+        assert set(mem2["last_served"]) == set(fetched)
     finally:
         _reset_memory()
         await _close(conn, tx)
@@ -331,12 +373,14 @@ async def test_a_saturday_through_the_database_serves_ncaaf_every_cycle():
     before every cycle: a restart each time), persists it, and the next
     cycle reads it back. NCAAF is fetched in every cycle; MLB, the NFL and
     the soccer competitions alongside it; never more than four calls; and
-    coverage_integrity's reader reports exactly that."""
+    coverage_integrity's reader reports exactly that. The cycles run on the
+    collector's single-writer lease, as `run` drives them."""
     conn, tx, schema = await _isolated()
     n = 12
     t_end = time.time() - 5.0
     base = t_end - (n - 1) * CYCLE
     slate = _slate(base)
+    await _take_lease(conn)
     try:
         for k in range(n):
             now = base + k * CYCLE
@@ -381,9 +425,11 @@ async def test_a_saturday_through_the_database_serves_ncaaf_every_cycle():
         cyc = rec["cycles"]
         assert cyc["cycles"] == n and cyc["over_budget"] == 0
         assert cyc["max_calls_made"] <= 4 == cyc["calls_budget"]
-        assert cyc["writer_lease"] == "NOT_HELD"
+        assert cyc["writer_lease"] == "HELD"
+        assert rec["cycles_without_lease"] == 0
     finally:
         _reset_memory()
+        await _drop_lease(conn)
         await _close(conn, tx)
 
 
@@ -397,7 +443,9 @@ async def test_league_status_names_the_budget_drop_from_the_receipts():
     -- persisted for six cycles: coverage_integrity's collector reads the
     receipts (not the heartbeat), names which competitions the latest cycle
     budget-dropped with the reason and the promised slot, and a league with
-    no provider events today says how often it was dropped."""
+    no provider events today says how often it was dropped. A cycle run
+    WITHOUT the collector's lease in the same window is counted apart and
+    changes none of it."""
     conn, tx, schema = await _isolated()
     n = 6
     t_end = time.time() - 5.0
@@ -406,6 +454,7 @@ async def test_league_status_names_the_budget_drop_from_the_receipts():
             "americanfootball_x3", "americanfootball_x4"]
     last, waiting = {}, {}
     try:
+        await _take_lease(conn)
         for k in range(n):
             now = base + k * CYCLE
             comps = [cov.competition(key=key, family="football",
@@ -425,10 +474,26 @@ async def test_league_status_names_the_budget_drop_from_the_receipts():
                        if r.get("waiting_since") is not None}
             await loop._persist_coverage_receipts(
                 conn, cycle_id="ovl-%d" % k, cycle_at=now, plan=plan)
+        await _drop_lease(conn)
         dropped_last = [r["key"] for r in plan["receipts"]
                         if r["planned"] == cov.DEFERRED_TO_SLOT]
         assert len(dropped_last) == 2
+        # A STRAY, LEASE-LESS CYCLE inside the window that fetched the two
+        # the collector dropped: recorded, and never read as the collector's
+        stray = cov.plan([cov.competition(key=key, family="football",
+                                          listed=True, active=True,
+                                          events_in_horizon=5,
+                                          next_start=t_end + HOUR)
+                          for key in dropped_last], now=t_end - 1.0,
+                         cycle_s=CYCLE)
+        for key, _ in stray["fetch_order"]:
+            cov.settle(stray, key, ok=True, at=t_end, credits=3.0,
+                       basis=cov.COST_MEASURED)
+        w = await loop._persist_coverage_receipts(
+            conn, cycle_id="stray", cycle_at=t_end - 1.0, plan=stray)
+        assert w["ok"] and w["writer_lease"] == "NOT_HELD"
         coll = await C.collector_selection(conn, now=t_end + 1.0)
+        assert coll["receipts"]["cycles_without_lease"] == 1
         assert coll["source"] == "COVERAGE_RECEIPTS" and coll["fresh"]
         assert sorted(coll["budget_dropped"]) == sorted(dropped_last)
         assert coll["budget"] == 4
@@ -440,8 +505,10 @@ async def test_league_status_names_the_budget_drop_from_the_receipts():
         by = coll["receipts"]["by_competition"]
         for key in keys:
             assert by[key]["served"] >= n // 2, (key, by[key])
+            assert by[key]["cycles"] == n, (key, by[key])
             assert by[key]["starvation_bound_cycles"] == \
                 1 + -(-(len(keys) - 1) // 4)
+        assert coll["receipts"]["cycles"]["cycles"] == n
         # the league status of a dropped league with no provider events
         league = dropped_last[0]
         row = {C.COLUMN[s]: 0 for s in C.STAGES}
@@ -464,7 +531,9 @@ async def test_league_status_names_the_budget_drop_from_the_receipts():
         assert ncaaf["collector_receipt"]["cycles"] == n
         assert table["collector"]["receipts"]["cycles"]["over_budget"] == 0
         assert table["collector"]["source"] == "COVERAGE_RECEIPTS"
+        assert table["collector"]["receipts"]["cycles_without_lease"] == 1
     finally:
+        await _drop_lease(conn)
         await _close(conn, tx)
 
 
@@ -477,8 +546,10 @@ async def test_a_skipped_league_says_it_had_no_venue_event_in_the_horizon():
             key=BRB, family="soccer", listed=True, active=True,
             events_in_horizon=0, next_start=now + 40 * HOUR,
             feed_covered=True)], now=now, cycle_s=CYCLE)
+        await _take_lease(conn)
         await loop._persist_coverage_receipts(conn, cycle_id="s1",
                                               cycle_at=now, plan=plan)
+        await _drop_lease(conn)
         coll = await C.collector_selection(conn, now=now + 1.0)
         row = {C.COLUMN[s]: 0 for s in C.STAGES}
         row.update({c: 0 for c in C.EXTRA_COLUMNS})

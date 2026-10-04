@@ -657,6 +657,18 @@ async def test_every_nfl_game_ends_in_a_recorded_named_outcome(monkeypatch):
         assert cc["spent_this_cycle"] <= cc["envelope"]["cycle_budget"], cc
         assert {r["key"]: r["final"] for r in cc["competitions"]}[NFL] == \
             "FETCHED", cc
+        # ...and the cycle APPENDED its receipts (migration 248) under the
+        # outcome rows' cycle id. This harness drives `cycle` without the
+        # collector's single-writer lease, so the rows say NOT_HELD and the
+        # collector's schedule memory is untouched by them.
+        rec = out["collector_coverage_receipts"]
+        assert rec["ok"] is True and rec["writer_lease"] == "NOT_HELD", rec
+        assert rec["rows"] == 1 + len(cc["competitions"]), rec
+        assert await conn.fetchval(
+            "SELECT receipt FROM collector_coverage_receipts WHERE "
+            "cycle_id = $1 AND scope = 'COMPETITION' AND competition = $2",
+            rec["cycle_id"], NFL) == "FETCHED"
+        assert NFL not in loop._COVERAGE["last_served"]
         assert NFL in calls["odds"]
         step = out["funnel_by_provider_sport"][NFL]
         assert step["family"] == "football"
