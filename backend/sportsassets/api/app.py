@@ -507,6 +507,22 @@ async def lifespan(_: FastAPI):
             log.info("intel shadow runner armed (advisory lock per cycle)")
     except Exception:  # noqa: BLE001 -- the API must serve regardless
         log.exception("intel shadow runner failed to arm")
+    # ── THE TWIN / PROFITABILITY RESEARCH RUNNER (migration 219) ─────
+    # Economic digital twin (counterfactual replay of the recorded
+    # stream), cross-sport transfer research, agent financial scorecards,
+    # the evidence ladder, kill-switch RECOMMENDATIONS and evals, every
+    # CYCLE_S. RESEARCH: it writes only its own twin_* tables; no venue,
+    # order, sizing, control or activation authority. Failure-isolated,
+    # bounded, advisory-locked; POS_TWIN=off is a kill switch. Without
+    # migration 219 it idles.
+    twin_task = None
+    try:
+        from ..twin import runner as _TWIN
+        if _TWIN.enabled():
+            twin_task = asyncio.create_task(_TWIN.run(_cap_pool))
+            log.info("twin research runner armed (advisory lock per cycle)")
+    except Exception:  # noqa: BLE001 -- the API must serve regardless
+        log.exception("twin research runner failed to arm")
     try:
         yield
     finally:
@@ -520,7 +536,7 @@ async def lifespan(_: FastAPI):
                              ext_task, rn1x_model_task, trim_task,
                              poller_task, capability_task, slack_task,
                              karen_task, peer_task, execmirror_task,
-                             intel_task,
+                             intel_task, twin_task,
                              *watchdog_tasks)
                  if t is not None]
         for task in tasks:
@@ -630,6 +646,15 @@ try:
     app.include_router(_command_intel_router)
 except ImportError:
     log.warning("intel: api.command_intel not loaded", exc_info=True)
+# ── THE TWIN AND PROFITABILITY-EVIDENCE READS (migration 219):
+# /api/command/twin, /twin/scenarios/{id}, /research/transfer,
+# /profitability/{scorecards,evidence-ladder,kill-switches}, /evals.
+# GET only, COMMAND auth. RESEARCH: no route here writes or has authority.
+try:
+    from .command_twin import router as _command_twin_router
+    app.include_router(_command_twin_router)
+except ImportError:
+    log.warning("twin: api.command_twin not loaded", exc_info=True)
 from .agent_capabilities import router as _capabilities_router
 app.include_router(_capabilities_router)
 from .slack_agents import router as _slack_agents_router

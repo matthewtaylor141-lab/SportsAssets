@@ -677,3 +677,6 @@ tests/test_karen_persona_and_peer_response.py
 # a census that files a requested league honestly, college names that map
 # exactly or refuse by name, captured football settlement terms.
 tests/test_ncaaf_identity_settlement_and_coverage.py
+tests/test_twin_authority.py
+tests/test_twin_replay.py
+tests/test_twin_profitability.py
