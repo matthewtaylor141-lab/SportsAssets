@@ -35,7 +35,10 @@ DSN = os.environ.get("RN1X_TEST_DSN", "")
 pg = pytest.mark.skipif(not DSN, reason="needs RN1X_TEST_DSN")
 
 STDLIB = {"__future__", "json", "time", "datetime", "typing"}
-ALLOWED = {"fastapi", "sportsassets.api.agents_core"}
+ALLOWED = {"fastapi", "sportsassets.api.agents_core",
+           # the read-time freshness truth of Xavier's recommendation (owner
+           # P0, 2026-10-04): pure, stdlib only, imports nothing of ours
+           "sportsassets.xavier_freshness"}
 FORBIDDEN = ("execmirror", "kalshi", "pmus", "venue", "clob", "executor",
              "execution", "ledger", "simulator", "bettor_funded", "funded",
              "paper_", "smalllive", "order", "submit", "live_",
@@ -78,7 +81,8 @@ def test_the_floor_imports_no_order_venue_ledger_or_paper_module():
         top = imp.split(".")[0]
         if top == "sportsassets":
             mod = imp if imp.count(".") <= 2 else imp.rsplit(".", 1)[0]
-            assert mod in ALLOWED or imp in {
+            assert mod in ALLOWED or imp.rsplit(".", 1)[0] in (
+                "sportsassets.xavier_freshness",) or imp in {
                 "sportsassets.api.agents_core._pool",
                 "sportsassets.api.agents_core.require_read"}, imp
         else:

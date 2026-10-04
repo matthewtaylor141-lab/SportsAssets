@@ -267,7 +267,12 @@ async def test_a_row_links_decision_paper_fill_mirror_order_and_venue_fills():
         assert isinstance(x["paper_first_fill_to_live_ack_ms"], int)
         # management
         assert m["xavier_paper"]["handoff_id"] == hid
-        assert m["xavier_paper"]["latest_recommendation"] == "PASSIVE_EXIT"
+        # the seeded review carries no probability evidence: its stored
+        # word is RECORDED and the recommendation reads STALE now (owner P0)
+        assert m["xavier_paper"]["latest_recorded_recommendation"] == \
+            "PASSIVE_EXIT"
+        assert m["xavier_paper"]["latest_recommendation"] == "STALE"
+        assert m["xavier_paper"]["latest_recommendation_state"] == "STALE"
         assert m["xavier_actual"]["present"] is False
         assert m["xavier_actual"]["handoff_id"] is None
         assert m["xavier_actual"]["why_unavailable"].startswith("unavailable")
@@ -431,9 +436,14 @@ async def test_the_operating_view_on_one_complete_chain():
         assert pr["paper"]["standing_resting_qty"] == pytest.approx(1702)
         assert pr["paper"]["standing_resting_orders"] == 1
         assert pr["paper"]["filled_protection_qty"] == pytest.approx(1000)
-        assert pr["paper"]["unprotected_qty"] == pytest.approx(0)
+        # C28 P0: the 1,702 RESTING never reduce the unprotected quantity --
+        # the position protected is 1,702 held + 1,000 already sold by the
+        # filled protective sale; only the 1,000 FILLED are protection
+        assert pr["paper"]["position_qty"] == pytest.approx(2702)
+        assert pr["paper"]["unprotected_qty"] == pytest.approx(1702)
         assert pr["actual"]["held_qty"] == pytest.approx(3)
         assert pr["actual"]["standing_resting_qty"] == pytest.approx(3)
+        assert pr["actual"]["unprotected_qty"] == pytest.approx(3)
         assert pr["actual"]["filled_protection_qty"] == 0.0
         assert pr["actual"]["pending_submission_qty"] == 0.0
         assert "NOT filled protection" in pr["rule"]
@@ -481,6 +491,7 @@ async def test_the_operating_view_on_one_complete_chain():
         pr2 = r2["management"]["protection"]["actual"]
         assert pr2["standing_resting_qty"] == 0.0 and pr2["filled_protection_qty"] == 3.0
         assert pr2["held_qty"] == 0.0
+        assert pr2["position_qty"] == 3.0 and pr2["unprotected_qty"] == 0.0
         a2 = r2["actual"]
         assert a2["group_pnl_kind"] == "REALIZED"
         assert a2["group_pnl_usd"] == pytest.approx(-1.68 - 0.06 + 1.80 - 0.03)
@@ -810,7 +821,7 @@ def test_the_route_answers_an_authorised_reader_and_refuses_bad_filters(client, 
     r = client.get("/api/command/small-live?view=kalshi", headers=auth)
     assert r.status_code == 200, r.text
     body = r.json()
-    assert body["title"] == "Small Live · Paper vs Actual"
+    assert body["title"] == "Legacy Mirror Validation · Paper vs Actual"
     assert body["rows"] == [] and body["kalshi"]["status"] == "NOT_CONNECTED"
     assert r.headers["cache-control"] == "no-store"
     assert client.get("/api/command/small-live?view=betfair", headers=auth).status_code == 422

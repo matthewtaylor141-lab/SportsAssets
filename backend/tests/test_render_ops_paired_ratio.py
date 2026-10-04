@@ -24,8 +24,9 @@ import re
 from pathlib import Path
 
 from tests import test_render_ops_hourly as hourly
+from tests.workflow_source import render_ops_file as _render_ops_file
 
-YML = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "render-ops.yml"
+YML = _render_ops_file()
 SETTLED = "b.state = 'closed' AND b.settled_pnl IS NOT NULL"
 WINDOW = ("FROM mirror_books b WHERE b.whale = 'rn1' AND (b.opened_at >= now() - interval '24 hours'"
           " OR b.closed_at >= now() - interval '24 hours')")

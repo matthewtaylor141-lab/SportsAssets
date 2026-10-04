@@ -44,11 +44,12 @@ from datetime import timedelta
 import pytest
 
 from sportsassets.workers import mirror_live as ml
+from tests.workflow_source import render_ops_file as _render_ops_file
 
 DSN_BASE = os.environ.get(
     "S1_SQL_PIN_DSN",
     "postgresql://sportsassets:sportsassets@localhost:5432/postgres")
-RENDER_OPS = pathlib.Path(__file__).resolve().parents[2] / ".github" / "workflows" / "render-ops.yml"
+RENDER_OPS = _render_ops_file()
 
 # the columns the loss sum and the preset read, typed as 047 types them
 DDL = """

@@ -77,6 +77,7 @@ from typing import Any
 
 from .. import bettor_paper_ledger as L
 from .. import bettor_paper_simulator as SIM
+from .. import xavier_freshness as XF
 from . import derek_policy as DP
 
 VERSION = "PAPER_XAVIER_V1"
@@ -84,6 +85,15 @@ T_FIRST = "FIRST_FILL"
 T_FILL = "FILL_EVENT"
 T_MARKET = "MARKET_EVENT"
 T_BACKSTOP = "SCHEDULED_BACKSTOP"
+#: THE REQUEUE TRIGGERS ADDED FOR THE FRESHNESS TRUTH (owner P0; migration
+#: 222 admits them on paper_xavier_reviews): a management order of the group
+#: reached a terminal state (protection changed / cancelled), a newer stored
+#: valuation of the contract, the event started, the last review's fresh
+#: probability expired (source stamp + the existing limit).
+T_ORDER = "ORDER_EVENT"
+T_VALUATION = "VALUATION_CHANGE"
+T_GAME = "GAME_STATE_CHANGE"
+T_EXPIRY = "FRESHNESS_EXPIRY"
 
 A_HOLD, A_EXIT, A_REDUCE = "HOLD", "EXIT", "REDUCE"
 A_NETTING, A_INDIRECT = "NETTING", "ACQUIRE_INDIRECT_HEDGE"
@@ -499,9 +509,25 @@ async def _measure(conn, ctx, *, pos: dict, levels_buy: list) -> dict:
     return {"p": None, "source": None, "stale": True, "why": R_NO_MEASURE}
 
 
+def last_evidence_expiry(last: dict | None) -> float | None:
+    """When the last review's FRESH probability stops being current: its
+    own source stamp + the limit it recorded (the existing 30 s rule).
+    None when the last review was not fresh (nothing to expire) or carried
+    no stamp. Pure."""
+    m = (last or {}).get("measure") or {}
+    if m.get("evidence_state") != E_FRESH:
+        return None
+    return XF.valuation_block(m, assessed_at=(last or {}).get(
+        "reviewed_at")).get("expires_at")
+
+
 def _trigger(*, group: str, new_handoffs: list, last: dict | None,
              last_fill_at, book_at, best_exit, at: float,
-             backstop_s: float, feed_change_at=None) -> str | None:
+             backstop_s: float, feed_change_at=None, order_event_at=None,
+             valuation_at=None, event_start_at=None) -> str | None:
+    """WHICH REVIEW A HELD GROUP IS DUE. Every requeue is bounded: each
+    trigger fires once per change (it compares with the last review's
+    instant), so nothing loops."""
     if group in new_handoffs or last is None:
         return T_FIRST
     if last_fill_at is not None and last_fill_at > last["reviewed_at"]:
@@ -510,7 +536,29 @@ def _trigger(*, group: str, new_handoffs: list, last: dict | None,
     # (pinnapi_held): a fresh probability exists for ~30 s from now on
     if feed_change_at is not None and feed_change_at > last["reviewed_at"]:
         return T_MARKET
-    prev_exit = ((last.get("measure") or {}).get("best_exit_at_review"))
+    # A MANAGEMENT ORDER OF THE GROUP REACHED A TERMINAL STATE (cancelled /
+    # expired / filled protection) since the last review: the protection
+    # changed, so the position is re-assessed now
+    if order_event_at is not None and order_event_at > last["reviewed_at"]:
+        return T_ORDER
+    # A NEWER STORED VALUATION OF THE CONTRACT than the last review saw
+    m = last.get("measure") or {}
+    seen = XF.valuation_block(m, assessed_at=last["reviewed_at"]).get(
+        "source_at")
+    if valuation_at is not None and valuation_at > last["reviewed_at"] and \
+            (seen is None or valuation_at > float(seen) + 1e-6):
+        return T_VALUATION
+    # THE GAME STATE CHANGED: the event started after the last review
+    if event_start_at is not None and \
+            last["reviewed_at"] < event_start_at <= at:
+        return T_GAME
+    # THE LAST REVIEW'S FRESH PROBABILITY HAS EXPIRED: re-assess at once
+    # (fresh again if a newer probability exists; otherwise the review
+    # records WAITING_FOR_FRESH_EVIDENCE -- never a stale HOLD)
+    exp = last_evidence_expiry(last)
+    if exp is not None and at >= exp and exp > last["reviewed_at"]:
+        return T_EXPIRY
+    prev_exit = m.get("best_exit_at_review")
     if book_at is not None and book_at > last["reviewed_at"] and \
             best_exit is not None and prev_exit is not None and \
             abs(float(best_exit) - float(prev_exit)) > 1e-9:
@@ -628,17 +676,22 @@ async def review_group(conn, ctx: dict, group_id: str, *,
             "SELECT coalesce(sum(qty), 0) FROM paper_fills WHERE group_id=$1"
             "   AND role='STANDING_PROTECTION'", group_id)
         live = [dict(s) for s in standing]
-        protected_qty = sum(float(s["qty"]) - float(s["filled_qty"])
-                            for s in live)
-        exposure = {"open_qty": pos["open_qty"],
-                    "cost_basis_usd": pos["cost_basis_usd"],
-                    "max_loss_usd": pos["cost_basis_usd"],
-                    "resting_protection_qty": protected_qty,
-                    "unmatched_inventory_qty": round(
-                        pos["open_qty"] - protected_qty, 6),
-                    "remaining_exposure_usd": pos["cost_basis_usd"],
-                    "floors_are_not_realized_pnl": True}
+        resting_qty = sum(float(s["qty"]) - float(s["filled_qty"])
+                          for s in live)
+        exposure = exposure_view(pos, resting_qty=resting_qty,
+                                 filled_protection_qty=float(confirmed))
         rid = "paperrev:" + _h(group_id, pos["position_key"], at, trigger)
+        # WHAT THE REVIEW RECOMMENDS (owner P0): the selection only on FRESH
+        # evidence. On stale / absent evidence the selector's HOLD is merely
+        # what was left after the sales were blocked, so the recorded
+        # recommendation is WAITING_FOR_FRESH_EVIDENCE (or
+        # MANAGEMENT_UNAVAILABLE_STALE_INPUT) -- the protection above is
+        # still maintained and no discretionary sale is possible.
+        recorded = XF.recorded_recommendation(
+            evidence_state=measure["evidence_state"], selected=chosen)
+        valuation = XF.valuation_block(
+            measure, assessed_at=at,
+            limit_s=float(ctx["config"]["entry"]["pinnacle_max_age_s"]))
         await conn.execute(
             "INSERT INTO paper_xavier_reviews (review_id, session_id, "
             " account_id, group_id, reviewed_at, trigger, recommendation, "
@@ -648,12 +701,17 @@ async def review_group(conn, ctx: dict, group_id: str, *,
             " $10::jsonb,$11::jsonb,$12::jsonb,$13::jsonb,$14::jsonb,"
             " $15::jsonb,$16::jsonb,$17::jsonb,$18) ON CONFLICT DO NOTHING",
             rid, ctx["session_id"], acct, group_id, L._ts(at), trigger,
-            chosen, sel.get("refusal"), json.dumps(alts, default=str),
+            recorded, sel.get("refusal"), json.dumps(alts, default=str),
             json.dumps(dict({k: sel.get(k) for k in (
                 "selected", "refusal", "selection_reason",
                 "margin_over_runner_up", "decision_policy", "tie_break",
                 "hold_is_priced", "limits_applied")},
-                management_policy=mpol), default=str),
+                management_policy=mpol,
+                mechanical_selection=chosen,
+                recommendation_state=XF.write_state(
+                    evidence_state=measure["evidence_state"],
+                    recommendation=recorded),
+                valuation=valuation), default=str),
             json.dumps(exposure, default=str),
             json.dumps({"live_orders": [L.order_view(s) for s in standing],
                         "protective_price": prot,
@@ -675,13 +733,58 @@ async def review_group(conn, ctx: dict, group_id: str, *,
             trigger=trigger, at=at, measure=measure, alts=alts,
             recommendation=chosen, exit_levels=exit_lv, policy=mpol,
             due_at=due_at)
+        # FRESHNESS EXPIRY IS A REVIEW TRIGGER: a fresh probability expires
+        # at its own source stamp + the limit; a review is scheduled for
+        # that instant (paper_runtime.schedule_expiry_review via the
+        # runtime's ctx hook: one timer per market, bounded) and the pass's
+        # own _trigger also fires FRESHNESS_EXPIRY on the next pass.
+        sched = ctx.get("schedule_review_at")
+        if sched is not None and measure["evidence_state"] == E_FRESH \
+                and valuation.get("expires_at") is not None:
+            try:
+                sched(pos["us_market_slug"], float(valuation["expires_at"]))
+            except Exception:                                   # noqa: BLE001
+                pass
         reviews.append({"review_id": rid, "position": pos["position_key"],
-                        "recommendation": chosen, "trigger": trigger,
+                        "recommendation": recorded,
+                        "mechanical_selection": chosen,
+                        "recommendation_state": mg.get(
+                            "recommendation_state"),
+                        "valuation_expires_at": valuation.get("expires_at"),
+                        "trigger": trigger,
                         "action": action.get("taken"),
                         "thesis_state": mg.get("thesis_state"),
                         "review_latency_s": mg.get("review_latency_s"),
                         "within_bound": mg.get("within_bound")})
     return {"group_id": group_id, "reviews": reviews}
+
+
+def exposure_view(pos: dict, *, resting_qty: float,
+                  filled_protection_qty: float) -> dict:
+    """THE REVIEW'S EXPOSURE RECORD (pure). ONLY FILLED QUANTITY COUNTS AS
+    PROTECTION (owner rule): a RESTING protective sale is not protection
+    until it fills. A filled protective sale has already left `open_qty`
+    (open = bought - sold - settled), so none of the quantity still held is
+    protected: unmatched = open - filled protection still held against it =
+    open. The resting quantity is reported apart (`standing_qty`), never
+    subtracted. Before this, unmatched was open - resting, which counted a
+    resting order as matched protection."""
+    q = float(pos["open_qty"])
+    return {"open_qty": pos["open_qty"],
+            "cost_basis_usd": pos["cost_basis_usd"],
+            "max_loss_usd": pos["cost_basis_usd"],
+            "standing_qty": round(float(resting_qty), 6),
+            "resting_protection_qty": round(float(resting_qty), 6),
+            "resting_is_protection": False,
+            "filled_protection_qty": round(float(filled_protection_qty), 6),
+            "filled_protection_held_against_open_qty": 0.0,
+            "unmatched_inventory_qty": round(q, 6),
+            "unmatched_basis": ("open - filled protection held against it "
+                                "(0: a filled protective sale has already "
+                                "left open_qty); resting protection is NOT "
+                                "protection until it fills"),
+            "remaining_exposure_usd": pos["cost_basis_usd"],
+            "floors_are_not_realized_pnl": True}
 
 
 async def _submit_sale(conn, ctx, *, pos, role, qty, limit, wire,
@@ -782,7 +885,8 @@ async def _maintain_standing(conn, ctx, *, pos, standing, prot, md, at,
 
 #: THE TRIGGERS' PRIORITY: a position never reviewed goes first, then one
 #: with a new fill, a market event, the scheduled backstop.
-TRIGGER_PRIORITY = {T_FIRST: 0, T_FILL: 1, T_MARKET: 2, T_BACKSTOP: 3}
+TRIGGER_PRIORITY = {T_FIRST: 0, T_FILL: 1, T_ORDER: 1.2, T_VALUATION: 1.4,
+                    T_GAME: 1.6, T_EXPIRY: 1.8, T_MARKET: 2, T_BACKSTOP: 3}
 #: a held market that just moved on the feed is reviewed right after the
 #: first reviews: its fresh probability lasts only the 30 s limit
 FEED_CHANGE_PRIORITY = 0.5
@@ -803,6 +907,49 @@ def _due_at(trig: str, *, first_fill_at, last: dict | None, last_fill_at,
     if trig == T_MARKET:
         return book_at
     return None if last is None else last["reviewed_at"] + backstop_s
+
+
+async def _requeue_evidence(conn, ctx: dict, groups: list, *,
+                            at: float) -> dict:
+    """WHAT CHANGED SINCE EACH GROUP'S LAST REVIEW, in three batched reads
+    per pass (never per group): the latest terminal instant of a management
+    order (protection cancelled / expired / filled), the latest stored
+    valuation of the group's own contract (xavier_management.
+    LATEST_VALUATION_SQL, the measure's identity, within the measure's
+    lookback) and the event start of a pre-event thesis. A failed read
+    leaves that trigger out (the backstop and the expiry still run)."""
+    from . import xavier_management as XM
+    out: dict = {g: {} for g in groups}
+    if not groups:
+        return out
+    try:
+        for r in await conn.fetch(
+                "SELECT group_id, max(terminal_at) AS t FROM paper_orders "
+                " WHERE account_id = $1 AND group_id = ANY($2::text[]) "
+                "   AND role <> 'ENTRY' AND terminal_at IS NOT NULL "
+                " GROUP BY group_id", ctx["account_id"], groups):
+            out[r["group_id"]]["order_event_at"] = L._epoch(r["t"])
+    except Exception:                                           # noqa: BLE001
+        pass
+    try:
+        lb = float(ctx["config"]["entry"].get("valuation_lookback_s")
+                   or XM.CONTEXT_VALUATION_LOOKBACK_S)
+        for r in await conn.fetch(XM.LATEST_VALUATION_SQL, groups, at - lb):
+            out[r["group_id"]]["valuation_at"] = L._epoch(r["observed_at"])
+    except Exception:                                           # noqa: BLE001
+        pass
+    try:
+        if await XM.has_schema(conn):
+            for r in await conn.fetch(
+                    "SELECT group_id, event_start_at FROM xavier_entry_theses"
+                    " WHERE position_kind = 'PAPER' "
+                    "   AND group_id = ANY($1::text[]) "
+                    "   AND thesis_expires_at IS NOT NULL", groups):
+                out[r["group_id"]]["event_start_at"] = L._epoch(
+                    r["event_start_at"])
+    except Exception:                                           # noqa: BLE001
+        pass
+    return out
 
 
 async def step(conn, ctx: dict, *, only_groups=None) -> dict:
@@ -828,6 +975,8 @@ async def step(conn, ctx: dict, *, only_groups=None) -> dict:
     out = {"reviews": 0, "groups_held": len(groups), "by_trigger": {},
            "not_handed_off": sorted(set(groups) - set(handed)),
            "due": 0, "deferred": [], "first_review_latency_s": []}
+    ev = await _requeue_evidence(conn, ctx, [g for g in groups
+                                             if g in handed], at=at)
     due = []
     for g in groups:
         if g not in handed:
@@ -855,15 +1004,23 @@ async def step(conn, ctx: dict, *, only_groups=None) -> dict:
             best_exit = lv["levels"][0]["price"] if lv["levels"] else None
         book_at = None if book is None else L._epoch(book["observed_at"])
         fc = None if slug is None else PH.changed_at(slug)
+        gev = ev.get(g) or {}
         trig = _trigger(group=g, new_handoffs=ctx.get("new_handoffs") or [],
                         last=lastd, last_fill_at=lf, book_at=book_at,
                         best_exit=best_exit, at=at, backstop_s=backstop,
-                        feed_change_at=fc)
+                        feed_change_at=fc,
+                        order_event_at=gev.get("order_event_at"),
+                        valuation_at=gev.get("valuation_at"),
+                        event_start_at=gev.get("event_start_at"))
         if trig is None:
             continue
         by_feed = (trig == T_MARKET and fc is not None and lastd is not None
                    and fc > lastd["reviewed_at"])
         d_at = (fc if by_feed else
+                gev.get("order_event_at") if trig == T_ORDER else
+                gev.get("valuation_at") if trig == T_VALUATION else
+                gev.get("event_start_at") if trig == T_GAME else
+                last_evidence_expiry(lastd) if trig == T_EXPIRY else
                 _due_at(trig, first_fill_at=handed[g], last=lastd,
                         last_fill_at=lf, book_at=book_at,
                         backstop_s=backstop))

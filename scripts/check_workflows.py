@@ -225,6 +225,47 @@ def check_shell(path: str, doc) -> list[str]:
     return bad
 
 
+#: A wrapper step names the versioned script it runs on this marker line,
+#: directly under `run: |` (see backend/tests/workflow_source.py). The
+#: script is no longer inside a run: block, so check_shell cannot see it;
+#: it must still exist and still parse, or the lever fails at dispatch.
+SCRIPT_MARKER = "# versioned step script: "
+
+
+def check_versioned_scripts(root: str, doc) -> list[str]:
+    """Every script a wrapper step runs exists, is under .github/, and
+    passes `bash -n`."""
+    bad: list[str] = []
+    jobs = doc.get("jobs") if isinstance(doc, dict) else None
+    if not isinstance(jobs, dict):
+        return bad
+    for jid, job in jobs.items():
+        for i, st in enumerate((job or {}).get("steps") or []):
+            body = st.get("run") if isinstance(st, dict) else None
+            if not isinstance(body, str) or SCRIPT_MARKER not in body:
+                continue
+            rel = body.split(SCRIPT_MARKER, 1)[1].split("\n", 1)[0].strip()
+            path = os.path.join(root, rel)
+            label = "job %s step %d (%s)" % (jid, i, st.get("name", "unnamed"))
+            if not rel.startswith(".github/") or ".." in rel:
+                bad.append("%s: versioned script %r is not under .github/"
+                           % (label, rel))
+                continue
+            if not os.path.isfile(path):
+                bad.append("%s: versioned script %s does not exist"
+                           % (label, rel))
+                continue
+            if rel not in body.split(SCRIPT_MARKER, 1)[1].split("\n", 1)[1]:
+                bad.append("%s: the step does not run the script its marker "
+                           "names (%s)" % (label, rel))
+            r = subprocess.run(["bash", "-n", path],
+                               capture_output=True, text=True)
+            if r.returncode != 0:
+                bad.append("%s: %s: %s" % (label, rel,
+                                            (r.stderr or "").strip()[:300]))
+    return bad
+
+
 def main(argv: list[str]) -> int:
     root = argv[1] if len(argv) > 1 else "."
     failures: dict[str, list[str]] = {}
@@ -244,6 +285,7 @@ def main(argv: list[str]) -> int:
             problems += check_structure(path, doc)
             problems += check_shell(path, doc)
             problems += check_run_lengths(path, doc)
+            problems += check_versioned_scripts(root, doc)
         n = os.path.getsize(path)
         rows.append((name, n, LIMIT - n, "FAIL" if problems else "ok"))
         if problems:

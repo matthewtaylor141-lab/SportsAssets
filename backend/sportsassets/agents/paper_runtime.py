@@ -337,7 +337,11 @@ async def _run(conn, out, *, at, t0, account_id, market_data, steps, config,
         "results": out, "sleep": sleep,
         # THE DECISION CLOCK: the real clock in production (a decision made
         # 15 s into a pass is stamped 15 s later); the pass instant in tests.
-        "clock": (time.time if live_clock else (lambda: at))}
+        "clock": (time.time if live_clock else (lambda: at)),
+        # FRESHNESS EXPIRY REQUEUES XAVIER (owner P0): on the live clock a
+        # fresh review schedules its own re-review at source stamp + limit
+        "schedule_review_at": (schedule_expiry_review if live_clock
+                               else None)}
     out.update(ran=True, session_id=sess["session_id"],
                resumed=sess.get("resumed"))
     for item in (steps if steps is not None else default_steps()):
@@ -913,7 +917,9 @@ async def held_review(conn, *, slugs, now: float | None = None,
                 "config": sess.get("effective_config") or sess["config"],
                 "now": at, "fee_fn": fee_fn,
                 "deadline": time.monotonic() + HELD_REVIEW_BUDGET_S,
-                "clock": (time.time if live_clock else (lambda: at))}
+                "clock": (time.time if live_clock else (lambda: at)),
+                "schedule_review_at": (schedule_expiry_review if live_clock
+                                       else None)}
             got = await PX.step(conn, ctx, only_groups=groups)
             return dict(out, ran=True, groups=groups, xavier=got)
         except Exception as exc:                               # noqa: BLE001
@@ -960,3 +966,66 @@ def schedule_held_review(slugs, *, get_pool=None) -> dict:
 
     _HELD["task"] = loop.create_task(run())
     return {"scheduled": True}
+
+
+# ═════════════════════════════════════════════════════════════════════
+# FRESHNESS EXPIRY REQUEUES XAVIER (owner P0, 2026-10-04)
+# ═════════════════════════════════════════════════════════════════════
+#
+# A fresh review stands on a probability that stops being current at its
+# own source stamp + the existing limit (the 30 s rule). Waiting for the
+# next 60 s pass left a stale recommendation on display; so each fresh
+# review schedules a held review of its market for that instant, through
+# the SAME debounced, bounded mechanism a PinnAPI change uses
+# (schedule_held_review). One timer per market (a newer fresh review
+# replaces it), at most EXPIRY_MAX_TIMERS, never sooner than now, never
+# further out than EXPIRY_MAX_DELAY_S -- no loop: the review it causes is
+# FRESHNESS_EXPIRY once (paper_xavier._trigger), then WAITING or fresh.
+
+EXPIRY_GRACE_S = 0.5
+EXPIRY_MAX_DELAY_S = 300.0
+EXPIRY_MAX_TIMERS = 400
+_EXPIRY: dict = {"timers": {}, "scheduled": 0, "replaced": 0, "fired": 0,
+                 "dropped": 0}
+
+
+def schedule_expiry_review(slug, expires_at, *, now=None, loop=None,
+                           fire=None) -> dict:
+    """Synchronous: schedule Xavier's held review of `slug` for the instant
+    its fresh probability expires. `fire` (tests) replaces the held-review
+    scheduler. Returns at once; never raises."""
+    try:
+        loop = loop or asyncio.get_running_loop()
+    except RuntimeError:
+        return {"scheduled": False, "why": "NO_RUNNING_LOOP"}
+    if not slug or expires_at is None:
+        return {"scheduled": False, "why": "NO_SLUG_OR_EXPIRY"}
+    timers = _EXPIRY["timers"]
+    if slug not in timers and len(timers) >= EXPIRY_MAX_TIMERS:
+        _EXPIRY["dropped"] += 1
+        return {"scheduled": False, "why": "EXPIRY_TIMER_BOUND_REACHED"}
+    t_now = float(now if now is not None else time.time())
+    delay = min(max(float(expires_at) + EXPIRY_GRACE_S - t_now, 0.0),
+                EXPIRY_MAX_DELAY_S)
+    old = timers.pop(slug, None)
+    if old is not None:
+        old.cancel()
+        _EXPIRY["replaced"] += 1
+    run = fire or schedule_held_review
+
+    def _fire():
+        timers.pop(slug, None)
+        _EXPIRY["fired"] += 1
+        try:
+            run([slug])
+        except Exception:                                      # noqa: BLE001
+            log.warning("xavier expiry review failed", exc_info=True)
+
+    timers[slug] = loop.call_later(delay, _fire)
+    _EXPIRY["scheduled"] += 1
+    return {"scheduled": True, "slug": slug, "delay_s": round(delay, 3),
+            "expires_at": float(expires_at)}
+
+
+def expiry_status() -> dict:
+    return {k: (len(v) if k == "timers" else v) for k, v in _EXPIRY.items()}

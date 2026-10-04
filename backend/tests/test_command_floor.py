@@ -155,12 +155,26 @@ async def test_fixture_rows_drive_every_desk_state():
     from sportsassets.agents import karen as K
     from sportsassets.agents import registry as R
 
-    # the scenario's clock sits two hours past wall time: rows other tests
-    # wrote "just now" (an Audrey finding, a Karen challenge) fall outside
-    # the floor's 5-minute activity window and 1-hour edge window, so only
-    # this scenario's rows (all placed relative to `now`) drive the desks
-    now = time.time() + 7200
+    # the scenario's clock sits two hours past the newest activity row any
+    # other test left behind (wall time, or a future-dated fixture): those
+    # rows fall outside the floor's 5-minute activity window and 1-hour edge
+    # window, so only this scenario's rows (all placed relative to `now`)
+    # drive the desks
     conn = await asyncpg.connect(DSN)
+    newest = time.time()
+    for table, col in (("paper_audrey_findings", "found_at"),
+                       ("audrey_audit_reports", "computed_at"),
+                       ("coverage_collapse_alerts", "detected_at"),
+                       ("karen_challenges", "challenged_at"),
+                       ("karen_challenges", "responded_at"),
+                       ("karen_challenges", "resolved_at"),
+                       ("agent_decisions", "decided_at")):
+        if await conn.fetchval("SELECT to_regclass($1) IS NOT NULL", table):
+            v = await conn.fetchval(
+                "SELECT extract(epoch FROM max(%s)) FROM %s" % (col, table))
+            if v is not None:
+                newest = max(newest, float(v))
+    now = newest + 7200
     tx = conn.transaction()
     await tx.start()
     try:
@@ -226,7 +240,15 @@ async def test_fixture_rows_drive_every_desk_state():
         assert x["state"] == "STALE" and x["heartbeat"]["age_s"] > 4000
         labels = [m["label"] for m in x["monitor"]]
         assert "Managed positions · PAPER" in labels
-        assert "Managed positions · ACTUAL" in labels   # never summed
+        # never summed: ACTUAL is venue by venue, each venue's connection
+        # read from its own control row (C28 venue independence)
+        assert "Managed positions · ACTUAL · POLYMARKET US" in labels
+        assert "Managed positions · ACTUAL · KALSHI" in labels
+        assert "Managed positions · ACTUAL" not in labels
+        mon = {m["label"]: m for m in x["monitor"]}
+        k = mon["Managed positions · ACTUAL · KALSHI"]
+        if k["value"] is None:
+            assert "NOT_CONNECTED" in (k["why"] or "") or k["why"]
 
         al = by["CHIEF_ALLOCATOR"]
         assert al["state"] == "IDLE", al["state_detail"]

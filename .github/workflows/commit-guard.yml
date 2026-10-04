@@ -121,8 +121,12 @@ jobs:
                  "size/structure/shell checks above still ran"
             exit 0
           fi
-          timeout 90 ./actionlint -color </dev/null
-          rc=$?
+          # The step shell is bash -e: a bare non-zero command exits here,
+          # BEFORE rc=$? is read -- so the timeout branch below could never
+          # run and a timeout failed the guard (seen 2026-10-04, run
+          # 37200435328, exit 124). Capture the status explicitly instead.
+          rc=0
+          timeout 90 ./actionlint -color </dev/null || rc=$?
           if [ "$rc" -eq 124 ]; then
             echo "::warning::actionlint timed out; not treating that as a lint failure"
             exit 0

@@ -7,7 +7,9 @@ TWO BOOKS, NEVER SUMMED.
           marked from the paper path's own observed books -- exactly
           `bettor_paper_ledger.balances` (MARK_METHOD), the one function every
           paper read model uses.
-  actual  SMALL LIVE CAPITAL, kept PER VENUE and never added across venues:
+  actual  the LEGACY MIRROR VALIDATION accounts (the old 1:1,000 execution
+          mirror -- NOT the target Small Live system), kept PER VENUE and
+          never added across venues:
             polymarket_us  the 1:1,000 execution-mirror account (its own
                            credential), from the worker's recorded venue
                            account snapshots (execmirror_snapshots) and the
@@ -18,6 +20,20 @@ TWO BOOKS, NEVER SUMMED.
                            (kalshi_account_reconciliations). No reconciliation
                            -> UNAVAILABLE with the exact reason.
   No key anywhere in a response combines the two books or the two venues.
+
+  paper.sleeves   the paper book split by ECONOMIC SLEEVE (migration 223,
+          bettor_paper_sleeves): INVESTMENT / TRAINING / BENCHMARK /
+          UNCLASSIFIED, each with realized, unrealized, exposure, mark
+          freshness and its last GENUINE mark update, and the accounting that
+          reconciles starting cash + every sleeve's contribution to the
+          account equity (P&L-only: one shared cash ledger).
+  small_live_bettor   SMALL LIVE -- BETTOR ORIGINATED (bettor_originated_status):
+          its status (NOT_CONFIGURED / SHADOW / READY_NOT_ACTIVATED / ACTIVE
+          / DEGRADED / STOPPED) from stored evidence; legacy mirror orders
+          never count.
+  NO FAKE TICKER. A paper `last_change_at` is the ledger's last commit or
+  the last GENUINE mark change (the mark PRICE moved between recorded
+  observations) -- a book re-read at the same price is not a change.
 
 EVERY ACCOUNT
     {status: OK | STALE | UNAVAILABLE, why, equity_usd, equity_treatment,
@@ -82,7 +98,8 @@ MAX_POINTS = 1500             # curve points after de-duplication
 CURVE_SCAN_LIMIT = 50000
 
 PAPER_LABEL = "$500,000 PAPER EXPERIMENT"
-ACTUAL_LABEL = "SMALL LIVE CAPITAL"
+ACTUAL_LABEL = ("LEGACY MIRROR VALIDATION (the old 1:1,000 execution mirror; "
+                "not the target Small Live system)")
 #: The paper runtime records one heartbeat and one equity snapshot per pass
 #: (about one a minute); five missed passes is a stopped source.
 PAPER_RUNTIME_STALE_AFTER_S = 300.0
@@ -98,9 +115,12 @@ KALSHI_PEM_ENVS = ("KALSHI_PRIVATE_KEY_PEM", "KALSHI_PRIVATE_KEY_PATH")
 
 DISCLOSURE = (
     "Read-only observation. PAPER is fictional money with simulated "
-    "execution; SMALL LIVE CAPITAL is real money at a 1:1,000 scale, per "
-    "venue. The two are never summed and the venues are never combined. "
-    "This interface has no order authority.")
+    "execution, split by economic sleeve. The LEGACY MIRROR VALIDATION "
+    "accounts are real money at a 1:1,000 scale, per venue (the old "
+    "execution mirror, not the target Small Live system). SMALL LIVE -- "
+    "BETTOR ORIGINATED is reported apart with its own status. Books are "
+    "never summed and venues are never combined. This interface has no "
+    "order authority.")
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -242,9 +262,15 @@ def _treatment(n_unmarked: int, unmarked_cost, marked_only) -> dict:
 def paper_account(bal: dict | None, *, now: float, error: str | None = None,
                   session: dict | None = None, day_basis: dict | None = None,
                   session_basis: dict | None = None,
-                  stale_mark_after_s: float = 300.0) -> dict:
+                  stale_mark_after_s: float = 300.0,
+                  genuine_mark_at: float | None = None,
+                  sleeves: dict | None = None) -> dict:
     """`session`: {active, session_id, started_at, heartbeat_at, reason}.
-    `day_basis` / `session_basis`: {equity_usd, at, basis} or {why}."""
+    `day_basis` / `session_basis`: {equity_usd, at, basis} or {why}.
+    `genuine_mark_at`: the last time an open position's mark PRICE changed
+    (bettor_paper_sleeves.mark_changes); None = no genuine change measured.
+    A book re-read at the same price is NOT a change, so it never moves
+    `last_change_at`. `sleeves`: bettor_paper_sleeves.sleeve_book output."""
     src = ("paper_ledger + paper_fills + paper_settlements (cash, realized); "
            "paper_book_observations (marks, bettor_paper_ledger.MARK_METHOD)")
     if error:
@@ -314,8 +340,13 @@ def paper_account(bal: dict | None, *, now: float, error: str | None = None,
     status = "STALE" if stale_why else "OK"
     src_at = max([t for t in (ledger_at, newest, hb) if t is not None],
                  default=None)
-    last_change = max([t for t in (ledger_at, newest) if t is not None],
+    # NO FAKE TICKER: only a ledger commit or a GENUINE mark change moves
+    # the last change; the newest book RE-READ does not.
+    genuine = num(genuine_mark_at)
+    last_change = max([t for t in (ledger_at, genuine) if t is not None],
                       default=None)
+    no_new_mark = bool(n_marked) and (
+        genuine is None or now - genuine > stale_mark_after_s)
     start_cash = num(bal.get("starting_cash_usd"))
     db = day_basis or {}
     sb = session_basis or {}
@@ -359,7 +390,18 @@ def paper_account(bal: dict | None, *, now: float, error: str | None = None,
                         "oldest_age_s": age(now, oldest),
                         "newest_age_s": age(now, newest),
                         "stale_mark_after_s": stale_mark_after_s,
-                        "method": bal.get("mark_method")},
+                        "method": bal.get("mark_method"),
+                        "newest_is": "the newest book RE-READ (not a price "
+                                     "change)"},
+        "last_genuine_mark_update_at": iso(genuine),
+        "last_genuine_mark_update_age_s": age(now, genuine),
+        "no_new_mark": no_new_mark,
+        "no_new_mark_rule": ("no open position's mark PRICE changed in the "
+                             "last %ds: the equity chart freezes at the last "
+                             "genuine change (NO NEW MARK)"
+                             % int(stale_mark_after_s)),
+        "sleeves": sleeves if sleeves is not None else {
+            "status": "UNAVAILABLE", "why": "SLEEVES_NOT_READ"},
         "source": src, "source_at": iso(src_at),
         "source_age_s": age(now, src_at),
         "ledger_last_committed_at": iso(ledger_at),
@@ -483,13 +525,20 @@ def pm_account(ctl: dict | None, snap: dict | None, *, now: float,
     src = ("execmirror_snapshots (the mirror worker's venue account read: "
            "currentBalance, buyingPower, positions cost/cashValue/realized) + "
            "execmirror_control + execmirror_fills")
-    label = "Polymarket US"
+    # THE LEGACY MIRROR, LABELLED FROM ITS REAL CONTROL ROW: it is not the
+    # target Small Live system (bettor_originated_status); STOPPED only when the
+    # row says so, RUNNING when it is enabled and not stopped.
+    from .. import bettor_originated_status as SLT
+    label = "Polymarket US · " + SLT.legacy_label(ctl)
     if error:
         return _unavailable("ACTUAL", label, error, venue="polymarket_us",
                             source=src)
     lane = lane_of(ctl)
-    lane["account"] = "execution-mirror account (its own credential), 1:%s" % (
-        int(lane["scale"]) if lane.get("scale") else "?")
+    lane["account"] = ("LEGACY MIRROR account (the old execution mirror's own "
+                       "credential), 1:%s" % (
+                           int(lane["scale"]) if lane.get("scale") else "?"))
+    lane["legacy_mirror"] = True
+    lane["legacy_label"] = SLT.legacy_label(ctl)
     if not ctl:
         return _unavailable("ACTUAL", label,
                             "EXECMIRROR_CONTROL_ROW_MISSING (migration 192)",
@@ -602,7 +651,7 @@ def kalshi_account(ctl: dict | None, recon: dict | None, *, now: float,
                    fills: int | None = None, error: str | None = None) -> dict:
     src = ("kalshi_account_reconciliations (read-only Kalshi account reads) + "
            "kalshi_smalllive_control + kalshi_live_fills")
-    label = "Kalshi"
+    label = "Kalshi · LEGACY MIRROR LANE"
     if error:
         return _unavailable("ACTUAL", label, error, venue="kalshi", source=src)
     if not schema:
@@ -690,7 +739,7 @@ def kalshi_account(ctl: dict | None, recon: dict | None, *, now: float,
 # THE ENVELOPE, ETag AND seq
 # ═════════════════════════════════════════════════════════════════════
 
-VOLATILE = ("computed_at", "computed_at_iso", "seq", "etag")
+VOLATILE = ("computed_at", "computed_at_iso", "seq", "etag", "as_of")
 
 
 def _strip(v):
@@ -724,15 +773,20 @@ def stamp(payload: dict, *, now: float) -> dict:
     return payload
 
 
-def envelope(paper: dict, pm: dict, kalshi: dict) -> dict:
+def envelope(paper: dict, pm: dict, kalshi: dict,
+             small_live: dict | None = None) -> dict:
     return {
         "schema": SCHEMA, "read_only": True, "authority": "NONE",
         "poll_after_s": POLL_AFTER_S,
         "books_summed": False, "venues_summed": False,
         "paper": paper,
         "actual": {"label": ACTUAL_LABEL, "venues_summed": False,
-                   "scale": "1:1,000",
+                   "scale": "1:1,000", "legacy_mirror": True,
+                   "is_target_small_live": False,
                    "venues": {"polymarket_us": pm, "kalshi": kalshi}},
+        "small_live_bettor": small_live if small_live is not None else {
+            "title": "SMALL LIVE — BETTOR ORIGINATED", "status": None,
+            "why": "SMALL_LIVE_TRUTH_NOT_READ"},
         "disclosure": DISCLOSURE,
     }
 
@@ -820,12 +874,43 @@ async def read_paper(conn, *, now: float, account_id: str | None = None) -> dict
                                  if s0 is not None else
                                  {"why": "the active session has recorded no "
                                          "complete equity snapshot yet"})
+        sleeves, genuine = await read_sleeves(conn, acct, now=now, bal=bal)
         return paper_account(bal, now=now, session=session,
                              day_basis=day_basis, session_basis=session_basis,
-                             stale_mark_after_s=float(L.MARK_STALE_AFTER_S))
+                             stale_mark_after_s=float(L.MARK_STALE_AFTER_S),
+                             genuine_mark_at=genuine, sleeves=sleeves)
     except Exception as exc:                                    # noqa: BLE001
         return paper_account(None, now=now, error="PAPER_READ_FAILED: %s: %s"
                              % (type(exc).__name__, str(exc)[:160]))
+
+
+async def read_sleeves(conn, acct: str, *, now: float, bal: dict) -> tuple:
+    """(sleeves, last genuine mark change) -- a failed sleeve read is
+    UNAVAILABLE with its reason and never breaks the account figures."""
+    from .. import bettor_paper_sleeves as SL
+    try:
+        # its own savepoint: a failed sleeve read never aborts the
+        # transaction the other accounts are read in
+        async with conn.transaction():
+            sb = await SL.sleeve_book(conn, acct, now=now, bal=bal)
+    except Exception as exc:                                    # noqa: BLE001
+        return ({"status": "UNAVAILABLE", "why": "SLEEVE_READ_FAILED: %s: %s"
+                 % (type(exc).__name__, str(exc)[:160])}, None)
+    return sb, sb.get("last_genuine_mark_update_at")
+
+
+async def read_small_live(conn, *, now: float) -> dict:
+    from .. import bettor_originated_status as SLT
+    try:
+        got = await SLT.read_isolated(conn, now=now)
+    except Exception as exc:                                    # noqa: BLE001
+        return {"title": SLT.TITLE, "status": None,
+                "why": "SMALL_LIVE_READ_FAILED: %s: %s"
+                       % (type(exc).__name__, str(exc)[:160])}
+    small = dict(got["small_live"])
+    small["legacy_mirror"] = got["legacy_mirror"]
+    small["eddie_funnel"] = got["eddie_funnel"]
+    return small
 
 
 async def read_pm(conn, *, now: float) -> dict:
@@ -889,9 +974,10 @@ async def live_payload(conn, *, now: float | None = None) -> dict:
         paper = await read_paper(conn, now=now)
         pm = await read_pm(conn, now=now)
         kalshi = await read_kalshi(conn, now=now)
+        small = await read_small_live(conn, now=now)
     finally:
         await tr.rollback()
-    return stamp(envelope(paper, pm, kalshi), now=now)
+    return stamp(envelope(paper, pm, kalshi, small), now=now)
 
 
 # ═════════════════════════════════════════════════════════════════════

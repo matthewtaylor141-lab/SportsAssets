@@ -76,6 +76,7 @@ from tests.test_mirror_live_worker import (  # noqa: F401 -- the autouse rails
     CID, M, N, NOW, SLUG, _UndefinedColumn, _Venue, _armed, _cancels, _census, _fill, _his, _mkt, _places,
     _pool, _run, _s4_proved, _short_book, _short_world, _shorts_on, _tick,
 )
+from tests.workflow_source import render_ops_file as _render_ops_file
 
 BUY, SELL = rules.BUY, rules.SELL
 SHORT = rules.ORDER_INTENT_SHORT
@@ -921,7 +922,7 @@ def test_e27_no_census_name_no_migration_render_ops_hashed_as_left_and_the_sites
     # comment as lane 2 left it
     files = sorted(x.name for x in (ROOT / "backend" / "migrations").glob("*.sql"))
     assert files[-1] == "064_run833_stream_channels.sql"  # re-pinned 2026-09-12 (run 83.3): run 83.3's 064 is the newest; this lane still adds none
-    assert _sha_file(ROOT / ".github" / "workflows" / "render-ops.yml") == RENDER_OPS_SHA
+    assert _sha_file(_render_ops_file()) == RENDER_OPS_SHA
     assert _sha_file(ROOT / "backend" / "migrations" / "059_mirror_orders_send_record.sql") == MIGRATION_059_SHA
     sql = (ROOT / "backend" / "migrations" / "059_mirror_orders_send_record.sql").read_text()
     assert "'take_in_band' is" in sql and "reserved for the entry band" in sql

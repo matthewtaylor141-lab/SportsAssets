@@ -34,8 +34,9 @@ from sportsassets.workers import mirror_live as ml
 from tests.test_l1_rearm_window import H24, TRIPPED, _loss_reads, _rearm, _reduce_world
 from tests.test_mirror_live_worker import GTC_TIF, IOC_TIF, M, N, NOW, SLUG, _armed  # noqa: F401 — the fixture
 from tests.test_mirror_live_worker import _census, _places, _pool, _tick, _Venue
+from tests.workflow_source import render_ops_file as _render_ops_file
 
-RENDER_OPS = pathlib.Path(__file__).resolve().parents[2] / ".github" / "workflows" / "render-ops.yml"
+RENDER_OPS = _render_ops_file()
 SQL_24H = ("SELECT COALESCE(sum(pnl), 0) FROM live_orders "
            "WHERE settled_at > now() - interval '24 hours' "
            "AND status IN ('settled', 'cashed_out') "

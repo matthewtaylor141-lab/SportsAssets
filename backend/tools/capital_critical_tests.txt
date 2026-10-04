@@ -767,3 +767,56 @@ tests/test_position_rooms_authority.py
 # with a bounded statement timeout, SELECT-only SQL, and imports no order,
 # venue, ledger, paper or funded module.
 tests/test_command_floor_authority.py
+# Improvement pipeline (claude/pos-improve, migration 221): the bounded
+# self-improvement ledger. The runner has no order / deploy / merge /
+# network / process path and writes only improve_*; the database refuses
+# self-approval, a skipped or backward stage, a protected item without two
+# independent reviews and a human, and a CONTROLLED_RELEASE without a human
+# approver and the exact-SHA gate receipt; GET /api/command/improvements
+# (+ /{id}) is GET only, session-authenticated and READ ONLY.
+tests/test_improvement_pipeline_authority.py
+tests/test_improvement_pipeline_db.py
+# The Lost Opportunity Ledger, the Opportunity Score and the horizon
+# forecasts (claude/pos-lol, migration 220): RESEARCH / SHADOW, no venue,
+# order, sizing, limit, threshold or capital authority. The package imports
+# no venue / order / paper / funded module (transitive closure), writes only
+# its own append-only lol_* tables (INSERT only; the database refuses UPDATE
+# / DELETE / TRUNCATE), a run leaves every order, fill, ledger, decision,
+# funded and pos_* table unchanged, a hindsight winner is never a
+# FALSE_REFUSAL (the classifier never reads the settlement), a FALSE_REFUSAL
+# needs a positive decision-time executable net EV AND a named defect (DB
+# CHECK), the hypothetical P&L is labelled HYPOTHETICAL, and the
+# /api/command/profitability/{lost-opportunities,opportunity-scores,
+# forecast-horizons} routes are GET-only, READ ONLY, behind a command session.
+tests/test_lost_opportunity_is_research_only.py
+tests/test_lost_opportunity_ledger.py
+# Paper book economic truth and Small Live truth (claude/c28-books,
+# migration 223): every paper position carries a durable sleeve
+# (INVESTMENT / TRAINING / BENCHMARK / UNCLASSIFIED, never silently
+# INVESTMENT); INVESTMENT economics exclude TRAINING; starting cash + every
+# sleeve reconciles exactly to the account equity; the sleeve table is
+# append-only RESEARCH / SHADOW_NO_AUTHORITY; /api/command/profitability/
+# sleeves is GET-only, READ ONLY, behind a command session. SMALL LIVE --
+# BETTOR ORIGINATED is never ACTIVE without a BETTOR-originated,
+# venue-acknowledged order; mirror / RN1 / copy orders never count; Eddie's
+# EXECUTE_NOW recommendations are never orders; the legacy mirror label
+# follows its real control row; no control row is changed.
+tests/test_paper_sleeves.py
+tests/test_small_live_truth.py
+# C28 RESTING (P0): a RESTING sell / hedge / order is NOT protection. One
+# shared pure mapping (sportsassets/order_state_truth.py) of every raw order
+# state to PROPOSED / SUBMITTED / RESTING / PARTIAL / FILLED / CANCELLED /
+# REJECTED / EXPIRED (+ explicit UNKNOWN, never FILLED); only FILLED quantity
+# counts as protection in every reader; the conditional floor is IF_FILLED and
+# never the realized floor; Kalshi NOT_CONNECTED is never inferred.
+tests/test_resting_is_not_protection.py
+# Xavier freshness truth (owner P0 2026-10-04): a stale probability never
+# yields a current HOLD; read-time validity; expiry requeues; resting is not
+# protection in the review exposure record.
+tests/test_xavier_freshness_truth.py
+# c28 RELEASE TRUTH: GET /api/command/release (api/command_release.py) is
+# GET-only, behind a command session, one READ ONLY transaction with a
+# statement timeout, imports no order/venue/paper/funded module, never
+# guesses a SHA (missing => UNAVAILABLE, 7 chars => PREFIX_7) and shows a
+# receipt whose sha256 does not verify as TAMPERED.
+tests/test_command_release_authority.py

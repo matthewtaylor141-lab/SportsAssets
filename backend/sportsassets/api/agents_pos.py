@@ -119,6 +119,10 @@ async def _eddie_workspace() -> dict:
             empty_why="NO_CANDIDATE_REVIEW_RECORDED",
             evidence_of=lambda r: list(r.get("evidence") or []))
         met, metrics = await _metric_section(E.metrics(conn))
+        # RECOMMENDATIONS ARE NOT ORDERS: Eddie's EXECUTE_NOW /
+        # SKIP_EXECUTION counts beside BETTOR-originated orders submitted,
+        # venue-acknowledged and filled (bettor_originated_status).
+        funnel_sec = await _funnel_section(conn)
         try:
             desk = await E.desk(conn)
             desk_sec = _ok(desk)
@@ -154,10 +158,29 @@ async def _eddie_workspace() -> dict:
             "predicted_vs_realized": outs,
             "scorecard": metrics,
             "candidate_reviews": reviews,
+            "execution_funnel": funnel_sec,
             "runner": _ok(profile["runner"]),
         },
+        "execution_funnel": funnel_sec.get("data"),
         "production_effect": "NONE", "read_at": time.time(),
         "read_only": True}
+
+
+async def _funnel_section(conn) -> dict:
+    """Eddie's recommendations apart from orders, and the SMALL LIVE --
+    BETTOR ORIGINATED status beside the LEGACY MIRROR label."""
+    from .. import bettor_originated_status as BOS
+    try:
+        got = await BOS.read_isolated(conn)
+    except Exception as exc:                                    # noqa: BLE001
+        return {"status": "UNAVAILABLE", "why": type(exc).__name__,
+                "data": None, "evidence": []}
+    f = dict(got["eddie_funnel"])
+    f["small_live"] = {k: got["small_live"].get(k) for k in (
+        "title", "status", "why", "chain_required", "venues")}
+    f["legacy_mirror_label"] = (got["legacy_mirror"] or {}).get("label")
+    return {"status": "OK" if f.get("status") == "OK" else "EMPTY",
+            "why": f.get("why"), "data": f, "evidence": []}
 
 
 async def _scout_workspace() -> dict:

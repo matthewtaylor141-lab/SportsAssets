@@ -15,6 +15,8 @@ import datetime as dt
 import json
 from decimal import Decimal
 
+from . import order_state_truth as OST
+
 TRAINING_HINTS = ("EXPLOR", "TRAIN")
 
 
@@ -245,7 +247,7 @@ async def view(conn, *, limit: int = 200) -> dict:
     expected_total = totals["paper_pnl"] / scale
     bal = (_js(snap["balances"]) if snap else []) or []
     return {
-        "title": "Live execution mirror · 1:%s" % int(scale),
+        "title": "LEGACY MIRROR VALIDATION · execution mirror · 1:%s" % int(scale),
         "basis": ("Paper experiment is the decision source; live orders are "
                   "placed on a separate Polymarket US account at paper "
                   "quantity / %s (nearest whole contract). Live fills come only "
@@ -738,34 +740,45 @@ async def _management(conn, rows: list) -> dict:
             out["reviews"][v["group_id"]] = dict(v)
         # PROTECTION, read from the orders and fills themselves: a resting
         # protective order is NOT filled protection, so the two are separate.
+        # The raw states of each bucket come from the ONE shared mapping
+        # (order_state_truth): standing = RESTING / PARTIAL (a requested
+        # cancel can still fill), pending = PROPOSED / SUBMITTED / UNKNOWN,
+        # and only a fill-bearing state's own filled quantity is filled.
         for g in await conn.fetch(
                 """SELECT g AS group_id,
                           (SELECT coalesce(sum(o.qty - o.filled_qty), 0) FROM paper_orders o
                             WHERE o.group_id = g AND o.role = 'STANDING_PROTECTION'
-                              AND o.state IN ('PENDING_SIMULATION','RESTING','PARTIALLY_FILLED'))
-                            AS resting,
+                              AND o.state = ANY($2::text[])) AS resting,
                           (SELECT count(*) FROM paper_orders o
                             WHERE o.group_id = g AND o.role = 'STANDING_PROTECTION'
-                              AND o.state IN ('PENDING_SIMULATION','RESTING','PARTIALLY_FILLED'))
-                            AS resting_orders,
+                              AND o.state = ANY($2::text[])) AS resting_orders,
+                          (SELECT coalesce(sum(o.qty - o.filled_qty), 0) FROM paper_orders o
+                            WHERE o.group_id = g AND o.role = 'STANDING_PROTECTION'
+                              AND o.state = ANY($3::text[])) AS pending,
                           (SELECT coalesce(sum(f.qty), 0) FROM paper_fills f
                             WHERE f.group_id = g AND f.role = 'STANDING_PROTECTION') AS filled
-                     FROM unnest($1::text[]) AS g""", groups):
+                     FROM unnest($1::text[]) AS g""", groups,
+                OST.raw_states(OST.SRC_PAPER, OST.STANDING_STATES),
+                OST.raw_states(OST.SRC_PAPER, OST.PENDING_STATES)):
             out["paper_protection"][g["group_id"]] = dict(g)
         for g in await conn.fetch(
                 """SELECT g AS group_id,
                           (SELECT coalesce(sum(m.live_qty - m.cum_qty), 0) FROM execmirror_orders m
                             WHERE m.group_id = g AND m.role = 'STANDING_PROTECTION'
-                              AND m.state IN ('OPEN','PARTIALLY_FILLED')) AS resting,
+                              AND m.state = ANY($2::text[])) AS resting,
                           (SELECT count(*) FROM execmirror_orders m
                             WHERE m.group_id = g AND m.role = 'STANDING_PROTECTION'
-                              AND m.state IN ('OPEN','PARTIALLY_FILLED')) AS resting_orders,
-                          (SELECT coalesce(sum(m.live_qty), 0) FROM execmirror_orders m
+                              AND m.state = ANY($2::text[])) AS resting_orders,
+                          (SELECT coalesce(sum(m.live_qty - m.cum_qty), 0) FROM execmirror_orders m
                             WHERE m.group_id = g AND m.role = 'STANDING_PROTECTION'
-                              AND m.state IN ('PLANNED','SUBMITTING','UNKNOWN')) AS pending,
+                              AND m.state = ANY($3::text[])) AS pending,
                           (SELECT coalesce(sum(m.cum_qty), 0) FROM execmirror_orders m
-                            WHERE m.group_id = g AND m.role = 'STANDING_PROTECTION') AS filled
-                     FROM unnest($1::text[]) AS g""", groups):
+                            WHERE m.group_id = g AND m.role = 'STANDING_PROTECTION'
+                              AND m.state = ANY($4::text[])) AS filled
+                     FROM unnest($1::text[]) AS g""", groups,
+                OST.raw_states(OST.SRC_MIRROR, OST.STANDING_STATES),
+                OST.raw_states(OST.SRC_MIRROR, OST.PENDING_STATES),
+                OST.raw_states(OST.SRC_MIRROR, OST.FILL_BEARING_STATES)):
             out["live_protection"][g["group_id"]] = dict(g)
         # ACTUAL inventory and cash, from venue fills only
         fills_by_group: dict = {}
@@ -856,8 +869,9 @@ async def _xavier_management_records(conn, groups: list, out: dict) -> None:
                       group_id, position_kind, assessed_at, trigger, review_latency_s,
                       latency_bound_s, within_bound, evidence_state, probability,
                       probability_source, probability_age_s, thesis_state, recommendation,
-                      discretionary_permitted, reallocate, thesis_id
-                 FROM xavier_management_assessments WHERE group_id = ANY($1)
+                      discretionary_permitted, reallocate, thesis_id,
+                      to_jsonb(x) -> 'valuation' AS valuation
+                 FROM xavier_management_assessments x WHERE group_id = ANY($1)
                 ORDER BY group_id, position_kind, assessed_at DESC, assessment_id DESC""",
             groups):
         out["assessments"][(r["group_id"], r["position_kind"])] = dict(r)
@@ -885,12 +899,27 @@ def _xavier_management(g, mg: dict) -> dict:
            "management_policy_status": (pol or {}).get("status"),
            "management_policy_approved": bool((pol or {}).get("approved")),
            "href": "/api/command/xavier/management"}
+    import time as _time
+
+    from . import xavier_freshness as XF
+    from .agents import xavier_management as XM
     for kind in ("PAPER", "ACTUAL"):
         a = (mg.get("assessments") or {}).get((g, kind))
         t = (mg.get("theses") or {}).get((g, kind))
         v = (mg.get("value_add") or {}).get((g, kind))
         re_ = _js(a.get("reallocate")) if a else {}
+        # THE RECOMMENDATION RE-JUDGED NOW (owner P0): the action only while
+        # CURRENT, the state otherwise; the stored word stays recorded
+        fr = None if a is None else XF.of_assessment(
+            dict(a, assessed_at=(a["assessed_at"].timestamp()
+                                 if hasattr(a["assessed_at"], "timestamp")
+                                 else a["assessed_at"]),
+                 valuation=_js(a.get("valuation")) or None),
+            now=_time.time(), limit_s=XM._config_limit())
         out[kind.lower()] = {
+            "recommendation_state": fr["recommendation_state"] if fr else None,
+            "recorded_recommendation": a["recommendation"] if a else None,
+            "freshness": fr,
             "assessment_id": a["assessment_id"] if a else None,
             "reviewed_at": _iso(a["assessed_at"]) if a else None,
             "trigger": a["trigger"] if a else None,
@@ -906,7 +935,7 @@ def _xavier_management(g, mg: dict) -> dict:
             "entry_ev_usd": _f(t["entry_ev_usd"]) if t else None,
             "thesis_expires_at": _iso(t["thesis_expires_at"]) if t else None,
             "evidence_expires_at": _iso(t["evidence_expires_at"]) if t else None,
-            "recommendation": a["recommendation"] if a else None,
+            "recommendation": fr["display_recommendation"] if fr else None,
             "discretionary_permitted": a["discretionary_permitted"] if a else None,
             "reallocate_shadow": ({"recommended": bool(re_.get("recommended")),
                                    "blocker": re_.get("blocker"), "mode": "SHADOW"}
@@ -939,7 +968,23 @@ RECONCILIATION_MEANING = {
 }
 PROTECTION_RULE = ("a resting protective order is NOT filled protection: the standing "
                    "(resting) quantity and the filled protection quantity are shown "
-                   "separately and never added together")
+                   "separately and never added together. " + OST.RULE + ". "
+                   + OST.POSITION_BASIS)
+
+
+def protection_quantities(*, held, resting, filled, pending=None) -> dict:
+    """THE PROTECTION LEDGER OF ONE BOOK'S GROUP, from the aggregates. A
+    standing protective SALE of the held side has already taken its FILLED
+    quantity out of the holding, so the position it protects is held + filled
+    and the unprotected quantity is that minus the filled protection -- the
+    RESTING quantity never reduces it. Pure."""
+    h, r, f = _d(held), _d(resting), _d(filled)
+    position = h + f if h > 0 or f > 0 else Decimal(0)
+    return {"position_qty": _f(position),
+            "standing_resting_qty": _f(r),
+            "filled_protection_qty": _f(f),
+            "pending_submission_qty": None if pending is None else _f(_d(pending)),
+            "unprotected_qty": _f(max(Decimal(0), position - f))}
 
 
 def _evidence_state(docs) -> tuple:
@@ -993,33 +1038,43 @@ def _protection(g, mg) -> dict:
     lp = mg["live_protection"].get(g)
     if pp is not None and gp.get("fills"):
         open_q = _d(gp.get("open_qty"))
+        q = protection_quantities(held=open_q, resting=pp["resting"],
+                                  filled=pp["filled"], pending=pp.get("pending"))
         paper = {"label": "PAPER POSITION (SIMULATED)", "open_qty": _f(open_q),
-                 "standing_resting_qty": _f(pp["resting"]),
+                 "position_qty": q["position_qty"],
+                 "standing_resting_qty": q["standing_resting_qty"],
                  "standing_resting_orders": pp["resting_orders"],
-                 "filled_protection_qty": _f(pp["filled"]),
-                 "unprotected_qty": _f(open_q - _d(pp["resting"])) if open_q > 0 else _f(0),
+                 "pending_submission_qty": q["pending_submission_qty"],
+                 "filled_protection_qty": q["filled_protection_qty"],
+                 "unprotected_qty": q["unprotected_qty"],
                  "source": ("paper_orders (role STANDING_PROTECTION, still resting) / "
                             "paper_fills (role STANDING_PROTECTION)"),
                  "why_unavailable": None}
     else:
         paper = {"label": "PAPER POSITION (SIMULATED)", "open_qty": None,
+                 "position_qty": None, "pending_submission_qty": None,
                  "standing_resting_qty": None, "standing_resting_orders": None,
                  "filled_protection_qty": None, "unprotected_qty": None, "source": None,
                  "why_unavailable": ("no simulated fill in this group: there is no paper "
                                      "position to protect")}
     if lp is not None and gl.get("live_bought"):
         held = _d(gl["live_held"])
+        q = protection_quantities(held=held, resting=lp["resting"],
+                                  filled=lp["filled"], pending=lp["pending"])
         actual = {"label": "ACTUAL POSITION", "held_qty": _f(held),
-                  "standing_resting_qty": _f(lp["resting"]),
+                  "position_qty": q["position_qty"],
+                  "standing_resting_qty": q["standing_resting_qty"],
                   "standing_resting_orders": lp["resting_orders"],
-                  "pending_submission_qty": _f(lp["pending"]),
-                  "filled_protection_qty": _f(lp["filled"]),
-                  "unprotected_qty": _f(held - _d(lp["resting"])) if held > 0 else _f(0),
+                  "pending_submission_qty": q["pending_submission_qty"],
+                  "filled_protection_qty": q["filled_protection_qty"],
+                  "unprotected_qty": q["unprotected_qty"],
                   "source": ("execmirror_orders (role STANDING_PROTECTION: resting = "
-                             "OPEN / PARTIALLY_FILLED remainder; filled = venue cum qty)"),
+                             "OPEN / PARTIALLY_FILLED / CANCEL_REQUESTED remainder; "
+                             "filled = venue cum qty)"),
                   "why_unavailable": None}
     else:
         actual = {"label": "ACTUAL POSITION", "held_qty": None,
+                  "position_qty": None,
                   "standing_resting_qty": None, "standing_resting_orders": None,
                   "pending_submission_qty": None, "filled_protection_qty": None,
                   "unprotected_qty": None, "source": None,
@@ -1154,6 +1209,19 @@ def _chain(r: dict, paper: dict, actual: dict, mg: dict) -> dict:
                       "NOT_APPLICABLE links are absent by design, with the reason")}
 
 
+def _gated_review(v: dict) -> dict:
+    """A paper review's recommendation re-judged at read time
+    (xavier_freshness.of_review on its own recorded measure)."""
+    import time as _time
+
+    from . import xavier_freshness as XF
+    ra = v.get("reviewed_at")
+    from .agents import xavier_management as XM
+    return XF.of_review(dict(v, reviewed_at=(ra.timestamp() if hasattr(
+        ra, "timestamp") else ra)), now=_time.time(),
+        limit_s=XM._config_limit())
+
+
 def _management_section(r: dict, mg: dict, now=None) -> dict:
     g = r.get("group_id")
     h = mg["handoffs"].get(g)
@@ -1174,7 +1242,12 @@ def _management_section(r: dict, mg: dict, now=None) -> dict:
           "latest_review_id": v["review_id"] if v else None,
           "latest_review_at": _iso(v["reviewed_at"]) if v else None,
           "latest_review_trigger": v["trigger"] if v else None,
-          "latest_recommendation": v["recommendation"] if v else None,
+          # re-judged now (owner P0): the action only while CURRENT
+          "latest_recommendation": _gated_review(v)["display_recommendation"]
+          if v else None,
+          "latest_recommendation_state": _gated_review(v)[
+              "recommendation_state"] if v else None,
+          "latest_recorded_recommendation": v["recommendation"] if v else None,
           # the probability's freshness on that review (paper_xavier E_*)
           "latest_probability_evidence_state": v.get("evidence_state") if v else None,
           "latest_probability_limitation": v.get("probability_limitation") if v else None,
@@ -1394,7 +1467,12 @@ def _decision_management(mg: dict, g) -> dict:
             nxt = _iso(rv["reviewed_at"] + dt.timedelta(seconds=float(rv["backstop_s"])))
         except (TypeError, ValueError):
             nxt = None
-    return {"xavier_recommendation": rv.get("recommendation"),
+    gr = _gated_review(rv) if rv else None
+    return {"xavier_recommendation": (gr["display_recommendation"]
+                                      if gr else None),
+            "xavier_recommendation_state": (gr["recommendation_state"]
+                                            if gr else None),
+            "xavier_recorded_recommendation": rv.get("recommendation"),
             "xavier_actual_action": lr.get("action"),
             "probability_evidence_state": (lr.get("evidence_state")
                                            or rv.get("evidence_state")),
@@ -1724,7 +1802,7 @@ async def small_live(conn, *, view: str | None = None, status: str | None = None
             "chain": _chain(r, paper, actual, mg)})
     counts = await _counts(conn)
     return {
-        "title": "Small Live · Paper vs Actual",
+        "title": "Legacy Mirror Validation · Paper vs Actual",
         "basis": ("ONE qualified decision -> PAPER and ACTUAL, as siblings. PAPER is "
                   "SIMULATED: the paper order and its simulated fills. ACTUAL is the "
                   "live venue: the separate retail account's order at the decision's "

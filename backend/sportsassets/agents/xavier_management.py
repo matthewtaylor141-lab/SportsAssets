@@ -71,6 +71,8 @@ import time
 from decimal import Decimal
 from typing import Any
 
+from .. import xavier_freshness as XF
+
 VERSION = "XAVIER_MANAGEMENT_V1"
 K_PAPER, K_ACTUAL = "PAPER", "ACTUAL"
 E_FRESH = "FRESH_CURRENT_PROBABILITY"
@@ -168,6 +170,19 @@ async def has_schema(conn) -> bool:
             "SELECT to_regclass('xavier_management_assessments') IS NOT NULL"
             " AND to_regclass('xavier_entry_theses') IS NOT NULL"
             " AND to_regclass('xavier_value_add') IS NOT NULL"))
+    except Exception:                                           # noqa: BLE001
+        return False
+
+
+async def has_valuation_columns(conn) -> bool:
+    """Migration 222 applied: the assessment carries its valuation and its
+    write-time recommendation state."""
+    try:
+        return int(await conn.fetchval(
+            "SELECT count(*) FROM information_schema.columns "
+            " WHERE table_name = 'xavier_management_assessments' "
+            "   AND column_name IN ('valuation', 'recommendation_state')"
+            "   AND table_schema = current_schema()") or 0) == 2
     except Exception:                                           # noqa: BLE001
         return False
 
@@ -511,9 +526,12 @@ async def best_opportunity(conn, *, at: float, exclude_slugs) -> dict | None:
 # THE ASSESSMENT RECORD
 # ═════════════════════════════════════════════════════════════════════
 
-def paper_alternatives(alts: dict, *, reallocate: dict) -> list:
-    """HOLD / EXIT / REDUCE / VERIFIED_HEDGE / REALLOCATE from the paper
-    review's own ranking (paper_xavier.alternatives). Pure."""
+def paper_alternatives(alts: dict, *, reallocate: dict,
+                       evidence_state=None) -> list:
+    """HOLD / EXIT / REDUCE / NETTING / VERIFIED_HEDGE / REALLOCATE from the
+    paper review's own ranking (paper_xavier.alternatives), completed to the
+    six management options (xavier_freshness.complete_alternatives: each
+    valued or carrying a NAMED missing-evidence reason). Pure."""
     out, seen = [], set()
     for c in alts.get("candidates") or []:
         out.append({"action": c.get("action"), "rankable": True,
@@ -546,7 +564,7 @@ def paper_alternatives(alts: dict, *, reallocate: dict) -> list:
                 "mode": "SHADOW", "recommended": reallocate["recommended"],
                 "blocker": reallocate.get("blocker"),
                 "value_usd": reallocate.get("position_ev_from_here_usd")})
-    return out
+    return XF.complete_alternatives(out, evidence_state=evidence_state)
 
 
 def actual_alternatives(*, evidence: dict, held: int, exit_px,
@@ -594,6 +612,10 @@ def actual_alternatives(*, evidence: dict, held: int, exit_px,
         else:
             alts.append(dict(c, rankable=True, blocker=None))
             vals[act] = v
+    # SAME-VENUE NETTING: on this venue one signed net position means
+    # buying the complement IS the sale -- valued once, as EXIT
+    alts.append({"action": "NETTING", "rankable": False, "value_usd": None,
+                 "blocker": "IDENTICAL_TO_EXIT_ON_A_ONE_NET_POSITION_VENUE"})
     alts.append({"action": A_HEDGE, "rankable": False, "value_usd": None,
                  "blocker": B_NO_HEDGE_PROOF})
     alts.append({"action": A_REALLOCATE, "rankable": False, "mode": "SHADOW",
@@ -601,11 +623,17 @@ def actual_alternatives(*, evidence: dict, held: int, exit_px,
                  "blocker": reallocate.get("blocker"),
                  "value_usd": reallocate.get("position_ev_from_here_usd")})
     rec = None
-    if vals:
+    if vals and fresh:
         rec = max(sorted(vals), key=lambda k: (vals[k], k == A_HOLD))
-        if not fresh:
-            rec = A_HOLD           # stale: hold with the limitation stated
-    return {"alternatives": alts, "recommendation": rec}
+    # NOT FRESH: no management action is recommended at all -- HOLD never
+    # survives by default because EXIT / REDUCE were blocked (owner P0). The
+    # position stays held; that is a fact about the book, not a
+    # recommendation (WAITING_FOR_FRESH_EVIDENCE, or
+    # MANAGEMENT_UNAVAILABLE_STALE_INPUT with no probability at all).
+    state = evidence.get("evidence_state") if p is not None else E_NONE
+    rec = XF.recorded_recommendation(evidence_state=state, selected=rec)
+    return {"alternatives": XF.complete_alternatives(
+        alts, evidence_state=state), "recommendation": rec}
 
 
 def assessment(*, kind: str, group_id: str, review_id: str, thesis: dict |
@@ -618,11 +646,20 @@ def assessment(*, kind: str, group_id: str, review_id: str, thesis: dict |
     if state not in EVIDENCE_STATES:
         state = E_NONE
     fresh = state == E_FRESH
-    if not fresh and recommendation in DISCRETIONARY:
-        recommendation = A_HOLD
+    # NOT FRESH -> NO MANAGEMENT ACTION IS RECOMMENDED (owner P0): never a
+    # discretionary sale (206 CHECK) and never a HOLD that only survived
+    # because the sales were blocked: WAITING_FOR_FRESH_EVIDENCE, or
+    # MANAGEMENT_UNAVAILABLE_STALE_INPUT when there is no probability.
+    recommendation = XF.recorded_recommendation(evidence_state=state,
+                                                selected=recommendation)
     if not fresh:
         reallocate = dict(reallocate, recommended=False)
     p = None if state == E_NONE else evidence.get("probability")
+    limit = evidence.get("probability_limit_s")
+    if limit is None and thesis:
+        limit = thesis.get("probability_limit_s")
+    valuation = XF.valuation_block(dict(evidence, evidence_state=state),
+                                   assessed_at=at, limit_s=limit)
     return {"assessment_id": "xma:" + _sha([kind, review_id])[:32],
             "position_kind": kind, "group_id": group_id,
             "review_id": review_id,
@@ -641,6 +678,9 @@ def assessment(*, kind: str, group_id: str, review_id: str, thesis: dict |
             "thesis_state": thesis_state.get("state", TH_NONE),
             "thesis_detail": thesis_state, "alternatives": alternatives,
             "recommendation": recommendation,
+            "recommendation_state": XF.write_state(
+                evidence_state=state, recommendation=recommendation),
+            "valuation": valuation,
             "discretionary_permitted": fresh,
             "reallocate": reallocate, "policy": policy}
 
@@ -649,6 +689,18 @@ async def record_assessment(conn, a: dict) -> dict:
     """INSERT the assessment (idempotent). Never raises."""
     if not await has_schema(conn):
         return {"ok": False, "why": "MIGRATION_206_NOT_APPLIED"}
+    # migration 222: the valuation the recommendation stands on and its
+    # write-time state, in the same INSERT (the 206 trigger forbids UPDATE);
+    # before 222 the row is written as before and the read layer derives
+    # the valuation from probability_age_s (stated as derived)
+    v222 = await has_valuation_columns(conn)
+    cols, vals = "", ""
+    extra: tuple = ()
+    if v222:
+        cols = ", valuation, recommendation_state"
+        vals = ", $24::jsonb, $25"
+        extra = (_dumps(a.get("valuation") or {}),
+                 a.get("recommendation_state"))
     try:
         async with conn.transaction():
             await conn.execute(
@@ -658,10 +710,11 @@ async def record_assessment(conn, a: dict) -> dict:
                 " within_bound, evidence_state, probability, "
                 " probability_source, probability_age_s, venue_economics, "
                 " thesis_state, thesis_detail, alternatives, recommendation, "
-                " discretionary_permitted, reallocate, policy) VALUES ($1,$2,"
+                " discretionary_permitted, reallocate, policy" + cols + ")"
+                " VALUES ($1,$2,"
                 " $3,$4,$5,to_timestamp($6),$7,to_timestamp($8),$9,$10,$11,"
                 " $12,$13,$14,$15,$16::jsonb,$17,$18::jsonb,$19::jsonb,$20,"
-                " $21,$22::jsonb,$23::jsonb) ON CONFLICT DO NOTHING",
+                " $21,$22::jsonb,$23::jsonb" + vals + ") ON CONFLICT DO NOTHING",
                 a["assessment_id"], a["position_kind"], a["group_id"],
                 a["review_id"], a["thesis_id"], a["assessed_at"],
                 a["trigger"], _ts(a.get("due_at")), a.get("review_latency_s"),
@@ -671,8 +724,9 @@ async def record_assessment(conn, a: dict) -> dict:
                 _dumps(a["venue_economics"]), a["thesis_state"],
                 _dumps(a["thesis_detail"]), _dumps(a["alternatives"]),
                 a.get("recommendation"), a["discretionary_permitted"],
-                _dumps(a["reallocate"]), _dumps(a["policy"]))
-        return {"ok": True, "assessment_id": a["assessment_id"]}
+                _dumps(a["reallocate"]), _dumps(a["policy"]), *extra)
+        return {"ok": True, "assessment_id": a["assessment_id"],
+                "valuation_recorded": v222}
     except Exception as exc:                                    # noqa: BLE001
         return {"ok": False, "why": "ASSESSMENT_WRITE_FAILED:%s"
                 % type(exc).__name__, "detail": str(exc)[:200]}
@@ -957,11 +1011,16 @@ async def _paper_review_hook(conn, ctx, *, group_id, pos, review_id, trigger,
     a = assessment(kind=K_PAPER, group_id=group_id, review_id=review_id,
                    thesis=thesis, at=at, lat=lat, evidence=measure,
                    venue_economics=venue, thesis_state=th,
-                   alternatives=paper_alternatives(alts, reallocate=re),
+                   alternatives=paper_alternatives(
+                       alts, reallocate=re,
+                       evidence_state=measure.get("evidence_state")),
                    recommendation=recommendation, reallocate=re,
                    policy=policy)
     got = await record_assessment(conn, a)
     return dict(got, thesis_state=a["thesis_state"],
+                recommendation=a["recommendation"],
+                recommendation_state=a["recommendation_state"],
+                valuation=a["valuation"],
                 reallocate_recommended=a["reallocate"]["recommended"],
                 within_bound=a["within_bound"],
                 review_latency_s=a["review_latency_s"])
@@ -1176,6 +1235,8 @@ async def _actual_review_hook(conn, h, *, review_id, at, trigger, due_at,
     got = await record_assessment(conn, a)
     return dict(got, thesis_state=a["thesis_state"],
                 recommendation=a["recommendation"],
+                recommendation_state=a["recommendation_state"],
+                valuation=a["valuation"],
                 reallocate_recommended=a["reallocate"]["recommended"],
                 within_bound=a["within_bound"],
                 review_latency_s=a["review_latency_s"],
@@ -1494,7 +1555,7 @@ def _assessment_view(r) -> dict | None:
     a = {}
     for k, v in dict(r).items():
         if k in ("venue_economics", "thesis_detail", "alternatives",
-                 "reallocate", "policy"):
+                 "reallocate", "policy", "valuation"):
             v = _j(v)
         elif hasattr(v, "timestamp"):
             v = v.timestamp()
@@ -1502,14 +1563,205 @@ def _assessment_view(r) -> dict | None:
     return a
 
 
+#: the read-time context looks for a newer valuation this far back (a
+#: recommendation whose source is older than this is STALE regardless)
+CONTEXT_VALUATION_LOOKBACK_S = 3600.0
+
+#: THE LATEST VALUATION OF EACH PAPER GROUP'S OWN CONTRACT (the measure's
+#: own contract identity; xavier_freshness.LATEST_VALUATION_SQL)
+LATEST_VALUATION_SQL = XF.LATEST_VALUATION_SQL
+
+
+async def validity_context(conn, items, *, now: float) -> dict:
+    """WHAT HAPPENED SINCE EACH RECOMMENDATION, for the read-time validity
+    (xavier_freshness.validity): the latest valuation of the paper group's
+    own contract, the held market's latest venue mark (best exit of the
+    held side in the latest observed book), the in-process PinnAPI change
+    of the held slug (pinnapi_held; None in a process without the feed).
+    `items`: [(kind, group_id, slug, holding_side)]. Read only; a failed
+    read leaves that context out (named in `unchecked`), never invents it.
+    """
+    from .. import bettor_paper_ledger as L
+    from .. import bettor_paper_simulator as SIM
+    out: dict = {"by_group": {}, "unchecked": []}
+    paper = [(g, s, side) for k, g, s, side in items
+             if k == K_PAPER and g and s]
+    groups = sorted({g for g, _, _ in paper})
+    slugs = sorted({s for _, s, _ in paper})
+    lv: dict = {}
+    if groups:
+        try:
+            for r in await conn.fetch(LATEST_VALUATION_SQL, groups,
+                                      float(now)
+                                      - CONTEXT_VALUATION_LOOKBACK_S):
+                lv[r["group_id"]] = {"id": r["id"],
+                                     "probability": _f(r["probability"]),
+                                     "observed_at": _epoch(r["observed_at"])}
+        except Exception as exc:                                # noqa: BLE001
+            out["unchecked"].append("LATEST_VALUATION_UNREADABLE:%s"
+                                    % type(exc).__name__)
+    books: dict = {}
+    if slugs:
+        try:
+            for r in await conn.fetch(
+                    "SELECT DISTINCT ON (us_market_slug) us_market_slug, "
+                    "       bids, offers, error, observed_at "
+                    "  FROM paper_book_observations "
+                    " WHERE us_market_slug = ANY($1::text[]) "
+                    " ORDER BY us_market_slug, observed_at DESC", slugs):
+                books[r["us_market_slug"]] = r
+        except Exception as exc:                                # noqa: BLE001
+            out["unchecked"].append("VENUE_MARK_UNREADABLE:%s"
+                                    % type(exc).__name__)
+    try:
+        from .. import pinnapi_held as PH
+    except Exception:                                           # noqa: BLE001
+        PH = None                                               # noqa: N806
+    for g, s, side in paper:
+        ctx: dict = {"latest_valuation": lv.get(g)}
+        b = books.get(s)
+        if b is not None and not b["error"]:
+            lvls = SIM.levels_for({"bids": L._j(b["bids"]) or [],
+                                   "offers": L._j(b["offers"]) or []},
+                                  direction="SELL",
+                                  holding_side=side)["levels"]
+            ctx["mark_now"] = lvls[0]["price"] if lvls else None
+        ctx["feed_change_at"] = None if PH is None else PH.changed_at(s)
+        out["by_group"][g] = ctx
+    return out
+
+
+def _config_limit() -> float | None:
+    """THE EXISTING freshness limit as the paper session configures it
+    (entry.pinnacle_max_age_s = ext_pinnacle_loop.PINNACLE_MAX_AGE_S), the
+    fallback when a stored row recorded none. Never defines one."""
+    try:
+        from .. import bettor_paper_session as S
+        return float(S.default_config()["entry"]["pinnacle_max_age_s"])
+    except Exception:                                           # noqa: BLE001
+        return None
+
+
+async def _group_refs(conn, groups: list) -> dict:
+    """group -> (slug, holding_side, event_start_at of a pre-event thesis)
+    for paper groups (their ENTRY order; the thesis). Never raises."""
+    out: dict = {}
+    if not groups:
+        return out
+    try:
+        for r in await conn.fetch(
+                "SELECT DISTINCT ON (group_id) group_id, us_market_slug, "
+                "       holding_side FROM paper_orders "
+                " WHERE group_id = ANY($1::text[]) AND role = 'ENTRY' "
+                " ORDER BY group_id, created_at", groups):
+            out[r["group_id"]] = {"slug": r["us_market_slug"],
+                                  "side": r["holding_side"]}
+        if await has_schema(conn):
+            for r in await conn.fetch(
+                    "SELECT group_id, event_start_at, probability_limit_s "
+                    "  FROM xavier_entry_theses WHERE position_kind = 'PAPER'"
+                    "   AND group_id = ANY($1::text[])", groups):
+                d = out.setdefault(r["group_id"], {})
+                d["event_start_at"] = _epoch(r["event_start_at"])
+                d["limit_s"] = _f(r["probability_limit_s"])
+    except Exception:                                           # noqa: BLE001
+        pass
+    return out
+
+
+async def gate_paper_reviews(conn, rows: list, *, now: float | None = None,
+                             latest_only: bool = True) -> list:
+    """THE READ LAYER FOR paper_xavier_reviews ROWS (owner P0): each row's
+    recommendation re-judged at `now` (xavier_freshness.of_review: the
+    review's own measure, the newer valuation of its contract, the venue
+    mark now, the event start; a row that is not its group's newest review
+    is INVALID as superseded unless `latest_only` says every row given is
+    the newest). The stored word is kept in `recorded_recommendation`; the
+    alternatives are completed to the six options. Never raises: on a
+    context failure the time rule alone still applies."""
+    at = float(now if now is not None else time.time())
+    rows = [dict(r) for r in rows]
+    groups = sorted({r.get("group_id") for r in rows if r.get("group_id")})
+    refs = await _group_refs(conn, groups)
+    ctx = await validity_context(
+        conn, [(K_PAPER, g, (refs.get(g) or {}).get("slug"),
+                (refs.get(g) or {}).get("side")) for g in groups], now=at)
+    newest: dict = {}
+    if not latest_only:
+        for r in rows:
+            g, t = r.get("group_id"), _epoch(r.get("reviewed_at"))
+            if t is not None and (g not in newest or t > newest[g][0]):
+                newest[g] = (t, r.get("review_id"))
+    out = []
+    for r in rows:
+        g = r.get("group_id")
+        c = dict(ctx["by_group"].get(g) or {})
+        ref = refs.get(g) or {}
+        nid = None
+        if not latest_only and g in newest and \
+                newest[g][1] != r.get("review_id"):
+            nid = newest[g][1]
+        blk = XF.of_review(
+            r, now=at, limit_s=ref.get("limit_s") or _config_limit(),
+            latest_valuation=c.get("latest_valuation"),
+            feed_change_at=c.get("feed_change_at"),
+            mark_now=c.get("mark_now"),
+            event_start_at=ref.get("event_start_at"),
+            newer_assessment_id=nid)
+        gr = XF.gated(r, blk)
+        m = _j(r.get("measure")) or {}
+        if "alternatives" in r:
+            alts = _j(r.get("alternatives")) or {}
+            if isinstance(alts, dict):
+                flat = list(alts.get("candidates") or []) + list(
+                    alts.get("not_rankable") or [])
+            else:
+                flat = alts if isinstance(alts, list) else []
+            gr["alternatives_complete"] = XF.complete_alternatives(
+                flat, evidence_state=m.get("evidence_state")
+                if isinstance(m, dict) else None)
+        out.append(gr)
+    return out
+
+
+def assessment_validity(a: dict | None, *, thesis: dict | None, now: float,
+                        ctx: dict | None = None) -> dict | None:
+    """THE READ-TIME STATE OF ONE STORED ASSESSMENT (pure): its own
+    valuation (migration 222) or the one derived from its recorded age; the
+    newer valuation / venue mark / PinnAPI change from `ctx`; the event
+    start from the thesis."""
+    if a is None:
+        return None
+    c = dict(ctx or {})
+    ve = a.get("venue_economics") or {}
+    if not isinstance(ve, dict):
+        ve = {}
+    return XF.of_assessment(
+        a, now=now, limit_s=((thesis or {}).get("probability_limit_s")
+                             or _config_limit()),
+        latest_valuation=c.get("latest_valuation"),
+        feed_change_at=c.get("feed_change_at"),
+        mark_at_assessment=ve.get("best_exit"), mark_now=c.get("mark_now"),
+        event_start_at=(thesis or {}).get("event_start_at"),
+        newer_assessment_id=c.get("newer_assessment_id"))
+
+
 def position_view(*, kind: str, group_id: str, ref: dict, thesis: dict |
                   None, a: dict | None, va: dict | None, cadence_s: float,
-                  now: float) -> dict:
-    """One managed position as the Command Centre shows it. Pure."""
+                  now: float, ctx: dict | None = None) -> dict:
+    """One managed position as the Command Centre shows it. Pure. The
+    recommendation is GATED at read time: `recommendation` is the action
+    only while CURRENT and the state (STALE / INVALID /
+    WAITING_FOR_FRESH_EVIDENCE / MANAGEMENT_UNAVAILABLE_STALE_INPUT)
+    otherwise; the stored word stays in `recorded_recommendation`."""
     last = None if a is None else a.get("assessed_at")
     due = None if last is None else last + float(cadence_s)
     td = (a or {}).get("thesis_detail") or {}
     ve = (a or {}).get("venue_economics") or {}
+    fr = assessment_validity(a, thesis=thesis, now=now, ctx=ctx)
+    ev_state = (a or {}).get("evidence_state")
+    alts = (None if a is None else XF.complete_alternatives(
+        a.get("alternatives"), evidence_state=ev_state))
     return {
         "position_kind": kind, "group_id": group_id, **ref,
         "latest_review": None if a is None else {
@@ -1545,8 +1797,27 @@ def position_view(*, kind: str, group_id: str, ref: dict, thesis: dict |
                        "thesis_expires_at"),
                    "expiry_basis": (thesis or {}).get("expiry_basis"),
                    "detail": td or None},
-        "alternatives": (a or {}).get("alternatives"),
-        "recommendation": (a or {}).get("recommendation"),
+        "alternatives": alts,
+        # THE GATED RECOMMENDATION (owner P0): the action word only while
+        # CURRENT; otherwise the state. Holding a position is not a HOLD
+        # recommendation.
+        "recommendation": None if fr is None else fr[
+            "display_recommendation"],
+        "recommendation_state": None if fr is None else fr[
+            "recommendation_state"],
+        "current_recommendation": None if fr is None else fr[
+            "current_recommendation"],
+        "recorded_recommendation": (a or {}).get("recommendation"),
+        "management_state": None if fr is None else fr["management_state"],
+        "freshness": fr,
+        # ONE SHAPE FOR EVERY XAVIER DECISION (review id / time, valuation
+        # id / version / time, age, limit, superseded_by)
+        "decision": None if fr is None else XF.decision(
+            fr, review_id=a.get("review_id"),
+            reviewed_at=a.get("assessed_at")),
+        "position_held": {"open_qty": ref.get("open_qty"),
+                          "is": ("a fact about the book; NOT a HOLD "
+                                 "recommendation")},
         "reallocate": (a or {}).get("reallocate"),
         "venue_economics": ve or None,
         "policy": (a or {}).get("policy"),
@@ -1579,6 +1850,19 @@ async def management_view(conn, *, limit: int = 100,
             "no_discretion_on_stale": (
                 "EXIT / REDUCE / REALLOCATE are recommended only on "
                 "FRESH_CURRENT_PROBABILITY"),
+            "no_hold_by_default": (
+                "a review on non-fresh evidence recommends nothing: "
+                "WAITING_FOR_FRESH_EVIDENCE (stale probability) or "
+                "MANAGEMENT_UNAVAILABLE_STALE_INPUT (none); a held position "
+                "is not a HOLD recommendation"),
+            "recommendation_states": list(XF.STATES),
+            "read_time_validity": (
+                "every recommendation is re-judged at read time: STALE once "
+                "now > its probability's source_at + its freshness limit, "
+                "INVALID on a newer valuation, a PinnAPI change, a venue-"
+                "mark move >= %.2f USD, the event starting or a newer "
+                "assessment; only CURRENT shows the action"
+                % XF.VENUE_MARK_INVALIDATION_USD),
             "reallocate": "SHADOW recommendation only; never an order",
             "verified_hedge": ("only with proven settlement/payoff "
                                "compatibility; otherwise not ranked"),
@@ -1649,16 +1933,23 @@ async def management_view(conn, *, limit: int = 100,
         for v in await value_add(conn, limit=1000):
             if v["group_id"] in groups:
                 vas[(v["group_id"], v["position_kind"])] = v
-    by_ev, by_th = {}, {}
+    by_ev, by_th, by_rs = {}, {}, {}
     overdue = missing = shadow = 0
+    vctx = await validity_context(
+        conn, [(k, g, ref.get("market"), ref.get("holding_side"))
+               for k, g, ref, _ in refs if ref["state"] == "OPEN"], now=at)
     for kind, g, ref, cad in refs:
         a = latest.get((g, kind))
         pv = position_view(kind=kind, group_id=g, ref=ref,
                            thesis=theses.get((g, kind)), a=a,
-                           va=vas.get((g, kind)), cadence_s=cad, now=at)
+                           va=vas.get((g, kind)), cadence_s=cad, now=at,
+                           ctx=(vctx["by_group"].get(g)
+                                if kind == K_PAPER else None))
         if ref["state"] == "OPEN":
             st = (pv["evidence"] or {}).get("state") or "NO_REVIEW"
             by_ev[st] = by_ev.get(st, 0) + 1
+            rs = pv["recommendation_state"] or "NO_REVIEW"
+            by_rs[rs] = by_rs.get(rs, 0) + 1
             ts = pv["thesis"]["state"] or "NO_REVIEW"
             by_th[ts] = by_th.get(ts, 0) + 1
             overdue += 1 if pv["review_overdue"] else 0
@@ -1671,6 +1962,8 @@ async def management_view(conn, *, limit: int = 100,
         "positions": len(refs),
         "open_positions": sum(1 for r in refs if r[2]["state"] == "OPEN"),
         "by_evidence_state": by_ev, "by_thesis_state": by_th,
+        "by_recommendation_state": by_rs,
+        "validity_context_unchecked": vctx["unchecked"],
         "reviews_overdue": overdue, "open_without_review": missing,
         "reallocate_shadow_recommended": shadow,
         "value_add_rows": len(vas),

@@ -605,7 +605,29 @@ READERS = {
     # THE POSITION ROOM (GET-only, read-only): a room's fixture row is
     # reached through its own decision's valuation id -> condition_id; the
     # module names the table once in prose. No selection, no write.
-    "position_rooms.py": ("FIXTURE_IDENTITY_BY_DECISION_VALUATION_ID_ONLY", 2),
+    # (222) plus an existence check before the freshness context read below
+    "position_rooms.py": ("FIXTURE_IDENTITY_BY_DECISION_VALUATION_ID_ONLY", 3),
+    # (222) XAVIER'S RECOMMENDATION FRESHNESS TRUTH: LATEST_VALUATION_SQL
+    # reads the newest valuation of an already-HELD paper group's own
+    # contract (the measure's identity: the entry decision's valuation id ->
+    # payout event / complement, the held side's intent) only to decide
+    # whether a stored recommendation is still CURRENT (a changed primary
+    # valuation makes it INVALID). Display / requeue only: never selects a
+    # candidate, sizes or places anything.
+    "xavier_freshness.py": (
+        "HELD_POSITION_NEWER_VALUATION_FOR_RECOMMENDATION_VALIDITY_ONLY", 2),
+    # (220) THE LOST OPPORTUNITY LEDGER (RESEARCH): reads the valuation row
+    # a SETTLED Derek REFUSE decision already links to, BY ID ONLY (venue,
+    # payout event, settlement comparison, sport family, event key), to
+    # verify whether the refusal's control condition held at decision time;
+    # both purposes, because the decision was taken on that row whatever its
+    # purpose. The runner names the table once as an evidence-id prefix. It
+    # selects no candidate, sizes and places nothing, and writes only lol_*
+    # tables (tests/test_lost_opportunity_is_research_only.py).
+    "lost_opportunity/reads.py": (
+        "BY_ID_OF_A_SETTLED_REFUSALS_DECISION_RESEARCH_CLASSIFICATION_ONLY",
+        2),
+    "lost_opportunity/runner.py": ("EVIDENCE_ID_PREFIX_ONLY", 1),
 }
 
 

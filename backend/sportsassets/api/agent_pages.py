@@ -105,7 +105,8 @@ REQUIRED_SECTIONS = {
                "releases", "directives", "conversations", "provider"),
     "karen": ("status", "authority", "current_challenges",
               "recent_challenges", "metrics", "detectors"),
-    "eddie": ("status", "authority", "desk", "current_estimates",
+    "eddie": ("status", "authority", "desk", "execution_funnel",
+              "current_estimates",
               "predicted_vs_realized", "scorecard", "candidate_reviews",
               "runner"),
     "scout": ("status", "authority", "desk", "sources", "features",
@@ -1638,6 +1639,30 @@ POS_JS = r"""
       {label: 'Definition', keys: ['definition']}], {rd: ctx.rd});
   }
   function deskNote(sec) { var d = isObj(sec.data) ? sec.data : {}; return '<p class="note">The desk above draws these values: ' + esc(d.name) + ', ' + esc(d.role) + ', authority ' + esc(d.authority) + '; affordances ' + esc(d.affordances) + '.</p>'; }
+  /* RECOMMENDATIONS ARE NOT ORDERS: Eddie's shadow EXECUTE_NOW /
+     SKIP_EXECUTION counts, then what was actually submitted, venue-
+     acknowledged and filled by a BETTOR-originated order, each in its own
+     cell; the legacy mirror's orders are named apart and are not Eddie's. */
+  function funnel(sec) {
+    var d = isObj(sec.data) ? sec.data : null;
+    if (!d) return AG.genericBody(sec);
+    function cell(lbl, v, sub) {
+      return '<div class="metric"><div class="lbl">' + esc(lbl) + '</div><div class="v">' + (typeof v === 'number' ? esc(v.toLocaleString('en-US')) : AG.unk(d.why || 'unmeasured')) + '</div>' + (sub ? '<div class="mute" style="font-size:12px">' + esc(sub) + '</div>' : '') + '</div>';
+    }
+    var sl = isObj(d.small_live) ? d.small_live : {};
+    var ven = isObj(sl.venues) ? sl.venues : {};
+    var lm = isObj(d.legacy_mirror_not_eddie) ? d.legacy_mirror_not_eddie : null;
+    return '<p class="note"><b>Recommendations are not orders.</b> Eddie is SHADOW ONLY: an EXECUTE_NOW recommendation sends nothing.</p>'
+      + '<div class="metrics">' + cell('EXECUTE_NOW recommendations', d.execute_now_recommendations, 'shadow · not orders')
+      + cell('SKIP_EXECUTION recommendations', d.skip_execution_recommendations, 'shadow')
+      + cell('Orders actually submitted', d.bettor_orders_submitted, 'BETTOR-originated only')
+      + cell('Venue-acknowledged orders', d.bettor_orders_venue_acknowledged, 'venue ack recorded')
+      + cell('Fills', d.bettor_fills, 'venue fills') + '</div>'
+      + '<p class="note">' + esc(d.orders_basis || '') + '</p>'
+      + '<p><b>' + esc(sl.title || 'SMALL LIVE — BETTOR ORIGINATED') + ':</b> ' + AG.statusPill(sl.status || 'UNAVAILABLE') + ' <span class="mute">' + esc(sl.why || '') + '</span></p>'
+      + '<p class="mute">Polymarket US: ' + esc((ven.polymarket_us || {}).state || '—') + ' · Kalshi: ' + esc((ven.kalshi || {}).state || '—') + '</p>'
+      + (lm ? '<p class="mute">' + esc(lm.label || 'LEGACY MIRROR VALIDATION') + ' (not Eddie\'s, not Small Live): ' + esc(lm.orders_sent_or_planned) + ' sent or planned · ' + esc(lm.venue_acknowledged) + ' venue-acknowledged · ' + esc(lm.fills) + ' fills</p>' : '');
+  }
   function estimates(sec, ctx) {
     var rows = AG.rowsOf(sec.data, ['estimates', 'rows']);
     if (!rows.length) return AG.genericBody(sec, ctx.rd);
@@ -1733,6 +1758,7 @@ POS_JS = r"""
     {key: 'status', title: 'Status & heartbeat', render: R.status},
     {key: 'authority', title: 'Authority · SHADOW ONLY', note: 'Eddie holds no venue submission, order, cancel, capital, approval or promotion authority. Enforced in code and in the database (migration 217).'},
     {key: 'desk', title: 'Desk record', render: deskNote},
+    {key: 'execution_funnel', title: 'Recommendations vs orders · SMALL LIVE — BETTOR ORIGINATED', render: funnel, wide: true, note: 'EXECUTE_NOW and SKIP_EXECUTION are shadow recommendations, never orders. Orders, venue acknowledgements and fills count only BETTOR-originated venue orders; legacy mirror orders never count.'},
     {key: 'current_estimates', title: 'Execution estimates (shadow)', render: estimates, wide: true, note: 'Never EXECUTE_NOW / REST_LIMIT / SPLIT when the expected executable EV is not positive. Null is unmeasured, never zero.'},
     {key: 'predicted_vs_realized', title: 'Predicted vs realized execution loss', render: outcomes, wide: true},
     {key: 'scorecard', title: 'Scorecard · numerator / denominator', render: metricsTable, wide: true, note: 'UNAVAILABLE until measured.'},

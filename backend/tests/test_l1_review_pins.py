@@ -47,6 +47,7 @@ from tests.test_l1_rearm_window import (H24, REARM_AT, TRIPPED, _loss_reads, _mo
                                         _reduce_world)
 from tests.test_mirror_live_worker import GTC_TIF, IOC_TIF, NOW, SLUG, _armed  # noqa: F401 — the fixture
 from tests.test_mirror_live_worker import _census, _places, _pool, _tick, _Venue
+from tests.workflow_source import render_ops_file as _render_ops_file
 
 
 @pytest.fixture(autouse=True)
@@ -56,7 +57,7 @@ def _fixtures_limit(monkeypatch):
     source there). The tick reads the attribute at tick time."""
     monkeypatch.setattr(rules, "MIRROR_LOSS_STOP_USD", 5000.0)
 
-RENDER_OPS = pathlib.Path(__file__).resolve().parents[2] / ".github" / "workflows" / "render-ops.yml"
+RENDER_OPS = _render_ops_file()
 MIGRATION = pathlib.Path(__file__).resolve().parents[1] / "migrations" / "001_init.sql"
 
 
