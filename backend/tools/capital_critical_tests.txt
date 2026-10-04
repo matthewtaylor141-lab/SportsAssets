@@ -827,3 +827,9 @@ tests/test_command_release_authority.py
 # append-only tables; bundles differ per agent and never widen the
 # registry (Karen / Scout / Eddie boundaries); no voice is borrowed.
 tests/test_agent_identity_api_authority.py
+# (R30A ci) THE EXACT-SHA CAPITAL-CRITICAL VERDICT: tools/ci_verdict.py rejects
+# every unquarantined failure or error, malformed / expired / stale quarantine
+# entries, any critical test that fails, errors, skips, xfails or is
+# quarantined, and an empty run; capital-critical.yml runs the whole suite on
+# the exact pushed SHA in the image's 3.12.3 + lock + Postgres 16 environment.
+tests/test_ci_verdict.py
