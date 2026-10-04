@@ -78,12 +78,7 @@ body.bt-hq2.fl .hq2-floor-title h1{max-width:920px}
 
 /* The old static pod fallback remains excellent on phone, but make Allie distinct. */
 .hq2-pod[data-slug="allocator"]{--a:#ff9bcf!important}
-.hq2-pod[data-slug="allocator"] .portrait{
-  background:
-    radial-gradient(circle at 50% 25%,#eef3fb 0 11%,transparent 12%),
-    radial-gradient(ellipse at 50% 34%,rgba(255,155,207,.48) 0 31%,transparent 32%),
-    linear-gradient(180deg,transparent 0 36%,#311c3c 37% 100%)!important
-}
+/* (her pod face is a still render of her own licensed 3D model, set by hq2-floor.js; no drawn figure) */
 
 /* Equity: the latest *real* point owns the screen like the reference video. */
 .bt-hq3-last{
@@ -101,12 +96,7 @@ body.bt-hq2.fl .hq2-floor-title h1{max-width:920px}
 
 /* Agent office hero polish. */
 .bt-agent2[data-agent="allocator"]{--a:#ff9bcf!important}
-.bt-agent2[data-agent="allocator"] .bt-agent2-face{
-  background:
-    radial-gradient(circle at 50% 25%,#edf2f8 0 11%,transparent 12%),
-    radial-gradient(ellipse at 50% 37%,rgba(255,155,207,.50) 0 32%,transparent 33%),
-    linear-gradient(180deg,transparent 0 35%,#321d3c 36% 100%)!important
-}
+/* (the hero face is her live 3D portrait, hq2-portrait.js, lit by --a; no drawn figure) */
 
 /* Full-site flow: make the old content feel like deeper layers, not another app. */
 body.bt-hq2 #app{position:relative;z-index:1}
