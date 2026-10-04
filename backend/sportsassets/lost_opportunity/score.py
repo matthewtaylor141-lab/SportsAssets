@@ -8,8 +8,14 @@
                      the sum over book levels with marginal net edge > 0 of
                      q x (p - price - fee), conditional on fill (pos-econ
                      capacity model, from the recorded book at decision)
-  P(fill)            the CAPACITY snapshot's book-level fill probability
-                     (PAPER-simulated entry fill share; pos-econ rates)
+  P(fill)            Eddie's expected fill probability for THIS decision
+                     (eddie_execution_estimates, migration 217, SHADOW_ONLY,
+                     from the decision's recorded book) when he measured
+                     one; else the CAPACITY snapshot's book-level fill
+                     probability (PAPER-simulated entry fill share; pos-econ
+                     rates) as of the decision. EXECUTION_CONFIDENCE names
+                     which (`source`) and always shows Eddie's estimate (or
+                     why there is none) beside it.
   capacity factor    min(1, idle PAPER capital / executable capacity): the
                      share of the opportunity's capital the book could fund
                      from the latest CAPITAL snapshot (1 when it fits)
@@ -50,6 +56,47 @@ def _comp(value, *, unit=None, status=None, why=None, basis=None,
             "in_score": in_score}
 
 
+EDDIE = "EDDIE_EXECUTION_ESTIMATE"
+CAPACITY_SNAPSHOT = "POS_CAPACITY_SNAPSHOT_FILL_SHARE"
+
+
+def eddie_view(est, why=None) -> dict:
+    """Eddie's (SHADOW_ONLY) estimate of this decision as shown beside the
+    execution component; UNAVAILABLE with its reason when there is none."""
+    if not est:
+        return {"status": C.UNAVAILABLE,
+                "why": why or "NO_EDDIE_ESTIMATE_FOR_THIS_DECISION"}
+    keys = ("estimate_id", "estimator_version", "estimated_at",
+            "expected_fill_probability", "expected_net_executable_edge_pp",
+            "expected_execution_loss_pp", "expected_executable_ev_usd",
+            "expected_time_to_fill_s", "max_executable_qty",
+            "execution_style", "recommendation", "recommendation_reason",
+            "book_obs_id", "book_age_s")
+    v = {k: est.get(k) for k in keys}
+    v.update(status=C.MEASURED, why=None, authority="SHADOW_ONLY")
+    if v["expected_fill_probability"] is None:
+        v["fill_probability_why"] = (est.get("fill_why")
+                                     or "EDDIE_FILL_PROBABILITY_UNMEASURED")
+    return v
+
+
+def execution_input(eddie_est, snapshot_fp, snapshot_basis) -> tuple:
+    """(fill probability, basis, source) for the score's P(fill): Eddie's
+    expected fill probability for this decision when he measured one, else
+    the CAPACITY snapshot's fill share as of the decision, else None."""
+    fp = C.num((eddie_est or {}).get("expected_fill_probability"))
+    if fp is not None:
+        return fp, ("eddie_execution_estimates %s (%s, SHADOW_ONLY) from the "
+                    "decision's recorded book %s, estimated at %s" % (
+                        eddie_est.get("estimate_id"),
+                        eddie_est.get("estimator_version"),
+                        eddie_est.get("book_obs_id"),
+                        eddie_est.get("estimated_at"))), EDDIE
+    if C.num(snapshot_fp) is not None:
+        return C.num(snapshot_fp), snapshot_basis, CAPACITY_SNAPSHOT
+    return None, snapshot_basis, None
+
+
 def components(out: dict, ctx: dict) -> dict:
     """The decomposition of one score (see the module docstring)."""
     ctx = ctx or {}
@@ -76,10 +123,12 @@ def components(out: dict, ctx: dict) -> dict:
                                   "BEFORE_THE_DECISION",
             basis="pos-econ EDGE_CALIBRATION (PAPER) as of the decision, "
                   "n=%s" % cal.get("sample_n")),
-        "EXECUTION_CONFIDENCE": _comp(
+        "EXECUTION_CONFIDENCE": dict(_comp(
             out.get("fill_probability"), unit="probability", in_score=True,
             why=um.get("fill_probability"),
             basis=out.get("fill_probability_basis")),
+            source=out.get("fill_probability_source"),
+            eddie=eddie_view(ctx.get("eddie"), ctx.get("eddie_why"))),
         "LIQUIDITY_CAPACITY": _comp(
             out.get("capacity_factor"), unit="fraction", in_score=True,
             why=um.get("capacity_factor"),
@@ -107,10 +156,12 @@ def components(out: dict, ctx: dict) -> dict:
 
 def score(cand: dict, *, fill_probability=None, fill_basis=None,
           idle_capital_usd=None, idle_capital_why=None, lag_samples=(),
-          ctx=None) -> dict:
+          ctx=None, fill_source=None) -> dict:
     out = _score(cand, fill_probability=fill_probability,
                  fill_basis=fill_basis, idle_capital_usd=idle_capital_usd,
                  idle_capital_why=idle_capital_why, lag_samples=lag_samples)
+    out["fill_probability_source"] = (
+        fill_source if out.get("fill_probability") is not None else None)
     out["components"] = components(out, dict(
         ctx or {}, capacity_ceiling_usd=C.num(
             cand.get("capacity_ceiling_usd"))))

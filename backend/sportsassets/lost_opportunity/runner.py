@@ -194,13 +194,16 @@ async def run_component(conn, *, now=None, pos_run_id=None, econs=None,
                 "edge_confidence": ec if ec is not None else {
                     "value": None, "why": sctx["edge_confidence_why"]
                     or "NO_EDGE_CONFIDENCE_FORECAST_FOR_THIS_VALUATION"}}
+            eddie = sctx["eddie"].get(str(c.get("candidate_id")))
+            ctx["eddie"], ctx["eddie_why"] = eddie, sctx["eddie_why"]
             cap = R.as_of(snaps["CAPITAL"], c["decided_at"])
             fpe = R.as_of(snaps["CAPACITY"], c["decided_at"])
+            fp, fbasis, fsrc = SC.execution_input(
+                eddie, None if fpe is None else fpe[1],
+                ("NO_CAPACITY_SNAPSHOT_AT_OR_BEFORE_DECISION"
+                 if fpe is None else fpe[2]))
             got = SC.score(
-                c,
-                fill_probability=None if fpe is None else fpe[1],
-                fill_basis=("NO_CAPACITY_SNAPSHOT_AT_OR_BEFORE_DECISION"
-                            if fpe is None else fpe[2]),
+                c, fill_probability=fp, fill_basis=fbasis, fill_source=fsrc,
                 idle_capital_usd=None if cap is None else cap[1],
                 idle_capital_why=("NO_PAPER_CAPITAL_SNAPSHOT_AT_OR_BEFORE_"
                                   "DECISION" if cap is None else cap[2]),
@@ -210,6 +213,8 @@ async def run_component(conn, *, now=None, pos_run_id=None, econs=None,
                 "capacity_snapshot_at": None if fpe is None else fpe[0],
                 "as_of": "THE_DECISION_INSTANT",
                 "score_basis": got.get("score_basis"),
+                "fill_probability_source": got.get(
+                    "fill_probability_source"),
                 "capacity_ceiling_usd": C.num(c.get("capacity_ceiling_usd"))}
             rows.append(got)
         n = await ST.save_scores(conn, run_id=run_id, now=now, rows=rows,
