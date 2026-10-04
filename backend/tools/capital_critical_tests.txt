@@ -677,3 +677,18 @@ tests/test_karen_persona_and_peer_response.py
 # a census that files a requested league honestly, college names that map
 # exactly or refuse by name, captured football settlement terms.
 tests/test_ncaaf_identity_settlement_and_coverage.py
+# The Profitability Operating System, part 1 (claude/pos-econ, migration
+# 216): RESEARCH / SHADOW, no venue, order, sizing, limit, threshold or
+# capital authority. The layer imports no venue or order module, writes
+# only its own append-only pos_* tables (INSERT only; the database refuses
+# UPDATE / DELETE / TRUNCATE), a full cycle leaves every order, fill,
+# ledger, decision, control and funded table unchanged, PAPER / ACTUAL /
+# COUNTERFACTUAL are never summed, missing inputs fail closed to null with a
+# named reason (capacity UNAVAILABLE with no number), the forecast is
+# UNPROVEN until its own scored forecasts validate it, and the
+# /api/command/profitability/* routes are GET-only behind a command session.
+tests/test_profitability_is_research_only.py
+tests/test_profitability_economics.py
+tests/test_profitability_capacity.py
+tests/test_profitability_metrics_forecast.py
+tests/test_profitability_warehouse_cycle.py

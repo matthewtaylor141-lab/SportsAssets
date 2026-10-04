@@ -507,6 +507,21 @@ async def lifespan(_: FastAPI):
             log.info("intel shadow runner armed (advisory lock per cycle)")
     except Exception:  # noqa: BLE001 -- the API must serve regardless
         log.exception("intel shadow runner failed to arm")
+    # ── THE PROFITABILITY RUNNER (migration 216) ──────────────────────
+    # Capital-hour economics, warehouse lineage, capacity, the five
+    # north-star metrics and the monthly revenue forecast, every CYCLE_S.
+    # RESEARCH: it writes only its own append-only pos_* tables; no venue,
+    # order, sizing, limit, threshold or capital authority. Bounded,
+    # failure-isolated, advisory-locked; POS_ECON=off is a kill switch.
+    # Without migration 216 it idles.
+    pos_task = None
+    try:
+        from ..profitability import runner as _POS
+        if _POS.enabled():
+            pos_task = asyncio.create_task(_POS.run(_cap_pool))
+            log.info("profitability runner armed (advisory lock per cycle)")
+    except Exception:  # noqa: BLE001 -- the API must serve regardless
+        log.exception("profitability runner failed to arm")
     try:
         yield
     finally:
@@ -520,7 +535,7 @@ async def lifespan(_: FastAPI):
                              ext_task, rn1x_model_task, trim_task,
                              poller_task, capability_task, slack_task,
                              karen_task, peer_task, execmirror_task,
-                             intel_task,
+                             intel_task, pos_task,
                              *watchdog_tasks)
                  if t is not None]
         for task in tasks:
@@ -630,6 +645,14 @@ try:
     app.include_router(_command_intel_router)
 except ImportError:
     log.warning("intel: api.command_intel not loaded", exc_info=True)
+# ── THE PROFITABILITY READS (migration 216): /api/command/profitability/*
+# GET only, COMMAND auth. RESEARCH: no route here writes or has authority.
+try:
+    from .command_profitability import router as _command_profitability_router
+    app.include_router(_command_profitability_router)
+except ImportError:
+    log.warning("profitability: api.command_profitability not loaded",
+                exc_info=True)
 from .agent_capabilities import router as _capabilities_router
 app.include_router(_capabilities_router)
 from .slack_agents import router as _slack_agents_router
