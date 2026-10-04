@@ -775,6 +775,15 @@ try:
 except ImportError:
     log.warning("validation: api.command_validation not loaded",
                 exc_info=True)
+# ── LAB-B AGENT CITATION INTEGRITY: /api/command/lab/citation-integrity.
+# GET only, COMMAND auth, READ ONLY transaction with a statement timeout:
+# per-agent citation metrics, recent failing verdicts, the retrospective.
+# Agent-quality measurement; no write, order, approval or capital path.
+try:
+    from .command_lab_citation import router as _command_lab_citation_router
+    app.include_router(_command_lab_citation_router)
+except ImportError:
+    log.warning("lab: api.command_lab_citation not loaded", exc_info=True)
 # ── THE POSITION ROOMS: /api/command/positions/rooms, /room/{group_key}.
 # GET only, COMMAND auth, READ ONLY transaction; one correlated economic
 # position per screen (paper and actual, actual per venue, never summed).
