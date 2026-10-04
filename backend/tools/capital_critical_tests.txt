@@ -677,3 +677,10 @@ tests/test_karen_persona_and_peer_response.py
 # a census that files a requested league honestly, college names that map
 # exactly or refuse by name, captured football settlement terms.
 tests/test_ncaaf_identity_settlement_and_coverage.py
+# cand24 Xavier freshness, measured without conflating two things: freshness
+# quality is MARKET_EVENT reviews on a fresh probability; scheduled reviews
+# of unchanged provider quotes are counted as correctly stale (informational)
+# and excluded; market change -> review SLA with median / p90; open positions
+# monitored inside their due bound; discretion only on fresh evidence.
+# Measurement only: the scorecard writes nothing and relabels nothing.
+tests/test_xavier_freshness_scorecard.py

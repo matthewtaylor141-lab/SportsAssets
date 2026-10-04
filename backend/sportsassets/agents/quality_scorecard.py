@@ -3,8 +3,10 @@
   ENGINEERING               gate results and failing tests (from the latest
                             gate artifact this process can read, else
                             UNAVAILABLE); deploy SHA alignment API == workers
-  AGENTS                    Xavier review latency; share of reviews made on a
-                            fresh probability; peer-challenge metrics (the
+  AGENTS                    Xavier review latency; Xavier's FRESHNESS, split
+                            so a correct stale label is never read as a
+                            defect (see "XAVIER'S FRESHNESS" below);
+                            peer-challenge metrics (the
                             collaboration loop's PEER_CHALLENGE stages, and
                             KAREN's tables when they exist, else UNAVAILABLE)
   INVESTMENT_INTELLIGENCE   calibration: Brier of the decision probability
@@ -21,6 +23,36 @@ next_improvement. A metric that cannot be measured is UNAVAILABLE with a
 reason and a null value -- never 0. A metric measured on fewer samples than
 its stated minimum is INSUFFICIENT_SAMPLE: the value is shown with its
 interval, and nothing is concluded from it.
+
+XAVIER'S FRESHNESS (measurement only; Xavier's behaviour is unchanged).
+Freshness is CHANGE-driven: a probability is current only within 30 s of
+the provider's last price CHANGE, and an unchanged provider quote is never
+called current. A SCHEDULED_BACKSTOP review of a position whose quote has
+not moved (a game over, a market no longer quoted) is therefore correctly
+STALE_ENTRY_TIME_PROBABILITY. Counting it against freshness conflates two
+things, so the freshness quality is read from xavier_management_assessments
+(migration 206; paper and actual) as:
+  freshness_when_market_changed       MARKET_EVENT reviews on a FRESH
+                                      probability / all MARKET_EVENT reviews
+  scheduled_review_no_provider_change SCHEDULED_BACKSTOP reviews not on a
+                                      fresh probability (no provider change
+                                      observed since the last review) / all
+                                      reviews -- informational, correctly
+                                      stale, excluded from freshness quality
+  market_change_to_review_sla         MARKET_EVENT reviews whose latency
+                                      from the change (due_at = the provider
+                                      change, or the venue book for a paper
+                                      book move) is within the 30 s SLA
+  market_change_review_latency_s      the median (p90 in detail) of that
+                                      latency
+  positions_monitored_share           OPEN positions whose latest review is
+                                      inside its due bound
+                                      (xavier_management.management_view)
+  freshness_at_discretionary_action   reviews recommending EXIT / REDUCE /
+                                      REALLOCATE, or permitting discretion,
+                                      on a FRESH probability (100 % by rule)
+The old `reviews_fresh_share` is kept, renamed to say it counts ALL reviews
+including unchanged quotes, and is no longer a quality target.
 
 Read-only: every figure comes from production tables and files; nothing here
 writes, and nothing here can change an order, a limit or a policy.
@@ -42,6 +74,18 @@ MIN_RATE_SAMPLE = 30
 DOMAINS = ("ENGINEERING", "AGENTS", "INVESTMENT_INTELLIGENCE", "EXECUTION",
            "PROFITABILITY_EVIDENCE")
 FRESH = "FRESH_CURRENT_PROBABILITY"
+STALE = "STALE_ENTRY_TIME_PROBABILITY"
+UNAVAIL = "PROBABILITY_UNAVAILABLE"
+T_MARKET, T_BACKSTOP = "MARKET_EVENT", "SCHEDULED_BACKSTOP"
+DISCRETIONARY = ("EXIT", "REDUCE", "REALLOCATE")
+#: THE MARKET-CHANGE -> REVIEW SLA (a MEASUREMENT bound, read by nothing
+#: that decides): the Pinnacle 30 s rule. A review later than this after the
+#: change cannot be on a fresh reading of that change.
+MARKET_CHANGE_REVIEW_SLA_S = 30.0
+#: the PinnAPI feed runtime's persisted heartbeat (held watch telemetry)
+FEED_HEARTBEAT_KEY = "pinnapi_feed_last"
+#: management_view's own cap on positions read per book
+MONITORED_VIEW_LIMIT = 500
 #: Where a gate artifact may be read (file or glob of run_gate.sh's
 #: `<prefix>_report.json`). Read only when the host sets it.
 GATE_REPORT_ENV = "QUALITY_GATE_REPORT_PATH"
@@ -330,10 +374,18 @@ async def fresh_share(conn, start, end) -> tuple:
     return int(r["k"]), int(r["n"]), _ep(r["last"])
 
 
+FRESH_SHARE_NAME = ("All paper reviews on a fresh probability (includes "
+                    "scheduled reviews of unchanged quotes)")
+
+
 async def fresh_share_metric(conn, now: float) -> dict:
-    name = "Reviews made on a fresh probability"
-    nxt = ("keep the PinnAPI feed in scope for every held sport so the "
-           "measure is current")
+    """KEPT FOR CONTINUITY, NOT A QUALITY TARGET: its denominator includes
+    every scheduled review of a position whose provider quote has not
+    changed (correctly stale). Freshness quality is
+    `freshness_when_market_changed`."""
+    name = FRESH_SHARE_NAME
+    nxt = ("read freshness quality from freshness_when_market_changed; this "
+           "share falls whenever held quotes stop changing, by design")
     if not await _regclass(conn, "paper_xavier_reviews"):
         return unavailable("reviews_fresh_share", name,
                            "SOURCE_TABLE_ABSENT", next_improvement=nxt)
@@ -343,12 +395,418 @@ async def fresh_share_metric(conn, now: float) -> dict:
     pv = round(pk / pn, 6) if pn else None
     return metric("reviews_fresh_share", name, value=v, numerator=k,
                   denominator=n, sample=n, ci=wilson(k, n), unit="share",
-                  trend=trend_of(v, pv), last_measured_at=last,
-                  min_sample=MIN_RATE_SAMPLE,
+                  trend=trend_of(v, pv, higher_is_better=None),
+                  last_measured_at=last, min_sample=MIN_RATE_SAMPLE,
                   why=None if n else "NO_REVIEWS_IN_WINDOW",
-                  blocker=None if v is None or v >= 0.9 else
-                  "%d of %d reviews were made on a stale or unavailable "
-                  "probability" % (n - k, n), next_improvement=nxt)
+                  detail={"counts": "every paper_xavier_reviews row, every "
+                                    "trigger",
+                          "not_a_quality_target": (
+                              "a SCHEDULED_BACKSTOP review of an unchanged "
+                              "provider quote is correctly "
+                              "STALE_ENTRY_TIME_PROBABILITY and is in this "
+                              "denominator"),
+                          "read_instead": list(FRESHNESS_IDS)},
+                  next_improvement=nxt)
+
+
+# ── XAVIER'S FRESHNESS, SPLIT (xavier_management_assessments) ────────────
+
+async def assessment_counts(conn, start: float, end: float) -> list:
+    """(position_kind, trigger, evidence_state, discretionary flags) counts
+    of the management assessments in [start, end)."""
+    rows = await conn.fetch(
+        "SELECT position_kind AS kind, trigger, evidence_state AS ev, "
+        "       (recommendation = ANY($3::text[])) AS rec_disc, "
+        "       discretionary_permitted AS permitted, count(*) AS n, "
+        "       max(assessed_at) AS last "
+        "  FROM xavier_management_assessments "
+        " WHERE assessed_at >= to_timestamp($1) "
+        "   AND assessed_at < to_timestamp($2) "
+        " GROUP BY 1, 2, 3, 4, 5", start, end, list(DISCRETIONARY))
+    return [{"kind": r["kind"], "trigger": r["trigger"], "ev": r["ev"],
+             "rec_disc": bool(r["rec_disc"]),
+             "permitted": bool(r["permitted"]), "n": int(r["n"]),
+             "last": _ep(r["last"])} for r in rows]
+
+
+def _sum(rows, pred) -> int:
+    return sum(r["n"] for r in rows if pred(r))
+
+
+def _last(rows, pred):
+    xs = [r["last"] for r in rows if pred(r) and r["last"] is not None]
+    return max(xs) if xs else None
+
+
+def freshness_split(rows: list) -> dict:
+    """The freshness figures from assessment counts. Pure."""
+    def mk(r):
+        return r["trigger"] == T_MARKET
+
+    def bk(r):
+        return r["trigger"] == T_BACKSTOP
+
+    def unchanged(r):
+        return bk(r) and r["ev"] != FRESH
+
+    def disc(r):
+        return r["rec_disc"] or r["permitted"]
+    total = _sum(rows, lambda r: True)
+    fresh_all = _sum(rows, lambda r: r["ev"] == FRESH)
+    by_trigger: dict = {}
+    for r in rows:
+        t = by_trigger.setdefault(r["trigger"], {"n": 0, "fresh": 0})
+        t["n"] += r["n"]
+        t["fresh"] += r["n"] if r["ev"] == FRESH else 0
+    by_kind: dict = {}
+    for r in rows:
+        if not mk(r):
+            continue
+        t = by_kind.setdefault(r["kind"], {"n": 0, "fresh": 0})
+        t["n"] += r["n"]
+        t["fresh"] += r["n"] if r["ev"] == FRESH else 0
+    nochange = _sum(rows, unchanged)
+    return {
+        "total": total, "fresh_all": fresh_all, "by_trigger": by_trigger,
+        "market_n": _sum(rows, mk),
+        "market_fresh": _sum(rows, lambda r: mk(r) and r["ev"] == FRESH),
+        "market_by_kind": by_kind,
+        "market_by_evidence": {e: _sum(rows, lambda r, e=e: mk(r)
+                                       and r["ev"] == e)
+                               for e in (FRESH, STALE, UNAVAIL)},
+        "market_last": _last(rows, mk),
+        "backstop_n": _sum(rows, bk),
+        "backstop_fresh": _sum(rows, lambda r: bk(r) and r["ev"] == FRESH),
+        "backstop_stale": _sum(rows, lambda r: bk(r) and r["ev"] == STALE),
+        "backstop_unavailable": _sum(rows, lambda r: bk(r)
+                                     and r["ev"] == UNAVAIL),
+        "no_change": nochange, "last": _last(rows, lambda r: True),
+        "quality_denominator": total - nochange,
+        "disc_n": _sum(rows, disc),
+        "disc_fresh": _sum(rows, lambda r: disc(r) and r["ev"] == FRESH),
+        "rec_n": _sum(rows, lambda r: r["rec_disc"]),
+        "rec_fresh": _sum(rows, lambda r: r["rec_disc"] and r["ev"] == FRESH),
+        "permitted_n": _sum(rows, lambda r: r["permitted"]),
+        "permitted_fresh": _sum(rows, lambda r: r["permitted"]
+                                and r["ev"] == FRESH)}
+
+
+def _share(k, n):
+    return round(k / n, 6) if n else None
+
+
+def percentile(xs: list, q: float):
+    """Nearest-rank (lower) percentile, the convention review_latency_s
+    already uses. Pure."""
+    if not xs:
+        return None
+    s = sorted(xs)
+    return round(s[int(q * (len(s) - 1))], 3)
+
+
+async def market_change_latencies(conn, start: float, end: float) -> tuple:
+    """(latencies of MARKET_EVENT reviews with a known change instant,
+    count with none, by kind)."""
+    rows = await conn.fetch(
+        "SELECT position_kind AS kind, review_latency_s AS lat "
+        "  FROM xavier_management_assessments "
+        " WHERE trigger = $3 AND assessed_at >= to_timestamp($1) "
+        "   AND assessed_at < to_timestamp($2)", start, end, T_MARKET)
+    lats = [float(r["lat"]) for r in rows if _f(r["lat"]) is not None]
+    by_kind: dict = {}
+    for r in rows:
+        if _f(r["lat"]) is None:
+            continue
+        k = by_kind.setdefault(r["kind"], {"n": 0, "within_sla": 0})
+        k["n"] += 1
+        k["within_sla"] += 1 if float(r["lat"]) <= \
+            MARKET_CHANGE_REVIEW_SLA_S else 0
+    return lats, len(rows) - len(lats), by_kind
+
+
+def sla_split(lats: list, *,
+              sla_s: float = MARKET_CHANGE_REVIEW_SLA_S) -> dict:
+    """Within-SLA count, median and p90 of market-change latencies. Pure."""
+    k = sum(1 for x in lats if x <= sla_s)
+    return {"n": len(lats), "within": k,
+            "median": round(statistics.median(lats), 3) if lats else None,
+            "p90": percentile(lats, 0.9),
+            "max": round(max(lats), 3) if lats else None}
+
+
+async def held_watch_heartbeat(conn) -> dict | None:
+    """The held watch's PERSISTED telemetry (the feed runtime's heartbeat):
+    cumulative counts since that process started -- not a per-event
+    record. None when absent or unreadable."""
+    try:
+        raw = await conn.fetchval(
+            "SELECT value FROM ingestion_state WHERE key = $1",
+            FEED_HEARTBEAT_KEY)
+    except Exception:                                           # noqa: BLE001
+        return None
+    v = json.loads(raw) if isinstance(raw, str) else raw
+    if not isinstance(v, dict):
+        return None
+    h = v.get("held_priority_targets")
+    if not isinstance(h, dict):
+        return {"beat_at": _f(v.get("beat_at")),
+                "held_watch": "NOT_IN_HEARTBEAT"}
+    counts = h.get("counts") or {}
+    return {"beat_at": _f(v.get("beat_at")),
+            "held_slugs": h.get("held_slugs"),
+            "held_events": h.get("held_events"),
+            "unmatched": h.get("unmatched"),
+            "held_changes_since_feed_start": counts.get("HELD_CHANGES"),
+            "basis": "cumulative counters of the running feed process; not "
+                     "a per-change record, no window"}
+
+
+#: WHAT THE HELD WATCH RECORDS (pinnapi_held.HeldWatch): in memory only,
+#: the LATEST provider change instant per held slug (`changes`), and a
+#: cumulative HELD_CHANGES counter the feed heartbeat persists. No held
+#: price-change EVENT is written anywhere, so the SLA's denominator is the
+#: changes that reached a MARKET_EVENT review.
+SLA_LIMITATION = (
+    "held price changes are not persisted per event (pinnapi_held.HeldWatch "
+    "keeps only the latest change instant per held slug, in memory); the "
+    "denominator is the changes that REACHED a MARKET_EVENT review -- a "
+    "change superseded by a later one before its review (coalesced) or "
+    "never reviewed is not counted")
+
+
+FRESHNESS_IDS = ("freshness_when_market_changed",
+                 "scheduled_review_no_provider_change",
+                 "market_change_to_review_sla",
+                 "market_change_review_latency_s",
+                 "freshness_at_discretionary_action")
+FRESHNESS_NAMES = (
+    "Xavier: reviews on a fresh probability when the market changed",
+    ("Xavier: scheduled reviews with no provider change (correctly stale; "
+     "informational)"),
+    "Xavier: market change -> review within %.0f s"
+    % MARKET_CHANGE_REVIEW_SLA_S,
+    "Xavier: review latency after a market change, median",
+    "Xavier: discretionary recommendations on a fresh probability")
+
+
+async def freshness_metrics(conn, now: float) -> list:
+    ids, names = FRESHNESS_IDS, FRESHNESS_NAMES
+    if not await _regclass(conn, "xavier_management_assessments"):
+        return [unavailable(i, n, "MIGRATION_206_NOT_APPLIED",
+                            unit="s" if i.endswith("_s") else None)
+                for i, n in zip(ids, names)]
+    cur = freshness_split(await assessment_counts(conn, now - WINDOW_S, now))
+    pri = freshness_split(await assessment_counts(conn, now - 2 * WINDOW_S,
+                                                  now - WINDOW_S))
+    hb = await held_watch_heartbeat(conn)
+    out = []
+
+    # 1. FRESHNESS WHEN THE MARKET CHANGED
+    k, n = cur["market_fresh"], cur["market_n"]
+    v = _share(k, n)
+    out.append(metric(
+        ids[0], names[0], value=v, numerator=k, denominator=n, sample=n,
+        ci=wilson(k, n), unit="share",
+        trend=trend_of(v, _share(pri["market_fresh"], pri["market_n"])),
+        last_measured_at=cur["market_last"], min_sample=MIN_RATE_SAMPLE,
+        why=None if n else "NO_MARKET_EVENT_REVIEW_IN_WINDOW",
+        detail={"by_kind": cur["market_by_kind"],
+                "by_evidence_state": cur["market_by_evidence"],
+                "excludes": "SCHEDULED_BACKSTOP reviews of unchanged quotes",
+                "note": ("a paper MARKET_EVENT also fires on a venue "
+                         "best-exit move; one with no provider change is "
+                         "correctly stale and stays in this denominator "
+                         "(the stored record does not tell the two apart)")},
+        blocker=None if not n or k == n else
+        "%d of %d market-change reviews were not on a fresh probability"
+        % (n - k, n),
+        next_improvement="keep every held sport in the PinnAPI feed scope "
+                         "so a provider change reaches the held watch"))
+
+    # 2. SCHEDULED REVIEWS WITH NO PROVIDER CHANGE (informational)
+    k, n = cur["no_change"], cur["total"]
+    v = _share(k, n)
+    qd = cur["quality_denominator"]
+    out.append(metric(
+        ids[1], names[1], value=v, numerator=k, denominator=n, sample=n,
+        ci=wilson(k, n), unit="share of all reviews",
+        trend=trend_of(v, _share(pri["no_change"], pri["total"]),
+                       higher_is_better=None),
+        last_measured_at=cur["last"], min_sample=MIN_RATE_SAMPLE,
+        why=None if n else "NO_REVIEW_IN_WINDOW",
+        detail={"informational": True,
+                "count": k,
+                "definition": ("SCHEDULED_BACKSTOP reviews not on a fresh "
+                               "probability: the backstop is chosen only "
+                               "when the held watch observed no provider "
+                               "change since the last review, so the "
+                               "quote is unchanged and correctly "
+                               "STALE_ENTRY_TIME_PROBABILITY (an unchanged "
+                               "quote is never called current)"),
+                "backstop_total": cur["backstop_n"],
+                "backstop_fresh": cur["backstop_fresh"],
+                "backstop_stale": cur["backstop_stale"],
+                "backstop_unavailable": cur["backstop_unavailable"],
+                "by_trigger": cur["by_trigger"],
+                "freshness_quality_denominator": qd,
+                # the no-change backstops are non-fresh by definition, so
+                # every fresh review stays in the numerator
+                "fresh_share_excluding_unchanged_quotes": _share(
+                    cur["fresh_all"], qd),
+                "limitation": ("'no change' means none OBSERVED by the held "
+                               "watch: a held slug the feed cannot match "
+                               "(out of feed scope, unmatched) observes "
+                               "none"),
+                "held_watch_heartbeat": hb},
+        blocker=None,
+        next_improvement="none needed: these are correct stale labels; "
+                         "they are excluded from freshness quality"))
+
+    # 3. MARKET CHANGE -> REVIEW WITHIN THE SLA, AND ITS LATENCY
+    lats, unknown, lby = await market_change_latencies(conn, now - WINDOW_S,
+                                                       now)
+    plats, _, _ = await market_change_latencies(conn, now - 2 * WINDOW_S,
+                                                now - WINDOW_S)
+    s, ps = sla_split(lats), sla_split(plats)
+    v = _share(s["within"], s["n"])
+    sla_detail = {"sla_s": MARKET_CHANGE_REVIEW_SLA_S,
+                  "latency_origin": ("due_at: the provider change instant "
+                                     "(PinnAPI held watch), or the venue "
+                                     "book's observation for a paper book "
+                                     "move"),
+                  "median_s": s["median"], "p90_s": s["p90"],
+                  "max_s": s["max"], "by_kind": lby,
+                  "market_event_reviews_without_a_change_instant": unknown,
+                  "held_watch_records": ("in memory: the latest change "
+                                         "instant per held slug; persisted: "
+                                         "cumulative counters in the feed "
+                                         "heartbeat only"),
+                  "held_watch_heartbeat": hb}
+    late = s["n"] - s["within"]
+    out.append(metric(
+        ids[2], names[2], value=v, numerator=s["within"], denominator=s["n"],
+        sample=s["n"], ci=wilson(s["within"], s["n"]), unit="share",
+        trend=trend_of(v, _share(ps["within"], ps["n"])),
+        last_measured_at=cur["market_last"], min_sample=MIN_RATE_SAMPLE,
+        why=None if s["n"] else "NO_MARKET_EVENT_REVIEW_WITH_A_CHANGE_INSTANT",
+        detail=sla_detail,
+        blocker=(("%d of %d reviewed later than %.0f s; " % (
+            late, s["n"], MARKET_CHANGE_REVIEW_SLA_S)) if late else "")
+        + SLA_LIMITATION,
+        next_improvement="persist each held price change (slug, provider "
+                         "instant) so a change that never reached a review "
+                         "is counted"))
+    out.append(metric(
+        ids[3], names[3], value=s["median"], sample=s["n"], unit="s",
+        ci=median_ci(lats),
+        trend=trend_of(s["median"], ps["median"], higher_is_better=False),
+        last_measured_at=cur["market_last"], min_sample=10,
+        why=None if lats else "NO_MARKET_EVENT_REVIEW_WITH_A_CHANGE_INSTANT",
+        detail={"p90_s": s["p90"], "max_s": s["max"],
+                "sla_s": MARKET_CHANGE_REVIEW_SLA_S, "by_kind": lby},
+        blocker=SLA_LIMITATION if lats else None,
+        next_improvement="review a held market in the pass its change "
+                         "arrives"))
+
+    # 5. FRESHNESS AT DISCRETIONARY ACTION (100 % by rule)
+    k, n = cur["disc_fresh"], cur["disc_n"]
+    v = _share(k, n)
+    xcheck = await paper_discretion_cross_check(conn, now - WINDOW_S, now)
+    out.append(metric(
+        ids[4], names[4], value=v, numerator=k, denominator=n, sample=n,
+        ci=wilson(k, n), unit="share",
+        trend=trend_of(v, _share(pri["disc_fresh"], pri["disc_n"])),
+        last_measured_at=cur["last"],
+        why=None if n else "NO_DISCRETIONARY_REVIEW_IN_WINDOW",
+        detail={"rule": ("EXIT / REDUCE / REALLOCATE only on "
+                         "FRESH_CURRENT_PROBABILITY (migration 206 CHECKs "
+                         "it); expected 1.0"),
+                "recommended": {"n": cur["rec_n"], "fresh": cur["rec_fresh"]},
+                "permitted": {"n": cur["permitted_n"],
+                              "fresh": cur["permitted_fresh"]},
+                "paper_reviews_cross_check": xcheck},
+        blocker=(None if (not n or k == n) and not (xcheck or {}).get(
+            "not_fresh") else "a discretionary recommendation on a "
+            "non-fresh probability: %d assessment(s), %s paper review(s)"
+            % (n - k, (xcheck or {}).get("not_fresh"))),
+        next_improvement="hold at 100 %: no discretion on stale evidence"))
+    return out
+
+
+async def paper_discretion_cross_check(conn, start, end) -> dict | None:
+    """paper_xavier_reviews that RECOMMENDED EXIT / REDUCE, and how many of
+    them were not on a fresh probability (expected 0)."""
+    if not await _regclass(conn, "paper_xavier_reviews"):
+        return None
+    r = await conn.fetchrow(
+        "SELECT count(*) AS n, count(*) FILTER (WHERE coalesce("
+        " measure->>'evidence_state', '') <> $4) AS bad "
+        "  FROM paper_xavier_reviews WHERE recommendation = ANY($3::text[]) "
+        "   AND reviewed_at >= to_timestamp($1) "
+        "   AND reviewed_at < to_timestamp($2)", start, end,
+        list(DISCRETIONARY), FRESH)
+    return {"recommended": int(r["n"]), "not_fresh": int(r["bad"])}
+
+
+MONITORED_NAME = "Xavier: open positions with a review inside their due bound"
+
+
+def monitored_split(positions: list) -> dict:
+    """OPEN positions with a review inside their due bound, per book, from
+    management_view's positions. Pure."""
+    out = {"open": 0, "monitored": 0, "overdue": 0, "without_review": 0,
+           "by_kind": {}}
+    for p in positions:
+        if p.get("state") != "OPEN":
+            continue
+        k = out["by_kind"].setdefault(p.get("position_kind"), {
+            "open": 0, "monitored": 0, "overdue": 0, "without_review": 0})
+        no_review = p.get("latest_review") is None
+        overdue = bool(p.get("review_overdue")) and not no_review
+        for d in (out, k):
+            d["open"] += 1
+            d["without_review"] += 1 if no_review else 0
+            d["overdue"] += 1 if overdue else 0
+            d["monitored"] += 0 if (no_review or overdue) else 1
+    return out
+
+
+async def positions_monitored_metric(conn, now: float) -> dict:
+    from . import xavier_management as XM
+    mid, name = "positions_monitored_share", MONITORED_NAME
+    nxt = "review every open position before its cadence + grace lapses"
+    view = await XM.management_view(conn, limit=MONITORED_VIEW_LIMIT, now=now)
+    if view.get("status") == "UNAVAILABLE":
+        return unavailable(mid, name, view.get("why") or "VIEW_UNAVAILABLE",
+                           next_improvement=nxt)
+    s = monitored_split(view.get("positions") or [])
+    summ = view.get("summary") or {}
+    n, k = s["open"], s["monitored"]
+    per_kind = {}
+    for p in view.get("positions") or []:
+        per_kind[p.get("position_kind")] = per_kind.get(
+            p.get("position_kind"), 0) + 1
+    truncated = sorted(kd for kd, c in per_kind.items()
+                       if c >= MONITORED_VIEW_LIMIT)
+    return metric(
+        mid, name, value=_share(k, n), numerator=k, denominator=n, sample=n,
+        unit="share", last_measured_at=now,
+        trend={"prior_value": None, "delta": None, "direction": None,
+               "why": "POINT_IN_TIME_CENSUS_NO_PRIOR_WINDOW"},
+        why=None if n else "NO_OPEN_POSITION",
+        detail={"open_positions": n, "monitored": k,
+                "reviews_overdue": summ.get("reviews_overdue"),
+                "open_without_review": summ.get("open_without_review"),
+                "by_kind": s["by_kind"],
+                "due_bound": ("latest review + cadence + cadence x "
+                              "REREVIEW_GRACE_FACTOR (management_view)"),
+                "census": "every OPEN position management_view reads; not "
+                          "a sample, so no interval",
+                "view_truncated_for": truncated},
+        blocker=None if not n or k == n else
+        "%d open position(s) overdue, %d never reviewed" % (
+            s["overdue"], s["without_review"]),
+        next_improvement=nxt)
 
 
 async def challenge_metrics(conn, now: float) -> list:
@@ -697,8 +1155,12 @@ async def scorecard(conn, *, now: float | None = None) -> dict:
             await _safe(lambda: review_latency_metric(conn, at),
                         ["review_latency_s"], ["Xavier review latency"])
             + await _safe(lambda: fresh_share_metric(conn, at),
-                          ["reviews_fresh_share"],
-                          ["Reviews made on a fresh probability"])
+                          ["reviews_fresh_share"], [FRESH_SHARE_NAME])
+            + await _safe(lambda: freshness_metrics(conn, at),
+                          list(FRESHNESS_IDS), list(FRESHNESS_NAMES))
+            + await _safe(lambda: positions_monitored_metric(conn, at),
+                          ["positions_monitored_share"],
+                          [MONITORED_NAME])
             + await _safe(lambda: challenge_metrics(conn, at),
                           ["peer_challenge_refuted_share",
                            "karen_challenges"],
