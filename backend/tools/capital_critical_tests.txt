@@ -827,3 +827,11 @@ tests/test_command_release_authority.py
 # append-only tables; bundles differ per agent and never widen the
 # registry (Karen / Scout / Eddie boundaries); no voice is borrowed.
 tests/test_agent_identity_api_authority.py
+# (248) THE COLLECTOR'S COVERAGE SCHEDULER AND RECEIPTS (P0 incident
+# 2026-10-04): the four metered calls a cycle are scheduled earliest deadline
+# first instead of truncated (NCAAF served every cycle of a Saturday slate
+# beside MLB, the NFL and soccer; no competition waits past its stated bound;
+# never more calls or credits than declared), and every cycle's receipts are
+# appended to collector_coverage_receipts and read by coverage_integrity.
+tests/test_collector_coverage_scheduler.py
+tests/test_collector_coverage_receipts.py

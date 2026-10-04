@@ -218,6 +218,44 @@ def test_saturday_serves_ncaaf_every_cycle_alongside_mlb_nfl_and_soccer(
             basis, k, worst)
 
 
+def test_an_overloaded_saturday_still_serves_ncaaf_within_its_bound():
+    """THE SAME SATURDAY WITH THREE MORE LISTED SOCCER COMPETITIONS IN THE
+    HORIZON: demand (two football keys at one cycle, seven feed-covered
+    keys at two) is 5.5 calls a cycle against the unchanged four, so the
+    stated bounds cannot all hold and the plan SAYS so (`feasible` False,
+    a starvation bound on every receipt). Nothing is starved: every
+    competition is served within its stated starvation bound, NCAAF in all
+    but a handful of the cycles its slate is in the horizon, and never
+    more than four calls a cycle."""
+    extra = [
+        ("soccer_usa_mls_x", "soccer", "mlsx", True, True,
+         _starts(SAT + 9 * H, 6, 10.0)),
+        ("soccer_mexico_ligamx", "soccer", "lmx", True, True,
+         _starts(SAT + 14 * H, 9, 8.0)),
+        ("soccer_brazil_campeonato", "soccer", "bra", True, True,
+         _starts(SAT + 12 * H, 8, 8.0))]
+    for cost in (cov.CREDITS_PER_FETCH_ESTIMATE, 3.0):
+        history = _run(SATURDAY + extra, cost=cost, cycles=192)
+        assert any(p["feasible"] is False for _, p in history)
+        _assert_starvation_bounds(history, label=cost)
+        cfb_cycles = cfb_served = 0
+        for now, plan in history:
+            assert len(plan["fetch_order"]) <= BUDGET
+            if _horizon(SATURDAY[0][5], now)[0] > 0:
+                cfb_cycles += 1
+                cfb_served += NCAAF in _fetched(plan)
+        assert cfb_cycles > 80
+        assert cfb_served >= cfb_cycles - 5, (cost, cfb_served, cfb_cycles)
+        worst = _max_wait(history)
+        # NCAAF's stated starvation bound under this load is three cycles;
+        # it never waited more than one
+        assert worst.get(NCAAF, 0) <= 1, worst
+        for key, *_ in SATURDAY + extra:
+            if key in (ARG2, NWSL):                  # the provider lists none
+                continue
+            assert any(key in _fetched(p) for _, p in history), key
+
+
 def test_the_old_first_come_rule_dropped_ncaaf_and_the_schedule_does_not():
     """THE MEASURED FAILURE, REPRODUCED AND REPAIRED. Sunday 2026-10-04
     (heartbeat): venue board cfb 3, unl 26, nfl 14, brb 8. The old rule --
@@ -581,6 +619,29 @@ def test_an_unread_horizon_is_not_an_empty_one():
     plan = cov.plan(comps, now=SAT, cycle_s=CYCLE)
     assert plan["receipts"][0]["planned"] == cov.SCHEDULED
     assert plan["receipts"][0]["horizon_known"] is False
+
+
+def test_a_listing_with_no_stated_start_is_not_an_empty_horizon():
+    """A venue market with no gameStartTime (us_premap.game_start NULL)
+    cannot be placed in or out of the horizon: the competition stays in
+    demand rather than being SKIPPED on a zero count. Found through the
+    real cycle (test_completed_game_collector_path): its MLB listing states
+    no start, and the zero count skipped the only competition it fetches."""
+    comps = [cov.competition(key=MLB, family="baseball", confirmed=True,
+                             listed=True, active=True, events_in_horizon=0,
+                             start_unknown=2, feed_covered=True),
+             cov.competition(key=BRB, family="soccer", listed=True,
+                             active=True, events_in_horizon=0,
+                             next_start=SAT + 40 * H, feed_covered=True)]
+    plan = cov.plan(comps, now=SAT, cycle_s=CYCLE)
+    by = {r["key"]: r for r in plan["receipts"]}
+    assert by[MLB]["planned"] == cov.SCHEDULED
+    assert by[MLB]["events_start_unknown"] == 2
+    assert "no stated start time" in by[MLB]["why"]
+    # a competition whose every listing states a start outside the horizon
+    # is still skipped, by name
+    assert by[BRB]["planned"] == cov.SKIPPED_NO_VENUE_EVENT_IN_HORIZON
+    assert by[BRB]["events_start_unknown"] == 0
 
 
 def test_an_unread_catalogue_confirms_nothing_but_the_confirmed_and_held():

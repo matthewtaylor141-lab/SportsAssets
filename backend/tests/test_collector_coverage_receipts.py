@@ -520,13 +520,30 @@ async def test_the_horizon_read_counts_the_venue_slate_by_token():
                 "event_title, question, sports_type, game_start) VALUES "
                 "($1, $2, $3, $4, $4, $5, to_timestamp($6))",
                 "id%d" % i, ms, es, title, st, gs)
+        # listings with NO stated start: one the sweep refreshed now (start
+        # unknown, counted apart) and one no sweep has touched for 3 days
+        # (no longer listed: not counted)
+        for ident, ms, es, age_h in (
+                ("idn1", "aec-mlb-k-l-1", "mlb-k-l", 0.0),
+                ("idn2", "aec-mlb-m-n-1", "mlb-m-n", 72.0)):
+            await conn.execute(
+                "INSERT INTO us_premap (identifier, market_slug, event_slug, "
+                "event_title, question, sports_type, game_start, updated_at) "
+                "VALUES ($1, $2, $3, 'K vs L', 'K vs L', "
+                "'baseball_team_full_game_winner', NULL, "
+                "now() - make_interval(secs => $4))",
+                ident, ms, es, age_h * HOUR)
         got = await loop.venue_horizon(conn)
         assert got["read"] is True
         cfb = got["by_token"]["cfb"]
         # in the horizon: the one at +2 h and the one in play (-2 h); the
         # +30 h game is listed but not in it; -10 h is past the tail
         assert cfb["events_in_horizon"] == 2 and cfb["board_events"] == 3
+        assert cfb["start_unknown"] == 0
         assert cfb["next_start"] == pytest.approx(now - 2 * HOUR, abs=1)
+        mlb = got["by_token"]["mlb"]
+        assert (mlb["events_in_horizon"], mlb["board_events"],
+                mlb["start_unknown"], mlb["next_start"]) == (0, 0, 1, None)
         # the simulated competition is excluded by the venue's own words,
         # exactly as the board excludes it
         assert "brb" not in got["by_token"]

@@ -233,7 +233,8 @@ def _num(v):
 def competition(*, key, family, token=None, listed=None, active=None,
                 confirmed=False, held=0, events_in_horizon=None,
                 next_start=None, board_events=None, feed_covered=False,
-                last_served_at=None, waiting_since=None, cost=None) -> dict:
+                last_served_at=None, waiting_since=None, cost=None,
+                start_unknown=0) -> dict:
     """One enabled competition's facts, normalised. Pure.
 
     `listed` / `active`: the provider's unmetered catalogue (None = unread).
@@ -244,6 +245,12 @@ def competition(*, key, family, token=None, listed=None, active=None,
     one: the competition stays in demand). `next_start` is the earliest venue
     start not older than the horizon's 6 h tail, so `next_start <= now`
     means an event is in play (or started within the tail).
+    `start_unknown`: venue events of this competition, refreshed by the venue
+    sweep within the last day, whose market states NO start time
+    (`us_premap.game_start` NULL: the venue sent no gameStartTime). A listing
+    with no stated start is not evidence that nothing starts in the horizon,
+    so such a competition is never SKIPPED on a zero count -- the unread-
+    horizon rule, applied per event.
     `feed_covered`: the subscribed feed carries this family's Pinnacle price
     in this process now.
     `last_served_at`: the cycle instant the competition was last given its
@@ -265,12 +272,13 @@ def competition(*, key, family, token=None, listed=None, active=None,
             "feed_covered": bool(feed_covered),
             "last_served_at": _num(last_served_at),
             "waiting_since": _num(waiting_since),
-            "cost": _num(cost)}
+            "cost": _num(cost),
+            "start_unknown": max(0, int(start_unknown or 0))}
 
 
 _FIELDS = ("key", "family", "token", "listed", "active", "confirmed", "held",
            "events_in_horizon", "next_start", "board_events", "feed_covered",
-           "last_served_at", "waiting_since", "cost")
+           "last_served_at", "waiting_since", "cost", "start_unknown")
 
 
 def _norm(c: dict) -> dict:
@@ -307,6 +315,10 @@ def _gate(c: dict, *, now: float) -> tuple:
     if c["held"] > 0:
         return (None, "a held position's competition is served whatever its "
                       "horizon (within the budget)")
+    if c["events_in_horizon"] == 0 and c["start_unknown"] > 0:
+        return (None, "%d venue event(s) listed with no stated start time: "
+                      "not evidence of an empty horizon, so it stays in "
+                      "demand" % c["start_unknown"])
     if c["events_in_horizon"] == 0:
         return (SKIPPED_NO_VENUE_EVENT_IN_HORIZON,
                 "no venue event starts in the next %.0f h or started in the "
@@ -415,6 +427,7 @@ def plan(competitions, *, now: float, cycle_s: float,
              "held": c["held"], "feed_covered": c["feed_covered"],
              "in_play": in_play(c, now=now),
              "events_in_horizon": c["events_in_horizon"],
+             "events_start_unknown": c["start_unknown"],
              "horizon_known": c["events_in_horizon"] is not None,
              "next_start": c["next_start"],
              "last_served_at": c["last_served_at"],
@@ -714,7 +727,8 @@ def digest(plan_out: dict | None) -> dict | None:
     for r in plan_out.get("receipts") or ():
         rows.append({k: r.get(k) for k in (
             "key", "token", "planned", "final", "priority_rank",
-            "events_in_horizon", "next_start", "in_play", "held",
+            "events_in_horizon", "events_start_unknown", "next_start",
+            "in_play", "held",
             "feed_covered", "bound_cycles", "starvation_bound_cycles",
             "cycles_since_served", "staleness_s", "next_slot_at",
             "credits_charged", "credits_basis", "discovery")})

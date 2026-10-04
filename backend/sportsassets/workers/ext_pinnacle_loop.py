@@ -1188,7 +1188,15 @@ def _horizon_sql() -> str:
     horizon, its events listed at all from the horizon's 6 h tail on, and
     its next start (the earliest start not older than the tail, so a start
     at or before now means an event in play). The same real-competition
-    rule as the board (`_realism_exclusions`)."""
+    rule as the board (`_realism_exclusions`).
+
+    A market the venue lists WITHOUT a start time (`game_start` NULL: the
+    venue sent no gameStartTime) is counted apart, as `start_unknown`, when
+    the venue sweep refreshed it within the last day (`updated_at`, set on
+    every premap upsert) -- a row no sweep has touched for a day is no longer
+    listed. Such an event cannot be placed in or out of the horizon, so it
+    keeps its competition in demand instead of letting a zero count skip it
+    (collector_coverage.competition `start_unknown`)."""
     toks = sorted(mapped_tokens())
     for t in toks:
         assert t.isalnum() and t.islower(), t
@@ -1198,7 +1206,10 @@ def _horizon_sql() -> str:
            count(DISTINCT event_slug) FILTER (
                WHERE game_start <= now() + make_interval(secs => %(ahead)d))
              AS in_horizon,
-           count(DISTINCT event_slug) AS board_events,
+           count(DISTINCT event_slug) FILTER (WHERE game_start IS NOT NULL)
+             AS board_events,
+           count(DISTINCT event_slug) FILTER (WHERE game_start IS NULL)
+             AS start_unknown,
            extract(epoch FROM min(game_start)) AS next_start
       FROM us_premap
      WHERE split_part(market_slug, '-', 2) IN (%(toks)s)
@@ -1208,15 +1219,17 @@ def _horizon_sql() -> str:
               "toks": ", ".join("'%s'" % t for t in toks)}
             + types + """
        """ + prose + """
-       AND game_start > now() - make_interval(secs => %d)
+       AND (game_start > now() - make_interval(secs => %d)
+            OR (game_start IS NULL
+                AND updated_at > now() - make_interval(secs => %d)))
      GROUP BY 1
-""" % int(cov.HORIZON_BEHIND_S))
+""" % (int(cov.HORIZON_BEHIND_S), int(cov.HORIZON_AHEAD_S)))
 
 
 async def venue_horizon(conn) -> dict:
-    """{token: {events_in_horizon, board_events, next_start}}. Never raises;
-    a failed read is `read: False` and the scheduler treats every horizon as
-    UNKNOWN (in demand), never as empty."""
+    """{token: {events_in_horizon, board_events, start_unknown,
+    next_start}}. Never raises; a failed read is `read: False` and the
+    scheduler treats every horizon as UNKNOWN (in demand), never as empty."""
     out: dict = {"read": False, "by_token": {}, "source": "us_premap"}
     try:
         rows = await conn.fetch(VENUE_HORIZON_SQL)
@@ -1225,6 +1238,7 @@ async def venue_horizon(conn) -> dict:
             out["by_token"][str(r["token"])] = {
                 "events_in_horizon": int(r["in_horizon"] or 0),
                 "board_events": int(r["board_events"] or 0),
+                "start_unknown": int(r["start_unknown"] or 0),
                 "next_start": None if nxt is None else float(nxt)}
     except Exception as exc:                                   # noqa: BLE001
         out.update(by_token={}, error=type(exc).__name__)
@@ -1431,6 +1445,7 @@ async def plan_coverage(conn, *, catalogue, selection, now: float) -> dict:
             if not key or key in comps:
                 return
             toks = venue_league_tokens(key) or ((token,) if token else ())
+            unknown = 0
             if not horizon["read"] or not toks:
                 # UNREAD, or no venue token to read it by: UNKNOWN, never 0
                 ev = board = nxt = None
@@ -1439,6 +1454,8 @@ async def plan_coverage(conn, *, catalogue, selection, now: float) -> dict:
                       if horizon["by_token"].get(t)]
                 ev = sum(h["events_in_horizon"] for h in hs)
                 board = sum(h["board_events"] for h in hs)
+                # listed with no stated start: keeps it in demand
+                unknown = sum(int(h.get("start_unknown") or 0) for h in hs)
                 starts = [h["next_start"] for h in hs
                           if h["next_start"] is not None]
                 nxt = min(starts) if starts else None
@@ -1450,6 +1467,7 @@ async def plan_coverage(conn, *, catalogue, selection, now: float) -> dict:
                 active=(None if row is None else row.get("active") is not False),
                 confirmed=confirmed, held=held["by_key"].get(key, 0),
                 events_in_horizon=ev, next_start=nxt, board_events=board,
+                start_unknown=unknown,
                 feed_covered=fam in feed.get("families", []),
                 last_served_at=mem["last_served"].get(key),
                 waiting_since=mem["waiting_since"].get(key))
@@ -1669,6 +1687,8 @@ async def _persist_coverage_receipts(conn, *, cycle_id: str, cycle_at: float,
             detail["unsettled"] = ("scheduled and never fetched this cycle; "
                                    "recorded FETCH_FAILED with no spend")
         detail["overdue_cycles"] = r.get("overdue_cycles")
+        if r.get("events_start_unknown"):
+            detail["events_start_unknown"] = r["events_start_unknown"]
         if r.get("waiting_since") is not None:
             detail["waiting_since"] = r["waiting_since"]
         rows.append((
