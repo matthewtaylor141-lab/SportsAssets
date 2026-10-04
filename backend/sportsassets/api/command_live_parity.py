@@ -54,17 +54,23 @@ def _row(r) -> dict:
 
 
 async def _profitability(conn) -> dict | None:
-    """The INVESTMENT sleeve's forward profitability verdict, when the
-    validation module is present (R30 profitability stream)."""
+    """The INVESTMENT sleeve's FORWARD profitability verdict (R30
+    profitability validation), since the R30 cutover."""
+    import time
     try:
         from ..profitability import validation as PV
+        from . import command_validation as CV
     except ImportError:
         return None
     try:
-        rep = await PV.report(conn)
-        return {"profitability_verdict": ((rep.get("sleeves") or {}).get(
-                    "INVESTMENT") or {}).get("profitability_verdict")
-                or rep.get("profitability_verdict")}
+        cut, src = PV.cutover_epoch()
+        rep = await CV._read(conn, since=cut, since_source=src,
+                             now=time.time())
+        v = (rep.get("data") or {}).get("profitability_verdict")
+        if isinstance(v, dict):
+            return {"profitability_verdict": v.get("verdict"), "detail": v}
+        return {"profitability_verdict": v,
+                "why": rep.get("why") if v is None else None}
     except Exception as exc:                                  # noqa: BLE001
         return {"profitability_verdict": None,
                 "why": "VALIDATION_UNREADABLE:%s" % type(exc).__name__}
