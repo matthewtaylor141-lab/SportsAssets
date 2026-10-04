@@ -820,3 +820,8 @@ tests/test_xavier_freshness_truth.py
 # guesses a SHA (missing => UNAVAILABLE, 7 chars => PREFIX_7) and shows a
 # receipt whose sha256 does not verify as TAMPERED.
 tests/test_command_release_authority.py
+# (224) THE SEVEN AGENTS' IDENTITY, MEMORY, EXPERIENCE AND EVENTS: GET-only
+# reads in a READ ONLY transaction; the memory learner writes only its own
+# append-only tables; bundles differ per agent and never widen the
+# registry (Karen / Scout / Eddie boundaries); no voice is borrowed.
+tests/test_agent_identity_api_authority.py

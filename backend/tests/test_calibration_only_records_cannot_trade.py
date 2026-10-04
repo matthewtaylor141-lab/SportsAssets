@@ -628,6 +628,11 @@ READERS = {
         "BY_ID_OF_A_SETTLED_REFUSALS_DECISION_RESEARCH_CLASSIFICATION_ONLY",
         2),
     "lost_opportunity/runner.py": ("EVIDENCE_ID_PREFIX_ONLY", 1),
+    # (224) the agents' context bundle names the table in CONTEXT_SOURCES
+    # (Derek's and Scout's list of the records their answers cite); it is a
+    # descriptive name list with no SQL behind it: selects nothing, reads no
+    # row, sizes and places nothing
+    "agents/agent_context.py": ("CONTEXT_SOURCE_NAME_LIST_PROSE_ONLY", 2),
 }
 
 
