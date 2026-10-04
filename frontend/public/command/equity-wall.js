@@ -213,6 +213,7 @@
   }
   function setOdo(node, value, animate) {
     var text = fin(value) ? USD.format(value) : '—';
+    node.setAttribute('role', 'img');
     node.setAttribute('aria-label', text);
     var prev = node.getAttribute('data-text');
     if (prev === text) { return; }

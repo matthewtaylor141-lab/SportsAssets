@@ -119,9 +119,9 @@
     if (sc.status !== 'OK') body += '<p class="wsx-na">' + esc(sc.why) + '</p>';
     else {
       var mine = (sc.data.agents || {})[name] || [];
-      body += mine.length ? '<table class="wsx-t"><thead><tr><th>Metric</th><th>Book</th><th class="r">Value</th><th class="r">n</th><th>CI</th><th>Status</th></tr></thead><tbody>' + mine.map(function (m) {
+      body += mine.length ? '<div class="wsx-scroll"><table class="wsx-t"><thead><tr><th>Metric</th><th>Book</th><th class="r">Value</th><th class="r">n</th><th>CI</th><th>Status</th></tr></thead><tbody>' + mine.map(function (m) {
         return '<tr><td>' + esc(m.metric) + '</td><td>' + esc(m.book || '') + '</td><td class="r num">' + (m.value == null ? '<span class="wsx-na">UNAVAILABLE</span>' : esc(m.unit === 'usd' ? money(m.value) : m.value)) + '</td><td class="r num">' + esc(m.sample_n == null ? '—' : m.sample_n) + '</td><td class="num">' + (m.ci_low != null && m.ci_high != null ? esc(m.ci_low + ' … ' + m.ci_high) : '—') + '</td><td>' + esc(m.status || '') + (m.reason ? ' · ' + esc(m.reason) : '') + '</td></tr>';
-      }).join('') + '</tbody></table><small class="wsx-src">run ' + esc(sc.data.run_id || '') + ' · ' + esc(B.ago(sc.data.computed_at, t)) + ' · books never summed</small>' : '<p class="wsx-na">UNAVAILABLE: the latest scorecard run has no rows for ' + esc(name) + '.</p>';
+      }).join('') + '</tbody></table></div><small class="wsx-src">run ' + esc(sc.data.run_id || '') + ' · ' + esc(B.ago(sc.data.computed_at, t)) + ' · books never summed</small>' : '<p class="wsx-na">UNAVAILABLE: the latest scorecard run has no rows for ' + esc(name) + '.</p>';
     }
     body += '<h3>Tournament <small>pos-learn agent tournaments</small></h3>';
     if (tr.status !== 'OK') body += '<p class="wsx-na">' + esc(tr.why) + '</p>';

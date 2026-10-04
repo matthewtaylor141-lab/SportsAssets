@@ -40,3 +40,6 @@
 .xp-vs{color:#8a9ba3;font-size:.85em;margin:0 2px}
 
 .xp-code{display:block;font-size:11px;opacity:.7;font-variant-numeric:tabular-nums;word-break:break-all;margin-top:2px}
+
+/* long agent codes (e.g. "VENUE_BOOK_CURRENCY_NOT_ESTABLISHED") wrap instead of widening the page on phones */
+.xp-recs li{overflow-wrap:anywhere;word-break:break-word;min-width:0}
