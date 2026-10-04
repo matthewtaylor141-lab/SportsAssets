@@ -46,10 +46,11 @@ for (const [label, vw, vh] of [["desktop", 1440, 900], ["phone", 390, 844]].filt
                  let clipped = false; for (let a = el.parentElement; a && a !== document.body; a = a.parentElement) { const ox = getComputedStyle(a).overflowX; if (ox !== "visible") { clipped = true; break; } } return { clipped, r: Math.round(r.right), w: Math.round(r.width), sel: el.tagName.toLowerCase() + (el.id ? "#" + el.id : "") + (typeof el.className === "string" && el.className ? "." + el.className.trim().split(/\s+/).slice(0, 3).join(".") : "") };
                }).filter((o) => o.r > de.clientWidth + 1 && !o.clipped).sort((a, b) => b.r - a.r).slice(0, 12),
                canvases: [...document.querySelectorAll("canvas")].map((c) => { const r = c.getBoundingClientRect(); return Math.round(r.width) + "x" + Math.round(r.height); }).filter((x) => !/^0x|x0$/.test(x)),
-               employeeLinks: [...document.querySelectorAll("#mtg-team a, #co-team a")].map((a) => a.getAttribute("href")),
+               employeeLinks: [...document.querySelectorAll("#hq4-company-home a.hq4-agent-card, #hq4-company-agents a.hq4-agent-card, #mtg-team a, #co-team a")].map((a) => a.getAttribute("href")),
                iframes: [...document.querySelectorAll("iframe")].filter((f) => !f.hidden && f.src).map((f) => f.getAttribute("src")),
                humanDirectory: (document.body.innerText.match(/HUMAN DIRECTORY · [A-Z ]+/) || [null])[0],
-               build: (document.querySelector('script[data-meeting]') ? "MEETING" : "PRE_MEETING"),
+               build: [document.querySelector('script[data-meeting]') && "MEETING", document.querySelector('script[data-hq4],#hq4-company-root') && "HQ4"].filter(Boolean).join("+") || "BASE",
+               homeOrder: [...document.querySelectorAll("#bt-meeting-home .mtg-head, #hq4-company-home, #bt-meeting-home .mtg-attention, #bt-meeting-home .mtg-capital, #bt-meeting-home .mtg-team")].filter((e) => getComputedStyle(e).display !== "none").sort((a, b) => a.getBoundingClientRect().top - b.getBoundingClientRect().top).map((e) => e.id || e.className.split(" ")[0]).join(">"),
                shadowLabels: (document.body.innerText.match(/SHADOW/g) || []).length,
                liveWord: (document.body.innerText.match(/\bLIVE\b/g) || []).length };
     }).catch((e) => ({ error: String(e).slice(0, 200) }));
@@ -119,7 +120,7 @@ await browser.close();
 fs.writeFileSync(`${OUT}/hq_report.json`, JSON.stringify(report, null, 1));
 for (const r of report.runs) {
   if (r.overflowers && r.overflowers.length) console.log("   overflow: " + JSON.stringify(r.overflowers));
-  console.log(`== ${r.label} ${r.path} HTTP ${r.status} ${r.ms}ms title="${r.title}" build=${r.build} overflowX=${r.overflowX} (${r.scrollWidth}/${r.clientWidth}) errors=${r.errors.length} canvases=${JSON.stringify(r.canvases)} iframes=${JSON.stringify(r.iframes)}${r.employeeLinks && r.employeeLinks.length ? " employees=" + r.employeeLinks.join(",") : ""}${r.humanDirectory ? " [" + r.humanDirectory + "]" : ""}${r.characters ? " characters=" + r.characters : ""}`);
+  console.log(`== ${r.label} ${r.path} HTTP ${r.status} ${r.ms}ms title="${r.title}" build=${r.build} overflowX=${r.overflowX} (${r.scrollWidth}/${r.clientWidth}) errors=${r.errors.length} canvases=${JSON.stringify(r.canvases)} iframes=${JSON.stringify(r.iframes)}${r.employeeLinks && r.employeeLinks.length ? " employees=" + r.employeeLinks.join(",") : ""}${r.humanDirectory ? " [" + r.humanDirectory + "]" : ""}${r.homeOrder ? " order=" + r.homeOrder : ""}${r.characters ? " characters=" + r.characters : ""}`);
   for (const e of r.errors.slice(0, 6)) console.log("   err: " + e);
   console.log("   apis: " + r.apis.join(" | ").slice(0, 1800));
   for (const s of (r.sections || [])) console.log(`   [${s.h}] unavailable=${s.unavailable} nan=${s.nan} chars=${s.chars} :: ${s.sample}`);
