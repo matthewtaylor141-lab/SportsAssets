@@ -762,3 +762,8 @@ tests/test_equity_wall_authority.py
 # Position rooms (GET /api/command/positions/*): GET only, 401 without a
 # session, READ ONLY transaction, no order / funded / paper-writer import.
 tests/test_position_rooms_authority.py
+# ui-floor: GET /api/command/floor (+ /{agent}) -- the trading-floor
+# aggregate is GET only, session-authenticated, one READ ONLY transaction
+# with a bounded statement timeout, SELECT-only SQL, and imports no order,
+# venue, ledger, paper or funded module.
+tests/test_command_floor_authority.py

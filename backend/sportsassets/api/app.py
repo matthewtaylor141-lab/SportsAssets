@@ -742,6 +742,15 @@ try:
     app.include_router(_command_positions_router)
 except ImportError:
     log.warning("positions: api.command_positions not loaded", exc_info=True)
+# ── THE TRADING FLOOR: /api/command/floor (+ /{agent}) ──────────────────
+# GET only, COMMAND auth, one READ ONLY transaction with a statement
+# timeout: every agent's state derived from its real rows + collaboration
+# edges. No write, order, approval or capital path.
+try:
+    from .command_floor import router as _command_floor_router
+    app.include_router(_command_floor_router)
+except ImportError:
+    log.warning("floor: api.command_floor not loaded", exc_info=True)
 from .agent_capabilities import router as _capabilities_router
 app.include_router(_capabilities_router)
 from .slack_agents import router as _slack_agents_router
