@@ -1,0 +1,87 @@
+{
+ "_what": "THE NFL TIE FREQUENCY UNDER THE CURRENT (2025) OVERTIME RULE, as retrieved -- the evidence bettor_nfl_settlement.TIE_RATE_EVIDENCE rests on. Verbatim wikitext; nothing interpreted here.",
+ "source": "Wikipedia, 'List of NFL tied games'",
+ "revision": {
+  "revid": 1377928469,
+  "timestamp": "2026-10-02T00:27:40Z",
+  "user": "Red0ctober22",
+  "comment": "/* 2025–present */",
+  "read_by": {
+   "workflow": "fetch-docs",
+   "run_id": 37226283325,
+   "job_id": 111506490371,
+   "retrieved_at": "2026-10-04T18:55:31Z",
+   "url": "https://en.wikipedia.org/w/api.php?action=query&prop=revisions&titles=List_of_NFL_tied_games&rvprop=ids|timestamp|user|comment&rvlimit=5&format=json",
+   "sha256": "5a47704f2bbe96e772963efc1478b33bc8decebad8d79f73dbf36d48c8e21651"
+  }
+ },
+ "section_2025_present": {
+  "url": "https://en.wikipedia.org/w/api.php?action=parse&oldid=1377928469&prop=wikitext&section=8&format=json",
+  "read_by": {
+   "workflow": "fetch-docs",
+   "run_id": 37226513169,
+   "job_id": 111507171658,
+   "retrieved_at": "2026-10-04T18:59:15Z",
+   "bytes": 2135,
+   "sha256": "c273836bf3278034a6e3f240a86e2cd3df479b8ba2014f41d014faf1f5fbbba2"
+  },
+  "rule_sentence": "In 2025, the NFL changed the overtime rules to allow both teams to have possession during the overtime period, even if the first team scores a touchdown, with the overtime remaining at 10 minutes.",
+  "count_sentence": "Through Week 3 of the [[2026 NFL season|2026 season]], a total of 17 regular season games went to overtime, 1 ({{Percentage|1|17|1|pad=yes}}) of which ended in a tie.",
+  "table_rows": [
+   {
+    "no": 1,
+    "date": "September 28, 2025",
+    "away": "Green Bay Packers",
+    "home": "Dallas Cowboys",
+    "score": "40–40"
+   }
+  ]
+ },
+ "section_lead": {
+  "url": "https://en.wikipedia.org/w/api.php?action=parse&page=List_of_NFL_tied_games&prop=wikitext|revid&section=0&format=json",
+  "read_by": {
+   "workflow": "fetch-docs",
+   "run_id": 37226271718,
+   "job_id": 111506466636,
+   "retrieved_at": "2026-10-04T18:55:23Z",
+   "bytes": 5607,
+   "sha256": "a9bc4f2005815a9659addf8fb8e439e541f168b2c49222fa89075caf04e0d47d",
+   "revid": 1377928469
+  },
+  "definition_sentence": "In the [[National Football League]] (NFL), a [[Tie (draw)|tied game]] occurs when a [[National Football League regular season|regular season]] game ends with both teams having an equal score after one 10-minute overtime period.",
+  "most_recent_sentence": "The most recent tie game occurred on September 28, 2025, when the [[2025 Green Bay Packers season|Green Bay Packers]] and [[2025 Dallas Cowboys season|Dallas Cowboys]] played to a 40–40 draw."
+ },
+ "schedule_size": {
+  "url": "https://operations.nfl.com/the-rules/nfl-overtime-rules/",
+  "read_by": {
+   "workflow": "fetch-docs",
+   "run_id": 37225975369,
+   "job_id": 111505599478,
+   "retrieved_at": "2026-10-04T18:50:40Z"
+  },
+  "sentence": "It takes thousands of computers and a team of NFL executives to create the NFL’s 272-game masterpiece.",
+  "note": "the overtime-rules page itself is client-rendered and served no rule text to the runner; the schedule-size sentence is from the same served page"
+ },
+ "not_reachable": [
+  {
+   "url": "https://www.pro-football-reference.com/years/2025/games.htm",
+   "run_id": 37225967270,
+   "result": "Cloudflare challenge page ('Just a moment...'), 5,566 bytes; no data"
+  },
+  {
+   "url": "https://www.espn.com/nfl/standings/_/season/2025",
+   "run_id": 37226104217,
+   "result": "0 bytes served to the runner"
+  },
+  {
+   "url": "https://operations.nfl.com/the-rules/2026-nfl-rulebook/",
+   "run_id": 37226111957,
+   "result": "client-rendered shell; no rule text"
+  }
+ ],
+ "denominator_bracket": {
+  "games_min": 272,
+  "games_max": 320,
+  "why": "the count runs through Week 3 of 2026: at least the full 272-game 2025 season, at most 3 x 16 more (32 clubs); the exact 2026 count was not captured, so the interval is taken across the bracket"
+ }
+}

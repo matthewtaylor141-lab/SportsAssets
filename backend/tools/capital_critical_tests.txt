@@ -708,6 +708,20 @@ tests/test_xavier_freshness_scorecard.py
 # claimed only where both documents agree, and the real cycle on the 14-game
 # 2026-10-04 slate ending every game in a recorded, named outcome.
 tests/test_nfl_slate_reaches_a_recorded_outcome.py
+# R30A NFL P0: the integration repaired, not allowlisted. Cited book and
+# venue settlement terms compared as PAYOUTS per state (regulation / OT win,
+# tie after OT, postponement and suspension as exceptional, Pro Bowl
+# excluded); the book's P(win | no tie) converted to the venue's $0.50-tie
+# value at the worst end of a cited Clopper-Pearson tie-rate interval; the
+# NFL alone admitted to the de-vig (college football unchanged); the PinnAPI
+# full-game two-way line (sport 5, period 0) with a draw-priced line refused;
+# hot NFL fixtures as a tier of the existing reactive scheduler (30 s
+# unchanged); and the REAL paper pass: ENTER with a canonical intent and a
+# SHADOW adapter row, below-edge at the worst tie rate, stale probability,
+# settlement mismatch, tie settled at 0.5, London / Sunday-night dating and
+# the Pro Bowl excluded.
+tests/test_nfl_settlement_and_tie_evidence.py
+tests/test_nfl_through_the_paper_pass.py
 # cand24 B: one status per league (HEALTHY / REFUSING_BY_POLICY /
 # EXPLICITLY_UNSUPPORTED / COVERAGE_INCIDENT / UNAVAILABLE), an Audrey alert
 # for every coverage incident (NULL is not absence), the per-game NFL
