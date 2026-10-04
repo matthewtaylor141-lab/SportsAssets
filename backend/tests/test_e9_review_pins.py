@@ -58,12 +58,26 @@ GTC_TIF = "TIME_IN_FORCE_GOOD_TILL_CANCEL"
 YML = _render_ops_file()
 
 
-async def _spin(until, n=2000):
-    """Yield to the loop until `until()` holds (the fakes never sleep)."""
+async def _spin(until, n=2000, seconds=10.0):
+    """Yield to the loop until `until()` holds.
+
+    "The fakes never sleep" is true of the fakes, not of the tick: its venue
+    reads go through `asyncio.to_thread` (`_paced`, the positions walk), so
+    reaching step O waits on a REAL thread. 2,000 bare yields take a few
+    milliseconds; on a loaded host the thread had not been scheduled by then
+    and the fold tests failed "the full tick is inside step O" about one run
+    in three (R30A ci, 2026-10-04, six streams on four cores) with no change
+    in the code under test. The yields come first, as before; then the wait
+    continues on the clock, bounded, and the condition must still hold."""
     for _ in range(n):
         if until():
             return True
         await asyncio.sleep(0)
+    deadline = asyncio.get_running_loop().time() + seconds
+    while asyncio.get_running_loop().time() < deadline:
+        if until():
+            return True
+        await asyncio.sleep(0.001)
     return until()
 
 
