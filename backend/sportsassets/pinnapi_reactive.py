@@ -26,16 +26,25 @@ ACTIVE = None
 #: still re-proves identity, venue, settlement, depth and fees.
 HELD_SEED_TTL_S = 6 * 3600
 
-#: THE JOB'S CONNECTION (R30A, 2026-10-04). Production, 15:46-18:47Z: the
-#: audit failed 14 times with TimeoutError inside asyncpg Pool._acquire --
-#: the audit took its OWN connection twice per job (STARTED, then the
-#: completion) under a 2 s budget, the evaluation a third, from an API pool
-#: whose ten slots were six-held by single-writer loops (research-sql run
-#: 37226381750). A failed first audit dropped a fresh change unevaluated; a
-#: failed second one left the attempt STARTED for ever with its valuation ids
-#: lost -- 19 such rows in 24 h, 13 of them HELD positions (research-sql run
+#: THE JOB'S CONNECTION (R30A, 2026-10-04). Production, 15:47-18:47Z
+#: (render-ops logs run 37225745383): the audit failed 12 times -- 10 with
+#: the TimeoutError inside asyncpg Pool._acquire, 2 (16:00:53, 17:46:10)
+#: inside the INSERT after the connection was acquired. The audit took its
+#: OWN connection twice per job (STARTED, then the completion) under ONE 2 s
+#: budget covering both the wait and the statement, the evaluation a third,
+#: from an API pool whose ten slots were six-held by single-writer loops
+#: (research-sql run 37226381750). The INSERT's server time never exceeded
+#: 12 ms (pg_stat_statements: 4,139 calls, mean 0.17 ms; research-sql run
+#: 37231484481), so the two in-statement timeouts were the client's budget
+#: expiring around it: a wait in acquire that left the statement almost no
+#: time, and the API event loop held 2-4 s at a time in the same minutes
+#: (the loop watchdog; fixed at the sources, tests/test_r30a_loop_stalls.py).
+#: A failed first audit dropped a fresh change unevaluated; a failed second
+#: one left the attempt STARTED for ever with its valuation ids lost -- 19
+#: such rows in 24 h, 13 of them HELD positions (research-sql run
 #: 37226551461). Now ONE connection is taken per job, within SESSION_WAIT_S,
-#: and both audits and the evaluation run on it. A job that gets no
+#: and both audits and the evaluation run on it, each statement with its
+#: own budget (the wait no longer eats the statement's). A job that gets no
 #: connection in time is refused before anything starts, counted
 #: SESSION_UNAVAILABLE and logged -- the same fail-closed rule as before
 #: (no unaudited evaluation), now one acquire instead of three.
@@ -44,6 +53,19 @@ SESSION_WAIT_S = 2.0
 #: when the job's connection cannot take it (a cancelled statement can leave
 #: that connection unusable)
 AUDIT_S = 2.0
+#: THE FENCE'S BUDGET (R30A review). The writer-lock proof on the job's
+#: connection is one pg_locks read; unanswered within FENCE_S it is a
+#: refusal (FENCED_OUT, counted FENCE_UNANSWERED, logged) -- before, a
+#: stalled read blocked the one reactive worker for ever, uncounted.
+FENCE_S = 2.0
+#: THE WORST CASE ONE JOB CAN TAKE, every bound spent in full: the session
+#: wait, the fence, the STARTED audit, the evaluation deadline, the
+#: completion audit, then its retry on a fresh session (wait + audit).
+#: = 2 + 2 + 2 + 12 + 2 + (2 + 2) = 24 s with the defaults; a test pins it.
+def worst_case_job_s(deadline: float = 12.0, session_wait: float = SESSION_WAIT_S
+                     ) -> float:
+    return (session_wait + FENCE_S + AUDIT_S + float(deadline) + AUDIT_S
+            + session_wait + AUDIT_S)
 
 
 class Scheduler:
@@ -311,9 +333,13 @@ async def _run_job_on_one_session(self, eid, tick):
             attempt['session_wait_s'] = round(self.clock() - t0, 3)
             if self.fence is not None:
                 try:
-                    fenced_in = await self.fence(conn)
+                    async with asyncio.timeout(FENCE_S):
+                        fenced_in = await self.fence(conn)
                 except asyncio.CancelledError:
                     raise
+                except TimeoutError:
+                    self.counts['FENCE_UNANSWERED'] += 1
+                    fenced_in = False
                 except Exception:                               # noqa: BLE001
                     fenced_in = False
                 if not fenced_in:

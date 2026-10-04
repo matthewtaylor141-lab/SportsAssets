@@ -7051,7 +7051,10 @@ async def _servicing_loop(pool, *, interval_s: float = SERVICING_INTERVAL_S,
                         timeout=SERVICING_ACQUIRE_TIMEOUT_S) as sconn:
                     if fence is not None:
                         try:
-                            fenced_in = await fence(sconn)
+                            # bounded: no answer in FENCE_TIMEOUT_S is a
+                            # refused pass (R30A review), never a stuck one
+                            async with asyncio.timeout(FENCE_TIMEOUT_S):
+                                fenced_in = await fence(sconn)
                         except asyncio.CancelledError:
                             raise
                         except Exception:                      # noqa: BLE001
@@ -7277,9 +7280,37 @@ async def _persist_candidate_outcomes(conn, *, cycle_at: float, rows) -> dict:
     return out
 
 
+def _step_rss(at: dict) -> dict:
+    """RSS at each cycle step boundary and the step's delta, in MB; a
+    boundary /proc could not be read is None and its deltas are None."""
+    order = ("start", "serviced", "entry", "persisted", "joined",
+             "calibrated", "observed")
+    names = {"serviced": "servicing_in_cycle", "entry": "entry_lane",
+             "persisted": "candidate_outcomes", "joined": "outcome_join",
+             "calibrated": "calibration_measurement",
+             "observed": "pair_observation"}
+    out = {"at_start": at.get("start"), "at_end": at.get("observed"),
+           "delta": {}}
+    for a, b in zip(order, order[1:]):
+        x, y = at.get(a), at.get(b)
+        out["delta"][names[b]] = (None if x is None or y is None
+                                  else round(y - x, 1))
+    return out
+
+
 async def cycle(conn, *, stream_seed=None) -> dict:
     """Never raises. Returns what it did and, mostly, why it did not."""
     started = time.time()
+    # WHERE THE CYCLE'S MEMORY WENT (R30A runtime): the API was OOM-killed
+    # at its 2 GiB limit seven times on 2026-10-04 (render-ops events run
+    # 37231548727) and its RSS stepped up in the minutes of this cycle's
+    # entry lane and outcome join (17:19-17:23 Z: 326 -> 1,043 MB; 17:36-
+    # 17:37 Z: 1,081 -> 1,562 MB; render-ops logs run 37231656397). What is
+    # missing to root-cause it is WHICH step allocates: RSS is read at each
+    # step boundary below (procmem.rss_mb, /proc, None where unreadable --
+    # never a guess) and rides the heartbeat beside step_timing_s.
+    from .. import procmem as _procmem
+    _rss_at = {"start": _procmem.rss_mb()}
     # ── AGENTS (core, migration 152): DEREK IS EVALUATING ──────────────
     if stream_seed is None:
         await _derek_heartbeat_start(conn, now=started)
@@ -7327,6 +7358,7 @@ async def cycle(conn, *, stream_seed=None) -> dict:
         funded_service = _svc.get("funded_service")
         xavier_review = _svc.get("xavier_review")
     _t_serviced = time.time()
+    _rss_at["serviced"] = _procmem.rss_mb()
 
     # ── A CYCLE THAT ENTERS NOTHING STILL SERVICED, SO IT STILL BEATS ──
     #
@@ -8933,10 +8965,12 @@ async def cycle(conn, *, stream_seed=None) -> dict:
 
     _close_event()
     _t_entry = time.time()
+    _rss_at["entry"] = _procmem.rss_mb()
     candidate_outcomes = _reconcile_event_ledger(event_ledger, funnel)
     candidate_outcomes["persisted"] = await _persist_candidate_outcomes(
         conn, cycle_at=started, rows=event_ledger)
     _t_persisted = time.time()
+    _rss_at["persisted"] = _procmem.rss_mb()
     if stream_seed is not None:
         return {"ran": True, "state": "WS_PAPER_EVALUATED", "written": written,
                 "refusals": dict(tally), "candidate_outcomes": candidate_outcomes,
@@ -8947,6 +8981,7 @@ async def cycle(conn, *, stream_seed=None) -> dict:
     # remember to run a backfill is a calibration that never happens.
     joined = await join_outcomes(conn)
     _t_joined = time.time()
+    _rss_at["joined"] = _procmem.rss_mb()
     # THE CALIBRATION MEASUREMENT, SCHEDULED, right after the join that
     # feeds it. At most once per CALIBRATION_MEASURE_EVERY_S; see
     # `_scheduled_calibration_measurement`. It writes only a completed
@@ -8954,9 +8989,11 @@ async def cycle(conn, *, stream_seed=None) -> dict:
     calibration_measurement = await _scheduled_calibration_measurement(
         conn, now=time.time())
     _t_calibrated = time.time()
+    _rss_at["calibrated"] = _procmem.rss_mb()
     pair_observation = await _pair_observation_pass(conn, observable,
                                                     now=time.time())
     _t_observed = time.time()
+    _rss_at["observed"] = _procmem.rss_mb()
     # WHERE THE CYCLE'S TIME WENT, per step, so the cadence can be read from
     # the heartbeat rather than inferred from `elapsed_s` alone. `servicing`
     # is ~0 while the servicing task is alive: the cycle then services nothing.
@@ -8967,9 +9004,11 @@ async def cycle(conn, *, stream_seed=None) -> dict:
         "outcome_join": round(_t_joined - _t_persisted, 3),
         "calibration_measurement": round(_t_calibrated - _t_joined, 3),
         "pair_observation": round(_t_observed - _t_calibrated, 3)}
+    step_rss_mb = _step_rss(_rss_at)
 
     out = {"ran": True, "state": "LIVE",
            "step_timing_s": step_timing_s,
+           "step_rss_mb": step_rss_mb,
            "pair_observation": pair_observation,
            "experiment_id": ext.EXPERIMENT_ID,
            "outcome_join": joined,
@@ -10161,7 +10200,31 @@ def next_cycle_delay(*, ran: bool, elapsed_s: float) -> float:
 
 #: FENCING (R30A): the writer's per-pass proof, on its own session, that it
 #: still holds LOCK_KEY must answer within this; no answer is a lost lock.
+#: The CHILDREN's proof (`_child_fence`, asked on a servicing pass's or a
+#: reactive job's own connection) has the same bound: an unanswered pg_locks
+#: read is a refused pass, never a pass that waits for ever.
 FENCE_TIMEOUT_S = 5.0
+
+#: RE-CONTENTION THAT CANNOT FAIL OUT OF `run` (R30A review, 2026-10-04).
+#: Losing the lease and contending again on a database that is still
+#: restarting raised the connect error straight out of `run`: the API
+#: lifespan task that runs it is not supervised, so the entry lane, the
+#: servicing child (held-position management) and the reactive scheduler
+#: stayed down until the next deploy. Every contention attempt now fails
+#: INTO the loop: logged with its exception, recorded in loop health, and
+#: retried after IDLE_POLL_S doubled per consecutive failure up to this cap
+#: (60, 120, 240, 300, 300 ... s). A hold that ran resets the doubling.
+CONTEND_BACKOFF_MAX_S = 300.0
+
+
+def contend_delay(consecutive_failures: int) -> float:
+    """Seconds before the next contention: IDLE_POLL_S after a hold that
+    ended normally (0 failures), doubling per consecutive failed attempt,
+    never above CONTEND_BACKOFF_MAX_S."""
+    n = max(0, int(consecutive_failures))
+    if n == 0:
+        return IDLE_POLL_S
+    return min(CONTEND_BACKOFF_MAX_S, IDLE_POLL_S * (2 ** min(n - 1, 16)))
 
 
 async def run(get_pool) -> None:
@@ -10194,204 +10257,245 @@ async def run(get_pool) -> None:
     ITS OWN SESSION (`db.lease_session`): the lock no longer occupies one of
     the shared pool's ten slots (six lock holders held six of them in
     production, research run 37226381750).
+
+    NOTHING IN A CONTENTION ATTEMPT ESCAPES `run` (see CONTEND_BACKOFF_MAX_S):
+    the pool, the lease session, the standby probe and the hold itself are
+    one attempt inside one try; a failure stops the children (the hold's own
+    `finally`), is logged and recorded, and the next attempt follows after
+    `contend_delay`. Only cancellation leaves.
     """
-    pool = await get_pool()
+    failures = 0
     while True:
         lost_why = None
-        async with lease_session(pool, name="ext_pinnacle") as conn:
-            while not await conn.fetchval(
-                    "SELECT pg_try_advisory_lock($1)", LOCK_KEY):
-                log.info("ext_pinnacle STANDBY: another process holds the "
-                         "writer lock; writing nothing, retrying in %ss",
-                         IDLE_POLL_S)
-                # ITS OWN KEY. This process writes no valuations, so it has no
-                # cycle; writing HEARTBEAT_KEY here erased the real writer's.
-                await _heartbeat(conn, {
-                    "state": "STANDBY_NOT_THE_WRITER",
-                    "refusals": {"ANOTHER_PROCESS_HOLDS_THE_WRITER_LOCK": 1}},
-                    key=STANDBY_KEY)
-                await asyncio.sleep(IDLE_POLL_S)
-            log.info("ext_pinnacle: writer lock held (key %s)", LOCK_KEY)
-            # THE WRITER'S FENCING TOKEN: this lock session's backend pid.
-            # The children (servicing, the reactive scheduler) write on
-            # their own pool connections, so each re-proves before a pass
-            # or a job that THIS backend still holds LOCK_KEY
-            # (db.advisory_held_by). Unreadable -> None -> every child pass
-            # is refused until the next hold, fail closed.
+        try:
+            lost_why = await _hold_once(get_pool)
+            failures = 0
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:                               # noqa: BLE001
+            failures += 1
+            lost_why = "CONTENTION_FAILED:%s" % type(exc).__name__
+            log.error("ext_pinnacle: contention attempt failed (%d in a "
+                      "row)", failures, exc_info=True)
             try:
-                writer_pid = await conn.fetchval("SELECT pg_backend_pid()")
+                _pool = await asyncio.wait_for(get_pool(), FENCE_TIMEOUT_S)
+                await _LH.record(_pool, "ext_pinnacle.entry_cycle",
+                                 process="api", phase=_LH.ERROR, error=exc)
+            except asyncio.CancelledError:
+                raise
             except Exception:                                  # noqa: BLE001
-                writer_pid = None
-
-            async def _child_fence(cconn, _pid=writer_pid):
-                if _pid is None:
-                    return False
-                return await _db_advisory_held_by(cconn, LOCK_KEY, _pid)
-            await _LH.record(conn, "ext_pinnacle.entry_cycle",
-                             process="api", phase=_LH.START,
-                             detail={"writer_pid": writer_pid})
-            # ── AGENTS (core, migration 152): THE THREE IDENTITIES, ONCE ─────
-            # By the writer only (a standby never reaches here), with this
-            # process's code identity. Never fatal.
-            try:
-                await _agents_runtime().ensure_identities(
-                    conn, code_version=_code_identity())
-            except Exception:                                      # noqa: BLE001
-                log.warning("ext_pinnacle: agent identities not ensured",
-                            exc_info=True)
-            # ── THE STORED VENUE COOLDOWN, READ BACK BEFORE THE FIRST READ ───
-            #
-            # THE FAIL-OPEN THIS CLOSES. Both rate controls lived in module
-            # globals and died with the process, so a crash-looping worker
-            # resumed at full rate immediately after the venue rate-limited us
-            # -- the worst possible moment, and the one most likely to follow a
-            # 429 storm. `resume_cooldown` and `cooldown_state` existed and a
-            # repository search found no production caller of either: a
-            # capability nothing invokes is not a capability, which is the third
-            # time that shape has been found on this path.
-            #
-            # PLACED AFTER THE LOCK AND BEFORE THE LOOP, deliberately. A standby
-            # process must not re-arm anything (it sends nothing), and the first
-            # cycle must not send before the stored prohibition is in force.
-            #
-            # A FAILED READ IS NOT "NO COOLDOWN". `load_and_resume` reports
-            # `read_failed` and this logs it as a warning rather than proceeding
-            # as though the venue were clear.
-            try:
-                from .. import venue_cooldown_store as _vcs
-                resumed = await _vcs.load_and_resume(conn)
-                if resumed.get("read_failed"):
-                    log.warning("ext_pinnacle: the stored venue cooldown could "
-                                "NOT be read (%s) — proceeding without it, and "
-                                "this is unknown rather than clear",
-                                resumed.get("why"))
-                elif resumed.get("resumed"):
-                    log.warning("ext_pinnacle: venue cooldown RESUMED from "
-                                "storage: %s", resumed)
-                else:
-                    log.info("ext_pinnacle: no venue cooldown to resume (%s)",
-                             resumed.get("why"))
-                await _heartbeat(conn, {"state": "COOLDOWN_RESUME_AT_STARTUP",
-                                        "cooldown_resume": resumed},
-                                 key=COOLDOWN_RESUME_KEY)
-            except Exception:                                      # noqa: BLE001
-                log.warning("ext_pinnacle: cooldown resume failed", exc_info=True)
-            # ── THE MARKET-DATA SUBSCRIPTION, IN THE PROCESS THAT DECIDES ────
-            #
-            # After the writer lock, so a standby never opens a socket. Armed only
-            # by BETTOR_MARKET_SUBSCRIPTION=on and a configured venue key; in every
-            # other case it records why and does nothing, and every decision
-            # refuses exactly as before. `start_default` never raises.
-            from .. import bettor_market_subscription as _msub
-            log.info("ext_pinnacle: market-data subscription %s",
-                     _msub.start_default().get("state"))
-            # ── THE PINNAPI FEED (C1, OBSERVE ONLY), BESIDE THE DECIDER ──────
-            # After the writer lock and with THIS connection's backend pid: the
-            # feed owner re-checks every liveness pass that this pid still holds
-            # LOCK_KEY and stops for good if not, so the one provider socket only
-            # ever lives beside the process that decides. Disarmed (no lease, no
-            # socket) unless the 'pinnapi_feed' control row reads true; env
-            # PINNAPI_FEED=off keeps it from starting at all. Never raises.
-            from .. import pinnapi_feed_runtime as _feed
-            try:
-                _writer_pid = writer_pid
-                log.info("ext_pinnacle: pinnapi feed %s", (await
-                         _feed.start_default(pool, writer_pid=_writer_pid,
-                                             writer_lock_key=LOCK_KEY)
-                         ).get("state"))
-            except Exception:                                      # noqa: BLE001
-                log.warning("ext_pinnacle: pinnapi feed start failed",
-                            exc_info=True)
-            from .. import pinnapi_reactive as _reactive
-            reactive_task = _reactive.start(pool, cycle=cycle)
-            if _reactive.ACTIVE is not None:
-                # each job re-proves the writer lock on its own connection
-                _reactive.ACTIVE.fence = _child_fence
-            # ── MANAGEMENT AND RECOVERY, ON THEIR OWN CADENCE ────────────────
-            #
-            # AFTER THE LOCK, so only the writer services (a standby never
-            # reaches here), and AFTER the cooldown resume, so its first venue
-            # read already obeys a stored prohibition. It lives exactly as long
-            # as this loop. See "ONE EXECUTION AUTHORITY, ON ITS OWN CADENCE".
-            servicing = asyncio.get_running_loop().create_task(
-                _servicing_loop(pool, interval_s=SERVICING_INTERVAL_S,
-                                fence=_child_fence))
-            try:
-                while True:
-                    delay = IDLE_POLL_S
-                    # ── FENCING: still the writer? ─────────────────
-                    # On the lock session itself, before anything in
-                    # this pass is written. A lost key, a dead session
-                    # or no answer in FENCE_TIMEOUT_S all end the hold.
-                    try:
-                        async with asyncio.timeout(FENCE_TIMEOUT_S):
-                            held = await _db_advisory_held(conn, LOCK_KEY)
-                    except asyncio.CancelledError:
-                        raise
-                    except Exception as exc:              # noqa: BLE001
-                        held, lost_why = False, "FENCE_UNANSWERED:%s" % (
-                            type(exc).__name__)
-                    if not held:
-                        lost_why = lost_why or "WRITER_LOCK_NOT_HELD"
-                        break
-                    try:
-                        # ── THE OTHER HALF OF DURABILITY ─────────────────────
-                        # A 429 is observed on a synchronous market-data path
-                        # with no connection, so it QUEUES its cooldown. This is
-                        # where the connection exists. Drained BEFORE the cycle,
-                        # so an observation from the previous cycle is durable
-                        # before this one sends anything.
-                        try:
-                            from .. import venue_cooldown_store as _vcs2
-                            if _vcs2.pending() is not None:
-                                drained = await _vcs2.drain_pending(conn)
-                                log.warning("ext_pinnacle: venue cooldown "
-                                            "persisted %s", drained)
-                        except Exception:                          # noqa: BLE001
-                            log.warning("ext_pinnacle: cooldown drain failed",
-                                        exc_info=True)
-                        t_cycle = time.monotonic()
-                        out = await cycle(conn)
-                        log.info("ext_pinnacle: %s", out)
-                        await _LH.record(conn, "ext_pinnacle.entry_cycle",
-                                         process="api", phase=_LH.SUCCESS,
-                                         detail={"state": out.get("state"),
-                                                 "ran": out.get("ran")})
-                        if out.get("ran"):
-                            # START TO START, as the budget above is written
-                            # ("~7.2k/day at 15 minutes"). Sleeping the full
-                            # CYCLE_S AFTER a 4-5 minute cycle made the real
-                            # period ~19.5 minutes (measured 13:02, 13:21, 13:41,
-                            # 13:58 UTC on 2026-10-01): a quarter fewer scans than
-                            # the budget pays for. Never shorter than IDLE_POLL_S.
-                            delay = next_cycle_delay(
-                                ran=True, elapsed_s=time.monotonic() - t_cycle)
-                    except asyncio.CancelledError:
-                        raise
-                    except Exception as exc:                       # noqa: BLE001
-                        log.warning("ext_pinnacle: cycle failed", exc_info=True)
-                        await _LH.record(conn, "ext_pinnacle.entry_cycle",
-                                         process="api", phase=_LH.ERROR,
-                                         error=exc)
-                    await asyncio.sleep(delay)
-            finally:
-                await _reactive.stop(reactive_task)
-                # THE FEED FIRST, BOUNDED: its socket closes and its lease is
-                # released before this connection (and LOCK_KEY) is returned.
-                try:
-                    await _feed.shutdown_default(wait_s=8.0)
-                except Exception:                                  # noqa: BLE001
-                    pass
-                # CLEAN SHUTDOWN of the subscription's socket. Never raises, and
-                # does not block the event loop: the socket thread sees the stop
-                # and closes on its own next pass.
-                _msub.shutdown_default(wait_s=0.0)
-                servicing.cancel()
-                try:
-                    await servicing
-                except (asyncio.CancelledError, Exception):        # noqa: BLE001
-                    pass
-                _SERVICING["task_active"] = False
+                pass
+        delay = contend_delay(failures)
         log.error("ext_pinnacle: writer lease ended (%s); children stopped, "
-                  "contending again in %ss", lost_why, IDLE_POLL_S)
-        await asyncio.sleep(IDLE_POLL_S)
+                  "contending again in %ss", lost_why, delay)
+        await asyncio.sleep(delay)
+
+
+async def _hold_once(get_pool) -> str | None:
+    """ONE contention attempt: open the lease session, wait as STANDBY until
+    the lock is granted, then hold it -- start the children, run the entry
+    cycles -- until the fence says the lock is gone. Returns why the hold
+    ended; RAISES on any failure to open, probe or hold (the caller, `run`,
+    logs it and contends again). The children always stop in this
+    function's `finally`."""
+    pool = await get_pool()
+    lost_why = None
+    async with lease_session(pool, name="ext_pinnacle") as conn:
+        while not await conn.fetchval(
+                "SELECT pg_try_advisory_lock($1)", LOCK_KEY):
+            log.info("ext_pinnacle STANDBY: another process holds the "
+                     "writer lock; writing nothing, retrying in %ss",
+                     IDLE_POLL_S)
+            # ITS OWN KEY. This process writes no valuations, so it has no
+            # cycle; writing HEARTBEAT_KEY here erased the real writer's.
+            await _heartbeat(conn, {
+                "state": "STANDBY_NOT_THE_WRITER",
+                "refusals": {"ANOTHER_PROCESS_HOLDS_THE_WRITER_LOCK": 1}},
+                key=STANDBY_KEY)
+            await asyncio.sleep(IDLE_POLL_S)
+        log.info("ext_pinnacle: writer lock held (key %s)", LOCK_KEY)
+        # THE WRITER'S FENCING TOKEN: this lock session's backend pid.
+        # The children (servicing, the reactive scheduler) write on
+        # their own pool connections, so each re-proves before a pass
+        # or a job that THIS backend still holds LOCK_KEY
+        # (db.advisory_held_by). Unreadable -> None -> every child pass
+        # is refused until the next hold, fail closed.
+        try:
+            writer_pid = await conn.fetchval("SELECT pg_backend_pid()")
+        except Exception:                                  # noqa: BLE001
+            writer_pid = None
+
+        async def _child_fence(cconn, _pid=writer_pid):
+            # BOUNDED (R30A review): an unanswered pg_locks read raises
+            # TimeoutError after FENCE_TIMEOUT_S, which every caller counts
+            # as fenced out -- a stalled check never blocks a child for ever
+            if _pid is None:
+                return False
+            async with asyncio.timeout(FENCE_TIMEOUT_S):
+                return await _db_advisory_held_by(cconn, LOCK_KEY, _pid)
+        await _LH.record(conn, "ext_pinnacle.entry_cycle",
+                         process="api", phase=_LH.START,
+                         detail={"writer_pid": writer_pid})
+        # ── AGENTS (core, migration 152): THE THREE IDENTITIES, ONCE ─────
+        # By the writer only (a standby never reaches here), with this
+        # process's code identity. Never fatal.
+        try:
+            await _agents_runtime().ensure_identities(
+                conn, code_version=_code_identity())
+        except Exception:                                      # noqa: BLE001
+            log.warning("ext_pinnacle: agent identities not ensured",
+                        exc_info=True)
+        # ── THE STORED VENUE COOLDOWN, READ BACK BEFORE THE FIRST READ ───
+        #
+        # THE FAIL-OPEN THIS CLOSES. Both rate controls lived in module
+        # globals and died with the process, so a crash-looping worker
+        # resumed at full rate immediately after the venue rate-limited us
+        # -- the worst possible moment, and the one most likely to follow a
+        # 429 storm. `resume_cooldown` and `cooldown_state` existed and a
+        # repository search found no production caller of either: a
+        # capability nothing invokes is not a capability, which is the third
+        # time that shape has been found on this path.
+        #
+        # PLACED AFTER THE LOCK AND BEFORE THE LOOP, deliberately. A standby
+        # process must not re-arm anything (it sends nothing), and the first
+        # cycle must not send before the stored prohibition is in force.
+        #
+        # A FAILED READ IS NOT "NO COOLDOWN". `load_and_resume` reports
+        # `read_failed` and this logs it as a warning rather than proceeding
+        # as though the venue were clear.
+        try:
+            from .. import venue_cooldown_store as _vcs
+            resumed = await _vcs.load_and_resume(conn)
+            if resumed.get("read_failed"):
+                log.warning("ext_pinnacle: the stored venue cooldown could "
+                            "NOT be read (%s) — proceeding without it, and "
+                            "this is unknown rather than clear",
+                            resumed.get("why"))
+            elif resumed.get("resumed"):
+                log.warning("ext_pinnacle: venue cooldown RESUMED from "
+                            "storage: %s", resumed)
+            else:
+                log.info("ext_pinnacle: no venue cooldown to resume (%s)",
+                         resumed.get("why"))
+            await _heartbeat(conn, {"state": "COOLDOWN_RESUME_AT_STARTUP",
+                                    "cooldown_resume": resumed},
+                             key=COOLDOWN_RESUME_KEY)
+        except Exception:                                      # noqa: BLE001
+            log.warning("ext_pinnacle: cooldown resume failed", exc_info=True)
+        # ── THE MARKET-DATA SUBSCRIPTION, IN THE PROCESS THAT DECIDES ────
+        #
+        # After the writer lock, so a standby never opens a socket. Armed only
+        # by BETTOR_MARKET_SUBSCRIPTION=on and a configured venue key; in every
+        # other case it records why and does nothing, and every decision
+        # refuses exactly as before. `start_default` never raises.
+        from .. import bettor_market_subscription as _msub
+        log.info("ext_pinnacle: market-data subscription %s",
+                 _msub.start_default().get("state"))
+        # ── THE PINNAPI FEED (C1, OBSERVE ONLY), BESIDE THE DECIDER ──────
+        # After the writer lock and with THIS connection's backend pid: the
+        # feed owner re-checks every liveness pass that this pid still holds
+        # LOCK_KEY and stops for good if not, so the one provider socket only
+        # ever lives beside the process that decides. Disarmed (no lease, no
+        # socket) unless the 'pinnapi_feed' control row reads true; env
+        # PINNAPI_FEED=off keeps it from starting at all. Never raises.
+        from .. import pinnapi_feed_runtime as _feed
+        try:
+            _writer_pid = writer_pid
+            log.info("ext_pinnacle: pinnapi feed %s", (await
+                     _feed.start_default(pool, writer_pid=_writer_pid,
+                                         writer_lock_key=LOCK_KEY)
+                     ).get("state"))
+        except Exception:                                      # noqa: BLE001
+            log.warning("ext_pinnacle: pinnapi feed start failed",
+                        exc_info=True)
+        from .. import pinnapi_reactive as _reactive
+        reactive_task = _reactive.start(pool, cycle=cycle)
+        if _reactive.ACTIVE is not None:
+            # each job re-proves the writer lock on its own connection
+            _reactive.ACTIVE.fence = _child_fence
+        # ── MANAGEMENT AND RECOVERY, ON THEIR OWN CADENCE ────────────────
+        #
+        # AFTER THE LOCK, so only the writer services (a standby never
+        # reaches here), and AFTER the cooldown resume, so its first venue
+        # read already obeys a stored prohibition. It lives exactly as long
+        # as this loop. See "ONE EXECUTION AUTHORITY, ON ITS OWN CADENCE".
+        servicing = asyncio.get_running_loop().create_task(
+            _servicing_loop(pool, interval_s=SERVICING_INTERVAL_S,
+                            fence=_child_fence))
+        try:
+            while True:
+                delay = IDLE_POLL_S
+                # ── FENCING: still the writer? ─────────────────
+                # On the lock session itself, before anything in
+                # this pass is written. A lost key, a dead session
+                # or no answer in FENCE_TIMEOUT_S all end the hold.
+                try:
+                    async with asyncio.timeout(FENCE_TIMEOUT_S):
+                        held = await _db_advisory_held(conn, LOCK_KEY)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:              # noqa: BLE001
+                    held, lost_why = False, "FENCE_UNANSWERED:%s" % (
+                        type(exc).__name__)
+                if not held:
+                    lost_why = lost_why or "WRITER_LOCK_NOT_HELD"
+                    break
+                try:
+                    # ── THE OTHER HALF OF DURABILITY ─────────────────────
+                    # A 429 is observed on a synchronous market-data path
+                    # with no connection, so it QUEUES its cooldown. This is
+                    # where the connection exists. Drained BEFORE the cycle,
+                    # so an observation from the previous cycle is durable
+                    # before this one sends anything.
+                    try:
+                        from .. import venue_cooldown_store as _vcs2
+                        if _vcs2.pending() is not None:
+                            drained = await _vcs2.drain_pending(conn)
+                            log.warning("ext_pinnacle: venue cooldown "
+                                        "persisted %s", drained)
+                    except Exception:                          # noqa: BLE001
+                        log.warning("ext_pinnacle: cooldown drain failed",
+                                    exc_info=True)
+                    t_cycle = time.monotonic()
+                    out = await cycle(conn)
+                    log.info("ext_pinnacle: %s", out)
+                    await _LH.record(conn, "ext_pinnacle.entry_cycle",
+                                     process="api", phase=_LH.SUCCESS,
+                                     detail={"state": out.get("state"),
+                                             "ran": out.get("ran")})
+                    if out.get("ran"):
+                        # START TO START, as the budget above is written
+                        # ("~7.2k/day at 15 minutes"). Sleeping the full
+                        # CYCLE_S AFTER a 4-5 minute cycle made the real
+                        # period ~19.5 minutes (measured 13:02, 13:21, 13:41,
+                        # 13:58 UTC on 2026-10-01): a quarter fewer scans than
+                        # the budget pays for. Never shorter than IDLE_POLL_S.
+                        delay = next_cycle_delay(
+                            ran=True, elapsed_s=time.monotonic() - t_cycle)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:                       # noqa: BLE001
+                    log.warning("ext_pinnacle: cycle failed", exc_info=True)
+                    await _LH.record(conn, "ext_pinnacle.entry_cycle",
+                                     process="api", phase=_LH.ERROR,
+                                     error=exc)
+                await asyncio.sleep(delay)
+        finally:
+            await _reactive.stop(reactive_task)
+            # THE FEED FIRST, BOUNDED: its socket closes and its lease is
+            # released before this connection (and LOCK_KEY) is returned.
+            try:
+                await _feed.shutdown_default(wait_s=8.0)
+            except Exception:                                  # noqa: BLE001
+                pass
+            # CLEAN SHUTDOWN of the subscription's socket. Never raises, and
+            # does not block the event loop: the socket thread sees the stop
+            # and closes on its own next pass.
+            _msub.shutdown_default(wait_s=0.0)
+            servicing.cancel()
+            try:
+                await servicing
+            except (asyncio.CancelledError, Exception):        # noqa: BLE001
+                pass
+            _SERVICING["task_active"] = False
+    return lost_why

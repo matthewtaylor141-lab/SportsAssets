@@ -4,23 +4,28 @@ UNAVAILABLE(reason).
 
     feed freshness          Pinnacle age at decision, p50 / p90 vs the odds
                             source's 30 s rule (paper_decisions.pinnacle
-                            age_s, the age the decision itself recorded)
+                            age_s, the age the decision itself recorded; a
+                            decision with NO recorded age counts as not
+                            fresh)
     decision latency        provider change received -> reactive evaluation
                             finished, p50 / p90 vs the scheduler's own 12 s
-                            evaluation deadline (pinnapi_reactive_attempts)
+                            evaluation deadline (pinnapi_reactive_attempts;
+                            TIMEOUT and orphaned STARTED attempts count as
+                            over it)
     open positions without  open PAPER + ACTUAL positions whose ONE current
       a fresh Xavier review Xavier review is not CURRENT (agent_work_state,
                             the same read the floor's work states use)
     agent task age          open agent_work_requests past their own expiry
                             (each request expires within 1 h by CHECK)
-    reconciliation age      the reconciliation of every open ACTUAL position
-                            vs 3 x the mirror's reconcile cadence
+    reconciliation age      the CURRENT reconciliation of every open ACTUAL
+                            position: MATCHED, within 3 x the mirror's
+                            reconcile cadence
     Opportunity Score age   the SCORES component's last run and the newest
                             score vs 3 x the profitability cycle
     parity divergence       LOGIC_DIVERGENCE rows in live_parity_ledger since
                             the recorded production cutover
-    release state           API SHA == workers SHA == the latest committed
-                            release receipt
+    release state           API SHA == workers SHA == the latest ACCEPTED
+                            release receipt that carries a deploy record
 
 RULES. Read-only (SELECT inside the caller's READ ONLY transaction, each SLO
 in its own savepoint, the caller's statement_timeout bounds every read). A
@@ -114,36 +119,64 @@ async def _section(conn, name, fn, judge_empty):
 # ── 1 · feed freshness ─────────────────────────────────────────────────
 
 def judge_feed(row: dict | None) -> dict:
+    """p90 of the Pinnacle age at decision vs 30 s, COUNTING A DECISION WITH
+    NO RECORDED AGE AS NOT FRESH (R30A review). A decision whose Pinnacle
+    reading carries no age is one whose reading was refused or absent at
+    the decision instant (production 24 h, research-sql run 37231263685:
+    478 of 4,152 -- the source check refused it (PINNAPI_PRIMARY_INPUT_
+    CHANGED, FEED_QUOTE_OLDER_THAN_LIMIT, FEED_SOCKET_CLOSED, ...), the lane
+    did not qualify it, or there was none). Judging only the aged ones was
+    survivorship: 999 decisions with no usable feed and one 3 s decision
+    read OK. Now the share of decisions WITHOUT a recorded age within the
+    30 s rule -- unaged, or aged beyond it -- must stay within 10 %, which
+    is exactly "p90 <= 30 s" with an unaged decision ranked as infinitely
+    old. The breakdown by the Pinnacle refusal says how much is coverage
+    and how much is staleness."""
     target = {"p90_age_s_at_most": FEED_FRESHNESS_TARGET_S,
               "basis": "the odds source's 30 s freshness rule (decision "
-                       "pinnacle.limit_s)"}
+                       "pinnacle.limit_s); a decision with no recorded age "
+                       "counts as not fresh"}
     window = "decisions in the last %d h" % (FEED_WINDOW_S / 3600)
     src = "paper_decisions.pinnacle->age_s"
     r = row or {}
     n, with_age = int(r.get("decisions") or 0), int(r.get("with_age") or 0)
+    over = int(r.get("over_target") or 0)
+    not_fresh = (n - with_age) + over
     measured = {"decisions": n, "with_recorded_age": with_age,
                 "without_recorded_age": n - with_age,
-                "p50_age_s": r.get("p50"), "p90_age_s": r.get("p90"),
+                "aged_over_30s": over,
+                "not_fresh_share": None if n == 0
+                else round(not_fresh / n, 4),
+                "p50_age_s_of_aged": r.get("p50"),
+                "p90_age_s_of_aged": r.get("p90"),
                 "over_own_limit": r.get("over_limit"),
-                "limit_s_recorded": r.get("limit_max")}
+                "limit_s_recorded": r.get("limit_max"),
+                "without_age_by_pinnacle_refusal":
+                    r.get("without_age_by_refusal") or {}}
     if n == 0:
         return unavailable("FEED_FRESHNESS", "NO_DECISIONS_IN_WINDOW",
                            target=target, window=window, source=src,
                            measured=measured)
-    if with_age == 0 or r.get("p90") is None:
+    if with_age == 0:
         return unavailable("FEED_FRESHNESS", "NO_RECORDED_PINNACLE_AGE",
                            target=target, window=window, source=src,
                            measured=measured)
-    ok = float(r["p90"]) <= FEED_FRESHNESS_TARGET_S
+    ok = not_fresh <= 0.10 * n
+    measured["p90_age_s_counting_unaged_as_infinite"] = (
+        r.get("p90") if ok and (n - with_age) == 0 else
+        "ABOVE_30S" if not ok else "AT_MOST_30S")
     return slo("FEED_FRESHNESS", target=target, window=window, source=src,
                measured=measured, status=OK if ok else BREACH,
-               why=None if ok else "P90_PINNACLE_AGE_ABOVE_30S")
+               why=None if ok else "P90_PINNACLE_AGE_ABOVE_30S_COUNTING_"
+                                   "DECISIONS_WITHOUT_A_RECORDED_AGE")
 
 
 FEED_SQL = """
 SELECT count(*) AS decisions,
        count(*) FILTER (WHERE jsonb_typeof(pinnacle->'age_s') = 'number')
            AS with_age,
+       count(*) FILTER (WHERE jsonb_typeof(pinnacle->'age_s') = 'number'
+           AND (pinnacle->>'age_s')::float8 > $3) AS over_target,
        percentile_cont(0.5) WITHIN GROUP (ORDER BY (pinnacle->>'age_s')::float8)
            FILTER (WHERE jsonb_typeof(pinnacle->'age_s') = 'number') AS p50,
        percentile_cont(0.9) WITHIN GROUP (ORDER BY (pinnacle->>'age_s')::float8)
@@ -157,47 +190,87 @@ SELECT count(*) AS decisions,
   FROM paper_decisions
  WHERE decided_at > to_timestamp($1) AND decided_at <= to_timestamp($2)
 """
+FEED_UNAGED_SQL = """
+SELECT coalesce(pinnacle->>'refusal', refusal, 'NONE') AS why, count(*) AS n
+  FROM paper_decisions
+ WHERE decided_at > to_timestamp($1) AND decided_at <= to_timestamp($2)
+   AND jsonb_typeof(pinnacle->'age_s') IS DISTINCT FROM 'number'
+ GROUP BY 1 ORDER BY 2 DESC LIMIT 12
+"""
 
 
 # ── 2 · decision latency ───────────────────────────────────────────────
 
 def judge_latency(row: dict | None) -> dict:
+    """p90 of provider change -> evaluation finished vs the scheduler's own
+    12 s deadline, OVER EVERY EVALUATION THAT STARTED (R30A review). Before,
+    only COMPLETED attempts were ranked, so the TIMEOUTs -- by definition
+    the slowest -- and the orphaned STARTED attempts (completion never
+    recorded) were left out: 500 timeouts and one 2 s completion read OK.
+    Now: a COMPLETED or ERROR attempt counts its measured latency; a
+    TIMEOUT counts its measured latency, or as over the deadline when it
+    has none; an orphaned STARTED attempt counts as over the deadline (its
+    latency is unknown and at least the time it has been open -- fail
+    closed). The verdict is "at most 10 % over the deadline", i.e. the p90
+    with the censored attempts ranked last. REFUSED attempts (superseded or
+    expired before evaluation) are counted, not ranked."""
     target = {"p90_latency_s_at_most": DECISION_LATENCY_TARGET_S,
               "basis": "the reactive scheduler's own evaluation deadline "
-                       "(pinnapi_reactive deadline=12)"}
+                       "(pinnapi_reactive deadline=12); TIMEOUT and "
+                       "orphaned STARTED attempts count as over it"}
     window = "reactive evaluations in the last %d h" % (
         LATENCY_WINDOW_S / 3600)
-    src = ("pinnapi_reactive_attempts COMPLETED: detail.finished_at - "
-           "detail.received_at")
+    src = ("pinnapi_reactive_attempts (COMPLETED / TIMEOUT / ERROR / "
+           "orphaned STARTED): detail.finished_at - detail.received_at")
     r = row or {}
-    n = int(r.get("completed") or 0)
-    measured = {"completed": n, "p50_s": r.get("p50"), "p90_s": r.get("p90"),
-                "max_s": r.get("max"), "timeouts": r.get("timeouts"),
-                "orphaned_started": r.get("orphaned")}
-    if n == 0:
+    started = int(r.get("started") or 0)
+    over = int(r.get("over_target") or 0)
+    measured = {"evaluations_started": started,
+                "completed": int(r.get("completed") or 0),
+                "timeouts": int(r.get("timeouts") or 0),
+                "errors": int(r.get("errors") or 0),
+                "orphaned_started": int(r.get("orphaned") or 0),
+                "refused_not_evaluated": int(r.get("refused") or 0),
+                "over_deadline": over,
+                "over_deadline_share": None if started == 0
+                else round(over / started, 4),
+                "p50_s_of_measured": r.get("p50"),
+                "p90_s_of_measured": r.get("p90"),
+                "max_s": r.get("max")}
+    if started == 0:
         return unavailable("DECISION_LATENCY",
-                           "NO_COMPLETED_REACTIVE_EVALUATION_IN_WINDOW",
+                           "NO_REACTIVE_EVALUATION_IN_WINDOW",
                            target=target, window=window, source=src,
                            measured=measured)
-    ok = float(r["p90"]) <= DECISION_LATENCY_TARGET_S
+    ok = over <= 0.10 * started
     return slo("DECISION_LATENCY", target=target, window=window, source=src,
                measured=measured, status=OK if ok else BREACH,
-               why=None if ok else "P90_LATENCY_ABOVE_THE_12S_DEADLINE")
+               why=None if ok else "P90_LATENCY_ABOVE_THE_12S_DEADLINE_"
+                                   "COUNTING_TIMEOUTS_AND_ORPHANS")
 
 
 LATENCY_SQL = """
-SELECT count(*) FILTER (WHERE state = 'COMPLETED' AND lat IS NOT NULL)
-           AS completed,
-       percentile_cont(0.5) WITHIN GROUP (ORDER BY lat)
-           FILTER (WHERE state = 'COMPLETED' AND lat IS NOT NULL) AS p50,
-       percentile_cont(0.9) WITHIN GROUP (ORDER BY lat)
-           FILTER (WHERE state = 'COMPLETED' AND lat IS NOT NULL) AS p90,
-       max(lat) FILTER (WHERE state = 'COMPLETED') AS max,
+SELECT count(*) FILTER (WHERE state IN ('COMPLETED', 'TIMEOUT', 'ERROR')
+                        OR (state = 'STARTED' AND orphan)) AS started,
+       count(*) FILTER (WHERE state = 'COMPLETED') AS completed,
        count(*) FILTER (WHERE state = 'TIMEOUT') AS timeouts,
-       count(*) FILTER (WHERE state = 'STARTED'
-                        AND updated_at < to_timestamp($2) - interval '60 seconds')
-           AS orphaned
-  FROM (SELECT state, updated_at,
+       count(*) FILTER (WHERE state = 'ERROR') AS errors,
+       count(*) FILTER (WHERE state = 'STARTED' AND orphan) AS orphaned,
+       count(*) FILTER (WHERE state = 'REFUSED') AS refused,
+       count(*) FILTER (WHERE (state IN ('COMPLETED', 'ERROR') AND lat > $3)
+                        OR (state = 'TIMEOUT' AND (lat IS NULL OR lat > $3))
+                        OR (state = 'STARTED' AND orphan)) AS over_target,
+       percentile_cont(0.5) WITHIN GROUP (ORDER BY lat)
+           FILTER (WHERE state IN ('COMPLETED', 'TIMEOUT', 'ERROR')
+                   AND lat IS NOT NULL) AS p50,
+       percentile_cont(0.9) WITHIN GROUP (ORDER BY lat)
+           FILTER (WHERE state IN ('COMPLETED', 'TIMEOUT', 'ERROR')
+                   AND lat IS NOT NULL) AS p90,
+       max(lat) FILTER (WHERE state IN ('COMPLETED', 'TIMEOUT', 'ERROR'))
+           AS max
+  FROM (SELECT state,
+               updated_at < to_timestamp($2) - interval '60 seconds'
+                   AS orphan,
                CASE WHEN jsonb_typeof(detail->'finished_at') = 'number'
                      AND jsonb_typeof(detail->'received_at') = 'number'
                     THEN (detail->>'finished_at')::float8
@@ -240,12 +313,28 @@ def judge_reviews(pos: dict | None) -> dict:
                                    "REVIEW" % stale)
 
 
+#: the agent_work_state sections this SLO cannot be judged without (R30A
+#: review): with the reviews unread every position reads UNREVIEWED and the
+#: SLO BREACHED on a missing input; with the actual positions unread they
+#: silently dropped out. Either now makes the SLO UNAVAILABLE, named.
+REQUIRED_SECTIONS = ("work.xavier_current_reviews",
+                     "work.xavier_actual_positions")
+
+
 async def read_positions(conn, now: float) -> dict:
     from . import agent_work_state as AWS
     s = AWS._Sections(conn)
     market = await AWS._read_market(s)
     ms = AWS.market_status(market, now)
     pos = await AWS._read_positions(s, now)
+    bad = {k: v for k, v in (s.status or {}).items()
+           if k in REQUIRED_SECTIONS
+           and str(v.get("status") or "").upper() in ("ABSENT", "UNAVAILABLE")}
+    if bad:
+        k = sorted(bad)[0]
+        return {"open": None,
+                "why": "%s_%s: %s" % (k, bad[k].get("status"),
+                                      bad[k].get("why") or "")}
     out = {"open": pos["open"], "why": pos["why"], "positions": []}
     for p in pos["positions"]:
         cls, why = AWS.position_class(p, market=ms, now=now)
@@ -291,11 +380,20 @@ SELECT agent_id, count(*) AS n FROM agent_work_open GROUP BY agent_id
 # ── 5 · reconciliation age ─────────────────────────────────────────────
 
 def judge_reconciliation(rows: list | None, newest, *, now: float) -> dict:
+    """Every open ACTUAL position's CURRENT reconciliation (one row per group,
+    smalllive_reconciliations' primary key) must be MATCHED and within 3 x
+    the reconcile cadence (R30A review: the outcome was never read, so a
+    fresh DISCREPANCY or PENDING read as reconciled; and an empty set read
+    OK, against this module's own rule that an empty window is UNAVAILABLE).
+    No open ACTUAL position (SMALL LIVE is SHADOW) is now
+    UNAVAILABLE(NO_OPEN_ACTUAL_POSITION_TO_RECONCILE), carrying the newest
+    reconciliation's age so the reconciler's own staleness stays visible."""
     target = {"open_actual_position_reconciliation_age_s_at_most":
               RECONCILE_TARGET_S,
+              "open_actual_position_reconciliation_status": "MATCHED",
               "basis": "3 x execmirror.MANAGEMENT_EVERY_S (audrey_reconcile "
                        "cadence while the mirror lane RUNS)"}
-    window = "now (each open ACTUAL position's latest reconciliation)"
+    window = "now (each open ACTUAL position's current reconciliation)"
     src = "smalllive_handoffs (OPEN) LEFT JOIN smalllive_reconciliations"
     rows = list(rows or [])
     newest_t = _ep(newest)
@@ -304,23 +402,31 @@ def judge_reconciliation(rows: list | None, newest, *, now: float) -> dict:
            "newest_reconciliation_age_s": None if newest_t is None
            else round(now - newest_t, 1)}
     if not rows:
-        ctx["note"] = ("no open ACTUAL position: nothing is owed a "
-                       "reconciliation (SMALL LIVE is SHADOW)")
-        return slo("RECONCILIATION_AGE", target=target, window=window,
-                   source=src, measured=ctx, status=OK)
-    ages, never = [], []
+        return unavailable("RECONCILIATION_AGE",
+                           "NO_OPEN_ACTUAL_POSITION_TO_RECONCILE",
+                           target=target, window=window, source=src,
+                           measured=ctx)
+    ages, never, not_matched = [], [], {}
     for r in rows:
         t = _ep(r.get("reconciled_at"))
         if t is None:
             never.append(r.get("group_id"))
-        else:
-            ages.append(now - t)
+            continue
+        ages.append(now - t)
+        st = r.get("status")
+        if st != "MATCHED":
+            not_matched[r.get("group_id")] = st
     ctx.update(max_age_s=None if not ages else round(max(ages), 1),
-               never_reconciled=never)
+               never_reconciled=never, not_matched=not_matched)
     if never:
         return slo("RECONCILIATION_AGE", target=target, window=window,
                    source=src, measured=ctx, status=BREACH,
                    why="OPEN_ACTUAL_POSITION_NEVER_RECONCILED")
+    if not_matched:
+        kinds = sorted({str(v) for v in not_matched.values()})
+        return slo("RECONCILIATION_AGE", target=target, window=window,
+                   source=src, measured=ctx, status=BREACH,
+                   why="OPEN_ACTUAL_POSITION_RECONCILED_%s" % "_".join(kinds))
     ok = max(ages) <= RECONCILE_TARGET_S
     return slo("RECONCILIATION_AGE", target=target, window=window, source=src,
                measured=ctx, status=OK if ok else BREACH,
@@ -390,34 +496,83 @@ def judge_parity(cutover: dict | None, counts: dict | None) -> dict:
 
 # ── 8 · release state ──────────────────────────────────────────────────
 
+#: WHICH RECEIPTS ARE A RELEASE (R30A review). A receipt's `acceptance` is
+#: VOID / INCOMPLETE / INVALID / REJECTED / GATED_PENDING_SIGNOFF / ACCEPTED
+#: (tools/release_receipt.py, which says the first four are "not
+#: evidence"); taking the newest hash-verified receipt whatever its state
+#: compared production with a REJECTED gate run (f33b, the newest committed)
+#: and read OK when it matched. Only an ACCEPTED receipt that carries a
+#: deploy record is "the latest release receipt". GATED_PENDING_SIGNOFF is
+#: NOT accepted here (no named approver); the newest such receipt is shown
+#: in the measured value so the gap is visible.
+ELIGIBLE_ACCEPTANCE = ("ACCEPTED",)
+
+
+def _acceptance(r: dict) -> str:
+    return str(r.get("acceptance") or r.get("state") or "")
+
+
+def _has_deploy(r: dict) -> bool:
+    d = r.get("deploy") or {}
+    api = d.get("api") if isinstance(d, dict) else None
+    return isinstance(api, dict) and bool(api.get("sha")
+                                          or api.get("requested_sha"))
+
+
 def judge_release(api: dict, workers: dict, receipts: dict) -> dict:
-    target = {"api_sha == workers_sha == latest_receipt_sha": True}
+    target = {"api_sha == workers_sha == latest_accepted_receipt_sha": True,
+              "receipt_acceptance": list(ELIGIBLE_ACCEPTANCE),
+              "receipt_needs_a_deploy_record": True}
     window = "now"
     src = ("env RENDER_GIT_COMMIT; ingestion_state.workers_boot; "
-           "sportsassets/release_receipts (hash-verified)")
-    items = [r for r in (receipts or {}).get("items") or []
-             if r.get("hash_verified")]
-    latest = max(items, key=lambda r: r.get("generated_at") or "") \
-        if items else None
+           "sportsassets/release_receipts (hash-verified, ACCEPTED, "
+           "deployed)")
+    verified = [r for r in (receipts or {}).get("items") or []
+                if r.get("hash_verified")]
+    eligible = [r for r in verified
+                if _acceptance(r) in ELIGIBLE_ACCEPTANCE and _has_deploy(r)]
+    latest = max(eligible, key=lambda r: r.get("generated_at") or "") \
+        if eligible else None
+    newest_any = max(verified, key=lambda r: r.get("generated_at") or "") \
+        if verified else None
+    pending = [r for r in verified
+               if _acceptance(r) == "GATED_PENDING_SIGNOFF"]
+    newest_pending = max(pending, key=lambda r: r.get("generated_at") or "") \
+        if pending else None
     a = (api or {}).get("sha")
     w = (workers or {}).get("sha")
     rsha = (latest or {}).get("sha")
     measured = {"api_sha": a, "workers_sha": w,
                 "latest_receipt_sha": rsha,
                 "latest_receipt_file": (latest or {}).get("file"),
-                "latest_receipt_state": (latest or {}).get("state")}
-    missing = [n for n, v in (("API_SHA", a), ("WORKERS_SHA", w),
-                              ("LATEST_RECEIPT_SHA", rsha)) if not v]
-    if missing:
-        return unavailable("RELEASE_STATE", "%s_UNAVAILABLE" % missing[0],
+                "latest_receipt_acceptance": (_acceptance(latest)
+                                              if latest else None),
+                "newest_receipt_any_state": None if newest_any is None else {
+                    "file": newest_any.get("file"),
+                    "sha": newest_any.get("sha"),
+                    "acceptance": _acceptance(newest_any)},
+                "newest_gated_pending_signoff": None
+                if newest_pending is None else {
+                    "file": newest_pending.get("file"),
+                    "sha": newest_pending.get("sha")}}
+    for n, v in (("API_SHA", a), ("WORKERS_SHA", w)):
+        if not v:
+            return unavailable("RELEASE_STATE", "%s_UNAVAILABLE" % n,
+                               target=target, window=window, source=src,
+                               measured=measured)
+    if str(a).lower() != str(w).lower():
+        return slo("RELEASE_STATE", target=target, window=window,
+                   source=src, measured=measured, status=BREACH,
+                   why="API_WORKERS_MISALIGNED")
+    if not rsha:
+        return unavailable("RELEASE_STATE", "NO_ACCEPTED_RELEASE_RECEIPT",
                            target=target, window=window, source=src,
                            measured=measured)
     full = [str(x).lower() for x in (a, w, rsha)]
     ok = len(set(full)) == 1 and len(full[0]) == 40
     why = None
     if not ok:
-        why = ("API_WORKERS_MISALIGNED" if full[0] != full[1]
-               else "RUNNING_SHA_IS_NOT_THE_LATEST_RECEIPT"
+        why = ("RUNNING_SHA_IS_NOT_THE_LATEST_RECEIPT"
                if full[0] != full[2] else "SHA_NOT_FULL_LENGTH")
     return slo("RELEASE_STATE", target=target, window=window, source=src,
                measured=measured, status=OK if ok else BREACH, why=why)
@@ -438,14 +593,20 @@ async def read_slos(conn, *, now: float | None = None, api=None,
 
     # 1 · feed freshness
     async def feed():
-        r = await conn.fetchrow(FEED_SQL, now - FEED_WINDOW_S, now)
-        return judge_feed(dict(r) if r else None)
+        r = await conn.fetchrow(FEED_SQL, now - FEED_WINDOW_S, now,
+                                FEED_FRESHNESS_TARGET_S)
+        d = dict(r) if r else {}
+        d["without_age_by_refusal"] = {
+            x["why"]: int(x["n"]) for x in await conn.fetch(
+                FEED_UNAGED_SQL, now - FEED_WINDOW_S, now)}
+        return judge_feed(d if r else None)
     out.append(await _section(conn, "FEED_FRESHNESS", feed,
                               lambda: judge_feed(None)))
 
     # 2 · decision latency
     async def latency():
-        r = await conn.fetchrow(LATENCY_SQL, now - LATENCY_WINDOW_S, now)
+        r = await conn.fetchrow(LATENCY_SQL, now - LATENCY_WINDOW_S, now,
+                                DECISION_LATENCY_TARGET_S)
         return judge_latency(dict(r) if r else None)
     out.append(await _section(conn, "DECISION_LATENCY", latency,
                               lambda: judge_latency(None)))
@@ -469,7 +630,8 @@ async def read_slos(conn, *, now: float | None = None, api=None,
     # 5 · reconciliation age
     async def recon():
         rows = await conn.fetch(
-            "SELECT h.group_id, r.reconciled_at FROM smalllive_handoffs h "
+            "SELECT h.group_id, r.reconciled_at, r.status "
+            "  FROM smalllive_handoffs h "
             "  LEFT JOIN smalllive_reconciliations r ON r.group_id = h.group_id "
             " WHERE h.state = 'OPEN'")
         newest = await conn.fetchval(

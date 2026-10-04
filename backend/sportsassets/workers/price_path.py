@@ -184,11 +184,19 @@ async def main() -> None:
     pool = await get_pool()
     log.info("price_path sampler up: offsets=%s poll=%ss tol=%ss",
              WORKER_OFFSETS, POLL_S, TOL_S)
+    from .. import loop_health as _LH
     while True:
         try:
             n = await sample_once(pool, pmus)
             if n:
                 log.info("price_path: wrote %d samples", n)
-        except Exception:  # noqa: BLE001 — a measurement worker never dies
+            # LOOP HEALTH (R30A review): before, only the supervisor's START
+            # reached runtime_loop_health, so this loop could never be
+            # judged. Throttled to its record_every_s; never raises.
+            await _LH.record(pool, "price_path", process="workers",
+                             phase=_LH.SUCCESS)
+        except Exception as exc:  # noqa: BLE001 — a measurement worker never dies
             log.exception("price_path pass failed")
+            await _LH.record(pool, "price_path", process="workers",
+                             phase=_LH.ERROR, error=exc)
         await asyncio.sleep(POLL_S)

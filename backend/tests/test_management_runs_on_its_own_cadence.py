@@ -472,7 +472,13 @@ def test_only_run_starts_the_task_and_only_after_the_writer_lock():
     cooldown resume, and cancelled with it; nothing else creates it."""
     import inspect
 
-    src = inspect.getsource(L.run)
+    # PINNED FACT, UPDATED (R30A review): the hold moved from run() into
+    # `_hold_once`, the one contention attempt run() repeats inside a try
+    # (a failed re-contention can no longer end the unsupervised task); the
+    # order pinned here -- lock, cooldown resume, task, cycle -- is the
+    # hold's, unchanged.
+    src = inspect.getsource(L._hold_once)
+    assert "_hold_once(get_pool)" in inspect.getsource(L.run)
     i_lock = src.index("pg_try_advisory_lock")
     i_resume = src.index("load_and_resume")
     i_task = src.index("_servicing_loop(pool")

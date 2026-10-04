@@ -190,12 +190,24 @@ async def close_pool() -> None:
 # of those loops did `async with pool.acquire()` once and never gave the slot
 # back. Four slots were left for every HTTP request, the reactive evaluation
 # and its audit, the feed heartbeat, the servicing pass, the research tick and
-# the agents' runners -- and the API log of the same afternoon is that pool
-# running dry: `pinnapi reactive audit failed` (TimeoutError in
-# asyncpg Pool._acquire, 14 in three hours), `agent research tick failed:
-# TimeoutError` (17), `pinnapi feed heartbeat failed` (9), all at the same
-# seconds (16:00:53, 17:40:58, 17:46:10, 18:21:28 ...) as command-centre
-# requests taking 3-5 s and one 30 s.
+# the agents' runners. The API log of the same afternoon (render-ops logs,
+# 15:47-18:47Z, runs 37225745383 / 37225748641 / 37225751870): `pinnapi
+# reactive audit failed` 12 times -- 10 with the TimeoutError inside asyncpg
+# Pool._acquire (waiting for a slot), 2 (16:00:53, 17:46:10) inside the
+# INSERT itself, after a slot was acquired; `agent research tick failed:
+# TimeoutError` 17 times (no traceback is logged for those); `pinnapi feed
+# heartbeat failed` 8 times.
+#
+# THE POOL WAS ONE OF TWO CAUSES. The other: the API event loop itself was
+# held 2-4 s at a time (the loop watchdog's ~60 recorded stalls, clustered in
+# exactly the minutes of all three classes; render-ops run 37231102537), and
+# a held loop expires every 2-3 s budget in the process -- it is the only
+# explanation for the two failures INSIDE the INSERT, whose server-side
+# execution never exceeded 12 ms (pg_stat_statements since 2026-10-01:
+# 4,139 calls, mean 0.17 ms; research-sql run 37231484481). The stalls are
+# fixed at their sources (pinnapi_feed.EventIndexedQuotes, the held refresh,
+# the census; see tests/test_r30a_loop_stalls.py). This block fixes the
+# pool half.
 #
 # THE FIX IS NOT A BIGGER POOL OR A LONGER TIMEOUT. A lock holder gets a
 # connection of its own, opened here, outside the shared pool: the pool's ten

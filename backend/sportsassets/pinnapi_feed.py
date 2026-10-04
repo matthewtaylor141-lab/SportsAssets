@@ -233,6 +233,94 @@ def closed_periods(rec: dict) -> set:
             and p.get("status") not in (None, "open")}
 
 
+class EventIndexedQuotes(dict):
+    """(event_id, key) -> Quote, WITH A PER-EVENT KEY INDEX kept on every
+    mutation (R30A runtime, 2026-10-04).
+
+    THE STALL THIS REMOVES. Every per-event operation of the cache found an
+    event's quotes by scanning ALL of them -- `[k for k in self.quotes if
+    k[0] == eid]` -- in `_replace_event` (each event of a snapshot, each
+    prematch_markets frame), `_merge_event` (each live frame), `_drop_event`
+    and `_bound`. With MAX_MARKETS 120,000 quotes, a snapshot of N events is
+    N full scans: the API's own loop watchdog recorded the event loop held
+    for 2.1 s (ended at 4.0 s) and 2.2 s (2.5 s) inside
+    `pinnapi_feed._replace_event <- _apply <- apply <- pinnapi_owner._own`
+    (ingestion_state api.loop_stalls, research-sql run 37231263685), and
+    while the loop is held every 2-3 s budget in the process expires -- the
+    reactive audit, the research tick, the feed heartbeat (render-ops logs
+    15:40-20:10Z: loop stalls >= 2 s in the same minutes as all three
+    timeout classes). Now an event's keys come from `by_event`, O(its own
+    markets), whatever the cache holds.
+
+    THE INDEX CANNOT DRIFT: it is maintained here, on the dict's own
+    mutation methods, so every writer -- the cache, and the tests that set
+    or clear `cache.quotes` directly -- keeps it exact. Iteration order, the
+    values and every read are the plain dict's (tests replay frame sequences
+    against the scanning implementation and compare)."""
+
+    __slots__ = ("by_event",)
+
+    def __init__(self, *a, **kw):
+        super().__init__()
+        self.by_event: dict = {}
+        if a or kw:
+            self.update(*a, **kw)
+
+    @staticmethod
+    def _eid(k):
+        return k[0] if isinstance(k, tuple) and k else k
+
+    def _unindex(self, k):
+        eid = self._eid(k)
+        keys = self.by_event.get(eid)
+        if keys is not None:
+            keys.discard(k)
+            if not keys:
+                del self.by_event[eid]
+
+    def __setitem__(self, k, v):
+        super().__setitem__(k, v)
+        self.by_event.setdefault(self._eid(k), set()).add(k)
+
+    def __delitem__(self, k):
+        super().__delitem__(k)
+        self._unindex(k)
+
+    _MISSING = object()
+
+    def pop(self, k, default=_MISSING):
+        if k in self:
+            v = super().pop(k)
+            self._unindex(k)
+            return v
+        if default is EventIndexedQuotes._MISSING:
+            raise KeyError(k)
+        return default
+
+    def popitem(self):
+        k, v = super().popitem()
+        self._unindex(k)
+        return k, v
+
+    def clear(self):
+        super().clear()
+        self.by_event.clear()
+
+    def setdefault(self, k, default=None):
+        if k not in self:
+            self[k] = default
+        return self[k]
+
+    def update(self, *a, **kw):
+        for k, v in dict(*a, **kw).items():
+            self[k] = v
+
+    def keys_of(self, eid) -> list:
+        """This event's quote keys (a list copy: safe to delete while
+        iterating), O(its own markets)."""
+        return list(self.by_event.get(eid, ()))
+
+
 class FeedCache:
     def __init__(self, *, authority: Optional[FeedAuthority] = None,
                  extract: Callable = extract_markets,
@@ -243,7 +331,8 @@ class FeedCache:
         self.max_events, self.max_markets = max_events, max_markets
         self.events: "collections.OrderedDict[int, dict]" = \
             collections.OrderedDict()
-        self.quotes: dict = {}          # (event_id, key) -> Quote
+        # (event_id, key) -> Quote, indexed per event (EventIndexedQuotes)
+        self.quotes: EventIndexedQuotes = EventIndexedQuotes()
         self.on_change = None  # synchronous, bounded notification; never I/O
         self._touched = set()
         self.counts = collections.Counter()
@@ -359,7 +448,7 @@ class FeedCache:
 
     def _drop_event(self, eid):
         self.events.pop(eid, None)
-        for k in [k for k in self.quotes if k[0] == eid]:
+        for k in self.quotes.keys_of(eid):
             del self.quotes[k]
         self.counts["events_deleted"] += 1
 
@@ -376,7 +465,7 @@ class FeedCache:
             self.events.setdefault(eid, {"id": eid, "stream": stream,
                                          "sport_id": sport})
             self.events.move_to_end(eid)
-        old = {k: q for k, q in self.quotes.items() if k[0] == eid}
+        old = {k: self.quotes[k] for k in self.quotes.keys_of(eid)}
         for k in old:
             del self.quotes[k]
         closed = closed_periods(ev)
@@ -400,8 +489,8 @@ class FeedCache:
         eid = rec["id"]
         self._touch_meta(rec, stream=stream, sport=sport)
         closed = closed_periods(rec)
-        for k in [k for k, q in self.quotes.items()
-                  if k[0] == eid and (q.period or 0) in closed]:
+        for k in [k for k in self.quotes.keys_of(eid)
+                  if (self.quotes[k].period or 0) in closed]:
             del self.quotes[k]
         parsed = self.extract(rec)
         if parsed is None:
@@ -435,7 +524,7 @@ class FeedCache:
     def _bound(self):
         while len(self.events) > self.max_events:
             eid, _ = self.events.popitem(last=False)
-            for k in [k for k in self.quotes if k[0] == eid]:
+            for k in self.quotes.keys_of(eid):
                 del self.quotes[k]
             self.counts["events_evicted"] += 1
         if len(self.quotes) > self.max_markets:

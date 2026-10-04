@@ -32,9 +32,15 @@ from .agents_core import _pool, require_read
 router = APIRouter()
 
 
+#: THE DIAGNOSTIC MUST ANSWER UNDER THE STARVATION IT DIAGNOSES (R30A
+#: review): a bounded wait for a pool connection, a 503 POOL_UNAVAILABLE when
+#: none comes -- never a request hung behind a dry pool.
+POOL_ACQUIRE_TIMEOUT_S = 2.0
+
+
 async def _read_only(fn):
     pool = await _pool()
-    async with pool.acquire() as conn:
+    async with pool.acquire(timeout=POOL_ACQUIRE_TIMEOUT_S) as conn:
         async with conn.transaction(readonly=True):
             await conn.execute("SET LOCAL statement_timeout = %d"
                                % SLO.STATEMENT_TIMEOUT_MS)
@@ -48,6 +54,11 @@ async def runtime_slos(response: Response) -> dict:
         return await _read_only(lambda c: SLO.read_slos(c))
     except HTTPException:
         raise
+    except TimeoutError:
+        raise HTTPException(status_code=503, detail={
+            "reason": "POOL_UNAVAILABLE",
+            "detail": "no database connection within %ss"
+                      % POOL_ACQUIRE_TIMEOUT_S})
     except Exception as exc:                                    # noqa: BLE001
         raise HTTPException(status_code=503, detail={
             "reason": "SLO_READ_FAILED", "detail": type(exc).__name__})

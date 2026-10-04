@@ -40,10 +40,26 @@ per WARN_EVERY_S per loop, never silently dropped.
 
 THE VERDICT (`classify`, pure): HEALTHY when the newest success from any of
 the loop's sources is within HEALTH_FACTOR (3) x its cadence; UNHEALTHY when
-older, or when a capital-critical, armed loop's writer lock is held by no
-backend; DISABLED (named) when the loop is not armed in this deployment;
-EVENT_DRIVEN when it has no cadence to judge against; UNAVAILABLE (named)
-when no source holds any record -- never a manufactured success.
+older, when the loop has NEVER succeeded since its last known start (its own
+START record, or the process's boot) and that start is more than 3 x cadence
+ago, or when a capital-critical, armed loop's writer lock is held by no
+backend; STARTING when it started less than 3 x cadence ago and has not
+succeeded yet; DISABLED (named) when the loop is not armed in this
+deployment; EVENT_DRIVEN when it has no cadence to judge against;
+UNAVAILABLE (named) only when its sources are unreadable or absent, or when
+nothing says when it last started -- never a manufactured success.
+
+WHAT COUNTS AS A SUCCESS (R30A review). A heartbeat is a success only when
+its status is in THAT WRITER's success vocabulary, declared per source below
+from the writer's own code and the production rows (research-sql run
+37231484481): `agent_karen` 'ok' is a success and 'error' is not;
+`shadow_rn1` 'venue_unreadable' and `shadow_bettor` 'store_not_ready' are
+passes that FAILED and are reported as such (beat_status, last_error), not
+as a fresh success. A status the vocabulary does not name is NOT a success
+(fail closed) and is shown by name. Business outcomes a writer reports from
+a pass that ran -- 'idle', 'drift', 'no_eligible_population', a cycle that
+was STOPPED or BLOCKED -- are successes of the LOOP; whether the business is
+healthy is the SLOs' question, not this one's.
 """
 from __future__ import annotations
 
@@ -66,6 +82,19 @@ MAX_ERROR_CHARS = 500
 
 HEALTHY, UNHEALTHY, DISABLED = "HEALTHY", "UNHEALTHY", "DISABLED"
 UNAVAILABLE, EVENT_DRIVEN = "UNAVAILABLE", "EVENT_DRIVEN"
+STARTING = "STARTING"
+#: the bound on a record's JSON detail; content beyond it is summarised
+#: (keys kept, values dropped) BEFORE serialising, so the row is always valid
+#: JSON -- cutting the serialised string made the jsonb cast fail and lost
+#: the whole row, an ERROR included (R30A review)
+MAX_DETAIL_CHARS = 4000
+
+#: THIS PROCESS's start, the "first sighting" of every loop the API lifespan
+#: starts: a loop that has recorded no success since the process booted more
+#: than 3 x its cadence ago is UNHEALTHY. (The workers process's own boot is
+#: read from ingestion_state 'workers_boot'.) Imported at app start-up by
+#: the loop-health router, so it is the API's boot to within a second.
+PROCESS_STARTED_AT = time.time()
 
 #: the six single-writer keys read granted in production (research-sql run
 #: 37226381750) plus the feed owner's
@@ -84,15 +113,50 @@ _OFF = ("off", "0", "false", "no")
 
 
 def _spec(name, process, cadence_s, *, critical, lease, sources, armed=None,
-          record_every_s=None, note=None):
+          record_every_s=None, period_s=None, note=None):
+    """`cadence_s` is what the 3 x rule judges against; `period_s` the loop's
+    own sleep when it differs (a 2 s tick recorded every 30 s). A test pins
+    record_every_s + period_s well inside 3 x cadence, so a loop that
+    succeeds on every pass can never read UNHEALTHY between two writes."""
     return {"name": name, "process": process, "cadence_s": cadence_s,
             "capital_critical": bool(critical), "lease": lease,
             "sources": tuple(sources), "armed": armed or ("always",),
-            "record_every_s": record_every_s, "note": note}
+            "record_every_s": record_every_s,
+            "period_s": period_s if period_s is not None else cadence_s,
+            "note": note}
 
 
 def _lh(name, process):
     return ("runtime_loop_health", name, process)
+
+
+def _hb(service, *success):
+    """A service_heartbeats row, a success only when its status is one of
+    `success` (that writer's vocabulary)."""
+    return ("service_heartbeats", service, frozenset(success))
+
+
+#: ingestion_state rules: ANY -- the key is written only when a pass
+#: completes; FIELD_IN -- a success when value[field] is one of the names;
+#: FIELD_NULL -- a success when value[field] is null (the writer stamps its
+#: error there on a failed pass)
+ANY = ("ANY",)
+
+
+def _is(key, at_field, rule=ANY):
+    return ("ingestion_state", key, at_field, rule)
+
+
+def _in(field, *names):
+    return ("FIELD_IN", field, frozenset(names))
+
+
+def _null(field):
+    return ("FIELD_NULL", field)
+
+
+#: ONE vocabulary for the five agent runners (each writes 'ok' / 'error')
+OK_ERROR = ("ok",)
 
 
 # ── THE API LIFESPAN (api/app.py) ──────────────────────────────────────
@@ -104,7 +168,9 @@ API_LOOPS = (
                             "stops the children and contends again"},
           armed=("env_on", "EXT_PINNACLE_SHADOW"),
           sources=(_lh("ext_pinnacle.entry_cycle", "api"),
-                   ("ingestion_state", "ext_pinnacle_last_cycle", "at")),
+                   # written only when a cycle completes (LIVE, STOPPED and
+                   # BLOCKED are all completed passes)
+                   _is("ext_pinnacle_last_cycle", "at")),
           note="the entry lane: Derek's decisions, PAPER and the SHADOW "
                "actual lane; IDLE_POLL_S 60 s when a cycle did not run"),
     _spec("ext_pinnacle.servicing", "api", 60.0, critical=True,
@@ -115,7 +181,10 @@ API_LOOPS = (
                             "is skipped"},
           armed=("env_on", "EXT_PINNACLE_SHADOW"),
           sources=(_lh("ext_pinnacle.servicing", "api"),
-                   ("ingestion_state", "ext_pinnacle_last_servicing", "at")),
+                   # SERVICED, or NOT_RUN when the execution lock was held
+                   # (a completed pass that skipped); shown as beat_status
+                   _is("ext_pinnacle_last_servicing", "at",
+                       _in("state", "SERVICED", "NOT_RUN"))),
           note="management and recovery of held positions on their own "
                "cadence"),
     _spec("pinnapi_feed.heartbeat", "api", 30.0, critical=True,
@@ -124,14 +193,21 @@ API_LOOPS = (
                  "fencing": "the owner re-checks its lease AND the decider's "
                             "writer lock every liveness pass"},
           armed=("env_not_off_and_row", "PINNAPI_FEED", "pinnapi_feed"),
-          sources=(("ingestion_state", "pinnapi_feed_last", "beat_at"),),
+          # a beat is written every HEARTBEAT_S whatever the feed's state;
+          # only OWNER_SYNCED is a feed that delivers (CONNECTING,
+          # RESYNCHRONIZING, STANDBY, OWNER_ERROR ... are not successes)
+          sources=(_is("pinnapi_feed_last", "beat_at",
+                       _in("state", "OWNER_SYNCED")),),
           note="the one provider socket; Xavier's held-position measure"),
     _spec("pinnapi_held.refresh", "api", 10.0, critical=True,
           lease={"kind": "CHILD_OF", "parent": "pinnapi_feed.heartbeat",
                  "key": K_FEED,
                  "fencing": "lives and dies with the feed owner"},
           armed=("env_not_off_and_row", "PINNAPI_FEED", "pinnapi_feed"),
-          record_every_s=30.0,
+          # EVERY pass is recorded (R30A review): a 30 s throttle against a
+          # 3 x 10 s threshold read a loop that succeeded on every pass as
+          # UNHEALTHY ~5% of the time
+          record_every_s=None, period_s=10.0,
           sources=(_lh("pinnapi_held.refresh", "api"),),
           note="which provider events are held (Xavier's priority targets)"),
     _spec("pinnapi_reactive", "api", None, critical=True,
@@ -147,7 +223,7 @@ API_LOOPS = (
                  "session": "own (db.lease_session)",
                  "fencing": "db.advisory_held before every tick; a lost lock "
                             "or dead session contends again"},
-          record_every_s=30.0,
+          record_every_s=30.0, period_s=2.0,
           sources=(_lh("execmirror.tick", "api"),),
           note="ticks every 2 s (TICK_S); health is recorded at most every "
                "30 s, so 30 s is its health cadence. Reviews actual "
@@ -161,17 +237,18 @@ API_LOOPS = (
           lease={"kind": "ADVISORY_LOCK", "key": K_RN1X_SHADOW,
                  "session": "own (db.lease_session)"},
           armed=("env_not_off", "RN1X_SHADOW", "off"),
-          sources=(("service_heartbeats", "rn1x_shadow"),)),
+          sources=(_hb("rn1x_shadow", "ok", "idle"),)),
     _spec("rn1x_learn", "api", 3600.0, critical=False,
           lease={"kind": "ADVISORY_LOCK", "key": K_RN1X_LEARN,
                  "session": "own (db.lease_session)"},
           armed=("env_not_off", "RN1X_LEARN", "off"),
-          sources=(("service_heartbeats", "rn1x_learn"),)),
+          sources=(_hb("rn1x_learn", "ok", "idle"),)),
     _spec("rn1x_model", "api", 3600.0, critical=False,
           lease={"kind": "ADVISORY_LOCK", "key": K_RN1X_MODEL,
                  "session": "own (db.lease_session)"},
           armed=("env_on", "RN1X_MODEL_FIT"),
-          sources=(("ingestion_state", "rn1x_model_last_cycle", "at"),)),
+          sources=(_is("rn1x_model_last_cycle", "at",
+                       _in("state", "LIVE", "STOPPED", "BLOCKED")),)),
     _spec("intel.runner", "api", 600.0, critical=False,
           lease={"kind": "ADVISORY_PER_CYCLE", "key": K_INTEL},
           armed=("env_not_off", "INTEL_SHADOW", "on"),
@@ -201,34 +278,58 @@ API_LOOPS = (
           lease={"kind": "NONE", "why": "writes only her own challenge "
                  "records, keyed per detector and target"},
           armed=("env_not_off", "KAREN_RUNNER_ENABLED", "1"),
-          sources=(("service_heartbeats", "agent_karen"),)),
+          sources=(_hb("agent_karen", *OK_ERROR),)),
     _spec("agents.peer_responder", "api", 120.0, critical=False,
           lease={"kind": "NONE", "why": "answers recorded challenges; one "
                  "response per challenge"},
           armed=("env_not_off", "PEER_RESPONDER_ENABLED", "1"),
-          sources=(("service_heartbeats", "agent_peer_responder"),)),
+          sources=(_hb("agent_peer_responder", *OK_ERROR),)),
     _spec("agents.eddie_runner", "api", 300.0, critical=False,
           lease={"kind": "NONE", "why": "SHADOW estimates keyed per "
                  "decision"},
           armed=("env_not_off", "EDDIE_RUNNER_ENABLED", "1"),
-          sources=(("service_heartbeats", "agent_eddie"),)),
+          sources=(_hb("agent_eddie", *OK_ERROR),)),
     _spec("agents.scout_runner", "api", 600.0, critical=False,
           lease={"kind": "NONE", "why": "RESEARCH observations keyed per "
                  "feature and window"},
           armed=("env_not_off", "SCOUT_RUNNER_ENABLED", "1"),
-          sources=(("service_heartbeats", "agent_scout"),)),
+          sources=(_hb("agent_scout", *OK_ERROR),)),
     _spec("agents.improvement_pipeline", "api", 600.0, critical=False,
           lease={"kind": "NONE", "why": "items seeded from source keys "
                  "(UNIQUE); stages mirrored, never decided"},
           armed=("env_not_off", "IMPROVEMENT_PIPELINE_ENABLED", "1"),
-          sources=(("service_heartbeats", "improvement_pipeline"),
+          sources=(_hb("improvement_pipeline", *OK_ERROR),
                    ("run_table", "improve_runs"))),
     _spec("agents.capability_runtime", "api", 15.0, critical=False,
           lease={"kind": "TASK_LEASE_ROWS",
                  "why": "agent_tasks claimed with an expiring lease"},
-          sources=(("ingestion_state",
-                    "agent.capabilities.heartbeat:paper_acct_main", "at"),),
+          # its heartbeat is written only at the end of a whole tick; a
+          # failed tick records ERROR (with the failing phase) here
+          sources=(_is("agent.capabilities.heartbeat:paper_acct_main", "at",
+                       _in("status", "OK")),
+                   _lh("agents.capability_runtime", "api")),
           note="sleeps 15 s between ticks; RESEARCH_ONLY"),
+    # ── the rest of the lifespan's recurring tasks (R30A review: the
+    # inventory test now parses every create_task in the lifespan) ──────
+    _spec("slack_bridge.run", "api", 3.0, critical=False,
+          lease={"kind": "TASK_LEASE_ROWS",
+                 "why": "deliveries claimed row by row with a claim token "
+                        "(agent_slack_delivery); no venue path"},
+          armed=("env_set", "SLACK_TEAM_ID"), sources=(),
+          note="persists no liveness record (only delivery rows when there "
+               "is work); reported UNAVAILABLE rather than guessed"),
+    _spec("institutional_api_stream", "api", None, critical=False,
+          lease={"kind": "NONE", "why": "observation only: a market-data "
+                 "stream and its refdata reads; writes no order"},
+          armed=("env_on", "INSTITUTIONAL_MD_STREAM"), sources=(),
+          note="started by institutional_api_stream.start only when the "
+               "credential passes its identity guard; state is in process"),
+    _spec("api.poller_fallback", "api", None, critical=False,
+          lease={"kind": "NONE", "why": "diagnostic ingestion fallback; "
+                 "trades dedupe on their keys"},
+          armed=("env_eq", "API_INGESTION_FALLBACK", "1"),
+          sources=(_hb("poller", "ok", "idle"),),
+          note="shares the workers poller's heartbeat row"),
     _spec("api.loop_watchdog", "api", None, critical=False,
           lease={"kind": "NONE", "why": "per-process stall telemetry"},
           sources=(), note="records the API event loop's own stalls"),
@@ -243,6 +344,9 @@ API_LOOPS = (
           sources=()),
 )
 
+#: tasks the lifespan starts ONCE (not loops): no cadence, no health
+API_ONE_SHOT = ("warm_cache", "_rescore_once")
+
 # ── THE WORKERS SERVICE (workers/all.py) ───────────────────────────────
 _WORKERS_LEASE = {"kind": "NONE",
                   "why": "the workers process is LOCKED in the execution "
@@ -251,36 +355,56 @@ _WORKERS_LEASE = {"kind": "NONE",
                          "their keys"}
 
 
-def _w(name, cadence_s, *sources, note=None, armed=None):
+def _w(name, cadence_s, *sources, note=None, armed=None,
+       record_every_s=None, period_s=None):
     return _spec(name, "workers", cadence_s, critical=False,
                  lease=dict(_WORKERS_LEASE),
                  sources=(_lh(name, "workers"),) + tuple(sources),
-                 armed=armed, note=note)
+                 armed=armed, note=note, record_every_s=record_every_s,
+                 period_s=period_s)
 
 
+# EACH VOCABULARY IS THE WRITER'S OWN (its heartbeat call sites) checked
+# against the production rows of research-sql run 37231484481: 'running'
+# (analytics) marks a pass that STARTED; 'degraded' (metadata, mirror_shadow)
+# a pass in which a stage failed; 'tick_failed', 'store_not_ready',
+# '*_unreadable', 'sweep_failed', 'credential_missing', 'registry_mismatch',
+# 'refused', 'down', 'error' passes that failed. 'drift' (reconciler: the
+# walk ran and found misses), 'idle', 'high' (memory: measured, and high),
+# 'off' (retention told not to delete), 'no_universe', 'no_focus_set',
+# 'no_eligible_population', 'already_sealed' are passes that ran.
 WORKERS_LOOPS = (
-    _w("poller", None, ("service_heartbeats", "poller")),
-    _w("chain_listener", None, ("service_heartbeats", "chain_listener")),
-    _w("metadata", 60.0, ("service_heartbeats", "metadata")),
-    _w("analytics", 300.0, ("service_heartbeats", "analytics")),
-    _w("dispatcher", None, ("service_heartbeats", "dispatcher")),
-    _w("roster", 168 * 3600.0, ("service_heartbeats", "roster")),
-    _w("reconciler", 3600.0, ("service_heartbeats", "reconciler")),
-    _w("premap", 1800.0, ("ingestion_state", "premap_last", "at")),
-    _w("price_path", 5.0),
-    _w("roster_auto", 3600.0, ("ingestion_state", "roster_auto_last", "at")),
-    _w("edge_marks", 20.0),
-    _w("mirror_shadow", 30.0, ("service_heartbeats", "mirror_shadow")),
-    _w("retention", 3600.0, ("service_heartbeats", "retention")),
+    _w("poller", None, _hb("poller", "ok", "idle")),
+    _w("chain_listener", None, _hb("chain_listener", "ok")),
+    _w("metadata", 60.0, _hb("metadata", "ok")),
+    _w("analytics", 300.0, _hb("analytics", "ok")),
+    _w("dispatcher", None, _hb("dispatcher", "ok")),
+    _w("roster", 168 * 3600.0, _hb("roster", "ok")),
+    _w("reconciler", 3600.0, _hb("reconciler", "ok", "drift")),
+    _w("premap", 1800.0, _is("premap_last", "at", _null("err"))),
+    # price_path and edge_marks record their own SUCCESS / ERROR (R30A
+    # review: before, only the supervisor's START / ERROR reached this row,
+    # so neither could ever be judged). Health cadence 30 s / 60 s, written
+    # at most every 30 s; the loops themselves pass every 5 s / 20 s.
+    _w("price_path", 30.0, record_every_s=30.0, period_s=5.0,
+       note="samples every POLL_S (5 s); health recorded at most every 30 s"),
+    _w("roster_auto", 3600.0, _is("roster_auto_last", "at", _null("error"))),
+    _w("edge_marks", 60.0, record_every_s=30.0, period_s=20.0,
+       note="passes every EVERY_S (20 s); health recorded at most every "
+            "30 s"),
+    _w("mirror_shadow", 30.0, _hb("mirror_shadow", "ok")),
+    _w("retention", 3600.0, _hb("retention", "ok", "off")),
     _w("rn1_obs", None, note="inert unless RN1_OBSERVABILITY_SHADOW is set"),
-    _w("shadow_bettor", 60.0, ("service_heartbeats", "shadow_bettor")),
-    _w("bettor_state", 60.0, ("service_heartbeats", "bettor_state")),
-    _w("institutional_md", 60.0, ("service_heartbeats", "institutional_md")),
+    _w("shadow_bettor", 60.0, _hb("shadow_bettor", "ok", "no_universe")),
+    _w("bettor_state", 60.0, _hb("bettor_state", "ok")),
+    _w("institutional_md", 60.0,
+       _hb("institutional_md", "ok", "no_focus_set")),
     _w("shadow_experimental", 60.0,
-       ("service_heartbeats", "shadow_experimental")),
-    _w("shadow_rn1", 5.0, ("service_heartbeats", "shadow_rn1")),
+       _hb("shadow_experimental", "ok", "no_eligible_population",
+           "no_focus_set", "already_sealed")),
+    _w("shadow_rn1", 5.0, _hb("shadow_rn1", "ok")),
     _w("bettor_live", None, note="STOPPED by its control row; decision only"),
-    _w("memory", 60.0, ("service_heartbeats", "workers_memory")),
+    _w("memory", 60.0, _hb("workers_memory", "ok", "high")),
 )
 #: registered in workers/all.py LOOPS and deliberately NOT started (cand21)
 WORKERS_NOT_STARTED = ("copy_sweep", "underdog", "whale_exits", "mirror_live")
@@ -338,6 +462,31 @@ def _error_text(error) -> str | None:
     return text[:MAX_ERROR_CHARS]
 
 
+def bounded_detail(detail, limit: int = MAX_DETAIL_CHARS) -> str:
+    """The record's JSON detail, ALWAYS valid JSON and at most `limit`
+    characters. Bounded on the CONTENT, never on the serialised string: an
+    oversized detail keeps its keys (and says it was truncated and how big
+    it was) and drops the values; a detail whose keys alone are too big
+    keeps only the marker."""
+    try:
+        text = json.dumps(detail or {}, default=str)
+    except (TypeError, ValueError) as exc:
+        return json.dumps({"truncated": True,
+                           "unserialisable": type(exc).__name__})
+    if not isinstance(detail or {}, dict):
+        return json.dumps({"truncated": True, "not_an_object": True})
+    if len(text) <= limit:
+        return text
+    keys = sorted(str(k) for k in (detail or {}))
+    out = {"truncated": True, "original_chars": len(text), "keys": []}
+    for k in keys:
+        out["keys"].append(k[:64])
+        if len(json.dumps(out)) > limit - 16:
+            out["keys"].pop()
+            break
+    return json.dumps(out)
+
+
 def due(name: str, process: str, phase: str, *, now: float | None = None,
         every_s: float | None = None) -> bool:
     """A START or ERROR is always written; a SUCCESS at most every
@@ -372,7 +521,7 @@ async def record(target, name: str, *, process: str, phase: str,
     args = (name, process, cad, phase, _error_text(error),
             (os.environ.get("RENDER_GIT_COMMIT") or None),
             socket.gethostname()[:120], os.getpid(),
-            json.dumps(detail or {}, default=str)[:4000])
+            bounded_detail(detail))
     try:
         async with asyncio.timeout(RECORD_TIMEOUT_S):
             if hasattr(target, "execute") and not hasattr(target, "acquire"):
@@ -459,6 +608,13 @@ def armed(spec: dict, env=None, rows: dict | None = None) -> tuple:
         v = str(env.get(rule[1], rule[2])).strip().lower()
         return (v not in _OFF), (None if v not in _OFF
                                  else "ENV_%s_OFF" % rule[1])
+    if kind == "env_set":
+        v = str(env.get(rule[1], "") or "").strip()
+        return bool(v), (None if v else "ENV_%s_NOT_SET" % rule[1])
+    if kind == "env_eq":
+        v = str(env.get(rule[1], "") or "").strip()
+        return (v == rule[2]), (None if v == rule[2]
+                                else "ENV_%s_NOT_%s" % (rule[1], rule[2]))
     if kind == "env_on_both":
         bad = [n for n in rule[1:]
                if str(env.get(n, "")).strip().lower() not in _ON]
@@ -480,19 +636,35 @@ def classify(spec: dict, facts: dict, *, now: float, is_armed=True,
     """One loop's verdict from its gathered facts. Pure.
 
     facts: {"success_at": [(epoch, source), ...], "start_at", "error_at",
-            "error", "beat_status", "sources_read": [...],
-            "sources_missing": [...]}"""
+            "error", "beat_status", "process_started_at",
+            "sources_read": [...], "sources_missing": [...]}
+
+    THE NEVER-SUCCEEDED RULE (R30A review). A loop with no recorded success
+    is judged against its LAST KNOWN START -- its own START record, or the
+    boot of the process that runs it, whichever is later: more than
+    HEALTH_FACTOR x cadence ago it is UNHEALTHY (NO_SUCCESS_SINCE_START),
+    within it STARTING. Before, it read UNAVAILABLE, so the loop that
+    starts and fails on every pass -- the bettor_state heartbeat of
+    2026-10-04 -- never read as unhealthy at all. UNAVAILABLE is kept for
+    unreadable or absent sources, and for a loop whose start is unknown."""
     cad = spec.get("cadence_s")
     succ = [(t, s) for t, s in (facts.get("success_at") or [])
             if t is not None]
     last_success, success_source = (max(succ) if succ else (None, None))
+    own_start = facts.get("start_at")
+    boot = facts.get("process_started_at")
+    starts = [t for t in (own_start, boot) if t is not None]
+    anchor = max(starts) if starts else None
     out = {"name": spec["name"], "process": spec["process"],
            "capital_critical": spec["capital_critical"],
            "cadence_s": cad,
            "unhealthy_after_s": None if not cad else HEALTH_FACTOR * cad,
            "lease": dict(spec["lease"]),
            "armed": is_armed, "armed_why": armed_why,
-           "last_start_at": facts.get("start_at"),
+           "last_start_at": anchor,
+           "start_source": (None if anchor is None
+                            else "runtime_loop_health" if anchor == own_start
+                            else "process_boot"),
            "last_success_at": last_success,
            "success_source": success_source,
            "last_error_at": facts.get("error_at"),
@@ -526,17 +698,52 @@ def classify(spec: dict, facts: dict, *, now: float, is_armed=True,
                         if spec["name"] == "pinnapi_reactive"
                         else "NO_DECLARED_CADENCE"))
         return out
-    if last_success is None:
-        out.update(status=UNAVAILABLE, why=(
-            "NO_SUCCESS_RECORDED" if facts.get("sources_read")
-            else "NO_SOURCE_READABLE"))
+    limit = HEALTH_FACTOR * cad
+    if last_success is not None:
+        if now - last_success <= limit:
+            out.update(status=HEALTHY, why=None)
+        else:
+            out.update(status=UNHEALTHY,
+                       why="NO_SUCCESS_WITHIN_%gX_CADENCE" % HEALTH_FACTOR)
         return out
-    if now - last_success <= HEALTH_FACTOR * cad:
-        out.update(status=HEALTHY, why=None)
-    else:
+    if not facts.get("sources_read"):
+        out.update(status=UNAVAILABLE, why="NO_SOURCE_READABLE")
+        return out
+    if facts.get("error_at") is not None:
+        # it RAN and the newest thing on record is a failure, with no
+        # success on record anywhere (an overwritten heartbeat row that
+        # now says 'error', or a loop-health row that has errors and no
+        # success): not healthy, by name -- never UNAVAILABLE
         out.update(status=UNHEALTHY,
-                   why="NO_SUCCESS_WITHIN_%gX_CADENCE" % HEALTH_FACTOR)
+                   why="NO_SUCCESS_ON_RECORD_LATEST_PASS_FAILED")
+        return out
+    if anchor is None:
+        out.update(status=UNAVAILABLE,
+                   why="NO_SUCCESS_RECORDED_AND_NO_KNOWN_START")
+        return out
+    if now - anchor > limit:
+        out.update(status=UNHEALTHY, why="NO_SUCCESS_SINCE_START")
+    else:
+        out.update(status=STARTING, why="NO_SUCCESS_YET_WITHIN_%gX_CADENCE"
+                                        "_OF_START" % HEALTH_FACTOR)
     return out
+
+
+def beat_ok(value, rule) -> tuple:
+    """(is a success, status label) for one ingestion_state value under its
+    source's rule. Pure."""
+    v = value if isinstance(value, dict) else {}
+    kind = (rule or ANY)[0]
+    if kind == "ANY":
+        return True, (v.get("state") or v.get("status"))
+    if kind == "FIELD_IN":
+        got = v.get(rule[1])
+        return (got in rule[2]), (None if got is None else str(got))
+    if kind == "FIELD_NULL":
+        got = v.get(rule[1])
+        return (got is None), (None if got is None
+                               else "%s=%s" % (rule[1], str(got)[:120]))
+    return False, "UNKNOWN_RULE"
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -569,13 +776,15 @@ async def read(conn, *, now: float | None = None, env=None) -> dict:
         "       last_success_at, last_error_at, last_error, starts, "
         "       successes, errors, commit_sha, detail "
         "  FROM runtime_loop_health"), missing, "runtime_loop_health")
+    lh_rows = lh
     lh = {(r["loop_name"], r["process"]): dict(r) for r in (lh or [])}
-    sb = await _try(conn, lambda: conn.fetch(
+    sb_rows = await _try(conn, lambda: conn.fetch(
         "SELECT service, status, beat_at FROM service_heartbeats"),
         missing, "service_heartbeats")
-    sb = {r["service"]: dict(r) for r in (sb or [])}
+    sb = {r["service"]: dict(r) for r in (sb_rows or [])}
     keys = sorted({s[1] for spec in INVENTORY for s in spec["sources"]
-                   if s[0] == "ingestion_state"} | {"pinnapi_feed"})
+                   if s[0] == "ingestion_state"} | {"pinnapi_feed",
+                                                     "workers_boot"})
     ist_rows = await _try(conn, lambda: conn.fetch(
         "SELECT key, value FROM ingestion_state WHERE key = ANY($1::text[])",
         keys), missing, "ingestion_state")
@@ -620,39 +829,69 @@ async def read(conn, *, now: float | None = None, env=None) -> dict:
     control_rows = {"pinnapi_feed": None if ist_rows is None
                     else ist.get("pinnapi_feed") is True}
 
+    # THE FIRST SIGHTING of every loop: its process's boot. The API's is
+    # this process's own; the workers' is the boot stamp workers/all.py
+    # writes (ingestion_state 'workers_boot'), absent -> unknown.
+    wb = ist.get("workers_boot")
+    boots = {"api": PROCESS_STARTED_AT,
+             "workers": _ep(wb.get("at")) if isinstance(wb, dict) else None}
+
+    def _error(facts, at, text):
+        if at is not None and (facts.get("error_at") is None
+                               or at >= facts["error_at"]):
+            facts["error_at"], facts["error"] = at, text
+
     loops = []
     for spec in INVENTORY:
         facts = {"success_at": [], "sources_read": [],
-                 "sources_missing": []}
+                 "sources_missing": [],
+                 "process_started_at": boots.get(spec["process"])}
         for src in spec["sources"]:
             kind = src[0]
             if kind == "runtime_loop_health":
+                if lh_rows is None:
+                    continue
                 row = lh.get((src[1], src[2]))
                 facts["sources_read"].append("runtime_loop_health")
                 if row:
                     facts["success_at"].append(
                         (_ep(row["last_success_at"]), "runtime_loop_health"))
                     facts["start_at"] = _ep(row["last_start_at"])
-                    facts["error_at"] = _ep(row["last_error_at"])
-                    facts["error"] = row["last_error"]
+                    _error(facts, _ep(row["last_error_at"]),
+                           row["last_error"])
             elif kind == "service_heartbeats":
+                if sb_rows is None:
+                    continue
                 row = sb.get(src[1])
-                facts["sources_read"].append("service_heartbeats:" + src[1])
+                label = "service_heartbeats:" + src[1]
+                facts["sources_read"].append(label)
                 if row:
-                    facts["success_at"].append(
-                        (_ep(row["beat_at"]), "service_heartbeats:" + src[1]))
-                    facts["beat_status"] = row["status"]
+                    at, status = _ep(row["beat_at"]), row["status"]
+                    facts["beat_status"] = status
+                    if status in src[2]:
+                        facts["success_at"].append((at, label))
+                    else:
+                        # A FAILED PASS IS NOT A SUCCESS: the writer said so
+                        # in its own status (or used one its vocabulary
+                        # does not name, which is not trusted either)
+                        _error(facts, at, "NON_SUCCESS_BEAT:%s" % status)
                 else:
                     facts["sources_missing"].append(
                         "service_heartbeats:%s:NO_ROW" % src[1])
             elif kind == "ingestion_state":
+                if ist_rows is None:
+                    continue
                 v = ist.get(src[1])
-                facts["sources_read"].append("ingestion_state:" + src[1])
+                label = "ingestion_state:" + src[1]
+                facts["sources_read"].append(label)
                 if isinstance(v, dict) and v.get(src[2]) is not None:
-                    facts["success_at"].append(
-                        (_ep(v.get(src[2])), "ingestion_state:" + src[1]))
-                    facts.setdefault("beat_status", v.get("state")
-                                     or v.get("status"))
+                    at = _ep(v.get(src[2]))
+                    ok, status = beat_ok(v, src[3] if len(src) > 3 else ANY)
+                    facts.setdefault("beat_status", status)
+                    if ok:
+                        facts["success_at"].append((at, label))
+                    else:
+                        _error(facts, at, "NON_SUCCESS_BEAT:%s" % status)
                 else:
                     facts["sources_missing"].append(
                         "ingestion_state:%s:NO_ROW" % src[1])
@@ -661,14 +900,18 @@ async def read(conn, *, now: float | None = None, env=None) -> dict:
                 if row is not None:
                     facts["sources_read"].append(src[1])
                     facts["success_at"].append((_ep(row["ok_at"]), src[1]))
-                    facts.setdefault("start_at", _ep(row["start_at"]))
+                    st = _ep(row["start_at"])
+                    if st is not None and (facts.get("start_at") is None
+                                           or st > facts["start_at"]):
+                        facts["start_at"] = st
                     if row["err_at"] is not None:
-                        facts["error_at"] = _ep(row["err_at"])
+                        _error(facts, _ep(row["err_at"]),
+                               "RUN_NOT_OK:%s" % src[1])
             elif kind == "reactive_attempts" and ra is not None:
                 facts["sources_read"].append("pinnapi_reactive_attempts")
                 facts["success_at"].append(
                     (_ep(ra["ok_at"]), "pinnapi_reactive_attempts"))
-                facts["error_at"] = _ep(ra["err_at"])
+                _error(facts, _ep(ra["err_at"]), "TIMEOUT_OR_ERROR_ATTEMPT")
                 facts["beat_status"] = (
                     "ORPHANED_STARTED_24H=%s" % ra["orphaned_started"])
         is_armed, why = armed(spec, env=env, rows=control_rows)
@@ -680,10 +923,15 @@ async def read(conn, *, now: float | None = None, env=None) -> dict:
     for lp in loops:
         summary[lp["status"]] = summary.get(lp["status"], 0) + 1
     critical_bad = [lp["name"] for lp in loops if lp["capital_critical"]
-                    and lp["status"] in (UNHEALTHY, UNAVAILABLE)]
+                    and lp["status"] in (UNHEALTHY, UNAVAILABLE, STARTING)]
     return {"version": VERSION, "now": now,
             "rule": "UNHEALTHY when the newest recorded success is older "
-                    "than %g x the loop's cadence" % HEALTH_FACTOR,
+                    "than %g x the loop's cadence, or when there is none "
+                    "since a start more than %g x cadence ago; a heartbeat "
+                    "counts only when its status is in its writer's "
+                    "success vocabulary" % (HEALTH_FACTOR, HEALTH_FACTOR),
+            "process_started_at": {"api": boots["api"],
+                                   "workers": boots["workers"]},
             "loops": loops, "summary": summary,
             "capital_critical_not_healthy": critical_bad,
             "workers_not_started_by_design": list(WORKERS_NOT_STARTED),

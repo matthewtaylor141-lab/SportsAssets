@@ -112,10 +112,31 @@ _OPEN_MARKET_PARAM_VARIANTS: list[dict[str, str]] = [
 ]
 
 
+#: THE DEEPEST OFFSET THE API SERVES (R30A runtime, 2026-10-04). The open-
+#: market paging asked for up to 50 pages and the API refused page 21 on
+#: every metadata cycle: `GET /markets?...&limit=100&offset=2100 -> 422
+#: {"type":"validation error","error":"offset too large, use /markets/keyset
+#: for deeper pagination"}` while offset=2000 returned 200 (render-ops logs,
+#: workers, 20:02:11 / 20:04:33 / 20:06:57Z, run 37230932776) -- a WARNING
+#: and a refused request every ~2.4 minutes, plus a needless re-probe of
+#: the param variants (the 422 reset `_open_params`). The paginator now
+#: stops at the offset the API itself states it serves; reaching it with a
+#: full page means the catalogue is TRUNCATED, which is recorded by name in
+#: `last_paging` (and rides the metadata heartbeat), never hidden. The
+#: keyset endpoint the error names is NOT used: its contract was not
+#: verifiable from here, and guessing it on a production collector is not
+#: acceptable.
+GAMMA_MAX_OFFSET = 2000
+#: the API's own words when an offset is past what it serves
+OFFSET_REFUSAL_TEXT = "offset too large"
+
+
 class GammaClient:
     def __init__(self) -> None:
         self._http = httpx.AsyncClient(base_url=settings().gamma_api_base, timeout=15)
         self._open_params: dict[str, str] | None = None
+        #: how the last open-market paging ended (pages, markets, why)
+        self.last_paging: dict = {}
 
     async def fetch_markets(self, params: dict[str, Any]) -> list[dict[str, Any]]:
         resp = await self._http.get("/markets", params=params)
@@ -168,20 +189,53 @@ class GammaClient:
         """
         base = await self._resolve_open_params()
         out: list[dict[str, Any]] = []
-        for page in range(max_pages):
+        # never ask for an offset the API has said it does not serve
+        pages = min(max_pages, GAMMA_MAX_OFFSET // page_size + 1)
+        for page in range(pages):
             try:
                 batch = await self.fetch_markets(
                     {**base, "limit": page_size, "offset": page * page_size}
                 )
             except httpx.HTTPStatusError as exc:
+                resp = getattr(exc, "response", None)
+                if (resp is not None and resp.status_code == 422
+                        and OFFSET_REFUSAL_TEXT in str(exc)):
+                    # the API's offset ceiling moved below ours: end of the
+                    # pages it serves, NOT a param-variant failure (no
+                    # re-probe), counted and named
+                    self.last_paging = {
+                        "pages": page, "markets": len(out),
+                        "stopped": "OFFSET_REFUSED_BY_API",
+                        "truncated": True, "offset": page * page_size}
+                    log.warning("open-market paging: the API refused offset "
+                                "%s (%s); keeping %s markets", page * page_size,
+                                OFFSET_REFUSAL_TEXT, len(out))
+                    return out
                 log.warning("open-market paging stopped at page %s (%s); keeping %s markets",
                             page, exc, len(out))
+                self.last_paging = {"pages": page, "markets": len(out),
+                                    "stopped": "HTTP_%s" % getattr(
+                                        resp, "status_code", "ERROR"),
+                                    "truncated": True}
                 self._open_params = None  # re-probe variants next cycle
                 return out
             out.extend(batch)
             if len(batch) < page_size:
+                self.last_paging = {"pages": page + 1, "markets": len(out),
+                                    "stopped": "SHORT_PAGE",
+                                    "truncated": False}
                 return out
+        if pages < max_pages:
+            # the API's offset ceiling with a FULL last page: more open
+            # markets exist than offset paging can reach (keyset needed)
+            self.last_paging = {"pages": pages, "markets": len(out),
+                                "stopped": "OFFSET_CEILING",
+                                "max_offset": GAMMA_MAX_OFFSET,
+                                "truncated": True}
+            return out
         log.warning("open-market paging hit the %s-page cap; cache may be partial", max_pages)
+        self.last_paging = {"pages": pages, "markets": len(out),
+                            "stopped": "PAGE_CAP", "truncated": True}
         return out
 
     async def fetch_by_condition_ids(self, condition_ids: list[str]) -> list[dict[str, Any]]:

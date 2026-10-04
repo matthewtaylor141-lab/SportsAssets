@@ -209,10 +209,17 @@ async def _census_once(pool) -> dict:
             C.catalogue_sql(sport_ids=subscribed))]
         others = [(r["sports_type"], r["n"]) for r in await c.fetch(
             C.catalogue_totals_sql())]
+    # THE VIEW ON THE LOOP, THE MATCHING OFF IT (R30A). The view is a copy
+    # taken from the cache, which only the event loop mutates, so it is
+    # taken here; `census` is pure over the rows and that copy, and matching
+    # every catalogue contract against it held the loop 2.1 s
+    # (`_census_once`, the API loop watchdog, research-sql run
+    # 37231263685) -- so it runs in a worker thread and the loop keeps
+    # serving every other task's 2-3 s budget meanwhile.
     view = C.feed_event_view(o.cache) if o else {}
-    out = C.census(rows, view, subscribed_sports=subscribed,
-                   synced=bool(o and o.cache.authority.synced), now=t0,
-                   others=others)
+    out = await asyncio.to_thread(
+        C.census, rows, view, subscribed_sports=subscribed,
+        synced=bool(o and o.cache.authority.synced), now=t0, others=others)
     out["computed_at"] = t0
     out["took_ms"] = round((time.time() - t0) * 1000)
     return out
@@ -503,11 +510,19 @@ async def held_moneyline(conn, *, us_market_slug, payout_event,
                       view=view)
 
 
-async def held_event_id(conn, us_market_slug) -> tuple:
+async def held_event_id(conn, us_market_slug, *, view=None) -> tuple:
     """(feed event id, None) for a held contract matched to ONE provider
     event of this process's cache under the census's own identity (same
     teams, start within tolerance, full-game moneyline family), else
-    (None, named reason). Read only; no network."""
+    (None, named reason). Read only; no network.
+
+    `view` (R30A): the feed event view (pinnapi_census.feed_event_view) the
+    caller already built for this pass. pinnapi_held.refresh resolves EVERY
+    held slug in one pass and rebuilt the view -- a walk of up to MAX_EVENTS
+    events, each one's participants parsed -- once PER SLUG, on the event
+    loop: the API's loop watchdog recorded the loop held 2.0 s in exactly
+    `participants <- feed_event_view <- held_event_id <- refresh`
+    (research-sql run 37231263685). None builds it here, as before."""
     from . import pinnapi_census as C
     o = _STATE.get("owner")
     if o is None:
@@ -525,8 +540,10 @@ async def held_event_id(conn, us_market_slug) -> tuple:
             else [])
     except Exception as exc:                                    # noqa: BLE001
         return None, "%s:%s" % (R_CATALOGUE_UNREADABLE, type(exc).__name__)
+    if view is None:
+        view = C.feed_event_view(o.cache)
     state, eid, _sid = C.contract_match(
-        dict(row), event_rows or [dict(row)], C.feed_event_view(o.cache),
+        dict(row), event_rows or [dict(row)], view,
         subscribed_sports=set(o.sport_ids),
         synced=bool(o.cache.authority.synced))
     if state != C.S_SUPPORTED or eid is None:

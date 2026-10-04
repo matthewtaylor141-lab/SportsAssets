@@ -60,10 +60,21 @@ def test_the_command_centre_maps_exactly_those_keys():
 
 
 def _run_fn(module):
+    """The function that takes and holds the loop's lock: run(), or -- for
+    the decider -- `_hold_once`. PINNED FACT, UPDATED (R30A review):
+    ext_pinnacle_loop.run let a failed re-contention (the database still
+    restarting) raise out of the unsupervised lifespan task; run() now
+    repeats `_hold_once` -- ONE contention attempt: the session, the lock
+    loop, the hold -- inside a try, so the properties pinned below (one
+    session for the hold's life, the lock re-asked in a loop before any
+    cycle) are `_hold_once`'s."""
     tree = ast.parse(inspect.getsource(module))
-    for node in tree.body:
-        if isinstance(node, ast.AsyncFunctionDef) and node.name == "run":
-            return node
+    fns = {node.name: node for node in tree.body
+           if isinstance(node, ast.AsyncFunctionDef)}
+    if "_hold_once" in fns:
+        return fns["_hold_once"]
+    if "run" in fns:
+        return fns["run"]
     raise AssertionError("%s has no run()" % module.__name__)
 
 

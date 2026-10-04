@@ -53,12 +53,38 @@ def test_every_workers_loop_is_inventoried():
     assert not stale, "inventory entries no loop has: %s" % stale
 
 
+def _lifespan_task_callees(lifespan: str) -> list:
+    """Every callable the lifespan hands to create_task (or a module's own
+    .start(pool)), by its dotted name, parsed -- not grepped from a list."""
+    tree = ast.parse("async def _l():\n" + "\n".join(
+        "    " + ln for ln in lifespan.split("\n")[1:]))
+    out = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        fn = node.func
+        name = ast.unparse(fn)
+        if name.endswith("create_task") and node.args:
+            arg = node.args[0]
+            if isinstance(arg, ast.Call):
+                out.append(ast.unparse(arg.func))
+        elif name in ("_WATCHDOG.start", "_IAS.start"):
+            out.append(name)
+    return out
+
+
 def test_every_api_lifespan_runner_is_inventoried():
     """The recurring tasks api/app.py's lifespan creates, by the module that
-    runs them."""
+    runs them. R30A review: the test now PARSES every create_task in the
+    lifespan and fails on one the inventory (or the one-shot list) does not
+    name -- a hardcoded list could not catch an omission (slack_bridge.run
+    and the API institutional stream were missing)."""
     src = (ROOT / "sportsassets" / "api" / "app.py").read_text()
     lifespan = src[src.index("async def lifespan"):src.index("app = FastAPI(")]
     expected = {
+        "_SLACK.run": "slack_bridge.run",
+        "_IAS.start": "institutional_api_stream",
+        "_delayed_poller": "api.poller_fallback",
         "_DESKLOOP.run": "bettor_desk_loop", "_RN1X.run": "rn1x_shadow",
         "_RN1XL.run": "rn1x_learn", "_EXT.run": "ext_pinnacle.entry_cycle",
         "_RN1XM.run": "rn1x_model", "_CAP.run": "agents.capability_runtime",
@@ -78,6 +104,12 @@ def test_every_api_lifespan_runner_is_inventoried():
     for call, name in expected.items():
         assert call in lifespan, "%s no longer in the lifespan" % call
         assert name in names, name
+    callees = _lifespan_task_callees(lifespan)
+    assert len(callees) >= 20, callees
+    unknown = [c for c in callees if c not in expected
+               and c not in LH.API_ONE_SHOT]
+    assert not unknown, ("lifespan tasks with no inventory entry: %s"
+                         % unknown)
     # the decider's children are inventoried too
     for child in ("ext_pinnacle.servicing", "pinnapi_feed.heartbeat",
                   "pinnapi_held.refresh", "pinnapi_reactive"):
@@ -294,14 +326,146 @@ def test_disabled_and_unavailable_are_named_never_successes():
     assert on["status"] == LH.UNAVAILABLE
     assert on["why"] == "NO_PERSISTED_HEALTH_SOURCE"
     s = _spec("execmirror.tick")
+    # UNAVAILABLE now only when nothing says when the loop last started
+    # (R30A review: "NO_SUCCESS_RECORDED" used to swallow the loop that
+    # starts and fails on every pass -- see the never-succeeded tests)
     none = LH.classify(s, {"success_at": [], "sources_read": ["x"]},
                        now=NOW, holders=[{"pid": 1}])
     assert none["status"] == LH.UNAVAILABLE
-    assert none["why"] == "NO_SUCCESS_RECORDED"
+    assert none["why"] == "NO_SUCCESS_RECORDED_AND_NO_KNOWN_START"
     ev = LH.classify(_spec("pinnapi_reactive"),
                      {"success_at": [(NOW - 9, "a")], "sources_read": ["a"]},
                      now=NOW)
     assert ev["status"] == LH.EVENT_DRIVEN
+
+
+def test_a_loop_that_starts_and_fails_on_every_pass_is_unhealthy():
+    """THE REVIEWER'S PROBE, PINNED: execmirror.tick (cadence 30 s) started
+    an hour ago, failed 2 s ago, never succeeded -> UNHEALTHY, not
+    UNAVAILABLE."""
+    spec = LH.BY_NAME[("execmirror.tick", "api")]
+    facts = {"success_at": [(None, "runtime_loop_health")],
+             "start_at": NOW - 3600, "error_at": NOW - 2,
+             "error": "TimeoutError: boom",
+             "sources_read": ["runtime_loop_health"], "sources_missing": []}
+    got = LH.classify(spec, facts, now=NOW, holders=[{"pid": 1}])
+    assert got["status"] == LH.UNHEALTHY
+    assert got["why"] == "NO_SUCCESS_ON_RECORD_LATEST_PASS_FAILED"
+    assert got["last_error"] == "TimeoutError: boom"
+
+
+def test_never_succeeded_since_start_is_measured_against_the_last_start():
+    spec = LH.BY_NAME[("execmirror.tick", "api")]          # 3 x 30 = 90 s
+    base = {"success_at": [], "sources_read": ["runtime_loop_health"]}
+    # its own START record 91 s ago, nothing since: UNHEALTHY
+    old = LH.classify(spec, dict(base, start_at=NOW - 91), now=NOW,
+                      holders=[{"pid": 1}])
+    assert old["status"] == LH.UNHEALTHY
+    assert old["why"] == "NO_SUCCESS_SINCE_START"
+    assert old["start_source"] == "runtime_loop_health"
+    # started 30 s ago: not yet judgeable as unhealthy, and not healthy
+    young = LH.classify(spec, dict(base, start_at=NOW - 30), now=NOW,
+                        holders=[{"pid": 1}])
+    assert young["status"] == LH.STARTING
+    # no START record: the process's boot is the first sighting
+    boot = LH.classify(spec, dict(base, process_started_at=NOW - 600),
+                       now=NOW, holders=[{"pid": 1}])
+    assert boot["status"] == LH.UNHEALTHY
+    assert boot["start_source"] == "process_boot"
+    # the LATER of the two anchors wins (a restart re-opens the grace)
+    later = LH.classify(spec, dict(base, start_at=NOW - 20,
+                                   process_started_at=NOW - 600),
+                        now=NOW, holders=[{"pid": 1}])
+    assert later["status"] == LH.STARTING
+
+
+def test_a_failing_heartbeat_is_not_a_success():
+    """service_heartbeats rows whose status the writer uses for a FAILED
+    pass ('error', 'venue_unreadable', 'store_not_ready', 'running' = only
+    started) never count as a success; the writer's success vocabulary
+    does."""
+    for name, proc, bad, good in (
+            ("agents.karen_runner", "api", "error", "ok"),
+            ("rn1x_shadow", "api", "error", "idle"),
+            ("analytics", "workers", "running", "ok"),
+            ("shadow_rn1", "workers", "venue_unreadable", "ok"),
+            ("shadow_bettor", "workers", "store_not_ready", "no_universe"),
+            ("reconciler", "workers", "error", "drift"),
+            ("metadata", "workers", "degraded", "ok"),
+            ("memory", "workers", "high", "high")):
+        spec = LH.BY_NAME[(name, proc)]
+        hb = [src for src in spec["sources"]
+              if src[0] == "service_heartbeats"][0]
+        assert good in hb[2], (name, good)
+        if bad != good:
+            assert bad not in hb[2], (name, bad)
+
+
+def test_ingestion_state_rules_honour_the_writers_own_fields():
+    assert LH.beat_ok({"state": "OWNER_SYNCED"},
+                      LH._in("state", "OWNER_SYNCED")) == (True,
+                                                            "OWNER_SYNCED")
+    assert LH.beat_ok({"state": "CONNECTING"},
+                      LH._in("state", "OWNER_SYNCED"))[0] is False
+    assert LH.beat_ok({"at": "x", "err": None}, LH._null("err"))[0] is True
+    ok, why = LH.beat_ok({"at": "x", "err": "QueryCanceledError"},
+                         LH._null("err"))
+    assert ok is False and why == "err=QueryCanceledError"
+    assert LH.beat_ok({"state": "BLOCKED"}, LH.ANY)[0] is True
+    feed = LH.BY_NAME[("pinnapi_feed.heartbeat", "api")]["sources"][0]
+    assert feed[3] == LH._in("state", "OWNER_SYNCED")
+    premap = [s for s in LH.BY_NAME[("premap", "workers")]["sources"]
+              if s[0] == "ingestion_state"][0]
+    assert premap[3] == LH._null("err")
+
+
+def test_a_loop_that_succeeds_every_pass_never_reads_unhealthy():
+    """THE THROTTLE MAY NOT OUTRUN THE THRESHOLD (R30A review: pinnapi_held
+    recorded at most every 30 s against 3 x 10 s and read UNHEALTHY ~5% of
+    the time while succeeding on every pass). For every inventoried loop,
+    the worst gap between two recorded successes -- the throttle plus one
+    loop period plus a 20% slow pass -- stays inside 3 x cadence; and a
+    simulation of 2 hours of passes through `due` never reads UNHEALTHY."""
+    for spec in LH.INVENTORY:
+        cad = spec["cadence_s"]
+        if not cad:
+            continue
+        period = spec["period_s"] or cad
+        throttle = spec["record_every_s"] or 0.0
+        worst = throttle + period * 1.2
+        assert worst < LH.HEALTH_FACTOR * cad, (spec["name"], worst, cad)
+    for name, proc in (("pinnapi_held.refresh", "api"),
+                       ("execmirror.tick", "api"),
+                       ("price_path", "workers"),
+                       ("edge_marks", "workers")):
+        spec = LH.BY_NAME[(name, proc)]
+        LH._last_write.clear()
+        t, last_written, worst_lag = 0.0, None, 0.0
+        while t < 7200.0:
+            t += spec["period_s"] * 1.05          # a slightly slow pass
+            if LH.due(name, proc, LH.SUCCESS, now=t):
+                LH._last_write[(name, proc, LH.SUCCESS)] = t
+                if last_written is not None:
+                    worst_lag = max(worst_lag, t - last_written)
+                last_written = t
+            got = LH.classify(spec, {"success_at": [(last_written, "x")],
+                                     "sources_read": ["x"]},
+                              now=t + spec["period_s"], holders=[{"pid": 1}])
+            assert got["status"] == LH.HEALTHY, (name, t, worst_lag)
+    LH._last_write.clear()
+
+
+def test_record_detail_is_bounded_on_content_and_always_valid_json():
+    big = LH.bounded_detail({"blob": "y" * 5000, "state": "LIVE"})
+    assert len(big) <= LH.MAX_DETAIL_CHARS
+    got = json.loads(big)
+    assert got["truncated"] is True and got["keys"] == ["blob", "state"]
+    assert got["original_chars"] > 5000
+    many = json.loads(LH.bounded_detail({"k%05d" % i: i for i in range(4000)}))
+    assert many["truncated"] is True
+    assert len(json.dumps(many)) <= LH.MAX_DETAIL_CHARS
+    assert json.loads(LH.bounded_detail({"a": 1})) == {"a": 1}
+    assert json.loads(LH.bounded_detail(None)) == {}
 
 
 def test_the_isolated_position_learning_layer_is_unavailable_not_read():
@@ -462,22 +626,29 @@ def test_read_combines_sources_and_lock_holders_on_production_shaped_rows():
             await holder.execute("SELECT pg_advisory_unlock($1)",
                                  LH.K_EXT_PINNACLE)
             await holder.close()
-        return body
+        return body, now
 
-    body = asyncio.run(main())
+    body, now = asyncio.run(main())
     by = {(lp["name"], lp["process"]): lp for lp in body["loops"]}
     ext = by[("ext_pinnacle.entry_cycle", "api")]
     assert ext["status"] == LH.HEALTHY, ext
     assert ext["lease"]["held"] is True and len(ext["lease"]["holders"]) == 1
     feed = by[("pinnapi_feed.heartbeat", "api")]
-    assert feed["status"] in (LH.HEALTHY, LH.UNHEALTHY)
+    # an exact verdict (R30A review): OWNER_SYNCED 12 s ago vs 3 x 30 s;
+    # its lock holder is checked separately (no backend holds K_FEED here)
     assert feed["beat_status"] == "OWNER_SYNCED"
     assert feed["armed"] is True
+    assert feed["last_success_at"] == pytest.approx(now - 12, abs=0.01)
+    assert feed["status"] == LH.UNHEALTHY
+    assert feed["why"] == "WRITER_LOCK_HELD_BY_NO_BACKEND"
     karen = by[("agents.karen_runner", "api")]
     assert karen["status"] == LH.HEALTHY
+    # 'venue_unreadable' is a pass that FAILED: never a fresh success
     rn1 = by[("shadow_rn1", "workers")]
-    assert rn1["status"] == LH.HEALTHY
+    assert rn1["status"] == LH.UNHEALTHY, rn1
+    assert rn1["why"] == "NO_SUCCESS_ON_RECORD_LATEST_PASS_FAILED"
     assert rn1["beat_status"] == "venue_unreadable"
+    assert rn1["last_error"] == "NON_SUCCESS_BEAT:venue_unreadable"
     # the mirror is critical and armed, and no backend holds its key here
     exm = by[("execmirror.tick", "api")]
     assert exm["status"] == LH.UNHEALTHY
@@ -485,6 +656,44 @@ def test_read_combines_sources_and_lock_holders_on_production_shaped_rows():
     assert "execmirror.tick" in body["capital_critical_not_healthy"]
     assert body["workers_not_started_by_design"] == list(
         LH.WORKERS_NOT_STARTED)
+
+
+@pg
+def test_fresh_error_heartbeats_read_unhealthy_on_postgres():
+    """THE REVIEWER'S PROBE ON POSTGRES: fresh 'error' rows for three
+    writers that heartbeat on failure read UNHEALTHY with the failure named,
+    and a fresh 'ok' row for the same writers reads HEALTHY."""
+    import asyncpg
+
+    async def main(status):
+        c = await asyncpg.connect(DSN)
+        tx = c.transaction()
+        await tx.start()
+        try:
+            for svc in ("agent_karen", "analytics", "rn1x_shadow"):
+                await c.execute(
+                    "INSERT INTO service_heartbeats (service, status, "
+                    "detail, beat_at) VALUES ($1, $2, '{}', now()) "
+                    "ON CONFLICT (service) DO UPDATE SET status = $2, "
+                    "beat_at = now()", svc, status)
+            return await LH.read(c, env={"RN1X_SHADOW": "on"})
+        finally:
+            await tx.rollback()
+            await c.close()
+
+    bad = {(lp["name"], lp["process"]): lp
+           for lp in asyncio.run(main("error"))["loops"]}
+    for k in (("agents.karen_runner", "api"), ("analytics", "workers"),
+              ("rn1x_shadow", "api")):
+        lp = bad[k]
+        assert lp["status"] != LH.HEALTHY, (k, lp)
+        assert lp["beat_status"] == "error"
+        assert lp["last_error"] == "NON_SUCCESS_BEAT:error"
+    assert bad[("agents.karen_runner", "api")]["status"] == LH.UNHEALTHY
+    good = {(lp["name"], lp["process"]): lp
+            for lp in asyncio.run(main("ok"))["loops"]}
+    assert good[("agents.karen_runner", "api")]["status"] == LH.HEALTHY
+    assert good[("analytics", "workers")]["status"] == LH.HEALTHY
 
 
 # ── §5 migration 229 ───────────────────────────────────────────────────
@@ -592,6 +801,49 @@ def test_the_routes_are_get_only_and_need_a_command_session():
     assert client.post("/api/command/loop-health").status_code == 405
 
 
+def test_the_diagnostics_answer_503_when_the_pool_is_dry(monkeypatch):
+    """R30A REVIEW: both endpoints acquired with no timeout, so under the
+    very starvation they diagnose they hung. A dry pool is now a bounded
+    wait and a 503 POOL_UNAVAILABLE."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from sportsassets.api import agents_core as AC
+    from sportsassets.api import command_loop_health as CLH
+    from sportsassets.api import command_slo as CS
+
+    waited = []
+
+    class _DryPool:
+        def acquire(self, timeout=None):
+            waited.append(timeout)
+
+            class _Ctx:
+                async def __aenter__(self):
+                    raise asyncio.TimeoutError()
+
+                async def __aexit__(self, *e):
+                    return False
+            return _Ctx()
+
+    async def _pool():
+        return _DryPool()
+
+    monkeypatch.setattr(CLH, "_pool", _pool)
+    monkeypatch.setattr(CS, "_pool", _pool)
+    app = FastAPI()
+    app.include_router(CLH.router)
+    app.include_router(CS.router)
+    app.dependency_overrides[AC.require_read] = lambda: None
+    client = TestClient(app)
+    for path in ("/api/command/loop-health", "/api/command/slo"):
+        r = client.get(path)
+        assert r.status_code == 503, (path, r.text)
+        assert r.json()["detail"]["reason"] == "POOL_UNAVAILABLE"
+    assert waited == [CLH.POOL_ACQUIRE_TIMEOUT_S, CS.POOL_ACQUIRE_TIMEOUT_S]
+    assert CLH.POOL_ACQUIRE_TIMEOUT_S <= 2.0
+
+
 @pg
 def test_the_loop_health_read_runs_in_a_read_only_transaction():
     import asyncpg
@@ -618,6 +870,7 @@ def test_the_r30a_runtime_tests_are_capital_critical():
     listed = (ROOT / "tools" / "capital_critical_tests.txt").read_text()
     for f in ("tests/test_r30a_pool_starvation_root_cause.py",
               "tests/test_r30a_runtime_defects.py",
+              "tests/test_r30a_loop_stalls.py",
               "tests/test_r30a_loop_health.py",
               "tests/test_r30a_runtime_slo.py"):
         assert f in listed, f

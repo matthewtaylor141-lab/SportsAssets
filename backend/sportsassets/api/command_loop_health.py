@@ -12,9 +12,13 @@ Per loop (loop_health.INVENTORY -- the API lifespan's loops and the workers
 service's): process, cadence, CAPITAL-CRITICAL or not, the LEASE that makes
 it a single writer (with the backends that hold its advisory key right now,
 read from pg_locks), last start / success / error, lag, and the verdict:
-HEALTHY / UNHEALTHY (no success within 3 x cadence, or a critical armed
-loop's writer lock held by no backend) / DISABLED (named) / EVENT_DRIVEN /
-UNAVAILABLE (named). No source ever reads as a manufactured success.
+HEALTHY / UNHEALTHY (no success within 3 x cadence; none since a start more
+than 3 x cadence ago; the newest record a failed pass; or a critical armed
+loop's writer lock held by no backend) / STARTING (started < 3 x cadence
+ago, no success yet) / DISABLED (named) / EVENT_DRIVEN / UNAVAILABLE (named:
+sources unreadable or absent). A heartbeat counts as a success only when its
+status is in its writer's success vocabulary; no source ever reads as a
+manufactured success.
 
 WHAT THIS MODULE CANNOT DO. It imports no order, venue, execution, ledger,
 paper or funded module (tests walk its imports), issues SELECTs only inside a
@@ -30,9 +34,15 @@ from .agents_core import _pool, require_read
 router = APIRouter()
 
 
+#: THE DIAGNOSTIC MUST ANSWER UNDER THE STARVATION IT DIAGNOSES (R30A
+#: review): a bounded wait for a pool connection, a 503 POOL_UNAVAILABLE when
+#: none comes -- never a request hung behind a dry pool.
+POOL_ACQUIRE_TIMEOUT_S = 2.0
+
+
 async def _read_only(fn):
     pool = await _pool()
-    async with pool.acquire() as conn:
+    async with pool.acquire(timeout=POOL_ACQUIRE_TIMEOUT_S) as conn:
         async with conn.transaction(readonly=True):
             await conn.execute("SET LOCAL statement_timeout = %d"
                                % LH.STATEMENT_TIMEOUT_MS)
@@ -46,6 +56,11 @@ async def loop_health(response: Response) -> dict:
         body = await _read_only(lambda c: LH.read(c))
     except HTTPException:
         raise
+    except TimeoutError:
+        raise HTTPException(status_code=503, detail={
+            "reason": "POOL_UNAVAILABLE",
+            "detail": "no database connection within %ss"
+                      % POOL_ACQUIRE_TIMEOUT_S})
     except Exception as exc:                                    # noqa: BLE001
         raise HTTPException(status_code=503, detail={
             "reason": "LOOP_HEALTH_READ_FAILED",

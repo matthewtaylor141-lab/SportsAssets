@@ -835,10 +835,18 @@ tests/test_agent_identity_api_authority.py
 # and the reactive scheduler takes ONE connection per job (no orphaned
 # STARTED attempt, a job without a connection refused before it starts).
 tests/test_r30a_pool_starvation_root_cause.py
-# R30A RUNTIME DEFECTS: the research tick names its failing step; every
-# heartbeat writer's json.dumps carries a default (the bettor_state datetime
-# defect cannot recur in another writer); service_heartbeats has one writer.
+# R30A RUNTIME DEFECTS: the research tick names its failing step (and
+# records it in loop health); every INSERT of a heartbeat-shaped
+# ingestion_state key serialises with a default and never slices serialised
+# JSON; service_heartbeats has one writer (db.py); the gamma paginator stops
+# at the offset the API serves (the recurring 422) and names a truncation.
 tests/test_r30a_runtime_defects.py
+# R30A EVENT-LOOP STALLS: the API loop was held 2-4 s at a time in the
+# minutes of every timeout class (the loop watchdog, render-ops run
+# 37231102537). The feed cache finds an event's quotes through a per-event
+# index (replayed frame by frame against the scanning implementation), the
+# held refresh builds one feed view per pass, the census matches off-loop.
+tests/test_r30a_loop_stalls.py
 # R30A WORKER RELIABILITY: every recurring loop inventoried with its lease;
 # every capital-critical loop holds a lock or is a child fenced by the
 # writer's backend pid (a fenced-out servicing pass / reactive job does

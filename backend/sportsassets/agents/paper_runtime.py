@@ -454,15 +454,31 @@ HARD_TIMEOUT_S = 90.0
 _TASK: dict = {"task": None, "last": None, "scheduled": 0, "coalesced": 0}
 
 
-async def write_heartbeat(conn, res: dict) -> None:
+#: the heartbeat's size bound. Bounded on the CONTENT (R30A runtime): the
+#: serialised string used to be cut at this length, and cut JSON fails the
+#: jsonb cast, so an oversized digest lost the whole heartbeat silently.
+HEARTBEAT_MAX_CHARS = 60000
+
+
+def _heartbeat_body(res: dict) -> str:
     import json as _json
+    body = _json.dumps(dict(_digest(res), refusal=res.get("refusal"),
+                            why=res.get("why"), written_at=time.time()),
+                       default=str)
+    if len(body) <= HEARTBEAT_MAX_CHARS:
+        return body
+    return _json.dumps({"heartbeat_truncated": True,
+                        "original_chars": len(body),
+                        "refusal": res.get("refusal"), "why": res.get("why"),
+                        "written_at": time.time()}, default=str)
+
+
+async def write_heartbeat(conn, res: dict) -> None:
     try:
         await conn.execute(
             "INSERT INTO ingestion_state (key, value) VALUES ($1, $2::jsonb) "
             "ON CONFLICT (key) DO UPDATE SET value = $2::jsonb",
-            HEARTBEAT_KEY, _json.dumps(dict(_digest(res), refusal=res.get(
-                "refusal"), why=res.get("why"), written_at=time.time()),
-                default=str)[:60000])
+            HEARTBEAT_KEY, _heartbeat_body(res))
     except Exception:                                          # noqa: BLE001
         pass
 

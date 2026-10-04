@@ -2,11 +2,15 @@
 
 PRODUCTION EVIDENCE (2026-10-04, read-only):
 
-  * render-ops `logs` (API, 15:46-18:47Z): `pinnapi reactive audit failed;
-    no unaudited evaluation started` x14, `agent research tick failed:
-    TimeoutError` x17, `pinnapi feed heartbeat failed` x9 -- every traceback
-    ends in asyncpg Pool._acquire -> TimeoutError, and they cluster at the same
-    seconds (16:00:53, 17:40:58, 17:46:10, 18:21:28).
+  * render-ops `logs` (API, 15:47-18:47Z; runs 37225745383 / 37225748641 /
+    37225751870): `pinnapi reactive audit failed; no unaudited evaluation
+    started` x12 -- 10 with the TimeoutError inside asyncpg Pool._acquire, 2
+    (16:00:53, 17:46:10) inside the INSERT after the connection was acquired
+    --, `agent research tick failed: TimeoutError` x17 (no traceback logged),
+    `pinnapi feed heartbeat failed` x8, clustered in the same minutes.
+    The pool was ONE of two causes; the other -- the API event loop held 2-4 s
+    at a time in exactly those minutes -- is pinned in
+    test_r30a_loop_stalls.py.
   * research-sql run 37226381750 (pg_stat_activity + pg_locks): the API host
     held TEN pooled backends (the pool's max_size) and SIX of them were the
     session advisory locks of the single-writer loops -- execmirror 0x45584d31,
@@ -50,11 +54,16 @@ def _lock_holders():
 
 
 def _run_src(mod) -> str:
+    """run() -- and, for the decider, the one contention attempt run() makes
+    (_hold_once: R30A review moved the lease there so a failed attempt can
+    never fail out of run)."""
     tree = ast.parse(inspect.getsource(mod))
-    for node in tree.body:
-        if isinstance(node, ast.AsyncFunctionDef) and node.name == "run":
-            return ast.unparse(node)
-    raise AssertionError("%s has no run()" % mod.__name__)
+    found = [ast.unparse(node) for node in tree.body
+             if isinstance(node, ast.AsyncFunctionDef)
+             and node.name in ("run", "_hold_once")]
+    if not found:
+        raise AssertionError("%s has no run()" % mod.__name__)
+    return "\n".join(found)
 
 
 # ── 1 · the six lock holders take their session outside the shared pool ──
@@ -120,12 +129,82 @@ def test_advisory_key_parts_match_pg_locks_spelling():
 
 
 @pg
+def test_production_shape_ten_slots_six_holders_and_a_burst():
+    """THE PRODUCTION SHAPE, AT PRODUCTION SIZE (R30A review: the first
+    reproduction used six slots for six holders, which makes the timeout
+    certain). Ten slots (db.get_pool max_size=10), six held for life by the
+    single-writer loops, four left; a burst of SIX transient jobs each
+    holding its connection 1 s (an evaluation, a servicing pass, ...) and a
+    seventh with the reactive audit's 2 s acquire budget behind them: on the
+    old path two of the burst and the audit wait for one of the four slots
+    and the audit's 2 s run out; on lease sessions the burst and the audit
+    all get a slot at once."""
+    import asyncpg
+
+    async def burst(pool, n, hold_s):
+        async def job():
+            async with pool.acquire(timeout=10.0) as c:
+                await c.execute("SELECT pg_sleep($1)", hold_s)
+        return [asyncio.create_task(job()) for _ in range(n)]
+
+    async def audit(pool):
+        t0 = asyncio.get_running_loop().time()
+        try:
+            async with pool.acquire(timeout=2.0) as c:
+                await c.fetchval("SELECT 1")
+            return asyncio.get_running_loop().time() - t0
+        except asyncio.TimeoutError:
+            return None
+
+    async def main():
+        pool = await asyncpg.create_pool(DSN, min_size=10, max_size=10)
+        saved_pool, saved_dsn = DB._pool, DB._dsn
+        DB._pool, DB._dsn = pool, (lambda: DSN)
+        keys = [990_000_000_200 + i for i in range(6)]
+        try:
+            # OLD PATH: six holders keep pooled connections for life
+            held = [await pool.acquire() for _ in keys]
+            for c, k in zip(held, keys):
+                assert await c.fetchval("SELECT pg_try_advisory_lock($1)", k)
+            jobs = await burst(pool, 6, 3.0)
+            await asyncio.sleep(0.2)           # the burst takes the 4 slots
+            old = await audit(pool)
+            await asyncio.gather(*jobs)
+            for c, k in zip(held, keys):
+                await c.execute("SELECT pg_advisory_unlock($1)", k)
+                await pool.release(c)
+            # FIXED PATH: the same six holders on lease sessions
+            cms = [DB.lease_session(pool, name="burst%d" % i)
+                   for i in range(6)]
+            conns = [await cm.__aenter__() for cm in cms]
+            try:
+                for c, k in zip(conns, keys):
+                    assert await c.fetchval(
+                        "SELECT pg_try_advisory_lock($1)", k)
+                jobs = await burst(pool, 6, 3.0)
+                await asyncio.sleep(0.2)
+                new = await audit(pool)
+                await asyncio.gather(*jobs)
+            finally:
+                for cm in cms:
+                    await cm.__aexit__(None, None, None)
+            return old, new
+        finally:
+            DB._pool, DB._dsn = saved_pool, saved_dsn
+            await pool.close()
+
+    old, new = asyncio.run(main())
+    assert old is None, "the audit got a slot behind six holders + a burst"
+    assert new is not None and new < 1.0, new
+
+
+@pg
 def test_lease_sessions_leave_the_shared_pool_free_for_a_two_second_audit():
-    """THE PRODUCTION SHAPE, REPRODUCED. A pool of six (scaled from ten)
-    with six lock holders: on the old path (`pool.acquire()` held for life)
-    the next 2 s acquire -- the reactive audit's budget -- times out exactly
-    as the production tracebacks did; on lease sessions it succeeds, and the
-    six locks are still held, each on its own named backend."""
+    """THE MECHANISM, MINIMAL. A pool of six with six lock holders: on the
+    old path (`pool.acquire()` held for life) the next 2 s acquire -- the
+    reactive audit's budget -- times out; on lease sessions it succeeds,
+    and the six locks are still held, each on its own named backend. (The
+    production-sized case, ten slots and a burst, is the test above.)"""
     import asyncpg
 
     async def main():
@@ -477,3 +556,219 @@ def test_a_completion_audit_the_job_connection_cannot_take_is_retried_fresh():
     assert records[0][1] == 0 and records[1][1] == 1
     assert s.counts["COMPLETION_AUDIT_RETRIED"] == 1
     assert s.counts["AUDIT_FAILED"] == 0
+
+
+# ── R30A review: re-contention can never fail out of ext_pinnacle.run ───
+
+def _ext_fakes(monkeypatch, L, *, fence_answers, opens):
+    """A fake lease whose N-th open is decided by `opens` (a list of
+    'ok' / exception instances), and a decider whose fence answers come
+    from `fence_answers` then True."""
+    from sportsassets import venue_cooldown_store as VCS
+    conns, cycles_on = [], []
+
+    class _Conn:
+        def __init__(self, n):
+            self.n = n
+
+        async def execute(self, sql, *args):
+            return "OK"
+
+        async def fetchval(self, sql, *args):
+            if "pg_try_advisory_lock" in sql:
+                return True
+            if "pg_locks" in sql and "pg_backend_pid()" in sql:
+                return fence_answers.pop(0) if fence_answers else True
+            if "pg_locks" in sql:
+                return True
+            if "pg_backend_pid" in sql:
+                return 2000 + self.n
+            return None
+
+    class _LS:
+        def __init__(self, pool, *, name):
+            pass
+
+        async def __aenter__(self):
+            what = opens.pop(0) if opens else "ok"
+            if isinstance(what, BaseException):
+                raise what
+            c = _Conn(len(conns))
+            conns.append(c)
+            return c
+
+        async def __aexit__(self, *exc):
+            return False
+
+    class _PCtx:
+        async def __aenter__(self):
+            return _Conn(-1)
+
+        async def __aexit__(self, *exc):
+            return False
+
+    class _Pool:
+        def acquire(self, *a, **kw):
+            return _PCtx()
+
+    async def _cycle(conn, *a, **kw):
+        cycles_on.append(conn.n)
+        return {"ran": False}
+
+    async def _service(conn, *, now, review_interval_s=None,
+                       run_learning=True):
+        return {"ok": True}
+
+    async def _resume(conn):
+        return {"resumed": False, "why": "TEST"}
+
+    async def _noop(*a, **kw):
+        return None
+
+    monkeypatch.setattr(L, "lease_session", _LS)
+    monkeypatch.setattr(L, "_SERVICING", L._servicing_state())
+    monkeypatch.setattr(L, "cycle", _cycle)
+    monkeypatch.setattr(L, "_funded_service", _service)
+    monkeypatch.setattr(L, "_xavier_daily_review", _noop)
+    monkeypatch.setattr(VCS, "load_and_resume", _resume)
+    monkeypatch.setattr(VCS, "pending", lambda: None)
+    monkeypatch.setattr(L, "IDLE_POLL_S", 0.01)
+    monkeypatch.setattr(L, "CONTEND_BACKOFF_MAX_S", 0.04)
+    monkeypatch.setattr(L, "SERVICING_INTERVAL_S", 0.01)
+    monkeypatch.setattr(L, "SERVICING_MIN_GAP_S", 0.0)
+    return _Pool(), conns, cycles_on
+
+
+def test_ext_pinnacle_contends_again_when_the_database_is_still_down(
+        monkeypatch):
+    """THE REVIEWERS' REPRODUCTION, FIXED: the lock is held, the fence then
+    says NOT HELD, the next TWO lease opens raise (the database restarting)
+    -- run() must stay alive, back off, and take the lock on the third open,
+    and the cycles must resume on that session."""
+    from sportsassets.workers import ext_pinnacle_loop as L
+    pool, conns, cycles_on = _ext_fakes(
+        monkeypatch, L, fence_answers=[True, False],
+        opens=["ok", ConnectionRefusedError("database restarting"),
+               OSError("still restarting"), "ok"])
+
+    async def main():
+        async def _get():
+            return pool
+        runner = asyncio.create_task(L.run(_get))
+        try:
+            async def _resumed():
+                while len(conns) < 2 or not [n for n in cycles_on
+                                             if n == 1]:
+                    assert not runner.done(), runner.exception()
+                    await asyncio.sleep(0.005)
+            await asyncio.wait_for(_resumed(), 10)
+            return runner.done()
+        finally:
+            runner.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await runner
+
+    done = asyncio.run(main())
+    assert done is False, "run() must never exit on a failed re-contention"
+    assert len(conns) == 2           # two failed opens took no session
+    assert cycles_on[0] == 0 and 1 in cycles_on
+    assert L._SERVICING["task_active"] is False
+
+
+def test_ext_pinnacle_survives_a_dead_pool_at_boot(monkeypatch):
+    """get_pool itself failing (the database down at boot) is one failed
+    attempt, not the end of the decider."""
+    from sportsassets.workers import ext_pinnacle_loop as L
+    pool, conns, cycles_on = _ext_fakes(monkeypatch, L, fence_answers=[],
+                                        opens=["ok"])
+    calls = {"n": 0}
+
+    async def _get():
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            raise ConnectionRefusedError("no database yet")
+        return pool
+
+    async def main():
+        runner = asyncio.create_task(L.run(_get))
+        try:
+            async def _ran():
+                while not cycles_on:
+                    assert not runner.done(), runner.exception()
+                    await asyncio.sleep(0.005)
+            await asyncio.wait_for(_ran(), 10)
+        finally:
+            runner.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await runner
+
+    asyncio.run(main())
+    assert cycles_on and calls["n"] >= 3
+
+
+def test_the_contention_backoff_doubles_and_is_capped():
+    from sportsassets.workers import ext_pinnacle_loop as L
+    assert L.contend_delay(0) == L.IDLE_POLL_S
+    assert L.contend_delay(1) == L.IDLE_POLL_S
+    assert L.contend_delay(2) == 2 * L.IDLE_POLL_S
+    assert L.contend_delay(3) == 4 * L.IDLE_POLL_S
+    assert L.contend_delay(50) == L.CONTEND_BACKOFF_MAX_S
+
+
+# ── R30A review: the reactive fence is bounded, and so is a whole job ───
+
+def test_a_stalled_reactive_fence_is_refused_not_waited_on(monkeypatch):
+    """THE REVIEWER'S REPRODUCTION, FIXED: a fence that never answers
+    blocked the one reactive worker for ever, uncounted. Now FENCE_S
+    bounds it: the job is refused (FENCED_OUT, FENCE_UNANSWERED), nothing
+    is audited or evaluated, and the worker serves the next change."""
+    from sportsassets import pinnapi_reactive as R
+    monkeypatch.setattr(R, "FENCE_S", 0.05)
+
+    async def main():
+        conns, records, calls, done = [], [], [], asyncio.Event()
+        s, cache, tick = _scheduler(_Session(conns), records, calls, done)
+
+        async def fence(conn):
+            await asyncio.sleep(3600)
+        s.fence = fence
+        task = asyncio.create_task(s.run())
+        try:
+            tick(cache)
+            for _ in range(300):
+                if s.counts["FENCE_UNANSWERED"]:
+                    break
+                await asyncio.sleep(0.01)
+            alive = not task.done()
+        finally:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        return records, calls, s, alive
+    records, calls, s, alive = asyncio.run(main())
+    assert alive
+    assert s.counts["FENCE_UNANSWERED"] == 1 and s.counts["FENCED_OUT"] == 1
+    assert records == [] and calls == []
+
+
+def test_the_child_fence_of_the_decider_is_bounded():
+    import inspect
+
+    from sportsassets.workers import ext_pinnacle_loop as L
+    src = inspect.getsource(L._hold_once)
+    body = src[src.index("async def _child_fence"):]
+    body = body[:body.index("await _LH.record")]
+    assert "asyncio.timeout(FENCE_TIMEOUT_S)" in body
+    loop_src = inspect.getsource(L._servicing_loop)
+    assert "asyncio.timeout(FENCE_TIMEOUT_S)" in loop_src
+
+
+def test_the_worst_case_job_bound_is_every_budget_spent():
+    """The report's total bound, corrected (R30A review): session wait 2 +
+    fence 2 + STARTED audit 2 + deadline 12 + completion audit 2 + its retry
+    on a fresh session (2 + 2) = 24 s -- not 18."""
+    from sportsassets import pinnapi_reactive as R
+    assert R.worst_case_job_s() == 24.0
+    assert R.worst_case_job_s(deadline=12.0) == (
+        R.SESSION_WAIT_S + R.FENCE_S + R.AUDIT_S + 12.0 + R.AUDIT_S
+        + R.SESSION_WAIT_S + R.AUDIT_S)

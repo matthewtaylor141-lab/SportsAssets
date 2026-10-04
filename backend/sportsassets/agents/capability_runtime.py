@@ -100,11 +100,23 @@ async def execute(pool,task):
 
 class TickPhaseFailed(Exception):
     """WHICH STEP OF THE TICK FAILED (R30A). Production logged `agent research
-    tick failed: TimeoutError` 17 times in three hours (2026-10-04 15:46-
-    18:47Z) with nothing saying which of the tick's five bounded steps timed
-    out; the tracebacks of the same seconds were all asyncpg Pool._acquire,
-    the API pool six-held by single-writer loops (fixed in db.lease_session).
-    The phase rides the exception so the next failure names its step."""
+    tick failed: TimeoutError` 17 times in three hours (2026-10-04 15:47-
+    18:47Z, render-ops logs run 37225748641), WITHOUT a traceback (the
+    warning carries no exc_info), so which of the tick's bounded steps
+    timed out is not in the record. What IS recorded: the server-side
+    statements of every step are fast (pg_stat_statements since 10-01: the
+    claim scan max 1.6 ms, the in-progress count max 9.1 ms; research-sql
+    run 37231484481), and the failures fall in the same minutes as the API
+    event loop's own recorded stalls of 2-3 s (16:00-16:02, 17:19-17:22,
+    17:37-17:47, 18:20-18:27, 18:42; render-ops run 37231102537) and as the
+    other two timeout classes -- the 15-19 s spacing at 16:00:53-16:01:48
+    is one 15 s sleep plus one 3 s step (CONTROL or HEARTBEAT). So the
+    cause is INFERRED to be the loop stalls (fixed at their sources:
+    pinnapi_feed.EventIndexedQuotes, the held refresh and the census) and
+    the pool's six life-long lock holders (db.lease_session); the phase now
+    rides the exception, is logged and is recorded in loop health
+    (runtime_loop_health agents.capability_runtime ERROR), so the next
+    failure CONFIRMS or refutes that inference by name."""
 
     def __init__(self, phase, exc):
         super().__init__('%s: %s' % (phase, type(exc).__name__))
@@ -160,14 +172,31 @@ async def tick(pool):
     async with _phase('HEARTBEAT'):
         async with asyncio.timeout(3):
             async with pool.acquire() as conn:
-                await conn.execute('INSERT INTO ingestion_state(key,value) VALUES($1,$2::jsonb) ON CONFLICT(key) DO UPDATE SET value=excluded.value',HEARTBEAT,json.dumps(state))
+                # default=str (R30A review): the one heartbeat writer the
+                # dea1b2e datetime fix did not reach; a non-JSON value in a
+                # state field must not fail the tick
+                await conn.execute('INSERT INTO ingestion_state(key,value) VALUES($1,$2::jsonb) ON CONFLICT(key) DO UPDATE SET value=excluded.value',HEARTBEAT,json.dumps(state,default=str))
     return state
+
+
+async def _record_failure(get_pool,error):
+    """The failed tick in loop health (never raises, bounded)."""
+    from .. import loop_health as LH
+    try:
+        pool=await asyncio.wait_for(get_pool(),LH.RECORD_TIMEOUT_S)
+    except asyncio.CancelledError:raise
+    except Exception:return
+    await LH.record(pool,'agents.capability_runtime',process='api',phase=LH.ERROR,error=error)
 
 
 async def run(get_pool):
     while True:
         try:await tick(await get_pool())
         except asyncio.CancelledError:raise
-        except TickPhaseFailed as exc:log.warning('agent research tick failed in %s: %s',exc.phase,type(exc.cause).__name__)
-        except Exception as exc:log.warning('agent research tick failed: %s',type(exc).__name__)
+        except TickPhaseFailed as exc:
+            log.warning('agent research tick failed in %s: %s',exc.phase,type(exc.cause).__name__)
+            await _record_failure(get_pool,'%s: %s'%(exc.phase,type(exc.cause).__name__))
+        except Exception as exc:
+            log.warning('agent research tick failed: %s',type(exc).__name__)
+            await _record_failure(get_pool,exc)
         await asyncio.sleep(15)

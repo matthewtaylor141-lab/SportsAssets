@@ -35,26 +35,58 @@ NOW = 1_791_140_400.0          # 2026-10-04 19:00Z, the readback's hour
 
 # ── §1 judges on production numbers ────────────────────────────────────
 
-def test_feed_freshness_production_is_ok_and_a_slow_p90_breaches():
-    prod = {"decisions": 4209, "with_age": 3750, "p50": 8.61, "p90": 25.27,
-            "over_limit": 0, "limit_max": 30.0}
+def test_feed_freshness_counts_decisions_without_a_recorded_age():
+    """R30A REVIEW: decisions with no recorded Pinnacle age are decisions
+    whose reading was refused or absent; judging only the aged ones was
+    survivorship. PINNED STALE FACT, UPDATED: production read OK on the
+    aged p90 (25.27 s); counting the unaged ones as not fresh, production
+    (research-sql run 37231263685: 4,152 decisions, 3,674 aged, 27 aged
+    over 30 s) is 505 / 4,152 = 12.2 % not fresh -> BREACH."""
+    prod = {"decisions": 4152, "with_age": 3674, "over_target": 27,
+            "p50": 8.61, "p90": 25.27, "over_limit": 27, "limit_max": 30.0,
+            "without_age_by_refusal": {"PINNAPI_PRIMARY_INPUT_CHANGED": 74}}
     got = S.judge_feed(prod)
-    assert got["status"] == S.OK
-    assert got["measured"]["p50_age_s"] == 8.61
-    assert got["measured"]["without_recorded_age"] == 459
-    assert got["target"]["p90_age_s_at_most"] == 30.0
-    slow = S.judge_feed(dict(prod, p90=31.2))
-    assert slow["status"] == S.BREACH
-    assert slow["why"] == "P90_PINNACLE_AGE_ABOVE_30S"
+    assert got["status"] == S.BREACH
+    assert got["why"] == ("P90_PINNACLE_AGE_ABOVE_30S_COUNTING_DECISIONS_"
+                          "WITHOUT_A_RECORDED_AGE")
+    assert got["measured"]["without_recorded_age"] == 478
+    assert got["measured"]["not_fresh_share"] == round(505 / 4152, 4)
+    assert got["measured"]["p90_age_s_of_aged"] == 25.27
+    assert got["measured"]["without_age_by_pinnacle_refusal"] == {
+        "PINNAPI_PRIMARY_INPUT_CHANGED": 74}
+    # 999 decisions with no usable feed and one 3 s decision: BREACH
+    surv = S.judge_feed({"decisions": 1000, "with_age": 1, "over_target": 0,
+                         "p50": 3.0, "p90": 3.0})
+    assert surv["status"] == S.BREACH
+    # within 10 %: OK
+    ok = S.judge_feed({"decisions": 100, "with_age": 95, "over_target": 4,
+                       "p50": 8.0, "p90": 24.0})
+    assert ok["status"] == S.OK
+    assert ok["target"]["p90_age_s_at_most"] == 30.0
 
 
-def test_decision_latency_production_is_ok_and_past_the_deadline_breaches():
-    prod = {"completed": 847, "p50": 5.78, "p90": 11.07, "max": 25.66,
-            "timeouts": 33, "orphaned": 19}
+def test_decision_latency_counts_timeouts_and_orphans_as_over_the_deadline():
+    """R30A REVIEW: TIMEOUT (the slowest, by definition) and orphaned
+    STARTED attempts were left out of the percentiles. Production 24 h
+    (research-sql run 37226381750): 847 COMPLETED, 33 TIMEOUT, 19 orphaned
+    STARTED, completed p90 11.07 s. With the censored ones counted as over
+    12 s: (33 + 19 + completed over 12 s) / 899."""
+    prod = {"started": 899, "completed": 847, "timeouts": 33, "errors": 0,
+            "orphaned": 19, "refused": 40, "over_target": 33 + 19 + 30,
+            "p50": 5.78, "p90": 11.07, "max": 25.66}
     got = S.judge_latency(prod)
-    assert got["status"] == S.OK
+    assert got["status"] == S.OK          # 82 / 899 = 9.1 %, within 10 %
     assert got["measured"]["orphaned_started"] == 19
-    assert S.judge_latency(dict(prod, p90=12.4))["status"] == S.BREACH
+    assert got["measured"]["over_deadline_share"] == round(82 / 899, 4)
+    worse = S.judge_latency(dict(prod, over_target=33 + 19 + 50))
+    assert worse["status"] == S.BREACH
+    # THE REVIEWER'S PROBE: 1 fast completion, 500 timeouts, 40 orphans
+    probe = S.judge_latency({"started": 541, "completed": 1, "timeouts": 500,
+                             "orphaned": 40, "over_target": 540,
+                             "p50": 2.0, "p90": 2.0})
+    assert probe["status"] == S.BREACH
+    assert probe["why"] == ("P90_LATENCY_ABOVE_THE_12S_DEADLINE_COUNTING_"
+                            "TIMEOUTS_AND_ORPHANS")
 
 
 def test_open_positions_without_a_current_review_breach():
@@ -86,20 +118,31 @@ def test_agent_task_age_breaches_only_past_expiry():
 
 def test_reconciliation_age():
     # production: 8 MATCHED reconciliations, newest 145,102 s old, and no
-    # open ACTUAL position (SMALL LIVE is SHADOW)
+    # open ACTUAL position (SMALL LIVE is SHADOW). PINNED STALE FACT,
+    # UPDATED (R30A review): an empty set was OK by default, against the
+    # module's own rule; it is UNAVAILABLE by name, carrying the age.
     got = S.judge_reconciliation([], NOW - 145102, now=NOW)
-    assert got["status"] == S.OK
+    assert got["status"] == S.UNAVAILABLE
+    assert got["why"] == "NO_OPEN_ACTUAL_POSITION_TO_RECONCILE"
     assert got["measured"]["open_actual_positions"] == 0
     assert got["measured"]["newest_reconciliation_age_s"] == 145102
+    # a FRESH reconciliation that is not MATCHED is not reconciled
+    for st in ("DISCREPANCY", "PENDING"):
+        bad = S.judge_reconciliation([{"group_id": "g1", "status": st,
+                                       "reconciled_at": NOW - 30}],
+                                     NOW - 30, now=NOW)
+        assert bad["status"] == S.BREACH, st
+        assert bad["why"] == "OPEN_ACTUAL_POSITION_RECONCILED_%s" % st
+        assert bad["measured"]["not_matched"] == {"g1": st}
     never = S.judge_reconciliation([{"group_id": "g1",
                                      "reconciled_at": None}], None, now=NOW)
     assert never["status"] == S.BREACH
     assert never["why"] == "OPEN_ACTUAL_POSITION_NEVER_RECONCILED"
-    stale = S.judge_reconciliation([{"group_id": "g1",
+    stale = S.judge_reconciliation([{"group_id": "g1", "status": "MATCHED",
                                      "reconciled_at": NOW - 600}],
                                    NOW - 600, now=NOW)
     assert stale["status"] == S.BREACH
-    fresh = S.judge_reconciliation([{"group_id": "g1",
+    fresh = S.judge_reconciliation([{"group_id": "g1", "status": "MATCHED",
                                      "reconciled_at": NOW - 90}],
                                    NOW - 90, now=NOW)
     assert fresh["status"] == S.OK
@@ -131,11 +174,17 @@ def test_parity_without_a_cutover_is_unavailable_not_zero():
     assert bad["status"] == S.BREACH
 
 
+DEPLOYED = {"api": {"sha": "191b299", "requested_sha": "x" * 40}}
+
+
 def test_release_state():
     sha = "191b2992406af8350bc9f0276de5b2fa15caf80f"
     rec = {"items": [{"sha": sha, "hash_verified": True, "file": "r.json",
-                      "generated_at": "2026-10-04T17:00:00Z", "state": "GATED"},
+                      "generated_at": "2026-10-04T17:00:00Z",
+                      "state": "GATED", "acceptance": "ACCEPTED",
+                      "deploy": DEPLOYED},
                      {"sha": "f" * 40, "hash_verified": False,
+                      "acceptance": "ACCEPTED", "deploy": DEPLOYED,
                       "generated_at": "2026-10-05T00:00:00Z"}]}
     ok = S.judge_release({"sha": sha}, {"sha": sha}, rec)
     assert ok["status"] == S.OK, "a TAMPERED receipt is never the latest"
@@ -148,14 +197,60 @@ def test_release_state():
         "API_SHA_UNAVAILABLE"
 
 
+def test_release_state_ignores_rejected_void_and_unsigned_receipts():
+    """THE REVIEWER'S PROBE, PINNED on the receipts committed in this build:
+    the newest is f33b, REJECTED; f33 VOID; f31 GATED_PENDING_SIGNOFF. None
+    is ACCEPTED, so there is no release receipt to compare with: production
+    running the REJECTED candidate's SHA is NOT OK, and running R29 is not a
+    breach against a rejected run -- both UNAVAILABLE by name, with the
+    newest receipt of any state shown."""
+    from sportsassets.api import command_release as CR
+    rec = CR.read_receipts()
+    states = {r["file"]: r["acceptance"] for r in rec["items"]}
+    assert states["f33b__c23b3baca2dd.json"] == "REJECTED"
+    assert "ACCEPTED" not in states.values()
+    rejected = [r for r in rec["items"] if r["acceptance"] == "REJECTED"][0]
+    got = S.judge_release({"sha": rejected["sha"]},
+                          {"sha": rejected["sha"]}, rec)
+    assert got["status"] == S.UNAVAILABLE
+    assert got["why"] == "NO_ACCEPTED_RELEASE_RECEIPT"
+    assert got["measured"]["newest_receipt_any_state"]["acceptance"] == \
+        "REJECTED"
+    assert got["measured"]["newest_gated_pending_signoff"]["file"] == \
+        "f31__8ab5013787a3.json"
+    r29 = "191b2992406af8350bc9f0276de5b2fa15caf80f"
+    assert S.judge_release({"sha": r29}, {"sha": r29}, rec)["why"] == \
+        "NO_ACCEPTED_RELEASE_RECEIPT"
+    # an ACCEPTED receipt with no deploy record is not "the release" either
+    undeployed = {"items": [{"sha": r29, "hash_verified": True,
+                             "acceptance": "ACCEPTED", "deploy": {},
+                             "generated_at": "2026-10-04T18:00:00Z"}]}
+    assert S.judge_release({"sha": r29}, {"sha": r29},
+                           undeployed)["why"] == "NO_ACCEPTED_RELEASE_RECEIPT"
+    # a NEWER rejected receipt never displaces the accepted one
+    mixed = {"items": [
+        {"sha": r29, "hash_verified": True, "acceptance": "ACCEPTED",
+         "deploy": DEPLOYED, "generated_at": "2026-10-04T18:00:00Z",
+         "file": "acc.json"},
+        {"sha": "e" * 40, "hash_verified": True, "acceptance": "REJECTED",
+         "deploy": DEPLOYED, "generated_at": "2026-10-04T19:00:00Z",
+         "file": "rej.json"}]}
+    got = S.judge_release({"sha": r29}, {"sha": r29}, mixed)
+    assert got["status"] == S.OK
+    assert got["measured"]["latest_receipt_file"] == "acc.json"
+    # misaligned processes are a breach whatever the receipts say
+    assert S.judge_release({"sha": r29}, {"sha": "c" * 40}, rec)["why"] == \
+        "API_WORKERS_MISALIGNED"
+
+
 # ── §2 never a manufactured value ──────────────────────────────────────
 
 def test_empty_windows_are_unavailable_with_a_reason():
     assert S.judge_feed({"decisions": 0})["why"] == "NO_DECISIONS_IN_WINDOW"
     assert S.judge_feed({"decisions": 5, "with_age": 0})["why"] == \
         "NO_RECORDED_PINNACLE_AGE"
-    assert S.judge_latency({"completed": 0})["why"] == \
-        "NO_COMPLETED_REACTIVE_EVALUATION_IN_WINDOW"
+    assert S.judge_latency({"started": 0})["why"] == \
+        "NO_REACTIVE_EVALUATION_IN_WINDOW"
     for got in (S.judge_feed(None), S.judge_latency(None),
                 S.judge_scores(None, None, None, now=NOW),
                 S.judge_parity(None, None),
@@ -268,6 +363,8 @@ def test_every_slo_answers_from_production_shaped_rows_read_only():
                 body = await S.read_slos(
                     c, now=now, api={"sha": sha},
                     receipts={"items": [{"sha": sha, "hash_verified": True,
+                                         "acceptance": "ACCEPTED",
+                                         "deploy": DEPLOYED,
                                          "generated_at": "2026-10-04",
                                          "file": "x.json"}]})
             return sess, body
@@ -279,13 +376,22 @@ def test_every_slo_answers_from_production_shaped_rows_read_only():
     by = {s["slo"]: s for s in body["slos"]}
     assert len(by) == 8
     feed = by["FEED_FRESHNESS"]
-    assert feed["status"] == S.OK, feed
+    # 5 aged (all within 30 s) + 1 with no Pinnacle at all: 1 / 6 = 16.7 %
+    # not fresh -> BREACH (R30A review: the unaged decision is counted)
+    assert feed["status"] == S.BREACH, feed
     assert feed["measured"]["decisions"] == 6
     assert feed["measured"]["with_recorded_age"] == 5
-    assert abs(feed["measured"]["p50_age_s"] - 12.0) < 1e-9
+    assert feed["measured"]["without_recorded_age"] == 1
+    assert feed["measured"]["without_age_by_pinnacle_refusal"] == {
+        "NO_PINNACLE": 1}
+    assert abs(feed["measured"]["p50_age_s_of_aged"] - 12.0) < 1e-9
     lat = by["DECISION_LATENCY"]
-    assert lat["status"] == S.OK, lat
+    # 3 COMPLETED within 12 s + 1 orphaned STARTED counted as over the
+    # deadline: 1 / 4 = 25 % -> BREACH (R30A review: the orphan counts)
+    assert lat["status"] == S.BREACH, lat
     assert lat["measured"]["completed"] == 3
+    assert lat["measured"]["evaluations_started"] == 4
+    assert lat["measured"]["over_deadline"] == 1
     assert abs(lat["measured"]["max_s"] - 11.0) < 1e-9
     assert lat["measured"]["orphaned_started"] == 1
     scores = by["OPPORTUNITY_SCORE_AGE"]
@@ -298,14 +404,122 @@ def test_every_slo_answers_from_production_shaped_rows_read_only():
     assert by["PARITY_DIVERGENCE"]["why"] == "NO_PRODUCTION_CUTOVER_RECORDED"
     assert by["RELEASE_STATE"]["status"] == S.OK, by["RELEASE_STATE"]
     assert by["AGENT_TASK_AGE"]["status"] in (S.OK, S.BREACH)
+    # the reviews SLO's exact counts are pinned in its own test below, on
+    # seeded positions with one current and one stale review
     rv = by["OPEN_POSITIONS_WITHOUT_FRESH_REVIEW"]
-    assert rv["status"] in (S.OK, S.BREACH, S.UNAVAILABLE)
     if rv["status"] != S.UNAVAILABLE:
         m = rv["measured"]
         assert m["open_positions"] == m["with_current_review"] + \
             m["without_current_review"]
     assert set(body["breaches"]) == {s["slo"] for s in body["slos"]
                                      if s["status"] == S.BREACH}
+
+
+REV = ("INSERT INTO paper_xavier_reviews (review_id, session_id, account_id,"
+       " group_id, reviewed_at, trigger, recommendation, alternatives, "
+       " exposure, selection, measure) VALUES ($1,$2,$3,$4,to_timestamp($5),"
+       " 'SCHEDULED_BACKSTOP',$6,'{}'::jsonb,'{}'::jsonb,$7::jsonb,"
+       " $8::jsonb)")
+
+
+async def _two_reviewed_positions(c):
+    """Two held paper positions (the real handoff path), then ONE current
+    review (fresh evidence, valuation 5 s old against its 30 s limit) on
+    the first and ONE stale review on the second, both at XR.AT."""
+    from sportsassets import xavier_freshness as XF
+    from tests import test_xavier_review_probability_freshness as XR
+    a1, g1, _ = await XR._held(c, "slo_cur", entry_age_s=3600)
+    a2, g2, _ = await XR._held(c, "slo_old", entry_age_s=3600)
+    tag = uuid.uuid4().hex[:8]
+    await c.execute(REV, "paperrev:slo_cur_" + tag, a1["session_id"],
+                    a1["account_id"], g1, XR.AT, "HOLD",
+                    json.dumps({"valuation": {"source_at": XR.AT - 5,
+                                              "limit_s": 30.0,
+                                              "valuation_id": 1}}),
+                    json.dumps({"evidence_state": XF.E_FRESH, "p": 0.6}))
+    await c.execute(REV, "paperrev:slo_old_" + tag, a2["session_id"],
+                    a2["account_id"], g2, XR.AT, "HOLD",
+                    json.dumps({}),
+                    json.dumps({"evidence_state": XF.E_STALE, "p": 0.6,
+                                "stale": True}))
+    return g1, g2, XR.AT + 5
+
+
+@pg
+def test_open_positions_without_a_current_review_exact_counts_on_postgres():
+    """R30A REVIEW: the Postgres read is pinned to an exact verdict. Two
+    seeded positions -- one current review, one stale -- move the counts by
+    exactly +1 current and +1 without, through read_positions AND through
+    read_slos, and the SLO BREACHES."""
+    import asyncpg
+
+    async def main():
+        c = await asyncpg.connect(DSN)
+        tx = c.transaction()
+        await tx.start()
+        try:
+            from tests import test_xavier_review_probability_freshness as XR
+            now = XR.AT + 5
+            before = S.judge_reviews(await S.read_positions(c, now))
+            g1, g2, now = await _two_reviewed_positions(c)
+            pos = await S.read_positions(c, now)
+            after = S.judge_reviews(pos)
+            async with c.transaction():
+                body = await S.read_slos(c, now=now, api={"sha": None},
+                                         receipts={"items": []})
+            return before, pos, after, body, g1, g2
+        finally:
+            await tx.rollback()
+            await c.close()
+
+    before, pos, after, body, g1, g2 = asyncio.run(main())
+    cls = {p["group_id"]: p["class"] for p in pos["positions"]}
+    assert cls[g1] == "CURRENT"
+    assert cls[g2] != "CURRENT"
+    bm = before.get("measured") or {"open_positions": 0,
+                                    "with_current_review": 0,
+                                    "without_current_review": 0}
+    am = after["measured"]
+    assert am["open_positions"] == bm["open_positions"] + 2
+    assert am["with_current_review"] == bm["with_current_review"] + 1
+    assert am["without_current_review"] == bm["without_current_review"] + 1
+    assert after["status"] == S.BREACH
+    by = {s["slo"]: s for s in body["slos"]}
+    rv = by["OPEN_POSITIONS_WITHOUT_FRESH_REVIEW"]
+    assert rv["status"] == S.BREACH
+    assert rv["measured"]["with_current_review"] == am["with_current_review"]
+    assert rv["measured"]["without_current_review"] == \
+        am["without_current_review"]
+
+
+@pg
+def test_an_unreadable_review_source_is_unavailable_not_a_breach():
+    """THE REVIEWER'S PROBE: with paper_xavier_reviews unreadable every
+    position used to read UNREVIEWED and the SLO BREACHED on a missing
+    input. Now it is UNAVAILABLE, naming the section."""
+    import asyncpg
+
+    async def main():
+        c = await asyncpg.connect(DSN)
+        tx = c.transaction()
+        await tx.start()
+        try:
+            g1, g2, now = await _two_reviewed_positions(c)
+            await c.execute("ALTER TABLE paper_xavier_reviews RENAME TO "
+                            "paper_xavier_reviews_hidden")
+            async with c.transaction():
+                body = await S.read_slos(c, now=now, api={"sha": None},
+                                         receipts={"items": []})
+            return body
+        finally:
+            await tx.rollback()
+            await c.close()
+
+    body = asyncio.run(main())
+    rv = {s["slo"]: s for s in body["slos"]}[
+        "OPEN_POSITIONS_WITHOUT_FRESH_REVIEW"]
+    assert rv["status"] == S.UNAVAILABLE, rv
+    assert rv["why"].startswith("work.xavier_current_reviews_ABSENT")
 
 
 @pg
