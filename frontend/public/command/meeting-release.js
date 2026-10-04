@@ -35,10 +35,10 @@ function buildHome(){
  loadHome();
 }
 function loadHome(){
- Promise.all([
-  fetch('/api/command/equity/live',{credentials:'same-origin',cache:'no-store'}).then(r=>r.ok?r.json():Promise.reject()),
-  fetch('/api/command/floor',{credentials:'same-origin',cache:'no-store'}).then(r=>r.ok?r.json():Promise.reject())
- ]).then(function(xs){renderEquity(xs[0]);renderTeam(xs[1]);}).catch(function(){renderTeam(null);});
+ /* integration: the seven employee links are drawn at once and the two reads are independent; production showed a slow equity read leaving the team and attention empty for 12+ s on phone when they waited on each other */
+ renderTeam(null);
+ fetch('/api/command/floor',{credentials:'same-origin',cache:'no-store'}).then(r=>r.ok?r.json():Promise.reject()).then(renderTeam).catch(function(){var a=document.getElementById('mtg-attn');if(a)a.textContent='FLOOR READ UNAVAILABLE';var b=document.getElementById('mtg-attn-sub');if(b)b.textContent='No alert state is shown without the floor record. Open Audrey for audit evidence.';});
+ fetch('/api/command/equity/live',{credentials:'same-origin',cache:'no-store'}).then(r=>r.ok?r.json():Promise.reject()).then(renderEquity).catch(function(){var e=document.getElementById('mtg-equity');if(e)e.textContent='UNAVAILABLE';var l=document.getElementById('mtg-l-state');if(l)l.textContent='UNAVAILABLE';});
 }
 function renderEquity(x){
  var p=x.paper||{},s=x.small_live_bettor||x.small_live||{};window.__mtgPaper=p;
@@ -64,6 +64,7 @@ function drawCurve(c){
 function renderTeam(f){
  var by={};(f&&f.agents||[]).forEach(a=>by[a.slug]=a);
  document.getElementById('mtg-team').innerHTML=AGENTS.map(function(m){var a=by[m[0]],col=stateColor(a,m[3]);return '<a class="mtg-agent" href="/'+m[0]+'" style="--a:'+m[3]+'"><b>'+m[1]+'</b><span class="role">'+m[2]+'</span><div class="state" style="color:'+col+'"><i></i>'+(a?esc(String(a.state||'UNKNOWN').replace(/_/g,' '))+' · '+ago(a.heartbeat&&a.heartbeat.at):'STATE UNAVAILABLE')+'</div><div class="task">'+esc(a&&a.state_detail||'Open workspace for current evidence.')+'</div><span class="open">Open workspace →</span></a>';}).join('');
+ if(!f)return; /* no floor read yet: attention stays READING (never 'no alert' before the evidence) */
  var alerts=[];(f&&f.agents||[]).forEach(function(a){(a.alerts||[]).forEach(function(z){alerts.push({who:a.slug==='allocator'?'Allie':a.name||a.agent,msg:z.message||z.summary||z.code||String(z)});});});
  if(alerts.length){document.getElementById('mtg-attn').textContent=alerts[0].who+' needs attention';document.getElementById('mtg-attn-sub').textContent=alerts[0].msg}else{document.getElementById('mtg-attn').textContent='No agent alert in the current floor read';document.getElementById('mtg-attn-sub').textContent='Open Audrey for complete audit and coverage evidence.'}
 }

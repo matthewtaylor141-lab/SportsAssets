@@ -1,0 +1,48 @@
+:root{--hq4-line:rgba(151,180,214,.15);--hq4-line2:rgba(151,180,214,.25);--hq4-ink:#eef5fc;--hq4-muted:#8296ad;--hq4-green:#57e1ad;--hq4-gold:#efca79;--hq4-red:#ff8197;--hq4-pink:#ff9bcf}
+.hq4-company-home{max-width:1500px;margin:18px auto 0}.hq4-company-head{display:flex;align-items:end;justify-content:space-between;gap:18px;margin-bottom:14px}
+.hq4-company-head h2{margin:5px 0 0;font:400 clamp(26px,3vw,42px)/1 Georgia,"Times New Roman",serif;letter-spacing:-.04em;color:var(--hq4-ink)}
+.hq4-company-head p{margin:8px 0 0;color:var(--hq4-muted);font-size:11px}.hq4-company-link{color:#89a3ff;text-decoration:none;font-size:10px;white-space:nowrap}
+.hq4-agent-grid{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:8px}
+.hq4-agent-card{--a:#7aa7ff;display:block;position:relative;min-height:180px;padding:15px;border:1px solid color-mix(in srgb,var(--a) 22%,var(--hq4-line));border-radius:18px;background:radial-gradient(180px 130px at 70% -5%,color-mix(in srgb,var(--a) 12%,transparent),transparent 68%),linear-gradient(180deg,rgba(9,25,47,.92),rgba(4,13,26,.96));text-decoration:none;color:var(--hq4-ink);overflow:hidden;transition:transform .18s,border-color .18s,box-shadow .18s}
+.hq4-agent-card:hover,.hq4-agent-card:focus-visible{transform:translateY(-3px);outline:none;border-color:color-mix(in srgb,var(--a) 52%,transparent);box-shadow:0 22px 45px rgba(0,0,0,.30)}
+.hq4-agent-top{display:flex;align-items:center;gap:10px}.hq4-agent-face{width:42px;height:48px;flex:none;border-radius:15px 15px 12px 12px;background:radial-gradient(circle at 50% 27%,#edf3fa 0 12%,transparent 13%),linear-gradient(180deg,transparent 0 35%,color-mix(in srgb,var(--a) 38%,#0a1527) 36%);border:1px solid color-mix(in srgb,var(--a) 28%,transparent)}
+.hq4-agent-card.allie .hq4-agent-face{background:radial-gradient(circle at 50% 25%,#eef2f8 0 12%,transparent 13%),radial-gradient(ellipse at 50% 36%,rgba(255,155,207,.52) 0 33%,transparent 34%),linear-gradient(180deg,transparent 0 35%,#321d3c 36%)!important}
+.hq4-agent-title b{display:block;font-size:13px}.hq4-agent-title span{display:block;margin-top:3px;color:#73889f;font-size:9px;line-height:1.25}
+.hq4-agent-state{display:flex;gap:6px;align-items:center;margin-top:14px;color:var(--a);font:700 8px/1 ui-monospace,monospace;letter-spacing:.05em;text-transform:uppercase}.hq4-agent-state i{width:6px;height:6px;border-radius:50%;background:currentColor;box-shadow:0 0 9px currentColor}
+.hq4-agent-task{margin-top:8px;color:#8fa1b4;font-size:9.5px;line-height:1.42;height:39px;overflow:hidden}.hq4-agent-open{position:absolute;left:15px;bottom:13px;color:#6f83a0;font:700 8px/1 ui-monospace,monospace;text-transform:uppercase;letter-spacing:.06em}
+.hq4-company-tools{display:grid;grid-template-columns:repeat(6,1fr);gap:8px;margin-top:10px}.hq4-tool{display:block;padding:13px 14px;border:1px solid var(--hq4-line);border-radius:15px;background:#061426;text-decoration:none;color:var(--hq4-ink)}.hq4-tool b{display:block;font-size:10.5px}.hq4-tool span{display:block;margin-top:4px;color:#6f8298;font-size:8.5px;line-height:1.35}
+.hq4-team-note{margin-top:10px;padding:11px 13px;border:1px solid var(--hq4-line);border-radius:13px;background:rgba(5,15,30,.72);color:#778ba2;font-size:9.5px}.hq4-team-note b{color:#a9bbcd}
+body.hq4-company-page{margin:0;background:radial-gradient(1000px 520px at 80% -10%,rgba(65,105,255,.16),transparent 62%),#030914;color:var(--hq4-ink);font-family:Inter,system-ui,-apple-system,sans-serif}
+.hq4-page{padding:120px 24px 90px 116px;max-width:1660px;margin:auto}.hq4-page-hero{display:grid;grid-template-columns:1.3fr .7fr;gap:22px;align-items:end;margin-bottom:22px}.hq4-page-hero h1{margin:8px 0 10px;font:400 clamp(42px,5vw,72px)/.92 Georgia,"Times New Roman",serif;letter-spacing:-.055em}.hq4-page-hero p{max-width:780px;color:#8499b0;font-size:13px;line-height:1.6}
+.hq4-page-summary{display:grid;grid-template-columns:1fr 1fr;gap:8px}.hq4-summary{padding:14px;border:1px solid var(--hq4-line);border-radius:15px;background:#061426}.hq4-summary span{display:block;color:#6f8298;font:700 8px/1 ui-monospace,monospace;text-transform:uppercase}.hq4-summary b{display:block;margin-top:7px;font-size:17px}
+.hq4-section{margin-top:16px;padding:20px;border:1px solid var(--hq4-line);border-radius:24px;background:linear-gradient(180deg,rgba(8,23,44,.92),rgba(4,13,26,.96));box-shadow:0 26px 70px rgba(0,0,0,.24)}.hq4-section-head{display:flex;align-items:end;justify-content:space-between;gap:14px;margin-bottom:14px}.hq4-section-head h2{margin:4px 0 0;font:400 28px/1 Georgia,"Times New Roman",serif}.hq4-section-head p{margin:5px 0 0;color:#71869e;font-size:10px}
+.hq4-human-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:9px}.hq4-human-card{padding:14px;border:1px solid var(--hq4-line);border-radius:15px;background:#061426}.hq4-human-card b{font-size:11px}.hq4-human-card span{display:block;color:#71859b;font-size:9px;margin-top:4px}.hq4-human-card .status{margin-top:10px;color:var(--hq4-gold);font:700 8px/1 ui-monospace,monospace;text-transform:uppercase}
+.hq4-activity{display:grid;gap:8px}.hq4-event{display:grid;grid-template-columns:90px 130px 1fr;gap:12px;padding:10px 0;border-top:1px solid rgba(151,180,214,.09)}.hq4-event:first-child{border-top:0}.hq4-event time{color:#687d94;font:650 8px/1 ui-monospace,monospace}.hq4-event b{font-size:10px}.hq4-event p{margin:0;color:#8296ad;font-size:9.5px}
+.hq4-unavailable{padding:18px;border:1px dashed rgba(239,202,121,.28);border-radius:14px;color:#9d9071;background:rgba(38,28,7,.18)}.hq4-unavailable b{display:block;color:var(--hq4-gold);font-size:11px}.hq4-unavailable p{margin:6px 0 0;font-size:9.5px;line-height:1.45}
+@media(max-width:1180px){.hq4-agent-grid{grid-template-columns:repeat(4,1fr)}.hq4-company-tools{grid-template-columns:repeat(3,1fr)}.hq4-human-grid{grid-template-columns:repeat(2,1fr)}}
+@media(max-width:780px){.hq4-agent-grid{display:grid;grid-auto-flow:column;grid-auto-columns:76%;grid-template-columns:none;overflow-x:auto;scroll-snap-type:x mandatory;padding-bottom:7px}.hq4-agent-card{scroll-snap-align:start}.hq4-company-tools{grid-template-columns:1fr 1fr}.hq4-page{padding:108px 10px 82px}.hq4-page-hero{grid-template-columns:1fr}.hq4-human-grid{grid-template-columns:1fr}.hq4-event{grid-template-columns:65px 90px 1fr}}
+
+/* integration (HQ4 on the meeting home): the owner's hierarchy
+   COMPANY -> PEOPLE -> CURRENT WORK -> CAPITAL -> deep ledger. HQ4's team
+   grid is the one PEOPLE section (the meeting home's duplicate team grid is
+   hidden), management attention follows it, capital after. */
+#bt-meeting-home .mtg-wrap{display:flex;flex-direction:column}
+#bt-meeting-home .mtg-head{order:1}
+#bt-meeting-home #hq4-company-home{order:2;margin-top:13px}
+#bt-meeting-home .mtg-attention{order:3}
+#bt-meeting-home .mtg-capital{order:4;margin-top:13px}
+#bt-meeting-home .mtg-deep{order:5}
+#bt-meeting-home:has(#hq4-company-home) .mtg-team{display:none}
+/* the Clean Home kicker HQ4 uses is not in this tree; same voice as the meeting kicker */
+.hq4-company-home .clean-kicker{font:700 8.5px/1 ui-monospace,monospace;letter-spacing:.14em;color:#71869e;text-transform:uppercase}
+/* integration: on a 390px phone the collaboration rows (long summaries in a fixed grid track) ran 27px past the viewport; let the track shrink and the text wrap */
+@media(max-width:620px){.hq4-activity,.hq4-event{min-width:0;max-width:100%}.hq4-event{grid-template-columns:minmax(0,1fr)!important}.hq4-event p,.hq4-event b{min-width:0;overflow-wrap:anywhere}}
+
+/* integration: each card shows that agent's own licensed 3D character (still render from claude/ui-avatars), never a drawn silhouette */
+.hq4-agent-card.derek .hq4-agent-face{background:#0a1527 url("team-demo/assets/models/portraits/derek.jpg") center 18%/cover no-repeat!important}
+.hq4-agent-card.karen .hq4-agent-face{background:#0a1527 url("team-demo/assets/models/portraits/karen.jpg") center 18%/cover no-repeat!important}
+.hq4-agent-card.scout .hq4-agent-face{background:#0a1527 url("team-demo/assets/models/portraits/scout.jpg") center 18%/cover no-repeat!important}
+.hq4-agent-card.eddie .hq4-agent-face{background:#0a1527 url("team-demo/assets/models/portraits/eddie.jpg") center 18%/cover no-repeat!important}
+.hq4-agent-card.allocator .hq4-agent-face{background:#0a1527 url("team-demo/assets/models/portraits/allocator.jpg") center 18%/cover no-repeat!important}
+.hq4-agent-card.audrey .hq4-agent-face{background:#0a1527 url("team-demo/assets/models/portraits/audrey.jpg") center 18%/cover no-repeat!important}
+.hq4-agent-card.xavier .hq4-agent-face{background:#0a1527 url("team-demo/assets/models/portraits/xavier.jpg") center 18%/cover no-repeat!important}
