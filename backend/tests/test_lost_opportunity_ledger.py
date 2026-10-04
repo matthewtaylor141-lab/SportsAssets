@@ -670,7 +670,12 @@ async def test_refusal_reasons_rank_by_unique_opportunity_not_rows(
     """(R30A, owner audit 2026-10-04) The ledger holds one row per DECISION;
     a market re-evaluated six times for one reason is ONE opportunity. The
     summary ranks the reasons by unique opportunities (the funnel's key),
-    keeps the rows beside it as evaluations, and splits by sleeve."""
+    keeps the rows beside it as evaluations, and splits by sleeve.
+    HERMETIC: the route summarises the whole ledger (and the classifier
+    classifies every settled refusal it finds), so the proof classifies
+    what other tests committed first, reads the summary before and after
+    seeding inside one transaction, and asserts the DIFFERENCE its own rows
+    made."""
     from sportsassets.api import command_lost_opportunity as API
 
     now = time.time()
@@ -678,6 +683,21 @@ async def test_refusal_reasons_rank_by_unique_opportunity_not_rows(
         async def pool():
             return _Pool(conn)
         monkeypatch.setattr(API, "_pool", pool)
+
+        async def summary():
+            out = await API.lost_opportunities(
+                classification="", league="", classifier_version=CL.VERSION,
+                limit=1)
+            if out["status"] != "OK":
+                return {}, None
+            s_ = out["data"]["summary"]
+            return {e["refusal"]: e for e in s_["by_refusal_reason"]}, s_
+        zero = {"n": 0, "unique_opportunities": 0, "re_evaluations": 0,
+                "unique_opportunities_by_sleeve": {"INVESTMENT": 0}}
+        # classify whatever settled refusals other tests committed FIRST, so
+        # the difference below is this proof's rows alone
+        await LR.run_component(conn, now=now)
+        before, _ = await summary()
         acct = await X.account(conn, now=now)
         t = now - 3 * DAY
         hot = F.uid("lol-hot-")
@@ -694,26 +714,27 @@ async def test_refusal_reasons_rank_by_unique_opportunity_not_rows(
                            at=t + 6 * HOUR, now=now)
         got = await LR.run_component(conn, now=now)
         assert got["components"]["LEDGER"] == "OK", got
-        out = await API.lost_opportunities(classification="", league="",
-                                           classifier_version=CL.VERSION,
-                                           limit=200)
-        assert out["status"] == "OK", out["why"]
-        summ = out["data"]["summary"]
-        by = {e["refusal"]: e for e in summ["by_refusal_reason"]}
-        assert by[CL.R_STALE]["n"] == 6 and by[CL.R_BELOW]["n"] == 3
-        assert by[CL.R_STALE]["unique_opportunities"] == 1
-        assert by[CL.R_STALE]["re_evaluations"] == 5
-        assert by[CL.R_BELOW]["unique_opportunities"] == 3
-        assert by[CL.R_BELOW]["re_evaluations"] == 0
-        # the row count ranked the stale reason first; unique opportunities
-        # rank the reason that cost three markets first
-        order = [e["refusal"] for e in summ["by_refusal_reason"]
-                 if e["refusal"] in (CL.R_STALE, CL.R_BELOW)]
-        assert order == [CL.R_BELOW, CL.R_STALE]
+        after, summ = await summary()
+        assert summ is not None
+
+        def delta(code, k):
+            a, b = after[code], before.get(code, zero)
+            if k == "inv":
+                return (a["unique_opportunities_by_sleeve"]["INVESTMENT"]
+                        - b["unique_opportunities_by_sleeve"]["INVESTMENT"])
+            return a[k] - b[k]
+        # six rows of ONE market vs three markets once each
+        assert delta(CL.R_STALE, "n") == 6 and delta(CL.R_BELOW, "n") == 3
+        assert delta(CL.R_STALE, "unique_opportunities") == 1
+        assert delta(CL.R_STALE, "re_evaluations") == 5
+        assert delta(CL.R_BELOW, "unique_opportunities") == 3
+        assert delta(CL.R_BELOW, "re_evaluations") == 0
         # Derek is an INVESTMENT strategy (migration 223's map)
-        assert by[CL.R_BELOW]["unique_opportunities_by_sleeve"] == {
-            "INVESTMENT": 3, "TRAINING": 0, "BENCHMARK": 0,
-            "UNCLASSIFIED": 0}
+        assert delta(CL.R_BELOW, "inv") == 3 and delta(CL.R_STALE, "inv") == 1
+        # the ranking is by unique opportunities (rows break ties)
+        keys = [(-e.get("unique_opportunities", e["n"]), -e["n"])
+                for e in summ["by_refusal_reason"]]
+        assert keys == sorted(keys)
         assert "unique opportunities" in summ["by_refusal_reason_basis"]
 
 
