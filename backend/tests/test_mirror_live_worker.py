@@ -9420,7 +9420,29 @@ def _satisfied_gate(monkeypatch):
         yield pool
 
 
-@pytest.mark.usefixtures("_satisfied_gate")
+# AND, FOR A BUY, THE CANONICAL ORIGINATION BOUNDARY (integration of the
+# R30A ci and intent streams). The intent stream put a second check inside
+# the same adapter: pmus.submit_fok refuses every BUY without the canonical
+# SMALL LIVE adapter's LiveAuthorization (require_canonical_origination),
+# which SHADOW never issues. Merged, the four BUY tests below that the ci
+# stream had just repaired (r2 and the three r4 429 proofs) were refused by
+# that check -- `canonical_origination_required` -- before the preview, the
+# pacer or the 429 handling they pin, exactly as the unbound gate refused
+# them before. They state that authorization as an assumption with the
+# intent stream's own test-only helper
+# (tests/admission_fixture.assume_canonical_venue_authorization, as
+# tests/test_pmus and tests/test_pmus_post_only do); the execution gate above
+# is still satisfied rather than skipped. The flatten tests (SELLs) are not
+# gated and do not take it. The refusal itself is proven in
+# tests/test_live_parity_convergence.py §7 and
+# tests/test_order_posts_are_sent_once_and_429s_are_named.py.
+@pytest.fixture
+def _canonical_buy_authorized(monkeypatch):
+    from tests import admission_fixture as AF
+    AF.assume_canonical_venue_authorization(monkeypatch)
+
+
+@pytest.mark.usefixtures("_satisfied_gate", "_canonical_buy_authorized")
 def test_r2_the_adapter_claims_its_own_gap_between_the_preview_and_the_create(monkeypatch):
     """LOW-a (round 2) as round 3 rebuilt it. pmus.submit_fok(paced_pair=True)
     -- what _guarded passes for every submit_fok -- claims a gap on the
@@ -10031,7 +10053,7 @@ def _refused_row(p, b):
     return [o for o in p.orders.values() if o["book_id"] == b["id"]][0]
 
 
-@pytest.mark.usefixtures("_satisfied_gate")
+@pytest.mark.usefixtures("_satisfied_gate", "_canonical_buy_authorized")
 def test_r4_a_429_on_the_preview_is_a_refusal_named_and_tripping_the_circuit_never_a_lost_response(monkeypatch):
     """HIGH-1. The FIRST of a BUY's two requests raises the SDK's
     RateLimitError (submit_fok wraps only the create). On v4 it crossed
@@ -10078,7 +10100,7 @@ def test_r4_a_429_on_the_preview_is_a_refusal_named_and_tripping_the_circuit_nev
     assert b["state"] == "live" and b.get("open_order_id") is not None
 
 
-@pytest.mark.usefixtures("_satisfied_gate")
+@pytest.mark.usefixtures("_satisfied_gate", "_canonical_buy_authorized")
 def test_r4_a_429_on_an_ioc_takes_create_is_a_refusal_not_a_lost_response(monkeypatch):
     """HIGH-1. A take was sent with post_only False, so submit_fok's create
     ran OUTSIDE the 4xx refusal wrapper: the SDK's RateLimitError raised
@@ -10161,7 +10183,7 @@ def test_r4_any_placement_raise_the_rate_limit_match_names_is_the_refusal_and_an
     assert "is_rate_limit" not in inspect.getsource(ml._lost_response)
 
 
-@pytest.mark.usefixtures("_satisfied_gate")
+@pytest.mark.usefixtures("_satisfied_gate", "_canonical_buy_authorized")
 def test_r4_the_placement_sites_read_the_refusal_raw_by_its_named_fields_never_a_substring(monkeypatch):
     """MEDIUM-2. v4 read `"429" in raw.error` on a post_only_rejected and
     `"429" in json.dumps(raw)` on any refusal without an id. A

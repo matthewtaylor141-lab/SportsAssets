@@ -135,9 +135,16 @@ async def test_derek_strategies_are_counted_apart_with_versions_labels_and_funne
     assert sv["edge_at_least_5pp_at_every_level_used"]["n"] == 1      # one more at the edge
     v2f = {x["stage"]: x for x in v2["funnel"]["data"]["stages"]}
     assert v2f["internal_model_qualified"]["n"] == 2 and v2f["paper entry orders"]["n"] == 0
-    # the switches, read as they are
+    # the switches, read as they are. Derek V2's paper entry switch is ON
+    # since migration 264 -- the owner's decision of 2026-10-04 (P0 incident,
+    # decision 2: PAPER entries for DEREK_ENTRY_POLICY_V2, paper only, no
+    # threshold / limit / live permission change). This line pinned migration
+    # 182's OFF; the read is unchanged, the state it reads changed on purpose
+    # (pinned at integration; tests/test_derek_paper_entries_reenabled proves
+    # the migration). The seeded STRATEGY_ENTRIES_DISABLED decision above is
+    # a historical record and keeps its own refusal.
     keys = {r["control_key"]: r["enabled"] for r in d["controls"]["data"]}
-    assert keys["PAPER_ENTRIES:DEREK_ENTRY_POLICY_V2"] is False
+    assert keys["PAPER_ENTRIES:DEREK_ENTRY_POLICY_V2"] is True
 
 
 async def test_xavier_sees_every_handoff_his_reviews_protection_settlements_and_pending():
@@ -424,15 +431,29 @@ async def test_the_pages_render_the_seeded_session_strategies_apart():
     assert 'data-strategy="PINNACLE_COMPLETED_GAME_PAPER" data-kind="EXPERIMENTAL_BENCHMARK"' in bench
     assert 'data-strategy="DEREK_ENTRY_POLICY_V2"' not in bench
     assert 'data-strategy="DEREK_ENTRY_POLICY_V2" data-kind="ORIGINAL_RESEARCH"' in research
-    assert "PINNACLE_" not in re.sub(r"<details class=\"tech\">.*?</details>", "", research, flags=re.S).replace(
-        "only the PINNACLE_ONLY_PAPER_BENCHMARK may open new paper entries", "")
+    # THE SWITCH'S OWN REASON IS QUOTED VERBATIM (controlNote), so it is the
+    # one place the research panel may name another strategy. This used to
+    # excuse migration 182's wording only; migration 264's reason (owner
+    # decision 2026-10-04) names the benchmark too, as the stale reason it
+    # corrects. The excuse is now the switch's recorded `why`, escaped as the
+    # page escapes it, whatever migration wrote it -- every other mention of
+    # a PINNACLE_ strategy in the research panel still fails here.
+    two = next(r for r in d["controls"]["data"]
+               if r["control_key"] == "PAPER_ENTRIES:DEREK_ENTRY_POLICY_V2")
+    quoted = " (%s)" % re.sub(r"[&<>\"']", lambda m: {
+        "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;",
+        "'": "&#39;"}[m.group(0)], str(two.get("why") or ""))
+    assert quoted in research
+    assert "PINNACLE_" not in re.sub(r"<details class=\"tech\">.*?</details>", "", research,
+                                     flags=re.S).replace(quoted, "")
     assert bench.count('<details class="dec"') == 11 and research.count('<details class="dec"') == 4
     # versions and labels, the CG policy's conditional / experimental label
     assert "PINNACLE_COMPLETED_GAME_PAPER_V1" in bench and "PINNACLE_ONLY_PAPER_BENCHMARK_V1" in bench
     assert "CONDITIONAL · EXPERIMENTAL" in bench and "CONDITIONAL_EXPERIMENTAL_NOT_RISK_ADJUSTED" in bench
     assert "Eligibility funnel" in bench and "handed to Xavier" in bench and "stopped here" in bench
     assert "ENTER (conditional on ordinary completion)" in bench and "+7.40 pp" in bench and "+$18.00" in bench
-    assert "STRATEGY_ENTRIES_DISABLED" in research and "Its paper entry switch is <b>OFF</b>" in research
+    # the historical refusal record stays; the switch reads ON (migration 264)
+    assert "STRATEGY_ENTRIES_DISABLED" in research and "Its paper entry switch is <b>ON</b>" in research
     assert [k["value"] for k in got["dk"][:3]] == ["4", "3", "8"]
     # Xavier: every handoff with its strategy, reviews, protection, settlements, pending
     xh = got["x"]["p-ops-handoffs"]["html"]
