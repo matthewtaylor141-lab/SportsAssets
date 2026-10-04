@@ -98,23 +98,54 @@ async def execute(pool,task):
             await W.finish(conn,task,reply,time.time(),error=error)
 
 
+class TickPhaseFailed(Exception):
+    """WHICH STEP OF THE TICK FAILED (R30A). Production logged `agent research
+    tick failed: TimeoutError` 17 times in three hours (2026-10-04 15:46-
+    18:47Z) with nothing saying which of the tick's five bounded steps timed
+    out; the tracebacks of the same seconds were all asyncpg Pool._acquire,
+    the API pool six-held by single-writer loops (fixed in db.lease_session).
+    The phase rides the exception so the next failure names its step."""
+
+    def __init__(self, phase, exc):
+        super().__init__('%s: %s' % (phase, type(exc).__name__))
+        self.phase, self.cause = phase, exc
+
+
+class _phase:
+    def __init__(self, name):
+        self.name = name
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, et, ev, tb):
+        if ev is not None and isinstance(ev, Exception) and not isinstance(
+                ev, TickPhaseFailed):
+            raise TickPhaseFailed(self.name, ev) from ev
+        return False
+
+
 async def tick(pool):
     now=time.time();admission_error=None
-    async with asyncio.timeout(3):
-        async with pool.acquire() as conn:
-            if not await W.schema(conn):return {'status':'SCHEMA_UNAVAILABLE'}
-            c=await W.control(conn)
-            if c.get('enabled') is not True:return {'status':'OFF'}
+    async with _phase('CONTROL'):
+        async with asyncio.timeout(3):
+            async with pool.acquire() as conn:
+                if not await W.schema(conn):return {'status':'SCHEMA_UNAVAILABLE'}
+                c=await W.control(conn)
+                if c.get('enabled') is not True:return {'status':'OFF'}
     # An admission failure must not starve already queued work.
     try:
         async with asyncio.timeout(5):
             async with pool.acquire() as conn:
                 await admit(conn,now)
     except Exception as exc:admission_error=type(exc).__name__
-    async with asyncio.timeout(5):
-        async with pool.acquire() as conn:
-            task=await W.claim(conn,time.time())
-    if task:await execute(pool,task)
+    async with _phase('CLAIM'):
+        async with asyncio.timeout(5):
+            async with pool.acquire() as conn:
+                task=await W.claim(conn,time.time())
+    if task:
+        async with _phase('EXECUTE'):
+            await execute(pool,task)
     from . import capability_experiments as E
     evaluation_error=None
     try:
@@ -126,9 +157,10 @@ async def tick(pool):
            'at':time.time(),'task_id':task['task_id'] if task else None,
            'admission_error':admission_error,'evaluation_error':evaluation_error,
            'authority':'RESEARCH_ONLY'}
-    async with asyncio.timeout(3):
-        async with pool.acquire() as conn:
-            await conn.execute('INSERT INTO ingestion_state(key,value) VALUES($1,$2::jsonb) ON CONFLICT(key) DO UPDATE SET value=excluded.value',HEARTBEAT,json.dumps(state))
+    async with _phase('HEARTBEAT'):
+        async with asyncio.timeout(3):
+            async with pool.acquire() as conn:
+                await conn.execute('INSERT INTO ingestion_state(key,value) VALUES($1,$2::jsonb) ON CONFLICT(key) DO UPDATE SET value=excluded.value',HEARTBEAT,json.dumps(state))
     return state
 
 
@@ -136,5 +168,6 @@ async def run(get_pool):
     while True:
         try:await tick(await get_pool())
         except asyncio.CancelledError:raise
+        except TickPhaseFailed as exc:log.warning('agent research tick failed in %s: %s',exc.phase,type(exc.cause).__name__)
         except Exception as exc:log.warning('agent research tick failed: %s',type(exc).__name__)
         await asyncio.sleep(15)

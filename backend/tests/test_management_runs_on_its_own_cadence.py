@@ -70,6 +70,11 @@ class FakeConn:
     async def fetchval(self, sql, *args):
         if "pg_try_advisory_lock" in sql:
             return self._lock_answers.pop(0) if self._lock_answers else True
+        if "pg_locks" in sql:
+            # R30A FENCING: run() re-proves on its lock session, before every
+            # pass, that this backend still holds the key (db.advisory_held).
+            # A session that was granted the lock still holds it here.
+            return True
         return None
 
     def rows_for(self, key):
@@ -470,7 +475,10 @@ def test_only_run_starts_the_task_and_only_after_the_writer_lock():
     assert i_lock < i_resume < i_task < src.index("cycle(conn)")
     assert "servicing.cancel()" in src
     whole = inspect.getsource(L)
-    assert whole.count("create_task(\n            _servicing_loop(") == 1
+    # one creation site; matched on the call, not on its indentation (R30A
+    # wrapped run() in the re-contention loop, which indents it one level)
+    import re
+    assert len(re.findall(r"create_task\(\s*_servicing_loop\(", whole)) == 1
     assert whole.count("_servicing_loop(pool, interval_s=") == 1
 
 

@@ -56,6 +56,7 @@ from decimal import ROUND_HALF_EVEN, Decimal
 from typing import Any
 
 from . import execmirror_probe as EP
+from .db import advisory_held, lease_session
 from . import venue_pace
 
 log = logging.getLogger(__name__)
@@ -63,6 +64,12 @@ log = logging.getLogger(__name__)
 VERSION = "EXECMIRROR_V1"
 LOCK_KEY = 0x45584D31          # 'EXM1'
 TICK_S = 2.0
+#: FENCING (R30A): the per-tick proof that this session still holds LOCK_KEY
+#: must answer within this; no answer is a lost lock.
+FENCE_TIMEOUT_S = 5.0
+#: the standby's wait between attempts at the writer lock, and after a
+#: runner failure (unchanged: 15 s)
+CONTEND_RETRY_S = 15.0
 SNAPSHOT_EVERY_S = 60.0
 UNKNOWN_GRACE_S = 45.0
 SUBMITTING_STALE_S = 30.0
@@ -1508,12 +1515,38 @@ async def run(get_pool, *, probability_reader=None, management_assessor=None) ->
     while True:
         try:
             pool = await get_pool()
-            async with pool.acquire() as conn:
+            # ITS OWN SESSION (db.lease_session), not one of the shared pool's
+            # ten slots: six lock holders held six of them in production
+            # (research run 37226381750), starving every request and audit.
+            async with lease_session(pool, name="execmirror") as conn:
                 if not await conn.fetchval("SELECT pg_try_advisory_lock($1)", LOCK_KEY):
-                    await asyncio.sleep(15)
+                    await asyncio.sleep(CONTEND_RETRY_S)
                     continue
                 try:
                     while True:
+                        # FENCING (R30A): before each tick, on the lock
+                        # session itself, prove this backend still holds
+                        # LOCK_KEY. Before this, a session that died failed
+                        # every tick ("execution mirror tick failed") every
+                        # TICK_S for ever and never contended again -- the
+                        # only exit from this loop was a cancellation. A lost
+                        # key, a dead session or no answer within
+                        # FENCE_TIMEOUT_S now leaves the hold; the outer loop
+                        # opens a fresh session and contends again.
+                        try:
+                            async with asyncio.timeout(FENCE_TIMEOUT_S):
+                                held = await advisory_held(conn, LOCK_KEY)
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception as exc:              # noqa: BLE001
+                            held = False
+                            log.error("execution mirror: writer lock check "
+                                      "unanswered (%s); leaving the hold",
+                                      type(exc).__name__)
+                        if not held:
+                            log.error("execution mirror: writer lock not held "
+                                      "by this session; contending again")
+                            break
                         try:
                             # the small-live money path: priority lane of the
                             # venue gate in this process (venue_pace E11)
@@ -1530,4 +1563,4 @@ async def run(get_pool, *, probability_reader=None, management_assessor=None) ->
             raise
         except Exception:                                     # noqa: BLE001
             log.exception("execution mirror runner failed")
-            await asyncio.sleep(15)
+            await asyncio.sleep(CONTEND_RETRY_S)

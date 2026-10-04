@@ -50,6 +50,7 @@ import os
 import time
 
 from .. import bettor_model_inventory as inv
+from ..db import lease_session
 from ..learn import dataset as ds
 from ..learn import kernel as K
 from ..learn import metrics as M
@@ -726,7 +727,9 @@ async def run(get_pool) -> None:
     when that connection goes back to the pool.
     """
     pool = await get_pool()
-    async with pool.acquire() as conn:
+    # ITS OWN SESSION, not a slot of the shared pool (db.lease_session: six
+    # lock holders held six of the API pool's ten slots in production).
+    async with lease_session(pool, name="rn1x_model") as conn:
         while not await conn.fetchval(
                 "SELECT pg_try_advisory_lock($1)", LOCK_KEY):
             log.info("rn1x_model STANDBY: another process holds the writer "

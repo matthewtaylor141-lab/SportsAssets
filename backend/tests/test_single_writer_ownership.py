@@ -77,7 +77,16 @@ def test_the_lock_is_taken_on_one_connection_not_per_cycle():
     for m in LOOPS:
         src = ast.unparse(_run_fn(m))
         assert "pg_try_advisory_lock" in src, m.__name__
-        assert src.count("pool.acquire()") == 1, (
+        # ONE SESSION FOR THE LOOP'S LIFE, taken once. The pinned spelling
+        # was `pool.acquire()`; R30A moved every lock holder to
+        # `db.lease_session(pool, ...)` -- the same one session held for life,
+        # opened OUTSIDE the shared pool -- because production showed six lock
+        # holders occupying six of the API pool's ten slots (research-sql run
+        # 37226381750) and starving the reactive audit, the feed heartbeat
+        # and the research tick. The property pinned is unchanged: exactly
+        # one session acquisition in run().
+        assert (src.count("pool.acquire()")
+                + src.count("lease_session(")) == 1, (
             "%s must hold one connection for the loop's life" % m.__name__)
         # the lock is asked for BEFORE any cycle runs
         assert src.index("pg_try_advisory_lock") < src.index("cycle("), (

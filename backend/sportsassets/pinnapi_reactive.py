@@ -26,6 +26,25 @@ ACTIVE = None
 #: still re-proves identity, venue, settlement, depth and fees.
 HELD_SEED_TTL_S = 6 * 3600
 
+#: THE JOB'S CONNECTION (R30A, 2026-10-04). Production, 15:46-18:47Z: the
+#: audit failed 14 times with TimeoutError inside asyncpg Pool._acquire --
+#: the audit took its OWN connection twice per job (STARTED, then the
+#: completion) under a 2 s budget, the evaluation a third, from an API pool
+#: whose ten slots were six-held by single-writer loops (research-sql run
+#: 37226381750). A failed first audit dropped a fresh change unevaluated; a
+#: failed second one left the attempt STARTED for ever with its valuation ids
+#: lost -- 19 such rows in 24 h, 13 of them HELD positions (research-sql run
+#: 37226551461). Now ONE connection is taken per job, within SESSION_WAIT_S,
+#: and both audits and the evaluation run on it. A job that gets no
+#: connection in time is refused before anything starts, counted
+#: SESSION_UNAVAILABLE and logged -- the same fail-closed rule as before
+#: (no unaudited evaluation), now one acquire instead of three.
+SESSION_WAIT_S = 2.0
+#: the completion audit's own budget, and its one retry on a fresh connection
+#: when the job's connection cannot take it (a cancelled statement can leave
+#: that connection unusable)
+AUDIT_S = 2.0
+
 
 class Scheduler:
     """One worker, one deadline. HELD EVENTS FIRST: a held event's change is
@@ -35,9 +54,13 @@ class Scheduler:
 
     def __init__(self, cache, evaluate, audit, *, clock=time.time,
                  queue_cap=128, seed_cap=512, seed_ttl=1800, deadline=12,
-                 held=None):
+                 held=None, session=None, session_wait=SESSION_WAIT_S):
         from . import pinnapi_held as PH
         self.cache, self.evaluate, self.audit, self.clock = cache, evaluate, audit, clock
+        # ONE CONNECTION PER JOB (R30A), when `session` is given: a callable
+        # returning an async context manager that yields a connection. Both
+        # audit records and the evaluation run on it -- see `run`.
+        self.session, self.session_wait = session, float(session_wait)
         self.queue_cap, self.seed_cap = queue_cap, seed_cap
         self.seed_ttl, self.deadline = seed_ttl, deadline
         self.seeds, self.pending, self.seen = OrderedDict(), OrderedDict(), {}
@@ -185,6 +208,9 @@ class Scheduler:
             eid, tick = job
             if not self.pending and not self.held_pending:
                 self.wake.clear()
+            if self.session is not None:
+                await self._run_job_on_one_session(eid, tick)
+                continue
             attempt = dict(attempt_id=uuid.uuid4().hex, event_id=eid, **tick,
                            evaluation_started_at=self.clock(), state='STARTED',
                            counters=dict(self.counts))
@@ -230,6 +256,89 @@ class Scheduler:
                 log.exception('pinnapi reactive audit failed; no unaudited evaluation started')
 
 
+async def _complete_audit(scheduler, attempt, conn):
+    """The completion record: on the job's connection, else once on a fresh
+    one. Raises when neither takes it (the caller counts AUDIT_FAILED)."""
+    try:
+        async with asyncio.timeout(AUDIT_S):
+            await scheduler.audit(attempt, conn)
+        return
+    except asyncio.CancelledError:
+        raise
+    except Exception:                                           # noqa: BLE001
+        scheduler.counts['COMPLETION_AUDIT_RETRIED'] += 1
+    async with asyncio.timeout(scheduler.session_wait + AUDIT_S):
+        async with scheduler.session() as fresh:
+            await scheduler.audit(attempt, fresh)
+
+
+async def _run_job_on_one_session(self, eid, tick):
+    """One job, one connection (see SESSION_WAIT_S): STARTED audit,
+    evaluation and completion audit all on it."""
+    import contextlib
+    t0 = self.clock()
+    attempt = dict(attempt_id=uuid.uuid4().hex, event_id=eid, **tick,
+                   evaluation_started_at=t0, state='STARTED',
+                   counters=dict(self.counts))
+    seed = self.seeds.get(eid)
+    got = self.cache.read(eid, F.FULL_GAME_MONEYLINE_KEY,
+                          evaluated_ms=self.clock()*1000)
+    q = got.get('quote')
+    version = None if q is None else (q.epoch, q.source_change_ms,
+                                      tuple(sorted(q.prices.items())))
+    if (not got.get('ok') or version != tick['version'] or seed is None or
+            not self._seed_live(eid, seed)):
+        attempt.update(state='REFUSED', reason=got.get('reason') or 'SUPERSEDED_OR_EXPIRED')
+    try:
+        async with contextlib.AsyncExitStack() as stack:
+            try:
+                async with asyncio.timeout(self.session_wait):
+                    conn = await stack.enter_async_context(self.session())
+            except TimeoutError:
+                # refused before anything started: no audit row, no
+                # evaluation -- the change is re-queued by the next one
+                self.counts['SESSION_UNAVAILABLE'] += 1
+                if tick.get('held'):
+                    self.counts['HELD_SESSION_UNAVAILABLE'] += 1
+                log.warning('pinnapi reactive: no connection within %ss for '
+                            'event %s (held=%s); not evaluated',
+                            self.session_wait, eid, bool(tick.get('held')))
+                return
+            attempt['session_wait_s'] = round(self.clock() - t0, 3)
+            # Audit failure blocks execution, it never becomes an unaudited trade.
+            async with asyncio.timeout(AUDIT_S):
+                await self.audit(attempt, conn)
+            if attempt['state'] != 'STARTED':
+                return
+            job = copy.deepcopy(seed)
+            job.update(valuation_ids=[], trigger=attempt)
+            try:
+                async with asyncio.timeout(self.deadline):
+                    result = await self.evaluate(job, conn)
+                attempt.update(state='COMPLETED', result=result)
+            except TimeoutError:
+                attempt.update(state='TIMEOUT')
+            except asyncio.CancelledError:
+                attempt.update(state='CANCELLED')
+                raise
+            except Exception as exc:
+                attempt.update(state='ERROR', error_type=type(exc).__name__)
+            finally:
+                attempt.update(finished_at=self.clock(), valuation_ids=job['valuation_ids'])
+                await _complete_audit(self, attempt, conn)
+        self.counts[attempt['state']] += 1
+        if tick.get('held'):
+            self.counts['HELD_' + attempt['state']] += 1
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        self.counts['AUDIT_FAILED'] += 1
+        log.exception('pinnapi reactive audit failed; no unaudited evaluation started')
+
+
+Scheduler._run_job_on_one_session = _run_job_on_one_session
+
+
 def request_held_reevaluation(slug) -> dict:
     """THE HELD RE-EVALUATION OF ONE HELD SLUG, on request (agents.
     work_queue's PROBABILITY request): the slug's provider event from the
@@ -270,16 +379,16 @@ def start(pool, *, cycle):
     if owner is None or ACTIVE is not None:
         return None
 
-    async def evaluate(seed):
+    async def evaluate(seed, conn):
         # DECISION-TIME READS TAKE THE PRIORITY LANE of this process's venue
         # gate (venue_pace E11): a WS-triggered evaluation is one event, one
         # at a time, under a 12 s deadline, and its book reads must not queue
         # behind the periodic collector's bulk reads. The gap and the 429
         # circuit are unchanged; starvation is bounded by PACE_PRIORITY_BURST.
+        # ON THE JOB'S CONNECTION (SESSION_WAIT_S), the one both audits use.
         from . import venue_pace
-        async with pool.acquire() as conn:
-            with venue_pace.priority_claims():
-                return await cycle(conn, stream_seed=seed)
+        with venue_pace.priority_claims():
+            return await cycle(conn, stream_seed=seed)
 
     # WHICH PROCESS WROTE THE ATTEMPT: the deployed build and this feed
     # owner's runtime, so a readback proves the writer -- not merely the web
@@ -287,16 +396,16 @@ def start(pool, *, cycle):
     writer = dict(build=os.environ.get('RENDER_GIT_COMMIT'), pid=os.getpid(),
                   runtime_id=runtime._STATE.get('runtime_id'))
 
-    async def audit(attempt):
-        async with pool.acquire() as conn:
-            await conn.execute('''INSERT INTO pinnapi_reactive_attempts
-                (attempt_id, event_id, state, detail) VALUES ($1,$2,$3,$4::jsonb)
-                ON CONFLICT (attempt_id) DO UPDATE SET
-                state=EXCLUDED.state, detail=EXCLUDED.detail, updated_at=now()''',
-                attempt['attempt_id'], str(attempt['event_id']), attempt['state'],
-                json.dumps(dict(attempt, writer=writer), default=str))
+    async def audit(attempt, conn):
+        await conn.execute('''INSERT INTO pinnapi_reactive_attempts
+            (attempt_id, event_id, state, detail) VALUES ($1,$2,$3,$4::jsonb)
+            ON CONFLICT (attempt_id) DO UPDATE SET
+            state=EXCLUDED.state, detail=EXCLUDED.detail, updated_at=now()''',
+            attempt['attempt_id'], str(attempt['event_id']), attempt['state'],
+            json.dumps(dict(attempt, writer=writer), default=str))
 
-    ACTIVE = Scheduler(owner.cache, evaluate, audit)
+    ACTIVE = Scheduler(owner.cache, evaluate, audit,
+                       session=lambda: pool.acquire())
     owner.cache.on_change = ACTIVE.changed
     # the held watch stays first on the change notification (priority
     # targets and review triggers), the scheduler after it

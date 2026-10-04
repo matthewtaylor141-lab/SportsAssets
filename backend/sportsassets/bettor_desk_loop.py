@@ -98,6 +98,7 @@ from decimal import Decimal
 from . import bettor_desk as DK
 from . import bettor_desk_accounts as ACC
 from . import bettor_fee_schedule as FEES
+from .db import lease_session
 
 log = logging.getLogger(__name__)
 
@@ -627,7 +628,9 @@ async def run(get_pool, *, desk_id="live1", policy=None, limits=None,
                    queue_share=queue_share, desk_id=desk_id)
 
     pool = await get_pool()
-    async with pool.acquire() as conn:
+    # ITS OWN SESSION, not a slot of the shared pool (db.lease_session: six
+    # lock holders held six of the API pool's ten slots in production).
+    async with lease_session(pool, name="bettor_desk_loop") as conn:
         while not await _acquire(conn):
             # ANOTHER INSTANCE HOLDS IT. This one does not write, does
             # not decide, and says so. During a deploy both are up for

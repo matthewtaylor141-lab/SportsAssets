@@ -178,6 +178,109 @@ async def close_pool() -> None:
         _pool = None
 
 
+# ── THE SINGLE-WRITER LOOPS' OWN SESSIONS (R30A, 2026-10-04) ────────────
+#
+# WHAT PRODUCTION SHOWED. research/r30a_runtime_evidence.sql (research-sql
+# run 37226381750, 18:57Z) read pg_stat_activity + pg_locks for the API host:
+# ten pooled backends -- the pool's max_size, every slot open -- and SIX of
+# them were the session advisory locks of the single-writer loops, each
+# connected since boot (5,989 s): execmirror 0x45584d31, the desk loop ...031,
+# rn1x_shadow ...032, rn1x_learn ...033, ext_pinnacle ...034, rn1x_model ...035.
+# A session lock must live on one session for the loop's whole life, so each
+# of those loops did `async with pool.acquire()` once and never gave the slot
+# back. Four slots were left for every HTTP request, the reactive evaluation
+# and its audit, the feed heartbeat, the servicing pass, the research tick and
+# the agents' runners -- and the API log of the same afternoon is that pool
+# running dry: `pinnapi reactive audit failed` (TimeoutError in
+# asyncpg Pool._acquire, 14 in three hours), `agent research tick failed:
+# TimeoutError` (17), `pinnapi feed heartbeat failed` (9), all at the same
+# seconds (16:00:53, 17:40:58, 17:46:10, 18:21:28 ...) as command-centre
+# requests taking 3-5 s and one 30 s.
+#
+# THE FIX IS NOT A BIGGER POOL OR A LONGER TIMEOUT. A lock holder gets a
+# connection of its own, opened here, outside the shared pool: the pool's ten
+# slots go back to transient work, and the holders cost the same six backends
+# they already cost (the database allows 403; 31 were in use). TCP keepalives
+# make the server notice a partitioned holder within ~25 s and free its lock,
+# exactly as pinnapi_owner.Lease does for the feed. No statement_timeout is
+# set: the holders' own statements (an entry cycle, an outcome join) carry
+# their own bounds.
+#
+# ONLY THE PROCESS'S OWN POOL IS BYPASSED. `pool is _pool` is the test: a pool
+# this module built from DATABASE_URL. Anything else -- a test double, a pool
+# a caller built itself -- keeps its own `acquire()`, so every caller that
+# injects a pool keeps working unchanged.
+LEASE_CONNECT_TIMEOUT_S = 10.0
+LEASE_CLOSE_TIMEOUT_S = 5.0
+LEASE_SERVER_SETTINGS = {"tcp_keepalives_idle": "10",
+                         "tcp_keepalives_interval": "5",
+                         "tcp_keepalives_count": "3"}
+
+
+class lease_session:                                       # noqa: N801
+    """`async with lease_session(pool, name="ext_pinnacle") as conn:` -- ONE
+    session for a single-writer loop's whole life (see above)."""
+
+    def __init__(self, pool, *, name: str):
+        self.pool, self.name = pool, str(name)
+        self._cm = None
+        self._conn = None
+        self.dedicated = False
+
+    async def __aenter__(self):
+        if self.pool is None or self.pool is not _pool:
+            self._cm = self.pool.acquire()
+            return await self._cm.__aenter__()
+        self.dedicated = True
+        self._conn = await asyncpg.connect(
+            _dsn(), timeout=LEASE_CONNECT_TIMEOUT_S,
+            server_settings=dict(LEASE_SERVER_SETTINGS, application_name=(
+                "sportsassets-lease:" + self.name)[:63]))
+        return self._conn
+
+    async def __aexit__(self, *exc):
+        if self._cm is not None:
+            return await self._cm.__aexit__(*exc)
+        conn, self._conn = self._conn, None
+        if conn is None:
+            return False
+        try:
+            # closing the session releases every session lock it held
+            await asyncio.wait_for(conn.close(), LEASE_CLOSE_TIMEOUT_S)
+        except asyncio.CancelledError:
+            conn.terminate()        # the socket goes now; the server frees
+            raise                   # the locks when it sees the close
+        except Exception:                                  # noqa: BLE001
+            conn.terminate()
+        return False
+
+
+def advisory_key_parts(key: int) -> tuple[int, int]:
+    """pg_locks spells a bigint advisory key as (classid, objid) = (high 32
+    bits, low 32 bits) with objsubid 1."""
+    k = int(key) & 0xFFFFFFFFFFFFFFFF
+    return (k >> 32) & 0xFFFFFFFF, k & 0xFFFFFFFF
+
+
+ADVISORY_HELD_SQL = (
+    "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype = 'advisory' "
+    "   AND granted AND objsubid = 1 AND pid = pg_backend_pid() "
+    "   AND classid = $1::bigint::oid AND objid = $2::bigint::oid)")
+
+
+async def advisory_held(conn, key: int) -> bool:
+    """FENCING: does THIS session still hold the session advisory lock `key`?
+
+    A single-writer loop asks before each cycle: a session that died, or
+    one that no longer holds its key, must stop writing and contend again
+    -- not loop forever on a dead connection while the children it started
+    write without the lock. Raises when the session cannot answer (a dead
+    connection is not a held lock); the caller treats a raise as lost, and
+    bounds the wait itself (asyncio.timeout)."""
+    hi, lo = advisory_key_parts(key)
+    return await conn.fetchval(ADVISORY_HELD_SQL, hi, lo) is True
+
+
 def _heartbeat_default(o):
     """What JSON cannot carry, as text: a datetime / date as ISO-8601
     (bettor_state's tick stats carry its observation `bucket` as a

@@ -45,7 +45,7 @@ import time
 
 from .. import bettor_rn1x_learn as learn
 from .. import bettor_rn1x_store as store
-from ..db import get_pool, heartbeat
+from ..db import get_pool, heartbeat, lease_session
 from . import rn1x_shadow as shadow
 
 log = logging.getLogger(__name__)
@@ -311,7 +311,9 @@ async def run(pool_factory=None) -> None:
     code_sha = (os.environ.get("RENDER_GIT_COMMIT") or "unknown")[:12]
     log.info("rn1x learn: armed; contending for its own lock")
     pool = await get()
-    async with pool.acquire() as conn:
+    # ITS OWN SESSION, not a slot of the shared pool (db.lease_session: six
+    # lock holders held six of the API pool's ten slots in production).
+    async with lease_session(pool, name="rn1x_learn") as conn:
         while not await conn.fetchval(
                 "SELECT pg_try_advisory_lock($1)", LOCK_KEY):
             log.info("rn1x learn STANDBY: lock held elsewhere; retrying")
