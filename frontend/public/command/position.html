@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#090d14">
+  <meta name="robots" content="noindex,nofollow">
+  <meta name="description" content="BettorToken Command — position rooms: every active position as one correlated economic position, read-only.">
+  <title>Position Rooms | BettorToken Command</title>
+  <link rel="stylesheet" href="command.css">
+  <link rel="stylesheet" href="position.css">
+</head>
+<body class="pr-body">
+  <a class="skip-link" href="#pr-main">Skip to the positions</a>
+  <!-- POSITION ROOMS. One authenticated same-origin GET per view:
+       /api/command/positions/rooms?book=PAPER|ACTUAL (the list) and
+       /api/command/positions/room/{group_key} (one room). Read-only: the
+       page has no control that writes, and shows UNAVAILABLE / STALE with
+       the server's reason instead of a manufactured figure. -->
+  <header class="pr-bar">
+    <a class="pr-brand" href="/" title="COMMAND homepage"><span class="pr-mark">B</span><span>Position rooms</span></a>
+    <nav class="pr-nav" aria-label="Command navigation">
+      <a href="/">Command</a>
+      <a href="/xavier">Xavier</a>
+      <a href="/positions" data-nav="list">All positions</a>
+      <a href="live.html">Small live</a>
+    </nav>
+    <div class="pr-meta">
+      <span class="pill" title="This page reads; it has no control that places, changes or cancels anything.">READ-ONLY</span>
+      <span id="pr-asof" class="pr-asof">reading…</span>
+      <button id="pr-refresh" class="button small ghost" type="button">Refresh</button>
+    </div>
+  </header>
+  <main id="pr-main" class="pr-main" tabindex="-1">
+    <div id="pr-state" class="pr-state" role="status" aria-live="polite">Reading the position rooms…</div>
+    <div id="pr-view"></div>
+  </main>
+  <noscript><p class="pr-state">This page needs JavaScript.</p></noscript>
+  <script src="position.js"></script>
+</body>
+</html>

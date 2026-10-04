@@ -95,6 +95,26 @@
   status = 200
   force = true
 
+# ── POSITION ROOMS: /positions (every active position) and /position?g=<key>
+# (one correlated position). REWRITES (status 200) to ONE static page that
+# holds no data; it reads /api/command/positions/* same-origin through the
+# /api/command/* proxy above, so the HttpOnly session cookie is sent and the
+# API enforces authentication. Netlify keeps the query string on a rewrite.
+# ORDER: below the /api/command/* proxy and ABOVE the command-host catch-all,
+# which would otherwise map /positions to the non-existent /command/positions.
+[[redirects]]
+  from = "https://command.bettortoken.com/positions"
+  to = "/command/position.html"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "https://command.bettortoken.com/position"
+  to = "/command/position.html"
+  status = 200
+  force = true
+# ── end POSITION ROOMS ──────────────────────────────────────────────────
+
 [[redirects]]
   from = "https://command.bettortoken.com/*"
   to = "/command/:splat"
