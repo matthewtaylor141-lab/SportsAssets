@@ -209,7 +209,7 @@
   "verdict_files": {}
  },
  "gate_id": "f33",
- "generated_at": "2026-10-04T11:38:47+00:00",
+ "generated_at": "2026-10-04T11:45:22+00:00",
  "github_ci": [
   {
    "comparable_to_gate": false,
@@ -694,7 +694,7 @@
   "status": "PENDING",
   "why": "no evidence recorded for the production schema"
  },
- "receipt_sha256": "f620110215e74ef18007c7d3f82dce0fe9f281c11fda87e6f5b6c841952ae014",
+ "receipt_sha256": "422b60b81b4cae3e6bc48f215aff377b92251e2aae9cb811524a0d0e46c72d2d",
  "schema": "BETTOR_RELEASE_RECEIPT_V1",
  "sha": "8e627493cd40e7b63f0b57af23a84019c02b044b",
  "stages": {
@@ -726,6 +726,7 @@
  },
  "state": "VOID",
  "supersedes": null,
+ "test_files": {},
  "tool": "backend/tools/release_receipt.py",
  "void_conditions": [
   {

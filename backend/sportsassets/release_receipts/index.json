@@ -3,11 +3,11 @@
   {
    "acceptance": "GATED_PENDING_SIGNOFF",
    "candidate": "cand25",
-   "file": "f31__c0f5033d5238.json",
+   "file": "f31__8ab5013787a3.json",
    "gate_id": "f31",
-   "generated_at": "2026-10-04T11:38:47+00:00",
+   "generated_at": "2026-10-04T11:45:21+00:00",
    "hash_verified": true,
-   "receipt_sha256": "c0f5033d523878fbba6d09c477ad017b6f1ddaac7d0432a8424afed68680b7dc",
+   "receipt_sha256": "8ab5013787a3b83a0c8c956fa7045659a672bab796312e7ada4aa0168b2393d8",
    "sha": "fd6cc5b1390dc181bb34a8e441f3ef4fd2ac29ad",
    "state": "GATED",
    "supersedes": null
@@ -15,11 +15,11 @@
   {
    "acceptance": "VOID",
    "candidate": "cand27",
-   "file": "f33__f620110215e7.json",
+   "file": "f33__422b60b81b4c.json",
    "gate_id": "f33",
-   "generated_at": "2026-10-04T11:38:47+00:00",
+   "generated_at": "2026-10-04T11:45:22+00:00",
    "hash_verified": true,
-   "receipt_sha256": "f620110215e74ef18007c7d3f82dce0fe9f281c11fda87e6f5b6c841952ae014",
+   "receipt_sha256": "422b60b81b4cae3e6bc48f215aff377b92251e2aae9cb811524a0d0e46c72d2d",
    "sha": "8e627493cd40e7b63f0b57af23a84019c02b044b",
    "state": "VOID",
    "supersedes": null

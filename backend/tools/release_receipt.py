@@ -415,6 +415,17 @@ def build(gate_id, gate_dir, candidate, sha, base_sha=None, baselines=(),
     changed_cause = [k["node"] for k in known
                      if not k["identical_in_every_baseline"]]
 
+    # ── per test file outcomes: what a requirement's tests did at this SHA
+    test_files = {}
+    for nid, v in hnodes.items():
+        f = nid.split("::", 1)[0]
+        row = test_files.setdefault(f, {"passed": 0, "failed": 0,
+                                        "skipped": 0, "xfailed": 0,
+                                        "xpassed": 0})
+        o = v.get("outcome")
+        if o in row:
+            row[o] += 1
+
     # ── critical list, read AT THE CANDIDATE SHA ────────────────────
     crit_txt = ("\n".join(critical_entries) if critical_entries is not None
                 else _git("show", "%s:backend/tools/capital_critical_tests.txt"
@@ -577,6 +588,7 @@ def build(gate_id, gate_dir, candidate, sha, base_sha=None, baselines=(),
         "new_regressions": new_regressions,
         "new_regressions_by_baseline": new_by_baseline,
         "known_baseline_failures": known,
+        "test_files": test_files,
         "critical": crit,
         "migrations": {
             "at_sha": mig_head,
