@@ -1,0 +1,359 @@
+{
+ "_what": "EVERY PRODUCTION cfb VALUATION ROW, read-only: the venue rules text the collector persisted (masked wording groups), the book's priced outcome set, and the paper decisions on those rows -- the evidence for the NCAAF venue clauses (bettor_ncaaf_settlement.VENUE_CAPTURES) and the NCAAF de-vig admission (bettor_pinnacle_devig.SUPPORTED_BY_LEAGUE).",
+ "_source": "research/incident_ncaaf_settlement_wording.sql (claude/command-center e55c25c)",
+ "_evidence": {
+  "workflow": "research-sql",
+  "run_id": 37241503567,
+  "job_id": 111550976439,
+  "read_at": "2026-10-04T22:54:12Z",
+  "schema_head": "224_agent_identity_memory.sql",
+  "file_sha256": "0335ccc403d47fc789969fc97b5940d78bba3aac303519b7b011d6b259a1c853",
+  "read_only": "default_transaction_read_only=on; the workflow refuses mutating keywords"
+ },
+ "N1_rules_text_presence": {
+  "rows": 9,
+  "contracts": 9,
+  "with_text": 9,
+  "without_text": 0,
+  "first_at": "2026-10-04 00:23:26.05633+00",
+  "last_at": "2026-10-04 03:37:23.378049+00"
+ },
+ "N1b_family_market": [
+  {
+   "sport_family": "football",
+   "market": "h2h",
+   "rows": 9,
+   "contracts": 9
+  }
+ ],
+ "N2_masked_wordings": [
+  {
+   "masked_md5": "f0828e4cff231ea08f7ef77099788595",
+   "rows": 9,
+   "contracts": 9,
+   "distinct_text_sha": 9,
+   "masked_text": "<WINNER-OF-NAMED-GAME-ON-DATE>. Overtime is included if played. If a tied final score is reported and no official winner is declared, this market will not resolve automatically and will be reviewed against the official governing-body result. If the game is delayed, postponed, or suspended and not rescheduled to a date within two weeks of the originally scheduled date, the market will settle to the last fair market price. Outcome sourced from the relevant governing body."
+  }
+ ],
+ "N2_mask": "This market will settle to the winner of the .* College Football game scheduled for [A-Za-z]+ [0-9]+, [0-9]{4}\\. -> <WINNER-OF-NAMED-GAME-ON-DATE>.",
+ "N2b_game_sentence": [
+  {
+   "says_college_football_game_on_date": true,
+   "says_nfl_game": false,
+   "mentions_a_tie": true,
+   "rows": 9,
+   "contracts": 9
+  }
+ ],
+ "N3_outcome_set": {
+  "rows": 9,
+  "contracts": 9,
+  "priced_2": 9,
+  "priced_3": 0,
+  "priced_null": 0,
+  "priced_other": 0,
+  "with_draw_key": 0,
+  "with_raw_odds": 9,
+  "book_pinnacle": 9,
+  "with_probability": 0
+ },
+ "N4_by_provider": [
+  {
+   "provider": "the-odds-api.com/v4",
+   "outcomes_priced": 2,
+   "expected_outcomes": 0,
+   "n": 9,
+   "contracts": 9,
+   "overround_min": 0.02814,
+   "overround_max": 0.05607
+  }
+ ],
+ "N5_rows": [
+  {
+   "id": 5131,
+   "decided_at": "2026-10-04 03:37:23.378049+00",
+   "us_market_slug": "aec-cfb-txst-sdst-2026-10-03",
+   "contract_selection": "San Diego State Aztecs",
+   "provider": "the-odds-api.com/v4",
+   "outcomes_priced": 2,
+   "raw_odds": {
+    "Texas State Bobcats": 1.11,
+    "San Diego State Aztecs": 6.75
+   },
+   "overround": 0.04905,
+   "record_purpose": "CALIBRATION_ONLY",
+   "first_refusals": [
+    "MARKET_NOT_IN_SUPPORTED_SET",
+    "VENUE_BOOK_CURRENCY_NOT_ESTABLISHED",
+    "VOID_ABANDONMENT_RULE_CONFLICTS_WITH_BOOK_RULE",
+    "NO_QUALIFIED_MODEL"
+   ],
+   "compatibility": "INCOMPATIBLE",
+   "venue_rules_sha256": "6b9be4d46d53594c6ad734c066c832993e64a5fad88c5c1eec1c49bd22995b03"
+  },
+  {
+   "id": 5066,
+   "decided_at": "2026-10-04 02:38:02.022578+00",
+   "us_market_slug": "aec-cfb-wash-usc-2026-10-03",
+   "contract_selection": "USC Trojans",
+   "provider": "the-odds-api.com/v4",
+   "outcomes_priced": 2,
+   "raw_odds": {
+    "USC Trojans": 1.24,
+    "Washington Huskies": 4.12
+   },
+   "overround": 0.04917,
+   "record_purpose": "CALIBRATION_ONLY",
+   "first_refusals": [
+    "MARKET_NOT_IN_SUPPORTED_SET",
+    "VENUE_BOOK_CURRENCY_NOT_ESTABLISHED",
+    "VOID_ABANDONMENT_RULE_CONFLICTS_WITH_BOOK_RULE",
+    "NO_QUALIFIED_MODEL"
+   ],
+   "compatibility": "INCOMPATIBLE",
+   "venue_rules_sha256": "c4b9eeb115f8d7ac38a611460a5fbd9ee2868e0e50a93c1e91b37b4148bbd2f4"
+  },
+  {
+   "id": 5020,
+   "decided_at": "2026-10-04 01:37:59.275347+00",
+   "us_market_slug": "aec-cfb-templ-sfl-2026-10-03",
+   "contract_selection": "South Florida Bulls",
+   "provider": "the-odds-api.com/v4",
+   "outcomes_priced": 2,
+   "raw_odds": {
+    "Temple Owls": 1.68,
+    "South Florida Bulls": 2.17
+   },
+   "overround": 0.05607,
+   "record_purpose": "CALIBRATION_ONLY",
+   "first_refusals": [
+    "MARKET_NOT_IN_SUPPORTED_SET",
+    "VENUE_BOOK_CURRENCY_NOT_ESTABLISHED",
+    "VOID_ABANDONMENT_RULE_CONFLICTS_WITH_BOOK_RULE",
+    "NO_QUALIFIED_MODEL"
+   ],
+   "compatibility": "INCOMPATIBLE",
+   "venue_rules_sha256": "86b85bfe8ef34ee007ee6edf416608c1d33105b4b12db28e2058405ea4e34c02"
+  },
+  {
+   "id": 5017,
+   "decided_at": "2026-10-04 01:37:55.805177+00",
+   "us_market_slug": "aec-cfb-arkst-loulaf-2026-10-03",
+   "contract_selection": "Louisiana Ragin Cajuns",
+   "provider": "the-odds-api.com/v4",
+   "outcomes_priced": 2,
+   "raw_odds": {
+    "Louisiana Ragin Cajuns": 1.72,
+    "Arkansas State Red Wolves": 2.18
+   },
+   "overround": 0.04011,
+   "record_purpose": "CALIBRATION_ONLY",
+   "first_refusals": [
+    "MARKET_NOT_IN_SUPPORTED_SET",
+    "VENUE_BOOK_CURRENCY_NOT_ESTABLISHED",
+    "VOID_ABANDONMENT_RULE_CONFLICTS_WITH_BOOK_RULE",
+    "NO_QUALIFIED_MODEL"
+   ],
+   "compatibility": "INCOMPATIBLE",
+   "venue_rules_sha256": "d03543c0ea1e61c4e91a525776eb3be74e6d21416a7d0e956a4a646a36988907"
+  },
+  {
+   "id": 4990,
+   "decided_at": "2026-10-04 00:52:26.238021+00",
+   "us_market_slug": "aec-cfb-cin-arz-2026-10-03",
+   "contract_selection": "Arizona Wildcats",
+   "provider": "the-odds-api.com/v4",
+   "outcomes_priced": 2,
+   "raw_odds": {
+    "Arizona Wildcats": 1.37,
+    "Cincinnati Bearcats": 3.3
+   },
+   "overround": 0.03296,
+   "record_purpose": "CALIBRATION_ONLY",
+   "first_refusals": [
+    "MARKET_NOT_IN_SUPPORTED_SET",
+    "VENUE_BOOK_CURRENCY_NOT_ESTABLISHED",
+    "VOID_ABANDONMENT_RULE_CONFLICTS_WITH_BOOK_RULE",
+    "NO_QUALIFIED_MODEL"
+   ],
+   "compatibility": "INCOMPATIBLE",
+   "venue_rules_sha256": "32b19dfe7712271b146c277d45e762dc794a7c6a28a764b4f4cff80d584af9e0"
+  },
+  {
+   "id": 4989,
+   "decided_at": "2026-10-04 00:52:13.419822+00",
+   "us_market_slug": "aec-cfb-bayl-arzst-2026-10-03",
+   "contract_selection": "Arizona State Sun Devils",
+   "provider": "the-odds-api.com/v4",
+   "outcomes_priced": 2,
+   "raw_odds": {
+    "Baylor Bears": 2.41,
+    "Arizona State Sun Devils": 1.62
+   },
+   "overround": 0.03222,
+   "record_purpose": "CALIBRATION_ONLY",
+   "first_refusals": [
+    "MARKET_NOT_IN_SUPPORTED_SET",
+    "VENUE_BOOK_CURRENCY_NOT_ESTABLISHED",
+    "VOID_ABANDONMENT_RULE_CONFLICTS_WITH_BOOK_RULE",
+    "NO_QUALIFIED_MODEL"
+   ],
+   "compatibility": "INCOMPATIBLE",
+   "venue_rules_sha256": "5735a8a2484fc7a9b7820631d9bd0c21f580765d55072b578bbc30edc9b652fa"
+  },
+  {
+   "id": 4977,
+   "decided_at": "2026-10-04 00:37:49.305255+00",
+   "us_market_slug": "aec-cfb-frest-washst-2026-10-03",
+   "contract_selection": "Washington State Cougars",
+   "provider": "the-odds-api.com/v4",
+   "outcomes_priced": 2,
+   "raw_odds": {
+    "Fresno State Bulldogs": 2.06,
+    "Washington State Cougars": 1.84
+   },
+   "overround": 0.02892,
+   "record_purpose": "CALIBRATION_ONLY",
+   "first_refusals": [
+    "MARKET_NOT_IN_SUPPORTED_SET",
+    "VENUE_BOOK_CURRENCY_NOT_ESTABLISHED",
+    "VOID_ABANDONMENT_RULE_CONFLICTS_WITH_BOOK_RULE",
+    "NO_QUALIFIED_MODEL"
+   ],
+   "compatibility": "INCOMPATIBLE",
+   "venue_rules_sha256": "1077f30ad7ca95970700685a62af51a08b25fad535a69e08e10c8b2b9251b985"
+  },
+  {
+   "id": 4971,
+   "decided_at": "2026-10-04 00:23:29.350524+00",
+   "us_market_slug": "aec-cfb-sjst-hawaii-2026-10-04",
+   "contract_selection": "Hawaii Rainbow Warriors",
+   "provider": "the-odds-api.com/v4",
+   "outcomes_priced": 2,
+   "raw_odds": {
+    "Hawaii Rainbow Warriors": 1.68,
+    "San Jose State Spartans": 2.31
+   },
+   "overround": 0.02814,
+   "record_purpose": "CALIBRATION_ONLY",
+   "first_refusals": [
+    "MARKET_NOT_IN_SUPPORTED_SET",
+    "VENUE_BOOK_CURRENCY_NOT_ESTABLISHED",
+    "VOID_ABANDONMENT_RULE_CONFLICTS_WITH_BOOK_RULE",
+    "NO_QUALIFIED_MODEL"
+   ],
+   "compatibility": "INCOMPATIBLE",
+   "venue_rules_sha256": "bc11acc070c268aca27112ada57ea70c0bc08fe97c21e66e16cb355a69ad3beb"
+  },
+  {
+   "id": 4970,
+   "decided_at": "2026-10-04 00:23:26.05633+00",
+   "us_market_slug": "aec-cfb-txtech-col-2026-10-03",
+   "contract_selection": "Colorado Buffaloes",
+   "provider": "the-odds-api.com/v4",
+   "outcomes_priced": 2,
+   "raw_odds": {
+    "Colorado Buffaloes": 3.86,
+    "Texas Tech Red Raiders": 1.28
+   },
+   "overround": 0.04032,
+   "record_purpose": "CALIBRATION_ONLY",
+   "first_refusals": [
+    "MARKET_NOT_IN_SUPPORTED_SET",
+    "VENUE_BOOK_CURRENCY_NOT_ESTABLISHED",
+    "VOID_ABANDONMENT_RULE_CONFLICTS_WITH_BOOK_RULE",
+    "NO_QUALIFIED_MODEL"
+   ],
+   "compatibility": "INCOMPATIBLE",
+   "venue_rules_sha256": "ddf75cc23a73dd513ff9b8e8c48e13a4c33293e23322784144c25e5f48715e84"
+  }
+ ],
+ "N7_catalogue_dates": {
+  "rows": 171,
+  "contracts": 86,
+  "first_et_day": "2026-10-03",
+  "last_et_day": "2026-10-07",
+  "slug_date_equals_et_day": 171,
+  "slug_date_equals_utc_day": 147,
+  "slug_without_date": 0
+ },
+ "N8_decisions_72h_first_refusal": [
+  {
+   "strategy": "DEREK_ENTRY_POLICY_V2",
+   "verdict": "REFUSE",
+   "refusal": "SETTLEMENT_NOT_SUPPORTED",
+   "decisions": 9,
+   "markets": 9
+  },
+  {
+   "strategy": "PINNACLE_COMPLETED_GAME_PAPER",
+   "verdict": "REFUSE",
+   "refusal": "PINNACLE_PROBABILITY_NOT_QUALIFIED_BY_THE_LANE",
+   "decisions": 9,
+   "markets": 9
+  },
+  {
+   "strategy": "PINNACLE_EXPLORATION_PAPER",
+   "verdict": "REFUSE",
+   "refusal": "PINNACLE_PROBABILITY_NOT_QUALIFIED_BY_THE_LANE",
+   "decisions": 9,
+   "markets": 9
+  }
+ ],
+ "N8b_decisions_72h_every_code": [
+  {
+   "strategy": "DEREK_ENTRY_POLICY_V2",
+   "refusal_code": "NO_QUALIFIED_PINNACLE_PROBABILITY",
+   "decisions": 9,
+   "markets": 9
+  },
+  {
+   "strategy": "DEREK_ENTRY_POLICY_V2",
+   "refusal_code": "NO_RESEARCH_MODEL_CANDIDATE_EXISTS",
+   "decisions": 9,
+   "markets": 9
+  },
+  {
+   "strategy": "DEREK_ENTRY_POLICY_V2",
+   "refusal_code": "SETTLEMENT_NOT_SUPPORTED",
+   "decisions": 9,
+   "markets": 9
+  },
+  {
+   "strategy": "PINNACLE_COMPLETED_GAME_PAPER",
+   "refusal_code": "NO_COMPLETED_GAME_TERMS_FOR_THIS_SPORT",
+   "decisions": 9,
+   "markets": 9
+  },
+  {
+   "strategy": "PINNACLE_COMPLETED_GAME_PAPER",
+   "refusal_code": "NO_QUALIFIED_PINNACLE_PROBABILITY",
+   "decisions": 9,
+   "markets": 9
+  },
+  {
+   "strategy": "PINNACLE_COMPLETED_GAME_PAPER",
+   "refusal_code": "PINNACLE_PROBABILITY_NOT_QUALIFIED_BY_THE_LANE",
+   "decisions": 9,
+   "markets": 9
+  },
+  {
+   "strategy": "PINNACLE_EXPLORATION_PAPER",
+   "refusal_code": "NO_COMPLETED_GAME_TERMS_FOR_THIS_SPORT",
+   "decisions": 9,
+   "markets": 9
+  },
+  {
+   "strategy": "PINNACLE_EXPLORATION_PAPER",
+   "refusal_code": "NO_QUALIFIED_PINNACLE_PROBABILITY",
+   "decisions": 9,
+   "markets": 9
+  },
+  {
+   "strategy": "PINNACLE_EXPLORATION_PAPER",
+   "refusal_code": "PINNACLE_PROBABILITY_NOT_QUALIFIED_BY_THE_LANE",
+   "decisions": 9,
+   "markets": 9
+  }
+ ]
+}
