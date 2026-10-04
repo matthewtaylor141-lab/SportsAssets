@@ -569,6 +569,21 @@ async def lifespan(_: FastAPI):
             log.info("twin research runner armed (advisory lock per cycle)")
     except Exception:  # noqa: BLE001 -- the API must serve regardless
         log.exception("twin research runner failed to arm")
+    # ── THE IMPROVEMENT PIPELINE RUNNER (migration 221) ──────────────
+    # Seeds improvement items from real signals (upheld Karen challenges,
+    # Audrey findings, coverage incidents, Eddie SKIP_EXECUTION, false
+    # refusals, tournament verdicts) and mirrors the stages the agents have
+    # already recorded. Writes only its own improve_* tables; never a human
+    # or engineering step; no push, merge, deploy, order or capital path.
+    # Bounded, failure-isolated; IMPROVEMENT_PIPELINE_ENABLED=0 is the kill
+    # switch. Without migration 221 it idles.
+    improve_task = None
+    try:
+        from ..agents import improvement_pipeline as _IMPROVE
+        if _IMPROVE.enabled():
+            improve_task = asyncio.create_task(_IMPROVE.run(_cap_pool))
+    except Exception:  # noqa: BLE001 -- the API must serve regardless
+        log.exception("improvement pipeline runner failed to arm")
     try:
         yield
     finally:
@@ -583,6 +598,7 @@ async def lifespan(_: FastAPI):
                              poller_task, capability_task, slack_task,
                              karen_task, peer_task, execmirror_task,
                              eddie_task, scout_task, intel_task, pos_task, poslearn_task, twin_task,
+                             improve_task,
                              *watchdog_tasks)
                  if t is not None]
         for task in tasks:
@@ -734,6 +750,14 @@ try:
     app.include_router(_command_equity_router)
 except ImportError:
     log.warning("equity: api.command_equity not loaded", exc_info=True)
+# ── THE PAPER SLEEVE ECONOMICS (migration 223): /api/command/profitability/
+# sleeves. GET only, COMMAND auth, READ ONLY transaction; INVESTMENT is the
+# default sleeve, TRAINING is research cost. No route here writes.
+try:
+    from .command_sleeves import router as _command_sleeves_router
+    app.include_router(_command_sleeves_router)
+except ImportError:
+    log.warning("sleeves: api.command_sleeves not loaded", exc_info=True)
 # ── THE POSITION ROOMS: /api/command/positions/rooms, /room/{group_key}.
 # GET only, COMMAND auth, READ ONLY transaction; one correlated economic
 # position per screen (paper and actual, actual per venue, never summed).
@@ -751,6 +775,34 @@ try:
     app.include_router(_command_floor_router)
 except ImportError:
     log.warning("floor: api.command_floor not loaded", exc_info=True)
+# ── THE IMPROVEMENT PIPELINE BOARD (migration 221): /api/command/
+# improvements (+ /{id}). GET only, COMMAND auth, one READ ONLY transaction
+# with a statement timeout. SHADOW: the board records the path; nothing here
+# approves, merges, deploys or activates.
+try:
+    from .command_improvements import router as _command_improvements_router
+    app.include_router(_command_improvements_router)
+except ImportError:
+    log.warning("improvements: api.command_improvements not loaded",
+                exc_info=True)
+# ── THE LOST OPPORTUNITY READS (migration 220): /api/command/profitability/
+# lost-opportunities and /opportunity-scores. GET only, COMMAND auth, READ
+# ONLY transactions. RESEARCH: no route here writes or has authority.
+try:
+    from .command_lost_opportunity import router as _command_lol_router
+    app.include_router(_command_lol_router)
+except ImportError:
+    log.warning("lost opportunity: api.command_lost_opportunity not loaded",
+                exc_info=True)
+# ── RELEASE TRUTH: /api/command/release. GET only, COMMAND auth, one READ
+# ONLY transaction with a statement timeout: the API build SHA, the workers'
+# boot SHA, schema_migrations 216-225 and the committed release receipts
+# (hash-verified). No write, deploy or approval path.
+try:
+    from .command_release import router as _command_release_router
+    app.include_router(_command_release_router)
+except ImportError:
+    log.warning("release: api.command_release not loaded", exc_info=True)
 from .agent_capabilities import router as _capabilities_router
 app.include_router(_capabilities_router)
 from .slack_agents import router as _slack_agents_router
@@ -2797,7 +2849,7 @@ async def command_small_live(
     async with pool.acquire() as c:
         if not await c.fetchval("SELECT to_regclass('execmirror_control') IS NOT NULL"):
             return {"status": "UNAVAILABLE", "why": "execution mirror schema not applied",
-                    "title": "Small Live · Paper vs Actual", "rows": [],
+                    "title": "Legacy Mirror Validation · Paper vs Actual", "rows": [],
                     "venues": V.venues({}, None)}
         return await V.small_live(c, view=view, status=status, limit=limit)
 

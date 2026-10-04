@@ -57,9 +57,10 @@ from tests.test_e5_frozen_exits import _frozen_long
 from tests.test_e5_frozen_exits import _pool as _e5_pool      # the pool that answers E5's co-held read
 from tests.test_render_ops_fills_missed import World, _preset, _stmts
 import tests.test_render_ops_hourly as hourly
+from tests.workflow_source import render_ops_file as _render_ops_file
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-YML = ROOT / ".github" / "workflows" / "render-ops.yml"
+YML = _render_ops_file()
 SQL_061 = MIG_DIR / "061_fill_answers_cause_orders_fast.sql"
 HEARTBEAT = ("fill_answer_cause_absent", "fast_col_absent", "fast_col_unreadable")
 CAUSES = ("same", "min_life", "take_capped", "replace_capped", "frozen", "flow_grew")

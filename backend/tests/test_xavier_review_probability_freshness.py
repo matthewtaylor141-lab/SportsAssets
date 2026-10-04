@@ -29,6 +29,7 @@ import pytest
 
 from sportsassets import bettor_paper_ledger as L
 from sportsassets import bettor_paper_simulator as SIM
+from sportsassets import xavier_freshness as XFT
 from sportsassets.agents import paper_benchmark as PB
 from sportsassets.agents import paper_xavier as PX
 from sportsassets.workers import ext_pinnacle_loop as LOOP
@@ -255,9 +256,12 @@ async def test_without_fresh_evidence_the_review_says_so_and_never_sells(case):
         assert hold["expected_net_usd"] is None
         assert hold["entry_time_expected_net_usd"] is not None
         assert PX.E_STALE in H.j(rv["exceptional"])
-        # HOLD with the limitation stated; no discretionary sale even though
-        # the 0.80 bid out-values holding at the stale probability
-        assert rv["recommendation"] == PX.A_HOLD
+        # no discretionary sale even though the 0.80 bid out-values holding
+        # at the stale probability -- and NO default HOLD either (owner P0):
+        # the review waits for fresh evidence; the selector's mechanical
+        # pick stays on the selection record
+        assert rv["recommendation"] == XFT.REC_WAITING
+        assert H.j(rv["selection"])["mechanical_selection"] == PX.A_HOLD
         assert sales == 0
         blocked = {x["action"] for x in alts["not_rankable"]
                    if x.get("blocker") == PX.B_STALE_MEASURE}
@@ -305,7 +309,7 @@ async def test_a_future_stamped_or_mis_mapped_row_is_never_fresh(case):
             # the mis-mapped reading is not used at all
             assert m["source"] == "ENTRY_TIME_MEASURE"
             assert m["probability"] == pytest.approx(0.62)
-        assert rv["recommendation"] == PX.A_HOLD and sales == 0
+        assert rv["recommendation"] == XFT.REC_WAITING and sales == 0
     finally:
         await _purge(conn, slugs)
         await conn.close()
@@ -330,7 +334,7 @@ async def test_an_unavailable_probability_is_null_and_liquidates_nothing(
                   "current_hold_value_usd", "entry_time_hold_value_usd"):
             assert m[k] is None, k
         assert m["probability_limitation"]
-        assert rv["recommendation"] is None and sales == 0
+        assert rv["recommendation"] == XFT.REC_UNAVAILABLE and sales == 0
         assert H.j(rv["action"])["taken"] in ("PLACE_STANDING",
                                               "KEEP_STANDING")
         assert PX.E_NONE in H.j(rv["exceptional"])

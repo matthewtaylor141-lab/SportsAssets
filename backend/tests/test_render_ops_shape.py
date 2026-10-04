@@ -25,15 +25,20 @@ import os
 import re
 import subprocess
 
+from tests.workflow_source import render_ops_path
+
 _ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-WF = os.path.join(_ROOT, ".github", "workflows", "render-ops.yml")
+REAL_WF = os.path.join(_ROOT, ".github", "workflows", "render-ops.yml")
+# The arms live in .github/render-ops/ops.sh (moved for size headroom); this
+# is the effective source -- the wrapper with that script re-inlined.
+WF = render_ops_path()
 
 # Decimal, not KiB. Measured against a real startup_failure at 513,127.
 CEILING = 512_000
 
 
 def test_the_workflow_is_under_the_startup_ceiling():
-    size = os.path.getsize(WF)
+    size = os.path.getsize(REAL_WF)
     assert size < CEILING, (
         "render-ops.yml is %d bytes, over the %d ceiling. Render returns "
         "startup_failure with NO log, which reads as a syntax error. "

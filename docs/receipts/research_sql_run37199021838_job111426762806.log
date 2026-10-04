@@ -1,0 +1,648 @@
+﻿2026-10-04T11:31:52.7902862Z Current runner version: '2.337.0'
+2026-10-04T11:31:52.7938608Z ##[group]Runner Image Provisioner
+2026-10-04T11:31:52.7939275Z Hosted Compute Agent
+2026-10-04T11:31:52.7939703Z Version: 20260901.588
+2026-10-04T11:31:52.7940131Z Commit: f88ec8081b781fac6c440065ac7ff9e710ce3d0b
+2026-10-04T11:31:52.7940648Z Build Date: 2026-09-01T19:56:44Z
+2026-10-04T11:31:52.7941118Z Worker ID: {323244d2-29ef-4cce-a8b5-11d3ec3d6121}
+2026-10-04T11:31:52.7941583Z Azure Region: centralus
+2026-10-04T11:31:52.7942020Z ##[endgroup]
+2026-10-04T11:31:52.7942925Z ##[group]Operating System
+2026-10-04T11:31:52.7943340Z Ubuntu
+2026-10-04T11:31:52.7943702Z 24.04.5
+2026-10-04T11:31:52.7944085Z LTS
+2026-10-04T11:31:52.7944648Z ##[endgroup]
+2026-10-04T11:31:52.7945048Z ##[group]Runner Image
+2026-10-04T11:31:52.7945505Z Image: ubuntu-24.04
+2026-10-04T11:31:52.7945899Z Version: 20260927.320.1
+2026-10-04T11:31:52.7946828Z Included Software: https://github.com/actions/runner-images/blob/ubuntu24/20260927.320/images/ubuntu/Ubuntu2404-Readme.md
+2026-10-04T11:31:52.7947903Z Image Release: https://github.com/actions/runner-images/releases/tag/ubuntu24%2F20260927.320
+2026-10-04T11:31:52.7948554Z ##[endgroup]
+2026-10-04T11:31:52.7949369Z ##[group]GITHUB_TOKEN Permissions
+2026-10-04T11:31:52.7950866Z Contents: read
+2026-10-04T11:31:52.7951251Z Metadata: read
+2026-10-04T11:31:52.7951656Z Packages: read
+2026-10-04T11:31:52.7952047Z ##[endgroup]
+2026-10-04T11:31:52.7953744Z Secret source: Actions
+2026-10-04T11:31:52.7954818Z Cache mode: write
+2026-10-04T11:31:52.7955304Z Prepare workflow directory
+2026-10-04T11:31:52.8210045Z Prepare all required actions
+2026-10-04T11:31:52.8244721Z Getting action download info
+2026-10-04T11:31:53.0466034Z Download action repository 'actions/checkout@v4' (SHA:11d5960a326750d5838078e36cf38b85af677262)
+2026-10-04T11:31:53.2097079Z Complete job name: research
+2026-10-04T11:31:53.2566723Z ##[group]Run actions/checkout@v4
+2026-10-04T11:31:53.2567315Z with:
+2026-10-04T11:31:53.2567731Z   repository: matthewtaylor141-lab/SportsAssets
+2026-10-04T11:31:53.2570589Z   token: ***
+2026-10-04T11:31:53.2570970Z   ssh-strict: true
+2026-10-04T11:31:53.2571335Z   ssh-user: git
+2026-10-04T11:31:53.2571793Z   persist-credentials: true
+2026-10-04T11:31:53.2572224Z   clean: true
+2026-10-04T11:31:53.2572607Z   sparse-checkout-cone-mode: true
+2026-10-04T11:31:53.2573017Z   fetch-depth: 1
+2026-10-04T11:31:53.2573648Z   fetch-tags: false
+2026-10-04T11:31:53.2574044Z   show-progress: true
+2026-10-04T11:31:53.2574430Z   lfs: false
+2026-10-04T11:31:53.2574941Z   submodules: false
+2026-10-04T11:31:53.2575304Z   set-safe-directory: true
+2026-10-04T11:31:53.2575741Z   allow-unsafe-pr-checkout: false
+2026-10-04T11:31:53.2576370Z ##[endgroup]
+2026-10-04T11:31:53.3345344Z Syncing repository: matthewtaylor141-lab/SportsAssets
+2026-10-04T11:31:53.3346845Z ##[group]Getting Git version info
+2026-10-04T11:31:53.3347536Z Working directory is '/home/runner/work/SportsAssets/SportsAssets'
+2026-10-04T11:31:53.3348367Z [command]/usr/bin/git version
+2026-10-04T11:31:53.3435195Z git version 2.55.0
+2026-10-04T11:31:53.3455656Z ##[endgroup]
+2026-10-04T11:31:53.3466220Z Temporarily overriding HOME='/home/runner/work/_temp/0670f793-c308-4bda-8b44-710bf81b456f' before making global git config changes
+2026-10-04T11:31:53.3467621Z Adding repository directory to the temporary git global config as a safe directory
+2026-10-04T11:31:53.3469821Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/SportsAssets/SportsAssets
+2026-10-04T11:31:53.3507761Z Deleting the contents of '/home/runner/work/SportsAssets/SportsAssets'
+2026-10-04T11:31:53.3511778Z ##[group]Initializing the repository
+2026-10-04T11:31:53.3515594Z [command]/usr/bin/git init /home/runner/work/SportsAssets/SportsAssets
+2026-10-04T11:31:53.3596923Z hint: Using 'master' as the name for the initial branch. This default branch name
+2026-10-04T11:31:53.3598045Z hint: will change to "main" in Git 3.0. To configure the initial branch name
+2026-10-04T11:31:53.3598912Z hint: to use in all of your new repositories, which will suppress this warning,
+2026-10-04T11:31:53.3599834Z hint: call:
+2026-10-04T11:31:53.3600311Z hint:
+2026-10-04T11:31:53.3600879Z hint: 	git config --global init.defaultBranch <name>
+2026-10-04T11:31:53.3601391Z hint:
+2026-10-04T11:31:53.3601874Z hint: Names commonly chosen instead of 'master' are 'main', 'trunk' and
+2026-10-04T11:31:53.3602567Z hint: 'development'. The just-created branch can be renamed via this command:
+2026-10-04T11:31:53.3603128Z hint:
+2026-10-04T11:31:53.3603473Z hint: 	git branch -m <name>
+2026-10-04T11:31:53.3603862Z hint:
+2026-10-04T11:31:53.3604368Z hint: Disable this message with "git config set advice.defaultBranchName false"
+2026-10-04T11:31:53.3605702Z Initialized empty Git repository in /home/runner/work/SportsAssets/SportsAssets/.git/
+2026-10-04T11:31:53.3607393Z [command]/usr/bin/git remote add origin https://github.com/matthewtaylor141-lab/SportsAssets
+2026-10-04T11:31:53.3648607Z ##[endgroup]
+2026-10-04T11:31:53.3649553Z ##[group]Disabling automatic garbage collection
+2026-10-04T11:31:53.3652363Z [command]/usr/bin/git config --local gc.auto 0
+2026-10-04T11:31:53.3678685Z ##[endgroup]
+2026-10-04T11:31:53.3679988Z ##[group]Setting up auth
+2026-10-04T11:31:53.3682524Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+2026-10-04T11:31:53.3702634Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+2026-10-04T11:31:53.3957776Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+2026-10-04T11:31:53.3979418Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+2026-10-04T11:31:53.4121822Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+2026-10-04T11:31:53.4143523Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+2026-10-04T11:31:53.4282770Z [command]/usr/bin/git config --local http.https://github.com/.extraheader AUTHORIZATION: basic ***
+2026-10-04T11:31:53.4312229Z ##[endgroup]
+2026-10-04T11:31:53.4313348Z ##[group]Fetching the repository
+2026-10-04T11:31:53.4319709Z [command]/usr/bin/git -c protocol.version=2 fetch --no-tags --prune --no-recurse-submodules --depth=1 origin +c83c15a104b272cb6d2d44702fc61ef79cbdeb3e:refs/remotes/origin/claude/command-center
+2026-10-04T11:31:57.4869780Z From https://github.com/matthewtaylor141-lab/SportsAssets
+2026-10-04T11:31:57.4871896Z  * [new ref]         c83c15a104b272cb6d2d44702fc61ef79cbdeb3e -> origin/claude/command-center
+2026-10-04T11:31:57.4876055Z ##[endgroup]
+2026-10-04T11:31:57.4877399Z ##[group]Determining the checkout info
+2026-10-04T11:31:57.4878803Z ##[endgroup]
+2026-10-04T11:31:57.4879887Z [command]/usr/bin/git sparse-checkout disable
+2026-10-04T11:31:57.4928266Z [command]/usr/bin/git config --local --unset-all extensions.worktreeConfig
+2026-10-04T11:31:57.4957090Z ##[group]Checking out the ref
+2026-10-04T11:31:57.4960045Z [command]/usr/bin/git checkout --progress --force -B claude/command-center refs/remotes/origin/claude/command-center
+2026-10-04T11:31:58.3451561Z Switched to a new branch 'claude/command-center'
+2026-10-04T11:31:58.3460964Z branch 'claude/command-center' set up to track 'origin/claude/command-center'.
+2026-10-04T11:31:58.3474989Z ##[endgroup]
+2026-10-04T11:31:58.3509657Z [command]/usr/bin/git log -1 --format=%H
+2026-10-04T11:31:58.3529351Z c83c15a104b272cb6d2d44702fc61ef79cbdeb3e
+2026-10-04T11:31:58.3704861Z ##[group]Run set +e
+2026-10-04T11:31:58.3705509Z [36;1mset +e[0m
+2026-10-04T11:31:58.3705783Z [36;1mset -u[0m
+2026-10-04T11:31:58.3706137Z [36;1m# `file` and `render_key` are read from the event payload on disk, not[0m
+2026-10-04T11:31:58.3706619Z [36;1m# mapped through `env:`: the runner prints a step's env block in the log[0m
+2026-10-04T11:31:58.3707207Z [36;1m# header BEFORE any ::add-mask:: in this script runs, so a key mapped[0m
+2026-10-04T11:31:58.3707646Z [36;1m# there would be exposed before it could be masked.[0m
+2026-10-04T11:31:58.3708026Z [36;1mFILE="$(jq -r '.inputs.file // empty' "$GITHUB_EVENT_PATH")"[0m
+2026-10-04T11:31:58.3708439Z [36;1mKEY_INPUT="$(jq -r '.inputs.render_key // empty' "$GITHUB_EVENT_PATH")"[0m
+2026-10-04T11:31:58.3708899Z [36;1mTO="$(jq -r '.inputs.timeout_ms // "600000"' "$GITHUB_EVENT_PATH")"[0m
+2026-10-04T11:31:58.3709271Z [36;1mHEAD="$(jq -r '.inputs.head // "800"' "$GITHUB_EVENT_PATH")"[0m
+2026-10-04T11:31:58.3709812Z [36;1m[ -n "$KEY_INPUT" ] && echo "::add-mask::$KEY_INPUT"[0m
+2026-10-04T11:31:58.3710126Z [36;1m[0m
+2026-10-04T11:31:58.3710455Z [36;1m# basename only: no traversal, no absolute paths, no other directory[0m
+2026-10-04T11:31:58.3710802Z [36;1mcase "$FILE" in[0m
+2026-10-04T11:31:58.3711217Z [36;1m  *[!A-Za-z0-9_.-]* | "" | .* ) echo "refused: bad file name '$FILE'"; exit 1 ;;[0m
+2026-10-04T11:31:58.3711589Z [36;1mesac[0m
+2026-10-04T11:31:58.3711888Z [36;1mcase "$FILE" in *.sql) ;; *) echo "refused: not a .sql file"; exit 1 ;; esac[0m
+2026-10-04T11:31:58.3712261Z [36;1mSRC="research/$FILE"[0m
+2026-10-04T11:31:58.3712574Z [36;1m[ -f "$SRC" ] || { echo "refused: no such file $SRC"; exit 1; }[0m
+2026-10-04T11:31:58.3712941Z [36;1m[0m
+2026-10-04T11:31:58.3713226Z [36;1m# THE READ-ONLY GUARD, first of two. Word-boundary match,[0m
+2026-10-04T11:31:58.3713619Z [36;1m# case-insensitive, over the file with `--` comments STRIPPED -- the[0m
+2026-10-04T11:31:58.3714057Z [36;1m# keyword list contains ordinary English words ("do", "create",[0m
+2026-10-04T11:31:58.3714573Z [36;1m# "copy"), so scanning prose would refuse every documented query and[0m
+2026-10-04T11:31:58.3715066Z [36;1m# teach the next person to weaken the guard. Comments cannot execute,[0m
+2026-10-04T11:31:58.3715427Z [36;1m# so removing them loses nothing.[0m
+2026-10-04T11:31:58.3715931Z [36;1mKW='\b(insert|update|delete|drop|alter|truncate|grant|revoke|create|copy|vacuum|reindex|refresh|call|do|merge|lock|set[[:space:]]+role)\b'[0m
+2026-10-04T11:31:58.3716502Z [36;1m# psql BACKSLASH META-COMMANDS ARE CHECKED FIRST, and separately. The[0m
+2026-10-04T11:31:58.3716959Z [36;1m# keyword scan alone would never have seen `\i other.sql` (which runs[0m
+2026-10-04T11:31:58.3717390Z [36;1m# another file) or `\o |sh` (which pipes to a shell), because neither[0m
+2026-10-04T11:31:58.3717764Z [36;1m# contains a SQL verb. Only `\echo` is admitted here.[0m
+2026-10-04T11:31:58.3718194Z [36;1mif grep -qE '^[[:space:]]*\\' "$SRC" && grep -qEv '^[[:space:]]*(\\echo([[:space:]]|$)|[^\\]|$)' "$SRC"; then[0m
+2026-10-04T11:31:58.3718701Z [36;1m  echo "refused: $SRC uses a psql meta-command other than \\echo"[0m
+2026-10-04T11:31:58.3719130Z [36;1m  grep -nE '^[[:space:]]*\\' "$SRC" | grep -vE ':[[:space:]]*\\echo([[:space:]]|$)' | head -20[0m
+2026-10-04T11:31:58.3719522Z [36;1m  exit 1[0m
+2026-10-04T11:31:58.3719766Z [36;1mfi[0m
+2026-10-04T11:31:58.3720058Z [36;1m# Then the keyword scan, over the file with `--` comments AND `\echo`[0m
+2026-10-04T11:31:58.3720518Z [36;1m# lines removed. Both are inert text, and both routinely contain the[0m
+2026-10-04T11:31:58.3720992Z [36;1m# ordinary English words in the list ("do", "create", "copy"); scanning[0m
+2026-10-04T11:31:58.3721426Z [36;1m# them refuses honestly-documented queries and teaches the next person[0m
+2026-10-04T11:31:58.3721806Z [36;1m# to weaken the guard rather than respect it.[0m
+2026-10-04T11:31:58.3722257Z [36;1msed -e 's/--.*$//' -e '/^[[:space:]]*\\echo/d' "$SRC" > /tmp/stripped.sql[0m
+2026-10-04T11:31:58.3722677Z [36;1mif grep -qiE "$KW" /tmp/stripped.sql; then[0m
+2026-10-04T11:31:58.3723121Z [36;1m  echo "refused: $SRC contains a mutating keyword in executable SQL; this surface is read-only"[0m
+2026-10-04T11:31:58.3723557Z [36;1m  grep -niE "$KW" /tmp/stripped.sql | head -20[0m
+2026-10-04T11:31:58.3723853Z [36;1m  exit 1[0m
+2026-10-04T11:31:58.3724135Z [36;1mfi[0m
+2026-10-04T11:31:58.3724616Z [36;1mcase "$TO" in ''|*[!0-9]*) echo "refused: timeout_ms must be digits"; exit 1 ;; esac[0m
+2026-10-04T11:31:58.3725062Z [36;1mcase "$HEAD" in ''|*[!0-9]*) echo "refused: head must be digits"; exit 1 ;; esac[0m
+2026-10-04T11:31:58.3725510Z [36;1m[0m
+2026-10-04T11:31:58.3725780Z [36;1mKEY="$KEY_SECRET"; [ -z "$KEY" ] && KEY="$KEY_INPUT"[0m
+2026-10-04T11:31:58.3726197Z [36;1m[ -z "$KEY" ] && { echo "no Render key: set the RENDER_API_KEY secret or pass render_key"; exit 1; }[0m
+2026-10-04T11:31:58.3726666Z [36;1mecho "::add-mask::$KEY"[0m
+2026-10-04T11:31:58.3727072Z [36;1mAPI=https://api.render.com/v1[0m
+2026-10-04T11:31:58.3727796Z [36;1mget() { curl -sS --max-time 45 -H "Authorization: ***" -H "Accept: application/json" "$API$1"; }[0m
+2026-10-04T11:31:58.3728416Z [36;1mPG=$(get "/postgres?name=$SERVICE&limit=20" | jq -r --arg n "$SERVICE" '.[]? | select(.postgres.name==$n) | .postgres.id' 2>/dev/null | head -1)[0m
+2026-10-04T11:31:58.3728950Z [36;1m[ -z "$PG" ] && { echo "no database named $SERVICE"; exit 1; }[0m
+2026-10-04T11:31:58.3729282Z [36;1m[0m
+2026-10-04T11:31:58.3729731Z [36;1mcommand -v psql >/dev/null 2>&1 || { sudo apt-get update -qq >/dev/null 2>&1; sudo apt-get install -y -qq postgresql-client >/dev/null 2>&1; }[0m
+2026-10-04T11:31:58.3730352Z [36;1mget "/postgres/$PG/connection-info" > /tmp/ci.json[0m
+2026-10-04T11:31:58.3730731Z [36;1mEXT=$(jq -r '.externalConnectionString // empty' /tmp/ci.json)[0m
+2026-10-04T11:31:58.3731100Z [36;1mPW=$(jq -r '.password // empty' /tmp/ci.json)[0m
+2026-10-04T11:31:58.3731508Z [36;1m[ -n "$PW" ] && echo "::add-mask::$PW"; [ -n "$EXT" ] && echo "::add-mask::$EXT"[0m
+2026-10-04T11:31:58.3731932Z [36;1m[ -z "$EXT" ] && { echo "no external connection string returned"; exit 1; }[0m
+2026-10-04T11:31:58.3732281Z [36;1m[0m
+2026-10-04T11:31:58.3732599Z [36;1mecho "== $SRC on $SERVICE ($PG) at $(date -u +%FT%TZ), statement_timeout ${TO}ms =="[0m
+2026-10-04T11:31:58.3733002Z [36;1mecho "== sha256 $(sha256sum "$SRC" | cut -d' ' -f1) =="[0m
+2026-10-04T11:31:58.3733429Z [36;1mPGOPTIONS="-c statement_timeout=$TO -c default_transaction_read_only=on" \[0m
+2026-10-04T11:31:58.3733828Z [36;1m  timeout $(( TO / 1000 + 120 )) \[0m
+2026-10-04T11:31:58.3734166Z [36;1m  psql "$EXT" -X -v ON_ERROR_STOP=1 -f "$SRC" 2>&1 \[0m
+2026-10-04T11:31:58.3734615Z [36;1m  | grep -v -F "$PW" | awk -v n="$HEAD" 'NR<=n'[0m
+2026-10-04T11:31:58.3734941Z [36;1mRC=${PIPESTATUS[0]}[0m
+2026-10-04T11:31:58.3735233Z [36;1mecho "psql exit=$RC"[0m
+2026-10-04T11:31:58.3735498Z [36;1m[0m
+2026-10-04T11:31:58.3735821Z [36;1m# TRUNCATION MUST NOT MASQUERADE AS FAILURE EITHER (2026-09-11).[0m
+2026-10-04T11:31:58.3736220Z [36;1m# This was `| head -"$HEAD"`, and head CLOSES THE PIPE as soon as it[0m
+2026-10-04T11:31:58.3736614Z [36;1m# has its lines. That SIGPIPEs grep, grep dies with "write error:[0m
+2026-10-04T11:31:58.3737037Z [36;1m# Broken pipe", psql's own write then fails and psql exits 3 -- the[0m
+2026-10-04T11:31:58.3737458Z [36;1m# SAME code as a real script error. Run 48 hit exactly that: a plan[0m
+2026-10-04T11:31:58.3737886Z [36;1m# longer than head -200, reported as "research SQL failed with exit[0m
+2026-10-04T11:31:58.3738282Z [36;1m# 3", and the SQL was fine (run 49 at head -3000 passed on the same[0m
+2026-10-04T11:31:58.3738691Z [36;1m# commit). That is the mirror image of the run-33 bug below: there a[0m
+2026-10-04T11:31:58.3739096Z [36;1m# dead run looked alive, here a live run looked dead, and the second[0m
+2026-10-04T11:31:58.3739592Z [36;1m# is just as expensive because it sends you hunting a defect that[0m
+2026-10-04T11:31:58.3739956Z [36;1m# does not exist.[0m
+2026-10-04T11:31:58.3740207Z [36;1m#[0m
+2026-10-04T11:31:58.3740513Z [36;1m# awk reads its input to EOF and prints only the first n lines, so[0m
+2026-10-04T11:31:58.3740928Z [36;1m# nothing upstream is ever signalled and RC is always psql's true[0m
+2026-10-04T11:31:58.3741404Z [36;1m# status. The 141 branch below can no longer fire from this pipeline;[0m
+2026-10-04T11:31:58.3741919Z [36;1m# it is kept because `timeout` can still deliver a signal.[0m
+2026-10-04T11:31:58.3742260Z [36;1m[0m
+2026-10-04T11:31:58.3742922Z [36;1m# FAILURE MUST PROPAGATE. This step used to end on the echo above, so[0m
+2026-10-04T11:31:58.3743412Z [36;1m# the job exited 0 whatever psql did, and a run that produced NO[0m
+2026-10-04T11:31:58.3743813Z [36;1m# RESULT rendered as a green tick. That is exactly what happened on[0m
+2026-10-04T11:31:58.3744245Z [36;1m# run 33 (2026-09-11): statement 1 hit the statement timeout,[0m
+2026-10-04T11:31:58.3744865Z [36;1m# ON_ERROR_STOP=1 aborted the file, psql exited 3, and the run was[0m
+2026-10-04T11:31:58.3745308Z [36;1m# reported successful with no rows. Research that died must look dead.[0m
+2026-10-04T11:31:58.3745720Z [36;1m#[0m
+2026-10-04T11:31:58.3746040Z [36;1m# 141 is the one tolerated non-zero: `head -$HEAD` closes the pipe once[0m
+2026-10-04T11:31:58.3746499Z [36;1m# it has its lines, psql takes SIGPIPE, and that is OUTPUT TRUNCATION,[0m
+2026-10-04T11:31:58.3746938Z [36;1m# not a query failure. It is called out rather than swallowed so a[0m
+2026-10-04T11:31:58.3747342Z [36;1m# truncated result is never mistaken for a complete one.[0m
+2026-10-04T11:31:58.3747802Z [36;1m# 124 is `timeout` killing the wall clock and is a real failure, as is[0m
+2026-10-04T11:31:58.3748209Z [36;1m# every psql status (1 fatal, 2 connection, 3 script error).[0m
+2026-10-04T11:31:58.3748590Z [36;1mif [ "$RC" = "141" ]; then[0m
+2026-10-04T11:31:58.3749025Z [36;1m  echo "::warning::output truncated at head -$HEAD (psql SIGPIPE); the query itself completed"[0m
+2026-10-04T11:31:58.3749561Z [36;1melif [ "$RC" != "0" ]; then[0m
+2026-10-04T11:31:58.3749987Z [36;1m  echo "::error::research SQL failed with exit $RC -- the results above are incomplete or absent"[0m
+2026-10-04T11:31:58.3750383Z [36;1m  exit "$RC"[0m
+2026-10-04T11:31:58.3750676Z [36;1mfi[0m
+2026-10-04T11:31:58.3909637Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+2026-10-04T11:31:58.3910020Z env:
+2026-10-04T11:31:58.3910336Z   SERVICE: sportsassets-db
+2026-10-04T11:31:58.3910742Z   KEY_SECRET: ***
+2026-10-04T11:31:58.3910989Z ##[endgroup]
+2026-10-04T11:31:58.7554951Z == research/c28_coverage_receipt_final.sql on sportsassets-db (dpg-d9gcudurnols73ce4avg-a) at 2026-10-04T11:31:58Z, statement_timeout 600000ms ==
+2026-10-04T11:31:58.7619854Z == sha256 a0d648e47b84ea8336f529f1d4bc4664f6ce1d6d0646a1d4d4af3690dc02f8c1 ==
+2026-10-04T11:32:00.2268640Z == R0 · read instant, schema head ==
+2026-10-04T11:32:00.2269607Z             read_at            |     read_at_et      |          schema_head          
+2026-10-04T11:32:00.2270143Z -------------------------------+---------------------+-------------------------------
+2026-10-04T11:32:00.2270731Z  2026-10-04 11:31:59.450706+00 | 2026-10-04 07:31:59 | 219_digital_twin_evidence.sql
+2026-10-04T11:32:00.2271199Z (1 row)
+2026-10-04T11:32:00.2271347Z 
+2026-10-04T11:32:00.2271755Z == R1 · collector last cycle: requested / budget / dropped / rejected / boards ==
+2026-10-04T11:32:00.2273719Z               at               | age_s |                                            requested                                            | budget |       budget_dropped       |                                                                                                                                                                                                                                                                                 rejected                                                                                                                                                                                                                                                                                 |                                                                            soccer_board                                                                            |      football_board       
+2026-10-04T11:32:00.2276603Z -------------------------------+-------+-------------------------------------------------------------------------------------------------+--------+----------------------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------+---------------------------
+2026-10-04T11:32:00.2280089Z  2026-10-04 11:30:21.000697+00 |    99 | ["baseball_mlb", "soccer_uefa_nations_league", "americanfootball_nfl", "soccer_brazil_serie_b"] | 4      | ["americanfootball_ncaaf"] | [{"key": "soccer_argentina_primera_nacional", "token": "arg2", "refusal": "PROVIDER_DOES_NOT_LIST_THIS_COMPETITION"}, {"key": "soccer_colombia_primera_a", "token": "lco", "refusal": "PROVIDER_DOES_NOT_LIST_THIS_COMPETITION"}, {"key": "soccer_concacaf_nations_league", "token": "cnl", "refusal": "PROVIDER_DOES_NOT_LIST_THIS_COMPETITION"}, {"key": "soccer_uruguay_primera_division", "token": "uru1", "refusal": "PROVIDER_DOES_NOT_LIST_THIS_COMPETITION"}, {"key": "soccer_usa_nwsl", "token": "nwsl", "refusal": "PROVIDER_DOES_NOT_LIST_THIS_COMPETITION"}] | ["ncaaws", "unl", "intf", "ncaams", "arg2", "ngnpfl", "brb", "lpa", "gtasc", "lco", "cnl", "wsl", "ven2", "bra", "lal2", "ghpl", "uru1", "ch1cl", "mne2", "sercb"] | [["nfl", 15], ["cfb", 3]]
+2026-10-04T11:32:00.2282058Z (1 row)
+2026-10-04T11:32:00.2282218Z 
+2026-10-04T11:32:00.2282904Z        provider_sport       |                                                                                                                                                                                                                                                                                                       funnel_step                                                                                                                                                                                                                                                                                                        
+2026-10-04T11:32:00.2284962Z ----------------------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+2026-10-04T11:32:00.2287451Z  americanfootball_nfl       | {"family": "football", "written": 0, "refusals": {"NO_PINNACLE_ON_EVENT": 13, "QUOTE_STALE_ON_ARRIVAL": 10}, "evaluated": 0, "venue_labels": [], "provider_events": 28, "identity_resolved": 15, "with_pinnacle_h2h": 15, "mapping_confirmation": {"ok": true, "why": "15 of the provider's 28 fixtures match a venue fixture one-to-one on both sides and on the date", "matches": 15, "refusal": null, "examined": 28, "min_required": 1, "matched_fixtures": [{"venue": "IND Colts vs. WAS Commanders", "strong": true, "provider": "Washington Commanders vs Indianapolis Colts", "date_check": {"same": true, "gap_
+2026-10-04T11:32:00.2289488Z  baseball_mlb               | {"family": "baseball", "written": 0, "refusals": {"QUOTE_STALE_ON_ARRIVAL": 2}, "evaluated": 0, "venue_labels": ["MLB"], "provider_events": 4, "identity_resolved": 4, "with_pinnacle_h2h": 4, "venue_native_replaced": {}, "mapped_by_venue_native": 0, "mapped_to_a_venue_contract": 4, "venue_markets_open_and_fresh": 20, "recorded_for_calibration_only": 1}
+2026-10-04T11:32:00.2291674Z  soccer_brazil_serie_b      | {"family": "soccer", "written": 0, "refusals": {"QUOTE_STALE_ON_ARRIVAL": 2, "NO_VENUE_CONTRACT_FOR_EVENT": 4, "NO_VENUE_NATIVE_EVENT_FOR_FIXTURE": 2, "VENUE_NATIVE_EVENT_MATCHES_ONLY_ONE_TEAM": 2}, "evaluated": 0, "venue_labels": ["Soccer"], "provider_events": 10, "identity_resolved": 6, "with_pinnacle_h2h": 10, "mapping_confirmation": {"ok": true, "why": "7 of the provider's 10 fixtures match a venue fixture one-to-one on both sides and on the date", "matches": 7, "refusal": null, "examined": 10, "min_required": 1, "matched_fixtures": [{"venue": "SC Recife vs. Sao Bernardo FC", "strong": tru
+2026-10-04T11:32:00.2294311Z  soccer_uefa_nations_league | {"family": "soccer", "written": 0, "refusals": {"NO_PINNACLE_ON_EVENT": 13, "QUOTE_STALE_ON_ARRIVAL": 3, "NO_VENUE_CONTRACT_FOR_EVENT": 2, "VENUE_NATIVE_EVENT_MATCHES_ONLY_ONE_TEAM": 2}, "evaluated": 0, "venue_labels": ["Soccer"], "provider_events": 22, "identity_resolved": 7, "with_pinnacle_h2h": 9, "mapping_confirmation": {"ok": true, "why": "7 of the provider's 22 fixtures match a venue fixture one-to-one on both sides and on the date", "matches": 7, "refusal": null, "examined": 22, "min_required": 1, "matched_fixtures": [{"venue": "Azerbaijan vs. Lithuania", "strong": true, "provider": "Az
+2026-10-04T11:32:00.2295881Z (4 rows)
+2026-10-04T11:32:00.2296042Z 
+2026-10-04T11:32:00.2296262Z == R2 · PinnAPI scope and heartbeat ==
+2026-10-04T11:32:00.2296603Z  scope_sport_ids |  feed_state  |         feed_beat_at          
+2026-10-04T11:32:00.2296959Z -----------------+--------------+-------------------------------
+2026-10-04T11:32:00.2297358Z  [6, 1]          | OWNER_SYNCED | 2026-10-04 11:31:54.972607+00
+2026-10-04T11:32:00.2297662Z (1 row)
+2026-10-04T11:32:00.2297827Z 
+2026-10-04T11:32:00.2298028Z == R3 · paper sessions and decision strategies since 2026-10-02 ==
+2026-10-04T11:32:00.2298520Z            session_id           |   account_id    | status |          started_at           | stopped_at | stopped_why 
+2026-10-04T11:32:00.2299062Z --------------------------------+-----------------+--------+-------------------------------+------------+-------------
+2026-10-04T11:32:00.2299604Z  paper_session_20261001T014716Z | paper_acct_main | ACTIVE | 2026-10-01 01:47:16.806494+00 |            | 
+2026-10-04T11:32:00.2300036Z (1 row)
+2026-10-04T11:32:00.2300149Z 
+2026-10-04T11:32:00.2300382Z            strategy            | decisions | enter |           first_at            |            last_at            
+2026-10-04T11:32:00.2300896Z -------------------------------+-----------+-------+-------------------------------+-------------------------------
+2026-10-04T11:32:00.2301437Z  PINNACLE_COMPLETED_GAME_PAPER |      3127 |    37 | 2026-10-02 00:02:05.928482+00 | 2026-10-04 11:29:47.460068+00
+2026-10-04T11:32:00.2301958Z  DEREK_ENTRY_POLICY_V2         |      3127 |     0 | 2026-10-02 00:02:06.081996+00 | 2026-10-04 11:29:47.712036+00
+2026-10-04T11:32:00.2302496Z  PINNACLE_EXPLORATION_PAPER    |      3127 |   106 | 2026-10-02 00:02:06.000678+00 | 2026-10-04 11:29:47.580832+00
+2026-10-04T11:32:00.2302872Z (3 rows)
+2026-10-04T11:32:00.2303006Z 
+2026-10-04T11:32:00.2303144Z == N1 · NFL PER GAME (ET day 2026-10-04) ==
+2026-10-04T11:32:00.2305277Z              game             |      ko_utc       |      ko_et       | et_service_day |  utc_day   | expected |          provider_event          | normalized |        venue_contract        | exact_mapping |                                          settlement_supported                                          |                                  probability_supported                                  | derek_evaluated |          refuse_enter           | paper_order | paper_fill |                                                  first_blocker                                                  |          status          | prov_events_n | cycles | ledger_rows | first_cycle_utc | last_cycle_utc | raw_stage | funnel_reach |                       ledger_last                       | n_val | n_prob |   last_purpose   |                                                                                                                                                 val_refusals                                                                                                                                                 |      d_strategy       |                       derek_refusals                       | last_dec_utc 
+2026-10-04T11:32:00.2309188Z ------------------------------+-------------------+------------------+----------------+------------+----------+----------------------------------+------------+------------------------------+---------------+--------------------------------------------------------------------------------------------------------+-----------------------------------------------------------------------------------------+-----------------+---------------------------------+-------------+------------+-----------------------------------------------------------------------------------------------------------------+--------------------------+---------------+--------+-------------+-----------------+----------------+-----------+--------------+---------------------------------------------------------+-------+--------+------------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+-----------------------+------------------------------------------------------------+--------------
+2026-10-04T11:32:00.2313760Z  IND Colts vs. WAS Commanders | 2026-10-04 13:30Z | 2026-10-04 09:30 | 2026-10-04     | 2026-10-04 | Y        | c9d8ed8aa4889486eaf10a630138ede0 | Y          | aec-nfl-ind-was-2026-10-04 Y | Y             | N:DRAW_HANDLING_NOT_RECONCILED,SETTLEMENT_NOT_SUPPORTED,VOID_ABANDONMENT_RULE_CONFLICTS_WITH_BOOK_RULE | N:INDEPENDENT_FAIR_VALUE_NOT_ESTABLISHED,MARKET_NOT_IN_SUPPORTED_SET,NO_QUALIFIED_MODEL | Y(1)            | REFUSE:SETTLEMENT_NOT_SUPPORTED |           0 |          0 | SETTLEMENT:DRAW_HANDLING_NOT_RECONCILED,SETTLEMENT_NOT_SUPPORTED,VOID_ABANDONMENT_RULE_CONFLICTS_WITH_BOOK_RULE | REFUSING_BY_POLICY       |             1 |     25 |          25 | 10-04 05:32     | 10-04 11:22    |         2 |            4 | REFUSED:2_FRESHNESS:QUOTE_STALE_ON_ARRIVAL              |     1 |      0 | CALIBRATION_ONLY | MARKET_NOT_IN_SUPPORTED_SET,VENUE_BOOK_CURRENCY_NOT_ESTABLISHED,DRAW_HANDLING_NOT_RECONCILED,VOID_ABANDONMENT_RULE_CONFLICTS_WITH_BOOK_RULE,NO_QUALIFIED_MODEL,INDEPENDENT_FAIR_VALUE_NOT_ESTABLISHED,EXECUTION_ESTIMATE_NOT_IDENTIFIED,SIZING_POLICY_NOT_APPLICABLE,RISK_GATE_BLOCKED,NO_ACTION_HAS_POSITIV | DEREK_ENTRY_POLICY_V2 | SETTLEMENT_NOT_SUPPORTED,NO_QUALIFIED_PINNACLE_PROBABILITY | 10-04 07:16
+2026-10-04T11:32:00.2319024Z  ARI Cardinals vs. NY Giants  | 2026-10-04 17:00Z | 2026-10-04 13:00 | 2026-10-04     | 2026-10-04 | Y        | 664e6bda5721dc63be16bcf7d962a436 | Y          | aec-nfl-ari-nyg-2026-10-04 Y | Y             | N:DRAW_HANDLING_NOT_RECONCILED,SETTLEMENT_NOT_SUPPORTED,VOID_ABANDONMENT_RULE_CONFLICTS_WITH_BOOK_RULE | N:INDEPENDENT_FAIR_VALUE_NOT_ESTABLISHED,MARKET_NOT_IN_SUPPORTED_SET,NO_QUALIFIED_MODEL | Y(1)            | REFUSE:SETTLEMENT_NOT_SUPPORTED |           0 |          0 | SETTLEMENT:DRAW_HANDLING_NOT_RECONCILED,SETTLEMENT_NOT_SUPPORTED,VOID_ABANDONMENT_RULE_CONFLICTS_WITH_BOOK_RULE | REFUSING_BY_POLICY       |             1 |     25 |          25 | 10-04 05:32     | 10-04 11:22    |         2 |            4 | REFUSED:2_FRESHNESS:VENUE_BOOK_CURRENCY_NOT_ESTABLISHED |     1 |      0 | CALIBRATION_ONLY | MARKET_NOT_IN_SUPPORTED_SET,VENUE_BOOK_CURRENCY_NOT_ESTABLISHED,DRAW_HANDLING_NOT_RECONCILED,VOID_ABANDONMENT_RULE_CONFLICTS_WITH_BOOK_RULE,NO_QUALIFIED_MODEL,INDEPENDENT_FAIR_VALUE_NOT_ESTABLISHED,EXECUTION_ESTIMATE_NOT_IDENTIFIED,SIZING_POLICY_NOT_APPLICABLE,RISK_GATE_BLOCKED,NO_ACTION_HAS_POSITIV | DEREK_ENTRY_POLICY_V2 | SETTLEMENT_NOT_SUPPORTED,NO_QUALIFIED_PINNACLE_PROBABILITY | 10-04 06:47
+2026-10-04T11:32:00.2324118Z  DAL Cowboys vs. HOU Texans   | 2026-10-04 17:00Z | 2026-10-04 13:00 | 2026-10-04     | 2026-10-04 | Y        | daf55e2df5341c007fee5a0fc5bbc2d4 | Y          | aec-nfl-dal-hou-2026-10-04 Y | Y             | N:DRAW_HANDLING_NOT_RECONCILED,SETTLEMENT_NOT_SUPPORTED,VOID_ABANDONMENT_RULE_CONFLICTS_WITH_BOOK_RULE | N:INDEPENDENT_FAIR_VALUE_NOT_ESTABLISHED,MARKET_NOT_IN_SUPPORTED_SET,NO_QUALIFIED_MODEL | Y(1)            | REFUSE:SETTLEMENT_NOT_SUPPORTED |           0 |          0 | SETTLEMENT:DRAW_HANDLING_NOT_RECONCILED,SETTLEMENT_NOT_SUPPORTED,VOID_ABANDONMENT_RULE_CONFLICTS_WITH_BOOK_RULE | REFUSING_BY_POLICY       |             1 |     25 |          25 | 10-04 05:32     | 10-04 11:22    |         2 |            4 | REFUSED:2_FRESHNESS:QUOTE_STALE_ON_ARRIVAL              |     1 |      0 | CALIBRATION_ONLY | MARKET_NOT_IN_SUPPORTED_SET,VENUE_BOOK_CURRENCY_NOT_ESTABLISHED,DRAW_HANDLING_NOT_RECONCILED,VOID_ABANDONMENT_RULE_CONFLICTS_WITH_BOOK_RULE,NO_QUALIFIED_MODEL,INDEPENDENT_FAIR_VALUE_NOT_ESTABLISHED,EXECUTION_ESTIMATE_NOT_IDENTIFIED,SIZING_POLICY_NOT_APPLICABLE,RISK_GATE_BLOCKED,NO_ACTION_HAS_POSITIV | DEREK_ENTRY_POLICY_V2 | SETTLEMENT_NOT_SUPPORTED,NO_QUALIFIED_PINNACLE_PROBABILITY | 10-04 07:16
+2026-10-04T11:32:00.2329220Z  GB Packers vs. TB Buccaneers | 2026-10-04 17:00Z | 2026-10-04 13:00 | 2026-10-04     | 2026-10-04 | Y        | 99a9bae4dc0dc2590496bd3102b211f2 | Y          | aec-nfl-gb-tb-2026-10-04 Y   | Y             | N:DRAW_HANDLING_NOT_RECONCILED,SETTLEMENT_NOT_SUPPORTED,VOID_ABANDONMENT_RULE_CONFLICTS_WITH_BOOK_RULE | N:INDEPENDENT_FAIR_VALUE_NOT_ESTABLISHED,MARKET_NOT_IN_SUPPORTED_SET,NO_QUALIFIED_MODEL | Y(1)            | REFUSE:SETTLEMENT_NOT_SUPPORTED |           0 |          0 | SETTLEMENT:DRAW_HANDLING_NOT_RECONCILED,SETTLEMENT_NOT_SUPPORTED,VOID_ABANDONMENT_RULE_CONFLICTS_WITH_BOOK_RULE | REFUSING_BY_POLICY       |             1 |     25 |          25 | 10-04 05:32     | 10-04 11:22    |         2 |            4 | REFUSED:2_FRESHNESS:QUOTE_STALE_ON_ARRIVAL              |     1 |      0 | CALIBRATION_ONLY | MARKET_NOT_IN_SUPPORTED_SET,VENUE_BOOK_CURRENCY_NOT_ESTABLISHED,DRAW_HANDLING_NOT_RECONCILED,VOID_ABANDONMENT_RULE_CONFLICTS_WITH_BOOK_RULE,NO_QUALIFIED_MODEL,INDEPENDENT_FAIR_VALUE_NOT_ESTABLISHED,EXECUTION_ESTIMATE_NOT_IDENTIFIED,SIZING_POLICY_NOT_APPLICABLE,RISK_GATE_BLOCKED,NO_ACTION_HAS_POSITIV | DEREK_ENTRY_POLICY_V2 | SETTLEMENT_NOT_SUPPORTED,NO_QUALIFIED_PINNACLE_PROBABILITY | 10-04 09:14
+2026-10-04T11:32:00.2334197Z  JAC Jaguars vs. CIN Bengals  | 2026-10-04 17:00Z | 2026-10-04 13:00 | 2026-10-04     | 2026-10-04 | Y        | 2ea94ddf20f66432b9024fe2e2eaba5f | Y          | aec-nfl-jax-cin-2026-10-04 Y | Y             | N:DRAW_HANDLING_NOT_RECONCILED,SETTLEMENT_NOT_SUPPORTED,VOID_ABANDONMENT_RULE_CONFLICTS_WITH_BOOK_RULE | N:INDEPENDENT_FAIR_VALUE_NOT_ESTABLISHED,MARKET_NOT_IN_SUPPORTED_SET,NO_QUALIFIED_MODEL | Y(1)            | REFUSE:SETTLEMENT_NOT_SUPPORTED |           0 |          0 | SETTLEMENT:DRAW_HANDLING_NOT_RECONCILED,SETTLEMENT_NOT_SUPPORTED,VOID_ABANDONMENT_RULE_CONFLICTS_WITH_BOOK_RULE | REFUSING_BY_POLICY       |             1 |     25 |          25 | 10-04 05:32     | 10-04 11:22    |         2 |            4 | REFUSED:2_FRESHNESS:VENUE_BOOK_READ_FAILED              |     1 |      0 | CALIBRATION_ONLY | MARKET_NOT_IN_SUPPORTED_SET,VENUE_BOOK_CURRENCY_NOT_ESTABLISHED,DRAW_HANDLING_NOT_RECONCILED,VOID_ABANDONMENT_RULE_CONFLICTS_WITH_BOOK_RULE,NO_QUALIFIED_MODEL,INDEPENDENT_FAIR_VALUE_NOT_ESTABLISHED,EXECUTION_ESTIMATE_NOT_IDENTIFIED,SIZING_POLICY_NOT_APPLICABLE,RISK_GATE_BLOCKED,NO_ACTION_HAS_POSITIV | DEREK_ENTRY_POLICY_V2 | SETTLEMENT_NOT_SUPPORTED,NO_QUALIFIED_PINNACLE_PROBABILITY | 10-04 06:17
+2026-10-04T11:32:00.2339078Z  LA Rams vs. PHI Eagles       | 2026-10-04 17:00Z | 2026-10-04 13:00 | 2026-10-04     | 2026-10-04 | Y        | 1b4f2e60ce83fa1d63a5dff83769d27c | Y          | aec-nfl-lar-phi-2026-10-04 Y | Y             | N:DRAW_HANDLING_NOT_RECONCILED,SETTLEMENT_NOT_SUPPORTED,VOID_ABANDONMENT_RULE_CONFLICTS_WITH_BOOK_RULE | N:INDEPENDENT_FAIR_VALUE_NOT_ESTABLISHED,MARKET_NOT_IN_SUPPORTED_SET,NO_QUALIFIED_MODEL | Y(1)            | REFUSE:SETTLEMENT_NOT_SUPPORTED |           0 |          0 | SETTLEMENT:DRAW_HANDLING_NOT_RECONCILED,SETTLEMENT_NOT_SUPPORTED,VOID_ABANDONMENT_RULE_CONFLICTS_WITH_BOOK_RULE | REFUSING_BY_POLICY       |             1 |     25 |          25 | 10-04 05:32     | 10-04 11:22    |         2 |            4 | REFUSED:2_FRESHNESS:QUOTE_STALE_ON_ARRIVAL              |     1 |      0 | CALIBRATION_ONLY | MARKET_NOT_IN_SUPPORTED_SET,VENUE_BOOK_CURRENCY_NOT_ESTABLISHED,DRAW_HANDLING_NOT_RECONCILED,VOID_ABANDONMENT_RULE_CONFLICTS_WITH_BOOK_RULE,NO_QUALIFIED_MODEL,INDEPENDENT_FAIR_VALUE_NOT_ESTABLISHED,EXECUTION_ESTIMATE_NOT_IDENTIFIED,SIZING_POLICY_NOT_APPLICABLE,RISK_GATE_BLOCKED,NO_ACTION_HAS_POSITIV | DEREK_ENTRY_POLICY_V2 | SETTLEMENT_NOT_SUPPORTED,NO_QUALIFIED_PINNACLE_PROBABILITY | 10-04 05:34
+2026-10-04T11:32:00.2344040Z  NE Patriots vs. BUF Bills    | 2026-10-04 17:00Z | 2026-10-04 13:00 | 2026-10-04     | 2026-10-04 | Y        | 573cc0ef39631a4f6673ec843a8bedd4 | Y          | aec-nfl-ne-buf-2026-10-04 Y  | Y             | N:DRAW_HANDLING_NOT_RECONCILED,SETTLEMENT_NOT_SUPPORTED,VOID_ABANDONMENT_RULE_CONFLICTS_WITH_BOOK_RULE | N:INDEPENDENT_FAIR_VALUE_NOT_ESTABLISHED,MARKET_NOT_IN_SUPPORTED_SET,NO_QUALIFIED_MODEL | Y(1)            | REFUSE:SETTLEMENT_NOT_SUPPORTED |           0 |          0 | SETTLEMENT:DRAW_HANDLING_NOT_RECONCILED,SETTLEMENT_NOT_SUPPORTED,VOID_ABANDONMENT_RULE_CONFLICTS_WITH_BOOK_RULE | REFUSING_BY_POLICY       |             1 |     25 |          25 | 10-04 05:32     | 10-04 11:22    |         2 |            4 | REFUSED:2_FRESHNESS:VENUE_BOOK_CURRENCY_NOT_ESTABLISHED |     1 |      0 | CALIBRATION_ONLY | MARKET_NOT_IN_SUPPORTED_SET,VENUE_BOOK_CURRENCY_NOT_ESTABLISHED,DRAW_HANDLING_NOT_RECONCILED,VOID_ABANDONMENT_RULE_CONFLICTS_WITH_BOOK_RULE,NO_QUALIFIED_MODEL,INDEPENDENT_FAIR_VALUE_NOT_ESTABLISHED,EXECUTION_ESTIMATE_NOT_IDENTIFIED,SIZING_POLICY_NOT_APPLICABLE,RISK_GATE_BLOCKED,NO_ACTION_HAS_POSITIV | DEREK_ENTRY_POLICY_V2 | SETTLEMENT_NOT_SUPPORTED,NO_QUALIFIED_PINNACLE_PROBABILITY | 10-04 05:34
+2026-10-04T11:32:00.2349154Z  NY Jets vs. CHI Bears        | 2026-10-04 17:00Z | 2026-10-04 13:00 | 2026-10-04     | 2026-10-04 | Y        | 164e6eb68f31bac190381903c3cccd31 | Y          | aec-nfl-nyj-chi-2026-10-04 Y | Y             | N:DRAW_HANDLING_NOT_RECONCILED,SETTLEMENT_NOT_SUPPORTED,VOID_ABANDONMENT_RULE_CONFLICTS_WITH_BOOK_RULE | N:INDEPENDENT_FAIR_VALUE_NOT_ESTABLISHED,MARKET_NOT_IN_SUPPORTED_SET,NO_QUALIFIED_MODEL | Y(1)            | REFUSE:SETTLEMENT_NOT_SUPPORTED |           0 |          0 | SETTLEMENT:DRAW_HANDLING_NOT_RECONCILED,SETTLEMENT_NOT_SUPPORTED,VOID_ABANDONMENT_RULE_CONFLICTS_WITH_BOOK_RULE | REFUSING_BY_POLICY       |             1 |     25 |          25 | 10-04 05:32     | 10-04 11:22    |         2 |            4 | REFUSED:2_FRESHNESS:QUOTE_STALE_ON_ARRIVAL              |     1 |      0 | CALIBRATION_ONLY | MARKET_NOT_IN_SUPPORTED_SET,VENUE_BOOK_CURRENCY_NOT_ESTABLISHED,DRAW_HANDLING_NOT_RECONCILED,VOID_ABANDONMENT_RULE_CONFLICTS_WITH_BOOK_RULE,NO_QUALIFIED_MODEL,INDEPENDENT_FAIR_VALUE_NOT_ESTABLISHED,EXECUTION_ESTIMATE_NOT_IDENTIFIED,SIZING_POLICY_NOT_APPLICABLE,RISK_GATE_BLOCKED,NO_ACTION_HAS_POSITIV | DEREK_ENTRY_POLICY_V2 | SETTLEMENT_NOT_SUPPORTED,NO_QUALIFIED_PINNACLE_PROBABILITY | 10-04 06:17
+2026-10-04T11:32:00.3049711Z  TEN Titans vs. BAL Ravens    | 2026-10-04 17:00Z | 2026-10-04 13:00 | 2026-10-04     | 2026-10-04 | Y        | f01589b0e7e6dd4f4ac1220a1db81f53 | Y          | aec-nfl-ten-bal-2026-10-04 Y | Y             | N:DRAW_HANDLING_NOT_RECONCILED,SETTLEMENT_NOT_SUPPORTED,VOID_ABANDONMENT_RULE_CONFLICTS_WITH_BOOK_RULE | N:INDEPENDENT_FAIR_VALUE_NOT_ESTABLISHED,MARKET_NOT_IN_SUPPORTED_SET,NO_QUALIFIED_MODEL | Y(1)            | REFUSE:SETTLEMENT_NOT_SUPPORTED |           0 |          0 | SETTLEMENT:DRAW_HANDLING_NOT_RECONCILED,SETTLEMENT_NOT_SUPPORTED,VOID_ABANDONMENT_RULE_CONFLICTS_WITH_BOOK_RULE | REFUSING_BY_POLICY       |             1 |     25 |          25 | 10-04 05:32     | 10-04 11:22    |         2 |            4 | REFUSED:2_FRESHNESS:QUOTE_STALE_ON_ARRIVAL              |     1 |      0 | CALIBRATION_ONLY | MARKET_NOT_IN_SUPPORTED_SET,VENUE_BOOK_CURRENCY_NOT_ESTABLISHED,DRAW_HANDLING_NOT_RECONCILED,VOID_ABANDONMENT_RULE_CONFLICTS_WITH_BOOK_RULE,NO_QUALIFIED_MODEL,INDEPENDENT_FAIR_VALUE_NOT_ESTABLISHED,EXECUTION_ESTIMATE_NOT_IDENTIFIED,SIZING_POLICY_NOT_APPLICABLE,RISK_GATE_BLOCKED,NO_ACTION_HAS_POSITIV | DEREK_ENTRY_POLICY_V2 | SETTLEMENT_NOT_SUPPORTED,NO_QUALIFIED_PINNACLE_PROBABILITY | 10-04 07:16
+2026-10-04T11:32:00.3054042Z  MIA Dolphins vs. MIN Vikings | 2026-10-04 20:05Z | 2026-10-04 16:05 | 2026-10-04     | 2026-10-04 | Y        | c327223d76a3b7b0db8c6c104442f44b | N          | aec-nfl-mia-min-2026-10-04 Y | Y             | -                                                                                                      | -                                                                                       | N               | -                               |           0 |          0 | NORMALIZED:REFUSED:2_FRESHNESS:QUOTE_STALE_ON_ARRIVAL                                                           | REFUSED_BEFORE_VALUATION |             1 |     25 |          25 | 10-04 05:32     | 10-04 11:22    |         2 |            4 | REFUSED:2_FRESHNESS:QUOTE_STALE_ON_ARRIVAL              |     0 |      0 |                  |                                                                                                                                                                                                                                                                                                              |                       |                                                            | 
+2026-10-04T11:32:00.3058740Z  DEN Broncos vs. SF 49ers     | 2026-10-04 20:25Z | 2026-10-04 16:25 | 2026-10-04     | 2026-10-04 | Y        | a7e7efb75a9792ac63480ae6328dca18 | Y          | aec-nfl-den-sf-2026-10-04 Y  | Y             | N:DRAW_HANDLING_NOT_RECONCILED,SETTLEMENT_NOT_SUPPORTED,VOID_ABANDONMENT_RULE_CONFLICTS_WITH_BOOK_RULE | N:INDEPENDENT_FAIR_VALUE_NOT_ESTABLISHED,MARKET_NOT_IN_SUPPORTED_SET,NO_QUALIFIED_MODEL | Y(1)            | REFUSE:SETTLEMENT_NOT_SUPPORTED |           0 |          0 | SETTLEMENT:DRAW_HANDLING_NOT_RECONCILED,SETTLEMENT_NOT_SUPPORTED,VOID_ABANDONMENT_RULE_CONFLICTS_WITH_BOOK_RULE | REFUSING_BY_POLICY       |             1 |     25 |          25 | 10-04 05:32     | 10-04 11:22    |         2 |            4 | REFUSED:2_FRESHNESS:VENUE_BOOK_CURRENCY_NOT_ESTABLISHED |     1 |      0 | CALIBRATION_ONLY | MARKET_NOT_IN_SUPPORTED_SET,VENUE_BOOK_CURRENCY_NOT_ESTABLISHED,DRAW_HANDLING_NOT_RECONCILED,VOID_ABANDONMENT_RULE_CONFLICTS_WITH_BOOK_RULE,NO_QUALIFIED_MODEL,INDEPENDENT_FAIR_VALUE_NOT_ESTABLISHED,EXECUTION_ESTIMATE_NOT_IDENTIFIED,SIZING_POLICY_NOT_APPLICABLE,RISK_GATE_BLOCKED,NO_ACTION_HAS_POSITIV | DEREK_ENTRY_POLICY_V2 | SETTLEMENT_NOT_SUPPORTED,NO_QUALIFIED_PINNACLE_PROBABILITY | 10-04 11:25
+2026-10-04T11:32:00.3064194Z  KC Chiefs vs. LV Raiders     | 2026-10-04 20:25Z | 2026-10-04 16:25 | 2026-10-04     | 2026-10-04 | Y        | e0cbd266dcf997089203a1b33ba0333d | Y          | aec-nfl-kc-lv-2026-10-04 Y   | Y             | N:DRAW_HANDLING_NOT_RECONCILED,SETTLEMENT_NOT_SUPPORTED,VOID_ABANDONMENT_RULE_CONFLICTS_WITH_BOOK_RULE | N:INDEPENDENT_FAIR_VALUE_NOT_ESTABLISHED,MARKET_NOT_IN_SUPPORTED_SET,NO_QUALIFIED_MODEL | Y(1)            | REFUSE:SETTLEMENT_NOT_SUPPORTED |           0 |          0 | SETTLEMENT:DRAW_HANDLING_NOT_RECONCILED,SETTLEMENT_NOT_SUPPORTED,VOID_ABANDONMENT_RULE_CONFLICTS_WITH_BOOK_RULE | REFUSING_BY_POLICY       |             1 |     25 |          25 | 10-04 05:32     | 10-04 11:22    |         2 |            4 | REFUSED:2_FRESHNESS:QUOTE_STALE_ON_ARRIVAL              |     1 |      0 | CALIBRATION_ONLY | MARKET_NOT_IN_SUPPORTED_SET,VENUE_BOOK_CURRENCY_NOT_ESTABLISHED,DRAW_HANDLING_NOT_RECONCILED,VOID_ABANDONMENT_RULE_CONFLICTS_WITH_BOOK_RULE,NO_QUALIFIED_MODEL,INDEPENDENT_FAIR_VALUE_NOT_ESTABLISHED,EXECUTION_ESTIMATE_NOT_IDENTIFIED,SIZING_POLICY_NOT_APPLICABLE,RISK_GATE_BLOCKED,NO_ACTION_HAS_POSITIV | DEREK_ENTRY_POLICY_V2 | SETTLEMENT_NOT_SUPPORTED,NO_QUALIFIED_PINNACLE_PROBABILITY | 10-04 07:16
+2026-10-04T11:32:00.3068429Z  LA Chargers vs. SEA Seahawks | 2026-10-04 20:25Z | 2026-10-04 16:25 | 2026-10-04     | 2026-10-04 | Y        | 96d2373cda647873b971f268482bced0 | N          | aec-nfl-lac-sea-2026-10-04 Y | Y             | -                                                                                                      | -                                                                                       | N               | -                               |           0 |          0 | NORMALIZED:REFUSED:2_FRESHNESS:QUOTE_STALE_ON_ARRIVAL                                                           | REFUSED_BEFORE_VALUATION |             1 |     25 |          25 | 10-04 05:32     | 10-04 11:22    |         2 |            4 | REFUSED:2_FRESHNESS:QUOTE_STALE_ON_ARRIVAL              |     0 |      0 |                  |                                                                                                                                                                                                                                                                                                              |                       |                                                            | 
+2026-10-04T11:32:00.3072574Z  DET Lions vs. CAR Panthers   | 2026-10-05 00:20Z | 2026-10-04 20:20 | 2026-10-04     | 2026-10-05 | Y        | a73a76599a4f3422803e57bd8f61b626 | Y          | aec-nfl-det-car-2026-10-04 Y | Y             | N:DRAW_HANDLING_NOT_RECONCILED,SETTLEMENT_NOT_SUPPORTED,VOID_ABANDONMENT_RULE_CONFLICTS_WITH_BOOK_RULE | N:INDEPENDENT_FAIR_VALUE_NOT_ESTABLISHED,MARKET_NOT_IN_SUPPORTED_SET,NO_QUALIFIED_MODEL | Y(1)            | REFUSE:SETTLEMENT_NOT_SUPPORTED |           0 |          0 | SETTLEMENT:DRAW_HANDLING_NOT_RECONCILED,SETTLEMENT_NOT_SUPPORTED,VOID_ABANDONMENT_RULE_CONFLICTS_WITH_BOOK_RULE | REFUSING_BY_POLICY       |             1 |     25 |          25 | 10-04 05:32     | 10-04 11:22    |         2 |            4 | REFUSED:2_FRESHNESS:QUOTE_STALE_ON_ARRIVAL              |     1 |      0 | CALIBRATION_ONLY | MARKET_NOT_IN_SUPPORTED_SET,VENUE_BOOK_CURRENCY_NOT_ESTABLISHED,DRAW_HANDLING_NOT_RECONCILED,VOID_ABANDONMENT_RULE_CONFLICTS_WITH_BOOK_RULE,NO_QUALIFIED_MODEL,INDEPENDENT_FAIR_VALUE_NOT_ESTABLISHED,EXECUTION_ESTIMATE_NOT_IDENTIFIED,SIZING_POLICY_NOT_APPLICABLE,RISK_GATE_BLOCKED,NO_ACTION_HAS_POSITIV | DEREK_ENTRY_POLICY_V2 | SETTLEMENT_NOT_SUPPORTED,NO_QUALIFIED_PINNACLE_PROBABILITY | 10-04 09:14
+2026-10-04T11:32:00.3075513Z (14 rows)
+2026-10-04T11:32:00.3075679Z 
+2026-10-04T11:32:00.3076118Z == N2 · NFL per game: ledger refusal histogram since 2026-10-01 (stage:first_refusal -> cycles) ==
+2026-10-04T11:32:00.3076788Z                          game                          |        provider_event_id         |                      outcome_stage_refusal                       | n_rows |           first_at            |            last_at            
+2026-10-04T11:32:00.3077615Z -------------------------------------------------------+----------------------------------+------------------------------------------------------------------+--------+-------------------------------+-------------------------------
+2026-10-04T11:32:00.3078616Z  aec-nfl-ari-nyg-2026-10-04                            | 664e6bda5721dc63be16bcf7d962a436 | REFUSED:2_FRESHNESS:QUOTE_STALE_ON_ARRIVAL                       |     15 | 2026-10-04 05:47:53.734495+00 | 2026-10-04 10:57:54.105841+00
+2026-10-04T11:32:00.3079531Z  aec-nfl-ari-nyg-2026-10-04                            | 664e6bda5721dc63be16bcf7d962a436 | REFUSED:2_FRESHNESS:VENUE_BOOK_READ_FAILED                       |      5 | 2026-10-04 05:32:53.670177+00 | 2026-10-04 10:27:52.314865+00
+2026-10-04T11:32:00.3080570Z  aec-nfl-ari-nyg-2026-10-04                            | 664e6bda5721dc63be16bcf7d962a436 | REFUSED:2_FRESHNESS:VENUE_BOOK_CURRENCY_NOT_ESTABLISHED          |      4 | 2026-10-04 06:45:58.376433+00 | 2026-10-04 11:22:58.578086+00
+2026-10-04T11:32:00.3081531Z  aec-nfl-ari-nyg-2026-10-04                            | 664e6bda5721dc63be16bcf7d962a436 | REFUSED:2_FRESHNESS:VENUE_BOOK_CURRENCY_CONTRADICTED_BY_CONTRACT |      1 | 2026-10-04 10:12:52.253516+00 | 2026-10-04 10:12:52.253516+00
+2026-10-04T11:32:00.3082535Z  aec-nfl-atl-no-2026-10-05                             | 8bd90781e17e6d97df3941063cedae1e | REFUSED:2_FRESHNESS:QUOTE_STALE_ON_ARRIVAL                       |     21 | 2026-10-04 05:32:53.670177+00 | 2026-10-04 11:12:54.167632+00
+2026-10-04T11:32:00.3083433Z  aec-nfl-atl-no-2026-10-05                             | 8bd90781e17e6d97df3941063cedae1e | REFUSED:2_FRESHNESS:VENUE_BOOK_READ_FAILED                       |      3 | 2026-10-04 05:47:53.734495+00 | 2026-10-04 11:22:58.578086+00
+2026-10-04T11:32:00.3084366Z  aec-nfl-atl-no-2026-10-05                             | 8bd90781e17e6d97df3941063cedae1e | REFUSED:2_FRESHNESS:VENUE_BOOK_CURRENCY_NOT_ESTABLISHED          |      1 | 2026-10-04 06:30:58.318773+00 | 2026-10-04 06:30:58.318773+00
+2026-10-04T11:32:00.3085385Z  aec-nfl-dal-hou-2026-10-04                            | daf55e2df5341c007fee5a0fc5bbc2d4 | REFUSED:2_FRESHNESS:QUOTE_STALE_ON_ARRIVAL                       |     23 | 2026-10-04 05:32:53.670177+00 | 2026-10-04 11:22:58.578086+00
+2026-10-04T11:32:00.3086360Z  aec-nfl-dal-hou-2026-10-04                            | daf55e2df5341c007fee5a0fc5bbc2d4 | REFUSED:2_FRESHNESS:VENUE_BOOK_CURRENCY_NOT_ESTABLISHED          |      2 | 2026-10-04 07:15:58.901317+00 | 2026-10-04 11:12:54.167632+00
+2026-10-04T11:32:00.3087359Z  aec-nfl-den-sf-2026-10-04                             | a7e7efb75a9792ac63480ae6328dca18 | REFUSED:2_FRESHNESS:QUOTE_STALE_ON_ARRIVAL                       |     24 | 2026-10-04 05:32:53.670177+00 | 2026-10-04 11:12:54.167632+00
+2026-10-04T11:32:00.3088300Z  aec-nfl-den-sf-2026-10-04                             | a7e7efb75a9792ac63480ae6328dca18 | REFUSED:2_FRESHNESS:VENUE_BOOK_CURRENCY_NOT_ESTABLISHED          |      1 | 2026-10-04 11:22:58.578086+00 | 2026-10-04 11:22:58.578086+00
+2026-10-04T11:32:00.3089722Z  aec-nfl-det-car-2026-10-04                            | a73a76599a4f3422803e57bd8f61b626 | REFUSED:2_FRESHNESS:QUOTE_STALE_ON_ARRIVAL                       |     22 | 2026-10-04 05:32:53.670177+00 | 2026-10-04 11:22:58.578086+00
+2026-10-04T11:32:00.3090660Z  aec-nfl-det-car-2026-10-04                            | a73a76599a4f3422803e57bd8f61b626 | REFUSED:2_FRESHNESS:VENUE_BOOK_READ_FAILED                       |      2 | 2026-10-04 07:15:58.901317+00 | 2026-10-04 11:12:54.167632+00
+2026-10-04T11:32:00.3091579Z  aec-nfl-det-car-2026-10-04                            | a73a76599a4f3422803e57bd8f61b626 | REFUSED:2_FRESHNESS:VENUE_BOOK_CURRENCY_NOT_ESTABLISHED          |      1 | 2026-10-04 09:12:51.969496+00 | 2026-10-04 09:12:51.969496+00
+2026-10-04T11:32:00.3092510Z  aec-nfl-gb-tb-2026-10-04                              | 99a9bae4dc0dc2590496bd3102b211f2 | REFUSED:2_FRESHNESS:QUOTE_STALE_ON_ARRIVAL                       |     24 | 2026-10-04 05:32:53.670177+00 | 2026-10-04 11:22:58.578086+00
+2026-10-04T11:32:00.3093488Z  aec-nfl-gb-tb-2026-10-04                              | 99a9bae4dc0dc2590496bd3102b211f2 | REFUSED:2_FRESHNESS:VENUE_BOOK_CURRENCY_NOT_ESTABLISHED          |      1 | 2026-10-04 09:12:51.969496+00 | 2026-10-04 09:12:51.969496+00
+2026-10-04T11:32:00.3094341Z  aec-nfl-ind-was-2026-10-04                            | c9d8ed8aa4889486eaf10a630138ede0 | REFUSED:2_FRESHNESS:QUOTE_STALE_ON_ARRIVAL                       |     23 | 2026-10-04 05:32:53.670177+00 | 2026-10-04 11:22:58.578086+00
+2026-10-04T11:32:00.3095416Z  aec-nfl-ind-was-2026-10-04                            | c9d8ed8aa4889486eaf10a630138ede0 | REFUSED:2_FRESHNESS:VENUE_BOOK_CURRENCY_NOT_ESTABLISHED          |      2 | 2026-10-04 07:15:58.901317+00 | 2026-10-04 11:12:54.167632+00
+2026-10-04T11:32:00.3096422Z  aec-nfl-jax-cin-2026-10-04                            | 2ea94ddf20f66432b9024fe2e2eaba5f | REFUSED:2_FRESHNESS:VENUE_BOOK_CURRENCY_NOT_ESTABLISHED          |     11 | 2026-10-04 06:15:58.045079+00 | 2026-10-04 10:12:52.253516+00
+2026-10-04T11:32:00.3097321Z  aec-nfl-jax-cin-2026-10-04                            | 2ea94ddf20f66432b9024fe2e2eaba5f | REFUSED:2_FRESHNESS:QUOTE_STALE_ON_ARRIVAL                       |      9 | 2026-10-04 05:47:53.734495+00 | 2026-10-04 11:12:54.167632+00
+2026-10-04T11:32:00.3850758Z  aec-nfl-jax-cin-2026-10-04                            | 2ea94ddf20f66432b9024fe2e2eaba5f | REFUSED:2_FRESHNESS:VENUE_BOOK_READ_FAILED                       |      5 | 2026-10-04 05:32:53.670177+00 | 2026-10-04 11:22:58.578086+00
+2026-10-04T11:32:00.3851686Z  aec-nfl-kc-lv-2026-10-04                              | e0cbd266dcf997089203a1b33ba0333d | REFUSED:2_FRESHNESS:QUOTE_STALE_ON_ARRIVAL                       |     24 | 2026-10-04 05:32:53.670177+00 | 2026-10-04 11:22:58.578086+00
+2026-10-04T11:32:00.3852539Z  aec-nfl-kc-lv-2026-10-04                              | e0cbd266dcf997089203a1b33ba0333d | REFUSED:2_FRESHNESS:VENUE_BOOK_CURRENCY_NOT_ESTABLISHED          |      1 | 2026-10-04 07:15:58.901317+00 | 2026-10-04 07:15:58.901317+00
+2026-10-04T11:32:00.3853445Z  aec-nfl-lac-sea-2026-10-04                            | 96d2373cda647873b971f268482bced0 | REFUSED:2_FRESHNESS:QUOTE_STALE_ON_ARRIVAL                       |     25 | 2026-10-04 05:32:53.670177+00 | 2026-10-04 11:22:58.578086+00
+2026-10-04T11:32:00.3854281Z  aec-nfl-lar-phi-2026-10-04                            | 1b4f2e60ce83fa1d63a5dff83769d27c | REFUSED:2_FRESHNESS:VENUE_BOOK_CURRENCY_NOT_ESTABLISHED          |     13 | 2026-10-04 05:32:53.670177+00 | 2026-10-04 10:57:54.105841+00
+2026-10-04T11:32:00.3855321Z  aec-nfl-lar-phi-2026-10-04                            | 1b4f2e60ce83fa1d63a5dff83769d27c | REFUSED:2_FRESHNESS:VENUE_BOOK_READ_FAILED                       |      9 | 2026-10-04 05:47:53.734495+00 | 2026-10-04 09:42:52.116812+00
+2026-10-04T11:32:00.3856189Z  aec-nfl-lar-phi-2026-10-04                            | 1b4f2e60ce83fa1d63a5dff83769d27c | REFUSED:2_FRESHNESS:QUOTE_STALE_ON_ARRIVAL                       |      3 | 2026-10-04 08:57:51.912921+00 | 2026-10-04 11:22:58.578086+00
+2026-10-04T11:32:00.3857006Z  aec-nfl-mia-min-2026-10-04                            | c327223d76a3b7b0db8c6c104442f44b | REFUSED:2_FRESHNESS:QUOTE_STALE_ON_ARRIVAL                       |     25 | 2026-10-04 05:32:53.670177+00 | 2026-10-04 11:22:58.578086+00
+2026-10-04T11:32:00.3857846Z  aec-nfl-ne-buf-2026-10-04                             | 573cc0ef39631a4f6673ec843a8bedd4 | REFUSED:2_FRESHNESS:QUOTE_STALE_ON_ARRIVAL                       |     13 | 2026-10-04 05:47:53.734495+00 | 2026-10-04 11:12:54.167632+00
+2026-10-04T11:32:00.3858654Z  aec-nfl-ne-buf-2026-10-04                             | 573cc0ef39631a4f6673ec843a8bedd4 | REFUSED:2_FRESHNESS:VENUE_BOOK_CURRENCY_NOT_ESTABLISHED          |      9 | 2026-10-04 05:32:53.670177+00 | 2026-10-04 11:22:58.578086+00
+2026-10-04T11:32:00.3859597Z  aec-nfl-ne-buf-2026-10-04                             | 573cc0ef39631a4f6673ec843a8bedd4 | REFUSED:2_FRESHNESS:VENUE_BOOK_READ_FAILED                       |      3 | 2026-10-04 07:00:58.839683+00 | 2026-10-04 08:12:51.70929+00
+2026-10-04T11:32:00.3860685Z  aec-nfl-nyj-chi-2026-10-04                            | 164e6eb68f31bac190381903c3cccd31 | REFUSED:2_FRESHNESS:VENUE_BOOK_CURRENCY_NOT_ESTABLISHED          |     12 | 2026-10-04 06:15:58.045079+00 | 2026-10-04 10:27:52.314865+00
+2026-10-04T11:32:00.3861573Z  aec-nfl-nyj-chi-2026-10-04                            | 164e6eb68f31bac190381903c3cccd31 | REFUSED:2_FRESHNESS:VENUE_BOOK_READ_FAILED                       |      7 | 2026-10-04 05:32:53.670177+00 | 2026-10-04 10:57:54.105841+00
+2026-10-04T11:32:00.3862438Z  aec-nfl-nyj-chi-2026-10-04                            | 164e6eb68f31bac190381903c3cccd31 | REFUSED:2_FRESHNESS:QUOTE_STALE_ON_ARRIVAL                       |      4 | 2026-10-04 08:57:51.912921+00 | 2026-10-04 11:22:58.578086+00
+2026-10-04T11:32:00.3863346Z  aec-nfl-nyj-chi-2026-10-04                            | 164e6eb68f31bac190381903c3cccd31 | REFUSED:2_FRESHNESS:VENUE_BOOK_CURRENCY_CONTRADICTED_BY_CONTRACT |      1 | 2026-10-04 09:42:52.116812+00 | 2026-10-04 09:42:52.116812+00
+2026-10-04T11:32:00.3864291Z  aec-nfl-nyj-chi-2026-10-04                            | 164e6eb68f31bac190381903c3cccd31 | REFUSED:2_FRESHNESS:VENUE_BOOK_READ_RETURNED_ERROR               |      1 | 2026-10-04 06:05:37.682029+00 | 2026-10-04 06:05:37.682029+00
+2026-10-04T11:32:00.3865207Z  aec-nfl-ten-bal-2026-10-04                            | f01589b0e7e6dd4f4ac1220a1db81f53 | REFUSED:2_FRESHNESS:QUOTE_STALE_ON_ARRIVAL                       |     24 | 2026-10-04 05:32:53.670177+00 | 2026-10-04 11:22:58.578086+00
+2026-10-04T11:32:00.3866114Z  aec-nfl-ten-bal-2026-10-04                            | f01589b0e7e6dd4f4ac1220a1db81f53 | REFUSED:2_FRESHNESS:VENUE_BOOK_CURRENCY_NOT_ESTABLISHED          |      1 | 2026-10-04 07:15:58.901317+00 | 2026-10-04 07:15:58.901317+00
+2026-10-04T11:32:00.5879694Z  (no slug) Baltimore Ravens at Atlanta Falcons         | 86457f91112732f21ad4bb7d37bd291c | REFUSED:NO_PINNACLE_ON_EVENT                                     |     25 | 2026-10-04 05:32:53.670177+00 | 2026-10-04 11:22:58.578086+00
+2026-10-04T11:32:00.5880788Z  (no slug) Buffalo Bills at Los Angeles Rams           | e6d00eedd87d367e510314bd8cab8f6f | REFUSED:NO_PINNACLE_ON_EVENT                                     |     25 | 2026-10-04 05:32:53.670177+00 | 2026-10-04 11:22:58.578086+00
+2026-10-04T11:32:00.5881644Z  (no slug) Chicago Bears at Green Bay Packers          | 2caea57b1e5cfbba1334cfbfd46f6771 | REFUSED:NO_PINNACLE_ON_EVENT                                     |     25 | 2026-10-04 05:32:53.670177+00 | 2026-10-04 11:22:58.578086+00
+2026-10-04T11:32:00.5882532Z  (no slug) Cincinnati Bengals at Miami Dolphins        | c4647ca1201e6768501877267ca8251b | REFUSED:NO_PINNACLE_ON_EVENT                                     |     25 | 2026-10-04 05:32:53.670177+00 | 2026-10-04 11:22:58.578086+00
+2026-10-04T11:32:00.5883416Z  (no slug) Denver Broncos at Los Angeles Chargers      | d1d408fdfd272046fb517fe992a1c5a0 | REFUSED:NO_PINNACLE_ON_EVENT                                     |     25 | 2026-10-04 05:32:53.670177+00 | 2026-10-04 11:22:58.578086+00
+2026-10-04T11:32:00.5884277Z  (no slug) Detroit Lions at Arizona Cardinals          | f8e7f43f73aa983c5c99c189587f0118 | REFUSED:NO_PINNACLE_ON_EVENT                                     |     25 | 2026-10-04 05:32:53.670177+00 | 2026-10-04 11:22:58.578086+00
+2026-10-04T11:32:00.5885323Z  (no slug) Houston Texans at Tennessee Titans          | cc52bba56e74f5cddbe9011046181c3d | REFUSED:NO_PINNACLE_ON_EVENT                                     |     25 | 2026-10-04 05:32:53.670177+00 | 2026-10-04 11:22:58.578086+00
+2026-10-04T11:32:00.5886199Z  (no slug) Las Vegas Raiders at New England Patriots   | 6b024bad1abb54f597225e4ab9b39d89 | REFUSED:NO_PINNACLE_ON_EVENT                                     |     25 | 2026-10-04 05:32:53.670177+00 | 2026-10-04 11:22:58.578086+00
+2026-10-04T11:32:00.5887069Z  (no slug) Minnesota Vikings at New Orleans Saints     | 2cda9bf0fbe35a2735f0dd8aaafe9eff | REFUSED:NO_PINNACLE_ON_EVENT                                     |     25 | 2026-10-04 05:32:53.670177+00 | 2026-10-04 11:22:58.578086+00
+2026-10-04T11:32:00.5888134Z  (no slug) New York Giants at Washington Commanders    | fbffd0b7722fd81d68d5d62472dc80e8 | REFUSED:NO_PINNACLE_ON_EVENT                                     |     25 | 2026-10-04 05:32:53.670177+00 | 2026-10-04 11:22:58.578086+00
+2026-10-04T11:32:00.5888958Z  (no slug) Philadelphia Eagles at Jacksonville Jaguars | 21b26266f3d78af02eb672e606275d95 | REFUSED:NO_PINNACLE_ON_EVENT                                     |     25 | 2026-10-04 05:32:53.670177+00 | 2026-10-04 11:22:58.578086+00
+2026-10-04T11:32:00.5889943Z  (no slug) San Francisco 49ers at Seattle Seahawks     | 8e5d515b10d8a5ffb324640ed60bcc55 | REFUSED:NO_PINNACLE_ON_EVENT                                     |     25 | 2026-10-04 05:32:53.670177+00 | 2026-10-04 11:22:58.578086+00
+2026-10-04T11:32:00.5890805Z  (no slug) Tampa Bay Buccaneers at Dallas Cowboys      | 259b5df9aa0d10257f56de78523495e0 | REFUSED:NO_PINNACLE_ON_EVENT                                     |     25 | 2026-10-04 05:32:53.670177+00 | 2026-10-04 11:22:58.578086+00
+2026-10-04T11:32:00.5891372Z (51 rows)
+2026-10-04T11:32:00.5891496Z 
+2026-10-04T11:32:00.5891855Z == N3 · NFL Derek decisions since 2026-10-02: verdict x refusal x refusals ==
+2026-10-04T11:32:00.5892389Z            strategy            | verdict |                    refusal                     |                                                        refusals                                                         | n  | games |            last_at            
+2026-10-04T11:32:00.5893210Z -------------------------------+---------+------------------------------------------------+-------------------------------------------------------------------------------------------------------------------------+----+-------+-------------------------------
+2026-10-04T11:32:00.5894093Z  DEREK_ENTRY_POLICY_V2         | REFUSE  | SETTLEMENT_NOT_SUPPORTED                       | SETTLEMENT_NOT_SUPPORTED,NO_QUALIFIED_PINNACLE_PROBABILITY                                                              | 13 |    13 | 2026-10-04 11:25:22.8144+00
+2026-10-04T11:32:00.5895196Z  PINNACLE_COMPLETED_GAME_PAPER | REFUSE  | PINNACLE_PROBABILITY_NOT_QUALIFIED_BY_THE_LANE | PINNACLE_PROBABILITY_NOT_QUALIFIED_BY_THE_LANE,NO_COMPLETED_GAME_TERMS_FOR_THIS_SPORT,NO_QUALIFIED_PINNACLE_PROBABILITY | 13 |    13 | 2026-10-04 11:25:22.671462+00
+2026-10-04T11:32:00.9165881Z  PINNACLE_EXPLORATION_PAPER    | REFUSE  | PINNACLE_PROBABILITY_NOT_QUALIFIED_BY_THE_LANE | PINNACLE_PROBABILITY_NOT_QUALIFIED_BY_THE_LANE,NO_COMPLETED_GAME_TERMS_FOR_THIS_SPORT,NO_QUALIFIED_PINNACLE_PROBABILITY | 13 |    13 | 2026-10-04 11:25:22.727923+00
+2026-10-04T11:32:00.9166906Z (3 rows)
+2026-10-04T11:32:00.9167061Z 
+2026-10-04T11:32:00.9167423Z == A1 · ALL SPORTS: provider ledger per league key, ET day (cycle_at) ==
+2026-10-04T11:32:00.9168183Z            league           |  family  | provider_events | normalized | venue_discovered | mapped | settlement_reach |                                                                                                                                      top_outcomes                                                                                                                                       
+2026-10-04T11:32:00.9169379Z ----------------------------+----------+-----------------+------------+------------------+--------+------------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+2026-10-04T11:32:00.9170620Z  americanfootball_ncaaf     | football |              39 |          5 |                5 |      5 |                0 | {":NO_PINNACLE_ON_EVENT": 39, "2_FRESHNESS:QUOTE_STALE_ON_ARRIVAL": 5, "2_FRESHNESS:VENUE_BOOK_READ_FAILED": 4, "2_FRESHNESS:VENUE_BOOK_CURRENCY_NOT_ESTABLISHED": 5, "2_FRESHNESS:VENUE_BOOK_CURRENCY_CONTRADICTED_BY_CONTRACT": 1}
+2026-10-04T11:32:00.9172188Z  americanfootball_nfl       | football |              28 |         15 |               15 |     15 |                0 | {":NO_PINNACLE_ON_EVENT": 13, "2_FRESHNESS:QUOTE_STALE_ON_ARRIVAL": 15, "2_FRESHNESS:VENUE_BOOK_READ_FAILED": 7, "2_FRESHNESS:VENUE_BOOK_READ_RETURNED_ERROR": 1, "2_FRESHNESS:VENUE_BOOK_CURRENCY_NOT_ESTABLISHED": 13, "2_FRESHNESS:VENUE_BOOK_CURRENCY_CONTRADICTED_BY_CONTRACT": 2}
+2026-10-04T11:32:00.9173638Z  soccer_uefa_nations_league | soccer   |              22 |         13 |               13 |     13 |                0 | {":NO_PINNACLE_ON_EVENT": 15, "2_FRESHNESS:QUOTE_STALE_ON_ARRIVAL": 6, "2_FRESHNESS:VENUE_BOOK_READ_FAILED": 10, "2_FRESHNESS:VENUE_BOOK_READ_RETURNED_ERROR": 6, "2_FRESHNESS:VENUE_BOOK_CURRENCY_NOT_ESTABLISHED": 13, "2_FRESHNESS:VENUE_BOOK_CURRENCY_CONTRADICTED_BY_CONTRACT": 8}
+2026-10-04T11:32:00.9175410Z  soccer_brazil_serie_b      | soccer   |              10 |          6 |                6 |      6 |                0 | {":NO_VENUE_CONTRACT_FOR_EVENT": 4, "2_FRESHNESS:QUOTE_STALE_ON_ARRIVAL": 5, "2_FRESHNESS:VENUE_BOOK_READ_FAILED": 6, "2_FRESHNESS:VENUE_BOOK_CURRENCY_NOT_ESTABLISHED": 6, "2_FRESHNESS:VENUE_BOOK_CURRENCY_CONTRADICTED_BY_CONTRACT": 6}
+2026-10-04T11:32:00.9176767Z  baseball_mlb               | baseball |               5 |          5 |                5 |      5 |                0 | {":NO_PINNACLE_ON_EVENT": 2, "2_FRESHNESS:QUOTE_STALE_ON_ARRIVAL": 5, "2_FRESHNESS:VENUE_BOOK_READ_FAILED": 4, "2_FRESHNESS:VENUE_BOOK_READ_RETURNED_ERROR": 2, "2_FRESHNESS:VENUE_BOOK_CURRENCY_NOT_ESTABLISHED": 4, "2_FRESHNESS:VENUE_BOOK_CURRENCY_CONTRADICTED_BY_CONTRACT": 2}
+2026-10-04T11:32:00.9177626Z (5 rows)
+2026-10-04T11:32:00.9177751Z 
+2026-10-04T11:32:00.9177992Z == A2 · ALL SPORTS: evaluated / decided / enter / orders / fills per league, ET day ==
+2026-10-04T11:32:00.9178582Z            league           | evaluated | with_prob | decided | entered | refused | ordered | filled |                                          refusals                                          
+2026-10-04T11:32:00.9179261Z ----------------------------+-----------+-----------+---------+---------+---------+---------+--------+--------------------------------------------------------------------------------------------
+2026-10-04T11:32:00.9179850Z  americanfootball_nfl       |        13 |         0 |      13 |       0 |      13 |       0 |      0 | {"SETTLEMENT_NOT_SUPPORTED": 13}
+2026-10-04T11:32:00.9180478Z  soccer_uefa_nations_league |        13 |        13 |      13 |       6 |       7 |       6 |      4 | {"BELOW_MIN_GROSS_EDGE": 3, "SETTLEMENT_NOT_SUPPORTED": 3, "STRATEGY_ENTRIES_DISABLED": 1}
+2026-10-04T11:32:00.9181240Z  soccer_brazil_serie_b      |         6 |         6 |       6 |       0 |       6 |       0 |      0 | {"BELOW_MIN_GROSS_EDGE": 3, "NO_QUALIFIED_PINNACLE_PROBABILITY": 3}
+2026-10-04T11:32:00.9181786Z  baseball_mlb               |         4 |         4 |       4 |       2 |       2 |       2 |      2 | {"SETTLEMENT_NOT_SUPPORTED": 2}
+2026-10-04T11:32:00.9927878Z (4 rows)
+2026-10-04T11:32:00.9928202Z 
+2026-10-04T11:32:00.9928747Z == A3 · VENUE BOARD: every league token listed with a game on the ET day, by family ==
+2026-10-04T11:32:00.9929290Z     token     |   family   | events_et_day | events_not_started | contracts 
+2026-10-04T11:32:00.9929785Z --------------+------------+---------------+--------------------+-----------
+2026-10-04T11:32:00.9930203Z  btc          |            |            38 |                  0 |        38
+2026-10-04T11:32:00.9930674Z  kbo          | baseball   |             5 |                  0 |         5
+2026-10-04T11:32:00.9931148Z  npb          | baseball   |             3 |                  0 |         3
+2026-10-04T11:32:00.9931511Z  mlb          | baseball   |             2 |                  2 |       670
+2026-10-04T11:32:00.9931836Z  jpbl         | basketball |            13 |                  0 |        13
+2026-10-04T11:32:00.9932205Z  ita2         | basketball |             8 |                  8 |         8
+2026-10-04T11:32:00.9932540Z  acb          | basketball |             6 |                  3 |         6
+2026-10-04T11:32:00.9932989Z  autbl        | basketball |             5 |                  5 |         5
+2026-10-04T11:32:00.9933367Z  bbl          | basketball |             4 |                  4 |         4
+2026-10-04T11:32:00.9933685Z  lba          | basketball |             4 |                  4 |         4
+2026-10-04T11:32:00.9934031Z  vtb          | basketball |             3 |                  2 |         3
+2026-10-04T11:32:00.9934588Z  bsl          | basketball |             3 |                  2 |         3
+2026-10-04T11:32:00.9934943Z  nba          | basketball |             2 |                  2 |        12
+2026-10-04T11:32:00.9935273Z  wnba         | basketball |             2 |                  2 |       171
+2026-10-04T11:32:00.9935615Z  nbl          | basketball |             2 |                  0 |         2
+2026-10-04T11:32:00.9935970Z  lnb          | basketball |             2 |                  2 |         2
+2026-10-04T11:32:00.9936283Z  lkl          | basketball |             2 |                  2 |         2
+2026-10-04T11:32:00.9936636Z  kbl          | basketball |             2 |                  0 |         2
+2026-10-04T11:32:00.9936949Z  gbl          | basketball |             2 |                  1 |         2
+2026-10-04T11:32:00.9937268Z  slb          | basketball |             1 |                  1 |         1
+2026-10-04T11:32:00.9937634Z  t20icr       | cricket    |             2 |                  2 |         2
+2026-10-04T11:32:00.9937972Z  pdcdarts     | darts      |             1 |                  1 |         1
+2026-10-04T11:32:00.9938309Z  ebfwca       | efootball  |            40 |                  0 |       120
+2026-10-04T11:32:00.9938662Z  ebfsa        | efootball  |            28 |                  0 |        84
+2026-10-04T11:32:00.9939000Z  ebfwcb       | efootball  |            20 |                  0 |        60
+2026-10-04T11:32:00.9939335Z  ebfcwc       | efootball  |             4 |                  0 |        12
+2026-10-04T11:32:00.9939719Z  cs2          | esports    |            21 |                 10 |       252
+2026-10-04T11:32:00.9940062Z  r6           | esports    |             8 |                  6 |        20
+2026-10-04T11:32:00.9940365Z  lol          | esports    |             7 |                  4 |       114
+2026-10-04T11:32:00.9940721Z  ow           | esports    |             7 |                  1 |         7
+2026-10-04T11:32:00.9941129Z  dota2        | esports    |             3 |                  1 |        13
+2026-10-04T11:32:00.9941479Z  valorant     | esports    |             2 |                  1 |        30
+2026-10-04T11:32:00.9941810Z  nfl          | football   |            14 |                 14 |      9716
+2026-10-04T11:32:00.9942135Z  cfb          | football   |             1 |                  0 |       282
+2026-10-04T11:32:00.9942474Z  f1           | futures    |             6 |                  0 |       121
+2026-10-04T11:32:00.9942779Z  temp         | futures    |             5 |                  0 |        30
+2026-10-04T11:32:00.9943100Z  pres         | futures    |             2 |                  2 |        10
+2026-10-04T11:32:00.9943451Z  presmov      | futures    |             1 |                  1 |         8
+2026-10-04T11:32:00.9943774Z  nascar       | futures    |             1 |                  1 |        36
+2026-10-04T11:32:00.9944107Z  ahl          | hockey     |             9 |                  9 |         9
+2026-10-04T11:32:00.9944543Z  del          | hockey     |             7 |                  7 |         7
+2026-10-04T11:32:00.9944879Z  cehl         | hockey     |             6 |                  6 |         6
+2026-10-04T11:32:00.9945206Z  nhl          | hockey     |             5 |                  5 |       903
+2026-10-04T11:32:00.9945539Z  khl          | hockey     |             3 |                  1 |         3
+2026-10-04T11:32:00.9945858Z  snhl         | hockey     |             2 |                  2 |         2
+2026-10-04T11:32:00.9946180Z  ppa          | pickleball |             5 |                  5 |         5
+2026-10-04T11:32:00.9946608Z  top14        | rugby      |             1 |                  1 |         1
+2026-10-04T11:32:00.9946932Z  nrlw         | rugby      |             1 |                  0 |         1
+2026-10-04T11:32:00.9947235Z  nrl          | rugby      |             1 |                  0 |         1
+2026-10-04T11:32:00.9947577Z  prem         | rugby      |             1 |                  1 |         1
+2026-10-04T11:32:00.9947878Z  ncaaws       | soccer     |            74 |                 74 |       222
+2026-10-04T11:32:00.9948285Z  ncaams       | soccer     |            12 |                 12 |        36
+2026-10-04T11:32:00.9948627Z  arg2         | soccer     |            10 |                 10 |        30
+2026-10-04T11:32:00.9948954Z  ngnpfl       | soccer     |            10 |                 10 |        30
+2026-10-04T11:32:00.9949260Z  unl          | soccer     |             8 |                  8 |       632
+2026-10-04T11:32:00.9949606Z  gtasc        | soccer     |             8 |                  8 |        24
+2026-10-04T11:32:00.9949935Z  wsl          | soccer     |             6 |                  6 |        18
+2026-10-04T11:32:00.9950246Z  ghpl         | soccer     |             6 |                  6 |        18
+2026-10-04T11:32:00.9950590Z  ven2         | soccer     |             6 |                  6 |        18
+2026-10-04T11:32:00.9950896Z  j2           | soccer     |             5 |                  0 |        15
+2026-10-04T11:32:00.9951204Z  lal2         | soccer     |             5 |                  5 |        15
+2026-10-04T11:32:00.9951564Z  lco          | soccer     |             5 |                  5 |        15
+2026-10-04T11:32:00.9951863Z  ch1cl        | soccer     |             5 |                  5 |        15
+2026-10-04T11:32:00.9952196Z  sercb        | soccer     |             5 |                  5 |        15
+2026-10-04T11:32:00.9952530Z  sercc        | soccer     |             4 |                  4 |        12
+2026-10-04T11:32:00.9952870Z  intf         | soccer     |             4 |                  4 |        44
+2026-10-04T11:32:00.9953177Z  lpa          | soccer     |             4 |                  4 |        12
+2026-10-04T11:32:00.9953511Z  serca        | soccer     |             4 |                  2 |        12
+2026-10-04T11:32:00.9953824Z  uru1         | soccer     |             4 |                  4 |        12
+2026-10-04T11:32:00.9954128Z  ligaf        | soccer     |             4 |                  2 |        12
+2026-10-04T11:32:00.9954624Z  nwsl         | soccer     |             3 |                  3 |         9
+2026-10-04T11:32:00.9954938Z  cnl          | soccer     |             3 |                  3 |         9
+2026-10-04T11:32:00.9955363Z  norw1        | soccer     |             3 |                  3 |         9
+2026-10-04T11:32:00.9955676Z  fbl          | soccer     |             3 |                  3 |         9
+2026-10-04T11:32:00.9956294Z  bolcup       | soccer     |             3 |                  3 |         9
+2026-10-04T11:32:00.9956675Z  mne2         | soccer     |             3 |                  3 |         9
+2026-10-04T11:32:00.9956992Z  be1vv        | soccer     |             2 |                  2 |         6
+2026-10-04T11:32:00.9957309Z  lng          | soccer     |             2 |                  2 |         6
+2026-10-04T11:32:00.9957644Z  svn3e        | soccer     |             2 |                  1 |         6
+2026-10-04T11:32:00.9957968Z  u19f         | soccer     |             2 |                  0 |         6
+2026-10-04T11:32:00.9958285Z  minw         | soccer     |             1 |                  1 |         3
+2026-10-04T11:32:00.9958613Z  lexp         | soccer     |             1 |                  1 |         3
+2026-10-04T11:32:00.9958942Z  nor1         | soccer     |             1 |                  1 |         3
+2026-10-04T11:32:00.9959248Z  cpach        | soccer     |             1 |                  1 |         3
+2026-10-04T11:32:00.9959610Z  uslc         | soccer     |             1 |                  1 |         3
+2026-10-04T11:32:00.9959988Z  uslcp        | soccer     |             1 |                  1 |         3
+2026-10-04T11:32:00.9960283Z  svk2         | soccer     |             1 |                  0 |         3
+2026-10-04T11:32:00.9960654Z  be1acff      | soccer     |             1 |                  1 |         3
+2026-10-04T11:32:00.9961002Z  setkameua    | table      |           235 |                146 |      1470
+2026-10-04T11:32:00.9961350Z  czechligapro | table      |            55 |                 30 |        55
+2026-10-04T11:32:00.9961762Z  setkamecz    | table      |            51 |                 26 |       324
+2026-10-04T11:32:00.9962084Z  setkamemd    | table      |            36 |                 36 |       216
+2026-10-04T11:32:00.9962423Z  wtt          | table      |            32 |                 12 |        32
+2026-10-04T11:32:00.9962748Z  setkawoua    | table      |            15 |                 15 |        90
+2026-10-04T11:32:00.9963081Z  itfme        | tennis     |           220 |                131 |       220
+2026-10-04T11:32:00.9963397Z  itfwo        | tennis     |           182 |                116 |       182
+2026-10-04T11:32:00.9963740Z  atp          | tennis     |            71 |                 36 |      1295
+2026-10-04T11:32:00.9964068Z  wta          | tennis     |            35 |                 18 |       449
+2026-10-04T11:32:00.9964363Z  utr          | tennis     |            21 |                 20 |        21
+2026-10-04T11:32:00.9964861Z  wtadb        | tennis     |            15 |                  8 |        15
+2026-10-04T11:32:00.9965174Z  atpdb        | tennis     |             3 |                  1 |         3
+2026-10-04T11:32:00.9965461Z (101 rows)
+2026-10-04T11:32:00.9965614Z 
+2026-10-04T11:32:00.9965937Z == I1 · persisted coverage_funnel_snapshots, 2026-10-04, both timezones ==
+2026-10-04T11:32:00.9966797Z         tz        |              league               |   fam    | prov | norm | disc | mapped | settle | eval | decided | entered | refused | ordered | filled | venue |                                                                                         unavailable                                                                                         | computed_utc 
+2026-10-04T11:32:00.9968157Z ------------------+-----------------------------------+----------+------+------+------+--------+--------+------+---------+---------+---------+---------+--------+-------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+--------------
+2026-10-04T11:32:00.9969392Z  America/New_York | americanfootball_ncaaf            | football |   39 |    5 |    5 |      5 |        |    0 |       0 |       0 |       0 |       0 |      0 |     1 | {"settlement_supported": "NOT_MEASURED_BY_THE_COLLECTION_LEDGER: it records no row past stage 4 in this window; settlement is decided per strategy at decision time (see decided/refused)"} | 10-04 11:30
+2026-10-04T11:32:00.9970828Z  America/New_York | americanfootball_nfl              | football |   28 |   15 |   15 |     15 |        |   13 |      13 |       0 |      13 |       0 |      0 |    14 | {"settlement_supported": "NOT_MEASURED_BY_THE_COLLECTION_LEDGER: it records no row past stage 4 in this window; settlement is decided per strategy at decision time (see decided/refused)"} | 10-04 11:30
+2026-10-04T11:32:00.9972181Z  America/New_York | soccer_uefa_nations_league        | soccer   |   22 |   13 |   13 |     13 |        |   13 |      13 |       6 |       7 |       6 |      4 |     8 | {"settlement_supported": "NOT_MEASURED_BY_THE_COLLECTION_LEDGER: it records no row past stage 4 in this window; settlement is decided per strategy at decision time (see decided/refused)"} | 10-04 11:30
+2026-10-04T11:32:00.9973658Z  America/New_York | soccer_brazil_serie_b             | soccer   |   10 |    6 |    6 |      6 |        |    6 |       6 |       0 |       6 |       0 |      0 |     0 | {"settlement_supported": "NOT_MEASURED_BY_THE_COLLECTION_LEDGER: it records no row past stage 4 in this window; settlement is decided per strategy at decision time (see decided/refused)"} | 10-04 11:30
+2026-10-04T11:32:00.9975051Z  America/New_York | baseball_mlb                      | baseball |    5 |    5 |    5 |      5 |        |    4 |       4 |       2 |       2 |       2 |      2 |     2 | {"settlement_supported": "NOT_MEASURED_BY_THE_COLLECTION_LEDGER: it records no row past stage 4 in this window; settlement is decided per strategy at decision time (see decided/refused)"} | 10-04 11:30
+2026-10-04T11:32:00.9976467Z  America/New_York | basketball_nba                    |          |    0 |    0 |    0 |      0 |        |    0 |       0 |       0 |       0 |       0 |      0 |     2 | {"settlement_supported": "NOT_MEASURED_BY_THE_COLLECTION_LEDGER: it records no row past stage 4 in this window; settlement is decided per strategy at decision time (see decided/refused)"} | 10-04 11:30
+2026-10-04T11:32:00.9977699Z  America/New_York | basketball_wnba                   |          |    0 |    0 |    0 |      0 |        |    0 |       0 |       0 |       0 |       0 |      0 |     2 | {"settlement_supported": "NOT_MEASURED_BY_THE_COLLECTION_LEDGER: it records no row past stage 4 in this window; settlement is decided per strategy at decision time (see decided/refused)"} | 10-04 11:30
+2026-10-04T11:32:00.9978949Z  America/New_York | icehockey_nhl                     |          |    0 |    0 |    0 |      0 |        |    0 |       0 |       0 |       0 |       0 |      0 |     5 | {"settlement_supported": "NOT_MEASURED_BY_THE_COLLECTION_LEDGER: it records no row past stage 4 in this window; settlement is decided per strategy at decision time (see decided/refused)"} | 10-04 11:30
+2026-10-04T11:32:00.9980204Z  America/New_York | soccer_argentina_primera_nacional |          |    0 |    0 |    0 |      0 |        |    0 |       0 |       0 |       0 |       0 |      0 |    10 | {"settlement_supported": "NOT_MEASURED_BY_THE_COLLECTION_LEDGER: it records no row past stage 4 in this window; settlement is decided per strategy at decision time (see decided/refused)"} | 10-04 11:30
+2026-10-04T11:32:01.0690812Z  America/New_York | soccer_colombia_primera_a         |          |    0 |    0 |    0 |      0 |        |    0 |       0 |       0 |       0 |       0 |      0 |     5 | {"settlement_supported": "NOT_MEASURED_BY_THE_COLLECTION_LEDGER: it records no row past stage 4 in this window; settlement is decided per strategy at decision time (see decided/refused)"} | 10-04 11:30
+2026-10-04T11:32:01.0692834Z  America/New_York | soccer_concacaf_nations_league    |          |    0 |    0 |    0 |      0 |        |    0 |       0 |       0 |       0 |       0 |      0 |     3 | {"settlement_supported": "NOT_MEASURED_BY_THE_COLLECTION_LEDGER: it records no row past stage 4 in this window; settlement is decided per strategy at decision time (see decided/refused)"} | 10-04 11:30
+2026-10-04T11:32:01.0694962Z  America/New_York | soccer_uruguay_primera_division   |          |    0 |    0 |    0 |      0 |        |    0 |       0 |       0 |       0 |       0 |      0 |     4 | {"settlement_supported": "NOT_MEASURED_BY_THE_COLLECTION_LEDGER: it records no row past stage 4 in this window; settlement is decided per strategy at decision time (see decided/refused)"} | 10-04 11:30
+2026-10-04T11:32:01.0697892Z  America/New_York | soccer_usa_nwsl                   |          |    0 |    0 |    0 |      0 |        |    0 |       0 |       0 |       0 |       0 |      0 |     3 | {"settlement_supported": "NOT_MEASURED_BY_THE_COLLECTION_LEDGER: it records no row past stage 4 in this window; settlement is decided per strategy at decision time (see decided/refused)"} | 10-04 11:30
+2026-10-04T11:32:01.0699422Z  America/New_York | soccer_usa_usl_championship       |          |    0 |    0 |    0 |      0 |        |    0 |       0 |       0 |       0 |       0 |      0 |     1 | {"settlement_supported": "NOT_MEASURED_BY_THE_COLLECTION_LEDGER: it records no row past stage 4 in this window; settlement is decided per strategy at decision time (see decided/refused)"} | 10-04 11:30
+2026-10-04T11:32:01.0700900Z  UTC              | americanfootball_ncaaf            | football |   55 |   15 |   15 |     15 |        |    9 |       9 |       0 |       9 |       0 |      0 |    12 | {"settlement_supported": "NOT_MEASURED_BY_THE_COLLECTION_LEDGER: it records no row past stage 4 in this window; settlement is decided per strategy at decision time (see decided/refused)"} | 10-04 11:30
+2026-10-04T11:32:01.0702209Z  UTC              | americanfootball_nfl              | football |   28 |   15 |   15 |     15 |        |   13 |      13 |       0 |      13 |       0 |      0 |    13 | {"settlement_supported": "NOT_MEASURED_BY_THE_COLLECTION_LEDGER: it records no row past stage 4 in this window; settlement is decided per strategy at decision time (see decided/refused)"} | 10-04 11:30
+2026-10-04T11:32:01.0703584Z  UTC              | soccer_uefa_nations_league        | soccer   |   22 |   13 |   13 |     13 |        |   13 |      13 |       6 |       7 |       6 |      4 |     8 | {"settlement_supported": "NOT_MEASURED_BY_THE_COLLECTION_LEDGER: it records no row past stage 4 in this window; settlement is decided per strategy at decision time (see decided/refused)"} | 10-04 11:30
+2026-10-04T11:32:01.0705000Z  UTC              | soccer_brazil_serie_b             | soccer   |   10 |    6 |    6 |      6 |        |    6 |       6 |       3 |       3 |       3 |      3 |     0 | {"settlement_supported": "NOT_MEASURED_BY_THE_COLLECTION_LEDGER: it records no row past stage 4 in this window; settlement is decided per strategy at decision time (see decided/refused)"} | 10-04 11:30
+2026-10-04T11:32:01.0706291Z  UTC              | baseball_mlb                      | baseball |    6 |    6 |    6 |      6 |        |    6 |       6 |       6 |       0 |       6 |      4 |     3 | {"settlement_supported": "NOT_MEASURED_BY_THE_COLLECTION_LEDGER: it records no row past stage 4 in this window; settlement is decided per strategy at decision time (see decided/refused)"} | 10-04 11:30
+2026-10-04T11:32:01.0707507Z  UTC              | basketball_nba                    |          |    0 |    0 |    0 |      0 |        |    0 |       0 |       0 |       0 |       0 |      0 |     2 | {"settlement_supported": "NOT_MEASURED_BY_THE_COLLECTION_LEDGER: it records no row past stage 4 in this window; settlement is decided per strategy at decision time (see decided/refused)"} | 10-04 11:30
+2026-10-04T11:32:01.1443318Z  UTC              | basketball_wnba                   |          |    0 |    0 |    0 |      0 |        |    0 |       0 |       0 |       0 |       0 |      0 |     2 | {"settlement_supported": "NOT_MEASURED_BY_THE_COLLECTION_LEDGER: it records no row past stage 4 in this window; settlement is decided per strategy at decision time (see decided/refused)"} | 10-04 11:30
+2026-10-04T11:32:01.1444845Z  UTC              | icehockey_nhl                     |          |    0 |    0 |    0 |      0 |        |    0 |       0 |       0 |       0 |       0 |      0 |     7 | {"settlement_supported": "NOT_MEASURED_BY_THE_COLLECTION_LEDGER: it records no row past stage 4 in this window; settlement is decided per strategy at decision time (see decided/refused)"} | 10-04 11:30
+2026-10-04T11:32:01.1446119Z  UTC              | soccer_argentina_primera_nacional |          |    0 |    0 |    0 |      0 |        |    0 |       0 |       0 |       0 |       0 |      0 |    10 | {"settlement_supported": "NOT_MEASURED_BY_THE_COLLECTION_LEDGER: it records no row past stage 4 in this window; settlement is decided per strategy at decision time (see decided/refused)"} | 10-04 11:30
+2026-10-04T11:32:01.1447411Z  UTC              | soccer_colombia_primera_a         |          |    0 |    0 |    0 |      0 |        |    0 |       0 |       0 |       0 |       0 |      0 |     4 | {"settlement_supported": "NOT_MEASURED_BY_THE_COLLECTION_LEDGER: it records no row past stage 4 in this window; settlement is decided per strategy at decision time (see decided/refused)"} | 10-04 11:30
+2026-10-04T11:32:01.1448814Z  UTC              | soccer_concacaf_nations_league    |          |    0 |    0 |    0 |      0 |        |    0 |       0 |       0 |       0 |       0 |      0 |     1 | {"settlement_supported": "NOT_MEASURED_BY_THE_COLLECTION_LEDGER: it records no row past stage 4 in this window; settlement is decided per strategy at decision time (see decided/refused)"} | 10-04 11:30
+2026-10-04T11:32:01.1450132Z  UTC              | soccer_uruguay_primera_division   |          |    0 |    0 |    0 |      0 |        |    0 |       0 |       0 |       0 |       0 |      0 |     4 | {"settlement_supported": "NOT_MEASURED_BY_THE_COLLECTION_LEDGER: it records no row past stage 4 in this window; settlement is decided per strategy at decision time (see decided/refused)"} | 10-04 11:30
+2026-10-04T11:32:01.1451414Z  UTC              | soccer_usa_nwsl                   |          |    0 |    0 |    0 |      0 |        |    0 |       0 |       0 |       0 |       0 |      0 |     4 | {"settlement_supported": "NOT_MEASURED_BY_THE_COLLECTION_LEDGER: it records no row past stage 4 in this window; settlement is decided per strategy at decision time (see decided/refused)"} | 10-04 11:30
+2026-10-04T11:32:01.1452706Z  UTC              | soccer_usa_usl_championship       |          |    0 |    0 |    0 |      0 |        |    0 |       0 |       0 |       0 |       0 |      0 |     5 | {"settlement_supported": "NOT_MEASURED_BY_THE_COLLECTION_LEDGER: it records no row past stage 4 in this window; settlement is decided per strategy at decision time (see decided/refused)"} | 10-04 11:30
+2026-10-04T11:32:01.1453477Z (28 rows)
+2026-10-04T11:32:01.1453605Z 
+2026-10-04T11:32:01.1454000Z == I2 · coverage_collapse_alerts since 2026-10-02 (with the Audrey finding each wrote) ==
+2026-10-04T11:32:01.1454909Z     day     |        tz        |           league           |       kind        |      stage_from      |       stage_to       | severity |         audrey_finding_id          | audrey_refusal | coverage_status |                                  statement                                   | detected_utc |   finding_kind    | finding_severity |  found_utc  
+2026-10-04T11:32:01.1456082Z ------------+------------------+----------------------------+-------------------+----------------------+----------------------+----------+------------------------------------+----------------+-----------------+------------------------------------------------------------------------------+--------------+-------------------+------------------+-------------
+2026-10-04T11:32:01.1457326Z  2026-10-04 | America/New_York | americanfootball_ncaaf     | ABSENT_DOWNSTREAM | settlement_supported | evaluated            | CRITICAL | paperfind:2fc3e31e3052cdfa5a113aba |                |                 | NCAAF: 20 provider event(s); none reached evaluated                          | 10-04 04:16  | COVERAGE_COLLAPSE | CRITICAL         | 10-04 04:16
+2026-10-04T11:32:01.2994682Z  2026-10-03 | America/New_York | americanfootball_ncaaf     | ABSENT_DOWNSTREAM | mapped               | settlement_supported | WARNING  | paperfind:46dd2b049c9723cdf175e21b |                |                 | NCAAF: 27 provider event(s); none reached settlement_supported               | 10-04 00:37  | COVERAGE_COLLAPSE | WARNING          | 10-04 00:37
+2026-10-04T11:32:01.2996728Z  2026-10-02 | America/New_York | soccer_uefa_nations_league | ABSENT_DOWNSTREAM | mapped               | settlement_supported | WARNING  | paperfind:6ec06aeb10256d7834bdcabd |                |                 | UEFA_NATIONS_LEAGUE: 34 provider event(s); none reached settlement_supported | 10-04 00:22  | COVERAGE_COLLAPSE | WARNING          | 10-04 00:22
+2026-10-04T11:32:01.2998106Z  2026-10-03 | America/New_York | soccer_brazil_serie_b      | ABSENT_DOWNSTREAM | mapped               | settlement_supported | WARNING  | paperfind:d2aad973e6e373c273251d1c |                |                 | BRAZIL_SERIE_B: 14 provider event(s); none reached settlement_supported      | 10-04 00:22  | COVERAGE_COLLAPSE | WARNING          | 10-04 00:22
+2026-10-04T11:32:01.2999647Z  2026-10-03 | America/New_York | baseball_mlb               | ABSENT_DOWNSTREAM | mapped               | settlement_supported | WARNING  | paperfind:a546f0c031e808ef3a58ac7b |                |                 | MLB: 6 provider event(s); none reached settlement_supported                  | 10-04 00:22  | COVERAGE_COLLAPSE | WARNING          | 10-04 00:22
+2026-10-04T11:32:01.3000954Z  2026-10-02 | America/New_York | soccer_brazil_serie_b      | ABSENT_DOWNSTREAM | mapped               | settlement_supported | WARNING  | paperfind:751485c0704e6f4f6983b6d5 |                |                 | BRAZIL_SERIE_B: 18 provider event(s); none reached settlement_supported      | 10-04 00:22  | COVERAGE_COLLAPSE | WARNING          | 10-04 00:22
+2026-10-04T11:32:01.3002345Z  2026-10-03 | America/New_York | soccer_uefa_nations_league | ABSENT_DOWNSTREAM | mapped               | settlement_supported | WARNING  | paperfind:d500c8bd313107b8c16c2a98 |                |                 | UEFA_NATIONS_LEAGUE: 24 provider event(s); none reached settlement_supported | 10-04 00:22  | COVERAGE_COLLAPSE | WARNING          | 10-04 00:22
+2026-10-04T11:32:01.3003722Z  2026-10-02 | America/New_York | baseball_mlb               | ABSENT_DOWNSTREAM | mapped               | settlement_supported | WARNING  | paperfind:1ec3cfc109700f1a92f3be37 |                |                 | MLB: 4 provider event(s); none reached settlement_supported                  | 10-04 00:22  | COVERAGE_COLLAPSE | WARNING          | 10-04 00:22
+2026-10-04T11:32:01.3004619Z (8 rows)
+2026-10-04T11:32:01.3004759Z 
+2026-10-04T11:32:01.3005083Z == I3 · Audrey COVERAGE_COLLAPSE findings since 2026-10-02 ==
+2026-10-04T11:32:01.3005589Z              finding_id             |          subject           | severity |       stage_to       |       kind        |    day     |                                  statement                                   |  found_utc  
+2026-10-04T11:32:01.3006314Z ------------------------------------+----------------------------+----------+----------------------+-------------------+------------+------------------------------------------------------------------------------+-------------
+2026-10-04T11:32:01.3007221Z  paperfind:2fc3e31e3052cdfa5a113aba | americanfootball_ncaaf     | CRITICAL | evaluated            | ABSENT_DOWNSTREAM | 2026-10-04 | NCAAF: 20 provider event(s); none reached evaluated                          | 10-04 04:16
+2026-10-04T11:32:01.3008154Z  paperfind:46dd2b049c9723cdf175e21b | americanfootball_ncaaf     | WARNING  | settlement_supported | ABSENT_DOWNSTREAM | 2026-10-03 | NCAAF: 27 provider event(s); none reached settlement_supported               | 10-04 00:37
+2026-10-04T11:32:01.3009185Z  paperfind:a546f0c031e808ef3a58ac7b | baseball_mlb               | WARNING  | settlement_supported | ABSENT_DOWNSTREAM | 2026-10-03 | MLB: 6 provider event(s); none reached settlement_supported                  | 10-04 00:22
+2026-10-04T11:32:01.3010114Z  paperfind:751485c0704e6f4f6983b6d5 | soccer_brazil_serie_b      | WARNING  | settlement_supported | ABSENT_DOWNSTREAM | 2026-10-02 | BRAZIL_SERIE_B: 18 provider event(s); none reached settlement_supported      | 10-04 00:22
+2026-10-04T11:32:01.3011102Z  paperfind:d2aad973e6e373c273251d1c | soccer_brazil_serie_b      | WARNING  | settlement_supported | ABSENT_DOWNSTREAM | 2026-10-03 | BRAZIL_SERIE_B: 14 provider event(s); none reached settlement_supported      | 10-04 00:22
+2026-10-04T11:32:01.3012037Z  paperfind:6ec06aeb10256d7834bdcabd | soccer_uefa_nations_league | WARNING  | settlement_supported | ABSENT_DOWNSTREAM | 2026-10-02 | UEFA_NATIONS_LEAGUE: 34 provider event(s); none reached settlement_supported | 10-04 00:22
+2026-10-04T11:32:01.3013027Z  paperfind:d500c8bd313107b8c16c2a98 | soccer_uefa_nations_league | WARNING  | settlement_supported | ABSENT_DOWNSTREAM | 2026-10-03 | UEFA_NATIONS_LEAGUE: 24 provider event(s); none reached settlement_supported | 10-04 00:22
+2026-10-04T11:32:01.3014026Z  paperfind:1ec3cfc109700f1a92f3be37 | baseball_mlb               | WARNING  | settlement_supported | ABSENT_DOWNSTREAM | 2026-10-02 | MLB: 4 provider event(s); none reached settlement_supported                  | 10-04 00:22
+2026-10-04T11:32:01.3014663Z (8 rows)
+2026-10-04T11:32:01.3014835Z 
+2026-10-04T11:32:01.3015028Z == I4 · coverage_integrity watermark (last pass) ==
+2026-10-04T11:32:01.3015381Z                                   watermark                                  |         last_pass_at          | age_s 
+2026-10-04T11:32:01.3015894Z -----------------------------------------------------------------------------+-------------------------------+-------
+2026-10-04T11:32:01.3016373Z  {"at": 1791113422.1955771, "alerts": 1, "version": "COVERAGE_INTEGRITY_V1"} | 2026-10-04 11:30:22.195577+00 |    99
+2026-10-04T11:32:01.3016741Z (1 row)
+2026-10-04T11:32:01.3016874Z 
+2026-10-04T11:32:01.3017152Z == F1 · NCAAF provider events seen in ET-day cycles: commence, furthest raw stage, slug, refusals ==
+2026-10-04T11:32:01.3017963Z         provider_event_id         |                          fixture                          |    commence_time     |   commence_et    |              slug               | raw_stage | rows_ |          first_cycle          |          last_cycle           |                                                                                                              outcomes                                                                                                               
+2026-10-04T11:32:01.3019304Z ----------------------------------+-----------------------------------------------------------+----------------------+------------------+---------------------------------+-----------+-------+-------------------------------+-------------------------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+2026-10-04T11:32:01.3020933Z  4ec93b02d04c2a019ebd6f4ccd9f7af5 | Baylor Bears at Arizona State Sun Devils                  | 2026-10-04T02:37:00Z | 2026-10-03 22:37 | aec-cfb-bayl-arzst-2026-10-03   |         2 |    11 | 2026-10-04 04:05:30.443236+00 | 2026-10-04 06:15:58.045079+00 | {":NO_PINNACLE_ON_EVENT": 4, "2_FRESHNESS:QUOTE_STALE_ON_ARRIVAL": 1, "2_FRESHNESS:VENUE_BOOK_READ_FAILED": 2, "2_FRESHNESS:VENUE_BOOK_CURRENCY_NOT_ESTABLISHED": 4}
+2026-10-04T11:32:01.3022629Z  63dded0ee467d6f6d03c41673569238d | Cincinnati Bearcats at Arizona Wildcats                   | 2026-10-04T03:08:00Z | 2026-10-03 23:08 | aec-cfb-cin-arz-2026-10-03      |         2 |    11 | 2026-10-04 04:05:30.443236+00 | 2026-10-04 06:15:58.045079+00 | {":NO_PINNACLE_ON_EVENT": 4, "2_FRESHNESS:QUOTE_STALE_ON_ARRIVAL": 2, "2_FRESHNESS:VENUE_BOOK_READ_FAILED": 3, "2_FRESHNESS:VENUE_BOOK_CURRENCY_NOT_ESTABLISHED": 2}
+2026-10-04T11:32:01.3024351Z  23025b717a93bdd8f30424e90a97d68f | Fresno State Bulldogs at Washington State Cougars         | 2026-10-04T01:35:00Z | 2026-10-03 21:35 | aec-cfb-frest-washst-2026-10-03 |         2 |     6 | 2026-10-04 04:05:30.443236+00 | 2026-10-04 05:08:38.282757+00 | {":NO_PINNACLE_ON_EVENT": 2, "2_FRESHNESS:QUOTE_STALE_ON_ARRIVAL": 2, "2_FRESHNESS:VENUE_BOOK_CURRENCY_NOT_ESTABLISHED": 2}
+2026-10-04T11:32:01.3025976Z  4d9e59b57798afb31927c84e1f6dc25e | San Jose State Spartans at Hawaii Rainbow Warriors        | 2026-10-04T04:05:00Z | 2026-10-04 00:05 | aec-cfb-sjst-hawaii-2026-10-04  |         2 |    15 | 2026-10-04 04:05:30.443236+00 | 2026-10-04 07:15:58.901317+00 | {":NO_PINNACLE_ON_EVENT": 2, "2_FRESHNESS:QUOTE_STALE_ON_ARRIVAL": 6, "2_FRESHNESS:VENUE_BOOK_READ_FAILED": 1, "2_FRESHNESS:VENUE_BOOK_CURRENCY_NOT_ESTABLISHED": 6}
+2026-10-04T11:32:01.3027809Z  f73081099f845f23ea7f41ef09128cdd | Texas State Bobcats at San Diego State Aztecs             | 2026-10-04T02:30:00Z | 2026-10-03 22:30 | aec-cfb-txst-sdst-2026-10-03    |         2 |    11 | 2026-10-04 04:05:30.443236+00 | 2026-10-04 06:15:58.045079+00 | {":NO_PINNACLE_ON_EVENT": 2, "2_FRESHNESS:QUOTE_STALE_ON_ARRIVAL": 2, "2_FRESHNESS:VENUE_BOOK_READ_FAILED": 3, "2_FRESHNESS:VENUE_BOOK_CURRENCY_NOT_ESTABLISHED": 3, "2_FRESHNESS:VENUE_BOOK_CURRENCY_CONTRADICTED_BY_CONTRACT": 1}
+2026-10-04T11:32:01.3029288Z  57ad14afc7db1843fd56f5971dadb058 | Southern Mississippi Golden Eagles at Troy Trojans        | 2026-10-07T00:00:00Z | 2026-10-06 20:00 |                                 |         0 |    15 | 2026-10-04 04:05:30.443236+00 | 2026-10-04 07:15:58.901317+00 | {":NO_PINNACLE_ON_EVENT": 15}
+2026-10-04T11:32:01.3030373Z  c89488b9c83038e85e02e92481d093fe | Jacksonville State Gamecocks at Kennesaw State Owls       | 2026-10-07T23:00:00Z | 2026-10-07 19:00 |                                 |         0 |    15 | 2026-10-04 04:05:30.443236+00 | 2026-10-04 07:15:58.901317+00 | {":NO_PINNACLE_ON_EVENT": 15}
+2026-10-04T11:32:01.3031432Z  9aa0a267b153a6cc0d6c3e5746e78213 | New Mexico State Aggies at Florida International Panthers | 2026-10-07T23:30:00Z | 2026-10-07 19:30 |                                 |         0 |    15 | 2026-10-04 04:05:30.443236+00 | 2026-10-04 07:15:58.901317+00 | {":NO_PINNACLE_ON_EVENT": 15}
+2026-10-04T11:32:01.3032485Z  b274da111dc9826f36e5fa238998dd69 | Sam Houston State Bearkats at Liberty Flames              | 2026-10-08T23:00:00Z | 2026-10-08 19:00 |                                 |         0 |     6 | 2026-10-04 06:05:37.682029+00 | 2026-10-04 07:15:58.901317+00 | {":NO_PINNACLE_ON_EVENT": 6}
+2026-10-04T11:32:01.3033468Z  561884d0d63e91b022e96bc6c415accd | Missouri State Bears at Western Kentucky Hilltoppers      | 2026-10-08T23:00:00Z | 2026-10-08 19:00 |                                 |         0 |     5 | 2026-10-04 06:15:58.045079+00 | 2026-10-04 07:15:58.901317+00 | {":NO_PINNACLE_ON_EVENT": 5}
+2026-10-04T11:32:01.3034613Z  52f2d012fe3e686087077b0d7083159a | South Alabama Jaguars at Arkansas State Red Wolves        | 2026-10-08T23:30:00Z | 2026-10-08 19:30 |                                 |         0 |     1 | 2026-10-04 07:15:58.901317+00 | 2026-10-04 07:15:58.901317+00 | {":NO_PINNACLE_ON_EVENT": 1}
+2026-10-04T11:32:01.3035600Z  2a637494f07611db6ba822fb84218d58 | South Florida Bulls at UTSA Roadrunners                   | 2026-10-08T23:30:00Z | 2026-10-08 19:30 |                                 |         0 |     1 | 2026-10-04 07:15:58.901317+00 | 2026-10-04 07:15:58.901317+00 | {":NO_PINNACLE_ON_EVENT": 1}
+2026-10-04T11:32:01.3036649Z  7556739cc30a38511b7f631581a416e4 | Florida State Seminoles at Louisville Cardinals           | 2026-10-09T23:00:00Z | 2026-10-09 19:00 |                                 |         0 |    15 | 2026-10-04 04:05:30.443236+00 | 2026-10-04 07:15:58.901317+00 | {":NO_PINNACLE_ON_EVENT": 15}
+2026-10-04T11:32:01.3037648Z  a168f1bed30ce7d56dc2b77dbfe37705 | Iowa Hawkeyes at Washington Huskies                       | 2026-10-10T01:00:00Z | 2026-10-09 21:00 |                                 |         0 |     8 | 2026-10-04 05:32:53.670177+00 | 2026-10-04 07:15:58.901317+00 | {":NO_PINNACLE_ON_EVENT": 8}
+2026-10-04T11:32:01.3038648Z  55d9636153ca5741d460ef2f78b663d9 | Iowa State Cyclones at BYU Cougars                        | 2026-10-10T02:15:00Z | 2026-10-09 22:15 |                                 |         0 |    15 | 2026-10-04 04:05:30.443236+00 | 2026-10-04 07:15:58.901317+00 | {":NO_PINNACLE_ON_EVENT": 15}
+2026-10-04T11:32:01.3039658Z  b067027cbaeaf86e6c9bb26becb97c94 | North Carolina Tar Heels at Pittsburgh Panthers           | 2026-10-10T16:00:00Z | 2026-10-10 12:00 |                                 |         0 |     5 | 2026-10-04 06:15:58.045079+00 | 2026-10-04 07:15:58.901317+00 | {":NO_PINNACLE_ON_EVENT": 5}
+2026-10-04T11:32:01.3040652Z  4462f1fa168ab2a5a25fe2807ebec8ac | USC Trojans at Penn State Nittany Lions                   | 2026-10-10T16:00:00Z | 2026-10-10 12:00 |                                 |         0 |    15 | 2026-10-04 04:05:30.443236+00 | 2026-10-04 07:15:58.901317+00 | {":NO_PINNACLE_ON_EVENT": 15}
+2026-10-04T11:32:01.3041738Z  5d7901b0ad44ffe1b92e18fc8d511a7e | Arizona Wildcats at West Virginia Mountaineers            | 2026-10-10T16:00:00Z | 2026-10-10 12:00 |                                 |         0 |     1 | 2026-10-04 07:15:58.901317+00 | 2026-10-04 07:15:58.901317+00 | {":NO_PINNACLE_ON_EVENT": 1}
+2026-10-04T11:32:01.3821224Z  416ce0307b7b9d97f5365a29c1729339 | Wake Forest Demon Deacons at NC State Wolfpack            | 2026-10-10T16:00:00Z | 2026-10-10 12:00 |                                 |         0 |     6 | 2026-10-04 06:05:37.682029+00 | 2026-10-04 07:15:58.901317+00 | {":NO_PINNACLE_ON_EVENT": 6}
+2026-10-04T11:32:01.3822570Z  690e2edaba34c383d2ebfa8f8394f973 | UCF Knights at Oklahoma State Cowboys                     | 2026-10-10T16:00:00Z | 2026-10-10 12:00 |                                 |         0 |     1 | 2026-10-04 07:15:58.901317+00 | 2026-10-04 07:15:58.901317+00 | {":NO_PINNACLE_ON_EVENT": 1}
+2026-10-04T11:32:01.3823544Z  3e691b53c660a64495a44816768176e8 | Indiana Hoosiers at Nebraska Cornhuskers                  | 2026-10-10T16:00:00Z | 2026-10-10 12:00 |                                 |         0 |    15 | 2026-10-04 04:05:30.443236+00 | 2026-10-04 07:15:58.901317+00 | {":NO_PINNACLE_ON_EVENT": 15}
+2026-10-04T11:32:01.3824856Z  9383cbbbb905d9ee50a3341f6945eae7 | South Carolina Gamecocks at Florida Gators                | 2026-10-10T17:00:00Z | 2026-10-10 13:00 |                                 |         0 |    15 | 2026-10-04 04:05:30.443236+00 | 2026-10-04 07:15:58.901317+00 | {":NO_PINNACLE_ON_EVENT": 15}
+2026-10-04T11:32:01.3825853Z  9e243e91f8f94e6431da5cc5c3cc8fda | Texas A&M Aggies at Missouri Tigers                       | 2026-10-10T17:00:00Z | 2026-10-10 13:00 |                                 |         0 |    15 | 2026-10-04 04:05:30.443236+00 | 2026-10-04 07:15:58.901317+00 | {":NO_PINNACLE_ON_EVENT": 15}
+2026-10-04T11:32:01.3826830Z  373204ebaf557738961c85f37a72fe10 | Houston Cougars at Kansas State Wildcats                  | 2026-10-10T19:30:00Z | 2026-10-10 15:30 |                                 |         0 |     3 | 2026-10-04 06:45:58.376433+00 | 2026-10-04 07:15:58.901317+00 | {":NO_PINNACLE_ON_EVENT": 3}
+2026-10-04T11:32:01.3827836Z  82b83ec87fc2be5faa2e9f26ac50edef | Texas Longhorns at Oklahoma Sooners                       | 2026-10-10T19:30:00Z | 2026-10-10 15:30 |                                 |         0 |    15 | 2026-10-04 04:05:30.443236+00 | 2026-10-04 07:15:58.901317+00 | {":NO_PINNACLE_ON_EVENT": 15}
+2026-10-04T11:32:01.3828786Z  92f26a40bba178c47bbade8c9af0ada3 | Illinois Fighting Illini at Michigan State Spartans       | 2026-10-10T19:30:00Z | 2026-10-10 15:30 |                                 |         0 |     8 | 2026-10-04 05:32:53.670177+00 | 2026-10-04 07:15:58.901317+00 | {":NO_PINNACLE_ON_EVENT": 8}
+2026-10-04T11:32:01.3829830Z  496f20b5a45e727fdc2d07915ab0f865 | Stanford Cardinal at Notre Dame Fighting Irish            | 2026-10-10T19:30:00Z | 2026-10-10 15:30 |                                 |         0 |    15 | 2026-10-04 04:05:30.443236+00 | 2026-10-04 07:15:58.901317+00 | {":NO_PINNACLE_ON_EVENT": 15}
+2026-10-04T11:32:01.3830807Z  d9b77825d169fdd683f8efa7c1948a8e | Ole Miss Rebels at Vanderbilt Commodores                  | 2026-10-10T19:30:00Z | 2026-10-10 15:30 |                                 |         0 |    11 | 2026-10-04 04:53:37.690857+00 | 2026-10-04 07:15:58.901317+00 | {":NO_PINNACLE_ON_EVENT": 11}
+2026-10-04T11:32:01.3831789Z  3ad908e99942c191b72d855b6f1b508f | UCLA Bruins at Oregon Ducks                               | 2026-10-10T19:30:00Z | 2026-10-10 15:30 |                                 |         0 |    15 | 2026-10-04 04:05:30.443236+00 | 2026-10-04 07:15:58.901317+00 | {":NO_PINNACLE_ON_EVENT": 15}
+2026-10-04T11:32:01.3832742Z  43457c08aa50a7e0038aa06eb3437680 | Duke Blue Devils at Georgia Tech Yellow Jackets           | 2026-10-10T19:30:00Z | 2026-10-10 15:30 |                                 |         0 |     7 | 2026-10-04 05:47:53.734495+00 | 2026-10-04 07:15:58.901317+00 | {":NO_PINNACLE_ON_EVENT": 7}
+2026-10-04T11:32:01.3833817Z  9f633922d2cc5fa338aa22d1fcb83099 | Virginia Tech Hokies at California Golden Bears           | 2026-10-10T19:30:00Z | 2026-10-10 15:30 |                                 |         0 |     4 | 2026-10-04 06:30:58.318773+00 | 2026-10-04 07:15:58.901317+00 | {":NO_PINNACLE_ON_EVENT": 4}
+2026-10-04T11:32:01.3834856Z  031164b8d704599d8023a3e104f9a6c0 | Maryland Terrapins at Ohio State Buckeyes                 | 2026-10-10T20:15:00Z | 2026-10-10 16:15 |                                 |         0 |    15 | 2026-10-04 04:05:30.443236+00 | 2026-10-04 07:15:58.901317+00 | {":NO_PINNACLE_ON_EVENT": 15}
+2026-10-04T11:32:01.3835865Z  0dd06b09349f56ce8dfc2d61d5fcd042 | Tennessee Volunteers at Arkansas Razorbacks               | 2026-10-10T20:15:00Z | 2026-10-10 16:15 |                                 |         0 |    11 | 2026-10-04 04:53:37.690857+00 | 2026-10-04 07:15:58.901317+00 | {":NO_PINNACLE_ON_EVENT": 11}
+2026-10-04T11:32:01.6132867Z  bdfaffbf5873812f3e04de2cbd273aa6 | LSU Tigers at Kentucky Wildcats                           | 2026-10-10T23:00:00Z | 2026-10-10 19:00 |                                 |         0 |    15 | 2026-10-04 04:05:30.443236+00 | 2026-10-04 07:15:58.901317+00 | {":NO_PINNACLE_ON_EVENT": 15}
+2026-10-04T11:32:01.6134239Z  59f8c98dee8ce77cc17c5b4958e4f325 | Georgia Bulldogs at Alabama Crimson Tide                  | 2026-10-10T23:30:00Z | 2026-10-10 19:30 |                                 |         0 |    15 | 2026-10-04 04:05:30.443236+00 | 2026-10-04 07:15:58.901317+00 | {":NO_PINNACLE_ON_EVENT": 15}
+2026-10-04T11:32:01.6135455Z  f7b49f43b10f581d991954dae86b9aa5 | Syracuse Orange at Virginia Cavaliers                     | 2026-10-10T23:30:00Z | 2026-10-10 19:30 |                                 |         0 |     4 | 2026-10-04 06:30:58.318773+00 | 2026-10-04 07:15:58.901317+00 | {":NO_PINNACLE_ON_EVENT": 4}
+2026-10-04T11:32:01.6136477Z  234d9123fdc010716a5a844efaf7ab43 | Minnesota Golden Gophers at Purdue Boilermakers           | 2026-10-11T00:00:00Z | 2026-10-10 20:00 |                                 |         0 |     7 | 2026-10-04 05:47:53.734495+00 | 2026-10-04 07:15:58.901317+00 | {":NO_PINNACLE_ON_EVENT": 7}
+2026-10-04T11:32:01.6137456Z  616eba68e65fe65023aa2335e81096c8 | Kansas Jayhawks at Utah Utes                              | 2026-10-11T02:15:00Z | 2026-10-10 22:15 |                                 |         0 |     2 | 2026-10-04 07:00:58.839683+00 | 2026-10-04 07:15:58.901317+00 | {":NO_PINNACLE_ON_EVENT": 2}
+2026-10-04T11:32:01.6138447Z  c4db3412210ed8e1045807c73f69b377 | Boise State Broncos at Fresno State Bulldogs              | 2026-10-11T02:30:00Z | 2026-10-10 22:30 |                                 |         0 |     1 | 2026-10-04 07:15:58.901317+00 | 2026-10-04 07:15:58.901317+00 | {":NO_PINNACLE_ON_EVENT": 1}
+2026-10-04T11:32:01.6139064Z (39 rows)
+2026-10-04T11:32:01.6139195Z 
+2026-10-04T11:32:01.6139644Z == F2 · NCAAF valuations and Derek decisions with decided_at in the ET day ==
+2026-10-04T11:32:01.6140814Z   id  |         us_market_slug          |            event_key             |  record_purpose  |          decided_at           |                                                                                                 refusals                                                                                                 
+2026-10-04T11:32:01.6141833Z ------+---------------------------------+----------------------------------+------------------+-------------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+2026-10-04T11:32:01.6143090Z  5131 | aec-cfb-txst-sdst-2026-10-03    | f73081099f845f23ea7f41ef09128cdd | CALIBRATION_ONLY | 2026-10-04 03:37:23.378049+00 | MARKET_NOT_IN_SUPPORTED_SET,VENUE_BOOK_CURRENCY_NOT_ESTABLISHED,VOID_ABANDONMENT_RULE_CONFLICTS_WITH_BOOK_RULE,NO_QUALIFIED_MODEL,INDEPENDENT_FAIR_VALUE_NOT_ESTABLISHED,EXECUTION_ESTIMATE_NOT_IDENTIFI
+2026-10-04T11:32:01.6144776Z  5066 | aec-cfb-wash-usc-2026-10-03     | f981648dba0e71d8517d47d31aa2633d | CALIBRATION_ONLY | 2026-10-04 02:38:02.022578+00 | MARKET_NOT_IN_SUPPORTED_SET,VENUE_BOOK_CURRENCY_NOT_ESTABLISHED,VOID_ABANDONMENT_RULE_CONFLICTS_WITH_BOOK_RULE,NO_QUALIFIED_MODEL,INDEPENDENT_FAIR_VALUE_NOT_ESTABLISHED,EXECUTION_ESTIMATE_NOT_IDENTIFI
+2026-10-04T11:32:01.6146220Z  5020 | aec-cfb-templ-sfl-2026-10-03    | 6338f8a71aba32414791add2d358472d | CALIBRATION_ONLY | 2026-10-04 01:37:59.275347+00 | MARKET_NOT_IN_SUPPORTED_SET,VENUE_BOOK_CURRENCY_NOT_ESTABLISHED,VOID_ABANDONMENT_RULE_CONFLICTS_WITH_BOOK_RULE,NO_QUALIFIED_MODEL,INDEPENDENT_FAIR_VALUE_NOT_ESTABLISHED,EXECUTION_ESTIMATE_NOT_IDENTIFI
+2026-10-04T11:32:01.6147736Z  5017 | aec-cfb-arkst-loulaf-2026-10-03 | 1d3756ab74c013c39510958b5a632b74 | CALIBRATION_ONLY | 2026-10-04 01:37:55.805177+00 | MARKET_NOT_IN_SUPPORTED_SET,VENUE_BOOK_CURRENCY_NOT_ESTABLISHED,VOID_ABANDONMENT_RULE_CONFLICTS_WITH_BOOK_RULE,NO_QUALIFIED_MODEL,INDEPENDENT_FAIR_VALUE_NOT_ESTABLISHED,EXECUTION_ESTIMATE_NOT_IDENTIFI
+2026-10-04T11:32:01.6149181Z  4990 | aec-cfb-cin-arz-2026-10-03      | 63dded0ee467d6f6d03c41673569238d | CALIBRATION_ONLY | 2026-10-04 00:52:26.238021+00 | MARKET_NOT_IN_SUPPORTED_SET,VENUE_BOOK_CURRENCY_NOT_ESTABLISHED,VOID_ABANDONMENT_RULE_CONFLICTS_WITH_BOOK_RULE,NO_QUALIFIED_MODEL,INDEPENDENT_FAIR_VALUE_NOT_ESTABLISHED,EXECUTION_ESTIMATE_NOT_IDENTIFI
+2026-10-04T11:32:01.6891757Z  4989 | aec-cfb-bayl-arzst-2026-10-03   | 4ec93b02d04c2a019ebd6f4ccd9f7af5 | CALIBRATION_ONLY | 2026-10-04 00:52:13.419822+00 | MARKET_NOT_IN_SUPPORTED_SET,VENUE_BOOK_CURRENCY_NOT_ESTABLISHED,VOID_ABANDONMENT_RULE_CONFLICTS_WITH_BOOK_RULE,NO_QUALIFIED_MODEL,INDEPENDENT_FAIR_VALUE_NOT_ESTABLISHED,EXECUTION_ESTIMATE_NOT_IDENTIFI
+2026-10-04T11:32:01.6893830Z  4977 | aec-cfb-frest-washst-2026-10-03 | 23025b717a93bdd8f30424e90a97d68f | CALIBRATION_ONLY | 2026-10-04 00:37:49.305255+00 | MARKET_NOT_IN_SUPPORTED_SET,VENUE_BOOK_CURRENCY_NOT_ESTABLISHED,VOID_ABANDONMENT_RULE_CONFLICTS_WITH_BOOK_RULE,NO_QUALIFIED_MODEL,INDEPENDENT_FAIR_VALUE_NOT_ESTABLISHED,EXECUTION_ESTIMATE_NOT_IDENTIFI
+2026-10-04T11:32:01.6896204Z  4971 | aec-cfb-sjst-hawaii-2026-10-04  | 4d9e59b57798afb31927c84e1f6dc25e | CALIBRATION_ONLY | 2026-10-04 00:23:29.350524+00 | MARKET_NOT_IN_SUPPORTED_SET,VENUE_BOOK_CURRENCY_NOT_ESTABLISHED,VOID_ABANDONMENT_RULE_CONFLICTS_WITH_BOOK_RULE,NO_QUALIFIED_MODEL,INDEPENDENT_FAIR_VALUE_NOT_ESTABLISHED,EXECUTION_ESTIMATE_NOT_IDENTIFI
+2026-10-04T11:32:01.6899215Z  4970 | aec-cfb-txtech-col-2026-10-03   | 253e389201e449a2984a194e3eebf7f8 | CALIBRATION_ONLY | 2026-10-04 00:23:26.05633+00  | MARKET_NOT_IN_SUPPORTED_SET,VENUE_BOOK_CURRENCY_NOT_ESTABLISHED,VOID_ABANDONMENT_RULE_CONFLICTS_WITH_BOOK_RULE,NO_QUALIFIED_MODEL,INDEPENDENT_FAIR_VALUE_NOT_ESTABLISHED,EXECUTION_ESTIMATE_NOT_IDENTIFI
+2026-10-04T11:32:01.6900474Z (9 rows)
+2026-10-04T11:32:01.6900632Z 
+2026-10-04T11:32:01.6901036Z == F3 · Derek-only verdicts per league token, ET day ==
+2026-10-04T11:32:01.6901686Z  token | contracts_decided | contracts_enter |                                                                   refusals                                                                   
+2026-10-04T11:32:01.6902530Z -------+-------------------+-----------------+----------------------------------------------------------------------------------------------------------------------------------------------
+2026-10-04T11:32:01.6903225Z  nfl   |                13 |               0 | {SETTLEMENT_NOT_SUPPORTED}
+2026-10-04T11:32:01.6903784Z  unl   |                13 |               0 | {BELOW_MIN_GROSS_EDGE,FEED_SOCKET_CLOSED,NO_QUALIFIED_PINNACLE_PROBABILITY,NO_RESEARCH_MODEL_CANDIDATE_EXISTS,PINNAPI_PRIMARY_INPUT_CHANGED}
+2026-10-04T11:32:01.6904430Z  brb   |                 6 |               0 | {BELOW_MIN_GROSS_EDGE,NO_QUALIFIED_PINNACLE_PROBABILITY,NO_RESEARCH_MODEL_CANDIDATE_EXISTS}
+2026-10-04T11:32:01.6905235Z  mlb   |                 4 |               0 | {SETTLEMENT_NOT_SUPPORTED,STRATEGY_ENTRIES_DISABLED}
+2026-10-04T11:32:01.6905558Z (4 rows)
+2026-10-04T11:32:01.6905693Z 
+2026-10-04T11:32:01.6905939Z == F4 · paper orders / fills per league token and strategy, ET day ==
+2026-10-04T11:32:01.6906322Z  token |           strategy            |        role         | orders | fills 
+2026-10-04T11:32:01.6906833Z -------+-------------------------------+---------------------+--------+-------
+2026-10-04T11:32:01.6907213Z  brb   |                               | STANDING_PROTECTION |     53 |     0
+2026-10-04T11:32:01.6907574Z  mlb   | PINNACLE_EXPLORATION_PAPER    | ENTRY               |      6 |     2
+2026-10-04T11:32:01.6907934Z  mlb   |                               | STANDING_PROTECTION |     24 |     0
+2026-10-04T11:32:01.6908367Z  unl   | PINNACLE_COMPLETED_GAME_PAPER | ENTRY               |      4 |     2
+2026-10-04T11:32:01.6908739Z  unl   | PINNACLE_EXPLORATION_PAPER    | ENTRY               |      6 |     2
+2026-10-04T11:32:01.6909071Z  unl   |                               | STANDING_PROTECTION |     99 |     0
+2026-10-04T11:32:01.6909390Z (6 rows)
+2026-10-04T11:32:01.6909496Z 
+2026-10-04T11:32:01.6909680Z == F5 · snapshots behind the 10-02 / 10-03 alerts (ET) ==
+2026-10-04T11:32:01.6910088Z     day     |           league           | prov | norm | disc | mapped | settle | eval | decided | entered | final | computed_utc 
+2026-10-04T11:32:01.6910625Z ------------+----------------------------+------+------+------+--------+--------+------+---------+---------+-------+--------------
+2026-10-04T11:32:01.6911110Z  2026-10-02 | baseball_mlb               |    4 |    4 |    4 |      4 |      0 |    0 |       4 |       1 | t     | 10-04 00:22
+2026-10-04T11:32:01.6911560Z  2026-10-02 | soccer_brazil_serie_b      |   18 |    7 |    7 |      7 |      0 |    0 |       7 |       5 | t     | 10-04 00:22
+2026-10-04T11:32:01.6912105Z  2026-10-02 | soccer_uefa_nations_league |   34 |   15 |   15 |     15 |      0 |    0 |      14 |       5 | t     | 10-04 00:22
+2026-10-04T11:32:01.6912564Z  2026-10-03 | americanfootball_ncaaf     |   33 |   15 |   15 |     15 |        |    9 |       9 |       0 | t     | 10-04 04:01
+2026-10-04T11:32:01.6913060Z  2026-10-03 | baseball_mlb               |    7 |    7 |    7 |      7 |        |    7 |       7 |       7 | t     | 10-04 04:01
+2026-10-04T11:32:01.6913514Z  2026-10-03 | soccer_brazil_serie_b      |   14 |   10 |   10 |     10 |        |   10 |      10 |       9 | t     | 10-04 04:01
+2026-10-04T11:32:01.6913969Z  2026-10-03 | soccer_uefa_nations_league |   24 |   18 |   18 |     18 |        |   18 |      18 |      12 | t     | 10-04 04:01
+2026-10-04T11:32:01.6914335Z (7 rows)
+2026-10-04T11:32:01.6914431Z 
+2026-10-04T11:32:01.6914746Z == F6 · the NCAAF 10-04 alert row in full ==
+2026-10-04T11:32:01.6915354Z              alert_id              |      stage_from      | stage_to  | severity |                                                                                 detail                                                                                  |         audrey_finding_id          |          detected_at          |          recorded_at          
+2026-10-04T11:32:01.6916403Z -----------------------------------+----------------------+-----------+----------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------+------------------------------------+-------------------------------+-------------------------------
+2026-10-04T11:32:01.6917736Z  covalert:41b73a6967ed9bc42f739952 | settlement_supported | evaluated | CRITICAL | {"statement": "NCAAF: 20 provider event(s); none reached evaluated", "stage_count": 0, "provider_events": 20, "flowed_in_baseline": true, "previous_stage_count": null} | paperfind:2fc3e31e3052cdfa5a113aba | 2026-10-04 04:16:55.426446+00 | 2026-10-04 04:16:57.501038+00
+2026-10-04T11:32:01.6918607Z (1 row)
+2026-10-04T11:32:01.6918728Z 
+2026-10-04T11:32:01.6918818Z psql exit=0
+2026-10-04T11:32:01.7021703Z Post job cleanup.
+2026-10-04T11:32:01.7640662Z [command]/usr/bin/git version
+2026-10-04T11:32:01.7672627Z git version 2.55.0
+2026-10-04T11:32:01.7697178Z Temporarily overriding HOME='/home/runner/work/_temp/a196dd33-eed3-4f28-837f-960d366716bc' before making global git config changes
+2026-10-04T11:32:01.7698368Z Adding repository directory to the temporary git global config as a safe directory
+2026-10-04T11:32:01.7699477Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/SportsAssets/SportsAssets
+2026-10-04T11:32:01.7726913Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+2026-10-04T11:32:01.7749288Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+2026-10-04T11:32:01.7937830Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+2026-10-04T11:32:01.7955829Z http.https://github.com/.extraheader
+2026-10-04T11:32:01.7963535Z [command]/usr/bin/git config --local --unset-all http.https://github.com/.extraheader
+2026-10-04T11:32:01.7998508Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+2026-10-04T11:32:01.8155640Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+2026-10-04T11:32:01.8180596Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+2026-10-04T11:32:01.8432177Z Cleaning up orphan processes
+2026-10-04T11:32:01.8618045Z ##[warning]Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/checkout@v4. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/

@@ -140,7 +140,10 @@ def test_actual_and_paper_are_separate_rooms_never_summed():
     # one real contract held, at 1:1000; nothing of the paper book in it
     assert [lg["holding"]["open_qty"] for lg in a["legs"]] == [1.0]
     prot = _order(a, "mirror_fx_prot")
+    # a requested-but-unconfirmed cancel can still fill: its own canonical
+    # state CANCEL_PENDING (order_state_truth, the owner's 9-state list)
     assert prot["state"] == "CANCEL_PENDING"
+    assert prot["sub_state"] is None
     assert prot["raw_state"] == "CANCEL_REQUESTED"
     assert prot["if_it_fills"]["available"] is True     # it can still fill
     assert a["xavier"][0]["protection"]["filled_protection_qty"] == 0.0
@@ -320,7 +323,8 @@ def test_xavier_panel_reads_the_persisted_decision():
     assert acts[:3] == ["HOLD", "REDUCE", "EXIT"]          # ranked by value
     assert "HEDGE" in acts and "PROTECTION" in acts and "REALLOCATE" in acts
     prot = next(a for a in x["alternatives"] if a["action"] == "PROTECTION")
-    assert prot["note"] == "RESTING - NOT PROTECTION UNTIL FILLED"
+    assert prot["note"] == ("STANDING 1,000 - NOT PROTECTION UNTIL FILLED; "
+                            "FILLED PROTECTION 0")
     assert x["protection"]["filled_protection_qty"] == 0.0
     assert x["protection"]["unfilled_resting_protection_qty"] == 1000.0
     assert x["next_review_due_at"] is not None
@@ -337,10 +341,23 @@ def test_stale_xavier_evidence_is_warned_and_waits():
     assert any(w["what"] == "PROBABILITY_NOT_FRESH"
                for w in x["stale_evidence"])
     assert any(w["what"] == "A_FRESH_PROBABILITY" for w in x["waiting_for"])
+    # a HISTORICAL row that recorded HOLD on stale evidence is shown as
+    # STALE, never as the current HOLD (owner P0, 2026-10-04)
+    assert x["recommendation"] is None
+    assert x["recommendation_state"] == "STALE"
+    assert x["display_recommendation"] == "STALE"
+    assert x["recorded_recommendation"] == "HOLD"
+    assert x["current_ev_usd"] is None
+    assert not any(a.get("is_recommendation") for a in x["alternatives"])
     raw = F.raw_paper(fresh=False)
     raw["xavier"]["assessments"][F.G_NYY]["recommendation"] = None
     x2 = next(p for p in _evt(raw)["xavier"] if p["group_id"] == F.G_NYY)
-    assert x2["display_recommendation"] == "WAITING_FOR_EVIDENCE"
+    assert x2["display_recommendation"] == "WAITING_FOR_FRESH_EVIDENCE"
+    raw["xavier"]["assessments"][F.G_NYY]["recommendation"] = (
+        "WAITING_FOR_FRESH_EVIDENCE")
+    x3 = next(p for p in _evt(raw)["xavier"] if p["group_id"] == F.G_NYY)
+    assert x3["display_recommendation"] == "WAITING_FOR_FRESH_EVIDENCE"
+    assert x3["recommendation"] is None
 
 
 def test_karen_challenge_on_the_room_review_is_shown():
@@ -390,5 +407,5 @@ def test_every_raw_state_of_both_machines_is_mapped():
     assert set(P.MIRROR_STATE_MAP) == set(mirror)
     from sportsassets import kalshi_orders as KO
     assert set(KO.TRANSITIONS) | set(KO.TERMINAL) == set(mirror)
-    assert P.canonical_state("NEW_STATE", table="paper_orders").startswith(
-        "UNMAPPED")
+    # an unmapped raw state is the explicit UNKNOWN, never FILLED
+    assert P.canonical_state("NEW_STATE", table="paper_orders") == "UNKNOWN"

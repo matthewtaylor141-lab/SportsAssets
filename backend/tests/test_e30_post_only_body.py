@@ -64,6 +64,7 @@ from tests.test_mirror_live_worker import (  # noqa: F401 -- the autouse rails r
     BUY, CID, GTC_TIF, IOC_TIF, M, N, NOW, SELL, SHORT, SLUG, _NoClose, _Venue, _armed, _census, _fill, _his,
     _mkt, _places, _ratio_fills, _run, _short_book, _shorts_on, _tick,
 )
+from tests.workflow_source import render_ops_file as _render_ops_file
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 NEW_NAMES = ("post_only_backoff",)
@@ -765,7 +766,7 @@ def test_e30_the_census_place_the_emit_sites_and_the_records():
     assert mig[-1].startswith("064_")  # re-pinned 2026-09-12 (run 83.3): run 83.3's 064 is the newest; this lane still adds none
     assert "backoff" not in (ROOT / "backend" / "migrations" / "059_mirror_orders_send_record.sql").read_text()
     assert "post_only_backoff" not in inspect.getsource(rules.order_decision)
-    assert hashlib.sha256((ROOT / ".github" / "workflows" / "render-ops.yml").read_bytes()).hexdigest()[:16] == e27.RENDER_OPS_SHA
+    assert hashlib.sha256((_render_ops_file()).read_bytes()).hexdigest()[:16] == e27.RENDER_OPS_SHA
 
 
 def test_e30_the_untouched_functions_are_byte_for_byte_66144cf_and_the_touched_ones_with_the_lanes_lines_excised():

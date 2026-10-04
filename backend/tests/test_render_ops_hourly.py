@@ -15,8 +15,9 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from tests.workflow_source import render_ops_file as _render_ops_file
 
-YML = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "render-ops.yml"
+YML = _render_ops_file()
 # E31 (FILL lane 31, 2026-09-10): `maker-rests` rides right after take-band -- the rest's own
 # life (placement to fill, replace or rejection) with the touch beside it, which nothing read
 PARTS = ("mirror-tick", "tick-ring", "mirror-pnl", "paired-day", "paired-ratio", "latency-census", "fills-answered",

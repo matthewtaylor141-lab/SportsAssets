@@ -49,7 +49,30 @@ jobs:
           cd backend
           pip install --quiet -e ".[dev]"
       - name: Run the suite
+        # FAILING NODE IDS ARE PART OF THE RESULT (c28, 2026-10-04). The
+        # previous `| tail -30` kept only the summary, so a red run could not
+        # be compared with the release gate's baseline failures: the receipts
+        # for fd6cc5b and 8e62749 had to record CI as UNREADABLE. The full
+        # console and a junit report are now an artifact, and every FAILED /
+        # ERROR id is printed. pytest's own exit status is still the step's.
         run: |
           cd backend
-          python -m pytest tests -q --tb=short 2>&1 | tail -30
-          exit ${PIPESTATUS[0]}
+          # the default shell is bash -e: capture the status, do not die on it
+          rc=0
+          python -m pytest tests -q --tb=short -rfE \
+            --junitxml="$RUNNER_TEMP/backend-tests-junit.xml" \
+            > "$RUNNER_TEMP/backend-tests-console.txt" 2>&1 || rc=$?
+          tail -30 "$RUNNER_TEMP/backend-tests-console.txt"
+          echo "== failing node ids =="
+          grep -E '^(FAILED|ERROR) ' "$RUNNER_TEMP/backend-tests-console.txt" || echo "(none)"
+          exit $rc
+      - name: Keep the console and junit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-tests-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/backend-tests-console.txt
+            ${{ runner.temp }}/backend-tests-junit.xml
+          if-no-files-found: warn
+          retention-days: 14

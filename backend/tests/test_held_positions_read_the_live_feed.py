@@ -285,7 +285,9 @@ def _ctx(a, now):
 
 
 @pg
-@pytest.mark.parametrize("age,expect", [(31.0, "HOLD"), (5.0, "EXIT")])
+@pytest.mark.parametrize("age,expect", [
+    # 31 s: stale -- no sale and no default HOLD (owner P0): waiting
+    (31.0, "WAITING_FOR_FRESH_EVIDENCE"), (5.0, "EXIT")])
 async def test_a_feed_refused_stale_measure_still_blocks_a_discretionary_exit(
         monkeypatch, age, expect):
     conn = await H.connect()

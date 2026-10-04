@@ -46,6 +46,7 @@ from tests.test_e17_standing_reanchor import _retired, _settled_writes
 from tests.test_e9_fast_path import _fast, _skips, _walk
 from tests.test_e19_smaller_reading import FILLS_NET, VENUE_NET
 from tests.test_fill_t1_turn import WALK_ELSEWHERE, _reopen_writes, _turn_reads
+from tests.workflow_source import render_ops_file as _render_ops_file
 from tests.test_mirror_live_worker import (  # noqa: F401 -- the autouse rails (_armed)
     CID, INTENT, M, N, NOW, SHORT, SLUG, _armed, _census, _fill, _his, _Http, _mkt, _places, _pool,
     _rails_2026_09_06, _run, _short_book, _shorts_on, _tick, _Venue,
@@ -587,7 +588,7 @@ def test_c16_the_census_place_the_emit_site_no_rail_no_decision_word_no_migratio
     assert "turn_woke" not in (mig / "059_mirror_orders_send_record.sql").read_text()
     assert sorted(p.name for p in mig.glob("*.sql"))[-1] == "064_run833_stream_channels.sql"  # re-pinned 2026-09-12 (run 83.3): run 83.3's 064 is the newest; this lane still adds none
     # the render-ops presets are untouched by this lane: lane 0b's closed-while-he-traded already prints the turn
-    yml = (ROOT / ".github" / "workflows" / "render-ops.yml").read_text()
+    yml = (_render_ops_file()).read_text()
     assert "turn_woke" not in yml and "b.last_plan->'turn'" in yml
 
 

@@ -34,6 +34,7 @@ from tests.test_mirror_live_worker import (  # noqa: F401 -- the autouse rails
     _Http, _kinds, _NoClose, _places, _pool, _reduce_world, _run, _short_book, _short_world, _shorts_on,
     _tick, _Venue,
 )
+from tests.workflow_source import render_ops_file as _render_ops_file
 
 IOC_TIF = "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL"
 # RE-PINNED at E31 (FILL lane 31, 2026-09-10: every order a post-only rest that never
@@ -54,7 +55,7 @@ IOC_TIF = "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL"
 #                           booked, so every ledger figure below is unchanged.
 
 GTC_TIF = "TIME_IN_FORCE_GOOD_TILL_CANCEL"
-YML = pathlib.Path(__file__).resolve().parents[2] / ".github" / "workflows" / "render-ops.yml"
+YML = _render_ops_file()
 
 
 async def _spin(until, n=2000):

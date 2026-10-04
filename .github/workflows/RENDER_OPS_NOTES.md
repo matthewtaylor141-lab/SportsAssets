@@ -12,6 +12,20 @@ above the code it documents, keyed by the anchor left behind in its
 place. The workflow now sits far enough under the ceiling that a note
 can be added without taking the lever down again.
 
+**2026-10-04 (c28): the script left the workflow file.** Moving prose out
+bought room once; the script kept growing and render-ops.yml was back at
+510,399 bytes (1,601 spare). The whole `run:` body of the `Run` step now
+lives, byte for byte, in `.github/render-ops/ops.sh`. The workflow keeps
+every input, action choice, env mapping and the `confirm=DO` contract; a
+`Fetch the versioned step scripts` step checks out that directory from
+the same commit (no persisted credential), and `Run` executes the file
+with `bash --noprofile --norc -eo pipefail` — exactly what `shell: bash`
+gave the inline body — after deleting the checkout. Edit presets in
+`ops.sh`. The `[Rnn]` anchors below now sit in `ops.sh`.
+`backend/tests/test_workflow_headroom.py` holds the line: every workflow
+under 400,000 bytes, no input or mode removed, every confirm=DO arm still
+opening with `need_confirm`, and the move proven lossless from history.
+
 ## [R01]
 
 Documents:

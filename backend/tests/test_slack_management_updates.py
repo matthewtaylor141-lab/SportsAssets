@@ -110,7 +110,7 @@ def test_every_progress_update_answers_the_four_management_questions():
                            with_reconciliation=False)
     for part in ("What changed:", "Why it matters:", "Next:",
                  "Management action needed:", "SIMULATED (paper account):",
-                 "ACTUAL (live account, 1:1,000 mirror)"):
+                 "LEGACY MIRROR VALIDATION (1:1,000 mirror account"):
         assert part in text
     assert "SETTLEMENT_NOT_SUPPORTED (9)" in text
 

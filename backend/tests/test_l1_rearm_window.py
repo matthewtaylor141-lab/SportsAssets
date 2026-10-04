@@ -42,8 +42,9 @@ from sportsassets.workers import mirror_live as ml
 from tests.test_mirror_live_worker import GTC_TIF, IOC_TIF, M, N, NOW, SLUG, _armed  # noqa: F401 — the fixture
 from tests.test_mirror_live_worker import (_OTHER, _ZZ, _census, _his, _places, _pool, _settled_book,
                                            _tick, _Venue)
+from tests.workflow_source import render_ops_file as _render_ops_file
 
-RENDER_OPS = pathlib.Path(__file__).resolve().parents[2] / ".github" / "workflows" / "render-ops.yml"
+RENDER_OPS = _render_ops_file()
 H24 = ml.LOSS_WINDOW_S
 
 

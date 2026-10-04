@@ -57,9 +57,10 @@ from tests.test_mirror_live_worker import (  # noqa: F401 -- the autouse rails
     CID, NOW, SLUG, _Http, _Pool, _Venue, _armed, _census, _flat, _places, _pool, _run, _tick,
 )
 from tests.test_render_ops_fills_missed import World, _labels_and_help, _preset, _stmts
+from tests.workflow_source import render_ops_file as _render_ops_file
 
 ROOT = Path(__file__).resolve().parents[2]
-YML = ROOT / ".github" / "workflows" / "render-ops.yml"
+YML = _render_ops_file()
 DOCS = ROOT / "docs" / "mirror-coverage.md"
 SPEED_KEYS = ("cand_yielded", "fast_prelude", "fast_walk", "ring")
 KEY = "mirror_tick_ring"

@@ -45,6 +45,8 @@ import re
 import time
 from typing import Any
 
+from .. import order_state_truth as OST
+
 DEMO_LABEL = "DEMONSTRATION"
 DEMO_POSITION_ID = "DEMONSTRATION-NYY-ML"
 PAPER_NOT_IN_BUILD = "paper ledger not in this build"
@@ -197,7 +199,10 @@ def demonstration_facts() -> Facts:
           "total cost $1,800 = $1,000 + $800")
     for state, net in DEMO["floors"]:
         f.add(DEMO_LABEL, p, "floor:" + state, net,
-              "%s: $%s before fees" % (state, format(int(net), ",")))
+              "%s: $%s before fees (DEMONSTRATION: the hedge is assumed "
+              "FILLED here; on a real position a resting hedge is NOT "
+              "protection and this floor would be CONDITIONAL IF_FILLED)"
+              % (state, format(int(net), ",")))
     f.add(DEMO_LABEL, h, "unhedged_worst_case_usd",
           DEMO["unhedged_loss_usd"],
           "unhedged, a Red Sox win loses the $1,000 stake")
@@ -255,6 +260,14 @@ async def _paper(conn, f: Facts, *, likes, context_ids, limit=5) -> bool:
         return False
     found = False
     for t in tables:
+        if t == "paper_xavier_reviews":
+            # XAVIER'S REVIEWS ARE NEVER DUMPED UNORDERED (owner P0): an
+            # older review's HOLD on an 86 s probability once surfaced here
+            # beside a newer fresh one. One CURRENT decision per position,
+            # older reviews labelled SUPERSEDED (_xavier_current below).
+            found = await _xavier_current(
+                conn, f, likes=likes, context_ids=context_ids) or found
+            continue
         try:
             if likes or context_ids:
                 rows = await conn.fetch(
@@ -278,6 +291,87 @@ async def _paper(conn, f: Facts, *, likes, context_ids, limit=5) -> bool:
                 f.add(t, rid, k, v, "paper %s %s = %s" % (t, k, v))
             found = True
     return found
+
+
+XAVIER_CURRENT_SQL = (
+    "SELECT r.review_id, r.group_id, r.reviewed_at, r.trigger, "
+    "       r.recommendation, r.refusal, r.measure, r.selection "
+    "  FROM paper_xavier_reviews r "
+    " WHERE r.group_id IN (SELECT x.group_id FROM paper_xavier_reviews x "
+    "                       WHERE to_jsonb(x)::text ILIKE ANY($1::text[]) "
+    "                          OR to_jsonb(x)::text LIKE ANY($2::text[]) "
+    "                       UNION SELECT o.group_id FROM paper_orders o "
+    "                       WHERE o.us_market_slug ILIKE ANY($1::text[]) "
+    "                          OR o.group_id LIKE ANY($2::text[])) "
+    " ORDER BY r.group_id, r.reviewed_at DESC, r.review_id DESC LIMIT $3")
+
+
+def xavier_decision_text(d: dict, group_id) -> str:
+    """One Xavier decision as a fact sentence: the CURRENT one says so; an
+    older one is SUPERSEDED by the newer review id. Pure."""
+    dec = d["decision"]
+    age = dec.get("age_at_review_seconds")
+    lim = dec.get("freshness_limit")
+    base = ("review %s at %s; probability %s, %s s old at the review "
+            "(freshness limit %s s), valuation %s" % (
+                dec["review_id"], dec["review_timestamp"],
+                dec.get("valuation_source") or "source not recorded",
+                "unknown" if age is None else "%.3f" % float(age),
+                "unknown" if lim is None else "%g" % float(lim),
+                dec.get("valuation_id") if dec.get("valuation_id")
+                is not None else "id not recorded"))
+    if dec["management_state"] == "SUPERSEDED":
+        return ("SUPERSEDED Xavier review of paper position %s (history, NOT "
+                "the current decision; superseded by %s): recorded %s; %s"
+                % (group_id, dec["superseded_by"],
+                   dec["recorded_recommendation"], base))
+    if dec["management_state"] == "CURRENT":
+        return ("CURRENT Xavier management decision for paper position %s: "
+                "%s; %s" % (group_id, dec["current_recommendation"], base))
+    return ("CURRENT Xavier management state for paper position %s: %s -- "
+            "no current recommendation (recorded %s, %s); %s" % (
+                group_id, dec["management_state"],
+                dec["recorded_recommendation"],
+                dec["recommendation_state"], base))
+
+
+async def _xavier_current(conn, f: Facts, *, likes, context_ids,
+                          limit=40, now: float | None = None) -> bool:
+    """XAVIER'S DECISIONS FOR THE NAMED POSITION(S): exactly one CURRENT
+    decision per position (its newest review, re-judged now:
+    xavier_freshness.current_decisions), then up to two older reviews
+    labelled SUPERSEDED with the newer review id."""
+    import time as _time
+
+    from .. import xavier_freshness as XF
+    from . import xavier_management as XM
+    try:
+        rows = [dict(r) for r in await conn.fetch(
+            XAVIER_CURRENT_SQL, likes or [],
+            ["%" + i + "%" for i in context_ids or []], int(limit))]
+    except Exception as exc:                                    # noqa: BLE001
+        f.check("paper_xavier_reviews", "READ_FAILED", 0, type(exc).__name__)
+        return False
+    f.check("paper_xavier_reviews", "MATCHED" if rows else "NO_MATCH",
+            len(rows))
+    for r in rows:
+        if hasattr(r.get("reviewed_at"), "timestamp"):
+            r["reviewed_at"] = r["reviewed_at"].timestamp()
+    cur = XF.current_decisions(
+        rows, now=float(now if now is not None else _time.time()),
+        limit_s=XM._config_limit())
+    for g, d in cur.items():
+        c = d["current"]
+        f.add("paper_xavier_reviews", c["review_id"],
+              "current_management_decision",
+              c["decision"]["current_recommendation"]
+              or c["decision"]["management_state"],
+              xavier_decision_text(c, g))
+        for o in d["superseded"][:2]:
+            f.add("paper_xavier_reviews", o["review_id"],
+                  "superseded_review", o["recorded_recommendation"],
+                  xavier_decision_text(o, g))
+    return bool(rows)
 
 
 def _money(v) -> str:
@@ -321,10 +415,13 @@ async def _positions(conn, f: Facts, *, likes, context_ids,
         ids.append(iid)
         f.add("bettor_funded_intents", iid, "position",
               "%s %s" % (d["us_market_slug"], d["order_intent"]),
-              "funded position %s on %s (%s), state %s" % (
-                  iid, d["us_market_slug"],
-                  "long" if d["order_intent"].endswith("LONG") else "short",
-                  d["state"]))
+              "funded position %s on %s (%s), state %s (canonical %s: %s)"
+              % (iid, d["us_market_slug"],
+                 "long" if d["order_intent"].endswith("LONG") else "short",
+                 d["state"], OST.canonical_order_state(
+                     d["state"], source=OST.SRC_FUNDED),
+                 OST.MEANING[OST.canonical_order_state(
+                     d["state"], source=OST.SRC_FUNDED)]))
         f.add("bettor_funded_intents", iid, "quantity", d["quantity"],
               "ordered %s contracts at limit %s" % (d["quantity"],
                                                     d["limit_price"]))
@@ -535,7 +632,9 @@ async def _paper_live(conn, f: Facts, *, now: float | None) -> dict:
               mg.get("open_management_orders"),
               "what Xavier manages on paper: %s open paper position(s), %s "
               "open paper management order(s) (standing protection, hedge, "
-              "exit, reduce), %s open paper entry order(s), %s handoff(s) "
+              "exit, reduce -- open ORDERS, not fills: a resting protective "
+              "order is NOT protection until it fills), %s open paper entry "
+              "order(s), %s handoff(s) "
               "from Derek%s" % (
                   mg.get("open_positions"), mg.get("open_management_orders"),
                   mg.get("open_entry_orders"),
@@ -726,30 +825,54 @@ async def _standing(conn, f: Facts, *, intents, xids, limit=2) -> None:
     if not await _regclass(conn, "bettor_standing_order_plans"):
         f.check("bettor_standing_order_plans", "TABLE_ABSENT")
         return
+    funded = await _regclass(conn, "bettor_funded_intents") and \
+        await _regclass(conn, "bettor_funded_fills")
     rows = await conn.fetch(
-        "SELECT plan_id, venue_slug, quantity, cost_price, floor_class, "
-        " floor, created_at FROM bettor_standing_order_plans WHERE "
-        " primary_intent_id = ANY($1::text[]) OR xavier_decision_id = "
-        " ANY($2::text[]) ORDER BY created_at DESC LIMIT $3",
+        "SELECT p.plan_id, p.venue_slug, p.quantity, p.cost_price, "
+        " p.floor_class, p.floor, p.created_at, p.hedge_intent_id, %s "
+        " FROM bettor_standing_order_plans p %s WHERE "
+        " p.primary_intent_id = ANY($1::text[]) OR p.xavier_decision_id = "
+        " ANY($2::text[]) ORDER BY p.created_at DESC LIMIT $3" % (
+            ("i.state AS hedge_state, i.quantity AS hedge_qty, "
+             "(SELECT sum(fl.qty) FROM bettor_funded_fills fl "
+             "  WHERE fl.intent_id = p.hedge_intent_id "
+             "    AND fl.direction = 'ENTRY') AS hedge_filled"
+             if funded else "NULL AS hedge_state, NULL AS hedge_qty, "
+             "NULL AS hedge_filled"),
+            ("LEFT JOIN bettor_funded_intents i "
+             "  ON i.intent_id = p.hedge_intent_id" if funded else "")),
         intents or [], xids or [], int(limit))
     f.check("bettor_standing_order_plans", "MATCHED" if rows else "NO_MATCH",
             len(rows))
     for r in rows:
         d = _jsonable(dict(r))
         pid = d["plan_id"]
+        # THE PLAN IS NOT PROTECTION: only the hedge order's FILLED quantity
+        # is (order_state_truth). Its state and filled quantity are stated.
+        t = OST.order_state(d.get("hedge_state"), source=OST.SRC_FUNDED,
+                            qty=d.get("hedge_qty"),
+                            filled_qty=d.get("hedge_filled"))
+        state = (t["state"] if d.get("hedge_intent_id") else
+                 "%s (no order placed for the plan yet)" % OST.PROPOSED)
         f.add("bettor_standing_order_plans", pid, "plan",
               "%s x %s @ %s" % (d["venue_slug"], d["quantity"],
                                 d["cost_price"]),
               "standing protective order %s: %s contracts of %s at %s; "
-              "floor class %s" % (pid, d["quantity"], d["venue_slug"],
-                                  d["cost_price"], d["floor_class"]))
+              "floor class %s; order state %s, FILLED %s -- a resting or "
+              "planned order is NOT protection until it fills" % (
+                  pid, d["quantity"], d["venue_slug"], d["cost_price"],
+                  d["floor_class"], state,
+                  OST.fmt_qty(t["filled_qty"] if d.get("hedge_intent_id")
+                              else 0)))
         fl = _obj(d.get("floor"), {}) or {}
         for reg in (fl.get("regions") or [])[:6]:
             if reg.get("net_usd") is not None:
                 f.add("bettor_standing_order_plans", pid,
                       "floor.regions:%s" % reg.get("region"),
-                      reg["net_usd"], "payoff if %s: %s" % (
-                          reg.get("region"), _money(reg["net_usd"])))
+                      reg["net_usd"], "CONDITIONAL floor IF_FILLED -- payoff "
+                      "if %s: %s, only if the standing order fills; not a "
+                      "realized floor" % (reg.get("region"),
+                                          _money(reg["net_usd"])))
 
 
 async def _audits(conn, f: Facts, *, ids, limit=1) -> None:

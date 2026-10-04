@@ -27,8 +27,9 @@ import pytest
 
 from tests import test_render_ops_hourly as hourly
 from tests.test_render_ops_fills_missed import World, _f
+from tests.workflow_source import render_ops_file as _render_ops_file
 
-YML = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "render-ops.yml"
+YML = _render_ops_file()
 
 
 def _preset(text: str, name: str) -> tuple[str, int]:

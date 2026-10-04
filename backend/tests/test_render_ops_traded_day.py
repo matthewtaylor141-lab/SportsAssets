@@ -14,8 +14,9 @@ import re
 from pathlib import Path
 
 import pglast
+from tests.workflow_source import render_ops_file as _render_ops_file
 
-YML = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "render-ops.yml"
+YML = _render_ops_file()
 USD = "o.filled * COALESCE(o.avg_px, o.wire)"
 WHERE = "o.whale = 'rn1' AND o.filled > 0 AND COALESCE(o.done_at, o.placed_at) >= date_trunc('day', now())"
 

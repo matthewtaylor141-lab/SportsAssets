@@ -49,9 +49,49 @@ from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Response
 
+from ..xavier_freshness import of_assessment as _xf_of_assessment
+from ..xavier_freshness import of_review as _xf_of_review
 from .agents_core import _pool, require_read
 
 router = APIRouter()
+
+
+def _labels(blk: dict) -> dict:
+    """XAVIER'S RECOMMENDATION AS THE FLOOR MAY SHOW IT (owner P0): the
+    action only while CURRENT; otherwise the state, with the stored word
+    named as recorded (xavier_freshness.validity at read time)."""
+    st, rec = blk["recommendation_state"], blk["recorded_recommendation"]
+    if blk["is_current"]:
+        label = rec
+    else:
+        label = st + (" (recorded %s, not current)" % rec
+                      if rec and rec != st else "")
+    v = blk.get("valuation") or {}
+    return {"recommendation": blk["current_recommendation"] or st,
+            "recommendation_state": st,
+            "management_state": blk.get("management_state"),
+            "superseded_by": blk.get("superseded_by"),
+            "recorded_recommendation": rec,
+            "recommendation_label": label,
+            "valuation_id": v.get("valuation_id"),
+            "valuation_timestamp": v.get("source_at"),
+            "age_seconds": v.get("age_now_s"),
+            "freshness_limit": v.get("limit_s"),
+            "valuation_expires_at": v.get("expires_at")}
+
+
+def _gate_assessment(row: dict, now: float, *,
+                     superseded_by: str | None = None) -> dict:
+    v = row.get("valuation")
+    if isinstance(v, str):
+        try:
+            row["valuation"] = json.loads(v)
+        except ValueError:
+            row["valuation"] = None
+    blk = _xf_of_assessment(
+        dict(row, assessed_at=_ep(row.get("assessed_at"))), now=now,
+        newer_assessment_id=superseded_by)
+    return dict(row, **_labels(blk))
 
 VERSION = "COMMAND_FLOOR_V1"
 STATEMENT_TIMEOUT_MS = 5000
@@ -412,8 +452,28 @@ async def _xavier(rd: _Reads, now: float) -> dict:
         return {"open": int(r["open"]), "handed": int(r["handed"])}
 
     async def actual(conn):
-        return {"open": int(await conn.fetchval(
-            "SELECT count(*) FROM smalllive_handoffs WHERE state='OPEN'"))}
+        # VENUE BY VENUE, never one count across Polymarket US and Kalshi;
+        # each venue's connection from ITS OWN control row only.
+        by = {r["venue"]: int(r["n"]) for r in await conn.fetch(
+            "SELECT venue, count(*) AS n FROM smalllive_handoffs "
+            " WHERE state='OPEN' GROUP BY venue")}
+        conn_of = {}
+        for venue, table, col in (
+                ("POLYMARKET", "execmirror_control", "account_fingerprint"),
+                ("KALSHI", "kalshi_smalllive_control", "key_fingerprint")):
+            if await conn.fetchval("SELECT to_regclass($1) IS NOT NULL",
+                                   table):
+                conn_of[venue] = bool(await conn.fetchval(
+                    "SELECT %s IS NOT NULL FROM %s WHERE id = 1"
+                    % (col, table)))
+            else:
+                conn_of[venue] = False
+        return {"by_venue": {v: by.get(v, 0) for v in ("POLYMARKET",
+                                                        "KALSHI")},
+                "connected": conn_of,
+                "unknown_venue_open": sum(n for v, n in by.items()
+                                          if v not in ("POLYMARKET",
+                                                       "KALSHI"))}
 
     async def assessments(conn):
         agg = await conn.fetchrow(
@@ -422,18 +482,28 @@ async def _xavier(rd: _Reads, now: float) -> dict:
             " WHERE assessed_at >= to_timestamp($1)", now - DETAIL_WINDOW_S)
         last = await conn.fetchrow(
             "SELECT assessment_id, position_kind, group_id, assessed_at, "
-            "       trigger, evidence_state, thesis_state, recommendation "
-            "  FROM xavier_management_assessments "
+            "       trigger, evidence_state, thesis_state, recommendation, "
+            "       probability, probability_source, probability_age_s, "
+            "       to_jsonb(x) -> 'valuation' AS valuation "
+            "  FROM xavier_management_assessments x "
             " ORDER BY assessed_at DESC LIMIT 1")
         return {"n24": int(agg["n"]), "groups24": int(agg["groups"]),
-                "last": None if last is None else dict(last)}
+                "last": None if last is None else _gate_assessment(
+                    dict(last), now)}
 
     async def reviews(conn):
         last = await conn.fetchrow(
             "SELECT review_id, group_id, reviewed_at, trigger, recommendation,"
-            "       refusal FROM paper_xavier_reviews "
+            "       refusal, measure, selection FROM paper_xavier_reviews "
             " ORDER BY reviewed_at DESC LIMIT 1")
-        return None if last is None else dict(last)
+        if last is None:
+            return None
+        d = dict(last)
+        blk = _xf_of_review(dict(d, reviewed_at=_ep(d.get("reviewed_at"))),
+                           now=now)
+        d.pop("measure", None)
+        d.pop("selection", None)
+        return dict(d, **_labels(blk))
 
     return {
         "paper": await rd.run("xavier_paper_positions",
@@ -737,6 +807,17 @@ def _money(v) -> str | None:
     return None if v is None else "${:,.2f}".format(float(v))
 
 
+def _venue_open(ac: dict | None, venue: str):
+    """One ACTUAL venue's open managed positions, or None (with the reason
+    at the call site) when that venue is not connected and holds none."""
+    if not ac:
+        return None
+    n = (ac.get("by_venue") or {}).get(venue, 0)
+    if not (ac.get("connected") or {}).get(venue) and not n:
+        return None
+    return n
+
+
 def _m(label, value, source, as_of=None, why=None) -> dict:
     """A monitor metric: a real value, or None with the reason."""
     return {"label": label, "value": value, "source": source,
@@ -844,7 +925,8 @@ async def build_floor(conn, *, now: float | None = None,
                     None, asmt["assessed_at"]), group_id=asmt["group_id"],
                     position_kind=asmt["position_kind"],
                     summary="%s · %s · %s" % (
-                        asmt.get("recommendation") or "NO RECOMMENDATION",
+                        asmt.get("recommendation_label")
+                        or "NO RECOMMENDATION",
                         asmt["position_kind"], asmt["group_id"]))))
             if rev:
                 cand.append((rev["reviewed_at"], dict(_ref(
@@ -852,8 +934,9 @@ async def build_floor(conn, *, now: float | None = None,
                     rev["reviewed_at"]), group_id=rev["group_id"],
                     position_kind="PAPER",
                     summary="%s · PAPER · %s" % (
-                        rev.get("recommendation") or rev.get("refusal")
-                        or "REVIEWED", rev["group_id"]))))
+                        rev.get("recommendation_label")
+                        or rev.get("refusal") or "REVIEWED",
+                        rev["group_id"]))))
             if cand:
                 at, last_output = max(cand, key=lambda c: _ep(c[0]) or 0)
                 focus = last_output
@@ -865,9 +948,15 @@ async def build_floor(conn, *, now: float | None = None,
                 _m("Managed positions · PAPER", (p or {}).get("open"),
                    "paper_handoffs+paper_fills", now,
                    rd.sections.get("xavier_paper_positions", {}).get("why")),
-                _m("Managed positions · ACTUAL", (ac or {}).get("open"),
-                   "smalllive_handoffs", now,
-                   rd.sections.get("xavier_actual_positions", {}).get("why")),
+                # ACTUAL, venue by venue: never one figure across venues,
+                # never one venue inferred from the other
+                *[_m("Managed positions · ACTUAL · " + lbl,
+                     _venue_open(ac, venue), "smalllive_handoffs (venue=%s)"
+                     % venue, now,
+                     rd.sections.get("xavier_actual_positions", {}).get("why")
+                     or "%s — NOT_CONNECTED" % lbl)
+                  for venue, lbl in (("POLYMARKET", "POLYMARKET US"),
+                                     ("KALSHI", "KALSHI"))],
                 _m("Latest recommendation",
                    (last_output or {}).get("summary"),
                    (last_output or {}).get("kind") or
@@ -1140,18 +1229,38 @@ async def build_agent_detail(conn, slug: str, *, now: float | None = None
                                 else "")})
         elif a == "XAVIER" and await rd.exists(
                 "xavier_management_assessments"):
+            newest: dict = {}
             for r in await c.fetch(
                     "SELECT assessment_id, position_kind, group_id, "
                     "       assessed_at, trigger, evidence_state, "
-                    "       thesis_state, recommendation "
-                    "  FROM xavier_management_assessments "
-                    " ORDER BY assessed_at DESC LIMIT 20"):
+                    "       thesis_state, recommendation, probability, "
+                    "       probability_source, probability_age_s, "
+                    "       to_jsonb(x) -> 'valuation' AS valuation "
+                    "  FROM xavier_management_assessments x "
+                    " ORDER BY assessed_at DESC, assessment_id DESC "
+                    " LIMIT 20"):
+                # newest first: an older row of a position already listed
+                # is SUPERSEDED by it, never a current recommendation
+                key = (r["position_kind"], r["group_id"])
+                g = _gate_assessment(dict(r), time.time(),
+                                     superseded_by=newest.get(key))
+                newest.setdefault(key, r["assessment_id"])
                 out.append({"kind": "xavier_management_assessments",
                             "id": r["assessment_id"],
                             "at": _ep(r["assessed_at"]),
-                            "verdict": r["recommendation"],
+                            "verdict": g["recommendation"],
+                            "recommendation_state": g[
+                                "recommendation_state"],
+                            "recorded_recommendation": g[
+                                "recorded_recommendation"],
+                            "management_state": g["management_state"],
+                            "superseded_by": g["superseded_by"],
+                            "valuation_id": g["valuation_id"],
+                            "valuation_timestamp": g["valuation_timestamp"],
+                            "age_seconds": g["age_seconds"],
+                            "freshness_limit": g["freshness_limit"],
                             "summary": "%s · %s %s · %s · %s" % (
-                                r["recommendation"] or "NO RECOMMENDATION",
+                                g["recommendation_label"],
                                 r["position_kind"], r["group_id"],
                                 r["evidence_state"], r["thesis_state"])})
         elif a == "AUDREY" and await rd.exists("paper_audrey_findings"):

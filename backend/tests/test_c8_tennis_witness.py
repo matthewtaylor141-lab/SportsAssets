@@ -54,8 +54,9 @@ from tests.test_mirror_live_worker import (  # noqa: F401 -- the autouse rails
 from tests.test_mirror_maps_the_copy_lane import _Recorder
 from tests.test_mirror_shadow import HIS, RATIO, _nosleep
 from tests.test_mirror_shadow import _Pool as _ShadowPool
+from tests.workflow_source import render_ops_file as _render_ops_file
 
-YML = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "render-ops.yml"
+YML = _render_ops_file()
 KEY = ("rn1", CID)
 # his slug, verbatim (cand_refusals_1158 row 686); the tick's clock is
 # set so that its date is more than one day past: 2026-09-09 13:00Z is
