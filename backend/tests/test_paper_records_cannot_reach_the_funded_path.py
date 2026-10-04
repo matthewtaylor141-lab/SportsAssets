@@ -168,6 +168,15 @@ def test_no_funded_module_imports_the_paper_modules():
                # agent_work_* records and holds no submit, cancel or reserve
                # call (tests/test_agent_work_state_authority.py)
                "agents/work_queue.py",
+               # (R30C, 233) the live execution calibration read model
+               # (/api/command/execution-calibration): GET-only, reads the
+               # PAPER adapter's paper orders / fills / books and walks the
+               # SHADOW proposal through the observed book with the paper
+               # simulator's PURE walk (levels_for / walk) inside a READ ONLY
+               # transaction; writes nothing, imports no order, venue,
+               # execution or funded module
+               # (tests/test_execution_calibration.py)
+               "api/command_execution_calibration.py",
                # (R30C, 233) the Opportunity Score V1 / V2 shadow tournament
                # (/api/command/opportunity-score-tournament): GET-only, joins
                # each intent's paper order to bettor_paper_ledger.positions

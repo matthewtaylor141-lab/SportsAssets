@@ -827,6 +827,12 @@ tests/test_command_release_authority.py
 # append-only tables; bundles differ per agent and never widen the
 # registry (Karen / Scout / Eddie boundaries); no voice is borrowed.
 tests/test_agent_identity_api_authority.py
+# (R30C, 233) LIVE EXECUTION CALIBRATION: PAPER_SIMULATION, LIVE_SHADOW and
+# ACTUAL kept apart in storage, estimation and display; every LIVE-path
+# execution estimate states the class it was fitted on; a LIVE estimate
+# without ACTUAL is labelled and WIDER; ACTUAL is UNMEASURED with its reason
+# (never a zero); a venue event can never name a SHADOW execution.
+tests/test_execution_calibration.py
 # (R30C, 233) THE OPPORTUNITY SCORE V1 / V2 SHADOW TOURNAMENT: both scored at
 # the decision instant beside (never in) the canonical intent; INVESTMENT
 # only, forward only, unique opportunities, event-clustered intervals; V2 has

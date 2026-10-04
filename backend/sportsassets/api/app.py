@@ -775,6 +775,16 @@ try:
 except ImportError:
     log.warning("validation: api.command_validation not loaded",
                 exc_info=True)
+# ── R30C LIVE EXECUTION CALIBRATION: /api/command/execution-calibration.
+# PAPER_SIMULATION, LIVE_SHADOW and ACTUAL side by side, never pooled; GET
+# only, COMMAND auth, READ ONLY transaction with a statement timeout.
+try:
+    from .command_execution_calibration import (
+        router as _command_execution_calibration_router)
+    app.include_router(_command_execution_calibration_router)
+except ImportError:
+    log.warning("execution calibration: api.command_execution_calibration "
+                "not loaded", exc_info=True)
 # ── R30C OPPORTUNITY SCORE V1 / V2 SHADOW TOURNAMENT:
 # /api/command/opportunity-score-tournament. V2 has no authority; GET only,
 # COMMAND auth, READ ONLY transaction with a statement timeout.
