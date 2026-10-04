@@ -59,6 +59,28 @@ NOT_ADMISSIBLE = "NOT_ADMISSIBLE"
 #: failure -> this constant alone). This module stays pure.
 APPROVED_LIVE_BOOK_RULES: frozenset = frozenset()
 
+#: THE SETTLEMENT-COMPATIBILITY GATE AND ITS APPROVAL (R30A section 24). The
+#: gate stays: settlement is admissible only on explicit positive facts
+#: (`settlement_admission`). Its APPROVAL is now versioned and hash-matched
+#: like the book-currency rule's: the gate admits only when its id is in the
+#: approved set the caller passes, and the callers (execution_intent) pass
+#: this code constant UNION the gates whose owner approval in live_approvals
+#: names the sha of THIS gate's enforced configuration
+#: (live_approvals.config_sha256: SETTLEMENT_GATE_RULE below, the version,
+#: NEGATIVE). A changed rule changes that sha and the approval stops
+#: admitting. EMPTY: no settlement gate approval exists, so nothing is
+#: admitted -- an absent approval is a refusal, never a default pass.
+SETTLEMENT_GATE_ID = "SETTLEMENT_COMPATIBILITY_V1"
+SETTLEMENT_GATE_VERSION = "1"
+APPROVED_SETTLEMENT_GATES: frozenset = frozenset()
+#: what settlement_admission enforces (read by live_approvals.gate_config)
+SETTLEMENT_GATE_RULE = {
+    "compatibility_required": "COMPATIBLE",
+    "overall_established_required": True,
+    "blockers_allowed": 0,
+    "lane_refusals_allowed": 0,
+    "research_disclosure_counts": False}
+
 #: The PinnAPI probability authority basis the V3 investment policy records.
 PINNAPI_AUTHORITY = "PINNAPI_SOLE_PROBABILITY_AUTHORITY"
 
@@ -130,23 +152,35 @@ def facts_digest(facts: dict) -> str:
                                      default=str).encode()).hexdigest()
 
 
-def settlement_admission(st: dict | None) -> dict:
+def settlement_admission(st: dict | None, *, approved=None) -> dict:
     """LIVE_ADMISSIBLE only when the venue and book settlement terms were
     compared COMPATIBLE, every rule established, no blocker and no
-    settlement-stage lane refusal is recorded. A research-risk disclosure is
-    reported as what it is and never counts."""
+    settlement-stage lane refusal is recorded -- AND the settlement gate's
+    configuration approval is in force (`approved`: the approved gate ids;
+    None -> the code constant, EMPTY). A research-risk disclosure is reported
+    as what it is and never counts."""
     st = dict(st or {})
+    rule = SETTLEMENT_GATE_RULE
+    gates = APPROVED_SETTLEMENT_GATES if approved is None else approved
     blockers = list(st.get("blockers") or [])
     lane = list(st.get("lane_refusals") or [])
-    ok = (st.get("compatibility") == "COMPATIBLE"
-          and st.get("overall_established") is True
-          and not blockers and not lane)
+    facts_ok = (st.get("compatibility") == rule["compatibility_required"]
+                and st.get("overall_established") is
+                rule["overall_established_required"]
+                and len(blockers) <= rule["blockers_allowed"]
+                and len(lane) <= rule["lane_refusals_allowed"])
+    gate_ok = SETTLEMENT_GATE_ID in (gates or ())
+    ok = facts_ok and gate_ok
     return {"status": LIVE_ADMISSIBLE if ok else NOT_ADMISSIBLE,
             "compatibility": st.get("compatibility"),
             "overall_established": st.get("overall_established"),
             "blockers": blockers, "lane_refusals": lane,
             "research_disclosure": st.get("research_disclosure"),
-            "research_disclosure_counts": False}
+            "research_disclosure_counts": rule["research_disclosure_counts"],
+            "gate": SETTLEMENT_GATE_ID, "gate_approved": gate_ok,
+            "why": (None if ok else
+                    "SETTLEMENT_GATE_APPROVAL_ABSENT_OR_STALE" if facts_ok
+                    else "settlement facts are not explicitly compatible")}
 
 
 def book_currency_admission(bc: dict | None, *, approved=None) -> dict:
@@ -170,10 +204,13 @@ def book_currency_admission(bc: dict | None, *, approved=None) -> dict:
 
 def evaluate(facts: dict | None, *, slug: str | None = None,
              order_intent: str | None = None, live_qty=None,
-             approved_book_rules=None) -> dict:
+             approved_book_rules=None,
+             approved_settlement_gates=None) -> dict:
     """Pure. {verdict, refusal (first failing), requirements: [...], digest}.
     `slug` / `order_intent` bind the facts to the intent being admitted;
-    `live_qty` (when known) is the depth requirement's quantity."""
+    `live_qty` (when known) is the depth requirement's quantity;
+    `approved_settlement_gates` the settlement gate approvals in force
+    (None -> APPROVED_SETTLEMENT_GATES, empty)."""
     reqs: list = []
 
     def put(name, ok, code, **ev):
@@ -251,12 +288,14 @@ def evaluate(facts: dict | None, *, slug: str | None = None,
         and nev is not None and nev > 0, R_NET_EV,
         net_expected_profit_usd=nev)
     # 11 · settlement explicitly LIVE_ADMISSIBLE
-    sa = settlement_admission(facts.get("settlement"))
+    sa = settlement_admission(facts.get("settlement"),
+                              approved=approved_settlement_gates)
     put("settlement_live_admissible", sa["status"] == LIVE_ADMISSIBLE,
         R_SETTLEMENT, compatibility=sa["compatibility"],
         overall_established=sa["overall_established"],
         blockers=sa["blockers"],
-        research_disclosure=sa["research_disclosure"])
+        research_disclosure=sa["research_disclosure"],
+        gate_approved=sa["gate_approved"], why=sa["why"])
     failed = [r for r in reqs if not r["passed"]]
     return {"version": VERSION,
             "verdict": NOT_ADMISSIBLE if failed else LIVE_ADMISSIBLE,

@@ -43,10 +43,12 @@ from sportsassets import live_book_evidence as LBE
 from sportsassets import p5_runtime as P5R
 
 try:
+    from tests import admission_fixture as AF
     from tests.test_institutional_contract_map import AEC, SLUG
     from tests.test_institutional_md_grpc_transport import (
         GOOD, Wait, ack, book, until, venue)  # noqa: F401  (fixture)
 except ImportError:                                             # pragma: no cover
+    import admission_fixture as AF  # type: ignore
     from test_institutional_contract_map import AEC, SLUG  # type: ignore
     from test_institutional_md_grpc_transport import (  # type: ignore
         GOOD, Wait, ack, book, until, venue)  # noqa: F401
@@ -277,6 +279,13 @@ async def test_live_admissible_end_to_end_then_each_fact_alone(venue,
     await tx.start()
     try:
         await conn.execute(APPROVE, LBC.RULE_ID, LBC.VERSION)
+        # R30A: the artifact alone is not the approval; the gate's
+        # configuration approval (live_approvals) is the second part
+        assert (await P5R.artifact_state(conn))["owner_approved"] is False
+        await AF.record_test_gate_approvals(conn, [LBC.RULE_ID])
+        art = await P5R.artifact_state(conn)
+        assert art["owner_approved"] is True
+        assert art["gate_config_approved"] is True
         pool = _Pool(conn)
         rows = rec.rows(IS.BOOKS, identity_for=lambda s: {
             "ok": True, "institutional_symbol": s, "refusal": None})
