@@ -159,7 +159,7 @@ export async function createFloor(host, opts) {
   renderer.setPixelRatio(dpr);
   renderer.outputColorSpace = THREE.SRGBColorSpace;
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
-  renderer.toneMappingExposure = 1.05;
+  renderer.toneMappingExposure = 1.10;
   renderer.shadowMap.enabled = !phone;
   renderer.shadowMap.type = THREE.PCFShadowMap;
 
@@ -179,7 +179,7 @@ export async function createFloor(host, opts) {
   }
 
   /* lights */
-  scene.add(new THREE.HemisphereLight('#bcd6ff', '#0b1210', phone ? 1.1 : 0.7));
+  scene.add(new THREE.HemisphereLight('#bcd6ff', '#0b1210', phone ? 1.1 : 0.92));
   const key = new THREE.DirectionalLight('#fff1e2', 2.0);
   key.position.set(-3, 16, 15);
   if (!phone) {
@@ -188,6 +188,11 @@ export async function createFloor(host, opts) {
     key.shadow.bias = -0.0004; key.shadow.normalBias = 0.03;
   }
   scene.add(key);
+  // hq6 face fill: the room stays dark while faces/hands remain legible.
+  const faceFill = new THREE.DirectionalLight('#c7ddff', phone ? 0.32 : 0.58); // hq6 face fill
+  faceFill.position.set(0, 7, 14); scene.add(faceFill);
+  const sideFill = new THREE.DirectionalLight('#86c8ff', phone ? 0.14 : 0.26);
+  sideFill.position.set(9, 4, 7); scene.add(sideFill);
   // no back rim light: on the glossy floor it reads as a glare, not as state
 
   /* the room */
@@ -622,7 +627,7 @@ export async function createFloor(host, opts) {
 
   /* ── camera: overview orbit + focus transitions ────────────────── */
   const camera = new THREE.PerspectiveCamera(phone ? 52 : 40, 1, 0.1, 120);
-  const view = phone ? {target: new THREE.Vector3(0, 0.6, -1.0), az: 0, pol: 0.72, r: 15.5} : {target: new THREE.Vector3(0, 2.1, -1.2), az: 0, pol: 1.2, r: 13.8};
+  const view = phone ? {target: new THREE.Vector3(0, 0.6, -1.0), az: 0, pol: 0.72, r: 15.5} : {target: new THREE.Vector3(0, 1.55, -0.35), az: 0, pol: 1.06, r: 11.8};
   const base = {target: view.target.clone(), az: 0, pol: view.pol, r: view.r};
   let flight = null, focused = null, cameraDirty = true;
   function setCamFromView() {

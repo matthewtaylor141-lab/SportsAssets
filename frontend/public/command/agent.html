@@ -44,6 +44,7 @@
 <link rel="stylesheet" href="hq3-live.css" data-hq3="css">
 <link rel="stylesheet" href="meeting-release.css" data-meeting="css">
 <link rel="stylesheet" href="hq5-workspace.css" data-hq5="css">
+<link rel="stylesheet" href="hq6-complete.css" data-hq6="css">
 <!-- bt-brand: the one BettorToken brand source (brand/install_brand.py) -->
 <link rel="icon" href="brand/favicon.ico" sizes="any" data-brand="icon">
 <link rel="icon" type="image/png" sizes="32x32" href="brand/bettortoken-app-icon-32.png" data-brand="icon32">
@@ -134,7 +135,7 @@
   function load() { var s = document.createElement("script"); s.src = "workspace.js"; document.body.appendChild(s); }
   if (WORKSPACE[name]) {
     if (CLASSIC[name]) { tabs.hidden = false; } else { tabDesk.hidden = true; }
-    var want = CLASSIC[name] ? "desk" : "ws";
+    var want = "ws";
     try { if (CLASSIC[name] && (location.hash === "#desk" || sessionStorage.getItem("bt.agent.tab") === "desk")) { want = "desk"; } } catch (e) { /* no storage */ }
     window.__btWorkspace = {agent: name};
     load();
@@ -155,5 +156,6 @@
 <!-- the agent's licensed 3D character, live in the hero (lazy; pending card without a licensed model) -->
 <script type="module" src="hq2-portrait.js"></script>
 <script src="hq5-workspace.js" data-hq5="js"></script>
+<script src="hq6-complete.js" data-hq6="js"></script>
 </body>
 </html>

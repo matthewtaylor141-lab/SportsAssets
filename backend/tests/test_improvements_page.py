@@ -113,7 +113,7 @@ def test_the_route_and_the_relative_references():
         "/command/improvements.html")
     refs = re.findall(r'(?:href|src)="([^"]+\.(?:css|js))"', HTML)
     # the page's own files plus the shared BettorToken brand stylesheet
-    # (brand/install_brand.py) and the HQ5 workspace layer (command palette,
-    # Company Pulse); every reference stays relative
-    assert refs == ['improvements.css', 'hq5-workspace.css', 'brand/brand.css', 'improvements.js', 'hq5-workspace.js']
+    # (brand/install_brand.py) and the HQ5/HQ6 workspace layers (command
+    # palette, Company Pulse, five-item navigation); every reference relative
+    assert refs == ['improvements.css', 'hq5-workspace.css', 'hq6-complete.css', 'brand/brand.css', 'improvements.js', 'hq5-workspace.js', 'hq6-complete.js']
     assert 'name="viewport"' in HTML and 'name="robots"' in HTML

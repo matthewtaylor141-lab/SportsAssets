@@ -8,7 +8,7 @@
   var names={home:'Command',floor:'Trading Floor',positions:'Position Rooms',profitability:'Profitability OS',agents:'AI Team',company:'Company',acceptance:'Acceptance'};
   var links=[
     ['home','/','⌂','HQ'],['floor','/floor','◈','Floor'],['positions','/positions','◎','Positions'],
-    ['profitability','/profitability','↗','Economics'],['company','/company','◇','Company'],['acceptance','/acceptance','✓','Accept']
+    ['profitability','/profitability','↗','Economics'],['company','/company','◇','Company']
   ];
   document.body.classList.add('bt-hq2');
   var shell=document.createElement('aside'); shell.className='bt-hq2-shell';

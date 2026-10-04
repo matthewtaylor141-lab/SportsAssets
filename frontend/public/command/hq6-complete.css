@@ -1,0 +1,178 @@
+/* BETTOR HQ6 · COMPLETE COMMAND
+   Final convergence: fewer permanent controls, stronger people/work hierarchy,
+   closer/better-lit floor, progressive detail, and a persistent agent/work split. */
+
+:root{
+  --hq6-surface:#061426;--hq6-surface2:#081a31;--hq6-line:rgba(151,180,214,.13);
+  --hq6-ink:#edf5fc;--hq6-muted:#7f93aa;--hq6-blue:#4169ff;--hq6-green:#57e1ad;
+  --hq6-gold:#efca79;--hq6-red:#ff8197
+}
+
+/* PRIMARY IA: Home / Floor / Positions / Economics / Company */
+.bt-hq2 .bt-hq2-nav{gap:10px!important}
+.bt-hq2 .bt-hq2-nav a{min-height:61px!important}
+.bt-hq2 .bt-hq2-nav a span:last-child{font-size:8px!important}
+.bt-hq2 .bt-hq2-page-title{font-weight:600!important;color:#dbe6f3!important}
+
+/* HOME: management brief */
+.hq6-brief{
+  margin-top:13px;display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px
+}
+.hq6-brief-card{
+  min-height:112px;padding:14px;border:1px solid var(--hq6-line);border-radius:15px;
+  background:linear-gradient(180deg,rgba(8,22,42,.84),rgba(5,14,28,.92))
+}
+.hq6-brief-card .k{
+  color:#677c94;font:700 8px/1 ui-monospace,monospace;text-transform:uppercase;letter-spacing:.1em
+}
+.hq6-brief-card h3{margin:8px 0 5px;font-size:12px;color:#e0e9f3}
+.hq6-brief-card p{margin:0;color:#8296ac;font-size:9.5px;line-height:1.45}
+.hq6-brief-card small{display:block;margin-top:8px;color:#667b92;font:650 8px ui-monospace,monospace}
+.hq6-brief-card.attn{border-color:rgba(239,202,121,.20)}
+.hq6-brief-card.attn h3{color:#efca79}
+
+/* Bring real people into team surfaces using the already-generated portraits. */
+.mtg-agent,.hq4-agent-card{padding-top:84px!important;overflow:hidden!important}
+.mtg-agent::before,.hq4-agent-card::before{
+  content:"";position:absolute;left:0;right:0;top:0;height:72px;
+  background-position:50% 20%;background-size:cover;background-repeat:no-repeat;
+  filter:saturate(.88) contrast(1.03);opacity:.90;
+  mask-image:linear-gradient(to bottom,black 60%,transparent 100%);
+}
+.mtg-agent[href="/derek"]::before,.hq4-agent-card.derek::before{background-image:url("team-demo/assets/models/portraits/derek.jpg")}
+.mtg-agent[href="/karen"]::before,.hq4-agent-card.karen::before{background-image:url("team-demo/assets/models/portraits/karen.jpg")}
+.mtg-agent[href="/scout"]::before,.hq4-agent-card.scout::before{background-image:url("team-demo/assets/models/portraits/scout.jpg")}
+.mtg-agent[href="/eddie"]::before,.hq4-agent-card.eddie::before{background-image:url("team-demo/assets/models/portraits/eddie.jpg")}
+.mtg-agent[href="/allocator"]::before,.hq4-agent-card.allocator::before{background-image:url("team-demo/assets/models/portraits/allocator.jpg")}
+.mtg-agent[href="/audrey"]::before,.hq4-agent-card.audrey::before{background-image:url("team-demo/assets/models/portraits/audrey.jpg")}
+.mtg-agent[href="/xavier"]::before,.hq4-agent-card.xavier::before{background-image:url("team-demo/assets/models/portraits/xavier.jpg")}
+.mtg-agent b,.hq4-agent-card b{font-size:12px!important}
+
+/* AGENT PAGE: person always visible, work alongside them. */
+.hq6-agent-layout{
+  margin-left:92px;padding:76px 18px 34px;display:grid;grid-template-columns:minmax(320px,410px) minmax(0,1fr);
+  gap:14px;max-width:1800px
+}
+.hq6-agent-person{
+  position:sticky;top:76px;align-self:start;max-height:calc(100vh - 92px);overflow:auto;
+  scrollbar-width:thin;scrollbar-color:#20374e transparent
+}
+.hq6-agent-work{min-width:0}
+.hq6-agent-layout .bt-agent2,.hq6-agent-layout .bt-agent2-memory{margin-left:0!important;margin-right:0!important}
+.hq6-agent-layout .bt-agent2{
+  margin-top:0!important;padding:16px!important;border-radius:20px!important;box-shadow:0 24px 58px rgba(0,0,0,.28)!important
+}
+.hq6-agent-layout .bt-agent2-grid{display:block!important}
+.hq6-agent-layout .bt-agent2-id{display:block!important}
+.hq6-agent-layout .bt-agent2-face.bt-portrait{width:100%!important;height:310px!important;margin-bottom:15px}
+.hq6-agent-layout .bt-agent2-id>div:last-child{padding:0 4px}
+.hq6-agent-layout .bt-agent2-id h1{font-size:45px!important;margin-top:8px!important}
+.hq6-agent-layout .bt-agent2-id p{font-size:11px!important}
+.hq6-agent-layout .bt-agent2-state{margin-top:12px!important;line-height:1.35!important}
+.hq6-agent-layout .ws-tabs{
+  padding:0 0 0!important;margin:0 0 10px!important;border:1px solid var(--hq6-line)!important;border-radius:13px!important;
+  background:#051121!important;overflow:hidden
+}
+.hq6-agent-layout .ws-tabs button{flex:1;border-radius:0!important;padding:12px 14px!important}
+.hq6-agent-layout .ws{padding:0!important}
+.hq6-agent-layout #page{padding:0!important;min-height:calc(100vh - 145px)!important;border:1px solid var(--hq6-line)!important;border-radius:18px!important;overflow:hidden}
+.hq6-agent-layout #state{margin:0!important}
+.hq6-now{
+  margin-top:13px;padding:14px;border:1px solid color-mix(in srgb,var(--a) 22%,var(--hq6-line));border-radius:15px;
+  background:linear-gradient(180deg,rgba(8,22,42,.90),rgba(4,13,26,.94))
+}
+.hq6-now .eyebrow{color:#6f849b;font:700 8px/1 ui-monospace,monospace;letter-spacing:.12em;text-transform:uppercase}
+.hq6-now h2{margin:7px 0 4px;font:500 18px/1.15 Inter,system-ui,sans-serif;letter-spacing:-.02em}
+.hq6-now>p{margin:0;color:#8da0b5;font-size:10px;line-height:1.45}
+.hq6-now-code{margin-top:8px;color:#647990;font:650 8px ui-monospace,monospace;text-transform:uppercase}
+.hq6-now-grid{display:grid;grid-template-columns:1fr 1fr;gap:7px;margin-top:12px}
+.hq6-now-cell{padding:10px;border:1px solid rgba(151,180,214,.10);border-radius:11px;background:#061426}
+.hq6-now-cell span{display:block;color:#657a91;font:700 7px ui-monospace,monospace;text-transform:uppercase;letter-spacing:.07em}
+.hq6-now-cell b{display:block;margin-top:6px;color:#dbe6f2;font-size:9.5px;line-height:1.35}
+.hq6-now-collab{margin-top:9px;padding-top:9px;border-top:1px solid rgba(151,180,214,.09);color:#72869d;font-size:9px}
+.hq6-agent-more{
+  margin-top:10px;border:1px solid var(--hq6-line);border-radius:14px;background:#05111f;overflow:hidden
+}
+.hq6-agent-more summary{
+  padding:12px 13px;cursor:pointer;color:#9eb0c3;font:650 9px/1 Inter,system-ui,sans-serif;list-style:none
+}
+.hq6-agent-more summary::-webkit-details-marker{display:none}
+.hq6-agent-more summary::after{content:"＋";float:right;color:#61768e;font-size:14px}
+.hq6-agent-more[open] summary::after{content:"−"}
+.hq6-agent-more .bt-agent2-panel{margin:0 10px 8px!important}
+.hq6-agent-more .bt-agent2-memory{margin:0 10px 10px!important}
+.hq6-machine-state{
+  display:inline-block;margin-left:7px;padding:3px 5px;border:1px solid rgba(151,180,214,.12);border-radius:5px;
+  color:#657b92;font:700 7px ui-monospace,monospace;vertical-align:middle
+}
+
+/* Work views: reduce card/border noise and strengthen title hierarchy. */
+.hq6-agent-layout .wsx-hero{border-radius:18px!important;box-shadow:none!important}
+.hq6-agent-layout .wsx-grid{gap:11px!important;margin-top:11px!important}
+.hq6-agent-layout .wsx-card{
+  border-color:rgba(151,180,214,.10)!important;border-radius:14px!important;padding:15px 17px!important;
+  background:linear-gradient(180deg,rgba(9,24,45,.75),rgba(5,14,28,.86))!important
+}
+.hq6-agent-layout .wsx-card h2{font-size:14px!important}
+.hq6-agent-layout .wsx-card h3{font-size:12px!important}
+
+/* FLOOR: room first, forensic detail on focus. */
+body.meeting-real-floor:not(.wall-focus) #ws-feed .ws-rows li:nth-child(n+3){display:none!important}
+body.meeting-real-floor:not(.wall-focus) #ws-health .ws-hb span:nth-child(n+5){display:none!important}
+body.meeting-real-floor:not(.wall-focus) .wall-screen .ws-src{display:none!important}
+body.meeting-real-floor.wall-focus .wall-screen{box-shadow:0 0 0 1px rgba(104,180,240,.22),0 22px 70px rgba(0,0,0,.40)!important}
+.hq6-watch{
+  border-left:1px solid rgba(151,180,214,.12)!important;margin-left:2px!important;padding-left:12px!important
+}
+.hq6-watch.active{color:#57e1ad!important;background:rgba(87,225,173,.08)!important}
+.hq6-watch-toast{
+  position:fixed;left:50%;top:126px;z-index:9300;transform:translateX(-50%) translateY(-8px);
+  padding:8px 11px;border:1px solid rgba(87,225,173,.22);border-radius:999px;
+  background:rgba(5,20,27,.88);backdrop-filter:blur(14px);color:#aee9ce;font:650 8.5px ui-monospace,monospace;
+  opacity:0;pointer-events:none;transition:opacity .2s,transform .2s
+}
+.hq6-watch-toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+.hq6-context{
+  margin:0 12px 10px;padding:11px 12px;border:1px solid rgba(151,180,214,.10);border-radius:12px;background:#061426
+}
+.hq6-context .k{color:#657a91;font:700 7px ui-monospace,monospace;text-transform:uppercase;letter-spacing:.08em}
+.hq6-context h3{margin:6px 0 3px;font-size:12px;color:#e2ebf5}
+.hq6-context p{margin:0;color:#7f93a9;font-size:9px;line-height:1.4}
+.hq6-context small{display:block;margin-top:7px;color:#60758c;font:650 7.5px ui-monospace,monospace}
+
+/* The compact dock keeps portraits visible, but less text. */
+body.meeting-real-floor .fl-agent{position:relative!important;overflow:hidden!important;padding-left:42px!important}
+body.meeting-real-floor .fl-agent::before{
+  content:"";position:absolute;left:4px;top:4px;bottom:4px;width:34px;border-radius:8px;
+  background-position:center 20%;background-size:cover;background-repeat:no-repeat;opacity:.88
+}
+body.meeting-real-floor .fl-agent[data-slug="derek"]::before{background-image:url("team-demo/assets/models/portraits/derek.jpg")}
+body.meeting-real-floor .fl-agent[data-slug="karen"]::before{background-image:url("team-demo/assets/models/portraits/karen.jpg")}
+body.meeting-real-floor .fl-agent[data-slug="scout"]::before{background-image:url("team-demo/assets/models/portraits/scout.jpg")}
+body.meeting-real-floor .fl-agent[data-slug="eddie"]::before{background-image:url("team-demo/assets/models/portraits/eddie.jpg")}
+body.meeting-real-floor .fl-agent[data-slug="allocator"]::before{background-image:url("team-demo/assets/models/portraits/allocator.jpg")}
+body.meeting-real-floor .fl-agent[data-slug="audrey"]::before{background-image:url("team-demo/assets/models/portraits/audrey.jpg")}
+body.meeting-real-floor .fl-agent[data-slug="xavier"]::before{background-image:url("team-demo/assets/models/portraits/xavier.jpg")}
+body.meeting-real-floor .fl-agent .fl-mono{display:none!important}
+
+/* Company / other cards: softer and more usable */
+.hq4-section,.mtg-paper,.mtg-live,.mtg-team,.mtg-attention{
+  box-shadow:0 20px 50px rgba(0,0,0,.20)!important
+}
+.mtg-btn,.hq4-tool{min-height:38px!important;display:flex!important;align-items:center!important}
+
+/* MOBILE is a workspace, not a squeezed desktop */
+@media(max-width:780px){
+  .hq6-brief{grid-template-columns:1fr}
+  .hq6-agent-layout{margin-left:0;padding:70px 10px 82px;display:block}
+  .hq6-agent-person{position:relative;top:auto;max-height:none;overflow:visible}
+  .hq6-agent-layout .bt-agent2-face.bt-portrait{height:300px!important}
+  .hq6-agent-layout .bt-agent2-id h1{font-size:38px!important}
+  .hq6-agent-work{margin-top:10px}
+  .hq6-agent-layout #page{min-height:68vh!important}
+  .hq6-now-grid{grid-template-columns:1fr 1fr}
+  .hq6-watch-toast{top:118px;max-width:calc(100vw - 20px);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .mtg-agent,.hq4-agent-card{padding-top:100px!important}
+  .mtg-agent::before,.hq4-agent-card::before{height:88px}
+}
+@media(max-width:480px){.hq6-now-grid{grid-template-columns:1fr}}
