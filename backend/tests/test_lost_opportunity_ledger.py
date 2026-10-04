@@ -427,7 +427,7 @@ async def _capacity_row(conn, d, *, now, book_age_s=2.0, strategy=None):
 
 
 @pg
-async def test_scores_are_written_as_of_the_decision():
+async def test_scores_are_written_as_of_the_decision(monkeypatch):
     now = time.time()
     async with _txn() as conn:
         acct = await X.account(conn, now=now)
@@ -456,6 +456,26 @@ async def test_scores_are_written_as_of_the_decision():
         assert comps["EXECUTION_CONFIDENCE"]["value"] == 0.8
         assert comps["EDGE_CONFIDENCE"]["value"] is None
         assert P.j(r["detail"])["executable_freshness"]["fresh"] is True
+        # (R30A review) the row records its scope: book, sleeve (the
+        # decision strategy's), strategy and the deciding policy version
+        det = P.j(r["detail"])
+        assert (det["book"], det["sleeve"], det["strategy"],
+                det["policy_version"]) == ("PAPER", "INVESTMENT", X.DEREK,
+                                           X.DEREK)
+        assert det["confidence_scope"] == "PRODUCTION_CONFIDENCE"
+        # ...and the read serves it at the top level of every row
+        from sportsassets.api import command_lost_opportunity as API
+
+        async def pool():
+            return _Pool(conn)
+        monkeypatch.setattr(API, "_pool", pool)
+        got = await API.opportunity_scores(status="", limit=1000)
+        row = next(x for x in got["data"]["rows"]
+                   if x["candidate_id"] == d["decision_id"])
+        assert (row["book"], row["sleeve"], row["strategy"],
+                row["policy_version"], row["confidence_scope"]) == (
+            "PAPER", "INVESTMENT", X.DEREK, X.DEREK, "PRODUCTION_CONFIDENCE")
+        assert row["policy_version_why"] is None
         again = await LR.run_component(conn, now=now + 60)
         assert again["scores"]["written"] == 0
 

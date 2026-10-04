@@ -285,10 +285,35 @@ async def run_cycle(conn, *, now=None, account_id=C.PAPER_ACCOUNT,
         db = await SCD.load(conn, now=now, since=since)
         ed, ew = ctx.get("eddie") or (None, "TWIN_COMPONENT_FAILED")
         sc_, sw = ctx.get("scout") or (None, "TWIN_COMPONENT_FAILED")
-        rows = SCD.compute(streams=streams, results=ctx.get("results") or {},
+        # THE AGENT SCORECARDS' PAPER / ACTUAL ROWS ARE INVESTMENT-ONLY
+        # (R30A review, owner audit P0 #5). Derek's realized edge and
+        # calibration, Xavier's incremental P&L and Scout's outcome joins
+        # pooled every PAPER sleeve: an exploration (TRAINING) win or loss
+        # moved Derek's scorecard. The stored rows (one per agent, metric
+        # and book) now score the INVESTMENT sleeve's positions (the
+        # group's durable migration-223 classification; a decision without
+        # a group: its strategy's sleeve); TRAINING / BENCHMARK /
+        # UNCLASSIFIED are scored SEPARATELY in the snapshot
+        # (`by_sleeve_research`), labelled research. The COUNTERFACTUAL
+        # rows (Karen, the allocator) score twin replays of the whole
+        # recorded stream and say so (`counterfactual_scope`).
+        sl = await _group_sleeves(conn, [
+            p.get("group_id") for st in streams.values()
+            for p in st.positions])
+        by_sleeve = {s_: sleeve_streams(streams, sl, s_)
+                     for s_ in ("INVESTMENT", "TRAINING", "BENCHMARK",
+                                "UNCLASSIFIED")}
+        rows = SCD.compute(streams=by_sleeve["INVESTMENT"],
+                           results=ctx.get("results") or {},
                            traces=ctx.get("traces") or {}, db=db,
                            eddie_rows=ed, eddie_why=ew, scout_rows=sc_,
                            scout_why=sw)
+        for r in rows:
+            if r["book"] in ("PAPER", "ACTUAL") and r["agent"] in (
+                    "DEREK", "XAVIER", "SCOUT"):
+                r["basis"] = "%s [INVESTMENT sleeve only]" % r["basis"]
+        research = {s_: SCD.derek(st_) + SCD.xavier(st_, db["value_add"])
+                    for s_, st_ in by_sleeve.items() if s_ != "INVESTMENT"}
         await ST.save_scorecards(conn, run_id=run_id, now=now, rows=rows)
         by: dict = {}
         for r in rows:
@@ -298,7 +323,21 @@ async def run_cycle(conn, *, now=None, account_id=C.PAPER_ACCOUNT,
             version=SCD.VERSION, payload=C.envelope(
                 version=SCD.VERSION, computed_at=now, run_id=run_id,
                 economic_contribution_only=True, summed_across_books=False,
-                twin_available=bool(streams), agents=by))
+                twin_available=bool(streams), agents=by,
+                production_confidence_scope={
+                    "sleeve": "INVESTMENT",
+                    "rows": "every PAPER / ACTUAL row of DEREK, XAVIER and "
+                            "SCOUT counts INVESTMENT positions only"},
+                counterfactual_scope=(
+                    "ALL_SLEEVES_RESEARCH: KAREN / ALLOCATOR COUNTERFACTUAL "
+                    "rows score twin replays of the whole recorded stream"),
+                sleeve_positions={
+                    s_: {b: len(st_.positions) for b, st_ in v.items()}
+                    for s_, v in by_sleeve.items()},
+                by_sleeve_research={
+                    s_: {"confidence_scope":
+                         "RESEARCH_NOT_PRODUCTION_CONFIDENCE", "rows": rs}
+                    for s_, rs in research.items()}))
         return {"metrics": len(rows), "measured": sum(
             1 for r in rows if r["status"] == "MEASURED")}
 
@@ -447,12 +486,15 @@ async def _closed_rows(conn, paper_positions, actual_positions) -> dict:
         d.update(cost_usd=p.get("cost_usd"), sport=p.get("sport") or
                  "unknown", decided_at=p.get("decided_at"), p=p.get("p"),
                  payoff=p.get("payoff"), slippage_pc=p.get("slippage_pc"))
-        # the group's durable sleeve (migration 223); an ACTUAL position
-        # whose paper group has none takes the classifier's sleeve of the
-        # strategy it recorded; anything else is UNCLASSIFIED
-        d["sleeve"] = sl.get(d["group_id"]) or (
-            STRATEGY_SLEEVE.get(str(d.get("strategy")), "UNCLASSIFIED")
-            if d["book"] == "ACTUAL" else "UNCLASSIFIED")
+        # the group's durable sleeve (migration 223), else UNCLASSIFIED --
+        # PAPER and ACTUAL alike (R30A review: a closed ACTUAL row used to
+        # take the strategy map's sleeve while the open ACTUAL positions of
+        # ladder_inputs read UNCLASSIFIED; UNCLASSIFIED never counts as
+        # INVESTMENT). The strategy map's sleeve is kept as information.
+        d["sleeve"] = sl.get(d["group_id"]) or "UNCLASSIFIED"
+        if d["book"] == "ACTUAL" and not sl.get(d["group_id"]):
+            d["strategy_map_sleeve"] = STRATEGY_SLEEVE.get(
+                str(d.get("strategy")), "UNCLASSIFIED")
         out[d["book"]].append(d)
     return out
 
@@ -509,6 +551,31 @@ STRATEGY_SLEEVE = {
     "PINNACLE_ONLY_PAPER_BENCHMARK": "BENCHMARK",
     "PINNACLE_COMPLETED_GAME_MAKER_PAPER": "BENCHMARK",
 }
+
+
+def sleeve_streams(streams: dict, group_sleeves: dict, sleeve: str) -> dict:
+    """{basis: Stream} holding only `sleeve`'s positions and decisions: a
+    position by its group's durable classification (none -> UNCLASSIFIED,
+    never INVESTMENT); a decision by its group's classification when it has
+    one, else its strategy's sleeve (the classifier map). Every other part
+    of the stream (books, oracle, regimes) is shared. Pure."""
+    def pos_sleeve(p):
+        return group_sleeves.get(p.get("group_id")) or "UNCLASSIFIED"
+
+    def opp_sleeve(o):
+        return (group_sleeves.get(o.get("group_id"))
+                or STRATEGY_SLEEVE.get(str(o.get("strategy")),
+                                       "UNCLASSIFIED"))
+    out = {}
+    for basis, st in streams.items():
+        out[basis] = E.Stream(
+            basis=st.basis,
+            opps=[o for o in st.opps if opp_sleeve(o) == sleeve],
+            positions=[p for p in st.positions if pos_sleeve(p) == sleeve],
+            oracle=st.oracle, books=st.books, regimes=st.regimes,
+            allocations=st.allocations, karen=st.karen, eddie=st.eddie,
+            scout=st.scout, iface_why=st.iface_why, window=st.window)
+    return out
 
 
 async def _group_sleeves(conn, gids) -> dict:

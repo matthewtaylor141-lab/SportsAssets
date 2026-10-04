@@ -138,8 +138,23 @@ async def run_cycle(conn, *, now=None, account_id=C.PAPER_ACCOUNT,
         rows = []
         for c in cands:
             c["fee_basis"] = FEE_BASIS
-            rows.append(CP.assess(c, books.get(c["candidate_id"]),
-                                  fee_fn=fee_fn_for(c.get("decided_at"))))
+            a = CP.assess(c, books.get(c["candidate_id"]),
+                          fee_fn=fee_fn_for(c.get("decided_at")))
+            # (R30A review) every persisted candidate row names its scope:
+            # book, the decision strategy's sleeve (the classifier map; a
+            # decision has no position group), strategy, the deciding
+            # policy version, and the decision's own recorded book -- what
+            # its executable freshness is judged against
+            sleeve = C.strategy_sleeve(c.get("strategy"))
+            a["detail"] = dict(a.get("detail") or {}, scope={
+                "book": "PAPER", "sleeve": sleeve,
+                "sleeve_basis": "THE_DECISION_STRATEGY_CLASSIFIER_MAP",
+                "strategy": c.get("strategy"),
+                "policy_version": c.get("policy_version"),
+                "confidence_scope": C.confidence_scope(sleeve),
+                "decision_book_obs_id": c.get("book_obs_id"),
+                "decision_book_age_s": c.get("decision_book_age_s")})
+            rows.append(a)
         await ST.save_capacity(conn, run_id=run_id, now=now, rows=rows,
                                fee_basis=FEE_BASIS)
         rates = await R.capacity_rates(conn, now=now, account_id=account_id)
@@ -147,9 +162,16 @@ async def run_cycle(conn, *, now=None, account_id=C.PAPER_ACCOUNT,
             conn, now=now, account_id=account_id,
             strategies=C.INVESTMENT_STRATEGIES)
         recent = await R.capacity_recent(conn, now=now)
+
+        def pvs(rs):
+            # the deciding policy versions of the candidates an aggregate
+            # counts (R30A review: every aggregate names them)
+            return sorted({str(r["policy_version"]) for r in rs
+                           if r.get("policy_version")})
         research = CP.aggregate(recent, rates=rates, scope={
             "confidence_scope": C.RESEARCH_SCOPE, "sleeve": None,
-            "strategies": "EVERY_PAPER_STRATEGY",
+            "book": "PAPER", "strategies": "EVERY_PAPER_STRATEGY",
+            "policy_versions": pvs(recent),
             "book_freshness": "RESEARCH_BOUND_%ds" % int(CP.MAX_BOOK_AGE_S),
             "why_research": ("accepts book observations up to %ds from the "
                              "decision -- older than any entry rule allows "
@@ -160,14 +182,17 @@ async def run_cycle(conn, *, now=None, account_id=C.PAPER_ACCOUNT,
         agg = CP.aggregate(prod_rows, rates=prod_rates, scope={
             "confidence_scope": C.PRODUCTION, "sleeve": C.INVESTMENT,
             "book": "PAPER", "strategies": list(C.INVESTMENT_STRATEGIES),
+            "policy_versions": pvs(prod_rows),
             "book_freshness": {
                 "rule": "THE_STRATEGY_EXECUTABLE_FRESHNESS_STANDARD",
                 "bounds_s": {s: CP.executable_bound(s)
                              for s in C.INVESTMENT_STRATEGIES},
-                "basis": "the same book-age bound the entry decision applies "
-                         "(paper_benchmark.BOOK_MAX_AGE_S); a decision's own "
-                         "book by the age it recorded, any other book only "
-                         "at or before the decision"}})
+                "basis": "the entry rule's book-age bound "
+                         "(paper_benchmark.BOOK_MAX_AGE_S; for Derek, who "
+                         "has no book-age refusal, the conservative "
+                         "standard); a decision's own book by the age it "
+                         "recorded, any other book only at or before the "
+                         "decision"}})
         agg["computed_at"] = now
         agg["lookback_hours"] = R.CAPACITY_LOOKBACK_H
         research["computed_at"] = now

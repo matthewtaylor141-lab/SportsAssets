@@ -129,6 +129,16 @@ async def profitability_index() -> dict:
     return await _read(fn)
 
 
+def _jl(v):
+    """A jsonb value as read (dict, or its JSON text)."""
+    if isinstance(v, str):
+        try:
+            return json.loads(v)
+        except ValueError:
+            return None
+    return v if isinstance(v, dict) else None
+
+
 SLEEVES = ("INVESTMENT", "TRAINING", "BENCHMARK", "UNCLASSIFIED")
 SCOPE_RULE = ("data.{PAPER,ACTUAL} is PRODUCTION CONFIDENCE: the INVESTMENT "
               "sleeve only (migration 227). TRAINING, BENCHMARK and "
@@ -223,7 +233,7 @@ async def profitability_capital(
             "       expected_net_profit_usd, expected_capital_hours, "
             "       realized_profit_per_capital_hour, "
             "       expected_profit_per_capital_hour, release_basis, "
-            "       unmeasured, "
+            "       unmeasured, detail, "
             "       extract(epoch FROM opened_at)::float8 AS opened_at, "
             "       extract(epoch FROM last_event_at)::float8 "
             "       AS last_event_at, "
@@ -233,6 +243,22 @@ async def profitability_capital(
             "  FROM pos_economics_latest WHERE ($1 = '' OR book = $1) "
             " ORDER BY (state = 'OPEN') DESC, last_event_at DESC NULLS LAST "
             " LIMIT $2", book, int(limit))]
+        # (R30A review) every position row names its scope -- book, sleeve,
+        # strategy, the deciding policy version -- as the economics run
+        # computed it (economics.scope_of: the group's durable migration-223
+        # classification, else UNCLASSIFIED, never INVESTMENT; PAPER and
+        # ACTUAL alike). A row computed before that stamp says so.
+        for r in rows:
+            scope = (_jl(r.pop("detail", None)) or {}).get("scope") or {}
+            sl = scope.get("sleeve")
+            r["sleeve"] = sl if sl in SLEEVES else "UNCLASSIFIED"
+            r["sleeve_basis"] = (scope.get("sleeve_basis") if scope else
+                                 "NOT_RECORDED_BEFORE_R30A_REVIEW")
+            r["policy_version"] = scope.get("policy_version")
+            r["classifier_version"] = scope.get("classifier_version")
+            r["confidence_scope"] = (
+                "PRODUCTION_CONFIDENCE" if r["sleeve"] == "INVESTMENT"
+                else "RESEARCH_NOT_PRODUCTION_CONFIDENCE")
         now = time.time()
         for r in rows:
             r["REALIZED_PROFIT_PER_CAPITAL_HOUR"] = r[
@@ -260,23 +286,39 @@ async def profitability_capital(
 @router.get(BASE + "/capacity", dependencies=[Depends(require_read)])
 async def profitability_capacity(
         limit: int = Query(default=100, ge=1, le=1000)) -> dict:
+    """The capacity snapshot (top level: PRODUCTION confidence, INVESTMENT
+    at executable freshness; `research` beside it) and the latest
+    per-candidate assessments.
+
+    (R30A review) Each candidate row now names its scope -- book, sleeve
+    (the decision strategy's sleeve: migration 223's classifier map; a
+    strategy outside it UNCLASSIFIED), strategy, policy_version (the
+    decision's) -- and its executable freshness. The row's own dollar
+    figures are the RESEARCH assessment (books up to the research bound,
+    300 s) and say so (`confidence_scope`); the PRODUCTION figure beside them
+    is the same assessment ONLY when the candidate is INVESTMENT and its
+    book met the strategy's executable freshness standard, else None with
+    the reason."""
+    from ..profitability import capacity as CP
+    from ..profitability import common as PC
+
     async def fn(conn):
         snap = await _snapshot(conn, "CAPACITY", "NONE")
         rows = [_row(r) for r in await conn.fetch(
-            "SELECT capacity_id, candidate_id, us_market_slug, holding_side, "
-            "       strategy, status, why, probability, best_price, "
-            "       book_obs_id, book_age_s, visible_depth_usd, "
-            "       visible_depth_contracts, max_executable_contracts, "
-            "       executable_capacity_usd, capacity_ceiling_usd, "
-            "       capacity_ceiling_depth_bound, "
-            "       theoretical_opportunity_dollars, "
-            "       executable_opportunity_dollars, expected_price_impact, "
-            "       edge_decay_per_1000_usd, exit_liquidity_usd, "
-            "       exit_unabsorbed_contracts, edge_at_size, unmeasured, "
-            "       fee_basis, "
-            "       extract(epoch FROM decided_at)::float8 AS decided_at "
-            "  FROM pos_capacity_latest ORDER BY decided_at DESC NULLS LAST "
-            " LIMIT $1", int(limit))]
+            "SELECT c.capacity_id, c.candidate_id, c.us_market_slug, "
+            "       c.holding_side, c.strategy, c.status, c.why, "
+            "       c.probability, c.best_price, c.book_obs_id, c.book_age_s, "
+            "       c.visible_depth_usd, c.visible_depth_contracts, "
+            "       c.max_executable_contracts, c.executable_capacity_usd, "
+            "       c.capacity_ceiling_usd, c.capacity_ceiling_depth_bound, "
+            "       c.theoretical_opportunity_dollars, "
+            "       c.executable_opportunity_dollars, "
+            "       c.expected_price_impact, c.edge_decay_per_1000_usd, "
+            "       c.exit_liquidity_usd, c.exit_unabsorbed_contracts, "
+            "       c.edge_at_size, c.unmeasured, c.fee_basis, c.detail, "
+            "       extract(epoch FROM c.decided_at)::float8 AS decided_at "
+            "  FROM pos_capacity_latest c "
+            " ORDER BY c.decided_at DESC NULLS LAST LIMIT $1", int(limit))]
         for r in rows:
             r["THEORETICAL_OPPORTUNITY_DOLLARS"] = r[
                 "theoretical_opportunity_dollars"]
@@ -284,6 +326,38 @@ async def profitability_capacity(
                 "executable_opportunity_dollars"]
             r["EXPECTED_EDGE_AT_SIZE"] = r["edge_at_size"]
             r["CAPACITY_CEILING_USD"] = r["capacity_ceiling_usd"]
+            scope = (_jl(r.pop("detail", None)) or {}).get("scope") or {}
+            sleeve = scope.get("sleeve") or PC.strategy_sleeve(
+                r.get("strategy"))
+            r["policy_version"] = scope.get("policy_version")
+            r["scope_basis"] = (
+                "RECORDED_AT_ASSESSMENT" if scope else
+                "NOT_RECORDED_BEFORE_R30A_REVIEW: sleeve from the decision "
+                "strategy's classifier map; policy version and the "
+                "decision's own book unknown")
+            r["decision_book_obs_id"] = scope.get("decision_book_obs_id")
+            r["decision_book_age_s"] = scope.get("decision_book_age_s")
+            view = CP.executable_view(r)
+            fresh = view["executable_freshness"]
+            r.update(
+                book="PAPER", sleeve=sleeve,
+                sleeve_basis=scope.get("sleeve_basis")
+                or "THE_DECISION_STRATEGY_CLASSIFIER_MAP",
+                confidence_scope=PC.RESEARCH_SCOPE,
+                research_basis=(
+                    "RESEARCH: this assessment accepts a book up to %ds from "
+                    "the decision; the PRODUCTION figure is the same only "
+                    "at the strategy's executable freshness"
+                    % int(CP.MAX_BOOK_AGE_S)),
+                executable_freshness=fresh)
+            if sleeve != PC.INVESTMENT:
+                prod, why = None, "SLEEVE_IS_%s_NOT_PRODUCTION" % sleeve
+            elif view.get("status") != PC.MEASURED:
+                prod, why = None, view.get("why")
+            else:
+                prod, why = view.get("executable_opportunity_dollars"), None
+            r["PRODUCTION_EXECUTABLE_OPPORTUNITY_DOLLARS"] = prod
+            r["production_executable_opportunity_why"] = why
         if snap is None:
             return _env("EMPTY", "NO_RUN_YET", data=None, candidates=rows)
         return _env("OK", None, computed_at=snap["computed_at"],

@@ -64,9 +64,11 @@ from sportsassets.profitability import validation as V
 from sportsassets.twin import runner as TRUN
 
 try:
+    from tests import lol_fixture as X
     from tests import paper_harness as H
     from tests import pos_fixture as P
 except ImportError:                                             # pragma: no cover
+    import lol_fixture as X
     import paper_harness as H
     import pos_fixture as P
 
@@ -532,6 +534,164 @@ async def test_the_real_cycle_keeps_training_out_of_every_production_number(
 
 
 @pg
+async def test_every_capacity_and_capital_row_names_its_scope(monkeypatch):
+    """(R30A review) Every row and aggregate carries book, sleeve, strategy
+    and policy version: the capacity aggregates name their policy versions;
+    every persisted capacity row records its scope (and the decision's own
+    book, so its executable freshness can be judged); the /capacity rows say
+    their dollars are RESEARCH and give the PRODUCTION figure only for an
+    INVESTMENT candidate on an executable-fresh book; the /capital position
+    rows name sleeve and policy version. Decisions from the production-shaped
+    paper_decisions writer of the lost-opportunity proofs; books from the
+    real observation writer."""
+    from sportsassets.api import command_profitability as CPR
+    now = time.time()
+    async with _txn() as conn:
+        acct = await X.account(conn, now=now)
+        await P.lag_history(conn, acct, now=now)
+        made = {}
+        for name, strategy, age in (("fresh", CG, 2.0), ("old", CG, 120.0),
+                                    ("train", EXPLORE, 2.0)):
+            at = now - 1800 + len(made) * 60
+            d = await X.decision(conn, acct, at=at, refusals=["BELOW"],
+                                 strategy=strategy)
+            await H.observe(conn, d["slug"], at - age,
+                            offers=[(0.50, 100)], bids=[(0.48, 100)])
+            made[name] = d
+        g = await _settled(conn, acct, strategy=CG, at=now - 5 * DAY, qty=20,
+                           price=0.40, outcome="WON")
+        got = await RUN.run_cycle(conn, now=now, account_id=acct["account_id"],
+                                  include_actual=False)
+        assert got["components"]["CAPACITY"] == "OK", got
+        # every persisted capacity row records its scope
+        rows = {r["candidate_id"]: P.j(r["detail"]) for r in await conn.fetch(
+            "SELECT candidate_id, detail FROM pos_capacity_latest "
+            " WHERE candidate_id = ANY($1::text[])",
+            [d["decision_id"] for d in made.values()])}
+        assert len(rows) == 3
+        for name, d in made.items():
+            sc = rows[d["decision_id"]]["scope"]
+            assert sc["book"] == "PAPER"
+            assert sc["strategy"] == (EXPLORE if name == "train" else CG)
+            assert sc["sleeve"] == ("TRAINING" if name == "train"
+                                    else "INVESTMENT")
+            assert sc["policy_version"] == X.DEREK
+        # the aggregates name their policy versions
+        cap = await _snapshot(conn, "CAPACITY", "NONE")
+        assert cap["scope"]["policy_versions"] == [X.DEREK]
+        assert cap["research"]["scope"]["policy_versions"] == [X.DEREK]
+        assert cap["scope"]["book"] == cap["research"]["scope"]["book"] == \
+            "PAPER"
+
+        class _Pool:
+            @asynccontextmanager
+            async def acquire(self):
+                yield conn
+
+        async def pool():
+            return _Pool()
+        monkeypatch.setattr(CPR, "_pool", pool)
+        out = await CPR.profitability_capacity(limit=1000)
+        by = {r["candidate_id"]: r for r in out["candidates"]}
+        f, o, t = (by[made[k]["decision_id"]] for k in ("fresh", "old",
+                                                       "train"))
+        for r in (f, o, t):
+            assert r["book"] == "PAPER" and r["policy_version"] == X.DEREK
+            assert r["confidence_scope"] == C.RESEARCH_SCOPE
+            assert r["scope_basis"] == "RECORDED_AT_ASSESSMENT"
+            assert "executable_freshness" in r
+        assert f["sleeve"] == "INVESTMENT" and t["sleeve"] == "TRAINING"
+        assert f["executable_freshness"]["fresh"] is True
+        assert f["PRODUCTION_EXECUTABLE_OPPORTUNITY_DOLLARS"] == \
+            f["EXECUTABLE_OPPORTUNITY_DOLLARS"] is not None
+        # a 120 s book: a RESEARCH number, never a production one
+        assert o["EXECUTABLE_OPPORTUNITY_DOLLARS"] is not None
+        assert o["PRODUCTION_EXECUTABLE_OPPORTUNITY_DOLLARS"] is None
+        assert o["production_executable_opportunity_why"] == \
+            CP.R_NOT_EXECUTABLE_FRESH
+        assert t["PRODUCTION_EXECUTABLE_OPPORTUNITY_DOLLARS"] is None
+        assert t["production_executable_opportunity_why"] == \
+            "SLEEVE_IS_TRAINING_NOT_PRODUCTION"
+        cp = await CPR.profitability_capital(book="PAPER", limit=1000)
+        mine = [r for r in cp["positions"] if r["group_id"] == g]
+        assert mine and all(r["sleeve"] == "INVESTMENT" for r in mine)
+        assert all(r["confidence_scope"] == "PRODUCTION_CONFIDENCE"
+                   and "policy_version" in r and r["sleeve_basis"]
+                   for r in mine)
+
+
+def test_a_training_win_or_loss_cannot_move_the_agent_scorecards():
+    """(R30A review) The twin's agent scorecards (Derek's realized edge and
+    calibration, Xavier's incremental P&L) pooled every PAPER sleeve. The
+    stored PAPER rows now score the INVESTMENT sleeve only: a TRAINING
+    position -- a huge win or loss -- leaves every INVESTMENT row unchanged,
+    and is scored separately as research."""
+    import copy as _copy
+
+    from sportsassets.twin import engine as E
+    from sportsassets.twin import scorecards as SCD
+    try:
+        from tests import twin_fixture as TF
+    except ImportError:                                         # pragma: no cover
+        import twin_fixture as TF
+    st = TF.stream()
+    sleeves = {"gA": "INVESTMENT", "gC": "TRAINING", "gD": "INVESTMENT"}
+
+    def cards(stream):
+        inv = TRUN.sleeve_streams({"PAPER": stream}, sleeves, "INVESTMENT")
+        return SCD.derek(inv) + SCD.xavier(inv, [])
+    base = cards(st)
+    dirty_pos = []
+    for p in st.positions:
+        q = _copy.deepcopy(p)
+        if p["group_id"] == "gC":            # the TRAINING group
+            q["realized_pnl_usd"] = -5000.0
+        dirty_pos.append(q)
+    dirty = E.Stream(basis="PAPER", opps=st.opps, positions=dirty_pos,
+                     oracle=st.oracle, books=st.books, regimes=st.regimes,
+                     allocations=st.allocations, karen=st.karen,
+                     window=st.window)
+    assert cards(dirty) == base
+    # ...while the TRAINING sleeve's own (research) rows move
+    tr = lambda stream: SCD.derek(TRUN.sleeve_streams(
+        {"PAPER": stream}, sleeves, "TRAINING"))
+    pick = lambda rows: {r["metric"]: r["value"] for r in rows}
+    assert pick(tr(dirty))["accepted_opportunity_pnl"] == -5000.0
+    assert pick(tr(st))["accepted_opportunity_pnl"] == 8.0
+    # a group with no durable classification is never INVESTMENT
+    inv = TRUN.sleeve_streams({"PAPER": st}, {}, "INVESTMENT")["PAPER"]
+    assert inv.positions == []
+
+
+def test_an_actual_position_without_a_durable_classification_is_unclassified():
+    """(R30A review) The ACTUAL readers used to give a position whose group
+    had no durable migration-223 row the strategy map's sleeve (INVESTMENT
+    for CG / Derek) while the twin's open ACTUAL positions read UNCLASSIFIED.
+    It is UNCLASSIFIED everywhere now, the map's sleeve kept as information
+    only."""
+    from sportsassets.profitability import reads as PR
+    pos = PR.attach_sleeve({"book": "ACTUAL", "group_id": "g-none",
+                            "strategy": CG}, {}, strategy_fallback=True)
+    assert pos["sleeve"] == "UNCLASSIFIED"
+    assert pos["sleeve_basis"] == PR.R_NO_DURABLE
+    assert pos["strategy_map_sleeve"] == "INVESTMENT"
+    assert C.sleeve_of(pos) != "INVESTMENT"
+    # a durable classification still stands
+    pos = PR.attach_sleeve({"book": "ACTUAL", "group_id": "g", "strategy": CG},
+                           {"g": {"sleeve": "INVESTMENT", "basis": "ENTRY",
+                                  "policy_version": "CG_V3",
+                                  "classifier_version": "V1"}},
+                           strategy_fallback=True)
+    assert pos["sleeve"] == "INVESTMENT" and "strategy_map_sleeve" not in pos
+    # the SQL twin of the rule never yields INVESTMENT without a durable row
+    sql = PR._sleeve_case_sql("e.group_id", "e.strategy", book_col="e.book",
+                              have_view=True)
+    assert "INVESTMENT" not in sql and "'UNCLASSIFIED'" in sql
+    assert PR._sleeve_case_sql("g", "s", book_col="b", have_view=False) == \
+        "'UNCLASSIFIED'"
+
+
+@pg
 async def test_the_opportunity_score_reads_the_investment_calibration_only():
     from sportsassets.lost_opportunity import reads as LR
     now = time.time()
@@ -664,19 +824,56 @@ async def test_migration_227_refuses_unscoped_rows_and_mislabelled_training():
         await sp.rollback()
 
 
+SCOPED_COUNT = (
+    "SELECT (SELECT count(*) FROM pos_metric_observations WHERE "
+    "        sleeve IS NOT NULL) + (SELECT count(*) FROM "
+    "        pos_forecasts WHERE sleeve IS NOT NULL) + (SELECT "
+    "        count(*) FROM lol_horizon_forecasts WHERE sleeve IS NOT"
+    "        NULL)")
+
+
 @pg
 async def test_migration_227_rollback_applies_cleanly_and_reapplies():
+    """ALWAYS RUNS (R30A review: a skipped critical proof is INVALID at the
+    release gate). Whatever the database holds:
+      * with committed scoped rows, the rollback REFUSES (asserted), then the
+        clean path is proven inside the same rolled-back transaction with
+        those rows hidden from it (the append-only triggers are bypassed by
+        session_replication_role = replica, the rows deleted IN THE
+        TRANSACTION ONLY, and the transaction rolled back -- the test asserts
+        afterwards that every committed row is still there);
+      * the rollback then applies, is idempotent, and 227 reapplies."""
+    conn0 = await asyncpg.connect(H.DSN)
+    try:
+        committed = await conn0.fetchval(SCOPED_COUNT)
+    finally:
+        await conn0.close()
     async with _txn() as conn:
-        # no scoped row in this transaction's view of the test database
-        # (other proofs roll theirs back) -> the rollback applies
-        n = await conn.fetchval(
-            "SELECT (SELECT count(*) FROM pos_metric_observations WHERE "
-            "        sleeve IS NOT NULL) + (SELECT count(*) FROM "
-            "        pos_forecasts WHERE sleeve IS NOT NULL) + (SELECT "
-            "        count(*) FROM lol_horizon_forecasts WHERE sleeve IS NOT"
-            "        NULL)")
+        n = await conn.fetchval(SCOPED_COUNT)
         if n:
-            pytest.skip("this database holds committed scoped rows")
+            sp = conn.transaction()
+            await sp.start()
+            with pytest.raises(asyncpg.RaiseError, match="rollback refused"):
+                await conn.execute(DOWN)
+            await sp.rollback()
+            await conn.execute("SET LOCAL session_replication_role = replica")
+            for t in ("pos_metric_observations", "pos_forecasts",
+                      "lol_horizon_forecasts"):
+                # dependent score rows first (rolled back with the rest)
+                if t == "pos_forecasts":
+                    await conn.execute(
+                        "DELETE FROM pos_forecast_scores WHERE forecast_id IN"
+                        " (SELECT forecast_id FROM pos_forecasts WHERE "
+                        "  sleeve IS NOT NULL)")
+                if t == "lol_horizon_forecasts":
+                    await conn.execute(
+                        "DELETE FROM lol_horizon_forecast_scores WHERE "
+                        " forecast_id IN (SELECT forecast_id FROM "
+                        " lol_horizon_forecasts WHERE sleeve IS NOT NULL)")
+                await conn.execute("DELETE FROM %s WHERE sleeve IS NOT NULL"
+                                   % t)
+            await conn.execute("SET LOCAL session_replication_role = origin")
+            assert await conn.fetchval(SCOPED_COUNT) == 0
         await conn.execute(DOWN)
         cols = {r["column_name"] for r in await conn.fetch(
             "SELECT column_name FROM information_schema.columns "
@@ -698,6 +895,40 @@ async def test_migration_227_rollback_applies_cleanly_and_reapplies():
         assert await conn.fetchval(
             "SELECT count(*) FROM pg_constraint "
             " WHERE conname = 'pos_fc_one_per_day'") == 0
+    # nothing committed was touched: the transaction rolled back
+    conn0 = await asyncpg.connect(H.DSN)
+    try:
+        assert await conn0.fetchval(SCOPED_COUNT) == committed
+    finally:
+        await conn0.close()
+
+
+@pg
+async def test_the_rollback_proof_runs_even_over_committed_scoped_rows():
+    """The branch the gate would otherwise never see: a scoped row visible
+    to the proof (written in this transaction, as a committed one would be)
+    makes the rollback refuse, and the proof's hide-and-prove path still
+    completes -- so the critical proof can never SKIP."""
+    async with _txn() as conn:
+        await conn.execute(
+            "INSERT INTO pos_metric_observations (observation_id, run_id, "
+            " book, metric, computed_at, value, sample_n, status, "
+            " content_sha256, version, sleeve, strategy, policy_versions, "
+            " confidence_scope) VALUES ('rb-proof', 'r', 'PAPER', "
+            " 'MAX_DRAWDOWN', now(), 1.0, 1, 'INSUFFICIENT_SAMPLE', 's', 'v',"
+            " 'INVESTMENT', 'ALL', '{}', 'PRODUCTION_CONFIDENCE')")
+        assert await conn.fetchval(SCOPED_COUNT) >= 1
+        sp = conn.transaction()
+        await sp.start()
+        with pytest.raises(asyncpg.RaiseError, match="rollback refused"):
+            await conn.execute(DOWN)
+        await sp.rollback()
+        await conn.execute("SET LOCAL session_replication_role = replica")
+        await conn.execute(
+            "DELETE FROM pos_metric_observations WHERE sleeve IS NOT NULL")
+        await conn.execute("SET LOCAL session_replication_role = origin")
+        await conn.execute(DOWN)
+        await conn.execute(UP)
 
 
 def test_the_migration_is_research_only_and_writes_no_row():

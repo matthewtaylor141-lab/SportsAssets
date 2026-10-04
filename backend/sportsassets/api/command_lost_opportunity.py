@@ -600,6 +600,24 @@ async def opportunity_scores(
             return _env("EMPTY", "NO_CANDIDATE_SCORED_YET" if last
                         else "NO_RUN_YET", data=None, last_run=last,
                         formula=SCORE_FORMULA)
+        # (R30A review) every score row names its scope at the top level:
+        # book, sleeve (the decision strategy's, classifier map), strategy,
+        # the deciding policy version and its confidence scope, as the
+        # scoring run recorded them in the row's detail
+        from ..profitability import common as PC
+        for r in rows:
+            det = r.get("detail") if isinstance(r.get("detail"), dict) \
+                else (json.loads(r["detail"]) if isinstance(
+                    r.get("detail"), str) else {})
+            sl = det.get("sleeve") or PC.strategy_sleeve(r.get("strategy"))
+            r["book"] = det.get("book") or "PAPER"
+            r["sleeve"] = sl
+            r["policy_version"] = det.get("policy_version")
+            r["policy_version_why"] = (
+                None if det.get("policy_version") else
+                "NOT_RECORDED_BEFORE_R30A_REVIEW" if "policy_version"
+                not in det else "THE_DECISION_RECORDED_NO_POLICY_VERSION")
+            r["confidence_scope"] = PC.confidence_scope(sl)
         await _expand(conn, rows)
         comp = max((r["computed_at"] for r in rows), default=None)
         return _env("OK", None, computed_at=comp, data={

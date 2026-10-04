@@ -244,6 +244,7 @@ async def score_candidates(conn, *, now, version, hours=SCORE_LOOKBACK_H,
         "       extract(epoch FROM c.decided_at)::float8 AS decided_at, "
         "       d.verdict, d.label->>'competition' AS league, "
         "       d.valuation_id, d.book_obs_id AS decision_book_obs_id, "
+        "       d.policy_version, "
         "       CASE WHEN jsonb_typeof(d.book->'age_at_decision_s') = "
         "            'number' THEN (d.book->>'age_at_decision_s')::float8 "
         "       END AS decision_book_age_s "

@@ -75,10 +75,16 @@ MAX_BOOK_AGE_S = 300.0
 #
 # THE RULE. Production-confidence capacity counts an assessment only when
 # its book meets the strategy's OWN executable freshness standard -- the
-# same age bound the entry decision applies (paper_benchmark.BOOK_MAX_AGE_S,
-# pinned equal by a test; every paper policy -- the completed-game
-# investment policy, Derek's entry policy, the benchmark, the maker and
-# exploration arms -- refuses a book older than it):
+# age bound the entry decision applies (paper_benchmark.BOOK_MAX_AGE_S =
+# 10 s, pinned equal by a test). The completed-game investment policy, the
+# benchmark, the maker and the exploration arms each REFUSE a book older
+# than it (THE_PAPER_BOOK_OBSERVATION_IS_NOT_CURRENT). Derek's entry policy
+# has NO book-age refusal of its own (corrected, R30A review): it reads a
+# new book -- or reuses a shared read at most bettor_paper_guard.
+# SHARED_BOOK_MAX_AGE_S = 6 s old -- inside its decision deadline, and
+# refuses only a deadline overrun, a read error or an empty book. For Derek
+# the 10 s bound is therefore the CONSERVATIVE executable standard (every
+# book he could have acted on is within it), not a rule he applies:
 #
 #   the decision's OWN book observation   counted when the age the decision
 #                                         recorded (paper_decisions.book.
@@ -94,8 +100,10 @@ MAX_BOOK_AGE_S = 300.0
 #: pinned equal to agents.paper_benchmark.BOOK_MAX_AGE_S by a test (this
 #: module may not import a paper module)
 EXECUTABLE_BOOK_MAX_AGE_S = 10.0
-#: per strategy (every paper policy applies the same entry bound today; a
-#: strategy not named here gets EXECUTABLE_BOOK_MAX_AGE_S)
+#: per strategy (the four policies with a book-age refusal apply this entry
+#: bound; Derek, with none, gets it as the conservative standard -- his
+#: reads are fresh or at most SHARED_BOOK_MAX_AGE_S old; a strategy not
+#: named here gets EXECUTABLE_BOOK_MAX_AGE_S)
 EXECUTABLE_BOOK_MAX_AGE_BY_STRATEGY = {
     "PINNACLE_COMPLETED_GAME_PAPER": EXECUTABLE_BOOK_MAX_AGE_S,
     "DEREK_ENTRY_POLICY_V2": EXECUTABLE_BOOK_MAX_AGE_S,

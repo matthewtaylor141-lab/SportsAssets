@@ -217,7 +217,16 @@ async def run_component(conn, *, now=None, pos_run_id=None, econs=None,
                     "fill_probability_source"),
                 "capacity_ceiling_usd": C.num(c.get("capacity_ceiling_usd")),
                 "executable_freshness": c.get("executable_freshness"),
-                "sleeve": C.strategy_sleeve(c.get("strategy"))}
+                # (R30A review) the row's scope: book, the decision
+                # strategy's sleeve (classifier map), strategy, the deciding
+                # policy version, and its confidence scope
+                "book": "PAPER",
+                "sleeve": C.strategy_sleeve(c.get("strategy")),
+                "sleeve_basis": "THE_DECISION_STRATEGY_CLASSIFIER_MAP",
+                "strategy": c.get("strategy"),
+                "policy_version": c.get("policy_version"),
+                "confidence_scope": C.confidence_scope(
+                    C.strategy_sleeve(c.get("strategy")))}
             rows.append(got)
         n = await ST.save_scores(conn, run_id=run_id, now=now, rows=rows,
                                  version=SC.VERSION)

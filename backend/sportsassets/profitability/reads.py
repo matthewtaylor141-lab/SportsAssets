@@ -83,41 +83,52 @@ async def sleeve_classes(conn, gids) -> dict | None:
 def attach_sleeve(pos: dict, classes, *, strategy_fallback=False,
                   policy_version=None) -> dict:
     """Stamp a position record with its sleeve, the classification basis,
-    the deciding policy version and the classifier version. PAPER: the
-    group's durable classification or UNCLASSIFIED. ACTUAL
-    (`strategy_fallback`): the mirrored paper group's classification, else
-    the classifier's sleeve of the strategy the live lane recorded."""
+    the deciding policy version and the classifier version: the group's
+    durable migration-223 classification, else UNCLASSIFIED -- for PAPER
+    AND ACTUAL alike.
+
+    (R30A review) An ACTUAL position whose group has no durable
+    classification used to take the classifier's sleeve of the strategy the
+    live lane recorded -- INVESTMENT for the completed-game policy or Derek
+    -- while the twin's ladder read the same open ACTUAL positions as
+    UNCLASSIFIED. Migration 223's own reason for a group without a durable
+    row is NO_DURABLE_CLASSIFICATION, i.e. UNCLASSIFIED, and UNCLASSIFIED
+    never counts as INVESTMENT. So it is UNCLASSIFIED everywhere now; with
+    `strategy_fallback` (the ACTUAL readers) the strategy map's sleeve is
+    kept beside it as `strategy_map_sleeve` -- information, never the
+    sleeve."""
     c = (classes or {}).get(pos.get("group_id"))
+    extra = {}
     if c is not None:
         sleeve = c["sleeve"] if c["sleeve"] in C.SLEEVES else C.UNCLASSIFIED
         basis = c.get("basis")
         pv = policy_version or c.get("policy_version")
         cv = c.get("classifier_version")
-    elif strategy_fallback and pos.get("strategy"):
-        sleeve = C.strategy_sleeve(pos["strategy"])
-        basis = "ACTUAL_LANE_STRATEGY_%s" % pos["strategy"]
-        pv, cv = policy_version, "STRATEGY_MAP_OF_PAPER_SLEEVE_V1"
     else:
         sleeve, pv, cv = C.UNCLASSIFIED, policy_version, None
         basis = R_NO_SLEEVE_SCHEMA if classes is None else R_NO_DURABLE
+        if strategy_fallback and pos.get("strategy"):
+            extra["strategy_map_sleeve"] = C.strategy_sleeve(pos["strategy"])
+            extra["strategy_map_role"] = (
+                "INFORMATION ONLY: the classifier's sleeve of the strategy "
+                "the live lane recorded; without a durable classification "
+                "the position is UNCLASSIFIED (never INVESTMENT)")
     pos.update(sleeve=sleeve, sleeve_basis=basis, policy_version=pv,
-               classifier_version=cv)
+               classifier_version=cv, **extra)
     return pos
 
 
 def _sleeve_case_sql(group_col: str, strategy_col: str, *, book_col: str,
                      have_view: bool) -> str:
     """SQL expression: the sleeve of an economics row -- the durable
-    classification of its group; for an ACTUAL row with none, the
-    classifier's sleeve of its strategy; else UNCLASSIFIED."""
-    strat = " ".join("WHEN %s = '%s' THEN '%s'" % (strategy_col, s, v)
-                     for s, v in sorted(C.STRATEGY_SLEEVE.items()))
-    fallback = ("CASE WHEN %s = 'ACTUAL' THEN (CASE %s ELSE 'UNCLASSIFIED' "
-                "END) ELSE 'UNCLASSIFIED' END" % (book_col, strat))
+    classification of its group, else UNCLASSIFIED (PAPER and ACTUAL alike:
+    R30A review, see attach_sleeve). `strategy_col` / `book_col` are kept
+    for the callers' signature; neither can make a row INVESTMENT."""
+    del strategy_col, book_col
     if not have_view:
-        return fallback
+        return "'UNCLASSIFIED'"
     return ("coalesce((SELECT s.sleeve FROM paper_sleeve_current_v s "
-            "           WHERE s.group_id = %s), %s)" % (group_col, fallback))
+            "           WHERE s.group_id = %s), 'UNCLASSIFIED')" % group_col)
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -661,8 +672,11 @@ async def capacity_candidates(conn, *, now, account_id=None,
     rows = await conn.fetch(
         "SELECT d.decision_id, d.us_market_slug, d.holding_side, "
         "       d.p_blended, d.p_pinnacle, d.p_internal, d.book_obs_id, "
-        "       d.strategy, extract(epoch FROM d.decided_at)::float8 "
-        "       AS decided_at "
+        "       d.strategy, d.policy_version, "
+        "       CASE WHEN jsonb_typeof(d.book->'age_at_decision_s') = "
+        "            'number' THEN (d.book->>'age_at_decision_s')::float8 "
+        "       END AS decision_book_age_s, "
+        "       extract(epoch FROM d.decided_at)::float8 AS decided_at "
         "  FROM paper_decisions d "
         " WHERE d.decided_at >= to_timestamp($1) "
         "   AND ($2::text IS NULL OR d.account_id = $2) "
@@ -680,7 +694,9 @@ async def capacity_candidates(conn, *, now, account_id=None,
                     "holding_side": r["holding_side"],
                     "strategy": r["strategy"], "probability": p,
                     "probability_basis": pb,
-                    "book_obs_id": r["book_obs_id"]})
+                    "book_obs_id": r["book_obs_id"],
+                    "policy_version": r["policy_version"],
+                    "decision_book_age_s": r["decision_book_age_s"]})
     return out
 
 
@@ -824,6 +840,7 @@ async def capacity_recent(conn, *, now, hours=CAPACITY_LOOKBACK_H) -> list:
         "       c.executable_opportunity_dollars, c.executable_capacity_usd, "
         "       c.capacity_ceiling_usd, "
         "       d.book_obs_id AS decision_book_obs_id, "
+        "       d.policy_version, "
         "       CASE WHEN jsonb_typeof(d.book->'age_at_decision_s') = "
         "            'number' THEN (d.book->>'age_at_decision_s')::float8 "
         "       END AS decision_book_age_s, "
