@@ -775,6 +775,18 @@ try:
 except ImportError:
     log.warning("validation: api.command_validation not loaded",
                 exc_info=True)
+# ── THE CONFIDENCE LADDER (R30A): /api/command/confidence-ladder. GET only,
+# COMMAND auth, one READ ONLY transaction with a statement timeout: levels
+# 0..6 per strategy and overall (INVESTMENT sleeve), the highest level met
+# and the next level's blockers, from the paper ledger, the validation
+# verdict, the parity ledger and the SMALL LIVE control. No route here
+# writes, sends an order or changes a control.
+try:
+    from .command_confidence_ladder import router as _command_ladder_router
+    app.include_router(_command_ladder_router)
+except ImportError:
+    log.warning("confidence ladder: api.command_confidence_ladder not loaded",
+                exc_info=True)
 # ── THE POSITION ROOMS: /api/command/positions/rooms, /room/{group_key}.
 # GET only, COMMAND auth, READ ONLY transaction; one correlated economic
 # position per screen (paper and actual, actual per venue, never summed).

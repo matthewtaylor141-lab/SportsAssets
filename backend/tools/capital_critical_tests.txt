@@ -827,3 +827,20 @@ tests/test_command_release_authority.py
 # append-only tables; bundles differ per agent and never widen the
 # registry (Karen / Scout / Eddie boundaries); no voice is borrowed.
 tests/test_agent_identity_api_authority.py
+# (R30A, migration 227) EVERY PRODUCTION-CONFIDENCE NUMBER IS INVESTMENT-ONLY:
+# a TRAINING (or BENCHMARK, or UNCLASSIFIED) win or loss cannot move a
+# north-star metric, forecast, horizon forecast, production capacity rate,
+# INVESTMENT profit line, twin ladder input, scorecard sample or the
+# Opportunity Score's calibration; production capacity uses the strategy's
+# executable book freshness (the entry rule's bound), the 300 s research
+# number stays labelled research; 227 refuses unscoped rows and a TRAINING
+# row labelled PRODUCTION_CONFIDENCE; its rollback refuses while scoped rows
+# exist.
+tests/test_investment_only_confidence.py
+# (R30A) THE CONFIDENCE LADDER (GET /api/command/confidence-ladder): levels
+# 0..6 exactly as the owner's audit names them, never a skipped level;
+# level 2 from validation's forward event-clustered checks plus power from
+# the observed variance (no invented sample count); level 3 is live_parity's
+# gate; levels 4-6 NOT_REACHED while SMALL LIVE is SHADOW; a TRAINING win or
+# loss moves no INVESTMENT level; GET-only, READ ONLY, no write.
+tests/test_confidence_ladder.py

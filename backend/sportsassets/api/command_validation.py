@@ -114,6 +114,11 @@ def position_rows(allp: list, open_views: list, classes: dict) -> list:
             "group_id": p.get("group_id"),
             "sleeve": c.get("sleeve") or "UNCLASSIFIED",
             "strategy": c.get("strategy") or p.get("strategy"),
+            # (R30A) the durable classification's policy version and
+            # classifier: the confidence ladder names them on every scope
+            # (None when the group has no durable classification)
+            "policy_version": c.get("policy_version"),
+            "classifier_version": c.get("classifier_version"),
             "fixture": p.get("fixture"),
             "us_market_slug": p.get("us_market_slug"),
             "first_fill_at": _f(p.get("first_fill_at")),

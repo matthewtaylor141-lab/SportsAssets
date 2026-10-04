@@ -161,6 +161,15 @@ def test_no_funded_module_imports_the_paper_modules():
                # execution or funded module
                # (tests/test_profitability_validation.py)
                "api/command_validation.py",
+               # (R30A) the confidence ladder (/api/command/confidence-
+               # ladder): GET-only; reads the paper positions through
+               # command_validation.gather (bettor_paper_ledger.ACCOUNT_ID,
+               # positions / balances, the sleeves), counts paper_decisions
+               # per strategy and reads the parity ledger and the SMALL LIVE
+               # control, all inside one READ ONLY transaction. It writes
+               # nothing and imports no order, venue, execution or funded
+               # module (tests/test_confidence_ladder.py)
+               "api/command_confidence_ladder.py",
                # (226, owner R30) Xavier's fresh-evidence work queue: reads
                # the paper ledger's open positions (to close the requests of
                # a position that closed) and asks the paper runtime for a
