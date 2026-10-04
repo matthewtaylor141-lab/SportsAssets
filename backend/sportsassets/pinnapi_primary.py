@@ -18,7 +18,24 @@ PROVIDER = "pinnapi.com/raw-websocket"
 LEGACY_PROVIDER = "the-odds-api.com/v4"
 VERSION = "PINNAPI_PRIMARY_H2H_V1"
 START_TOLERANCE_S = 90 * 60
-SPORTS = {"baseball": 6, "soccer": 1}
+#: PinnAPI's OWN sport ids, from its public documentation ("## Sport IDs --
+#: Stable integer mapping": 1 Soccer, 5 Football, 6 Baseball), read from
+#: https://pinnapi.com/llms-full.txt at 2026-10-04T18:56:20Z by fetch-docs run
+#: 37226335697 (job 111506643056, 56,250 bytes, sha256 162705de...d394d;
+#: excerpt in tests/fixtures/pinnapi_docs_2026_10_04.json). R30A adds
+#: football: until now the full-game NFL line was never even matched here,
+#: so no NFL valuation could carry a PinnAPI probability.
+#:
+#: WHICH MARKET. The same documentation names period `num_0` "full match"
+#: (its example's description is "Game") and `money_line` as {home, away,
+#: draw?}. Pinnacle's American Football rules make the Game period include
+#: overtime ("Bets on the Game and 2nd Half-periods include points scored in
+#: overtime."), which is the venue contract's own "Overtime is included if
+#: played." So the NFL line read is the period-0 money line with EXACTLY the
+#: two teams. A draw-priced football line is the regulation market and is
+#: refused by name (FOOTBALL_DRAW_PRICED), never de-vigged as the game line.
+SPORTS = {"baseball": 6, "soccer": 1, "football": 5}
+R_FOOTBALL_DRAW_PRICED = "PINNAPI_PRIMARY_FOOTBALL_LINE_PRICES_A_DRAW"
 
 
 def epoch(value):
@@ -144,6 +161,8 @@ def select(cache, event, fallback, *, family, sharp_books, at,
         return fail("PINNAPI_PRIMARY_NOT_FULL_GAME_H2H")
     expected = {"home", "away", "draw"} if family == "soccer" else {"home", "away"}
     odds = q.decimal_prices()
+    if family == "football" and "draw" in odds:
+        return fail(R_FOOTBALL_DRAW_PRICED)
     if set(odds) != expected or any(v is None or not math.isfinite(v) or v <= 1
                                    for v in odds.values()):
         return fail("PINNAPI_PRIMARY_INCOMPLETE_OUTCOMES")

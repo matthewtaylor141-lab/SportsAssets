@@ -25,8 +25,12 @@ WHAT THIS FILE PINS:
     London game's UTC/ET dating; a game in progress keeps its identity.
   4 SETTLEMENT from the two captured documents: overtime agrees (established);
     the venue's postponement rule CONFLICTS with the book's void rule, and the
-    venue's $0.50 tie payout has no counterpart in the book's captured terms --
-    both stay refused BY NAME. Football stays out of the de-vig set.
+    venue's $0.50 tie payout differs from the book's void-on-a-tie General
+    Rule (R30A: cand24 wrongly read the book as silent) -- both stay refused
+    BY NAME for the strict comparison. Football stays out of the family-wide
+    de-vig set; R30A admits the NFL alone (SUPPORTED_BY_LEAGUE), its two-way
+    price conditional on no tie (bettor_nfl_settlement converts it for the
+    venue's tie payout).
   5 THE REAL CYCLE on a 14-game fixture built from today's production rows:
     every game ends in a persisted valuation and a recorded paper decision
     with a named refusal; an unlisted provider game stops at identity by name;
@@ -451,6 +455,60 @@ def test_football_stays_out_of_the_de_vig_set():
     assert devig.R_UNSUPPORTED_MARKET in val["refusals"]
 
 
+def test_the_nfl_enters_the_de_vig_set_conditional_on_no_tie():
+    # R30A. The family-wide pin above still holds: a football contract
+    # whose league is not established is refused exactly as before. The NFL
+    # -- and only the NFL -- is admitted by measurement (research-sql run
+    # 37226814972: 15 of 15 production NFL money lines priced as exactly two
+    # outcomes, no Draw), and the de-vigged number says what it is
+    # conditional on: P(win | no tie), which bettor_nfl_settlement converts
+    # into the venue contract's value from the cited tie rate before any
+    # policy compares it with a price.
+    assert devig.SUPPORTED_BY_LEAGUE[("football", "h2h", "nfl")] == 2
+    val = devig.valuation(
+        contract={"sport_family": "football", "market": "h2h",
+                  "selection": "Washington Commanders",
+                  "us_market_slug": "aec-nfl-ind-was-2026-10-04",
+                  "event_key": "e1", "period": "FULL_GAME"},
+        quote={"book": "pinnacle", "event_key": "e1", "period": "FULL_GAME",
+               "observed_at": 0.0,
+               "outcomes": {"Washington Commanders": 2.8,
+                            "Indianapolis Colts": 1.48}},
+        now=1.0)
+    assert val["refusals"] == []
+    assert val["admitted_for_league"] == "football/h2h@nfl"
+    assert 0.33 < val["probability"] < 0.36
+    assert val["conditional_on"]["condition"] == "NO_TIE"
+    assert "draw is not offered" in val["conditional_on"]["book_rule"]
+    # the same prices on a college contract stay outside, as before
+    cfb = devig.valuation(
+        contract={"sport_family": "football", "market": "h2h",
+                  "selection": "Washington Commanders",
+                  "us_market_slug": "aec-cfb-ind-was-2026-10-04"},
+        quote={"book": "pinnacle",
+               "outcomes": {"Washington Commanders": 2.8,
+                            "Indianapolis Colts": 1.48}},
+        now=1.0)
+    assert cfb["probability"] is None
+    assert cfb["refusals"] == [devig.R_UNSUPPORTED_MARKET]
+    assert cfb["supported_for_league_only"] == ["football/h2h@nfl"]
+    # a contract whose explicit league and slug disagree is not established
+    assert devig.league_of_contract(
+        {"league": "nfl", "us_market_slug": "aec-cfb-x-y-2026-10-04"}) is None
+    # a draw-priced football line (the regulation market) is refused by name
+    drawn = devig.valuation(
+        contract={"sport_family": "football", "market": "h2h",
+                  "selection": "Washington Commanders", "league": "nfl",
+                  "event_key": "e1", "period": "FULL_GAME"},
+        quote={"book": "pinnacle", "event_key": "e1", "period": "FULL_GAME",
+               "observed_at": 0.0,
+               "outcomes": {"Washington Commanders": 3.1, "Draw": 41.0,
+                            "Indianapolis Colts": 1.52}},
+        now=1.0)
+    assert drawn["probability"] is None
+    assert drawn["refusals"] == [devig.R_DRAW_PRICED_LINE]
+
+
 # ═════════════════════════════════════════════════════════════════════
 # 5 · THE REAL CYCLE ON THE 14-GAME SLATE
 # ═════════════════════════════════════════════════════════════════════
@@ -644,9 +702,18 @@ async def test_every_nfl_game_ends_in_a_recorded_named_outcome(monkeypatch):
             # the home team is the venue's SHORT row on every NFL contract
             assert v["buy_intent"] == SHORT, (s, v["buy_intent"])
             assert v["admissible"] is False
-            assert v["probability"] is None
-            for code in ("MARKET_NOT_IN_SUPPORTED_SET",
-                         vset.R_VOID_CONFLICTS, vset.R_DRAW_ASYMMETRIC):
+            # STALE PIN UPDATED (R30A): this asserted `probability is None`
+            # and MARKET_NOT_IN_SUPPORTED_SET because football was outside
+            # the de-vig set. The NFL is now admitted by measurement
+            # (research-sql run 37226814972, SUPPORTED_BY_LEAGUE; college
+            # football unchanged), so every NFL row carries the book's two-way
+            # probability -- P(win | no tie), which the completed-game policy
+            # converts for the venue's tie payout before any edge. The
+            # strict settlement refusals are unchanged and still named.
+            assert v["probability"] is not None and \
+                0.0 < v["probability"] < 1.0, (s, v["probability"])
+            assert "MARKET_NOT_IN_SUPPORTED_SET" not in v["refusals"]
+            for code in (vset.R_VOID_CONFLICTS, vset.R_DRAW_ASYMMETRIC):
                 assert code in v["refusals"], (s, code, v["refusals"])
             assert "OVERTIME_RULE_NOT_ESTABLISHED" not in v["refusals"]
 

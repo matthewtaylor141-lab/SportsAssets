@@ -615,29 +615,56 @@ def attest(*, sport_family, market="h2h", venue_evidence=None,
 
     # ── draw ─────────────────────────────────────────────────────────
     #
-    # A TIE THE VENUE PRICES AND THE BOOK'S CAPTURED TERMS DO NOT (cand24).
-    # The venue's NFL listing says "If the game ends in a tie, the market
-    # will settle to $0.50" (tests/fixtures/pmus_nfl_listing_2026_10_04.json);
-    # an NFL regular-season game can end level after overtime
-    # (TIE_REACHABLE), and the bookmaker's captured American Football section
-    # states no money-line rule for that outcome. "This sport prices no draw"
-    # would then be a claim neither document makes, so the draw rule refuses
-    # by name. The college listing names no tie payout and is unaffected.
+    # A TIE THE TWO SIDES PAY DIFFERENTLY (cand24, corrected in R30A). The
+    # venue's NFL listing says "If the game ends in a tie, the market will
+    # settle to $0.50" (tests/fixtures/pmus_nfl_listing_2026_10_04.json); an
+    # NFL regular-season game can end level after overtime (TIE_REACHABLE).
+    # cand24 recorded that "the book's captured terms state no money-line
+    # rule for a tie". THAT WAS WRONG: the same capture's General Rules
+    # (pinnacle_american_football_rules_2026_10_03.json, general_rules_section
+    # [11], re-read unchanged 2026-10-04T18:50:51Z) state it -- "If a draw is
+    # not offered and a draw happens, then bets on both teams will be
+    # voided." So the comparison is now PAYOUT AGAINST PAYOUT: the book
+    # returns the stake, the venue pays 0.50. They differ, so for a policy
+    # that requires every condition to pay the same (Derek's) the draw rule
+    # still refuses by name -- with both payouts and both citations on the
+    # record. The completed-game policy prices the difference instead
+    # (bettor_nfl_settlement.convert, with the cited tie-rate interval). The
+    # college listing names no tie payout and is unaffected.
     tie_prose = str(ve.get("rules_text") or "").lower()
     venue_prices_a_tie = bool(re.search(
         r"\bties?\b[^.]*\bsettle\w*\s+(?:to|at)\s+\$?0?\.5|"
         r"\bties?\b[^.]*\b50\s*[-/]\s*50\b", tie_prose))
     if n_book != 3 and venue_prices_a_tie and \
             TIE_REACHABLE.get((fam, "OT_INCLUDED")):
+        from . import bettor_nfl_settlement as _NFL
+        vt = _NFL.venue_tie_payout(ve.get("rules_text"))
         out["rules"]["draw"] = {
             "applicable": True, "established": False,
             "evidence_class": EV_NONE, "refusal": R_DRAW_ASYMMETRIC,
             "source": ve.get("rules_source") or "venue rules_text",
-            "detail": ("the venue settles a TIED game at a stated price "
-                       "(its own prose), a tie is reachable in this sport "
-                       "(TIE_REACHABLE), and the book's captured terms state "
-                       "no money-line rule for a tie: the tie outcome is not "
-                       "reconciled")}
+            "tie_payout_comparison": {
+                "condition": "TIE_AFTER_OVERTIME",
+                "book_payout": _ST.PAY_STAKE_BACK,
+                "venue_payout": ("PAYS_0.50_PER_CONTRACT"
+                                 if vt.get("payout") == 0.5 else
+                                 "STATED_BUT_NOT_THE_CITED_0.50"),
+                "verdict": _ST.V_MISMATCH,
+                "book_cite": {"source_url": _NFL.PINNACLE_RULES_URL,
+                              "retrieved_at": _NFL.PINNACLE_CAPTURES[-1][
+                                  "retrieved_at"],
+                              "page_sha256": _NFL.PINNACLE_PAGE_SHA256,
+                              "quote": _NFL.Q_BOOK_TIE},
+                "venue_quote": _NFL.Q_VENUE_TIE,
+                "priced_by": ("bettor_nfl_settlement.convert (the completed-"
+                              "game policy, at the worst end of the cited "
+                              "tie-rate interval); a strict policy has no "
+                              "way to price it")},
+            "detail": ("a TIED game pays 0.50 per contract at the venue and "
+                       "VOIDS (stake returned) at the book, whose money line "
+                       "offers no draw price (General Rules, cited). The "
+                       "payouts differ, so the draw rule is not reconciled "
+                       "for a policy that needs identical payouts")}
     elif n_book != 3:
         out["rules"]["draw"] = {
             "applicable": False, "established": True,
@@ -944,6 +971,14 @@ def settlement_blockers(srule, *, fixture=None) -> dict:
     for k, r in (s.get("rules") or {}).items():
         if k != "void" and r.get("applicable") and not r.get("established") \
                 and r.get("refusal"):
+            # R30A: a tie paid differently on the two sides is a PAYOUT
+            # mismatch with both payouts on the record, named as one -- not
+            # only as the rule that is unmet.
+            tie = r.get("tie_payout_comparison") or {}
+            if tie.get("verdict") == _ST.V_MISMATCH:
+                add(B_INCOMPATIBLE, "%s(book=%s;venue=%s)" % (
+                    tie.get("condition"), tie.get("book_payout"),
+                    tie.get("venue_payout")))
             add(B_RULE_UNMET, r["refusal"])
     verdict = cmp_.get("verdict")
     established = bool(verdict == _ST.COMPATIBLE

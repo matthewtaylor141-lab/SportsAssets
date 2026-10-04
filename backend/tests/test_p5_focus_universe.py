@@ -209,6 +209,29 @@ async def _seed(conn, tag):
     return s
 
 
+async def _isolate_the_candidate_tier(conn) -> None:
+    """THE CANDIDATE TIER IS READ FROM A SHARED TEST DATABASE (R30A).
+
+    `FU._candidates` lists at most 2 x MAX_MEMBERS (64) distinct slugs of
+    recent V3 decisions, ENTER first. Other proofs in the same database
+    (the paper-pass proofs of every policy, the NFL ones among them) leave
+    their own V3 ENTER decisions inside the one-hour window, and once 64
+    such slugs exist this proof's seeded REFUSE candidate is ranked past
+    the cap and the lookup fails with a KeyError -- a count of OTHER proofs'
+    residue, not a tier-ordering defect (reproduced by preloading 70 ENTER
+    slugs: the same KeyError at the base commit). Those rows are removed
+    INSIDE this proof's transaction, which is rolled back, so nothing is
+    deleted for good and every assertion below is unchanged; the append-only
+    trigger is bypassed for that one statement only."""
+    await conn.execute("SET LOCAL session_replication_role = replica")
+    await conn.execute(
+        "DELETE FROM paper_decisions WHERE strategy = $1 AND "
+        " policy_version = $2 AND decided_at > now() - "
+        " make_interval(secs => $3)", FU.INVESTMENT_STRATEGY,
+        FU.INVESTMENT_VERSION, FU.CANDIDATE_WINDOW_S * 2)
+    await conn.execute("SET LOCAL session_replication_role = origin")
+
+
 @pg
 async def test_every_reader_puts_each_seeded_contract_in_its_tier():
     conn = await asyncpg.connect(H.DSN)
@@ -216,6 +239,7 @@ async def test_every_reader_puts_each_seeded_contract_in_its_tier():
     await tx.start()
     try:
         tag = uuid.uuid4().hex[:8]
+        await _isolate_the_candidate_tier(conn)
         s = await _seed(conn, tag)
         g = await FU.gather(conn)
         assert all(v["status"] == "MEASURED" for v in g["status"].values()), \

@@ -1128,7 +1128,8 @@ def venue_price_settlement(rows: list, *, holding_side: str) -> dict:
     the short side its complement. Otherwise: no payout, the position stays
     open and pending -- a refund is never assumed."""
     from .. import bettor_settlement_terms as ST
-    prices, ev, stated = set(), [], False
+    from .. import bettor_nfl_settlement as NFL
+    prices, ev, stated, tie_stated = set(), [], False, False
     for r in rows:
         try:
             sp = float(str(r.get("settlement_read")).strip())
@@ -1143,17 +1144,57 @@ def venue_price_settlement(rows: list, *, holding_side: str) -> dict:
         terms = ST.read_terms(r.get("rules") or "").get("terms") or {}
         if ST.PAY_LAST_FAIR_MARKET_PRICE in terms.values():
             stated = True
+        # R30A: THE NFL TIE. "If the game ends in a tie, the market will
+        # settle to $0.50." is a stated price settlement of an ORDINARILY
+        # COMPLETED game, read from the contract's own text.
+        if NFL.venue_tie_payout(r.get("rules")).get("payout") == 0.5:
+            tie_stated = True
     if not ev:
         return {"price": None, "why": "NO_VENUE_PRICE_SETTLEMENT_RECORDED"}
     if len(prices) > 1:
         return {"price": None, "why": "CONFLICTING_VENUE_SETTLEMENT_PRICES",
                 "evidence": ev}
-    if not stated:
+    tie_price = tie_stated and prices == {0.5}
+    if not stated and not tie_price:
         return {"price": None, "evidence": ev,
                 "why": ("VENUE_SETTLED_AT_A_PRICE_BUT_THE_CONTRACT_TEXT_HELD_"
                         "STATES_NO_PRICE_SETTLEMENT")}
     long_px = prices.pop()
     per = long_px if holding_side == "LONG" else round(1.0 - long_px, 9)
+    if tie_price:
+        # WHICH STATE PAID 0.50 IS RECORDED ONLY AS FAR AS IT IS KNOWN (R30A
+        # review). The venue's settlement read is a PRICE, not a score. When
+        # the contract's text states BOTH the tie settlement and the
+        # last-fair-market-price clause (every captured NFL listing does), a
+        # 0.50 can be an ordinary tied game OR a postponed / suspended game
+        # whose last fair price was 0.50 -- an EXCEPTIONAL state. Writing
+        # TIE_AFTER_OVERTIME / ORDINARY there would state an unverified fact
+        # and move an exceptional settlement into the ordinary class, which
+        # undercounts the exceptional risk that is measured apart. No outcome
+        # source read here reports a final tied score, so the state is named
+        # as not distinguished. Only when the text states the tie settlement
+        # and NO other price settlement is 0.50 the tie by the contract's own
+        # terms. The payout is the venue's published price either way.
+        if stated:
+            state, cls = NFL.S_TIE_OR_LAST_FAIR_PRICE, NFL.AMBIGUOUS
+            why = ("the contract states both a $0.50 tie settlement and a "
+                   "last-fair-market-price settlement; the venue's read is a "
+                   "price only, and no final score is read here, so which "
+                   "state paid is not established")
+        else:
+            state, cls = "TIE_AFTER_OVERTIME", NFL.ORDINARY
+            why = ("the contract's only stated price settlement is the $0.50 "
+                   "tie settlement")
+        return {"price": per, "venue_long_price": long_px, "evidence": ev,
+                "rule": ("the contract's stated $0.50 settlement: each side "
+                         "is paid 0.50 per contract"),
+                "settlement_state": state, "state_class": cls,
+                "state_basis": why,
+                "would_distinguish": ("a final score from an outcome source "
+                                      "(tied after overtime -> "
+                                      "TIE_AFTER_OVERTIME, ordinary; game not "
+                                      "completed -> exceptional)"),
+                "quote": NFL.Q_VENUE_TIE}
     return {"price": per, "venue_long_price": long_px, "evidence": ev,
             "rule": "the contract's stated last-fair-market-price settlement"}
 

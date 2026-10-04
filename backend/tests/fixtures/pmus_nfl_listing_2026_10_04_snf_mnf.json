@@ -1,0 +1,89 @@
+{
+ "_what": "THE VENUE'S OWN nfl MONEY-LINE LISTINGS for the Sunday-night (UTC Monday) and Monday-night games of 2026-10-04/05, as served by the public gateway, for R30A date mapping and the tie / postponement wording.",
+ "_source": "GET https://gateway.polymarket.us/v1/markets?slug=aec-nfl-det-car-2026-10-04&slug=aec-nfl-atl-no-2026-10-05",
+ "_captured_at": "2026-10-04T18:50:46Z",
+ "_reader": "github-actions runner (fetch-docs)",
+ "_evidence": {
+  "workflow": "fetch-docs",
+  "run_id": 37225983304,
+  "job_id": 111505618185,
+  "response_bytes": 9467,
+  "response_sha256": "02ff2cf8df8d1b786883622f761b70c8e7d1a93340eef54fc5c2389bdec7cb4d"
+ },
+ "_subset": "the fields this repository reads (slug, question, description, types, gameStartTime, sides with team name/abbreviation/alias/ordering); icons/colours/prices omitted",
+ "_dating": "the slug and the description date the game by its America/New_York day: DET at CAR kicks off 2026-10-05T00:20:00Z (20:20 ET on 10-04) and is aec-nfl-det-car-2026-10-04, 'scheduled for Oct 4, 2026'",
+ "markets": [
+  {
+   "slug": "aec-nfl-det-car-2026-10-04",
+   "question": "Who will win in the upcoming football event Detroit Lions vs Carolina Panthers scheduled for October 5, 2026 at 12:20 AM UTC?",
+   "description": "This market will settle to the winner of the Detroit Lions vs Carolina Panthers NFL game scheduled for Oct 4, 2026. Overtime is included if played. If the game ends in a tie, the market will settle to $0.50. If the game is delayed, postponed, or suspended and not rescheduled to a date within two weeks of the originally scheduled date, the market will settle to the last fair market price. Outcome sourced from NFL.",
+   "marketType": "moneyline",
+   "sportsMarketType": "football_team_full_game_winner",
+   "sportsMarketTypeV2": "SPORTS_MARKET_TYPE_MONEYLINE",
+   "gameStartTime": "2026-10-05T00:20:00Z",
+   "endDate": "2026-10-19T04:20:00Z",
+   "marketSides": [
+    {
+     "identifier": "aec-nfl-det-car-2026-10-04",
+     "description": "Lions",
+     "long": true,
+     "team": {
+      "name": "Detroit Lions",
+      "abbreviation": "det",
+      "league": "nfl",
+      "alias": "Lions",
+      "ordering": "away"
+     }
+    },
+    {
+     "identifier": "aec-nfl-det-car-2026-10-04",
+     "description": "Panthers",
+     "long": false,
+     "team": {
+      "name": "Carolina Panthers",
+      "abbreviation": "car",
+      "league": "nfl",
+      "alias": "Panthers",
+      "ordering": "home"
+     }
+    }
+   ]
+  },
+  {
+   "slug": "aec-nfl-atl-no-2026-10-05",
+   "question": "Who will win in the upcoming football event Atlanta Falcons vs New Orleans Saints scheduled for October 6, 2026 at 12:15 AM UTC?",
+   "description": "This market will settle to the winner of the Atlanta Falcons vs New Orleans Saints NFL game scheduled for Oct 5, 2026. Overtime is included if played. If the game ends in a tie, the market will settle to $0.50. If the game is delayed, postponed, or suspended and not rescheduled to a date within two weeks of the originally scheduled date, the market will settle to the last fair market price. Outcome sourced from NFL.",
+   "marketType": "moneyline",
+   "sportsMarketType": "football_team_full_game_winner",
+   "sportsMarketTypeV2": "SPORTS_MARKET_TYPE_MONEYLINE",
+   "gameStartTime": "2026-10-06T00:15:00Z",
+   "endDate": "2026-10-20T04:15:00Z",
+   "marketSides": [
+    {
+     "identifier": "aec-nfl-atl-no-2026-10-05",
+     "description": "Falcons",
+     "long": true,
+     "team": {
+      "name": "Atlanta Falcons",
+      "abbreviation": "atl",
+      "league": "nfl",
+      "alias": "Falcons",
+      "ordering": "away"
+     }
+    },
+    {
+     "identifier": "aec-nfl-atl-no-2026-10-05",
+     "description": "Saints",
+     "long": false,
+     "team": {
+      "name": "New Orleans Saints",
+      "abbreviation": "no",
+      "league": "nfl",
+      "alias": "Saints",
+      "ordering": "home"
+     }
+    }
+   ]
+  }
+ ]
+}

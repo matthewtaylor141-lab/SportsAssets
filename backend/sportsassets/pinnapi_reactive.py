@@ -26,12 +26,46 @@ ACTIVE = None
 #: still re-proves identity, venue, settlement, depth and fees.
 HELD_SEED_TTL_S = 6 * 3600
 
+#: R30A · HOT NFL FRESHNESS PRIORITY. An NFL game near kickoff (from
+#: HOT_BEFORE_KICKOFF_S before its scheduled start through HOT_AFTER_KICKOFF_S
+#: after it) is where a fresh Pinnacle line matters most and where the
+#: periodic collector, every ~15 minutes, is too slow for the 30 s rule (the
+#: 2026-10-04 production receipt: two NFL games QUOTE_STALE_ON_ARRIVAL in all
+#: 25 cycles). Such an event's changes get their OWN queue, served after held
+#: events (open inventory keeps first call) and before every other discovery
+#: change, and its seed is pinned against discovery eviction while it is hot.
+#: Same socket, same owner, same single worker and deadline: nothing new is
+#: opened and no rule is loosened -- each queued change is still read through
+#: the cache's own 30 s freshness check and re-proved end to end by the
+#: evaluation it triggers. The kickoff is the discovery seed's own
+#: commence_time (a schedule; used only to ORDER work, never to classify a
+#: quote's context).
+HOT_SPORT_KEYS = frozenset(("americanfootball_nfl",))
+HOT_BEFORE_KICKOFF_S = 6 * 3600
+HOT_AFTER_KICKOFF_S = 4 * 3600
+#: THE HOT TIER'S SHARE IS BOUNDED (R30A review). Strict priority let an NFL
+#: Sunday -- a dozen-plus games hot all day, each re-queued on every change
+#: -- hold every MLB and soccer discovery change behind it on the single
+#: worker, which changes other sports' behaviour. While a discovery change
+#: is waiting, at most HOT_MAX_CONSECUTIVE hot jobs run before one discovery
+#: job is served: a waiting discovery change is evaluated within
+#: HOT_MAX_CONSECUTIVE + 1 non-held jobs, and discovery keeps at least a
+#: third of the non-held throughput whenever both queues hold work. With no
+#: discovery change waiting, the hot tier runs freely (it starves nobody).
+#: The hot queue itself is bounded by the number of NFL events inside their
+#: window (one entry per event, later changes coalesce). Held events still
+#: go first, exactly as before R30A.
+HOT_MAX_CONSECUTIVE = 2
+
 
 class Scheduler:
     """One worker, one deadline. HELD EVENTS FIRST: a held event's change is
     queued on `held_pending`, served before any discovery change, never
-    evicted by discovery; its seed is pinned while held. Discovery keeps its
-    FIFO queue, cap and eviction exactly as before."""
+    evicted by discovery; its seed is pinned while held. HOT NFL EVENTS
+    SECOND (R30A, `hot_pending`): an NFL game near kickoff, ahead of
+    discovery for at most HOT_MAX_CONSECUTIVE jobs in a row while discovery
+    waits. Discovery keeps its FIFO queue, cap and eviction exactly as
+    before."""
 
     def __init__(self, cache, evaluate, audit, *, clock=time.time,
                  queue_cap=128, seed_cap=512, seed_ttl=1800, deadline=12,
@@ -42,6 +76,8 @@ class Scheduler:
         self.seed_ttl, self.deadline = seed_ttl, deadline
         self.seeds, self.pending, self.seen = OrderedDict(), OrderedDict(), {}
         self.held_pending = OrderedDict()
+        self.hot_pending = OrderedDict()
+        self.hot_streak = 0
         self.held = held if held is not None else PH.WATCH
         self.wake = asyncio.Event()
         self.counts = Counter()
@@ -53,8 +89,24 @@ class Scheduler:
         except Exception:                                       # noqa: BLE001
             return False
 
+    def _is_hot(self, eid, seed=None) -> bool:
+        """An NFL game inside its hot window, from the discovery seed's own
+        sport key and scheduled start. Never raises."""
+        try:
+            seed = seed if seed is not None else self.seeds.get(eid)
+            if not seed or seed.get('sport_key') not in HOT_SPORT_KEYS:
+                return False
+            start = P.epoch((seed.get('event') or {}).get('commence_time'))
+            if start is None:
+                return False
+            dt = start - float(self.clock())
+            return -HOT_AFTER_KICKOFF_S <= dt <= HOT_BEFORE_KICKOFF_S
+        except Exception:                                       # noqa: BLE001
+            return False
+
     def _seed_live(self, eid, seed) -> bool:
-        ttl = HELD_SEED_TTL_S if self._is_held(eid) else self.seed_ttl
+        ttl = (HELD_SEED_TTL_S if (self._is_held(eid) or self._is_hot(eid, seed))
+               else self.seed_ttl)
         return 0 <= self.clock() - seed['registered_at'] <= ttl
 
     def register(self, event, *, sport_key, family, received_at):
@@ -75,8 +127,10 @@ class Scheduler:
 
     def _evict_seeds(self):
         while len(self.seeds) > self.seed_cap:
-            # the oldest NON-HELD seed goes; a held event's seed is pinned
-            old = next((k for k in self.seeds if not self._is_held(k)), None)
+            # the oldest NON-HELD, NON-HOT seed goes; held and hot seeds
+            # are pinned
+            old = next((k for k in self.seeds if not self._is_held(k)
+                        and not self._is_hot(k)), None)
             if old is None:
                 break
             self.seeds.pop(old)
@@ -105,8 +159,9 @@ class Scheduler:
             self.counts['UNCHANGED'] += 1
             return
         self.seen[eid] = version
+        hot = (not held) and self._is_hot(eid, seed)
         tick = dict(version=version, received_at=quote.received_ms/1000,
-                    queued_at=self.clock(), held=held)
+                    queued_at=self.clock(), held=held, hot=hot)
         if held:
             # HELD FIRST: its own queue, never evicted by discovery, and a
             # change already queued for discovery is moved here
@@ -115,6 +170,15 @@ class Scheduler:
                 self.counts['HELD_COALESCED'] += 1
             self.held_pending[eid] = tick
             self.counts['HELD_QUEUED'] += 1
+            self.wake.set()
+            return
+        if hot:
+            # HOT NFL SECOND: its own queue, never evicted by discovery
+            self.pending.pop(eid, None)
+            if eid in self.hot_pending:
+                self.counts['HOT_COALESCED'] += 1
+            self.hot_pending[eid] = tick
+            self.counts['HOT_QUEUED'] += 1
             self.wake.set()
             return
         if eid in self.pending:
@@ -159,6 +223,7 @@ class Scheduler:
             return 'ALREADY_EVALUATED_THIS_VERSION'
         self.seen[eid] = version
         self.pending.pop(eid, None)
+        self.hot_pending.pop(eid, None)
         self.held_pending[eid] = dict(version=version,
                                       received_at=q.received_ms/1000,
                                       queued_at=self.clock(), held=True,
@@ -168,10 +233,21 @@ class Scheduler:
         return 'QUEUED'
 
     def next_job(self):
-        """(event id, tick) to evaluate next: held before discovery."""
+        """(event id, tick) to evaluate next: held first; then hot NFL ahead
+        of discovery, but never more than HOT_MAX_CONSECUTIVE hot jobs in a
+        row while a discovery change waits; then discovery."""
         if self.held_pending:
             return self.held_pending.popitem(last=False)
+        if self.hot_pending:
+            if not self.pending:
+                self.hot_streak = 0
+                return self.hot_pending.popitem(last=False)
+            if self.hot_streak < HOT_MAX_CONSECUTIVE:
+                self.hot_streak += 1
+                return self.hot_pending.popitem(last=False)
+            self.counts['HOT_YIELDED_TO_DISCOVERY'] += 1
         if self.pending:
+            self.hot_streak = 0
             return self.pending.popitem(last=False)
         return None
 
@@ -183,7 +259,8 @@ class Scheduler:
                 self.wake.clear()
                 continue
             eid, tick = job
-            if not self.pending and not self.held_pending:
+            if not self.pending and not self.held_pending and \
+                    not self.hot_pending:
                 self.wake.clear()
             attempt = dict(attempt_id=uuid.uuid4().hex, event_id=eid, **tick,
                            evaluation_started_at=self.clock(), state='STARTED',
@@ -223,6 +300,8 @@ class Scheduler:
                 self.counts[attempt['state']] += 1
                 if tick.get('held'):
                     self.counts['HELD_' + attempt['state']] += 1
+                elif tick.get('hot'):
+                    self.counts['HOT_' + attempt['state']] += 1
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -313,6 +392,7 @@ async def stop(task):
         scheduler.cache.on_change = None
         scheduler.pending.clear()
         scheduler.held_pending.clear()
+        scheduler.hot_pending.clear()
         from . import pinnapi_held as PH
         # the held watch keeps watching (on the feed runtime's cache only)
         PH.reinstall_if_installed(scheduler.cache)
