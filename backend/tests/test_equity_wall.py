@@ -139,6 +139,8 @@ def test_paper_marks_that_stopped_refreshing_are_stale():
     dead = E.paper_account(paper_balances([]), now=NOW,
                            session=dict(RUNNING, heartbeat_at=NOW - 3600))
     assert dead["status"] == "STALE" and "heartbeat" in dead["why"]
+    assert dead["lane"]["state"] == "NO_HEARTBEAT"
+    assert got["lane"]["state"] == "RUNNING"
     assert dead["equity_usd"] == 499000.0
 
 

@@ -366,7 +366,10 @@ def paper_account(bal: dict | None, *, now: float, error: str | None = None,
         "ledger_sequence": bal.get("last_sequence"),
         "last_change_at": iso(last_change),
         "stale_after_s": PAPER_RUNTIME_STALE_AFTER_S,
-        "lane": {"state": "RUNNING" if sess.get("active") else "NOT_RUNNING",
+        "lane": {"state": ("NOT_RUNNING" if not sess.get("active") else
+                           "RUNNING" if hb is not None
+                           and now - hb <= PAPER_RUNTIME_STALE_AFTER_S
+                           else "NO_HEARTBEAT"),
                  "session_id": sess.get("session_id"),
                  "session_started_at": iso(sess.get("started_at")),
                  "heartbeat_at": iso(hb), "heartbeat_age_s": age(now, hb),
