@@ -497,8 +497,13 @@ def confirm_mapping_by_fixtures(*, provider_events, venue_event_titles,
                 {"venue": str(title)[:60], "refusal": R_SIDES_NOT_TWO,
                  "why": "both sides normalise to the same team"})
             continue
-        venue.append({"title": str(title)[:70], "a": a_tok, "b": b_tok,
-                      "day": days.get(title)})
+        # A title that names fixtures on several days (a return leg under the
+        # same title) is one venue fixture PER DAY (R30A): each is matched on
+        # its own date, so neither meeting erases the other.
+        tdays = days.get(title)
+        for tday in (tdays if isinstance(tdays, (list, tuple)) else [tdays]):
+            venue.append({"title": str(title)[:70], "a": a_tok, "b": b_tok,
+                          "day": tday})
         if a_drop or b_drop:
             out["normalisation"].append(
                 {"venue": str(title)[:60],
@@ -631,10 +636,37 @@ VENUE_BOARD_SNAPSHOT_MEASURED = (
     ("par2", 4), ("mls", 3), ("lmx", 3), ("uru1", 3), ("nwsl", 2),
 )
 
+#: ── THE BOARD'S BOUNDS (R30A P0 incident, inc-catalogue) ───────────────
+#:
+#: THE BOARD KEPT ITS FIRST THIRTY TOKENS AND TWELVE TITLES, AND BOTH CUTS
+#: REACHED MAPPED COMPETITIONS. research-sql run 37233672878 (K5a, 2026-10-04
+#: 20:51Z): the venue's real soccer board carried 47 league tokens; `LIMIT 30`
+#: dropped 17 of them -- among them `mls` (row 38) and `uslc` (row 44), both
+#: mapped in VENUE_TOKEN_TO_PROVIDER_KEY -- so on a quiet day those two
+#: competitions could never become a candidate, and nothing named why (ties at
+#: one event broke on the planner's whim). And the fixture titles that travel
+#: with each candidate were the first TWELVE in alphabetical order: `unl` listed
+#: 25 fixtures, `ncaaws` 74, `u21eq` 24, so `confirm_mapping_by_fixtures` saw
+#: under half of the Nations League board and could refuse a competition whose
+#: provider fixtures all sat in the alphabet's second half.
+#:
+#: The token bound is now a size the board cannot reach in practice (it holds
+#: one row per competition), and the titles carried are every fixture up to a
+#: bound far above any measured slate. Both bounds are still bounds: a board
+#: that FILLS one is reported (`board_truncated`, `titles_truncated`), never
+#: read as complete.
+BOARD_TOKEN_LIMIT = 500
+BOARD_TITLES_CARRIED = 1000
+#: The board ranks the slate inside the catalogue sweep's own forward window
+#: (premap fwd_h = 96 h) -- the horizon it always ranked, now stated.
+BOARD_HORIZON_H = 96
+
 #: The venue's REAL soccer board, by its own league token, newest first. The
 #: simulated exclusion is `bettor_venue_realism`'s, applied in SQL so a
 #: competition of 168 eBattles events cannot outrank a real one.
-def _board_sql(family_prefix: str = "soccer", title_limit: int = 12) -> str:
+def _board_sql(family_prefix: str = "soccer",
+               title_limit: int = BOARD_TITLES_CARRIED,
+               token_limit: int = BOARD_TOKEN_LIMIT) -> str:
     """The board query, with its exclusions GENERATED from the classifier.
 
     `family_prefix` is the venue `sports_type` family the board ranks
@@ -657,7 +689,8 @@ def _board_sql(family_prefix: str = "soccer", title_limit: int = 12) -> str:
     input, and are asserted to be plain lowercase words before interpolation.
     """
     assert family_prefix.isalpha() and family_prefix.islower(), family_prefix
-    assert isinstance(title_limit, int) and 0 < title_limit <= 200, title_limit
+    assert isinstance(title_limit, int) and 0 < title_limit <= 5000, title_limit
+    assert isinstance(token_limit, int) and 0 < token_limit <= 5000, token_limit
     for m in vreal.SIMULATED_MARKERS:
         assert m.replace("-", "").isalpha() and m.islower(), m
     for pfx in vreal.SIMULATED_SPORTS_TYPE_PREFIXES:
@@ -675,6 +708,9 @@ def _board_sql(family_prefix: str = "soccer", title_limit: int = 12) -> str:
     return ("""
     SELECT split_part(market_slug, '-', 2)  AS token,
            count(DISTINCT event_slug)        AS events,
+           -- every distinct fixture title, so a carried list shorter than this
+           -- is a truncation the reader can name (R30A)
+           count(DISTINCT left(event_title, 80)) AS title_count,
            (array_agg(DISTINCT left(event_title, 80)))[1:%(n)d] AS titles,
            -- THE FIXTURE DATES, PER TITLE. Codex: the scheduled caller never
            -- supplied `venue_event_days`, so the date comparison in
@@ -690,10 +726,15 @@ def _board_sql(family_prefix: str = "soccer", title_limit: int = 12) -> str:
        """ % {"n": title_limit, "fam": family_prefix} + types + """
        """ + prose + """
        AND game_start > now() - interval '6 hours'
+       -- the slate the metered budget is spent on: the sweep's own window.
+       -- The catalogue now also holds futures and next week's fixtures
+       -- (premap AHEAD); ranking competitions by those would hand the
+       -- provider budget to fixtures it does not price yet (R30A)
+       AND game_start <= now() + interval '%(horizon)d hours'
      GROUP BY 1
-     ORDER BY 2 DESC
-     LIMIT 30
-""")
+     ORDER BY 2 DESC, 1
+     LIMIT %(tokens)d
+""" % {"tokens": token_limit, "horizon": BOARD_HORIZON_H})
 
 
 VENUE_SOCCER_BOARD_SQL = _board_sql()
@@ -756,17 +797,86 @@ async def venue_soccer_competitions(conn, *, now: float | None = None) -> dict:
     # {token: {title: 'YYYY-MM-DD'}}, from the venue's own game_start.
     days: dict = {}
     for r in rows:
-        per: dict = {}
-        for pair in (r["title_days"] or []):
-            title, _, day = str(pair).partition("\u0001")
-            if title and day:
-                per[title] = day
-        days[str(r["token"])] = per
+        days[str(r["token"])] = title_days_of(r["title_days"])
     out["title_days"] = days
+    out.update(board_bounds(rows))
     out["why"] = ("the venue's own league tokens for REAL soccer events "
                   "starting within the last 6 hours or later, simulated "
                   "competitions excluded by the venue's own words")
     return out
+
+
+def title_days_of(pairs) -> dict:
+    """{title: 'YYYY-MM-DD'} from the board's `title<U+0001>day` pairs -- and
+    {title: ['YYYY-MM-DD', 'YYYY-MM-DD']} when ONE title names fixtures on
+    several days. Pure.
+
+    TWO FIXTURES, ONE TITLE, TWO DATES (R30A, adversarial review): this was
+    `per[title] = day`, so the last pair won and a return leg -- the same two
+    clubs, the same title, another date -- erased the first fixture's date
+    from the confirmation (a provider fixture on the erased date then read as
+    "the same two teams on different days"). The SQL already returns every
+    distinct (title, day) pair; every date is kept. A single date stays a
+    string, exactly as every reader and pin has it."""
+    per: dict = {}
+    for pair in (pairs or []):
+        title, _, day = str(pair).partition("\u0001")
+        if not (title and day):
+            continue
+        cur = per.get(title)
+        if cur is None:
+            per[title] = day
+        elif isinstance(cur, list):
+            if day not in cur:
+                cur.append(day)
+                cur.sort()
+        elif cur != day:
+            per[title] = sorted({cur, day})
+    return per
+
+
+def board_bounds(rows, *, token_limit: int = BOARD_TOKEN_LIMIT,
+                 title_limit: int = BOARD_TITLES_CARRIED) -> dict:
+    """The board's own completeness, stated beside it (R30A). Pure.
+
+    `board_truncated` when the read returned its token bound (a competition may
+    lie beyond it); `titles_truncated` names every token whose carried titles
+    are fewer than its distinct fixture titles. A row without `title_count`
+    (an older reader, a test fake) is reported as not measured, never as
+    complete."""
+    rows = list(rows or [])
+    cut, unmeasured, same_title, pairs_cut = [], [], [], []
+    for r in rows:
+        get = r.get if hasattr(r, "get") else (lambda k, _r=r: _r[k])
+
+        def _opt(k):
+            try:
+                return get(k)
+            except (KeyError, IndexError):
+                return None
+
+        n = _opt("title_count")
+        pairs = list(_opt("title_days") or [])
+        # every title naming fixtures on more than one day, by name (R30A)
+        for title, days in title_days_of(pairs).items():
+            if isinstance(days, list) and len(same_title) < 50:
+                same_title.append({"token": str(get("token")),
+                                   "title": title, "days": list(days)})
+        if len(pairs) >= title_limit:
+            pairs_cut.append(str(get("token")))
+        if n is None:
+            unmeasured.append(str(get("token")))
+            continue
+        carried = len(get("titles") or [])
+        if int(n) > carried:
+            cut.append({"token": str(get("token")), "titles": int(n),
+                        "carried": carried})
+    return {"board_bound": {"tokens": token_limit, "titles": title_limit},
+            "board_truncated": len(rows) >= token_limit,
+            "titles_truncated": cut,
+            "title_days_truncated": pairs_cut,
+            "same_title_fixtures": same_title,
+            "titles_count_unmeasured": unmeasured}
 
 
 def candidates_from_board(board, titles=None, title_days=None, *,
@@ -860,10 +970,13 @@ VENUE_FOOTBALL_TOKEN_TO_PROVIDER_KEY = {
     "nfl": "americanfootball_nfl",
 }
 
-#: More titles than soccer's 12: one Saturday's `cfb` slate is ~100 events,
-#: listed alphabetically, and the confirmation needs a title the provider
-#: still lists (finished games drop out of the provider's feed).
-VENUE_FOOTBALL_TITLES_CARRIED = 120
+#: More titles than soccer's old 12: one Saturday's `cfb` slate is ~100
+#: events, listed alphabetically, and the confirmation needs a title the
+#: provider still lists (finished games drop out of the provider's feed).
+#: R30A: both boards now carry every fixture up to BOARD_TITLES_CARRIED (a
+#: Saturday with FBS and FCS listed would pass 120), with the cut named by
+#: `board_bounds` if a slate ever reaches it.
+VENUE_FOOTBALL_TITLES_CARRIED = BOARD_TITLES_CARRIED
 VENUE_FOOTBALL_BOARD_SQL = _board_sql("football",
                                       VENUE_FOOTBALL_TITLES_CARRIED)
 
@@ -893,13 +1006,9 @@ async def venue_football_competitions(conn) -> dict:
                          for r in rows}
         days: dict = {}
         for r in rows:
-            per: dict = {}
-            for pair in (r["title_days"] or []):
-                title, _, day = str(pair).partition("\u0001")
-                if title and day:
-                    per[title] = day
-            days[str(r["token"])] = per
+            days[str(r["token"])] = title_days_of(r["title_days"])
         out["title_days"] = days
+        out.update(board_bounds(rows))
     except Exception as exc:                                   # noqa: BLE001
         out.update(board=[], titles={}, title_days={},
                    evidence="READ_UNPARSEABLE", error=type(exc).__name__)

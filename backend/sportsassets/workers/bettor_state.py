@@ -108,7 +108,18 @@ PREMAP_SQL = """
            p.kind, p.sports_type, p.team_league, p.game_start
       FROM us_premap p
      WHERE p.updated_at > now() - ($1 || ' seconds')::interval
+       AND (p.game_start IS NULL
+            OR (p.game_start >= now() - interval '12 hours'
+                                - ($1 || ' seconds')::interval
+                AND p.game_start <= now() + interval '96 hours'))
 """
+# THE FRAME'S POPULATION IS STATED, NOT INHERITED (R30A inc-catalogue). This
+# frozen frame sampled every fresh us_premap row and needed no start-time
+# bound only because the catalogue writer never read outside its window
+# (now-12h .. now+96h at write time). The calendar lane now also writes
+# futures, next week's slate and live multi-day events
+# (workers/premap.calendar_refresh); the bound keeps exactly the population
+# the frame always sampled, so the frame is unchanged and needs no version.
 # NOTE THE ABSENT ORDER BY AND LIMIT. The sibling BETTOR lane orders by
 # updated_at DESC and takes the top rows, which selects on recent venue
 # activity. Here the WHOLE eligible set is fetched and the rotation --

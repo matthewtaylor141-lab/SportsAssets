@@ -10739,10 +10739,23 @@ async def api_venue_competitions(min_events: int = Query(1, ge=1, le=200),
             b["verdict"] = "MIXED_SOME_EVENTS_CARRY_A_SIMULATION_MARKER"
     rows.sort(key=lambda b: (-b["events"], b["league_token"]))
     real = [b for b in rows if b["simulated_events"] == 0]
+    # THE CACHE'S OWN RECEIPT, NOT A CONSTANT (R30A inc-catalogue). This said
+    # `"truncated": False` over a desk cache that every sweep cut at its page
+    # budget (render-ops logs 2026-10-04: `pages=14 events=1400/1400` against
+    # an 18-page board). The sweep now records how it ended; absent a receipt
+    # (a cache filled before this build) the truncation is UNAVAILABLE, never
+    # False.
+    _rcpt = dict(getattr(_pmus, "_desk_cache", {}).get("receipt") or {})
     return {
         "events_read": len(events),
         "competitions": len(rows),
-        "truncated": False,
+        "truncated": (bool(_rcpt.get("truncated")) if _rcpt else None),
+        "truncation_evidence": (_rcpt or {
+            "status": "UNAVAILABLE",
+            "why": "the desk cache carries no sweep receipt yet"}),
+        "complete_catalogue": ("us_premap (workers/premap.refresh reads every "
+                               "page of the board; this endpoint reads the "
+                               "desk's bounded browse cache)"),
         "no_second_venue_sweep": True,
         "source": "pmus.list_desk_events (the cache the desk reads)",
         "real_competition_tokens": [b["league_token"] for b in real],

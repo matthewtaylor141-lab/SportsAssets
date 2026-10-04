@@ -37,6 +37,9 @@ from typing import Optional
 START_TOLERANCE_S = 90 * 60.0
 IN_PLAY_WINDOW_S = 5 * 3600.0
 MAX_CONTRACTS = 20000
+#: the venue catalogue sweep's own forward window (workers/premap.refresh
+#: fwd_h): the census's population, now stated (see _base_where)
+CENSUS_HORIZON_H = 96
 
 #: ("football", 5) PRECEDES ("americanfootball", 5) ON PURPOSE (R30A).
 #: `sport_family_of` returns the FIRST name for an id, and that name is the
@@ -81,9 +84,19 @@ def _base_where() -> str:
     types = "\n   ".join(
         "AND coalesce(sports_type, '') NOT LIKE '%s%%'" % p
         for p in vreal.SIMULATED_SPORTS_TYPE_PREFIXES)
+    # THE CENSUS'S HORIZON IS STATED, NOT INHERITED (R30A inc-catalogue). The
+    # census counted every row with game_start > now-6h and needed no upper
+    # bound only because the catalogue writer never read past +96 h. The
+    # writer now walks the venue's calendar on both sides of its window
+    # (workers/premap AHEAD / STARTED_EARLIER: futures, next week's slate), and
+    # without this bound those listings -- which the feed does not carry yet
+    # -- would read as NO_FEED_EVENT and push the subscribed rows past
+    # MAX_CONTRACTS. The census keeps measuring the population it always
+    # measured; the catalogue itself is no longer cut to it.
     return ("""game_start > now() - interval '6 hours'
+   AND game_start <= now() + interval '%d hours'
    %s
-   %s""" % (prose, types))
+   %s""" % (CENSUS_HORIZON_H, prose, types))
 
 
 def catalogue_sql(sport_ids=None) -> str:

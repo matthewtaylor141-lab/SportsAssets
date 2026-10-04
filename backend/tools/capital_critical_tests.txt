@@ -984,3 +984,17 @@ tests/test_chaos_provider_disconnect_and_delayed_settlement.py
 # after authority revocation); K7 the entry-evidence route returns the
 # collector's jsonb as objects.
 tests/test_contract_writers_round_trip_to_their_readers.py
+# R30A P0 INCIDENT, inc-catalogue (migration 249): the venue catalogue holds
+# the full tradable board -- every page (a venue page-size cap is detected, a
+# shifting board is caught by the overlap, an exhausted budget is TRUNCATED by
+# name), every market of every event, live and pregame with the venue's own
+# state, futures on both sides of the sweep window, no side key collapsed --
+# every request behind venue_pace, one append-only receipt per refresh; the
+# boards carry every token and fixture; the desk names its truncation.
+# Second pass: the calendar lane runs outside the sweep lock and in slices,
+# never re-admits a finished game, keeps futures only while their event runs;
+# one bad listing or a refusing database still ends in a reconciled receipt;
+# every request (failed probe rungs, detail reads) is receipted; the desk is
+# PageWalk-paged, paced and backs off after a 429 or a refused partial.
+tests/test_venue_catalogue_is_complete.py
+tests/test_venue_catalogue_readers_and_receipts.py

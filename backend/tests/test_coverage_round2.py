@@ -264,10 +264,27 @@ class TestTheSweepCanSeeItsOwnTruncation:
         sweep, not a truncated one."""
         import inspect
 
+        from sportsassets import venue_catalogue as vc
         from sportsassets.workers import premap
 
+        # PIN MOVED, FACT UNCHANGED (R30A inc-catalogue). This pinned refresh's
+        # own locals ('last_page_full', 'pages_walked") == max_pages'). The page
+        # loop now lives in venue_catalogue.PageWalk -- one paginator for every
+        # pass, which also confirms a short first page and overlaps pages -- so
+        # those names no longer exist; the RULE they encoded is pinned here by
+        # behaviour on the walk refresh drives, and refresh is pinned to drive
+        # it and to read truncation off it.
         src = inspect.getsource(premap.refresh)
-        assert 'last_page_full' in src and 'pages_walked") == max_pages' in src
+        assert "vc.PageWalk(" in src and 'r.get("truncated")' in src
+        page = lambda tag, n: [{"slug": "%s%d" % (tag, i)} for i in range(n)]
+        full = vc.PageWalk(limit=100, max_requests=2)
+        full.first(page("a", 100))
+        full.accept(page("b", 100))
+        assert full.next_offset() is None and full.truncated is True
+        short = vc.PageWalk(limit=100, max_requests=2)
+        short.first(page("a", 100))
+        short.accept(page("b", 40))
+        assert short.next_offset() is None and short.truncated is False
 
     def test_the_note_says_what_truncation_costs(self):
         import inspect
