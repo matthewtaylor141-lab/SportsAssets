@@ -51,7 +51,9 @@ from sportsassets.agents import registry as R
 from tests import agent_ops_fixture as F
 
 pg = F.pg
-NOW = F.NOW
+#: the scorecards read every row of a window: these proofs run at a time no
+#: other proof writes at (agent_ops_fixture.ISOLATED)
+NOW = F.ISOLATED
 H = 3600.0
 ROOT = pathlib.Path(__file__).resolve().parents[1] / "sportsassets"
 
@@ -88,8 +90,12 @@ async def test_karen_xavier_and_audrey_from_the_replayed_flood(monkeypatch):
     from tests.test_improvement_clusters import _replay
     conn, tx = await F.tx()
     try:
-        a, pos = await _replay(conn, monkeypatch)     # 3 groups x 13 reviews
         now = NOW + 600
+        # open queue items are read at the instant, not by window: a shared
+        # database may hold other proofs' committed items
+        pre = _cards(await S.scorecards(conn, now=now,
+                                        agents=("XAVIER", "AUDREY")))
+        a, pos = await _replay(conn, monkeypatch, at=NOW)  # 3 x 13 reviews
         got = await S.scorecards(conn, now=now, window_days=7)
         assert got["single_score"] is None
         assert got["authority"] == "NONE_RECORDS_ONLY"
@@ -104,7 +110,8 @@ async def test_karen_xavier_and_audrey_from_the_replayed_flood(monkeypatch):
         assert k["evidence_completeness"]["value"] == 1.0   # cites target
         lat = [float(r[0]) for r in await conn.fetch(
             "SELECT extract(epoch FROM challenged_at - record_at) FROM "
-            " karen_challenges")]
+            " karen_challenges WHERE challenged_at >= to_timestamp($1)",
+            now - 7 * 86400)]
         assert k["decision_latency"]["n"] == 39
         assert k["decision_latency"]["value"] == pytest.approx(
             S.percentile(lat, 0.5), abs=1e-3)
@@ -144,9 +151,26 @@ async def test_karen_xavier_and_audrey_from_the_replayed_flood(monkeypatch):
         assert au["evidence_completeness"]["value"] == 1.0
         assert au["citation_correctness"]["value"] == 1.0
         assert au["false_approval"]["status"] == S.UNAVAILABLE
+        # every response / evaluation the replay owed was done: none of its
+        # queue items is still open, so neither card gained a blocker
+        mine = [r[0] for r in await conn.fetch(
+            "SELECT challenge_id FROM karen_challenges WHERE challenged_at "
+            " >= to_timestamp($1)", now - 7 * 86400)]
+        assert len(mine) == 39
+        assert await conn.fetchval(
+            "SELECT count(*) FROM agent_work_open o JOIN agent_work_requests"
+            " r USING (request_id) WHERE r.source_table = 'karen_challenges'"
+            " AND r.source_id = ANY($1::text[])", mine) == 0
+        assert await conn.fetchval(
+            "SELECT count(*) FROM agent_work_requests WHERE source_table = "
+            " 'karen_challenges' AND source_id = ANY($1::text[])", mine) > 0
         for agent in ("XAVIER", "AUDREY"):
-            assert c[agent]["unresolved_blocker_age"]["status"] == \
-                S.NO_BLOCKER
+            b0 = pre[agent]["unresolved_blocker_age"]
+            b1 = c[agent]["unresolved_blocker_age"]
+            assert b1["detail"]["blocked_items"] <= \
+                b0["detail"]["blocked_items"], (agent, b0, b1)
+            if b0["status"] == S.NO_BLOCKER:
+                assert b1["status"] == S.NO_BLOCKER
         # Eddie and Scout are not challenge targets
         for agent in ("EDDIE", "SCOUT"):
             assert c[agent]["challenge_quality"]["status"] == \
@@ -314,41 +338,66 @@ async def test_xaviers_value_added_and_false_exits_from_his_value_add():
     try:
         await R.ensure_identities(conn)
         a = await F.account(conn, "scdx")
-        at = NOW - 29 * H
+        # the venue settlement fixture stamps outcome_at with the database
+        # clock, which must follow the valuation: a past time base here
+        base = F.NOW
+        at = base - 29 * H
         lost = "%sscx-l-%s" % (PL.SYN, a["account_id"][-8:])
         won = "%sscx-w-%s" % (PL.SYN, a["account_id"][-8:])
         v_lost = await PL.valuation(conn, slug=lost, decided_at=at - H)
         v_won = await PL.valuation(conn, slug=won, decided_at=at - H)
         held = await F.position(conn, a, slug=lost, at=at, outcome="LOST",
-                                payout=0.0, settle_at=NOW - 10 * H)
+                                payout=0.0, settle_at=base - 10 * H)
         good = await F.position(conn, a, slug=lost, at=at + 10)
         bad = await F.position(conn, a, slug=won, at=at + 20)
         await F.exit_fill(conn, a, good, qty=100, price=0.55,
-                          at=NOW - 20 * H)
+                          at=base - 20 * H)
         await F.exit_fill(conn, a, bad, qty=100, price=0.55,
-                          at=NOW - 20 * H)
+                          at=base - 20 * H)
         await PL.settle_valuation(conn, v_lost["valuation_id"], outcome=0)
         await PL.settle_valuation(conn, v_won["valuation_id"], outcome=1)
+        # value-add rows carry the DATABASE clock (computed_at = now()), so
+        # this proof reads the window around it as a DIFFERENCE: the card
+        # before and after these three value-adds (a shared database may
+        # hold other proofs' committed rows in that window)
+        when = _time.time() + 60
+
+        async def card():
+            return _cards(await S.scorecards(conn, now=when, window_days=1,
+                                             agents=("XAVIER",)))["XAVIER"]
+
+        def parts(x):
+            va, fr = x["value_added"], x["false_refusal"]
+            acted = fr["n"] or 0
+            return {"n": va["n"] or 0,
+                    "total": va["detail"].get("total_usd") or 0.0,
+                    "acted": acted,
+                    "worse": round((fr["value"] or 0.0) * acted)}
+        before = parts(await card())
+        ids = []
         for pos, slug in ((held, lost), (good, lost), (bad, won)):
             t = await _thesis(conn, XM, pos, slug, at)
             got = await XM.compute_value_add(conn, t)
             assert got["ok"] and got["status"] == "FINAL", got
+            ids.append(t["thesis_id"])
         inc = sorted(float(S._j(r["incremental"])[
             "ACTUAL_XAVIER_minus_HOLD_TO_SETTLEMENT"]["pnl_usd"])
             for r in await conn.fetch("SELECT incremental FROM "
-                                      " xavier_value_add"))
+                                      " xavier_value_add WHERE thesis_id = "
+                                      " ANY($1::text[])", ids))
         assert inc == [-45.0, 0.0, 55.0]
-        # value-add rows are stamped by the database clock
-        x = _cards(await S.scorecards(conn, now=_time.time() + 60,
-                                      window_days=1,
-                                      agents=("XAVIER",)))["XAVIER"]
-        va = x["value_added"]
-        assert va["value"] == pytest.approx(10.0 / 3, abs=1e-6)
-        assert va["n"] == 3 and va["status"] == S.SMALL
-        assert va["detail"]["total_usd"] == 10.0
-        assert va["detail"]["actual_book"] is None    # never summed in
-        fr = x["false_refusal"]
-        assert (fr["value"], fr["n"]) == (0.5, 2), fr   # 1 of 2 exits
+        x = await card()
+        after = parts(x)
+        assert after["n"] - before["n"] == 3
+        assert after["total"] - before["total"] == pytest.approx(10.0)
+        assert after["acted"] - before["acted"] == 2     # two exits ...
+        assert after["worse"] - before["worse"] == 1     # ... one fell short
+        assert "actual_book" in x["value_added"]["detail"]  # apart, not summed
+        if before["n"] == 0:                  # a clean database: exact
+            assert x["value_added"]["value"] == pytest.approx(10.0 / 3)
+            assert x["value_added"]["status"] == S.SMALL
+            assert (x["false_refusal"]["value"],
+                    x["false_refusal"]["n"]) == (0.5, 2)
     finally:
         await F.done(conn, tx)
 

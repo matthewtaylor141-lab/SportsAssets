@@ -266,7 +266,9 @@ async def test_eddies_estimates_and_a_refusal_through_his_runner(monkeypatch):
     try:
         await R.ensure_identities(conn)
         a = await F.account(conn, "awqe")
-        t = NOW
+        # Eddie's producer reads every decision of his lookback: run at a time
+        # no other proof writes at (a shared database keeps their rows)
+        t = F.ISOLATED
         d1 = await F.decision(conn, a, at=t - 120)
         d2 = await F.decision(conn, a, at=t - 110)
         # the decisions are owed estimates: two EXECUTION_ESTIMATE items

@@ -26,6 +26,12 @@ MIG = pathlib.Path(__file__).resolve().parents[1] / "migrations"
 UP = (MIG / "234_agent_operations.sql").read_text()
 DOWN = (MIG / "rollback" / "234_agent_operations.down.sql").read_text()
 NOW = 1_790_500_000.0
+#: A TIME NO OTHER PROOF WRITES AT (2033-05-18). The scorecards and the
+#: queue producers read EVERY row of a window, and a shared test database
+#: keeps rows other proofs commit (seen: test_xavier_thesis_reallocate_
+#: value_add's and test_live_parity's accounts at 2026-09-25 / wall clock),
+#: so a proof that asserts a window's exact figures runs here.
+ISOLATED = 2_000_000_000.0
 EXPLORATION = "PINNACLE_EXPLORATION_PAPER"
 
 

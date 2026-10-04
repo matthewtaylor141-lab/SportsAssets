@@ -45,28 +45,29 @@ SHA = "a" * 40
 DET = "HOLD_ON_STALE_PROBABILITY"
 
 
-async def _replay(conn, monkeypatch, *, groups=3, per_group=13):
+async def _replay(conn, monkeypatch, *, groups=3, per_group=13, at=NOW):
     """Three exploration groups, each with its ENTRY and stale HOLD reviews
-    20 h .. 1 h before NOW; Karen's runner and the peer responder run."""
+    20 h .. 1 h before `at` (NOW); Karen's runner and the peer responder
+    run."""
     await R.ensure_identities(conn)
     a = await F.account(conn, "rcc")
     pos = []
     for g in range(groups):
-        p = await F.position(conn, a, at=NOW - 30 * H)
+        p = await F.position(conn, a, at=at - 30 * H)
         pos.append(p)
         for i in range(per_group):
             await F.stale_hold_review(conn, a, group_id=p["group_id"],
-                                      at=NOW - 20 * H + (g * per_group + i)
+                                      at=at - 20 * H + (g * per_group + i)
                                       * 600.0)
     monkeypatch.setattr(KR, "MAX_NEW_PER_DETECTOR", 200)
     monkeypatch.setattr(KR, "MAX_NEW_PER_PASS", 200)
     monkeypatch.setattr(KR, "MAX_OPEN_PER_DETECTOR", 500)
-    s = await KR.pass_once(conn, now=NOW,
+    s = await KR.pass_once(conn, now=at,
                            detectors=[(DET, KR.detect_hold_on_stale_probability)])
     assert len(s["opened"]) == groups * per_group, s
     conceded = upheld = 0
     for k in range(10):                 # PRS.MAX_PER_AGENT a pass
-        s = await PRS.pass_once(conn, now=NOW + 60 + k)
+        s = await PRS.pass_once(conn, now=at + 60 + k)
         conceded += len(s["responses"]["XAVIER"]["conceded"])
         upheld += len(s["evaluations"]["AUDREY"]["upheld"])
     assert conceded == upheld == groups * per_group
