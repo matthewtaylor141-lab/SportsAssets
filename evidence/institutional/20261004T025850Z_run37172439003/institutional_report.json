@@ -1,0 +1,348 @@
+{
+ "at": "2026-10-04T02:54:23.792Z",
+ "host": "https://command.bettortoken.com",
+ "runs": [
+  {
+   "label": "desktop",
+   "path": "/institutional.html",
+   "status": null,
+   "ms": 67306,
+   "errors": [
+    "GOTO TimeoutError: page.goto: Timeout 60000ms exceeded.\nCall log:\n  - navigating to \"https://command.bettortoken.com/institutional.html\", waiting until \"networkidle\""
+   ],
+   "apis": [
+    "200 /api/command/intel",
+    "200 /api/command/intel/allocator",
+    "200 /api/command/intel/sizing",
+    "200 /api/command/intel/calibration",
+    "200 /api/command/intel/risk",
+    "200 /api/command/intel/regime",
+    "200 /api/command/intel/attribution",
+    "200 /api/command/coverage?tz=America/New_York&days=7",
+    "200 /api/command/agents",
+    "200 /api/command/karen/challenges?limit=50",
+    "200 /api/command/karen",
+    "200 /api/command/xavier/management",
+    "200 /api/command/p5/evidence",
+    "200 /api/command/agents/findings",
+    "200 /api/command/postmortems?limit=25",
+    "200 /api/command/quality",
+    "200 /api/command/small-live?limit=25",
+    "200 /api/command/snapshot"
+   ],
+   "title": "Institutional View | Bettor EV Engine",
+   "sections": [
+    {
+     "h": "ivquestions",
+     "unavailable": 4,
+     "nan": 0,
+     "chars": 1226,
+     "sample": "QUESTION 1 What does BETTOR own? PAPER — SIMULATED 20 open · exposure $6,081.31 SHADOW · NO AUTHORITY ACTUAL — VENUE 0 open · venue snapshot 0 position(s) NEVER"
+    },
+    {
+     "h": "PAPER\nwhat BETTOR owns · simulated execution, fictional USD",
+     "unavailable": 12,
+     "nan": 0,
+     "chars": 2608,
+     "sample": "PAPER what BETTOR owns · simulated execution, fictional USD OK/api/command/xavier/management OK/api/command/small-live OK/api/command/intel/risk OK/api/command/"
+    },
+    {
+     "h": "ACTUAL\nwhat BETTOR owns · the venue account at 1:1,000",
+     "unavailable": 9,
+     "nan": 0,
+     "chars": 1702,
+     "sample": "ACTUAL what BETTOR owns · the venue account at 1:1,000 OK/api/command/small-live OK/api/command/xavier/management OK/api/command/intel/risk OK/api/command/postm"
+    },
+    {
+     "h": "PORTFOLIO\nSHADOW · NO AUTHORITY\nattribution and sizing per p",
+     "unavailable": 33,
+     "nan": 0,
+     "chars": 3446,
+     "sample": "PORTFOLIO SHADOW · NO AUTHORITY attribution and sizing per position OK/api/command/intel/attribution OK/api/command/intel/sizing SHADOW · NO AUTHORITY OK · run "
+    },
+    {
+     "h": "DEREK\nwhy: the decision and its evidence",
+     "unavailable": 12,
+     "nan": 0,
+     "chars": 1647,
+     "sample": "DEREK why: the decision and its evidence OK/api/command/agents OK/api/command/small-live STATE WAITING_FOR_EVIDENCE ACTIVITY NO_DECISION_RECORDED:ZERO_EVALUATED"
+    },
+    {
+     "h": "XAVIER\nmanagement against holding",
+     "unavailable": 11,
+     "nan": 0,
+     "chars": 1530,
+     "sample": "XAVIER management against holding OK/api/command/xavier/management POLICY XAVIER_SMALL_LIVE_MANAGEMENT_V1 APPROVED APPROVED yes Matt Taylor (owner) PLACES ORDER"
+    },
+    {
+     "h": "AUDREY\npostmortems of every closed position · independent ri",
+     "unavailable": 5,
+     "nan": 0,
+     "chars": 1358,
+     "sample": "AUDREY postmortems of every closed position · independent risk recompute OK/api/command/postmortems OK/api/command/intel/risk selection + slippage + fees + mana"
+    },
+    {
+     "h": "KAREN\nred-team challenges · no authority",
+     "unavailable": 13,
+     "nan": 0,
+     "chars": 13882,
+     "sample": "KAREN red-team challenges · no authority OK/api/command/karen OK/api/command/karen/challenges AUTHORITY NONE ROLE RED_TEAM_CHALLENGE PRODUCTION EFFECT NONE CHAL"
+    },
+    {
+     "h": "ALLOCATOR\nSHADOW · NO AUTHORITY\ncapital allocation of the sl",
+     "unavailable": 0,
+     "nan": 0,
+     "chars": 1139,
+     "sample": "ALLOCATOR SHADOW · NO AUTHORITY capital allocation of the sleeve (recommendation only) OK/api/command/intel/allocator OK/api/command/intel SHADOW · NO AUTHORITY"
+    },
+    {
+     "h": "RISK\nSHADOW · NO AUTHORITY\nwhat can go wrong · exposure and ",
+     "unavailable": 2,
+     "nan": 0,
+     "chars": 1185,
+     "sample": "RISK SHADOW · NO AUTHORITY what can go wrong · exposure and regime OK/api/command/intel/risk OK/api/command/intel/regime SHADOW · NO AUTHORITY OK · run intelrun"
+    },
+    {
+     "h": "CALIBRATION\nSHADOW · NO AUTHORITY\nis the probability any goo",
+     "unavailable": 2,
+     "nan": 0,
+     "chars": 976,
+     "sample": "CALIBRATION SHADOW · NO AUTHORITY is the probability any good OK/api/command/intel/calibration OK/api/command/quality SHADOW · NO AUTHORITY OK · run intelrun:dc"
+    },
+    {
+     "h": "EXECUTION\nfill rate, slippage, admission, latency",
+     "unavailable": 10,
+     "nan": 0,
+     "chars": 1567,
+     "sample": "EXECUTION fill rate, slippage, admission, latency OK/api/command/quality OK/api/command/small-live Paper ENTRY fill rate (terminal orders) MEASURED 39.4% 50 / 1"
+    },
+    {
+     "h": "INSTITUTIONAL STREAM / P5\nthe live stream book rule, evaluat",
+     "unavailable": 6,
+     "nan": 0,
+     "chars": 2248,
+     "sample": "INSTITUTIONAL STREAM / P5 the live stream book rule, evaluated at runtime OK/api/command/p5/evidence P5_LIVE_STREAM_BOOK_V1 v1: BLOCKED 11 of 15 predicates PROV"
+    },
+    {
+     "h": "COVERAGE\nprovider → fill funnel per league per day",
+     "unavailable": 0,
+     "nan": 0,
+     "chars": 1678,
+     "sample": "COVERAGE provider → fill funnel per league per day OK/api/command/coverage Unit: provider events · day: America/New_York · provider heartbeat age 11.53422832489"
+    },
+    {
+     "h": "QUALITY\nthe five-domain scorecard",
+     "unavailable": 6,
+     "nan": 0,
+     "chars": 3991,
+     "sample": "QUALITY the five-domain scorecard OK/api/command/quality Profitability: PAPER UNPROVEN · ACTUAL UNPROVEN (evaluated separately) one-sided 95%: the lower bound o"
+    },
+    {
+     "h": "AGENT COLLABORATION\nevidence → hypothesis → peer challenge →",
+     "unavailable": 0,
+     "nan": 5,
+     "chars": 2351,
+     "sample": "AGENT COLLABORATION evidence → hypothesis → peer challenge → paper experiment OK/api/command/agents/findings OK/api/command/agents Stages: EVIDENCE → HYPOTHESIS"
+    }
+   ],
+   "overflowX": false,
+   "scrollWidth": 1440,
+   "clientWidth": 1440,
+   "shadowLabels": 31,
+   "liveWord": 10
+  },
+  {
+   "label": "desktop",
+   "path": "/karen",
+   "status": null,
+   "ms": 66144,
+   "errors": [
+    "Failed to load resource: the server responded with a status of 404 ()",
+    "GOTO TimeoutError: page.goto: Timeout 60000ms exceeded.\nCall log:\n  - navigating to \"https://command.bettortoken.com/karen\", waiting until \"networkidle\"\n"
+   ],
+   "apis": [
+    "200 /api/command/agents/karen/page",
+    "404 /api/command/agents/karen/persona/latest-conversation",
+    "200 /api/command/karen"
+   ],
+   "title": "BettorToken · Karen",
+   "sections": [],
+   "overflowX": false,
+   "scrollWidth": 1440,
+   "clientWidth": 1440,
+   "shadowLabels": 0,
+   "liveWord": 0
+  },
+  {
+   "label": "phone",
+   "path": "/institutional.html",
+   "status": null,
+   "ms": 66951,
+   "errors": [
+    "GOTO TimeoutError: page.goto: Timeout 60000ms exceeded.\nCall log:\n  - navigating to \"https://command.bettortoken.com/institutional.html\", waiting until \"networkidle\""
+   ],
+   "apis": [
+    "200 /api/command/intel/allocator",
+    "200 /api/command/coverage?tz=America/New_York&days=7",
+    "200 /api/command/intel/risk",
+    "200 /api/command/intel",
+    "200 /api/command/intel/calibration",
+    "200 /api/command/intel/sizing",
+    "200 /api/command/intel/attribution",
+    "200 /api/command/intel/regime",
+    "200 /api/command/karen/challenges?limit=50",
+    "200 /api/command/agents/findings",
+    "200 /api/command/xavier/management",
+    "200 /api/command/postmortems?limit=25",
+    "200 /api/command/karen",
+    "200 /api/command/p5/evidence",
+    "200 /api/command/agents",
+    "200 /api/command/quality",
+    "200 /api/command/small-live?limit=25",
+    "200 /api/command/snapshot"
+   ],
+   "title": "Institutional View | Bettor EV Engine",
+   "sections": [
+    {
+     "h": "ivquestions",
+     "unavailable": 4,
+     "nan": 0,
+     "chars": 1226,
+     "sample": "QUESTION 1 What does BETTOR own? PAPER — SIMULATED 20 open · exposure $6,081.31 SHADOW · NO AUTHORITY ACTUAL — VENUE 0 open · venue snapshot 0 position(s) NEVER"
+    },
+    {
+     "h": "PAPER\nwhat BETTOR owns · simulated execution, fictional USD",
+     "unavailable": 12,
+     "nan": 0,
+     "chars": 2608,
+     "sample": "PAPER what BETTOR owns · simulated execution, fictional USD OK/api/command/xavier/management OK/api/command/small-live OK/api/command/intel/risk OK/api/command/"
+    },
+    {
+     "h": "ACTUAL\nwhat BETTOR owns · the venue account at 1:1,000",
+     "unavailable": 9,
+     "nan": 0,
+     "chars": 1702,
+     "sample": "ACTUAL what BETTOR owns · the venue account at 1:1,000 OK/api/command/small-live OK/api/command/xavier/management OK/api/command/intel/risk OK/api/command/postm"
+    },
+    {
+     "h": "PORTFOLIO\nSHADOW · NO AUTHORITY\nattribution and sizing per p",
+     "unavailable": 33,
+     "nan": 0,
+     "chars": 3446,
+     "sample": "PORTFOLIO SHADOW · NO AUTHORITY attribution and sizing per position OK/api/command/intel/attribution OK/api/command/intel/sizing SHADOW · NO AUTHORITY OK · run "
+    },
+    {
+     "h": "DEREK\nwhy: the decision and its evidence",
+     "unavailable": 12,
+     "nan": 0,
+     "chars": 1647,
+     "sample": "DEREK why: the decision and its evidence OK/api/command/agents OK/api/command/small-live STATE WAITING_FOR_EVIDENCE ACTIVITY NO_DECISION_RECORDED:ZERO_EVALUATED"
+    },
+    {
+     "h": "XAVIER\nmanagement against holding",
+     "unavailable": 11,
+     "nan": 0,
+     "chars": 1530,
+     "sample": "XAVIER management against holding OK/api/command/xavier/management POLICY XAVIER_SMALL_LIVE_MANAGEMENT_V1 APPROVED APPROVED yes Matt Taylor (owner) PLACES ORDER"
+    },
+    {
+     "h": "AUDREY\npostmortems of every closed position · independent ri",
+     "unavailable": 5,
+     "nan": 0,
+     "chars": 1358,
+     "sample": "AUDREY postmortems of every closed position · independent risk recompute OK/api/command/postmortems OK/api/command/intel/risk selection + slippage + fees + mana"
+    },
+    {
+     "h": "KAREN\nred-team challenges · no authority",
+     "unavailable": 13,
+     "nan": 0,
+     "chars": 13883,
+     "sample": "KAREN red-team challenges · no authority OK/api/command/karen OK/api/command/karen/challenges AUTHORITY NONE ROLE RED_TEAM_CHALLENGE PRODUCTION EFFECT NONE CHAL"
+    },
+    {
+     "h": "ALLOCATOR\nSHADOW · NO AUTHORITY\ncapital allocation of the sl",
+     "unavailable": 0,
+     "nan": 0,
+     "chars": 1139,
+     "sample": "ALLOCATOR SHADOW · NO AUTHORITY capital allocation of the sleeve (recommendation only) OK/api/command/intel/allocator OK/api/command/intel SHADOW · NO AUTHORITY"
+    },
+    {
+     "h": "RISK\nSHADOW · NO AUTHORITY\nwhat can go wrong · exposure and ",
+     "unavailable": 2,
+     "nan": 0,
+     "chars": 1185,
+     "sample": "RISK SHADOW · NO AUTHORITY what can go wrong · exposure and regime OK/api/command/intel/risk OK/api/command/intel/regime SHADOW · NO AUTHORITY OK · run intelrun"
+    },
+    {
+     "h": "CALIBRATION\nSHADOW · NO AUTHORITY\nis the probability any goo",
+     "unavailable": 2,
+     "nan": 0,
+     "chars": 976,
+     "sample": "CALIBRATION SHADOW · NO AUTHORITY is the probability any good OK/api/command/intel/calibration OK/api/command/quality SHADOW · NO AUTHORITY OK · run intelrun:dc"
+    },
+    {
+     "h": "EXECUTION\nfill rate, slippage, admission, latency",
+     "unavailable": 10,
+     "nan": 0,
+     "chars": 1567,
+     "sample": "EXECUTION fill rate, slippage, admission, latency OK/api/command/quality OK/api/command/small-live Paper ENTRY fill rate (terminal orders) MEASURED 39.4% 50 / 1"
+    },
+    {
+     "h": "INSTITUTIONAL STREAM / P5\nthe live stream book rule, evaluat",
+     "unavailable": 6,
+     "nan": 0,
+     "chars": 2155,
+     "sample": "INSTITUTIONAL STREAM / P5 the live stream book rule, evaluated at runtime OK/api/command/p5/evidence P5_LIVE_STREAM_BOOK_V1 v1: BLOCKED 13 of 15 predicates PROV"
+    },
+    {
+     "h": "COVERAGE\nprovider → fill funnel per league per day",
+     "unavailable": 0,
+     "nan": 0,
+     "chars": 1677,
+     "sample": "COVERAGE provider → fill funnel per league per day OK/api/command/coverage Unit: provider events · day: America/New_York · provider heartbeat age 20.13507652282"
+    },
+    {
+     "h": "QUALITY\nthe five-domain scorecard",
+     "unavailable": 6,
+     "nan": 0,
+     "chars": 3991,
+     "sample": "QUALITY the five-domain scorecard OK/api/command/quality Profitability: PAPER UNPROVEN · ACTUAL UNPROVEN (evaluated separately) one-sided 95%: the lower bound o"
+    },
+    {
+     "h": "AGENT COLLABORATION\nevidence → hypothesis → peer challenge →",
+     "unavailable": 0,
+     "nan": 5,
+     "chars": 2351,
+     "sample": "AGENT COLLABORATION evidence → hypothesis → peer challenge → paper experiment OK/api/command/agents/findings OK/api/command/agents Stages: EVIDENCE → HYPOTHESIS"
+    }
+   ],
+   "overflowX": false,
+   "scrollWidth": 390,
+   "clientWidth": 390,
+   "shadowLabels": 31,
+   "liveWord": 10
+  },
+  {
+   "label": "phone",
+   "path": "/karen",
+   "status": null,
+   "ms": 66100,
+   "errors": [
+    "Failed to load resource: the server responded with a status of 404 ()",
+    "GOTO TimeoutError: page.goto: Timeout 60000ms exceeded.\nCall log:\n  - navigating to \"https://command.bettortoken.com/karen\", waiting until \"networkidle\"\n"
+   ],
+   "apis": [
+    "200 /api/command/agents/karen/page",
+    "404 /api/command/agents/karen/persona/latest-conversation",
+    "200 /api/command/karen"
+   ],
+   "title": "BettorToken · Karen",
+   "sections": [],
+   "overflowX": false,
+   "scrollWidth": 390,
+   "clientWidth": 390,
+   "shadowLabels": 0,
+   "liveWord": 0
+  }
+ ]
+}
