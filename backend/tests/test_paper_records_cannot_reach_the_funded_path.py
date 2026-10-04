@@ -140,7 +140,7 @@ def test_no_funded_module_imports_the_paper_modules():
                # writes only eddie_execution_estimates / _outcomes, declared
                # as EDDIE (the database refuses him on every order table),
                # and holds no submit, cancel or reserve call
-               "agents/eddie.py"}
+               "agents/eddie.py",
                # the live equity wall (/api/command/equity/*): GET-only, reads
                # bettor_paper_ledger.balances inside a READ ONLY transaction
                # beside the actual books (never summed); it writes nothing and
