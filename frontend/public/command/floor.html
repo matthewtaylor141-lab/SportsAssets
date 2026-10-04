@@ -3,63 +3,45 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="theme-color" content="#05090e">
+<meta name="theme-color" content="#04070d">
 <meta name="color-scheme" content="dark">
 <meta name="robots" content="noindex">
-<meta name="description" content="BETTOR headquarters: the live trading floor. Every agent's desk shows its recorded state, heartbeat and collaboration.">
+<meta name="description" content="BETTOR headquarters: the live trading floor. Seven desks, one capital core; every state, path and figure is a recorded read.">
 <title>BETTOR · Trading Floor</title>
-<link rel="stylesheet" href="floor.css">
+<link rel="icon" href="data:,">
 <link rel="stylesheet" href="hq2-brand.css" data-hq2="brand">
 <link rel="stylesheet" href="hq2-floor.css" data-hq2="floor-css">
 <link rel="stylesheet" href="hq3-live.css" data-hq3="css">
 </head>
-<body class="fl">
-<a class="fl-skip" href="#roster">Skip to the agent list</a>
-<div class="fl-screen">
-<header class="fl-top">
-  <a class="fl-brand" href="/" title="Back to the COMMAND homepage"><span aria-hidden="true">&#8592;</span> BETTOR<span class="fl-brand-sub">COMMAND</span></a>
-  <div class="fl-title">
-    <span class="fl-eyebrow">Headquarters</span>
-    <h1>Trading Floor</h1>
-  </div>
-  <div class="fl-status" id="fl-status" role="status" aria-live="polite">
-    <span class="fl-pill" data-tone="off"><i></i><span>Connecting…</span></span>
-  </div>
-  <div class="fl-tools">
-    <button type="button" class="fl-btn" id="fl-view" aria-pressed="false" title="Switch between the 3D floor and the floor map">Floor map</button>
-    <button type="button" class="fl-btn" id="fl-reset" title="Back to the overview">Overview</button>
-  </div>
-</header>
-
-<div class="fl-fixture" id="fl-fixture" hidden>FIXTURE DATA · rendered from a labelled test payload · not production</div>
-
-<main class="fl-main">
-  <section class="fl-stage" id="fl-stage" aria-label="Trading floor">
-    <div class="fl-wall" id="fl-wall" aria-label="Central wall">
-      <article class="wall-screen" data-screen="feed" id="ws-feed"></article>
-      <article class="wall-screen equity" data-screen="equity" id="ws-equity"></article>
-      <article class="wall-screen" data-screen="health" id="ws-health"></article>
+<body class="fl hqf-page">
+<a class="hqf-skip" href="#hqf-roster">Skip to the desk list</a>
+<main class="hqf" id="hqf" aria-label="BETTOR trading floor">
+  <section class="hqf-stage" id="hqf-stage" aria-label="Three-dimensional trading floor">
+    <div class="hqf-mount" id="hqf-mount"></div>
+    <div class="hqf-vignette" aria-hidden="true"></div>
+    <header class="hqf-hud">
+      <div class="hqf-title"><span class="hqf-eyebrow">BETTOR headquarters</span><h1>Trading Floor</h1></div>
+      <div class="hqf-read" id="hqf-read" role="status" aria-live="polite"></div>
+      <span class="hqf-fixture" id="hqf-fixture" hidden>FIXTURE PAYLOAD · NOT PRODUCTION</span>
+    </header>
+    <div class="hqf-capital" id="hqf-capital" aria-label="Capital: paper and small live, shown separately"></div>
+    <nav class="hqf-roster" id="hqf-roster" aria-label="Desks on the floor"></nav>
+    <aside class="hqf-panel" id="hqf-panel" aria-label="Desk detail" tabindex="-1" hidden></aside>
+    <div class="hqf-tip" id="hqf-tip" role="tooltip" hidden></div>
+    <div class="hqf-controls">
+      <button type="button" class="hqf-ghost" id="hqf-back">Overview</button>
+      <button type="button" class="hqf-ghost" id="hqf-textbtn" title="The same floor as text">Text view</button>
     </div>
-    <div class="fl-counts" id="fl-counts" aria-label="Desks by state"></div>
-    <div class="fl-tip" id="fl-tip" role="tooltip" hidden></div>
-    <div class="fl-loading" id="fl-loading"><div class="fl-loading-mark">B</div><span>Opening the floor…</span></div>
-    <p class="fl-hint" id="fl-hint">Drag to look around · click a desk to focus · click it again to open the workspace</p>
-    <div class="fl-map" id="fl-map" hidden></div>
+    <p class="hqf-hint" id="hqf-hint">Click a desk or an agent to focus · click again to open the workspace · Esc returns to the overview</p>
+    <div class="hqf-loader" id="hqf-loader" role="progressbar" aria-label="Opening the floor"><div class="hqf-loader-mark">B</div><b><i></i></b><span>Opening the floor…</span></div>
   </section>
-  <aside class="fl-panel" id="fl-panel" aria-label="Agent summary" hidden tabindex="-1"></aside>
+  <section class="hqf-static" id="hqf-static" aria-label="Trading floor as text" hidden></section>
+  <footer class="hqf-legal">
+    <p>Every desk state, collaboration path and figure on this floor is a recorded read (<code>GET /api/command/floor</code>, <code>/floor/&lt;agent&gt;</code>, <code>/equity/live</code>, <code>/coverage</code>) shown with its timestamp. PAPER and SMALL LIVE are separate books and are never added together. Read only: nothing here places, cancels or approves anything.</p>
+    <p>Characters: Microsoft Rocketbox (MIT, © 2020 Microsoft) — <a href="team-demo/assets/models/ROCKETBOX_LICENSE.md">licence</a>; each agent has their own model, none is recoloured from another. Rendering: three.js (MIT) — <a href="team-demo/assets/THREE_LICENSE.txt">licence</a>.</p>
+  </footer>
 </main>
-
-<nav class="fl-roster" id="roster" aria-label="Agents on the floor"></nav>
-</div>
-
-<section class="fl-wallflow" id="fl-wallflow" aria-label="Central wall screens"></section>
-
-<footer class="fl-foot">
-  <p>Every desk state is derived from recorded rows (<code>GET /api/command/floor</code>): heartbeats, runs, decisions, reviews, challenges and hand-offs, each with its timestamp. Nothing moves unless a record says so. PAPER and ACTUAL figures are separate and never summed. Read-only: no control on this page places, cancels or approves anything.</p>
-  <p class="fl-credits" id="fl-credits">Characters: Microsoft Rocketbox (MIT, © 2020 Microsoft) — <a href="team-demo/assets/models/ROCKETBOX_LICENSE.md">licence</a>. Karen, the Chief Allocator, Eddie and Scout reuse the same licensed models with recoloured suits and desk props. Rendering: three.js (MIT) — <a href="team-demo/assets/THREE_LICENSE.txt">licence</a>.</p>
-</footer>
-
-<noscript><p class="fl-noscript">The trading floor needs JavaScript. The agent pages are at <a href="/derek">/derek</a>, <a href="/xavier">/xavier</a>, <a href="/audrey">/audrey</a> and <a href="/karen">/karen</a>.</p></noscript>
+<noscript><p class="hqf-noscript">The trading floor needs JavaScript. The agent workspaces are at <a href="/derek">/derek</a>, <a href="/xavier">/xavier</a>, <a href="/audrey">/audrey</a>, <a href="/karen">/karen</a>, <a href="/allocator">/allocator</a>, <a href="/eddie">/eddie</a> and <a href="/scout">/scout</a>.</p></noscript>
 <script src="floor-core.js"></script>
 <!-- data-hq2="legacy-floor-disabled": legacy cloned-avatar floor removed by HQ2 -->
 <script src="hq2-shell.js" data-hq2="shell"></script>
