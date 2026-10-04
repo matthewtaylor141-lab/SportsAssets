@@ -30,10 +30,12 @@ HOW AN ANSWER IS PRODUCED
      measure), ids, timestamps, codes, CURRENT / SUPERSEDED status and the
      agent it attributes a decision to. A failing sentence is re-cited when
      exactly one fact supports it (deterministically); otherwise a model
-     reply is DISCARDED for the records-only answer with the reason named,
-     and a records-only answer (or an interrupted partial) keeps the
-     sentence followed by an explicit statement that the evidence does not
-     support it. Every verdict is recorded, append-only (migration 243).
+     reply with a known unsupported citation is DISCARDED for the
+     records-only answer with the reason named, and an uncited sentence (or
+     any failing sentence of a records-only answer or an interrupted
+     partial) is kept followed by an explicit statement that the evidence
+     does not support it. Every verdict is recorded, append-only (migration
+     243).
   4. The exchange is stored (migration 180): the visible transcript (`body`)
      and its pronunciation-normalised spoken form (`spoken_text`), the cited
      facts, what evidence is missing, the persona version and the provider
@@ -1360,7 +1362,9 @@ async def _converse_impl(db, *, agent, role, text, conversation_id, context,
                 provider, mode=MODE_RECORDS, failure="CITATION_INTEGRITY",
                 integrity_reason=checked["reason"],
                 disclosure=DISCLOSE_FALLBACK.format(why=CI.FALLBACK_WHY))
-        if checked["action"] == CI.A_REPAIRED:
+        if checked["action"] in (CI.A_REPAIRED, CI.A_STATED):
+            # re-cited, and/or an uncited sentence followed by the explicit
+            # integrity statement
             got = checked["text"]
             provider["citation_repairs"] = [
                 r for r in checked["repairs"] if r.get("repaired")][:10]

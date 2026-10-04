@@ -64,7 +64,8 @@ TOLERANCE (stated, and the same on both sides of the comparison)
   * An id is supported when the cited fact's record id or text contains it; a
     timestamp when a cited fact holds the same date (and the same time to the
     precision written); a code when the cited fact holds it as a word or as
-    the leading part of a longer code (HOLD -> HOLD_ON_STALE_PROBABILITY).
+    a run of a longer code's underscore-separated parts (HOLD ->
+    HOLD_ON_STALE_PROBABILITY, BUY_SHORT -> ORDER_INTENT_BUY_SHORT).
   * Status: a fact is STALE-marked when its text says SUPERSEDED or
     HISTORICAL (or its field is superseded_review), CURRENT-marked when it
     says CURRENT. A sentence asserting a current state ("current", "latest",
@@ -97,17 +98,26 @@ ACTIONS (`gate`): never silently publish a known unsupported citation
                              list supports the material (all of the clause's
                              items, else all of its failing items while the
                              original citation keeps supporting the rest) ->
-                             that fact is cited instead of / beside the wrong
-                             one; the repaired sentence is verified again and
+                             that fact REPLACES a citation that holds
+                             nothing the clause says (always for a stale
+                             record cited for the present state), or is
+                             cited BESIDE one that still holds part of it;
+                             the repaired sentence is verified again and
                              must PASS. Never a model's guess.
-  FELL_BACK_TO_RECORDS_ONLY  a MODEL reply with an unrepairable sentence is
-                             discarded; the records-only answer is published
-                             with the integrity reason named
-  STATED_UNSUPPORTED         a records-only answer or an interrupted partial
-                             (there is nothing further to fall back to): the
-                             sentence is kept and followed by an explicit
+  FELL_BACK_TO_RECORDS_ONLY  a MODEL reply with an unrepairable known
+                             unsupported citation (WRONG_FACT,
+                             STALE_STATE_CITATION, ENTITY_MISMATCH,
+                             INSUFFICIENT_SUPPORT) is discarded; the
+                             records-only answer is published with the
+                             integrity reason named
+  STATED_UNSUPPORTED         the sentence is kept and followed by an explicit
                              "(Integrity check: ...)" statement that the
-                             evidence does not support it
+                             evidence does not support it: a records-only
+                             answer or an interrupted partial (nothing
+                             further to fall back to), or a model reply whose
+                             only remaining gap is an uncited sentence
+                             (NO_CITATION) that no single fact could be cited
+                             for
 
 WHAT IT IS NOT. A judge of reasoning or tone; a check of spelled-out numbers
 ("seven refusals") or of lower-case action verbs ("we hold"), which stay with
@@ -200,7 +210,7 @@ NUMBER = re.compile(r"(?<![\w.:])[-\u2212]?(\$?)(\d{1,3}(?:,\d{3})+(?:\.\d+)?|"
 _PERCENTISH = re.compile(r"%|pp|percent|cent|\u00a2")
 _ISO = re.compile(r"(?<!\d)(\d{4}-\d{2}-\d{2})(?:[T ](\d{2}:\d{2}(?::\d{2})?)"
                   r"(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2}|\s?UTC)?(?!\d)")
-_CLOCK = re.compile(r"(?<![\d:])(\d{1,2}:\d{2}(?::\d{2})?)(?![\d:])")
+_CLOCK = re.compile(r"(?<![\d:])(\d{1,2}:\d{2}(?::\d{2})?)(?:\.\d+)?(?![\d:])")
 _IDTOK = re.compile(r"(?<![\w:.\-/#])[A-Za-z][A-Za-z0-9]*(?:[-_:.#/][A-Za-z0-9]+)+")
 _MULTI_CODE = re.compile(r"\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\b")
 STATE_WORDS = ("HOLD", "EXIT", "REDUCE", "HEDGE", "ENTER", "REFUSE",
@@ -210,6 +220,21 @@ STATE_WORDS = ("HOLD", "EXIT", "REDUCE", "HEDGE", "ENTER", "REFUSE",
                "INACTIVE", "ACKNOWLEDGED", "EXPIRED", "RECONCILES", "SKIP",
                "SPLIT", "WAIT", "PENDING", "APPROVED", "DISPUTE", "DISPUTED")
 _STATE_CODE = re.compile(r"\b(?:%s)\b" % "|".join(STATE_WORDS))
+#: a proposal, hypothesis or conditional, not an assertion about a record:
+#: "That review should either reconfirm HOLD or select a different action",
+#: "The measurable outcome is a stored review for <group>" (the production
+#: retrospective, research runs 37234456833..37234967005: action words and
+#: subject ids in such sentences are vocabulary, not claims)
+_MODAL = re.compile(r"\b(?:should|would|could|might|may|if|once|whether|"
+                    r"propose|proposed|proposal|suggest|suggests|suggested|"
+                    r"hypothesis|hypothesi[sz]e|ought|let's|let\s+us|"
+                    r"measurable\s+outcome|next\s+(?:action|step))\b|"
+                    # a labelled proposal ("Repair: ...", "Action: ...") or
+                    # an imperative opening ("Record the threshold on ...")
+                    r"\b(?:action|repair|proposed\s+repair|recommendation|"
+                    r"ask)\s*\**\s*:|^\W*(?:produce|record|re-?run|run|"
+                    r"add|log|store|track|fix|attach|capture|persist)\b",
+                    re.I)
 _STATUS_NOUN = (r"\b(?:reviews?|decisions?|recommendations?|management|"
                 r"states?|status|calls?|positions?|orders?)\b")
 _CURRENT_WORD = re.compile(r"\b(?:current|currently|latest|newest|now|live|"
@@ -262,6 +287,15 @@ FAMILY = {"CASH": "ACCOUNT", "RESERVED": "ACCOUNT", "AVAILABLE": "ACCOUNT",
 _SKIP_WORDS = frozenset(("in", "of", "at", "the", "a", "an", "is", "was",
                          "are", "were", "to", "for", "its", "his", "her",
                          "our", "their", "this", "that", "on", "per", "s"))
+#: a clause joint: a measure word beyond it belongs to the next figure
+#: ("cash of $499,404.86 and reserved deltas of $98.92": production
+#: research run 37234456833, where "reserved" was read as the first figure's)
+_JOINT_WORDS = frozenset(("and", "or", "but", "while", "whereas", "versus",
+                          "vs", "against", "plus", "then", "with", "than",
+                          # a qualifier, not the figure's name: "$180 before
+                          # fees" is a profit, not a fee
+                          "before", "after", "excluding", "including",
+                          "less", "minus", "net"))
 _STOP_PUNCT = frozenset("(),;:[]{}\u2014\u2013=")
 _WORDTOK = re.compile(r"[A-Za-z&]+|\d[\d,.]*|\S")
 
@@ -329,28 +363,38 @@ def _is_num_tok(t: str) -> bool:
 
 
 def measures_near(text: str, start: int, end: int) -> frozenset:
-    """The measure words just after the figure at text[start:end] (up to
-    three words, skipping small words), else just before it -- never across
-    punctuation or another figure, and never a word that belongs to the
-    figure before (\"2,000 contracts for $1,000\": contracts is 2,000's)."""
-    out: set = set()
+    """The measure of the figure at text[start:end]: the NEAREST measure word
+    (the unit the figure carries counts as nearest; then up to three words
+    after it and three before it, small words not counted, never across
+    punctuation, a clause joint or another figure, and never a word that
+    belongs to the figure before -- "2,000 contracts for $1,000": contracts
+    is 2,000's). A tie unites both sides. "Available of $499,305.94 equals
+    cash minus reserved" is AVAILABLE (production research run 37234456833
+    read it as cash when the words after always won)."""
+    unit: set = set()
     for w in re.findall(r"[A-Za-z]+", text[start:end]):
-        out.update(_measure_of_word(w))     # the unit the figure carries
-    after = _WORDTOK.findall(text[end:end + 80])
+        unit.update(_measure_of_word(w))     # the unit the figure carries
+    if unit:
+        return frozenset(unit)
+    after_d, after_m = None, set()
     n = 0
-    for t in after:
+    for t in _WORDTOK.findall(text[end:end + 80]):
         if t in _STOP_PUNCT or _is_num_tok(t) or t == "$":
             break
         if not t[0].isalpha():
             continue
+        if t.lower() in _JOINT_WORDS:
+            break
         if t.lower() in _SKIP_WORDS:
             continue
-        out.update(_measure_of_word(t))
         n += 1
+        m = _measure_of_word(t)
+        if m:
+            after_d, after_m = n, set(m)
+            break
         if n >= 3:
             break
-    if out:
-        return frozenset(out)
+    before_d, before_m = None, set()
     before = _WORDTOK.findall(text[max(0, start - 80):start])
     n = 0
     for i in range(len(before) - 1, -1, -1):
@@ -361,13 +405,24 @@ def measures_near(text: str, start: int, end: int) -> frozenset:
             continue
         if i > 0 and _is_num_tok(before[i - 1]):
             break                       # the previous figure's own word
+        if t.lower() in _JOINT_WORDS:
+            break
         if t.lower() in _SKIP_WORDS:
             continue
-        out.update(_measure_of_word(t))
         n += 1
+        m = _measure_of_word(t)
+        if m:
+            before_d, before_m = n, set(m)
+            break
         if n >= 3:
             break
-    return frozenset(out)
+    if after_d is None and before_d is None:
+        return frozenset()
+    if before_d is None or (after_d is not None and after_d < before_d):
+        return frozenset(after_m)
+    if after_d is None or before_d < after_d:
+        return frozenset(before_m)
+    return frozenset(after_m | before_m)
 
 
 def field_measures(field: str) -> frozenset:
@@ -650,13 +705,13 @@ def extract_items(text: str, idx: FactIndex, qnums: set, *,
     items += _number_items(work, qnums, measure=profile == PROFILE_FULL)
     if profile == PROFILE_FULL:
         seen = set()
-        for rx in (_MULTI_CODE, _STATE_CODE):
+        for rx, single in ((_MULTI_CODE, False), (_STATE_CODE, True)):
             for m in rx.finditer(work):
                 c = m.group(0)
                 if c in seen or c in ("CURRENT", "SUPERSEDED", "HISTORICAL"):
                     continue
                 seen.add(c)
-                items.append({"kind": K_CODE, "token": c})
+                items.append({"kind": K_CODE, "token": c, "single": single})
     cur, sup = status_assertion(text)
     if cur != sup:
         items.append({"kind": K_STATUS, "token": "CURRENT" if cur else
@@ -695,6 +750,25 @@ def categories_of(text: str, items: list) -> list:
 #: not checkable against any record ("my current assessment rests on the
 #: latest records") and is verified only when cited.
 _MATERIAL_KINDS = (K_NUMBER, K_ID, K_TIME, K_CODE)
+
+
+def _material(item: dict, modal: bool, cited: bool) -> bool:
+    """Whether an item makes its sentence a material claim. Figures and
+    timestamps always do. Without a citation, a lone action word (HOLD,
+    REDUCE ...) is vocabulary, and an id or a refusal / policy code inside a
+    proposal or conditional names a subject rather than asserting a record
+    -- neither demands a citation. With a citation every item is checked
+    (a modal sentence's lone action words were already set aside)."""
+    k = item["kind"]
+    if k in (K_NUMBER, K_TIME):
+        return True
+    if k not in (K_ID, K_CODE):
+        return False
+    if cited:
+        return True
+    if item.get("single"):
+        return False
+    return not modal
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -755,8 +829,10 @@ def supports(fx: Fact, item: dict, *, profile: str = PROFILE_FULL) -> bool:
         return t in fx.clocks or any((tm or "").startswith(t)
                                      for _d, tm in fx.times)
     if k == K_CODE:
-        return bool(re.search(r"\b%s(?:\b|_)" % re.escape(item["token"]),
-                              fx.codes))
+        # a whole code or a run of its underscore-separated parts: HOLD in
+        # HOLD_ON_STALE_PROBABILITY, BUY_SHORT in ORDER_INTENT_BUY_SHORT
+        return bool(re.search(r"(?<![A-Za-z0-9])%s(?![A-Za-z0-9])"
+                              % re.escape(item["token"]), fx.codes))
     if k == K_STATUS:
         if item["asserts"] == "CURRENT":
             return not (fx.stale and not fx.current)
@@ -824,12 +900,18 @@ def verify_sentence(sentence: str, idx: FactIndex, qnums: set, *,
             group_list.append(s["group"])
     seg_items = []
     all_items = []
+    modal = bool(_MODAL.search(sentence))
     for s in segs:
         its = extract_items(s["text"], idx, qnums, profile=profile)
+        if modal:
+            # a single action word in a proposal or conditional is
+            # vocabulary ("should either reconfirm HOLD or ..."), never
+            # checked as a claim about a record
+            its = [i for i in its if not i.get("single")]
         seg_items.append(its)
         all_items += its
     sent_ids = [i for i in all_items if i["kind"] == K_ID]
-    material = any(i["kind"] in _MATERIAL_KINDS for i in all_items)
+    material = any(_material(i, modal, bool(cited)) for i in all_items)
     out = {"text": sentence, "sha256": sha256(sentence),
            "cited_ids": cited,
            "unknown_ids": [f for f in cited if idx.get(f) is None],
@@ -841,14 +923,12 @@ def verify_sentence(sentence: str, idx: FactIndex, qnums: set, *,
         out["verdict"] = None
         return out
     if not cited:
+        need = [i for i in all_items if _material(i, modal, False)]
         alt_all = [fx.fid for fx in idx.facts.values()
-                   if all(supports(fx, it, profile=profile)
-                          for it in all_items if it["kind"] in
-                          _MATERIAL_KINDS)]
+                   if all(supports(fx, it, profile=profile) for it in need)]
         out["verdict"] = NO_CITATION
         out["failing"] = [{"kind": i["kind"], "token": i["token"],
-                           "verdict": NO_CITATION}
-                          for i in all_items if i["kind"] in _MATERIAL_KINDS]
+                           "verdict": NO_CITATION} for i in need]
         out["supported_by_uncited"] = alt_all[:10]
         out["segments"].append({"segment": 0, "items": len(all_items),
                                 "failing": len(out["failing"])})
@@ -953,6 +1033,26 @@ def _evaluable(sentence: str, idx: FactIndex) -> str:
     return mask_quotations(sentence, idx.raw_facts).replace("\x03", " ")
 
 
+_STATE_LOWER = re.compile(r"\b(?:%s)\b" % "|".join(
+    w.lower() for w in STATE_WORDS if len(w) >= 4), re.I)
+
+
+def _still_relevant(orig: list, items: list, clause: str) -> bool:
+    """Whether a clause's original citation still holds part of what the
+    clause says: one of its checked items, or a state word the clause uses
+    in prose ("expired" against a fact whose state is EXPIRED). Decides
+    only whether a repair cites beside the original or replaces it."""
+    for fx in orig:
+        if any(supports(fx, i) for i in items if i["kind"] != K_STATUS):
+            return True
+        for w in set(m.group(0).upper() for m in _STATE_LOWER.finditer(
+                clause)):
+            if re.search(r"(?<![A-Za-z0-9])%s(?![A-Za-z0-9])" % w,
+                         fx.codes.upper()):
+                return True
+    return False
+
+
 def _repair_sentence(sentence: str, res: dict, idx: FactIndex,
                      qnums: set) -> tuple:
     """(new sentence, [{from, to, segment}]) or (None, reason). Segments are
@@ -960,10 +1060,11 @@ def _repair_sentence(sentence: str, res: dict, idx: FactIndex,
     at the same offsets."""
     segs = segments(res.get("eval_text") or _evaluable(sentence, idx))
     if res["verdict"] == NO_CITATION:
+        modal = bool(_MODAL.search(res.get("eval_text") or sentence))
         items = []
         for s in segs:
             items += [i for i in extract_items(s["text"], idx, qnums)
-                      if i["kind"] in _MATERIAL_KINDS]
+                      if _material(i, modal, False)]
         cands = [fx for fx in idx.facts.values() if _supports_all(fx, items)]
         if len(cands) != 1:
             return None, "%d_FACTS_SUPPORT_THE_UNCITED_MATERIAL" % len(cands)
@@ -989,8 +1090,18 @@ def _repair_sentence(sentence: str, res: dict, idx: FactIndex,
         whole = [fx for fx in idx.facts.values()
                  if _supports_all(fx, its)]
         if len(whole) == 1:
-            edits.append((s["gstart"], s["gend"], [whole[0].fid],
-                          s["group"], n))
+            orig = [idx.get(f) for f in s["group"] if idx.get(f)]
+            if _still_relevant(orig, its, s["text"]) and not any(
+                    i["kind"] == K_STATUS for i in fail_items):
+                # the clause's citation still holds part of what it says
+                # ("566 units expired [state = EXPIRED, ...]"): the one
+                # fact that holds the rest is cited BESIDE it
+                ids = list(s["group"]) + [whole[0].fid]
+            else:
+                # a citation that holds nothing the clause says (or a
+                # stale record cited for the present): REPLACED
+                ids = [whole[0].fid]
+            edits.append((s["gstart"], s["gend"], ids, s["group"], n))
             continue
         if any(i["kind"] == K_STATUS for i in fail_items):
             # a stale citation for a current state is REPLACED by the one
@@ -1109,7 +1220,13 @@ def gate(text: str, facts, *, question: str = "",
     worst = _worst(after)
     out["verdict"] = worst
     out["reason"] = "CITATION_INTEGRITY:%s" % worst
-    if composer == COMPOSER_MODEL and not partial:
+    if composer == COMPOSER_MODEL and not partial and worst != NO_CITATION:
+        # a KNOWN unsupported citation (wrong record, stale record, other
+        # entity, nothing holds it) is never published: the whole reply is
+        # discarded. A sentence that merely cites nothing (and no single
+        # fact could be cited for it) is kept with the explicit integrity
+        # statement instead -- the production retrospective showed 87 of
+        # 302 stored model replies whose only gap was an uncited sentence.
         out.update(action=A_FALLBACK, text=None)
         out["sentences"] = _ledger(before, repairs, A_FALLBACK)
         return out

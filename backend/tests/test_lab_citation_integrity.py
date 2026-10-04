@@ -168,6 +168,14 @@ def test_no_citation_and_insufficient_support():
     g = CI.gate("The paper account holds $500,000 in cash.", facts)
     assert g["action"] == CI.A_REPAIRED
     assert g["text"] == "The paper account holds $500,000 in cash [F143]."
+    # no single fact to cite (two facts hold $1,250? one does; 2026-10-03
+    # is in several): the model reply is KEPT with the explicit statement
+    g = CI.gate("The desk was last updated on 2026-10-03.",
+                facts + [dict(facts[-1], fact_id="F144",
+                              text="paper ledger as of 2026-10-03")])
+    assert g["action"] == CI.A_STATED and g["verdict"] == CI.NO_CITATION
+    assert g["text"].endswith("(Integrity check: it states a figure or "
+                              "record without citing the evidence.)")
     s = one("Fees today were $3.17 [F142].", facts)
     assert s["verdict"] == CI.INSUFFICIENT_SUPPORT
     g = CI.gate("Fees today were $3.17 [F142].", facts)
@@ -224,6 +232,16 @@ def test_measure_words_read_the_same_way_on_both_sides():
     assert CI.measures_near(t, 0, 9) == frozenset({"AGE"})
     i = t.index("30 s")
     assert "LIMIT" in CI.measures_near(t, i, i + 4)
+    t = ("cash deltas summing to $499,404.86 against cash of $499,404.86 "
+         "and reserved deltas of $98.92")
+    i = t.index("$499,404.86 and")
+    assert CI.measures_near(t, i, i + 11) == frozenset({"CASH"})
+    t = "Available of $499,305.94 equals cash minus reserved"
+    i = t.index("$")
+    assert CI.measures_near(t, i, i + 11) == frozenset({"AVAILABLE"})
+    t = "the probability was 149.3 s old"
+    i = t.index("149.3")
+    assert CI.measures_near(t, i, i + 7) == frozenset({"AGE", "PROBABILITY"})
     assert not CI.measures_compatible(frozenset({"AGE"}),
                                       frozenset({"LIMIT", "PRICE"}))
     assert CI.measures_compatible(frozenset({"CASH"}), frozenset())
@@ -262,10 +280,14 @@ def test_ids_timestamps_codes_and_attribution():
                "BELOW_MIN_GROSS_EDGE [F20].", facts)["verdict"] == CI.PASS
     assert one("Derek refused it at 18:00 [F20].", facts)["verdict"] == \
         CI.PASS
+    assert one("Derek refused it at 18:00:00.123456 [F20].", facts)[
+        "verdict"] == CI.PASS                    # fractional seconds
     s = one("Derek refused it at 18:05 [F20].", facts)
     assert s["verdict"] == CI.INSUFFICIENT_SUPPORT
     s = one("Derek's decision was HOLD_ON_STALE_PROBABILITY [F11].", facts)
     assert s["verdict"] == CI.ENTITY_MISMATCH        # Xavier's record
+    assert one("The refusal was MIN_GROSS_EDGE [F20].", facts)[
+        "verdict"] == CI.PASS                    # a run of the code's parts
     s = one("The refusal was SETTLEMENT_NOT_SUPPORTED [F20].", facts)
     assert s["verdict"] == CI.INSUFFICIENT_SUPPORT
 
@@ -393,3 +415,63 @@ def test_a_quoted_records_own_citation_tokens_are_not_citations():
     assert r["sentences"][0]["text"] == text      # reported as written
     # outside a quotation the same token IS a citation
     assert CI.cited_fact_ids("Cash $500,000 [F143].", facts) == ["F143"]
+
+
+def test_action_words_in_proposals_are_vocabulary_not_claims():
+    """Production retrospective (FULL profile over the stored answers): a
+    lone HOLD / REDUCE in a proposal, or a subject id in a "measurable
+    outcome", is not a claim about a record; an assertion is."""
+    facts = reviews()
+    for t in ("That review should either reconfirm HOLD or select a "
+              "different action.",
+              "Repair: record the shortfall on every BELOW_MIN_GROSS_EDGE "
+              "refusal.",
+              "Record the threshold on every BELOW_MIN_GROSS_EDGE refusal.",
+              "The measurable outcome is a stored review for %s." % G,
+              "REDUCE halves the tail but still pays fees."):
+        assert CI.verify(t, facts)["material"] == 0, t
+    # assertions about a record still need their citation
+    for t in ("My current management state is WAITING_FOR_FRESH_EVIDENCE.",
+              "The running session is paper_session_20261001T014716Z.",
+              "Derek's decision papercg:d7a0ff395098767c recorded ENTER."):
+        assert CI.verify(t, facts)["counts"][CI.NO_CITATION] == 1, t
+    # a cited proposal still has its figures checked
+    s = one("The review should use a probability under 30 s old, not "
+            "149.3 s [F12].", facts)
+    assert s["verdict"] == CI.STALE_STATE_CITATION
+
+
+def test_the_production_defect_classes_found_by_the_retrospective():
+    """Shapes measured in production (research run 37234801958, sanitised):
+    (1) a figure from one record cited to sibling records that hold only a
+    state -- the quantity's own record is never cited; (2) a price cited to
+    the probability's record; (3) a figure attributed to another agent's
+    claim cited to the agent's own evidence."""
+    facts = [F("F227", "paper paper_orders state = EXPIRED",
+               source="paper_orders", record_id="paperord:aa11bb22cc33",
+               field="state", value="EXPIRED"),
+             F("F239", "paper paper_orders state = EXPIRED",
+               source="paper_orders", record_id="paperord:dd44ee55ff66",
+               field="state", value="EXPIRED"),
+             F("F165", "paper paper_orders qty = 566.0",
+               source="paper_orders", record_id="paperord:aa11bb22cc33",
+               field="qty", value=566.0),
+             F("F110", "paper paper_decisions p_pinnacle = 0.248708693850303",
+               source="paper_decisions", record_id="paperdec:1",
+               field="p_pinnacle", value=0.248708693850303),
+             F("F114", "paper paper_decisions executable_price = 0.26",
+               source="paper_decisions", record_id="paperdec:1",
+               field="executable_price", value=0.26)]
+    s = one("Three standing-protection sell orders for 566 units expired "
+            "[F227][F239].", facts)
+    assert s["verdict"] == CI.WRONG_FACT
+    assert s["failing"][0]["alt"] == ["F165"]
+    g = CI.gate("Three standing-protection sell orders for 566 units expired "
+                "[F227][F239].", facts)
+    # the one record that holds 566 is cited beside the state records
+    assert g["action"] == CI.A_REPAIRED
+    assert "[F227] [F239] [F165]" in g["text"]
+    s = one("It paid 0.26 against a Pinnacle probability of "
+            "0.248708693850303 [F110].", facts)
+    assert s["verdict"] == CI.WRONG_FACT and s["failing"][0]["alt"] == \
+        ["F114"]
