@@ -1305,7 +1305,7 @@ XAVIER_JS = r"""
   AG.SPECS.xavier = {sections: [
     {key: 'status', title: 'Status & dependencies', render: R.status},
     {key: 'versions', title: 'Policy, model & code versions', render: R.versions},
-    {key: 'positions', title: 'Owned position groups', render: positions, empty: positionsEmpty, wide: true, note: 'Basis, exposure, primary / hedge / residual quantities, the current and next review, and the selected action with its explanation.'},
+    {key: 'positions', title: 'Owned position groups', render: positions, empty: positionsEmpty, wide: true, note: 'Basis, exposure, primary / hedge / residual quantities, the current and next review, and the selected action with its explanation. <a href="/positions" target="_top">Open every position as one correlated room &#8594;</a>'},
     {key: 'servicing_cadence', title: 'Servicing cadence', render: cadence},
     {key: 'reviews', title: 'Reviews', render: reviews},
     {key: 'ladder', title: 'Spread ladder', render: ladder, wide: true},

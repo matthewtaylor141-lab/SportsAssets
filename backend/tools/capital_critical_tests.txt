@@ -759,3 +759,6 @@ tests/test_twin_profitability.py
 # import no order/venue/execution/funded module, hold no SQL write, and run
 # every read in a READ ONLY transaction under a statement timeout.
 tests/test_equity_wall_authority.py
+# Position rooms (GET /api/command/positions/*): GET only, 401 without a
+# session, READ ONLY transaction, no order / funded / paper-writer import.
+tests/test_position_rooms_authority.py
