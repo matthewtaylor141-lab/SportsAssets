@@ -510,6 +510,17 @@ async def test_212_is_idempotent_and_its_rollback_refuses_over_its_records():
             "CREATE TRIGGER karen_challenges_207a_guard_trg BEFORE INSERT OR "
             "UPDATE ON karen_challenges FOR EACH ROW EXECUTE FUNCTION "
             "karen_challenges_207a_guard()")
+        # re-applying 212 presumes a pre-217 database: 217 (Eddie, Scout)
+        # widened the persona CHECK and may have seeded their personas
+        # (this transaction is rolled back)
+        await conn.execute("ALTER TABLE agent_persona_versions DISABLE "
+                           "TRIGGER agent_persona_versions_kept_trg")
+        await conn.execute("DELETE FROM agent_persona_versions WHERE "
+                           " agent_id IN ('EDDIE', 'SCOUT')")
+        await conn.execute("ALTER TABLE agent_persona_versions ENABLE "
+                           "TRIGGER agent_persona_versions_kept_trg")
+        await conn.execute("DELETE FROM agent_chat_conversations WHERE "
+                           " agent_id IN ('EDDIE', 'SCOUT')")
         await conn.execute(UP)
         await conn.execute(UP)
         trg = {r["tgname"] for r in await conn.fetch(

@@ -164,12 +164,35 @@ async def _expect(conn, sql, *args, match=None):
         await sp.rollback()
 
 
+async def _pre_217(conn):
+    """Re-running 207 presumes a database before 217 (Eddie, Scout): their
+    identity / status / persona rows -- which a later test may have
+    committed -- are removed inside the test's rolled-back transaction."""
+    if await conn.fetchval("SELECT to_regclass('agent_persona_versions')"):
+        await conn.execute("ALTER TABLE agent_persona_versions DISABLE "
+                           "TRIGGER USER")
+        await conn.execute("DELETE FROM agent_persona_versions WHERE "
+                           " agent_id IN ('EDDIE', 'SCOUT')")
+        await conn.execute("ALTER TABLE agent_persona_versions ENABLE "
+                           "TRIGGER USER")
+        await conn.execute("DELETE FROM agent_chat_conversations WHERE "
+                           " agent_id IN ('EDDIE', 'SCOUT')")
+    await conn.execute("DELETE FROM agent_status WHERE agent_id IN "
+                       "('EDDIE', 'SCOUT')")
+    await conn.execute("DELETE FROM agent_identities WHERE agent_id IN "
+                       "('EDDIE', 'SCOUT')")
+
+
 @pg
 @pytest.mark.asyncio
 async def test_the_identity_is_persisted_with_its_permissions():
     conn, tx = await _tx()
     try:
+        await _pre_217(conn)
         await conn.execute(UP)                                # idempotent
+        # re-running 207 narrows the identity CHECK to its four agents;
+        # 217 (Eddie, Scout) re-asserts the widened CHECK after it
+        await conn.execute((MIG / "217_eddie_scout_agents.sql").read_text())
         got = await R.ensure_identities(conn)
         assert got["ok"] is True and got["agents"]["KAREN"]["ok"], got
         st = await R.status_of(conn, R.KAREN)
@@ -178,7 +201,7 @@ async def test_the_identity_is_persisted_with_its_permissions():
         assert st["tool_permissions"] == \
             R.IDENTITIES[R.KAREN]["tool_permissions"]
         assert st["state"] == "IDLE" and st["activity"] == "NOT_YET_RUN"
-        # the CHECK admits exactly the four agents
+        # the CHECK admits exactly the registered agents
         await _expect(conn, "INSERT INTO agent_identities (agent_id, "
                       " display_name, mandate) VALUES ('MALLORY','m','m')")
     finally:
@@ -345,6 +368,7 @@ async def test_207_is_idempotent_and_its_rollback_refuses_over_karen_records():
     import asyncpg
     conn, tx = await _tx()
     try:
+        await _pre_217(conn)
         await conn.execute(UP)
         await conn.execute(UP)
         await R.ensure_identities(conn)

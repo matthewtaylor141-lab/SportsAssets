@@ -726,3 +726,16 @@ tests/test_profitability_economics.py
 tests/test_profitability_capacity.py
 tests/test_profitability_metrics_forecast.py
 tests/test_profitability_warehouse_cycle.py
+# Eddie (Head of Execution, SHADOW_ONLY) and Scout (Market Intelligence,
+# RESEARCH_SHADOW_ONLY), claude/pos-agents, migration 217: persisted
+# identities with NO venue / order / cancel / capital / approval / promotion
+# authority (registry deny lists + pos_authority.may + a first-firing trigger
+# on every approval, control, order, intent and fill table that refuses
+# either as an actor column or as the session's declared acting agent);
+# Eddie's hard rule (no executing recommendation with expected executable
+# EV <= 0, in code AND a CHECK); Scout's compliant-source guard and a frozen
+# prospective tournament he cannot judge or promote.
+tests/test_eddie_scout_identity_and_no_authority.py
+tests/test_eddie_execution_estimates.py
+tests/test_scout_features_and_tournament.py
+tests/test_eddie_scout_api_pages_slack.py
