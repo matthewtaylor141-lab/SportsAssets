@@ -25,6 +25,7 @@ import time as _time
 
 import logging
 import math
+import os
 import re
 import threading
 import unicodedata
@@ -430,12 +431,30 @@ def event_board(event_slug: str) -> list[dict]:
     it doesn't recognize, so positive eventSlug mismatches are dropped
     exactly like resolve_market does."""
     client = _get_client()
+    got = None
+    # THE EVENT'S OWN BOARD, BY SLUG (R30A inc-catalogue). This read was
+    # markets.list filtered by eventSlug -- a filter PREMAP-GT (probe #1030,
+    # 2026-08-24) proved the venue IGNORES, so the call returned one generic
+    # page and the eventSlug check below emptied it: the desk-game fallback
+    # for any event beyond the desk's page budget (app.py, `event_board(id)`)
+    # rendered an empty board for an event the venue lists in full. The
+    # venue's direct event lookup returns the event with its markets inline,
+    # the same shape the listing sweeps read; the old call stays as the
+    # fallback for an SDK or gateway that refuses it.
     try:
-        resp = client.markets.list({"eventSlug": [event_slug],
-                                    "active": True})
-        got = list((resp or {}).get("markets") or [])
-    except Exception:  # noqa: BLE001 — an empty board, never a 500
-        return []
+        ev = (client.events.retrieve_by_slug(event_slug) or {}).get("event")
+        if isinstance(ev, dict) and isinstance(ev.get("markets"), list):
+            got = [dict(m, eventSlug=m.get("eventSlug") or event_slug)
+                   for m in ev["markets"] if isinstance(m, dict)]
+    except Exception:  # noqa: BLE001 — fall back to the list read
+        got = None
+    if got is None:
+        try:
+            resp = client.markets.list({"eventSlug": [event_slug],
+                                        "active": True})
+            got = list((resp or {}).get("markets") or [])
+        except Exception:  # noqa: BLE001 — an empty board, never a 500
+            return []
     rows: list[dict] = []
 
     def _px(v) -> float | None:
@@ -491,6 +510,10 @@ _desk_cache: dict = {"ts": 0.0, "events": [], "blind_at": 0.0,
 # times in an hour. The two move together so a request between warm
 # ticks reads the cache instead of starting a sweep of its own.
 _DESK_TTL_S = 120.0
+# The desk's claim on venue_pace per page (R30A). Normal lane, the gate's own
+# minimum gap: the desk is a browse surface and never queues ahead of a money
+# path.
+_DESK_PACE_S = 0.35
 # blind_at: when a sweep last ended with nothing to cache (no variant
 # answered, or no event carried a board) — the waiters queued behind
 # that sweep read it and do not each run the probe ladder again.
@@ -512,6 +535,25 @@ _desk_sweep_lock = threading.Lock()
 # Guards the warned_at compare-and-set: two waiters that time out in
 # the same instant both read 'due' otherwise, and write two lines.
 _desk_warn_lock = threading.Lock()
+# THE DESK'S PAGE BUDGET IS A BOUND, AND IT MUST SAY WHEN IT BINDS (R30A P0
+# incident, inc-catalogue). render-ops logs, sportsassets-api 17:52-20:51Z on
+# 2026-10-04: every sweep read `pages=14 events=1400/1400` while the premap
+# sweep of the same board walked 18 pages (1,714-1,738 events), and the
+# venue-competition endpoint built on this cache published
+# `"truncated": False`. The budget stays where the 2026-09-05 OOM work left it
+# by default (fourteen pages: the API's 2 GiB line is the constraint, and the
+# trading catalogue is `us_premap`, which now reads the whole board), it is
+# tunable, and every sweep records how it ended in `_desk_cache["receipt"]`
+# so the endpoint can report the truncation instead of denying it. An event
+# beyond the budget is still reachable by slug: `event_board` reads it
+# directly (events.retrieve_by_slug) rather than from a list the venue does
+# not filter.
+_DESK_MAX_PAGES = int(os.environ.get("PMUS_DESK_MAX_PAGES", "14"))
+# A sweep that FAILED part-way never replaces a fuller board younger than this:
+# at 20:18:29Z a sweep died on page 3 and served 200 events in place of 1,400
+# until the next sweep. The stale-but-whole board is served instead, and the
+# receipt says so.
+_DESK_PARTIAL_KEEP_S = 600.0
 
 
 def _ev_volume_usd(ev: dict) -> float | None:
@@ -669,14 +711,21 @@ def _desk_sweep() -> list[dict]:
         _report()
         return _desk_cache["events"]
     offset = 0
-    for _ in range(14):                      # bounded paging
+    stopped = "BUDGET"
+    for _ in range(max(1, _DESK_MAX_PAGES)):  # bounded paging
         try:
+            # one claim on the process-wide venue gate per request (R30A):
+            # the desk's pages were unpaced, on top of every gated read
+            from . import venue_pace as _vp
+            _vp.pace(_DESK_PACE_S)
             resp = client.events.list(
                 {"limit": 100, "offset": offset, **variant}) or {}
-        except Exception:  # noqa: BLE001 — stale cache beats a 500
+        except Exception as exc:  # noqa: BLE001 — stale cache beats a 500
+            stopped = "ERROR:%s" % type(exc).__name__
             break
         got = resp.get("events") or []
         if not got:
+            stopped = "EMPTY_PAGE"
             break
         pages += 1
         for ev in got:
@@ -752,12 +801,31 @@ def _desk_sweep() -> list[dict]:
         # every fetch, on top of the probe page (2026-09-05).
         del resp, got
         if n_got < 100:
+            stopped = "SHORT_PAGE"
             break
         offset += 100
     _report()
     out = [e for e in events.values() if e["markets"]]
+    receipt = {"pages": pages, "events_with_markets": len(out),
+               "events_seen": len(events), "max_pages": _DESK_MAX_PAGES,
+               "stopped": stopped,
+               "truncated": stopped == "BUDGET",
+               "partial": stopped.startswith("ERROR:"),
+               "at": _t.time()}
+    prev = _desk_cache.get("events") or []
+    if (out and receipt["partial"] and len(prev) > len(out)
+            and _t.time() - float(_desk_cache.get("ts") or 0.0)
+            < _DESK_PARTIAL_KEEP_S):
+        # a failed sweep does not replace a fuller, recent board; its own
+        # receipt is kept beside the board it did not replace
+        receipt["kept_previous_board"] = len(prev)
+        _desk_cache["receipt_rejected"] = receipt
+        log.warning("desk sweep US: sweep failed after %d pages (%s); "
+                    "keeping the previous %d-event board", pages, stopped,
+                    len(prev))
+        return prev
     if out:
-        _desk_cache.update(ts=_t.time(), events=out)
+        _desk_cache.update(ts=_t.time(), events=out, receipt=receipt)
     else:
         _desk_cache["blind_at"] = _t.time()
     return _desk_cache["events"] if _desk_cache["events"] else out

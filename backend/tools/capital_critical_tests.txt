@@ -827,3 +827,12 @@ tests/test_command_release_authority.py
 # append-only tables; bundles differ per agent and never widen the
 # registry (Karen / Scout / Eddie boundaries); no voice is borrowed.
 tests/test_agent_identity_api_authority.py
+# R30A P0 INCIDENT, inc-catalogue (migration 249): the venue catalogue holds
+# the full tradable board -- every page (a venue page-size cap is detected, a
+# shifting board is caught by the overlap, an exhausted budget is TRUNCATED by
+# name), every market of every event, live and pregame with the venue's own
+# state, futures on both sides of the sweep window, no side key collapsed --
+# every request behind venue_pace, one append-only receipt per refresh; the
+# boards carry every token and fixture; the desk names its truncation.
+tests/test_venue_catalogue_is_complete.py
+tests/test_venue_catalogue_readers_and_receipts.py
