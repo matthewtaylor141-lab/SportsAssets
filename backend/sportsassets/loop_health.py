@@ -228,7 +228,11 @@ API_LOOPS = (
           note="ticks every 2 s (TICK_S); health is recorded at most every "
                "30 s, so 30 s is its health cadence. Reviews actual "
                "positions even while the control row keeps the lane off"),
-    _spec("bettor_desk_loop", "api", 20.0, critical=False,
+    # the desk's cadence is env-set in bettor_desk_loop (CYCLE_S =
+    # float(os.getenv("BETTOR_DESK_CYCLE_S", "20"))); read the same knob, so
+    # an override there is not judged against the default here
+    _spec("bettor_desk_loop", "api",
+          float(os.getenv("BETTOR_DESK_CYCLE_S", "20")), critical=False,
           lease={"kind": "ADVISORY_LOCK", "key": K_DESK,
                  "session": "own (db.lease_session)"},
           armed=("env_on", "BETTOR_DESK_LOOP"), sources=(),

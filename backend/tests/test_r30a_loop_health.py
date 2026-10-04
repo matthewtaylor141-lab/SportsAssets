@@ -116,6 +116,62 @@ def test_every_api_lifespan_runner_is_inventoried():
         assert child in names
 
 
+class _Declared:
+    """A module's constants AS ITS SOURCE DECLARES THEM (a literal at module
+    level), falling back to the live attribute for anything computed.
+
+    THE FULL-SUITE FAILURE THIS IS FOR (R30A review, full run on a7109d2):
+    test_desk_concurrency.py:123 and test_desk_recovery.py:254/792 assign
+    `bettor_desk_loop.CYCLE_S = 0.01` directly and never restore it, so in
+    the full suite this test read 0.01 against the copied 20.0 and failed,
+    while it passes alone. What loop_health copies is the declared constant,
+    so that is what is compared -- not whatever another test left behind."""
+
+    def __init__(self, mod):
+        self._mod = mod
+        self._lit = {}
+        tree = ast.parse(pathlib.Path(mod.__file__).read_text())
+        for node in tree.body:
+            if isinstance(node, ast.Assign):
+                targets, value = node.targets, node.value
+            elif isinstance(node, ast.AnnAssign) and node.value is not None:
+                targets, value = [node.target], node.value
+            else:
+                continue
+            for t in targets:
+                if isinstance(t, ast.Name):
+                    try:
+                        self._lit[t.id] = self._eval(value)
+                    except Exception:                  # noqa: BLE001
+                        pass                            # computed: live value
+
+    @staticmethod
+    def _eval(value):
+        """A literal, or the env knob pattern `float(os.getenv(NAME,
+        DEFAULT))` evaluated against this process's environment (what the
+        module itself evaluated at import)."""
+        if (isinstance(value, ast.Call) and isinstance(value.func, ast.Name)
+                and value.func.id in ("float", "int") and len(value.args) == 1
+                and isinstance(value.args[0], ast.Call)
+                and ast.unparse(value.args[0].func) == "os.getenv"):
+            name, default = (ast.literal_eval(a) for a in value.args[0].args)
+            return {"float": float, "int": int}[value.func.id](
+                os.getenv(name, default))
+        return ast.literal_eval(value)
+
+    def __getattr__(self, name):
+        if name in self._lit:
+            return self._lit[name]
+        return getattr(self._mod, name)
+
+
+def test_declared_reads_the_source_not_a_reassigned_attribute(monkeypatch):
+    from sportsassets import bettor_desk_loop as DESK
+    declared = _Declared(DESK).CYCLE_S
+    monkeypatch.setattr(DESK, "CYCLE_S", 0.01)
+    assert _Declared(DESK).CYCLE_S == declared != 0.01
+
+
 def test_copied_constants_match_the_loops():
     from sportsassets import bettor_desk_loop as DESK
     from sportsassets import execmirror as EXM
@@ -134,6 +190,12 @@ def test_copied_constants_match_the_loops():
     from sportsassets.workers import rn1x_model_loop as MOD
     from sportsassets.workers import rn1x_shadow as SHD
 
+    (DESK, EXM, FR, PH, PO, CAP, eddie_runner, improvement_pipeline,
+     karen_runner, peer_responder, scout_runner, INTEL, POSL, POS, TWIN, EXT,
+     LRN, MOD, SHD) = map(_Declared, (
+        DESK, EXM, FR, PH, PO, CAP, eddie_runner, improvement_pipeline,
+        karen_runner, peer_responder, scout_runner, INTEL, POSL, POS, TWIN,
+        EXT, LRN, MOD, SHD))
     B = {s["name"]: s for s in LH.API_LOOPS}
     assert B["ext_pinnacle.entry_cycle"]["cadence_s"] == EXT.CYCLE_S
     assert B["ext_pinnacle.entry_cycle"]["lease"]["key"] == EXT.LOCK_KEY
