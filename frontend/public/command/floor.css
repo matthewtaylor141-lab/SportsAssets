@@ -198,3 +198,35 @@ button{font:inherit;color:inherit;cursor:pointer}
 @media (prefers-reduced-motion:reduce){
   *,*::before,*::after{animation:none!important;transition:none!important}
 }
+
+/* ── phone: the 3D floor fills the screen between the HQ shell's top bar
+   (89px) and its bottom rail (66px); the desk roster is one swipeable row
+   above the rail and the agent summary a sheet above the roster. These win
+   over the meeting-release desktop placement, which otherwise also applied
+   at phone width (its phone override had lower specificity). ─────────── */
+@media (max-width:780px){
+  html body.fl:is(.meeting-real-floor,.fl) .fl-screen{height:100dvh!important;min-height:0!important;padding:89px 0 66px!important;display:flex;flex-direction:column}
+  html body.fl:is(.meeting-real-floor,.fl) .fl-top{flex-wrap:wrap;gap:6px 10px;padding:8px 12px!important;min-height:0}
+  html body.fl:is(.meeting-real-floor,.fl) .fl-brand{display:none}
+  html body.fl:is(.meeting-real-floor,.fl) .fl-title{padding-left:0;border-left:0}
+  html body.fl:is(.meeting-real-floor,.fl) .fl-title h1{font-size:17px}
+  html body.fl:is(.meeting-real-floor,.fl) .fl-tools{margin-left:auto;gap:6px}
+  html body.fl:is(.meeting-real-floor,.fl) .fl-btn{min-height:30px;padding:5px 9px;font-size:11px}
+  html body.fl:is(.meeting-real-floor,.fl) .fl-status{order:5;flex-basis:100%}
+  html body.fl:is(.meeting-real-floor,.fl) .fl-pill{font-size:10px;padding:4px 9px}
+  html body.fl:is(.meeting-real-floor,.fl) .fl-fixture{font-size:9px;padding:5px 8px;letter-spacing:.06em}
+  html body.fl:is(.meeting-real-floor,.fl) .fl-main{flex:1;min-height:0}
+  html body.fl:is(.meeting-real-floor,.fl) .fl-stage{flex:1;height:auto!important;min-height:0!important}
+  html body.fl:is(.meeting-real-floor,.fl) .fl-hint{display:none}
+  html body.fl:is(.meeting-real-floor,.fl) .fl-roster{position:fixed!important;left:0!important;right:0!important;bottom:66px!important;top:auto!important;z-index:12!important;
+    display:flex!important;gap:8px;overflow-x:auto;overflow-y:hidden;padding:8px 10px!important;min-height:0;border-radius:0!important;border:0!important;
+    border-top:1px solid rgba(151,180,214,.14)!important;background:rgba(3,9,18,.86)!important;scroll-snap-type:x mandatory;scrollbar-width:none;box-shadow:none!important}
+  html body.fl:is(.meeting-real-floor,.fl) .fl-roster::-webkit-scrollbar{display:none}
+  html body.fl:is(.meeting-real-floor,.fl) .fl-agent{flex:0 0 146px;scroll-snap-align:start;padding:7px 9px;gap:8px;align-items:center}
+  html body.fl:is(.meeting-real-floor,.fl) .fl-agent .fl-mono{width:28px;height:28px;border-radius:8px;font-size:13px}
+  html body.fl:is(.meeting-real-floor,.fl) .fl-agent-st small{display:none}
+  html body.fl:is(.meeting-real-floor,.fl) .fl-agent-st{margin-top:3px}
+  html body.fl:is(.meeting-real-floor,.fl) .fl-agent-st .fl-chip{white-space:nowrap;font-size:8.5px;padding:3px 6px}
+  html body.fl:is(.meeting-real-floor,.fl) .fl-panel{position:fixed!important;left:8px!important;right:8px!important;top:auto!important;bottom:136px!important;width:auto!important;max-height:38vh!important;border-radius:16px}
+  html body.fl.focused:is(.meeting-real-floor,.fl) .fl-status{display:none}
+}

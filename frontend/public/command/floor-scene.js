@@ -1,29 +1,60 @@
-/* BETTOR HEADQUARTERS · THE 3D TRADING FLOOR (three.js, vendored r185).
+/* BETTOR HEADQUARTERS · THE TRADING FLOOR (three.js r185, vendored).
  *
- * Presentation only: it is handed the floor payload (GET /api/command/floor)
- * by floor.js and draws it. Every visible behaviour maps to a recorded fact:
- *   typing        a run is in progress inside the heartbeat window
- *                 (activity_basis RUN_IN_PROGRESS) or a Slack request is being
- *                 worked (SLACK_REQUEST)
- *   reviewing     REVIEWING / CHALLENGING from a recorded output
- *   walking       ONLY when a collaboration edge newer than WALK_WINDOW_S
- *                 arrives (a real row with its evidence id); once per edge
- *   light trail   one per collaboration edge in the payload's window
- *   still / dim   STALE, NOT_DEPLOYED or no data (unknown is never animated)
- * prefers-reduced-motion: no idle motion, no walks, no moving trails; the
- * scene renders only when the data or the camera changes.
+ * The real Three.js floor (driven by floor.js, the controller), rebuilt as a
+ * cinematic headquarters: seven desk zones around the capital core, giant
+ * LED walls (floor.js projects its DOM wall screens onto them), a suspended
+ * ticker ring, glass, steel and a polished stone floor under ACES tone
+ * mapping, with real-time floor reflections and HDR bloom on desktop.
+ * Every visible behaviour maps to a recorded fact (floor-model.js):
+ *
+ *   desk light, zone edge, sign, monitors   GET /api/command/floor agents[]
+ *                                           (state, state_detail, monitor,
+ *                                           last_output, heartbeat)
+ *   avatar posture                          the same desk state: WORKING /
+ *                                           REVIEWING / CHALLENGING lean in to
+ *                                           the keyboard (typing rhythm),
+ *                                           WAITING leans back, NO TASK sits
+ *                                           upright, STALE sits still,
+ *                                           OFFLINE stands away from the desk
+ *   light paths between desks               floor edges[] (real hand-offs,
+ *                                           challenges, review steps); the
+ *                                           newer the row, the brighter
+ *   capital core                            /equity/live paper and
+ *                                           small_live_bettor, side by side,
+ *                                           never summed; a pulse only when
+ *                                           the server's seq says the content
+ *                                           genuinely changed
+ *   markets wall, ticker ring               paper open_positions rows: real
+ *                                           marks with their observed time
+ *   decisions / coverage / portfolio walls  floor feed[], /coverage,
+ *                                           /floor/xavier outputs
  *
  * Characters: the licensed Microsoft Rocketbox models in the repo
  * (team-demo/assets/models, MIT). EVERY agent wears its OWN model -- seven
- * distinct people; no seat reuses or recolours another agent's body (see
- * CAST and CREDITS). Eddie's headset is a desk prop. Nothing is downloaded
- * from anywhere else. */
+ * distinct people; no seat reuses or recolours another agent's body (CAST).
+ * A desk whose model is not present shows a lit PORTRAIT ARRIVING plate.
+ * prefers-reduced-motion: no drift, no scrolling, no flowing light, instant
+ * camera cuts; the scene renders only when data or the camera changes. */
 import * as THREE from './team-demo/assets/three.module.min.js';
-import {clone as cloneSkinned} from './team-demo/assets/SkeletonUtils.js';
-import {AvatarController, resolveBones, resolveBlendshapes, resolveVisemes,
-        buildJoints, armsDown} from './team-demo/assets/cc_avatar.js';
+import {mergeGeometries} from './team-demo/assets/BufferGeometryUtils.js';
+import {AvatarController, resolveBones, resolveBlendshapes, resolveVisemes, buildJoints, armsDown} from './team-demo/assets/cc_avatar.js';
+import * as S from './floor-screens.js';
+import {createModel} from './floor-model.js';
 
-const MODELS = './team-demo/assets/models/';
+const MODELS = new URL('./team-demo/assets/models/', import.meta.url).href;
+const V = (x, y, z) => new THREE.Vector3(x, y, z);
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const ease = (t) => t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+const damp = (a, b, k, dt) => a + (b - a) * (1 - Math.exp(-k * dt));
+
+/* THE FLOOR PLAN. Angle from north (the LED wall), clockwise; the seven
+ * desks form a horseshoe that opens toward the establishing camera. */
+const SEAT_ANGLE = {derek: -118, karen: -79, scout: -40, allocator: 0, eddie: 40, audrey: 79, xavier: 118};
+const R_DESK = 8.4;
+const DESK_TOP = 0.74;
+const SEAT_TOP = 0.47;
+const LAYER_NO_REFLECT = 1;
+
 export const CREDITS = {
   derek: 'Rocketbox Business_Male_03 (MIT, © 2020 Microsoft)',
   xavier: 'Rocketbox Business_Male_05 (MIT, © 2020 Microsoft)',
@@ -33,778 +64,1074 @@ export const CREDITS = {
   eddie: 'Rocketbox Business_Male_04, with a headset prop (MIT, © 2020 Microsoft)',
   scout: 'Rocketbox Business_Male_06 (MIT, © 2020 Microsoft)'
 };
-// which licensed model each seat wears: its own, never a recoloured copy of
-// another agent's (the tint shader below only dims / desaturates by state)
+// which licensed model each seat wears: its OWN file, never another agent's
+// body, never a tint (models/manifest.json entries, when present, win)
 export const CAST = {
-  derek: {model: 'derek', tint: null},
-  xavier: {model: 'xavier', tint: null},
-  audrey: {model: 'audrey', tint: null},
-  karen: {model: 'karen', tint: null},
-  allocator: {model: 'allie', tint: null},
-  eddie: {model: 'eddie', tint: null, headset: true},
+  derek: {model: 'derek', tint: null}, xavier: {model: 'xavier', tint: null}, audrey: {model: 'audrey', tint: null},
+  karen: {model: 'karen', tint: null}, allocator: {model: 'allie', tint: null}, eddie: {model: 'eddie', tint: null},
   scout: {model: 'scout', tint: null}
 };
-const WALK_WINDOW_S = 600;          // an edge newer than this may walk once
-const ARC_R = 7.0, ARC_Z = 2.4, ARC_SPAN = 150 * Math.PI / 180;
-const DESK_H = 1.04;
-
-const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
-const damp = (cur, tgt, lambda, dt) => cur + (tgt - cur) * (1 - Math.exp(-lambda * dt));
-const lerp = (a, b, t) => a + (b - a) * t;
-const ease = (t) => t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
 
 export function webglAvailable() {
-  try {
-    const c = document.createElement('canvas');
-    return !!(window.WebGLRenderingContext && (c.getContext('webgl2') || c.getContext('webgl')));
-  } catch (e) { return false; }
+  try { const c = document.createElement('canvas'); return !!(window.WebGL2RenderingContext && c.getContext('webgl2')) || !!(window.WebGLRenderingContext && c.getContext('webgl')); } catch (e) { return false; }
 }
 
-/* ── canvas text helpers ─────────────────────────────────────────── */
-function wrap(ctx, text, x, y, maxW, lineH, maxLines) {
-  const words = String(text || '').split(/\s+/);
-  let line = '', n = 0;
-  for (let i = 0; i < words.length; i++) {
-    const test = line ? line + ' ' + words[i] : words[i];
-    if (ctx.measureText(test).width > maxW && line) {
-      if (n === maxLines - 1) { ctx.fillText(line.replace(/.{0,2}$/, '') + '…', x, y + n * lineH); return n + 1; }
-      ctx.fillText(line, x, y + n * lineH); n++; line = words[i];
-    } else line = test;
-  }
-  if (line) { ctx.fillText(line, x, y + n * lineH); n++; }
-  return n;
-}
-function roundRect(ctx, x, y, w, h, r) {
-  ctx.beginPath(); ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r);
-  ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath();
-}
-function fitText(ctx, text, maxW) {
-  let t = String(text == null ? '' : text);
-  if (ctx.measureText(t).width <= maxW) return t;
-  while (t.length > 1 && ctx.measureText(t + '…').width > maxW) t = t.slice(0, -1);
-  return t + '…';
-}
-
-/* ── the suit recolour: dark, unsaturated texels move toward the tint;
- *    skin (saturated) and the white shirt (bright) are left alone ─────── */
-function tintMaterial(mat, opts) {
-  const m = mat.clone();
-  m.userData.uniforms = {uTint: {value: new THREE.Color(0, 0, 0)}, uTintAmt: {value: 0},
-                         uDim: {value: 1}, uDesat: {value: 0}};
-  if (opts && opts.tint) { m.userData.uniforms.uTint.value.setRGB(opts.tint[0], opts.tint[1], opts.tint[2]); m.userData.uniforms.uTintAmt.value = opts.amt || 0.8; }
-  const suit = !!(opts && opts.suit);
-  m.onBeforeCompile = (sh) => {
-    Object.assign(sh.uniforms, m.userData.uniforms);
-    sh.fragmentShader = 'uniform vec3 uTint; uniform float uTintAmt; uniform float uDim; uniform float uDesat;\n' +
-      sh.fragmentShader.replace('#include <map_fragment>', '#include <map_fragment>\n' +
-        (suit ? '{ float lum = dot(diffuseColor.rgb, vec3(0.2126,0.7152,0.0722));\n' +
-          ' float mx = max(max(diffuseColor.r,diffuseColor.g),diffuseColor.b); float mn = min(min(diffuseColor.r,diffuseColor.g),diffuseColor.b);\n' +
-          ' float sat = (mx-mn)/(mx+1e-4);\n' +
-          ' float k = smoothstep(0.42,0.12,sat) * smoothstep(0.30,0.04,lum);\n' +
-          ' diffuseColor.rgb = mix(diffuseColor.rgb, uTint * (0.55 + lum * 9.0), k * uTintAmt); }\n' : '') +
-        '{ float g = dot(diffuseColor.rgb, vec3(0.2126,0.7152,0.0722)); diffuseColor.rgb = mix(diffuseColor.rgb, vec3(g), uDesat) * uDim; }\n');
-  };
-  m.customProgramCacheKey = () => 'bt-floor-tint-' + (suit ? 1 : 0);
-  return m;
-}
-
-/* ── the legs: hinge joints like cc_avatar's arms (model faces +Z) ───── */
-function legJoints(root) {
-  root.updateMatrixWorld(true);
-  const find = (n) => { let b = null; root.traverse((o) => { if (!b && o.isBone && o.name === n) b = o; }); return b; };
-  const rootInv = root.getWorldQuaternion(new THREE.Quaternion()).invert();
-  const pos = (b) => root.worldToLocal(b.getWorldPosition(new THREE.Vector3()));
-  const out = {};
-  for (const side of ['L', 'R']) {
-    const th = find('Bip01 ' + side + ' Thigh'), ca = find('Bip01 ' + side + ' Calf'), ft = find('Bip01 ' + side + ' Foot');
-    if (!th || !ca || !ft) continue;
-    for (const [b, a, c] of [[th, th, ca], [ca, ca, ft]]) {
-      const d = pos(c).sub(pos(a)).normalize();
-      const ax = d.clone().cross(new THREE.Vector3(0, 0, 1)).normalize();
-      const toParent = rootInv.clone().multiply(b.parent.getWorldQuaternion(new THREE.Quaternion())).invert();
-      out[b.name] = {bone: b, rest: b.quaternion.clone(), axis: ax.applyQuaternion(toParent).normalize()};
-    }
-    out[side] = {thigh: th.name, calf: ca.name};
-  }
-  return out;
-}
-function hinge(j, angle) {
-  if (!j) return;
-  j.bone.quaternion.copy(new THREE.Quaternion().setFromAxisAngle(j.axis, angle).multiply(j.rest));
-}
-
-/* ═══════════════════════════════════════════════════════════════════ */
 export async function createFloor(host, opts) {
-  const o = Object.assign({phone: false, reducedMotion: false, seats: [], onPick: null, onHover: null,
-                           onFrame: null, onStatus: null}, opts || {});
+  const o = Object.assign({phone: false, reducedMotion: false, seats: [], onPick: null, onHover: null, onFrame: null, onStatus: null}, opts || {});
+  const stage = host;
   const phone = !!o.phone;
-  let raf = 0, last = 0, T = 0, ema = 16, slow = 0, needsOne = true, paused = false;
-  const fps = []; let frames = 0, secT = performance.now();
-  const canvas = document.createElement('canvas');
-  canvas.className = 'fl-canvas';
-  canvas.setAttribute('role', 'img');
-  canvas.setAttribute('aria-label', 'Three-dimensional trading floor: seven agent desks around a central wall. Use the agent list for the same information as text.');
-  host.appendChild(canvas);
-  const renderer = new THREE.WebGLRenderer({canvas, antialias: !phone, powerPreference: 'high-performance', alpha: false});
-  let dpr = Math.min(window.devicePixelRatio || 1, phone ? 1.25 : 1.75);
+  const reduced = !!o.reducedMotion;
+  const HQ = createModel(window.BTFloor);
+  // loading progress for the seven portraits (the room itself is drawn at once)
+  const prog = document.createElement('div'); prog.className = 'fl-av-progress'; prog.setAttribute('role', 'status');
+  prog.style.cssText = 'position:absolute;left:50%;top:14px;transform:translateX(-50%);z-index:5;display:flex;align-items:center;gap:10px;padding:7px 12px;border-radius:999px;background:rgba(4,12,25,.78);border:1px solid rgba(151,180,214,.18);backdrop-filter:blur(10px);font:600 10px/1 ui-monospace,monospace;letter-spacing:.08em;text-transform:uppercase;color:#9fb1c4;pointer-events:none;transition:opacity .8s';
+  prog.innerHTML = '<b style="display:block;width:120px;height:3px;border-radius:3px;background:rgba(150,180,220,.18);overflow:hidden"><i style="display:block;height:100%;transform-origin:left;transform:scaleX(.02);background:linear-gradient(90deg,#3157ff,#8fb0ff);transition:transform .4s"></i></b><span>Building the floor…</span>'; host.appendChild(prog);
+  HQ.progress = (frac, label) => {
+    prog.querySelector('i').style.transform = 'scaleX(' + Math.max(0.02, Math.min(1, frac)) + ')';
+    if (label) prog.querySelector('span').textContent = label;
+    if (frac >= 1) { prog.style.opacity = '0'; setTimeout(() => { prog.hidden = true; }, 900); }
+  };
+  const TEX = phone ? 0.5 : 1;
+  HQ.progress(0.04, 'Building the floor…');
+
+  /* ── renderer ──────────────────────────────────────────────────── */
+  const renderer = new THREE.WebGLRenderer({antialias: phone || !(window.WebGL2RenderingContext), powerPreference: 'high-performance', alpha: false});
+  const HIGH = !phone && renderer.capabilities.isWebGL2;
+  let dpr = Math.min(window.devicePixelRatio || 1, phone ? 1.5 : 1.75);
   renderer.setPixelRatio(dpr);
   renderer.outputColorSpace = THREE.SRGBColorSpace;
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
-  renderer.toneMappingExposure = 1.05;
-  renderer.shadowMap.enabled = !phone;
+  renderer.toneMappingExposure = 1.0;
+  renderer.shadowMap.enabled = HIGH;
   renderer.shadowMap.type = THREE.PCFShadowMap;
+  renderer.shadowMap.autoUpdate = false;
+  const canvas = renderer.domElement;
+  canvas.className = 'fl-canvas';
+  canvas.setAttribute('role', 'img');
+  canvas.setAttribute('aria-label', 'Three-dimensional BETTOR trading floor: seven agent desks around the capital core, with LED walls. The desk list and the panel give the same information as text.');
+  host.insertBefore(canvas, host.firstChild);
 
   const scene = new THREE.Scene();
-  scene.background = new THREE.Color('#05090e');
-  scene.fog = new THREE.Fog('#05090e', 22, 48);
+  scene.background = new THREE.Color('#03060b');
+  scene.fog = new THREE.FogExp2('#04070c', phone ? 0.014 : 0.0115);
+  const camera = new THREE.PerspectiveCamera(40, 1, 0.1, 220);
+  camera.layers.enable(LAYER_NO_REFLECT);
 
-  // a soft in-scene environment for reflections (no HDR file)
-  {
-    const s = new THREE.Scene();
-    s.background = new THREE.Color('#0a1018');
-    const panel = (c, i, p, w, h) => { const m = new THREE.Mesh(new THREE.PlaneGeometry(w, h), new THREE.MeshBasicMaterial({color: new THREE.Color(c).multiplyScalar(i), side: THREE.DoubleSide})); m.position.set(...p); m.lookAt(0, 1.5, 0); s.add(m); };
-    panel('#cfe6ff', 1.6, [0, 7, 0], 10, 1.2); panel('#7fb8ff', 0.45, [-6, 4, -4], 4, 3); panel('#ffe2c4', 0.3, [6, 4, 4], 4, 3); panel('#3a6c8c', 0.5, [0, 4, -9], 14, 4);
-    const pm = new THREE.PMREMGenerator(renderer);
-    scene.environment = pm.fromScene(s, 0.04).texture; pm.dispose();
-    scene.environmentIntensity = 0.55;
+  /* ── materials ─────────────────────────────────────────────────── */
+  const std = (o) => new THREE.MeshStandardMaterial(o);
+  const MAT = {
+    arch: std({color: '#0e131a', roughness: 0.82, metalness: 0.1}),
+    panel: std({color: '#0a0f15', roughness: 0.5, metalness: 0.35}),
+    alu: std({color: '#9aa7b6', roughness: 0.3, metalness: 1}),
+    darkMetal: std({color: '#1b222b', roughness: 0.35, metalness: 0.9}),
+    brass: std({color: '#c7a467', roughness: 0.26, metalness: 1}),
+    bezel: std({color: '#07090c', roughness: 0.22, metalness: 0.4}),
+    deskTop: std({color: '#14181d', roughness: 0.38, metalness: 0.08}),
+    walnut: std({color: '#2b1d14', roughness: 0.42, metalness: 0.05}),
+    leather: std({color: '#101215', roughness: 0.5, metalness: 0.05}),
+    mesh: std({color: '#16191e', roughness: 0.85, metalness: 0.1}),
+    carpet: std({color: '#0b0f15', roughness: 0.96, metalness: 0}),
+    stone: std({color: '#151a21', roughness: 0.3, metalness: 0.1}),
+    glass: new THREE.MeshStandardMaterial({color: '#a9c2dc', roughness: 0.04, metalness: 0.9, transparent: true, opacity: 0.1, depthWrite: false}),
+    black: new THREE.MeshBasicMaterial({color: '#020306'})
+  };
+  const glow = (hex, k) => new THREE.MeshBasicMaterial({color: new THREE.Color(hex).multiplyScalar(k), toneMapped: true});
+  MAT.strip = glow('#9cc2ff', 3.2);
+  MAT.stripWarm = glow('#ffe2bd', 3.0);
+  MAT.stripDim = glow('#5f86c9', 1.4);
+
+  /* ── batching: static geometry merged per material ─────────────── */
+  const batches = new Map();
+  function addStatic(geom, mat, matrix, opts) {
+    const g = geom.index ? geom.toNonIndexed() : geom.clone();
+    if (matrix) g.applyMatrix4(matrix);
+    for (const k of Object.keys(g.attributes)) if (!['position', 'normal', 'uv'].includes(k)) g.deleteAttribute(k);
+    if (!g.attributes.uv) g.setAttribute('uv', new THREE.Float32BufferAttribute(new Float32Array(g.attributes.position.count * 2), 2));
+    const key = mat.uuid + (opts && opts.noReflect ? ':nr' : '') + (opts && opts.noShadow ? ':ns' : '');
+    if (!batches.has(key)) batches.set(key, {mat, list: [], opts: opts || {}});
+    batches.get(key).list.push(g);
+  }
+  function flushStatic() {
+    for (const {mat, list, opts} of batches.values()) {
+      const merged = mergeGeometries(list, false);
+      list.forEach((g) => g.dispose());
+      const m = new THREE.Mesh(merged, mat);
+      m.castShadow = HIGH && !opts.noShadow && !(mat.isMeshBasicMaterial);
+      m.receiveShadow = HIGH && !(mat.isMeshBasicMaterial);
+      m.matrixAutoUpdate = false;
+      if (opts.noReflect) { m.layers.set(LAYER_NO_REFLECT); }
+      scene.add(m);
+    }
+    batches.clear();
+  }
+  const M4 = (x, y, z, rx, ry, rz, sx, sy, sz) => new THREE.Matrix4().compose(V(x, y, z), new THREE.Quaternion().setFromEuler(new THREE.Euler(rx || 0, ry || 0, rz || 0)), V(sx || 1, sy || 1, sz || 1));
+  function roundedBox(w, h, d, r, seg) {
+    const s = new THREE.Shape(), x = -w / 2 + r, y = -d / 2 + r, ww = w - 2 * r, dd = d - 2 * r;
+    s.moveTo(x, y); s.lineTo(x + ww, y); s.absarc(x + ww, y, r, -Math.PI / 2, 0); s.lineTo(x + ww + r, y + dd); s.absarc(x + ww, y + dd, r, 0, Math.PI / 2);
+    s.lineTo(x, y + dd + r); s.absarc(x, y + dd, r, Math.PI / 2, Math.PI); s.lineTo(x - r, y); s.absarc(x, y, r, Math.PI, Math.PI * 1.5);
+    const g = new THREE.ExtrudeGeometry(s, {depth: h, bevelEnabled: false, curveSegments: seg || 6});
+    g.rotateX(-Math.PI / 2); g.translate(0, -h / 2, 0);
+    return g;
+  }
+  function curvedPanel(w, h, R, segs) {
+    const g = new THREE.PlaneGeometry(w, h, segs || 32, 1), p = g.attributes.position;
+    for (let i = 0; i < p.count; i++) { const a = p.getX(i) / R; p.setXYZ(i, R * Math.sin(a), p.getY(i), R - R * Math.cos(a)); }
+    g.computeVertexNormals();
+    return g;
+  }
+  /* a canvas-backed screen surface */
+  const screens = [];
+  function screen(geom, pxW, pxH, paint, tags, opts) {
+    const c = document.createElement('canvas'); c.width = Math.round(pxW * TEX); c.height = Math.round(pxH * TEX);
+    const tex = new THREE.CanvasTexture(c); tex.colorSpace = THREE.SRGBColorSpace; tex.anisotropy = HIGH ? 8 : 2;
+    const o = opts || {};
+    if (o.repeatX) { tex.wrapS = THREE.RepeatWrapping; tex.repeat.x = o.repeatX; }
+    const mat = new THREE.MeshBasicMaterial({map: tex, toneMapped: true, transparent: !!o.transparent, depthWrite: !o.transparent, side: o.side || THREE.FrontSide,
+      blending: o.additive ? THREE.AdditiveBlending : THREE.NormalBlending});
+    mat.color.setScalar(o.gain || 1.15);
+    const mesh = new THREE.Mesh(geom, mat);
+    const sc = {canvas: c, ctx: c.getContext('2d'), tex, mat, mesh, paint, tags: new Set(tags)};
+    screens.push(sc);
+    return sc;
+  }
+  function redraw(tag) {
+    for (const sc of screens) if (!tag || sc.tags.has(tag) || sc.tags.has('*')) {
+      try { sc.paint(sc.ctx, sc.canvas.width, sc.canvas.height); } catch (e) { if (window.console) console.warn('BETTOR floor: screen paint', e); }
+      sc.tex.needsUpdate = true;
+    }
+    requestRender();
   }
 
-  /* lights */
-  scene.add(new THREE.HemisphereLight('#bcd6ff', '#0b1210', phone ? 1.1 : 0.7));
-  const key = new THREE.DirectionalLight('#fff1e2', 2.0);
-  key.position.set(-3, 16, 15);
-  if (!phone) {
+  /* ── environment (reflections without an HDR file) ────────────── */
+  {
+    const env = new THREE.Scene();
+    env.background = new THREE.Color('#05070b');
+    const em = (c, k) => new THREE.MeshBasicMaterial({color: new THREE.Color(c).multiplyScalar(k), side: THREE.DoubleSide});
+    const ring = new THREE.Mesh(new THREE.TorusGeometry(7, 0.5, 8, 64), em('#dbe8ff', 5)); ring.rotation.x = Math.PI / 2; ring.position.y = 12; env.add(ring);
+    const wall = new THREE.Mesh(new THREE.PlaneGeometry(24, 6), em('#6d8dff', 1.6)); wall.position.set(0, 6.5, -17); env.add(wall);
+    for (const sx of [-1, 1]) { const win = new THREE.Mesh(new THREE.PlaneGeometry(30, 10), em('#1b2a44', 0.9)); win.position.set(sx * 21, 6, 2); win.rotation.y = -sx * Math.PI / 2; env.add(win); }
+    const warm = new THREE.Mesh(new THREE.PlaneGeometry(10, 1), em('#ffd9a8', 1.4)); warm.position.set(0, 4, 12); env.add(warm);
+    const fl = new THREE.Mesh(new THREE.PlaneGeometry(60, 60), em('#0a0d12', 1)); fl.rotation.x = -Math.PI / 2; env.add(fl);
+    const pm = new THREE.PMREMGenerator(renderer);
+    scene.environment = pm.fromScene(env, 0.02).texture; pm.dispose();
+    scene.environmentIntensity = 0.85;
+  }
+
+  /* ── lights ────────────────────────────────────────────────────── */
+  scene.add(new THREE.HemisphereLight('#3a4f72', '#06080b', phone ? 0.9 : 0.35));
+  const key = new THREE.DirectionalLight('#d6e4ff', HIGH ? 1.1 : 1.6);
+  key.position.set(8, 22, 6);
+  if (HIGH) {
     key.castShadow = true; key.shadow.mapSize.set(2048, 2048);
-    const sc = key.shadow.camera; sc.left = -14; sc.right = 14; sc.top = 14; sc.bottom = -12; sc.near = 1; sc.far = 50;
-    key.shadow.bias = -0.0004; key.shadow.normalBias = 0.03;
+    const sc = key.shadow.camera; sc.left = -15; sc.right = 15; sc.top = 15; sc.bottom = -15; sc.near = 4; sc.far = 45;
+    key.shadow.bias = -0.0004; key.shadow.normalBias = 0.025; key.shadow.radius = 4;
   }
   scene.add(key);
-  // no back rim light: on the glossy floor it reads as a glare, not as state
+  const wallSpill = new THREE.SpotLight('#7a96ff', HIGH ? 110 : 90, 40, 0.8, 0.9, 1.6);
+  wallSpill.position.set(0, 8, -15); wallSpill.target.position.set(0, 0, -2); scene.add(wallSpill, wallSpill.target);
+  const coreLight = new THREE.PointLight('#6f9bff', 12, 12, 1.8); coreLight.position.set(0, 2.6, 0); scene.add(coreLight);
 
-  /* the room */
-  const room = new THREE.Group(); scene.add(room);
+  /* ── the floor: polished stone with real-time reflection (desktop) ─ */
+  const floorTex = (() => {
+    const c = document.createElement('canvas'); c.width = c.height = 1024 * (phone ? 0.5 : 1);
+    const g = c.getContext('2d'), n = 4, t = c.width / n;
+    let seed = 1337; const rnd = () => ((seed = (seed * 16807) % 2147483647) / 2147483647);   // deterministic tile variation (decor, not data)
+    for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) {
+      const v = 15 + Math.floor(rnd() * 6);
+      g.fillStyle = 'rgb(' + v + ',' + (v + 3) + ',' + (v + 8) + ')'; g.fillRect(i * t, j * t, t, t);
+      for (let k = 0; k < 6; k++) { g.strokeStyle = 'rgba(160,180,210,' + (0.012 + rnd() * 0.02) + ')'; g.lineWidth = 1 + rnd() * 2; g.beginPath(); const y0 = j * t + rnd() * t; g.moveTo(i * t, y0); g.bezierCurveTo(i * t + t * 0.3, y0 + (rnd() - 0.5) * t * 0.4, i * t + t * 0.7, y0 + (rnd() - 0.5) * t * 0.4, i * t + t, y0 + (rnd() - 0.5) * t * 0.3); g.stroke(); }
+    }
+    g.strokeStyle = 'rgba(0,0,0,.55)'; g.lineWidth = 3;
+    for (let i = 0; i <= n; i++) { g.beginPath(); g.moveTo(i * t, 0); g.lineTo(i * t, c.height); g.moveTo(0, i * t); g.lineTo(c.width, i * t); g.stroke(); }
+    const tx = new THREE.CanvasTexture(c); tx.wrapS = tx.wrapT = THREE.RepeatWrapping; tx.repeat.set(22, 22); tx.colorSpace = THREE.SRGBColorSpace; tx.anisotropy = HIGH ? 8 : 2;
+    return tx;
+  })();
+  const floorMat = new THREE.MeshStandardMaterial({map: floorTex, color: '#c9ced6', roughness: 0.28, metalness: 0.0, envMapIntensity: 0.35});
+  const floor = new THREE.Mesh(new THREE.PlaneGeometry(90, 90), floorMat);
+  floor.rotation.x = -Math.PI / 2; floor.receiveShadow = HIGH; scene.add(floor);
+  let refl = null;
+  if (HIGH) {
+    const rt = new THREE.WebGLRenderTarget(512, 512, {type: THREE.HalfFloatType});
+    const texMat = new THREE.Matrix4(), rcam = new THREE.PerspectiveCamera();
+    rcam.layers.set(0);
+    refl = {rt, texMat, rcam, strength: 0.5};
+    floorMat.onBeforeCompile = (sh) => {
+      sh.uniforms.tRefl = {value: rt.texture}; sh.uniforms.uTexMat = {value: texMat}; sh.uniforms.uReflStr = refl.uniform = {value: refl.strength};
+      sh.uniforms.uTexel = {value: new THREE.Vector2(1 / 512, 1 / 512)}; refl.texel = sh.uniforms.uTexel;
+      sh.vertexShader = 'uniform mat4 uTexMat;\nvarying vec4 vReflUv;\n' + sh.vertexShader.replace('#include <project_vertex>', '#include <project_vertex>\n vReflUv = uTexMat * vec4(transformed, 1.0);');
+      sh.fragmentShader = 'uniform sampler2D tRefl; uniform float uReflStr; uniform vec2 uTexel;\nvarying vec4 vReflUv;\n' + sh.fragmentShader.replace('#include <tonemapping_fragment>',
+        '{ vec2 ruv = vReflUv.xy / vReflUv.w; vec2 o = uTexel * 2.5;\n' +
+        '  vec3 r = texture2D(tRefl, ruv).rgb * 0.28 + (texture2D(tRefl, ruv + vec2(o.x, 0.0)).rgb + texture2D(tRefl, ruv - vec2(o.x, 0.0)).rgb + texture2D(tRefl, ruv + vec2(0.0, o.y)).rgb + texture2D(tRefl, ruv - vec2(0.0, o.y)).rgb) * 0.13\n' +
+        '    + (texture2D(tRefl, ruv + o * 2.0).rgb + texture2D(tRefl, ruv - o * 2.0).rgb + texture2D(tRefl, ruv + vec2(o.x, -o.y) * 2.0).rgb + texture2D(tRefl, ruv - vec2(o.x, -o.y) * 2.0).rgb) * 0.05;\n' +
+        '  float fres = 0.45 + 0.55 * pow(1.0 - clamp(dot(normalize(vViewPosition), normal), 0.0, 1.0), 4.0);\n' +
+        '  float tile = smoothstep(0.02, 0.09, dot(diffuseColor.rgb, vec3(0.333)));\n' +
+        '  gl_FragColor.rgb += r * uReflStr * fres * tile; }\n#include <tonemapping_fragment>');
+    };
+  }
+  function updateReflection() {
+    const {rcam, texMat, rt} = refl;
+    const n = V(0, 1, 0), camPos = camera.getWorldPosition(V(0, 0, 0));
+    if (camPos.y < 0.05) return false;
+    const rot = new THREE.Matrix4().extractRotation(camera.matrixWorld);
+    const view = camPos.clone(); view.y = -view.y;
+    const look = V(0, 0, -1).applyMatrix4(rot).add(camPos); look.y = -look.y;
+    rcam.position.copy(view);
+    rcam.up.set(0, 1, 0).applyMatrix4(rot).reflect(n);
+    rcam.lookAt(look);
+    rcam.far = camera.far; rcam.near = camera.near; rcam.fov = camera.fov; rcam.aspect = camera.aspect;
+    rcam.updateMatrixWorld(); rcam.projectionMatrix.copy(camera.projectionMatrix);
+    texMat.set(0.5, 0, 0, 0.5, 0, 0.5, 0, 0.5, 0, 0, 0.5, 0.5, 0, 0, 0, 1);
+    texMat.multiply(rcam.projectionMatrix).multiply(rcam.matrixWorldInverse).multiply(floor.matrixWorld);
+    // oblique near plane on the floor
+    const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(n, V(0, 0, 0)).applyMatrix4(rcam.matrixWorldInverse);
+    const cp = new THREE.Vector4(plane.normal.x, plane.normal.y, plane.normal.z, plane.constant), pm = rcam.projectionMatrix.elements;
+    const q = new THREE.Vector4((Math.sign(cp.x) + pm[8]) / pm[0], (Math.sign(cp.y) + pm[9]) / pm[5], -1, (1 + pm[10]) / pm[14]);
+    cp.multiplyScalar(2 / cp.dot(q));
+    pm[2] = cp.x; pm[6] = cp.y; pm[10] = cp.z + 1 - 0.003; pm[14] = cp.w;
+    floor.visible = false;
+    const fog = scene.fog; scene.fog = null;
+    renderer.setRenderTarget(rt); renderer.clear(); renderer.render(scene, rcam);
+    renderer.setRenderTarget(null);
+    scene.fog = fog; floor.visible = true;
+    return true;
+  }
+
+  /* ── architecture ──────────────────────────────────────────────── */
   {
-    // polished floor with a fine grid
-    const gc = document.createElement('canvas'); gc.width = gc.height = 512;
-    const g = gc.getContext('2d'); g.fillStyle = '#0a1219'; g.fillRect(0, 0, 512, 512);
-    g.strokeStyle = 'rgba(120,170,210,.10)'; g.lineWidth = 2; g.strokeRect(0, 0, 512, 512);
-    g.strokeStyle = 'rgba(120,170,210,.045)'; g.lineWidth = 1;
-    for (let i = 64; i < 512; i += 64) { g.beginPath(); g.moveTo(i, 0); g.lineTo(i, 512); g.moveTo(0, i); g.lineTo(512, i); g.stroke(); }
-    const gt = new THREE.CanvasTexture(gc); gt.wrapS = gt.wrapT = THREE.RepeatWrapping; gt.repeat.set(16, 16); gt.colorSpace = THREE.SRGBColorSpace;
-    gt.anisotropy = Math.min(8, renderer.capabilities.getMaxAnisotropy());
-    const floor = new THREE.Mesh(new THREE.PlaneGeometry(64, 64), new THREE.MeshStandardMaterial({map: gt, color: '#ffffff', metalness: 0.55, roughness: 0.32}));
-    floor.rotation.x = -Math.PI / 2; floor.receiveShadow = true; room.add(floor);
-    // the inlaid medallion at the centre of the floor
-    const mc = document.createElement('canvas'); mc.width = mc.height = 1024;
-    const m = mc.getContext('2d'); m.translate(512, 512);
-    for (const [r, w, a] of [[500, 3, .5], [455, 1.5, .35], [300, 1, .22]]) { m.beginPath(); m.arc(0, 0, r, 0, Math.PI * 2); m.strokeStyle = 'rgba(150,205,240,' + a + ')'; m.lineWidth = w; m.stroke(); }
-    for (let i = 0; i < 72; i++) { const an = i / 72 * Math.PI * 2; m.beginPath(); m.moveTo(Math.cos(an) * 462, Math.sin(an) * 462); m.lineTo(Math.cos(an) * (i % 6 ? 475 : 492), Math.sin(an) * (i % 6 ? 475 : 492)); m.strokeStyle = 'rgba(150,205,240,.35)'; m.lineWidth = 2; m.stroke(); }
-    m.fillStyle = 'rgba(205,232,250,.85)'; m.font = '600 120px Inter, system-ui, sans-serif'; m.textAlign = 'center'; m.textBaseline = 'middle';
-    m.fillText('BETTOR', 0, -10); m.font = '500 34px Inter, system-ui, sans-serif'; m.fillStyle = 'rgba(160,200,225,.7)'; m.fillText('H E A D Q U A R T E R S', 0, 92);
+    // the north wall that carries the LED wall
+    addStatic(curvedPanel(46, 15, 19.2, 48), MAT.arch, M4(0, 7.5, -19.2));
+    for (let i = -11; i <= 11; i++) {   // vertical fins
+      const a = i * 0.055;
+      addStatic(new THREE.BoxGeometry(0.16, 15, 0.5), MAT.panel, M4(19 * Math.sin(a), 7.5, -19 * Math.cos(a), 0, -a, 0));
+    }
+    addStatic(curvedPanel(46, 0.06, 18.9, 48), MAT.strip, M4(0, 3.55, -18.9), {noShadow: true});
+    addStatic(curvedPanel(46, 0.05, 18.9, 48), MAT.stripDim, M4(0, 11.4, -18.9), {noShadow: true});
+    // ceiling
+    const ceil = new THREE.Mesh(new THREE.CircleGeometry(40, 64), new THREE.MeshStandardMaterial({color: '#05070a', roughness: 0.9}));
+    ceil.rotation.x = Math.PI / 2; ceil.position.y = 14; scene.add(ceil);
+    addStatic(new THREE.TorusGeometry(7.2, 0.07, 8, 128), MAT.strip, M4(0, 12.9, 0, Math.PI / 2), {noShadow: true});
+    addStatic(new THREE.TorusGeometry(5.2, 0.045, 8, 128), MAT.stripDim, M4(0, 13.1, 0, Math.PI / 2), {noShadow: true});
+    addStatic(new THREE.CylinderGeometry(7.6, 7.6, 0.9, 96, 1, true), MAT.panel, M4(0, 13.45, 0), {noShadow: true});
+    for (let i = 0; i < 24; i++) {
+      const a = i / 24 * Math.PI * 2, r0 = 8.3, len = 9;
+      addStatic(new THREE.BoxGeometry(0.07, 0.035, len), i % 2 ? MAT.stripDim : MAT.strip, M4(Math.sin(a) * (r0 + len / 2), 13.5, Math.cos(a) * (r0 + len / 2), 0, a, 0), {noShadow: true});
+    }
+    // structural columns with light reveals
+    for (const deg of [-52, -88, 52, 88]) {
+      const a = deg * Math.PI / 180, r = 20.2, x = r * Math.sin(a), z = -r * Math.cos(a);
+      addStatic(new THREE.CylinderGeometry(0.55, 0.55, 14, 24), MAT.stone, M4(x, 7, z));
+      addStatic(new THREE.BoxGeometry(0.06, 12.5, 0.06), MAT.stripDim, M4(x * 0.972, 7, z * 0.972, 0, -a, 0), {noShadow: true});
+    }
+    // glass curtain walls with mullions and transoms, east and west
+    for (const side of [-1, 1]) {
+      for (let k = 0; k < 7; k++) {
+        const a = side * (62 + k * 12) * Math.PI / 180, r = 23;
+        const seg = new THREE.Mesh(new THREE.PlaneGeometry(4.8, 14), MAT.glass);
+        seg.position.set(r * Math.sin(a), 7, -r * Math.cos(a)); seg.lookAt(0, 7, 0); scene.add(seg);
+        addStatic(new THREE.BoxGeometry(0.12, 14, 0.25), MAT.darkMetal, M4(r * Math.sin(a + side * 0.105), 7, -r * Math.cos(a + side * 0.105), 0, -a, 0));
+        for (const y of [0.15, 4.6, 9.2, 13.8]) addStatic(new THREE.BoxGeometry(4.9, 0.1, 0.2), MAT.darkMetal, M4(r * Math.sin(a), y, -r * Math.cos(a), 0, -a, 0), {noShadow: true});
+      }
+    }
+    // the night skyline beyond the glass (painted once; deterministic)
+    const sk = document.createElement('canvas'); sk.width = 4096 * TEX; sk.height = 1024 * TEX;
+    const k = sk.getContext('2d'), W = sk.width, H = sk.height;
+    const gr = k.createLinearGradient(0, 0, 0, H); gr.addColorStop(0, '#020409'); gr.addColorStop(0.55, '#0a1527'); gr.addColorStop(1, '#16253c');
+    k.fillStyle = gr; k.fillRect(0, 0, W, H);
+    let seed = 77; const rnd = () => ((seed = (seed * 16807) % 2147483647) / 2147483647);
+    for (let layer = 0; layer < 2; layer++) {
+      let x = 0;
+      while (x < W) {
+        const w = (40 + rnd() * 110) * TEX, h = (layer ? 180 + rnd() * 520 : 100 + rnd() * 260) * TEX;
+        k.fillStyle = layer ? '#060b14' : '#0a1220'; k.fillRect(x, H - h, w, h);
+        if (layer) for (let yy = H - h + 12 * TEX; yy < H - 8; yy += 16 * TEX) for (let xx = x + 6 * TEX; xx < x + w - 8 * TEX; xx += 11 * TEX) if (rnd() > 0.78) { k.fillStyle = rnd() > 0.85 ? 'rgba(255,214,160,.55)' : 'rgba(170,205,255,.35)'; k.fillRect(xx, yy, 5 * TEX, 7 * TEX); }
+        x += w + (layer ? 6 : 2) * TEX;
+      }
+    }
+    const skyT = new THREE.CanvasTexture(sk); skyT.colorSpace = THREE.SRGBColorSpace;
+    const sky = new THREE.Mesh(new THREE.CylinderGeometry(70, 70, 46, 64, 1, true), new THREE.MeshBasicMaterial({map: skyT, side: THREE.BackSide, fog: false, color: new THREE.Color(0.7, 0.7, 0.75)}));
+    sky.position.y = 14; scene.add(sky);
+  }
+
+  /* ── the capital core ──────────────────────────────────────────── */
+  const core = {};
+  {
+    addStatic(new THREE.CylinderGeometry(3.3, 3.4, 0.2, 96), MAT.stone, M4(0, 0.1, 0));
+    addStatic(new THREE.CylinderGeometry(2.45, 2.5, 0.16, 96), MAT.stone, M4(0, 0.28, 0));
+    addStatic(new THREE.CylinderGeometry(0.95, 1.15, 0.55, 48), MAT.darkMetal, M4(0, 0.63, 0));
+    addStatic(new THREE.CylinderGeometry(0.62, 0.95, 0.12, 48), MAT.alu, M4(0, 0.96, 0));
+    core.rimMat = glow('#7fa6ff', 3);
+    const rim1 = new THREE.Mesh(new THREE.TorusGeometry(3.36, 0.022, 6, 160), core.rimMat); rim1.rotation.x = Math.PI / 2; rim1.position.y = 0.205; scene.add(rim1);
+    const rim2 = new THREE.Mesh(new THREE.TorusGeometry(2.49, 0.02, 6, 160), core.rimMat); rim2.rotation.x = Math.PI / 2; rim2.position.y = 0.365; scene.add(rim2);
+    // the medallion inlaid in the dais
+    const mc = document.createElement('canvas'); mc.width = mc.height = 1024 * TEX;
+    const m = mc.getContext('2d'), c = mc.width / 2; m.translate(c, c); const s = mc.width / 1024;
+    for (const [r, w, a] of [[500, 3, .55], [462, 1.5, .3], [300, 1.2, .25], [150, 1, .2]]) { m.beginPath(); m.arc(0, 0, r * s, 0, Math.PI * 2); m.strokeStyle = 'rgba(150,190,255,' + a + ')'; m.lineWidth = w * s; m.stroke(); }
+    for (let i = 0; i < 96; i++) { const an = i / 96 * Math.PI * 2; m.beginPath(); m.moveTo(Math.cos(an) * 466 * s, Math.sin(an) * 466 * s); m.lineTo(Math.cos(an) * (i % 8 ? 478 : 496) * s, Math.sin(an) * (i % 8 ? 478 : 496) * s); m.strokeStyle = 'rgba(150,190,255,.4)'; m.lineWidth = 2 * s; m.stroke(); }
+    m.fillStyle = 'rgba(200,220,255,.7)'; m.font = '600 ' + (44 * s) + 'px Inter, system-ui, sans-serif'; m.textAlign = 'center';
+    for (let i = 0; i < 2; i++) { m.save(); m.rotate(i * Math.PI); m.fillText('B E T T O R   ·   C A P I T A L   C O R E', 0, -390 * s); m.restore(); }
     const mt = new THREE.CanvasTexture(mc); mt.colorSpace = THREE.SRGBColorSpace;
-    const med = new THREE.Mesh(new THREE.CircleGeometry(3.1, 96), new THREE.MeshBasicMaterial({map: mt, transparent: true, opacity: 0.55, depthWrite: false}));
-    med.rotation.x = -Math.PI / 2; med.position.set(0, 0.004, ARC_Z); room.add(med);
-
-    // the central wall
-    const wall = new THREE.Mesh(new THREE.BoxGeometry(26, 8.2, 0.4), new THREE.MeshStandardMaterial({color: '#0b1520', metalness: 0.15, roughness: 0.8}));
-    wall.position.set(0, 4.1, -8.8); wall.receiveShadow = true; room.add(wall);
-    const trim = new THREE.Mesh(new THREE.BoxGeometry(26, 0.04, 0.05), new THREE.MeshBasicMaterial({color: '#5fb4e8'}));
-    trim.position.set(0, 0.6, -8.58); room.add(trim);
-    const trim2 = trim.clone(); trim2.position.y = 7.7; room.add(trim2);
-    // signage
-    const sc = document.createElement('canvas'); sc.width = 2048; sc.height = 160;
-    const s = sc.getContext('2d'); s.fillStyle = '#dbeefa'; s.font = '600 92px Inter, system-ui, sans-serif'; s.textBaseline = 'middle';
-    s.fillText('BETTOR', 40, 82); const bw = s.measureText('BETTOR').width;
-    s.fillStyle = '#7fb6d8'; s.font = '400 46px Inter, system-ui, sans-serif'; s.fillText('·  HEADQUARTERS  ·  TRADING FLOOR', 80 + bw, 86);
-    const st = new THREE.CanvasTexture(sc); st.colorSpace = THREE.SRGBColorSpace;
-    const sign = new THREE.Mesh(new THREE.PlaneGeometry(12.8, 1), new THREE.MeshBasicMaterial({map: st, transparent: true}));
-    sign.position.set(-4.6, 7.05, -8.58); room.add(sign);
-    // side walls with vertical light ribs and a night skyline beyond glass
-    const sky = document.createElement('canvas'); sky.width = 2048; sky.height = 512;
-    const k = sky.getContext('2d'); const grd = k.createLinearGradient(0, 0, 0, 512); grd.addColorStop(0, '#04070c'); grd.addColorStop(0.65, '#0c1a2b'); grd.addColorStop(1, '#122a40'); k.fillStyle = grd; k.fillRect(0, 0, 2048, 512);
-    let x = 0, seed = 7; const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
-    while (x < 2048) { const w = 30 + rnd() * 90, h = 120 + rnd() * 300; k.fillStyle = 'rgba(8,16,26,.95)'; k.fillRect(x, 512 - h, w, h);
-      k.fillStyle = 'rgba(160,200,235,.16)'; for (let yy = 512 - h + 10; yy < 500; yy += 14) for (let xx = x + 5; xx < x + w - 6; xx += 10) if (rnd() > .72) k.fillRect(xx, yy, 4, 6); x += w + 4; }
-    const skyT = new THREE.CanvasTexture(sky); skyT.colorSpace = THREE.SRGBColorSpace;
-    const backdrop = new THREE.Mesh(new THREE.CylinderGeometry(30, 30, 16, 64, 1, true, Math.PI * 0.25, Math.PI * 1.5), new THREE.MeshBasicMaterial({map: skyT, side: THREE.BackSide, fog: false}));
-    backdrop.position.set(0, 6, 2); room.add(backdrop);
-    const ribMat = new THREE.MeshBasicMaterial({color: '#3f7fae'});
-    for (const sx of [-1, 1]) for (let i = 0; i < 6; i++) {
-      const rib = new THREE.Mesh(new THREE.BoxGeometry(0.06, 6.5, 0.06), ribMat); rib.position.set(sx * (14 + i * 0.4), 3.25, -8 + i * 4.2); room.add(rib);
-      const col = new THREE.Mesh(new THREE.BoxGeometry(0.5, 7.5, 0.5), new THREE.MeshStandardMaterial({color: '#0d1822', metalness: .1, roughness: .85})); col.position.set(sx * (14.3 + i * 0.4), 3.75, -8 + i * 4.2); col.castShadow = !phone; room.add(col);
+    const med = new THREE.Mesh(new THREE.CircleGeometry(2.42, 96), new THREE.MeshBasicMaterial({map: mt, transparent: true, opacity: 0.9, depthWrite: false}));
+    med.rotation.x = -Math.PI / 2; med.position.y = 0.365; scene.add(med);
+    // energy column (a static vertical gradient; colour = paper status)
+    core.beamMat = new THREE.ShaderMaterial({transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide,
+      uniforms: {uColor: {value: new THREE.Color('#6f9bff')}, uK: {value: 1}},
+      vertexShader: 'varying vec2 vUv; varying vec3 vN; varying vec3 vV; void main(){ vUv = uv; vN = normalize(normalMatrix*normal); vec4 mv = modelViewMatrix*vec4(position,1.); vV = normalize(-mv.xyz); gl_Position = projectionMatrix*mv; }',
+      fragmentShader: 'uniform vec3 uColor; uniform float uK; varying vec2 vUv; varying vec3 vN; varying vec3 vV; void main(){ float rim = pow(1.0 - abs(dot(vN, vV)), 1.6); float h = smoothstep(0.0, 0.15, vUv.y) * (1.0 - smoothstep(0.55, 1.0, vUv.y)); gl_FragColor = vec4(uColor * (0.12 + rim * 0.75) * h * uK, 1.0); }'});
+    const beam = new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.32, 3.4, 32, 1, true), core.beamMat); beam.position.y = 2.6; scene.add(beam);
+    // the orb
+    core.orbMat = new THREE.MeshStandardMaterial({color: '#0b1430', emissive: new THREE.Color('#5d8cff'), emissiveIntensity: 2.4, roughness: 0.2, metalness: 0.4, flatShading: true});
+    core.orb = new THREE.Mesh(new THREE.IcosahedronGeometry(0.36, 1), core.orbMat); core.orb.position.y = 2.95; scene.add(core.orb);
+    core.cage = new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.IcosahedronGeometry(0.56, 1)), new THREE.LineBasicMaterial({color: new THREE.Color('#9fbcff').multiplyScalar(1.6), transparent: true, opacity: 0.6}));
+    core.cage.position.y = 2.95; scene.add(core.cage);
+    // the holographic band: PAPER | SMALL LIVE | PAPER | SMALL LIVE (never one figure)
+    core.band = screen(new THREE.CylinderGeometry(1.7, 1.7, 0.95, 96, 1, true), 4096, 366, (ctx, w, h) => S.coreBand(ctx, w, h, HQ), ['equity'], {transparent: true, additive: true, gain: 1.35});
+    core.band.mesh.position.y = 1.72; scene.add(core.band.mesh);
+    for (const y of [1.22, 2.22]) { const t = new THREE.Mesh(new THREE.TorusGeometry(1.7, 0.012, 6, 128), core.rimMat); t.rotation.x = Math.PI / 2; t.position.y = y; scene.add(t); }
+    // equity pulse ring (fires only when /equity/live seq changes)
+    core.pulse = new THREE.Mesh(new THREE.RingGeometry(0.96, 1, 128), new THREE.MeshBasicMaterial({color: new THREE.Color('#8fb0ff').multiplyScalar(2), transparent: true, opacity: 0, depthWrite: false}));
+    core.pulse.rotation.x = -Math.PI / 2; core.pulse.position.y = 0.02; scene.add(core.pulse);
+    core.pulseT = 1; core.lastChange = null;
+    // the house wordmark inlaid in the floor on the visitors' side of the core
+    {
+      const wc = document.createElement('canvas'); wc.width = 2048 * TEX; wc.height = 320 * TEX;
+      const w = wc.getContext('2d'), k = wc.width / 2048;
+      w.textAlign = 'center'; w.fillStyle = 'rgba(190,210,240,.9)';
+      w.font = '300 ' + (190 * k) + 'px Inter, system-ui, sans-serif'; w.fillText('B E T T O R', 1024 * k, 200 * k);
+      w.font = '600 ' + (40 * k) + 'px Inter, system-ui, sans-serif'; w.fillStyle = 'rgba(150,180,220,.8)'; w.fillText('C A P I T A L   ·   H E A D Q U A R T E R S', 1024 * k, 290 * k);
+      const wt = new THREE.CanvasTexture(wc); wt.colorSpace = THREE.SRGBColorSpace; wt.anisotropy = HIGH ? 8 : 2;
+      const mark = new THREE.Mesh(new THREE.PlaneGeometry(8.4, 1.31), new THREE.MeshBasicMaterial({map: wt, transparent: true, opacity: 0.16, depthWrite: false}));
+      mark.rotation.x = -Math.PI / 2; mark.position.set(0, 0.006, 6.4); scene.add(mark);
     }
+    // floor rings
+    for (const [r, mat] of [[3.9, MAT.stripDim], [6.1, MAT.stripDim]]) { const g = new THREE.RingGeometry(r - 0.012, r + 0.012, 192); g.rotateX(-Math.PI / 2); addStatic(g, mat, M4(0, 0.004, 0), {noShadow: true}); }
   }
 
-  /* the three wall screens: frames in 3D; their content is DOM projected
-   * onto them by floor.js (crisp text, the equity component mounts there) */
-  const WALL = [
-    {id: 'feed', x: -8.9, y: 3.7, w: 5.0, h: 3.3},
-    {id: 'equity', x: 0, y: 4.0, w: 11.6, h: 3.9},
-    {id: 'health', x: 8.9, y: 3.7, w: 5.0, h: 3.3}
-  ];
-  const WALL_Z = -8.56;
-  for (const w of WALL) {
-    const frame = new THREE.Mesh(new THREE.BoxGeometry(w.w + 0.16, w.h + 0.16, 0.08), new THREE.MeshStandardMaterial({color: '#111c28', metalness: .7, roughness: .3}));
-    frame.position.set(w.x, w.y, WALL_Z); room.add(frame);
-    const glass = new THREE.Mesh(new THREE.PlaneGeometry(w.w, w.h), new THREE.MeshBasicMaterial({color: '#07111b'}));
-    glass.position.set(w.x, w.y, WALL_Z + 0.05); room.add(glass);
-    const glow = new THREE.Mesh(new THREE.PlaneGeometry(w.w + 0.5, 0.03), new THREE.MeshBasicMaterial({color: '#6ec3f2', transparent: true, opacity: .7}));
-    glow.position.set(w.x, w.y - w.h / 2 - 0.16, WALL_Z + 0.06); room.add(glow);
+  /* ── the suspended ticker ring (real marks, scrolling) ─────────── */
+  const ring = {};
+  {
+    ring.sc = screen(new THREE.CylinderGeometry(4.7, 4.7, 0.72, 128, 1, true), 4096, 200, (ctx, w, h) => S.ticker(ctx, w, h, HQ), ['equity', 'floor'], {repeatX: 2, gain: 1.4});
+    ring.sc.mesh.position.y = 9.2; ring.sc.mesh.layers.set(0); scene.add(ring.sc.mesh);
+    const inner = new THREE.Mesh(new THREE.CylinderGeometry(4.66, 4.66, 0.72, 96, 1, true), new THREE.MeshStandardMaterial({color: '#07090d', roughness: 0.5, metalness: 0.6, side: THREE.BackSide}));
+    inner.position.y = 9.2; scene.add(inner);
+    for (const y of [8.82, 9.58]) addStatic(new THREE.TorusGeometry(4.72, 0.045, 8, 160), MAT.alu, M4(0, y, 0, Math.PI / 2), {noShadow: true});
+    for (let i = 0; i < 6; i++) { const a = i / 6 * Math.PI * 2; addStatic(new THREE.CylinderGeometry(0.012, 0.012, 4.4, 6), MAT.alu, M4(Math.sin(a) * 4.7, 11.8, Math.cos(a) * 4.7), {noShadow: true, noReflect: true}); }
   }
 
-  /* ── desks ─────────────────────────────────────────────────────── */
-  const seats = o.seats;
-  // a narrow portrait screen gets a tighter arc of slightly smaller desks
-  const portrait = host.clientWidth / Math.max(1, host.clientHeight) < 0.9;
-  const LR = portrait ? 6.0 : ARC_R, LSPAN = portrait ? 120 * Math.PI / 180 : ARC_SPAN, LS = portrait ? 0.85 : 1;
-  const desks = {};
-  const pickables = [];
-  const N = seats.length;
-  const center = new THREE.Vector3(0, 0, ARC_Z);
-  const deskMetal = new THREE.MeshStandardMaterial({color: '#1a2633', metalness: .75, roughness: .3});
-  const deskTop = new THREE.MeshStandardMaterial({color: '#162230', metalness: .3, roughness: .22});
-  const screenBack = new THREE.MeshStandardMaterial({color: '#0c131b', metalness: .6, roughness: .4});
-
-  function makeCanvasPlane(w, h, pxW, pxH) {
-    const c = document.createElement('canvas'); c.width = pxW; c.height = pxH;
-    const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 4;
-    const mesh = new THREE.Mesh(new THREE.PlaneGeometry(w, h), new THREE.MeshBasicMaterial({map: t, toneMapped: false}));
-    return {canvas: c, ctx: c.getContext('2d'), tex: t, mesh};
+  /* ── the giant LED wall (floor.js projects its DOM wall screens onto
+   *    these three panels: feed, equity, health) + side walls ────────── */
+  const WALL = [];
+  {
+    const Rw = 17.6;
+    const mk = (id, deg, w, h, y, pxW, pxH, paint, tags) => {
+      const a = deg * Math.PI / 180;
+      const sc = screen(new THREE.PlaneGeometry(w, h), pxW, pxH, paint, tags, {gain: 1.25});
+      sc.mesh.position.set(Rw * Math.sin(a), y, -Rw * Math.cos(a)); sc.mesh.lookAt(0, y, 0); scene.add(sc.mesh);
+      const fr = new THREE.Mesh(new THREE.BoxGeometry(w + 0.22, h + 0.22, 0.1), MAT.bezel);
+      fr.position.copy(sc.mesh.position).multiplyScalar(1.0035); fr.position.y = y; fr.lookAt(0, y, 0); scene.add(fr);
+      const glowLine = new THREE.Mesh(new THREE.PlaneGeometry(w + 0.4, 0.025), MAT.strip);
+      glowLine.position.copy(sc.mesh.position); glowLine.position.y = y - h / 2 - 0.2; glowLine.lookAt(0, glowLine.position.y, 0); scene.add(glowLine);
+      sc.mesh.updateMatrixWorld(true);
+      WALL.push({id, mesh: sc.mesh, w, h});
+      return sc;
+    };
+    mk('feed', -27.5, 5.0, 3.3, 6.15, 1552, 1024, (c, w, h) => S.decisions(c, w, h, HQ), ['floor']);
+    mk('equity', 0, 11.6, 3.9, 6.3, 2048, 689, (c, w, h) => S.capital(c, w, h, HQ), ['equity']);
+    mk('health', 27.5, 5.0, 3.3, 6.15, 1552, 1024, (c, w, h) => S.coverageWall(c, w, h, HQ), ['coverage']);
+    // side walls on pylons
+    const side = (deg, paint, tags) => {
+      const a = deg * Math.PI / 180, r = 16.2, y = 3.7;
+      const sc = screen(curvedPanel(5.6, 3.15, 16, 12), 1138, 640, paint, tags, {gain: 1.2});
+      sc.mesh.position.set(r * Math.sin(a), y, -r * Math.cos(a)); sc.mesh.lookAt(0, y, 0); scene.add(sc.mesh);
+      const m = new THREE.Matrix4().compose(V(r * 1.006 * Math.sin(a), y, -r * 1.006 * Math.cos(a)), new THREE.Quaternion().setFromRotationMatrix(new THREE.Matrix4().lookAt(V(0, y, 0), V(r * Math.sin(a), y, -r * Math.cos(a)), V(0, 1, 0))), V(1, 1, 1));
+      addStatic(new THREE.BoxGeometry(5.9, 3.45, 0.14), MAT.bezel, m);
+      addStatic(new THREE.BoxGeometry(0.5, 2.1, 0.5), MAT.darkMetal, M4(r * 1.012 * Math.sin(a), 1.05, -r * 1.012 * Math.cos(a), 0, -a, 0));
+      addStatic(new THREE.BoxGeometry(5.9, 0.03, 0.03), MAT.strip, new THREE.Matrix4().multiplyMatrices(m, M4(0, -1.8, 0.08)), {noShadow: true});
+    };
+    side(-64, (c, w, h) => S.markets(c, w, h, HQ), ['equity']);
+    side(64, (c, w, h) => S.xavierWall(c, w, h, HQ), ['xavier', 'floor']);
   }
 
-  seats.forEach((seat, i) => {
-    const th = -LSPAN / 2 + LSPAN * (i / (N - 1));
-    const pos = new THREE.Vector3(Math.sin(th) * LR, 0, ARC_Z - Math.cos(th) * LR);
-    const g = new THREE.Group(); g.position.copy(pos); g.lookAt(center.x, 0, center.z); g.scale.setScalar(LS); room.add(g); g.updateMatrixWorld(true);
-    // +Z of the group points at the centre: the agent stands at z=-0.55 facing +z
+  /* ── the seven desk zones ──────────────────────────────────────── */
+  const desks = {}, pickables = [];
+  function buildDesk(seat) {
+    const slug = seat.slug, th = SEAT_ANGLE[slug] * Math.PI / 180;
+    const g = new THREE.Group();
+    g.position.set(R_DESK * Math.sin(th), 0, -R_DESK * Math.cos(th));
+    g.lookAt(0, 0, 0); g.updateMatrixWorld(true);
+    scene.add(g);
+    const L = (x, y, z, rx, ry, rz, sx, sy, sz) => new THREE.Matrix4().multiplyMatrices(g.matrixWorld, M4(x, y, z, rx, ry, rz, sx, sy, sz));
     const accent = new THREE.Color(seat.accent);
-    const top = new THREE.Mesh(new THREE.BoxGeometry(2.1, 0.06, 0.86), deskTop); top.position.set(0, DESK_H, 0.15); top.castShadow = top.receiveShadow = !phone; g.add(top);
-    const edgeMat = new THREE.MeshBasicMaterial({color: accent.clone()});
-    const edge = new THREE.Mesh(new THREE.BoxGeometry(2.1, 0.012, 0.012), edgeMat); edge.position.set(0, DESK_H - 0.02, 0.585); g.add(edge);
-    for (const sx of [-0.95, 0.95]) { const leg = new THREE.Mesh(new THREE.BoxGeometry(0.06, DESK_H, 0.7), deskMetal); leg.position.set(sx, DESK_H / 2, 0.15); leg.castShadow = !phone; g.add(leg); }
-    const modesty = new THREE.Mesh(new THREE.BoxGeometry(1.84, 0.5, 0.025), deskMetal); modesty.position.set(0, 0.62, 0.55); g.add(modesty);
-    // monitors facing the agent (screens toward -z), backs toward the centre
-    const monitors = [];
-    const monSpecs = [[-0.6, 0.42], [0, 0], [0.6, -0.42]];
-    for (const [mx, rot] of monSpecs) {
-      const arm = new THREE.Group(); arm.position.set(mx, DESK_H + 0.02, 0.32); arm.rotation.y = Math.PI + rot; g.add(arm);
-      const stem = new THREE.Mesh(new THREE.CylinderGeometry(0.015, 0.015, 0.18, 8), deskMetal); stem.position.y = 0.09; arm.add(stem);
-      const back = new THREE.Mesh(new THREE.BoxGeometry(0.58, 0.34, 0.02), screenBack); back.position.y = 0.33; back.castShadow = !phone; arm.add(back);
-      const scr = makeCanvasPlane(0.55, 0.31, 512, 288); scr.mesh.position.set(0, 0.33, 0.0115); arm.add(scr.mesh);
-      monitors.push(scr);
+    const wide = slug === 'allocator' ? 2.9 : slug === 'eddie' ? 2.7 : 2.3;
+    // zone plate + its lit edge (state colour)
+    addStatic(roundedBox(5.6, 0.03, 4.6, 0.35, 6), MAT.carpet, L(0, 0.015, -0.25), {noShadow: true});
+    const edgeMat = new THREE.MeshBasicMaterial({color: accent.clone().multiplyScalar(2)});
+    const eg = [];
+    for (const [w, d, x, z] of [[5.6, 0.025, 0, 2.0], [5.6, 0.025, 0, -2.5], [0.025, 4.6, 2.8, -0.25], [0.025, 4.6, -2.8, -0.25]]) {
+      const b = new THREE.BoxGeometry(w, 0.012, d); b.applyMatrix4(M4(x, 0.034, z)); eg.push(b);
     }
-    if (!phone) { const spot = new THREE.SpotLight('#fff4e6', 22, 7, 0.5, 0.6, 1.6); spot.position.set(0, 4.6, 1.4); spot.target.position.set(0, 1.3, -0.5); g.add(spot); g.add(spot.target); }
-    const backGlow = new THREE.PointLight(accent.clone(), 0.5, 3.2, 2); backGlow.position.set(0, DESK_H + 0.45, -0.1); g.add(backGlow);
-    // the floating status board behind the agent, facing the centre
-    const board = makeCanvasPlane(1.9, 0.86, 1024, 464);
-    board.mesh.position.set(0, 2.62, -1.15); g.add(board.mesh);
-    const boardFrameMat = new THREE.MeshBasicMaterial({color: accent.clone(), transparent: true, opacity: 0.9});
-    const bf = new THREE.Mesh(new THREE.PlaneGeometry(1.94, 0.012), boardFrameMat); bf.position.set(0, 2.62 - 0.445, -1.151); g.add(bf);
-    const bf2 = bf.clone(); bf2.position.y = 2.62 + 0.445; g.add(bf2);
-    const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.018, 0.018, 2.2, 8), deskMetal); pole.position.set(0, 1.1, -1.2); g.add(pole);
-    // nameplate on the desk front (facing the centre)
-    const plate = makeCanvasPlane(1.1, 0.2, 512, 96);
-    plate.mesh.position.set(0, DESK_H - 0.16, 0.567); g.add(plate.mesh);
-    // the state ring on the floor
-    const ringMat = new THREE.MeshBasicMaterial({color: '#4a5566', transparent: true, opacity: 0.7, depthWrite: false});
-    const ring = new THREE.Mesh(new THREE.RingGeometry(1.45, 1.52, 96), ringMat); ring.rotation.x = -Math.PI / 2; ring.position.set(0, 0.006, -0.1); g.add(ring);
-    const halo = new THREE.Mesh(new THREE.CircleGeometry(1.45, 64), new THREE.MeshBasicMaterial({color: '#4a5566', transparent: true, opacity: 0.08, depthWrite: false}));
-    halo.rotation.x = -Math.PI / 2; halo.position.set(0, 0.005, -0.1); g.add(halo);
-    // props
-    if (seat.slug === 'karen') { const flag = new THREE.Mesh(new THREE.ConeGeometry(0.07, 0.2, 3), new THREE.MeshStandardMaterial({color: '#d4414c', emissive: '#5a0d12'})); flag.rotation.z = -Math.PI / 2; flag.position.set(0.86, DESK_H + 0.3, 0.05); g.add(flag); const fp = new THREE.Mesh(new THREE.CylinderGeometry(0.006, 0.006, 0.36, 6), deskMetal); fp.position.set(0.79, DESK_H + 0.2, 0.05); g.add(fp); }
-    if (seat.slug === 'allocator') { const brass = new THREE.MeshStandardMaterial({color: '#c9a250', metalness: 1, roughness: .25}); const base = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.07, 0.03, 24), brass); base.position.set(-0.85, DESK_H + 0.045, 0.0); g.add(base); const beam = new THREE.Mesh(new THREE.BoxGeometry(0.26, 0.008, 0.008), brass); beam.position.set(-0.85, DESK_H + 0.24, 0); g.add(beam); const post = new THREE.Mesh(new THREE.CylinderGeometry(0.006, 0.006, 0.2, 8), brass); post.position.set(-0.85, DESK_H + 0.14, 0); g.add(post); for (const px of [-0.12, 0.12]) { const pan = new THREE.Mesh(new THREE.CylinderGeometry(0.045, 0.03, 0.01, 20), brass); pan.position.set(-0.85 + px, DESK_H + 0.17, 0); g.add(pan); } }
-    if (seat.slug === 'scout') { const globe = new THREE.Mesh(new THREE.SphereGeometry(0.1, 24, 16), new THREE.MeshStandardMaterial({color: '#2b5a6e', metalness: .2, roughness: .5, wireframe: true})); globe.position.set(0.85, DESK_H + 0.16, 0.02); g.add(globe); const gb = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.06, 0.04, 16), deskMetal); gb.position.set(0.85, DESK_H + 0.05, 0.02); g.add(gb); }
-    // the hit volume (desk + agent + board)
-    const hit = new THREE.Mesh(new THREE.BoxGeometry(2.3, 3.2, 2.2), new THREE.MeshBasicMaterial({visible: false}));
-    hit.position.set(0, 1.6, -0.35); hit.userData.slug = seat.slug; g.add(hit); pickables.push(hit);
-    const world = (x, y, z) => g.localToWorld(new THREE.Vector3(x, y, z));
-    desks[seat.slug] = {seat, group: g, theta: th, monitors, board, plate, ring, ringMat, halo, edgeMat, boardFrameMat, backGlow,
-      stand: world(0, 0, -0.55), visit: world(0.25, 0, 1.05), anchor: world(0, 2.3, -0.4), focusPos: world(0.2, 2.45, 3.95), focusTarget: world(0, 1.7, -0.6),
-      agent: null, avatar: null, data: null};
-  });
-
-  /* ── characters ────────────────────────────────────────────────── */
-  const loaded = {};
-  async function loadModel(name) {
-    if (!loaded[name]) loaded[name] = (async () => {
-      const [{GLTFLoader}, {MeshoptDecoder}] = await Promise.all([import('./team-demo/assets/GLTFLoader.js'), import('./team-demo/assets/meshopt_decoder.module.js')]);
-      const loader = new GLTFLoader(); loader.setMeshoptDecoder(MeshoptDecoder);
-      const gltf = await loader.loadAsync(MODELS + name + '.glb');
-      return gltf.scene;
-    })();
-    return loaded[name];
+    const edge = new THREE.Mesh(mergeGeometries(eg), edgeMat); g.add(edge);
+    // floor light path toward the core (brightness = desk state)
+    const pathMat = new THREE.MeshBasicMaterial({color: accent.clone().multiplyScalar(1.2), transparent: true, opacity: 0.6, depthWrite: false});
+    const path = new THREE.Mesh(new THREE.PlaneGeometry(0.035, R_DESK - 6.3), pathMat);
+    path.rotation.x = -Math.PI / 2; path.position.set(0, 0.006, 2.0 + (R_DESK - 6.3) / 2 - 0.0); g.add(path);
+    // the desk
+    const deskTopMat = slug === 'allocator' ? MAT.walnut : MAT.deskTop;
+    addStatic(roundedBox(wide, 0.045, 0.82, 0.04, 4), deskTopMat, L(0, DESK_TOP - 0.022, 0.8));
+    addStatic(new THREE.BoxGeometry(wide, 0.012, 0.012), slug === 'allocator' ? MAT.brass : MAT.alu, L(0, DESK_TOP - 0.03, 0.39), {noShadow: true});
+    for (const sx of [-1, 1]) addStatic(new THREE.BoxGeometry(0.05, DESK_TOP - 0.045, 0.72), MAT.darkMetal, L(sx * (wide / 2 - 0.12), (DESK_TOP - 0.045) / 2, 0.8));
+    addStatic(new THREE.BoxGeometry(wide - 0.3, 0.32, 0.02), MAT.darkMetal, L(0, DESK_TOP - 0.22, 1.16));
+    // keyboard + mouse (small: not reflected)
+    addStatic(roundedBox(0.44, 0.018, 0.14, 0.01, 2), MAT.bezel, L(0, DESK_TOP + 0.009, 0.56), {noReflect: true, noShadow: true});
+    addStatic(roundedBox(0.06, 0.02, 0.1, 0.025, 3), MAT.bezel, L(0.34, DESK_TOP + 0.01, 0.56), {noReflect: true, noShadow: true});
+    // monitors (screens face the agent: -z)
+    const kinds = S.DESK_SCREENS[slug] || ['status'];
+    const mons = [];
+    const monAt = (kind, x, y, w, h, yaw, curved) => {
+      const geom = curved ? curvedPanel(w, h, 1.6, 16) : new THREE.PlaneGeometry(w, h);
+      const sc = screen(geom, Math.round(320 * w / h), 320, (c, cw, ch) => S.monitor(c, cw, ch, HQ, slug, kind), ['floor', 'equity', 'coverage', 'xavier', 'clock']);
+      const holder = new THREE.Group(); holder.position.set(x, y, 1.02); holder.rotation.y = Math.PI + yaw; g.add(holder);
+      sc.mesh.position.z = 0.012; holder.add(sc.mesh);
+      const back = new THREE.Mesh(curved ? curvedPanel(w + 0.03, h + 0.03, 1.62, 16) : new THREE.BoxGeometry(w + 0.03, h + 0.03, 0.02), MAT.bezel);
+      holder.add(back);
+      // the back of every monitor carries a faint accent line (seen from the core)
+      const line = new THREE.Mesh(new THREE.PlaneGeometry(w * 0.6, 0.008), new THREE.MeshBasicMaterial({color: accent.clone().multiplyScalar(1.5)}));
+      line.position.set(0, -h / 2 + 0.03, -0.012); line.rotation.y = Math.PI; holder.add(line);
+      sc.mesh.layers.set(0);
+      mons.push(sc);
+      return holder;
+    };
+    const mw = 0.6, mh = 0.35, y0 = DESK_TOP + 0.36;
+    if (slug === 'eddie') {
+      [-0.62, 0, 0.62].forEach((x, i) => { monAt(kinds[i], x, y0, mw, mh, [-0.32, 0, 0.32][i]); monAt(kinds[i + 3], x, y0 + 0.385, mw, mh, [-0.32, 0, 0.32][i]); });
+    } else if (slug === 'xavier') {
+      monAt(kinds[0], 0, y0 + 0.02, 1.15, 0.38, 0, true); monAt(kinds[1], -0.88, y0, mw * 0.85, mh * 0.85, -0.5); monAt(kinds[2], 0.88, y0, mw * 0.85, mh * 0.85, 0.5);
+    } else if (slug === 'audrey') {
+      [-0.63, 0, 0.63].forEach((x, i) => monAt(kinds[i], x, y0, mw, mh, [-0.36, 0, 0.36][i])); monAt(kinds[3], 0, y0 + 0.385, mw, mh, 0);
+    } else {
+      [-0.63, 0, 0.63].forEach((x, i) => monAt(kinds[i], x, y0, mw, mh, [-0.36, 0, 0.36][i]));
+    }
+    // monitor stand pole + base
+    addStatic(new THREE.CylinderGeometry(0.018, 0.018, slug === 'eddie' ? 0.82 : 0.42, 10), MAT.alu, L(0, DESK_TOP + 0.21 * (slug === 'eddie' ? 1.95 : 1), 1.06), {noReflect: true});
+    addStatic(new THREE.BoxGeometry(0.26, 0.012, 0.16), MAT.alu, L(0, DESK_TOP + 0.006, 1.06), {noReflect: true, noShadow: true});
+    // the executive chair (base static; the seat reads as leather)
+    {
+      const cz = -0.06;
+      addStatic(roundedBox(0.52, 0.08, 0.5, 0.08, 5), MAT.leather, L(0, SEAT_TOP - 0.04, cz + 0.02));
+      addStatic(roundedBox(0.5, 0.07, 0.66, 0.1, 5), slug === 'allocator' ? MAT.leather : MAT.mesh, L(0, SEAT_TOP + 0.4, cz - 0.2, Math.PI / 2 - 0.12, 0, 0));
+      if (slug === 'allocator' || slug === 'xavier') addStatic(roundedBox(0.32, 0.07, 0.16, 0.06, 4), MAT.leather, L(0, SEAT_TOP + 0.84, cz - 0.25, Math.PI / 2 - 0.12, 0, 0));
+      for (const sx of [-1, 1]) {
+        addStatic(new THREE.BoxGeometry(0.05, 0.03, 0.3), MAT.leather, L(sx * 0.29, SEAT_TOP + 0.2, cz), {noReflect: true});
+        addStatic(new THREE.BoxGeometry(0.025, 0.2, 0.03), MAT.darkMetal, L(sx * 0.29, SEAT_TOP + 0.08, cz - 0.04), {noReflect: true});
+      }
+      addStatic(new THREE.CylinderGeometry(0.03, 0.035, SEAT_TOP - 0.16, 12), MAT.alu, L(0, (SEAT_TOP - 0.16) / 2 + 0.08, cz));
+      for (let i = 0; i < 5; i++) {
+        const a = i / 5 * Math.PI * 2;
+        addStatic(new THREE.BoxGeometry(0.035, 0.03, 0.32), MAT.alu, L(Math.sin(a) * 0.16, 0.08, cz + Math.cos(a) * 0.16, 0, a, 0), {noReflect: true});
+        addStatic(new THREE.SphereGeometry(0.03, 8, 6), MAT.bezel, L(Math.sin(a) * 0.31, 0.03, cz + Math.cos(a) * 0.31), {noReflect: true, noShadow: true});
+      }
+    }
+    // backdrop: a glass partition carrying the zone board, and the lit sign
+    addStatic(new THREE.BoxGeometry(5.4, 2.9, 0.06), MAT.panel, L(0, 1.45, -2.42));
+    for (const sx of [-1, 1]) addStatic(new THREE.BoxGeometry(0.06, 2.95, 0.12), MAT.alu, L(sx * 2.72, 1.475, -2.42));
+    addStatic(new THREE.BoxGeometry(5.5, 0.05, 0.14), MAT.alu, L(0, 2.93, -2.42));
+    const glassP = new THREE.Mesh(new THREE.PlaneGeometry(5.4, 1.1), MAT.glass); glassP.position.set(0, 3.5, -2.42); g.add(glassP);
+    const board = screen(new THREE.PlaneGeometry(3.1, 1.74), 1536, 864, (c, w, h) => S.zoneBoard(c, w, h, HQ, slug), ['floor', 'clock'], {gain: 1.2});
+    board.mesh.position.set(0, 1.62, -2.385); g.add(board.mesh);
+    const sign = screen(new THREE.PlaneGeometry(4.2, 0.66), 1024, 160, (c, w, h) => S.zoneSign(c, w, h, HQ, slug), ['floor'], {transparent: true, gain: 1.5});
+    sign.mesh.scale.setScalar(0.62); sign.mesh.position.set(-0.25, 2.7, -2.38); g.add(sign.mesh);
+    const accentBar = new THREE.Mesh(new THREE.BoxGeometry(5.4, 0.025, 0.03), new THREE.MeshBasicMaterial({color: accent.clone().multiplyScalar(2.4)}));
+    accentBar.position.set(0, 0.05, -2.38); g.add(accentBar);
+    // nameplate on the desk front (faces the core)
+    const plate = screen(new THREE.PlaneGeometry(0.96, 0.18), 512, 96, (c, w, h) => S.nameplate(c, w, h, HQ, slug), ['floor'], {gain: 1.2});
+    plate.mesh.position.set(0, DESK_TOP - 0.15, 1.175); g.add(plate.mesh);
+    // the pendant luminaire + its desk light (Allie: a brass ring over the allocation desk)
+    if (slug === 'allocator') {
+      addStatic(new THREE.TorusGeometry(1.25, 0.05, 10, 96), MAT.brass, L(0, 3.4, 0.35, Math.PI / 2), {noShadow: true});
+      const halo = new THREE.Mesh(new THREE.TorusGeometry(1.25, 0.018, 8, 128), glow('#ffd9b0', 3.2)); halo.rotation.x = Math.PI / 2; halo.position.set(0, 3.36, 0.35); g.add(halo);
+      for (let i = 0; i < 3; i++) { const a = i / 3 * Math.PI * 2; addStatic(new THREE.CylinderGeometry(0.004, 0.004, 10.6, 4), MAT.alu, L(Math.sin(a) * 1.25, 8.7, 0.35 + Math.cos(a) * 1.25), {noShadow: true, noReflect: true}); }
+      // her line to the capital core is drawn in brass, wider than the others
+      const brassPath = new THREE.Mesh(new THREE.PlaneGeometry(0.11, R_DESK - 6.3), new THREE.MeshBasicMaterial({color: new THREE.Color('#e7c27c').multiplyScalar(0.9), transparent: true, opacity: 0.5, depthWrite: false}));
+      brassPath.rotation.x = -Math.PI / 2; brassPath.position.set(0, 0.005, 2.0 + (R_DESK - 6.3) / 2); g.add(brassPath);
+    } else {
+      addStatic(new THREE.BoxGeometry(2.6, 0.05, 0.22), MAT.darkMetal, L(0, 3.35, 0.45), {noShadow: true});
+      const lum = new THREE.Mesh(new THREE.PlaneGeometry(2.5, 0.14), MAT.stripWarm); lum.rotation.x = Math.PI / 2; lum.position.set(0, 3.322, 0.45); g.add(lum);
+      for (const sx of [-1, 1]) addStatic(new THREE.CylinderGeometry(0.004, 0.004, 10.6, 4), MAT.alu, L(sx * 1.1, 8.65, 0.45), {noShadow: true, noReflect: true});
+    }
+    let spot = null;
+    if (HIGH) {
+      spot = new THREE.SpotLight('#ffe7c8', 40, 9, 0.62, 0.7, 1.4);
+      spot.position.copy(g.localToWorld(V(0, 3.3, 0.35))); spot.target.position.copy(g.localToWorld(V(0, 0.6, 0.2)));
+      scene.add(spot, spot.target);
+    }
+    let accentLight = null;
+    if (HIGH) { accentLight = new THREE.PointLight(accent.clone(), 3, 4.5, 1.8); accentLight.position.copy(g.localToWorld(V(0, 1.6, -1.9))); scene.add(accentLight); }
+    // zone character props
+    if (slug === 'allocator') {   // brass balance on the executive desk
+      addStatic(new THREE.CylinderGeometry(0.05, 0.07, 0.025, 24), MAT.brass, L(-1.15, DESK_TOP + 0.012, 0.7), {noReflect: true});
+      addStatic(new THREE.CylinderGeometry(0.006, 0.006, 0.24, 8), MAT.brass, L(-1.15, DESK_TOP + 0.13, 0.7), {noReflect: true});
+      addStatic(new THREE.BoxGeometry(0.3, 0.007, 0.007), MAT.brass, L(-1.15, DESK_TOP + 0.25, 0.7), {noReflect: true});
+      for (const px of [-0.14, 0.14]) addStatic(new THREE.CylinderGeometry(0.05, 0.035, 0.012, 20), MAT.brass, L(-1.15 + px, DESK_TOP + 0.18, 0.7), {noReflect: true});
+    }
+    if (slug === 'eddie') {   // headset on the desk
+      const hs = new THREE.TorusGeometry(0.09, 0.008, 8, 24, Math.PI); addStatic(hs, MAT.bezel, L(1.05, DESK_TOP + 0.09, 0.62, 0, 0.6, 0), {noReflect: true});
+      for (const sx of [-1, 1]) addStatic(new THREE.CylinderGeometry(0.035, 0.035, 0.03, 16), MAT.bezel, L(1.05 + sx * 0.074, DESK_TOP + 0.02, 0.62 + sx * 0.05, Math.PI / 2, 0.6, 0), {noReflect: true});
+    }
+    if (slug === 'audrey') {  // ledger binders on a low credenza behind
+      addStatic(new THREE.BoxGeometry(1.6, 0.6, 0.4), MAT.panel, L(1.7, 0.3, -1.95));
+      const cols = ['#3d2f55', '#2c3a4f', '#4a3a24', '#2f4a3e', '#55303a', '#28303c', '#3d2f55', '#4a3a24'];
+      cols.forEach((c, i) => addStatic(new THREE.BoxGeometry(0.07, 0.32, 0.26), std({color: c, roughness: 0.7}), L(1.08 + i * 0.09, 0.76, -1.95), {noReflect: true}));
+    }
+    if (slug === 'scout') {   // the research globe
+      addStatic(new THREE.CylinderGeometry(0.16, 0.22, 0.9, 24), MAT.darkMetal, L(1.85, 0.45, 0.6));
+      const globe = new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.IcosahedronGeometry(0.3, 2)), new THREE.LineBasicMaterial({color: accent.clone().multiplyScalar(1.6), transparent: true, opacity: 0.75}));
+      globe.position.copy(g.localToWorld(V(1.85, 1.25, 0.6))); scene.add(globe);
+      const gc = new THREE.Mesh(new THREE.SphereGeometry(0.26, 24, 16), new THREE.MeshStandardMaterial({color: '#0b1520', emissive: accent.clone(), emissiveIntensity: 0.35, roughness: 0.3, metalness: 0.5}));
+      gc.position.copy(globe.position); scene.add(gc);
+      desksExtra[slug] = {spin: globe};
+    }
+    if (slug === 'karen') {   // the red-team glass fin
+      const fin = new THREE.Mesh(new THREE.PlaneGeometry(0.04, 2.2), new THREE.MeshBasicMaterial({color: accent.clone().multiplyScalar(2.2)}));
+      fin.position.set(-2.55, 1.1, -0.8); fin.rotation.y = Math.PI / 2; g.add(fin);
+      const glassFin = new THREE.Mesh(new THREE.PlaneGeometry(2.6, 2.3), new THREE.MeshStandardMaterial({color: '#ff8a90', roughness: 0.05, metalness: 0.6, transparent: true, opacity: 0.08, depthWrite: false, side: THREE.DoubleSide}));
+      glassFin.position.set(-2.55, 1.15, -0.95); glassFin.rotation.y = Math.PI / 2; g.add(glassFin);
+    }
+    if (slug === 'derek') {   // the discovery pipeline: a large screen on a floor stand beside the desk
+      const sc2 = screen(new THREE.PlaneGeometry(1.1, 0.62), 568, 320, (c, w, h) => S.monitor(c, w, h, HQ, slug, 'pipeline'), ['floor', 'equity']);
+      sc2.mesh.position.set(-1.75, 1.35, 0.7); sc2.mesh.rotation.y = Math.PI - 0.55; g.add(sc2.mesh);
+      addStatic(new THREE.BoxGeometry(1.14, 0.66, 0.035), MAT.bezel, L(-1.75 + 0.012, 1.35, 0.7 + 0.016, 0, -0.55, 0));
+      addStatic(new THREE.CylinderGeometry(0.025, 0.025, 1.05, 10), MAT.alu, L(-1.75, 0.52, 0.72));
+      addStatic(new THREE.CylinderGeometry(0.22, 0.24, 0.03, 24), MAT.darkMetal, L(-1.75, 0.015, 0.72));
+    }
+    // PORTRAIT ARRIVING plate (shown until this agent's own model is present)
+    const arr = screen(new THREE.PlaneGeometry(0.66, 0.66), 512, 512, (c, w, h) => S.arriving(c, w, h, HQ, slug), ['floor'], {transparent: true, gain: 1.35});
+    arr.mesh.position.set(0, 1.34, -0.12); g.add(arr.mesh);
+    // hit volume
+    const hit = new THREE.Mesh(new THREE.BoxGeometry(5.4, 3.2, 4.6), new THREE.MeshBasicMaterial({visible: false}));
+    hit.position.set(0, 1.6, -0.25); hit.userData.slug = slug; g.add(hit); pickables.push(hit);
+    const W = (x, y, z) => g.localToWorld(V(x, y, z));
+    desks[slug] = {seat, group: g, edgeMat, pathMat, accent, spot, accentLight, mons, board, sign, plate, arr, avatar: null,
+      head: W(0, 1.2, 0.05), top: W(0, 3.2, 0.2), center: W(0, 1, 0)};
   }
+  const desksExtra = {};
+  HQ.SEATS.forEach(buildDesk);
+  flushStatic();
+  HQ.progress(0.2, 'Lighting the floor…');
+
+  /* ── collaboration light paths (floor edges) ───────────────────── */
+  const edgeGroup = new THREE.Group(); scene.add(edgeGroup);
+  const edgeMats = [];
+  function buildEdges() {
+    while (edgeGroup.children.length) { const m = edgeGroup.children.pop(); m.geometry.dispose(); m.material.dispose(); }
+    edgeMats.length = 0;
+    const list = HQ.edges(), nowS = Date.now() / 1000, win = (HQ.reads.floor.data && HQ.reads.floor.data.window_s) || 3600;
+    list.forEach((e, i) => {
+      const A = desks[e.from], Bd = desks[e.to]; if (!A || !Bd) return;
+      const p0 = A.top.clone(), p3 = Bd.top.clone();
+      const mid = p0.clone().add(p3).multiplyScalar(0.5);
+      const pull = mid.clone().multiplyScalar(0.35); pull.y = 5.2 + (i % 3) * 0.45;
+      const c1 = p0.clone().lerp(pull, 0.7), c2 = p3.clone().lerp(pull, 0.7);
+      const curve = new THREE.CubicBezierCurve3(p0, c1, c2, p3);
+      const age = e.at ? Math.max(0, nowS - e.at) : win;
+      const fresh = clamp(1 - age / win, 0.15, 1);
+      const mat = new THREE.ShaderMaterial({transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+        uniforms: {uA: {value: new THREE.Color(A.seat.accent)}, uB: {value: new THREE.Color(Bd.seat.accent)}, uT: {value: 0}, uK: {value: 0.6 + fresh * 1.6}, uFlow: {value: reduced ? 0 : 1}},
+        vertexShader: 'varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix*modelViewMatrix*vec4(position,1.); }',
+        fragmentShader: 'uniform vec3 uA; uniform vec3 uB; uniform float uT; uniform float uK; uniform float uFlow; varying vec2 vUv; void main(){ vec3 c = mix(uA, uB, vUv.x); float base = 0.28; float p = fract(vUv.x * 2.0 - uT * 0.35); float pulse = uFlow * smoothstep(0.0, 0.08, p) * (1.0 - smoothstep(0.08, 0.22, p)); float edge = 1.0 - abs(vUv.y - 0.5) * 2.0; gl_FragColor = vec4(c * (base + pulse * 1.8) * uK * edge, 1.0); }'});
+      const tube = new THREE.Mesh(new THREE.TubeGeometry(curve, 64, 0.022 + Math.min(4, e.count) * 0.006, 8, false), mat);
+      tube.layers.set(LAYER_NO_REFLECT);
+      edgeGroup.add(tube); edgeMats.push(mat);
+    });
+  }
+
+  /* ── avatars: each agent's own licensed model ──────────────────── */
   const avatars = [];
-  async function mountAvatar(d) {
-    const cast = CAST[d.seat.slug]; if (!cast) return;
-    const src = await loadModel(cast.model);
-    const root = cloneSkinned(src);
-    const mats = [];
-    root.traverse((m) => {
-      if (!m.isMesh) return;
-      m.castShadow = !phone; m.receiveShadow = false; m.frustumCulled = false;
-      const isBody = /body/i.test(m.material && m.material.name || '');
-      m.material = tintMaterial(m.material, {tint: isBody ? cast.tint : null, amt: cast.amt, suit: isBody && !!cast.tint});
-      mats.push(m.material);
+  const THIGH = ['Bip01 L Thigh', 'mixamorigLeftUpLeg', 'LeftUpperLeg', 'LeftUpLeg', 'J_Bip_L_UpperLeg', 'thigh_l'];
+  const CALF = ['Bip01 L Calf', 'mixamorigLeftLeg', 'LeftLowerLeg', 'LeftLeg', 'J_Bip_L_LowerLeg', 'calf_l'];
+  const FOOT = ['Bip01 L Foot', 'mixamorigLeftFoot', 'LeftFoot', 'J_Bip_L_Foot', 'foot_l'];
+  const HAND = ['Bip01 L Hand', 'mixamorigLeftHand', 'LeftHand', 'J_Bip_L_Hand', 'hand_l'];
+  const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  function findBone(root, names, side) {
+    const want = names.map((n) => norm(side === 'R' ? n.replace(/\bL\b/, 'R').replace('Left', 'Right').replace('_L_', '_R_').replace(/_l$/, '_r') : n));
+    let hit = null;
+    root.traverse((o) => { if (!hit && o.isBone && want.includes(norm(o.name))) hit = o; });
+    return hit;
+  }
+  function aim(bone, child, want) {
+    bone.updateMatrixWorld(true);
+    const pa = bone.getWorldPosition(V(0, 0, 0)), pb = child.getWorldPosition(V(0, 0, 0));
+    const d = pb.sub(pa).normalize();
+    const qw = new THREE.Quaternion().setFromUnitVectors(d, want.clone().normalize());
+    const bw = bone.getWorldQuaternion(new THREE.Quaternion()), pw = bone.parent.getWorldQuaternion(new THREE.Quaternion());
+    bone.quaternion.copy(pw.invert().multiply(qw).multiply(bw));
+    bone.updateMatrixWorld(true);
+  }
+  const qaxisArr = (a, ang) => { const s = Math.sin(ang / 2); return new THREE.Quaternion(a[0] * s, a[1] * s, a[2] * s, Math.cos(ang / 2)); };
+  function skinTune(root) {
+    root.traverse((o) => {
+      if (!o.isMesh) return;
+      for (const m of [].concat(o.material)) {
+        if (!m || !/skin|body|face|head/i.test(m.name || '')) continue;
+        if ('roughness' in m && !m.roughnessMap) m.roughness = clamp(m.roughness, 0.45, 0.6);
+        if ('metalness' in m) m.metalness = 0;
+      }
     });
-    armsDown(root);
-    root.updateMatrixWorld(true);
-    const bones = resolveBones(root).bones;
-    const ctl = new AvatarController(bones, resolveBlendshapes(root).shapes, {mode: 'unavailable', seed: 17 + avatars.length * 13, visemes: resolveVisemes(root), joints: buildJoints(root, bones)});
-    const legs = legJoints(root);
-    if (cast.headset && bones.head) {
-      const hs = new THREE.Group(); const mat = new THREE.MeshStandardMaterial({color: '#1b1f24', metalness: .6, roughness: .35});
-      const band = new THREE.Mesh(new THREE.TorusGeometry(0.105, 0.008, 8, 32, Math.PI), mat); hs.add(band);
-      for (const sx of [-1, 1]) { const cup = new THREE.Mesh(new THREE.CylinderGeometry(0.035, 0.035, 0.025, 20), mat); cup.rotation.z = Math.PI / 2; cup.position.set(sx * 0.105, 0, 0); hs.add(cup); }
-      const boom = new THREE.Mesh(new THREE.CylinderGeometry(0.004, 0.004, 0.12, 6), mat); boom.rotation.x = Math.PI / 2.4; boom.position.set(0.1, -0.055, 0.05); hs.add(boom);
-      // place it in head space: measure the head's world frame once
-      const hp = bones.head.getWorldPosition(new THREE.Vector3());
-      const hq = bones.head.getWorldQuaternion(new THREE.Quaternion());
-      hs.position.copy(bones.head.worldToLocal(hp.clone().add(new THREE.Vector3(0, 0.08, 0.0))));
-      hs.quaternion.copy(hq.clone().invert());
-      bones.head.add(hs);
+  }
+  /* posture from the desk's REAL state */
+  const POSTURE_OF = {WORKING_ON: 'work', REVIEWING: 'work', CHALLENGING: 'work', WAITING: 'back', BLOCKED: 'back', IDLE: 'upright', STALE: 'still', NOT_DEPLOYED: 'away', UNAVAILABLE: 'away'};
+  const MODE_OF = {work: 'reviewing', back: 'waiting', upright: 'monitoring', still: 'unavailable', away: 'unavailable'};
+
+  async function loadAvatar(slug, entry, loader, onBytes) {
+    const gltf = await new Promise((res, rej) => loader.load(MODELS + entry.model, res, (ev) => onBytes(ev.loaded || 0, ev.total || 0), rej));
+    const root = gltf.scene;
+    root.traverse((o) => {
+      if (!o.isMesh) return;
+      o.castShadow = HIGH; o.receiveShadow = false; o.frustumCulled = false;
+      // alpha-tested hair cards resolve through MSAA instead of stair-stepping
+      for (const m of [].concat(o.material)) if (m && m.alphaTest > 0) { m.alphaToCoverage = true; m.needsUpdate = true; }
+    });
+    skinTune(root);
+    const hide = new Set(entry.hide_materials || []);
+    if (hide.size) root.traverse((o) => { if (o.isMesh && [].concat(o.material).some((m) => hide.has(m.name))) o.visible = false; });
+    if (entry.yaw) root.rotation.y = entry.yaw;
+    if (entry.scale) root.scale.setScalar(entry.scale);
+    const pivot = new THREE.Group(); pivot.add(root); pivot.updateMatrixWorld(true);
+    const box = new THREE.Box3().setFromObject(root), hgt = box.max.y - box.min.y;
+    if (hgt < 1.3 || hgt > 2.2) { root.scale.multiplyScalar(1.76 / hgt); pivot.updateMatrixWorld(true); }
+    if (entry.arms_down !== false) armsDown(root, entry.bones || {});
+    pivot.updateMatrixWorld(true);
+    const {bones} = resolveBones(root, entry.bones || {});
+    const legs = {};
+    for (const sd of ['L', 'R']) legs[sd] = {thigh: findBone(root, THIGH, sd), calf: findBone(root, CALF, sd), foot: findBone(root, FOOT, sd), hand: findBone(root, HAND, sd)};
+    const joints = buildJoints(root, bones);
+    // record the base (standing, arms down) pose
+    const driven = [];
+    for (const sd of ['L', 'R']) for (const k of ['thigh', 'calf']) if (legs[sd][k]) driven.push(legs[sd][k]);
+    for (const r of ['leftUpperArm', 'leftLowerArm', 'rightUpperArm', 'rightLowerArm']) if (bones[r]) driven.push(bones[r]);
+    const base = new Map(driven.map((b) => [b, b.quaternion.clone()]));
+    const spineRest = {spine: joints.spine ? joints.spine.rest.slice() : null, chest: joints.chest ? joints.chest.rest.slice() : null};
+    const restore = () => { for (const [b, q] of base) b.quaternion.copy(q); for (const k of ['spine', 'chest']) if (joints[k]) { joints[k].bone.quaternion.fromArray(spineRest[k]); joints[k].rest = spineRest[k].slice(); } pivot.updateMatrixWorld(true); };
+    const wp = (b) => b.getWorldPosition(V(0, 0, 0));
+    const ankle0 = legs.L.foot ? wp(legs.L.foot).y : 0.08;
+    function lean(ang) {
+      for (const [k, f] of [['spine', 0.55], ['chest', 0.45]]) {
+        const j = joints[k]; if (!j) continue;
+        const q = qaxisArr(j.axes.x, ang * f).multiply(new THREE.Quaternion().fromArray(spineRest[k]));
+        j.bone.quaternion.copy(q);
+      }
+      pivot.updateMatrixWorld(true);
     }
-    root.position.copy(d.stand);
-    root.rotation.y = d.group.rotation.y;
-    root.scale.setScalar(LS);
-    room.add(root);
-    const av = {slug: d.seat.slug, root, ctl, legs, mats, pose: {type: 0, fore: 0.24, up: 0.04}, home: d.stand.clone(), homeYaw: d.group.rotation.y,
-                walk: null, phase: Math.random() * 6, dim: 1, desat: 0, mode: 'unavailable'};
-    d.avatar = av; avatars.push(av);
-    applyLook(d);
+    function seatLegs() {
+      for (const sd of ['L', 'R']) {
+        const lg = legs[sd]; if (!lg.thigh || !lg.calf || !lg.foot) continue;
+        const sx = Math.sign(wp(lg.thigh).x) || (sd === 'L' ? 1 : -1);
+        aim(lg.thigh, lg.calf, V(sx * 0.1, -0.12, 1));
+      }
+      // drop so the pelvis sits on the seat, then let the calves reach the floor
+      const pel = bones.hips ? wp(bones.hips) : V(0, 0.95, 0);
+      const dy = (SEAT_TOP + 0.085) - pel.y;
+      for (const sd of ['L', 'R']) {
+        const lg = legs[sd]; if (!lg.thigh || !lg.calf || !lg.foot) continue;
+        const knee = wp(lg.calf), ank = wp(lg.foot), len = knee.distanceTo(ank);
+        const drop = (knee.y + dy) - ankle0;
+        const a = drop >= len ? 0 : Math.acos(clamp(drop / len, -1, 1));
+        aim(lg.calf, lg.foot, V(0, -Math.cos(a), Math.sin(a) + 0.05));
+      }
+      return dy;
+    }
+    function armsTo(side, upDir, handTarget) {
+      const up = bones[side + 'UpperArm'], lo = bones[side + 'LowerArm'], hand = legs[side === 'left' ? 'L' : 'R'].hand || (lo && lo.children.find((c) => c.isBone));
+      if (!up || !lo || !hand) return;
+      const sx = Math.sign(wp(up).x) || 1;
+      aim(up, lo, V(sx * upDir.x, upDir.y, upDir.z));
+      const el = wp(lo), tgt = V(sx * Math.abs(handTarget.x), handTarget.y, handTarget.z);
+      aim(lo, hand, tgt.sub(el));
+    }
+    const postures = {};
+    function capture(name, f) {
+      restore();
+      const out = f() || {};
+      const q = new Map(driven.map((b) => [b, b.quaternion.clone()]));
+      const rest = {spine: joints.spine ? joints.spine.bone.quaternion.toArray() : null, chest: joints.chest ? joints.chest.bone.quaternion.toArray() : null};
+      postures[name] = {q, rest, pos: out.pos || V(0, 0, 0), yaw: out.yaw || 0};
+    }
+    // all positions are in the desk's local frame: agent at the origin, desk ahead (+z)
+    const KB = 0.56;
+    capture('work', () => { lean(0.16); const dy = seatLegs(); const pz = 0.0; armsTo('left', V(0.1, -0.78, 0.6), V(0.2, DESK_TOP + 0.045 - dy, KB - pz)); armsTo('right', V(0.1, -0.78, 0.6), V(0.2, DESK_TOP + 0.045 - dy, KB - pz)); return {pos: V(0, dy, pz)}; });
+    capture('upright', () => { lean(0.02); const dy = seatLegs(); armsTo('left', V(0.14, -0.92, 0.32), V(0.2, SEAT_TOP + 0.2 - dy, 0.34)); armsTo('right', V(0.14, -0.92, 0.32), V(0.2, SEAT_TOP + 0.2 - dy, 0.34)); return {pos: V(0, dy, 0)}; });
+    capture('back', () => { lean(-0.1); const dy = seatLegs(); armsTo('left', V(0.18, -0.95, 0.12), V(0.27, SEAT_TOP + 0.22 - dy, 0.18)); armsTo('right', V(0.18, -0.95, 0.12), V(0.27, SEAT_TOP + 0.22 - dy, 0.18)); return {pos: V(0, dy, -0.04)}; });
+    capture('still', () => { lean(0.1); const dy = seatLegs(); armsTo('left', V(0.13, -0.93, 0.3), V(0.18, SEAT_TOP + 0.18 - dy, 0.32)); armsTo('right', V(0.13, -0.93, 0.3), V(0.18, SEAT_TOP + 0.18 - dy, 0.32)); return {pos: V(0, dy, 0)}; });
+    capture('away', () => ({pos: V(1.75, 0, 0.15), yaw: -0.55}));
+    restore();
+    const ctl = new AvatarController(bones, resolveBlendshapes(root, entry.blendshapes || {}).shapes, {mode: 'unavailable', seed: 23 + avatars.length * 17, visemes: resolveVisemes(root), joints});
+    const d = desks[slug];
+    d.group.add(pivot);
+    const av = {slug, pivot, root, ctl, joints, driven, postures, cur: null, from: null, to: null, t: 1, phase: avatars.length * 1.7, bones, legs, posture: null};
+    avatars.push(av); d.avatar = av;
+    d.arr.mesh.visible = false;
+    setPosture(av, POSTURE_OF[HQ.desk(slug).code] || 'away', true);
+    return av;
+  }
+  function snapshot(av) {
+    return {q: new Map(av.driven.map((b) => [b, b.quaternion.clone()])),
+            rest: {spine: av.joints.spine ? av.joints.spine.rest.slice() : null, chest: av.joints.chest ? av.joints.chest.rest.slice() : null},
+            pos: av.pivot.position.clone(), yaw: av.pivot.rotation.y};
+  }
+  function setPosture(av, name, instant) {
+    if (!av.postures[name] || av.posture === name) return;
+    av.posture = name;
+    av.from = snapshot(av); av.to = av.postures[name]; av.t = instant || reduced ? 1 : 0;
+    av.ctl.setMode(MODE_OF[name]);
+    applyPosture(av, av.t);
+    shadowDirty = true;
+  }
+  const _q = new THREE.Quaternion(), _q2 = new THREE.Quaternion(), _axis = new THREE.Vector3();
+  function applyPosture(av, t) {
+    const e = ease(clamp(t, 0, 1)), A = av.from, Bp = av.to;
+    for (const b of av.driven) { _q.copy(A.q.get(b)).slerp(Bp.q.get(b), e); b.quaternion.copy(_q); }
+    for (const k of ['spine', 'chest']) {
+      const j = av.joints[k]; if (!j || !A.rest[k] || !Bp.rest[k]) continue;
+      _q.fromArray(A.rest[k]); _q2.fromArray(Bp.rest[k]); _q.slerp(_q2, e); j.rest = _q.toArray();
+    }
+    av.pivot.position.lerpVectors(A.pos, Bp.pos, e);
+    av.pivot.rotation.y = A.yaw + (Bp.yaw - A.yaw) * e;
+  }
+  // after the controller's frame: the posture's arms and legs, plus a light
+  // typing rhythm ONLY while the desk's recorded state is an active one
+  function holdPosture(av, T) {
+    const Bp = av.to; if (!Bp) return;
+    if (av.t >= 1) for (const b of av.driven) b.quaternion.copy(Bp.q.get(b));
+    else applyPosture(av, av.t);
+    const d = HQ.desk(av.slug);
+    if (av.posture === 'work' && d.active && !reduced) {
+      for (const [r, ph] of [['leftLowerArm', 0], ['rightLowerArm', 1.9]]) {
+        const j = av.joints[r]; if (!j) continue;
+        const k = 0.05 * Math.max(0, Math.sin(T * 7.3 + ph + av.phase)) * (0.55 + 0.45 * Math.sin(T * 0.63 + av.phase));
+        j.bone.quaternion.premultiply(_q.setFromAxisAngle(_axis.fromArray(j.axis), k));
+      }
+    }
+  }
+
+  async function loadAvatars() {
+    let manifest = null;
+    try { const r = await fetch(MODELS + 'manifest.json', {cache: 'no-cache'}); if (r.ok) manifest = await r.json(); } catch (e) { manifest = null; }
+    const chars = manifest && manifest.characters || {};
+    // each desk's OWN model: its manifest entry (by its own slug; the Chief
+    // Allocator may be listed as 'allie'); without a manifest, its own file (CAST)
+    const plan = HQ.SEATS.map((s) => {
+      const e = chars[s.slug] || (s.slug === 'allocator' ? (chars.allie || chars.chief_allocator) : null);
+      if (e) return e.model && e.test_asset === false ? {slug: s.slug, entry: e} : null;
+      return !manifest && CAST[s.slug] ? {slug: s.slug, entry: {model: CAST[s.slug].model + '.glb'}} : null;
+    }).filter(Boolean);
+    if (!plan.length) { HQ.progress(1, 'Floor open'); if (o.onStatus) o.onStatus('characters-ready', HQ.SEATS.length); return; }
+    const [{GLTFLoader}, {MeshoptDecoder}] = await Promise.all([import('./team-demo/assets/GLTFLoader.js'), import('./team-demo/assets/meshopt_decoder.module.js')]);
+    const loader = new GLTFLoader(); loader.setMeshoptDecoder(MeshoptDecoder);
+    let done = 0;
+    for (const p of plan) {
+      const name = HQ.BY_SLUG[p.slug].name;
+      try {
+        await loadAvatar(p.slug, p.entry, loader, (l, t) => HQ.progress(0.25 + 0.75 * (done + (t ? l / t : 0.5)) / plan.length, 'Seating ' + name + ' · ' + (done + 1) + ' of ' + plan.length));
+      } catch (e) { if (o.onStatus) o.onStatus('character-failed', p.slug, e); }
+      done++;
+      HQ.progress(0.25 + 0.75 * done / plan.length, done < plan.length ? 'Seating the desks · ' + done + ' of ' + plan.length : 'Floor open');
+      requestRender();
+    }
+    canvas.setAttribute('data-avatars', String(avatars.length));
+    if (o.onStatus) o.onStatus('characters-ready', HQ.SEATS.length - avatars.length);
+  }
+
+  /* ── state → visuals ───────────────────────────────────────────── */
+  const TONE_K = {work: 2.6, wait: 1.5, idle: 1.1, stale: 0.45, off: 0.14};
+  let hoverSlug = null;
+  function applyStates() {
+    for (const slug of Object.keys(desks)) {
+      const d = desks[slug], st = HQ.desk(slug), k = TONE_K[st.tone] || 0.3, hov = hoverSlug === slug || HQ.selected() === slug;
+      d.edgeMat.color.set(st.color).multiplyScalar((0.2 + k * 0.32) * (hov ? 1.8 : 1));
+      d.pathMat.color.copy(d.accent).multiplyScalar(0.3 + k * 0.3);
+      d.pathMat.opacity = st.tone === 'off' ? 0.15 : 0.55;
+      if (d.spot) d.spot.intensity = st.tone === 'off' ? 5 : st.tone === 'stale' ? 16 : 40;
+      if (d.accentLight) d.accentLight.intensity = (st.tone === 'off' ? 0.6 : 3) * (hov ? 1.8 : 1);
+      if (d.avatar) setPosture(d.avatar, POSTURE_OF[st.code] || 'away');
+    }
+    const q = HQ.equity(), p = q.paper;
+    const col = !p ? '#7a8496' : p.status === 'OK' ? '#6f9bff' : p.status === 'STALE' ? '#e8b25e' : '#7a8496';
+    core.beamMat.uniforms.uColor.value.set(col);
+    core.beamMat.uniforms.uK.value = !p ? 0.35 : p.status === 'OK' ? 1 : 0.6;
+    core.orbMat.emissive.set(col); core.orbMat.emissiveIntensity = !p ? 0.4 : p.status === 'OK' ? 1.1 : 0.6;
+    core.rimMat.color.set(col).multiplyScalar(p && p.status === 'OK' ? 2.6 : 1.3);
+    coreLight.color.set(col); coreLight.intensity = p && p.status === 'OK' ? 12 : 6;
+    if (q.changedAt && q.changedAt !== core.lastChange) { core.lastChange = q.changedAt; if (!reduced) core.pulseT = 0; core.pulse.material.color.set(col).multiplyScalar(2); }
     requestRender();
   }
 
-  /* ── board / monitor drawing (REAL fields only) ────────────────── */
-  const B = window.BTFloor;
-  let payload = null, readMeta = {status: 'LOADING'};
-  function kpi(a) { const m = (a && a.monitor || []).find((x) => x && x.value != null) || (a && a.monitor || [])[0]; return m || null; }
-  function alerts(a) {
-    const out = [];
-    if (!a) return out;
-    if (a.challenges && a.challenges.open_against) out.push(a.challenges.open_against + ' open challenge' + (a.challenges.open_against > 1 ? 's' : ''));
-    if (a.state === 'STALE') out.push('Heartbeat stale');
-    if (a.state === 'WAITING') out.push('Waiting');
-    if (a.status_row && a.status_row.last_error && a.status_row.state === 'FAILED') out.push('Last run failed');
-    return out;
+  /* ── camera ────────────────────────────────────────────────────── */
+  const camState = {pos: V(0, 24, 44), tgt: V(0, 1.2, -2), from: null, fromT: null, t: 1, dur: 1.8, lift: 0, mode: 'overview', slug: null,
+    userYaw: 0, userPitch: 0, zoom: 1, offX: 0, offY: 0, offXT: 0, offYT: 0};
+  function overviewPose(T) {
+    const portrait = camera.aspect < 1;
+    const C = portrait ? V(0, 1.6, -1.2) : V(0, 3.1, -3.4);
+    const dist = (portrait ? 27 : 19.0) * camState.zoom, el = (portrait ? 0.36 : 0.215) + camState.userPitch + (reduced ? 0 : 0.012 * Math.sin(T * 0.07));
+    const yaw = camState.userYaw + (reduced ? 0 : 0.085 * Math.sin(T * 0.043));
+    return {pos: V(C.x + dist * Math.sin(yaw) * Math.cos(el), C.y + dist * Math.sin(el), C.z + dist * Math.cos(yaw) * Math.cos(el)), tgt: C};
   }
-  function drawBoard(d) {
-    const a = d.data, seat = d.seat, c = d.board.ctx, W = 1024, H = 464, now = Date.now() / 1000;
-    const st = B.stateOf(a), meta = B.STATES[st];
-    c.clearRect(0, 0, W, H);
-    const bg = c.createLinearGradient(0, 0, 0, H); bg.addColorStop(0, 'rgba(14,26,38,.96)'); bg.addColorStop(1, 'rgba(7,14,22,.96)');
-    c.fillStyle = bg; roundRect(c, 0, 0, W, H, 22); c.fill();
-    c.fillStyle = seat.accent; c.fillRect(0, 0, 10, H);
-    c.fillStyle = '#e9f2fa'; c.font = '600 54px Inter, system-ui, sans-serif'; c.textBaseline = 'alphabetic';
-    c.fillText(fitText(c, seat.name, 560), 44, 74);
-    c.fillStyle = '#8fa7ba'; c.font = '500 25px Inter, system-ui, sans-serif'; c.fillText(fitText(c, seat.short.toUpperCase(), 560), 46, 112);
-    // the state chip
-    c.font = '700 26px Inter, system-ui, sans-serif';
-    const label = (readMeta.stale ? 'STALE READ · ' : '') + meta.label.toUpperCase();
-    const cw = c.measureText(label).width + 56;
-    c.fillStyle = meta.color + '26'; roundRect(c, W - cw - 36, 36, cw, 52, 26); c.fill();
-    c.strokeStyle = meta.color; c.lineWidth = 2; roundRect(c, W - cw - 36, 36, cw, 52, 26); c.stroke();
-    c.fillStyle = meta.color; c.beginPath(); c.arc(W - cw - 12, 62, 7, 0, Math.PI * 2); c.fill();
-    c.fillText(label, W - cw - 36 + 40, 72);
-    // detail
-    c.fillStyle = '#c8d6e2'; c.font = '400 28px Inter, system-ui, sans-serif';
-    const detail = !a ? (readMeta.why || 'No floor read yet') : (a.state_detail || '');
-    wrap(c, detail, 46, 168, W - 92, 36, 2);
-    // KPI
-    const k = kpi(a);
-    c.fillStyle = 'rgba(255,255,255,.06)'; c.fillRect(46, 250, W - 92, 2);
-    if (k) {
-      c.fillStyle = '#8fa7ba'; c.font = '500 22px Inter, system-ui, sans-serif'; c.fillText(fitText(c, k.label.toUpperCase(), 520), 46, 296);
-      c.fillStyle = k.value == null ? '#e9be74' : '#f1f7fc'; c.font = (k.value == null ? '600 34px' : '600 64px') + ' Inter, system-ui, sans-serif';
-      c.fillText(fitText(c, k.value == null ? 'UNAVAILABLE' : String(k.value), 560), 46, k.value == null ? 348 : 366);
-      c.fillStyle = '#6f8597'; c.font = '400 19px Inter, system-ui, sans-serif';
-      c.fillText(fitText(c, 'source ' + k.source + (k.as_of ? ' · ' + B.ago(k.as_of, now) : '') + (k.value == null && k.why ? ' · ' + k.why : ''), 560), 46, 404);
-    } else if (a && a.state === 'NOT_DEPLOYED') {
-      c.fillStyle = '#e9be74'; c.font = '600 36px Inter, system-ui, sans-serif'; c.fillText('NOT YET DEPLOYED', 46, 340);
-      c.fillStyle = '#6f8597'; c.font = '400 20px Inter, system-ui, sans-serif'; c.fillText(fitText(c, a.deploy_why || '', 560), 46, 380);
-    }
-    // heartbeat + alerts
-    const hb = a && a.heartbeat;
-    c.textAlign = 'right';
-    c.fillStyle = '#8fa7ba'; c.font = '500 22px Inter, system-ui, sans-serif'; c.fillText('HEARTBEAT', W - 46, 296);
-    c.fillStyle = !hb || hb.age_s == null ? '#e9be74' : (a.state === 'STALE' ? '#ff8395' : '#e9f2fa');
-    c.font = '600 44px Inter, system-ui, sans-serif';
-    c.fillText(!a ? '—' : (!hb || hb.at == null ? 'NONE' : B.age(now - hb.at).trim()), W - 46, 352);
-    const al = alerts(a);
-    c.font = '600 21px Inter, system-ui, sans-serif'; c.fillStyle = al.length ? '#ffb1bd' : '#6f8597';
-    c.fillText(al.length ? '⚠ ' + al.slice(0, 2).join(' · ') : 'No alerts', W - 46, 404);
-    c.textAlign = 'left';
-    if (B.isFixture(payload)) { c.fillStyle = '#e9be74'; c.font = '700 18px Inter, system-ui, sans-serif'; c.fillText('FIXTURE DATA · NOT PRODUCTION', 46, H - 22); }
-    d.board.tex.needsUpdate = true;
+  function focusPose(slug, T) {
+    const d = desks[slug], g = d.group;
+    const side = g.position.x >= -0.5 ? 1 : -1;
+    const sway = reduced ? 0 : 0.05 * Math.sin(T * 0.11);
+    // a three-quarter view from the open side, high enough to see the agent over the monitors
+    const yaw = (camState.userYaw * 0.6) + side * (slug === 'eddie' ? 1.12 : 0.95) + sway;
+    const dist = (camera.aspect < 1 ? 5.6 : 3.9) * camState.zoom;
+    const local = V(Math.sin(yaw) * dist, 2.3 + camState.userPitch * 3, 0.1 + Math.cos(yaw) * dist);
+    return {pos: g.localToWorld(local), tgt: g.localToWorld(V(0, 1.18, -0.1))};
   }
-  function drawMonitors(d) {
-    const a = d.data, now = Date.now() / 1000, st = B.stateOf(a), meta = B.STATES[st];
-    const off = !a || st === 'NOT_DEPLOYED' || st === 'UNKNOWN';
-    d.monitors.forEach((m, i) => {
-      const c = m.ctx, W = 512, H = 288;
-      c.fillStyle = off ? '#05080c' : '#0a1724'; c.fillRect(0, 0, W, H);
-      if (off) { c.fillStyle = '#3d4859'; c.font = '600 26px Inter, system-ui, sans-serif'; c.fillText(st === 'NOT_DEPLOYED' ? 'NOT YET DEPLOYED' : 'NO DATA', 28, 150); m.tex.needsUpdate = true; return; }
-      c.fillStyle = meta.color; c.fillRect(0, 0, W, 6);
-      c.fillStyle = '#d8e6f1'; c.font = '600 26px Inter, system-ui, sans-serif';
-      if (i === 1) {
-        c.fillText(fitText(c, meta.label.toUpperCase(), 460), 28, 50);
-        c.fillStyle = '#9db3c4'; c.font = '400 21px Inter, system-ui, sans-serif'; wrap(c, a.state_detail || '', 28, 92, 456, 28, 4);
-      } else {
-        const mon = (a.monitor || [])[i === 0 ? 0 : 1] || (a.monitor || [])[0];
-        if (mon) {
-          c.fillStyle = '#8fa7ba'; c.font = '500 18px Inter, system-ui, sans-serif'; c.fillText(fitText(c, mon.label.toUpperCase(), 456), 28, 46);
-          c.fillStyle = mon.value == null ? '#e9be74' : '#f1f7fc'; c.font = '600 44px Inter, system-ui, sans-serif'; c.fillText(fitText(c, mon.value == null ? 'UNAVAILABLE' : String(mon.value), 456), 28, 110);
-          c.fillStyle = '#6f8597'; c.font = '400 16px Inter, system-ui, sans-serif'; c.fillText(fitText(c, mon.source + (mon.as_of ? ' · ' + B.ago(mon.as_of, now) : ''), 456), 28, 150);
-        }
-        if (a.last_output && i === 0) { c.fillStyle = '#9db3c4'; c.font = '400 17px Inter, system-ui, sans-serif'; wrap(c, 'Last: ' + a.last_output.summary, 28, 196, 456, 24, 3); }
-      }
-      m.tex.needsUpdate = true;
-    });
+  function wallPose(id) {
+    const w = WALL.find((x) => x.id === id) || WALL[1];
+    const half = Math.tan(THREE.MathUtils.degToRad(camera.fov / 2));
+    const dist = Math.max(w.w / (2 * half * camera.aspect), w.h / (2 * half)) * 1.16;
+    const c = w.mesh.getWorldPosition(V(0, 0, 0)), n = V(0, 0, 1).applyQuaternion(w.mesh.getWorldQuaternion(new THREE.Quaternion()));
+    return {pos: c.clone().addScaledVector(n, dist), tgt: c};
   }
-  function drawPlate(d) {
-    const c = d.plate.ctx, W = 512, H = 96, seat = d.seat;
-    c.clearRect(0, 0, W, H); c.fillStyle = 'rgba(8,14,20,.92)'; roundRect(c, 0, 0, W, H, 14); c.fill();
-    c.fillStyle = seat.accent; c.fillRect(20, 26, 6, 44);
-    c.fillStyle = '#eef5fb'; c.font = '600 34px Inter, system-ui, sans-serif'; c.fillText(fitText(c, seat.name, 300), 42, 58);
-    c.fillStyle = '#8fa7ba'; c.font = '500 18px Inter, system-ui, sans-serif'; c.textAlign = 'right'; c.fillText(fitText(c, seat.short.toUpperCase(), 170), W - 20, 58); c.textAlign = 'left';
-    d.plate.tex.needsUpdate = true;
+  function desired(T) {
+    if (camState.debug) return camState.debug;
+    if (camState.mode === 'wall') return wallPose(camState.slug);
+    return camState.mode === 'focus' && camState.slug ? focusPose(camState.slug, T) : overviewPose(T);
   }
-
-  function applyLook(d) {
-    const a = d.data, st = B.stateOf(a), meta = B.STATES[st];
-    const color = new THREE.Color(meta.color);
-    d.ringMat.color.copy(color); d.halo.material.color.copy(color);
-    d.ringMat.opacity = st === 'NOT_DEPLOYED' || st === 'UNKNOWN' ? 0.25 : st === 'STALE' ? 0.35 : 0.8;
-    d.halo.material.opacity = meta.motion === 'work' ? 0.12 : meta.motion === 'review' ? 0.1 : 0.05;
-    const lit = !(st === 'STALE' || st === 'NOT_DEPLOYED' || st === 'UNKNOWN');
-    d.edgeMat.color.copy(new THREE.Color(d.seat.accent)).multiplyScalar(lit ? 1 : 0.25);
-    d.boardFrameMat.color.copy(color);
-    d.backGlow.intensity = lit ? 0.6 : 0.08;
-    d.board.mesh.material.color.setScalar(lit ? 1 : 0.55);
-    const av = d.avatar;
-    if (av) {
-      const mode = st === 'STALE' || st === 'NOT_DEPLOYED' || st === 'UNKNOWN' ? 'unavailable'
-        : st === 'WAITING' ? 'waiting' : meta.motion === 'review' ? 'reviewing' : meta.motion === 'work' ? 'speaking' : 'monitoring';
-      // 'speaking' would open the mouth only with speech audio; here it just
-      // narrows the gaze -- no audio is attached on the floor
-      av.mode = mode === 'speaking' ? 'reviewing' : mode;
-      av.ctl.setMode(av.mode);
-      const typing = a && (a.activity_basis === 'RUN_IN_PROGRESS' || a.activity_basis === 'SLACK_REQUEST');
-      av.pose.target = typing ? 1 : (meta.motion === 'review' || meta.motion === 'work') ? 0.45 : 0;
-      av.dim = st === 'NOT_DEPLOYED' ? 0.5 : st === 'STALE' ? 0.6 : st === 'UNKNOWN' ? 0.7 : 1;
-      av.desat = st === 'NOT_DEPLOYED' ? 0.85 : st === 'STALE' ? 0.5 : 0;
-      for (const m of av.mats) { m.userData.uniforms.uDim.value = av.dim; m.userData.uniforms.uDesat.value = av.desat; }
-    }
-  }
-
-  /* ── light trails (one per real edge) ──────────────────────────── */
-  const trailGroup = new THREE.Group(); scene.add(trailGroup);
-  const trailMat = (color) => new THREE.ShaderMaterial({
-    transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
-    uniforms: {uTime: {value: 0}, uColor: {value: new THREE.Color(color)}, uAlpha: {value: 1}, uSpeed: {value: o.reducedMotion ? 0 : 1}},
-    vertexShader: 'varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }',
-    fragmentShader: 'uniform float uTime; uniform vec3 uColor; uniform float uAlpha; uniform float uSpeed; varying vec2 vUv;' +
-      'void main(){ float along = vUv.x; float pulse = fract(along*3.0 - uTime*0.45*uSpeed); float head = smoothstep(0.0,0.08,pulse)*smoothstep(0.35,0.08,pulse);' +
-      ' float edge = 1.0 - abs(vUv.y-0.5)*2.0; float base = 0.28 + 0.72*head*step(0.001,uSpeed) + (1.0-step(0.001,uSpeed))*0.35;' +
-      ' float fade = smoothstep(0.0,0.06,along)*smoothstep(1.0,0.94,along); gl_FragColor = vec4(uColor, base*edge*fade*uAlpha); }'
-  });
-  let trails = [];
-  function buildTrails(edges) {
-    for (const t of trails) { trailGroup.remove(t.mesh); t.mesh.geometry.dispose(); t.mesh.material.dispose(); }
-    trails = [];
-    const now = Date.now() / 1000;
-    for (const e of edges || []) {
-      const fs = B.BY_AGENT[e.from], ts = B.BY_AGENT[e.to];
-      if (!fs || !ts || !desks[fs.slug] || !desks[ts.slug]) continue;
-      const a = desks[fs.slug].anchor.clone(), b = desks[ts.slug].anchor.clone();
-      const mid = a.clone().add(b).multiplyScalar(0.5); mid.y += 1.2 + a.distanceTo(b) * 0.12;
-      mid.lerp(new THREE.Vector3(0, mid.y, ARC_Z), 0.18);
-      const curve = new THREE.QuadraticBezierCurve3(a, mid, b);
-      const geo = new THREE.TubeGeometry(curve, 64, 0.035 + Math.min(4, e.count || 1) * 0.008, 8, false);
-      const mat = trailMat(fs.accent);
-      const ageS = e.at ? now - e.at : (payload && payload.window_s) || 3600;
-      mat.uniforms.uAlpha.value = clamp(1.15 - ageS / ((payload && payload.window_s) || 3600), 0.3, 1);
-      const mesh = new THREE.Mesh(geo, mat); mesh.userData.edge = e; mesh.renderOrder = 5; trailGroup.add(mesh);
-      trails.push({mesh, edge: e});
-    }
-  }
-
-  /* ── walks (once per new edge, only for recent real edges) ─────── */
-  const walked = new Set();
-  const walkQueue = [];
-  function considerWalks(edges) {
-    if (o.reducedMotion) return;
-    const now = Date.now() / 1000;
-    for (const e of edges || []) {
-      if (!e.at || now - e.at > WALK_WINDOW_S) continue;
-      const id = e.from + '>' + e.to + '>' + e.kind + '>' + e.at;
-      if (walked.has(id)) continue;
-      walked.add(id);
-      const fs = B.BY_AGENT[e.from], ts = B.BY_AGENT[e.to];
-      if (!fs || !ts || !desks[fs.slug] || !desks[ts.slug]) continue;
-      // a desk that is stale / not deployed / unknown does not get up
-      const st = B.stateOf(desks[fs.slug].data);
-      if (st === 'STALE' || st === 'NOT_DEPLOYED' || st === 'UNKNOWN') continue;
-      walkQueue.push({from: fs.slug, to: ts.slug, edge: e});
-    }
-  }
-  function startWalk(av, job) {
-    const td = desks[job.to];
-    const target = td.visit.clone();
-    av.walk = {stage: 'out', from: av.root.position.clone(), to: target, t: 0, dur: av.root.position.distanceTo(target) / 1.15,
-               hold: 7, faceTo: td.stand.clone(), edge: job.edge};
-  }
-  function stepWalk(av, dt) {
-    const w = av.walk; if (!w) return false;
-    if (w.stage === 'out' || w.stage === 'back') {
-      w.t += dt / Math.max(0.5, w.dur);
-      const u = clamp(w.t, 0, 1), e = ease(u);
-      // a gentle curve through the open floor, not through desks
-      const p = w.from.clone().lerp(w.to, e);
-      const pull = Math.sin(u * Math.PI) * 1.4;
-      const inward = new THREE.Vector3(0, 0, ARC_Z).sub(p).setY(0).normalize().multiplyScalar(pull);
-      p.add(inward);
-      const prev = av.root.position.clone();
-      av.root.position.copy(p);
-      const v = p.clone().sub(prev); v.y = 0;
-      if (v.lengthSq() > 1e-7) av.root.rotation.y = damp(av.root.rotation.y, Math.atan2(v.x, v.z), 10, dt);
-      av.phase += dt * 6.2;
-      const s = Math.sin(av.phase), sw = 0.42 * Math.min(1, Math.sin(u * Math.PI) * 3);
-      hinge(av.legs['Bip01 L Thigh'], s * sw); hinge(av.legs['Bip01 R Thigh'], -s * sw);
-      hinge(av.legs['Bip01 L Calf'], -Math.max(0, -s) * sw * 1.3); hinge(av.legs['Bip01 R Calf'], -Math.max(0, s) * sw * 1.3);
-      av.root.position.y = Math.abs(Math.cos(av.phase)) * 0.015 * Math.min(1, sw * 3);
-      if (u >= 1) {
-        for (const k of ['Bip01 L Thigh', 'Bip01 R Thigh', 'Bip01 L Calf', 'Bip01 R Calf']) hinge(av.legs[k], 0);
-        av.root.position.y = 0;
-        if (w.stage === 'out') { w.stage = 'hold'; w.t = 0; }
-        else { av.walk = null; av.root.rotation.y = av.homeYaw; }
-      }
-      return true;
-    }
-    if (w.stage === 'hold') {
-      const f = w.faceTo.clone().sub(av.root.position);
-      av.root.rotation.y = damp(av.root.rotation.y, Math.atan2(f.x, f.z), 4, dt);
-      w.t += dt;
-      if (w.t >= w.hold) { w.stage = 'back'; w.t = 0; w.from = av.root.position.clone(); w.to = av.home.clone(); w.dur = w.from.distanceTo(w.to) / 1.15; }
-      return true;
-    }
-    return false;
-  }
-
-  /* ── arms: typing / reviewing pose over the controller's motion ─── */
-  function stepArms(av, dt, T) {
-    const p = av.pose; const tgt = av.walk ? 0 : (p.target || 0);
-    p.type = damp(p.type, tgt, 3, dt);
-    if (p.type < 0.01 && !av.walk) return;
-    const typing = p.type;
-    for (const side of [1, -1]) {
-      const up = side === 1 ? 'leftUpperArm' : 'rightUpperArm', lo = side === 1 ? 'leftLowerArm' : 'rightLowerArm';
-      const tap = (tgt >= 1 && !o.reducedMotion) ? Math.sin(T * 9 + side * 1.7) * 0.035 + Math.sin(T * 13.3 + side) * 0.02 : 0;
-      av.ctl._hinge(up, lerp(0.04, 0.42, typing));
-      av.ctl._hinge(lo, lerp(0.24, 1.32, typing) + tap * typing);
-    }
-    if (av.walk) { const s = Math.sin(av.phase); av.ctl._hinge('leftUpperArm', -s * 0.22); av.ctl._hinge('rightUpperArm', s * 0.22); }
-  }
-
-  /* ── camera: overview orbit + focus transitions ────────────────── */
-  const camera = new THREE.PerspectiveCamera(phone ? 52 : 40, 1, 0.1, 120);
-  const view = phone ? {target: new THREE.Vector3(0, 0.6, -1.0), az: 0, pol: 0.72, r: 15.5} : {target: new THREE.Vector3(0, 2.1, -1.2), az: 0, pol: 1.2, r: 13.8};
-  const base = {target: view.target.clone(), az: 0, pol: view.pol, r: view.r};
-  let flight = null, focused = null, cameraDirty = true;
-  function setCamFromView() {
-    const sp = new THREE.Vector3(Math.sin(view.az) * Math.sin(view.pol), Math.cos(view.pol), Math.cos(view.az) * Math.sin(view.pol)).multiplyScalar(view.r);
-    camera.position.copy(view.target).add(sp); camera.lookAt(view.target); cameraDirty = true;
-  }
-  setCamFromView();
-  function flyTo(pos, target, dur) {
-    const fromPos = camera.position.clone(), fromT = view.target.clone();
-    if (o.reducedMotion) dur = 0.001;
-    flight = {fromPos, fromT, toPos: pos.clone(), toT: target.clone(), t0: performance.now(), dur: dur || 1.4};
+  function goTo(mode, slug, dur, lift) {
+    camState.from = {pos: camState.pos.clone(), tgt: camState.tgt.clone()};
+    camState.mode = mode; camState.slug = slug; camState.t = reduced ? 1 : 0; camState.dur = dur; camState.lift = lift || 0;
+    camState.userYaw = 0; camState.userPitch = 0; camState.zoom = 1;
     requestRender();
   }
+  function stepCamera(dt, T) {
+    const want = desired(T);
+    if (camState.t < 1) {
+      camState.t = Math.min(1, camState.t + dt / camState.dur);
+      const e = ease(camState.t);
+      camState.pos.lerpVectors(camState.from.pos, want.pos, e); camState.pos.y += Math.sin(Math.PI * e) * camState.lift;
+      camState.tgt.lerpVectors(camState.from.tgt, want.tgt, e);
+    } else { camState.pos.copy(want.pos); camState.tgt.copy(want.tgt); }
+    camera.position.copy(camState.pos); camera.lookAt(camState.tgt);
+    // keep the focused desk clear of the detail panel
+    camState.offX = damp(camState.offX, camState.offXT, 4, dt); camState.offY = damp(camState.offY, camState.offYT, 4, dt);
+    const w = size.w, h = size.h;
+    if (Math.abs(camState.offX) > 0.5 || Math.abs(camState.offY) > 0.5) camera.setViewOffset(w, h, camState.offX, camState.offY, w, h);
+    else if (camera.view && camera.view.enabled) camera.clearViewOffset();
+    camera.updateMatrixWorld();
+  }
+  // keep the subject clear of floor.js's overlays: the agent panel (right on
+  // a desktop, a bottom sheet on a phone) and the desk roster along the bottom
   let insetRight = 0;
-  function applyInset() {
-    const w = Math.max(1, host.clientWidth), h = Math.max(1, host.clientHeight);
-    if (insetRight > 0 && focused && !String(focused).startsWith('wall:')) camera.setViewOffset(w, h, insetRight / 2, 0, w, h); else camera.clearViewOffset();
-    camera.updateProjectionMatrix(); cameraDirty = true;
-  }
-  function focus(slug) {
-    const d = desks[slug]; if (!d) return;
-    focused = slug; applyInset();
-    flyTo(d.focusPos, d.focusTarget, 1.5);
-  }
-  function focusWall(id) {
-    const w = WALL.find((x) => x.id === id); if (!w) return;
-    focused = 'wall:' + id; applyInset();
-    const dist = Math.max(w.w / (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)) * camera.aspect), w.h / (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)))) * 1.18;
-    flyTo(new THREE.Vector3(w.x * 0.92, w.y + 0.1, WALL_Z + dist), new THREE.Vector3(w.x, w.y, WALL_Z), 1.4);
-  }
-  function resetView() {
-    focused = null; applyInset();
-    const sp = new THREE.Vector3(Math.sin(base.az) * Math.sin(base.pol), Math.cos(base.pol), Math.cos(base.az) * Math.sin(base.pol)).multiplyScalar(base.r);
-    view.az = base.az; view.pol = base.pol; view.r = base.r;
-    flyTo(base.target.clone().add(sp), base.target, 1.3);
+  function panelOffsets() {
+    const s = stage.getBoundingClientRect(), p = document.getElementById('fl-panel'), ro = document.getElementById('roster');
+    const below = (el) => el && !el.hidden && el.getClientRects().length ? Math.max(0, s.bottom - el.getBoundingClientRect().top) : 0;
+    if (camState.mode === 'focus') {
+      if (insetRight > 0) { camState.offXT = insetRight / 2; camState.offYT = below(ro) * 0.25; }
+      else { camState.offXT = 0; camState.offYT = Math.max(below(p), below(ro)) * 0.5; }
+    } else if (camState.mode === 'wall') { camState.offXT = 0; camState.offYT = 0; }
+    else { camState.offXT = 0; camState.offYT = Math.min(below(ro), s.height * 0.3) * 0.12; }
   }
 
-  /* pointer: drag to orbit (overview), wheel / pinch to zoom, tap to pick */
+  /* ── post-processing (desktop): HDR bloom + vignette, ACES at the end ─ */
+  let post = null;
+  if (HIGH) {
+    const vs = 'varying vec2 vUv; void main(){ vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }';
+    const qScene = new THREE.Scene(), qCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1), quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2)); quad.frustumCulled = false; qScene.add(quad);
+    const down = new THREE.ShaderMaterial({uniforms: {src: {value: null}, texel: {value: new THREE.Vector2()}, pre: {value: 0}, thr: {value: 1.05}}, vertexShader: vs, depthTest: false, depthWrite: false,
+      fragmentShader: 'uniform sampler2D src; uniform vec2 texel; uniform float pre; uniform float thr; varying vec2 vUv;\n' +
+        'vec3 s(vec2 uv){ vec3 c = texture2D(src, uv).rgb; if (pre > 0.5) { float b = max(c.r, max(c.g, c.b)); float k = 0.5; float soft = clamp(b - thr + k, 0.0, 2.0 * k); soft = soft * soft / (4.0 * k + 1e-4); c *= max(soft, b - thr) / max(b, 1e-4); c = min(c, vec3(24.0)); } return c; }\n' +
+        'void main(){ vec2 o = texel; vec3 c = s(vUv) * 4.0 + s(vUv - o) + s(vUv + o) + s(vUv + vec2(o.x, -o.y)) + s(vUv - vec2(o.x, -o.y)); gl_FragColor = vec4(c / 8.0, 1.0); }'});
+    const up = new THREE.ShaderMaterial({uniforms: {src: {value: null}, base: {value: null}, texel: {value: new THREE.Vector2()}}, vertexShader: vs, depthTest: false, depthWrite: false,
+      fragmentShader: 'uniform sampler2D src; uniform sampler2D base; uniform vec2 texel; varying vec2 vUv;\n' +
+        'void main(){ vec2 o = texel; vec3 c = texture2D(src, vUv + vec2(-o.x * 2.0, 0.0)).rgb + texture2D(src, vUv + vec2(-o.x, o.y)).rgb * 2.0 + texture2D(src, vUv + vec2(0.0, o.y * 2.0)).rgb + texture2D(src, vUv + vec2(o.x, o.y)).rgb * 2.0 + texture2D(src, vUv + vec2(o.x * 2.0, 0.0)).rgb + texture2D(src, vUv + vec2(o.x, -o.y)).rgb * 2.0 + texture2D(src, vUv + vec2(0.0, -o.y * 2.0)).rgb + texture2D(src, vUv + vec2(-o.x, -o.y)).rgb * 2.0; gl_FragColor = vec4(c / 12.0 + texture2D(base, vUv).rgb, 1.0); }'});
+    const comp = new THREE.ShaderMaterial({uniforms: {tScene: {value: null}, tBloom: {value: null}, k: {value: 0.3}}, vertexShader: vs, depthTest: false, depthWrite: false,
+      fragmentShader: 'uniform sampler2D tScene; uniform sampler2D tBloom; uniform float k; varying vec2 vUv;\n' +
+        'void main(){ vec3 c = texture2D(tScene, vUv).rgb + texture2D(tBloom, vUv).rgb * k; vec2 d = vUv - 0.5; float v = 1.0 - smoothstep(0.35, 0.95, length(d * vec2(1.15, 1.0))); c *= mix(0.62, 1.0, v); gl_FragColor = vec4(c, 1.0);\n#include <tonemapping_fragment>\n#include <colorspace_fragment>\n}'});
+    const LV = 5, rtOpt = {type: THREE.HalfFloatType, depthBuffer: false};
+    post = {main: new THREE.WebGLRenderTarget(4, 4, {type: THREE.HalfFloatType, samples: 4}), down: [], up: [], comp,
+      setSize(w, h) {
+        this.main.setSize(w, h);
+        for (let i = 0; i < LV; i++) {
+          const ww = Math.max(1, w >> (i + 1)), hh = Math.max(1, h >> (i + 1));
+          if (!this.down[i]) { this.down[i] = new THREE.WebGLRenderTarget(ww, hh, rtOpt); this.up[i] = new THREE.WebGLRenderTarget(ww, hh, rtOpt); }
+          this.down[i].setSize(ww, hh); this.up[i].setSize(ww, hh);
+        }
+      },
+      render() {
+        renderer.setRenderTarget(this.main); renderer.render(scene, camera);
+        let src = this.main;
+        quad.material = down;
+        for (let i = 0; i < LV; i++) {
+          down.uniforms.src.value = src.texture; down.uniforms.texel.value.set(1 / src.width, 1 / src.height); down.uniforms.pre.value = i === 0 ? 1 : 0;
+          renderer.setRenderTarget(this.down[i]); renderer.render(qScene, qCam); src = this.down[i];
+        }
+        quad.material = up;
+        let prev = this.down[LV - 1];
+        for (let i = LV - 2; i >= 0; i--) {
+          up.uniforms.src.value = prev.texture; up.uniforms.base.value = this.down[i].texture; up.uniforms.texel.value.set(1 / prev.width, 1 / prev.height);
+          renderer.setRenderTarget(this.up[i]); renderer.render(qScene, qCam); prev = this.up[i];
+        }
+        quad.material = comp; comp.uniforms.tScene.value = this.main.texture; comp.uniforms.tBloom.value = prev.texture;
+        renderer.setRenderTarget(null); renderer.render(qScene, qCam);
+      }};
+  }
+
+  /* ── size ──────────────────────────────────────────────────────── */
+  const size = {w: 1, h: 1};
+  function resize() {
+    const r = stage.getBoundingClientRect(), w = Math.max(1, Math.round(r.width)), h = Math.max(1, Math.round(r.height));
+    size.w = w; size.h = h;
+    renderer.setPixelRatio(dpr); renderer.setSize(w, h, false);
+    camera.aspect = w / h; camera.fov = w / h < 1 ? 52 : 40; camera.updateProjectionMatrix();
+    const pw = Math.round(w * dpr), ph = Math.round(h * dpr);
+    if (post) post.setSize(pw, ph);
+    if (refl) { const rw = Math.max(256, Math.round(pw * 0.5)), rh = Math.max(256, Math.round(ph * 0.5)); refl.rt.setSize(rw, rh); if (refl.texel) refl.texel.value.set(1 / rw, 1 / rh); }
+    panelOffsets();
+    requestRender();
+  }
+  new ResizeObserver(resize).observe(stage);
+
+  /* ── interaction ───────────────────────────────────────────────── */
   const ray = new THREE.Raycaster(), ndc = new THREE.Vector2();
-  let drag = null, pinch = null, hoverSlug = null;
-  function pick(clientX, clientY) {
+  function pick(cx, cy) {
     const r = canvas.getBoundingClientRect();
-    ndc.set(((clientX - r.left) / r.width) * 2 - 1, -((clientY - r.top) / r.height) * 2 + 1);
+    ndc.set(((cx - r.left) / r.width) * 2 - 1, -((cy - r.top) / r.height) * 2 + 1);
     ray.setFromCamera(ndc, camera);
     const hit = ray.intersectObjects(pickables, false)[0];
     return hit ? hit.object.userData.slug : null;
   }
-  canvas.addEventListener('pointerdown', (e) => {
-    canvas.setPointerCapture(e.pointerId);
-    drag = {x: e.clientX, y: e.clientY, moved: 0, id: e.pointerId, az: view.az, pol: view.pol};
-  });
+  let drag = null;
+  canvas.addEventListener('pointerdown', (e) => { drag = {x: e.clientX, y: e.clientY, moved: 0, id: e.pointerId}; });
   canvas.addEventListener('pointermove', (e) => {
-    if (drag && drag.id === e.pointerId && !pinch) {
-      const dx = e.clientX - drag.x, dy = e.clientY - drag.y; drag.moved = Math.max(drag.moved, Math.abs(dx) + Math.abs(dy));
-      if (drag.moved > 6 && !focused && !flight) {
-        view.az = clamp(drag.az - dx * 0.004, -0.75, 0.75);
-        view.pol = clamp(drag.pol - dy * 0.003, 0.62, 1.32);
-        setCamFromView(); requestRender();
-      }
+    if (drag && e.buttons) {
+      const dx = e.clientX - drag.x, dy = e.clientY - drag.y; drag.moved += Math.abs(dx) + Math.abs(dy); drag.x = e.clientX; drag.y = e.clientY;
+      if (drag.moved > 6) { camState.userYaw = clamp(camState.userYaw - dx * 0.003, -0.75, 0.75); camState.userPitch = clamp(camState.userPitch + dy * 0.0022, -0.22, 0.3); hideHint(); requestRender(); }
       return;
     }
-    if (e.pointerType === 'mouse') {
-      const s = pick(e.clientX, e.clientY);
-      if (s !== hoverSlug) { hoverSlug = s; canvas.style.cursor = s ? 'pointer' : 'grab'; }
-      if (o.onHover) o.onHover(s, e.clientX, e.clientY);
-    }
+    if (e.pointerType !== 'mouse') return;
+    const slug = pick(e.clientX, e.clientY);
+    if (slug !== hoverSlug) { hoverSlug = slug; applyStates(); canvas.style.cursor = slug ? 'pointer' : 'grab'; }
+    if (o.onHover) o.onHover(slug, e.clientX, e.clientY);
   });
+  canvas.addEventListener('pointerleave', () => { if (hoverSlug) { hoverSlug = null; applyStates(); } if (o.onHover) o.onHover(null); });
   canvas.addEventListener('pointerup', (e) => {
-    if (drag && drag.id === e.pointerId && drag.moved <= 6) {
-      const s = pick(e.clientX, e.clientY);
-      if (o.onPick) o.onPick(s, {again: s && s === focused});
-    }
-    drag = null;
+    const wasDrag = drag && drag.moved > 6; drag = null;
+    if (wasDrag) return;
+    const slug = pick(e.clientX, e.clientY);
+    if (slug) hideHint();
+    // floor.js decides: a first click focuses, a second opens the workspace,
+    // a click on empty floor returns to the overview
+    if (o.onPick) o.onPick(slug, {again: !!slug && slug === focused});
   });
-  canvas.addEventListener('pointerleave', () => { if (o.onHover) o.onHover(null); });
-  canvas.addEventListener('wheel', (e) => {
-    if (focused) return;
-    e.preventDefault();
-    view.r = clamp(view.r * (1 + Math.sign(e.deltaY) * 0.08), 9, 30); setCamFromView(); requestRender();
-  }, {passive: false});
-  canvas.addEventListener('touchstart', (e) => { if (e.touches.length === 2) { pinch = {d: Math.hypot(e.touches[0].clientX - e.touches[1].clientX, e.touches[0].clientY - e.touches[1].clientY), r: view.r}; } }, {passive: true});
-  canvas.addEventListener('touchmove', (e) => {
-    if (pinch && e.touches.length === 2 && !focused) {
-      const d = Math.hypot(e.touches[0].clientX - e.touches[1].clientX, e.touches[0].clientY - e.touches[1].clientY);
-      view.r = clamp(pinch.r * pinch.d / Math.max(20, d), 9, 32); setCamFromView(); requestRender();
-    }
-  }, {passive: true});
-  canvas.addEventListener('touchend', () => { pinch = null; }, {passive: true});
+  canvas.addEventListener('wheel', (e) => { camState.zoom = clamp(camState.zoom + e.deltaY * 0.0008, 0.72, 1.3); requestRender(); }, {passive: true});
+  function hideHint() { const h = document.getElementById('fl-hint'); if (h) h.classList.add('gone'); }
 
-  /* ── sizing, render loop, quality ──────────────────────────────── */
-  function resize() {
-    const w = Math.max(1, host.clientWidth), h = Math.max(1, host.clientHeight);
-    renderer.setSize(w, h, false); camera.aspect = w / h;
-    camera.fov = (w / h < 0.8 ? 62 : phone ? 52 : 40); applyInset();
-    cameraDirty = true; requestRender();
-  }
-  const ro = window.ResizeObserver ? new ResizeObserver(resize) : null;
-  if (ro) ro.observe(host); else window.addEventListener('resize', resize);
-  resize();
+  /* ── data subscriptions ────────────────────────────────────────── */
+  let paused = false;
+  HQ.subscribe((kind) => {
+    if (kind === 'floor') { redraw('floor'); buildEdges(); applyStates(); }
+    else if (kind === 'equity') { redraw('equity'); applyStates(); }
+    else if (kind === 'coverage') redraw('coverage');
+    else if (kind === 'detail:xavier') redraw('xavier');
+  });
+  window.addEventListener('resize', () => setTimeout(panelOffsets, 50));
 
-  function requestRender() { needsOne = true; if (!raf && !paused && !document.hidden) raf = requestAnimationFrame(tick); }
-  function animating() {
-    if (flight) return true;
-    if (o.reducedMotion) return walkQueue.length > 0 && false;
-    return true;   // idle breathing / typing / trails while visible
-  }
-  function tick(now) {
+  /* ── the loop ──────────────────────────────────────────────────── */
+  let raf = 0, last = 0, T = 0, needs = true, ema = 16, slowFor = 0, frames = 0, fpsT = performance.now();
+  let shadowDirty = true, lastCam = new Array(16).fill(0), lastProj = new Array(16).fill(0), forceDirty = true, focused = null;
+  const perf = {fps: [], drawCalls: 0, triangles: 0, tier: HIGH ? 'high' : 'phone', dpr, reflections: !!refl, bloom: !!post};
+  function requestRender() { needs = true; if (!raf && !paused && !document.hidden) raf = requestAnimationFrame(frame); }
+  function frame(now) {
     raf = 0;
     const dt = last ? Math.min(0.1, (now - last) / 1000) : 1 / 60; last = now; T += dt;
-    if (flight) {
-      flight.t = (now - flight.t0) / 1000 / flight.dur; const u = ease(clamp(flight.t, 0, 1));
-      camera.position.lerpVectors(flight.fromPos, flight.toPos, u);
-      view.target.lerpVectors(flight.fromT, flight.toT, u); camera.lookAt(view.target); cameraDirty = true;
-      if (flight.t >= 1) flight = null;
+    stepCamera(dt, T);
+    // avatars: blink / breathe / glance (cc_avatar), then the recorded posture
+    for (const av of avatars) {
+      if (av.t < 1) av.t = Math.min(1, av.t + dt / 1.3);
+      av.ctl.update(dt); holdPosture(av, T);
     }
-    // walks: one at a time per walker
-    if (walkQueue.length) {
-      for (let i = 0; i < walkQueue.length; i++) {
-        const job = walkQueue[i], d = desks[job.from];
-        if (d && d.avatar && !d.avatar.walk) { startWalk(d.avatar, job); walkQueue.splice(i, 1); i--; }
+    edgeGroup.visible = camState.mode === 'overview' || camState.t < 0.5;
+    if (!reduced) {
+      ring.sc.tex.offset.x = (ring.sc.tex.offset.x + dt * 0.0065) % 1;
+      edgeMats.forEach((m) => { m.uniforms.uT.value = T; });
+      core.cage.rotation.y += dt * 0.12; core.orb.rotation.y -= dt * 0.08;
+      core.band.mesh.rotation.y += dt * 0.035;
+      if (desksExtra.scout) desksExtra.scout.spin.rotation.y += dt * 0.15;
+    }
+    if (core.pulseT < 1) {
+      core.pulseT = Math.min(1, core.pulseT + dt / 2.6);
+      const s = 3.4 + core.pulseT * 6.5; core.pulse.scale.setScalar(s); core.pulse.material.opacity = (1 - core.pulseT) * 0.8;
+    }
+    if (shadowDirty && HIGH) { renderer.shadowMap.needsUpdate = true; shadowDirty = false; }
+    renderer.info.autoReset = false; renderer.info.reset();
+    if (refl) updateReflection();
+    if (post) post.render(); else renderer.render(scene, camera);
+    let camDirty = false;
+    for (let k = 0; k < 16; k++) if (Math.abs(camera.matrixWorld.elements[k] - lastCam[k]) > 1e-6 || Math.abs(camera.projectionMatrix.elements[k] - lastProj[k]) > 1e-9) { camDirty = true; break; }
+    if (camDirty) { lastCam = camera.matrixWorld.elements.slice(); lastProj = camera.projectionMatrix.elements.slice(); }
+    if (o.onFrame) o.onFrame({camera, cameraDirty: camDirty || forceDirty, focused});
+    forceDirty = false;
+    perf.drawCalls = renderer.info.render.calls; perf.triangles = renderer.info.render.triangles;
+    // adaptive quality: sustained slow frames step down reflections, bloom, then resolution
+    ema = ema * 0.92 + dt * 1000 * 0.08;
+    if (!window.__floorFixedQuality) {
+      slowFor = ema > 26 ? slowFor + dt : 0;
+      if (slowFor > 2.5) {
+        slowFor = 0; ema = 16;
+        if (refl && refl.strength > 0) { refl.strength = 0; if (refl.uniform) refl.uniform.value = 0; refl = null; perf.reflections = false; }
+        else if (dpr > 1) { dpr = Math.max(1, dpr - 0.25); perf.dpr = dpr; resize(); }
+        else if (post) { post = null; perf.bloom = false; }
       }
     }
-    for (const av of avatars) {
-      const moving = stepWalk(av, dt);
-      if (!o.reducedMotion || moving) av.ctl.update(dt); else if (needsOne) av.ctl.update(1 / 60);
-      stepArms(av, dt, T);
-    }
-    for (const t of trails) t.mesh.material.uniforms.uTime.value = T;
-    // the state rings breathe only while that desk is genuinely working
-    for (const s in desks) {
-      const d = desks[s], m = B.STATES[B.stateOf(d.data)].motion;
-      if (!o.reducedMotion && (m === 'work' || m === 'review')) d.halo.material.opacity = 0.07 + 0.06 * (0.5 + 0.5 * Math.sin(T * (m === 'work' ? 2.4 : 1.4)));
-    }
-    renderer.render(scene, camera);
-    if (o.onFrame) o.onFrame({camera, cameraDirty, focused});
-    cameraDirty = false; needsOne = false;
-    // adaptive quality
-    ema = ema * 0.92 + dt * 1000 * 0.08;
-    if (ema > 24 && !window.__floorFixedQuality) { slow += dt; if (slow > 2 && dpr > 0.8) { dpr = Math.max(0.8, dpr - 0.25); renderer.setPixelRatio(dpr); renderer.shadowMap.enabled = false; resize(); slow = 0; ema = 16; host.setAttribute('data-dpr', String(dpr)); } } else slow = 0;
-    frames++; if (now - secT >= 1000) { fps.push(Math.round(frames * 1000 / (now - secT))); if (fps.length > 30) fps.shift(); host.setAttribute('data-fps', String(fps[fps.length - 1])); frames = 0; secT = now; }
-    if (!paused && !document.hidden && (animating() || walkQueue.length || avatars.some((a) => a.walk))) raf = requestAnimationFrame(tick);
+    frames++;
+    if (now - fpsT >= 1000) { perf.fps.push(Math.round(frames * 1000 / (now - fpsT))); if (perf.fps.length > 30) perf.fps.shift(); frames = 0; fpsT = now; perf.frameMs = Math.round(ema * 10) / 10; }
+    needs = false;
+    const animating = !reduced || camState.t < 1 || avatars.some((a) => a.t < 1) || core.pulseT < 1;
+    if (animating && !paused && !document.hidden) raf = requestAnimationFrame(frame);
   }
   document.addEventListener('visibilitychange', () => { if (!document.hidden) { last = 0; requestRender(); } });
 
-  /* ── data in ───────────────────────────────────────────────────── */
-  function setData(p, meta) {
-    payload = p; readMeta = meta || {status: p ? 'OK' : 'NONE'};
-    const by = {};
-    for (const a of (p && p.agents) || []) by[a.slug] = a;
-    for (const s in desks) {
-      const d = desks[s];
-      d.data = by[s] || null;
-      drawBoard(d); drawMonitors(d); drawPlate(d); applyLook(d);
-    }
-    buildTrails(p && p.edges);
-    considerWalks(p && p.edges);
-    requestRender();
-  }
-  function tickClocks() { for (const s in desks) { drawBoard(desks[s]); drawMonitors(desks[s]); } requestRender(); }
-
-  /* the wall screens' projected corners for floor.js's DOM overlay */
-  const tmp = new THREE.Vector3();
-  function wallQuads() {
-    const W = canvas.clientWidth, H = canvas.clientHeight, out = {};
-    for (const w of WALL) {
-      const pts = [[-1, 1], [1, 1], [1, -1], [-1, -1]].map(([sx, sy]) => {
-        tmp.set(w.x + sx * w.w / 2, w.y + sy * w.h / 2, WALL_Z + 0.06).project(camera);
-        return {x: (tmp.x * 0.5 + 0.5) * W, y: (-tmp.y * 0.5 + 0.5) * H, behind: tmp.z > 1};
-      });
-      out[w.id] = pts;
-    }
-    return out;
-  }
-  function anchorOf(slug) {
-    const d = desks[slug]; if (!d) return null;
-    tmp.copy(d.anchor).setY(3.2).project(camera);
-    return {x: (tmp.x * 0.5 + 0.5) * canvas.clientWidth, y: (-tmp.y * 0.5 + 0.5) * canvas.clientHeight, behind: tmp.z > 1};
-  }
-
-  // characters load after the room is drawn: the floor is usable at once
-  for (const s in desks) { drawBoard(desks[s]); drawMonitors(desks[s]); drawPlate(desks[s]); }
+  // first paint: screens, states, then the establishing move
+  resize();
+  redraw();
+  applyStates();
+  buildEdges();
+  HQ.start();
+  canvas.setAttribute('data-ready', '1');
+  if (!reduced) { camState.pos.set(0, 21, 46); camState.tgt.set(0, 2.5, -4); goTo('overview', null, 3.6, 0); }
+  else { const ov = overviewPose(0); camState.pos.copy(ov.pos); camState.tgt.copy(ov.tgt); }
   requestRender();
-  const mounting = (async () => {
-    let failed = 0;
-    for (const s of Object.keys(desks)) {
-      try { await mountAvatar(desks[s]); } catch (e) { failed++; if (o.onStatus) o.onStatus('character-failed', s, e); }
-    }
-    if (o.onStatus) o.onStatus('characters-ready', failed);
-  })();
+  HQ.progress(0.25, 'Seating the desks…');
+  const mounting = loadAvatars().then(() => { shadowDirty = true; requestRender(); }, (e) => { if (o.onStatus) o.onStatus('character-failed', null, e); });
 
-  return {
-    setData, focus, focusWall, resetView, tickClocks, wallQuads, anchorOf, requestRender, mounting,
+  /* ── the API floor.js drives ───────────────────────────────────── */
+  const tmpV = new THREE.Vector3();
+  const toScreen = (v) => { tmpV.copy(v).project(camera); return {x: (tmpV.x * 0.5 + 0.5) * size.w, y: (-tmpV.y * 0.5 + 0.5) * size.h, behind: tmpV.z > 1}; };
+  const api = {
+    setData(p, meta) { HQ.setFloor(p, meta); },
+    focus(slug) {
+      if (!desks[slug]) return;
+      focused = slug; HQ.setSelected(slug);
+      goTo('focus', slug, 1.7, camState.mode === 'focus' ? 0.8 : 0.4);
+      setTimeout(panelOffsets, 40); applyStates();
+    },
+    focusWall(id) { focused = 'wall:' + id; HQ.setSelected(null); goTo('wall', id, 1.5, 0.2); panelOffsets(); applyStates(); },
+    resetView() { focused = null; HQ.setSelected(null); goTo('overview', null, 1.9, 0.6); setTimeout(panelOffsets, 40); applyStates(); },
+    tickClocks() { redraw('clock'); },
+    wallQuads() {
+      const out = {};
+      for (const w of WALL) out[w.id] = [[-1, 1], [1, 1], [1, -1], [-1, -1]].map(([sx, sy]) => toScreen(w.mesh.localToWorld(V(sx * w.w / 2, sy * w.h / 2, 0.02))));
+      return out;
+    },
+    anchorOf(slug) { const d = desks[slug]; return d ? toScreen(d.top) : null; },
+    requestRender, mounting,
     get focused() { return focused; },
-    setInsetRight(px) { insetRight = px || 0; applyInset(); requestRender(); },
-    setPaused(v) { paused = !!v; if (!paused) requestRender(); },
-    stats() { return {fps: fps.slice(), dpr, shadows: renderer.shadowMap.enabled, avatars: avatars.length, trails: trails.length, walking: avatars.filter((a) => a.walk).map((a) => a.slug)}; },
-    dispose() { cancelAnimationFrame(raf); if (ro) ro.disconnect(); renderer.dispose(); }
+    setInsetRight(px) { insetRight = px || 0; panelOffsets(); requestRender(); },
+    setPaused(v) { paused = !!v; if (!paused) { forceDirty = true; resize(); requestRender(); } },
+    stats() { return Object.assign({avatars: avatars.length, edges: edgeMats.length}, perf); },
+    dispose() { cancelAnimationFrame(raf); renderer.dispose(); }
   };
+  // inspection hooks (software-GL renders): complete running transitions now / place the camera
+  const settle = () => { panelOffsets(); camState.offX = camState.offXT; camState.offY = camState.offYT; camState.t = 1; for (const av of avatars) { av.t = 1; applyPosture(av, 1); } forceDirty = true; requestRender(); };
+  const look = (slug, lp, lt) => { const g = desks[slug].group; camState.debug = lp ? {pos: g.localToWorld(V(...lp)), tgt: g.localToWorld(V(...lt))} : null; camState.t = 1; requestRender(); };
+  window.__floorScene = {camState, look, settle, scene, camera, renderer, desks, avatars, perf, model: HQ};
+  return api;
 }
