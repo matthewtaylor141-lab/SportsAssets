@@ -659,6 +659,47 @@ async def test_the_cutover_is_refused_until_every_condition_holds():
         if await conn.fetchval("SELECT to_regclass('agent_work_requests')") is None:
             await conn.execute("CREATE TABLE agent_work_requests (x int)")
         await conn.execute("UPDATE execmirror_control SET enabled = true")
+        # THE WORLD THE CUTOVER REQUIRES HAS NEVER SENT A VENUE ORDER (R30A ci,
+        # 2026-10-04). NO_CAPITAL_ACTIVATED reads execmirror_orders and
+        # small_live_order_events for ALL time -- correctly: production has
+        # never sent one. A shared test database has: test_actual_admission
+        # commits two execmirror_orders with a venue_order_id and
+        # test_execution_intent_fanout leaves one (measured file by file, in
+        # suite order). On a database built fresh and run whole --
+        # capital-critical run 37230040128 -- this test therefore found its
+        # world refused for NO_CAPITAL_ACTIVATED and the final
+        # `recorded is True` failed, while runs on a database those files had
+        # not touched passed. The test now builds its world: both tables
+        # emptied inside ITS transaction (rolled back below; the append-only
+        # triggers are suspended for those statements only), and a venue order
+        # put back in a savepoint must refuse the cutover with the mirror
+        # stopped, so the condition is still proved on both sides.
+        await conn.execute("SET LOCAL session_replication_role = replica")
+        await conn.execute("DELETE FROM execmirror_fills")
+        await conn.execute("DELETE FROM execmirror_orders")
+        await conn.execute("DELETE FROM small_live_order_events")
+        await conn.execute("SET LOCAL session_replication_role = origin")
+        sp = conn.transaction()
+        await sp.start()
+        await _cutover_world(conn)
+        await conn.execute("SET LOCAL session_replication_role = replica")
+        await conn.execute(
+            "INSERT INTO execmirror_orders (mirror_id, role, us_market_slug, "
+            " intent, order_type, tif, state, venue_order_id) VALUES "
+            " ('lp-cutover-test', 'ENTRY', 'lp-cutover-slug', "
+            "  'ORDER_INTENT_BUY_LONG', 'LIMIT', 'GTC', 'FILLED', "
+            "  'lp-cutover-venue-order')")
+        await conn.execute("SET LOCAL session_replication_role = origin")
+        sent_once = await LP.record_cutover(conn, release_sha=SHA,
+                                            recorded_by="release engineer",
+                                            api_sha=SHA,
+                                            hooks_here=list(LP.HOOK_NAMES))
+        assert sent_once["recorded"] is False, sent_once
+        assert sent_once["refused"] == ["NO_CAPITAL_ACTIVATED"], sent_once
+        assert sent_once["checks"]["NO_CAPITAL_ACTIVATED"]["value"][
+            "venue_orders_ever"] == 1
+        assert await LP.production_cutover(conn) is None
+        await sp.rollback()
         cases = [
             ({"workers": "b" * 40}, "WORKERS_RUN_THE_RELEASE_SHA"),
             ({"hooks": False}, "HOOKS_INSTALLED_ON_THE_RELEASE_SHA"),

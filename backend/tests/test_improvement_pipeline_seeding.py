@@ -253,23 +253,26 @@ async def test_the_mirror_reaches_eligible_change_and_preserves_the_dissent():
 # ── §3 Karen upheld ─────────────────────────────────────────────────
 
 async def _upheld(conn, *, detector, claim, stance="DISPUTE",
-                  outcome="UPHELD", resolver="AUDREY", target=DEC):
+                  outcome="UPHELD", resolver="AUDREY", target=DEC, base=NOW):
+    """`base`: when the challenge is opened (base - 3000), answered (- 2000)
+    and resolved (- 1000). The challenged record keeps its own time (the
+    seeded decision, NOW - 3600) whatever the base."""
     got = await K.open_challenge(
         conn, target_agent="DEREK", target_kind=target["kind"],
         target_id=target["id"], detector=detector, claim=claim,
         severity="HIGH", evidence_refs=[target], record_at=NOW - 3600,
-        at=NOW - 3000)
+        at=base - 3000)
     assert got["ok"], got
     cid = got["challenge_id"]
     if stance:
         got = await K.respond(conn, cid, agent="DEREK", stance=stance,
                               response="The decision cites its valuation.",
-                              at=NOW - 2000, evidence_refs=[target])
+                              at=base - 2000, evidence_refs=[target])
         assert got["ok"], got
     if outcome:
         got = await K.resolve(conn, cid, resolver=resolver, outcome=outcome,
                               reason="The valuation is absent from the "
-                                     "record.", at=NOW - 1000,
+                                     "record.", at=base - 1000,
                               evidence_refs=[target])
         assert got["ok"], got
     return cid
@@ -507,9 +510,20 @@ def _slack_env(monkeypatch, *, karen_shares_derek=False):
 async def _live_item(conn, now):
     """A Karen-upheld item whose transitions happen now (inside the Slack
     window), then a hypothesis mirrored by hand through the runner's own
-    write path with a real source."""
+    write path with a real source.
+
+    THE CHALLENGE IS RESOLVED RELATIVE TO THAT `now` (R30A ci, 2026-10-04).
+    It used to be resolved at the fixed fixture instant (NOW - 1000, i.e.
+    2026-09-20 17:43Z) while the pass ran at the wall clock, and
+    `seed_karen` reads only challenges resolved within LOOKBACK_S (14 days)
+    of its `now`. Both Slack tests therefore passed until 2026-10-04
+    17:43Z and failed from then on -- `s["created"]` empty, IndexError --
+    in capital-critical run 37230040128 and here, with no code changed. The
+    rule (an upheld challenge seeds an item for 14 days) is untouched; the
+    fixture's challenge is now one the rule admits on every day the test
+    runs."""
     await _upheld(conn, detector="DECISION_WITHOUT_EVIDENCE",
-                  claim="Derek's decision cites no valuation.")
+                  claim="Derek's decision cites no valuation.", base=now)
     s = await P.pass_once(conn, now=now)
     return s["created"][0]
 
