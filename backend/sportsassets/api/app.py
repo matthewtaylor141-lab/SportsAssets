@@ -2840,7 +2840,7 @@ async def command_small_live(
     async with pool.acquire() as c:
         if not await c.fetchval("SELECT to_regclass('execmirror_control') IS NOT NULL"):
             return {"status": "UNAVAILABLE", "why": "execution mirror schema not applied",
-                    "title": "Small Live · Paper vs Actual", "rows": [],
+                    "title": "Legacy Mirror Validation · Paper vs Actual", "rows": [],
                     "venues": V.venues({}, None)}
         return await V.small_live(c, view=view, status=status, limit=limit)
 

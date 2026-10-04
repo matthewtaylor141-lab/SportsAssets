@@ -1724,7 +1724,7 @@ async def small_live(conn, *, view: str | None = None, status: str | None = None
             "chain": _chain(r, paper, actual, mg)})
     counts = await _counts(conn)
     return {
-        "title": "Small Live · Paper vs Actual",
+        "title": "Legacy Mirror Validation · Paper vs Actual",
         "basis": ("ONE qualified decision -> PAPER and ACTUAL, as siblings. PAPER is "
                   "SIMULATED: the paper order and its simulated fills. ACTUAL is the "
                   "live venue: the separate retail account's order at the decision's "
