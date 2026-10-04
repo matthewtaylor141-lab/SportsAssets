@@ -80,9 +80,10 @@ ONE CASH LEDGER. No bankroll of its own and no second funding: its orders
 reserve on the account's one `paper_ledger` through
 `bettor_paper_ledger.submit_order`, under the same account row lock as every
 other paper order, so available cash is never committed twice across
-strategies. Only this strategy is enabled for NEW paper entries; the
-two-model strategy keeps recording its decisions with its entry switch
-(paper_control 'PAPER_ENTRIES:DEREK_ENTRY_POLICY_V2') off.
+strategies. Each strategy opens NEW paper entries only while its own
+paper_control switch is on (this one: 'PINNACLE_ONLY_PAPER_BENCHMARK', off
+since migration 184; the two-model strategy: 'PAPER_ENTRIES:
+DEREK_ENTRY_POLICY_V2', re-enabled for PAPER by migration 264).
 
 UNREACHABLE FROM REAL MONEY. This module imports only the paper ledger, the
 paper simulator, the pure policy helpers (`derek_policy`) and paper Derek's
