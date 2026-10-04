@@ -105,6 +105,7 @@ from .. import bettor_paper_ledger as L
 from .. import decision_hooks as DH
 from .. import bettor_paper_simulator as SIM
 from .. import bettor_settlement_terms as ST
+from .. import bettor_market_family as MF
 from . import derek_policy as DP
 from . import paper_derek as PD
 
@@ -782,6 +783,13 @@ def completed_game_match(cand: dict, row: dict) -> dict:
             refusals.append(refusal)
 
     fam = str(cand.get("sport_family") or row.get("sport_family") or "")
+    if str(cand.get("market") or "") in MF.LINE_FAMILIES:
+        # A LINE MARKET (R30A P0 incident): the same match, with the line's
+        # own market/line check and its own cited grading proof in place of
+        # the money line's -- see `_completed_game_line_checks`.
+        return _completed_game_line_checks(cand, row, fam=fam, checks=checks,
+                                           refusals=refusals, put=put,
+                                           authority=authority)
     mk_ok = (str(cand.get("market") or "") == "h2h"
              and cand.get("line") is None)
     put("market_and_line", mk_ok, R_MARKET,
@@ -818,6 +826,89 @@ def completed_game_match(cand: dict, row: dict) -> dict:
     return {"established": not refusals, "refusals": refusals,
             "checks": checks, "exceptional_terms": exceptional,
             "probability_authority": authority,
+            "policy": CG_VERSION}
+
+
+def _completed_game_line_checks(cand: dict, row: dict, *, fam: str, checks,
+                                refusals, put, authority) -> dict:
+    """THE COMPLETED-GAME MATCH FOR A LINE MARKET (spread / total / team
+    total). Identity, the payout outcome and the lane's probability
+    qualification are the money line's checks, unchanged (already run). What
+    differs is only what a line requires instead of "a money line has no
+    line":
+
+      market_and_line   the row is a proven line family at a HALF-POINT
+                        line, and its line is the venue contract's own
+                        (recorded beside the proof); the de-vig already
+                        refused any other Pinnacle line (LINE_DOES_NOT_MATCH)
+      grading period    RE-PROVEN HERE from the venue's own rules text on the
+                        row (bettor_market_family.prove) against the book's
+                        cited grading for the family -- equal periods, the
+                        text's line and team the contract's, or it refuses
+                        by the proof's precise code
+
+    The exceptional terms (postponement, suspension, short games) are carried
+    as DISCLOSED research risks with both sides' words -- never part of
+    `established`, never called compatible."""
+    scmp = DP._j(row.get("settlement_comparison")) or {}
+    lm = dict(scmp.get("line_market") or {})
+    lc = dict(lm.get("contract") or {})
+    market = str(cand.get("market") or "")
+    line = cand.get("line")
+    try:
+        same_line = (line is not None and lc.get("line") is not None
+                     and abs(float(lc["line"]) - float(line)) < 1e-9)
+    except (TypeError, ValueError):
+        same_line = False
+    mk_ok = (lc.get("family") == market and lc.get("sport") == fam
+             and same_line and MF.half_point(line)
+             and (fam, market) in MF.EQUIVALENCE)
+    put("market_and_line", mk_ok, R_MARKET,
+        ("line market %s/%s at the half-point line %r, the venue contract's "
+         "own" % (fam, market, line)) if mk_ok else (
+            "line market %s/%s, row line %r, contract line %r, half-point %s,"
+            " family proven %s" % (fam, market, line, lc.get("line"),
+                                   MF.half_point(line),
+                                   (fam, market) in MF.EQUIVALENCE)))
+    put("grading_period_full_game",
+        str(cand.get("period") or "") == "FULL_GAME", R_PERIOD,
+        "contract period %r" % (cand.get("period"),))
+    book = MF.book_grading(fam, market)
+    proof = MF.prove(contract=lc, venue_text=scmp.get("venue_rules_text"),
+                     participants=lm.get("participants"))
+    gp_ok = (book is not None and proof.get("established") is True
+             and proof.get("period") == book["period"]
+             and (lc.get("designation") is None
+                  or proof.get("designation") == lc.get("designation")))
+    put("ordinary_completion_grading_period", gp_ok,
+        (MF.family_status(fam, market).get("refusal") if book is None
+         else (proof.get("refusal") or R_GP_MISMATCH)),
+        ("book and venue both grade the ordinarily completed game as %s"
+         % book["period"]) if gp_ok else (
+            "book %s vs venue proof %s (%s)" % (
+                (book or {}).get("period"), proof.get("period"),
+                proof.get("refusal"))),
+        book=book, venue={"established": proof.get("established"),
+                          "refusal": proof.get("refusal"),
+                          "statement": (proof.get("venue") or {})
+                          .get("statement"),
+                          "rules_sha256": scmp.get("venue_rules_sha256")})
+    exceptional = {
+        "status": "DISCLOSED_RESEARCH_RISK_NOT_SETTLEMENT_COMPATIBILITY",
+        "compatibility_recorded": scmp.get("compatibility"),
+        "blockers": list(scmp.get("blockers") or []),
+        "per_condition": {},
+        "line_divergences": list((proof.get("exceptional") or {})
+                                 .get("divergences") or []),
+        "why": ("postponement, abandonment, suspension and short-game terms "
+                "are not required to agree under this experimental policy; "
+                "they are carried as research risks and never reported as "
+                "proven compatibility")}
+    return {"established": not refusals, "refusals": refusals,
+            "checks": checks, "exceptional_terms": exceptional,
+            "probability_authority": authority,
+            "line_market": {"family": market, "line": line,
+                            "proof_established": proof.get("established")},
             "policy": CG_VERSION}
 
 

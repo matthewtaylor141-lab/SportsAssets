@@ -7470,6 +7470,465 @@ async def _persist_candidate_outcomes(conn, *, cycle_at: float, rows) -> dict:
     return out
 
 
+# ═════════════════════════════════════════════════════════════════════
+# THE LINE-MARKET LANE: SPREADS, TOTALS AND TEAM TOTALS (R30A P0 incident)
+# ═════════════════════════════════════════════════════════════════════
+#
+# THE DEFECT. This cycle priced one market per event, the full-game money
+# line, although the venue lists spread, total and team-total contracts on
+# the same games (NFL 574 / 406 / 476 a day, NCAAF 4,034 / 3,312 / 2,852, all
+# half-point) and the leased PinnAPI cache already holds Pinnacle's own
+# spread, total and team-total markets for every subscribed fixture.
+#
+# WHAT RUNS. For each event this cycle reaches whose VENUE event is known --
+# a PinnAPI-native event (its discovery names the venue event) or any event
+# the venue-native resolver mapped -- every line contract the venue lists on
+# that event is read from the catalogue and put through
+# `bettor_market_family`, in this order, each refusing by name:
+#
+#   1 the contract: a known line family, exactly one LONG and one SHORT side,
+#     its team one of the fixture's matched participants, its line readable
+#     and agreeing with the slug, a HALF-POINT line, a family whose payoff
+#     equivalence is proven (soccer / tennis / basketball team totals refuse
+#     with their precise reasons);
+#   2 Pinnacle's market at the IDENTICAL line and side for that fixture, from
+#     the WS cache, inside the unchanged 30 s rule (LINE_DOES_NOT_MATCH, or
+#     the cache's own freshness code, otherwise) -- free, before any venue
+#     read;
+#   3 the contract's OWN rules text, read now, proving the ordinary-completion
+#     payoff equivalent to the book's cited rules (`bettor_market_family.
+#     prove`); a contract whose text is not the captured wording is never
+#     priced;
+#   4 the venue book for that side (`venue_quote`, the h2h lane's read), and
+#     the same calibration-only rule when its currency is not established;
+#   5 the Pinnacle pair re-validated at the decision instant (same record,
+#     epoch, change, prices, points, still inside 30 s) -- a changed input
+#     removes the probability, exactly as the h2h reference check does;
+#   6 `ext.evaluate` on the pair's own two-way de-vig at the identical line,
+#     persisted, and handed to the paper policies like any valuation.
+#
+# NOTHING IS LOOSENED. The strict lane refuses every line valuation
+# (LINE_EXCEPTIONAL_SETTLEMENT_TERMS_DIFFER: the postponement and short-game
+# terms differ, see bettor_market_family); only the completed-game paper
+# policy, which prices conditional on ordinary completion by design, can act,
+# and it re-proves the grading from the row. The gross-edge, net-EV,
+# freshness, depth, sizing and risk rules are the ones every valuation meets.
+#
+# BOUNDED, BECAUSE VENUE READS ARE SHARED. A scheduled cycle spends at most
+# MAX_LINE_INSTRUMENTS_PER_CYCLE venue book reads on lines, AFTER every
+# money-line event (so no money-line evaluation waits for a line read). A
+# WS-triggered evaluation spends at most MAX_LINE_INSTRUMENTS_PER_WS_EVALUATION
+# and never one it cannot finish inside the evaluation's own deadline. What
+# the bound defers is COUNTED by name (LINE_INSTRUMENT_DEFERRED_*), never
+# dropped silently. Pinnacle's main lines are taken before its alternates.
+MAX_LINE_INSTRUMENTS_PER_CYCLE = 12
+MAX_LINE_INSTRUMENTS_PER_WS_EVALUATION = 2
+#: the time one line instrument needs (catalogue read, rules read, paced book
+#: read, recheck, persist, paper decision); a WS evaluation with less than
+#: this left before its deadline defers the instrument rather than letting
+#: the whole evaluation time out
+LINE_INSTRUMENT_BUDGET_S = 5.0
+#: the line contracts read per venue event (rows; two per market)
+MAX_LINE_ROWS_PER_EVENT = 160
+#: a catalogue row not re-listed within three sweeps is not a current listing
+#: (bettor_venue_native_identity.RESEEN_WITHIN_S)
+LINE_ROWS_RESEEN_S = 3 * 1800
+R_LINE_NO_IDENTITY = "LINE_FIXTURE_NOT_MATCHED_BY_PINNAPI_DISCOVERY"
+R_LINE_ROWS_READ = "LINE_CATALOGUE_READ_FAILED"
+R_LINE_DEFERRED_CYCLE = "LINE_INSTRUMENT_DEFERRED_CYCLE_BOUND"
+R_LINE_DEFERRED_WS = "LINE_INSTRUMENT_DEFERRED_WS_EVALUATION_DEADLINE"
+R_LINE_INSTRUMENT_EVALUATED = "LINE_INSTRUMENT_ALREADY_EVALUATED_THIS_CYCLE"
+LINE_IDENTITY_RESOLVER = "BETTOR_LINE_MARKET_FAMILY_V1"
+
+LINE_ROWS_SQL = """
+    SELECT identifier, market_slug, event_slug, side_norm, intent, line,
+           signed, team_name, team_safe_name, team_abbr, team_id,
+           sports_type, question, kind
+      FROM us_premap
+     WHERE event_slug = $1
+       AND market_slug IS NOT NULL
+       AND sports_type = ANY($2::text[])
+       AND updated_at > now() - make_interval(secs => $3)
+     ORDER BY market_slug, intent
+     LIMIT $4
+"""
+
+
+def line_job_for(event, *, sport_key, family, venue_event_slug,
+                 identity=None) -> dict | None:
+    """A line-lane job for one event whose venue event is known, or None.
+    The fixture identity comes from the PinnAPI-native discovery: the event's
+    own (a native event carries it) or the latest discovery's record for the
+    venue event. Pure apart from that in-process read."""
+    if not venue_event_slug:
+        return None
+    ident = identity
+    nat = native_identity_of(event)
+    if ident is None and nat is not None and nat.get("venue_records"):
+        ident = {"fixture_id": nat.get("fixture_id"),
+                 "venue_records": nat.get("venue_records"),
+                 "venue_event_slug": nat.get("venue_event_slug"),
+                 "family": nat.get("family")}
+    if ident is None:
+        from .. import pinnapi_discovery as PD
+        ident = PD.identity_for(venue_event_slug)
+    return {"event": event, "sport_key": sport_key, "family": family,
+            "venue_event_slug": str(venue_event_slug), "identity": ident,
+            "provider_event_id": (event or {}).get("id")}
+
+
+def _line_report() -> dict:
+    return {"version": None, "jobs": 0, "contracts": 0,
+            "by_state": {}, "by_sport_family_state": {},
+            "instruments_eligible": 0, "instruments_evaluated": 0,
+            "venue_reads": 0, "valuations_written": 0,
+            "calibration_only_written": 0, "duplicates": 0, "deferred": 0,
+            "valuation_ids": [], "sample": []}
+
+
+def _line_count(report, code, *, sport=None, family=None, n=1) -> None:
+    code = str(code)
+    report["by_state"][code] = report["by_state"].get(code, 0) + n
+    if sport or family:
+        k = "%s|%s|%s" % (sport or "?", family or "?", code)
+        report["by_sport_family_state"][k] = \
+            report["by_sport_family_state"].get(k, 0) + n
+
+
+async def line_market_pass(conn, *, jobs, fee_fn, open_book, ev_measurable,
+                           calibration, research, stream_seed=None,
+                           fixture_keys=None, now=None) -> dict:
+    """THE LINE-MARKET LANE for the events this cycle reached (see the block
+    comment above). Never raises: a failure is counted by name and the cycle's
+    money-line results stand. Returns the lane's report; valuation ids written
+    are appended to `stream_seed['valuation_ids']` on a WS evaluation."""
+    from .. import bettor_market_family as MF
+    from .. import pinnapi_feed_runtime as feed
+
+    report = _line_report()
+    report["version"] = MF.VERSION
+    owner = feed._STATE.get("owner")
+    cache = owner.cache if owner is not None else None
+    if stream_seed is not None:
+        trig = stream_seed.get("trigger") or {}
+        started = trig.get("evaluation_started_at")
+        deadline_s = trig.get("deadline_s")
+        deadline_at = (float(started) + float(deadline_s)
+                       if started is not None and deadline_s is not None
+                       else None)
+        cap = MAX_LINE_INSTRUMENTS_PER_WS_EVALUATION
+        if deadline_at is None:
+            # NO DEADLINE KNOWN, NO LINE READ: a WS evaluation must never
+            # risk timing out the money-line work it already did.
+            cap = 0
+    else:
+        deadline_at = None
+        cap = MAX_LINE_INSTRUMENTS_PER_CYCLE
+    report["instrument_cap"] = cap
+    eligible, seen_events = [], set()
+    t0 = time.time() if now is None else float(now)
+    for job in jobs or ():
+        slug = job.get("venue_event_slug")
+        if not slug or slug in seen_events:
+            continue
+        seen_events.add(slug)
+        report["jobs"] += 1
+        ident = job.get("identity")
+        if not ident or not ident.get("venue_records") \
+                or ident.get("fixture_id") is None:
+            _line_count(report, R_LINE_NO_IDENTITY, family=job.get("family"))
+            continue
+        try:
+            rows = [dict(r) for r in await conn.fetch(
+                LINE_ROWS_SQL, slug, list(MF.VENUE_LINE_TYPES),
+                int(LINE_ROWS_RESEEN_S), int(MAX_LINE_ROWS_PER_EVENT))]
+        except Exception as exc:                               # noqa: BLE001
+            _line_count(report, "%s:%s" % (R_LINE_ROWS_READ,
+                                           type(exc).__name__),
+                        family=job.get("family"))
+            continue
+        by_market: dict = {}
+        for r in rows:
+            by_market.setdefault(str(r.get("market_slug")), []).append(r)
+        parts = ident.get("venue_records")
+        for mslug, mrows in sorted(by_market.items()):
+            report["contracts"] += 1
+            c = MF.market_contract(mrows, participants=parts)
+            if not c.get("ok"):
+                _line_count(report, c.get("refusal"), sport=c.get("sport"),
+                            family=c.get("family"))
+                continue
+            proof = None
+            if c.get("designation") is None and c["family"] == MF.TEAM_TOTAL:
+                # A TEAM TOTAL WHOSE TEAM THE SLUG DID NOT BIND: the
+                # contract's own words name it (`prove`), read before the
+                # book pair is looked up, so the pair is the named team's.
+                vevid = await venue_settlement_evidence(conn, mslug)
+                proof = MF.prove(contract=c,
+                                 venue_text=(vevid or {}).get("rules_text"),
+                                 participants=parts)
+                if not proof.get("established"):
+                    _line_count(report, proof.get("refusal"),
+                                sport=c["sport"], family=c["family"])
+                    continue
+                c = dict(c, designation=proof.get("designation"))
+            pair = MF.pinnacle_pair(cache, fixture_id=ident["fixture_id"],
+                                    contract=c,
+                                    evaluated_ms=time.time() * 1000.0,
+                                    max_age_s=PINNACLE_MAX_AGE_S)
+            if not pair.get("ok"):
+                _line_count(report, pair.get("refusal"), sport=c["sport"],
+                            family=c["family"])
+                continue
+            _line_count(report, "PINNACLE_LINE_MATCHED_%s" % (
+                "ALTERNATE" if pair.get("alternate") else "MAIN"),
+                sport=c["sport"], family=c["family"])
+            for inst in c["instruments"]:
+                eligible.append((pair, c, inst, job, proof))
+    report["instruments_eligible"] = len(eligible)
+    eligible.sort(key=lambda it: MF.instrument_order(it[:3]))
+    done: set = set()
+    for pair, c, inst, job, proof in eligible:
+        key = (c["market_slug"], inst["intent"])
+        if key in done:
+            report["duplicates"] += 1
+            _line_count(report, R_LINE_INSTRUMENT_EVALUATED,
+                        sport=c["sport"], family=c["family"])
+            continue
+        if report["venue_reads"] >= cap:
+            report["deferred"] += 1
+            _line_count(report, (R_LINE_DEFERRED_WS if stream_seed is not None
+                                 else R_LINE_DEFERRED_CYCLE),
+                        sport=c["sport"], family=c["family"])
+            continue
+        if deadline_at is not None and \
+                time.time() + LINE_INSTRUMENT_BUDGET_S > deadline_at:
+            report["deferred"] += 1
+            _line_count(report, R_LINE_DEFERRED_WS, sport=c["sport"],
+                        family=c["family"])
+            continue
+        done.add(key)
+        try:
+            code = await _line_instrument(
+                conn, MF, cache=cache, pair=pair, contract=c, inst=inst,
+                job=job, proof=proof, report=report, fee_fn=fee_fn,
+                open_book=open_book, ev_measurable=ev_measurable,
+                calibration=calibration, research=research,
+                stream_seed=stream_seed, fixture_keys=fixture_keys)
+        except Exception as exc:                               # noqa: BLE001
+            code = "LINE_INSTRUMENT_RAISED:%s" % type(exc).__name__
+        _line_count(report, code, sport=c["sport"], family=c["family"])
+    report["took_s"] = round(time.time() - t0, 3)
+    return report
+
+
+async def _line_instrument(conn, MF, *, cache, pair, contract, inst, job,
+                           proof, report, fee_fn, open_book, ev_measurable,
+                           calibration, research, stream_seed,
+                           fixture_keys) -> str:
+    """ONE line instrument (a contract and a side), steps 3-6 of the lane.
+    Returns the code it ended on (counted by the caller)."""
+    c, slug = contract, contract["market_slug"]
+    vevid = await venue_settlement_evidence(conn, slug)
+    rules_text = (vevid or {}).get("rules_text")
+    if proof is None:
+        proof = MF.prove(contract=c, venue_text=rules_text,
+                         participants=(job.get("identity") or {})
+                         .get("venue_records"))
+    if not proof.get("established"):
+        return proof.get("refusal") or MF.R_VENUE_TEXT_UNRECOGNISED
+    sel = pair["selection"] if inst["pays_on"] == "selection" \
+        else pair["other"]
+    # ONE FIXTURE, ONE EVENT KEY: the same venue event's key the money line
+    # carries, so every fixture rail sees a line position and a money-line
+    # position on one game as ONE fixture (`sticky_event_key`, migration 261)
+    _sk = await sticky_event_key(conn, venue_event_slug=job["venue_event_slug"],
+                                 proposed=job.get("provider_event_id"),
+                                 cache=fixture_keys)
+    event_key = _sk.get("event_key") or job.get("provider_event_id")
+    read_at = time.time()
+    _cev = book_currency_evidence(slug)
+    vq = await venue_quote(conn, us_slug=slug, intent=inst["intent"],
+                           now=read_at,
+                           subscription=_cev.get("subscription"),
+                           revalidation=_cev.get("revalidation"))
+    report["venue_reads"] += 1
+    calibration_only = None
+    if not vq.get("ok"):
+        calibration_only = _calibration_only_basis(vq)
+        if calibration_only is None:
+            return vq.get("refusal") or R_NO_VENUE_QUOTE
+    now = time.time()
+    decision_lag_s = round(now - read_at, 3)
+    check = MF.validate_pair(cache, pair, evaluated_ms=now * 1000.0,
+                             max_age_s=PINNACLE_MAX_AGE_S)
+    srule = {"overall_established": False,
+             "unmet": [MF.R_EXCEPTIONAL_DIFFER],
+             "refusal": MF.R_EXCEPTIONAL_DIFFER,
+             "book_rule": proof["period"], "rules": {},
+             "fixture_metadata": {}, "line_proof": proof}
+    extra = [MF.R_EXCEPTIONAL_DIFFER]
+    if calibration_only is not None:
+        extra = [calibration_only["refusal"]] + extra
+    if not check.get("ok"):
+        extra = [check.get("reason") or MF.R_INPUT_CHANGED] + extra
+    quote = {"observed_at": pair["observed_at"],
+             "received_at": pair["received_at"]}
+    contract_row = {
+        "venue": "PMUS", "condition_id": None, "us_market_slug": slug,
+        "contract_identity_basis": "VENUE_NATIVE_US_SLUG",
+        "identity_resolver": LINE_IDENTITY_RESOLVER,
+        "buy_intent": inst["intent"], "selection": sel,
+        "payout_event": sel,
+        "payout_event_basis": (
+            "THE_VENUE_LINE_SIDE'S_OWN_OUTCOME: on a half-point line the "
+            "short side's NOT(proposition) is exactly the pair's other "
+            "outcome"),
+        "probability_event": sel, "resolver_asked_for": sel,
+        "matched_side_norm": inst.get("side_norm"),
+        "matched_identifier": slug, "matched_by": LINE_IDENTITY_RESOLVER,
+        "ladder_side": "BID" if inst["intent"] == MF.INTENT_SHORT else "ASK",
+        "sport_family": c["sport"], "market": c["family"],
+        "period": "FULL_GAME",
+        "period_basis": ("THE_VENUE_TYPE_IS_A_FULL_GAME_LINE (%s) AND THE "
+                         "BOOK MARKET IS PERIOD 0" % c.get("sports_type")),
+        "period_evidence": {"sports_type": c.get("sports_type"),
+                            "book_period": 0},
+        "line": c["line"], "settlement_rule": proof["period"],
+        "event_key": event_key}
+    rec = ext.evaluate(
+        contract=contract_row,
+        quote={"book": devig.BOOK, "outcomes": dict(pair["outcomes"]),
+               "observed_at": pair["observed_at"],
+               "received_at": pair["received_at"],
+               "event_key": event_key, "period": "FULL_GAME",
+               "period_basis": "PINNACLE_MARKET_PERIOD_0",
+               "line": pair["line"], "settlement_rule": proof["period"]},
+        market_state=(_displayed_market_state(calibration_only)
+                      if calibration_only is not None else
+                      {"ask": vq["acquisition_price"],
+                       "api_price": vq["api_price"],
+                       "side_consumed": vq["side_consumed"],
+                       "depth": vq["depth"], "readable": True}),
+        execution_plan=None if calibration_only is not None else
+        _entry_plan(ladder=vq.get("acquisition_ladder"), fee_fn=fee_fn,
+                    observation_age_s=vq.get("age_s"),
+                    action=_risk_action(inst["intent"]), condition_id=None,
+                    event_key=job["venue_event_slug"],
+                    venue_market_slug=slug, provider_event_id=event_key,
+                    open_book=open_book,
+                    event_exposure_measurable=ev_measurable,
+                    settlement=srule,
+                    freshness=_entry_freshness(quote, vq, now),
+                    calibration=calibration,
+                    research_authorised=(research or {}).get(
+                        "authorised") is True, now=now),
+        execution_estimate={"p_fill": None, "basis": "P_FILL_NOT_IDENTIFIED",
+                            "crossing": True},
+        size=None, risk={"permitted": False,
+                         "reason": "NO_EXECUTION_PLAN_WAS_BUILT"},
+        fee_fn=fee_fn, now=now,
+        # PINNACLE ALONE, ONE BOOK: no other provider is read for a line, so
+        # the multi-book floor refuses here exactly as on a native money line
+        # and the completed-game policy's PinnAPI-sole-authority rule decides
+        outcome_books=1, armed=True, payout_is_complement=False,
+        extra_refusals=extra,
+        record_purpose=(ext.PURPOSE_ENTRY_DECISION
+                        if calibration_only is None
+                        else ext.PURPOSE_CALIBRATION_ONLY),
+        calibration_only_evidence=(
+            None if calibration_only is None else {
+                "venue_read_refusal": calibration_only["refusal"],
+                "venue_read_why": _sanitize(
+                    calibration_only.get("venue_read_why") or "", limit=240),
+                "book_currency": calibration_only["book_currency"],
+                "displayed_quote": calibration_only["displayed"],
+                "decision_instant_epoch_s": now,
+                "decision_lag_s": decision_lag_s}))
+    reference = {
+        "version": MF.VERSION, "provider": "pinnapi.com/raw-websocket",
+        "runtime_id": None, "feed_event_id": pair.get("fixture_id"),
+        "quote_event_id": pair.get("quote_event_id"),
+        "market_key": pair.get("key"), "market_type": c["family"],
+        "alternate": pair.get("alternate"), "stream": pair.get("stream"),
+        "raw_odds": pair.get("raw_odds"), "points": pair.get("points"),
+        "outcome_designations": pair.get("designations"),
+        "epoch": pair.get("epoch"), "change_ms": pair.get("change_ms"),
+        "source_change_ms": pair.get("source_change_ms"),
+        "provenance": pair.get("provenance"), "decision_check": check,
+        "discovery_event_id": job.get("provider_event_id"),
+        "family": job.get("family")}
+    try:
+        from .. import pinnapi_feed_runtime as feed
+        reference["runtime_id"] = feed._STATE.get("runtime_id")
+    except Exception:                                          # noqa: BLE001
+        pass
+    if stream_seed is not None:
+        reference["evaluation_trigger"] = {
+            k: (stream_seed.get("trigger") or {}).get(k) for k in (
+                "attempt_id", "received_at", "queued_at",
+                "evaluation_started_at")}
+    rec["provider"] = "pinnapi.com/raw-websocket"
+    rec["valuation"]["provider"] = "pinnapi.com/raw-websocket"
+    if not check.get("ok"):
+        # A CHANGED OR STALE PINNACLE INPUT REMOVES THE PROBABILITY, not just
+        # admission: paper policies read probabilities past other refusals
+        # (the h2h lane's `pinnapi_primary.stamp_record` rule).
+        rec["probability"] = rec["probability_of_selection"] = None
+        rec["valuation"]["probability"] = None
+        rec["admissible"] = False
+        rec["decision"] = "NO_TRADE"
+    rec["venue_quote"] = vq
+    rec["settlement"] = srule
+    rec["settlement_comparison"] = {
+        "compatibility": "INCOMPATIBLE_EXCEPTIONAL_TERMS",
+        "overall_established": False,
+        "blockers": [MF.R_EXCEPTIONAL_DIFFER],
+        "line_market": {
+            "contract": {k: c.get(k) for k in (
+                "market_slug", "event_slug", "sport", "family", "line",
+                "designation", "team", "sports_type", "period")},
+            "participants": (job.get("identity") or {}).get("venue_records"),
+            "fixture_id": (job.get("identity") or {}).get("fixture_id"),
+            "proof": proof},
+        "reference_input": reference,
+        "venue_rules_read": bool(rules_text),
+        "venue_rules_source": (vevid or {}).get("rules_source"),
+        "venue_rules_text": (str(rules_text)[:4000] if rules_text else None),
+        "venue_rules_sha256": MF.rules_sha256(rules_text)}
+    if calibration_only is not None:
+        try:
+            vid = await ext.persist(conn, rec)
+        except Exception as exc:                               # noqa: BLE001
+            return "LINE_CALIBRATION_ONLY_PERSIST:%s" % type(exc).__name__
+        if vid is None:
+            return "LINE_ALREADY_RECORDED"
+        report["calibration_only_written"] += 1
+    else:
+        try:
+            vid = await ext.persist(conn, rec)
+        except Exception as exc:                               # noqa: BLE001
+            return "LINE_PERSIST:%s" % type(exc).__name__
+        if vid is None:
+            return "LINE_ALREADY_RECORDED"
+        report["valuations_written"] += 1
+    report["instruments_evaluated"] += 1
+    report["valuation_ids"].append(vid)
+    if len(report["sample"]) < 8:
+        report["sample"].append({
+            "valuation_id": vid, "us_market_slug": slug,
+            "intent": inst["intent"], "selection": sel,
+            "line": c["line"], "family": c["family"], "sport": c["sport"],
+            "alternate": pair.get("alternate"),
+            "probability": rec.get("probability"),
+            "refusals": list(rec.get("refusals") or [])[:6]})
+    if stream_seed is not None:
+        stream_seed["valuation_ids"].append(vid)
+    await _paper_valuation(conn, vid)
+    return ("LINE_VALUATION_RECORDED_CALIBRATION_ONLY"
+            if calibration_only is not None else "LINE_VALUATION_RECORDED")
+
+
 async def cycle(conn, *, stream_seed=None) -> dict:
     """Never raises. Returns what it did and, mostly, why it did not."""
     started = time.time()
@@ -7482,6 +7941,9 @@ async def cycle(conn, *, stream_seed=None) -> dict:
     fixture_cache: dict = {}
     # venue event slug -> its fixed event key (`sticky_event_key`), per cycle
     fixture_keys: dict = {}
+    # THE LINE-MARKET LANE'S WORK (see `line_market_pass`): one job per event
+    # whose venue event is known, run after every money-line event
+    line_jobs: list = []
 
     # ── SERVICING FIRST, BEFORE ANY ENTRY-SIDE GATE ─────────────────
     #
@@ -8081,6 +8543,17 @@ async def cycle(conn, *, stream_seed=None) -> dict:
             event = events[_i]
             _open_event(sport_key, family, _i, event)
             served_by_this_fetch += 1
+            # A PINNAPI-NATIVE EVENT NAMES ITS VENUE EVENT ALREADY: its line
+            # contracts are queued here, before any money-line refusal below
+            # can `continue` past them (a stale or superseded money line says
+            # nothing about the spread's own price).
+            _nat_line = native_identity_of(event)
+            if _nat_line is not None:
+                _lj = line_job_for(event, sport_key=sport_key, family=family,
+                                   venue_event_slug=_nat_line.get(
+                                       "venue_event_slug"))
+                if _lj is not None:
+                    line_jobs.append(_lj)
             quote = primary_pinnacle_h2h(
                 event, received_at=received_at, family=family, at=time.time())
             if stream_seed is None:
@@ -8283,6 +8756,17 @@ async def cycle(conn, *, stream_seed=None) -> dict:
                     quote = dict(quote, event_id=_sk["event_key"],
                                  provider_event_id=quote.get("event_id"),
                                  fixture_event_key=_sk)
+                # A METERED EVENT THE VENUE-NATIVE RESOLVER MAPPED: its venue
+                # event is now known, so its line contracts are queued too
+                # (priced against the fixture PinnAPI discovery matched to it)
+                if native_identity_of(event) is None:
+                    _lj = line_job_for(
+                        event, sport_key=sport_key, family=family,
+                        venue_event_slug=((ident.get("venue_native") or {})
+                                          .get("event_slug")
+                                          or ident.get("venue_event_key")))
+                    if _lj is not None:
+                        line_jobs.append(_lj)
 
             # ── LEVER A · SKIP WHAT IS ALREADY PAST THE LIMIT ───────
             #
@@ -9172,6 +9656,18 @@ async def cycle(conn, *, stream_seed=None) -> dict:
                              else float(rec["edge"]) > 0.0)})
 
     _close_event()
+    # ── THE LINE-MARKET LANE, AFTER EVERY MONEY-LINE EVENT ─────────────
+    # Bounded and never fatal (see `line_market_pass`); its report rides the
+    # cycle result and the heartbeat.
+    try:
+        line_markets = await line_market_pass(
+            conn, jobs=line_jobs, fee_fn=fee_fn, open_book=open_book,
+            ev_measurable=_ev_measurable, calibration=calibration,
+            research=research, stream_seed=stream_seed,
+            fixture_keys=fixture_keys)
+    except Exception as exc:                                   # noqa: BLE001
+        line_markets = {"error": "LINE_MARKET_PASS_RAISED:%s"
+                        % type(exc).__name__}
     _t_entry = time.time()
     candidate_outcomes = _reconcile_event_ledger(event_ledger, funnel)
     candidate_outcomes["persisted"] = await _persist_candidate_outcomes(
@@ -9180,6 +9676,7 @@ async def cycle(conn, *, stream_seed=None) -> dict:
     if stream_seed is not None:
         return {"ran": True, "state": "WS_PAPER_EVALUATED", "written": written,
                 "refusals": dict(tally), "candidate_outcomes": candidate_outcomes,
+                "line_markets": line_markets,
                 "valuation_ids": list(stream_seed["valuation_ids"])}
 
     # THE OUTCOME JOIN RUNS EVERY CYCLE, bounded. Collection has to
@@ -9347,6 +9844,9 @@ async def cycle(conn, *, stream_seed=None) -> dict:
            # outcome -- and whether the rows add up to the funnel.
            "candidate_outcomes": candidate_outcomes,
            "event_ledger": event_ledger,
+           # THE LINE-MARKET LANE: every line contract of the events above,
+           # counted by sport / family / precise state, and what it wrote
+           "line_markets": line_markets,
            # THE CYCLE'S OWN LABEL, and the distinction it protects.
            # "zero positive edge" is a claim ABOUT THE MARKET. It can only
            # be made when candidates actually reached the economics. When

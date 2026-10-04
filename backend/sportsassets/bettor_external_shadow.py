@@ -857,6 +857,11 @@ STAGES = (
         "VOID_ABANDONMENT_RULE_NOT_ESTABLISHED",
         "OVERTIME_RULE_NOT_ESTABLISHED",
         "SETTLEMENT_TERMS_CONFLICT",
+        # A LINE MARKET'S EXCEPTIONAL TERMS (postponement, suspension, short
+        # game) are settled differently by the two sides; every line
+        # valuation carries it, so no strict or funded reader may treat a
+        # line as settlement-compatible (bettor_market_family)
+        "LINE_EXCEPTIONAL_SETTLEMENT_TERMS_DIFFER",
         "SETTLEMENT_SCOPE_NOT_ESTABLISHED",
         "UNRESOLVED_SETTLEMENT_SEMANTICS")),
     ("5_EXECUTION_ESTIMATE", (
@@ -940,6 +945,9 @@ EVALUABILITY_OF = {
     # capability gap to make the funnel look better.
     "SETTLEMENT_TERMS_CONFLICT": DECIDED,
     "VOID_ABANDONMENT_RULE_CONFLICTS_WITH_BOOK_RULE": DECIDED,
+    # both sides' exceptional-state terms were read and they differ: a
+    # stated difference, decided (bettor_market_family)
+    "LINE_EXCEPTIONAL_SETTLEMENT_TERMS_DIFFER": DECIDED,
     "OVERTIME_RULE_CONFLICTS_WITH_BOOK_RULE": DECIDED,
     # A SEGMENT SCOPE IS A DECISION: the contract pays on part of the
     # fixture, and this lane prices whole fixtures.

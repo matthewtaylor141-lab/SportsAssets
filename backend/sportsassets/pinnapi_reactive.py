@@ -232,8 +232,14 @@ class Scheduler:
             eid, tick = job
             if not self.pending and not self.held_pending:
                 self.wake.clear()
+            # `deadline_s` travels with the job so work the evaluation may
+            # add (the line-market lane) is never started when it cannot
+            # finish inside this same deadline (ext_pinnacle_loop.
+            # line_market_pass): the money-line evaluation is never turned
+            # into a TIMEOUT by it.
             attempt = dict(attempt_id=uuid.uuid4().hex, event_id=eid, **tick,
                            evaluation_started_at=self.clock(), state='STARTED',
+                           deadline_s=self.deadline,
                            counters=dict(self.counts))
             seed = self.seeds.get(eid)
             qid, why = _quote_record(self.cache, eid)

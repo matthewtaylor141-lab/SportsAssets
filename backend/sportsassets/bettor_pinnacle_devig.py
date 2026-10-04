@@ -176,6 +176,30 @@ DEFAULT_METHOD = METHOD_POWER
 SUPPORTED: dict = {
     ("soccer", "h2h"): 3,      # home / draw / away
     ("baseball", "h2h"): 2,    # no draw in MLB
+    # ── LINE FAMILIES (R30A P0 incident; bettor_market_family) ─────────
+    # A HALF-POINT spread, total or team total is a TWO-WAY market by
+    # construction: home/away at mirrored points, or over/under at one
+    # point, and no outcome between them (no push on a half point). Each is
+    # de-vigged on ITS OWN pair at the contract's identical line -- the
+    # contract and the quote both declare `line`, and `_contract_agrees`
+    # refuses LINE_DOES_NOT_MATCH on any difference. Only the families whose
+    # payoff equivalence bettor_market_family PROVES from both sides' cited
+    # words are listed (a test pins this set equal to its PROVEN set):
+    # soccer (the book's Market Rules section was not captured), tennis (its
+    # sport section was not read) and basketball team totals (no venue
+    # listing captured) are NOT here and refuse MARKET_NOT_IN_SUPPORTED_SET.
+    # No money line is touched by these entries.
+    ("football", "spread"): 2,
+    ("football", "total"): 2,
+    ("football", "team_total"): 2,
+    ("hockey", "spread"): 2,
+    ("hockey", "total"): 2,
+    ("hockey", "team_total"): 2,
+    ("basketball", "spread"): 2,
+    ("basketball", "total"): 2,
+    ("baseball", "spread"): 2,
+    ("baseball", "total"): 2,
+    ("baseball", "team_total"): 2,
 }
 
 #: Sports in which Pinnacle was ABSENT FROM THE RESPONSES WE HAVE SEEN.

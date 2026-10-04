@@ -285,15 +285,27 @@ def _pinnacle(cand: dict, *, at: float, max_age: float) -> dict:
     ref = pin.get("reference_input") or {}
     if (pin.get("provider") == "pinnapi.com/raw-websocket"
             or ref.get("provider") == "pinnapi.com/raw-websocket"):
+        from .. import bettor_market_family as MF
         from .. import pinnapi_feed_runtime as feed
         from .. import pinnapi_primary as primary
         owner = feed._STATE.get("owner")
         try:
-            check = (primary.validate(
-                owner.cache if owner else None, {"reference_input": ref},
-                at=at, max_age_s=max_age,
-                runtime_id=feed._STATE.get("runtime_id")) if ref else
-                {"ok": False, "reason": "PINNAPI_PRIMARY_PROVENANCE_MISSING"})
+            if not ref:
+                check = {"ok": False,
+                         "reason": "PINNAPI_PRIMARY_PROVENANCE_MISSING"}
+            elif ref.get("version") == MF.VERSION:
+                # A LINE VALUATION (spread / total / team total): the same
+                # recheck on its own market -- same runtime, record, market,
+                # epoch, change, prices and points, inside the 30 s rule
+                check = MF.validate_reference(
+                    owner.cache if owner else None, ref, at=at,
+                    max_age_s=max_age,
+                    runtime_id=feed._STATE.get("runtime_id"))
+            else:
+                check = primary.validate(
+                    owner.cache if owner else None, {"reference_input": ref},
+                    at=at, max_age_s=max_age,
+                    runtime_id=feed._STATE.get("runtime_id"))
         except (KeyError, TypeError, ValueError):
             check = {"ok": False, "reason": "PINNAPI_PRIMARY_PROVENANCE_INVALID"}
         if not check.get("ok"):

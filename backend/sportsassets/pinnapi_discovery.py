@@ -129,8 +129,15 @@ def venue_events_sql(sport_ids) -> str:
     scope = ("AND (%s)" % " OR ".join("%s LIKE '%s%%'" % (_norm_sql(), p)
                                       for p in prefixes)
              if prefixes else "AND false")
+    # ONE ROW PER (EVENT, TEAM RECORD), not per contract type: an NFL game
+    # carries its team records on the winner, every spread rung and the
+    # team totals, and grouping by the type as well multiplied the rows by
+    # the venue's whole ladder (the six-sport scope lists ~1,500 events), so
+    # the LIMIT would have cut the latest-starting events silently. The sport
+    # is the same for every type of one event (`min` names one of them).
     return ("""SELECT event_slug, team_name, team_safe_name, team_abbr,
-       team_id, team_league, sports_type,
+       team_id, team_league, min(sports_type) AS sports_type,
+       count(DISTINCT sports_type) AS sports_types,
        extract(epoch FROM game_start)::float8 AS game_start,
        count(*) AS rows
   FROM us_premap
@@ -141,7 +148,7 @@ def venue_events_sql(sport_ids) -> str:
    AND game_start < now() + make_interval(secs => %d)
    AND updated_at > now() - make_interval(secs => %d)
  GROUP BY event_slug, team_name, team_safe_name, team_abbr, team_id,
-          team_league, sports_type, game_start
+          team_league, game_start
  ORDER BY game_start, event_slug
  LIMIT %d""" % (C._base_where(), scope, int(HORIZON_AHEAD_S),
                 int(RESEEN_WITHIN_S), MAX_VENUE_ROWS))
@@ -384,6 +391,15 @@ def match_fixture(fx: dict, venue: list, *, family: str) -> dict:
                        % ",".join(ev["problems"]))
             return out
         fallback = any(h["by"] == MATCHED_BY_FALLBACK for h in a["how"])
+        # THE VENUE TEAM RECORD OF EACH PINNACLE DESIGNATION, carried so a
+        # line contract's team (a spread's covering side, a team total's
+        # team) is bound to Pinnacle's home/away by the venue's own record
+        # -- its team id first, its own names otherwise (bettor_market_
+        # family.designation_of_team) -- never re-matched by name later.
+        out["venue_records"] = {
+            d: {k: a[d].get(k) for k in (
+                "team_name", "team_safe_name", "team_abbr", "team_id")}
+            for d in ("home", "away")}
         out.update(state=MATCHED, venue_event_slug=ev["slug"],
                    venue_league_tokens=list(ev["league_tokens"]),
                    venue_start=ev["start"],
@@ -462,7 +478,15 @@ def discover(events, venue_rows, *, sport_ids) -> dict:
     venue_unmatched = sum(1 for sid, evs in venue.items() if sid in sports
                           for e in evs if (sid, e["slug"]) not in
                           matched_venue)
+    # THE LINE LANE'S LOOKUP: venue event -> the one fixture matched to it
+    # (a venue event two fixtures claimed is DUPLICATE_CANDIDATES above and
+    # is not here), so a line contract of a venue event reached by ANY
+    # discovery path is priced against that fixture's Pinnacle markets.
+    by_venue_event = {r["venue_event_slug"]: identity_of(r)
+                      for r in receipts if r["state"] == MATCHED}
     return {"version": VERSION, "fixtures": len(receipts),
+            "by_venue_event": by_venue_event,
+            "venue_rows_truncated": len(venue_rows or ()) >= MAX_VENUE_ROWS,
             "states": {s: counts.get(s, 0) for s in STATES},
             "by_sport_league_state": dict(by_sport_league),
             "records_pricing_no_fixture": dict(skipped),
@@ -498,6 +522,7 @@ def seed_event(receipt: dict) -> dict:
                 "matched_by": receipt.get("matched_by"),
                 "orientation": receipt.get("orientation"),
                 "start_offset_s": receipt.get("start_offset_s"),
+                "venue_records": receipt.get("venue_records"),
                 "live": receipt.get("live")}}
 
 
@@ -514,5 +539,30 @@ def digest(result: dict) -> dict:
     return {k: result.get(k) for k in (
         "version", "fixtures", "states", "by_sport_league_state",
         "records_pricing_no_fixture", "venue_events",
-        "venue_events_without_a_fixture", "receipt_sample", "registered",
-        "computed_at", "took_ms", "error")}
+        "venue_events_without_a_fixture", "venue_rows_truncated",
+        "receipt_sample", "registered", "computed_at", "took_ms", "error")}
+
+
+def identity_of(receipt: dict) -> dict:
+    """The part of a MATCHED receipt the line lane needs: the fixture, the
+    record that prices it now, the sport, and each Pinnacle designation's
+    venue team record."""
+    return {k: receipt.get(k) for k in (
+        "fixture_id", "quote_id", "sport_id", "family", "league",
+        "venue_event_slug", "venue_records", "orientation", "matched_by",
+        "live")}
+
+
+def identity_for(venue_event_slug, result=None) -> Optional[dict]:
+    """The latest discovery's identity for a venue event (the runtime's
+    last `discover` result unless one is passed), or None when no fixture is
+    matched to it. In-process; never raises."""
+    try:
+        if result is None:
+            from . import pinnapi_feed_runtime as FR
+            result = FR._STATE.get("discovery")
+        got = ((result or {}).get("by_venue_event") or {}).get(
+            venue_event_slug)
+        return dict(got) if isinstance(got, dict) else None
+    except Exception:                                          # noqa: BLE001
+        return None

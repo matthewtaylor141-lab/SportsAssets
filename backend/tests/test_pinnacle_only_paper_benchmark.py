@@ -122,7 +122,13 @@ ALLOWED_IMPORTS = {"__future__", "annotations", "asyncio", "hashlib", "json", "m
                    # executing process's decision hook. It imports NOTHING and
                    # does no I/O (pinned below); the benchmark never imports
                    # an execution, venue or funded module through it.
-                   "decision_hooks"}
+                   "decision_hooks",
+                   # R30A P0 incident: the LINE-MARKET family proofs the
+                   # completed-game match re-runs for a spread / total / team
+                   # total row. Pure (no socket, database, venue, funded or
+                   # order path): it imports only the de-vig and the feed
+                   # cache's pure reader (pinned below).
+                   "bettor_market_family"}
 
 
 def _imports(path: pathlib.Path) -> list:
@@ -141,6 +147,17 @@ def test_the_benchmark_imports_only_paper_and_pure_policy_modules():
     # every import statement in the file, top level AND inside functions
     leaves = {n.split(".")[-1] for n in names if n}
     assert leaves <= ALLOWED_IMPORTS | {"Any"}, sorted(leaves - ALLOWED_IMPORTS)
+    bad = [n for n in names if any(f in (n or "").lower() for f in FORBIDDEN)]
+    assert not bad, bad
+
+
+def test_the_line_market_family_is_pure():
+    from sportsassets import bettor_market_family as MF
+    names = _imports(pathlib.Path(MF.__file__))
+    leaves = {n.split(".")[-1] for n in names if n}
+    assert leaves <= {"__future__", "annotations", "hashlib", "math", "re",
+                      "unicodedata", "typing", "Optional",
+                      "bettor_pinnacle_devig", "pinnapi_feed"}, leaves
     bad = [n for n in names if any(f in (n or "").lower() for f in FORBIDDEN)]
     assert not bad, bad
 
