@@ -200,8 +200,27 @@ LISTING_TIMEOUT_S = 20.0
 # Therefore ONE WRAPPER CALL IS EXACTLY ONE OUTBOUND HTTP REQUEST, and
 # reserving per call is reserving per request. If a future SDK version
 # adds retry or pagination this equality breaks, so it is asserted by
-# `test_bettor_universe_probe.py::test_sdk_has_no_hidden_requests`.
+# `test_bettor_live_loop.py::TestTheSDKAddsNoHiddenRequests`.
+#
+# THE SECOND BULLET CHANGED ON 2026-09-28 (5a0b571), AND THE EQUALITY NOW
+# RESTS ON OUR CONFIGURATION, NOT THE SDK'S DEFAULT. polymarket-us 1.0.2 (the
+# pinned, deployed version) takes `max_retries=2` and retries 408/409/429/5xx
+# on GET inside `_request`, with `time.sleep` between attempts. The listing
+# reads through `pmus._get_client()`, which passes `venue_sdk.client_kwargs()`
+# (`max_retries=0`) and reports `sdk_retries_disabled` only when the installed
+# constructor accepted it -- so on OUR client a 429 is still one request and
+# raises. The evidence block below says which of the two it rests on.
 LISTING_PAGE_IS_ONE_REQUEST = True
+
+
+def _sdk_retries_disabled():
+    """Whether the installed SDK accepted `max_retries=0` on our client.
+    None when it could not be read -- never a guessed True."""
+    try:
+        from . import venue_sdk as _vsdk
+        return bool(_vsdk.report()["sdk_retries_disabled"])
+    except Exception:                                          # noqa: BLE001
+        return None
 
 # How many consecutive throttled pages end the listing. "Honor server
 # backoff and stop on repeated throttling" -- a limiter that says no
@@ -1127,13 +1146,22 @@ def describe() -> dict:
         "sdk_request_accounting": {
             "one_wrapper_call_is_one_http_request": LISTING_PAGE_IS_ONE_REQUEST,
             "verified_against": "the installed polymarket_us package",
+            # 2026-09-28: the SDK's own retry loop (1.0.2 default
+            # max_retries=2) is turned off on OUR client, which is what
+            # makes the equality hold; the old wording ("no retries=",
+            # "_request contains no sleep") described 0.1.2 and was false
+            # of the installed package.
             "checks": ["Markets.list has no loop and no pagination",
-                       "httpx.Client built with no transport= and no "
-                       "retries= (httpx default retries=0)",
+                       "httpx.Client built with no transport= (httpx "
+                       "default retries=0)",
+                       "the SDK's own retry loop is disabled on our client: "
+                       "pmus._get_client passes venue_sdk.client_kwargs() "
+                       "(max_retries=0)",
                        "follow_redirects appears nowhere (httpx default "
                        "False; a 3xx raises rather than re-requesting)",
-                       "_request contains no sleep; a 429 raises "
-                       "immediately"],
+                       "on our client a 429 raises on the first response; "
+                       "no SDK sleep"],
+            "sdk_retries_disabled": _sdk_retries_disabled(),
             "if_this_changes": ("the listing budget silently "
                                 "undercounts again; asserted by "
                                 "TestTheSDKAddsNoHiddenRequests"),
