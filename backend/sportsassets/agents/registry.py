@@ -38,12 +38,20 @@ DEREK = "DEREK"
 XAVIER = "XAVIER"
 AUDREY = "AUDREY"
 KAREN = "KAREN"
+#: (migration 217) Eddie, Head of Execution (SHADOW_ONLY), and Scout, Market
+#: Intelligence (RESEARCH_SHADOW_ONLY). Neither holds any order, cancel,
+#: venue or capital authority.
+EDDIE = "EDDIE"
+SCOUT = "SCOUT"
+#: The shadow / research agents: no order path, no approval, no promotion.
+SHADOW_AGENTS = (EDDIE, SCOUT)
 #: The three OPERATING agents (entry, management, audit) -- the ones Karen
 #: challenges, and the only ones that may propose a collaboration-loop
 #: finding or hold an order path.
 OPERATING_AGENTS = (DEREK, XAVIER, AUDREY)
-#: Every registered agent identity, Karen included (migration 207).
-AGENTS = (DEREK, XAVIER, AUDREY, KAREN)
+#: Every registered agent identity, Karen (207), Eddie and Scout (217)
+#: included.
+AGENTS = (DEREK, XAVIER, AUDREY, KAREN, EDDIE, SCOUT)
 
 # ── STATES (agent_status.state CHECK) ───────────────────────────────────
 S_IDLE = "IDLE"
@@ -98,6 +106,17 @@ TOOLS: dict[str, str] = {
                              "reconciliation reports (read only)"),
     "read.audits": "paper_audrey_findings / audrey_audit_reports (read only)",
     "read.findings": "agent_findings and their stages (read only)",
+    # Eddie's and Scout's evidence reads (read only; named one by one)
+    "read.books": ("paper_book_observations / institutional stream "
+                   "evidence (recorded books, read only)"),
+    "read.orders_fills": ("paper_orders / paper_fills / execution_intents "
+                          "timelines (read only)"),
+    "read.allocations": "intel_* shadow allocator / risk records (read only)",
+    "read.external_sources": ("already-ingested external records that "
+                              "passed Scout's compliance check, e.g. "
+                              "fixture_metadata (read only)"),
+    "read.external_valuations": ("external_valuations: the PinnAPI "
+                                 "baseline probabilities (read only)"),
     # records an agent may write about its own work
     "write.entry_decisions": "agent_decisions rows of Derek's entry verdicts",
     "write.management_decisions": ("bettor_xavier_decisions via "
@@ -109,6 +128,21 @@ TOOLS: dict[str, str] = {
                                 "CANDIDATE only (never ACTIVE)"),
     "write.challenges": ("karen_challenges rows (migration 207) and the "
                          "PEER_CHALLENGE stage of another agent's finding"),
+    "write.execution_estimates": (
+        "eddie_execution_estimates / eddie_execution_outcomes (migration "
+        "217): SHADOW estimates and recommendations, never an order"),
+    "write.candidate_reviews": (
+        "pos_candidate_reviews / steps (migration 217): the grounded "
+        "candidate-review workflow record, never an order or approval"),
+    "write.feature_registry": (
+        "scout_sources / scout_features / scout_feature_observations "
+        "(migration 217), compliant sources only"),
+    "write.feature_tournaments": (
+        "scout_feature_tournaments spec FREEZE and frozen samples only; the "
+        "verdict is the evaluator's, never Scout's"),
+    "write.loop_findings": ("agent_findings / stages of the collaboration "
+                            "loop (203) for one's own findings and peer "
+                            "challenges; never RELEASE_ELIGIBILITY"),
     # the ONLY two order-bearing capabilities, each through the existing path
     "request.funded_entry": (
         "an entry REQUEST through the one real entry path: "
@@ -135,7 +169,21 @@ TOOLS: dict[str, str] = {
                                 "version ACTIVE"),
     "promotion": ("promoting or releasing a model, policy or candidate to "
                   "production"),
+    # (217) denied explicitly to the shadow agents
+    "write.feature_promotion": ("validating, adopting or promoting a feature "
+                                "into a model"),
+    "write.capital_allocation": "allocating or reserving capital",
+    "write.release_eligibility": ("marking a loop finding "
+                                  "ELIGIBLE_FOR_HUMAN_RELEASE_REVIEW"),
 }
+
+#: (217) Denied to Eddie and Scout on top of NEVER_GRANTED.
+SHADOW_DENIED = ("request.funded_entry", "dispatch.xavier_claim",
+                 "write.entry_decisions", "write.management_decisions",
+                 "write.agent_audits", "write.directives",
+                 "write.policy_candidates", "write.challenges", "read.all",
+                 "write.feature_promotion", "write.capital_allocation",
+                 "write.release_eligibility")
 
 #: Denied to EVERY agent, whatever else it is granted.
 NEVER_GRANTED = ("order.submit_direct", "order.cancel_direct", "deploy",
@@ -231,6 +279,63 @@ IDENTITIES: dict[str, dict] = {
             "order_path": None,
         },
     },
+    EDDIE: {
+        "display_name": "Eddie",
+        "role": "HEAD_OF_EXECUTION",
+        "authority": "SHADOW_ONLY",
+        "mandate": (
+            "Preserve as much of Derek's theoretical edge as possible between "
+            "decision and fill. For every Derek candidate, estimate in SHADOW "
+            "the theoretical edge, fees, spread cost, slippage, adverse "
+            "selection, fill probability, time to fill, capital-hours, the "
+            "maximum economically executable size and the expected net "
+            "executable edge, and recommend EXECUTE_NOW / REST_LIMIT / SPLIT "
+            "/ WAIT / SKIP_EXECUTION. Never recommends executing a candidate "
+            "whose expected executable EV is <= 0. Does NOT predict outcomes. "
+            "Holds NO authority: no venue submission, no order, no cancel, "
+            "no capital, no approval, no promotion."),
+        "policy_key": "execution",
+        "tool_permissions": {
+            "authority_status": "SHADOW_ONLY",
+            "allowed": ["read.decisions", "read.books", "read.orders_fills",
+                        "read.intents", "read.valuations",
+                        "read.allocations", "read.findings",
+                        "write.execution_estimates",
+                        "write.candidate_reviews", "write.loop_findings",
+                        "write.agent_tasks"],
+            "denied": [*SHADOW_DENIED, "write.feature_registry",
+                       "write.feature_tournaments", *NEVER_GRANTED],
+            "order_path": None,
+        },
+    },
+    SCOUT: {
+        "display_name": "Scout",
+        "role": "MARKET_INTELLIGENCE",
+        "authority": "RESEARCH_SHADOW_ONLY",
+        "mandate": (
+            "Discover external information that adds out-of-sample value to "
+            "the PinnAPI baseline. Register every feature with its source, "
+            "timestamps, event identity, confidence, freshness, provenance "
+            "and licensing classification; ingest only sources that passed "
+            "the declared compliance check; test each feature prospectively "
+            "(frozen spec, predeclared metric and minimum sample) and accept "
+            "REJECTED when it adds nothing. Does NOT decide trades. Holds NO "
+            "authority: no trade, no portfolio, no policy approval, and he "
+            "can never validate or promote his own feature."),
+        "policy_key": "intelligence",
+        "tool_permissions": {
+            "authority_status": "RESEARCH_SHADOW_ONLY",
+            "allowed": ["read.external_sources", "read.external_valuations",
+                        "read.valuations", "read.findings",
+                        "write.feature_registry",
+                        "write.feature_tournaments", "write.loop_findings",
+                        "write.agent_tasks"],
+            "denied": [*SHADOW_DENIED, "write.execution_estimates",
+                       "write.candidate_reviews", "read.books",
+                       *NEVER_GRANTED],
+            "order_path": None,
+        },
+    },
 }
 
 
@@ -247,6 +352,10 @@ def _model_version(agent_id: str) -> str:
         return "UNREADABLE:%s" % type(exc).__name__
     if agent_id == KAREN:
         return "NO_MODEL_RULE_BASED_CHALLENGE_DETECTORS"
+    if agent_id == EDDIE:
+        return "NO_OUTCOME_MODEL_RULE_BASED_EXECUTION_ESTIMATOR"
+    if agent_id == SCOUT:
+        return "NO_MODEL_PROSPECTIVE_FEATURE_TOURNAMENT"
     return "NO_MODEL_DETERMINISTIC_AUDIT"
 
 

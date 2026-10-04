@@ -1072,11 +1072,175 @@ async def karen_facts(conn, *, question: str,
                       "answers only from her challenge records"}}
 
 
+# ═════════════════════════════════════════════════════════════════════
+# EDDIE AND SCOUT: THEIR OWN RECORDS -- AND NOTHING ELSE (migration 217)
+# ═════════════════════════════════════════════════════════════════════
+
+_EEX = re.compile(r"\beex:[0-9a-f]{24}\b")
+POS_ROWS_IN_FACTS = 8
+
+
+def _pos_empty(agent: str, why: str) -> dict:
+    f = Facts()
+    f.check(agent.lower() + "_records", "TABLE_ABSENT")
+    f.miss(why)
+    return {"subject": None, "demonstration": False, "found": False,
+            "scope": "BOOK", "facts": f.items, "checked": f.checked,
+            "missing": f.missing, "memory": None, "work_context": None,
+            "paper": {"present": False, "why": "not read for %s" % agent}}
+
+
+async def _pos_status(conn, f: Facts, agent: str) -> None:
+    st = await conn.fetchrow(
+        "SELECT state, activity, last_heartbeat_at, runs, errors FROM "
+        " agent_status WHERE agent_id=$1", agent)
+    if st is None:
+        f.miss("%s's heartbeat (the runner has not started)" % agent.title())
+        return
+    d = _jsonable(dict(st))
+    f.add(agent.lower() + "_status", agent, "state", d.get("state"),
+          "%s's runner is %s (%s); last heartbeat %s; runs %s, errors %s" % (
+              agent.title(), d.get("state"), d.get("activity") or "no "
+              "activity", d.get("last_heartbeat_at") or "never",
+              d.get("runs"), d.get("errors")))
+
+
+def _pos_metrics(f: Facts, source: str, met: dict) -> None:
+    for name, m in met.items():
+        f.add(source, name, name, m.get("value"),
+              ("%s: %s (%s / %s)" % (name, m["value"], m["numerator"],
+                                     m["denominator"]))
+              if m.get("value") is not None else
+              "%s: unmeasured (%s), not zero" % (name, m.get("why")))
+
+
+async def eddie_facts(conn, *, question: str,
+                      context: dict | None = None) -> dict:
+    """Eddie's fact list: his status, his SHADOW estimates (the ones the
+    question names, else the latest), their predicted vs realized outcomes
+    and his scorecard. Nothing else is read."""
+    from . import eddie as E
+    if not await E.schema(conn):
+        return _pos_empty("EDDIE", "Eddie's estimate records (migration 217 "
+                                   "not applied)")
+    f = Facts()
+    await _pos_status(conn, f, "EDDIE")
+    named = set(_EEX.findall(str(question or "")))
+    for k in ("estimate_id", "decision_id", "subject"):
+        v = (context or {}).get(k)
+        if isinstance(v, str) and v:
+            named.add(v)
+    rows = []
+    if named:
+        rows = [E._row(r) for r in await conn.fetch(
+            "SELECT * FROM eddie_execution_estimates WHERE estimate_id = "
+            " ANY($1) OR decision_id = ANY($1) ORDER BY estimated_at DESC "
+            " LIMIT $2", sorted(named), POS_ROWS_IN_FACTS)]
+        if not rows:
+            f.miss("an estimate about %s (none recorded)"
+                   % ", ".join(sorted(named))[:200])
+    if not rows:
+        rows = await E.estimates(conn, limit=POS_ROWS_IN_FACTS)
+    f.check("eddie_execution_estimates", "MATCHED" if rows else "NO_MATCH",
+            len(rows))
+    for e in rows:
+        un = e.get("unmeasured") or {}
+        f.add("eddie_estimates", e["estimate_id"], "recommendation",
+              e["recommendation"],
+              "Estimate %s of Derek's candidate %s (SHADOW): %s as %s; "
+              "theoretical edge %s, spread %s, slippage %s, fees %s, adverse "
+              "selection %s, net executable edge %s, fill probability %s, "
+              "EV %s USD. Reason: %s.%s" % (
+                  e["estimate_id"], e["decision_id"], e["recommendation"],
+                  e.get("execution_style"), e.get("theoretical_edge_pp"),
+                  e.get("spread_cost_pp"), e.get("expected_slippage_pp"),
+                  e.get("expected_fees_pp"),
+                  e.get("expected_adverse_selection_pp"),
+                  e.get("expected_net_executable_edge_pp"),
+                  e.get("expected_fill_probability"),
+                  e.get("expected_executable_ev_usd"),
+                  str(e.get("recommendation_reason"))[:240],
+                  (" Unmeasured: %s." % "; ".join(
+                      "%s (%s)" % kv for kv in sorted(un.items())))[:400]
+                  if un else ""))
+    for o in await E.outcomes(conn, limit=POS_ROWS_IN_FACTS):
+        f.add("eddie_outcomes", o["outcome_id"], "realized_execution_loss_pp",
+              o.get("realized_execution_loss_pp"),
+              "Outcome %s of %s: predicted execution loss %s, realized %s "
+              "(filled %s at VWAP %s)." % (
+                  o["outcome_id"], o["decision_id"],
+                  o.get("predicted_execution_loss_pp"),
+                  o.get("realized_execution_loss_pp"), o.get("filled_qty"),
+                  o.get("fill_vwap")))
+    try:
+        _pos_metrics(f, "eddie_metrics", (await E.metrics(conn))["metrics"])
+    except Exception as exc:                                    # noqa: BLE001
+        f.miss("Eddie's scorecard (%s)" % type(exc).__name__)
+    return {"subject": None, "demonstration": False, "found": bool(rows),
+            "scope": "BOOK", "facts": f.items, "checked": f.checked,
+            "missing": f.missing, "memory": None, "work_context": None,
+            "paper": {"present": False, "why": "not read for Eddie: he "
+                      "answers only from his estimate records"}}
+
+
+async def scout_facts(conn, *, question: str,
+                      context: dict | None = None) -> dict:
+    """Scout's fact list: his status, his sources and their compliance, his
+    features with their hypotheses and forward tests, recent observations
+    and his scorecard. Nothing else is read."""
+    from . import scout as S
+    if not await S.schema(conn):
+        return _pos_empty("SCOUT", "Scout's feature records (migration 217 "
+                                   "not applied)")
+    f = Facts()
+    await _pos_status(conn, f, "SCOUT")
+    srcs = await S.sources(conn)
+    for s in srcs:
+        f.add("scout_sources", s["source_id"], "compliance_passed",
+              s["compliance_passed"],
+              "Source %s (%s): licensing %s; compliance %s." % (
+                  s["source_id"], s["name"], s["licensing_class"],
+                  "PASSED" if s["compliance_passed"] else "REFUSED -- never "
+                  "ingested"))
+    feats = await S.features(conn)
+    f.check("scout_features", "MATCHED" if feats else "NO_MATCH", len(feats))
+    for x in feats[:POS_ROWS_IN_FACTS]:
+        f.add("scout_features", x["feature_id"], "state", x["state"],
+              "Feature %s from %s is %s. Mechanism: %s Hypothesis: %s "
+              "Forward test %s: %s of %s settled samples (%s frozen)." % (
+                  x["feature"], x["source_id"], x["state"],
+                  str(x["expected_mechanism"])[:200],
+                  str(x["predeclared_hypothesis"])[:240],
+                  x.get("tournament_id"), x.get("samples_settled"),
+                  x.get("min_sample"), x.get("samples_frozen")))
+    for o in await S.observations(conn, limit=POS_ROWS_IN_FACTS):
+        f.add("scout_observations", o["observation_id"], "value",
+              o.get("value"),
+              "Observation %s: %s = %s (%s) for event %s; confidence %s, "
+              "freshness %s s, licensing %s." % (
+                  o["observation_id"], o["feature"], o.get("value"),
+                  o.get("value_label"), o["event_key"], o["confidence"],
+                  o["freshness_s"], o["licensing_class"]))
+    try:
+        _pos_metrics(f, "scout_metrics", (await S.metrics(conn))["metrics"])
+    except Exception as exc:                                    # noqa: BLE001
+        f.miss("Scout's scorecard (%s)" % type(exc).__name__)
+    return {"subject": None, "demonstration": False, "found": bool(feats),
+            "scope": "BOOK", "facts": f.items, "checked": f.checked,
+            "missing": f.missing, "memory": None, "work_context": None,
+            "paper": {"present": False, "why": "not read for Scout: he "
+                      "answers only from his own records"}}
+
+
 async def gather(conn, *, question: str, context: dict | None = None,
                  now: float | None = None, agent: str | None = None) -> dict:
     """The one fact list for this question (see the module docstring)."""
     if str(agent or "").upper() == "KAREN":
         return await karen_facts(conn, question=question, context=context)
+    if str(agent or "").upper() == "EDDIE":
+        return await eddie_facts(conn, question=question, context=context)
+    if str(agent or "").upper() == "SCOUT":
+        return await scout_facts(conn, question=question, context=context)
     subj = subject_of(question)
     if wants_demonstration(context):
         f = demonstration_facts()

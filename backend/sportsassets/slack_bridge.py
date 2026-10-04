@@ -13,6 +13,15 @@ is Karen's (source_key 'karen:...') is never sent under another agent's
 token. Her answers come from her challenge records only (no persona model).
 She is optional: the bridge can be enabled with the three operating agents
 configured and Karen not yet set up.
+
+EDDIE (head of execution) and SCOUT (market intelligence), migration 217,
+are dedicated apps on exactly the same terms: SLACK_EDDIE_BOT_TOKEN /
+_SIGNING_SECRET / _APP_ID and SLACK_SCOUT_BOT_TOKEN / _SIGNING_SECRET /
+_APP_ID. Each posts only under its own token, only when all three values
+differ from EVERY other agent's (`dedicated_identity`), and content of
+theirs (source_key 'eddie:...' / 'scout:...') is never sent under another
+agent's token. They answer mentions from their own records only (no persona
+model), and they are optional too.
 """
 from __future__ import annotations
 import asyncio
@@ -26,11 +35,17 @@ import uuid
 import httpx
 
 CONTROL='agent.slack.bridge'
-AGENTS=('derek','xavier','audrey','karen')
-#: The bridge may be enabled once these are configured; Karen is optional.
+AGENTS=('derek','xavier','audrey','karen','eddie','scout')
+#: The bridge may be enabled once these are configured; Karen, Eddie and
+#: Scout are optional.
 REQUIRED_AGENTS=('derek','xavier','audrey')
 KAREN='karen'
 KAREN_SOURCE='karen:'
+EDDIE='eddie'
+SCOUT='scout'
+#: The agents with a DEDICATED app whose content may never travel under
+#: another agent's token: agent -> its source_key prefix.
+DEDICATED={KAREN:KAREN_SOURCE,EDDIE:'eddie:',SCOUT:'scout:'}
 QUEUE_CAP=300
 
 def _clean(v):
@@ -47,19 +62,26 @@ def settings(agent):
          'managers':{x.strip() for x in os.getenv('SLACK_MANAGEMENT_USER_IDS','').split(',') if x.strip()},
          'workroom':_clean(os.getenv('SLACK_WORKROOM_CHANNEL_ID'))}
 
-def karen_identity():
- """Is Karen's Slack identity configured AND her own? Her bot token, app
- id and signing secret must each be present and differ from every other
- agent's. Never returns a value, only booleans and the reason."""
- k=settings(KAREN)
+def dedicated_identity(agent):
+ """Is a dedicated agent's Slack identity configured AND its own? Its bot
+ token, app id and signing secret must each be present and differ from
+ EVERY other agent's (an empty value never matches). Never returns a value,
+ only booleans and the reason."""
+ if agent not in DEDICATED:raise ValueError('NOT_A_DEDICATED_AGENT')
+ k=settings(agent)
  configured=all(k[x] for x in ('token','secret','app','team','channels','managers'))
  clash=[]
- for a in REQUIRED_AGENTS:
+ for a in AGENTS:
+  if a==agent:continue
   o=settings(a)
   for f in ('token','secret','app'):
    if k[f] and o[f] and k[f]==o[f]:clash.append(a+'.'+f)
- why=None if configured and not clash else ('SHARES_'+'_'.join(c.upper().replace('.','_') for c in clash) if clash else 'KAREN_SLACK_APP_NOT_CONFIGURED')
+ why=None if configured and not clash else ('SHARES_'+'_'.join(c.upper().replace('.','_') for c in clash) if clash else agent.upper()+'_SLACK_APP_NOT_CONFIGURED')
  return {'configured':configured,'distinct':not clash,'ok':configured and not clash,'why':why}
+
+def karen_identity():
+ """Is Karen's Slack identity configured AND her own? (dedicated_identity)"""
+ return dedicated_identity(KAREN)
 
 def token_shape(raw):
  """What KIND of value is stored, never the value: its Slack prefix class,
@@ -181,6 +203,30 @@ async def publish_karen_challenges(conn):
   if await conn.fetchval("SELECT 1 FROM agent_slack_delivery WHERE agent=$1 AND team_id=$2 AND source_key=$3",KAREN,cfg['team'],source):continue
   await conn.execute("INSERT INTO agent_slack_delivery(delivery_id,agent,team_id,channel_id,source_key,answer,message_id,state) VALUES($1,$2,$3,$4,$5,$6,$7,'READY') ON CONFLICT DO NOTHING",delivery_id(KAREN,cfg['team'],source),KAREN,cfg['team'],cfg['workroom'],source,text,cid)
 
+POS_POSTS_PER_PASS=3
+
+async def publish_pos_posts(conn):
+ """THE #agent-workroom PATH FOR EDDIE AND SCOUT: evidence-linked
+ collaboration posts read from their records (eddie.workroom_posts /
+ scout.workroom_posts -- review / estimate / outcome / tournament ids), once
+ each, at most POS_POSTS_PER_PASS per agent per pass, queued ONLY as that
+ agent so they go out under its own token. Nothing is queued until the
+ agent's dedicated identity is configured and its own."""
+ for agent in (EDDIE,SCOUT):
+  if not dedicated_identity(agent)['ok']:continue
+  cfg=settings(agent)
+  if not cfg['workroom'] or cfg['workroom'] not in cfg['channels']:continue
+  table='eddie_execution_estimates' if agent==EDDIE else 'scout_features'
+  if await conn.fetchval("SELECT to_regclass($1)",table) is None:continue
+  if agent==EDDIE:
+   from .agents import eddie as M
+  else:
+   from .agents import scout as M
+  for key,text in (await M.workroom_posts(conn,limit=POS_POSTS_PER_PASS))[:POS_POSTS_PER_PASS]:
+   source=DEDICATED[agent]+key
+   if await conn.fetchval("SELECT 1 FROM agent_slack_delivery WHERE agent=$1 AND team_id=$2 AND source_key=$3",agent,cfg['team'],source):continue
+   await conn.execute("INSERT INTO agent_slack_delivery(delivery_id,agent,team_id,channel_id,source_key,answer,state) VALUES($1,$2,$3,$4,$5,$6,'READY') ON CONFLICT DO NOTHING",delivery_id(agent,cfg['team'],source),agent,cfg['team'],cfg['workroom'],source,text)
+
 def impersonation(job):
  """A refusal code when sending `job` would put words in one bot's mouth
  under another bot's token; None when it may go."""
@@ -188,6 +234,13 @@ def impersonation(job):
  if source.startswith(KAREN_SOURCE) and agent!=KAREN:return 'IMPERSONATION_REFUSED_KAREN_CONTENT_ON_ANOTHER_TOKEN'
  if agent==KAREN and not karen_identity()['distinct']:return 'IMPERSONATION_REFUSED_KAREN_TOKEN_NOT_HER_OWN'
  if agent==KAREN and not karen_identity()['configured']:return 'KAREN_SLACK_APP_NOT_CONFIGURED_NOTHING_SENT'
+ for owner in (EDDIE,SCOUT):
+  if source.startswith(DEDICATED[owner]) and agent!=owner:return 'IMPERSONATION_REFUSED_%s_CONTENT_ON_ANOTHER_TOKEN'%owner.upper()
+ for owner in (EDDIE,SCOUT):
+  if agent==owner:
+   ident=dedicated_identity(owner)
+   if not ident['distinct']:return 'IMPERSONATION_REFUSED_%s_TOKEN_NOT_ITS_OWN'%owner.upper()
+   if not ident['configured']:return '%s_SLACK_APP_NOT_CONFIGURED_NOTHING_SENT'%owner.upper()
  return None
 
 async def claim(conn):
@@ -201,6 +254,9 @@ async def claim(conn):
   try:
    async with conn.transaction():await publish_karen_challenges(conn)
   except Exception:pass  # Karen's posts never block the bridge
+  try:
+   async with conn.transaction():await publish_pos_posts(conn)
+  except Exception:pass  # Eddie's / Scout's posts never block the bridge
   row=await conn.fetchrow("SELECT * FROM agent_slack_delivery WHERE (state IN ('QUEUED','READY') OR (state='WORKING' AND lease_until<now())) AND attempts<3 ORDER BY created_at,delivery_id LIMIT 1 FOR UPDATE SKIP LOCKED")
   if not row:return None
   token=uuid.uuid4().hex
@@ -244,6 +300,15 @@ async def process(pool,job):
   from .agents import karen as K
   async with asyncio.timeout(10):
    async with pool.acquire() as c:answer=await K.slack_answer(c)
+  message_id=None
+ if not answer and job['agent'] in (EDDIE,SCOUT):
+  # Eddie and Scout answer from their own records only, likewise.
+  if job['agent']==EDDIE:
+   from .agents import eddie as M
+  else:
+   from .agents import scout as M
+  async with asyncio.timeout(10):
+   async with pool.acquire() as c:answer=await M.slack_answer(c)
   message_id=None
  if not answer:
   assigned=await assignment(pool,job)
@@ -326,6 +391,7 @@ async def status(conn):
          'delivery_counts':{r['state']:r['n'] for r in counts},
          'agents':{a:{'configured':all(settings(a)[k] for k in ('token','secret','app','team','channels','managers'))} for a in AGENTS},
          'karen_identity':karen_identity(),
+         'dedicated_identities':{a:dedicated_identity(a) for a in DEDICATED},
          'errors':{r['error_code']:r['n'] for r in await conn.fetch("SELECT error_code,count(*) AS n FROM agent_slack_delivery WHERE error_code IS NOT NULL AND updated_at>now()-interval '6 hours' GROUP BY 1")},
          'receipts':RECEIPTS[-20:],
          'authority':'READ_ONLY_PERSONA_AND_RECORDED_RESEARCH','ambiguous_delivery':'MANUAL_RECONCILIATION_REQUIRED'}

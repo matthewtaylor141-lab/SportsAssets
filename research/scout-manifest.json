@@ -1,0 +1,33 @@
+{
+  "display_information": {
+    "name": "Scout \u00b7 BettorToken",
+    "description": "Market intelligence: compliant external features and prospective tests; no trade or promotion authority",
+    "background_color": "#10261c"
+  },
+  "features": {
+    "bot_user": {
+      "display_name": "Scout",
+      "always_online": false
+    }
+  },
+  "oauth_config": {
+    "scopes": {
+      "bot": [
+        "app_mentions:read",
+        "chat:write",
+        "chat:write.public"
+      ]
+    }
+  },
+  "settings": {
+    "event_subscriptions": {
+      "request_url": "https://sportsassets-api.onrender.com/api/integrations/slack/scout/events",
+      "bot_events": [
+        "app_mention"
+      ]
+    },
+    "org_deploy_enabled": false,
+    "socket_mode_enabled": false,
+    "token_rotation_enabled": false
+  }
+}

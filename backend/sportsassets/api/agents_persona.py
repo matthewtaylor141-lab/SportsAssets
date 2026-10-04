@@ -158,7 +158,8 @@ async def persona_transcript(agent: str, conversation_id: str,
 
 @router.get("/api/command/agents/{agent}/persona/latest-conversation")
 async def persona_latest(agent: str, response: Response,
-                         role: str = Depends(resolve_role)) -> dict:
+                         role: str = Depends(resolve_role),
+                         absent: str | None = None) -> dict:
     """THE MANAGEMENT USER'S CURRENT CONVERSATION WITH THIS AGENT, so the
     Talk panel resumes it after a refresh without storing anything in the
     browser: the most recently updated conversation of this agent started
@@ -176,6 +177,12 @@ async def persona_latest(agent: str, response: Response,
             " LIMIT 1", ag, role)
         got = await PC.transcript(conn, cid) if cid else None
     if got is None:
+        if absent == "empty":
+            # opt-in (?absent=empty, the Eddie / Scout pages): "none yet" as
+            # an explicit empty answer instead of a 404 the browser logs
+            return {"conversation": None, "messages": [], "read_only": True,
+                    "status": "NO_CONVERSATION_YET_FOR_THIS_AGENT_AND_ROLE",
+                    "scoped_to": {"agent": ag, "role": role}}
         raise HTTPException(status_code=404, detail={
             "reason": "NO_CONVERSATION_YET_FOR_THIS_AGENT_AND_ROLE"})
     return dict(got, read_only=True, scoped_to={"agent": ag, "role": role})

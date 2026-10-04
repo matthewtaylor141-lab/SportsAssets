@@ -458,6 +458,23 @@ async def lifespan(_: FastAPI):
         peer_task = asyncio.create_task(_PEER.run(_cap_pool))
     except Exception:                                           # noqa: BLE001
         log.warning("karen: peer responder not armed", exc_info=True)
+    # Eddie (Head of Execution) and Scout (Market Intelligence), migration
+    # 217: SHADOW / RESEARCH ONLY. Each writes only its own records, each
+    # write transaction declared as that agent (the database refuses any
+    # order, intent, fill, approval or control write); bounded per pass;
+    # never raises into this process. Kill switches EDDIE_RUNNER_ENABLED=0
+    # and SCOUT_RUNNER_ENABLED=0.
+    eddie_task = scout_task = None
+    try:
+        from ..agents import eddie_runner as _EDDIE
+        eddie_task = asyncio.create_task(_EDDIE.run(_cap_pool))
+    except Exception:                                           # noqa: BLE001
+        log.warning("eddie: runner not armed", exc_info=True)
+    try:
+        from ..agents import scout_runner as _SCOUT
+        scout_task = asyncio.create_task(_SCOUT.run(_cap_pool))
+    except Exception:                                           # noqa: BLE001
+        log.warning("scout: runner not armed", exc_info=True)
     # 1:1,000 execution mirror: its own durable control (off by default) and
     # its own credential; idle until the control row is enabled.
     from .. import execmirror as _EXM
@@ -520,6 +537,7 @@ async def lifespan(_: FastAPI):
                              ext_task, rn1x_model_task, trim_task,
                              poller_task, capability_task, slack_task,
                              karen_task, peer_task, execmirror_task,
+                             eddie_task, scout_task,
                              intel_task,
                              *watchdog_tasks)
                  if t is not None]
@@ -590,6 +608,14 @@ try:
     app.include_router(_agents_karen_router)
 except ImportError:
     log.warning("agents: api.agents_karen not loaded", exc_info=True)
+try:
+    # Eddie and Scout (migration 217): /api/command/eddie, /api/command/scout,
+    # /api/command/agents/{eddie,scout} and /api/command/pos/reviews. Reads
+    # only; there is no write route.
+    from .agents_pos import router as _agents_pos_router
+    app.include_router(_agents_pos_router)
+except ImportError:
+    log.warning("agents: api.agents_pos not loaded", exc_info=True)
 try:
     from .agents_chat import router as _agents_chat_router
     app.include_router(_agents_chat_router)

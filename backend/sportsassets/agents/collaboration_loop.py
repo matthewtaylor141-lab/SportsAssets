@@ -54,6 +54,31 @@ from typing import Any
 AGENTS = ("DEREK", "XAVIER", "AUDREY")
 #: Agents that may act in the loop ONLY by recording a PEER_CHALLENGE.
 CHALLENGERS_ONLY = ("KAREN",)
+#: (migration 217) Eddie (execution) and Scout (intelligence) propose and
+#: peer-review findings like the operating agents, but NEVER record
+#: RELEASE_ELIGIBILITY: they hold no promotion authority of any kind.
+SHADOW_PARTICIPANTS = ("EDDIE", "SCOUT")
+#: Who may propose a finding.
+PROPOSERS = AGENTS + SHADOW_PARTICIPANTS
+
+#: DEFAULT PEER ROUTING (217): who each shadow agent works with first --
+#: the peers its findings are routed to for challenge and evaluation, and
+#: the records it reads from. CHIEF_ALLOCATOR, CALIBRATION_ENGINE,
+#: MODEL_TOURNAMENT and MODEL_CHALLENGERS are roles (rule-based components),
+#: not agent identities; they hold no tool and no authority.
+PEER_ROUTING = {
+    "EDDIE": ("DEREK", "XAVIER", "CHIEF_ALLOCATOR", "AUDREY", "KAREN"),
+    "SCOUT": ("DEREK", "KAREN", "CALIBRATION_ENGINE", "MODEL_TOURNAMENT",
+              "AUDREY", "MODEL_CHALLENGERS"),
+}
+#: The first AGENT (identity, not role) in a shadow agent's routing that is
+#: not the proposer: who is asked to challenge / evaluate its finding.
+def default_peer(proposer: str, *, exclude=()) -> str | None:
+    for p in PEER_ROUTING.get(str(proposer or "").upper(), ()):
+        if p in AGENTS + CHALLENGERS_ONLY and p not in exclude \
+                and p != proposer:
+            return p
+    return None
 
 EVIDENCE = "EVIDENCE"
 HYPOTHESIS = "HYPOTHESIS"
@@ -131,6 +156,7 @@ AUTHORITY_KEYS = frozenset((
 
 R_UNKNOWN_AGENT = "THAT_IS_NOT_ONE_OF_THE_THREE_AGENTS"
 R_CHALLENGER_ONLY = "KAREN_RECORDS_ONLY_THE_PEER_CHALLENGE_STAGE"
+R_SHADOW_NO_RELEASE = "EDDIE_AND_SCOUT_NEVER_MARK_RELEASE_ELIGIBILITY"
 R_UNGROUNDED = "A_FINDING_NEEDS_AT_LEAST_ONE_EVIDENCE_REFERENCE"
 R_BAD_REF = "AN_EVIDENCE_REFERENCE_NEEDS_A_KIND_AND_AN_ID"
 R_UNKNOWN_KIND = "THAT_EVIDENCE_KIND_IS_NOT_A_RECORD_THE_AGENTS_KEEP"
@@ -285,6 +311,9 @@ def check_advance(finding: dict, stages: list, new: dict) -> str | None:
     if actor in CHALLENGERS_ONLY:
         if stage != PEER_CHALLENGE:
             return R_CHALLENGER_ONLY
+    elif actor in SHADOW_PARTICIPANTS:
+        if stage == RELEASE_ELIGIBILITY:
+            return R_SHADOW_NO_RELEASE
     elif actor not in AGENTS:
         return R_UNKNOWN_AGENT
     if f.get("stage") == CLOSED:
@@ -442,7 +471,7 @@ async def open_finding(conn, *, proposer: str, title: str, statement: str,
     """OPEN A GROUNDED FINDING AND RECORD ITS EVIDENCE STAGE, in one
     transaction. Idempotent on the finding id (a replay writes nothing).
     Never raises."""
-    if proposer not in AGENTS:
+    if proposer not in PROPOSERS:
         return _no(R_UNKNOWN_AGENT)
     if not _text(title, 300) or not _text(statement):
         return _no(R_TEXT)
