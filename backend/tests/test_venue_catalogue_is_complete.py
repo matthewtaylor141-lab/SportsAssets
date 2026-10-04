@@ -977,6 +977,11 @@ async def test_the_fast_lane_keeps_its_old_authority_and_a_compact_receipt(
         # every request a windowed one: no unbounded rung, no calendar pass
         assert all("startTimeMin" in q for k, q in venue.calls if k == "events")
         assert len(claims) == summary["completeness"]["requests"]
+        # no detail read every 180 s: the short event is counted, the full
+        # lane repairs it
+        assert not [c for c in venue.calls if c[0] == "detail"]
+        assert summary["completeness"]["venue_market_counts"][
+            "detail_reads_skipped_budget"] == 1
     finally:
         await tx.rollback()
         await conn.close()

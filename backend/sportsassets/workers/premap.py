@@ -136,6 +136,14 @@ CALENDAR_ENABLED = os.environ.get("PREMAP_CALENDAR", "1") not in ("0", "false")
 #: event whose count and inline list could be compared agreed (fetch-docs
 #: 37233829391: numMarkets 4, 4 inline), so this read is expected to be rare.
 DETAIL_READS_PER_REFRESH = int(os.environ.get("PREMAP_DETAIL_READS", "25"))
+#: The fast lane (every 180 s) makes NO detail reads by default: what its
+#: imminent window could need, the full lane repairs every 30 minutes (and the
+#: rows it writes live 26 h), while a detail budget here would be spent again
+#: every three minutes on the same events if the venue's count and its inline
+#: list ever disagree for a reason that is not a cap. Its receipt still counts
+#: every short event (`detail_reads_skipped_budget`).
+FAST_DETAIL_READS_PER_REFRESH = int(
+    os.environ.get("PREMAP_FAST_DETAIL_READS", "0"))
 
 
 def _items(resp, key: str) -> list:
@@ -6668,7 +6676,8 @@ async def refresh(*, back_h: float = 12.0, fwd_h: float = 96.0,
     window_variant_bounded = False
     probe_rate_limited = False
     read_events: set = set()
-    detail_left = [max(0, int(DETAIL_READS_PER_REFRESH))]
+    detail_left = [max(0, int(FAST_DETAIL_READS_PER_REFRESH if lane == "fast"
+                              else DETAIL_READS_PER_REFRESH))]
     # A sweep that never records is indistinguishable from one that
     # never STARTED (2026-08-24: rows=0 last=none read three probes in a
     # row) — record the start, then progress every page, so a hang shows
