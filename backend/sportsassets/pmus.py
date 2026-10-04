@@ -441,19 +441,29 @@ def event_board(event_slug: str) -> list[dict]:
     # venue's direct event lookup returns the event with its markets inline,
     # the same shape the listing sweeps read; the old call stays as the
     # fallback for an SDK or gateway that refuses it.
+    # Both reads claim venue_pace's process-wide gap and a 429 applies its
+    # circuit (and is not followed by the second read: the limiter just said
+    # no) -- R30A, the same rule as the desk sweep.
+    from . import venue_pace as _vp
+
     try:
+        _vp.pace(_DESK_PACE_S)
         ev = (client.events.retrieve_by_slug(event_slug) or {}).get("event")
         if isinstance(ev, dict) and isinstance(ev.get("markets"), list):
             got = [dict(m, eventSlug=m.get("eventSlug") or event_slug)
                    for m in ev["markets"] if isinstance(m, dict)]
-    except Exception:  # noqa: BLE001 — fall back to the list read
+    except Exception as exc:  # noqa: BLE001 — fall back to the list read
+        if _desk_rate_limited(exc, endpoint="events.retrieve_by_slug"):
+            return []
         got = None
     if got is None:
         try:
+            _vp.pace(_DESK_PACE_S)
             resp = client.markets.list({"eventSlug": [event_slug],
                                         "active": True})
             got = list((resp or {}).get("markets") or [])
-        except Exception:  # noqa: BLE001 — an empty board, never a 500
+        except Exception as exc:  # noqa: BLE001 — an empty board, never a 500
+            _desk_rate_limited(exc, endpoint="markets.list")
             return []
     rows: list[dict] = []
 
@@ -541,13 +551,17 @@ _desk_warn_lock = threading.Lock()
 # sweep of the same board walked 18 pages (1,714-1,738 events), and the
 # venue-competition endpoint built on this cache published
 # `"truncated": False`. The budget stays where the 2026-09-05 OOM work left it
-# by default (fourteen pages: the API's 2 GiB line is the constraint, and the
-# trading catalogue is `us_premap`, which now reads the whole board), it is
-# tunable, and every sweep records how it ended in `_desk_cache["receipt"]`
-# so the endpoint can report the truncation instead of denying it. An event
-# beyond the budget is still reachable by slug: `event_board` reads it
-# directly (events.retrieve_by_slug) rather than from a list the venue does
-# not filter.
+# by default (fourteen pages), it is tunable, and every sweep records how it
+# ended in `_desk_cache["receipt"]` so the endpoint can report the truncation
+# instead of denying it. WHY NOT RAISE IT: the same log lines carry the API's
+# RSS, and on 2026-10-04 the fourteen-page sweeps ENDED at 1,442-1,706 MB
+# (17:52-20:51Z; 1,706.1 MB at 19:41:47Z) under the 2 GiB kill line, with a
+# restart between 19:48 and 19:51 (rss 141.9 MB at 19:51:10Z) -- four more
+# pages of slim rows (about 30% more) is not headroom this process has shown.
+# The trading catalogue is `us_premap`, which reads the whole board (all lanes);
+# this cache is the desk's browse surface. An event beyond the budget is still
+# reachable by slug: `event_board` reads it directly (events.retrieve_by_slug)
+# rather than from a list the venue does not filter.
 _DESK_MAX_PAGES = int(os.environ.get("PMUS_DESK_MAX_PAGES", "14"))
 # A sweep that FAILED part-way never replaces a fuller board younger than this:
 # at 20:18:29Z a sweep died on page 3 and served 200 events in place of 1,400
@@ -604,6 +618,14 @@ def list_desk_events() -> list[dict]:
     now = _t.time()
     if now - _desk_cache["ts"] < _DESK_TTL_S and _desk_cache["events"]:
         return _desk_cache["events"]
+    # A SWEEP THAT FAILED (a partial board it refused to serve, or a 429)
+    # SETS A NOT-BEFORE TIME, and the board in hand is served until then
+    # (adversarial review: the rejected partial never stamped the cache, so
+    # every desk call for up to ten minutes started a new full sweep -- each
+    # one more probe ladder into a venue that had just failed or said "too
+    # many requests").
+    if now < float(_desk_cache.get("retry_at") or 0.0):
+        return _desk_cache["events"]
     waited = False
     if not _desk_sweep_lock.acquire(blocking=False):
         if _desk_cache["events"]:
@@ -627,6 +649,8 @@ def list_desk_events() -> list[dict]:
         now = _t.time()
         if now - _desk_cache["ts"] < _DESK_TTL_S and _desk_cache["events"]:
             return _desk_cache["events"]
+        if now < float(_desk_cache.get("retry_at") or 0.0):
+            return _desk_cache["events"]
         # A waiter that wakes to an empty cache woke because the sweep
         # ahead of it found the venue blind. Until 2026-09-05 each such
         # waiter then ran the whole probe ladder itself, in turn.
@@ -635,6 +659,27 @@ def list_desk_events() -> list[dict]:
         return _desk_sweep()
     finally:
         _desk_sweep_lock.release()
+
+
+def _desk_rate_limited(exc, endpoint: str = "events.list") -> dict | None:
+    """The venue's 429 on a desk read, described, with the process-wide
+    venue_pace circuit applied (the venue's own Retry-After when it sends
+    one); None for any other failure."""
+    from . import venue_http_error as _vhe
+    from . import venue_pace as _vp
+
+    try:
+        d = _vhe.describe(exc, endpoint=endpoint)
+    except Exception:  # noqa: BLE001
+        return None
+    if not (d.get("is_rate_limited") or d.get("http_status") == 429):
+        return None
+    try:
+        _vp.penalize_observed(retry_after_s=d.get("retry_after_s"),
+                              reason="desk %s 429" % endpoint)
+    except Exception:  # noqa: BLE001 — the circuit is best effort here
+        pass
+    return d
 
 
 def _desk_sweep() -> list[dict]:
@@ -648,8 +693,23 @@ def _desk_sweep() -> list[dict]:
     longer than the TTL — eighteen calls at the SDK's 30 s timeout can
     be minutes — landed already stale: the waiter behind a slow blind
     sweep read a blind_at older than the TTL and ran the ladder again,
-    and a slow board was revalidated by its very next caller."""
+    and a slow board was revalidated by its very next caller.
+
+    PAGED BY venue_catalogue.PageWalk, PACED, AND STOPPED BY A 429 (R30A,
+    adversarial review of the first pass). The desk ended its walk on any
+    page shorter than 100 -- the first-page-only class PageWalk exists to
+    close: under a venue page-size cap it read ONE page and reported
+    truncated False to the competition endpoint. Its probe ladder claimed no
+    venue_pace gap and a 429 applied no circuit. Now the probe page is the
+    walk's first page (one request fewer than the old re-read of offset 0),
+    a short first page is confirmed, pages overlap, every request -- every
+    probe rung included -- claims the process-wide gap and is counted in the
+    receipt, and a 429 applies venue_pace.penalize_observed, ends the sweep
+    and sets a not-before time. The PAGE budget stays _DESK_MAX_PAGES (a
+    failed probe rung costs a request, never a page)."""
     import time as _t
+    from . import venue_catalogue as _vc
+    from . import venue_pace as _vp
 
     t0 = _t.monotonic()
     rss0 = _procmem.rss_label()
@@ -677,26 +737,40 @@ def _desk_sweep() -> list[dict]:
         {"active": True},
         {},
     )
+    # THE SAME REQUEST BUDGET AS BEFORE: the old loop sent the probe and then
+    # _DESK_MAX_PAGES pages (15 requests, 1,400 events); the probe page is now
+    # the walk's first page, and the five-event overlap per page costs no
+    # request -- 15 requests read 1,430 events.
+    walk = _vc.PageWalk(limit=100, max_requests=max(1, _DESK_MAX_PAGES) + 1)
     variant = None
-    probe = None
+    first = None
     for v in variants:
         try:
+            _vp.pace(_DESK_PACE_S)
             probe = client.events.list({"limit": 100, **v}) or {}
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            walk.probe_failed()
+            walk.max_requests += 1       # a failed rung is a request, not a page
+            if _desk_rate_limited(exc):
+                walk.fail(_vc.STOP_RATE_LIMITED,
+                          "%s: %s" % (type(exc).__name__, str(exc)[:160]))
+                break
             continue
         if probe.get("events"):
-            variant = v
+            variant, first = v, probe.get("events")
             break
-    # The probe page is a hundred raw events with their boards and is
-    # never read again — it must not sit alive under the paging below.
+        walk.probe_rejected()
+        walk.max_requests += 1
+    # The probe page is a hundred raw events with their boards; it becomes
+    # the walk's first page below and is dropped as soon as its slim rows
+    # are built.
     probe = None
     events: dict[str, dict] = {}
-    pages = 0
 
     def _report() -> None:
         took = _t.monotonic() - t0
         log.info("desk sweep US: pages=%d events=%d/%d markets=%d %.1fs "
-                 "rss %s->%s MB", pages,
+                 "rss %s->%s MB", walk.pages,
                  sum(1 for e in events.values() if e["markets"]),
                  len(events),
                  sum(len(e["markets"]) for e in events.values()),
@@ -706,28 +780,7 @@ def _desk_sweep() -> list[dict]:
                         "the %gs TTL a cold caller waits on it",
                         took, _DESK_TTL_S)
 
-    if variant is None:
-        _desk_cache["blind_at"] = _t.time()
-        _report()
-        return _desk_cache["events"]
-    offset = 0
-    stopped = "BUDGET"
-    for _ in range(max(1, _DESK_MAX_PAGES)):  # bounded paging
-        try:
-            # one claim on the process-wide venue gate per request (R30A):
-            # the desk's pages were unpaced, on top of every gated read
-            from . import venue_pace as _vp
-            _vp.pace(_DESK_PACE_S)
-            resp = client.events.list(
-                {"limit": 100, "offset": offset, **variant}) or {}
-        except Exception as exc:  # noqa: BLE001 — stale cache beats a 500
-            stopped = "ERROR:%s" % type(exc).__name__
-            break
-        got = resp.get("events") or []
-        if not got:
-            stopped = "EMPTY_PAGE"
-            break
-        pages += 1
+    def _slim(got) -> None:
         for ev in got:
             eslug = ev.get("slug") or ev.get("eventSlug") or ""
             if not eslug:
@@ -794,35 +847,79 @@ def _desk_sweep() -> list[dict]:
                             m.get("sportsMarketTypeV2"),
                         "sports_market_type": m.get("sportsMarketType"),
                         "team": None, "team_id": None})
-        n_got = len(got)
-        # Its slim rows are built: drop the raw page before the next one
-        # arrives. Rebinding `resp` on the next call would have kept
-        # this page alive across that call — two raw pages resident at
-        # every fetch, on top of the probe page (2026-09-05).
-        del resp, got
-        if n_got < 100:
-            stopped = "SHORT_PAGE"
+
+    def _receipt() -> dict:
+        r = walk.receipt()
+        r.update(pages=walk.pages,
+                 events_with_markets=sum(1 for e in events.values()
+                                         if e["markets"]),
+                 events_seen=len(events), max_pages=_DESK_MAX_PAGES,
+                 max_pages_after_probe=_DESK_MAX_PAGES,
+                 partial=walk.stopped in (_vc.STOP_ERROR,
+                                          _vc.STOP_RATE_LIMITED),
+                 at=_t.time())
+        return r
+
+    def _not_before(seconds: float) -> None:
+        try:
+            pen = float(_vp.penalty_left())
+        except Exception:  # noqa: BLE001
+            pen = 0.0
+        _desk_cache["retry_at"] = _t.time() + max(float(seconds), pen)
+
+    if variant is None:
+        _desk_cache["blind_at"] = _t.time()
+        _desk_cache["receipt_blind"] = _receipt()
+        if walk.stopped == _vc.STOP_RATE_LIMITED:
+            _not_before(_DESK_TTL_S)
+        _report()
+        return _desk_cache["events"]
+    fresh = walk.first(first)
+    first = None
+    _slim(fresh)
+    fresh = None
+    while (off := walk.next_offset()) is not None:
+        try:
+            # one claim on the process-wide venue gate per request (R30A):
+            # the desk's pages were unpaced, on top of every gated read
+            _vp.pace(_DESK_PACE_S)
+            resp = client.events.list(
+                {"limit": 100, "offset": off, **variant}) or {}
+        except Exception as exc:  # noqa: BLE001 — stale cache beats a 500
+            walk.requests += 1           # it was sent: counted
+            rl = _desk_rate_limited(exc)
+            walk.fail(_vc.STOP_RATE_LIMITED if rl else _vc.STOP_ERROR,
+                      "%s: %s" % (type(exc).__name__, str(exc)[:160]))
             break
-        offset += 100
+        got = resp.get("events") or []
+        # Its slim rows are built from the fresh events: drop the raw page
+        # before the next one arrives. Rebinding `resp` on the next call
+        # would have kept this page alive across that call — two raw pages
+        # resident at every fetch, on top of the probe page (2026-09-05).
+        del resp
+        fresh = walk.accept(got)
+        del got
+        _slim(fresh)
+        fresh = None
     _report()
     out = [e for e in events.values() if e["markets"]]
-    receipt = {"pages": pages, "events_with_markets": len(out),
-               "events_seen": len(events), "max_pages": _DESK_MAX_PAGES,
-               "stopped": stopped,
-               "truncated": stopped == "BUDGET",
-               "partial": stopped.startswith("ERROR:"),
-               "at": _t.time()}
+    receipt = _receipt()
     prev = _desk_cache.get("events") or []
+    if receipt["partial"] and walk.stopped == _vc.STOP_RATE_LIMITED:
+        _not_before(_DESK_TTL_S)
     if (out and receipt["partial"] and len(prev) > len(out)
             and _t.time() - float(_desk_cache.get("ts") or 0.0)
             < _DESK_PARTIAL_KEEP_S):
         # a failed sweep does not replace a fuller, recent board; its own
-        # receipt is kept beside the board it did not replace
+        # receipt is kept beside the board it did not replace, and the next
+        # sweep waits one TTL (not-before) instead of every caller starting
+        # one
         receipt["kept_previous_board"] = len(prev)
         _desk_cache["receipt_rejected"] = receipt
+        _not_before(_DESK_TTL_S)
         log.warning("desk sweep US: sweep failed after %d pages (%s); "
-                    "keeping the previous %d-event board", pages, stopped,
-                    len(prev))
+                    "keeping the previous %d-event board", walk.pages,
+                    walk.stopped, len(prev))
         return prev
     if out:
         _desk_cache.update(ts=_t.time(), events=out, receipt=receipt)

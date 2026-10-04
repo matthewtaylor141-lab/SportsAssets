@@ -493,8 +493,13 @@ def confirm_mapping_by_fixtures(*, provider_events, venue_event_titles,
                 {"venue": str(title)[:60], "refusal": R_SIDES_NOT_TWO,
                  "why": "both sides normalise to the same team"})
             continue
-        venue.append({"title": str(title)[:70], "a": a_tok, "b": b_tok,
-                      "day": days.get(title)})
+        # A title that names fixtures on several days (a return leg under the
+        # same title) is one venue fixture PER DAY (R30A): each is matched on
+        # its own date, so neither meeting erases the other.
+        tdays = days.get(title)
+        for tday in (tdays if isinstance(tdays, (list, tuple)) else [tdays]):
+            venue.append({"title": str(title)[:70], "a": a_tok, "b": b_tok,
+                          "day": tday})
         if a_drop or b_drop:
             out["normalisation"].append(
                 {"venue": str(title)[:60],
@@ -788,18 +793,42 @@ async def venue_soccer_competitions(conn, *, now: float | None = None) -> dict:
     # {token: {title: 'YYYY-MM-DD'}}, from the venue's own game_start.
     days: dict = {}
     for r in rows:
-        per: dict = {}
-        for pair in (r["title_days"] or []):
-            title, _, day = str(pair).partition("\u0001")
-            if title and day:
-                per[title] = day
-        days[str(r["token"])] = per
+        days[str(r["token"])] = title_days_of(r["title_days"])
     out["title_days"] = days
     out.update(board_bounds(rows))
     out["why"] = ("the venue's own league tokens for REAL soccer events "
                   "starting within the last 6 hours or later, simulated "
                   "competitions excluded by the venue's own words")
     return out
+
+
+def title_days_of(pairs) -> dict:
+    """{title: 'YYYY-MM-DD'} from the board's `title<U+0001>day` pairs -- and
+    {title: ['YYYY-MM-DD', 'YYYY-MM-DD']} when ONE title names fixtures on
+    several days. Pure.
+
+    TWO FIXTURES, ONE TITLE, TWO DATES (R30A, adversarial review): this was
+    `per[title] = day`, so the last pair won and a return leg -- the same two
+    clubs, the same title, another date -- erased the first fixture's date
+    from the confirmation (a provider fixture on the erased date then read as
+    "the same two teams on different days"). The SQL already returns every
+    distinct (title, day) pair; every date is kept. A single date stays a
+    string, exactly as every reader and pin has it."""
+    per: dict = {}
+    for pair in (pairs or []):
+        title, _, day = str(pair).partition("\u0001")
+        if not (title and day):
+            continue
+        cur = per.get(title)
+        if cur is None:
+            per[title] = day
+        elif isinstance(cur, list):
+            if day not in cur:
+                cur.append(day)
+                cur.sort()
+        elif cur != day:
+            per[title] = sorted({cur, day})
+    return per
 
 
 def board_bounds(rows, *, token_limit: int = BOARD_TOKEN_LIMIT,
@@ -812,13 +841,25 @@ def board_bounds(rows, *, token_limit: int = BOARD_TOKEN_LIMIT,
     (an older reader, a test fake) is reported as not measured, never as
     complete."""
     rows = list(rows or [])
-    cut, unmeasured = [], []
+    cut, unmeasured, same_title, pairs_cut = [], [], [], []
     for r in rows:
         get = r.get if hasattr(r, "get") else (lambda k, _r=r: _r[k])
-        try:
-            n = get("title_count")
-        except (KeyError, IndexError):
-            n = None
+
+        def _opt(k):
+            try:
+                return get(k)
+            except (KeyError, IndexError):
+                return None
+
+        n = _opt("title_count")
+        pairs = list(_opt("title_days") or [])
+        # every title naming fixtures on more than one day, by name (R30A)
+        for title, days in title_days_of(pairs).items():
+            if isinstance(days, list) and len(same_title) < 50:
+                same_title.append({"token": str(get("token")),
+                                   "title": title, "days": list(days)})
+        if len(pairs) >= title_limit:
+            pairs_cut.append(str(get("token")))
         if n is None:
             unmeasured.append(str(get("token")))
             continue
@@ -829,6 +870,8 @@ def board_bounds(rows, *, token_limit: int = BOARD_TOKEN_LIMIT,
     return {"board_bound": {"tokens": token_limit, "titles": title_limit},
             "board_truncated": len(rows) >= token_limit,
             "titles_truncated": cut,
+            "title_days_truncated": pairs_cut,
+            "same_title_fixtures": same_title,
             "titles_count_unmeasured": unmeasured}
 
 
@@ -959,12 +1002,7 @@ async def venue_football_competitions(conn) -> dict:
                          for r in rows}
         days: dict = {}
         for r in rows:
-            per: dict = {}
-            for pair in (r["title_days"] or []):
-                title, _, day = str(pair).partition("\u0001")
-                if title and day:
-                    per[title] = day
-            days[str(r["token"])] = per
+            days[str(r["token"])] = title_days_of(r["title_days"])
         out["title_days"] = days
         out.update(board_bounds(rows))
     except Exception as exc:                                   # noqa: BLE001

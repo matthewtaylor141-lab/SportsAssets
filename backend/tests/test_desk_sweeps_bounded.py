@@ -98,10 +98,19 @@ class _FakeEvents:
         self.entered.set()
         assert self.gate.wait(timeout=10), "the test never opened the gate"
         off = params.get("offset")
-        if off is None:
+        if not off:
             return {"events": self.pages[0]}
-        idx = off // 100
-        return {"events": self.pages[idx] if idx < len(self.pages) else []}
+        # OFFSET + LIMIT OVER THE WHOLE BOARD, as the venue answers it (R30A
+        # inc-catalogue). This was `self.pages[off // 100]`, which answers only
+        # offsets on a 100 boundary: the desk now pages with
+        # venue_catalogue.PageWalk, whose next page re-reads the previous
+        # page's last five events (offset 95, 190, ...) and whose short first
+        # page is confirmed at the very next offset. For every offset the old
+        # fake answered (0, 100, 200 on full pages) this answers the same
+        # list; the facts pinned below are unchanged.
+        flat = [e for page in self.pages for e in page]
+        n = int(params.get("limit") or 100)
+        return {"events": flat[off:off + n]}
 
 
 class _FakeClient:
@@ -367,7 +376,10 @@ def test_no_raw_page_outlives_its_slim_rows(monkeypatch):
     real_list = fake.list
 
     def spy(params):
-        if params.get("offset") == 100:
+        # the first PAGED request after the probe (R30A: the probe page is
+        # now the walk's first page and the next offset is 95, the overlap,
+        # not 100 -- the moment checked is the same: page 1 being fetched)
+        if params.get("offset") and "refs_at_page1" not in seen:
             seen["refs_at_page1"] = sys.getrefcount(page0)
         return real_list(params)
 

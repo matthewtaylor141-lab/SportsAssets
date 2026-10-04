@@ -129,6 +129,48 @@ async def test_a_board_that_fills_a_bound_says_so():
         await conn.close()
 
 
+@pg
+async def test_two_fixtures_with_one_title_keep_both_dates():
+    """ADVERSARIAL REVIEW: `per[title] = day` kept the LAST date, so the
+    first meeting of two clubs listed twice under one title was erased from
+    the fixture confirmation."""
+    conn, tx = await _tx()
+    try:
+        d1 = datetime.now(timezone.utc) + timedelta(hours=6)
+        d2 = datetime.now(timezone.utc) + timedelta(hours=54)
+        for ev, at in (("mls-cla-clb-1", d1), ("mls-cla-clb-2", d2)):
+            for side, intent in (("yes", "ORDER_INTENT_BUY_LONG"),
+                                 ("no", "ORDER_INTENT_BUY_SHORT")):
+                await conn.execute(ROW, "atc-%s-cla" % ev, ev,
+                                   "Club A vs. Club B", side, intent,
+                                   "soccer_team_full_time_winner", at)
+        got = await loop.venue_soccer_competitions(conn)
+        days = got["title_days"]["mls"]["Club A vs. Club B"]
+        assert days == sorted([d1.strftime("%Y-%m-%d"), d2.strftime("%Y-%m-%d")])
+        assert got["same_title_fixtures"] == [
+            {"token": "mls", "title": "Club A vs. Club B", "days": days}]
+        # the confirmation matches a provider fixture on EITHER date
+        for when in (d1, d2):
+            r = loop.confirm_mapping_by_fixtures(
+                provider_events=[{"home_team": "Club A", "away_team": "Club B",
+                                  "commence_time": when.strftime(
+                                      "%Y-%m-%dT%H:%M:%SZ")}],
+                venue_event_titles=got["titles"]["mls"],
+                venue_event_days=got["title_days"]["mls"])
+            assert r["ok"] is True, r
+    finally:
+        await tx.rollback()
+        await conn.close()
+
+
+def test_a_single_date_stays_a_string():
+    assert loop.title_days_of(["A vs B\u00012026-10-05"]) == {
+        "A vs B": "2026-10-05"}
+    assert loop.title_days_of(["A vs B\u00012026-10-05",
+                               "A vs B\u00012026-10-05"]) == {
+        "A vs B": "2026-10-05"}
+
+
 def test_a_board_row_without_its_title_count_is_unmeasured_not_complete():
     b = loop.board_bounds([{"token": "mls", "events": 1, "titles": ["A vs B"]}])
     assert b["titles_count_unmeasured"] == ["mls"]
@@ -146,42 +188,66 @@ def _desk_event(i):
                  "price": 0.5}]}]}
 
 
+class _Desk429(Exception):
+    def __init__(self):
+        super().__init__("429 Too Many Requests")
+        self.status_code = 429
+        self.response = type("R", (), {"status_code": 429,
+                                       "headers": {"retry-after": "9"}})()
+
+
 class _DeskEvents:
-    def __init__(self, n, *, fail_at=None):
+    def __init__(self, n, *, fail_at=None, page_cap=None, fail_exc=None,
+                 fail_probe=None):
         self.board = [_desk_event(i) for i in range(n)]
         self.fail_at = fail_at
+        self.page_cap = page_cap
+        self.fail_exc = fail_exc or (lambda: RuntimeError("gateway 502"))
+        self.fail_probe = fail_probe
         self.calls = []
 
     def list(self, q):
         self.calls.append(dict(q))
-        off = q.get("offset")
-        if off is None:
-            return {"events": self.board[:100]}
+        off = int(q.get("offset") or 0)
+        if q.get("offset") is None and self.fail_probe is not None:
+            exc = self.fail_probe(q)
+            if exc is not None:
+                raise exc
         if self.fail_at is not None and off >= self.fail_at:
-            raise RuntimeError("gateway 502")
-        return {"events": self.board[off:off + 100]}
+            raise self.fail_exc()
+        n = min(100, self.page_cap or 100)
+        return {"events": self.board[off:off + n]}
 
 
 def _wire_desk(monkeypatch, events, *, cache=None):
+    from sportsassets import venue_pace
+    claims = []
     monkeypatch.setattr(pmus, "_get_client",
                         lambda: type("C", (), {"events": events})())
     monkeypatch.setattr(pmus, "_desk_cache", cache or {
         "ts": 0.0, "events": [], "blind_at": 0.0, "warned_at": 0.0})
     monkeypatch.setattr(pmus, "_desk_sweep_lock", threading.Lock())
     monkeypatch.setattr(pmus, "_DESK_PACE_S", 0.0)
+    monkeypatch.setattr(venue_pace, "pace",
+                        lambda gap=0.35, **k: claims.append(gap) or 0.0)
+    return claims
 
 
 def test_the_desk_names_its_truncation(monkeypatch):
     """Eighteen pages listed, the budget reads fourteen: the receipt says
-    TRUNCATED -- the endpoint used to publish truncated False over it."""
+    TRUNCATED -- the endpoint used to publish truncated False over it. The
+    probe page is the walk's first page now (one request fewer)."""
     ev = _DeskEvents(1738)
-    _wire_desk(monkeypatch, ev)
+    claims = _wire_desk(monkeypatch, ev)
     monkeypatch.setattr(pmus, "_DESK_MAX_PAGES", 14)
     got = pmus.list_desk_events()
-    assert len(got) == 1400
+    # the same 15 requests as before (probe + 14 pages) now read 1,430
+    assert len(got) == 1430
     r = pmus._desk_cache["receipt"]
-    assert r["truncated"] is True and r["stopped"] == "BUDGET"
-    assert r["pages"] == 14 and r["max_pages"] == 14
+    assert r["truncated"] is True and r["stopped"] == vc.STOP_BUDGET
+    assert r["pages"] == 15 and r["max_pages_after_probe"] == 14
+    # every request paced, every request receipted
+    assert len(claims) == len(ev.calls) == r["requests"] == 15
 
 
 def test_the_desk_budget_reads_the_whole_board_when_it_covers_it(monkeypatch):
@@ -191,7 +257,20 @@ def test_the_desk_budget_reads_the_whole_board_when_it_covers_it(monkeypatch):
     got = pmus.list_desk_events()
     assert len(got) == 1738
     r = pmus._desk_cache["receipt"]
-    assert r["truncated"] is False and r["stopped"] == "SHORT_PAGE"
+    assert r["truncated"] is False and r["stopped"] == vc.STOP_SHORT_PAGE
+
+
+def test_a_venue_page_cap_does_not_make_the_desk_first_page_only(monkeypatch):
+    """ADVERSARIAL REVIEW: the desk ended on any page shorter than 100. With
+    a venue cap of 40 it read 40 of 1,738 events and reported truncated
+    False. It now confirms a short first page and pages at the venue's size."""
+    ev = _DeskEvents(500, page_cap=40)
+    _wire_desk(monkeypatch, ev)
+    monkeypatch.setattr(pmus, "_DESK_MAX_PAGES", 30)
+    got = pmus.list_desk_events()
+    assert len(got) == 500
+    r = pmus._desk_cache["receipt"]
+    assert r["venue_page_cap"] == 40 and r["truncated"] is False
 
 
 def test_a_failed_sweep_does_not_replace_a_fuller_recent_board(monkeypatch):
@@ -200,12 +279,38 @@ def test_a_failed_sweep_does_not_replace_a_fuller_recent_board(monkeypatch):
     ev = _DeskEvents(1738, fail_at=200)
     _wire_desk(monkeypatch, ev, cache={
         "ts": _t.time() - 130.0, "events": full, "blind_at": 0.0,
-        "warned_at": 0.0, "receipt": {"stopped": "BUDGET"}})
+        "warned_at": 0.0, "receipt": {"stopped": vc.STOP_BUDGET}})
     got = pmus.list_desk_events()
-    assert len(got) == 1400, "the 200-event partial must not replace it"
+    assert len(got) == 1400, "the partial must not replace it"
     assert pmus._desk_cache["events"] is full
     rej = pmus._desk_cache["receipt_rejected"]
     assert rej["partial"] is True and rej["kept_previous_board"] == 1400
+    assert rej["stopped"] == vc.STOP_ERROR
+    # AND THE NEXT CALLER DOES NOT START ANOTHER SWEEP (adversarial review:
+    # the rejected partial never stamped the cache, so every desk call for up
+    # to ten minutes swept again)
+    n = len(ev.calls)
+    assert pmus.list_desk_events() is full
+    assert len(ev.calls) == n
+    assert pmus._desk_cache["retry_at"] > _t.time()
+
+
+def test_a_429_on_the_desk_applies_the_circuit_and_a_not_before(monkeypatch):
+    import time as _t
+    from sportsassets import venue_pace
+    applied = []
+    monkeypatch.setattr(venue_pace, "penalize_observed",
+                        lambda **k: applied.append(k) or {})
+    ev = _DeskEvents(1738, fail_probe=lambda q: _Desk429())
+    claims = _wire_desk(monkeypatch, ev)
+    assert pmus.list_desk_events() == []
+    assert applied and applied[0]["retry_after_s"] == 9.0
+    # the ladder stopped at the 429: one request, paced and receipted
+    assert len(ev.calls) == 1 and len(claims) == 1
+    assert pmus._desk_cache["receipt_blind"]["stopped"] == vc.STOP_RATE_LIMITED
+    assert pmus._desk_cache["retry_at"] > _t.time()
+    pmus.list_desk_events()
+    assert len(ev.calls) == 1, "no new sweep before the not-before time"
 
 
 def test_an_event_past_the_desk_budget_is_read_by_its_slug(monkeypatch):
@@ -241,6 +346,30 @@ def test_an_event_past_the_desk_budget_is_read_by_its_slug(monkeypatch):
     assert len(rows) == 4
     assert {r["us_slug"] for r in rows} == {"aec-" + slug,
                                              "tsc-" + slug + "-47pt5"}
+
+
+def test_event_board_is_paced_and_stops_on_a_429(monkeypatch):
+    from sportsassets import venue_pace
+    claims = []
+    monkeypatch.setattr(venue_pace, "pace",
+                        lambda gap=0.35, **k: claims.append(gap) or 0.0)
+    monkeypatch.setattr(venue_pace, "penalize_observed", lambda **k: {})
+    calls = []
+
+    class _Events:
+        def retrieve_by_slug(self, s):
+            calls.append("slug")
+            raise _Desk429()
+
+    class _Markets:
+        def list(self, q):
+            calls.append("markets")
+            return {"markets": []}
+
+    monkeypatch.setattr(pmus, "_get_client", lambda: type(
+        "C", (), {"events": _Events(), "markets": _Markets()})())
+    assert pmus.event_board("ev-x") == []
+    assert calls == ["slug"] and len(claims) == 1
 
 
 def test_event_board_falls_back_to_the_list_read_when_the_lookup_fails(monkeypatch):
@@ -298,6 +427,9 @@ async def test_249_is_idempotent_append_only_checked_and_guarded():
                       2, False, ok)
         await _expect(conn, E, REC, "slow", "PARTIAL", 3, 4, 10, 8, 2, 20, 18,
                       2, False, ok)
+        # the calendar lane has its own receipts
+        await conn.execute(REC, "calendar", "PARTIAL", 3, 4, 10, 8, 2, 20, 18,
+                           2, False, ok)
         await _expect(conn, E, REC, "full", "FINE", 3, 4, 10, 8, 2, 20, 18, 2,
                       False, ok)
         # append-only
@@ -384,6 +516,21 @@ async def test_the_census_and_the_board_keep_their_horizon_as_the_catalogue_grow
         assert sum(int(r["n"]) for r in totals) == 2
         fb = await loop.venue_football_competitions(conn)
         assert fb["board"] == [("nfl", 1)]
+        # the frozen bettor_state frame and the shadow universe sample the
+        # population they always sampled: a future that started four weeks
+        # ago (STARTED_EARLIER) and next week's game (AHEAD), both freshly
+        # written, are not in it
+        old = datetime.now(timezone.utc) - timedelta(days=27)
+        await conn.execute(ROW, "tec-mlb-nlchamp-lad", "mlb-nlchamp-2026-09-27",
+                           "National League Champion", "yes",
+                           "ORDER_INTENT_BUY_LONG", "futures", old)
+        from sportsassets import shadow_bettor as sb
+        from sportsassets.workers import bettor_state as bs
+        frame = {r["event_slug"] for r in await conn.fetch(bs.PREMAP_SQL, "7200")}
+        assert frame == {"nfl-kc-lv-2026-10-05"}, frame
+        uni = {r["event_slug"] for r in await conn.fetch(
+            sb.UNIVERSE_SQL, "7200", 40)}
+        assert uni == {"nfl-kc-lv-2026-10-05"}, uni
     finally:
         await tx.rollback()
         await conn.close()

@@ -13,11 +13,16 @@
 --     90 minutes, ZERO started more than 12 h before their sighting and ZERO
 --     start more than 96 h after it -- the sweep's start-time window was the
 --     only door into the catalogue.
---   * fetch-docs runs 37233823157 / 37233829391 (the venue's public gateway):
---     open, tradable sports events outside that window exist -- "National
---     League Champion" / "World Series Champion" (startTime 2026-09-07, every
---     market MARKET_STATUS_OPEN) -- and every event carries the venue's own
---     `live` flag and `marketCounts.numMarkets`, neither of which was stored.
+--   * fetch-docs runs 37233823157 / 37233829391 (the venue's public gateway,
+--     two GETs of limit 2): open, tradable sports events outside that window
+--     exist -- "National League Champion" / "World Series Champion"
+--     (startTime 2026-09-07, every market MARKET_STATUS_OPEN). All four events
+--     read carried `marketCounts.numMarkets` and a `period` word; `live` was
+--     on the two sports events only (absent on the two politics events) and
+--     `ended` on none. None of it was stored.
+--   * research-sql run 37238634518 R2: the in-window futures (four ALDS / NLDS
+--     series winners, the ESL Pro League season winner) left the catalogue
+--     11.6-12.0 h after their start while still listed.
 --   * premap_last carried `events`, `rows`, `pages_walked` and `truncated` for
 --     the LAST sweep only, overwritten every 30 minutes (and every 3 minutes
 --     for the fast lane): no history of what any refresh kept or dropped, so
@@ -25,14 +30,17 @@
 --
 -- WHAT THIS ADDS
 --   1. us_premap.listing_state / listing_state_source / listing_pass: the
---      venue's own live / pregame word for the row's event (or the schedule,
---      named as an estimate when the venue said nothing) and the calendar slice
---      that read it. The writer (workers/premap._ensure_table) adds the same
+--      venue's own live / pregame / ended word for the row's event (its `live`
+--      flag, its `ended` flag or its period word -- or the schedule, named as
+--      an estimate when the venue said nothing, which is an expected case) and
+--      the calendar slice that read it. The writer (workers/premap._ensure_table) adds the same
 --      three columns itself, as it does every column it writes, because the
 --      workers can boot before the API's migrate; these statements are
 --      IF NOT EXISTS and the CHECKs are added only where absent.
---   2. venue_catalogue_receipts: one APPEND-ONLY row per refresh, either lane
---      -- requests, pages, listings seen / kept / dropped (with the precise
+--   2. venue_catalogue_receipts: one APPEND-ONLY row per refresh, any lane
+--      (full, fast, calendar) -- requests (every request sent, failed probe
+--      rungs and per-event detail reads included), pages, listings seen / kept
+--      / dropped (with the precise
 --      reasons by sport, league and family in `receipt`), side keys qualified
 --      or refused, truncation, and the outcome. The arithmetic is a CHECK, not
 --      a promise: kept + dropped = seen, a TRUNCATED outcome is exactly a
@@ -67,8 +75,8 @@ BEGIN
                     WHERE conname = 'us_premap_listing_state_source_known') THEN
         ALTER TABLE us_premap ADD CONSTRAINT us_premap_listing_state_source_known
             CHECK (listing_state_source IS NULL OR listing_state_source IN
-                   ('VENUE_LIVE_FLAG', 'VENUE_ENDED_FLAG', 'SCHEDULE_ESTIMATE',
-                    'NO_EVIDENCE'));
+                   ('VENUE_LIVE_FLAG', 'VENUE_ENDED_FLAG', 'VENUE_PERIOD_WORD',
+                    'SCHEDULE_ESTIMATE', 'NO_EVIDENCE'));
     END IF;
     -- a state never travels without the evidence it came from
     IF NOT EXISTS (SELECT 1 FROM pg_constraint
@@ -85,14 +93,15 @@ BEGIN
     END IF;
     COMMENT ON COLUMN us_premap.listing_state IS
         'The row''s event state when the sweep read it: LIVE / PREGAME / '
-        'NOT_LIVE / ENDED from the venue''s own live and ended flags, STARTED / '
-        'PREGAME from the schedule only when the venue stated nothing (see '
+        'NOT_LIVE / ENDED from the venue''s own live and ended flags and its '
+        'period word (a final word such as FT is ENDED), STARTED / PREGAME from '
+        'the schedule only when the venue stated nothing (see '
         'listing_state_source), UNKNOWN with neither. Migration 249; '
         'venue_catalogue.listing_state.';
     COMMENT ON COLUMN us_premap.listing_state_source IS
         'Where listing_state came from: VENUE_LIVE_FLAG, VENUE_ENDED_FLAG, '
-        'SCHEDULE_ESTIMATE (the venue said nothing; the start time decided) or '
-        'NO_EVIDENCE.';
+        'VENUE_PERIOD_WORD, SCHEDULE_ESTIMATE (the venue said nothing; the '
+        'start time decided) or NO_EVIDENCE.';
     COMMENT ON COLUMN us_premap.listing_pass IS
         'The calendar slice of the refresh that read the row: WINDOW (now-12h .. '
         'now+96h), AHEAD (beyond +96h), STARTED_EARLIER (before -12h), FAST (the '
@@ -102,7 +111,8 @@ END $$;
 CREATE TABLE IF NOT EXISTS venue_catalogue_receipts (
     id                  bigserial PRIMARY KEY,
     recorded_at         timestamptz NOT NULL DEFAULT now(),
-    lane                text NOT NULL CHECK (lane IN ('full', 'fast')),
+    lane                text NOT NULL CHECK (lane IN ('full', 'fast',
+                                                      'calendar')),
     started_at          timestamptz NOT NULL,
     finished_at         timestamptz NOT NULL,
     outcome             text NOT NULL
@@ -152,7 +162,8 @@ CREATE INDEX IF NOT EXISTS venue_catalogue_receipts_recent
 
 COMMENT ON TABLE venue_catalogue_receipts IS
     'One append-only completeness receipt per us_premap refresh (workers/premap.'
-    'refresh, either lane): requests and pages per pass, how each pass ended, '
+    'refresh, any lane: full, fast, calendar): requests and pages per pass, how '
+    'each pass ended, '
     'listings seen / kept / dropped with the precise reason by sport, league and '
     'family, the venue''s own market count per event against what arrived '
     'inline, live / pregame states, side keys qualified or refused. Migration 249 '
