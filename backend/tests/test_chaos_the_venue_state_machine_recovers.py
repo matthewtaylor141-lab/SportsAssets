@@ -1121,6 +1121,9 @@ async def test_a_lane_that_outlives_its_lease_never_overwrites_what_recovery_est
         assert await _fills(e, r["mirror_id"]) == Decimal(3)
         i = await _intent_row(e, e.it["intent_id"])
         assert i["actual_state"] == EI.A_SUBMITTED and i["actual_refusal"] is None
+        # the late lane's latency marks still reach the intent (evidence only)
+        tl = i["timeline"] if isinstance(i["timeline"], dict) else json.loads(i["timeline"])
+        assert tl.get("late_answer") == "RECOVERY_OWNS_IT" and "submit_error" in tl
         assert "LATE_SUBMIT_ANSWER" in await _events(e, r["mirror_id"])
         assert len(e.venue.placed) == 1
     finally:

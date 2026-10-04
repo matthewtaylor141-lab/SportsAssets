@@ -115,7 +115,20 @@ def _clean_venue_state(monkeypatch):
     only where no pacer is installed, so an entry there is the SDK's own."""
     from polymarket_us import client as sdk_client
     slept: list = []
-    monkeypatch.setattr(sdk_client.time, "sleep", lambda s: slept.append(s))
+    # `sdk_client.time` IS the process-wide time module: patching its sleep
+    # patches every thread's. Only THIS test's thread (where the SDK and the
+    # pacers run here) is recorded; any other thread -- a background loop an
+    # earlier test left behind -- still really sleeps (in the full suite it
+    # otherwise spun, and its 0.25 s gaps landed in this list)
+    me = threading.get_ident()
+    real_sleep = sdk_client.time.sleep
+
+    def record(s):
+        if threading.get_ident() == me:
+            slept.append(s)
+        else:
+            real_sleep(s)
+    monkeypatch.setattr(sdk_client.time, "sleep", record)
 
     def reset():
         GRT.clear_hold()
@@ -371,11 +384,14 @@ def test_close_position_sends_one_close_and_names_a_429(monkeypatch,
 # lane's send boundary (bettor_funded_execution boundary 3b) records any
 # raised send as a lost acknowledgement without touching the circuit. Only
 # the copy worker (workers/mirror_live._rate_limited) tripped it, at its own
-# layer. The adapter now trips the shared circuit itself on a NAMED 429 (the
-# SDK's RateLimitError or an int status 429 -- never '429' inside a text),
-# for every caller, before the answer goes back exactly as before: raised by
-# name, or (post_only / close) returned as the named refusal. One request,
-# never a second.
+# layer. The adapter's transport (venue_request_gate.PacedTransport, which
+# every request on the funded credential passes) now trips the shared circuit
+# on an order request's 429 -- decided by the response's own status code,
+# never a text -- for every caller, and the answer goes back exactly as
+# before: raised by name, or (post_only / close) returned as the named
+# refusal. submit_fok and close_position themselves are unchanged (their
+# sources are pinned by tests/test_e31_maker_only). One request, never a
+# second.
 
 RATE_LIMITED = (429, {"message": "Too Many Requests"})
 
@@ -432,6 +448,16 @@ def test_an_order_failure_that_is_not_a_429_does_not_trip_the_circuit(
         pmus.submit_fok(SLUG, 0.55, 3, intent="ORDER_INTENT_BUY_LONG",
                         tif="TIME_IN_FORCE_IMMEDIATE_OR_CANCEL")
     assert VP.penalty_left() == 0.0
+
+
+def test_a_read_429_is_left_to_the_read_paths_own_cooldown():
+    """The transport trips the circuit for ORDER requests only; a GET's 429
+    is armed by pmus.paced_read's own measured cooldown (_arm_cooldown_from),
+    unchanged."""
+    assert GRT.trip_circuit_on_order_429("GET", "/v1/orders/v1") is False
+    assert VP.penalty_left() == 0.0
+    assert GRT.trip_circuit_on_order_429("DELETE", "/v1/order/v1/cancel") is True
+    assert VP.penalty_left() > 0
 
 
 def test_the_funded_lane_sends_through_the_adapter_that_trips_the_circuit():

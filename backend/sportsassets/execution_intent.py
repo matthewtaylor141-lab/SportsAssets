@@ -405,6 +405,7 @@ class ActualLane:
                 await M._event(conn, "ACTUAL_SUBMIT_" + state, mirror_id=mid,
                                intent_id=intent_id, error=EP._error(exc),
                                late=got)
+                await self._late_timeline(conn, intent_id, t, got)
                 return {"state": "LATE_" + state, "late": got}
             await self._finish(conn, intent_id, t,
                                A_REJECTED if state == "REJECTED" else A_UNKNOWN,
@@ -432,6 +433,7 @@ class ActualLane:
                 await self.mirror._refresh(conn, {"mirror_id": mid,
                                                   "venue_order_id": vid})
                 await self.mirror.live_handoffs(conn)
+            await self._late_timeline(conn, intent_id, t, got)
             return {"state": "LATE_" + ("ACK" if vid else "UNKNOWN"),
                     "late": got, "venue_order_id": vid, "mirror_id": mid}
         await M._event(conn, "ACTUAL_ACCEPTED" if vid else "SUBMISSION_AMBIGUOUS",
@@ -466,6 +468,15 @@ class ActualLane:
                  timeline = timeline || $4::jsonb, updated_at = now()
                WHERE intent_id = $1 AND actual_state = $5""",
             intent_id, state, refusal, _j(t), A_SUBMITTING)
+
+    async def _late_timeline(self, conn, intent_id, t, outcome) -> None:
+        """A late answer's latency marks still reach the intent's timeline
+        (evidence only: the intent's state is the venue evidence's, set by
+        execmirror.late_submit_answer / recovery, never the late lane's)."""
+        await conn.execute(
+            """UPDATE execution_intents SET timeline = timeline || $2::jsonb,
+                 updated_at = now() WHERE intent_id = $1""",
+            intent_id, _j(dict(t, late_answer=outcome)))
 
     async def _buying_power(self, conn) -> tuple[Any, float | None]:
         """The retail account's buying power: the runner's live figure when it
