@@ -47,6 +47,12 @@ from tests.workflow_source import render_ops_file as _render_ops_file
 
 YML = _render_ops_file()
 
+# R30A ci (2026-10-04): the tests marked below slice the preset by the comment
+# headers that 4c20f8c (2026-09-21) moved verbatim into RENDER_OPS_NOTES.md,
+# leaving an anchor line; they read the workflow with those notes put back
+# (tests/workflow_source.render_ops_documented_text). The SQL is unchanged.
+from tests.workflow_source import render_ops_documented_text as _ro_documented
+
 
 def _preset(text: str, name: str) -> tuple[str, int]:
     m = re.search(r'^ {16}' + re.escape(name) + r'\) SQL="(.*?)"; TO=(\d+)', text, re.M | re.S)
@@ -197,7 +203,7 @@ def test_fills_missed_state_and_decision_statements_carry_the_class_rows_measure
 
 
 def test_fills_missed_keeps_its_case_label_and_the_hourly_carries_the_six_statements():
-    text = YML.read_text()
+    text = _ro_documented()  # the notes put back (R30A ci)
     names, labels, line = _labels_and_help(text)
     assert names == labels and names[-1] == "hourly"
     j = labels.index("fills-missed")
@@ -292,7 +298,7 @@ WHERE_WORD = "WHERE class IN ('filled', 'partial', 'missed_expired_ioc', 'missed
 
 
 def test_fills_missed_decision_block_carries_missed_replace_in_both_places_and_prints_the_rows_own_word():
-    text = YML.read_text()
+    text = _ro_documented()  # the notes put back (R30A ci)
     st = _stmts(_preset(text, "fills-missed")[0])
     assert WHERE_WORD + " GROUP BY 1, 2 ORDER BY 1, 4 DESC" in st[2]
     assert "WHERE class IN ('filled', 'partial', 'missed_expired_ioc')" not in text, "the old three-word clause is gone everywhere"

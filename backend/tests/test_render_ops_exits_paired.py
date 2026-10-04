@@ -51,6 +51,12 @@ from tests.test_render_ops_fills_missed import World, _f
 from tests.workflow_source import render_ops_file as _render_ops_file
 
 YML = _render_ops_file()
+
+# R30A ci (2026-10-04): the tests marked below slice the preset by the comment
+# headers that 4c20f8c (2026-09-21) moved verbatim into RENDER_OPS_NOTES.md,
+# leaving an anchor line; they read the workflow with those notes put back
+# (tests/workflow_source.render_ops_documented_text). The SQL is unchanged.
+from tests.workflow_source import render_ops_documented_text as _ro_documented
 VERDICTS = ("we_matched_his_cut", "he_reduced_we_held", "no_exit_by_him", "exited_with_him", "partial_exit",
             "exit_placed_unfilled", "no_exit_order")
 # he_reduced_we_held since FILL lane 0b, before no_exit_by_him (its sub-case); we_matched_his_cut since FILL
@@ -81,7 +87,7 @@ def _statements(sql: str) -> list[str]:
 
 
 def test_the_exits_paired_preset_is_read_only_limited_on_its_own_timeout():
-    text = YML.read_text()
+    text = _ro_documented()  # the notes put back (R30A ci)
     block = _block(text)
     assert "need_confirm" not in block and "$ARG" not in block
     for bad in ("INSERT", "UPDATE", "DELETE", "DROP", "TRUNCATE"):
@@ -256,7 +262,7 @@ def test_the_exits_paired_preset_names_the_verdicts_in_order_and_puts_the_stuck_
 
 
 def test_the_exits_paired_help_line_is_the_case_labels_after_nf_venue_with_hourly_last_and_untouched():
-    text = YML.read_text()
+    text = _ro_documented()  # the notes put back (R30A ci)
     line = next(ln for ln in text.splitlines() if ln.lstrip().startswith('*) echo "sql: arg must be one of'))
     names = line.split("one of ", 1)[1].split(" (got", 1)[0].split("|")
     labels = re.findall(r"^ {16}([a-z0-9-]+)\) ", text[text.index('case "$ARG" in'):text.index(line)], re.M)

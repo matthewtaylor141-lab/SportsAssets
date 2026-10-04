@@ -479,7 +479,10 @@ def test_c11_the_census_place_the_emit_site_the_source_shape_and_no_knob():
     assert "cand_market_closed_db" not in inspect.getsource(rules)
     # no migration from this lane: 061 is lane 9's (landed after), nothing sorts past it
     migs = sorted(p.name for p in pathlib.Path(ml.__file__).resolve().parents[3].joinpath("backend", "migrations").glob("*.sql"))
-    assert migs[-1] == "064_run833_stream_channels.sql" and "cand" not in migs[-1]  # re-pinned 2026-09-12 (run 83.3): run 83.3's 064 is the newest; this lane still adds none
+    # R30A ci (2026-10-04): this was `files[-1] == 064`, the GLOBALLY newest file -- red since
+    # 065 landed. The lane's property, re-expressed in tests/migration_epochs.py:
+    from tests import migration_epochs as MIG
+    MIG.assert_lane_added_no_migration(NEW_NAME)
     assert "cand_market_closed_db" not in (ROOT / "backend" / "migrations" / "059_mirror_orders_send_record.sql").read_text()
 
 

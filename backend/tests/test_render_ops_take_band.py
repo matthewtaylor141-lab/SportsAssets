@@ -40,6 +40,12 @@ from tests.test_render_ops_fills_missed import World, _f
 from tests.workflow_source import render_ops_file as _render_ops_file
 
 YML = _render_ops_file()
+
+# R30A ci (2026-10-04): the tests marked below slice the preset by the comment
+# headers that 4c20f8c (2026-09-21) moved verbatim into RENDER_OPS_NOTES.md,
+# leaving an anchor line; they read the workflow with those notes put back
+# (tests/workflow_source.render_ops_documented_text). The SQL is unchanged.
+from tests.workflow_source import render_ops_documented_text as _ro_documented
 HIS_CENT = "floor(round((o.his_level * 100)::numeric, 6)) / 100"
 RESOLVED = "filled > 0 AND payoff IS NOT NULL"
 CAUSES = "('replace_cent', 'replace_qty', 'replace_side', 'ttl', 'replace_unread')"
@@ -72,7 +78,7 @@ def _short_statement(sql: str) -> str:
 
 
 def test_take_band_is_two_read_only_statements_on_its_own_timeout():
-    text = YML.read_text()
+    text = _ro_documented()  # the notes put back (R30A ci)
     block = text[text.index("take-band) SQL="):text.index("# THE EXIT BAND")]
     assert "need_confirm" not in block and "$ARG" not in block and "HEAD=" not in block
     for bad in ("INSERT", "UPDATE", "DELETE", "DROP", "TRUNCATE", "ALTER"):
@@ -157,7 +163,7 @@ def test_take_band_third_statement_grades_the_short_adds_rows_on_the_bid_under_h
     our_usd the collateral, roi = (wire - payoff) / (1 - wire) over the
     filled rows on resolved markets, the same buckets and ROLLUP, side
     'short'; read-only, both places."""
-    text = YML.read_text()
+    text = _ro_documented()  # the notes put back (R30A ci)
     sql, _ = _preset(text, "take-band")
     short = _short_statement(sql)
     assert short.count(";") == 1 and short.endswith("FROM y GROUP BY ROLLUP (decision, bucket) ORDER BY 2, 3;")
@@ -202,7 +208,7 @@ def test_take_band_third_statement_grades_the_short_adds_rows_on_the_bid_under_h
 
 
 def test_take_band_sits_after_exits_paired_and_rides_the_hourly_after_fills_missed():
-    text = YML.read_text()
+    text = _ro_documented()  # the notes put back (R30A ci)
     line = next(ln for ln in text.splitlines() if ln.lstrip().startswith('*) echo "sql: arg must be one of'))
     names = line.split("one of ", 1)[1].split(" (got", 1)[0].split("|")
     labels = re.findall(r"^ {16}([a-z0-9-]+)\) ", text[text.index('case "$ARG" in'):text.index(line)], re.M)
@@ -293,7 +299,7 @@ def test_take_band_prints_whatever_decision_word_the_row_carries():
 
 
 def test_take_band_comment_names_the_split_the_pairs_and_the_gate():
-    text = YML.read_text()
+    text = _ro_documented()  # the notes put back (R30A ci)
     block = text[text.index("# REST VS TAKE, BY DECISION AND BAND"):text.index("take-band) SQL=")]
     for word in ("FILL lane 8", "rest_replaced", "replaced_n` STAYS", "window sum", "SECOND STATEMENT", "LEAD",
                  "touch_moved", "same_quote", "qty_regrow", "other", "unread", "future_clock", "45 s", "lane 12",
