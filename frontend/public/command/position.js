@@ -132,18 +132,19 @@
     RESTING: {t: 'RESTING', d: 'on the book, nothing filled: NOT protection until it fills'},
     PARTIAL: {t: 'PARTIAL', d: 'part filled: only the filled part counts, the remainder rests'},
     FILLED: {t: 'FILLED', d: 'completely filled'},
-    CANCEL_PENDING: {t: 'CANCEL PENDING', d: 'can still fill until confirmed'},
+    CANCEL_PENDING: {t: 'CANCEL PENDING', d: 'cancel requested, not confirmed: it MAY STILL FILL; its unfilled remainder is NOT protection, only a part already filled counts'},
     CANCELLED: {t: 'CANCELLED', d: 'unfilled remainder gone'},
     EXPIRED: {t: 'EXPIRED', d: 'expired'},
     REJECTED: {t: 'REJECTED', d: 'refused'},
     EXCLUDED: {t: 'EXCLUDED', d: 'never sent'}
   };
-  var CANON = ['PROPOSED', 'SUBMITTED', 'RESTING', 'PARTIAL', 'FILLED', 'CANCELLED', 'REJECTED', 'EXPIRED', 'UNKNOWN'];
+  // the owner's NINE canonical states + the explicit UNKNOWN (order_state_truth)
+  var CANON = ['PROPOSED', 'SUBMITTED', 'RESTING', 'PARTIAL', 'FILLED', 'CANCEL_PENDING', 'CANCELLED', 'REJECTED', 'EXPIRED', 'UNKNOWN'];
+  var STANDING = ['RESTING', 'PARTIAL', 'CANCEL_PENDING'];
   function stateBadge(st, raw, sub) {
     var k = STATE[st] ? st : 'UNKNOWN';
     return '<span class="pr-st st-' + k + '" title="' + esc((STATE[k] || {}).d + (sub ? ' · ' + human(sub) : '') + (raw ? ' · recorded state ' + raw : '')) + '">' +
-      '<i class="pr-glyph" aria-hidden="true"></i>' + esc((STATE[k] || {t: st}).t) + '</span>' +
-      (sub === 'CANCEL_PENDING' ? '<span class="pr-st st-CANCEL_PENDING pr-sub-st" title="cancel requested, not confirmed: it can still fill"><i class="pr-glyph" aria-hidden="true"></i>CANCEL PENDING</span>' : '');
+      '<i class="pr-glyph" aria-hidden="true"></i>' + esc((STATE[k] || {t: st}).t) + '</span>';
   }
 
   // ── transport ──────────────────────────────────────────────────────
@@ -409,7 +410,7 @@
       '<div class="pr-pgrid">' +
         k('', 'Position qty', '<b class="money">' + esc(qtyTxt(p.position_qty)) + '</b>', 'held now + sold by filled protection', p.position_basis) +
         k('is-bad', 'Unprotected qty', '<b class="money">' + esc(qtyTxt(p.unprotected_qty)) + '</b>', 'position − filled protection', p.position_basis) +
-        k('is-standing', 'Standing order qty', '<b class="money">' + esc(qtyTxt(p.standing_order_qty)) + '</b>', 'RESTING / PARTIAL remainder · NOT protection' + (num(p.pending_order_qty) ? ' · +' + esc(qtyTxt(p.pending_order_qty)) + ' not yet on the book' : ''), p.rule) +
+        k('is-standing', 'Standing order qty', '<b class="money">' + esc(qtyTxt(p.standing_order_qty)) + '</b>', 'RESTING / PARTIAL / CANCEL PENDING remainder · NOT protection' + (num(p.pending_order_qty) ? ' · +' + esc(qtyTxt(p.pending_order_qty)) + ' not yet on the book' : ''), p.rule) +
         k('is-good', 'Filled protection qty', '<b class="money">' + esc(qtyTxt(p.filled_protection_qty)) + '</b>', 'filled protective sales + filled hedges', p.rule) +
         k('is-cond', 'Conditional floor · IF FILLED', usd(p.conditional_floor_if_filled_usd, condWhy || 'nothing standing'),
           num(p.conditional_floor_if_filled_usd) === null ? esc(condWhy || 'nothing standing') : 'CONDITIONAL · nothing of it is realized', p.conditional_floor_basis) +
@@ -545,7 +546,7 @@
     var q = num(o.qty) || 0, f = num(o.filled_qty) || 0;
     var p = q > 0 ? Math.min(100, f / q * 100) : 0;
     var dist = o.distance || null;
-    var standing = ['RESTING', 'PARTIAL'].indexOf(o.state) >= 0;
+    var standing = STANDING.indexOf(o.state) >= 0;
     var head = '<div class="pr-ord-line">' + stateBadge(o.state, o.raw_state, o.sub_state) +
       '<b class="pr-ord-what">' + esc((o.role === 'STANDING_PROTECTION' ? 'STANDING ' : '') + o.direction) + ' ' + centsTxt(o.limit) + '</b>' +
       '<span class="muted">' + esc(roleLabel(o.role)) + '</span>' +

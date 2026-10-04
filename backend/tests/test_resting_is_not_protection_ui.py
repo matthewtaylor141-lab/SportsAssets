@@ -74,9 +74,10 @@ def test_the_position_room_renders_the_whole_protection_ledger():
     # the conditional scenario columns and the if-it-fills card say IF FILLED
     assert "IF FILLED · every standing order (conditional)" in js
     assert "IF FILLED · conditional · " in js
-    # the eight canonical states + explicit UNKNOWN in the legend
+    # the owner's nine canonical states + explicit UNKNOWN in the legend
     assert ("['PROPOSED', 'SUBMITTED', 'RESTING', 'PARTIAL', 'FILLED', "
-            "'CANCELLED', 'REJECTED', 'EXPIRED', 'UNKNOWN']") in js
+            "'CANCEL_PENDING', 'CANCELLED', 'REJECTED', 'EXPIRED', "
+            "'UNKNOWN']") in js
     # each ACTUAL venue shows its OWN connection (KALSHI — NOT_CONNECTED)
     assert "v.connection" in js and "cn.display" in js
 
@@ -85,3 +86,24 @@ def test_live_page_unprotected_never_nets_resting():
     js = (FRONTEND / "live.js").read_text()
     assert "Standing orders (resting, NOT protection until filled)" in js
     assert "Standing protection" not in js
+
+
+def test_cancel_pending_renders_as_standing_never_protection():
+    """UI regression: CANCEL_PENDING is its own state (glyph + legend), is
+    drawn as a STANDING order whose remainder is labelled NOT protection,
+    and its unfilled quantity is never placed under a protection label. The
+    rendered page with a CANCEL_PENDING fixture is checked by the
+    screenshot harness (shots/c28-resting/room_cancel_pending_*)."""
+    js = (FRONTEND / "position.js").read_text()
+    css = (FRONTEND / "position.css").read_text()
+    assert "var STANDING = ['RESTING', 'PARTIAL', 'CANCEL_PENDING'];" in js
+    assert "var standing = STANDING.indexOf(o.state) >= 0;" in js
+    assert "'Standing · NOT protection'" in js
+    assert "CANCEL_PENDING: {t: 'CANCEL PENDING'" in js
+    assert "MAY STILL FILL; its unfilled remainder is NOT protection" in js
+    # the protection figures come from the server's ledger only: the page
+    # never sums an order's quantity into a protection figure itself
+    assert not re.search(r"filled_protection_qty\s*[+]?=", js)
+    assert ".st-CANCEL_PENDING" in css
+    # the old RESTING + tag rendering is gone
+    assert "sub === 'CANCEL_PENDING'" not in js
