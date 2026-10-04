@@ -14,7 +14,9 @@ from decimal import Decimal
 import asyncpg
 import pytest
 
+from sportsassets import canonical_intent as CI
 from sportsassets import execmirror as M
+from sportsassets import live_approvals as LAP
 from sportsassets import live_parity as LP
 from tests import paper_harness as H
 
@@ -26,24 +28,71 @@ DOWN = (MIG / "rollback" / "225_live_parity.down.sql").read_text()
 CG = "PINNACLE_COMPLETED_GAME_PAPER"
 SHA = "a" * 40
 CG3 = "PINNACLE_COMPLETED_GAME_PAPER_V3"
+NOW = 1791130000.0
+
+#: the completed-game policy's ACTIVE parameter row as paper_benchmark.
+#: cg_parameters reads it (migration 188's V2: its stored sha is the sha of
+#: json.dumps(values, sort_keys=True))
+PARAMS_V2 = {
+    "policy_key": CG, "source": "ACTIVE_VERSION",
+    "version_id": "paperparam:%s:V2" % CG, "version_no": 2,
+    "values": {"min_gross_edge_pp": 0.5},
+    "params_sha256": CI.params_row_sha({"min_gross_edge_pp": 0.5}),
+    "version_source": "OWNER_DECISION",
+    "approved_by": "OWNER (account holder): written paper-only authorization",
+    "activation_id": "paperact:%s:V2:OWNER_DECISION" % CG,
+    "activation_kind": "OWNER_DECISION", "fallback_reason": None}
 
 
-def _intent(**over):
+def _intent(now=NOW, **over):
     kw = dict(
         decision_id="papercg:abc", strategy=CG, strategy_version=CG3,
         evidence={"valuation_id": 101, "book_obs_id": 7, "probability": 0.62},
         opportunity_score={"status": "MEASURED", "opportunity_score": 0.4},
         derek={"status": "MEASURED", "verdict": "ENTER"},
         karen={"state": "NO_OPEN_CHALLENGE_ON_THIS_MARKET_OR_STRATEGY"},
-        allie={"status": "MEASURED", "shadow_usd": 2.0},
-        eddie={"status": "MEASURED", "recommendation": "EXECUTE_NOW"},
-        us_market_slug="aec-nfl-kc-buf-2026-10-04", contract={"fixture": "f1"},
+        allie={"status": "MEASURED", "final_allocatable_usd": 2000.0,
+               "final_binding": "CAPITAL_REQUIRED",
+               "binding_constraint": "CAPITAL_REQUIRED"},
+        eddie={"status": "MEASURED", "recommendation": "EXECUTE_NOW",
+               "expected_executable_ev_usd": 40.0,
+               "expected_net_executable_edge_pp": 3.2,
+               "expected_fill_probability": 0.9},
+        us_market_slug="aec-nfl-kc-buf-2026-10-04",
+        contract={"fixture": "f1", "line": None, "scope": "FULL_GAME"},
         holding_side="LONG", order_intent="ORDER_INTENT_BUY_LONG",
         order_type="MARKETABLE", time_in_force="IOC", limit_price=0.55,
         wire_price=0.55, target_qty=2400, sizing_basis={"rule": "x"},
-        created_at=1791130000.0)
+        created_at=now,
+        policy=CI.policy_block(strategy=CG, strategy_version=CG3,
+                               params=PARAMS_V2),
+        probability={"status": "MEASURED", "value": 0.62,
+                     "source": "pinnapi.com/raw-websocket",
+                     "source_version": "PINNACLE_DEVIG_V1",
+                     "observed_at": now - 5.0, "received_at": now - 4.5,
+                     "age_at_decision_s": 5.0, "limit_s": 30.0},
+        book={"status": "MEASURED", "obs_id": 7, "observed_at": now - 1.0,
+              "age_at_decision_s": 1.0, "max_age_s": 10.0},
+        risk_rails={"paper_per_order_cap_usd": 5000, "live": {
+            "live_max_order_usd": 25, "live_scale": 1000}})
     kw.update(over)
     return LP.build_decision_intent(**kw)
+
+
+def _gov(it):
+    """Everything approved for THIS intent (pure adapter tests; the
+    governance refusals have their own tests)."""
+    return {"approved_policy_shas": {it["policy"]["policy_sha"]},
+            "approved_gates": set(LAP.GATES)}
+
+
+def _live(it, *, now=None, governance="OK", **kw):
+    kw.setdefault("scale", 1000)
+    kw.setdefault("buying_power", 100.0)
+    kw.setdefault("max_order_usd", 25)
+    return LP.live_entry_proposal(
+        it, now=(it["created_at"] + 1.0) if now is None else now,
+        governance=_gov(it) if governance == "OK" else governance, **kw)
 
 
 def _paper_order(intent):
@@ -113,7 +162,7 @@ def test_small_live_is_shadow_and_the_real_venue_refuses_any_new_order():
 
 def test_the_live_entry_is_the_same_order_at_capital_scale():
     it = _intent()
-    live = LP.live_entry_proposal(it, scale=1000, buying_power=100.0,
+    live = _live(it, scale=1000, buying_power=100.0,
                                   max_order_usd=25)
     assert live["state"] == LP.S_PROPOSED and live["live_qty"] == 2
     assert live["params"] == M.venue_params(
@@ -126,21 +175,21 @@ def test_the_live_entry_is_the_same_order_at_capital_scale():
 
 
 def test_capital_bounds_are_exclusions_not_logic():
-    small = LP.live_entry_proposal(_intent(target_qty=300), scale=1000,
+    small = _live(_intent(target_qty=300), scale=1000,
                                    buying_power=100.0, max_order_usd=25)
     assert small["exclusion"] == M.BELOW_VENUE_MINIMUM
-    cap = LP.live_entry_proposal(_intent(target_qty=60000), scale=1000,
+    cap = _live(_intent(target_qty=60000), scale=1000,
                                  buying_power=100.0, max_order_usd=25)
     assert cap["exclusion"] == M.ABOVE_ORDER_CAP
-    acct = LP.live_entry_proposal(_intent(), scale=1000, buying_power=None,
+    acct = _live(_intent(), scale=1000, buying_power=None,
                                   max_order_usd=25)
     assert acct["exclusion"] == "ACCOUNT_STATE_NOT_CURRENT"
-    off = LP.live_entry_proposal(_intent(strategy="PINNACLE_EXPLORATION_PAPER",
+    off = _live(_intent(strategy="PINNACLE_EXPLORATION_PAPER",
                                          strategy_version="X"),
                                  scale=1000, buying_power=100.0,
                                  max_order_usd=25)
     assert off["state"] == LP.S_NO_ORDER
-    halted = LP.live_entry_proposal(_intent(), scale=1000, buying_power=100.0,
+    halted = _live(_intent(), scale=1000, buying_power=100.0,
                                     max_order_usd=25, halted=True)
     assert halted["state"] == LP.S_HALTED and halted["params"] is None
 
@@ -150,7 +199,7 @@ def test_capital_bounds_are_exclusions_not_logic():
 def _pair(it, *, paper_state=LP.P_SUBMITTED, refusal=None, live=None,
           order=None):
     order = order or _paper_order(it)
-    live = live or LP.live_entry_proposal(it, scale=1000, buying_power=100.0,
+    live = live or _live(it, scale=1000, buying_power=100.0,
                                           max_order_usd=25)
     return LP.compare(kind="DECISION", intent=it,
                       paper={"state": paper_state, "refusal": refusal,
@@ -168,8 +217,10 @@ def test_identical_logic_at_scale_is_an_expected_scale_difference():
 
 def test_scale_one_identical_quantities_match():
     it = _intent(target_qty=3)
-    live = LP.live_entry_proposal(it, scale=1, buying_power=100.0,
-                                  max_order_usd=25)
+    # R30A: Allie's final allocation ($2,000) is compared too, so the live
+    # rail must sit above it for a scale-1 pair to be identical in every
+    # compared field (with a $25 rail it is a capital bound: SCALE)
+    live = _live(it, scale=1, buying_power=10_000.0, max_order_usd=5000)
     res = LP.compare(kind="DECISION", intent=it,
                      paper={"state": LP.P_SUBMITTED,
                             "requested": LP.paper_entry_request(
@@ -192,7 +243,7 @@ def test_any_logic_field_that_differs_is_a_divergence(field, value):
 
 def test_a_quantity_that_is_not_the_scaled_quantity_is_a_divergence():
     it = _intent()
-    live = LP.live_entry_proposal(it, scale=1000, buying_power=100.0,
+    live = _live(it, scale=1000, buying_power=100.0,
                                   max_order_usd=25)
     live = dict(live, live_qty=3)
     res = _pair(it, live=live)
@@ -203,7 +254,7 @@ def test_a_quantity_that_is_not_the_scaled_quantity_is_a_divergence():
 def test_a_different_intent_sha_is_a_divergence():
     it = _intent()
     other = _intent(target_qty=2600)
-    live = LP.live_entry_proposal(other, scale=1000, buying_power=100.0,
+    live = _live(other, scale=1000, buying_power=100.0,
                                   max_order_usd=25)
     res = _pair(it, live=live)
     assert res["parity_state"] == LP.DIVERGENCE
@@ -214,7 +265,7 @@ def test_exclusions_and_refusals_are_classified_by_cause():
     it = _intent(target_qty=300)
     assert _pair(it)["parity_state"] == LP.SCALE                # venue min
     it = _intent()
-    venue = dict(LP.live_entry_proposal(it, scale=1000, buying_power=100.0,
+    venue = dict(_live(it, scale=1000, buying_power=100.0,
                                         max_order_usd=25),
                  state=LP.S_EXCLUDED, exclusion=M.UNSUPPORTED_ORDER)
     assert _pair(it, live=venue)["parity_state"] == LP.VENUE_DIFF
@@ -405,16 +456,60 @@ async def test_225_is_idempotent_append_only_and_shadow_only():
                       """INSERT INTO small_live_order_events (execution_id,
                            venue_order_id, state, source, venue_record)
                          VALUES ('nope','v','FILLED','PAPER_FILL','{}')""")
+        mi_sql = """INSERT INTO canonical_management_intents (intent_id,
+                       intent_version, review_id, group_id, position_key,
+                       sleeve, evidence_state, action, us_market_slug,
+                       holding_side, target_qty, target_limit, alternatives,
+                       alternative_set, chosen, chosen_why, policy,
+                       freshness, reason, created_at, content_sha)
+                     VALUES ('cmi_000000000000000000000000','v','r','g','p',
+                       'INVESTMENT',$1,$2,'s','LONG',5,'{}','{}',$3::jsonb,
+                       $2,'{}','{}','{}','{}',now(),repeat('a',64))"""
+        full = json.dumps({a: {"status": "EVALUATED"} for a in CI.ALTERNATIVES})
+        # a discretionary sale on stale evidence is refused
+        await _expect(conn, asyncpg.CheckViolationError, mi_sql,
+                      "STALE_ENTRY_TIME_PROBABILITY", "SELL_EXIT", full)
+        # R30A: the alternative set must name all eight alternatives ...
+        seven = json.loads(full)
+        seven.pop("INDIRECT_HEDGE")
+        await _expect(conn, asyncpg.CheckViolationError, mi_sql,
+                      "FRESH_CURRENT_PROBABILITY", "SELL_EXIT",
+                      json.dumps(seven))
+        # ... and an UNAVAILABLE alternative must carry its reason
+        noreason = dict(json.loads(full), INDIRECT_HEDGE={
+            "status": "UNAVAILABLE"})
+        await _expect(conn, asyncpg.CheckViolationError, mi_sql,
+                      "FRESH_CURRENT_PROBABILITY", "SELL_EXIT",
+                      json.dumps(noreason))
+        # a decision intent's expires_at is NULL exactly when its window is
+        # underivable (the reason in `expiry`); the opportunity id is the
+        # five-part key
+        for bad in (dict(it, decision_id="papercg:x1",
+                         intent_id=LP.decision_intent_id("papercg:x1"),
+                         expires_at=None),
+                    dict(it, decision_id="papercg:x2",
+                         intent_id=LP.decision_intent_id("papercg:x2"),
+                         opportunity_id="no-key")):
+            sp = conn.transaction()
+            await sp.start()
+            try:
+                with pytest.raises(asyncpg.CheckViolationError):
+                    await LP.record_decision_intent(conn, bad)
+            finally:
+                await sp.rollback()
+        # R30A: an owner LIVE approval is append-only and needs a named human
         await _expect(conn, asyncpg.CheckViolationError,
-                      """INSERT INTO canonical_management_intents (intent_id,
-                           intent_version, review_id, group_id, position_key,
-                           sleeve, evidence_state, action, us_market_slug,
-                           holding_side, target_qty, target_limit, alternatives,
-                           freshness, reason, created_at, content_sha)
-                         VALUES ('cmi_000000000000000000000000','v','r','g','p',
-                           'INVESTMENT','STALE_ENTRY_TIME_PROBABILITY',
-                           'SELL_EXIT','s','LONG',5,'{}','{}','{}','{}',now(),
-                           repeat('a',64))""")
+                      """INSERT INTO live_approvals (subject_kind, subject_id,
+                           subject_version, config_sha256, decision,
+                           approved_by, statement) VALUES ('LIVE_GATE',
+                           'SETTLEMENT_COMPATIBILITY_V1', '1', repeat('a',64),
+                           'APPROVE', 'Xavier', 'self-approval')""")
+        await _expect(conn, asyncpg.CheckViolationError,
+                      """INSERT INTO live_approvals (subject_kind, subject_id,
+                           subject_version, config_sha256, decision,
+                           approved_by, statement) VALUES ('LIVE_GATE',
+                           'SETTLEMENT_COMPATIBILITY_V1', '1', repeat('a',64),
+                           'APPROVE', 'system', 'x')""")
         # the rollback refuses while records exist
         await _expect(conn, asyncpg.exceptions.RaiseError, DOWN)
     finally:
@@ -438,26 +533,38 @@ async def test_both_adapters_parity_and_the_halt_end_to_end():
             """INSERT INTO execmirror_snapshots (at, balances, positions,
                  open_orders) VALUES (now(), $1::jsonb, '[]', 0)""",
             json.dumps([{"currency": "USD", "buyingPower": 100}]))
-        # a recorded production cutover just before these intents
-        iid = await conn.fetchval(
-            "INSERT INTO live_parity_hook_installs (process, commit_sha, hooks)"
-            " VALUES ('api', $1, $2) RETURNING install_id", SHA,
-            list(LP.HOOK_NAMES))
-        await conn.execute(
-            "INSERT INTO live_parity_cutover (cutover_at, release_sha, api_sha,"
-            " workers_sha, migrations, hook_install_id, small_live_mode,"
-            " small_live_halted, capital_activated, evidence, recorded_by)"
-            " VALUES (now() - interval '1 minute', $1, $1, $1,"
-            " ARRAY['225','226'], $2, 'SHADOW', false, false, '{}', 'test')",
-            SHA, iid)
-        it = _intent()
+        # a recorded production cutover just before these intents (the
+        # database stamps recorded_at with its own clock)
+        await _record_cutover_row(conn, SHA, "1" * 64)
+        t0 = __import__("time").time()
+        it = _intent(now=t0)
         assert await LP.record_decision_intent(conn, it)
         order = _paper_order(it)
         got = await LP.entry_adapters(conn, it, paper_order=order,
                                       paper_result={"ok": True, "order": {
-                                          "order_id": "paper_o1"}})
-        assert got["paper"] == LP.P_SUBMITTED and got["live"] == LP.S_PROPOSED
+                                          "order_id": "paper_o1"}},
+                                      now=t0 + 0.5,
+                                      stages={"intent_recorded_at": t0 + 0.1,
+                                              "paper_submit_at": t0 + 0.2})
+        # R30A: no LIVE approval of this policy and no live gate approval is
+        # recorded, so LIVE refuses the exposure (SHADOW_EXCLUDED, the
+        # governance reason) -- but the would-be order is still compared:
+        # identical logic at scale, an expected scale difference
+        assert got["paper"] == LP.P_SUBMITTED and got["live"] == LP.S_EXCLUDED
         assert got["parity"] == LP.SCALE
+        lrec = await conn.fetchrow(
+            "SELECT exclusion, refs FROM canonical_intent_executions "
+            " WHERE intent_id = $1 AND adapter = 'SMALL_LIVE'", it["intent_id"])
+        assert lrec["exclusion"] == CI.R_POLICY_UNAPPROVED
+        assert H.j(lrec["refs"])["new_exposure_refused"] is True
+        par = await conn.fetchrow(
+            "SELECT comparison FROM live_parity_ledger WHERE intent_id = $1",
+            it["intent_id"])
+        comp = H.j(par["comparison"])
+        assert comp["live_governance_refusals"] == [
+            CI.R_POLICY_UNAPPROVED, LP.R_GATE_APPROVAL]
+        assert comp["fields"]["allie_final_allocation"]["equal"] is True
+        assert comp["fields"]["eddie_estimate"]["equal"] is True
         rows = await conn.fetch(
             "SELECT adapter, mode, state, intent_sha FROM "
             "canonical_intent_executions WHERE intent_id = $1 ORDER BY adapter",
@@ -467,19 +574,21 @@ async def test_both_adapters_parity_and_the_halt_end_to_end():
         assert {r["intent_sha"] for r in rows} == {it["content_sha"]}
         assert await conn.fetchval("SELECT count(*) FROM small_live_order_events") == 0
         # a divergent pair halts SMALL LIVE in the same transaction
-        it2 = _intent(decision_id="papercg:def")
+        it2 = _intent(decision_id="papercg:def", now=t0)
         await LP.record_decision_intent(conn, it2)
         bad = dict(_paper_order(it2), holding_side="SHORT")
         got2 = await LP.entry_adapters(conn, it2, paper_order=bad,
-                                       paper_result={"ok": True})
+                                       paper_result={"ok": True},
+                                       now=t0 + 0.5)
         assert got2["parity"] == LP.DIVERGENCE
         ctl = await LP.control(conn)
         assert ctl["halted"] and ctl["halt_reason"] == "LOGIC_DIVERGENCE"
         # halted: the next intent gets no live proposal
-        it3 = _intent(decision_id="papercg:ghi")
+        it3 = _intent(decision_id="papercg:ghi", now=t0)
         await LP.record_decision_intent(conn, it3)
         got3 = await LP.entry_adapters(conn, it3, paper_order=_paper_order(it3),
-                                       paper_result={"ok": True})
+                                       paper_result={"ok": True},
+                                       now=t0 + 0.5)
         assert got3["live"] == LP.S_HALTED
         # only a named human clears it
         await _expect(conn, asyncpg.exceptions.RestrictViolationError,
@@ -492,6 +601,12 @@ async def test_both_adapters_parity_and_the_halt_end_to_end():
         assert rep["logic_divergences"] == 1
         assert "SMALL_LIVE_HALTED_BY_LOGIC_DIVERGENCE" in rep["blockers"]
         assert rep["recommendation"] == LP.NOT_READY
+        # R30A: an intent LIVE refused for governance is never activation
+        # evidence: the gate names it
+        assert any(b.startswith("LIVE_GOVERNANCE_REFUSED:%s"
+                                % CI.R_POLICY_UNAPPROVED)
+                   for b in rep["blockers"]), rep["blockers"]
+        assert rep["governance_gate"] == "FAIL"
         ctl = await LP.clear_halt(conn, actor="Matt (owner)", reason="fixed")
         assert not ctl["halted"]
         # a cleared halt restarts the consecutive sample (the divergence stays
@@ -619,13 +734,43 @@ def test_unmeasured_efficiency_allocates_nothing_and_says_why():
     assert c["binding_constraint"] == "NON_POSITIVE_EXPECTED_EXECUTABLE_NET"
 
 
-# ── the production cutover: recorded once, only when every condition holds ──
+# ── the production cutover: one row per release, every condition verified ──
+
+
+async def _record_cutover_row(conn, sha, logic_hash, *, by="release engineer"):
+    iid = await conn.fetchval(
+        "INSERT INTO live_parity_hook_installs (process, commit_sha, hooks)"
+        " VALUES ('api', $1, $2) RETURNING install_id", sha,
+        list(LP.HOOK_NAMES))
+    return await conn.fetchrow(
+        "INSERT INTO live_parity_cutover (release_sha, api_sha, workers_sha,"
+        " migrations, decision_logic_hash, decision_logic_files,"
+        " hook_install_id, small_live_mode, small_live_halted,"
+        " capital_activated, evidence, recorded_by)"
+        " VALUES ($1, $1, $1, ARRAY['225','226'], $2, '{}'::jsonb, $3,"
+        " 'SHADOW', false, false, '{}', $4) RETURNING *",
+        sha, logic_hash, iid, by)
 
 
 async def _cutover_world(conn, *, sha=SHA, workers=SHA, migrations=True,
-                         hooks=True, halted=False, stopped=True):
+                         hooks=True, halted=False, stopped=True,
+                         venue_order=False):
     await conn.execute("UPDATE small_live_control SET halted = false, "
                        "cleared_by = 'test human' WHERE id = 1")
+    # "no venue order ever": a shared test database holds the FakeVenue
+    # orders other files' lane tests leave behind (they TRUNCATE at setup,
+    # not at teardown), so this world states the condition explicitly --
+    # inside the caller's rolled-back transaction, nothing persists
+    await conn.execute(
+        "TRUNCATE smalllive_reviews, smalllive_handoffs, "
+        "smalllive_reconciliations, execmirror_fills, execmirror_events, "
+        "execmirror_snapshots, execmirror_orders")
+    if venue_order:
+        await conn.execute(
+            "INSERT INTO execmirror_orders (mirror_id, role, us_market_slug, "
+            " intent, order_type, tif, state, venue_order_id) VALUES "
+            " ('lp-cutover-test', 'ENTRY', 'lp-cutover-test', "
+            " 'ORDER_INTENT_BUY_LONG', 'LIMIT', 'IOC', 'OPEN', 'v-1')")
     if halted:
         await conn.execute(
             "UPDATE small_live_control SET halted = true, halted_at = now(), "
@@ -650,7 +795,7 @@ async def _cutover_world(conn, *, sha=SHA, workers=SHA, migrations=True,
 
 @pg
 @pytest.mark.asyncio
-async def test_the_cutover_is_refused_until_every_condition_holds():
+async def test_the_cutover_is_refused_until_every_condition_holds(monkeypatch):
     conn = await asyncpg.connect(H.DSN)
     tx = conn.transaction()
     await tx.start()
@@ -663,7 +808,8 @@ async def test_the_cutover_is_refused_until_every_condition_holds():
             ({"workers": "b" * 40}, "WORKERS_RUN_THE_RELEASE_SHA"),
             ({"hooks": False}, "HOOKS_INSTALLED_ON_THE_RELEASE_SHA"),
             ({"halted": True}, "SMALL_LIVE_NOT_HALTED"),
-            ({"stopped": False}, "NO_CAPITAL_ACTIVATED")]
+            ({"stopped": False}, "NO_CAPITAL_ACTIVATED"),
+            ({"venue_order": True}, "NO_CAPITAL_ACTIVATED")]
         for kw, failing in cases:
             sp = conn.transaction()
             await sp.start()
@@ -687,6 +833,12 @@ async def test_the_cutover_is_refused_until_every_condition_holds():
                                                 recorded_by="release engineer",
                                                 api_sha=SHA, hooks_here=[])
         assert "HOOKS_INSTALLED_IN_THIS_PROCESS" in no_hooks_here["refused"]
+        # R30A: a system / agent actor never records a cutover
+        for robot in ("system", "Xavier", "agent:release", ""):
+            r = await LP.record_cutover(conn, release_sha=SHA,
+                                        recorded_by=robot, api_sha=SHA,
+                                        hooks_here=list(LP.HOOK_NAMES))
+            assert "RECORDED_BY_IS_A_NAMED_HUMAN" in r["refused"], robot
         ok = await LP.record_cutover(conn, release_sha=SHA,
                                      recorded_by="release engineer",
                                      api_sha=SHA,
@@ -697,17 +849,66 @@ async def test_the_cutover_is_refused_until_every_condition_holds():
         assert cut["small_live_mode"] == "SHADOW"
         assert cut["capital_activated"] is False
         assert set(["225", "226"]) <= set(cut["migrations"])
+        # the decision-logic hash of THIS build, over the pinned files
+        logic = LP.decision_logic_hash()
+        assert cut["decision_logic_hash"] == logic["hash"]
+        assert set(H.j(cut["decision_logic_files"])) == set(
+            LP.DECISION_LOGIC_FILES)
+        assert ok["restarts_forward_window"] is True      # the first release
         again = await LP.record_cutover(conn, release_sha=SHA,
                                         recorded_by="someone else",
                                         api_sha=SHA,
                                         hooks_here=list(LP.HOOK_NAMES))
         assert again["recorded"] is False and again["already"] is True
-        assert again["cutover"]["cutover_at"] == cut["cutover_at"]
+        assert again["cutover"]["recorded_at"] == cut["recorded_at"]
         await _expect(conn, asyncpg.exceptions.RestrictViolationError,
                       "UPDATE live_parity_cutover SET recorded_by = 'x'")
+        await _expect(conn, asyncpg.exceptions.RestrictViolationError,
+                      "DELETE FROM live_parity_cutover")
         # the parity gate starts AT the cutover: earlier rows never count
         rep = await LP.readiness_report(conn, since=0)
-        assert rep["since"] >= cut["cutover_at"].timestamp() - 1e-6
+        assert rep["since"] >= cut["recorded_at"].timestamp() - 1e-6
+        first_eff = await LP.production_cutover(conn)
+        assert first_eff["cutover_id"] == cut["cutover_id"]
+
+        # ── R30A: A RELEASE THAT CHANGES NO DECISION LOGIC ──────────────
+        sha2 = "d" * 40
+        await _cutover_world(conn, sha=sha2, workers=sha2)
+        same = await LP.record_cutover(conn, release_sha=sha2,
+                                       recorded_by="release engineer",
+                                       api_sha=sha2,
+                                       hooks_here=list(LP.HOOK_NAMES))
+        assert same["recorded"] is True, same
+        assert same["restarts_forward_window"] is False
+        eff = await LP.production_cutover(conn)
+        assert eff["cutover_id"] == cut["cutover_id"]    # the sample stands
+        assert eff["releases_recorded"] == 2
+        latest = await LP.latest_release_cutover(conn)
+        assert latest["release_sha"] == sha2
+
+        # ── ... AND ONE THAT DOES ────────────────────────────────────────
+        sha3 = "e" * 40
+        await _cutover_world(conn, sha=sha3, workers=sha3)
+        changed = dict(logic, hash="f" * 64)
+        monkeypatch.setattr(LP, "decision_logic_hash", lambda root=None: changed)
+        moved = await LP.record_cutover(conn, release_sha=sha3,
+                                        recorded_by="release engineer",
+                                        api_sha=sha3,
+                                        hooks_here=list(LP.HOOK_NAMES))
+        assert moved["recorded"] is True, moved
+        assert moved["restarts_forward_window"] is True
+        eff = await LP.production_cutover(conn)
+        assert eff["release_sha"] == sha3                # the sample restarts
+        rep = await LP.readiness_report(conn, since=0)
+        assert rep["since"] >= eff["recorded_at"].timestamp() - 1e-6
+        assert rep["latest_release_cutover"]["release_sha"] == sha3
+        # the pure rule is the view's rule
+        rows = await conn.fetch("SELECT * FROM live_parity_cutover")
+        assert LP.effective_cutover_of(rows)["cutover_id"] == eff["cutover_id"]
+        # recorded_at is the DATABASE's clock, never the caller's
+        stamped = await _record_cutover_row(conn, "9" * 40, "2" * 64)
+        assert abs(stamped["recorded_at"].timestamp()
+                   - __import__("time").time()) < 300
         await sp.rollback()
         # no cutover -> no forward sample at all
         rep = await LP.readiness_report(conn)
@@ -716,6 +917,38 @@ async def test_the_cutover_is_refused_until_every_condition_holds():
     finally:
         await tx.rollback()
         await conn.close()
+
+
+def test_the_effective_cutover_is_the_latest_logic_change():
+    rows = [{"cutover_id": 1, "recorded_at": 1.0, "decision_logic_hash": "a"},
+            {"cutover_id": 2, "recorded_at": 2.0, "decision_logic_hash": "a"},
+            {"cutover_id": 3, "recorded_at": 3.0, "decision_logic_hash": "b"},
+            {"cutover_id": 4, "recorded_at": 4.0, "decision_logic_hash": "b"}]
+    assert LP.effective_cutover_of(rows)["cutover_id"] == 3
+    assert LP.effective_cutover_of(rows[:2])["cutover_id"] == 1
+    # a revert to an earlier hash is a change too
+    rows.append({"cutover_id": 5, "recorded_at": 5.0,
+                 "decision_logic_hash": "a"})
+    assert LP.effective_cutover_of(rows)["cutover_id"] == 5
+    assert LP.effective_cutover_of([]) is None
+
+
+def test_the_decision_logic_hash_covers_every_pinned_file(tmp_path):
+    got = LP.decision_logic_hash()
+    assert got["hash"] and not got["missing"]
+    assert set(got["files"]) == set(LP.DECISION_LOGIC_FILES)
+    # a missing file is never a hash
+    assert LP.decision_logic_hash(root=tmp_path)["hash"] is None
+    # one changed byte in one file is a different hash
+    import shutil
+    base = pathlib.Path(LP.__file__).resolve().parent
+    for rel in LP.DECISION_LOGIC_FILES:
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(base / rel, tmp_path / rel)
+    assert LP.decision_logic_hash(root=tmp_path)["hash"] == got["hash"]
+    f = tmp_path / LP.DECISION_LOGIC_FILES[0]
+    f.write_bytes(f.read_bytes() + b"\n# changed\n")
+    assert LP.decision_logic_hash(root=tmp_path)["hash"] != got["hash"]
 
 
 def test_the_sleeve_map_is_the_paper_sleeve_classifiers():

@@ -826,9 +826,13 @@ async def test_the_endpoint_over_a_seeded_multi_sleeve_book(monkeypatch):
             " run_id, computed_at, slippage_usd, slippage_pc) VALUES "
             " ('PAPER',$1,$2,'r',now(),0.75,0.0075)", "val-" + g1, g1)
         monkeypatch.setattr(L, "ACCOUNT_ID", acct)
-        # THE PRODUCTION CUTOVER (recorded once in production by
-        # live_parity.record_cutover); here, inside the rolled-back test
-        # transaction, at `since`
+        # THE PRODUCTION CUTOVER (recorded per release in production by
+        # live_parity.record_cutover; the forward window starts at the
+        # EFFECTIVE one -- R30A); here, inside the rolled-back test
+        # transaction, at `since`. R30A: recorded_at is stamped by the
+        # database clock (live_parity_cutover_stamp_trg), so backdating the
+        # row to `since` disables THAT trigger for this transaction only --
+        # the DDL rolls back with everything else and nothing persists.
         if await conn.fetchval(
                 "SELECT to_regclass('live_parity_cutover') IS NOT NULL") and \
                 not await conn.fetchval("SELECT count(*) FROM live_parity_cutover"):
@@ -836,14 +840,20 @@ async def test_the_endpoint_over_a_seeded_multi_sleeve_book(monkeypatch):
                 "INSERT INTO live_parity_hook_installs (process, commit_sha, "
                 " hooks) VALUES ('test', repeat('a', 40), ARRAY['X']) "
                 " RETURNING install_id")
+            await conn.execute("ALTER TABLE live_parity_cutover DISABLE "
+                               "TRIGGER live_parity_cutover_stamp_trg")
             await conn.execute(
-                "INSERT INTO live_parity_cutover (cutover_at, release_sha, "
-                " api_sha, workers_sha, migrations, hook_install_id, "
+                "INSERT INTO live_parity_cutover (recorded_at, release_sha, "
+                " api_sha, workers_sha, migrations, decision_logic_hash, "
+                " decision_logic_files, hook_install_id, "
                 " small_live_mode, small_live_halted, capital_activated, "
                 " evidence, recorded_by) VALUES (to_timestamp($1), "
                 " repeat('a', 40), repeat('a', 40), repeat('a', 40), "
-                " ARRAY['225','226'], $2, 'SHADOW', false, false, '{}', "
-                " 'test')", float(since), iid)
+                " ARRAY['225','226'], repeat('b', 64), '{}'::jsonb, $2, "
+                " 'SHADOW', false, false, '{}', 'release engineer')",
+                float(since), iid)
+            await conn.execute("ALTER TABLE live_parity_cutover ENABLE "
+                               "TRIGGER live_parity_cutover_stamp_trg")
 
         async def pool():
             return _Pool(conn)

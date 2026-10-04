@@ -102,6 +102,7 @@ import time
 from typing import Any
 
 from .. import bettor_paper_ledger as L
+from .. import canonical_intent as CI
 from .. import decision_hooks as DH
 from .. import bettor_paper_simulator as SIM
 from .. import bettor_settlement_terms as ST
@@ -1817,6 +1818,29 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
         return dict(rec, duplicate=True)
     if verdict != DP.ENTER:
         return rec
+    # ── R30 · THE ONE CANONICAL DECISION INTENT, FIRST ──────────────────
+    # Built once, immutable, sha-stamped (live_parity). The PAPER adapter
+    # below reads side, quantity, prices and order form FROM IT; the SMALL
+    # LIVE adapter (SHADOW) constructs its venue order from the SAME object.
+    # A failure to build it never stops the paper sibling -- but then no
+    # live proposal exists either (live never acts without an intent).
+    #
+    # R30A: it is built BEFORE the execution hook below, so the ACTUAL
+    # sibling's intent NAMES it (evidence.canonical_intent): the ACTUAL lane
+    # re-verifies that name before its claim and refuses without it -- it
+    # can no longer originate outside a canonical intent.
+    canonical = await canonical_intent(
+        conn, did=did, strategy=STRATEGY, version=VERSION, cand=cand,
+        side=side, sized=sized, ent=ent, obs=obs, md=md, econ=econ, p=p,
+        best_edge=best_edge, verdict=verdict, refusals=refusals,
+        policy_decision=policy_decision, at=at, label=label,
+        book_age=book_age, cfg=cfg, params=params, pin=pin,
+        book_max_age=BOOK_MAX_AGE_S, book_source=ctx.get("last_book_source"))
+    rec["canonical_intent_id"] = (canonical or {}).get("intent_id")
+    # THE LATENCY CHAIN'S ADAPTER-SIDE STAGES (R30A section 6), on the same
+    # decision clock as the intent's own stages
+    stages = {"intent_recorded_at": (None if canonical is None
+                                     else round(float(clock()), 6))}
     # ── ONE DECISION -> ONE EXECUTION INTENT -> PAPER + ACTUAL ─────────
     # The qualified decision, not the paper order, is the authoritative
     # object. The executing process's hook (decision_hooks; installed by
@@ -1893,7 +1917,12 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
                     # THE DECISION-TIME FACTS THE ACTUAL LANE'S ADMISSION
                     # READS (facts only; this module decides nothing about
                     # execution).
-                    "admission_facts": facts},
+                    "admission_facts": facts,
+                    # R30A: the canonical intent this execution intent
+                    # executes (None: the ACTUAL lane can never submit)
+                    "canonical_intent": (None if canonical is None else {
+                        "intent_id": canonical["intent_id"],
+                        "content_sha": canonical["content_sha"]})},
                 "timeline": {
                     "pinnapi_provider_ts": {"utc_s": (cand.get("pinnacle") or {}).get("observed_at")},
                     "pinnapi_receipt": {"utc_s": (cand.get("pinnacle") or {}).get("received_at")},
@@ -1909,19 +1938,6 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
             rec["actual_lane"] = got_i.get("actual_lane")
         except Exception as exc:                                # noqa: BLE001
             rec["actual_lane"] = "EXECUTION_HOOK_FAILED:%s" % type(exc).__name__
-    # ── R30 · THE ONE CANONICAL DECISION INTENT ─────────────────────────
-    # Built once, immutable, sha-stamped (live_parity). The PAPER adapter
-    # below reads side, quantity, prices and order form FROM IT; the SMALL
-    # LIVE adapter (SHADOW) constructs its venue order from the SAME object.
-    # A failure to build it never stops the paper sibling -- but then no
-    # live proposal exists either (live never acts without an intent).
-    canonical = await canonical_intent(
-        conn, did=did, strategy=STRATEGY, version=VERSION, cand=cand,
-        side=side, sized=sized, ent=ent, obs=obs, md=md, econ=econ, p=p,
-        best_edge=best_edge, verdict=verdict, refusals=refusals,
-        policy_decision=policy_decision, at=at, label=label,
-        book_age=book_age, cfg=cfg, params=params, pin=pin)
-    rec["canonical_intent_id"] = (canonical or {}).get("intent_id")
     # ── THE PAPER SIBLING ──────────────────────────────────────────────
     delay = float(sim_cfg["decision_to_execution_delay_s"])
     order = {"idempotency_key": "%s:ENTRY" % did,
@@ -1941,17 +1957,33 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
              "expires_at": at + float(sim_cfg["marketable_ttl_s"]),
              "simulator_version": cfg["simulator_version"],
              "strategy": STRATEGY}
+    expired = None
     if canonical is not None:
         # THE PAPER ADAPTER CONSUMES THE INTENT: every order-defining field
         # comes from the canonical object, not from local variables.
         order.update({k: canonical[f] for k, f in CANONICAL_ORDER_FIELDS.items()})
-    got = await L.submit_order(conn, order, caps=cfg["risk"],
-                               fee_fn=fee_fn, now=at, exclusive_fixture=True)
+        # R30A: AN EXPIRED INTENT IS NEVER EXECUTED -- by this adapter
+        # either. Checked on the decision clock immediately before the
+        # submit: if the decision's own 30 s probability (or its book's
+        # entry-rule age) has run out while the decision was being built,
+        # the paper order is refused by name, never sent on dead evidence.
+        expired = CI.intent_expiry_refusal(canonical, now=float(clock()))
+    if expired is not None:
+        got = {"ok": False, "refusal": expired,
+               "expires_at": canonical.get("expires_at")}
+        stages["paper_submit_at"] = None
+        stages["paper_submit_why"] = expired
+    else:
+        got = await L.submit_order(conn, order, caps=cfg["risk"],
+                                   fee_fn=fee_fn, now=at,
+                                   exclusive_fixture=True)
+        stages["paper_submit_at"] = round(float(clock()), 6)
     rec["order"] = {k: got.get(k) for k in ("ok", "refusal", "duplicate")}
     if canonical is not None and DH.CANONICAL_ENTRY_ADAPTERS is not None:
         try:
             rec["live_parity"] = await DH.CANONICAL_ENTRY_ADAPTERS(
-                conn, canonical, paper_order=order, paper_result=got)
+                conn, canonical, paper_order=order, paper_result=got,
+                now=float(clock()), stages=stages)
         except Exception as exc:                                # noqa: BLE001
             rec["live_parity"] = {"error": type(exc).__name__}
     if got.get("ok"):

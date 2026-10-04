@@ -96,11 +96,15 @@ SLEEVES = (INVESTMENT, TRAINING, BENCHMARK, UNCLASSIFIED)
 ALL_TIME, FORWARD = "ALL_TIME", "FORWARD"
 WINDOWS = (ALL_TIME, FORWARD)
 
-#: THE R30 CUTOVER is NOT a constant: it is the production cutover recorded
-#: ONCE by live_parity.record_cutover (live_parity_cutover.cutover_at) after
-#: the release SHA is accepted, API and workers run it, migrations 225/226 are
-#: applied, the canonical hooks are installed, the readback passes, no capital
-#: is active and SMALL LIVE is SHADOW. Until it exists there is NO forward
+#: THE R30 CUTOVER is NOT a constant: it is the EFFECTIVE production
+#: cutover. live_parity.record_cutover appends ONE row per release
+#: (live_parity_cutover) after the release SHA is accepted, API and workers
+#: run it, migrations 225/226 are applied, the canonical hooks are installed,
+#: the readback passes, no capital is active and SMALL LIVE is SHADOW; the
+#: forward window starts at the latest release whose decision-logic hash
+#: differs from its predecessor's (view live_parity_effective_cutover,
+#: R30A): a release that does not change decision logic does not restart the
+#: sample, one that does restarts it. Until one exists there is NO forward
 #: window and the verdict is NOT_ESTABLISHED (NO_PRODUCTION_CUTOVER_RECORDED).
 R_NO_CUTOVER = "NO_PRODUCTION_CUTOVER_RECORDED"
 
@@ -1002,8 +1006,10 @@ def compute(data: dict, *, now: float, since, cutover: float,
         "version": VERSION, "computed_at": now,
         "since": None if no_cutover else since,
         "since_source": since_source, "cutover": cutover,
-        "cutover_basis": ("live_parity_cutover.cutover_at (recorded once, "
-                          "after every production condition was verified)"
+        "cutover_basis": ("live_parity_effective_cutover.cutover_at (the "
+                          "latest release whose decision-logic hash changed; "
+                          "each release recorded after every production "
+                          "condition was verified)"
                           if not no_cutover else R_NO_CUTOVER),
         "forward_rule": ("FORWARD = positions whose group first filled at or "
                          "after `since`; refusals decided at or after it"),

@@ -660,6 +660,37 @@ async def review_group(conn, ctx: dict, group_id: str, *,
             protection_ok=bool(prot.get("ok")), standing_live=bool(standing),
             candidate=sel.get("selected_candidate"), protective=prot,
             open_qty=pos["open_qty"])
+        # R30A · EVERY ALTERNATIVE, VALUED OR WITH ITS REASON (section 8).
+        # Xavier's REALLOCATE comparison is made HERE, once, before the
+        # intent (and handed to the assessment below, which records the
+        # same comparison): HOLD, SELL_EXIT, SELL_REDUCE, CANCEL_PROTECTION_
+        # BEFORE_EXIT, MAINTAIN_STANDING_PROTECTION, INDIRECT_HEDGE,
+        # REALLOCATE and NO_ORDER all enter the intent. Nothing here changes
+        # the action decided above: management_action is unchanged (its
+        # choice is consistent with its own values -- a sale only on fresh
+        # evidence and only when the selector ranked it highest, protection
+        # otherwise), and the set only RECORDS what each alternative was
+        # worth or why it could not be valued.
+        realloc = await XM.paper_reallocation(
+            conn, ctx, group_id=group_id, pos=pos, trigger=trigger, at=at,
+            measure=measure, exit_levels=exit_lv)
+        alt_set = CI.management_alternatives(
+            alts=alts, decided=decided, mechanical_selection=chosen,
+            standing_live=bool(standing), protective=prot,
+            open_qty=pos["open_qty"],
+            reallocate=(realloc.get("reallocate")
+                        if realloc.get("reallocate") is not None else
+                        {"blocker": realloc.get("why")
+                         or "REALLOCATE_NOT_COMPARED"}))
+        mgmt_policy = {
+            "status": "RECORDED",
+            "small_live_management_policy": mpol,
+            "selection_policy": {k: (policy or {}).get(k) for k in (
+                "policy_key", "version", "source", "why", "approved_by")},
+            "new_exposure": False,
+            "rule": ("management actions here only reduce exposure (a sale "
+                     "or a resting protective sale of held inventory); the "
+                     "LIVE fail-closed policy rule governs NEW exposure")}
         mintent = None
         try:
             mintent = CI.build_management_intent(
@@ -680,7 +711,7 @@ async def review_group(conn, ctx: dict, group_id: str, *,
                         "margin_over_runner_up": sel.get(
                             "margin_over_runner_up"),
                         "exceptional": list(exceptional)},
-                created_at=at)
+                created_at=at, alternative_set=alt_set, policy=mgmt_policy)
             rec_hook = DH.CANONICAL_MANAGEMENT_RECORD
             if rec_hook is None or not await rec_hook(conn, mintent):
                 mintent = None
@@ -779,7 +810,7 @@ async def review_group(conn, ctx: dict, group_id: str, *,
             conn, ctx, group_id=group_id, pos=pos, review_id=rid,
             trigger=trigger, at=at, measure=measure, alts=alts,
             recommendation=chosen, exit_levels=exit_lv, policy=mpol,
-            due_at=due_at)
+            due_at=due_at, precomputed=realloc)
         # FRESHNESS EXPIRY IS A REVIEW TRIGGER: a fresh probability expires
         # at its own source stamp + the limit; a review is scheduled for
         # that instant (paper_runtime.schedule_expiry_review via the

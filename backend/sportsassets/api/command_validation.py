@@ -1,9 +1,11 @@
 """PROFITABILITY VALIDATION: GET /api/command/profitability/validation
 (GET only, COMMAND auth via agents_core.require_read). READ ONLY.
 
-    ?since=<epoch>   a later forward start (never before the R30 production
-                     cutover recorded in live_parity_cutover; with no
-                     cutover there is no forward window)
+    ?since=<epoch>   a later forward start (never before the EFFECTIVE
+                     production cutover -- the latest release recorded in
+                     live_parity_cutover whose decision-logic hash changed
+                     (view live_parity_effective_cutover); with no cutover
+                     there is no forward window)
 
 ANSWERS (the profitability envelope):
     {label: RESEARCH, authority: SHADOW_NO_AUTHORITY, status, why,
@@ -241,13 +243,19 @@ async def gather(conn, account_id: str, *, now: float) -> tuple:
 
 
 async def production_cutover_epoch(conn) -> float | None:
-    """The recorded R30 production cutover (epoch seconds), or None."""
+    """THE EFFECTIVE production cutover (epoch seconds), or None: the latest
+    release whose decision-logic hash differs from its predecessor's
+    (migration 225's view live_parity_effective_cutover, the same rule
+    live_parity.readiness_report applies). A release that did not change
+    decision logic does not restart the forward window; one that did
+    restarts it. Read from the view, not from live_parity, so this module
+    still imports no execution module."""
     if not await conn.fetchval(
-            "SELECT to_regclass('live_parity_cutover') IS NOT NULL"):
+            "SELECT to_regclass('live_parity_effective_cutover') IS NOT NULL"):
         return None
     return await conn.fetchval(
         "SELECT extract(epoch FROM cutover_at)::float8 FROM "
-        " live_parity_cutover WHERE id = 1")
+        " live_parity_effective_cutover")
 
 
 async def _read(conn, *, since, since_source: str, now: float) -> dict:

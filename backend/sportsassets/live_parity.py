@@ -59,6 +59,41 @@ field by field and classifies the pair:
 A PAPER fill is never a SMALL LIVE fill: the SMALL LIVE lifecycle
 (REJECTED/RESTING/PARTIAL/FILLED/CANCEL_PENDING/CANCELLED) is read only from
 the venue's own order record (`live_state_of`, small_live_order_events).
+
+R30A ADDITIONS (truth / convergence):
+
+  VALIDITY        every adapter refuses an intent after its expires_at
+                  (canonical_intent.decision_expiry): the PAPER adapter before
+                  it submits, the SMALL LIVE adapter before it proposes, the
+                  ACTUAL sibling before it claims.
+  LIVE POLICY     the SMALL LIVE adapter refuses new exposure (SHADOW_EXCLUDED
+                  with the reason) when the policy row behind the intent was
+                  missing or unreadable, its sha mismatches, or its version is
+                  not approved FOR LIVE (live_approvals); likewise when a live
+                  gate's configuration approval is absent or stale. These are
+                  GOVERNANCE refusals: the would-be order is still built and
+                  compared for logic parity, and the readiness gate blocks on
+                  them -- they are never counted as logic divergences, and
+                  never as passes.
+  ALLIE / EDDIE   the parity comparison also compares Allie's final
+                  allocation (scaled) and Eddie's executable estimate; a
+                  capital-scale difference is EXPECTED_SCALE_DIFFERENCE,
+                  anything else LOGIC_DIVERGENCE.
+  ALTERNATIVES    a management pair compares the evaluated alternative set:
+                  an alternative evaluated on one side but not the other is a
+                  LOGIC_DIVERGENCE; one evaluated on neither (the paper book's
+                  INDIRECT_HEDGE) is recorded and exact parity is NOT claimed.
+  CUTOVER         one row per release; the forward window starts at the
+                  latest release whose decision-logic hash changed.
+  LATENCY         per-decision stage timestamps and their distributions.
+  CONVERGENCE     the ACTUAL sibling (execution_intent) and the funded stack
+                  originate NOTHING outside a canonical intent:
+                  `actual_authorization` (the canonical intent, verified,
+                  current, matching, LIVE-policy admissible, and an
+                  authorization only the SMALL LIVE adapter in LIVE mode can
+                  issue -- impossible in SHADOW) gates the ACTUAL lane before
+                  its claim, and `canonical_live_authorized` gates every
+                  funded acquisition and execmirror.Venue.place.
 """
 from __future__ import annotations
 
@@ -66,6 +101,8 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
+import pathlib
 import time
 from decimal import Decimal, ROUND_HALF_EVEN
 from typing import Any
@@ -74,21 +111,25 @@ from . import execmirror as M
 from . import canonical_intent as SLV  # the sleeve constants
 from .canonical_intent import (  # noqa: F401  (re-exported)
     ACT_CANCEL_FIRST, ACT_EXIT, ACT_NONE, ACT_PROTECT, ACT_REDUCE,
-    INTENT_VERSION, MGMT_INTENT_VERSION, VENUE, _INTENT_FIELDS, _MGMT_FIELDS,
-    _dec, _norm, build_decision_intent, build_management_intent,
-    canonical_json, content_sha, decision_intent_id, management_action,
-    management_intent_id, sleeve_of, unavailable,
-    verify_intent)
+    ALTERNATIVES, EVALUATED, INTENT_VERSION, LIVE_POLICY_REFUSALS,
+    MGMT_INTENT_VERSION, R_EXPIRY_UNAVAILABLE, R_INTENT_EXPIRED,
+    UNAVAILABLE, VENUE, _INTENT_FIELDS, _MGMT_FIELDS,
+    _dec, _epoch, _norm, build_decision_intent, build_management_intent,
+    canonical_json, content_sha, decision_expiry, decision_intent_id,
+    evaluated_set, intent_expiry_refusal, is_named_human,
+    live_policy_verdict, management_action, management_alternatives,
+    management_intent_id, opportunity_key, policy_block, sleeve_of,
+    unavailable, verify_intent)
 
 #: what the PAPER adapter reads from the intent (canonical_intent)
 paper_entry_fields = SLV.paper_entry_fields
 
 log = logging.getLogger(__name__)
 
-PAPER_ADAPTER_VERSION = "PAPER_ADAPTER_V1"
-LIVE_ADAPTER_VERSION = "SMALL_LIVE_ADAPTER_V1"
-PARITY_VERSION = "LIVE_PARITY_V1"
-READINESS_VERSION = "LIVE_READINESS_GATE_V1"
+PAPER_ADAPTER_VERSION = "PAPER_ADAPTER_V2"
+LIVE_ADAPTER_VERSION = "SMALL_LIVE_ADAPTER_V2"
+PARITY_VERSION = "LIVE_PARITY_V2"
+READINESS_VERSION = "LIVE_READINESS_GATE_V2"
 
 #: THE ONLY SMALL LIVE MODE THIS CODE KNOWS. The database CHECKs the same.
 MODE_SHADOW = "SHADOW"
@@ -111,9 +152,23 @@ S_PROPOSED, S_EXCLUDED, S_NO_ORDER, S_HALTED = (
 #: live exclusions that are capital/scale bounds, not logic
 CAPITAL_EXCLUSIONS = {M.BELOW_VENUE_MINIMUM, M.ABOVE_ORDER_CAP,
                       M.INSUFFICIENT_CASH, M.NO_LIVE_INVENTORY}
-#: live exclusions that are venue facts, not logic
+#: live exclusions that are venue facts, not logic. An intent that expired
+#: before the SMALL LIVE adapter reached it is a TIMING fact of execution
+#: (both adapters read the same expires_at; the later one found it past).
 VENUE_EXCLUSIONS = {M.UNSUPPORTED_ORDER, M.INVENTORY_COMMITTED,
-                    "ACCOUNT_STATE_NOT_CURRENT"}
+                    "ACCOUNT_STATE_NOT_CURRENT", R_INTENT_EXPIRED,
+                    R_EXPIRY_UNAVAILABLE}
+#: GOVERNANCE refusals of new live exposure (R30A sections 23 / 24): the
+#: LIVE policy verdict and the live gates' configuration approvals. They are
+#: neither logic nor capital: the would-be order is still built and compared
+#: (so parity evidence accumulates before an approval exists), the SMALL LIVE
+#: record is SHADOW_EXCLUDED with the reason, and the readiness gate blocks
+#: while any row of its sample carries one.
+R_GATE_APPROVAL = "LIVE_GATE_APPROVAL_ABSENT_OR_STALE"
+GOVERNANCE_EXCLUSIONS = set(LIVE_POLICY_REFUSALS) | {R_GATE_APPROVAL}
+#: tolerance for a scaled dollar comparison (Allie / Eddie): the scaled
+#: values are computed from the same intent, so they agree to rounding
+SCALED_USD_TOLERANCE = Decimal("0.000001")
 #: paper-ledger refusals that are the paper account's capital caps
 PAPER_CAPITAL_REFUSALS = {
     "INSUFFICIENT_AVAILABLE_PAPER_CASH", "AN_ENTRY_MAY_NOT_SPEND_THE_HEDGE_RESERVE",
@@ -155,23 +210,117 @@ def evidence_ids(intent: dict) -> dict:
             if k in ev}
 
 
+def _obj(v) -> dict:
+    if isinstance(v, str):
+        try:
+            v = json.loads(v)
+        except ValueError:
+            return {}
+    return v if isinstance(v, dict) else {}
+
+
+def _num_s(v) -> str | None:
+    """A dollar / ratio value in its normal decimal text (the comparison
+    form), or None."""
+    d = _dec(v)
+    if d is None or d != d:
+        return None
+    return format(d.normalize(), "f")
+
+
+def allie_eddie_view(intent: dict, *, scale=1, live_rail_usd=None) -> dict:
+    """ALLIE'S FINAL ALLOCATION AND EDDIE'S EXECUTABLE ESTIMATE AS ONE ADAPTER
+    SEES THEM AT ITS CAPITAL SCALE (pure; R30A section 30). Both adapters read
+    the SAME intent: the PAPER adapter at scale 1, the SMALL LIVE adapter at
+    1:scale, where Allie's final allocation is also bounded by the live rail
+    (the per-order cap the SMALL LIVE adapter applies) and Eddie's executable
+    EV is in live dollars. Scale-free facts (status, recommendation, edge in
+    percentage points, fill probability, Allie's binding term) are carried
+    unchanged; any of them differing between the adapters is logic."""
+    a, e = _obj(intent.get("allie")), _obj(intent.get("eddie"))
+    s = Decimal(str(scale))
+    final = _dec(a.get("final_allocatable_usd"))
+    scaled = None if final is None else final / s
+    rail_bound = False
+    if scaled is not None and live_rail_usd is not None and \
+            scaled > Decimal(str(live_rail_usd)):
+        scaled, rail_bound = Decimal(str(live_rail_usd)), True
+    ev = _dec(e.get("expected_executable_ev_usd")) \
+        if e.get("status") == "MEASURED" else None
+    return {
+        "allie": {"status": a.get("status") or "UNAVAILABLE",
+                  "final_allocatable_usd": _num_s(scaled),
+                  "final_binding": a.get("final_binding"),
+                  "binding_constraint": a.get("binding_constraint"),
+                  "live_rail_bound": rail_bound, "scale": _num_s(s)},
+        "eddie": {"status": e.get("status") or "UNAVAILABLE",
+                  "recommendation": e.get("recommendation"),
+                  "expected_executable_ev_usd": _num_s(
+                      None if ev is None else ev / s),
+                  "expected_net_executable_edge_pp": _num_s(e.get(
+                      "expected_net_executable_edge_pp")),
+                  "expected_fill_probability": _num_s(e.get(
+                      "expected_fill_probability")),
+                  "scale": _num_s(s)}}
+
+
 def paper_entry_request(intent: dict, order: dict) -> dict:
     """The PAPER adapter's requested entry order, normalized."""
-    return _req(action="BUY_ENTRY", intent=order.get("intent"),
-                side=order.get("holding_side"),
-                slug=order.get("us_market_slug"), qty=order.get("qty"),
-                limit=order.get("limit_price"), wire=order.get("wire_price"),
-                tif=str(order.get("time_in_force")),
-                order_type=str(order.get("order_type")),
-                strategy=order.get("strategy"),
-                strategy_version=intent["strategy_version"],
-                evidence_ids=evidence_ids(intent), sha=intent["content_sha"])
+    return dict(_req(action="BUY_ENTRY", intent=order.get("intent"),
+                     side=order.get("holding_side"),
+                     slug=order.get("us_market_slug"), qty=order.get("qty"),
+                     limit=order.get("limit_price"),
+                     wire=order.get("wire_price"),
+                     tif=str(order.get("time_in_force")),
+                     order_type=str(order.get("order_type")),
+                     strategy=order.get("strategy"),
+                     strategy_version=intent["strategy_version"],
+                     evidence_ids=evidence_ids(intent),
+                     sha=intent["content_sha"]),
+                allie_eddie=allie_eddie_view(intent, scale=1))
+
+
+def _live_gates():
+    from . import live_approvals as LAP
+    return LAP.GATES
+
+
+def governance_verdict(intent: dict, governance: dict | None) -> dict:
+    """MAY LIVE TAKE NEW EXPOSURE ON THIS INTENT? (pure). `governance` is
+    what the caller read from the approvals in force: {approved_policy_shas,
+    approved_gates}; None reads as NOTHING approved (fail closed).
+
+      policy  canonical_intent.live_policy_verdict on the intent's own policy
+              block (row present, sha matches, version approved FOR LIVE)
+      gates   the live book-currentness and settlement-compatibility gates'
+              configuration approvals (live_approvals; the book gate also
+              needs its 204 rule document approved)"""
+    g = governance or {}
+    pol = live_policy_verdict(_obj(intent.get("policy")),
+                              approved_policy_shas=g.get(
+                                  "approved_policy_shas") or ())
+    approved = set(g.get("approved_gates") or ())
+    gates = [{"gate": x, "approved": x in approved} for x in _live_gates()]
+    refusals = list(pol["refusals"])
+    if not all(x["approved"] for x in gates):
+        refusals.append(R_GATE_APPROVAL)
+    return {"admissible": not refusals, "refusals": refusals,
+            "policy": pol, "gates": gates,
+            "new_exposure_refused": bool(refusals)}
 
 
 def live_entry_proposal(intent: dict, *, scale, buying_power,
-                        max_order_usd, halted: bool = False) -> dict:
+                        max_order_usd, halted: bool = False, now=None,
+                        governance: dict | None = None) -> dict:
     """THE SMALL LIVE ADAPTER, ENTRY (pure, SHADOW): the real venue order the
-    SAME intent produces at capital scale. Never sent."""
+    SAME intent produces at capital scale. Never sent.
+
+    R30A: an EXPIRED intent (canonical_intent.intent_expiry_refusal at `now`,
+    default the wall clock) and a GOVERNANCE refusal (governance_verdict: the
+    LIVE policy fails closed, a live gate approval absent or stale) make the
+    proposal SHADOW_EXCLUDED with that reason. The would-be order is still
+    built -- `plan_state` / `plan_exclusion` say what capital and venue facts
+    alone would have done -- so the parity comparison still measures logic."""
     assert SMALL_LIVE_MODE == MODE_SHADOW
     eligible, why = M.live_eligibility({
         "strategy": intent["strategy"],
@@ -206,8 +355,21 @@ def live_entry_proposal(intent: dict, *, scale, buying_power,
                order_type=intent["order_type"], strategy=intent["strategy"],
                strategy_version=intent["strategy_version"],
                evidence_ids=evidence_ids(intent), sha=intent["content_sha"])
-    return dict(base, state=S_PROPOSED if plan.state == "PLANNED"
-                else S_EXCLUDED, exclusion=plan.exclusion, requested=req,
+    req["allie_eddie"] = allie_eddie_view(intent, scale=scale,
+                                          live_rail_usd=max_order_usd)
+    gov = governance_verdict(intent, governance)
+    exp = intent_expiry_refusal(intent, now=time.time() if now is None
+                                else now)
+    if gov["refusals"]:
+        state, excl = S_EXCLUDED, gov["refusals"][0]
+    elif exp is not None:
+        state, excl = S_EXCLUDED, exp
+    else:
+        state = S_PROPOSED if plan.state == "PLANNED" else S_EXCLUDED
+        excl = plan.exclusion
+    return dict(base, state=state, exclusion=excl, plan_state=plan.state,
+                plan_exclusion=plan.exclusion, governance=gov,
+                expiry_refusal=exp, requested=req,
                 params=plan.params or None, live_qty=live_qty,
                 detail={k: str(v) for k, v in (plan.detail or {}).items()})
 
@@ -237,7 +399,10 @@ def paper_management_request(mi: dict, taken: dict | None) -> dict:
                      evidence_ids={"valuation_id": mi.get("valuation_id"),
                                    "evidence_version": mi.get("evidence_version")},
                      sha=mi["content_sha"]),
-                paper_taken=(taken or {}).get("taken"))
+                paper_taken=(taken or {}).get("taken"),
+                # THE ALTERNATIVES THE PAPER REVIEW EVALUATED (the intent's
+                # set: EVALUATED / UNAVAILABLE per alternative)
+                alternatives_evaluated=evaluated_set(mi.get("alternative_set")))
 
 
 def hypothetical_live_inventory(open_qty, scale) -> int:
@@ -249,12 +414,31 @@ def hypothetical_live_inventory(open_qty, scale) -> int:
 
 
 def live_management_proposal(mi: dict, *, scale, open_qty,
-                             halted: bool = False) -> dict:
+                             halted: bool = False,
+                             live_alternatives: dict | None = None) -> dict:
     """THE SMALL LIVE ADAPTER, MANAGEMENT (pure, SHADOW): the venue order the
-    SAME management intent produces on the scaled position. Never sent."""
+    SAME management intent produces on the scaled position. Never sent.
+
+    THE ALTERNATIVES LIVE EVALUATED (R30A section 8). The SMALL LIVE adapter
+    evaluates no management alternative of its own: it consumes the
+    canonical management intent, so its evaluated set IS the intent's.
+    `live_alternatives` is the seam where a LIVE-side evaluator's own set
+    would enter ({alternative: EVALUATED | UNAVAILABLE}); the parity
+    comparison then refuses exact parity for any alternative evaluated on one
+    side but not the other (LOGIC_DIVERGENCE).
+
+    Management actions here only ever REDUCE exposure (a sale or a resting
+    protective sale of held inventory), so the LIVE policy's fail-closed rule
+    for NEW exposure does not refuse them; the management policy state is
+    recorded on the intent."""
     assert SMALL_LIVE_MODE == MODE_SHADOW
+    alt_set = (dict(live_alternatives) if live_alternatives is not None
+               else evaluated_set(mi.get("alternative_set")))
     base = {"scale": str(_dec(scale)),
-            "inventory_basis": "HYPOTHETICAL_SCALED_PAPER_POSITION_SHADOW_ONLY"}
+            "inventory_basis": "HYPOTHETICAL_SCALED_PAPER_POSITION_SHADOW_ONLY",
+            "alternatives_basis": ("LIVE_SIDE_EVALUATOR" if live_alternatives
+                                   is not None else
+                                   "THE_CANONICAL_MANAGEMENT_INTENT_S_SET")}
     if halted:
         return dict(base, state=S_HALTED, exclusion="SMALL_LIVE_HALTED",
                     requested=None, params=None, live_qty=0)
@@ -263,15 +447,18 @@ def live_management_proposal(mi: dict, *, scale, open_qty,
     act = mi["action"]
 
     def req(qty):
-        return _req(action=act, intent=mi.get("order_intent"),
-                    side=mi["holding_side"], slug=mi["us_market_slug"],
-                    qty=qty, limit=tl.get("limit_price"),
-                    wire=tl.get("wire_price"), tif=tl.get("time_in_force"),
-                    order_type=tl.get("order_type"), strategy=mi.get("strategy"),
-                    strategy_version=None,
-                    evidence_ids={"valuation_id": mi.get("valuation_id"),
-                                  "evidence_version": mi.get("evidence_version")},
-                    sha=mi["content_sha"])
+        return dict(_req(action=act, intent=mi.get("order_intent"),
+                         side=mi["holding_side"], slug=mi["us_market_slug"],
+                         qty=qty, limit=tl.get("limit_price"),
+                         wire=tl.get("wire_price"),
+                         tif=tl.get("time_in_force"),
+                         order_type=tl.get("order_type"),
+                         strategy=mi.get("strategy"), strategy_version=None,
+                         evidence_ids={"valuation_id": mi.get("valuation_id"),
+                                       "evidence_version": mi.get(
+                                           "evidence_version")},
+                         sha=mi["content_sha"]),
+                    alternatives_evaluated=alt_set)
 
     if act in (ACT_NONE, ACT_CANCEL_FIRST):
         return dict(base, state=S_NO_ORDER, exclusion=None, requested=req(None),
@@ -328,14 +515,135 @@ def _expected_live_qty(kind: str, action: str, paper_qty, scale, *,
     return int(((q / po) * held).quantize(Decimal(1), rounding=ROUND_HALF_EVEN))
 
 
+def _scaled_equal(paper_v, live_v, scale) -> bool | None:
+    """live == paper / scale to rounding (None when either is absent)."""
+    p, lv = _dec(paper_v), _dec(live_v)
+    if p is None or lv is None:
+        return None
+    return abs(p / Decimal(str(scale)) - lv) <= SCALED_USD_TOLERANCE
+
+
+def compare_allie_eddie(paper_ae: dict | None, live_ae: dict | None,
+                        scale) -> tuple[dict, list]:
+    """ALLIE AND EDDIE IN THE PARITY COMPARISON (pure; R30A section 30).
+    Returns ({field: {...}}, [divergent fields]). A pair that predates the
+    view (either side absent) is not compared and says so.
+
+      allie_final_allocation  status and binding terms equal; live final =
+                              paper final / scale, or bounded by the live
+                              rail (a capital bound) -> scale difference
+      eddie_estimate          status, recommendation, net edge (pp) and fill
+                              probability equal; live EV = paper EV / scale"""
+    if not paper_ae or not live_ae:
+        return ({"allie_final_allocation": {"compared": False,
+                                            "why": "VIEW_ABSENT_ON_A_SIDE"},
+                 "eddie_estimate": {"compared": False,
+                                    "why": "VIEW_ABSENT_ON_A_SIDE"}}, [])
+    fields, div = {}, []
+    pa, la = paper_ae.get("allie") or {}, live_ae.get("allie") or {}
+    same_terms = all(pa.get(k) == la.get(k) for k in (
+        "status", "final_binding", "binding_constraint"))
+    if la.get("live_rail_bound"):
+        p_scaled = (None if _dec(pa.get("final_allocatable_usd")) is None
+                    else _dec(pa["final_allocatable_usd"]) / Decimal(str(scale)))
+        amount_ok = (p_scaled is not None
+                     and _dec(la.get("final_allocatable_usd")) is not None
+                     and _dec(la["final_allocatable_usd"]) <= p_scaled
+                     + SCALED_USD_TOLERANCE)
+        basis = "LIVE_RAIL_BOUND"
+    else:
+        eq = _scaled_equal(pa.get("final_allocatable_usd"),
+                           la.get("final_allocatable_usd"), scale)
+        amount_ok = eq if eq is not None else (
+            pa.get("final_allocatable_usd") is None
+            and la.get("final_allocatable_usd") is None)
+        basis = "PAPER_FINAL_OVER_SCALE"
+    a_ok = bool(same_terms and amount_ok)
+    fields["allie_final_allocation"] = {
+        "compared": True, "paper": pa.get("final_allocatable_usd"),
+        "live": la.get("final_allocatable_usd"), "basis": basis,
+        "equal": a_ok, "scale_difference": a_ok and (
+            Decimal(str(scale)) != 1 or bool(la.get("live_rail_bound")))}
+    if not a_ok:
+        div.append("allie_final_allocation")
+    pe, le = paper_ae.get("eddie") or {}, live_ae.get("eddie") or {}
+    same_e = all(pe.get(k) == le.get(k) for k in (
+        "status", "recommendation", "expected_net_executable_edge_pp",
+        "expected_fill_probability"))
+    ev = _scaled_equal(pe.get("expected_executable_ev_usd"),
+                       le.get("expected_executable_ev_usd"), scale)
+    ev_ok = ev if ev is not None else (
+        pe.get("expected_executable_ev_usd") is None
+        and le.get("expected_executable_ev_usd") is None)
+    e_ok = bool(same_e and ev_ok)
+    fields["eddie_estimate"] = {
+        "compared": True, "paper": {k: pe.get(k) for k in (
+            "recommendation", "expected_executable_ev_usd")},
+        "live": {k: le.get(k) for k in (
+            "recommendation", "expected_executable_ev_usd")},
+        "equal": e_ok,
+        "scale_difference": e_ok and Decimal(str(scale)) != 1}
+    if not e_ok:
+        div.append("eddie_estimate")
+    return fields, div
+
+
+def compare_alternatives(paper_set: dict | None,
+                         live_set: dict | None) -> tuple[dict, list]:
+    """THE MANAGEMENT ALTERNATIVE SETS (pure; R30A section 8). An
+    alternative EVALUATED on one side but not the other is a divergence
+    (`alternative:<NAME>`); one evaluated on NEITHER side (the paper book
+    runs no indirect-hedge search) is recorded as not evaluated, and exact
+    management parity is NOT claimed while any exists."""
+    ps, ls = dict(paper_set or {}), dict(live_set or {})
+    if not ps and not ls:
+        return ({"compared": False, "why": "NO_ALTERNATIVE_SET_ON_EITHER_SIDE",
+                 "exact_parity_claimed": False}, [])
+    div, neither = [], []
+    per = {}
+    for a in sorted(set(ALTERNATIVES) | set(ps) | set(ls)):
+        pe, le = ps.get(a) == EVALUATED, ls.get(a) == EVALUATED
+        per[a] = {"paper": ps.get(a), "live": ls.get(a),
+                  "equal": pe == le}
+        if pe != le:
+            div.append("alternative:%s" % a)
+        elif not pe:
+            neither.append(a)
+    return ({"compared": True, "per_alternative": per,
+             "evaluated_on_neither_side": neither,
+             "exact_parity_claimed": not div and not neither,
+             "why_not_exact": (None if not neither else
+                               "NOT_EVALUATED_ON_EITHER_SIDE:%s"
+                               % ",".join(neither))}, div)
+
+
 def compare(*, kind: str, intent: dict, paper: dict, live: dict, scale,
             open_qty=None) -> dict:
     """CLASSIFY ONE PAPER / SMALL LIVE PAIR (pure). `paper` and `live` are the
     adapter records: {state, exclusion|refusal, requested}. Returns
-    {parity_state, divergence_fields, comparison}."""
+    {parity_state, divergence_fields, comparison}.
+
+    R30A: a GOVERNANCE exclusion (LIVE policy / gate approval) or an expiry
+    on the live record leaves the logic comparison to the would-be order
+    (`plan_state` / `plan_exclusion`); the governance refusals are recorded
+    on the comparison and block readiness, the expiry is a venue-timing
+    difference. Allie / Eddie (decisions) and the alternative set
+    (management) are compared too."""
     pr, lr = paper.get("requested") or {}, live.get("requested") or {}
     fields: dict[str, Any] = {}
     div: list[str] = []
+    gov_refusals = list((live.get("governance") or {}).get("refusals") or [])
+    expiry = live.get("expiry_refusal")
+    if live.get("state") == S_EXCLUDED and live.get("plan_state") is not None \
+            and live.get("exclusion") in (GOVERNANCE_EXCLUSIONS
+                                          | {R_INTENT_EXPIRED,
+                                             R_EXPIRY_UNAVAILABLE}):
+        # refused for governance / expiry: the logic is compared on the
+        # would-be order -- what capital and venue facts alone decided
+        lstate = S_PROPOSED if live["plan_state"] == "PLANNED" else S_EXCLUDED
+        lexcl = live.get("plan_exclusion")
+    else:
+        lstate, lexcl = live.get("state"), live.get("exclusion")
     # both adapters must have consumed THIS intent
     for side_name, rec in (("paper", pr), ("live", lr)):
         if rec and rec.get("intent_sha") not in (None, intent["content_sha"]):
@@ -360,15 +668,34 @@ def compare(*, kind: str, intent: dict, paper: dict, live: dict, scale,
     fields["qty"] = {"paper": pr.get("qty"), "live": lq,
                      "expected_live_at_scale": exp,
                      "scale": str(_dec(scale))}
-    excl = live.get("exclusion")
+    excl = lexcl
     pref = paper.get("refusal")
+    # ALLIE AND EDDIE (decisions): both adapters' views of the same intent
+    ae_scale = False
+    if kind == "DECISION" and lr:
+        ae_fields, ae_div = compare_allie_eddie(pr.get("allie_eddie"),
+                                                lr.get("allie_eddie"), scale)
+        fields.update(ae_fields)
+        ae_scale = any((ae_fields.get(k) or {}).get("scale_difference")
+                       for k in ("allie_final_allocation", "eddie_estimate"))
+        for f in ae_div:
+            if f not in div:
+                div.append(f)
+    # THE ALTERNATIVE SETS (management)
+    alt_cmp = None
+    if kind == "MANAGEMENT" and lr:
+        alt_cmp, alt_div = compare_alternatives(
+            pr.get("alternatives_evaluated"), lr.get("alternatives_evaluated"))
+        for f in alt_div:
+            if f not in div:
+                div.append(f)
     cls = None
     if div:
         cls = DIVERGENCE
-    elif live.get("state") == S_PROPOSED and exp is not None and lq != exp:
+    elif lstate == S_PROPOSED and exp is not None and lq != exp:
         div.append("qty")
         cls = DIVERGENCE
-    elif live.get("state") == S_EXCLUDED:
+    elif lstate == S_EXCLUDED:
         if excl in CAPITAL_EXCLUSIONS:
             cls = SCALE
         elif excl in VENUE_EXCLUSIONS:
@@ -376,26 +703,38 @@ def compare(*, kind: str, intent: dict, paper: dict, live: dict, scale,
         else:
             div.append("live_exclusion:%s" % excl)
             cls = DIVERGENCE
-    elif paper.get("state") == P_REFUSED and live.get("state") == S_PROPOSED:
+    elif paper.get("state") == P_REFUSED and lstate == S_PROPOSED:
         if pref in PAPER_CAPITAL_REFUSALS:
             cls = SCALE
+        elif pref in VENUE_EXCLUSIONS:
+            # the paper adapter found the intent expired: a timing fact
+            cls = VENUE_DIFF
         else:
             div.append("paper_refusal:%s" % pref)
             cls = DIVERGENCE
     elif kind == "DECISION" and not paper_order and \
-            live.get("state") == S_PROPOSED and paper.get("state") != P_REFUSED:
+            lstate == S_PROPOSED and paper.get("state") != P_REFUSED:
         div.append("paper_order_absent")
         cls = DIVERGENCE
+    if cls is None and expiry is not None:
+        # identical logic; the SMALL LIVE adapter reached the intent after it
+        # expired -- a venue-timing difference, recorded, never sent
+        cls = VENUE_DIFF
     if cls is None:
         same_qty = (pr.get("qty") is None and lq in (0, None)) or (
             pr.get("qty") is not None and lq is not None
             and Decimal(str(pr["qty"])) == Decimal(int(lq)))
-        cls = MATCHED if same_qty else SCALE
-    return {"parity_state": cls, "divergence_fields": div,
-            "comparison": {"fields": fields, "paper_state": paper.get("state"),
-                           "live_state": live.get("state"),
-                           "live_exclusion": excl, "paper_refusal": pref,
-                           "version": PARITY_VERSION}}
+        cls = MATCHED if same_qty and not ae_scale else SCALE
+    comp = {"fields": fields, "paper_state": paper.get("state"),
+            "live_state": live.get("state"),
+            "live_exclusion": live.get("exclusion"),
+            "live_plan_exclusion": lexcl, "paper_refusal": pref,
+            "live_governance_refusals": gov_refusals,
+            "live_expiry_refusal": expiry,
+            "version": PARITY_VERSION}
+    if alt_cmp is not None:
+        comp["alternatives"] = alt_cmp
+    return {"parity_state": cls, "divergence_fields": div, "comparison": comp}
 
 
 # ─────────────────────────── live venue lifecycle (pure) ───────────────
@@ -453,6 +792,26 @@ def readiness(rows: list, *, halted: bool, profitability: dict | None = None,
     div = count(inv, DIVERGENCE)
     dec_match = sum(1 for r in dec if r.get("parity_state") != DIVERGENCE)
     mgt_match = sum(1 for r in mgt if r.get("parity_state") != DIVERGENCE)
+    # R30A: governance refusals (LIVE policy / gate approvals) in the sample
+    gov: dict = {}
+    for r in inv:
+        for code in ((r.get("comparison") or {}).get(
+                "live_governance_refusals") or []):
+            gov[code] = gov.get(code, 0) + 1
+    gov_rows = sum(1 for r in inv if (r.get("comparison") or {}).get(
+        "live_governance_refusals"))
+    expired = sum(1 for r in inv if (r.get("comparison") or {}).get(
+        "live_expiry_refusal"))
+    # R30A: management alternative sets -- exact parity is claimed only when
+    # every alternative was evaluated on both sides
+    alt_missing: dict = {}
+    alt_exact = 0
+    for r in mgt:
+        a = (r.get("comparison") or {}).get("alternatives") or {}
+        if a.get("exact_parity_claimed"):
+            alt_exact += 1
+        for x in a.get("evaluated_on_neither_side") or []:
+            alt_missing[x] = alt_missing.get(x, 0) + 1
     report = {
         "version": READINESS_VERSION,
         "sleeve": SLV.INVESTMENT,
@@ -468,6 +827,18 @@ def readiness(rows: list, *, halted: bool, profitability: dict | None = None,
             "order_type": field_rate(dec, "order_type")},
         "xavier_management_match": {"matched": mgt_match, "of": len(mgt),
                                     "rate": rate(mgt_match, len(mgt))},
+        "allie_allocation_match": field_rate(dec, "allie_final_allocation"),
+        "eddie_estimate_match": field_rate(dec, "eddie_estimate"),
+        "management_alternatives": {
+            "exact_parity_claimed": alt_exact, "of": len(mgt),
+            "evaluated_on_neither_side": alt_missing,
+            "statement": ("exact management parity is NOT claimed for a "
+                          "review whose alternative set was evaluated on "
+                          "neither side for some alternative (the paper book "
+                          "runs no indirect-hedge search); an alternative "
+                          "evaluated on one side only is a LOGIC_DIVERGENCE")},
+        "live_governance_refusals": {"rows": gov_rows, "by_refusal": gov},
+        "live_expired_intents": expired,
         "matched": count(inv, MATCHED),
         "expected_scale_differences": count(inv, SCALE),
         "venue_only_differences": count(inv, VENUE_DIFF),
@@ -479,7 +850,10 @@ def readiness(rows: list, *, halted: bool, profitability: dict | None = None,
                  "INVESTMENT decision intents and >= %d INVESTMENT "
                  "management intents compared since it (a MINIMUM PARITY "
                  "SAMPLE ONLY, not profit evidence); zero LOGIC_DIVERGENCE; "
-                 "and, separately, the INVESTMENT sleeve's forward "
+                 "zero intents LIVE would have refused for governance (the "
+                 "LIVE policy approved and matched, the live gates' "
+                 "configurations approved); and, separately, the INVESTMENT "
+                 "sleeve's forward "
                  "profitability verdict is SUPPORTED_BY_FORWARD_EVIDENCE "
                  "(positive forward net, positive t and bootstrap lower "
                  "bounds on per-event net, bounded drawdown, >= 30 "
@@ -491,6 +865,9 @@ def readiness(rows: list, *, halted: bool, profitability: dict | None = None,
         blockers.append("SMALL_LIVE_HALTED_BY_LOGIC_DIVERGENCE")
     if div:
         blockers.append("LOGIC_DIVERGENCES_IN_SAMPLE:%d" % div)
+    for code in sorted(gov):
+        # LIVE would have refused these intents: never activation evidence
+        blockers.append("LIVE_GOVERNANCE_REFUSED:%s:%d" % (code, gov[code]))
     if len(dec) < min_decisions:
         blockers.append("DECISION_SAMPLE:%d_OF_%d" % (len(dec), min_decisions))
     if len(mgt) < min_management:
@@ -499,9 +876,10 @@ def readiness(rows: list, *, halted: bool, profitability: dict | None = None,
     pv = (profitability or {}).get("profitability_verdict")
     if pv != "SUPPORTED_BY_FORWARD_EVIDENCE":
         blockers.append("PROFITABILITY:%s" % (pv or "NOT_EVALUATED"))
-    report["parity_gate"] = "PASS" if not [b for b in blockers
-                                           if not b.startswith("PROFIT")] \
-        else "FAIL"
+    report["parity_gate"] = "PASS" if not [
+        b for b in blockers if not b.startswith("PROFIT")
+        and not b.startswith("LIVE_GOVERNANCE_REFUSED")] else "FAIL"
+    report["governance_gate"] = "PASS" if not gov else "FAIL"
     report["blockers"] = blockers
     report["recommendation"] = READY if not blockers else NOT_READY
     report["capital_activation"] = ("NOT_AUTHORIZED: SMALL LIVE stays SHADOW "
@@ -556,18 +934,27 @@ async def record_decision_intent(conn, intent: dict) -> bool:
     async def ins(c):
         return await c.fetchval(
             """INSERT INTO canonical_decision_intents (intent_id, intent_version,
-                 decision_id, strategy, strategy_version, sleeve, evidence,
+                 decision_id, opportunity_id, strategy, strategy_version,
+                 policy, sleeve, evidence, probability, book, risk_rails,
+                 binding_constraints, evidence_refs, latency_stages,
                  opportunity_score, derek, karen, allie, eddie, venue,
                  us_market_slug, contract, holding_side, order_intent,
                  order_type, time_in_force, limit_price, wire_price, target_qty,
-                 sizing_basis, created_at, content_sha)
-               VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8::jsonb,$9::jsonb,
-                 $10::jsonb,$11::jsonb,$12::jsonb,$13,$14,$15::jsonb,$16,$17,
-                 $18,$19,$20,$21,$22,$23::jsonb,to_timestamp($24),$25)
+                 sizing_basis, created_at, expires_at, expiry, content_sha)
+               VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9::jsonb,$10::jsonb,
+                 $11::jsonb,$12::jsonb,$13::jsonb,$14::jsonb,$15::jsonb,
+                 $16::jsonb,$17::jsonb,$18::jsonb,$19::jsonb,$20::jsonb,$21,
+                 $22,$23::jsonb,$24,$25,$26,$27,$28,$29,$30,$31::jsonb,
+                 to_timestamp($32),to_timestamp($33),$34::jsonb,$35)
                ON CONFLICT (decision_id) DO NOTHING RETURNING intent_id""",
             intent["intent_id"], intent["intent_version"], intent["decision_id"],
-            intent["strategy"], intent["strategy_version"], intent["sleeve"],
-            _j(intent["evidence"]), _j(intent["opportunity_score"]),
+            intent["opportunity_id"], intent["strategy"],
+            intent["strategy_version"], _j(intent["policy"]),
+            intent["sleeve"], _j(intent["evidence"]),
+            _j(intent["probability"]), _j(intent["book"]),
+            _j(intent["risk_rails"]), _j(intent["binding_constraints"]),
+            _j(intent["evidence_refs"]), _j(intent["latency_stages"]),
+            _j(intent["opportunity_score"]),
             _j(intent["derek"]), _j(intent["karen"]), _j(intent["allie"]),
             _j(intent["eddie"]), intent["venue"], intent["us_market_slug"],
             _j(intent["contract"]), intent["holding_side"],
@@ -575,6 +962,7 @@ async def record_decision_intent(conn, intent: dict) -> bool:
             intent["time_in_force"], intent["limit_price"],
             intent["wire_price"], intent["target_qty"],
             _j(intent["sizing_basis"]), intent["created_at"],
+            intent["expires_at"], _j(intent["expiry"]),
             intent["content_sha"])
     return bool(await _savepoint(conn, ins))
 
@@ -587,10 +975,11 @@ async def record_management_intent(conn, mi: dict) -> bool:
                  sleeve, valuation_id, evidence_version, evidence_state,
                  recommendation, mechanical_selection, action, us_market_slug,
                  holding_side, order_intent, target_qty, target_limit,
-                 alternatives, freshness, reason, created_at, content_sha)
+                 alternatives, alternative_set, chosen, chosen_why, policy,
+                 freshness, reason, created_at, content_sha)
                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,
-                 $17,$18::jsonb,$19::jsonb,$20::jsonb,$21::jsonb,
-                 to_timestamp($22),$23)
+                 $17,$18::jsonb,$19::jsonb,$20::jsonb,$21,$22::jsonb,
+                 $23::jsonb,$24::jsonb,$25::jsonb,to_timestamp($26),$27)
                ON CONFLICT (review_id) DO NOTHING RETURNING intent_id""",
             mi["intent_id"], mi["intent_version"], mi["review_id"],
             mi["group_id"], mi["position_key"], mi["strategy"], mi["sleeve"],
@@ -598,8 +987,9 @@ async def record_management_intent(conn, mi: dict) -> bool:
             mi["recommendation"], mi["mechanical_selection"], mi["action"],
             mi["us_market_slug"], mi["holding_side"], mi["order_intent"],
             mi["target_qty"], _j(mi["target_limit"]), _j(mi["alternatives"]),
-            _j(mi["freshness"]), _j(mi["reason"]), mi["created_at"],
-            mi["content_sha"])
+            _j(mi["alternative_set"]), mi["chosen"], _j(mi["chosen_why"]),
+            _j(mi["policy"]), _j(mi["freshness"]), _j(mi["reason"]),
+            mi["created_at"], mi["content_sha"])
     return bool(await _savepoint(conn, ins))
 
 
@@ -658,13 +1048,30 @@ async def _record_parity(c, *, kind, intent, paper_eid, live_eid, scale,
     return pid
 
 
+async def governance_in_force(conn) -> dict:
+    """THE APPROVALS IN FORCE NOW, for governance_verdict (read-only, fail
+    closed): the policy shas approved for LIVE, and the live gates whose
+    configuration approval matches this build (the book gate also needs its
+    204 rule document approved: live_rule_artifacts intersects both)."""
+    from . import live_approvals as LAP
+    from . import live_rule_artifacts as LRA
+    pol = await LAP.approved_policy_shas(conn)
+    book = await LRA.approved_live_book_rules(conn)
+    settle = await LAP.approved_settlement_gates(conn)
+    gates = frozenset(g for g in book if g == LAP.GATE_BOOK) | settle
+    return {"approved_policy_shas": pol, "approved_gates": gates}
+
+
 async def entry_adapters(conn, intent: dict, *, paper_order: dict,
-                         paper_result: dict) -> dict:
+                         paper_result: dict, now=None,
+                         stages: dict | None = None) -> dict:
     """Record what BOTH adapters did with one canonical decision intent and
     the parity between them. The PAPER adapter already ran (the caller
     submitted `paper_order`, built from `paper_entry_fields(intent)`); the
-    SMALL LIVE adapter constructs its SHADOW proposal here. Never raises into
-    the caller."""
+    SMALL LIVE adapter constructs its SHADOW proposal here, at `now` (the
+    caller's decision clock; default the wall clock). `stages` are the
+    latency chain's adapter-side stamps (intent recorded, paper submit),
+    recorded on the PAPER execution row. Never raises into the caller."""
     async def go(c):
         ctl = await control(c)
         cap = await capital_scale(c)
@@ -678,11 +1085,14 @@ async def entry_adapters(conn, intent: dict, *, paper_order: dict,
             mode="SIMULATED", version=PAPER_ADAPTER_VERSION, state=pstate,
             exclusion=pref, requested=preq, scale=1, params=None,
             refs={"order_id": (paper_result.get("order") or {}).get("order_id"),
-                  "decision_id": intent["decision_id"]})
+                  "decision_id": intent["decision_id"],
+                  "stages": dict(stages or {})})
+        gov = await governance_in_force(c)
         live = live_entry_proposal(intent, scale=cap["scale"],
                                    buying_power=cap["buying_power"],
                                    max_order_usd=cap["max_order_usd"],
-                                   halted=bool(ctl.get("halted")))
+                                   halted=bool(ctl.get("halted")),
+                                   now=now, governance=gov)
         if live["state"] == S_NO_ORDER and \
                 live["exclusion"] == M.STRATEGY_NOT_LIVE_ELIGIBLE:
             # out of live scope by policy (TRAINING / BENCHMARK / unpromoted
@@ -697,7 +1107,12 @@ async def entry_adapters(conn, intent: dict, *, paper_order: dict,
             refs={"eligibility": live.get("eligibility"),
                   "detail": live.get("detail"),
                   "max_order_usd": str(cap["max_order_usd"]),
-                  "buying_power_current": cap["buying_power"] is not None})
+                  "buying_power_current": cap["buying_power"] is not None,
+                  "governance": live.get("governance"),
+                  "expiry_refusal": live.get("expiry_refusal"),
+                  "plan_state": live.get("plan_state"),
+                  "plan_exclusion": live.get("plan_exclusion"),
+                  "new_exposure_refused": live["state"] != S_PROPOSED})
         if live["state"] == S_HALTED:
             return {"paper": pstate, "live": S_HALTED}
         res = compare(kind="DECISION", intent=intent,
@@ -752,7 +1167,10 @@ async def management_adapters(conn, mi: dict, *, taken: dict,
             params=live["params"],
             refs={"inventory_basis": live.get("inventory_basis"),
                   "live_held": live.get("live_held"),
-                  "detail": live.get("detail")})
+                  "detail": live.get("detail"),
+                  "alternatives_basis": live.get("alternatives_basis"),
+                  "new_exposure": False,
+                  "management_policy": _obj(mi.get("policy"))})
         if live["state"] == S_HALTED:
             return {"paper": pstate, "live": S_HALTED}
         res = compare(kind="MANAGEMENT", intent=mi,
@@ -788,10 +1206,12 @@ async def clear_halt(conn, *, actor: str, reason: str) -> dict:
 
 async def readiness_report(conn, *, since: float | None = None,
                            profitability: dict | None = None) -> dict:
-    """The gate over the ledger since `since` (default: the last cleared halt,
-    else everything)."""
+    """The gate over the ledger since `since` (never before the EFFECTIVE
+    production cutover -- the latest release whose decision-logic hash
+    changed -- nor before the last cleared halt)."""
     ctl = await control(conn)
     cut = await production_cutover(conn)
+    latest = await latest_release_cutover(conn)
     cut_at = None if cut is None else cut["cutover_at"].timestamp()
     if since is None:
         since = cut_at
@@ -827,6 +1247,13 @@ async def readiness_report(conn, *, since: float | None = None,
     out["since"] = since
     out["cutover"] = {k: (v.isoformat() if hasattr(v, "isoformat") else v)
                       for k, v in cut.items() if k != "evidence"}
+    out["latest_release_cutover"] = None if latest is None else {
+        k: (v.isoformat() if hasattr(v, "isoformat") else v)
+        for k, v in latest.items() if k != "evidence"}
+    out["cutover_rule"] = (
+        "the forward window starts at the latest release whose "
+        "decision_logic_hash differs from its predecessor's: a release that "
+        "does not change decision logic does not restart the sample")
     first = next((r for r in recs if r.get("sleeve") == SLV.INVESTMENT
                   and r.get("intent_kind") == "DECISION"), None)
     out["observation_1"] = (None if first is None
@@ -841,16 +1268,46 @@ async def readiness_report(conn, *, since: float | None = None,
 
 # ─────────────────────────── the decision hook ─────────────────────────
 
+async def _live_rails(conn) -> dict:
+    """The live rails in force, read-only (execmirror_control): the live
+    lane's per-order cap and its capital scale. UNAVAILABLE with the reason
+    when unreadable -- never a manufactured value."""
+    try:
+        async with conn.transaction():                        # a savepoint
+            ctl = await conn.fetchrow(
+                "SELECT scale, max_order_usd FROM execmirror_control LIMIT 1")
+    except Exception as exc:                                  # noqa: BLE001
+        return unavailable("LIVE_RAILS_UNREADABLE:%s" % type(exc).__name__)
+    if ctl is None:
+        return unavailable("NO_EXECMIRROR_CONTROL_ROW")
+    scale = None if ctl["scale"] is None else Decimal(str(ctl["scale"]))
+    cap = None if ctl["max_order_usd"] is None else Decimal(
+        str(ctl["max_order_usd"]))
+    return {"status": "MEASURED", "live_max_order_usd": cap,
+            "live_scale": scale,
+            "live_rail_paper_equivalent_usd": (
+                None if cap is None or scale is None else cap * scale),
+            "read_from": "execmirror_control (read-only)"}
+
+
 async def canonical_decision(conn, *, did, strategy, version, cand, side, sized,
                            ent, obs, md, econ, p, best_edge, verdict, refusals,
                            policy_decision, at, label, book_age, cfg, params,
-                           pin) -> dict | None:
+                           pin, book_max_age=None, book_source=None,
+                           clock=None) -> dict | None:
     """THE DECISION HOOK (decision_hooks.CANONICAL_DECISION): BUILD AND
     RECORD THE ONE CANONICAL DECISION INTENT of an ENTER
     decision (live_parity.build_decision_intent), with the agent components
     computed at the decision instant (canonical_components). Returns the
     intent, or None when it could not be built or recorded (the paper
-    sibling then proceeds exactly as before, and no live proposal exists)."""
+    sibling then proceeds exactly as before, and no live proposal exists).
+
+    R30A: the intent also carries the opportunity id, the policy block (the
+    parameter version, its row sha, policy_sha; a PAPER fallback labelled),
+    the probability's source / version / stamps / age, the book observation
+    and its age against the entry rule (`book_max_age`), the risk rails in
+    force, Allie's binding constraints, evidence references, the latency
+    chain's decision-side stages, and the validity window (expires_at)."""
     try:
         e = econ or {}
         cost = e.get("acquisition_cost_usd")
@@ -885,8 +1342,98 @@ async def canonical_decision(conn, *, did, strategy, version, cand, side, sized,
                                      book_row=book_row, cost_usd=cost, p=p,
                                      wire=sized.get("wire"), now=at)
         pinnacle = cand.get("pinnacle") or {}
+        pin = pin or {}
+        prm = params if isinstance(params, dict) else None
+        policy = policy_block(strategy=strategy, strategy_version=version,
+                              params=prm)
+        p_obs = pin.get("at") if pin.get("at") is not None else pinnacle.get(
+            "observed_at")
+        probability = {
+            "status": "MEASURED" if p is not None else "UNAVAILABLE",
+            "value": p,
+            "source": pin.get("provider") or pinnacle.get("provider"),
+            "source_version": pin.get("source_version")
+            or pinnacle.get("source_version"),
+            "method": pin.get("method") or pinnacle.get("method"),
+            "observed_at": p_obs,
+            "received_at": pin.get("received_at")
+            or pinnacle.get("received_at"),
+            "age_at_decision_s": pin.get("age_s"),
+            "limit_s": pin.get("limit_s"),
+            "qualified": pin.get("qualified"),
+            "authority": pin.get("probability_authority"),
+            "valuation_id": cand.get("valuation_id"),
+            "valuation_decided_at": cand.get("decided_at")}
+        book = {"status": "MEASURED" if obs is not None else "UNAVAILABLE",
+                "obs_id": None if obs is None else obs["obs_id"],
+                "observed_at": None if obs is None
+                else float(obs["observed_at"]),
+                "observed_at_is": "OUR_RECEIPT_INSTANT",
+                "age_at_decision_s": book_age,
+                "max_age_s": book_max_age, "source": book_source}
+        risk = cfg.get("risk") or {}
+        rails = await _live_rails(conn)
+        risk_rails = {
+            "paper_per_order_cap_usd": risk.get("per_order_cap_usd"),
+            "paper_target_order_usd": ent.get("target_order_usd"),
+            "paper_risk": {k: risk.get(k) for k in sorted(risk)},
+            "live": rails,
+            "per_order_cap_usd": risk.get("per_order_cap_usd"),
+            "scale": rails.get("live_scale"),
+            "basis": ("the rails the paper account applied to this order and "
+                      "the live lane's per-order cap and scale the SMALL LIVE "
+                      "adapter applies; none is changed here")}
+        allie = comps["allie"] or {}
+        eddie = comps["eddie"] or {}
+        refs = [x for x in (
+            {"kind": "paper_decisions", "id": did},
+            {"kind": "valuation", "id": cand.get("valuation_id")}
+            if cand.get("valuation_id") is not None else None,
+            {"kind": "paper_book_observations", "id": obs["obs_id"]}
+            if obs is not None else None,
+            {"kind": "policy_parameters_version",
+             "id": (prm or {}).get("version_id")}
+            if (prm or {}).get("version_id") else None,
+            {"kind": "policy_parameters_activation",
+             "id": (prm or {}).get("activation_id")}
+            if (prm or {}).get("activation_id") else None,
+            {"kind": "eddie_estimate", "id": eddie.get("estimate_id")}
+            if eddie.get("estimate_id") else None) if x]
+        stages = {
+            "pinnacle_observed_at": p_obs,
+            "ingest_at": probability["received_at"],
+            "probability_qualified_at": cand.get("decided_at"),
+            "book_observed_at": book["observed_at"],
+            "decision_start_at": at,
+            "basis": {
+                "pinnacle_observed_at": "the provider's source stamp",
+                "ingest_at": "our receipt of the Pinnacle reading",
+                "probability_qualified_at": ("the lane's valuation decision "
+                                             "instant (the valuation row's "
+                                             "decided_at)"),
+                "book_observed_at": "our receipt of the executable book",
+                "decision_start_at": "the paper decision instant",
+                "clock": ("the decision clock (the pass context's clock; the "
+                          "wall clock in production)")}}
+        contract = {"us_market_slug": cand.get("us_market_slug"),
+                    "fixture": cand.get("fixture"),
+                    "condition_id": cand.get("condition_id"),
+                    "payout_event": cand.get("payout_event"),
+                    "payout_is_complement": cand.get("payout_is_complement"),
+                    "sport_family": cand.get("sport_family"),
+                    "event_key": (label or {}).get("event_key"),
+                    "market": cand.get("market"), "line": cand.get("line"),
+                    "scope": cand.get("period")}
         intent = build_decision_intent(
             decision_id=did, strategy=strategy, strategy_version=version,
+            opportunity_id=opportunity_key(
+                fixture=cand.get("fixture"),
+                us_market_slug=cand.get("us_market_slug"),
+                holding_side=side, line=cand.get("line"),
+                scope=cand.get("period")),
+            policy=policy, probability=probability, book=book,
+            risk_rails=risk_rails, evidence_refs=refs,
+            latency_stages=stages,
             evidence={
                 "valuation_id": cand.get("valuation_id"),
                 "book_obs_id": None if obs is None else obs["obs_id"],
@@ -905,15 +1452,9 @@ async def canonical_decision(conn, *, did, strategy, version, cand, side, sized,
                 verdict=verdict, policy_version=version,
                 policy_decision=policy_decision, refusals=refusals,
                 economics=e, gross_edge_pp=best_edge, probability=p),
-            karen=comps["karen"], allie=comps["allie"], eddie=comps["eddie"],
+            karen=comps["karen"], allie=allie or None, eddie=eddie or None,
             us_market_slug=cand["us_market_slug"],
-            contract={"us_market_slug": cand.get("us_market_slug"),
-                      "fixture": cand.get("fixture"),
-                      "condition_id": cand.get("condition_id"),
-                      "payout_event": cand.get("payout_event"),
-                      "payout_is_complement": cand.get("payout_is_complement"),
-                      "sport_family": cand.get("sport_family"),
-                      "event_key": (label or {}).get("event_key")},
+            contract=contract,
             holding_side=side, order_intent=cand.get("side"),
             order_type=ent["order_type"], time_in_force=ent["time_in_force"],
             limit_price=sized.get("limit"), wire_price=sized.get("wire"),
@@ -983,18 +1524,105 @@ async def _record_install(get_pool, process: str) -> None:
 
 CUTOVER_MIGRATIONS = ("225", "226")
 
+#: THE DECISION-PATH SOURCE FILES (paths relative to the sportsassets
+#: package) whose content IS the decision logic: what decides ENTER and
+#: sizes it, what values and manages a position, what builds both canonical
+#: intents and both adapters' orders, and the live gates. Their combined
+#: sha256 (`decision_logic_hash`), computed from the RUNNING build's files,
+#: is recorded with every release's cutover: a release that changes none of
+#: them keeps the forward sample; one that changes any restarts it. Pinned:
+#: a new decision-path module is added here in the same change (a test
+#: checks every listed file exists). Accounting, storage, pages and agents'
+#: advisory code are not decision logic and are deliberately not listed.
+DECISION_LOGIC_FILES = (
+    "canonical_intent.py", "canonical_components.py", "allie_capital.py",
+    "live_parity.py", "live_approvals.py", "execmirror.py",
+    "execution_intent.py", "actual_admission.py", "live_book_currency.py",
+    "xavier_freshness.py", "bettor_funded_decision.py",
+    "bettor_paper_simulator.py", "agents/paper_benchmark.py",
+    "agents/paper_derek.py", "agents/derek_policy.py",
+    "agents/paper_xavier.py", "agents/xavier_policy.py",
+    "agents/xavier_management.py", "agents/eddie.py",
+    "lost_opportunity/score.py")
+
+
+def decision_logic_hash(root=None) -> dict:
+    """sha256 over the pinned decision-path files of THIS build (read from
+    disk beside this module, i.e. the code the serving process runs).
+    {hash, files: {path: sha256}, missing}. A missing file makes the hash
+    None: a cutover never records a logic identity it could not compute."""
+    base = pathlib.Path(root) if root is not None else \
+        pathlib.Path(__file__).resolve().parent
+    files, missing = {}, []
+    for rel in DECISION_LOGIC_FILES:
+        f = base / rel
+        try:
+            files[rel] = hashlib.sha256(f.read_bytes()).hexdigest()
+        except OSError:
+            missing.append(rel)
+    if missing:
+        return {"hash": None, "files": files, "missing": missing}
+    h = hashlib.sha256("".join("%s:%s\n" % (k, files[k])
+                               for k in sorted(files)).encode()).hexdigest()
+    return {"hash": h, "files": files, "missing": []}
+
+
+def effective_cutover_of(rows: list) -> dict | None:
+    """THE EFFECTIVE CUTOVER (pure; the same rule as the view
+    live_parity_effective_cutover): rows in recorded order; the latest row
+    whose decision_logic_hash differs from its predecessor's (the first row
+    differs from nothing)."""
+    rs = sorted((dict(r) for r in rows or []),
+                key=lambda r: (_epoch(r.get("recorded_at")) or 0.0,
+                               r.get("cutover_id") or 0))
+    eff, prev = None, object()
+    for r in rs:
+        if r.get("decision_logic_hash") != prev:
+            eff = r
+        prev = r.get("decision_logic_hash")
+    return eff
+
 
 async def production_cutover(conn) -> dict | None:
-    """The recorded R30 production cutover, or None."""
+    """THE EFFECTIVE production cutover (the forward window's start), or
+    None: the latest release whose decision-logic hash changed
+    (live_parity_effective_cutover). `cutover_at` is its recorded_at."""
     try:
-        r = await conn.fetchrow("SELECT * FROM live_parity_cutover WHERE id = 1")
+        async with conn.transaction():
+            r = await conn.fetchrow(
+                "SELECT * FROM live_parity_effective_cutover")
+    except Exception:                                         # noqa: BLE001
+        return None
+    return None if r is None else dict(r)
+
+
+async def latest_release_cutover(conn) -> dict | None:
+    """The most recently recorded release (it may not have restarted the
+    window), or None."""
+    try:
+        async with conn.transaction():
+            r = await conn.fetchrow(
+                "SELECT * FROM live_parity_cutover "
+                " ORDER BY recorded_at DESC, cutover_id DESC LIMIT 1")
+    except Exception:                                         # noqa: BLE001
+        return None
+    return None if r is None else dict(r)
+
+
+async def release_cutover(conn, release_sha: str) -> dict | None:
+    try:
+        async with conn.transaction():
+            r = await conn.fetchrow(
+                "SELECT * FROM live_parity_cutover WHERE release_sha = $1",
+                release_sha)
     except Exception:                                         # noqa: BLE001
         return None
     return None if r is None else dict(r)
 
 
 async def cutover_checks(conn, *, release_sha: str, api_sha: str | None,
-                         hooks_here: list) -> dict:
+                         hooks_here: list, recorded_by: str | None = None,
+                         logic: dict | None = None) -> dict:
     """EVERY CUTOVER CONDITION, read from production now (pure reads). Each
     check is {passed, value}; the cutover is recorded only if all pass."""
     checks: dict = {}
@@ -1006,6 +1634,12 @@ async def cutover_checks(conn, *, release_sha: str, api_sha: str | None,
         c in "0123456789abcdef" for c in release_sha)
     put("RELEASE_SHA_IS_A_FULL_SHA", full, release_sha)
     put("API_RUNS_THE_RELEASE_SHA", api_sha == release_sha, api_sha)
+    # R30A: a NAMED HUMAN records a cutover (the table CHECKs the same)
+    put("RECORDED_BY_IS_A_NAMED_HUMAN", is_named_human(recorded_by),
+        recorded_by)
+    lg = logic if logic is not None else decision_logic_hash()
+    put("DECISION_LOGIC_HASH_COMPUTED", lg.get("hash") is not None,
+        {"hash": lg.get("hash"), "missing": lg.get("missing")})
     wb = await conn.fetchval(
         "SELECT value FROM ingestion_state WHERE key = 'workers_boot'")
     wb = json.loads(wb) if isinstance(wb, str) else (wb or {})
@@ -1041,55 +1675,368 @@ async def cutover_checks(conn, *, release_sha: str, api_sha: str | None,
         {"execmirror_enabled": None if em is None else em["enabled"],
          "execmirror_stopped": None if em is None else em["stopped"],
          "venue_orders_ever": sent, "small_live_venue_events": live_ev})
-    # THE READBACK: every R30 object present and readable
+    # THE READBACK: every R30 / R30A object present and readable
     objs = ["canonical_decision_intents", "canonical_management_intents",
             "canonical_intent_executions", "live_parity_ledger",
             "small_live_control", "small_live_order_events",
-            "live_parity_hook_installs", "agent_work_requests"]
+            "live_parity_hook_installs", "agent_work_requests",
+            "live_parity_cutover", "live_approvals",
+            "live_parity_effective_cutover"]
     present = {o: bool(await conn.fetchval(
         "SELECT to_regclass($1) IS NOT NULL", o)) for o in objs}
+    # NO LOGIC DIVERGENCE a human has not cleared. With ONE singleton cutover
+    # this read "ever"; with a row per release, "ever" would make every
+    # later release unrecordable after the first divergence -- including the
+    # release that fixes it. A divergence stays in the ledger forever; what
+    # blocks a cutover is one recorded after the last human halt clear (and
+    # SMALL_LIVE_NOT_HALTED above refuses while the halt itself stands).
     div = await conn.fetchval(
         "SELECT count(*) FROM live_parity_ledger "
-        " WHERE parity_state = 'LOGIC_DIVERGENCE'")
+        " WHERE parity_state = 'LOGIC_DIVERGENCE' "
+        "   AND ($1::timestamptz IS NULL OR created_at > $1)",
+        ctl.get("cleared_at"))
     put("READBACK_OBJECTS_PRESENT", all(present.values()), present)
-    put("READBACK_NO_LOGIC_DIVERGENCE", div == 0, div)
+    put("READBACK_NO_LOGIC_DIVERGENCE", div == 0,
+        {"uncleared_divergences": div,
+         "since_halt_cleared_at": None if ctl.get("cleared_at") is None
+         else ctl["cleared_at"].isoformat()})
     return {"checks": checks,
             "passed": all(c["passed"] for c in checks.values()),
             "install_id": None if inst is None else inst["install_id"],
-            "workers_sha": wsha,
+            "workers_sha": wsha, "logic": lg,
             "migrations": sorted(m for m in applied if m >= "225")}
 
 
 async def record_cutover(conn, *, release_sha: str, recorded_by: str,
                          api_sha: str | None = None,
                          hooks_here: list | None = None) -> dict:
-    """RECORD THE R30 PRODUCTION CUTOVER ONCE, only if every condition holds
-    now. Returns {recorded, cutover, checks}. An existing cutover is returned
-    unchanged (the table is append-only and singular)."""
-    import os
-    existing = await production_cutover(conn)
+    """RECORD THIS RELEASE'S PRODUCTION CUTOVER (one append-only row per
+    release), only if every condition holds now. Called INSIDE THE SERVING
+    PROCESS (POST /api/admin/live-parity/cutover): the API's commit and the
+    installed hooks are this process's own, and the decision-logic hash is
+    computed from the files this process runs. A release already recorded
+    is returned unchanged. Returns {recorded, cutover, effective, restarts_
+    forward_window, checks}."""
+    existing = await release_cutover(conn, release_sha)
     if existing is not None:
-        return {"recorded": False, "already": True, "cutover": existing}
+        return {"recorded": False, "already": True, "cutover": existing,
+                "effective": await production_cutover(conn)}
     api = api_sha if api_sha is not None else os.environ.get("RENDER_GIT_COMMIT")
     hooks = installed_hooks() if hooks_here is None else hooks_here
     got = await cutover_checks(conn, release_sha=release_sha, api_sha=api,
-                               hooks_here=hooks)
+                               hooks_here=hooks, recorded_by=recorded_by)
     if not got["passed"]:
         return {"recorded": False, "refused": [
             k for k, c in got["checks"].items() if not c["passed"]],
             "checks": got["checks"]}
+    before = await production_cutover(conn)
+    lg = got["logic"]
     async with conn.transaction():
         await conn.execute(
-            """INSERT INTO live_parity_cutover (cutover_at, release_sha,
-                 api_sha, workers_sha, migrations, hook_install_id,
-                 small_live_mode, small_live_halted, capital_activated,
-                 evidence, recorded_by)
-               VALUES (now(), $1, $2, $3, $4, $5, 'SHADOW', false, false,
-                       $6::jsonb, $7) ON CONFLICT (id) DO NOTHING""",
+            """INSERT INTO live_parity_cutover (release_sha, api_sha,
+                 workers_sha, migrations, decision_logic_hash,
+                 decision_logic_files, hook_install_id, small_live_mode,
+                 small_live_halted, capital_activated, evidence, recorded_by)
+               VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, 'SHADOW', false,
+                       false, $8::jsonb, $9)
+               ON CONFLICT (release_sha) DO NOTHING""",
             release_sha, api, got["workers_sha"], got["migrations"],
-            got["install_id"], _j(got["checks"]), recorded_by)
-    return {"recorded": True, "cutover": await production_cutover(conn),
-            "checks": got["checks"]}
+            lg["hash"], _j(lg["files"]), got["install_id"],
+            _j(got["checks"]), recorded_by)
+    row = await release_cutover(conn, release_sha)
+    eff = await production_cutover(conn)
+    return {"recorded": True, "cutover": row, "effective": eff,
+            "restarts_forward_window": (
+                eff is not None and row is not None
+                and eff.get("cutover_id") == row.get("cutover_id")),
+            "previous_effective": before, "checks": got["checks"]}
+
+
+# ─────────────────────────── convergence: ONE origin of live exposure ──
+#
+# R30A / audit P0 #2. Three generations of live execution existed:
+#
+#   execmirror           copied filled PAPER orders to the venue. RETIRED:
+#                        Venue.place raises LegacyOriginationRetired without
+#                        a canonical LIVE authorization (canonical_live_
+#                        authorized), and Mirror.plan_new no longer plans a
+#                        BUY-role copy at all (LEGACY_ORIGINATION_RETIRED).
+#   execution_intent     the ACTUAL sibling of a qualified decision. It may
+#                        not submit outside a canonical intent: ActualLane.
+#                        _run calls authorize_live_exposure BEFORE its claim
+#                        -- the canonical intent for the decision must exist,
+#                        verify, be the one the execution intent names, match
+#                        its order, be unexpired, pass the LIVE policy and the
+#                        live gates, and carry an authorization only the
+#                        canonical SMALL LIVE adapter in LIVE mode issues.
+#   the funded stack     bettor_funded_execution: every acquisition (a BUY:
+#                        new exposure) passes authorize_live_exposure before
+#                        anything is written or sent; exits are untouched.
+#
+# In THIS release SMALL_LIVE_MODE is SHADOW (and migration 225 CHECKs it),
+# so issue_live_authorization never issues and every one of the three
+# refuses new exposure before the venue. Turning LIVE on is a new release, a
+# new migration and the owner's explicit approval -- and even then the only
+# origin is the canonical intent. No third path is built here: the canonical
+# SMALL LIVE adapter remains the one designated originator.
+
+R_NO_CANONICAL = "NO_CANONICAL_DECISION_INTENT"
+R_CANONICAL_SHA = "CANONICAL_INTENT_SHA_DOES_NOT_VERIFY"
+R_CANONICAL_NOT_NAMED = "EXECUTION_DOES_NOT_NAME_THIS_CANONICAL_INTENT"
+R_CANONICAL_MISMATCH = "ORDER_DIFFERS_FROM_ITS_CANONICAL_INTENT"
+R_NO_LIVE_AUTHORIZATION = "CANONICAL_LIVE_AUTHORIZATION_ABSENT_SMALL_LIVE_IS_SHADOW"
+
+
+class LiveAuthorization:
+    """An authorization to originate one live order from one canonical
+    intent. Only issue_live_authorization constructs one, and only outside
+    SHADOW -- which this release has no way to be."""
+    __slots__ = ("issued_by", "intent_id", "content_sha", "issued_at")
+
+    def __init__(self, *, intent_id: str, content_sha: str, issued_at: float):
+        self.issued_by = LIVE_ADAPTER_VERSION
+        self.intent_id = intent_id
+        self.content_sha = content_sha
+        self.issued_at = issued_at
+
+
+def issue_live_authorization(intent: dict, *, governance: dict,
+                             now: float) -> LiveAuthorization | None:
+    """THE CANONICAL SMALL LIVE ADAPTER'S AUTHORIZATION (pure). SHADOW:
+    never issued. Outside SHADOW (a future, owner-approved release) only for
+    a governance-admissible intent."""
+    if SMALL_LIVE_MODE == MODE_SHADOW:
+        return None
+    if not (governance or {}).get("admissible"):
+        return None
+    return LiveAuthorization(intent_id=intent["intent_id"],
+                             content_sha=intent["content_sha"],
+                             issued_at=float(now))
+
+
+def canonical_live_authorized(token) -> bool:
+    """True only for an authorization the canonical SMALL LIVE adapter
+    issued in LIVE mode. Always False in this (SHADOW) release."""
+    return (token is not None and SMALL_LIVE_MODE != MODE_SHADOW
+            and isinstance(token, LiveAuthorization)
+            and getattr(token, "issued_by", None) == LIVE_ADAPTER_VERSION)
+
+
+#: the order fields a live order must share with its canonical intent
+#: (order field -> intent field)
+ORIGINATION_MATCH = {"us_market_slug": "us_market_slug",
+                     "order_intent": "order_intent",
+                     "holding_side": "holding_side", "strategy": "strategy",
+                     "strategy_version": "strategy_version",
+                     "time_in_force": "time_in_force",
+                     "order_type": "order_type",
+                     "wire_price": "wire_price", "limit_price": "limit_price",
+                     "target_qty": "target_qty"}
+
+
+def origination_mismatches(intent: dict, order: dict) -> list:
+    """The order fields (of those `order` names) that differ from the
+    canonical intent (pure). Numbers compare as decimals."""
+    out = []
+    for of, inf in ORIGINATION_MATCH.items():
+        if of not in order:
+            continue
+        a, b = order.get(of), intent.get(inf)
+        if of in ("wire_price", "limit_price", "target_qty"):
+            da, db = _dec(a), _dec(b)
+            same = (da is None and db is None) or (
+                da is not None and db is not None and da == db)
+        else:
+            same = (None if a is None else str(a)) == (
+                None if b is None else str(b))
+        if not same:
+            out.append({"field": of, "order": None if a is None else str(a),
+                        "intent": None if b is None else str(b)})
+    return out
+
+
+async def authorize_live_exposure(conn, *, decision_id: str | None = None,
+                                  canonical_intent_id: str | None = None,
+                                  named: dict | None = None,
+                                  order: dict | None = None,
+                                  now: float | None = None) -> dict:
+    """MAY THIS NEW LIVE EXPOSURE BE ORIGINATED? Read-only; never raises.
+
+    {ok, refusal, detail, token}. In order: the canonical intent (by
+    decision or id) exists; its sha verifies; the caller names THIS intent
+    (`named`: {intent_id, content_sha}); the order matches it
+    (origination_mismatches); it is unexpired at `now`; the LIVE policy and
+    the live gates admit it (governance_verdict over the approvals in force);
+    and the canonical SMALL LIVE adapter issues its authorization -- which it
+    never does in SHADOW."""
+    t = time.time() if now is None else float(now)
+
+    def no(code, **detail):
+        return {"ok": False, "refusal": code, "detail": detail, "token": None}
+    try:
+        async with conn.transaction():                        # a savepoint
+            if canonical_intent_id is not None:
+                row = await conn.fetchrow(
+                    "SELECT * FROM canonical_decision_intents "
+                    " WHERE intent_id = $1", canonical_intent_id)
+            elif decision_id is not None:
+                row = await conn.fetchrow(
+                    "SELECT * FROM canonical_decision_intents "
+                    " WHERE decision_id = $1", decision_id)
+            else:
+                row = None
+    except Exception as exc:                                  # noqa: BLE001
+        return no(R_NO_CANONICAL, error=type(exc).__name__)
+    if row is None:
+        return no(R_NO_CANONICAL, decision_id=decision_id,
+                  canonical_intent_id=canonical_intent_id)
+    ci = dict(row)
+    if not verify_intent(ci):
+        return no(R_CANONICAL_SHA, intent_id=ci["intent_id"])
+    nm = named or {}
+    if nm.get("intent_id") != ci["intent_id"] or \
+            nm.get("content_sha") != ci["content_sha"]:
+        return no(R_CANONICAL_NOT_NAMED, named=nm,
+                  canonical={"intent_id": ci["intent_id"],
+                             "content_sha": ci["content_sha"]})
+    mism = origination_mismatches(ci, order or {})
+    if mism:
+        return no(R_CANONICAL_MISMATCH, mismatches=mism,
+                  intent_id=ci["intent_id"])
+    exp = intent_expiry_refusal(ci, now=t)
+    if exp is not None:
+        return no(exp, expires_at=_epoch(ci.get("expires_at")), now=t)
+    try:
+        gin = await governance_in_force(conn)
+    except Exception as exc:                                  # noqa: BLE001
+        gin = None
+        log.debug("approvals unreadable: %s", type(exc).__name__)
+    gov = governance_verdict(ci, gin)
+    if not gov["admissible"]:
+        return no(gov["refusals"][0], governance=gov,
+                  intent_id=ci["intent_id"])
+    token = issue_live_authorization(ci, governance=gov, now=t)
+    if not canonical_live_authorized(token):
+        return no(R_NO_LIVE_AUTHORIZATION, mode=SMALL_LIVE_MODE,
+                  intent_id=ci["intent_id"])
+    return {"ok": True, "refusal": None, "token": token,
+            "detail": {"intent_id": ci["intent_id"],
+                       "content_sha": ci["content_sha"]}}
+
+
+# ─────────────────────────── the latency chain (R30A section 6) ────────
+
+#: the stages, in order, and the consecutive / end-to-end spans reported
+LATENCY_STAGES = ("pinnacle_observed_at", "ingest_at",
+                  "probability_qualified_at", "book_observed_at",
+                  "decision_start_at", "intent_recorded_at",
+                  "paper_submit_at", "paper_fill_at")
+LATENCY_SPANS = (
+    ("pinnacle_to_ingest", "pinnacle_observed_at", "ingest_at"),
+    ("ingest_to_probability_qualified", "ingest_at",
+     "probability_qualified_at"),
+    ("probability_qualified_to_decision_start", "probability_qualified_at",
+     "decision_start_at"),
+    ("book_observed_to_decision_start", "book_observed_at",
+     "decision_start_at"),
+    ("decision_start_to_intent_recorded", "decision_start_at",
+     "intent_recorded_at"),
+    ("intent_recorded_to_paper_submit", "intent_recorded_at",
+     "paper_submit_at"),
+    ("paper_submit_to_paper_fill", "paper_submit_at", "paper_fill_at"),
+    ("pinnacle_to_paper_submit", "pinnacle_observed_at", "paper_submit_at"),
+    ("decision_start_to_paper_submit", "decision_start_at",
+     "paper_submit_at"))
+
+
+def _pct(xs: list, q: float):
+    if not xs:
+        return None
+    s = sorted(xs)
+    i = (len(s) - 1) * q
+    lo, hi = int(i), min(int(i) + 1, len(s) - 1)
+    return round(s[lo] + (s[hi] - s[lo]) * (i - lo), 6)
+
+
+def latency_report(rows: list) -> dict:
+    """PER-STAGE LATENCY DISTRIBUTIONS (pure). `rows` are one dict per
+    decision with the stage stamps (epoch seconds, or None with a reason in
+    `<stage>_why`). For each span: n, p50, p90, max (seconds); a span whose
+    stamps are missing is UNAVAILABLE for that decision and counted by
+    reason; a NEGATIVE span (a later stage stamped before an earlier one:
+    two clocks disagree) is never folded into the distribution -- it is
+    counted as CLOCK_DISAGREEMENT."""
+    spans = {}
+    for name, a, b in LATENCY_SPANS:
+        vals, why = [], {}
+        for r in rows or []:
+            ta, tb = _epoch(r.get(a)), _epoch(r.get(b))
+            if ta is None or tb is None:
+                miss = a if ta is None else b
+                reason = r.get(miss + "_why") or "%s_NOT_RECORDED" % miss.upper()
+                why[reason] = why.get(reason, 0) + 1
+                continue
+            d = tb - ta
+            if d < 0:
+                why["CLOCK_DISAGREEMENT"] = why.get("CLOCK_DISAGREEMENT", 0) + 1
+                continue
+            vals.append(d)
+        spans[name] = {
+            "from": a, "to": b, "n": len(vals),
+            "p50_s": _pct(vals, 0.5), "p90_s": _pct(vals, 0.9),
+            "max_s": None if not vals else round(max(vals), 6),
+            "status": "MEASURED" if vals else "UNAVAILABLE",
+            "unavailable": why}
+    return {"version": "CANONICAL_LATENCY_CHAIN_V1",
+            "decisions": len(rows or []),
+            "stages": list(LATENCY_STAGES), "spans": spans,
+            "units": "seconds",
+            "rule": ("stages come from the canonical intent (decision side), "
+                     "the PAPER adapter record (intent recorded, paper "
+                     "submit) and the paper fill ledger (first fill of the "
+                     "entry order); a missing stage is UNAVAILABLE with its "
+                     "reason, never a zero")}
+
+
+async def latency_rows(conn, *, since: float | None = None,
+                       limit: int = 500) -> list:
+    """One row of stage stamps per canonical decision intent (read-only)."""
+    rows = await conn.fetch(
+        """SELECT i.intent_id, i.decision_id, i.latency_stages,
+                  e.refs AS paper_refs,
+                  (SELECT min(f.filled_at) FROM paper_orders o
+                     JOIN paper_fills f ON f.order_id = o.order_id
+                    WHERE o.decision_id = i.decision_id
+                      AND o.role = 'ENTRY') AS first_fill_at,
+                  (SELECT count(*) FROM paper_orders o
+                    WHERE o.decision_id = i.decision_id
+                      AND o.role = 'ENTRY') AS entry_orders
+             FROM canonical_decision_intents i
+             LEFT JOIN canonical_intent_executions e
+               ON e.intent_id = i.intent_id AND e.adapter = 'PAPER'
+            WHERE ($1::double precision IS NULL
+                   OR i.created_at >= to_timestamp($1))
+            ORDER BY i.created_at DESC LIMIT $2""", since, int(limit))
+    out = []
+    for r in rows:
+        st = _obj(r["latency_stages"])
+        refs = _obj(r["paper_refs"])
+        ps = refs.get("stages") or {}
+        d = {k: st.get(k) for k in LATENCY_STAGES[:5]}
+        d["intent_id"] = r["intent_id"]
+        d["intent_recorded_at"] = ps.get("intent_recorded_at")
+        d["paper_submit_at"] = ps.get("paper_submit_at")
+        if r["paper_refs"] is None:
+            d["intent_recorded_at_why"] = "NO_PAPER_ADAPTER_RECORD"
+            d["paper_submit_at_why"] = "NO_PAPER_ADAPTER_RECORD"
+        elif ps.get("paper_submit_at") is None and ps.get("paper_submit_why"):
+            d["paper_submit_at_why"] = ps["paper_submit_why"]
+        d["paper_fill_at"] = _epoch(r["first_fill_at"])
+        if d["paper_fill_at"] is None:
+            d["paper_fill_at_why"] = ("NO_ENTRY_ORDER" if not r["entry_orders"]
+                                      else "NOT_FILLED_YET_OR_UNFILLED")
+        out.append(d)
+    return out
 
 
 def uninstall() -> None:
