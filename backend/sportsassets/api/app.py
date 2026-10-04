@@ -786,6 +786,15 @@ try:
 except ImportError:
     log.warning("lost opportunity: api.command_lost_opportunity not loaded",
                 exc_info=True)
+# ── RELEASE TRUTH: /api/command/release. GET only, COMMAND auth, one READ
+# ONLY transaction with a statement timeout: the API build SHA, the workers'
+# boot SHA, schema_migrations 216-225 and the committed release receipts
+# (hash-verified). No write, deploy or approval path.
+try:
+    from .command_release import router as _command_release_router
+    app.include_router(_command_release_router)
+except ImportError:
+    log.warning("release: api.command_release not loaded", exc_info=True)
 from .agent_capabilities import router as _capabilities_router
 app.include_router(_capabilities_router)
 from .slack_agents import router as _slack_agents_router

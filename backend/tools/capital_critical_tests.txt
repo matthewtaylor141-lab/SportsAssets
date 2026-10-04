@@ -790,3 +790,9 @@ tests/test_improvement_pipeline_db.py
 # forecast-horizons} routes are GET-only, READ ONLY, behind a command session.
 tests/test_lost_opportunity_is_research_only.py
 tests/test_lost_opportunity_ledger.py
+# c28 RELEASE TRUTH: GET /api/command/release (api/command_release.py) is
+# GET-only, behind a command session, one READ ONLY transaction with a
+# statement timeout, imports no order/venue/paper/funded module, never
+# guesses a SHA (missing => UNAVAILABLE, 7 chars => PREFIX_7) and shows a
+# receipt whose sha256 does not verify as TAMPERED.
+tests/test_command_release_authority.py
