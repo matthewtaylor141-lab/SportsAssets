@@ -775,6 +775,15 @@ try:
 except ImportError:
     log.warning("validation: api.command_validation not loaded",
                 exc_info=True)
+# ── LAB-F POLICY / MARKET DRIFT SENTINEL: /api/command/lab/drift
+# (?as_of=, ?strategy=, ?findings=). GET only, COMMAND auth, one READ ONLY
+# transaction with a statement timeout; SHADOW_RESEARCH_ONLY -- drift lowers
+# displayed confidence and returns revalidation work, it changes no policy.
+try:
+    from .command_lab_drift import router as _command_lab_drift_router
+    app.include_router(_command_lab_drift_router)
+except ImportError:
+    log.warning("lab drift: api.command_lab_drift not loaded", exc_info=True)
 # ── THE POSITION ROOMS: /api/command/positions/rooms, /room/{group_key}.
 # GET only, COMMAND auth, READ ONLY transaction; one correlated economic
 # position per screen (paper and actual, actual per venue, never summed).
