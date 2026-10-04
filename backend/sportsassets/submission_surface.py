@@ -123,7 +123,9 @@ GATES = (
          "carries its own explicit _gate.authorize('submit_clob')"),
      "and_this_is_the_only_gate_that_covers_the_LEGACY_lanes": (
          "gates 1-4 and 6-8 guard the FUNDED lane. live_executor, mirror_live "
-         "and underdog are not behind any of them")},
+         "and underdog are not behind any of them -- for their SELLS. Since "
+         "R30A their BUYS are also behind gate 11, which sits in the same "
+         "adapter")},
     {"n": 6, "gate": "a recorded submission authorization",
      "where": "bettor_funded_activation / bettor_entry_execution",
      "kind": "DATABASE_ROW",
@@ -145,6 +147,21 @@ GATES = (
      "where": "bettor_funded_schema",
      "kind": "SCHEMA",
      "cleared_by": "applying the funded migrations to that database"},
+    {"n": 11, "gate": "canonical origination (R30A, audit P0 #2)",
+     "where": ("INSIDE pmus.submit_fok and live_executor._submit_fok (every "
+               "BUY: pmus.require_canonical_origination) and "
+               "execmirror.Venue.place (every new order)"),
+     "kind": "CODE_CONSTANT",
+     "cleared_by": ("a live_parity.LiveAuthorization, which only the "
+                    "canonical SMALL LIVE adapter issues and only outside "
+                    "SHADOW: SMALL_LIVE_MODE is the constant SHADOW and "
+                    "migration 225 CHECKs it, so clearing it needs a new "
+                    "release, a new migration and the owner's approval"),
+     "covers_every_caller_because": (
+         "it is inside the venue primitives, not at the call sites: copy, "
+         "manual desk, GTC, mirror, underdog, calibration and funded BUYs "
+         "all pass through it; sells (exits, reductions, protection) are "
+         "not gated")},
 )
 
 

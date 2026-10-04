@@ -334,7 +334,16 @@ def test_the_live_management_order_is_the_same_order_on_the_scaled_position():
                      paper={"state": LP.P_SUBMITTED,
                             "requested": LP.paper_management_request(mi, taken)},
                      live=live, scale=1000, open_qty=2400)
-    assert res["parity_state"] == LP.SCALE, res
+    # R30A (section 8; review finding 1): the same sale at scale -- but the
+    # paper review evaluated no INDIRECT_HEDGE and LIVE consumes its set, so
+    # the alternative is evaluated on NEITHER side and exact parity is not
+    # claimed. Was EXPECTED_SCALE_DIFFERENCE before the alternative set was
+    # part of the classification; the scale classification is kept beside it.
+    assert res["parity_state"] == LP.INCOMPLETE, res
+    assert res["comparison"]["state_if_alternatives_were_complete"] == LP.SCALE
+    assert "INDIRECT_HEDGE" in res["comparison"]["why_not_exact"]
+    assert res["comparison"]["exact_parity_claimed"] is False
+    assert res["divergence_fields"] == []
 
 
 def test_a_paper_sale_that_differs_from_the_intent_is_a_divergence():
@@ -364,7 +373,11 @@ def test_standing_protection_is_one_resting_sale_of_the_scaled_holding():
                             "requested": LP.paper_management_request(
                                 mi, {"taken": "KEEP_STANDING"})},
                      live=live, scale=1000, open_qty=2400)
-    assert res["parity_state"] == LP.SCALE, res
+    # R30A: identical protection at scale, alternative set incomplete on both
+    # sides (no indirect-hedge search) -> INCOMPLETE_COMPARISON, never a
+    # claimed match (was EXPECTED_SCALE_DIFFERENCE before section 8)
+    assert res["parity_state"] == LP.INCOMPLETE, res
+    assert res["comparison"]["state_if_alternatives_were_complete"] == LP.SCALE
 
 
 # ── the venue lifecycle (venue record only) ───────────────────────────
@@ -1164,8 +1177,26 @@ def test_allie_and_eddie_are_compared_at_capital_scale():
                          "binding_constraint": "CAPACITY"})
     rb = _pair(big)
     fa = rb["comparison"]["fields"]["allie_final_allocation"]
-    assert fa["basis"] == "LIVE_RAIL_BOUND" and fa["equal"] is True
+    # R30A review: the live bound is LIVE CAPITAL STATE -- the rail or the
+    # live buying power -- so the basis was renamed from LIVE_RAIL_BOUND
+    assert fa["basis"] == "LIVE_CAPITAL_BOUND" and fa["equal"] is True
+    assert fa["live_capital_bound_by"] == "LIVE_RAIL"
     assert rb["parity_state"] == LP.SCALE
+    # the live account's buying power below the rail bounds it instead
+    poor = _pair(big, live=_live(big, buying_power=10.0))
+    fp = poor["comparison"]["fields"]["allie_final_allocation"]
+    assert fp["live"] == "10" and fp["live_capital_bound_by"] == \
+        "LIVE_BUYING_POWER" and fp["equal"] is True
+    # WHAT THIS COMPARISON IS: a scale-consistency check of two views of one
+    # intent, never an independent LIVE evaluation -- stated on every row
+    # and on the readiness report
+    assert fa["comparison_kind"] == LP.ALLIE_EDDIE_BASIS["kind"] == \
+        "SCALE_CONSISTENCY_CHECK_NOT_AN_INDEPENDENT_EVALUATION"
+    assert rb["comparison"]["fields"]["eddie_estimate"]["comparison_kind"] \
+        == LP.ALLIE_EDDIE_BASIS["kind"]
+    assert "cannot_detect" in LP.ALLIE_EDDIE_BASIS
+    assert LP.readiness([], halted=False)["allie_eddie_basis"] == \
+        LP.ALLIE_EDDIE_BASIS
 
 
 @pytest.mark.parametrize("side,key,value,field", [
@@ -1411,4 +1442,648 @@ async def test_the_cutover_endpoint_runs_every_check_in_the_serving_process(
             "SELECT count(*) FROM live_parity_cutover") == before
     finally:
         await tx.rollback()
+        await conn.close()
+
+
+# ═════════════════════════════════════════════════════════════════════
+# R30A · ADVERSARIAL REVIEW FIXES: exact parity over an incomplete
+# alternative set, governance as a current-state check, a rollback is a
+# cutover too, the derived decision-logic list, the serving build's logic,
+# every server-side cutover check, the named-human rule, the floored window
+# ═════════════════════════════════════════════════════════════════════
+
+_NOT_SEARCHED = "INDIRECT_HEDGE_SEARCH_NOT_RUN_ON_THE_PAPER_BOOK"
+
+
+def _review_alts(*, indirect_searched: bool):
+    """A review's ranking as paper_xavier builds it: HOLD valued, both sales
+    evaluated and blocked (no bids) -- and the indirect hedge either NOT
+    SEARCHED (the paper book today: `incomplete_search`) or searched and
+    valued."""
+    alts = {"candidates": [{"action": "HOLD", "qty": 2400,
+                            "value_usd": 1488.0, "expected_net_usd": 168.0}],
+            "not_rankable": [{"action": "EXIT", "blocker": "NO_BIDS"},
+                             {"action": "REDUCE", "blocker": "NO_BIDS"}]}
+    if indirect_searched:
+        alts["candidates"].append({"action": "ACQUIRE_INDIRECT_HEDGE",
+                                   "value_usd": 1400.0,
+                                   "expected_net_usd": 90.0})
+    else:
+        alts["not_rankable"].append({"action": "ACQUIRE_INDIRECT_HEDGE",
+                                     "blocker": _NOT_SEARCHED})
+        alts["incomplete_search"] = {"complete": False, "why": _NOT_SEARCHED}
+    return alts
+
+
+def _no_order_mi(*, indirect_searched: bool):
+    decided = LP.management_action(
+        chosen=None, fresh=True, stale=False, p_missing=False,
+        protection_ok=False, standing_live=False, candidate=None,
+        protective=None, open_qty=2400)
+    assert decided["action"] == LP.ACT_NONE
+    alts = _review_alts(indirect_searched=indirect_searched)
+    aset = CI.management_alternatives(
+        alts=alts, decided=decided, mechanical_selection=None,
+        standing_live=False,
+        protective={"ok": False, "refusal": "NO_PROTECTIVE_PRICE_TEST"},
+        open_qty=2400,
+        reallocate={"position_efficiency": 0.1,
+                    "alternative_efficiency": 0.05, "advantage": -0.05,
+                    "recommended": False, "position_ev_from_here_usd": 168.0,
+                    "best_opportunity": {"decision_id": "d1"}})
+    return LP.build_management_intent(
+        review_id="paperrev:none:%s" % indirect_searched, group_id="g1",
+        position_key="pk", strategy=CG,
+        valuation={"valuation_id": 9, "valuation_hash": "h"},
+        evidence_state="FRESH_CURRENT_PROBABILITY", recommendation=None,
+        mechanical_selection=None, decided=decided,
+        us_market_slug="aec-nfl-kc-buf-2026-10-04", holding_side="LONG",
+        alternatives=alts, reason={}, created_at=NOW, alternative_set=aset)
+
+
+def test_unavailable_alternatives_say_whether_their_evaluation_ran():
+    mi = _no_order_mi(indirect_searched=False)
+    s = mi["alternative_set"]
+    assert s["INDIRECT_HEDGE"]["evaluation"] == CI.NOT_RUN
+    assert s["SELL_EXIT"]["status"] == "UNAVAILABLE"
+    assert s["SELL_EXIT"]["evaluation"] == CI.RAN          # evaluated: no bids
+    assert s["CANCEL_PROTECTION_BEFORE_EXIT"]["evaluation"] == CI.RAN
+    assert CI.not_run_set(s) == ["INDIRECT_HEDGE"]
+    assert CI.not_run_set(_no_order_mi(indirect_searched=True)[
+        "alternative_set"]) == []
+    # an UNAVAILABLE entry that does not say counts as not run (fail closed)
+    assert CI.not_run_set({"HOLD": {"status": "UNAVAILABLE", "why": "x"}}) \
+        == ["HOLD"]
+    # a caller that computed nothing: every unrun evaluation is NOT_RUN
+    assert {"INDIRECT_HEDGE", "REALLOCATE"} <= set(CI.not_run_set(
+        _mi()["alternative_set"]))
+
+
+@pytest.mark.parametrize("scale", [1, 1000])
+def test_an_incomplete_alternative_set_is_never_claimed_as_exact_parity(scale):
+    """Review finding 1: a NO_ORDER pair (quantity None on both sides) whose
+    INDIRECT_HEDGE was evaluated on neither side was MATCHED -- at scale 1
+    and at the production 1:1,000 -- and readiness counted it as an exact
+    Xavier match."""
+    mi = _no_order_mi(indirect_searched=False)
+    live = LP.live_management_proposal(mi, scale=scale, open_qty=2400)
+    res = LP.compare(kind="MANAGEMENT", intent=mi,
+                     paper={"state": LP.P_NO_ORDER,
+                            "requested": LP.paper_management_request(
+                                mi, {"taken": "NONE"})},
+                     live=live, scale=scale, open_qty=2400)
+    assert res["parity_state"] == LP.INCOMPLETE, res
+    assert res["parity_state"] != LP.MATCHED
+    assert res["comparison"]["state_if_alternatives_were_complete"] == \
+        LP.MATCHED
+    assert res["comparison"]["why_not_exact"] == \
+        "NOT_EVALUATED_ON_EITHER_SIDE:INDIRECT_HEDGE"
+    assert res["comparison"]["exact_parity_claimed"] is False
+    assert res["divergence_fields"] == []          # never a halt
+    rows = ([_row("DECISION")] * 30
+            + [{"intent_kind": "MANAGEMENT", "sleeve": "INVESTMENT",
+                "parity_state": res["parity_state"],
+                "comparison": res["comparison"]}] * 30)
+    r = LP.readiness(rows, halted=False, profitability={
+        "profitability_verdict": "SUPPORTED_BY_FORWARD_EVIDENCE"})
+    xm = r["xavier_management_match"]
+    assert xm["matched"] == 0 and xm["of"] == 30 and xm["rate"] == 0.0
+    assert xm["incomplete_comparisons"] == 30
+    assert r["management_alternatives"]["not_run"] == {"INDIRECT_HEDGE": 30}
+    assert "MANAGEMENT_PARITY_NOT_EXACT:INCOMPLETE_COMPARISON:30" in \
+        r["blockers"]
+    assert r["parity_gate"] == "FAIL" and r["recommendation"] == LP.NOT_READY
+    # WITH the indirect hedge searched (evaluated on both sides), the same
+    # pair is exact -- the sales and the cancel, UNAVAILABLE on both sides
+    # after their evaluation RAN, are evaluated facts and do not withhold it
+    full = _no_order_mi(indirect_searched=True)
+    assert full["alternative_set"]["INDIRECT_HEDGE"]["status"] == CI.EVALUATED
+    live = LP.live_management_proposal(full, scale=scale, open_qty=2400)
+    ok = LP.compare(kind="MANAGEMENT", intent=full,
+                    paper={"state": LP.P_NO_ORDER,
+                           "requested": LP.paper_management_request(
+                               full, {"taken": "NONE"})},
+                    live=live, scale=scale, open_qty=2400)
+    assert ok["parity_state"] == LP.MATCHED, ok
+    assert ok["comparison"]["exact_parity_claimed"] is True
+    assert "why_not_exact" not in ok["comparison"]
+    assert "SELL_EXIT" in ok["comparison"]["alternatives"][
+        "evaluated_on_neither_side"]
+    r2 = LP.readiness([_row("DECISION")] * 30 + [
+        {"intent_kind": "MANAGEMENT", "sleeve": "INVESTMENT",
+         "parity_state": ok["parity_state"],
+         "comparison": ok["comparison"]}] * 30, halted=False,
+        profitability={"profitability_verdict":
+                       "SUPPORTED_BY_FORWARD_EVIDENCE"})
+    assert r2["xavier_management_match"]["matched"] == 30
+    assert r2["recommendation"] == LP.READY, r2["blockers"]
+    # a LIVE side that evaluated the hedge PAPER never searched: divergence
+    own = dict(CI.evaluated_set(mi["alternative_set"]),
+               INDIRECT_HEDGE=CI.EVALUATED)
+    live3 = LP.live_management_proposal(mi, scale=scale, open_qty=2400,
+                                        live_alternatives=own)
+    res3 = LP.compare(kind="MANAGEMENT", intent=mi,
+                      paper={"state": LP.P_NO_ORDER,
+                             "requested": LP.paper_management_request(
+                                 mi, {"taken": "NONE"})},
+                      live=live3, scale=scale, open_qty=2400)
+    assert res3["parity_state"] == LP.DIVERGENCE
+
+
+def _gov_row(t, refusals=(), *, kind="DECISION", policy_sha="p1"):
+    return {"intent_kind": kind, "sleeve": "INVESTMENT",
+            "parity_state": LP.SCALE, "created_at": t, "policy_sha": policy_sha,
+            "comparison": {"fields": {}, "live_governance_refusals":
+                           list(refusals)}}
+
+
+def test_governance_is_a_current_state_check_not_a_permanent_record():
+    """Review finding 2: every row recorded before the owner's approval
+    carries a governance refusal, so counting them all made readiness
+    unpassable for the whole window after an approval -- only a decision-
+    logic edit (restarting the window) would clear it."""
+    good = {"profitability_verdict": "SUPPORTED_BY_FORWARD_EVIDENCE"}
+    pre = [_gov_row(100.0 + i, [CI.R_POLICY_UNAPPROVED, LP.R_GATE_APPROVAL])
+           for i in range(5)]
+    post = [_gov_row(1000.0 + i) for i in range(30)]
+    mgt = [dict(_row("MANAGEMENT"), created_at=2000.0)] * 30
+    approved = {"gates_approved": True, "approved_policy_shas": {"p1"},
+                "approvals_changed_at": 500.0}
+    # refused rows, THEN the approval, THEN a clean sample: no blocker
+    r = LP.readiness(pre + post + mgt, halted=False, profitability=good,
+                     governance_now=approved)
+    assert not [b for b in r["blockers"] if b.startswith("LIVE_GOVERNANCE")]
+    assert r["governance_gate"] == "PASS"
+    assert r["recommendation"] == LP.READY, r["blockers"]
+    g = r["live_governance_refusals"]
+    assert g["historical_not_counted"] == {CI.R_POLICY_UNAPPROVED: 5,
+                                           LP.R_GATE_APPROVAL: 5}
+    assert g["window"]["rows_before_the_change"] == 5
+    # a refusal recorded AFTER the approvals last changed still blocks
+    late = post + [_gov_row(1500.0, [CI.R_POLICY_SHA])]
+    r = LP.readiness(pre + late + mgt, halted=False, profitability=good,
+                     governance_now=approved)
+    assert "LIVE_GOVERNANCE_REFUSED:%s:1" % CI.R_POLICY_SHA in r["blockers"]
+    # the state NOW: gates not approved (a REVOKE, or a gate config changed
+    # by a release) blocks even with no refused row in the window
+    r = LP.readiness(post + mgt, halted=False, profitability=good,
+                     governance_now=dict(approved, gates_approved=False))
+    assert "LIVE_GOVERNANCE_NOT_IN_FORCE:%s" % LP.R_GATE_APPROVAL in \
+        r["blockers"]
+    assert r["governance_gate"] == "FAIL"
+    # ... and the latest decision's policy no longer approved
+    r = LP.readiness(post + mgt, halted=False, profitability=good,
+                     governance_now=dict(approved,
+                                         approved_policy_shas=set()))
+    assert "LIVE_GOVERNANCE_NOT_IN_FORCE:%s" % CI.R_POLICY_UNAPPROVED in \
+        r["blockers"]
+    # nothing ever approved: every refusal counts and the state blocks too
+    r = LP.readiness(pre + post + mgt, halted=False, profitability=good,
+                     governance_now={"gates_approved": False,
+                                     "approved_policy_shas": set(),
+                                     "approvals_changed_at": None})
+    assert "LIVE_GOVERNANCE_REFUSED:%s:5" % CI.R_POLICY_UNAPPROVED in \
+        r["blockers"]
+    # a pure caller that supplies no approvals state: fail closed (all count)
+    r = LP.readiness(pre + post + mgt, halted=False, profitability=good)
+    assert "LIVE_GOVERNANCE_REFUSED:%s:5" % LP.R_GATE_APPROVAL in r["blockers"]
+
+
+@pg
+@pytest.mark.asyncio
+async def test_the_approvals_change_instant_is_read_from_the_database():
+    conn = await asyncpg.connect(H.DSN)
+    tx = conn.transaction()
+    await tx.start()
+    try:
+        from tests import admission_fixture as AF
+        before = await LP.approvals_changed_at(conn)
+        gnow = await LP.governance_now(conn)
+        assert gnow["gates_approved"] is False             # none recorded
+        await AF.record_test_gate_approvals(conn, [LAP.GATE_SETTLEMENT])
+        after = await LP.approvals_changed_at(conn)
+        assert after is not None and (before is None or after >= before)
+        assert abs(after - __import__("time").time()) < 300
+    finally:
+        await tx.rollback()
+        await conn.close()
+
+
+@pg
+@pytest.mark.asyncio
+async def test_a_rollback_redeploy_appends_a_cutover_and_restarts_the_window(
+        monkeypatch):
+    """Review finding 3: A -> B -> A could not be recorded (release_sha was
+    UNIQUE and record_cutover answered `already` for any earlier row), so
+    the effective cutover stayed on B while A's logic decided again."""
+    conn = await asyncpg.connect(H.DSN)
+    tx = conn.transaction()
+    await tx.start()
+    try:
+        if await conn.fetchval(
+                "SELECT to_regclass('agent_work_requests')") is None:
+            await conn.execute("CREATE TABLE agent_work_requests (x int)")
+        real = LP.decision_logic_hash()
+        a_sha, b_sha = "1" * 40, "2" * 40
+        hashes = {a_sha: dict(real, hash="a" * 64),
+                  b_sha: dict(real, hash="b" * 64)}
+
+        async def record(sha):
+            await _cutover_world(conn, sha=sha, workers=sha)
+            monkeypatch.setattr(LP, "decision_logic_hash",
+                                lambda root=None: hashes[sha])
+            return await LP.record_cutover(conn, release_sha=sha,
+                                           recorded_by="release engineer",
+                                           api_sha=sha,
+                                           hooks_here=list(LP.HOOK_NAMES))
+        first = await record(a_sha)
+        assert first["recorded"] is True and first["restarts_forward_window"]
+        second = await record(b_sha)
+        assert second["recorded"] is True and second["restarts_forward_window"]
+        assert (await LP.production_cutover(conn))["release_sha"] == b_sha
+        # the ROLLBACK to A: a third row, and the window restarts on it
+        back = await record(a_sha)
+        assert back["recorded"] is True, back
+        assert back["restarts_forward_window"] is True
+        eff = await LP.production_cutover(conn)
+        assert eff["release_sha"] == a_sha
+        assert eff["cutover_id"] == back["cutover"]["cutover_id"]
+        assert eff["cutover_id"] != first["cutover"]["cutover_id"]
+        assert eff["releases_recorded"] == 3
+        assert (await LP.release_cutover(conn, a_sha))["cutover_id"] == \
+            eff["cutover_id"]
+        # recording A again while it IS the latest: already, nothing appended
+        again = await record(a_sha)
+        assert again["recorded"] is False and again["already"] is True
+        assert await conn.fetchval(
+            "SELECT count(*) FROM live_parity_cutover") == 3
+        # and the database refuses a consecutive duplicate on its own
+        await _expect(conn, asyncpg.exceptions.UniqueViolationError,
+                      "INSERT INTO live_parity_cutover (release_sha, api_sha,"
+                      " workers_sha, migrations, decision_logic_hash,"
+                      " decision_logic_files, hook_install_id,"
+                      " small_live_mode, small_live_halted, capital_activated,"
+                      " evidence, recorded_by) SELECT release_sha, api_sha,"
+                      " workers_sha, migrations, decision_logic_hash,"
+                      " decision_logic_files, hook_install_id,"
+                      " small_live_mode, small_live_halted, capital_activated,"
+                      " evidence, 'release engineer' FROM live_parity_cutover"
+                      " WHERE cutover_id = $1", eff["cutover_id"])
+        rows = await conn.fetch("SELECT * FROM live_parity_cutover")
+        assert LP.effective_cutover_of(rows)["cutover_id"] == eff["cutover_id"]
+    finally:
+        await tx.rollback()
+        await conn.close()
+
+
+@pg
+@pytest.mark.asyncio
+async def test_every_server_side_cutover_check_refuses_on_its_own(monkeypatch):
+    """Review finding 10 / 16: the checks the first refusal test did not
+    exercise -- DECISION_LOGIC_HASH_COMPUTED, MIGRATIONS_225_226_APPLIED,
+    SMALL_LIVE_IS_SHADOW, READBACK_OBJECTS_PRESENT and
+    READBACK_NO_LOGIC_DIVERGENCE -- each refuse a cutover alone.
+
+    READBACK_NO_LOGIC_DIVERGENCE, A DELIBERATE CHANGE (stated): with the R30
+    singleton it counted divergences EVER; with a row per deployment "ever"
+    would make every later release unrecordable after the first divergence,
+    including the release that fixes it. It now counts divergences recorded
+    after the last named-human halt clear (SMALL_LIVE_NOT_HALTED refuses
+    while the halt itself stands). Both sides are proven here."""
+    conn = await asyncpg.connect(H.DSN)
+    tx = conn.transaction()
+    await tx.start()
+    try:
+        if await conn.fetchval(
+                "SELECT to_regclass('agent_work_requests')") is None:
+            await conn.execute("CREATE TABLE agent_work_requests (x int)")
+
+        async def attempt():
+            return await LP.record_cutover(conn, release_sha=SHA,
+                                           recorded_by="release engineer",
+                                           api_sha=SHA,
+                                           hooks_here=list(LP.HOOK_NAMES))
+
+        async def refused_alone(check, setup):
+            sp = conn.transaction()
+            await sp.start()
+            try:
+                await _cutover_world(conn)
+                await setup()
+                got = await attempt()
+                assert got["recorded"] is False, got
+                assert got["refused"] == [check], got["refused"]
+            finally:
+                await sp.rollback()
+
+        real_hash = LP.decision_logic_hash
+
+        async def no_hash():
+            monkeypatch.setattr(LP, "decision_logic_hash", lambda root=None: {
+                "hash": None, "files": {}, "missing": ["canonical_intent.py"]})
+        await refused_alone("DECISION_LOGIC_HASH_COMPUTED", no_hash)
+        monkeypatch.setattr(LP, "decision_logic_hash", real_hash)
+
+        async def no_226():
+            await conn.execute("DELETE FROM schema_migrations "
+                               " WHERE version LIKE '226%'")
+        await refused_alone("MIGRATIONS_225_226_APPLIED", no_226)
+
+        async def not_shadow():
+            monkeypatch.setattr(LP, "SMALL_LIVE_MODE", "NOT_SHADOW_TEST_ONLY")
+        await refused_alone("SMALL_LIVE_IS_SHADOW", not_shadow)
+        monkeypatch.setattr(LP, "SMALL_LIVE_MODE", LP.MODE_SHADOW)
+
+        async def no_view():
+            await conn.execute("DROP VIEW live_approvals_current")
+        await refused_alone("READBACK_OBJECTS_PRESENT", no_view)
+
+        async def ledger_divergence(cleared_after: bool):
+            it = _intent(decision_id="papercg:div:%s" % cleared_after)
+            assert await LP.record_decision_intent(conn, it)
+            for adapter, mode, state, scale in (
+                    ("PAPER", "SIMULATED", "PAPER_SUBMITTED", 1),
+                    ("SMALL_LIVE", "SHADOW", "SHADOW_PROPOSED", 1000)):
+                await conn.execute(
+                    "INSERT INTO canonical_intent_executions (execution_id,"
+                    " intent_kind, intent_id, intent_sha, adapter, mode,"
+                    " adapter_version, state, requested, capital_scale)"
+                    " VALUES ($1,'DECISION',$2,$3,$4,$5,'T',$6,'{}',$7)",
+                    "cie_%s_%s" % (adapter, cleared_after), it["intent_id"],
+                    it["content_sha"], adapter, mode, state, scale)
+            await conn.execute(
+                "INSERT INTO live_parity_ledger (parity_id, parity_version,"
+                " intent_kind, intent_id, intent_sha, sleeve,"
+                " paper_execution_id, live_execution_id, capital_scale,"
+                " parity_state, divergence_fields, comparison)"
+                " VALUES ($1,'T','DECISION',$2,$3,'INVESTMENT',$4,$5,1000,"
+                " 'LOGIC_DIVERGENCE', ARRAY['qty'], '{}')",
+                "lpl_%s" % cleared_after, it["intent_id"], it["content_sha"],
+                "cie_PAPER_%s" % cleared_after,
+                "cie_SMALL_LIVE_%s" % cleared_after)
+
+        async def divergence_after_the_clear():
+            # cleared first (by _cutover_world's named human), THEN diverged
+            await conn.execute(
+                "UPDATE small_live_control SET halted = true, halted_at = now(),"
+                " halt_reason = 'LOGIC_DIVERGENCE' WHERE id = 1")
+            await LP.clear_halt(conn, actor="release engineer",
+                                reason="test: cleared before the divergence")
+            await ledger_divergence(True)
+        await refused_alone("READBACK_NO_LOGIC_DIVERGENCE",
+                            divergence_after_the_clear)
+        # a divergence recorded BEFORE a named human cleared its halt does
+        # not block a later cutover
+        sp = conn.transaction()
+        await sp.start()
+        try:
+            await _cutover_world(conn)
+            await ledger_divergence(False)
+            await conn.execute(
+                "UPDATE small_live_control SET halted = true, halted_at = now(),"
+                " halt_reason = 'LOGIC_DIVERGENCE' WHERE id = 1")
+            await LP.clear_halt(conn, actor="release engineer",
+                                reason="test: reviewed and cleared")
+            got = await attempt()
+            assert got["recorded"] is True, got.get("refused")
+            div = got["checks"]["READBACK_NO_LOGIC_DIVERGENCE"]
+            assert div["passed"] is True and div["value"][
+                "uncleared_divergences"] == 0
+        finally:
+            await sp.rollback()
+    finally:
+        await tx.rollback()
+        await conn.close()
+
+
+@pg
+@pytest.mark.asyncio
+async def test_a_serving_build_whose_logic_has_no_cutover_blocks_readiness(
+        monkeypatch):
+    """Review finding 8: nothing compared the serving build's decision-logic
+    hash with the effective cutover's."""
+    conn = await asyncpg.connect(H.DSN)
+    tx = conn.transaction()
+    await tx.start()
+    try:
+        if await conn.fetchval(
+                "SELECT to_regclass('agent_work_requests')") is None:
+            await conn.execute("CREATE TABLE agent_work_requests (x int)")
+        await _cutover_world(conn)
+        ok = await LP.record_cutover(conn, release_sha=SHA,
+                                     recorded_by="release engineer",
+                                     api_sha=SHA,
+                                     hooks_here=list(LP.HOOK_NAMES))
+        assert ok["recorded"] is True
+        rep = await LP.readiness_report(conn)
+        assert rep["build_logic"]["matches"] is True
+        assert "CURRENT_BUILD_LOGIC_HAS_NO_CUTOVER" not in rep["blockers"]
+        # the build now decides with logic no cutover names
+        changed = dict(LP.decision_logic_hash(), hash="c" * 64)
+        monkeypatch.setattr(LP, "decision_logic_hash",
+                            lambda root=None: changed)
+        rep = await LP.readiness_report(conn)
+        assert rep["build_logic"]["serving_hash"] == "c" * 64
+        assert "CURRENT_BUILD_LOGIC_HAS_NO_CUTOVER" in rep["blockers"]
+        assert rep["parity_gate"] == "FAIL"
+    finally:
+        await tx.rollback()
+        await conn.close()
+
+
+def test_the_profitability_verdict_needs_the_serving_logic_to_have_a_cutover():
+    from sportsassets import decision_logic as DL
+    from sportsassets.profitability import validation as V
+    data = {"positions": [], "econ": [], "attribution": [], "scores": [],
+            "refusals": [], "exec_outcomes": [], "value_add": []}
+    real = DL.decision_logic_hash()
+    match = DL.build_logic_check(real["hash"], logic=real)
+    assert match["matches"] is True and match["refusal"] is None
+    out = V.compute(data, now=NOW, since=None, cutover=NOW - 100,
+                    build_logic=match)
+    assert out["profitability_verdict"]["why"] != DL.R_LOGIC_HAS_NO_CUTOVER
+    moved = DL.build_logic_check("d" * 64, logic=real)
+    assert moved["refusal"] == DL.R_LOGIC_HAS_NO_CUTOVER
+    out = V.compute(data, now=NOW, since=None, cutover=NOW - 100,
+                    build_logic=moved)
+    v = out["profitability_verdict"]
+    assert v["verdict"] == V.NOT_ESTABLISHED
+    assert v["why"] == DL.R_LOGIC_HAS_NO_CUTOVER
+    assert out["build_logic"]["refusal"] == DL.R_LOGIC_HAS_NO_CUTOVER
+    nohash = DL.build_logic_check("d" * 64, logic={"hash": None,
+                                                   "missing": ["x.py"]})
+    assert nohash["refusal"] == DL.R_LOGIC_HASH_UNAVAILABLE
+    # the readiness gate says the same
+    r = LP.readiness([], halted=False, build_logic=moved)
+    assert "CURRENT_BUILD_LOGIC_HAS_NO_CUTOVER" in r["blockers"]
+    r = LP.readiness([], halted=False, build_logic=nohash)
+    assert "CURRENT_BUILD_LOGIC_HASH_UNAVAILABLE" in r["blockers"]
+
+
+def test_the_decision_logic_list_is_derived_from_the_decision_roots():
+    """Review finding 4: modules the ENTER, sizing, freshness, settlement
+    and management decisions read were missing from the pinned list. Every
+    package module a decision root imports must be pinned or excused with a
+    reason; a new import that is neither fails here."""
+    from sportsassets import decision_logic as DL
+    imports = DL.decision_logic_imports()
+    assert set(imports) == set(DL.DECISION_LOGIC_ROOTS)
+    unclassified = sorted({(r, m) for r, ms in imports.items() for m in ms
+                           if m not in DL.DECISION_LOGIC_FILES
+                           and m not in DL.NOT_DECISION_LOGIC})
+    assert unclassified == [], unclassified
+    # every excuse is still needed and carries its reason
+    used = {m for ms in imports.values() for m in ms}
+    assert set(DL.NOT_DECISION_LOGIC) <= used
+    assert all(len(why) > 20 for why in DL.NOT_DECISION_LOGIC.values())
+    assert not set(DL.NOT_DECISION_LOGIC) & set(DL.DECISION_LOGIC_FILES)
+    # the modules the review named are pinned
+    for m in ("bettor_paper_ledger.py", "bettor_settlement_terms.py",
+              "bettor_paper_session.py", "workers/ext_pinnacle_loop.py",
+              "pinnapi_primary.py", "bettor_xavier_standing_orders.py"):
+        assert m in DL.DECISION_LOGIC_FILES, m
+    # the 30 s rule's own constant is inside a pinned file
+    src = (pathlib.Path(LP.__file__).resolve().parent
+           / "workers" / "ext_pinnacle_loop.py").read_text()
+    assert "PINNACLE_MAX_AGE_S = 30.0" in src
+    # every root is itself pinned, every pinned file exists, the identity is
+    # one object whichever module a caller reads it from
+    assert set(DL.DECISION_LOGIC_ROOTS) <= set(DL.DECISION_LOGIC_FILES)
+    assert DL.decision_logic_hash()["missing"] == []
+    assert LP.DECISION_LOGIC_FILES is DL.DECISION_LOGIC_FILES
+    # decision_logic is pure: the standard library only
+    import ast
+    tree = ast.parse(pathlib.Path(DL.__file__).read_text())
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            assert not node.level and node.module in (
+                "__future__",), node.module
+        elif isinstance(node, ast.Import):
+            for a in node.names:
+                assert a.name in ("ast", "hashlib", "os", "pathlib"), a.name
+
+
+def test_each_intent_records_the_build_that_decided_it():
+    ident = LP.serving_build_identity()
+    assert ident["decision_logic_hash"] == LP.decision_logic_hash()["hash"]
+    assert set(ident) == {"decision_logic_hash", "release_sha"}
+
+
+@pytest.mark.parametrize("actor", [
+    "github-actions[bot]", "dependabot[bot]", "bot", "ci", "CI", "cron",
+    "codex", "assistant", "openai", "gpt", "automation", "service", "root",
+    "admin", "scheduler", "render-deploy", "deploy-bot", "ci_runner",
+    "claude", "system", "Xavier", "agent:release", "unknown", "none", "",
+    "   ", None])
+def test_machine_identities_are_never_named_humans(actor):
+    """Review finding 11: the rule was an R30 prefix deny-list, so 'github-
+    actions[bot]', 'ci', 'cron', 'codex', 'openai', 'root' and 'admin'
+    passed as named humans for recorded_by and for the LIVE approver."""
+    assert CI.is_named_human(actor) is False, actor
+
+
+@pytest.mark.parametrize("actor", [
+    "release engineer", "owner@example", "Matt Taylor", "Jane Doe (owner)",
+    "OWNER (account holder): written paper-only authorization",
+    "test human"])
+def test_named_humans_still_pass(actor):
+    assert CI.is_named_human(actor) is True, actor
+
+
+@pg
+@pytest.mark.asyncio
+async def test_the_database_applies_the_same_named_human_rule():
+    conn = await asyncpg.connect(H.DSN)
+    try:
+        for actor in ("github-actions[bot]", "ci", "cron", "root", "admin",
+                      "codex", "system", "release engineer", "owner@example",
+                      " system", "Matt Taylor", "deploy-bot", ""):
+            db = await conn.fetchval("SELECT live_parity_named_human($1)",
+                                     actor)
+            assert db is CI.is_named_human(actor), actor
+        assert await conn.fetchval(
+            "SELECT live_parity_named_human(NULL)") is False
+        # the CHECKs use the function; the function carries the pattern
+        assert CI.NON_HUMAN_ACTOR_PATTERN in UP
+        for ck in ("lpc_named_human_ck CHECK (live_parity_named_human(",
+                   "la_named_human_ck CHECK (live_parity_named_human(",
+                   "OR live_parity_named_human(actor))",
+                   "live_parity_named_human(NEW.cleared_by)"):
+            assert ck in UP, ck
+    finally:
+        await conn.close()
+
+
+def test_the_validity_window_is_floored_never_extended():
+    """Review finding 12: round(stamp + 30, 3) could end the window up to
+    0.5 ms AFTER the true end."""
+    e = CI.decision_expiry(probability_observed_at=1791130000.0006,
+                           probability_limit_s=30.0,
+                           book_observed_at=1791130000.0006,
+                           book_max_age_s=60.0)
+    assert e["expires_at"] == 1791130030.0                 # not ...030.001
+    assert e["expires_at"] <= 1791130000.0006 + 30.0
+    it = {"expires_at": e["expires_at"]}
+    assert CI.intent_expiry_refusal(it, now=1791130030.0002) == \
+        CI.R_INTENT_EXPIRED
+    for stamp in (NOW, NOW + 0.0004, NOW + 0.0005, NOW + 0.9999, NOW + 0.123):
+        got = CI.decision_expiry(probability_observed_at=stamp,
+                                 probability_limit_s=30.0,
+                                 book_observed_at=stamp, book_max_age_s=99.0)
+        assert got["expires_at"] <= stamp + 30.0 + 1e-9, stamp
+        assert stamp + 30.0 - got["expires_at"] < 0.001 + 1e-9, stamp
+
+
+def test_the_book_stage_is_its_signed_age_and_only_two_clocks_disagree():
+    """Review finding 7: decide_one stamps decision_start and THEN reads the
+    book, so a fresh read gave a negative book_observed -> decision_start
+    span, discarded as CLOCK_DISAGREEMENT although both stamps are ours."""
+    t = NOW
+    fresh = {"pinnacle_observed_at": t, "ingest_at": t + 0.5,
+             "probability_qualified_at": t + 1.0, "decision_start_at": t + 1.5,
+             "book_observed_at": t + 1.8,          # read inside the decision
+             "intent_recorded_at": t + 2.0, "paper_submit_at": t + 2.1,
+             "paper_fill_at": t + 3.0}
+    cached = dict(fresh, book_observed_at=t + 1.2)
+    rep = LP.latency_report([fresh, cached])
+    age = rep["spans"]["book_age_at_decision_start"]
+    assert age["kind"] == LP.SIGNED and age["n"] == 2
+    assert age["unavailable"] == {}
+    assert age["min_s"] == pytest.approx(-0.3)
+    assert age["max_s"] == pytest.approx(0.3)
+    b2i = rep["spans"]["book_observed_to_intent_recorded"]
+    assert b2i["n"] == 2 and b2i["max_s"] == pytest.approx(0.8)
+    assert "book_observed_to_decision_start" not in rep["spans"]
+    # a same-clock inversion is a stage-order fact, not two clocks
+    inv = LP.latency_report([dict(fresh, intent_recorded_at=t + 1.0)])
+    s = inv["spans"]["decision_start_to_intent_recorded"]
+    assert s["unavailable"] == {"STAGE_ORDER_INVERTED": 1}
+    # the provider's stamp against ours is the one cross-clock span family
+    cross = LP.latency_report([dict(fresh, ingest_at=t - 1.0)])
+    assert cross["spans"]["pinnacle_to_ingest"]["unavailable"] == {
+        "CLOCK_DISAGREEMENT": 1}
+    assert cross["spans"]["pinnacle_to_ingest"]["clocks"] == \
+        "PROVIDER_CLOCK->OUR_CLOCK"
+
+
+@pg
+@pytest.mark.asyncio
+async def test_the_latency_read_path_is_indexed_and_reads_one_lateral():
+    """Review finding 13: two correlated subqueries per intent, each a
+    sequential scan, under a 6 s statement timeout."""
+    import inspect
+    src = inspect.getsource(LP.latency_rows)
+    assert "LEFT JOIN LATERAL" in src and "WITH sel AS" in src
+    conn = await asyncpg.connect(H.DSN)
+    try:
+        idx = {r["indexname"] for r in await conn.fetch(
+            "SELECT indexname FROM pg_indexes WHERE tablename IN "
+            " ('paper_orders', 'paper_fills')")}
+        assert {"paper_orders_decision_role_idx",
+                "paper_fills_order_idx"} <= idx
+        rows = await LP.latency_rows(conn, limit=50)
+        assert isinstance(rows, list)
+        for r in rows:
+            assert "paper_fill_at" in r
+    finally:
         await conn.close()

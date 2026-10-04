@@ -2567,7 +2567,7 @@ def _get_client():
 
 
 def _submit_fok(token_id: str, price: float, shares: float,
-                sell: bool = False) -> dict:
+                sell: bool = False, canonical_live_authorization=None) -> dict:
     """Sync order submission; returns a normalized result dict.
 
     sell=True places the SELL side (underdog cash-out sleeve, owner
@@ -2592,6 +2592,17 @@ def _submit_fok(token_id: str, price: float, shares: float,
     # Same gate, same terms, same reasons.
     _gate.authorize("submit_clob", lane=_gate.current_lane(),
                     slug=token_id)
+    # R30A CONVERGENCE (audit P0 #2): a BUY on this second venue is new
+    # exposure too, and it may come only from a canonical intent -- the same
+    # boundary pmus.submit_fok carries (pmus.require_canonical_origination:
+    # the canonical SMALL LIVE adapter's LiveAuthorization, never issued in
+    # SHADOW; denial raises execution_gate.Denied before the client is
+    # built). A canonical intent names a POLYMARKET (US) contract, so no
+    # CLOB order can match one: in this release a CLOB BUY is always refused.
+    if not sell:
+        from . import pmus as _pmus
+        _pmus.require_canonical_origination(token_id,
+                                            canonical_live_authorization)
     client = _get_client()
     order = client.create_order(
         OrderArgs(token_id=token_id, price=price, size=shares,

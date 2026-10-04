@@ -41,7 +41,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from decimal import Decimal
+from decimal import ROUND_FLOOR, Decimal
 
 
 INTENT_VERSION = "CANONICAL_DECISION_INTENT_V2"
@@ -94,11 +94,31 @@ R_POLICY_UNAPPROVED = "LIVE_POLICY_VERSION_NOT_APPROVED"
 #: every LIVE policy refusal (the parity ledger treats them as governance,
 #: not logic: live_parity.GOVERNANCE_EXCLUSIONS)
 LIVE_POLICY_REFUSALS = (R_POLICY_MISSING, R_POLICY_SHA, R_POLICY_UNAPPROVED)
-#: actors that are never a human approver (migration 225 CHECKs the same
-#: pattern on every approval / cutover row)
+#: actors that are never a human approver (migration 225 CHECKs the SAME
+#: pattern, character for character, on every approval / cutover row and on
+#: a halt clear; a test pins the two equal). Three parts, searched
+#: case-insensitively anywhere in the actor:
+#:   1 an agent / system identity at the START (the R30 list: these are also
+#:     human first names, so only the leading position is refused, as before)
+#:   2 a MACHINE word anywhere, as a whole word (delimited by a non-letter /
+#:     non-digit or the ends): bot, ci, cron, codex, assistant, openai, gpt,
+#:     automation, service, root, admin, scheduler, deploy, github, actions,
+#:     worker, daemon, pipeline, webhook, script ... and the placeholders
+#:     unknown / anonymous / none / null, which name nobody
+#:   3 a GitHub App suffix `[bot]` (github-actions[bot], dependabot[bot])
+#: R30A review: the first version was part 1 alone, anchored at the start,
+#: so 'github-actions[bot]', 'ci', 'cron', 'codex', 'openai', 'root' and
+#: 'admin' all passed as named humans -- for the cutover's recorded_by and
+#: for live_approvals.approved_by, the LIVE governance approver.
 NON_HUMAN_ACTOR_PATTERN = (
     r"^(system|derek|xavier|audrey|karen|allie|chief_allocator|eddie|scout|"
-    r"bettor|claude|agent|migration|test_harness_system)")
+    r"bettor|claude|agent|migration|test_harness_system)"
+    r"|(^|[^a-z0-9])(bots?|ci|cron|codex|assistant|openai|gpt|chatgpt|"
+    r"anthropic|llm|copilot|automation|automated|service|svc|root|admin|"
+    r"administrator|scheduler|deploy|deployer|render|github|actions|worker|"
+    r"daemon|robot|script|pipeline|webhook|unknown|anonymous|none|null)"
+    r"([^a-z0-9]|$)"
+    r"|\[bot\]")
 
 #: the venue's sell intent for a held side (pinned equal to
 #: execmirror.EXIT_FOR by a test; stated here so this module imports no
@@ -164,7 +184,9 @@ def is_named_human(actor) -> bool:
     identity (the same pattern migration 225 CHECKs, case-insensitive)."""
     import re
     a = str(actor or "").strip()
-    return bool(a) and re.match(NON_HUMAN_ACTOR_PATTERN, a, re.I) is None
+    # SEARCH, not match: parts 2 and 3 of the pattern may sit anywhere in the
+    # actor (Postgres `!~*` searches the same way)
+    return bool(a) and re.search(NON_HUMAN_ACTOR_PATTERN, a, re.I) is None
 
 
 def _epoch(v) -> float | None:
@@ -200,6 +222,17 @@ def opportunity_key(*, fixture, us_market_slug, holding_side, line,
                                       line, scope))
 
 
+def _floor_ms(stamp: float, limit_s: float) -> float:
+    """stamp + limit, FLOORED to the millisecond (the precision the intent
+    records). R30A review: this was round(stamp + limit, 3), which can land
+    up to 0.5 ms AFTER the true end -- a sub-millisecond loosening of the
+    30 s rule. Flooring can only end the window early, never late. Decimal
+    arithmetic on the shortest repr of each float, so no binary rounding
+    error moves the floor either way."""
+    end = Decimal(repr(float(stamp))) + Decimal(repr(float(limit_s)))
+    return float(end.quantize(Decimal("0.001"), rounding=ROUND_FLOOR))
+
+
 def decision_expiry(*, probability_observed_at, probability_limit_s,
                     book_observed_at, book_max_age_s) -> dict:
     """THE DECISION VALIDITY WINDOW (pure), derived from the freshness rules
@@ -226,7 +259,7 @@ def decision_expiry(*, probability_observed_at, probability_limit_s,
                           "expires_at": None})
             continue
         terms.append({"term": name, "stamp": round(a, 3), "limit_s": l_,
-                      "expires_at": round(a + l_, 3)})
+                      "expires_at": _floor_ms(a, l_)})
     if missing:
         return {"status": UNAVAILABLE, "expires_at": None,
                 "why": "EXPIRY_UNDERIVABLE_MISSING:%s" % ",".join(missing),
@@ -497,12 +530,32 @@ _MGMT_FIELDS = ("intent_version", "review_id", "group_id", "position_key",
                 "freshness", "reason", "created_at")
 
 
-def _alt(name, status, *, why=None, **values) -> dict:
+#: WAS THE ALTERNATIVE'S EVALUATION RUN? (R30A review). UNAVAILABLE has two
+#: meanings that parity must not conflate: the review RAN the evaluation and
+#: found the alternative unavailable (no standing protection to cancel, no
+#: bids, a stale measure) -- an evaluated fact -- or the evaluation was NOT
+#: RUN at all (the paper book runs no indirect-hedge search; a reallocation
+#: not compared; a value never computed): the comparison is INCOMPLETE on it,
+#: and exact parity may not be claimed while any alternative is NOT_RUN.
+RAN, NOT_RUN = "RAN", "NOT_RUN"
+
+
+def _alt(name, status, *, why=None, evaluation=RAN, **values) -> dict:
     out = {"alternative": name, "status": status}
     if status == UNAVAILABLE:
         out["why"] = why or "NOT_EVALUATED"
+        out["evaluation"] = evaluation
+    else:
+        out["evaluation"] = RAN
     out.update({k: v for k, v in values.items()})
     return out
+
+
+def _not_run_reason(why) -> bool:
+    w = str(why or "")
+    return ("NOT_SEARCHED" in w or "SEARCH_NOT_RUN" in w
+            or w.endswith("_NOT_VALUED") or w.endswith("_NOT_COMPARED")
+            or w == "NOT_EVALUATED")
 
 
 def management_alternatives(*, alts: dict | None, decided: dict,
@@ -555,8 +608,10 @@ def management_alternatives(*, alts: dict | None, decided: dict,
                              ev_is_current=hold.get("ev_is_current"),
                              qty=hold.get("qty"))
     else:
-        out[ALT_HOLD] = _alt(ALT_HOLD, UNAVAILABLE, why=(blocked.get(
-            "HOLD") or {}).get("blocker") or "HOLD_NOT_VALUED")
+        why = (blocked.get("HOLD") or {}).get("blocker") or "HOLD_NOT_VALUED"
+        out[ALT_HOLD] = _alt(ALT_HOLD, UNAVAILABLE, why=why,
+                             evaluation=NOT_RUN if _not_run_reason(why)
+                             else RAN)
     sales = {}
     for name, key in ((ACT_EXIT, "EXIT"), (ACT_REDUCE, "REDUCE")):
         c = cands.get(key)
@@ -568,8 +623,10 @@ def management_alternatives(*, alts: dict | None, decided: dict,
                                  "worst_price"))
             sales[name] = c
         else:
-            out[name] = _alt(name, UNAVAILABLE, why=(blocked.get(key) or {})
-                             .get("blocker") or "SALE_NOT_VALUED")
+            why = (blocked.get(key) or {}).get("blocker") or "SALE_NOT_VALUED"
+            out[name] = _alt(name, UNAVAILABLE, why=why,
+                             evaluation=NOT_RUN if _not_run_reason(why)
+                             else RAN)
     if not standing_live:
         out[ACT_CANCEL_FIRST] = _alt(ACT_CANCEL_FIRST, UNAVAILABLE,
                                      why="NO_STANDING_PROTECTION_TO_CANCEL")
@@ -594,8 +651,10 @@ def management_alternatives(*, alts: dict | None, decided: dict,
                                 qty=_dec(open_qty), floor_is_realized=False,
                                 basis=pr.get("floor_is"))
     else:
+        # no protective computation at all is NOT_RUN; a computed refusal ran
         out[ACT_PROTECT] = _alt(ACT_PROTECT, UNAVAILABLE,
-                                why=pr.get("refusal") or "NO_PROTECTIVE_PRICE")
+                                why=pr.get("refusal") or "NO_PROTECTIVE_PRICE",
+                                evaluation=RAN if pr else NOT_RUN)
     ind_c = cands.get("ACQUIRE_INDIRECT_HEDGE")
     if ind_c is not None:
         out[ALT_INDIRECT] = _alt(ALT_INDIRECT, EVALUATED,
@@ -603,15 +662,19 @@ def management_alternatives(*, alts: dict | None, decided: dict,
                                  expected_net_usd=ind_c.get(
                                      "expected_net_usd"))
     else:
-        out[ALT_INDIRECT] = _alt(
-            ALT_INDIRECT, UNAVAILABLE,
-            why=(blocked.get("ACQUIRE_INDIRECT_HEDGE") or {}).get("blocker")
-            or (a.get("incomplete_search") or {}).get("why")
-            or "INDIRECT_HEDGE_NOT_SEARCHED")
+        why = ((blocked.get("ACQUIRE_INDIRECT_HEDGE") or {}).get("blocker")
+               or (a.get("incomplete_search") or {}).get("why")
+               or "INDIRECT_HEDGE_NOT_SEARCHED")
+        search = a.get("incomplete_search")
+        not_run = (_not_run_reason(why) or (isinstance(search, dict)
+                                            and search.get("complete") is False))
+        out[ALT_INDIRECT] = _alt(ALT_INDIRECT, UNAVAILABLE, why=why,
+                                 evaluation=NOT_RUN if not_run else RAN)
     r = reallocate if isinstance(reallocate, dict) else None
     if r is None:
         out[ALT_REALLOCATE] = _alt(ALT_REALLOCATE, UNAVAILABLE,
-                                   why="REALLOCATE_NOT_COMPARED")
+                                   why="REALLOCATE_NOT_COMPARED",
+                                   evaluation=NOT_RUN)
     elif r.get("position_efficiency") is not None and \
             r.get("alternative_efficiency") is not None:
         out[ALT_REALLOCATE] = _alt(
@@ -634,7 +697,8 @@ def management_alternatives(*, alts: dict | None, decided: dict,
                              basis="the position held as-is; no order placed")
     else:
         out[ACT_NONE] = _alt(ACT_NONE, UNAVAILABLE,
-                             why=out[ALT_HOLD].get("why"))
+                             why=out[ALT_HOLD].get("why"),
+                             evaluation=out[ALT_HOLD]["evaluation"])
     chosen = decided.get("action")
     for k, v in out.items():
         v["chosen"] = (k == chosen)
@@ -784,6 +848,18 @@ def evaluated_set(alternative_set) -> dict:
     if isinstance(s, str):
         s = json.loads(s)
     return {k: (v or {}).get("status") for k, v in (s or {}).items()}
+
+
+def not_run_set(alternative_set) -> list:
+    """The alternatives whose evaluation was NOT RUN (sorted). An UNAVAILABLE
+    entry that does not say whether it ran counts as not run (fail closed:
+    it can never support a claim of exact parity)."""
+    s = alternative_set
+    if isinstance(s, str):
+        s = json.loads(s)
+    return sorted(k for k, v in (s or {}).items()
+                  if (v or {}).get("status") != EVALUATED
+                  and (v or {}).get("evaluation") != RAN)
 
 
 

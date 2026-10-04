@@ -966,11 +966,16 @@ SLEEVE_ROLE = {
 
 
 def compute(data: dict, *, now: float, since, cutover: float,
-            since_source: str = "", sources: dict | None = None) -> dict:
+            since_source: str = "", sources: dict | None = None,
+            build_logic: dict | None = None) -> dict:
     """`data`: {positions, econ, attribution, scores, refusals,
     exec_outcomes, value_add} (see the module docstring for each row's
     keys); `sources`: {name: reason the source is unavailable} for the
-    sources that cannot be read. Pure."""
+    sources that cannot be read; `build_logic`: decision_logic.
+    build_logic_check for the serving build against the effective cutover
+    (R30A review: when the serving build's decision logic has no cutover,
+    the forward window would silently span two logics, so no verdict is
+    established -- CURRENT_BUILD_LOGIC_HAS_NO_CUTOVER). Pure."""
     sources = sources or {}
     fsince = forward_since(since, cutover)
     no_cutover = fsince is None
@@ -996,6 +1001,15 @@ def compute(data: dict, *, now: float, since, cutover: float,
         verdict = dict(verdict, verdict=NOT_ESTABLISHED, why=R_NO_CUTOVER,
                        claim=("NO profitability claim: no production cutover "
                               "is recorded, so no forward evidence exists"))
+    elif build_logic is not None and not build_logic.get("matches"):
+        verdict = dict(verdict, verdict=NOT_ESTABLISHED,
+                       why=build_logic.get("refusal")
+                       or "CURRENT_BUILD_LOGIC_HAS_NO_CUTOVER",
+                       claim=("NO profitability claim: the serving build "
+                              "decides with decision logic no recorded "
+                              "cutover names, so the forward window would "
+                              "span two decision logics"),
+                       verdict_before_the_logic_check=verdict.get("verdict"))
     book = {k: false_refusal_metric(
         data.get("refusals") or [],
         window={"kind": k, "start": since if k == FORWARD else None,
@@ -1006,6 +1020,7 @@ def compute(data: dict, *, now: float, since, cutover: float,
         "version": VERSION, "computed_at": now,
         "since": None if no_cutover else since,
         "since_source": since_source, "cutover": cutover,
+        "build_logic": build_logic,
         "cutover_basis": ("live_parity_effective_cutover.cutover_at (the "
                           "latest release whose decision-logic hash changed; "
                           "each release recorded after every production "

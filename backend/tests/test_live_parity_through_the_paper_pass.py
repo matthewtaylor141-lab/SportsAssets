@@ -296,6 +296,25 @@ async def test_one_intent_two_adapters_parity_through_the_real_pass(
         assert mcomp["alternatives"]["exact_parity_claimed"] is False
         assert "INDIRECT_HEDGE" in mcomp["alternatives"][
             "evaluated_on_neither_side"]
+        # R30A review: ... and the LEDGER says so -- the pair is never
+        # MATCHED (nor any other claimed-parity state) through the real pass
+        assert aset["INDIRECT_HEDGE"]["evaluation"] == CI.NOT_RUN
+        assert "INDIRECT_HEDGE" in mcomp["alternatives"]["not_run"]
+        assert mpar["parity_state"] == LP.INCOMPLETE, mpar["parity_state"]
+        assert mcomp["why_not_exact"].startswith(
+            "NOT_EVALUATED_ON_EITHER_SIDE:")
+        assert mcomp["exact_parity_claimed"] is False
+        assert mcomp["state_if_alternatives_were_complete"] in (
+            LP.MATCHED, LP.SCALE, LP.VENUE_DIFF)
+        # the decision intent names the build that decided it
+        ev = H.j((await conn.fetchrow(
+            "SELECT evidence FROM canonical_decision_intents WHERE "
+            " intent_id=$1", it["intent_id"]))["evidence"])
+        assert ev["build"]["decision_logic_hash"] == \
+            LP.decision_logic_hash()["hash"]
+        # the Allie / Eddie comparison is labelled for what it is
+        assert comp["fields"]["allie_final_allocation"][
+            "comparison_kind"] == LP.ALLIE_EDDIE_BASIS["kind"]
         # R30A: THE LATENCY CHAIN FOR THIS DECISION
         lat = [r for r in await LP.latency_rows(conn)
                if r["intent_id"] == it["intent_id"]]
@@ -307,6 +326,13 @@ async def test_one_intent_two_adapters_parity_through_the_real_pass(
         rep = LP.latency_report(lat)
         assert rep["spans"]["decision_start_to_paper_submit"]["n"] == 1
         assert rep["spans"]["paper_submit_to_paper_fill"]["n"] == 1
+        # R30A review: the book stage is its SIGNED age at decision start --
+        # measured whichever side of decision_start the read landed, never
+        # discarded as a clock disagreement (both stamps are our clock)
+        age = rep["spans"]["book_age_at_decision_start"]
+        assert age["n"] == 1 and age["unavailable"] == {}, age
+        assert "CLOCK_DISAGREEMENT" not in rep["spans"][
+            "book_observed_to_intent_recorded"]["unavailable"]
         b = await L.balances(conn, acct["account_id"], now=now + 141)
         assert b["ledger_consistent"] is True
     finally:

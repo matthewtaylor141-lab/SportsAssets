@@ -25,9 +25,11 @@ ledger and the live readiness gate.
                                              agent or system actor). The
                                              divergence stays in the ledger.
     POST /api/admin/live-parity/cutover      R30A: a NAMED HUMAN records this
-                                             release's production cutover
+                                             deployment's production cutover
                                              (admin token; system / agent
-                                             actors refused). record_cutover
+                                             actors refused; a rollback to an
+                                             earlier release appends its own
+                                             row). record_cutover
                                              runs INSIDE THIS SERVING
                                              PROCESS: the API commit, the
                                              installed hooks and the
@@ -209,6 +211,10 @@ async def clear_halt(body: dict | None = None) -> dict:
         b.get("reason") or "").strip()
     if not actor or not reason:
         raise HTTPException(400, detail={"reason": "ACTOR_AND_REASON_REQUIRED"})
+    if not LP.is_named_human(actor):
+        # the database refuses it too (migration 225's named-human rule)
+        raise HTTPException(400, detail={
+            "reason": "ACTOR_MUST_BE_A_NAMED_HUMAN", "actor": actor})
     pool = await _pool()
     async with pool.acquire() as conn:
         try:
@@ -262,5 +268,5 @@ async def record_cutover(body: dict | None = None) -> dict:
             return str(v)
         return v
     return ser({k: got.get(k) for k in (
-        "recorded", "already", "cutover", "effective",
-        "restarts_forward_window", "checks")})
+        "recorded", "already", "already_rule", "cutover", "effective",
+        "restarts_forward_window", "previous_effective", "checks")})

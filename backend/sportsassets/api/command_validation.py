@@ -258,6 +258,15 @@ async def production_cutover_epoch(conn) -> float | None:
         " live_parity_effective_cutover")
 
 
+async def production_cutover_logic_hash(conn) -> str | None:
+    """The effective cutover's decision_logic_hash, or None."""
+    if not await conn.fetchval(
+            "SELECT to_regclass('live_parity_effective_cutover') IS NOT NULL"):
+        return None
+    return await conn.fetchval(
+        "SELECT decision_logic_hash FROM live_parity_effective_cutover")
+
+
 async def _read(conn, *, since, since_source: str, now: float) -> dict:
     import asyncio
 
@@ -271,13 +280,18 @@ async def _read(conn, *, since, since_source: str, now: float) -> dict:
                            % STATEMENT_TIMEOUT_MS)
         data, sources = await gather(conn, L.ACCOUNT_ID, now=now)
         cutover = await production_cutover_epoch(conn)
+        cutover_hash = await production_cutover_logic_hash(conn)
     finally:
         await tr.rollback()
     if data is None:
         return {"status": "UNAVAILABLE", "why": sources, "data": None}
+    # R30A: the serving build's decision logic against the effective
+    # cutover's (decision_logic is pure: no execution module is imported)
+    from .. import decision_logic as DL
+    build = DL.build_logic_check(cutover_hash)
     out = await asyncio.to_thread(
         V.compute, data, now=now, since=since, cutover=cutover,
-        since_source=since_source, sources=sources)
+        since_source=since_source, sources=sources, build_logic=build)
     return {"status": "OK", "why": None, "data": out}
 
 

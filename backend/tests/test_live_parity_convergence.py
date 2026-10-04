@@ -577,16 +577,21 @@ async def test_canonical_origination_needs_a_named_canonical_intent():
                                                   "content_sha": "0" * 64}},
         plan=plan)
     assert got["refusal"] == LP.R_NO_CANONICAL
-    # named and present: SHADOW still issues nothing
+    # named and present, but the funded order is not the intent's order:
+    # R30A review -- the boundary used to bind only the slug and the order
+    # intent, so this plan (no strategy, no quantity, no price, no order
+    # form) got as far as the SHADOW refusal; now it is refused BY NAME,
+    # field by field (canonical_order_of / VENUE_ORIGINATION_MATCH)
     it = _intent()
     got = await FX.canonical_origination(
         _RowConn(it), rec={"canonical_intent": _named(it)},
         plan={"us_market_slug": it["us_market_slug"],
               "intent": it["order_intent"]})
     assert got["ok"] is False and got["token"] is None
-    assert got["refusal"] in (CI.R_POLICY_UNAPPROVED, LP.R_GATE_APPROVAL,
-                              LP.R_NO_LIVE_AUTHORIZATION,
-                              CI.R_INTENT_EXPIRED)
+    assert got["refusal"] == LP.R_CANONICAL_MISMATCH
+    assert {m["field"] for m in got["detail"]["mismatches"]} == {
+        "strategy", "strategy_version", "wire_price", "venue_time_in_force",
+        "live_qty"}
 
 
 @pg
@@ -668,3 +673,270 @@ def test_the_actual_lane_hands_the_venue_only_the_canonical_token():
     i_place = src.index(".place,")
     assert i_auth < i_claim < i_place
     assert '"canonical_live_authorization": canon["token"]' in src
+
+
+# ═════════════════════════════════════════════════════════════════════
+# §7 R30A REVIEW: EVERY VENUE PRIMITIVE THAT CAN CREATE AN ORDER, GATED
+# ═════════════════════════════════════════════════════════════════════
+#
+# The review found live_executor's copy / manual-desk / GTC lanes (and the
+# mirror lane, the underdog sleeve and calibration) reaching pmus.submit_fok
+# with sell=False, and the CLOB post_order path, with no canonical check:
+# §6's census counted only callers of authorize_live_exposure. The census
+# below is by VENUE PRIMITIVE -- the only code that creates an order -- so a
+# lane written tomorrow is covered the moment it calls one.
+
+def _enclosing(tree):
+    """{id(call node): 'Class.func' | 'func'} for every Call in `tree`."""
+    out = {}
+
+    def walk(node, stack):
+        for ch in ast.iter_child_nodes(node):
+            if isinstance(ch, (ast.FunctionDef, ast.AsyncFunctionDef,
+                               ast.ClassDef)):
+                walk(ch, stack + [ch.name])
+            else:
+                if isinstance(ch, ast.Call):
+                    out[id(ch)] = ".".join(stack)
+                walk(ch, stack)
+    walk(tree, [])
+    return out
+
+
+def _order_creating_calls() -> set:
+    """(file, enclosing function) of every call that creates a venue order:
+    `<x>.orders.create(...)` (polymarket-us SDK), `post_order(...)` /
+    `create_order(...)` (polymarket-CLOB), and a POST to Kalshi's order
+    endpoint."""
+    found = set()
+    for f in ROOT.rglob("*.py"):
+        src = f.read_text()
+        tree = ast.parse(src)
+        encl = _enclosing(tree)
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            fn = node.func
+            name = getattr(fn, "attr", None) or getattr(fn, "id", None)
+            hit = False
+            if name == "create" and isinstance(fn, ast.Attribute) and \
+                    getattr(fn.value, "attr", None) == "orders":
+                hit = True
+            elif name in ("post_order", "create_order"):
+                hit = True
+            elif name == "_send" and len(node.args) >= 2 and all(
+                    isinstance(a, ast.Constant) for a in node.args[:2]) and \
+                    node.args[0].value == "POST" and \
+                    "orders" in str(node.args[1].value):
+                hit = True
+            if hit:
+                found.add((str(f.relative_to(ROOT)), encl.get(id(node), "")))
+    return found
+
+
+def test_every_order_creating_call_sits_in_a_gated_venue_primitive():
+    assert _order_creating_calls() == {
+        ("pmus.py", "submit_fok"),                     # polymarket-us, x2
+        ("execmirror.py", "Venue.place"),              # the mirror account
+        ("live_executor.py", "_submit_fok"),           # polymarket-CLOB
+        ("kalshi_venue.py", "KalshiClient.submit"),    # unreachable (below)
+    }, _order_creating_calls()
+    # each reachable primitive refuses a BUY before the order is created
+    sub = inspect.getsource(__import__("sportsassets.pmus",
+                                       fromlist=["x"]).submit_fok)
+    assert sub.index("require_canonical_origination(") < sub.index(
+        "orders.create(")
+    assert sub.index("if not sell:") < sub.index(
+        "require_canonical_origination(")
+    from sportsassets import live_executor as LE
+    clob = inspect.getsource(LE._submit_fok)
+    assert clob.index("require_canonical_origination(") < clob.index(
+        "create_order(") < clob.index("post_order(")
+    place = inspect.getsource(M.Venue.place)
+    assert place.index("_canonical_live_authorized") < place.index(
+        "orders.create(")
+
+
+def test_the_kalshi_primitive_is_reachable_from_nowhere():
+    """KalshiClient.submit carries no canonical gate because nothing can call
+    it: only the Kalshi modules import kalshi_venue, and nothing outside it
+    calls .submit( on a Kalshi client (tests/test_kalshi_isolation.py pins
+    both). A canonical intent names a POLYMARKET contract, so no Kalshi
+    order could ever match one."""
+    kalshi = {"kalshi_venue.py", "kalshi_account.py", "kalshi_mapping.py",
+              "kalshi_orders.py", "kalshi_linkage.py", "venue_selection.py"}
+    importers = set()
+    for f in ROOT.rglob("*.py"):
+        rel = str(f.relative_to(ROOT))
+        if rel in kalshi:
+            continue
+        for node in ast.walk(ast.parse(f.read_text())):
+            names = []
+            if isinstance(node, ast.ImportFrom):
+                names = [node.module or ""] + [a.name for a in node.names]
+            elif isinstance(node, ast.Import):
+                names = [a.name for a in node.names]
+            if any(n.split(".")[-1] == "kalshi_venue" for n in names):
+                importers.add(rel)
+    assert importers == set(), importers
+    assert CI.VENUE == "POLYMARKET"
+
+
+#: every module that calls a venue mutation primitive (submission_surface's
+#: own scanner), and what it reaches. A new caller fails this test until it
+#: is classified -- and a BUY from it is gated inside the primitive anyway.
+KNOWN_MUTATION_CALLERS = {
+    "bettor_funded_execution.py": "pmus.submit_fok (BUY gated in the "
+                                  "adapter; canonical_origination first)",
+    "bettor_funded_management.py": "pmus.submit_fok sell / cancel_order",
+    "bettor_xavier_standing_orders.py": "cancel_order",
+    "execmirror.py": "close_position (risk reducing)",
+    "live_executor.py": "pmus.submit_fok copy / manual / GTC (BUY gated in "
+                        "the adapter) and the CLOB _submit_fok (gated)",
+    "workers/mirror_live.py": "pmus.submit_fok (BUY gated in the adapter)",
+    "workers/underdog.py": "pmus.submit_fok (BUY gated in the adapter)",
+}
+
+
+def test_every_caller_of_a_venue_primitive_is_classified():
+    from sportsassets import submission_surface as SS
+    callers = SS.mutation_callers()["callers"]
+    assert set(callers) == set(KNOWN_MUTATION_CALLERS), set(callers) ^ set(
+        KNOWN_MUTATION_CALLERS)
+    gate = next(g for g in SS.GATES if g["n"] == 11)
+    assert "pmus.submit_fok" in gate["where"] and \
+        "live_executor._submit_fok" in gate["where"]
+
+
+class _NoClient:
+    """Stands where pmus / live_executor build their venue client: building
+    it at all is a failure (the gate must refuse first)."""
+    def __init__(self):
+        self.built = 0
+        self.orders = _RecordingOrders()
+
+    def __call__(self):
+        self.built += 1
+        return self
+
+
+@pytest.mark.parametrize("token_kind", ["none", "forged", "direct"])
+def test_the_polymarket_us_adapter_refuses_every_buy_without_the_canonical_authorization(
+        monkeypatch, token_kind):
+    from sportsassets import execution_gate as EG
+    from sportsassets import pmus
+    monkeypatch.setattr(pmus._gate, "authorize",
+                        lambda *a, **k: None)          # the kill switch: open
+    client = _NoClient()
+    monkeypatch.setattr(pmus, "_get_client", client)
+    it = _intent()
+    tok = {"none": None, "forged": _Forged(),
+           "direct": LP.LiveAuthorization(intent_id=it["intent_id"],
+                                          content_sha=it["content_sha"],
+                                          issued_at=1.0)}[token_kind]
+    for intent in ("ORDER_INTENT_BUY_LONG", "ORDER_INTENT_BUY_SHORT", None):
+        with pytest.raises(EG.Denied) as e:
+            pmus.submit_fok("aec-nfl-x", 0.55, 2, intent=intent,
+                            canonical_live_authorization=tok)
+        assert e.value.reason == pmus.R_CANONICAL_ORIGINATION
+    assert client.built == 0 and client.orders.created == []
+
+
+def test_a_sell_still_reaches_the_polymarket_us_adapter(monkeypatch):
+    from sportsassets import pmus
+    monkeypatch.setattr(pmus._gate, "authorize", lambda *a, **k: None)
+    client = _NoClient()
+    monkeypatch.setattr(pmus, "_get_client", client)
+    monkeypatch.setattr(pmus, "_exit_intent",
+                        lambda slug, intent: "ORDER_INTENT_SELL_LONG")
+    got = pmus.submit_fok("aec-nfl-x", 0.55, 2, True)
+    assert client.orders.created and client.orders.created[0][
+        "intent"] == "ORDER_INTENT_SELL_LONG"
+    assert got["order_id"] == "must-never-happen"     # the recording stub
+
+
+def test_the_clob_adapter_refuses_every_buy_without_the_canonical_authorization(
+        monkeypatch):
+    from sportsassets import execution_gate as EG
+    from sportsassets import live_executor as LE
+    monkeypatch.setattr(LE._gate, "authorize", lambda *a, **k: None)
+    client = _NoClient()
+    monkeypatch.setattr(LE, "_get_client", client)
+    for tok in (None, _Forged()):
+        with pytest.raises(EG.Denied) as e:
+            LE._submit_fok("token-1", 0.55, 2.0,
+                           canonical_live_authorization=tok)
+        assert e.value.reason == "canonical_origination_required"
+    assert client.built == 0
+
+
+def test_outside_shadow_only_the_issued_token_passes_the_adapter(monkeypatch):
+    """PURE, IN MEMORY (a recording client, no network): what the adapter
+    boundary would admit in a future LIVE release -- the token the canonical
+    adapter issued, and nothing else."""
+    from sportsassets import execution_gate as EG
+    from sportsassets import pmus
+    monkeypatch.setattr(LP, "SMALL_LIVE_MODE", "LIVE_NOT_IN_THIS_RELEASE")
+    it = _intent()
+    tok = LP.issue_live_authorization(
+        it, governance=LP.governance_verdict(it, _all_approved(it)), now=1.0)
+    pmus.require_canonical_origination("aec-nfl-x", tok)       # no raise
+    with pytest.raises(EG.Denied):
+        pmus.require_canonical_origination("aec-nfl-x", _Forged())
+
+
+def test_a_refused_buy_is_pre_send_for_the_lanes_that_read_the_gate():
+    """The refusal is execution_gate.Denied -- the exception the funded path
+    already classifies as provably pre-send (nothing left), the same one a
+    paused kill switch raises inside the adapter."""
+    src = inspect.getsource(FX.submit_for_decision)
+    assert "isinstance(exc, _eg.Denied)" in src
+
+
+def test_the_funded_boundary_binds_every_order_field():
+    """Review finding 6: the funded match bound only slug and order intent;
+    a plan of 999,999 contracts at 0.99 under another strategy reached the
+    SHADOW refusal instead of being refused by name."""
+    it = _intent()
+    good_plan = {"us_market_slug": it["us_market_slug"],
+                 "intent": it["order_intent"], "limit_price": 0.55,
+                 "quantity": 2, "tif": M.TIF["IOC"], "post_only": False}
+    rec = {"strategy": it["strategy"], "strategy_version":
+           it["strategy_version"]}
+    order = FX.canonical_order_of(rec, good_plan)
+    assert LP.origination_mismatches(it, order, scale=1000) == []
+    bad = FX.canonical_order_of(
+        {"strategy": "SOME_FUNDED_STRATEGY", "strategy_version": "X"},
+        dict(good_plan, quantity=999999, limit_price=0.99,
+             tif="TIME_IN_FORCE_FILL_OR_KILL", post_only=True,
+             intent="ORDER_INTENT_BUY_SHORT"))
+    got = {m["field"] for m in LP.origination_mismatches(it, bad, scale=1000)}
+    assert got == {"order_intent", "holding_side", "strategy",
+                   "strategy_version", "wire_price", "venue_time_in_force",
+                   "post_only", "live_qty"}, got
+    # the scale unknown -> the quantity cannot be shown to match
+    assert [m["field"] for m in LP.origination_mismatches(
+        it, order, scale=None)] == ["live_qty"]
+
+
+@pytest.mark.asyncio
+async def test_a_funded_order_that_is_not_the_intents_order_is_refused_by_name(
+        monkeypatch):
+    it = _intent()
+
+    class _Conn(_RowConn):
+        async def fetchval(self, sql, *a):
+            return 1000
+
+    plan = {"us_market_slug": it["us_market_slug"],
+            "intent": it["order_intent"], "limit_price": 0.99,
+            "quantity": 999999, "tif": "TIME_IN_FORCE_FILL_OR_KILL",
+            "post_only": False}
+    got = await FX.canonical_origination(
+        _Conn(it), rec={"canonical_intent": _named(it),
+                        "strategy": "SOME_FUNDED_STRATEGY"}, plan=plan)
+    assert got["ok"] is False
+    assert got["refusal"] == LP.R_CANONICAL_MISMATCH
+    fields = {m["field"] for m in got["detail"]["mismatches"]}
+    assert {"strategy", "wire_price", "live_qty",
+            "venue_time_in_force"} <= fields

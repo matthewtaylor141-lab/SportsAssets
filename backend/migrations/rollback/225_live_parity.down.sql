@@ -21,6 +21,8 @@ BEGIN
     END IF;
 END $$;
 
+DROP INDEX IF EXISTS paper_orders_decision_role_idx;
+DROP INDEX IF EXISTS paper_fills_order_idx;
 DROP VIEW IF EXISTS live_approvals_current;
 DROP VIEW IF EXISTS live_parity_effective_cutover;
 DROP TABLE IF EXISTS live_approvals;
@@ -38,3 +40,4 @@ DROP FUNCTION IF EXISTS live_parity_cutover_stamp();
 DROP FUNCTION IF EXISTS cmi_alternative_set_ok(jsonb);
 DROP FUNCTION IF EXISTS small_live_control_guard();
 DROP FUNCTION IF EXISTS live_parity_append_only();
+DROP FUNCTION IF EXISTS live_parity_named_human(text);

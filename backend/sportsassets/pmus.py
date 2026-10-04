@@ -3164,13 +3164,54 @@ def _post_only_cross(resp: Any, prev_order: dict, records: list[dict],
                     "executions": records}}
 
 
+#: R30A CONVERGENCE AT THE SHARED BOUNDARY (audit P0 #2). The reason a BUY
+#: is refused here without the canonical SMALL LIVE adapter's authorization.
+R_CANONICAL_ORIGINATION = "canonical_origination_required"
+
+
+def _canonical_origination_authorized(token) -> bool:
+    """True only for a live_parity.LiveAuthorization the canonical SMALL LIVE
+    adapter issued in LIVE mode -- which this (SHADOW) release cannot issue.
+    Fail closed: anything that cannot be checked is not authorized."""
+    try:
+        from . import live_parity as _LP
+        return bool(_LP.canonical_live_authorized(token))
+    except Exception:                                         # noqa: BLE001
+        return False
+
+
+def require_canonical_origination(us_market_slug: str, token) -> None:
+    """NEW EXPOSURE (a BUY) ONLY FROM A CANONICAL INTENT -- AT THE ADAPTER.
+
+    R30A review: live_executor's copy, manual-desk and GTC lanes, the mirror
+    lane, the underdog sleeve and calibration all reach this adapter with
+    sell=False, gated only by execution_gate -- so real-money BUYs could
+    still originate outside any canonical decision intent, although the
+    ACTUAL sibling, the funded stack and execmirror could not. The gate now
+    sits HERE, inside the adapter every polymarket-us order passes, exactly
+    as execmirror.Venue.place carries it for the mirror account: a BUY needs
+    the LiveAuthorization only live_parity.issue_live_authorization builds,
+    and only outside SHADOW (migration 225 admits no other mode). Denial
+    RAISES execution_gate.Denied -- the exception every caller already
+    handles as "refused before anything was sent" (the paused kill switch
+    raises the same one), so no lane reads it as a lost response. A SELL
+    (exit, reduce, protection) only reduces exposure and is not gated."""
+    if not _canonical_origination_authorized(token):
+        raise _gate.Denied(
+            R_CANONICAL_ORIGINATION,
+            "a BUY on %s needs the canonical SMALL LIVE adapter's "
+            "authorization (live_parity), which is never issued in SHADOW"
+            % us_market_slug)
+
+
 def submit_fok(us_market_slug: str, limit_price: float, quantity: int,
                sell: bool = False,
                tif: str = "TIME_IN_FORCE_FILL_OR_KILL",
                intent: str | None = None,
                post_only: bool = False,
                good_till: str | None = None,
-               paced_pair: bool = False) -> dict:
+               paced_pair: bool = False,
+               canonical_live_authorization=None) -> dict:
     """Preview then place a limit order. Returns the same normalized
     shape the global executor uses:
     {ok, order_id, status, fill_price, filled_shares, raw}.
@@ -3223,6 +3264,11 @@ def submit_fok(us_market_slug: str, limit_price: float, quantity: int,
     # token to present. Denial raises, so a route cannot proceed by
     # ignoring a return value.
     _gate.authorize("submit", lane=_lane(), slug=us_market_slug)
+    # R30A: a BUY (new exposure) only from a canonical intent, before the
+    # client is built or anything is read from the venue
+    if not sell:
+        require_canonical_origination(us_market_slug,
+                                      canonical_live_authorization)
     client = _get_client()
     # THE SIDE SELECTOR (venue ground truth 2026-08-24): on market
     # families whose two sides share one identifier — every aec- match

@@ -16,7 +16,9 @@ canonical SMALL LIVE adapter's authorization (never issued in SHADOW), which
 the ACTUAL lane requires before its claim. The refusals without it are proven
 in tests/test_live_parity_convergence.py. `assume_canonical_funded_origination`
 is the same assumption for the funded path's BUY boundary, used next to every
-test's own flip of FUNDED_SUBMISSION_ENABLED. `record_test_gate_approvals`
+test's own flip of FUNDED_SUBMISSION_ENABLED; `assume_canonical_venue_
+authorization` states it for the venue adapters' own BUY boundary
+(pmus.submit_fok, the CLOB _submit_fok). `record_test_gate_approvals`
 writes, inside a transaction the test rolls back, the owner's live-gate
 configuration approvals a test needs when it exercises the DATABASE path
 (live_rule_artifacts + live_approvals) instead of the code constants.
@@ -69,10 +71,28 @@ def assume_canonical_funded_origination(monkeypatch) -> None:
     canonical_origination) stated as satisfied, for tests that already flip
     FUNDED_SUBMISSION_ENABLED to exercise the funded mechanics against a fake
     transport. Its refusals are proven in
-    tests/test_live_parity_convergence.py."""
+    tests/test_live_parity_convergence.py. Since the R30A review the same
+    boundary sits inside the venue adapter too (pmus.submit_fok refuses a
+    BUY without the canonical authorization), so the assumption covers it:
+    a funded BUY through the real adapter needs both parts."""
     from sportsassets import bettor_funded_execution as FX
     monkeypatch.setattr(FX, "canonical_origination",
                         _assumed_canonical_origination)
+    assume_canonical_venue_authorization(monkeypatch)
+
+
+def assume_canonical_venue_authorization(monkeypatch) -> None:
+    """R30A review: the canonical-origination boundary INSIDE the venue
+    primitives (pmus.submit_fok and live_executor's CLOB _submit_fok refuse
+    every BUY without the canonical SMALL LIVE adapter's LiveAuthorization,
+    which SHADOW never issues) stated as satisfied, for a test that
+    exercises an adapter's or a lane's BUY mechanics against a fake client
+    or transport. The refusals themselves are proven in
+    tests/test_live_parity_convergence.py §7. Nothing else is assumed: the
+    execution gate, the preview guard and every other check still run."""
+    from sportsassets import pmus
+    monkeypatch.setattr(pmus, "_canonical_origination_authorized",
+                        lambda token: True)
 
 
 TEST_APPROVER = "owner@example"

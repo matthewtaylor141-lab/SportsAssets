@@ -44,8 +44,10 @@
 --                                  clearing a halt needs a named human actor.
 --   small_live_control_events      append-only audit of every control change.
 --
---   live_parity_cutover            R30A: ONE append-only row PER RELEASE (was
---                                  a singleton): release / api / workers sha,
+--   live_parity_cutover            R30A: ONE append-only row PER DEPLOYMENT
+--                                  of a release (was a singleton; a rollback
+--                                  to an earlier sha appends a row of its
+--                                  own): release / api / workers sha,
 --                                  migrations, the decision-logic hash, the
 --                                  hook install, the named human who recorded
 --                                  it and the database's own clock. The
@@ -83,6 +85,22 @@ BEGIN
     RAISE EXCEPTION 'LIVE_PARITY_APPEND_ONLY: % on % is refused (append-only record)',
         TG_OP, TG_TABLE_NAME USING ERRCODE = 'restrict_violation';
 END $$;
+
+-- ── the named-human rule (one definition for every CHECK below) ────────
+-- A halt clear, a cutover's recorded_by and an owner LIVE approval's
+-- approved_by must be a NAMED HUMAN. The pattern is canonical_intent.
+-- NON_HUMAN_ACTOR_PATTERN character for character (a test pins them equal):
+-- an agent / system identity at the start; a machine word anywhere as a
+-- whole word (bot, ci, cron, codex, assistant, openai, gpt, automation,
+-- service, root, admin, scheduler, deploy, github, actions, worker ...); a
+-- GitHub App `[bot]` suffix. R30A review: the R30 rule was the first part
+-- alone, so 'github-actions[bot]', 'ci', 'cron', 'root' or 'admin' passed
+-- as a named human.
+CREATE OR REPLACE FUNCTION live_parity_named_human(actor text) RETURNS boolean
+LANGUAGE sql IMMUTABLE AS $$
+    SELECT actor IS NOT NULL AND length(btrim(actor)) > 0
+       AND btrim(actor) !~* '^(system|derek|xavier|audrey|karen|allie|chief_allocator|eddie|scout|bettor|claude|agent|migration|test_harness_system)|(^|[^a-z0-9])(bots?|ci|cron|codex|assistant|openai|gpt|chatgpt|anthropic|llm|copilot|automation|automated|service|svc|root|admin|administrator|scheduler|deploy|deployer|render|github|actions|worker|daemon|robot|script|pipeline|webhook|unknown|anonymous|none|null)([^a-z0-9]|$)|\[bot\]'
+$$;
 
 -- ── 1 · canonical decision intents ──────────────────────────────────────
 CREATE TABLE IF NOT EXISTS canonical_decision_intents (
@@ -175,7 +193,11 @@ LANGUAGE sql IMMUTABLE AS $$
            SELECT 1 FROM jsonb_each(s) e
             WHERE NOT (e.value->>'status' = 'EVALUATED'
                        OR (e.value->>'status' = 'UNAVAILABLE'
-                           AND coalesce(e.value->>'why', '') <> '')))
+                           AND coalesce(e.value->>'why', '') <> ''
+                           -- R30A review: whether the evaluation RAN (an
+                           -- evaluated fact) or was NOT_RUN (the comparison
+                           -- is incomplete on it) -- parity reads this
+                           AND e.value->>'evaluation' IN ('RAN', 'NOT_RUN'))))
 $$;
 
 CREATE TABLE IF NOT EXISTS canonical_management_intents (
@@ -306,11 +328,19 @@ CREATE TABLE IF NOT EXISTS live_parity_ledger (
     -- the forward window compares it with the cutover's clock_timestamp
     created_at          timestamptz NOT NULL DEFAULT clock_timestamp(),
     CONSTRAINT lpl_kind_ck CHECK (intent_kind IN ('DECISION', 'MANAGEMENT')),
+    -- INCOMPLETE_COMPARISON (R30A section 8): identical on every compared
+    -- field, but the management alternative set was evaluated on NEITHER
+    -- side for some alternative (the paper book runs no indirect-hedge
+    -- search), so exact parity is NOT claimed. Never a match, never a halt.
     CONSTRAINT lpl_state_ck CHECK (parity_state IN (
         'MATCHED', 'EXPECTED_SCALE_DIFFERENCE', 'VENUE_EXECUTION_DIFFERENCE',
-        'LOGIC_DIVERGENCE')),
+        'INCOMPLETE_COMPARISON', 'LOGIC_DIVERGENCE')),
     CONSTRAINT lpl_divergence_named_ck CHECK (
         parity_state <> 'LOGIC_DIVERGENCE' OR cardinality(divergence_fields) > 0),
+    CONSTRAINT lpl_incomplete_ck CHECK (
+        parity_state <> 'INCOMPLETE_COMPARISON'
+        OR (intent_kind = 'MANAGEMENT'
+            AND coalesce(comparison->>'why_not_exact', '') <> '')),
     CONSTRAINT lpl_sleeve_ck CHECK (sleeve IN ('INVESTMENT', 'TRAINING',
                                                'BENCHMARK', 'UNCLASSIFIED'))
 );
@@ -346,8 +376,7 @@ CREATE TABLE IF NOT EXISTS small_live_control_events (
     CONSTRAINT slce_action_ck CHECK (action IN ('HALT', 'CLEAR_HALT')),
     -- a halt is cleared only by a named human, never by the system or an agent
     CONSTRAINT slce_clear_actor_ck CHECK (
-        action <> 'CLEAR_HALT' OR (actor !~* '^(system|derek|xavier|audrey|karen|allie|chief_allocator|eddie|scout|bettor)'
-                                   AND length(btrim(actor)) > 0))
+        action <> 'CLEAR_HALT' OR live_parity_named_human(actor))
 );
 
 CREATE OR REPLACE FUNCTION small_live_control_guard() RETURNS trigger
@@ -357,8 +386,8 @@ BEGIN
         RAISE EXCEPTION 'SMALL_LIVE_CONTROL_IS_PERMANENT: % refused', TG_OP
             USING ERRCODE = 'restrict_violation';
     END IF;
-    IF OLD.halted AND NOT NEW.halted AND (NEW.cleared_by IS NULL
-            OR NEW.cleared_by ~* '^(system|derek|xavier|audrey|karen|allie|chief_allocator|eddie|scout|bettor)') THEN
+    IF OLD.halted AND NOT NEW.halted
+            AND NOT coalesce(live_parity_named_human(NEW.cleared_by), false) THEN
         RAISE EXCEPTION 'SMALL_LIVE_HALT_CLEAR_NEEDS_A_NAMED_HUMAN'
             USING ERRCODE = 'restrict_violation';
     END IF;
@@ -409,9 +438,17 @@ CREATE TABLE IF NOT EXISTS live_parity_hook_installs (
 );
 CREATE INDEX IF NOT EXISTS lphi_commit_idx ON live_parity_hook_installs (commit_sha, installed_at DESC);
 
+-- ONE ROW PER DEPLOYMENT OF A RELEASE, not per release sha. R30A review: with
+-- release_sha UNIQUE a rollback (or a redeploy of an earlier release) could
+-- not be recorded -- record_cutover returned `already` -- so after A -> B ->
+-- A the effective cutover stayed on B and the forward window kept counting
+-- A's logic as B's evidence. A sha may now appear again; what is refused
+-- (trigger below) is recording the SAME release twice IN A ROW, which would
+-- add nothing. A -> B -> A appends a third row, and when its logic hash
+-- differs from B's the forward window restarts there.
 CREATE TABLE IF NOT EXISTS live_parity_cutover (
     cutover_id           bigserial PRIMARY KEY,
-    release_sha          text NOT NULL UNIQUE,
+    release_sha          text NOT NULL,
     api_sha              text NOT NULL,
     workers_sha          text NOT NULL,
     migrations           text[] NOT NULL,
@@ -431,15 +468,27 @@ CREATE TABLE IF NOT EXISTS live_parity_cutover (
                                         AND jsonb_typeof(decision_logic_files) = 'object'),
     CONSTRAINT lpc_shadow_ck CHECK (small_live_mode = 'SHADOW' AND NOT small_live_halted),
     CONSTRAINT lpc_no_capital_ck CHECK (NOT capital_activated),
-    CONSTRAINT lpc_named_human_ck CHECK (
-        length(btrim(recorded_by)) > 0
-        AND recorded_by !~* '^(system|derek|xavier|audrey|karen|allie|chief_allocator|eddie|scout|bettor|claude|agent|migration|test_harness_system)')
+    CONSTRAINT lpc_named_human_ck CHECK (live_parity_named_human(recorded_by))
 );
 CREATE INDEX IF NOT EXISTS lpc_recorded_idx ON live_parity_cutover (recorded_at, cutover_id);
+CREATE INDEX IF NOT EXISTS lpc_release_idx ON live_parity_cutover (release_sha, recorded_at DESC);
 
+-- the database's own clock, and NO CONSECUTIVE DUPLICATE: the latest row
+-- (by recorded_at, cutover_id) may not already be this release. Serialized
+-- by a transaction-scoped advisory lock, so two concurrent recorders of the
+-- same deployment cannot both append.
 CREATE OR REPLACE FUNCTION live_parity_cutover_stamp() RETURNS trigger
 LANGUAGE plpgsql AS $$
+DECLARE
+    last_sha text;
 BEGIN
+    PERFORM pg_advisory_xact_lock(hashtext('live_parity_cutover'));
+    SELECT release_sha INTO last_sha FROM live_parity_cutover
+     ORDER BY recorded_at DESC, cutover_id DESC LIMIT 1;
+    IF last_sha IS NOT DISTINCT FROM NEW.release_sha THEN
+        RAISE EXCEPTION 'LIVE_PARITY_CUTOVER_ALREADY_LATEST: release % is already the latest recorded cutover',
+            NEW.release_sha USING ERRCODE = 'unique_violation';
+    END IF;
     NEW.recorded_at := clock_timestamp();
     RETURN NEW;
 END $$;
@@ -493,9 +542,7 @@ CREATE TABLE IF NOT EXISTS live_approvals (
     CONSTRAINT la_sha_ck CHECK (config_sha256 ~ '^[0-9a-f]{64}$'),
     CONSTRAINT la_decision_ck CHECK (decision IN ('APPROVE', 'REVOKE')),
     CONSTRAINT la_statement_ck CHECK (length(btrim(statement)) > 0),
-    CONSTRAINT la_named_human_ck CHECK (
-        length(btrim(approved_by)) > 0
-        AND approved_by !~* '^(system|derek|xavier|audrey|karen|allie|chief_allocator|eddie|scout|bettor|claude|agent|migration|test_harness_system)')
+    CONSTRAINT la_named_human_ck CHECK (live_parity_named_human(approved_by))
 );
 CREATE INDEX IF NOT EXISTS la_subject_idx ON live_approvals
     (subject_kind, subject_id, subject_version, recorded_at DESC, approval_id DESC);
@@ -636,3 +683,14 @@ BEGIN
                         FROM unnest(usable) x), ''));
     END LOOP;
 END $$;
+
+-- ── 9 · the latency chain's read path (R30A section 6) ─────────────────
+-- GET /api/command/live-parity/latency joins each canonical decision intent
+-- to its paper ENTRY order and that order's first fill. R30A review: with no
+-- index on paper_orders.decision_id or paper_fills.order_id every intent
+-- cost a sequential scan of both tables (EXPLAIN: SubPlan Seq Scan on
+-- paper_orders / paper_fills), so the read-only endpoint would time out at
+-- production size. Plain indexes; nothing about the paper ledger changes.
+CREATE INDEX IF NOT EXISTS paper_orders_decision_role_idx
+    ON paper_orders (decision_id, role);
+CREATE INDEX IF NOT EXISTS paper_fills_order_idx ON paper_fills (order_id);
