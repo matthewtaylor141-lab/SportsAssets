@@ -147,9 +147,12 @@ def test_the_canonical_intent_module_is_pure():
     """R30A: the benchmark may import canonical_intent only because it
     imports nothing beyond the standard library."""
     from sportsassets import canonical_intent as CI
+    # ROUND_FLOOR (decimal, standard library): R30A review -- the validity
+    # window is floored to the millisecond (canonical_intent._floor_ms),
+    # never rounded up past the 30 s rule
     stdlib = {"__future__", "annotations", "datetime", "decimal", "hashlib",
               "json", "math", "re", "time", "typing", "uuid", "Decimal",
-              "Any", "ROUND_HALF_UP", "InvalidOperation"}
+              "Any", "ROUND_HALF_UP", "ROUND_FLOOR", "InvalidOperation"}
     leaves = {n.split(".")[-1] for n in _imports(pathlib.Path(CI.__file__))
               if n}
     assert leaves <= stdlib, sorted(leaves - stdlib)
