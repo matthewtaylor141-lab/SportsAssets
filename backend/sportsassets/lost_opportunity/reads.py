@@ -32,6 +32,13 @@ DECISION_COLS = (
 JSON_KEYS = ("book", "economics", "policy_decision", "pinnacle",
              "internal_model", "label")
 
+# Only a MARKET settlement establishes the contract's outcome: WON, LOST or
+# VOID_REFUND. A paper position closed at the venue's price
+# (SETTLED_AT_VENUE_PRICE, written by Xavier's management) says what that
+# position realised, not how the contract resolved, so it is never used as
+# the outcome of a refused decision (and lol_ledger's CHECK refuses it).
+SETTLEMENT_OUTCOMES = ("WON", "LOST", "VOID_REFUND")
+
 SETTLED_REFUSALS_SQL = """
     SELECT %s,
            extract(epoch FROM d.decided_at)::float8 AS decided_at,
@@ -44,6 +51,7 @@ SETTLED_REFUSALS_SQL = """
                    s.payout_per_contract, s.settled_at, s.version
               FROM paper_settlements s
              WHERE s.us_market_slug = d.us_market_slug
+               AND s.outcome IN ('WON', 'LOST', 'VOID_REFUND')
                AND s.settled_at >= d.decided_at
                AND s.settled_at <= to_timestamp($2)
              ORDER BY (s.holding_side = d.holding_side) DESC NULLS LAST,
@@ -76,6 +84,7 @@ COVERAGE_REFUSALS_SQL = """
                        s.payout_per_contract, s.settled_at
                   FROM paper_settlements s
                  WHERE s.us_market_slug = o.us_market_slug
+                   AND s.outcome IN ('WON', 'LOST', 'VOID_REFUND')
                    AND s.settled_at >= o.cycle_at
                    AND s.settled_at <= to_timestamp($2)
                  ORDER BY s.settled_at DESC, s.version DESC

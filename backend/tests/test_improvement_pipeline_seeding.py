@@ -383,6 +383,12 @@ async def test_eddie_skips_group_per_day_and_later_rows_append_evidence():
 async def test_false_refusals_seed_only_when_the_ledger_exists():
     conn, tx = await _tx()
     try:
+        if await conn.fetchval("SELECT to_regclass('lol_ledger') IS NOT NULL"):
+            # migration 220 is applied: inside this rolled-back transaction
+            # set the real (append-only) ledger aside so the scenario below
+            # starts from "no ledger" and controls every row it reads
+            await conn.execute("ALTER TABLE lol_ledger RENAME TO "
+                               "lol_ledger_set_aside_by_test")
         assert await P.seed_false_refusals(conn, now=NOW) == []
         await conn.execute(
             "CREATE TABLE lol_ledger (ledger_id text PRIMARY KEY, "

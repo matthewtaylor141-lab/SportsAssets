@@ -86,7 +86,8 @@ async def settle(conn, *, slug, side="LONG", outcome="WON", at, now):
     """The market's settlement, recorded on ANOTHER paper position (the
     refused decision has none)."""
     other = await H.new_account(conn, "lolset", now=now - 40 * DAY)
-    ppc = {"WON": 1.0, "LOST": 0.0, "VOID_REFUND": 0.5}[outcome]
+    ppc = {"WON": 1.0, "LOST": 0.0, "VOID_REFUND": 0.5,
+           "SETTLED_AT_VENUE_PRICE": 0.43}[outcome]
     return await P.settle(conn, other, group_id="paper_group_" + F.uid(),
                           slug=slug, side=side, qty=1, outcome=outcome,
                           ppc=ppc, at=at)

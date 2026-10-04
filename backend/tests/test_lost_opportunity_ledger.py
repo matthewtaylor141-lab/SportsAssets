@@ -292,6 +292,32 @@ async def _seed(conn, now):
 
 
 @pg
+async def test_a_venue_price_close_is_not_a_market_settlement():
+    """A paper position closed at the venue's price (SETTLED_AT_VENUE_PRICE)
+    is not the contract's resolution: the refused decision on that market
+    gets no ledger row from it, and the LEDGER component stays OK (one such
+    row used to fail the whole component on lol_ledger's outcome CHECK)."""
+    now = time.time()
+    async with _txn() as conn:
+        acct = await X.account(conn, now=now)
+        t = now - 3 * DAY
+        d = await X.decision(conn, acct, at=t, refusals=[CL.R_BELOW],
+                             pd=X.pd_fig(-0.1), book=X.book_rec())
+        await X.settle(conn, slug=d["slug"], outcome="SETTLED_AT_VENUE_PRICE",
+                       at=t + 6 * HOUR, now=now)
+        got = await LR.run_component(conn, now=now)
+        assert got["ran"] and got["components"]["LEDGER"] == "OK", got
+        assert await _ledger(conn, d["decision_id"]) is None
+        # ...and once the market itself settles, the decision is classified
+        await X.settle(conn, slug=d["slug"], outcome="LOST",
+                       at=t + 7 * HOUR, now=now)
+        again = await LR.run_component(conn, now=now + 60)
+        assert again["components"]["LEDGER"] == "OK", again
+        row = await _ledger(conn, d["decision_id"])
+        assert row is not None and row["settlement_outcome"] == "LOST"
+
+
+@pg
 async def test_the_runner_classifies_settled_refusals_once():
     now = time.time()
     async with _txn() as conn:
