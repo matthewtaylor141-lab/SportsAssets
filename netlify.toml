@@ -114,6 +114,23 @@
   status = 200
   force = true
 # ── end POSITION ROOMS ──────────────────────────────────────────────────
+# ── EDDIE AND SCOUT (claude/pos-agents, migration 217) ─────────────────
+# Eddie (head of execution, SHADOW ONLY) and Scout (market intelligence,
+# RESEARCH SHADOW ONLY): the same shell, framing
+# /api/command/agents/<agent>/page. Until the API serving that page is
+# released, the shell says NOT YET RELEASED (it asks before framing).
+[[redirects]]
+  from = "https://command.bettortoken.com/eddie"
+  to = "/command/agent.html"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "https://command.bettortoken.com/scout"
+  to = "/command/agent.html"
+  status = 200
+  force = true
+# ── end EDDIE AND SCOUT ───────────────────────────────────────────────
 
 [[redirects]]
   from = "https://command.bettortoken.com/*"
