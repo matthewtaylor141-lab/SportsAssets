@@ -67,7 +67,11 @@ COLLAPSE DETECTION (declared in THRESHOLDS, applied by `detect`):
                      events and ZERO at a presence stage (normalized ..
                      evaluated) -- named at the first stage where it vanished.
                      CRITICAL when that stage flowed in the baseline,
-                     WARNING when it never has.
+                     WARNING when it never has. Its FIRST LOSS (c28,
+                     `first_loss`) is the nearest earlier stage that
+                     MEASURED a count -- never an unmeasured NULL stage --
+                     with that count, carried as stage_from /
+                     previous_stage_count / detail.first_loss.
   COVERAGE_INCIDENT  (cand24) the per-league STATUS (`classify_status`):
                      provider events > 0 and an expected stage zero with no
                      later stage counting anything. Raised even below
@@ -533,6 +537,40 @@ def _flows_after(row: dict, stage: str) -> bool:
     return any((row.get(COLUMN[s]) or 0) > 0 for s in later)
 
 
+def first_loss(row: dict, stage: str) -> dict:
+    """THE FIRST LOSS behind a zero at `stage` (c28): the nearest EARLIER
+    stage that MEASURED a count, i.e. where the league's events were last
+    seen, and how many were lost between it and `stage`. A NULL stage is
+    unmeasured (R_SETTLEMENT_UNMEASURED and the like), so it can never be
+    the stage the events were last seen at -- the 2026-10-04 NCAAF alert
+    named `settlement_supported` (NULL) as its stage_from with
+    previous_stage_count null, when the events were last counted at
+    `mapped` (5). Skipped unmeasured stages are listed. Pure."""
+    i = STAGES.index(stage)
+    skipped = []
+    for prev in reversed(STAGES[:i]):
+        n = row.get(COLUMN[prev])
+        if n is None:
+            skipped.append(prev)
+            continue
+        here = row.get(COLUMN[stage])
+        return {"stage": stage, "stage_count": here, "after_stage": prev,
+                "after_count": n,
+                "lost": (None if here is None else max(int(n) - int(here), 0)),
+                "skipped_unmeasured": skipped}
+    return {"stage": stage, "stage_count": row.get(COLUMN[stage]),
+            "after_stage": None, "after_count": None, "lost": None,
+            "skipped_unmeasured": skipped}
+
+
+def first_loss_statement(row: dict, fl: dict) -> str:
+    return "FIRST LOSS %s: %s (%s) -> %s (%s)%s" % (
+        league_name(row.get("league")), fl["after_stage"], fl["after_count"],
+        fl["stage"], fl["stage_count"],
+        ("; unmeasured between: %s" % ", ".join(fl["skipped_unmeasured"])
+         if fl["skipped_unmeasured"] else ""))
+
+
 def detect(today: dict, history: list, *, th: dict = THRESHOLDS) -> list:
     """Alerts for one league's day given its prior days. Pure."""
     alerts = []
@@ -546,7 +584,8 @@ def detect(today: dict, history: list, *, th: dict = THRESHOLDS) -> list:
             if n == 0 and _flows_after(today, st):
                 continue          # later stages flowed: a ledger gap, not absence
             if n == 0:
-                prev = STAGES[STAGES.index(st) - 1]
+                fl = first_loss(today, st)
+                prev = fl["after_stage"] or STAGES[STAGES.index(st) - 1]
                 flowed = stage_flowed(history, st)
                 alerts.append({
                     "kind": "ABSENT_DOWNSTREAM", "league": league,
@@ -555,12 +594,14 @@ def detect(today: dict, history: list, *, th: dict = THRESHOLDS) -> list:
                     "severity": "CRITICAL" if flowed else "WARNING",
                     "detail": {
                         "provider_events": prov,
-                        "previous_stage_count": today.get(COLUMN[prev]),
+                        "previous_stage_count": fl["after_count"],
                         "stage_count": 0,
                         "flowed_in_baseline": flowed,
+                        "first_loss": fl,
                         "statement": (
-                            "%s: %d provider event(s); none reached %s"
-                            % (league_name(league), prov, st))}})
+                            "%s: %d provider event(s); none reached %s; %s"
+                            % (league_name(league), prov, st,
+                               first_loss_statement(today, fl)))}})
                 break
     for a, b in RATIO_PAIRS:
         pair = "%s->%s" % (a, b)
@@ -1068,17 +1109,20 @@ def incident_alert(row: dict, history: list, already: list, *,
             a.setdefault("detail", {})["coverage_status"] = S_INCIDENT
             return None
     stage = st["stage"]
-    prev = STAGES[STAGES.index(stage) - 1]
+    fl = first_loss(row, stage)
+    prev = fl["after_stage"] or STAGES[STAGES.index(stage) - 1]
     flowed = stage_flowed(history, stage)
     return {"kind": "ABSENT_DOWNSTREAM", "league": league,
             "stage_from": prev, "stage_to": stage, "ratio": 0.0,
             "baseline": None, "severity": "CRITICAL" if flowed else "WARNING",
             "detail": {"coverage_status": S_INCIDENT,
                        "provider_events": row.get("provider_events"),
-                       "previous_stage_count": row.get(COLUMN[prev]),
+                       "previous_stage_count": fl["after_count"],
                        "stage_count": 0, "flowed_in_baseline": flowed,
-                       "statement": "%s: %s" % (league_name(league),
-                                                st["reason"])}}
+                       "first_loss": fl,
+                       "statement": "%s: %s; %s" % (
+                           league_name(league), st["reason"],
+                           first_loss_statement(row, fl))}}
 
 
 VENUE_TOKENS_SQL = """
