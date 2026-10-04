@@ -1817,6 +1817,13 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
         return dict(rec, duplicate=True)
     if verdict != DP.ENTER:
         return rec
+    # THE ENTER IS RECORDED: from here its paper order is owed. The hook's
+    # decision deadline stops applying (PD.bounded_decision); the order
+    # sequence below keeps its canonical order -- execution intent, then the
+    # canonical decision intent, then the paper order read from it -- and an
+    # ENTER that still ends without an order is named by the backstop
+    # (PD.step_enter_backstop, ENTER_WITHOUT_ORDER).
+    PD.enter_recorded(ctx, did)
     # ── ONE DECISION -> ONE EXECUTION INTENT -> PAPER + ACTUAL ─────────
     # The qualified decision, not the paper order, is the authoritative
     # object. The executing process's hook (decision_hooks; installed by
@@ -2078,7 +2085,14 @@ async def decide_for_hook(conn, ctx: dict, row: dict, *,
     """The per-valuation hook's benchmark decision: guarded, bounded, never
     raises (CancelledError excepted). The context is SHARED across the
     strategies deciding this valuation (`books_by_slug`): the deadline is
-    reset per strategy, the book read is not repeated while it is current."""
+    reset per strategy, the book read is not repeated while it is current.
+
+    THE DEADLINE BOUNDS THE DECISION, NOT A RECORDED ENTER'S ORDER (P0
+    incident 2026-10-04): `PD.bounded_decision` cancels a decision cut
+    before its row is written, exactly as `wait_for` did, but once an ENTER
+    row is written its order sequence completes (up to
+    PD.ENTER_ORDER_GRACE_S more). A grace overrun is a TIMEOUT that names
+    the recorded decision; the backstop turns it into ENTER_WITHOUT_ORDER."""
     pol = _pol(pol)
     STRATEGY = pol["strategy"]                                  # noqa: N806
     t0 = time.monotonic()
@@ -2089,16 +2103,25 @@ async def decide_for_hook(conn, ctx: dict, row: dict, *,
         ctx.setdefault("books_by_slug", {})      # shared by the copies
         ctx = dict(ctx, deadline=time.monotonic() + float(timeout_s))
         ctx.pop("benchmark", None)
-        rec = await asyncio.wait_for((decide or decide_one)(
-            conn, ctx, row, pol), timeout_s)
+        fn = decide or decide_one
+        rec = await PD.bounded_decision(
+            lambda c: fn(conn, c, row, pol), ctx, timeout_s=timeout_s)
         return dict({k: rec.get(k) for k in (
             "decision_id", "verdict", "refusal", "order_id", "duplicate",
             "deferred", "strategy", "book_source", "book_age_s",
-            "cooldown_s", "retry_after_s", "retry", "selection")},
+            "cooldown_s", "retry_after_s", "retry", "selection",
+            "order_after_decision_deadline")},
             decided=not rec.get("deferred"), why=rec.get("why"),
             elapsed_s=round(time.monotonic() - t0, 3))
     except asyncio.CancelledError:
         raise
+    except PD.EnterOrderGraceExceeded as exc:
+        # THE ENTER IS RECORDED; ITS ORDER DID NOT COMPLETE IN THE GRACE.
+        return {"decided": False, "strategy": STRATEGY, "timeout": True,
+                "decision_id": exc.decision_id, "verdict": DP.ENTER,
+                "enter_recorded_without_order": True,
+                "error": "EnterOrderGraceExceeded: %s" % exc,
+                "elapsed_s": round(time.monotonic() - t0, 3)}
     except asyncio.TimeoutError:
         return {"decided": False, "strategy": STRATEGY, "timeout": True,
                 "error": "TimeoutError: the in-cycle decision exceeded its "

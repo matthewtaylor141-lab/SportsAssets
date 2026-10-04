@@ -391,6 +391,8 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
         return dict(rec, duplicate=True)
     if verdict != DP.ENTER:
         return rec
+    # THE ENTER IS RECORDED: its resting order is owed (PD.bounded_decision).
+    PD.enter_recorded(ctx, did)
     # ── THE RESTING ORDER (persisted at once; not a fill) ─────────────
     lim = float(price["limit"])
     wire = lim if side == "LONG" else round(1.0 - lim, 6)
