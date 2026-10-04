@@ -25,5 +25,6 @@ window.BETTOR_COMMAND_CONFIG = Object.assign({
   staleMs: 45000,
   autoConnect: true,
   defaultDemo: false,
-  logo: 'assets/bt-logo-full.png'
+  logo: 'brand/bettortoken-logo.png',
+  logoOnDark: 'brand/bettortoken-logo-white.png'
 }, window.BETTOR_COMMAND_CONFIG || {});

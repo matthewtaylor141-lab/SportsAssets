@@ -43,10 +43,15 @@
 <link rel="stylesheet" href="hq2-agent.css" data-hq2="agent-css">
 <link rel="stylesheet" href="hq3-live.css" data-hq3="css">
 <link rel="stylesheet" href="meeting-release.css" data-meeting="css">
+<!-- bt-brand: the one BettorToken brand source (brand/install_brand.py) -->
+<link rel="icon" href="brand/favicon.ico" sizes="any" data-brand="icon">
+<link rel="icon" type="image/png" sizes="32x32" href="brand/bettortoken-app-icon-32.png" data-brand="icon32">
+<link rel="apple-touch-icon" href="brand/bettortoken-app-icon-180.png" data-brand="touch">
+<link rel="stylesheet" href="brand/brand.css" data-brand="css">
 </head>
 <body>
 <nav aria-label="AI agents">
-  <a class="brand" href="/" title="COMMAND homepage">&#8592; COMMAND</a>
+  <a class="brand" href="/" title="COMMAND homepage">&#8592; <span class="bt-brand-mark" aria-hidden="true"></span>COMMAND</a>
   <a class="floor" href="/floor" title="BETTOR headquarters: the live trading floor">Trading floor</a>
   <a href="/derek" data-agent="derek">Derek<span class="sep"> · </span><span class="role">Discovery &amp; Entry</span></a>
   <a href="/xavier" data-agent="xavier">Xavier<span class="sep"> · </span><span class="role">Portfolio Mgmt</span></a>

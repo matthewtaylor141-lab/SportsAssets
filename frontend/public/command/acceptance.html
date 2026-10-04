@@ -12,13 +12,19 @@
   <link rel="stylesheet" href="acceptance.css">
 <link rel="stylesheet" href="hq2-brand.css" data-hq2="brand">
 <link rel="stylesheet" href="hq3-live.css" data-hq3="css">
+<!-- bt-brand: the one BettorToken brand source (brand/install_brand.py) -->
+<link rel="icon" href="brand/favicon.ico" sizes="any" data-brand="icon">
+<link rel="icon" type="image/png" sizes="32x32" href="brand/bettortoken-app-icon-32.png" data-brand="icon32">
+<link rel="apple-touch-icon" href="brand/bettortoken-app-icon-180.png" data-brand="touch">
+<link rel="stylesheet" href="brand/brand.css" data-brand="css">
 </head>
 <body class="deskbody">
   <a class="skip-link" href="#acmain">Skip to the acceptance answer</a>
 
+  <div class="bt-brand-plate" style="margin:18px 24px 0"><img class="bt-brand-logo" src="brand/bettortoken-logo-white.png" alt="BettorToken"><span class="bt-brand-rule"></span><span class="bt-brand-ctx">Release acceptance</span></div>
   <header class="deskbar">
     <div class="deskbar-brand">
-      <span class="deskmark">B</span>
+      <span class="deskmark" role="img" aria-label="BettorToken"></span>
       <span class="deskname">PM Acceptance</span>
       <span id="ac-pill" class="pill pill-grey">READING —</span>
       <span class="pill pill-blue" title="Reads the requirements design matrix, the release receipts (data/receipts/), GET /api/command/release and each requirement's readback endpoint. No control, approval or deployment path.">READ ONLY · DERIVED</span>

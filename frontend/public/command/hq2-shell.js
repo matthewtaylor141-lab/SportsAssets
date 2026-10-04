@@ -12,13 +12,13 @@
   ];
   document.body.classList.add('bt-hq2');
   var shell=document.createElement('aside'); shell.className='bt-hq2-shell';
-  shell.innerHTML='<a class="bt-hq2-logo" href="/" aria-label="BettorToken Command home">B</a>'+
+  shell.innerHTML='<a class="bt-hq2-logo" href="/" aria-label="BettorToken Command home"></a>'+
     '<nav class="bt-hq2-nav" aria-label="Command Center">'+links.map(function(x){
       return '<a href="'+x[1]+'" class="'+(page===x[0]?'active':'')+'"><span class="bt-hq2-ico">'+x[2]+'</span><span>'+x[3]+'</span></a>';
     }).join('')+'</nav><div class="bt-hq2-shell-foot"><div class="bt-hq2-system" id="bt-hq2-system" data-state="unknown"><i></i><span>READ</span></div></div>';
   document.body.appendChild(shell);
   var bar=document.createElement('header'); bar.className='bt-hq2-pagebar';
-  bar.innerHTML='<div class="bt-hq2-brandword">BETTOR <em>COMMAND</em></div><span class="sep"></span>'+
+  bar.innerHTML='<div class="bt-hq2-brandword" role="img" aria-label="BettorToken Command"></div><span class="sep"></span>'+
     '<div class="bt-hq2-page-title">'+(names[page]||'Command')+'</div>'+
     '<div class="bt-hq2-live" id="bt-hq2-live" data-state="unknown"><i></i><span>CONNECTING</span></div>';
   document.body.appendChild(bar);

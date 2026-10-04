@@ -112,5 +112,7 @@ def test_the_route_and_the_relative_references():
     assert NETLIFY.index('from = "/api/command/*"') < NETLIFY.index(
         "/command/improvements.html")
     refs = re.findall(r'(?:href|src)="([^"]+\.(?:css|js))"', HTML)
-    assert refs == ["improvements.css", "improvements.js"]
+    # the page's own files plus the one shared BettorToken brand stylesheet
+    # (brand/install_brand.py); every reference stays relative
+    assert refs == ["improvements.css", "brand/brand.css", "improvements.js"]
     assert 'name="viewport"' in HTML and 'name="robots"' in HTML

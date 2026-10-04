@@ -31,7 +31,7 @@ class PDF {
   chunks.push(bytes(xref));return new Blob([concat(chunks)],{type:'application/pdf'});
  }
 }
-async function logoImage(){return new Promise(resolve=>{const im=new Image();const timer=setTimeout(()=>resolve(null),2500);im.onload=()=>{clearTimeout(timer);try{const cv=document.createElement('canvas');cv.width=im.naturalWidth;cv.height=im.naturalHeight;const ctx=cv.getContext('2d');ctx.fillStyle='white';ctx.fillRect(0,0,cv.width,cv.height);ctx.drawImage(im,0,0);const b=atob(cv.toDataURL('image/jpeg',.96).split(',')[1]);resolve({w:cv.width,h:cv.height,bytes:Uint8Array.from(b,c=>c.charCodeAt(0))});}catch{resolve(null);}};im.onerror=()=>{clearTimeout(timer);resolve(null);};im.src=root.BETTOR_COMMAND_CONFIG?.logo||'assets/bt-logo-full.png';});}
+async function logoImage(){return new Promise(resolve=>{const im=new Image();const timer=setTimeout(()=>resolve(null),2500);im.onload=()=>{clearTimeout(timer);try{const cv=document.createElement('canvas');cv.width=im.naturalWidth;cv.height=im.naturalHeight;const ctx=cv.getContext('2d');ctx.fillStyle='white';ctx.fillRect(0,0,cv.width,cv.height);ctx.drawImage(im,0,0);const b=atob(cv.toDataURL('image/jpeg',.96).split(',')[1]);resolve({w:cv.width,h:cv.height,bytes:Uint8Array.from(b,c=>c.charCodeAt(0))});}catch{resolve(null);}};im.onerror=()=>{clearTimeout(timer);resolve(null);};im.src=root.BETTOR_COMMAND_CONFIG?.logo||'brand/bettortoken-logo.png';});}
 function save(blob,filename){const u=URL.createObjectURL(blob);const a=document.createElement('a');a.href=u;a.download=filename;document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(u),60000);}
 async function create(snapshot,kind='Management overview'){
  if(!snapshot)throw new Error('No snapshot is available to report.');

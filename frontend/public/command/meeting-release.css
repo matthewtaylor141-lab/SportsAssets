@@ -1,32 +1,7 @@
 /* BETTOR · MEETING RELEASE
    Emergency visual convergence for Command. Presentation only. */
 
-/* REAL BRAND ASSETS */
-.bt-hq2 .bt-hq2-logo{
-  font-size:0!important;color:transparent!important;
-  background-color:#075dc3!important;
-  background-image:url("assets/brand/bettortoken-mark-white-transparent.png")!important;
-  background-size:76%!important;background-position:center!important;background-repeat:no-repeat!important;
-}
-.bt-hq2 .bt-hq2-brandword{
-  display:flex!important;align-items:center!important;gap:10px!important;font-size:0!important
-}
-.bt-hq2 .bt-hq2-brandword::before{
-  content:"";display:block;width:28px;height:28px;
-  background:url("assets/brand/bettortoken-mark-white-transparent.png") center/contain no-repeat;
-}
-.bt-hq2 .bt-hq2-brandword::after{
-  content:"BETTOR COMMAND";font:800 12px/1 Inter,system-ui,sans-serif;letter-spacing:.16em;color:#e9f1fa
-}
-.fl-loading-mark,.boot-mark{
-  font-size:0!important;color:transparent!important;background-color:transparent!important;
-  background-image:url("assets/brand/bettortoken-mark-blue-transparent.png")!important;
-  background-position:center!important;background-repeat:no-repeat!important;background-size:82%!important;
-}
-.fl-brand::before{
-  content:"";width:24px;height:24px;display:inline-block;vertical-align:middle;
-  background:url("assets/brand/bettortoken-mark-white-transparent.png") center/contain no-repeat;
-}
+/* brand marks: brand/brand.css (the one BettorToken brand source) */
 
 /* RESTORED REAL 3D FLOOR: maximize the existing Three.js world rather than
    the abstract HQ2 replacement. */

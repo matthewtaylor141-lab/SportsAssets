@@ -12,12 +12,17 @@
 <link rel="stylesheet" href="hq2-brand.css" data-hq2="brand">
 <link rel="stylesheet" href="hq3-live.css" data-hq3="css">
 <link rel="stylesheet" href="meeting-release.css" data-meeting="css">
+<!-- bt-brand: the one BettorToken brand source (brand/install_brand.py) -->
+<link rel="icon" href="brand/favicon.ico" sizes="any" data-brand="icon">
+<link rel="icon" type="image/png" sizes="32x32" href="brand/bettortoken-app-icon-32.png" data-brand="icon32">
+<link rel="apple-touch-icon" href="brand/bettortoken-app-icon-180.png" data-brand="touch">
+<link rel="stylesheet" href="brand/brand.css" data-brand="css">
 </head>
 <body class="fl">
 <a class="fl-skip" href="#roster">Skip to the agent list</a>
 <div class="fl-screen">
 <header class="fl-top">
-  <a class="fl-brand" href="/" title="Back to the COMMAND homepage"><span aria-hidden="true">&#8592;</span> BETTOR<span class="fl-brand-sub">COMMAND</span></a>
+  <a class="fl-brand" href="/" title="Back to the COMMAND homepage"><span aria-hidden="true">&#8592;</span> <span class="fl-brand-word" role="img" aria-label="BettorToken"></span><span class="fl-brand-sub">COMMAND</span></a>
   <div class="fl-title">
     <span class="fl-eyebrow">Headquarters</span>
     <h1>Trading Floor</h1>
@@ -42,7 +47,7 @@
     </div>
     <div class="fl-counts" id="fl-counts" aria-label="Desks by state"></div>
     <div class="fl-tip" id="fl-tip" role="tooltip" hidden></div>
-    <div class="fl-loading" id="fl-loading"><div class="fl-loading-mark">B</div><span>Opening the floor…</span></div>
+    <div class="fl-loading" id="fl-loading"><div class="fl-loading-mark" role="img" aria-label="BettorToken"></div><span>Opening the floor…</span></div>
     <p class="fl-hint" id="fl-hint">Drag to look around · click a desk to focus · click it again to open the workspace</p>
     <div class="fl-map" id="fl-map" hidden></div>
   </section>

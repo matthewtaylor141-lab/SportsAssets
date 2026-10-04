@@ -23,6 +23,15 @@ import {clone as cloneSkinned} from './team-demo/assets/SkeletonUtils.js';
 import {AvatarController, resolveBones, resolveBlendshapes, resolveVisemes,
         buildJoints, armsDown} from './team-demo/assets/cc_avatar.js';
 
+// BettorToken brand images (frontend/public/command/brand/) for canvas
+// textures: local files only; a texture keeps its plain state if one fails.
+function brandImage(src, draw) {
+  const im = new Image(); im.decoding = 'async';
+  im.onload = () => { try { draw(im); } catch (e) { /* keep the plain texture */ } };
+  im.src = src;
+}
+
+
 const MODELS = './team-demo/assets/models/';
 export const CREDITS = {
   derek: 'Rocketbox Business_Male_03 (MIT, © 2020 Microsoft)',
@@ -199,24 +208,29 @@ export async function createFloor(host, opts) {
     const m = mc.getContext('2d'); m.translate(512, 512);
     for (const [r, w, a] of [[500, 3, .5], [455, 1.5, .35], [300, 1, .22]]) { m.beginPath(); m.arc(0, 0, r, 0, Math.PI * 2); m.strokeStyle = 'rgba(150,205,240,' + a + ')'; m.lineWidth = w; m.stroke(); }
     for (let i = 0; i < 72; i++) { const an = i / 72 * Math.PI * 2; m.beginPath(); m.moveTo(Math.cos(an) * 462, Math.sin(an) * 462); m.lineTo(Math.cos(an) * (i % 6 ? 475 : 492), Math.sin(an) * (i % 6 ? 475 : 492)); m.strokeStyle = 'rgba(150,205,240,.35)'; m.lineWidth = 2; m.stroke(); }
-    m.fillStyle = 'rgba(205,232,250,.85)'; m.font = '600 120px Inter, system-ui, sans-serif'; m.textAlign = 'center'; m.textBaseline = 'middle';
-    m.fillText('BETTOR', 0, -10); m.font = '500 34px Inter, system-ui, sans-serif'; m.fillStyle = 'rgba(160,200,225,.7)'; m.fillText('H E A D Q U A R T E R S', 0, 92);
+    // the BettorToken mark (brand/), drawn once it loads; the rings show until then
+    m.font = '500 34px Inter, system-ui, sans-serif'; m.fillStyle = 'rgba(160,200,225,.7)'; m.textAlign = 'center'; m.textBaseline = 'middle';
+    m.fillText('B E T T O R T O K E N', 0, 300);
     const mt = new THREE.CanvasTexture(mc); mt.colorSpace = THREE.SRGBColorSpace;
+    brandImage('brand/bettortoken-mark-white.png', (im) => { m.globalAlpha = 0.9; m.drawImage(im, -230, -270, 460, 460); m.globalAlpha = 1; mt.needsUpdate = true; });
     const med = new THREE.Mesh(new THREE.CircleGeometry(3.1, 96), new THREE.MeshBasicMaterial({map: mt, transparent: true, opacity: 0.55, depthWrite: false}));
     med.rotation.x = -Math.PI / 2; med.position.set(0, 0.004, ARC_Z); room.add(med);
 
     // the central wall
     const wall = new THREE.Mesh(new THREE.BoxGeometry(26, 8.2, 0.4), new THREE.MeshStandardMaterial({color: '#0b1520', metalness: 0.15, roughness: 0.8}));
     wall.position.set(0, 4.1, -8.8); wall.receiveShadow = true; room.add(wall);
-    const trim = new THREE.Mesh(new THREE.BoxGeometry(26, 0.04, 0.05), new THREE.MeshBasicMaterial({color: '#5fb4e8'}));
+    const trim = new THREE.Mesh(new THREE.BoxGeometry(26, 0.04, 0.05), new THREE.MeshBasicMaterial({color: '#2f86ff'}));
     trim.position.set(0, 0.6, -8.58); room.add(trim);
     const trim2 = trim.clone(); trim2.position.y = 7.7; room.add(trim2);
     // signage
     const sc = document.createElement('canvas'); sc.width = 2048; sc.height = 160;
-    const s = sc.getContext('2d'); s.fillStyle = '#dbeefa'; s.font = '600 92px Inter, system-ui, sans-serif'; s.textBaseline = 'middle';
-    s.fillText('BETTOR', 40, 82); const bw = s.measureText('BETTOR').width;
-    s.fillStyle = '#7fb6d8'; s.font = '400 46px Inter, system-ui, sans-serif'; s.fillText('·  HEADQUARTERS  ·  TRADING FLOOR', 80 + bw, 86);
+    const s = sc.getContext('2d'); s.textBaseline = 'middle';
     const st = new THREE.CanvasTexture(sc); st.colorSpace = THREE.SRGBColorSpace;
+    // the full BettorToken lockup (brand/), then the room's name beside it
+    brandImage('brand/bettortoken-logo-white.png', (im) => {
+      const h = 132, w = im.naturalWidth * h / im.naturalHeight; s.drawImage(im, 30, 14, w, h);
+      s.fillStyle = '#8fc0ff'; s.font = '400 46px Inter, system-ui, sans-serif'; s.fillText('·  TRADING FLOOR', 70 + w, 84);
+      st.needsUpdate = true; });
     const sign = new THREE.Mesh(new THREE.PlaneGeometry(12.8, 1), new THREE.MeshBasicMaterial({map: st, transparent: true}));
     sign.position.set(-4.6, 7.05, -8.58); room.add(sign);
     // side walls with vertical light ribs and a night skyline beyond glass
@@ -228,7 +242,7 @@ export async function createFloor(host, opts) {
     const skyT = new THREE.CanvasTexture(sky); skyT.colorSpace = THREE.SRGBColorSpace;
     const backdrop = new THREE.Mesh(new THREE.CylinderGeometry(30, 30, 16, 64, 1, true, Math.PI * 0.25, Math.PI * 1.5), new THREE.MeshBasicMaterial({map: skyT, side: THREE.BackSide, fog: false}));
     backdrop.position.set(0, 6, 2); room.add(backdrop);
-    const ribMat = new THREE.MeshBasicMaterial({color: '#3f7fae'});
+    const ribMat = new THREE.MeshBasicMaterial({color: '#1f6fe0'});
     for (const sx of [-1, 1]) for (let i = 0; i < 6; i++) {
       const rib = new THREE.Mesh(new THREE.BoxGeometry(0.06, 6.5, 0.06), ribMat); rib.position.set(sx * (14 + i * 0.4), 3.25, -8 + i * 4.2); room.add(rib);
       const col = new THREE.Mesh(new THREE.BoxGeometry(0.5, 7.5, 0.5), new THREE.MeshStandardMaterial({color: '#0d1822', metalness: .1, roughness: .85})); col.position.set(sx * (14.3 + i * 0.4), 3.75, -8 + i * 4.2); col.castShadow = !phone; room.add(col);
