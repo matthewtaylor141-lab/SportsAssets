@@ -745,6 +745,19 @@ def substitute(monkeypatch, *, slugs, odds_by_sport, received_at=None,
     monkeypatch.setattr(loop, "fetch_sport_catalogue", fake_catalogue)
     monkeypatch.setattr(loop, "fetch_odds", fake_odds)
     monkeypatch.setattr(loop, "fetch_scores", fake_scores)
+
+    # R30A · THE COVERAGE SCHEDULER SKIPS A COMPETITION WITH NO VENUE EVENT IN
+    # THE NEXT 24 H, and the captures these tests replay are dated 2026-09-29
+    # (MLB `aec-mlb-cws-hou-2026-09-29`) while the cycle runs on the real
+    # clock -- so the venue's own catalogue correctly shows them as past, and
+    # MLB would no longer be fetched. Before R30A MLB was fetched every cycle
+    # whatever its board said (240 cycles in 7 days with no event in 24 h).
+    # The subject here is identity, not scheduling, so the horizon is stated
+    # UNREAD, exactly as on a failed read: the competition stays in demand.
+    async def _horizon_unread(conn):
+        return {"read": False, "by_token": {}, "source": "substituted",
+                "error": "SUBSTITUTED_BY_THE_TEST"}
+    monkeypatch.setattr(loop, "venue_horizon", _horizon_unread)
     monkeypatch.setattr(loop, "_fetch_schedule_blocking",
                         lambda d: {"ok": True, "url": "substituted",
                                    "payload": {"dates": []}})
