@@ -948,7 +948,11 @@ async def coverage_payload(conn, *, tz: str = ALERT_TIMEZONE, days: int = 7,
 #                           everywhere; since R30A the completed-game policy
 #                           prices the NFL tie from cited evidence and the
 #                           strict policy still refuses settlement by name --
-#                           bettor_nfl_settlement.STRICT_POLICY_MISSING)
+#                           bettor_nfl_settlement.STRICT_POLICY_MISSING; NCAAF
+#                           the same since the P0 incident: the completed-game
+#                           policy reads the cited college contract and the
+#                           strict refusal names each payout difference --
+#                           bettor_ncaaf_settlement.STRICT_CODES)
 #   EXPLICITLY_UNSUPPORTED  not in the collector's scope by its declared maps
 #                           (ext_pinnacle_loop), the reason named
 #   COVERAGE_INCIDENT       provider events > 0 and an expected stage zero

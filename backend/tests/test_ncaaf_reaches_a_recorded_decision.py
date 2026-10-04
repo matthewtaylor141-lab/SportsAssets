@@ -33,7 +33,10 @@ the pair a school-only match confuses), re-dated to a kickoff ahead of the
 test clock. Prices and the book are SYNTHETIC. No gate, threshold or rule is
 changed by the test: settlement for football is not established and the
 book currency is not established, exactly as in production, and the
-decisions record those refusals by name.
+decisions record those refusals by name. (P0 incident: the college money
+line's de-vig admission and cited completed-game terms now exist; the strict
+policy's settlement refusal stays, with its precise clauses behind it, and
+the book currency still seals every row for calibration.)
 """
 from __future__ import annotations
 
@@ -386,15 +389,23 @@ async def test_ncaaf_reaches_a_recorded_paper_decision_never_silence(
             assert v["record_purpose"] == "CALIBRATION_ONLY", v["refusals"]
             assert v["admissible"] is False
             for code in (loop.R_BOOK_CURRENCY_NOT_ESTABLISHED,
-                         "MARKET_NOT_IN_SUPPORTED_SET",
                          # the captured documents CONFLICT on abandonment
                          "VOID_ABANDONMENT_RULE_CONFLICTS_WITH_BOOK_RULE"):
                 assert code in v["refusals"], (code, v["refusals"])
             # ...and AGREE on overtime, so that rule is established
             assert "OVERTIME_RULE_NOT_ESTABLISHED" not in v["refusals"]
-            # THE MEASUREMENT ACCRUES: the book's two-outcome set is on the
-            # row although no probability is derived from it
-            assert v["probability"] is None
+            # PIN UPDATED IN THE P0 INCIDENT (NCAAF stream). The measurement
+            # this file said "accrues" was taken: production's priced set on
+            # every cfb row was two outcomes, no Draw (research-sql run
+            # 37241503567, N3/N4), so the college money line is admitted to
+            # the de-vig by league (SUPPORTED_BY_LEAGUE cfb) and
+            # MARKET_NOT_IN_SUPPORTED_SET no longer applies; the probability
+            # is derived from the same two-outcome set, conditional on NO_TIE.
+            assert "MARKET_NOT_IN_SUPPORTED_SET" not in v["refusals"], \
+                v["refusals"]
+            assert v["expected_outcomes"] == 2
+            assert v["probability"] is not None and \
+                0.0 < float(v["probability"]) < 1.0, v["refusals"]
             assert len(H.j(v["raw_odds"])) == 2 and v["outcomes_priced"] == 2
 
         # 3 · Derek recorded a decision for every one -- ENTER or NAMED REFUSE
@@ -411,6 +422,18 @@ async def test_ncaaf_reaches_a_recorded_paper_decision_never_silence(
                 assert x["refusal"], x
             assert x["us_market_slug"] in slugs
             assert H.j(x["label"])["competition"] == "CFB"
+        # P0 INCIDENT (NCAAF stream): the strict refusal is never a generic
+        # bucket. SETTLEMENT_NOT_SUPPORTED stays (the cited texts pay
+        # postponement, suspension, a tied result without a winner, a forfeit
+        # and a venue change differently), and each of those clauses rides
+        # behind it by name, in the cited order.
+        from sportsassets import bettor_ncaaf_settlement as NCS
+        for x in derek:
+            refs = list(x["refusals"] or [])
+            assert x["refusal"] == "SETTLEMENT_NOT_SUPPORTED", refs
+            i = refs.index("SETTLEMENT_NOT_SUPPORTED")
+            assert refs[i + 1:i + 1 + len(NCS.STRICT_CODES)] == \
+                list(NCS.STRICT_CODES), refs
         print("NCAAF_PAPER_DECISIONS",
               sorted((x["strategy"], x["us_market_slug"], x["verdict"],
                       x["refusal"]) for x in decs))

@@ -242,6 +242,50 @@ REFUSAL_WORDS = {
     "NFL_SEASON_PHASE_NOT_ESTABLISHED_AS_REGULAR_SEASON": (
         "the game is not established as a regular-season game (preseason, "
         "playoffs, Pro Bowl or an uncited season are never traded)"),
+    # P0 incident · the NCAAF money line (bettor_ncaaf_settlement): each
+    # names the clause or premise of the cited comparison that is missing
+    "NCAAF_VENUE_RULES_TEXT_NOT_RECORDED": ("the venue's college-football "
+                                            "rules text was not recorded"),
+    "NCAAF_VENUE_WINNER_CLAUSE_NOT_THE_CITED_COLLEGE_FOOTBALL_GAME": (
+        "the venue's text does not settle on the winner of a named College "
+        "Football game, as the cited listing does"),
+    "NCAAF_VENUE_OVERTIME_CLAUSE_NOT_THE_CITED_ONE": (
+        "the venue's text does not state the cited 'Overtime is included if "
+        "played.'"),
+    "NCAAF_VENUE_TIE_CLAUSE_NOT_THE_CITED_REVIEW_CLAUSE": (
+        "the venue's tie wording is not the cited review clause (missing, "
+        "varied, or contradicted by another tie clause)"),
+    "NCAAF_VENUE_POSTPONEMENT_CLAUSE_NOT_THE_CITED_ONE": (
+        "the venue's postponement wording is not the cited clause"),
+    "NCAAF_VENUE_RESULT_SOURCE_CLAUSE_NOT_THE_CITED_ONE": (
+        "the venue's result-source wording is not the cited clause"),
+    "NCAAF_VENUE_TEXT_CARRIES_AN_UNCITED_CLAUSE": (
+        "the venue's text carries a clause outside the cited five"),
+    "NCAAF_NO_TIE_RULE_EVIDENCE_NOT_HELD": (
+        "the cited rule that a completed college game is played to a winner "
+        "is not held"),
+    "NCAAF_BOOK_RULES_CAPTURE_NOT_HELD": ("Pinnacle's cited rules capture is "
+                                          "not held"),
+    "NCAAF_BOOK_LINE_PRICES_A_DRAW_NOT_THE_TWO_WAY_GAME_LINE": (
+        "Pinnacle's line prices a draw (the regulation market), not the "
+        "two-way game line"),
+    "NCAAF_FIXTURE_DATE_NOT_CONSISTENT_WITH_THE_VENUE_SLUG": (
+        "the game's date does not match the venue's own date for it"),
+    "NCAAF_FIXTURE_DATE_NOT_READABLE_FROM_THE_VENUE_SLUG": (
+        "the venue slug carries no readable game date"),
+    "NCAAF_STRICT_POSTPONEMENT_PAYOUTS_DIFFER": (
+        "a postponed game pays differently: Pinnacle voids, the venue grades "
+        "a rescheduled game or pays the last fair price"),
+    "NCAAF_STRICT_SUSPENSION_PAYOUTS_DIFFER": (
+        "a suspended game pays differently on the two sides"),
+    "NCAAF_STRICT_TIED_RESULT_VENUE_PAYOUT_NOT_STATED": (
+        "the venue states only a review, no payout, for a tied result "
+        "declared without a winner"),
+    "NCAAF_STRICT_FORFEIT_PAYOUTS_DIFFER": (
+        "a forfeit pays differently: Pinnacle voids, the venue follows the "
+        "governing body"),
+    "NCAAF_STRICT_VENUE_CHANGE_VENUE_PAYOUT_NOT_STATED": (
+        "the venue states no payout for a relocated game; Pinnacle voids"),
     "FOOTBALL_LINE_PRICES_A_DRAW_NOT_THE_TWO_WAY_GAME_LINE": (
         "Pinnacle's football line prices a draw (the regulation market)"),
     "VENUE_PROBABILITY_CONVERSION_REFUSED": (

@@ -457,8 +457,15 @@ async def decide_one(conn, ctx: dict, row: dict) -> dict:
                if not cand.get(k)]
     if missing or side is None:
         refusals.append(DP.R_IDENTITY)
-    if cand["settlement"].get("compatibility") == "INCOMPATIBLE":
+    # THE PRECISE CLAUSES RIDE BEHIND THE CATEGORY (P0 incident, NCAAF):
+    # where the venue and book texts are cited, the strict refusal names each
+    # clause the strict policy lacks (paper_brief reports the first one after
+    # the category); a cited payout difference refuses even if a row recorded
+    # COMPATIBLE. Every other contract: unchanged.
+    precise = DP.strict_settlement_reasons(cand)
+    if cand["settlement"].get("compatibility") == "INCOMPATIBLE" or precise:
         refusals.append(DP.R_SETTLEMENT)
+        refusals.extend(r for r in precise if r not in refusals)
     pin = _pinnacle(cand, at=at, max_age=float(ent["pinnacle_max_age_s"]))
     # WHERE AND WHEN THIS DECISION WAS FORMED (audits the freshness rule):
     # at the valuation instant inside the cycle, or later by the pass.

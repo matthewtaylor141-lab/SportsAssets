@@ -106,6 +106,7 @@ from .. import decision_hooks as DH
 from .. import bettor_paper_simulator as SIM
 from .. import bettor_settlement_terms as ST
 from .. import bettor_nfl_settlement as NFL
+from .. import bettor_ncaaf_settlement as NCAAF
 from . import derek_policy as DP
 from . import paper_derek as PD
 
@@ -611,9 +612,13 @@ def contract_match(cand: dict, row: dict, *, not_applied=()) -> dict:
     # 3 · SETTLEMENT TERMS (evaluate's C_SETTLEMENT)
     st = dict(cand.get("settlement") or {})
     blockers = [str(b) for b in (st.get("blockers") or [])]
+    precise = DP.strict_settlement_reasons(cand)
     s_ok = (st.get("compatibility") == "COMPATIBLE"
             and st.get("overall_established") is True
-            and not lane["settlement"] and not blockers)
+            and not lane["settlement"] and not blockers
+            # a payout difference the cited texts state (NCAAF) is never
+            # overridden by a recorded COMPATIBLE
+            and not precise)
     put(DP.C_SETTLEMENT, s_ok, R_SETTLEMENT,
         ("venue and book settlement terms compared COMPATIBLE and every "
          "rule established") if s_ok else (
@@ -631,6 +636,10 @@ def contract_match(cand: dict, row: dict, *, not_applied=()) -> dict:
     # A row written before blockers were recorded says that instead.
     if not s_ok:
         for b in (blockers or ["SETTLEMENT_BLOCKERS_NOT_RECORDED_ON_THIS_ROW"]):
+            if b not in refusals:
+                refusals.append(b)
+        # and, where the texts are cited (NCAAF), every clause by name
+        for b in precise:
             if b not in refusals:
                 refusals.append(b)
     # 4 · THE LANE QUALIFIED THE PROBABILITY ITSELF (de-vig, mapping, books)
@@ -684,6 +693,16 @@ GP_SOCCER_90 = ("NINETY_MINUTES_PLUS_STOPPAGE_EXCLUDING_EXTRA_TIME_AND_"
 #: assumed away.
 GP_FOOTBALL_NFL = ("FULL_GAME_INCLUDING_OVERTIME_TIE_AFTER_OVERTIME_IS_A_"
                    "SEPARATELY_PRICED_STATE")
+#: P0 INCIDENT, THE NCAAF MONEY LINE. Both sides grade the game INCLUDING
+#: overtime (book: the same American Football sentence, which covers NCAA;
+#: venue: "Overtime is included if played."), and a completed college game is
+#: played to a winner (the cited no-tie rule, bettor_ncaaf_settlement), so
+#: there is no tie state to price: the book's two-way price IS the contract's
+#: value. A DIFFERENT period from the NFL's, on purpose -- the NFL contract
+#: pays 0.50 on a reachable tie and this one has no reachable tie -- so a
+#: college text can never satisfy the NFL template, nor the reverse.
+GP_FOOTBALL_NCAAF = ("FULL_GAME_INCLUDING_OVERTIME_PLAYED_TO_A_WINNER_NO_"
+                     "TIE_STATE_IN_A_COMPLETED_GAME")
 
 R_GP_TEXT_ABSENT = "VENUE_RULES_TEXT_NOT_RECORDED_ON_THE_VALUATION_ROW"
 R_GP_UNKNOWN = "ORDINARY_GRADING_PERIOD_NOT_ESTABLISHED"
@@ -731,11 +750,12 @@ VENUE_GRADING_TEMPLATES = {
 def book_grading_period(family, league=None) -> dict | None:
     """Pinnacle's completed-game grading for the money line, cited.
 
-    FOOTBALL IS THE NFL ONLY (R30A), and the league is read from the venue's
-    own slug: the college board's listing words its tie differently ("will
-    not resolve automatically") and a college game cannot end tied, so it is
-    a different contract -- left exactly where it was (no completed-game
-    terms) rather than borrowed from the NFL's."""
+    FOOTBALL IS READ PER LEAGUE, from the venue's own slug: the NFL (R30A)
+    and the college board (P0 incident, NCAAF) are DIFFERENT contracts -- the
+    college listing words its tie differently ("will not resolve
+    automatically") and a completed college game cannot end tied -- so each
+    has its own cited grading and neither borrows the other's. Any other
+    football league has none (NO_COMPLETED_GAME_TERMS_FOR_THIS_SPORT)."""
     if family == "baseball":
         t = ST.BOOK_TERMS[("baseball", "h2h", ST.CTX_PRE_GAME)]
         return {"period": GP_BASEBALL,
@@ -769,11 +789,71 @@ def book_grading_period(family, league=None) -> dict | None:
                           "tie voids the bet and its two-way price is "
                           "conditional on no tie (converted for the venue's "
                           "0.50 tie payout by bettor_nfl_settlement)")}
+    if family == "football" and str(league or "").lower() == NCAAF.LEAGUE:
+        # THE SAME PAGE AND THE SAME SENTENCES AS THE NFL (Pinnacle's American
+        # Football rules apply "to NFL, NCAA, UFL, and CFL unless a specific
+        # league is mentioned"; its only NCAA market rules are season wins and
+        # conference futures), re-read by the NCAAF stream byte-identical.
+        # WITHOUT THE CAPTURE THERE IS NO BOOK GRADING TO CITE, and the match
+        # refuses by that name -- never by the generic family code, never by
+        # a crash on the missing retrieval.
+        bk = NCAAF.book_rules_held()
+        if not bk["held"]:
+            return {"period": None, "refusal": bk["refusal"],
+                    "why": bk["why"], "source_url": NCAAF.PINNACLE_RULES_URL}
+        t = ST.BOOK_TERMS[("football", "h2h", ST.CTX_PRE_GAME)]
+        return {"period": GP_FOOTBALL_NCAAF,
+                "regulation": t[ST.C_FULL], "overtime": t[ST.C_OVERTIME],
+                "quote": NCAAF.Q_BOOK_OVERTIME,
+                "leagues_quote": NCAAF.Q_BOOK_LEAGUES,
+                "tie_quote": NCAAF.Q_BOOK_TIE,
+                "source_url": NCAAF.PINNACLE_RULES_URL,
+                "retrieved_at": NCAAF.PINNACLE_CAPTURES[-1]["retrieved_at"],
+                "run_id": NCAAF.PINNACLE_CAPTURES[-1]["run_id"],
+                "page_sha256": NCAAF.PINNACLE_PAGE_SHA256,
+                "basis": ("Pinnacle's Game-period money line grades the game "
+                          "including overtime; it offers no draw price, so a "
+                          "tie would void the bet -- and a completed college "
+                          "game is played to a winner (the cited no-tie rule), "
+                          "so its two-way price is the contract's value, "
+                          "unconverted (bettor_ncaaf_settlement.convert)")}
     return None
 
 
-def venue_grading_period(family, prose) -> dict:
-    """The venue contract's completed-game grading, from its own text."""
+def venue_grading_period(family, prose, league=None) -> dict:
+    """The venue contract's completed-game grading, from its own text.
+
+    THE COLLEGE BOARD IS READ CLAUSE BY CLAUSE, NOT BY TEMPLATE (P0 incident,
+    NCAAF). Its text must be EXACTLY the five cited clauses
+    (bettor_ncaaf_settlement.venue_clauses: each fixed clause once, the
+    winner-of-a-named-College-Football-game sentence once, nothing else), so
+    an appended or variant clause -- the NFL review's appended-tie-clause
+    case -- is a named refusal (the first missing or extra clause), never a
+    keyword match. Every other family and league reads its template as
+    before; the football template stays the NFL's."""
+    if (str(family or "") == "football"
+            and str(league or "").lower() == NCAAF.LEAGUE):
+        vc = NCAAF.venue_clauses(prose)
+        if vc["ok"]:
+            return {"period": GP_FOOTBALL_NCAAF, "refusal": None,
+                    "matched": sorted(vc["clauses"])}
+        if vc["refusals"] == [NCAAF.R_VENUE_TEXT_ABSENT]:
+            return {"period": None, "refusal": R_GP_TEXT_ABSENT,
+                    "clause_refusals": list(vc["refusals"]),
+                    "why": vc.get("why")}
+        # NOT ESTABLISHED, and a MISMATCH only where the text says so: a
+        # regulation-only or overtime-excluding phrase (the same phrases the
+        # football template refuses) is a different grading period; any
+        # other deviation from the cited clauses establishes nothing.
+        import re as _re
+        flat = " ".join(str(prose or "").split()).lower()
+        bad = [p for p in VENUE_GRADING_TEMPLATES["football"]["none_of"]
+               if _re.search(p, flat)]
+        return {"period": ("NOT_" + GP_FOOTBALL_NCAAF) if bad else None,
+                "refusal": R_GP_MISMATCH if bad else R_GP_UNKNOWN,
+                "matched_excluding": bad,
+                "clause_refusals": list(vc["refusals"]),
+                "why": vc.get("why"), "uncited": vc.get("uncited")}
     tpl = VENUE_GRADING_TEMPLATES.get(str(family or ""))
     flat = " ".join(str(prose or "").split()).lower()
     if tpl is None:
@@ -825,7 +905,17 @@ def completed_game_match(cand: dict, row: dict, *,
     extra refusal, never the only one); and its tie
     can be priced -- the venue states the cited $0.50 and the book's line is
     the two-way game line -- which `venue_conversion` then carries to
-    `apply_venue_conversion`."""
+    `apply_venue_conversion`.
+
+    NCAAF (P0 incident), the same design with the college contract's own
+    premises, each a named refusal: the venue's text is EXACTLY the cited
+    clauses (the first missing or extra clause is the code); its date reads
+    the same in the slug, the text and the kickoff's America/New_York day;
+    the book's line is the two-way game line (no Draw); the book capture and
+    the cited no-tie rule are held. No phase window is needed: the cited rule
+    is stated for college football without one. `venue_conversion` then
+    carries the identity conversion (a completed college game cannot end
+    tied) to `apply_venue_conversion`, which re-checks every premise."""
     authority = pinnapi_sole_authority(cand, row)
     base = contract_match(cand, row, not_applied=(
         (R_THIN_OUTCOME,) if authority["applies"] else ()))
@@ -854,11 +944,12 @@ def completed_game_match(cand: dict, row: dict, *,
     league = NFL.league_of_slug(cand.get("us_market_slug")
                                 or row.get("us_market_slug"))
     book = book_grading_period(fam, league)
-    venue = venue_grading_period(fam, scmp.get("venue_rules_text"))
+    venue = venue_grading_period(fam, scmp.get("venue_rules_text"), league)
     gp_ok = (book is not None and venue.get("refusal") is None
              and venue.get("period") == book["period"])
     put("ordinary_completion_grading_period", gp_ok,
-        (R_FAMILY if book is None else (venue.get("refusal")
+        (R_FAMILY if book is None else (book.get("refusal")
+                                         or venue.get("refusal")
                                          or R_GP_MISMATCH)),
         ("book and venue both grade the ordinarily completed game as %s"
          % (book or {}).get("period")) if gp_ok else (
@@ -924,6 +1015,60 @@ def completed_game_match(cand: dict, row: dict, *,
                             "book_outcome_names": names,
                             "phase": phase.get("phase"),
                             "fixture_date": fdate}
+    ncaaf = fam == "football" and NCAAF.is_ncaaf(fam, league)
+    if ncaaf:
+        cat = dict(catalogue or {})
+        slug = cand.get("us_market_slug") or row.get("us_market_slug")
+        prose = scmp.get("venue_rules_text")
+        # 1 · THE VENUE'S TEXT IS EXACTLY THE CITED CLAUSES. The grading
+        # check above refuses an unestablished period generically; this one
+        # names WHICH clause is missing, varied or extra.
+        vc = NCAAF.venue_clauses(prose)
+        put("ncaaf_venue_text_is_exactly_the_cited_clauses", vc["ok"],
+            (vc["refusals"] or [NCAAF.R_VENUE_UNCITED])[0],
+            ("the venue states exactly the five cited clauses (winner of the "
+             "named College Football game, overtime included, the tied-result "
+             "review, postponement, result source)") if vc["ok"]
+            else "; ".join(vc.get("why") or []),
+            clause_refusals=list(vc["refusals"]),
+            uncited=vc.get("uncited"))
+        # every further clause rides behind the first, by name (an appended
+        # tie clause is both a tie-clause and an uncited-clause defect)
+        for r in vc["refusals"][1:]:
+            if r not in refusals:
+                refusals.append(r)
+        # 2 · THE DATE, as the NFL's: slug == text == kickoff's ET day
+        fdate = NCAAF.fixture_date(slug=slug, venue_rules_text=prose,
+                                   kickoff_epoch=cat.get("game_start_epoch"))
+        put("ncaaf_fixture_date_matches_the_venue_slug",
+            fdate.get("refusal") is None,
+            fdate.get("refusal") or NCAAF.R_DATE_INCONSISTENT,
+            ("event date %s: %s" % (fdate.get("event_date"),
+                                    fdate.get("basis")))
+            if fdate.get("refusal") is None else fdate.get("why"),
+            fixture_date=fdate)
+        # 3 · NO TIE TO PRICE: the book's two-way game line, the book capture
+        # and the cited no-tie rule, each held -- or the named premise.
+        names = list((DP._j(row.get("raw_odds")) or {}).keys())
+        bk = NCAAF.book_rules_held()
+        nt = NCAAF.no_tie_rule()
+        tie_refusal = (NCAAF.R_BOOK_PRICES_DRAW if NCAAF._draw_named(names)
+                       else (None if bk["held"] else bk["refusal"])
+                       or (None if nt["held"] else nt["refusal"]))
+        put("ncaaf_no_tie_state_by_the_cited_rule", tie_refusal is None,
+            tie_refusal,
+            ("a completed college game is played to a winner (%s); the book's "
+             "line is the two-way game line, so its price is the contract's "
+             "value" % nt.get("source")) if tie_refusal is None
+            else (nt.get("why") or bk.get("why")
+                  or "the book's line prices a draw"),
+            no_tie_rule={k: nt.get(k) for k in (
+                "held", "rule_quote", "source_url", "retrieved_at", "run_id",
+                "sha256")})
+        venue_conversion = {"sport_family": fam, "league": league,
+                            "venue_rules_text": prose,
+                            "book_outcome_names": names,
+                            "fixture_date": fdate}
     exceptional = {
         "status": "DISCLOSED_RESEARCH_RISK_NOT_SETTLEMENT_COMPATIBILITY",
         "compatibility_recorded": scmp.get("compatibility"),
@@ -940,6 +1085,13 @@ def completed_game_match(cand: dict, row: dict, *,
         # ordinary (priced); postponement / suspension / venue change are the
         # exceptional states, probabilities UNMEASURED.
         exceptional["nfl_settlement_states"] = NFL.states_record()
+    if ncaaf:
+        # THE COLLEGE STATES, PAYOUT BY PAYOUT, with their citations: the
+        # ordinary wins, the tie UNREACHABLE in a completed game by the cited
+        # rule, and the exceptional states (postponement, suspension, a tied
+        # result declared without a winner, forfeit, overturned result, venue
+        # change) with probabilities UNMEASURED.
+        exceptional["ncaaf_settlement_states"] = NCAAF.states_record()
     return {"established": not refusals, "refusals": refusals,
             "checks": checks, "exceptional_terms": exceptional,
             "probability_authority": authority,
@@ -960,9 +1112,33 @@ def apply_venue_conversion(pin: dict, match: dict) -> str | None:
     own number stays on the record as `p_book_conditional_no_tie`; the age,
     the freshness verdict and the 30 s limit are untouched (the conversion
     changes what the number means, never how old it is). Every other sport:
-    nothing happens. Returns the refusal to append, or None. Pure."""
+    nothing happens. Returns the refusal to append, or None. Pure.
+
+    NCAAF (P0 incident): bettor_ncaaf_settlement.convert re-checks every
+    premise (the exact cited clauses, the two-way line, the book capture, the
+    no-tie rule) and returns the book's number UNCHANGED -- a completed
+    college game cannot end tied -- or a named refusal with no number."""
     vc = (match or {}).get("venue_conversion")
     if not vc or pin.get("p") is None:
+        return None
+    if str(vc.get("league") or "").lower() == NCAAF.LEAGUE:
+        got = NCAAF.convert(pin["p"], sport_family=vc.get("sport_family"),
+                            league=vc.get("league"),
+                            venue_rules_text=vc.get("venue_rules_text"),
+                            book_outcome_names=vc.get("book_outcome_names"))
+        pin["venue_conversion"] = {k: v for k, v in got.items() if k in (
+            "applies", "version", "p", "refusal", "why", "p_is",
+            "p_book_conditional_no_tie", "tie_probability_completed",
+            "formula", "derivation", "venue_clauses", "no_tie_rule",
+            "book_tie_rule", "book_overtime_rule")}
+        if not got.get("applies"):
+            return None
+        if got.get("refusal") or got.get("p") is None:
+            pin["p_is"] = "BOOK_CONDITIONAL_NO_TIE_UNCONVERTED"
+            return got.get("refusal") or R_VENUE_CONVERSION
+        pin["p_book_conditional_no_tie"] = pin["p"]
+        pin["p"] = float(got["p"])
+        pin["p_is"] = got.get("p_is") or NCAAF.P_IS_EQUIVALENT
         return None
     got = NFL.convert(pin["p"], sport_family=vc.get("sport_family"),
                       venue_rules_text=vc.get("venue_rules_text"),
@@ -1009,6 +1185,31 @@ def held_nfl_conversion(contract) -> dict | None:
         "venue_rules_text": c.get("venue_rules_text"),
         "book_outcome_names": list((DP._j(c.get("raw_odds")) or {}).keys()),
         "phase": phase.get("phase"), "season_phase": phase}}
+
+
+def held_ncaaf_conversion(contract) -> dict | None:
+    """THE CONVERSION A HELD (OR RESTING) NCAAF CONTRACT IS RE-MEASURED WITH
+    (P0 incident), in the shape `apply_venue_conversion` reads -- or None when
+    the contract is not a college money line. The conversion is the identity,
+    but it is still applied: it re-reads the contract's own text against the
+    cited clauses and refuses by name when a premise is missing, so a held
+    contract is never measured on a reading the entry could not have used.
+    Pure."""
+    c = contract if contract is not None else {}
+    if not NCAAF.is_ncaaf(c.get("sport_family"),
+                          NCAAF.league_of_slug(c.get("us_market_slug"))):
+        return None
+    return {"venue_conversion": {
+        "sport_family": "football", "league": NCAAF.LEAGUE,
+        "venue_rules_text": c.get("venue_rules_text"),
+        "book_outcome_names": list((DP._j(c.get("raw_odds")) or {}).keys())}}
+
+
+def held_venue_conversion(contract) -> dict | None:
+    """The held-contract conversion for whichever football contract this is
+    (NFL or NCAAF), or None for every other contract. Xavier's measure and
+    the maker's re-check read this one function. Pure."""
+    return held_nfl_conversion(contract) or held_ncaaf_conversion(contract)
 
 
 def exceptional_scenarios(*, cand: dict, row: dict, qty: float,
@@ -2429,8 +2630,10 @@ async def xavier_measure(conn, ctx: dict, *, pos: dict,
     # value at the worst end of the cited tie-rate interval -- the same
     # conversion the entry used (apply_venue_conversion). The entry-time
     # measure (d.p_pinnacle) is already on that scale and is never converted
-    # twice.
-    nfl_conv = (held_nfl_conversion(contract)
+    # twice. A HELD NCAAF POSITION (P0 incident) takes its own conversion --
+    # the identity, re-checked against the contract's cited clauses -- so a
+    # reading the entry could not have used is never used to manage it.
+    nfl_conv = (held_venue_conversion(contract)
                 if contract is not None
                 and pol["kind"] in COMPLETED_GAME_KINDS else None)
 
@@ -2442,8 +2645,12 @@ async def xavier_measure(conn, ctx: dict, *, pos: dict,
         if why:
             return dict(reading, p=None, stale=True,
                         venue_conversion=pin_like.get("venue_conversion"),
-                        why="the held NFL contract's tie could not be "
-                            "priced: %s" % why)
+                        why=("the held NCAAF contract's reading could "
+                             "not be converted: %s" % why)
+                        if (nfl_conv["venue_conversion"].get("league")
+                            == NCAAF.LEAGUE)
+                        else ("the held NFL contract's tie could not be "
+                              "priced: %s" % why))
         return dict(reading, p=pin_like["p"],
                     p_pinnacle=pin_like["p"],
                     p_book_conditional_no_tie=pin_like.get(

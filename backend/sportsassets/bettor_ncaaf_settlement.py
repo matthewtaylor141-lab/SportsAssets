@@ -136,10 +136,13 @@ BOOK_QUOTES = (Q_BOOK_LEAGUES, Q_BOOK_OVERTIME, Q_BOOK_NOT_STARTED,
 
 
 def _book_cite(quote, where):
-    c = PINNACLE_CAPTURES[-1]
+    # NO CAPTURE, NO RETRIEVAL CLAIMED: a withdrawn capture must reach the
+    # named refusal (NCAAF_BOOK_RULES_CAPTURE_NOT_HELD in book_rules_held),
+    # never crash on the way there or borrow a retrieval it does not have.
+    c = PINNACLE_CAPTURES[-1] if PINNACLE_CAPTURES else {}
     return {"source": "Pinnacle betting rules -- %s" % where,
             "source_url": PINNACLE_RULES_URL,
-            "retrieved_at": c["retrieved_at"], "run_id": c["run_id"],
+            "retrieved_at": c.get("retrieved_at"), "run_id": c.get("run_id"),
             "page_sha256": PINNACLE_PAGE_SHA256, "quote": quote}
 
 
@@ -165,7 +168,7 @@ VENUE_CAPTURES = (
      "slugs": ("aec-cfb-frest-washst-2026-10-03",
                "aec-cfb-bayl-arzst-2026-10-03", "aec-cfb-cin-arz-2026-10-03"),
      "held_in": "tests/fixtures/pmus_cfb_listing_2026_10_03.json"},
-    {"what": ("production external_valuations.settlement_comparison."
+    {"what": ("production valuation rows' settlement_comparison."
               "venue_rules_text, every cfb row, masked wording groups"),
      "retrieved_at": "2026-10-04T22:54:12Z", "run_id": 37241503567,
      "job_id": 111550976439,
