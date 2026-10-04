@@ -882,7 +882,8 @@ def xavier_panel(*, group_id: str, kind: str, assessment: dict | None,
     for k in ("evidence_expires_at", "thesis_expires_at"):
         e = _epoch((thesis or {}).get(k))
         if e is not None and e < now:
-            warnings.append({"what": k.upper() + "_PASSED",
+            warnings.append({"what": k.replace("_expires_at", "").upper()
+                             + "_EXPIRY_PASSED",
                              "detail": iso(e),
                              "source": "xavier_entry_theses." + k})
     due = None if at is None else at + float(cadence_s)
@@ -1323,8 +1324,8 @@ def build_rooms(raw: dict) -> list:
     out = []
     for key, rm in rooms.items():
         out.append(_finish_room(rm, raw, ident_of, now))
-    out.sort(key=lambda r: (not r["active"], r["identity"].get("event_slug")
-                            or r["group_key"]))
+    out.sort(key=lambda r: (not r["active"], r["kind"] != K_EVT,
+                            r["identity"].get("event_slug") or r["group_key"]))
     return out
 
 
@@ -1601,6 +1602,7 @@ def summarize(room: dict) -> dict:
         "grouping": room["grouping"],
         "ungrouped_reason": room["ungrouped_reason"],
         "event": room["event"],
+        "outcome_labels": room.get("outcome_labels"),
         "teams": room["game_state"].get("teams") or [],
         "legs": len(room["legs"]),
         "open_legs": sum(1 for lg in room["legs"] if lg["open"]),
