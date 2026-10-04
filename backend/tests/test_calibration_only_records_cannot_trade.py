@@ -641,6 +641,21 @@ READERS = {
     # descriptive name list with no SQL behind it: selects nothing, reads no
     # row, sizes and places nothing
     "agents/agent_context.py": ("CONTEXT_SOURCE_NAME_LIST_PROSE_ONLY", 2),
+    # (R30C) THE MEASURED SETTLEMENT-EXCEPTION TABLE reads the outcome join's
+    # columns (outcome_basis, settlement_read) and the recorded per-condition
+    # settlement comparison of BOTH purposes deliberately: it measures how
+    # often the VENUE settled a valued market other than ordinarily, and a
+    # calibration-only row's market settles exactly like an entry row's. It
+    # selects no candidate, sizes and places nothing; its cost rides on the
+    # canonical decision as shadow evidence (tests/
+    # test_settlement_exception_risk.py, test_risk_evidence_authority.py).
+    "settlement_exception_risk.py": (
+        "SETTLEMENT_OUTCOME_MEASUREMENT_BOTH_PURPOSES_NEVER_SELECTS", 5),
+    # (R30C) THE SETTLEMENT-EXCEPTION COMPONENT of a canonical decision reads
+    # the venue rules text of the decision's OWN valuation row, BY ID: the
+    # decision was already taken on that row; nothing is selected.
+    "canonical_components.py": (
+        "BY_ID_OF_THE_DECISIONS_OWN_VALUATION_RULES_TEXT_ONLY", 1),
 }
 
 

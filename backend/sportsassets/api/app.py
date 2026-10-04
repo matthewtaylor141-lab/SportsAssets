@@ -765,6 +765,15 @@ try:
     app.include_router(_command_live_parity_router)
 except ImportError:
     log.warning("live parity: api.command_live_parity not loaded", exc_info=True)
+# ── R30C RISK EVIDENCE: /api/command/settlement-exception-risk. GET only,
+# COMMAND auth, READ ONLY transaction; shadow information -- no cap, haircut
+# or ENTER rule changes.
+try:
+    from .command_risk_evidence import router as _command_risk_router
+    app.include_router(_command_risk_router)
+except ImportError:
+    log.warning("risk evidence: api.command_risk_evidence not loaded",
+                exc_info=True)
 # ── PROFITABILITY VALIDATION PER SLEEVE: /api/command/profitability/
 # validation (?since=). GET only, COMMAND auth, READ ONLY transaction with a
 # statement timeout; the verdict reads the INVESTMENT sleeve's FORWARD

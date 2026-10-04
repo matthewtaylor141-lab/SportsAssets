@@ -883,7 +883,8 @@ async def canonical_decision(conn, *, did, strategy, version, cand, side, sized,
         from . import canonical_components as CC
         comps = await CC.at_decision(conn, decision=decision,
                                      book_row=book_row, cost_usd=cost, p=p,
-                                     wire=sized.get("wire"), now=at)
+                                     wire=sized.get("wire"), now=at,
+                                     contract=cand)
         pinnacle = cand.get("pinnacle") or {}
         intent = build_decision_intent(
             decision_id=did, strategy=strategy, strategy_version=version,
@@ -899,7 +900,14 @@ async def canonical_decision(conn, *, did, strategy, version, cand, side, sized,
                 "probability": p,
                 "probability_authority": pin.get("probability_authority"),
                 "parameters_version": (params or {}).get("version")
-                if isinstance(params, dict) else None},
+                if isinstance(params, dict) else None,
+                # R30C: the expected settlement-exception cost against the
+                # completed-game assumption. SHADOW evidence for Eddie /
+                # Allie (R30B); it gates nothing and is not one of the
+                # parity ledger's evidence ids (`evidence_ids`).
+                "settlement_exception_risk": comps.get(
+                    "settlement_exception_risk") or unavailable(
+                        "COMPONENT_NOT_COMPUTED")},
             opportunity_score=comps["opportunity_score"],
             derek=CC.derek_component(
                 verdict=verdict, policy_version=version,

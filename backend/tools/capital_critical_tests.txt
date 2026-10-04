@@ -827,3 +827,9 @@ tests/test_command_release_authority.py
 # append-only tables; bundles differ per agent and never widen the
 # registry (Karen / Scout / Eddie boundaries); no voice is borrowed.
 tests/test_agent_identity_api_authority.py
+# R30C SETTLEMENT-EXCEPTION RISK: the measured exception table (the venue's own
+# settlements as the outcome join and the paper ledger wrote them; exact
+# Clopper-Pearson / Wilson upper bounds; unknown is never zero; external base
+# rates only with citation, count and denominator) and its cost on the
+# canonical decision's evidence, which gates nothing (same ENTER, order, size).
+tests/test_settlement_exception_risk.py
