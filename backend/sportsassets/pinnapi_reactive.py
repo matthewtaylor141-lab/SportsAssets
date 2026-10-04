@@ -84,21 +84,35 @@ class Scheduler:
         ttl = HELD_SEED_TTL_S if self._is_held(eid) else self.seed_ttl
         return 0 <= self.clock() - seed['registered_at'] <= ttl
 
-    def register(self, event, *, sport_key, family, received_at):
-        # Registration is called only AFTER competition confirmation.
+    def register(self, event, *, sport_key, family, received_at,
+                 native=False):
+        """Seed one fixture. Called after competition confirmation (the
+        metered cycle) or after a MATCHED PinnAPI-native discovery receipt
+        (`native`, pinnapi_discovery). A native registration never replaces
+        a live seed the metered cycle registered for the same fixture: that
+        seed's event carries independent books that corroborate the price.
+        Returns what happened, by name."""
         hit, why = P.match_event(self.cache, event, family)
         if why:
             self.counts[why] += 1
-            return
+            return why
         if len(json.dumps(event, default=str)) > 16384:
             self.counts['SEED_TOO_LARGE'] += 1
-            return
+            return 'SEED_TOO_LARGE'
         eid = hit[0]
+        old = self.seeds.get(eid)
+        if (native and old is not None and self._seed_live(eid, old)
+                and not (old.get('event') or {}).get('pinnapi_native')):
+            self.counts['NATIVE_KEPT_METERED_SEED'] += 1
+            return 'NATIVE_KEPT_METERED_SEED'
+        if native:
+            self.counts['NATIVE_SEEDED'] += 1
         self.seeds[eid] = dict(event=copy.deepcopy(event), sport_key=sport_key,
                                family=family, received_at=received_at,
                                registered_at=self.clock())
         self.seeds.move_to_end(eid)
         self._evict_seeds()
+        return 'SEEDED' if eid in self.seeds else 'SEED_EVICTED'
 
     def _evict_seeds(self):
         while len(self.seeds) > self.seed_cap:
@@ -289,7 +303,8 @@ def request_held_reevaluation(slug) -> dict:
 
 def register(event, **kwargs):
     if ACTIVE is not None:
-        ACTIVE.register(event, **kwargs)
+        return ACTIVE.register(event, **kwargs)
+    return None
 
 
 def start(pool, *, cycle):

@@ -194,7 +194,8 @@ def evaluate(*, contract, quote, market_state, execution_estimate, size,
             "team alone"),
         "raw_odds": val.get("raw_odds"),
         # THE PROVIDER'S OWN INSTANT, EVEN WHEN THE DE-VIG REFUSED FIRST
-        # (P0 incident, migration 261). `devig.valuation` sets observed_at
+        # (P0 incident root cause RC5 of the fair-value segment; no schema
+        # change). `devig.valuation` sets observed_at
         # only after its support, book, outcome-set and odds checks, so a row
         # it refused earlier (football's MARKET_NOT_IN_SUPPORTED_SET) carried
         # NULL -- and the one-per-observation index coalesced every such row

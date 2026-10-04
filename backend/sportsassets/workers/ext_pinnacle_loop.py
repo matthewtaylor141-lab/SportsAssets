@@ -7480,6 +7480,8 @@ async def cycle(conn, *, stream_seed=None) -> dict:
     # cycle cluster on one or two dates; asking per candidate would be the
     # same answer many times over.
     fixture_cache: dict = {}
+    # venue event slug -> its fixed event key (`sticky_event_key`), per cycle
+    fixture_keys: dict = {}
 
     # ── SERVICING FIRST, BEFORE ANY ENTRY-SIDE GATE ─────────────────
     #
@@ -8087,6 +8089,17 @@ async def cycle(conn, *, stream_seed=None) -> dict:
                                   received_at=received_at)
             elif (quote or {}).get("reference_input", {}).get("provider") != "pinnapi.com/raw-websocket":
                 tally["WS_REFERENCE_NOT_USABLE"] = tally.get("WS_REFERENCE_NOT_USABLE", 0) + 1
+                # WHICH WS REFUSAL (P0 incident RC7): the fallback carries
+                # it when there was one; with none (a PinnAPI-native seed
+                # has no other provider) the read is asked again for its
+                # reason, so the event never reads as "no Pinnacle".
+                _ws_why = (((quote or {}).get("reference_input") or {})
+                           .get("fallback_reason")
+                           or pinnapi_read_refusal(event, family=family,
+                                                   at=time.time()))
+                _ws_code = "WS_REFERENCE_NOT_USABLE:%s" % _ws_why
+                tally[_ws_code] = tally.get(_ws_code, 0) + 1
+                _step_refuse(_ws_code)
                 continue
             if quote is None:
                 tally["NO_PINNACLE_ON_EVENT"] = \
@@ -8127,8 +8140,18 @@ async def cycle(conn, *, stream_seed=None) -> dict:
                     _first["our_processing_s"])
 
             # ── the venue contract, exactly or not at all ───────────
-            mapped = vmap.map_event(home=quote["home"], away=quote["away"],
-                                    markets=markets)
+            # A PINNAPI-NATIVE EVENT (pinnapi_discovery) was matched to ONE
+            # venue event by its structured participants: the date-blind
+            # global catalogue is not consulted at all, and the venue's own
+            # resolver is asked for THAT event only (every check of its
+            # still runs; an event outside its window refuses by name).
+            _native = native_identity_of(event)
+            if _native is not None:
+                mapped = {"mapped": False, "refusals": [R_GLOBAL_NOT_CONSULTED],
+                          "pinnapi_native": dict(_native)}
+            else:
+                mapped = vmap.map_event(home=quote["home"],
+                                        away=quote["away"], markets=markets)
             ident = None
             if not mapped["mapped"]:
                 # ── THE VENUE'S OWN CATALOGUE, WHEN THE GLOBAL ONE HAS NO ROW ──
@@ -8150,7 +8173,8 @@ async def cycle(conn, *, stream_seed=None) -> dict:
                         commence_time=quote.get("commence_time"),
                         family=family, now=time.time(),
                         competition=sport_key,
-                        league_tokens=venue_league_tokens(sport_key))
+                        league_tokens=league_tokens_for(sport_key, event),
+                        event_slug=(_native or {}).get("venue_event_slug"))
                 if vn is not None and vn.get("ok"):
                     replaced = list(mapped["refusals"])
                     mapped = venue_native_mapping(vn, replaced=replaced,
@@ -8159,6 +8183,8 @@ async def cycle(conn, *, stream_seed=None) -> dict:
                     _venue_native_took_it(replaced)
                 else:
                     for code in mapped["refusals"]:
+                        if code == R_GLOBAL_NOT_CONSULTED:
+                            continue        # not a refusal: not asked
                         tally[code] = tally.get(code, 0) + 1
                         _step_refuse(code)
                     if vn is not None:
@@ -8240,6 +8266,23 @@ async def cycle(conn, *, stream_seed=None) -> dict:
                         "refusal": code,
                         "why": _sanitize(ident.get("why") or "", limit=200)})
                 continue
+
+            # ── ONE FIXTURE, ONE EVENT KEY (P0 incident; migration 261) ──
+            # A venue-native contract's fixture is keyed by its event key,
+            # and a fixture may now be discovered by either provider. The
+            # key is the first one recorded for this VENUE event, fixed once
+            # in venue_fixture_event_keys, so the fixture rails never see
+            # one fixture as two (see `sticky_event_key`).
+            if mapped.get("mapped_by") == vnat.MAPPED_BY_VENUE_NATIVE:
+                _sk = await sticky_event_key(
+                    conn, venue_event_slug=(ident.get("venue_native")
+                                            or {}).get("event_slug"),
+                    proposed=quote.get("event_id"), cache=fixture_keys)
+                if (_sk.get("event_key") is not None
+                        and str(_sk["event_key"]) != str(quote.get("event_id"))):
+                    quote = dict(quote, event_id=_sk["event_key"],
+                                 provider_event_id=quote.get("event_id"),
+                                 fixture_event_key=_sk)
 
             # ── LEVER A · SKIP WHAT IS ALREADY PAST THE LIMIT ───────
             #

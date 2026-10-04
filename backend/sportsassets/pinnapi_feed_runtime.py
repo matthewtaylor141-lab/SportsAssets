@@ -42,6 +42,7 @@ provider-stamp->receipt distribution.
 from __future__ import annotations
 
 import asyncio
+import collections
 import json
 import logging
 import math
@@ -117,8 +118,11 @@ R_SCOPE_NOT_AN_ID = "SPORT_ID_NOT_AN_INTEGER"
 
 _STATE: dict = {"owner": None, "task": None, "beat": None, "pool": None,
                 "census": None, "runtime_id": None, "held": None,
-                "scope": None}
+                "scope": None, "discovery": None}
 CENSUS_S = 60.0
+#: PinnAPI-native discovery (pinnapi_discovery) rides the census cadence:
+#: one bounded catalogue read per CENSUS_S, under its own timeout
+DISCOVERY_TIMEOUT_S = 10.0
 #: held_moneyline is the only decision read; no order path reads the feed
 DECISION_EFFECT = "XAVIER_HELD_MEASURE_ONLY (read-only, held positions)"
 
@@ -206,6 +210,9 @@ def digest() -> dict:
     d["coverage_census"] = _STATE.get("census")
     d["c1_decision_effect"] = DECISION_EFFECT
     d["scope"] = _STATE.get("scope")
+    from . import pinnapi_discovery as PD
+    d["native_discovery"] = (PD.digest(_STATE["discovery"])
+                             if _STATE.get("discovery") else None)
     from . import pinnapi_held as PH
     d["held_priority_targets"] = PH.WATCH.status()
     return d
@@ -257,6 +264,11 @@ def _capped(d: dict) -> str:
     if cen:
         cen["by_sport_family_phase_state"] = "TRUNCATED_FOR_SIZE"
         d["coverage_census"] = cen
+    disc = dict(d.get("native_discovery") or {})
+    if disc:
+        disc["by_sport_league_state"] = "TRUNCATED_FOR_SIZE"
+        disc["receipt_sample"] = "TRUNCATED_FOR_SIZE"
+        d["native_discovery"] = disc
     d["heartbeat_truncated"] = True
     s = json.dumps(d, default=str)
     if len(s) <= HEARTBEAT_MAX_BYTES:
@@ -294,6 +306,39 @@ async def _census_once(pool) -> dict:
     return out
 
 
+async def _discovery_once(pool) -> dict:
+    """PINNAPI-NATIVE DISCOVERY (R30A RC2): every subscribed fixture the
+    feed holds, matched to the venue's own events with a receipt each
+    (pinnapi_discovery), and every MATCHED fixture seeded in the reactive
+    scheduler -- so a PinnAPI price change is evaluated whether or not the
+    metered provider ever listed the competition. A fixture the metered
+    cycle already seeded keeps that seed (its other books corroborate).
+    Read-only; places nothing."""
+    from . import pinnapi_discovery as PD
+    from . import pinnapi_primary as P
+    from . import pinnapi_reactive as RX
+    o = _STATE.get("owner")
+    t0 = time.time()
+    if o is None or not o.cache.authority.synced:
+        return {"skipped": "FEED_NOT_SYNCED", "computed_at": t0}
+    async with pool.acquire() as c:
+        rows = [dict(r) for r in await c.fetch(
+            PD.venue_events_sql(o.sport_ids))]
+    out = PD.discover(o.cache.events, rows, sport_ids=o.sport_ids)
+    reg = collections.Counter()
+    for ev in out["seeds"]:
+        fam = ev["pinnapi_native"]["family"]
+        if fam not in P.SPORTS:
+            reg["FAMILY_NOT_PRICED_BY_THE_PRIMARY_SELECTOR"] += 1
+            continue
+        reg[RX.register(ev, sport_key=PD.sport_key_for(fam), family=fam,
+                        received_at=t0, native=True) or "NO_SCHEDULER"] += 1
+    out["registered"] = dict(reg)
+    out["computed_at"] = t0
+    out["took_ms"] = round((time.time() - t0) * 1000)
+    return out
+
+
 async def _beat_loop(pool):
     last_census = 0.0
     while True:
@@ -313,6 +358,14 @@ async def _beat_loop(pool):
             except Exception as exc:                            # noqa: BLE001
                 _STATE["census"] = {"error": type(exc).__name__,
                                     "detail": str(exc)[:200]}
+            try:
+                async with asyncio.timeout(DISCOVERY_TIMEOUT_S):
+                    _STATE["discovery"] = await _discovery_once(pool)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:                            # noqa: BLE001
+                _STATE["discovery"] = {"error": type(exc).__name__,
+                                       "detail": str(exc)[:200]}
         try:
             await _write_heartbeat(pool, dict(digest(), beat_at=time.time()))
         except asyncio.CancelledError:
@@ -403,7 +456,7 @@ async def shutdown_default(wait_s: float = 8.0) -> dict:
         final_status = "UNAVAILABLE:" + type(exc).__name__
         log.warning("pinnapi terminal heartbeat unavailable: %s", type(exc).__name__)
     _STATE.update(owner=None, task=None, beat=None, pool=None, runtime_id=None,
-                  census=None, held=None, scope=None)
+                  census=None, held=None, scope=None, discovery=None)
     return {"verdict": verdict, "terminal_heartbeat": final_status}
 
 
