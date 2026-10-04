@@ -35,8 +35,8 @@ for (const [label, vw, vh] of [["desktop", 1440, 900], ["phone", 390, 844]].filt
                scrollWidth: de.scrollWidth, clientWidth: de.clientWidth,
                overflowers: [...document.querySelectorAll("body *")].map((el) => {
                  const r = el.getBoundingClientRect();
-                 return { r: Math.round(r.right), w: Math.round(r.width), sel: el.tagName.toLowerCase() + (el.id ? "#" + el.id : "") + (typeof el.className === "string" && el.className ? "." + el.className.trim().split(/\s+/).slice(0, 3).join(".") : "") };
-               }).filter((o) => o.r > de.clientWidth + 1).sort((a, b) => b.r - a.r).slice(0, 12),
+                 let clipped = false; for (let a = el.parentElement; a && a !== document.body; a = a.parentElement) { const ox = getComputedStyle(a).overflowX; if (ox !== "visible") { clipped = true; break; } } return { clipped, r: Math.round(r.right), w: Math.round(r.width), sel: el.tagName.toLowerCase() + (el.id ? "#" + el.id : "") + (typeof el.className === "string" && el.className ? "." + el.className.trim().split(/\s+/).slice(0, 3).join(".") : "") };
+               }).filter((o) => o.r > de.clientWidth + 1 && !o.clipped).sort((a, b) => b.r - a.r).slice(0, 12),
                shadowLabels: (document.body.innerText.match(/SHADOW/g) || []).length,
                liveWord: (document.body.innerText.match(/\bLIVE\b/g) || []).length };
     }).catch((e) => ({ error: String(e).slice(0, 200) }));
