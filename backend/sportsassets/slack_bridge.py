@@ -227,6 +227,48 @@ async def publish_pos_posts(conn):
    if await conn.fetchval("SELECT 1 FROM agent_slack_delivery WHERE agent=$1 AND team_id=$2 AND source_key=$3",agent,cfg['team'],source):continue
    await conn.execute("INSERT INTO agent_slack_delivery(delivery_id,agent,team_id,channel_id,source_key,answer,state) VALUES($1,$2,$3,$4,$5,$6,'READY') ON CONFLICT DO NOTHING",delivery_id(agent,cfg['team'],source),agent,cfg['team'],cfg['workroom'],source,text)
 
+IMPROVE_POSTS_PER_PASS=2
+IMPROVE_POSTS_PER_HOUR=12
+IMPROVE_WINDOW_H=6
+
+async def publish_improvement_posts(conn):
+ """THE #agent-workroom DIGEST OF THE IMPROVEMENT PIPELINE (migration 221):
+ one evidence-linked line per STAGE TRANSITION (improve_events.is_transition)
+ -- never for a repeated stage, never when nothing changed -- at most
+ IMPROVE_POSTS_PER_PASS per pass and IMPROVE_POSTS_PER_HOUR per hour, from
+ the last IMPROVE_WINDOW_H hours (an older transition is not backfilled).
+ Each line goes out under the agent that recorded the transition, through
+ the existing per-agent path: Karen / Eddie / Scout content only under their
+ own dedicated token (their source-key prefixes), a runner, human or
+ engineering transition reported by Audrey naming who recorded it. Nothing
+ is queued for an agent whose Slack identity is not configured."""
+ if await conn.fetchval("SELECT to_regclass('improve_events')") is None:return
+ if await conn.fetchval("SELECT count(*) FROM agent_slack_delivery WHERE state IN ('QUEUED','WORKING','READY','SENDING')")>=QUEUE_CAP-3:return
+ sent=await conn.fetchval("SELECT count(*) FROM agent_slack_delivery WHERE source_key ~ '(^|:)improve:' AND created_at>now()-interval '1 hour'")
+ budget=min(IMPROVE_POSTS_PER_PASS,IMPROVE_POSTS_PER_HOUR-int(sent or 0))
+ if budget<=0:return
+ from .agents import improvement_stages as IS
+ rows=await conn.fetch("SELECT e.event_id,e.item_id FROM improve_events e WHERE e.is_transition AND e.at>now()-make_interval(hours=>$1) ORDER BY e.event_id LIMIT 50",IMPROVE_WINDOW_H)
+ for r in rows:
+  if budget<=0:return
+  it=dict(await conn.fetchrow("SELECT * FROM improve_items WHERE item_id=$1",r['item_id']))
+  evs=[dict(x) for x in await conn.fetch("SELECT * FROM improve_events WHERE item_id=$1 AND event_id<=$2 ORDER BY event_id",r['item_id'],r['event_id'])]
+  for x in evs:
+   for k in ('body','source_ref','evidence_refs'):x[k]=decode(x[k]) if x[k] is not None else None
+  it['evidence_refs']=decode(it['evidence_refs'])
+  ev=evs[-1];agent=IS.slack_agent(ev)
+  if agent in DEDICATED:
+   if not dedicated_identity(agent)['ok']:continue
+   source=DEDICATED[agent]+'improve:'+str(ev['event_id'])
+  else:
+   source='improve:'+str(ev['event_id'])
+  cfg=settings(agent)
+  if not cfg['token'] or not cfg['team'] or not cfg['workroom'] or cfg['workroom'] not in cfg['channels']:continue
+  if await conn.fetchval("SELECT 1 FROM agent_slack_delivery WHERE agent=$1 AND team_id=$2 AND source_key=$3",agent,cfg['team'],source):continue
+  text=IS.slack_post(it,ev,IS.next_required(dict(it,stage=ev['stage']),evs))
+  await conn.execute("INSERT INTO agent_slack_delivery(delivery_id,agent,team_id,channel_id,source_key,answer,message_id,state) VALUES($1,$2,$3,$4,$5,$6,$7,'READY') ON CONFLICT DO NOTHING",delivery_id(agent,cfg['team'],source),agent,cfg['team'],cfg['workroom'],source,text,it['item_id'])
+  budget-=1
+
 def impersonation(job):
  """A refusal code when sending `job` would put words in one bot's mouth
  under another bot's token; None when it may go."""
@@ -257,6 +299,9 @@ async def claim(conn):
   try:
    async with conn.transaction():await publish_pos_posts(conn)
   except Exception:pass  # Eddie's / Scout's posts never block the bridge
+  try:
+   async with conn.transaction():await publish_improvement_posts(conn)
+  except Exception:pass  # the improvement digest never blocks the bridge
   row=await conn.fetchrow("SELECT * FROM agent_slack_delivery WHERE (state IN ('QUEUED','READY') OR (state='WORKING' AND lease_until<now())) AND attempts<3 ORDER BY created_at,delivery_id LIMIT 1 FOR UPDATE SKIP LOCKED")
   if not row:return None
   token=uuid.uuid4().hex

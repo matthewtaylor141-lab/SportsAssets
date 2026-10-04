@@ -767,3 +767,12 @@ tests/test_position_rooms_authority.py
 # with a bounded statement timeout, SELECT-only SQL, and imports no order,
 # venue, ledger, paper or funded module.
 tests/test_command_floor_authority.py
+# Improvement pipeline (claude/pos-improve, migration 221): the bounded
+# self-improvement ledger. The runner has no order / deploy / merge /
+# network / process path and writes only improve_*; the database refuses
+# self-approval, a skipped or backward stage, a protected item without two
+# independent reviews and a human, and a CONTROLLED_RELEASE without a human
+# approver and the exact-SHA gate receipt; GET /api/command/improvements
+# (+ /{id}) is GET only, session-authenticated and READ ONLY.
+tests/test_improvement_pipeline_authority.py
+tests/test_improvement_pipeline_db.py
