@@ -364,6 +364,17 @@ async function boot() {
     core.pulse = new THREE.Mesh(new THREE.RingGeometry(0.96, 1, 128), new THREE.MeshBasicMaterial({color: new THREE.Color('#8fb0ff').multiplyScalar(2), transparent: true, opacity: 0, depthWrite: false}));
     core.pulse.rotation.x = -Math.PI / 2; core.pulse.position.y = 0.02; scene.add(core.pulse);
     core.pulseT = 1; core.lastChange = null;
+    // the house wordmark inlaid in the floor on the visitors' side of the core
+    {
+      const wc = document.createElement('canvas'); wc.width = 2048 * TEX; wc.height = 320 * TEX;
+      const w = wc.getContext('2d'), k = wc.width / 2048;
+      w.textAlign = 'center'; w.fillStyle = 'rgba(190,210,240,.9)';
+      w.font = '300 ' + (190 * k) + 'px Inter, system-ui, sans-serif'; w.fillText('B E T T O R', 1024 * k, 200 * k);
+      w.font = '600 ' + (40 * k) + 'px Inter, system-ui, sans-serif'; w.fillStyle = 'rgba(150,180,220,.8)'; w.fillText('C A P I T A L   ·   H E A D Q U A R T E R S', 1024 * k, 290 * k);
+      const wt = new THREE.CanvasTexture(wc); wt.colorSpace = THREE.SRGBColorSpace; wt.anisotropy = HIGH ? 8 : 2;
+      const mark = new THREE.Mesh(new THREE.PlaneGeometry(8.4, 1.31), new THREE.MeshBasicMaterial({map: wt, transparent: true, opacity: 0.16, depthWrite: false}));
+      mark.rotation.x = -Math.PI / 2; mark.position.set(0, 0.006, 6.4); scene.add(mark);
+    }
     // floor rings
     for (const [r, mat] of [[3.9, MAT.stripDim], [6.1, MAT.stripDim]]) { const g = new THREE.RingGeometry(r - 0.012, r + 0.012, 192); g.rotateX(-Math.PI / 2); addStatic(g, mat, M4(0, 0.004, 0), {noShadow: true}); }
   }
@@ -499,10 +510,19 @@ async function boot() {
     // nameplate on the desk front (faces the core)
     const plate = screen(new THREE.PlaneGeometry(0.96, 0.18), 512, 96, (c, w, h) => S.nameplate(c, w, h, HQ, slug), ['floor'], {gain: 1.2});
     plate.mesh.position.set(0, DESK_TOP - 0.15, 1.175); g.add(plate.mesh);
-    // the pendant luminaire + its desk light
-    addStatic(new THREE.BoxGeometry(2.6, 0.05, 0.22), MAT.darkMetal, L(0, 3.35, 0.45), {noShadow: true});
-    const lum = new THREE.Mesh(new THREE.PlaneGeometry(2.5, 0.14), MAT.stripWarm); lum.rotation.x = Math.PI / 2; lum.position.set(0, 3.322, 0.45); g.add(lum);
-    for (const sx of [-1, 1]) addStatic(new THREE.CylinderGeometry(0.004, 0.004, 10.6, 4), MAT.alu, L(sx * 1.1, 8.65, 0.45), {noShadow: true, noReflect: true});
+    // the pendant luminaire + its desk light (Allie: a brass ring over the allocation desk)
+    if (slug === 'allocator') {
+      addStatic(new THREE.TorusGeometry(1.25, 0.05, 10, 96), MAT.brass, L(0, 3.4, 0.35, Math.PI / 2), {noShadow: true});
+      const halo = new THREE.Mesh(new THREE.TorusGeometry(1.25, 0.018, 8, 128), glow('#ffd9b0', 3.2)); halo.rotation.x = Math.PI / 2; halo.position.set(0, 3.36, 0.35); g.add(halo);
+      for (let i = 0; i < 3; i++) { const a = i / 3 * Math.PI * 2; addStatic(new THREE.CylinderGeometry(0.004, 0.004, 10.6, 4), MAT.alu, L(Math.sin(a) * 1.25, 8.7, 0.35 + Math.cos(a) * 1.25), {noShadow: true, noReflect: true}); }
+      // her line to the capital core is drawn in brass, wider than the others
+      const brassPath = new THREE.Mesh(new THREE.PlaneGeometry(0.11, R_DESK - 6.3), new THREE.MeshBasicMaterial({color: new THREE.Color('#e7c27c').multiplyScalar(0.9), transparent: true, opacity: 0.5, depthWrite: false}));
+      brassPath.rotation.x = -Math.PI / 2; brassPath.position.set(0, 0.005, 2.0 + (R_DESK - 6.3) / 2); g.add(brassPath);
+    } else {
+      addStatic(new THREE.BoxGeometry(2.6, 0.05, 0.22), MAT.darkMetal, L(0, 3.35, 0.45), {noShadow: true});
+      const lum = new THREE.Mesh(new THREE.PlaneGeometry(2.5, 0.14), MAT.stripWarm); lum.rotation.x = Math.PI / 2; lum.position.set(0, 3.322, 0.45); g.add(lum);
+      for (const sx of [-1, 1]) addStatic(new THREE.CylinderGeometry(0.004, 0.004, 10.6, 4), MAT.alu, L(sx * 1.1, 8.65, 0.45), {noShadow: true, noReflect: true});
+    }
     let spot = null;
     if (HIGH) {
       spot = new THREE.SpotLight('#ffe7c8', 55, 9, 0.62, 0.65, 1.4);
@@ -629,7 +649,12 @@ async function boot() {
   async function loadAvatar(slug, entry, loader, onBytes) {
     const gltf = await new Promise((res, rej) => loader.load(MODELS + entry.model, res, (ev) => onBytes(ev.loaded || 0, ev.total || 0), rej));
     const root = gltf.scene;
-    root.traverse((o) => { if (o.isMesh) { o.castShadow = HIGH; o.receiveShadow = false; o.frustumCulled = false; } });
+    root.traverse((o) => {
+      if (!o.isMesh) return;
+      o.castShadow = HIGH; o.receiveShadow = false; o.frustumCulled = false;
+      // alpha-tested hair cards resolve through MSAA instead of stair-stepping
+      for (const m of [].concat(o.material)) if (m && m.alphaTest > 0) { m.alphaToCoverage = true; m.needsUpdate = true; }
+    });
     skinTune(root);
     const hide = new Set(entry.hide_materials || []);
     if (hide.size) root.traverse((o) => { if (o.isMesh && [].concat(o.material).some((m) => hide.has(m.name))) o.visible = false; });
@@ -815,9 +840,9 @@ async function boot() {
     const side = g.position.x >= -0.5 ? 1 : -1;
     const sway = reduced ? 0 : 0.05 * Math.sin(T * 0.11);
     const yaw = (camState.userYaw * 0.6) + side * 0.62 + sway;
-    const dist = (camera.aspect < 1 ? 6.2 : 4.9) * camState.zoom;
-    const local = V(Math.sin(yaw) * dist, 2.35 + camState.userPitch * 3, 0.2 + Math.cos(yaw) * dist);
-    return {pos: g.localToWorld(local), tgt: g.localToWorld(V(0, 1.25, -0.2))};
+    const dist = (camera.aspect < 1 ? 5.4 : 4.0) * camState.zoom;
+    const local = V(Math.sin(yaw) * dist, 2.15 + camState.userPitch * 3, 0.1 + Math.cos(yaw) * dist);
+    return {pos: g.localToWorld(local), tgt: g.localToWorld(V(0, 1.18, -0.1))};
   }
   function desired(T) { if (camState.debug) return camState.debug; return camState.mode === 'focus' && camState.slug ? focusPose(camState.slug, T) : overviewPose(T); }
   function goTo(mode, slug, dur, lift) {
