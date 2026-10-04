@@ -827,3 +827,20 @@ tests/test_command_release_authority.py
 # append-only tables; bundles differ per agent and never widen the
 # registry (Karen / Scout / Eddie boundaries); no voice is borrowed.
 tests/test_agent_identity_api_authority.py
+# R30B AGENTS (migration 234; owner R30 program sections 17-20): every
+# agent's durable queue on the 226 table (owner, blocker, SLA, dependency,
+# last / next attempt, evidence needed, collaborator; IDLE impossible while
+# owning open work; WAITING needs an enqueued reacquisition); Eddie and Scout
+# may enqueue their own work but write no governance row (217 registry
+# extended, a superset of 225's); root-cause clusters whose fix only a named
+# person links and whose effect is measured, never assumed; lesson retrieval
+# and an append-only supersession that only lowers a weight and grants no
+# authority; read-only scorecards by decision / economic quality; and the
+# authority proof that none of these modules writes outside its own records
+# or imports an order, execution, venue, funded or paper module.
+tests/test_agent_operations_authority.py
+tests/test_agent_work_queues.py
+tests/test_agent_work_state.py
+tests/test_improvement_clusters.py
+tests/test_lesson_usage.py
+tests/test_agent_scorecards.py

@@ -9,8 +9,11 @@ clusters).
   §2 the runner edits are each a single queue sync AFTER the runner's own
      work: Eddie's, Scout's, Karen's runner, the peer responder, the paper
      pass (a step, before the memory step which stays last).
-  §3 every module this stream adds is checked by the same rules as it lands
-     (the list below grows with the stream).
+  §3 every module this stream adds is checked by the same rules as it lands:
+     the root-cause clusters and their read API, lesson usage (§4), and the
+     agent scorecards and their read API (SELECT only, READ ONLY, no
+     activity counted as a score); the stream's proofs are on the
+     capital-critical list.
 """
 from __future__ import annotations
 
@@ -188,6 +191,54 @@ def test_lesson_usage_imports_no_order_execution_or_paper_module():
         assert not any(f in leaf for f in FORBIDDEN), imp
     for word in ORDER_CALLS:
         assert word not in LU.read_text(), word
+
+
+def test_memory_never_grants_authority_and_the_scorecards_only_read():
+    """(Scorecards, section 18.) The card module and its read API SELECT
+    only, run in a READ ONLY transaction, import nothing outside the queue
+    helpers and Karen's rule table, and count no activity as a score."""
+    SC = ROOT / "agents" / "agent_scorecards.py"
+    SC_API = ROOT / "api" / "command_agent_scorecards.py"
+    for path in (SC, SC_API):
+        assert not _writes(path), (path.name, _writes(path))
+        for s in _sql(path):
+            assert not re.search(r"\b(INSERT\s+INTO|UPDATE\s+[a-z_]+\s+SET|"
+                                 r"DELETE\s+FROM|TRUNCATE|ALTER\s|DROP\s)",
+                                 s, re.I), (path.name, s[:120])
+        for word in ORDER_CALLS:
+            assert word not in path.read_text(), (path.name, word)
+    for path, pkg, allowed in (
+            (SC, "sportsassets.agents",
+             ("sportsassets.agent_work_state",
+              "sportsassets.agents.karen_runner")),
+            (SC_API, "sportsassets.api",
+             ("sportsassets.api.agents_core",
+              "sportsassets.agents.agent_scorecards"))):
+        for imp in _imports(path, pkg):
+            if imp.startswith("sportsassets"):
+                assert any(imp == a or imp.startswith(a + ".")
+                           for a in allowed), (path.name, imp)
+            leaf = imp.rsplit(".", 1)[-1].lower()
+            assert not any(f in leaf for f in FORBIDDEN), (path.name, imp)
+    assert "transaction(readonly=" in SC_API.read_text()
+    from sportsassets.agents import agent_scorecards as S
+    assert S.METRICS == (
+        "decision_latency", "evidence_completeness", "citation_correctness",
+        "calibration", "false_approval", "false_refusal", "value_added",
+        "challenge_quality", "freshness_compliance",
+        "unresolved_blocker_age")
+    assert not any(S.NOT_A_SCORE.search(m) for m in S.METRICS)
+    test_memory_never_grants_authority()
+
+
+def test_the_stream_proofs_are_capital_critical():
+    listed = (ROOT.parent / "tools" / "capital_critical_tests.txt"
+              ).read_text().splitlines()
+    for name in ("test_agent_operations_authority.py",
+                 "test_agent_work_queues.py", "test_agent_work_state.py",
+                 "test_improvement_clusters.py", "test_lesson_usage.py",
+                 "test_agent_scorecards.py"):
+        assert "tests/%s" % name in listed, name
 
 
 def test_memory_never_grants_authority():
