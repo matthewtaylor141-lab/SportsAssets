@@ -630,6 +630,14 @@ try:
     app.include_router(_command_intel_router)
 except ImportError:
     log.warning("intel: api.command_intel not loaded", exc_info=True)
+# ── THE LIVE EQUITY WALL: /api/command/equity/live, /equity/curve ────────
+# GET only, COMMAND auth, READ ONLY transactions. PAPER and SMALL LIVE (per
+# venue) side by side, never summed; no venue call, no order authority.
+try:
+    from .command_equity import router as _command_equity_router
+    app.include_router(_command_equity_router)
+except ImportError:
+    log.warning("equity: api.command_equity not loaded", exc_info=True)
 from .agent_capabilities import router as _capabilities_router
 app.include_router(_capabilities_router)
 from .slack_agents import router as _slack_agents_router
