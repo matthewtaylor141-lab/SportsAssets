@@ -45,7 +45,7 @@ const damp = (a, b, k, dt) => a + (b - a) * (1 - Math.exp(-k * dt));
 /* THE FLOOR PLAN. Angle from north (the LED wall), clockwise; the seven
  * desks form a horseshoe that opens toward the establishing camera. */
 const SEAT_ANGLE = {derek: -118, karen: -79, scout: -40, allocator: 0, eddie: 40, audrey: 79, xavier: 118};
-const R_DESK = 9.6;
+const R_DESK = 8.4;
 const DESK_TOP = 0.74;
 const SEAT_TOP = 0.47;
 const LAYER_NO_REFLECT = 1;
@@ -76,7 +76,7 @@ async function boot() {
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
   renderer.toneMappingExposure = 1.0;
   renderer.shadowMap.enabled = HIGH;
-  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  renderer.shadowMap.type = THREE.PCFShadowMap;
   renderer.shadowMap.autoUpdate = false;
   const canvas = renderer.domElement;
   canvas.className = 'hqf-canvas';
@@ -191,7 +191,7 @@ async function boot() {
   }
 
   /* ── lights ────────────────────────────────────────────────────── */
-  scene.add(new THREE.HemisphereLight('#3a4f72', '#06080b', phone ? 1.2 : 0.55));
+  scene.add(new THREE.HemisphereLight('#3a4f72', '#06080b', phone ? 0.9 : 0.35));
   const key = new THREE.DirectionalLight('#d6e4ff', HIGH ? 1.1 : 1.6);
   key.position.set(8, 22, 6);
   if (HIGH) {
@@ -200,9 +200,9 @@ async function boot() {
     key.shadow.bias = -0.0004; key.shadow.normalBias = 0.025; key.shadow.radius = 4;
   }
   scene.add(key);
-  const wallSpill = new THREE.SpotLight('#7a96ff', HIGH ? 380 : 220, 40, 0.9, 0.9, 1.6);
+  const wallSpill = new THREE.SpotLight('#7a96ff', HIGH ? 110 : 90, 40, 0.8, 0.9, 1.6);
   wallSpill.position.set(0, 8, -15); wallSpill.target.position.set(0, 0, -2); scene.add(wallSpill, wallSpill.target);
-  const coreLight = new THREE.PointLight('#6f9bff', 40, 16, 1.7); coreLight.position.set(0, 2.6, 0); scene.add(coreLight);
+  const coreLight = new THREE.PointLight('#6f9bff', 12, 12, 1.8); coreLight.position.set(0, 2.6, 0); scene.add(coreLight);
 
   /* ── the floor: polished stone with real-time reflection (desktop) ─ */
   const floorTex = (() => {
@@ -219,7 +219,7 @@ async function boot() {
     const tx = new THREE.CanvasTexture(c); tx.wrapS = tx.wrapT = THREE.RepeatWrapping; tx.repeat.set(22, 22); tx.colorSpace = THREE.SRGBColorSpace; tx.anisotropy = HIGH ? 8 : 2;
     return tx;
   })();
-  const floorMat = new THREE.MeshStandardMaterial({map: floorTex, color: '#ffffff', roughness: 0.22, metalness: 0.15});
+  const floorMat = new THREE.MeshStandardMaterial({map: floorTex, color: '#c9ced6', roughness: 0.28, metalness: 0.0, envMapIntensity: 0.35});
   const floor = new THREE.Mesh(new THREE.PlaneGeometry(90, 90), floorMat);
   floor.rotation.x = -Math.PI / 2; floor.receiveShadow = HIGH; scene.add(floor);
   let refl = null;
@@ -227,7 +227,7 @@ async function boot() {
     const rt = new THREE.WebGLRenderTarget(512, 512, {type: THREE.HalfFloatType});
     const texMat = new THREE.Matrix4(), rcam = new THREE.PerspectiveCamera();
     rcam.layers.set(0);
-    refl = {rt, texMat, rcam, strength: 0.62};
+    refl = {rt, texMat, rcam, strength: 0.5};
     floorMat.onBeforeCompile = (sh) => {
       sh.uniforms.tRefl = {value: rt.texture}; sh.uniforms.uTexMat = {value: texMat}; sh.uniforms.uReflStr = refl.uniform = {value: refl.strength};
       sh.uniforms.uTexel = {value: new THREE.Vector2(1 / 512, 1 / 512)}; refl.texel = sh.uniforms.uTexel;
@@ -290,7 +290,7 @@ async function boot() {
       addStatic(new THREE.BoxGeometry(0.07, 0.035, len), i % 2 ? MAT.stripDim : MAT.strip, M4(Math.sin(a) * (r0 + len / 2), 13.5, Math.cos(a) * (r0 + len / 2), 0, a, 0), {noShadow: true});
     }
     // structural columns with light reveals
-    for (const deg of [-52, -88, -126, 52, 88, 126, -160, 160]) {
+    for (const deg of [-52, -88, 52, 88]) {
       const a = deg * Math.PI / 180, r = 20.2, x = r * Math.sin(a), z = -r * Math.cos(a);
       addStatic(new THREE.CylinderGeometry(0.55, 0.55, 14, 24), MAT.stone, M4(x, 7, z));
       addStatic(new THREE.BoxGeometry(0.06, 12.5, 0.06), MAT.stripDim, M4(x * 0.972, 7, z * 0.972, 0, -a, 0), {noShadow: true});
@@ -349,7 +349,7 @@ async function boot() {
     core.beamMat = new THREE.ShaderMaterial({transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide,
       uniforms: {uColor: {value: new THREE.Color('#6f9bff')}, uK: {value: 1}},
       vertexShader: 'varying vec2 vUv; varying vec3 vN; varying vec3 vV; void main(){ vUv = uv; vN = normalize(normalMatrix*normal); vec4 mv = modelViewMatrix*vec4(position,1.); vV = normalize(-mv.xyz); gl_Position = projectionMatrix*mv; }',
-      fragmentShader: 'uniform vec3 uColor; uniform float uK; varying vec2 vUv; varying vec3 vN; varying vec3 vV; void main(){ float rim = pow(1.0 - abs(dot(vN, vV)), 1.6); float h = smoothstep(0.0, 0.15, vUv.y) * (1.0 - smoothstep(0.55, 1.0, vUv.y)); gl_FragColor = vec4(uColor * (0.35 + rim * 1.6) * h * uK, 1.0); }'});
+      fragmentShader: 'uniform vec3 uColor; uniform float uK; varying vec2 vUv; varying vec3 vN; varying vec3 vV; void main(){ float rim = pow(1.0 - abs(dot(vN, vV)), 1.6); float h = smoothstep(0.0, 0.15, vUv.y) * (1.0 - smoothstep(0.55, 1.0, vUv.y)); gl_FragColor = vec4(uColor * (0.12 + rim * 0.75) * h * uK, 1.0); }'});
     const beam = new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.32, 3.4, 32, 1, true), core.beamMat); beam.position.y = 2.6; scene.add(beam);
     // the orb
     core.orbMat = new THREE.MeshStandardMaterial({color: '#0b1430', emissive: new THREE.Color('#5d8cff'), emissiveIntensity: 2.4, roughness: 0.2, metalness: 0.4, flatShading: true});
@@ -372,11 +372,11 @@ async function boot() {
   const ring = {};
   {
     ring.sc = screen(new THREE.CylinderGeometry(4.7, 4.7, 0.72, 128, 1, true), 4096, 200, (ctx, w, h) => S.ticker(ctx, w, h, HQ), ['equity', 'floor'], {repeatX: 2, gain: 1.4});
-    ring.sc.mesh.position.y = 7.4; ring.sc.mesh.layers.set(0); scene.add(ring.sc.mesh);
+    ring.sc.mesh.position.y = 9.2; ring.sc.mesh.layers.set(0); scene.add(ring.sc.mesh);
     const inner = new THREE.Mesh(new THREE.CylinderGeometry(4.66, 4.66, 0.72, 96, 1, true), new THREE.MeshStandardMaterial({color: '#07090d', roughness: 0.5, metalness: 0.6, side: THREE.BackSide}));
-    inner.position.y = 7.4; scene.add(inner);
-    for (const y of [7.02, 7.78]) addStatic(new THREE.TorusGeometry(4.72, 0.045, 8, 160), MAT.alu, M4(0, y, 0, Math.PI / 2), {noShadow: true});
-    for (let i = 0; i < 6; i++) { const a = i / 6 * Math.PI * 2; addStatic(new THREE.CylinderGeometry(0.012, 0.012, 6.2, 6), MAT.alu, M4(Math.sin(a) * 4.7, 10.9, Math.cos(a) * 4.7), {noShadow: true, noReflect: true}); }
+    inner.position.y = 9.2; scene.add(inner);
+    for (const y of [8.82, 9.58]) addStatic(new THREE.TorusGeometry(4.72, 0.045, 8, 160), MAT.alu, M4(0, y, 0, Math.PI / 2), {noShadow: true});
+    for (let i = 0; i < 6; i++) { const a = i / 6 * Math.PI * 2; addStatic(new THREE.CylinderGeometry(0.012, 0.012, 4.4, 6), MAT.alu, M4(Math.sin(a) * 4.7, 11.8, Math.cos(a) * 4.7), {noShadow: true, noReflect: true}); }
   }
 
   /* ── giant LED wall + side walls ───────────────────────────────── */
@@ -472,8 +472,8 @@ async function boot() {
     {
       const cz = -0.06;
       addStatic(roundedBox(0.52, 0.08, 0.5, 0.08, 5), MAT.leather, L(0, SEAT_TOP - 0.04, cz + 0.02));
-      addStatic(roundedBox(0.5, 0.07, 0.66, 0.1, 5), slug === 'allocator' ? MAT.leather : MAT.mesh, L(0, SEAT_TOP + 0.4, cz - 0.27, Math.PI / 2 - 0.12, 0, 0));
-      if (slug === 'allocator' || slug === 'xavier') addStatic(roundedBox(0.32, 0.07, 0.16, 0.06, 4), MAT.leather, L(0, SEAT_TOP + 0.84, cz - 0.32, Math.PI / 2 - 0.12, 0, 0));
+      addStatic(roundedBox(0.5, 0.07, 0.66, 0.1, 5), slug === 'allocator' ? MAT.leather : MAT.mesh, L(0, SEAT_TOP + 0.4, cz - 0.2, Math.PI / 2 - 0.12, 0, 0));
+      if (slug === 'allocator' || slug === 'xavier') addStatic(roundedBox(0.32, 0.07, 0.16, 0.06, 4), MAT.leather, L(0, SEAT_TOP + 0.84, cz - 0.25, Math.PI / 2 - 0.12, 0, 0));
       for (const sx of [-1, 1]) {
         addStatic(new THREE.BoxGeometry(0.05, 0.03, 0.3), MAT.leather, L(sx * 0.29, SEAT_TOP + 0.2, cz), {noReflect: true});
         addStatic(new THREE.BoxGeometry(0.025, 0.2, 0.03), MAT.darkMetal, L(sx * 0.29, SEAT_TOP + 0.08, cz - 0.04), {noReflect: true});
@@ -549,8 +549,8 @@ async function boot() {
       addStatic(new THREE.CylinderGeometry(0.22, 0.24, 0.03, 24), MAT.darkMetal, L(-1.75, 0.015, 0.72));
     }
     // PORTRAIT ARRIVING plate (shown until this agent's own model is present)
-    const arr = screen(new THREE.PlaneGeometry(0.62, 0.62), 512, 512, (c, w, h) => S.arriving(c, w, h, HQ, slug), ['floor'], {transparent: true, gain: 1.35});
-    arr.mesh.position.set(0, SEAT_TOP + 0.5, -0.05); g.add(arr.mesh);
+    const arr = screen(new THREE.PlaneGeometry(0.66, 0.66), 512, 512, (c, w, h) => S.arriving(c, w, h, HQ, slug), ['floor'], {transparent: true, gain: 1.35});
+    arr.mesh.position.set(0, 1.34, -0.12); g.add(arr.mesh);
     // hit volume
     const hit = new THREE.Mesh(new THREE.BoxGeometry(5.4, 3.2, 4.6), new THREE.MeshBasicMaterial({visible: false}));
     hit.position.set(0, 1.6, -0.25); hit.userData.slug = slug; g.add(hit); pickables.push(hit);
@@ -782,8 +782,8 @@ async function boot() {
   function applyStates() {
     for (const slug of Object.keys(desks)) {
       const d = desks[slug], st = HQ.desk(slug), k = TONE_K[st.tone] || 0.3, hov = hoverSlug === slug || HQ.selected() === slug;
-      d.edgeMat.color.set(st.color).multiplyScalar(k * (hov ? 1.5 : 1));
-      d.pathMat.color.copy(d.accent).multiplyScalar(0.4 + k * 0.5);
+      d.edgeMat.color.set(st.color).multiplyScalar((0.2 + k * 0.32) * (hov ? 1.8 : 1));
+      d.pathMat.color.copy(d.accent).multiplyScalar(0.3 + k * 0.3);
       d.pathMat.opacity = st.tone === 'off' ? 0.15 : 0.55;
       if (d.spot) d.spot.intensity = st.tone === 'off' ? 6 : st.tone === 'stale' ? 22 : 55;
       if (d.accentLight) d.accentLight.intensity = (st.tone === 'off' ? 0.6 : 3) * (hov ? 1.8 : 1);
@@ -793,9 +793,9 @@ async function boot() {
     const col = !p ? '#7a8496' : p.status === 'OK' ? '#6f9bff' : p.status === 'STALE' ? '#e8b25e' : '#7a8496';
     core.beamMat.uniforms.uColor.value.set(col);
     core.beamMat.uniforms.uK.value = !p ? 0.35 : p.status === 'OK' ? 1 : 0.6;
-    core.orbMat.emissive.set(col); core.orbMat.emissiveIntensity = !p ? 0.6 : p.status === 'OK' ? 2.4 : 1.2;
+    core.orbMat.emissive.set(col); core.orbMat.emissiveIntensity = !p ? 0.4 : p.status === 'OK' ? 1.1 : 0.6;
     core.rimMat.color.set(col).multiplyScalar(p && p.status === 'OK' ? 2.6 : 1.3);
-    coreLight.color.set(col); coreLight.intensity = p && p.status === 'OK' ? 40 : 18;
+    coreLight.color.set(col); coreLight.intensity = p && p.status === 'OK' ? 12 : 6;
     if (q.changedAt && q.changedAt !== core.lastChange) { core.lastChange = q.changedAt; if (!reduced) core.pulseT = 0; core.pulse.material.color.set(col).multiplyScalar(2); }
     requestRender();
   }
@@ -805,8 +805,8 @@ async function boot() {
     userYaw: 0, userPitch: 0, zoom: 1, offX: 0, offY: 0, offXT: 0, offYT: 0};
   function overviewPose(T) {
     const portrait = camera.aspect < 1;
-    const C = portrait ? V(0, 1.0, -1.5) : V(0, 1.2, -2.6);
-    const dist = (portrait ? 33 : 25.8) * camState.zoom, el = (portrait ? 0.42 : 0.37) + camState.userPitch + (reduced ? 0 : 0.012 * Math.sin(T * 0.07));
+    const C = portrait ? V(0, 1.6, -1.2) : V(0, 2.5, -2.8);
+    const dist = (portrait ? 27 : 19.8) * camState.zoom, el = (portrait ? 0.36 : 0.235) + camState.userPitch + (reduced ? 0 : 0.012 * Math.sin(T * 0.07));
     const yaw = camState.userYaw + (reduced ? 0 : 0.085 * Math.sin(T * 0.043));
     return {pos: V(C.x + dist * Math.sin(yaw) * Math.cos(el), C.y + dist * Math.sin(el), C.z + dist * Math.cos(yaw) * Math.cos(el)), tgt: C};
   }
@@ -815,11 +815,11 @@ async function boot() {
     const side = g.position.x >= -0.5 ? 1 : -1;
     const sway = reduced ? 0 : 0.05 * Math.sin(T * 0.11);
     const yaw = (camState.userYaw * 0.6) + side * 0.62 + sway;
-    const dist = (camera.aspect < 1 ? 4.6 : 3.7) * camState.zoom;
-    const local = V(Math.sin(yaw) * dist, 2.0 + camState.userPitch * 3, 0.2 + Math.cos(yaw) * dist);
-    return {pos: g.localToWorld(local), tgt: g.localToWorld(V(0, 1.12, 0.35))};
+    const dist = (camera.aspect < 1 ? 6.2 : 4.9) * camState.zoom;
+    const local = V(Math.sin(yaw) * dist, 2.35 + camState.userPitch * 3, 0.2 + Math.cos(yaw) * dist);
+    return {pos: g.localToWorld(local), tgt: g.localToWorld(V(0, 1.25, -0.2))};
   }
-  function desired(T) { return camState.mode === 'focus' && camState.slug ? focusPose(camState.slug, T) : overviewPose(T); }
+  function desired(T) { if (camState.debug) return camState.debug; return camState.mode === 'focus' && camState.slug ? focusPose(camState.slug, T) : overviewPose(T); }
   function goTo(mode, slug, dur, lift) {
     camState.from = {pos: camState.pos.clone(), tgt: camState.tgt.clone()};
     camState.mode = mode; camState.slug = slug; camState.t = reduced ? 1 : 0; camState.dur = dur; camState.lift = lift || 0;
@@ -844,7 +844,11 @@ async function boot() {
   }
   function panelOffsets() {
     const p = document.getElementById('hqf-panel');
-    if (!HQ.selected() || !p || p.hidden) { camState.offXT = 0; camState.offYT = 0; return; }
+    if (!HQ.selected() || !p || p.hidden) {
+      // overview: centre the floor in the space the desk list leaves
+      const ro = document.getElementById('hqf-roster'), sr = stage.getBoundingClientRect();
+      camState.offXT = ro && !phone && sr.width >= 820 ? -Math.max(0, ro.getBoundingClientRect().right - sr.left) * 0.42 : 0; camState.offYT = 0; return;
+    }
     const r = p.getBoundingClientRect(), s = stage.getBoundingClientRect();
     if (phone || s.width < 820) { camState.offXT = 0; camState.offYT = Math.max(0, (s.bottom - r.top)) * 0.5; }
     else { camState.offXT = Math.max(0, s.right - r.left) * 0.5; camState.offYT = 0; }
@@ -862,7 +866,7 @@ async function boot() {
     const up = new THREE.ShaderMaterial({uniforms: {src: {value: null}, base: {value: null}, texel: {value: new THREE.Vector2()}}, vertexShader: vs, depthTest: false, depthWrite: false,
       fragmentShader: 'uniform sampler2D src; uniform sampler2D base; uniform vec2 texel; varying vec2 vUv;\n' +
         'void main(){ vec2 o = texel; vec3 c = texture2D(src, vUv + vec2(-o.x * 2.0, 0.0)).rgb + texture2D(src, vUv + vec2(-o.x, o.y)).rgb * 2.0 + texture2D(src, vUv + vec2(0.0, o.y * 2.0)).rgb + texture2D(src, vUv + vec2(o.x, o.y)).rgb * 2.0 + texture2D(src, vUv + vec2(o.x * 2.0, 0.0)).rgb + texture2D(src, vUv + vec2(o.x, -o.y)).rgb * 2.0 + texture2D(src, vUv + vec2(0.0, -o.y * 2.0)).rgb + texture2D(src, vUv + vec2(-o.x, -o.y)).rgb * 2.0; gl_FragColor = vec4(c / 12.0 + texture2D(base, vUv).rgb, 1.0); }'});
-    const comp = new THREE.ShaderMaterial({uniforms: {tScene: {value: null}, tBloom: {value: null}, k: {value: 0.42}}, vertexShader: vs, depthTest: false, depthWrite: false,
+    const comp = new THREE.ShaderMaterial({uniforms: {tScene: {value: null}, tBloom: {value: null}, k: {value: 0.3}}, vertexShader: vs, depthTest: false, depthWrite: false,
       fragmentShader: 'uniform sampler2D tScene; uniform sampler2D tBloom; uniform float k; varying vec2 vUv;\n' +
         'void main(){ vec3 c = texture2D(tScene, vUv).rgb + texture2D(tBloom, vUv).rgb * k; vec2 d = vUv - 0.5; float v = 1.0 - smoothstep(0.35, 0.95, length(d * vec2(1.15, 1.0))); c *= mix(0.62, 1.0, v); gl_FragColor = vec4(c, 1.0);\n#include <tonemapping_fragment>\n#include <colorspace_fragment>\n}'});
     const LV = 5, rtOpt = {type: THREE.HalfFloatType, depthBuffer: false};
@@ -1019,7 +1023,10 @@ async function boot() {
   else { const o = overviewPose(0); camState.pos.copy(o.pos); camState.tgt.copy(o.tgt); }
   requestRender();
   HQ.progress(0.25, 'Seating the desks…');
-  window.__hqf = {scene, camera, renderer, desks, avatars, perf, goTo, requestRender, setPosture};
+  // inspection hook (software-GL renders): complete running transitions now
+  const settle = () => { panelOffsets(); camState.offX = camState.offXT; camState.offY = camState.offYT; camState.t = 1; for (const av of avatars) { av.t = 1; applyPosture(av, 1); } requestRender(); };
+  const look = (slug, lp, lt) => { const g = desks[slug].group; camState.debug = lp ? {pos: g.localToWorld(V(...lp)), tgt: g.localToWorld(V(...lt))} : null; camState.t = 1; requestRender(); };
+  window.__hqf = {look, scene, camera, renderer, desks, avatars, perf, goTo, requestRender, setPosture, settle};
   await loadAvatars();
   shadowDirty = true; requestRender();
   if (HQ.selected()) goTo('focus', HQ.selected(), 1.2, 0.3);

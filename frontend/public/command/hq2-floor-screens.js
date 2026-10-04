@@ -546,6 +546,7 @@ export function ticker(ctx, W, H, hq) {
   // fill the strip with the real items (repeated if short, so it wraps cleanly)
   for (let guard = 0; x < W && guard < 64; guard++) {
     const it = items[guard % items.length];
+    if (x + ctx.measureText(it.s).width > W - 24 * s) break;   // whole items only: no cut line at the wrap seam
     ctx.fillStyle = it.c; ctx.fillText(it.s, x, 84 * s);
     x += ctx.measureText(it.s).width + 40 * s;
     ctx.fillStyle = '#3b5f9a'; ctx.fillText('◆', x, 82 * s); x += 80 * s;

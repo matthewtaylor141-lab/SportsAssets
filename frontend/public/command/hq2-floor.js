@@ -35,7 +35,7 @@
     {agent: 'SCOUT', slug: 'scout', name: 'Scout', role: 'Market intelligence', zone: 'Research & signals',
      accent: '#f3ae68', href: '/scout'},
     {agent: 'CHIEF_ALLOCATOR', slug: 'allocator', name: 'Allie', role: 'Chief Allocator', zone: 'Capital allocation',
-     accent: '#e9c46a', href: '/allocator'},
+     accent: '#ff9bcf', href: '/allocator'},
     {agent: 'EDDIE', slug: 'eddie', name: 'Eddie', role: 'Head of Execution', zone: 'Execution & microstructure',
      accent: '#5fd8cf', href: '/eddie'},
     {agent: 'AUDREY', slug: 'audrey', name: 'Audrey', role: 'Audit & reconciliation', zone: 'Audit & reconciliation',
@@ -202,6 +202,10 @@
     document.body.classList.toggle('hqf-focused', !!slug);
     if (slug) readDetail(slug);
     paintPanel(); paintRoster(); emit('select');
+    if (slug && how !== 'swipe' && matchMedia('(max-width: 780px)').matches) {
+      var card = document.querySelector('.hqf-desk[data-slug="' + slug + '"]');
+      if (card) { userSwipe = false; card.scrollIntoView({block: 'nearest', inline: 'center', behavior: B.reducedMotion() ? 'auto' : 'smooth'}); }
+    }
     if (slug && how !== 'pointer') { var p = el('hqf-panel'); if (p && how === 'keyboard') p.focus({preventScroll: true}); }
   }
   function open(slug) {
@@ -258,6 +262,7 @@
         if (selected === slug) open(slug); else select(slug, ev.detail === 0 ? 'keyboard' : 'roster');
       });
       nav.addEventListener('scroll', rosterScroll, {passive: true});
+      ['touchstart', 'pointerdown', 'wheel'].forEach(function (t) { nav.addEventListener(t, function (ev) { if (t !== 'pointerdown' || ev.pointerType !== 'mouse') userSwipe = true; }, {passive: true}); });
     }
     nav.querySelectorAll('.hqf-desk').forEach(function (b) {
       var d = desk(b.getAttribute('data-slug'));
@@ -270,15 +275,16 @@
     });
   }
   // phone: the swipeable roster selects the desk that snaps to the centre
-  var rosterTimer = 0;
+  var rosterTimer = 0, userSwipe = false;
   function rosterScroll() {
-    if (!matchMedia('(max-width: 780px)').matches) return;
+    if (!matchMedia('(max-width: 780px)').matches || !userSwipe) return;
     clearTimeout(rosterTimer);
     rosterTimer = setTimeout(function () {
       var nav = el('hqf-roster'), r = nav.getBoundingClientRect(), mid = r.left + r.width / 2, best = null, bd = 1e9;
       nav.querySelectorAll('.hqf-desk').forEach(function (b) { var q = b.getBoundingClientRect(), dd = Math.abs(q.left + q.width / 2 - mid); if (dd < bd) { bd = dd; best = b; } });
-      if (best && selected && best.getAttribute('data-slug') !== selected) select(best.getAttribute('data-slug'), 'swipe');
-    }, 160);
+      userSwipe = false;
+      if (best && best.getAttribute('data-slug') !== selected) select(best.getAttribute('data-slug'), 'swipe');
+    }, 220);
   }
   function metricHtml(m) {
     var v = m.value == null ? '<b class="na">UNAVAILABLE</b><small>' + esc(m.why || 'no value recorded') + '</small>'
