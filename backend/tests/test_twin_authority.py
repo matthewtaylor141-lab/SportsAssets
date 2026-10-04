@@ -68,7 +68,7 @@ ALLOWED_PROJECT = {"sportsassets", "sportsassets.intel",
                    # SELECT-only, pinned by tests/test_intel_is_shadow_only
                    "sportsassets.intel.reads",
                    "sportsassets.agents",
-                   "sportsassets.agents.quality_scorecard"}
+                   "sportsassets.agents.quality_stats"}
 FORBIDDEN = ("execmirror", "kalshi", "pmus", "venue", "clob", "executor",
              "execution_intent", "execution_gate", "paper", "bettor_funded",
              "derek", "xavier", "karen", "maker", "smalllive", "order",

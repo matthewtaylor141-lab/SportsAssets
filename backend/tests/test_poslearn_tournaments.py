@@ -86,8 +86,14 @@ async def test_a_full_forward_tournament_reaches_the_human_gate(monkeypatch):
         assert regs["M3_PINNAPI_PLUS_SCOUT"]["status"] == "AWAITING_FEATURES"
         assert regs["M4_CROSS_MARKET_CONSENSUS"]["status"] == \
             "AWAITING_SOURCE"
+        # EDDIE's interface is migration 217's eddie_execution_estimates:
+        # absent -> AWAITING_INTERFACE; present (integrated) -> registered
+        eddie_iface = await conn.fetchval(
+            "SELECT to_regclass('eddie_execution_estimates') IS NOT NULL")
         for v in ("EDDIE_V1", "EDDIE_CHALLENGER_A", "EDDIE_CHALLENGER_B"):
-            assert regs[v]["status"] == "AWAITING_INTERFACE"
+            assert regs[v]["status"] == (
+                "ACTIVE_FORWARD" if eddie_iface else "AWAITING_INTERFACE"), \
+                (v, regs[v])
         # untrainable challengers are NOT registered, with the reason
         assert "M2_PINNAPI_PLUS_MICROSTRUCTURE" not in regs
         assert "M5_NFL_SPECIFIC" not in regs
@@ -192,7 +198,8 @@ async def test_a_full_forward_tournament_reaches_the_human_gate(monkeypatch):
         v = {x["subject_id"]: x for x in asnap["variants"]}
         assert v["DEREK_V1"]["metrics"]["n"] == FORWARD
         assert v["DEREK_V1"]["metrics"]["net_economics_usd"] is not None
-        assert v["EDDIE_V1"]["status"] == "AWAITING_INTERFACE"
+        assert v["EDDIE_V1"]["status"] == (
+            "ACTIVE_FORWARD" if eddie_iface else "AWAITING_INTERFACE")
         assert v["XAVIER_CHALLENGER_A"]["metrics"]["path_unobserved"] == \
             FORWARD // 2
         # experiment outcomes follow their assignments

@@ -15,7 +15,7 @@ from __future__ import annotations
 import json
 import math
 
-from ..agents import quality_scorecard as QS
+from ..agents import quality_stats as QS
 from ..intel import common as IC
 
 LABEL = "RESEARCH"

@@ -589,6 +589,23 @@ READERS = {
     "twin/reads.py": (
         "RESEARCH_BY_ID_OUTCOMES_AND_SPORT_BOTH_PURPOSES_NEVER_SELECTS", 2),
     "twin/evals.py": ("EVIDENCE_REFERENCE_EXISTENCE_BY_ID_NO_SELECTION", 1),
+    # (217) EDDIE / SCOUT AND THEIR WORKFLOW: Scout reaches a game through a
+    # valuation's condition_id (game identity) and, for his feature
+    # tournaments, freezes the PinnAPI baseline probability as then known and
+    # later joins its outcome BY ID -- research forecasting, both purposes,
+    # never a candidate for any execution path; the database refuses Scout on
+    # every order/control table. The candidate-review workflow and the role
+    # brief use the same condition_id game-identity join; the registry names
+    # the read permission in prose.
+    "agents/scout.py": (
+        "RESEARCH_FEATURE_TOURNAMENT_BASELINE_AND_OUTCOME_BY_ID_NEVER_SELECTS", 4),
+    "agents/pos_workflow.py": ("GAME_IDENTITY_BY_CONDITION_ID_ONLY", 2),
+    "agents/role_brief.py": ("GAME_IDENTITY_BY_CONDITION_ID_ONLY", 2),
+    "agents/registry.py": ("PERMISSION_NAME_PROSE_ONLY", 3),
+    # THE POSITION ROOM (GET-only, read-only): a room's fixture row is
+    # reached through its own decision's valuation id -> condition_id; the
+    # module names the table once in prose. No selection, no write.
+    "position_rooms.py": ("FIXTURE_IDENTITY_BY_DECISION_VALUATION_ID_ONLY", 2),
 }
 
 

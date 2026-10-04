@@ -569,7 +569,12 @@ async def test_evals_judge_persisted_records_through_the_cycle():
         assert gr["n_passed"] < gr["n_evaluated"]
         ed = rows[("AGENT", "EDDIE", "EVIDENCE_GROUNDING")]
         assert ed["status"] == "UNAVAILABLE"
-        assert ed["reason"].startswith("INTERFACE_ABSENT")
+        # without migration 217 the view is absent; with it (integrated) the
+        # view exists but this test database holds no Eddie estimate row
+        iface = await conn.fetchval(
+            "SELECT to_regclass('pos_iface_eddie_execution') IS NOT NULL")
+        assert ed["reason"].startswith(
+            "NO_INTERFACE_ROW" if iface else "INTERFACE_ABSENT"), ed["reason"]
         assert ("MACRO", "DEREK", "FAILURE_ORIGIN") in rows
         assert ("HANDOFF", "DEREK->XAVIER", "HANDOFF_QUALITY") in rows
     finally:

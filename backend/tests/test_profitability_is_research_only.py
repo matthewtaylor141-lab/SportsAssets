@@ -295,14 +295,29 @@ async def test_migration_216_is_idempotent_and_its_rollback_drops_only_pos():
     try:
         await conn.execute(up)
         await conn.execute(up)
+        # migration 217 (Eddie/Scout) also owns pos_* objects
+        # (pos_candidate_review*, pos_iface_*): the rollback of 216 must drop
+        # EVERY relation 216 creates and NONE of anyone else's
+        own = sorted(set(re.findall(
+            r"CREATE (?:TABLE|VIEW|OR REPLACE VIEW)(?: IF NOT EXISTS)? "
+            r"(pos_[a-z0-9_]+)", up)))
+        assert set(POS_TABLES) <= set(own), (POS_TABLES, own)
+        others = await conn.fetch(
+            "SELECT relname FROM pg_class WHERE relname LIKE 'pos\\_%' "
+            "   AND relkind IN ('r', 'v') AND NOT relname = ANY($1::text[])",
+            own)
         await conn.execute(down)
         assert await conn.fetchval(
-            "SELECT count(*) FROM pg_class WHERE relname LIKE 'pos\\_%' "
-            "   AND relkind IN ('r', 'v')") == 0
+            "SELECT count(*) FROM pg_class WHERE relname = ANY($1::text[]) "
+            "   AND relkind IN ('r', 'v')", own) == 0
+        assert sorted(r["relname"] for r in await conn.fetch(
+            "SELECT relname FROM pg_class WHERE relname LIKE 'pos\\_%' "
+            "   AND relkind IN ('r', 'v')")) == sorted(
+                r["relname"] for r in others)
         await conn.execute(up)
         assert await conn.fetchval(
-            "SELECT count(*) FROM pg_class WHERE relname LIKE 'pos\\_%' "
-            "   AND relkind = 'r'") == len(POS_TABLES)
+            "SELECT count(*) FROM pg_class WHERE relname = ANY($1::text[]) "
+            "   AND relkind = 'r'", list(POS_TABLES)) == len(POS_TABLES)
         await conn.execute(
             "INSERT INTO pos_forecasts (forecast_id, book, run_id, "
             " issued_at, issued_day, horizon_start, horizon_end, "
