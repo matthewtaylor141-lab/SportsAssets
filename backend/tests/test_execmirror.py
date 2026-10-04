@@ -256,6 +256,18 @@ class FakeVenue:
                 if o["state"] in ("ORDER_STATE_NEW", "ORDER_STATE_PARTIALLY_FILLED")
                 and (not slugs or o["marketSlug"] in slugs)]
 
+    def own_trades(self, slug, since):
+        # The account's own trade log (portfolio activities). Added with the
+        # R30A recovery repair: an ambiguous attempt that is no longer open is
+        # concluded NOT_FOUND only after this log shows no own trade of it (an
+        # IOC that traded leaves no open order), so the double models it. Every
+        # executed order on the market; the matcher skips mapped ones.
+        return [{"order_id": vid, "intent": o["intent"], "price": o["price"],
+                 "quantity": o["quantity"], "traded_qty": o["cumQuantity"],
+                 "at": None}
+                for vid, o in self.orders.items()
+                if o["marketSlug"] == slug and o["cumQuantity"] > 0]
+
     def balances(self):
         return [{"currency": "USD", "currentBalance": self.bp, "buyingPower": self.bp}]
 

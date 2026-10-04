@@ -861,6 +861,39 @@ def not_run_set(alternative_set) -> list:
                   if (v or {}).get("status") != EVALUATED
                   and (v or {}).get("evaluation") != RAN)
 
+def _management_body(intent: dict) -> dict:
+    """The sha-covered content of a management intent, normalized from a
+    stored row (jsonb as TEXT, numeric as Decimal, timestamptz) or a built
+    dict -- the same normalization verify_intent applies to a decision
+    intent. A jsonb column of this table always holds an OBJECT (or array)
+    and a text column an identifier, enum, slug or sha, so a str value whose
+    first character opens an object or array is the jsonb as asyncpg
+    returned it; decoding by that rule keeps the verifier right when a field
+    is added to _MGMT_FIELDS (a new jsonb field needs no second list)."""
+    body = {k: intent.get(k) for k in _MGMT_FIELDS}
+    body["target_qty"] = _dec(body.get("target_qty"))
+    at = body.get("created_at")
+    if hasattr(at, "timestamp"):
+        at = at.timestamp()
+    body["created_at"] = round(float(at), 3)
+    for k, v in body.items():
+        if isinstance(v, str) and v.lstrip()[:1] in ("{", "["):
+            body[k] = json.loads(v)
+    return body
+def verify_management_intent(intent: dict) -> bool:
+    """True when a management intent's stored sha is the sha of its own
+    content (pure; the counterpart of verify_intent).
+    THE GAP THIS CLOSES (R30A chaos review). The intent route served every
+    management intent (`cmi_...`) with sha_verified=None: only decision
+    intents had a production verifier, and the contract test for Xavier's
+    review -> management intent checked the persisted row with a verifier
+    written inside the test file. A reader therefore could not prove that
+    the management intent both adapters consumed is the one recorded. The
+    route now calls this on the persisted row; so does the contract test."""
+    try:
+        return content_sha(_management_body(intent)) == intent.get("content_sha")
+    except (TypeError, ValueError):
+        return False
 
 
 def paper_entry_fields(intent: dict) -> dict:

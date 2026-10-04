@@ -41,9 +41,12 @@ OUR lane constructs. Nothing here changes `bettor_live_loop`'s client, and
 it introduces no retry of any order submission.
 """
 
+import logging
 import threading
 import time
 import uuid
+
+log = logging.getLogger(__name__)
 
 try:
     import httpx
@@ -306,6 +309,46 @@ def note_response(read_id: str = None, status: int = None) -> None:
                 r["rate_limited"] += 1
 
 
+def trip_circuit_on_order_429(method, path="") -> bool:
+    """A 429 ON AN ORDER REQUEST (any method that is not a read: the
+    preview, the create, the close, a cancel) TRIPS THE SHARED CIRCUIT.
+
+    THE GAP THIS CLOSES (R30A chaos review, reproduced: a preview, then a
+    429 on the create, and `venue_pace.penalty_left()` 0.0 afterwards).
+    Program section 21 requires a 429 to be raised by name AND to trip the
+    circuit. Every funded / copy / desk order reaches the venue through
+    pmus.submit_fok or pmus.close_position on the client this transport
+    wraps, and both answered a 429 by name -- raised, or as the named
+    refusal -- but neither tripped venue_pace: only the copy worker did, at
+    its own layer (workers/mirror_live._rate_limited), and the funded lane's
+    send boundary records a raised send as a lost acknowledgement without
+    touching the circuit. So a funded acquisition or exit that met a 429 left
+    every lane in the process on the ordinary gap, into a venue that had
+    just said slow down. READS were already covered (pmus.paced_read arms
+    the cooldown from a measured 429 via _arm_cooldown_from).
+
+    It is done HERE, at the transport, because this is the one place every
+    order request on the funded credential passes -- whatever function sent
+    it -- and because it leaves the adapter functions themselves untouched
+    (their sources are pinned). The decision is by the response's own status
+    code, never a text. `venue_pace.penalize()` is the same shared circuit
+    execmirror.Venue and the copy worker trip (idempotent across a burst, so
+    a caller that also trips it changes nothing). Nothing is retried and no
+    request is added; the SDK still raises the 429 by name to its caller.
+    Never raises."""
+    if str(method or "").upper() in READ_ONLY_METHODS:
+        return False
+    try:
+        from . import venue_pace as _vp
+        _vp.penalize()
+        log.warning("venue 429 on %s %s: the shared venue circuit is tripped "
+                    "(gap x%s for %ss)", str(method).upper(), path,
+                    _vp.PENALTY_MULT, _vp.PENALTY_S)
+        return True
+    except Exception:                                          # noqa: BLE001
+        return False
+
+
 # ── THE TRANSPORT ───────────────────────────────────────────────────
 
 _current_read = threading.local()
@@ -354,6 +397,11 @@ if httpx is not None:
             note_dispatch(rid)
             resp = self._inner.handle_request(request)
             note_response(rid, getattr(resp, "status_code", None))
+            # 4 · AN ORDER REQUEST'S 429 TRIPS THE SHARED CIRCUIT
+            if getattr(resp, "status_code", None) == 429:
+                trip_circuit_on_order_429(
+                    getattr(request, "method", ""),
+                    getattr(getattr(request, "url", None), "path", ""))
             return resp
 
         def close(self):

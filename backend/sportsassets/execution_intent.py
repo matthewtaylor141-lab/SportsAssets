@@ -444,13 +444,30 @@ class ActualLane:
         except Exception as exc:                              # noqa: BLE001
             state = M._classify(exc)            # REJECTED, or UNKNOWN to reconcile
             _mark(t, "submit_error")
-            await conn.execute(
+            err = {"error": type(exc).__name__,
+                   "status": getattr(exc, "status_code", None),
+                   "detail": EP._error(exc)["detail"]}
+            # FENCED ON THE CLAIM (R30A chaos review): a lane that outlived
+            # its SUBMITTING lease finds recovery has taken the row over and
+            # must not overwrite what recovery established from the venue;
+            # its answer is recorded (and acted on only where it is evidence
+            # the row lacks) by execmirror.late_submit_answer
+            wrote = await conn.fetchval(
                 """UPDATE execmirror_orders SET state = $2, error = $3::jsonb,
-                     latency_ms = $4, updated_at = now() WHERE mirror_id = $1""",
-                mid, state, _j({"error": type(exc).__name__,
-                                "status": getattr(exc, "status_code", None),
-                                "detail": EP._error(exc)["detail"]}),
+                     latency_ms = $4, updated_at = now()
+                   WHERE mirror_id = $1 AND state = 'SUBMITTING'
+                   RETURNING mirror_id""",
+                mid, state, _j(err),
                 (time.perf_counter_ns() - t0) // 1_000_000)
+            if not wrote:
+                got = await M.late_submit_answer(conn, mid, vid=None,
+                                                 classified=state, error=err,
+                                                 now=self.mirror._now())
+                await M._event(conn, "ACTUAL_SUBMIT_" + state, mirror_id=mid,
+                               intent_id=intent_id, error=EP._error(exc),
+                               late=got)
+                await self._late_timeline(conn, intent_id, t, got)
+                return {"state": "LATE_" + state, "late": got}
             await self._finish(conn, intent_id, t,
                                A_REJECTED if state == "REJECTED" else A_UNKNOWN,
                                refusal=("VENUE_REJECTED" if state == "REJECTED"
@@ -461,12 +478,25 @@ class ActualLane:
         _mark(t, "ack")
         vid = (resp or {}).get("id")
         lat_ms = (time.perf_counter_ns() - t0) // 1_000_000
-        await conn.execute(
+        wrote = await conn.fetchval(
             """UPDATE execmirror_orders SET state = $2, venue_order_id = $3,
                  accepted_at = now(), latency_ms = $4, updated_at = now(),
-                 detail = detail || $5::jsonb WHERE mirror_id = $1""",
+                 detail = detail || $5::jsonb
+               WHERE mirror_id = $1 AND state = 'SUBMITTING'
+               RETURNING mirror_id""",
             mid, "OPEN" if vid else "UNKNOWN", vid, lat_ms,
             _j({"submit_executions": len((resp or {}).get("executions") or [])}))
+        if not wrote:
+            got = await M.late_submit_answer(
+                conn, mid, vid=vid, classified="OPEN" if vid else "UNKNOWN",
+                error=None, now=self.mirror._now())
+            if got == "RECORDED_LATE_ACKNOWLEDGEMENT":
+                await self.mirror._refresh(conn, {"mirror_id": mid,
+                                                  "venue_order_id": vid})
+                await self.mirror.live_handoffs(conn)
+            await self._late_timeline(conn, intent_id, t, got)
+            return {"state": "LATE_" + ("ACK" if vid else "UNKNOWN"),
+                    "late": got, "venue_order_id": vid, "mirror_id": mid}
         await M._event(conn, "ACTUAL_ACCEPTED" if vid else "SUBMISSION_AMBIGUOUS",
                        mirror_id=mid, intent_id=intent_id, venue_order_id=vid,
                        latency_ms=lat_ms)
@@ -490,10 +520,24 @@ class ActualLane:
                 "venue_order_id": vid, "mirror_id": mid}
 
     async def _finish(self, conn, intent_id, t, state, refusal=None) -> None:
+        """The lane's own outcome onto its intent -- only while the intent
+        still says the lane's submission is in flight (SUBMITTING): an intent
+        recovery has already decided from venue evidence is never rewritten
+        by the lane (R30A chaos review: the lease fence, on the intent)."""
         await conn.execute(
             """UPDATE execution_intents SET actual_state = $2, actual_refusal = $3,
                  timeline = timeline || $4::jsonb, updated_at = now()
-               WHERE intent_id = $1""", intent_id, state, refusal, _j(t))
+               WHERE intent_id = $1 AND actual_state = $5""",
+            intent_id, state, refusal, _j(t), A_SUBMITTING)
+
+    async def _late_timeline(self, conn, intent_id, t, outcome) -> None:
+        """A late answer's latency marks still reach the intent's timeline
+        (evidence only: the intent's state is the venue evidence's, set by
+        execmirror.late_submit_answer / recovery, never the late lane's)."""
+        await conn.execute(
+            """UPDATE execution_intents SET timeline = timeline || $2::jsonb,
+                 updated_at = now() WHERE intent_id = $1""",
+            intent_id, _j(dict(t, late_answer=outcome)))
 
     async def _buying_power(self, conn) -> tuple[Any, float | None]:
         """The retail account's buying power: the runner's live figure when it

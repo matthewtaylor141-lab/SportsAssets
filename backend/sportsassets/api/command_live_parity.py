@@ -49,6 +49,7 @@ import json
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
+from .. import canonical_intent as CI
 from .. import live_parity as LP
 from .agents_core import _pool, require_read
 
@@ -186,11 +187,16 @@ async def live_parity_intent(intent_id: str,
                 intent_id)
     body = _row(it)
     verified = None
-    if intent_id.startswith("cdi_"):
-        try:
+    try:
+        if intent_id.startswith("cdi_"):
             verified = LP.verify_intent(dict(it))
-        except Exception:                                     # noqa: BLE001
-            verified = False
+        else:
+            # R30A: a management intent is verified from its persisted row
+            # too (canonical_intent.verify_management_intent); it was served
+            # with sha_verified None, unprovable by any reader
+            verified = CI.verify_management_intent(dict(it))
+    except Exception:                                         # noqa: BLE001
+        verified = False
     return {"intent": body, "sha_verified": verified,
             "executions": [_row(r) for r in ex],
             "parity": None if par is None else _row(par)}

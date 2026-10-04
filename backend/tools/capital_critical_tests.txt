@@ -913,3 +913,74 @@ tests/test_r30a_loop_health.py
 # cutover / no table / no SHA is UNAVAILABLE, never a manufactured zero;
 # targets pinned to the system's own bounds.
 tests/test_r30a_runtime_slo.py
+# R30A CHAOS / RECOVERY (program section 28): the one venue state machine
+# (execution_intent.ActualLane + execmirror.Mirror) driven through its fake
+# venue with faults at the transport and the database. A timeout after send
+# stays UNKNOWN, is never re-sent, and is decided only by venue evidence --
+# the open orders, then the account's own trade log (an IOC that traded is
+# recovered and booked, never written off as REJECTED); an unreadable log or
+# an unattributable own trade keeps it UNKNOWN. Duplicate / stale order-record
+# reads never book a fill twice and never move cum backwards; a lane killed
+# mid-submit is decided after its lease with no second submission (also for
+# two racing lanes); a DB failure after the venue accepted is recovered,
+# booked and handed to Xavier; a partial fill during a working cancel is
+# counted and the cancel is not forgotten; a restart resolves every UNKNOWN.
+# Review round: the trade log is served in the venue's own page shapes and
+# read by the REAL execmirror.Venue.own_trades (an empty body, a None, eof
+# "false", an unfinished page or a row naming no market / type / time keeps
+# a filled IOC UNKNOWN, never REJECTED), and it refuses exactly the pages the
+# funded lane's strict reader refuses; a lane that outlives its lease never
+# overwrites recovery (its late answer is an event, a late acknowledgement
+# records the order a premature NOT_FOUND wrote off, a late ambiguous end
+# reopens it); absence is not concluded while a send can still be on the
+# wire; same-shape attempts are paired earliest first and wait on a live
+# same-shape claim; a permanently lower venue read is recorded once, leaves
+# the poll queue and is reconciled; an adopted order carries the venue's own
+# instant, not the reconciliation time.
+tests/test_chaos_the_venue_state_machine_recovers.py
+# R30A SDK RETRIES / 429 / AMBIGUOUS POST (program section 21), counted on
+# the wire under the installed venue SDK through an httpx.MockTransport: the
+# SDK never retries a POST even at its default; every client built from an
+# order credential (pmus, execmirror.Venue, the execmirror probe reader) has
+# the SDK's retries off, so a 429 is one dispatch and a named RateLimitError;
+# a 429 at the execution mirror trips venue_pace's shared circuit;
+# pmus.submit_fok makes exactly one create whatever the venue answers and
+# raises it by name (a post-only 429 refusal carries status_code 429 and
+# error_type RateLimitError); a 429 on submit_fok's preview or create (IOC and
+# post-only) and on close_position trips the shared circuit at the adapter's
+# transport (venue_request_gate.PacedTransport), for every funded / copy /
+# desk caller, and a non-429 failure does not; no
+# order adapter loops around its send; no module builds the SDK with retries
+# on (order modules found by AST, the reference form included, with a
+# mutation check); Kalshi's session has no retry adapter.
+tests/test_order_posts_are_sent_once_and_429s_are_named.py
+# R30A CHAOS: a provider that goes silent and a settlement that arrives late.
+# The real PinnAPI owner loses its socket (authority revoked, quotes
+# unreadable); the feed runtime's real heartbeat writer publishes it and the
+# agents' work-state reader blocks Xavier on market data (never IDLE, never
+# REVIEWING on a dead feed); the completed-game policy refuses to ENTER on the
+# silent provider's last price (PROBABILITY_EVIDENCE_STALE, no order, no
+# intent) and enters once a fresh reading lands; a stale review waits and
+# enqueues reacquisition with no sale. A delayed settlement: the real writer
+# (join_outcomes over read_resolution over the real SDK client) records the
+# attempt and no outcome, the real reader books nothing and the position
+# stays open and owned; on arrival it is booked once through the ledger.
+tests/test_chaos_provider_disconnect_and_delayed_settlement.py
+# R30A PRODUCTION-SHAPED CONTRACTS (program section 22): the production
+# writer persists, the production reader reads the persisted row (jsonb as
+# asyncpg returns it, Decimals, timestamptz) -- no hand-built reader input.
+# K1 paper decision -> canonical intent -> both adapters -> parity ledger ->
+# the readiness gate after a recorded cutover; K2 Xavier's review -> a
+# management intent consumed by exactly both adapters, verified from its row
+# by canonical_intent.verify_management_intent and the intent route; K3 paper order / fill /
+# settlement -> ledger positions -> INVESTMENT profitability validation; K4
+# the actual lane's order record (incl. one recovered from the trade log) ->
+# Audrey's reconciliation and the management views; K5 agent_work_requests ->
+# the floor workspace queue and the identity work state; K6 PinnAPI ingest ->
+# the collector's valuation record -> the completed-game sole authority
+# (nothing once authority is revoked or past 30 s); K6b a WS frame -> the real
+# reactive collector cycle persists the PinnAPI valuation -> the real
+# completed-game decision on that row (ENTER fresh; refused past 30 s and
+# after authority revocation); K7 the entry-evidence route returns the
+# collector's jsonb as objects.
+tests/test_contract_writers_round_trip_to_their_readers.py

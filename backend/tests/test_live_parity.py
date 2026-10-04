@@ -804,6 +804,16 @@ async def _cutover_world(conn, *, sha=SHA, workers=SHA, migrations=True,
     if await conn.fetchval("SELECT count(*) FROM execmirror_control") == 0:
         await conn.execute("INSERT INTO execmirror_control DEFAULT VALUES")
     await conn.execute("UPDATE execmirror_control SET stopped = $1", stopped)
+    # THE WORLD HAS NO VENUE ORDERS. NO_CAPITAL_ACTIVATED counts every
+    # execmirror order that ever carried a venue order id, and the files that
+    # sort before this one (test_actual_admission, test_execmirror,
+    # test_execution_intent_fanout) leave fake-venue rows behind in the shared
+    # test database, so this proof failed in a full run for a reason that is
+    # not its subject. Cleared inside this test's own transaction, which is
+    # rolled back (R30A chaos stream).
+    await conn.execute("DELETE FROM execmirror_fills")
+    await conn.execute("DELETE FROM execmirror_orders")
+    await conn.execute("DELETE FROM small_live_order_events")
 
 
 @pg
