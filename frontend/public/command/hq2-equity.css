@@ -1,0 +1,34 @@
+/* Capital Pulse treatment. Motion communicates freshness/change, not synthetic price.
+   The line itself remains the step-line emitted by equity-wall.js. */
+.bt-hq2 .btew-host{margin-top:10px!important}
+.bt-hq2 .btew-wall,.bt-hq2 .ew-wall{
+  border:1px solid var(--bt-line)!important;border-radius:26px!important;
+  background:
+    radial-gradient(700px 240px at 85% -10%,rgba(49,87,255,.16),transparent 55%),
+    linear-gradient(180deg,#071427,#040c19)!important;
+  box-shadow:0 32px 90px rgba(0,0,0,.34)!important;overflow:hidden!important
+}
+.bt-hq2 .ew-card{
+  border-color:var(--bt-line)!important;background:linear-gradient(180deg,rgba(8,24,45,.78),rgba(4,13,26,.9))!important;
+  border-radius:20px!important
+}
+.bt-hq2 .ew-plot{height:clamp(220px,28vw,360px)!important;position:relative!important}
+.bt-hq2 .ew-line{stroke-width:2.25!important;filter:drop-shadow(0 0 8px rgba(91,120,255,.4))}
+.bt-hq2 .ew-end.live{box-shadow:0 0 0 6px rgba(91,120,255,.08),0 0 24px rgba(91,120,255,.72)!important}
+.bt-hq2 .ew-plot::after{
+  content:"";position:absolute;top:0;bottom:0;width:1px;left:0;
+  background:linear-gradient(to bottom,transparent,rgba(87,216,255,.5),transparent);
+  box-shadow:0 0 18px rgba(87,216,255,.28);animation:btEquityScan 8s ease-in-out infinite
+}
+.bt-hq2 .btew-host.bt-eq-stale .ew-plot::after{animation-play-state:paused;opacity:.18}
+@keyframes btEquityScan{0%{left:2%;opacity:0}10%{opacity:1}90%{opacity:1}100%{left:98%;opacity:0}}
+.bt-equity2-pulse{
+  display:flex;align-items:center;gap:9px;margin:0 0 10px;padding:8px 11px;
+  border:1px solid var(--bt-line);border-radius:999px;width:max-content;max-width:100%;
+  background:#071426;color:#8fa4bb;font:700 9px/1 var(--bt-mono);letter-spacing:.08em;text-transform:uppercase
+}
+.bt-equity2-pulse i{width:7px;height:7px;border-radius:50%;background:var(--bt-green);box-shadow:0 0 12px rgba(88,227,178,.75)}
+.bt-equity2-pulse.stale i{background:var(--bt-gold);box-shadow:none}
+.bt-equity2-pulse.changed{animation:btEqFlash .7s ease-out}
+@keyframes btEqFlash{0%{box-shadow:0 0 0 0 rgba(88,227,178,.35)}100%{box-shadow:0 0 0 18px rgba(88,227,178,0)}}
+@media(prefers-reduced-motion:reduce){.bt-hq2 .ew-plot::after,.bt-equity2-pulse.changed{animation:none}}
