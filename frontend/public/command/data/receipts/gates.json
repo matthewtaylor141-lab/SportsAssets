@@ -1,0 +1,35 @@
+{
+ "about": "Gate runs the receipt tool knows how to read. `python tools/release_receipt.py --gate <id>` (from backend/) regenerates a receipt; an unchanged run writes nothing. Add a row per new gate.",
+ "gates": [
+  {
+   "gate_id": "f31",
+   "candidate": "cand25",
+   "sha": "fd6cc5b1390dc181bb34a8e441f3ef4fd2ac29ad",
+   "base_sha": "177d05e96263f3965f5fbb3cf7312c376886e392",
+   "gate_dir": "/tmp/claude-0/gate_f31_out",
+   "run_script": "/tmp/claude-0/gate_f31_run.sh",
+   "baselines": ["/tmp/claude-0/gate_explore_out", "/tmp/claude-0/gate_talk_out"],
+   "evidence": "backend/sportsassets/release_receipts/evidence/f31.json"
+  },
+  {
+   "gate_id": "f33",
+   "candidate": "cand27",
+   "sha": "8e627493cd40e7b63f0b57af23a84019c02b044b",
+   "base_sha": "fd6cc5b1390dc181bb34a8e441f3ef4fd2ac29ad",
+   "gate_dir": "/tmp/claude-0/gate_f33_out_DISKFULL_VOID",
+   "run_script": "/tmp/claude-0/gate_f33_run.sh",
+   "baselines": ["/tmp/claude-0/gate_explore_out", "/tmp/claude-0/gate_talk_out"],
+   "evidence": "backend/sportsassets/release_receipts/evidence/f33.json"
+  },
+  {
+   "gate_id": "f33b",
+   "candidate": "cand27",
+   "sha": "8e627493cd40e7b63f0b57af23a84019c02b044b",
+   "base_sha": "fd6cc5b1390dc181bb34a8e441f3ef4fd2ac29ad",
+   "gate_dir": "/tmp/claude-0/gate_f33b_out",
+   "run_script": "/tmp/claude-0/gate_f33b_run.sh",
+   "baselines": ["/tmp/claude-0/gate_explore_out", "/tmp/claude-0/gate_talk_out"],
+   "evidence": "backend/sportsassets/release_receipts/evidence/f33.json"
+  }
+ ]
+}
