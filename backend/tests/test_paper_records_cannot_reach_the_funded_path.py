@@ -173,9 +173,11 @@ def test_no_funded_module_imports_the_paper_modules():
                # PAPER adapter's paper orders / fills / books and walks the
                # SHADOW proposal through the observed book with the paper
                # simulator's PURE walk (levels_for / walk) inside a READ ONLY
-               # transaction; writes nothing, imports no order, venue,
-               # execution or funded module
-               # (tests/test_execution_calibration.py)
+               # transaction; writes nothing, and imports no order, venue,
+               # execution or funded module -- directly or in what a request
+               # loads at run time (the micro-calibration lane's class is
+               # restated, never imported; tests/test_execution_calibration.py
+               # checks the route's run-time import closure)
                "api/command_execution_calibration.py",
                # (R30C, 233) the Opportunity Score V1 / V2 shadow tournament
                # (/api/command/opportunity-score-tournament): GET-only, joins

@@ -9,14 +9,19 @@
      spec is frozen and hashed.
   §2 THE TOURNAMENT (pure): unique opportunities (re-evaluations counted,
      never pooled as new evidence), INVESTMENT only, forward only (no
-     cutover -> NOT_ESTABLISHED), rank correlation / top-k / calibration
-     with EVENT-CLUSTER bootstrap intervals, and a pre-declared promotion
-     rule whose best outcome is PENDING_OWNER_DECISION -- never automatic.
+     cutover -> NOT_ESTABLISHED), ONE SPEC SERIES at a time (a re-tuned V2
+     starts from zero; nothing first seen before it counts), rank
+     correlation / top-k / calibration (summed predictions of the traded
+     intents) with EVENT-CLUSTER bootstrap intervals, and a pre-declared
+     promotion rule whose best outcome is PENDING_OWNER_DECISION -- never
+     automatic.
   §3 THE REAL WRITERS: the decision hook records V1 and V2 beside every
-     canonical intent at its decision instant (the real paper pass); the
-     outcome join reads the paper ledger's realized P&L of the intent's own
-     paper order; the database refuses a backfilled or authority-bearing
-     row and every UPDATE / DELETE / TRUNCATE.
+     canonical intent at its decision instant (the real paper pass, and
+     live_parity.canonical_decision driven to a MEASURED V2 over seeded
+     history); the outcome join reads the paper ledger's realized P&L of
+     the intent's own paper order; the database forces recorded_at to its
+     own clock, refuses a row that is not its intent's, a backfilled or
+     authority-bearing row and every UPDATE / DELETE / TRUNCATE.
   §4 NO AUTHORITY: V2 is never in the intent and nothing on the decision
      path reads the tournament; the route is GET only behind a command
      session, READ ONLY.
@@ -86,7 +91,11 @@ def test_v2_is_the_lower_bound_formula_it_declares():
     assert got["status"] == "MEASURED" and got["spec_sha"] == V2.SPEC_SHA
     k = EE.TRANSFER_PENALTY[EE.PAPER_SIMULATION]
     f_lcb, _ = EE.wilson(0.9, 40 / k)
-    a_ucb = 0.004 + EE.t_crit_95(39) * 0.002 * math.sqrt(k) / math.sqrt(40)
+    # the class half-width x sqrt(K), never below the declared transfer
+    # floor (one $0.01 tick): here the floor binds
+    half = EE.t_crit_95(39) * 0.002 * math.sqrt(k) / math.sqrt(40)
+    assert half < EE.MEAN_TRANSFER_FLOOR[EE.USD_PER_CONTRACT]
+    a_ucb = 0.004 + max(half, EE.MEAN_TRANSFER_FLOOR[EE.USD_PER_CONTRACT])
     e = 0.62 - 0.52 - 0.01 - a_ucb
     ev = f_lcb * e * 1000 * (1 - 0.0) * (1 - 0.05)
     tail = f_lcb * 1000 ** 2 * 0.62 * 0.38 / (2 * 400_000)
@@ -100,7 +109,30 @@ def test_v2_is_the_lower_bound_formula_it_declares():
     assert c["fill_probability"]["lcb"] < c["fill_probability"]["point"]
     assert c["fill_probability"]["fitted_on"] == EE.PAPER_SIMULATION
     assert c["adverse_selection_pp"]["ucb"] > c["adverse_selection_pp"]["mean"]
+    assert c["adverse_selection_pp"]["transfer_floor"] == 0.01
     assert got["execution_evidence"]["actual"]["why"] == EE.R_NO_ACTUAL
+    # a zero-spread markout history is never read as certain
+    flat = _v2(est=_est(sd=0.0))
+    assert flat["components"]["adverse_selection_pp"]["ucb"] == \
+        pytest.approx(0.004 + 0.01)
+
+
+def test_v2_uses_the_cluster_effective_sample_when_it_is_recorded():
+    est = _est(n=40)
+    est["inputs"]["history"]["fill_rate"][TAKER].update(n_eff=10.0,
+                                                         clusters=8)
+    est["inputs"]["history"]["adverse_selection"][TAKER].update(
+        se_clustered_pp=0.003, clusters=8)
+    got = _v2(est=est)
+    fp = got["components"]["fill_probability"]
+    assert fp["clustered"] is True and fp["n_eff"] == 10.0
+    assert fp["lcb"] == pytest.approx(EE.wilson(0.9, 10.0 / 9.0)[0],
+                                      abs=1e-9)
+    ad = got["components"]["adverse_selection_pp"]
+    assert ad["clustered"] is True
+    assert ad["ucb"] == pytest.approx(
+        0.004 + EE.t_crit_95(7) * 0.003 * 3.0, abs=1e-9)
+    assert got["opportunity_score"] < _v2()["opportunity_score"]
 
 
 def test_v2_rewards_evidence_and_penalizes_correlation_and_tail():
@@ -134,6 +166,13 @@ def test_v2_says_why_instead_of_scoring_zero():
             ({"allie": {"expected_hours_to_capital_release": 3.0,
                         "opportunity_cost": {"idle_capital_usd": 1e5}}},
              "correlation"),
+            # no fixture on the decision: Allie's 0 is labelled UNMEASURED
+            # (canonical_components) and V2 never reads it as "no
+            # correlation"
+            ({"allie": dict(_allie(), correlation_concentration={
+                "haircut": 0.0, "haircut_status": "UNMEASURED",
+                "haircut_why": "NO_FIXTURE_ON_THE_DECISION"})},
+             "correlation"),
             ({"ex": None}, "exceptional_settlement")):
         got = _v2(**kw)
         assert got["status"] == "UNAVAILABLE", kw
@@ -156,6 +195,8 @@ def test_the_exceptional_settlement_bound_uses_the_sport_else_pooled_else_none()
                                      scope_key="nfl",
                                      pooled={"k": 0, "n": 500})
     assert own["scope"] == "nfl" and own["rate_ucb"] > 1 / 50
+    assert "SETTLED_AT_VENUE_PRICE" in own["basis"]
+    assert "INVESTMENT" in own["basis"]
     pooled = V2.exceptional_from_counts(scope_counts={}, scope_key="nfl",
                                         pooled={"k": 2, "n": 400})
     assert pooled["scope"] == "POOLED_ALL_PAPER_SETTLEMENTS"
@@ -172,7 +213,12 @@ def test_the_v2_spec_is_frozen_and_hashed():
     assert V2.SPEC_SHA == __import__("hashlib").sha256(json.dumps(
         V2.SPEC, sort_keys=True).encode()).hexdigest()
     assert V2.SPEC["transfer_penalty"] == EE.TRANSFER_PENALTY
+    assert V2.SPEC["mean_transfer_floor"] == EE.MEAN_TRANSFER_FLOOR
+    assert V2.SPEC["exceptional_outcomes"] == ["VOID_REFUND",
+                                               "SETTLED_AT_VENUE_PRICE"]
     assert V2.SPEC["authority"] == "SHADOW_NO_AUTHORITY"
+    from sportsassets import canonical_components as CC
+    assert tuple(V2.SPEC["exceptional_outcomes"]) == CC.EXCEPTIONAL_OUTCOMES
 
 
 # ── §2 the tournament (pure) ─────────────────────────────────────────
@@ -219,10 +265,15 @@ def test_the_outcome_of_an_intent_is_the_ledger_or_a_named_exclusion():
     assert r["state"] == "RESOLVED" and r["realized_net_usd"] == 1.5
 
 
+CUR = OT.current_series()
+OLD = (OT.VERSION, CUR[1], V2.VERSION, "a" * 64)      # a re-tuned-away spec
+
+
 def _entry(i, *, opp, event, v1, v2, at, sleeve="INVESTMENT", v1p=None,
-           v2p=None):
+           v2p=None, series=CUR):
     return {"intent_id": "cdi_%024d" % i, "opportunity_id": opp,
             "event_key": event, "decided_at": at, "sleeve": sleeve,
+            **dict(zip(OT.SERIES_FIELDS, series)),
             "v1_status": "MEASURED" if v1 is not None else "UNAVAILABLE",
             "v1_score": v1, "v1_why": None if v1 is not None else "X: y",
             "v2_status": "MEASURED" if v2 is not None else "UNAVAILABLE",
@@ -331,6 +382,93 @@ def test_only_forward_investment_unique_opportunities_count():
     assert got["coverage"]["v1_unavailable_why"] == {"X": 1}
 
 
+def test_a_reentered_opportunity_is_calibrated_on_summed_predictions():
+    """R30C review: the calibration compared the FIRST intent's prediction
+    with the SUM of every traded intent's realized net. The prediction is
+    now the sum over the same intents whose outcomes are summed; an intent
+    with no paper order adds to neither."""
+    a = _entry(1, opp="o", event="e", v1=1.0, v2=2.0, at=10.0, v1p=5.0,
+               v2p=3.0)
+    b = _entry(2, opp="o", event="e", v1=9.0, v2=9.0, at=20.0, v1p=7.0,
+               v2p=4.0)
+    c = _entry(3, opp="o", event="e", v1=9.0, v2=9.0, at=30.0, v1p=100.0,
+               v2p=100.0)
+    outcomes = {a["intent_id"]: {"state": "RESOLVED",
+                                 "realized_net_usd": 2.0},
+                b["intent_id"]: {"state": "RESOLVED",
+                                 "realized_net_usd": 6.0},
+                c["intent_id"]: {"state": "EXCLUDED",
+                                 "why": "NO_PAPER_ORDER"}}
+    rows, counts = OT.opportunities([a, b, c], outcomes)
+    r = rows[0]
+    assert (r["v1"], r["v2"]) == (1.0, 2.0)             # ranked by the first
+    assert r["traded_intents"] == 2
+    assert r["realized_net_usd"] == 8.0
+    assert r["v1_pred"] == 12.0 and r["v2_pred"] == 7.0  # same two intents
+    b2 = dict(b, v1_predicted_net_usd=None)
+    rows, _ = OT.opportunities([a, b2, c], outcomes)
+    assert rows[0]["v1_pred"] is None                   # never half a sum
+
+
+def test_one_spec_series_at_a_time_and_nothing_seen_before_it_counts():
+    """R30C review: rows recorded under a re-tuned-away V2 spec counted
+    toward the new spec's 30-event minimum. Each series is reported apart;
+    only the CURRENT one is evaluated, and within it only opportunities
+    first decided under it, on events not seen before it began."""
+    old, outcomes = [], {}
+    for i in range(40):
+        e = _entry(i, opp="opp_old_%d" % i, event="ev_old_%d" % i,
+                   v1=-float(i), v2=float(i), at=100.0 + i, v1p=1.0,
+                   v2p=1.0, series=OLD)
+        old.append(e)
+        outcomes[e["intent_id"]] = {"state": "RESOLVED",
+                                    "realized_net_usd": 10.0 * i}
+    new = []
+    for i in range(20):
+        e = _entry(100 + i, opp="opp_new_%d" % i, event="ev_new_%d" % i,
+                   v1=-float(i), v2=float(i), at=200.0 + i, v1p=1.0,
+                   v2p=1.0)
+        new.append(e)
+        outcomes[e["intent_id"]] = {"state": "RESOLVED",
+                                    "realized_net_usd": 10.0 * i}
+    # an opportunity first seen under the old spec, re-decided under the new
+    re_old = _entry(500, opp="opp_old_3", event="ev_old_3", v1=1.0, v2=1.0,
+                    at=230.0)
+    # a new opportunity on an event the old spec had already seen
+    same_ev = _entry(501, opp="opp_x", event="ev_old_5", v1=1.0, v2=1.0,
+                     at=231.0)
+    for e in (re_old, same_ev):
+        outcomes[e["intent_id"]] = {"state": "RESOLVED",
+                                    "realized_net_usd": 1.0}
+    got = OT.compute(old + new + [re_old, same_ev], outcomes, since=0.0,
+                     cutover=0.0)
+    assert got["status"] == "OK"
+    assert got["entries_in_window"] == 62 and got["entries"] == 20
+    assert got["current_series"]["v2_spec_sha"] == V2.SPEC_SHA
+    assert got["current_series"]["first_decided_at"] == 200.0
+    by = {s["v2_spec_sha"]: s for s in got["series"]}
+    assert by["a" * 64]["entries"] == 40 and by["a" * 64]["evaluated"] is \
+        False
+    assert by[V2.SPEC_SHA]["entries"] == 22 and by[V2.SPEC_SHA]["current"]
+    assert got["series_excluded"] == {
+        "RECORDED_UNDER_ANOTHER_SPEC_SERIES": 40,
+        "OPPORTUNITY_FIRST_SEEN_UNDER_AN_EARLIER_SPEC": 1,
+        "EVENT_SEEN_BEFORE_THE_CURRENT_SPEC_SERIES_BEGAN": 1}
+    assert got["common"]["V2"]["n_opportunities"] == 20
+    pe = got["promotion_evidence"]
+    assert pe["independent_events"] == 20
+    assert pe["status"] == "INSUFFICIENT_OUT_OF_SAMPLE_EVIDENCE"
+    # the same 40 old rows WOULD have passed the rule had they been pooled
+    pooled = OT.compute(old, outcomes, since=0.0, cutover=0.0, current=OLD)
+    assert pooled["promotion_evidence"]["status"] == \
+        "EVIDENCE_SUPPORTS_V2_PENDING_OWNER_DECISION"
+    # with no row of the current spec there is nothing to evaluate
+    none = OT.compute(old, outcomes, since=0.0, cutover=0.0)
+    assert none["entries"] == 0
+    assert none["promotion_evidence"]["status"] == \
+        "INSUFFICIENT_OUT_OF_SAMPLE_EVIDENCE"
+
+
 def test_an_entry_is_built_from_the_intent_and_never_scores_a_missing_value():
     it = _intent(intent_id="cdi_" + "1" * 24)
     e = OT.build_entry(intent=it, v1={"status": "UNAVAILABLE", "why": "NO"},
@@ -368,11 +506,14 @@ async def test_the_outcome_join_reads_the_ledger_of_the_intents_own_order():
         assert (await F.fill(conn, a, at=T + 4,
                              offers=[(0.50, 1500), (0.52, 1000)],
                              bids=[(0.48, 2000)]))["state"] == "FILLED"
+        # sized within its decision book's depth (as the real sizer does);
+        # the book moved beyond the limit before the simulator's fill
         b = await F.decision(conn, acct, T=T + 5, slug="test-ost-b-%s" % tag,
-                             event="ev-b-%s" % tag, offers=[(0.60, 3000)],
-                             bids=[(0.58, 3000)])
-        await F.fill(conn, b, at=T + 9, offers=[(0.60, 3000)],
-                     bids=[(0.58, 3000)])
+                             event="ev-b-%s" % tag, offers=[(0.50, 3000)],
+                             bids=[(0.48, 3000)])
+        assert (await F.fill(conn, b, at=T + 9, offers=[(0.60, 3000)],
+                             bids=[(0.58, 3000)]))["state"] in (
+            "EXPIRED", "CANCELED")
         c = await F.decision(conn, acct, T=T + 20, slug="test-ost-b-%s" % tag,
                              event="ev-b-%s" % tag, offers=[(0.50, 3000)],
                              bids=[(0.48, 3000)])
@@ -398,9 +539,13 @@ async def test_the_outcome_join_reads_the_ledger_of_the_intents_own_order():
             assert r["sleeve"] == "INVESTMENT"
         assert rows[b["intent"]["intent_id"]]["opportunity_id"] == \
             rows[c["intent"]["intent_id"]]["opportunity_id"]
-        entries, outcomes = await CT.gather(conn, since=T - 1)
+        entries, outcomes, ctx = await CT.gather(conn, since=T - 1)
         own = [e for e in entries if e["intent_id"] in mine]
         assert len(own) == 3
+        assert ctx["read"]["truncated"] is False
+        assert ctx["series_summary"][OT.current_series()]["entries"] >= 3
+        assert set(ctx["first_seen"]["opportunity"]) >= {
+            e["opportunity_id"] for e in own}
         from sportsassets import bettor_paper_ledger as L
         pos = {p["group_id"]: p for p in await L.positions(
             conn, acct["account_id"], include_closed=True)}
@@ -425,6 +570,8 @@ async def test_the_outcome_join_reads_the_ledger_of_the_intents_own_order():
         cut = await CT.cutover_epoch(conn)
         got = OT.compute(own, outcomes, since=T - 1, cutover=cut)
         assert got["status"] == "OK" and got["counts"]["resolved"] == 2
+        assert got["series_excluded"] == {}
+        assert got["current_series"]["v2_spec_sha"] == V2.SPEC_SHA
         assert got["common"]["V2"]["status"] == "UNAVAILABLE"
         assert got["promotion_evidence"]["status"] == \
             "INSUFFICIENT_OUT_OF_SAMPLE_EVIDENCE"
@@ -470,29 +617,78 @@ async def test_the_database_refuses_backfill_authority_and_any_change():
         # idempotent on the intent: a second record is a no-op
         assert await OT.record_entry(conn, intent=d["intent"], v1=d["v1"],
                                      v2=d["v2"]) is False
-        # a BACKFILL (scored long after its decision) is refused -- the
-        # writer reports it and never raises into the decision
-        old = dict(d["intent"], intent_id="cdi_" + uuid.uuid4().hex[:24],
-                   created_at=time.time() - 3600)
+        # a BACKFILL: an intent decided an hour ago and RECORDED, scored
+        # now -- refused (the writer reports it, never raises into the
+        # decision)
+        old = await F.bare_intent(conn, T=time.time() - 3600,
+                                  slug="test-ostdb-old-%s" % tag,
+                                  event="ev-old-%s" % tag)
         assert await OT.record_entry(conn, intent=old, v1=d["v1"],
                                      v2=d["v2"]) is False
         assert await conn.fetchval(
             "SELECT count(*) FROM opportunity_score_tournament WHERE "
             " intent_id = $1", old["intent_id"]) == 0
-        base = ("INSERT INTO opportunity_score_tournament (entry_id, "
+        # a score for an intent that was never recorded: refused by name
+        ghost = dict(d["intent"], intent_id="cdi_" + uuid.uuid4().hex[:24])
+        assert await OT.record_entry(conn, intent=ghost, v1=d["v1"],
+                                     v2=d["v2"]) is False
+        fresh = await F.bare_intent(conn, T=time.time(),
+                                    slug="test-ostdb-new-%s" % tag,
+                                    event="ev-new-%s" % tag)
+        cols = ("INSERT INTO opportunity_score_tournament (entry_id, "
                 " tournament_version, intent_id, intent_version, intent_sha,"
                 " decision_id, opportunity_id, opportunity_key_version, "
                 " opportunity_key, event_key, strategy, sleeve, "
                 " us_market_slug, holding_side, decided_at, v1_version, "
                 " v1_status, v1_score, v1_why, v1_detail, v2_version, "
                 " v2_spec_sha, v2_status, v2_score, v2_why, v2_detail, "
-                " authority) VALUES ('ost_' || repeat('c', 24), 'v', "
-                " 'cdi_' || repeat('c', 24), 'v', repeat('a', 64), 'd', 'o',"
-                " 'k', '{}', 'e', 's', 'INVESTMENT', 'm', 'LONG', now(), "
-                " 'v1', %s, '{}', 'v2', repeat('a', 64), %s, '{}', %s)")
+                " authority, recorded_at) VALUES ($1, 'v', $2, $3, $4, $5, "
+                " 'o', 'k', '{}', 'e', $6, $7, $8, 'LONG', to_timestamp($9), "
+                " 'v1', %s, '{}', 'v2', repeat('a', 64), %s, '{}', %s, "
+                " to_timestamp($10))")
         ok_v1 = "'MEASURED', 0.1, NULL"
         ok_v2 = "'MEASURED', 0.2, NULL"
-        await conn.execute(base % (ok_v1, ok_v2, "'SHADOW_NO_AUTHORITY'"))
+
+        def args(it, *, eid="ost_" + "c" * 24, sha=None, sleeve=None,
+                 decided=None, recorded=None):
+            return (eid, it["intent_id"], it["intent_version"],
+                    sha or it["content_sha"], it["decision_id"],
+                    it["strategy"], sleeve or it["sleeve"],
+                    it["us_market_slug"],
+                    float(decided if decided is not None
+                          else it["created_at"]),
+                    float(recorded if recorded is not None
+                          else it["created_at"]))
+        ok = cols % (ok_v1, ok_v2, "'SHADOW_NO_AUTHORITY'")
+        # a missing intent, a different sha, sleeve or decision instant:
+        # refused -- the row must be its intent's own
+        await _expect(conn, asyncpg.CheckViolationError, ok,
+                      *args(dict(fresh, intent_id="cdi_" + "9" * 24)))
+        await _expect(conn, asyncpg.CheckViolationError, ok,
+                      *args(fresh, sha="f" * 64))
+        await _expect(conn, asyncpg.CheckViolationError, ok,
+                      *args(fresh, sleeve="TRAINING"))
+        await _expect(conn, asyncpg.CheckViolationError, ok,
+                      *args(fresh, decided=time.time() - 30 * 86400))
+        # R30C review's bypass: an OLD intent written with an explicit,
+        # equally old recorded_at -- recorded_at is forced to the database
+        # clock, so the CHECK sees a 30-day lag and refuses
+        ancient = await F.bare_intent(conn, T=time.time() - 30 * 86400,
+                                      slug="test-ostdb-anc-%s" % tag,
+                                      event="ev-anc-%s" % tag)
+        await _expect(conn, asyncpg.CheckViolationError, ok,
+                      *args(ancient, recorded=ancient["created_at"]))
+        # the well-formed row is accepted -- and whatever recorded_at the
+        # writer supplied, the database's clock is what is kept
+        await conn.execute(ok, *args(fresh, recorded=time.time() - 86400))
+        lag = await conn.fetchval(
+            "SELECT abs(extract(epoch FROM clock_timestamp() - recorded_at))"
+            "  FROM opportunity_score_tournament WHERE intent_id = $1",
+            fresh["intent_id"])
+        assert lag < 60.0
+        other = await F.bare_intent(conn, T=time.time(),
+                                    slug="test-ostdb-oth-%s" % tag,
+                                    event="ev-oth-%s" % tag)
         for v1, v2, auth in (
                 ("'MEASURED', NULL, NULL", ok_v2, "'SHADOW_NO_AUTHORITY'"),
                 (ok_v1, "'UNAVAILABLE', NULL, NULL",
@@ -500,11 +696,225 @@ async def test_the_database_refuses_backfill_authority_and_any_change():
                 (ok_v1, "'UNAVAILABLE', 0.0, 'why'",
                  "'SHADOW_NO_AUTHORITY'"),
                 (ok_v1, ok_v2, "'PROMOTED'")):
-            await _expect(conn, (asyncpg.CheckViolationError,
-                                 asyncpg.UniqueViolationError),
-                          (base % (v1, v2, auth)).replace(
-                              "repeat('c', 24)", "repeat('d', 24)"))
+            await _expect(conn, asyncpg.CheckViolationError,
+                          cols % (v1, v2, auth),
+                          *args(other, eid="ost_" + "d" * 24))
     finally:
+        await tx.rollback()
+        await conn.close()
+
+
+@pg
+async def test_a_bounded_tournament_read_never_scores_a_reevaluation_as_first(
+        monkeypatch):
+    conn = await asyncpg.connect(H.DSN)
+    tx = conn.transaction()
+    await tx.start()
+    try:
+        await F.prepare(conn)
+        await F.record_cutover(conn)
+        acct = await H.new_account(conn, "ostcap")
+        T = time.time()
+        tag = uuid.uuid4().hex[:8]
+        a = await F.decision(conn, acct, T=T, slug="test-ostcap-a-%s" % tag,
+                             event="ev-a-%s" % tag, offers=[(0.50, 3000)],
+                             bids=[(0.48, 3000)])
+        b = await F.decision(conn, acct, T=T + 1, slug="test-ostcap-b-%s" % tag,
+                             event="ev-b-%s" % tag, offers=[(0.50, 3000)],
+                             bids=[(0.48, 3000)])
+        c = await F.decision(conn, acct, T=T + 2, slug="test-ostcap-b-%s" % tag,
+                             event="ev-b-%s" % tag, offers=[(0.50, 3000)],
+                             bids=[(0.48, 3000)])
+        assert all(x["tournament_recorded"] for x in (a, b, c))
+        monkeypatch.setattr(CT, "MAX_ENTRIES", 1)
+        entries, outcomes, ctx = await CT.gather(conn, since=T - 0.5)
+        assert [e["intent_id"] for e in entries] == [c["intent"]["intent_id"]]
+        assert ctx["read"]["truncated"] is True
+        assert ctx["read"]["rows_in_window"] == 3
+        got = OT.compute(entries, outcomes, since=T - 0.5, cutover=T - 60,
+                         **ctx)
+        assert got["truncated"] is True
+        # c re-evaluates b's opportunity; b (its first decision) was not
+        # read, so c is never scored as if it were the first
+        assert got["series_excluded"] == {
+            "FIRST_DECISION_OF_THE_OPPORTUNITY_NOT_IN_THE_READ_WINDOW": 1}
+        assert got["entries"] == 0
+    finally:
+        await tx.rollback()
+        await conn.close()
+
+
+@pg
+async def test_the_production_path_records_a_measured_v2_beside_the_intent():
+    """live_parity.canonical_decision -- the decision hook itself, with
+    canonical_components.at_decision reading the database -- over a
+    recorded history seeded through the real writers (Eddie's paper orders,
+    fills and markouts; settlements and their game starts; a capital
+    snapshot): V1 and V2 are both MEASURED in the tournament row, V2 from
+    the cluster-effective fill sample, and the intent's execution
+    estimates carry their LIVE intervals."""
+    from sportsassets import canonical_components as CC
+    from sportsassets import live_parity as LP
+    conn = await asyncpg.connect(H.DSN)
+    tx = conn.transaction()
+    await tx.start()
+    CC.reset_cache()
+    try:
+        await F.prepare(conn)
+        acct = await H.new_account(conn, "ostprod")
+        T = time.time()
+        seeded = await F.seed_history(conn, acct, T=T)
+        assert seeded["filled"] == 22
+        tag = uuid.uuid4().hex[:8]
+        slug = "test-ostprod-%s" % tag
+        obs0 = await H.observe(conn, slug, T - 1, bids=[(0.48, 3000)],
+                               offers=[(0.50, 3000)])
+        obs = dict(await conn.fetchrow(
+            "SELECT obs_id, extract(epoch FROM observed_at)::float8 AS "
+            " observed_at FROM paper_book_observations WHERE obs_id = $1",
+            obs0))
+        qty, limit, p = 2000, 0.52, 0.62
+        intent = await LP.canonical_decision(
+            conn, did="papercg:%s" % tag, strategy=F.CG, version=F.CG3,
+            cand={"us_market_slug": slug, "sport_family": "baseball",
+                  "league": "mlb", "fixture": "fx-ostprod-%s" % tag,
+                  "event_start_at": T + 3600,
+                  "side": "ORDER_INTENT_BUY_LONG", "valuation_id": None},
+            side="LONG",
+            sized={"qty": qty, "limit": limit, "wire": limit,
+                   "depth_within_limit": 3000, "budget_usd": 1100.0,
+                   "levels_used": 1},
+            ent={"order_type": "MARKETABLE", "time_in_force": "IOC",
+                 "target_order_usd": 1100.0},
+            obs=obs, md=H.md(offers=[(0.50, 3000)], bids=[(0.48, 3000)]),
+            econ={"acquisition_cost_usd": qty * 0.50,
+                  "fees_usd": qty * 0.005, "expected_net_profit_usd": 40.0},
+            p=p, best_edge=12.0, verdict="ENTER", refusals=[],
+            policy_decision={"selection_reason": "test"}, at=T,
+            label={"event_key": "ev-ostprod-%s" % tag}, book_age=1.0,
+            cfg={"risk": {"per_order_cap_usd": 5000.0}}, params=None, pin={})
+        assert intent is not None
+        row = await conn.fetchrow(
+            "SELECT * FROM opportunity_score_tournament WHERE intent_id = $1",
+            intent["intent_id"])
+        assert row is not None
+        assert row["v2_status"] == "MEASURED", row["v2_why"]
+        assert row["v1_status"] == "MEASURED", row["v1_why"]
+        assert row["v2_spec_sha"] == V2.SPEC_SHA
+        assert row["intent_sha"] == intent["content_sha"]
+        comp = H.j(row["v2_detail"])["components"]
+        assert comp["fill_probability"]["clustered"] is True
+        assert comp["fill_probability"]["fitted_on"] == EE.PAPER_SIMULATION
+        assert float(comp["fill_probability"]["lcb"]) < float(
+            comp["fill_probability"]["point"])
+        assert float(comp["adverse_selection_pp"]["ucb"]) >= \
+            float(comp["adverse_selection_pp"]["mean"]) + 0.01 - 1e-9
+        assert int(comp["exceptional_settlement"]["markets"]) >= 22
+        assert float(comp["correlation_haircut"]) == 0.0   # a fixture: measured
+        # the intent (V2 never in it) carries the LIVE intervals
+        assert "opportunity_score_v2" not in json.dumps(intent, default=str)
+        ed = intent["eddie"]
+        assert ed["status"] == "MEASURED"
+        assert ed["execution_evidence"]["fitted_on"] == EE.PAPER_SIMULATION
+        assert ed["live_interval"]["status"] == "MEASURED"
+        lo = ed["live_interval"]["expected_executable_ev_usd"]["low"]
+        hi = ed["live_interval"]["expected_executable_ev_usd"]["high"]
+        assert lo < ed["expected_executable_ev_usd"] < hi
+        al = intent["allie"]["execution_evidence"]
+        assert al["executable_net_live_interval_usd"]["status"] == "MEASURED"
+        assert al["live_execution_confidence"] == \
+            "NOT_ESTABLISHED_NO_ACTUAL_CANONICAL_FILL"
+        op = intent["opportunity_score"]
+        assert op["fill_probability_evidence"] == EE.PAPER_SIMULATION
+        assert op["fill_probability_live_interval"]["low"] < \
+            op["fill_probability"]
+        assert await conn.fetchval(
+            "SELECT count(*) FROM small_live_order_events") == 0
+    finally:
+        CC.reset_cache()
+        await tx.rollback()
+        await conn.close()
+
+
+@pg
+async def test_the_exceptional_settlement_bound_counts_venue_price_on_investment_only():
+    """R30C review: V2's tail input was labelled "on the canonical INVESTMENT
+    path" but read every sleeve, and it left out SETTLED_AT_VENUE_PRICE (the
+    venue's own exceptional price, e.g. $0.50 on a tie). Over real
+    settlements: three INVESTMENT intents (WON, SETTLED_AT_VENUE_PRICE,
+    LOST) and two BENCHMARK intents (VOID_REFUND x2) of one sport -- the
+    by-sport bound counts 1 exceptional of 3 settled markets."""
+    from sportsassets import canonical_components as CC
+    conn = await asyncpg.connect(H.DSN)
+    tx = conn.transaction()
+    await tx.start()
+    CC.reset_cache()
+    try:
+        await F.prepare(conn)
+        acct = await H.new_account(conn, "ostexc")
+        T = time.time() - 600
+        tag = uuid.uuid4().hex[:8]
+        sport = "testsport%s" % tag
+        plan = [(F.CG, F.CG3, "WON", {}),
+                (F.CG, F.CG3, "SETTLED_AT_VENUE_PRICE",
+                 {"price_per_contract": 0.5}),
+                (F.CG, F.CG3, "LOST", {}),
+                ("PINNACLE_ONLY_PAPER_BENCHMARK",
+                 "PINNACLE_ONLY_PAPER_BENCHMARK_V1", "VOID_REFUND",
+                 {"void_refund_per_contract": 0.50}),
+                ("PINNACLE_ONLY_PAPER_BENCHMARK",
+                 "PINNACLE_ONLY_PAPER_BENCHMARK_V1", "VOID_REFUND",
+                 {"void_refund_per_contract": 0.50})]
+        for i, (strat, ver, outcome, kw) in enumerate(plan):
+            it = await F.bare_intent(conn, T=T + i,
+                                     slug="test-exc-%s-%d" % (tag, i),
+                                     event="ev-exc-%s-%d" % (tag, i),
+                                     strategy=strat, version=ver,
+                                     sport=sport)
+            await F.settled_entry(conn, acct, it, T=T + i, outcome=outcome,
+                                  **kw)
+        got = await CC.exceptional_at_decision(conn, sport=sport,
+                                               now=time.time() + 1)
+        assert (got["k"], got["n"], got["scope"]) == (1, 3, sport), got
+        assert "SETTLED_AT_VENUE_PRICE" in got["basis"]
+        assert got["rate_ucb"] == pytest.approx(EE.wilson(1 / 3, 3)[1],
+                                                abs=1e-9)
+    finally:
+        CC.reset_cache()
+        await tx.rollback()
+        await conn.close()
+
+
+@pg
+async def test_a_decision_with_no_fixture_has_no_measured_correlation():
+    """R30C review: allie_at_decision passed fixture_open_groups=0 when the
+    decision had no fixture, and V2 read that 0 as "no correlation". The
+    haircut is labelled UNMEASURED and V2 says so."""
+    from sportsassets import canonical_components as CC
+    conn = await asyncpg.connect(H.DSN)
+    tx = conn.transaction()
+    await tx.start()
+    CC.reset_cache()
+    try:
+        T = time.time()
+        decision = {"decision_id": "papercg:nofx", "decided_at": T,
+                    "strategy": F.CG, "fixture": None,
+                    "us_market_slug": "test-nofx", "holding_side": "LONG",
+                    "proposed_qty": 100, "limit_price": 0.52,
+                    "capital_required_usd": 52.5,
+                    "executable_opportunity_dollars": 5.0,
+                    "event_start_at": T + 3600, "per_order_cap_usd": 5000}
+        allie = await CC.allie_at_decision(conn, decision=decision,
+                                           eddie={"status": "UNAVAILABLE"},
+                                           now=T)
+        cc = allie["correlation_concentration"]
+        assert cc["haircut_status"] == "UNMEASURED"
+        assert allie["unmeasured"]["correlation_haircut"] == CC.R_NO_FIXTURE
+        got = V2.score(V2.inputs_from(_est(), allie, EX))
+        assert "correlation" in got["unmeasured"]
+        assert "NO_FIXTURE_ON_THE_DECISION" in got["unmeasured"]["correlation"]
+    finally:
+        CC.reset_cache()
         await tx.rollback()
         await conn.close()
 

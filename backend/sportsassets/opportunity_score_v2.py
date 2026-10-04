@@ -16,22 +16,32 @@ inputs (no outcome is ever an input):
                 (the VWAP of the decision's recorded book for the economic
                 size), and the fee per contract (Eddie's, by style)
   f_lcb         the LOWER 95% bound of the fill probability: Wilson at the
-                effective sample n / K, where n is the count Eddie's fill
-                rate was fitted on and K the execution-evidence transfer
-                penalty of the class it was fitted on (execution_evidence:
-                9 for PAPER_SIMULATION, 1 for ACTUAL)
+                effective sample n_eff / K, where n_eff is the
+                cluster-effective count Eddie's fill rate was fitted on
+                (independent fixtures; the raw order count, labelled
+                unclustered, when no event key was recorded) and K the
+                execution-evidence transfer penalty of the class it was
+                fitted on (execution_evidence: 9 for PAPER_SIMULATION, 1
+                for ACTUAL)
   a_ucb         the UPPER 95% bound of adverse selection per contract:
-                max(0, mean markout + t x sd x sqrt(K) / sqrt(n))
+                max(0, mean markout + max(h x sqrt(K), floor)), h the
+                class half-width (cluster-robust t x se over independent
+                events, else t x sd / sqrt(n)) and floor the declared
+                transfer floor (one $0.01 tick; none for ACTUAL), so a
+                zero-spread markout history is never read as certain
   e_lcb         p - c - fee - a_ucb      (net executable edge per contract,
                 after spread, depth, fees, slippage and adverse selection)
   EV_lcb        f_lcb x e_lcb x q
   CORRELATION   x (1 - h), h = Allie's fixture haircut (0.25 per group
                 already open on the fixture, allie_capital), on a positive
-                EV only
+                EV only; a decision with no fixture has no countable open
+                groups -> correlation UNMEASURED (never a silent 0)
   TAIL (a)      x (1 - v_ucb), v_ucb = the Wilson UPPER bound of the share
-                of markets that settled VOID_REFUND (an exceptional
-                settlement forfeits the edge), by sport over the canonical
-                INVESTMENT path, else pooled over every paper settlement;
+                of markets that settled EXCEPTIONALLY -- VOID_REFUND or
+                SETTLED_AT_VENUE_PRICE (the venue's own published price,
+                e.g. $0.50 on a tie; either forfeits or replaces the
+                edge) -- by sport over the canonical INVESTMENT path, else
+                pooled over every paper settlement (any sleeve, labelled);
                 no settlement history at all -> UNAVAILABLE (unknown is not
                 zero, and it is not a guess either)
   TAIL (b)      - RISK_AVERSION x f_lcb x q^2 x p(1-p) / (2 W): the
@@ -76,15 +86,20 @@ SPEC = {
     "version": VERSION, "unit": UNIT, "z": Z,
     "risk_aversion": RISK_AVERSION,
     "transfer_penalty": dict(EE.TRANSFER_PENALTY),
+    "mean_transfer_floor": dict(EE.MEAN_TRANSFER_FLOOR),
     "evidence_rule": EE.VERSION,
+    "fill_sample": "cluster-effective n (independent fixtures) when "
+                   "recorded, else the raw terminal-order count",
+    "exceptional_outcomes": ["VOID_REFUND", "SETTLED_AT_VENUE_PRICE"],
     "formula": ("(f_lcb x (p - c - fee - a_ucb) x q x (1-h) x (1-v_ucb) "
                 "[the two haircuts on a positive EV only] - RISK_AVERSION x "
                 "f_lcb x q^2 x p(1-p) / (2W)) x min(1, W/(q(c+fee))) / "
                 "(q(c+fee) x hours_to_release)"),
     "inputs": ["eddie estimate (walk, fee, fitted fill rate and markouts)",
                "allie (hours to release, fixture haircut, idle capital)",
-               "exceptional settlement counts (VOID_REFUND share by sport, "
-               "else pooled)"],
+               "exceptional settlement counts (VOID_REFUND + "
+               "SETTLED_AT_VENUE_PRICE share by sport on the INVESTMENT "
+               "path, else pooled)"],
     "authority": AUTHORITY,
 }
 SPEC_SHA = hashlib.sha256(json.dumps(SPEC, sort_keys=True).encode()
@@ -117,6 +132,10 @@ def inputs_from(eddie_est: dict | None, allie: dict | None,
     a = allie if isinstance(allie, dict) else {}
     cc = a.get("correlation_concentration") or {}
     oc = a.get("opportunity_cost") or {}
+    # a haircut labelled UNMEASURED (no fixture on the decision) is not a
+    # measured 0 (canonical_components.allie_at_decision)
+    h_unmeasured = str(cc.get("haircut_status") or "").startswith(
+        "UNMEASURED")
     return {
         "eddie_status": ("MEASURED" if e and e.get("status") != UNAVAILABLE
                          and e.get("estimate_id") else
@@ -133,7 +152,8 @@ def inputs_from(eddie_est: dict | None, allie: dict | None,
         "hours": _num(a.get("expected_hours_to_capital_release")),
         "hours_why": (a.get("unmeasured") or {}).get(
             "expected_hours_to_capital_release"),
-        "haircut": _num(cc.get("haircut")),
+        "haircut": None if h_unmeasured else _num(cc.get("haircut")),
+        "haircut_why": cc.get("haircut_why") if h_unmeasured else None,
         "idle_usd": _num(oc.get("idle_capital_usd")),
         "exceptional": exceptional if isinstance(exceptional, dict) else None,
     }
@@ -158,7 +178,9 @@ def score(x: dict) -> dict:
         EE.PAPER_SIMULATION])
     # fill probability lower bound (class-widened)
     fr = x.get("fill") or {}
-    f_hat, n_f = _num(fr.get("value")), _num(fr.get("denominator"))
+    f_hat, n_raw = _num(fr.get("value")), _num(fr.get("denominator"))
+    n_eff = _num(fr.get("n_eff"))
+    n_f = n_eff if n_eff is not None else n_raw
     f_lcb = None
     if f_hat is None or not n_f:
         um["fill_probability"] = "FILL_PROBABILITY_UNMEASURED: %s" % (
@@ -166,23 +188,31 @@ def score(x: dict) -> dict:
     else:
         f_lcb, _hi = EE.wilson(f_hat, n_f / k_pen)
         comp["fill_probability"] = {
-            "point": _r(f_hat), "lcb": _r(f_lcb), "n": int(n_f),
+            "point": _r(f_hat), "lcb": _r(f_lcb), "n": int(n_raw or 0),
+            "n_eff": _r(n_f, 6), "clusters": fr.get("clusters"),
+            "clustered": n_eff is not None,
             "fitted_on": cls, "transfer_penalty": k_pen,
-            "basis": "Wilson lower bound at n/K"}
+            "basis": "Wilson lower bound at n_eff/K"}
     # adverse selection upper bound (class-widened)
     ad = x.get("adverse") or {}
     a_mean, a_sd, n_a = (_num(ad.get("raw_mean_pp")), _num(ad.get("sd_pp")),
                          _num(ad.get("n")))
+    a_se, a_g = _num(ad.get("se_clustered_pp")), ad.get("clusters")
     a_ucb = None
     if a_mean is None or a_sd is None or not n_a or n_a < 2:
         um["adverse_selection"] = "ADVERSE_SELECTION_UNMEASURED: %s" % (
             ad.get("why") or "NO_MARKOUT_SPREAD")
     else:
-        a_ucb = max(0.0, a_mean + EE.t_crit_95(int(n_a) - 1) * a_sd
-                    * math.sqrt(k_pen) / math.sqrt(n_a))
+        clustered = a_se is not None and a_g is not None and int(a_g) >= 2
+        half = (EE.t_crit_95(int(a_g) - 1) * a_se if clustered else
+                EE.t_crit_95(int(n_a) - 1) * a_sd / math.sqrt(n_a))
+        floor = EE.mean_floor(cls, EE.USD_PER_CONTRACT)
+        a_ucb = max(0.0, a_mean + max(half * math.sqrt(k_pen), floor))
         comp["adverse_selection_pp"] = {
             "mean": _r(a_mean), "ucb": _r(a_ucb), "n": int(n_a),
-            "fitted_on": cls, "transfer_penalty": k_pen}
+            "clusters": a_g, "clustered": clustered,
+            "fitted_on": cls, "transfer_penalty": k_pen,
+            "transfer_floor": floor or None}
     hours = x.get("hours")
     if hours is None:
         um["hours_to_capital_release"] = "ALLIE_HOURS_UNMEASURED: %s" % (
@@ -191,7 +221,8 @@ def score(x: dict) -> dict:
         um["hours_to_capital_release"] = "NON_POSITIVE_HOLD"
     h = x.get("haircut")
     if h is None:
-        um["correlation"] = "ALLIE_FIXTURE_HAIRCUT_UNMEASURED"
+        um["correlation"] = "ALLIE_FIXTURE_HAIRCUT_UNMEASURED%s" % (
+            ": %s" % x["haircut_why"] if x.get("haircut_why") else "")
     idle = x.get("idle_usd")
     if idle is None:
         um["idle_capital"] = "IDLE_CAPITAL_UNMEASURED"
@@ -260,11 +291,13 @@ def exceptional_from_counts(*, scope_counts: dict | None, scope_key,
     UNAVAILABLE). Pure."""
     own = (scope_counts or {}).get(scope_key) if scope_key else None
     for scope, cnt, basis in (
-            (scope_key, own, "VOID_REFUND share of settled markets of this "
-                             "sport on the canonical INVESTMENT path"),
+            (scope_key, own, "VOID_REFUND + SETTLED_AT_VENUE_PRICE share of "
+                             "settled markets of this sport on the "
+                             "canonical INVESTMENT path"),
             ("POOLED_ALL_PAPER_SETTLEMENTS", pooled,
-             "VOID_REFUND share of every settled paper market (the sport "
-             "has none yet)")):
+             "VOID_REFUND + SETTLED_AT_VENUE_PRICE share of every settled "
+             "paper market, any sleeve (the sport has none on the "
+             "INVESTMENT path yet)")):
         n = int((cnt or {}).get("n") or 0)
         if n > 0:
             k = int((cnt or {}).get("k") or 0)

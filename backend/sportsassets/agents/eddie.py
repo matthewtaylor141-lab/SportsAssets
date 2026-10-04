@@ -407,8 +407,18 @@ def estimate(candidate: dict, book_row: dict | None, history: dict, *,
         refs.append({"kind": "paper_book_observations",
                      "id": str(book_row["obs_id"])})
     # WHAT THIS ESTIMATE WAS FITTED ON (R30C): persisted inside `inputs`
-    # (jsonb, no schema change) and carried on the canonical intent.
+    # (jsonb, no schema change) and carried on the canonical intent -- with
+    # the LIVE interval of the net executable edge and the EV (the point
+    # values above are the paper simulator's; a LIVE reader gets a wider
+    # range, never the point alone).
     evidence = execution_evidence(history, style)
+    fpv, adv_v = evidence["fill_probability"], evidence["adverse_selection_pp"]
+    evidence["live_interval"] = EE.live_executable_bounds(
+        net_pp=net, adverse_pp=adverse_used,
+        adverse_live=(adv_v.get("live_ci_low"), adv_v.get("live_ci_high")),
+        fill_live=(fpv.get("live_ci_low"), fpv.get("live_ci_high")),
+        qty=qty if style == MAKER else q_exec,
+        fitted_on=evidence["fitted_on"])
     return {
         "estimate_id": estimate_id_for(candidate["decision_id"]),
         "decision_id": str(candidate["decision_id"]),
@@ -570,6 +580,16 @@ def summarise_history(orders: list, fills: list, markouts: list) -> dict:
         filled = sum(1 for r in o if r.get("state") == "FILLED")
         out["fill_rate"][style] = _rate(filled, len(o),
                                         "TERMINAL_ORDERS")
+        # R30C: the INDEPENDENT EVENTS the rate rests on (orders on one
+        # fixture are not independent of each other) -- carried beside the
+        # rate so its interval can be clustered. The rate itself and its
+        # MIN_HISTORY gate are unchanged.
+        if o and any("cluster" in r for r in o):
+            cp = EE.clustered_proportion(
+                [r.get("state") == "FILLED" for r in o],
+                [r.get("cluster") for r in o])
+            out["fill_rate"][style].update(clusters=cp["clusters"],
+                                           n_eff=cp["n_eff"])
         t = sorted(float(r["ttf_s"]) for r in fills
                    if _style_of(r.get("order_type")) == style
                    and _num(r.get("ttf_s")) is not None
@@ -579,11 +599,13 @@ def summarise_history(orders: list, fills: list, markouts: list) -> dict:
              "why": None} if len(t) >= MIN_HISTORY else
             {"value": None, "n": len(t),
              "why": "FILL_TIMES_BELOW_%d (n=%d)" % (MIN_HISTORY, len(t))})
-        mk = [float(r["markout_pp"]) for r in markouts
-              if _style_of(r.get("order_type")) == style
-              and _num(r.get("markout_pp")) is not None]
+        mrows = [r for r in markouts
+                 if _style_of(r.get("order_type")) == style
+                 and _num(r.get("markout_pp")) is not None]
+        mk = [float(r["markout_pp"]) for r in mrows]
         # the spread of the markouts travels with their mean, so a LIVE
-        # reader can put an interval on it (R30C execution evidence)
+        # reader can put an interval on it (R30C execution evidence); with
+        # event keys, the cluster-robust standard error too
         out["adverse_selection"][style] = (
             {"value": round(max(0.0, statistics.fmean(mk)), 6),
              "raw_mean_pp": round(statistics.fmean(mk), 6), "n": len(mk),
@@ -595,6 +617,10 @@ def summarise_history(orders: list, fills: list, markouts: list) -> dict:
             if len(mk) >= MIN_HISTORY else
             {"value": None, "n": len(mk),
              "why": "MARKOUTS_BELOW_%d (n=%d)" % (MIN_HISTORY, len(mk))})
+        if len(mk) >= MIN_HISTORY and any("cluster" in r for r in mrows):
+            cm = EE.clustered_mean(mk, [r.get("cluster") for r in mrows])
+            out["adverse_selection"][style].update(
+                clusters=cm["clusters"], se_clustered_pp=cm["se"])
     lat = sorted(float(r["submit_s"]) for r in orders
                  if _num(r.get("submit_s")) is not None
                  and float(r["submit_s"]) >= 0)
@@ -645,14 +671,22 @@ def execution_evidence(history: dict, style: str) -> dict:
     fr = ((history or {}).get("fill_rate") or {}).get(key) or {}
     adv = ((history or {}).get("adverse_selection") or {}).get(key) or {}
     ttf = ((history or {}).get("time_to_fill") or {}).get(key) or {}
+    # a rate Eddie declared unmeasured (below MIN_HISTORY) carries NO
+    # interval: proportion_view never re-derives it from the numerator
     fill = EE.proportion_view(fr.get("value"), fr.get("numerator"),
-                              fr.get("denominator"), cls)
+                              fr.get("denominator"), cls,
+                              n_eff=fr.get("n_eff"),
+                              clusters=fr.get("clusters"))
     if fr.get("value") is None:
-        fill.update(value=None, why=fr.get("why") or "NO_FILL_HISTORY")
-    mark = EE.mean_view(adv.get("raw_mean_pp"), adv.get("sd_pp"),
-                        adv.get("n"), cls)
+        fill.update(why=fr.get("why") or "NO_FILL_HISTORY")
     if adv.get("value") is None:
-        mark.update(value=None, why=adv.get("why") or "NO_MARKOUT_HISTORY")
+        mark = EE.mean_view(None, None, adv.get("n"), cls)
+        mark.update(why=adv.get("why") or "NO_MARKOUT_HISTORY")
+    else:
+        mark = EE.mean_view(adv.get("raw_mean_pp"), adv.get("sd_pp"),
+                            adv.get("n"), cls,
+                            se=adv.get("se_clustered_pp"),
+                            clusters=adv.get("clusters"))
     return EE.provenance(
         cls, basis=("Eddie's recorded history: paper_orders terminal fill "
                     "rates, paper_fills times to fill and %d-%d s markouts "
@@ -680,7 +714,8 @@ async def history_stats(conn, *, now: float) -> dict:
     lo = now - HISTORY_LOOKBACK_S
     orders = [dict(r) for r in await conn.fetch(
         "SELECT order_type, state, queue_ahead_qty, "
-        "       extract(epoch FROM created_at - decided_at) AS submit_s "
+        "       extract(epoch FROM created_at - decided_at) AS submit_s, "
+        "       coalesce(fixture, us_market_slug) AS cluster "
         "  FROM paper_orders WHERE created_at BETWEEN to_timestamp($1) "
         "   AND to_timestamp($2) ORDER BY created_at DESC LIMIT $3",
         lo, now, HISTORY_LIMIT)]
@@ -693,6 +728,7 @@ async def history_stats(conn, *, now: float) -> dict:
         " ORDER BY o.created_at DESC LIMIT $3", lo, now, HISTORY_LIMIT)]
     rows = await conn.fetch(
         "SELECT f.fill_id, f.holding_side, f.price, o.order_type, "
+        "       coalesce(o.fixture, f.us_market_slug) AS cluster, "
         "       b0.bids AS b0b, b0.offers AS b0o, b1.bids AS b1b, "
         "       b1.offers AS b1o "
         "  FROM paper_fills f JOIN paper_orders o USING (order_id) "
@@ -714,7 +750,8 @@ async def history_stats(conn, *, now: float) -> dict:
         if m0 is None or m1 is None:
             continue
         markouts.append({"order_type": r["order_type"],
-                         "markout_pp": m0 - m1, "fill_id": r["fill_id"]})
+                         "markout_pp": m0 - m1, "fill_id": r["fill_id"],
+                         "cluster": r["cluster"]})
     out = summarise_history(orders, fills, markouts)
     out["read_at"] = now
     return out
@@ -1000,6 +1037,9 @@ def _row(r) -> dict:
 
 
 def _with_links(e: dict) -> dict:
+    # R30C: every estimate read for display says what its fill probability
+    # was fitted on (agent pages, desk, API)
+    e["fill_probability_evidence"] = EE.fill_probability_label(e)
     e["evidence"] = [dict(x, href=None) for x in (e.get("evidence_refs")
                                                   or [])]
     e["evidence"].append({"kind": "eddie_execution_estimates",
@@ -1300,6 +1340,8 @@ async def desk(conn) -> dict:
             "expected_net_executable_edge_pp": cur[
                 "expected_net_executable_edge_pp"],
             "expected_fill_probability": cur["expected_fill_probability"],
+            # R30C: what the fill probability was fitted on, beside it
+            "fill_probability_evidence": EE.fill_probability_label(cur),
             "expected_slippage_pp": cur["expected_slippage_pp"],
             "expected_capital_hours": cur["expected_capital_hours"],
             "max_executable_qty": cur["max_executable_qty"],

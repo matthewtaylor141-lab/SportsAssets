@@ -17,16 +17,32 @@ else the derived key event / market / side / line / scope. Re-evaluations of
 one opportunity are separate rows and are counted, never pooled as new
 evidence.
 
+ONE SPEC, ONE SERIES (R30C review). Every row carries its SERIES: the
+tournament version, the V1 version, the V2 version and the frozen V2 spec
+sha. The report and the promotion rule evaluate ONLY the CURRENT series
+(current_series()), and within it only opportunities whose FIRST forward
+decision was recorded under it, on independent events with no forward
+INVESTMENT tournament entry (under any series) before the series' first
+recorded row -- so a V2 re-tuned after outcomes were seen starts a NEW
+series from zero, and nothing seen before the retune counts toward its
+30-event minimum. Rows of every other series are counted per series and
+excluded.
+
 WHAT IS JOINED LATER (`intent_outcome` / `opportunities` / `compute` here;
 the bounded SELECTs in api/command_opportunity_tournament.gather): the
 resolved net economics of
 each unique opportunity from the paper ledger (bettor_paper_ledger.positions:
 realized P&L after fees) -- INVESTMENT sleeve only, FORWARD only (decisions at
 or after the R30 production cutover; none recorded -> NOT_ESTABLISHED). An
-opportunity's score is the one recorded at its FIRST forward decision; its
-outcome is the sum over every intent of it. A terminal paper order that never
-filled realized a MEASURED zero (nothing was traded); an order still open, a
-position not yet resolved, or no paper order at all is excluded and counted.
+opportunity's RANK score is the one recorded at its FIRST forward decision;
+its outcome is the sum over every intent of it that reached a paper order.
+For CALIBRATION the prediction compared with that summed outcome is the SUM
+of the same intents' own predicted nets (each prediction already prices its
+own fill probability), so a re-entered opportunity is never calibrated with
+one entry's prediction against two entries' outcome. A terminal paper order
+that never filled realized a MEASURED zero (nothing was traded); an order
+still open, a position not yet resolved, or no paper order at all is
+excluded and counted.
 
 THE REPORT, per score, on the opportunities BOTH scored (and on each own set):
 Spearman rank correlation with realized net, top-k realized net (top
@@ -53,7 +69,9 @@ from . import canonical_intent as CI
 
 log = logging.getLogger(__name__)
 
-VERSION = "OPPORTUNITY_SCORE_TOURNAMENT_V1"
+#: V2 of the tournament (R30C review): one spec series per report, calibration
+#: on summed predictions of the traded intents
+VERSION = "OPPORTUNITY_SCORE_TOURNAMENT_V2"
 KEY_VERSION = "TOURNAMENT_OPPORTUNITY_KEY_V1"
 AUTHORITY = "SHADOW_NO_AUTHORITY"
 MEASURED, UNAVAILABLE = "MEASURED", "UNAVAILABLE"
@@ -69,7 +87,9 @@ PROMOTION_RULE = {
     "version": VERSION,
     "population": ("unique opportunities, INVESTMENT sleeve, decided at or "
                    "after the R30 production cutover, both scores MEASURED, "
-                   "outcome resolved"),
+                   "outcome resolved -- of the CURRENT spec series only "
+                   "(tournament / V1 / V2 version and V2 spec sha): first "
+                   "decided under it, on events not seen before it began"),
     "checks": {
         "MIN_INDEPENDENT_EVENTS": ">= %d independent events" % MIN_EVENTS,
         "RANK_CORRELATION_GAIN": ("event-cluster bootstrap 95% interval of "
@@ -86,6 +106,21 @@ PROMOTION_RULE = {
 }
 
 R_NO_CUTOVER = "NO_PRODUCTION_CUTOVER_RECORDED"
+SERIES_FIELDS = ("tournament_version", "v1_version", "v2_version",
+                 "v2_spec_sha")
+
+
+def series_of(e: dict) -> tuple:
+    """The series a row belongs to (SERIES_FIELDS). Pure."""
+    return tuple(str(e.get(k)) for k in SERIES_FIELDS)
+
+
+def current_series() -> tuple:
+    """The series this build records: (VERSION, V1 version, V2 version,
+    V2 SPEC_SHA)."""
+    from .lost_opportunity import score as SC
+    from . import opportunity_score_v2 as V2
+    return (VERSION, SC.VERSION, V2.VERSION, V2.SPEC_SHA)
 
 
 def _num(v):
@@ -290,9 +325,22 @@ def intent_outcome(order: dict | None, positions: list) -> dict:
             "basis": "LEDGER_REALIZED_PNL_AFTER_FEES"}
 
 
+def _pred_sum(es: list, outs: list, key: str):
+    """The summed prediction of the intents that reached a paper order (the
+    same intents whose realized net is summed), None if any of them has no
+    prediction."""
+    vals = [_num(e.get(key)) for e, o in zip(es, outs)
+            if o["state"] != "EXCLUDED"]
+    if not vals or any(v is None for v in vals):
+        return None
+    return sum(vals)
+
+
 def opportunities(entries: list, outcomes: dict) -> tuple:
     """Unique opportunities from tournament entries (oldest first) and
-    {intent_id: intent_outcome}. Returns (rows, counts). Pure."""
+    {intent_id: intent_outcome}. Returns (rows, counts). Pure. The rank
+    scores are the FIRST decision's; the calibration predictions are the
+    sums over the intents whose outcomes are summed (_pred_sum)."""
     by: dict = {}
     for e in sorted(entries, key=lambda r: (_num(r.get("decided_at")) or 0,
                                             r.get("intent_id"))):
@@ -327,8 +375,9 @@ def opportunities(entries: list, outcomes: dict) -> tuple:
                 "v1_status") == MEASURED else None,
             "v2": _num(first.get("v2_score")) if first.get(
                 "v2_status") == MEASURED else None,
-            "v1_pred": _num(first.get("v1_predicted_net_usd")),
-            "v2_pred": _num(first.get("v2_predicted_net_lcb_usd")),
+            "v1_pred": _pred_sum(es, outs, "v1_predicted_net_usd"),
+            "v2_pred": _pred_sum(es, outs, "v2_predicted_net_lcb_usd"),
+            "traded_intents": len(traded),
             "realized_net_usd": sum(o["realized_net_usd"] for o in traded)})
     return rows, counts
 
@@ -456,8 +505,9 @@ def score_report(rows: list, key: str, pred: str, *, seed: int) -> dict:
                             seed=seed + 1))
     cal_rows = [r for r in rs if r.get(pred) is not None]
     cal = {"n": len(cal_rows), "predicted": pred,
-           "basis": ("the score's own predicted net USD at the decision vs "
-                     "the opportunity's realized net")}
+           "basis": ("the sum of the score's own predicted net USD over the "
+                     "opportunity's intents that reached a paper order vs "
+                     "the sum of those intents' realized net")}
     if len(cal_rows) >= 3:
         xs = [r[pred] for r in cal_rows]
         ys = [r["realized_net_usd"] for r in cal_rows]
@@ -492,10 +542,79 @@ def score_report(rows: list, key: str, pred: str, *, seed: int) -> dict:
     return out
 
 
-def compute(entries: list, outcomes: dict, *, since, cutover) -> dict:
+def series_summary_of(entries: list) -> dict:
+    """{series: {entries, first, last}} of rows. Pure."""
+    out: dict = {}
+    for e in entries:
+        t = _num(e.get("decided_at"))
+        s = out.setdefault(series_of(e), {"entries": 0, "first": None,
+                                          "last": None})
+        s["entries"] += 1
+        if t is not None:
+            s["first"] = t if s["first"] is None else min(s["first"], t)
+            s["last"] = t if s["last"] is None else max(s["last"], t)
+    return out
+
+
+def first_seen_of(entries: list) -> dict:
+    """{"opportunity": {oid: {decided_at, intent_id, series}}, "event":
+    {event_key: decided_at}} -- the first forward sighting of each
+    opportunity and event among `entries`. Pure (the read model supplies
+    the same from the whole forward window)."""
+    opp: dict = {}
+    ev: dict = {}
+    for e in sorted(entries, key=lambda r: (_num(r.get("decided_at")) or 0,
+                                            r.get("intent_id"))):
+        t = _num(e.get("decided_at"))
+        opp.setdefault(e["opportunity_id"], {
+            "decided_at": t, "intent_id": e.get("intent_id"),
+            "series": series_of(e)})
+        k = e.get("event_key") or e["opportunity_id"]
+        if k not in ev:
+            ev[k] = t
+    return {"opportunity": opp, "event": ev}
+
+
+def in_series(inv: list, *, cur: tuple, series_first, first_seen: dict
+              ) -> tuple:
+    """The rows the CURRENT series may evaluate, and the count excluded per
+    reason. Pure."""
+    keep, why = [], {}
+
+    def drop(w):
+        why[w] = why.get(w, 0) + 1
+    read_ids = {e.get("intent_id") for e in inv}
+    for e in inv:
+        if series_of(e) != cur:
+            drop("RECORDED_UNDER_ANOTHER_SPEC_SERIES")
+            continue
+        fo = (first_seen.get("opportunity") or {}).get(e["opportunity_id"])
+        if fo is None or fo.get("intent_id") not in read_ids:
+            drop("FIRST_DECISION_OF_THE_OPPORTUNITY_NOT_IN_THE_READ_WINDOW")
+            continue
+        if tuple(fo.get("series") or ()) != cur:
+            drop("OPPORTUNITY_FIRST_SEEN_UNDER_AN_EARLIER_SPEC")
+            continue
+        ek = e.get("event_key") or e["opportunity_id"]
+        fe = (first_seen.get("event") or {}).get(ek)
+        if series_first is None or (fe is not None
+                                    and fe < float(series_first) - 1e-6):
+            drop("EVENT_SEEN_BEFORE_THE_CURRENT_SPEC_SERIES_BEGAN")
+            continue
+        keep.append(e)
+    return keep, why
+
+
+def compute(entries: list, outcomes: dict, *, since, cutover,
+            series_summary: dict | None = None,
+            first_seen: dict | None = None, read: dict | None = None,
+            current: tuple | None = None) -> dict:
     """THE TOURNAMENT REPORT (pure). `entries`: tournament rows of the
     INVESTMENT sleeve decided at or after `since`; `outcomes`:
-    {intent_id: intent_outcome(...)}."""
+    {intent_id: intent_outcome(...)}. `series_summary` / `first_seen`: the
+    same over the WHOLE forward window when the read model bounded its read
+    (derived from `entries` otherwise); `read`: what the read covered;
+    `current`: the series under evaluation (default current_series())."""
     base = {"version": VERSION, "authority": AUTHORITY, "sleeve": INVESTMENT,
             "since": since, "cutover": cutover,
             "promotion_rule": PROMOTION_RULE,
@@ -508,14 +627,33 @@ def compute(entries: list, outcomes: dict, *, since, cutover) -> dict:
                     entries_recorded=len(entries),
                     note=("entries recorded before a production cutover are "
                           "not forward evidence"))
-    inv = [e for e in entries if e.get("sleeve") == INVESTMENT
-           and (_num(e.get("decided_at")) or 0) >= float(since)]
+    cur = tuple(current) if current is not None else current_series()
+    inv_all = [e for e in entries if e.get("sleeve") == INVESTMENT
+               and (_num(e.get("decided_at")) or 0) >= float(since)]
+    ssum = series_summary if series_summary is not None \
+        else series_summary_of(inv_all)
+    fs = first_seen if first_seen is not None else first_seen_of(inv_all)
+    series_first = (ssum.get(cur) or {}).get("first")
+    inv, series_excluded = in_series(inv_all, cur=cur,
+                                     series_first=series_first,
+                                     first_seen=fs)
+    series_rows = [dict(zip(SERIES_FIELDS, k), entries=v["entries"],
+                        first_decided_at=v["first"],
+                        last_decided_at=v["last"], current=(k == cur),
+                        evaluated=(k == cur))
+                   for k, v in sorted(ssum.items(),
+                                      key=lambda kv: (kv[1]["first"] or 0))]
     rows, counts = opportunities(inv, outcomes)
     seed = _seed([VERSION, sorted((r["opportunity_id"], r["realized_net_usd"])
                                   for r in rows)])
     both = [r for r in rows if r["v1"] is not None and r["v2"] is not None]
     rep = {
-        "entries": len(inv), "counts": counts,
+        "entries": len(inv), "entries_in_window": len(inv_all),
+        "current_series": dict(zip(SERIES_FIELDS, cur),
+                               first_decided_at=series_first),
+        "series": series_rows, "series_excluded": series_excluded,
+        "read": read, "truncated": bool((read or {}).get("truncated")),
+        "counts": counts,
         "coverage": {
             "v1_measured": sum(1 for e in inv if e.get("v1_status")
                                == MEASURED),

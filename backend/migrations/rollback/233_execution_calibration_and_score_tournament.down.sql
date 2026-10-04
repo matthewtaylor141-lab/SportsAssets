@@ -3,8 +3,8 @@
 -- scores were recorded at their decision instants and cannot be recomputed
 -- without look-ahead, so they are never dropped as cleanup. With none,
 -- drops only 233's objects (the small_live_order_events guard trigger and
--- function, the tournament table and its append-only function); every 225
--- object is untouched.
+-- function, the tournament table and its append-only and at-decision
+-- functions); every 225 object is untouched.
 DO $$
 BEGIN
     IF to_regclass('opportunity_score_tournament') IS NOT NULL
@@ -23,5 +23,6 @@ BEGIN
     END IF;
 END $$;
 DROP TABLE IF EXISTS opportunity_score_tournament;
+DROP FUNCTION IF EXISTS opportunity_tournament_at_decision();
 DROP FUNCTION IF EXISTS opportunity_tournament_append_only();
 DROP FUNCTION IF EXISTS small_live_order_event_live_only();

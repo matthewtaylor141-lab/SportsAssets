@@ -33,9 +33,27 @@ delay, no consumption, nothing sent; ACTUAL from small_live_order_events of a
 LIVE-mode execution -- none exist while SMALL LIVE is SHADOW, so every
 ACTUAL metric is UNAVAILABLE with execution_evidence.R_NO_ACTUAL, never 0.
 
+THE SHADOW'S FILL FIGURES ARE TAUTOLOGICAL AT LIVE SCALE: the SHADOW order
+was sized within this very book's depth at its limit and scaled 1:1,000, so
+the walk fills it at the touch by construction. Its fill / slippage / cancel
+/ recovery figures are shown with `live_eligible: false` and the reason,
+never as live execution quality (execution_calibration).
+
+BOUNDED AND SAID SO: each class reads at most MAX_INTENTS (MAX_EVENTS) rows,
+the MOST RECENT first; when the window holds more, the class's `read` block
+says `truncated: true` with the cap, the count in the window and the oldest
+instant read, and the rows not read are counted under `excluded` -- the
+newest evidence is never the part silently dropped.
+
 Everything runs inside a READ ONLY transaction under a statement timeout.
-This module imports no order, venue, execution-path or funded module and
-writes nothing.
+This module writes nothing. Neither it nor anything it calls imports an
+order-submission, venue, execution-path or funded module: not directly, and
+not at run time -- tests/test_execution_calibration.py imports the route in
+a fresh interpreter, runs its estimate registry and checks the loaded
+modules (the micro-calibration lane's venue and ledger modules included:
+their evidence class is restated in execution_calibration, never imported).
+The paper modules it reads (the simulator's pure walk, Eddie's history) are
+read models of paper records.
 """
 from __future__ import annotations
 
@@ -57,6 +75,7 @@ STATEMENT_TIMEOUT_MS = 8000
 CACHE_S = 15.0
 _CACHE: dict = {}
 MAX_INTENTS = EC.MAX_INTENTS
+MAX_EVENTS = EC.MAX_EVENTS
 HORIZONS = EC.HORIZONS
 HORIZON_TOLERANCE_S = EC.HORIZON_TOLERANCE_S
 PAPER_TERMINAL = EC.PAPER_TERMINAL
@@ -141,6 +160,8 @@ def shadow_fill(md, *, holding_side: str, qty, limit, time_in_force) -> dict:
 # THE READS (SELECT only)
 # ═════════════════════════════════════════════════════════════════════
 
+#: the most recent MAX_INTENTS of the window (newest first); the count of
+#: the whole window says whether anything older was left unread
 INTENT_SQL = """
     SELECT i.intent_id, i.decision_id, i.strategy, i.sleeve, i.us_market_slug,
            i.holding_side, i.contract, i.evidence, i.limit_price,
@@ -150,7 +171,13 @@ INTENT_SQL = """
       JOIN canonical_intent_executions e ON e.intent_id = i.intent_id
      WHERE e.adapter = $1 AND e.intent_kind = 'DECISION'
        AND i.created_at >= to_timestamp($2) AND i.created_at <= to_timestamp($3)
-     ORDER BY i.created_at, i.intent_id LIMIT $4
+     ORDER BY i.created_at DESC, i.intent_id DESC LIMIT $4
+"""
+INTENT_COUNT_SQL = """
+    SELECT count(*) FROM canonical_decision_intents i
+      JOIN canonical_intent_executions e ON e.intent_id = i.intent_id
+     WHERE e.adapter = $1 AND e.intent_kind = 'DECISION'
+       AND i.created_at >= to_timestamp($2) AND i.created_at <= to_timestamp($3)
 """
 
 PROBE_SQL = """
@@ -211,10 +238,38 @@ def _cluster(intent: dict) -> str:
     return OT.opportunity_key(intent)["event_key"]
 
 
-async def paper_observations(conn, *, since, until) -> tuple:
-    rows = [dict(r) for r in await conn.fetch(INTENT_SQL, "PAPER", since,
+def read_block(rows: list, *, cap: int, in_window: int, at_key: str) -> dict:
+    """What a bounded read covered: the cap, the rows in the window and
+    read, whether older rows were left unread, and the oldest instant read.
+    Pure."""
+    ats = [r.get(at_key) for r in rows if r.get(at_key) is not None]
+    return {"cap": cap, "rows_in_window": int(in_window),
+            "rows_read": len(rows),
+            "truncated": int(in_window) > len(rows),
+            "kept": "MOST_RECENT_FIRST",
+            "oldest_read_at": min(ats) if ats else None}
+
+
+async def _intents(conn, adapter, *, since, until, excluded: dict) -> tuple:
+    rows = [dict(r) for r in await conn.fetch(INTENT_SQL, adapter, since,
                                               until, MAX_INTENTS)]
+    total = len(rows)
+    if total >= MAX_INTENTS:
+        total = int(await conn.fetchval(INTENT_COUNT_SQL, adapter, since,
+                                        until) or 0)
+    rd = read_block(rows, cap=MAX_INTENTS, in_window=total,
+                    at_key="decided_at")
+    if rd["truncated"]:
+        excluded["NOT_READ_OLDER_THAN_THE_%d_MOST_RECENT" % MAX_INTENTS] = (
+            total - len(rows))
+    return rows, rd
+
+
+async def paper_observations(conn, *, since, until) -> tuple:
+    """(observations, excluded, read) of the PAPER_SIMULATION class."""
     excluded: dict = {}
+    rows, rd = await _intents(conn, "PAPER", since=since, until=until,
+                              excluded=excluded)
     oids = {}
     for r in rows:
         refs = _j(r["refs"]) or {}
@@ -274,13 +329,14 @@ async def paper_observations(conn, *, since, until) -> tuple:
     for x in obs:
         x["adverse"] = adv.get(x["intent_id"]) or {}
     EC.mark_recoveries(obs)
-    return obs, excluded
+    return obs, excluded, rd
 
 
 async def shadow_observations(conn, *, since, until) -> tuple:
-    rows = [dict(r) for r in await conn.fetch(INTENT_SQL, "SMALL_LIVE", since,
-                                              until, MAX_INTENTS)]
+    """(observations, excluded, read) of the LIVE_SHADOW class."""
     excluded: dict = {}
+    rows, rd = await _intents(conn, "SMALL_LIVE", since=since, until=until,
+                              excluded=excluded)
     keep = []
     for r in rows:
         if r.get("mode") != "SHADOW":
@@ -330,11 +386,12 @@ async def shadow_observations(conn, *, since, until) -> tuple:
     for x in obs:
         x["adverse"] = adv.get(x["intent_id"]) or {}
     EC.mark_recoveries(obs)
-    return obs, excluded
+    return obs, excluded, rd
 
 
 async def actual_observations(conn, *, since, until) -> tuple:
-    """(observations, excluded, integrity) from small_live_order_events. An
+    """(observations, excluded, integrity, read) from
+    small_live_order_events (the most recent MAX_EVENTS of the window). An
     event on a SHADOW (or non-SMALL_LIVE) execution is an INTEGRITY
     VIOLATION: counted, never used."""
     rows = [dict(r) for r in await conn.fetch(
@@ -349,8 +406,16 @@ async def actual_observations(conn, *, since, until) -> tuple:
              LEFT JOIN canonical_decision_intents i ON i.intent_id = e.intent_id
             WHERE ev.observed_at >= to_timestamp($1)
               AND ev.observed_at <= to_timestamp($2)
-            ORDER BY ev.execution_id, ev.observed_at, ev.event_id""",
-        since, until)]
+            ORDER BY ev.observed_at DESC, ev.event_id DESC LIMIT $3""",
+        since, until, MAX_EVENTS)]
+    rows.sort(key=lambda r: (r["execution_id"], r["at"], r["event_id"]))
+    total = len(rows)
+    if total >= MAX_EVENTS:
+        total = int(await conn.fetchval(
+            "SELECT count(*) FROM small_live_order_events WHERE observed_at "
+            ">= to_timestamp($1) AND observed_at <= to_timestamp($2)",
+            since, until) or 0)
+    rd = read_block(rows, cap=MAX_EVENTS, in_window=total, at_key="at")
     integrity = sum(1 for r in rows if r["adapter"] != "SMALL_LIVE"
                     or r["mode"] == "SHADOW")
     live = [r for r in rows if r["adapter"] == "SMALL_LIVE"
@@ -361,6 +426,9 @@ async def actual_observations(conn, *, since, until) -> tuple:
     for r in live:
         by.setdefault(r["execution_id"], []).append(r)
     excluded: dict = {}
+    if rd["truncated"]:
+        excluded["NOT_READ_OLDER_THAN_THE_%d_MOST_RECENT_EVENTS"
+                 % MAX_EVENTS] = total - len(rows)
     obs, refs_for_adverse = [], []
     for eid, evs in by.items():
         last = evs[-1]
@@ -403,7 +471,7 @@ async def actual_observations(conn, *, since, until) -> tuple:
     for x in obs:
         x["adverse"] = adv.get(x["intent_id"]) or {}
     EC.mark_recoveries(obs)
-    return obs, excluded, integrity
+    return obs, excluded, integrity, rd
 
 
 async def eddie_fit(conn, *, now: float) -> dict:
@@ -429,16 +497,21 @@ async def report(conn, *, since: float | None, until: float | None,
     until = float(until if until is not None else now)
     since = float(since if since is not None
                   else until - WINDOW_DAYS * 86400.0)
-    p_obs, p_ex = await paper_observations(conn, since=since, until=until)
-    s_obs, s_ex = await shadow_observations(conn, since=since, until=until)
-    a_obs, a_ex, integrity = await actual_observations(conn, since=since,
-                                                       until=until)
+    p_obs, p_ex, p_rd = await paper_observations(conn, since=since,
+                                                 until=until)
+    s_obs, s_ex, s_rd = await shadow_observations(conn, since=since,
+                                                  until=until)
+    a_obs, a_ex, integrity, a_rd = await actual_observations(
+        conn, since=since, until=until)
     classes = {
         EE.PAPER_SIMULATION: EC.summarise(EE.PAPER_SIMULATION, p_obs, p_ex),
         EE.LIVE_SHADOW: EC.summarise(EE.LIVE_SHADOW, s_obs, s_ex),
         EE.ACTUAL: EC.summarise(EE.ACTUAL, a_obs, a_ex,
                              unavailable_why=EE.R_NO_ACTUAL),
     }
+    for cls, rd in ((EE.PAPER_SIMULATION, p_rd), (EE.LIVE_SHADOW, s_rd),
+                    (EE.ACTUAL, a_rd)):
+        classes[cls]["read"] = rd
     classes[EE.ACTUAL]["integrity_violations"] = integrity
     if integrity:
         classes[EE.ACTUAL]["integrity_why"] = (
@@ -448,6 +521,8 @@ async def report(conn, *, since: float | None, until: float | None,
                                            "days": round((until - since)
                                                          / 86400.0, 3)},
             "classes": classes, "live_estimates": EC.live_estimates(classes),
+            "truncated": any(c["read"]["truncated"]
+                             for c in classes.values()),
             "estimates_in_use": EC.estimates_in_use(),
             "eddie_fit": await eddie_fit(conn, now=now),
             "rule": EE.RULE, "rule_sha": EE.RULE_SHA,

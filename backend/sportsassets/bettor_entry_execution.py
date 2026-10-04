@@ -152,6 +152,14 @@ EXECUTION_EVIDENCE = {
                "why": ("no real venue fill is linked to this lane; its "
                        "coverage is an observation of the displayed "
                        "ladder")},
+    # the WIDER live uncertainty the R30C rule asks of a non-ACTUAL
+    # estimate cannot be computed for a figure fitted on no fill: said so,
+    # never presented as a tight number
+    "live_interval": {"status": "UNAVAILABLE",
+                      "why": ("NOT_FITTED_ON_ANY_FILL: no fill model exists "
+                              "to widen; displayed depth is not guaranteed "
+                              "depth, so live coverage may be anywhere from "
+                              "0 to this figure")},
 }
 
 WHY_NOT_A_FORECAST = (

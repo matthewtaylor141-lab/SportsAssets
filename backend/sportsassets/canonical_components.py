@@ -55,6 +55,15 @@ CACHE_S = 300.0
 COMPONENT_TIMEOUT_S = 2.0
 #: how far back V2's exceptional-settlement counts look (R30C)
 EXCEPTIONAL_LOOKBACK_DAYS = 60
+#: the settlement outcomes V2 counts as EXCEPTIONAL (the edge is forfeited
+#: or replaced): a void refund, and the venue's own published settlement
+#: price (migration 184, e.g. $0.50 per contract on an NFL tie)
+EXCEPTIONAL_OUTCOMES = ("VOID_REFUND", "SETTLED_AT_VENUE_PRICE")
+SETTLED_OUTCOMES = ("WON", "LOST") + EXCEPTIONAL_OUTCOMES
+#: why Allie's fixture haircut is not a measurement for this decision
+R_NO_FIXTURE = ("NO_FIXTURE_ON_THE_DECISION: the open groups on its fixture "
+                "cannot be counted, so the correlation haircut 0 is not a "
+                "measured absence of correlation")
 _CACHE: dict[str, tuple[float, Any]] = {}
 
 
@@ -131,7 +140,37 @@ def eddie_component(est: dict | None, why: str | None = None) -> dict:
             "execution_evidence": est.get("execution_evidence") or {
                 "fitted_on": "UNMEASURED",
                 "why": "THE_ESTIMATE_CARRIES_NO_EXECUTION_EVIDENCE"},
+            # R30C review: the point EV / net edge / fill probability above
+            # are the paper simulator's; their LIVE interval (wider, by the
+            # declared transfer penalty and floor) travels beside them
+            "live_interval": _eddie_live_interval(est),
             "authority": "SHADOW_ONLY_CARRIED_AS_EVIDENCE"}
+
+
+def _eddie_live_interval(est: dict) -> dict:
+    """The LIVE interval of Eddie's EV, net executable edge and fill
+    probability (execution_evidence.live_executable_bounds, computed by
+    agents/eddie.estimate), or UNAVAILABLE with its reason."""
+    ev = est.get("execution_evidence") or {}
+    li = ev.get("live_interval") or {}
+    fp = ev.get("fill_probability") or {}
+    if li.get("status") != "MEASURED":
+        return {"status": "UNAVAILABLE", "fitted_on": ev.get("fitted_on"),
+                "why": li.get("why") or "THE_ESTIMATE_CARRIES_NO_LIVE_"
+                                        "INTERVAL",
+                "expected_fill_probability": {
+                    "low": fp.get("live_ci_low"),
+                    "high": fp.get("live_ci_high")}}
+    return {"status": "MEASURED", "fitted_on": li.get("fitted_on"),
+            "live_use": li.get("live_use"),
+            "is_proof_of_live_execution": bool(
+                li.get("is_proof_of_live_execution")),
+            "expected_executable_ev_usd": li.get(
+                "expected_executable_ev_usd"),
+            "expected_net_executable_edge_pp": li.get(
+                "expected_net_executable_edge_pp"),
+            "expected_fill_probability": {"low": fp.get("live_ci_low"),
+                                          "high": fp.get("live_ci_high")}}
 
 
 async def eddie_estimate_at_decision(conn, *, decision: dict,
@@ -200,6 +239,20 @@ async def opportunity_at_decision(conn, *, decision: dict, eddie: dict,
                 "fill_probability_live_use": (
                     (eddie.get("execution_evidence") or {}).get("live_use")
                     if fp is not None else None),
+                # R30C review: the WIDER live uncertainty of that P(fill)
+                # beside the point; V1 itself is a point score -- its
+                # uncertainty-adjusted counterpart is V2 (a lower bound),
+                # recorded in the shadow tournament, never on the intent
+                "fill_probability_live_interval": (
+                    ((eddie.get("live_interval") or {}).get(
+                        "expected_fill_probability"))
+                    if fp is not None else None),
+                "score_live_interval": {
+                    "status": "UNAVAILABLE",
+                    "why": ("V1_IS_A_POINT_SCORE: its P(fill) live interval "
+                            "is beside it; the uncertainty-adjusted live "
+                            "counterpart is Opportunity Score V2 (lower "
+                            "confidence bound), shadow tournament only")},
                 "capacity_factor": got.get("capacity_factor"),
                 "capital_hours": got.get("capital_hours"),
                 "unmeasured": got.get("unmeasured") or {},
@@ -269,6 +322,10 @@ async def allie_at_decision(conn, *, decision: dict, eddie: dict,
         cap_snap = await _cached("lol_capital", now, capital)
         hs = await _cached("allie_hurdle", now, hurdle)
         fx = decision.get("fixture")
+        # R30C review: with no fixture on the decision the open groups on it
+        # cannot be counted -- Allie's arithmetic still sees 0 (her module
+        # is unchanged), but the haircut is labelled UNMEASURED below so no
+        # reader (V2 included) takes that 0 for a measured "no correlation"
         fixture = await conn.fetchrow(
             """SELECT count(DISTINCT o.group_id) AS n,
                       coalesce(sum(o.filled_qty * o.limit_price), 0) AS usd
@@ -310,25 +367,54 @@ async def allie_at_decision(conn, *, decision: dict, eddie: dict,
         # (the decision's modelled net, her labelled fallback, is a walk of
         # the displayed book too)
         ev_cls = (e.get("execution_evidence") or {}).get("fitted_on")
-        net_cls = (ev_cls if str(out.get("net_basis") or "").startswith(
-            "EDDIE") else EE.NO_FILL_EVIDENCE if out.get("net_basis")
-            else None)
+        from_eddie = str(out.get("net_basis") or "").startswith("EDDIE")
+        net_cls = (ev_cls if from_eddie else EE.NO_FILL_EVIDENCE
+                   if out.get("net_basis") else None)
+        eli = e.get("live_interval") or {}
+        if from_eddie and eli.get("status") == "MEASURED":
+            net_live = dict(eli.get("expected_executable_ev_usd") or {},
+                            status="MEASURED", fitted_on=net_cls,
+                            basis="Eddie's EV at its LIVE interval")
+        else:
+            net_live = {"status": "UNAVAILABLE", "fitted_on": net_cls,
+                        "why": (eli.get("why") or "EDDIE_LIVE_INTERVAL_"
+                                "UNAVAILABLE") if from_eddie else (
+                            "MODELLED_NET_IS_A_WALK_OF_THE_DISPLAYED_BOOK: "
+                            "fitted on no fill, so no fill model exists to "
+                            "widen it; it is not live execution evidence"
+                            if out.get("net_basis") else
+                            "NO_EXECUTABLE_NET")}
         out["execution_evidence"] = {
             "executable_net_fitted_on": net_cls,
+            "executable_net_live_interval_usd": net_live,
             "capacity_fitted_on": (
                 EE.NO_FILL_EVIDENCE if out.get("capacity_basis") else None),
             "live_use": EE.LIVE_USE.get(net_cls) if net_cls else None,
+            # her `confidence` grades input COMPLETENESS; it says nothing
+            # about live execution, which no ACTUAL fill has measured
+            "confidence_scope": "INPUT_COMPLETENESS_ONLY",
+            "live_execution_confidence": (
+                "NOT_ESTABLISHED_NO_ACTUAL_CANONICAL_FILL"),
             "actual": {"status": EE.UNMEASURED, "why": EE.R_NO_ACTUAL}}
+        if not fx:
+            cc = dict(out.get("correlation_concentration") or {})
+            cc.update(haircut_status="UNMEASURED",
+                      haircut_why=R_NO_FIXTURE)
+            out["correlation_concentration"] = cc
+            out["unmeasured"] = dict(out.get("unmeasured") or {},
+                                     correlation_haircut=R_NO_FIXTURE)
         return out
     return await _bounded(conn, go)
 
 
 async def exceptional_at_decision(conn, *, sport, now: float) -> dict:
-    """THE EXCEPTIONAL-SETTLEMENT BOUND V2 reads: VOID_REFUND counts of
-    settled markets (WON / LOST / VOID_REFUND, recorded at or before the
-    decision, last EXCEPTIONAL_LOOKBACK_DAYS) by sport over the canonical
-    path (intent -> its paper ENTRY order -> the group's settlement), and
-    pooled over every paper settlement. Cached; bounded."""
+    """THE EXCEPTIONAL-SETTLEMENT BOUND V2 reads: EXCEPTIONAL_OUTCOMES
+    (VOID_REFUND and SETTLED_AT_VENUE_PRICE) counts of settled markets
+    (SETTLED_OUTCOMES, recorded at or before the decision, last
+    EXCEPTIONAL_LOOKBACK_DAYS) by sport over the canonical INVESTMENT path
+    (INVESTMENT intent -> its paper ENTRY order -> the group's settlement),
+    and pooled over every paper settlement (any sleeve, labelled so).
+    Cached; bounded."""
     from . import opportunity_score_v2 as V2
 
     async def counts():
@@ -338,31 +424,34 @@ async def exceptional_at_decision(conn, *, sport, now: float) -> dict:
             for r in await conn.fetch(
                     """SELECT i.contract->>'sport_family' AS sport,
                               count(DISTINCT s.us_market_slug) FILTER (
-                                  WHERE s.outcome = 'VOID_REFUND') AS k,
+                                  WHERE s.outcome = ANY($3::text[])) AS k,
                               count(DISTINCT s.us_market_slug) AS n
                          FROM canonical_decision_intents i
                          JOIN paper_orders o
                            ON o.idempotency_key = i.decision_id || ':ENTRY'
                          JOIN paper_settlements s ON s.group_id = o.group_id
-                        WHERE s.outcome IN ('WON', 'LOST', 'VOID_REFUND')
+                        WHERE i.sleeve = 'INVESTMENT'
+                          AND s.outcome = ANY($4::text[])
                           AND s.recorded_at <= to_timestamp($1)
                           AND s.recorded_at >= to_timestamp($1)
                                                - make_interval(days => $2)
                         GROUP BY 1""", float(now),
-                    int(EXCEPTIONAL_LOOKBACK_DAYS)):
+                    int(EXCEPTIONAL_LOOKBACK_DAYS),
+                    list(EXCEPTIONAL_OUTCOMES), list(SETTLED_OUTCOMES)):
                 if r["sport"]:
                     by[str(r["sport"]).lower()] = {"k": int(r["k"]),
                                                    "n": int(r["n"])}
         p = await conn.fetchrow(
             """SELECT count(DISTINCT us_market_slug) FILTER (
-                          WHERE outcome = 'VOID_REFUND') AS k,
+                          WHERE outcome = ANY($3::text[])) AS k,
                       count(DISTINCT us_market_slug) AS n
                  FROM paper_settlements
-                WHERE outcome IN ('WON', 'LOST', 'VOID_REFUND')
+                WHERE outcome = ANY($4::text[])
                   AND recorded_at <= to_timestamp($1)
                   AND recorded_at >= to_timestamp($1)
                                      - make_interval(days => $2)""",
-            float(now), int(EXCEPTIONAL_LOOKBACK_DAYS))
+            float(now), int(EXCEPTIONAL_LOOKBACK_DAYS),
+            list(EXCEPTIONAL_OUTCOMES), list(SETTLED_OUTCOMES))
         return {"by_sport": by, "pooled": {"k": int(p["k"] or 0),
                                            "n": int(p["n"] or 0)}}
 

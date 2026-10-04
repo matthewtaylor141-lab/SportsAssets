@@ -51,14 +51,34 @@ ci_method, status, why, unit, basis}):
 
 INTERVALS are 95% and EVENT-CLUSTERED (orders on one event are not
 independent): proportions use Wilson at the cluster effective sample size,
-means a cluster-robust t interval. Below execution_evidence.MIN_N a figure
-is INSUFFICIENT_SAMPLE: shown, never used for LIVE.
+means a cluster-robust t interval; with fewer than two independent events
+there is no interval at all. Below execution_evidence.MIN_N INDEPENDENT
+EVENTS (or without an interval) a figure is INSUFFICIENT_SAMPLE: shown,
+never used for LIVE.
 
 THE LIVE ESTIMATE per metric (`live_estimates`) is execution_evidence's rule:
-ACTUAL when measured, else LIVE_SHADOW, else PAPER_SIMULATION -- labelled
-with what it was fitted on and widened by the declared transfer penalty.
+the first ELIGIBLE class that is MEASURED (>= MIN_N independent events with
+a clustered interval) -- ACTUAL, else (adverse selection only) LIVE_SHADOW,
+else PAPER_SIMULATION -- labelled with what it was fitted on and widened by
+the declared transfer penalty and floor.
+
+THE SHADOW'S FILL FIGURES ARE TAUTOLOGICAL AT LIVE SCALE (R30C review). The
+SMALL LIVE SHADOW order is sized within the decision book's depth at its
+limit (paper_benchmark.size_within_edge), scaled 1:1,000 and walked here
+through that SAME book with nothing consumed: it fills fully at the touch by
+construction. Its fill rate, quantity share, slippage, cancel and recovery
+are therefore shown in the LIVE_SHADOW column with `live_eligible: false`,
+`evidence_kind: NO_FILL_EVIDENCE_DISPLAYED_BOOK_ONLY` and the reason
+(execution_evidence.R_SHADOW_TAUTOLOGICAL) -- never as live execution
+quality, never as a LIVE estimate. Its adverse selection (the venue book's
+move after the decision) is a measurement and stays eligible.
+
 `estimates_in_use` lists every execution estimate on the LIVE decision path
-and the class it is fitted on, read from each module's own declaration.
+and the class it is fitted on, read from each module's own declaration --
+except the micro-calibration lane (calibration_store / calibration_execute,
+real-venue machinery wired to no route), whose declaration is RESTATED here
+as a literal and pinned equal by the test: a module a request can reach
+never imports the venue submit / cancel module.
 """
 from __future__ import annotations
 
@@ -69,6 +89,7 @@ from . import execution_evidence as EE
 VERSION = "EXECUTION_CALIBRATION_V1"
 WINDOW_DAYS = 14.0
 MAX_INTENTS = 5000
+MAX_EVENTS = 20000
 HORIZONS = (30.0, 300.0)
 #: how long after reference + horizon a book may be and still be the
 #: horizon's book
@@ -81,6 +102,16 @@ METRICS = ("fill_rate", "any_fill_rate", "qty_fill_share",
            "slippage_vs_limit_pp", "slippage_vs_decision_best_pp",
            "adverse_selection_30s_pp", "adverse_selection_300s_pp",
            "cancel_rate", "recovery_rate")
+#: the metric family of each metric (execution_evidence.LIVE_ELIGIBLE)
+FAMILY = {m: EE.FILL_FAMILY for m in METRICS}
+FAMILY.update({"adverse_selection_30s_pp": EE.MARKOUT_FAMILY,
+               "adverse_selection_300s_pp": EE.MARKOUT_FAMILY})
+#: the unit of a mean metric's LIVE transfer floor
+FLOOR_UNIT = {"qty_fill_share": EE.FRACTION,
+              "slippage_vs_limit_pp": EE.USD_PER_CONTRACT,
+              "slippage_vs_decision_best_pp": EE.USD_PER_CONTRACT,
+              "adverse_selection_30s_pp": EE.USD_PER_CONTRACT,
+              "adverse_selection_300s_pp": EE.USD_PER_CONTRACT}
 KIND = {"fill_rate": "proportion", "any_fill_rate": "proportion",
         "qty_fill_share": "mean", "slippage_vs_limit_pp": "mean",
         "slippage_vs_decision_best_pp": "mean",
@@ -141,15 +172,27 @@ def mark_recoveries(obs: list) -> None:
             and x.get("any") for x in by.get(o.get("opportunity_id"), []))
 
 
-def _metric(name, stat: dict, *, basis: str, why_empty: str) -> dict:
+def live_eligible(cls: str, metric: str) -> bool:
+    return cls in EE.LIVE_ELIGIBLE[FAMILY[metric]]
+
+
+def _metric(name, stat: dict, *, basis: str, why_empty: str,
+            cls: str | None = None) -> dict:
     st = EE.status_of(stat)
     out = dict(stat or {})
-    out.update(metric=name, unit=UNITS[name], basis=basis, status=st)
+    out.update(metric=name, unit=UNITS[name], basis=basis, status=st,
+               independent_events=EE.independent_events(out))
     if st == EE.UNAVAILABLE:
         out["why"] = out.get("why") or why_empty
     elif st == EE.INSUFFICIENT:
-        out["why"] = "FEWER_THAN_%d_OBSERVATIONS (n=%s)" % (
-            EE.MIN_N, out.get("n"))
+        out["why"] = EE.insufficient_why(stat)
+    if cls is not None:
+        out["live_eligible"] = live_eligible(cls, name)
+        if cls == EE.LIVE_SHADOW and not out["live_eligible"]:
+            # shown beside the other classes, said for what it is
+            out.update(evidence_kind=EE.NO_FILL_EVIDENCE,
+                       tautological_at_live_scale=True,
+                       note=EE.R_SHADOW_TAUTOLOGICAL)
     return out
 
 
@@ -175,13 +218,13 @@ def summarise(cls: str, obs: list, excluded: dict, *,
     m = {}
     m["fill_rate"] = _metric("fill_rate", EE.clustered_proportion(
         [o["full"] for o in term], cl),
-        basis="fully filled / terminal", why_empty=none)
+        basis="fully filled / terminal", why_empty=none, cls=cls)
     m["any_fill_rate"] = _metric("any_fill_rate", EE.clustered_proportion(
         [o["any"] for o in term], cl),
-        basis="any fill / terminal", why_empty=none)
+        basis="any fill / terminal", why_empty=none, cls=cls)
     m["qty_fill_share"] = _metric("qty_fill_share", EE.clustered_ratio(
         [o["filled_qty"] for o in term], [o["requested_qty"] for o in term],
-        cl), basis="sum filled / sum requested", why_empty=none)
+        cl), basis="sum filled / sum requested", why_empty=none, cls=cls)
     fl = [o for o in term if o.get("any")]
     nofill = "NO_FILLED_ORDER_IN_THE_WINDOW"
 
@@ -197,14 +240,14 @@ def summarise(cls: str, obs: list, excluded: dict, *,
         "slippage_vs_limit_pp", mean_of(
             lambda o: None if None in (o.get("vwap"), o.get("limit"))
             else o["vwap"] - o["limit"], fl),
-        basis="fill VWAP - order limit", why_empty=nofill)
+        basis="fill VWAP - order limit", why_empty=nofill, cls=cls)
     m["slippage_vs_decision_best_pp"] = _metric(
         "slippage_vs_decision_best_pp", mean_of(
             lambda o: None if None in (o.get("vwap"),
                                        o.get("best_at_decision"))
             else o["vwap"] - o["best_at_decision"], fl),
         basis="fill VWAP - best acquisition at the decision book",
-        why_empty=nofill)
+        why_empty=nofill, cls=cls)
     for h in HORIZONS:
         name = "adverse_selection_%ds_pp" % int(h)
         unmeasured = sum(1 for o in fl if (o.get("adverse") or {}).get(h)
@@ -215,17 +258,18 @@ def summarise(cls: str, obs: list, excluded: dict, *,
                    "%d..%d s later (positive = adverse)"
                    % (h, h + HORIZON_TOLERANCE_S[h])),
             why_empty=(nofill if not fl else
-                       "NO_BOOK_OBSERVED_IN_THE_HORIZON_WINDOW"))
+                       "NO_BOOK_OBSERVED_IN_THE_HORIZON_WINDOW"), cls=cls)
         m[name]["unmeasured_filled_orders"] = unmeasured
     m["cancel_rate"] = _metric("cancel_rate", EE.clustered_proportion(
         [o["cancelled_remainder"] for o in term], cl),
-        basis="remainder cancelled or expired / terminal", why_empty=none)
+        basis="remainder cancelled or expired / terminal", why_empty=none,
+        cls=cls)
     rc = [o for o in term if o.get("recovered") is not None]
     m["recovery_rate"] = _metric("recovery_rate", EE.clustered_proportion(
         [o["recovered"] for o in rc], [o.get("cluster") for o in rc]),
         basis=("cancelled remainders whose opportunity a later intent "
                "filled within %d s" % RECOVERY_WINDOW_S),
-        why_empty="NO_CANCELLED_REMAINDER_IN_THE_WINDOW")
+        why_empty="NO_CANCELLED_REMAINDER_IN_THE_WINDOW", cls=cls)
     base.update(orders=len(term),
                 independent_events=len({c for c in cl if c is not None}),
                 metrics=m, status="OK", why=None)
@@ -233,10 +277,15 @@ def summarise(cls: str, obs: list, excluded: dict, *,
 
 
 def live_estimates(classes: dict) -> dict:
-    """The LIVE estimate of every metric by execution_evidence's rule."""
+    """The LIVE estimate of every metric by execution_evidence's rule: only
+    the classes ELIGIBLE for the metric's family, the mean metrics widened
+    with their declared floor."""
     return {m: EE.choose_live(
         {cls: (classes.get(cls) or {}).get("metrics", {}).get(m)
-         for cls in EE.CLASSES}, kind=KIND[m]) for m in METRICS}
+         for cls in EE.CLASSES}, kind=KIND[m],
+        eligible=EE.LIVE_ELIGIBLE[FAMILY[m]],
+        ineligible_why={EE.LIVE_SHADOW: EE.R_SHADOW_TAUTOLOGICAL},
+        floor_unit=FLOOR_UNIT.get(m)) for m in METRICS}
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -252,6 +301,14 @@ TWIN_EXECUTION_EVIDENCE_CLASS = {"PAPER": EE.PAPER_SIMULATION,
 TWIN_ACTUAL_BOOK_PATH = ("LEGACY_EXECUTION_MIRROR (execution_intents -> "
                          "execmirror_fills), not the canonical SMALL LIVE "
                          "path")
+#: the micro-calibration lane's declarations (calibration_store /
+#: calibration_execute .EXECUTION_EVIDENCE_CLASS), RESTATED because a module
+#: a request can reach must never import the venue submit / cancel module
+#: (calibration_execute: "WIRED TO NOTHING. No route reaches this module");
+#: pinned equal by tests/test_execution_calibration.py, which also checks
+#: the route's runtime import closure
+CALIBRATION_LANE_EXECUTION_EVIDENCE_CLASS = {
+    "calibration_store": EE.ACTUAL, "calibration_execute": EE.ACTUAL}
 
 
 def estimates_in_use() -> list:
@@ -259,8 +316,6 @@ def estimates_in_use() -> list:
     it is fitted on -- from each module's own declaration (pinned by a
     test)."""
     from . import bettor_entry_execution as EX
-    from . import calibration_execute as CEX
-    from . import calibration_store as CST
     from .agents import eddie as E
     from . import opportunity_score_v2 as V2
     from .lost_opportunity import score as SC
@@ -298,8 +353,7 @@ def estimates_in_use() -> list:
                      "machinery of its own lane, wired to no route; no LIVE "
                      "estimate is fitted on it",
          "module": "calibration_store.py / calibration_execute.py",
-         "fitted_on": {"calibration_store": CST.EXECUTION_EVIDENCE_CLASS,
-                       "calibration_execute": CEX.EXECUTION_EVIDENCE_CLASS}},
+         "fitted_on": dict(CALIBRATION_LANE_EXECUTION_EVIDENCE_CLASS)},
     ]
     for r in rows:
         f = r["fitted_on"]
