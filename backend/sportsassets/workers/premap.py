@@ -26,6 +26,7 @@ from datetime import datetime, timezone
 
 from ..db import get_pool
 from .. import pmus
+from .. import venue_catalogue as vc
 
 log = logging.getLogger(__name__)
 
@@ -76,6 +77,38 @@ MAX_EVENT_PAGES = 120           # bounds a sweep at ~12k events
 LIST_PACING_S = 0.35            # stay under venue rate limits (429 fix, 2026-08-23)
 PRUNE_HOURS = 26                # rows unseen for a day age out
 LIST_CALL_TIMEOUT_S = 30        # a hung SDK call must not wedge the sweep
+# ── THE CALENDAR BEYOND THE WINDOW (R30A P0 incident, inc-catalogue) ─────
+#
+# THE WINDOW WAS THE ONLY DOOR. Every events.list this sweep made carried
+# startTimeMin = now-12h and startTimeMax = now+96h, and nothing else ever
+# wrote a row: research-sql run 37233672878 (K3a, 2026-10-04 20:51Z) found
+# ZERO of 40,094 re-seen rows starting more than 12 h before or 96 h after
+# their sighting. The venue's own gateway (fetch-docs runs 37233823157 /
+# 37233829391) lists active, open sports events on both sides of it --
+# `mlb-nlchamp-2026-09-27` "National League Champion" and "World Series
+# Champion" (startTime 2026-09-07, every market MARKET_STATUS_OPEN) -- so the
+# MLB post-season futures did not exist for BETTOR, and the in-window ones
+# (ALDS / NLDS series winners, a season winner at -11:53) fell out twelve
+# hours after their start while still tradable (K3b).
+#
+# So the FULL lane walks two more passes after the window: AHEAD
+# (now+fwd_h .. now+AHEAD_DAYS) and STARTED_EARLIER (now-EARLIER_DAYS ..
+# now-back_h), each one bounded variant with its own request budget,
+# paginated like the window, written through the same _market_rows / _upsert
+# path. They keep only the venue's sports categories (the first events past
+# +96 h were the U.S. midterms; venue_catalogue.SPORTS_CATEGORIES, every
+# other category counted by name) and STARTED_EARLIER drops a game market past
+# its playable span unless the venue flags the event live
+# (venue_catalogue.market_drop_reason). The fast lane is unchanged: the
+# imminent window and nothing else.
+#
+# THE COST, STATED. 40 + 40 requests at most per 30-minute sweep on top of
+# the window's ~19, every one behind venue_pace's process-wide gap; the
+# receipts name what each pass actually spent.
+AHEAD_DAYS = float(os.environ.get("PREMAP_AHEAD_DAYS", "400"))
+AHEAD_MAX_PAGES = int(os.environ.get("PREMAP_AHEAD_PAGES", "40"))
+EARLIER_DAYS = float(os.environ.get("PREMAP_EARLIER_DAYS", "200"))
+EARLIER_MAX_PAGES = int(os.environ.get("PREMAP_EARLIER_PAGES", "40"))
 
 
 def _items(resp, key: str) -> list:
@@ -5914,6 +5947,20 @@ async def _ensure_table(pool) -> None:
         await pool.execute(
             f"ALTER TABLE us_premap ADD COLUMN IF NOT EXISTS {_col} {_typ}")
     _TEAM_COLS_STATE["present"] = None          # re-probed: the columns were just ensured
+    # THE LISTING'S STATE AND THE PASS THAT SAW IT (R30A inc-catalogue,
+    # migration 249). The venue states `live` (and `period`, `ended`) on every
+    # event, and the sweep stored none of it: a live market and a pregame one
+    # were the same row, told apart only by a reader comparing game_start to
+    # its own clock. listing_state / listing_state_source carry the venue's
+    # word (venue_catalogue.listing_state; SCHEDULE_ESTIMATE only where the
+    # venue said nothing) and listing_pass names the calendar slice that read
+    # the row (WINDOW, AHEAD, STARTED_EARLIER, FAST, MARKETS_FALLBACK). Same
+    # precedent as `signed` and the C6 team columns: the writer ensures what it
+    # writes, the readers probe (listing_columns_present).
+    for _col in _LISTING_COLUMNS:
+        await pool.execute(
+            f"ALTER TABLE us_premap ADD COLUMN IF NOT EXISTS {_col} text")
+    _LISTING_COLS_STATE["present"] = None
     await pool.execute(
         "ALTER TABLE us_premap DROP CONSTRAINT IF EXISTS us_premap_pkey")
     await pool.execute(
@@ -6268,6 +6315,32 @@ async def team_select_cols(pool) -> str:
     return TEAM_SELECT_COLS if await team_columns_present(pool) else ""
 
 
+_LISTING_COLUMNS = ("listing_state", "listing_state_source", "listing_pass")
+_LISTING_COLS_STATE: dict = {"present": None, "at": 0.0}
+
+
+async def listing_columns_present(pool) -> bool:
+    """Whether us_premap carries migration 249's three listing columns, read
+    from information_schema once per process (re-asked every
+    _TEAM_COLS_REPROBE_S while absent), exactly like team_columns_present.
+    Unreadable is absent."""
+    st = _LISTING_COLS_STATE
+    now = time.time()
+    if st["present"] is True or (st["present"] is False
+                                 and now - st["at"] < _TEAM_COLS_REPROBE_S):
+        return bool(st["present"])
+    try:
+        n = await pool.fetchval(
+            "SELECT count(*) FROM information_schema.columns WHERE table_name = 'us_premap' "
+            "AND column_name = ANY($1::text[]) /* premap-249-columns */",
+            list(_LISTING_COLUMNS))
+        present = int(n or 0) == len(_LISTING_COLUMNS)
+    except Exception:  # noqa: BLE001 — unreadable is absent, never a guess
+        present = False
+    st["present"], st["at"] = present, now
+    return present
+
+
 async def _upsert(pool, r: dict, keys: list[str]) -> None:
     if not await team_columns_present(pool):
         # 055 not applied on this database yet: the pre-C6 row
@@ -6286,6 +6359,38 @@ async def _upsert(pool, r: dict, keys: list[str]) -> None:
             r["market_slug"], r["question"], r["kind"],
             r["line"], r["side_norm"], keys, r.get("intent"),
             r.get("signed"))
+        return
+    if await listing_columns_present(pool):
+        # R30A (migration 249): the venue's live / pregame word and the pass
+        # that read the row, rewritten on conflict like every other column so
+        # a pregame row turns LIVE the first sweep after the venue says so
+        await pool.execute(
+            """
+            INSERT INTO us_premap (identifier, event_slug,
+                event_title, market_slug, question, kind, line,
+                side_norm, event_keys, intent, signed,
+                team_abbr, team_name, team_safe_name, team_id, team_league,
+                game_start, sports_type, listing_state,
+                listing_state_source, listing_pass, updated_at)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,
+                    $12,$13,$14,$15,$16,$17,$18,$19,$20,$21, now())
+            ON CONFLICT (identifier, side_norm) DO UPDATE SET
+                event_slug=$2, event_title=$3, market_slug=$4,
+                question=$5, kind=$6, line=$7,
+                event_keys=$9, intent=$10, signed=$11,
+                team_abbr=$12, team_name=$13, team_safe_name=$14, team_id=$15,
+                team_league=$16, game_start=$17, sports_type=$18,
+                listing_state=$19, listing_state_source=$20,
+                listing_pass=$21, updated_at=now()
+            """,
+            r["identifier"], r["event_slug"], r["event_title"],
+            r["market_slug"], r["question"], r["kind"],
+            r["line"], r["side_norm"], keys, r.get("intent"),
+            r.get("signed"),
+            r.get("team_abbr"), r.get("team_name"), r.get("team_safe_name"),
+            r.get("team_id"), r.get("team_league"), r.get("game_start"),
+            r.get("sports_type"), r.get("listing_state"),
+            r.get("listing_state_source"), r.get("listing_pass"))
         return
     await pool.execute(
         """
@@ -6343,6 +6448,120 @@ async def _record_last(pool, summary: dict,
         log.exception("premap_last write failed")
 
 
+#: ── THE CATALOGUE'S COMPLETENESS RECEIPT AND ITS HISTORY (R30A, migration 249) ─
+#:
+#: Every refresh, either lane, ends with a receipt: requests and pages per pass,
+#: how each pass ended (a natural end of the board, the request budget, a 429, an
+#: error), listings seen / kept / dropped with one precise reason each by sport,
+#: league and family, the venue's own market count per event against what arrived
+#: inline, and the live / pregame state of every event. It rides `premap_last`
+#: (`premap_last_fast`) under `completeness`, and is APPENDED to
+#: `venue_catalogue_receipts` when that table exists -- a workers process can boot
+#: before the API's migrate has run, so a missing table is probed once per refresh
+#: and never fails the sweep.
+RECEIPTS_TABLE = "venue_catalogue_receipts"
+
+
+async def _receipts_table_present(pool) -> bool:
+    """One read per refresh (a refresh is minutes apart): never cached, so a
+    worker that booted before migration 249 starts appending on the first
+    refresh after it lands."""
+    try:
+        return bool(await pool.fetchval(
+            "SELECT to_regclass('venue_catalogue_receipts') IS NOT NULL "
+            "/* premap-receipts-probe */"))
+    except Exception:  # noqa: BLE001 — unreadable is absent, never a guess
+        return False
+
+
+async def _append_receipt(pool, *, lane: str, started_at: float,
+                          tally, summary: dict) -> dict:
+    """One append-only row per refresh (migration 249). Never raises: a
+    receipt that cannot be written is reported on `premap_last`, it never
+    costs the sweep its rows."""
+    import json as _json
+    from datetime import datetime as _dt, timezone as _tz
+
+    out = {"appended": False, "table": RECEIPTS_TABLE}
+    if not await _receipts_table_present(pool):
+        out["why"] = "the table does not exist yet (migration 249 not applied)"
+        return out
+    rec = tally.receipt() if lane == "full" else tally.compact()
+    try:
+        await pool.execute(
+            "INSERT INTO venue_catalogue_receipts (lane, started_at, "
+            "finished_at, outcome, pages_read, requests, events_seen, "
+            "events_kept, events_dropped, markets_seen, markets_kept, "
+            "markets_dropped, sides_written, side_keys_qualified, "
+            "side_keys_refused, truncated, version, receipt) VALUES "
+            "($1, to_timestamp($2::float8), $3, $4, $5, $6, $7, $8, $9, $10, "
+            "$11, $12, $13, $14, $15, $16, $17, $18::jsonb)",
+            lane, float(started_at), _dt.now(_tz.utc), rec["outcome"],
+            int(rec["pages_read"]), int(rec["requests"]),
+            int(rec["events"]["seen"]), int(rec["events"]["kept"]),
+            int(rec["events"]["dropped"]), int(rec["markets"]["seen"]),
+            int(rec["markets"]["kept"]), int(rec["markets"]["dropped"]),
+            int(rec["sides_written"]),
+            int((summary.get("side_keys") or {}).get("qualified_pairs") or 0),
+            int((summary.get("side_keys") or {}).get("refused_cross_market") or 0),
+            bool(summary.get("truncated")), vc.VERSION,
+            _json.dumps(rec, default=str))
+        out["appended"] = True
+    except Exception as exc:  # noqa: BLE001 — diagnostics never kill the sweep
+        out["why"] = "%s: %s" % (type(exc).__name__, str(exc)[:160])
+        log.warning("premap receipt append failed: %s", out["why"])
+    return out
+
+
+def _paced_events_list(client, q: dict):
+    """ONE events.list request, behind the process-wide venue gate.
+
+    THE PACING WAS ITS OWN (R30A). The sweep slept LIST_PACING_S between pages
+    but never claimed `venue_pace` -- the gate every other measurement read in
+    this process claims (mirror_shadow, price_path, shadow_bettor, bettor_state
+    run in the same workers process). Its page reads were therefore invisible
+    to the gate and landed ON TOP of the gated rate: two pacers at 0.35 s do
+    not bound the sum, which is the 2026-09-02 lesson venue_pace was written
+    for. Each page now claims one gap before its request (the normal lane:
+    a catalogue read must never queue ahead of the live mirror's tick), so the
+    venue sees one request per gap from this process whatever runs beside the
+    sweep, and the 429 circuit (`venue_pace.penalize_observed`) slows the sweep
+    with everything else. Runs in a worker thread (pace() sleeps)."""
+    from .. import venue_pace as _vp
+
+    _vp.pace(LIST_PACING_S)
+    return client.events.list(q)
+
+
+def _paced_markets_list(client, q: dict):
+    """The degraded fallback's markets.list, behind the same gate."""
+    from .. import venue_pace as _vp
+
+    _vp.pace(LIST_PACING_S)
+    return client.markets.list(q)
+
+
+def _rate_limited(exc) -> dict | None:
+    """The venue's 429, described (venue_http_error), or None for any other
+    failure. A 429 applies the process-wide circuit with the venue's own
+    Retry-After when it sends one."""
+    from .. import venue_http_error as _vhe
+    from .. import venue_pace as _vp
+
+    try:
+        d = _vhe.describe(exc, endpoint="events.list")
+    except Exception:  # noqa: BLE001
+        return None
+    if not (d.get("is_rate_limited") or d.get("http_status") == 429):
+        return None
+    try:
+        _vp.penalize_observed(retry_after_s=d.get("retry_after_s"),
+                              reason="premap events.list 429")
+    except Exception:  # noqa: BLE001 — the circuit is best effort here
+        pass
+    return d
+
+
 async def refresh(*, back_h: float = 12.0, fwd_h: float = 96.0,
                   max_pages: int = MAX_EVENT_PAGES,
                   prune: bool = True,
@@ -6353,20 +6572,193 @@ async def refresh(*, back_h: float = 12.0, fwd_h: float = 96.0,
     no visible error — the worker's SDK predates .events), fall back to
     paginating markets.list directly and keying each market from its own
     title/question. Every completion or failure writes premap_last so
-    a silent sweep is impossible."""
+    a silent sweep is impossible.
+
+    THREE PASSES, ONE ROW BUILDER (R30A inc-catalogue). The window pass is the
+    sweep that always ran. The full lane then walks the venue's calendar on
+    BOTH sides of it -- AHEAD (past +fwd_h: futures, next week's slate) and
+    STARTED_EARLIER (before -back_h: still-open futures and series, events the
+    venue flags live) -- through the same `_market_rows` / `_upsert` path, so
+    every row is still the venue's own side expansion. Each pass is paginated
+    by `venue_catalogue.PageWalk` (a short first page is confirmed, pages
+    overlap, the budget is a request count and running out of it is
+    TRUNCATED), and every listing seen is tallied kept or dropped by name.
+    The fast lane keeps exactly its old authority: the window, nothing else.
+    """
     pool = await get_pool()
     await _ensure_table(pool)
     client = pmus._get_client()
+    started_at = time.time()
+    lane = "fast" if windowed_only else "full"
+    tally = vc.CompletenessTally(lane=lane)
+    guard = vc.SideKeyGuard()
     seen_rows = 0
     events = 0
     err = None
     mode = "events"
+    events_err = None
+    walks: dict = {}
+    window_variant_bounded = False
+    probe_rate_limited = False
+    read_events: set = set()
     # A sweep that never records is indistinguishable from one that
     # never STARTED (2026-08-24: rows=0 last=none read three probes in a
     # row) — record the start, then progress every page, so a hang shows
     # exactly where it hangs.
     await _record_last(pool, {"mode": "starting", "events": 0, "rows": 0},
                        state_key)
+    from datetime import datetime as _dt, timedelta as _td
+    from datetime import timezone as _tz
+
+    def _iso(d):
+        return d.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    _now = _dt.now(_tz.utc)
+    now_epoch = _now.timestamp()
+    _window = {"active": True, "closed": False,
+               "startTimeMin": _iso(_now - _td(hours=back_h)),
+               "startTimeMax": _iso(_now + _td(hours=fwd_h))}
+
+    async def _write_event(ev, pass_name):
+        """One event of any pass: dropped by name or written row by row.
+        Returns the rows written."""
+        nonlocal events
+        ev_slug = ev.get("slug") or ev.get("eventSlug")
+        reason = vc.event_drop_reason(ev, pass_name=pass_name)
+        if ev_slug and ev_slug in read_events:
+            reason = vc.D_EVENT_ALREADY_READ
+        elif ev_slug:
+            read_events.add(ev_slug)
+        if reason is not None:
+            tally.event_dropped(ev, reason)
+            if reason == vc.D_EVENT_OUT_OF_SCOPE_CATEGORY:
+                tally.note("category_dropped:%s" % str(
+                    ev.get("category") or "")[:40].lower())
+            return 0
+        league = vc.league_of(ev_slug)
+        all_markets = [m for m in (ev.get("markets") or [])
+                       if isinstance(m, dict)]
+        tally.inline_vs_venue_count(ev, len(all_markets))
+        markets = []
+        for m in all_markets:
+            st = m.get("sportsMarketType")
+            cell = {"sport": vc.sport_of(st), "league": league,
+                    "family": vc.family_of(st, slug=m.get("slug"),
+                                           n_sides=len(m.get("marketSides") or []))}
+            tally.market_seen(**cell, status=m.get("status"))
+            why = vc.market_drop_reason(ev, m, pass_name=pass_name, now=now_epoch)
+            if why is not None:
+                tally.market_dropped(**cell, reason=why)
+                continue
+            markets.append((m, cell))
+        if not markets:
+            tally.event_dropped(ev, vc.D_EVENT_NO_OPEN_MARKET)
+            return 0
+        events += 1
+        state = vc.listing_state(ev, now_epoch, markets[0][0])
+        tally.event_kept(ev, sport=markets[0][1]["sport"], state=state,
+                         now=now_epoch)
+        keys = event_keys_for(ev.get("title"), ev_slug) or []
+        if not keys:
+            # THE SILENT DROP THIS REPLACES: `if not keys: continue` threw
+            # away every row of an event whose title and slug produced no
+            # lookup key, after counting it in `events`. Readers that go by
+            # market_slug / sports_type (the venue-native resolver, the
+            # census, the boards) never needed the key; the row is kept with
+            # its own name keys and the case is counted.
+            tally.note(vc.K_KEPT_WITHOUT_EVENT_KEY)
+        built = [(m, cell, _market_rows(ev, m)) for m, cell in markets]
+        rows = []
+        for m, cell, mrows in built:
+            sides = [s for s in (m.get("marketSides") or [])
+                     if isinstance(s, dict)]
+            tally.sides_incomplete += sum(
+                1 for s in sides
+                if not (s.get("identifier") and s.get("description")))
+            if mrows:
+                tally.market_kept(**cell, sides=len(mrows))
+            else:
+                tally.market_dropped(**cell,
+                                     reason=vc.D_MARKET_NO_ORDERABLE_SIDE)
+            rows.extend(mrows)
+        for r in rows:
+            r["listing_state"], r["listing_state_source"] = state
+            r["listing_pass"] = pass_name
+        # C7: every row of the event carries BOTH clubs' kickoff
+        # keys (<club>@<ISO minute>, from the event's own
+        # full-time-winner records), so the draw and the family
+        # rows are fetched by his instant too
+        keys = sorted(set(keys) | venue_kick_keys(rows))
+        to_write = []
+        for r0 in rows:
+            r1, fix = guard.admit(r0)
+            if fix is not None:
+                # the market's OTHER side normalised to the same text: the
+                # earlier row is rewritten under its qualified key before
+                # anything is written (see venue_catalogue.SideKeyGuard)
+                for i, w in enumerate(to_write):
+                    if (w.get("identifier"), w.get("side_norm"),
+                            w.get("market_slug")) == (
+                            fix["rewrite"].get("identifier"),
+                            fix["delete_side_norm"],
+                            fix["rewrite"].get("market_slug")):
+                        to_write[i] = fix["rewrite"]
+                try:
+                    await pool.execute(
+                        "DELETE FROM us_premap WHERE identifier = $1 AND "
+                        "side_norm = $2 /* premap-side-key-qualified */",
+                        fix["rewrite"].get("identifier"),
+                        fix["delete_side_norm"])
+                except Exception:  # noqa: BLE001 — the prune ages it out
+                    pass
+            if r1 is not None:
+                to_write.append(r1)
+        written = 0
+        for r in to_write:
+            # R1 / C6-N: the event's keys (the pair key among
+            # them) plus the row's own name keys; the UPSERT
+            # rewrites event_keys on conflict, so every row the
+            # sweep still sees gains them on its next pass
+            await _upsert(pool, r, keys_for_row(keys, r))
+            written += 1
+        tally.sides_written += written
+        return written
+
+    async def _walk(pass_name, variant, budget, first_events):
+        """One pass's pages after its first page is in hand. Returns the
+        PageWalk (its receipt names how the pass ended)."""
+        nonlocal seen_rows
+        walk = walks[pass_name] = vc.PageWalk(limit=PAGE_LIMIT,
+                                              max_requests=budget)
+        page_no = 0
+        fresh = walk.first(first_events)
+        while True:
+            for ev in fresh:
+                seen_rows += await _write_event(ev, pass_name)
+            await _record_last(pool, {"mode": "events/%s/page%d"
+                                      % (pass_name.lower(), page_no),
+                                      "events": events, "rows": seen_rows},
+                               state_key)
+            off = walk.next_offset()
+            if off is None:
+                break
+            page_no += 1
+            try:
+                resp = await asyncio.wait_for(asyncio.to_thread(
+                    _paced_events_list, client,
+                    {"limit": PAGE_LIMIT, "offset": off, **variant}),
+                    timeout=LIST_CALL_TIMEOUT_S)
+            except Exception as exc:  # noqa: BLE001 — named on the walk
+                rl = _rate_limited(exc)
+                walk.fail(vc.STOP_RATE_LIMITED if rl else vc.STOP_ERROR,
+                          "%s: %s" % (type(exc).__name__, str(exc)[:160]))
+                if pass_name in (vc.PASS_WINDOW, vc.PASS_FAST):
+                    raise
+                break
+            fresh = walk.accept(_items(resp, "events"))
+        return walk
+
+    window_pass = vc.PASS_FAST if windowed_only else vc.PASS_WINDOW
     try:
         # PREMAP-GT ground truth (probe #1030, 2026-08-24): the venue
         # IGNORES the eventSlug filter on markets.list (every queried
@@ -6376,16 +6768,7 @@ async def refresh(*, back_h: float = 12.0, fwd_h: float = 96.0,
         # 2026-08-21: probe the PARAM-VARIANT LADDER most-specific
         # first (a start-time window), and read each event's markets
         # INLINE off the event row — no per-event calls at all.
-        from datetime import datetime as _dt, timedelta as _td
-        from datetime import timezone as _tz
-
-        def _iso(d):
-            return d.strftime("%Y-%m-%dT%H:%M:%SZ")
-
-        _now = _dt.now(_tz.utc)
-        _window = {"active": True, "closed": False,
-                   "startTimeMin": _iso(_now - _td(hours=back_h)),
-                   "startTimeMax": _iso(_now + _td(hours=fwd_h))}
+        #
         # THE FAST LANE TAKES THE WINDOWED RUNG OR NOTHING.
         #
         # Rungs 2 and 3 carry no start-time bound at all, and PREMAP-GT
@@ -6405,9 +6788,14 @@ async def refresh(*, back_h: float = 12.0, fwd_h: float = 96.0,
         for v in variants:
             try:
                 probe = await asyncio.wait_for(asyncio.to_thread(
-                    client.events.list, {"limit": PAGE_LIMIT, **v}),
+                    _paced_events_list, client, {"limit": PAGE_LIMIT, **v}),
                     timeout=LIST_CALL_TIMEOUT_S)
-            except Exception:  # noqa: BLE001 — next variant
+            except Exception as exc:  # noqa: BLE001 — next variant
+                if _rate_limited(exc):
+                    # a 429 on the probe ends the ladder: the next rung is
+                    # another request into a limiter that just said no
+                    probe_rate_limited = True
+                    break
                 continue
             evs = _items(probe, "events")
             # the winning variant is the one whose events carry live
@@ -6419,55 +6807,11 @@ async def refresh(*, back_h: float = 12.0, fwd_h: float = 96.0,
                 break
         if variant is None:
             raise RuntimeError(
+                "the venue rate-limited the events.list probe (429)"
+                if probe_rate_limited else
                 "no events.list variant returned live inline markets")
-        offset = 0
-        pages_walked = 0
-        last_page_full = False
-        for _page in range(max_pages):
-            pages_walked = _page + 1
-            if _page == 0:
-                got = first
-            else:
-                resp = await asyncio.wait_for(asyncio.to_thread(
-                    client.events.list,
-                    {"limit": PAGE_LIMIT, "offset": offset, **variant}),
-                    timeout=LIST_CALL_TIMEOUT_S)
-                got = _items(resp, "events")
-            if not got:
-                break
-            offset += len(got)
-            for ev in got:
-                ev_slug = ev.get("slug") or ev.get("eventSlug")
-                if not ev_slug:
-                    continue
-                markets = [m for m in (ev.get("markets") or [])
-                           if isinstance(m, dict) and not m.get("closed")]
-                if not markets:
-                    continue
-                events += 1
-                keys = event_keys_for(ev.get("title"), ev_slug)
-                if not keys:
-                    continue
-                rows = [r for m in markets for r in _market_rows(ev, m)]
-                # C7: every row of the event carries BOTH clubs' kickoff
-                # keys (<club>@<ISO minute>, from the event's own
-                # full-time-winner records), so the draw and the family
-                # rows are fetched by his instant too
-                keys = sorted(set(keys) | venue_kick_keys(rows))
-                for r in rows:
-                    # R1 / C6-N: the event's keys (the pair key among
-                    # them) plus the row's own name keys; the UPSERT
-                    # rewrites event_keys on conflict, so every row the
-                    # sweep still sees gains them on its next pass
-                    await _upsert(pool, r, keys_for_row(keys, r))
-                    seen_rows += 1
-            await _record_last(pool, {"mode": "events/page%d" % _page,
-                                      "events": events, "rows": seen_rows},
-                              state_key)
-            await asyncio.sleep(LIST_PACING_S)
-            last_page_full = len(got) >= PAGE_LIMIT
-            if not last_page_full:
-                break
+        window_variant_bounded = variant is _window
+        await _walk(window_pass, variant, max_pages, first)
     except Exception as exc:  # noqa: BLE001 — maybe try the fallback
         err = f"{type(exc).__name__}: {str(exc)[:160]}"
         # FALLBACK ONLY ON A DEAD PATH (leak-hunt round 2, 2026-08-24):
@@ -6477,11 +6821,22 @@ async def refresh(*, back_h: float = 12.0, fwd_h: float = 96.0,
         # surnames, no dated slug key) and overwrite good rows
         # table-wide via the identifier upsert. Partial success keeps
         # what it wrote and waits for the next cycle instead.
+        _ww = walks.get(window_pass)
         if seen_rows > 0:
             log.warning("premap events path failed mid-sweep after %d "
                         "rows (%s); keeping them, no fallback",
                         seen_rows, err)
             mode, events_err = "events/partial", err
+        elif probe_rate_limited or (_ww is not None
+                                    and _ww.stopped == vc.STOP_RATE_LIMITED):
+            # A 429 IS NOT A DEAD PATH (R30A). The markets fallback exists for
+            # an events board that does not answer; a board that answered
+            # "too many requests" gets no further request from this sweep --
+            # the venue_pace circuit is already applied and the next cycle
+            # retries on the gated rate.
+            log.warning("premap: the venue rate-limited the sweep (%s); no "
+                        "fallback, next cycle", err)
+            mode, events_err = "events/rate_limited", err
         elif windowed_only:
             # The fast lane never runs the markets fallback either. Its
             # rows are keyed off each market's own question — a
@@ -6496,22 +6851,49 @@ async def refresh(*, back_h: float = 12.0, fwd_h: float = 96.0,
             log.warning("premap events path failed (%s); markets fallback",
                         err)
             mode = "markets"
+        if window_pass not in walks:
+            tally.set_pass(window_pass,
+                           {"requests": 0, "pages_with_events": 0,
+                            "stopped": (vc.STOP_RATE_LIMITED
+                                        if probe_rate_limited else
+                                        vc.STOP_NO_VARIANT if seen_rows == 0
+                                        else vc.STOP_ERROR),
+                            "error": err, "truncated": False,
+                            "natural_end": False})
         try:
             if mode != "markets":
                 raise _SkipFallback()
+            fb = vc.PageWalk(limit=PAGE_LIMIT, max_requests=max_pages,
+                             overlap=0)
             offset = 0
             for _page in range(max_pages):
                 mresp = await asyncio.wait_for(asyncio.to_thread(
-                    client.markets.list,
+                    _paced_markets_list, client,
                     {"limit": PAGE_LIMIT, "offset": offset, "active": True}),
                     timeout=LIST_CALL_TIMEOUT_S)
                 raw = _items(mresp, "markets")
-                got = [m for m in raw if not m.get("closed")]
+                got = []
+                for m in raw:
+                    if not isinstance(m, dict):
+                        continue
+                    cell = {"sport": vc.sport_of(m.get("sportsMarketType")),
+                            "league": vc.league_of(m.get("eventSlug")
+                                                   or m.get("event_slug")),
+                            "family": vc.family_of(m.get("sportsMarketType"),
+                                                   slug=m.get("slug"))}
+                    tally.market_seen(**cell, status=m.get("status"))
+                    if m.get("closed"):
+                        tally.market_dropped(**cell, reason=vc.D_MARKET_CLOSED)
+                        continue
+                    got.append((m, cell))
+                fb.requests += 1
                 if not raw:
+                    fb.stopped = vc.STOP_EMPTY_PAGE
                     break
+                fb.pages += 1
+                fb.events_received += len(raw)
                 offset += len(raw)
-                await asyncio.sleep(LIST_PACING_S)
-                for m in got:
+                for m, cell in got:
                     ev_slug = (m.get("eventSlug") or m.get("event_slug")
                                or "")
                     ev = {"slug": ev_slug,
@@ -6519,20 +6901,35 @@ async def refresh(*, back_h: float = 12.0, fwd_h: float = 96.0,
                     keys = event_keys_for(
                         m.get("question") or m.get("title"), ev_slug)
                     if not keys:
+                        # the degraded lane keys rows off the market's own
+                        # title; with no key it writes nothing -- now named
+                        tally.market_dropped(
+                            **cell, reason=vc.D_FALLBACK_MARKET_WITHOUT_KEY)
                         continue
                     events += 1
                     rows = _market_rows(ev, m)
+                    if rows:
+                        tally.market_kept(**cell, sides=len(rows))
+                    else:
+                        tally.market_dropped(
+                            **cell, reason=vc.D_MARKET_NO_ORDERABLE_SIDE)
                     # C7: the market's own kickoff key (one market at a
                     # time here: the subject's club alone)
                     keys = sorted(set(keys) | venue_kick_keys(rows))
                     for r in rows:
+                        r["listing_pass"] = vc.PASS_MARKETS_FALLBACK
                         await _upsert(pool, r, keys_for_row(keys, r))
                         seen_rows += 1
+                        tally.sides_written += 1
                 await _record_last(pool, {"mode": "markets/page%d" % _page,
                                           "events": events,
                                           "rows": seen_rows}, state_key)
                 if len(raw) < PAGE_LIMIT:
+                    fb.stopped = vc.STOP_SHORT_PAGE
                     break
+            else:
+                fb.stopped = vc.STOP_BUDGET
+            tally.set_pass(vc.PASS_MARKETS_FALLBACK, fb.receipt())
             # The events-path failure stays on the record even when the
             # fallback succeeds (leak-hunt 2026-08-24): markets-mode
             # keys come from market titles, a DEGRADED key set vs the
@@ -6543,8 +6940,63 @@ async def refresh(*, back_h: float = 12.0, fwd_h: float = 96.0,
         except Exception as exc2:  # noqa: BLE001 — recorded, next cycle
             events_err = err
             err = f"{type(exc2).__name__}: {str(exc2)[:160]}"
-    else:
-        events_err = None
+    window_walk = walks.get(window_pass)
+    if window_walk is not None:
+        tally.set_pass(window_pass, window_walk.receipt())
+    # THE CALENDAR ON BOTH SIDES OF THE WINDOW (R30A inc-catalogue). Only the
+    # full lane, only after a window pass that walked the WINDOWED rung to a
+    # natural end or its budget -- never after a 429, an error, or a ladder
+    # that fell through to an unbounded rung (whose board already holds both
+    # sides). Each pass is one bounded variant; its failure is recorded on the
+    # pass and makes the refresh partial, and the next pass still runs unless
+    # the venue rate-limited us.
+    extra_ran = []
+    if (not windowed_only and window_walk is not None
+            and window_variant_bounded
+            and window_walk.stopped in (vc.NATURAL_ENDS | {vc.STOP_BUDGET})):
+        extra = (
+            (vc.PASS_AHEAD,
+             {"active": True, "closed": False,
+              "startTimeMin": _iso(_now + _td(hours=fwd_h)),
+              "startTimeMax": _iso(_now + _td(days=AHEAD_DAYS))},
+             AHEAD_MAX_PAGES),
+            (vc.PASS_STARTED_EARLIER,
+             {"active": True, "closed": False,
+              "startTimeMin": _iso(_now - _td(days=EARLIER_DAYS)),
+              "startTimeMax": _iso(_now - _td(hours=back_h))},
+             EARLIER_MAX_PAGES),
+        )
+        for pname, pvar, pbudget in extra:
+            try:
+                presp = await asyncio.wait_for(asyncio.to_thread(
+                    _paced_events_list, client, {"limit": PAGE_LIMIT, **pvar}),
+                    timeout=LIST_CALL_TIMEOUT_S)
+            except Exception as exc:  # noqa: BLE001 — named on the pass
+                why = "%s: %s" % (type(exc).__name__, str(exc)[:160])
+                rl = _rate_limited(exc)
+                tally.set_pass(pname, {
+                    "requests": 1, "pages_with_events": 0,
+                    "stopped": vc.STOP_RATE_LIMITED if rl else vc.STOP_ERROR,
+                    "error": why, "truncated": False, "natural_end": False,
+                    "window": [pvar["startTimeMin"], pvar["startTimeMax"]]})
+                if mode == "events":
+                    mode = "events/partial"
+                err = err or why
+                extra_ran.append(pname)
+                if rl:
+                    break
+                continue
+            walk = await _walk(pname, pvar, pbudget, _items(presp, "events"))
+            rec = walk.receipt()
+            rec["window"] = [pvar["startTimeMin"], pvar["startTimeMax"]]
+            tally.set_pass(pname, rec)
+            extra_ran.append(pname)
+            if walk.stopped in (vc.STOP_ERROR, vc.STOP_RATE_LIMITED):
+                if mode == "events":
+                    mode = "events/partial"
+                err = err or walk.error
+                if walk.stopped == vc.STOP_RATE_LIMITED:
+                    break
     # NEVER prune on an empty sweep (leak-hunt 2026-08-24): a sweep
     # that wrote zero rows proves nothing about staleness — repeated
     # empty sweeps would otherwise age the whole table out and take
@@ -6572,22 +7024,35 @@ async def refresh(*, back_h: float = 12.0, fwd_h: float = 96.0,
     # markets that can NEVER be premapped, and premap is the only lane
     # allowed to trade under the quarantine, so it is a silent hard
     # ceiling on coverage that no instrument reported.
-    _truncated = bool(locals().get("last_page_full")) and \
-        locals().get("pages_walked") == max_pages
+    #
+    # R30A: truncation is now any PASS that ran out of its request budget
+    # while the venue was still serving full pages, named per pass.
+    rec = tally.receipt()
+    truncated_passes = sorted(p for p, r in rec["passes"].items()
+                              if r.get("truncated"))
+    _truncated = bool(truncated_passes)
     summary = {"mode": mode, "events": events, "rows": seen_rows,
                "err": err, "events_err": events_err,
-               "lane": "fast" if windowed_only else "full",
+               "lane": lane,
                "window_h": [back_h, fwd_h], "max_pages": max_pages,
-               "pages_walked": locals().get("pages_walked", 0),
+               "pages_walked": (window_walk.pages if window_walk is not None
+                                else 0),
                "truncated": _truncated,
+               "truncated_passes": truncated_passes,
                "truncated_note": (
                    "the page budget ran out while the venue was still "
                    "returning full pages — part of the board was never "
                    "read, and those markets cannot be resolved at all"
                    if _truncated else None),
-               "pruned": int(pruned.split()[-1]) if pruned else 0}
+               "pruned": int(pruned.split()[-1]) if pruned else 0,
+               "extra_passes": extra_ran,
+               "side_keys": guard.receipt(),
+               "completeness": (rec if lane == "full" else tally.compact())}
+    summary["receipt_history"] = await _append_receipt(
+        pool, lane=lane, started_at=started_at, tally=tally, summary=summary)
     await _record_last(pool, summary, state_key)
-    log.info("premap refresh: %s", summary)
+    log.info("premap refresh: %s", {k: v for k, v in summary.items()
+                                    if k not in ("completeness",)})
     return summary
 
 
