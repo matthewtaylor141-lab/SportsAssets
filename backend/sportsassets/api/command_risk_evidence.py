@@ -1,5 +1,5 @@
-"""R30C RISK EVIDENCE: the measured settlement-exception table. SHADOW
-INFORMATION ONLY.
+"""R30C RISK EVIDENCE: the measured settlement-exception table and the
+evidence-backed correlation graph. SHADOW INFORMATION ONLY.
 
     GET /api/command/settlement-exception-risk
         the MEASURED exception-risk table by sport / league / market type
@@ -9,6 +9,11 @@ INFORMATION ONLY.
         conservative prior, and the expected exception cost the most recent
         canonical decisions carried (settlement_exception_risk)
         ?limit=<n>   recent canonical decisions shown (default 25)
+    GET /api/command/correlation-graph
+        the PAPER book's open positions, working orders and candidate
+        opportunities as a graph of shared settlement dependence, with the
+        WORST-CASE (the caps' treatment) and EVIDENCED-CASE portfolio
+        exposure side by side
 
 GET only, COMMAND read auth (agents_core.require_read). Each read runs in a
 READ ONLY transaction under a statement timeout; nothing here writes, sends
@@ -98,3 +103,20 @@ async def settlement_exception_risk(
     return await _read_only(_exception_payload,
                             reason="SETTLEMENT_EXCEPTION_READ_FAILED",
                             limit=limit)
+
+
+async def _graph_payload(conn) -> dict:
+    from .. import correlation_graph as CG
+    return await CG.load(conn, now=time.time())
+
+
+@router.get("/api/command/correlation-graph",
+            dependencies=[Depends(require_read)])
+async def correlation_graph(response: Response) -> dict:
+    response.headers["Cache-Control"] = "no-store"
+    got = await _read_only(_graph_payload,
+                           reason="CORRELATION_GRAPH_READ_FAILED")
+    if not got.get("ok"):
+        raise HTTPException(status_code=503, detail={
+            "reason": got.get("refusal") or "CORRELATION_GRAPH_UNAVAILABLE"})
+    return got

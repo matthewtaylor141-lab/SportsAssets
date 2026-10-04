@@ -833,3 +833,10 @@ tests/test_agent_identity_api_authority.py
 # rates only with citation, count and denominator) and its cost on the
 # canonical decision's evidence, which gates nothing (same ENTER, order, size).
 tests/test_settlement_exception_risk.py
+# R30C CORRELATION GRAPH: exact / measured / unmeasured=worst-case edges of
+# shared settlement dependence; the evidenced case never above the worst case;
+# the worst-case caps stay authoritative and unchanged.
+tests/test_correlation_graph.py
+# R30C risk evidence routes: GET-only, command session or 401, READ ONLY
+# transaction with a statement timeout, no order/venue/paper/funded import.
+tests/test_risk_evidence_authority.py

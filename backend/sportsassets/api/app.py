@@ -765,9 +765,9 @@ try:
     app.include_router(_command_live_parity_router)
 except ImportError:
     log.warning("live parity: api.command_live_parity not loaded", exc_info=True)
-# ── R30C RISK EVIDENCE: /api/command/settlement-exception-risk. GET only,
-# COMMAND auth, READ ONLY transaction; shadow information -- no cap, haircut
-# or ENTER rule changes.
+# ── R30C RISK EVIDENCE: /api/command/settlement-exception-risk and
+# /api/command/correlation-graph. GET only, COMMAND auth, READ ONLY
+# transaction; shadow information -- no cap, haircut or ENTER rule changes.
 try:
     from .command_risk_evidence import router as _command_risk_router
     app.include_router(_command_risk_router)

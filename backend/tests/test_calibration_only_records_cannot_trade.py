@@ -651,6 +651,12 @@ READERS = {
     # test_settlement_exception_risk.py, test_risk_evidence_authority.py).
     "settlement_exception_risk.py": (
         "SETTLEMENT_OUTCOME_MEASUREMENT_BOTH_PURPOSES_NEVER_SELECTS", 5),
+    # (R30C) THE CORRELATION GRAPH reads the latest probability of a market
+    # the PAPER book already holds, works or decided (by its slug), and the
+    # settled LONG outcomes of both purposes for the measured same-day
+    # dependence. Display / shadow only: no selection, no cap change.
+    "correlation_graph.py": (
+        "HELD_BOOK_PROBABILITY_AND_SETTLED_OUTCOMES_DISPLAY_ONLY", 3),
     # (R30C) THE SETTLEMENT-EXCEPTION COMPONENT of a canonical decision reads
     # the venue rules text of the decision's OWN valuation row, BY ID: the
     # decision was already taken on that row; nothing is selected.
