@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#05090e">
+<meta name="color-scheme" content="dark">
+<meta name="robots" content="noindex,nofollow">
+<meta name="description" content="BETTOR improvement pipeline: every improvement item from evidence to forward result, with peer challenges, preserved disagreements, independent evaluation and the human release gate. Read-only.">
+<title>BETTOR · Improvement Pipeline</title>
+<link rel="stylesheet" href="improvements.css">
+</head>
+<body class="im">
+<a class="im-skip" href="#im-board">Skip to the pipeline board</a>
+<!-- THE IMPROVEMENT PIPELINE. Two authenticated same-origin GETs:
+     /api/command/improvements (the board) and
+     /api/command/improvements/{id} (one item's trail). Read-only: no
+     control on this page approves, merges, deploys, releases or changes
+     anything. An absent or failed read is shown with its reason, never as
+     an empty pipeline. -->
+<header class="im-top">
+  <a class="im-brand" href="/" title="Back to the COMMAND homepage"><span aria-hidden="true">&#8592;</span> BETTOR<span class="im-brand-sub">COMMAND</span></a>
+  <div class="im-title">
+    <span class="im-eyebrow">Self-improvement · shadow</span>
+    <h1>Improvement Pipeline</h1>
+  </div>
+  <div class="im-status" id="im-status" role="status" aria-live="polite">
+    <span class="im-pill" data-tone="off"><i></i><span>Connecting…</span></span>
+  </div>
+  <nav class="im-nav" aria-label="Command navigation">
+    <a href="/floor">Floor</a>
+    <a href="/karen">Karen</a>
+    <a href="/audrey">Audrey</a>
+  </nav>
+  <button type="button" class="im-btn" id="im-refresh" title="Read the pipeline again">Refresh</button>
+</header>
+
+<div class="im-fixture" id="im-fixture" hidden>FIXTURE DATA · rendered from a labelled test payload · not production</div>
+
+<main class="im-main" id="im-main">
+  <section class="im-hero" aria-labelledby="im-hero-h">
+    <div class="im-hero-copy">
+      <h2 id="im-hero-h">Evidence to forward result, <em>challenged at every step.</em></h2>
+      <p>Each card is one improvement item on the ledger. Agents propose and challenge; an independent evaluator decides; a human approves any release against an exact-SHA gate receipt. No agent approves its own change, disagreements stay on the record, and the system never pushes, merges or deploys.</p>
+    </div>
+    <div class="im-kpis" id="im-kpis" aria-label="Pipeline counts"></div>
+  </section>
+
+  <ol class="im-flow" aria-label="The canonical workflow">
+    <li>Evidence</li><li>Hypothesis</li><li>Peer challenge</li><li>Owner response</li><li>Experiment</li><li>Independent evaluation</li><li>Eligible change</li><li>Controlled release</li><li>Forward result</li>
+  </ol>
+
+  <div class="im-filters" id="im-filters" role="toolbar" aria-label="Filter the board"></div>
+
+  <div class="im-state" id="im-state" role="status" aria-live="polite">Reading the improvement ledger…</div>
+  <section class="im-board" id="im-board" aria-label="Pipeline board" tabindex="-1"></section>
+
+  <footer class="im-foot">
+    <p id="im-disclosure"></p>
+    <p class="im-src" id="im-src"></p>
+  </footer>
+</main>
+
+<div class="im-scrim" id="im-scrim" hidden></div>
+<aside class="im-drawer" id="im-drawer" role="dialog" aria-modal="true" aria-labelledby="im-d-title" hidden tabindex="-1"></aside>
+
+<noscript><p class="im-noscript">The improvement pipeline needs JavaScript.</p></noscript>
+<script src="improvements.js"></script>
+</body>
+</html>

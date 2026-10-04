@@ -172,6 +172,22 @@
   status = 200
   force = true
 
+# ── THE IMPROVEMENT PIPELINE (/improvements, claude/ui-improve) ───────
+# The bounded self-improvement board (command/improvements.html): every
+# improvement item from EVIDENCE to FORWARD RESULT, its peer challenges,
+# preserved disagreements, independent evaluation and the human release
+# gate. A static page that reads GET /api/command/improvements (+ /{id})
+# through the same-origin /api/command/* proxy above (session cookie, read
+# only); it has no control that approves, merges, deploys or releases.
+# REWRITE (status 200) so the address bar keeps /improvements?item=...;
+# ORDER: below the /api/command/* proxy and ABOVE the command-host catch-all.
+[[redirects]]
+  from = "https://command.bettortoken.com/improvements"
+  to = "/command/improvements.html"
+  status = 200
+  force = true
+# ── end IMPROVEMENT PIPELINE ──────────────────────────────────────────
+
 [[redirects]]
   from = "https://command.bettortoken.com/*"
   to = "/command/:splat"
