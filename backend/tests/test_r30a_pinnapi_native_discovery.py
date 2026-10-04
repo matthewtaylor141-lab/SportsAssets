@@ -31,10 +31,8 @@ the PinnAPI REST probe (run 37232918224) listed ("Carolina Panthers" home v
 """
 from __future__ import annotations
 
-import asyncio
 import json
 import time
-import types
 from datetime import datetime, timezone
 
 import pytest
@@ -455,3 +453,91 @@ async def test_a_natively_discovered_fixture_enters_with_no_metered_request(
             "DELETE FROM venue_fixture_event_keys WHERE venue_event_slug = "
             "'%s'; SET session_replication_role = origin"
             % e.game.event_slug)
+
+
+# ═════════════════════════════════════════════════════════════════════
+# §5 MIGRATION 261: ONE VENUE FIXTURE, ONE EVENT KEY
+# ═════════════════════════════════════════════════════════════════════
+
+import pathlib  # noqa: E402
+
+_MIG = pathlib.Path(__file__).resolve().parents[1] / "migrations"
+
+
+@pg
+async def test_the_first_key_is_fixed_once_and_a_second_discovery_reads_it():
+    import asyncpg
+    from sportsassets.workers import ext_pinnacle_loop as loop
+    conn = await asyncpg.connect(H.DSN)
+    tx = conn.transaction()
+    await tx.start()
+    try:
+        slug = "nfl-det-car-r30a-sticky-%d" % int(time.time())
+        got = await loop.sticky_event_key(conn, venue_event_slug=slug,
+                                          proposed="odds-abc")
+        assert got["event_key"] == "odds-abc"
+        assert got["fixed_in"] == "venue_fixture_event_keys"
+        # the SAME venue event found later by PinnAPI-native discovery keeps
+        # the first key, so the fixture rails see one fixture
+        again = await loop.sticky_event_key(conn, venue_event_slug=slug,
+                                            proposed="pinnapi:1637712345")
+        assert again["event_key"] == "odds-abc"
+        assert again["basis"].startswith("FIXED_FOR_THIS_VENUE_EVENT")
+        # a cycle's own cache answers without a read
+        cache = {}
+        await loop.sticky_event_key(conn, venue_event_slug=slug,
+                                    proposed="x", cache=cache)
+        assert cache[slug]["event_key"] == "odds-abc"
+        # no venue event: the proposal stands, said so
+        none = await loop.sticky_event_key(conn, venue_event_slug=None,
+                                           proposed="odds-q")
+        assert none["event_key"] == "odds-q"
+        assert none["basis"] == "PROVIDER_EVENT_ID_NO_VENUE_EVENT_KEY"
+        # append-only: a fixed key is never rewritten or removed
+        for sql in ("UPDATE venue_fixture_event_keys SET event_key='y' "
+                    " WHERE venue_event_slug=$1",
+                    "DELETE FROM venue_fixture_event_keys "
+                    " WHERE venue_event_slug=$1"):
+            sp = conn.transaction()
+            await sp.start()
+            with pytest.raises(asyncpg.exceptions.IntegrityConstraintViolationError):
+                await conn.execute(sql, slug)
+            await sp.rollback()
+    finally:
+        await tx.rollback()
+        await conn.close()
+
+
+@pg
+async def test_migration_261_is_idempotent_and_its_rollback_refuses_a_fixed_key():
+    import asyncpg
+    up = (_MIG / "261_venue_fixture_event_keys.sql").read_text()
+    down = (_MIG / "rollback" / "261_venue_fixture_event_keys.down.sql") \
+        .read_text()
+    conn = await asyncpg.connect(H.DSN)
+    tx = conn.transaction()
+    await tx.start()
+    try:
+        await conn.execute(up)                       # a re-run changes nothing
+        await conn.execute(
+            "INSERT INTO venue_fixture_event_keys (venue_event_slug, "
+            " event_key, basis) VALUES ('r30a-rollback-probe', 'k', 'b')")
+        sp = conn.transaction()
+        await sp.start()
+        with pytest.raises(asyncpg.exceptions.RaiseError):
+            await conn.execute(down)                 # rows exist: refused
+        await sp.rollback()
+        # emptied (inside this transaction only), the rollback applies and
+        # the migration re-applies cleanly
+        await conn.execute("SET LOCAL session_replication_role = replica")
+        await conn.execute("DELETE FROM venue_fixture_event_keys")
+        await conn.execute("SET LOCAL session_replication_role = origin")
+        await conn.execute(down)
+        assert await conn.fetchval(
+            "SELECT to_regclass('venue_fixture_event_keys')") is None
+        await conn.execute(up)
+        assert await conn.fetchval(
+            "SELECT to_regclass('venue_fixture_event_keys')") is not None
+    finally:
+        await tx.rollback()
+        await conn.close()

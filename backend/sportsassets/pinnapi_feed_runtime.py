@@ -268,6 +268,10 @@ def _capped(d: dict) -> str:
     if disc:
         disc["by_sport_league_state"] = "TRUNCATED_FOR_SIZE"
         disc["receipt_sample"] = "TRUNCATED_FOR_SIZE"
+        if isinstance(disc.get("line_census"), dict):
+            disc["line_census"] = dict(
+                disc["line_census"],
+                by_sport_family_state="TRUNCATED_FOR_SIZE")
         d["native_discovery"] = disc
     d["heartbeat_truncated"] = True
     s = json.dumps(d, default=str)
@@ -334,6 +338,27 @@ async def _discovery_once(pool) -> dict:
         reg[RX.register(ev, sport_key=PD.sport_key_for(fam), family=fam,
                         received_at=t0, native=True) or "NO_SCHEDULER"] += 1
     out["registered"] = dict(reg)
+    # THE LINE CENSUS (bettor_market_family.census): every line contract the
+    # venue lists on a matched fixture, by sport / family / precise state --
+    # one more bounded catalogue read; no venue request, nothing priced
+    try:
+        from . import bettor_market_family as MF
+        slugs = sorted(out.get("by_venue_event") or {})
+        if slugs:
+            async with pool.acquire() as c:
+                lrows = [dict(r) for r in await c.fetch(
+                    PD.line_rows_sql(), slugs, list(MF.VENUE_LINE_TYPES),
+                    int(PD.RESEEN_WITHIN_S), int(PD.MAX_LINE_ROWS))]
+        else:
+            lrows = []
+        out["line_census"] = dict(
+            MF.census(lrows, out.get("by_venue_event"), o.cache,
+                      now_ms=time.time() * 1000.0),
+            rows_truncated=len(lrows) >= PD.MAX_LINE_ROWS)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:                                    # noqa: BLE001
+        out["line_census"] = {"error": type(exc).__name__}
     out["computed_at"] = t0
     out["took_ms"] = round((time.time() - t0) * 1000)
     return out

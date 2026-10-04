@@ -217,6 +217,14 @@ async def _clean(conn, game, eid):
         await conn.execute(
             "DELETE FROM external_valuations WHERE us_market_slug=$1",
             game.us_slug)
+        # the venue event's fixed event key (migration 261, append-only):
+        # the synthetic game's venue event slug is dated, so a key fixed by
+        # one proof would otherwise be inherited by the next proof that day
+        if await conn.fetchval(
+                "SELECT to_regclass('venue_fixture_event_keys')") is not None:
+            await conn.execute(
+                "DELETE FROM venue_fixture_event_keys "
+                " WHERE venue_event_slug=$1", game.event_slug)
     await conn.execute(
         "DELETE FROM pinnapi_reactive_attempts WHERE event_id=$1", str(eid))
 

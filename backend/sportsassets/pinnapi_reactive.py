@@ -26,6 +26,19 @@ ACTIVE = None
 #: still re-proves identity, venue, settlement, depth and fees.
 HELD_SEED_TTL_S = 6 * 3600
 
+#: HOW MANY FIXTURES MAY HOLD A DISCOVERY SEED (R30A P0 incident). 512 was
+#: sized for the metered cycle's few competitions. PinnAPI-native discovery
+#: now seeds EVERY matched fixture of six subscribed sports each census pass
+#: (pinnapi_feed_runtime._discovery_once), and the measured six-sport load is
+#: ~1,750 cached fixtures (pinnapi_feed "CAPACITY FOR THE R30A SCOPE"). Past
+#: the cap, each pass's later registrations evict its earlier ones in the
+#: same iteration order every time, so the same fixtures would be unseeded
+#: for good -- a silent loss (counted only as SEED_EVICTED). The cap now
+#: covers the cache's own event bound, the same order of magnitude; a seed
+#: is one copied discovery event (~1-2 KB), ~8 MB at the cap. A memory bound,
+#: not a threshold: no evaluation, freshness or economic rule reads it.
+SEED_CAP = 4000
+
 
 def version_of(q) -> tuple:
     """A quote's evaluation version: (epoch, change instant, prices). The
@@ -61,7 +74,8 @@ class Scheduler:
     FIFO queue, cap and eviction exactly as before."""
 
     def __init__(self, cache, evaluate, audit, *, clock=time.time,
-                 queue_cap=128, seed_cap=512, seed_ttl=1800, deadline=12,
+                 queue_cap=128, seed_cap=SEED_CAP, seed_ttl=1800,
+                 deadline=12,
                  held=None):
         from . import pinnapi_held as PH
         self.cache, self.evaluate, self.audit, self.clock = cache, evaluate, audit, clock

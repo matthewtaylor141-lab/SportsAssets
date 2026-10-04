@@ -908,3 +908,180 @@ async def test_a_ws_change_prices_the_run_line_and_the_policy_enters_it(
     assert d_short["verdict"] != "ENTER"
     assert not any("LINE" in str(x) or "GRADING" in str(x)
                    for x in (d_short["refusals"] or [])), d_short["refusals"]
+
+
+# ═════════════════════════════════════════════════════════════════════
+# §8 THE LINE CENSUS AND THE LANE'S BOUNDS
+# ═════════════════════════════════════════════════════════════════════
+
+NFL_EVENT = "nfl-det-car-2026-10-04"
+NFL_SLUGS = [s for s in MARKETS if "-nfl-det-car-" in s]
+
+
+def _nfl_rows():
+    out = []
+    for slug in NFL_SLUGS:
+        for r in _rows(slug):
+            out.append(dict(r, event_slug=NFL_EVENT))
+    return out
+
+
+def test_the_census_counts_every_line_contract_of_a_matched_fixture():
+    ident = {NFL_EVENT: {"fixture_id": FID,
+                         "venue_records": _participants(NFL_SPREAD)}}
+    got = MF.census(_nfl_rows(), ident, nfl_cache(),
+                    now_ms=time.time() * 1000.0)
+    assert got["venue_events"] == 1 and got["contracts"] == len(NFL_SLUGS)
+    s = got["by_sport_family_state"]
+    assert s["football|spread|EXACT_PINNACLE_LINE_FRESH_NOW_MAIN"] == 1
+    assert s["football|spread|EXACT_PINNACLE_LINE_FRESH_NOW_ALTERNATE"] == 1
+    assert s["football|total|EXACT_PINNACLE_LINE_FRESH_NOW_MAIN"] == 1
+    assert s["football|team_total|EXACT_PINNACLE_LINE_FRESH_NOW_MAIN"] == 1
+    # held but unchanged for longer than the 30 s rule: counted apart, never
+    # read as "no Pinnacle line"
+    old = MF.census(_nfl_rows(), ident, nfl_cache(change_age_s=90.0),
+                    now_ms=time.time() * 1000.0)
+    assert old["states"].get("EXACT_PINNACLE_LINE_HELD_NOT_FRESH_NOW_MAIN") \
+        == 3
+    # a fixture discovery did not match prices nothing; its contracts are
+    # counted by the contract's own refusal (no participants to bind)
+    none = MF.census(_nfl_rows(), {}, nfl_cache(),
+                     now_ms=time.time() * 1000.0)
+    assert none["contracts"] == len(NFL_SLUGS)
+    assert none["states"].get(MF.R_CONTRACT_TEAM) == 2
+
+
+def test_a_metered_event_finds_its_fixture_through_the_discovery_index(
+        monkeypatch):
+    from sportsassets import pinnapi_discovery as PD
+    from sportsassets import pinnapi_feed_runtime as FR
+    from sportsassets.workers import ext_pinnacle_loop as loop
+    ident = {"fixture_id": FID, "venue_records": _participants(NFL_SPREAD),
+             "venue_event_slug": NFL_EVENT}
+    monkeypatch.setitem(FR._STATE, "discovery",
+                        {"by_venue_event": {NFL_EVENT: ident}})
+    assert PD.identity_for(NFL_EVENT)["fixture_id"] == FID
+    assert PD.identity_for("nfl-x-y-2026-10-04") is None
+    ev = {"id": "odds-1", "home_team": "Carolina Panthers",
+          "away_team": "Detroit Lions"}
+    job = loop.line_job_for(ev, sport_key="americanfootball_nfl",
+                            family="football", venue_event_slug=NFL_EVENT)
+    assert job["identity"]["fixture_id"] == FID
+    assert job["provider_event_id"] == "odds-1"
+    assert loop.line_job_for(ev, sport_key="x", family="football",
+                             venue_event_slug=None) is None
+
+
+@pg
+async def test_the_lane_defers_by_name_and_never_past_a_ws_deadline(
+        monkeypatch):
+    import types as _t
+    from sportsassets.workers import ext_pinnacle_loop as loop
+    conn = await H.connect()
+    tx = conn.transaction()
+    await tx.start()
+    try:
+        await pm._ensure_table(conn)
+        ev_slug = "nfl-det-car-r30a-%d" % int(time.time())
+        for r in _nfl_rows():
+            r = dict(r, event_slug=ev_slug)
+            await pm._upsert(conn, r, [])
+        cache = nfl_cache()
+        monkeypatch.setitem(FR._STATE, "owner", _t.SimpleNamespace(
+            cache=cache))
+        ident = {"fixture_id": FID,
+                 "venue_records": _participants(NFL_SPREAD)}
+        job = loop.line_job_for({"id": "pinnapi:%d" % FID},
+                                sport_key="pinnapi_football",
+                                family="football", venue_event_slug=ev_slug,
+                                identity=ident)
+        common = dict(fee_fn=lambda *a, **k: 0.0, open_book=[],
+                      ev_measurable=None, calibration=None, research={})
+        # a WS evaluation whose deadline is unknown never reads a line
+        rep = await loop.line_market_pass(
+            conn, jobs=[job], stream_seed={"trigger": {},
+                                           "valuation_ids": []}, **common)
+        assert rep["instrument_cap"] == 0
+        # 4 exact Pinnacle lines (main spread, alt spread, total, team total)
+        # x 2 sides
+        assert rep["instruments_eligible"] == 8, rep
+        assert rep["by_state"][loop.R_LINE_DEFERRED_WS] == 8
+        assert rep["venue_reads"] == 0
+        # a deadline already spent: deferred by name, nothing read
+        rep = await loop.line_market_pass(
+            conn, jobs=[job], stream_seed={
+                "trigger": {"evaluation_started_at": time.time() - 11.0,
+                            "deadline_s": 12}, "valuation_ids": []},
+            **common)
+        assert rep["instrument_cap"] == loop.MAX_LINE_INSTRUMENTS_PER_WS_EVALUATION
+        assert rep["by_state"][loop.R_LINE_DEFERRED_WS] == 8
+        assert rep["venue_reads"] == 0
+        # the lane's own counts name every contract's state
+        assert rep["by_sport_family_state"][
+            "football|spread|PINNACLE_LINE_MATCHED_MAIN"] == 1
+        assert rep["by_sport_family_state"][
+            "football|spread|PINNACLE_LINE_MATCHED_ALTERNATE"] == 1
+        # a fixture discovery never matched: no line is read, said so
+        rep = await loop.line_market_pass(
+            conn, jobs=[dict(job, identity=None)], stream_seed=None,
+            **common)
+        assert rep["by_state"] == {loop.R_LINE_NO_IDENTITY: 1}
+    finally:
+        await tx.rollback()
+        await conn.close()
+
+
+@pg
+async def test_the_census_read_feeds_the_census_on_postgres():
+    from sportsassets import pinnapi_discovery as PD
+    conn = await H.connect()
+    tx = conn.transaction()
+    await tx.start()
+    try:
+        await pm._ensure_table(conn)
+        ev_slug = "nfl-det-car-r30a-c-%d" % int(time.time())
+        for r in _nfl_rows():
+            await pm._upsert(conn, dict(r, event_slug=ev_slug), [])
+        rows = [dict(r) for r in await conn.fetch(
+            PD.line_rows_sql(), [ev_slug], list(MF.VENUE_LINE_TYPES),
+            int(PD.RESEEN_WITHIN_S), int(PD.MAX_LINE_ROWS))]
+        assert len(rows) == 2 * len(NFL_SLUGS)
+        got = MF.census(rows, {ev_slug: {
+            "fixture_id": FID, "venue_records": _participants(NFL_SPREAD)}},
+            nfl_cache(), now_ms=time.time() * 1000.0)
+        assert got["states"]["EXACT_PINNACLE_LINE_FRESH_NOW_MAIN"] == 3
+    finally:
+        await tx.rollback()
+        await conn.close()
+
+
+@pg
+async def test_the_discovery_pass_seeds_and_counts_the_line_contracts(
+        line_env, monkeypatch):
+    """`pinnapi_feed_runtime._discovery_once` on Postgres: one bounded venue
+    read matches the fixture, a second counts its line contracts against the
+    cache (the census), and the heartbeat digest stays bounded."""
+    import asyncpg
+    import types as _t
+    e = line_env
+    e.pool = await asyncpg.create_pool(H.DSN, min_size=1, max_size=2)
+    monkeypatch.setitem(FR._STATE, "owner", _t.SimpleNamespace(
+        cache=e.cache, sport_ids=[RI.SPORT_ID]))
+    now = time.time()
+    e.cache.apply({"type": "prematch_markets", "matchup_id": e.eid,
+                   "sport_id": RI.SPORT_ID, "ts": (now - 0.2) * 1000,
+                   "data": _ws_markets((-105, -105), (150, -170))},
+                  epoch=e.cache.authority.epoch, received_ms=now * 1000)
+    out = await FR._discovery_once(e.pool)
+    assert out["states"][PD.MATCHED] >= 1
+    assert e.game.event_slug in out["by_venue_event"]
+    # no scheduler in this process: every seed says so by name
+    assert out["registered"].get("NO_SCHEDULER", 0) >= 1
+    lc = out["line_census"]
+    assert lc["rows_truncated"] is False
+    assert lc["by_sport_family_state"][
+        "baseball|spread|EXACT_PINNACLE_LINE_FRESH_NOW_MAIN"] == 1, lc
+    dg = PD.digest(out)
+    assert "receipts" not in dg and "by_venue_event" not in dg
+    assert dg["line_census"]["contracts"] >= 1
+    json.dumps(dg, default=str)

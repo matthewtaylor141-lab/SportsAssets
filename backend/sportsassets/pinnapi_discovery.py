@@ -540,7 +540,28 @@ def digest(result: dict) -> dict:
         "version", "fixtures", "states", "by_sport_league_state",
         "records_pricing_no_fixture", "venue_events",
         "venue_events_without_a_fixture", "venue_rows_truncated",
-        "receipt_sample", "registered", "computed_at", "took_ms", "error")}
+        "receipt_sample", "registered", "line_census", "computed_at",
+        "took_ms", "error")}
+
+
+#: the line census's bounded catalogue read (every line contract of the
+#: matched venue events; two rows per market)
+MAX_LINE_ROWS = 20000
+
+
+def line_rows_sql() -> str:
+    """ONE bounded read of the matched venue events' line contracts, for the
+    line census (bettor_market_family.census). $1 venue event slugs, $2 the
+    venue line types, $3 the re-seen window, $4 the row cap."""
+    return """SELECT market_slug, event_slug, side_norm, intent, line, signed,
+       team_name, team_safe_name, team_abbr, team_id, sports_type
+  FROM us_premap
+ WHERE event_slug = ANY($1::text[])
+   AND sports_type = ANY($2::text[])
+   AND market_slug IS NOT NULL
+   AND updated_at > now() - make_interval(secs => $3)
+ ORDER BY event_slug, market_slug, intent
+ LIMIT $4"""
 
 
 def identity_of(receipt: dict) -> dict:

@@ -7577,6 +7577,14 @@ def line_job_for(event, *, sport_key, family, venue_event_slug,
             "provider_event_id": (event or {}).get("id")}
 
 
+def _line_markets_digest(lm) -> dict | None:
+    """The line lane's report for the heartbeat: every count, the bounded
+    sample, never the full list of valuation ids."""
+    if not isinstance(lm, dict):
+        return None
+    return {k: v for k, v in lm.items() if k != "valuation_ids"}
+
+
 def _line_report() -> dict:
     return {"version": None, "jobs": 0, "contracts": 0,
             "by_state": {}, "by_sport_family_state": {},
@@ -10771,6 +10779,9 @@ async def _heartbeat(conn, out: dict, *, key: str = None) -> None:
                 # themselves are in `ext_candidate_outcomes`, one per event
                 # per cycle, so this heartbeat stays bounded.
                 "candidate_outcomes": out.get("candidate_outcomes"),
+                # THE LINE-MARKET LANE (R30A P0 incident): its counts by
+                # sport / family / precise state, bounded (no id list)
+                "line_markets": _line_markets_digest(out.get("line_markets")),
                 "cycle_label": out.get("cycle_label"),
                 "cycle_label_note": out.get("cycle_label_note"),
                 # THE LATENCY MEASUREMENT, PERSISTED. See

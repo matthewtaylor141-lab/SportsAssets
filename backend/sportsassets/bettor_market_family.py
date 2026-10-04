@@ -1023,6 +1023,71 @@ def instrument_order(item) -> tuple:
             0 if inst.get("intent") == INTENT_LONG else 1)
 
 
+# ═════════════════════════════════════════════════════════════════════
+# THE LINE CENSUS: every line contract of every matched fixture, counted
+# ═════════════════════════════════════════════════════════════════════
+#
+# The collector's line lane evaluates a bounded number of instruments per
+# cycle. The FUNNEL still has to show every line contract the venue lists on
+# a fixture PinnAPI discovery matched, and where each one stands -- by sport,
+# family and precise state -- so a bounded lane is never read as missing
+# coverage, and a refusal is never read as an absence. No venue read is made
+# here (the contract's own text is proven only when it is evaluated), so a
+# contract that would be priced is counted as having an EXACT Pinnacle line,
+# fresh now or held but not changed within the 30 s rule.
+C_EXACT_FRESH = "EXACT_PINNACLE_LINE_FRESH_NOW"
+C_EXACT_HELD = "EXACT_PINNACLE_LINE_HELD_NOT_FRESH_NOW"
+C_TEXT_BINDS_TEAM = "TEAM_TOTAL_TEAM_BOUND_BY_ITS_TEXT_AT_EVALUATION"
+_NOT_FRESH = (F.R_STALE, F.R_NO_CHANGE_TIME, F.R_FUTURE)
+
+
+def census(rows, identities, cache, *, now_ms) -> dict:
+    """{'contracts', 'states', 'by_sport_family_state', ...} for every line
+    market in `rows` (us_premap rows of the matched venue events, any order)
+    against `identities` ({venue event slug: discovery identity}). Pure;
+    never raises."""
+    out = {"version": VERSION, "venue_events": 0, "contracts": 0,
+           "states": {}, "by_sport_family_state": {}}
+
+    def count(state, sport, family):
+        out["states"][state] = out["states"].get(state, 0) + 1
+        k = "%s|%s|%s" % (sport or "?", family or "?", state)
+        out["by_sport_family_state"][k] = \
+            out["by_sport_family_state"].get(k, 0) + 1
+    try:
+        by_market: dict = {}
+        for r in rows or ():
+            r = dict(r)
+            by_market.setdefault((str(r.get("event_slug")),
+                                  str(r.get("market_slug"))), []).append(r)
+        out["venue_events"] = len({e for e, _ in by_market})
+        for (ev, _slug), mrows in sorted(by_market.items()):
+            ident = (identities or {}).get(ev) or {}
+            out["contracts"] += 1
+            c = market_contract(mrows, participants=ident.get(
+                "venue_records"))
+            if not c.get("ok"):
+                count(c.get("refusal"), c.get("sport"), c.get("family"))
+                continue
+            if c.get("designation") is None and c["family"] == TEAM_TOTAL:
+                count(C_TEXT_BINDS_TEAM, c["sport"], c["family"])
+                continue
+            pair = pinnacle_pair(cache, fixture_id=ident.get("fixture_id"),
+                                 contract=c, evaluated_ms=now_ms)
+            if pair.get("ok"):
+                state = C_EXACT_FRESH
+            elif pair.get("refusal") in _NOT_FRESH and pair.get("key"):
+                state = C_EXACT_HELD
+            else:
+                state = pair.get("refusal") or "PINNACLE_LINE_NOT_READ"
+            if state in (C_EXACT_FRESH, C_EXACT_HELD):
+                state += "_ALTERNATE" if pair.get("alternate") else "_MAIN"
+            count(state, c["sport"], c["family"])
+    except Exception as exc:                                   # noqa: BLE001
+        out["error"] = "LINE_CENSUS_RAISED:%s" % type(exc).__name__
+    return out
+
+
 def describe() -> dict:
     return {"version": VERSION, "families": list(LINE_FAMILIES),
             "proven": ["%s/%s" % k for k in PROVEN],
