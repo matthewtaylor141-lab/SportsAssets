@@ -775,6 +775,16 @@ try:
     app.include_router(_command_floor_router)
 except ImportError:
     log.warning("floor: api.command_floor not loaded", exc_info=True)
+# ── THE SEVEN AGENTS' IDENTITY, MEMORY, EXPERIENCE AND EVENTS (migration
+# 224): /api/command/agents/stream and /api/command/agents/{agent}/
+# {identity,memories,experience,relationships,events,evaluation,context}.
+# GET only, COMMAND auth, one READ ONLY transaction with a statement
+# timeout. No write, order, approval, activation or capital path.
+try:
+    from .agents_identity import router as _agents_identity_router
+    app.include_router(_agents_identity_router)
+except ImportError:
+    log.warning("agents: api.agents_identity not loaded", exc_info=True)
 # ── THE IMPROVEMENT PIPELINE BOARD (migration 221): /api/command/
 # improvements (+ /{id}). GET only, COMMAND auth, one READ ONLY transaction
 # with a statement timeout. SHADOW: the board records the path; nothing here

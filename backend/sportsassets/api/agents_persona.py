@@ -43,6 +43,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from ..agents import audrey_chat as AC
 from ..agents import directives as D
+from ..agents import identity as VI
 from ..agents import persona_chat as PC
 from ..agents import persona_speech as PS
 from ..agents import personas as P
@@ -125,6 +126,8 @@ async def _chat(agent: str, body: PersonaChatBody, role: str) -> Response:
                                            PC.R_WRONG_AGENT) else 422
         return JSONResponse(status_code=code, content=got,
                             headers={"Cache-Control": "no-store"})
+    if got.get("message_id"):
+        got = dict(got, voice_response=await _voice_response(pool, ag, got))
     return JSONResponse(status_code=_CODES.get(got.get("status"), 200),
                         content=got, headers={"Cache-Control": "no-store"})
 
@@ -207,6 +210,41 @@ async def persona_interrupt(agent: str, conversation_id: str,
 
 # ── speech ──────────────────────────────────────────────────────────
 
+async def _voice_owner_conflict(pool, agent: str, res: dict) -> str | None:
+    """The OTHER agent that already speaks with `res`'s voice id, or None.
+    The recorded resolutions decide (first to resolve owns the voice); a
+    failed read refuses (fail closed: VOICE_OWNERSHIP_UNVERIFIED)."""
+    try:
+        async with pool.acquire() as conn:
+            latest = await VI.latest_resolutions(conn)
+    except Exception:                                           # noqa: BLE001
+        return "VOICE_OWNERSHIP_UNVERIFIED"
+    mine = latest.get(agent)
+    if mine is None or mine.get("voice_id") != res.get("voice_id") \
+            or mine.get("status") != P.RES_RESOLVED:
+        latest = dict(latest)
+        latest[agent] = dict(res, status=P.RES_RESOLVED,
+                             resolved_at=res.get("resolved_at") or _clock())
+    owner = VI.voice_claims(latest).get(str(res.get("voice_id")))
+    return None if owner in (None, agent) else owner
+
+
+async def _voice_response(pool, agent: str, got: dict) -> dict:
+    """Section 6: the response's message id, text, the agent's OWN voice
+    profile id and the audio status (VOICE_UNAVAILABLE with the reason)."""
+    try:
+        async with pool.acquire() as conn:
+            v = await VI.read_voice(conn, agent)
+    except Exception as exc:                                    # noqa: BLE001
+        v = {"voice_profile_id": VI.VOICE_SPEC[agent]["voice_profile_id"],
+             "audio": {"status": VI.V_UNAVAILABLE,
+                       "reason": "VOICE_READ_FAILED:%s"
+                       % type(exc).__name__}}
+    return VI.response_voice(agent, message_id=got.get("message_id"),
+                             text=got.get("spoken_text") or got.get("answer"),
+                             voice=v)
+
+
 def _speech_error(e: PS.SpeechFailure, *, extra: dict | None = None):
     body = {"status": "VOICE_UNAVAILABLE" if e.status == 503 else "REFUSED",
             "reason": e.reason}
@@ -249,6 +287,19 @@ async def _speech(agent: str, body: SpeechBody) -> Response:
             resolver_source=res.get("source"),
             configured_voice=P.configured_voice_report(ag, persona)),
             extra={"message_id": mid, "browser_fallback": fallback})
+    # ONE VOICE PER AGENT (migration 224 / identity.voice_claims): a voice id
+    # another agent already speaks with is refused -- VOICE_UNAVAILABLE with
+    # the reason, never a silent fallback to another agent's voice.
+    shared_with = await _voice_owner_conflict(pool, ag, res)
+    if shared_with:
+        unverified = shared_with == "VOICE_OWNERSHIP_UNVERIFIED"
+        return _speech_error(PS.SpeechFailure(
+            shared_with if unverified else VI.V_SHARED,
+            owner=None if unverified else shared_with,
+            reason_detail=None if unverified else
+            "VOICE_ID_ALREADY_SPOKEN_BY:%s" % shared_with),
+            extra={"message_id": mid, "voice_profile_id":
+                   VI.VOICE_SPEC[ag]["voice_profile_id"]})
     spoken = m["spoken_text"][:PS.MAX_SPOKEN_CHARS]
     key = PS.cache_key(agent=ag, persona_version=persona.get("version"),
                        voice_id=res["voice_id"],

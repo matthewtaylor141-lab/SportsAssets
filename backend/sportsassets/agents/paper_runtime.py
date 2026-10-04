@@ -252,6 +252,17 @@ def default_steps() -> list:
         steps.append(("improvement_driver", IDRV.step))
     except ImportError:
         pass
+    try:
+        # THE AGENTS' OWN MEMORY (migration 224): at most every 10 minutes,
+        # each agent learns from durable outcomes (settlements, reviews,
+        # challenge outcomes, execution outcomes, tournament verdicts) into
+        # its PRIVATE, append-only, evidence-grounded memory. Writes only
+        # agent_memory_events / agent_conversation_messages and its own
+        # watermark; never an order, limit, threshold, model or policy.
+        from . import agent_memory as AMEM
+        steps.append(("agent_memory", AMEM.step))
+    except ImportError:
+        pass
     return steps
 
 
