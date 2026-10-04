@@ -711,3 +711,6 @@ tests/test_nfl_slate_reaches_a_recorded_outcome.py
 # for every coverage incident (NULL is not absence), the per-game NFL
 # reconciliation on GET /api/command/coverage.
 tests/test_league_coverage_status.py
+# Position rooms (GET /api/command/positions/*): GET only, 401 without a
+# session, READ ONLY transaction, no order / funded / paper-writer import.
+tests/test_position_rooms_authority.py

@@ -630,6 +630,14 @@ try:
     app.include_router(_command_intel_router)
 except ImportError:
     log.warning("intel: api.command_intel not loaded", exc_info=True)
+# ── THE POSITION ROOMS: /api/command/positions/rooms, /room/{group_key}.
+# GET only, COMMAND auth, READ ONLY transaction; one correlated economic
+# position per screen (paper and actual, actual per venue, never summed).
+try:
+    from .command_positions import router as _command_positions_router
+    app.include_router(_command_positions_router)
+except ImportError:
+    log.warning("positions: api.command_positions not loaded", exc_info=True)
 from .agent_capabilities import router as _capabilities_router
 app.include_router(_capabilities_router)
 from .slack_agents import router as _slack_agents_router
