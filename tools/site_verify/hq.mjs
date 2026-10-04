@@ -11,7 +11,7 @@ fs.mkdirSync(OUT, { recursive: true });
 const report = { at: new Date().toISOString(), host: HOST, runs: [] };
 const browser = await chromium.launch();
 for (const [label, vw, vh] of [["desktop", 1440, 900], ["phone", 390, 844]].filter(([l]) => !process.env.ONLY || process.env.ONLY === l)) {
-  for (const path of (process.env.PAGES || "/,/floor,/positions,/xavier,/allocator,/eddie,/scout").split(",")) {
+  for (const path of (process.env.PAGES || "/,/floor,/positions,/xavier,/allocator,/eddie,/scout,/profitability,/acceptance,/improvements").split(",")) {
     const ctx = await browser.newContext({ viewport: { width: vw, height: vh } });
     if (TOKEN) await ctx.route(HOST + "/api/command/**", (r) =>
       r.continue({ headers: { ...r.request().headers(), "x-admin-token": TOKEN } }));
