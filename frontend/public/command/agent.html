@@ -5,11 +5,13 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>BettorToken · AI Agents</title>
 <meta name="robots" content="noindex">
+<meta name="color-scheme" content="dark">
+<link rel="stylesheet" href="workspace.css">
 <style>
   :root{--bg:#0b0e13;--ink:#e8ecf2;--mute:#8b95a5;--line:#1c2330;--acc:#e0b54a}
-  *{box-sizing:border-box} html,body{margin:0;height:100%;background:var(--bg);color:var(--ink);
+  *{box-sizing:border-box} html,body{margin:0;min-height:100%;background:var(--bg);color:var(--ink);
   font:14px/1.4 system-ui,-apple-system,"Segoe UI",sans-serif}
-  body{display:flex;flex-direction:column}
+  body{display:flex;flex-direction:column;min-height:100vh}
   /* THE NAVIGATION NEVER CLIPS: at phone width (390 px) the roles drop to
      a second line inside each link and the row scrolls sideways if it must;
      nothing is cut off. */
@@ -21,6 +23,7 @@
   nav a .role{color:var(--mute)}
   nav a:hover,nav a:focus-visible{color:var(--ink);outline:2px solid var(--line)}
   nav a[aria-current="page"]{color:var(--ink);background:#151b26;box-shadow:inset 0 -2px 0 var(--acc)}
+  nav a.floor{color:#bfe3f5}
   nav .tag{margin-left:auto;color:var(--mute);font-size:12px;white-space:nowrap;padding-left:8px}
   @media (max-width:640px){
     nav{gap:2px;padding:0 8px}
@@ -31,7 +34,8 @@
     nav a .sep{display:none}
     nav .tag{display:none}
   }
-  iframe{flex:1;width:100%;border:0;background:var(--bg)}
+  iframe{flex:1;width:100%;border:0;background:var(--bg);min-height:70vh}
+  iframe[hidden]{display:none}
   noscript{padding:24px}
   #state{margin:48px auto;max-width:640px;padding:20px 24px;border:1px solid #6b3a3a;border-radius:10px;background:#1a1012;color:#f1d3d3;font-weight:600}
 </style>
@@ -39,47 +43,99 @@
 <body>
 <nav aria-label="AI agents">
   <a class="brand" href="/" title="COMMAND homepage">&#8592; COMMAND</a>
+  <a class="floor" href="/floor" title="BETTOR headquarters: the live trading floor">Trading floor</a>
   <a href="/derek" data-agent="derek">Derek<span class="sep"> · </span><span class="role">Discovery &amp; Entry</span></a>
   <a href="/xavier" data-agent="xavier">Xavier<span class="sep"> · </span><span class="role">Portfolio Mgmt</span></a>
   <a href="/audrey" data-agent="audrey">Audrey<span class="sep"> · </span><span class="role">Audit &amp; Intel</span></a>
   <a href="/karen" data-agent="karen">Karen<span class="sep"> · </span><span class="role">Red Team</span></a>
+  <a href="/allocator" data-agent="allocator">Allocator<span class="sep"> · </span><span class="role">Capital</span></a>
+  <a href="/eddie" data-agent="eddie">Eddie<span class="sep"> · </span><span class="role">Execution</span></a>
+  <a href="/scout" data-agent="scout">Scout<span class="sep"> · </span><span class="role">Intelligence</span></a>
   <span class="tag">AI agents · paper experiment</span>
 </nav>
-<iframe id="page" title="Agent page" allow="microphone; autoplay"></iframe>
+<!-- THE WORKSPACE (workspace.js) above the classic desk page. The workspace
+     reads GET /api/command/floor/<agent> and the profitability / tournament
+     reads when they exist; the classic page (chat, voice, the 3D portrait)
+     stays exactly as it was, one tab away. -->
+<div class="ws-tabs" id="ws-tabs" role="tablist" aria-label="Agent views" hidden>
+  <button type="button" role="tab" id="tab-ws" aria-controls="ws-root" aria-selected="true">Workspace</button>
+  <button type="button" role="tab" id="tab-desk" aria-controls="page" aria-selected="false">Desk &amp; conversation</button>
+</div>
+<main id="ws-root" class="ws" role="tabpanel" aria-labelledby="tab-ws" hidden></main>
+<iframe id="page" title="Agent page" allow="microphone; autoplay" hidden></iframe>
 <div id="state" role="status" hidden></div>
 <noscript>This page needs JavaScript. Open <a href="/api/command/agents/page">the agent pages</a> directly.</noscript>
+<script src="floor-core.js"></script>
 <script>
 (function () {
-  var AGENTS = {derek: 1, xavier: 1, audrey: 1, karen: 1};
+  // derek, xavier, audrey, karen: the workspace + their classic desk page.
+  // allocator: the workspace only (no classic page exists).
+  // eddie, scout: their own pages (pos-agents) framed as before, with the
+  // live floor state above them -- never a duplicate workspace.
+  var AGENTS = {derek: 1, xavier: 1, audrey: 1, karen: 1, allocator: 1, eddie: 1, scout: 1};
+  var WORKSPACE = {derek: 1, xavier: 1, audrey: 1, karen: 1, allocator: 1};
+  var CLASSIC = {derek: 1, xavier: 1, audrey: 1, karen: 1, eddie: 1, scout: 1};
   var name = (location.pathname.replace(/\/+$/, "").split("/").pop() || "").toLowerCase();
   if (!AGENTS[name]) { name = "derek"; }
   document.querySelectorAll("nav a[data-agent]").forEach(function (a) {
     if (a.getAttribute("data-agent") === name) { a.setAttribute("aria-current", "page"); }
   });
-  document.title = "BettorToken · " + name.charAt(0).toUpperCase() + name.slice(1);
+  var label = name === "allocator" ? "Chief Allocator" : name.charAt(0).toUpperCase() + name.slice(1);
+  document.title = "BettorToken · " + label;
   var url = "/api/command/agents/" + name + "/page";
   var frame = document.getElementById("page");
   var note = document.getElementById("state");
+  var tabs = document.getElementById("ws-tabs"), root = document.getElementById("ws-root");
+  var tabWs = document.getElementById("tab-ws"), tabDesk = document.getElementById("tab-desk");
+  var framed = false;
   function show(msg) { note.textContent = msg; note.hidden = false; frame.hidden = true; }
   // ASK FIRST, THEN FRAME: a page the serving API has not released, a
   // signed-out session and an unavailable service each get their own
   // truthful message instead of an error page inside the frame.
-  fetch(url, {method: "GET", credentials: "same-origin", cache: "no-store"})
-    .then(function (r) {
-      if (r.ok) { frame.src = url; return; }
-      if (r.status === 401 || r.status === 403) {
-        show("SIGN-IN REQUIRED: your COMMAND session is missing or has expired. No figure is shown in the meantime. ");
-        var a = document.createElement("a"); a.href = "/"; a.textContent = "Sign in to COMMAND →";
-        a.style.color = "#9fd3ff"; note.appendChild(a);
-      } else if (r.status === 404) {
-        show("NOT YET RELEASED: the serving API does not have the " + name +
-             " page yet. It ships with the next API release.");
-      } else {
-        show("UNAVAILABLE: the agent service answered HTTP " + r.status +
-             ". No data is shown rather than stale or empty figures.");
-      }
-    })
-    .catch(function (e) { show("UNAVAILABLE: the agent service could not be reached (" + e.name + ")."); });
+  function classic() {
+    if (framed) { frame.hidden = !frame.src; return; }
+    framed = true;
+    fetch(url, {method: "GET", credentials: "same-origin", cache: "no-store"})
+      .then(function (r) {
+        if (r.ok) { frame.src = url; frame.hidden = false; return; }
+        if (r.status === 401 || r.status === 403) {
+          show("SIGN-IN REQUIRED: your COMMAND session is missing or has expired. No figure is shown in the meantime. ");
+          var a = document.createElement("a"); a.href = "/"; a.textContent = "Sign in to COMMAND →";
+          a.style.color = "#9fd3ff"; note.appendChild(a);
+        } else if (r.status === 404) {
+          show("NOT YET RELEASED: the serving API does not have the " + name +
+               " page yet. It ships with the next API release.");
+        } else {
+          show("UNAVAILABLE: the agent service answered HTTP " + r.status +
+               ". No data is shown rather than stale or empty figures.");
+        }
+      })
+      .catch(function (e) { show("UNAVAILABLE: the agent service could not be reached (" + e.name + ")."); });
+  }
+  function select(which) {
+    var ws = which === "ws";
+    tabWs.setAttribute("aria-selected", String(ws)); tabDesk.setAttribute("aria-selected", String(!ws));
+    root.hidden = !ws;
+    if (ws) { frame.hidden = true; note.hidden = true; } else { classic(); }
+    try { sessionStorage.setItem("bt.agent.tab", which); } catch (e) { /* per-viewer convenience only */ }
+  }
+  tabWs.addEventListener("click", function () { select("ws"); });
+  tabDesk.addEventListener("click", function () { select("desk"); });
+  function load() { var s = document.createElement("script"); s.src = "workspace.js"; document.body.appendChild(s); }
+  if (WORKSPACE[name]) {
+    if (CLASSIC[name]) { tabs.hidden = false; } else { tabDesk.hidden = true; }
+    var want = "ws";
+    try { if (CLASSIC[name] && (location.hash === "#desk" || sessionStorage.getItem("bt.agent.tab") === "desk")) { want = "desk"; } } catch (e) { /* no storage */ }
+    window.__btWorkspace = {agent: name};
+    load();
+    select(want);
+  } else {
+    // eddie / scout: the live floor strip above their own page
+    window.__btWorkspace = {agent: name, stripOnly: true};
+    root.hidden = false; root.classList.add("strip-only");
+    load();
+    classic();
+  }
 })();
 </script>
 </body>
