@@ -775,6 +775,16 @@ try:
 except ImportError:
     log.warning("validation: api.command_validation not loaded",
                 exc_info=True)
+# ── THE HISTORICAL R30 DECISION REPLAY (migration 237): /api/command/
+# r30-replay. GET only, COMMAND auth, READ ONLY transaction with a statement
+# timeout, bounded; reads the append-only r30_replay_* runs (labelled
+# REPLAY_NOT_FORWARD_EVIDENCE). No route here writes or holds authority.
+try:
+    from .command_r30_replay import router as _command_r30_replay_router
+    app.include_router(_command_r30_replay_router)
+except ImportError:
+    log.warning("r30 replay: api.command_r30_replay not loaded",
+                exc_info=True)
 # ── THE POSITION ROOMS: /api/command/positions/rooms, /room/{group_key}.
 # GET only, COMMAND auth, READ ONLY transaction; one correlated economic
 # position per screen (paper and actual, actual per venue, never summed).

@@ -641,6 +641,18 @@ READERS = {
     # descriptive name list with no SQL behind it: selects nothing, reads no
     # row, sizes and places nothing
     "agents/agent_context.py": ("CONTEXT_SOURCE_NAME_LIST_PROSE_ONLY", 2),
+    # (237) THE HISTORICAL R30 REPLAY (RESEARCH / TOURNAMENT EVIDENCE): the
+    # choke point registers the table (its insert stamp and the outcome
+    # columns it reveals only at their own stamps); the reconstruction reads
+    # the valuation row a historical decision ALREADY links to, BY ID ONLY,
+    # at that decision's clock (provider observation, receipt, mapping,
+    # valuation), both purposes because the decision was taken on that row
+    # whatever its purpose. It selects no candidate, sizes and places
+    # nothing, and writes only r30_replay_* (tests/test_r30_replay.py).
+    "replay/pit.py": ("REPLAY_CHOKE_POINT_REGISTRY_ENTRY", 1),
+    "replay/reconstruct.py": (
+        "BY_ID_OF_A_HISTORICAL_DECISIONS_VALUATION_AT_ITS_CLOCK_RESEARCH_ONLY",
+        4),
 }
 
 

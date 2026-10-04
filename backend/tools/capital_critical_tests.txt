@@ -827,3 +827,15 @@ tests/test_command_release_authority.py
 # append-only tables; bundles differ per agent and never widen the
 # registry (Karen / Scout / Eddie boundaries); no voice is borrowed.
 tests/test_agent_identity_api_authority.py
+# (237) THE HISTORICAL R30 DECISION REPLAY + ALPHA ATTRIBUTION V2 (owner
+# red-team acceptance addendum): the one choke-point reader returns only rows
+# recorded by each replay clock (a future-dated row is invisible; a forced one
+# raises), the database CHECKs no decision input was recorded after its clock,
+# every output is REPLAY_NOT_FORWARD_EVIDENCE with production_effect NONE, the
+# replay imports no order/venue/execution/funded module, the V2 decomposition
+# is an exact identity with each term UNAVAILABLE with a reason, and the
+# vendored red-team reference models stay byte-identical and without
+# authority (no decision / sizing / order path imports them).
+tests/test_r30_replay.py
+tests/test_alpha_attribution_v2.py
+tests/test_research_ref_models.py
