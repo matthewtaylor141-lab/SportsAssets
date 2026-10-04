@@ -6768,6 +6768,11 @@ async def refresh(*, back_h: float = 12.0, fwd_h: float = 96.0,
                 tally.market_dropped(**cell, reason=why)
                 market_reasons.append(why)
                 continue
+            if pass_name == vc.PASS_STARTED_EARLIER:
+                # which rule kept a listing that started before the window,
+                # by sport: each rule's population is on the receipt
+                tally.note("started_earlier_kept:%s:%s" % (
+                    vc.started_earlier_keep_rule(ev, m), cell["sport"]))
             markets.append((m, cell))
         if not markets:
             # the event-level form of what emptied it: "no open market"

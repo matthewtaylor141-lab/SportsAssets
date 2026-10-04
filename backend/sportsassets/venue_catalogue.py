@@ -285,8 +285,14 @@ MAX_CONSECUTIVE_EVENT_FAILURES = 5
 #: OWN end date is still ahead, is kept by STARTED_EARLIER only when the venue
 #: scheduled it to span at least this long (endDate - start): a multi-day
 #: event between its sessions -- a cricket test at stumps, a golf round
-#: overnight. A single game's end date is its start (the az-col fixture), and
-#: the midterms' event spans 23 h 59 min, so neither qualifies.
+#: overnight. WHAT IS AND IS NOT OBSERVED: the midterms' EVENT spans 23 h 59 min
+#: (fetch-docs 37233823157) and would not qualify; a single game's MARKET
+#: endDate equals its start (the az-col fixture), but a single game's EVENT
+#: endDate has not been observed. If the venue dates a game's event to end a
+#: day or more after its start, this rule would keep that game until then --
+#: so every listing kept this way is counted BY SPORT in the receipt
+#: (`notes`, `started_earlier_kept:MULTI_DAY_SCHEDULE:<sport>`), and the first
+#: production receipt shows whether anything but multi-day sports lands here.
 MULTI_DAY_MIN_SPAN_H = 24.0
 
 #: The receipt keeps at most this many (sport, league, family) cells by
@@ -603,11 +609,13 @@ def market_drop_reason(ev: dict, market: dict, *, pass_name: str,
     (12 h ago and earlier). What it exists to keep, and nothing else:
       * a FUTURE (sportsMarketType `futures`) while its EVENT's end date is
         ahead or unstated -- "National League Champion" started 2026-09-07 and
-        ends 2026-10-20. A future past its event's end is the venue's
-        resolution backlog, not a tradable listing:
-        FUTURE_PAST_ITS_EVENT_END_DATE (the same-day weather markets and a
-        finished qualifying session, research-sql 37236398336 B1b, are the
-        cases this names);
+        ends 2026-10-20. A future past its event's end (a series winner whose
+        series is over, a qualifying session already run -- research-sql
+        37236398336 B1b) is the venue's resolution backlog, not a tradable
+        listing: FUTURE_PAST_ITS_EVENT_END_DATE. (The same-day weather
+        markets carry the `futures` type too; they are left out by the
+        category rule when the venue files them under a non-sports word, and
+        counted by their word either way.)
       * a game market on an event the venue flags `live` (a long match still
         in play);
       * a game market on an event scheduled to span MULTI_DAY_MIN_SPAN_H or
@@ -640,6 +648,24 @@ def market_drop_reason(ev: dict, market: dict, *, pass_name: str,
             and end - start >= MULTI_DAY_MIN_SPAN_H * 3600.0):
         return None
     return D_MARKET_GAME_NOT_LIVE_BEFORE_WINDOW
+
+
+K_SE_FUTURE_RUNNING = "FUTURE_EVENT_STILL_RUNNING"
+K_SE_VENUE_LIVE = "VENUE_FLAGS_LIVE"
+K_SE_MULTI_DAY = "MULTI_DAY_SCHEDULE"
+
+
+def started_earlier_keep_rule(ev: dict, market: dict) -> str:
+    """Which STARTED_EARLIER rule kept a market market_drop_reason passed
+    (call it only for those). Pure. Counted by sport in the receipt so each
+    rule's population is visible."""
+    fam = family_of((market or {}).get("sportsMarketType"),
+                    slug=(market or {}).get("slug"))
+    if fam == F_FUTURES:
+        return K_SE_FUTURE_RUNNING
+    if (ev or {}).get("live") is True:
+        return K_SE_VENUE_LIVE
+    return K_SE_MULTI_DAY
 
 
 # ── pagination ───────────────────────────────────────────────────────────

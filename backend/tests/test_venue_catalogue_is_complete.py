@@ -928,6 +928,11 @@ async def test_the_writer_keeps_every_tradable_listing_with_its_state(monkeypatc
                       vc.D_MARKET_GAME_NOT_LIVE_BEFORE_WINDOW: 1,
                       vc.D_MARKET_FUTURE_PAST_END: 2}, md
         assert crec["states"][vc.S_LIVE] == 1                  # the T20
+        # each STARTED_EARLIER keep rule counted by sport (markets)
+        n = crec["notes"]
+        assert n["started_earlier_kept:FUTURE_EVENT_STILL_RUNNING:futures"] == 4
+        assert n["started_earlier_kept:VENUE_FLAGS_LIVE:cricket"] == 1
+        assert n["started_earlier_kept:MULTI_DAY_SCHEDULE:cricket"] == 1
         # nearest slice first, every slice named, the durations measured
         ah = crec["passes"][vc.PASS_AHEAD]
         assert ah["slices"][0]["hours_from_now"] == [96.0, 14 * 24.0]
