@@ -284,7 +284,7 @@ def test_the_store_writes_only_the_replay_tables_and_the_route_holds_no_sql():
     import re
     writes = []
     for s in _strings(PKG / "replay" / "store.py"):
-        for kw, table in re.findall(r"\b(INSERT\s+INTO|UPDATE|DELETE\s+FROM)"
+        for _kw, table in re.findall(r"\b(INSERT\s+INTO|UPDATE|DELETE\s+FROM)"
                                     r"\s+([a-z0-9_]+)", s):
             writes.append(table)
         for table in re.findall(r"\bFROM\s+([a-z0-9_]+)", s):
@@ -328,6 +328,8 @@ def test_importing_the_replay_loads_no_execution_module_at_runtime():
         "import sportsassets.replay.runner, sportsassets.replay.store\n"
         "import sportsassets.intel.attribution_v2\n"
         "import sportsassets.research_ref.marginal_capital_value\n"
+        # what a run imports lazily (Eddie's pure estimator)
+        "import sportsassets.agents.eddie\n"
         "bad = [m for m in sys.modules if m.startswith('sportsassets') and "
         "any(f in m.rsplit('.', 1)[-1] for f in %r)]\n"
         "print(bad)\n" % (("execmirror", "execution", "live_", "funded",
