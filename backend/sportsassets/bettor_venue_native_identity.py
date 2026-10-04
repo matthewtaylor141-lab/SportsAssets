@@ -167,14 +167,102 @@ NICKNAME_QUALIFIED_FAMILIES = frozenset(("football",))
 
 def participant_name(row, family) -> str:
     """The venue participant a row names: `team_name`, plus `side_norm` (the
-    nickname) for NICKNAME_QUALIFIED_FAMILIES. Pure."""
+    nickname) for NICKNAME_QUALIFIED_FAMILIES -- unless `team_name` already
+    ends with it, as every venue `nfl` row does ("los angeles rams" / "rams").
+    Pure."""
     r = _row(row)
     team = " ".join(str(r.get("team_name") or "").split())
     if family in NICKNAME_QUALIFIED_FAMILIES and team:
         nick = " ".join(str(r.get("side_norm") or "").split())
         if nick and nick not in ("yes", "no"):
+            if team.lower().split()[-len(nick.split()):] == \
+                    nick.lower().split():
+                return team
             return "%s %s" % (team, nick)
     return str(r.get("team_name") or "")
+
+
+#: ── THE NFL: CITY/REGION + NICKNAME, A CLOSED TABLE OF 32 (cand24) ─────
+#:
+#: The venue's `nfl` rows carry the full name in `team_name` ("los angeles
+#: rams", "washington commanders") and the nickname in `side_norm`; its event
+#: TITLES use the abbreviated region ("LA Rams vs. PHI Eagles", "NE Patriots
+#: vs. BUF Bills", "JAC Jaguars vs. CIN Bengals"), and the provider renders the
+#: full name ("Los Angeles Rams"). Two regions are shared -- LA (Rams,
+#: Chargers) and NY (Giants, Jets) -- so the NICKNAME is what separates them and
+#: the REGION must agree with it: "LA Rams" is the Rams, "NY Jets" the Jets,
+#: and "Oakland Raiders" is nobody (the Raiders' region is Las Vegas).
+#:
+#: EACH ENTRY IS ONE TEAM'S OWN RENDERINGS (venue slug abbr, venue title abbr,
+#: the common region abbreviation), never a similarity between two teams.
+#: Nickname -> (region, renderings of the region). Every NFL nickname is
+#: unique, so the nickname names at most one entry.
+NFL_TEAMS = {
+    "cardinals": ("arizona", ("ari", "arz")),
+    "falcons": ("atlanta", ("atl",)),
+    "ravens": ("baltimore", ("bal",)),
+    "bills": ("buffalo", ("buf",)),
+    "panthers": ("carolina", ("car",)),
+    "bears": ("chicago", ("chi",)),
+    "bengals": ("cincinnati", ("cin",)),
+    "browns": ("cleveland", ("cle",)),
+    "cowboys": ("dallas", ("dal",)),
+    "broncos": ("denver", ("den",)),
+    "lions": ("detroit", ("det",)),
+    "packers": ("green bay", ("gb", "gnb")),
+    "texans": ("houston", ("hou",)),
+    "colts": ("indianapolis", ("ind",)),
+    "jaguars": ("jacksonville", ("jax", "jac")),
+    "chiefs": ("kansas city", ("kc", "kan")),
+    "raiders": ("las vegas", ("lv", "lvr")),
+    "chargers": ("los angeles", ("lac", "la")),
+    "rams": ("los angeles", ("lar", "la")),
+    "dolphins": ("miami", ("mia",)),
+    "vikings": ("minnesota", ("min",)),
+    "patriots": ("new england", ("ne", "nwe")),
+    "saints": ("new orleans", ("no", "nor")),
+    "giants": ("new york", ("nyg", "ny")),
+    "jets": ("new york", ("nyj", "ny")),
+    "eagles": ("philadelphia", ("phi",)),
+    "steelers": ("pittsburgh", ("pit",)),
+    "49ers": ("san francisco", ("sf", "sfo")),
+    "seahawks": ("seattle", ("sea",)),
+    "buccaneers": ("tampa bay", ("tb", "tam")),
+    "titans": ("tennessee", ("ten",)),
+    "commanders": ("washington", ("was", "wsh")),
+}
+NFL_PROVIDER_COMPETITION = "americanfootball_nfl"
+NFL_LEAGUE_TOKEN = "nfl"
+
+
+def nfl_team(name):
+    """The NFL team a rendering names, as `(nickname, region)`, or None.
+
+    Exactly one NFL nickname among the folded tokens, and every OTHER token
+    must be that team's region -- in full ("tampa bay") or one of its own
+    abbreviations ("tb") -- or nothing at all ("49ers"). A region that belongs
+    to a different team ("louisville cardinals", "oakland raiders") is not
+    this team, and the function answers None rather than guess. Pure."""
+    toks = fold(name).split()
+    nicks = [t for t in dict.fromkeys(toks) if t in NFL_TEAMS]
+    if len(nicks) != 1:
+        return None
+    nick = nicks[0]
+    region, abbrs = NFL_TEAMS[nick]
+    rest = [t for t in toks if t != nick]
+    if not rest or rest == region.split() or \
+            (len(rest) == 1 and rest[0] in abbrs):
+        return (nick, region)
+    return None
+
+
+def nfl_canonical_tokens(name):
+    """`nfl_team`'s answer as the full rendering's tokens ("TB Buccaneers" ->
+    ['tampa', 'bay', 'buccaneers']), or None. Pure."""
+    got = nfl_team(name)
+    if got is None:
+        return None
+    return got[1].split() + [got[0]]
 
 #: ── THE START-TIME TOLERANCE, AND WHY IT IS 90 MINUTES ────────────────
 #:
@@ -380,7 +468,16 @@ def team_profile(name, family=None, nickname=None) -> dict:
     text = _RANK_PREFIX.sub("", str(name or "")) if college else name
     raw = fold(text).split()
     rewrites: list = []
-    if college:
+    nfl = nfl_canonical_tokens(name) if college else None
+    if nfl is not None:
+        # AN NFL TEAM, rendered in full: "LA Rams" and "Los Angeles Rams" are
+        # one team's two renderings (NFL_TEAMS); the nickname still has to
+        # agree, so the Chargers are never the Rams.
+        if raw != nfl:
+            rewrites.append("nfl region %s -> %s" % (" ".join(raw),
+                                                      " ".join(nfl)))
+        raw = list(nfl)
+    elif college:
         if text != name:
             rewrites.append("ranked prefix dropped")
         raw, rw = _college_tokens(raw)
@@ -951,6 +1048,10 @@ def describe() -> dict:
         "affiliation_tokens_dropped": sorted(AFFILIATION_TOKENS),
         "generic_tokens_never_count_alone": True,
         "alias_table": None,
+        # cand24: one closed table of the 32 NFL teams' OWN renderings
+        # (region in full or its abbreviation + the nickname) -- not an alias
+        # between two names, and the nickname must always agree
+        "nfl_teams": len(NFL_TEAMS),
         "womens_provider_competitions": sorted(WOMENS_PROVIDER_COMPETITIONS),
         "refusals": list(REFUSALS),
         "priced_outcome": "the provider's HOME team, as on the global path",

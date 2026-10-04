@@ -68,6 +68,13 @@ COLLAPSE DETECTION (declared in THRESHOLDS, applied by `detect`):
                      evaluated) -- named at the first stage where it vanished.
                      CRITICAL when that stage flowed in the baseline,
                      WARNING when it never has.
+  COVERAGE_INCIDENT  (cand24) the per-league STATUS (`classify_status`):
+                     provider events > 0 and an expected stage zero with no
+                     later stage counting anything. Raised even below
+                     `absent_min_provider`, as an ABSENT_DOWNSTREAM alert
+                     carrying `coverage_status`, unless the detector already
+                     raised that stage. A zero FOLLOWED by downstream flow is
+                     a ledger gap (`measurement_gaps`), never an alert.
 Every alert is persisted (coverage_collapse_alerts) and AUTOMATICALLY written
 as an Audrey finding (paper_audrey_findings, kind COVERAGE_COLLAPSE) on the
 current paper session; with no session the alert records why no finding
@@ -517,6 +524,15 @@ def stage_flowed(history: list, stage: str) -> bool:
     return any(((h or {}).get(col) or 0) > 0 for h in history)
 
 
+def _flows_after(row: dict, stage: str) -> bool:
+    """Did any LATER stage (through `decided`) count an event? Then a zero
+    at `stage` is the collection ledger not recording that step, not an
+    absence: the events demonstrably got past it (the 4717460 lesson,
+    applied to every stage, not only settlement). Pure."""
+    later = STAGES[STAGES.index(stage) + 1: STAGES.index("decided") + 1]
+    return any((row.get(COLUMN[s]) or 0) > 0 for s in later)
+
+
 def detect(today: dict, history: list, *, th: dict = THRESHOLDS) -> list:
     """Alerts for one league's day given its prior days. Pure."""
     alerts = []
@@ -527,6 +543,8 @@ def detect(today: dict, history: list, *, th: dict = THRESHOLDS) -> list:
             n = today.get(COLUMN[st])
             if n is None:
                 continue          # unmeasured is not absent
+            if n == 0 and _flows_after(today, st):
+                continue          # later stages flowed: a ledger gap, not absence
             if n == 0:
                 prev = STAGES[STAGES.index(st) - 1]
                 flowed = stage_flowed(history, st)
@@ -719,6 +737,8 @@ async def run(conn, *, now: float | None = None, ctx: dict | None = None,
                 continue
             if tz != ALERT_TIMEZONE:
                 continue
+            live_decisions = any((r.get("decided_events") or 0) > 0
+                                 for r in f["leagues"].values())
             for league, r in f["leagues"].items():
                 if league.startswith("UNATTRIBUTED"):
                     continue
@@ -726,7 +746,16 @@ async def run(conn, *, now: float | None = None, ctx: dict | None = None,
                     hist = await history_for(conn, tz, league, day)
                 except Exception:                               # noqa: BLE001
                     hist = []
-                for a in detect(dict(r, league=league), hist):
+                found = detect(dict(r, league=league), hist)
+                # A COVERAGE_INCIDENT IS ALWAYS AN ALERT (cand24): when the
+                # collapse detector did not already raise one for that stage
+                # (it needs absent_min_provider events), the status raises
+                # it through the same table and the same Audrey finding.
+                inc = incident_alert(dict(r, league=league), hist, found,
+                                     decisions_live=live_decisions)
+                if inc is not None:
+                    found.append(inc)
+                for a in found:
                     out["alerts"].append(await raise_alert(
                         conn, a, tz=tz, day=day.isoformat(), now=at,
                         ctx=ctx))
@@ -844,6 +873,19 @@ async def coverage_payload(conn, *, tz: str = ALERT_TIMEZONE, days: int = 7,
             d["day"] = d["day"].isoformat()
             d["league_name"] = league_name(d["league"])
             alerts.append(d)
+    try:
+        out["league_status"] = await league_status_table(
+            conn, rows=by_day.get(today.isoformat()) or [], day=today, tz=tz,
+            now=at)
+    except Exception as exc:                                    # noqa: BLE001
+        out["league_status"] = {"status": "UNAVAILABLE", "why": "%s: %s" % (
+            type(exc).__name__, str(exc)[:160])}
+    try:
+        out["nfl_reconciliation"] = await reconcile_league(
+            conn, token="nfl", day=today, tz=tz, now=at)
+    except Exception as exc:                                    # noqa: BLE001
+        out["nfl_reconciliation"] = {"status": "UNAVAILABLE", "why": "%s: %s" % (
+            type(exc).__name__, str(exc)[:160])}
     out.update(status="OK" if by_day else "EMPTY",
                why=None if by_day else "NO_SNAPSHOTS_AND_NO_PROVIDER_RECORDS",
                today_computed_live=live,
@@ -852,3 +894,485 @@ async def coverage_payload(conn, *, tz: str = ALERT_TIMEZONE, days: int = 7,
                alerts=alerts,
                provider_supplement=await pinnapi_supplement(conn, now=at))
     return out
+
+
+# ═════════════════════════════════════════════════════════════════════
+# PER-LEAGUE STATUS (cand24): EXACTLY ONE OF FIVE, WITH ITS REASON
+# ═════════════════════════════════════════════════════════════════════
+#
+#   HEALTHY                 provider events reach decisions and at least one
+#                           ENTER
+#   REFUSING_BY_POLICY      reaches decisions, every one REFUSED by a named
+#                           policy (football today: SETTLEMENT_NOT_SUPPORTED)
+#   EXPLICITLY_UNSUPPORTED  not in the collector's scope by its declared maps
+#                           (ext_pinnacle_loop), the reason named
+#   COVERAGE_INCIDENT       provider events > 0 and an expected stage zero
+#                           with nothing downstream of it (NULL is unmeasured,
+#                           never absent; a zero followed by later flow is a
+#                           ledger gap, not an incident) -- always an alert
+#   UNAVAILABLE             in scope, but nothing to measure: no provider
+#                           events (not requested, budget, provider does not
+#                           list), the venue lists none, or a source unread
+#
+# Display and alerting only: no admission path reads a status.
+
+S_HEALTHY = "HEALTHY"
+S_REFUSING = "REFUSING_BY_POLICY"
+S_UNSUPPORTED = "EXPLICITLY_UNSUPPORTED"
+S_INCIDENT = "COVERAGE_INCIDENT"
+S_UNAVAILABLE = "UNAVAILABLE"
+LEAGUE_STATUSES = (S_HEALTHY, S_REFUSING, S_UNSUPPORTED, S_INCIDENT,
+                   S_UNAVAILABLE)
+#: The stages a provider-present, in-scope league is expected to reach.
+STATUS_STAGES = ("normalized", "venue_discovered", "mapped",
+                 "settlement_supported", "evaluated", "decided")
+COLLECTOR_KEY = "ext_pinnacle_last_cycle"
+COLLECTOR_FRESH_S = 3 * 900.0
+
+#: Families the collector prices at all; anything else is out of scope by
+#: declaration, and says why.
+FAMILY_SCOPE_NOTE = {
+    "basketball": "no basketball provider key is requested by the collector "
+                  "(ext_pinnacle_loop maps none) and basketball h2h is not in "
+                  "the measured de-vig set",
+    "hockey": "no hockey provider key is requested by the collector and "
+              "hockey h2h is not in the measured de-vig set",
+    "tennis": "no tennis provider key is requested by the collector and "
+              "tennis is not in the measured de-vig set",
+    "futures": "an outright/futures listing is not a fixture",
+}
+
+
+def lane_scope(league: str, *, token: str | None = None,
+               family: str | None = None) -> dict:
+    """Is this league in the collector's declared scope? {"in_scope", "why"}.
+    Read from ext_pinnacle_loop's maps -- the same identity the cycle uses.
+    Pure."""
+    from ..workers import ext_pinnacle_loop as L
+    from .. import bettor_venue_realism as vreal
+    keys = ({k for k, _ in L.SPORTS_CONFIRMED}
+            | set(L.VENUE_TOKEN_TO_PROVIDER_KEY.values())
+            | set(L.VENUE_FOOTBALL_TOKEN_TO_PROVIDER_KEY.values()))
+    if league in keys:
+        return {"in_scope": True, "why": None}
+    tok = str(token or "").lower()
+    fam = str(family or "").lower()
+    if tok in L.VENUE_TOKENS_DELIBERATELY_EXCLUDED:
+        return {"in_scope": False, "why": "DELIBERATELY_EXCLUDED: %s"
+                % L.VENUE_TOKENS_DELIBERATELY_EXCLUDED[tok]}
+    if tok in L.VENUE_TOKENS_WITH_A_REFUTED_MAPPING:
+        return {"in_scope": False, "why": (
+            "MAPPING_REFUTED_BY_THE_VENUE_FIXTURES: %s" % str(
+                L.VENUE_TOKENS_WITH_A_REFUTED_MAPPING[tok].get(
+                    "why_it_is_out", ""))[:200])}
+    if fam and any(fam.startswith(p.rstrip("_"))
+                   for p in vreal.SIMULATED_SPORTS_TYPE_PREFIXES):
+        return {"in_scope": False,
+                "why": "SIMULATED_COMPETITION: %s is a simulated family" % fam}
+    if fam in FAMILY_SCOPE_NOTE:
+        return {"in_scope": False, "why": "FAMILY_NOT_IN_COLLECTOR_SCOPE: %s"
+                % FAMILY_SCOPE_NOTE[fam]}
+    if league.startswith("UNATTRIBUTED"):
+        return {"in_scope": False, "why": "UNATTRIBUTED: the record's provider "
+                "event has no league in the collection ledger"}
+    return {"in_scope": False, "why": (
+        "VENUE_TOKEN_NOT_MAPPED: %s has no provider key in the collector's "
+        "maps (ext_pinnacle_loop SPORTS_CONFIRMED / VENUE_TOKEN_TO_PROVIDER_KEY "
+        "/ VENUE_FOOTBALL_TOKEN_TO_PROVIDER_KEY)" % (tok or league))}
+
+
+def classify_status(row: dict, *, scope: dict, collector: dict | None = None,
+                    decisions_live: bool = False) -> dict:
+    """ONE status for one league's day row. Pure.
+
+    `scope` is `lane_scope`'s answer; `collector` the last cycle's selection
+    ({"fresh", "requested", "rejected": {key: refusal}, "budget_dropped"})
+    used only to NAME why an in-scope league has no provider events.
+    `decisions_live` says the paper decision path recorded decisions for SOME
+    league that day: only then is a league's zero at `decided` unexpected (a
+    paper session that is off decides nothing anywhere, which is not an
+    incident in any one league)."""
+    out = {"status": None, "reason": None, "stage": None,
+           "measurement_gaps": []}
+    if not scope.get("in_scope"):
+        return dict(out, status=S_UNSUPPORTED, reason=scope.get("why"))
+    league = row.get("league")
+    prov = row.get("provider_events")
+    if prov is None:
+        return dict(out, status=S_UNAVAILABLE, reason="PROVIDER_STAGE_UNMEASURED: "
+                    + str((row.get("unavailable") or {}).get(
+                        "provider_events") or "no ledger read"))
+    if prov == 0:
+        c = collector or {}
+        venue = row.get("venue_catalogue_events")
+        if not c.get("fresh"):
+            why = "COLLECTOR_HEARTBEAT_NOT_CURRENT"
+        elif league in (c.get("rejected") or {}):
+            why = "PROVIDER_REFUSED: %s" % c["rejected"][league]
+        elif league in (c.get("budget_dropped") or ()):
+            why = ("NOT_REQUESTED_METERED_BUDGET_SPENT: the cycle's %s keys "
+                   "went to higher venue coverage" % c.get("budget", "?"))
+        elif league in (c.get("requested") or ()):
+            why = "REQUESTED_THE_PROVIDER_RETURNED_NO_EVENTS"
+        else:
+            why = "NOT_A_CANDIDATE_THIS_CYCLE (not on the collector's board)"
+        return dict(out, status=S_UNAVAILABLE, reason=(
+            "NO_PROVIDER_EVENTS: %s; venue lists %s event(s)"
+            % (why, "an unmeasured number of" if venue is None else venue)))
+    if row.get("venue_catalogue_events") == 0 and \
+            not (row.get("venue_discovered") or 0):
+        return dict(out, status=S_UNAVAILABLE, reason=(
+            "VENUE_LISTS_NO_EVENTS: the provider listed %d event(s) the venue "
+            "does not list in this window" % prov))
+    for st in STATUS_STAGES:
+        n = row.get(COLUMN[st])
+        if n is None:
+            continue                                  # NULL is not absence
+        if st == "decided" and not decisions_live:
+            continue
+        if n == 0:
+            if _flows_after(row, st):
+                out["measurement_gaps"].append(st)
+                continue
+            return dict(out, status=S_INCIDENT, stage=st, reason=(
+                "%d provider event(s); none reached %s and nothing reached a "
+                "later stage" % (prov, st)))
+    entered = row.get("entered_events")
+    decided = row.get("decided_events")
+    if entered:
+        return dict(out, status=S_HEALTHY, reason=(
+            "%d of %s decided event(s) ENTERED" % (entered, decided)))
+    if decided:
+        return dict(out, status=S_REFUSING, reason=(
+            "all %d decided event(s) REFUSED by a named policy" % decided))
+    return dict(out, status=S_UNAVAILABLE, reason=(
+        "NO_PAPER_DECISIONS_RECORDED: %s evaluated event(s); the paper "
+        "decision path recorded none for any league in this window"
+        % row.get("evaluated_events")))
+
+
+def incident_alert(row: dict, history: list, already: list, *,
+                   decisions_live: bool = False) -> dict | None:
+    """The alert a COVERAGE_INCIDENT raises, unless `detect` already raised
+    one for that stage. Kind ABSENT_DOWNSTREAM (present upstream, absent
+    downstream -- which is what an incident is), carried with
+    `coverage_status`. Pure."""
+    league = row.get("league") or ""
+    st = classify_status(row, scope=lane_scope(league),
+                         decisions_live=decisions_live)
+    if st["status"] != S_INCIDENT:
+        return None
+    for a in already:
+        if a.get("kind") == "ABSENT_DOWNSTREAM" and \
+                a.get("stage_to") == st["stage"]:
+            a.setdefault("detail", {})["coverage_status"] = S_INCIDENT
+            return None
+    stage = st["stage"]
+    prev = STAGES[STAGES.index(stage) - 1]
+    flowed = stage_flowed(history, stage)
+    return {"kind": "ABSENT_DOWNSTREAM", "league": league,
+            "stage_from": prev, "stage_to": stage, "ratio": 0.0,
+            "baseline": None, "severity": "CRITICAL" if flowed else "WARNING",
+            "detail": {"coverage_status": S_INCIDENT,
+                       "provider_events": row.get("provider_events"),
+                       "previous_stage_count": row.get(COLUMN[prev]),
+                       "stage_count": 0, "flowed_in_baseline": flowed,
+                       "statement": "%s: %s" % (league_name(league),
+                                                st["reason"])}}
+
+
+VENUE_TOKENS_SQL = """
+    SELECT lower(split_part(coalesce(event_slug, ''), '-', 1)) AS token,
+           mode() WITHIN GROUP (ORDER BY split_part(coalesce(sports_type, ''),
+                                                    '_', 1)) AS family,
+           count(DISTINCT event_slug) AS events
+      FROM us_premap
+     WHERE game_start >= to_timestamp($1) AND game_start < to_timestamp($2)
+       AND event_slug IS NOT NULL
+     GROUP BY 1
+"""
+
+
+async def collector_selection(conn, *, now: float) -> dict:
+    """The collector's last cycle selection, for naming why a league has no
+    provider events. Never raises."""
+    out = {"fresh": False, "requested": [], "rejected": {},
+           "budget_dropped": [], "budget": None, "at": None}
+    try:
+        raw = await conn.fetchval(
+            "SELECT value FROM ingestion_state WHERE key = $1", COLLECTOR_KEY)
+        v = json.loads(raw) if isinstance(raw, str) else dict(raw or {})
+        sel = v.get("sports_selection") or {}
+        at = float(v.get("at"))
+        out.update(at=at, fresh=0 <= now - at <= COLLECTOR_FRESH_S,
+                   requested=list(sel.get("requested") or []),
+                   rejected={r.get("key"): r.get("refusal")
+                             for r in sel.get("rejected") or []},
+                   budget_dropped=[d.get("key")
+                                   for d in sel.get("budget_dropped") or []],
+                   budget=sel.get("metered_budget"))
+    except Exception as exc:                                    # noqa: BLE001
+        out["why"] = type(exc).__name__
+    return out
+
+
+async def league_status_table(conn, *, rows: list, day: _dt.date, tz: str,
+                              now: float) -> dict:
+    """Status per league for one day: the funnel's own rows, plus every league
+    the venue lists that day and every league the collector or the counting
+    map declares -- so an unsupported or silent league appears, by name, and
+    is never simply missing. Never raises on a source read."""
+    start, end = day_window(day, tz)
+    coll = await collector_selection(conn, now=now)
+    tmap = catalogue_token_map()
+    by_league: dict[str, dict] = {}
+    for r in rows:
+        by_league[r["league"]] = dict(r)
+    venue = await _read(conn, ("us_premap",), VENUE_TOKENS_SQL, start, end)
+    tokens_of: dict[str, list] = {}
+    fam_of: dict[str, str] = {}
+    if not isinstance(venue, str):
+        for g in venue:
+            tok = g["token"] or ""
+            key = tmap.get(tok) or "venue:%s" % tok
+            tokens_of.setdefault(key, []).append(tok)
+            fam_of.setdefault(key, g["family"] or "")
+            r = by_league.setdefault(key, {"league": key})
+            if r.get("venue_catalogue_events") is None:
+                r["venue_catalogue_events"] = int(g["events"])
+    from ..workers import ext_pinnacle_loop as L
+    declared = (set(CATALOGUE_TOKENS) | {k for k, _ in L.SPORTS_CONFIRMED}
+                | set(L.VENUE_FOOTBALL_TOKEN_TO_PROVIDER_KEY.values()))
+    for key in declared:
+        by_league.setdefault(key, {"league": key})
+    ledger_read = await _regclass(conn, "ext_candidate_outcomes")
+    live_decisions = any((r.get("decided_events") or 0) > 0
+                         for r in by_league.values())
+    out = []
+    for key, r in sorted(by_league.items()):
+        # a league with no funnel row was READ and had no record: a measured
+        # zero -- unless the source itself is absent (then NULL)
+        for c in [COLUMN[s] for s in STAGES] + list(EXTRA_COLUMNS):
+            if c == "venue_catalogue_events":
+                r.setdefault(c, None if isinstance(venue, str) else 0)
+            else:
+                r.setdefault(c, 0 if ledger_read else None)
+        toks = tokens_of.get(key) or []
+        fam = r.get("sport_family") or fam_of.get(key) or \
+            L.family_for_provider_key(key)
+        scope = lane_scope(key, token=(toks[0] if toks else
+                                       key.split(":", 1)[-1]), family=fam)
+        st = classify_status(r, scope=scope, collector=coll,
+                             decisions_live=live_decisions)
+        out.append({"league": key,
+                    "league_name": (league_name(key) if not
+                                    key.startswith("venue:") else
+                                    "UNMAPPED:%s" % key.split(":", 1)[1]),
+                    "sport_family": fam or None, "venue_tokens": toks,
+                    "status": st["status"], "reason": st["reason"],
+                    "stage": st["stage"],
+                    "measurement_gaps": st["measurement_gaps"],
+                    "counts": {c: r.get(c) for c in (
+                        "provider_events", "normalized_events",
+                        "venue_discovered", "mapped_events",
+                        "settlement_supported", "evaluated_events",
+                        "decided_events", "entered_events", "refused_events",
+                        "venue_catalogue_events")}})
+    summary = {s: 0 for s in LEAGUE_STATUSES}
+    for o in out:
+        summary[o["status"]] += 1
+    return {"day": day.isoformat(), "tz": tz, "statuses": out,
+            "summary": summary, "status_vocabulary": list(LEAGUE_STATUSES),
+            "collector": {k: coll.get(k) for k in (
+                "fresh", "at", "requested", "budget_dropped", "budget")},
+            "venue_read": None if not isinstance(venue, str) else venue}
+
+
+# ═════════════════════════════════════════════════════════════════════
+# ONE LEAGUE'S DAY, GAME BY GAME: EXPECTED vs OBSERVED (cand24)
+# ═════════════════════════════════════════════════════════════════════
+
+RECON_STAGES = ("EXPECTED", "PINNAPI", "NORMALIZED", "VENUE_CONTRACT",
+                "EXACT_MAP", "SETTLEMENT", "PROBABILITY", "DEREK_EVALUATED",
+                "VERDICT")
+RECON_EXPECTED_SQL = """
+    SELECT event_slug, market_slug, max(event_title) AS title,
+           min(game_start) AS game_start,
+           array_agg(intent ORDER BY intent) AS intents,
+           array_agg(team_name ORDER BY intent) AS teams,
+           array_agg(side_norm ORDER BY intent) AS nicks
+      FROM us_premap
+     WHERE lower(split_part(coalesce(event_slug, ''), '-', 1)) = $1
+       AND sports_type = ANY($2::text[])
+       AND game_start >= to_timestamp($3) AND game_start < to_timestamp($4)
+     GROUP BY event_slug, market_slug
+     ORDER BY min(game_start), event_slug
+"""
+RECON_LEDGER_SQL = """
+    SELECT provider_event_id, max(home) AS home, max(away) AS away,
+           max(commence_time) AS commence_time,
+           max(us_market_slug) AS us_market_slug, max(%s) AS reach,
+           (array_agg(first_refusal ORDER BY cycle_at DESC))[1] AS refusal,
+           (array_agg(outcome ORDER BY cycle_at DESC))[1] AS outcome,
+           max(cycle_at) AS last_cycle
+      FROM ext_candidate_outcomes
+     WHERE sport_key = $1 AND provider_event_id IS NOT NULL
+       AND cycle_at >= to_timestamp($2) AND cycle_at < to_timestamp($3)
+     GROUP BY provider_event_id
+""" % REACH_SQL
+RECON_VALUATION_SQL = """
+    SELECT DISTINCT ON (us_market_slug) us_market_slug, id, record_purpose,
+           probability, refusals, decided_at
+      FROM external_valuations
+     WHERE us_market_slug = ANY($1::text[]) AND decided_at >= to_timestamp($2)
+     ORDER BY us_market_slug, decided_at DESC, id DESC
+"""
+RECON_DECISION_SQL = """
+    SELECT DISTINCT ON (us_market_slug, strategy) us_market_slug, strategy,
+           verdict, refusal, decided_at
+      FROM paper_decisions
+     WHERE us_market_slug = ANY($1::text[]) AND decided_at >= to_timestamp($2)
+     ORDER BY us_market_slug, strategy, decided_at DESC
+"""
+DEREK_STRATEGY = "DEREK_ENTRY_POLICY_V2"
+_SETTLEMENT_CODE = ("SETTLEMENT", "_RULE_", "DRAW_HANDLING", "VOID_",
+                    "OVERTIME_")
+_PROBABILITY_CODE = ("MARKET_NOT_IN_SUPPORTED_SET", "NO_QUALIFIED_PINNACLE",
+                     "PROBABILITY", "DEVIG", "OVERROUND")
+
+
+def _fold(t) -> str:
+    import re as _re
+    return " ".join(_re.sub(r"[^a-z0-9]+", " ", str(t or "").lower()).split())
+
+
+async def reconcile_league(conn, *, token: str, day: _dt.date, tz: str,
+                           now: float, lookback_s: float = 2 * 86400.0
+                           ) -> dict:
+    """Every venue-listed game of `token` on the local `day`, stage by stage:
+    EXPECTED -> PINNAPI (a provider event the collector saw) -> NORMALIZED ->
+    VENUE_CONTRACT -> EXACT_MAP -> SETTLEMENT -> PROBABILITY ->
+    DEREK_EVALUATED -> VERDICT, with the first stage that did not pass and its
+    named reason, plus the MISSING list. Read-only; never raises on a read."""
+    from ..workers import ext_pinnacle_loop as L
+    from .. import bettor_venue_native_identity as V
+    start, end = day_window(day, tz)
+    key = L.provider_key_for_venue_token(token)
+    fam = L.family_for_provider_key(key) if key else None
+    types = list(V.FAMILY_WINNER_TYPES.get(fam or "", ()))
+    out: dict[str, Any] = {"league_token": token, "provider_key": key,
+                           "league_name": league_name(key) if key else None,
+                           "day": day.isoformat(), "tz": tz,
+                           "stages": list(RECON_STAGES)}
+    if not key or not types:
+        return dict(out, status="UNAVAILABLE",
+                    why="the collector maps no provider competition to %r"
+                    % token, games=[], missing=[])
+    exp = await _read(conn, ("us_premap",), RECON_EXPECTED_SQL, token, types,
+                      start, end)
+    if isinstance(exp, str):
+        return dict(out, status="UNAVAILABLE", why=exp, games=[], missing=[])
+    led = await _read(conn, ("ext_candidate_outcomes",), RECON_LEDGER_SQL, key,
+                      start - lookback_s, min(end, now + 1.0))
+    slugs = [e["market_slug"] for e in exp]
+    vals = await _read(conn, ("external_valuations",), RECON_VALUATION_SQL,
+                       slugs, start - lookback_s)
+    decs = await _read(conn, ("paper_decisions",), RECON_DECISION_SQL, slugs,
+                       start - lookback_s)
+    coll = await collector_selection(conn, now=now)
+    led_rows = [] if isinstance(led, str) else led
+    val_by = {} if isinstance(vals, str) else {v["us_market_slug"]: v
+                                               for v in vals}
+    dec_by: dict = {}
+    for d in ([] if isinstance(decs, str) else decs):
+        dec_by.setdefault(d["us_market_slug"], {})[d["strategy"]] = d
+    games, missing = [], []
+    for e in exp:
+        gs = e["game_start"].timestamp() if hasattr(e["game_start"],
+                                                    "timestamp") else None
+        nicks = [_fold(n) for n in (e["nicks"] or []) if n]
+        hit = next((r for r in led_rows
+                    if r["us_market_slug"] == e["market_slug"]), None)
+        if hit is None and gs is not None:
+            for r in led_rows:
+                ct = V._epoch(r["commence_time"])
+                names = _fold("%s %s" % (r["home"], r["away"]))
+                if ct is not None and abs(ct - gs) <= V.START_TOLERANCE_S \
+                        and nicks and all(n in names for n in nicks):
+                    hit = r
+                    break
+        v = val_by.get(e["market_slug"])
+        dd = dec_by.get(e["market_slug"]) or {}
+        dk = dd.get(DEREK_STRATEGY)
+        refusals = list((v or {}).get("refusals") or [])
+        st: dict[str, Any] = {"EXPECTED": True,
+                              "VENUE_CONTRACT": e["market_slug"]}
+        st["PINNAPI"] = ({"provider_event_id": hit["provider_event_id"]}
+                         if hit else None)
+        st["NORMALIZED"] = bool(hit and (hit["reach"] or 0) >= 3) or \
+            v is not None
+        st["EXACT_MAP"] = bool(hit and hit["us_market_slug"]
+                               == e["market_slug"]) or v is not None
+        sett = [c for c in refusals if any(k in c for k in _SETTLEMENT_CODE)]
+        prob = [c for c in refusals if any(k in c for k in _PROBABILITY_CODE)]
+        st["SETTLEMENT"] = (None if v is None else
+                            ("ESTABLISHED" if not sett else sett))
+        st["PROBABILITY"] = (None if v is None else
+                             (v["probability"] if v["probability"] is not None
+                              else (prob or ["NO_PROBABILITY"])))
+        st["DEREK_EVALUATED"] = dk is not None
+        st["VERDICT"] = (None if dk is None else
+                         ("ENTER" if dk["verdict"] == "ENTER"
+                          else "REFUSE:%s" % (dk["refusal"] or "UNNAMED")))
+        if dk is not None:
+            stopped, why = ("VERDICT", st["VERDICT"])
+        elif v is not None:
+            stopped, why = ("DEREK_EVALUATED",
+                            "valuation %s recorded (%s); no Derek decision"
+                            % (v["id"], v["record_purpose"]))
+        elif hit is not None:
+            stopped = ("NORMALIZED" if not st["NORMALIZED"] else
+                       "EXACT_MAP" if not st["EXACT_MAP"] else "SETTLEMENT")
+            why = "%s:%s" % (hit["outcome"], hit["refusal"] or "UNNAMED")
+        else:
+            if not coll.get("fresh"):
+                why = "COLLECTOR_HEARTBEAT_NOT_CURRENT"
+            elif key in coll.get("budget_dropped") or []:
+                why = "NOT_REQUESTED_METERED_BUDGET_SPENT"
+            elif key in (coll.get("rejected") or {}):
+                why = "PROVIDER_REFUSED:%s" % coll["rejected"][key]
+            elif key in (coll.get("requested") or []):
+                why = "REQUESTED_NO_PROVIDER_EVENT_FOR_THIS_GAME"
+            else:
+                why = "NOT_REQUESTED_BY_THE_COLLECTOR"
+            stopped = "PINNAPI"
+        g = {"market_slug": e["market_slug"], "title": e["title"],
+             "kickoff_utc": (_dt.datetime.fromtimestamp(gs, _dt.timezone.utc)
+                             .strftime("%Y-%m-%dT%H:%M:%SZ") if gs else None),
+             "kickoff_local": (_dt.datetime.fromtimestamp(gs, ZoneInfo(tz))
+                               .strftime("%Y-%m-%d %H:%M") if gs else None),
+             "sides": [{"intent": i, "team": t, "nickname": n}
+                       for i, t, n in zip(e["intents"] or [], e["teams"] or [],
+                                          e["nicks"] or [])],
+             "stages": st, "stopped_at": stopped, "reason": why}
+        games.append(g)
+        if stopped == "PINNAPI":
+            missing.append({"market_slug": e["market_slug"],
+                            "title": e["title"], "reason": why})
+    reached = {s: 0 for s in RECON_STAGES}
+    for g in games:
+        s = g["stages"]
+        reached["EXPECTED"] += 1
+        reached["VENUE_CONTRACT"] += 1
+        reached["PINNAPI"] += bool(s["PINNAPI"])
+        reached["NORMALIZED"] += bool(s["NORMALIZED"])
+        reached["EXACT_MAP"] += bool(s["EXACT_MAP"])
+        reached["SETTLEMENT"] += s["SETTLEMENT"] is not None
+        reached["PROBABILITY"] += s["PROBABILITY"] is not None
+        reached["DEREK_EVALUATED"] += bool(s["DEREK_EVALUATED"])
+        reached["VERDICT"] += s["VERDICT"] is not None
+    return dict(out, status="OK", expected=len(games), reached=reached,
+                games=games, missing=missing,
+                unread={k: v for k, v in (("ledger", led), ("valuations", vals),
+                                          ("decisions", decs))
+                        if isinstance(v, str)} or None)

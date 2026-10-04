@@ -7,7 +7,14 @@ change an order, a limit or a policy.
 
   GET /api/command/coverage      the provider -> fill funnel per league per
                                  day (?tz=UTC|America/New_York, ?days=1..60)
-                                 and the collapse alerts Audrey raised
+                                 and the collapse alerts Audrey raised; plus
+                                 (cand24, additive) `league_status` -- one of
+                                 HEALTHY / REFUSING_BY_POLICY /
+                                 EXPLICITLY_UNSUPPORTED / COVERAGE_INCIDENT /
+                                 UNAVAILABLE per league, with its reason --
+                                 and `nfl_reconciliation`, today's NFL games
+                                 expected (venue listing) vs observed, stage
+                                 by stage, with the MISSING list
   GET /api/command/postmortems   every closed position's decomposition,
                                  PAPER and ACTUAL separately (?book=, ?limit=)
   GET /api/command/quality       the five-domain quality scorecard

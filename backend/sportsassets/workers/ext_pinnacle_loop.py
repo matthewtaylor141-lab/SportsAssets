@@ -284,6 +284,12 @@ def _team_tokens(name, family=None):
         # its own by tests/test_held_feed_boundary.py)
         from .. import bettor_venue_native_identity as _vn
     if family is not None and family in _vn.NICKNAME_QUALIFIED_FAMILIES:
+        # AN NFL TEAM reads as its full rendering (cand24): the venue's `nfl`
+        # titles say "LA Rams vs. PHI Eagles", the provider "Los Angeles
+        # Rams" -- one team, by NFL_TEAMS, whose nickname must agree.
+        nfl = _vn.nfl_canonical_tokens(name)
+        if nfl is not None:
+            return frozenset(nfl), []
         name = _vn._RANK_PREFIX.sub("", str(name or ""))
         raw = _vn._college_tokens([w for w in _fold(name).split() if w])[0]
     else:
@@ -828,12 +834,26 @@ VENUE_SOCCER_BOARD_MEASURED_2026_09_28 = VENUE_BOARD_SNAPSHOT_MEASURED
 #: EXACTLY the soccer path: confirmed against the provider's unmetered
 #: catalogue, capped by MAX_METERED_SPORTS_PER_CYCLE (unchanged), fixture-
 #: confirmed against the venue's own titles before any identity is resolved.
-#: `nfl` is deliberately absent: it is a different competition, and this
-#: change is about the college board the owner asked for.
+#: `nfl` WAS deliberately absent here (cand22) and that left the NFL invisible:
+#: on Sunday 2026-10-04 the venue listed 14 `nfl` games with a
+#: `football_team_full_game_winner` contract on the America/New_York day
+#: (research-sql cand24_nfl_discover: `aec-nfl-ind-was-2026-10-04`, the 09:30 ET
+#: London game, through `aec-nfl-det-car-2026-10-04` at 20:20 ET) and no
+#: provider request, identity, valuation or refusal existed for any of them.
+#: cand24 maps it through THE SAME PATH as `cfb`: provider-catalogue
+#: confirmation, the unchanged MAX_METERED_SPORTS_PER_CYCLE ranked by venue
+#: coverage, fixture confirmation against the venue's own titles, then the
+#: venue-native identity (city/region + nickname, see
+#: bettor_venue_native_identity.NFL_TEAMS). The league tokens keep the two
+#: competitions apart: an NFL price never searches `cfb` rows and vice versa.
 VENUE_FOOTBALL_TOKEN_TO_PROVIDER_KEY = {
     # Alabama vs. Mississippi State, Michigan vs. Minnesota, Notre Dame vs.
     # North Carolina, Ohio State vs. Iowa (venue `cfb`, 2026-10-03)
     "cfb": "americanfootball_ncaaf",
+    # IND Colts vs. WAS Commanders (London, 13:30Z), LA Rams vs. PHI Eagles,
+    # NY Jets vs. CHI Bears, DET Lions vs. CAR Panthers (venue `nfl`,
+    # 2026-10-04; team_name "indianapolis colts", side_norm "colts")
+    "nfl": "americanfootball_nfl",
 }
 
 #: More titles than soccer's 12: one Saturday's `cfb` slate is ~100 events,
@@ -927,6 +947,13 @@ R_PROVIDER_LISTS_IT_INACTIVE = "PROVIDER_LISTS_THIS_COMPETITION_AS_INACTIVE"
 #: venue contract, so the SPEND THAT CAN REACH A CONTRACT rises from roughly
 #: 40 credits a cycle to 80.
 MAX_METERED_SPORTS_PER_CYCLE = 4
+#: UNCHANGED BY cand24 (the NFL). The NFL competes for the same four keys by
+#: the same rule -- the confirmed MLB key first, then measured venue coverage.
+#: On the 2026-10-04 board (cfb 34, unl 26, nfl 15, brb 8 events) that requests
+#: MLB, NCAAF, UNL and NFL, and Brazil Serie B -- with no event in the next 24 h
+#: -- is the one `budget_dropped`, by name. MLB (the postseason) is never
+#: ranked out. Raising the cap to 5 would cost ~20 credits a cycle, ~1.9k a day
+#: at the 900 s cadence; it is not raised.
 METERED_BUDGET_CHANGE = {
     "before": {"keys": 3, "credits_per_cycle": "~60", "per_day": "~5.8k",
                "keys_named": ["soccer_epl", "soccer_mexico_ligamx",
@@ -1447,8 +1474,9 @@ VENUE_LEAGUE_TOKENS_CONFIRMED = {"baseball_mlb": ("mlb",)}
 
 def venue_league_tokens(sport_key) -> tuple:
     """The venue league token(s) for a provider key; () when none is named.
-    `americanfootball_ncaaf` -> ('cfb',) through the football token map, so a
-    college price never lands on an `nfl` fixture."""
+    `americanfootball_ncaaf` -> ('cfb',) and `americanfootball_nfl` ->
+    ('nfl',) through the football token map, so a college price never lands
+    on an `nfl` fixture, nor an NFL price on a `cfb` one."""
     got = set(VENUE_LEAGUE_TOKENS_CONFIRMED.get(str(sport_key), ()))
     got |= {t for t, k in VENUE_TOKEN_TO_PROVIDER_KEY.items()
             if k == str(sport_key)}

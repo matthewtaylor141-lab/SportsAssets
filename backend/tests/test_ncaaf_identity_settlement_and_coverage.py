@@ -55,10 +55,10 @@ def test_cfb_is_ncaaf_everywhere():
                             "market_slug": "aec-cfb-ohiost-iowa-2026-10-03"})
     assert lg == {"token": "cfb", "provider_key": NCAAF, "lane_maps": True,
                   "league_name": "NCAAF"}
-    # nfl is NOT mapped by the lane; it is only NAMED for counting
-    assert L.provider_key_for_venue_token("nfl") is None
+    # cand24: nfl IS mapped by the lane now, to its OWN key -- never NCAAF's
+    assert L.provider_key_for_venue_token("nfl") == "americanfootball_nfl"
     nfl = COV.league_of_row({"event_slug": "nfl-ari-nyg-2026-10-04"})
-    assert nfl["lane_maps"] is False and nfl["league_name"] == "NFL"
+    assert nfl["lane_maps"] is True and nfl["league_name"] == "NFL"
     # every lane token round-trips through the shared identity
     for tok, key in list(L.VENUE_FOOTBALL_TOKEN_TO_PROVIDER_KEY.items()) + \
             list(L.VENUE_TOKEN_TO_PROVIDER_KEY.items()):
