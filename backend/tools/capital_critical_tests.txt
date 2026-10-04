@@ -677,21 +677,6 @@ tests/test_karen_persona_and_peer_response.py
 # a census that files a requested league honestly, college names that map
 # exactly or refuse by name, captured football settlement terms.
 tests/test_ncaaf_identity_settlement_and_coverage.py
-# The Profitability Operating System, part 1 (claude/pos-econ, migration
-# 216): RESEARCH / SHADOW, no venue, order, sizing, limit, threshold or
-# capital authority. The layer imports no venue or order module, writes
-# only its own append-only pos_* tables (INSERT only; the database refuses
-# UPDATE / DELETE / TRUNCATE), a full cycle leaves every order, fill,
-# ledger, decision, control and funded table unchanged, PAPER / ACTUAL /
-# COUNTERFACTUAL are never summed, missing inputs fail closed to null with a
-# named reason (capacity UNAVAILABLE with no number), the forecast is
-# UNPROVEN until its own scored forecasts validate it, and the
-# /api/command/profitability/* routes are GET-only behind a command session.
-tests/test_profitability_is_research_only.py
-tests/test_profitability_economics.py
-tests/test_profitability_capacity.py
-tests/test_profitability_metrics_forecast.py
-tests/test_profitability_warehouse_cycle.py
 # cand24 P5 focus universe (migration 213): the institutional stream, its
 # evidence recorder and the same-book probe hold a prioritized universe
 # (actual positions > live / imminent intents > paper investment positions >
@@ -726,6 +711,71 @@ tests/test_nfl_slate_reaches_a_recorded_outcome.py
 # for every coverage incident (NULL is not absence), the per-game NFL
 # reconciliation on GET /api/command/coverage.
 tests/test_league_coverage_status.py
+# The Profitability Operating System, part 1 (claude/pos-econ, migration
+# 216): RESEARCH / SHADOW, no venue, order, sizing, limit, threshold or
+# capital authority. The layer imports no venue or order module, writes
+# only its own append-only pos_* tables (INSERT only; the database refuses
+# UPDATE / DELETE / TRUNCATE), a full cycle leaves every order, fill,
+# ledger, decision, control and funded table unchanged, PAPER / ACTUAL /
+# COUNTERFACTUAL are never summed, missing inputs fail closed to null with a
+# named reason (capacity UNAVAILABLE with no number), the forecast is
+# UNPROVEN until its own scored forecasts validate it, and the
+# /api/command/profitability/* routes are GET-only behind a command session.
+tests/test_profitability_is_research_only.py
+tests/test_profitability_economics.py
+tests/test_profitability_capacity.py
+tests/test_profitability_metrics_forecast.py
+tests/test_profitability_warehouse_cycle.py
+# Eddie (Head of Execution, SHADOW_ONLY) and Scout (Market Intelligence,
+# RESEARCH_SHADOW_ONLY), claude/pos-agents, migration 217: persisted
+# identities with NO venue / order / cancel / capital / approval / promotion
+# authority (registry deny lists + pos_authority.may + a first-firing trigger
+# on every approval, control, order, intent and fill table that refuses
+# either as an actor column or as the session's declared acting agent);
+# Eddie's hard rule (no executing recommendation with expected executable
+# EV <= 0, in code AND a CHECK); Scout's compliant-source guard and a frozen
+# prospective tournament he cannot judge or promote.
+tests/test_eddie_scout_identity_and_no_authority.py
+tests/test_eddie_execution_estimates.py
+tests/test_scout_features_and_tournament.py
+tests/test_eddie_scout_api_pages_slack.py
+# The profitability operating system, part 3 (claude/pos-learn, migration
+# 218): the model tournament (M0 raw PinnAPI champion vs calibrated,
+# microstructure, Scout / cross-market placeholders and sport-specific
+# challengers), the agent tournament (DEREK / XAVIER / ALLOCATOR / EDDIE
+# variants on one shared opportunity set), the edge-confidence and avoidance
+# meta-models, the seeded randomized SHADOW experiment platform. SHADOW /
+# RESEARCH: no probability, threshold, sizing, allowlist, order or capital
+# authority; registrations, forecasts, assignments and the promotion ladder
+# are DB-guarded; the human approval record is written by no code path.
+tests/test_poslearn_authority.py
+tests/test_poslearn_tournaments.py
+tests/test_poslearn_models_and_meta.py
+tests/test_poslearn_overfitting_defences.py
+tests/test_twin_authority.py
+tests/test_twin_replay.py
+tests/test_twin_profitability.py
+# Equity wall: /api/command/equity/* are GET-only behind the COMMAND session,
+# import no order/venue/execution/funded module, hold no SQL write, and run
+# every read in a READ ONLY transaction under a statement timeout.
+tests/test_equity_wall_authority.py
+# Position rooms (GET /api/command/positions/*): GET only, 401 without a
+# session, READ ONLY transaction, no order / funded / paper-writer import.
+tests/test_position_rooms_authority.py
+# ui-floor: GET /api/command/floor (+ /{agent}) -- the trading-floor
+# aggregate is GET only, session-authenticated, one READ ONLY transaction
+# with a bounded statement timeout, SELECT-only SQL, and imports no order,
+# venue, ledger, paper or funded module.
+tests/test_command_floor_authority.py
+# Improvement pipeline (claude/pos-improve, migration 221): the bounded
+# self-improvement ledger. The runner has no order / deploy / merge /
+# network / process path and writes only improve_*; the database refuses
+# self-approval, a skipped or backward stage, a protected item without two
+# independent reviews and a human, and a CONTROLLED_RELEASE without a human
+# approver and the exact-SHA gate receipt; GET /api/command/improvements
+# (+ /{id}) is GET only, session-authenticated and READ ONLY.
+tests/test_improvement_pipeline_authority.py
+tests/test_improvement_pipeline_db.py
 # The Lost Opportunity Ledger, the Opportunity Score and the horizon
 # forecasts (claude/pos-lol, migration 220): RESEARCH / SHADOW, no venue,
 # order, sizing, limit, threshold or capital authority. The package imports

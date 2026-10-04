@@ -133,7 +133,20 @@ def test_no_funded_module_imports_the_paper_modules():
                # the held-position watch on the PinnAPI feed: on a held
                # market's price change it SCHEDULES a paper Xavier review
                # (paper_runtime.schedule_held_review); no write, no order
-               "pinnapi_held.py"}
+               "pinnapi_held.py",
+               # (217) Eddie's SHADOW execution estimator reads the paper
+               # simulator's book ladders (levels_for) and the ledger's fee
+               # schedule (_fee) as pure functions over recorded books; it
+               # writes only eddie_execution_estimates / _outcomes, declared
+               # as EDDIE (the database refuses him on every order table),
+               # and holds no submit, cancel or reserve call
+               "agents/eddie.py",
+               # the live equity wall (/api/command/equity/*): GET-only, reads
+               # bettor_paper_ledger.balances inside a READ ONLY transaction
+               # beside the actual books (never summed); it writes nothing and
+               # imports no order, venue, execution or funded module
+               # (tests/test_equity_wall_authority.py)
+               "api/command_equity.py"}
     assert set(offenders) <= allowed, sorted(set(offenders) - allowed)
     # ...and neither capability module reaches a funded or execution module,
     # directly or through the rest of the capability package
@@ -141,7 +154,13 @@ def test_no_funded_module_imports_the_paper_modules():
                 "agents/capability_runtime.py", "agents/capability_work.py",
                 "agents/capability_scorecards.py", "api/agent_capabilities.py",
                 "slack_updates.py", "slack_bridge.py",
-                "agents/intelligence_reports.py", "agents/cross_venue_research.py"):
+                "agents/intelligence_reports.py", "agents/cross_venue_research.py",
+                # (217) Eddie, Scout and their workflow: no funded module
+                "agents/eddie.py", "agents/eddie_runner.py", "agents/scout.py",
+                "agents/scout_runner.py", "agents/feature_tournament.py",
+                "agents/pos_workflow.py", "agents/pos_authority.py",
+                "agents/pos_evidence.py", "api/agents_pos.py",
+                "api/agent_desks.py"):
         tree = ast.parse((ROOT / rel).read_text())
         for node in ast.walk(tree):
             mods = []

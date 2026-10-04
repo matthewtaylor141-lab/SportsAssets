@@ -59,6 +59,9 @@ ENDPOINTS = {
     "audrey": "/api/command/agents/audrey",
     # Karen (red team / challenge, migration 207): api/agents_karen.py
     "karen": "/api/command/karen",
+    # Eddie and Scout (migration 217): api/agents_pos.py
+    "eddie": "/api/command/eddie",
+    "scout": "/api/command/scout",
     "chat": "/api/command/agents/audrey/chat",
     "directives": "/api/command/agents/audrey/directives",
     # the Command Centre pages' extra read-only routes (agents_cc_reads) and
@@ -102,6 +105,11 @@ REQUIRED_SECTIONS = {
                "releases", "directives", "conversations", "provider"),
     "karen": ("status", "authority", "current_challenges",
               "recent_challenges", "metrics", "detectors"),
+    "eddie": ("status", "authority", "desk", "current_estimates",
+              "predicted_vs_realized", "scorecard", "candidate_reviews",
+              "runner"),
+    "scout": ("status", "authority", "desk", "sources", "features",
+              "tournaments", "observations", "scorecard", "runner"),
 }
 
 PAGE_PATHS = {
@@ -110,6 +118,8 @@ PAGE_PATHS = {
     "xavier": "/api/command/agents/xavier/page",
     "audrey": "/api/command/agents/audrey/page",
     "karen": "/api/command/agents/karen/page",
+    "eddie": "/api/command/agents/eddie/page",
+    "scout": "/api/command/agents/scout/page",
     "demo": "/api/command/agents/demo/page",
 }
 
@@ -424,6 +434,7 @@ var AG = (function () {
     index: '/api/command/agents', derek: '/api/command/agents/derek',
     xavier: '/api/command/agents/xavier', audrey: '/api/command/agents/audrey',
     karen: '/api/command/karen',
+    eddie: '/api/command/eddie', scout: '/api/command/scout',
     chat: '/api/command/agents/audrey/chat', directives: '/api/command/agents/audrey/directives'
   };
   var FETCH_OPTS = {credentials: 'same-origin', cache: 'no-store', headers: {'Accept': 'application/json'}};
@@ -646,7 +657,9 @@ var AG = (function () {
     DEREK: {letter: 'D', role: 'Discovery · entry', kind: 'derek'},
     XAVIER: {letter: 'X', role: 'Position management · exits', kind: 'xavier'},
     AUDREY: {letter: 'A', role: 'Audit · management chat · improvement', kind: 'audrey'},
-    KAREN: {letter: 'K', role: 'Red team · challenge · no authority', kind: 'karen'}
+    KAREN: {letter: 'K', role: 'Red team · challenge · no authority', kind: 'karen'},
+    EDDIE: {letter: 'E', role: 'Head of execution · shadow only', kind: 'eddie'},
+    SCOUT: {letter: 'S', role: 'Market intelligence · research only', kind: 'scout'}
   };
   function depList(v) {
     if (v === null || v === undefined) return '';
@@ -1292,7 +1305,7 @@ XAVIER_JS = r"""
   AG.SPECS.xavier = {sections: [
     {key: 'status', title: 'Status & dependencies', render: R.status},
     {key: 'versions', title: 'Policy, model & code versions', render: R.versions},
-    {key: 'positions', title: 'Owned position groups', render: positions, empty: positionsEmpty, wide: true, note: 'Basis, exposure, primary / hedge / residual quantities, the current and next review, and the selected action with its explanation.'},
+    {key: 'positions', title: 'Owned position groups', render: positions, empty: positionsEmpty, wide: true, note: 'Basis, exposure, primary / hedge / residual quantities, the current and next review, and the selected action with its explanation. <a href="/positions" target="_top">Open every position as one correlated room &#8594;</a>'},
     {key: 'servicing_cadence', title: 'Servicing cadence', render: cadence},
     {key: 'reviews', title: 'Reviews', render: reviews},
     {key: 'ladder', title: 'Spread ladder', render: ladder, wide: true},
@@ -1603,13 +1616,150 @@ KAREN_JS = r"""
 })(AG);
 """
 
+# Eddie and Scout (migration 217): their records, read only. Null is
+# UNKNOWN / NOT MEASURED with the reason, never zero; no write control.
+POS_JS = r"""
+(function (AG) {
+  'use strict';
+  var esc = AG.esc, isObj = AG.isObj, R = AG.R;
+  function refs(list) { return Array.isArray(list) && list.length ? list.map(function (e) { return '<span class="mono">' + esc(e.kind) + ' · ' + esc(e.id) + '</span>'; }).join('<br>') : '<span class="mute">none cited</span>'; }
+  function unm(o) { return isObj(o) && Object.keys(o).length ? Object.keys(o).map(function (k) { return '<span class="mono">' + esc(k) + '</span>: ' + esc(o[k]); }).join('<br>') : '<span class="mute">none</span>'; }
+  function metricsTable(sec, ctx) {
+    var d = isObj(sec.data) ? sec.data : {}, m = isObj(d.metrics) ? d.metrics : {};
+    var rows = Object.keys(m).map(function (k) { return m[k]; });
+    if (!rows.length) return AG.genericBody(sec, ctx.rd);
+    return '<p class="note">' + esc(d.rule || '') + ' · authority ' + esc(d.authority || '') + '</p>' + AG.table(rows, [
+      {label: 'Metric', keys: ['name']},
+      {label: 'Status', render: function (r) { return AG.statusPill(r.status || (r.value === null ? 'UNAVAILABLE' : 'MEASURED')); }},
+      {label: 'Value', render: function (r) { return r.value === null || r.value === undefined ? AG.unk(r.why || 'unmeasured') : esc(r.value); }},
+      {label: 'Numerator', render: function (r) { return r.numerator === null || r.numerator === undefined ? AG.unk() : esc(r.numerator); }},
+      {label: 'Denominator', keys: ['denominator'], num: 1},
+      {label: 'Why null', render: function (r) { return r.why ? esc(r.why) : ''; }},
+      {label: 'Definition', keys: ['definition']}], {rd: ctx.rd});
+  }
+  function deskNote(sec) { var d = isObj(sec.data) ? sec.data : {}; return '<p class="note">The desk above draws these values: ' + esc(d.name) + ', ' + esc(d.role) + ', authority ' + esc(d.authority) + '; affordances ' + esc(d.affordances) + '.</p>'; }
+  function estimates(sec, ctx) {
+    var rows = AG.rowsOf(sec.data, ['estimates', 'rows']);
+    if (!rows.length) return AG.genericBody(sec, ctx.rd);
+    return AG.table(rows, [
+      {label: 'Estimate', keys: ['estimate_id']}, {label: 'Derek candidate', keys: ['decision_id']},
+      {label: 'Recommendation (shadow)', render: function (r) { return AG.statusPill(r.recommendation); }},
+      {label: 'Style', keys: ['execution_style']},
+      {label: 'Theoretical edge', keys: ['theoretical_edge_pp'], num: 1}, {label: 'Spread', keys: ['spread_cost_pp'], num: 1},
+      {label: 'Slippage', keys: ['expected_slippage_pp'], num: 1}, {label: 'Fees', keys: ['expected_fees_pp'], num: 1},
+      {label: 'Adverse selection', keys: ['expected_adverse_selection_pp'], num: 1},
+      {label: 'Execution loss', keys: ['expected_execution_loss_pp'], num: 1},
+      {label: 'Net executable edge', keys: ['expected_net_executable_edge_pp'], num: 1},
+      {label: 'Fill probability', keys: ['expected_fill_probability'], num: 1},
+      {label: 'Time to fill (s)', keys: ['expected_time_to_fill_s'], num: 1},
+      {label: 'Capital-hours', keys: ['expected_capital_hours'], num: 1},
+      {label: 'Max size', keys: ['max_executable_qty'], num: 1}, {label: 'EV (USD)', keys: ['expected_executable_ev_usd'], num: 1},
+      {label: 'Unmeasured', render: function (r) { return unm(r.unmeasured); }},
+      {label: 'Reason', keys: ['recommendation_reason']}, {label: 'Estimated', keys: ['estimated_at'], u: 'ts'}], {rd: ctx.rd});
+  }
+  function outcomes(sec, ctx) {
+    var rows = AG.rowsOf(sec.data, ['outcomes', 'rows']);
+    if (!rows.length) return AG.genericBody(sec, ctx.rd);
+    return AG.table(rows, [
+      {label: 'Outcome', keys: ['outcome_id']}, {label: 'Derek candidate', keys: ['decision_id']},
+      {label: 'Eddie said', keys: ['recommendation']}, {label: 'Source', keys: ['source']},
+      {label: 'Filled qty', keys: ['filled_qty'], num: 1}, {label: 'VWAP', keys: ['fill_vwap'], num: 1},
+      {label: 'Predicted loss', keys: ['predicted_execution_loss_pp'], num: 1},
+      {label: 'Realized loss', keys: ['realized_execution_loss_pp'], num: 1},
+      {label: 'Naive loss', keys: ['naive_execution_loss_pp'], num: 1},
+      {label: 'Decision→submit (s)', keys: ['decision_to_submit_s'], num: 1},
+      {label: 'Decision→fill (s)', keys: ['decision_to_fill_s'], num: 1},
+      {label: 'Capital-hours', keys: ['capital_hours'], num: 1},
+      {label: 'Unmeasured', render: function (r) { return unm(r.unmeasured); }}], {rd: ctx.rd});
+  }
+  function reviews(sec, ctx) {
+    var rows = AG.rowsOf(sec.data, ['reviews', 'rows']);
+    if (!rows.length) return AG.genericBody(sec, ctx.rd);
+    return rows.slice(0, 5).map(function (rv) {
+      return '<h4 class="mono">' + esc(rv.review_id) + ' · Derek candidate ' + esc(rv.decision_id) + ' · ' + esc(rv.steps_recorded) + '/7 steps</h4>' + AG.table(rv.steps || [], [
+        {label: '#', keys: ['seq']}, {label: 'Step', keys: ['step']}, {label: 'Agent', keys: ['agent']},
+        {label: 'Status', render: function (r) { return AG.statusPill(r.status); }},
+        {label: 'Question', keys: ['question']}, {label: 'Response', keys: ['response']},
+        {label: 'Evidence', render: function (r) { return refs(r.evidence_refs); }},
+        {label: 'Disagreement', render: function (r) { return isObj(r.disagreement) ? AG.kv(r.disagreement) : '<span class="mute">none</span>'; }},
+        {label: 'Resolution', render: function (r) { return r.resolution ? esc(r.resolution) : '<span class="mute">none</span>'; }},
+        {label: 'Experiment', render: function (r) { return isObj(r.experiment_ref) ? AG.kv(r.experiment_ref) : '<span class="mute">none</span>'; }},
+        {label: 'Result', render: function (r) { return isObj(r.result) ? AG.kv(r.result) : '<span class="mute">pending</span>'; }}], {rd: ctx.rd});
+    }).join('');
+  }
+  function sources(sec, ctx) {
+    var rows = AG.rowsOf(sec.data, ['sources', 'rows']);
+    if (!rows.length) return AG.genericBody(sec, ctx.rd);
+    return AG.table(rows, [
+      {label: 'Source', keys: ['source_id']}, {label: 'Name', keys: ['name']}, {label: 'Licensing', keys: ['licensing_class']},
+      {label: 'Compliance', render: function (r) { return AG.statusPill(r.compliance_passed ? 'PASSED' : 'REFUSED'); }},
+      {label: 'Failed checks', render: function (r) { var c = isObj(r.compliance) ? r.compliance : {}; var f = Object.keys(c).filter(function (k) { return c[k] !== true; }); return f.length ? esc(f.join(', ')) : '<span class="mute">none</span>'; }},
+      {label: 'Access', keys: ['access_method']}, {label: 'Usage terms', keys: ['usage_terms']}], {rd: ctx.rd});
+  }
+  function features(sec, ctx) {
+    var rows = AG.rowsOf(sec.data, ['features', 'rows']);
+    if (!rows.length) return AG.genericBody(sec, ctx.rd);
+    return AG.table(rows, [
+      {label: 'Feature', keys: ['feature']}, {label: 'State', render: function (r) { return AG.statusPill(r.state); }},
+      {label: 'Source', keys: ['source_id']}, {label: 'Licensing', keys: ['licensing_class']},
+      {label: 'Expected mechanism', keys: ['expected_mechanism']}, {label: 'Predeclared hypothesis', keys: ['predeclared_hypothesis']},
+      {label: 'Forward test', keys: ['tournament_id']}, {label: 'Observations', keys: ['observations'], num: 1},
+      {label: 'Settled / minimum', render: function (r) { return esc(r.samples_settled) + ' / ' + esc(r.min_sample); }},
+      {label: 'Incremental value', render: function (r) { return isObj(r.incremental_value) ? AG.kv(r.incremental_value) : AG.unk('not evaluated'); }},
+      {label: 'Set by', keys: ['state_set_by']}], {rd: ctx.rd});
+  }
+  function tournaments(sec, ctx) {
+    var rows = AG.rowsOf(sec.data, ['tournaments', 'rows']);
+    if (!rows.length) return AG.genericBody(sec, ctx.rd);
+    return AG.table(rows, [
+      {label: 'Tournament', keys: ['tournament_id']}, {label: 'Baseline', keys: ['baseline']}, {label: 'Challenger', keys: ['challenger']},
+      {label: 'Metric', keys: ['metric']}, {label: 'Min sample', keys: ['min_sample'], num: 1}, {label: 'Min improvement', keys: ['min_improvement'], num: 1},
+      {label: 'Frozen', keys: ['frozen_at'], u: 'ts'}, {label: 'Frozen samples', keys: ['samples_frozen'], num: 1},
+      {label: 'Settled', keys: ['samples_settled'], num: 1},
+      {label: 'Verdict', render: function (r) { return r.verdict ? AG.statusPill(r.verdict) : '<span class="mute">not evaluated</span>'; }},
+      {label: 'Improvement', keys: ['improvement'], num: 1}, {label: 'Evaluated by', keys: ['evaluated_by']}], {rd: ctx.rd});
+  }
+  function observations(sec, ctx) {
+    var rows = AG.rowsOf(sec.data, ['observations', 'rows']);
+    if (!rows.length) return AG.genericBody(sec, ctx.rd);
+    return AG.table(rows, [
+      {label: 'Observation', keys: ['observation_id']}, {label: 'Feature', keys: ['feature']}, {label: 'Event', keys: ['event_key']},
+      {label: 'Value', keys: ['value'], num: 1}, {label: 'Label', keys: ['value_label']}, {label: 'Confidence', keys: ['confidence'], num: 1},
+      {label: 'Freshness (s)', keys: ['freshness_s'], num: 1}, {label: 'Source time', keys: ['source_timestamp'], u: 'ts'},
+      {label: 'Observed', keys: ['observed_timestamp'], u: 'ts'}, {label: 'Licensing', keys: ['licensing_class']},
+      {label: 'Provenance', render: function (r) { return refs(r.provenance); }}], {rd: ctx.rd});
+  }
+  AG.SPECS.eddie = {sections: [
+    {key: 'status', title: 'Status & heartbeat', render: R.status},
+    {key: 'authority', title: 'Authority · SHADOW ONLY', note: 'Eddie holds no venue submission, order, cancel, capital, approval or promotion authority. Enforced in code and in the database (migration 217).'},
+    {key: 'desk', title: 'Desk record', render: deskNote},
+    {key: 'current_estimates', title: 'Execution estimates (shadow)', render: estimates, wide: true, note: 'Never EXECUTE_NOW / REST_LIMIT / SPLIT when the expected executable EV is not positive. Null is unmeasured, never zero.'},
+    {key: 'predicted_vs_realized', title: 'Predicted vs realized execution loss', render: outcomes, wide: true},
+    {key: 'scorecard', title: 'Scorecard · numerator / denominator', render: metricsTable, wide: true, note: 'UNAVAILABLE until measured.'},
+    {key: 'candidate_reviews', title: 'Candidate reviews · Derek → Karen → Scout → Eddie → Allocator → Audrey → Xavier', render: reviews, wide: true},
+    {key: 'runner', title: 'Runner'}
+  ]};
+  AG.SPECS.scout = {sections: [
+    {key: 'status', title: 'Status & heartbeat', render: R.status},
+    {key: 'authority', title: 'Authority · RESEARCH SHADOW ONLY', note: 'Scout holds no trade, portfolio, policy-approval or feature-promotion authority and cannot validate his own feature. Enforced in code and in the database (migration 217).'},
+    {key: 'desk', title: 'Desk record', render: deskNote},
+    {key: 'sources', title: 'Sources and the declared compliance check', render: sources, wide: true},
+    {key: 'features', title: 'Feature registry', render: features, wide: true},
+    {key: 'tournaments', title: 'Feature tournaments · PinnAPI vs PinnAPI + feature (frozen)', render: tournaments, wide: true},
+    {key: 'observations', title: 'Observations', render: observations, wide: true},
+    {key: 'scorecard', title: 'Scorecard · numerator / denominator', render: metricsTable, wide: true, note: 'UNAVAILABLE until measured.'},
+    {key: 'runner', title: 'Runner'}
+  ]};
+})(AG);
+"""
+
 INDEX_JS = r"""
 (function (AG) {
   'use strict';
   var esc = AG.esc, pick = AG.pick, isObj = AG.isObj;
-  var IDS = ['DEREK', 'XAVIER', 'AUDREY', 'KAREN'];
+  var IDS = ['DEREK', 'XAVIER', 'AUDREY', 'KAREN', 'EDDIE', 'SCOUT'];
   var TERMINAL = ['RELEASED', 'REJECTED', 'CLOSED_NO_CHANGE', 'CANCELLED', 'ROLLED_BACK'];
-  var MANDATE = {DEREK: 'Finds and enters opportunities', XAVIER: 'Manages owned positions and exits', AUDREY: 'Audits both, talks with management, runs improvement', KAREN: 'Challenges all three with evidence; holds no authority'};
+  var MANDATE = {DEREK: 'Finds and enters opportunities', XAVIER: 'Manages owned positions and exits', AUDREY: 'Audits both, talks with management, runs improvement', KAREN: 'Challenges all three with evidence; holds no authority', EDDIE: 'Estimates execution of Derek\'s candidates in shadow; no order or capital authority', SCOUT: 'Tests compliant external features prospectively; no trade or promotion authority'};
   function agentCard(a, id, tasks, rd) {
     var meta = AG.AGENT_META[id];
     if (!isObj(a)) return '<div class="panel acard ag-' + meta.kind + '" data-agent="' + id + '"><div class="ident"><div class="sigil">' + meta.letter + '</div><div><div class="role">' + esc(meta.role) + '</div><h1>' + id.charAt(0) + id.slice(1).toLowerCase() + '</h1></div></div>'
@@ -1872,7 +2022,7 @@ CHAT_PANEL_HTML = r"""
 # ═════════════════════════════════════════════════════════════════════
 
 TALK_NAMES = {"derek": "Derek", "xavier": "Xavier", "audrey": "Audrey",
-              "karen": "Karen"}
+              "karen": "Karen", "eddie": "Eddie", "scout": "Scout"}
 
 TALK_PANEL_HTML = r"""
 <section class="card wide talk" id="talk" data-agent="%%AGENT%%" aria-label="Talk to %%NAME%%">
@@ -1901,6 +2051,14 @@ TALK_SCOPE = {
               "and the independent evaluations",
               "What are you challenging right now?",
               "Which of your challenges were rejected, and why?"),
+    "eddie": ("his shadow execution estimates, the costs between decision "
+              "and fill, and predicted against realized execution loss",
+              "What are you estimating right now?",
+              "How much edge did execution cost on the last fill?"),
+    "scout": ("his sources and their compliance, the features under test "
+              "and their forward tests",
+              "Which features are under test?",
+              "Why was the weather source refused?"),
 }
 
 TALK_CSS = r"""
@@ -2175,13 +2333,14 @@ def karen_hero_html() -> str:
 
 
 _PAGE_TITLES = {"index": "Agents", "derek": "Derek", "xavier": "Xavier",
-                "audrey": "Audrey", "karen": "Karen"}
+                "audrey": "Audrey", "karen": "Karen", "eddie": "Eddie",
+                "scout": "Scout"}
 
 
 def _nav(current: str) -> str:
     items = [("index", "Agents"), ("derek", "Derek"), ("xavier", "Xavier"),
-             ("audrey", "Audrey"), ("karen", "Karen"),
-             ("demo", "Product demo")]
+             ("audrey", "Audrey"), ("karen", "Karen"), ("eddie", "Eddie"),
+             ("scout", "Scout"), ("demo", "Product demo")]
     return "".join(
         '<a href="%s"%s>%s</a>' % (PAGE_PATHS[k],
                                   ' aria-current="page"' if k == current else "", t)
@@ -2211,6 +2370,8 @@ _DESCS = {
     "xavier": "Xavier: owned positions, the spread ladder, every alternative, payouts and servicing. Read-only.",
     "audrey": "Audrey: reports, findings, outcomes, improvement tasks, releases, directives and management chat.",
     "karen": "Karen: red-team challenges to Derek, Xavier and Audrey, their peer responses, outcomes and metrics. No authority. Read-only.",
+    "eddie": "Eddie: head of execution. Shadow execution estimates of Derek's candidates, predicted vs realized execution loss and his scorecard. No order or capital authority. Read-only.",
+    "scout": "Scout: market intelligence. Compliant sources, the feature registry, frozen forward tests against PinnAPI and his scorecard. No trade or promotion authority. Read-only.",
 }
 
 
@@ -2227,7 +2388,7 @@ _CC_SHELL = r"""<!doctype html>
 <a class="skip" href="#cc-main">Skip to the records</a>
 <header class="top cc-top"><a class="brand" href="/api/command/agents/page"><span class="mark"></span>BETTOR <b>COMMAND</b></a>
 <nav class="cc-nav" aria-label="Agents">%%NAV%%</nav>
-<nav class="cc-sub" aria-label="More"><a href="/api/command/agents/page">All agents</a><a href="/api/command/agents/karen/page">Karen · red team</a><a href="/api/command/agents/demo/page">Product demo</a></nav>
+<nav class="cc-sub" aria-label="More"><a href="/api/command/agents/page">All agents</a><a href="/api/command/agents/karen/page">Karen · red team</a><a href="/api/command/agents/eddie/page">Eddie · execution</a><a href="/api/command/agents/scout/page">Scout · intelligence</a><a href="/api/command/agents/demo/page">Product demo</a></nav>
 <div class="meta"><span class="ro">READ-ONLY</span><span id="readat">reading&#8230;</span><button id="trace-btn" type="button">Trace</button><button id="refresh" type="button">Refresh</button></div></header>
 <main id="cc-main" tabindex="-1">
 <div class="cc-paper-banner" id="paper-banner" data-state="READING" role="status" aria-live="polite">Reading the paper session&#8230;</div>
@@ -2314,7 +2475,10 @@ def page_html(kind: str) -> str:
         return _cc_page_html(kind)
     js = CORE_JS + COMMON_JS + TRACE_JS
     js += {"index": INDEX_JS, "derek": DEREK_JS, "xavier": XAVIER_JS,
-           "audrey": AUDREY_JS, "karen": KAREN_JS}[kind]
+           "audrey": AUDREY_JS, "karen": KAREN_JS, "eddie": POS_JS,
+           "scout": POS_JS}[kind]
+    if kind in ("eddie", "scout"):
+        return _pos_page_html(kind, js)
     js += BOOT_JS
     shell = _SHELL
     if kind == "karen":
@@ -2339,13 +2503,44 @@ def page_html(kind: str) -> str:
             .replace("%%KIND%%", kind))
 
 
+def _pos_page_html(kind: str, js: str) -> str:
+    """Eddie's / Scout's page: the desk (live 3D character at an original
+    desk, every value from the endpoint), the persona chat, then every
+    record section. Read only: no write control of any kind."""
+    from . import agent_desks as DK
+    name = TALK_NAMES[kind]
+    talk = talk_panel_html(kind).replace(
+        "%s answers from the paper records, the active policy and stored "
+        "lessons &#183; paper only" % name,
+        "%s answers only from his own records" % name).replace(
+        "%s can explain and propose;" % name,
+        "%s can explain, never act;" % name)
+    shell = _SHELL.replace('<div id="app">', DK.desk_html(kind) + talk
+                           + '<div id="app">', 1).replace(
+        "</script></body></html>",
+        "</script>\n<script type=\"module\">%s</script></body></html>"
+        % DK.DESK_LOADER_JS.replace("%%CHARACTERS%%",
+                                    ENDPOINTS["characters"]), 1)
+    return (shell.replace("%%CSS%%", BASE_CSS + TALK_CSS + DK.DESK_CSS)
+            .replace("%%JS%%", js + DK.DESK_JS + BOOT_JS + TALK_JS.replace(
+                "BASE + '/persona/latest-conversation'",
+                "BASE + '/persona/latest-conversation?absent=empty'", 1))
+            .replace("%%EXTRA%%", "")
+            .replace("%%NAV%%", _nav(kind))
+            .replace("%%ENDPOINT%%", ENDPOINTS[kind])
+            .replace("%%TITLE%%", _PAGE_TITLES[kind])
+            .replace("%%DESC%%", _DESCS[kind])
+            .replace("%%KIND%%", kind))
+
+
 def render_js(kind: str) -> str:
     """The pure render code a page carries, without its DOM boot (for tests)."""
     from . import agent_cc_ops as OPS
     from . import agent_cc_page as CCP
     return CORE_JS + COMMON_JS + TRACE_JS + {"index": INDEX_JS, "derek": DEREK_JS,
                                   "xavier": XAVIER_JS, "audrey": AUDREY_JS,
-                                  "karen": KAREN_JS}[kind] + (
+                                  "karen": KAREN_JS, "eddie": POS_JS,
+                                  "scout": POS_JS}[kind] + (
         CCP.CC_CORE_JS + CCP.PAPER_CORE_JS + OPS.OPS_CORE_JS
         if kind in ("derek", "xavier", "audrey") else "")
 
@@ -2587,6 +2782,18 @@ async def agents_karen_page(request: Request):
     # the Command Centre CSP: media-src for her spoken answers, framed by
     # the /karen management shell (frame-ancestors 'self')
     return _serve(request, lambda: page_html("karen"), _cc_headers)
+
+
+@router.get("/api/command/agents/eddie/page", include_in_schema=False)
+async def agents_eddie_page(request: Request):
+    # the Command Centre CSP (the 3D desk module and its spoken answers),
+    # framed by the /eddie management shell
+    return _serve(request, lambda: page_html("eddie"), _cc_headers)
+
+
+@router.get("/api/command/agents/scout/page", include_in_schema=False)
+async def agents_scout_page(request: Request):
+    return _serve(request, lambda: page_html("scout"), _cc_headers)
 
 
 @router.get("/api/command/agents/demo/page", include_in_schema=False)

@@ -19,6 +19,14 @@
  *                 character stands still, eyes lowered, lights dimmed, and
  *                 the screens behind show NO HEARTBEAT.
  *
+ * EDDIE AND SCOUT (migration 217) stand at their own desks: Eddie's is an
+ * institutional execution desk (order-book / depth screens), Scout's a
+ * research desk (information, sports-feed and weather / data panels). Their
+ * screens are drawn ONLY from the desk record the page passes in
+ * (`opts.desk` and the `cc:desk` event, read by the page from the agent's
+ * own endpoint); this module reads no data itself, and a value the
+ * record does not carry is drawn as NOT MEASURED / NO RECORD, never invented.
+ *
  * prefers-reduced-motion: one static frame per change, no animation loop.
  * This module is loaded only after the page's capability checks and is
  * independent of the data: if it fails, the 2D portrait stays and every
@@ -98,6 +106,46 @@ const PERSONAS = {
       waiting: [{L: 'CROSS_UNDER', R: 'CROSS_OVER', dur: 4.0}],
       speaking: [{R: 'OPEN', dur: 1.4}, {L: 'OPEN', R: 'EXPLAIN', dur: 1.6}]},
     gestureEvery: [4, 7.5],
+  },
+  eddie: {
+    // institutional execution: charcoal suit, steel-blue accent, precise
+    accent: 0x5fb7ff, scale: 1.0, seed: 41, desk: 'execution',
+    skin: 0x8d5a3b, hair: 0x15100d, iris: 0x2b1a10, lips: 0x80493d, brow: 0x15100d,
+    jacket: 0x161a21, lapel: 0x101318, shirt: 0xdfe6ee, trousers: 0x161a21, shoes: 0x0d0c0c,
+    top: 'tie', hair_style: 'crop', beard: null, glasses: false, female: false, tie: 0x24425f,
+    build: {sh: 0.207, chest: 0.199, waist: 0.17, hem: 0.178},
+    tempo: 1.15, smooth: 0.2, blink: [2.6, 5.0], weightEvery: [6, 10], breathHz: 0.24,
+    expr: {smile: 0.1, brow: -0.0005},
+    poses: {
+      monitoring: {L: 'POCKET', R: 'REST'}, reviewing: {L: 'SUPPORT', R: 'CHIN'},
+      waiting: {L: 'CLASP', R: 'CLASP'}, speaking: {L: 'REST', R: 'EXPLAIN'},
+      unavailable: {L: 'REST', R: 'REST'}},
+    gestures: {
+      monitoring: [{R: 'POINT', dur: 1.2, look: [0.45, 0.05]}, {L: 'WATCH', R: 'REST', dur: 1.4, look: [0.12, -0.45]}],
+      reviewing: [{look: [0.3, -0.15], dur: 1.2}],
+      waiting: [{look: [0.4, 0.02], dur: 2.0}],
+      speaking: [{R: 'EXPLAIN', dur: 1.0}]},
+    gestureEvery: [4, 7],
+  },
+  scout: {
+    // field researcher: open collar, glasses, green accent, curious
+    accent: 0x6fd39a, scale: 0.99, seed: 53, desk: 'research',
+    skin: 0xe0b48f, hair: 0x6b4a2b, iris: 0x3b5a3a, lips: 0xa06455, brow: 0x5a3d22,
+    jacket: 0x2f3a2c, lapel: 0x263022, shirt: 0xe9e4d6, trousers: 0x3a3f46, shoes: 0x2a1d14,
+    top: 'open', hair_style: 'swept', beard: 'stubble', glasses: true, female: false, tie: null,
+    build: {sh: 0.2, chest: 0.193, waist: 0.166, hem: 0.174},
+    tempo: 1.05, smooth: 0.24, blink: [2.2, 4.4], weightEvery: [4, 8], breathHz: 0.27,
+    expr: {smile: 0.4, brow: 0.003},
+    poses: {
+      monitoring: {L: 'HIP', R: 'CHIN'}, reviewing: {L: 'SUPPORT', R: 'CHIN'},
+      waiting: {L: 'CROSS_UNDER', R: 'CROSS_OVER'}, speaking: {L: 'OPEN', R: 'EXPLAIN'},
+      unavailable: {L: 'REST', R: 'REST'}},
+    gestures: {
+      monitoring: [{R: 'GLASSES', L: 'REST', dur: 1.5, look: [0, 0.02]}, {R: 'POINT', dur: 1.6, look: [-0.5, 0.08]}],
+      reviewing: [{look: [-0.2, -0.25], dur: 2.0}],
+      waiting: [{L: 'WATCH', R: 'REST', dur: 1.8, look: [0.12, -0.45]}],
+      speaking: [{R: 'OPEN', dur: 1.3}]},
+    gestureEvery: [3.5, 6.5],
   },
 };
 
@@ -669,6 +717,120 @@ function buildRoom(scene, P, renderer) {
 }
 
 // ════════════════════════════════════════════════════════════════════
+// THE DESKS (Eddie, Scout): original procedural geometry; every screen is
+// redrawn from the desk RECORD the page passes in -- nothing is invented
+// ════════════════════════════════════════════════════════════════════
+const NM = 'NOT MEASURED';
+function dv(v, d) { return v === null || v === undefined ? NM : (typeof v === 'number' ? (Math.abs(v) < 1 && v !== 0 ? v.toFixed(d === undefined ? 4 : d) : String(Math.round(v * 100) / 100)) : String(v)); }
+function txt(g, s, x, y, col, size, max) {
+  g.fillStyle = col; g.font = (size || 15) + 'px monospace';
+  let t = String(s === null || s === undefined ? '' : s);
+  if (max) while (t.length > 3 && g.measureText(t).width > max) t = t.slice(0, -2);
+  g.fillText(t, x, y);
+}
+function screenHead(g, w, title, acc) {
+  g.fillStyle = '#03060a'; g.fillRect(0, 0, w, 1000);
+  g.fillStyle = 'rgba(255,255,255,0.04)'; g.fillRect(0, 0, w, 30);
+  txt(g, title, 12, 21, acc, 15);
+}
+const DESK_SCREENS = {
+  execution: [
+    ['DEPTH AT DECISION', (g, w, h, d, acc) => {
+      const a = d && d.current_analysis, b = a && a.book;
+      screenHead(g, w, 'DEPTH AT DECISION', acc);
+      if (!b || b.mid === null || b.mid === undefined) { txt(g, 'NO RECORDED BOOK', 12, h / 2, '#6b7686', 22); return; }
+      const rows = [['BEST ASK (ACQ)', b.best_acquisition, '#ff7d73'], ['MID', b.mid, '#c9d3e0'], ['BEST BID (EXIT)', b.best_exit, '#4fd197']];
+      rows.forEach((r, i) => { txt(g, r[0], 16, 74 + i * 52, '#8391a6', 16); txt(g, dv(r[1], 3), w - 150, 74 + i * 52, r[2], 26); });
+      const wk = b.walk || {};
+      txt(g, 'WALK ' + dv(wk.filled_qty, 0) + ' @ VWAP ' + dv(wk.vwap, 3), 16, h - 22, acc, 16, w - 24);
+    }],
+    ['EXECUTION ANALYSIS', (g, w, h, d, acc) => {
+      const a = d && d.current_analysis;
+      screenHead(g, w, 'EXECUTION ANALYSIS · SHADOW', acc);
+      if (!a) { txt(g, 'NO ESTIMATE RECORDED', 12, h / 2, '#6b7686', 22); return; }
+      txt(g, a.recommendation, 16, 78, a.recommendation === 'SKIP_EXECUTION' ? '#ff7d73' : a.recommendation === 'WAIT' ? '#f0b54f' : '#4fd197', 34, w - 24);
+      const rows = [['THEORETICAL EDGE', a.theoretical_edge_pp], ['NET EXECUTABLE EDGE', a.expected_net_executable_edge_pp], ['FILL PROBABILITY', a.expected_fill_probability], ['EXP. SLIPPAGE', a.expected_slippage_pp]];
+      rows.forEach((r, i) => { txt(g, r[0], 16, 122 + i * 36, '#8391a6', 15); txt(g, dv(r[1]), w - 190, 122 + i * 36, '#e8eef6', 18); });
+    }],
+    ['CAPITAL & OUTCOME', (g, w, h, d, acc) => {
+      screenHead(g, w, 'CAPITAL · PREDICTED vs REALIZED', acc);
+      const a = d && d.current_analysis, pv = d && d.predicted_vs_realized, ec = d && d.economic_score;
+      txt(g, 'CAPITAL-HOURS', 16, 70, '#8391a6', 15); txt(g, dv(a && a.expected_capital_hours, 2), w - 190, 70, '#e8eef6', 18);
+      txt(g, 'PREDICTED LOSS', 16, 110, '#8391a6', 15); txt(g, dv(pv && pv.predicted_execution_loss_pp), w - 190, 110, '#e8eef6', 18);
+      txt(g, 'REALIZED LOSS', 16, 150, '#8391a6', 15); txt(g, dv(pv && pv.realized_execution_loss_pp), w - 190, 150, '#e8eef6', 18);
+      txt(g, 'VS NAIVE (USD)', 16, 190, '#8391a6', 15); txt(g, ec && ec.value !== null && ec.value !== undefined ? dv(ec.value, 2) : NM, w - 190, 190, acc, 18);
+    }],
+  ],
+  research: [
+    ['SPORTS FEED', (g, w, h, d, acc) => {
+      screenHead(g, w, 'SPORTS FEED · COMPLIANT SOURCES', acc);
+      const s = (d && d.data_sources) || [];
+      if (!s.length) { txt(g, 'NO SOURCE DECLARED', 12, h / 2, '#6b7686', 22); return; }
+      s.slice(0, 4).forEach((x, i) => { txt(g, x.compliance_passed ? 'PASS' : 'REFUSED', 16, 70 + i * 50, x.compliance_passed ? '#4fd197' : '#ff7d73', 18); txt(g, x.name, 120, 70 + i * 50, '#c9d3e0', 14, w - 132); txt(g, x.licensing_class, 120, 90 + i * 50, '#6b7686', 12, w - 132); });
+    }],
+    ['FEATURES UNDER TEST', (g, w, h, d, acc) => {
+      screenHead(g, w, 'FEATURES UNDER TEST', acc);
+      const f = (d && d.features_under_test) || [];
+      if (!f.length) { txt(g, 'NO FEATURE UNDER TEST', 12, h / 2, '#6b7686', 22); return; }
+      f.slice(0, 4).forEach((x, i) => {
+        const n = Number(x.samples_settled) || 0, m = Number(x.min_sample) || 1;
+        txt(g, x.feature, 16, 66 + i * 52, '#c9d3e0', 14, w - 32);
+        g.fillStyle = '#1b2430'; g.fillRect(16, 74 + i * 52, w - 32, 10);
+        g.fillStyle = acc; g.fillRect(16, 74 + i * 52, Math.min(1, n / m) * (w - 32), 10);
+        txt(g, n + '/' + m + ' settled · ' + (x.samples_frozen || 0) + ' frozen', 16, 100 + i * 52, '#6b7686', 12);
+      });
+    }],
+    ['WEATHER / DATA', (g, w, h, d, acc) => {
+      screenHead(g, w, 'WEATHER · DATA', acc);
+      const s = ((d && d.data_sources) || []).filter((x) => /weather/i.test(x.name || x.source_id || ''));
+      txt(g, s.length ? (s[0].compliance_passed ? 'LICENSED' : 'NO LICENSED SOURCE') : 'NOT DECLARED', 16, 78, s.length && !s[0].compliance_passed ? '#f0b54f' : '#c9d3e0', 22, w - 32);
+      txt(g, 'NOTHING INGESTED WITHOUT A LICENSE', 16, 112, '#6b7686', 13, w - 32);
+      const ip = d && d.incremental_predictive_value;
+      txt(g, 'INCREMENTAL VALUE', 16, 160, '#8391a6', 15); txt(g, ip && ip.value !== null && ip.value !== undefined ? dv(ip.value) : NM, w - 190, 160, acc, 18);
+    }],
+  ],
+};
+function buildDesk(room, P) {
+  const acc = '#' + P.accent.toString(16).padStart(6, '0');
+  const kind = P.desk;
+  const deskM = std(kind === 'execution' ? 0x0f1319 : 0x1b1712, kind === 'execution' ? 0.35 : 0.7, kind === 'execution' ? 0.5 : 0.05);
+  const frameM = std(0x06070a, 0.3, 0.6);
+  const g = group(room, [0.12, 0, -0.95]);
+  // the desk: a long top, a modesty panel, and (execution) a brushed rail /
+  // (research) a lower shelf of reference binders
+  add(g, G.box, deskM, [0, 0.74, 0], null, [2.6, 0.045, 0.62]);
+  add(g, G.box, deskM, [0, 0.37, -0.28], null, [2.5, 0.74, 0.03], false);
+  if (kind === 'execution') add(g, G.box, std(0x8a97a8, 0.25, 0.9), [0, 0.765, 0.3], null, [2.6, 0.012, 0.012], false);
+  else for (let i = 0; i < 9; i++) add(g, G.box, std([0x3d5a40, 0x6a4e2d, 0x2f4a5a][i % 3], 0.8), [-1.0 + i * 0.07, 0.86, -0.22], null, [0.05, 0.22, 0.16], false);
+  const screens = [], defs = DESK_SCREENS[kind];
+  defs.forEach((def, i) => {
+    // two desk monitors either side of the agent, the third wall-mounted
+    // above him, so none is hidden behind the character
+    const mid = i === 1, sc_ = mid ? 1.18 : 1.0;
+    const x = (i - 1) * 0.8, rotY = -(i - 1) * 0.36, y = mid ? 1.98 : 1.22, z = mid ? -0.3 : -0.05;
+    add(g, G.box, frameM, [x, y, z], [0, rotY, 0], [0.8 * sc_, 0.47 * sc_, 0.025], false);
+    const c = document.createElement('canvas'); c.width = 512; c.height = 300;
+    const tex = new THREE.CanvasTexture(c); tex.colorSpace = THREE.SRGBColorSpace;
+    const mat = new THREE.MeshBasicMaterial({map: tex, toneMapped: true});
+    const mesh = add(g, new THREE.PlaneGeometry(0.76 * sc_, 0.44 * sc_), mat, [x + Math.sin(rotY) * 0.014, y, z + Math.cos(rotY) * 0.014], [0, rotY, 0], null, false);
+    if (mid) add(g, G.box, frameM, [x, y + 0.45, z - 0.02], null, [0.03, 0.42, 0.03], false);
+    else add(g, G.cyl, frameM, [x, 0.92, z - 0.03], null, [0.014, 0.34, 0.014], false);
+    screens.push({mesh, tex, on: mat, canvas: c, draw: def[1], title: def[0]});
+  });
+  function update(desk) {
+    for (const sc of screens) {
+      const ctx = sc.canvas.getContext('2d');
+      ctx.clearRect(0, 0, sc.canvas.width, sc.canvas.height);
+      try { sc.draw(ctx, sc.canvas.width, sc.canvas.height, desk || null, acc); }
+      catch (_) { screenHead(ctx, sc.canvas.width, sc.title, acc); txt(ctx, 'RECORD UNREADABLE', 12, 150, '#6b7686', 20); }
+      sc.tex.needsUpdate = true;
+    }
+  }
+  update(null);
+  return {screens, update};
+}
+
+// ════════════════════════════════════════════════════════════════════
 // MOUNT
 // ════════════════════════════════════════════════════════════════════
 export function mount(stage, opts) {
@@ -712,6 +874,9 @@ export function mount(stage, opts) {
   }
 
   const env = buildRoom(scene, P, renderer);
+  // Eddie's / Scout's own desk, its screens drawn from the desk record only
+  const desk = P.desk ? buildDesk(env.room, P) : null;
+  if (desk) { for (const sc of desk.screens) env.screens.push(sc); desk.update((opts && opts.desk) || null); }
   const rig = buildCharacter(P);
   rig.root.position.set(0.12, 0, 0);
   scene.add(rig.root);
@@ -895,6 +1060,8 @@ export function mount(stage, opts) {
   const onMode = (e) => setMode(e.detail && e.detail.mode);
   const onSpeech = (e) => { S.speech = e.detail && typeof e.detail.amplitude === 'number' ? e.detail.amplitude : 0; if (S.speech) schedule(); };
   window.addEventListener('cc:speech', onSpeech);
+  const onDesk = (e) => { if (!desk) return; desk.update((e.detail && e.detail.desk) || null); if (reduced || S.paused) still(); else schedule(); };
+  window.addEventListener('cc:desk', onDesk);
   const onPause = (e) => { S.paused = !!(e.detail && e.detail.paused); if (S.paused) { if (raf) cancelAnimationFrame(raf); raf = 0; } else { S.lastT = 0; schedule(); } };
   const onVis = () => { S.lastT = 0; schedule(); };
   window.addEventListener('cc:mode', onMode);
@@ -911,7 +1078,7 @@ export function mount(stage, opts) {
   stage.setAttribute('data-cc-3d', reduced ? 'static' : 'on');
   try { window.dispatchEvent(new CustomEvent('cc:ready')); } catch (_) { /* ignore */ }
   schedule();
-  return {setMode, dispose() { dead = true; if (raf) cancelAnimationFrame(raf); window.removeEventListener('cc:mode', onMode); window.removeEventListener('cc:pause', onPause); document.removeEventListener('visibilitychange', onVis); if (ro) ro.disconnect(); if (io) io.disconnect(); renderer.dispose(); }};
+  return {setMode, dispose() { dead = true; if (raf) cancelAnimationFrame(raf); window.removeEventListener('cc:mode', onMode); window.removeEventListener('cc:desk', onDesk); window.removeEventListener('cc:pause', onPause); document.removeEventListener('visibilitychange', onVis); if (ro) ro.disconnect(); if (io) io.disconnect(); renderer.dispose(); }};
 }
 
 export const DESCRIBE = {characters: Object.keys(PERSONAS), modes: ['monitoring', 'reviewing', 'waiting', 'speaking', 'unavailable'], original: true, three: '0.185.1'};

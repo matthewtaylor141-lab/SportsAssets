@@ -568,6 +568,44 @@ READERS = {
     "profitability/reads.py": (
         "BY_ID_OF_THE_HELD_POSITIONS_DECISION_RESEARCH_LINEAGE_ONLY", 2),
     "profitability/warehouse.py": ("PROSE_ONLY", 1),
+    # (218) THE LEARNING LAYER'S ONE READER: it reads BOTH purposes
+    # deliberately -- every forward PinnAPI probability is an opportunity the
+    # model / agent tournaments and meta-models score, captured BEFORE its
+    # outcome; the joined outcome by id; quotes before t for as-of features.
+    # SHADOW / RESEARCH: it selects no candidate for any execution path,
+    # sizes nothing and places nothing, and writes only poslearn_* tables
+    # (tests/test_poslearn_authority.py). A CALIBRATION_ONLY row's displayed
+    # price is used for research economics only, labelled
+    # DISPLAYED_NOT_EXECUTABLE.
+    "poslearn/reads.py": (
+        "SHADOW_RESEARCH_SCORES_BOTH_PURPOSES_NEVER_SELECTS_A_CANDIDATE", 4),
+    # (219) THE RESEARCH TWIN: reads BOTH purposes deliberately -- a
+    # decision's valuation BY ID for its sport and venue-verified outcome
+    # (scoring a replayed decision after the fact) and one resolved
+    # prediction per event for cross-sport calibration research. Its evals
+    # LEFT JOIN a decision's cited valuation id only to check that the id
+    # resolves. It selects no candidate, writes only twin_* tables and has
+    # no order, sizing or activation effect (tests/test_twin_authority.py).
+    "twin/reads.py": (
+        "RESEARCH_BY_ID_OUTCOMES_AND_SPORT_BOTH_PURPOSES_NEVER_SELECTS", 2),
+    "twin/evals.py": ("EVIDENCE_REFERENCE_EXISTENCE_BY_ID_NO_SELECTION", 1),
+    # (217) EDDIE / SCOUT AND THEIR WORKFLOW: Scout reaches a game through a
+    # valuation's condition_id (game identity) and, for his feature
+    # tournaments, freezes the PinnAPI baseline probability as then known and
+    # later joins its outcome BY ID -- research forecasting, both purposes,
+    # never a candidate for any execution path; the database refuses Scout on
+    # every order/control table. The candidate-review workflow and the role
+    # brief use the same condition_id game-identity join; the registry names
+    # the read permission in prose.
+    "agents/scout.py": (
+        "RESEARCH_FEATURE_TOURNAMENT_BASELINE_AND_OUTCOME_BY_ID_NEVER_SELECTS", 4),
+    "agents/pos_workflow.py": ("GAME_IDENTITY_BY_CONDITION_ID_ONLY", 2),
+    "agents/role_brief.py": ("GAME_IDENTITY_BY_CONDITION_ID_ONLY", 2),
+    "agents/registry.py": ("PERMISSION_NAME_PROSE_ONLY", 3),
+    # THE POSITION ROOM (GET-only, read-only): a room's fixture row is
+    # reached through its own decision's valuation id -> condition_id; the
+    # module names the table once in prose. No selection, no write.
+    "position_rooms.py": ("FIXTURE_IDENTITY_BY_DECISION_VALUATION_ID_ONLY", 2),
     # (220) THE LOST OPPORTUNITY LEDGER (RESEARCH): reads the valuation row
     # a SETTLED Derek REFUSE decision already links to, BY ID ONLY (venue,
     # payout event, settlement comparison, sport family, event key), to
