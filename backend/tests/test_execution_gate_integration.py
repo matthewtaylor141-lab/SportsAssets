@@ -38,6 +38,19 @@ import pytest
 
 from sportsassets import execution_gate as gate
 
+@pytest.fixture(autouse=True)
+def _canonical_venue_authorization_assumed(monkeypatch):
+    """R30A review (audit P0 #2): pmus.submit_fok -- and the CLOB
+    _submit_fok -- refuse every BUY without the canonical SMALL LIVE
+    adapter's LiveAuthorization, which SHADOW never issues. This file pins
+    the adapter's own BUY mechanics against a fake client, so it states that
+    authorization as an assumption (tests/admission_fixture.py); nothing else
+    is assumed. The refusal itself is proven in
+    tests/test_live_parity_convergence.py §7."""
+    from tests import admission_fixture as AF
+    AF.assume_canonical_venue_authorization(monkeypatch)
+
+
 BACKEND = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
 

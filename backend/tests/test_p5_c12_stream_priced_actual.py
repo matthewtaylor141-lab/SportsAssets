@@ -54,6 +54,15 @@ def _world(e, monkeypatch):
     book's currency stays the production NOT_ESTABLISHED."""
     monkeypatch.setattr(AA, "APPROVED_LIVE_BOOK_RULES",
                         frozenset({AF.TEST_RULE, LBC.RULE_ID}))
+    # R30A: the settlement-compatibility gate admits only under an approval
+    # of its configuration (production approves none), and the ACTUAL lane
+    # requires the canonical SMALL LIVE authorization before its claim
+    # (never issued in SHADOW; refusals proven in
+    # tests/test_live_parity_convergence.py). Both are this test's stated
+    # assumptions, like the approved rule above.
+    monkeypatch.setattr(AA, "APPROVED_SETTLEMENT_GATES",
+                        frozenset({AA.SETTLEMENT_GATE_ID}))
+    AF.assume_canonical_live_authorization(monkeypatch)
     assert PB.BOOK_CURRENCY["verdict"] == "NOT_ESTABLISHED"
     e.venue.market_state = "MARKET_STATE_OPEN"
     from sportsassets.workers import ext_pinnacle_loop as LOOP

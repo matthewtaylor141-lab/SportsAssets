@@ -131,6 +131,71 @@ R_COUNTED_DEPTH_UNREACHABLE = "THE_LIMIT_DOES_NOT_REACH_THE_DEPTH_IT_WAS_SIZED_O
 LONG = "ORDER_INTENT_BUY_LONG"
 
 
+def canonical_order_of(rec: dict | None, plan: dict) -> dict:
+    """THE FUNDED ORDER AS THE CANONICAL MATCH SEES IT (pure). EVERY field
+    the venue would receive, bound to the canonical intent -- the ACTUAL
+    lane matches ten; this matches the same facts in the venue's own words:
+
+      us_market_slug, order_intent    the contract and the venue intent
+      holding_side                    the side the intent buys
+      strategy, strategy_version      what the record says decided it (absent
+                                      on a funded record -> it is not the
+                                      intent's strategy: refused by name)
+      wire_price                      the limit sent (pmus' price is the wire)
+      venue_time_in_force, post_only  the order form (live_parity.
+                                      VENUE_ORIGINATION_MATCH)
+      live_qty                        the contracts sent, which must be the
+                                      intent's quantity at the canonical
+                                      capital scale
+
+    R30A review: this bound only the slug and the order intent, so a funded
+    BUY of any quantity, price or strategy on a canonical intent's market
+    passed the origination match (it was refused only because SHADOW
+    issues nothing)."""
+    r = rec or {}
+    intent = plan.get("intent")
+    return {"us_market_slug": plan.get("us_market_slug"),
+            "order_intent": intent,
+            "holding_side": ("LONG" if intent == LONG else "SHORT"
+                             if intent == "ORDER_INTENT_BUY_SHORT" else None),
+            "strategy": r.get("strategy"),
+            "strategy_version": (r.get("strategy_version")
+                                 or r.get("policy_version")),
+            "wire_price": plan.get("limit_price"),
+            "venue_time_in_force": plan.get("tif"),
+            "post_only": bool(plan.get("post_only")),
+            "live_qty": plan.get("quantity")}
+
+
+async def canonical_origination(conn, *, rec: dict | None, plan: dict) -> dict:
+    """MAY THIS FUNDED ACQUISITION BE ORIGINATED? (R30A convergence). The
+    record must name a canonical decision intent ({intent_id, content_sha}
+    under `canonical_intent`); live_parity.authorize_live_exposure then
+    verifies it, matches EVERY order field (canonical_order_of: contract,
+    side, strategy, price, order form and the scaled quantity), checks its
+    validity window,
+    the LIVE policy and the live gates, and asks the canonical SMALL LIVE
+    adapter for its authorization (never issued in SHADOW). Never raises:
+    any failure refuses. {ok, refusal, detail, token}."""
+    try:
+        from . import live_parity as LP
+    except Exception as exc:                                  # noqa: BLE001
+        return {"ok": False, "refusal": "CANONICAL_AUTHORITY_UNAVAILABLE",
+                "detail": {"error": type(exc).__name__}, "token": None}
+    ref = (rec or {}).get("canonical_intent") or {}
+    if not isinstance(ref, dict) or not ref.get("intent_id"):
+        return {"ok": False, "refusal": LP.R_NO_CANONICAL,
+                "detail": {"why": ("the funded record names no canonical "
+                                   "decision intent")}, "token": None}
+    try:
+        return await LP.authorize_live_exposure(
+            conn, canonical_intent_id=ref["intent_id"], named=ref,
+            order=canonical_order_of(rec, plan), now=time.time())
+    except Exception as exc:                                  # noqa: BLE001
+        return {"ok": False, "refusal": "CANONICAL_AUTHORITY_UNAVAILABLE",
+                "detail": {"error": type(exc).__name__}, "token": None}
+
+
 def _adapter(mod=None):
     """The existing venue module, or an injected stand-in for a test.
 
@@ -1187,6 +1252,39 @@ async def submit_for_decision(conn, rec: dict, *, account_id: str,
                          "the adapter was NOT called. Turning this on is a "
                          "code change, and three further boundaries remain "
                          "after it"))
+    # ── R30A CONVERGENCE: NO ACQUISITION OUTSIDE A CANONICAL INTENT ──────
+    #
+    # The funded stack is the third generation of live execution (beside the
+    # retired execmirror copy and the execution-intent ACTUAL sibling). It
+    # may not originate NEW exposure on its own decision: a BUY reaches the
+    # adapter only for a canonical decision intent the record names, that
+    # verifies, matches this order's contract and side, is unexpired, passes
+    # the LIVE policy (fail closed: a missing / unreadable / sha-mismatched /
+    # unapproved policy refuses) and the live gates, and carries the
+    # canonical SMALL LIVE adapter's authorization -- which SHADOW never
+    # issues. So even with FUNDED_SUBMISSION_ENABLED flipped, a funded
+    # acquisition cannot be sent from this build. THE FUNDED STACK'S OWN
+    # POLICY READS (derek_policy.policy_params, xavier_policy.load, each
+    # falling back to a labelled CODE_DEFAULT) therefore authorize no new
+    # exposure by themselves. A SELL (exit, reduce, protection) only reduces
+    # exposure and is untouched. Checked before anything is written or
+    # sent, so a refusal leaves no row and the leg's claim can be released.
+    canon_token = None
+    if not plan.get("sell"):
+        canon = await canonical_origination(conn, rec=rec, plan=plan)
+        out["canonical_origination"] = {
+            k: canon.get(k) for k in ("ok", "refusal", "detail")}
+        if not canon.get("ok"):
+            return dict(out, ok=False, refusal=canon["refusal"],
+                        nothing_was_written=True, exposure="NONE",
+                        why=("a funded acquisition is originated only by a "
+                             "canonical decision intent with the canonical "
+                             "SMALL LIVE adapter's authorization; refused "
+                             "before anything was written or sent"))
+        # the authorization is presented to the adapter, whose own
+        # boundary (pmus.require_canonical_origination) refuses a BUY
+        # without it
+        canon_token = canon.get("token")
     try:
         mod = _adapter(adapter)
     except Exception as exc:                               # noqa: BLE001
@@ -1337,12 +1435,17 @@ async def submit_for_decision(conn, rec: dict, *, account_id: str,
     try:
         # A STANDING order names its venue-enforced expiry; every other
         # order sends exactly the arguments it always did.
-        answer = mod.submit_fok(
-            plan["us_market_slug"], plan["limit_price"], plan["quantity"],
-            plan["sell"], tif=plan["tif"], intent=plan["intent"],
-            post_only=plan["post_only"],
-            **({"good_till": plan["good_till"]} if plan.get("good_till")
-               else {}))
+        # the canonical authorization (None for a SELL, and in SHADOW) is
+        # PRESENTED to the adapter for this one call: pmus.submit_fok's own
+        # boundary refuses a BUY without it (live_authorization.presenting)
+        from . import live_authorization as _LA
+        with _LA.presenting(canon_token):
+            answer = mod.submit_fok(
+                plan["us_market_slug"], plan["limit_price"], plan["quantity"],
+                plan["sell"], tif=plan["tif"], intent=plan["intent"],
+                post_only=plan["post_only"],
+                **({"good_till": plan["good_till"]} if plan.get("good_till")
+                   else {}))
     except Exception as exc:                               # noqa: BLE001
         # DID THE REQUEST ACTUALLY LEAVE? The two answers need opposite
         # handling, and getting this wrong in either direction is a real cost:
@@ -1518,6 +1621,9 @@ def describe() -> dict:
                   "bettor_entry_execution.effective_limits (MIN, never raises)",
                   "bettor_entry_execution.authorize_submission",
                   "%s.FUNDED_SUBMISSION_ENABLED" % __name__,
+                  "%s.canonical_origination (a BUY: the canonical intent "
+                  "and the SMALL LIVE adapter's authorization; never "
+                  "issued in SHADOW)" % __name__,
                   "pmus.submit_fok -> execution_gate -> preview -> create"],
         "allowed_venue_classes": list(ALLOWED_VENUE_CLASSES),
         "adapter": ADAPTER_MODULE,

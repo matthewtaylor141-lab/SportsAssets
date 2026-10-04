@@ -605,9 +605,17 @@ async def artifact_state(conn) -> dict:
     except Exception:                                         # noqa: BLE001
         row = None
     approved = LBC.RULE_ID in desc.get("approved_live_book_rules", [])
+    # R30A section 24: the approval has two parts -- the rule document (204)
+    # AND the gate's enforced configuration (live_approvals, by config sha).
+    # `owner_approved` is the intersection (live_rule_artifacts.approved_live_
+    # book_rules); the second part is reported on its own as well.
+    from . import live_approvals as LAP
+    gate_ok = LBC.RULE_ID in await LAP.approved_gates(conn)
     return {"rule_id": LBC.RULE_ID, "version": LBC.VERSION,
             "code_sha256": LBC.SHA256,
             "owner_approved": approved,
+            "gate_config_sha256": LAP.config_sha256(LAP.GATE_BOOK),
+            "gate_config_approved": gate_ok,
             "stored_status": (row or {}).get("status"),
             "stored_sha256_matches_code": (None if row is None else
                                            row.get("sha256") == LBC.SHA256),
@@ -821,8 +829,11 @@ def evaluate_predicates(*, ps: dict, decision: dict, stream: dict,
                       action=("owner: record an approval on live_rule_"
                               "artifacts for %s v%s sha256 %s (research/"
                               "p5_live_stream_book_v1.md, 'Owner approval "
-                              "action')" % (LBC.RULE_ID, LBC.VERSION,
-                                            LBC.SHA256)),
+                              "action') AND a LIVE_GATE approval in "
+                              "live_approvals naming this build's gate "
+                              "config sha256 %s" % (
+                                  LBC.RULE_ID, LBC.VERSION, LBC.SHA256,
+                                  artifact.get("gate_config_sha256"))),
                       deciding_process=artifact))
 
     # S1 -- the single-book premise, on recorded same-book samples

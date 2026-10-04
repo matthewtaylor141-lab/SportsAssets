@@ -9,7 +9,18 @@ rule (`actual_admission.book_currency_admission`). The approved set is
         AND carries an owner approval record (actor, approved_at, statement)
             whose actor is not an agent
         AND whose (version, sha256) is exactly what THIS code implements
-            (live_book_currency.CODE_RULES) }
+            (live_book_currency.CODE_RULES)
+        AND (R30A section 24) whose GATE CONFIGURATION is approved: the
+            latest live_approvals decision for (LIVE_GATE, rule_id, version)
+            is an owner APPROVE naming the sha of the configuration THIS
+            build enforces (live_approvals.config_sha256) }
+
+WHY THE SECOND PART. The 204 artifact hashes the rule DOCUMENT. The gate's
+enforced constants (receipt-age, skew and verdict-age bounds, the tradable
+states, the admission rule) live in code and could change without the
+document changing -- and the old approval would have gone on admitting a gate
+the owner never saw. The configuration's own sha, recorded with the
+approval, makes any such change stop admitting until it is approved again.
 
 READ-ONLY and FAIL CLOSED: a missing table, a missing row, a hash that
 differs from the code's, a malformed row or ANY error yields only the code
@@ -96,7 +107,9 @@ async def approved_live_book_rules(conn) -> frozenset:
                 rows = await _read(conn)
         else:
             rows = await _read(conn)
-        return base | admissible_rows(rows)
+        from . import live_approvals as LAP
+        gates = await LAP.approved_gates(conn)
+        return base | (admissible_rows(rows) & gates)
     except Exception as exc:                                  # noqa: BLE001
         log.debug("live_rule_artifacts read failed: %s", type(exc).__name__)
         return base

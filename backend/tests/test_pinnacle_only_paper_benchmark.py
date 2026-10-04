@@ -127,7 +127,14 @@ ALLOWED_IMPORTS = {"__future__", "annotations", "asyncio", "hashlib", "json", "m
                    # Standard library only (math, re, datetime, zoneinfo --
                    # pinned below): cited quotes, a binomial interval and a
                    # date read, no I/O and no execution, venue or funded path.
-                   "bettor_nfl_settlement"}
+                   "bettor_nfl_settlement",
+                   # R30A: the canonical decision intent the benchmark builds
+                   # before its hook and whose validity window it checks
+                   # before the paper submit. canonical_intent is PURE: it
+                   # imports only the standard library (pinned below), so no
+                   # execution, venue or funded module is reachable through
+                   # it.
+                   "canonical_intent"}
 
 
 def _imports(path: pathlib.Path) -> list:
@@ -139,6 +146,21 @@ def _imports(path: pathlib.Path) -> list:
         elif isinstance(node, ast.Import):
             out.extend(a.name for a in node.names)
     return out
+
+
+def test_the_canonical_intent_module_is_pure():
+    """R30A: the benchmark may import canonical_intent only because it
+    imports nothing beyond the standard library."""
+    from sportsassets import canonical_intent as CI
+    # ROUND_FLOOR (decimal, standard library): R30A review -- the validity
+    # window is floored to the millisecond (canonical_intent._floor_ms),
+    # never rounded up past the 30 s rule
+    stdlib = {"__future__", "annotations", "datetime", "decimal", "hashlib",
+              "json", "math", "re", "time", "typing", "uuid", "Decimal",
+              "Any", "ROUND_HALF_UP", "ROUND_FLOOR", "InvalidOperation"}
+    leaves = {n.split(".")[-1] for n in _imports(pathlib.Path(CI.__file__))
+              if n}
+    assert leaves <= stdlib, sorted(leaves - stdlib)
 
 
 def test_the_benchmark_imports_only_paper_and_pure_policy_modules():

@@ -13,6 +13,13 @@ hooks installed (as `execution_intent.start` installs them in the API):
   * after the fill and handoff, Xavier's review records ONE canonical
     management intent consumed by both adapters, with its parity row.
 
+R30A: the intent is complete (opportunity id, policy, probability, book,
+rails, binding constraints, evidence refs, latency stages, a derived validity
+window); with no LIVE approval in force the SMALL LIVE adapter refuses new
+exposure by name while the would-be order is still compared (Allie and Eddie
+included); the management intent carries all eight alternatives and exact
+management parity is not claimed; the latency chain is measured end to end.
+
 SYNTHETIC: valuations and books from tests/paper_live_fixture.
 """
 from __future__ import annotations
@@ -23,6 +30,7 @@ import time
 import pytest
 
 from sportsassets import bettor_paper_ledger as L
+from sportsassets import canonical_intent as CI
 from sportsassets import decision_hooks as DH
 from sportsassets import live_parity as LP
 from sportsassets.agents import paper_benchmark as PB
@@ -157,6 +165,41 @@ async def test_one_intent_two_adapters_parity_through_the_real_pass(
         assert ev["valuation_id"] == v["valuation_id"]
         assert ev["book_obs_id"] == d["book_obs_id"]
 
+        # ── R30A: THE COMPLETE INTENT ───────────────────────────────────
+        assert it["intent_version"] == CI.INTENT_VERSION
+        parts = it["opportunity_id"].split("|")
+        assert len(parts) == 5
+        assert parts[1] == it["us_market_slug"]
+        assert parts[2] == it["holding_side"]
+        pol = H.j(it["policy"])
+        assert pol["strategy"] == CG and pol["strategy_version"] == PB.CG_VERSION
+        assert len(pol["policy_sha"]) == 64
+        if pol["parameters_source"] == CI.POLICY_ACTIVE:
+            assert pol["row_sha_matches"] is True and pol["fallback"] is None
+        else:
+            # PAPER fell back -- explicitly and labelled, never LIVE-admissible
+            assert pol["fallback"]["explicit"] is True
+            assert pol["fallback"]["live_admissible"] is False
+        prob = H.j(it["probability"])
+        # (numbers are stored in the sha's normal form: decimal strings)
+        assert prob["status"] == "MEASURED" and float(prob["limit_s"]) <= 30.0
+        assert prob["observed_at"] is not None
+        book = H.j(it["book"])
+        assert book["obs_id"] == d["book_obs_id"]
+        assert float(book["max_age_s"]) == float(PB.BOOK_MAX_AGE_S)
+        rails = H.j(it["risk_rails"])
+        assert "live" in rails and rails["per_order_cap_usd"] is not None
+        assert "allie_final_binding" in H.j(it["binding_constraints"])
+        refs = H.j(it["evidence_refs"])
+        assert {"kind": "paper_decisions", "id": d["decision_id"]} in refs
+        stages = H.j(it["latency_stages"])
+        assert stages["decision_start_at"] is not None
+        # the validity window, derived from the rules that admitted it
+        expiry = H.j(it["expiry"])
+        assert expiry["status"] == "DERIVED" and it["expires_at"] is not None
+        assert it["expires_at"].timestamp() <= \
+            float(prob["observed_at"]) + 30.0 + 0.001
+
         # ── THE PAPER ADAPTER: THE ORDER IS THE INTENT'S ORDER ──────────
         o = await conn.fetchrow("SELECT * FROM paper_orders WHERE "
                                 " decision_id=$1 AND role='ENTRY'",
@@ -180,11 +223,28 @@ async def test_one_intent_two_adapters_parity_through_the_real_pass(
                                              "SHADOW_EXCLUDED")
         assert {r["intent_sha"] for r in ex.values()} == {it["content_sha"]}
         assert "venue_order_id" not in H.j(ex["SMALL_LIVE"]["refs"])
+        # R30A: no LIVE approval exists here, so the SMALL LIVE adapter
+        # refuses new exposure by name (fail closed) -- and still records
+        # the would-be order for the parity comparison
+        lrefs = H.j(ex["SMALL_LIVE"]["refs"])
+        assert ex["SMALL_LIVE"]["state"] == "SHADOW_EXCLUDED"
+        assert lrefs["new_exposure_refused"] is True
+        gref = lrefs["governance"]["refusals"]
+        assert gref and ex["SMALL_LIVE"]["exclusion"] == gref[0]
+        assert gref[0] in CI.LIVE_POLICY_REFUSALS
+        assert LP.R_GATE_APPROVAL in gref
+        assert lrefs["plan_state"] is not None
+        assert H.j(ex["PAPER"]["refs"])["stages"]["intent_recorded_at"]
         par = await conn.fetchrow(
             "SELECT * FROM live_parity_ledger WHERE intent_id=$1",
             it["intent_id"])
         assert par is not None
         assert par["parity_state"] != "LOGIC_DIVERGENCE", H.j(par["comparison"])
+        comp = H.j(par["comparison"])
+        assert comp["live_governance_refusals"] == gref
+        for f in ("allie_final_allocation", "eddie_estimate"):
+            assert comp["fields"][f]["compared"] is True, f
+            assert comp["fields"][f]["equal"] is True, comp["fields"][f]
         assert client.mutation_attempts == 0
         assert await conn.fetchval(
             "SELECT count(*) FROM small_live_order_events") == 0
@@ -218,6 +278,61 @@ async def test_one_intent_two_adapters_parity_through_the_real_pass(
             mpar["comparison"])
         assert not (await LP.control(conn))["halted"]
         assert client.mutation_attempts == 0
+        # R30A: EVERY ALTERNATIVE, VALUED OR UNAVAILABLE WITH ITS REASON
+        aset = H.j(last["alternative_set"])
+        assert set(aset) == set(CI.ALTERNATIVES)
+        for name, e in aset.items():
+            assert e["status"] in (CI.EVALUATED, "UNAVAILABLE"), name
+            if e["status"] == "UNAVAILABLE":
+                assert e["why"], name
+        assert aset["INDIRECT_HEDGE"]["status"] == "UNAVAILABLE"
+        assert last["chosen"] == last["action"]
+        assert aset[last["chosen"]]["chosen"] is True
+        assert H.j(last["chosen_why"])["action"] == last["action"]
+        assert "small_live_management_policy" in H.j(last["policy"])
+        mcomp = H.j(mpar["comparison"])
+        # the paper book runs no indirect-hedge search: exact management
+        # parity is never claimed
+        assert mcomp["alternatives"]["exact_parity_claimed"] is False
+        assert "INDIRECT_HEDGE" in mcomp["alternatives"][
+            "evaluated_on_neither_side"]
+        # R30A review: ... and the LEDGER says so -- the pair is never
+        # MATCHED (nor any other claimed-parity state) through the real pass
+        assert aset["INDIRECT_HEDGE"]["evaluation"] == CI.NOT_RUN
+        assert "INDIRECT_HEDGE" in mcomp["alternatives"]["not_run"]
+        assert mpar["parity_state"] == LP.INCOMPLETE, mpar["parity_state"]
+        assert mcomp["why_not_exact"].startswith(
+            "NOT_EVALUATED_ON_EITHER_SIDE:")
+        assert mcomp["exact_parity_claimed"] is False
+        assert mcomp["state_if_alternatives_were_complete"] in (
+            LP.MATCHED, LP.SCALE, LP.VENUE_DIFF)
+        # the decision intent names the build that decided it
+        ev = H.j((await conn.fetchrow(
+            "SELECT evidence FROM canonical_decision_intents WHERE "
+            " intent_id=$1", it["intent_id"]))["evidence"])
+        assert ev["build"]["decision_logic_hash"] == \
+            LP.decision_logic_hash()["hash"]
+        # the Allie / Eddie comparison is labelled for what it is
+        assert comp["fields"]["allie_final_allocation"][
+            "comparison_kind"] == LP.ALLIE_EDDIE_BASIS["kind"]
+        # R30A: THE LATENCY CHAIN FOR THIS DECISION
+        lat = [r for r in await LP.latency_rows(conn)
+               if r["intent_id"] == it["intent_id"]]
+        assert len(lat) == 1
+        row = lat[0]
+        for k in ("decision_start_at", "intent_recorded_at", "paper_submit_at",
+                  "paper_fill_at"):
+            assert row[k] is not None, (k, row)
+        rep = LP.latency_report(lat)
+        assert rep["spans"]["decision_start_to_paper_submit"]["n"] == 1
+        assert rep["spans"]["paper_submit_to_paper_fill"]["n"] == 1
+        # R30A review: the book stage is its SIGNED age at decision start --
+        # measured whichever side of decision_start the read landed, never
+        # discarded as a clock disagreement (both stamps are our clock)
+        age = rep["spans"]["book_age_at_decision_start"]
+        assert age["n"] == 1 and age["unavailable"] == {}, age
+        assert "CLOCK_DISAGREEMENT" not in rep["spans"][
+            "book_observed_to_intent_recorded"]["unavailable"]
         b = await L.balances(conn, acct["account_id"], now=now + 141)
         assert b["ledger_consistent"] is True
     finally:

@@ -324,13 +324,33 @@ class LegacyOriginationRetired(RuntimeError):
 
 def _canonical_live_authorized(token) -> bool:
     """R30: True only for an authorization issued by the canonical SMALL LIVE
-    adapter in LIVE mode. This release has no LIVE mode (live_parity.
-    SMALL_LIVE_MODE is SHADOW and migration 225 CHECKs it), so nothing can
-    issue one: activation needs a new release, a new migration and the
-    owner's explicit approval."""
+    adapter in LIVE mode (live_parity.canonical_live_authorized: a
+    LiveAuthorization only live_parity.issue_live_authorization constructs).
+    This release has no LIVE mode (live_parity.SMALL_LIVE_MODE is SHADOW and
+    migration 225 CHECKs it), so nothing can issue one: activation needs a
+    new release, a new migration and the owner's explicit approval."""
     from . import live_parity as LPAR
-    return (token is not None and LPAR.SMALL_LIVE_MODE != LPAR.MODE_SHADOW
-            and getattr(token, "issued_by", None) == LPAR.LIVE_ADAPTER_VERSION)
+    return LPAR.canonical_live_authorized(token)
+
+
+# R30A · WHY EXECMIRROR ORIGINATION IS RETIRED, AND WHERE IT IS PROVEN.
+#
+# Mirror.plan_new / submit_planned (a HEDGE copied from a paper order) and
+# the execution-intent ACTUAL lane both end at THIS adapter's place(). In
+# production the venue factory is always this class (execmirror.run builds
+# `Mirror(...)` with its default venue_factory=Venue), and place() refuses
+# every new order unless it carries a
+# LiveAuthorization -- which only live_parity.issue_live_authorization can
+# construct, and only outside SHADOW. So a copied paper order can never
+# reach the venue: the row is claimed, place() raises
+# LegacyOriginationRetired, _classify reads that as REJECTED (nothing was
+# sent), and nothing is retried. The ACTUAL lane is gated earlier still:
+# live_parity.authorize_live_exposure refuses before its claim.
+# tests/test_live_parity_convergence.py drives Mirror.tick and ActualLane.
+# _run against THIS class over a recording client and asserts the client's
+# orders.create is never reached. (Lane mechanics tests use a FakeVenue in
+# place of this class and therefore state the authorization as an
+# assumption.)
 
 
 class Venue:

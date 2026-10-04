@@ -44,6 +44,30 @@
 --                                  clearing a halt needs a named human actor.
 --   small_live_control_events      append-only audit of every control change.
 --
+--   live_parity_cutover            R30A: ONE append-only row PER DEPLOYMENT
+--                                  of a release (was a singleton; a rollback
+--                                  to an earlier sha appends a row of its
+--                                  own): release / api / workers sha,
+--                                  migrations, the decision-logic hash, the
+--                                  hook install, the named human who recorded
+--                                  it and the database's own clock. The
+--                                  forward window starts at the latest release
+--                                  whose decision-logic hash differs from its
+--                                  predecessor's (live_parity_effective_
+--                                  cutover).
+--   live_approvals                 R30A: append-only owner LIVE approvals of a
+--                                  policy version (keyed by its sha) or of a
+--                                  live gate's configuration (keyed by its
+--                                  config sha). Nothing in the application
+--                                  writes it; a changed policy / gate config
+--                                  no longer matches its approval.
+--
+-- R30A (this file was not yet deployed, so it is amended in place): the
+-- decision intent gains opportunity_id, policy, probability, book,
+-- risk_rails, binding_constraints, evidence_refs, latency_stages, expires_at
+-- and expiry -- all inside its sha; the management intent gains the full
+-- eight-alternative set, the chosen action, why, and the management policy.
+--
 -- APPEND-ONLY: every table except the control singleton refuses UPDATE,
 -- DELETE and TRUNCATE. The control singleton refuses DELETE/TRUNCATE, refuses
 -- any mode but SHADOW, and refuses clearing a halt without a human actor.
@@ -62,15 +86,48 @@ BEGIN
         TG_OP, TG_TABLE_NAME USING ERRCODE = 'restrict_violation';
 END $$;
 
+-- ── the named-human rule (one definition for every CHECK below) ────────
+-- A halt clear, a cutover's recorded_by and an owner LIVE approval's
+-- approved_by must be a NAMED HUMAN. The pattern is canonical_intent.
+-- NON_HUMAN_ACTOR_PATTERN character for character (a test pins them equal):
+-- an agent / system identity at the start; a machine word anywhere as a
+-- whole word (bot, ci, cron, codex, assistant, openai, gpt, automation,
+-- service, root, admin, scheduler, deploy, github, actions, worker ...); a
+-- GitHub App `[bot]` suffix. R30A review: the R30 rule was the first part
+-- alone, so 'github-actions[bot]', 'ci', 'cron', 'root' or 'admin' passed
+-- as a named human.
+CREATE OR REPLACE FUNCTION live_parity_named_human(actor text) RETURNS boolean
+LANGUAGE sql IMMUTABLE AS $$
+    SELECT actor IS NOT NULL AND length(btrim(actor)) > 0
+       AND btrim(actor) !~* '^(system|derek|xavier|audrey|karen|allie|chief_allocator|eddie|scout|bettor|claude|agent|migration|test_harness_system)|(^|[^a-z0-9])(bots?|ci|cron|codex|assistant|openai|gpt|chatgpt|anthropic|llm|copilot|automation|automated|service|svc|root|admin|administrator|scheduler|deploy|deployer|render|github|actions|worker|daemon|robot|script|pipeline|webhook|unknown|anonymous|none|null)([^a-z0-9]|$)|\[bot\]'
+$$;
+
 -- ── 1 · canonical decision intents ──────────────────────────────────────
 CREATE TABLE IF NOT EXISTS canonical_decision_intents (
     intent_id          text PRIMARY KEY,
     intent_version     text NOT NULL,
     decision_id        text NOT NULL UNIQUE,
+    -- fixture | us_market_slug | holding_side | line | scope
+    -- (canonical_intent.opportunity_key: the unique-opportunity funnel key)
+    opportunity_id     text NOT NULL,
     strategy           text NOT NULL,
     strategy_version   text NOT NULL,
+    -- the parameter version + its row sha + policy_sha (what a LIVE approval
+    -- names); a PAPER shipped-default fallback is labelled here
+    policy             jsonb NOT NULL,
     sleeve             text NOT NULL,
     evidence           jsonb NOT NULL,
+    -- source, source version, observed / received stamps, age at decision
+    probability        jsonb NOT NULL,
+    -- book observation id, receipt stamp, age at decision, the entry rule
+    book               jsonb NOT NULL,
+    -- the rails in force: paper per-order cap, live rail, scale
+    risk_rails         jsonb NOT NULL,
+    -- Allie's binding_constraint / final_binding and the sizing stop
+    binding_constraints jsonb NOT NULL,
+    evidence_refs      jsonb NOT NULL,
+    -- the latency chain's decision-side stages (R30A section 6)
+    latency_stages     jsonb NOT NULL,
     opportunity_score  jsonb NOT NULL,
     derek              jsonb NOT NULL,
     karen              jsonb NOT NULL,
@@ -88,8 +145,22 @@ CREATE TABLE IF NOT EXISTS canonical_decision_intents (
     target_qty         numeric(20,6) NOT NULL,
     sizing_basis       jsonb NOT NULL,
     created_at         timestamptz NOT NULL,
+    -- THE VALIDITY WINDOW (canonical_intent.decision_expiry): the earlier of
+    -- the probability stamp + its 30 s rule and the book receipt + the entry
+    -- rule's book age. No adapter executes the intent after it; NULL (an
+    -- underivable window, with its reason in `expiry`) refuses everywhere.
+    expires_at         timestamptz,
+    expiry             jsonb NOT NULL,
     content_sha        text NOT NULL,
     recorded_at        timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT cdi_opportunity_ck CHECK (
+        opportunity_id ~ '^[^|]*\|[^|]+\|(LONG|SHORT)\|[^|]*\|[^|]*$'),
+    CONSTRAINT cdi_policy_ck CHECK (
+        policy ? 'policy_sha' AND policy ? 'parameters_source'),
+    CONSTRAINT cdi_expiry_ck CHECK (
+        expiry ? 'status'
+        AND (expires_at IS NOT NULL) = (expiry->>'status' = 'DERIVED')),
+    CONSTRAINT cdi_refs_ck CHECK (jsonb_typeof(evidence_refs) = 'array'),
     CONSTRAINT cdi_id_ck CHECK (intent_id ~ '^cdi_[0-9a-f]{24}$'),
     CONSTRAINT cdi_sha_ck CHECK (content_sha ~ '^[0-9a-f]{64}$'),
     CONSTRAINT cdi_side_ck CHECK (holding_side IN ('LONG', 'SHORT')),
@@ -105,8 +176,30 @@ CREATE TABLE IF NOT EXISTS canonical_decision_intents (
 );
 CREATE INDEX IF NOT EXISTS cdi_created_idx ON canonical_decision_intents (created_at DESC);
 CREATE INDEX IF NOT EXISTS cdi_strategy_idx ON canonical_decision_intents (strategy, created_at DESC);
+CREATE INDEX IF NOT EXISTS cdi_opportunity_idx ON canonical_decision_intents (opportunity_id, created_at DESC);
 
 -- ── 2 · canonical management intents ────────────────────────────────────
+-- THE EIGHT ALTERNATIVES every review evaluates (canonical_intent.
+-- ALTERNATIVES): exactly these keys, each EVALUATED or UNAVAILABLE with a
+-- reason (R30A section 8: nothing dropped silently).
+CREATE OR REPLACE FUNCTION cmi_alternative_set_ok(s jsonb) RETURNS boolean
+LANGUAGE sql IMMUTABLE AS $$
+    SELECT jsonb_typeof(s) = 'object'
+       AND (SELECT array_agg(k ORDER BY k) FROM jsonb_object_keys(s) k)
+           = ARRAY['CANCEL_PROTECTION_BEFORE_EXIT', 'HOLD', 'INDIRECT_HEDGE',
+                   'MAINTAIN_STANDING_PROTECTION', 'NO_ORDER', 'REALLOCATE',
+                   'SELL_EXIT', 'SELL_REDUCE']
+       AND NOT EXISTS (
+           SELECT 1 FROM jsonb_each(s) e
+            WHERE NOT (e.value->>'status' = 'EVALUATED'
+                       OR (e.value->>'status' = 'UNAVAILABLE'
+                           AND coalesce(e.value->>'why', '') <> ''
+                           -- R30A review: whether the evaluation RAN (an
+                           -- evaluated fact) or was NOT_RUN (the comparison
+                           -- is incomplete on it) -- parity reads this
+                           AND e.value->>'evaluation' IN ('RAN', 'NOT_RUN'))))
+$$;
+
 CREATE TABLE IF NOT EXISTS canonical_management_intents (
     intent_id            text PRIMARY KEY,
     intent_version       text NOT NULL,
@@ -127,11 +220,18 @@ CREATE TABLE IF NOT EXISTS canonical_management_intents (
     target_qty           numeric(20,6),
     target_limit         jsonb NOT NULL,
     alternatives         jsonb NOT NULL,
+    alternative_set      jsonb NOT NULL,
+    chosen               text NOT NULL,
+    chosen_why           jsonb NOT NULL,
+    policy               jsonb NOT NULL,
     freshness            jsonb NOT NULL,
     reason               jsonb NOT NULL,
     created_at           timestamptz NOT NULL,
     content_sha          text NOT NULL,
     recorded_at          timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT cmi_alternative_set_ck CHECK (cmi_alternative_set_ok(alternative_set)),
+    CONSTRAINT cmi_chosen_ck CHECK (chosen = action
+                                    AND alternative_set ? chosen),
     CONSTRAINT cmi_id_ck CHECK (intent_id ~ '^cmi_[0-9a-f]{24}$'),
     CONSTRAINT cmi_sha_ck CHECK (content_sha ~ '^[0-9a-f]{64}$'),
     CONSTRAINT cmi_side_ck CHECK (holding_side IN ('LONG', 'SHORT')),
@@ -166,7 +266,10 @@ CREATE TABLE IF NOT EXISTS canonical_intent_executions (
     capital_scale  numeric(14,4) NOT NULL,
     venue_params   jsonb,
     refs           jsonb NOT NULL DEFAULT '{}'::jsonb,
-    created_at     timestamptz NOT NULL DEFAULT now(),
+    -- the instant of the write itself (clock_timestamp, not the enclosing
+    -- transaction's start): a long paper pass must not date its adapter
+    -- records before a cutover recorded while it ran
+    created_at     timestamptz NOT NULL DEFAULT clock_timestamp(),
     CONSTRAINT cie_kind_ck CHECK (intent_kind IN ('DECISION', 'MANAGEMENT')),
     CONSTRAINT cie_sha_ck CHECK (intent_sha ~ '^[0-9a-f]{64}$'),
     -- THE ONLY TWO ADAPTER MODES THIS MIGRATION ADMITS. A LIVE mode needs a
@@ -221,13 +324,23 @@ CREATE TABLE IF NOT EXISTS live_parity_ledger (
     parity_state        text NOT NULL,
     divergence_fields   text[] NOT NULL DEFAULT '{}',
     comparison          jsonb NOT NULL,
-    created_at          timestamptz NOT NULL DEFAULT now(),
+    -- the instant of the write (see canonical_intent_executions.created_at):
+    -- the forward window compares it with the cutover's clock_timestamp
+    created_at          timestamptz NOT NULL DEFAULT clock_timestamp(),
     CONSTRAINT lpl_kind_ck CHECK (intent_kind IN ('DECISION', 'MANAGEMENT')),
+    -- INCOMPLETE_COMPARISON (R30A section 8): identical on every compared
+    -- field, but the management alternative set was evaluated on NEITHER
+    -- side for some alternative (the paper book runs no indirect-hedge
+    -- search), so exact parity is NOT claimed. Never a match, never a halt.
     CONSTRAINT lpl_state_ck CHECK (parity_state IN (
         'MATCHED', 'EXPECTED_SCALE_DIFFERENCE', 'VENUE_EXECUTION_DIFFERENCE',
-        'LOGIC_DIVERGENCE')),
+        'INCOMPLETE_COMPARISON', 'LOGIC_DIVERGENCE')),
     CONSTRAINT lpl_divergence_named_ck CHECK (
         parity_state <> 'LOGIC_DIVERGENCE' OR cardinality(divergence_fields) > 0),
+    CONSTRAINT lpl_incomplete_ck CHECK (
+        parity_state <> 'INCOMPLETE_COMPARISON'
+        OR (intent_kind = 'MANAGEMENT'
+            AND coalesce(comparison->>'why_not_exact', '') <> '')),
     CONSTRAINT lpl_sleeve_ck CHECK (sleeve IN ('INVESTMENT', 'TRAINING',
                                                'BENCHMARK', 'UNCLASSIFIED'))
 );
@@ -263,8 +376,7 @@ CREATE TABLE IF NOT EXISTS small_live_control_events (
     CONSTRAINT slce_action_ck CHECK (action IN ('HALT', 'CLEAR_HALT')),
     -- a halt is cleared only by a named human, never by the system or an agent
     CONSTRAINT slce_clear_actor_ck CHECK (
-        action <> 'CLEAR_HALT' OR (actor !~* '^(system|derek|xavier|audrey|karen|allie|chief_allocator|eddie|scout|bettor)'
-                                   AND length(btrim(actor)) > 0))
+        action <> 'CLEAR_HALT' OR live_parity_named_human(actor))
 );
 
 CREATE OR REPLACE FUNCTION small_live_control_guard() RETURNS trigger
@@ -274,8 +386,8 @@ BEGIN
         RAISE EXCEPTION 'SMALL_LIVE_CONTROL_IS_PERMANENT: % refused', TG_OP
             USING ERRCODE = 'restrict_violation';
     END IF;
-    IF OLD.halted AND NOT NEW.halted AND (NEW.cleared_by IS NULL
-            OR NEW.cleared_by ~* '^(system|derek|xavier|audrey|karen|allie|chief_allocator|eddie|scout|bettor)') THEN
+    IF OLD.halted AND NOT NEW.halted
+            AND NOT coalesce(live_parity_named_human(NEW.cleared_by), false) THEN
         RAISE EXCEPTION 'SMALL_LIVE_HALT_CLEAR_NEEDS_A_NAMED_HUMAN'
             USING ERRCODE = 'restrict_violation';
     END IF;
@@ -290,15 +402,32 @@ DROP TRIGGER IF EXISTS small_live_control_truncate_trg ON small_live_control;
 CREATE TRIGGER small_live_control_truncate_trg BEFORE TRUNCATE
     ON small_live_control FOR EACH STATEMENT EXECUTE FUNCTION small_live_control_guard();
 
--- ── 6b · hook installs and THE PRODUCTION CUTOVER ──────────────────────
+-- ── 6b · hook installs and THE PRODUCTION CUTOVER, ONE ROW PER RELEASE ──
 -- Each executing process records, at boot, the canonical hooks it installed
--- and the commit it runs. The R30 CUTOVER is recorded ONCE, by
--- live_parity.record_cutover, only after it has verified in production: the
+-- and the commit it runs. A CUTOVER is recorded per release, by
+-- live_parity.record_cutover INSIDE THE SERVING PROCESS (POST /api/admin/
+-- live-parity/cutover), only after it has verified in production: the
 -- release SHA = the API's own commit = the workers' boot commit; migrations
 -- 225 and 226 applied; the canonical decision + management hooks installed
--- by a process on that commit; SMALL LIVE SHADOW and not halted; no capital
--- activated; the readback checks passing. The forward-profitability window
--- and the parity sample start at cutover_at -- never at a fixed date.
+-- by a process on that commit AND in the recording process itself; SMALL
+-- LIVE SHADOW and not halted; no capital activated; the readback checks
+-- passing; and the DECISION-LOGIC HASH (sha256 over a pinned list of
+-- decision-path source files, computed from the running build).
+--
+-- WHY PER RELEASE (R30A section 31). The R30 singleton was written once and
+-- then never again: a later release that CHANGED the decision logic would
+-- still have counted the old logic's parity rows and forward profitability
+-- as its own evidence, and a release that changed nothing could not be
+-- recorded at all. Now every release appends its row; the forward window
+-- (parity sample and INVESTMENT profitability) starts at the latest cutover
+-- whose decision_logic_hash DIFFERS from its predecessor's
+-- (live_parity_effective_cutover): a release that does not change decision
+-- logic does not restart the sample, one that does restarts it.
+--
+-- recorded_at is the DATABASE's clock_timestamp() at insert (a trigger
+-- overwrites any value a caller sends): a cutover instant is never chosen by
+-- whoever records it. recorded_by is a named human (system / agent actors
+-- are refused by CHECK).
 CREATE TABLE IF NOT EXISTS live_parity_hook_installs (
     install_id    bigserial PRIMARY KEY,
     process       text NOT NULL,
@@ -309,27 +438,131 @@ CREATE TABLE IF NOT EXISTS live_parity_hook_installs (
 );
 CREATE INDEX IF NOT EXISTS lphi_commit_idx ON live_parity_hook_installs (commit_sha, installed_at DESC);
 
+-- ONE ROW PER DEPLOYMENT OF A RELEASE, not per release sha. R30A review: with
+-- release_sha UNIQUE a rollback (or a redeploy of an earlier release) could
+-- not be recorded -- record_cutover returned `already` -- so after A -> B ->
+-- A the effective cutover stayed on B and the forward window kept counting
+-- A's logic as B's evidence. A sha may now appear again; what is refused
+-- (trigger below) is recording the SAME release twice IN A ROW, which would
+-- add nothing. A -> B -> A appends a third row, and when its logic hash
+-- differs from B's the forward window restarts there.
 CREATE TABLE IF NOT EXISTS live_parity_cutover (
-    id                 smallint PRIMARY KEY DEFAULT 1,
-    cutover_at         timestamptz NOT NULL,
-    release_sha        text NOT NULL,
-    api_sha            text NOT NULL,
-    workers_sha        text NOT NULL,
-    migrations         text[] NOT NULL,
-    hook_install_id    bigint NOT NULL REFERENCES live_parity_hook_installs (install_id),
-    small_live_mode    text NOT NULL,
-    small_live_halted  boolean NOT NULL,
-    capital_activated  boolean NOT NULL,
-    evidence           jsonb NOT NULL,
-    recorded_by        text NOT NULL,
-    recorded_at        timestamptz NOT NULL DEFAULT now(),
-    CONSTRAINT lpc_singleton_ck CHECK (id = 1),
+    cutover_id           bigserial PRIMARY KEY,
+    release_sha          text NOT NULL,
+    api_sha              text NOT NULL,
+    workers_sha          text NOT NULL,
+    migrations           text[] NOT NULL,
+    decision_logic_hash  text NOT NULL,
+    decision_logic_files jsonb NOT NULL,
+    hook_install_id      bigint NOT NULL REFERENCES live_parity_hook_installs (install_id),
+    small_live_mode      text NOT NULL,
+    small_live_halted    boolean NOT NULL,
+    capital_activated    boolean NOT NULL,
+    evidence             jsonb NOT NULL,
+    recorded_by          text NOT NULL,
+    recorded_at          timestamptz NOT NULL DEFAULT clock_timestamp(),
     CONSTRAINT lpc_sha_ck CHECK (release_sha ~ '^[0-9a-f]{40}$'),
     CONSTRAINT lpc_same_sha_ck CHECK (api_sha = release_sha AND workers_sha = release_sha),
     CONSTRAINT lpc_migrations_ck CHECK (migrations @> ARRAY['225', '226']),
+    CONSTRAINT lpc_logic_hash_ck CHECK (decision_logic_hash ~ '^[0-9a-f]{64}$'
+                                        AND jsonb_typeof(decision_logic_files) = 'object'),
     CONSTRAINT lpc_shadow_ck CHECK (small_live_mode = 'SHADOW' AND NOT small_live_halted),
-    CONSTRAINT lpc_no_capital_ck CHECK (NOT capital_activated)
+    CONSTRAINT lpc_no_capital_ck CHECK (NOT capital_activated),
+    CONSTRAINT lpc_named_human_ck CHECK (live_parity_named_human(recorded_by))
 );
+CREATE INDEX IF NOT EXISTS lpc_recorded_idx ON live_parity_cutover (recorded_at, cutover_id);
+CREATE INDEX IF NOT EXISTS lpc_release_idx ON live_parity_cutover (release_sha, recorded_at DESC);
+
+-- the database's own clock, and NO CONSECUTIVE DUPLICATE: the latest row
+-- (by recorded_at, cutover_id) may not already be this release. Serialized
+-- by a transaction-scoped advisory lock, so two concurrent recorders of the
+-- same deployment cannot both append.
+CREATE OR REPLACE FUNCTION live_parity_cutover_stamp() RETURNS trigger
+LANGUAGE plpgsql AS $$
+DECLARE
+    last_sha text;
+BEGIN
+    PERFORM pg_advisory_xact_lock(hashtext('live_parity_cutover'));
+    SELECT release_sha INTO last_sha FROM live_parity_cutover
+     ORDER BY recorded_at DESC, cutover_id DESC LIMIT 1;
+    IF last_sha IS NOT DISTINCT FROM NEW.release_sha THEN
+        RAISE EXCEPTION 'LIVE_PARITY_CUTOVER_ALREADY_LATEST: release % is already the latest recorded cutover',
+            NEW.release_sha USING ERRCODE = 'unique_violation';
+    END IF;
+    NEW.recorded_at := clock_timestamp();
+    RETURN NEW;
+END $$;
+DROP TRIGGER IF EXISTS live_parity_cutover_stamp_trg ON live_parity_cutover;
+CREATE TRIGGER live_parity_cutover_stamp_trg BEFORE INSERT ON live_parity_cutover
+    FOR EACH ROW EXECUTE FUNCTION live_parity_cutover_stamp();
+
+-- THE EFFECTIVE CUTOVER: the latest release whose decision-logic hash
+-- differs from its predecessor's (the first release differs from nothing).
+-- cutover_at is its recorded_at. Every reader of the forward window
+-- (live_parity.readiness_report, profitability validation) reads THIS view.
+CREATE OR REPLACE VIEW live_parity_effective_cutover AS
+SELECT x.*, x.recorded_at AS cutover_at
+  FROM (SELECT c.*,
+               lag(c.decision_logic_hash) OVER (ORDER BY c.recorded_at, c.cutover_id)
+                   AS previous_logic_hash,
+               count(*) OVER () AS releases_recorded
+          FROM live_parity_cutover c) x
+ WHERE x.previous_logic_hash IS DISTINCT FROM x.decision_logic_hash
+ ORDER BY x.recorded_at DESC, x.cutover_id DESC
+ LIMIT 1;
+
+-- ── 6c · OWNER LIVE APPROVALS (policy versions, live gate configs) ─────
+-- R30A sections 23 and 24. LIVE refuses new exposure unless the policy
+-- version it would act under is approved FOR LIVE (a paper-only
+-- authorization is not one), and the live book-currentness and
+-- settlement-compatibility gates admit only under an approval of their
+-- CURRENT configuration. Each approval names what it approves by sha:
+--   POLICY_VERSION  subject_id = strategy, subject_version = strategy
+--                   version | parameter version id, config_sha256 =
+--                   canonical_intent.policy_block(...).policy_sha
+--   LIVE_GATE       subject_id = the gate id, subject_version = its version,
+--                   config_sha256 = live_approvals.config_sha256(gate): the sha
+--                   of the gate's ENFORCED configuration, so a changed gate
+--                   config no longer matches and the approval stops admitting
+-- The latest row per (kind, subject, version) decides: APPROVE admits only
+-- while its config_sha256 equals the code's; REVOKE withdraws. Append-only;
+-- named human approvers only (CHECK); recorded_at is the database clock.
+-- NOTHING IN THE APPLICATION WRITES THIS TABLE; no approval is created here.
+CREATE TABLE IF NOT EXISTS live_approvals (
+    approval_id      bigserial PRIMARY KEY,
+    subject_kind     text NOT NULL,
+    subject_id       text NOT NULL,
+    subject_version  text NOT NULL,
+    config_sha256    text NOT NULL,
+    decision         text NOT NULL,
+    approved_by      text NOT NULL,
+    statement        text NOT NULL,
+    recorded_at      timestamptz NOT NULL DEFAULT clock_timestamp(),
+    CONSTRAINT la_kind_ck CHECK (subject_kind IN ('POLICY_VERSION', 'LIVE_GATE')),
+    CONSTRAINT la_sha_ck CHECK (config_sha256 ~ '^[0-9a-f]{64}$'),
+    CONSTRAINT la_decision_ck CHECK (decision IN ('APPROVE', 'REVOKE')),
+    CONSTRAINT la_statement_ck CHECK (length(btrim(statement)) > 0),
+    CONSTRAINT la_named_human_ck CHECK (live_parity_named_human(approved_by))
+);
+CREATE INDEX IF NOT EXISTS la_subject_idx ON live_approvals
+    (subject_kind, subject_id, subject_version, recorded_at DESC, approval_id DESC);
+
+CREATE OR REPLACE FUNCTION live_approvals_stamp() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+    NEW.recorded_at := clock_timestamp();
+    RETURN NEW;
+END $$;
+DROP TRIGGER IF EXISTS live_approvals_stamp_trg ON live_approvals;
+CREATE TRIGGER live_approvals_stamp_trg BEFORE INSERT ON live_approvals
+    FOR EACH ROW EXECUTE FUNCTION live_approvals_stamp();
+
+-- the decision in force per approved subject (latest row wins)
+CREATE OR REPLACE VIEW live_approvals_current AS
+SELECT DISTINCT ON (subject_kind, subject_id, subject_version) *
+  FROM live_approvals
+ ORDER BY subject_kind, subject_id, subject_version, recorded_at DESC,
+          approval_id DESC;
 
 -- ── 7 · append-only triggers ────────────────────────────────────────────
 DO $$
@@ -343,7 +576,8 @@ BEGIN
                              'live_parity_ledger',
                              'small_live_control_events',
                              'live_parity_hook_installs',
-                             'live_parity_cutover'] LOOP
+                             'live_parity_cutover',
+                             'live_approvals'] LOOP
         EXECUTE format('DROP TRIGGER IF EXISTS %I ON %I', t || '_append_only_trg', t);
         EXECUTE format('CREATE TRIGGER %I BEFORE UPDATE OR DELETE ON %I '
                        'FOR EACH ROW EXECUTE FUNCTION live_parity_append_only()',
@@ -408,7 +642,10 @@ RETURNS TABLE (tbl text, cols text[], kind text) LANGUAGE sql IMMUTABLE AS $$
       ('small_live_order_events',            ARRAY['source'], 'ORDER'),
       ('live_parity_ledger',                 ARRAY['strategy'], 'ORDER'),
       ('small_live_control',                 ARRAY['cleared_by'], 'CONTROL'),
-      ('small_live_control_events',          ARRAY['actor'], 'CONTROL')
+      ('small_live_control_events',          ARRAY['actor'], 'CONTROL'),
+      -- R30A: the per-release cutover and the owner LIVE approvals
+      ('live_parity_cutover',                ARRAY['recorded_by'], 'CONTROL'),
+      ('live_approvals',                     ARRAY['approved_by'], 'APPROVAL')
 $$;
 
 DO $$
@@ -425,7 +662,8 @@ BEGIN
                             'canonical_management_intents',
                             'canonical_intent_executions',
                             'small_live_order_events', 'live_parity_ledger',
-                            'small_live_control', 'small_live_control_events')
+                            'small_live_control', 'small_live_control_events',
+                            'live_parity_cutover', 'live_approvals')
     LOOP
         usable := ARRAY[]::text[];
         FOREACH c IN ARRAY r.cols LOOP
@@ -445,3 +683,14 @@ BEGIN
                         FROM unnest(usable) x), ''));
     END LOOP;
 END $$;
+
+-- ── 9 · the latency chain's read path (R30A section 6) ─────────────────
+-- GET /api/command/live-parity/latency joins each canonical decision intent
+-- to its paper ENTRY order and that order's first fill. R30A review: with no
+-- index on paper_orders.decision_id or paper_fills.order_id every intent
+-- cost a sequential scan of both tables (EXPLAIN: SubPlan Seq Scan on
+-- paper_orders / paper_fills), so the read-only endpoint would time out at
+-- production size. Plain indexes; nothing about the paper ledger changes.
+CREATE INDEX IF NOT EXISTS paper_orders_decision_role_idx
+    ON paper_orders (decision_id, role);
+CREATE INDEX IF NOT EXISTS paper_fills_order_idx ON paper_fills (order_id);
