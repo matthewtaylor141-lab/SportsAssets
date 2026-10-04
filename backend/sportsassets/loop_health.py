@@ -76,8 +76,8 @@ K_RN1X_LEARN = 7723901544120033
 K_EXT_PINNACLE = 7723901544120034
 K_RN1X_MODEL = 7723901544120035
 K_FEED = 7723901544120036
-K_INTEL, K_POS, K_POSLEARN, K_TWIN = 0x494E5431, 0x504F5331, 0x504F534C, \
-    0x54574E31
+K_INTEL, K_POS, K_TWIN = 0x494E5431, 0x504F5331, 0x54574E31
+K_POSITION_LEARNING = 0x504F534C
 
 _ON = ("on", "1", "true", "yes")
 _OFF = ("off", "0", "false", "no")
@@ -181,10 +181,18 @@ API_LOOPS = (
           armed=("env_not_off", "POS_ECON", "on"),
           sources=(("run_table", "pos_runs"),),
           note="also hosts the lost-opportunity LEDGER / SCORES components"),
-    _spec("poslearn.runner", "api", 900.0, critical=False,
-          lease={"kind": "ADVISORY_PER_CYCLE", "key": K_POSLEARN},
+    # THE POSITION-LEARNING LAYER IS ISOLATED BY DESIGN: nothing outside
+    # its package may read its tables or import it (only api/app.py starts
+    # it, and its authority test pins that). Its run records are therefore
+    # NOT read here; the loop is listed so the inventory is complete and is
+    # reported UNAVAILABLE (NO_PERSISTED_HEALTH_SOURCE) rather than given a
+    # manufactured status. It is SHADOW research with no capital path.
+    _spec("position_learning.runner", "api", 900.0, critical=False,
+          lease={"kind": "ADVISORY_PER_CYCLE", "key": K_POSITION_LEARNING},
           armed=("env_not_off", "POS_LEARN", "on"),
-          sources=(("run_table", "poslearn_runs"),)),
+          sources=(),
+          note="layer isolated by design; its run records are read only "
+               "inside the layer"),
     _spec("twin.runner", "api", 21600.0, critical=False,
           lease={"kind": "ADVISORY_PER_CYCLE", "key": K_TWIN},
           armed=("env_not_off", "POS_TWIN", "on"),

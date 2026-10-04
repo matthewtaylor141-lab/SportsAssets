@@ -67,7 +67,8 @@ def test_every_api_lifespan_runner_is_inventoried():
         "_EDDIE.run": "agents.eddie_runner",
         "_SCOUT.run": "agents.scout_runner", "_EXM.run": "execmirror.tick",
         "_INTEL.run": "intel.runner", "_POS.run": "profitability.runner",
-        "_POSLEARN.run": "poslearn.runner", "_TWIN.run": "twin.runner",
+        "_POSLEARN.run": "position_learning.runner",
+        "_TWIN.run": "twin.runner",
         "_IMPROVE.run": "agents.improvement_pipeline",
         "_WATCHDOG.start": "api.loop_watchdog",
         "_desk_feed_warm_loop": "api.desk_feed_warm",
@@ -127,7 +128,8 @@ def test_copied_constants_match_the_loops():
     assert B["pinnapi_feed.heartbeat"]["sources"][0][1] == FR.HEARTBEAT_KEY
     assert B["pinnapi_held.refresh"]["cadence_s"] == PH.HELD_REFRESH_S
     for mod, name in ((INTEL, "intel.runner"), (POS, "profitability.runner"),
-                      (POSL, "poslearn.runner"), (TWIN, "twin.runner")):
+                      (POSL, "position_learning.runner"),
+                      (TWIN, "twin.runner")):
         assert B[name]["lease"]["key"] == mod.LOCK_KEY, name
         assert B[name]["cadence_s"] == mod.CYCLE_S, name
         assert B[name]["armed"][1] == mod.ENV_KILL, name
@@ -300,6 +302,17 @@ def test_disabled_and_unavailable_are_named_never_successes():
                      {"success_at": [(NOW - 9, "a")], "sources_read": ["a"]},
                      now=NOW)
     assert ev["status"] == LH.EVENT_DRIVEN
+
+
+def test_the_isolated_position_learning_layer_is_unavailable_not_read():
+    """That layer's tables may be read only inside it (its authority test
+    pins the isolation), so the inventory lists its runner with no source
+    and reports it UNAVAILABLE by name -- never a manufactured status."""
+    s = _spec("position_learning.runner")
+    assert s["sources"] == () and not s["capital_critical"]
+    got = LH.classify(s, {}, now=NOW, is_armed=True)
+    assert got["status"] == LH.UNAVAILABLE
+    assert got["why"] == "NO_PERSISTED_HEALTH_SOURCE"
 
 
 def test_arming_reads_the_api_env_and_the_feed_control_row():
