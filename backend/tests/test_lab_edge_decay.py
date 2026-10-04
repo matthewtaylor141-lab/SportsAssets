@@ -298,9 +298,35 @@ def test_execution_loss_is_measured_on_the_first_book_after_eligible():
     # no book in the order window: UNAVAILABLE, counted, never a zero loss
     r2 = ED.evaluate(_rec(books=[]), fee_fn=ZERO)
     assert r2["execution"]["status"] == "UNAVAILABLE"
-    assert r2["execution"]["why"] == "NO_RECORDED_BOOK_IN_THE_ORDER_WINDOW"
+    assert r2["execution"]["why"] == \
+        "NO_RECORDED_READABLE_BOOK_IN_THE_ORDER_WINDOW"
     assert "ev_lost_usd" not in r2["execution"]
     assert t0 > T0
+
+
+def test_an_order_expired_on_an_unreadable_book_has_no_execution_book():
+    """The simulator expires an order whose first book after eligibility was
+    unreadable and never retries on a later one: a later readable book is
+    NOT its execution book."""
+    from sportsassets import bettor_paper_simulator as SIM
+    assert set(ED.SIM_NO_EXECUTION) == {SIM.R_BOOK_UNREADABLE,
+                                        SIM.R_NO_BOOK_IN_WINDOW}
+    books = [[2, T0 + 10.0, T0 + 10.0, [["0.50", "100"]]]]
+    rec = _rec(books=books)
+    rec["orders"][0].update(state="EXPIRED",
+                            terminal_reason=SIM.R_BOOK_UNREADABLE)
+    ex = ED.evaluate(rec, fee_fn=ZERO)["execution"]
+    assert ex["status"] == "UNAVAILABLE"
+    assert ex["why"] == "FIRST_BOOK_AFTER_ELIGIBLE_WAS_UNREADABLE_ORDER_EXPIRED"
+    assert "execution_book_obs_id" not in ex
+    # when the simulator filled, the execution book is the one it filled on
+    books = [[2, T0 + 3.0, T0 + 3.0, [["0.52", "100"]]],
+             [3, T0 + 4.0, T0 + 4.0, [["0.50", "100"]]]]
+    rec = _rec(books=books)
+    rec["fills"] = [[T0 + 5.0, T0 + 5.0, 100, 0.50, 0.0, 3, T0 + 4.0]]
+    ex = ED.evaluate(rec, fee_fn=ZERO)["execution"]
+    assert ex["execution_book_obs_id"] == 3
+    assert ex["ev_lost_usd"] == pytest.approx(0.0)
 
 
 def test_a_near_miss_has_no_decided_order():

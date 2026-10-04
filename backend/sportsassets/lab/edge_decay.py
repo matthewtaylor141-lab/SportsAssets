@@ -79,10 +79,12 @@ accessor `sportsassets.lab.pit` at the instant it is used):
       detection minus its EV at the execution instant -- the first recorded
       book at or after the order's eligible instant (decided_at + the
       simulator's delay), as the paper simulator itself executes -- with the
-      probability fresh then, in dollars at the decided quantity. An order
-      with no recorded book in its window has NO execution evidence: its
-      loss is UNAVAILABLE (and it is counted separately: it expired unfilled
-      on the paper ledger, a simulation fact, not a market measurement).
+      probability fresh then, in dollars at the decided quantity (when the
+      simulator filled, the book it filled on). An order the simulator
+      expired because its first book after eligibility was UNREADABLE, or
+      with no readable book in its window, has NO execution evidence: its
+      loss is UNAVAILABLE and counted by reason (it expired unfilled on the
+      paper ledger -- a fact of the paper pipeline, not a market measurement).
 
 Nothing here decides, sizes, gates or sends anything. It imports nothing from
 any order, venue, execution or funded module, and no decision path imports it
@@ -126,6 +128,14 @@ SIM_DELAY_S = 2.0
 #: (bettor_paper_session default) when an order record carries no expiry
 SIM_TTL_S = 90.0
 FEE_BLOCK = 10000
+#: the paper simulator's terminal reasons that mean the order never met an
+#: execution book (bettor_paper_simulator R_BOOK_UNREADABLE /
+#: R_NO_BOOK_IN_WINDOW; pinned equal by a test)
+SIM_NO_EXECUTION = {
+    "THE_OBSERVED_BOOK_WAS_UNREADABLE":
+        "FIRST_BOOK_AFTER_ELIGIBLE_WAS_UNREADABLE_ORDER_EXPIRED",
+    "NO_BOOK_OBSERVED_BEFORE_THE_ORDER_EXPIRED":
+        "NO_BOOK_OBSERVED_IN_THE_ORDER_WINDOW_ORDER_EXPIRED"}
 
 MEASURED = "MEASURED"
 UNAVAILABLE = "UNAVAILABLE"
@@ -780,31 +790,57 @@ def execution(rec: dict, *, t0, lv0, o0, vals, lim, books, fee_fn) -> dict:
                                       else _r(eligible - dec, 3)),
            "order_state": o.get("state"),
            "order_terminal_reason": o.get("terminal_reason")}
-    cand = [b for b in books if eligible is not None
-            and eligible - PIT.EPS_S <= float(b["observed_at"]) <= expires]
-    cand.sort(key=lambda b: float(b["observed_at"]))
-    exe = None
-    for b in cand:
-        k = PIT.known_at("paper_book_observations", b)
-        if k is not None and k <= expires + PIT.EPS_S:
-            exe = b
-            break
     fills = rec.get("fills") or []
     fq = sum(_f(f[2]) or 0 for f in fills) if fills else 0.0
     fcost = sum((_f(f[2]) or 0) * (_f(f[3]) or 0) for f in fills)
     ffee = sum(_f(f[4]) or 0 for f in fills)
+    p0 = _f(d.get("p_pinnacle"))
     out["realized_fill"] = {"filled_qty": _r(fq, 6),
                             "vwap": _r(fcost / fq) if fq else None,
                             "fees_usd": _r(ffee, 6),
                             "fills": len(fills),
+                            # the simulated fills valued at the DETECTION
+                            # probability (the paper ledger's own expected
+                            # value of what it actually bought)
+                            "expected_ev_at_detection_p_usd": (
+                                None if p0 is None else
+                                _r(fq * p0 - fcost - ffee, 6)),
+                            "ev_at_detection_usd": (o0 or {}).get("ev_usd"),
                             "basis": "paper_fills (SIMULATOR)"}
+    # THE SIMULATOR EXPIRES AN ORDER WHOSE FIRST BOOK AFTER ITS ELIGIBLE
+    # INSTANT WAS UNREADABLE (bettor_paper_simulator: "an unreadable book is
+    # evidence of nothing"; it never retries on a later book). Such an order
+    # has NO execution book, whatever readable book came later -- pricing it
+    # on a later book would be a book the paper path never executed on.
+    reason = o.get("terminal_reason")
+    if reason in SIM_NO_EXECUTION:
+        out.update(status=UNAVAILABLE, why=SIM_NO_EXECUTION[reason],
+                   detail=("the paper order expired unfilled: %s -- a fact "
+                           "of the paper pipeline (its post-decision book "
+                           "read), not a market measurement of decay"
+                           % reason))
+        return out
+    cand = [b for b in books if eligible is not None
+            and eligible - PIT.EPS_S <= float(b["observed_at"]) <= expires]
+    cand.sort(key=lambda b: float(b["observed_at"]))
+    exe = None
+    fill_books = {f[5] for f in fills if len(f) > 5 and f[5] is not None}
+    for b in cand:
+        k = PIT.known_at("paper_book_observations", b)
+        if k is None or k > expires + PIT.EPS_S:
+            continue
+        if fill_books and b.get("obs_id") not in fill_books:
+            continue                    # the simulator filled on another book
+        exe = b
+        break
     if exe is None:
         out.update(status=UNAVAILABLE,
-                   why="NO_RECORDED_BOOK_IN_THE_ORDER_WINDOW",
-                   detail=("the paper order had no recorded book between its "
-                           "eligible instant and its expiry; it expires "
-                           "unfilled on the paper ledger -- a simulation "
-                           "fact, not a market measurement of decay"))
+                   why="NO_RECORDED_READABLE_BOOK_IN_THE_ORDER_WINDOW",
+                   detail=("the paper order had no recorded readable book "
+                           "between its eligible instant and its expiry; it "
+                           "expires unfilled on the paper ledger -- a "
+                           "simulation fact, not a market measurement of "
+                           "decay"))
         return out
     k = PIT.known_at("paper_book_observations", exe)
     lv = to_levels(exe.get("levels"), d.get("holding_side"))
@@ -991,11 +1027,15 @@ def summarize(results: list, *, pipeline_latency_s: float | None = None,
         "book_acquisition_after_eligible_s": ST.quartiles(
             [e.get("book_acquisition_after_eligible_s") for e in ex]),
         "orders_without_execution_evidence": sum(
-            1 for e in ex if e.get("why") ==
-            "NO_RECORDED_BOOK_IN_THE_ORDER_WINDOW"),
+            1 for e in ex if e.get("why") in (
+                "NO_RECORDED_READABLE_BOOK_IN_THE_ORDER_WINDOW",
+                *SIM_NO_EXECUTION.values())),
+        "order_terminal_reasons": _count(e.get("order_terminal_reason")
+                                         for e in ex),
         "realized_filled_orders": sum(
             1 for e in ex if ((e.get("realized_fill") or {}).get("filled_qty")
                               or 0) > 0),
+        "paper_pipeline_realization": realization(ex),
         "method": ("decided IOC order walked on the detection book and on "
                    "the first recorded book at/after its eligible instant, "
                    "each with the probability fresh at that instant; "
@@ -1005,6 +1045,41 @@ def summarize(results: list, *, pipeline_latency_s: float | None = None,
         ok, pipeline_latency_s)
     out["segments"] = segment_table(ok, level_family=level_family)
     return out
+
+
+def realization(ex: list) -> dict:
+    """WHAT THE PAPER PIPELINE REALIZED OF THE DETECTED EV (ENTER): the
+    detection EV of every decided order, the simulated fills valued at the
+    same detection probability, and the gap attributed to each order's
+    terminal reason (an order that expired unfilled realized nothing)."""
+    det = [e for e in ex if (e.get("realized_fill") or {}).get(
+        "ev_at_detection_usd") is not None]
+    tot = sum(e["realized_fill"]["ev_at_detection_usd"] for e in det)
+    real = sum(e["realized_fill"].get("expected_ev_at_detection_p_usd") or 0.0
+               for e in det)
+    by: dict = {}
+    for e in det:
+        k = str(e.get("order_terminal_reason"))
+        g = by.setdefault(k, {"orders": 0, "ev_at_detection_usd": 0.0,
+                              "realized_usd": 0.0})
+        g["orders"] += 1
+        g["ev_at_detection_usd"] += e["realized_fill"]["ev_at_detection_usd"]
+        g["realized_usd"] += e["realized_fill"].get(
+            "expected_ev_at_detection_p_usd") or 0.0
+    for g in by.values():
+        g["ev_at_detection_usd"] = _r(g["ev_at_detection_usd"], 6)
+        g["realized_usd"] = _r(g["realized_usd"], 6)
+        g["gap_usd"] = _r(g["ev_at_detection_usd"] - g["realized_usd"], 6)
+    return {"orders": len(det), "ev_at_detection_usd_total": _r(tot, 6),
+            "realized_at_detection_p_usd_total": _r(real, 6),
+            "gap_usd_total": _r(tot - real, 6),
+            "by_terminal_reason": dict(sorted(
+                by.items(), key=lambda kv: -kv[1]["gap_usd"])),
+            "basis": ("detection EV of the decided order vs its simulated "
+                      "fills, both at the detection probability; the gap is "
+                      "the paper pipeline's realization loss (mostly orders "
+                      "that never met a readable execution book), NOT a "
+                      "market measurement")}
 
 
 def _count(xs) -> dict:
@@ -1225,6 +1300,10 @@ def pm_answers(summary: dict, realized: dict | None = None) -> dict:
             "why": NOT_PRE_TRADE},
         "orders_without_execution_evidence":
             ev.get("orders_without_execution_evidence"),
+        "order_terminal_reasons": ev.get("order_terminal_reasons"),
+        "paper_pipeline_realization": ev.get("paper_pipeline_realization"),
+        "post_decision_book_acquisition_s":
+            ev.get("book_acquisition_after_eligible_s"),
     }
     by = {}
     for r in seg:
