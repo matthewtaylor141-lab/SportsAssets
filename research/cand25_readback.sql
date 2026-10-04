@@ -10,8 +10,8 @@ SELECT i.agent_id, s.state, s.last_heartbeat_at FROM agent_identities i LEFT JOI
 \echo '== R1 · profitability runs (216) =='
 SELECT component, status, count(*) AS n, max(finished_at) AS last_at FROM pos_runs GROUP BY 1, 2 ORDER BY 1;
 \echo '== R2 · north-star observations (216) =='
-SELECT metric, book, status, value, sample_n, observed_at FROM (
-  SELECT DISTINCT ON (metric, book) * FROM pos_metric_observations ORDER BY metric, book, observed_at DESC) x ORDER BY 1, 2;
+SELECT metric, book, status, value, sample_n, computed_at FROM (
+  SELECT DISTINCT ON (metric, book) * FROM pos_metric_observations ORDER BY metric, book, computed_at DESC) x ORDER BY 1, 2;
 \echo '== R3 · learning runs (218) =='
 SELECT component, status, count(*) AS n, max(finished_at) AS last_at FROM poslearn_runs GROUP BY 1, 2 ORDER BY 1;
 SELECT subject_id, status, role FROM poslearn_registrations ORDER BY 1 LIMIT 30;
