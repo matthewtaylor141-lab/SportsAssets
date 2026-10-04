@@ -62,7 +62,15 @@ def test_nothing_moves_on_its_own():
 
 
 def test_no_figure_combines_the_books_or_the_venues():
+    # The owner's required labels "PAPER TOTAL EQUITY" and "COMBINED
+    # ACCOUNTING TOTAL" (2026-10-04) total the PAPER book's own sleeves only --
+    # never paper with actual money, never one venue with another -- so exactly
+    # those paper-only phrases (and the sleeve card's reference back to the
+    # paper total) are allowed; every other "total"/"combined" still fails.
     low = CODE.lower()
+    for ok in ("paper total equity", "the paper total above",
+               "combined accounting total"):
+        low = low.replace(ok, "")
     for bad in ("total", "combined", "grand", "net worth", "sum("):
         assert bad not in low, bad
     assert not re.search(r"paper[^;\n]{0,40}equity_usd\s*\+", CODE)
