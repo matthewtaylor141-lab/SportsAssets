@@ -292,6 +292,13 @@ def default_steps() -> list:
         from . import improvement_clusters as RCC
         steps.append(("root_cause_clusters", RCC.step))
         steps.append(("agent_work_queues", AWQ.step))
+        # MEMORY USEFULNESS (owner R30 section 19): which lessons were in
+        # each new decision's context (point in time), and, hourly, their
+        # forward INVESTMENT-sleeve evidence -- a lesson with harmful
+        # evidence is downweighted / superseded (append-only; a weight only
+        # falls; no decision reads it to trade)
+        from . import lesson_usage as LU
+        steps.append(("lesson_usage", LU.step))
     except ImportError:
         pass
     try:

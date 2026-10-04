@@ -160,3 +160,47 @@ def test_the_cluster_read_api_writes_nothing():
         assert not re.search(r"\b(INSERT\s+INTO|UPDATE\s+[a-z_]+\s+SET|"
                              r"DELETE\s+FROM)", s, re.I), s[:120]
     assert "transaction(readonly=" in RCC_API.read_text()
+
+
+# ═════════════════════════════════════════════════════════════════════
+# §4 MEMORY USEFULNESS
+# ═════════════════════════════════════════════════════════════════════
+
+LU = ROOT / "agents" / "lesson_usage.py"
+
+
+def test_lesson_usage_writes_only_its_own_records():
+    assert _writes(LU) == {"agent_lesson_retrievals",
+                           "agent_lesson_supersessions"}, _writes(LU)
+    for s in _sql(LU):
+        assert not re.search(r"\bUPDATE\s+[a-z_]+\s+SET|\bDELETE\s+FROM|"
+                             r"TRUNCATE|ALTER\s|DROP\s", s, re.I), s[:120]
+
+
+def test_lesson_usage_imports_no_order_execution_or_paper_module():
+    allowed = ("sportsassets.api.command_validation",
+               "sportsassets.profitability.validation")
+    for imp in _imports(LU, "sportsassets.agents"):
+        if imp.startswith("sportsassets"):
+            assert any(imp == a or imp.startswith(a + ".")
+                       for a in allowed), imp
+        leaf = imp.rsplit(".", 1)[-1].lower()
+        assert not any(f in leaf for f in FORBIDDEN), imp
+    for word in ORDER_CALLS:
+        assert word not in LU.read_text(), word
+
+
+def test_memory_never_grants_authority():
+    """Only the evaluator version decides; a weight only falls; no module
+    outside lesson_usage / the scorecards reads a lesson weight."""
+    src = LU.read_text()
+    assert 'VERSION = "MEMORY_USEFULNESS_V1"' in src
+    assert "UPWEIGHT" not in src and "PROMOTE" not in src
+    readers = []
+    for p in ROOT.rglob("*.py"):
+        t = p.read_text()
+        if "agent_lesson_supersessions" in t or "agent_lesson_retrievals" in t:
+            readers.append(str(p.relative_to(ROOT)))
+    assert set(readers) <= {"agents/lesson_usage.py",
+                            "agents/agent_scorecards.py",
+                            "api/command_agent_scorecards.py"}, readers
