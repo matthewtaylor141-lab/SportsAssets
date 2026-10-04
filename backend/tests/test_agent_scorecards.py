@@ -392,7 +392,40 @@ async def test_xaviers_value_added_and_false_exits_from_his_value_add():
         assert after["total"] - before["total"] == pytest.approx(10.0)
         assert after["acted"] - before["acted"] == 2     # two exits ...
         assert after["worse"] - before["worse"] == 1     # ... one fell short
-        assert "actual_book" in x["value_added"]["detail"]  # apart, not summed
+        # THE ACTUAL BOOK IS REPORTED APART AND NEVER SUMMED IN -- checked
+        # exactly, whatever other proofs' rows the window holds (R30B
+        # review: this had become the vacuous `"actual_book" in detail`).
+        # The card's PAPER figures equal the PAPER rows' own sums, and its
+        # actual_book equals the ACTUAL rows' (None exactly when none).
+        books = {r["position_kind"]: r for r in await conn.fetch(
+            "WITH v AS (SELECT DISTINCT ON (thesis_id) position_kind, "
+            "  incremental FROM xavier_value_add WHERE status = 'FINAL' "
+            "  AND computed_at >= to_timestamp($1) AND computed_at < "
+            "  to_timestamp($2) ORDER BY thesis_id, computed_at DESC) "
+            "SELECT position_kind, count(*) AS n, sum((incremental->"
+            "  'ACTUAL_XAVIER_minus_HOLD_TO_SETTLEMENT'->>'pnl_usd')"
+            "  ::float8) AS total FROM v WHERE incremental->"
+            "  'ACTUAL_XAVIER_minus_HOLD_TO_SETTLEMENT'->>'available' = "
+            "  'true' GROUP BY position_kind", when - 86400.0, when)}
+        paper = books["PAPER"]
+        va = x["value_added"]
+        assert va["n"] == int(paper["n"])
+        assert va["detail"]["total_usd"] == pytest.approx(
+            float(paper["total"]))
+        assert va["value"] == pytest.approx(float(paper["total"])
+                                            / int(paper["n"]))
+        act = books.get("ACTUAL")
+        if act is None:
+            assert va["detail"]["actual_book"] is None    # none to report
+        else:
+            assert va["detail"]["actual_book"]["n"] == int(act["n"])
+            assert va["detail"]["actual_book"]["total_usd"] == \
+                pytest.approx(float(act["total"]))
+        # this proof's own three rows are all PAPER (never in the ACTUAL
+        # book) and add exactly +10 over three positions
+        assert await conn.fetchval(
+            "SELECT count(*) FROM xavier_value_add WHERE thesis_id = "
+            " ANY($1::text[]) AND position_kind <> 'PAPER'", ids) == 0
         if before["n"] == 0:                  # a clean database: exact
             assert x["value_added"]["value"] == pytest.approx(10.0 / 3)
             assert x["value_added"]["status"] == S.SMALL

@@ -41,6 +41,7 @@ DROP FUNCTION IF EXISTS agent_lesson_exists(text, text, text);
 DROP FUNCTION IF EXISTS agent_lesson_record_is_append_only();
 DROP FUNCTION IF EXISTS agent_ops_no_authority(jsonb);
 DROP FUNCTION IF EXISTS agent_ops_is_machine_actor(text);
+DROP FUNCTION IF EXISTS agent_ops_refs_grounded(jsonb);
 
 DO $$
 BEGIN

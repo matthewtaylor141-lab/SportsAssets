@@ -16,11 +16,26 @@ Postgres and pure.
      by the profitability validation's own reader (paper ledger fills +
      settlements): a lesson whose decisions lost while comparable decisions
      won is DOWNWEIGHTED on a before / after comparison (never superseded on
-     one), SUPERSEDED on a contemporaneous one; TRAINING-sleeve outcomes
-     never count; small samples are reported as SMALL_SAMPLE; the same
-     evidence never lowers a weight twice; a superseded lesson is never
-     retrieved again.
-  §4 THE STATISTICS (pure).
+     one), SUPERSEDED on a contemporaneous one -- each on a MEASURED
+     comparison (30 independent events per arm), never on a small sample;
+     TRAINING-sleeve outcomes never count; the same evidence never lowers a
+     weight twice; a superseded lesson is never retrieved again, is
+     excluded from the conversation context (learning_context.retrieve) and
+     from the agent's own context bundle, and a downweighted one ranks
+     lower there.
+  §3b EVERY AGENT'S LESSONS: Karen's and Eddie's 224 LESSON memories (the
+     only ones production holds) are retrieved for their own decisions of
+     record; Eddie's are measured through the outcomes of the decisions he
+     estimated; Karen's are UNAVAILABLE with the reason (no position follows
+     a challenge); a lesson never in force for a decision is listed, never
+     left out.
+  §4 THE STATISTICS (pure): SMALL_SAMPLE and zero-variance comparisons never
+     act; the permutation test must agree with the t bound.
+
+WHY PINS CHANGED (R30B review): SUPERSEDE / DOWNWEIGHT had fired on
+SMALL_SAMPLE evidence (4 losses against 4 wins; two identical losses per
+arm). The proofs now build 30+ independent events per arm, and the pure
+pins assert that small or zero-variance comparisons never act.
 """
 from __future__ import annotations
 
@@ -115,11 +130,27 @@ async def test_retrievals_and_supersessions_are_guarded():
                " 'paper_agent_lessons',$2,$3,$4,$5,"
                " 'FORWARD_INVESTMENT_OUTCOMES',$6::jsonb,$7::jsonb,$8,"
                " to_timestamp($9),$10)")
-        ev = json.dumps({"n_used": 2, "n_comparable": 2,
-                         "mean_difference_usd": -1.0})
+        # the evidence is a MEASURED comparison (234: 30 events per arm)
+        ev = json.dumps({"n_used": 30, "n_comparable": 30,
+                         "mean_difference_usd": -1.0, "status": "MEASURED"})
+        small = json.dumps({"n_used": 4, "n_comparable": 4,
+                            "mean_difference_usd": -100.0,
+                            "status": "SMALL_SAMPLE"})
         refs = json.dumps([{"kind": "paper_agent_lessons", "id": lid}])
         await F.expect(conn, C, sup, "als:" + "1" * 24, lid, "UPWEIGHT", 1.0,
                        0.9, ev, refs, "MEMORY_USEFULNESS_V1", NOW, False)
+        # (R30B review) never on a small sample, however harmful it looks
+        await F.expect(conn, C, sup, "als:" + "1" * 24, lid, "SUPERSEDE",
+                       1.0, 0.0, small, refs, "MEMORY_USEFULNESS_V1", NOW,
+                       False)
+        await F.expect(conn, C, sup, "als:" + "1" * 24, lid, "SUPERSEDE",
+                       1.0, 0.0, json.dumps(dict(json.loads(ev), n_used=29)),
+                       refs, "MEMORY_USEFULNESS_V1", NOW, False)
+        # a decision source belongs to exactly one agent
+        await F.expect(conn, C, ins.replace("'paper_decisions'",
+                                            "'karen_challenges'"),
+                       "alr:" + "9" * 24, "DEREK", lid, NOW - H, did, NOW,
+                       "NONE_RECORD_ONLY")
         await F.expect(conn, C, sup, "als:" + "1" * 24, lid, "DOWNWEIGHT",
                        1.0, 1.0, ev, refs, "MEMORY_USEFULNESS_V1", NOW,
                        False)                              # did not fall
@@ -218,6 +249,25 @@ async def test_retrieval_is_point_in_time_and_strategy_first():
 # §3 USEFULNESS AND SUPERSESSION
 # ═════════════════════════════════════════════════════════════════════
 
+ARM = 30                                # = LU.MIN_EVENTS_FOR_MEASURED
+
+
+async def _derek_memory_lesson(conn, acct, *, at, summary,
+                               expires_at=None):
+    """A Derek LESSON memory written by the one memory writer
+    (agent_memory.promote), grounded on a real paper decision."""
+    ref = await F.decision(conn, acct, at=at - 60, strategy=INV)
+    mem = await M.promote(conn, {
+        "agent_id": "DEREK", "memory_kind": "LESSON",
+        "subject_type": "entry_calibration",
+        "subject_id": "paper_enter:%s" % uuid.uuid4().hex[:8],
+        "summary": summary, "expires_at": expires_at,
+        "evidence_refs": [{"kind": "paper_decisions", "id": ref}],
+        "confidence": 0.8, "deriver": "test_fixture"}, now=at)
+    assert mem["ok"] and mem["created"], mem
+    return mem["memory_id"]
+
+
 @pg
 async def test_harmful_before_after_evidence_downweights_once():
     conn, tx = await F.tx()
@@ -225,33 +275,44 @@ async def test_harmful_before_after_evidence_downweights_once():
         await R.ensure_identities(conn)
         a = await F.account(conn, "lu3")
         acct = a["account_id"]
-        # BEFORE the lesson: four INVESTMENT entries that won
-        for i in range(4):
+        # BEFORE the lesson: 30 INVESTMENT entries that won
+        for i in range(ARM):
             await _entry(conn, a, at=NOW - 20 * H + i * 600, won=True,
                          qty=99 + i)
-        lid = await _lesson(conn, a, at=NOW - 10 * H)
-        # AFTER it, with it in context: four that lost
+        # the lesson: one of Derek's 224 LESSON memories
+        lid = await _derek_memory_lesson(
+            conn, a, at=NOW - 10 * H,
+            summary="Enter on thin agreement when the edge is large.")
+        # an OLDER memory, at full weight: it had expired before the
+        # decisions below, so it was never in force for them
+        other = await _derek_memory_lesson(
+            conn, a, at=NOW - 12 * H, expires_at=NOW - 6 * H,
+            summary="Fees consume small edges.")
+        # AFTER it, with it in force: 30 that lost
         used = []
-        for i in range(4):
-            did, _ = await _entry(conn, a, at=NOW - 5 * H + i * 600,
+        for i in range(ARM):
+            did, _ = await _entry(conn, a, at=NOW - 5 * H + i * 300,
                                   won=False, qty=99 + i)
             used.append(did)
         # a TRAINING-sleeve loss in the same span never counts
-        await _entry(conn, a, at=NOW - 5 * H + 300, won=False,
+        await _entry(conn, a, at=NOW - 5 * H + 100, won=False,
                      strategy="PINNACLE_EXPLORATION_PAPER")
         await LU.retrieve(conn, account_id=acct, now=NOW)
         rep = await LU.usefulness(conn, account_id=acct, now=NOW)
         lm = [x for x in rep["lessons"] if x["lesson_id"] == lid][0]
         m = lm["measure"]
         assert m["design"] == LU.D_BEFORE_AFTER
-        assert m["n_used"] == 4 and m["n_comparable"] == 4, m
-        assert m["status"] == LU.SMALL                  # reported as such
-        assert m["mean_difference_usd"] < -90
+        assert m["n_used"] == ARM and m["n_comparable"] == ARM, m
+        assert m["status"] == LU.MEASURED
+        assert m["mean_difference_usd"] < -50
         assert m["harmful_95"] and m["harmful_99"]
+        assert m["permutation_p"] < 0.01
         assert lm["influence"] == "NONE_RECORD_ONLY"
-        assert sorted(d["id"] for d in lm["used_decisions"]) == sorted(used)
+        assert sorted(d["id"] for d in lm["used_decisions"]) == \
+            sorted(used)[:LU.MAX_EVIDENCE_REFS]
+        assert rep["retrieval"].startswith("POINT_IN_TIME_RECONSTRUCTION")
         got = await LU.supersede(conn, account_id=acct, now=NOW)
-        assert got["downweighted"] == [lid] and got["superseded"] == [], got
+        assert lid in got["downweighted"] and got["superseded"] == [], got
         row = await conn.fetchrow(
             "SELECT action, previous_weight, weight, decided_by, basis, "
             "       evidence, grants_authority FROM "
@@ -261,69 +322,73 @@ async def test_harmful_before_after_evidence_downweights_once():
         assert row["basis"] == "FORWARD_INVESTMENT_OUTCOMES"
         assert row["grants_authority"] is False
         assert F.j(row["evidence"])["design"] == LU.D_BEFORE_AFTER
+        assert F.j(row["evidence"])["status"] == LU.MEASURED
         # the same evidence never lowers it twice
         again = await LU.supersede(conn, account_id=acct, now=NOW + 3600)
-        assert again["downweighted"] == []
-        assert await LU.weight_at(conn, "paper_agent_lessons", lid,
+        assert lid not in again["downweighted"]
+        assert await LU.weight_at(conn, "agent_memory_events", lid,
                                   NOW + 7200) == 0.5
+        # WHAT THE AGENT READS (R30B review): in Derek's own context bundle
+        # the downweighted lesson ranks after his full-weight memory
+        from sportsassets.agents import agent_context as AC
+        ctx = await AC.build_context(conn, "DEREK", now=NOW + 7200)
+        mine = [x["memory_id"] for x in ctx["own_memories"]
+                if x["memory_id"] in (lid, other)]
+        assert mine == [other, lid], mine
+        w = {x["memory_id"]: x["lesson_weight"] for x in ctx["own_memories"]}
+        assert w[lid] == 0.5 and w[other] == 1.0
     finally:
         await F.done(conn, tx)
 
 
 @pg
 async def test_harmful_contemporaneous_evidence_supersedes():
-    """Inside the lesson's span, three newer strategy lessons outrank it
-    for a while (they are later superseded as setup), so comparable
-    decisions WITHOUT it exist in the same span: the contemporaneous
-    comparison may SUPERSEDE, and the lesson is never retrieved again."""
+    """Inside the lesson's span, three newer strategy lessons outrank it for
+    a while (later replaced by versions of another strategy, so they leave
+    INV's context), so 30 comparable decisions WITHOUT it exist in the same
+    span: the contemporaneous comparison may SUPERSEDE; the lesson is never
+    retrieved again and leaves the conversation context."""
+    from sportsassets.agents import learning_context as LC
     conn, tx = await F.tx()
     try:
         await R.ensure_identities(conn)
         a = await F.account(conn, "lu4")
         acct = a["account_id"]
-        lid = await _lesson(conn, a, at=NOW - 30 * H)
+        lid = await _lesson(conn, a, at=NOW - 40 * H)
         used, comps = [], []
-        for i in range(4):                      # with it: lost
-            did, _ = await _entry(conn, a, at=NOW - 24 * H + i * 600,
+        for i in range(ARM):                    # with it: lost
+            did, _ = await _entry(conn, a, at=NOW - 39 * H + i * 300,
                                   won=False, qty=99 + i)
             used.append(did)
-        await LU.retrieve(conn, account_id=acct, now=NOW - 23 * H)
-        newer = [await _lesson(conn, a, at=NOW - 22 * H) for _ in range(3)]
-        for i in range(4):                      # outranked: without it, won
-            did, _ = await _entry(conn, a, at=NOW - 21 * H + i * 600,
+        await LU.retrieve(conn, account_id=acct, now=NOW - 36 * H)
+        series = ["s-out-%d-%s" % (k, uuid.uuid4().hex[:6]) for k in range(3)]
+        for sk in series:
+            await _lesson(conn, a, series=sk, at=NOW - 35 * H)
+        for i in range(ARM):                    # outranked: without it, won
+            did, _ = await _entry(conn, a, at=NOW - 34 * H + i * 300,
                                   won=True, qty=99 + i)
             comps.append(did)
-        await LU.retrieve(conn, account_id=acct, now=NOW - 20 * H)
+        await LU.retrieve(conn, account_id=acct, now=NOW - 31 * H)
         for d in comps:
             assert lid not in [r["lesson_id"]
                                for r in await _retrievals(conn, d)]
-        # setup: the three newer lessons are superseded, so it ranks again
-        for k, n in enumerate(newer):
-            await conn.execute(
-                "INSERT INTO agent_lesson_supersessions (supersession_id, "
-                " agent_id, lesson_table, lesson_id, action, "
-                " previous_weight, weight, basis, evidence, evidence_refs, "
-                " decided_by, decided_at) VALUES ($1,'DEREK',"
-                " 'paper_agent_lessons',$2,'SUPERSEDE',1,0,"
-                " 'FORWARD_INVESTMENT_OUTCOMES',$3::jsonb,$4::jsonb,"
-                " 'MEMORY_USEFULNESS_V1',to_timestamp($5))",
-                "als:%024d" % (k + 1), n,
-                json.dumps({"n_used": 0, "n_comparable": 0,
-                            "mean_difference_usd": None}),
-                json.dumps([{"kind": "paper_agent_lessons", "id": n}]),
-                NOW - 19 * H)
-        did, _ = await _entry(conn, a, at=NOW - 18 * H, won=False, qty=98)
+        # the three series move to another strategy: out of INV's context
+        for sk in series:
+            await _lesson(conn, a, series=sk, version=2,
+                          strategy="PINNACLE_EXPLORATION_PAPER",
+                          at=NOW - 30 * H)
+        did, _ = await _entry(conn, a, at=NOW - 29 * H, won=False, qty=98)
         used.append(did)
-        await LU.retrieve(conn, account_id=acct, now=NOW - 17 * H)
+        await LU.retrieve(conn, account_id=acct, now=NOW - 28 * H)
         assert lid in [r["lesson_id"] for r in await _retrievals(conn, did)]
         rep = await LU.usefulness(conn, account_id=acct, now=NOW)
         m = [x for x in rep["lessons"] if x["lesson_id"] == lid][0][
             "measure"]
         assert m["design"] == LU.D_CONTEMPORANEOUS, m
-        assert m["n_used"] == 5 and m["n_comparable"] == 4
-        assert m["harmful_99"] is True
+        assert m["n_used"] == ARM + 1 and m["n_comparable"] == ARM
+        assert m["status"] == LU.MEASURED and m["harmful_99"] is True
         got = await LU.supersede(conn, account_id=acct, now=NOW)
-        assert got["superseded"] == [lid], got
+        assert lid in got["superseded"], got
         assert await LU.weight_at(conn, "paper_agent_lessons", lid,
                                   NOW + 1) == 0.0
         # never retrieved again
@@ -331,6 +396,157 @@ async def test_harmful_contemporaneous_evidence_supersedes():
         await LU.retrieve(conn, account_id=acct, now=NOW + 120)
         assert lid not in [r["lesson_id"]
                            for r in await _retrievals(conn, late)]
+        # ... and the conversation context excludes it, by name (R30B
+        # review: learning_context.retrieve had kept serving it)
+        sel = await LC.retrieve(conn, account_id=acct, agent="derek",
+                                question="what about the refusal funnel",
+                                now=NOW + 200)
+        assert lid not in [x["lesson_id"] for x in sel["lessons"]]
+        assert "SUPERSEDED_BY_FORWARD_EVIDENCE" in sel["rejected"]
+    finally:
+        await F.done(conn, tx)
+
+
+@pg
+async def test_a_superseded_memory_leaves_the_agents_own_context():
+    """The agent's own context bundle (agent_memory.private_memories with
+    include_superseded=False) leaves a superseded LESSON out; the
+    operator's full view still shows it, as historical. (The supersession
+    row is test setup carrying a MEASURED-shaped evidence document; the
+    evaluator's own path is proven above.)"""
+    from sportsassets.agents import agent_context as AC
+    conn, tx = await F.tx()
+    try:
+        await R.ensure_identities(conn)
+        a = await F.account(conn, "lu6")
+        lid = await _derek_memory_lesson(conn, a, at=NOW - 10 * H,
+                                         summary="A harmful belief.")
+        keep = await _derek_memory_lesson(conn, a, at=NOW - 9 * H,
+                                          summary="A sound belief.")
+        await conn.execute(
+            "INSERT INTO agent_lesson_supersessions (supersession_id, "
+            " agent_id, lesson_table, lesson_id, action, previous_weight, "
+            " weight, basis, evidence, evidence_refs, decided_by, "
+            " decided_at) VALUES ($1,'DEREK','agent_memory_events',$2,"
+            " 'SUPERSEDE',1,0,'FORWARD_INVESTMENT_OUTCOMES',$3::jsonb,"
+            " $4::jsonb,'MEMORY_USEFULNESS_V1',to_timestamp($5))",
+            "als:%024d" % 7, lid,
+            json.dumps({"n_used": 30, "n_comparable": 30, "status":
+                        "MEASURED", "mean_difference_usd": -10.0}),
+            json.dumps([{"kind": "agent_memory_events", "id": lid}]),
+            NOW - H)
+        ctx = await AC.build_context(conn, "DEREK", now=NOW)
+        ids = [x["memory_id"] for x in ctx["own_memories"]]
+        assert keep in ids and lid not in ids
+        full = await M.private_memories(conn, reader=M.OPERATOR,
+                                        owner="DEREK", limit=500)
+        row = [x for x in full if x["memory_id"] == lid][0]
+        assert row["lesson_weight"] == 0.0 and row["historical"] is True
+    finally:
+        await F.done(conn, tx)
+
+
+@pg
+async def test_karens_and_eddies_lessons_are_retrieved_and_reported():
+    """(R30B review) Production's 224 LESSON memories are Karen's and
+    Eddie's, and retrieval covered only Derek's and Xavier's decisions."""
+    from sportsassets.agents import eddie as E
+    from sportsassets.agents import karen as K
+    conn, tx = await F.tx()
+    try:
+        await R.ensure_identities(conn)
+        a = await F.account(conn, "lu7")
+        acct = a["account_id"]
+        # KAREN: a detector lesson, then a challenge she opens
+        ref = "adr:lu7-%s" % uuid.uuid4().hex[:8]
+        await conn.execute(
+            "INSERT INTO agent_decisions (decision_ref, agent_id, kind, "
+            " decided_at) VALUES ($1,'DEREK','TEST',to_timestamp($2))",
+            ref, NOW - 5 * H)
+        first = await K.open_challenge(
+            conn, target_agent="DEREK", target_kind="agent_decisions",
+            target_id=ref, detector="DECISION_WITHOUT_EVIDENCE",
+            claim="no evidence", severity="MEDIUM",
+            evidence_refs=[{"kind": "agent_decisions", "id": ref}],
+            record_at=NOW - 5 * H, at=NOW - 4 * H)
+        assert first["ok"], first
+        km = await M.promote(conn, {
+            "agent_id": "KAREN", "memory_kind": "LESSON",
+            "subject_type": "karen_detector",
+            "subject_id": "DECISION_WITHOUT_EVIDENCE",
+            "summary": "This detector's challenges are usually upheld.",
+            "evidence_refs": [{"kind": "karen_challenges",
+                               "id": first["challenge_id"]}],
+            "confidence": 0.7, "deriver": "test_fixture"}, now=NOW - 3 * H)
+        assert km["ok"] and km["created"], km
+        ref2 = "adr:lu7-%s" % uuid.uuid4().hex[:8]
+        await conn.execute(
+            "INSERT INTO agent_decisions (decision_ref, agent_id, kind, "
+            " decided_at) VALUES ($1,'DEREK','TEST',to_timestamp($2))",
+            ref2, NOW - 2 * H)
+        later = await K.open_challenge(
+            conn, target_agent="DEREK", target_kind="agent_decisions",
+            target_id=ref2, detector="DECISION_WITHOUT_EVIDENCE",
+            claim="no evidence", severity="MEDIUM",
+            evidence_refs=[{"kind": "agent_decisions", "id": ref2}],
+            record_at=NOW - 2 * H, at=NOW - H)
+        assert later["ok"], later
+        # EDDIE: an execution lesson, then an estimate of a filled decision
+        did, _ = await _entry(conn, a, at=NOW - 2 * H, won=False)
+        em = await M.promote(conn, {
+            "agent_id": "EDDIE", "memory_kind": "LESSON",
+            "subject_type": "execution_calibration",
+            "subject_id": "all_measured_outcomes",
+            "summary": "Slippage runs above the estimate on thin books.",
+            "evidence_refs": [{"kind": "paper_decisions", "id": did}],
+            "confidence": 0.6, "deriver": "test_fixture"},
+            now=NOW - 2 * H - 600)
+        assert em["ok"] and em["created"], em
+        # Eddie's REAL runner writes his estimate of the decision
+        from sportsassets.agents import eddie_runner as ER
+        s_ = await ER.pass_once(conn, now=NOW - 2 * H + 300)
+        est = E.estimate_id_for(did)
+        assert await conn.fetchval(
+            "SELECT count(*) FROM eddie_execution_estimates WHERE "
+            " estimate_id = $1", est) == 1, s_
+        await LU.retrieve(conn, account_id=acct, now=NOW)
+        rk = await conn.fetch(
+            "SELECT decision_table, decision_id FROM agent_lesson_retrievals"
+            " WHERE lesson_id = $1", km["memory_id"])
+        assert [(r["decision_table"], r["decision_id"]) for r in rk] == [
+            ("karen_challenges", later["challenge_id"])]   # not the first
+        re_ = await conn.fetch(
+            "SELECT decision_table, decision_id FROM agent_lesson_retrievals"
+            " WHERE lesson_id = $1", em["memory_id"])
+        assert [(r["decision_table"], r["decision_id"]) for r in re_] == [
+            ("eddie_execution_estimates", est)]
+        rep = await LU.usefulness(conn, account_id=acct, now=NOW)
+        by = {x["lesson_id"]: x for x in rep["lessons"]}
+        mk = by[km["memory_id"]]["measure"]
+        assert mk["status"] == LU.UNAVAILABLE
+        assert mk["why"] == "%s:karen_challenges" % LU.R_NO_OUTCOME
+        me = by[em["memory_id"]]
+        # Eddie's estimate shares its decision's INVESTMENT outcome
+        assert me["used_decisions"] == [
+            {"table": "eddie_execution_estimates", "id": est}]
+        assert me["measure"]["status"] == LU.UNAVAILABLE
+        assert me["measure"]["why"].startswith("FEWER_THAN_2_EVENTS")
+        # a lesson never in force for a decision of record is listed
+        never = {x["lesson_id"]: x for x in rep["never_in_force"]}
+        assert km["memory_id"] not in never
+        nl = await _lesson(conn, a, agent="AUDREY", strategy=None,
+                           at=NOW - H)
+        rep = await LU.usefulness(conn, account_id=acct, now=NOW)
+        never = {x["lesson_id"]: x for x in rep["never_in_force"]}
+        assert never[nl]["measure"] == {"status": LU.UNAVAILABLE,
+                                        "why": LU.R_NEVER}
+        # and the scorecards' memory summary now sees Karen and Eddie
+        from sportsassets.agents import agent_scorecards as S
+        cards = await S.scorecards(conn, now=NOW, window_days=1,
+                                   agents=("KAREN", "EDDIE"))
+        mem = {c["agent"]: c["memory_usefulness"] for c in cards["agents"]}
+        assert mem["KAREN"]["status"] == "MEASURED"
+        assert mem["EDDIE"]["status"] == "MEASURED"
     finally:
         await F.done(conn, tx)
 
@@ -372,13 +588,40 @@ def test_the_comparison_and_the_action():
     # one event with three positions is one observation
     same = [{"event": "e1", "outcome": -1.0}] * 3
     assert LU.compare(same, _rows([1.0, 2.0], "c"))["n_used"] == 1
+    # (pin changed, R30B review) 4 losses against 4 wins is a SMALL_SAMPLE:
+    # reported -- the t bound alone would call it harmful at 99% -- and
+    # never acted on (an exact test on 0/4 vs 4/4 gives p = 1/70)
     m = LU.compare(_rows([-40, -41, -39, -40.5], "u"),
                    _rows([60, 59, 61, 60.5], "c"))
-    assert m["status"] == LU.SMALL and m["harmful_99"]
-    assert LU.action_for(dict(m, design=LU.D_CONTEMPORANEOUS), 1.0) == {
-        "action": "SUPERSEDE", "weight": 0.0}
-    assert LU.action_for(dict(m, design=LU.D_BEFORE_AFTER), 1.0) == {
+    assert m["status"] == LU.SMALL and m["upper_99_usd"] < 0
+    assert m["permutation_p"] > 0.01 and m["harmful_99"] is False
+    for design in (LU.D_CONTEMPORANEOUS, LU.D_BEFORE_AFTER):
+        assert LU.action_for(dict(m, design=design), 1.0) is None
+    # two identical losses per arm: no interval at all, never harmful
+    z = LU.compare(_rows([-10.0, -10.0], "u"), _rows([-2.0, -2.0], "c"))
+    assert z["status"] == LU.SMALL and z["harmful_99"] is None
+    assert z["upper_99_usd"] is None and LU.R_ZERO_VAR in z["why"]
+    assert LU.action_for(dict(z, design=LU.D_CONTEMPORANEOUS), 1.0) is None
+    z = LU.compare(_rows([-1.0] * 40, "u"), _rows([0.5] * 40, "c"))
+    assert z["status"] == LU.MEASURED and z["harmful_95"] is None
+    assert LU.action_for(z, 1.0) is None
+    # MEASURED (30+ events per arm) and both tests agree: it acts
+    big_loss = LU.compare(_rows([-40 - (i % 3) for i in range(30)], "u"),
+                          _rows([60 + (i % 3) for i in range(30)], "c"))
+    assert big_loss["status"] == LU.MEASURED and big_loss["harmful_99"]
+    assert LU.action_for(dict(big_loss, design=LU.D_CONTEMPORANEOUS),
+                         1.0) == {"action": "SUPERSEDE", "weight": 0.0}
+    assert LU.action_for(dict(big_loss, design=LU.D_BEFORE_AFTER), 1.0) == {
         "action": "DOWNWEIGHT", "weight": 0.5}
+    # win / lose outcomes, 30 per arm: 12 of 30 won vs 18 of 30 -- the
+    # permutation test does not find it harmful at 95%
+    wl = LU.compare(_rows([60.0] * 12 + [-40.0] * 18, "u"),
+                    _rows([60.0] * 18 + [-40.0] * 12, "c"))
+    assert wl["status"] == LU.MEASURED and wl["harmful_95"] is False
+    assert LU.permutation_p([1.0, 2.0], [1.0, 2.0]) == \
+        LU.permutation_p([1.0, 2.0], [1.0, 2.0])     # deterministic
+    assert LU.MIN_EVENTS_FOR_MEASURED == 30     # = migration 234's CHECK
+    assert "(evidence ->> 'n_used')::numeric >= 30" in F.UP
     noisy = LU.compare(_rows([-40, 50, -45, 55], "u"),
                        _rows([10, -5, 12, -8], "c"))
     assert not noisy["harmful_95"] and LU.action_for(noisy, 1.0) is None
@@ -388,7 +631,7 @@ def test_the_comparison_and_the_action():
     big = LU.compare(_rows([float(-i % 7) for i in range(40)], "u"),
                      _rows([float(i % 5) for i in range(40)], "c"))
     assert big["status"] == LU.MEASURED
-    assert LU.action_for(m, 0.0) is None            # superseded: nothing
+    assert LU.action_for(big_loss, 0.0) is None     # superseded: nothing
     assert LU.t_crit(30, 0.95) == 1.697 and LU.t_crit(1, 0.99) == 31.821
     assert abs(LU.t_crit(1000, 0.99) - 2.33) < 0.01
     from sportsassets.profitability import validation as V

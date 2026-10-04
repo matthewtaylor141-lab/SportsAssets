@@ -11,11 +11,17 @@ told from one carrying a harmful belief.
 WHAT THIS DOES.
 
   retrieve(conn)   (a paper-pass step on the main account) for each
-                   decision of record not yet retrieved for -- Derek's paper
-                   ENTER decisions and Xavier's FIRST review of each position
-                   (one management decision per position: his every-minute
-                   backstop reviews would only repeat it) -- the deciding
-                   agent's lessons IN FORCE AT THE DECISION INSTANT:
+                   DECISION OF RECORD not yet retrieved for -- one source
+                   per agent (DECISION_SOURCES): Derek's paper ENTER
+                   decisions, Xavier's FIRST review of each position (one
+                   management decision per position: his every-minute
+                   backstop reviews would only repeat it), Eddie's execution
+                   estimates, the Chief Allocator's shadow allocations,
+                   Karen's challenges, Audrey's WARNING / CRITICAL findings,
+                   Scout's proposed features (R30B review: production's 224
+                   LESSON memories are Karen's and Eddie's, which Derek's and
+                   Xavier's decisions alone could never retrieve) -- the
+                   deciding agent's lessons IN FORCE AT THE DECISION INSTANT:
                      * agent_memory_events of kind LESSON / SELF_CORRECTION,
                        learned at or before the decision, not expired, not
                        superseded by a memory learned at or before it;
@@ -26,42 +32,62 @@ WHAT THIS DOES.
                        before the decision; a DOWNWEIGHTED one ranks lower.
                    The top MAX_LESSONS (strategy match first, then weight,
                    then recency) are recorded in agent_lesson_retrievals.
-                   INFLUENCE NONE_RECORD_ONLY: no decision reads a lesson to
-                   decide (memory never grants authority) -- "used" means
-                   "in the agent's context for that decision", and the
-                   comparison below is observational, stated as such.
+                   THIS IS A POINT-IN-TIME RECONSTRUCTION, stated plainly:
+                   no decision path reads a lesson (memory never grants
+                   authority; influence NONE_RECORD_ONLY), so "retrieved"
+                   means "in force and ranked for that decision", and the
+                   comparison below is observational. The paths that DO put
+                   lessons in front of an agent -- the conversation context
+                   (learning_context.retrieve) and the agent's own context
+                   bundle (agent_memory.private_memories with
+                   include_superseded=False) -- read the same supersession
+                   record: a superseded lesson is excluded there too, a
+                   downweighted one ranks lower.
 
   usefulness(conn) for each retrieved lesson, the FORWARD INVESTMENT-sleeve
                    outcomes (the profitability validation's own position
                    rows: api.command_validation.gather) of the decisions that
-                   had it in context against COMPARABLE decisions that did
-                   not -- the same agent, the same strategies, decided inside
-                   the same span after the lesson was learned
-                   (CONTEMPORANEOUS); when a lesson was in force for every
-                   such decision, an equal-length window BEFORE it was
-                   learned (BEFORE_AFTER, confounded by time, labelled). Outcomes are
-                   resolved positions' realized net (fees included),
-                   averaged per INDEPENDENT EVENT (validation.event_key) so
-                   repeated positions on one fixture are one observation.
-                   Welch's difference of means (used - comparable) with
-                   one-sided Student-t upper bounds at 95% and 99%.
-                   UNAVAILABLE (with the reason) below two events per arm;
-                   SMALL_SAMPLE below MIN_EVENTS_FOR_MEASURED events per arm
-                   -- reported, never hidden.
+                   had it in force against COMPARABLE decisions that did
+                   not -- the same agent, the same decision source and
+                   strategies, decided inside the same span after the lesson
+                   was learned (CONTEMPORANEOUS); when a lesson was in force
+                   for every such decision, an equal-length window BEFORE it
+                   was learned (BEFORE_AFTER, confounded by time, labelled).
+                   Outcomes are resolved positions' realized net (fees
+                   included), averaged per INDEPENDENT EVENT
+                   (validation.event_key) so repeated positions on one
+                   fixture are one observation. Welch's difference of means
+                   (used - comparable) with one-sided Student-t upper bounds
+                   at 95% and 99%, AND a one-sided permutation test of the
+                   same difference (exact in distribution for win / lose
+                   outcomes, where the t bound overstates certainty): a level
+                   is "harmful" only when BOTH agree. A zero-variance pair of
+                   arms has no interval and is never harmful. UNAVAILABLE
+                   (with the reason) below two events per arm, or when the
+                   lesson's decisions have no forward INVESTMENT outcome at
+                   all (Karen's challenges, Audrey's findings, Scout's
+                   features: no position follows them -- named, never
+                   dropped); SMALL_SAMPLE below MIN_EVENTS_FOR_MEASURED
+                   events per arm -- reported, never acted on. Every lesson
+                   that was never in force for a decision of record is listed
+                   too, UNAVAILABLE with its reason.
 
-  supersede(conn)  HARMFUL EVIDENCE lowers a lesson's weight through the
-                   append-only agent_lesson_supersessions record (decided by
-                   this evaluator's VERSION, never an agent or a person):
-                     DOWNWEIGHT (weight halved)  the 95% one-sided upper
-                                                 bound of the difference is
-                                                 below zero;
-                     SUPERSEDE (weight 0)        the 99% bound is below zero
-                                                 on the CONTEMPORANEOUS
-                                                 comparison (a before / after
-                                                 one only downweights).
-                   A weight only ever falls (the database refuses anything
-                   else); nothing follows SUPERSEDE; a superseded lesson is
-                   never retrieved again.
+  supersede(conn)  HARMFUL MEASURED EVIDENCE lowers a lesson's weight
+                   through the append-only agent_lesson_supersessions record
+                   (decided by this evaluator's VERSION, never an agent or a
+                   person):
+                     DOWNWEIGHT (weight halved)  harmful at 95%;
+                     SUPERSEDE (weight 0)        harmful at 99% on the
+                                                 CONTEMPORANEOUS comparison
+                                                 (a before / after one only
+                                                 downweights).
+                   Only on a MEASURED comparison (at least
+                   MIN_EVENTS_FOR_MEASURED independent events per arm; the
+                   database refuses anything else -- R30B review: two events
+                   per arm, or 4 losses against 4 wins, had superseded a
+                   lesson for good). A weight only ever falls; nothing
+                   follows SUPERSEDE; a superseded lesson is never retrieved
+                   again.
 
 NO AUTHORITY. Writes only agent_lesson_retrievals / agent_lesson_
 supersessions. Nothing reads a lesson weight to trade; no order, venue,
@@ -74,6 +100,7 @@ import hashlib
 import json
 import logging
 import math
+import random
 import time
 from typing import Any
 
@@ -113,6 +140,11 @@ T99 = (31.821, 6.965, 4.541, 3.747, 3.365, 3.143, 2.998, 2.896, 2.821,
        2.528, 2.518, 2.508, 2.500, 2.492, 2.485, 2.479, 2.473, 2.467, 2.462,
        2.457)
 Z = {0.95: 1.6448536, 0.99: 2.3263479}
+#: the permutation test's resamples (deterministic: seeded by the data)
+PERMUTATIONS = 2000
+R_NO_OUTCOME = "NO_FORWARD_INVESTMENT_OUTCOME_JOIN"
+R_NEVER = "NEVER_IN_FORCE_FOR_A_DECISION_OF_RECORD"
+R_ZERO_VAR = "ZERO_VARIANCE_IN_BOTH_ARMS_NO_INTERVAL"
 
 
 def _h(*parts) -> str:
@@ -165,10 +197,36 @@ def event_means(rows: list) -> list:
     return [(k, sum(v) / len(v)) for k, v in sorted(by.items())]
 
 
+def permutation_p(a: list, b: list, *, resamples: int = PERMUTATIONS
+                  ) -> float:
+    """ONE-SIDED PERMUTATION p-VALUE of mean(a) - mean(b) being this low
+    (H1: the lesson's arm `a` did worse). Pure and deterministic (the
+    generator is seeded by the data). (1 + #{d* <= d}) / (1 + resamples):
+    never zero, exact in distribution for win / lose outcomes."""
+    na, nb = len(a), len(b)
+    if not na or not nb:
+        return 1.0
+    pooled = [float(x) for x in a] + [float(x) for x in b]
+    total = sum(pooled)
+    d_obs = sum(a) / na - sum(b) / nb
+    seed = int(hashlib.sha256(json.dumps(
+        [round(x, 9) for x in pooled] + [na]).encode()).hexdigest()[:16], 16)
+    rng = random.Random(seed)
+    hits = 0
+    for _ in range(int(resamples)):
+        sa = sum(rng.sample(pooled, na))
+        d = sa / na - (total - sa) / nb
+        if d <= d_obs + 1e-12:
+            hits += 1
+    return (1 + hits) / (1 + int(resamples))
+
+
 def compare(used: list, comparable: list) -> dict:
     """USED vs COMPARABLE event-level outcomes. Pure. Welch's difference of
-    means with one-sided upper bounds; UNAVAILABLE below MIN_EVENTS per arm,
-    SMALL_SAMPLE below MIN_EVENTS_FOR_MEASURED."""
+    means with one-sided upper bounds AND a one-sided permutation test;
+    UNAVAILABLE below MIN_EVENTS per arm, SMALL_SAMPLE below
+    MIN_EVENTS_FOR_MEASURED; a level is harmful only when both tests agree;
+    zero variance in both arms has no interval (never harmful)."""
     a = [x for _, x in event_means(used)]
     b = [x for _, x in event_means(comparable)]
     out: dict[str, Any] = {"n_used": len(a), "n_comparable": len(b),
@@ -185,34 +243,46 @@ def compare(used: list, comparable: list) -> dict:
     sa, sb = va / len(a), vb / len(b)
     se = math.sqrt(sa + sb)
     d = ma - mb
-    if se <= 0:
-        df = float(len(a) + len(b) - 2)
-        up95 = up99 = d
-    else:
-        den = ((sa ** 2) / (len(a) - 1) + (sb ** 2) / (len(b) - 1))
-        df = (sa + sb) ** 2 / den if den > 0 else float(len(a) + len(b) - 2)
-        up95 = d + t_crit(df, 0.95) * se
-        up99 = d + t_crit(df, 0.99) * se
     small = min(len(a), len(b)) < MIN_EVENTS_FOR_MEASURED
-    return dict(out, status=SMALL if small else MEASURED,
-                why=("FEWER_THAN_%d_EVENTS_PER_ARM" % MIN_EVENTS_FOR_MEASURED
-                     if small else None),
+    base = dict(out, status=SMALL if small else MEASURED,
                 mean_used_usd=round(ma, 6), mean_comparable_usd=round(mb, 6),
-                mean_difference_usd=round(d, 6), welch_df=round(df, 3),
-                upper_95_usd=round(up95, 6), upper_99_usd=round(up99, 6),
-                harmful_95=up95 < 0, harmful_99=up99 < 0)
+                mean_difference_usd=round(d, 6))
+    if se <= 0:
+        # BOTH ARMS CONSTANT: no interval exists, and a degenerate "bound"
+        # equal to the raw difference is not certainty (R30B review: two
+        # identical losses against two identical small losses had read
+        # harmful at 99%)
+        return dict(base, why=R_ZERO_VAR if not small else (
+            "FEWER_THAN_%d_EVENTS_PER_ARM; %s" % (MIN_EVENTS_FOR_MEASURED,
+                                                  R_ZERO_VAR)),
+            welch_df=None, upper_95_usd=None, upper_99_usd=None,
+            permutation_p=None, harmful_95=None, harmful_99=None)
+    den = ((sa ** 2) / (len(a) - 1) + (sb ** 2) / (len(b) - 1))
+    df = (sa + sb) ** 2 / den if den > 0 else float(len(a) + len(b) - 2)
+    up95 = d + t_crit(df, 0.95) * se
+    up99 = d + t_crit(df, 0.99) * se
+    p = permutation_p(a, b)
+    return dict(base, why=("FEWER_THAN_%d_EVENTS_PER_ARM"
+                           % MIN_EVENTS_FOR_MEASURED if small else None),
+                welch_df=round(df, 3), upper_95_usd=round(up95, 6),
+                upper_99_usd=round(up99, 6),
+                permutation_p=round(p, 6),
+                permutation_resamples=PERMUTATIONS,
+                harmful_95=bool(up95 < 0 and p < 0.05),
+                harmful_99=bool(up99 < 0 and p < 0.01))
 
 
 def action_for(measure: dict, current_weight: float) -> dict | None:
     """The supersession HARMFUL evidence calls for, or None. Pure. Weights
-    only fall. SUPERSEDE needs the contemporaneous comparison; a
+    only fall. ONLY ON A MEASURED comparison (a SMALL_SAMPLE is reported,
+    never acted on). SUPERSEDE needs the contemporaneous comparison; a
     before / after comparison (confounded by time) can only DOWNWEIGHT."""
-    if measure.get("status") == UNAVAILABLE or current_weight <= 0:
+    if measure.get("status") != MEASURED or current_weight <= 0:
         return None
-    if measure.get("harmful_99") and \
+    if measure.get("harmful_99") is True and \
             measure.get("design", D_CONTEMPORANEOUS) == D_CONTEMPORANEOUS:
         return {"action": A_SUPERSEDE, "weight": 0.0}
-    if measure.get("harmful_95"):
+    if measure.get("harmful_95") is True:
         w = round(current_weight * DOWNWEIGHT_FACTOR, 6)
         if 0 < w < current_weight:
             return {"action": A_DOWNWEIGHT, "weight": w}
@@ -309,46 +379,110 @@ async def lessons_in_force(conn, *, agent: str, account_id: str,
     return kept
 
 
+def _not_retrieved(table: str, idexpr: str) -> str:
+    return ("NOT EXISTS (SELECT 1 FROM agent_lesson_retrievals x "
+            " WHERE x.decision_table = '%s' AND x.decision_id = %s)"
+            % (table, idexpr))
+
+
+#: THE DECISIONS OF RECORD, one source per agent: (table, SQL over $1
+#: account, $2 / $3 the window, $4 the limit -> id, at, strategy). The
+#: id expression is what agent_lesson_retrievals.decision_id holds.
+DECISION_SOURCES = {
+    "DEREK": ("paper_decisions",
+              "SELECT d.decision_id AS id, d.decided_at AS at, d.strategy "
+              "  FROM paper_decisions d WHERE d.account_id = $1 "
+              "   AND d.verdict = 'ENTER' "
+              "   AND d.decided_at BETWEEN to_timestamp($2) "
+              "                        AND to_timestamp($3) AND "
+              + _not_retrieved("paper_decisions", "d.decision_id") +
+              " ORDER BY d.decided_at, d.decision_id LIMIT $4"),
+    # Xavier's FIRST review of each position: the window's reviews with no
+    # earlier review of the same group (the (group_id, reviewed_at) index)
+    "XAVIER": ("paper_xavier_reviews",
+               "SELECT r.review_id AS id, r.reviewed_at AS at, r.strategy "
+               "  FROM paper_xavier_reviews r WHERE r.account_id = $1 "
+               "   AND r.reviewed_at BETWEEN to_timestamp($2) "
+               "                         AND to_timestamp($3) "
+               "   AND NOT EXISTS (SELECT 1 FROM paper_xavier_reviews p "
+               "        WHERE p.group_id = r.group_id "
+               "          AND (p.reviewed_at < r.reviewed_at "
+               "               OR (p.reviewed_at = r.reviewed_at "
+               "                   AND p.review_id < r.review_id))) AND "
+               + _not_retrieved("paper_xavier_reviews", "r.review_id") +
+               " ORDER BY r.reviewed_at, r.review_id LIMIT $4"),
+    "EDDIE": ("eddie_execution_estimates",
+              "SELECT e.estimate_id AS id, e.estimated_at AS at, d.strategy "
+              "  FROM eddie_execution_estimates e "
+              "  JOIN paper_decisions d ON d.decision_id = e.decision_id "
+              " WHERE d.account_id = $1 "
+              "   AND e.estimated_at BETWEEN to_timestamp($2) "
+              "                          AND to_timestamp($3) AND "
+              + _not_retrieved("eddie_execution_estimates", "e.estimate_id") +
+              " ORDER BY e.estimated_at, e.estimate_id LIMIT $4"),
+    "CHIEF_ALLOCATOR": (
+        "intel_allocations",
+        "SELECT a.run_id || '|' || a.candidate_id AS id, "
+        "       a.computed_at AS at, d.strategy "
+        "  FROM intel_allocations a "
+        "  JOIN paper_decisions d ON d.decision_id = a.decision_id "
+        " WHERE d.account_id = $1 "
+        "   AND a.computed_at BETWEEN to_timestamp($2) "
+        "                         AND to_timestamp($3) AND "
+        + _not_retrieved("intel_allocations",
+                         "a.run_id || '|' || a.candidate_id") +
+        " ORDER BY a.computed_at, a.run_id, a.candidate_id LIMIT $4"),
+    "KAREN": ("karen_challenges",
+              "SELECT k.challenge_id AS id, k.challenged_at AS at, "
+              "       NULL::text AS strategy FROM karen_challenges k "
+              " WHERE $1::text IS NOT NULL "
+              "   AND k.challenged_at BETWEEN to_timestamp($2) "
+              "                           AND to_timestamp($3) AND "
+              + _not_retrieved("karen_challenges", "k.challenge_id") +
+              " ORDER BY k.challenged_at, k.challenge_id LIMIT $4"),
+    "AUDREY": ("paper_audrey_findings",
+               "SELECT f.finding_id AS id, f.found_at AS at, "
+               "       f.detail->>'strategy' AS strategy "
+               "  FROM paper_audrey_findings f WHERE f.account_id = $1 "
+               "   AND f.severity IN ('WARNING', 'CRITICAL') "
+               "   AND f.found_at BETWEEN to_timestamp($2) "
+               "                      AND to_timestamp($3) AND "
+               + _not_retrieved("paper_audrey_findings", "f.finding_id") +
+               " ORDER BY f.found_at, f.finding_id LIMIT $4"),
+    "SCOUT": ("scout_features",
+              "SELECT s.feature_id AS id, s.proposed_at AS at, "
+              "       NULL::text AS strategy FROM scout_features s "
+              " WHERE $1::text IS NOT NULL "
+              "   AND s.proposed_at BETWEEN to_timestamp($2) "
+              "                         AND to_timestamp($3) AND "
+              + _not_retrieved("scout_features", "s.feature_id") +
+              " ORDER BY s.proposed_at, s.feature_id LIMIT $4"),
+}
+#: the decision sources whose decisions have a forward INVESTMENT-sleeve
+#: outcome (a position follows them); the others are named UNAVAILABLE
+OUTCOME_SOURCES = ("paper_decisions", "paper_xavier_reviews",
+                   "eddie_execution_estimates", "intel_allocations")
+
+
 async def _decisions_to_retrieve(conn, *, account_id: str, now: float,
                                  limit: int) -> list:
-    """Derek's ENTER decisions and Xavier's first review per position, in
-    the lookback, with no retrieval recorded yet."""
+    """Every agent's decisions of record in the lookback with no retrieval
+    recorded yet (DECISION_SOURCES)."""
     out = []
     lo = now - RETRIEVE_LOOKBACK_S
-    if await _exists(conn, "paper_decisions"):
-        for r in await conn.fetch(
-                "SELECT d.decision_id, d.decided_at, d.strategy "
-                "  FROM paper_decisions d WHERE d.account_id = $1 "
-                "   AND d.verdict = 'ENTER' "
-                "   AND d.decided_at BETWEEN to_timestamp($2) "
-                "                        AND to_timestamp($3) "
-                "   AND NOT EXISTS (SELECT 1 FROM agent_lesson_retrievals x "
-                "        WHERE x.decision_table = 'paper_decisions' "
-                "          AND x.decision_id = d.decision_id) "
-                " ORDER BY d.decided_at, d.decision_id LIMIT $4",
-                account_id, lo, now, limit):
-            out.append({"agent": "DEREK", "table": "paper_decisions",
-                        "id": r["decision_id"],
-                        "decided_at": _ep(r["decided_at"]),
-                        "strategy": r["strategy"]})
-    if await _exists(conn, "paper_xavier_reviews"):
-        for r in await conn.fetch(
-                "SELECT f.review_id, f.reviewed_at, f.strategy FROM ("
-                "  SELECT DISTINCT ON (group_id) review_id, reviewed_at, "
-                "         strategy, group_id FROM paper_xavier_reviews "
-                "   WHERE account_id = $1 "
-                "   ORDER BY group_id, reviewed_at, review_id) f "
-                " WHERE f.reviewed_at BETWEEN to_timestamp($2) "
-                "                         AND to_timestamp($3) "
-                "   AND NOT EXISTS (SELECT 1 FROM agent_lesson_retrievals x "
-                "        WHERE x.decision_table = 'paper_xavier_reviews' "
-                "          AND x.decision_id = f.review_id) "
-                " ORDER BY f.reviewed_at, f.review_id LIMIT $4",
-                account_id, lo, now, limit):
-            out.append({"agent": "XAVIER", "table": "paper_xavier_reviews",
-                        "id": r["review_id"],
-                        "decided_at": _ep(r["reviewed_at"]),
-                        "strategy": r["strategy"]})
+    for agent, (table, sql) in DECISION_SOURCES.items():
+        if not await _exists(conn, table):
+            continue
+        try:
+            async with conn.transaction():
+                rows = await conn.fetch(sql, account_id, lo, now, limit)
+        except Exception as exc:                                # noqa: BLE001
+            log.info("lesson_usage: %s decisions unreadable (%s)", agent,
+                     type(exc).__name__)
+            continue
+        out += [{"agent": agent, "table": table, "id": str(r["id"]),
+                 "decided_at": _ep(r["at"]), "strategy": r["strategy"]}
+                for r in rows if r["at"] is not None]
     return out
 
 
@@ -429,6 +563,7 @@ async def _outcomes(conn, account_id: str, now: float) -> tuple:
         g["outcome"] += float(p["realized_pnl_usd"])
     out: dict = {}
     if by_group:
+        entry = {}
         for r in await conn.fetch(
                 "SELECT DISTINCT ON (o.decision_id) o.decision_id, "
                 "       o.group_id, d.decided_at FROM paper_orders o "
@@ -437,8 +572,27 @@ async def _outcomes(conn, account_id: str, now: float) -> tuple:
                 "   AND o.group_id = ANY($2::text[]) "
                 " ORDER BY o.decision_id, o.created_at", account_id,
                 sorted(by_group)):
+            entry[r["decision_id"]] = r["group_id"]
             out[("paper_decisions", r["decision_id"])] = dict(
                 by_group[r["group_id"]], decided_at=_ep(r["decided_at"]))
+        # Eddie's estimate and the Chief Allocator's allocation of a
+        # decision share that decision's position outcome
+        if entry and await _exists(conn, "eddie_execution_estimates"):
+            for r in await conn.fetch(
+                    "SELECT estimate_id, decision_id, estimated_at FROM "
+                    " eddie_execution_estimates WHERE decision_id = "
+                    " ANY($1::text[])", sorted(entry)):
+                out[("eddie_execution_estimates", r["estimate_id"])] = dict(
+                    by_group[entry[r["decision_id"]]],
+                    decided_at=_ep(r["estimated_at"]))
+        if entry and await _exists(conn, "intel_allocations"):
+            for r in await conn.fetch(
+                    "SELECT run_id || '|' || candidate_id AS id, "
+                    "       decision_id, computed_at FROM intel_allocations "
+                    " WHERE decision_id = ANY($1::text[])", sorted(entry)):
+                out[("intel_allocations", r["id"])] = dict(
+                    by_group[entry[r["decision_id"]]],
+                    decided_at=_ep(r["computed_at"]))
         for r in await conn.fetch(
                 "SELECT DISTINCT ON (group_id) review_id, group_id, "
                 "       reviewed_at FROM paper_xavier_reviews "
@@ -510,6 +664,13 @@ async def usefulness(conn, *, account_id: str = MAIN_PAPER_ACCOUNT,
             comp = pick(learned - span, learned - 1e-6)
             design = D_BEFORE_AFTER
         m = dict(compare(used, comp), design=design)
+        if not tables & set(OUTCOME_SOURCES):
+            # no position follows these decisions: no forward INVESTMENT
+            # outcome exists to compare -- named, never silently left out
+            m = {"status": UNAVAILABLE, "design": None,
+                 "n_used": 0, "n_comparable": 0, "mean_difference_usd": None,
+                 "harmful_95": None, "harmful_99": None,
+                 "why": "%s:%s" % (R_NO_OUTCOME, ",".join(sorted(tables)))}
         w = await weight_at(conn, key[0], key[1], t)
         out.append({"lesson_table": key[0], "lesson_id": key[1],
                     "agent": r["agent_id"], "retrievals": int(r["retrievals"]),
@@ -531,7 +692,61 @@ async def usefulness(conn, *, account_id: str = MAIN_PAPER_ACCOUNT,
                                        "an equal-length window BEFORE the "
                                        "lesson (confounded by time)")),
                     "influence": "NONE_RECORD_ONLY"})
-    return {"lessons": out, "why": why}
+    return {"lessons": out, "why": why,
+            "never_in_force": await _never_in_force(conn, account_id, t),
+            "retrieval": "POINT_IN_TIME_RECONSTRUCTION: no decision path "
+                         "reads a lesson; retrieved = in force and ranked "
+                         "for the decision"}
+
+
+NEVER_LIMIT = 200
+
+
+async def _never_in_force(conn, account_id: str, now: float) -> list:
+    """Every live lesson that was never in force for a decision of record:
+    listed UNAVAILABLE with the reason, never left out silently."""
+    out: list = []
+    if await _exists(conn, "agent_memory_events"):
+        for r in await conn.fetch(
+                "SELECT m.memory_id, m.agent_id, m.memory_kind, m.learned_at"
+                "  FROM agent_memory_events m "
+                " WHERE m.memory_kind = ANY($1::text[]) "
+                "   AND m.superseded_by IS NULL "
+                "   AND (m.expires_at IS NULL "
+                "        OR m.expires_at > to_timestamp($2)) "
+                "   AND NOT EXISTS (SELECT 1 FROM agent_lesson_retrievals x "
+                "        WHERE x.lesson_table = 'agent_memory_events' "
+                "          AND x.lesson_id = m.memory_id) "
+                " ORDER BY m.learned_at DESC LIMIT $3",
+                list(MEMORY_KINDS), float(now), NEVER_LIMIT):
+            out.append({"lesson_table": "agent_memory_events",
+                        "lesson_id": r["memory_id"], "agent": r["agent_id"],
+                        "learned_at": _ep(r["learned_at"]),
+                        "measure": {"status": UNAVAILABLE, "why": R_NEVER},
+                        "weight": await weight_at(
+                            conn, "agent_memory_events", r["memory_id"],
+                            now)})
+    if await _exists(conn, "paper_agent_lessons"):
+        for r in await conn.fetch(
+                "SELECT l.lesson_id, l.agent_id, l.learned_at "
+                "  FROM paper_agent_lessons l WHERE l.account_id = $1 "
+                "   AND NOT EXISTS (SELECT 1 FROM paper_agent_lessons n "
+                "        WHERE n.account_id = l.account_id "
+                "          AND n.series_key = l.series_key "
+                "          AND n.version > l.version) "
+                "   AND NOT EXISTS (SELECT 1 FROM agent_lesson_retrievals x "
+                "        WHERE x.lesson_table = 'paper_agent_lessons' "
+                "          AND x.lesson_id = l.lesson_id) "
+                " ORDER BY l.learned_at DESC LIMIT $2",
+                account_id, NEVER_LIMIT):
+            out.append({"lesson_table": "paper_agent_lessons",
+                        "lesson_id": r["lesson_id"], "agent": r["agent_id"],
+                        "learned_at": _ep(r["learned_at"]),
+                        "measure": {"status": UNAVAILABLE, "why": R_NEVER},
+                        "weight": await weight_at(
+                            conn, "paper_agent_lessons", r["lesson_id"],
+                            now)})
+    return out
 
 
 async def supersede(conn, *, account_id: str = MAIN_PAPER_ACCOUNT,

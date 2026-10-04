@@ -68,21 +68,33 @@ slot: owner, blocker, SLA due_at, dependency, last / next attempt, evidence
 needed, collaborator) are read for every agent and DRIVE the state:
 
   * an agent that owns ANY open item is never IDLE_NO_OPEN_WORK (the guard in
-    `derive`, and `invariant_holds`);
+    `derive`, and `invariant_holds`). The open count is read PER AGENT with
+    no limit (count(*) GROUP BY agent_id) and the items PER AGENT under a
+    per-agent bound -- never one global LIMIT, which let 2001 of Karen's
+    investigations push Scout's one item out of the read and derive Scout
+    IDLE while he owned it (R30B review). A queue that could not be read is
+    never taken as empty: an agent that would otherwise be IDLE has no state
+    (None, with the reason), as Xavier's unreadable positions already do;
   * WAITING_FOR_FRESH_EVIDENCE is derived ONLY from an enqueued
-    REACQUISITION: an open item of an acquisition kind (Xavier's PROBABILITY
-    / VENUE_BOOK / GAME_STATE / MANAGEMENT_REASSESSMENT, Derek's
-    CANDIDATE_FRESH_EVIDENCE, Scout's RESEARCH_QUESTION) or an open item
-    whose latest attempt recorded WAITING_FOR_FRESH_EVIDENCE with a
-    scheduled next attempt. A waiting SIGNAL with no enqueued reacquisition
-    (a heartbeat WAITING_FOR_EVIDENCE, Scout's features under test, Xavier's
-    non-current positions with no open request) is work that nobody picked
-    up: HANDOFF_PENDING, kind REACQUISITION_NOT_ENQUEUED -- never passive
-    waiting;
-  * an open item never attempted (or not attempted inside the agent's stale
-    window) is HANDOFF_PENDING; one attempted inside it is the agent's busy
-    state; a market-data agent's item BLOCKED on a market-data blocker is
-    BLOCKED_ON_MARKET_DATA;
+    REACQUISITION that an acquisition path services: an open item of an
+    acquisition kind (Xavier's PROBABILITY / VENUE_BOOK / GAME_STATE /
+    MANAGEMENT_REASSESSMENT, dispatched by work_queue.drain; Scout's
+    RESEARCH_QUESTION, whose prospective samples his own runner freezes each
+    pass) or an open item whose latest attempt recorded WAITING_FOR_FRESH_
+    EVIDENCE with a scheduled next attempt -- EXCEPT a PASSIVE kind. Derek's
+    CANDIDATE_FRESH_EVIDENCE is passive: no acquisition path reads it (the
+    hot-candidate list has no consumer on this branch), so its only "next
+    attempt" is his next ordinary re-decision -- work nobody acquires
+    evidence for, HANDOFF_PENDING (REACQUISITION_NOT_ENQUEUED), never
+    passive WAITING. A waiting SIGNAL with no enqueued reacquisition (a
+    heartbeat WAITING_FOR_EVIDENCE, Scout's features under test, Xavier's
+    non-current positions with no open request) is the same:
+    HANDOFF_PENDING, kind REACQUISITION_NOT_ENQUEUED;
+  * an open item never attempted, or whose scheduled next attempt is
+    overdue by more than the agent's stale window, is HANDOFF_PENDING; one
+    whose next attempt is scheduled (or was due inside the window) is the
+    agent's busy state; a market-data agent's item BLOCKED on a market-data
+    blocker is BLOCKED_ON_MARKET_DATA;
   * an item past its SLA is OVERDUE (counted in `queue.overdue`, named in
     the basis).
 
@@ -149,26 +161,45 @@ MAX_POSITIONS = 500
 SAMPLE_IDS = 5
 
 #: THE DURABLE QUEUE (migration 234). The acquisition kinds: an open item of
-#: one of them IS an enqueued reacquisition (= agents.work_queue.EVIDENCE_
-#: KINDS + MANAGEMENT_REASSESSMENT, agents.agent_work.ACQUISITION_KINDS; a
-#: test pins both).
+#: one of them IS an enqueued reacquisition, serviced by a named path (=
+#: agents.work_queue.EVIDENCE_KINDS + MANAGEMENT_REASSESSMENT, dispatched by
+#: work_queue.drain, and Scout's RESEARCH_QUESTION, whose samples his runner
+#: freezes; agents.agent_work.ACQUISITION_KINDS; a test pins both).
 ACQUISITION_KINDS = ("PROBABILITY", "VENUE_BOOK", "GAME_STATE",
-                     "MANAGEMENT_REASSESSMENT", "CANDIDATE_FRESH_EVIDENCE",
-                     "RESEARCH_QUESTION")
+                     "MANAGEMENT_REASSESSMENT", "RESEARCH_QUESTION")
+#: PASSIVE kinds: no acquisition path services them, so not even a WAITING
+#: attempt with a next attempt scheduled is an enqueued reacquisition.
+#: Derek's CANDIDATE_FRESH_EVIDENCE (R30B review: it had been counted as one
+#: while nothing read it -- agents.agent_work.hot_candidate_slugs has no
+#: caller); it leaves this list only when an acquisition path dispatches it
+#: (agents.agent_work.PASSIVE_KINDS, pinned).
+PASSIVE_KINDS = ("CANDIDATE_FRESH_EVIDENCE",)
 O_WAITING = "WAITING_FOR_FRESH_EVIDENCE"
 O_BLOCKED = "BLOCKED"
 #: a BLOCKED attempt's blocker that names failing / absent market data
 MARKET_BLOCKER_PREFIXES = ("FEED_", "VENUE_", "BOOK_", "NO_VENUE_BOOK",
                            "LATEST_VENUE_BOOK", "THE_OBSERVED_BOOK",
                            "MARKET_DATA_", "NO_DECISION_BOOK")
-MAX_QUEUE_ITEMS = 2000
+#: THE PER-AGENT READ BOUND: at most this many open items are read per
+#: agent (most overdue first); the agent's open COUNT is always read in full
+#: (OPEN_COUNTS_SQL), so a bound can never hide an agent's work.
+MAX_QUEUE_ITEMS = 500
 K_NOT_ENQUEUED = "REACQUISITION_NOT_ENQUEUED"
 K_QUEUE_UNTOUCHED = "QUEUE_ITEM_NOT_PICKED_UP"
+R_QUEUE_UNREADABLE = "QUEUE_UNREADABLE"
+
+#: EVERY AGENT'S OPEN COUNT, unbounded (one row per agent that owns work)
+OPEN_COUNTS_SQL = (
+    "SELECT o.agent_id, count(*) AS n, count(*) FILTER (WHERE "
+    "       coalesce(r.due_at, r.expires_at) < to_timestamp($1)) AS overdue "
+    "  FROM agent_work_open o "
+    "  JOIN agent_work_requests r ON r.request_id = o.request_id "
+    " GROUP BY o.agent_id")
 
 #: EVERY OPEN ITEM WITH ITS TERMS (226 rows recorded before migration 234
 #: read their SLA as their expiry and their evidence as their kind). The
 #: latest attempt is the newest ATTEMPTED / DISPATCHED event.
-OPEN_ITEMS_SQL = (
+_ITEM_COLUMNS = (
     "SELECT r.request_id, r.agent_id, r.kind, r.position_kind, r.group_id, "
     "       r.us_market_slug, r.reason, r.source_table, r.source_id, "
     "       r.batch_id, r.detail, r.blocker, r.depends_on, r.collaborator, "
@@ -187,19 +218,39 @@ OPEN_ITEMS_SQL = (
     "         AS last_next_attempt_at, la.detail AS last_detail, "
     "       (SELECT count(*) FROM agent_work_request_events c "
     "         WHERE c.request_id = r.request_id "
-    "           AND c.state IN ('ATTEMPTED', 'DISPATCHED')) AS attempts "
-    "  FROM agent_work_open o "
-    "  JOIN agent_work_requests r ON r.request_id = o.request_id "
+    "           AND c.state IN ('ATTEMPTED', 'DISPATCHED')) AS attempts ")
+_LAST_ATTEMPT = (
     "  LEFT JOIN LATERAL (SELECT e.state, e.at, e.outcome, e.blocker, "
     "                            e.next_attempt_at, e.detail "
     "                       FROM agent_work_request_events e "
     "                      WHERE e.request_id = r.request_id "
     "                        AND e.state IN ('ATTEMPTED', 'DISPATCHED') "
     "                      ORDER BY e.at DESC, e.event_id DESC LIMIT 1) la "
-    "    ON true "
+    "    ON true ")
+#: one agent's (or every agent's) open items of the named kinds, most
+#: overdue first, at most $3 -- a caller that reads every agent uses
+#: OPEN_ITEMS_BY_AGENT_SQL instead, never one global limit
+OPEN_ITEMS_SQL = (
+    _ITEM_COLUMNS +
+    "  FROM agent_work_open o "
+    "  JOIN agent_work_requests r ON r.request_id = o.request_id " +
+    _LAST_ATTEMPT +
     " WHERE ($1::text IS NULL OR o.agent_id = $1) "
     "   AND ($2::text[] IS NULL OR o.kind = ANY($2::text[])) "
     " ORDER BY coalesce(r.due_at, r.expires_at), r.request_id LIMIT $3")
+#: EVERY AGENT'S open items, bounded PER AGENT ($1 each, most overdue first)
+OPEN_ITEMS_BY_AGENT_SQL = (
+    "WITH pick AS (SELECT o.request_id, row_number() OVER (PARTITION BY "
+    "       o.agent_id ORDER BY coalesce(r.due_at, r.expires_at), "
+    "       r.request_id) AS rn FROM agent_work_open o "
+    "  JOIN agent_work_requests r ON r.request_id = o.request_id) " +
+    _ITEM_COLUMNS +
+    "  FROM pick p "
+    "  JOIN agent_work_open o ON o.request_id = p.request_id "
+    "  JOIN agent_work_requests r ON r.request_id = o.request_id " +
+    _LAST_ATTEMPT +
+    " WHERE p.rn <= $1 "
+    " ORDER BY o.agent_id, coalesce(r.due_at, r.expires_at), r.request_id")
 
 # position classes (Xavier)
 P_UNREVIEWED, P_CURRENT, P_BLOCKED, P_WAITING = (
@@ -354,6 +405,9 @@ def queue_item(row: dict, now: float) -> dict:
         "age_s": (None if _ep(r.get("enqueued_at")) is None
                   else round(now - _ep(r.get("enqueued_at")), 1)),
         "last_attempt_at": last_at, "last_attempt": r.get("last_state"),
+        "last_attempt_blocker": (r.get("last_blocker")
+                                 if r.get("last_state") == "ATTEMPTED"
+                                 else None),
         "outcome": outcome if r.get("last_state") == "ATTEMPTED" else (
             "DISPATCHED" if r.get("last_state") == "DISPATCHED" else None),
         "next_attempt_at": nxt,
@@ -365,26 +419,49 @@ def queue_item(row: dict, now: float) -> dict:
 
 
 def is_reacquisition(item: dict) -> bool:
-    """An ENQUEUED REACQUISITION: an acquisition kind, or an item whose
-    latest attempt recorded WAITING_FOR_FRESH_EVIDENCE with its next attempt
-    scheduled. Pure."""
+    """An ENQUEUED REACQUISITION: an acquisition kind, or an item of a kind
+    an acquisition path services whose latest attempt recorded
+    WAITING_FOR_FRESH_EVIDENCE with its next attempt scheduled (never a
+    PASSIVE kind). Pure."""
+    if item.get("kind") in PASSIVE_KINDS:
+        return False
     return item.get("kind") in ACQUISITION_KINDS or (
         item.get("outcome") == O_WAITING
         and item.get("next_attempt_at") is not None)
 
 
+def picked_up(item: dict, now: float, stale_s: float = STALE_FLOOR_S) -> bool:
+    """Is the item being worked? Attempted, and its scheduled next attempt is
+    not overdue by more than the stale window (an item whose attempts back
+    off is still worked while its next attempt is scheduled); with no
+    scheduled next attempt, attempted inside the window. Pure."""
+    last = item.get("last_attempt_at")
+    if last is None:
+        return False
+    nxt = item.get("next_attempt_at")
+    if nxt is not None and float(nxt) > float(last):
+        return now - float(nxt) <= stale_s
+    return 0 <= now - float(last) <= stale_s
+
+
 def queue_classes(agent: str, items: list, now: float,
-                  stale_s: float = STALE_FLOOR_S) -> dict:
-    """The agent's open items by what they mean for its state. Pure."""
-    reacq, md, untouched, active = [], [], [], []
+                  stale_s: float = STALE_FLOOR_S, *,
+                  open_count: int | None = None,
+                  overdue_count: int | None = None) -> dict:
+    """The agent's open items by what they mean for its state. Pure.
+    `open_count` / `overdue_count` are the agent's unbounded counts (the
+    items may be a bounded read of them)."""
+    reacq, md, unserviced, untouched, active = [], [], [], [], []
     for i in items or []:
         if is_reacquisition(i):
             reacq.append(i)
         elif i.get("outcome") == O_BLOCKED and agent in MARKET_SOURCES \
                 and market_blocker(i.get("blocker")):
             md.append(i)
-        elif i.get("last_attempt_at") is None or not \
-                0 <= now - float(i["last_attempt_at"]) <= stale_s:
+        elif i.get("outcome") == O_WAITING:
+            # waiting for evidence nobody acquires (a PASSIVE kind)
+            unserviced.append(i)
+        elif not picked_up(i, now, stale_s):
             untouched.append(i)
         else:
             active.append(i)
@@ -392,12 +469,20 @@ def queue_classes(agent: str, items: list, now: float,
     by_kind: dict = {}
     for i in items or []:
         by_kind[i.get("kind")] = by_kind.get(i.get("kind"), 0) + 1
+    n_read = len(items or [])
+    n_open = max(int(open_count), n_read) if open_count is not None \
+        else n_read
     return {"reacquisition": reacq, "blocked_market": md,
+            "unserviced": unserviced,
             "untouched": untouched, "active": active, "overdue": over,
             "summary": {
-                "open": len(items or []), "overdue": len(over),
+                "open": n_open, "read": n_read,
+                "limited": n_open > n_read,
+                "overdue": max(int(overdue_count), len(over))
+                if overdue_count is not None else len(over),
                 "by_kind": by_kind, "reacquisition": len(reacq),
                 "untouched": len(untouched), "active": len(active),
+                "waiting_unserviced": len(unserviced),
                 "blocked_on_market_data": len(md),
                 "oldest_due_at": min([i["due_at"] for i in items or []
                                       if i.get("due_at") is not None]
@@ -417,6 +502,32 @@ def _qref(items: list, kind: str) -> dict:
                        "due_at": i.get("due_at"),
                        "overdue": i.get("overdue")}
                       for i in items[:SAMPLE_IDS]]}
+
+
+def _queue_handoff(hs: list, qc: dict, **kw) -> dict:
+    """HANDOFF_PENDING from hand-offs and queue items nobody picked up:
+    never attempted / attempts lapsed (QUEUE_ITEM_NOT_PICKED_UP), or waiting
+    for evidence no acquisition path is asked for (REACQUISITION_NOT_
+    ENQUEUED)."""
+    rows = [dict(h) for h in hs]
+    parts = ["%s %d" % (h["kind"], h["count"]) for h in hs]
+    times = [_ep(h.get("oldest_at")) for h in hs
+             if _ep(h.get("oldest_at")) is not None]
+    lst = qc["untouched"]
+    if lst:
+        rows.append(_qref(lst, K_QUEUE_UNTOUCHED))
+        parts.append("%d queued item(s) not picked up (%d overdue)" % (
+            len(lst), sum(1 for i in lst if i.get("overdue"))))
+    un = qc["unserviced"]
+    if un:
+        rows.append(_qref(un, K_NOT_ENQUEUED))
+        parts.append("%d item(s) waiting for evidence that no acquisition "
+                     "path is asked for (%s)" % (len(un), ", ".join(sorted(
+                         {str(i.get("kind")) for i in un}))))
+    times += [i["enqueued_at"] for i in lst + un
+              if i.get("enqueued_at") is not None]
+    return _out(HANDOFF, "Handed over, not yet picked up: " + "; ".join(
+        parts), rows, since=min(times) if times else None, **kw)
 
 
 def _out(state, detail, basis, since=None, **kw) -> dict:
@@ -478,11 +589,24 @@ def _run(facts: dict, now: float) -> dict | None:
 # ═════════════════════════════════════════════════════════════════════
 
 def _queue(facts: dict, now: float) -> tuple:
-    """(items, classes) of the agent's open queue items."""
+    """(items, classes) of the agent's open queue items (and its unbounded
+    open / overdue counts, when read)."""
     items = [i if "overdue" in i else queue_item(i, now)
              for i in facts.get("queue") or []]
-    return items, queue_classes(facts.get("agent") or "", items, now,
-                                float(facts.get("stale_s") or STALE_FLOOR_S))
+    qc = queue_classes(facts.get("agent") or "", items, now,
+                       float(facts.get("stale_s") or STALE_FLOOR_S),
+                       open_count=facts.get("queue_open"),
+                       overdue_count=facts.get("queue_overdue"))
+    if facts.get("queue_why"):
+        qc["summary"]["read_status"] = facts.get("queue_status")
+        qc["summary"]["why"] = facts.get("queue_why")
+    return items, qc
+
+
+def queue_unreadable(facts: dict) -> bool:
+    """The durable queue exists and could not be read: never taken as
+    empty."""
+    return facts.get("queue_status") == "UNAVAILABLE"
 
 
 def _xavier_reacquisition(facts: dict) -> int:
@@ -503,7 +627,10 @@ def invariant_holds(agent: str, facts: dict, state) -> bool:
     items = [i if "overdue" in i else queue_item(i, 0.0)
              for i in facts.get("queue") or []]
     if state == IDLE:
-        if items:
+        # an open item read, an open COUNT (the items may be a bounded
+        # read), or a queue that could not be read at all
+        if items or int(facts.get("queue_open") or 0) > 0 \
+                or queue_unreadable(facts):
             return False
         if agent == "XAVIER":
             n = facts.get("open_positions")
@@ -530,6 +657,17 @@ def derive(agent: str, facts: dict, *, now: float | None = None) -> dict:
         agent, facts, now)
     items, qc = _queue(facts, now)
     out.setdefault("queue", qc["summary"])
+    if out["state"] == IDLE and queue_unreadable(facts):
+        # THE QUEUE COULD NOT BE READ: whether the agent owns open work is
+        # unknown, and unknown is never "no open work" (R30B review: a
+        # failed read had derived KAREN and SCOUT IDLE while each owned
+        # items). Every other state rests on its own recorded rows.
+        return _out(None, "The durable queue could not be read; never taken "
+                    "as empty", out["basis"] + [{
+                        "table": "agent_work_open / agent_work_requests",
+                        "why": "%s:%s" % (R_QUEUE_UNREADABLE,
+                                          facts.get("queue_why"))}],
+                    counts=out.get("counts"), queue=qc["summary"])
     if out["state"] is not None and not invariant_holds(agent, facts,
                                                         out["state"]):
         # unreachable by construction (an open position is unreviewed,
@@ -581,21 +719,10 @@ def _generic(agent: str, facts: dict, now: float) -> dict:
                                         for i in lst}))),
             [_qref(lst, "QUEUE_ITEM_BLOCKED_ON_MARKET_DATA")],
             since=min(i["last_attempt_at"] for i in lst), queue=qs)
-    if hs or qc["untouched"]:
-        if not qc["untouched"]:
+    if hs or qc["untouched"] or qc["unserviced"]:
+        if not qc["untouched"] and not qc["unserviced"]:
             return dict(_handoff_out(hs), queue=qs)
-        lst = qc["untouched"]
-        rows = [dict(h) for h in hs] + [_qref(lst, K_QUEUE_UNTOUCHED)]
-        since = min([_ep(h.get("oldest_at")) for h in hs
-                     if _ep(h.get("oldest_at")) is not None]
-                    + [i["enqueued_at"] for i in lst
-                       if i.get("enqueued_at") is not None] or [None],
-                    key=lambda x: x or 0)
-        parts = ["%s %d" % (h["kind"], h["count"]) for h in hs] + [
-            "%d queued item(s) not picked up (%d overdue)" % (
-                len(lst), sum(1 for i in lst if i.get("overdue")))]
-        return _out(HANDOFF, "Handed over, not yet picked up: " + "; ".join(
-            parts), rows, since=since, queue=qs)
+        return _queue_handoff(hs, qc, queue=qs)
     if qc["reacquisition"]:
         lst = qc["reacquisition"]
         return _out(WAITING, "Waiting for fresh evidence; %d reacquisition "
@@ -616,7 +743,7 @@ def _generic(agent: str, facts: dict, now: float) -> dict:
         return _out(busy, "Working %d open item(s)%s%s" % (
             len(lst), " (blocked: %s)" % ", ".join(blocked) if blocked
             else "", ", %d overdue" % qs["overdue"] if qs["overdue"]
-            else ""), [_qref(lst, "QUEUE_ITEM_ATTEMPTED_IN_WINDOW")],
+            else ""), [_qref(lst, "QUEUE_ITEM_BEING_WORKED")],
             since=max(i["last_attempt_at"] for i in lst), queue=qs)
     waits = [w for w in facts.get("waiting") or []
              if int(w.get("count") or 0) > 0]
@@ -731,16 +858,10 @@ def _xavier(facts: dict, now: float) -> dict:
                              "kind": K_NOT_ENQUEUED,
                              "count": not_enqueued}], since=since)
     hs = _handoffs(facts)
-    if hs or qc["untouched"]:
-        if not qc["untouched"]:
+    if hs or qc["untouched"] or qc["unserviced"]:
+        if not qc["untouched"] and not qc["unserviced"]:
             return dict(_handoff_out(hs), counts=counts, queue=qs)
-        lst = qc["untouched"]
-        return out(HANDOFF, "Handed over, not yet picked up: %s" % "; ".join(
-            ["%s %d" % (h["kind"], h["count"]) for h in hs]
-            + ["%d queued item(s) not picked up" % len(lst)]),
-            [dict(h) for h in hs] + [_qref(lst, K_QUEUE_UNTOUCHED)],
-            since=min(i["enqueued_at"] for i in lst
-                      if i.get("enqueued_at") is not None))
+        return _queue_handoff(hs, qc, queue=qs, counts=counts)
     if classes[P_CURRENT]:
         lst = classes[P_CURRENT]
         return out(REVIEWING, "Managing %d open positions on CURRENT "
@@ -765,7 +886,7 @@ def _xavier(facts: dict, now: float) -> dict:
     if qc["active"] or qc["blocked_market"]:
         lst = qc["active"] + qc["blocked_market"]
         return out(REVIEWING, "Working %d open item(s)" % len(lst),
-                   [_qref(lst, "QUEUE_ITEM_ATTEMPTED_IN_WINDOW")])
+                   [_qref(lst, "QUEUE_ITEM_BEING_WORKED")])
     sw = _status_waiting(facts, now)
     if sw:
         return out(HANDOFF, "Needs fresh evidence and no reacquisition is "
@@ -1188,9 +1309,13 @@ async def _read_scout_waiting(s: _Sections) -> list:
 
 
 async def _read_queue(s: _Sections, now: float) -> dict:
-    """{agent: [open queue items]} from the durable queue (226 + 234).
-    Without migration 234 the section is ABSENT (named, never a zero)."""
-    out: dict = {a: [] for a in AGENTS}
+    """{"items": {agent: [open items]}, "counts": {agent: {"n", "overdue"}},
+    "status", "why"} from the durable queue (226 + 234). The counts are
+    unbounded; the items bounded PER AGENT (never one global limit). Without
+    migration 234 the section is ABSENT (no 234 work exists to own); a read
+    that failed is UNAVAILABLE -- named, never a zero."""
+    out: dict = {"items": {a: [] for a in AGENTS}, "counts": {},
+                 "status": "OK", "why": None}
 
     try:
         has234 = bool(await s.conn.fetchval(
@@ -1202,17 +1327,31 @@ async def _read_queue(s: _Sections, now: float) -> dict:
     if not has234:
         s.status["work.queue"] = {"status": "ABSENT",
                                   "why": "MIGRATION_234_NOT_APPLIED"}
-        return out
+        return dict(out, status="ABSENT", why="MIGRATION_234_NOT_APPLIED")
 
     async def fn(conn):
-        return [dict(r) for r in await conn.fetch(
-            OPEN_ITEMS_SQL, None, None, MAX_QUEUE_ITEMS)]
-    for r in await s.run("work.queue", ("agent_work_open",
-                                        "agent_work_requests",
-                                        "agent_work_request_events"), fn,
-                         default=[]) or []:
-        if r.get("agent_id") in out:
-            out[r["agent_id"]].append(queue_item(r, now))
+        counts = {r["agent_id"]: {"n": int(r["n"]),
+                                  "overdue": int(r["overdue"])}
+                  for r in await conn.fetch(OPEN_COUNTS_SQL, now)}
+        rows = [dict(r) for r in await conn.fetch(
+            OPEN_ITEMS_BY_AGENT_SQL, MAX_QUEUE_ITEMS)] if counts else []
+        return {"counts": counts, "rows": rows}
+    tables = ("agent_work_open", "agent_work_requests",
+              "agent_work_request_events")
+    got = await s.run("work.queue", tables, fn)
+    st = s.status.get("work.queue") or {}
+    if got is None and st.get("status") not in ("OK", "EMPTY"):
+        return dict(out, status=st.get("status") or "UNAVAILABLE",
+                    why=st.get("why") or "READ_FAILED")
+    got = got or {"counts": {}, "rows": []}
+    out["counts"] = got["counts"]
+    for r in got["rows"]:
+        if r.get("agent_id") in out["items"]:
+            out["items"][r["agent_id"]].append(queue_item(r, now))
+    s.status["work.queue"] = {
+        "status": "OK" if got["counts"] else "EMPTY", "why": None,
+        "limited": {a: c["n"] for a, c in got["counts"].items()
+                    if c["n"] > len(out["items"].get(a) or [])}}
     return out
 
 
@@ -1232,10 +1371,15 @@ async def read_facts(conn, *, now: float | None = None) -> dict:
     facts = {}
     for a in AGENTS:
         st = status.get(a)
+        qn = queue["counts"].get(a) or {"n": 0, "overdue": 0}
         f = {"status": st, "stale_s": (st or {}).get("stale_s"),
              "market": market, "handoffs": hand.get(a) or [],
              "outputs": outs.get(a) or [], "waiting": [],
-             "queue": queue.get(a) or []}
+             "queue": queue["items"].get(a) or [],
+             "queue_status": queue["status"], "queue_why": queue["why"],
+             "queue_open": qn["n"] if queue["status"] in ("OK",) else None,
+             "queue_overdue": qn["overdue"]
+             if queue["status"] in ("OK",) else None}
         if a == "XAVIER":
             f.update(open_positions=pos["open"], positions=pos["positions"],
                      positions_why=pos["why"])

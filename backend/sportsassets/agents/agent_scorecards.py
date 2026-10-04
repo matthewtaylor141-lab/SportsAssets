@@ -70,7 +70,7 @@ false-approval census; the lost-opportunity ledger (220); Xavier's frozen
 value-add (206) and his assessments (206 / 222); Eddie's outcome definitions
 (eddie.DEFINITIONS); the twin's persisted scorecards (219); the peer-review
 columns of karen_challenges (207 / 212); the queue (226 / 234) through
-agent_work_state's own OPEN_ITEMS_SQL and queue_item. MEMORY USEFULNESS
+agent_work_state's own per-agent reads and queue_item. MEMORY USEFULNESS
 (section 19) is summarised beside the metrics from lesson_usage's records --
 a summary, not a score, and it grants nothing.
 
@@ -1348,8 +1348,17 @@ async def queue(cx: _Ctx) -> tuple:
                            source=["agent_work_requests"], reason=why,
                            direction=LOWER) for a in AGENTS}
         return cards, {"_why": why}
+    # THE COUNTS UNBOUNDED, THE ITEMS BOUNDED PER AGENT (agent_work_state's
+    # own reads): one global limit had let another agent's backlog push an
+    # agent's items out of the read and report NO_BLOCKER for it (R30B
+    # review). An agent whose items were not all read is UNAVAILABLE
+    # (QUEUE_READ_LIMITED), never a made-up "no blocker".
+    counts, cwhy = await cx.read(("agent_work_open",), lambda: c.fetch(
+        WS.OPEN_COUNTS_SQL, cx.now))
     rows, rwhy = await cx.read(("agent_work_requests",), lambda: c.fetch(
-        WS.OPEN_ITEMS_SQL, None, None, WS.MAX_QUEUE_ITEMS))
+        WS.OPEN_ITEMS_BY_AGENT_SQL, WS.MAX_QUEUE_ITEMS))
+    rwhy = rwhy or cwhy
+    n_open = {r["agent_id"]: int(r["n"]) for r in counts or []}
     items = [WS.queue_item(dict(r), cx.now) for r in rows or []]
     since: dict = {}
     first, _w = await cx.read(("agent_work_request_events",), lambda: c.fetch(
@@ -1363,21 +1372,28 @@ async def queue(cx: _Ctx) -> tuple:
     for r in first or []:
         if r["since"] is not None:
             since[r["request_id"]] = float(r["since"])
-    limited = len(rows or []) >= WS.MAX_QUEUE_ITEMS
     cards = {}
     for a in AGENTS:
-        if rwhy:
+        mine = [it for it in items if it.get("owner") == a]
+        limited = n_open.get(a, 0) > len(mine)
+        if rwhy or limited:
             cards[a] = metric(a, "unresolved_blocker_age", win=win,
                               definition="the agent's durable queue",
-                              source=["agent_work_requests"], reason=rwhy,
-                              direction=LOWER)
+                              source=["agent_work_requests"],
+                              reason=rwhy or (
+                                  "QUEUE_READ_LIMITED: %d open, %d read "
+                                  "(the oldest blocked item may be unread)"
+                                  % (n_open.get(a, 0), len(mine))),
+                              direction=LOWER,
+                              detail={"open_items": n_open.get(a),
+                                      "items_read": len(mine),
+                                      "queue_read_limit_per_agent":
+                                          WS.MAX_QUEUE_ITEMS})
         else:
-            cards[a] = blocker_card(a, [it for it in items
-                                        if it.get("owner") == a],
-                                    cx.now, since)
+            cards[a] = blocker_card(a, mine, cx.now, since)
             cards[a]["detail"].update({
-                "queue_read_limit": WS.MAX_QUEUE_ITEMS,
-                "queue_read_limited": limited})
+                "queue_read_limit_per_agent": WS.MAX_QUEUE_ITEMS,
+                "queue_read_limited": False})
     lat, lwhy = await cx.read(("agent_work_request_events",), lambda: c.fetch(
         "SELECT r.agent_id, r.kind, " + _PCT + " FROM (SELECT r.agent_id, "
         "  r.kind, extract(epoch FROM e.at - r.enqueued_at) AS s FROM "

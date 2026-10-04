@@ -14,18 +14,33 @@
   §2 THE PRODUCERS THROUGH THE REAL WRITERS: Eddie's runner (estimates /
      outcomes, a refusal as a BLOCKED attempt), Karen's runner (deferred
      detector candidates -> investigations completed by the challenge that
-     later opens), the peer responder (challenge answers and evaluations,
+     later opens; bounded per detector and failed once the record leaves
+     her window), the peer responder (challenge answers and evaluations,
      the evaluation depending on the response), Derek's stale-refused
-     candidates (WAITING, re-decided stale = an attempt, a fresh decision
-     completes; the hot-candidate list), Scout's runner (research questions
-     attempted each pass), Allie's allocation reviews (an OK run completes,
-     a failed run blocks), Audrey's reconciliations.
-  §3 OVERDUE AND EXPIRY: an item's SLA counts from when the work arose (a
-     backlog older than the queue is overdue at once); past its horizon it
-     is FAILED and re-enqueued while still pending.
-  §4 THE WORK STATE FROM THE QUEUE, read from the database: Derek WAITING on
-     an enqueued reacquisition, Eddie HANDOFF on an untouched item, never
-     IDLE while an item is open.
+     candidates through his REAL decision path (paper_derek.decide_one:
+     refused stale -> an item; re-decided stale -> an attempt; decided on
+     fresh evidence -> COMPLETED; PASSIVE, never an enqueued
+     reacquisition), Scout's runner (research questions), Allie's
+     allocation reviews (an OK run completes, a failed run blocks), Audrey's
+     reconciliations and her open findings through the real audit writer
+     (paper_audrey.finding -> a follow-up; paper_audrey.open_task ->
+     COMPLETED).
+  §3 OVERDUE, EXPIRY AND THE ATTEMPT SCHEDULE: an item's SLA counts from
+     when the work arose (a backlog older than the queue is overdue at
+     once); past its horizon it is FAILED and re-enqueued while still
+     pending; an attempt is recorded only when its scheduled next attempt
+     is due (an unchanged outcome backs off, a change resets), so every
+     recorded next attempt is true and every kind fits the database's
+     per-request bound.
+  §4 THE WORK STATE FROM THE QUEUE, read from the database: Eddie HANDOFF on
+     an untouched item, never IDLE while an item is open -- not when another
+     agent's backlog exceeds the read bound, not when the queue read fails.
+
+R30B REVIEW NOTES. The Derek proof had used hand-built decisions and pinned
+his candidate items as an enqueued reacquisition; nothing acquires their
+evidence, so it now pins HANDOFF_PENDING through his real decision path. The
+rollback proof's shared-database case is a visible SKIP, never a silent
+return.
 """
 from __future__ import annotations
 
@@ -33,6 +48,7 @@ import re
 import uuid
 
 import asyncpg
+import pytest
 
 from sportsassets import agent_work_state as AWS
 from sportsassets.agents import agent_work as AW
@@ -240,7 +256,11 @@ async def test_the_rollback_refuses_with_records_and_drops_cleanly_without():
                                " 'MANAGEMENT_REASSESSMENT')") or \
                 await conn.fetchval("SELECT count(*) FROM improvement_"
                                     "clusters"):
-            return          # a shared database with real records: skip
+            # a shared database holding committed 234 records: the rollback
+            # refuses by design (proven above); the drop-and-reapply half
+            # needs a database without them -- a visible skip, never a pass
+            pytest.skip("the database holds committed 234 records: the "
+                        "drop half of the rollback proof needs none")
         await conn.execute(F.DOWN)
         assert await conn.fetchval(
             "SELECT to_regclass('improvement_clusters')") is None
@@ -253,6 +273,36 @@ async def test_the_rollback_refuses_with_records_and_drops_cleanly_without():
     finally:
         await tx.rollback()
         await conn.close()
+
+
+@pg
+async def test_224s_rollback_still_applies_with_234_present():
+    """(R30B review) 234's supersession CHECK had called 224's
+    agent_memory_refs_grounded, so 224's rollback failed with
+    DependentObjectsStillExist (the 224 test swallows errors, so nothing
+    saw it). 234 now grounds refs with its own copy."""
+    down224 = (F.MIG / "rollback" /
+               "224_agent_identity_memory.down.sql").read_text()
+    conn, tx = await F.tx()
+    try:
+        if await conn.fetchval(
+                "SELECT EXISTS (SELECT 1 FROM agent_identity_versions "
+                " WHERE identity_version > 1 "
+                "    OR approved_by <> 'PENDING_OWNER_APPROVAL')"):
+            pytest.skip("this database holds a later identity version or "
+                        "an approval: 224's rollback refuses by design")
+        await conn.execute(down224)          # raises on any 234 dependency
+        assert await conn.fetchval(
+            "SELECT to_regclass('agent_memory_events')") is None
+        assert await conn.fetchval(
+            "SELECT to_regclass('agent_lesson_supersessions') IS NOT NULL")
+        assert await conn.fetchval(
+            "SELECT to_regprocedure('agent_ops_refs_grounded(jsonb)') "
+            "IS NOT NULL")
+        assert "agent_memory_refs_grounded" not in F.UP.split(
+            "CREATE TABLE IF NOT EXISTS agent_lesson_supersessions")[1]
+    finally:
+        await F.done(conn, tx)
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -419,60 +469,137 @@ async def test_challenge_answers_and_evaluations_through_the_peer_responder():
 
 
 @pg
-async def test_dereks_stale_candidates_wait_on_an_enqueued_reacquisition():
+async def test_dereks_stale_candidates_are_owed_work_through_his_decisions():
+    """Derek's REAL decision path (paper_derek.decide_one) on synthetic
+    Pinnacle valuations: refused on a stale probability -> an item; the
+    candidate re-decided and refused stale again -> an attempt; decided on
+    fresh evidence -> COMPLETED by that decision. The items are PASSIVE: no
+    acquisition path reads them, so Derek is HANDOFF_PENDING, never WAITING
+    (R30B review: they had been counted as an enqueued reacquisition)."""
+    from tests import paper_live_fixture as PL
     conn, tx = await F.tx()
     try:
-        a = await F.account(conn, "awqd")
-        slug = "aec-test-stale-%s" % uuid.uuid4().hex[:6]
-        d0 = await F.decision(conn, a, at=NOW - 60, slug=slug,
-                              verdict="REFUSE",
-                              refusals=["PROBABILITY_EVIDENCE_STALE"])
-        ctx = {"now": NOW, "agent_work_any_account": True}
+        t0 = F.ISOLATED
+        a = await PL.new_account(conn, "awqd", now=t0 - 600)
+        slug = "%sawqd-%s" % (PL.SYN, uuid.uuid4().hex[:8])
+        tr = PL.Transport(t0)
+        tr.set(slug, offers=[(0.50, 5000)], bids=[(0.48, 5000)])
+        # a valuation a minute old at the decision: refused STALE
+        d0 = await F.derek_decides(conn, a, tr, slug=slug, valuation_at=t0,
+                                   pin_age_s=5.0, decide_at=t0 + 60)
+        assert "PROBABILITY_EVIDENCE_STALE" in d0["refusals"], d0
+        ctx = {"now": t0 + 90, "agent_work_any_account": True}
         AW._LAST_STEP.clear()
         got = await AW.step(conn, ctx)
         assert got["ran"] and got["kinds"][AW.K_CANDIDATE]["enqueued"] == 1
-        it = (await F.requests(conn, AW.K_CANDIDATE))[0]
-        assert it["agent_id"] == "DEREK" and it["source_id"] == d0
+        it = [r for r in await F.requests(conn, AW.K_CANDIDATE)
+              if r["us_market_slug"] == slug][0]
+        assert it["agent_id"] == "DEREK"
+        assert it["source_id"] == d0["decision_id"]
         assert it["blocker"] == "PROBABILITY_EVIDENCE_STALE"
         assert it["evidence_needed"][0] == "FRESH_PINNACLE_PROBABILITY"
-        assert it["us_market_slug"] == slug
-        assert await AW.hot_candidate_slugs(conn) == [slug]
-        st = await AWS.read_work_states(conn, now=NOW + 1)
-        # (a shared database may also hold Derek hand-offs, which precede)
-        assert st["states"]["DEREK"]["state"] != AWS.IDLE
-        assert st["states"]["DEREK"]["queue"]["reacquisition"] >= 1
-        mine = [AWS.queue_item(r, NOW + 1) for r in await conn.fetch(
-            AWS.OPEN_ITEMS_SQL, "DEREK", [AW.K_CANDIDATE], 100)]
-        assert AWS.derive("DEREK", {"queue": mine, "market": {}},
-                          now=NOW + 1)["state"] == AWS.WAITING
+        assert it["detail"]["strategy"] == d0["strategy"]
+        assert it["due_at"].timestamp() == \
+            d0["decided_at"].timestamp() + 900          # SLA from decided
+        # the read an acquisition path WOULD consume has no caller: PASSIVE
+        assert slug in await AW.hot_candidate_slugs(conn)
+        assert AW.K_CANDIDATE in AW.PASSIVE_KINDS
+
+        async def state(at):
+            mine = [AWS.queue_item(r, at) for r in await conn.fetch(
+                AWS.OPEN_ITEMS_SQL, "DEREK", [AW.K_CANDIDATE], 100)]
+            return AWS.derive("DEREK", {"queue": mine, "market": {}}, now=at)
+        st = await state(t0 + 91)
+        assert st["state"] == AWS.HANDOFF and st["queue"]["reacquisition"] == 0
+        assert st["basis"][-1]["kind"] == AWS.K_QUEUE_UNTOUCHED
         # the paper-pass step is throttled
-        assert (await AW.step(conn, dict(ctx, now=NOW + 5)))["why"] == \
+        assert (await AW.step(conn, dict(ctx, now=t0 + 95)))["why"] == \
             "NOT_DUE"
-        # re-decided, still stale: an ATTEMPT (WAITING), still open
-        d1 = await F.decision(conn, a, at=NOW + 30, slug=slug,
-                              verdict="REFUSE",
-                              refusals=["PROBABILITY_EVIDENCE_STALE"])
-        await AW.sync_for(conn, "paper_pass", now=NOW + 90)
-        it = (await F.requests(conn, AW.K_CANDIDATE))[0]
+        # re-decided on a still stale valuation: an ATTEMPT (WAITING)
+        d1 = await F.derek_decides(conn, a, tr, slug=slug,
+                                   valuation_at=t0 + 100, pin_age_s=5.0,
+                                   decide_at=t0 + 160)
+        assert "PROBABILITY_EVIDENCE_STALE" in d1["refusals"]
+        await AW.sync_for(conn, "paper_pass", now=t0 + 200)
         att = await F.attempts(conn, it["request_id"])
         assert [x["outcome"] for x in att] == ["WAITING_FOR_FRESH_EVIDENCE"]
-        assert F.j(att[0]["detail"])["decision_id"] == d1
-        await AW.sync_for(conn, "paper_pass", now=NOW + 150)
-        assert len(await F.attempts(conn, it["request_id"])) == 1  # no dup
-        # decided on fresh evidence (refused for edge, not freshness):
-        # COMPLETED by that decision
-        d2 = await F.decision(conn, a, at=NOW + 200, slug=slug,
-                              verdict="REFUSE",
-                              refusals=["BELOW_MIN_GROSS_EDGE"])
-        await AW.sync_for(conn, "paper_pass", now=NOW + 260)
-        it = (await F.requests(conn, AW.K_CANDIDATE))[0]
+        assert F.j(att[0]["detail"])["decision_id"] == d1["decision_id"]
+        await AW.sync_for(conn, "paper_pass", now=t0 + 260)
+        assert len(await F.attempts(conn, it["request_id"])) == 1  # no news
+        # waiting on evidence nobody is asked to acquire: a hand-off
+        st = await state(t0 + 261)
+        assert st["state"] == AWS.HANDOFF
+        assert st["basis"][-1]["kind"] == AWS.K_NOT_ENQUEUED
+        # decided on FRESH evidence (refused for something else): COMPLETED
+        d2 = await F.derek_decides(conn, a, tr, slug=slug,
+                                   valuation_at=t0 + 300, pin_age_s=2.0,
+                                   decide_at=t0 + 301)
+        assert not set(d2["refusals"] or []) & set(AW.STALE_REFUSALS), d2
+        await AW.sync_for(conn, "paper_pass", now=t0 + 360)
+        it = [r for r in await F.requests(conn, AW.K_CANDIDATE)
+              if r["us_market_slug"] == slug][0]
         assert it["terminal"]["state"] == "COMPLETED"
-        assert it["terminal"]["evidence_id"] == d2
-        assert await AW.hot_candidate_slugs(conn) == []
+        assert it["terminal"]["evidence_id"] == d2["decision_id"]
+        assert slug not in await AW.hot_candidate_slugs(conn)
         # a non-main account's pass does nothing
         AW._LAST_STEP.clear()
-        got = await AW.step(conn, {"now": NOW + 999, "account_id": "x"})
+        got = await AW.step(conn, {"now": t0 + 999, "account_id": "x"})
         assert got == {"ran": False, "why": "NOT_THE_MAIN_PAPER_ACCOUNT"}
+    finally:
+        await F.done(conn, tx)
+
+
+@pg
+async def test_karens_investigations_stay_bounded_as_her_window_moves(
+        monkeypatch):
+    """(R30B review) A capped detector deferred its oldest records every
+    pass, the window moved, and an immutable stale HOLD kept its rule true:
+    items piled up until their 7-day expiry. Now at most
+    MAX_OPEN_INVESTIGATIONS_PER_DETECTOR are open, and an item whose record
+    left the detector's lookback is FAILED (RECORD_LEFT_THE_DETECTOR_
+    WINDOW). Karen's REAL runner writes every item; the reviews are the
+    hand-built pre-R30 stale HOLD shape (agent_ops_fixture)."""
+    conn, tx = await F.tx()
+    try:
+        await R.ensure_identities(conn)
+        T = F.ISOLATED + 30 * 86400
+        a = await F.account(conn, "awqk", now=T - 8 * 86400)
+        p = await F.position(conn, a, at=T - 7.5 * 86400)
+        t = T - 6.9 * 86400
+        while t < T + 2.5 * 86400:              # one every 30 minutes
+            await F.stale_hold_review(conn, a, group_id=p["group_id"], at=t)
+            t += 1800
+        dets = [("HOLD_ON_STALE_PROBABILITY",
+                 KR.detect_hold_on_stale_probability)]
+        monkeypatch.setattr(KR, "MAX_OPEN_PER_DETECTOR", 0)   # capped
+        monkeypatch.setattr(KR, "MAX_NEW_PER_DETECTOR", 40)
+        cap = AW.MAX_OPEN_INVESTIGATIONS_PER_DETECTOR
+        assert AW.KINDS[AW.K_INVESTIGATION]["open_cap"] == ("detector", cap)
+        s = await KR.pass_once(conn, now=T, detectors=dets)
+        assert s["refused"]["HOLD_ON_STALE_PROBABILITY"] == \
+            "OPEN_CHALLENGE_CAP_REACHED"
+        rep = s["work_queue"]["kinds"][AW.K_INVESTIGATION]
+        assert rep["enqueued"] == cap and rep["capped"] == 40 - cap, rep
+        # the window moves six hours a pass for two days
+        reqs: list = []
+        for k in range(1, 9):
+            now = T + k * 0.25 * 86400
+            await KR.pass_once(conn, now=now, detectors=dets)
+            reqs = await F.requests(conn, AW.K_INVESTIGATION, "KAREN")
+            live = [r for r in reqs if r["is_open"]]
+            assert len(live) <= cap, (k, len(live))
+            assert all(float(r["detail"]["arose_at"]) >= now - KR.LOOKBACK_S
+                       for r in live), k
+        failed = [r["terminal"] for r in reqs
+                  if r["terminal"] and r["terminal"]["state"] == "FAILED"]
+        assert failed and {f["failure"] for f in failed} == {
+            AW.F_LEFT_DETECTOR}
+        assert len(reqs) - len(failed) == len([r for r in reqs
+                                               if r["is_open"]])
+        # the copied constants are Karen's own
+        assert AW.KAREN_LOOKBACK_S == KR.LOOKBACK_S
+        assert AW.MAX_OPEN_INVESTIGATIONS_PER_DETECTOR == 25
+        assert AW.AUDIT_OPEN_AFTER_S == KR.AUDIT_OPEN_AFTER_S
     finally:
         await F.done(conn, tx)
 
@@ -570,9 +697,145 @@ async def test_audreys_reconciliations_complete_when_matched():
         await F.done(conn, tx)
 
 
+@pg
+async def test_audreys_open_findings_are_her_followups_through_the_writer():
+    """(R30B review) Audrey's audit backlog never reached her queue: an open
+    WARNING / CRITICAL finding with no improvement task (the class Karen
+    upholds as AUDIT_DISCREPANCY_LEFT_OPEN) is now her
+    AUDIT_FINDING_FOLLOWUP, written by the real audit writer
+    (paper_audrey.finding) and completed by the real task hook
+    (paper_audrey.open_task)."""
+    from sportsassets.agents import paper_audrey as PA
+    conn, tx = await F.tx()
+    try:
+        await R.ensure_identities(conn)
+        t0 = F.ISOLATED + 90 * 86400
+        a = await F.account(conn, "awqf", now=t0 - 3 * 86400)
+        found = t0 - 2 * 86400
+        ctx = {"session_id": a["session_id"], "account_id": a["account_id"],
+               "now": found}
+        f = await PA.finding(conn, ctx, kind="LEDGER_INCONSISTENT",
+                             subject=a["account_id"], severity="CRITICAL",
+                             detail={"last_sequence": 7}, scope="7")
+        info = await PA.finding(conn, ctx, kind="R30B_INFO_ONLY",
+                                subject="x", severity="INFO", detail={})
+        assert f["new"] and info["new"]
+        got = await AW.sync(conn, [AW.K_AUDIT_FINDING], now=t0)
+        assert got["kinds"][AW.K_AUDIT_FINDING]["enqueued"] >= 1, got
+        rq = [r for r in await F.requests(conn, AW.K_AUDIT_FINDING)
+              if r["group_id"] in (f["finding_id"], info["finding_id"])]
+        assert [r["group_id"] for r in rq] == [f["finding_id"]]   # not INFO
+        r0 = rq[0]
+        assert r0["agent_id"] == "AUDREY" and r0["position_kind"] == "RECORD"
+        assert r0["blocker"] == "NO_IMPROVEMENT_TASK_LINKED"
+        assert r0["evidence_needed"] == ["IMPROVEMENT_TASK_LINKED"]
+        assert r0["source_table"] == "paper_audrey_findings"
+        assert r0["detail"]["finding_kind"] == "LEDGER_INCONSISTENT"
+        # SLA: Karen's own open-after bound from when it was found
+        assert r0["due_at"].timestamp() == found + KR.AUDIT_OPEN_AFTER_S
+        mine = [AWS.queue_item(r, t0 + 1) for r in await conn.fetch(
+            AWS.OPEN_ITEMS_SQL, "AUDREY", [AW.K_AUDIT_FINDING], 100)]
+        st = AWS.derive("AUDREY", {"queue": mine}, now=t0 + 1)
+        assert st["state"] == AWS.HANDOFF and st["queue"]["overdue"] >= 1
+        # the improvement task is opened by the real hook: COMPLETED by it
+        task = await PA.open_task(conn, dict(ctx, now=t0 + 10), f,
+                                  detail={"why": "R30B proof"})
+        assert task["ok"], task
+        await AW.sync(conn, [AW.K_AUDIT_FINDING], now=t0 + 60)
+        r0 = [r for r in await F.requests(conn, AW.K_AUDIT_FINDING)
+              if r["group_id"] == f["finding_id"]][0]
+        assert r0["terminal"]["state"] == "COMPLETED"
+        assert r0["terminal"]["evidence_table"] == "agent_tasks"
+        assert r0["terminal"]["evidence_id"] == task["task_id"]
+    finally:
+        await F.done(conn, tx)
+
+
 # ═════════════════════════════════════════════════════════════════════
-# §3 OVERDUE AND EXPIRY
+# §3 OVERDUE, EXPIRY AND THE ATTEMPT SCHEDULE
 # ═════════════════════════════════════════════════════════════════════
+
+@pg
+async def test_attempts_follow_the_schedule_they_record():
+    """(R30B review) Every 60 s paper-pass sync had written an attempt
+    whatever next_attempt_at said. Now: Audrey's triage of a root-cause
+    cluster (retry 3600 s) synced every minute for eight hours records an
+    attempt only when its scheduled next attempt is due, the interval
+    doubling while the answer is unchanged (3600, 7200, 14400, then the
+    21600 s ceiling); each recorded next attempt is exactly when the next
+    attempt happened; a changed answer (a fix linked) resets the interval."""
+    from sportsassets.agents import improvement_clusters as IC
+    conn, tx = await F.tx()
+    try:
+        t0 = F.ISOLATED + 60 * 86400
+        a = await F.account(conn, "awqt", now=t0 - 86400)
+        kind = "R30B_SCHEDULE_T%s" % uuid.uuid4().hex[:6]
+        for i in range(2):
+            await F.audrey_finding(conn, a, kind=kind, at=t0 - 7200 + i)
+        cid = IC.cluster_id_for(IC.cluster_key("AUDREY", kind, None))
+        assert cid in (await IC.refresh(conn, now=t0))["opened"]
+        for k in range(8 * 60 + 1):
+            await AW.sync(conn, [AW.K_ROOT_CAUSE], now=t0 + 60.0 * k)
+        it = [r for r in await F.requests(conn, AW.K_ROOT_CAUSE)
+              if r["group_id"] == cid][0]
+        att = await F.attempts(conn, it["request_id"])
+        assert [x["at"] - t0 for x in att] == [60.0, 3660.0, 10860.0,
+                                               25260.0], att
+        assert {x["blocker"] for x in att} == {"AWAITING_ENGINEERING_FIX"}
+        for prev, nxt in zip(att, att[1:]):
+            assert prev["nxt"] == nxt["at"]              # truthful
+        assert att[-1]["nxt"] - att[-1]["at"] == AW.MAX_RETRY_BACKOFF_S
+        # a changed answer (a person links a fix: WAITING on post-fix
+        # evidence) is recorded at once, the interval back to its base
+        ok = await IC.link_fix(conn, cid, actor="Test Engineer",
+                               commit_sha="b" * 40, effective_at=t0 + 30000,
+                               at=t0 + 30000)
+        assert ok["ok"], ok
+        await AW.sync(conn, [AW.K_ROOT_CAUSE], now=t0 + 30060)
+        att = await F.attempts(conn, it["request_id"])
+        assert att[-1]["outcome"] == "WAITING_FOR_FRESH_EVIDENCE"
+        assert att[-1]["at"] == t0 + 30060
+        assert att[-1]["nxt"] - att[-1]["at"] == \
+            AW.KINDS[AW.K_ROOT_CAUSE]["retry_s"]
+    finally:
+        await F.done(conn, tx)
+
+
+def test_the_attempt_plan_and_the_database_bound():
+    base = {"last_attempt": "ATTEMPTED", "outcome": "BLOCKED",
+            "last_attempt_blocker": "X", "last_attempt_at": NOW,
+            "next_attempt_at": NOW + 600}
+    plan = AW.attempt_plan
+    # never attempted: due at once
+    assert plan({}, at=NOW, outcome="BLOCKED", blocker="X",
+                base_s=600) == {"next_in_s": 600}
+    # unchanged: not before its scheduled time; then the interval doubles
+    assert plan(base, at=NOW + 599, outcome="BLOCKED", blocker="X",
+                base_s=600) is None
+    assert plan(base, at=NOW + 600, outcome="BLOCKED", blocker="X",
+                base_s=600) == {"next_in_s": 1200}
+    far = dict(base, next_attempt_at=NOW + 20000)
+    assert plan(far, at=NOW + 20000, outcome="BLOCKED", blocker="X",
+                base_s=600) == {"next_in_s": AW.MAX_RETRY_BACKOFF_S}
+    # changed (outcome or blocker): once the base interval has passed,
+    # back to the base
+    assert plan(far, at=NOW + 300, outcome="PROGRESSED", blocker=None,
+                base_s=600) is None
+    assert plan(far, at=NOW + 600, outcome="BLOCKED", blocker="Y",
+                base_s=600) == {"next_in_s": 600}
+    # a BLOCKED attempt with no blocker is recorded as UNSPECIFIED_BLOCKER:
+    # the same again is unchanged
+    unspec = dict(base, last_attempt_blocker="UNSPECIFIED_BLOCKER")
+    assert plan(unspec, at=NOW + 10, outcome="BLOCKED", blocker=None,
+                base_s=600) is None
+    # EVERY KIND FITS THE DATABASE'S PER-REQUEST BOUND: at most one attempt
+    # per base interval over the item's whole horizon
+    bound = int(re.search(r"state = 'ATTEMPTED'\)\s*>= (\d+)",
+                          F.UP).group(1))
+    for k in AW.KINDS:
+        assert AW.max_attempts(k) < bound, (k, AW.max_attempts(k), bound)
+
+
 
 @pg
 async def test_an_item_past_its_horizon_fails_and_is_enqueued_again():
@@ -612,6 +875,73 @@ def test_terms_count_the_sla_from_when_the_work_arose():
     long = AW.subject_key("x" * 300, "y")
     assert len(long) <= AW.MAX_SUBJECT and long == AW.subject_key(
         "x" * 300, "y")
+
+
+@pg
+async def test_a_long_queue_never_hides_an_agents_work(monkeypatch):
+    """(R30B review) One global LIMIT over every open item had let Karen's
+    backlog push Scout's item out of the read and derive Scout IDLE while he
+    owned it, and a failed read was taken as an empty queue. Now the counts
+    are unbounded and the items bounded PER AGENT: Scout's item is read
+    whatever Karen's backlog; Karen, whose items exceed the bound, is never
+    IDLE and her blocker card is UNAVAILABLE (QUEUE_READ_LIMITED); a queue
+    read that fails yields no IDLE and no made-up NO_BLOCKER."""
+    from sportsassets.agents import agent_scorecards as S
+    conn, tx = await F.tx()
+    try:
+        t0 = F.ISOLATED + 120 * 86400
+        monkeypatch.setattr(AWS, "MAX_QUEUE_ITEMS", 3)
+        tag = uuid.uuid4().hex[:6]
+        for i in range(4):
+            got = await AW.enqueue_item(
+                conn, kind=AW.K_INVESTIGATION, agent="KAREN",
+                subject="rec-%s-%d" % (tag, i), at=t0,
+                arose_at=t0 - 5 * 86400, source_table="paper_xavier_reviews",
+                source_id="r%d" % i, batch_id="b",
+                blocker="OPEN_CHALLENGE_CAP_REACHED",
+                detail={"detector": "D", "target_kind": "paper_xavier_reviews",
+                        "target_id": "r%d" % i})
+            assert got["enqueued"], got
+        got = await AW.enqueue_item(
+            conn, kind=AW.K_RESEARCH, agent="SCOUT", subject="feat-" + tag,
+            at=t0, arose_at=t0, source_table="scout_feature_tournaments",
+            source_id="t", batch_id="b", blocker="AWAITING_PROSPECTIVE_SAMPLES")
+        assert got["enqueued"], got
+        st = await AWS.read_work_states(conn, now=t0 + 1)
+        sc, ka = st["states"]["SCOUT"], st["states"]["KAREN"]
+        assert sc["state"] != AWS.IDLE and sc["queue"]["open"] >= 1, sc
+        assert ka["state"] != AWS.IDLE
+        assert ka["queue"]["open"] >= 4 and ka["queue"]["read"] == 3
+        assert ka["queue"]["limited"] is True
+        assert st["sections"]["work.queue"]["limited"]["KAREN"] >= 4
+
+        async def blocker_cards():
+            got = await S.scorecards(conn, now=t0 + 1,
+                                     agents=("KAREN", "SCOUT"))
+            return {c["agent"]: [m for m in c["metrics"]
+                                 if m["metric"] == "unresolved_blocker_age"][0]
+                    for c in got["agents"]}
+        b = await blocker_cards()
+        assert b["KAREN"]["status"] == S.UNAVAILABLE
+        assert b["KAREN"]["reason"].startswith("QUEUE_READ_LIMITED"), b
+        assert b["SCOUT"]["status"] == S.MEASURED            # its blocker
+        # the queue read FAILS: never IDLE, never NO_BLOCKER
+        monkeypatch.setattr(AWS, "OPEN_ITEMS_BY_AGENT_SQL",
+                            "SELECT 1 / 0 AS x WHERE $1::int IS NOT NULL")
+        st = await AWS.read_work_states(conn, now=t0 + 1)
+        assert st["sections"]["work.queue"]["status"] == "UNAVAILABLE"
+        for agent in ("KAREN", "SCOUT"):
+            s_ = st["states"][agent]
+            assert s_["state"] != AWS.IDLE, (agent, s_)
+            if s_["state"] is None:
+                assert s_["basis"][-1]["why"].startswith(
+                    AWS.R_QUEUE_UNREADABLE)
+        b = await blocker_cards()
+        for agent in ("KAREN", "SCOUT"):
+            assert b[agent]["status"] == S.UNAVAILABLE, b[agent]
+            assert b[agent]["reason"].startswith("READ_FAILED"), b[agent]
+    finally:
+        await F.done(conn, tx)
 
 
 def test_every_kind_is_owned_and_produced():

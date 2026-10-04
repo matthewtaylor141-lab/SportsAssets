@@ -145,8 +145,10 @@ def test_the_cluster_modules_import_no_order_execution_or_paper_module():
     for path, pkg, allowed in (
             (RCC, "sportsassets.agents",
              ("sportsassets.agents.karen_runner",)),
+            # (R30B review) the human steps' admin route reads the admin
+            # token check from api.app, as the clear-halt route does
             (RCC_API, "sportsassets.api",
-             ("sportsassets.api.agents_core",
+             ("sportsassets.api.agents_core", "sportsassets.api.app",
               "sportsassets.agents.improvement_clusters"))):
         for imp in _imports(path, pkg):
             if imp.startswith("sportsassets"):
@@ -163,6 +165,15 @@ def test_the_cluster_read_api_writes_nothing():
         assert not re.search(r"\b(INSERT\s+INTO|UPDATE\s+[a-z_]+\s+SET|"
                              r"DELETE\s+FROM)", s, re.I), s[:120]
     assert "transaction(readonly=" in RCC_API.read_text()
+    # THE HUMAN STEPS (R30B review): one admin-token POST that writes only
+    # through the cluster module's own human-step functions; the GET routes
+    # stay read only
+    src = RCC_API.read_text()
+    post = src[src.index("async def apply("):]
+    assert set(re.findall(r"IC\.([a-z_]+)\(", post)) == {
+        "link_fix", "assign_owner", "close", "reopen"}
+    assert src.count("@router.post(") == 1
+    assert "dependencies=[Depends(_require_admin)]" in src
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -243,7 +254,17 @@ def test_the_stream_proofs_are_capital_critical():
 
 def test_memory_never_grants_authority():
     """Only the evaluator version decides; a weight only falls; no module
-    outside lesson_usage / the scorecards reads a lesson weight."""
+    outside lesson_usage / the scorecards / the two context readers reads a
+    lesson weight -- and those readers only SELECT it.
+
+    WHY THE READER SET WIDENED (R30B review): a supersession had changed
+    nothing an agent actually reads. The conversation context
+    (agents/learning_context.py) and the agent's own context bundle
+    (agents/agent_memory.private_memories, used by agent_context) now read
+    the weight to EXCLUDE a superseded lesson and rank a downweighted one
+    lower. Neither is on an order, capital or approval path (learning
+    context: OBSERVATIONS_ONLY_NO_POLICY_CHANGE; agent memory: the
+    identity authority tests)."""
     src = LU.read_text()
     assert 'VERSION = "MEMORY_USEFULNESS_V1"' in src
     assert "UPWEIGHT" not in src and "PROMOTE" not in src
@@ -252,6 +273,16 @@ def test_memory_never_grants_authority():
         t = p.read_text()
         if "agent_lesson_supersessions" in t or "agent_lesson_retrievals" in t:
             readers.append(str(p.relative_to(ROOT)))
+    context_readers = {"agents/learning_context.py",
+                       "agents/agent_memory.py"}
     assert set(readers) <= {"agents/lesson_usage.py",
                             "agents/agent_scorecards.py",
-                            "api/command_agent_scorecards.py"}, readers
+                            "api/command_agent_scorecards.py"} | \
+        context_readers, readers
+    for rel in context_readers:
+        path = ROOT / rel
+        for q in _sql(path):
+            if "agent_lesson_supersessions" in q:
+                assert not re.search(r"\b(INSERT\s+INTO|UPDATE\s+[a-z_]+"
+                                     r"\s+SET|DELETE\s+FROM)", q, re.I), rel
+        assert "agent_lesson_retrievals" not in path.read_text(), rel

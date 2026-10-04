@@ -56,9 +56,18 @@
 --      the consumer's attempt and its outcome (PROGRESSED / BLOCKED /
 --      WAITING_FOR_FRESH_EVIDENCE / NO_CHANGE), the blocker when BLOCKED,
 --      and the next attempt. Nothing follows a terminal event (226's guard).
---   §2 agent_lesson_retrievals     which lesson was in a decision's context
---                                  (point in time: never a lesson learned
---                                  after the decision), append-only.
+--      AUDREY'S AUDIT BACKLOG (R30B review): an open WARNING / CRITICAL
+--      paper_audrey_findings row with no improvement task is an
+--      AUDIT_FINDING_FOLLOWUP item of hers (subject RECORD) -- the class
+--      production shows Karen upholding 50 times
+--      (AUDIT_DISCREPANCY_LEFT_OPEN).
+--   §2 agent_lesson_retrievals     which lesson was in force for a decision
+--                                  of record (point in time: never a lesson
+--                                  learned after the decision), append-only.
+--                                  A RECONSTRUCTION: no decision path reads
+--                                  a lesson, so "retrieved" means "in force
+--                                  and ranked for that decision"; one
+--                                  decision source per agent.
 --      agent_lesson_supersessions  the append-only DOWNWEIGHT / SUPERSEDE
 --                                  record from forward INVESTMENT-sleeve
 --                                  outcome evidence. A weight only ever
@@ -118,7 +127,8 @@ ALTER TABLE agent_work_requests ADD CONSTRAINT agent_work_requests_kind_ck
         'CANDIDATE_FRESH_EVIDENCE', 'CHALLENGE_RESPONSE',
         'CHALLENGE_EVALUATION', 'CHALLENGE_INVESTIGATION',
         'ALLOCATION_REVIEW', 'EXECUTION_ESTIMATE', 'OUTCOME_CALIBRATION',
-        'RESEARCH_QUESTION', 'AUDIT_RECONCILIATION', 'ROOT_CAUSE_TRIAGE'))
+        'RESEARCH_QUESTION', 'AUDIT_RECONCILIATION', 'ROOT_CAUSE_TRIAGE',
+        'AUDIT_FINDING_FOLLOWUP'))
     NOT VALID;
 -- the subject kinds (226: a position, PAPER / ACTUAL)
 ALTER TABLE agent_work_requests DROP CONSTRAINT IF EXISTS
@@ -137,7 +147,8 @@ ALTER TABLE agent_work_requests ADD CONSTRAINT agent_work_requests_reason_ck
         'CHALLENGE_RESPONDED', 'DETECTOR_CANDIDATE_DEFERRED',
         'ENTER_AFTER_LAST_ALLOCATION_RUN', 'ENTER_WITHOUT_ESTIMATE',
         'ESTIMATE_FILLED_WITHOUT_OUTCOME', 'FEATURE_UNDER_TEST',
-        'RECONCILIATION_DISCREPANCY', 'ROOT_CAUSE_CLUSTER_OPEN')) NOT VALID;
+        'RECONCILIATION_DISCREPANCY', 'ROOT_CAUSE_CLUSTER_OPEN',
+        'AUDIT_FINDING_WITHOUT_TASK')) NOT VALID;
 -- 226's evidence requests keep their one-hour horizon; other work may stay
 -- open (and overdue) up to thirty days before it is FAILED as expired
 ALTER TABLE agent_work_requests DROP CONSTRAINT IF EXISTS
@@ -178,7 +189,9 @@ ALTER TABLE agent_work_requests ADD CONSTRAINT
         OR (kind = 'AUDIT_RECONCILIATION' AND agent_id = 'AUDREY'
             AND position_kind = 'RECONCILIATION')
         OR (kind = 'ROOT_CAUSE_TRIAGE' AND agent_id = 'AUDREY'
-            AND position_kind = 'CLUSTER')) NOT VALID;
+            AND position_kind = 'CLUSTER')
+        OR (kind = 'AUDIT_FINDING_FOLLOWUP' AND agent_id = 'AUDREY'
+            AND position_kind = 'RECORD')) NOT VALID;
 -- EVERY OPEN ITEM CARRIES ITS TERMS (the fill trigger supplies 226 rows')
 ALTER TABLE agent_work_requests DROP CONSTRAINT IF EXISTS
     agent_work_requests_terms_ck;
@@ -259,8 +272,13 @@ ALTER TABLE agent_work_request_events ADD CONSTRAINT
         OR (state <> 'ATTEMPTED' AND outcome IS NULL AND blocker IS NULL
             AND next_attempt_at IS NULL)) NOT VALID;
 
--- BOUNDED: at most this many attempts per request (a producer attempts an
--- item at most once per pass; this is the database's backstop)
+-- BOUNDED: at most this many attempts per request. A consumer attempts an
+-- item only when its scheduled next attempt is due (or its outcome / blocker
+-- changed), and an unchanged outcome doubles the interval up to
+-- agent_work.MAX_RETRY_BACKOFF_S; the worst case over any kind's horizon is
+-- far below this backstop (tests/test_agent_work_queues.py sizes it per kind
+-- from ttl_s / retry_s). Before that rule (R30B review) a 120 s consumer
+-- reached 2000 on a 7-day item in 2.8 days and then stopped silently.
 CREATE OR REPLACE FUNCTION agent_work_attempt_bound()
 RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
@@ -291,6 +309,22 @@ BEGIN
                     'never rewritten)', TG_TABLE_NAME, TG_OP
         USING ERRCODE = 'integrity_constraint_violation';
 END;
+$$;
+
+-- GROUNDED EVIDENCE REFERENCES: a copy of 224's agent_memory_refs_grounded
+-- under this migration's own name (R30B review: a CHECK calling 224's
+-- function made 224's rollback fail with DependentObjectsStillExist; 221's
+-- functions were already copied for the same reason, below)
+CREATE OR REPLACE FUNCTION agent_ops_refs_grounded(refs jsonb)
+RETURNS boolean LANGUAGE sql IMMUTABLE AS $$
+    SELECT refs IS NOT NULL
+       AND jsonb_typeof(refs) = 'array'
+       AND jsonb_array_length(refs) BETWEEN 1 AND 50
+       AND NOT EXISTS (
+           SELECT 1 FROM jsonb_array_elements(refs) e
+            WHERE jsonb_typeof(e) <> 'object'
+               OR coalesce(length(btrim(e ->> 'kind')), 0) = 0
+               OR coalesce(length(btrim(e ->> 'id')), 0) = 0)
 $$;
 
 -- does the lesson exist, and is it the named agent's?
@@ -344,9 +378,29 @@ CREATE TABLE IF NOT EXISTS agent_lesson_retrievals (
     CONSTRAINT agent_lesson_retrievals_lesson_ck CHECK (
         lesson_table IN ('agent_memory_events', 'paper_agent_lessons')
         AND length(btrim(lesson_id)) BETWEEN 1 AND 300),
+    -- THE DECISIONS OF RECORD, one source per agent (R30B review: the
+    -- production 224 LESSON memories are Karen's and Eddie's, so Derek's
+    -- and Xavier's decisions alone could never measure them): Derek's ENTER
+    -- decisions, Xavier's first review per position, Eddie's execution
+    -- estimates, the Chief Allocator's shadow allocations, Karen's
+    -- challenges, Audrey's findings, Scout's proposed features -- each
+    -- source belongs to exactly one agent
     CONSTRAINT agent_lesson_retrievals_decision_ck CHECK (
-        decision_table IN ('paper_decisions', 'paper_xavier_reviews')
+        decision_table IN ('paper_decisions', 'paper_xavier_reviews',
+                           'eddie_execution_estimates', 'intel_allocations',
+                           'karen_challenges', 'paper_audrey_findings',
+                           'scout_features')
         AND length(btrim(decision_id)) BETWEEN 1 AND 300),
+    CONSTRAINT agent_lesson_retrievals_source_ck CHECK (
+        (decision_table = 'paper_decisions' AND agent_id = 'DEREK')
+        OR (decision_table = 'paper_xavier_reviews' AND agent_id = 'XAVIER')
+        OR (decision_table = 'eddie_execution_estimates'
+            AND agent_id = 'EDDIE')
+        OR (decision_table = 'intel_allocations'
+            AND agent_id = 'CHIEF_ALLOCATOR')
+        OR (decision_table = 'karen_challenges' AND agent_id = 'KAREN')
+        OR (decision_table = 'paper_audrey_findings' AND agent_id = 'AUDREY')
+        OR (decision_table = 'scout_features' AND agent_id = 'SCOUT')),
     -- POINT IN TIME: a decision never "used" a lesson learned after it
     CONSTRAINT agent_lesson_retrievals_pit_ck CHECK (
         lesson_learned_at <= decided_at),
@@ -402,11 +456,23 @@ CREATE TABLE IF NOT EXISTS agent_lesson_supersessions (
              OR (action = 'SUPERSEDE' AND weight = 0))),
     CONSTRAINT agent_lesson_supersessions_basis_ck CHECK (
         basis = 'FORWARD_INVESTMENT_OUTCOMES'),
+    -- the evidence is a MEASURED comparison (at least 30 independent events
+    -- per arm, = lesson_usage.MIN_EVENTS_FOR_MEASURED, pinned by a test):
+    -- a SMALL_SAMPLE is reported, never acted on (R30B review: two events
+    -- per arm had superseded a lesson for good). The refs are grounded by
+    -- 234's own copy of 224's rule, so 224's rollback drops nothing 234
+    -- depends on.
     CONSTRAINT agent_lesson_supersessions_evidence_ck CHECK (
         jsonb_typeof(evidence) = 'object'
         AND evidence ? 'n_used' AND evidence ? 'n_comparable'
         AND evidence ? 'mean_difference_usd'
-        AND agent_memory_refs_grounded(evidence_refs)),
+        AND coalesce(evidence ->> 'status', '') = 'MEASURED'
+        AND CASE WHEN jsonb_typeof(evidence -> 'n_used') = 'number'
+                  AND jsonb_typeof(evidence -> 'n_comparable') = 'number'
+                 THEN (evidence ->> 'n_used')::numeric >= 30
+                      AND (evidence ->> 'n_comparable')::numeric >= 30
+                 ELSE false END
+        AND agent_ops_refs_grounded(evidence_refs)),
     -- the evaluator VERSION decided it -- never an agent, never a person
     CONSTRAINT agent_lesson_supersessions_decider_ck CHECK (
         decided_by ~ '^MEMORY_USEFULNESS_V[0-9]+$'),
@@ -606,12 +672,20 @@ CREATE TABLE IF NOT EXISTS improvement_cluster_events (
     CONSTRAINT improvement_cluster_events_kind_ck CHECK (kind IN (
         'OPENED', 'OWNER_ASSIGNED', 'FIX_LINKED', 'EFFECT_MEASURED',
         'CLOSED', 'REOPENED')),
+    -- FIX_PARTIALLY_EFFECTIVE (R30B review): the defect rate fell
+    -- significantly but not materially (production 10-03 -> 10-04: a stale
+    -- HOLD on 97.6% then 62.4% of reviews is a significant drop and still a
+    -- running defect, never FIX_EFFECTIVE). An owner assignment keeps the
+    -- cluster's current status (the guard below), never resets it.
     CONSTRAINT improvement_cluster_events_status_ck CHECK (
         (kind = 'OPENED' AND status_to = 'OPEN')
-        OR (kind = 'OWNER_ASSIGNED' AND status_to IN ('OPEN', 'FIX_LINKED'))
+        OR (kind = 'OWNER_ASSIGNED' AND status_to IN (
+                'OPEN', 'FIX_LINKED', 'FIX_EFFECTIVE',
+                'FIX_PARTIALLY_EFFECTIVE', 'FIX_NOT_EFFECTIVE'))
         OR (kind = 'FIX_LINKED' AND status_to = 'FIX_LINKED')
         OR (kind = 'EFFECT_MEASURED' AND status_to IN (
-                'FIX_LINKED', 'FIX_EFFECTIVE', 'FIX_NOT_EFFECTIVE'))
+                'FIX_LINKED', 'FIX_EFFECTIVE', 'FIX_PARTIALLY_EFFECTIVE',
+                'FIX_NOT_EFFECTIVE'))
         OR (kind = 'CLOSED' AND status_to = 'CLOSED')
         OR (kind = 'REOPENED' AND status_to = 'OPEN')),
     CONSTRAINT improvement_cluster_events_class_ck CHECK (
@@ -674,6 +748,7 @@ CREATE INDEX IF NOT EXISTS paper_xavier_reviews_at_idx
 CREATE OR REPLACE FUNCTION improvement_cluster_events_guard()
 RETURNS trigger LANGUAGE plpgsql AS $$
 DECLARE last_kind text;
+DECLARE last_status text;
 DECLARE last_reopen timestamptz;
 BEGIN
     IF NEW.actor_class IN ('HUMAN', 'ENGINEERING') AND coalesce(
@@ -682,7 +757,8 @@ BEGIN
             'records no % step', NEW.actor_class
             USING ERRCODE = 'integrity_constraint_violation';
     END IF;
-    SELECT kind INTO last_kind FROM improvement_cluster_events
+    SELECT kind, status_to INTO last_kind, last_status
+      FROM improvement_cluster_events
      WHERE cluster_id = NEW.cluster_id ORDER BY at DESC, event_id DESC
      LIMIT 1;
     IF NEW.kind = 'OPENED' THEN
@@ -704,6 +780,11 @@ BEGIN
     IF NEW.kind = 'REOPENED' AND last_kind <> 'CLOSED' THEN
         RAISE EXCEPTION 'improvement_cluster_events: only a closed cluster '
             'reopens' USING ERRCODE = 'integrity_constraint_violation';
+    END IF;
+    IF NEW.kind = 'OWNER_ASSIGNED' AND NEW.status_to <> last_status THEN
+        RAISE EXCEPTION 'improvement_cluster_events: an owner assignment '
+            'keeps the status (% -> % refused)', last_status, NEW.status_to
+            USING ERRCODE = 'integrity_constraint_violation';
     END IF;
     IF NEW.kind = 'EFFECT_MEASURED' THEN
         SELECT max(at) INTO last_reopen FROM improvement_cluster_events

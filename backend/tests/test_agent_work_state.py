@@ -24,6 +24,19 @@ WAITING_FOR_EVIDENCE, Scout's features under test or Xavier's non-current
 positions were enough to derive WAITING. The owner's section 17 rule is
 "WAITING must have an enqueued reacquisition": those cases now assert WAITING
 WITH a reacquisition item in the queue, and HANDOFF_PENDING without one.
+
+WHY THE DEREK PINS CHANGED AGAIN (R30B review): Derek's CANDIDATE_FRESH_
+EVIDENCE had been counted as an enqueued reacquisition while no acquisition
+path read it (agent_work.hot_candidate_slugs had no caller). It is a PASSIVE
+kind now: with only such items Derek is HANDOFF_PENDING (not picked up, or
+REACQUISITION_NOT_ENQUEUED once a re-decision was refused again) -- never
+passive WAITING. Derek owns no serviced acquisition kind, so no case derives
+him WAITING.
+
+WHY THE ITEM FIXTURE'S NEXT ATTEMPT MOVED (R30B review): an item is worked
+while its scheduled next attempt is not overdue beyond the stale window
+(attempts back off). The fixture schedules the next attempt 300 s after the
+LAST attempt (as agent_work.attempt writes it), not at a fixed NOW + 300.
 """
 from __future__ import annotations
 
@@ -79,14 +92,17 @@ def _q(kind="EXECUTION_ESTIMATE", *, owner="EDDIE", outcome=None,
             "last_attempt_at": last_at, "last_outcome": outcome,
             "last_blocker": blocker if outcome else None,
             "last_next_attempt_at": nxt if nxt is not None else (
-                NOW + 300 if outcome else None),
+                (last_at if last_at is not None else NOW) + 300
+                if outcome else None),
             "attempts": 1 if outcome else 0}
 
 
 #: an enqueued reacquisition per agent (an acquisition kind, or an item
-#: whose latest attempt is waiting with its next attempt scheduled)
+#: whose latest attempt is waiting with its next attempt scheduled). Derek
+#: has none: his CANDIDATE_FRESH_EVIDENCE is PASSIVE (no acquisition path
+#: services it); PASSIVE_DEREK is that item, never a reacquisition.
+PASSIVE_DEREK = _q("CANDIDATE_FRESH_EVIDENCE", owner="DEREK")
 REACQ = {
-    "DEREK": _q("CANDIDATE_FRESH_EVIDENCE", owner="DEREK"),
     "SCOUT": _q("RESEARCH_QUESTION", owner="SCOUT"),
     "EDDIE": _q("OUTCOME_CALIBRATION", owner="EDDIE",
                 outcome="WAITING_FOR_FRESH_EVIDENCE", last_at=NOW - 30),
@@ -303,8 +319,10 @@ CASES = {
           "handoffs": _h("KAREN_CHALLENGE_TO_ANSWER")}, W.HANDOFF),
         ({"market": MARKET_OK, "handoffs": _h("AGENT_TASK_OPEN")},
          W.HANDOFF),
+        # (R30B review) a PASSIVE candidate item is no reacquisition:
+        # nobody acquires its evidence -- a hand-off, never WAITING
         ({"market": MARKET_OK, "status": _status("WAITING_FOR_PROVIDER"),
-          "queue": [REACQ["DEREK"]]}, W.WAITING),
+          "queue": [PASSIVE_DEREK]}, W.HANDOFF),
         ({"market": MARKET_OK,
           "status": _status("WAITING_FOR_PROVIDER")}, W.HANDOFF),
         ({"market": MARKET_OK, "outputs": OUT}, W.WORKING),
@@ -386,6 +404,11 @@ def test_every_state_is_reached_for_every_agent_that_can_hold_it():
         expect = {busy, W.HANDOFF, W.WAITING, W.IDLE}
         if a in W.MARKET_SOURCES:
             expect.add(W.BLOCKED)
+        if a == "DEREK":
+            # (R30B review) Derek owns no kind an acquisition path services
+            # (CANDIDATE_FRESH_EVIDENCE is PASSIVE), so nothing can derive
+            # him WAITING until one dispatches his candidates
+            expect.discard(W.WAITING)
         assert reached[a] == expect, (a, reached[a] ^ expect)
 
 
@@ -473,23 +496,26 @@ def test_an_agent_that_owns_open_work_is_never_idle(agent):
                 _status("EVALUATING", started=NOW - 5000)]
     markets = [MARKET_OK, FEED_DOWN, VENUE_DOWN]
     shapes = list(ITEM_SHAPES)
-    for n in (1, 2):
+    # (R30B review) the items' kinds include a PASSIVE one: it never makes
+    # WAITING, alone or beside others
+    kinds = ["EXECUTION_ESTIMATE", "CANDIDATE_FRESH_EVIDENCE"]
+    for n, kind in itertools.product((1, 2), kinds):
         for combo in itertools.product(shapes, repeat=n):
-            items = [_q(owner=agent, rid="r%d" % i, **ITEM_SHAPES[k])
+            items = [_q(kind, owner=agent, rid="r%d" % i, **ITEM_SHAPES[k])
                      for i, k in enumerate(combo)]
-            for st in statuses:
-                for mk in markets:
-                    f = {"queue": items, "status": st, "market": mk}
-                    if agent == "XAVIER":
-                        f.update(open_positions=0, positions=[])
-                    s = W.derive(agent, f, now=NOW)
-                    assert s["state"] != W.IDLE, (agent, combo, s)
-                    assert W.invariant_holds(agent, f, s["state"])
-                    assert s.get("guard") is None, (agent, combo, s)
-                    if s["state"] == W.WAITING:
-                        assert any(W.is_reacquisition(W.queue_item(i, NOW))
-                                   for i in items)
-                    assert s["queue"]["open"] == n
+            for st, mk in itertools.product(statuses, markets):
+                f = {"queue": items, "status": st, "market": mk}
+                if agent == "XAVIER":
+                    f.update(open_positions=0, positions=[])
+                s = W.derive(agent, f, now=NOW)
+                assert s["state"] != W.IDLE, (agent, combo, s)
+                assert W.invariant_holds(agent, f, s["state"])
+                assert s.get("guard") is None, (agent, combo, s)
+                if s["state"] == W.WAITING:
+                    assert any(W.is_reacquisition(W.queue_item(i, NOW))
+                               for i in items)
+                    assert kind not in W.PASSIVE_KINDS
+                assert s["queue"]["open"] == n
 
 
 def test_queue_items_drive_each_state():
@@ -521,12 +547,30 @@ def test_queue_items_drive_each_state():
     # Eddie with open estimate work reads the books: venue down -> BLOCKED
     s = _st("EDDIE", {"queue": [_q()], "market": VENUE_DOWN})
     assert s["state"] == W.BLOCKED
-    # an enqueued reacquisition -> WAITING, overdue counted
+    # an enqueued reacquisition -> WAITING, overdue counted (Scout's
+    # research question: his runner freezes its samples each pass)
+    s = _st("SCOUT", {"queue": [_q("RESEARCH_QUESTION", owner="SCOUT",
+                                   due=NOW - 60)]})
+    assert s["state"] == W.WAITING
+    assert s["queue"]["overdue"] == 1 and "1 overdue" in s["detail"]
+    # (R30B review) Derek's PASSIVE candidate: never picked up -> a
+    # hand-off; re-decided and refused again (a WAITING attempt with its
+    # next attempt scheduled) -> still a hand-off, REACQUISITION_NOT_
+    # ENQUEUED: no acquisition path asks for its evidence
     s = _st("DEREK", {"queue": [_q("CANDIDATE_FRESH_EVIDENCE",
                                    owner="DEREK", due=NOW - 60)],
                       "market": MARKET_OK})
-    assert s["state"] == W.WAITING
-    assert s["queue"]["overdue"] == 1 and "1 overdue" in s["detail"]
+    assert s["state"] == W.HANDOFF
+    assert s["basis"][-1]["kind"] == W.K_QUEUE_UNTOUCHED
+    assert s["queue"]["reacquisition"] == 0
+    s = _st("DEREK", {"queue": [_q("CANDIDATE_FRESH_EVIDENCE",
+                                   owner="DEREK", last_at=NOW - 30,
+                                   outcome="WAITING_FOR_FRESH_EVIDENCE",
+                                   blocker="PROBABILITY_EVIDENCE_STALE")],
+                      "market": MARKET_OK})
+    assert s["state"] == W.HANDOFF
+    assert s["basis"][-1]["kind"] == W.K_NOT_ENQUEUED
+    assert "no acquisition path is asked for" in s["detail"]
     # Xavier with every position current and an untouched challenge answer
     s = _st("XAVIER", _x([_pos("a")], queue=[_q(
         "CHALLENGE_RESPONSE", owner="XAVIER")]))
@@ -541,7 +585,13 @@ def test_queue_items_drive_each_state():
 def test_waiting_requires_an_enqueued_reacquisition():
     # the invariant itself
     assert not W.invariant_holds("DEREK", {"queue": []}, W.WAITING)
-    assert W.invariant_holds("DEREK", {"queue": [REACQ["DEREK"]]}, W.WAITING)
+    # (R30B review) a PASSIVE item is never the reacquisition WAITING needs
+    assert not W.invariant_holds("DEREK", {"queue": [PASSIVE_DEREK]},
+                                 W.WAITING)
+    assert not W.invariant_holds("DEREK", {"queue": [_q(
+        "CANDIDATE_FRESH_EVIDENCE", owner="DEREK", last_at=NOW - 30,
+        outcome="WAITING_FOR_FRESH_EVIDENCE")]}, W.WAITING)
+    assert W.invariant_holds("SCOUT", {"queue": [REACQ["SCOUT"]]}, W.WAITING)
     assert not W.invariant_holds("EDDIE", {"queue": [_q()]}, W.WAITING)
     assert not W.invariant_holds("EDDIE", {"queue": [_q()]}, W.IDLE)
     assert W.invariant_holds("XAVIER", _x([_pos("a", review=XF.S_WAITING,
@@ -568,7 +618,10 @@ def test_the_queue_item_view():
                         blocker="DB_REFUSED", due=NOW - 100), NOW)
     assert i["blocker"] == "DB_REFUSED" and i["outcome"] == "BLOCKED"
     assert i["overdue"] and i["overdue_s"] == 100.0
-    assert i["next_attempt_at"] == NOW + 300
+    # the attempt scheduled its next one 300 s after itself (the fixture's
+    # shape since the R30B review)
+    assert i["next_attempt_at"] == (NOW - 30) + 300
+    assert i["last_attempt_blocker"] == "DB_REFUSED"
     assert i["owner"] == "EDDIE" and i["evidence_needed"] == [
         "EXECUTION_ESTIMATE"]
     j = W.queue_item(_q(), NOW)
@@ -583,9 +636,63 @@ def test_the_queue_item_view():
     assert not W.market_blocker(None)
 
 
+def test_a_truncated_or_unreadable_queue_is_never_idle():
+    """(R30B review) The open COUNT is read per agent with no limit; the
+    items are a bounded read. An agent whose count says it owns work is
+    never IDLE even when none of its items was read, and a queue that could
+    not be read is never taken as empty: no state, with the reason."""
+    for agent in W.AGENTS:
+        f = {"queue": [], "queue_open": 2001, "queue_overdue": 2001,
+             "queue_status": "OK", "market": MARKET_OK}
+        if agent == "XAVIER":
+            f.update(open_positions=0, positions=[])
+        s = W.derive(agent, f, now=NOW)
+        assert s["state"] not in (W.IDLE, None), (agent, s)
+        assert s["queue"]["open"] == 2001 and s["queue"]["read"] == 0
+        assert s["queue"]["limited"] is True
+        assert s["queue"]["overdue"] == 2001
+        assert not W.invariant_holds(agent, f, W.IDLE)
+        # the queue read failed: whether it owns work is unknown
+        f = {"queue": [], "queue_status": "UNAVAILABLE",
+             "queue_why": "DivisionByZeroError", "market": MARKET_OK}
+        if agent == "XAVIER":
+            f.update(open_positions=0, positions=[])
+        s = W.derive(agent, f, now=NOW)
+        assert s["state"] is None, (agent, s)
+        assert s["basis"][-1]["why"] == \
+            "QUEUE_UNREADABLE:DivisionByZeroError"
+        assert not W.invariant_holds(agent, f, W.IDLE)
+        # ... and any other recorded state still stands on its own rows
+        f["status"] = RUN
+        assert W.derive(agent, f, now=NOW)["state"] == (
+            W.BUSY.get(agent, W.WORKING))
+    # the queue table absent (migration 234 not applied): no queue work
+    # exists to own, so IDLE stays a valid answer
+    s = W.derive("SCOUT", {"queue": [], "queue_status": "ABSENT",
+                           "queue_why": "MIGRATION_234_NOT_APPLIED"},
+                 now=NOW)
+    assert s["state"] == W.IDLE
+
+
+def test_attempts_that_back_off_are_still_worked():
+    # attempted 2 h ago, the next attempt scheduled 4 h after it (backoff):
+    # worked, not a hand-off
+    i = _q(outcome="BLOCKED", blocker="DB_REFUSED", last_at=NOW - 7200,
+           nxt=NOW + 7200)
+    s = _st("EDDIE", {"queue": [i], "market": MARKET_OK})
+    assert s["state"] == W.WORKING
+    # the scheduled attempt lapsed beyond the stale window: owed again
+    i = _q(outcome="BLOCKED", blocker="DB_REFUSED", last_at=NOW - 9000,
+           nxt=NOW - W.STALE_FLOOR_S - 60)
+    s = _st("EDDIE", {"queue": [i], "market": MARKET_OK})
+    assert s["state"] == W.HANDOFF
+
+
 def test_the_queue_constants_mirror_the_queue_modules():
     from sportsassets.agents import agent_work as AW
     from sportsassets.agents import work_queue as WQ
+    assert set(W.PASSIVE_KINDS) == set(AW.PASSIVE_KINDS)
+    assert not set(W.PASSIVE_KINDS) & set(W.ACQUISITION_KINDS)
     assert set(W.ACQUISITION_KINDS) == set(AW.ACQUISITION_KINDS)
     assert set(WQ.EVIDENCE_KINDS) | {WQ.K_REASSESS} <= set(
         W.ACQUISITION_KINDS)

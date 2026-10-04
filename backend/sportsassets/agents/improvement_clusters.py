@@ -31,10 +31,22 @@ WHAT THIS DOES.
            table: the share of its rows in each window where the predicate
            holds -- never the challenge count, which Karen throttles;
          * otherwise the members' rate per day (labelled as such).
-       FIX_EFFECTIVE only when the 95% interval of (after - before) lies
-       wholly below zero; FIX_NOT_EFFECTIVE when it lies at or above zero;
-       otherwise the status stays FIX_LINKED (inconclusive). Small windows
-       are INSUFFICIENT_SAMPLE, a missing window UNAVAILABLE with its reason.
+       FIX_EFFECTIVE only when the drop is SIGNIFICANT (the 95% interval of
+       after - before lies wholly below zero) AND MATERIAL: the after
+       window's 95% upper bound is at most max(TARGET_RATE, (1 -
+       MIN_RELATIVE_REDUCTION) x the before rate) -- the fix removed at
+       least 90% of the defect (members per day: the rate ratio's upper
+       bound at most 1 - MIN_RELATIVE_REDUCTION). Significant but not
+       material is FIX_PARTIALLY_EFFECTIVE (R30B review: production's own
+       10-03 -> 10-04 figures, a stale HOLD on 97.6% then 62.4% of
+       reviews, had read FIX_EFFECTIVE while ~10,000 stale HOLDs a day
+       continued). FIX_NOT_EFFECTIVE when the interval lies at or above
+       zero; otherwise FIX_LINKED (inconclusive). Small windows are
+       INSUFFICIENT_SAMPLE, a missing window UNAVAILABLE with its reason.
+       MEASURING NEVER STOPS while a fix is linked: FIX_EFFECTIVE, partial
+       and not-effective clusters are re-measured every MEASURE_EVERY_S on
+       the most recent post-fix window, so a regression moves the status
+       back and re-raises Audrey's triage (agents/agent_work.py).
 
   view(conn)     (GET /api/command/improvement-clusters, read only)
     every cluster: key, count (and the count per challenge state), first /
@@ -45,7 +57,10 @@ WHAT THIS DOES.
 
   link_fix / assign_owner / close / reopen  -- the HUMAN steps, for a named
     person (the database refuses a machine name, and refuses them in the
-    runner's session); nothing in the runner calls them.
+    runner's session); nothing in the runner calls them. Their application
+    path is the admin-token POST in api/command_improvement_clusters.py
+    (the clear-halt pattern of api/command_live_parity.py): the operator
+    names the person, who is recorded as actor and recorded_by.
 
 The improvement pipeline stops seeding one item per challenge of a class
 that has a cluster (improvement_pipeline.seed_karen): the cluster is the
@@ -82,6 +97,16 @@ MAIN_PAPER_ACCOUNT = "paper_acct_main"
 
 S_OPEN, S_FIX_LINKED, S_EFFECTIVE, S_NOT_EFFECTIVE, S_CLOSED = (
     "OPEN", "FIX_LINKED", "FIX_EFFECTIVE", "FIX_NOT_EFFECTIVE", "CLOSED")
+S_PARTIAL = "FIX_PARTIALLY_EFFECTIVE"
+#: the statuses a linked fix keeps being measured in (never stops at
+#: FIX_EFFECTIVE: a regression must be seen)
+S_MEASURED = (S_FIX_LINKED, S_EFFECTIVE, S_PARTIAL, S_NOT_EFFECTIVE)
+#: MATERIALITY: an effective fix removes at least this share of the defect
+#: (the after window's 95% upper bound at most (1 - this) x the before
+#: rate), or brings the rate under TARGET_RATE -- the rule's own near-zero
+#: expectation (each Karen rule names a defect that should not occur)
+MIN_RELATIVE_REDUCTION = 0.9
+TARGET_RATE = 0.01
 MEASURED, INSUFFICIENT, UNAVAILABLE = (
     "MEASURED", "INSUFFICIENT_SAMPLE", "UNAVAILABLE")
 R_NO_SCHEMA = "MIGRATION_234_NOT_APPLIED"
@@ -126,6 +151,36 @@ TARGET_DIMENSIONS = {
         "  JOIN paper_decisions d ON d.decision_id = k.target_id "
         " WHERE k.detector = $1 AND k.target_agent = $2 "
         "   AND k.state = 'UPHELD'" % (MAX_DIM, MAX_DIM)),
+    # Audrey's findings (AUDIT_DISCREPANCY_LEFT_OPEN, production's second
+    # largest class): the finding's own strategy and subject, as
+    # AUDREY_DIMENSIONS reads them (R30B review: this had read
+    # TARGET_KIND_CARRIES_NO_STRATEGY_OR_MARKET although the table carries
+    # both)
+    "paper_audrey_findings": (
+        "SELECT count(DISTINCT f.finding_id) AS subjects, "
+        "       (array_agg(DISTINCT f.detail->>'strategy') FILTER (WHERE "
+        "        f.detail->>'strategy' IS NOT NULL))[1:%d] AS strategies, "
+        "       count(DISTINCT f.detail->>'strategy') AS n_strategies, "
+        "       (array_agg(DISTINCT f.subject) FILTER (WHERE f.subject IS "
+        "        NOT NULL))[1:%d] AS markets, "
+        "       count(DISTINCT f.subject) AS n_markets "
+        "  FROM karen_challenges k "
+        "  JOIN paper_audrey_findings f ON f.finding_id = k.target_id "
+        " WHERE k.detector = $1 AND k.target_agent = $2 "
+        "   AND k.state = 'UPHELD'" % (MAX_DIM, MAX_DIM)),
+    # small-live reconciliations: the handed-off position's market (its
+    # strategy is not recorded on the hand-off: none is claimed)
+    "smalllive_reconciliations": (
+        "SELECT count(DISTINCT r.group_id) AS subjects, "
+        "       ARRAY[]::text[] AS strategies, 0 AS n_strategies, "
+        "       (array_agg(DISTINCT h.us_market_slug) FILTER (WHERE "
+        "        h.us_market_slug IS NOT NULL))[1:%d] AS markets, "
+        "       count(DISTINCT h.us_market_slug) AS n_markets "
+        "  FROM karen_challenges k "
+        "  JOIN smalllive_reconciliations r ON r.group_id = k.target_id "
+        "  LEFT JOIN smalllive_handoffs h ON h.group_id = r.group_id "
+        " WHERE k.detector = $1 AND k.target_agent = $2 "
+        "   AND k.state = 'UPHELD'" % MAX_DIM),
     "execution_intents": (
         "SELECT count(DISTINCT i.intent_id) AS subjects, "
         "       (array_agg(DISTINCT i.strategy))[1:%d] AS strategies, "
@@ -185,11 +240,28 @@ def cluster_id_for(key: str) -> str:
 # THE MEASURED EFFECT (pure)
 # ═════════════════════════════════════════════════════════════════════
 
+def wilson_upper(k: int, n: int, z: float = Z95) -> float | None:
+    """The Wilson score interval's upper bound of k / n. Pure."""
+    if not n:
+        return None
+    p = k / n
+    den = 1 + z * z / n
+    mid = p + z * z / (2 * n)
+    rad = z * math.sqrt(max(p * (1 - p) / n + z * z / (4 * n * n), 0.0))
+    return min(1.0, (mid + rad) / den)
+
+
+def material_target(p0: float) -> float:
+    """The after-rate bound a fix must reach to count as effective. Pure."""
+    return max(TARGET_RATE, (1.0 - MIN_RELATIVE_REDUCTION) * p0)
+
+
 def proportion_effect(before: tuple, after: tuple) -> dict:
     """THE DEFECT RATE BEFORE vs AFTER A FIX from (hits, rows) per window.
-    Pure. Difference of proportions with a 95% normal interval; a window
-    with no rows is UNAVAILABLE, fewer than MIN_WINDOW_ROWS rows
-    INSUFFICIENT_SAMPLE (shown, never concluded from)."""
+    Pure. Difference of proportions with a 95% normal interval and the
+    after rate's Wilson upper bound for materiality; a window with no rows
+    is UNAVAILABLE, fewer than MIN_WINDOW_ROWS rows INSUFFICIENT_SAMPLE
+    (shown, never concluded from)."""
     (k0, n0), (k1, n1) = before, after
     out: dict[str, Any] = {"basis": "RULE_PREDICATE_SHARE_OF_TABLE_ROWS",
                            "before": {"hits": k0, "rows": n0},
@@ -203,12 +275,23 @@ def proportion_effect(before: tuple, after: tuple) -> dict:
     se = math.sqrt(max(p0 * (1 - p0) / n0 + p1 * (1 - p1) / n1, 0.0))
     lo, hi = d - Z95 * se, d + Z95 * se
     small = min(n0, n1) < MIN_WINDOW_ROWS
-    verdict = (S_EFFECTIVE if hi < 0 else S_NOT_EFFECTIVE if lo >= 0
-               else None)
+    up1 = wilson_upper(k1, n1)
+    target = material_target(p0)
+    material = up1 is not None and up1 <= target
+    verdict = ((S_EFFECTIVE if material else S_PARTIAL) if hi < 0
+               else S_NOT_EFFECTIVE if lo >= 0 else None)
     out["before"]["rate"] = round(p0, 6)
     out["after"]["rate"] = round(p1, 6)
+    out["after"]["upper_95"] = round(up1, 6)
     return dict(out, difference=round(d, 6), ci95=[round(lo, 6),
                                                    round(hi, 6)],
+                materiality={"after_upper_95": round(up1, 6),
+                             "target": round(target, 6),
+                             "material": material,
+                             "rule": "after upper bound <= max(%.2f, "
+                                     "%.1f x before rate)" % (
+                                         TARGET_RATE,
+                                         1.0 - MIN_RELATIVE_REDUCTION)},
                 status=INSUFFICIENT if small else MEASURED,
                 why=("FEWER_THAN_%d_ROWS_IN_A_WINDOW" % MIN_WINDOW_ROWS
                      if small else None),
@@ -233,23 +316,29 @@ def rate_effect(before: tuple, after: tuple) -> dict:
     se = math.sqrt(1.0 / a0 + 1.0 / a1)
     lo, hi = lrr - Z95 * se, lrr + Z95 * se
     small = (c0 + c1) < 10
-    verdict = (S_EFFECTIVE if hi < 0 else S_NOT_EFFECTIVE if lo >= 0
-               else None)
+    material = math.exp(hi) <= 1.0 - MIN_RELATIVE_REDUCTION
+    verdict = ((S_EFFECTIVE if material else S_PARTIAL) if hi < 0
+               else S_NOT_EFFECTIVE if lo >= 0 else None)
     out["before"]["per_day"] = round(r0, 4)
     out["after"]["per_day"] = round(r1, 4)
     return dict(out, log_rate_ratio=round(lrr, 6),
                 ci95=[round(lo, 6), round(hi, 6)],
+                materiality={"rate_ratio_upper_95": round(math.exp(hi), 6),
+                             "target": round(1.0 - MIN_RELATIVE_REDUCTION,
+                                             6),
+                             "material": material},
                 status=INSUFFICIENT if small else MEASURED,
                 why="FEWER_THAN_10_MEMBERS" if small else None,
                 verdict=None if small else verdict)
 
 
 def windows(fix_at: float, now: float) -> tuple:
-    """(before_start, fix_at, now): the post-fix window is everything since
-    the fix; the baseline is the same length before it (at most
-    BASELINE_MAX_S)."""
+    """(before_start, fix_at, after_start, now): the post-fix window is the
+    most recent BASELINE_MAX_S since the fix (so a regression weeks after a
+    fix is not diluted by the good days right after it); the baseline is
+    the same length immediately before the fix."""
     length = min(max(now - fix_at, 0.0), BASELINE_MAX_S)
-    return fix_at - length, fix_at, now
+    return fix_at - length, fix_at, now - length, now
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -329,7 +418,17 @@ async def _members(conn, c: dict) -> dict:
             "member_basis": "paper_audrey_findings WARNING / CRITICAL (kind)"}
 
 
+#: what a cluster's "markets" / "strategies" are, per challenged record
+DIMENSION_BASIS = {
+    "AUDREY": {"markets": "the finding's subject"},
+    "paper_audrey_findings": {"markets": "the finding's subject"},
+    "smalllive_reconciliations": {
+        "strategies": "NOT_RECORDED_ON_THE_SMALL_LIVE_HANDOFF"},
+}
+
+
 async def _dimensions(conn, c: dict) -> dict:
+    tk = "AUDREY"
     if c["source"] == "AUDREY":
         sql = AUDREY_DIMENSIONS
         args = (c["finding_class"],)
@@ -355,7 +454,8 @@ async def _dimensions(conn, c: dict) -> dict:
             "strategies": [s for s in (r["strategies"] or []) if s],
             "n_strategies": int(r["n_strategies"] or 0),
             "markets": [m for m in (r["markets"] or []) if m],
-            "n_markets": int(r["n_markets"] or 0)}
+            "n_markets": int(r["n_markets"] or 0),
+            "basis": DIMENSION_BASIS.get(tk) or {}}
 
 
 async def _events(conn, cid: str) -> list:
@@ -400,35 +500,36 @@ async def measure_effect(conn, c: dict, fix: dict | None, *,
     if now - fix_at < MIN_POST_FIX_S:
         return {"status": UNAVAILABLE, "why": R_TOO_SOON, "verdict": None,
                 "fix_effective_at": fix_at}
-    lo, mid, hi = windows(fix_at, now)
+    lo, mid, a0, hi = windows(fix_at, now)
     out: dict[str, Any] = {"fix_effective_at": fix_at,
                            "windows": {"before": [lo, mid],
-                                       "after": [mid, hi]}}
+                                       "after": [a0, hi]}}
     if c["source"] == "KAREN":
         b = await rule_rate(conn, c["finding_class"], lo, mid)
-        a = await rule_rate(conn, c["finding_class"], mid, hi)
+        a = await rule_rate(conn, c["finding_class"], a0, hi)
         if b is not None and a is not None:
             return dict(out, **proportion_effect(b, a),
                         rule=c["finding_class"])
         cnt = await conn.fetchrow(
-            "SELECT count(*) FILTER (WHERE record_at < to_timestamp($3)) "
-            "         AS c0, count(*) FILTER (WHERE record_at >= "
-            "         to_timestamp($3)) AS c1 FROM karen_challenges "
+            "SELECT count(*) FILTER (WHERE record_at >= to_timestamp($3) "
+            "         AND record_at < to_timestamp($4)) AS c0, "
+            "       count(*) FILTER (WHERE record_at >= to_timestamp($5) "
+            "         AND record_at < to_timestamp($6)) AS c1 "
+            "  FROM karen_challenges "
             " WHERE detector = $1 AND target_agent = $2 "
-            "   AND state = 'UPHELD' AND record_at >= to_timestamp($4) "
-            "   AND record_at < to_timestamp($5)",
-            c["finding_class"], c["target_agent"], mid, lo, hi)
+            "   AND state = 'UPHELD'",
+            c["finding_class"], c["target_agent"], lo, mid, a0, hi)
     else:
         cnt = await conn.fetchrow(
-            "SELECT count(*) FILTER (WHERE found_at < to_timestamp($2)) AS "
-            "       c0, count(*) FILTER (WHERE found_at >= to_timestamp($2))"
-            "       AS c1 FROM paper_audrey_findings WHERE kind = $1 "
-            "   AND severity IN ('WARNING', 'CRITICAL') "
-            "   AND found_at >= to_timestamp($3) "
-            "   AND found_at < to_timestamp($4)",
-            c["finding_class"], mid, lo, hi)
+            "SELECT count(*) FILTER (WHERE found_at >= to_timestamp($2) "
+            "         AND found_at < to_timestamp($3)) AS c0, "
+            "       count(*) FILTER (WHERE found_at >= to_timestamp($4) "
+            "         AND found_at < to_timestamp($5)) AS c1 "
+            "  FROM paper_audrey_findings WHERE kind = $1 "
+            "   AND severity IN ('WARNING', 'CRITICAL')",
+            c["finding_class"], lo, mid, a0, hi)
     eff = rate_effect((int(cnt["c0"] or 0), (mid - lo) / 86400.0),
-                      (int(cnt["c1"] or 0), (hi - mid) / 86400.0))
+                      (int(cnt["c1"] or 0), (hi - a0) / 86400.0))
     if c["source"] == "KAREN":
         eff["note"] = ("members are Karen's challenges, which she raises at "
                        "most three per detector per pass: a throttled "
@@ -615,7 +716,7 @@ async def refresh(conn, *, now: float | None = None) -> dict:
         try:
             ev = await _events(conn, c["cluster_id"])
             st = state_of(c, ev)
-            if st["status"] != S_FIX_LINKED or not st["fix"]:
+            if st["status"] not in S_MEASURED or not st["fix"]:
                 continue
             last = st["last_measurement"]
             if last is not None and t - float(last["at"]) < MEASURE_EVERY_S:
@@ -703,11 +804,12 @@ async def link_fix(conn, cluster_id: str, *, actor: str, commit_sha: str,
 
 async def assign_owner(conn, cluster_id: str, *, actor: str, owner: str,
                        at: float | None = None) -> dict:
+    """A PERSON assigns the owner; the cluster's status is kept (the
+    database refuses an assignment that would change it)."""
     ev = await _events(conn, cluster_id)
     st = state_of({"owner_agent": None}, ev)["status"]
     return await _human(conn, cluster_id, kind="OWNER_ASSIGNED",
-                        status_to=st if st in (S_OPEN, S_FIX_LINKED)
-                        else S_OPEN, actor=actor,
+                        status_to=st, actor=actor,
                         at=float(at if at is not None else time.time()),
                         owner=owner)
 

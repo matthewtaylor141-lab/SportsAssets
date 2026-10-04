@@ -585,7 +585,9 @@ def _mem_row(r) -> dict:
     d["facts"] = _j(d.get("facts")) or {}
     d["confidence"] = _f(d.get("confidence"))
     d["source"] = "agent_memory_events"
-    d["historical"] = d.get("superseded_by") is not None
+    d["lesson_weight"] = _f(d.get("lesson_weight", 1.0))
+    d["historical"] = d.get("superseded_by") is not None or (
+        d["lesson_weight"] is not None and d["lesson_weight"] <= 0)
     return d
 
 
@@ -607,16 +609,43 @@ async def private_memories(conn, *, reader: str, owner: str,
                            before: float | None = None,
                            include_superseded: bool = True) -> list:
     """THE OWNER'S MEMORY, for the owner itself or the human OPERATOR only.
-    Another agent is refused (PrivateMemoryRefused) before any read."""
+    Another agent is refused (PrivateMemoryRefused) before any read.
+
+    With include_superseded=False (the agent's own context bundle,
+    agent_context.build_context) a lesson SUPERSEDED on forward INVESTMENT
+    evidence (migration 234's agent_lesson_supersessions, weight 0) is left
+    out like a memory superseded by a newer one, and a DOWNWEIGHTED lesson
+    ranks after full-weight memories (R30B review: the supersession record
+    had changed nothing an agent read). Every row carries `lesson_weight`
+    (1.0 before any supersession). Read only; the weight grants nothing."""
     o = _check_reader(reader, owner)
-    rows = await conn.fetch(
-        "SELECT %s FROM agent_memory_events WHERE agent_id=$1 "
-        "   AND ($2::text IS NULL OR memory_kind=$2) "
-        "   AND ($3::float8 IS NULL OR learned_at < to_timestamp($3)) "
-        "   AND ($4 OR superseded_by IS NULL) "
-        " ORDER BY learned_at DESC, memory_id DESC LIMIT $5" % _MEM_COLS,
-        o, kind, before, bool(include_superseded),
-        max(1, min(int(limit or 50), 500)))
+    n = max(1, min(int(limit or 50), 500))
+    if await _exists(conn, "agent_lesson_supersessions"):
+        rows = await conn.fetch(
+            "SELECT %s, coalesce(w.weight, 1.0) AS lesson_weight "
+            "  FROM agent_memory_events m LEFT JOIN LATERAL (SELECT s.weight"
+            "       FROM agent_lesson_supersessions s "
+            "      WHERE s.lesson_table = 'agent_memory_events' "
+            "        AND s.lesson_id = m.memory_id "
+            "      ORDER BY s.decided_at DESC, s.recorded_at DESC LIMIT 1) w "
+            "    ON true WHERE m.agent_id=$1 "
+            "   AND ($2::text IS NULL OR m.memory_kind=$2) "
+            "   AND ($3::float8 IS NULL OR m.learned_at < to_timestamp($3)) "
+            "   AND ($4 OR (m.superseded_by IS NULL "
+            "               AND coalesce(w.weight, 1.0) > 0)) "
+            " ORDER BY CASE WHEN $4 THEN 1.0 ELSE coalesce(w.weight, 1.0) "
+            "          END DESC, m.learned_at DESC, m.memory_id DESC "
+            " LIMIT $5" % ", ".join("m." + c.strip()
+                                    for c in _MEM_COLS.split(",")),
+            o, kind, before, bool(include_superseded), n)
+    else:
+        rows = await conn.fetch(
+            "SELECT %s FROM agent_memory_events WHERE agent_id=$1 "
+            "   AND ($2::text IS NULL OR memory_kind=$2) "
+            "   AND ($3::float8 IS NULL OR learned_at < to_timestamp($3)) "
+            "   AND ($4 OR superseded_by IS NULL) "
+            " ORDER BY learned_at DESC, memory_id DESC LIMIT $5" % _MEM_COLS,
+            o, kind, before, bool(include_superseded), n)
     return [_mem_row(r) for r in rows]
 
 

@@ -203,13 +203,33 @@ async def seed_karen(conn, *, now: float) -> list:
     # migration 234): an upheld challenge of a class that has a root-cause
     # cluster (Karen detector x target agent) is a member of that cluster,
     # which is the engineering item -- production seeded 232 items from 684
-    # repeated HOLD_ON_STALE_PROBABILITY challenges of 7 groups
+    # repeated HOLD_ON_STALE_PROBABILITY challenges of 7 groups. WHILE THE
+    # CLUSTER IS ACTIVE (OPEN / FIX_LINKED / FIX_PARTIALLY_EFFECTIVE /
+    # FIX_NOT_EFFECTIVE) every member folds into it. Once it is
+    # FIX_EFFECTIVE or CLOSED, a challenge of a record made AFTER the cluster
+    # reached that status is a RECURRENCE and is seeded as its own item
+    # again (R30B review: folding every status had left a defect recurring
+    # after a "fix" with no work item anywhere); the cluster runner also
+    # re-measures FIX_EFFECTIVE clusters and moves them back on regression.
     clustered = "TRUE"
     if await _regclass(conn, "improvement_clusters"):
-        clustered = ("NOT EXISTS (SELECT 1 FROM improvement_clusters c "
-                     " WHERE c.source = 'KAREN' "
-                     "   AND c.finding_class = karen_challenges.detector "
-                     "   AND c.target_agent = karen_challenges.target_agent)")
+        clustered = (
+            "NOT EXISTS (SELECT 1 FROM improvement_clusters c "
+            "  LEFT JOIN LATERAL (SELECT s.status_to, (SELECT min(e2.at) "
+            "       FROM improvement_cluster_events e2 WHERE e2.cluster_id "
+            "       = c.cluster_id AND e2.at > coalesce((SELECT max(e3.at) "
+            "       FROM improvement_cluster_events e3 WHERE e3.cluster_id "
+            "       = c.cluster_id AND e3.status_to <> s.status_to), "
+            "       '-infinity'::timestamptz)) AS since FROM (SELECT "
+            "       e.status_to FROM improvement_cluster_events e WHERE "
+            "       e.cluster_id = c.cluster_id ORDER BY e.at DESC, "
+            "       e.event_id DESC LIMIT 1) s) st ON true "
+            " WHERE c.source = 'KAREN' "
+            "   AND c.finding_class = karen_challenges.detector "
+            "   AND c.target_agent = karen_challenges.target_agent "
+            "   AND (coalesce(st.status_to, 'OPEN') NOT IN "
+            "        ('FIX_EFFECTIVE', 'CLOSED') "
+            "        OR karen_challenges.record_at <= st.since))")
     rows = await conn.fetch(
         "SELECT * FROM karen_challenges WHERE state = 'UPHELD' "
         "   AND finding_id IS NULL "

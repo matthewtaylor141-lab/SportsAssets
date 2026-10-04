@@ -31,8 +31,16 @@ work writes):
                    R_FRESHNESS_UNKNOWN). COMPLETED by a later decision on
                    that candidate that was not refused on freshness; a later
                    decision still refused on it is an ATTEMPT (WAITING).
-                   The open items are the hot-candidate list the freshness
-                   service reads (`hot_candidate_slugs`).
+                   PASSIVE (R30B review): no acquisition path reads these
+                   items -- the reacquisition is only Derek's next ordinary
+                   re-decision of the candidate when the collector or the
+                   reactive scheduler happens to bring a new valuation -- so
+                   they are NEVER counted as an enqueued reacquisition
+                   (PASSIVE_KINDS; agent_work_state derives HANDOFF_PENDING /
+                   REACQUISITION_NOT_ENQUEUED, never passive WAITING).
+                   `hot_candidate_slugs` is the read an acquisition path
+                   would consume; it has no caller on this branch, and the
+                   kind leaves PASSIVE_KINDS only when one dispatches it.
   XAVIER           (226, unchanged) PROBABILITY / VENUE_BOOK / GAME_STATE /
                    MANAGEMENT_REASSESSMENT through work_queue.after_review /
                    drain; plus his challenge answers / evaluations below.
@@ -46,7 +54,15 @@ work writes):
                    that the pass did not open (the open-challenge cap, the
                    per-pass budget). PUSHED by karen_runner. COMPLETED by the
                    challenge that opened it; FAILED when the same rule no
-                   longer holds for the record.
+                   longer holds for the record, or when the record has left
+                   her detector's lookback (karen_runner.LOOKBACK_S: no pass
+                   can ever challenge it). At most
+                   MAX_OPEN_INVESTIGATIONS_PER_DETECTOR open per detector
+                   (R30B review: a capped detector deferred its three oldest
+                   records every 300 s pass, the window moved, and an
+                   immutable stale HOLD kept its rule true -- about 864 new
+                   items a day per capped detector, never closed before
+                   their 7-day expiry).
   CHIEF_ALLOCATOR  ALLOCATION_REVIEW  a paper ENTER decision recorded after
                    her latest allocation run started. COMPLETED by the first
                    OK allocation run that started after it (its allocation
@@ -62,7 +78,14 @@ work writes):
                    attempt (PROGRESSED when samples grew, else WAITING with
                    the sample count against the predeclared minimum).
                    COMPLETED by the evaluator's verdict.
-  AUDREY           AUDIT_RECONCILIATION  a small-live reconciliation in
+  AUDREY           AUDIT_FINDING_FOLLOWUP  an open WARNING / CRITICAL
+                   paper audit finding (paper_audrey_findings) with no
+                   improvement task (the class production shows Karen
+                   upholding 50 times as AUDIT_DISCREPANCY_LEFT_OPEN). SLA:
+                   karen_runner.AUDIT_OPEN_AFTER_S after it was found.
+                   COMPLETED by the improvement task linked to it
+                   (paper_audrey.open_task); FAILED if the finding is gone.
+                   AUDIT_RECONCILIATION  a small-live reconciliation in
                    DISCREPANCY. COMPLETED when it reconciles.
                    ROOT_CAUSE_TRIAGE  an open root-cause cluster
                    (agents/improvement_clusters.py, refreshed on the same
@@ -76,9 +99,21 @@ An item stays open past its SLA (OVERDUE, visible) until its hard horizon
 is still pending, enqueued again on the next pass with a fresh horizon (its
 SLA still counted from when the work arose).
 
+ATTEMPTS FOLLOW THE SCHEDULE THEY RECORD (R30B review: every pass wrote an
+ATTEMPTED event whatever next_attempt_at said, so the recorded next attempt
+was false and the database's per-request bound was exhausted long before an
+item's horizon). An attempt is recorded only when the item's scheduled next
+attempt is due -- or its outcome / blocker changed and at least the kind's
+base interval has passed. The base interval is the larger of the kind's
+retry_s and the runner's own cadence; an UNCHANGED outcome doubles the
+interval (up to MAX_RETRY_BACKOFF_S). So at most ttl_s / retry_s attempts
+fit in any item's life, below the database's bound for every kind (a test
+sizes it).
+
 BOUNDED: per-kind backlog limits, at most MAX_ENQUEUE_PER_KIND new items and
-MAX_ATTEMPTS_PER_KIND attempts per pass, the open-slot primary key, the
-database's per-request attempt bound.
+MAX_ATTEMPTS_PER_KIND attempts per pass, the open-slot primary key, per-
+detector caps on Karen's investigations, the database's per-request attempt
+bound. Past-horizon items are expired first, whatever the read limit.
 
 NO AUTHORITY. It writes only the three agent_work_* tables (through the
 work_queue writers for terminal events). It imports no order, venue,
@@ -116,17 +151,21 @@ K_CALIBRATION = "OUTCOME_CALIBRATION"
 K_RESEARCH = "RESEARCH_QUESTION"
 K_RECONCILIATION = "AUDIT_RECONCILIATION"
 K_ROOT_CAUSE = "ROOT_CAUSE_TRIAGE"
+K_AUDIT_FINDING = "AUDIT_FINDING_FOLLOWUP"
 
-#: an open item of one of these IS an enqueued reacquisition (= agent_work_
-#: state.ACQUISITION_KINDS; a test pins both)
-ACQUISITION_KINDS = WQ.EVIDENCE_KINDS + (WQ.K_REASSESS, K_CANDIDATE,
-                                         K_RESEARCH)
+#: an open item of one of these IS an enqueued reacquisition, serviced by a
+#: named path (= agent_work_state.ACQUISITION_KINDS; a test pins both)
+ACQUISITION_KINDS = WQ.EVIDENCE_KINDS + (WQ.K_REASSESS, K_RESEARCH)
+#: no acquisition path services these: never a reacquisition, even waiting
+#: (= agent_work_state.PASSIVE_KINDS, pinned)
+PASSIVE_KINDS = (K_CANDIDATE,)
 
 F_EXPIRED = "EXPIRED_UNRESOLVED"
 F_WITHDRAWN = "CHALLENGE_WITHDRAWN"
 F_RULE_GONE = "RULE_NO_LONGER_HOLDS"
 F_LEFT_WINDOW = "LEFT_THE_ESTIMATION_WINDOW"
 F_LEFT_BACKLOG = "SUBJECT_LEFT_THE_BACKLOG_WITHOUT_EVIDENCE"
+F_LEFT_DETECTOR = "RECORD_LEFT_THE_DETECTOR_WINDOW"
 
 R_NO_SCHEMA = "MIGRATION_234_NOT_APPLIED"
 R_NOT_OWNER = "AGENT_DOES_NOT_OWN_THIS_KIND"
@@ -141,6 +180,17 @@ CHALLENGE_TARGETS = ("DEREK", "XAVIER", "AUDREY", "CHIEF_ALLOCATOR")
 #: = agents.eddie.VERSION and eddie_runner.LOOKBACK_S (pinned by a test)
 EDDIE_ESTIMATOR_VERSION = "EDDIE_EXECUTION_ESTIMATOR_V1"
 EDDIE_LOOKBACK_S = AWS.EDDIE_LOOKBACK_S
+#: = karen_runner.LOOKBACK_S / MAX_OPEN_PER_DETECTOR / AUDIT_OPEN_AFTER_S
+#: (copied: karen_runner is imported only lazily, for the same-rule
+#: re-check; a test pins them)
+KAREN_LOOKBACK_S = 7 * 86400.0
+MAX_OPEN_INVESTIGATIONS_PER_DETECTOR = 25
+AUDIT_OPEN_AFTER_S = 86400.0
+#: Audrey's findings older than this leave her follow-up backlog (= the
+#: queue's own 30-day horizon, migration 234's due_at bound)
+AUDIT_BACKLOG_S = 30 * 86400.0
+#: the longest interval an unchanged outcome backs off to
+MAX_RETRY_BACKOFF_S = 6 * 3600.0
 
 DAY = 86400.0
 #: THE TERMS PER KIND: owners, subject kind, what raised it, SLA (seconds
@@ -157,21 +207,22 @@ KINDS: dict = {
     K_RESPONSE: {
         "agents": CHALLENGE_TARGETS, "scope": "CHALLENGE",
         "reason": "KAREN_CHALLENGE_OPEN", "sla_s": 3600.0,
-        "ttl_s": 7 * DAY, "retry_s": 120.0,
+        "ttl_s": 7 * DAY, "retry_s": 600.0,
         "evidence": ["PEER_RESPONSE_UNDER_THE_SAME_RULE"],
         "collaborator": "KAREN", "backlog_limit": 300},
     K_EVALUATION: {
         "agents": ("AUDREY", "XAVIER"), "scope": "CHALLENGE",
         "reason": "CHALLENGE_RESPONDED", "sla_s": 3600.0,
-        "ttl_s": 7 * DAY, "retry_s": 120.0,
+        "ttl_s": 7 * DAY, "retry_s": 600.0,
         "evidence": ["INDEPENDENT_EVALUATION_UNDER_THE_SAME_RULE"],
         "collaborator": None, "backlog_limit": 300},
     K_INVESTIGATION: {
         "agents": ("KAREN",), "scope": "RECORD",
         "reason": "DETECTOR_CANDIDATE_DEFERRED", "sla_s": 3600.0,
-        "ttl_s": 7 * DAY, "retry_s": 300.0,
+        "ttl_s": 7 * DAY, "retry_s": 600.0,
         "evidence": ["GROUNDED_CHALLENGE_RECORD"],
-        "collaborator": None, "backlog_limit": 0},
+        "collaborator": None, "backlog_limit": 0,
+        "open_cap": ("detector", MAX_OPEN_INVESTIGATIONS_PER_DETECTOR)},
     K_ALLOCATION: {
         "agents": ("CHIEF_ALLOCATOR",), "scope": "DECISION",
         "reason": "ENTER_AFTER_LAST_ALLOCATION_RUN", "sla_s": 1200.0,
@@ -187,13 +238,13 @@ KINDS: dict = {
     K_CALIBRATION: {
         "agents": ("EDDIE",), "scope": "ESTIMATE",
         "reason": "ESTIMATE_FILLED_WITHOUT_OUTCOME", "sla_s": 3600.0,
-        "ttl_s": 7 * DAY, "retry_s": 300.0,
+        "ttl_s": 7 * DAY, "retry_s": 600.0,
         "evidence": ["PAPER_FILLS", "EXECUTION_OUTCOME"],
         "collaborator": "DEREK", "backlog_limit": 200},
     K_RESEARCH: {
         "agents": ("SCOUT",), "scope": "FEATURE",
         "reason": "FEATURE_UNDER_TEST", "sla_s": 14 * DAY,
-        "ttl_s": 30 * DAY, "retry_s": 600.0,
+        "ttl_s": 30 * DAY, "retry_s": 1800.0,
         "evidence": ["PROSPECTIVE_SAMPLES", "SETTLED_OUTCOMES",
                      "EVALUATOR_VERDICT"],
         "collaborator": "KAREN", "backlog_limit": 100},
@@ -209,6 +260,12 @@ KINDS: dict = {
         "ttl_s": 30 * DAY, "retry_s": 3600.0,
         "evidence": ["LINKED_FIX_COMMIT", "MEASURED_EFFECT_AFTER_THE_FIX"],
         "collaborator": None, "backlog_limit": 100},
+    K_AUDIT_FINDING: {
+        "agents": ("AUDREY",), "scope": "RECORD",
+        "reason": "AUDIT_FINDING_WITHOUT_TASK",
+        "sla_s": AUDIT_OPEN_AFTER_S, "ttl_s": 7 * DAY, "retry_s": 3600.0,
+        "evidence": ["IMPROVEMENT_TASK_LINKED"],
+        "collaborator": None, "backlog_limit": 100},
 }
 #: which kinds each runner syncs
 RUNNER_KINDS = {
@@ -218,7 +275,7 @@ RUNNER_KINDS = {
     # pass that records the ENTER decisions she reviews, and her runs'
     # outcomes (intel_runs) complete or block each item
     "paper_pass": (K_CANDIDATE, K_RECONCILIATION, K_ALLOCATION,
-                   K_ROOT_CAUSE),
+                   K_ROOT_CAUSE, K_AUDIT_FINDING),
     "karen_runner": (K_INVESTIGATION,),
     "peer_responder": (K_RESPONSE, K_EVALUATION),
     "eddie_runner": (K_ESTIMATE, K_CALIBRATION),
@@ -383,6 +440,51 @@ async def attempt(conn, request_id: str, *, at: float, outcome: str,
 
 complete = WQ.complete
 fail = WQ.fail
+
+
+def _norm_blocker(outcome: str, blocker) -> str | None:
+    if blocker:
+        return str(blocker)[:200]
+    return "UNSPECIFIED_BLOCKER" if outcome == O_BLOCKED else None
+
+
+def attempt_plan(item: dict, *, at: float, outcome: str, blocker,
+                 base_s: float) -> dict | None:
+    """IS AN ATTEMPT DUE, and when is the next one? Pure. None: not due --
+    nothing is recorded, the item's scheduled next attempt stays true.
+
+      * never attempted: due, next after `base_s`;
+      * the same outcome and blocker as the last attempt: due only once its
+        scheduled next attempt has come; the interval then DOUBLES (up to
+        MAX_RETRY_BACKOFF_S) -- an unchanged answer is not news;
+      * a changed outcome or blocker: due once `base_s` has passed since the
+        last attempt; the interval returns to `base_s`."""
+    last = item.get("last_attempt_at")
+    base = max(1.0, float(base_s))
+    if last is None or item.get("last_attempt") not in (None, "ATTEMPTED"):
+        return {"next_in_s": base}
+    last = float(last)
+    b = _norm_blocker(outcome, blocker)
+    same = (item.get("outcome") == outcome
+            and (item.get("last_attempt_blocker") or None) == b)
+    nxt = item.get("next_attempt_at")
+    prev = (float(nxt) - last) if nxt is not None and float(nxt) > last \
+        else base
+    if same:
+        if nxt is not None and at < float(nxt) - 1e-6:
+            return None
+        return {"next_in_s": min(max(2.0 * prev, base),
+                                 max(MAX_RETRY_BACKOFF_S, base))}
+    if at - last < base - 1e-6:
+        return None
+    return {"next_in_s": base}
+
+
+def max_attempts(kind: str) -> int:
+    """The most attempts an item of `kind` can record in its life under
+    attempt_plan (every attempt a change, at the base interval). Pure."""
+    spec = KINDS[kind]
+    return int(float(spec["ttl_s"]) // float(spec["retry_s"])) + 1
 
 
 async def open_items(conn, *, agent: str | None = None, kinds=None,
@@ -566,6 +668,16 @@ async def _resolve_investigation(conn, items: list, now: float) -> dict:
         if cid is not None:
             out[it["request_id"]] = ("COMPLETED", "karen_challenges", cid, {
                 "detector": d.get("detector")})
+            continue
+        # THE RECORD LEFT HER DETECTOR'S WINDOW: no pass can challenge it
+        # any more (the detector reads [now - LOOKBACK_S, now]); an
+        # immutable record keeps its rule true forever, so waiting for the
+        # rule to stop holding would keep the item open until expiry
+        rec = _ep(d.get("arose_at"))
+        if rec is not None and now - rec > KAREN_LOOKBACK_S:
+            out[it["request_id"]] = ("FAILED", F_LEFT_DETECTOR, {
+                "detector": d.get("detector"), "record_at": rec,
+                "lookback_s": KAREN_LOOKBACK_S})
             continue
         try:
             from . import karen_runner as KR
@@ -830,6 +942,47 @@ async def _resolve_reconciliation(conn, items: list, now: float) -> dict:
     return out
 
 
+async def _backlog_audit_finding(conn, now: float, limit: int) -> list:
+    if not await _exists(conn, "paper_audrey_findings"):
+        return []
+    rows = await conn.fetch(
+        "SELECT finding_id, kind, severity, subject, found_at, "
+        "       detail->>'strategy' AS strategy FROM paper_audrey_findings "
+        " WHERE severity IN ('WARNING', 'CRITICAL') "
+        "   AND improvement_task_id IS NULL "
+        "   AND found_at BETWEEN to_timestamp($1) AND to_timestamp($2) "
+        " ORDER BY found_at, finding_id LIMIT $3",
+        now - AUDIT_BACKLOG_S, now, limit)
+    return [{"agent": "AUDREY", "subject": r["finding_id"],
+             "arose_at": _ep(r["found_at"]),
+             "source_table": "paper_audrey_findings",
+             "source_id": r["finding_id"],
+             "blocker": "NO_IMPROVEMENT_TASK_LINKED",
+             "detail": {"finding_kind": r["kind"],
+                        "severity": r["severity"], "subject": r["subject"],
+                        "strategy": r["strategy"]}} for r in rows]
+
+
+async def _resolve_audit_finding(conn, items: list, now: float) -> dict:
+    out: dict = {}
+    ids = [it["subject"] for it in items]
+    if not ids:
+        return out
+    rows = {r["finding_id"]: r for r in await conn.fetch(
+        "SELECT finding_id, improvement_task_id FROM paper_audrey_findings "
+        " WHERE finding_id = ANY($1::text[])", ids)}
+    for it in items:
+        r = rows.get(it["subject"])
+        if r is None:
+            out[it["request_id"]] = ("FAILED", F_LEFT_BACKLOG,
+                                     {"why": "FINDING_NOT_FOUND"})
+        elif r["improvement_task_id"]:
+            out[it["request_id"]] = ("COMPLETED", "agent_tasks",
+                                     r["improvement_task_id"], {
+                                         "finding_id": r["finding_id"]})
+    return out
+
+
 async def _backlog_root_cause(conn, now: float, limit: int) -> list:
     if not await _exists(conn, "improvement_clusters"):
         return []
@@ -840,20 +993,30 @@ async def _backlog_root_cause(conn, now: float, limit: int) -> list:
         "       improvement_cluster_events e WHERE e.cluster_id = "
         "       c.cluster_id ORDER BY e.at DESC, e.event_id DESC LIMIT 1) s "
         "    ON true "
-        " WHERE coalesce(s.status_to, 'OPEN') IN ('OPEN', 'FIX_LINKED', "
-        "       'FIX_NOT_EFFECTIVE') "
-        " ORDER BY c.first_seen_at, c.cluster_id LIMIT $1", limit)
+        " WHERE coalesce(s.status_to, 'OPEN') = ANY($2::text[]) "
+        " ORDER BY c.first_seen_at, c.cluster_id LIMIT $1", limit,
+        list(ROOT_CAUSE_OPEN))
     return [{"agent": "AUDREY", "subject": r["cluster_id"],
              "arose_at": _ep(r["opened_at"]),
              "source_table": "improvement_clusters",
              "source_id": r["cluster_id"],
              "collaborator": r["owner_agent"]
              if r["owner_agent"] != "AUDREY" else "KAREN",
-             "blocker": ("AWAITING_POST_FIX_EVIDENCE"
-                         if r["status_to"] == "FIX_LINKED"
-                         else "AWAITING_ENGINEERING_FIX"),
+             "blocker": ROOT_CAUSE_BLOCKER.get(r["status_to"] or "OPEN"),
              "detail": {"cluster_key": r["cluster_key"],
                         "status": r["status_to"] or "OPEN"}} for r in rows]
+
+
+#: the cluster statuses that owe Audrey's triage (a cluster measured
+#: FIX_EFFECTIVE is re-measured daily: a regression returns it here and
+#: re-raises the triage), and what blocks it in each
+ROOT_CAUSE_OPEN = ("OPEN", "FIX_LINKED", "FIX_PARTIALLY_EFFECTIVE",
+                   "FIX_NOT_EFFECTIVE")
+ROOT_CAUSE_BLOCKER = {
+    "OPEN": "AWAITING_ENGINEERING_FIX",
+    "FIX_LINKED": "AWAITING_POST_FIX_EVIDENCE",
+    "FIX_PARTIALLY_EFFECTIVE": "FIX_PARTIALLY_EFFECTIVE_DEFECT_STILL_RUNNING",
+    "FIX_NOT_EFFECTIVE": "FIX_NOT_EFFECTIVE"}
 
 
 async def _resolve_root_cause(conn, items: list, now: float) -> dict:
@@ -872,13 +1035,13 @@ async def _resolve_root_cause(conn, items: list, now: float) -> dict:
                                          "status": r["status_to"]})
         elif r["status_to"] == "FIX_LINKED":
             out[it["request_id"]] = ("ATTEMPT", O_WAITING,
-                                     "AWAITING_POST_FIX_EVIDENCE",
+                                     ROOT_CAUSE_BLOCKER["FIX_LINKED"],
                                      {"event_id": r["event_id"]})
         else:
             out[it["request_id"]] = ("ATTEMPT", O_BLOCKED,
-                                     "AWAITING_ENGINEERING_FIX" if r[
-                                         "status_to"] == "OPEN" else
-                                     "FIX_NOT_EFFECTIVE",
+                                     ROOT_CAUSE_BLOCKER.get(
+                                         r["status_to"],
+                                         "AWAITING_ENGINEERING_FIX"),
                                      {"event_id": r["event_id"]})
     return out
 
@@ -908,6 +1071,7 @@ PRODUCERS = {
     K_RESEARCH: (_backlog_research, _resolve_research),
     K_RECONCILIATION: (_backlog_reconciliation, _resolve_reconciliation),
     K_ROOT_CAUSE: (_backlog_root_cause, _resolve_root_cause),
+    K_AUDIT_FINDING: (_backlog_audit_finding, _resolve_audit_finding),
 }
 
 
@@ -945,25 +1109,54 @@ async def sync(conn, kinds, *, now: float | None = None,
     return out
 
 
+#: the past-horizon items of a kind (expired first, whatever the read limit)
+EXPIRED_SQL = (
+    "SELECT o.request_id FROM agent_work_open o "
+    "  JOIN agent_work_requests r ON r.request_id = o.request_id "
+    " WHERE o.kind = $1 AND r.expires_at < to_timestamp($2) "
+    " ORDER BY r.expires_at, r.request_id LIMIT $3")
+
+
 async def _sync_kind(conn, kind, t, batch, rep, runner_attempts, pushed):
     spec = KINDS[kind]
     backlog_fn, resolve_fn = PRODUCERS[kind]
+    # 1 · past the hard horizon: FAILED (it was overdue since due_at) --
+    # read on its own, so a long queue never hides an expired item
+    expired = [r["request_id"] for r in await conn.fetch(
+        EXPIRED_SQL, kind, t, MAX_OPEN_READ)]
+    for rid in expired:
+        if await fail(conn, rid, at=t, failure=F_EXPIRED,
+                      detail={"expired_at": t}):
+            rep["expired"] += 1
     items = await open_items(conn, kinds=[kind], now=t)
-    live = []
-    # 1 · past the hard horizon: FAILED (it was overdue since due_at)
-    for it in items:
-        if it.get("expires_at") is not None and t > it["expires_at"]:
-            if await fail(conn, it["request_id"], at=t, failure=F_EXPIRED,
-                          detail={"due_at": it.get("due_at"),
-                                  "overdue_s": it.get("overdue_s"),
-                                  "attempts": it.get("attempts")}):
-                rep["expired"] += 1
-            continue
-        live.append(it)
+    if len(items) >= MAX_OPEN_READ:
+        rep["open_read_limited"] = True
+    gone = set(expired)
+    live = [it for it in items if it["request_id"] not in gone
+            and not (it.get("expires_at") is not None
+                     and t > it["expires_at"])]
     # 2 · what the items' own records say
     res = await resolve_fn(conn, live, t) if live else {}
     attempted_now: set = set()
     still = []
+
+    async def try_attempt(it, outcome, blocker, base_s, detail):
+        """Record the attempt only when attempt_plan says it is due."""
+        if rep["attempted"] >= MAX_ATTEMPTS_PER_KIND:
+            return False
+        plan = attempt_plan(it, at=t, outcome=outcome, blocker=blocker,
+                            base_s=base_s)
+        if plan is None:
+            rep["not_due"] = rep.get("not_due", 0) + 1
+            return False
+        if await attempt(conn, it["request_id"], at=t, outcome=outcome,
+                         blocker=blocker, next_in_s=plan["next_in_s"],
+                         detail=detail):
+            rep["attempted"] += 1
+            attempted_now.add(it["request_id"])
+            return True
+        return False
+
     for it in live:
         r = res.get(it["request_id"])
         if r is None:
@@ -980,13 +1173,15 @@ async def _sync_kind(conn, kind, t, batch, rep, runner_attempts, pushed):
                 rep["failed"] += 1
         else:                                   # ("ATTEMPT", outcome, ...)
             still.append(it)
-            if rep["attempted"] < MAX_ATTEMPTS_PER_KIND and await attempt(
-                    conn, it["request_id"], at=t, outcome=r[1],
-                    blocker=r[2], next_in_s=spec["retry_s"], detail=r[3]):
-                rep["attempted"] += 1
-                attempted_now.add(it["request_id"])
+            await try_attempt(it, r[1], r[2], float(spec["retry_s"]), r[3])
     # 3 · what is pending and not yet enqueued
     open_keys = {(it["owner"], it["subject"]) for it in still}
+    cap = spec.get("open_cap")
+    per_group: dict = {}
+    if cap:
+        for it in still:
+            g = (it.get("detail") or {}).get(cap[0])
+            per_group[g] = per_group.get(g, 0) + 1
     backlog = list(pushed or []) if pushed is not None else \
         await backlog_fn(conn, t, int(spec["backlog_limit"]))
     n_new = 0
@@ -996,6 +1191,13 @@ async def _sync_kind(conn, kind, t, batch, rep, runner_attempts, pushed):
         key = (s["agent"], s["subject"])
         if key in open_keys:
             continue
+        if cap:
+            g = (s.get("detail") or {}).get(cap[0])
+            if per_group.get(g, 0) >= cap[1]:
+                # THE PER-GROUP CAP (Karen: per detector): the oldest open
+                # items fail as their records leave the window, freeing room
+                rep["capped"] = rep.get("capped", 0) + 1
+                continue
         got = await enqueue_item(
             conn, kind=kind, agent=s["agent"], subject=s["subject"], at=t,
             arose_at=s.get("arose_at"), source_table=s.get("source_table"),
@@ -1007,6 +1209,9 @@ async def _sync_kind(conn, kind, t, batch, rep, runner_attempts, pushed):
             n_new += 1
             rep["enqueued"] += 1
             open_keys.add(key)
+            if cap:
+                g = (s.get("detail") or {}).get(cap[0])
+                per_group[g] = per_group.get(g, 0) + 1
             still.append({"request_id": got["request_id"],
                           "owner": s["agent"], "subject": s["subject"]})
         elif got.get("why") == WQ.R_DEDUPED:
@@ -1014,8 +1219,10 @@ async def _sync_kind(conn, kind, t, batch, rep, runner_attempts, pushed):
         else:
             rep["refused"][got.get("why") or "UNKNOWN"] = rep["refused"].get(
                 got.get("why") or "UNKNOWN", 0) + 1
-    # 4 · what the runner just tried (once per item per pass); "*" is an
-    # attempt on every open item of the kind (a pass that could not run)
+    # 4 · what the runner just tried (once per item per pass, when due);
+    # "*" is an attempt on every open item of the kind (a pass that could
+    # not run). The base interval is the larger of the runner's cadence and
+    # the kind's retry_s.
     by_subject = {it["subject"]: it for it in still}
     if "*" in runner_attempts:
         runner_attempts = dict({k: runner_attempts["*"] for k in by_subject},
@@ -1023,17 +1230,13 @@ async def _sync_kind(conn, kind, t, batch, rep, runner_attempts, pushed):
                                   if k != "*"})
     for subj, a in runner_attempts.items():
         it = by_subject.get(subj)
-        if it is None or it["request_id"] in attempted_now or \
-                rep["attempted"] >= MAX_ATTEMPTS_PER_KIND:
+        if it is None or it["request_id"] in attempted_now:
             continue
-        if await attempt(conn, it["request_id"], at=t,
-                         outcome=a.get("outcome") or O_PROGRESSED,
-                         blocker=a.get("blocker"),
-                         next_in_s=float(a.get("next_in_s")
-                                         or spec["retry_s"]),
-                         detail=a.get("detail")):
-            rep["attempted"] += 1
-            attempted_now.add(it["request_id"])
+        await try_attempt(it, a.get("outcome") or O_PROGRESSED,
+                          a.get("blocker"),
+                          max(float(a.get("next_in_s") or 0.0),
+                              float(spec["retry_s"])),
+                          a.get("detail"))
 
 
 async def sync_for(conn, runner: str, **kw) -> dict:
@@ -1100,9 +1303,13 @@ async def research_attempts(conn, *, now: float) -> dict:
 # ═════════════════════════════════════════════════════════════════════
 
 async def hot_candidate_slugs(conn, *, limit: int = 20) -> list:
-    """THE HOT-CANDIDATE LIST for the freshness service: the slugs of
-    Derek's open CANDIDATE_FRESH_EVIDENCE items, most overdue first, at most
-    `limit` distinct. Never raises ([] without the schema)."""
+    """THE HOT-CANDIDATE LIST an acquisition path WOULD consume: the slugs
+    of Derek's open CANDIDATE_FRESH_EVIDENCE items, most overdue first, at
+    most `limit` distinct. NO CALLER ON THIS BRANCH (R30B review): nothing
+    acquires evidence from it, which is why the kind is PASSIVE (never an
+    enqueued reacquisition). An integration that dispatches these slugs to a
+    real acquisition path records a DISPATCHED event and removes the kind
+    from PASSIVE_KINDS. Never raises ([] without the schema)."""
     try:
         if not await has_schema(conn):
             return []
@@ -1122,12 +1329,22 @@ async def hot_candidate_slugs(conn, *, limit: int = 20) -> list:
 
 async def queue_view(conn, *, now: float | None = None) -> dict:
     """EVERY AGENT'S OPEN QUEUE with its terms and overdue counts (read
-    only): {agent: {"items": [...], "summary": {...}}}."""
+    only): {agent: {"items": [...], "summary": {...}}}. The counts are
+    unbounded, the items bounded PER AGENT (agent_work_state's own
+    reads)."""
     t = float(now if now is not None else time.time())
-    items = await open_items(conn, now=t, limit=AWS.MAX_QUEUE_ITEMS)
+    counts = {r["agent_id"]: r for r in await conn.fetch(
+        AWS.OPEN_COUNTS_SQL, t)}
+    rows = await conn.fetch(AWS.OPEN_ITEMS_BY_AGENT_SQL,
+                            AWS.MAX_QUEUE_ITEMS)
+    items = [AWS.queue_item(dict(r), t) for r in rows]
     out = {}
     for a in AGENTS:
         mine = [i for i in items if i.get("owner") == a]
+        c = counts.get(a)
         out[a] = {"items": mine,
-                  "summary": AWS.queue_classes(a, mine, t)["summary"]}
+                  "summary": AWS.queue_classes(
+                      a, mine, t, open_count=int(c["n"]) if c else 0,
+                      overdue_count=int(c["overdue"]) if c else 0)[
+                          "summary"]}
     return out

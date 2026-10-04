@@ -9,6 +9,19 @@ book_obs_id, disclosure, economics_label, exceptional_states, internal_model,
 measure_is, p, p_internal, source, stale, strategy, void_applied, why} with
 stale = true and no probability_age_s). Every scenario runs inside one
 transaction that is rolled back.
+
+HAND-BUILT FIXTURES vs THE REAL WRITERS (R30B review). `decision`,
+`position`, `exit_fill`, `stale_hold_review` and `audrey_finding` are
+HAND-BUILT INSERTs, said so: they reproduce production's row shapes where a
+proof needs exact control of times and outcomes. In particular
+`stale_hold_review` reproduces the PRE-R30 defect shape (a HOLD on a stale
+probability), which no writer on this branch can produce any more: the R30
+freshness rule makes paper_xavier record WAITING_FOR_FRESH_EVIDENCE on
+stale evidence. Where a real writer exists the proofs use it:
+`held_position` / `real_review` (the ledger, the simulator,
+paper_xavier.step_handoff and review_group), `derek_decides`
+(paper_derek.decide_one), paper_audrey.finding for Audrey's findings, and
+the agents' own runners for every queue item, challenge and cluster.
 """
 from __future__ import annotations
 
@@ -251,3 +264,88 @@ async def audrey_finding(conn, acct, *, kind, at, severity="WARNING",
         fid, acct["session_id"], acct["account_id"], float(at), kind,
         severity, subject, json.dumps(detail))
     return fid
+
+
+# ═════════════════════════════════════════════════════════════════════
+# THE REAL WRITERS (R30B review: production-shaped rows written by the
+# writers production runs, not hand-built INSERTs, wherever one exists)
+# ═════════════════════════════════════════════════════════════════════
+
+async def held_position(conn, tag, *, at, entry_age_s=3600.0):
+    """A held completed-game paper position handed to Xavier through the
+    REAL chain (paper_harness account, the ledger's submit_order, the
+    simulator's fill, paper_xavier.step_handoff) at time base `at`: the
+    entry valuation is `entry_age_s` old at `at`, so every later review of
+    it is on STALE probability evidence. (account, group_id, slug)."""
+    from sportsassets import bettor_paper_ledger as L
+    from sportsassets import bettor_paper_simulator as SIM
+    from sportsassets.agents import paper_xavier as PX
+    from tests import paper_live_fixture as PL
+    from tests import test_xavier_review_probability_freshness as XR
+    a = await H.new_account(conn, tag, now=at - 5000)
+    slug = "%sops-%s" % (PL.SYN, uuid.uuid4().hex[:10])
+    g = "paper_g_%s_ops" % a["account_id"][-10:]
+    vid = await XR._reading(conn, slug, decided_at=at - entry_age_s,
+                            pin_age_s=5.0, p=0.62)
+    did = await XR._decision(conn, a, slug=slug, vid=vid, p=0.62,
+                             at=at - entry_age_s)
+    o = H.order(a, key="e", qty=XR.QTY, limit=0.40, slug=slug, at=at - 60,
+                group_id=g)
+    o.update(decision_id=did, strategy=XR.CG)
+    got = await L.submit_order(conn, o, fee_fn=H.zero_fee, now=at - 60)
+    assert got["ok"], got
+    await H.observe(conn, slug, at - 57, offers=[(0.40, XR.QTY)])
+    await SIM.simulate_order(conn, got["order"]["order_id"], now=at - 56,
+                             fee_fn=H.zero_fee)
+    await PX.step_handoff(conn, XR._ctx(a, at - 55))
+    await H.observe(conn, slug, at - 2, offers=[(0.82, XR.QTY)],
+                    bids=[(0.80, XR.QTY)])
+    return a, g, slug
+
+
+async def real_review(conn, acct, group_id, *, at) -> dict:
+    """One Xavier review of the position through the REAL review path
+    (paper_xavier.review_group, backstop trigger). The review row."""
+    from sportsassets.agents import paper_xavier as PX
+    from tests import test_xavier_review_probability_freshness as XR
+    await PX.review_group(conn, XR._ctx(acct, at), group_id,
+                          trigger=PX.T_BACKSTOP)
+    return dict(await conn.fetchrow(
+        "SELECT * FROM paper_xavier_reviews WHERE group_id=$1 "
+        " ORDER BY reviewed_at DESC, review_id DESC LIMIT 1", group_id))
+
+
+def derek_ctx(acct, transport, *, now) -> dict:
+    """The context paper_derek.decide_one runs in (as the paper pass builds
+    it), at `now`."""
+    import time as _t
+    from tests import paper_live_fixture as PL
+    ctx = {"session": {"session_id": acct["session_id"],
+                       "config": acct["config"]},
+           "session_id": acct["session_id"],
+           "account_id": acct["account_id"], "config": acct["config"],
+           "market_data": PL.client(transport), "books_read": 0,
+           "now": float(now), "deadline": _t.monotonic() + 30,
+           "first_fills": [], "fills": 0}
+    ctx["clock"] = lambda: ctx["now"]
+    return ctx
+
+
+async def derek_decides(conn, acct, transport, *, slug, valuation_at,
+                        pin_age_s, decide_at) -> dict:
+    """ONE DEREK DECISION THROUGH HIS REAL DECISION PATH
+    (paper_derek.decide_one) on a synthetic Pinnacle valuation of `slug`
+    stamped at `valuation_at` (its reading `pin_age_s` old then), decided
+    at `decide_at`. The paper_decisions row."""
+    from sportsassets.agents import paper_derek as PD
+    from tests import paper_live_fixture as PL
+    v = await PL.valuation(conn, slug=slug, decided_at=valuation_at,
+                           pin_age_s=pin_age_s)
+    row = await conn.fetchrow("SELECT * FROM external_valuations "
+                              " WHERE id=$1", v["valuation_id"])
+    PD._CONTEXT_CACHE.clear()
+    rec = await PD.decide_one(conn, derek_ctx(acct, transport,
+                                              now=decide_at), dict(row))
+    return dict(await conn.fetchrow(
+        "SELECT * FROM paper_decisions WHERE decision_id=$1",
+        rec["decision_id"]))
