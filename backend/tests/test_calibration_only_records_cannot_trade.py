@@ -568,6 +568,18 @@ READERS = {
     "profitability/reads.py": (
         "BY_ID_OF_THE_HELD_POSITIONS_DECISION_RESEARCH_LINEAGE_ONLY", 2),
     "profitability/warehouse.py": ("PROSE_ONLY", 1),
+    # (220) THE LOST OPPORTUNITY LEDGER (RESEARCH): reads the valuation row
+    # a SETTLED Derek REFUSE decision already links to, BY ID ONLY (venue,
+    # payout event, settlement comparison, sport family, event key), to
+    # verify whether the refusal's control condition held at decision time;
+    # both purposes, because the decision was taken on that row whatever its
+    # purpose. The runner names the table once as an evidence-id prefix. It
+    # selects no candidate, sizes and places nothing, and writes only lol_*
+    # tables (tests/test_lost_opportunity_is_research_only.py).
+    "lost_opportunity/reads.py": (
+        "BY_ID_OF_A_SETTLED_REFUSALS_DECISION_RESEARCH_CLASSIFICATION_ONLY",
+        2),
+    "lost_opportunity/runner.py": ("EVIDENCE_ID_PREFIX_ONLY", 1),
 }
 
 

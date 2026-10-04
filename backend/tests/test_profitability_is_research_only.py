@@ -62,7 +62,13 @@ STDLIB = {"__future__", "asyncio", "datetime", "hashlib", "json", "logging",
           "math", "os", "random", "time", "uuid", "zoneinfo", "typing",
           "contextlib", "dataclasses", "decimal", "collections"}
 ALLOWED_PROJECT = {"sportsassets", "sportsassets.profitability",
-                   "sportsassets.intel", "sportsassets.bettor_fee_schedule"}
+                   "sportsassets.intel", "sportsassets.bettor_fee_schedule",
+                   # the lost opportunity component (migration 220), called
+                   # by the cycle after FORECAST; its own closure and write
+                   # targets are pinned by test_lost_opportunity_is_research_
+                   # only.py and are traversed (and leaf-checked) here too
+                   "sportsassets.lost_opportunity",
+                   "sportsassets.lost_opportunity.runner"}
 #: the intelligence modules this layer may import (pure computation and
 #: SELECT-only reads; their own closure is pinned by test_intel_is_shadow_only)
 ALLOWED_INTEL = {"sportsassets.intel.common", "sportsassets.intel.reads",
