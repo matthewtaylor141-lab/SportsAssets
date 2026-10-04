@@ -645,9 +645,14 @@ async def apply_fill_locked(conn, *, order: dict, qty, price, wire_price,
                             fee, filled_at: float, basis: str,
                             book_obs_id=None, book_observed_at=None,
                             evidence: dict | None = None,
-                            key: str) -> dict:
+                            key: str, event_detail: dict | None = None
+                            ) -> dict:
     """ONE SIMULATED FILL. The caller holds the transaction AND the account
     lock (`bettor_paper_simulator` does). Idempotent on `key`.
+
+    `event_detail` is added to the FILL event's detail (never over the fill's
+    own fields): the simulator names there the unreadable observations it
+    skipped before the book this fill was taken on.
 
     BUY: FILL debits cost + fees of the filled qty and releases the filled
     share of the reservation; the fill that completes the order releases
@@ -733,9 +738,10 @@ async def apply_fill_locked(conn, *, order: dict, qty, price, wire_price,
         cur["order_id"], q, new_state, release, _ts(filled_at))
     await event(conn, order_id=cur["order_id"], kind="FILL", at=filled_at,
                 simulator_version=cur["simulator_version"],
-                detail={"fill_id": fid, "qty": f(q), "price": f(px),
-                        "fee_usd": f(fe), "basis": basis,
-                        "book_obs_id": book_obs_id})
+                detail=dict(event_detail or {},
+                            fill_id=fid, qty=f(q), price=f(px),
+                            fee_usd=f(fe), basis=basis,
+                            book_obs_id=book_obs_id))
     return {"ok": True, "duplicate": False, "fill_id": fid, "qty": f(q),
             "price": f(px), "fee_usd": f(fe), "state": new_state,
             "ledger_entry": entry, "first_fill": D(cur["filled_qty"]) == 0}

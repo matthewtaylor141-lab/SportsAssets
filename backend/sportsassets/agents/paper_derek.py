@@ -771,14 +771,18 @@ async def step_after_delay(conn, ctx: dict) -> dict:
     the next one, or expires with no fill."""
     pend = list(ctx.get("pending_entries") or [])
     known = {p["order_id"] for p in pend}
-    # ...and every open marketable order still waiting for a book observed
-    # at or after its eligible instant (e.g. one the in-cycle hook submitted).
+    # ...and every open marketable order still waiting for a READABLE book
+    # observed at or after its eligible instant (e.g. one the in-cycle hook
+    # submitted). An errored observation holds no book and the simulator
+    # skips it (bettor_paper_simulator.R_NO_READABLE_BOOK), so an order that
+    # has met only those is still waiting and is read again here.
     for r in await conn.fetch(
             "SELECT o.order_id, o.eligible_at FROM paper_orders o "
             " WHERE o.account_id=$1 AND o.order_type='MARKETABLE' "
             "   AND o.state='PENDING_SIMULATION' AND NOT EXISTS (SELECT 1 "
             "   FROM paper_book_observations b WHERE b.us_market_slug = "
-            "   o.us_market_slug AND b.observed_at >= o.eligible_at)",
+            "   o.us_market_slug AND b.observed_at >= o.eligible_at "
+            "   AND b.error IS NULL)",
             ctx["account_id"]):
         if r["order_id"] not in known:
             pend.append({"order_id": r["order_id"],
