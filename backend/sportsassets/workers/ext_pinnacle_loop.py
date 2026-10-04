@@ -48,6 +48,8 @@ import time
 
 from .. import bettor_entry_execution as entryx
 from ..db import advisory_held as _db_advisory_held
+from ..db import advisory_held_by as _db_advisory_held_by
+from .. import loop_health as _LH
 from ..db import lease_session
 from .. import bettor_entry_inventory as inv
 from .. import bettor_research_shadow as rsh
@@ -7009,9 +7011,15 @@ async def _servicing_heartbeat(conn, res: dict) -> None:
         log.warning("ext_pinnacle: servicing heartbeat failed", exc_info=True)
 
 
+class _FencedOut(Exception):
+    """A servicing pass the writer lock did not cover (counted, not raised
+    out of the loop)."""
+
+
 async def _servicing_loop(pool, *, interval_s: float = SERVICING_INTERVAL_S,
                           sleep=None, clock=None,
-                          max_passes: int | None = None) -> None:
+                          max_passes: int | None = None,
+                          fence=None) -> None:
     """THE SERVICING TASK: management and recovery on their own cadence.
 
     Started by `run` after the writer lock is held; cancelled with it. Each
@@ -7019,6 +7027,14 @@ async def _servicing_loop(pool, *, interval_s: float = SERVICING_INTERVAL_S,
     lock and writes SERVICING_KEY. NOTHING RAISES OUT OF A PASS: a failed pass
     is counted, logged and followed by the next one on schedule. `sleep`,
     `clock` and `max_passes` exist so a test can drive it on controlled time.
+
+    FENCED (R30A): `fence(sconn)`, given by `run`, re-proves on the pass's
+    own connection that the writer's backend still holds LOCK_KEY before
+    anything is serviced. A pass it does not confirm -- False, or no answer
+    -- services NOTHING, is counted `fenced_out` and logged, and the next
+    pass asks again: a lost lock never manages a position, and a transient
+    failure of the check never stops management for good. Each pass also
+    records its health (loop_health: ext_pinnacle.servicing).
     """
     sleep = sleep or asyncio.sleep
     clock = clock or time.monotonic
@@ -7033,18 +7049,45 @@ async def _servicing_loop(pool, *, interval_s: float = SERVICING_INTERVAL_S,
             try:
                 async with pool.acquire(
                         timeout=SERVICING_ACQUIRE_TIMEOUT_S) as sconn:
+                    if fence is not None:
+                        try:
+                            fenced_in = await fence(sconn)
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception:                      # noqa: BLE001
+                            fenced_in = False
+                        if not fenced_in:
+                            st["fenced_out"] = st.get("fenced_out", 0) + 1
+                            log.error("ext_pinnacle: servicing pass refused: "
+                                      "the writer lock is not held by this "
+                                      "process's writer backend")
+                            await _LH.record(
+                                sconn, "ext_pinnacle.servicing",
+                                process="api", phase=_LH.ERROR,
+                                error="FENCED_OUT_WRITER_LOCK_NOT_HELD")
+                            raise _FencedOut()
                     res = await _service_once(
                         sconn, now=time.time(), source=SOURCE_SERVICING_TASK,
                         review_interval_s=interval_s)
                     await _servicing_heartbeat(sconn, res)
+                    await _LH.record(sconn, "ext_pinnacle.servicing",
+                                     process="api", phase=_LH.SUCCESS)
             except asyncio.CancelledError:
                 raise
+            except _FencedOut:
+                pass
             except Exception as exc:                           # noqa: BLE001
                 st["errors"] += 1
                 st["last_error"] = "%s: %s" % (type(exc).__name__,
                                                str(exc)[:200])
                 log.warning("ext_pinnacle: servicing pass failed",
                             exc_info=True)
+                try:
+                    await _LH.record(pool, "ext_pinnacle.servicing",
+                                     process="api", phase=_LH.ERROR,
+                                     error=exc)
+                except Exception:                              # noqa: BLE001
+                    pass
             elapsed = clock() - t0
             await sleep(max(SERVICING_MIN_GAP_S, float(interval_s) - elapsed))
     finally:
@@ -10169,6 +10212,24 @@ async def run(get_pool) -> None:
                     key=STANDBY_KEY)
                 await asyncio.sleep(IDLE_POLL_S)
             log.info("ext_pinnacle: writer lock held (key %s)", LOCK_KEY)
+            # THE WRITER'S FENCING TOKEN: this lock session's backend pid.
+            # The children (servicing, the reactive scheduler) write on
+            # their own pool connections, so each re-proves before a pass
+            # or a job that THIS backend still holds LOCK_KEY
+            # (db.advisory_held_by). Unreadable -> None -> every child pass
+            # is refused until the next hold, fail closed.
+            try:
+                writer_pid = await conn.fetchval("SELECT pg_backend_pid()")
+            except Exception:                                  # noqa: BLE001
+                writer_pid = None
+
+            async def _child_fence(cconn, _pid=writer_pid):
+                if _pid is None:
+                    return False
+                return await _db_advisory_held_by(cconn, LOCK_KEY, _pid)
+            await _LH.record(conn, "ext_pinnacle.entry_cycle",
+                             process="api", phase=_LH.START,
+                             detail={"writer_pid": writer_pid})
             # ── AGENTS (core, migration 152): THE THREE IDENTITIES, ONCE ─────
             # By the writer only (a standby never reaches here), with this
             # process's code identity. Never fatal.
@@ -10233,7 +10294,7 @@ async def run(get_pool) -> None:
             # PINNAPI_FEED=off keeps it from starting at all. Never raises.
             from .. import pinnapi_feed_runtime as _feed
             try:
-                _writer_pid = await conn.fetchval("SELECT pg_backend_pid()")
+                _writer_pid = writer_pid
                 log.info("ext_pinnacle: pinnapi feed %s", (await
                          _feed.start_default(pool, writer_pid=_writer_pid,
                                              writer_lock_key=LOCK_KEY)
@@ -10243,6 +10304,9 @@ async def run(get_pool) -> None:
                             exc_info=True)
             from .. import pinnapi_reactive as _reactive
             reactive_task = _reactive.start(pool, cycle=cycle)
+            if _reactive.ACTIVE is not None:
+                # each job re-proves the writer lock on its own connection
+                _reactive.ACTIVE.fence = _child_fence
             # ── MANAGEMENT AND RECOVERY, ON THEIR OWN CADENCE ────────────────
             #
             # AFTER THE LOCK, so only the writer services (a standby never
@@ -10250,7 +10314,8 @@ async def run(get_pool) -> None:
             # read already obeys a stored prohibition. It lives exactly as long
             # as this loop. See "ONE EXECUTION AUTHORITY, ON ITS OWN CADENCE".
             servicing = asyncio.get_running_loop().create_task(
-                _servicing_loop(pool, interval_s=SERVICING_INTERVAL_S))
+                _servicing_loop(pool, interval_s=SERVICING_INTERVAL_S,
+                                fence=_child_fence))
             try:
                 while True:
                     delay = IDLE_POLL_S
@@ -10288,6 +10353,10 @@ async def run(get_pool) -> None:
                         t_cycle = time.monotonic()
                         out = await cycle(conn)
                         log.info("ext_pinnacle: %s", out)
+                        await _LH.record(conn, "ext_pinnacle.entry_cycle",
+                                         process="api", phase=_LH.SUCCESS,
+                                         detail={"state": out.get("state"),
+                                                 "ran": out.get("ran")})
                         if out.get("ran"):
                             # START TO START, as the budget above is written
                             # ("~7.2k/day at 15 minutes"). Sleeping the full
@@ -10299,8 +10368,11 @@ async def run(get_pool) -> None:
                                 ran=True, elapsed_s=time.monotonic() - t_cycle)
                     except asyncio.CancelledError:
                         raise
-                    except Exception:                              # noqa: BLE001
+                    except Exception as exc:                       # noqa: BLE001
                         log.warning("ext_pinnacle: cycle failed", exc_info=True)
+                        await _LH.record(conn, "ext_pinnacle.entry_cycle",
+                                         process="api", phase=_LH.ERROR,
+                                         error=exc)
                     await asyncio.sleep(delay)
             finally:
                 await _reactive.stop(reactive_task)

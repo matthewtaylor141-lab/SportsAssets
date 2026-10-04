@@ -72,9 +72,13 @@ class FakeConn:
             return self._lock_answers.pop(0) if self._lock_answers else True
         if "pg_locks" in sql:
             # R30A FENCING: run() re-proves on its lock session, before every
-            # pass, that this backend still holds the key (db.advisory_held).
-            # A session that was granted the lock still holds it here.
+            # pass, that this backend still holds the key (db.advisory_held),
+            # and each servicing pass re-proves it for the writer's backend
+            # pid (db.advisory_held_by). A granted lock is still held here.
             return True
+        if "pg_backend_pid" in sql:
+            # the writer's fencing token (a real backend always has one)
+            return 4242
         return None
 
     def rows_for(self, key):

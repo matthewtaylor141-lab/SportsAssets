@@ -57,6 +57,7 @@ from typing import Any
 
 from . import execmirror_probe as EP
 from .db import advisory_held, lease_session
+from . import loop_health as _LH
 from . import venue_pace
 
 log = logging.getLogger(__name__)
@@ -1522,6 +1523,8 @@ async def run(get_pool, *, probability_reader=None, management_assessor=None) ->
                 if not await conn.fetchval("SELECT pg_try_advisory_lock($1)", LOCK_KEY):
                     await asyncio.sleep(CONTEND_RETRY_S)
                     continue
+                await _LH.record(conn, "execmirror.tick", process="api",
+                                 phase=_LH.START)
                 try:
                     while True:
                         # FENCING (R30A): before each tick, on the lock
@@ -1551,11 +1554,21 @@ async def run(get_pool, *, probability_reader=None, management_assessor=None) ->
                             # the small-live money path: priority lane of the
                             # venue gate in this process (venue_pace E11)
                             with venue_pace.priority_claims():
-                                await mirror.tick(conn)
+                                tick_out = await mirror.tick(conn)
+                            # at most every 30 s (loop_health record_every_s)
+                            await _LH.record(
+                                conn, "execmirror.tick", process="api",
+                                phase=_LH.SUCCESS,
+                                detail={"state": (tick_out or {}).get("state")
+                                        if isinstance(tick_out, dict)
+                                        else None})
                         except asyncio.CancelledError:
                             raise
-                        except Exception:                     # noqa: BLE001
+                        except Exception as exc:              # noqa: BLE001
                             log.exception("execution mirror tick failed")
+                            await _LH.record(conn, "execmirror.tick",
+                                             process="api", phase=_LH.ERROR,
+                                             error=exc)
                         await asyncio.sleep(TICK_S)
                 finally:
                     await conn.execute("SELECT pg_advisory_unlock($1)", LOCK_KEY)

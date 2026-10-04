@@ -173,14 +173,20 @@ async def refresh(conn, *, watch: HeldWatch | None = None) -> dict:
 
 async def refresh_loop(pool, *, watch: HeldWatch | None = None,
                        every_s: float = HELD_REFRESH_S) -> None:
+    from . import loop_health as LH
     while True:
         try:
             async with pool.acquire() as c:
                 await refresh(c, watch=watch)
+                # health at most every 30 s (loop_health record_every_s)
+                await LH.record(c, "pinnapi_held.refresh", process="api",
+                                phase=LH.SUCCESS)
         except asyncio.CancelledError:
             raise
-        except Exception:                                       # noqa: BLE001
+        except Exception as exc:                                # noqa: BLE001
             log.warning("held targets refresh failed", exc_info=True)
+            await LH.record(pool, "pinnapi_held.refresh", process="api",
+                            phase=LH.ERROR, error=exc)
         await asyncio.sleep(every_s)
 
 

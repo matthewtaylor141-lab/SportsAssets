@@ -268,6 +268,23 @@ ADVISORY_HELD_SQL = (
     "   AND classid = $1::bigint::oid AND objid = $2::bigint::oid)")
 
 
+ADVISORY_HELD_BY_SQL = (
+    "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype = 'advisory' "
+    "   AND granted AND objsubid = 1 AND pid = $3 "
+    "   AND classid = $1::bigint::oid AND objid = $2::bigint::oid)")
+
+
+async def advisory_held_by(conn, key: int, pid: int) -> bool:
+    """CHILD FENCING: is the session advisory lock `key` still granted to
+    the writer's backend `pid`? Asked on ANY connection (a child's own, from
+    the pool) -- the writer's session itself is busy with the writer's own
+    work and cannot be shared. The pid is the writer's fencing token: a
+    re-contended lock belongs to a new backend, so a child of the old hold
+    reads False. Raises when the connection cannot answer."""
+    hi, lo = advisory_key_parts(key)
+    return await conn.fetchval(ADVISORY_HELD_BY_SQL, hi, lo, int(pid)) is True
+
+
 async def advisory_held(conn, key: int) -> bool:
     """FENCING: does THIS session still hold the session advisory lock `key`?
 

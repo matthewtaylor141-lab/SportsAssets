@@ -283,8 +283,12 @@ def test_ext_pinnacle_stops_its_children_and_contends_again_when_fenced_out(
         async def fetchval(self, sql, *args):
             if "pg_try_advisory_lock" in sql:
                 return True
-            if "pg_locks" in sql:
+            if "pg_locks" in sql and "pg_backend_pid()" in sql:
+                # the PARENT's fence (db.advisory_held, its own session)
                 return fence_answers.pop(0) if fence_answers else True
+            if "pg_locks" in sql:
+                # a CHILD's fence (db.advisory_held_by the writer's pid)
+                return True
             if "pg_backend_pid" in sql:
                 return 1000 + self.n
             return None

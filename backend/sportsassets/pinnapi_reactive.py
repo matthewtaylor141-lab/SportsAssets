@@ -61,6 +61,10 @@ class Scheduler:
         # returning an async context manager that yields a connection. Both
         # audit records and the evaluation run on it -- see `run`.
         self.session, self.session_wait = session, float(session_wait)
+        # CHILD FENCING (R30A): set by ext_pinnacle_loop.run to an async
+        # callable(conn) -> bool that re-proves, on the job's connection, that
+        # the decider's writer backend still holds its lock. None: no fence.
+        self.fence = None
         self.queue_cap, self.seed_cap = queue_cap, seed_cap
         self.seed_ttl, self.deadline = seed_ttl, deadline
         self.seeds, self.pending, self.seen = OrderedDict(), OrderedDict(), {}
@@ -305,6 +309,21 @@ async def _run_job_on_one_session(self, eid, tick):
                             self.session_wait, eid, bool(tick.get('held')))
                 return
             attempt['session_wait_s'] = round(self.clock() - t0, 3)
+            if self.fence is not None:
+                try:
+                    fenced_in = await self.fence(conn)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:                               # noqa: BLE001
+                    fenced_in = False
+                if not fenced_in:
+                    # nothing evaluated and nothing audited: a process that
+                    # is not the writer must not write a decision
+                    self.counts['FENCED_OUT'] += 1
+                    log.error('pinnapi reactive: event %s refused: the '
+                              'writer lock is not held by this process\'s '
+                              'writer backend', eid)
+                    return
             # Audit failure blocks execution, it never becomes an unaudited trade.
             async with asyncio.timeout(AUDIT_S):
                 await self.audit(attempt, conn)
