@@ -541,7 +541,7 @@
     var s = '<svg class="pc-chart" viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="Expected net edge per dollar by deployed size for ' + esc(c.us_market_slug) + '">';
     ticks.forEach(function (t) { s += '<line class="grid" x1="' + L + '" x2="' + (W - R) + '" y1="' + y(t) + '" y2="' + y(t) + '"/><text x="' + (L - 6) + '" y="' + (y(t) + 3) + '" text-anchor="end">' + (t * 100).toFixed(1) + '¢</text>'; });
     s += '<line class="zero" x1="' + L + '" x2="' + (W - R) + '" y1="' + y(0) + '" y2="' + y(0) + '"/>';
-    [10, 100, 1000, 10000].forEach(function (v) { s += '<text x="' + x(lx(v)) + '" y="' + (H - 14) + '" text-anchor="middle">$' + v.toLocaleString('en-US') + '</text>'; });
+    [10, 100, 1000, 10000].forEach(function (v) { s += '<text x="' + x(lx(v)) + '" y="' + (H - 14) + '" text-anchor="' + (v === 10 ? 'start' : v === 10000 ? 'end' : 'middle') + '">$' + v.toLocaleString('en-US') + '</text>'; });
     s += '<text x="' + (W - R) + '" y="' + (H - 2) + '" text-anchor="end">size deployed (log scale)</text>';
     if (fin(c.CAPACITY_CEILING_USD) && c.CAPACITY_CEILING_USD >= 10) {
       var cx = x(lx(Math.min(10000, c.CAPACITY_CEILING_USD)));
