@@ -150,6 +150,28 @@
   status = 200
   force = true
 
+# ── MANAGEMENT PROFITABILITY COCKPIT AND PM ACCEPTANCE (claude/ui-cockpit) ──
+# /profitability is the management profitability cockpit
+# (command/profitability.html): static, it reads GET /api/command/
+# profitability/*, /tournament/*, /twin, /coverage, /floor, /p5/evidence and
+# /equity/* same-origin through the /api/command/* proxy above (session
+# cookie, read only). /acceptance is the PM acceptance + audit matrix
+# (command/acceptance.html), which reads only the static
+# command/data/audit-matrix.json. REWRITES (status 200) so the address bar
+# keeps the management URL; ORDER: below the /api/command/* proxy and ABOVE
+# the command-host catch-all.
+[[redirects]]
+  from = "https://command.bettortoken.com/profitability"
+  to = "/command/profitability.html"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "https://command.bettortoken.com/acceptance"
+  to = "/command/acceptance.html"
+  status = 200
+  force = true
+
 [[redirects]]
   from = "https://command.bettortoken.com/*"
   to = "/command/:splat"

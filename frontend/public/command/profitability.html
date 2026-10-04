@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#090d14">
+  <meta name="robots" content="noindex,nofollow">
+  <meta name="description" content="Bettor EV Engine — the management profitability cockpit: are we making money, why, what opportunities exist, how much capital can be deployed and what blocks more profit. PAPER and ACTUAL side by side, never summed; every figure from the research read models with its source and freshness.">
+  <title>Profitability Cockpit | Bettor EV Engine</title>
+  <link rel="stylesheet" href="command.css">
+  <link rel="stylesheet" href="desk.css">
+  <link rel="stylesheet" href="equity-wall.css">
+  <link rel="stylesheet" href="profitability.css">
+</head>
+<body class="deskbody">
+  <a class="skip-link" href="#pcmain">Skip to the profitability cockpit</a>
+
+  <header class="deskbar">
+    <div class="deskbar-brand">
+      <span class="deskmark">B</span>
+      <span class="deskname">Profitability Cockpit</span>
+      <span id="pc-pill" class="pill pill-grey">READING —</span>
+      <span class="pill pill-blue" title="Every read on this page is RESEARCH / SHADOW: computed and displayed only, with no venue, order, sizing, limit, threshold or capital authority.">RESEARCH · NO AUTHORITY</span>
+    </div>
+    <nav class="desknav" aria-label="Command navigation">
+      <a href="index.html">Command</a>
+      <a href="/floor">Trading floor</a>
+      <a href="/positions">Positions</a>
+      <a href="institutional.html">Institutional</a>
+      <a href="profitability.html" aria-current="page">Profitability</a>
+      <a href="acceptance.html">Acceptance</a>
+    </nav>
+  </header>
+
+  <main id="pcmain" class="deskmain pc-main">
+    <!-- THE LIVE EQUITY WALL (window.BTEquityWall from equity-wall.js),
+         mounted compact: PAPER and SMALL LIVE per venue, never summed, its
+         own GET /api/command/equity/* poll. If the script fails to load the
+         slot says UNAVAILABLE and nothing else changes. -->
+    <section id="pc-equity" class="pc-equity" data-slot="equity-wall" aria-label="Live equity wall"></section>
+    <div id="pc-root"></div>
+  </main>
+
+  <footer class="deskfoot">
+    <span id="pc-asof">—</span>
+    <span>PAPER is simulated execution on a fictional account; ACTUAL is the venue account of the 1:1,000 execution mirror. The two are never summed, and every figure names its book. Everything here is RESEARCH / SHADOW: it places nothing and changes no limit, size, threshold or cap. A read that is missing or fails shows UNAVAILABLE with its reason, never zero; old data shows STALE with its age. Forecasts are UNPROVEN until scored forward. Kill-switch entries are RECOMMEND_PAUSE records, never controls. Hypothetical P&amp;L is labelled HYPOTHETICAL and is not a result.</span>
+  </footer>
+
+  <script src="config.js"></script>
+  <script src="unlock.js"></script>
+  <script src="core.js"></script>
+  <script src="equity-wall.js"></script>
+  <script src="profitability.js"></script>
+</body>
+</html>
