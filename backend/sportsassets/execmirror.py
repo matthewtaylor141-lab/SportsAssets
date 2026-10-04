@@ -492,12 +492,36 @@ LIVE_T_MARKET = "MARKET_EVENT"
 #: a feed-change re-review at most this often per position (venue pacing:
 #: one BBO read per review); a change is still well inside its 30 s life
 LIVE_MARKET_MIN_GAP_S = 10.0
+#: the last review's FRESH probability passed its own source stamp + its
+#: recorded limit (the existing 30 s rule): re-reviewed on the next tick so
+#: a stale recommendation is never left standing until the cadence (records
+#: only; the review places, cancels and sizes nothing)
+LIVE_T_EXPIRY = "FRESHNESS_EXPIRY"
 LIVE_TRIGGER_PRIORITY = {LIVE_T_FIRST: 0, LIVE_T_MARKET: 1, LIVE_T_FILL: 2,
-                         LIVE_T_BACKSTOP: 3}
+                         LIVE_T_EXPIRY: 2.5, LIVE_T_BACKSTOP: 3}
+
+
+def live_evidence_expiry(prob) -> float | None:
+    """When a recorded FRESH probability evidence stops being current: its
+    source stamp + its own recorded limit. None otherwise. Pure."""
+    if isinstance(prob, str):
+        try:
+            prob = json.loads(prob)
+        except ValueError:
+            return None
+    if not isinstance(prob, dict) or \
+            prob.get("evidence_state") != "FRESH_CURRENT_PROBABILITY":
+        return None
+    try:
+        return (float(prob["probability_source_at"])
+                + float(prob["probability_limit_s"]))
+    except (KeyError, TypeError, ValueError):
+        return None
 
 
 def live_review_trigger(*, last_reviewed_at, last_held, held,
-                        now: float, feed_change_at=None) -> str | None:
+                        now: float, feed_change_at=None,
+                        evidence_expires_at=None) -> str | None:
     """Which review an OPEN actual position is due, or None. Pure."""
     if last_reviewed_at is None:
         return LIVE_T_FIRST
@@ -506,6 +530,10 @@ def live_review_trigger(*, last_reviewed_at, last_held, held,
     if feed_change_at is not None and float(feed_change_at) > float(
             last_reviewed_at) and now - float(last_reviewed_at) >= LIVE_MARKET_MIN_GAP_S:
         return LIVE_T_MARKET
+    if evidence_expires_at is not None and \
+            float(evidence_expires_at) > float(last_reviewed_at) and \
+            now >= float(evidence_expires_at):
+        return LIVE_T_EXPIRY
     if now - float(last_reviewed_at) >= MANAGEMENT_EVERY_S:
         return LIVE_T_BACKSTOP
     return None
@@ -1091,10 +1119,13 @@ class Mirror:
         now = self._now()
         hs = await conn.fetch(
             """SELECT h.*, extract(epoch FROM lr.reviewed_at)::float8 AS last_reviewed_at,
-                      lr.live_held AS last_reviewed_held
+                      lr.live_held AS last_reviewed_held,
+                      lr.last_probability_evidence
                  FROM smalllive_handoffs h
                  LEFT JOIN LATERAL (
-                     SELECT reviewed_at, live_held FROM smalllive_reviews r
+                     SELECT reviewed_at, live_held,
+                            detail -> 'probability_evidence' AS last_probability_evidence
+                       FROM smalllive_reviews r
                       WHERE r.handoff_id = h.handoff_id
                       ORDER BY reviewed_at DESC, review_id DESC LIMIT 1) lr ON true
                 WHERE h.state = 'OPEN'""")
@@ -1103,16 +1134,18 @@ class Mirror:
         for h in hs:
             h = dict(h)
             fc = PH.changed_at(h["us_market_slug"])
+            exp = live_evidence_expiry(h.get("last_probability_evidence"))
             trig = live_review_trigger(
                 last_reviewed_at=h.get("last_reviewed_at"),
                 last_held=h.get("last_reviewed_held"), held=h["live_held"], now=now,
-                feed_change_at=fc)
+                feed_change_at=fc, evidence_expires_at=exp)
             if trig is None and due_only:
                 continue
             trig = trig or LIVE_T_BACKSTOP
             due_at = (h["first_live_fill_at"].timestamp()
                       if trig == LIVE_T_FIRST and h.get("first_live_fill_at") is not None
                       else fc if trig == LIVE_T_MARKET
+                      else exp if trig == LIVE_T_EXPIRY
                       else (h.get("updated_at").timestamp()
                             if trig == LIVE_T_FILL and h.get("updated_at") is not None
                             else (None if h.get("last_reviewed_at") is None

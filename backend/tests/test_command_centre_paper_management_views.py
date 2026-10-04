@@ -283,7 +283,11 @@ async def test_xavier_shows_owned_positions_scenarios_and_realized_apart_from_ri
     assert len(own) == 3
     cg2, strict = own[got["entries"]["cg2"]["group_id"]], own[got["entries"]["strict"]["group_id"]]
     # the open completed-game position: recommendation, exposure, scenarios
-    assert cg2["status"] == "OPEN" and cg2["recommendation"]["recommendation"] == "HOLD"
+    # the seeded review recorded HOLD with no probability evidence at all:
+    # it is shown as STALE, never as the current HOLD (owner P0, 2026-10-04)
+    assert cg2["status"] == "OPEN" and cg2["recommendation"]["recommendation"] == "STALE"
+    assert cg2["recommendation"]["recorded_recommendation"] == "HOLD"
+    assert cg2["recommendation"]["current_recommendation"] is None
     assert cg2["recommendation"]["trigger"] == "SCHEDULED_BACKSTOP"     # his LATEST review
     rm = cg2["remaining"]
     assert rm["open_qty"] == 400.0 and rm["cost_basis_usd"] == 200.4
@@ -305,7 +309,9 @@ async def test_xavier_shows_owned_positions_scenarios_and_realized_apart_from_ri
     assert h.count("Realized profit (booked on the ledger)") == 3
     assert h.count("Remaining risk (conditional, not realized)") == 1
     assert h.count('<b class="unm">UNMEASURED</b>') == 2
-    assert "Current recommendation: <b>HOLD</b>" in h and "data-exposure" in h
+    assert "Current recommendation:</span> <b>STALE</b>" in h and "data-exposure" in h
+    assert "Current recommendation:</span> <b>HOLD</b>" not in h
+    assert "recorded HOLD · not current" in h and 'data-rec-state="STALE"' in h
     assert "wins +$199.60 · loses −$200.40" in h
 
 

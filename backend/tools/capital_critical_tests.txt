@@ -790,3 +790,7 @@ tests/test_improvement_pipeline_db.py
 # forecast-horizons} routes are GET-only, READ ONLY, behind a command session.
 tests/test_lost_opportunity_is_research_only.py
 tests/test_lost_opportunity_ledger.py
+# Xavier freshness truth (owner P0 2026-10-04): a stale probability never
+# yields a current HOLD; read-time validity; expiry requeues; resting is not
+# protection in the review exposure record.
+tests/test_xavier_freshness_truth.py

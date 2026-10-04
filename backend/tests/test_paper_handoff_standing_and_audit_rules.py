@@ -273,9 +273,12 @@ async def test_audrey_opens_improvement_tasks_from_findings_and_promotes_nothing
 
 @pg
 @pytest.mark.parametrize("stale,p,expect", [
-    (True, 0.2, "HOLD"),       # stale: no discretionary sale, hold + protect
+    # stale: no discretionary sale, the position stays held + protected, and
+    # NO management action is recommended (owner P0: never a default HOLD)
+    (True, 0.2, "WAITING_FOR_FRESH_EVIDENCE"),
     (False, 0.2, "EXIT"),      # fresh: the same book and p rank EXIT
-    (True, None, None),        # absent: nothing ranked, protection kept
+    # absent: nothing ranked, protection kept, management unavailable
+    (True, None, "MANAGEMENT_UNAVAILABLE_STALE_INPUT"),
 ])
 async def test_a_stale_or_absent_measure_never_drives_a_discretionary_sale(
         monkeypatch, stale, p, expect):

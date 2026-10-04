@@ -810,7 +810,12 @@ async def xavier_operations(conn, *, account_id: str | None = None,
             "       refusal, strategy, action, standing, measure, exceptional "
             "  FROM paper_xavier_reviews WHERE account_id = $1 "
             " ORDER BY reviewed_at DESC LIMIT $2", acct, int(limit))
-        return [RM._row(r) for r in rows]
+        # each review's recommendation re-judged now (owner P0): a review
+        # superseded by a newer one of its group is INVALID, a stale one
+        # STALE / WAITING -- never shown as the current recommendation
+        from .agents import xavier_management as XM
+        return await XM.gate_paper_reviews(conn, [RM._row(r) for r in rows],
+                                           now=at, latest_only=False)
 
     async def review_counts():
         rows = await conn.fetch(
@@ -903,9 +908,20 @@ async def xavier_operations(conn, *, account_id: str | None = None,
         revs = {r["group_id"]: RM._row(r) for r in await conn.fetch(
             "SELECT DISTINCT ON (group_id) group_id, review_id, reviewed_at, "
             "       trigger, recommendation, refusal, selection, action, "
-            "       exposure, measure FROM paper_xavier_reviews "
+            "       exposure, measure, alternatives FROM paper_xavier_reviews "
             " WHERE account_id = $1 ORDER BY group_id, reviewed_at DESC",
             acct)}
+        # THE CURRENT RECOMMENDATION IS RE-JUDGED NOW (owner P0): for an
+        # open position with the full context (newer valuation, venue mark,
+        # event start), for a closed one by the time rule alone
+        from . import xavier_freshness as XF
+        from .agents import xavier_management as XM
+        opened = [r for g, r in revs.items() if g in marks]
+        for r in await XM.gate_paper_reviews(conn, opened, now=at):
+            revs[r["group_id"]] = r
+        for g, r in list(revs.items()):
+            if g not in marks:
+                revs[g] = XF.gated(r, XF.of_review(r, now=at))
         stand = {}
         for r in await conn.fetch(
                 "SELECT group_id, count(*) AS n FROM paper_orders "
@@ -996,7 +1012,15 @@ async def xavier_operations(conn, *, account_id: str | None = None,
                         "settlement condition to be compatible)"),
                     "open_management_orders": stand.get(g, 0)},
                 "recommendation": None if rv is None else {
+                    # the action only while CURRENT, the state otherwise
                     "recommendation": rv.get("recommendation"),
+                    "recommendation_state": rv.get("recommendation_state"),
+                    "current_recommendation": rv.get(
+                        "current_recommendation"),
+                    "recorded_recommendation": rv.get(
+                        "recorded_recommendation"),
+                    "freshness": rv.get("freshness"),
+                    "alternatives_complete": rv.get("alternatives_complete"),
                     "refusal": rv.get("refusal"),
                     "refusal_words": refusal_words(rv.get("refusal")),
                     "selection": rv.get("selection"),

@@ -267,7 +267,12 @@ async def test_a_row_links_decision_paper_fill_mirror_order_and_venue_fills():
         assert isinstance(x["paper_first_fill_to_live_ack_ms"], int)
         # management
         assert m["xavier_paper"]["handoff_id"] == hid
-        assert m["xavier_paper"]["latest_recommendation"] == "PASSIVE_EXIT"
+        # the seeded review carries no probability evidence: its stored
+        # word is RECORDED and the recommendation reads STALE now (owner P0)
+        assert m["xavier_paper"]["latest_recorded_recommendation"] == \
+            "PASSIVE_EXIT"
+        assert m["xavier_paper"]["latest_recommendation"] == "STALE"
+        assert m["xavier_paper"]["latest_recommendation_state"] == "STALE"
         assert m["xavier_actual"]["present"] is False
         assert m["xavier_actual"]["handoff_id"] is None
         assert m["xavier_actual"]["why_unavailable"].startswith("unavailable")

@@ -114,9 +114,16 @@ def summarize(agent, rows, now, account_id):
             buckets[state]+=1
             selection=obj(r.get('selection'))
             if len(attention)<12:
+                # the stored word is RECORDED; what it means NOW is re-judged
+                # (owner P0): the action only while CURRENT, the state otherwise
+                from .. import xavier_freshness as XF
+                ra=r.get('reviewed_at')
+                fr=XF.of_review(dict(r,reviewed_at=ra.timestamp() if hasattr(ra,'timestamp') else ra),now=float(now))
                 attention.append({'group_id':group,'review_id':r['review_id'],
                                   'reviewed_at':r['reviewed_at'],'freshness_at_review':state,
-                                  'recommendation':r.get('recommendation'),'refusal':r.get('refusal'),
+                                  'recommendation':fr['display_recommendation'],
+                                  'recommendation_state':fr['recommendation_state'],
+                                  'recorded_recommendation':r.get('recommendation'),'refusal':r.get('refusal'),
                                   'recorded_selection_present':bool(selection)})
         result.update(distinct_reviewed_groups=len(latest),freshness_at_review={k:buckets[k] for k in ('STALE','RECORDED_FRESH','UNKNOWN')},
                       recent_groups=attention,source_ids=[r['review_id'] for r in selected[:10]],

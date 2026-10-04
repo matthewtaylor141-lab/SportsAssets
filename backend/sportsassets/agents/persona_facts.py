@@ -255,6 +255,14 @@ async def _paper(conn, f: Facts, *, likes, context_ids, limit=5) -> bool:
         return False
     found = False
     for t in tables:
+        if t == "paper_xavier_reviews":
+            # XAVIER'S REVIEWS ARE NEVER DUMPED UNORDERED (owner P0): an
+            # older review's HOLD on an 86 s probability once surfaced here
+            # beside a newer fresh one. One CURRENT decision per position,
+            # older reviews labelled SUPERSEDED (_xavier_current below).
+            found = await _xavier_current(
+                conn, f, likes=likes, context_ids=context_ids) or found
+            continue
         try:
             if likes or context_ids:
                 rows = await conn.fetch(
@@ -278,6 +286,87 @@ async def _paper(conn, f: Facts, *, likes, context_ids, limit=5) -> bool:
                 f.add(t, rid, k, v, "paper %s %s = %s" % (t, k, v))
             found = True
     return found
+
+
+XAVIER_CURRENT_SQL = (
+    "SELECT r.review_id, r.group_id, r.reviewed_at, r.trigger, "
+    "       r.recommendation, r.refusal, r.measure, r.selection "
+    "  FROM paper_xavier_reviews r "
+    " WHERE r.group_id IN (SELECT x.group_id FROM paper_xavier_reviews x "
+    "                       WHERE to_jsonb(x)::text ILIKE ANY($1::text[]) "
+    "                          OR to_jsonb(x)::text LIKE ANY($2::text[]) "
+    "                       UNION SELECT o.group_id FROM paper_orders o "
+    "                       WHERE o.us_market_slug ILIKE ANY($1::text[]) "
+    "                          OR o.group_id LIKE ANY($2::text[])) "
+    " ORDER BY r.group_id, r.reviewed_at DESC, r.review_id DESC LIMIT $3")
+
+
+def xavier_decision_text(d: dict, group_id) -> str:
+    """One Xavier decision as a fact sentence: the CURRENT one says so; an
+    older one is SUPERSEDED by the newer review id. Pure."""
+    dec = d["decision"]
+    age = dec.get("age_at_review_seconds")
+    lim = dec.get("freshness_limit")
+    base = ("review %s at %s; probability %s, %s s old at the review "
+            "(freshness limit %s s), valuation %s" % (
+                dec["review_id"], dec["review_timestamp"],
+                dec.get("valuation_source") or "source not recorded",
+                "unknown" if age is None else "%.3f" % float(age),
+                "unknown" if lim is None else "%g" % float(lim),
+                dec.get("valuation_id") if dec.get("valuation_id")
+                is not None else "id not recorded"))
+    if dec["management_state"] == "SUPERSEDED":
+        return ("SUPERSEDED Xavier review of paper position %s (history, NOT "
+                "the current decision; superseded by %s): recorded %s; %s"
+                % (group_id, dec["superseded_by"],
+                   dec["recorded_recommendation"], base))
+    if dec["management_state"] == "CURRENT":
+        return ("CURRENT Xavier management decision for paper position %s: "
+                "%s; %s" % (group_id, dec["current_recommendation"], base))
+    return ("CURRENT Xavier management state for paper position %s: %s -- "
+            "no current recommendation (recorded %s, %s); %s" % (
+                group_id, dec["management_state"],
+                dec["recorded_recommendation"],
+                dec["recommendation_state"], base))
+
+
+async def _xavier_current(conn, f: Facts, *, likes, context_ids,
+                          limit=40, now: float | None = None) -> bool:
+    """XAVIER'S DECISIONS FOR THE NAMED POSITION(S): exactly one CURRENT
+    decision per position (its newest review, re-judged now:
+    xavier_freshness.current_decisions), then up to two older reviews
+    labelled SUPERSEDED with the newer review id."""
+    import time as _time
+
+    from .. import xavier_freshness as XF
+    from . import xavier_management as XM
+    try:
+        rows = [dict(r) for r in await conn.fetch(
+            XAVIER_CURRENT_SQL, likes or [],
+            ["%" + i + "%" for i in context_ids or []], int(limit))]
+    except Exception as exc:                                    # noqa: BLE001
+        f.check("paper_xavier_reviews", "READ_FAILED", 0, type(exc).__name__)
+        return False
+    f.check("paper_xavier_reviews", "MATCHED" if rows else "NO_MATCH",
+            len(rows))
+    for r in rows:
+        if hasattr(r.get("reviewed_at"), "timestamp"):
+            r["reviewed_at"] = r["reviewed_at"].timestamp()
+    cur = XF.current_decisions(
+        rows, now=float(now if now is not None else _time.time()),
+        limit_s=XM._config_limit())
+    for g, d in cur.items():
+        c = d["current"]
+        f.add("paper_xavier_reviews", c["review_id"],
+              "current_management_decision",
+              c["decision"]["current_recommendation"]
+              or c["decision"]["management_state"],
+              xavier_decision_text(c, g))
+        for o in d["superseded"][:2]:
+            f.add("paper_xavier_reviews", o["review_id"],
+                  "superseded_review", o["recorded_recommendation"],
+                  xavier_decision_text(o, g))
+    return bool(rows)
 
 
 def _money(v) -> str:

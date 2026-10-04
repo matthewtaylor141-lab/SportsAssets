@@ -55,6 +55,7 @@ import time
 
 from . import bettor_book_snapshot as BS
 from . import bettor_venue_native_identity as VNI
+from . import xavier_freshness as XF
 
 VERSION = "POSITION_ROOMS_V1"
 
@@ -792,8 +793,15 @@ def xavier_panel(*, group_id: str, kind: str, assessment: dict | None,
                  thesis: dict | None, review: dict | None,
                  standing_orders: list, cadence_s: float, now: float,
                  schema_present: bool = True, group_orders: list | None = None,
-                 group_legs: list | None = None, venue: str = V_PM) -> dict:
-    """XAVIER AS DECISION MAKER, from the persisted rows only."""
+                 group_legs: list | None = None, venue: str = V_PM,
+                 latest_valuation: dict | None = None,
+                 limit_s: float | None = None) -> dict:
+    """XAVIER AS DECISION MAKER, from the persisted rows only. The stored
+    recommendation is RE-JUDGED AT `now` (xavier_freshness.of_assessment):
+    `recommendation` / `display_recommendation` carry the action only while
+    CURRENT, and the state (STALE / INVALID / WAITING_FOR_FRESH_EVIDENCE /
+    MANAGEMENT_UNAVAILABLE_STALE_INPUT) otherwise -- a stale HOLD never
+    renders as the current recommendation (owner P0)."""
     base = {"group_id": group_id, "position_kind": kind,
             "source": "xavier_management_assessments (migration 206)",
             "protection": protection_view(group_orders or []),
@@ -805,13 +813,25 @@ def xavier_panel(*, group_id: str, kind: str, assessment: dict | None,
                     thesis=_thesis_view(thesis, None, now))
     a = assessment
     at = _epoch(a.get("assessed_at"))
-    alts = _j(a.get("alternatives")) or []
+    ve0 = _j(a.get("venue_economics")) or {}
+    fr = XF.of_assessment(
+        dict(a, assessed_at=at, valuation=_j(a.get("valuation"))), now=now,
+        limit_s=(_f((thesis or {}).get("probability_limit_s"))
+                 or _f(limit_s)),
+        latest_valuation=latest_valuation,
+        event_start_at=_epoch((thesis or {}).get("event_start_at")),
+        mark_at_assessment=(ve0.get("best_exit")
+                            if isinstance(ve0, dict) else None))
+    alts = XF.complete_alternatives(_j(a.get("alternatives")) or [],
+                                    evidence_state=a.get("evidence_state"))
     ranked = sorted(
         [x for x in alts if isinstance(x, dict)],
         key=lambda x: (not x.get("rankable"),
                        -(float(x["value_usd"]) if x.get("value_usd")
                          is not None else -1e18)))
-    rec = a.get("recommendation")
+    recorded = a.get("recommendation")
+    # only a CURRENT recommendation is a recommendation now
+    rec = fr["current_recommendation"]
     rows = []
     for i, x in enumerate(ranked):
         rows.append({"rank": i + 1 if x.get("rankable") else None,
@@ -822,7 +842,10 @@ def xavier_panel(*, group_id: str, kind: str, assessment: dict | None,
                      "fees_usd": _f(x.get("fees_usd")), "qty": _f(x.get("qty")),
                      "rankable": bool(x.get("rankable")),
                      "blocker": x.get("blocker"), "mode": x.get("mode"),
-                     "is_recommendation": x.get("action") == rec,
+                     "option": x.get("option"),
+                     "missing_evidence": x.get("missing_evidence"),
+                     "is_recommendation": rec is not None
+                     and x.get("action") == rec,
                      "ev_basis": x.get("ev_basis")})
     # PROTECTION is the standing order (if any): it is an order, not a
     # valued alternative, and it is not protection until it fills.
@@ -854,12 +877,15 @@ def xavier_panel(*, group_id: str, kind: str, assessment: dict | None,
             "margin_over_runner_up": round(lead["value_usd"]
                                            - nxt["value_usd"], 6),
             "source": "DERIVED_FROM_THE_RECORDED_ALTERNATIVE_VALUES"}
-    elif rec and not a.get("discretionary_permitted"):
-        why = {"text": ("the probability is not fresh, so no discretionary "
-                        "action (EXIT / REDUCE / REALLOCATE) may lead; HOLD "
-                        "stands with the limitation stated"),
-               "source": "xavier_management_assessments."
-                         "discretionary_permitted = false"}
+    if not fr["is_current"]:
+        why = {"text": ("no current management recommendation: %s%s. A held "
+                        "position is not a HOLD recommendation; Xavier "
+                        "re-assesses on fresh evidence" % (
+                            fr["recommendation_state"],
+                            (" (" + ", ".join(fr["reasons"]) + ")")
+                            if fr["reasons"] else "")),
+               "recorded_recommendation": recorded,
+               "source": "xavier_freshness.validity at read time"}
     p_age = _f(a.get("probability_age_s"), 1)
     age_now = None if p_age is None or at is None else round(
         p_age + max(0.0, now - at), 1)
@@ -910,7 +936,12 @@ def xavier_panel(*, group_id: str, kind: str, assessment: dict | None,
         review_view = {
             "review_id": review.get("review_id"),
             "reviewed_at": iso(review.get("reviewed_at")),
-            "recommendation": review.get("recommendation"),
+            # the review's stored word is RECORDED; what it means now is
+            # the gated recommendation above (never a stale HOLD as current)
+            "recommendation": (review.get("recommendation")
+                               if fr["is_current"] else
+                               fr["recommendation_state"]),
+            "recorded_recommendation": review.get("recommendation"),
             "refusal": review.get("refusal"),
             "action": _j(review.get("action")),
             "exposure": _j(review.get("exposure")),
@@ -919,13 +950,11 @@ def xavier_panel(*, group_id: str, kind: str, assessment: dict | None,
     hold = next((r for r in rows if r["recorded_action"] == "HOLD"), None)
     taken = str(((review_view or {}).get("action") or {}).get("taken") or "")
     if rec is None:
-        disp = ("WAITING_FOR_EVIDENCE" if a.get("evidence_state") !=
-                "FRESH_CURRENT_PROBABILITY" else "NO_RECOMMENDATION_RECORDED")
+        # STALE / INVALID / WAITING_FOR_FRESH_EVIDENCE /
+        # MANAGEMENT_UNAVAILABLE_STALE_INPUT / NO_RECOMMENDATION
+        disp = fr["recommendation_state"]
     elif rec == "HOLD" and "STANDING" in taken:
         disp = "PROTECT"
-    elif rec == "HOLD" and a.get("evidence_state") != \
-            "FRESH_CURRENT_PROBABILITY":
-        disp = "HOLD"
     else:
         disp = ALT_NAMES.get(rec, rec)
     return dict(
@@ -933,14 +962,28 @@ def xavier_panel(*, group_id: str, kind: str, assessment: dict | None,
         assessment_id=a.get("assessment_id"), review_id=a.get("review_id"),
         assessed_at=iso(at), trigger=a.get("trigger"),
         recommendation=rec, display_recommendation=disp,
-        display_basis=("recorded recommendation %s; PROTECT = HOLD while the "
-                       "review maintains a standing protective order (%s); "
-                       "WAITING_FOR_EVIDENCE = nothing recommended on a "
-                       "non-fresh probability" % (rec, taken or "none")),
-        current_ev_usd=None if hold is None else hold["value_usd"],
+        recommendation_state=fr["recommendation_state"],
+        management_state=fr["management_state"],
+        recorded_recommendation=recorded,
+        freshness=fr,
+        decision=XF.decision(fr, review_id=a.get("review_id"),
+                             reviewed_at=at),
+        display_basis=("recorded recommendation %s, %s at read time; only a "
+                       "CURRENT recommendation is shown as one; PROTECT = "
+                       "a CURRENT HOLD while the review maintains a standing "
+                       "protective order (%s)" % (
+                           recorded, fr["recommendation_state"],
+                           taken or "none")),
+        current_ev_usd=(hold["value_usd"] if hold is not None
+                        and fr["is_current"] else None),
+        hold_value_at_assessment_usd=(None if hold is None
+                                      else hold["value_usd"]),
         current_ev_basis=("HOLD alternative's recorded value (held qty x "
-                          "recorded probability) at %s, evidence %s"
-                          % (iso(at), a.get("evidence_state"))),
+                          "recorded probability) at %s, evidence %s; shown "
+                          "as current only while the recommendation is "
+                          "CURRENT (now %s)" % (
+                              iso(at), a.get("evidence_state"),
+                              fr["recommendation_state"])),
         entry_ev_usd=_f((thesis or {}).get("entry_ev_usd")),
         evidence=evidence,
         venue_economics=_j(a.get("venue_economics")),
@@ -1419,6 +1462,8 @@ def _finish_room(rm: dict, raw: dict, ident_of, now: float) -> dict:
             group_orders=[o for o in orders if o.get("group_id") == g],
             group_legs=[lg for lg in legs if lg["group_id"] == g],
             venue=venue,
+            latest_valuation=(xa.get("latest_valuations") or {}).get(g),
+            limit_s=xa.get("limit_s"),
             cadence_s=float(xa.get("cadence_s") or (
                 PAPER_BACKSTOP_DEFAULT_S if book == B_PAPER
                 else ACTUAL_MANAGEMENT_EVERY_S)),
@@ -1625,7 +1670,13 @@ def summarize(room: dict) -> dict:
         "capital_at_risk_usd": eco["capital_at_risk_usd"],
         "money_label": eco["money_label"],
         "xavier": None if x is None else {
-            "recommendation": x.get("recommendation"),
+            # the action only while CURRENT; the state otherwise (owner P0)
+            "recommendation": x.get("recommendation") or x.get(
+                "recommendation_state"),
+            "recommendation_state": x.get("recommendation_state"),
+            "recorded_recommendation": x.get("recorded_recommendation"),
+            "freshness_expires_at": ((x.get("freshness") or {}).get(
+                "valuation") or {}).get("expires_at"),
             "evidence_state": (x.get("evidence") or {}).get("state"),
             "thesis_state": (x.get("thesis") or {}).get("state"),
             "assessed_at": x.get("assessed_at"),
@@ -2002,6 +2053,30 @@ async def _xavier(conn, book: str, groups: list) -> dict:
                     ORDER BY group_id, reviewed_at DESC""", groups):
             out["reviews"][r["group_id"]] = dict(r, _table=(
                 "paper_xavier_reviews"))
+        # THE NEWER VALUATION OF EACH GROUP'S OWN CONTRACT, for the
+        # read-time validity of Xavier's recommendation (owner P0): a
+        # changed primary valuation makes the stored recommendation INVALID
+        out["latest_valuations"] = {}
+        try:
+            if await _exists(conn, "external_valuations"):
+                for r in await conn.fetch(
+                        XF.LATEST_VALUATION_SQL, groups,
+                        time.time() - XF.CONTEXT_VALUATION_LOOKBACK_S):
+                    out["latest_valuations"][r["group_id"]] = {
+                        "id": r["id"], "probability": _f(r["probability"]),
+                        "observed_at": _epoch(r["observed_at"])}
+        except Exception as exc:                                # noqa: BLE001
+            out["latest_valuations_unchecked"] = type(exc).__name__
+        try:
+            # the paper session's OWN freshness limit (entry.
+            # pinnacle_max_age_s): the existing threshold, read, for rows
+            # that did not record theirs
+            lim = await conn.fetchval(
+                "SELECT (config->'entry'->>'pinnacle_max_age_s')::float8 "
+                "  FROM paper_sessions ORDER BY started_at DESC LIMIT 1")
+            out["limit_s"] = None if lim is None else float(lim)
+        except Exception:                                       # noqa: BLE001
+            out["limit_s"] = None
         try:
             b = await conn.fetchval(
                 "SELECT (config->'cadence'->>'xavier_backstop_s')::float8 "

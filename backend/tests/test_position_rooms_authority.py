@@ -90,7 +90,10 @@ def test_the_import_graph_reaches_no_order_or_paper_writer_module():
         "position_rooms.py", "bettor_book_snapshot.py",
         "bettor_venue_native_identity.py", "bettor_venue_mapping.py",
         "bettor_venue_realism.py", "bettor_sport_mapping.py",
-        "market_labels.py", "team_logos.py"}, sorted(reached)
+        "market_labels.py", "team_logos.py",
+        # the read-time freshness truth of Xavier's recommendation (owner
+        # P0, 2026-10-04): pure, stdlib only, imports no sportsassets module
+        "xavier_freshness.py"}, sorted(reached)
 
 
 def test_the_route_module_imports_only_auth_db_and_the_read_model():

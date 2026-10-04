@@ -337,10 +337,23 @@ def test_stale_xavier_evidence_is_warned_and_waits():
     assert any(w["what"] == "PROBABILITY_NOT_FRESH"
                for w in x["stale_evidence"])
     assert any(w["what"] == "A_FRESH_PROBABILITY" for w in x["waiting_for"])
+    # a HISTORICAL row that recorded HOLD on stale evidence is shown as
+    # STALE, never as the current HOLD (owner P0, 2026-10-04)
+    assert x["recommendation"] is None
+    assert x["recommendation_state"] == "STALE"
+    assert x["display_recommendation"] == "STALE"
+    assert x["recorded_recommendation"] == "HOLD"
+    assert x["current_ev_usd"] is None
+    assert not any(a.get("is_recommendation") for a in x["alternatives"])
     raw = F.raw_paper(fresh=False)
     raw["xavier"]["assessments"][F.G_NYY]["recommendation"] = None
     x2 = next(p for p in _evt(raw)["xavier"] if p["group_id"] == F.G_NYY)
-    assert x2["display_recommendation"] == "WAITING_FOR_EVIDENCE"
+    assert x2["display_recommendation"] == "WAITING_FOR_FRESH_EVIDENCE"
+    raw["xavier"]["assessments"][F.G_NYY]["recommendation"] = (
+        "WAITING_FOR_FRESH_EVIDENCE")
+    x3 = next(p for p in _evt(raw)["xavier"] if p["group_id"] == F.G_NYY)
+    assert x3["display_recommendation"] == "WAITING_FOR_FRESH_EVIDENCE"
+    assert x3["recommendation"] is None
 
 
 def test_karen_challenge_on_the_room_review_is_shown():

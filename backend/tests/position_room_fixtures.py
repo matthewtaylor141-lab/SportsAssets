@@ -115,7 +115,10 @@ def paper_fills():
 
 
 def assessment(*, fresh=True):
-    at = NOW - 40
+    # a FRESH assessment 10 s ago on a 6 s old probability is CURRENT at NOW
+    # (source NOW-16 + 30 s limit); the stale variant is a HISTORICAL row
+    # that recorded HOLD on stale evidence 40 s ago -- read as STALE
+    at = NOW - (10 if fresh else 40)
     alts = [
         {"action": "HOLD", "rankable": True, "value_usd": 630.0,
          "ev_basis": "FRESH_CURRENT_PROBABILITY", "blocker": None},
@@ -211,6 +214,8 @@ def raw_paper(*, fresh=True, game_age_s=900.0, book_age_s=12.0):
             "xavier": {"assessments": {G_NYY: assessment(fresh=fresh)},
                        "theses": {G_NYY: thesis()},
                        "reviews": {G_NYY: review()}, "cadence_s": 60.0,
+                       # the paper session's freshness limit, as recorded
+                       "limit_s": 30.0,
                        "schema_present": True},
             "karen": [{"challenge_id": "kc:fixture", "detector":
                        "HOLD_ON_STALE_PROBABILITY", "target_agent": "XAVIER",
