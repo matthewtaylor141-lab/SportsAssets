@@ -682,16 +682,21 @@ CAPTURED_SCOPE = {
     # section states ONE rule set for every phase of the leagues it names --
     # "All American Football rules apply to NFL, NCAA, UFL, and CFL unless a
     # specific league is mentioned within the rule" -- and the only
-    # league-specific Game-period exception is the NFL Pro Bowl. The lane maps
-    # only the college board (`cfb`), so for it no phase or format selects a
-    # different rule and none is required. Revisit before mapping `nfl`.
+    # league-specific Game-period exception is the NFL Pro Bowl. No phase or
+    # format selects a different rule for the college board (`cfb`) or, since
+    # cand24, the NFL board (`nfl`): the same captured sentence names the NFL,
+    # and the Pro Bowl -- the one NFL exception -- is not a game the lane maps
+    # (it stays `not_covered`). What the section does NOT state is a money-line
+    # rule for a game that ENDS TIED, which an NFL regular-season game can;
+    # `bettor_venue_settlement.attest` refuses the draw rule by name when the
+    # venue's prose prices a tie (DRAW_HANDLING_NOT_RECONCILED).
     ("football", "h2h"): {"phases": (), "formats": (),
                           "phase_independent": True,
                           "phase_independent_because": (
                               "All American Football rules apply to NFL, "
                               "NCAA, UFL, and CFL unless a specific league "
                               "is mentioned within the rule."),
-                          "leagues_covered": ("NCAA",),
+                          "leagues_covered": ("NCAA", "NFL"),
                           "not_covered": ("NFL Pro Bowl",)},
 }
 

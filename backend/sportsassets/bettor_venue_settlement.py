@@ -614,7 +614,31 @@ def attest(*, sport_family, market="h2h", venue_evidence=None,
            "venue_evidence": ve, "book_evidence": be}
 
     # ── draw ─────────────────────────────────────────────────────────
-    if n_book != 3:
+    #
+    # A TIE THE VENUE PRICES AND THE BOOK'S CAPTURED TERMS DO NOT (cand24).
+    # The venue's NFL listing says "If the game ends in a tie, the market
+    # will settle to $0.50" (tests/fixtures/pmus_nfl_listing_2026_10_04.json);
+    # an NFL regular-season game can end level after overtime
+    # (TIE_REACHABLE), and the bookmaker's captured American Football section
+    # states no money-line rule for that outcome. "This sport prices no draw"
+    # would then be a claim neither document makes, so the draw rule refuses
+    # by name. The college listing names no tie payout and is unaffected.
+    tie_prose = str(ve.get("rules_text") or "").lower()
+    venue_prices_a_tie = bool(re.search(
+        r"\bties?\b[^.]*\bsettle\w*\s+(?:to|at)\s+\$?0?\.5|"
+        r"\bties?\b[^.]*\b50\s*[-/]\s*50\b", tie_prose))
+    if n_book != 3 and venue_prices_a_tie and \
+            TIE_REACHABLE.get((fam, "OT_INCLUDED")):
+        out["rules"]["draw"] = {
+            "applicable": True, "established": False,
+            "evidence_class": EV_NONE, "refusal": R_DRAW_ASYMMETRIC,
+            "source": ve.get("rules_source") or "venue rules_text",
+            "detail": ("the venue settles a TIED game at a stated price "
+                       "(its own prose), a tie is reachable in this sport "
+                       "(TIE_REACHABLE), and the book's captured terms state "
+                       "no money-line rule for a tie: the tie outcome is not "
+                       "reconciled")}
+    elif n_book != 3:
         out["rules"]["draw"] = {
             "applicable": False, "established": True,
             "evidence_class": EV_BOOK_PAYLOAD,
