@@ -1,0 +1,2135 @@
+{
+ "workflow": ".github/workflows/research-sql.yml",
+ "ref": "claude/command-center",
+ "query_file": "research/c28_coverage_receipt_final.sql",
+ "query_commit": "c83c15a",
+ "run_id": 37199021838,
+ "job_id": 111426762806,
+ "run_url": "https://github.com/matthewtaylor141-lab/SportsAssets/actions/runs/37199021838",
+ "database": "sportsassets-db (read replica connection, default_transaction_read_only=on)",
+ "query_sha256": "a0d648e47b84ea8336f529f1d4bc4664f6ce1d6d0646a1d4d4af3690dc02f8c1",
+ "psql_exit": "0",
+ "read_at": "2026-10-04 11:31:59.450706+00",
+ "run_header": "== research/c28_coverage_receipt_final.sql on sportsassets-db (dpg-d9gcudurnols73ce4avg-a) at 2026-10-04T11:31:58Z, statement_timeout 600000ms ==",
+ "generated_at": "2026-10-04T11:36:28Z",
+ "supporting_runs": [
+  {
+   "run_id": 37198700093,
+   "job_id": 111425751648,
+   "file": "research/c28_coverage_receipt.sql",
+   "sha256": "d854dfb3724f3c3cd5f138e77e74c5199f4b99aa61f1e41cd04d93075e02f786",
+   "read_at": "2026-10-04T11:25:48Z",
+   "note": "first pass; same N/A/I sections"
+  },
+  {
+   "run_id": 37198885728,
+   "job_id": 111426301688,
+   "file": "research/c28_coverage_firstloss.sql",
+   "sha256": "3116299f076cb2fd8c6e6bab5fa9de69b515c2e0f9f9314097995dd3ba39960f",
+   "read_at": "2026-10-04T11:29:16Z",
+   "note": "first-loss check; same F sections"
+  }
+ ],
+ "deliverable": "All-sports coverage funnel, Sunday 2026-10-04 (America/New_York day)",
+ "status_rule": {
+  "source": "backend/sportsassets/agents/coverage_integrity.py lane_scope + classify_status (unchanged by c28)",
+  "order": [
+   "EXPLICITLY_UNSUPPORTED: lane_scope says the league/token is outside the collector's declared maps (family not priced, token unmapped, deliberately excluded, mapping refuted, simulated)",
+   "UNAVAILABLE: in scope but provider events = 0 (collector heartbeat stale / provider refused / budget-dropped / not on board), or the venue lists none of the provider's events, or no paper decision path recorded anything",
+   "COVERAGE_INCIDENT: provider events > 0 and an expected stage (normalized, venue_discovered, mapped, settlement_supported, evaluated, decided-when-live) reads 0 with nothing after it; NULL = unmeasured, never absent; a zero followed by later flow is a measurement gap",
+   "HEALTHY: reached decisions and at least one ENTER (any paper strategy, as the funnel counts)",
+   "REFUSING_BY_POLICY: reached decisions, every one REFUSED with a named policy code"
+  ],
+  "inputs": "the persisted coverage_funnel_snapshots row (tz America/New_York, day 2026-10-04) read in this run; venue counts from us_premap tokens on the ET day; collector selection from ingestion_state ext_pinnacle_last_cycle",
+  "decisions_live": true
+ },
+ "collector": {
+  "fresh": true,
+  "requested": [
+   "baseball_mlb",
+   "soccer_uefa_nations_league",
+   "americanfootball_nfl",
+   "soccer_brazil_serie_b"
+  ],
+  "rejected": {
+   "soccer_argentina_primera_nacional": "PROVIDER_DOES_NOT_LIST_THIS_COMPETITION",
+   "soccer_colombia_primera_a": "PROVIDER_DOES_NOT_LIST_THIS_COMPETITION",
+   "soccer_concacaf_nations_league": "PROVIDER_DOES_NOT_LIST_THIS_COMPETITION",
+   "soccer_uruguay_primera_division": "PROVIDER_DOES_NOT_LIST_THIS_COMPETITION",
+   "soccer_usa_nwsl": "PROVIDER_DOES_NOT_LIST_THIS_COMPETITION"
+  },
+  "budget_dropped": [
+   "americanfootball_ncaaf"
+  ],
+  "budget": "4"
+ },
+ "leagues": [
+  {
+   "LEAGUE": "MLB",
+   "league_key": "baseball_mlb",
+   "family": "baseball",
+   "venue_tokens": [
+    "mlb"
+   ],
+   "present_in": [
+    "provider config (ext_pinnacle_loop)",
+    "coverage_integrity CATALOGUE_TOKENS",
+    "settlement registry BOOK_SETTLEMENT[baseball]",
+    "collector requested"
+   ],
+   "VENUE (ET day)": 2,
+   "PROVIDER": 5,
+   "NORMALIZED": 5,
+   "VENUE DISCOVERED": 5,
+   "MAPPED": 5,
+   "SETTLEMENT": null,
+   "EVALUATED": 4,
+   "DECIDED": 4,
+   "ENTER (any paper strategy)": 2,
+   "REFUSE": 2,
+   "PAPER ORDERS": 2,
+   "PAPER FILLS": 2,
+   "DEREK DECIDED": 4,
+   "DEREK ENTER": 0,
+   "STATUS": "HEALTHY",
+   "reason": "2 of 4 decided event(s) ENTERED",
+   "incident_stage": null,
+   "measurement_gaps": [],
+   "snapshot_computed_utc": "10-04 11:30",
+   "unavailable": {
+    "settlement_supported": "NOT_MEASURED_BY_THE_COLLECTION_LEDGER: it records no row past stage 4 in this window; settlement is decided per strategy at decision time (see decided/refused)"
+   }
+  },
+  {
+   "LEAGUE": "NFL",
+   "league_key": "americanfootball_nfl",
+   "family": "football",
+   "venue_tokens": [
+    "nfl"
+   ],
+   "present_in": [
+    "provider config (ext_pinnacle_loop)",
+    "coverage_integrity CATALOGUE_TOKENS",
+    "settlement registry BOOK_SETTLEMENT[football]",
+    "collector requested"
+   ],
+   "VENUE (ET day)": 14,
+   "PROVIDER": 28,
+   "NORMALIZED": 15,
+   "VENUE DISCOVERED": 15,
+   "MAPPED": 15,
+   "SETTLEMENT": null,
+   "EVALUATED": 13,
+   "DECIDED": 13,
+   "ENTER (any paper strategy)": 0,
+   "REFUSE": 13,
+   "PAPER ORDERS": 0,
+   "PAPER FILLS": 0,
+   "DEREK DECIDED": 13,
+   "DEREK ENTER": 0,
+   "STATUS": "REFUSING_BY_POLICY",
+   "reason": "all 13 decided event(s) REFUSED by a named policy",
+   "incident_stage": null,
+   "measurement_gaps": [],
+   "snapshot_computed_utc": "10-04 11:30",
+   "unavailable": {
+    "settlement_supported": "NOT_MEASURED_BY_THE_COLLECTION_LEDGER: it records no row past stage 4 in this window; settlement is decided per strategy at decision time (see decided/refused)"
+   }
+  },
+  {
+   "LEAGUE": "NCAAF",
+   "league_key": "americanfootball_ncaaf",
+   "family": "football",
+   "venue_tokens": [
+    "cfb",
+    "ncaaf"
+   ],
+   "present_in": [
+    "provider config (ext_pinnacle_loop)",
+    "coverage_integrity CATALOGUE_TOKENS",
+    "settlement registry BOOK_SETTLEMENT[football]",
+    "collector budget_dropped"
+   ],
+   "VENUE (ET day)": 1,
+   "PROVIDER": 39,
+   "NORMALIZED": 5,
+   "VENUE DISCOVERED": 5,
+   "MAPPED": 5,
+   "SETTLEMENT": null,
+   "EVALUATED": 0,
+   "DECIDED": 0,
+   "ENTER (any paper strategy)": 0,
+   "REFUSE": 0,
+   "PAPER ORDERS": 0,
+   "PAPER FILLS": 0,
+   "DEREK DECIDED": 0,
+   "DEREK ENTER": 0,
+   "STATUS": "COVERAGE_INCIDENT",
+   "reason": "39 provider event(s); none reached evaluated and nothing reached a later stage",
+   "incident_stage": "evaluated",
+   "measurement_gaps": [],
+   "snapshot_computed_utc": "10-04 11:30",
+   "unavailable": {
+    "settlement_supported": "NOT_MEASURED_BY_THE_COLLECTION_LEDGER: it records no row past stage 4 in this window; settlement is decided per strategy at decision time (see decided/refused)"
+   }
+  },
+  {
+   "LEAGUE": "NBA",
+   "league_key": "basketball_nba",
+   "family": "basketball",
+   "venue_tokens": [
+    "nba"
+   ],
+   "present_in": [
+    "coverage_integrity CATALOGUE_TOKENS",
+    "settlement registry TIE_REACHABLE[basketball]"
+   ],
+   "VENUE (ET day)": 2,
+   "PROVIDER": 0,
+   "NORMALIZED": 0,
+   "VENUE DISCOVERED": 0,
+   "MAPPED": 0,
+   "SETTLEMENT": null,
+   "EVALUATED": 0,
+   "DECIDED": 0,
+   "ENTER (any paper strategy)": 0,
+   "REFUSE": 0,
+   "PAPER ORDERS": 0,
+   "PAPER FILLS": 0,
+   "DEREK DECIDED": 0,
+   "DEREK ENTER": 0,
+   "STATUS": "EXPLICITLY_UNSUPPORTED",
+   "reason": "FAMILY_NOT_IN_COLLECTOR_SCOPE: no basketball provider key is requested by the collector (ext_pinnacle_loop maps none) and basketball h2h is not in the measured de-vig set",
+   "incident_stage": null,
+   "measurement_gaps": [],
+   "snapshot_computed_utc": "10-04 11:30",
+   "unavailable": {
+    "settlement_supported": "NOT_MEASURED_BY_THE_COLLECTION_LEDGER: it records no row past stage 4 in this window; settlement is decided per strategy at decision time (see decided/refused)"
+   }
+  },
+  {
+   "LEAGUE": "WNBA",
+   "league_key": "basketball_wnba",
+   "family": "basketball",
+   "venue_tokens": [
+    "wnba"
+   ],
+   "present_in": [
+    "coverage_integrity CATALOGUE_TOKENS",
+    "settlement registry TIE_REACHABLE[basketball]"
+   ],
+   "VENUE (ET day)": 2,
+   "PROVIDER": 0,
+   "NORMALIZED": 0,
+   "VENUE DISCOVERED": 0,
+   "MAPPED": 0,
+   "SETTLEMENT": null,
+   "EVALUATED": 0,
+   "DECIDED": 0,
+   "ENTER (any paper strategy)": 0,
+   "REFUSE": 0,
+   "PAPER ORDERS": 0,
+   "PAPER FILLS": 0,
+   "DEREK DECIDED": 0,
+   "DEREK ENTER": 0,
+   "STATUS": "EXPLICITLY_UNSUPPORTED",
+   "reason": "FAMILY_NOT_IN_COLLECTOR_SCOPE: no basketball provider key is requested by the collector (ext_pinnacle_loop maps none) and basketball h2h is not in the measured de-vig set",
+   "incident_stage": null,
+   "measurement_gaps": [],
+   "snapshot_computed_utc": "10-04 11:30",
+   "unavailable": {
+    "settlement_supported": "NOT_MEASURED_BY_THE_COLLECTION_LEDGER: it records no row past stage 4 in this window; settlement is decided per strategy at decision time (see decided/refused)"
+   }
+  },
+  {
+   "LEAGUE": "NCAAB",
+   "league_key": "basketball_ncaab",
+   "family": "basketball",
+   "venue_tokens": [
+    "cbb",
+    "ncaab"
+   ],
+   "present_in": [
+    "coverage_integrity CATALOGUE_TOKENS",
+    "settlement registry TIE_REACHABLE[basketball]"
+   ],
+   "VENUE (ET day)": 0,
+   "PROVIDER": 0,
+   "NORMALIZED": 0,
+   "VENUE DISCOVERED": 0,
+   "MAPPED": 0,
+   "SETTLEMENT": 0,
+   "EVALUATED": 0,
+   "DECIDED": 0,
+   "ENTER (any paper strategy)": 0,
+   "REFUSE": 0,
+   "PAPER ORDERS": 0,
+   "PAPER FILLS": 0,
+   "DEREK DECIDED": 0,
+   "DEREK ENTER": 0,
+   "STATUS": "EXPLICITLY_UNSUPPORTED",
+   "reason": "FAMILY_NOT_IN_COLLECTOR_SCOPE: no basketball provider key is requested by the collector (ext_pinnacle_loop maps none) and basketball h2h is not in the measured de-vig set",
+   "incident_stage": null,
+   "measurement_gaps": [],
+   "snapshot_computed_utc": null,
+   "unavailable": {}
+  },
+  {
+   "LEAGUE": "NHL",
+   "league_key": "icehockey_nhl",
+   "family": "hockey",
+   "venue_tokens": [
+    "nhl"
+   ],
+   "present_in": [
+    "coverage_integrity CATALOGUE_TOKENS",
+    "settlement registry TIE_REACHABLE[hockey]"
+   ],
+   "VENUE (ET day)": 5,
+   "PROVIDER": 0,
+   "NORMALIZED": 0,
+   "VENUE DISCOVERED": 0,
+   "MAPPED": 0,
+   "SETTLEMENT": null,
+   "EVALUATED": 0,
+   "DECIDED": 0,
+   "ENTER (any paper strategy)": 0,
+   "REFUSE": 0,
+   "PAPER ORDERS": 0,
+   "PAPER FILLS": 0,
+   "DEREK DECIDED": 0,
+   "DEREK ENTER": 0,
+   "STATUS": "EXPLICITLY_UNSUPPORTED",
+   "reason": "FAMILY_NOT_IN_COLLECTOR_SCOPE: no hockey provider key is requested by the collector and hockey h2h is not in the measured de-vig set",
+   "incident_stage": null,
+   "measurement_gaps": [],
+   "snapshot_computed_utc": "10-04 11:30",
+   "unavailable": {
+    "settlement_supported": "NOT_MEASURED_BY_THE_COLLECTION_LEDGER: it records no row past stage 4 in this window; settlement is decided per strategy at decision time (see decided/refused)"
+   }
+  },
+  {
+   "LEAGUE": "UEFA_NATIONS_LEAGUE",
+   "league_key": "soccer_uefa_nations_league",
+   "family": "soccer",
+   "venue_tokens": [
+    "unl"
+   ],
+   "present_in": [
+    "provider config (ext_pinnacle_loop)",
+    "settlement registry BOOK_SETTLEMENT[soccer]",
+    "collector requested"
+   ],
+   "VENUE (ET day)": 8,
+   "PROVIDER": 22,
+   "NORMALIZED": 13,
+   "VENUE DISCOVERED": 13,
+   "MAPPED": 13,
+   "SETTLEMENT": null,
+   "EVALUATED": 13,
+   "DECIDED": 13,
+   "ENTER (any paper strategy)": 6,
+   "REFUSE": 7,
+   "PAPER ORDERS": 6,
+   "PAPER FILLS": 4,
+   "DEREK DECIDED": 13,
+   "DEREK ENTER": 0,
+   "STATUS": "HEALTHY",
+   "reason": "6 of 13 decided event(s) ENTERED",
+   "incident_stage": null,
+   "measurement_gaps": [],
+   "snapshot_computed_utc": "10-04 11:30",
+   "unavailable": {
+    "settlement_supported": "NOT_MEASURED_BY_THE_COLLECTION_LEDGER: it records no row past stage 4 in this window; settlement is decided per strategy at decision time (see decided/refused)"
+   }
+  },
+  {
+   "LEAGUE": "MLS",
+   "league_key": "soccer_usa_mls",
+   "family": "soccer",
+   "venue_tokens": [
+    "mls"
+   ],
+   "present_in": [
+    "provider config (ext_pinnacle_loop)",
+    "settlement registry BOOK_SETTLEMENT[soccer]"
+   ],
+   "VENUE (ET day)": 0,
+   "PROVIDER": 0,
+   "NORMALIZED": 0,
+   "VENUE DISCOVERED": 0,
+   "MAPPED": 0,
+   "SETTLEMENT": 0,
+   "EVALUATED": 0,
+   "DECIDED": 0,
+   "ENTER (any paper strategy)": 0,
+   "REFUSE": 0,
+   "PAPER ORDERS": 0,
+   "PAPER FILLS": 0,
+   "DEREK DECIDED": 0,
+   "DEREK ENTER": 0,
+   "STATUS": "UNAVAILABLE",
+   "reason": "NO_PROVIDER_EVENTS: NOT_A_CANDIDATE_THIS_CYCLE (not on the collector's board); venue lists 0 event(s)",
+   "incident_stage": null,
+   "measurement_gaps": [],
+   "snapshot_computed_utc": null,
+   "unavailable": {}
+  },
+  {
+   "LEAGUE": "MEXICO_LIGAMX",
+   "league_key": "soccer_mexico_ligamx",
+   "family": "soccer",
+   "venue_tokens": [
+    "lmx"
+   ],
+   "present_in": [
+    "provider config (ext_pinnacle_loop)",
+    "settlement registry BOOK_SETTLEMENT[soccer]"
+   ],
+   "VENUE (ET day)": 0,
+   "PROVIDER": 0,
+   "NORMALIZED": 0,
+   "VENUE DISCOVERED": 0,
+   "MAPPED": 0,
+   "SETTLEMENT": 0,
+   "EVALUATED": 0,
+   "DECIDED": 0,
+   "ENTER (any paper strategy)": 0,
+   "REFUSE": 0,
+   "PAPER ORDERS": 0,
+   "PAPER FILLS": 0,
+   "DEREK DECIDED": 0,
+   "DEREK ENTER": 0,
+   "STATUS": "UNAVAILABLE",
+   "reason": "NO_PROVIDER_EVENTS: NOT_A_CANDIDATE_THIS_CYCLE (not on the collector's board); venue lists 0 event(s)",
+   "incident_stage": null,
+   "measurement_gaps": [],
+   "snapshot_computed_utc": null,
+   "unavailable": {}
+  },
+  {
+   "LEAGUE": "UEFA_CHAMPS_LEAGUE_WOMEN",
+   "league_key": "soccer_uefa_champs_league_women",
+   "family": "soccer",
+   "venue_tokens": [
+    "uwcl"
+   ],
+   "present_in": [
+    "provider config (ext_pinnacle_loop)",
+    "settlement registry BOOK_SETTLEMENT[soccer]"
+   ],
+   "VENUE (ET day)": 0,
+   "PROVIDER": 0,
+   "NORMALIZED": 0,
+   "VENUE DISCOVERED": 0,
+   "MAPPED": 0,
+   "SETTLEMENT": 0,
+   "EVALUATED": 0,
+   "DECIDED": 0,
+   "ENTER (any paper strategy)": 0,
+   "REFUSE": 0,
+   "PAPER ORDERS": 0,
+   "PAPER FILLS": 0,
+   "DEREK DECIDED": 0,
+   "DEREK ENTER": 0,
+   "STATUS": "UNAVAILABLE",
+   "reason": "NO_PROVIDER_EVENTS: NOT_A_CANDIDATE_THIS_CYCLE (not on the collector's board); venue lists 0 event(s)",
+   "incident_stage": null,
+   "measurement_gaps": [],
+   "snapshot_computed_utc": null,
+   "unavailable": {}
+  },
+  {
+   "LEAGUE": "CONCACAF_NATIONS_LEAGUE",
+   "league_key": "soccer_concacaf_nations_league",
+   "family": "soccer",
+   "venue_tokens": [
+    "cnl"
+   ],
+   "present_in": [
+    "provider config (ext_pinnacle_loop)",
+    "settlement registry BOOK_SETTLEMENT[soccer]",
+    "collector rejected: PROVIDER_DOES_NOT_LIST_THIS_COMPETITION"
+   ],
+   "VENUE (ET day)": 3,
+   "PROVIDER": 0,
+   "NORMALIZED": 0,
+   "VENUE DISCOVERED": 0,
+   "MAPPED": 0,
+   "SETTLEMENT": null,
+   "EVALUATED": 0,
+   "DECIDED": 0,
+   "ENTER (any paper strategy)": 0,
+   "REFUSE": 0,
+   "PAPER ORDERS": 0,
+   "PAPER FILLS": 0,
+   "DEREK DECIDED": 0,
+   "DEREK ENTER": 0,
+   "STATUS": "UNAVAILABLE",
+   "reason": "NO_PROVIDER_EVENTS: PROVIDER_REFUSED: PROVIDER_DOES_NOT_LIST_THIS_COMPETITION; venue lists 3 event(s)",
+   "incident_stage": null,
+   "measurement_gaps": [],
+   "snapshot_computed_utc": "10-04 11:30",
+   "unavailable": {
+    "settlement_supported": "NOT_MEASURED_BY_THE_COLLECTION_LEDGER: it records no row past stage 4 in this window; settlement is decided per strategy at decision time (see decided/refused)"
+   }
+  },
+  {
+   "LEAGUE": "USA_USL_CHAMPIONSHIP",
+   "league_key": "soccer_usa_usl_championship",
+   "family": "soccer",
+   "venue_tokens": [
+    "uslc"
+   ],
+   "present_in": [
+    "provider config (ext_pinnacle_loop)",
+    "settlement registry BOOK_SETTLEMENT[soccer]"
+   ],
+   "VENUE (ET day)": 1,
+   "PROVIDER": 0,
+   "NORMALIZED": 0,
+   "VENUE DISCOVERED": 0,
+   "MAPPED": 0,
+   "SETTLEMENT": null,
+   "EVALUATED": 0,
+   "DECIDED": 0,
+   "ENTER (any paper strategy)": 0,
+   "REFUSE": 0,
+   "PAPER ORDERS": 0,
+   "PAPER FILLS": 0,
+   "DEREK DECIDED": 0,
+   "DEREK ENTER": 0,
+   "STATUS": "UNAVAILABLE",
+   "reason": "NO_PROVIDER_EVENTS: NOT_A_CANDIDATE_THIS_CYCLE (not on the collector's board); venue lists 1 event(s)",
+   "incident_stage": null,
+   "measurement_gaps": [],
+   "snapshot_computed_utc": "10-04 11:30",
+   "unavailable": {
+    "settlement_supported": "NOT_MEASURED_BY_THE_COLLECTION_LEDGER: it records no row past stage 4 in this window; settlement is decided per strategy at decision time (see decided/refused)"
+   }
+  },
+  {
+   "LEAGUE": "ARGENTINA_PRIMERA_NACIONAL",
+   "league_key": "soccer_argentina_primera_nacional",
+   "family": "soccer",
+   "venue_tokens": [
+    "arg2"
+   ],
+   "present_in": [
+    "provider config (ext_pinnacle_loop)",
+    "settlement registry BOOK_SETTLEMENT[soccer]",
+    "collector rejected: PROVIDER_DOES_NOT_LIST_THIS_COMPETITION"
+   ],
+   "VENUE (ET day)": 10,
+   "PROVIDER": 0,
+   "NORMALIZED": 0,
+   "VENUE DISCOVERED": 0,
+   "MAPPED": 0,
+   "SETTLEMENT": null,
+   "EVALUATED": 0,
+   "DECIDED": 0,
+   "ENTER (any paper strategy)": 0,
+   "REFUSE": 0,
+   "PAPER ORDERS": 0,
+   "PAPER FILLS": 0,
+   "DEREK DECIDED": 0,
+   "DEREK ENTER": 0,
+   "STATUS": "UNAVAILABLE",
+   "reason": "NO_PROVIDER_EVENTS: PROVIDER_REFUSED: PROVIDER_DOES_NOT_LIST_THIS_COMPETITION; venue lists 10 event(s)",
+   "incident_stage": null,
+   "measurement_gaps": [],
+   "snapshot_computed_utc": "10-04 11:30",
+   "unavailable": {
+    "settlement_supported": "NOT_MEASURED_BY_THE_COLLECTION_LEDGER: it records no row past stage 4 in this window; settlement is decided per strategy at decision time (see decided/refused)"
+   }
+  },
+  {
+   "LEAGUE": "BRAZIL_SERIE_B",
+   "league_key": "soccer_brazil_serie_b",
+   "family": "soccer",
+   "venue_tokens": [
+    "brb"
+   ],
+   "present_in": [
+    "provider config (ext_pinnacle_loop)",
+    "settlement registry BOOK_SETTLEMENT[soccer]",
+    "collector requested"
+   ],
+   "VENUE (ET day)": 0,
+   "PROVIDER": 10,
+   "NORMALIZED": 6,
+   "VENUE DISCOVERED": 6,
+   "MAPPED": 6,
+   "SETTLEMENT": null,
+   "EVALUATED": 6,
+   "DECIDED": 6,
+   "ENTER (any paper strategy)": 0,
+   "REFUSE": 6,
+   "PAPER ORDERS": 0,
+   "PAPER FILLS": 0,
+   "DEREK DECIDED": 6,
+   "DEREK ENTER": 0,
+   "STATUS": "REFUSING_BY_POLICY",
+   "reason": "all 6 decided event(s) REFUSED by a named policy",
+   "incident_stage": null,
+   "measurement_gaps": [],
+   "snapshot_computed_utc": "10-04 11:30",
+   "unavailable": {
+    "settlement_supported": "NOT_MEASURED_BY_THE_COLLECTION_LEDGER: it records no row past stage 4 in this window; settlement is decided per strategy at decision time (see decided/refused)"
+   }
+  },
+  {
+   "LEAGUE": "COLOMBIA_PRIMERA_A",
+   "league_key": "soccer_colombia_primera_a",
+   "family": "soccer",
+   "venue_tokens": [
+    "lco"
+   ],
+   "present_in": [
+    "provider config (ext_pinnacle_loop)",
+    "settlement registry BOOK_SETTLEMENT[soccer]",
+    "collector rejected: PROVIDER_DOES_NOT_LIST_THIS_COMPETITION"
+   ],
+   "VENUE (ET day)": 5,
+   "PROVIDER": 0,
+   "NORMALIZED": 0,
+   "VENUE DISCOVERED": 0,
+   "MAPPED": 0,
+   "SETTLEMENT": null,
+   "EVALUATED": 0,
+   "DECIDED": 0,
+   "ENTER (any paper strategy)": 0,
+   "REFUSE": 0,
+   "PAPER ORDERS": 0,
+   "PAPER FILLS": 0,
+   "DEREK DECIDED": 0,
+   "DEREK ENTER": 0,
+   "STATUS": "UNAVAILABLE",
+   "reason": "NO_PROVIDER_EVENTS: PROVIDER_REFUSED: PROVIDER_DOES_NOT_LIST_THIS_COMPETITION; venue lists 5 event(s)",
+   "incident_stage": null,
+   "measurement_gaps": [],
+   "snapshot_computed_utc": "10-04 11:30",
+   "unavailable": {
+    "settlement_supported": "NOT_MEASURED_BY_THE_COLLECTION_LEDGER: it records no row past stage 4 in this window; settlement is decided per strategy at decision time (see decided/refused)"
+   }
+  },
+  {
+   "LEAGUE": "URUGUAY_PRIMERA_DIVISION",
+   "league_key": "soccer_uruguay_primera_division",
+   "family": "soccer",
+   "venue_tokens": [
+    "uru1"
+   ],
+   "present_in": [
+    "provider config (ext_pinnacle_loop)",
+    "settlement registry BOOK_SETTLEMENT[soccer]",
+    "collector rejected: PROVIDER_DOES_NOT_LIST_THIS_COMPETITION"
+   ],
+   "VENUE (ET day)": 4,
+   "PROVIDER": 0,
+   "NORMALIZED": 0,
+   "VENUE DISCOVERED": 0,
+   "MAPPED": 0,
+   "SETTLEMENT": null,
+   "EVALUATED": 0,
+   "DECIDED": 0,
+   "ENTER (any paper strategy)": 0,
+   "REFUSE": 0,
+   "PAPER ORDERS": 0,
+   "PAPER FILLS": 0,
+   "DEREK DECIDED": 0,
+   "DEREK ENTER": 0,
+   "STATUS": "UNAVAILABLE",
+   "reason": "NO_PROVIDER_EVENTS: PROVIDER_REFUSED: PROVIDER_DOES_NOT_LIST_THIS_COMPETITION; venue lists 4 event(s)",
+   "incident_stage": null,
+   "measurement_gaps": [],
+   "snapshot_computed_utc": "10-04 11:30",
+   "unavailable": {
+    "settlement_supported": "NOT_MEASURED_BY_THE_COLLECTION_LEDGER: it records no row past stage 4 in this window; settlement is decided per strategy at decision time (see decided/refused)"
+   }
+  },
+  {
+   "LEAGUE": "USA_NWSL",
+   "league_key": "soccer_usa_nwsl",
+   "family": "soccer",
+   "venue_tokens": [
+    "nwsl"
+   ],
+   "present_in": [
+    "provider config (ext_pinnacle_loop)",
+    "settlement registry BOOK_SETTLEMENT[soccer]",
+    "collector rejected: PROVIDER_DOES_NOT_LIST_THIS_COMPETITION"
+   ],
+   "VENUE (ET day)": 3,
+   "PROVIDER": 0,
+   "NORMALIZED": 0,
+   "VENUE DISCOVERED": 0,
+   "MAPPED": 0,
+   "SETTLEMENT": null,
+   "EVALUATED": 0,
+   "DECIDED": 0,
+   "ENTER (any paper strategy)": 0,
+   "REFUSE": 0,
+   "PAPER ORDERS": 0,
+   "PAPER FILLS": 0,
+   "DEREK DECIDED": 0,
+   "DEREK ENTER": 0,
+   "STATUS": "UNAVAILABLE",
+   "reason": "NO_PROVIDER_EVENTS: PROVIDER_REFUSED: PROVIDER_DOES_NOT_LIST_THIS_COMPETITION; venue lists 3 event(s)",
+   "incident_stage": null,
+   "measurement_gaps": [],
+   "snapshot_computed_utc": "10-04 11:30",
+   "unavailable": {
+    "settlement_supported": "NOT_MEASURED_BY_THE_COLLECTION_LEDGER: it records no row past stage 4 in this window; settlement is decided per strategy at decision time (see decided/refused)"
+   }
+  }
+ ],
+ "other_venue_families": [
+  {
+   "family": "(none)",
+   "tokens": [
+    "btc(38)"
+   ],
+   "events_et_day": 38,
+   "statuses": {
+    "EXPLICITLY_UNSUPPORTED": 1
+   },
+   "reasons": [
+    "VENUE_TOKEN_NOT_MAPPED"
+   ]
+  },
+  {
+   "family": "baseball",
+   "tokens": [
+    "kbo(5)",
+    "npb(3)"
+   ],
+   "events_et_day": 8,
+   "statuses": {
+    "EXPLICITLY_UNSUPPORTED": 2
+   },
+   "reasons": [
+    "VENUE_TOKEN_NOT_MAPPED"
+   ]
+  },
+  {
+   "family": "basketball",
+   "tokens": [
+    "jpbl(13)",
+    "ita2(8)",
+    "acb(6)",
+    "autbl(5)",
+    "bbl(4)",
+    "lba(4)",
+    "vtb(3)",
+    "bsl(3)",
+    "nbl(2)",
+    "lnb(2)",
+    "lkl(2)",
+    "kbl(2)",
+    "gbl(2)",
+    "slb(1)"
+   ],
+   "events_et_day": 57,
+   "statuses": {
+    "EXPLICITLY_UNSUPPORTED": 14
+   },
+   "reasons": [
+    "FAMILY_NOT_IN_COLLECTOR_SCOPE"
+   ]
+  },
+  {
+   "family": "cricket",
+   "tokens": [
+    "t20icr(2)"
+   ],
+   "events_et_day": 2,
+   "statuses": {
+    "EXPLICITLY_UNSUPPORTED": 1
+   },
+   "reasons": [
+    "VENUE_TOKEN_NOT_MAPPED"
+   ]
+  },
+  {
+   "family": "darts",
+   "tokens": [
+    "pdcdarts(1)"
+   ],
+   "events_et_day": 1,
+   "statuses": {
+    "EXPLICITLY_UNSUPPORTED": 1
+   },
+   "reasons": [
+    "VENUE_TOKEN_NOT_MAPPED"
+   ]
+  },
+  {
+   "family": "efootball",
+   "tokens": [
+    "ebfwca(40)",
+    "ebfsa(28)",
+    "ebfwcb(20)",
+    "ebfcwc(4)"
+   ],
+   "events_et_day": 92,
+   "statuses": {
+    "EXPLICITLY_UNSUPPORTED": 4
+   },
+   "reasons": [
+    "SIMULATED_COMPETITION"
+   ]
+  },
+  {
+   "family": "esports",
+   "tokens": [
+    "cs2(21)",
+    "r6(8)",
+    "lol(7)",
+    "ow(7)",
+    "dota2(3)",
+    "valorant(2)"
+   ],
+   "events_et_day": 48,
+   "statuses": {
+    "EXPLICITLY_UNSUPPORTED": 6
+   },
+   "reasons": [
+    "SIMULATED_COMPETITION"
+   ]
+  },
+  {
+   "family": "futures",
+   "tokens": [
+    "f1(6)",
+    "temp(5)",
+    "pres(2)",
+    "presmov(1)",
+    "nascar(1)"
+   ],
+   "events_et_day": 15,
+   "statuses": {
+    "EXPLICITLY_UNSUPPORTED": 5
+   },
+   "reasons": [
+    "FAMILY_NOT_IN_COLLECTOR_SCOPE"
+   ]
+  },
+  {
+   "family": "hockey",
+   "tokens": [
+    "ahl(9)",
+    "del(7)",
+    "cehl(6)",
+    "khl(3)",
+    "snhl(2)"
+   ],
+   "events_et_day": 27,
+   "statuses": {
+    "EXPLICITLY_UNSUPPORTED": 5
+   },
+   "reasons": [
+    "FAMILY_NOT_IN_COLLECTOR_SCOPE"
+   ]
+  },
+  {
+   "family": "pickleball",
+   "tokens": [
+    "ppa(5)"
+   ],
+   "events_et_day": 5,
+   "statuses": {
+    "EXPLICITLY_UNSUPPORTED": 1
+   },
+   "reasons": [
+    "VENUE_TOKEN_NOT_MAPPED"
+   ]
+  },
+  {
+   "family": "rugby",
+   "tokens": [
+    "top14(1)",
+    "nrlw(1)",
+    "nrl(1)",
+    "prem(1)"
+   ],
+   "events_et_day": 4,
+   "statuses": {
+    "EXPLICITLY_UNSUPPORTED": 4
+   },
+   "reasons": [
+    "VENUE_TOKEN_NOT_MAPPED"
+   ]
+  },
+  {
+   "family": "soccer",
+   "tokens": [
+    "ncaaws(74)",
+    "ncaams(12)",
+    "ngnpfl(10)",
+    "gtasc(8)",
+    "wsl(6)",
+    "ghpl(6)",
+    "ven2(6)",
+    "j2(5)",
+    "lal2(5)",
+    "ch1cl(5)",
+    "sercb(5)",
+    "sercc(4)",
+    "intf(4)",
+    "lpa(4)",
+    "serca(4)",
+    "ligaf(4)",
+    "norw1(3)",
+    "fbl(3)",
+    "bolcup(3)",
+    "mne2(3)",
+    "be1vv(2)",
+    "lng(2)",
+    "svn3e(2)",
+    "u19f(2)",
+    "minw(1)",
+    "lexp(1)",
+    "nor1(1)",
+    "cpach(1)",
+    "uslcp(1)",
+    "svk2(1)",
+    "be1acff(1)"
+   ],
+   "events_et_day": 189,
+   "statuses": {
+    "EXPLICITLY_UNSUPPORTED": 31
+   },
+   "reasons": [
+    "DELIBERATELY_EXCLUDED",
+    "VENUE_TOKEN_NOT_MAPPED"
+   ]
+  },
+  {
+   "family": "table",
+   "tokens": [
+    "setkameua(235)",
+    "czechligapro(55)",
+    "setkamecz(51)",
+    "setkamemd(36)",
+    "wtt(32)",
+    "setkawoua(15)"
+   ],
+   "events_et_day": 424,
+   "statuses": {
+    "EXPLICITLY_UNSUPPORTED": 6
+   },
+   "reasons": [
+    "VENUE_TOKEN_NOT_MAPPED"
+   ]
+  },
+  {
+   "family": "tennis",
+   "tokens": [
+    "itfme(220)",
+    "itfwo(182)",
+    "atp(71)",
+    "wta(35)",
+    "utr(21)",
+    "wtadb(15)",
+    "atpdb(3)"
+   ],
+   "events_et_day": 547,
+   "statuses": {
+    "EXPLICITLY_UNSUPPORTED": 7
+   },
+   "reasons": [
+    "FAMILY_NOT_IN_COLLECTOR_SCOPE"
+   ]
+  }
+ ],
+ "other_venue_tokens": [
+  {
+   "token": "btc",
+   "family": "(none)",
+   "events_et_day": 38,
+   "events_not_started": 0,
+   "STATUS": "EXPLICITLY_UNSUPPORTED",
+   "reason": "VENUE_TOKEN_NOT_MAPPED: btc has no provider key in the collector's maps (ext_pinnacle_loop SPORTS_CONFIRMED / VENUE_TOKEN_TO_PROVIDER_KEY / VENUE_FOOTBALL_TOKEN_TO_PROVIDER_KEY)"
+  },
+  {
+   "token": "kbo",
+   "family": "baseball",
+   "events_et_day": 5,
+   "events_not_started": 0,
+   "STATUS": "EXPLICITLY_UNSUPPORTED",
+   "reason": "VENUE_TOKEN_NOT_MAPPED: kbo has no provider key in the collector's maps (ext_pinnacle_loop SPORTS_CONFIRMED / VENUE_TOKEN_TO_PROVIDER_KEY / VENUE_FOOTBALL_TOKEN_TO_PROVIDER_KEY)"
+  },
+  {
+   "token": "npb",
+   "family": "baseball",
+   "events_et_day": 3,
+   "events_not_started": 0,
+   "STATUS": "EXPLICITLY_UNSUPPORTED",
+   "reason": "VENUE_TOKEN_NOT_MAPPED: npb has no provider key in the collector's maps (ext_pinnacle_loop SPORTS_CONFIRMED / VENUE_TOKEN_TO_PROVIDER_KEY / VENUE_FOOTBALL_TOKEN_TO_PROVIDER_KEY)"
+  },
+  {
+   "token": "jpbl",
+   "family": "basketball",
+   "events_et_day": 13,
+   "events_not_started": 0,
+   "STATUS": "EXPLICITLY_UNSUPPORTED",
+   "reason": "FAMILY_NOT_IN_COLLECTOR_SCOPE: no basketball provider key is requested by the collector (ext_pinnacle_loop maps none) and basketball h2h is not in the measured de-vig set"
+  },
+  {
+   "token": "ita2",
+   "family": "basketball",
+   "events_et_day": 8,
+   "events_not_started": 8,
+   "STATUS": "EXPLICITLY_UNSUPPORTED",
+   "reason": "FAMILY_NOT_IN_COLLECTOR_SCOPE: no basketball provider key is requested by the collector (ext_pinnacle_loop maps none) and basketball h2h is not in the measured de-vig set"
+  },
+  {
+   "token": "acb",
+   "family": "basketball",
+   "events_et_day": 6,
+   "events_not_started": 3,
+   "STATUS": "EXPLICITLY_UNSUPPORTED",
+   "reason": "FAMILY_NOT_IN_COLLECTOR_SCOPE: no basketball provider key is requested by the collector (ext_pinnacle_loop maps none) and basketball h2h is not in the measured de-vig set"
+  },
+  {
+   "token": "autbl",
+   "family": "basketball",
+   "events_et_day": 5,
+   "events_not_started": 5,
+   "STATUS": "EXPLICITLY_UNSUPPORTED",
+   "reason": "FAMILY_NOT_IN_COLLECTOR_SCOPE: no basketball provider key is requested by the collector (ext_pinnacle_loop maps none) and basketball h2h is not in the measured de-vig set"
+  },
+  {
+   "token": "bbl",
+   "family": "basketball",
+   "events_et_day": 4,
+   "events_not_started": 4,
+   "STATUS": "EXPLICITLY_UNSUPPORTED",
+   "reason": "FAMILY_NOT_IN_COLLECTOR_SCOPE: no basketball provider key is requested by the collector (ext_pinnacle_loop maps none) and basketball h2h is not in the measured de-vig set"
+  },
+  {
+   "token": "lba",
+   "family": "basketball",
+   "events_et_day": 4,
+   "events_not_started": 4,
+   "STATUS": "EXPLICITLY_UNSUPPORTED",
+   "reason": "FAMILY_NOT_IN_COLLECTOR_SCOPE: no basketball provider key is requested by the collector (ext_pinnacle_loop maps none) and basketball h2h is not in the measured de-vig set"
+  },
+  {
+   "token": "vtb",
+   "family": "basketball",
+   "events_et_day": 3,
+   "events_not_started": 2,
+   "STATUS": "EXPLICITLY_UNSUPPORTED",
+   "reason": "FAMILY_NOT_IN_COLLECTOR_SCOPE: no basketball provider key is requested by the collector (ext_pinnacle_loop maps none) and basketball h2h is not in the measured de-vig set"
+  },
+  {
+   "token": "bsl",
+   "family": "basketball",
+   "events_et_day": 3,
+   "events_not_started": 2,
+   "STATUS": "EXPLICITLY_UNSUPPORTED",
+   "reason": "FAMILY_NOT_IN_COLLECTOR_SCOPE: no basketball provider key is requested by the collector (ext_pinnacle_loop maps none) and basketball h2h is not in the measured de-vig set"
+  },
+  {
+   "token": "nbl",
+   "family": "basketball",
+   "events_et_day": 2,
+   "events_not_started": 0,
+   "STATUS": "EXPLICITLY_UNSUPPORTED",
+   "reason": "FAMILY_NOT_IN_COLLECTOR_SCOPE: no basketball provider key is requested by the collector (ext_pinnacle_loop maps none) and basketball h2h is not in the measured de-vig set"
+  },
+  {
+   "token": "lnb",
+   "family": "basketball",
+   "events_et_day": 2,
+   "events_not_started": 2,
+   "STATUS": "EXPLICITLY_UNSUPPORTED",
+   "reason": "FAMILY_NOT_IN_COLLECTOR_SCOPE: no basketball provider key is requested by the collector (ext_pinnacle_loop maps none) and basketball h2h is not in the measured de-vig set"
+  },
+  {
+   "token": "lkl",
+   "family": "basketball",
+   "events_et_day": 2,
+   "events_not_started": 2,
+   "STATUS": "EXPLICITLY_UNSUPPORTED",
+   "reason": "FAMILY_NOT_IN_COLLECTOR_SCOPE: no basketball provider key is requested by the collector (ext_pinnacle_loop maps none) and basketball h2h is not in the measured de-vig set"
+  },
+  {
+   "token": "kbl",
+   "family": "basketball",
+   "events_et_day": 2,
+   "events_not_started": 0,
+   "STATUS": "EXPLICITLY_UNSUPPORTED",
+   "reason": "FAMILY_NOT_IN_COLLECTOR_SCOPE: no basketball provider key is requested by the collector (ext_pinnacle_loop maps none) and basketball h2h is not in the measured de-vig set"
+  },
+  {
+   "token": "gbl",
+   "family": "basketball",
+   "events_et_day": 2,
+   "events_not_started": 1,
+   "STATUS": "EXPLICITLY_UNSUPPORTED",
+   "reason": "FAMILY_NOT_IN_COLLECTOR_SCOPE: no basketball provider key is requested by the collector (ext_pinnacle_loop maps none) and basketball h2h is not in the measured de-vig set"
+  },
+  {
+   "token": "slb",
+   "family": "basketball",
+   "events_et_day": 1,
+   "events_not_started": 1,
+   "STATUS": "EXPLICITLY_UNSUPPORTED",
+   "reason": "FAMILY_NOT_IN_COLLECTOR_SCOPE: no basketball provider key is requested by the collector (ext_pinnacle_loop maps none) and basketball h2h is not in the measured de-vig set"
+  },
+  {
+   "token": "t20icr",
+   "family": "cricket",
+   "events_et_day": 2,
+   "events_not_started": 2,
+   "STATUS": "EXPLICITLY_UNSUPPORTED",
+   "reason": "VENUE_TOKEN_NOT_MAPPED: t20icr has no provider key in the collector's maps (ext_pinnacle_loop SPORTS_CONFIRMED / VENUE_TOKEN_TO_PROVIDER_KEY / VENUE_FOOTBALL_TOKEN_TO_PROVIDER_KEY)"
+  },
+  {
+   "token": "pdcdarts",
+   "family": "darts",
+   "events_et_day": 1,
+   "events_not_started": 1,
+   "STATUS": "EXPLICITLY_UNSUPPORTED",
+   "reason": "VENUE_TOKEN_NOT_MAPPED: pdcdarts has no provider key in the collector's maps (ext_pinnacle_loop SPORTS_CONFIRMED / VENUE_TOKEN_TO_PROVIDER_KEY / VENUE_FOOTBALL_TOKEN_TO_PROVIDER_KEY)"
+  },
+  {
+   "token": "ebfwca",
+   "family": "efootball",
+   "events_et_day": 40,
+   "events_not_started": 0,
+   "STATUS": "EXPLICITLY_UNSUPPORTED",
+   "reason": "SIMULATED_COMPETITION: efootball is a simulated family"
+  },
+  {
+   "token": "ebfsa",
+   "family": "efootball",
+   "events_et_day": 28,
+   "events_not_started": 0,
+   "STATUS": "EXPLICITLY_UNSUPPORTED",
+   "reason": "SIMULATED_COMPETITION: efootball is a simulated family"
+  },
+  {
+   "token": "ebfwcb",
+   "family": "efootball",
+   "events_et_day": 20,
+   "events_not_started": 0,
+   "STATUS": "EXPLICITLY_UNSUPPORTED",
+   "reason": "SIMULATED_COMPETITION: efootball is a simulated family"
+  },
+  {
+   "token": "ebfcwc",
+   "family": "efootball",
+   "events_et_day": 4,
+   "events_not_started": 0,
+   "STATUS": "EXPLICITLY_UNSUPPORTED",
+   "reason": "SIMULATED_COMPETITION: efootball is a simulated family"
+  },
+  {
+   "token": "cs2",
+   "family": "esports",
+   "events_et_day": 21,
+   "events_not_started": 10,
+   "STATUS": "EXPLICITLY_UNSUPPORTED",
+   "reason": "SIMULATED_COMPETITION: esports is a simulated family"
+  },
+  {
+   "token": "r6",
+   "family": "esports",
+   "events_et_day": 8,
+   "events_not_started": 6,
+   "STATUS": "EXPLICITLY_UNSUPPORTED",
+   "reason": "SIMULATED_COMPETITION: esports is a simulated family"
+  },
+  {
+   "token": "lol",
+   "family": "esports",
+   "events_et_day": 7,
+   "events_not_started": 4,
+   "STATUS": "EXPLICITLY_UNSUPPORTED",
+   "reason": "SIMULATED_COMPETITION: esports is a simulated family"
+  },
+  {
+   "token": "ow",
+   "family": "esports",
+   "events_et_day": 7,
+   "events_not_started": 1,
+   "STATUS": "EXPLICITLY_UNSUPPORTED",
+   "reason": "SIMULATED_COMPETITION: esports is a simulated family"
+  },
+  {
+   "token": "dota2",
+   "family": "esports",
+   "events_et_day": 3,
+   "events_not_started": 1,
+   "STATUS": "EXPLICITLY_UNSUPPORTED",
+   "reason": "SIMULATED_COMPETITION: esports is a simulated family"
+  },
+  {
+   "token": "valorant",
+   "family": "esports",
+   "events_et_day": 2,
+   "events_not_started": 1,
+   "STATUS": "EXPLICITLY_UNSUPPORTED",
+   "reason": "SIMULATED_COMPETITION: esports is a simulated family"
+  },
+  {
+   "token": "f1",
+   "family": "futures",
+   "events_et_day": 6,
+   "events_not_started": 0,
+   "STATUS": "EXPLICITLY_UNSUPPORTED",
+   "reason": "FAMILY_NOT_IN_COLLECTOR_SCOPE: an outright/futures listing is not a fixture"
+  },
+  {
+   "token": "temp",
+   "family": "futures",
+   "events_et_day": 5,
+   "events_not_started": 0,
+   "STATUS": "EXPLICITLY_UNSUPPORTED",
+   "reason": "FAMILY_NOT_IN_COLLECTOR_SCOPE: an outright/futures listing is not a fixture"
+  },
+  {
+   "token": "pres",
+   "family": "futures",
+   "events_et_day": 2,
+   "events_not_started": 2,
+   "STATUS": "EXPLICITLY_UNSUPPORTED",
+   "reason": "FAMILY_NOT_IN_COLLECTOR_SCOPE: an outright/futures listing is not a fixture"
+  },
+  {
+   "token": "presmov",
+   "family": "futures",
+   "events_et_day": 1,
+   "events_not_started": 1,
+   "STATUS": "EXPLICITLY_UNSUPPORTED",
+   "reason": "FAMILY_NOT_IN_COLLECTOR_SCOPE: an outright/futures listing is not a fixture"
+  },
+  {
+   "token": "nascar",
+   "family": "futures",
+   "events_et_day": 1,
+   "events_not_started": 1,
+   "STATUS": "EXPLICITLY_UNSUPPORTED",
+   "reason": "FAMILY_NOT_IN_COLLECTOR_SCOPE: an outright/futures listing is not a fixture"
+  },
+  {
+   "token": "ahl",
+   "family": "hockey",
+   "events_et_day": 9,
+   "events_not_started": 9,
+   "STATUS": "EXPLICITLY_UNSUPPORTED",
+   "reason": "FAMILY_NOT_IN_COLLECTOR_SCOPE: no hockey provider key is requested by the collector and hockey h2h is not in the measured de-vig set"
+  },
+  {
+   "token": "del",
+   "family": "hockey",
+   "events_et_day": 7,
+   "events_not_started": 7,
+   "STATUS": "EXPLICITLY_UNSUPPORTED",
+   "reason": "FAMILY_NOT_IN_COLLECTOR_SCOPE: no hockey provider key is requested by the collector and hockey h2h is not in the measured de-vig set"
+  },
+  {
+   "token": "cehl",
+   "family": "hockey",
+   "events_et_day": 6,
+   "events_not_started": 6,
+   "STATUS": "EXPLICITLY_UNSUPPORTED",
+   "reason": "FAMILY_NOT_IN_COLLECTOR_SCOPE: no hockey provider key is requested by the collector and hockey h2h is not in the measured de-vig set"
+  },
+  {
+   "token": "khl",
+   "family": "hockey",
+   "events_et_day": 3,
+   "events_not_started": 1,
+   "STATUS": "EXPLICITLY_UNSUPPORTED",
+   "reason": "FAMILY_NOT_IN_COLLECTOR_SCOPE: no hockey provider key is requested by the collector and hockey h2h is not in the measured de-vig set"
+  },
+  {
+   "token": "snhl",
+   "family": "hockey",
+   "events_et_day": 2,
+   "events_not_started": 2,
+   "STATUS": "EXPLICITLY_UNSUPPORTED",
+   "reason": "FAMILY_NOT_IN_COLLECTOR_SCOPE: no hockey provider key is requested by the collector and hockey h2h is not in the measured de-vig set"
+  },
+  {
+   "token": "ppa",
+   "family": "pickleball",
+   "events_et_day": 5,
+   "events_not_started": 5,
+   "STATUS": "EXPLICITLY_UNSUPPORTED",
+   "reason": "VENUE_TOKEN_NOT_MAPPED: ppa has no provider key in the collector's maps (ext_pinnacle_loop SPORTS_CONFIRMED / VENUE_TOKEN_TO_PROVIDER_KEY / VENUE_FOOTBALL_TOKEN_TO_PROVIDER_KEY)"
+  },
+  {
+   "token": "top14",
+   "family": "rugby",
+   "events_et_day": 1,
+   "events_not_started": 1,
+   "STATUS": "EXPLICITLY_UNSUPPORTED",
+   "reason": "VENUE_TOKEN_NOT_MAPPED: top14 has no provider key in the collector's maps (ext_pinnacle_loop SPORTS_CONFIRMED / VENUE_TOKEN_TO_PROVIDER_KEY / VENUE_FOOTBALL_TOKEN_TO_PROVIDER_KEY)"
+  },
+  {
+   "token": "nrlw",
+   "family": "rugby",
+   "events_et_day": 1,
+   "events_not_started": 0,
+   "STATUS": "EXPLICITLY_UNSUPPORTED",
+   "reason": "VENUE_TOKEN_NOT_MAPPED: nrlw has no provider key in the collector's maps (ext_pinnacle_loop SPORTS_CONFIRMED / VENUE_TOKEN_TO_PROVIDER_KEY / VENUE_FOOTBALL_TOKEN_TO_PROVIDER_KEY)"
+  },
+  {
+   "token": "nrl",
+   "family": "rugby",
+   "events_et_day": 1,
+   "events_not_started": 0,
+   "STATUS": "EXPLICITLY_UNSUPPORTED",
+   "reason": "VENUE_TOKEN_NOT_MAPPED: nrl has no provider key in the collector's maps (ext_pinnacle_loop SPORTS_CONFIRMED / VENUE_TOKEN_TO_PROVIDER_KEY / VENUE_FOOTBALL_TOKEN_TO_PROVIDER_KEY)"
+  },
+  {
+   "token": "prem",
+   "family": "rugby",
+   "events_et_day": 1,
+   "events_not_started": 1,
+   "STATUS": "EXPLICITLY_UNSUPPORTED",
+   "reason": "VENUE_TOKEN_NOT_MAPPED: prem has no provider key in the collector's maps (ext_pinnacle_loop SPORTS_CONFIRMED / VENUE_TOKEN_TO_PROVIDER_KEY / VENUE_FOOTBALL_TOKEN_TO_PROVIDER_KEY)"
+  },
+  {
+   "token": "ncaaws",
+   "family": "soccer",
+   "events_et_day": 74,
+   "events_not_started": 74,
+   "STATUS": "EXPLICITLY_UNSUPPORTED",
+   "reason": "VENUE_TOKEN_NOT_MAPPED: ncaaws has no provider key in the collector's maps (ext_pinnacle_loop SPORTS_CONFIRMED / VENUE_TOKEN_TO_PROVIDER_KEY / VENUE_FOOTBALL_TOKEN_TO_PROVIDER_KEY)"
+  },
+  {
+   "token": "ncaams",
+   "family": "soccer",
+   "events_et_day": 12,
+   "events_not_started": 12,
+   "STATUS": "EXPLICITLY_UNSUPPORTED",
+   "reason": "VENUE_TOKEN_NOT_MAPPED: ncaams has no provider key in the collector's maps (ext_pinnacle_loop SPORTS_CONFIRMED / VENUE_TOKEN_TO_PROVIDER_KEY / VENUE_FOOTBALL_TOKEN_TO_PROVIDER_KEY)"
+  },
+  {
+   "token": "ngnpfl",
+   "family": "soccer",
+   "events_et_day": 10,
+   "events_not_started": 10,
+   "STATUS": "EXPLICITLY_UNSUPPORTED",
+   "reason": "VENUE_TOKEN_NOT_MAPPED: ngnpfl has no provider key in the collector's maps (ext_pinnacle_loop SPORTS_CONFIRMED / VENUE_TOKEN_TO_PROVIDER_KEY / VENUE_FOOTBALL_TOKEN_TO_PROVIDER_KEY)"
+  },
+  {
+   "token": "gtasc",
+   "family": "soccer",
+   "events_et_day": 8,
+   "events_not_started": 8,
+   "STATUS": "EXPLICITLY_UNSUPPORTED",
+   "reason": "VENUE_TOKEN_NOT_MAPPED: gtasc has no provider key in the collector's maps (ext_pinnacle_loop SPORTS_CONFIRMED / VENUE_TOKEN_TO_PROVIDER_KEY / VENUE_FOOTBALL_TOKEN_TO_PROVIDER_KEY)"
+  },
+  {
+   "token": "wsl",
+   "family": "soccer",
+   "events_et_day": 6,
+   "events_not_started": 6,
+   "STATUS": "EXPLICITLY_UNSUPPORTED",
+   "reason": "VENUE_TOKEN_NOT_MAPPED: wsl has no provider key in the collector's maps (ext_pinnacle_loop SPORTS_CONFIRMED / VENUE_TOKEN_TO_PROVIDER_KEY / VENUE_FOOTBALL_TOKEN_TO_PROVIDER_KEY)"
+  },
+  {
+   "token": "ghpl",
+   "family": "soccer",
+   "events_et_day": 6,
+   "events_not_started": 6,
+   "STATUS": "EXPLICITLY_UNSUPPORTED",
+   "reason": "VENUE_TOKEN_NOT_MAPPED: ghpl has no provider key in the collector's maps (ext_pinnacle_loop SPORTS_CONFIRMED / VENUE_TOKEN_TO_PROVIDER_KEY / VENUE_FOOTBALL_TOKEN_TO_PROVIDER_KEY)"
+  },
+  {
+   "token": "ven2",
+   "family": "soccer",
+   "events_et_day": 6,
+   "events_not_started": 6,
+   "STATUS": "EXPLICITLY_UNSUPPORTED",
+   "reason": "VENUE_TOKEN_NOT_MAPPED: ven2 has no provider key in the collector's maps (ext_pinnacle_loop SPORTS_CONFIRMED / VENUE_TOKEN_TO_PROVIDER_KEY / VENUE_FOOTBALL_TOKEN_TO_PROVIDER_KEY)"
+  },
+  {
+   "token": "j2",
+   "family": "soccer",
+   "events_et_day": 5,
+   "events_not_started": 0,
+   "STATUS": "EXPLICITLY_UNSUPPORTED",
+   "reason": "VENUE_TOKEN_NOT_MAPPED: j2 has no provider key in the collector's maps (ext_pinnacle_loop SPORTS_CONFIRMED / VENUE_TOKEN_TO_PROVIDER_KEY / VENUE_FOOTBALL_TOKEN_TO_PROVIDER_KEY)"
+  },
+  {
+   "token": "lal2",
+   "family": "soccer",
+   "events_et_day": 5,
+   "events_not_started": 5,
+   "STATUS": "EXPLICITLY_UNSUPPORTED",
+   "reason": "VENUE_TOKEN_NOT_MAPPED: lal2 has no provider key in the collector's maps (ext_pinnacle_loop SPORTS_CONFIRMED / VENUE_TOKEN_TO_PROVIDER_KEY / VENUE_FOOTBALL_TOKEN_TO_PROVIDER_KEY)"
+  },
+  {
+   "token": "ch1cl",
+   "family": "soccer",
+   "events_et_day": 5,
+   "events_not_started": 5,
+   "STATUS": "EXPLICITLY_UNSUPPORTED",
+   "reason": "VENUE_TOKEN_NOT_MAPPED: ch1cl has no provider key in the collector's maps (ext_pinnacle_loop SPORTS_CONFIRMED / VENUE_TOKEN_TO_PROVIDER_KEY / VENUE_FOOTBALL_TOKEN_TO_PROVIDER_KEY)"
+  },
+  {
+   "token": "sercb",
+   "family": "soccer",
+   "events_et_day": 5,
+   "events_not_started": 5,
+   "STATUS": "EXPLICITLY_UNSUPPORTED",
+   "reason": "VENUE_TOKEN_NOT_MAPPED: sercb has no provider key in the collector's maps (ext_pinnacle_loop SPORTS_CONFIRMED / VENUE_TOKEN_TO_PROVIDER_KEY / VENUE_FOOTBALL_TOKEN_TO_PROVIDER_KEY)"
+  },
+  {
+   "token": "sercc",
+   "family": "soccer",
+   "events_et_day": 4,
+   "events_not_started": 4,
+   "STATUS": "EXPLICITLY_UNSUPPORTED",
+   "reason": "VENUE_TOKEN_NOT_MAPPED: sercc has no provider key in the collector's maps (ext_pinnacle_loop SPORTS_CONFIRMED / VENUE_TOKEN_TO_PROVIDER_KEY / VENUE_FOOTBALL_TOKEN_TO_PROVIDER_KEY)"
+  },
+  {
+   "token": "intf",
+   "family": "soccer",
+   "events_et_day": 4,
+   "events_not_started": 4,
+   "STATUS": "EXPLICITLY_UNSUPPORTED",
+   "reason": "DELIBERATELY_EXCLUDED: international friendlies: settlement and team-selection conventions are not established for this lane, so a candidate would reach a rule refusal, not a trade"
+  },
+  {
+   "token": "lpa",
+   "family": "soccer",
+   "events_et_day": 4,
+   "events_not_started": 4,
+   "STATUS": "EXPLICITLY_UNSUPPORTED",
+   "reason": "VENUE_TOKEN_NOT_MAPPED: lpa has no provider key in the collector's maps (ext_pinnacle_loop SPORTS_CONFIRMED / VENUE_TOKEN_TO_PROVIDER_KEY / VENUE_FOOTBALL_TOKEN_TO_PROVIDER_KEY)"
+  },
+  {
+   "token": "serca",
+   "family": "soccer",
+   "events_et_day": 4,
+   "events_not_started": 2,
+   "STATUS": "EXPLICITLY_UNSUPPORTED",
+   "reason": "VENUE_TOKEN_NOT_MAPPED: serca has no provider key in the collector's maps (ext_pinnacle_loop SPORTS_CONFIRMED / VENUE_TOKEN_TO_PROVIDER_KEY / VENUE_FOOTBALL_TOKEN_TO_PROVIDER_KEY)"
+  },
+  {
+   "token": "ligaf",
+   "family": "soccer",
+   "events_et_day": 4,
+   "events_not_started": 2,
+   "STATUS": "EXPLICITLY_UNSUPPORTED",
+   "reason": "VENUE_TOKEN_NOT_MAPPED: ligaf has no provider key in the collector's maps (ext_pinnacle_loop SPORTS_CONFIRMED / VENUE_TOKEN_TO_PROVIDER_KEY / VENUE_FOOTBALL_TOKEN_TO_PROVIDER_KEY)"
+  },
+  {
+   "token": "norw1",
+   "family": "soccer",
+   "events_et_day": 3,
+   "events_not_started": 3,
+   "STATUS": "EXPLICITLY_UNSUPPORTED",
+   "reason": "VENUE_TOKEN_NOT_MAPPED: norw1 has no provider key in the collector's maps (ext_pinnacle_loop SPORTS_CONFIRMED / VENUE_TOKEN_TO_PROVIDER_KEY / VENUE_FOOTBALL_TOKEN_TO_PROVIDER_KEY)"
+  },
+  {
+   "token": "fbl",
+   "family": "soccer",
+   "events_et_day": 3,
+   "events_not_started": 3,
+   "STATUS": "EXPLICITLY_UNSUPPORTED",
+   "reason": "VENUE_TOKEN_NOT_MAPPED: fbl has no provider key in the collector's maps (ext_pinnacle_loop SPORTS_CONFIRMED / VENUE_TOKEN_TO_PROVIDER_KEY / VENUE_FOOTBALL_TOKEN_TO_PROVIDER_KEY)"
+  },
+  {
+   "token": "bolcup",
+   "family": "soccer",
+   "events_et_day": 3,
+   "events_not_started": 3,
+   "STATUS": "EXPLICITLY_UNSUPPORTED",
+   "reason": "VENUE_TOKEN_NOT_MAPPED: bolcup has no provider key in the collector's maps (ext_pinnacle_loop SPORTS_CONFIRMED / VENUE_TOKEN_TO_PROVIDER_KEY / VENUE_FOOTBALL_TOKEN_TO_PROVIDER_KEY)"
+  },
+  {
+   "token": "mne2",
+   "family": "soccer",
+   "events_et_day": 3,
+   "events_not_started": 3,
+   "STATUS": "EXPLICITLY_UNSUPPORTED",
+   "reason": "VENUE_TOKEN_NOT_MAPPED: mne2 has no provider key in the collector's maps (ext_pinnacle_loop SPORTS_CONFIRMED / VENUE_TOKEN_TO_PROVIDER_KEY / VENUE_FOOTBALL_TOKEN_TO_PROVIDER_KEY)"
+  },
+  {
+   "token": "be1vv",
+   "family": "soccer",
+   "events_et_day": 2,
+   "events_not_started": 2,
+   "STATUS": "EXPLICITLY_UNSUPPORTED",
+   "reason": "VENUE_TOKEN_NOT_MAPPED: be1vv has no provider key in the collector's maps (ext_pinnacle_loop SPORTS_CONFIRMED / VENUE_TOKEN_TO_PROVIDER_KEY / VENUE_FOOTBALL_TOKEN_TO_PROVIDER_KEY)"
+  },
+  {
+   "token": "lng",
+   "family": "soccer",
+   "events_et_day": 2,
+   "events_not_started": 2,
+   "STATUS": "EXPLICITLY_UNSUPPORTED",
+   "reason": "VENUE_TOKEN_NOT_MAPPED: lng has no provider key in the collector's maps (ext_pinnacle_loop SPORTS_CONFIRMED / VENUE_TOKEN_TO_PROVIDER_KEY / VENUE_FOOTBALL_TOKEN_TO_PROVIDER_KEY)"
+  },
+  {
+   "token": "svn3e",
+   "family": "soccer",
+   "events_et_day": 2,
+   "events_not_started": 1,
+   "STATUS": "EXPLICITLY_UNSUPPORTED",
+   "reason": "VENUE_TOKEN_NOT_MAPPED: svn3e has no provider key in the collector's maps (ext_pinnacle_loop SPORTS_CONFIRMED / VENUE_TOKEN_TO_PROVIDER_KEY / VENUE_FOOTBALL_TOKEN_TO_PROVIDER_KEY)"
+  },
+  {
+   "token": "u19f",
+   "family": "soccer",
+   "events_et_day": 2,
+   "events_not_started": 0,
+   "STATUS": "EXPLICITLY_UNSUPPORTED",
+   "reason": "VENUE_TOKEN_NOT_MAPPED: u19f has no provider key in the collector's maps (ext_pinnacle_loop SPORTS_CONFIRMED / VENUE_TOKEN_TO_PROVIDER_KEY / VENUE_FOOTBALL_TOKEN_TO_PROVIDER_KEY)"
+  },
+  {
+   "token": "minw",
+   "family": "soccer",
+   "events_et_day": 1,
+   "events_not_started": 1,
+   "STATUS": "EXPLICITLY_UNSUPPORTED",
+   "reason": "VENUE_TOKEN_NOT_MAPPED: minw has no provider key in the collector's maps (ext_pinnacle_loop SPORTS_CONFIRMED / VENUE_TOKEN_TO_PROVIDER_KEY / VENUE_FOOTBALL_TOKEN_TO_PROVIDER_KEY)"
+  },
+  {
+   "token": "lexp",
+   "family": "soccer",
+   "events_et_day": 1,
+   "events_not_started": 1,
+   "STATUS": "EXPLICITLY_UNSUPPORTED",
+   "reason": "VENUE_TOKEN_NOT_MAPPED: lexp has no provider key in the collector's maps (ext_pinnacle_loop SPORTS_CONFIRMED / VENUE_TOKEN_TO_PROVIDER_KEY / VENUE_FOOTBALL_TOKEN_TO_PROVIDER_KEY)"
+  },
+  {
+   "token": "nor1",
+   "family": "soccer",
+   "events_et_day": 1,
+   "events_not_started": 1,
+   "STATUS": "EXPLICITLY_UNSUPPORTED",
+   "reason": "VENUE_TOKEN_NOT_MAPPED: nor1 has no provider key in the collector's maps (ext_pinnacle_loop SPORTS_CONFIRMED / VENUE_TOKEN_TO_PROVIDER_KEY / VENUE_FOOTBALL_TOKEN_TO_PROVIDER_KEY)"
+  },
+  {
+   "token": "cpach",
+   "family": "soccer",
+   "events_et_day": 1,
+   "events_not_started": 1,
+   "STATUS": "EXPLICITLY_UNSUPPORTED",
+   "reason": "VENUE_TOKEN_NOT_MAPPED: cpach has no provider key in the collector's maps (ext_pinnacle_loop SPORTS_CONFIRMED / VENUE_TOKEN_TO_PROVIDER_KEY / VENUE_FOOTBALL_TOKEN_TO_PROVIDER_KEY)"
+  },
+  {
+   "token": "uslcp",
+   "family": "soccer",
+   "events_et_day": 1,
+   "events_not_started": 1,
+   "STATUS": "EXPLICITLY_UNSUPPORTED",
+   "reason": "VENUE_TOKEN_NOT_MAPPED: uslcp has no provider key in the collector's maps (ext_pinnacle_loop SPORTS_CONFIRMED / VENUE_TOKEN_TO_PROVIDER_KEY / VENUE_FOOTBALL_TOKEN_TO_PROVIDER_KEY)"
+  },
+  {
+   "token": "svk2",
+   "family": "soccer",
+   "events_et_day": 1,
+   "events_not_started": 0,
+   "STATUS": "EXPLICITLY_UNSUPPORTED",
+   "reason": "VENUE_TOKEN_NOT_MAPPED: svk2 has no provider key in the collector's maps (ext_pinnacle_loop SPORTS_CONFIRMED / VENUE_TOKEN_TO_PROVIDER_KEY / VENUE_FOOTBALL_TOKEN_TO_PROVIDER_KEY)"
+  },
+  {
+   "token": "be1acff",
+   "family": "soccer",
+   "events_et_day": 1,
+   "events_not_started": 1,
+   "STATUS": "EXPLICITLY_UNSUPPORTED",
+   "reason": "VENUE_TOKEN_NOT_MAPPED: be1acff has no provider key in the collector's maps (ext_pinnacle_loop SPORTS_CONFIRMED / VENUE_TOKEN_TO_PROVIDER_KEY / VENUE_FOOTBALL_TOKEN_TO_PROVIDER_KEY)"
+  },
+  {
+   "token": "setkameua",
+   "family": "table",
+   "events_et_day": 235,
+   "events_not_started": 146,
+   "STATUS": "EXPLICITLY_UNSUPPORTED",
+   "reason": "VENUE_TOKEN_NOT_MAPPED: setkameua has no provider key in the collector's maps (ext_pinnacle_loop SPORTS_CONFIRMED / VENUE_TOKEN_TO_PROVIDER_KEY / VENUE_FOOTBALL_TOKEN_TO_PROVIDER_KEY)"
+  },
+  {
+   "token": "czechligapro",
+   "family": "table",
+   "events_et_day": 55,
+   "events_not_started": 30,
+   "STATUS": "EXPLICITLY_UNSUPPORTED",
+   "reason": "VENUE_TOKEN_NOT_MAPPED: czechligapro has no provider key in the collector's maps (ext_pinnacle_loop SPORTS_CONFIRMED / VENUE_TOKEN_TO_PROVIDER_KEY / VENUE_FOOTBALL_TOKEN_TO_PROVIDER_KEY)"
+  },
+  {
+   "token": "setkamecz",
+   "family": "table",
+   "events_et_day": 51,
+   "events_not_started": 26,
+   "STATUS": "EXPLICITLY_UNSUPPORTED",
+   "reason": "VENUE_TOKEN_NOT_MAPPED: setkamecz has no provider key in the collector's maps (ext_pinnacle_loop SPORTS_CONFIRMED / VENUE_TOKEN_TO_PROVIDER_KEY / VENUE_FOOTBALL_TOKEN_TO_PROVIDER_KEY)"
+  },
+  {
+   "token": "setkamemd",
+   "family": "table",
+   "events_et_day": 36,
+   "events_not_started": 36,
+   "STATUS": "EXPLICITLY_UNSUPPORTED",
+   "reason": "VENUE_TOKEN_NOT_MAPPED: setkamemd has no provider key in the collector's maps (ext_pinnacle_loop SPORTS_CONFIRMED / VENUE_TOKEN_TO_PROVIDER_KEY / VENUE_FOOTBALL_TOKEN_TO_PROVIDER_KEY)"
+  },
+  {
+   "token": "wtt",
+   "family": "table",
+   "events_et_day": 32,
+   "events_not_started": 12,
+   "STATUS": "EXPLICITLY_UNSUPPORTED",
+   "reason": "VENUE_TOKEN_NOT_MAPPED: wtt has no provider key in the collector's maps (ext_pinnacle_loop SPORTS_CONFIRMED / VENUE_TOKEN_TO_PROVIDER_KEY / VENUE_FOOTBALL_TOKEN_TO_PROVIDER_KEY)"
+  },
+  {
+   "token": "setkawoua",
+   "family": "table",
+   "events_et_day": 15,
+   "events_not_started": 15,
+   "STATUS": "EXPLICITLY_UNSUPPORTED",
+   "reason": "VENUE_TOKEN_NOT_MAPPED: setkawoua has no provider key in the collector's maps (ext_pinnacle_loop SPORTS_CONFIRMED / VENUE_TOKEN_TO_PROVIDER_KEY / VENUE_FOOTBALL_TOKEN_TO_PROVIDER_KEY)"
+  },
+  {
+   "token": "itfme",
+   "family": "tennis",
+   "events_et_day": 220,
+   "events_not_started": 131,
+   "STATUS": "EXPLICITLY_UNSUPPORTED",
+   "reason": "FAMILY_NOT_IN_COLLECTOR_SCOPE: no tennis provider key is requested by the collector and tennis is not in the measured de-vig set"
+  },
+  {
+   "token": "itfwo",
+   "family": "tennis",
+   "events_et_day": 182,
+   "events_not_started": 116,
+   "STATUS": "EXPLICITLY_UNSUPPORTED",
+   "reason": "FAMILY_NOT_IN_COLLECTOR_SCOPE: no tennis provider key is requested by the collector and tennis is not in the measured de-vig set"
+  },
+  {
+   "token": "atp",
+   "family": "tennis",
+   "events_et_day": 71,
+   "events_not_started": 36,
+   "STATUS": "EXPLICITLY_UNSUPPORTED",
+   "reason": "FAMILY_NOT_IN_COLLECTOR_SCOPE: no tennis provider key is requested by the collector and tennis is not in the measured de-vig set"
+  },
+  {
+   "token": "wta",
+   "family": "tennis",
+   "events_et_day": 35,
+   "events_not_started": 18,
+   "STATUS": "EXPLICITLY_UNSUPPORTED",
+   "reason": "FAMILY_NOT_IN_COLLECTOR_SCOPE: no tennis provider key is requested by the collector and tennis is not in the measured de-vig set"
+  },
+  {
+   "token": "utr",
+   "family": "tennis",
+   "events_et_day": 21,
+   "events_not_started": 20,
+   "STATUS": "EXPLICITLY_UNSUPPORTED",
+   "reason": "FAMILY_NOT_IN_COLLECTOR_SCOPE: no tennis provider key is requested by the collector and tennis is not in the measured de-vig set"
+  },
+  {
+   "token": "wtadb",
+   "family": "tennis",
+   "events_et_day": 15,
+   "events_not_started": 8,
+   "STATUS": "EXPLICITLY_UNSUPPORTED",
+   "reason": "FAMILY_NOT_IN_COLLECTOR_SCOPE: no tennis provider key is requested by the collector and tennis is not in the measured de-vig set"
+  },
+  {
+   "token": "atpdb",
+   "family": "tennis",
+   "events_et_day": 3,
+   "events_not_started": 1,
+   "STATUS": "EXPLICITLY_UNSUPPORTED",
+   "reason": "FAMILY_NOT_IN_COLLECTOR_SCOPE: no tennis provider key is requested by the collector and tennis is not in the measured de-vig set"
+  }
+ ],
+ "ncaaf_incident_evidence": {
+  "provider_events_in_et_day_cycles": 39,
+  "already_kicked_off_10_03_games": [
+   {
+    "fixture": "Baylor Bears at Arizona State Sun Devils",
+    "commence_utc": "2026-10-04T02:37:00Z",
+    "commence_et": "2026-10-03 22:37",
+    "slug": "aec-cfb-bayl-arzst-2026-10-03",
+    "outcomes": "{\":NO_PINNACLE_ON_EVENT\": 4, \"2_FRESHNESS:QUOTE_STALE_ON_ARRIVAL\": 1, \"2_FRESHNESS:VENUE_BOOK_READ_FAILED\": 2, \"2_FRESHNESS:VENUE_BOOK_CURRENCY_NOT_ESTABLISHED\": 4}"
+   },
+   {
+    "fixture": "Cincinnati Bearcats at Arizona Wildcats",
+    "commence_utc": "2026-10-04T03:08:00Z",
+    "commence_et": "2026-10-03 23:08",
+    "slug": "aec-cfb-cin-arz-2026-10-03",
+    "outcomes": "{\":NO_PINNACLE_ON_EVENT\": 4, \"2_FRESHNESS:QUOTE_STALE_ON_ARRIVAL\": 2, \"2_FRESHNESS:VENUE_BOOK_READ_FAILED\": 3, \"2_FRESHNESS:VENUE_BOOK_CURRENCY_NOT_ESTABLISHED\": 2}"
+   },
+   {
+    "fixture": "Fresno State Bulldogs at Washington State Cougars",
+    "commence_utc": "2026-10-04T01:35:00Z",
+    "commence_et": "2026-10-03 21:35",
+    "slug": "aec-cfb-frest-washst-2026-10-03",
+    "outcomes": "{\":NO_PINNACLE_ON_EVENT\": 2, \"2_FRESHNESS:QUOTE_STALE_ON_ARRIVAL\": 2, \"2_FRESHNESS:VENUE_BOOK_CURRENCY_NOT_ESTABLISHED\": 2}"
+   },
+   {
+    "fixture": "San Jose State Spartans at Hawaii Rainbow Warriors",
+    "commence_utc": "2026-10-04T04:05:00Z",
+    "commence_et": "2026-10-04 00:05",
+    "slug": "aec-cfb-sjst-hawaii-2026-10-04",
+    "outcomes": "{\":NO_PINNACLE_ON_EVENT\": 2, \"2_FRESHNESS:QUOTE_STALE_ON_ARRIVAL\": 6, \"2_FRESHNESS:VENUE_BOOK_READ_FAILED\": 1, \"2_FRESHNESS:VENUE_BOOK_CURRENCY_NOT_ESTABLISHED\": 6}"
+   },
+   {
+    "fixture": "Texas State Bobcats at San Diego State Aztecs",
+    "commence_utc": "2026-10-04T02:30:00Z",
+    "commence_et": "2026-10-03 22:30",
+    "slug": "aec-cfb-txst-sdst-2026-10-03",
+    "outcomes": "{\":NO_PINNACLE_ON_EVENT\": 2, \"2_FRESHNESS:QUOTE_STALE_ON_ARRIVAL\": 2, \"2_FRESHNESS:VENUE_BOOK_READ_FAILED\": 3, \"2_FRESHNESS:VENUE_BOOK_CURRENCY_NOT_ESTABLISHED\": 3, \"2_FRESHNESS:VENUE_BOOK_CURRENCY_CONTRADICTED_BY_CONTRACT\": 1}"
+   }
+  ],
+  "games_dated_after_today": 34,
+  "future_commence_range_et": [
+   "2026-10-06 20:00",
+   "2026-10-10 22:30"
+  ],
+  "their_valuations": [
+   {
+    "id": "5131",
+    "slug": "aec-cfb-txst-sdst-2026-10-03",
+    "decided_at": "2026-10-04 03:37:23.378049+00"
+   },
+   {
+    "id": "5066",
+    "slug": "aec-cfb-wash-usc-2026-10-03",
+    "decided_at": "2026-10-04 02:38:02.022578+00"
+   },
+   {
+    "id": "5020",
+    "slug": "aec-cfb-templ-sfl-2026-10-03",
+    "decided_at": "2026-10-04 01:37:59.275347+00"
+   },
+   {
+    "id": "5017",
+    "slug": "aec-cfb-arkst-loulaf-2026-10-03",
+    "decided_at": "2026-10-04 01:37:55.805177+00"
+   },
+   {
+    "id": "4990",
+    "slug": "aec-cfb-cin-arz-2026-10-03",
+    "decided_at": "2026-10-04 00:52:26.238021+00"
+   },
+   {
+    "id": "4989",
+    "slug": "aec-cfb-bayl-arzst-2026-10-03",
+    "decided_at": "2026-10-04 00:52:13.419822+00"
+   },
+   {
+    "id": "4977",
+    "slug": "aec-cfb-frest-washst-2026-10-03",
+    "decided_at": "2026-10-04 00:37:49.305255+00"
+   },
+   {
+    "id": "4971",
+    "slug": "aec-cfb-sjst-hawaii-2026-10-04",
+    "decided_at": "2026-10-04 00:23:29.350524+00"
+   },
+   {
+    "id": "4970",
+    "slug": "aec-cfb-txtech-col-2026-10-03",
+    "decided_at": "2026-10-04 00:23:26.05633+00"
+   }
+  ],
+  "statement": "The NCAAF COVERAGE_INCIDENT is raised by the rule on the funnel row, but the rows show no game of the 2026-10-04 ET slate was lost: the 5 mapped events are Saturday (10-03 ET) games that had already kicked off (01:35Z-04:05Z) and were valued on 10-03 (valuations 4970-5131, decided 00:23Z-03:37Z); the other 34 are games dated 10-06..10-10 ET with no Pinnacle price yet. The funnel attributes provider events to a day by CYCLE time, evaluations by DECISION time, so the two windows disagree for games that span midnight ET. NCAAF has been budget_dropped by the collector since the 07:15Z cycle."
+ },
+ "alerts_since_10_02": [
+  {
+   "day": "2026-10-04",
+   "tz": "America/New_York",
+   "league": "americanfootball_ncaaf",
+   "kind": "ABSENT_DOWNSTREAM",
+   "stage_from": "settlement_supported",
+   "stage_to": "evaluated",
+   "severity": "CRITICAL",
+   "audrey_finding_id": "paperfind:2fc3e31e3052cdfa5a113aba",
+   "audrey_refusal": "",
+   "coverage_status": "",
+   "statement": "NCAAF: 20 provider event(s); none reached evaluated",
+   "detected_utc": "10-04 04:16",
+   "finding_kind": "COVERAGE_COLLAPSE",
+   "finding_severity": "CRITICAL",
+   "found_utc": "10-04 04:16"
+  },
+  {
+   "day": "2026-10-03",
+   "tz": "America/New_York",
+   "league": "americanfootball_ncaaf",
+   "kind": "ABSENT_DOWNSTREAM",
+   "stage_from": "mapped",
+   "stage_to": "settlement_supported",
+   "severity": "WARNING",
+   "audrey_finding_id": "paperfind:46dd2b049c9723cdf175e21b",
+   "audrey_refusal": "",
+   "coverage_status": "",
+   "statement": "NCAAF: 27 provider event(s); none reached settlement_supported",
+   "detected_utc": "10-04 00:37",
+   "finding_kind": "COVERAGE_COLLAPSE",
+   "finding_severity": "WARNING",
+   "found_utc": "10-04 00:37"
+  },
+  {
+   "day": "2026-10-02",
+   "tz": "America/New_York",
+   "league": "soccer_uefa_nations_league",
+   "kind": "ABSENT_DOWNSTREAM",
+   "stage_from": "mapped",
+   "stage_to": "settlement_supported",
+   "severity": "WARNING",
+   "audrey_finding_id": "paperfind:6ec06aeb10256d7834bdcabd",
+   "audrey_refusal": "",
+   "coverage_status": "",
+   "statement": "UEFA_NATIONS_LEAGUE: 34 provider event(s); none reached settlement_supported",
+   "detected_utc": "10-04 00:22",
+   "finding_kind": "COVERAGE_COLLAPSE",
+   "finding_severity": "WARNING",
+   "found_utc": "10-04 00:22"
+  },
+  {
+   "day": "2026-10-03",
+   "tz": "America/New_York",
+   "league": "soccer_brazil_serie_b",
+   "kind": "ABSENT_DOWNSTREAM",
+   "stage_from": "mapped",
+   "stage_to": "settlement_supported",
+   "severity": "WARNING",
+   "audrey_finding_id": "paperfind:d2aad973e6e373c273251d1c",
+   "audrey_refusal": "",
+   "coverage_status": "",
+   "statement": "BRAZIL_SERIE_B: 14 provider event(s); none reached settlement_supported",
+   "detected_utc": "10-04 00:22",
+   "finding_kind": "COVERAGE_COLLAPSE",
+   "finding_severity": "WARNING",
+   "found_utc": "10-04 00:22"
+  },
+  {
+   "day": "2026-10-03",
+   "tz": "America/New_York",
+   "league": "baseball_mlb",
+   "kind": "ABSENT_DOWNSTREAM",
+   "stage_from": "mapped",
+   "stage_to": "settlement_supported",
+   "severity": "WARNING",
+   "audrey_finding_id": "paperfind:a546f0c031e808ef3a58ac7b",
+   "audrey_refusal": "",
+   "coverage_status": "",
+   "statement": "MLB: 6 provider event(s); none reached settlement_supported",
+   "detected_utc": "10-04 00:22",
+   "finding_kind": "COVERAGE_COLLAPSE",
+   "finding_severity": "WARNING",
+   "found_utc": "10-04 00:22"
+  },
+  {
+   "day": "2026-10-02",
+   "tz": "America/New_York",
+   "league": "soccer_brazil_serie_b",
+   "kind": "ABSENT_DOWNSTREAM",
+   "stage_from": "mapped",
+   "stage_to": "settlement_supported",
+   "severity": "WARNING",
+   "audrey_finding_id": "paperfind:751485c0704e6f4f6983b6d5",
+   "audrey_refusal": "",
+   "coverage_status": "",
+   "statement": "BRAZIL_SERIE_B: 18 provider event(s); none reached settlement_supported",
+   "detected_utc": "10-04 00:22",
+   "finding_kind": "COVERAGE_COLLAPSE",
+   "finding_severity": "WARNING",
+   "found_utc": "10-04 00:22"
+  },
+  {
+   "day": "2026-10-03",
+   "tz": "America/New_York",
+   "league": "soccer_uefa_nations_league",
+   "kind": "ABSENT_DOWNSTREAM",
+   "stage_from": "mapped",
+   "stage_to": "settlement_supported",
+   "severity": "WARNING",
+   "audrey_finding_id": "paperfind:d500c8bd313107b8c16c2a98",
+   "audrey_refusal": "",
+   "coverage_status": "",
+   "statement": "UEFA_NATIONS_LEAGUE: 24 provider event(s); none reached settlement_supported",
+   "detected_utc": "10-04 00:22",
+   "finding_kind": "COVERAGE_COLLAPSE",
+   "finding_severity": "WARNING",
+   "found_utc": "10-04 00:22"
+  },
+  {
+   "day": "2026-10-02",
+   "tz": "America/New_York",
+   "league": "baseball_mlb",
+   "kind": "ABSENT_DOWNSTREAM",
+   "stage_from": "mapped",
+   "stage_to": "settlement_supported",
+   "severity": "WARNING",
+   "audrey_finding_id": "paperfind:1ec3cfc109700f1a92f3be37",
+   "audrey_refusal": "",
+   "coverage_status": "",
+   "statement": "MLB: 4 provider event(s); none reached settlement_supported",
+   "detected_utc": "10-04 00:22",
+   "finding_kind": "COVERAGE_COLLAPSE",
+   "finding_severity": "WARNING",
+   "found_utc": "10-04 00:22"
+  }
+ ],
+ "audrey_findings": [
+  {
+   "finding_id": "paperfind:2fc3e31e3052cdfa5a113aba",
+   "subject": "americanfootball_ncaaf",
+   "severity": "CRITICAL",
+   "stage_to": "evaluated",
+   "kind": "ABSENT_DOWNSTREAM",
+   "day": "2026-10-04",
+   "statement": "NCAAF: 20 provider event(s); none reached evaluated",
+   "found_utc": "10-04 04:16"
+  },
+  {
+   "finding_id": "paperfind:46dd2b049c9723cdf175e21b",
+   "subject": "americanfootball_ncaaf",
+   "severity": "WARNING",
+   "stage_to": "settlement_supported",
+   "kind": "ABSENT_DOWNSTREAM",
+   "day": "2026-10-03",
+   "statement": "NCAAF: 27 provider event(s); none reached settlement_supported",
+   "found_utc": "10-04 00:37"
+  },
+  {
+   "finding_id": "paperfind:a546f0c031e808ef3a58ac7b",
+   "subject": "baseball_mlb",
+   "severity": "WARNING",
+   "stage_to": "settlement_supported",
+   "kind": "ABSENT_DOWNSTREAM",
+   "day": "2026-10-03",
+   "statement": "MLB: 6 provider event(s); none reached settlement_supported",
+   "found_utc": "10-04 00:22"
+  },
+  {
+   "finding_id": "paperfind:751485c0704e6f4f6983b6d5",
+   "subject": "soccer_brazil_serie_b",
+   "severity": "WARNING",
+   "stage_to": "settlement_supported",
+   "kind": "ABSENT_DOWNSTREAM",
+   "day": "2026-10-02",
+   "statement": "BRAZIL_SERIE_B: 18 provider event(s); none reached settlement_supported",
+   "found_utc": "10-04 00:22"
+  },
+  {
+   "finding_id": "paperfind:d2aad973e6e373c273251d1c",
+   "subject": "soccer_brazil_serie_b",
+   "severity": "WARNING",
+   "stage_to": "settlement_supported",
+   "kind": "ABSENT_DOWNSTREAM",
+   "day": "2026-10-03",
+   "statement": "BRAZIL_SERIE_B: 14 provider event(s); none reached settlement_supported",
+   "found_utc": "10-04 00:22"
+  },
+  {
+   "finding_id": "paperfind:6ec06aeb10256d7834bdcabd",
+   "subject": "soccer_uefa_nations_league",
+   "severity": "WARNING",
+   "stage_to": "settlement_supported",
+   "kind": "ABSENT_DOWNSTREAM",
+   "day": "2026-10-02",
+   "statement": "UEFA_NATIONS_LEAGUE: 34 provider event(s); none reached settlement_supported",
+   "found_utc": "10-04 00:22"
+  },
+  {
+   "finding_id": "paperfind:d500c8bd313107b8c16c2a98",
+   "subject": "soccer_uefa_nations_league",
+   "severity": "WARNING",
+   "stage_to": "settlement_supported",
+   "kind": "ABSENT_DOWNSTREAM",
+   "day": "2026-10-03",
+   "statement": "UEFA_NATIONS_LEAGUE: 24 provider event(s); none reached settlement_supported",
+   "found_utc": "10-04 00:22"
+  },
+  {
+   "finding_id": "paperfind:1ec3cfc109700f1a92f3be37",
+   "subject": "baseball_mlb",
+   "severity": "WARNING",
+   "stage_to": "settlement_supported",
+   "kind": "ABSENT_DOWNSTREAM",
+   "day": "2026-10-02",
+   "statement": "MLB: 4 provider event(s); none reached settlement_supported",
+   "found_utc": "10-04 00:22"
+  }
+ ],
+ "ncaaf_alert_row": [
+  {
+   "alert_id": "covalert:41b73a6967ed9bc42f739952",
+   "stage_from": "settlement_supported",
+   "stage_to": "evaluated",
+   "severity": "CRITICAL",
+   "detail": "{\"statement\": \"NCAAF: 20 provider event(s); none reached evaluated\", \"stage_count\": 0, \"provider_events\": 20, \"flowed_in_baseline\": true, \"previous_stage_count\": null}",
+   "audrey_finding_id": "paperfind:2fc3e31e3052cdfa5a113aba",
+   "detected_at": "2026-10-04 04:16:55.426446+00",
+   "recorded_at": "2026-10-04 04:16:57.501038+00"
+  }
+ ],
+ "snapshots_behind_older_alerts": [
+  {
+   "day": "2026-10-02",
+   "league": "baseball_mlb",
+   "prov": "4",
+   "norm": "4",
+   "disc": "4",
+   "mapped": "4",
+   "settle": "0",
+   "eval": "0",
+   "decided": "4",
+   "entered": "1",
+   "final": "t",
+   "computed_utc": "10-04 00:22"
+  },
+  {
+   "day": "2026-10-02",
+   "league": "soccer_brazil_serie_b",
+   "prov": "18",
+   "norm": "7",
+   "disc": "7",
+   "mapped": "7",
+   "settle": "0",
+   "eval": "0",
+   "decided": "7",
+   "entered": "5",
+   "final": "t",
+   "computed_utc": "10-04 00:22"
+  },
+  {
+   "day": "2026-10-02",
+   "league": "soccer_uefa_nations_league",
+   "prov": "34",
+   "norm": "15",
+   "disc": "15",
+   "mapped": "15",
+   "settle": "0",
+   "eval": "0",
+   "decided": "14",
+   "entered": "5",
+   "final": "t",
+   "computed_utc": "10-04 00:22"
+  },
+  {
+   "day": "2026-10-03",
+   "league": "americanfootball_ncaaf",
+   "prov": "33",
+   "norm": "15",
+   "disc": "15",
+   "mapped": "15",
+   "settle": "",
+   "eval": "9",
+   "decided": "9",
+   "entered": "0",
+   "final": "t",
+   "computed_utc": "10-04 04:01"
+  },
+  {
+   "day": "2026-10-03",
+   "league": "baseball_mlb",
+   "prov": "7",
+   "norm": "7",
+   "disc": "7",
+   "mapped": "7",
+   "settle": "",
+   "eval": "7",
+   "decided": "7",
+   "entered": "7",
+   "final": "t",
+   "computed_utc": "10-04 04:01"
+  },
+  {
+   "day": "2026-10-03",
+   "league": "soccer_brazil_serie_b",
+   "prov": "14",
+   "norm": "10",
+   "disc": "10",
+   "mapped": "10",
+   "settle": "",
+   "eval": "10",
+   "decided": "10",
+   "entered": "9",
+   "final": "t",
+   "computed_utc": "10-04 04:01"
+  },
+  {
+   "day": "2026-10-03",
+   "league": "soccer_uefa_nations_league",
+   "prov": "24",
+   "norm": "18",
+   "disc": "18",
+   "mapped": "18",
+   "settle": "",
+   "eval": "18",
+   "decided": "18",
+   "entered": "12",
+   "final": "t",
+   "computed_utc": "10-04 04:01"
+  }
+ ],
+ "watermark": [
+  {
+   "watermark": "{\"at\": 1791113422.1955771, \"alerts\": 1, \"version\": \"COVERAGE_INTEGRITY_V1\"}",
+   "last_pass_at": "2026-10-04 11:30:22.195577+00",
+   "age_s": "99"
+  }
+ ],
+ "paper_orders_fills_by_strategy": [
+  {
+   "token": "brb",
+   "strategy": "",
+   "role": "STANDING_PROTECTION",
+   "orders": "53",
+   "fills": "0"
+  },
+  {
+   "token": "mlb",
+   "strategy": "PINNACLE_EXPLORATION_PAPER",
+   "role": "ENTRY",
+   "orders": "6",
+   "fills": "2"
+  },
+  {
+   "token": "mlb",
+   "strategy": "",
+   "role": "STANDING_PROTECTION",
+   "orders": "24",
+   "fills": "0"
+  },
+  {
+   "token": "unl",
+   "strategy": "PINNACLE_COMPLETED_GAME_PAPER",
+   "role": "ENTRY",
+   "orders": "4",
+   "fills": "2"
+  },
+  {
+   "token": "unl",
+   "strategy": "PINNACLE_EXPLORATION_PAPER",
+   "role": "ENTRY",
+   "orders": "6",
+   "fills": "2"
+  },
+  {
+   "token": "unl",
+   "strategy": "",
+   "role": "STANDING_PROTECTION",
+   "orders": "99",
+   "fills": "0"
+  }
+ ],
+ "summary": {
+  "HEALTHY": 2,
+  "REFUSING_BY_POLICY": 2,
+  "EXPLICITLY_UNSUPPORTED": 4,
+  "COVERAGE_INCIDENT": 1,
+  "UNAVAILABLE": 9
+ }
+}
