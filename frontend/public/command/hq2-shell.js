@@ -3,12 +3,12 @@
   if(window.__BTHQ2Shell){return;} window.__BTHQ2Shell=true;
   var path=(location.pathname||'/').replace(/\/+$/,'')||'/';
   var page = path==='/floor'?'floor':path.indexOf('/position')===0?'positions':
-    path==='/profitability'?'profitability':path==='/acceptance'?'acceptance':
+    path==='/profitability'?'profitability':path==='/acceptance'?'acceptance':path==='/company'?'company':
     /\/(derek|xavier|audrey|karen|allocator|eddie|scout)$/.test(path)?'agents':'home';
-  var names={home:'Command',floor:'Trading Floor',positions:'Position Rooms',profitability:'Profitability OS',agents:'AI Team',acceptance:'Acceptance'};
+  var names={home:'Command',floor:'Trading Floor',positions:'Position Rooms',profitability:'Profitability OS',agents:'AI Team',company:'Company',acceptance:'Acceptance'};
   var links=[
     ['home','/','⌂','HQ'],['floor','/floor','◈','Floor'],['positions','/positions','◎','Positions'],
-    ['profitability','/profitability','↗','Economics'],['agents','/derek','◇','Agents'],['acceptance','/acceptance','✓','Accept']
+    ['profitability','/profitability','↗','Economics'],['company','/company','◇','Company'],['acceptance','/acceptance','✓','Accept']
   ];
   document.body.classList.add('bt-hq2');
   var shell=document.createElement('aside'); shell.className='bt-hq2-shell';
@@ -46,7 +46,7 @@
         '<span><b>'+((counts.WORKING_ON||0)+(counts.REVIEWING||0)+(counts.CHALLENGING||0))+'</b> active desks</span>',
         '<span><b>'+edge+'</b> collaboration links</span>'
       ];
-      agents.forEach(function(a){var n=(a.name||a.agent||'').replace('CHIEF_ALLOCATOR','Allocator');bits.push('<span class="'+tone(a)+'"><b>'+n+'</b> '+String(a.state||'UNKNOWN').replace(/_/g,' ')+' · '+ago(a.heartbeat&&a.heartbeat.at)+'</span>');});
+      agents.forEach(function(a){var n=(a.name||a.agent||'').replace('CHIEF_ALLOCATOR','Allie');bits.push('<span class="'+tone(a)+'"><b>'+n+'</b> '+String(a.state||'UNKNOWN').replace(/_/g,' ')+' · '+ago(a.heartbeat&&a.heartbeat.at)+'</span>');});
       rail.innerHTML=bits.concat(bits).join('');
     }
     var t=document.getElementById('bt-hq2-tape');if(t)t.classList.toggle('stale',state!=='live');

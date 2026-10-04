@@ -188,6 +188,14 @@
   force = true
 # ── end IMPROVEMENT PIPELINE ──────────────────────────────────────────
 
+# ── COMPANY WORKSPACE ──
+[[redirects]]
+  from = "https://command.bettortoken.com/company"
+  to = "/command/company.html"
+  status = 200
+  force = true
+# ── end COMPANY WORKSPACE ──
+
 [[redirects]]
   from = "https://command.bettortoken.com/*"
   to = "/command/:splat"

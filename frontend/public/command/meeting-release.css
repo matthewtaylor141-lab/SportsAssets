@@ -1,0 +1,107 @@
+/* BETTOR · MEETING RELEASE
+   Emergency visual convergence for Command. Presentation only. */
+
+/* REAL BRAND ASSETS */
+.bt-hq2 .bt-hq2-logo{
+  font-size:0!important;color:transparent!important;
+  background-color:#075dc3!important;
+  background-image:url("assets/brand/bettortoken-mark-white-transparent.png")!important;
+  background-size:76%!important;background-position:center!important;background-repeat:no-repeat!important;
+}
+.bt-hq2 .bt-hq2-brandword{
+  display:flex!important;align-items:center!important;gap:10px!important;font-size:0!important
+}
+.bt-hq2 .bt-hq2-brandword::before{
+  content:"";display:block;width:28px;height:28px;
+  background:url("assets/brand/bettortoken-mark-white-transparent.png") center/contain no-repeat;
+}
+.bt-hq2 .bt-hq2-brandword::after{
+  content:"BETTOR COMMAND";font:800 12px/1 Inter,system-ui,sans-serif;letter-spacing:.16em;color:#e9f1fa
+}
+.fl-loading-mark,.boot-mark{
+  font-size:0!important;color:transparent!important;background-color:transparent!important;
+  background-image:url("assets/brand/bettortoken-mark-blue-transparent.png")!important;
+  background-position:center!important;background-repeat:no-repeat!important;background-size:82%!important;
+}
+.fl-brand::before{
+  content:"";width:24px;height:24px;display:inline-block;vertical-align:middle;
+  background:url("assets/brand/bettortoken-mark-white-transparent.png") center/contain no-repeat;
+}
+
+/* RESTORED REAL 3D FLOOR: maximize the existing Three.js world rather than
+   the abstract HQ2 replacement. */
+body.meeting-real-floor .fl-screen{
+  height:100dvh!important;min-height:650px!important;padding-left:92px!important;padding-top:98px!important;
+}
+body.meeting-real-floor .fl-main{min-height:0!important}
+body.meeting-real-floor .fl-stage{
+  min-height:calc(100dvh - 160px)!important;
+  background:radial-gradient(ellipse at 50% 22%,#132b48 0,#06101c 48%,#020711 86%)!important
+}
+body.meeting-real-floor .fl-roster{
+  position:absolute!important;left:116px!important;right:24px!important;bottom:18px!important;z-index:12!important;
+  background:rgba(4,12,25,.82)!important;border:1px solid rgba(151,180,214,.18)!important;border-radius:18px!important;
+  backdrop-filter:blur(16px)!important;box-shadow:0 20px 55px rgba(0,0,0,.35)!important
+}
+body.meeting-real-floor .fl-foot,body.meeting-real-floor .fl-wallflow{display:none!important}
+body.meeting-real-floor .fl-top{
+  background:rgba(3,10,20,.78)!important;backdrop-filter:blur(14px)!important
+}
+body.meeting-real-floor .fl-hint{bottom:94px!important}
+body.meeting-real-floor .fl-counts{top:20px!important}
+body.meeting-real-floor .fl-panel{bottom:100px!important}
+body.meeting-real-floor .wall-screen{
+  border-color:#28577c!important;box-shadow:inset 0 0 0 1px rgba(100,185,245,.18),0 0 26px rgba(58,141,220,.08)!important
+}
+
+/* AGENT PAGES: the classic 3D/avatar desk is the opening view for every
+   agent that has one. Keep Workspace one click away. */
+body.meeting-agent .ws-tabs{border-color:rgba(151,180,214,.14)!important;background:#040c18!important}
+body.meeting-agent #page{
+  min-height:calc(100dvh - 150px)!important;background:#030914!important
+}
+
+/* MEETING HOME */
+#bt-meeting-home{
+  margin-left:92px;padding:116px 24px 28px;background:
+    radial-gradient(900px 400px at 83% 0,rgba(65,105,255,.17),transparent 62%),
+    radial-gradient(680px 350px at 10% 20%,rgba(87,225,173,.05),transparent 60%),
+    #030914;color:#eef5fc
+}
+.mtg-wrap{max-width:1500px;margin:auto}
+.mtg-head{display:flex;justify-content:space-between;gap:22px;align-items:end;margin-bottom:18px}
+.mtg-head h1{margin:6px 0 0;font:400 clamp(34px,4.2vw,61px)/.94 Georgia,"Times New Roman",serif;letter-spacing:-.05em}
+.mtg-head p{margin:9px 0 0;color:#8398af;font-size:12px;max-width:730px;line-height:1.55}
+.mtg-actions{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end}
+.mtg-btn{padding:10px 13px;border:1px solid rgba(151,180,214,.17);border-radius:12px;background:#07172a;color:#b2c2d3;text-decoration:none;font:650 10px/1 system-ui,sans-serif}
+.mtg-btn.primary{background:#4169ff;border-color:transparent;color:#fff}
+.mtg-capital{display:grid;grid-template-columns:minmax(0,1.5fr) minmax(290px,.65fr);gap:13px}
+.mtg-paper,.mtg-live,.mtg-team,.mtg-attention{border:1px solid rgba(151,180,214,.15);border-radius:24px;background:linear-gradient(180deg,rgba(9,24,46,.94),rgba(4,13,26,.97));box-shadow:0 28px 72px rgba(0,0,0,.28)}
+.mtg-paper{padding:25px}.mtg-live{padding:22px;background:radial-gradient(420px 230px at 100% 0,rgba(239,202,121,.11),transparent 65%),linear-gradient(180deg,#141817,#080d12)}
+.mtg-kicker{font:700 8.5px/1 ui-monospace,monospace;letter-spacing:.14em;color:#71869e;text-transform:uppercase}
+.mtg-title{display:flex;align-items:center;justify-content:space-between;gap:12px}.mtg-title h2{margin:6px 0 0;font-size:15px}
+.mtg-status{padding:6px 9px;border:1px solid rgba(151,180,214,.14);border-radius:999px;font:700 8px/1 ui-monospace,monospace;color:#8296ac}
+.mtg-status.good{color:#57e1ad;border-color:rgba(87,225,173,.22)}.mtg-status.warn{color:#efca79}
+.mtg-equity{font:600 clamp(40px,5vw,68px)/1 ui-monospace,monospace;letter-spacing:-.055em;margin:18px 0 7px}
+.mtg-change{font:700 10px/1 ui-monospace,monospace;color:#8296ad}.mtg-change.down{color:#ff8197}.mtg-change.up{color:#57e1ad}
+.mtg-metrics{display:flex;gap:8px;flex-wrap:wrap;margin-top:16px}.mtg-metric{min-width:130px;padding:10px 11px;border:1px solid rgba(151,180,214,.11);border-radius:12px;background:#061426}
+.mtg-metric span{display:block;color:#647990;font:700 7.5px ui-monospace,monospace;text-transform:uppercase}.mtg-metric b{display:block;margin-top:5px;font:600 11px ui-monospace,monospace}
+.mtg-chart{position:relative;height:180px;margin-top:17px;border:1px solid rgba(151,180,214,.09);border-radius:16px;background:#04101f;overflow:hidden}.mtg-chart canvas{width:100%;height:100%}
+.mtg-last{position:absolute;right:10px;top:10px;padding:7px 9px;border-radius:8px;background:#087f4d;color:#fff;font:700 8px ui-monospace,monospace}.mtg-last.frozen{background:#66542d;color:#ffe9b2}
+.mtg-live-state{margin-top:17px;padding:13px;border:1px solid rgba(239,202,121,.15);border-radius:13px;background:rgba(38,28,7,.28)}.mtg-live-state b{color:#efca79;font:700 11px ui-monospace,monospace}.mtg-live-state p{color:#95886d;font-size:9.5px;line-height:1.45}
+.mtg-live-grid{display:grid;grid-template-columns:1fr 1fr;gap:7px;margin-top:11px}.mtg-live-stat{padding:10px;border:1px solid rgba(239,202,121,.09);border-radius:11px}.mtg-live-stat span{display:block;color:#6e685b;font:700 7px ui-monospace,monospace;text-transform:uppercase}.mtg-live-stat b{display:block;margin-top:5px;font:600 10px ui-monospace,monospace}
+.mtg-team{margin-top:13px;padding:20px}.mtg-team-head{display:flex;align-items:end;justify-content:space-between;gap:12px}.mtg-team-head h2{margin:5px 0 0;font:400 28px/1 Georgia,serif;letter-spacing:-.035em}.mtg-team-head p{margin:6px 0 0;color:#7489a1;font-size:9.5px}
+.mtg-team-grid{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:7px;margin-top:14px}
+.mtg-agent{--a:#7aa7ff;display:block;min-height:145px;position:relative;padding:12px;border:1px solid color-mix(in srgb,var(--a) 25%,transparent);border-radius:15px;background:radial-gradient(140px 100px at 80% 0,color-mix(in srgb,var(--a) 10%,transparent),transparent 70%),#061426;text-decoration:none;color:#eaf2fb}
+.mtg-agent:hover{transform:translateY(-2px);box-shadow:0 18px 35px rgba(0,0,0,.26)}.mtg-agent b{font-size:12px}.mtg-agent .role{display:block;margin-top:3px;color:#70849a;font-size:8px}
+.mtg-agent .state{display:flex;align-items:center;gap:6px;margin-top:12px;color:var(--a);font:700 7.5px ui-monospace,monospace;text-transform:uppercase}.mtg-agent .state i{width:6px;height:6px;border-radius:50%;background:currentColor;box-shadow:0 0 8px currentColor}
+.mtg-agent .task{margin-top:7px;color:#8093a8;font-size:8.5px;line-height:1.35;height:33px;overflow:hidden}.mtg-agent .open{position:absolute;left:12px;bottom:10px;color:#62778f;font:700 7px ui-monospace,monospace;text-transform:uppercase}
+.mtg-workspaces{display:grid;grid-template-columns:repeat(6,1fr);gap:7px;margin-top:9px}.mtg-workspaces a{padding:11px;border:1px solid rgba(151,180,214,.11);border-radius:12px;background:#061426;text-decoration:none;color:#d9e4ef;font-size:9.5px}.mtg-workspaces a span{display:block;margin-top:3px;color:#667b92;font-size:7.8px}
+.mtg-attention{margin-top:13px;padding:18px;display:grid;grid-template-columns:1fr auto;gap:12px;align-items:center}.mtg-attention h3{margin:5px 0 0;font-size:14px}.mtg-attention p{margin:5px 0 0;color:#74889f;font-size:9px}
+body.meeting-home #app{display:none!important}.mtg-deep{margin-top:11px}.mtg-deep summary{cursor:pointer;color:#8ea2b8;font-size:9.5px}.mtg-deep[open]+#app{display:block!important}
+@media(max-width:1100px){.mtg-team-grid{grid-template-columns:repeat(4,1fr)}.mtg-workspaces{grid-template-columns:repeat(3,1fr)}}
+@media(max-width:780px){
+ #bt-meeting-home{margin-left:0;padding:105px 10px 80px}.mtg-head{display:block}.mtg-actions{justify-content:flex-start;margin-top:12px}.mtg-head h1{font-size:42px}
+ .mtg-capital{grid-template-columns:1fr}.mtg-team-grid{display:grid;grid-auto-flow:column;grid-auto-columns:76%;grid-template-columns:none;overflow-x:auto;scroll-snap-type:x mandatory}.mtg-agent{scroll-snap-align:start}.mtg-workspaces{grid-template-columns:1fr 1fr}
+ body.meeting-real-floor .fl-screen{padding-left:0!important;padding-top:89px!important}.meeting-real-floor .fl-roster{left:10px!important;right:10px!important}
+}

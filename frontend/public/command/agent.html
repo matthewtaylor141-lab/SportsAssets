@@ -42,6 +42,7 @@
 <link rel="stylesheet" href="hq2-brand.css" data-hq2="brand">
 <link rel="stylesheet" href="hq2-agent.css" data-hq2="agent-css">
 <link rel="stylesheet" href="hq3-live.css" data-hq3="css">
+<link rel="stylesheet" href="meeting-release.css" data-meeting="css">
 </head>
 <body>
 <nav aria-label="AI agents">
@@ -127,7 +128,7 @@
   function load() { var s = document.createElement("script"); s.src = "workspace.js"; document.body.appendChild(s); }
   if (WORKSPACE[name]) {
     if (CLASSIC[name]) { tabs.hidden = false; } else { tabDesk.hidden = true; }
-    var want = "ws";
+    var want = CLASSIC[name] ? "desk" : "ws";
     try { if (CLASSIC[name] && (location.hash === "#desk" || sessionStorage.getItem("bt.agent.tab") === "desk")) { want = "desk"; } } catch (e) { /* no storage */ }
     window.__btWorkspace = {agent: name};
     load();
@@ -144,5 +145,6 @@
 <script src="hq2-shell.js" data-hq2="shell"></script>
 <script src="hq2-agent.js" data-hq2="agent-js"></script>
 <script src="hq3-live.js" data-hq3="js"></script>
+<script src="meeting-release.js" data-meeting="js"></script>
 </body>
 </html>
