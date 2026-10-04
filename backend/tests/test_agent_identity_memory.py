@@ -271,7 +271,8 @@ async def test_the_migration_seed_equals_the_code_and_versions_are_immutable():
                 async with conn.transaction():
                     await conn.execute(sql)
         row = I.identity_row("DEREK")
-        cols = ("agent_id, identity_version, display_name, title, role, "
+        cols = ("agent_id, identity_version, display_name, title, "
+                "presentation, role, "
                 "mission, personality_traits, communication_style, "
                 "default_voice_profile, expertise_domains, "
                 "decision_principles, may, may_not, signature, "
@@ -282,7 +283,7 @@ async def test_the_migration_seed_equals_the_code_and_versions_are_immutable():
             await conn.execute(
                 "INSERT INTO agent_identity_versions (%s, "
                 " grants_financial_authority) VALUES ('DEREK',$1,'Derek','t',"
-                "'r','m','[]','s','vp','[]','[]','[]','[\"x\"]','sig',$5,$2,"
+                "'MALE','r','m','[]','s','vp','[]','[]','[]','[\"x\"]','sig',$5,$2,"
                 "$3,$4,$6)" % cols, version, row["content_sha"], approved_by,
                 approved_at, status, auth)
         # a rewrite of version 1, a gap, a forged approval without a time,
@@ -326,6 +327,47 @@ def test_one_voice_profile_per_agent_and_no_secret_fields():
                                                     "password")), k
     assert I.VOICE_SPEC["CHIEF_ALLOCATOR"]["assignment"] == I.A_UNASSIGNED
     assert I.VOICE_SPEC["CHIEF_ALLOCATOR"]["speaking_rate"] is None
+
+
+def test_allie_is_the_chief_allocator_a_woman_with_her_own_voice():
+    """The owner's HQ3 directive: the Chief Allocator is Allie, a woman,
+    displayed "Allie / Chief Allocator"; the id CHIEF_ALLOCATOR and the
+    /allocator slug are unchanged; her voice is her own (UNASSIGNED until
+    one exists) and is never Audrey's, nor any other agent's."""
+    s = I.IDENTITY_SPEC["CHIEF_ALLOCATOR"]
+    assert (s["agent_id"], s["display_name"], s["title"],
+            s["presentation"]) == ("CHIEF_ALLOCATOR", "Allie",
+                                   "Chief Allocator", I.PRESENTATION_FEMALE)
+    assert I.SLUGS["CHIEF_ALLOCATOR"] == "allocator"
+    assert I.agent_of("allocator") == I.agent_of("CHIEF_ALLOCATOR") \
+        == "CHIEF_ALLOCATOR"
+    v = I.VOICE_SPEC["CHIEF_ALLOCATOR"]
+    assert v["assignment"] == I.A_UNASSIGNED
+    assert v["provider_voice_id"] is None and v["persona_voice_ref"] is None
+    others = [I.VOICE_SPEC[a] for a in I.AGENTS if a != "CHIEF_ALLOCATOR"]
+    assert v["provider_voice_alias"] not in {o["provider_voice_alias"]
+                                             for o in others}
+    assert "AUDREY" not in v["provider_voice_alias"]
+    assert "Audrey" not in v["display_name"] + v["style_instructions"]
+    # a resolution that would hand Allie Audrey's voice id is refused
+    latest = {"AUDREY": {"status": "RESOLVED", "voice_id": "v-audrey",
+                         "resolved_at": 1.0},
+              "CHIEF_ALLOCATOR": {"status": "RESOLVED",
+                                  "voice_id": "v-audrey",
+                                  "resolved_at": 2.0}}
+    got = I.voice_status("CHIEF_ALLOCATOR", profile=v, latest=latest,
+                         server_key_configured=True)
+    assert got["status"] == I.V_UNASSIGNED and got["voice_id"] is None
+    assert got["audio"]["status"] == I.V_UNAVAILABLE
+    # ...and even were a runtime voice configured for her, Audrey's voice
+    # id stays Audrey's: Allie is VOICE_SHARED, never handed it
+    configured = dict(v, assignment=I.A_RUNTIME)
+    got = I.voice_status("CHIEF_ALLOCATOR", profile=configured,
+                         latest=latest, server_key_configured=True)
+    assert got["status"] == I.V_SHARED and got["voice_id"] is None, got
+    assert got["reason"] == "VOICE_ID_ALREADY_SPOKEN_BY:AUDREY"
+    for a in I.AGENTS:
+        assert I.IDENTITY_SPEC[a]["presentation"] in I.PRESENTATIONS
 
 
 def test_a_shared_voice_is_never_silently_given_to_a_second_agent():
@@ -739,11 +781,13 @@ async def test_the_rollback_refuses_people_decisions_and_drops_only_224():
         row = I.identity_row("SCOUT")
         await conn.execute(
             "INSERT INTO agent_identity_versions (agent_id, identity_version,"
-            " display_name, title, role, mission, personality_traits, "
+            " display_name, title, presentation, role, mission, "
+            " personality_traits, "
             " communication_style, default_voice_profile, expertise_domains,"
             " decision_principles, may, may_not, signature, "
             " authority_status, content_sha, approved_by) SELECT agent_id, "
-            " 2, display_name, title, role, mission, personality_traits, "
+            " 2, display_name, title, presentation, role, mission, "
+            " personality_traits, "
             " communication_style, default_voice_profile, expertise_domains,"
             " decision_principles, may, may_not, signature, "
             " authority_status, content_sha, approved_by "

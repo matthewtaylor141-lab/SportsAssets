@@ -124,11 +124,16 @@ def fingerprint(b: dict) -> tuple:
     return (tuple(b["tools"]), tuple(b["context_sources"]), b["focus"])
 
 
+# AS OF `now`: a review recorded after the context instant is not yet
+# known then (no look-ahead), and must not crowd that instant's positions
+# out of the recent window.
 XAVIER_REVIEWS_SQL = """
 SELECT review_id, group_id, reviewed_at, recommendation, refusal, measure,
        selection
   FROM paper_xavier_reviews
- WHERE group_id IN (SELECT group_id FROM paper_xavier_reviews
+ WHERE reviewed_at <= to_timestamp($3)
+   AND group_id IN (SELECT group_id FROM paper_xavier_reviews
+                     WHERE reviewed_at <= to_timestamp($3)
                      ORDER BY reviewed_at DESC LIMIT $1)
  ORDER BY reviewed_at DESC, review_id DESC LIMIT $2"""
 
@@ -139,7 +144,8 @@ async def xavier_current_reviews(conn, *, now: float, groups: int = 10
     review id, valuation id / version, management state and the ids of the
     reviews it superseded. Raises on a failed read (the caller reports it)."""
     rows = [dict(r) for r in await conn.fetch(XAVIER_REVIEWS_SQL,
-                                              groups * 5, groups * 20)]
+                                              groups * 5, groups * 20,
+                                              float(now))]
     for r in rows:
         if hasattr(r.get("reviewed_at"), "timestamp"):
             r["reviewed_at"] = r["reviewed_at"].timestamp()
