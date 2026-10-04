@@ -193,7 +193,8 @@ async def test_fresh_stale_and_unavailable_are_explicit_on_the_assessment(
         (st,) = await _assessments(conn, g2)
         assert st["evidence_state"] == XM.E_STALE
         assert st["discretionary_permitted"] is False
-        assert st["recommendation"] == PX.A_HOLD
+        # stale evidence recommends NOTHING (owner P0): never a default HOLD
+        assert st["recommendation"] == "WAITING_FOR_FRESH_EVIDENCE"
         alts = {x["action"]: x for x in _j(st["alternatives"])}
         assert alts["EXIT"]["rankable"] is False
         assert alts["EXIT"]["blocker"] == PX.B_STALE_MEASURE
@@ -216,7 +217,7 @@ async def test_fresh_stale_and_unavailable_are_explicit_on_the_assessment(
         (un,) = await _assessments(conn, g3)
         assert un["evidence_state"] == XM.E_NONE
         assert un["probability"] is None
-        assert un["recommendation"] is None
+        assert un["recommendation"] == "MANAGEMENT_UNAVAILABLE_STALE_INPUT"
         assert un["discretionary_permitted"] is False
     finally:
         await XF._purge(conn, slugs)
@@ -235,7 +236,9 @@ def test_a_stale_assessment_never_carries_a_discretionary_action():
                 alternatives=[], recommendation=rec,
                 reallocate={"mode": "SHADOW", "recommended": True},
                 policy={"status": XSP.STATUS_READY})
-            assert a["recommendation"] == XM.A_HOLD
+            assert a["recommendation"] == (
+                "WAITING_FOR_FRESH_EVIDENCE" if state == XM.E_STALE
+                else "MANAGEMENT_UNAVAILABLE_STALE_INPUT")
             assert a["discretionary_permitted"] is False
             assert a["reallocate"]["recommended"] is False
             if state == XM.E_NONE:
@@ -251,13 +254,13 @@ def test_the_actual_alternatives_rank_a_sale_only_on_fresh_evidence():
     stale = XM.actual_alternatives(
         evidence={"evidence_state": XM.E_STALE, "probability": 0.5}, held=4,
         exit_px=0.8, fee_fn=H.zero_fee, at=1.0, reallocate=re)
-    assert stale["recommendation"] == XM.A_HOLD
+    assert stale["recommendation"] == "WAITING_FOR_FRESH_EVIDENCE"
     ex = next(x for x in stale["alternatives"] if x["action"] == XM.A_EXIT)
     assert ex["rankable"] is False and ex["blocker"] == XM.B_STALE
     none = XM.actual_alternatives(
         evidence={"evidence_state": XM.E_NONE, "probability": None}, held=4,
         exit_px=0.8, fee_fn=H.zero_fee, at=1.0, reallocate=re)
-    assert none["recommendation"] is None
+    assert none["recommendation"] == "MANAGEMENT_UNAVAILABLE_STALE_INPUT"
 
 
 @pg
@@ -326,7 +329,7 @@ async def test_an_actual_position_is_reviewed_on_its_handoff_tick_and_on_cadence
         (a,) = await _assessments(conn, po["group_id"], "ACTUAL")
         assert a["trigger"] == M.LIVE_T_FIRST and a["within_bound"] is True
         assert a["evidence_state"] == XM.E_STALE
-        assert a["recommendation"] == XM.A_HOLD
+        assert a["recommendation"] == "WAITING_FOR_FRESH_EVIDENCE"
         th = await conn.fetchrow("SELECT * FROM xavier_entry_theses WHERE "
                                  " position_kind='ACTUAL' AND group_id=$1",
                                  po["group_id"])

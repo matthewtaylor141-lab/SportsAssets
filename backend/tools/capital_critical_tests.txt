@@ -810,3 +810,7 @@ tests/test_small_live_truth.py
 # counts as protection in every reader; the conditional floor is IF_FILLED and
 # never the realized floor; Kalshi NOT_CONNECTED is never inferred.
 tests/test_resting_is_not_protection.py
+# Xavier freshness truth (owner P0 2026-10-04): a stale probability never
+# yields a current HOLD; read-time validity; expiry requeues; resting is not
+# protection in the review exposure record.
+tests/test_xavier_freshness_truth.py

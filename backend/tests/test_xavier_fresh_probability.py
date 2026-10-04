@@ -295,7 +295,8 @@ async def test_end_to_end_the_re_review_gets_a_fresh_probability_from_the_held_r
         assert out["by_trigger"] == {PX.T_FIRST: 1}
         (first,) = await _assessments(conn, g)
         assert first["evidence_state"] == XM.E_STALE
-        assert first["recommendation"] == PX.A_HOLD
+        # stale: nothing discretionary and no default HOLD (owner P0)
+        assert first["recommendation"] == "WAITING_FOR_FRESH_EVIDENCE"
         m1 = _j((await conn.fetchrow(
             "SELECT measure FROM paper_xavier_reviews WHERE group_id=$1",
             g))["measure"])

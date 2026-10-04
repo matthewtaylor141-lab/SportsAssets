@@ -869,8 +869,9 @@ async def _xavier_management_records(conn, groups: list, out: dict) -> None:
                       group_id, position_kind, assessed_at, trigger, review_latency_s,
                       latency_bound_s, within_bound, evidence_state, probability,
                       probability_source, probability_age_s, thesis_state, recommendation,
-                      discretionary_permitted, reallocate, thesis_id
-                 FROM xavier_management_assessments WHERE group_id = ANY($1)
+                      discretionary_permitted, reallocate, thesis_id,
+                      to_jsonb(x) -> 'valuation' AS valuation
+                 FROM xavier_management_assessments x WHERE group_id = ANY($1)
                 ORDER BY group_id, position_kind, assessed_at DESC, assessment_id DESC""",
             groups):
         out["assessments"][(r["group_id"], r["position_kind"])] = dict(r)
@@ -898,12 +899,27 @@ def _xavier_management(g, mg: dict) -> dict:
            "management_policy_status": (pol or {}).get("status"),
            "management_policy_approved": bool((pol or {}).get("approved")),
            "href": "/api/command/xavier/management"}
+    import time as _time
+
+    from . import xavier_freshness as XF
+    from .agents import xavier_management as XM
     for kind in ("PAPER", "ACTUAL"):
         a = (mg.get("assessments") or {}).get((g, kind))
         t = (mg.get("theses") or {}).get((g, kind))
         v = (mg.get("value_add") or {}).get((g, kind))
         re_ = _js(a.get("reallocate")) if a else {}
+        # THE RECOMMENDATION RE-JUDGED NOW (owner P0): the action only while
+        # CURRENT, the state otherwise; the stored word stays recorded
+        fr = None if a is None else XF.of_assessment(
+            dict(a, assessed_at=(a["assessed_at"].timestamp()
+                                 if hasattr(a["assessed_at"], "timestamp")
+                                 else a["assessed_at"]),
+                 valuation=_js(a.get("valuation")) or None),
+            now=_time.time(), limit_s=XM._config_limit())
         out[kind.lower()] = {
+            "recommendation_state": fr["recommendation_state"] if fr else None,
+            "recorded_recommendation": a["recommendation"] if a else None,
+            "freshness": fr,
             "assessment_id": a["assessment_id"] if a else None,
             "reviewed_at": _iso(a["assessed_at"]) if a else None,
             "trigger": a["trigger"] if a else None,
@@ -919,7 +935,7 @@ def _xavier_management(g, mg: dict) -> dict:
             "entry_ev_usd": _f(t["entry_ev_usd"]) if t else None,
             "thesis_expires_at": _iso(t["thesis_expires_at"]) if t else None,
             "evidence_expires_at": _iso(t["evidence_expires_at"]) if t else None,
-            "recommendation": a["recommendation"] if a else None,
+            "recommendation": fr["display_recommendation"] if fr else None,
             "discretionary_permitted": a["discretionary_permitted"] if a else None,
             "reallocate_shadow": ({"recommended": bool(re_.get("recommended")),
                                    "blocker": re_.get("blocker"), "mode": "SHADOW"}
@@ -1193,6 +1209,19 @@ def _chain(r: dict, paper: dict, actual: dict, mg: dict) -> dict:
                       "NOT_APPLICABLE links are absent by design, with the reason")}
 
 
+def _gated_review(v: dict) -> dict:
+    """A paper review's recommendation re-judged at read time
+    (xavier_freshness.of_review on its own recorded measure)."""
+    import time as _time
+
+    from . import xavier_freshness as XF
+    ra = v.get("reviewed_at")
+    from .agents import xavier_management as XM
+    return XF.of_review(dict(v, reviewed_at=(ra.timestamp() if hasattr(
+        ra, "timestamp") else ra)), now=_time.time(),
+        limit_s=XM._config_limit())
+
+
 def _management_section(r: dict, mg: dict, now=None) -> dict:
     g = r.get("group_id")
     h = mg["handoffs"].get(g)
@@ -1213,7 +1242,12 @@ def _management_section(r: dict, mg: dict, now=None) -> dict:
           "latest_review_id": v["review_id"] if v else None,
           "latest_review_at": _iso(v["reviewed_at"]) if v else None,
           "latest_review_trigger": v["trigger"] if v else None,
-          "latest_recommendation": v["recommendation"] if v else None,
+          # re-judged now (owner P0): the action only while CURRENT
+          "latest_recommendation": _gated_review(v)["display_recommendation"]
+          if v else None,
+          "latest_recommendation_state": _gated_review(v)[
+              "recommendation_state"] if v else None,
+          "latest_recorded_recommendation": v["recommendation"] if v else None,
           # the probability's freshness on that review (paper_xavier E_*)
           "latest_probability_evidence_state": v.get("evidence_state") if v else None,
           "latest_probability_limitation": v.get("probability_limitation") if v else None,
@@ -1433,7 +1467,12 @@ def _decision_management(mg: dict, g) -> dict:
             nxt = _iso(rv["reviewed_at"] + dt.timedelta(seconds=float(rv["backstop_s"])))
         except (TypeError, ValueError):
             nxt = None
-    return {"xavier_recommendation": rv.get("recommendation"),
+    gr = _gated_review(rv) if rv else None
+    return {"xavier_recommendation": (gr["display_recommendation"]
+                                      if gr else None),
+            "xavier_recommendation_state": (gr["recommendation_state"]
+                                            if gr else None),
+            "xavier_recorded_recommendation": rv.get("recommendation"),
             "xavier_actual_action": lr.get("action"),
             "probability_evidence_state": (lr.get("evidence_state")
                                            or rv.get("evidence_state")),

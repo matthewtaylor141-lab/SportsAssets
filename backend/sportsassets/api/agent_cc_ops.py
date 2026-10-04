@@ -189,6 +189,18 @@ details.dec .dfig{flex-basis:100%;font:12px/1.4 var(--mono);color:var(--ink-2);o
 .cc-p.ops time,.cc-fresh time,.cc-acct time,.cc-signin time,.cc-kpis time,.cc-funded time{white-space:normal}
 .orow .oh>*,.ocounts .v,.ocounts .v *,.cc-kpi .s,.cc-kpi .v,.olist li *{min-width:0;overflow-wrap:anywhere;white-space:normal}
 .schip,.ostat{white-space:normal;overflow-wrap:anywhere;max-width:100%}
+/* XAVIER'S RECOMMENDATION STATE (owner P0): only CURRENT is a recommendation */
+.xrs{border:1px solid var(--line);border-radius:10px;padding:8px 10px;margin-top:6px;min-width:0}
+.xrs .xrh{display:flex;flex-wrap:wrap;gap:6px 10px;align-items:center;font-size:12.5px}
+.xst{font:700 10px/1 var(--mono);letter-spacing:.06em;padding:3px 6px;border-radius:4px;border:1px solid currentColor;white-space:normal;overflow-wrap:anywhere}
+.xst.CURRENT{color:var(--ok)}.xst.STALE,.xst.INVALID{color:var(--bad)}
+.xst.WAITING_FOR_FRESH_EVIDENCE,.xst.MANAGEMENT_UNAVAILABLE_STALE_INPUT,.xst.NO_RECOMMENDATION{color:var(--warn)}
+.xst.SUPERSEDED{color:var(--ink-3);border-style:dashed}
+.xrs.CURRENT{border-color:color-mix(in oklab,var(--ok) 45%,var(--line))}.xrs.STALE,.xrs.INVALID{border-color:color-mix(in oklab,var(--bad) 45%,var(--line))}
+.xrs .xv{font:11.5px/1.45 var(--mono);color:var(--ink-3);margin-top:4px;overflow-wrap:anywhere;font-variant-numeric:tabular-nums}
+.xrs .xalts{list-style:none;margin:6px 0 0;padding:0;display:grid;gap:3px}
+.xrs .xalts li{font:11.5px/1.4 var(--mono);color:var(--ink-2);overflow-wrap:anywhere}
+.xrs .xalts .miss{color:var(--warn)}
 @media (max-width:1000px){.cc-acct .acct7{grid-template-columns:repeat(4,minmax(0,1fr))}.pboxes{grid-template-columns:1fr}.cc-fresh{grid-template-columns:1fr}.pfig6{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media (max-width:760px){.cc-acct .acct7{grid-template-columns:repeat(2,minmax(0,1fr))}.cc-stagewrap .cc-stage{min-height:300px}.cc-kpi .v{font-size:17px}.ocounts{grid-template-columns:repeat(2,minmax(0,1fr))}.cc-top .meta{flex-wrap:wrap;white-space:normal}}
 """
@@ -417,6 +429,38 @@ _OPS_CORE_JS_RAW = r"""
   function refusalHtml(code, words) {
     return code ? '<span class="ref" title="' + esc(code) + '">' + esc(words || String(code).replace(/_/g, ' ').toLowerCase()) + '</span>' : '';
   }
+  // ── XAVIER'S RECOMMENDATION, GATED BY ITS FRESHNESS (owner P0) ───────
+  // Only a CURRENT recommendation is shown as one. STALE / INVALID /
+  // WAITING_FOR_FRESH_EVIDENCE / MANAGEMENT_UNAVAILABLE_STALE_INPUT show the
+  // state, the recorded word as RECORDED (not current), the valuation it
+  // stood on (source, source time, age, threshold, valuation id) and every
+  // alternative with its value or its named missing evidence.
+  var XSTATES = ['CURRENT', 'STALE', 'INVALID', 'WAITING_FOR_FRESH_EVIDENCE', 'MANAGEMENT_UNAVAILABLE_STALE_INPUT', 'NO_RECOMMENDATION', 'SUPERSEDED'];
+  function xstate(rc) {
+    var s = rc && (rc.recommendation_state || (rc.freshness && rc.freshness.recommendation_state));
+    return XSTATES.indexOf(s) >= 0 ? s : 'NO_RECOMMENDATION';
+  }
+  function xsec(v) { return num(v) ? (Math.abs(v) >= 100 ? Math.round(v) : Math.round(v * 10) / 10) + ' s' : null; }
+  function xrecHtml(rc, held) {
+    if (!isObj(rc)) return '<div class="om">No review recorded yet</div>';
+    var st = xstate(rc), fr = isObj(rc.freshness) ? rc.freshness : {}, v = isObj(fr.valuation) ? fr.valuation : {};
+    var cur = st === 'CURRENT' ? (rc.current_recommendation || rc.recommendation) : null;
+    var recd = rc.recorded_recommendation !== undefined ? rc.recorded_recommendation : null;
+    var head = '<div class="xrh"><span>Current recommendation:</span> <b>' + esc(cur || st) + '</b> <span class="xst ' + esc(st) + '" data-rec-state="' + esc(st) + '">' + esc(st.replace(/_/g, ' ')) + '</span>'
+      + (!cur && recd && recd !== st ? '<span class="mute">recorded ' + esc(recd) + ' · not current</span>' : '')
+      + (num(held) ? '<span class="mute">position held: ' + n(held) + ' contracts (held is not a HOLD recommendation)</span>' : '') + '</div>';
+    var val = '<div class="xv" data-valuation>source ' + esc(v.source || 'not recorded') + ' · source time ' + (AG.toEpoch(v.source_at) !== null ? AG.ts(v.source_at) : '<span class="ns">NOT RECORDED</span>')
+      + (AG.toEpoch(v.observed_at) !== null ? ' · observed ' + AG.ts(v.observed_at) : '') + ' · age ' + (xsec(v.age_now_s) || '<span class="ns">UNKNOWN</span>') + ' at read · threshold ' + (xsec(v.limit_s) || '<span class="ns">UNKNOWN</span>')
+      + (AG.toEpoch(v.expires_at) !== null ? ' · ' + (num(v.seconds_to_expiry) && v.seconds_to_expiry > 0 ? 'expires ' : 'expired ') + AG.ts(v.expires_at) : '')
+      + ' · valuation ' + esc(v.valuation_id != null ? '#' + v.valuation_id : 'id not recorded') + (v.valuation_hash ? ' · hash ' + esc(String(v.valuation_hash).slice(0, 12)) : '') + '</div>';
+    var why = (fr.reasons && fr.reasons.length) ? '<div class="xv">why not current: ' + fr.reasons.map(function (r) { return esc(String(r)); }).join(', ') + '</div>' : '';
+    var alts = Array.isArray(rc.alternatives_complete) ? rc.alternatives_complete : [];
+    var al = alts.length ? '<ul class="xalts" data-alternatives>' + alts.map(function (a) {
+      var miss = a.missing_evidence || (a.value_usd == null ? a.blocker : null);
+      return '<li data-option="' + esc(a.option || a.action) + '"><b>' + esc(a.option || a.action) + '</b> · ' + (num(a.value_usd) ? CC.usd(a.value_usd) + (miss ? ' (not current)' : '') : 'not valued') + (miss ? ' · <span class="miss">' + esc(miss) + '</span>' : '') + (a.blocker && a.blocker !== miss ? ' · blocker ' + esc(a.blocker) : '') + '</li>';
+    }).join('') + '</ul>' : '';
+    return '<div class="xrs ' + esc(st) + '" data-xavier-rec>' + head + val + why + al + '</div>';
+  }
   // ── DEREK ─────────────────────────────────────────────────────────
   function decRow(d) {
     d = isObj(d) ? d : {};
@@ -527,7 +571,7 @@ _OPS_CORE_JS_RAW = r"""
       + '<p class="lbl" style="margin:8px 0 2px">Ordinary completion</p><div class="om">wins ' + (CC.usdS((rm.ordinary_completion || {}).win_usd) || '?') + ' · loses ' + (CC.usdS((rm.ordinary_completion || {}).lose_usd) || '?') + ' · Pinnacle at entry ' + (CC.prob((rm.ordinary_completion || {}).p_pinnacle_at_decision) || '—') + (num(rm.conditional_ev_at_decision_usd) ? ' · conditional EV at entry ' + CC.usdS(rm.conditional_ev_at_decision_usd) : '') + (rm.economics_label ? ' <span class="econ">' + esc(rm.economics_label) + '</span>' : '') + '</div>'
       + '<p class="lbl" style="margin:8px 0 2px">Exceptional settlement (postponed, abandoned, suspended)</p>' + (rm.exceptional_settlement && rm.exceptional_settlement.length ? scenRows(rm.exceptional_settlement) : '') + '<p class="note" style="margin:2px 0 0">' + esc(rm.exceptional_note || '') + '</p>'
       + (rm.open_management_orders ? '<div class="om">' + n(rm.open_management_orders) + ' open protection / management order(s)</div>' : '') + '</div>' : '';
-    var rec = rc ? '<div class="om">Current recommendation: <b>' + esc(rc.recommendation || 'NONE') + '</b>' + (rc.refusal ? ' · ' + refusalHtml(rc.refusal, rc.refusal_words) : '') + ' · ' + esc(rc.trigger || '') + ' · ' + (AG.toEpoch(rc.reviewed_at) !== null ? AG.ts(rc.reviewed_at) : '') + '</div>' + (isObj(rc.selection) && Object.keys(rc.selection).length ? '<details class="tech"><summary>Selection</summary>' + AG.kv(rc.selection) + '</details>' : '') : '<div class="om">No review recorded yet</div>';
+    var rec = rc ? xrecHtml(rc, rm ? rm.open_qty : null) + '<div class="om">' + (rc.refusal ? refusalHtml(rc.refusal, rc.refusal_words) + ' · ' : '') + 'review ' + esc(rc.trigger || '') + ' · ' + (AG.toEpoch(rc.reviewed_at) !== null ? AG.ts(rc.reviewed_at) : '') + '</div>' + (isObj(rc.selection) && Object.keys(rc.selection).length ? '<details class="tech"><summary>Selection</summary>' + AG.kv(rc.selection) + '</details>' : '') : '<div class="om">No review recorded yet</div>';
     return '<div class="orow owned" data-group="' + esc(p.group_id) + '" data-strategy="' + esc(p.strategy) + '"><div class="oh">' + schip(p.strategy) + '<span class="ostat ' + (p.status === 'OPEN' ? 'OPEN' : /WON/.test(p.status) ? 'WON' : /LOST/.test(p.status) ? 'LOST' : 'SETTLED_AT_VENUE_PRICE') + '">' + esc(p.status || '?') + '</span></div>'
       + nameHtml(p) + rec + '<div class="pboxes">' + real + risk + '</div>' + CC.techDetails(tech) + '</div>';
   }
@@ -544,8 +588,8 @@ _OPS_CORE_JS_RAW = r"""
       + '<div><div class="lbl">If every open contract loses</div><div class="v">' + (CC.usdS(ex.max_loss_usd) || '?') + '</div></div><div><div class="lbl">If every open contract wins</div><div class="v">' + (CC.usdS(ex.max_gain_usd) || '?') + '</div></div><div><div class="lbl">Realized (booked)</div><div class="v">' + (CC.usdS(ex.realized_pnl_usd) || '?') + '</div></div></div><p class="note">' + esc(ex.basis || '') + '</p>' : secBox(j.exposure, 'exposure');
     out['p-ops-handoffs'] = {status: stStatus(j.owned_positions), html: expo + (counts ? '<p class="note">Handed to Xavier: ' + counts.map(function (r) { return schip(r.strategy) + ' ' + n(r.n); }).join(' · ') + '</p>' : '') + (od ? od.map(ownedCard).join('') : secBox(own, 'owned positions'))};
     var rv = sec(j.reviews), rvd = ok(j.reviews), rc = ok(j.review_counts);
-    out['p-ops-reviews'] = {status: stStatus(j.reviews), html: (rc ? '<ul class="olist">' + rc.map(function (r) { return '<li>' + schip(r.strategy) + ' <b>' + esc(r.recommendation) + '</b> × ' + n(r.n) + (AG.toEpoch(r.latest_at) !== null ? ' · latest ' + AG.ts(r.latest_at) : '') + '</li>'; }).join('') + '</ul>' : '')
-      + (rvd ? rvd.map(function (r) { return '<div class="orow" data-review="' + esc(r.review_id) + '"><div class="oh">' + schip(r.strategy) + '<b>' + esc(r.recommendation || 'REFUSED') + '</b>' + (r.refusal ? '<span class="ref">' + esc(r.refusal) + '</span>' : '') + '<span class="mute">' + esc(r.trigger || '') + '</span></div><div class="om">' + (AG.toEpoch(r.reviewed_at) !== null ? AG.ts(r.reviewed_at) : '?') + '</div>' + CC.techDetails([['review id', r.review_id], ['group id', r.group_id]]) + '</div>'; }).join('') : secBox(rv, 'reviews'))};
+    out['p-ops-reviews'] = {status: stStatus(j.reviews), html: (rc ? '<p class="note">Recorded recommendations by strategy: history as written, not the current recommendation (each review below shows its state now).</p><ul class="olist">' + rc.map(function (r) { return '<li>' + schip(r.strategy) + ' <b>' + esc(r.recommendation) + '</b> × ' + n(r.n) + (AG.toEpoch(r.latest_at) !== null ? ' · latest ' + AG.ts(r.latest_at) : '') + '</li>'; }).join('') + '</ul>' : '')
+      + (rvd ? rvd.map(function (r) { return '<div class="orow" data-review="' + esc(r.review_id) + '"><div class="oh">' + schip(r.strategy) + '<b>' + esc(r.recommendation || 'REFUSED') + '</b>' + (r.recommendation_state ? '<span class="xst ' + esc(xstate(r)) + '" data-rec-state="' + esc(xstate(r)) + '">' + esc(xstate(r).replace(/_/g, ' ')) + '</span>' + (r.recorded_recommendation && r.recorded_recommendation !== r.recommendation ? '<span class="mute">recorded ' + esc(r.recorded_recommendation) + '</span>' : '') + (r.superseded_by ? '<span class="mute" data-superseded-by="' + esc(r.superseded_by) + '">history · superseded by ' + esc(r.superseded_by) + '</span>' : '') : '') + (r.refusal ? '<span class="ref">' + esc(r.refusal) + '</span>' : '') + '<span class="mute">' + esc(r.trigger || '') + '</span></div><div class="om">' + (AG.toEpoch(r.reviewed_at) !== null ? AG.ts(r.reviewed_at) : '?') + '</div>' + CC.techDetails([['review id', r.review_id], ['group id', r.group_id]]) + '</div>'; }).join('') : secBox(rv, 'reviews'))};
     var so = sec(j.standing_orders), sod = ok(j.standing_orders), ss = ok(j.standing_summary);
     out['p-ops-protection'] = {status: stStatus(j.standing_orders), html: (ss ? '<ul class="olist">' + ss.map(function (r) { return '<li>' + schip(r.strategy) + ' ' + esc(r.role) + ' · ' + esc(r.state) + ' × ' + n(r.n) + (r.open ? ' <span class="ostat OPEN">OPEN</span>' : '') + '</li>'; }).join('') + '</ul>' : '')
       + (sod ? sod.map(function (o) { return '<div class="orow" data-order="' + esc(o.order_id) + '"><div class="oh">' + schip(o.strategy) + '<b>' + esc(o.role) + '</b><span>' + esc(o.direction || '') + ' ' + (n(o.qty) || '?') + ' @ ' + (CC.price(o.limit_price) || '?') + '</span><span class="ostat ' + (o.open ? 'OPEN' : 'VOID_REFUND') + '">' + esc(o.state) + '</span></div><div class="om">filled ' + (n(o.filled_qty) || '0') + ' · created ' + (AG.toEpoch(o.created_at) !== null ? AG.ts(o.created_at) : '?') + (AG.toEpoch(o.expires_at) !== null ? ' · expires ' + AG.ts(o.expires_at) : '') + '</div>' + CC.techDetails([['order id', o.order_id], ['group id', o.group_id], ['market slug', o.us_market_slug]]) + '</div>'; }).join('') : secBox(so, 'standing orders'))};

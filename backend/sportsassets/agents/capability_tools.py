@@ -93,11 +93,19 @@ class Toolkit:
             if not exists:raise ValueError('POSITION_NOT_IN_ACCOUNT')
             # Bounded detail instead of the unlimited historical chain renderer.
             orders=[dict(x) for x in await c.fetch('SELECT order_id,direction,role,qty,filled_qty,limit_price,state,created_at FROM paper_orders WHERE account_id=$1 AND group_id=$2 ORDER BY created_at DESC LIMIT 30',W.ACCOUNT,rid)]
-            reviews=[dict(x) for x in await c.fetch('SELECT review_id,reviewed_at,recommendation,refusal,measure,selection,action,alternatives,confirmed_protection,incomplete_search FROM paper_xavier_reviews WHERE account_id=$1 AND group_id=$2 ORDER BY reviewed_at DESC LIMIT 5',W.ACCOUNT,rid)]
+            reviews=[dict(x) for x in await c.fetch('SELECT review_id,group_id,reviewed_at,recommendation,refusal,measure,selection,action,alternatives,confirmed_protection,incomplete_search FROM paper_xavier_reviews WHERE account_id=$1 AND group_id=$2 ORDER BY reviewed_at DESC LIMIT 5',W.ACCOUNT,rid)]
+            # ONE CURRENT XAVIER DECISION (owner P0): the newest review re-judged now; older ones SUPERSEDED with the newer review id
+            from .. import xavier_freshness as XF
+            from . import xavier_management as XM
+            for x in reviews:
+                if hasattr(x.get('reviewed_at'),'timestamp'): x['reviewed_at']=x['reviewed_at'].timestamp()
+            cd=XF.current_decisions(reviews,now=float(self.now),limit_s=XM._config_limit()).get(rid) or {}
+            reviews=([cd['current']] if cd.get('current') else [])+list(cd.get('superseded') or [])
+            current_decision=(cd.get('current') or {}).get('decision')
             settlements=[dict(x) for x in await c.fetch('SELECT settlement_id,settled_at,recorded_at,outcome,payout_per_contract,evidence,evidence_source FROM paper_settlements WHERE account_id=$1 AND group_id=$2 ORDER BY recorded_at DESC LIMIT 5',W.ACCOUNT,rid)]
             from . import cross_venue_research
             comparison=await cross_venue_research.read(c,W.ACCOUNT,rid,self.now)
-            return {'group_id':rid,'orders':orders,'reviews':reviews,'settlements':settlements,'cross_venue_comparison':comparison,'bounded_history':True}
+            return {'group_id':rid,'orders':orders,'current_xavier_decision':current_decision,'reviews':reviews,'settlements':settlements,'cross_venue_comparison':comparison,'bounded_history':True}
         d=await c.fetchrow('SELECT * FROM paper_decisions WHERE account_id=$1 AND decision_id=$2',W.ACCOUNT,rid)
         if not d:raise ValueError('DECISION_NOT_IN_ACCOUNT')
         if name=='decision':return dict(d)

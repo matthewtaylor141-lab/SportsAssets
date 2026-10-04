@@ -236,7 +236,12 @@ async def xavier_payload(conn, *, account_id: str = L.ACCOUNT_ID,
             "SELECT DISTINCT ON (group_id) * FROM paper_xavier_reviews "
             " WHERE account_id=$1 ORDER BY group_id, reviewed_at DESC "
             " LIMIT $2", account_id, limit)
-        return [_row(r) for r in rows]
+        # THE RECOMMENDATION IS RE-JUDGED AT READ TIME (owner P0): a stored
+        # HOLD on evidence that is stale now reads STALE / INVALID /
+        # WAITING_FOR_FRESH_EVIDENCE, never as the current recommendation
+        from .agents import xavier_management as XM
+        return await XM.gate_paper_reviews(conn, [_row(r) for r in rows],
+                                           now=at)
 
     out["positions"] = await _section(
         positions(), empty_why="NO_OPEN_PAPER_POSITION")
