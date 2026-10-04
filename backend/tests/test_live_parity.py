@@ -957,3 +957,458 @@ def test_the_sleeve_map_is_the_paper_sleeve_classifiers():
     assert CI.STRATEGY_SLEEVE == BPS.STRATEGY_SLEEVE
     assert (CI.INVESTMENT, CI.TRAINING, CI.BENCHMARK, CI.UNCLASSIFIED) == (
         BPS.INVESTMENT, BPS.TRAINING, BPS.BENCHMARK, BPS.UNCLASSIFIED)
+
+
+# ═════════════════════════════════════════════════════════════════════
+# R30A · THE COMPLETE INTENT, ITS VALIDITY WINDOW, THE LIVE POLICY, ALLIE /
+# EDDIE / ALTERNATIVES IN PARITY, THE LATENCY CHAIN, THE CUTOVER ENDPOINT
+# ═════════════════════════════════════════════════════════════════════
+
+def test_the_opportunity_id_is_fixture_slug_side_line_scope():
+    k = CI.opportunity_key(fixture="f1", us_market_slug="aec-x",
+                           holding_side="LONG", line=3.5, scope="FULL_GAME")
+    assert k == "f1|aec-x|LONG|3.5|FULL_GAME"
+    # one line, written three ways, is one opportunity
+    for line in (Decimal("3.50"), 3.50, Decimal("3.5")):
+        assert CI.opportunity_key(fixture="f1", us_market_slug="aec-x",
+                                  holding_side="LONG", line=line,
+                                  scope="FULL_GAME") == k
+    # missing parts are stated as empty, a '|' inside a part never splits it
+    assert CI.opportunity_key(fixture=None, us_market_slug="a|b",
+                              holding_side="SHORT", line=None,
+                              scope=None) == "|a/b|SHORT||"
+    it = _intent(contract={"fixture": "f1", "line": Decimal("-1.5"),
+                           "scope": "FULL_GAME"})
+    assert it["opportunity_id"] == \
+        "f1|aec-nfl-kc-buf-2026-10-04|LONG|-1.5|FULL_GAME"
+    with pytest.raises(ValueError):
+        _intent(opportunity_id="not-a-key")
+
+
+@pytest.mark.parametrize("field,value", [
+    ("opportunity_id", "f1|other|LONG||FULL_GAME"),
+    ("policy", {"policy_sha": "0" * 64}),
+    ("probability", {"status": "MEASURED", "value": 0.7}),
+    ("book", {"status": "MEASURED", "obs_id": 8}),
+    ("risk_rails", {"live": {"live_max_order_usd": 26}}),
+    ("binding_constraints", {"allie_final_binding": "OTHER"}),
+    ("evidence_refs", [{"kind": "paper_decisions", "id": "x"}]),
+    ("latency_stages", {"decision_start_at": 1.0}),
+    ("expires_at", NOW + 99.0),
+    ("expiry", {"status": "DERIVED", "expires_at": NOW + 99.0}),
+    ("allie", {"status": "MEASURED", "final_allocatable_usd": 1.0}),
+    ("eddie", {"status": "MEASURED", "recommendation": "WAIT"}),
+    ("karen", {"state": "OPEN_CHALLENGE"}),
+    ("opportunity_score", {"status": "MEASURED", "opportunity_score": 0.9}),
+])
+def test_every_r30a_field_is_inside_the_sha(field, value):
+    it = _intent()
+    assert LP.verify_intent(it)
+    assert not LP.verify_intent(dict(it, **{field: value})), field
+
+
+def test_the_intent_records_its_policy_probability_book_rails_and_refs():
+    it = _intent(evidence_refs=[{"kind": "paper_decisions", "id": "d"}],
+                 latency_stages={"decision_start_at": NOW})
+    assert it["intent_version"] == CI.INTENT_VERSION == \
+        "CANONICAL_DECISION_INTENT_V2"
+    pol = it["policy"]
+    assert pol["strategy_version"] == CG3
+    assert pol["parameters_version_id"] == PARAMS_V2["version_id"]
+    assert pol["row_sha_matches"] is True and pol["fallback"] is None
+    assert it["probability"]["limit_s"] == 30.0
+    assert it["book"]["obs_id"] == 7
+    assert it["risk_rails"]["live"] == {"live_max_order_usd": 25,
+                                        "live_scale": 1000}
+    bc = it["binding_constraints"]
+    assert bc["allie_binding_constraint"] == "CAPITAL_REQUIRED"
+    assert bc["allie_final_binding"] == "CAPITAL_REQUIRED"
+    assert it["evidence_refs"] == [{"kind": "paper_decisions", "id": "d"}]
+    assert it["latency_stages"] == {"decision_start_at": NOW}
+    # an unrecorded block is UNAVAILABLE with its reason, never a zero
+    bare = _intent(probability=None, book=None, risk_rails=None)
+    for k in ("probability", "book", "risk_rails"):
+        assert bare[k]["status"] == "UNAVAILABLE" and bare[k]["why"], k
+
+
+def test_the_validity_window_is_the_earlier_of_the_two_admission_rules():
+    e = CI.decision_expiry(probability_observed_at=NOW - 5,
+                           probability_limit_s=30.0,
+                           book_observed_at=NOW - 1, book_max_age_s=10.0)
+    assert e["status"] == "DERIVED" and e["binding_term"] == "BOOK_AGE"
+    assert e["expires_at"] == pytest.approx(NOW + 9.0)
+    e = CI.decision_expiry(probability_observed_at=NOW - 25,
+                           probability_limit_s=30.0,
+                           book_observed_at=NOW - 1, book_max_age_s=10.0)
+    assert e["binding_term"] == "PROBABILITY_FRESHNESS"
+    assert e["expires_at"] == pytest.approx(NOW + 5.0)
+    for miss in ({"probability_observed_at": None},
+                 {"probability_limit_s": None}, {"book_observed_at": None},
+                 {"book_max_age_s": None}):
+        kw = dict(probability_observed_at=NOW - 5, probability_limit_s=30.0,
+                  book_observed_at=NOW - 1, book_max_age_s=10.0)
+        kw.update(miss)
+        u = CI.decision_expiry(**kw)
+        assert u["status"] == "UNAVAILABLE" and u["expires_at"] is None
+        assert u["why"].startswith("EXPIRY_UNDERIVABLE_MISSING:")
+    it = _intent()
+    assert it["expires_at"] == pytest.approx(NOW + 9.0)
+    assert CI.intent_expiry_refusal(it, now=it["expires_at"]) is None
+    assert CI.intent_expiry_refusal(it, now=it["expires_at"] + 0.001) == \
+        CI.R_INTENT_EXPIRED
+    assert CI.intent_expiry_refusal(it, now=None) == CI.R_INTENT_EXPIRED
+    assert CI.intent_expiry_refusal(dict(it, expires_at=None), now=NOW) == \
+        CI.R_EXPIRY_UNAVAILABLE
+    # the window is never longer than the 30 s probability rule
+    assert it["expires_at"] <= it["probability"]["observed_at"] + 30.0
+
+
+def test_both_adapters_refuse_an_expired_intent():
+    it = _intent()
+    late = it["expires_at"] + 1.0
+    live = _live(it, now=late)
+    assert live["state"] == LP.S_EXCLUDED
+    assert live["exclusion"] == CI.R_INTENT_EXPIRED
+    assert live["plan_state"] == "PLANNED"        # the logic is still built
+    res = _pair(it, live=live)
+    assert res["parity_state"] == LP.VENUE_DIFF
+    assert res["comparison"]["live_expiry_refusal"] == CI.R_INTENT_EXPIRED
+    no_window = _intent(book=None)
+    assert _live(no_window)["exclusion"] == CI.R_EXPIRY_UNAVAILABLE
+    # the PAPER adapter's refusal of an expired intent is a timing fact too
+    res = _pair(it, paper_state=LP.P_REFUSED, refusal=CI.R_INTENT_EXPIRED)
+    assert res["parity_state"] == LP.VENUE_DIFF
+
+
+def test_the_live_policy_fails_closed_and_the_paper_fallback_is_labelled():
+    ok = CI.policy_block(strategy=CG, strategy_version=CG3, params=PARAMS_V2)
+    v = CI.live_policy_verdict(ok, approved_policy_shas={ok["policy_sha"]})
+    assert v["admissible"] is True and v["refusal"] is None
+    assert [c["check"] for c in v["checks"]] == [
+        "policy_row_present_and_readable", "policy_row_sha_matches",
+        "policy_version_approved_for_live"]
+    # PAPER MAY FALL BACK -- explicitly and labelled -- LIVE never does
+    fb = CI.policy_block(strategy=CG, strategy_version=CG3, params=dict(
+        PARAMS_V2, source=CI.POLICY_FALLBACK,
+        fallback_reason="PARAMETER_READ_FAILED:TimeoutError"))
+    assert fb["fallback"] == {
+        "explicit": True, "label": "PAPER_SHIPPED_RESEARCH_DEFAULT_FALLBACK",
+        "reason": "PARAMETER_READ_FAILED:TimeoutError",
+        "live_admissible": False}
+    assert CI.live_policy_verdict(fb, approved_policy_shas={
+        fb["policy_sha"]})["refusal"] == CI.R_POLICY_MISSING
+    none = CI.policy_block(strategy=CG, strategy_version=CG3, params=None)
+    assert none["parameters_source"] == CI.POLICY_CODE_CONSTANT
+    assert CI.live_policy_verdict(none, approved_policy_shas={
+        none["policy_sha"]})["refusal"] == CI.R_POLICY_MISSING
+    assert CI.live_policy_verdict(None)["refusal"] == CI.R_POLICY_MISSING
+    bad = CI.policy_block(strategy=CG, strategy_version=CG3,
+                          params=dict(PARAMS_V2, params_sha256="0" * 64))
+    assert bad["row_sha_matches"] is False
+    assert CI.live_policy_verdict(bad, approved_policy_shas={
+        bad["policy_sha"]})["refusal"] == CI.R_POLICY_SHA
+    # the shipped V2 row's paper-only authorization is NOT a LIVE approval
+    assert CI.live_policy_verdict(ok)["refusal"] == CI.R_POLICY_UNAPPROVED
+    robot = CI.policy_block(strategy=CG, strategy_version=CG3,
+                            params=dict(PARAMS_V2, approved_by="system"))
+    assert CI.live_policy_verdict(robot, approved_policy_shas={
+        robot["policy_sha"]})["refusal"] == CI.R_POLICY_UNAPPROVED
+    # the policy sha names strategy version + parameter version + values
+    for other in (CI.policy_block(strategy=CG, strategy_version="V9",
+                                  params=PARAMS_V2),
+                  CI.policy_block(strategy=CG, strategy_version=CG3,
+                                  params=dict(PARAMS_V2, version_id="v3")),
+                  CI.policy_block(strategy=CG, strategy_version=CG3,
+                                  params=dict(PARAMS_V2, values={
+                                      "min_gross_edge_pp": 0.6}))):
+        assert other["policy_sha"] != ok["policy_sha"]
+
+
+def test_a_governance_refusal_is_shadow_excluded_but_still_measured():
+    it = _intent()
+    for gov, first in ((None, CI.R_POLICY_UNAPPROVED),
+                       ({"approved_policy_shas": {it["policy"]["policy_sha"]},
+                         "approved_gates": set()}, LP.R_GATE_APPROVAL)):
+        live = _live(it, governance=gov)
+        assert live["state"] == LP.S_EXCLUDED and live["exclusion"] == first
+        assert live["governance"]["new_exposure_refused"] is True
+        assert live["plan_state"] == "PLANNED" and live["live_qty"] == 2
+        res = _pair(it, live=live)
+        # the logic is compared on the would-be order: identical -> SCALE
+        assert res["parity_state"] == LP.SCALE, res
+        assert first in res["comparison"]["live_governance_refusals"]
+        r = LP.readiness([{"intent_kind": "DECISION", "sleeve": "INVESTMENT",
+                           "parity_state": res["parity_state"],
+                           "comparison": res["comparison"]}] * 30
+                         + [_row("MANAGEMENT")] * 30, halted=False,
+                         profitability={"profitability_verdict":
+                                        "SUPPORTED_BY_FORWARD_EVIDENCE"})
+        assert r["recommendation"] == LP.NOT_READY
+        assert "LIVE_GOVERNANCE_REFUSED:%s:30" % first in r["blockers"]
+        assert r["governance_gate"] == "FAIL" and r["parity_gate"] == "PASS"
+
+
+def test_allie_and_eddie_are_compared_at_capital_scale():
+    it = _intent()
+    res = _pair(it)
+    f = res["comparison"]["fields"]
+    assert f["allie_final_allocation"]["equal"] is True
+    assert f["allie_final_allocation"]["scale_difference"] is True
+    assert f["allie_final_allocation"]["live"] == "2"       # 2000 / 1000
+    assert f["eddie_estimate"]["equal"] is True
+    assert f["eddie_estimate"]["live"]["expected_executable_ev_usd"] == "0.04"
+    assert res["parity_state"] == LP.SCALE
+    # a live allocation bounded by the $25 live rail is a capital bound
+    big = _intent(allie={"status": "MEASURED", "final_allocatable_usd": 60000,
+                         "final_binding": "CAPACITY",
+                         "binding_constraint": "CAPACITY"})
+    rb = _pair(big)
+    fa = rb["comparison"]["fields"]["allie_final_allocation"]
+    assert fa["basis"] == "LIVE_RAIL_BOUND" and fa["equal"] is True
+    assert rb["parity_state"] == LP.SCALE
+
+
+@pytest.mark.parametrize("side,key,value,field", [
+    ("allie", "final_allocatable_usd", "3", "allie_final_allocation"),
+    ("allie", "final_binding", "OTHER", "allie_final_allocation"),
+    ("eddie", "recommendation", "WAIT", "eddie_estimate"),
+    ("eddie", "expected_executable_ev_usd", "0.05", "eddie_estimate"),
+    ("eddie", "expected_fill_probability", "0.5", "eddie_estimate")])
+def test_an_allie_or_eddie_difference_beyond_scale_is_a_divergence(
+        side, key, value, field):
+    it = _intent()
+    live = _live(it)
+    ae = json.loads(json.dumps(live["requested"]["allie_eddie"]))
+    ae[side][key] = value
+    live = dict(live, requested=dict(live["requested"], allie_eddie=ae))
+    res = _pair(it, live=live)
+    assert res["parity_state"] == LP.DIVERGENCE
+    assert field in res["divergence_fields"]
+
+
+def _alts():
+    return {"candidates": [
+        {"action": "HOLD", "qty": 2400, "value_usd": 1488.0,
+         "expected_net_usd": 168.0, "ev_basis": "FRESH", "ev_is_current": True},
+        {"action": "EXIT", "qty": 2400, "value_usd": 1440.0,
+         "expected_net_usd": 120.0, "fees_usd": 10.0,
+         "walk": {"worst_price": 0.60}}],
+        "not_rankable": [{"action": "REDUCE", "blocker": "NO_BIDS_FOR_REDUCE"}]}
+
+
+def test_every_management_alternative_is_valued_or_unavailable_with_a_reason():
+    decided = LP.management_action(
+        chosen="HOLD", fresh=True, stale=False, p_missing=False,
+        protection_ok=True, standing_live=False, candidate=None,
+        protective={"ok": True, "price": 0.40}, open_qty=2400)
+    s = CI.management_alternatives(
+        alts=_alts(), decided=decided, mechanical_selection="HOLD",
+        standing_live=False, protective={"ok": True, "price": 0.40,
+                                         "floor_usd": 960.0},
+        open_qty=2400, reallocate={"position_efficiency": 0.1,
+                                   "alternative_efficiency": 0.2,
+                                   "advantage": 0.1, "recommended": True,
+                                   "position_ev_from_here_usd": 168.0,
+                                   "best_opportunity": {"decision_id": "d9"}})
+    assert set(s) == set(CI.ALTERNATIVES) and len(s) == 8
+    for name, e in s.items():
+        assert e["status"] in (CI.EVALUATED, "UNAVAILABLE"), name
+        if e["status"] == "UNAVAILABLE":
+            assert e["why"], name                 # a reason, never a zero
+    assert s["HOLD"]["status"] == CI.EVALUATED and s["HOLD"]["value_usd"] == 1488.0
+    assert s["SELL_EXIT"]["value_usd"] == 1440.0
+    assert s["SELL_REDUCE"]["why"] == "NO_BIDS_FOR_REDUCE"
+    assert s["CANCEL_PROTECTION_BEFORE_EXIT"]["why"] == \
+        "NO_STANDING_PROTECTION_TO_CANCEL"
+    assert s["MAINTAIN_STANDING_PROTECTION"]["status"] == CI.EVALUATED
+    assert s["MAINTAIN_STANDING_PROTECTION"]["floor_is_realized"] is False
+    assert s["INDIRECT_HEDGE"]["status"] == "UNAVAILABLE"
+    assert s["REALLOCATE"]["status"] == CI.EVALUATED
+    assert s["REALLOCATE"]["mode"] == "SHADOW"
+    assert s["NO_ORDER"]["value_usd"] == 1488.0
+    chosen = [k for k, e in s.items() if e["chosen"]]
+    assert chosen == [decided["action"]] == ["MAINTAIN_STANDING_PROTECTION"]
+    mi = LP.build_management_intent(
+        review_id="paperrev:alts", group_id="g1", position_key="pk",
+        strategy=CG, valuation={"valuation_id": 9, "valuation_hash": "h"},
+        evidence_state="FRESH_CURRENT_PROBABILITY", recommendation="HOLD",
+        mechanical_selection="HOLD", decided=decided,
+        us_market_slug="aec-nfl-kc-buf-2026-10-04", holding_side="LONG",
+        alternatives=_alts(), reason={"selection_reason": "HIGHEST_EV"},
+        created_at=NOW, alternative_set=s,
+        policy={"small_live_management_policy": {"status": "X"}})
+    assert mi["chosen"] == mi["action"] == "MAINTAIN_STANDING_PROTECTION"
+    assert mi["chosen_why"]["selection_reason"] == "HIGHEST_EV"
+    assert mi["chosen_why"]["action_rule"] == "PROTECTIVE_PRICE"
+    # the set, the choice, the why and the policy are inside the sha
+    tampered = dict(mi, alternative_set=dict(s, HOLD=dict(s["HOLD"],
+                                                          value_usd=1.0)))
+    assert CI.content_sha({k: tampered[k] for k in CI._MGMT_FIELDS}) != \
+        mi["content_sha"]
+    with pytest.raises(ValueError):
+        LP.build_management_intent(
+            review_id="paperrev:x", group_id="g1", position_key="pk",
+            strategy=CG, valuation={}, evidence_state="X",
+            recommendation="HOLD", mechanical_selection="HOLD",
+            decided=decided, us_market_slug="s", holding_side="LONG",
+            alternatives={}, reason={}, created_at=NOW,
+            alternative_set={"HOLD": s["HOLD"]})
+    # a caller that computed no set still records all eight
+    assert set(_mi()["alternative_set"]) == set(CI.ALTERNATIVES)
+
+
+def test_an_alternative_evaluated_on_one_side_only_is_a_divergence():
+    mi = _mi()
+    paper_req = LP.paper_management_request(mi, {"taken": "SUBMIT_EXIT",
+                                                 "ok": True})
+    # LIVE consumes the intent's own set: equal, but INDIRECT_HEDGE was
+    # evaluated on neither side -> exact parity is NOT claimed
+    live = LP.live_management_proposal(mi, scale=1000, open_qty=2400)
+    assert live["alternatives_basis"] == \
+        "THE_CANONICAL_MANAGEMENT_INTENT_S_SET"
+    res = LP.compare(kind="MANAGEMENT", intent=mi,
+                     paper={"state": LP.P_SUBMITTED, "requested": paper_req},
+                     live=live, scale=1000, open_qty=2400)
+    alt = res["comparison"]["alternatives"]
+    assert res["parity_state"] != LP.DIVERGENCE
+    assert alt["exact_parity_claimed"] is False
+    assert "INDIRECT_HEDGE" in alt["evaluated_on_neither_side"]
+    assert alt["why_not_exact"].startswith("NOT_EVALUATED_ON_EITHER_SIDE")
+    # a LIVE-side evaluator that evaluated the indirect hedge where PAPER
+    # did not: LOGIC_DIVERGENCE
+    own = dict(CI.evaluated_set(mi["alternative_set"]),
+               INDIRECT_HEDGE=CI.EVALUATED)
+    live2 = LP.live_management_proposal(mi, scale=1000, open_qty=2400,
+                                        live_alternatives=own)
+    res2 = LP.compare(kind="MANAGEMENT", intent=mi,
+                      paper={"state": LP.P_SUBMITTED, "requested": paper_req},
+                      live=live2, scale=1000, open_qty=2400)
+    assert res2["parity_state"] == LP.DIVERGENCE
+    assert "alternative:INDIRECT_HEDGE" in res2["divergence_fields"]
+    assert res2["comparison"]["alternatives"]["exact_parity_claimed"] is False
+    # ... and one PAPER evaluated that LIVE did not
+    assert CI.evaluated_set(mi["alternative_set"])["SELL_EXIT"] == \
+        CI.EVALUATED
+    fewer = dict(CI.evaluated_set(mi["alternative_set"]),
+                 SELL_EXIT="UNAVAILABLE")
+    live3 = LP.live_management_proposal(mi, scale=1000, open_qty=2400,
+                                        live_alternatives=fewer)
+    res3 = LP.compare(kind="MANAGEMENT", intent=mi,
+                      paper={"state": LP.P_SUBMITTED, "requested": paper_req},
+                      live=live3, scale=1000, open_qty=2400)
+    assert "alternative:SELL_EXIT" in res3["divergence_fields"]
+    # readiness reports the alternatives evaluated on neither side
+    r = LP.readiness([{"intent_kind": "MANAGEMENT", "sleeve": "INVESTMENT",
+                       "parity_state": res["parity_state"],
+                       "comparison": res["comparison"]}], halted=False)
+    ma = r["management_alternatives"]
+    assert ma["exact_parity_claimed"] == 0 and ma["of"] == 1
+    assert ma["evaluated_on_neither_side"]["INDIRECT_HEDGE"] == 1
+
+
+def test_the_latency_chain_reports_distributions_and_unavailable_reasons():
+    t = NOW
+
+    def row(**over):
+        r = {"pinnacle_observed_at": t, "ingest_at": t + 0.5,
+             "probability_qualified_at": t + 1.0, "book_observed_at": t + 1.2,
+             "decision_start_at": t + 1.5, "intent_recorded_at": t + 1.6,
+             "paper_submit_at": t + 1.7, "paper_fill_at": t + 6.7}
+        r.update(over)
+        return r
+    rows = [row(), row(ingest_at=t + 1.5),
+            row(paper_fill_at=None, paper_fill_at_why="NOT_FILLED_YET"),
+            row(ingest_at=t - 1.0)]               # two clocks disagree
+    rep = LP.latency_report(rows)
+    assert rep["decisions"] == 4 and rep["units"] == "seconds"
+    assert rep["stages"] == list(LP.LATENCY_STAGES)
+    s = rep["spans"]["pinnacle_to_ingest"]
+    assert s["n"] == 3 and s["status"] == "MEASURED"
+    assert s["p50_s"] == pytest.approx(0.5) and s["max_s"] == pytest.approx(1.5)
+    assert s["p90_s"] == pytest.approx(1.3)
+    assert s["unavailable"] == {"CLOCK_DISAGREEMENT": 1}
+    f = rep["spans"]["paper_submit_to_paper_fill"]
+    assert f["n"] == 3 and f["unavailable"] == {"NOT_FILLED_YET": 1}
+    e2e = rep["spans"]["decision_start_to_paper_submit"]
+    assert e2e["p50_s"] == pytest.approx(0.2)
+    # two stamps of one instant, rounded to the microsecond differently, are
+    # a zero span -- not a clock disagreement
+    same = LP.latency_report([row(decision_start_at=t + 1.7000004,
+                                  paper_submit_at=t + 1.7)])
+    sp0 = same["spans"]["decision_start_to_paper_submit"]
+    assert sp0["n"] == 1 and sp0["max_s"] == 0.0 and sp0["unavailable"] == {}
+    # nothing recorded: UNAVAILABLE with the default reason, never a zero
+    empty = LP.latency_report([{}])
+    sp = empty["spans"]["pinnacle_to_ingest"]
+    assert sp["status"] == "UNAVAILABLE" and sp["n"] == 0
+    assert sp["p50_s"] is None and sp["max_s"] is None
+    assert sp["unavailable"] == {"PINNACLE_OBSERVED_AT_NOT_RECORDED": 1}
+    assert LP.latency_report([])["spans"]["pinnacle_to_ingest"]["n"] == 0
+
+
+@pytest.mark.asyncio
+async def test_the_cutover_endpoint_refuses_without_a_named_human():
+    from fastapi import HTTPException
+    from sportsassets.api import command_live_parity as CLP
+    for body in (None, {}, {"actor": "release engineer"},
+                 {"release_sha": SHA}):
+        with pytest.raises(HTTPException) as e:
+            await CLP.record_cutover(body)
+        assert e.value.status_code == 400
+        assert e.value.detail["reason"] == "ACTOR_AND_RELEASE_SHA_REQUIRED"
+    for robot in ("system", "Xavier", "agent:release", "claude"):
+        with pytest.raises(HTTPException) as e:
+            await CLP.record_cutover({"actor": robot, "release_sha": SHA})
+        assert e.value.detail["reason"] == "ACTOR_MUST_BE_A_NAMED_HUMAN"
+    # the route is admin-only
+    route = [r for r in CLP.router.routes
+             if getattr(r, "path", "") == "/api/admin/live-parity/cutover"]
+    assert route and "POST" in route[0].methods
+    deps = [d.call for d in route[0].dependant.dependencies]
+    assert CLP._require_admin in deps
+    lat = [r for r in CLP.router.routes
+           if getattr(r, "path", "") == "/api/command/live-parity/latency"]
+    assert lat and lat[0].methods == {"GET"}
+
+
+@pg
+@pytest.mark.asyncio
+async def test_the_cutover_endpoint_runs_every_check_in_the_serving_process(
+        monkeypatch):
+    """No check can be supplied from the request: this test process has no
+    hooks installed and does not run the release sha, so the endpoint
+    refuses with the server's own checks and writes nothing."""
+    from fastapi import HTTPException
+    from sportsassets.api import command_live_parity as CLP
+    conn = await asyncpg.connect(H.DSN)
+    tx = conn.transaction()
+    await tx.start()
+    try:
+        class _Pool:
+            def acquire(self):
+                class _Ctx:
+                    async def __aenter__(self_):
+                        return conn
+
+                    async def __aexit__(self_, *a):
+                        return False
+                return _Ctx()
+
+        async def pool():
+            return _Pool()
+        monkeypatch.setattr(CLP, "_pool", pool)
+        before = await conn.fetchval("SELECT count(*) FROM live_parity_cutover")
+        with pytest.raises(HTTPException) as e:
+            await CLP.record_cutover({"actor": "release engineer",
+                                      "release_sha": SHA,
+                                      # request-supplied overrides are ignored
+                                      "api_sha": SHA,
+                                      "hooks_here": list(LP.HOOK_NAMES)})
+        assert e.value.status_code == 409
+        assert e.value.detail["reason"] == "CUTOVER_REFUSED"
+        assert "HOOKS_INSTALLED_IN_THIS_PROCESS" in e.value.detail["refused"]
+        assert await conn.fetchval(
+            "SELECT count(*) FROM live_parity_cutover") == before
+    finally:
+        await tx.rollback()
+        await conn.close()

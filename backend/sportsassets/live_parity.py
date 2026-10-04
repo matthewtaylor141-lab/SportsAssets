@@ -1399,12 +1399,17 @@ async def canonical_decision(conn, *, did, strategy, version, cand, side, sized,
             if (prm or {}).get("activation_id") else None,
             {"kind": "eddie_estimate", "id": eddie.get("estimate_id")}
             if eddie.get("estimate_id") else None) if x]
+        def _us(v):
+            # every stage stamp is recorded to the microsecond, as the
+            # adapter-side stamps are (paper_benchmark rounds to 6 places)
+            ep = _epoch(v)
+            return None if ep is None else round(ep, 6)
         stages = {
-            "pinnacle_observed_at": p_obs,
-            "ingest_at": probability["received_at"],
-            "probability_qualified_at": cand.get("decided_at"),
-            "book_observed_at": book["observed_at"],
-            "decision_start_at": at,
+            "pinnacle_observed_at": _us(p_obs),
+            "ingest_at": _us(probability["received_at"]),
+            "probability_qualified_at": _us(cand.get("decided_at")),
+            "book_observed_at": _us(book["observed_at"]),
+            "decision_start_at": _us(at),
             "basis": {
                 "pinnacle_observed_at": "the provider's source stamp",
                 "ingest_at": "our receipt of the Pinnacle reading",
@@ -1757,10 +1762,13 @@ async def record_cutover(conn, *, release_sha: str, recorded_by: str,
 # R30A / audit P0 #2. Three generations of live execution existed:
 #
 #   execmirror           copied filled PAPER orders to the venue. RETIRED:
-#                        Venue.place raises LegacyOriginationRetired without
-#                        a canonical LIVE authorization (canonical_live_
-#                        authorized), and Mirror.plan_new no longer plans a
-#                        BUY-role copy at all (LEGACY_ORIGINATION_RETIRED).
+#                        execmirror.Venue.place (the production venue
+#                        factory) raises LegacyOriginationRetired without a
+#                        canonical LIVE authorization (canonical_live_
+#                        authorized), so a planned copy is claimed, refused
+#                        before the client and recorded REJECTED; nothing is
+#                        sent. Risk-reducing calls (cancel, close) are
+#                        unaffected.
 #   execution_intent     the ACTUAL sibling of a qualified decision. It may
 #                        not submit outside a canonical intent: ActualLane.
 #                        _run calls authorize_live_exposure BEFORE its claim
@@ -1958,6 +1966,11 @@ def _pct(xs: list, q: float):
     return round(s[lo] + (s[hi] - s[lo]) * (i - lo), 6)
 
 
+#: stage stamps are recorded to the microsecond; a "negative" span smaller
+#: than that is the rounding of two stamps of one instant, not two clocks
+LATENCY_RESOLUTION_S = 1e-6
+
+
 def latency_report(rows: list) -> dict:
     """PER-STAGE LATENCY DISTRIBUTIONS (pure). `rows` are one dict per
     decision with the stage stamps (epoch seconds, or None with a reason in
@@ -1978,8 +1991,12 @@ def latency_report(rows: list) -> dict:
                 continue
             d = tb - ta
             if d < 0:
-                why["CLOCK_DISAGREEMENT"] = why.get("CLOCK_DISAGREEMENT", 0) + 1
-                continue
+                if d > -LATENCY_RESOLUTION_S:
+                    d = 0.0
+                else:
+                    why["CLOCK_DISAGREEMENT"] = why.get(
+                        "CLOCK_DISAGREEMENT", 0) + 1
+                    continue
             vals.append(d)
         spans[name] = {
             "from": a, "to": b, "n": len(vals),

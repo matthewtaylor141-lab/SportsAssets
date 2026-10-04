@@ -504,6 +504,16 @@ tests/test_execmirror.py
 tests/test_execmirror_probe.py
 tests/test_live_parity.py
 tests/test_live_parity_through_the_paper_pass.py
+# (R30A) ONE ORIGIN OF LIVE EXPOSURE: the canonical SMALL LIVE adapter's
+# authorization is never issued in SHADOW; the production venue adapter, the
+# ACTUAL sibling and the funded acquisition path each refuse new exposure
+# outside a canonical intent (expired, mismatched, unnamed, policy or gate
+# unapproved) before any claim, write or client call.
+tests/test_live_parity_convergence.py
+# (R30A) OWNER LIVE APPROVALS: a live gate's enforced configuration and a
+# LIVE policy are admitted only by a named human's hash-matched approval;
+# a changed constant invalidates it; nothing in the application writes one.
+tests/test_live_approvals.py
 # Small Live · Paper vs Actual management view (/api/command/small-live): decision -> paper -> mirror -> venue fill rows, exclusion reasons, filters, null-not-zero, KALSHI NOT_CONNECTED, command read guard.
 tests/test_small_live_view.py
 # Kalshi venue adapter (credential-free, fail-closed): RSA-PSS signing on a
