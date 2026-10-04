@@ -208,6 +208,15 @@ def demonstration_facts() -> Facts:
           "unhedged, a Red Sox win loses the $1,000 stake")
     f.add(DEMO_LABEL, h, "unhedged_best_case_usd", DEMO["unhedged_win_usd"],
           "unhedged, a Yankees win pays $1,000 net before fees")
+    # APPENDED, so no earlier F# moves: the two figures the demonstration's
+    # own answers state that no fact held (the citation-integrity verifier,
+    # lab/citation_integrity.py, found them): the $1 a winning contract pays
+    # in the payoff arithmetic, and the 2 pp between the two probabilities.
+    f.add(DEMO_LABEL, e, "payout_per_contract_usd", 1.0,
+          "each winning contract pays $1")
+    f.add(DEMO_LABEL, e, "p_disagreement_pp", 2.0,
+          "the internal and Pinnacle probabilities disagree by 2 pp "
+          "(0.60 against 0.58)")
     f.miss("fees on either leg (every figure is before fees)")
     f.miss("a settlement (no result exists, so nothing is realised)")
     f.miss("the probability of the Yankees winning by exactly 1 or 2 runs, "

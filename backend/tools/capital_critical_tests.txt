@@ -827,3 +827,7 @@ tests/test_command_release_authority.py
 # append-only tables; bundles differ per agent and never widen the
 # registry (Karen / Scout / Eddie boundaries); no voice is borrowed.
 tests/test_agent_identity_api_authority.py
+# (243) LAB-B CITATION INTEGRITY: the lab's verifier imports only the standard
+# library and itself, no decision path loads it, and only the agent chat's
+# publication choke point and the lab's read-only endpoint import it.
+tests/test_lab_citation_integrity_import_guard.py

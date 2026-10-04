@@ -24,6 +24,16 @@ HOW AN ANSWER IS PRODUCED
      WITHOUT the key the route refuses with LLM_UNAVAILABLE unless the caller
      asked for `allow_records_only`, in which case the records-only draft is
      the answer, labelled as such.
+  3b. CITATION INTEGRITY, before anything is published (lab/
+     citation_integrity.py): every sentence's [F#] must hold that sentence's
+     material -- its figures (at the precision written, beside the same
+     measure), ids, timestamps, codes, CURRENT / SUPERSEDED status and the
+     agent it attributes a decision to. A failing sentence is re-cited when
+     exactly one fact supports it (deterministically); otherwise a model
+     reply is DISCARDED for the records-only answer with the reason named,
+     and a records-only answer (or an interrupted partial) keeps the
+     sentence followed by an explicit statement that the evidence does not
+     support it. Every verdict is recorded, append-only (migration 243).
   4. The exchange is stored (migration 180): the visible transcript (`body`)
      and its pronunciation-normalised spoken form (`spoken_text`), the cited
      facts, what evidence is missing, the persona version and the provider
@@ -60,6 +70,8 @@ import re
 import uuid
 from typing import Any
 
+from ..lab import citation_integrity as CI
+from ..lab import citation_integrity_store as CIS
 from . import audrey_chat as AC
 from . import directives as D
 from . import persona_facts as PF
@@ -100,6 +112,14 @@ FALLBACK_LABEL = ("Records-only answer — the AI answer was not used ({why}); "
 
 def labelled_fallback(draft: str, why: str) -> str:
     return "%s %s" % (FALLBACK_LABEL.format(why=why), draft)
+
+
+def integrity_skip_prefixes() -> tuple:
+    """Sentences of a records-only answer that are disclosures, not claims
+    about a record: the fallback label, the agent's "what is missing" line
+    and the list of sources checked."""
+    return ((CIS.RECORDS_LABEL_PREFIX, "Checked:")
+            + tuple("%s:" % v for v in MISSING_LEAD.values()))
 
 DEPTH_QUICK, DEPTH_NORMAL, DEPTH_MATH = "QUICK", "NORMAL", "MATH"
 
@@ -323,7 +343,7 @@ def _demo(agent: str, intent: str, depth: str, c: _Cite) -> list:
                     "The two estimates disagree by 2 pp — internal 0.60, "
                     "Pinnacle 0.58 %s — and the blend only helps if they're "
                     "independent, which I can't show here." % c(
-                        "p_internal", "p_pinnacle"),
+                        "p_internal", "p_pinnacle", "p_disagreement_pp"),
                     "And every figure is before fees; I don't have the fees."]
         if intent in ("hedge", "red_sox_win", "middle"):
             return [lab, "The hedge is Xavier's call, not mine — but I can "
@@ -357,18 +377,23 @@ def _demo(agent: str, intent: str, depth: str, c: _Cite) -> list:
                         "total_cost_usd"),
                     "Yankees win by 3 or more: the moneyline pays 2,000 × $1 "
                     "= $2,000; $2,000 − $1,800 = $200 %s." % c(
+                        "qty", "payout_per_contract_usd", "total_cost_usd",
                         "floor:Yankees win by 3 or more"),
                     "Yankees win by 1 or 2: both legs pay, $2,000 + $2,000 − "
-                    "$1,800 = $2,200 %s." % c("floor:Yankees win by 1 or 2"),
+                    "$1,800 = $2,200 %s." % c(
+                        "qty", "hedge_qty", "total_cost_usd",
+                        "floor:Yankees win by 1 or 2"),
                     "Red Sox win: the +2.5 pays $2,000; $2,000 − $1,800 = "
-                    "$200 %s." % c("floor:Red Sox win"),
+                    "$200 %s." % c("hedge", "hedge_qty", "total_cost_usd",
+                                   "floor:Red Sox win"),
                     "All before fees; fees on both legs aren't recorded."]
         if depth == DEPTH_QUICK or intent == "red_sox_win":
             if intent == "red_sox_win":
                 return ["DEMONSTRATION position %s: if the Red Sox win, the "
                         "+2.5 leg pays and we net $200 before fees %s — "
                         "unhedged, that same result would have cost the full "
-                        "$1,000 %s." % (c("label"), c("floor:Red Sox win"),
+                        "$1,000 %s." % (c("label"), c("hedge",
+                                                      "floor:Red Sox win"),
                                         c("unhedged_worst_case_usd"))]
             return ["DEMONSTRATION position %s: the floor is $200 before "
                     "fees in every outcome, and $2,200 if the Yankees win by "
@@ -390,7 +415,7 @@ def _demo(agent: str, intent: str, depth: str, c: _Cite) -> list:
                 % floors,
                 "The trade-off: we spent $800 and gave up the unhedged $1,000 "
                 "upside on a Yankees win %s to take the $1,000 downside off "
-                "the table." % c("unhedged_best_case_usd"),
+                "the table." % c("hedge_cost_usd", "unhedged_best_case_usd"),
                 "The original thesis was Derek's: %s against a $0.50 "
                 "price, 9 pp of edge and about $180 expected before fees %s. "
                 "What changed is that protection became available at $0.40 "
@@ -445,8 +470,8 @@ def _demo(agent: str, intent: str, depth: str, c: _Cite) -> list:
             "Where I'd push them: Derek, the internal model learns from "
             "market prices, so that blend is less independent than it "
             "looks. Xavier, the hedge record doesn't carry the probability "
-            "of the 1-or-2 middle, so I can't tell whether $800 was a good "
-            "price for that protection.",
+            "of the 1-or-2 middle, so I can't tell whether $800 %s was a "
+            "good price for that protection." % c("hedge_cost_usd"),
             "What should improve: record fees on both legs, record the "
             "middle's probability on the hedge decision, and grade it again "
             "after settlement."]
@@ -1243,6 +1268,10 @@ async def _converse_impl(db, *, agent, role, text, conversation_id, context,
     turn = _Turn(turn_id)
     _INFLIGHT[cid] = turn
     meta: dict[str, Any] = {}
+    #: the citation-integrity verdicts of this answer (lab/
+    #: citation_integrity.gate): "model" for the model's reply, "records" for
+    #: a records-only answer
+    integrity: dict[str, Any] = {}
 
     async def _compose() -> tuple:
         if not use_llm:
@@ -1298,10 +1327,40 @@ async def _converse_impl(db, *, agent, role, text, conversation_id, context,
         if bundle.get("demonstration") and "DEMONSTRATION" not in got:
             got = "DEMONSTRATION position %s. %s" % (
                 _Cite(bundle["facts"])("label"), got)
+        got = AC.redact(got, env=env)
+        # CITATION INTEGRITY (owner 2026-10-04): a figure held by SOME fact
+        # is not enough -- the [F#] on each sentence must hold that
+        # sentence's material. Repaired deterministically when exactly one
+        # fact supports it; otherwise the reply is discarded for the
+        # records-only answer, with the integrity reason named.
+        try:
+            checked = CI.gate(got, bundle["facts"], question=text,
+                              composer=CI.COMPOSER_MODEL)
+        except Exception as exc:                                # noqa: BLE001
+            # FAIL CLOSED: a reply the verifier could not check is not
+            # published; the records-only answer is, with the reason
+            log.warning("persona chat (%s): citation verifier failed (%s); "
+                        "records answer", agent, type(exc).__name__)
+            why = "its citations could not be verified"
+            return labelled_fallback(draft, why), dict(
+                provider, mode=MODE_RECORDS,
+                failure="CITATION_INTEGRITY_UNVERIFIED",
+                integrity_error=type(exc).__name__,
+                disclosure=DISCLOSE_FALLBACK.format(why=why))
+        integrity["model"] = checked
+        if checked["action"] == CI.A_FALLBACK:
+            return labelled_fallback(draft, CI.FALLBACK_WHY), dict(
+                provider, mode=MODE_RECORDS, failure="CITATION_INTEGRITY",
+                integrity_reason=checked["reason"],
+                disclosure=DISCLOSE_FALLBACK.format(why=CI.FALLBACK_WHY))
+        if checked["action"] == CI.A_REPAIRED:
+            got = checked["text"]
+            provider["citation_repairs"] = [
+                r for r in checked["repairs"] if r.get("repaired")][:10]
         provider["disclosure"] = "Answered by %s in %s's voice from the " \
             "cited facts" % (meta.get("answered_model") or cfg["model"],
                              persona.get("display_name"))
-        return AC.redact(got, env=env), provider
+        return got, provider
 
     turn.task = asyncio.ensure_future(_compose())
     try:
@@ -1312,7 +1371,8 @@ async def _converse_impl(db, *, agent, role, text, conversation_id, context,
         await _store_interrupted(db, turn, out, agent=agent, cid=cid,
                                  user_mid=user_mid, role=role, now=now,
                                  persona=persona, depth=depth,
-                                 intent=intent, request_id=request_id)
+                                 intent=intent, request_id=request_id,
+                                 facts=bundle["facts"], question=text)
         raise
     finally:
         if _INFLIGHT.get(cid) is turn:
@@ -1321,8 +1381,30 @@ async def _converse_impl(db, *, agent, role, text, conversation_id, context,
         return await _store_interrupted(db, turn, out, agent=agent, cid=cid,
                                         user_mid=user_mid, role=role, now=now,
                                         persona=persona, depth=depth,
-                                        intent=intent, request_id=request_id)
+                                        intent=intent, request_id=request_id,
+                                        facts=bundle["facts"], question=text)
     answer, provider = turn.task.result()
+    if provider.get("mode") == MODE_RECORDS:
+        # the records-only answer is verified too: there is nothing further
+        # to fall back to, so an unsupported sentence is re-cited when one
+        # fact supports it, else followed by an explicit statement that the
+        # evidence does not support it -- never published silently
+        try:
+            rec = CI.gate(answer, bundle["facts"], question=text,
+                          composer=CI.COMPOSER_RECORDS,
+                          skip_prefixes=integrity_skip_prefixes())
+        except Exception as exc:                                # noqa: BLE001
+            # the records-only answer quotes the records it cites; a
+            # verifier fault is named on the answer, never hidden
+            log.warning("persona chat (%s): citation verifier failed on the "
+                        "records answer (%s)", agent, type(exc).__name__)
+            rec = None
+            provider["citation_integrity_error"] = type(exc).__name__
+        if rec is not None:
+            integrity["records"] = rec
+            answer = rec["text"]
+    provider["citation_integrity"] = {k: CI.summary(g)
+                                      for k, g in integrity.items()}
     cited = cited_facts(answer, bundle["facts"])
     async with D.use(db) as conn:
         mid = await _append(
@@ -1334,9 +1416,14 @@ async def _converse_impl(db, *, agent, role, text, conversation_id, context,
             persona_version=persona.get("version"), request_id=request_id)
         stored = await message(conn, mid)
     turn.persisted.set()
+    ledger = await _record_integrity(db, integrity, agent=agent, cid=cid,
+                                     mid=mid, turn_id=turn_id,
+                                     facts=bundle["facts"], now=now)
     status = S_INTERRUPTED if stored and stored["status"] == \
         "INTERRUPTED" else S_ANSWERED
     return dict(out, status=status, message_id=mid, answer=answer,
+                citation_integrity=dict(provider["citation_integrity"],
+                                        ledger=ledger),
                 text=answer, spoken_text=(stored or {}).get("spoken_text"),
                 facts=cited, citations=_fact_citations(cited),
                 facts_considered=len(bundle["facts"]),
@@ -1374,13 +1461,63 @@ def _context_supplied(history: list, bundle: dict, provider: dict) -> dict:
                       "facts were used")}
 
 
+async def _record_integrity(db, integrity: dict, *, agent, cid, mid,
+                            turn_id, facts, now) -> dict:
+    """EVERY VERDICT, append-only (migration 243): the model reply's check
+    (primary when a model composed it), the records-only answer's and an
+    interrupted partial's. A ledger that cannot be written is logged and
+    reported in the response; the stored message's provider record carries
+    the same verdict summary, so a failure is never silent."""
+    if not integrity:
+        return {"recorded": False, "why": "NOTHING_VERIFIED"}
+    try:
+        async with D.use(db) as conn:
+            if not await CIS.schema(conn):
+                return {"recorded": False, "why": CIS.R_NO_SCHEMA}
+            ids = []
+            model = integrity.get("model")
+            for key, stage, primary, published in (
+                    ("model", CI.ST_MODEL, True, model is not None and
+                     model["action"] != CI.A_FALLBACK),
+                    ("records", CI.ST_RECORDS, model is None, True),
+                    ("partial", CI.ST_PARTIAL, False, True)):
+                g = integrity.get(key)
+                if g is None:
+                    continue
+                ids.append(await CIS.record(
+                    conn, agent=agent, conversation_id=cid, message_id=mid,
+                    turn_id=turn_id, stage=stage, checked=g, facts=facts,
+                    primary=primary, published=published, now=now))
+            return {"recorded": True, "check_ids": ids}
+    except Exception as exc:                                    # noqa: BLE001
+        log.warning("citation integrity ledger not written (%s): %s", agent,
+                    type(exc).__name__)
+        return {"recorded": False,
+                "why": "LEDGER_WRITE_FAILED:%s" % type(exc).__name__}
+
+
 async def _store_interrupted(db, turn: _Turn, out, *, agent, cid, user_mid,
                              role, now, persona, depth, intent,
-                             request_id) -> dict:
+                             request_id, facts=None, question="") -> dict:
     partial = "".join(turn.sink)
+    checked = None
+    if facts is not None and partial.strip():
+        # an interrupted partial is stored and returned too: its complete
+        # sentences are verified (the trailing fragment cannot be), and an
+        # unsupported one is followed by the integrity statement
+        try:
+            checked = CI.gate(partial, facts, question=question,
+                              composer=CI.COMPOSER_MODEL, partial=True)
+            partial = checked["text"]
+        except Exception as exc:                                # noqa: BLE001
+            log.warning("interrupted partial not verified: %s",
+                        type(exc).__name__)
+            checked = None
     provider = {"mode": "INTERRUPTED", "failure": None,
                 "disclosure": "Interrupted by a newer message; this is the "
                               "partial answer as it stood"}
+    if checked is not None:
+        provider["citation_integrity"] = {"partial": CI.summary(checked)}
     try:
         async with D.use(db) as conn:
             mid = await _append(
@@ -1396,6 +1533,10 @@ async def _store_interrupted(db, turn: _Turn, out, *, agent, cid, user_mid,
         mid = None
     finally:
         turn.persisted.set()
+    if checked is not None and mid is not None:
+        await _record_integrity(db, {"partial": checked}, agent=agent,
+                                cid=cid, mid=mid, turn_id=turn.turn_id,
+                                facts=facts, now=now)
     return dict(out, status=S_INTERRUPTED, message_id=mid, answer=partial,
                 text=partial, partial=True,
                 interrupted_by=turn.interrupted_by, facts=[], citations=[],
