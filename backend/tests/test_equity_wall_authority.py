@@ -35,7 +35,14 @@ ROUTES = ("/api/command/equity/live", "/api/command/equity/curve")
 STDLIB = {"__future__", "asyncio", "datetime", "hashlib", "json", "math",
           "os", "time", "zoneinfo"}
 ALLOWED_PROJECT = {"sportsassets.api.agents_core",
-                   "sportsassets.bettor_paper_ledger"}
+                   "sportsassets.bettor_paper_ledger",
+                   # (223) the paper sleeves reader: SELECTs over the paper
+                   # records + paper_sleeve_classifications; its one write
+                   # (the backstop) is never called from here
+                   "sportsassets.bettor_paper_sleeves",
+                   # SMALL LIVE -- BETTOR ORIGINATED status: pure derivation
+                   # + SELECTs, no venue / order / execution import
+                   "sportsassets.bettor_originated_status"}
 FORBIDDEN = ("execmirror", "kalshi_venue", "kalshi_orders", "kalshi_account",
              "pmus", "clob", "executor", "execution", "funded_execution",
              "funded_management", "order", "submit", "smalllive", "live_",

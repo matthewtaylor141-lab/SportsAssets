@@ -750,6 +750,14 @@ try:
     app.include_router(_command_equity_router)
 except ImportError:
     log.warning("equity: api.command_equity not loaded", exc_info=True)
+# ── THE PAPER SLEEVE ECONOMICS (migration 223): /api/command/profitability/
+# sleeves. GET only, COMMAND auth, READ ONLY transaction; INVESTMENT is the
+# default sleeve, TRAINING is research cost. No route here writes.
+try:
+    from .command_sleeves import router as _command_sleeves_router
+    app.include_router(_command_sleeves_router)
+except ImportError:
+    log.warning("sleeves: api.command_sleeves not loaded", exc_info=True)
 # ── THE POSITION ROOMS: /api/command/positions/rooms, /room/{group_key}.
 # GET only, COMMAND auth, READ ONLY transaction; one correlated economic
 # position per screen (paper and actual, actual per venue, never summed).

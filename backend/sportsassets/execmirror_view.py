@@ -245,7 +245,7 @@ async def view(conn, *, limit: int = 200) -> dict:
     expected_total = totals["paper_pnl"] / scale
     bal = (_js(snap["balances"]) if snap else []) or []
     return {
-        "title": "Live execution mirror · 1:%s" % int(scale),
+        "title": "LEGACY MIRROR VALIDATION · execution mirror · 1:%s" % int(scale),
         "basis": ("Paper experiment is the decision source; live orders are "
                   "placed on a separate Polymarket US account at paper "
                   "quantity / %s (nearest whole contract). Live fills come only "
