@@ -29,9 +29,9 @@ SELECT count(*) AS cfb_decisions, count(DISTINCT us_market_slug) AS cfb_contract
        sum(CASE WHEN verdict='ENTER' THEN 1 ELSE 0 END) AS enter_n FROM paper_decisions WHERE us_market_slug LIKE '%-cfb-%';
 SELECT count(*) AS cfb_paper_orders FROM paper_orders o JOIN paper_decisions d ON d.decision_id = o.decision_id WHERE d.us_market_slug LIKE '%-cfb-%';
 \echo '== N2 · NCAAF provider-side outcomes (ext_candidate_outcomes, last 24 h) =='
-SELECT outcome, refusal, count(*) AS n FROM ext_candidate_outcomes
- WHERE created_at > now() - interval '24 hours' AND (sport_key = 'americanfootball_ncaaf' OR detail::text ILIKE '%americanfootball_ncaaf%')
- GROUP BY 1,2 ORDER BY 3 DESC LIMIT 12;
+SELECT stage, outcome, first_refusal, count(*) AS n, count(DISTINCT provider_event_id) AS events, max(recorded_at) AS last_at FROM ext_candidate_outcomes
+ WHERE recorded_at > now() - interval '24 hours' AND sport_key = 'americanfootball_ncaaf'
+ GROUP BY 1,2,3 ORDER BY 4 DESC LIMIT 12;
 \echo '== X1 · Xavier assessments since 718b532 by trigger and evidence state =='
 SELECT position_kind, trigger, evidence_state, count(*) AS n, round(min(probability_age_s)::numeric,1) AS min_age,
        round(percentile_cont(0.5) WITHIN GROUP (ORDER BY probability_age_s)::numeric,1) AS p50_age, max(assessed_at) AS last_at
