@@ -26,8 +26,9 @@ THE CONTRACTS (each named in its test):
   K1 paper decision -> canonical intent -> both adapters -> parity ledger ->
      the live readiness gate (live_parity.readiness_report) and the intent
      route's sha verification
-  K2 Xavier's review -> the canonical management intent, verifiable from its
-     persisted row
+  K2 Xavier's review -> the canonical management intent -> both adapters,
+     verified from its persisted row by the production verifier
+     (canonical_intent.verify_management_intent) and the intent route
   K3 paper order / fill / settlement -> ledger positions -> the INVESTMENT
      profitability validation reader
   K4 the actual lane's order record (execution_intent / execmirror) ->
@@ -38,6 +39,9 @@ THE CONTRACTS (each named in its test):
   K6 PinnAPI ingest -> the collector's valuation record -> the completed-game
      decision's probability authority (and nothing once the feed's
      authority is gone or the reading is past the 30-second rule)
+  K6b a WS frame -> the real reactive collector cycle persists the PinnAPI
+     valuation -> the real completed-game decision on THAT row: ENTER when
+     fresh, refused past 30 s, refused once the feed's authority is revoked
   K7 the collector's entry-decision row -> the entry-evidence route, jsonb
      returned as objects (the command_rn1x defect above)
   (settlement writer -> settlement reader -> ledger is
@@ -185,24 +189,72 @@ async def test_k5_xaviers_work_requests_read_back_through_the_floor_and_identity
 
 # ═════════════ K2 · XAVIER'S REVIEW -> THE MANAGEMENT INTENT ═════════════
 
-def verify_persisted_management_intent(row: dict) -> bool:
-    """The management intent's sha recomputed FROM ITS PERSISTED ROW, with the
-    same normalisation `canonical_intent.verify_intent` applies to a decision
-    intent's row (jsonb text, Decimal numerics, timestamptz)."""
-    body = {k: row.get(k) for k in CI._MGMT_FIELDS}
-    body["target_qty"] = CI._dec(body["target_qty"])
-    if hasattr(body["created_at"], "timestamp"):
-        body["created_at"] = body["created_at"].timestamp()
-    body["created_at"] = round(float(body["created_at"]), 3)
-    for k in ("target_limit", "alternatives", "freshness", "reason"):
-        if isinstance(body[k], str):
-            body[k] = json.loads(body[k])
-    return CI.content_sha(body) == row.get("content_sha")
+class _RoutePool:
+    """The intent route's pool, answering with the rows the TEST connection
+    reads from Postgres inside its rolled-back transaction (the route's own
+    pool cannot see uncommitted rows). Every row handed to the route is the
+    asyncpg Record exactly as persisted; only the connection is substituted."""
+
+    def __init__(self, conn):
+        self._c = conn
+
+    def acquire(self):
+        pool = self
+
+        class _Acq:
+            async def __aenter__(self):
+                return _RouteConn(pool._c)
+
+            async def __aexit__(self, *a):
+                return False
+        return _Acq()
+
+
+class _RouteConn:
+    def __init__(self, conn):
+        self._c = conn
+
+    def transaction(self, **kw):              # the route asks for READ ONLY
+        class _Tx:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return False
+        return _Tx()
+
+    async def execute(self, sql, *a):
+        if sql.lstrip().upper().startswith("SET LOCAL"):
+            return "SET"
+        return await self._c.execute(sql, *a)
+
+    async def fetchrow(self, sql, *a):
+        return await self._c.fetchrow(sql, *a)
+
+    async def fetch(self, sql, *a):
+        return await self._c.fetch(sql, *a)
+
+
+async def _intent_route(conn, monkeypatch, intent_id: str) -> dict:
+    """GET /api/command/live-parity/intent/{id} -- the production handler --
+    over the persisted rows."""
+    from sportsassets.api import command_live_parity as CLP
+
+    async def pool():
+        return _RoutePool(conn)
+    monkeypatch.setattr(CLP, "_pool", pool)
+    return await CLP.live_parity_intent(intent_id, _auth="contract-test")
 
 
 @pg
 @pytest.mark.parametrize("fresh", [False, True], ids=["stale", "fresh"])
-async def test_k2_xaviers_review_writes_a_management_intent_that_verifies_from_its_row(fresh):
+async def test_k2_xaviers_review_writes_a_management_intent_that_verifies_from_its_row(
+        fresh, monkeypatch):
+    """R30A review: the verifier is now PRODUCTION code
+    (canonical_intent.verify_management_intent, called by the intent route
+    for every cmi_ id, which served sha_verified=None before), and the
+    adapters' consumption is asserted exactly: both adapters, each with the
+    persisted sha."""
     conn, tx = await _tx()
     LP.install()
     try:
@@ -215,26 +267,38 @@ async def test_k2_xaviers_review_writes_a_management_intent_that_verifies_from_i
         rv = await conn.fetchrow("SELECT * FROM paper_xavier_reviews WHERE "
                                  " group_id=$1 ORDER BY reviewed_at DESC "
                                  " LIMIT 1", g)
-        mi = await conn.fetchrow(
+        rec = await conn.fetchrow(
             "SELECT * FROM canonical_management_intents WHERE review_id=$1",
             rv["review_id"])
-        assert mi is not None, "the review recorded no management intent"
-        mi = dict(mi)
+        assert rec is not None, "the review recorded no management intent"
+        mi = dict(rec)
         assert mi["intent_id"] == CI.management_intent_id(rv["review_id"])
-        assert verify_persisted_management_intent(mi), (
+        # the PRODUCTION verifier, on the persisted row
+        assert CI.verify_management_intent(mi), (
             "the persisted management intent does not verify against its own "
             "content: a reader cannot prove it is the intent both adapters "
             "consumed")
         # tamper-evident on the row as on the decision intent
-        assert not verify_persisted_management_intent(
+        assert not CI.verify_management_intent(
             dict(mi, action=CI.ACT_EXIT if mi["action"] != CI.ACT_EXIT
                  else CI.ACT_NONE))
-        # the review names the intent it produced, and both adapters consumed
-        # exactly that sha
+        assert not CI.verify_management_intent(
+            dict(mi, reason=json.dumps({"tampered": True})))
+        # the PRODUCTION reader: the intent route, on the persisted row
+        got = await _intent_route(conn, monkeypatch, mi["intent_id"])
+        assert got["sha_verified"] is True, got["sha_verified"]
+        assert got["intent"]["intent_id"] == mi["intent_id"]
+        # the review names the intent it produced, and BOTH adapters
+        # consumed exactly that sha -- not "at most" that sha
         assert _j(rv["action"]).get("canonical_intent_id") == mi["intent_id"]
         ex = await conn.fetch("SELECT * FROM canonical_intent_executions "
                               " WHERE intent_id=$1", mi["intent_id"])
-        assert {r["intent_sha"] for r in ex} <= {mi["content_sha"]}
+        assert sorted(r["adapter"] for r in ex) == ["PAPER", "SMALL_LIVE"], \
+            [dict(r) for r in ex]
+        assert {r["intent_sha"] for r in ex} == {mi["content_sha"]}
+        assert {r["intent_kind"] for r in ex} == {"MANAGEMENT"}
+        assert sorted(x["adapter"] for x in got["executions"]) == \
+            ["PAPER", "SMALL_LIVE"]
         assert mi["sleeve"] == "INVESTMENT"
         if not fresh:
             assert mi["evidence_state"] != XF.E_FRESH
@@ -538,6 +602,92 @@ async def test_k6_a_pinnapi_valuation_persisted_by_the_collector_is_the_sole_aut
         RT._STATE.update(prev)
         await tx.rollback()
         await conn.close()
+
+
+# ═════════════ K6b · PINNAPI INGEST -> COLLECTOR ROW -> THE CG DECISION ════
+#
+# R30A REVIEW (MINOR): K6 stopped at the probability authority, and every test
+# here that ran the completed-game decision fed it a hand-INSERTed valuation
+# (paper_live_fixture.valuation: provider the-odds-api, raw_odds '{}') of a
+# shape the PinnAPI collector never writes. K6b runs the REAL writer -- a WS
+# frame on the real FeedCache wakes the real reactive scheduler, which runs
+# the real collector `cycle()` (identity, rules, fixture scope, venue book,
+# reference re-validation, `bettor_external_shadow.persist`) -- and then the
+# REAL completed-game decision on THAT persisted row, three ways: fresh ->
+# ENTER; the same row past the 30-second rule -> refused, never entered; the
+# feed's authority revoked -> refused, never entered. (The environment is
+# tests/test_pinnapi_reactive_integration's, reused, not restated.)
+
+from tests.test_pinnapi_reactive_integration import env  # noqa: E402,F401
+
+
+async def _cg_pass_on(e, *, tag: str, at: float) -> dict:
+    """The REAL paper pass, for a fresh scratch account (so the candidate
+    query offers the persisted row again), at the decision instant `at`."""
+    from sportsassets import bettor_paper_guard as G
+    from sportsassets.agents import paper_runtime as PR
+    from tests import paper_live_fixture as PL
+    acct = await PL.new_account(e.conn, tag, now=at)
+    out = await PR.paper_pass(e.conn, now=at, account_id=acct["account_id"],
+                              market_data=G.PaperMarketDataClient(e.venue),
+                              config=acct["config"], force=True,
+                              fee_fn=H.flat_fee(0.01), sleep=_nosleep)
+    assert out["ran"], out
+    return acct
+
+
+@pg
+async def test_k6b_the_completed_game_decision_reads_the_row_the_pinnapi_collector_persisted(env):
+    from sportsassets import pinnapi_feed as F
+    from sportsassets import pinnapi_primary as PP
+    from sportsassets.agents import paper_benchmark as PB
+    from sportsassets.workers import ext_pinnacle_loop as LOOP
+    from tests import test_pinnapi_reactive_integration as RI
+    e = env
+    rows = await RI._one_reactive(e)
+    assert [r["state"] for r in rows] == ["COMPLETED"], rows
+    vids = rows[0]["detail"]["valuation_ids"]
+    assert len(vids) == 1, rows[0]["detail"]
+    v = await RI._valuation(e, vids[0])
+    # ── the writer's row: the collector's own PinnAPI record ──
+    assert v["provider"] == PP.PROVIDER
+    ref = H.j(v["settlement_comparison"])["reference_input"]
+    assert ref["provider"] == PP.PROVIDER and ref["decision_check"]["ok"] is True
+    # ── FRESH: the decision on THAT row enters, reading the row's own
+    #    probability and provenance ──
+    d = RI._cg(await RI._decisions(e, vids))
+    assert len(d) == 1 and d[0]["verdict"] == "ENTER", \
+        [(x["refusal"], x["refusals"]) for x in d]
+    d = d[0]
+    assert d["valuation_id"] == v["id"]
+    pin = H.j(d["pinnacle"])
+    assert pin["qualified"] is True and pin["provider"] == PP.PROVIDER
+    assert pin["reference_input"]["feed_event_id"] == ref["feed_event_id"]
+    assert pin["valuation_decided_at"] == pytest.approx(
+        v["decided_at"].timestamp(), abs=1e-3)
+    observed = float(pin["at"])
+    # ── STALE: the SAME persisted row, decided past the 30-second rule ──
+    late = observed + LOOP.PINNACLE_MAX_AGE_S + 1.0
+    acct = await _cg_pass_on(e, tag="k6b-stale", at=late)
+    ds = [x for x in await e.conn.fetch(
+        "SELECT * FROM paper_decisions WHERE session_id=$1 AND valuation_id=$2"
+        "   AND strategy=$3", acct["session_id"], v["id"], PB.CG_STRATEGY)]
+    assert len(ds) == 1 and ds[0]["verdict"] == "REFUSE", [dict(x) for x in ds]
+    lp = H.j(ds[0]["pinnacle"])
+    assert lp["qualified"] is False and lp["p"] is None
+    assert lp["refusal"] == F.R_STALE, lp
+    # ── REVOKED: the feed loses its authority; a fresh instant ──
+    e.cache.authority.revoke()
+    acct = await _cg_pass_on(e, tag="k6b-revoked", at=observed + 2.0)
+    ds = [x for x in await e.conn.fetch(
+        "SELECT * FROM paper_decisions WHERE session_id=$1 AND valuation_id=$2"
+        "   AND strategy=$3", acct["session_id"], v["id"], PB.CG_STRATEGY)]
+    assert len(ds) == 1 and ds[0]["verdict"] == "REFUSE", [dict(x) for x in ds]
+    rp = H.j(ds[0]["pinnacle"])
+    assert rp["qualified"] is False and rp["p"] is None, rp
+    assert rp["refusal"] == (e.cache.authority.reason or F.R_NO_AUTHORITY), rp
+    # nothing but the fresh decision ever entered on this contract
+    assert await RI._enters_on_contract(e) == 1
 
 
 @pg
