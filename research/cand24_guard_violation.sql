@@ -1,6 +1,6 @@
 -- Read-only: the execution intent(s) marked live_eligible without a
 -- LIVE_ADMISSIBLE admission verdict (actual-lane guard K9 / G).
-SELECT id, created_at, strategy, us_market_slug, order_intent, live_eligible,
+SELECT intent_id, decision_id, created_at, decided_at, strategy, policy_version, us_market_slug, order_intent, live_eligible, live_qty, actual_mirror_id,
        actual_state, actual_refusal,
        live_eligibility->'admission'->>'verdict' AS admission_verdict,
        left((live_eligibility)::text, 1500) AS live_eligibility
