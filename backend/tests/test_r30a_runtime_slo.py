@@ -89,6 +89,27 @@ def test_decision_latency_counts_timeouts_and_orphans_as_over_the_deadline():
                             "TIMEOUTS_AND_ORPHANS")
 
 
+def test_decision_latency_judges_a_summary_row_without_started_or_over():
+    """R30A REVIEW: the reviewer's probe passed the summary shape (completed /
+    timeouts / orphaned, no `started`, no `over_target`) and read
+    UNAVAILABLE "no evaluation" -- 541 evaluations, 540 of them past the
+    deadline, hidden. The started count comes from the parts, and every
+    TIMEOUT and orphan is at least over the deadline."""
+    probe = S.judge_latency({"completed": 1, "timeouts": 500, "orphaned": 40,
+                             "p50": 2.0, "p90": 2.0})
+    assert probe["status"] == S.BREACH
+    assert probe["measured"]["evaluations_started"] == 541
+    # an explicit over_target of 0 is honoured (LATENCY_SQL's own count)
+    clean = S.judge_latency({"completed": 10, "over_target": 0,
+                             "p50": 2.0, "p90": 3.0})
+    assert clean["status"] == S.OK
+    # no counted over_target, but the measured p90 is past the deadline
+    slow = S.judge_latency({"completed": 10, "p50": 9.0, "p90": 14.0})
+    assert slow["status"] == S.BREACH
+    # nothing at all is still UNAVAILABLE, never a manufactured OK
+    assert S.judge_latency({})["status"] == S.UNAVAILABLE
+
+
 def test_open_positions_without_a_current_review_breach():
     """The brief's baseline: 60 open groups, 2 with FRESH evidence."""
     positions = ([{"class": "CURRENT"}] * 2 + [{"class": "WAITING"}] * 51

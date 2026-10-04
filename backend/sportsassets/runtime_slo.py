@@ -223,8 +223,19 @@ def judge_latency(row: dict | None) -> dict:
     src = ("pinnapi_reactive_attempts (COMPLETED / TIMEOUT / ERROR / "
            "orphaned STARTED): detail.finished_at - detail.received_at")
     r = row or {}
-    started = int(r.get("started") or 0)
-    over = int(r.get("over_target") or 0)
+    # LATENCY_SQL gives `started` and `over_target`; a row without them (a
+    # caller's summary) is judged on what it does give: the started count
+    # from its parts, and at least every TIMEOUT and orphan over the
+    # deadline -- never a default of "none over"
+    started = int(r.get("started") or 0) or sum(
+        int(r.get(k) or 0) for k in ("completed", "timeouts", "errors",
+                                     "orphaned"))
+    over = (int(r["over_target"]) if r.get("over_target") is not None
+            else int(r.get("timeouts") or 0) + int(r.get("orphaned") or 0))
+    # without a counted over_target, the measured p90 itself above the
+    # deadline is a breach whatever the censored count says
+    p90_over = (r.get("over_target") is None and r.get("p90") is not None
+                and float(r["p90"]) > DECISION_LATENCY_TARGET_S)
     measured = {"evaluations_started": started,
                 "completed": int(r.get("completed") or 0),
                 "timeouts": int(r.get("timeouts") or 0),
@@ -242,7 +253,7 @@ def judge_latency(row: dict | None) -> dict:
                            "NO_REACTIVE_EVALUATION_IN_WINDOW",
                            target=target, window=window, source=src,
                            measured=measured)
-    ok = over <= 0.10 * started
+    ok = over <= 0.10 * started and not p90_over
     return slo("DECISION_LATENCY", target=target, window=window, source=src,
                measured=measured, status=OK if ok else BREACH,
                why=None if ok else "P90_LATENCY_ABOVE_THE_12S_DEADLINE_"
