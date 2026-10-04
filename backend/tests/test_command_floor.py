@@ -155,7 +155,11 @@ async def test_fixture_rows_drive_every_desk_state():
     from sportsassets.agents import karen as K
     from sportsassets.agents import registry as R
 
-    now = time.time()
+    # the scenario's clock sits two hours past wall time: rows other tests
+    # wrote "just now" (an Audrey finding, a Karen challenge) fall outside
+    # the floor's 5-minute activity window and 1-hour edge window, so only
+    # this scenario's rows (all placed relative to `now`) drive the desks
+    now = time.time() + 7200
     conn = await asyncpg.connect(DSN)
     tx = conn.transaction()
     await tx.start()
