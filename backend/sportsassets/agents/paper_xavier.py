@@ -674,14 +674,19 @@ async def review_group(conn, ctx: dict, group_id: str, *,
         realloc = await XM.paper_reallocation(
             conn, ctx, group_id=group_id, pos=pos, trigger=trigger, at=at,
             measure=measure, exit_levels=exit_lv)
-        alt_set = CI.management_alternatives(
-            alts=alts, decided=decided, mechanical_selection=chosen,
-            standing_live=bool(standing), protective=prot,
-            open_qty=pos["open_qty"],
-            reallocate=(realloc.get("reallocate")
-                        if realloc.get("reallocate") is not None else
-                        {"blocker": realloc.get("why")
-                         or "REALLOCATE_NOT_COMPARED"}))
+        try:
+            alt_set = CI.management_alternatives(
+                alts=alts, decided=decided, mechanical_selection=chosen,
+                standing_live=bool(standing), protective=prot,
+                open_qty=pos["open_qty"],
+                reallocate=(realloc.get("reallocate")
+                            if realloc.get("reallocate") is not None else
+                            {"blocker": realloc.get("why")
+                             or "REALLOCATE_NOT_COMPARED"}))
+        except Exception:                                       # noqa: BLE001
+            # never fails the review: the intent then builds the set from
+            # the ranking alone (REALLOCATE UNAVAILABLE: not compared)
+            alt_set = None
         mgmt_policy = {
             "status": "RECORDED",
             "small_live_management_policy": mpol,
